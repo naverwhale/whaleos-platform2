@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,7 @@ class Error;
 namespace mm1 {
 
 using ModemStateChangedSignalCallback =
-    base::Callback<void(int32_t, int32_t, uint32_t)>;
+    base::RepeatingCallback<void(int32_t, int32_t, uint32_t)>;
 
 // These are the methods that a org.freedesktop.ModemManager1.Modem
 // proxy must support. The interface is provided so that it can be
@@ -26,49 +26,36 @@ class ModemProxyInterface {
  public:
   virtual ~ModemProxyInterface() = default;
 
-  virtual void Enable(bool enable,
-                      Error* error,
-                      const ResultCallback& callback,
-                      int timeout) = 0;
+  virtual void Enable(bool enable, ResultCallback callback, int timeout) = 0;
   virtual void CreateBearer(const KeyValueStore& properties,
-                            Error* error,
-                            const RpcIdentifierCallback& callback,
+                            RpcIdentifierCallback callback,
                             int timeout) = 0;
   virtual void DeleteBearer(const RpcIdentifier& bearer,
-                            Error* error,
-                            const ResultCallback& callback,
+                            ResultCallback callback,
                             int timeout) = 0;
-  virtual void Reset(Error* error,
-                     const ResultCallback& callback,
-                     int timeout) = 0;
+  virtual void Reset(ResultCallback callback, int timeout) = 0;
   virtual void FactoryReset(const std::string& code,
-                            Error* error,
-                            const ResultCallback& callback,
+                            ResultCallback callback,
                             int timeout) = 0;
   virtual void SetCurrentCapabilities(uint32_t capabilities,
-                                      Error* error,
-                                      const ResultCallback& callback,
+                                      ResultCallback callback,
                                       int timeout) = 0;
   virtual void SetCurrentModes(uint32_t allowed_modes,
                                uint32_t preferred_mode,
-                               Error* error,
-                               const ResultCallback& callback,
+                               ResultCallback callback,
                                int timeout) = 0;
   virtual void SetCurrentBands(const std::vector<uint32_t>& bands,
-                               Error* error,
-                               const ResultCallback& callback,
+                               ResultCallback callback,
                                int timeout) = 0;
   virtual void SetPrimarySimSlot(uint32_t slot,
-                                 const ResultCallback& callback,
+                                 ResultCallback callback,
                                  int timeout) = 0;
   virtual void Command(const std::string& cmd,
                        uint32_t user_timeout,
-                       Error* error,
-                       const StringCallback& callback,
+                       StringCallback callback,
                        int timeout) = 0;
   virtual void SetPowerState(uint32_t power_state,
-                             Error* error,
-                             const ResultCallback& callback,
+                             ResultCallback callback,
                              int timeout) = 0;
 
   virtual void set_state_changed_callback(

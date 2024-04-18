@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,14 +19,14 @@
 
 #include "power_manager/common/clock.h"
 #include "power_manager/common/util.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
-class InternalBacklightTest : public ::testing::Test {
+class InternalBacklightTest : public TestEnvironment {
  public:
-  InternalBacklightTest() {}
-  ~InternalBacklightTest() override {}
+  InternalBacklightTest() = default;
+  ~InternalBacklightTest() override = default;
 
   void SetUp() override {
     CHECK(temp_dir_.CreateUniqueTempDir());
@@ -137,7 +137,8 @@ TEST_F(InternalBacklightTest, Transitions) {
   PopulateBacklightDir(backlight_dir, 50, kMaxBrightness);
 
   InternalBacklight backlight;
-  const base::TimeTicks kStartTime = base::TimeTicks::FromInternalValue(10000);
+  const base::TimeTicks kStartTime =
+      base::TimeTicks() + base::Microseconds(10000);
   backlight.clock()->set_current_time_for_testing(kStartTime);
   ASSERT_TRUE(backlight.Init(test_path_, "*"));
 
@@ -149,14 +150,13 @@ TEST_F(InternalBacklightTest, Transitions) {
 
   // Start a transition to the backlight's halfway point.
   const int64_t kHalfBrightness = kMaxBrightness / 2;
-  const base::TimeDelta kDuration = base::TimeDelta::FromMilliseconds(1000);
+  const base::TimeDelta kDuration = base::Milliseconds(1000);
   backlight.SetBrightnessLevel(kHalfBrightness, kDuration);
 
   // If the timeout fires at this point, we should still be at the maximum
   // level.
   EXPECT_TRUE(backlight.transition_timer_is_running());
-  EXPECT_EQ(kStartTime.ToInternalValue(),
-            backlight.transition_timer_start_time().ToInternalValue());
+  EXPECT_EQ(kStartTime, backlight.transition_timer_start_time());
   EXPECT_TRUE(backlight.TriggerTransitionTimeoutForTesting());
   EXPECT_EQ(kMaxBrightness, ReadBrightness(backlight_dir));
   EXPECT_EQ(kMaxBrightness, backlight.GetCurrentBrightnessLevel());
@@ -184,12 +184,12 @@ TEST_F(InternalBacklightTest, InterruptTransition) {
   base::FilePath backlight_dir = test_path_.Append("backlight");
   PopulateBacklightDir(backlight_dir, kMaxBrightness, kMaxBrightness);
   InternalBacklight backlight;
-  backlight.clock()->set_current_time_for_testing(
-      base::TimeTicks::FromInternalValue(10000));
+  backlight.clock()->set_current_time_for_testing(base::TimeTicks() +
+                                                  base::Microseconds(10000));
   ASSERT_TRUE(backlight.Init(test_path_, "*"));
 
   // Start a one-second transition to 0.
-  const base::TimeDelta kDuration = base::TimeDelta::FromSeconds(1);
+  const base::TimeDelta kDuration = base::Seconds(1);
   backlight.SetBrightnessLevel(0, kDuration);
 
   // Let the timer fire after half a second. The backlight should be at half
@@ -227,8 +227,8 @@ TEST_F(InternalBacklightTest, InterruptTransition) {
   EXPECT_EQ(kHalfBrightness, ReadBrightness(backlight_dir));
 
   // Since the timer was already running, it shouldn't be restarted.
-  EXPECT_EQ(kInterruptedTransitionStartTime.ToInternalValue(),
-            backlight.transition_timer_start_time().ToInternalValue());
+  EXPECT_EQ(kInterruptedTransitionStartTime,
+            backlight.transition_timer_start_time());
   EXPECT_TRUE(backlight.transition_timer_is_running());
 
   // After a second, the backlight should be at 75% and the timer should stop.
@@ -249,8 +249,8 @@ TEST_F(InternalBacklightTest, BlPower) {
 
   // The bl_power file shouldn't be touched initially.
   InternalBacklight backlight;
-  backlight.clock()->set_current_time_for_testing(
-      base::TimeTicks::FromInternalValue(10000));
+  backlight.clock()->set_current_time_for_testing(base::TimeTicks() +
+                                                  base::Microseconds(10000));
   ASSERT_TRUE(backlight.Init(test_path_, "*"));
   std::string data;
   ASSERT_TRUE(base::ReadFileToString(kPowerFile, &data));
@@ -282,7 +282,7 @@ TEST_F(InternalBacklightTest, BlPower) {
 
   // Now do an animated transition. bl_power should remain at FB_BLANK_UNBLANK
   // until the backlight level reaches 0.
-  const base::TimeDelta kDuration = base::TimeDelta::FromSeconds(1);
+  const base::TimeDelta kDuration = base::Seconds(1);
   backlight.SetBrightnessLevel(0, kDuration);
   EXPECT_EQ(FB_BLANK_UNBLANK, ReadFile(kPowerFile));
 
@@ -310,5 +310,4 @@ TEST_F(InternalBacklightTest, BlPower) {
   EXPECT_EQ(FB_BLANK_UNBLANK, ReadFile(kPowerFile));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

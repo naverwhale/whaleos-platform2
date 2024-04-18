@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,9 @@
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/dlcservice/dbus-constants.h>
 
-#include "dlcservice/dlc.h"
+#include "dlcservice/dlc_base.h"
 #include "dlcservice/error.h"
+#include "dlcservice/proto_utils.h"
 #include "dlcservice/utils.h"
 
 using std::string;
@@ -27,22 +28,23 @@ namespace dlcservice {
 DBusService::DBusService(DlcServiceInterface* dlc_service)
     : dlc_service_(dlc_service) {}
 
-bool DBusService::InstallDlc(brillo::ErrorPtr* err, const std::string& id_in) {
-  return dlc_service_->Install(id_in, /*omaha_url=*/"", err);
-}
-
-bool DBusService::InstallWithOmahaUrl(brillo::ErrorPtr* err,
-                                      const std::string& id_in,
-                                      const std::string& omaha_url_in) {
-  return dlc_service_->Install(id_in, omaha_url_in, err);
+void DBusService::Install(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<>> response,
+    const dlcservice::InstallRequest& in_install_request) {
+  dlc_service_->Install(in_install_request, std::move(response));
 }
 
 bool DBusService::Uninstall(brillo::ErrorPtr* err, const string& id_in) {
   return dlc_service_->Uninstall(id_in, err);
 }
 
+// Purge is the same as Uninstall.
 bool DBusService::Purge(brillo::ErrorPtr* err, const string& id_in) {
-  return dlc_service_->Purge(id_in, err);
+  return dlc_service_->Uninstall(id_in, err);
+}
+
+bool DBusService::Deploy(brillo::ErrorPtr* err, const string& id_in) {
+  return dlc_service_->Deploy(id_in, err);
 }
 
 bool DBusService::GetInstalled(brillo::ErrorPtr* err, vector<string>* ids_out) {
@@ -55,6 +57,8 @@ bool DBusService::GetExistingDlcs(brillo::ErrorPtr* err,
   DlcIdList ids = dlc_service_->GetExistingDlcs();
   for (const auto& id : ids) {
     const auto* dlc = dlc_service_->GetDlc(id, err);
+    if (dlc == nullptr)
+      continue;
     auto* dlc_info = dlc_list_out->add_dlc_infos();
     dlc_info->set_id(id);
     dlc_info->set_name(dlc->GetName());

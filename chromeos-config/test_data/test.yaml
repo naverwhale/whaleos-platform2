@@ -1,5 +1,5 @@
 #
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 #
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
@@ -45,6 +45,12 @@ some_base_config: &some_base_config
     media-profiles:
       build-path: "some/media_profiles.xml"
       system-path: "/etc/some_media_profiles.xml"
+    media-codecs:
+      build-path: "some/media_codecs_c2.xml"
+      system-path: "/etc/some_media_codecs_c2.xml"
+    media-codecs-performance:
+      build-path: "some/media_codecs_performance_c2.xml"
+      system-path: "/etc/some_media_codecs_performance_c2.xml"
     build-properties:
       product: "{{$name}}"
       device: "{{$name}}_cheets"
@@ -61,6 +67,7 @@ some_base_config: &some_base_config
       u-boot: "some"
 
     ec-ro-image: "bcs://Some_EC.1111.11.1.tbz2"
+    ec-rw-image: "bcs://Some_EC_RW.1111.11.1.tbz2"
     main-ro-image: "bcs://Some.1111.11.1.tbz2"
     main-rw-image: "bcs://Some_RW.1111.11.1.tbz2"
   fingerprint:
@@ -100,24 +107,26 @@ some_config: &some_config
     key-id: "{{$key-id}}"
     signature-id: "{{$name}}"
   hardware-properties:
+    form-factor: CONVERTIBLE
+    recovery-input: POWER_BUTTON
     is-lid-convertible: true
   identity:
     platform-name: "Some"
-    smbios-name-match: "Some"
+    frid: "{{$frid}}"
     sku-id: "{{$sku-id}}"
   modem:
-    attach-apn-required: True
     firmware-variant: "some"
     wedge-reboot-delay-ms : "20000"
   wallpaper: "some"
   $oem-id: "0"
+  $frid: "Some"
 
 some_whitelabel_config: &some_whitelabel_config
   <<: *some_base_config
   brand-code: "{{$brand-code}}"
   identity:
     platform-name: "Some"
-    smbios-name-match: "Some"
+    frid: "Google_Some"
     sku-id: "{{$sku-id}}"
     whitelabel-tag: "{{$whitelabel-tag}}"
   firmware-signing:
@@ -125,8 +134,29 @@ some_whitelabel_config: &some_whitelabel_config
     signature-id: "{{$name}}-{{$whitelabel-tag}}"
     sig-id-in-customization-id: True
   hardware-properties:
+    form-factor: CHROMEBOX
     is-lid-convertible: false
   $oem-id: "1"
+
+multi_whitelabel_config: &multi_whitelabel_config
+  <<: *some_base_config
+  brand-code: "{{$brand-code}}"
+  identity:
+    platform-name: "Multi"
+    frid: "Google_Multi{{$firmware-suffix}}"
+    sku-id: "{{$sku-id}}"
+    whitelabel-tag: "{{$whitelabel-tag}}"
+  firmware-signing:
+    key-id: "{{$key-id}}"
+    signature-id: "{{$name}}{{$firmware-suffix}}-{{$whitelabel-tag}}"
+    sig-id-in-customization-id: True
+  hardware-properties:
+    form-factor: CHROMEBOX
+    is-lid-convertible: false
+  firmware:
+    image-name: "multi{{$firmware-suffix}}"
+  $oem-id: "1"
+  $firmware-suffix: ""
 
 some_touch_config: &some_touch_config
   <<: *touch
@@ -170,11 +200,14 @@ chromeos:
                 build-path: "build-path/wifi_sar_2.hex"
                 system-path: "/firmware/cbfs-rw-raw/proj/wifi_sar_2.hex"
         - $sku-id: 1
+          $frid: "Some_Other"
           config:
             <<: *some_config
             hardware-properties:
               is-lid-convertible: false
             hwid-override: SOME-ZZCR A6B-C5D-A4E
+            efi:
+              bootvar-name-override: "Some OS"
             touch: *some_touch_config
             thermal:
               files:
@@ -184,6 +217,12 @@ chromeos:
               sar-file:
                 build-path: "build-path/wifi_sar_2.hex"
                 system-path: "/firmware/cbfs-rw-raw/proj/wifi_sar_2.hex"
+            proximity-sensor:
+              semtech-config:
+                - location: "wifi_right"
+                  file:
+                    build-path: "build_path/config_project_right.json"
+                    system-path: "/usr/share/chromeos-assets/proximity-sensor/wifi/config_project_right.json"
     - $name: "some2"
       products:
         - $key-id: "SOME"
@@ -197,6 +236,15 @@ chromeos:
               image-name: "some2"
               build-targets:
                 zephyr-ec: "experimental/some2"
+        - $sku-id: 3
+          config:
+            <<: *some_config
+            firmware:
+              # if image-name is present, then coreboot build-target is not
+              # required to be present
+              image-name: "some2_custom"
+              build-targets:
+                zephyr-ec: "experimental/some2"
     - $name: "another"
       products:
         - $key-id: "ANOTHER"
@@ -206,17 +254,26 @@ chromeos:
             audio:
               <<: *audio
               $topology-name: "another"
+            displays:
+              - connector-type: 14
+                rounded-corners:
+                  top-left: 15
+                  top-right: 15
+                  bottom-left: 15
+                  bottom-right: 15
             hardware-properties:
+              form-factor: CONVERTIBLE
+              recovery-input: KEYBOARD
               is-lid-convertible: true
             identity:
               platform-name: "Some"
-              smbios-name-match: "Another"
+              frid: "Google_Another"
             fingerprint:
               board: "dartmonkey"
               ro-version: "VERSION3"
             firmware:
               bcs-overlay: "overlay-another-private"
-
+              detachable-ui: True
               ec-ro-image: "bcs://Another_EC.1111.11.1.tbz2"
               main-ro-image: "bcs://Another.1111.11.1.tbz2"
               main-rw-image: "bcs://Another_RW.1111.11.1.tbz2"
@@ -253,6 +310,12 @@ chromeos:
                 - source: "{{$some_touchscreen}}"
                   destination: "{{$fw_dest}}/{{$some_touchscreen}}"
                   symlink: "{{$fw_root}}/some_touch_vendorts_i2c_some-pid.bin"
+            proximity-sensor:
+              semtech-config:
+                - location: "wifi_left"
+                  file:
+                    build-path: "build_path/config_project_left.json"
+                    system-path: "/usr/share/chromeos-assets/proximity-sensor/wifi/config_project_left.json"
             thermal:
               files:
                 - source: "another/dptf.dv"
@@ -269,7 +332,7 @@ chromeos:
             name: "some_customization"
             identity:
               platform-name: "Some"
-              smbios-name-match: "SomeCustomization"
+              frid: "Google_SomeCustomization"
               customization-id: "SomeCustomization"
             fingerprint:
               board: "bloonchipper"
@@ -300,3 +363,97 @@ chromeos:
             <<: *some_whitelabel_config
             wallpaper: "{{$wallpaper}}"
             touch: *some_touch_config
+    - $name: "badrecovery1"
+      products:
+        - $key-id: "BAD1"
+        - $key-id: "BAD2"
+      skus:
+        - $sku-id: 10
+          config:
+            <<: *some_base_config
+            $oem-id: "0"
+            identity:
+              custom-label-tag: "{{$key-id}}"
+              sku-id: "{{$sku-id}}"
+            firmware:
+              build-targets:
+                coreboot: "badrecovery1"
+                ec: "badrecovery1"
+                depthcharge: "badrecovery1"
+                libpayload: "badrecovery1"
+                u-boot: "badrecovery1"
+            hardware-properties:
+              form-factor: CLAMSHELL
+              recovery-input: KEYBOARD
+        - $sku-id: 11
+          config:
+            <<: *some_base_config
+            $oem-id: "0"
+            identity:
+              custom-label-tag: "{{$key-id}}"
+              sku-id: "{{$sku-id}}"
+            firmware:
+              build-targets:
+                coreboot: "badrecovery1"
+                ec: "badrecovery1"
+                depthcharge: "badrecovery1"
+                libpayload: "badrecovery1"
+                u-boot: "badrecovery1"
+            hardware-properties:
+              form-factor: CLAMSHELL
+              recovery-input: POWER_BUTTON
+    - $name: "badrecovery2"
+      products:
+        - $key-id: "BAD3"
+        - $key-id: "BAD4"
+      skus:
+        - $sku-id: 12
+          config:
+            <<: *some_base_config
+            $oem-id: "0"
+            identity:
+              custom-label-tag: "{{$key-id}}"
+              sku-id: "{{$sku-id}}"
+            firmware:
+              build-targets:
+                coreboot: "badrecovery2"
+                ec: "badrecovery2"
+                depthcharge: "badrecovery2"
+                libpayload: "badrecovery2"
+                u-boot: "badrecovery2"
+            hardware-properties:
+              form-factor: CLAMSHELL
+        - $sku-id: 13
+          config:
+            <<: *some_base_config
+            $oem-id: "0"
+            identity:
+              custom-label-tag: "{{$key-id}}"
+              sku-id: "{{$sku-id}}"
+            firmware:
+              build-targets:
+                coreboot: "badrecovery2"
+                ec: "badrecovery2"
+                depthcharge: "badrecovery2"
+                libpayload: "badrecovery2"
+                u-boot: "badrecovery2"
+            hardware-properties:
+              form-factor: CHROMEBOX
+    - $name: "multi"
+      products:
+        - $brand-code: "WLBA"
+          $key-id: "WHITELABEL1"
+          $wallpaper: "wallpaper-wl1"
+          $whitelabel-tag: "whitelabel1"
+        - $brand-code: "WLBB"
+          $key-id: "WHITELABEL2"
+          $wallpaper: "wallpaper-wl2"
+          $whitelabel-tag: "whitelabel2"
+      skus:
+        - $sku-id: 14
+          config:
+            <<: *multi_whitelabel_config
+        - $sku-id: 15
+          config:
+            <<: *multi_whitelabel_config
+            $firmware-suffix: "_other"

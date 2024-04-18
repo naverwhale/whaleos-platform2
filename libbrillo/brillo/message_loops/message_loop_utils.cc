@@ -1,10 +1,10 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <brillo/message_loops/message_loop_utils.h>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 
 namespace brillo {

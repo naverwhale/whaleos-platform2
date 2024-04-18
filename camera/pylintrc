@@ -1,4 +1,4 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -36,11 +36,6 @@ load-plugins=
     pylint.extensions.docstyle,
     pylint.extensions.redefined_variable_type,
     pylint.extensions.overlapping_exceptions,
-
-# Configure quote preferences.
-string-quote = single-avoid-escape
-triple-quote = double
-docstring-quote = double
 
 
 [MESSAGES CONTROL]
@@ -141,6 +136,8 @@ enable=
 # TODO: Re-enable try-except-raise.
 # TODO: Re-enable chained-comparison.
 disable=
+    bad-continuation,
+    bad-indentation,
     broad-except,
     chained-comparison,
     consider-iterating-dictionary,
@@ -150,6 +147,9 @@ disable=
     fixme,
     file-ignored,
     keyword-arg-before-vararg,
+    invalid-docstring-quote,
+    invalid-string-quote,
+    invalid-triple-quote,
     import-outside-toplevel,
     inconsistent-return-statements,
     invalid-name,

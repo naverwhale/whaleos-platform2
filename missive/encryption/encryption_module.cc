@@ -1,16 +1,15 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/encryption/encryption_module.h"
 
-#include <atomic>
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/strings/string_piece.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/task/thread_pool.h>
 #include <base/time/time.h>
 
@@ -24,7 +23,7 @@ namespace reporting {
 namespace {
 
 // Helper function for asynchronous encryption.
-void AddToRecord(base::StringPiece record,
+void AddToRecord(std::string_view record,
                  Encryptor::Handle* handle,
                  base::OnceCallback<void(StatusOr<EncryptedRecord>)> cb) {
   handle->AddToRecord(
@@ -47,23 +46,24 @@ void AddToRecord(base::StringPiece record,
 
 }  // namespace
 
-EncryptionModule::EncryptionModule(base::TimeDelta renew_encryption_key_period)
-    : EncryptionModuleInterface(renew_encryption_key_period) {
+EncryptionModule::EncryptionModule(bool is_enabled,
+                                   base::TimeDelta renew_encryption_key_period)
+    : EncryptionModuleInterface(is_enabled, renew_encryption_key_period) {
   static_assert(std::is_same<PublicKeyId, Encryptor::PublicKeyId>::value,
                 "Public key id types must match");
   auto encryptor_result = Encryptor::Create();
-  DCHECK(encryptor_result.ok());
+  CHECK(encryptor_result.ok());
   encryptor_ = std::move(encryptor_result.ValueOrDie());
 }
 
 EncryptionModule::~EncryptionModule() = default;
 
 void EncryptionModule::EncryptRecordImpl(
-    base::StringPiece record,
+    std::string_view record,
     base::OnceCallback<void(StatusOr<EncryptedRecord>)> cb) const {
   // Encryption key is available, encrypt.
   encryptor_->OpenRecord(base::BindOnce(
-      [](base::StringPiece record,
+      [](std::string record,
          base::OnceCallback<void(StatusOr<EncryptedRecord>)> cb,
          StatusOr<Encryptor::Handle*> handle_result) {
         if (!handle_result.ok()) {
@@ -72,7 +72,7 @@ void EncryptionModule::EncryptRecordImpl(
         }
         base::ThreadPool::PostTask(
             FROM_HERE,
-            base::BindOnce(&AddToRecord, std::string(record),
+            base::BindOnce(&AddToRecord, record,
                            base::Unretained(handle_result.ValueOrDie()),
                            std::move(cb)));
       },
@@ -80,7 +80,7 @@ void EncryptionModule::EncryptRecordImpl(
 }
 
 void EncryptionModule::UpdateAsymmetricKeyImpl(
-    base::StringPiece new_public_key,
+    std::string_view new_public_key,
     PublicKeyId new_public_key_id,
     base::OnceCallback<void(Status)> response_cb) {
   encryptor_->UpdateAsymmetricKey(new_public_key, new_public_key_id,
@@ -89,9 +89,9 @@ void EncryptionModule::UpdateAsymmetricKeyImpl(
 
 // static
 scoped_refptr<EncryptionModuleInterface> EncryptionModule::Create(
-    base::TimeDelta renew_encryption_key_period) {
+    bool is_enabled, base::TimeDelta renew_encryption_key_period) {
   return base::WrapRefCounted(
-      new EncryptionModule(renew_encryption_key_period));
+      new EncryptionModule(is_enabled, renew_encryption_key_period));
 }
 
 }  // namespace reporting

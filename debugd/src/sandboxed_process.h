@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <base/environment.h>
 #include <brillo/process/process.h>
 
 namespace debugd {
@@ -40,6 +41,9 @@ class SandboxedProcess : public brillo::ProcessImpl {
   // Allow this process to access the root mount namespace.
   virtual void AllowAccessRootMountNamespace();
 
+  // Set additional environment variables to run the process with.
+  virtual void SetEnvironmentVariables(const base::EnvironmentMap& env);
+
   // Kill the sandboxed process' process group.
   virtual bool KillProcessGroup();
 
@@ -55,6 +59,7 @@ class SandboxedProcess : public brillo::ProcessImpl {
   std::string group_;
   std::string seccomp_filter_policy_file_;
   uint64_t capabilities_mask_;
+  base::EnvironmentMap env_vars_;
 };
 
 }  // namespace debugd

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,14 +11,17 @@
 
 class MbimCmd {
  public:
-  // enum values are borrowed from QMI for consistency
   enum MbimType : uint16_t {
-    kMbimSubscriberStatusReady = 0x00,
-    kMbimSendApdu = 0x3B,
-    kMbimOpenLogicalChannel = 0x42,
-    kMbimCloseLogicalChannel = 0x46,
-    kMbimDeviceCaps = 0x47,
-    kMbimSendEidApdu = 0x50,
+    kMbimSubscriberStatusReady,
+    kMbimSendApdu,
+    kMbimOpenChannel,
+    kMbimCloseChannel,
+    kMbimDeviceCaps,
+    kMbimSendEidApdu,
+    kMbimSetDeviceSlotMapping,
+    kMbimDeviceSlotMapping,
+    kMbimSysCaps,
+    kMbimSlotInfoStatus,
   };
   explicit MbimCmd(MbimType mbim_type) : mbim_type_(mbim_type) {}
 

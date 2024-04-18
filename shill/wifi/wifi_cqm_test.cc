@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -75,7 +75,7 @@ class WiFiCQMTest : public ::testing::Test {
   WiFiCQMTest()
       : manager_(&control_interface_, &dispatcher_, &metrics_),
         wifi_(new MockWiFi(
-            &manager_, "wifi", kDeviceAddress, 0, new MockWakeOnWiFi())),
+            &manager_, "wifi", kDeviceAddress, 0, 0, new MockWakeOnWiFi())),
         wifi_cqm_(new WiFiCQM(&metrics_, wifi().get())) {
     Nl80211Message::SetMessageType(kNl80211FamilyId);
   }
@@ -116,7 +116,7 @@ class WiFiCQMTest : public ::testing::Test {
   MockMetrics metrics_;
   MockControl control_interface_;
   EventDispatcherForTest dispatcher_;
-  MockManager manager_;
+  NiceMock<MockManager> manager_;
 
   scoped_refptr<MockWiFi> wifi_;
   std::unique_ptr<WiFiCQM> wifi_cqm_;
@@ -135,7 +135,6 @@ TEST_F(WiFiCQMTest, TriggerFwDump) {
 
   Mock::VerifyAndClearExpectations(&log);
 
-  EXPECT_CALL(log, Log(_, _, HasSubstr("In FW dump cool down period")));
   TriggerFwDump();
   // No new FW dump should be triggered in cool down period, so this should
   // still be one.
@@ -151,32 +150,28 @@ TEST_F(WiFiCQMTest, OnCQMNotificationBeaconLoss) {
   ScopeLogger::GetInstance()->EnableScopesByName("wifi");
   ScopeLogger::GetInstance()->set_verbose_level(3);
 
-  NetlinkPacket packet(kCQMBeaconLossNLMsg, sizeof(kCQMBeaconLossNLMsg));
+  NetlinkPacket packet(kCQMBeaconLossNLMsg);
   msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   const Nl80211Message& nl80211_msg =
       *reinterpret_cast<const Nl80211Message*>(&msg);
 
   EXPECT_CALL(log, Log(_, _, HasSubstr("Beacon loss observed")));
-  EXPECT_CALL(log, Log(_, _, HasSubstr("Triggering FW dump")));
-  EXPECT_CALL(log, Log(_, _, HasSubstr("FW dump trigger succeeded")));
-  EXPECT_CALL(*wifi(), GetSignalLevelForActiveService()).WillOnce(Return(-50));
   EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricWiFiCQMNotification,
                                         Metrics::kWiFiCQMBeaconLoss, _));
+  EXPECT_CALL(*wifi(), EmitStationInfoRequestEvent(
+                           WiFiLinkStatistics::Trigger::kCQMBeaconLoss))
+      .Times(1);
   OnCQMNotify(nl80211_msg);
-  EXPECT_EQ(FwDumpCount(), 1);
 
   Mock::VerifyAndClearExpectations(wifi().get());
   Mock::VerifyAndClearExpectations(&log);
 
-  // No Fw dump triggered for signal strength less than -80dBm.
-  EXPECT_CALL(
-      log,
-      Log(_, _,
-          HasSubstr("CQM notification for signal strength less than -80 dBm")));
-  EXPECT_CALL(*wifi(), GetSignalLevelForActiveService()).WillOnce(Return(-90));
+  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricWiFiCQMNotification,
+                                        Metrics::kWiFiCQMBeaconLoss, _));
+  EXPECT_CALL(*wifi(), EmitStationInfoRequestEvent(
+                           WiFiLinkStatistics::Trigger::kCQMBeaconLoss))
+      .Times(1);
   OnCQMNotify(nl80211_msg);
-  // FW dump count should not increase.
-  EXPECT_EQ(FwDumpCount(), 1);
   ScopeLogger::GetInstance()->set_verbose_level(0);
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
 }
@@ -186,15 +181,14 @@ TEST_F(WiFiCQMTest, OnCQMNotificationLowRssiLevelBreach) {
   ScopedMockLog log;
   ScopeLogger::GetInstance()->EnableScopesByName("wifi");
   ScopeLogger::GetInstance()->set_verbose_level(3);
-  NetlinkPacket packet(kCQMRssiLowNLMsg, sizeof(kCQMRssiLowNLMsg));
+  NetlinkPacket packet(kCQMRssiLowNLMsg);
   msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   const Nl80211Message& nl80211_msg =
       *reinterpret_cast<const Nl80211Message*>(&msg);
-  EXPECT_CALL(
-      log, Log(_, _,
-               HasSubstr("NL80211_ATTR_CQM_RSSI_THRESHOLD_EVENT event found")));
+  EXPECT_CALL(*wifi(), EmitStationInfoRequestEvent(
+                           WiFiLinkStatistics::Trigger::kCQMRSSILow))
+      .Times(1);
   OnCQMNotify(nl80211_msg);
-  EXPECT_EQ(FwDumpCount(), 0);
   ScopeLogger::GetInstance()->set_verbose_level(0);
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
 }
@@ -204,15 +198,14 @@ TEST_F(WiFiCQMTest, OnCQMNotificationHighRssiLevelBreach) {
   ScopedMockLog log;
   ScopeLogger::GetInstance()->EnableScopesByName("wifi");
   ScopeLogger::GetInstance()->set_verbose_level(3);
-  NetlinkPacket packet(kCQMRssiHighNLMsg, sizeof(kCQMRssiHighNLMsg));
+  NetlinkPacket packet(kCQMRssiHighNLMsg);
   msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   const Nl80211Message& nl80211_msg =
       *reinterpret_cast<const Nl80211Message*>(&msg);
-  EXPECT_CALL(
-      log, Log(_, _,
-               HasSubstr("NL80211_ATTR_CQM_RSSI_THRESHOLD_EVENT event found")));
+  EXPECT_CALL(*wifi(), EmitStationInfoRequestEvent(
+                           WiFiLinkStatistics::Trigger::kCQMRSSIHigh))
+      .Times(1);
   OnCQMNotify(nl80211_msg);
-  EXPECT_EQ(FwDumpCount(), 0);
   ScopeLogger::GetInstance()->set_verbose_level(0);
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
 }
@@ -224,32 +217,28 @@ TEST_F(WiFiCQMTest, OnCQMNotificationPacketLoss) {
   ScopeLogger::GetInstance()->EnableScopesByName("wifi");
   ScopeLogger::GetInstance()->set_verbose_level(3);
 
-  NetlinkPacket packet(kCQMPacketLossNLMsg, sizeof(kCQMPacketLossNLMsg));
+  NetlinkPacket packet(kCQMPacketLossNLMsg);
   msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   const Nl80211Message& nl80211_msg =
       *reinterpret_cast<const Nl80211Message*>(&msg);
 
   EXPECT_CALL(log, Log(_, _, HasSubstr("Packet loss event received")));
-  EXPECT_CALL(log, Log(_, _, HasSubstr("Triggering FW dump")));
-  EXPECT_CALL(log, Log(_, _, HasSubstr("FW dump trigger succeeded")));
-  EXPECT_CALL(*wifi(), GetSignalLevelForActiveService()).WillOnce(Return(-50));
   EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricWiFiCQMNotification,
                                         Metrics::kWiFiCQMPacketLoss, _));
+  EXPECT_CALL(*wifi(), EmitStationInfoRequestEvent(
+                           WiFiLinkStatistics::Trigger::kCQMPacketLoss))
+      .Times(1);
   OnCQMNotify(nl80211_msg);
-  EXPECT_EQ(FwDumpCount(), 1);
 
   Mock::VerifyAndClearExpectations(wifi().get());
   Mock::VerifyAndClearExpectations(&log);
 
-  // No Fw dump triggered for signal strength less than -80dBm.
-  EXPECT_CALL(
-      log,
-      Log(_, _,
-          HasSubstr("CQM notification for signal strength less than -80 dBm")));
-  EXPECT_CALL(*wifi(), GetSignalLevelForActiveService()).WillOnce(Return(-90));
+  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricWiFiCQMNotification,
+                                        Metrics::kWiFiCQMPacketLoss, _));
+  EXPECT_CALL(*wifi(), EmitStationInfoRequestEvent(
+                           WiFiLinkStatistics::Trigger::kCQMPacketLoss))
+      .Times(1);
   OnCQMNotify(nl80211_msg);
-  // FW dump count should not increase.
-  EXPECT_EQ(FwDumpCount(), 1);
   ScopeLogger::GetInstance()->set_verbose_level(0);
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
 }

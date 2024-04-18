@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define SHILL_VPN_MOCK_OPENVPN_DRIVER_H_
 
 #include <string>
+#include <string_view>
 
 #include <gmock/gmock.h>
 
@@ -15,18 +16,18 @@ namespace shill {
 
 class MockOpenVPNDriver : public OpenVPNDriver {
  public:
-  MockOpenVPNDriver(Manager* manager, ProcessManager* process_manager)
-      : OpenVPNDriver(manager, process_manager) {}
+  MockOpenVPNDriver(Manager* manager, ProcessManager* process_manager);
   MockOpenVPNDriver(const MockOpenVPNDriver&) = delete;
   MockOpenVPNDriver& operator=(const MockOpenVPNDriver&) = delete;
 
-  ~MockOpenVPNDriver() = default;
+  ~MockOpenVPNDriver() override;
 
   MOCK_METHOD(void, OnReconnecting, (ReconnectReason), (override));
   MOCK_METHOD(void,
               FailService,
-              (Service::ConnectFailure, const std::string&),
+              (Service::ConnectFailure, std::string_view),
               (override));
+  MOCK_METHOD(void, ReportCipherMetrics, (std::string_view), (override));
 };
 
 }  // namespace shill

@@ -1,38 +1,42 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "cryptohome/storage/homedirs.h"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
+#include <base/logging.h>
 #include <base/time/time.h>
 #include <brillo/cryptohome.h>
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
 #include <brillo/blkdev_utils/mock_lvm.h>
-#endif  // USE_LVM_STATEFUL_PARTITION
 #include <brillo/secure_blob.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <libhwsec-foundation/error/testing_helper.h>
 #include <policy/mock_device_policy.h>
 
-#include "cryptohome/credentials.h"
-#include "cryptohome/crypto.h"
 #include "cryptohome/filesystem_layout.h"
+#include "cryptohome/mock_device_management_client_proxy.h"
 #include "cryptohome/mock_keyset_management.h"
 #include "cryptohome/mock_platform.h"
 #include "cryptohome/storage/cryptohome_vault_factory.h"
 #include "cryptohome/storage/encrypted_container/encrypted_container.h"
 #include "cryptohome/storage/encrypted_container/encrypted_container_factory.h"
-#include "cryptohome/storage/encrypted_container/fake_backing_device.h"
+#include "cryptohome/storage/error_test_helpers.h"
+#include "cryptohome/storage/keyring/fake_keyring.h"
 #include "cryptohome/storage/mount_constants.h"
+#include "cryptohome/username.h"
 
+using ::cryptohome::storage::testing::IsError;
+using ::hwsec_foundation::error::testing::IsOk;
 using ::testing::_;
 using ::testing::DoAll;
+using ::testing::Eq;
 using ::testing::NiceMock;
 using ::testing::Return;
 
@@ -61,16 +65,15 @@ ACTION_P2(SetOwner, owner_known, owner) {
   return owner_known;
 }
 
-ACTION_P(SetEphemeralUsersEnabled, ephemeral_users_enabled) {
-  *arg0 = ephemeral_users_enabled;
+ACTION_P(SetEphemeralSettings, ephemeral_settings) {
+  *arg0 = ephemeral_settings;
   return true;
 }
 
 struct UserInfo {
-  std::string name;
-  std::string obfuscated;
+  Username name;
+  ObfuscatedUsername obfuscated;
   brillo::SecureBlob passkey;
-  Credentials credentials;
   base::FilePath homedir_path;
   base::FilePath user_path;
 };
@@ -85,9 +88,7 @@ struct test_homedir {
 class HomeDirsTest
     : public ::testing::TestWithParam<bool /* should_test_ecryptfs */> {
  public:
-  HomeDirsTest()
-      : crypto_(&platform_),
-        mock_device_policy_(new policy::MockDevicePolicy()) {}
+  HomeDirsTest() : mock_device_policy_(new policy::MockDevicePolicy()) {}
   ~HomeDirsTest() override {}
 
   // Not copyable or movable
@@ -97,65 +98,53 @@ class HomeDirsTest
   HomeDirsTest& operator=(HomeDirsTest&&) = delete;
 
   void SetUp() override {
-    PreparePolicy(true, kOwner, false, "");
+    PreparePolicy(true, kOwner, "");
 
-    InitializeFilesystemLayout(&platform_, &crypto_, &system_salt_);
     std::unique_ptr<EncryptedContainerFactory> container_factory =
         std::make_unique<EncryptedContainerFactory>(
-            &platform_, std::make_unique<FakeBackingDeviceFactory>(&platform_));
+            &platform_, std::make_unique<FakeKeyring>(),
+            std::make_unique<BackingDeviceFactory>(&platform_));
+    vault_factory_ = std::make_unique<CryptohomeVaultFactory>(
+        &platform_, std::move(container_factory));
     HomeDirs::RemoveCallback remove_callback =
         base::BindRepeating(&MockKeysetManagement::RemoveLECredentials,
                             base::Unretained(&keyset_management_));
     homedirs_ = std::make_unique<HomeDirs>(
-        &platform_, system_salt_,
+        &platform_,
         std::make_unique<policy::PolicyProvider>(
             std::unique_ptr<policy::MockDevicePolicy>(mock_device_policy_)),
-        remove_callback,
-        std::make_unique<CryptohomeVaultFactory>(&platform_,
-                                                 std::move(container_factory)));
-
-    platform_.GetFake()->SetSystemSaltForLibbrillo(system_salt_);
+        remove_callback, vault_factory_.get());
+    homedirs_->SetDeviceManagementClientProxy(&device_management_client_);
 
     AddUser(kUser0, kUserPassword0);
     AddUser(kUser1, kUserPassword1);
     AddUser(kUser2, kUserPassword2);
     AddUser(kOwner, kOwnerPassword);
 
-    ASSERT_EQ(kOwner, users_[kOwnerIndex].name);
+    ASSERT_EQ(kOwner, *users_[kOwnerIndex].name);
 
     PrepareDirectoryStructure();
   }
 
-  void TearDown() override {
-    platform_.GetFake()->RemoveSystemSaltForLibbrillo();
-  }
-
   void AddUser(const char* name, const char* password) {
-    std::string obfuscated =
-        brillo::cryptohome::home::SanitizeUserNameWithSalt(name, system_salt_);
-    brillo::SecureBlob passkey;
-    cryptohome::Crypto::PasswordToPasskey(password, system_salt_, &passkey);
-    Credentials credentials(name, passkey);
+    Username username(name);
+    ObfuscatedUsername obfuscated =
+        brillo::cryptohome::home::SanitizeUserName(username);
+    brillo::SecureBlob passkey(password);
 
-    UserInfo info = {name,
-                     obfuscated,
-                     passkey,
-                     credentials,
-                     ShadowRoot().Append(obfuscated),
+    UserInfo info = {username, obfuscated, passkey, UserPath(obfuscated),
                      brillo::cryptohome::home::GetHashedUserPath(obfuscated)};
     users_.push_back(info);
   }
 
   void PreparePolicy(bool owner_known,
                      const std::string& owner,
-                     bool ephemeral_users_enabled,
                      const std::string& clean_up_strategy) {
-    EXPECT_CALL(*mock_device_policy_, LoadPolicy())
+    EXPECT_CALL(*mock_device_policy_,
+                LoadPolicy(/*delete_invalid_files=*/false))
         .WillRepeatedly(Return(true));
     EXPECT_CALL(*mock_device_policy_, GetOwner(_))
         .WillRepeatedly(SetOwner(owner_known, owner));
-    EXPECT_CALL(*mock_device_policy_, GetEphemeralUsersEnabled(_))
-        .WillRepeatedly(SetEphemeralUsersEnabled(ephemeral_users_enabled));
   }
 
   // Returns true if the test is running for eCryptfs, false if for dircrypto.
@@ -163,10 +152,10 @@ class HomeDirsTest
 
  protected:
   NiceMock<MockPlatform> platform_;
+  NiceMock<MockDeviceManagementClientProxy> device_management_client_;
   MockKeysetManagement keyset_management_;
-  Crypto crypto_;
-  brillo::SecureBlob system_salt_;
   policy::MockDevicePolicy* mock_device_policy_;  // owned by homedirs_
+  std::unique_ptr<CryptohomeVaultFactory> vault_factory_;
   std::unique_ptr<HomeDirs> homedirs_;
 
   // Information about users' homedirs. The order of users is equal to kUsers.
@@ -194,7 +183,54 @@ class HomeDirsTest
 INSTANTIATE_TEST_SUITE_P(WithEcryptfs, HomeDirsTest, ::testing::Values(true));
 INSTANTIATE_TEST_SUITE_P(WithDircrypto, HomeDirsTest, ::testing::Values(false));
 
-TEST_P(HomeDirsTest, RemoveNonOwnerCryptohomes) {
+TEST_P(HomeDirsTest, RemoveEphemeralCryptohomes_Error) {
+  EXPECT_TRUE(platform_.DirectoryExists(users_[0].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
+
+  EXPECT_CALL(platform_, IsDirectoryMounted(_)).WillRepeatedly(Return(false));
+  EXPECT_CALL(keyset_management_, RemoveLECredentials(_)).Times(0);
+  EXPECT_CALL(*mock_device_policy_, GetEphemeralSettings(_))
+      .WillRepeatedly(Return(false));
+
+  auto result = homedirs_->RemoveCryptohomesBasedOnPolicy();
+  EXPECT_EQ(result, HomeDirs::CryptohomesRemovedStatus::kError);
+
+  EXPECT_TRUE(platform_.DirectoryExists(users_[0].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
+}
+
+// When the global ephemeral user policy is not set, and there are no ephemeral
+// or non-ephemeral users, we should not remove cryptohomes.
+TEST_P(HomeDirsTest, RemoveEphemeralCryptohomes_EphemeralUsersDisabled) {
+  EXPECT_TRUE(platform_.DirectoryExists(users_[0].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
+
+  EXPECT_CALL(platform_, IsDirectoryMounted(_)).WillRepeatedly(Return(false));
+  EXPECT_CALL(keyset_management_, RemoveLECredentials(_)).Times(0);
+  policy::DevicePolicy::EphemeralSettings ephemeral_settings;
+  ephemeral_settings.global_ephemeral_users_enabled = false;
+  EXPECT_CALL(*mock_device_policy_, GetEphemeralSettings(_))
+      .WillRepeatedly(SetEphemeralSettings(ephemeral_settings));
+
+  auto result = homedirs_->RemoveCryptohomesBasedOnPolicy();
+  EXPECT_EQ(result, HomeDirs::CryptohomesRemovedStatus::kNone);
+
+  EXPECT_TRUE(platform_.DirectoryExists(users_[0].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
+}
+
+// When the global ephemeral user policy is set, and there are no ephemeral
+// or non-ephemeral users and the device is enterprise owned we should remove
+// all cryptohomes except the owner.
+TEST_P(HomeDirsTest, RemoveEphemeralCryptohomes_EphemeralUsersEnabled) {
   EXPECT_TRUE(platform_.DirectoryExists(users_[0].homedir_path));
   EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
   EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
@@ -202,85 +238,139 @@ TEST_P(HomeDirsTest, RemoveNonOwnerCryptohomes) {
 
   EXPECT_CALL(platform_, IsDirectoryMounted(_)).WillRepeatedly(Return(false));
   EXPECT_CALL(keyset_management_, RemoveLECredentials(_)).Times(3);
+  policy::DevicePolicy::EphemeralSettings ephemeral_settings;
+  ephemeral_settings.global_ephemeral_users_enabled = true;
+  EXPECT_CALL(*mock_device_policy_, GetEphemeralSettings(_))
+      .WillRepeatedly(SetEphemeralSettings(ephemeral_settings));
 
-  homedirs_->RemoveNonOwnerCryptohomes();
+  auto result = homedirs_->RemoveCryptohomesBasedOnPolicy();
+  EXPECT_EQ(result, HomeDirs::CryptohomesRemovedStatus::kSome);
 
-  // Non-owners' vaults are removed
+  // Non-owners' vaults are removed.
   EXPECT_FALSE(platform_.DirectoryExists(users_[0].homedir_path));
   EXPECT_FALSE(platform_.DirectoryExists(users_[1].homedir_path));
   EXPECT_FALSE(platform_.DirectoryExists(users_[2].homedir_path));
 
-  // Owner's vault still exists
+  // Owner's vault still exists.
   EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
 }
 
-TEST_P(HomeDirsTest, RenameCryptohome) {
-  constexpr char kNewUserId[] = "some_new_user";
-  const std::string kHashedNewUserId =
-      brillo::cryptohome::home::SanitizeUserNameWithSalt(kNewUserId,
-                                                         system_salt_);
-  const base::FilePath kNewUserPath = ShadowRoot().Append(kHashedNewUserId);
-
-  // Original state - pregenerated users' vaults exist, kNewUserId's vault
-  // doesn't exist
+// When the global ephemeral user policy is set, and there are no ephemeral
+// or non-ephemeral users and the device is not enterprise owned we should
+// remove all cryptohomes.
+TEST_P(HomeDirsTest,
+       RemoveEphemeralCryptohomes_EphemeralUsersEnabled_EnterpriseOwned) {
   EXPECT_TRUE(platform_.DirectoryExists(users_[0].homedir_path));
   EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
   EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
   EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
-  EXPECT_FALSE(platform_.DirectoryExists(kNewUserPath));
 
-  // Rename user0
-  EXPECT_TRUE(homedirs_->Rename(users_[0].name, kNewUserId));
+  EXPECT_CALL(platform_, IsDirectoryMounted(_)).WillRepeatedly(Return(false));
+  EXPECT_CALL(keyset_management_, RemoveLECredentials(_)).Times(4);
+  policy::DevicePolicy::EphemeralSettings ephemeral_settings;
+  ephemeral_settings.global_ephemeral_users_enabled = true;
+  EXPECT_CALL(*mock_device_policy_, GetEphemeralSettings(_))
+      .WillRepeatedly(SetEphemeralSettings(ephemeral_settings));
 
-  // Renamed user0 to kNewUserId, thus user0's vault doesn't exist and
-  // kNewUserId's does.
+  EXPECT_CALL(device_management_client_, IsEnterpriseOwned())
+      .WillRepeatedly(Return(true));
+  auto result = homedirs_->RemoveCryptohomesBasedOnPolicy();
+  EXPECT_EQ(result, HomeDirs::CryptohomesRemovedStatus::kAll);
+
+  // When enterprise owned there is no owner vault.
   EXPECT_FALSE(platform_.DirectoryExists(users_[0].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(kNewUserPath));
+  EXPECT_FALSE(platform_.DirectoryExists(users_[1].homedir_path));
+  EXPECT_FALSE(platform_.DirectoryExists(users_[2].homedir_path));
+  EXPECT_FALSE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
+}
 
-  // If source directory doesn't exist, assume renamed.
-  EXPECT_TRUE(homedirs_->Rename(users_[0].name, kNewUserId));
-
-  // Since renaming already renamed user, no changes are expected.
-  EXPECT_FALSE(platform_.DirectoryExists(users_[0].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(kNewUserPath));
-
-  // This should fail as target directory already exists.
-  EXPECT_FALSE(homedirs_->Rename(users_[1].name, users_[2].name));
-
-  // Since renaming failed, no changes are expected.
-  EXPECT_FALSE(platform_.DirectoryExists(users_[0].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
-  EXPECT_TRUE(platform_.DirectoryExists(kNewUserPath));
-
-  // Rename back.
-  EXPECT_TRUE(homedirs_->Rename(kNewUserId, users_[0].name));
-
-  // Back to the original state - pregenerated users' vaults exist, kNewUserId's
-  // vault doesn't exist.
+// When the global ephemeral user policy is set, and there are ephemeral
+// and non-ephemeral users, we should remove all cryptohomes except the owner
+// and the non-ephemeral cryptohomes.
+TEST_P(HomeDirsTest,
+       RemoveEphemeralCryptohomes_EphemeralUsersEnabled_WithAllowLists) {
   EXPECT_TRUE(platform_.DirectoryExists(users_[0].homedir_path));
   EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
   EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
   EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
-  EXPECT_FALSE(platform_.DirectoryExists(kNewUserPath));
+
+  EXPECT_CALL(platform_, IsDirectoryMounted(_)).WillRepeatedly(Return(false));
+  EXPECT_CALL(keyset_management_, RemoveLECredentials(_)).Times(2);
+  policy::DevicePolicy::EphemeralSettings ephemeral_settings;
+  ephemeral_settings.global_ephemeral_users_enabled = true;
+  ephemeral_settings.specific_ephemeral_users.push_back(kUser0);
+  ephemeral_settings.specific_nonephemeral_users.push_back(kUser1);
+  EXPECT_CALL(*mock_device_policy_, GetEphemeralSettings(_))
+      .WillRepeatedly(SetEphemeralSettings(ephemeral_settings));
+
+  auto result = homedirs_->RemoveCryptohomesBasedOnPolicy();
+  EXPECT_EQ(result, HomeDirs::CryptohomesRemovedStatus::kSome);
+
+  // Ephemeral vaults are removed.
+  EXPECT_FALSE(platform_.DirectoryExists(users_[0].homedir_path));
+  EXPECT_FALSE(platform_.DirectoryExists(users_[2].homedir_path));
+  // Non-ephemeral cryptohome still exists.
+  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
+  // Owner's vault still exists.
+  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
+}
+
+// When the global ephemeral user policy is not set, and there are ephemeral
+// and non-ephemeral users, we should remove only the ephemeral cryptohomes.
+TEST_P(HomeDirsTest,
+       RemoveEphemeralCryptohomes_EphemeralUsersDisabled_WithAllowLists) {
+  EXPECT_TRUE(platform_.DirectoryExists(users_[0].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
+
+  EXPECT_CALL(platform_, IsDirectoryMounted(_)).WillRepeatedly(Return(false));
+  EXPECT_CALL(keyset_management_, RemoveLECredentials(_)).Times(1);
+  policy::DevicePolicy::EphemeralSettings ephemeral_settings;
+  ephemeral_settings.global_ephemeral_users_enabled = false;
+  ephemeral_settings.specific_ephemeral_users.push_back(kUser0);
+  ephemeral_settings.specific_nonephemeral_users.push_back(kUser1);
+  EXPECT_CALL(*mock_device_policy_, GetEphemeralSettings(_))
+      .WillRepeatedly(SetEphemeralSettings(ephemeral_settings));
+
+  auto result = homedirs_->RemoveCryptohomesBasedOnPolicy();
+  EXPECT_EQ(result, HomeDirs::CryptohomesRemovedStatus::kSome);
+
+  // Ephemeral vaults are removed.
+  EXPECT_FALSE(platform_.DirectoryExists(users_[0].homedir_path));
+  // Non-ephemeral vaults still exists.
+  EXPECT_TRUE(platform_.DirectoryExists(users_[2].homedir_path));
+  EXPECT_TRUE(platform_.DirectoryExists(users_[1].homedir_path));
+  // Owner's vault still exists.
+  EXPECT_TRUE(platform_.DirectoryExists(users_[kOwnerIndex].homedir_path));
 }
 
 TEST_P(HomeDirsTest, CreateCryptohome) {
-  constexpr char kNewUserId[] = "some_new_user";
-  const std::string kHashedNewUserId =
-      brillo::cryptohome::home::SanitizeUserNameWithSalt(kNewUserId,
-                                                         system_salt_);
-  const base::FilePath kNewUserPath = ShadowRoot().Append(kHashedNewUserId);
+  const Username kNewUserId("some_new_user");
+  const ObfuscatedUsername kHashedNewUserId =
+      brillo::cryptohome::home::SanitizeUserName(kNewUserId);
+  const base::FilePath kNewUserPath = UserPath(kHashedNewUserId);
 
   EXPECT_TRUE(homedirs_->Create(kNewUserId));
   EXPECT_TRUE(platform_.DirectoryExists(kNewUserPath));
+}
+
+TEST_P(HomeDirsTest, RemoveCryptohome) {
+  const Username kNewUserId("some_new_user");
+  const ObfuscatedUsername kHashedNewUserId =
+      brillo::cryptohome::home::SanitizeUserName(kNewUserId);
+  const base::FilePath kNewUserPath = UserPath(kHashedNewUserId);
+
+  EXPECT_TRUE(homedirs_->Create(kNewUserId));
+  EXPECT_TRUE(platform_.DirectoryExists(kNewUserPath));
+
+  EXPECT_CALL(platform_, IsDirectoryMounted(_)).WillOnce(Return(true));
+  EXPECT_FALSE(homedirs_->Remove(kHashedNewUserId));
+  EXPECT_TRUE(platform_.DirectoryExists(kNewUserPath));
+
+  EXPECT_CALL(platform_, IsDirectoryMounted(_)).WillRepeatedly(Return(false));
+  EXPECT_TRUE(homedirs_->Remove(kHashedNewUserId));
+  EXPECT_FALSE(platform_.DirectoryExists(kNewUserPath));
 }
 
 TEST_P(HomeDirsTest, ComputeDiskUsage) {
@@ -330,7 +420,7 @@ TEST_P(HomeDirsTest, ComputeDiskUsageEphemeral) {
 TEST_P(HomeDirsTest, ComputeDiskUsageWithNonexistentUser) {
   // If the specified user doesn't exist, there is no directory for the user, so
   // ComputeDiskUsage should return 0.
-  const char kNonExistentUserId[] = "non_existent_user";
+  const Username kNonExistentUserId("non_existent_user");
   EXPECT_EQ(0, homedirs_->ComputeDiskUsage(kNonExistentUserId));
 }
 
@@ -432,7 +522,7 @@ TEST_P(HomeDirsTest, GetUnmountedAndroidDataCount) {
 
 TEST_P(HomeDirsTest, GetHomedirsAllMounted) {
   std::vector<bool> all_mounted(users_.size(), true);
-  std::set<std::string> hashes, got_hashes;
+  std::set<ObfuscatedUsername> hashes, got_hashes;
 
   for (int i = 0; i < users_.size(); i++) {
     hashes.insert(users_[i].obfuscated);
@@ -451,7 +541,7 @@ TEST_P(HomeDirsTest, GetHomedirsAllMounted) {
 
 TEST_P(HomeDirsTest, GetHomedirsSomeMounted) {
   std::vector<bool> some_mounted(users_.size());
-  std::set<std::string> hashes, got_hashes;
+  std::set<ObfuscatedUsername> hashes, got_hashes;
 
   for (int i = 0; i < users_.size(); i++) {
     hashes.insert(users_[i].obfuscated);
@@ -468,255 +558,355 @@ TEST_P(HomeDirsTest, GetHomedirsSomeMounted) {
   EXPECT_EQ(hashes, got_hashes);
 }
 
+// Test that deleting the /home/user/<hash> paths doesn't affect homedir
+// enumeration.
+TEST_P(HomeDirsTest, GetHomedirsSomeMountedUserPathDeleted) {
+  std::vector<bool> some_mounted(users_.size());
+  std::set<ObfuscatedUsername> hashes, got_hashes;
+
+  for (int i = 0; i < users_.size(); i++) {
+    hashes.insert(users_[i].obfuscated);
+    some_mounted[i] = i % 2;
+    ASSERT_TRUE(platform_.DeletePathRecursively(users_[i].user_path));
+  }
+
+  EXPECT_CALL(platform_, AreDirectoriesMounted(_))
+      .WillOnce(Return(some_mounted));
+  auto dirs = homedirs_->GetHomeDirs();
+  for (int i = 0; i < users_.size(); i++) {
+    EXPECT_EQ(dirs[i].is_mounted, some_mounted[i]);
+    got_hashes.insert(dirs[i].obfuscated);
+  }
+  EXPECT_EQ(hashes, got_hashes);
+}
+
 class HomeDirsVaultTest : public ::testing::Test {
  public:
   HomeDirsVaultTest()
-      : user_({.obfuscated = "foo",
-               .homedir_path = base::FilePath(ShadowRoot().Append("foo"))}),
-        key_reference_({.fek_sig = brillo::SecureBlob("random keyref")}),
-        crypto_(&platform_),
-        mock_device_policy_(new policy::MockDevicePolicy()) {}
+      : user_({.obfuscated = ObfuscatedUsername("foo"),
+               .homedir_path =
+                   base::FilePath(UserPath(ObfuscatedUsername("foo")))}),
+        key_reference_({.fek_sig = brillo::SecureBlob("random keyref")}) {}
   ~HomeDirsVaultTest() override = default;
 
-  void SetUp() override {
-    HomeDirs::RemoveCallback remove_callback;
-    homedirs_ = std::make_unique<HomeDirs>(
-        &platform_, system_salt_,
-        std::make_unique<policy::PolicyProvider>(
-            std::unique_ptr<policy::MockDevicePolicy>(mock_device_policy_)),
-        remove_callback);
-  }
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
   void ExpectLogicalVolumeStatefulPartition(
-      const std::string& obfuscated_username, bool existing_cryptohome) {
-    brillo::PhysicalVolume pv(base::FilePath("/dev/mmcblk0p1"), nullptr);
-    brillo::VolumeGroup vg("stateful", nullptr);
-    brillo::Thinpool thinpool("thinpool", "stateful", nullptr);
+      MockPlatform* platform,
+      HomeDirs* homedirs,
+      const ObfuscatedUsername& obfuscated_username,
+      bool existing_cryptohome) {
     brillo::LogicalVolume lv(LogicalVolumePrefix(obfuscated_username)
                                  .append(kDmcryptDataContainerSuffix),
                              "stateful", nullptr);
-    std::unique_ptr<brillo::MockLogicalVolumeManager> lvm(
-        new brillo::MockLogicalVolumeManager());
 
-    EXPECT_CALL(platform_, GetStatefulDevice())
+    EXPECT_CALL(*platform, GetStatefulDevice())
         .WillRepeatedly(Return(base::FilePath("/dev/mmcblk0")));
-    EXPECT_CALL(platform_, GetBlkSize(_, _))
+    EXPECT_CALL(*platform, GetBlkSize(_, _))
         .WillRepeatedly(
             DoAll(SetArgPointee<1>(1024 * 1024 * 1024), Return(true)));
-    EXPECT_CALL(*lvm.get(), GetPhysicalVolume(_)).WillRepeatedly(Return(pv));
-    EXPECT_CALL(*lvm.get(), GetVolumeGroup(_)).WillRepeatedly(Return(vg));
-    EXPECT_CALL(*lvm.get(), GetThinpool(_, _)).WillRepeatedly(Return(thinpool));
+    EXPECT_CALL(*platform, IsStatefulLogicalVolumeSupported())
+        .WillRepeatedly(Return(true));
+    brillo::MockLogicalVolumeManager* lvm =
+        platform->GetFake()->GetMockLogicalVolumeManager();
     if (existing_cryptohome) {
-      EXPECT_CALL(*lvm.get(), GetLogicalVolume(_, _))
-          .WillRepeatedly(Return(lv));
+      EXPECT_CALL(*lvm, GetLogicalVolume(_, _)).WillRepeatedly(Return(lv));
+    } else {
+      EXPECT_CALL(*lvm, GetLogicalVolume(_, _))
+          .WillRepeatedly(Return(std::nullopt));
     }
-
-    homedirs_->SetLogicalVolumeManagerForTesting(std::move(lvm));
   }
-#endif  // USE_LVM_STATEFUL_PARTITION
 
  protected:
+  struct HomedirsTestCase {
+    std::string name;
+    bool lvm_supported;
+    bool fscrypt_supported;
+    EncryptedContainerType existing_container_type;
+    CryptohomeVault::Options options;
+
+    EncryptedContainerType expected_type;
+    MountError expected_error;
+  };
+
   const UserInfo user_;
   const FileSystemKeyReference key_reference_;
 
-  NiceMock<MockPlatform> platform_;
-  Crypto crypto_;
-  brillo::SecureBlob system_salt_;
-  policy::MockDevicePolicy* mock_device_policy_;  // owned by homedirs_
-  std::unique_ptr<HomeDirs> homedirs_;
+  void PrepareTestCase(const HomedirsTestCase& test_case,
+                       MockPlatform* platform,
+                       HomeDirs* homedirs) {
+    if (test_case.lvm_supported) {
+      auto type = test_case.existing_container_type;
+      bool expect_dmcrypt_partition =
+          type == EncryptedContainerType::kDmcrypt ||
+          type == EncryptedContainerType::kEcryptfsToDmcrypt ||
+          type == EncryptedContainerType::kFscryptToDmcrypt;
+      ExpectLogicalVolumeStatefulPartition(platform, homedirs, user_.obfuscated,
+                                           expect_dmcrypt_partition);
+      homedirs->set_lvm_migration_enabled(true);
+    }
+
+    dircrypto::KeyState root_keystate =
+        test_case.fscrypt_supported ? dircrypto::KeyState::NO_KEY
+                                    : dircrypto::KeyState::NOT_SUPPORTED;
+    ON_CALL(*platform, GetDirCryptoKeyState(ShadowRoot()))
+        .WillByDefault(Return(root_keystate));
+
+    switch (test_case.existing_container_type) {
+      case EncryptedContainerType::kEcryptfs:
+        ASSERT_TRUE(platform->CreateDirectory(
+            GetEcryptfsUserVaultPath(user_.obfuscated)));
+        ASSERT_TRUE(
+            platform->CreateDirectory(GetUserMountDirectory(user_.obfuscated)));
+        break;
+      case EncryptedContainerType::kFscrypt:
+        ASSERT_TRUE(
+            platform->CreateDirectory(GetUserMountDirectory(user_.obfuscated)));
+        ON_CALL(*platform,
+                GetDirCryptoKeyState(GetUserMountDirectory(user_.obfuscated)))
+            .WillByDefault(Return(dircrypto::KeyState::ENCRYPTED));
+        break;
+      case EncryptedContainerType::kEcryptfsToFscrypt:
+        ASSERT_TRUE(platform->CreateDirectory(
+            GetEcryptfsUserVaultPath(user_.obfuscated)));
+        ASSERT_TRUE(
+            platform->CreateDirectory(GetUserMountDirectory(user_.obfuscated)));
+        ON_CALL(*platform,
+                GetDirCryptoKeyState(GetUserMountDirectory(user_.obfuscated)))
+            .WillByDefault(Return(dircrypto::KeyState::ENCRYPTED));
+        break;
+      case EncryptedContainerType::kEcryptfsToDmcrypt:
+        ASSERT_TRUE(platform->CreateDirectory(
+            GetEcryptfsUserVaultPath(user_.obfuscated)));
+        ASSERT_TRUE(
+            platform->CreateDirectory(GetUserMountDirectory(user_.obfuscated)));
+        break;
+      case EncryptedContainerType::kFscryptToDmcrypt:
+        ASSERT_TRUE(
+            platform->CreateDirectory(GetUserMountDirectory(user_.obfuscated)));
+        ON_CALL(*platform,
+                GetDirCryptoKeyState(GetUserMountDirectory(user_.obfuscated)))
+            .WillByDefault(Return(dircrypto::KeyState::ENCRYPTED));
+        break;
+      default:
+        // kDmcrypt is handled above.
+        // kEphemeral doesn't need special preparations.
+        break;
+    }
+  }
 };
 
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
-TEST_F(HomeDirsVaultTest, PristineVaultLvmStatefulSupport) {
-  ExpectLogicalVolumeStatefulPartition(user_.obfuscated,
-                                       /*existing_cryptohome=*/false);
+namespace {
+TEST_F(HomeDirsVaultTest, PickVaultType) {
+  const std::vector<HomeDirsVaultTest::HomedirsTestCase> test_cases = {
+      {
+          .name = "new_ecryptfs_allowed",
+          .lvm_supported = false,
+          .fscrypt_supported = false,
+          .existing_container_type = EncryptedContainerType::kUnknown,
+          .options = {},
+          .expected_type = EncryptedContainerType::kEcryptfs,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "new_ecryptfs_block_no_effect",
+          .lvm_supported = false,
+          .fscrypt_supported = false,
+          .existing_container_type = EncryptedContainerType::kUnknown,
+          .options = {.block_ecryptfs = true},
+          .expected_type = EncryptedContainerType::kEcryptfs,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "new_ecryptfs_cant_migrate",
+          .lvm_supported = false,
+          .fscrypt_supported = false,
+          .existing_container_type = EncryptedContainerType::kUnknown,
+          .options = {.migrate = true},
+          .expected_type = EncryptedContainerType::kUnknown,
+          .expected_error = MOUNT_ERROR_UNEXPECTED_MOUNT_TYPE,
+      },
+      {
+          .name = "new_ecryptfs_forced",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kUnknown,
+          .options = {.force_type = EncryptedContainerType::kEcryptfs},
+          .expected_type = EncryptedContainerType::kEcryptfs,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "new_fscrypt",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kUnknown,
+          .options = {},
+          .expected_type = EncryptedContainerType::kFscrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_ecryptfs_allowed",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kEcryptfs,
+          .options = {},
+          .expected_type = EncryptedContainerType::kEcryptfs,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_ecryptfs_not_allowed",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kEcryptfs,
+          .options = {.block_ecryptfs = true},
+          .expected_type = EncryptedContainerType::kUnknown,
+          .expected_error = MOUNT_ERROR_OLD_ENCRYPTION,
+      },
+      {
+          .name = "existing_ecryptfs_migrate_to_fscrypt",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kEcryptfs,
+          .options = {.migrate = true},
+          .expected_type = EncryptedContainerType::kEcryptfsToFscrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_fscrypt",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kFscrypt,
+          .options = {},
+          .expected_type = EncryptedContainerType::kFscrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_fscrypt_force_ignored",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kFscrypt,
+          .options = {.force_type = EncryptedContainerType::kEcryptfs},
+          .expected_type = EncryptedContainerType::kFscrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_migration",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kEcryptfsToFscrypt,
+          .options = {.migrate = true},
+          .expected_type = EncryptedContainerType::kEcryptfsToFscrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_migration_without_flag",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kEcryptfsToFscrypt,
+          .options = {},
+          .expected_type = EncryptedContainerType::kUnknown,
+          .expected_error = MOUNT_ERROR_PREVIOUS_MIGRATION_INCOMPLETE,
+      },
+      {
+          .name = "existing_fscrypt_migrate",
+          .lvm_supported = true,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kFscrypt,
+          .options = {.migrate = true},
+          .expected_type = EncryptedContainerType::kFscryptToDmcrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_ecryptfs_migrate_to_dmcrypt",
+          .lvm_supported = true,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kEcryptfs,
+          .options = {.migrate = true},
+          .expected_type = EncryptedContainerType::kEcryptfsToDmcrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "new_lvm",
+          .lvm_supported = true,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kUnknown,
+          .options = {},
+          .expected_type = EncryptedContainerType::kDmcrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_lvm",
+          .lvm_supported = true,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kDmcrypt,
+          .options = {},
+          .expected_type = EncryptedContainerType::kDmcrypt,
+          .expected_error = MOUNT_ERROR_NONE,
+      },
+      {
+          .name = "existing_in_process_migration_ecryptfs_to_fscrypt",
+          .lvm_supported = false,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kEcryptfsToFscrypt,
+          .options = {},
+          .expected_type = EncryptedContainerType::kEcryptfsToFscrypt,
+          .expected_error = MOUNT_ERROR_PREVIOUS_MIGRATION_INCOMPLETE,
+      },
+      {
+          .name = "existing_in_process_migration_ecryptfs_to_dmcrypt",
+          .lvm_supported = true,
+          .fscrypt_supported = false,
+          .existing_container_type = EncryptedContainerType::kEcryptfsToDmcrypt,
+          .options = {},
+          .expected_type = EncryptedContainerType::kEcryptfsToDmcrypt,
+          .expected_error = MOUNT_ERROR_PREVIOUS_MIGRATION_INCOMPLETE,
+      },
+      {
+          .name = "existing_in_process_migration_fscrypt_to_dmcrypt",
+          .lvm_supported = true,
+          .fscrypt_supported = true,
+          .existing_container_type = EncryptedContainerType::kFscryptToDmcrypt,
+          .options = {},
+          .expected_type = EncryptedContainerType::kFscryptToDmcrypt,
+          .expected_error = MOUNT_ERROR_PREVIOUS_MIGRATION_INCOMPLETE,
+      }};
 
-  CryptohomeVault::Options options;
-  MountError mount_error = MOUNT_ERROR_NONE;
+  for (const auto& test_case : test_cases) {
+    NiceMock<MockPlatform> platform;
+    std::unique_ptr<EncryptedContainerFactory> container_factory =
+        std::make_unique<EncryptedContainerFactory>(
+            &platform, std::make_unique<FakeKeyring>(),
+            std::make_unique<BackingDeviceFactory>(&platform));
 
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/true,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kDmcrypt);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kUnknown);
-  EXPECT_EQ(vault->GetCacheContainerType(), EncryptedContainerType::kDmcrypt);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
+    std::unique_ptr<CryptohomeVaultFactory> vault_factory =
+        std::make_unique<CryptohomeVaultFactory>(&platform,
+                                                 std::move(container_factory));
+
+    if (test_case.lvm_supported) {
+      std::shared_ptr<brillo::LvmCommandRunner> command_runner =
+          std::make_shared<brillo::MockLvmCommandRunner>();
+      brillo::VolumeGroup vg("STATEFUL", command_runner);
+      brillo::Thinpool thinpool("thinpool", "STATEFUL", command_runner);
+      vault_factory->CacheLogicalVolumeObjects(vg, thinpool);
+    }
+
+    HomeDirs homedirs(&platform,
+                      std::make_unique<policy::PolicyProvider>(
+                          std::make_unique<policy::MockDevicePolicy>()),
+                      HomeDirs::RemoveCallback(), vault_factory.get());
+
+    PrepareTestCase(test_case, &platform, &homedirs);
+    auto vault_type_or =
+        homedirs.PickVaultType(user_.obfuscated, test_case.options);
+
+    if (test_case.expected_error == MOUNT_ERROR_NONE) {
+      ASSERT_THAT(vault_type_or, IsOk()) << "TestCase: " << test_case.name;
+      EXPECT_THAT(vault_type_or.value(), Eq(test_case.expected_type))
+          << "TestCase: " << test_case.name;
+    } else {
+      ASSERT_THAT(vault_type_or, IsError(test_case.expected_error))
+          << "TestCase: " << test_case.name;
+    }
+  }
 }
-
-TEST_F(HomeDirsVaultTest, ExistingDmcryptContainer) {
-  ExpectLogicalVolumeStatefulPartition(user_.obfuscated,
-                                       /*existing_cryptohome=*/true);
-
-  CryptohomeVault::Options options;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/false,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kDmcrypt);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kUnknown);
-  EXPECT_EQ(vault->GetCacheContainerType(), EncryptedContainerType::kDmcrypt);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
-}
-#endif  // USE_LVM_STATEFUL_PARTITION
-
-// Tests cryptohome vault generation with fscrypt support.
-TEST_F(HomeDirsVaultTest, PristineVault) {
-  EXPECT_CALL(platform_, GetDirCryptoKeyState(_))
-      .WillOnce(Return(dircrypto::KeyState::NO_KEY));
-
-  CryptohomeVault::Options options;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/true,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kFscrypt);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kUnknown);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
-}
-
-// Tests cryptohome vault generation in absence of fscrypt support.
-TEST_F(HomeDirsVaultTest, PristineVaultNoFscrypt) {
-  EXPECT_CALL(platform_, GetDirCryptoKeyState(_))
-      .WillOnce(Return(dircrypto::KeyState::NOT_SUPPORTED));
-
-  CryptohomeVault::Options options;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/true,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kEcryptfs);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kUnknown);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
-}
-
-// Tests cryptohome vault generation with forced eCryptfs usage.
-TEST_F(HomeDirsVaultTest, PristineVaultForceEcryptfs) {
-  CryptohomeVault::Options options;
-  options.force_type = EncryptedContainerType::kEcryptfs;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/true,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kEcryptfs);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kUnknown);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
-}
-
-// Tests cryptohome vault generation for an existing eCryptfs container with
-// forced fscrypt usage.
-TEST_F(HomeDirsVaultTest, PristineForceFscrypt) {
-  CryptohomeVault::Options options;
-  options.force_type = EncryptedContainerType::kFscrypt;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/true,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kFscrypt);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kUnknown);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
-}
-
-// Tests cryptohome vault generation for an existing eCryptfs container with no
-// migration.
-TEST_F(HomeDirsVaultTest, ExistingEcryptfsContainerNoMigrate) {
-  ASSERT_TRUE(
-      platform_.CreateDirectory(user_.homedir_path.Append(kEcryptfsVaultDir)));
-
-  CryptohomeVault::Options options;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/false,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kEcryptfs);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kUnknown);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
-}
-
-// Tests cryptohome vault generation for an existing eCryptfs container with
-// migration.
-TEST_F(HomeDirsVaultTest, ExistingEcryptfsContainerMigrate) {
-  ASSERT_TRUE(
-      platform_.CreateDirectory(user_.homedir_path.Append(kEcryptfsVaultDir)));
-
-  CryptohomeVault::Options options;
-  options.migrate = true;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine*/ false,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kEcryptfs);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kFscrypt);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
-}
-
-// Tests cryptohome vault generation if there is an existing eCryptfs container
-// and a fscrypt container but migration is not enabled.
-TEST_F(HomeDirsVaultTest, ExistingEcryptfsContainerNoMigrateFscryptExists) {
-  ASSERT_TRUE(platform_.CreateDirectory(user_.homedir_path.Append(kMountDir)));
-  ASSERT_TRUE(
-      platform_.CreateDirectory(user_.homedir_path.Append(kEcryptfsVaultDir)));
-  EXPECT_CALL(platform_, GetDirCryptoKeyState(_))
-      .WillOnce(Return(dircrypto::KeyState::ENCRYPTED));
-
-  CryptohomeVault::Options options;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/false,
-      &mount_error);
-  EXPECT_EQ(vault, nullptr);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_PREVIOUS_MIGRATION_INCOMPLETE);
-}
-
-// Tests cryptohome vault generation if there is an existing eCryptfs container,
-// but migration is not enabled and dircrypto is forced.
-TEST_F(HomeDirsVaultTest, ExistingEcryptfsContainerNoMigrateForceFscrypt) {
-  ASSERT_TRUE(
-      platform_.CreateDirectory(user_.homedir_path.Append(kEcryptfsVaultDir)));
-
-  CryptohomeVault::Options options;
-  options.block_ecryptfs = true;
-  MountError mount_error = MOUNT_ERROR_NONE;
-
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/false,
-      &mount_error);
-  EXPECT_EQ(vault, nullptr);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_OLD_ENCRYPTION);
-}
-
-// Tests cryptohome vault generation if there is an existing fscrypt container.
-TEST_F(HomeDirsVaultTest, ExistingFscryptContainer) {
-  ASSERT_TRUE(platform_.CreateDirectory(user_.homedir_path.Append(kMountDir)));
-  EXPECT_CALL(platform_, GetDirCryptoKeyState(_))
-      .WillRepeatedly(Return(dircrypto::KeyState::ENCRYPTED));
-
-  CryptohomeVault::Options options;
-  MountError mount_error = MOUNT_ERROR_NONE;
-  auto vault = homedirs_->GenerateCryptohomeVault(
-      user_.obfuscated, key_reference_, options, /*is_pristine=*/false,
-      &mount_error);
-  EXPECT_EQ(vault->GetContainerType(), EncryptedContainerType::kFscrypt);
-  EXPECT_EQ(vault->GetMigratingContainerType(),
-            EncryptedContainerType::kUnknown);
-  EXPECT_EQ(mount_error, MOUNT_ERROR_NONE);
-}
+}  // namespace
 
 }  // namespace cryptohome

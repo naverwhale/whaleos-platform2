@@ -1,15 +1,16 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef PATCHPANEL_SCOPED_NS_H_
 #define PATCHPANEL_SCOPED_NS_H_
 
+#include <sys/types.h>
+
 #include <memory>
 #include <string>
 
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 
 namespace patchpanel {
 

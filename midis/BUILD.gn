@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -6,7 +6,16 @@ import("//common-mk/mojom_bindings_generator.gni")
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":midis" ]
+  deps = [
+    ":install_dbus_config",
+    ":install_dbus_service",
+    ":install_init",
+    ":install_minijail_conf",
+    ":midis",
+  ]
+  if (use.seccomp) {
+    deps += [ ":install_seccomp_policy" ]
+  }
   if (use.test) {
     deps += [ ":midis_testrunner" ]
   }
@@ -51,8 +60,40 @@ executable("midis") {
     "daemon.cc",
     "main.cc",
   ]
+  install_path = "bin"
   libs = [ "dl" ]
   deps = [ ":midis_common" ]
+}
+
+install_config("install_init") {
+  sources = [ "init/midis.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "minijail/midis.conf" ]
+  install_path = "minijail_conf"
+}
+
+# Install midis DBUS configuration file
+install_config("install_dbus_config") {
+  sources = [ "dbus_permissions/org.chromium.Midis.conf" ]
+  install_path = "dbus_system_d"
+}
+
+# Install D-Bus service activation configuration.
+install_config("install_dbus_service") {
+  sources = [ "dbus_permissions/org.chromium.Midis.service" ]
+  install_path = "dbus_system_services"
+}
+
+if (use.seccomp) {
+  # Install seccomp policy file.
+  install_config("install_seccomp_policy") {
+    sources = [ "seccomp/midis-seccomp-" + getenv("ARCH") + ".policy" ]
+    install_path = "seccomp_policy"
+    outputs = [ "midis-seccomp.policy" ]
+  }
 }
 
 if (use.test) {
@@ -65,9 +106,10 @@ if (use.test) {
       "tests/test_helper.cc",
     ]
     configs += [ "//common-mk:test" ]
+    run_test = true
     deps = [
       ":midis_common",
-      "../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 }

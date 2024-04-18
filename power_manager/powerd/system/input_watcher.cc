@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,31 +7,28 @@
 #include <linux/input.h>
 #include <unistd.h>
 
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 #include "power_manager/common/power_constants.h"
 #include "power_manager/common/prefs.h"
-#include "power_manager/common/util.h"
-#include "power_manager/powerd/system/acpi_wakeup_helper.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/powerd/system/event_device_interface.h"
 #include "power_manager/powerd/system/input_observer.h"
 #include "power_manager/powerd/system/udev.h"
-#include "power_manager/powerd/system/wakeup_device.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -124,13 +121,11 @@ bool GetSleepButtonStateFromEvent(const input_event& event,
 
 const char InputWatcher::kPowerButtonToSkip[] = "LNXPWRBN";
 const char InputWatcher::kPowerButtonToSkipForLegacy[] = "isa";
-const char InputWatcher::kAcpiLidDevice[] = "PNP0C0D";
 
 InputWatcher::InputWatcher()
     : dev_input_path_(kDevInputPath),
       sys_class_input_path_(kSysClassInputPath),
       power_button_to_skip_(kPowerButtonToSkip),
-      acpi_lid_device_(kAcpiLidDevice),
       weak_ptr_factory_(this) {}
 
 InputWatcher::~InputWatcher() {
@@ -155,6 +150,9 @@ bool InputWatcher::Init(
     power_button_to_skip_ = kPowerButtonToSkipForLegacy;
 
   prefs->GetBool(kDetectHoverPref, &detect_hover_);
+
+  prefs->GetString(power_manager::kPreferredLidDevicePref,
+                   &preferred_lid_device_);
 
   udev_->AddSubsystemObserver(kInputUdevSubsystem, this);
 
@@ -192,8 +190,13 @@ LidState InputWatcher::QueryLidState() {
   while (true) {
     // Stop when we fail to read any more events.
     std::vector<input_event> events;
-    if (!lid_device_->ReadEvents(&events))
+    auto ret = lid_device_->ReadEvents(&events);
+    if (ret == EventDeviceInterface::ReadResult::kFailure) {
       break;
+    } else if (ret == EventDeviceInterface::ReadResult::kNoDevice) {
+      HandleRemovedInput(GetDeviceInputNumber(lid_device_));
+      return LidState::NOT_PRESENT;
+    }
 
     // Get the state from the last lid event (|events| may also contain non-lid
     // events).
@@ -205,15 +208,15 @@ LidState InputWatcher::QueryLidState() {
 
     queued_events_.reserve(queued_events_.size() + events.size());
     for (auto event : events)
-      queued_events_.push_back(std::make_pair(event, device_types));
+      queued_events_.emplace_back(event, device_types);
     VLOG(1) << "Queued " << events.size()
             << " event(s) while querying lid state";
   }
 
   if (!queued_events_.empty()) {
-    send_queued_events_task_.Reset(
-        base::Bind(&InputWatcher::SendQueuedEvents, base::Unretained(this)));
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    send_queued_events_task_.Reset(base::BindOnce(
+        &InputWatcher::SendQueuedEvents, base::Unretained(this)));
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, send_queued_events_task_.callback());
   }
 
@@ -285,27 +288,45 @@ uint32_t InputWatcher::GetDeviceTypes(
   return device_types;
 }
 
-void InputWatcher::OnNewEvents(EventDeviceInterface* device) {
+int InputWatcher::GetDeviceInputNumber(
+    const EventDeviceInterface* device) const {
+  for (const auto& entry : event_devices_) {
+    if (entry.second.get() == device)
+      return entry.first;
+  }
+  return -1;
+}
+
+void InputWatcher::OnNewEvents(int input_num, EventDeviceInterface* device) {
   SendQueuedEvents();
 
   std::vector<input_event> events;
-  if (!device->ReadEvents(&events))
-    return;
+  switch (device->ReadEvents(&events)) {
+    case EventDeviceInterface::ReadResult::kFailure:
+      return;
+    case EventDeviceInterface::ReadResult::kNoDevice:
+      HandleRemovedInput(input_num);
+      return;
+    case EventDeviceInterface::ReadResult::kSuccess:
+      break;
+  }
 
   VLOG(1) << "Read " << events.size() << " event(s) from "
           << device->GetDebugName();
   const uint32_t device_types = GetDeviceTypes(device);
-  for (size_t i = 0; i < events.size(); ++i) {
+  for (const input_event& event : events) {
     // Update |lid_state_| here instead of in ProcessEvent() so we can avoid
     // modifying it in response to queued events.
     if (device_types & DEVICE_LID_SWITCH)
-      GetLidStateFromEvent(events[i], &lid_state_);
-    ProcessEvent(events[i], device_types);
+      GetLidStateFromEvent(event, &lid_state_);
+    ProcessEvent(event, device_types);
   }
 }
 
 void InputWatcher::ProcessEvent(const input_event& event,
                                 uint32_t device_types) {
+  TRACE_EVENT("power", "InputWatcher::ProcessEvent", "type", event.type, "code",
+              event.code, "value", event.value, "device_types", device_types);
   LidState lid_state = LidState::OPEN;
   if ((device_types & DEVICE_LID_SWITCH) &&
       GetLidStateFromEvent(event, &lid_state)) {
@@ -439,7 +460,9 @@ void InputWatcher::HandleAddedInput(const std::string& input_name,
   // Note that it's possible for a power button and lid switch to share a single
   // event device.
   if (use_lid_ && device->IsLidSwitch()) {
-    if (lid_device_) {
+    if (lid_device_ && (preferred_lid_device_.empty() ||
+                        lid_device_->GetName() == preferred_lid_device_ ||
+                        device->GetName() != preferred_lid_device_)) {
       LOG(WARNING) << "Skipping additional lid switch device "
                    << device->GetDebugName();
     } else {
@@ -490,9 +513,9 @@ void InputWatcher::HandleAddedInput(const std::string& input_name,
   }
 
   if (should_watch) {
-    device->WatchForEvents(base::Bind(&InputWatcher::OnNewEvents,
-                                      weak_ptr_factory_.GetWeakPtr(),
-                                      base::Unretained(device.get())));
+    device->WatchForEvents(base::BindRepeating(
+        &InputWatcher::OnNewEvents, weak_ptr_factory_.GetWeakPtr(), input_num,
+        base::Unretained(device.get())));
     event_devices_.insert(std::make_pair(input_num, device));
   } else {
     VLOG(1) << "Event device with phys path " << device->GetDebugName()
@@ -518,10 +541,10 @@ void InputWatcher::HandleRemovedInput(int input_num) {
 }
 
 void InputWatcher::SendQueuedEvents() {
+  TRACE_EVENT("power", "InputWatcher::SendQueuedEvents");
   for (auto event_pair : queued_events_)
     ProcessEvent(event_pair.first, event_pair.second);
   queued_events_.clear();
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

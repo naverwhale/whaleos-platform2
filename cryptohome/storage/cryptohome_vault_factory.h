@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,6 +16,7 @@
 #include "cryptohome/storage/encrypted_container/encrypted_container.h"
 #include "cryptohome/storage/encrypted_container/encrypted_container_factory.h"
 #include "cryptohome/storage/encrypted_container/filesystem_key.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
@@ -24,25 +25,44 @@ class CryptohomeVaultFactory {
   CryptohomeVaultFactory(
       Platform* platform,
       std::unique_ptr<EncryptedContainerFactory> encrypted_container_factory);
-  explicit CryptohomeVaultFactory(Platform* platform);
 
   virtual ~CryptohomeVaultFactory();
 
   virtual std::unique_ptr<CryptohomeVault> Generate(
-      const std::string& obfuscated_username,
+      const ObfuscatedUsername& obfuscated_username,
       const FileSystemKeyReference& key_reference,
-      EncryptedContainerType container_type,
-      EncryptedContainerType migrating_container_type);
+      EncryptedContainerType vault_type,
+      bool keylocker_enabled = false);
+
+  void set_enable_application_containers(bool value) {
+    enable_application_containers_ = value;
+  }
+
+  // Cache objects for volume group and thinpool.
+  void CacheLogicalVolumeObjects(std::optional<brillo::VolumeGroup> vg,
+                                 std::optional<brillo::Thinpool> thinpool);
+
+  bool ContainerExists(const std::string& container);
 
  private:
+  struct DmOptions {
+    bool keylocker_enabled = false;
+    bool is_raw_device = false;
+    uint32_t iv_offset = 0;
+  };
+
   virtual std::unique_ptr<EncryptedContainer> GenerateEncryptedContainer(
       EncryptedContainerType type,
-      const std::string& obfuscated_username,
+      const ObfuscatedUsername& obfuscated_username,
       const FileSystemKeyReference& key_reference,
-      const std::string& container_identifier);
+      const std::string& container_identifier,
+      const DmOptions& dm_options);
 
   Platform* platform_;
   std::unique_ptr<EncryptedContainerFactory> encrypted_container_factory_;
+  bool enable_application_containers_;
+  std::shared_ptr<brillo::VolumeGroup> vg_;
+  std::shared_ptr<brillo::Thinpool> thinpool_;
 };
 
 }  // namespace cryptohome

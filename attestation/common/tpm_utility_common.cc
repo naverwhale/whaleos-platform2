@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,8 @@
 #include <base/containers/contains.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/task/bind_post_task.h>
+#include <base/task/sequenced_task_runner.h>
 #include <tpm_manager-client/tpm_manager/dbus-constants.h>
 
 namespace attestation {
@@ -24,18 +26,37 @@ TpmUtilityCommon::TpmUtilityCommon(
 TpmUtilityCommon::~TpmUtilityCommon() {}
 
 bool TpmUtilityCommon::Initialize() {
-  BuildValidPCR0Values();
   if (!tpm_manager_utility_) {
     LOG(INFO) << __func__ << "Reinitialize tpm_manager utility";
     tpm_manager_utility_ = tpm_manager::TpmManagerUtility::GetSingleton();
   }
-  tpm_manager_utility_->AddOwnershipCallback(base::Bind(
-      &TpmUtilityCommon::OnOwnershipTakenSignal, base::Unretained(this)));
+  tpm_manager_utility_->AddOwnershipCallback(base::BindPostTask(
+      base::SequencedTaskRunner::GetCurrentDefault(),
+      base::BindRepeating(&TpmUtilityCommon::OnOwnershipTakenSignal,
+                          base::Unretained(this))));
   return tpm_manager_utility_;
 }
 
-void TpmUtilityCommon::UpdateTpmLocalData(
-    const tpm_manager::LocalData& local_data) {
+void TpmUtilityCommon::UpdateTpmStatus() {
+  tpm_manager::LocalData local_data;
+  bool is_enabled{false};
+  bool is_owned{false};
+
+  if (!tpm_manager_utility_) {
+    tpm_manager_utility_ = tpm_manager::TpmManagerUtility::GetSingleton();
+    if (!tpm_manager_utility_) {
+      LOG(ERROR) << __func__ << ": Failed to get tpm_manager utility.";
+      return;
+    }
+  }
+
+  if (!tpm_manager_utility_->GetTpmStatus(&is_enabled, &is_owned,
+                                          &local_data)) {
+    LOG(ERROR) << __func__ << ": Failed to get tpm status from tpm_manager.";
+    return;
+  }
+
+  is_ready_ = is_enabled && is_owned;
   endorsement_password_ = local_data.endorsement_password();
   owner_password_ = local_data.owner_password();
   delegate_blob_ = local_data.owner_delegate().blob();
@@ -46,19 +67,7 @@ void TpmUtilityCommon::OnOwnershipTakenSignal() {
   if (is_ready_) {
     return;
   }
-  CHECK(tpm_manager_utility_);
-  tpm_manager::LocalData local_data;
-  if (!tpm_manager_utility_->GetOwnershipTakenSignalStatus(nullptr, nullptr,
-                                                           &local_data)) {
-    LOG(ERROR) << __func__ << ": Failed to get local data.";
-    return;
-  }
-  base::AutoLock lock(tpm_state_lock_);
-  if (is_ready_) {
-    return;
-  }
-  is_ready_ = true;
-  UpdateTpmLocalData(local_data);
+  UpdateTpmStatus();
 }
 
 bool TpmUtilityCommon::IsTpmReady() {
@@ -70,61 +79,10 @@ bool TpmUtilityCommon::IsTpmReady() {
   if (is_ready_) {
     return true;
   }
-  tpm_manager::LocalData local_data;
-  bool is_enabled{false};
-  bool is_owned{false};
-  if (!tpm_manager_utility_) {
-    tpm_manager_utility_ = tpm_manager::TpmManagerUtility::GetSingleton();
-    if (!tpm_manager_utility_) {
-      LOG(ERROR) << __func__ << ": Failed to get tpm_manager utility.";
-      return false;
-    }
-  }
-  if (!tpm_manager_utility_->GetTpmStatus(&is_enabled, &is_owned,
-                                          &local_data)) {
-    LOG(ERROR) << __func__ << ": Failed to get tpm status from tpm_manager.";
-    return false;
-  }
-  base::AutoLock lock(tpm_state_lock_);
-  if (is_ready_) {
-    return true;
-  }
-  is_ready_ = is_enabled && is_owned;
-  UpdateTpmLocalData(local_data);
-  return true;
-}
 
-void TpmUtilityCommon::BuildValidPCR0Values() {
-  // 3-byte boot mode:
-  //  - byte 0: 1 if in developer mode, 0 otherwise,
-  //  - byte 1: 1 if in recovery mode, 0 otherwise,
-  //  - byte 2: 1 if verified firmware, 0 if developer firmware.
-  constexpr char kKnownBootModes[][3] = {{0, 0, 0}, {0, 0, 1}, {0, 1, 0},
-                                         {0, 1, 1}, {1, 0, 0}, {1, 0, 1},
-                                         {1, 1, 0}, {1, 1, 1}};
+  UpdateTpmStatus();
 
-  for (size_t i = 0; i < base::size(kKnownBootModes); i++) {
-    const std::string mode(std::begin(kKnownBootModes[i]),
-                           std::end(kKnownBootModes[i]));
-
-    valid_pcr0_values_.insert(GetPCRValueForMode(mode));
-  }
-}
-
-bool TpmUtilityCommon::IsPCR0Valid() {
-  std::string pcr0_value;
-  if (!ReadPCR(0, &pcr0_value)) {
-    LOG(ERROR) << __func__ << "Failed to read PCR0";
-    return false;
-  }
-
-  if (!base::Contains(valid_pcr0_values_, pcr0_value)) {
-    LOG(ERROR) << "Encountered invalid PCR0 value: "
-               << base::HexEncode(pcr0_value.data(), pcr0_value.size());
-    return false;
-  }
-
-  return true;
+  return is_ready_;
 }
 
 bool TpmUtilityCommon::GetEndorsementPassword(std::string* password) {

@@ -29,13 +29,30 @@ UMA. In order to use the library in a module, you need to do the following:
   and installed into the sysroot libdir (e.g. `$SYSROOT/usr/lib/`). By default
   `-lmetrics` links against `libmetrics.so`, which is preferred.
 
+- Make sure `/var/lib/metrics` is writable by the daemon. For example, if you
+  are using libmetrics in a daemon, you can achieve this by adding
+  `-b /var/lib/metrics,,1` to the `minijail0` command that starts the daemon.
+
 - To access the metrics library API in the module, include the
   `<metrics/metrics_library.h>` header file. The file is installed in
   `$SYSROOT/usr/include/` when the metrics library is built and installed.
 
 - The API is documented in [metrics_library.h](./metrics_library.h).  Before
-  using the API methods, a MetricsLibrary object needs to be constructed and
-  initialized through its Init method.
+  using the API methods, a MetricsLibrary object needs to be constructed. A
+  quick example:
+
+  ```c++
+  MetricsLibrary metrics;
+  bool result = metrics.SendToUMA(
+                 /*name=*/"Platform.MyModule.MyLabel",
+                 /*sample=*/3,
+                 /*min=*/1,
+                 /*max=*/10,
+                 /*num_buckets=*/10);
+  if (!result) {
+    LOG(ERROR) << "Failed to send to UMA";
+  }
+  ```
 
   For more information on the C API, see
   [c_metrics_library.h](./c_metrics_library.h).
@@ -117,8 +134,8 @@ boot sessions, so that the quantities can be accumulated over stretches of time
 version changes, and then reported as samples.  For this purpose, some
 persistent state (i.e. partial accumulations) is maintained as files on the
 device.  These "backing files" are typically placed in
-/var/lib/<daemon-name>/metrics.  (The metrics daemon is an exception, with its
-backing files being in /var/lib/metrics.)
+`/var/lib/<daemon-name>/metrics`.  (The metrics daemon is an exception, with its
+backing files being in `/var/lib/metrics`.)
 
 ## Memory Daemon
 

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,13 +10,13 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
-#include <base/guid.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
+#include <base/uuid.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
@@ -106,6 +106,11 @@ void Service::SendIdReleased(const std::string& id) {
       &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, base::DoNothing());
 }
 
+// static
+bool Service::IsValidVirtualFileId(const std::string& id) {
+  return base::Uuid::ParseCaseInsensitive(id).is_valid();
+}
+
 void Service::GenerateVirtualFileId(
     dbus::MethodCall* method_call,
     dbus::ExportedObject::ResponseSender response_sender) {
@@ -120,7 +125,7 @@ void Service::GenerateVirtualFileId(
     return;
   }
   // Generate a new ID.
-  std::string id = base::GenerateGUID();
+  std::string id = base::Uuid::GenerateRandomV4().AsLowercaseString();
 
   // Set the size of the ID.
   // NOTE: Currently, updating the size value is not supported. If the virtual
@@ -144,10 +149,12 @@ void Service::OpenFileById(
 
   dbus::MessageReader reader(method_call);
   std::string id;
-  if (!reader.PopString(&id)) {
+  if (!reader.PopString(&id) || !IsValidVirtualFileId(id)) {
+    LOG(ERROR) << "No valid ID was provided. id = " << id;
     std::move(response_sender)
-        .Run(dbus::ErrorResponse::FromMethodCall(
-            method_call, DBUS_ERROR_INVALID_ARGS, "Id must be provided."));
+        .Run(dbus::ErrorResponse::FromMethodCall(method_call,
+                                                 DBUS_ERROR_INVALID_ARGS,
+                                                 "Valid ID must be provided."));
     return;
   }
 

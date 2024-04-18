@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,20 +8,15 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/dbus/async_event_sequencer.h>
 #include <brillo/dbus/dbus_object.h>
 #include <brillo/secure_blob.h>
 #include <dbus/bus.h>
 #include <chaps/proto_bindings/ck_structs.pb.h>
 
-namespace base {
-class Lock;
-}  // namespace base
-
 namespace chaps {
 
-const char kPersistentLogLevelPath[] = "/var/lib/chaps/.loglevel";
+inline constexpr char kPersistentLogLevelPath[] = "/var/lib/chaps/.loglevel";
 
 class ChapsInterface;
 class TokenManagerInterface;
@@ -31,7 +26,6 @@ class TokenManagerInterface;
 class ChapsAdaptor {
  public:
   ChapsAdaptor(scoped_refptr<dbus::Bus> bus,
-               base::Lock* lock,
                ChapsInterface* service,
                TokenManagerInterface* token_manager);
   ChapsAdaptor(const ChapsAdaptor&) = delete;
@@ -40,7 +34,7 @@ class ChapsAdaptor {
   virtual ~ChapsAdaptor();
 
   void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb);
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb);
 
   // Chaps D-Bus interface methods.
   void OpenIsolate(const brillo::SecureVector& isolate_credential_in,
@@ -55,10 +49,8 @@ class ChapsAdaptor {
                  uint64_t* slot_id,
                  bool* result);
   void UnloadToken(const brillo::SecureVector& isolate_credential,
-                   const std::string& path);
-  void ChangeTokenAuthData(const std::string& path,
-                           const brillo::SecureVector& old_auth_data,
-                           const brillo::SecureVector& new_auth_data);
+                   const std::string& path,
+                   bool* result);
   void GetTokenPath(const brillo::SecureVector& isolate_credential,
                     uint64_t slot_id,
                     std::string* path,
@@ -392,7 +384,6 @@ class ChapsAdaptor {
  private:
   brillo::dbus_utils::DBusObject dbus_object_;
 
-  base::Lock* lock_;
   ChapsInterface* service_;
   TokenManagerInterface* token_manager_;
 };

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,39 +8,45 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/contains.h>
+#include <base/json/json_reader.h>
 #include <base/logging.h>
 #include <base/notreached.h>
+#include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
 #include <brillo/variant_dictionary.h>
 #include <chromeos/dbus/service_constants.h>
+#include <chromeos/dbus/shill/dbus-constants.h>
 #include <chromeos/patchpanel/dbus/client.h>
+#include <metrics/bootstat.h>
+#include <metrics/timer.h>
 
-#include "shill/connection.h"
+#include "shill/cellular/power_opt.h"
 #include "shill/dbus/dbus_control.h"
-#include "shill/dhcp/dhcp_properties.h"
+#include "shill/eap_credentials.h"
 #include "shill/error.h"
+#include "shill/event_history.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
 #include "shill/metrics.h"
-#include "shill/net/event_history.h"
+#include "shill/network/network.h"
 #include "shill/profile.h"
-#include "shill/property_accessor.h"
 #include "shill/refptr_types.h"
-#include "shill/store_interface.h"
-
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
-#include "shill/eap_credentials.h"
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
+#include "shill/store/pkcs11_slot_getter.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/store_interface.h"
 
 namespace shill {
 
@@ -61,11 +67,23 @@ const char kServiceSortProfileOrder[] = "ProfileOrder";
 const char kServiceSortEtc[] = "Etc";
 const char kServiceSortSerialNumber[] = "SerialNumber";
 const char kServiceSortTechnology[] = "Technology";
+const char kServiceSortTechnologySpecific[] = "TechnologySpecific";
+
+// This is property is only supposed to be used in tast tests to order Ethernet
+// services. Can be removed once we support multiple Ethernet profiles properly
+// (b/159725895).
+constexpr char kEphemeralPriorityProperty[] = "EphemeralPriority";
+
+// JSON keys and values for Service property ProxyConfig. Must be kept
+// consistent with chromium/src/components/proxy_config/proxy_prefs.cc and
+// shill/doc/service_api.txt.
+constexpr char kServiceProxyConfigMode[] = "mode";
+constexpr char kServiceProxyConfigModeDirect[] = "direct";
 
 std::valarray<uint64_t> CounterToValArray(
-    const patchpanel::TrafficCounter& counter) {
-  return std::valarray<uint64_t>{counter.rx_bytes(), counter.tx_bytes(),
-                                 counter.rx_packets(), counter.tx_packets()};
+    const patchpanel::Client::TrafficCounter& counter) {
+  return std::valarray<uint64_t>{counter.rx_bytes, counter.tx_bytes,
+                                 counter.rx_packets, counter.tx_packets};
 }
 
 // Extracts enum value but with enum's underlying type.
@@ -80,6 +98,20 @@ static constexpr std::array<const char*,
                             toUnderlying(Service::ONCSource::kONCSourcesNum)>
     ONCSourceMapping = {kONCSourceUnknown, kONCSourceNone, kONCSourceUserImport,
                         kONCSourceDevicePolicy, kONCSourceUserPolicy};
+
+// Get JSON value from |json| dictionary keyed by |key|.
+std::optional<std::string> GetJSONDictValue(std::string_view json,
+                                            std::string_view key) {
+  auto dict = base::JSONReader::ReadDict(json);
+  if (!dict) {
+    return std::nullopt;
+  }
+  auto val = dict->FindString(key);
+  if (!val) {
+    return std::nullopt;
+  }
+  return *val;
+}
 
 }  // namespace
 
@@ -102,16 +134,14 @@ const char Service::kAutoConnTechnologyNotAutoConnectable[] =
 const char Service::kAutoConnThrottled[] = "throttled";
 const char Service::kAutoConnMediumUnavailable[] =
     "connection medium unavailable";
+const char Service::kAutoConnRecentBadPassphraseFailure[] =
+    "recent bad passphrase failure";
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 const size_t Service::kEAPMaxCertificationElements = 10;
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 const char Service::kCheckPortalAuto[] = "auto";
 const char Service::kCheckPortalFalse[] = "false";
 const char Service::kCheckPortalTrue[] = "true";
-
-const char Service::kErrorDetailsNone[] = "";
 
 const int Service::kPriorityNone = 0;
 
@@ -143,15 +173,21 @@ const char* const Service::kStorageTrafficCounterSuffixes[] = {
     kStorageTrafficCounterTxPacketsSuffix};
 const char Service::kStorageTrafficCounterResetTime[] =
     "TrafficCounterResetTime";
+const char Service::kStorageLastManualConnectAttempt[] =
+    "LastManualConnectAttempt";
+const char Service::kStorageLastConnected[] = "LastConnected";
+const char Service::kStorageLastOnline[] = "LastOnline";
 
 const size_t Service::kTrafficCounterArraySize = 4;
 
 const uint8_t Service::kStrengthMax = 100;
 const uint8_t Service::kStrengthMin = 0;
 
-const uint64_t Service::kMinAutoConnectCooldownTimeMilliseconds = 1000;
+const base::TimeDelta Service::kMinAutoConnectCooldownTime = base::Seconds(1);
+const base::TimeDelta Service::kMaxAutoConnectCooldownTime = base::Minutes(1);
 const uint64_t Service::kAutoConnectCooldownBackoffFactor = 2;
 
+// TODO(b/184036481): convert all of these to base::TimeDelta
 const int Service::kDisconnectsMonitorSeconds = 5 * 60;
 const int Service::kMisconnectsMonitorSeconds = 5 * 60;
 const int Service::kMaxDisconnectEventHistory = 20;
@@ -175,6 +211,7 @@ Service::Service(Manager* manager, Technology technology)
       previous_error_serial_number_(0),
       explicitly_disconnected_(false),
       is_in_user_connect_(false),
+      is_in_auto_connect_(false),
       priority_(kPriorityNone),
       crypto_algorithm_(kCryptoNone),
       key_rotation_(false),
@@ -182,21 +219,20 @@ Service::Service(Manager* manager, Technology technology)
       portal_detection_failure_status_code_(0),
       strength_(0),
       save_credentials_(true),
-      dhcp_properties_(new DhcpProperties(/*manager=*/nullptr)),
       technology_(technology),
       has_ever_connected_(false),
       disconnects_(kMaxDisconnectEventHistory),
       misconnects_(kMaxMisconnectEventHistory),
-      auto_connect_cooldown_milliseconds_(0),
-      store_(PropertyStore::PropertyChangeCallback(base::Bind(
-          &Service::OnPropertyChanged, weak_ptr_factory_.GetWeakPtr()))),
+      store_(base::BindRepeating(&Service::OnPropertyChanged,
+                                 weak_ptr_factory_.GetWeakPtr())),
       serial_number_(next_serial_number_++),
       adaptor_(manager->control_interface()->CreateServiceAdaptor(this)),
       manager_(manager),
       link_monitor_disabled_(false),
       managed_credentials_(false),
       unreliable_(false),
-      source_(ONCSource::kONCSourceUnknown) {
+      source_(ONCSource::kONCSourceUnknown),
+      time_resume_to_ready_timer_(new chromeos_metrics::Timer) {
   // Provide a default name.
   friendly_name_ = "service_" + base::NumberToString(serial_number_);
   log_name_ = friendly_name_;
@@ -223,10 +259,8 @@ Service::Service(Manager* manager, Technology technology)
   store_.RegisterConstBool(kConnectableProperty, &connectable_);
   HelpRegisterConstDerivedRpcIdentifier(kDeviceProperty,
                                         &Service::GetDeviceRpcId);
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   store_.RegisterConstStrings(kEapRemoteCertificationProperty,
                               &remote_certification_);
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
   HelpRegisterDerivedString(kGuidProperty, &Service::GetGuid,
                             &Service::SetGuid);
 
@@ -252,12 +286,12 @@ Service::Service(Manager* manager, Technology technology)
                             &previous_error_serial_number_);
   HelpRegisterDerivedInt32(kPriorityProperty, &Service::GetPriority,
                            &Service::SetPriority);
+  store_.RegisterInt32(kEphemeralPriorityProperty, &ephemeral_priority_);
   HelpRegisterDerivedString(kProfileProperty, &Service::GetProfileRpcId,
                             &Service::SetProfileRpcId);
   HelpRegisterDerivedString(kProxyConfigProperty, &Service::GetProxyConfig,
                             &Service::SetProxyConfig);
   store_.RegisterBool(kSaveCredentialsProperty, &save_credentials_);
-  HelpRegisterConstDerivedString(kTetheringProperty, &Service::GetTethering);
   HelpRegisterDerivedString(kTypeProperty, &Service::CalculateTechnology,
                             nullptr);
   // kSecurityProperty: Registered in WiFiService
@@ -290,21 +324,33 @@ Service::Service(Manager* manager, Technology technology)
   HelpRegisterConstDerivedUint64(kTrafficCounterResetTimeProperty,
                                  &Service::GetTrafficCounterResetTimeProperty);
 
-  metrics()->RegisterService(*this);
+  HelpRegisterConstDerivedUint64(kLastManualConnectAttemptProperty,
+                                 &Service::GetLastManualConnectAttemptProperty);
+  HelpRegisterConstDerivedUint64(kLastConnectedProperty,
+                                 &Service::GetLastConnectedProperty);
+  HelpRegisterConstDerivedUint64(kLastOnlineProperty,
+                                 &Service::GetLastOnlineProperty);
+
+  store_.RegisterConstUint32(kUplinkSpeedPropertyKbps, &uplink_speed_kbps_);
+  store_.RegisterConstUint32(kDownlinkSpeedPropertyKbps, &downlink_speed_kbps_);
+
+  service_metrics_ = std::make_unique<ServiceMetrics>();
+  InitializeServiceStateTransitionMetrics();
 
   static_ip_parameters_.PlumbPropertyStore(&store_);
+  store_.RegisterDerivedKeyValueStore(
+      kSavedIPConfigProperty,
+      KeyValueStoreAccessor(new CustomAccessor<Service, KeyValueStore>(
+          this, &Service::GetSavedIPConfig, nullptr)));
 
   IgnoreParameterForConfigure(kTypeProperty);
   IgnoreParameterForConfigure(kProfileProperty);
-
-  dhcp_properties_->InitPropertyStore(&store_);
 
   SLOG(this, 1) << technology << " Service " << serial_number_
                 << " constructed.";
 }
 
 Service::~Service() {
-  metrics()->DeregisterService(*this);
   SLOG(this, 1) << technology() << " Service " << serial_number_
                 << " destroyed.";
 }
@@ -314,15 +360,15 @@ void Service::AutoConnect() {
   if (!IsAutoConnectable(&reason)) {
     if (reason == kAutoConnTechnologyNotAutoConnectable ||
         reason == kAutoConnConnected) {
-      SLOG(this, 3) << "Suppressed autoconnect to " << log_name()
+      SLOG(this, 2) << "Suppressed autoconnect to " << log_name()
                     << " Reason: " << reason;
     } else if (reason == kAutoConnBusy ||
                reason == kAutoConnMediumUnavailable) {
       SLOG(this, 1) << "Suppressed autoconnect to " << log_name()
                     << " Reason: " << reason;
     } else {
-      LOG(INFO) << "Suppressed autoconnect to " << log_name()
-                << " Reason: " << reason;
+      SLOG(2) << "Suppressed autoconnect to " << log_name()
+              << " Reason: " << reason;
     }
     return;
   }
@@ -330,17 +376,39 @@ void Service::AutoConnect() {
   Error error;
   LOG(INFO) << "Auto-connecting to " << log_name();
   ThrottleFutureAutoConnects();
+  is_in_auto_connect_ = true;
   Connect(&error, __func__);
+  // If Service::Connect returns with error, roll-back the flag that marks
+  // auto-connection is ongoing so that next sessions are not affected.
+  if (error.IsFailure() || IsInFailState()) {
+    is_in_auto_connect_ = false;
+  }
 }
 
 void Service::Connect(Error* error, const char* reason) {
   CHECK(reason);
+  // If there is no record of a manual connect, record the first time a
+  // connection is attempted so there is way to track how long it's been since
+  // the first connection attempt.
+  if (last_manual_connect_attempt_.ToDeltaSinceWindowsEpoch().is_zero())
+    SetLastManualConnectAttemptProperty(base::Time::Now());
+
+  // The device has never been online. If the time since last manual connect
+  // attempt exceeds threshold, disable modem.
+  if (last_online_.ToDeltaSinceWindowsEpoch().is_zero()) {
+    manager_->power_opt()->UpdateDurationSinceLastOnline(
+        last_manual_connect_attempt_, is_in_user_connect());
+  } else {
+    manager_->power_opt()->UpdateDurationSinceLastOnline(last_online_,
+                                                         is_in_user_connect());
+  }
+
   if (!connectable()) {
     Error::PopulateAndLog(
         FROM_HERE, error, Error::kOperationFailed,
         base::StringPrintf(
             "Connect attempted but %s Service %s is not connectable: %s",
-            technology().GetName().c_str(), log_name().c_str(), reason));
+            GetTechnologyName().c_str(), log_name().c_str(), reason));
     return;
   }
 
@@ -349,7 +417,7 @@ void Service::Connect(Error* error, const char* reason) {
         FROM_HERE, error, Error::kAlreadyConnected,
         base::StringPrintf(
             "Connect attempted but %s Service %s is already connected: %s",
-            technology().GetName().c_str(), log_name().c_str(), reason));
+            GetTechnologyName().c_str(), log_name().c_str(), reason));
     return;
   }
   if (IsConnecting()) {
@@ -357,15 +425,15 @@ void Service::Connect(Error* error, const char* reason) {
         FROM_HERE, error, Error::kInProgress,
         base::StringPrintf(
             "Connect attempted but %s Service %s already connecting: %s",
-            technology().GetName().c_str(), log_name().c_str(), reason));
+            GetTechnologyName().c_str(), log_name().c_str(), reason));
     return;
   }
   if (IsDisconnecting()) {
     // SetState will re-trigger a connection after this disconnection has
     // completed.
     pending_connect_task_.Reset(
-        base::Bind(&Service::Connect, weak_ptr_factory_.GetWeakPtr(),
-                   base::Owned(new Error()), "Triggering delayed Connect"));
+        base::BindOnce(&Service::Connect, weak_ptr_factory_.GetWeakPtr(),
+                       base::Owned(new Error()), "Triggering delayed Connect"));
     return;
   }
 
@@ -413,6 +481,16 @@ void Service::DisconnectWithFailure(ConnectFailure failure,
 }
 
 void Service::UserInitiatedConnect(const char* reason, Error* error) {
+  SLOG(this, 3) << __func__;
+  SetLastManualConnectAttemptProperty(base::Time::Now());
+  // |is_in_user_connect_| should only be set when Service::Connect returns with
+  // no error, i.e. the connection attempt is successfully initiated. However,
+  // when the call stack of Service::Connect gets far enough and no error is
+  // expected, it is useful to distinguish whether the connection is initiated
+  // by the user. Here, optimistically set this field in advance (assume the
+  // initiation of a connection attempt will succeed) and roll-back when
+  // Service::Connect returns with error.
+  is_in_user_connect_ = true;
   Connect(error, reason);
 
   // Since Service::Connect will clear a failure state when it gets far enough,
@@ -427,14 +505,13 @@ void Service::UserInitiatedConnect(const char* reason, Error* error) {
         error->type() != Error::kInProgress) {
       ReportUserInitiatedConnectionResult(state());
     }
-    // If we've already failed, SetState will not be able to catch this failure
-    // before |is_in_user_connect_| is set (in fact the state may not even
-    // change by the time the failure occurs). Setting |is_in_user_connect_| in
-    // this case will act as setting either the next or already-ongoing Connect
-    // as being user-initiated, even if it isn't.
-    return;
+    // The initiation of the connection attempt failed, we're not even going to
+    // ask lower layers (e.g. wpa_supplicant for WiFi) to connect, so the flag
+    // won't be cleared in Service::SetState when the connection attempt would
+    // succeed/fail. Reset the flag so it doesn't interfere with the next
+    // connection attempt.
+    is_in_user_connect_ = false;
   }
-  is_in_user_connect_ = true;
 }
 
 void Service::UserInitiatedDisconnect(const char* reason, Error* error) {
@@ -446,14 +523,17 @@ void Service::UserInitiatedDisconnect(const char* reason, Error* error) {
 }
 
 void Service::CompleteCellularActivation(Error* error) {
-  Error::PopulateAndLog(
-      FROM_HERE, error, Error::kNotSupported,
-      "Service doesn't support cellular activation completion.");
+  Error::PopulateAndLog(FROM_HERE, error, Error::kNotImplemented,
+                        "Service doesn't support cellular activation "
+                        "completion for technology: " +
+                            GetTechnologyName());
 }
 
 std::string Service::GetWiFiPassphrase(Error* error) {
-  Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
-                        "Service doesn't support WiFi passphrase retrieval.");
+  Error::PopulateAndLog(FROM_HERE, error, Error::kNotImplemented,
+                        "Service doesn't support WiFi passphrase retrieval for "
+                        "technology: " +
+                            GetTechnologyName());
   return std::string();
 }
 
@@ -510,6 +590,11 @@ bool Service::IsOnline() const {
   return state() == kStateOnline;
 }
 
+void Service::ResetAutoConnectCooldownTime() {
+  auto_connect_cooldown_ = base::TimeDelta();
+  reenable_auto_connect_task_.Cancel();
+}
+
 void Service::SetState(ConnectState state) {
   if (state == state_) {
     return;
@@ -526,15 +611,49 @@ void Service::SetState(ConnectState state) {
   }
 
   // Metric reporting for result of user-initiated connection attempt.
-  if (is_in_user_connect_ &&
+  if ((is_in_user_connect_ || is_in_auto_connect_) &&
       ((state == kStateConnected) || (state == kStateFailure) ||
        (state == kStateIdle))) {
-    ReportUserInitiatedConnectionResult(state);
-    is_in_user_connect_ = false;
+    if (is_in_user_connect_) {
+      ReportUserInitiatedConnectionResult(state);
+      is_in_user_connect_ = false;
+    }
+    if (is_in_auto_connect_) {
+      is_in_auto_connect_ = false;
+    }
   }
 
   if (state == kStateFailure) {
     NoteFailureEvent();
+  }
+
+  if (portal_detection_count_ > 0) {
+    switch (state) {
+      case kStateUnknown:        // FALLTHROUGH
+      case kStateIdle:           // FALLTHROUGH
+      case kStateAssociating:    // FALLTHROUGH
+      case kStateConfiguring:    // FALLTHROUGH
+      case kStateDisconnecting:  // FALLTHROUGH
+      case kStateFailure:
+        metrics()->SendToUMA(Metrics::kPortalDetectorAttemptsToDisconnect,
+                             technology(), portal_detection_count_);
+        portal_detection_count_ = 0;
+        break;
+      case kStateRedirectFound:
+        metrics()->SendToUMA(Metrics::kPortalDetectorAttemptsToRedirectFound,
+                             technology(), portal_detection_count_);
+        // Do not reset the counter, state might reach 'online'.
+        break;
+      case kStateOnline:
+        metrics()->SendToUMA(Metrics::kPortalDetectorAttemptsToOnline,
+                             technology(), portal_detection_count_);
+        portal_detection_count_ = 0;
+        break;
+      case kStateConnected:       // FALLTHROUGH
+      case kStateNoConnectivity:  // FALLTHROUGH
+      case kStatePortalSuspected:
+        break;
+    }
   }
 
   previous_state_ = state_;
@@ -546,16 +665,22 @@ void Service::SetState(ConnectState state) {
   if (state == kStateConnected) {
     failed_time_ = base::Time();
     has_ever_connected_ = true;
+    SetLastConnectedProperty(base::Time::Now());
     SaveToProfile();
     // When we succeed in connecting, forget that connects failed in the past.
     // Give services one chance at a fast autoconnect retry by resetting the
     // cooldown to 0 to indicate that the last connect was successful.
-    auto_connect_cooldown_milliseconds_ = 0;
-    reenable_auto_connect_task_.Cancel();
+    ResetAutoConnectCooldownTime();
   }
+  // Because we can bounce between `online` and 'limited-connectivity' states
+  // while connected, this value will store the last time the service
+  // transitioned to the `online` state.
+  if (state == kStateOnline)
+    SetLastOnlineProperty(base::Time::Now());
+
   UpdateErrorProperty();
   manager_->NotifyServiceStateChanged(this);
-  metrics()->NotifyServiceStateChanged(*this, state);
+  UpdateStateTransitionMetrics(state);
 
   if (IsConnectedState(previous_state_) != IsConnectedState(state_)) {
     adaptor_->EmitBoolChanged(kIsConnectedProperty, IsConnected());
@@ -597,21 +722,20 @@ void Service::ReEnableAutoConnectTask() {
 }
 
 void Service::ThrottleFutureAutoConnects() {
-  if (auto_connect_cooldown_milliseconds_ > 0) {
+  if (!auto_connect_cooldown_.is_zero()) {
     LOG(INFO) << "Throttling future autoconnects to " << log_name()
-              << ". Next autoconnect in " << auto_connect_cooldown_milliseconds_
-              << " milliseconds.";
-    reenable_auto_connect_task_.Reset(base::Bind(
+              << ". Next autoconnect in " << auto_connect_cooldown_;
+    reenable_auto_connect_task_.Reset(base::BindOnce(
         &Service::ReEnableAutoConnectTask, weak_ptr_factory_.GetWeakPtr()));
     dispatcher()->PostDelayedTask(FROM_HERE,
                                   reenable_auto_connect_task_.callback(),
-                                  auto_connect_cooldown_milliseconds_);
+                                  auto_connect_cooldown_);
   }
-  auto_connect_cooldown_milliseconds_ =
-      std::min(GetMaxAutoConnectCooldownTimeMilliseconds(),
-               std::max(kMinAutoConnectCooldownTimeMilliseconds,
-                        auto_connect_cooldown_milliseconds_ *
-                            kAutoConnectCooldownBackoffFactor));
+  auto min_cooldown_time =
+      std::max(GetMinAutoConnectCooldownTime(),
+               auto_connect_cooldown_ * kAutoConnectCooldownBackoffFactor);
+  auto_connect_cooldown_ =
+      std::min(GetMaxAutoConnectCooldownTime(), min_cooldown_time);
 }
 
 void Service::SaveFailure() {
@@ -640,13 +764,13 @@ void Service::SetFailureSilent(ConnectFailure failure) {
   UpdateErrorProperty();
 }
 
-base::Optional<base::TimeDelta> Service::GetTimeSinceFailed() const {
+std::optional<base::TimeDelta> Service::GetTimeSinceFailed() const {
   if (failed_time_.is_null())
-    return base::nullopt;
+    return std::nullopt;
   return base::Time::Now() - failed_time_;
 }
 
-std::string Service::GetDBusObjectPathIdentifer() const {
+std::string Service::GetDBusObjectPathIdentifier() const {
   return base::NumberToString(serial_number());
 }
 
@@ -720,16 +844,18 @@ bool Service::Load(const StoreInterface* storage) {
     metered_override_ = metered_override;
   }
 
-  static_ip_parameters_.Load(storage, id);
+  // Note that service might be connected when Load() is called, e.g., Ethernet
+  // service will keep connected when profile is changed.
+  if (static_ip_parameters_.Load(storage, id)) {
+    NotifyStaticIPConfigChanged();
+  }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   // Call OnEapCredentialsChanged with kReasonCredentialsLoaded to avoid
   // resetting the has_ever_connected value.
   if (mutable_eap()) {
     mutable_eap()->Load(storage, id);
     OnEapCredentialsChanged(kReasonCredentialsLoaded);
   }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
   ClearExplicitlyDisconnected();
 
@@ -737,12 +863,7 @@ bool Service::Load(const StoreInterface* storage) {
   // now that the credentials have been loaded.
   storage->GetBool(id, kStorageHasEverConnected, &has_ever_connected_);
 
-  dhcp_properties_->Load(storage, id);
-
-  for (patchpanel::TrafficCounter::Source source =
-           patchpanel::TrafficCounter::Source_MIN;
-       source <= patchpanel::TrafficCounter::Source_MAX;
-       source = patchpanel::TrafficCounter::Source(source + 1)) {
+  for (auto source : patchpanel::Client::kAllTrafficSources) {
     std::valarray<uint64_t> counter_array(kTrafficCounterArraySize);
     for (size_t i = 0; i < kTrafficCounterArraySize; i++) {
       storage->GetUint64(id,
@@ -757,13 +878,23 @@ bool Service::Load(const StoreInterface* storage) {
     }
   }
 
-  uint64_t traffic_counter_reset_time_ms;
-  if (storage->GetUint64(id, kStorageTrafficCounterResetTime,
-                         &traffic_counter_reset_time_ms)) {
-    traffic_counter_reset_time_ = base::Time::FromDeltaSinceWindowsEpoch(
-        base::TimeDelta::FromMilliseconds(traffic_counter_reset_time_ms));
+  uint64_t temp_ms;
+  if (storage->GetUint64(id, kStorageTrafficCounterResetTime, &temp_ms)) {
+    traffic_counter_reset_time_ =
+        base::Time::FromDeltaSinceWindowsEpoch(base::Milliseconds(temp_ms));
   }
-
+  if (storage->GetUint64(id, kStorageLastManualConnectAttempt, &temp_ms)) {
+    last_manual_connect_attempt_ =
+        base::Time::FromDeltaSinceWindowsEpoch(base::Milliseconds(temp_ms));
+  }
+  if (storage->GetUint64(id, kStorageLastConnected, &temp_ms)) {
+    last_connected_ =
+        base::Time::FromDeltaSinceWindowsEpoch(base::Milliseconds(temp_ms));
+  }
+  if (storage->GetUint64(id, kStorageLastOnline, &temp_ms)) {
+    last_online_ =
+        base::Time::FromDeltaSinceWindowsEpoch(base::Milliseconds(temp_ms));
+  }
   return true;
 }
 
@@ -776,11 +907,9 @@ void Service::MigrateDeprecatedStorage(StoreInterface* storage) {
   // TODO(b/182744859): Remove code after M93.
   storage->DeleteKey(id, "DNSAutoFallback");
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   if (eap()) {
     eap()->MigrateDeprecatedStorage(storage, id);
   }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
   // Prior to M91, Chrome did not tell us the source directly. We derive it
   // from UIData for old services. Remove this migration code in M97+.
@@ -808,18 +937,17 @@ bool Service::Unload() {
   link_monitor_disabled_ = false;
   managed_credentials_ = false;
   source_ = ONCSource::kONCSourceUnknown;
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   if (mutable_eap()) {
     mutable_eap()->Reset();
   }
   ClearEAPCertification();
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
   if (IsActive(nullptr)) {
     Error error;  // Ignored.
     Disconnect(&error, __func__);
   }
   current_traffic_counters_.clear();
   static_ip_parameters_.Reset();
+  NotifyStaticIPConfigChanged();
   return false;
 }
 
@@ -831,7 +959,7 @@ void Service::Remove(Error* /*error*/) {
 bool Service::Save(StoreInterface* storage) {
   const auto id = GetStorageIdentifier();
 
-  storage->SetString(id, kStorageType, GetTechnologyString());
+  storage->SetString(id, kStorageType, GetTechnologyName());
 
   // IMPORTANT: Changes to kStorageAutoConnect must be backwards compatible, see
   // WiFiService::Save for details.
@@ -869,17 +997,11 @@ bool Service::Save(StoreInterface* storage) {
   }
 
   static_ip_parameters_.Save(storage, id);
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   if (eap()) {
     eap()->Save(storage, id, save_credentials_);
   }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
-  dhcp_properties_->Save(storage, id);
 
-  for (patchpanel::TrafficCounter::Source source =
-           patchpanel::TrafficCounter::Source_MIN;
-       source < patchpanel::TrafficCounter::Source_MAX;
-       source = patchpanel::TrafficCounter::Source(source + 1)) {
+  for (auto source : patchpanel::Client::kAllTrafficSources) {
     bool in_storage = current_traffic_counters_.find(source) !=
                       current_traffic_counters_.end();
     for (size_t i = 0; i < kTrafficCounterArraySize; i++) {
@@ -896,6 +1018,18 @@ bool Service::Save(StoreInterface* storage) {
   storage->SetUint64(id, kStorageTrafficCounterResetTime,
                      GetTrafficCounterResetTimeProperty(/*error=*/nullptr));
 
+  if (!last_manual_connect_attempt_.ToDeltaSinceWindowsEpoch().is_zero())
+    storage->SetUint64(id, kStorageLastManualConnectAttempt,
+                       GetLastManualConnectAttemptProperty(/*error=*/nullptr));
+
+  if (!last_connected_.ToDeltaSinceWindowsEpoch().is_zero())
+    storage->SetUint64(id, kStorageLastConnected,
+                       GetLastConnectedProperty(/*error=*/nullptr));
+
+  if (!last_online_.ToDeltaSinceWindowsEpoch().is_zero())
+    storage->SetUint64(id, kStorageLastOnline,
+                       GetLastOnlineProperty(/*error=*/nullptr));
+
   return true;
 }
 
@@ -910,7 +1044,7 @@ void Service::Configure(const KeyValueStore& args, Error* error) {
       Error set_error;
       store_.SetBoolProperty(it.first, it.second.Get<bool>(), &set_error);
       if (error->IsSuccess() && set_error.IsFailure()) {
-        error->CopyFrom(set_error);
+        *error = set_error;
       }
     } else if (it.second.IsTypeCompatible<int32_t>()) {
       if (base::Contains(parameters_ignored_for_configure_, it.first)) {
@@ -921,7 +1055,7 @@ void Service::Configure(const KeyValueStore& args, Error* error) {
       Error set_error;
       store_.SetInt32Property(it.first, it.second.Get<int32_t>(), &set_error);
       if (error->IsSuccess() && set_error.IsFailure()) {
-        error->CopyFrom(set_error);
+        *error = set_error;
       }
     } else if (it.second.IsTypeCompatible<KeyValueStore>()) {
       if (base::Contains(parameters_ignored_for_configure_, it.first)) {
@@ -933,7 +1067,7 @@ void Service::Configure(const KeyValueStore& args, Error* error) {
       store_.SetKeyValueStoreProperty(it.first, it.second.Get<KeyValueStore>(),
                                       &set_error);
       if (error->IsSuccess() && set_error.IsFailure()) {
-        error->CopyFrom(set_error);
+        *error = set_error;
       }
     } else if (it.second.IsTypeCompatible<std::string>()) {
       if (base::Contains(parameters_ignored_for_configure_, it.first)) {
@@ -945,7 +1079,7 @@ void Service::Configure(const KeyValueStore& args, Error* error) {
       store_.SetStringProperty(it.first, it.second.Get<std::string>(),
                                &set_error);
       if (error->IsSuccess() && set_error.IsFailure()) {
-        error->CopyFrom(set_error);
+        *error = set_error;
       }
     } else if (it.second.IsTypeCompatible<Strings>()) {
       if (base::Contains(parameters_ignored_for_configure_, it.first)) {
@@ -956,7 +1090,7 @@ void Service::Configure(const KeyValueStore& args, Error* error) {
       Error set_error;
       store_.SetStringsProperty(it.first, it.second.Get<Strings>(), &set_error);
       if (error->IsSuccess() && set_error.IsFailure()) {
-        error->CopyFrom(set_error);
+        *error = set_error;
       }
     } else if (it.second.IsTypeCompatible<Stringmap>()) {
       if (base::Contains(parameters_ignored_for_configure_, it.first)) {
@@ -968,7 +1102,7 @@ void Service::Configure(const KeyValueStore& args, Error* error) {
       store_.SetStringmapProperty(it.first, it.second.Get<Stringmap>(),
                                   &set_error);
       if (error->IsSuccess() && set_error.IsFailure()) {
-        error->CopyFrom(set_error);
+        *error = set_error;
       }
     } else if (it.second.IsTypeCompatible<Stringmaps>()) {
       if (base::Contains(parameters_ignored_for_configure_, it.first)) {
@@ -980,7 +1114,7 @@ void Service::Configure(const KeyValueStore& args, Error* error) {
       store_.SetStringmapsProperty(it.first, it.second.Get<Stringmaps>(),
                                    &set_error);
       if (error->IsSuccess() && set_error.IsFailure()) {
-        error->CopyFrom(set_error);
+        *error = set_error;
       }
     }
   }
@@ -1045,6 +1179,22 @@ bool Service::IsRemembered() const {
   return profile_ && !manager_->IsServiceEphemeral(this);
 }
 
+bool Service::HasProxyConfig() const {
+  if (proxy_config_.empty()) {
+    return false;
+  }
+
+  // Check if proxy "mode" is equal to "direct".
+  auto mode = GetJSONDictValue(proxy_config_, kServiceProxyConfigMode);
+  if (!mode) {
+    LOG(ERROR) << "Failed to parse proxy config: " << proxy_config_;
+    // Returns true here for backward compatibility. Previously, this method
+    // only checks whether or not |proxy_config_| is empty.
+    return true;
+  }
+  return *mode != kServiceProxyConfigModeDirect;
+}
+
 void Service::EnableAndRetainAutoConnect() {
   if (retain_auto_connect_) {
     // We do not want to clobber the value of auto_connect_ (it may
@@ -1056,18 +1206,26 @@ void Service::EnableAndRetainAutoConnect() {
   RetainAutoConnect();
 }
 
-void Service::SetConnection(const ConnectionRefPtr& connection) {
-  if (connection) {
-    Error unused_error;
-    connection->set_tethering(GetTethering(&unused_error));
-  } else {
-    static_ip_parameters_.ClearSavedParameters();
+void Service::SetAttachedNetwork(base::WeakPtr<Network> network) {
+  if (attached_network_.get() == network.get()) {
+    return;
   }
-  connection_ = connection;
-  NotifyIPConfigChanges();
+  if (attached_network_) {
+    // Clear the handler and static IP config registered on the previous
+    // Network.
+    attached_network_->RegisterCurrentIPConfigChangeHandler({});
+    attached_network_->OnStaticIPConfigChanged({});
+  }
+  attached_network_ = network;
+  EmitIPConfigPropertyChange();
+  if (attached_network_) {
+    attached_network_->RegisterCurrentIPConfigChangeHandler(base::BindRepeating(
+        &Service::EmitIPConfigPropertyChange, weak_ptr_factory_.GetWeakPtr()));
+    NotifyStaticIPConfigChanged();
+  }
 }
 
-void Service::NotifyIPConfigChanges() {
+void Service::EmitIPConfigPropertyChange() {
   Error error;
   RpcIdentifier ipconfig = GetIPConfigRpcIdentifier(&error);
   if (error.IsSuccess()) {
@@ -1075,7 +1233,25 @@ void Service::NotifyIPConfigChanges() {
   }
 }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
+void Service::NotifyStaticIPConfigChanged() {
+  if (attached_network_) {
+    attached_network_->OnStaticIPConfigChanged(static_ip_parameters_.config());
+  }
+}
+
+KeyValueStore Service::GetSavedIPConfig(Error* /*error*/) {
+  if (!attached_network_) {
+    return {};
+  }
+  const auto* saved_network_config = attached_network_->GetSavedIPConfig();
+  return StaticIPParameters::NetworkConfigToKeyValues(
+      saved_network_config ? *saved_network_config : NetworkConfig{});
+}
+
+VirtualDeviceRefPtr Service::GetVirtualDevice() const {
+  return nullptr;
+}
+
 bool Service::Is8021xConnectable() const {
   return eap() && eap()->IsConnectable();
 }
@@ -1103,6 +1279,12 @@ void Service::ClearEAPCertification() {
   remote_certification_.clear();
 }
 
+void Service::SetEapSlotGetter(Pkcs11SlotGetter* slot_getter) {
+  if (mutable_eap()) {
+    mutable_eap()->SetEapSlotGetter(slot_getter);
+  }
+}
+
 void Service::SetEapCredentials(EapCredentials* eap) {
   // This operation must be done at most once for the lifetime of the service.
   CHECK(eap && !eap_);
@@ -1110,25 +1292,28 @@ void Service::SetEapCredentials(EapCredentials* eap) {
   eap_.reset(eap);
   eap_->InitPropertyStore(mutable_store());
 }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 std::string Service::GetEapPassphrase(Error* error) {
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   if (eap()) {
     return eap()->GetEapPassword(error);
   }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
-  Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
+  Error::PopulateAndLog(FROM_HERE, error, Error::kIllegalOperation,
                         "Cannot retrieve EAP passphrase from non-EAP network.");
   return std::string();
 }
 
-bool Service::HasStaticIPAddress() const {
-  return static_ip_parameters().ContainsAddress();
-}
-
-bool Service::HasStaticNameServers() const {
-  return static_ip_parameters().ContainsNameServers();
+void Service::RequestPortalDetection(Error* error) {
+  DeviceRefPtr device = manager_->FindDeviceFromService(this);
+  if (!device) {
+    Error::PopulateAndLog(FROM_HERE, error, Error::kOperationFailed,
+                          "Failed to find device from service: " + log_name());
+    return;
+  }
+  if (!device->UpdatePortalDetector(Network::ValidationReason::kDBusRequest)) {
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kOperationFailed,
+        "Failed to restart portal detection for service: " + log_name());
+  }
 }
 
 void Service::SetAutoConnect(bool connect) {
@@ -1143,8 +1328,8 @@ void Service::SetAutoConnect(bool connect) {
 // static
 // Note: keep in sync with ERROR_* constants in
 // android/system/connectivity/shill/IService.aidl.
-const char* Service::ConnectFailureToString(const ConnectFailure& state) {
-  switch (state) {
+const char* Service::ConnectFailureToString(ConnectFailure failure) {
+  switch (failure) {
     case kFailureNone:
       return kErrorNoFailure;
     case kFailureAAA:
@@ -1171,6 +1356,8 @@ const char* Service::ConnectFailureToString(const ConnectFailure& state) {
       return kErrorHTTPGetFailed;
     case kFailureInternal:
       return kErrorInternal;
+    case kFailureInvalidAPN:
+      return kErrorInvalidAPN;
     case kFailureIPsecCertAuth:
       return kErrorIpsecCertAuthFailed;
     case kFailureIPsecPSKAuth:
@@ -1189,6 +1376,8 @@ const char* Service::ConnectFailureToString(const ConnectFailure& state) {
       return kErrorPppAuthFailed;
     case kFailureSimLocked:
       return kErrorSimLocked;
+    case kFailureSimCarrierLocked:
+      return kErrorSimCarrierLocked;
     case kFailureNotRegistered:
       return kErrorNotRegistered;
     case kFailureUnknown:
@@ -1201,6 +1390,8 @@ const char* Service::ConnectFailureToString(const ConnectFailure& state) {
       return kErrorTooManySTAs;
     case kFailureDisconnect:
       return kErrorDisconnect;
+    case kFailureDelayedConnectSetup:
+      return kErrorDelayedConnectSetup;
     case kFailureMax:
       NOTREACHED();
   }
@@ -1208,7 +1399,7 @@ const char* Service::ConnectFailureToString(const ConnectFailure& state) {
 }
 
 // static
-const char* Service::ConnectStateToString(const ConnectState& state) {
+const char* Service::ConnectStateToString(ConnectState state) {
   switch (state) {
     case kStateUnknown:
       return "Unknown";
@@ -1236,8 +1427,118 @@ const char* Service::ConnectStateToString(const ConnectState& state) {
   return "Invalid";
 }
 
-std::string Service::GetTechnologyString() const {
-  return technology().GetName();
+// static
+Metrics::NetworkServiceError Service::ConnectFailureToMetricsEnum(
+    Service::ConnectFailure failure) {
+  // Explicitly map all possible failures. So when new failures are added,
+  // they will need to be mapped as well. Otherwise, the compiler will
+  // complain.
+  switch (failure) {
+    case Service::kFailureNone:
+      return Metrics::kNetworkServiceErrorNone;
+    case Service::kFailureAAA:
+      return Metrics::kNetworkServiceErrorAAA;
+    case Service::kFailureActivation:
+      return Metrics::kNetworkServiceErrorActivation;
+    case Service::kFailureBadPassphrase:
+      return Metrics::kNetworkServiceErrorBadPassphrase;
+    case Service::kFailureBadWEPKey:
+      return Metrics::kNetworkServiceErrorBadWEPKey;
+    case Service::kFailureConnect:
+      return Metrics::kNetworkServiceErrorConnect;
+    case Service::kFailureDHCP:
+      return Metrics::kNetworkServiceErrorDHCP;
+    case Service::kFailureDNSLookup:
+      return Metrics::kNetworkServiceErrorDNSLookup;
+    case Service::kFailureEAPAuthentication:
+      return Metrics::kNetworkServiceErrorEAPAuthentication;
+    case Service::kFailureEAPLocalTLS:
+      return Metrics::kNetworkServiceErrorEAPLocalTLS;
+    case Service::kFailureEAPRemoteTLS:
+      return Metrics::kNetworkServiceErrorEAPRemoteTLS;
+    case Service::kFailureHTTPGet:
+      return Metrics::kNetworkServiceErrorHTTPGet;
+    case Service::kFailureIPsecCertAuth:
+      return Metrics::kNetworkServiceErrorIPsecCertAuth;
+    case Service::kFailureIPsecPSKAuth:
+      return Metrics::kNetworkServiceErrorIPsecPSKAuth;
+    case Service::kFailureInternal:
+      return Metrics::kNetworkServiceErrorInternal;
+    case Service::kFailureInvalidAPN:
+      return Metrics::kNetworkServiceErrorInvalidAPN;
+    case Service::kFailureNeedEVDO:
+      return Metrics::kNetworkServiceErrorNeedEVDO;
+    case Service::kFailureNeedHomeNetwork:
+      return Metrics::kNetworkServiceErrorNeedHomeNetwork;
+    case Service::kFailureNotAssociated:
+      return Metrics::kNetworkServiceErrorNotAssociated;
+    case Service::kFailureNotAuthenticated:
+      return Metrics::kNetworkServiceErrorNotAuthenticated;
+    case Service::kFailureOTASP:
+      return Metrics::kNetworkServiceErrorOTASP;
+    case Service::kFailureOutOfRange:
+      return Metrics::kNetworkServiceErrorOutOfRange;
+    case Service::kFailurePPPAuth:
+      return Metrics::kNetworkServiceErrorPPPAuth;
+    case Service::kFailureSimLocked:
+      return Metrics::kNetworkServiceErrorSimLocked;
+    case Service::kFailureSimCarrierLocked:
+      return Metrics::kNetworkServiceErrorSimCarrierLocked;
+    case Service::kFailureNotRegistered:
+      return Metrics::kNetworkServiceErrorNotRegistered;
+    case Service::kFailurePinMissing:
+      return Metrics::kNetworkServiceErrorPinMissing;
+    case Service::kFailureTooManySTAs:
+      return Metrics::kNetworkServiceErrorTooManySTAs;
+    case Service::kFailureDisconnect:
+      return Metrics::kNetworkServiceErrorDisconnect;
+    case Service::kFailureDelayedConnectSetup:
+      return Metrics::kNetworkServiceErrorDelayedConnectSetup;
+    case Service::kFailureUnknown:
+    case Service::kFailureMax:
+      return Metrics::kNetworkServiceErrorUnknown;
+  }
+}
+
+// static
+Metrics::UserInitiatedConnectionFailureReason
+Service::ConnectFailureToFailureReason(Service::ConnectFailure failure) {
+  switch (failure) {
+    case Service::kFailureNone:
+      return Metrics::kUserInitiatedConnectionFailureReasonNone;
+    case Service::kFailureBadPassphrase:
+      return Metrics::kUserInitiatedConnectionFailureReasonBadPassphrase;
+    case Service::kFailureBadWEPKey:
+      return Metrics::kUserInitiatedConnectionFailureReasonBadWEPKey;
+    case Service::kFailureConnect:
+      return Metrics::kUserInitiatedConnectionFailureReasonConnect;
+    case Service::kFailureDHCP:
+      return Metrics::kUserInitiatedConnectionFailureReasonDHCP;
+    case Service::kFailureDNSLookup:
+      return Metrics::kUserInitiatedConnectionFailureReasonDNSLookup;
+    case Service::kFailureEAPAuthentication:
+      return Metrics::kUserInitiatedConnectionFailureReasonEAPAuthentication;
+    case Service::kFailureEAPLocalTLS:
+      return Metrics::kUserInitiatedConnectionFailureReasonEAPLocalTLS;
+    case Service::kFailureEAPRemoteTLS:
+      return Metrics::kUserInitiatedConnectionFailureReasonEAPRemoteTLS;
+    case Service::kFailureNotAssociated:
+      return Metrics::kUserInitiatedConnectionFailureReasonNotAssociated;
+    case Service::kFailureNotAuthenticated:
+      return Metrics::kUserInitiatedConnectionFailureReasonNotAuthenticated;
+    case Service::kFailureOutOfRange:
+      return Metrics::kUserInitiatedConnectionFailureReasonOutOfRange;
+    case Service::kFailurePinMissing:
+      return Metrics::kUserInitiatedConnectionFailureReasonPinMissing;
+    case Service::kFailureTooManySTAs:
+      return Metrics::kUserInitiatedConnectionFailureReasonTooManySTAs;
+    default:
+      return Metrics::kUserInitiatedConnectionFailureReasonUnknown;
+  }
+}
+
+std::string Service::GetTechnologyName() const {
+  return TechnologyName(technology());
 }
 
 bool Service::ShouldIgnoreFailure() const {
@@ -1274,11 +1575,13 @@ void Service::NoteFailureEvent() {
   // take into account the last non-idle state.
   ConnectState state = state_ == kStateIdle ? previous_state_ : state_;
   if (IsConnectedState(state)) {
-    LOG(INFO) << "Noting an unexpected connection drop.";
+    LOG(INFO) << "Noting an unexpected connection drop for " << log_name()
+              << ".";
     period = kDisconnectsMonitorSeconds;
     events = &disconnects_;
   } else if (IsConnectingState(state)) {
-    LOG(INFO) << "Noting an unexpected failure to connect.";
+    LOG(INFO) << "Noting an unexpected failure to connect for " << log_name()
+              << ".";
     period = kMisconnectsMonitorSeconds;
     events = &misconnects_;
   } else {
@@ -1291,7 +1594,7 @@ void Service::NoteFailureEvent() {
 
 void Service::ReportUserInitiatedConnectionResult(ConnectState state) {
   // Report stats for wifi only for now.
-  if (technology_ != Technology::kWifi)
+  if (technology_ != Technology::kWiFi)
     return;
 
   int result;
@@ -1301,8 +1604,9 @@ void Service::ReportUserInitiatedConnectionResult(ConnectState state) {
       break;
     case kStateFailure:
       result = Metrics::kUserInitiatedConnectionResultFailure;
-      metrics()->NotifyUserInitiatedConnectionFailureReason(
-          Metrics::kMetricWifiUserInitiatedConnectionFailureReason, failure_);
+      metrics()->SendEnumToUMA(
+          Metrics::kMetricWifiUserInitiatedConnectionFailureReason,
+          ConnectFailureToFailureReason(failure_));
       break;
     case kStateIdle:
       // This assumes the device specific class (wifi, cellular) will advance
@@ -1314,8 +1618,8 @@ void Service::ReportUserInitiatedConnectionResult(ConnectState state) {
       return;
   }
 
-  metrics()->NotifyUserInitiatedConnectionResult(
-      Metrics::kMetricWifiUserInitiatedConnectionResult, result);
+  metrics()->SendEnumToUMA(Metrics::kMetricWifiUserInitiatedConnectionResult,
+                           result);
 }
 
 bool Service::HasRecentConnectionIssues() {
@@ -1347,10 +1651,9 @@ bool Service::IsMetered() const {
     return true;
   }
 
-  Error unused_error;
-  std::string tethering = GetTethering(&unused_error);
-  return (tethering == kTetheringSuspectedState ||
-          tethering == kTetheringConfirmedState);
+  TetheringState tethering = GetTethering();
+  return tethering == TetheringState::kSuspected ||
+         tethering == TetheringState::kConfirmed;
 }
 
 bool Service::IsMeteredByServiceProperties() const {
@@ -1358,72 +1661,77 @@ bool Service::IsMeteredByServiceProperties() const {
 }
 
 void Service::InitializeTrafficCounterSnapshot(
-    const std::vector<patchpanel::TrafficCounter>& counters) {
+    const std::vector<patchpanel::Client::TrafficCounter>& counters) {
   for (const auto& counter : counters) {
-    traffic_counter_snapshot_[counter.source()] = CounterToValArray(counter);
+    traffic_counter_snapshot_[counter.source] = CounterToValArray(counter);
   }
 }
 
 void Service::RefreshTrafficCounters(
-    const std::vector<patchpanel::TrafficCounter>& counters) {
+    const std::vector<patchpanel::Client::TrafficCounter>& counters) {
   for (const auto& counter : counters) {
     std::valarray<uint64_t> counter_array = CounterToValArray(counter);
-    if (current_traffic_counters_.find(counter.source()) ==
+    if (current_traffic_counters_.find(counter.source) ==
         current_traffic_counters_.end()) {
-      current_traffic_counters_[counter.source()] =
+      current_traffic_counters_[counter.source] =
           std::valarray<uint64_t>(kTrafficCounterArraySize);
     }
-    if (traffic_counter_snapshot_[counter.source()].size() ==
+    if (traffic_counter_snapshot_[counter.source].size() ==
         kTrafficCounterArraySize) {
-      current_traffic_counters_[counter.source()] +=
-          counter_array - traffic_counter_snapshot_[counter.source()];
+      current_traffic_counters_[counter.source] +=
+          counter_array - traffic_counter_snapshot_[counter.source];
     } else {
       LOG(WARNING) << "Uninitialized traffic counter snapshot for source "
-                   << patchpanel::TrafficCounter::Source_Name(counter.source());
+                   << patchpanel::Client::TrafficSourceName(counter.source);
     }
-    traffic_counter_snapshot_[counter.source()] = counter_array;
+    traffic_counter_snapshot_[counter.source] = counter_array;
   }
   SaveToProfile();
 }
 
 void Service::RequestTrafficCountersCallback(
-    Error* error,
-    const ResultVariantDictionariesCallback& callback,
-    const std::vector<patchpanel::TrafficCounter>& counters) {
+    ResultVariantDictionariesCallback callback,
+    const std::vector<patchpanel::Client::TrafficCounter>& counters) {
   RefreshTrafficCounters(counters);
   std::vector<brillo::VariantDictionary> traffic_counters;
   for (const auto& [source, counters] : current_traffic_counters_) {
     brillo::VariantDictionary dict;
     // Select only the first two |counters| elements, corresponding to rx_bytes
     // and tx_bytes.
-    dict.emplace("source", patchpanel::TrafficCounter::Source_Name(source));
+    dict.emplace("source", patchpanel::Client::TrafficSourceName(source));
     dict.emplace("rx_bytes", counters[TrafficCounterVals::kRxBytes]);
     dict.emplace("tx_bytes", counters[TrafficCounterVals::kTxBytes]);
     traffic_counters.push_back(std::move(dict));
   }
-  error->Populate(Error::kSuccess);
-  callback.Run(*error, std::move(traffic_counters));
+  std::move(callback).Run(Error(Error::kSuccess), std::move(traffic_counters));
 }
 
 void Service::RequestTrafficCounters(
-    Error* error, const ResultVariantDictionariesCallback& callback) {
+    ResultVariantDictionariesCallback callback) {
   DeviceRefPtr device = manager_->FindDeviceFromService(this);
   if (!device) {
+    Error error;
     Error::PopulateAndLog(
-        FROM_HERE, error, Error::kOperationFailed,
+        FROM_HERE, &error, Error::kOperationFailed,
         "Failed to find device from service: " + GetRpcIdentifier().value());
+    std::move(callback).Run(error, std::vector<brillo::VariantDictionary>());
     return;
   }
+
   std::set<std::string> devices{device->link_name()};
   patchpanel::Client* client = manager_->patchpanel_client();
   if (!client) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kOperationFailed,
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kOperationFailed,
                           "Failed to get patchpanel client");
+    std::move(callback).Run(error, std::vector<brillo::VariantDictionary>());
     return;
   }
+
   client->GetTrafficCounters(
-      devices, BindOnce(&Service::RequestTrafficCountersCallback,
-                        weak_ptr_factory_.GetWeakPtr(), error, callback));
+      devices,
+      base::BindOnce(&Service::RequestTrafficCountersCallback,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
 void Service::ResetTrafficCounters(Error* /*error*/) {
@@ -1432,11 +1740,15 @@ void Service::ResetTrafficCounters(Error* /*error*/) {
   SaveToProfile();
 }
 
+bool Service::CompareWithSameTechnology(const ServiceRefPtr& service,
+                                        bool* decision) {
+  return false;
+}
+
 // static
 std::string Service::GetCurrentTrafficCounterKey(
-    patchpanel::TrafficCounter::Source source, std::string suffix) {
-  return std::string(kStorageCurrentTrafficCounterPrefix) +
-         patchpanel::TrafficCounter::Source_Name(source) + suffix;
+    patchpanel::Client::TrafficSource source, std::string suffix) {
+  return patchpanel::Client::TrafficSourceName(source) + suffix;
 }
 
 // static
@@ -1481,6 +1793,10 @@ std::pair<bool, const char*> Service::Compare(
     }
   }
 
+  if (DecideBetween(a->ephemeral_priority_, b->ephemeral_priority_, &ret)) {
+    return std::make_pair(ret, kServiceSortPriority);
+  }
+
   if (DecideBetween(a->priority(), b->priority(), &ret)) {
     return std::make_pair(ret, kServiceSortPriority);
   }
@@ -1515,6 +1831,10 @@ std::pair<bool, const char*> Service::Compare(
 
   if (DecideBetween(a->has_ever_connected(), b->has_ever_connected(), &ret)) {
     return std::make_pair(ret, kServiceSortHasEverConnected);
+  }
+
+  if (a->CompareWithSameTechnology(b, &ret)) {
+    return std::make_pair(ret, kServiceSortTechnologySpecific);
   }
 
   if (DecideBetween(a->strength(), b->strength(), &ret)) {
@@ -1557,22 +1877,21 @@ void Service::SetProfile(const ProfileRefPtr& p) {
   adaptor_->EmitStringChanged(kProfileProperty, profile_rpc_id);
 }
 
-void Service::OnPropertyChanged(const std::string& property) {
+void Service::OnPropertyChanged(std::string_view property) {
   SLOG(this, 1) << __func__ << " " << property;
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   if (Is8021x() && EapCredentials::IsEapAuthenticationProperty(property)) {
     OnEapCredentialsChanged(kReasonPropertyUpdate);
   }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
   SaveToProfile();
+  if (property == kStaticIPConfigProperty) {
+    NotifyStaticIPConfigChanged();
+  }
   if (!IsConnected()) {
     return;
   }
 
-  if (property == kCheckPortalProperty || property == kProxyConfigProperty) {
-    manager_->RecheckPortalOnService(this);
-  } else if (property == kPriorityProperty ||
-             property == kManagedCredentialsProperty) {
+  if (property == kPriorityProperty || property == kEphemeralPriorityProperty ||
+      property == kManagedCredentialsProperty) {
     // These properties affect the sorting order of Services. Note that this is
     // only necessary if there are multiple connected Services that would be
     // sorted differently by this change, so we can avoid doing this for
@@ -1581,15 +1900,15 @@ void Service::OnPropertyChanged(const std::string& property) {
   }
 }
 
-void Service::OnBeforeSuspend(const ResultCallback& callback) {
+void Service::OnBeforeSuspend(ResultCallback callback) {
   // Nothing to be done in the general case, so immediately report success.
-  callback.Run(Error(Error::kSuccess));
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
 void Service::OnAfterResume() {
+  time_resume_to_ready_timer_->Start();
   // Forget old autoconnect failures across suspend/resume.
-  auto_connect_cooldown_milliseconds_ = 0;
-  reenable_auto_connect_task_.Cancel();
+  ResetAutoConnectCooldownTime();
   // Forget if the user disconnected us, we might be able to connect now.
   ClearExplicitlyDisconnected();
 }
@@ -1603,20 +1922,16 @@ void Service::OnDefaultServiceStateChanged(const ServiceRefPtr& parent) {
 }
 
 RpcIdentifier Service::GetIPConfigRpcIdentifier(Error* error) const {
-  if (!connection_) {
-    error->Populate(Error::kNotFound);
-    return DBusControl::NullRpcIdentifier();
+  IPConfig* ipconfig = nullptr;
+  if (attached_network_) {
+    ipconfig = attached_network_->GetCurrentIPConfig();
   }
-
-  RpcIdentifier id = connection_->ipconfig_rpc_identifier();
-
-  if (id.value().empty()) {
+  if (!ipconfig) {
     // Do not return an empty IPConfig.
     error->Populate(Error::kNotFound);
     return DBusControl::NullRpcIdentifier();
   }
-
-  return id;
+  return ipconfig->GetRpcIdentifier();
 }
 
 void Service::SetConnectable(bool connectable) {
@@ -1702,17 +2017,35 @@ bool Service::IsAutoConnectable(const char** reason) const {
     return false;
   }
 
-  if (!technology_.IsPrimaryConnectivityTechnology() &&
+  if (!IsPrimaryConnectivityTechnology(technology_) &&
       !manager_->IsConnected()) {
     *reason = kAutoConnOffline;
+    return false;
+  }
+
+  // It's possible for a connection failure to trigger an autoconnect to the
+  // same Service. This happens with no cooldown, so we'll see a connection
+  // failure immediately followed by an autoconnect attempt. This is desirable
+  // in many cases (e.g. there's a brief AP-/network-side issue), but not when
+  // the failure is due to a bad passphrase. Enforce a minimum cooldown time to
+  // avoid this.
+  auto time_since_failed = GetTimeSinceFailed();
+  if (time_since_failed &&
+      time_since_failed.value() < kMinAutoConnectCooldownTime &&
+      previous_error_ == kErrorBadPassphrase) {
+    *reason = kAutoConnRecentBadPassphraseFailure;
     return false;
   }
 
   return true;
 }
 
-uint64_t Service::GetMaxAutoConnectCooldownTimeMilliseconds() const {
-  return 1 * 60 * 1000;  // 1 minute
+base::TimeDelta Service::GetMinAutoConnectCooldownTime() const {
+  return kMinAutoConnectCooldownTime;
+}
+
+base::TimeDelta Service::GetMaxAutoConnectCooldownTime() const {
+  return kMaxAutoConnectCooldownTime;
 }
 
 bool Service::IsDisconnectable(Error* error) const {
@@ -1727,14 +2060,30 @@ bool Service::IsDisconnectable(Error* error) const {
 }
 
 bool Service::IsPortalDetectionDisabled() const {
-  return check_portal_ == kCheckPortalFalse;
+  // Services created through policy should not be checked by the connection
+  // manager, since we don't have the ability to evaluate arbitrary proxy
+  // configs and their possible credentials. One possible scenario for the case
+  // is an on-prem proxy server with a strict firewall that blocks portal
+  // detection probes. See b/279520395.
+  if (source_ == ONCSource::kONCSourceDevicePolicy ||
+      source_ == ONCSource::kONCSourceUserPolicy) {
+    return true;
+  }
+
+  // We need to disable portal detection on networks with proxy config
+  // (excluding "direct"), even when the network is not managed, in order for
+  // on-prem proxy server with a strict firewall that blocks portal detection to
+  // be seen as online. See b/302126338.
+  if (HasProxyConfig()) {
+    return true;
+  }
+
+  return (check_portal_ == kCheckPortalFalse) ||
+         (check_portal_ == kCheckPortalAuto &&
+          !manager_->IsPortalDetectionEnabled(technology()));
 }
 
-bool Service::IsPortalDetectionAuto() const {
-  return check_portal_ == kCheckPortalAuto;
-}
-
-void Service::HelpRegisterDerivedBool(const std::string& name,
+void Service::HelpRegisterDerivedBool(std::string_view name,
                                       bool (Service::*get)(Error* error),
                                       bool (Service::*set)(const bool&, Error*),
                                       void (Service::*clear)(Error*)) {
@@ -1743,7 +2092,7 @@ void Service::HelpRegisterDerivedBool(const std::string& name,
       BoolAccessor(new CustomAccessor<Service, bool>(this, get, set, clear)));
 }
 
-void Service::HelpRegisterDerivedInt32(const std::string& name,
+void Service::HelpRegisterDerivedInt32(std::string_view name,
                                        int32_t (Service::*get)(Error* error),
                                        bool (Service::*set)(const int32_t&,
                                                             Error*)) {
@@ -1753,7 +2102,7 @@ void Service::HelpRegisterDerivedInt32(const std::string& name,
 }
 
 void Service::HelpRegisterDerivedString(
-    const std::string& name,
+    std::string_view name,
     std::string (Service::*get)(Error* error),
     bool (Service::*set)(const std::string&, Error*)) {
   store_.RegisterDerivedString(
@@ -1762,28 +2111,28 @@ void Service::HelpRegisterDerivedString(
 }
 
 void Service::HelpRegisterConstDerivedRpcIdentifier(
-    const std::string& name, RpcIdentifier (Service::*get)(Error*) const) {
+    std::string_view name, RpcIdentifier (Service::*get)(Error*) const) {
   store_.RegisterDerivedRpcIdentifier(
       name, RpcIdentifierAccessor(
                 new CustomReadOnlyAccessor<Service, RpcIdentifier>(this, get)));
 }
 
 void Service::HelpRegisterConstDerivedStrings(
-    const std::string& name, Strings (Service::*get)(Error* error) const) {
+    std::string_view name, Strings (Service::*get)(Error* error) const) {
   store_.RegisterDerivedStrings(
       name,
       StringsAccessor(new CustomReadOnlyAccessor<Service, Strings>(this, get)));
 }
 
 void Service::HelpRegisterConstDerivedString(
-    const std::string& name, std::string (Service::*get)(Error* error) const) {
+    std::string_view name, std::string (Service::*get)(Error* error) const) {
   store_.RegisterDerivedString(
       name, StringAccessor(
                 new CustomReadOnlyAccessor<Service, std::string>(this, get)));
 }
 
 void Service::HelpRegisterConstDerivedUint64(
-    const std::string& name, uint64_t (Service::*get)(Error* error) const) {
+    std::string_view name, uint64_t (Service::*get)(Error* error) const) {
   store_.RegisterDerivedUint64(
       name,
       Uint64Accessor(new CustomReadOnlyAccessor<Service, uint64_t>(this, get)));
@@ -1826,22 +2175,17 @@ std::string Service::CalculateState(Error* /*error*/) {
 }
 
 std::string Service::CalculateTechnology(Error* /*error*/) {
-  return GetTechnologyString();
+  return GetTechnologyName();
 }
 
-std::string Service::GetTethering(Error* error) const {
-  // The "Tethering" property isn't supported by the Service base class, and
-  // therefore should not be listed in the properties returned by
-  // the GetProperties() RPC method.
-  error->Populate(Error::kNotSupported);
-  return "";
+Service::TetheringState Service::GetTethering() const {
+  return TetheringState::kUnknown;
 }
 
 void Service::IgnoreParameterForConfigure(const std::string& parameter) {
   parameters_ignored_for_configure_.insert(parameter);
 }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 const std::string& Service::GetEAPKeyManagement() const {
   CHECK(eap());
   return eap()->key_management();
@@ -1851,7 +2195,6 @@ void Service::SetEAPKeyManagement(const std::string& key_management) {
   CHECK(mutable_eap());
   mutable_eap()->SetKeyManagement(key_management, nullptr);
 }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 bool Service::GetAutoConnect(Error* /*error*/) {
   return auto_connect();
@@ -1904,7 +2247,27 @@ bool Service::SetCheckPortal(const std::string& check_portal, Error* error) {
     return false;
   }
   check_portal_ = check_portal;
+  OnPortalDetectionConfigurationChange();
   return true;
+}
+
+void Service::OnPortalDetectionConfigurationChange() {
+  if (!IsConnected()) {
+    return;
+  }
+  const DeviceRefPtr device = manager_->FindDeviceFromService(this);
+  if (!device) {
+    LOG(WARNING)
+        << log_name()
+        << ": Service is connected but associated Device was not found";
+    return;
+  }
+  // Start or restart portal detection if it should be running.
+  // Stop portal detection if it should now be disabled and ensure that the
+  // Service transitions to the "online" state now that portal detection has
+  // stopped.
+  device->UpdatePortalDetector(
+      Network::ValidationReason::kServicePropertyUpdate);
 }
 
 std::string Service::GetGuid(Error* error) {
@@ -1993,9 +2356,13 @@ std::string Service::GetProxyConfig(Error* error) {
 }
 
 bool Service::SetProxyConfig(const std::string& proxy_config, Error* error) {
-  if (proxy_config_ == proxy_config)
+  if (proxy_config_ == proxy_config) {
     return false;
+  }
   proxy_config_ = proxy_config;
+  // Force portal detection to restart if it was already running: the new
+  // Proxy settings could change validation results.
+  OnPortalDetectionConfigurationChange();
   adaptor_->EmitStringChanged(kProxyConfigProperty, proxy_config_);
   return true;
 }
@@ -2020,6 +2387,43 @@ uint64_t Service::GetTrafficCounterResetTimeProperty(Error* /*error*/) const {
       .InMilliseconds();
 }
 
+void Service::SetLastManualConnectAttemptProperty(const base::Time& value) {
+  if (last_manual_connect_attempt_ == value)
+    return;
+  last_manual_connect_attempt_ = value;
+  adaptor_->EmitUint64Changed(kLastManualConnectAttemptProperty,
+                              GetLastManualConnectAttemptProperty(nullptr));
+}
+
+uint64_t Service::GetLastManualConnectAttemptProperty(Error* /*error*/) const {
+  return last_manual_connect_attempt_.ToDeltaSinceWindowsEpoch()
+      .InMilliseconds();
+}
+
+void Service::SetLastConnectedProperty(const base::Time& value) {
+  if (last_connected_ == value)
+    return;
+  last_connected_ = value;
+  adaptor_->EmitUint64Changed(kLastConnectedProperty,
+                              GetLastConnectedProperty(nullptr));
+}
+
+uint64_t Service::GetLastConnectedProperty(Error* /*error*/) const {
+  return last_connected_.ToDeltaSinceWindowsEpoch().InMilliseconds();
+}
+
+void Service::SetLastOnlineProperty(const base::Time& value) {
+  if (last_online_ == value)
+    return;
+  last_online_ = value;
+  adaptor_->EmitUint64Changed(kLastOnlineProperty,
+                              GetLastOnlineProperty(nullptr));
+}
+
+uint64_t Service::GetLastOnlineProperty(Error* /*error*/) const {
+  return last_online_.ToDeltaSinceWindowsEpoch().InMilliseconds();
+}
+
 bool Service::GetMeteredProperty(Error* /*error*/) {
   return IsMetered();
 }
@@ -2039,7 +2443,7 @@ bool Service::SetMeteredProperty(const bool& metered, Error* /*error*/) {
 
 void Service::ClearMeteredProperty(Error* /*error*/) {
   bool was_metered = IsMetered();
-  metered_override_ = base::nullopt;
+  metered_override_ = std::nullopt;
 
   bool is_metered = IsMetered();
   if (was_metered != is_metered)
@@ -2112,11 +2516,11 @@ void Service::SetStrength(uint8_t strength) {
   adaptor_->EmitUint8Changed(kSignalStrengthProperty, strength);
 }
 
-void Service::SetErrorDetails(const std::string& details) {
+void Service::SetErrorDetails(std::string_view details) {
   if (error_details_ == details) {
     return;
   }
-  error_details_ = details;
+  error_details_ = std::string(details);
   adaptor_->EmitStringChanged(kErrorDetailsProperty, error_details_);
 }
 
@@ -2143,6 +2547,107 @@ EventDispatcher* Service::dispatcher() const {
 
 Metrics* Service::metrics() const {
   return manager_->metrics();
+}
+
+void Service::SetUplinkSpeedKbps(uint32_t uplink_speed_kbps) {
+  if (uplink_speed_kbps != uplink_speed_kbps_) {
+    uplink_speed_kbps_ = uplink_speed_kbps;
+    adaptor_->EmitIntChanged(kUplinkSpeedPropertyKbps, uplink_speed_kbps_);
+  }
+}
+
+void Service::SetDownlinkSpeedKbps(uint32_t downlink_speed_kbps) {
+  if (downlink_speed_kbps != downlink_speed_kbps_) {
+    downlink_speed_kbps_ = downlink_speed_kbps;
+    adaptor_->EmitIntChanged(kDownlinkSpeedPropertyKbps, downlink_speed_kbps_);
+  }
+}
+
+void Service::UpdateStateTransitionMetrics(Service::ConnectState new_state) {
+  UpdateServiceStateTransitionMetrics(new_state);
+  if (new_state == kStateFailure) {
+    Metrics::NetworkServiceError error = ConnectFailureToMetricsEnum(failure());
+    // Publish technology specific connection failure metrics. This will
+    // account for all the connection failures happening while connected to
+    // a particular interface e.g. wifi, cellular etc.
+    metrics()->SendEnumToUMA(Metrics::kMetricNetworkServiceError, technology(),
+                             error);
+  }
+  bootstat::BootStat().LogEvent(
+      base::StrCat({"network-", GetTechnologyName(), "-", GetStateString()}));
+  if (new_state != kStateConnected) {
+    return;
+  }
+  base::TimeDelta time_resume_to_ready;
+  time_resume_to_ready_timer_->GetElapsedTime(&time_resume_to_ready);
+  time_resume_to_ready_timer_->Reset();
+  SendPostReadyStateMetrics(time_resume_to_ready);
+}
+
+void Service::UpdateServiceStateTransitionMetrics(
+    Service::ConnectState new_state) {
+  const char* state_string = ConnectStateToString(new_state);
+  SLOG(5) << __func__ << " " << log_name() << ": new_state=" << state_string;
+  TimerReportersList& start_timers =
+      service_metrics_->start_on_state[new_state];
+  for (auto* start_timer : start_timers) {
+    SLOG(5) << __func__ << " " << log_name() << " Starting timer for "
+            << start_timer->histogram_name() << " due to new state "
+            << state_string << ".";
+    start_timer->Start();
+  }
+  TimerReportersList& stop_timers = service_metrics_->stop_on_state[new_state];
+  for (auto* stop_timer : stop_timers) {
+    SLOG(5) << __func__ << " " << log_name() << " Stopping timer for "
+            << stop_timer->histogram_name() << " due to new state "
+            << state_string << ".";
+    if (stop_timer->Stop()) {
+      metrics()->ReportMilliseconds(*stop_timer);
+    }
+  }
+}
+
+void Service::InitializeServiceStateTransitionMetrics() {
+  auto histogram = Metrics::GetFullMetricName(
+      Metrics::kMetricTimeToConfigMillisecondsSuffix, technology());
+  AddServiceStateTransitionTimer(histogram, kStateConfiguring, kStateConnected);
+  histogram = Metrics::GetFullMetricName(
+      Metrics::kMetricTimeToPortalMillisecondsSuffix, technology());
+  AddServiceStateTransitionTimer(histogram, kStateConnected,
+                                 kStateNoConnectivity);
+  histogram = Metrics::GetFullMetricName(
+      Metrics::kMetricTimeToRedirectFoundMillisecondsSuffix, technology());
+  AddServiceStateTransitionTimer(histogram, kStateConnected,
+                                 kStateRedirectFound);
+  histogram = Metrics::GetFullMetricName(
+      Metrics::kMetricTimeToOnlineMillisecondsSuffix, technology());
+  AddServiceStateTransitionTimer(histogram, kStateConnected, kStateOnline);
+}
+
+void Service::AddServiceStateTransitionTimer(const std::string& histogram_name,
+                                             Service::ConnectState start_state,
+                                             Service::ConnectState stop_state) {
+  SLOG(5) << __func__ << " " << log_name() << ": adding " << histogram_name
+          << " for " << ConnectStateToString(start_state) << " -> "
+          << ConnectStateToString(stop_state);
+  CHECK(start_state < stop_state);
+  int num_buckets = Metrics::kTimerHistogramNumBuckets;
+  int max_ms = Metrics::kTimerHistogramMillisecondsMax;
+  if (base::EndsWith(histogram_name,
+                     Metrics::kMetricTimeToJoinMillisecondsSuffix,
+                     base::CompareCase::SENSITIVE)) {
+    // TimeToJoin state transition has a timeout of 70s in wpa_supplicant (see
+    // b/265183655 for more details). Use a larger number of buckets and max
+    // value to capture this.
+    num_buckets = Metrics::kTimerHistogramNumBucketsLarge;
+    max_ms = Metrics::kTimerHistogramMillisecondsMaxLarge;
+  }
+  auto timer = std::make_unique<chromeos_metrics::TimerReporter>(
+      histogram_name, Metrics::kTimerHistogramMillisecondsMin, max_ms,
+      num_buckets);
+  service_metrics_->start_on_state[start_state].push_back(timer.get());
+  service_metrics_->stop_on_state[stop_state].push_back(timer.get());
+  service_metrics_->timers.push_back(std::move(timer));
 }
 
 }  // namespace shill

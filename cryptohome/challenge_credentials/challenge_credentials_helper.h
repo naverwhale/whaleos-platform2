@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,15 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <brillo/secure_blob.h>
 
-#include "cryptohome/credentials.h"
-#include "cryptohome/key.pb.h"
+#include "cryptohome/flatbuffer_schemas/structures.h"
 #include "cryptohome/key_challenge_service.h"
-#include "cryptohome/rpc.pb.h"
-#include "cryptohome/vault_keyset.pb.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
@@ -37,32 +36,61 @@ namespace cryptohome {
 // This class must be used on a single thread only.
 class ChallengeCredentialsHelper {
  public:
-  using KeysetSignatureChallengeInfo =
-      SerializedVaultKeyset_SignatureChallengeInfo;
+  // A simple storage struct for storing the results of Decrypt() or
+  // GenerateNew(). For Decrypt(), the signature_challenge_info field is always
+  // nullptr.
+  class GenerateNewOrDecryptResult {
+   public:
+    GenerateNewOrDecryptResult(std::unique_ptr<SerializedSignatureChallengeInfo>
+                                   signature_challenge_info,
+                               std::unique_ptr<brillo::SecureBlob> passkey)
+        : info_(std::move(signature_challenge_info)),
+          passkey_(std::move(passkey)) {}
+
+    // Getters
+    std::unique_ptr<SerializedSignatureChallengeInfo> info() {
+      return std::move(info_);
+    }
+    std::unique_ptr<brillo::SecureBlob> passkey() {
+      return std::move(passkey_);
+    }
+
+    // Const getters
+    const SerializedSignatureChallengeInfo* info() const { return info_.get(); }
+    const brillo::SecureBlob* passkey() const { return passkey_.get(); }
+
+   private:
+    std::unique_ptr<SerializedSignatureChallengeInfo> info_;
+    std::unique_ptr<brillo::SecureBlob> passkey_;
+  };
 
   // This callback reports result of a GenerateNew() call.
   //
-  // If the operation succeeds, |credentials| will contain the freshly generated
-  // credentials that should be used for encrypting the new vault keyset, with
-  // the challenge_credentials_keyset_info() field containing the data to be
-  // stored in the created vault keyset.
-  // If the operation fails, the argument will be null.
+  // If the operation succeeds, the result struct will contain the |passkey|,
+  // which can be used for decryption of the user's vault keyset, and
+  // |signature_challenge_info|, which contains the data to be stored in the
+  // auth block state. If the operation fails, the argument will be the
+  // CryptoStatus on the details of the failure.
   using GenerateNewCallback =
-      base::OnceCallback<void(std::unique_ptr<Credentials> /* credentials */)>;
+      base::OnceCallback<void(CryptoStatusOr<GenerateNewOrDecryptResult>)>;
 
   // This callback reports result of a Decrypt() call.
   //
-  // If the operation succeeds, |credentials| will contain the built credentials
-  // that should be used for decrypting the user's vault keyset.
-  // If the operation fails, the argument will be null.
+  // If the operation succeeds, result struct will contain the passkey, which
+  // can be used for decryption of the user's vault keyset. The
+  // signature_challenge_info field is always nullptr. If the operation fails,
+  // the argument will be the CryptoStatus on details of the failure.
   using DecryptCallback =
-      base::OnceCallback<void(std::unique_ptr<Credentials> /* credentials */)>;
+      base::OnceCallback<void(CryptoStatusOr<GenerateNewOrDecryptResult>)>;
 
   // This callback reports result of a VerifyKey() call.
   //
   // The |is_key_valid| argument will be true iff the operation succeeds and
   // the provided key is valid for decryption of the given vault keyset.
-  using VerifyKeyCallback = base::OnceCallback<void(bool /* is_key_valid */)>;
+  // An OK status is returned for successful verification. A status with
+  // kIncorrectAuth is returned if it failed and the user is at fault.
+  // Otherwise, other actions are returned.
+  using VerifyKeyCallback = base::OnceCallback<void(CryptoStatus)>;
 
   // The maximum number of attempts that will be made for a single operation
   // when it fails with a transient error.
@@ -80,20 +108,15 @@ class ChallengeCredentialsHelper {
   // be stored in the created vault keyset. This operation may involve making
   // challenge request(s) against the specified key.
   //
-  // |key_data| must have the |KEY_TYPE_CHALLENGE_RESPONSE| type.
-  //
-  // |pcr_restrictions| is the list of PCR sets; the created credentials will be
-  // protected in a way that decrypting them back is possible iff at least one
-  // of these sets is satisfied. Each PCR value set must be non-empty; pass
-  // empty list of sets in order to have no PCR binding. The used
-  // SignatureSealingBackend implementation may impose constraint on the maximum
-  // allowed number of sets.
+  // |obfuscated_username| is the obfuscated username; the created credentials
+  // will be protected in a way that decrypting them back is possible iff the
+  // current user is satisfied.
   //
   // The result is reported via |callback|.
   virtual void GenerateNew(
-      const std::string& account_id,
-      const KeyData& key_data,
-      const std::vector<std::map<uint32_t, brillo::Blob>>& pcr_restrictions,
+      const Username& account_id,
+      const SerializedChallengePublicKeyInfo& public_key_info,
+      const ObfuscatedUsername& obfuscated_username,
       std::unique_ptr<KeyChallengeService> key_challenge_service,
       GenerateNewCallback callback) = 0;
 
@@ -104,14 +127,13 @@ class ChallengeCredentialsHelper {
   // supported algorithms may be tolerated in some cases. This operation
   // involves making challenge request(s) against the key.
   //
-  // |key_data| must have the |KEY_TYPE_CHALLENGE_RESPONSE| type.
   // |keyset_challenge_info| is the encrypted representation of secrets as
   // created via GenerateNew().
   // The result is reported via |callback|.
   virtual void Decrypt(
-      const std::string& account_id,
-      const KeyData& key_data,
-      const KeysetSignatureChallengeInfo& keyset_challenge_info,
+      const Username& account_id,
+      const SerializedChallengePublicKeyInfo& public_key_info,
+      const SerializedSignatureChallengeInfo& keyset_challenge_info,
       std::unique_ptr<KeyChallengeService> key_challenge_service,
       DecryptCallback callback) = 0;
 
@@ -120,11 +142,10 @@ class ChallengeCredentialsHelper {
   // against the key. This method is intended as a lightweight analog of
   // Decrypt() for cases where the actual credentials aren't needed.
   //
-  // |key_data| must have the |KEY_TYPE_CHALLENGE_RESPONSE| type.
   // The result is reported via |callback|.
   virtual void VerifyKey(
-      const std::string& account_id,
-      const KeyData& key_data,
+      const Username& account_id,
+      const SerializedChallengePublicKeyInfo& public_key_info,
       std::unique_ptr<KeyChallengeService> key_challenge_service,
       VerifyKeyCallback callback) = 0;
 };

@@ -1,15 +1,18 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "croslog/log_line_reader.h"
 
+#include <iterator>
 #include <string>
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
+#include "base/threading/platform_thread.h"
+#include "base/time/time.h"
 #include "gtest/gtest.h"
 
 #include "croslog/file_map_reader.h"
@@ -27,12 +30,13 @@ const char* kNormalLines[] = {"Lorem ipsum dolor sit amet, consectetur",
                               "reprehenderit in voluptate velit esse cillum",
                               "dolore eu fugiat nulla pariatur."};
 
-const char* kCrazyLines[] = {"",
-                             "   Lorem ipsum dolor sit amet, consectetur",
-                             " adipiscing elit, sed do eiusmod tempor ",
-                             "",
-                             "",
-                             " incididunt ut labore et dolore magna aliqua."};
+const char* kIrregularLines[] = {
+    "",
+    "   Lorem ipsum dolor sit amet, consectetur",
+    " adipiscing elit, sed do eiusmod tempor ",
+    "",
+    "",
+    " incididunt ut labore et dolore magna aliqua."};
 
 const char* kEmptyLines[] = {"", "", "", "", ""};
 
@@ -65,11 +69,10 @@ class LogLineReaderTest : public ::testing::Test,
   bool WaitForChangeEvent(int previous_value) {
     base::RunLoop().RunUntilIdle();
 
-    const int kTinyTimeoutMs = 100;
+    constexpr base::TimeDelta kTinyTimeout = base::Milliseconds(100);
     int max_try = 50;
     while (previous_value == changed_event_receieved_) {
-      base::PlatformThread::Sleep(
-          base::TimeDelta::FromMilliseconds(kTinyTimeoutMs));
+      base::PlatformThread::Sleep(kTinyTimeout);
       base::RunLoop().RunUntilIdle();
       max_try--;
       EXPECT_NE(0u, max_try);
@@ -85,50 +88,58 @@ TEST_F(LogLineReaderTest, Forward) {
     LogLineReader reader(LogLineReader::Backend::FILE);
     reader.OpenFile(base::FilePath("./testdata/TEST_NORMAL_LINES"));
 
-    for (size_t i = 0; i < base::size(kNormalLines); i++) {
-      base::Optional<std::string> s = reader.Forward();
-      EXPECT_TRUE(s.has_value());
-      EXPECT_EQ(kNormalLines[i], s.value());
+    for (const auto& line : kNormalLines) {
+      auto [s, result] = reader.Forward();
+      EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+      EXPECT_EQ(line, s);
     }
 
-    EXPECT_FALSE(reader.Forward().has_value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 
   {
     LogLineReader reader(LogLineReader::Backend::FILE);
-    reader.OpenFile(base::FilePath("./testdata/TEST_CRAZY_LINES"));
+    reader.OpenFile(base::FilePath("./testdata/TEST_IRREGULAR_LINES"));
 
-    for (int i = 0; i < base::size(kCrazyLines); i++) {
-      base::Optional<std::string> s = reader.Forward();
-      EXPECT_TRUE(s.has_value());
-      EXPECT_EQ(kCrazyLines[i], s);
+    for (const auto& line : kIrregularLines) {
+      auto [s, result] = reader.Forward();
+      EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+      EXPECT_EQ(line, s);
     }
 
-    EXPECT_FALSE(reader.Forward().has_value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 
   {
     LogLineReader reader(LogLineReader::Backend::FILE);
     reader.OpenFile(base::FilePath("./testdata/TEST_EMPTY_LINES"));
 
-    for (int i = 0; i < base::size(kEmptyLines); i++) {
-      base::Optional<std::string> s = reader.Forward();
-      EXPECT_TRUE(s.has_value());
-      EXPECT_EQ(kEmptyLines[i], s);
+    for (const auto& line : kEmptyLines) {
+      auto [s, result] = reader.Forward();
+      EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+      EXPECT_EQ(line, s);
     }
 
-    EXPECT_FALSE(reader.Forward().has_value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 
   {
     LogLineReader reader(LogLineReader::Backend::FILE);
     reader.OpenFile(base::FilePath("./testdata/TEST_EMPTY_FILE"));
 
-    EXPECT_FALSE(reader.Forward().has_value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 }
 
@@ -137,70 +148,86 @@ TEST_F(LogLineReaderTest, Backward) {
     LogLineReader reader(LogLineReader::Backend::FILE);
     reader.OpenFile(base::FilePath("./testdata/TEST_NORMAL_LINES"));
 
-    EXPECT_FALSE(reader.Backward().has_value());
-    EXPECT_FALSE(reader.Backward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
 
     reader.SetPositionLast();
 
-    for (int i = base::size(kNormalLines) - 1; i >= 0; i--) {
-      base::Optional<std::string> s = reader.Backward();
-      EXPECT_TRUE(s.has_value());
+    for (int i = std::size(kNormalLines) - 1; i >= 0; i--) {
+      auto [s, result] = reader.Backward();
+      EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
       EXPECT_EQ(kNormalLines[i], s);
     }
 
-    EXPECT_FALSE(reader.Backward().has_value());
-    EXPECT_FALSE(reader.Backward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
   }
 
   {
     LogLineReader reader(LogLineReader::Backend::FILE);
-    reader.OpenFile(base::FilePath("./testdata/TEST_CRAZY_LINES"));
+    reader.OpenFile(base::FilePath("./testdata/TEST_IRREGULAR_LINES"));
 
-    EXPECT_FALSE(reader.Backward().has_value());
-    EXPECT_FALSE(reader.Backward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
 
     reader.SetPositionLast();
 
-    for (int i = base::size(kCrazyLines) - 1; i >= 0; i--) {
-      base::Optional<std::string> s = reader.Backward();
-      EXPECT_TRUE(s.has_value());
-      EXPECT_EQ(kCrazyLines[i], s);
+    for (int i = std::size(kIrregularLines) - 1; i >= 0; i--) {
+      auto [s, result] = reader.Backward();
+      EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+      EXPECT_EQ(kIrregularLines[i], s);
     }
 
-    EXPECT_FALSE(reader.Backward().has_value());
-    EXPECT_FALSE(reader.Backward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
   }
 
   {
     LogLineReader reader(LogLineReader::Backend::FILE);
     reader.OpenFile(base::FilePath("./testdata/TEST_EMPTY_LINES"));
 
-    EXPECT_FALSE(reader.Backward().has_value());
-    EXPECT_FALSE(reader.Backward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
 
     reader.SetPositionLast();
 
-    for (int i = base::size(kEmptyLines) - 1; i >= 0; i--) {
-      base::Optional<std::string> s = reader.Backward();
-      EXPECT_TRUE(s.has_value());
+    for (int i = std::size(kEmptyLines) - 1; i >= 0; i--) {
+      auto [s, result] = reader.Backward();
+      EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
       EXPECT_EQ(kEmptyLines[i], s);
     }
 
-    EXPECT_FALSE(reader.Backward().has_value());
-    EXPECT_FALSE(reader.Backward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
   }
 
   {
     LogLineReader reader(LogLineReader::Backend::FILE);
     reader.OpenFile(base::FilePath("./testdata/TEST_EMPTY_FILE"));
 
-    EXPECT_FALSE(reader.Backward().has_value());
-    EXPECT_FALSE(reader.Backward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
 
     reader.SetPositionLast();
 
-    EXPECT_FALSE(reader.Backward().has_value());
-    EXPECT_FALSE(reader.Backward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Backward()));
   }
 }
 
@@ -208,38 +235,43 @@ TEST_F(LogLineReaderTest, ForwardAndBackward) {
   LogLineReader reader(LogLineReader::Backend::FILE);
   reader.OpenFile(base::FilePath("./testdata/TEST_NORMAL_LINES"));
 
-  for (size_t i = 0; i < base::size(kNormalLines); i++) {
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
+  for (const auto& line : kNormalLines) {
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(line, s);
+  }
+
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
+
+  for (int i = std::size(kNormalLines) - 1; i >= 0; i--) {
+    auto [s, result] = reader.Backward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
     EXPECT_EQ(kNormalLines[i], s);
   }
 
-  EXPECT_FALSE(reader.Forward().has_value());
-  EXPECT_FALSE(reader.Forward().has_value());
-
-  for (int i = base::size(kNormalLines) - 1; i >= 0; i--) {
-    base::Optional<std::string> s = reader.Backward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(kNormalLines[i], s);
-  }
-
-  EXPECT_FALSE(reader.Backward().has_value());
-  EXPECT_FALSE(reader.Backward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Backward()));
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Backward()));
 }
 
 TEST_F(LogLineReaderTest, AppendingLines) {
   LogLineReader reader(LogLineReader::Backend::MEMORY_FOR_TEST);
   reader.OpenMemoryBufferForTest("", 0);
 
-  for (size_t i = 0; i < base::size(kAppendingLines); i++) {
-    const char* logFileContent = kAppendingLines[i][1];
+  for (const auto& line : kAppendingLines) {
+    const char* logFileContent = line[1];
     reader.OpenMemoryBufferForTest(logFileContent, strlen(logFileContent));
 
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(kAppendingLines[i][0], s);
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(line[0], s);
 
-    EXPECT_FALSE(reader.Forward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 }
 
@@ -276,8 +308,10 @@ TEST_F(LogLineReaderTest, ReadEmptyFile) {
   reader.OpenFile(temp_path);
 
   // Nothing to be read, since the file is empty.
-  EXPECT_FALSE(reader.Forward().has_value());
-  EXPECT_FALSE(reader.Forward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
 }
 
 TEST_F(LogLineReaderTest, ReadFileBeingWritten) {
@@ -294,7 +328,8 @@ TEST_F(LogLineReaderTest, ReadFileBeingWritten) {
 
   base::File file(temp_path, base::File::FLAG_OPEN | base::File::FLAG_WRITE);
   // Nothing to be read, since the file is empty.
-  EXPECT_FALSE(reader.Forward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
 
   // Write and read
   {
@@ -306,10 +341,11 @@ TEST_F(LogLineReaderTest, ReadFileBeingWritten) {
               test_string_with_lf.length());
     WaitForChangeEvent(previous_change_event_counter);
 
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string, s.value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string, s);
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 
   // Write and read
@@ -322,10 +358,11 @@ TEST_F(LogLineReaderTest, ReadFileBeingWritten) {
               test_string_with_lf.length());
     WaitForChangeEvent(previous_change_event_counter);
 
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string, s.value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string, s);
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 
   reader.RemoveObserver(this);
@@ -343,7 +380,8 @@ TEST_F(LogLineReaderTest, ReadFileRotated) {
 
   base::File file(temp_path, base::File::FLAG_OPEN | base::File::FLAG_WRITE);
   // Nothing to be read, since the file is empty.
-  EXPECT_FALSE(reader.Forward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
 
   // Write and read
   {
@@ -355,10 +393,11 @@ TEST_F(LogLineReaderTest, ReadFileRotated) {
               test_string1_with_lf.length());
     WaitForChangeEvent(previous_change_event_counter);
 
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string1, s.value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string1, s);
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 
   // Rotate
@@ -374,7 +413,8 @@ TEST_F(LogLineReaderTest, ReadFileRotated) {
                       base::File::FLAG_OPEN_ALWAYS | base::File::FLAG_WRITE);
     EXPECT_TRUE(file.IsValid());
     // Nothing to be read, since the new file is empty.
-    EXPECT_FALSE(reader.Forward().has_value());
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 
   // Write and read
@@ -387,10 +427,11 @@ TEST_F(LogLineReaderTest, ReadFileRotated) {
               test_string2_with_lf.length());
     WaitForChangeEvent(previous_change_event_counter);
 
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string2, s.value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string2, s);
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
   reader.RemoveObserver(this);
 }
@@ -444,19 +485,20 @@ TEST_F(LogLineReaderTest, ReadFileRotatedMisorder) {
 
   // First read, should be from the first file.
   {
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string1, s.value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string1, s);
   }
 
   // First read, should be from the second file.
   {
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string2, s.value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string2, s);
   }
 
-  EXPECT_FALSE(reader.Forward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
 
   reader.RemoveObserver(this);
 }
@@ -512,19 +554,20 @@ TEST_F(LogLineReaderTest, ReadFileRotatedWithoutLf) {
 
   // First read, should be from the first file.
   {
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string1, s.value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string1, s);
   }
 
   // First read, should be from the second file.
   {
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string2, s.value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string2, s);
   }
 
-  EXPECT_FALSE(reader.Forward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
 
   reader.RemoveObserver(this);
 }
@@ -552,11 +595,12 @@ TEST_F(LogLineReaderTest, ReadLarge) {
   for (int i = 0; i < (10 * 1024); i++) {
     std::string test_string = base::StringPrintf("%019d", i);
 
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string, s.value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string, s);
   }
-  EXPECT_FALSE(reader.Forward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
 }
 
 TEST_F(LogLineReaderTest, ReadLargeAppend) {
@@ -572,7 +616,8 @@ TEST_F(LogLineReaderTest, ReadLargeAppend) {
 
   base::File file(temp_path, base::File::FLAG_OPEN | base::File::FLAG_WRITE);
   // Nothing to be read, since the file is empty.
-  EXPECT_FALSE(reader.Forward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
 
   // Write and read
   for (int i = 0; i < 10; i++) {
@@ -586,13 +631,15 @@ TEST_F(LogLineReaderTest, ReadLargeAppend) {
               test_string_with_lf.length());
     WaitForChangeEvent(previous_change_event_counter);
 
-    base::Optional<std::string> s = reader.Forward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string, s.value());
-    EXPECT_FALSE(reader.Forward().has_value());
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string, s);
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+              std::get<1>(reader.Forward()));
   }
 
-  EXPECT_FALSE(reader.Forward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Forward()));
   reader.RemoveObserver(this);
 }
 
@@ -620,11 +667,101 @@ TEST_F(LogLineReaderTest, ReadLargeBackward) {
   for (int i = 10 * 1024 - 1; i >= 0; i--) {
     std::string test_string = base::StringPrintf("%019d", i);
 
-    base::Optional<std::string> s = reader.Backward();
-    EXPECT_TRUE(s.has_value());
-    EXPECT_EQ(test_string, s.value());
+    auto [s, result] = reader.Backward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ(test_string, s);
   }
-  EXPECT_FALSE(reader.Backward().has_value());
+  EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS,
+            std::get<1>(reader.Backward()));
+}
+
+TEST_F(LogLineReaderTest, ForwardAfterTruncationToEmpty) {
+  LogLineReader reader(LogLineReader::Backend::MEMORY_FOR_TEST);
+  const char* kInitialFileContent = "AAAA\nBBBB\n";
+  reader.OpenMemoryBufferForTest(kInitialFileContent,
+                                 strlen(kInitialFileContent));
+
+  {
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ("AAAA", s);
+  }
+
+  reader.OpenMemoryBufferForTest("", 0);
+  {
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::ERROR_FILE_TRUNCATED, result);
+    EXPECT_TRUE(s.empty());
+  }
+}
+
+TEST_F(LogLineReaderTest, BackwardAfterTruncationToEmpty) {
+  LogLineReader reader(LogLineReader::Backend::MEMORY_FOR_TEST);
+  const char* kInitialFileContent = "AAAA\nBBBB\n";
+  reader.OpenMemoryBufferForTest(kInitialFileContent,
+                                 strlen(kInitialFileContent));
+
+  {
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ("AAAA", s);
+  }
+
+  reader.OpenMemoryBufferForTest("", 0);
+  {
+    auto [s, result] = reader.Backward();
+    EXPECT_EQ(LogLineReader::ReadResult::ERROR_FILE_TRUNCATED, result);
+    EXPECT_TRUE(s.empty());
+  }
+}
+
+TEST_F(LogLineReaderTest, ForwardAfterTruncation) {
+  LogLineReader reader(LogLineReader::Backend::MEMORY_FOR_TEST);
+  const char* kInitialFileContent1 = "AAAA\nBBBB\n";
+  reader.OpenMemoryBufferForTest(kInitialFileContent1,
+                                 strlen(kInitialFileContent1));
+  {
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ("AAAA", s);
+  }
+
+  const char* kInitialFileContent2 = "AAAA\n";
+  reader.OpenMemoryBufferForTest(kInitialFileContent2,
+                                 strlen(kInitialFileContent2));
+  {
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_MORE_LOGS, result);
+    EXPECT_TRUE(s.empty());
+  }
+}
+
+TEST_F(LogLineReaderTest, BackwardAfterTruncation) {
+  LogLineReader reader(LogLineReader::Backend::MEMORY_FOR_TEST);
+  const char* kInitialFileContent1 = "AAAA\nBBBB\n";
+  reader.OpenMemoryBufferForTest(kInitialFileContent1,
+                                 strlen(kInitialFileContent1));
+
+  {
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ("AAAA", s);
+  }
+
+  {
+    auto [s, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    EXPECT_EQ("BBBB", s);
+  }
+
+  const char* kInitialFileContent2 = "AAAA\n";
+  reader.OpenMemoryBufferForTest(kInitialFileContent2,
+                                 strlen(kInitialFileContent2));
+  {
+    auto [s, result] = reader.Backward();
+    EXPECT_EQ(LogLineReader::ReadResult::ERROR_FILE_TRUNCATED, result);
+    EXPECT_TRUE(s.empty());
+  }
 }
 
 }  // namespace croslog

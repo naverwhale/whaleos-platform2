@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,14 +24,14 @@ class Environment {
 class FakeAresClient : public AresClient {
  public:
   explicit FakeAresClient(FuzzedDataProvider* provider)
-      : AresClient(base::TimeDelta::FromSeconds(1), 1, 1),
-        provider_(provider) {}
+      : AresClient(base::Seconds(1)), provider_(provider) {}
   ~FakeAresClient() = default;
 
   bool Resolve(const unsigned char* msg,
                size_t len,
                const AresClient::QueryCallback& callback,
-               void* ctx) override {
+               const std::string& name_server,
+               int type) override {
     return provider_->ConsumeBool();
   }
 
@@ -47,11 +47,10 @@ class FakeCurlClient : public DoHCurlClientInterface {
   bool Resolve(const char*,
                int,
                const DoHCurlClient::QueryCallback&,
-               void*) override {
+               const std::vector<std::string>&,
+               const std::string&) override {
     return provider_->ConsumeBool();
   }
-  void SetNameServers(const std::vector<std::string>&) override {}
-  void SetDoHProviders(const std::vector<std::string>&) override {}
 
  private:
   FuzzedDataProvider* provider_;

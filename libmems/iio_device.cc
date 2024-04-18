@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,28 +6,66 @@
 
 #include <stdlib.h>
 
+#include <optional>
+
+#include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 
 #include "libmems/common_types.h"
 #include "libmems/iio_channel.h"
+#include "libmems/iio_event.h"
 
 namespace libmems {
 
 IioDevice::~IioDevice() = default;
 
+std::optional<base::FilePath> IioDevice::GetAbsoluteSysPath() const {
+  base::FilePath iio_path(GetPath());
+  base::FilePath sys_path;
+  if (base::ReadSymbolicLink(iio_path, &sys_path)) {
+    if (sys_path.IsAbsolute()) {
+      return sys_path;
+
+    } else {
+      base::FilePath result = iio_path.DirName();
+      result = result.Append(sys_path);
+
+      return base::MakeAbsoluteFilePath(result);
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::optional<std::string> IioDevice::GetLocation() const {
+  auto label = ReadStringAttribute(kLabelAttr);
+  if (label.has_value()) {
+    if (label->find("-base") != std::string::npos)
+      return "base";
+
+    if (label->find("-display") != std::string::npos)
+      return "lid";
+
+    if (label->find("-camera") != std::string::npos)
+      return "camera";
+  }
+
+  return ReadStringAttribute(kLocationAttr);
+}
+
 bool IioDevice::IsSingleSensor() const {
-  return ReadStringAttribute("location").has_value();
+  return ReadStringAttribute(kLocationAttr).has_value();
 }
 
 // static
-base::Optional<int> IioDevice::GetIdAfterPrefix(const char* id_str,
-                                                const char* prefix) {
+std::optional<int> IioDevice::GetIdAfterPrefix(const char* id_str,
+                                               const char* prefix) {
   size_t id_len = strlen(id_str);
   size_t prefix_len = strlen(prefix);
   if (id_len <= prefix_len || strncmp(id_str, prefix, prefix_len) != 0) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   int value = 0;
@@ -35,7 +73,7 @@ base::Optional<int> IioDevice::GetIdAfterPrefix(const char* id_str,
   if (success)
     return value;
 
-  return base::nullopt;
+  return std::nullopt;
 }
 
 std::vector<IioChannel*> IioDevice::GetAllChannels() {
@@ -67,6 +105,28 @@ IioChannel* IioDevice::GetChannel(const std::string& name) {
   }
 
   return nullptr;
+}
+
+std::vector<IioEvent*> IioDevice::GetAllEvents() {
+  std::vector<IioEvent*> events;
+  for (const auto& event : events_)
+    events.push_back(event.get());
+
+  return events;
+}
+
+void IioDevice::EnableAllEvents() {
+  for (const auto& event : events_) {
+    if (!event->SetEnabledAndCheck(true))
+      LOG(ERROR) << "Failed to enable event: " << event->GetChannelNumber();
+  }
+}
+
+IioEvent* IioDevice::GetEvent(int32_t index) {
+  if (index < 0 || index >= events_.size())
+    return nullptr;
+
+  return events_[index].get();
 }
 
 bool IioDevice::GetMinMaxFrequency(double* min_freq, double* max_freq) {

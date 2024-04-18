@@ -1,11 +1,13 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MINIOS_SHILL_PROXY_H_
 #define MINIOS_SHILL_PROXY_H_
 
-#include <base/callback.h>
+#include <string>
+
+#include <base/functional/callback.h>
 #include <brillo/errors/error.h>
 #include <brillo/variant_dictionary.h>
 #include <shill/dbus-proxies.h>
@@ -22,7 +24,7 @@ class ShillProxy : public ShillProxyInterface {
   ShillProxy(const ShillProxy&) = delete;
   ShillProxy& operator=(const ShillProxy&) = delete;
 
-  void ManagerRequestScan(const WifiTechnologyType& technology,
+  void ManagerRequestScan(const std::string& technology,
                           OnManagerRequestScanSuccess success_callback,
                           OnManagerRequestScanError error_callback) override;
 

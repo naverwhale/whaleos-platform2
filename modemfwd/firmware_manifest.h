@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,19 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/optional.h>
 
 #include "modemfwd/firmware_file_info.h"
 
-#include "modemfwd/proto_bindings/firmware_manifest.pb.h"
+#include "modemfwd/proto_bindings/firmware_manifest_v2.pb.h"
 
 namespace modemfwd {
 
-base::Optional<FirmwareFileInfo::Compression> ToFirmwareFileInfoCompression(
+std::optional<FirmwareFileInfo::Compression> ToFirmwareFileInfoCompression(
     Compression compression);
 
 struct DeviceType {
@@ -47,15 +47,18 @@ struct DeviceFirmwareCache {
   CarrierIndex main_firmware;
   CarrierIndex carrier_firmware;
   CarrierIndex oem_firmware;
+
+  // Map of tag -> firmware files
+  using AssociatedFirmware = std::map<std::string, FirmwareFileInfo*>;
+  // Associated firmware should be keyed on a main firmware file.
+  std::map<FirmwareFileInfo*, AssociatedFirmware> assoc_firmware;
 };
 
 using FirmwareIndex = std::map<DeviceType, DeviceFirmwareCache>;
 
-bool ParseFirmwareManifest(const base::FilePath& manifest,
-                           FirmwareIndex* index);
-
-bool ParseFirmwareManifestV2(const base::FilePath& manifest,
-                             FirmwareIndex* index);
+std::unique_ptr<FirmwareIndex> ParseFirmwareManifestV2(
+    const base::FilePath& manifest,
+    std::map<std::string, Dlc>& dlc_per_variant);
 
 }  // namespace modemfwd
 

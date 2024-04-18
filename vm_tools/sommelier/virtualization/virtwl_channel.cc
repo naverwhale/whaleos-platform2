@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,8 +27,8 @@ VirtWaylandChannel::~VirtWaylandChannel() {
 int32_t VirtWaylandChannel::init() {
   virtwl_ = open(VIRTWL_DEVICE, O_RDWR);
   int32_t ret;
-  struct WaylandBufferCreateInfo create_info = {0};
-  struct WaylandBufferCreateOutput create_output = {0};
+  struct WaylandBufferCreateInfo create_info = {};
+  struct WaylandBufferCreateOutput create_output = {};
   create_output.fd = -1;
 
   if (virtwl_ == -1)
@@ -53,7 +53,7 @@ int32_t VirtWaylandChannel::init() {
   return 0;
 }
 
-bool VirtWaylandChannel::supports_dmabuf(void) {
+bool VirtWaylandChannel::supports_dmabuf() {
   return supports_dmabuf_;
 }
 
@@ -163,7 +163,7 @@ int32_t VirtWaylandChannel::allocate(
     const struct WaylandBufferCreateInfo& create_info,
     struct WaylandBufferCreateOutput& create_output) {
   int ret;
-  struct virtwl_ioctl_new ioctl_new = {0};
+  struct virtwl_ioctl_new ioctl_new = {};
 
   if (create_info.dmabuf) {
     ioctl_new.type = VIRTWL_IOCTL_NEW_DMABUF;
@@ -203,7 +203,7 @@ int32_t VirtWaylandChannel::allocate(
 }
 
 int32_t VirtWaylandChannel::sync(int dmabuf_fd, uint64_t flags) {
-  struct virtwl_ioctl_dmabuf_sync sync = {0};
+  struct virtwl_ioctl_dmabuf_sync sync = {};
   int ret;
 
   sync.flags = flags;
@@ -220,6 +220,6 @@ int32_t VirtWaylandChannel::handle_pipe(int read_fd,
   return 0;
 }
 
-size_t VirtWaylandChannel::max_send_size(void) {
+size_t VirtWaylandChannel::max_send_size() {
   return MAX_SEND_SIZE;
 }

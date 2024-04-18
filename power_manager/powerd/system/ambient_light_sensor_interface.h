@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,15 @@
 
 #include "power_manager/powerd/system/ambient_light_observer.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class AmbientLightSensorInterface {
  public:
-  AmbientLightSensorInterface() {}
+  AmbientLightSensorInterface() = default;
   AmbientLightSensorInterface(const AmbientLightSensorInterface&) = delete;
   AmbientLightSensorInterface& operator=(const AmbientLightSensorInterface&) =
       delete;
-  virtual ~AmbientLightSensorInterface() {}
+  virtual ~AmbientLightSensorInterface() = default;
 
   // Adds or removes observers for sensor readings.
   virtual void AddObserver(AmbientLightObserver* observer) = 0;
@@ -40,7 +39,6 @@ class AmbientLightSensorInterface {
   virtual base::FilePath GetIlluminancePath() const = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_AMBIENT_LIGHT_SENSOR_INTERFACE_H_

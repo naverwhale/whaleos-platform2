@@ -1,10 +1,8 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <libmtp.h>
-
-#include <base/macros.h>
 
 #include "system_api/proto_bindings/mtp_file_entry.pb.h"
 

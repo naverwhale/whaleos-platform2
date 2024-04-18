@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,10 @@
 #define POWER_MANAGER_POWERD_SYSTEM_CROS_EC_HELPER_H_
 
 #include <base/files/file_util.h>
-#include <base/macros.h>
 
 #include "power_manager/powerd/system/cros_ec_helper_interface.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class CrosEcHelper : public CrosEcHelperInterface {
  public:
@@ -19,7 +17,7 @@ class CrosEcHelper : public CrosEcHelperInterface {
   CrosEcHelper(const CrosEcHelper&) = delete;
   CrosEcHelper& operator=(const CrosEcHelper&) = delete;
 
-  ~CrosEcHelper() override;
+  ~CrosEcHelper() override = default;
 
   // Implementation of EcHelperInterface.
   bool IsWakeAngleSupported() override;
@@ -34,7 +32,6 @@ class CrosEcHelper : public CrosEcHelperInterface {
   base::FilePath wake_angle_sysfs_node_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_CROS_EC_HELPER_H_

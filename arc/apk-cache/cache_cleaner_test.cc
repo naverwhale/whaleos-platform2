@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,7 @@
 #include <base/files/scoped_temp_dir.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
+#include <brillo/files/file_util.h>
 #include <gtest/gtest.h>
 
 namespace apk_cache {
@@ -28,7 +29,7 @@ bool CreateFile(const base::FilePath& file_path) {
 }
 
 bool DeleteFile(const base::FilePath& file_path) {
-  return base::DeleteFile(file_path);
+  return brillo::DeleteFile(file_path);
 }
 
 bool CreateDir(const base::FilePath& dir_path) {
@@ -301,14 +302,12 @@ TEST_F(CacheCleanerTest, PatchObbNameMismatch) {
 TEST_F(CacheCleanerTest, Outdated) {
   // Package0 is expired. Should be deleted.
   ASSERT_TRUE(CreateValidPackage(temp_path(), kPackage0));
-  base::Time atime_0 =
-      base::Time::Now() - (kValidityPeriod + base::TimeDelta::FromDays(1));
+  base::Time atime_0 = base::Time::Now() - (kValidityPeriod + base::Days(1));
   WriteAttributes(temp_path().Append(kPackage0), kPackage0, atime_0);
 
   // Package1 is 1 more day before expire. Should not be deleted.
   ASSERT_TRUE(CreateValidPackage(temp_path(), kPackage1));
-  base::Time atime_1 =
-      base::Time::Now() - (kValidityPeriod - base::TimeDelta::FromDays(1));
+  base::Time atime_1 = base::Time::Now() - (kValidityPeriod - base::Days(1));
   WriteAttributes(temp_path().Append(kPackage1), kPackage1, atime_1);
 
   EXPECT_TRUE(Clean(temp_path()));
@@ -355,8 +354,7 @@ TEST_F(CacheCleanerTest, Combined) {
   ASSERT_TRUE(CreateValidPackage(temp_path(), kPackage0));
 
   ASSERT_TRUE(CreateValidPackage(temp_path(), kPackage1));
-  base::Time atime =
-      base::Time::Now() - (kValidityPeriod + base::TimeDelta::FromDays(1));
+  base::Time atime = base::Time::Now() - (kValidityPeriod + base::Days(1));
   WriteAttributes(temp_path().Append(kPackage1), kPackage1, atime);
 
   ASSERT_TRUE(CreateFile(temp_path().Append("odd.file")));

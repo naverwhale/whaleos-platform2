@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 
 #include <gmock/gmock.h>
 
+#include "shill/bluetooth/mock_bluetooth_manager_proxy.h"
 #include "shill/mock_adaptors.h"
 
 using testing::NiceMock;
@@ -55,22 +56,34 @@ MockControl::CreateThirdPartyVpnAdaptor(ThirdPartyVpnDriver* /*driver*/) {
 }
 #endif
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 std::unique_ptr<SupplicantProcessProxyInterface>
-MockControl::CreateSupplicantProcessProxy(const base::Closure& appear,
-                                          const base::Closure& vanish) {
+MockControl::CreateSupplicantProcessProxy(
+    const base::RepeatingClosure& appear,
+    const base::RepeatingClosure& vanish) {
   supplicant_appear_ = appear;
   supplicant_vanish_ = vanish;
   return std::make_unique<NiceMock<MockSupplicantProcessProxy>>();
 }
 
-const base::Closure& MockControl::supplicant_appear() const {
+const base::RepeatingClosure& MockControl::supplicant_appear() const {
   return supplicant_appear_;
 }
 
-const base::Closure& MockControl::supplicant_vanish() const {
+const base::RepeatingClosure& MockControl::supplicant_vanish() const {
   return supplicant_vanish_;
 }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
+#if !defined(DISABLE_FLOSS)
+std::unique_ptr<BluetoothManagerProxyInterface>
+MockControl::CreateBluetoothManagerProxy(
+    const base::RepeatingClosure& service_appeared_callback) {
+  bt_manager_appear_ = service_appeared_callback;
+  return std::make_unique<NiceMock<MockBluetoothManagerProxy>>();
+}
+
+const base::RepeatingClosure& MockControl::bluetooth_manager_appear() const {
+  return bt_manager_appear_;
+}
+
+#endif  // DISABLE_FLOSS
 }  // namespace shill

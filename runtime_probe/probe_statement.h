@@ -1,17 +1,17 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef RUNTIME_PROBE_PROBE_STATEMENT_H_
 #define RUNTIME_PROBE_PROBE_STATEMENT_H_
 
-#include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
-#include <vector>
 
+#include <base/functional/callback.h>
 #include <base/values.h>
 #include <gtest/gtest.h>
 
@@ -44,37 +44,54 @@ class ProbeStatement {
   //
   // When evaluating a ProbeStatement, the ProbeFunction defined by "eval" will
   // be called.  The results will be filtered / processed by "keys" and "expect"
-  // rules.  See ProbeStatement::Eval() for more details.
+  // rules.  See ProbeStatement::Eval for more details.
  public:
+  virtual ~ProbeStatement() = default;
+
   static std::unique_ptr<ProbeStatement> FromValue(std::string component_name,
                                                    const base::Value& dv);
 
   // Evaluate the probe statement.
   //
   // The process can be break into following steps:
-  // - Call probe function |eval_|
+  // - Call probe function |probe_function_|
   // - Filter results by |key_|  (if |key_| is not empty)
   // - Transform and check results by |expect_|  (if |expect_| is not empty)
   // - Return final results that passed |expect_| check.
-  ProbeFunction::DataType Eval() const;
+  virtual void Eval(
+      base::OnceCallback<void(ProbeFunction::DataType)> callback) const;
 
-  base::Optional<base::Value> GetInformation() const {
+  virtual std::optional<base::Value> GetInformation() const {
     if (information_)
       return information_->Clone();
-    return base::nullopt;
+    return std::nullopt;
   }
 
- private:
+  // Gets pointer to the probe function or nullptr on failure.
+  const ProbeFunction* probe_function() const { return probe_function_.get(); }
+
+  // Set mocked probe function for testing.
+  void SetProbeFunctionForTesting(
+      std::unique_ptr<ProbeFunction> probe_function) {
+    probe_function_ = std::move(probe_function);
+  }
+
+  // Set mocked expect value for testing.
+  void SetExpectForTesting(base::Value expect_value) {
+    expect_value_ = std::move(expect_value);
+  }
+
+ protected:
   ProbeStatement() = default;
 
+ private:
   std::string component_name_;
-  std::unique_ptr<ProbeFunction> eval_;
+  std::unique_ptr<ProbeFunction> probe_function_;
   std::set<std::string> key_;
-  std::unique_ptr<ProbeResultChecker> expect_;
-  base::Optional<base::Value> information_;
+  std::optional<base::Value> expect_value_;
+  std::optional<base::Value> information_;
 
   FRIEND_TEST(ProbeConfigTest, LoadConfig);
-  FRIEND_TEST(ProbeStatementTest, TestEval);
 };
 
 }  // namespace runtime_probe

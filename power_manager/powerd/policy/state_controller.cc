@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,10 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/strings/string_number_conversions.h>
@@ -24,49 +24,53 @@
 #include <chromeos/ec/ec_commands.h>
 #include <update_engine/proto_bindings/update_engine.pb.h>
 
+#include "base/time/time.h"
 #include "power_manager/common/clock.h"
+#include "power_manager/common/metrics_constants.h"
 #include "power_manager/common/power_constants.h"
 #include "power_manager/common/prefs.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/common/util.h"
 #include "power_manager/powerd/system/cros_ec_device_event.h"
 #include "power_manager/powerd/system/dbus_wrapper.h"
 #include "power_manager/proto_bindings/idle.pb.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
 // Time to wait for display mode change after resuming with lid still closed
 // before triggering idle and lid closed action (crbug.com/786721).
-constexpr base::TimeDelta KWaitForExternalDisplayTimeout =
-    base::TimeDelta::FromSeconds(25);
+constexpr base::TimeDelta KWaitForExternalDisplayTimeout = base::Seconds(25);
 
 // Time to wait for the display mode and policy after Init() is called.
-constexpr base::TimeDelta kInitialStateTimeout =
-    base::TimeDelta::FromSeconds(10);
+constexpr base::TimeDelta kInitialStateTimeout = base::Seconds(10);
 
 // Time to wait for the crash-boot-collect to successfully complete.
-constexpr base::TimeDelta kCrashBootCollectTimeout =
-    base::TimeDelta::FromMinutes(1);
+constexpr base::TimeDelta kCrashBootCollectTimeout = base::Minutes(1);
 
 // Time to wait for responses to D-Bus method calls to update_engine.
-constexpr base::TimeDelta kUpdateEngineDBusTimeout =
-    base::TimeDelta::FromSeconds(3);
+constexpr base::TimeDelta kUpdateEngineDBusTimeout = base::Seconds(3);
 
 // Interval between logging the list of current wake locks.
-constexpr base::TimeDelta kWakeLocksLoggingInterval =
-    base::TimeDelta::FromMinutes(5);
+constexpr base::TimeDelta kWakeLocksLoggingInterval = base::Minutes(5);
 
 // File used by crash_reporter to signal successful collection of per-boot crash
 // logs.
 constexpr char kCrashBootCollectorDoneFile[] =
     "/run/crash_reporter/boot-collector-done";
 
+// A screen dim will be deferred by hps if `hps_result_` is POSITIVE longer than
+// kHpsPositiveForDimDefer * delays_.screen_dim
+constexpr float kHpsPositiveForDimDefer = 0.5;
+
+// How many times hps is allowed to defer the dimming continuously.
+constexpr int kNTimesForHpsToDeferDimming = 2;
+
 // Returns |time_ms|, a time in milliseconds, as a
 // util::TimeDeltaToString()-style string.
 std::string MsToString(int64_t time_ms) {
-  return util::TimeDeltaToString(base::TimeDelta::FromMilliseconds(time_ms));
+  return util::TimeDeltaToString(base::Milliseconds(time_ms));
 }
 
 // Returns the minimum positive value after comparing |a| and |b|.  If one
@@ -113,8 +117,8 @@ void UpdateActionTimeout(base::TimeTicks now,
 //   that the action can be performed later.
 void HandleDelay(base::TimeDelta delay,
                  base::TimeDelta inactivity_duration,
-                 base::Closure callback,
-                 base::Closure undo_callback,
+                 base::OnceClosure callback,
+                 base::OnceClosure undo_callback,
                  const std::string& description,
                  const std::string& undo_description,
                  bool* action_already_performed) {
@@ -122,13 +126,13 @@ void HandleDelay(base::TimeDelta delay,
     if (!*action_already_performed) {
       LOG(INFO) << description << " after "
                 << util::TimeDeltaToString(inactivity_duration);
-      callback.Run();
+      std::move(callback).Run();
       *action_already_performed = true;
     }
   } else if (*action_already_performed) {
     if (!undo_callback.is_null()) {
       LOG(INFO) << undo_description;
-      undo_callback.Run();
+      std::move(undo_callback).Run();
     }
     *action_already_performed = false;
   }
@@ -146,7 +150,7 @@ bool GetMillisecondPref(PrefsInterface* prefs,
   if (!prefs->GetInt64(name, &int_value))
     return false;
 
-  *out = base::TimeDelta::FromMilliseconds(int_value);
+  *out = base::Milliseconds(int_value);
   return true;
 }
 
@@ -157,10 +161,14 @@ std::string GetPolicyDelaysDebugString(
   std::string str;
   if (delays.has_screen_dim_ms())
     str += prefix + "_dim=" + MsToString(delays.screen_dim_ms()) + " ";
+  if (delays.has_quick_dim_ms())
+    str += prefix + "_quick_dim=" + MsToString(delays.quick_dim_ms()) + " ";
   if (delays.has_screen_off_ms())
     str += prefix + "_screen_off=" + MsToString(delays.screen_off_ms()) + " ";
   if (delays.has_screen_lock_ms())
     str += prefix + "_lock=" + MsToString(delays.screen_lock_ms()) + " ";
+  if (delays.has_quick_lock_ms())
+    str += prefix + "_quick_lock=" + MsToString(delays.quick_lock_ms()) + " ";
   if (delays.has_idle_warning_ms())
     str += prefix + "_idle_warn=" + MsToString(delays.idle_warning_ms()) + " ";
   if (delays.has_idle_ms())
@@ -236,7 +244,8 @@ bool StateController::Delays::operator!=(
   // based solely on screen_dim.
   return idle != o.idle || idle_warning != o.idle_warning ||
          screen_off != o.screen_off || screen_dim != o.screen_dim ||
-         screen_lock != o.screen_lock;
+         screen_lock != o.screen_lock || quick_dim != o.quick_dim ||
+         quick_lock != o.quick_lock;
 }
 
 class StateController::ActivityInfo {
@@ -280,6 +289,7 @@ class StateController::ActivityInfo {
 };
 
 constexpr base::TimeDelta StateController::kScreenDimImminentInterval;
+constexpr base::TimeDelta StateController::kDeferDimmingTimeLimit;
 
 // static
 std::string StateController::GetPolicyDebugString(
@@ -341,7 +351,10 @@ std::string StateController::GetPolicyDebugString(
                policy.force_nonzero_brightness_for_user_activity()) +
            " ";
   }
-
+  if (policy.has_send_feedback_if_undimmed()) {
+    str += "send_feedback_if_undimmed=" +
+           base::NumberToString(policy.send_feedback_if_undimmed()) + " ";
+  }
   if (policy.has_reason())
     str += "(" + policy.reason() + ")";
 
@@ -355,7 +368,6 @@ StateController::StateController()
       dim_wake_lock_(std::make_unique<ActivityInfo>()),
       system_wake_lock_(std::make_unique<ActivityInfo>()),
       wake_lock_logger_(kWakeLocksLoggingInterval),
-      smart_dim_requestor_(new SmartDimRequestor()),
       weak_ptr_factory_(this) {}
 
 StateController::~StateController() {
@@ -376,26 +388,24 @@ void StateController::Init(Delegate* delegate,
   dbus_wrapper_ = dbus_wrapper;
   dbus_wrapper->ExportMethod(
       kGetInactivityDelaysMethod,
-      base::Bind(&StateController::HandleGetInactivityDelaysMethodCall,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(&StateController::HandleGetInactivityDelaysMethodCall,
+                          weak_ptr_factory_.GetWeakPtr()));
 
   update_engine_dbus_proxy_ =
       dbus_wrapper_->GetObjectProxy(update_engine::kUpdateEngineServiceName,
                                     update_engine::kUpdateEngineServicePath);
   dbus_wrapper_->RegisterForServiceAvailability(
       update_engine_dbus_proxy_,
-      base::Bind(&StateController::HandleUpdateEngineAvailable,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindOnce(&StateController::HandleUpdateEngineAvailable,
+                     weak_ptr_factory_.GetWeakPtr()));
   dbus_wrapper_->RegisterForSignal(
       update_engine_dbus_proxy_, update_engine::kUpdateEngineInterface,
       update_engine::kStatusUpdateAdvanced,
-      base::Bind(&StateController::HandleUpdateEngineStatusUpdateSignal,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(
+          &StateController::HandleUpdateEngineStatusUpdateSignal,
+          weak_ptr_factory_.GetWeakPtr()));
 
-  smart_dim_requestor_->Init(
-      dbus_wrapper_,
-      base::BindRepeating(&StateController::HandleDeferFromSmartDim,
-                          weak_ptr_factory_.GetWeakPtr()));
+  dim_advisor_.Init(dbus_wrapper_, this);
 
   last_user_activity_time_ = clock_->GetCurrentTime();
   power_source_ = power_source;
@@ -407,8 +417,9 @@ void StateController::Init(Delegate* delegate,
   crash_boot_collector_watcher_.Watch(
       base::FilePath(kCrashBootCollectorDoneFile),
       base::FilePathWatcher::Type::kNonRecursive,
-      base::Bind(&StateController::MaybeStopWaitForCrashBootCollectTimer,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(
+          &StateController::MaybeStopWaitForCrashBootCollectTimer,
+          weak_ptr_factory_.GetWeakPtr()));
 
   wait_for_crash_boot_collect_timer_.Start(
       FROM_HERE, kCrashBootCollectTimeout, this,
@@ -424,7 +435,10 @@ void StateController::Init(Delegate* delegate,
 }
 
 void StateController::HandlePowerSourceChange(PowerSource source) {
+  TRACE_EVENT("power", "StateController::HandlePowerSourceChange", "source",
+              source);
   CHECK(initialized_);
+
   if (source == power_source_)
     return;
 
@@ -434,6 +448,7 @@ void StateController::HandlePowerSourceChange(PowerSource source) {
 }
 
 void StateController::HandleLidStateChange(LidState state) {
+  TRACE_EVENT("power", "StateController::HandleLidStateChange", "state", state);
   CHECK(initialized_);
   if (state == lid_state_)
     return;
@@ -455,6 +470,7 @@ void StateController::HandleSleepButtonPress() {
 }
 
 void StateController::HandleTabletModeChange(TabletMode mode) {
+  TRACE_EVENT("power", "StateController::HandleTabletModeChange", "mode", mode);
   DCHECK(initialized_);
 
   // We don't care about the mode, but we treat events as user activity.
@@ -463,6 +479,8 @@ void StateController::HandleTabletModeChange(TabletMode mode) {
 }
 
 void StateController::HandleSessionStateChange(SessionState state) {
+  TRACE_EVENT("power", "StateController::HandleSessionStateChange", "state",
+              state);
   CHECK(initialized_);
   if (state == session_state_)
     return;
@@ -475,6 +493,8 @@ void StateController::HandleSessionStateChange(SessionState state) {
 }
 
 void StateController::HandleDisplayModeChange(DisplayMode mode) {
+  TRACE_EVENT("power", "StateController::HandleDisplayModeChange", "mode",
+              mode);
   CHECK(initialized_);
   if (mode == display_mode_ && got_initial_display_mode_)
     return;
@@ -497,14 +517,14 @@ void StateController::HandleDisplayModeChange(DisplayMode mode) {
 
   if (defer_external_display_timeout_s_ && lid_state_ == LidState::CLOSED)
     wait_for_external_display_timer_.Start(
-        FROM_HERE,
-        base::TimeDelta::FromSeconds(defer_external_display_timeout_s_), this,
+        FROM_HERE, base::Seconds(defer_external_display_timeout_s_), this,
         &StateController::HandleWaitForExternalDisplayTimeout);
 
   UpdateSettingsAndState();
 }
 
 void StateController::HandleResume(LidState state) {
+  TRACE_EVENT("power", "StateController::HandleResume", "state", state);
   CHECK(initialized_);
 
   lid_state_ = state;
@@ -527,6 +547,7 @@ void StateController::HandleResume(LidState state) {
 }
 
 void StateController::HandlePolicyChange(const PowerManagementPolicy& policy) {
+  TRACE_EVENT("power", "StateController::HandlePolicyChange");
   CHECK(initialized_);
   policy_ = policy;
   if (!got_initial_policy_) {
@@ -546,6 +567,7 @@ void StateController::HandlePolicyChange(const PowerManagementPolicy& policy) {
 }
 
 void StateController::HandleUserActivity() {
+  TRACE_EVENT("power", "StateController::HandleUserActivity");
   CHECK(initialized_);
 
   // Ignore user activity reported while the lid is closed unless we're in
@@ -577,6 +599,7 @@ void StateController::HandleUserActivity() {
 }
 
 void StateController::HandleVideoActivity() {
+  TRACE_EVENT("power", "StateController::HandleVideoActivity");
   CHECK(initialized_);
   if (screen_dimmed_ || screen_turned_off_) {
     LOG(INFO) << "Ignoring video since screen is dimmed or off";
@@ -587,6 +610,7 @@ void StateController::HandleVideoActivity() {
 }
 
 void StateController::HandleWakeNotification() {
+  TRACE_EVENT("power", "StateController::HandleWakeNotification");
   CHECK(initialized_);
 
   // Ignore user activity reported while the lid is closed unless we're in
@@ -601,12 +625,16 @@ void StateController::HandleWakeNotification() {
 }
 
 void StateController::HandleAudioStateChange(bool active) {
+  TRACE_EVENT("power", "StateController::HandleAudioStateChange", "active",
+              active);
   CHECK(initialized_);
   audio_activity_->SetActive(active, clock_->GetCurrentTime());
   UpdateState();
 }
 
 void StateController::HandleTpmStatus(int dictionary_attack_count) {
+  TRACE_EVENT("power", "StateController::HandleTpmStatus",
+              "dictionary_attack_count", dictionary_attack_count);
   if (tpm_dictionary_attack_count_ == dictionary_attack_count)
     return;
 
@@ -625,8 +653,12 @@ PowerManagementPolicy::Delays StateController::CreateInactivityDelaysProto()
     proto.set_screen_off_ms(delays_.screen_off.InMilliseconds());
   if (!delays_.screen_dim.is_zero())
     proto.set_screen_dim_ms(delays_.screen_dim.InMilliseconds());
+  if (!delays_.quick_dim.is_zero())
+    proto.set_quick_dim_ms(delays_.quick_dim.InMilliseconds());
   if (!delays_.screen_lock.is_zero())
     proto.set_screen_lock_ms(delays_.screen_lock.InMilliseconds());
+  if (!delays_.quick_lock.is_zero())
+    proto.set_quick_lock_ms(delays_.quick_lock.InMilliseconds());
   return proto;
 }
 
@@ -638,6 +670,28 @@ void StateController::OnPrefChanged(const std::string& pref_name) {
     LoadPrefs();
     UpdateSettingsAndState();
   }
+}
+
+bool StateController::ShouldRequestDimDeferSuggestion(base::TimeTicks now) {
+  return !screen_dimmed_ && delays_.screen_dim_imminent > base::TimeDelta() &&
+         // Only consider defer dimming when it is close to actual dimming.
+         (now - GetLastActivityTimeForScreenDim(now) >=
+          delays_.screen_dim_imminent) &&
+         // No dimming defer after kDeferDimmingTimeLimit - delays_.screen_dim;
+         // this is to make sure dimming always happens within
+         // kDeferDimmingTimeLimit.
+         (now - GetLastActivityTimeForScreenDimWithoutDefer(now) <=
+          kDeferDimmingTimeLimit - delays_.screen_dim);
+}
+
+void StateController::HandleDeferFromSmartDim() {
+  TRACE_EVENT("power", "StateController::HandleDeferFromSmartDim");
+  if (screen_dimmed_) {
+    VLOG(1) << "Screen is already dimmed";
+    return;
+  }
+  last_defer_screen_dim_time_ = clock_->GetCurrentTime();
+  UpdateState();
 }
 
 // static
@@ -682,7 +736,8 @@ void StateController::ScaleDelays(Delays* delays,
     return;
 
   const base::TimeDelta orig_screen_dim = delays->screen_dim;
-  delays->screen_dim *= screen_dim_scale_factor;
+  delays->screen_dim = base::Microseconds(delays->screen_dim.InMicrosecondsF() *
+                                          screen_dim_scale_factor);
 
   const base::TimeDelta diff = delays->screen_dim - orig_screen_dim;
   if (delays->screen_off > base::TimeDelta())
@@ -714,6 +769,17 @@ void StateController::SanitizeDelays(Delays* delays) {
     delays->screen_dim = base::TimeDelta();
   }
 
+  // A quick_dim after screen_dim will never happen.
+  if (delays->quick_dim >= delays->screen_dim) {
+    delays->quick_dim = base::TimeDelta();
+  }
+
+  // A quick_lock after screen_lock will never happen.
+  if (delays->screen_lock > base::TimeDelta() &&
+      delays->quick_lock >= delays->screen_lock) {
+    delays->quick_lock = base::TimeDelta();
+  }
+
   // Cap the idle-warning timeout to the idle-action timeout.
   if (delays->idle_warning > base::TimeDelta())
     delays->idle_warning = std::min(delays->idle_warning, delays->idle);
@@ -734,26 +800,29 @@ void StateController::MergeDelaysFromPolicy(
   DCHECK(delays_out);
 
   if (policy_delays.has_idle_ms() && policy_delays.idle_ms() >= 0) {
-    delays_out->idle =
-        base::TimeDelta::FromMilliseconds(policy_delays.idle_ms());
+    delays_out->idle = base::Milliseconds(policy_delays.idle_ms());
   }
   if (policy_delays.has_idle_warning_ms() &&
       policy_delays.idle_warning_ms() >= 0) {
     delays_out->idle_warning =
-        base::TimeDelta::FromMilliseconds(policy_delays.idle_warning_ms());
+        base::Milliseconds(policy_delays.idle_warning_ms());
   }
   if (policy_delays.has_screen_dim_ms() && policy_delays.screen_dim_ms() >= 0) {
-    delays_out->screen_dim =
-        base::TimeDelta::FromMilliseconds(policy_delays.screen_dim_ms());
+    delays_out->screen_dim = base::Milliseconds(policy_delays.screen_dim_ms());
+  }
+  if (policy_delays.has_quick_dim_ms() && policy_delays.quick_dim_ms() >= 0) {
+    delays_out->quick_dim = base::Milliseconds(policy_delays.quick_dim_ms());
   }
   if (policy_delays.has_screen_off_ms() && policy_delays.screen_off_ms() >= 0) {
-    delays_out->screen_off =
-        base::TimeDelta::FromMilliseconds(policy_delays.screen_off_ms());
+    delays_out->screen_off = base::Milliseconds(policy_delays.screen_off_ms());
   }
   if (policy_delays.has_screen_lock_ms() &&
       policy_delays.screen_lock_ms() >= 0) {
     delays_out->screen_lock =
-        base::TimeDelta::FromMilliseconds(policy_delays.screen_lock_ms());
+        base::Milliseconds(policy_delays.screen_lock_ms());
+  }
+  if (policy_delays.has_quick_lock_ms() && policy_delays.quick_lock_ms() >= 0) {
+    delays_out->quick_lock = base::Milliseconds(policy_delays.quick_lock_ms());
   }
 }
 
@@ -840,19 +909,30 @@ base::TimeTicks StateController::GetLastActivityTimeForIdle(
   return last_time;
 }
 
-base::TimeTicks StateController::GetLastActivityTimeForScreenDim(
+base::TimeTicks StateController::GetLastActivityTimeForScreenDimWithoutDefer(
     base::TimeTicks now) const {
   base::TimeTicks last_time =
       WaitingForInitialUserActivity() ? now : last_user_activity_time_;
   if (use_video_activity_)
     last_time = std::max(last_time, last_video_activity_time_);
-  last_time = std::max(last_time, last_defer_screen_dim_time_);
   last_time = std::max(last_time, last_wake_notification_time_);
 
   // Only full-brightness wake locks keep the screen from dimming.
   last_time = std::max(last_time, screen_wake_lock_->GetLastActiveTime(now));
 
   return last_time;
+}
+
+base::TimeTicks StateController::GetLastActivityTimeForScreenDim(
+    base::TimeTicks now) const {
+  return std::max(GetLastActivityTimeForScreenDimWithoutDefer(now),
+                  last_defer_screen_dim_time_);
+}
+
+base::TimeTicks StateController::GetLastActivityTimeForQuickDim(
+    base::TimeTicks now) const {
+  return std::max(last_hps_result_change_time_,
+                  GetLastActivityTimeForScreenDim(now));
 }
 
 base::TimeTicks StateController::GetLastActivityTimeForScreenOff(
@@ -876,6 +956,13 @@ base::TimeTicks StateController::GetLastActivityTimeForScreenLock(
                   dim_wake_lock_->GetLastActiveTime(now));
 }
 
+base::TimeTicks StateController::GetLastActivityTimeForQuickLock(
+    base::TimeTicks now) const {
+  // On-but-dimmed wake locks also keep the screen from locking.
+  return std::max(GetLastActivityTimeForScreenLock(now),
+                  last_hps_result_change_time_);
+}
+
 void StateController::UpdateLastUserActivityTime() {
   last_user_activity_time_ = clock_->GetCurrentTime();
   delegate_->ReportUserActivityMetrics();
@@ -887,6 +974,7 @@ void StateController::LoadPrefs() {
   prefs_->GetBool(kAvoidSuspendWhenHeadphoneJackPluggedPref,
                   &avoid_suspend_when_headphone_jack_plugged_);
   prefs_->GetBool(kDisableIdleSuspendPref, &disable_idle_suspend_);
+  prefs_->GetBool(kSendFeedbackIfUndimmedPref, &send_feedback_if_undimmed_);
   prefs_->GetBool(kFactoryModePref, &factory_mode_);
   prefs_->GetBool(kIgnoreExternalPolicyPref, &ignore_external_policy_);
 
@@ -906,6 +994,10 @@ void StateController::LoadPrefs() {
                            &pref_ac_delays_.screen_off));
   CHECK(GetMillisecondPref(prefs_, kPluggedDimMsPref,
                            &pref_ac_delays_.screen_dim));
+  CHECK(GetMillisecondPref(prefs_, kPluggedQuickDimMsPref,
+                           &pref_ac_delays_.quick_dim));
+  CHECK(GetMillisecondPref(prefs_, kPluggedQuickLockMsPref,
+                           &pref_ac_delays_.quick_lock));
 
   CHECK(GetMillisecondPref(prefs_, kUnpluggedSuspendMsPref,
                            &pref_battery_delays_.idle));
@@ -913,6 +1005,10 @@ void StateController::LoadPrefs() {
                            &pref_battery_delays_.screen_off));
   CHECK(GetMillisecondPref(prefs_, kUnpluggedDimMsPref,
                            &pref_battery_delays_.screen_dim));
+  CHECK(GetMillisecondPref(prefs_, kUnpluggedQuickDimMsPref,
+                           &pref_battery_delays_.quick_dim));
+  CHECK(GetMillisecondPref(prefs_, kUnpluggedQuickLockMsPref,
+                           &pref_battery_delays_.quick_lock));
 
   SanitizeDelays(&pref_ac_delays_);
   SanitizeDelays(&pref_battery_delays_);
@@ -926,6 +1022,7 @@ void StateController::LoadPrefs() {
 }
 
 void StateController::UpdateSettingsAndState() {
+  TRACE_EVENT("power", "UpdateSettingsAndState");
   const Action old_idle_action = idle_action_;
   const Action old_lid_closed_action = lid_closed_action_;
   const Delays old_delays = delays_;
@@ -969,6 +1066,9 @@ void StateController::UpdateSettingsAndState() {
     if (policy_.has_wait_for_initial_user_activity()) {
       wait_for_initial_user_activity_ =
           policy_.wait_for_initial_user_activity();
+    }
+    if (policy_.has_send_feedback_if_undimmed()) {
+      send_feedback_if_undimmed_ = policy_.send_feedback_if_undimmed();
     }
   }
 
@@ -1026,9 +1126,11 @@ void StateController::UpdateSettingsAndState() {
 
   // Most functionality is disabled in factory mode.
   if (factory_mode_) {
+    delays_.quick_dim = base::TimeDelta();
     delays_.screen_dim = base::TimeDelta();
     delays_.screen_off = base::TimeDelta();
     delays_.screen_lock = base::TimeDelta();
+    delays_.quick_lock = base::TimeDelta();
     lid_closed_action_ = Action::DO_NOTHING;
     idle_action_ = Action::DO_NOTHING;
     reason_for_ignoring_idle_action_ = "factory mode is enabled";
@@ -1082,8 +1184,10 @@ void StateController::LogSettings() {
 
   LOG(INFO) << "Updated settings:"
             << " dim=" << util::TimeDeltaToString(delays_.screen_dim)
+            << " quick_dim=" << util::TimeDeltaToString(delays_.quick_dim)
             << " screen_off=" << util::TimeDeltaToString(delays_.screen_off)
             << " lock=" << util::TimeDeltaToString(delays_.screen_lock)
+            << " quick_lock=" << util::TimeDeltaToString(delays_.quick_lock)
             << " idle_warn=" << util::TimeDeltaToString(delays_.idle_warning)
             << " idle=" << util::TimeDeltaToString(delays_.idle) << " ("
             << ActionToString(idle_action_) << ")"
@@ -1099,6 +1203,8 @@ void StateController::LogSettings() {
 }
 
 void StateController::PerformAction(Action action, ActionReason reason) {
+  TRACE_EVENT("power", "StateController::PerformAction", "action",
+              ActionToString(action), "reason", reason);
   switch (action) {
     case Action::SUSPEND:
       delegate_->Suspend(reason);
@@ -1136,47 +1242,98 @@ StateController::Action StateController::GetIdleAction() const {
 }
 
 void StateController::UpdateState() {
+  TRACE_EVENT("power", "UpdateState");
   base::TimeTicks now = clock_->GetCurrentTime();
   base::TimeDelta idle_duration = now - GetLastActivityTimeForIdle(now);
-  base::TimeDelta screen_dim_duration =
+  base::TimeDelta duration_since_last_activity_for_screen_dim =
       now - GetLastActivityTimeForScreenDim(now);
   base::TimeDelta screen_off_duration =
       now - GetLastActivityTimeForScreenOff(now);
   base::TimeDelta screen_lock_duration =
       now - GetLastActivityTimeForScreenLock(now);
 
-  // We only want to send a smart dim request if the screen is not dimmed and it
-  // has been a while since the last smart_dim_activity.
-  if (!screen_dimmed_ && delays_.screen_dim_imminent > base::TimeDelta() &&
-      screen_dim_duration >= delays_.screen_dim_imminent &&
-      smart_dim_requestor_->ReadyForRequest(now, delays_.screen_dim_imminent)) {
-    smart_dim_requestor_->RequestSmartDimDecision(now);
+  // Only request a dimming defer suggestion at certain condition.
+  if (ShouldRequestDimDeferSuggestion(now)) {
+    // Hps is allowed to defer a dimming only if:
+    // (1) Hps is enabled.
+    // (2) hps_result_ is POSITIVE.
+    // (3) hps_result_ is in POSITIVE state for some time.
+    // (4) dimming is not deferred for more than kNTimesForHpsToDeferDimming
+    // times
+    auto hps_wait = base::Microseconds(kHpsPositiveForDimDefer *
+                                       delays_.screen_dim.InMicrosecondsF());
+    if (dim_advisor_.IsHpsSenseEnabled() &&
+        hps_result_ == hps::HpsResult::POSITIVE &&
+        now - last_hps_result_change_time_ >= hps_wait &&
+        now - GetLastActivityTimeForScreenDimWithoutDefer(now) <=
+            kNTimesForHpsToDeferDimming * delays_.screen_dim) {
+      last_defer_screen_dim_time_ = clock_->GetCurrentTime();
+      LOG(INFO) << "StateController: screen dim is deferred by HPS.";
+      delegate_->ReportHpsEventDurationMetrics(
+          metrics::kStandardDimDeferredByHpsSec,
+          duration_since_last_activity_for_screen_dim);
+    } else if (dim_advisor_.ReadyForSmartDimRequest(
+                   now, delays_.screen_dim_imminent)) {
+      // Ask for a SmartDimDecision which may also decide to defer the screen
+      // dim.
+      dim_advisor_.RequestSmartDimDecision(now);
+    }
   }
 
   const bool screen_was_dimmed = screen_dimmed_;
-  HandleDelay(delays_.screen_dim, screen_dim_duration,
-              base::Bind(&Delegate::DimScreen, base::Unretained(delegate_)),
-              base::Bind(&Delegate::UndimScreen, base::Unretained(delegate_)),
-              "Dimming screen", "Undimming screen", &screen_dimmed_);
-  if (screen_dimmed_ && !screen_was_dimmed && audio_activity_->active() &&
-      delegate_->IsHdmiAudioActive()) {
-    LOG(INFO) << "Audio is currently being sent to display; screen will not be "
-              << "turned off for inactivity";
+
+  if (dim_advisor_.IsHpsSenseEnabled() && !delays_.quick_dim.is_zero()) {
+    // Use new dim logic with Hps.
+    HandleDimWithHps(now, duration_since_last_activity_for_screen_dim);
+  } else {
+    // Use old dim logic without Hps.
+    HandleDelay(
+        delays_.screen_dim, duration_since_last_activity_for_screen_dim,
+        base::BindOnce(&Delegate::DimScreen, base::Unretained(delegate_)),
+        base::BindOnce(&Delegate::UndimScreen, base::Unretained(delegate_)),
+        "Dimming screen", "Undimming screen", &screen_dimmed_);
+    if (screen_dimmed_ && !screen_was_dimmed) {
+      last_dim_time_ = now;
+      // quick_dim_ahead_ is reset on a standard dim.
+      quick_dim_ahead_ = base::TimeDelta();
+    } else if (!screen_dimmed_) {
+      // If screen is not dimmed, set last_dim_time_ as base::TimeTicks().
+      last_dim_time_ = base::TimeTicks();
+    }
+    if (screen_dimmed_ && !screen_was_dimmed && audio_activity_->active() &&
+        delegate_->IsHdmiAudioActive()) {
+      LOG(INFO)
+          << "Audio is currently being sent to display; screen will not be "
+          << "turned off for inactivity";
+    }
   }
 
   const bool screen_was_turned_off = screen_turned_off_;
-  HandleDelay(delays_.screen_off, screen_off_duration,
-              base::Bind(&Delegate::TurnScreenOff, base::Unretained(delegate_)),
-              base::Bind(&Delegate::TurnScreenOn, base::Unretained(delegate_)),
-              "Turning screen off", "Turning screen on", &screen_turned_off_);
+  HandleDelay(
+      delays_.screen_off, screen_off_duration,
+      base::BindOnce(&Delegate::TurnScreenOff, base::Unretained(delegate_)),
+      base::BindOnce(&Delegate::TurnScreenOn, base::Unretained(delegate_)),
+      "Turning screen off", "Turning screen on", &screen_turned_off_);
   if (screen_turned_off_ && !screen_was_turned_off)
     screen_turned_off_time_ = now;
   else if (!screen_turned_off_)
     screen_turned_off_time_ = base::TimeTicks();
 
-  HandleDelay(delays_.screen_lock, screen_lock_duration,
-              base::Bind(&Delegate::LockScreen, base::Unretained(delegate_)),
-              base::Closure(), "Locking screen", "", &requested_screen_lock_);
+  if (dim_advisor_.IsHpsSenseEnabled() && !delays_.quick_lock.is_zero()) {
+    HandleScreenLockWithHps(now, screen_lock_duration);
+  } else {
+    const bool requested_screen_lock_previously = requested_screen_lock_;
+    HandleDelay(
+        delays_.screen_lock, screen_lock_duration,
+        base::BindOnce(&Delegate::LockScreen, base::Unretained(delegate_)),
+        base::OnceClosure(), "Locking screen", "", &requested_screen_lock_);
+    if (requested_screen_lock_ && !requested_screen_lock_previously) {
+      last_lock_requested_time_ = now;
+    } else if (!requested_screen_lock_) {
+      // Set last_lock_requested_time_ as base::TimeTicks() if not requested.
+      last_lock_requested_time_ = base::TimeTicks();
+    }
+  }
 
   if (screen_dimmed_ != screen_was_dimmed ||
       screen_turned_off_ != screen_was_turned_off) {
@@ -1193,7 +1350,7 @@ void StateController::UpdateState() {
                 << util::TimeDeltaToString(time_until_idle) << " after "
                 << util::TimeDeltaToString(idle_duration);
       IdleActionImminent proto;
-      proto.set_time_until_idle_action(time_until_idle.ToInternalValue());
+      proto.set_time_until_idle_action(time_until_idle.InMicroseconds());
       dbus_wrapper_->EmitSignalWithProtocolBuffer(kIdleActionImminentSignal,
                                                   proto);
       sent_idle_warning_ = true;
@@ -1279,14 +1436,30 @@ void StateController::UpdateState() {
 }
 
 void StateController::ScheduleActionTimeout(base::TimeTicks now) {
+  TRACE_EVENT_BEGIN("power", "StateController::ScheduleActionTimeout");
   // Find the minimum of the delays that haven't yet occurred.
   base::TimeDelta timeout_delay;
   if (!IsScreenDimBlocked()) {
-    if (smart_dim_requestor_->request_smart_dim_decision()) {
-      UpdateActionTimeout(now, GetLastActivityTimeForScreenDim(now),
+    base::TimeTicks last_activity_time_for_screen_dim =
+        GetLastActivityTimeForScreenDim(now);
+
+    // Schedule an action for calling MLDecisionService.
+    if (dim_advisor_.IsSmartDimEnabled()) {
+      UpdateActionTimeout(now, last_activity_time_for_screen_dim,
                           delays_.screen_dim_imminent, &timeout_delay);
     }
-    UpdateActionTimeout(now, GetLastActivityTimeForScreenDim(now),
+    // Schedule an action for quick dim.
+    // We only schedule an action for quick dim if `hps_result_` is NEGATIVE.
+    // If `hps_result_` is POSITIVE, there will be no quick dim, and when that
+    // value becomes NEGATIVE, the UpdateState will be called and a quick dim
+    // action will be scheduled.
+    if (dim_advisor_.IsHpsSenseEnabled() && !delays_.quick_dim.is_zero() &&
+        !screen_dimmed_ && hps_result_ == hps::HpsResult::NEGATIVE) {
+      UpdateActionTimeout(now, GetLastActivityTimeForQuickDim(now),
+                          delays_.quick_dim, &timeout_delay);
+    }
+
+    UpdateActionTimeout(now, last_activity_time_for_screen_dim,
                         delays_.screen_dim, &timeout_delay);
   }
   if (!IsScreenOffBlocked()) {
@@ -1296,6 +1469,13 @@ void StateController::ScheduleActionTimeout(base::TimeTicks now) {
   if (!IsScreenLockBlocked()) {
     UpdateActionTimeout(now, GetLastActivityTimeForScreenLock(now),
                         delays_.screen_lock, &timeout_delay);
+    // Schedule an action for quick lock.
+    // We only schedule an action for quick lock if `hps_result_` is NEGATIVE.
+    if (dim_advisor_.IsHpsSenseEnabled() && !delays_.quick_lock.is_zero() &&
+        !requested_screen_lock_ && hps_result_ == hps::HpsResult::NEGATIVE) {
+      UpdateActionTimeout(now, GetLastActivityTimeForQuickLock(now),
+                          delays_.quick_lock, &timeout_delay);
+    }
   }
   if (!IsIdleBlocked()) {
     UpdateActionTimeout(now, GetLastActivityTimeForIdle(now),
@@ -1312,14 +1492,17 @@ void StateController::ScheduleActionTimeout(base::TimeTicks now) {
     action_timer_.Stop();
     action_timer_time_for_testing_ = base::TimeTicks();
   }
+  TRACE_EVENT_END("power", "timeout_delay_ms", timeout_delay.InMillisecondsF());
 }
 
 void StateController::HandleActionTimeout() {
+  TRACE_EVENT("power", "StateController::HandleActionTimeout");
   action_timer_time_for_testing_ = base::TimeTicks();
   UpdateState();
 }
 
 void StateController::HandleInitialStateTimeout() {
+  TRACE_EVENT("power", "StateController::HandleInitialStateTimeout");
   LOG(INFO) << "Didn't receive initial notification about display mode or "
             << "policy; using " << DisplayModeToString(display_mode_)
             << " display mode";
@@ -1327,6 +1510,7 @@ void StateController::HandleInitialStateTimeout() {
 }
 
 void StateController::HandleCrashBootCollectTimeout() {
+  TRACE_EVENT("power", "StateController::HandleCrashBootCollectTimeout");
   LOG(INFO) << "CrashBootCollect did not complete sucessfully in "
             << util::TimeDeltaToString(kCrashBootCollectTimeout);
   if (lid_state_ == LidState::CLOSED)
@@ -1334,6 +1518,7 @@ void StateController::HandleCrashBootCollectTimeout() {
 }
 
 void StateController::HandleWaitForExternalDisplayTimeout() {
+  TRACE_EVENT("power", "StateController::HandleWaitForExternalDisplayTimeout");
   LOG(INFO) << "Didn't receive display mode change notification in "
             << util::TimeDeltaToString(KWaitForExternalDisplayTimeout)
             << " on resuming with lid closed";
@@ -1381,11 +1566,7 @@ void StateController::HandleUpdateEngineStatusMessage(dbus::Message* message) {
   }
 
   update_engine::Operation operation = status.current_operation();
-  // TODO(crbug.com/977320): Through the protobuf we don't have access to the
-  // string value of the current operation. One way to get around this is to add
-  // a new |current_operation_string| value to the protobuf with the current
-  // operation's string representation for these logging purposes.
-  LOG(INFO) << "Update operation is " << operation;
+  LOG(INFO) << "Update operation is " << Operation_Name(operation);
   UpdaterState state = UpdaterState::IDLE;
   if (operation == update_engine::Operation::DOWNLOADING ||
       operation == update_engine::Operation::VERIFYING ||
@@ -1410,14 +1591,162 @@ void StateController::EmitScreenIdleStateChanged(bool dimmed, bool off) {
                                               proto);
 }
 
-void StateController::HandleDeferFromSmartDim() {
-  if (screen_dimmed_) {
-    VLOG(1) << "Screen is already dimmed";
+void StateController::HandleDimWithHps(
+    base::TimeTicks now,
+    base::TimeDelta duration_since_last_activity_for_screen_dim) {
+  if (!screen_dimmed_) {
+    // Try to dim.
+    const bool should_quick_dim =
+        duration_since_last_activity_for_screen_dim <
+            delays_.screen_dim_imminent &&
+        hps_result_ == hps::HpsResult::NEGATIVE &&
+        now - GetLastActivityTimeForQuickDim(now) >= delays_.quick_dim;
+
+    const bool should_standard_dim =
+        duration_since_last_activity_for_screen_dim >= delays_.screen_dim;
+
+    if (should_quick_dim || should_standard_dim) {
+      LOG(INFO) << "Dimming screen after "
+                << util::TimeDeltaToString(
+                       duration_since_last_activity_for_screen_dim);
+      delegate_->DimScreen();
+      screen_dimmed_ = true;
+      last_dim_time_ = now;
+
+      if (should_quick_dim) {
+        // Quick dim is not recorded here, but recorded when it got reverted or
+        // successfully transitioned to a standard dim.
+
+        // `quick_dim_ahead_` records how far from a standard dim when this
+        // quick dim happens; so that later on, when this quick dim got reverted
+        // eventually, we'll know whether the quick_dim stayed long enough to
+        // transition to a standard dim.
+        quick_dim_ahead_ =
+            delays_.screen_dim - duration_since_last_activity_for_screen_dim;
+        delegate_->ReportDimEventMetrics(metrics::DimEvent::QUICK_DIM);
+      } else {
+        // Record a standard dim event.
+        delegate_->ReportDimEventMetrics(metrics::DimEvent::STANDARD_DIM);
+        quick_dim_ahead_ = base::TimeDelta();
+      }
+    }
+  } else {
+    // Try to undim.
+
+    // Screen should be undimmed if there is a user_activity after last_dim_time
+    // NOTE: comparing to the original condition
+    //   duration_since_last_activity_for_screen_dim < delays_.screen_dim
+    // The new condition will skip an edge case that the screen is dimmed and
+    // the delays_.screen_dim is set to a larger value without any user
+    // activity. This will undim the screen in the original condition; but not
+    // in this new condition. We don't think this edge case could happen or even
+    // if it does, a reasonably better behaviour is to apply that new
+    // delays_.screen_dim in the next dimming process.
+    bool undim_for_user_activity =
+        GetLastActivityTimeForScreenDim(now) >= last_dim_time_;
+
+    const bool undim_for_hps = !undim_for_user_activity &&
+                               duration_since_last_activity_for_screen_dim <
+                                   delays_.screen_dim_imminent &&
+                               hps_result_ == hps::HpsResult::POSITIVE;
+
+    if (undim_for_hps || undim_for_user_activity) {
+      const base::TimeDelta duration_since_last_dim = now - last_dim_time_;
+
+      LOG(INFO) << "Undimming screen after "
+                << util::TimeDeltaToString(duration_since_last_dim);
+
+      delegate_->UndimScreen();
+      screen_dimmed_ = false;
+      last_dim_time_ = base::TimeTicks();
+
+      // We know that quick_dim happened quick_dim_ahead_ before standard dim,
+      // and duration_since_last_dim has passed since last dim.
+      // duration_since_last_dim >= quick_dim_ahead_ means that even if we
+      // didn't have quick dim before, we would have a standard dim by now.
+      // We named this case as a transitioning to standard dim.
+      const bool transitioned_to_standard_dim =
+          duration_since_last_dim >= quick_dim_ahead_;
+
+      if (send_feedback_if_undimmed_ && !transitioned_to_standard_dim) {
+        dim_advisor_.UnDimFeedback(undim_for_user_activity);
+      }
+
+      if (undim_for_hps) {
+        // Undimmed by hps.
+
+        delegate_->ReportHpsEventDurationMetrics(
+            metrics::kQuickDimDurationBeforeRevertedByHpsSec,
+            duration_since_last_dim);
+        delegate_->ReportDimEventMetrics(
+            metrics::DimEvent::QUICK_DIM_REVERTED_BY_HPS);
+      } else {
+        // Undimmed by user.
+
+        if (quick_dim_ahead_.is_zero()) {
+          // A standard dim was undimmed.
+          delegate_->ReportHpsEventDurationMetrics(
+              metrics::kStandardDimDurationBeforeRevertedByUserSec,
+              duration_since_last_dim);
+        } else {
+          // A quick dim was undimmed.
+          delegate_->ReportHpsEventDurationMetrics(
+              metrics::kQuickDimDurationBeforeRevertedByUserSec,
+              duration_since_last_dim);
+          if (transitioned_to_standard_dim) {
+            delegate_->ReportDimEventMetrics(
+                metrics::DimEvent::QUICK_DIM_TRANSITIONED_TO_STANDARD_DIM);
+          } else {
+            delegate_->ReportDimEventMetrics(
+                metrics::DimEvent::QUICK_DIM_REVERTED_BY_USER);
+          }
+        }
+      }
+    }
+  }
+}
+
+void StateController::HandleScreenLockWithHps(
+    base::TimeTicks now,
+    base::TimeDelta duration_since_last_activity_for_screen_lock) {
+  if (!requested_screen_lock_) {
+    // Try to lock.
+    const bool should_quick_lock =
+        hps_result_ == hps::HpsResult::NEGATIVE &&
+        now - GetLastActivityTimeForQuickLock(now) >= delays_.quick_lock;
+
+    const bool should_standard_lock =
+        delays_.screen_lock > base::TimeDelta() &&
+        duration_since_last_activity_for_screen_lock >= delays_.screen_lock;
+
+    if (should_quick_lock || should_standard_lock) {
+      LOG(INFO) << "Lock screen after "
+                << util::TimeDeltaToString(
+                       duration_since_last_activity_for_screen_lock);
+      delegate_->LockScreen();
+      requested_screen_lock_ = true;
+      last_lock_requested_time_ = now;
+      if (should_quick_lock) {
+        delegate_->ReportLockEventMetrics(metrics::LockEvent::QUICK_LOCK);
+      } else {
+        delegate_->ReportLockEventMetrics(metrics::LockEvent::STANDARD_LOCK);
+      }
+    }
+  } else if (GetLastActivityTimeForScreenLock(now) >=
+             last_lock_requested_time_) {
+    requested_screen_lock_ = false;
+    last_lock_requested_time_ = base::TimeTicks();
+  }
+}
+
+void StateController::HandleHpsResultChange(hps::HpsResult hps_result) {
+  // Calls UpdateState to consume the new HpsResult.
+  if (hps_result_ == hps_result) {
     return;
   }
-  last_defer_screen_dim_time_ = clock_->GetCurrentTime();
+  hps_result_ = hps_result;
+  last_hps_result_change_time_ = clock_->GetCurrentTime();
   UpdateState();
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

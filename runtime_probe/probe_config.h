@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,11 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include <base/functional/callback.h>
+#include <base/files/file_path.h>
 #include <base/values.h>
 #include <gtest/gtest.h>
 
@@ -29,6 +32,12 @@ class ProbeConfig {
   //   }
 
  public:
+  // Factory method that creates the probe config from the given file path.
+  // Return |nullptr| if loading fails.
+  static std::unique_ptr<ProbeConfig> FromFile(const base::FilePath& file_path);
+
+  // Factory method that creates the probe config from the given dictionary.
+  // Return |nullptr| if loading fails.
   static std::unique_ptr<ProbeConfig> FromValue(const base::Value& dv);
 
   // Evaluates the probe config.
@@ -44,21 +53,49 @@ class ProbeConfig {
   //       }
   //     ]
   //   }
-  base::Value Eval(const std::vector<std::string>& category) const;
+  void Eval(const std::vector<std::string>& category,
+            base::OnceCallback<void(base::Value::Dict)> callback) const;
 
   // Evaluates the probe config.
   //
-  // This is the same as calling `this->eval({keys of category_})`.
-  base::Value Eval() const;
+  // This is the same as calling `this->Eval({keys of category_})`.
+  void Eval(base::OnceCallback<void(base::Value::Dict)> callback) const;
 
+  // Gets the component category with given name or return nullptr on failure.
   ComponentCategory* GetComponentCategory(
       const std::string& category_name) const;
 
+  // Checksum of the probe config text in SHA1 hash.
+  const std::string& checksum() const { return checksum_; }
+
+  // Path to the probe config file.
+  const base::FilePath& path() const { return path_; }
+
+  // Returns an iterator to the first category.
+  auto begin() { return category_.begin(); }
+  auto begin() const { return category_.begin(); }
+  auto cbegin() const { return category_.cbegin(); }
+
+  // Returns an iterator following the last category.
+  auto end() { return category_.end(); }
+  auto end() const { return category_.end(); }
+  auto cend() const { return category_.cend(); }
+
+  // Set |category| with the category name |category_name| for testing.
+  void SetCategoryForTesting(std::string category_name,
+                             std::unique_ptr<ComponentCategory> category) {
+    category_[category_name] = std::move(category);
+  }
+
  private:
-  // Must call `FromValue()` to create an instance.
+  // Private constructor used by factory methods only.
   ProbeConfig() = default;
 
   std::map<std::string, std::unique_ptr<ComponentCategory>> category_;
+
+  std::string checksum_;
+
+  base::FilePath path_;
 
   FRIEND_TEST(ProbeConfigTest, LoadConfig);
 };

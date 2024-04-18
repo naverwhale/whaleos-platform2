@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -57,12 +57,13 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include <base/json/json_writer.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/values.h>
@@ -126,12 +127,12 @@ struct ifflag {
 };
 
 Value flags2list(unsigned int flags) {
-  Value lv(Value::Type::LIST);
-  for (unsigned int i = 0; i < base::size(ifflags); ++i) {
-    if (flags & ifflags[i].bit)
-      lv.Append(ifflags[i].name);
+  Value::List lv;
+  for (const auto& ifflag : ifflags) {
+    if (flags & ifflag.bit)
+      lv.Append(ifflag.name);
   }
-  return lv;
+  return Value(std::move(lv));
 }
 
 class NetInterface {
@@ -147,13 +148,13 @@ class NetInterface {
  private:
   int fd_;
   const char* name_;
-  Value ipv4_{Value::Type::DICTIONARY};
-  Value ipv6_{Value::Type::DICTIONARY};
+  Value ipv4_{Value::Type::DICT};
+  Value ipv6_{Value::Type::DICT};
   Value flags_{Value::Type::LIST};
   std::string mac_;
-  Value signal_strengths_{Value::Type::DICTIONARY};
+  Value::Dict signal_strengths_;
 
-  void AddAddressTo(Value* dv, struct sockaddr* sa);
+  void AddAddressTo(Value::Dict& dv, struct sockaddr* sa);
 };
 
 NetInterface::NetInterface(int fd, const char* name) : fd_(fd), name_(name) {}
@@ -165,13 +166,13 @@ bool NetInterface::Init() {
 
 void NetInterface::AddSignalStrength(const std::string& name, int strength) {
   // Use base::Value::SetKey, because |name| may contain ".".
-  signal_strengths_.SetIntKey(name, strength);
+  signal_strengths_.Set(name, strength);
 }
 
-void NetInterface::AddAddressTo(Value* dv, struct sockaddr* sa) {
-  Value* lv = dv->FindListKey("addrs");
+void NetInterface::AddAddressTo(Value::Dict& dict, struct sockaddr* sa) {
+  Value::List* lv = dict.FindList("addrs");
   if (lv == nullptr)
-    lv = dv->SetKey("addrs", Value(Value::Type::LIST));
+    lv = dict.Set("addrs", Value::List{})->GetIfList();
   lv->Append(sockaddr2str(sa));
 }
 
@@ -182,31 +183,32 @@ void NetInterface::AddAddress(struct ifaddrs* ifa) {
     return;
   if (ifa->ifa_addr->sa_family == AF_INET) {
     // An IPv4 address.
-    AddAddressTo(&ipv4_, ifa->ifa_addr);
-    if (!ipv4_.FindKey("mask")) {
-      ipv4_.SetStringKey("mask", sockaddr2str(ifa->ifa_netmask));
+    auto& ipv4_dict = ipv4_.GetDict();
+    AddAddressTo(ipv4_dict, ifa->ifa_addr);
+    if (!ipv4_dict.Find("mask")) {
+      ipv4_dict.Set("mask", sockaddr2str(ifa->ifa_netmask));
     }
-    if (!ipv4_.FindKey("destination")) {
-      ipv4_.SetStringKey("destination", sockaddr2str(ifa->ifa_broadaddr));
+    if (!ipv4_dict.Find("destination")) {
+      ipv4_dict.Set("destination", sockaddr2str(ifa->ifa_broadaddr));
     }
   } else if (ifa->ifa_addr->sa_family == AF_INET6) {
     // An IPv6 address.
-    AddAddressTo(&ipv6_, ifa->ifa_addr);
+    AddAddressTo(ipv6_.GetDict(), ifa->ifa_addr);
   }
 }
 
 Value NetInterface::ToValue() const {
-  Value dv(Value::Type::DICTIONARY);
-  if (!ipv4_.DictEmpty())
-    dv.SetKey("ipv4", ipv4_.Clone());
-  if (!ipv6_.DictEmpty())
-    dv.SetKey("ipv6", ipv6_.Clone());
+  Value::Dict dv;
+  if (!ipv4_.GetDict().empty())
+    dv.Set("ipv4", ipv4_.Clone());
+  if (!ipv6_.GetDict().empty())
+    dv.Set("ipv6", ipv6_.Clone());
   if (flags_.GetList().size())
-    dv.SetKey("flags", flags_.Clone());
-  if (!signal_strengths_.DictEmpty())
-    dv.SetKey("signal-strengths", signal_strengths_.Clone());
-  dv.SetStringKey("mac", mac_);
-  return dv;
+    dv.Set("flags", flags_.Clone());
+  if (!signal_strengths_.empty())
+    dv.Set("signal-strengths", signal_strengths_.Clone());
+  dv.Set("mac", mac_);
+  return Value(std::move(dv));
 }
 
 std::string DevicePathToName(const std::string& path) {
@@ -233,9 +235,9 @@ void AddSignalStrengths(
   for (const auto& service_path : service_paths) {
     auto service_properties =
         proxy->GetProperties(shill::kFlimflamServiceInterface, service_path);
-    base::Optional<int> strength = service_properties->FindIntKey("Strength");
-    const std::string* name = service_properties->FindStringKey("Name");
-    const std::string* device = service_properties->FindStringKey("Device");
+    std::optional<int> strength = service_properties->FindInt("Strength");
+    const std::string* name = service_properties->FindString("Name");
+    const std::string* device = service_properties->FindString("Device");
     if (!strength.has_value() || name == nullptr || device == nullptr) {
       continue;
     }
@@ -249,7 +251,7 @@ void AddSignalStrengths(
 int main() {
   struct ifaddrs* ifaddrs;
   int fd;
-  Value result(Value::Type::DICTIONARY);
+  Value::Dict result;
   std::map<std::string, std::unique_ptr<NetInterface>> interfaces;
 
   if (getifaddrs(&ifaddrs) == -1) {
@@ -275,7 +277,7 @@ int main() {
   AddSignalStrengths(&interfaces);
 
   for (const auto& interface : interfaces)
-    result.SetKey(interface.first, interface.second->ToValue());
+    result.Set(interface.first, interface.second->ToValue());
 
   std::string json;
   base::JSONWriter::WriteWithOptions(

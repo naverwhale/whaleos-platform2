@@ -1,55 +1,21 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "biod/biod_metrics.h"
 
-#include <base/stl_util.h>
+#include <base/types/cxx23_to_underlying.h>
 #include <libec/fingerprint/fp_sensor_errors.h>
 #include <metrics/metrics_library.h>
 
 #include "biod/biod_storage.h"
+#include "biod/session_state_manager.h"
 #include "biod/updater/update_reason.h"
 #include "biod/utils.h"
 
 namespace biod {
 
 namespace metrics {
-
-constexpr char kFpUnlockEnabled[] = "Fingerprint.UnlockEnabled";
-constexpr char kFpEnrolledFingerCount[] =
-    "Fingerprint.Unlock.EnrolledFingerCount";
-constexpr char kFpMatchDurationCapture[] =
-    "Fingerprint.Unlock.Match.Duration.Capture";
-constexpr char kFpMatchDurationMatcher[] =
-    "Fingerprint.Unlock.Match.Duration.Matcher";
-constexpr char kFpMatchDurationOverall[] =
-    "Fingerprint.Unlock.Match.Duration.Overall";
-constexpr char kFpNoMatchDurationCapture[] =
-    "Fingerprint.Unlock.NoMatch.Duration.Capture";
-constexpr char kFpNoMatchDurationMatcher[] =
-    "Fingerprint.Unlock.NoMatch.Duration.Matcher";
-constexpr char kFpNoMatchDurationOverall[] =
-    "Fingerprint.Unlock.NoMatch.Duration.Overall";
-constexpr char kFpMatchIgnoredDueToPowerButtonPress[] =
-    "Fingerprint.Unlock.MatchIgnoredDueToPowerButtonPress";
-constexpr char kResetContextMode[] = "Fingerprint.Reset.ResetContextMode";
-constexpr char kSetContextMode[] = "Fingerprint.SetContext.SetContextMode";
-constexpr char kSetContextSuccess[] = "Fingerprint.SetContext.Success";
-constexpr char kUpdaterStatus[] = "Fingerprint.Updater.Status";
-constexpr char kUpdaterReason[] = "Fingerprint.Updater.Reason";
-constexpr char kUpdaterDurationNoUpdate[] =
-    "Fingerprint.Updater.NoUpdate.Duration.Overall";
-constexpr char kUpdaterDurationUpdate[] =
-    "Fingerprint.Updater.Update.Duration.Overall";
-constexpr char kFpReadPositiveMatchSecretSuccessOnMatch[] =
-    "Fingerprint.Unlock.ReadPositiveMatchSecret.Success";
-constexpr char kFpPositiveMatchSecretCorrect[] =
-    "Fingerprint.Unlock.Match.PositiveMatchSecretCorrect";
-constexpr char kRecordFormatVersionMetric[] =
-    "Fingerprint.Unlock.RecordFormatVersion";
-constexpr char kNumDeadPixels[] = "Fingerprint.Sensor.NumDeadPixels";
-constexpr char kUploadTemplateSuccess[] = "Fingerprint.UploadTemplate.Success";
 
 // See
 // https://chromium.googlesource.com/chromium/src.git/+/HEAD/tools/metrics/histograms/README.md#count-histograms_choosing-number-of-buckets
@@ -69,12 +35,17 @@ bool BiodMetrics::SendEnrolledFingerCount(int finger_count) {
                                      finger_count, 10);
 }
 
+bool BiodMetrics::SendEnrollmentCapturesCount(int captures_count) {
+  return metrics_lib_->SendEnumToUMA(metrics::kFpEnrollmentCapturesCount,
+                                     captures_count, 20);
+}
+
 bool BiodMetrics::SendFpUnlockEnabled(bool enabled) {
   return metrics_lib_->SendBoolToUMA(metrics::kFpUnlockEnabled, enabled);
 }
 
 bool BiodMetrics::SendFpLatencyStats(
-    bool matched, const CrosFpDeviceInterface::FpStats& stats) {
+    bool matched, const ec::CrosFpDeviceInterface::FpStats& stats) {
   bool rc = true;
   rc = metrics_lib_->SendToUMA(matched ? metrics::kFpMatchDurationCapture
                                        : metrics::kFpNoMatchDurationCapture,
@@ -111,7 +82,7 @@ bool BiodMetrics::SendFwUpdaterStatus(FwUpdaterStatus status,
   constexpr int kUpdateBuckets = kUpdateMaxMSec / kUpdateResolutionMSec;
 
   bool rc = true;
-  // TODO(crbug.com/1218246) Change UMA enum name kUpdaterStatus if new enums
+  // TODO(b/266077024) Change UMA enum name kUpdaterStatus if new enums
   // for FWUpdaterStatus are added to avoid data discontinuity, then use
   // kMaxValue+1 rather than kMaxValue (or templated SendEnumToUMA()).
   if (!metrics_lib_->SendEnumToUMA(
@@ -155,7 +126,7 @@ bool BiodMetrics::SendPositiveMatchSecretCorrect(bool correct) {
 }
 
 bool BiodMetrics::SendRecordFormatVersion(int version) {
-  // TODO(crbug.com/1218246) Change UMA enum name kRecordFormatVersionMetric if
+  // TODO(b/266077024) Change UMA enum name kRecordFormatVersionMetric if
   // kRecordFormatVersion changes to avoid data discontinuity, then use
   // kRecordFormatVersion+1 rather than kRecordFormatVersion for
   // 'exclusive_max'.
@@ -198,4 +169,48 @@ bool BiodMetrics::SendUploadTemplateResult(int ec_result) {
       metrics::kMaxEcResultCode - min_ec_result_code + 1);
 }
 
+bool BiodMetrics::SendPartialAttemptsBeforeSuccess(int partial_attempts) {
+  // kMaxPartialAttempts = 20.
+  return metrics_lib_->SendEnumToUMA(metrics::kPartialAttemptsBeforeSuccess,
+                                     partial_attempts, 21);
+}
+
+bool BiodMetrics::SendFpSensorErrorNoIrq(bool no_irq) {
+  return metrics_lib_->SendBoolToUMA(metrics::kFpSensorErrorNoIrq, no_irq);
+}
+
+bool BiodMetrics::SendFpSensorErrorSpiCommunication(
+    bool spi_communication_error) {
+  return metrics_lib_->SendBoolToUMA(metrics::kFpSensorErrorSpiCommunication,
+                                     spi_communication_error);
+}
+
+bool BiodMetrics::SendFpSensorErrorBadHardwareID(bool bad_hwid) {
+  return metrics_lib_->SendBoolToUMA(metrics::kFpSensorErrorBadHardwareID,
+                                     bad_hwid);
+}
+
+bool BiodMetrics::SendFpSensorErrorInitializationFailure(bool init_failure) {
+  return metrics_lib_->SendBoolToUMA(
+      metrics::kFpSensorErrorInitializationFailure, init_failure);
+}
+
+bool BiodMetrics::SendSessionRetrievePrimarySessionResult(
+    RetrievePrimarySessionResult result) {
+  return metrics_lib_->SendEnumToUMA(
+      metrics::kSessionRetrievePrimarySessionResult, result);
+}
+
+bool BiodMetrics::SendSessionRetrievePrimarySessionDuration(int ms) {
+  // Rename UMA histogram name in kSessionRetrievePrimarySessionDuration when
+  // changing these constants.
+  constexpr int kResponseDurationMaxMs = dbus_constants::kDbusTimeoutMs;
+  constexpr int kResponseDurationResolutionMs = 500;
+  constexpr int kResponseDurationBuckets =
+      kResponseDurationMaxMs / kResponseDurationResolutionMs;
+
+  return metrics_lib_->SendToUMA(
+      metrics::kSessionRetrievePrimarySessionDuration, ms, 0,
+      kResponseDurationMaxMs, kResponseDurationBuckets);
+}
 }  // namespace biod

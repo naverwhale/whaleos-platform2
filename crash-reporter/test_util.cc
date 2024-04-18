@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,8 +35,7 @@ bool RetrieveActiveSessionsImpl(
 }  // namespace
 
 AdvancingClock::AdvancingClock()
-    : time_(GetDefaultTime()),
-      advance_amount_(base::TimeDelta::FromSeconds(10)) {}
+    : time_(GetDefaultTime()), advance_amount_(base::Seconds(10)) {}
 
 AdvancingClock::AdvancingClock(base::TimeDelta advance_amount)
     : time_(GetDefaultTime()), advance_amount_(advance_amount) {}
@@ -100,8 +99,33 @@ bool DirectoryHasFileWithPattern(const base::FilePath& directory,
   return !path.empty();
 }
 
-base::FilePath GetTestDataPath(const std::string& name) {
-  return base::FilePath(getenv("SRC")).Append(name);
+bool DirectoryHasFileWithPatternAndContents(const base::FilePath& directory,
+                                            const std::string& pattern,
+                                            const std::string& contents) {
+  base::FileEnumerator enumerator(
+      directory, false, base::FileEnumerator::FileType::FILES, pattern);
+  for (base::FilePath path = enumerator.Next(); !path.empty();
+       path = enumerator.Next()) {
+    LOG(INFO) << "Checking " << path.value();
+    std::string actual_contents;
+    if (!base::ReadFileToString(path, &actual_contents)) {
+      LOG(ERROR) << "Failed to read file " << path.value();
+      return false;
+    }
+    std::size_t found = actual_contents.find(contents);
+    if (found != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+base::FilePath GetTestDataPath(const std::string& name, bool use_testdata) {
+  base::FilePath src = base::FilePath(getenv("SRC"));
+  if (use_testdata) {
+    src = src.Append("testdata");
+  }
+  return src.Append(name);
 }
 
 bool TouchFileHelper(const base::FilePath& file_name,

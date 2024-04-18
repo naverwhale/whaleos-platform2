@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,6 +18,7 @@
 #include "power_manager/powerd/system/display/display_power_setter_stub.h"
 #include "power_manager/powerd/system/display/display_watcher_stub.h"
 #include "power_manager/powerd/system/external_ambient_light_sensor_factory_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 #include "power_manager/proto_bindings/backlight.pb.h"
 
 namespace {
@@ -29,10 +30,9 @@ constexpr char kSecondSensor[] = "/sys/devices/usb2/mysensor";
 
 }  // namespace
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
-class ExternalBacklightControllerTest : public ::testing::Test {
+class ExternalBacklightControllerTest : public TestEnvironment {
  public:
   ExternalBacklightControllerTest() {
     prefs_.SetString(kExternalBacklightAlsStepsPref, default_als_steps_);
@@ -309,5 +309,4 @@ TEST_F(ExternalBacklightControllerTest,
       0, controller_.GetAmbientLightSensorAndDisplayMatchesForTesting().size());
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

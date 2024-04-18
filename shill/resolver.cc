@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,19 +11,15 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
+#include <net-base/ip_address.h>
 
 #include "shill/dns_util.h"
-#include "shill/ipconfig.h"
 #include "shill/logging.h"
-#include "shill/net/ip_address.h"
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kResolver;
-static std::string ObjectID(const Resolver* r) {
-  return "(resolver)";
-}
 }  // namespace Logging
 
 const char Resolver::kDefaultIgnoredSearchList[] = "gateway.2wire.net";
@@ -40,7 +36,7 @@ Resolver* Resolver::GetInstance() {
 bool Resolver::SetDNSFromLists(
     const std::vector<std::string>& name_servers,
     const std::vector<std::string>& domain_search_list) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
 
   name_servers_ = name_servers;
   domain_search_list_ = domain_search_list;
@@ -54,24 +50,21 @@ bool Resolver::Emit() {
   }
 
   // dns-proxy always used if set.
-  const auto name_servers = !dns_proxy_addr_.empty()
-                                ? std::vector<std::string>({dns_proxy_addr_})
-                                : name_servers_;
+  const auto name_servers =
+      !dns_proxy_addrs_.empty() ? dns_proxy_addrs_ : name_servers_;
   if (name_servers.empty() && domain_search_list_.empty()) {
-    SLOG(this, 2) << "DNS list is empty";
+    SLOG(2) << "DNS list is empty";
     return ClearDNS();
   }
 
   std::vector<std::string> lines;
   for (const auto& server : name_servers) {
-    IPAddress addr(server);
-    std::string canonical_ip;
-    if (addr.family() != IPAddress::kFamilyUnknown &&
-        addr.IntoString(&canonical_ip)) {
-      lines.push_back("nameserver " + canonical_ip);
-    } else {
+    const auto addr = net_base::IPAddress::CreateFromString(server);
+    if (!addr.has_value()) {
       LOG(WARNING) << "Malformed nameserver IP: " << server;
+      continue;
     }
+    lines.push_back("nameserver " + addr->ToString());
   }
 
   std::vector<std::string> filtered_domain_search_list;
@@ -109,21 +102,22 @@ bool Resolver::Emit() {
 
   const auto contents = base::JoinString(lines, "\n");
 
-  SLOG(this, 2) << "Writing DNS out to " << path_.value();
+  SLOG(2) << "Writing DNS out to " << path_.value();
   int count = base::WriteFile(path_, contents.c_str(), contents.size());
 
   return count == static_cast<int>(contents.size());
 }
 
-bool Resolver::SetDNSProxy(const std::string& proxy_addr) {
-  SLOG(this, 2) << __func__;
+bool Resolver::SetDNSProxyAddresses(
+    const std::vector<std::string>& proxy_addrs) {
+  SLOG(2) << __func__;
 
-  dns_proxy_addr_ = proxy_addr;
+  dns_proxy_addrs_ = proxy_addrs;
   return Emit();
 }
 
 bool Resolver::ClearDNS() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
 
   if (path_.empty()) {
     LOG(DFATAL) << "No path set";
@@ -132,7 +126,7 @@ bool Resolver::ClearDNS() {
 
   name_servers_.clear();
   domain_search_list_.clear();
-  dns_proxy_addr_.clear();
+  dns_proxy_addrs_.clear();
   return base::DeleteFile(path_);
 }
 

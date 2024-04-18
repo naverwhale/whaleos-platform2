@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ethernet/ethernet_eap_provider.h"
 
 #include <string>
+#include <utility>
 
 #include "shill/ethernet/ethernet_eap_service.h"
 #include "shill/manager.h"
@@ -47,6 +48,8 @@ ServiceRefPtr EthernetEapProvider::CreateTemporaryServiceFromProfile(
   return new EthernetEapService(manager_);
 }
 
+void EthernetEapProvider::AbandonService(const ServiceRefPtr& service) {}
+
 void EthernetEapProvider::Start() {
   if (!service_) {
     service_ = new EthernetEapService(manager_);
@@ -65,7 +68,7 @@ void EthernetEapProvider::Stop() {
 
 void EthernetEapProvider::SetCredentialChangeCallback(
     Ethernet* device, CredentialChangeCallback callback) {
-  callback_map_[device] = callback;
+  callback_map_[device] = std::move(callback);
 }
 
 void EthernetEapProvider::ClearCredentialChangeCallback(Ethernet* device) {

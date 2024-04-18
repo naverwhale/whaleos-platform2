@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -10,10 +10,10 @@
 #include <set>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
-#include <base/memory/scoped_refptr.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 
 #include "cros-camera/common.h"
 #include "cros-camera/future_internal.h"
@@ -63,14 +63,12 @@ class Future : public base::RefCountedThreadSafe<Future<T>> {
   /* Waits until the value to be ready and then return the value through
    * std::move(). */
   T Get() {
-    VLOGF_ENTER();
     lock_.Wait(-1);  // Wait indefinitely until the value is set.
     return std::move(value_);
   }
 
   /* Sets the value and then wake up the waiter. */
   void Set(T value) {
-    VLOGF_ENTER();
     value_ = std::move(value);
     lock_.Signal();
   }
@@ -79,7 +77,6 @@ class Future : public base::RefCountedThreadSafe<Future<T>> {
    * than or equal to 0 will wait indefinitely until the value is set.
    */
   bool Wait(int timeout_ms = 5000) {
-    VLOGF_ENTER();
     return lock_.Wait(timeout_ms);
   }
 
@@ -107,7 +104,6 @@ class Future<void> : public base::RefCountedThreadSafe<Future<void>> {
 
   /* Wakes up the waiter. */
   void Set() {
-    VLOGF_ENTER();
     lock_.Signal();
   }
 
@@ -115,7 +111,6 @@ class Future<void> : public base::RefCountedThreadSafe<Future<void>> {
    * than or equal to 0 will wait indefinitely until the value is set.
    */
   bool Wait(int timeout_ms = 5000) {
-    VLOGF_ENTER();
     return lock_.Wait(timeout_ms);
   }
 
@@ -135,12 +130,12 @@ void FutureCallback(scoped_refptr<Future<T>> future, T ret) {
 }
 
 template <typename T>
-base::Callback<void(T)> GetFutureCallback(
+base::OnceCallback<void(T)> GetFutureCallback(
     const scoped_refptr<Future<T>>& future) {
-  return base::Bind(&FutureCallback<T>, future);
+  return base::BindOnce(&FutureCallback<T>, future);
 }
 
-CROS_CAMERA_EXPORT base::Callback<void()> GetFutureCallback(
+CROS_CAMERA_EXPORT base::OnceCallback<void()> GetFutureCallback(
     const scoped_refptr<Future<void>>& future);
 
 }  // namespace cros

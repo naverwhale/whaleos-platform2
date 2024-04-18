@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,9 +12,11 @@
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/logging.h>
+#include <base/no_destructor.h>
 #include <base/strings/string_number_conversions.h>
 #include <brillo/secure_blob.h>
 #include <crypto/scoped_openssl_types.h>
+#include <libhwsec-foundation/crypto/openssl.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -32,29 +34,7 @@ using std::stringstream;
 using std::vector;
 using ScopedASN1_OCTET_STRING =
     crypto::ScopedOpenSSL<ASN1_OCTET_STRING, ASN1_OCTET_STRING_free>;
-
-namespace {
-
-template <typename OpenSSLType,
-          int (*openssl_func)(OpenSSLType*, unsigned char**)>
-string ConvertOpenSSLObjectToString(OpenSSLType* type) {
-  string output;
-
-  int expected_size = openssl_func(type, nullptr);
-  if (expected_size < 0) {
-    return string();
-  }
-
-  output.resize(expected_size, '\0');
-
-  unsigned char* buf = chaps::ConvertStringToByteBuffer(output.data());
-  int real_size = openssl_func(type, &buf);
-  CHECK_EQ(expected_size, real_size);
-
-  return output;
-}
-
-}  // namespace
+using hwsec_foundation::OpenSSLObjectToString;
 
 namespace chaps {
 
@@ -402,10 +382,10 @@ string AttributeToString(CK_ATTRIBUTE_TYPE attribute) {
       return "kKeyBlobAttribute";
     case kAuthDataAttribute:
       return "kAuthDataAttribute";
-    case kLegacyAttribute:
-      return "kLegacyAttribute";
     case kForceSoftwareAttribute:
       return "kForceSoftwareAttribute";
+    case kAllowSoftwareGenAttribute:
+      return "kAllowSoftwareGenAttribute";
     case kKeyInSoftware:
       return "kKeyInSoftware";
     default:
@@ -416,100 +396,102 @@ string AttributeToString(CK_ATTRIBUTE_TYPE attribute) {
 }
 
 bool StringToAttribute(string attribute_string, CK_ATTRIBUTE_TYPE* output) {
-  static std::unordered_map<string, CK_ATTRIBUTE_TYPE> attribute_map({
-      {"CKA_CLASS", CKA_CLASS},
-      {"CKA_TOKEN", CKA_TOKEN},
-      {"CKA_PRIVATE", CKA_PRIVATE},
-      {"CKA_LABEL", CKA_LABEL},
-      {"CKA_APPLICATION", CKA_APPLICATION},
-      {"CKA_VALUE", CKA_VALUE},
-      {"CKA_OBJECT_ID", CKA_OBJECT_ID},
-      {"CKA_CERTIFICATE_TYPE", CKA_CERTIFICATE_TYPE},
-      {"CKA_ISSUER", CKA_ISSUER},
-      {"CKA_SERIAL_NUMBER", CKA_SERIAL_NUMBER},
-      {"CKA_AC_ISSUER", CKA_AC_ISSUER},
-      {"CKA_OWNER", CKA_OWNER},
-      {"CKA_ATTR_TYPES", CKA_ATTR_TYPES},
-      {"CKA_TRUSTED", CKA_TRUSTED},
-      {"CKA_CERTIFICATE_CATEGORY", CKA_CERTIFICATE_CATEGORY},
-      {"CKA_CHECK_VALUE", CKA_CHECK_VALUE},
-      {"CKA_JAVA_MIDP_SECURITY_DOMAIN", CKA_JAVA_MIDP_SECURITY_DOMAIN},
-      {"CKA_URL", CKA_URL},
-      {"CKA_HASH_OF_SUBJECT_PUBLIC_KEY", CKA_HASH_OF_SUBJECT_PUBLIC_KEY},
-      {"CKA_HASH_OF_ISSUER_PUBLIC_KEY", CKA_HASH_OF_ISSUER_PUBLIC_KEY},
-      {"CKA_KEY_TYPE", CKA_KEY_TYPE},
-      {"CKA_SUBJECT", CKA_SUBJECT},
-      {"CKA_ID", CKA_ID},
-      {"CKA_SENSITIVE", CKA_SENSITIVE},
-      {"CKA_ENCRYPT", CKA_ENCRYPT},
-      {"CKA_DECRYPT", CKA_DECRYPT},
-      {"CKA_WRAP", CKA_WRAP},
-      {"CKA_UNWRAP", CKA_UNWRAP},
-      {"CKA_SIGN", CKA_SIGN},
-      {"CKA_SIGN_RECOVER", CKA_SIGN_RECOVER},
-      {"CKA_VERIFY", CKA_VERIFY},
-      {"CKA_VERIFY_RECOVER", CKA_VERIFY_RECOVER},
-      {"CKA_DERIVE", CKA_DERIVE},
-      {"CKA_START_DATE", CKA_START_DATE},
-      {"CKA_END_DATE", CKA_END_DATE},
-      {"CKA_MODULUS", CKA_MODULUS},
-      {"CKA_MODULUS_BITS", CKA_MODULUS_BITS},
-      {"CKA_PUBLIC_EXPONENT", CKA_PUBLIC_EXPONENT},
-      {"CKA_PRIVATE_EXPONENT", CKA_PRIVATE_EXPONENT},
-      {"CKA_PRIME_1", CKA_PRIME_1},
-      {"CKA_PRIME_2", CKA_PRIME_2},
-      {"CKA_EXPONENT_1", CKA_EXPONENT_1},
-      {"CKA_EXPONENT_2", CKA_EXPONENT_2},
-      {"CKA_COEFFICIENT", CKA_COEFFICIENT},
-      {"CKA_PUBLIC_KEY_INFO", CKA_PUBLIC_KEY_INFO},
-      {"CKA_PRIME", CKA_PRIME},
-      {"CKA_SUBPRIME", CKA_SUBPRIME},
-      {"CKA_BASE", CKA_BASE},
-      {"CKA_PRIME_BITS", CKA_PRIME_BITS},
-      {"CKA_SUBPRIME_BITS", CKA_SUBPRIME_BITS},
-      {"CKA_SUB_PRIME_BITS", CKA_SUBPRIME_BITS},
-      {"CKA_VALUE_BITS", CKA_VALUE_BITS},
-      {"CKA_VALUE_LEN", CKA_VALUE_LEN},
-      {"CKA_EXTRACTABLE", CKA_EXTRACTABLE},
-      {"CKA_LOCAL", CKA_LOCAL},
-      {"CKA_NEVER_EXTRACTABLE", CKA_NEVER_EXTRACTABLE},
-      {"CKA_ALWAYS_SENSITIVE", CKA_ALWAYS_SENSITIVE},
-      {"CKA_KEY_GEN_MECHANISM", CKA_KEY_GEN_MECHANISM},
-      {"CKA_MODIFIABLE", CKA_MODIFIABLE},
-      {"CKA_ECDSA_PARAMS", CKA_ECDSA_PARAMS},
-      {"CKA_EC_PARAMS", CKA_EC_PARAMS},
-      {"CKA_EC_POINT", CKA_EC_POINT},
-      {"CKA_SECONDARY_AUTH", CKA_SECONDARY_AUTH},
-      {"CKA_AUTH_PIN_FLAGS", CKA_AUTH_PIN_FLAGS},
-      {"CKA_ALWAYS_AUTHENTICATE", CKA_ALWAYS_AUTHENTICATE},
-      {"CKA_WRAP_WITH_TRUSTED", CKA_WRAP_WITH_TRUSTED},
-      {"CKA_WRAP_TEMPLATE", CKA_WRAP_TEMPLATE},
-      {"CKA_UNWRAP_TEMPLATE", CKA_UNWRAP_TEMPLATE},
-      {"CKA_NSS_URL", CKA_NSS_URL},
-      {"CKA_NSS_EMAIL", CKA_NSS_EMAIL},
-      {"CKA_NSS_SMIME_INFO", CKA_NSS_SMIME_INFO},
-      {"CKA_NSS_SMIME_TIMESTAMP", CKA_NSS_SMIME_TIMESTAMP},
-      {"CKA_NSS_PKCS8_SALT", CKA_NSS_PKCS8_SALT},
-      {"CKA_NSS_PASSWORD_CHECK", CKA_NSS_PASSWORD_CHECK},
-      {"CKA_NSS_EXPIRES", CKA_NSS_EXPIRES},
-      {"CKA_NSS_KRL", CKA_NSS_KRL},
-      {"kKeyBlobAttribute", kKeyBlobAttribute},
-      {"kAuthDataAttribute", kAuthDataAttribute},
-      {"kLegacyAttribute", kLegacyAttribute},
-      {"kForceSoftwareAttribute", kForceSoftwareAttribute},
-      {"kKeyInSoftware", kKeyInSoftware},
-  });
+  static const base::NoDestructor<std::unordered_map<string, CK_ATTRIBUTE_TYPE>>
+      attribute_map({
+          {"CKA_CLASS", CKA_CLASS},
+          {"CKA_TOKEN", CKA_TOKEN},
+          {"CKA_PRIVATE", CKA_PRIVATE},
+          {"CKA_LABEL", CKA_LABEL},
+          {"CKA_APPLICATION", CKA_APPLICATION},
+          {"CKA_VALUE", CKA_VALUE},
+          {"CKA_OBJECT_ID", CKA_OBJECT_ID},
+          {"CKA_CERTIFICATE_TYPE", CKA_CERTIFICATE_TYPE},
+          {"CKA_ISSUER", CKA_ISSUER},
+          {"CKA_SERIAL_NUMBER", CKA_SERIAL_NUMBER},
+          {"CKA_AC_ISSUER", CKA_AC_ISSUER},
+          {"CKA_OWNER", CKA_OWNER},
+          {"CKA_ATTR_TYPES", CKA_ATTR_TYPES},
+          {"CKA_TRUSTED", CKA_TRUSTED},
+          {"CKA_CERTIFICATE_CATEGORY", CKA_CERTIFICATE_CATEGORY},
+          {"CKA_CHECK_VALUE", CKA_CHECK_VALUE},
+          {"CKA_JAVA_MIDP_SECURITY_DOMAIN", CKA_JAVA_MIDP_SECURITY_DOMAIN},
+          {"CKA_URL", CKA_URL},
+          {"CKA_HASH_OF_SUBJECT_PUBLIC_KEY", CKA_HASH_OF_SUBJECT_PUBLIC_KEY},
+          {"CKA_HASH_OF_ISSUER_PUBLIC_KEY", CKA_HASH_OF_ISSUER_PUBLIC_KEY},
+          {"CKA_KEY_TYPE", CKA_KEY_TYPE},
+          {"CKA_SUBJECT", CKA_SUBJECT},
+          {"CKA_ID", CKA_ID},
+          {"CKA_SENSITIVE", CKA_SENSITIVE},
+          {"CKA_ENCRYPT", CKA_ENCRYPT},
+          {"CKA_DECRYPT", CKA_DECRYPT},
+          {"CKA_WRAP", CKA_WRAP},
+          {"CKA_UNWRAP", CKA_UNWRAP},
+          {"CKA_SIGN", CKA_SIGN},
+          {"CKA_SIGN_RECOVER", CKA_SIGN_RECOVER},
+          {"CKA_VERIFY", CKA_VERIFY},
+          {"CKA_VERIFY_RECOVER", CKA_VERIFY_RECOVER},
+          {"CKA_DERIVE", CKA_DERIVE},
+          {"CKA_START_DATE", CKA_START_DATE},
+          {"CKA_END_DATE", CKA_END_DATE},
+          {"CKA_MODULUS", CKA_MODULUS},
+          {"CKA_MODULUS_BITS", CKA_MODULUS_BITS},
+          {"CKA_PUBLIC_EXPONENT", CKA_PUBLIC_EXPONENT},
+          {"CKA_PRIVATE_EXPONENT", CKA_PRIVATE_EXPONENT},
+          {"CKA_PRIME_1", CKA_PRIME_1},
+          {"CKA_PRIME_2", CKA_PRIME_2},
+          {"CKA_EXPONENT_1", CKA_EXPONENT_1},
+          {"CKA_EXPONENT_2", CKA_EXPONENT_2},
+          {"CKA_COEFFICIENT", CKA_COEFFICIENT},
+          {"CKA_PUBLIC_KEY_INFO", CKA_PUBLIC_KEY_INFO},
+          {"CKA_PRIME", CKA_PRIME},
+          {"CKA_SUBPRIME", CKA_SUBPRIME},
+          {"CKA_BASE", CKA_BASE},
+          {"CKA_PRIME_BITS", CKA_PRIME_BITS},
+          {"CKA_SUBPRIME_BITS", CKA_SUBPRIME_BITS},
+          {"CKA_SUB_PRIME_BITS", CKA_SUBPRIME_BITS},
+          {"CKA_VALUE_BITS", CKA_VALUE_BITS},
+          {"CKA_VALUE_LEN", CKA_VALUE_LEN},
+          {"CKA_EXTRACTABLE", CKA_EXTRACTABLE},
+          {"CKA_LOCAL", CKA_LOCAL},
+          {"CKA_NEVER_EXTRACTABLE", CKA_NEVER_EXTRACTABLE},
+          {"CKA_ALWAYS_SENSITIVE", CKA_ALWAYS_SENSITIVE},
+          {"CKA_KEY_GEN_MECHANISM", CKA_KEY_GEN_MECHANISM},
+          {"CKA_MODIFIABLE", CKA_MODIFIABLE},
+          {"CKA_ECDSA_PARAMS", CKA_ECDSA_PARAMS},
+          {"CKA_EC_PARAMS", CKA_EC_PARAMS},
+          {"CKA_EC_POINT", CKA_EC_POINT},
+          {"CKA_SECONDARY_AUTH", CKA_SECONDARY_AUTH},
+          {"CKA_AUTH_PIN_FLAGS", CKA_AUTH_PIN_FLAGS},
+          {"CKA_ALWAYS_AUTHENTICATE", CKA_ALWAYS_AUTHENTICATE},
+          {"CKA_WRAP_WITH_TRUSTED", CKA_WRAP_WITH_TRUSTED},
+          {"CKA_WRAP_TEMPLATE", CKA_WRAP_TEMPLATE},
+          {"CKA_UNWRAP_TEMPLATE", CKA_UNWRAP_TEMPLATE},
+          {"CKA_NSS_URL", CKA_NSS_URL},
+          {"CKA_NSS_EMAIL", CKA_NSS_EMAIL},
+          {"CKA_NSS_SMIME_INFO", CKA_NSS_SMIME_INFO},
+          {"CKA_NSS_SMIME_TIMESTAMP", CKA_NSS_SMIME_TIMESTAMP},
+          {"CKA_NSS_PKCS8_SALT", CKA_NSS_PKCS8_SALT},
+          {"CKA_NSS_PASSWORD_CHECK", CKA_NSS_PASSWORD_CHECK},
+          {"CKA_NSS_EXPIRES", CKA_NSS_EXPIRES},
+          {"CKA_NSS_KRL", CKA_NSS_KRL},
+          {"kKeyBlobAttribute", kKeyBlobAttribute},
+          {"kAuthDataAttribute", kAuthDataAttribute},
+          {"kForceSoftwareAttribute", kForceSoftwareAttribute},
+          {"kKeyInSoftware", kKeyInSoftware},
+          {"kAllowSoftwareGenAttribute", kAllowSoftwareGenAttribute},
+      });
 
   // If we can match the attribute name, then we'll return whatever that's
   // matched.
-  if (attribute_map.count(attribute_string) != 0) {
-    *output = attribute_map[attribute_string];
+  if (auto iter = attribute_map->find(attribute_string);
+      iter != attribute_map->end()) {
+    *output = iter->second;
     return true;
   }
 
   // If we can't match anything, then we'll treat the input as an integer.
-  uint64_t converted_int;
-  if (base::StringToUint64(attribute_string, &converted_int)) {
+  if (uint64_t converted_int;
+      base::StringToUint64(attribute_string, &converted_int)) {
     *output = static_cast<CK_ATTRIBUTE_TYPE>(converted_int);
     return true;
   }
@@ -622,8 +604,11 @@ string ValueToString(CK_ATTRIBUTE_TYPE attribute,
     case CKA_NEVER_EXTRACTABLE:
     case CKA_ALWAYS_SENSITIVE:
     case CKA_ALWAYS_AUTHENTICATE:
+    case CKA_LOCAL:
       return PrintYesNo(value);
     case CKA_ID:
+    case CKA_EC_PARAMS:
+    case CKA_LABEL:
       return PrintIntVector(value);
     default:
       return "***";
@@ -849,38 +834,14 @@ bool ConvertToBIGNUM(const string& big_integer, BIGNUM* b) {
                    big_integer.length(), b);
 }
 
-crypto::ScopedRSA NumberToScopedRsa(const std::string& modulus,
-                                    const std::string& exponent) {
-  crypto::ScopedRSA rsa(RSA_new());
-  if (!rsa) {
-    LOG(ERROR) << "Failed to allocate RSA.";
-    return nullptr;
-  }
-
-  crypto::ScopedBIGNUM n(BN_new()), e(BN_new());
-  if (!n || !e) {
-    LOG(ERROR) << "Failed to allocate BIGNUM.";
-    return nullptr;
-  }
-
-  if (!BN_bin2bn(reinterpret_cast<const unsigned char*>(modulus.data()),
-                 modulus.size(), n.get()) ||
-      !BN_bin2bn(reinterpret_cast<const unsigned char*>(exponent.data()),
-                 exponent.size(), e.get())) {
-    LOG(ERROR) << "Failed to convert modulus or exponent for RSA.";
-    return nullptr;
-  }
-
-  if (!RSA_set0_key(rsa.get(), n.release(), e.release(), nullptr)) {
-    LOG(ERROR) << "Failed to set modulus or exponent for RSA.";
-    return nullptr;
-  }
-
-  return rsa;
+bool ConvertBlobToBIGNUM(const brillo::Blob& big_integer, BIGNUM* b) {
+  if (big_integer.empty() || !b)
+    return false;
+  return BN_bin2bn(big_integer.data(), big_integer.size(), b);
 }
 
 string GetECParametersAsString(const EC_KEY* key) {
-  return ConvertOpenSSLObjectToString<EC_KEY, i2d_ECParameters>(
+  return OpenSSLObjectToString<EC_KEY, i2d_ECParameters>(
       const_cast<EC_KEY*>(key));
 }
 
@@ -893,7 +854,7 @@ string GetECParametersAsString(const EC_KEY* key) {
 string GetECPointAsString(const EC_KEY* key) {
   // Convert EC_KEY* to OCT_STRING
   const string oct_string =
-      ConvertOpenSSLObjectToString<EC_KEY, chaps::i2o_ECPublicKey_nc>(
+      OpenSSLObjectToString<EC_KEY, chaps::i2o_ECPublicKey_nc>(
           const_cast<EC_KEY*>(key));
   if (oct_string.empty())
     return string();
@@ -909,7 +870,7 @@ string GetECPointAsString(const EC_KEY* key) {
                         oct_string.size());
 
   // DER encode ASN1_OCTET_STRING
-  return ConvertOpenSSLObjectToString<ASN1_OCTET_STRING, i2d_ASN1_OCTET_STRING>(
+  return OpenSSLObjectToString<ASN1_OCTET_STRING, i2d_ASN1_OCTET_STRING>(
       os.get());
 }
 
@@ -950,16 +911,19 @@ chaps::DigestAlgorithm GetDigestAlgorithm(CK_MECHANISM_TYPE mechanism) {
     case CKM_SHA256_HMAC:
     case CKM_SHA256_RSA_PKCS:
     case CKM_SHA256_RSA_PKCS_PSS:
+    case CKM_ECDSA_SHA256:
       return chaps::DigestAlgorithm::SHA256;
     case CKM_SHA384:
     case CKM_SHA384_HMAC:
     case CKM_SHA384_RSA_PKCS:
     case CKM_SHA384_RSA_PKCS_PSS:
+    case CKM_ECDSA_SHA384:
       return chaps::DigestAlgorithm::SHA384;
     case CKM_SHA512:
     case CKM_SHA512_HMAC:
     case CKM_SHA512_RSA_PKCS:
     case CKM_SHA512_RSA_PKCS_PSS:
+    case CKM_ECDSA_SHA512:
       return chaps::DigestAlgorithm::SHA512;
     default:
       return chaps::DigestAlgorithm::NoDigest;
@@ -1030,8 +994,8 @@ const EVP_MD* GetOpenSSLDigestForMGF(const CK_RSA_PKCS_MGF_TYPE mgf) {
   }
 }
 
-bool ParseRSAPSSParams(CK_MECHANISM_TYPE signing_mechanism,
-                       const std::string& mechanism_parameter,
+bool ParseRSAPSSParams(const std::string& mechanism_parameter,
+                       const DigestAlgorithm signing_digest_algorithm_in,
                        const CK_RSA_PKCS_PSS_PARAMS** pss_params_out,
                        const EVP_MD** mgf1_hash_out,
                        DigestAlgorithm* digest_algorithm_out) {
@@ -1055,7 +1019,7 @@ bool ParseRSAPSSParams(CK_MECHANISM_TYPE signing_mechanism,
   }
   // If no Hash algorithm is specified in the signing mechanism, then we'll have
   // to use the one in the PSS parameters.
-  if (*digest_algorithm_out == DigestAlgorithm::NoDigest) {
+  if (signing_digest_algorithm_in == DigestAlgorithm::NoDigest) {
     *digest_algorithm_out = GetDigestAlgorithm(pss_params->hashAlg);
     if (*digest_algorithm_out == DigestAlgorithm::NoDigest) {
       // PSS can't accept signing of generic data without hash algorithm
@@ -1063,6 +1027,8 @@ bool ParseRSAPSSParams(CK_MECHANISM_TYPE signing_mechanism,
                     "CKM_RSA_PKCS_PSS in ParseRSAPSSParams().";
       return false;
     }
+  } else {
+    *digest_algorithm_out = signing_digest_algorithm_in;
   }
 
   *pss_params_out = pss_params;

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,10 +12,11 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/message_loops/message_loop.h>
 #include <mojo/core/embedder/embedder.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
@@ -81,7 +82,7 @@ void ClientTracker::MakeMojoClient(
   VLOG(1) << "MakeMojoClient called.";
   auto new_cli = std::make_unique<Client>(
       device_tracker_, client_id_counter_,
-      base::Bind(&ClientTracker::RemoveClient, weak_factory_.GetWeakPtr()),
+      base::BindOnce(&ClientTracker::RemoveClient, weak_factory_.GetWeakPtr()),
       std::move(receiver), std::move(client));
 
   if (new_cli) {
@@ -104,7 +105,7 @@ void ClientTracker::InitClientTracker() {
 
   mojo::core::Init();
   ipc_support_ = std::make_unique<mojo::core::ScopedIPCSupport>(
-      base::ThreadTaskRunnerHandle::Get(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
       mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
 }
 

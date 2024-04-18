@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 
 #include <algorithm>
+#include <cstring>
 
 #include <base/check.h>
 #include <base/logging.h>
@@ -93,10 +94,10 @@ bool UinputDevice::Init() {
 
 bool UinputDevice::SendEvent(int value) const {
   // Send an input event to the kernel through this uinput device.
-  struct input_event ev;
-  ev.type = EV_KEY;
-  ev.code = KEY_WAKEUP;
-  ev.value = value;
+  struct input_event ev = {.time = base::Time::Now().ToTimeVal(),
+                           .type = EV_KEY,
+                           .code = KEY_WAKEUP,
+                           .value = value};
 
   int bytes_written =
       TEMP_FAILURE_RETRY(write(uinput_fd_.get(), &ev, sizeof(ev)));

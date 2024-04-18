@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <brillo/daemons/dbus_daemon.h>
 #include <brillo/dbus/async_event_sequencer.h>
@@ -28,8 +28,8 @@ DBusService::DBusService(
     : DBusService(tpm_manager_service.get(),
                   tpm_manager_service.get(),
                   local_data_store) {
-  tpm_manager_service->SetOwnershipTakenCallback(
-      base::Bind(&DBusService::NotifyOwnershipIsTaken, base::Unretained(this)));
+  tpm_manager_service->SetOwnershipTakenCallback(base::BindRepeating(
+      &DBusService::NotifyOwnershipIsTaken, base::Unretained(this)));
   tpm_manager_service_ = std::move(tpm_manager_service);
 }
 
@@ -217,15 +217,8 @@ bool DBusService::MaybeSendOwnershipTakenSignal() {
     return false;
   }
 
-  // Currently we just keep the entirety of local data sent with the signal, but
-  // ideally the sercrets should not be exposed unless it's necessary.
-  // TODO(b/168852740): Wipe out the unnecessarily visible auth values before
-  // sending the signal.
-  OwnershipTakenSignal payload;
-  *payload.mutable_local_data() = local_data;
-
-  // The proto message |payload| will be converted to array of bytes by Send().
-  if (!signal->Send(payload)) {
+  // The proto message will be converted to array of bytes by Send().
+  if (!signal->Send(OwnershipTakenSignal())) {
     LOG(ERROR) << "Failed to send ownership taken signal!";
     return false;
   }
@@ -243,18 +236,12 @@ template <typename RequestProtobufType,
 void DBusService::HandleNvramDBusMethod(
     std::unique_ptr<DBusMethodResponse<const ReplyProtobufType&>> response,
     const RequestProtobufType& request) {
-  // Convert |response| to a shared_ptr so |nvram_service_| can safely copy the
-  // callback.
-  using SharedResponsePointer =
-      std::shared_ptr<DBusMethodResponse<const ReplyProtobufType&>>;
   // A callback that sends off the reply protobuf.
-  auto callback = [](const SharedResponsePointer& response,
-                     const ReplyProtobufType& reply) {
-    response->Return(reply);
-  };
-  (nvram_service_->*func)(
-      request,
-      base::Bind(callback, SharedResponsePointer(std::move(response))));
+  auto callback =
+      [](std::unique_ptr<DBusMethodResponse<const ReplyProtobufType&>> response,
+         const ReplyProtobufType& reply) { response->Return(reply); };
+  (nvram_service_->*func)(request,
+                          base::BindOnce(callback, std::move(response)));
 }
 
 template <typename RequestProtobufType,
@@ -265,18 +252,12 @@ template <typename RequestProtobufType,
 void DBusService::HandleOwnershipDBusMethod(
     std::unique_ptr<DBusMethodResponse<const ReplyProtobufType&>> response,
     const RequestProtobufType& request) {
-  // Convert |response| to a shared_ptr so |ownership_service_| can safely
-  // copy the callback.
-  using SharedResponsePointer =
-      std::shared_ptr<DBusMethodResponse<const ReplyProtobufType&>>;
   // A callback that sends off the reply protobuf.
-  auto callback = [](const SharedResponsePointer& response,
-                     const ReplyProtobufType& reply) {
-    response->Return(reply);
-  };
-  (ownership_service_->*func)(
-      request,
-      base::Bind(callback, SharedResponsePointer(std::move(response))));
+  auto callback =
+      [](std::unique_ptr<DBusMethodResponse<const ReplyProtobufType&>> response,
+         const ReplyProtobufType& reply) { response->Return(reply); };
+  (ownership_service_->*func)(request,
+                              base::BindOnce(callback, std::move(response)));
 }
 
 }  // namespace tpm_manager

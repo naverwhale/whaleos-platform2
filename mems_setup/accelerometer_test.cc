@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,15 +34,11 @@ constexpr char kTriggerString[] = "trigger";
 constexpr char kHwfifoTimeoutString[] = "buffer/hwfifo_timeout";
 constexpr char kFlushString[] = "flush";
 
-#if USE_IIOSERVICE
-constexpr char kDevString[] = "/dev/";
-#endif  // USE_IIOSERVICE
-
-class AccelerometerTest : public SensorTestBase {
+class AccelerometerTest : public SensorTestBase, public ::testing::Test {
  public:
   AccelerometerTest() : SensorTestBase("cros-ec-accel", kDeviceId) {
     mock_delegate_->AddGroup("chronos", kChronosGroupId);
-    mock_delegate_->AddGroup(Configuration::GetGroupNameForSysfs(),
+    mock_delegate_->AddGroup(GetConfiguration()->GetGroupNameForSysfs(),
                              kIioserviceGroupId);
 
     std::string dev_name = libmems::IioDeviceImpl::GetStringFromId(kDeviceId);
@@ -86,17 +82,15 @@ TEST_F(AccelerometerTest, CheckPermissionsAndOwnership) {
                                       base::FILE_PERMISSION_WRITE_BY_GROUP |
                                           base::FILE_PERMISSION_READ_BY_GROUP);
 
-#if USE_IIOSERVICE
   // /dev/iio:deviceX
-  base::FilePath dev_path = base::FilePath(kDevString).Append(dev_name.c_str());
+  base::FilePath dev_path =
+      base::FilePath(libmems::kDevString).Append(dev_name.c_str());
 
   CheckPermissionsAndOwnershipForFile(dev_path,
                                       base::FILE_PERMISSION_WRITE_BY_GROUP |
                                           base::FILE_PERMISSION_READ_BY_GROUP);
-#endif  // USE_IIOSERVICE
 }
 
-#if USE_IIOSERVICE
 TEST_F(AccelerometerTest, FrequencyReset) {
   SetSingleSensor(kBaseSensorLocation);
   ConfigureVpd({{"in_accel_x_base_calibbias", "100"}});
@@ -108,7 +102,6 @@ TEST_F(AccelerometerTest, FrequencyReset) {
   EXPECT_TRUE(frequency_opt.has_value());
   EXPECT_EQ(frequency_opt.value(), 0.0);
 }
-#endif  // USE_IIOSERVICE
 
 TEST_F(AccelerometerTest, CheckClock) {
   SetSingleSensor(kBaseSensorLocation);
@@ -143,7 +136,7 @@ TEST_F(AccelerometerTest, MissingVpd) {
 TEST_F(AccelerometerTest, NotNumericVpd) {
   SetSingleSensor(kBaseSensorLocation);
   ConfigureVpd({{"in_accel_x_base_calibbias", "blah"},
-                {"in_accel_y_base_calibbias", "100"}});
+                {"in_accel_y_base_calibbias", "104"}});
 
   EXPECT_TRUE(GetConfiguration()->Configure());
 
@@ -153,7 +146,7 @@ TEST_F(AccelerometerTest, NotNumericVpd) {
   EXPECT_TRUE(mock_device_->GetChannel("accel_y")
                   ->ReadNumberAttribute("calibbias")
                   .has_value());
-  EXPECT_EQ(100, mock_device_->GetChannel("accel_y")
+  EXPECT_EQ(104, mock_device_->GetChannel("accel_y")
                      ->ReadNumberAttribute("calibbias")
                      .value());
   EXPECT_FALSE(mock_device_->GetChannel("accel_z")
@@ -163,8 +156,8 @@ TEST_F(AccelerometerTest, NotNumericVpd) {
 
 TEST_F(AccelerometerTest, VpdOutOfRange) {
   SetSingleSensor(kBaseSensorLocation);
-  ConfigureVpd({{"in_accel_x_base_calibbias", "104"},  // just above .100g.
-                {"in_accel_y_base_calibbias", "100"},
+  ConfigureVpd({{"in_accel_x_base_calibbias", "400"},  // Above .250g
+                {"in_accel_y_base_calibbias", "104"},
                 {"in_accel_z_base_calibbias", "85"}});
 
   EXPECT_TRUE(GetConfiguration()->Configure());
@@ -241,7 +234,7 @@ TEST_F(AccelerometerTest, CalibscaleZeroData) {
 TEST_F(AccelerometerTest, NotLoadingTriggerModule) {
   SetSingleSensor(kBaseSensorLocation);
   ConfigureVpd({{"in_accel_x_base_calibbias", "50"},
-                {"in_accel_y_base_calibbias", "100"},
+                {"in_accel_y_base_calibbias", "104"},
                 {"in_accel_z_base_calibbias", "85"}});
 
   EXPECT_TRUE(GetConfiguration()->Configure());
@@ -252,7 +245,7 @@ TEST_F(AccelerometerTest, NotLoadingTriggerModule) {
 TEST_F(AccelerometerTest, MultipleSensorDevice) {
   SetSharedSensor();
   ConfigureVpd({{"in_accel_x_base_calibbias", "50"},
-                {"in_accel_y_base_calibbias", "100"},
+                {"in_accel_y_base_calibbias", "104"},
                 {"in_accel_z_base_calibbias", "85"},
                 {"in_accel_y_lid_calibbias", "27"}});
 
@@ -271,7 +264,7 @@ TEST_F(AccelerometerTest, MultipleSensorDevice) {
   EXPECT_EQ(50, mock_device_->GetChannel("accel_x_base")
                     ->ReadNumberAttribute("calibbias")
                     .value());
-  EXPECT_EQ(100, mock_device_->GetChannel("accel_y_base")
+  EXPECT_EQ(104, mock_device_->GetChannel("accel_y_base")
                      ->ReadNumberAttribute("calibbias")
                      .value());
   EXPECT_EQ(85, mock_device_->GetChannel("accel_z_base")
@@ -304,43 +297,6 @@ TEST_F(AccelerometerTest, TriggerPermissions) {
   EXPECT_EQ(kChronosGroupId, gid);
 }
 
-#if !USE_IIOSERVICE
-TEST_F(AccelerometerTest, SingleSensorEnableChannels) {
-  SetSingleSensor(kLidSensorLocation);
-  EXPECT_TRUE(GetConfiguration()->Configure());
-
-  for (auto channel : mock_device_->GetAllChannels()) {
-    if (strcmp(channel->GetId(), "calibration") == 0)
-      continue;
-    EXPECT_EQ(static_cast<FakeIioChannel*>(channel)->IsScanElementsEnabled(),
-              0 != strcmp(channel->GetId(), "timestamp"));
-  }
-}
-
-TEST_F(AccelerometerTest, MultipleSensorEnableChannels) {
-  SetSharedSensor();
-  EXPECT_TRUE(GetConfiguration()->Configure());
-
-  for (auto channel : mock_device_->GetAllChannels()) {
-    if (strcmp(channel->GetId(), "calibration") == 0)
-      continue;
-    EXPECT_EQ(static_cast<FakeIioChannel*>(channel)->IsScanElementsEnabled(),
-              0 != strcmp(channel->GetId(), "timestamp"));
-  }
-}
-
-TEST_F(AccelerometerTest, BufferEnabled) {
-  SetSingleSensor(kLidSensorLocation);
-  EXPECT_FALSE(mock_device_->IsBufferEnabled());
-
-  EXPECT_TRUE(GetConfiguration()->Configure());
-
-  size_t accel_buffer_len = 0;
-  EXPECT_TRUE(mock_device_->IsBufferEnabled(&accel_buffer_len));
-  EXPECT_EQ(1, accel_buffer_len);
-}
-#endif
-
 TEST_F(AccelerometerTest, SingleSensorKbWakeAnglePermissions) {
   base::FilePath kb_path("/sys/class/chromeos/cros_ec/kb_wake_angle");
 
@@ -364,8 +320,36 @@ TEST_F(AccelerometerTest, OkWithSysfstrigDefined) {
   EXPECT_TRUE(GetConfiguration()->Configure());
 }
 
-TEST_F(AccelerometerTest, SetRangeNoGyroLid) {
+TEST_F(AccelerometerTest, SetSingleAccelRangeNoGyroLid) {
   SetSingleSensor(kLidSensorLocation);
+  EXPECT_TRUE(GetConfiguration()->Configure());
+  EXPECT_EQ(4, mock_device_->ReadNumberAttribute("scale").value());
+}
+
+TEST_F(AccelerometerTest, SetSingleAccelRangeNoGyroBase) {
+  SetSingleSensor(kLidSensorLocation);
+  EXPECT_TRUE(GetConfiguration()->Configure());
+  EXPECT_EQ(4, mock_device_->ReadNumberAttribute("scale").value());
+}
+
+TEST_F(AccelerometerTest, SetPairAccelRangeNoGyroBase) {
+  SetSingleSensor(kBaseSensorLocation);
+  auto mock_lid_accel =
+      std::make_unique<FakeIioDevice>(mock_context_.get(), "cros-ec-accel", 2);
+  mock_lid_accel->WriteStringAttribute("location", kLidSensorLocation);
+  mock_context_->AddDevice(std::move(mock_lid_accel));
+
+  EXPECT_TRUE(GetConfiguration()->Configure());
+  EXPECT_EQ(2, mock_device_->ReadNumberAttribute("scale").value());
+}
+
+TEST_F(AccelerometerTest, SetPairAccelRangeNoGyroLid) {
+  SetSingleSensor(kLidSensorLocation);
+  auto mock_base_accel =
+      std::make_unique<FakeIioDevice>(mock_context_.get(), "cros-ec-accel", 2);
+  mock_base_accel->WriteStringAttribute("location", kBaseSensorLocation);
+  mock_context_->AddDevice(std::move(mock_base_accel));
+
   EXPECT_TRUE(GetConfiguration()->Configure());
   EXPECT_EQ(4, mock_device_->ReadNumberAttribute("scale").value());
 }
@@ -374,7 +358,7 @@ TEST_F(AccelerometerTest, SetRangeNoGyroLidOld) {
   SetSharedSensor();
   SetSingleSensor(kBaseSensorLocation);
   EXPECT_TRUE(GetConfiguration()->Configure());
-  EXPECT_NE(4, mock_device_->ReadNumberAttribute("scale").value_or(0));
+  EXPECT_EQ(4, mock_device_->ReadNumberAttribute("scale").value());
 }
 
 TEST_F(AccelerometerTest, SetRangeGyroBaseBase) {
@@ -414,7 +398,6 @@ TEST_F(AccelerometerTest, SetRangeMultipleGyroLid) {
   EXPECT_TRUE(GetConfiguration()->Configure());
   EXPECT_EQ(4, mock_device_->ReadNumberAttribute("scale").value());
 }
-
 TEST_F(AccelerometerTest, SetRangeMultipleGyroBase) {
   auto mock_gyro1 =
       std::make_unique<FakeIioDevice>(mock_context_.get(), "cros-ec-gyro", 2);
@@ -428,7 +411,13 @@ TEST_F(AccelerometerTest, SetRangeMultipleGyroBase) {
 
   SetSingleSensor(kBaseSensorLocation);
   EXPECT_TRUE(GetConfiguration()->Configure());
-  EXPECT_EQ(2, mock_device_->ReadNumberAttribute("scale").value());
+  EXPECT_EQ(4, mock_device_->ReadNumberAttribute("scale").value());
+}
+
+TEST_F(AccelerometerTest, SetRangeSingleAccelBase) {
+  SetSingleSensor(kBaseSensorLocation);
+  EXPECT_TRUE(GetConfiguration()->Configure());
+  EXPECT_EQ(4, mock_device_->ReadNumberAttribute("scale").value());
 }
 
 }  // namespace

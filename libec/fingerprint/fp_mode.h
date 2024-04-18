@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <ostream>
 
+#include "base/types/cxx23_to_underlying.h"
 #include <brillo/brillo_export.h>
 
 namespace ec {
@@ -30,7 +31,16 @@ class BRILLO_EXPORT FpMode {
     kDontChange,
     kSensorMaintenance,
 
-    kModeInvalid  // must be last item
+    kModeInvalid = 13,
+
+    kCaptureVendorFormat = kCapture,
+    kCaptureSimpleImage = 14,
+    kCapturePattern0 = 15,
+    kCapturePattern1 = 16,
+    kCaptureQualityTest = 17,
+    kCaptureResetTest = 18,
+
+    kMaxValue = kCaptureResetTest,  // must be last item
   };
 
   FpMode() = default;
@@ -49,9 +59,8 @@ class BRILLO_EXPORT FpMode {
 
   uint32_t RawVal() const { return EnumToRawVal(mode_); }
 
-  // TODO(tomhughes): switch to to_utype template instead of casting
-  int EnumVal() const { return static_cast<int>(mode_); }
-  int MaxEnumVal() const { return static_cast<int>(Mode::kModeInvalid); }
+  int EnumVal() const { return base::to_underlying(mode_); }
+  int MaxEnumVal() const { return base::to_underlying(Mode::kMaxValue); }
 
  private:
   Mode RawValToEnum(uint32_t mode) const;

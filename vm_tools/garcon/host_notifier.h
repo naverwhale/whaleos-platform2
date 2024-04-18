@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef VM_TOOLS_GARCON_HOST_NOTIFIER_H_
 #define VM_TOOLS_GARCON_HOST_NOTIFIER_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -14,7 +15,6 @@
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_path_watcher.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/timer/timer.h>
 #include <base/synchronization/waitable_event.h>
 #include <grpcpp/grpcpp.h>
@@ -33,46 +33,53 @@ class HostNotifier : public PackageKitProxy::PackageKitObserver,
  public:
   // Creates and inits the HostNotifier for running on the current sequence.
   // Returns null if there was any failure.
-  static std::unique_ptr<HostNotifier> Create(base::Closure shutdown_closure);
+  static std::unique_ptr<HostNotifier> Create(const std::string& token);
 
   // Sends a gRPC call to the host to notify it to open the specified URL with
   // the web browser. Returns true on success, false otherwise.
-  static bool OpenUrlInHost(const std::string& url);
+  bool OpenUrlInHost(const std::string& url);
 
   // Sends a gRPC call to the host to notify it to open a terminal window that
   // is connected to this container. |args| will be executed as a program in
   // the terminal if any are passed.
-  static bool OpenTerminal(std::vector<std::string> args);
+  bool OpenTerminal(std::vector<std::string> args);
 
   // Sends a gRPC call to the host to request a SelectFile dialog be shown.
-  static bool SelectFile(const std::string& type,
-                         const std::string& title,
-                         const std::string& default_path,
-                         const std::string& allowed_extensions,
-                         std::vector<std::string>* files);
+  bool SelectFile(const std::string& type,
+                  const std::string& title,
+                  const std::string& default_path,
+                  const std::string& allowed_extensions,
+                  std::vector<std::string>* files);
 
-  // Sends a gRPC call to the host to request information about what space is
-  // available on the VM disk and how much it could be expanded by.
-  static bool GetDiskInfo(vm_tools::container::GetDiskInfoResponse* response);
+  // Sends a gRPC call to the host to report metrics.
+  bool ReportMetrics(vm_tools::container::ReportMetricsRequest request,
+                     vm_tools::container::ReportMetricsResponse* response);
 
-  // Sends a gRPC call to the host to request that the disk be expanded by
-  // |space_requested| bytes. Will return the number of bytes that the disk was
-  // expanded by or an error.
-  static bool RequestSpace(uint64_t space_requested,
-                           vm_tools::container::RequestSpaceResponse* response);
+  // Install Shader Cache DLC and optionally mount it
+  bool InstallShaderCache(uint64_t steam_app_id, bool mount, bool wait);
 
-  // Sends a gRPC call to the host to notify it that it can shrink the disk by
-  // |space_to_release| bytes. Will return the number of bytes the disk was
-  // shrunk by or an error.
-  static bool ReleaseSpace(uint64_t space_to_release,
-                           vm_tools::container::ReleaseSpaceResponse* response);
+  // Unmount and uninstall shader cache DLC
+  bool UninstallShaderCache(uint64_t steam_app_id);
+
+  // Unmount shader cache DLC
+  bool UnmountShaderCache(uint64_t steam_app_id, bool wait);
+
+  // Sends a gRPC call to the host to request that sleep be inhibited.
+  bool InhibitScreensaver(vm_tools::container::InhibitScreensaverInfo info);
+
+  // Sends a gRPC call to the host to request that sleep be uninhibited.
+  bool UninhibitScreensaver(vm_tools::container::UninhibitScreensaverInfo info);
 
   ~HostNotifier() override;
 
   // Notifies the host that garcon is ready. This will send the initial update
   // for the application list and also establish a watcher for any updates to
   // the list of installed applications. Returns false if there was any failure.
-  bool Init(uint32_t vsock_port, PackageKitProxy* package_kit_proxy);
+  // Not required when used as a client.
+  bool InitServer(base::OnceClosure shutdown_closure,
+                  uint32_t garcon_port,
+                  uint32_t sftp_port,
+                  PackageKitProxy* package_kit_proxy);
 
   // vm_tools::garcon::PackageKitObserver overrides.
   void OnInstallCompletion(const std::string& command_uuid,
@@ -89,6 +96,8 @@ class HostNotifier : public PackageKitProxy::PackageKitObserver,
   // vm_tools::garcon::AnsiblePlaybookApplication::Observer overrides.
   void OnApplyAnsiblePlaybookCompletion(
       bool success, const std::string& failure_reason) override;
+  void OnApplyAnsiblePlaybookProgress(
+      const std::vector<std::string>& status_string) override;
   void CreateAnsiblePlaybookApplication(
       base::WaitableEvent* event,
       AnsiblePlaybookApplication** ansible_playbook_application_ptr);
@@ -99,6 +108,8 @@ class HostNotifier : public PackageKitProxy::PackageKitObserver,
   bool AddFileWatch(const base::FilePath& path, std::string* error_msg);
   // Stop watching files in |path| relative to $HOME.
   bool RemoveFileWatch(const base::FilePath& path, std::string* error_msg);
+
+  uint32_t sftp_vsock_port() const { return sftp_vsock_port_; }
 
  private:
   // Callback structure for SendAppListToHost callback chain.
@@ -117,13 +128,13 @@ class HostNotifier : public PackageKitProxy::PackageKitObserver,
     int num_package_id_queries_completed = 0;
   };
 
-  explicit HostNotifier(base::Closure shutdown_closure);
+  explicit HostNotifier(const std::string& token);
   HostNotifier(const HostNotifier&) = delete;
   HostNotifier& operator=(const HostNotifier&) = delete;
 
   // Sends a message to the host indicating that our server is ready for
   // accepting incoming calls.
-  bool NotifyHostGarconIsReady(uint32_t vsock_port);
+  bool NotifyHostGarconIsReady(uint32_t garcon_port, uint32_t sftp_port);
 
   // Sends a message to the host indicating the container is shutting down.
   void NotifyHostOfContainerShutdown();
@@ -160,9 +171,8 @@ class HostNotifier : public PackageKitProxy::PackageKitObserver,
   // |absolute_path| must be converted to a path relative to $HOME.
   void FileWatchTriggered(const base::FilePath& absolute_path, bool error);
 
-  // Creates a ContainerListener::Stub, defaulting to vsock but falling back
-  // to IPv4 if the host doesn't support vsock.
-  void SetUpContainerListenerStub(const std::string& host_ip);
+  // Creates a ContainerListener::Stub using vsock.
+  void SetUpContainerListenerStub();
 
   // Kicks off the next step in the process of getting package_id data while
   // building an UpdateApplicationListRequest. It either kicks off another
@@ -213,7 +223,7 @@ class HostNotifier : public PackageKitProxy::PackageKitObserver,
 
   // Closure for stopping the MessageLoop.  Posted to the thread's TaskRunner
   // when this program receives a SIGTERM.
-  base::Closure shutdown_closure_;
+  base::OnceClosure shutdown_closure_;
 
   // File descriptor for receiving signals.
   base::ScopedFD signal_fd_;
@@ -228,6 +238,11 @@ class HostNotifier : public PackageKitProxy::PackageKitObserver,
   scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
 
   base::RepeatingTimer free_disk_space_timer_;
+
+  uint32_t sftp_vsock_port_ = 0;
+
+  void HandleSteamApp(std::unordered_set<uint64_t> found_steam_apps);
+  std::unordered_set<uint64_t> installed_steam_apps_;
 
   base::WeakPtrFactory<HostNotifier> weak_ptr_factory_{this};
 };

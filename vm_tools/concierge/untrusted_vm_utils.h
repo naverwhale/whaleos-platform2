@@ -1,18 +1,18 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef VM_TOOLS_CONCIERGE_UNTRUSTED_VM_UTILS_H_
 #define VM_TOOLS_CONCIERGE_UNTRUSTED_VM_UTILS_H_
 
+#include <string>
 #include <utility>
 
 #include <base/files/file_path.h>
-#include <base/optional.h>
-#include <dbus/object_proxy.h>
 
-namespace vm_tools {
-namespace concierge {
+#include "vm_tools/concierge/vm_util.h"
+
+namespace vm_tools::concierge {
 
 // Used to check for, and if needed enable, the conditions required for
 // untrusted VMs.
@@ -24,6 +24,7 @@ class UntrustedVMUtils {
                    const base::FilePath& mds_status_path);
   UntrustedVMUtils(const UntrustedVMUtils&) = delete;
   UntrustedVMUtils& operator=(const UntrustedVMUtils&) = delete;
+  virtual ~UntrustedVMUtils() = default;
 
   // Mitigation status for L1TF and MDS vulnerabilities.
   enum class MitigationStatus {
@@ -42,7 +43,18 @@ class UntrustedVMUtils {
   // - Check if kernel version >= |min_needed_version_|.
   // - Check if L1TF is mitigated.
   // - Check if MDS is mitigated.
-  MitigationStatus CheckUntrustedVMMitigationStatus();
+  //
+  // virtual for testing.
+  virtual MitigationStatus CheckUntrustedVMMitigationStatus() const;
+
+  // Returns whether an untrusted VM is allowed on the host depending on the
+  // kernel version and whether security patches are applied.
+  bool IsUntrustedVMAllowed(KernelVersionAndMajorRevision host_kernel_version,
+                            std::string* reason) const;
+
+ protected:
+  // Default constructor for testing.
+  UntrustedVMUtils();
 
  private:
   // Path to read L1TF vulnerability status from.
@@ -52,7 +64,14 @@ class UntrustedVMUtils {
   base::FilePath mds_status_path_;
 };
 
-}  // namespace concierge
-}  // namespace vm_tools
+// Returns whether the VM is trusted or untrusted based on the source image,
+// whether we're passing custom kernel args, the host kernel version and a
+// flag passed down by the user.
+bool IsUntrustedVM(bool run_as_untrusted,
+                   bool is_trusted_image,
+                   bool has_custom_kernel_params,
+                   KernelVersionAndMajorRevision host_kernel_version);
+
+}  // namespace vm_tools::concierge
 
 #endif  // VM_TOOLS_CONCIERGE_UNTRUSTED_VM_UTILS_H_

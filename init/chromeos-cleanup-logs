@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+# Copyright 2011 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,35 +8,30 @@
 # It can also be called with "--no-periodic" directly from an init
 # script in which case it will clean up but not rotate.
 
-. /usr/share/cros/disk_utils.sh
+# This file exists on the DUT, but not outside of a chroot during repo upload.
+# shellcheck source=disk_utils.sh
+. "/usr/share/cros/disk_utils.sh"
 
 CLEANUP_PAUSED_FILE="/var/lib/cleanup_logs_paused"
 NUM_DAYS_TO_PRESERVE=7
 MAX_SUBDIR_SIZE=100   # MB
 MAX_SUBDIR_FILES=21
 # Threshold for additional histogram reporting (in 1KB blocks), 1GB in total.
-ADDITIONAL_REPORTING_THRESHOLD_BLOCKS=1048576
-SHADOW="/home/.shadow"
 ENCRYPTED_REBOOT_VAULT="/mnt/stateful_partition/reboot_vault"
 
 # Paths for the CRX cache. Shared with installer/crx-import.conf
-UNVALIDATED_CRX_CACHE="${STATEFUL}/unencrypted/import_extensions"
+UNVALIDATED_CRX_CACHE="${STATEFUL:?}/unencrypted/import_extensions"
 VALIDATED_CRX_CACHE=/var/cache/external_cache
-
-report_additional_statistics() {
-  # Number of users on device.
-  local user_count
-  user_count="$(find "${SHADOW}" -maxdepth 1 -mindepth  1 -type d | wc -l)"
-  metrics_client -s Platform.DiskUsage.UsersOnDevice "${user_count}"
-}
 
 # Remove older files, keep deleting until the directory is less than 100MB
 # or only one day old files remains.  ...and also delete older files if
-# there are too many.
+# there are too many (the number of files to keep can optionally be configured
+# by $3).
 remove_old_files() {
   local subdir="$1"
   local file_pattern="$2"
   local mtime="${NUM_DAYS_TO_PRESERVE}"
+  local max_subdir_files="${3:-${MAX_SUBDIR_FILES}}"
   if [ ! -d "${subdir}" ]; then
     return
   fi
@@ -50,7 +45,7 @@ remove_old_files() {
     fi
   done
 
-  # Delete all but the most recent MAX_SUBDIR_FILES files.
+  # Delete all but the most recent $max_subdir_files files.
   #
   # Note that 'ls -t' doesn't have a "null terminated" mode apparently
   # because you're not supposed to use it for scripts, so we end up
@@ -58,7 +53,7 @@ remove_old_files() {
   find "${subdir}" -type f -name "${file_pattern}" -printf "%T+ %p\0" | \
     sort -zr | \
     cut -z -d ' ' -f 2- | \
-    tail -z "-n+$(( MAX_SUBDIR_FILES + 1 ))" | \
+    tail -z "-n+$(( max_subdir_files + 1 ))" | \
     xargs -r -0 rm
 }
 
@@ -96,9 +91,13 @@ remove_old_pattern_log_files() {
 
   # Remove old chrome logs (not logged in)
   remove_old_files /var/log/chrome "chrome_*-*"
+  # Remove old lacros chrome logs (not logged in)
+  remove_old_files /var/log/lacros "lacros_*-*.log"
 
   # Remove old chrome logs (logged in)
   remove_old_files /home/chronos/user/log "chrome_*-*"
+  # Remove old lacros chrome logs (logged in)
+  remove_old_files /home/chronos/user/lacros "lacros_*-*.log"
 
   # Remove old miscellaneous UI logs
   remove_old_files /var/log/ui "ui.*-*"
@@ -114,10 +113,6 @@ remove_old_pattern_log_files() {
 
   # Remove old modemfwd helper logs
   remove_old_files /var/log/modemfwd "helper_log.*"
-
-  # Remove old bootstat metrics files. NB: this can still leave empty
-  # /var/log/metrics/shutdown.<timestamp>/ directories.
-  remove_old_files /var/log/metrics "*"
 }
 
 usage() {
@@ -163,11 +158,14 @@ main() {
   log_rotator
 
   # Report disk usage statistics
-  METRICS_ARGS="0 1073741824 50"
-  metrics_client Platform.DiskUsageVar \
-                "$(du -sxk /var/ | awk '{print $1}')" ${METRICS_ARGS}
-  metrics_client Platform.DiskUsageChronos \
-                "$(du -sxk /home/chronos | awk '{print $1}')" ${METRICS_ARGS}
+  (
+    # Subshell to re-use $@ array.
+    set -- 0 1073741824 50
+    metrics_client Platform.DiskUsageVar \
+                  "$(du -sxk /var/ | awk '{print $1}')" "$@"
+    metrics_client Platform.DiskUsageChronos \
+                  "$(du -sxk /home/chronos | awk '{print $1}')" "$@"
+  )
 
   # Report overall stateful usage.
   metrics_client -e Platform.StatefulUsage "$(get_stateful_usage_percent)" 101
@@ -190,56 +188,6 @@ main() {
   STATEFUL_FREE="$(get_stateful_free_space_blocks 1000)"
   metrics_client Platform.StatefulFreeSpace \
     "$((STATEFUL_FREE / 1000))" 0 2097152 50
-
-  NUMBER_OF_USERS="$(ls /home/user/ | wc -l)"
-  metrics_client Platform.DiskUsage.NumUserHomeDirectories \
-                "${NUMBER_OF_USERS}" 1 50 50
-
-  local last_activity
-  if ! last_activity="$(cryptohome --action=dump_last_activity)" ; then
-    logger -t "chromeos-cleanup-logs" -p warning \
-        "cryptohome dump_last_activity failed!"
-
-    metrics_client -s Login.UsersActiveWeekly.Percent 0
-  else
-    USERS_ACTIVE_DAILY="$(echo "${last_activity}" |
-        awk 'BEGIN {count = 0} $2 <= 1 {++count} END {print count}')"
-    metrics_client -s Login.UsersActiveDaily "${USERS_ACTIVE_DAILY}"
-
-    USERS_ACTIVE_WEEKLY="$(echo "${last_activity}" |
-        awk 'BEGIN {count = 0} $2 <= 7 {++count} END {print count}')"
-    metrics_client -s Login.UsersActiveWeekly "${USERS_ACTIVE_WEEKLY}"
-
-    USERS_ACTIVE_28DAYS="$(echo "${last_activity}" |
-        awk 'BEGIN {count = 0} $2 <= 28 {++count} END {print count}')"
-    metrics_client -s Login.UsersActive28Days "${USERS_ACTIVE_28DAYS}"
-
-    if [ "${NUMBER_OF_USERS}" -gt 0 ] ; then
-      metrics_client -s Login.UsersActiveWeekly.Percent \
-                    "$((WEEKLY_USERS_ACTIVE * 100 / NUMBER_OF_USERS))"
-    else
-      # Note that this metric is also reported if dump_last_activity failed.
-      # See above.
-      metrics_client -s Login.UsersActiveWeekly.Percent 0
-    fi
-
-    # Report days since the least frequently used account signed in.
-    # It is reported every time to measure effect of autodeletion feature.
-    DAYS_SINCE_LFU_ACCOUNT_SIGNIN="$(echo "${last_activity}" |
-        awk 'BEGIN {max = 0} $2 > max {max = $2} END {print max}')"
-
-    # Check if there are any users.
-    if [ "${DAYS_SINCE_LFU_ACCOUNT_SIGNIN}" != "" ]; then
-      metrics_client Login.LeastUsedAccountDays \
-                    "${DAYS_SINCE_LFU_ACCOUNT_SIGNIN}" 1 90 90
-    fi
-  fi
-
-  # Report additional metrics if we are low on free space.
-  if [ "$(get_stateful_free_space_blocks)" -le \
-      "${ADDITIONAL_REPORTING_THRESHOLD_BLOCKS}" ] ; then
-    report_additional_statistics
-  fi
 
   wipe_crx_cache
 }

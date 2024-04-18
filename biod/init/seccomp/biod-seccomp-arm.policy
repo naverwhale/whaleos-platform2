@@ -1,8 +1,11 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Use the run_biod_strace.sh script to generate an initial list of syscalls.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 gettid: 1
 clock_gettime: 1
@@ -58,7 +61,9 @@ set_robust_list: 1
 ugetrlimit: 1
 lstat64: 1
 readlink: 1
+readlinkat: 1
 unlink: 1
+unlinkat: 1
 rename: 1
 symlink: 1
 epoll_create1: 1
@@ -92,3 +97,4 @@ tgkill: 1
 futex: 1
 fstatfs64: 1
 fstatfs: 1
+sysinfo: 1

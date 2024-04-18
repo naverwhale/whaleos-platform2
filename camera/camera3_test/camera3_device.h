@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <hardware/camera3.h>
 
 #include "camera3_test/camera3_test_gralloc.h"
@@ -30,6 +30,9 @@ class Camera3Device {
  public:
   explicit Camera3Device(int cam_id);
 
+  Camera3Device(const Camera3Device&) = delete;
+  Camera3Device& operator=(const Camera3Device&) = delete;
+
   ~Camera3Device();
 
   // Initialize the device.
@@ -38,14 +41,16 @@ class Camera3Device {
   // Destroy the device.
   void Destroy();
 
-  typedef base::Callback<void(const camera3_capture_result* result)>
+  typedef base::RepeatingCallback<void(const camera3_capture_result* result)>
       ProcessCaptureResultCallback;
-  typedef base::Callback<void(const camera3_notify_msg* msg)> NotifyCallback;
-  typedef base::Callback<void(uint32_t frame_number,
-                              ScopedCameraMetadata metadata,
-                              std::vector<cros::ScopedBufferHandle> buffers)>
+  typedef base::RepeatingCallback<void(const camera3_notify_msg* msg)>
+      NotifyCallback;
+  typedef base::RepeatingCallback<void(
+      uint32_t frame_number,
+      ScopedCameraMetadata metadata,
+      std::vector<cros::ScopedBufferHandle> buffers)>
       ProcessResultMetadataOutputBuffersCallback;
-  typedef base::Callback<void(
+  typedef base::RepeatingCallback<void(
       std::vector<ScopedCameraMetadata>* partial_metadata)>
       ProcessPartialMetadataCallback;
 
@@ -64,6 +69,9 @@ class Camera3Device {
 
   // Whether or not the template is supported.
   bool IsTemplateSupported(int32_t type);
+
+  // Whether or not the buffer management APIs are supported.
+  bool IsBufferManagementSupported() const;
 
   // Construct default request settings.
   const camera_metadata_t* ConstructDefaultRequestSettings(int type);
@@ -90,16 +98,22 @@ class Camera3Device {
   // Configure streams and return configured streams if |streams| is not null.
   int ConfigureStreams(std::vector<const camera3_stream_t*>* streams);
 
-  // Allocate output buffers for all configured streams and return them
-  // in the stream buffer format, which has the buffer associated to the
-  // corresponding stream. The allocated buffers are owned by Camera3Device.
-  int AllocateOutputStreamBuffers(
+  // Signal HAL to return all buffers of designated streams through
+  // process_capture_result() or return_stream_buffers().
+  void SignalStreamFlush(const std::vector<const camera3_stream_t*>& streams);
+
+  // If the buffer management APIs are not supported, allocate output buffers
+  // for all configured streams and return them in the stream buffer format,
+  // which has the buffer associated to the corresponding stream. The allocated
+  // buffers are owned by Camera3Device.
+  int PrepareOutputStreamBuffers(
       std::vector<camera3_stream_buffer_t>* output_buffers);
 
-  // Allocate output buffers for given streams |streams| and return them
-  // in the stream buffer format, which has the buffer associated to the
-  // corresponding stream. The allocated buffers are owned by Camera3Device.
-  int AllocateOutputBuffersByStreams(
+  // If the buffer management APIs are not supported, allocate output buffers
+  // for given streams |streams| and return them in the stream buffer format,
+  // which has the buffer associated to the corresponding stream. The allocated
+  // buffers are owned by Camera3Device.
+  int PrepareOutputBuffersByStreams(
       const std::vector<const camera3_stream_t*>& streams,
       std::vector<camera3_stream_buffer_t>* output_buffers);
 
@@ -132,14 +146,14 @@ class Camera3Device {
 
  private:
   std::unique_ptr<Camera3DeviceImpl> impl_;
-
-  Camera3Device(const Camera3Device&) = delete;
-  Camera3Device& operator=(const Camera3Device&) = delete;
 };
 
 class Camera3Device::StaticInfo {
  public:
   explicit StaticInfo(const camera_info& cam_info);
+
+  StaticInfo(const StaticInfo&) = delete;
+  StaticInfo& operator=(const StaticInfo&) = delete;
 
   // Determine whether or not all the keys are available
   bool IsKeyAvailable(uint32_t tag) const;
@@ -207,6 +221,9 @@ class Camera3Device::StaticInfo {
   // Determine if camera device support AWB lock control
   bool IsAWBLockSupported() const;
 
+  // Check if the buffer management APIs are supported.
+  bool IsBufferManagementSupported() const;
+
   // Get the maximum number of partial result a request can expect
   // Returns: maximum number of partial results; it is 1 by default.
   int32_t GetPartialResultCount() const;
@@ -265,12 +282,12 @@ class Camera3Device::StaticInfo {
   // Get sensor pixel array size
   int32_t GetSensorPixelArraySize(uint32_t* width, uint32_t* height) const;
 
-  // Get available request keys
-  std::set<int32_t> GetAvailableRequestKeys() const;
-
   // Return the supported hardware level of the device, or fail if no value is
   // reported
   uint8_t GetHardwareLevel() const;
+
+  // Get ANDROID_SCALER_AVAILABLE_ROTATE_AND_CROP_MODES.
+  std::set<uint8_t> GetAvailableRotateAndCropModes() const;
 
  private:
   bool IsHardwareLevelAtLeast(uint8_t level) const;
@@ -282,8 +299,6 @@ class Camera3Device::StaticInfo {
   void GetStreamConfigEntry(camera_metadata_ro_entry_t* entry) const;
 
   const camera_metadata_t* characteristics_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(StaticInfo);
 };
 
 }  // namespace camera3_test

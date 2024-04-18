@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,9 +15,9 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 
 #include "arc/vm/mojo_proxy/file_descriptor_util.h"
@@ -180,6 +180,21 @@ void MojoProxy::Fstat(int64_t handle, FstatCallback callback) {
     Stop();
 }
 
+void MojoProxy::Ftruncate(int64_t handle,
+                          int64_t length,
+                          FtruncateCallback callback) {
+  const int64_t cookie = GenerateCookie();
+
+  arc_proxy::MojoMessage message;
+  auto* request = message.mutable_ftruncate_request();
+  request->set_cookie(cookie);
+  request->set_handle(handle);
+  request->set_length(length);
+  pending_ftruncate_.emplace(cookie, std::move(callback));
+  if (!delegate_->SendMessage(message, {}))
+    Stop();
+}
+
 void MojoProxy::Close(int64_t handle) {
   arc_proxy::MojoMessage message;
   message.mutable_close()->set_handle(handle);
@@ -191,17 +206,20 @@ void MojoProxy::OnMojoMessageAvailable() {
   arc_proxy::MojoMessage message;
   std::vector<base::ScopedFD> fds;
   if (!delegate_->ReceiveMessage(&message, &fds) ||
-      !HandleMessage(&message, &fds))
+      !HandleMessage(&message, std::move(fds)))
     Stop();
 }
 
 bool MojoProxy::HandleMessage(arc_proxy::MojoMessage* message,
-                              std::vector<base::ScopedFD>* received_fds) {
+                              std::vector<base::ScopedFD> fds) {
+  for (auto& fd : fds)
+    received_fds_.push_back(std::move(fd));
+
   switch (message->command_case()) {
     case arc_proxy::MojoMessage::kClose:
       return OnClose(message->mutable_close());
     case arc_proxy::MojoMessage::kData:
-      return OnData(message->mutable_data(), received_fds);
+      return OnData(message->mutable_data());
     case arc_proxy::MojoMessage::kConnectRequest:
       return OnConnectRequest(message->mutable_connect_request());
     case arc_proxy::MojoMessage::kConnectResponse:
@@ -221,6 +239,11 @@ bool MojoProxy::HandleMessage(arc_proxy::MojoMessage* message,
       return true;
     case arc_proxy::MojoMessage::kFstatResponse:
       return OnFstatResponse(message->mutable_fstat_response());
+    case arc_proxy::MojoMessage::kFtruncateRequest:
+      OnFtruncateRequest(message->mutable_ftruncate_request());
+      return true;
+    case arc_proxy::MojoMessage::kFtruncateResponse:
+      return OnFtruncateResponse(message->mutable_ftruncate_response());
     default:
       LOG(ERROR) << "Unknown message type: " << message->command_case();
       return false;
@@ -232,6 +255,10 @@ void MojoProxy::Stop() {
     return;
 
   // Run all pending callbacks.
+  for (auto& x : pending_ftruncate_) {
+    FtruncateCallback& callback = x.second;
+    std::move(callback).Run(ECONNREFUSED);
+  }
   for (auto& x : pending_fstat_) {
     FstatCallback& callback = x.second;
     std::move(callback).Run(ECONNREFUSED, 0);
@@ -266,8 +293,7 @@ bool MojoProxy::OnClose(arc_proxy::Close* close) {
   return true;
 }
 
-bool MojoProxy::OnData(arc_proxy::Data* data,
-                       std::vector<base::ScopedFD>* received_fds) {
+bool MojoProxy::OnData(arc_proxy::Data* data) {
   auto it = fd_map_.find(data->handle());
   if (it == fd_map_.end()) {
     // The file was already closed.
@@ -275,7 +301,6 @@ bool MojoProxy::OnData(arc_proxy::Data* data,
   }
 
   // First, create file descriptors for the received message.
-  size_t received_fd_index = 0;
   std::vector<base::ScopedFD> transferred_fds;
   transferred_fds.reserve(data->transferred_fd().size());
   for (const auto& transferred_fd : data->transferred_fd()) {
@@ -304,12 +329,12 @@ bool MojoProxy::OnData(arc_proxy::Data* data,
         break;
       }
       case arc_proxy::FileDescriptor::TRANSPORTABLE: {
-        if (received_fd_index >= received_fds->size()) {
+        if (received_fds_.empty()) {
           LOG(ERROR) << "Type in proto is TRANSPORTABLE but no FD remaining.";
           return false;
         }
-        remote_fd = std::move((*received_fds)[received_fd_index]);
-        ++received_fd_index;
+        remote_fd = std::move(received_fds_.front());
+        received_fds_.pop_front();
         break;
       }
       case arc_proxy::FileDescriptor::SOCKET_STREAM: {
@@ -345,13 +370,6 @@ bool MojoProxy::OnData(arc_proxy::Data* data,
                              transferred_fd.handle());
     }
     transferred_fds.emplace_back(std::move(remote_fd));
-  }
-
-  // All received FDs must be consumed.
-  if (received_fd_index != received_fds->size()) {
-    LOG(ERROR) << "Received FDs not consumed." << received_fd_index << " "
-               << received_fds->size();
-    return false;
   }
 
   if (!it->second.file->Write(std::move(*data->mutable_blob()),
@@ -499,13 +517,52 @@ void MojoProxy::SendFstatResponse(int64_t cookie,
 bool MojoProxy::OnFstatResponse(arc_proxy::FstatResponse* response) {
   auto it = pending_fstat_.find(response->cookie());
   if (it == pending_fstat_.end()) {
-    LOG(ERROR) << "Unexpected pread response: cookie=" << response->cookie();
+    LOG(ERROR) << "Unexpected fstat response: cookie=" << response->cookie();
     return false;
   }
 
   auto callback = std::move(it->second);
   pending_fstat_.erase(it);
   std::move(callback).Run(response->error_code(), response->size());
+  return true;
+}
+
+void MojoProxy::OnFtruncateRequest(arc_proxy::FtruncateRequest* request) {
+  auto it = fd_map_.find(request->handle());
+  if (it == fd_map_.end()) {
+    LOG(ERROR) << "Couldn't find handle: handle=" << request->handle();
+    arc_proxy::FtruncateResponse response;
+    response.set_error_code(EBADF);
+    SendFtruncateResponse(request->cookie(), std::move(response));
+    return;
+  }
+  it->second.file->Ftruncate(
+      request->length(),
+      base::BindOnce(&MojoProxy::SendFtruncateResponse,
+                     weak_factory_.GetWeakPtr(), request->cookie()));
+}
+
+void MojoProxy::SendFtruncateResponse(int64_t cookie,
+                                      arc_proxy::FtruncateResponse response) {
+  response.set_cookie(cookie);
+  arc_proxy::MojoMessage reply;
+  *reply.mutable_ftruncate_response() = std::move(response);
+
+  if (!delegate_->SendMessage(reply, {}))
+    Stop();
+}
+
+bool MojoProxy::OnFtruncateResponse(arc_proxy::FtruncateResponse* response) {
+  auto it = pending_ftruncate_.find(response->cookie());
+  if (it == pending_ftruncate_.end()) {
+    LOG(ERROR) << "Unexpected ftruncate response: cookie="
+               << response->cookie();
+    return false;
+  }
+
+  auto callback = std::move(it->second);
+  pending_ftruncate_.erase(it);
+  std::move(callback).Run(response->error_code());
   return true;
 }
 

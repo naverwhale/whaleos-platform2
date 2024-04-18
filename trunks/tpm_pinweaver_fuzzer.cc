@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -42,6 +42,10 @@ typedef enum PinweaverFunc {
   kSerializePwResetAuth,
   kSerializePwGetLog,
   kSerializePwLogReplay,
+  kSerializePwSysInfo,
+  kSerializePwGenerateBaPk,
+  kSerializePwStartBioAuth,
+  kSerializePwBlockGenerateBaPk,
   kParsePwResponseHeader,
   kParsePwShortMessage,
   kParsePwPong,
@@ -50,7 +54,10 @@ typedef enum PinweaverFunc {
   kParsePwResetAuth,
   kParsePwGetLog,
   kParsePwLogReplay,
-  kMaxValue = kParsePwLogReplay,
+  kParsePwSysInfo,
+  kParsePwGenerateBaPk,
+  kParsePwStartBioAuth,
+  kMaxValue = kParsePwStartBioAuth,
 } PinweaverFunc;
 
 // Manually create the fuzzed protobuf since it's only used in one function call
@@ -67,6 +74,13 @@ trunks::ValidPcrCriteria GenerateFuzzedValidPcrCriteria(
         data_provider->ConsumeRandomLengthString(kMaxStringLength));
   }
   return valid_pcr_criteria;
+}
+
+trunks::PinWeaverEccPoint GenerateFuzzedEccPoint(
+    FuzzedDataProvider* data_provider) {
+  trunks::PinWeaverEccPoint ecc_point;
+  data_provider->ConsumeData(&ecc_point, sizeof(ecc_point));
+  return ecc_point;
 }
 
 }  // namespace
@@ -90,8 +104,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     uint16_t res16;
     uint32_t res32_1;
     uint32_t res32_2;
+    uint64_t res64;
     brillo::SecureBlob sec_blob1;
     brillo::SecureBlob sec_blob2;
+    brillo::Blob blob1;
+    brillo::Blob blob2;
+    brillo::Blob blob3;
     std::vector<trunks::PinWeaverLogEntry> logs;
     trunks::TPM_RC retval;
 
@@ -130,7 +148,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             brillo::SecureBlob(
                 data_provider.ConsumeRandomLengthString(kMaxPwSecretSize)),
             delay_schedule, GenerateFuzzedValidPcrCriteria(&data_provider),
-            &buf1);
+            data_provider.ConsumeIntegral<uint32_t>(),
+            data_provider.ConsumeIntegral<uint8_t>(),
+            data_provider.ConsumeIntegral<uint8_t>(), &buf1);
         if (retval == trunks::TPM_RC_SUCCESS)
           CHECK(!buf1.empty());
         break;
@@ -159,6 +179,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             data_provider.ConsumeIntegral<uint8_t>(),
             brillo::SecureBlob(
                 data_provider.ConsumeRandomLengthString(kMaxPwSecretSize)),
+            data_provider.ConsumeBool(),
             data_provider.ConsumeRandomLengthString(kMaxStringLength),
             data_provider.ConsumeRandomLengthString(kMaxStringLength), &buf1);
         if (retval == trunks::TPM_RC_SUCCESS)
@@ -177,6 +198,37 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             data_provider.ConsumeRandomLengthString(kMaxPwHashSize),
             data_provider.ConsumeRandomLengthString(kMaxStringLength),
             data_provider.ConsumeRandomLengthString(kMaxStringLength), &buf1);
+        if (retval == trunks::TPM_RC_SUCCESS)
+          CHECK(!buf1.empty());
+        break;
+      case kSerializePwSysInfo:
+        retval = trunks::Serialize_pw_sys_info_t(
+            data_provider.ConsumeIntegral<uint8_t>(), &buf1);
+        if (retval == trunks::TPM_RC_SUCCESS)
+          CHECK(!buf1.empty());
+        break;
+      case kSerializePwGenerateBaPk:
+        retval = trunks::Serialize_pw_generate_ba_pk_t(
+            data_provider.ConsumeIntegral<uint8_t>(),
+            data_provider.ConsumeIntegral<uint8_t>(),
+            GenerateFuzzedEccPoint(&data_provider), &buf1);
+        if (retval == trunks::TPM_RC_SUCCESS)
+          CHECK(!buf1.empty());
+        break;
+      case kSerializePwStartBioAuth:
+        retval = trunks::Serialize_pw_start_bio_auth_t(
+            data_provider.ConsumeIntegral<uint8_t>(),
+            data_provider.ConsumeIntegral<uint8_t>(),
+            brillo::BlobFromString(
+                data_provider.ConsumeRandomLengthString(kMaxPwSecretSize)),
+            data_provider.ConsumeRandomLengthString(kMaxStringLength),
+            data_provider.ConsumeRandomLengthString(kMaxStringLength), &buf1);
+        if (retval == trunks::TPM_RC_SUCCESS)
+          CHECK(!buf1.empty());
+        break;
+      case kSerializePwBlockGenerateBaPk:
+        retval = trunks::Serialize_pw_block_generate_ba_pk_t(
+            data_provider.ConsumeIntegral<uint8_t>(), &buf1);
         if (retval == trunks::TPM_RC_SUCCESS)
           CHECK(!buf1.empty());
         break;
@@ -217,7 +269,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
       case kParsePwResetAuth:
         retval = trunks::Parse_pw_reset_auth_t(
             data_provider.ConsumeRandomLengthString(kMaxStringLength), &res32_1,
-            &buf1, &sec_blob1, &buf2, &buf3);
+            &buf1, &buf2, &buf3);
         if (retval == trunks::TPM_RC_SUCCESS)
           CHECK(!buf1.empty());
         break;
@@ -232,6 +284,29 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         retval = trunks::Parse_pw_log_replay_t(
             data_provider.ConsumeRandomLengthString(kMaxStringLength), &res32_1,
             &buf1, &buf2, &buf3);
+        if (retval == trunks::TPM_RC_SUCCESS)
+          CHECK(!buf1.empty());
+        break;
+      case kParsePwSysInfo:
+        retval = trunks::Parse_pw_sys_info_t(
+            data_provider.ConsumeRandomLengthString(kMaxStringLength), &res32_1,
+            &buf1, &res32_2, &res64);
+        if (retval == trunks::TPM_RC_SUCCESS)
+          CHECK(!buf1.empty());
+        break;
+      case kParsePwGenerateBaPk: {
+        trunks::PinWeaverEccPoint pt;
+        retval = trunks::Parse_pw_generate_ba_pk_t(
+            data_provider.ConsumeRandomLengthString(kMaxStringLength), &res32_1,
+            &buf1, &pt);
+        if (retval == trunks::TPM_RC_SUCCESS)
+          CHECK(!buf1.empty());
+        break;
+      }
+      case kParsePwStartBioAuth:
+        retval = trunks::Parse_pw_start_bio_auth_t(
+            data_provider.ConsumeRandomLengthString(kMaxStringLength), &res32_1,
+            &buf1, &blob1, &blob2, &blob3, &buf2, &buf3);
         if (retval == trunks::TPM_RC_SUCCESS)
           CHECK(!buf1.empty());
         break;

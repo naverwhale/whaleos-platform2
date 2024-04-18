@@ -1,0 +1,114 @@
+# Copyright 2022 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+import("//common-mk/generate-dbus-adaptors.gni")
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [
+    ":install_dbus_config",
+    ":install_init",
+    ":install_minijail_conf",
+    ":install_tmpfiles_config",
+    ":install_udev_rule",
+    ":swap_management",
+  ]
+  if (use.test) {
+    deps += [ ":swap_tool_test" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "absl",
+    "dbus-1",
+    "libbrillo",
+    "libchrome",
+    "libfeatures",
+    "libmetrics",
+    "protobuf",
+    "system_api",
+  ]
+}
+
+static_library("libswapmanagement") {
+  sources = [
+    "swap_management_dbus_adaptor.cc",
+    "swap_tool.cc",
+    "swap_tool_metrics.cc",
+    "swap_tool_status.cc",
+    "swap_tool_util.cc",
+  ]
+
+  configs += [ ":target_defaults" ]
+  libs = [
+    "policy",
+    "rootdev",
+  ]
+  deps = [ ":swap-management-adaptors" ]
+}
+
+generate_dbus_adaptors("swap-management-adaptors") {
+  dbus_service_config = "dbus_bindings/dbus-service-config.json"
+  dbus_adaptors_out_dir = "include/swap_management/dbus_adaptors"
+  sources = [ "dbus_bindings/org.chromium.SwapManagement.xml" ]
+}
+
+executable("swap_management") {
+  sources = [ "main.cc" ]
+  configs += [ ":target_defaults" ]
+  install_path = "sbin"
+  deps = [ ":libswapmanagement" ]
+}
+
+install_config("install_dbus_config") {
+  sources = [ "share/org.chromium.SwapManagement.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "minijail/swap_management.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_init") {
+  sources = [
+    "share/send_swap_management_metrics.conf",
+    "share/swap_management.conf",
+    "share/swap_start.conf",
+    "share/swap_stop.conf",
+  ]
+  install_path = "upstart"
+}
+
+install_config("install_tmpfiles_config") {
+  sources = [ "tmpfiles.d/swap_management.conf" ]
+  install_path = "tmpfilesd"
+}
+
+install_config("install_udev_rule") {
+  sources = [ "udev/12-zram-writeback.rules" ]
+  install_path = "/lib/udev/rules.d"
+}
+
+if (use.test) {
+  pkg_config("test_helper_config") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+    ]
+  }
+  executable("swap_tool_test") {
+    sources = [ "swap_tool_test.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":test_helper_config",
+      ":target_defaults",
+    ]
+    deps = [
+      ":libswapmanagement",
+      "//common-mk/testrunner:testrunner",
+    ]
+    run_test = true
+  }
+}

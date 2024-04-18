@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,7 @@ pub mod legacy;
 pub mod util;
 
 use dispatcher::Dispatcher;
-use sys_util::error;
+use log::error;
 
 pub fn setup_dispatcher() -> Dispatcher {
     let mut dispatcher = Dispatcher::new();

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,11 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
+#include <cryptohome/proto_bindings/fido.pb.h>
+#include <cryptohome/proto_bindings/rpc.pb.h>
 
-#include "cryptohome/fido.pb.h"
-#include "cryptohome/rpc.pb.h"
+#include "cryptohome/error/cryptohome_tpm_error.h"
 
 namespace cryptohome {
 
@@ -33,8 +34,8 @@ class KeyChallengeService {
   //
   // In case of error, |response| will be null; otherwise, it will contain the
   // challenge response data.
-  using ResponseCallback =
-      base::OnceCallback<void(std::unique_ptr<KeyChallengeResponse> response)>;
+  using ResponseCallback = base::OnceCallback<void(
+      CryptoStatusOr<std::unique_ptr<KeyChallengeResponse>> response)>;
 
   // This callback is called with a response containing the public key for a
   // make credential request to a FIDO security key.

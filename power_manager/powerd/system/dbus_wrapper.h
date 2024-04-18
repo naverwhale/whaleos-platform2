@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <string>
 
 #include <base/compiler_specific.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <base/observer_list.h>
@@ -17,20 +16,15 @@
 #include <dbus/exported_object.h>
 #include <dbus/object_proxy.h>
 
-#include "power_manager/common/power_constants.h"
-
 namespace dbus {
 class Bus;
 }  // namespace dbus
 
-namespace google {
-namespace protobuf {
+namespace google::protobuf {
 class MessageLite;
-}  // namespace protobuf
-}  // namespace google
+}  // namespace google::protobuf
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Interface for sending D-Bus messages.  A stub implementation can be
 // instantiated by tests to verify behavior without actually communicating with
@@ -39,16 +33,19 @@ class DBusWrapperInterface {
  public:
   class Observer : public base::CheckedObserver {
    public:
+    ~Observer() override = default;
+
+    // Called when DBusWrapper has successfully published its service to D-Bus.
+    virtual void OnServicePublished() {}
+
     // Called when the ownership of a D-Bus service name changes. |old_owner| or
     // |new_owner| may be empty if the service just started or stopped.
     virtual void OnDBusNameOwnerChanged(const std::string& service_name,
                                         const std::string& old_owner,
                                         const std::string& new_owner) {}
-
-    virtual ~Observer() {}
   };
 
-  virtual ~DBusWrapperInterface() {}
+  virtual ~DBusWrapperInterface() = default;
 
   // Adds or removes an observer.
   virtual void AddObserver(Observer* observer) = 0;
@@ -123,6 +120,9 @@ class DBusWrapperInterface {
 // bus.
 class DBusWrapper : public DBusWrapperInterface {
  public:
+  DBusWrapper(const DBusWrapper&) = delete;
+  DBusWrapper& operator=(const DBusWrapper&) = delete;
+
   ~DBusWrapper() override;
 
   // Factory method for DBusWrapper. Returns nullptr on failure.
@@ -162,8 +162,6 @@ class DBusWrapper : public DBusWrapperInterface {
   // Create DBusWrappers using the factory method above.
   DBusWrapper(scoped_refptr<dbus::Bus> bus,
               dbus::ExportedObject* exported_object);
-  DBusWrapper(const DBusWrapper&) = delete;
-  DBusWrapper& operator=(const DBusWrapper&) = delete;
 
   // Handles NameOwnerChanged signals emitted by dbus-daemon.
   void HandleNameOwnerChangedSignal(dbus::Signal* signal);
@@ -177,10 +175,12 @@ class DBusWrapper : public DBusWrapperInterface {
 
   base::ObserverList<Observer> observers_;
 
+  // Trace identifier used to connect async method calls to their responses.
+  uint64_t next_async_trace_id_ = reinterpret_cast<uint64_t>(this);
+
   base::WeakPtrFactory<DBusWrapper> weak_ptr_factory_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_DBUS_WRAPPER_H_

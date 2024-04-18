@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,11 +11,13 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <mojo/public/cpp/system/buffer.h>
+#include <mojo/public/cpp/bindings/pending_receiver.h>
 
-#include "mojo/cros_healthd.mojom.h"
-#include "mojo/wilco_dtc_supportd.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd.mojom.h"
+#include "diagnostics/mojom/public/wilco_dtc_supportd.mojom.h"
 
 namespace diagnostics {
+namespace wilco {
 
 class MockMojoClient
     : public chromeos::wilco_dtc_supportd::mojom::WilcoDtcSupportdClient {
@@ -30,10 +32,11 @@ class MockMojoClient
       MojoWilcoDtcSupportdWebRequestStatus, int32_t, mojo::ScopedHandle)>;
   using MojoGetConfigurationDataCallback =
       base::OnceCallback<void(const std::string&)>;
-  using MojoCrosHealthdDiagnosticsServiceRequest =
-      chromeos::cros_healthd::mojom::CrosHealthdDiagnosticsServiceRequest;
-  using MojoCrosHealthdProbeServiceRequest =
-      chromeos::cros_healthd::mojom::CrosHealthdProbeServiceRequest;
+  using MojoCrosHealthdDiagnosticsServicePendingReceiver =
+      mojo::PendingReceiver<
+          ash::cros_healthd::mojom::CrosHealthdDiagnosticsService>;
+  using MojoCrosHealthdProbeServicePendingReceiver =
+      mojo::PendingReceiver<ash::cros_healthd::mojom::CrosHealthdProbeService>;
 
   void SendWilcoDtcMessageToUi(
       mojo::ScopedHandle json_message,
@@ -62,14 +65,15 @@ class MockMojoClient
   MOCK_METHOD(void, HandleEvent, (const MojoWilcoDtcSupportdEvent), (override));
   MOCK_METHOD(void,
               GetCrosHealthdDiagnosticsService,
-              (MojoCrosHealthdDiagnosticsServiceRequest),
+              (MojoCrosHealthdDiagnosticsServicePendingReceiver),
               (override));
   MOCK_METHOD(void,
               GetCrosHealthdProbeService,
-              (MojoCrosHealthdProbeServiceRequest),
+              (MojoCrosHealthdProbeServicePendingReceiver),
               (override));
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_MOCK_MOJO_CLIENT_H_

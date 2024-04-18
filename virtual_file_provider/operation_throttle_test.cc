@@ -1,8 +1,8 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/threading/platform_thread.h>
 #include <base/threading/thread.h>
@@ -14,7 +14,7 @@ namespace virtual_file_provider {
 
 namespace {
 
-constexpr base::TimeDelta kTestTimeout = base::TimeDelta::FromMilliseconds(100);
+constexpr base::TimeDelta kTestTimeout = base::Milliseconds(100);
 
 }  // namespace
 

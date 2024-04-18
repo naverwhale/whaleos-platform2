@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -581,9 +581,8 @@ int HandleInfo(const std::string& smb_conf_path) {
     base::File::Info file_info;
     if (GetFileInfo(password_path, &file_info)) {
       const base::Time password_time = file_info.last_modified;
-      const base::Time server_time = password_time +
-                                     kDefaultMachinePasswordChangeRate +
-                                     base::TimeDelta::FromDays(1);
+      const base::Time server_time =
+          password_time + kDefaultMachinePasswordChangeRate + base::Days(1);
       const std::string server_time_str = FormatServerTime(server_time);
       WriteOutput(base::StringPrintf(kStubInfo, server_time_str.c_str()), "");
       return kExitCodeOk;

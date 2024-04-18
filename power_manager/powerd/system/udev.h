@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,15 +12,15 @@
 
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/observer_list.h>
+
+#include "power_manager/powerd/system/tagged_device.h"
 
 struct udev;
 struct udev_device;
 struct udev_monitor;
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class TaggedDevice;
 class UdevSubsystemObserver;
@@ -52,8 +52,8 @@ struct UdevEvent {
 // Watches the udev manager for device-related events (e.g. hotplug).
 class UdevInterface {
  public:
-  UdevInterface() {}
-  virtual ~UdevInterface() {}
+  UdevInterface() = default;
+  virtual ~UdevInterface() = default;
 
   // Adds or removes an observer for watching |subsystem|. To receive events,
   // this subsystem must also be given a "powerd" tag by
@@ -96,12 +96,17 @@ class UdevInterface {
   // udev configured, and stores their paths in |out|.
   virtual bool GetDevlinks(const std::string& syspath,
                            std::vector<std::string>* out) = 0;
+
+  // For the device specified by |syspath|, check if it has the specified powerd
+  // role.
+  virtual bool HasPowerdRole(const std::string& syspath,
+                             const std::string& role) = 0;
 };
 
 // Actual implementation of UdevInterface.
 class Udev : public UdevInterface {
  public:
-  Udev();
+  Udev() = default;
   Udev(const Udev&) = delete;
   Udev& operator=(const Udev&) = delete;
 
@@ -130,6 +135,8 @@ class Udev : public UdevInterface {
                   const std::string& value) override;
   bool GetDevlinks(const std::string& syspath,
                    std::vector<std::string>* out) override;
+  bool HasPowerdRole(const std::string& syspath,
+                     const std::string& role) override;
 
   void OnFileCanReadWithoutBlocking();
 
@@ -171,8 +178,8 @@ class Udev : public UdevInterface {
   base::FilePath FindWakeCapableParent(const std::string& syspath);
 
   bool GetDeviceInfo(struct udev_device* dev, UdevDeviceInfo* device_info_out);
-  struct udev* udev_;
-  struct udev_monitor* udev_monitor_;
+  struct udev* udev_ = nullptr;
+  struct udev_monitor* udev_monitor_ = nullptr;
 
   // Maps from a subsystem name to the corresponding observers.
   std::map<std::string,
@@ -188,7 +195,6 @@ class Udev : public UdevInterface {
   std::unique_ptr<base::FileDescriptorWatcher::Controller> controller_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_UDEV_H_

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,34 +8,49 @@
 #include <functional>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/location.h>
 #include <base/memory/ref_counted.h>
-#include <base/task_runner.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/task/task_runner.h>
 #include <grpcpp/grpcpp.h>
 
 namespace diagnostics {
 
-// A function that transforms base::Callback into std::function
-
+// Transforms base::RepeatingCallback into std::function.
 template <typename ReturnType, typename... ArgType>
-inline std::function<ReturnType(ArgType...)> MakeStdFunctionFromCallback(
-    base::Callback<ReturnType(ArgType...)> callback) {
+inline std::function<ReturnType(ArgType...)>
+MakeStdFunctionFromRepeatingCallback(
+    base::RepeatingCallback<ReturnType(ArgType...)> callback) {
   return [callback](ArgType&&... args) {
-    return callback.Run(std::forward<ArgType>(args)...);
+    callback.Run(std::forward<ArgType>(args)...);
   };
 }
 
-// A function that transforms base::Callback into std::function, and
+// Transforms base::OnceCallback into std::function (which can be executed only
+// at most once).
+template <typename ReturnType, typename... ArgType>
+inline std::function<ReturnType(ArgType...)> MakeStdFunctionFromOnceCallback(
+    base::OnceCallback<ReturnType(ArgType...)> callback) {
+  // As `std::function` only supports copyable functors and arguments natively,
+  // we first use `base::OwnedRef` to transform the once callback into a
+  // repeating callback.
+  return MakeStdFunctionFromRepeatingCallback(base::BindRepeating(
+      [](base::OnceCallback<ReturnType(ArgType...)>& callback,
+         ArgType&&... args) {
+        std::move(callback).Run(std::forward<ArgType>(args)...);
+      },
+      base::OwnedRef(std::move(callback))));
+}
+
+// A function that transforms base::OnceCallback into std::function, and
 // automatically adds grpc::Status::OK
 template <typename ReturnType, typename... ArgType>
 inline std::function<ReturnType(ArgType...)> MakeStdFunctionFromCallbackGrpc(
-    base::Callback<ReturnType(grpc::Status, ArgType...)> callback) {
-  return [callback](ArgType&&... args) {
-    return callback.Run(grpc::Status::OK, std::forward<ArgType>(args)...);
-  };
+    base::OnceCallback<ReturnType(grpc::Status, ArgType...)> callback) {
+  return MakeStdFunctionFromOnceCallback(
+      base::BindOnce(std::move(callback), grpc::Status::OK));
 }
 
 namespace internal {
@@ -56,33 +71,35 @@ inline ReturnType RunStdFunctionWithArgsGrpc(
 
 }  // namespace internal
 
-// Transforms std::function into base::Callback.
+// Transforms std::function into base::OnceCallback.
 template <typename ReturnType, typename... ArgTypes>
-inline base::Callback<ReturnType(ArgTypes...)> MakeCallbackFromStdFunction(
+inline base::OnceCallback<ReturnType(ArgTypes...)> MakeCallbackFromStdFunction(
     std::function<ReturnType(ArgTypes...)> function) {
-  return base::Bind(&internal::RunStdFunctionWithArgs<ReturnType, ArgTypes...>,
-                    base::Passed(std::move(function)));
+  return base::BindOnce(
+      &internal::RunStdFunctionWithArgs<ReturnType, ArgTypes...>,
+      std::move(function));
 }
 
-// Transforms std::function into base::Callback, and ignores grpc::Status
+// Transforms std::function into base::OnceCallback, and ignores grpc::Status.
 template <typename ReturnType, typename... ArgTypes>
-inline base::Callback<ReturnType(grpc::Status, ArgTypes...)>
+inline base::OnceCallback<ReturnType(grpc::Status, ArgTypes...)>
 MakeCallbackFromStdFunctionGrpc(
     std::function<ReturnType(ArgTypes...)> function) {
-  return base::Bind(
+  return base::BindOnce(
       &internal::RunStdFunctionWithArgsGrpc<ReturnType, ArgTypes...>,
-      base::Passed(std::move(function)));
+      std::move(function));
 }
 
 namespace internal {
 
 template <typename... ArgTypes>
-inline void RunCallbackOnTaskRunner(scoped_refptr<base::TaskRunner> task_runner,
-                                    const base::Location& location,
-                                    base::Callback<void(ArgTypes...)> callback,
-                                    ArgTypes... args) {
-  task_runner->PostTask(location, base::Bind(std::move(callback),
-                                             base::Passed(std::move(args))...));
+inline void RunCallbackOnTaskRunner(
+    scoped_refptr<base::TaskRunner> task_runner,
+    const base::Location& location,
+    base::OnceCallback<void(ArgTypes...)> callback,
+    ArgTypes... args) {
+  task_runner->PostTask(
+      location, base::BindOnce(std::move(callback), std::move(args)...));
 }
 
 }  // namespace internal
@@ -90,12 +107,13 @@ inline void RunCallbackOnTaskRunner(scoped_refptr<base::TaskRunner> task_runner,
 // Returns a callback that remembers the current task runner and, when called,
 // posts |callback| to it (with all arguments forwarded).
 template <typename... ArgTypes>
-inline base::Callback<void(ArgTypes...)> MakeOriginTaskRunnerPostingCallback(
+inline base::OnceCallback<void(ArgTypes...)>
+MakeOriginTaskRunnerPostingCallback(
     const base::Location& location,
-    base::Callback<void(ArgTypes...)> callback) {
-  return base::Bind(&internal::RunCallbackOnTaskRunner<ArgTypes...>,
-                    base::ThreadTaskRunnerHandle::Get(), location,
-                    std::move(callback));
+    base::OnceCallback<void(ArgTypes...)> callback) {
+  return base::BindOnce(&internal::RunCallbackOnTaskRunner<ArgTypes...>,
+                        base::SingleThreadTaskRunner::GetCurrentDefault(),
+                        location, std::move(callback));
 }
 
 }  // namespace diagnostics

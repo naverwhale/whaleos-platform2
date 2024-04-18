@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -164,7 +164,7 @@ UsbConnectStatus FirmwareUpdater::TryConnectUsb() {
     if (duration > kTimeoutMs) {
       break;
     }
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(kIntervalMs));
+    base::PlatformThread::Sleep(base::Milliseconds(kIntervalMs));
   }
   LOG(ERROR) << "Failed to connect USB endpoint.";
   return UsbConnectStatus::kUsbPathEmpty;
@@ -499,9 +499,13 @@ bool FirmwareUpdater::SendSubcommandReceiveResponse(
   }
   int received =
       endpoint_->Transfer(ufh.get(), usb_msg_size, resp, resp_size, allow_less);
-  // The first byte of the response is the status of the subcommand.
-  LOG(INFO) << base::StringPrintf("Status of subcommand: %d",
-                                  *(reinterpret_cast<uint8_t*>(resp)));
+  if (received != -1) {
+    // The first byte of the response is the status of the subcommand.
+    LOG(INFO) << base::StringPrintf("Status of subcommand: %d",
+                                    *(reinterpret_cast<uint8_t*>(resp)));
+  } else {
+    LOG(ERROR) << "USB transfer error!";
+  }
   return (received == resp_size);
 }
 
@@ -559,7 +563,7 @@ bool FirmwareUpdater::SendFirstPdu() {
         static_cast<int>(UpdateCommandResponseStatus::kRwsigBusy))
       break;
     LOG(WARNING) << "EC still calculating RW signature, retrying...";
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(kWaitTimeMs));
+    base::PlatformThread::Sleep(base::Milliseconds(kWaitTimeMs));
   }
   if (return_value) {
     LOG(ERROR) << "Target reporting error " << return_value;

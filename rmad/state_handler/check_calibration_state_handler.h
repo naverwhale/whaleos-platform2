@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,22 +11,20 @@
 #include <memory>
 
 #include "rmad/utils/calibration_utils.h"
-#include "rmad/utils/iio_sensor_probe_utils.h"
 
 namespace rmad {
 
 class CheckCalibrationStateHandler : public BaseStateHandler {
  public:
-  explicit CheckCalibrationStateHandler(scoped_refptr<JsonStore> json_store);
-  // Used to inject mocked |iio_sensor_probe_utils_| for testing.
-  CheckCalibrationStateHandler(
+  explicit CheckCalibrationStateHandler(
       scoped_refptr<JsonStore> json_store,
-      std::unique_ptr<IioSensorProbeUtils> iio_sensor_probe_utils);
+      scoped_refptr<DaemonCallback> daemon_callback);
 
   ASSIGN_STATE(RmadState::StateCase::kCheckCalibration);
   SET_REPEATABLE;
 
   RmadErrorCode InitializeState() override;
+  void RunState() override;
   GetNextStateCaseReply GetNextStateCase(const RmadState& state) override;
 
  protected:
@@ -38,8 +36,6 @@ class CheckCalibrationStateHandler : public BaseStateHandler {
   bool CheckIsCalibrationRequired(const RmadState& state,
                                   bool* need_calibration,
                                   RmadErrorCode* error_code);
-
-  std::unique_ptr<IioSensorProbeUtils> iio_sensor_probe_utils_;
 
   // To ensure that calibration starts from a higher priority, we use an
   // ordered map to traverse the enumerator of its setup instruction.

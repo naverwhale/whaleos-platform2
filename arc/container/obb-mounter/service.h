@@ -1,11 +1,10 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ARC_CONTAINER_OBB_MOUNTER_SERVICE_H_
 #define ARC_CONTAINER_OBB_MOUNTER_SERVICE_H_
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <dbus/exported_object.h>
 

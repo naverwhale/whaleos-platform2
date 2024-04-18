@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef SYSTEM_API_DBUS_DLP_DBUS_CONSTANTS_H_
@@ -13,7 +13,10 @@ constexpr char kDlpServiceName[] = "org.chromium.Dlp";
 // DLP Daemon methods:
 constexpr char kSetDlpFilesPolicyMethod[] = "SetDlpFilesPolicy";
 constexpr char kAddFileMethod[] = "AddFile";
+constexpr char kAddFilesMethod[] = "AddFiles";
 constexpr char kRequestFileAccessMethod[] = "RequestFileAccess";
+constexpr char kGetFilesSourcesMethod[] = "GetFilesSources";
+constexpr char kCheckFilesTransferMethod[] = "CheckFilesTransfer";
 
 // Errors returned by DLP Daemon mathods:
 constexpr char kErrorFailedToCreatePipe[] = "FailedToCreatePipe";
@@ -30,6 +33,8 @@ constexpr char kDlpFilesPolicyServiceInterface[] =
 constexpr char kDlpFilesPolicyServiceIsRestrictedMethod[] = "IsRestricted";
 constexpr char kDlpFilesPolicyServiceIsDlpPolicyMatchedMethod[] =
     "IsDlpPolicyMatched";
+constexpr char kDlpFilesPolicyServiceIsFilesTransferRestrictedMethod[] =
+    "IsFilesTransferRestricted";
 
 }  // namespace dlp
 #endif  // SYSTEM_API_DBUS_DLP_DBUS_CONSTANTS_H_

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,6 +23,35 @@ namespace biod {
  */
 std::string LogSafeID(const std::string& id);
 
+/**
+ * @brief Callback invoked when signal is connected
+ *
+ * This function is compatible with |on_connected_callback| argument
+ * in ConnectToSignal() DBus method.
+ *
+ * @param interface_name Name of the interface which provides the signal.
+ * @param signal_name Name of the signal we are connecting to.
+ * @param success Indicates if connection was established.
+ */
+void LogOnSignalConnected(const std::string& interface_name,
+                          const std::string& signal_name,
+                          bool success);
+
+/**
+ * @brief Convert fingerprint enroll result to a description string.
+ *
+ * @param result An EC result code representing an enroll result.
+ * @return std::string The description string of |result|.
+ */
+std::string EnrollResultToString(int result);
+
+/**
+ * @brief Convert fingerprint match result to a description string.
+ *
+ * @param result An EC result code representing an match result.
+ * @return std::string The description string of |result|.
+ */
+std::string MatchResultToString(int result);
 }  // namespace biod
 
 #endif  // BIOD_UTILS_H_

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include <string>
 #include <vector>
@@ -104,6 +105,11 @@ bool SandboxedProcess::Init(
     AddArg("-n");
   }
 
+  for (const auto& env_var : env_vars_) {
+    AddArg("--env-add");
+    AddArg(base::JoinString({env_var.first, env_var.second}, "="));
+  }
+
   for (const auto& arg : minijail_extra_args)
     AddArg(arg);
 
@@ -142,6 +148,11 @@ void SandboxedProcess::SetSeccompFilterPolicyFile(const std::string& path) {
 
 void SandboxedProcess::AllowAccessRootMountNamespace() {
   access_root_mount_ns_ = true;
+}
+
+void SandboxedProcess::SetEnvironmentVariables(
+    const base::EnvironmentMap& env) {
+  env_vars_ = env;
 }
 
 bool SandboxedProcess::KillProcessGroup() {

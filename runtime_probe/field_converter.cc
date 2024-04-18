@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,11 @@
 #include <inttypes.h>
 
 #include <memory>
+#include <string_view>
 
 #include <base/check.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
-#include <base/strings/string_piece.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/values.h>
 
@@ -68,9 +68,9 @@ constexpr const char* ToString(ValidatorOperator op) {
   return nullptr;
 }
 
-bool SplitValidateRuleString(const base::StringPiece& validate_rule,
+bool SplitValidateRuleString(std::string_view validate_rule,
                              ValidatorOperator* operator_,
-                             base::StringPiece* operand) {
+                             std::string* operand) {
   if (validate_rule.empty()) {
     *operator_ = ValidatorOperator::NOP;
     *operand = "";
@@ -95,9 +95,9 @@ bool SplitValidateRuleString(const base::StringPiece& validate_rule,
 
 template <typename ConverterType>
 std::unique_ptr<ConverterType> BuildNumericConverter(
-    const base::StringPiece& validate_rule) {
+    std::string_view validate_rule) {
   ValidatorOperator op;
-  base::StringPiece rest;
+  std::string rest;
 
   if (SplitValidateRuleString(validate_rule, &op, &rest)) {
     if (op == ValidatorOperator::NOP)
@@ -159,7 +159,7 @@ std::string StringFieldConverter::ToString() const {
 }
 
 std::string IntegerFieldConverter::ToString() const {
-  return base::StringPrintf("IntegerFieldConverter(%s, %d)",
+  return base::StringPrintf("IntegerFieldConverter(%s, %" PRIx64 ")",
                             ::runtime_probe::ToString(operator_), operand_);
 }
 
@@ -174,9 +174,9 @@ std::string DoubleFieldConverter::ToString() const {
 }
 
 std::unique_ptr<StringFieldConverter> StringFieldConverter::Build(
-    const base::StringPiece& validate_rule) {
+    std::string_view validate_rule) {
   ValidatorOperator op;
-  base::StringPiece pattern;
+  std::string pattern;
 
   if (SplitValidateRuleString(validate_rule, &op, &pattern)) {
     if (op == ValidatorOperator::NOP)
@@ -203,37 +203,38 @@ std::unique_ptr<StringFieldConverter> StringFieldConverter::Build(
 }
 
 std::unique_ptr<IntegerFieldConverter> IntegerFieldConverter::Build(
-    const base::StringPiece& validate_rule) {
+    std::string_view validate_rule) {
   return BuildNumericConverter<IntegerFieldConverter>(validate_rule);
 }
 
 std::unique_ptr<HexFieldConverter> HexFieldConverter::Build(
-    const base::StringPiece& validate_rule) {
+    std::string_view validate_rule) {
   return BuildNumericConverter<HexFieldConverter>(validate_rule);
 }
 
 std::unique_ptr<DoubleFieldConverter> DoubleFieldConverter::Build(
-    const base::StringPiece& validate_rule) {
+    std::string_view validate_rule) {
   return BuildNumericConverter<DoubleFieldConverter>(validate_rule);
 }
 
 ReturnCode StringFieldConverter::Convert(const std::string& field_name,
                                          base::Value* dict_value) const {
   CHECK(dict_value);
+  auto& dict = dict_value->GetDict();
 
-  auto* value = dict_value->FindKey(field_name);
+  auto* value = dict.Find(field_name);
   if (!value)
     return ReturnCode::FIELD_NOT_FOUND;
 
   switch (value->type()) {
     case base::Value::Type::DOUBLE:
-      dict_value->SetStringKey(field_name, std::to_string(value->GetDouble()));
+      dict.Set(field_name, std::to_string(value->GetDouble()));
       return ReturnCode::OK;
     case base::Value::Type::INTEGER:
-      dict_value->SetStringKey(field_name, std::to_string(value->GetInt()));
+      dict.Set(field_name, std::to_string(value->GetInt()));
       return ReturnCode::OK;
     case base::Value::Type::NONE:
-      dict_value->SetStringKey(field_name, "null");
+      dict.Set(field_name, "null");
       return ReturnCode::OK;
     case base::Value::Type::STRING:
       return ReturnCode::OK;
@@ -245,45 +246,56 @@ ReturnCode StringFieldConverter::Convert(const std::string& field_name,
 ReturnCode IntegerFieldConverter::Convert(const std::string& field_name,
                                           base::Value* dict_value) const {
   CHECK(dict_value);
+  auto& dict = dict_value->GetDict();
 
-  auto* value = dict_value->FindKey(field_name);
-  if (!value)
-    return ReturnCode::FIELD_NOT_FOUND;
-
-  switch (value->type()) {
-    case base::Value::Type::DOUBLE:
-      dict_value->SetIntKey(field_name, static_cast<int>(value->GetDouble()));
-      return ReturnCode::OK;
-    case base::Value::Type::INTEGER:
-      return ReturnCode::OK;
-    case base::Value::Type::STRING: {
-      const auto& string_value = value->GetString();
-      OperandType int_value;
-      if (StringToOperand(string_value, &int_value)) {
-        dict_value->SetIntKey(field_name, int_value);
-        return ReturnCode::OK;
-      } else {
-        LOG(ERROR) << "Failed to convert '" << string_value << "' to integer.";
-        return ReturnCode::INCOMPATIBLE_VALUE;
-      }
-    }
-    default:
-      return ReturnCode::INCOMPATIBLE_VALUE;
-  }
-}
-
-ReturnCode HexFieldConverter::Convert(const std::string& field_name,
-                                      base::Value* dict_value) const {
-  CHECK(dict_value);
-
-  auto* value = dict_value->FindKey(field_name);
+  auto* value = dict.Find(field_name);
   if (!value)
     return ReturnCode::FIELD_NOT_FOUND;
 
   OperandType int_value;
   switch (value->type()) {
     case base::Value::Type::DOUBLE:
-      dict_value->SetIntKey(field_name, static_cast<int>(value->GetDouble()));
+      int_value = static_cast<OperandType>(value->GetDouble());
+      break;
+    case base::Value::Type::INTEGER:
+      int_value = value->GetInt();
+      break;
+    case base::Value::Type::STRING: {
+      const auto& string_value_ = value->GetString();
+      if (!StringToOperand(string_value_, &int_value)) {
+        LOG(ERROR) << "Failed to convert '" << string_value_ << "' to integer.";
+        return ReturnCode::INCOMPATIBLE_VALUE;
+      }
+      break;
+    }
+    default:
+      return ReturnCode::INCOMPATIBLE_VALUE;
+  }
+  // Since base::Value only supports 32-bit integer, we use string field to
+  // store large integers.  We convert values to decimal strings to make
+  // google::protobuf::util::JsonStringToMessage parse strings to integers
+  // correctly.
+  const auto string_value = base::NumberToString(int_value);
+  dict.Set(field_name, string_value);
+  return ReturnCode::OK;
+}
+
+ReturnCode HexFieldConverter::Convert(const std::string& field_name,
+                                      base::Value* dict_value) const {
+  CHECK(dict_value);
+  if (!dict_value->is_dict()) {
+    return ReturnCode::FIELD_NOT_FOUND;
+  }
+  auto& dict = dict_value->GetDict();
+
+  auto* value = dict.Find(field_name);
+  if (!value)
+    return ReturnCode::FIELD_NOT_FOUND;
+
+  OperandType int_value;
+  switch (value->type()) {
+    case base::Value::Type::DOUBLE:
+      dict.Set(field_name, static_cast<int>(value->GetDouble()));
       return ReturnCode::OK;
     case base::Value::Type::INTEGER: {
       int_value = value->GetInt();
@@ -305,15 +317,19 @@ ReturnCode HexFieldConverter::Convert(const std::string& field_name,
   // google::protobuf::util::JsonStringToMessage parse strings to integers
   // correctly.
   const auto string_value = base::NumberToString(int_value);
-  dict_value->SetStringKey(field_name, string_value);
+  dict.Set(field_name, string_value);
   return ReturnCode::OK;
 }
 
 ReturnCode DoubleFieldConverter::Convert(const std::string& field_name,
                                          base::Value* dict_value) const {
   CHECK(dict_value);
+  if (!dict_value->is_dict()) {
+    return ReturnCode::FIELD_NOT_FOUND;
+  }
+  auto& dict = dict_value->GetDict();
 
-  auto* value = dict_value->FindKey(field_name);
+  auto* value = dict.Find(field_name);
   if (!value)
     return ReturnCode::FIELD_NOT_FOUND;
 
@@ -321,13 +337,13 @@ ReturnCode DoubleFieldConverter::Convert(const std::string& field_name,
     case base::Value::Type::DOUBLE:
       return ReturnCode::OK;
     case base::Value::Type::INTEGER:
-      dict_value->SetDoubleKey(field_name, value->GetDouble());
+      dict.Set(field_name, value->GetDouble());
       return ReturnCode::OK;
     case base::Value::Type::STRING: {
       const auto& string_value = value->GetString();
       double double_value;
       if (StringToDouble(string_value, &double_value)) {
-        dict_value->SetDoubleKey(field_name, double_value);
+        dict.Set(field_name, double_value);
         return ReturnCode::OK;
       } else {
         LOG(ERROR) << "Failed to convert '" << string_value << "' to double.";
@@ -342,8 +358,12 @@ ReturnCode DoubleFieldConverter::Convert(const std::string& field_name,
 ReturnCode StringFieldConverter::Validate(const std::string& field_name,
                                           base::Value* dict_value) const {
   CHECK(dict_value);
+  if (!dict_value->is_dict()) {
+    return ReturnCode::FIELD_NOT_FOUND;
+  }
+  const auto& dict = dict_value->GetDict();
 
-  auto* value_ = dict_value->FindKey(field_name);
+  auto* value_ = dict.Find(field_name);
   if (!value_)
     return ReturnCode::FIELD_NOT_FOUND;
   if (!value_->is_string())
@@ -372,13 +392,29 @@ ReturnCode StringFieldConverter::Validate(const std::string& field_name,
 ReturnCode IntegerFieldConverter::Validate(const std::string& field_name,
                                            base::Value* dict_value) const {
   CHECK(dict_value);
+  if (!dict_value->is_dict()) {
+    return ReturnCode::FIELD_NOT_FOUND;
+  }
+  const auto& dict = dict_value->GetDict();
 
-  auto* value_ = dict_value->FindKey(field_name);
+  auto* value_ = dict.Find(field_name);
   if (!value_)
     return ReturnCode::FIELD_NOT_FOUND;
-  if (!value_->is_int())
-    return ReturnCode::INCOMPATIBLE_VALUE;
-  const auto value = value_->GetInt();
+  OperandType value;
+  switch (value_->type()) {
+    case base::Value::Type::INTEGER: {
+      value = value_->GetInt();
+      break;
+    }
+    case base::Value::Type::STRING: {
+      const auto& string_value = value_->GetString();
+      if (!StringToInt64(string_value, &value))
+        return ReturnCode::INCOMPATIBLE_VALUE;
+      break;
+    }
+    default:
+      return ReturnCode::INCOMPATIBLE_VALUE;
+  }
 
   return CheckNumber(operator_, value, operand_);
 }
@@ -386,8 +422,12 @@ ReturnCode IntegerFieldConverter::Validate(const std::string& field_name,
 ReturnCode HexFieldConverter::Validate(const std::string& field_name,
                                        base::Value* dict_value) const {
   CHECK(dict_value);
+  if (!dict_value->is_dict()) {
+    return ReturnCode::FIELD_NOT_FOUND;
+  }
+  const auto& dict = dict_value->GetDict();
 
-  auto* value_ = dict_value->FindKey(field_name);
+  auto* value_ = dict.Find(field_name);
   if (!value_)
     return ReturnCode::FIELD_NOT_FOUND;
   OperandType value;
@@ -411,8 +451,12 @@ ReturnCode HexFieldConverter::Validate(const std::string& field_name,
 ReturnCode DoubleFieldConverter::Validate(const std::string& field_name,
                                           base::Value* dict_value) const {
   CHECK(dict_value);
+  if (!dict_value->is_dict()) {
+    return ReturnCode::FIELD_NOT_FOUND;
+  }
+  const auto& dict = dict_value->GetDict();
 
-  auto* value_ = dict_value->FindKey(field_name);
+  auto* value_ = dict.Find(field_name);
   if (!value_)
     return ReturnCode::FIELD_NOT_FOUND;
   if (!value_->is_double() && !value_->is_int())

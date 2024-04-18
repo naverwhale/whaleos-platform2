@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,9 +12,7 @@
 
 #include <vm_tools/common/vm_id.h>
 
-namespace vm_tools {
-namespace concierge {
-namespace vm_permission {
+namespace vm_tools::concierge::vm_permission {
 
 dbus::ObjectProxy* GetServiceProxy(scoped_refptr<dbus::Bus> bus);
 
@@ -40,8 +38,6 @@ bool IsMicrophoneEnabled(scoped_refptr<dbus::Bus> bus,
                          dbus::ObjectProxy* proxy,
                          const std::string& vm_token);
 
-}  // namespace vm_permission
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge::vm_permission
 
 #endif  //  VM_TOOLS_CONCIERGE_VM_PERMISSION_INTERFACE_H_

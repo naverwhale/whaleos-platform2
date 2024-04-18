@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,15 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <utility>
 
 #include <base/check_op.h>
 #include <base/logging.h>
+#include <base/time/time.h>
 
-#include "power_manager/common/util.h"
+#include "power_manager/common/tracing.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -25,14 +26,11 @@ namespace {
 const size_t kInitialFileReadSize = 4096;
 
 // How often to poll for the AIO status.
-const int kPollMs = 100;
+constexpr base::TimeDelta kPoll = base::Milliseconds(100);
 
 }  // namespace
 
-AsyncFileReader::AsyncFileReader()
-    : read_in_progress_(false),
-      fd_(-1),
-      initial_read_size_(kInitialFileReadSize) {}
+AsyncFileReader::AsyncFileReader() : initial_read_size_(kInitialFileReadSize) {}
 
 AsyncFileReader::~AsyncFileReader() {
   Reset();
@@ -48,6 +46,7 @@ bool AsyncFileReader::Init(const base::FilePath& path) {
     return false;
   }
   path_ = path;
+  trace_id_ = reinterpret_cast<uint64_t>(this) ^ fd_;
   return true;
 }
 
@@ -56,34 +55,40 @@ bool AsyncFileReader::HasOpenedFile() const {
 }
 
 void AsyncFileReader::StartRead(
-    const base::Callback<void(const std::string&)>& read_cb,
-    const base::Callback<void()>& error_cb) {
+    base::OnceCallback<void(const std::string&)> read_cb,
+    base::OnceCallback<void()> error_cb) {
+  TRACE_EVENT("power", "AsyncFileReader::StartRead",
+              perfetto::Flow::ProcessScoped(trace_id_), "path", path_.value());
   Reset();
 
   if (fd_ == -1) {
     LOG(ERROR) << "No file handle available.";
     if (!error_cb.is_null())
-      error_cb.Run();
+      std::move(error_cb).Run();
     return;
   }
 
   if (!AsyncRead(initial_read_size_, 0)) {
     if (!error_cb.is_null())
-      error_cb.Run();
+      std::move(error_cb).Run();
     return;
   }
-  read_cb_ = read_cb;
-  error_cb_ = error_cb;
+  read_cb_ = std::move(read_cb);
+  error_cb_ = std::move(error_cb);
   read_in_progress_ = true;
 }
 
 void AsyncFileReader::UpdateState() {
+  TRACE_EVENT("power", "AsyncFileReader::UpdateState",
+              perfetto::Flow::ProcessScoped(trace_id_), "path", path_.value());
   if (!read_in_progress_) {
     update_state_timer_.Reset();
     return;
   }
 
   int status = aio_error(&aio_control_);
+  TRACE_EVENT_INSTANT("power", "AsyncFileReader::UpdateState::Result", "status",
+                      status);
 
   // If the read is still in-progress, keep the timer running.
   if (status == EINPROGRESS)
@@ -109,7 +114,7 @@ void AsyncFileReader::UpdateState() {
           break;
       }
       if (!read_cb_.is_null())
-        read_cb_.Run(stored_data_);
+        std::move(read_cb_).Run(stored_data_);
       Reset();
       break;
     }
@@ -117,7 +122,7 @@ void AsyncFileReader::UpdateState() {
       LOG(ERROR) << "Error during read of file " << path_.value()
                  << ", status=" << status;
       if (!error_cb_.is_null())
-        error_cb_.Run();
+        std::move(error_cb_).Run();
       Reset();
       break;
     }
@@ -164,11 +169,9 @@ bool AsyncFileReader::AsyncRead(int size, int offset) {
     return false;
   }
 
-  update_state_timer_.Start(FROM_HERE,
-                            base::TimeDelta::FromMilliseconds(kPollMs), this,
+  update_state_timer_.Start(FROM_HERE, kPoll, this,
                             &AsyncFileReader::UpdateState);
   return true;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

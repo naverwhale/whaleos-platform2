@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,13 @@
 #include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -18,14 +20,14 @@
 #include <vector>
 
 #include <base/barrier_closure.h>
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
 #include <base/run_loop.h>
@@ -42,16 +44,11 @@
 #include <google/protobuf/util/message_differencer.h>
 #include <gtest/gtest.h>
 #include <mojo/core/embedder/embedder.h>
+#include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/receiver.h>
 #include <mojo/public/cpp/bindings/remote.h>
 
-#include "diagnostics/common/file_test_utils.h"
-#include "diagnostics/common/mojo_test_utils.h"
-#include "diagnostics/common/mojo_utils.h"
-#include "diagnostics/common/protobuf_test_utils.h"
-#include "diagnostics/common/system/fake_bluetooth_client.h"
-#include "diagnostics/common/system/fake_powerd_adapter.h"
-#include "diagnostics/common/system/mock_debugd_adapter.h"
+#include "diagnostics/mojom/public/wilco_dtc_supportd.mojom.h"
 #include "diagnostics/wilco_dtc_supportd/core.h"
 #include "diagnostics/wilco_dtc_supportd/dbus_service.h"
 #include "diagnostics/wilco_dtc_supportd/ec_constants.h"
@@ -68,8 +65,14 @@
 #include "diagnostics/wilco_dtc_supportd/telemetry/fake_bluetooth_event_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/fake_ec_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/fake_powerd_event_service.h"
-#include "mojo/wilco_dtc_supportd.mojom.h"
-#include "wilco_dtc_supportd.pb.h"  // NOLINT(build/include)
+#include "diagnostics/wilco_dtc_supportd/utils/file_test_utils.h"
+#include "diagnostics/wilco_dtc_supportd/utils/mojo_test_utils.h"
+#include "diagnostics/wilco_dtc_supportd/utils/mojo_utils.h"
+#include "diagnostics/wilco_dtc_supportd/utils/protobuf_test_utils.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/fake_bluetooth_client.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/fake_powerd_adapter.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/mock_debugd_adapter.h"
+#include "wilco_dtc_supportd.pb.h"  // NOLINT(build/include_directory)
 
 using testing::_;
 using testing::ElementsAreArray;
@@ -81,6 +84,8 @@ using testing::StrictMock;
 using testing::WithArg;
 
 namespace diagnostics {
+namespace wilco {
+namespace {
 
 // Templates for the gRPC URIs that should be used for testing. "%s" is
 // substituted with a temporary directory.
@@ -102,17 +107,16 @@ using MojomWilcoDtcSupportdWebRequestHttpMethod =
 using MojomWilcoDtcSupportdWebRequestStatus =
     chromeos::wilco_dtc_supportd::mojom::WilcoDtcSupportdWebRequestStatus;
 
-namespace {
-
 // Returns a callback that, once called, saves its parameter to |*response| and
 // quits |*run_loop|.
 template <typename ValueType>
-base::Callback<void(grpc::Status, std::unique_ptr<ValueType>)>
-MakeAsyncResponseWriter(const base::Closure& callback,
+base::RepeatingCallback<void(grpc::Status, std::unique_ptr<ValueType>)>
+MakeAsyncResponseWriter(const base::RepeatingClosure& callback,
                         std::unique_ptr<ValueType>* response) {
-  return base::Bind(
-      [](const base::Closure& callback, std::unique_ptr<ValueType>* response,
-         grpc::Status status, std::unique_ptr<ValueType> received_response) {
+  return base::BindRepeating(
+      [](const base::RepeatingClosure& callback,
+         std::unique_ptr<ValueType>* response, grpc::Status status,
+         std::unique_ptr<ValueType> received_response) {
         ASSERT_TRUE(received_response);
         ASSERT_FALSE(*response);
         *response = std::move(received_response);
@@ -330,7 +334,8 @@ class CoreTest : public testing::Test {
 
   MojoServiceFactory mojo_service_factory_{
       &mojo_grpc_adapter_,
-      base::Bind(&StrictMock<MockDaemon>::ShutDown, base::Unretained(&daemon_)),
+      base::BindRepeating(&StrictMock<MockDaemon>::ShutDown,
+                          base::Unretained(&daemon_)),
       base::BindOnce(&CoreTest::FakeBindMojoFactory, base::Unretained(this))};
 
   bool simulate_bind_failure_ = false;
@@ -596,30 +601,31 @@ TEST_F(StartedCoreTest, MojoBootstrapSuccessThenAbort) {
 // ProbeService
 TEST_F(StartedCoreTest, ProbeTelemetryInfo) {
   using ProbeTelemetryInfoCallback =
-      base::OnceCallback<void(chromeos::cros_healthd::mojom::TelemetryInfoPtr)>;
+      base::OnceCallback<void(ash::cros_healthd::mojom::TelemetryInfoPtr)>;
   const auto kCategories =
-      std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum>{
-          chromeos::cros_healthd::mojom::ProbeCategoryEnum::kFan,
-          chromeos::cros_healthd::mojom::ProbeCategoryEnum::kCpu,
-          chromeos::cros_healthd::mojom::ProbeCategoryEnum::kStatefulPartition};
+      std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum>{
+          ash::cros_healthd::mojom::ProbeCategoryEnum::kFan,
+          ash::cros_healthd::mojom::ProbeCategoryEnum::kCpu,
+          ash::cros_healthd::mojom::ProbeCategoryEnum::kStatefulPartition};
 
-  core_delegate()->probe_service()->SetProbeTelemetryInfoCallback(base::Bind(
-      [](std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum>
-             expected_categories,
-         std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum>
-             received_categories,
-         ProbeTelemetryInfoCallback received_callback) {
-        EXPECT_EQ(expected_categories, received_categories);
-        std::move(received_callback).Run(nullptr);
-      },
-      kCategories));
+  core_delegate()->probe_service()->SetProbeTelemetryInfoCallback(
+      base::BindOnce(
+          [](std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum>
+                 expected_categories,
+             std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum>
+                 received_categories,
+             ProbeTelemetryInfoCallback received_callback) {
+            EXPECT_EQ(expected_categories, received_categories);
+            std::move(received_callback).Run(nullptr);
+          },
+          kCategories));
 
   base::RunLoop run_loop;
   static_cast<GrpcService::Delegate*>(core())->ProbeTelemetryInfo(
-      kCategories, base::Bind(
-                       [](base::Closure loop_closure,
-                          chromeos::cros_healthd::mojom::TelemetryInfoPtr) {
-                         loop_closure.Run();
+      kCategories, base::BindOnce(
+                       [](base::OnceClosure loop_closure,
+                          ash::cros_healthd::mojom::TelemetryInfoPtr) {
+                         std::move(loop_closure).Run();
                        },
                        run_loop.QuitClosure()));
   run_loop.Run();
@@ -648,7 +654,7 @@ TEST_F(StartedCoreTest, HandleRequestBluetoothDataNotification) {
     auto barrier_closure = base::BarrierClosure(2, run_loop.QuitClosure());
 
     auto update_callback = base::BindRepeating(
-        [](const base::Closure& callback,
+        [](const base::RepeatingClosure& callback,
            const grpc_api::HandleBluetoothDataChangedRequest&) {
           callback.Run();
         },
@@ -666,7 +672,7 @@ TEST_F(StartedCoreTest, HandleRequestBluetoothDataNotification) {
 
   {
     auto bluetooth_callback =
-        [](const base::Closure& callback,
+        [](const base::RepeatingClosure& callback,
            grpc_api::HandleBluetoothDataChangedRequest* request_out,
            const grpc_api::HandleBluetoothDataChangedRequest& request) {
           DCHECK(request_out);
@@ -691,8 +697,8 @@ TEST_F(StartedCoreTest, HandleRequestBluetoothDataNotification) {
 
     fake_wilco_dtc.RequestBluetoothDataNotification(
         grpc_api::RequestBluetoothDataNotificationRequest{},
-        base::Bind(
-            [](base::Closure barrier_closure, grpc::Status status,
+        base::BindRepeating(
+            [](base::RepeatingClosure barrier_closure, grpc::Status status,
                std::unique_ptr<
                    grpc_api::RequestBluetoothDataNotificationResponse>) {
               barrier_closure.Run();
@@ -741,11 +747,12 @@ class BootstrappedCoreTest : public StartedCoreTest {
 
   FakeWilcoDtc* fake_wilco_dtc() { return fake_wilco_dtc_.get(); }
 
-  base::Callback<void(mojo::ScopedHandle)> fake_browser_valid_handle_callback(
-      const base::Closure& callback,
+  base::OnceCallback<void(mojo::ScopedHandle)>
+  fake_browser_valid_handle_callback(
+      const base::RepeatingClosure& callback,
       const std::string& expected_response_json_message) {
-    return base::Bind(
-        [](const base::Closure& callback,
+    return base::BindOnce(
+        [](base::OnceClosure callback,
            const std::string& expected_response_json_message,
            mojo::ScopedHandle response_json_message_handle) {
           auto shm_mapping = GetReadOnlySharedMemoryMappingFromMojoHandle(
@@ -754,18 +761,18 @@ class BootstrappedCoreTest : public StartedCoreTest {
           ASSERT_EQ(expected_response_json_message,
                     std::string(shm_mapping.GetMemoryAs<const char>(),
                                 shm_mapping.mapped_size()));
-          callback.Run();
+          std::move(callback).Run();
         },
         callback, expected_response_json_message);
   }
 
-  base::Callback<void(mojo::ScopedHandle)> fake_browser_invalid_handle_callback(
-      const base::Closure& callback) {
-    return base::Bind(
-        [](const base::Closure& callback,
+  base::OnceCallback<void(mojo::ScopedHandle)>
+  fake_browser_invalid_handle_callback(const base::RepeatingClosure& callback) {
+    return base::BindOnce(
+        [](base::OnceClosure callback,
            mojo::ScopedHandle response_json_message_handle) {
           ASSERT_FALSE(response_json_message_handle.is_valid());
-          callback.Run();
+          std::move(callback).Run();
         },
         callback);
   }
@@ -792,15 +799,16 @@ TEST_F(BootstrappedCoreTest, SendGrpcUiMessageToWilcoDtc) {
       barrier_closure);
   fake_ui_message_receiver_wilco_dtc()
       ->set_handle_message_from_ui_json_message_response(kJsonMessageResponse);
-  fake_wilco_dtc()->set_handle_message_from_ui_callback(base::Bind([]() {
+  fake_wilco_dtc()->set_handle_message_from_ui_callback(base::BindOnce([]() {
     // The wilco_dtc not eligible to receive messages from UI must not
     // receive them.
     FAIL();
   }));
 
-  EXPECT_TRUE(fake_browser()->SendUiMessageToWilcoDtc(
-      kJsonMessageRequest, fake_browser_valid_handle_callback(
-                               barrier_closure, kJsonMessageResponse)));
+  auto callback =
+      fake_browser_valid_handle_callback(barrier_closure, kJsonMessageResponse);
+  EXPECT_TRUE(fake_browser()->SendUiMessageToWilcoDtc(kJsonMessageRequest,
+                                                      std::move(callback)));
 
   run_loop.Run();
 
@@ -818,7 +826,8 @@ TEST_F(BootstrappedCoreTest, SendGrpcUiMessageToWilcoDtcInvalidJSON) {
 
   auto callback =
       fake_browser_invalid_handle_callback(run_loop_fake_browser.QuitClosure());
-  EXPECT_TRUE(fake_browser()->SendUiMessageToWilcoDtc(kJsonMessage, callback));
+  EXPECT_TRUE(fake_browser()->SendUiMessageToWilcoDtc(kJsonMessage,
+                                                      std::move(callback)));
 
   run_loop_fake_browser.Run();
   // There's no reliable way to wait till the wrong HandleMessageFromUi(), if
@@ -862,21 +871,21 @@ TEST_F(BootstrappedCoreTest, SendGrpcUiMessageToWilcoDtcInvalidResponseJSON) {
 TEST_F(BootstrappedCoreTest, GetCrosHealthdDiagnosticsService) {
   FakeDiagnosticsService fake_diagnostics_service;
   EXPECT_CALL(*wilco_dtc_supportd_client(), GetCrosHealthdDiagnosticsService(_))
-      .WillOnce(
-          WithArg<0>([&](chromeos::cros_healthd::mojom::
-                             CrosHealthdDiagnosticsServiceRequest service) {
+      .WillOnce(WithArg<0>(
+          [&](mojo::PendingReceiver<
+              ash::cros_healthd::mojom::CrosHealthdDiagnosticsService>
+                  service) {
             fake_diagnostics_service.GetCrosHealthdDiagnosticsService(
                 std::move(service));
           }));
   fake_diagnostics_service.SetGetAvailableRoutinesResponse(
-      std::vector<chromeos::cros_healthd::mojom::DiagnosticRoutineEnum>{
-          chromeos::cros_healthd::mojom::DiagnosticRoutineEnum::
-              kBatteryCapacity});
+      std::vector<ash::cros_healthd::mojom::DiagnosticRoutineEnum>{
+          ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryCapacity});
 
   std::vector<grpc_api::DiagnosticRoutine> received_routines;
   base::RunLoop run_loop;
-  fake_wilco_dtc()->GetAvailableRoutines(base::Bind(
-      [](base::Closure quit_closure,
+  fake_wilco_dtc()->GetAvailableRoutines(base::BindRepeating(
+      [](base::RepeatingClosure quit_closure,
          std::vector<grpc_api::DiagnosticRoutine>* unpacked_response_out,
          grpc::Status status,
          std::unique_ptr<grpc_api::GetAvailableRoutinesResponse> response) {
@@ -894,7 +903,7 @@ TEST_F(BootstrappedCoreTest, GetCrosHealthdDiagnosticsService) {
 // browser.
 TEST_F(BootstrappedCoreTest, NotifyConfigurationDataChanged) {
   base::RunLoop run_loop;
-  const base::Closure barrier_closure =
+  const base::RepeatingClosure barrier_closure =
       base::BarrierClosure(2, run_loop.QuitClosure());
 
   fake_ui_message_receiver_wilco_dtc()->set_configuration_data_changed_callback(
@@ -1073,10 +1082,11 @@ TEST_F(BootstrappedCoreTest, GetConfigurationDataFromBrowser) {
 TEST_F(BootstrappedCoreTest, GetDriveSystemData) {
   constexpr char kFakeSmartctlData[] = "Fake smartctl data";
   EXPECT_CALL(*core_delegate()->debugd_adapter(), GetSmartAttributes(_))
-      .WillOnce(WithArg<0>(
-          [kFakeSmartctlData](
-              const base::Callback<void(const std::string&, brillo::Error*)>&
-                  callback) { callback.Run(kFakeSmartctlData, nullptr); }));
+      .WillOnce(
+          WithArg<0>([kFakeSmartctlData](
+                         DebugdAdapter::OnceStringResultCallback callback) {
+            std::move(callback).Run(kFakeSmartctlData, nullptr);
+          }));
   std::unique_ptr<grpc_api::GetDriveSystemDataResponse> response;
   {
     base::RunLoop run_loop;
@@ -1109,7 +1119,7 @@ TEST_F(BootstrappedCoreTest, HandleBluetoothDataChanged) {
   adapters[1].connected_devices_count = 2;
 
   auto bluetooth_callback =
-      [](const base::Closure& callback,
+      [](const base::RepeatingClosure& callback,
          grpc_api::HandleBluetoothDataChangedRequest* request_out,
          const grpc_api::HandleBluetoothDataChangedRequest& request) {
         DCHECK(request_out);
@@ -1153,7 +1163,7 @@ TEST_F(BootstrappedCoreTest, HandleBluetoothDataChanged) {
 class EcServiceBootstrappedCoreTest
     : public BootstrappedCoreTest,
       public testing::WithParamInterface<
-          std::tuple<EcEventReason, base::Optional<MojoEvent>>> {
+          std::tuple<EcEventReason, std::optional<MojoEvent>>> {
  protected:
   // Holds EC event type and payload of |grpc_api::HandleEcNotificationResponse|
   using GrpcEvent = std::pair<uint16_t, std::string>;
@@ -1191,19 +1201,20 @@ class EcServiceBootstrappedCoreTest
 
   EcEventReason ec_event_reason() const { return std::get<0>(GetParam()); }
 
-  base::Optional<MojoEvent> expected_mojo_event() const {
+  std::optional<MojoEvent> expected_mojo_event() const {
     return std::get<1>(GetParam());
   }
 
  private:
-  void SetupFakeWilcoDtcEcEventCallback(const base::Closure& callback,
+  void SetupFakeWilcoDtcEcEventCallback(const base::RepeatingClosure& callback,
                                         FakeWilcoDtc* fake_wilco_dtc,
                                         std::multiset<GrpcEvent>* events_out) {
     DCHECK(fake_wilco_dtc);
     DCHECK(events_out);
     fake_wilco_dtc->set_handle_ec_event_request_callback(base::BindRepeating(
-        [](const base::Closure& callback, std::multiset<GrpcEvent>* events_out,
-           int32_t type, const std::string& payload) {
+        [](const base::RepeatingClosure& callback,
+           std::multiset<GrpcEvent>* events_out, int32_t type,
+           const std::string& payload) {
           DCHECK(events_out);
           events_out->insert({type, payload});
           callback.Run();
@@ -1275,26 +1286,24 @@ INSTANTIATE_TEST_SUITE_P(
     testing::Values(
         std::make_tuple(
             EcEventReason::kNonWilcoCharger,
-            base::make_optional<MojoEvent>(MojoEvent::kNonWilcoCharger)),
+            std::make_optional<MojoEvent>(MojoEvent::kNonWilcoCharger)),
         std::make_tuple(
             EcEventReason::kLowPowerCharger,
-            base::make_optional<MojoEvent>(MojoEvent::kLowPowerCharger)),
-        std::make_tuple(
-            EcEventReason::kBatteryAuth,
-            base::make_optional<MojoEvent>(MojoEvent::kBatteryAuth)),
-        std::make_tuple(
-            EcEventReason::kDockDisplay,
-            base::make_optional<MojoEvent>(MojoEvent::kDockDisplay)),
+            std::make_optional<MojoEvent>(MojoEvent::kLowPowerCharger)),
+        std::make_tuple(EcEventReason::kBatteryAuth,
+                        std::make_optional<MojoEvent>(MojoEvent::kBatteryAuth)),
+        std::make_tuple(EcEventReason::kDockDisplay,
+                        std::make_optional<MojoEvent>(MojoEvent::kDockDisplay)),
         std::make_tuple(
             EcEventReason::kDockThunderbolt,
-            base::make_optional<MojoEvent>(MojoEvent::kDockThunderbolt)),
+            std::make_optional<MojoEvent>(MojoEvent::kDockThunderbolt)),
         std::make_tuple(
             EcEventReason::kIncompatibleDock,
-            base::make_optional<MojoEvent>(MojoEvent::kIncompatibleDock)),
+            std::make_optional<MojoEvent>(MojoEvent::kIncompatibleDock)),
         std::make_tuple(EcEventReason::kDockError,
-                        base::make_optional<MojoEvent>(MojoEvent::kDockError)),
-        std::make_tuple(EcEventReason::kNonSysNotification, base::nullopt),
-        std::make_tuple(EcEventReason::kSysNotification, base::nullopt)));
+                        std::make_optional<MojoEvent>(MojoEvent::kDockError)),
+        std::make_tuple(EcEventReason::kNonSysNotification, std::nullopt),
+        std::make_tuple(EcEventReason::kSysNotification, std::nullopt)));
 
 // Tests for powerd event service.
 //
@@ -1318,13 +1327,13 @@ class PowerdEventServiceBootstrappedCoreTest
   }
 
   void SetupFakeWilcoDtcPowerEventCallback(
-      const base::Closure& callback,
+      const base::RepeatingClosure& callback,
       FakeWilcoDtc* fake_wilco_dtc,
       grpc_api::HandlePowerNotificationRequest::PowerEvent* event_out) {
     DCHECK(fake_wilco_dtc);
     DCHECK(event_out);
     fake_wilco_dtc->set_handle_power_event_request_callback(base::BindRepeating(
-        [](const base::Closure& callback,
+        [](const base::RepeatingClosure& callback,
            grpc_api::HandlePowerNotificationRequest::PowerEvent* event_out,
            grpc_api::HandlePowerNotificationRequest::PowerEvent event) {
           DCHECK(event_out);
@@ -1375,5 +1384,5 @@ INSTANTIATE_TEST_SUITE_P(
                         grpc_api::HandlePowerNotificationRequest::OS_RESUME)));
 
 }  // namespace
-
+}  // namespace wilco
 }  // namespace diagnostics

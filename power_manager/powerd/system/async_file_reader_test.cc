@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,18 @@
 #include <algorithm>
 #include <memory>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
-#include <base/compiler_specific.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/time/time.h>
 #include <gtest/gtest.h>
 
 #include "power_manager/common/test_main_loop_runner.h"
-#include "power_manager/common/util.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -62,29 +61,28 @@ int GetMultipleReadFactor(int num_multiple_reads) {
   return (1 << num_multiple_reads) - 1;
 }
 
-// Maximum time allowed for file read in milliseconds.
-const int kMaxFileReadTimeMs = 60000;
+// Maximum time allowed for file read.
+constexpr base::TimeDelta kMaxFileReadTime = base::Minutes(1);
 
 }  // namespace
 
-class AsyncFileReaderTest : public ::testing::Test {
+class AsyncFileReaderTest : public TestEnvironment {
  public:
   AsyncFileReaderTest()
       : temp_dir_(new base::ScopedTempDir()),
-        file_reader_(new AsyncFileReader()),
-        got_error_(false) {
+        file_reader_(new AsyncFileReader()) {
     CHECK(temp_dir_->CreateUniqueTempDir());
     CHECK(temp_dir_->IsValid());
     path_ = temp_dir_->GetPath().Append(kDummyFileName);
   }
-  ~AsyncFileReaderTest() override {}
+  ~AsyncFileReaderTest() override = default;
 
  protected:
   // Creates a file containing |file_size| bytes and uses AsyncFileReader to
   // read from it, starting with an |initial_read_size|-byte chunk. Returns
   // false if initialization failed or if the reader timed out.
-  bool WriteAndReadData(size_t file_size,
-                        size_t initial_read_size) WARN_UNUSED_RESULT {
+  [[nodiscard]] bool WriteAndReadData(size_t file_size,
+                                      size_t initial_read_size) {
     data_.clear();
     got_error_ = false;
 
@@ -92,12 +90,11 @@ class AsyncFileReaderTest : public ::testing::Test {
     file_reader_->set_initial_read_size_for_testing(initial_read_size);
     if (!file_reader_->Init(path_))
       return false;
-    file_reader_->StartRead(
-        base::Bind(&AsyncFileReaderTest::ReadCallback, base::Unretained(this)),
-        base::Bind(&AsyncFileReaderTest::ErrorCallback,
-                   base::Unretained(this)));
-    return loop_runner_.StartLoop(
-        base::TimeDelta::FromMilliseconds(kMaxFileReadTimeMs));
+    file_reader_->StartRead(base::BindOnce(&AsyncFileReaderTest::ReadCallback,
+                                           base::Unretained(this)),
+                            base::BindOnce(&AsyncFileReaderTest::ErrorCallback,
+                                           base::Unretained(this)));
+    return loop_runner_.StartLoop(kMaxFileReadTime);
   }
 
   // Returns the contents of |path_|.
@@ -131,7 +128,7 @@ class AsyncFileReaderTest : public ::testing::Test {
   std::string data_;
 
   // True if |file_reader_| reported an error.
-  bool got_error_;
+  bool got_error_ = false;
 };
 
 // Read an empty file.
@@ -177,5 +174,4 @@ TEST_F(AsyncFileReaderTest, InitWithMissingFile) {
   EXPECT_FALSE(file_reader_->Init(path_));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef PATCHPANEL_COUNTERS_SERVICE_H_
 #define PATCHPANEL_COUNTERS_SERVICE_H_
 
+#include <compare>
 #include <map>
 #include <set>
 #include <string>
@@ -14,6 +15,7 @@
 #include <patchpanel/proto_bindings/patchpanel_service.pb.h>
 
 #include "patchpanel/datapath.h"
+#include "patchpanel/iptables.h"
 #include "patchpanel/routing_service.h"
 
 namespace patchpanel {
@@ -54,7 +56,9 @@ class CountersService {
     TrafficCounter::Source source;
     TrafficCounter::IpFamily ip_family;
 
-    bool operator<(const CounterKey& rhs) const;
+    // 3-way comparison operator for able to be keyed in a map.
+    friend std::strong_ordering operator<=>(const CounterKey&,
+                                            const CounterKey&);
   };
 
   struct Counter {
@@ -62,9 +66,11 @@ class CountersService {
     uint64_t rx_packets = 0;
     uint64_t tx_bytes = 0;
     uint64_t tx_packets = 0;
+
+    friend bool operator==(const Counter&, const Counter&);
   };
 
-  CountersService(Datapath* datapath);
+  explicit CountersService(Datapath* datapath);
   ~CountersService() = default;
 
   // Adds accounting rules and jump rules for a new physical device if this is
@@ -85,18 +91,17 @@ class CountersService {
       const std::set<std::string>& devices);
 
  private:
-  // Creates an iptables chain in the mangle table. Returns true if the chain
-  // was created, or false if the chain already existed.
-  bool MakeAccountingChain(const std::string& chain_name);
   bool AddAccountingRule(const std::string& chain_name, TrafficSource source);
-  // Installs the required accounting chains and rules for the target
-  // |chain_tag| if they did not exist already.
-  void SetupAccountingRules(const std::string& chain_tag);
-  // Installs jump rules in POSTROUTING to count traffic ingressing and
-  // egressing |ifname| with the accounting target |chain_tag|.
-  void SetupJumpRules(const std::string& op,
+  // Installs the required source accounting rules for the accounting chain
+  // |chain|, and creates |chain| if it did not already exist.
+  void SetupAccountingRules(const std::string& chain);
+  // Installs jump rules in POSTROUTING to count traffic ingressing and |ifname|
+  // with the accounting chain |rx_chain| and traffic egressing |ifname| with
+  // the accounting chain |tx_chain|.
+  void SetupJumpRules(Iptables::Command command,
                       const std::string& ifname,
-                      const std::string& chain_tag);
+                      const std::string& rx_chain,
+                      const std::string& tx_chain);
 
   Datapath* datapath_;
 };

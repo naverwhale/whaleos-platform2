@@ -1,24 +1,26 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "hermes/manager.h"
+#include "hermes/euicc_cache.h"
 #include "hermes/hermes_common.h"
+#include "hermes/manager.h"
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <brillo/errors/error_codes.h>
 #include <google-lpa/lpa/core/lpa.h>
 
 namespace {
 
-std::string LogicalSlotToStr(base::Optional<uint8_t> logical_slot) {
+std::string LogicalSlotToStr(std::optional<uint8_t> logical_slot) {
   return logical_slot ? std::to_string(logical_slot.value()) : "None";
 }
 
@@ -32,8 +34,24 @@ Manager::Manager()
 
 void Manager::OnEuiccUpdated(uint8_t physical_slot, EuiccSlotInfo slot_info) {
   LOG(INFO) << __func__ << " physical_slot: " << physical_slot
-            << " eid(Last 3 chars): " << GetTrailingChars(slot_info.eid(), 3)
+            << " eid(Last 3 chars): " << GetTrailingChars(slot_info.eid_, 3)
             << " logical_slot: " << LogicalSlotToStr(slot_info.logical_slot());
+
+  CachedEuicc cached_euicc;
+  if (EuiccCache::CacheExists(physical_slot) &&
+      !EuiccCache::Read(physical_slot, &cached_euicc)) {
+    LOG(ERROR) << "Couldn't load EID from cache";
+  }
+  if (slot_info.eid_.empty()) {
+    slot_info.eid_ = cached_euicc.eid();
+    VLOG(2) << "Loaded EID from cache: " << cached_euicc.eid();
+  } else {
+    cached_euicc.set_eid(slot_info.eid_);
+    if (!EuiccCache::Write(physical_slot, std::move(cached_euicc))) {
+      LOG(ERROR) << "Couldn't write EID to cache";
+    }
+  }
+
   auto iter = available_euiccs_.find(physical_slot);
   if (iter == available_euiccs_.end()) {
     available_euiccs_[physical_slot] =
@@ -65,7 +83,7 @@ void Manager::UpdateAvailableEuiccsProperty() {
 }
 
 void Manager::OnLogicalSlotUpdated(uint8_t physical_slot,
-                                   base::Optional<uint8_t> logical_slot) {
+                                   std::optional<uint8_t> logical_slot) {
   LOG(INFO) << __func__ << " physical_slot: " << physical_slot
             << " logical_slot: " << LogicalSlotToStr(logical_slot);
   auto iter = available_euiccs_.find(physical_slot);

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include <base/memory/scoped_refptr.h>
 #include <brillo/errors/error.h>
-#include <chromeos/dbus/service_constants.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -19,15 +18,13 @@
 #include "power_manager/proto_bindings/power_supply_properties.pb.h"
 
 namespace diagnostics {
+namespace {
 
-using ::chromeos::cros_healthd::mojom::ErrorType;
+using ::ash::cros_healthd::mojom::ErrorType;
 using ::testing::_;
 using ::testing::DoAll;
-using ::testing::Invoke;
 using ::testing::Return;
 using ::testing::WithArg;
-
-namespace {
 
 // Arbitrary test values for the various battery metrics.
 constexpr power_manager::PowerSupplyProperties_BatteryState kBatteryStateFull =
@@ -56,8 +53,6 @@ constexpr char kBatteryStatus[] = "Discharging";
 // Timeouts for the Debugd D-Bus calls. Note that D-Bus is mocked out in the
 // test, but the timeouts are still part of the mock calls.
 constexpr int kDebugdTimeOut = 10 * 1000;
-
-}  // namespace
 
 class BatteryFetcherTest : public ::testing::Test {
  protected:
@@ -114,16 +109,16 @@ TEST_F(BatteryFetcherTest, FetchBatteryInfo) {
   EXPECT_CALL(
       *mock_debugd_proxy(),
       CollectSmartBatteryMetric("manufacture_date_smart", _, _, kDebugdTimeOut))
-      .WillOnce(DoAll(WithArg<1>(Invoke([](std::string* result) {
+      .WillOnce(DoAll(WithArg<1>([](std::string* result) {
                         *result = kSmartBatteryManufactureDateResponse;
-                      })),
+                      }),
                       Return(true)));
   EXPECT_CALL(
       *mock_debugd_proxy(),
       CollectSmartBatteryMetric("temperature_smart", _, _, kDebugdTimeOut))
-      .WillOnce(DoAll(WithArg<1>(Invoke([](std::string* result) {
+      .WillOnce(DoAll(WithArg<1>([](std::string* result) {
                         *result = kSmartBatteryTemperatureResponse;
-                      })),
+                      }),
                       Return(true)));
 
   auto battery_result = battery_fetcher()->FetchBatteryInfo();
@@ -170,9 +165,9 @@ TEST_F(BatteryFetcherTest, ManufactureDateRetrievalFailure) {
   EXPECT_CALL(
       *mock_debugd_proxy(),
       CollectSmartBatteryMetric("manufacture_date_smart", _, _, kDebugdTimeOut))
-      .WillOnce(DoAll(WithArg<2>(Invoke([](brillo::ErrorPtr* error) {
+      .WillOnce(DoAll(WithArg<2>([](brillo::ErrorPtr* error) {
                         *error = brillo::Error::Create(FROM_HERE, "", "", "");
-                      })),
+                      }),
                       Return(false)));
 
   auto battery_result = battery_fetcher()->FetchBatteryInfo();
@@ -190,16 +185,16 @@ TEST_F(BatteryFetcherTest, TemperatureRetrievalFailure) {
   EXPECT_CALL(
       *mock_debugd_proxy(),
       CollectSmartBatteryMetric("manufacture_date_smart", _, _, kDebugdTimeOut))
-      .WillOnce(DoAll(WithArg<1>(Invoke([](std::string* result) {
+      .WillOnce(DoAll(WithArg<1>([](std::string* result) {
                         *result = kSmartBatteryManufactureDateResponse;
-                      })),
+                      }),
                       Return(true)));
   EXPECT_CALL(
       *mock_debugd_proxy(),
       CollectSmartBatteryMetric("temperature_smart", _, _, kDebugdTimeOut))
-      .WillOnce(DoAll(WithArg<2>(Invoke([](brillo::ErrorPtr* error) {
+      .WillOnce(DoAll(WithArg<2>([](brillo::ErrorPtr* error) {
                         *error = brillo::Error::Create(FROM_HERE, "", "", "");
-                      })),
+                      }),
                       Return(false)));
 
   auto battery_result = battery_fetcher()->FetchBatteryInfo();
@@ -218,9 +213,9 @@ TEST_F(BatteryFetcherTest, SmartMetricRegexFailure) {
   EXPECT_CALL(
       *mock_debugd_proxy(),
       CollectSmartBatteryMetric("manufacture_date_smart", _, _, kDebugdTimeOut))
-      .WillOnce(DoAll(WithArg<1>(Invoke([](std::string* result) {
+      .WillOnce(DoAll(WithArg<1>([](std::string* result) {
                         *result = kInvalidRegexSmartMetricResponse;
-                      })),
+                      }),
                       Return(true)));
 
   auto battery_result = battery_fetcher()->FetchBatteryInfo();
@@ -253,4 +248,5 @@ TEST_F(BatteryFetcherTest, NoBattery) {
   ASSERT_TRUE(battery_result->get_battery_info().is_null());
 }
 
+}  // namespace
 }  // namespace diagnostics

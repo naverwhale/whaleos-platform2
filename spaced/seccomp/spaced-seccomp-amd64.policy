@@ -1,7 +1,10 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 access: 1
 faccessat: 1
@@ -9,6 +12,7 @@ faccessat2: 1
 arch_prctl: 1
 brk: 1
 clock_getres: 1
+clock_gettime: 1
 clock_nanosleep: 1
 clone: 1
 close: 1
@@ -32,9 +36,11 @@ geteuid: 1
 getgid: 1
 getpid: 1
 getppid: 1
+getrandom: arg2 in ~GRND_RANDOM
 getresgid: 1
 getresuid: 1
 getsockname: 1
+gettimeofday: 1
 gettid: 1
 getuid: 1
 io_destroy: 1
@@ -42,10 +48,14 @@ io_getevents: 1
 io_setup: 1
 io_submit: 1
 ioctl: arg1 == 0xc138fd00 || arg1 == 0xc138fd07 || arg1 == 0xc138fd0c || \
-       arg1 == BLKGETSIZE64
+       arg1 == BLKGETSIZE64 || \
+       arg1 == FS_IOC_FSGETXATTR || arg1 == FS_IOC_FSSETXATTR || \
+       arg1 == FS_IOC_GETFLAGS || arg1 == FS_IOC_SETFLAGS
 lseek: 1
 lstat: 1
+madvise: arg2 == MADV_DONTNEED
 memfd_create: 1
+mkdir: 1
 mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 munmap: 1
@@ -55,7 +65,9 @@ pipe2: 1
 poll: 1
 pread64: 1
 prlimit64: 1
+quotactl: 1
 read: 1
+readlink: 1
 recvmsg: 1
 rename: 1
 restart_syscall: 1

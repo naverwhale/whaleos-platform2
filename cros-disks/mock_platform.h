@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,7 @@ namespace cros_disks {
 
 class MockPlatform : public Platform {
  public:
-  MOCK_METHOD(MountErrorType,
+  MOCK_METHOD(MountError,
               Mount,
               (const std::string& source,
                const std::string& target,
@@ -22,9 +22,10 @@ class MockPlatform : public Platform {
                uint64_t flags,
                const std::string& options),
               (const, override));
-  MOCK_METHOD(MountErrorType,
+  MOCK_METHOD(MountError,
               Unmount,
-              (const std::string& path, int flags),
+              (const base::FilePath& mount_path,
+               const std::string& filesystem_type),
               (const, override));
   MOCK_METHOD(bool,
               GetUserAndGroupId,
@@ -68,6 +69,10 @@ class MockPlatform : public Platform {
   MOCK_METHOD(bool,
               GetOwnership,
               (const std::string&, uid_t*, gid_t*),
+              (const, override));
+  MOCK_METHOD(bool,
+              CleanUpStaleMountPoints,
+              (const std::string&),
               (const, override));
 };
 

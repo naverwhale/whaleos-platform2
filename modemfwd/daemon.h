@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,15 +12,21 @@
 
 #include <base/files/file_path.h>
 #include <base/memory/weak_ptr.h>
+#include <base/timer/timer.h>
 #include <brillo/daemons/dbus_daemon.h>
+#include <brillo/process/process.h>
 #include <dbus/bus.h>
 
 #include "modemfwd/dbus_adaptors/org.chromium.Modemfwd.h"
+#include "modemfwd/dlc_manager.h"
 #include "modemfwd/journal.h"
+#include "modemfwd/metrics.h"
 #include "modemfwd/modem.h"
 #include "modemfwd/modem_flasher.h"
 #include "modemfwd/modem_helper.h"
+#include "modemfwd/modem_sandbox.h"
 #include "modemfwd/modem_tracker.h"
+#include "modemfwd/notification_manager.h"
 
 namespace modemfwd {
 
@@ -34,11 +40,12 @@ class DBusAdaptor : public org::chromium::ModemfwdInterface,
   DBusAdaptor& operator=(const DBusAdaptor&) = delete;
 
   void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb);
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb);
 
   // org::chromium::ModemfwdInterface overrides.
   void SetDebugMode(bool debug_mode) override;
-  bool ForceFlash(const std::string& device_id) override;
+  bool ForceFlash(const std::string& device_id,
+                  const brillo::VariantDictionary& args) override;
 
  private:
   brillo::dbus_utils::DBusObject dbus_object_;
@@ -47,8 +54,6 @@ class DBusAdaptor : public org::chromium::ModemfwdInterface,
 
 class Daemon : public brillo::DBusServiceDaemon {
  public:
-  // Constructor for Daemon which loads the cellular DLC to get firmware.
-  Daemon(const std::string& journal_file, const std::string& helper_directory);
   // Constructor for Daemon which loads from already set-up
   // directories.
   Daemon(const std::string& journal_file,
@@ -60,20 +65,29 @@ class Daemon : public brillo::DBusServiceDaemon {
   ~Daemon() override = default;
 
   bool ForceFlash(const std::string& device_id);
+  bool ForceFlashForTesting(const std::string& device_id,
+                            const std::string& carrier_uuid,
+                            const std::string& variant,
+                            bool use_modems_fw_info);
 
  protected:
   // brillo::Daemon overrides.
   int OnInit() override;
-  int OnEventLoopStarted() override;
 
   // brillo::DBusServiceDaemon overrides.
   void RegisterDBusObjectsAsync(
       brillo::dbus_utils::AsyncEventSequencer* sequencer) override;
 
  private:
-  // Once we have a path for the firmware directory we can set up the
-  // journal and flasher.
-  int CompleteInitialization();
+  // Once we have a path for the firmware directory we can parse
+  // the manifest and set up the DLC manager.
+  int SetupFirmwareDirectory();
+
+  // Setup the journal, flasher, and post delayed tasks.
+  void CompleteInitialization();
+
+  // Install DLC callback.
+  void InstallDlcCompleted(const std::string&, const brillo::Error*);
 
   // Called when a modem gets its home operator carrier ID and might
   // need a new main firmware or carrier customization.
@@ -91,14 +105,30 @@ class Daemon : public brillo::DBusServiceDaemon {
                           ModemHelper* modem_helper);
   void ForceFlashIfNeverAppeared(const std::string& device_id);
 
+  // Modem health polling
+  void StartHeartbeatTimer();
+  void StopHeartbeatTimer();
+  void CheckModemIsResponsive();
+  void HandleModemCheckResult(const std::string& device_id, bool check_result);
+  void ResetModemWithHelper(const std::string& device_id, ModemHelper* helper);
+
+  base::RepeatingTimer heartbeat_timer_;
+
   base::FilePath journal_file_path_;
   base::FilePath helper_dir_path_;
-  base::FilePath firmware_dir_path_;
+  base::FilePath fw_manifest_dir_path_;
 
+  std::string variant_;
+  std::unique_ptr<DlcManager> dlc_manager_;
+  std::unique_ptr<FirmwareDirectory> fw_manifest_directory_;
+  std::unique_ptr<FirmwareIndex> fw_index_;
   std::unique_ptr<ModemHelperDirectory> helper_directory_;
+  std::unique_ptr<Metrics> metrics_;
 
+  std::map<std::string, std::unique_ptr<Modem>> modems_;
   std::unique_ptr<ModemTracker> modem_tracker_;
   std::unique_ptr<ModemFlasher> modem_flasher_;
+  std::unique_ptr<NotificationManager> notification_mgr_;
 
   std::map<std::string, base::OnceClosure> modem_reappear_callbacks_;
   std::set<std::string> device_ids_seen_;

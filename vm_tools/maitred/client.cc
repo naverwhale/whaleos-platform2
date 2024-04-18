@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -240,6 +240,11 @@ bool SetTime(vm_tools::Maitred::Stub* stub, uint64_t time) {
 
 int main(int argc, char* argv[]) {
   base::AtExitManager at_exit;
+
+  // Force gRPC to use the native resolver instead of ares.
+  // TODO(crbug.com/1044665): Remove once gRPC doesn't use ares resolver for
+  // vsock.
+  setenv("GRPC_DNS_RESOLVER", "native", 1);
 
   DEFINE_uint64(cid, 0, "Cid of VM");
   DEFINE_uint64(port, 0, "Port number where maitred is listening");

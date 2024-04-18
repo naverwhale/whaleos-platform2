@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -60,16 +60,16 @@ message PowerSupplyProperties {
       // position. For example, LEFT_BACK means the farthest-back port on the
       // left side, while BACK_LEFT means the leftmost port on the back of the
       // device.
-      LEFT        = 1;
-      RIGHT       = 2;
-      BACK        = 3;
-      FRONT       = 4;
-      LEFT_FRONT  = 5;
-      LEFT_BACK   = 6;
+      LEFT = 1;
+      RIGHT = 2;
+      BACK = 3;
+      FRONT = 4;
+      LEFT_FRONT = 5;
+      LEFT_BACK = 6;
       RIGHT_FRONT = 7;
-      RIGHT_BACK  = 8;
-      BACK_LEFT   = 9;
-      BACK_RIGHT  = 10;
+      RIGHT_BACK = 8;
+      BACK_LEFT = 9;
+      BACK_RIGHT = 10;
 
       // Next value to use: 11
     }
@@ -147,8 +147,10 @@ message PowerSupplyProperties {
 
   // Estimated time until the battery is full, in seconds, or zero if the
   // battery isn't charging. -1 if the estimated time would be huge (e.g.
-  // because the current is zero or close to zero). Unset if a battery isn't
-  // present.
+  // because the current is zero or close to zero). Contains the best estimate
+  // for when the battery will be full when Adaptive Charging is delaying
+  // charge. If there is no current estimate for when Adaptive Charging will
+  // finish, the value is zero. Unset if a battery isn't present.
   optional int64 battery_time_to_full_sec = 6;
 
   // True when |battery_time_to_*| can't be trusted, e.g. because the power
@@ -207,5 +209,30 @@ message PowerSupplyProperties {
   // can be displayed.
   optional double preferred_minimum_external_power = 32;
 
-  // Next ID to use: 33
+  // Indicates if the system supports Adaptive Charging required functionality.
+  optional bool adaptive_charging_supported = 33 [default = false];
+
+  // Indicates whether charging to full is delayed by adaptive charging. If so,
+  // |battery_time_to_full_sec| indicates the time until the battery is planned
+  // to be fully charged. The planned time to fully charge the battery may
+  // change over time based on predictions from adaptive battery.
+  optional bool adaptive_delaying_charge = 34 [default = false];
+
+  // Indicates if Adaptive Charging is currently allowed by its heuristic, which
+  // disables Adaptive Charging if the charging behavior of the user won't
+  // benefit from the feature.
+  // Unused unless Adaptive Charging is supported on the system.
+  optional bool adaptive_charging_heuristic_enabled = 35;
+
+  // Indicates whether charging is limited by Charge Limit, which prevents
+  // charging over a default battery percentage of 80%. Percentage is
+  // configurable via |PowerManagementPolicy::adaptive_charging_hold_percent|.
+  // Set to true if the battery percentage is close to or above the limit
+  // (defined in the code as greater than or equal to
+  // |PowerManagementPolicy::adaptive_charging_hold_percent| -
+  // |PowerManagementPolicy::adaptive_charging_hold_delta_percent| - 1) and
+  // Charge Limit is enabled.
+  optional bool charge_limited = 36;
+
+  // Next ID to use: 37
 }

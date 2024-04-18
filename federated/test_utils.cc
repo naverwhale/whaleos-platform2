@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,24 +20,21 @@ using ::chromeos::federated::mojom::ValueList;
 using ::chromeos::federated::mojom::ValueListPtr;
 
 ValueListPtr CreateInt64List(const std::vector<int64_t>& values) {
-  ValueListPtr value_list = ValueList::New();
-  value_list->set_int64_list(Int64List::New());
+  ValueListPtr value_list = ValueList::NewInt64List(Int64List::New());
   value_list->get_int64_list()->value = std::vector<int64_t>();
   value_list->get_int64_list()->value = values;
   return value_list;
 }
 
 ValueListPtr CreateFloatList(const std::vector<double>& values) {
-  ValueListPtr value_list = ValueList::New();
-  value_list->set_float_list(FloatList::New());
+  ValueListPtr value_list = ValueList::NewFloatList(FloatList::New());
   value_list->get_float_list()->value = std::vector<double>();
   value_list->get_float_list()->value = values;
   return value_list;
 }
 
 ValueListPtr CreateStringList(const std::vector<std::string>& values) {
-  ValueListPtr value_list = ValueList::New();
-  value_list->set_string_list(StringList::New());
+  ValueListPtr value_list = ValueList::NewStringList(StringList::New());
   value_list->get_string_list()->value = std::vector<std::string>();
   value_list->get_string_list()->value = values;
   return value_list;
@@ -58,7 +55,7 @@ ExamplePtr CreateExamplePtr() {
 }
 
 base::Time SecondsAfterEpoch(const int64_t s) {
-  return base::Time::UnixEpoch() + base::TimeDelta::FromSeconds(s);
+  return base::Time::UnixEpoch() + base::Seconds(s);
 }
 
 }  // namespace federated

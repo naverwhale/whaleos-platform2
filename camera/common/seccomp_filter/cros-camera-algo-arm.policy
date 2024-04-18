@@ -1,9 +1,13 @@
-# Copyright 2017 The Chromium OS Authors. All rights reserved.
+# Copyright 2017 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
+
 _llseek: 1
 accept: 1
 access: 1
+ARM_set_tls: 1
 bind: 1
 brk: 1
 clock_gettime: 1
@@ -20,6 +24,9 @@ epoll_create1: 1
 epoll_ctl: 1
 epoll_wait: 1
 eventfd2: 1
+# Need execve because we run minijail with -Tstatic.
+# Ref: https://crrev.com/c/1958258/comments/fbcc6367_4d74475c
+execve: 1
 exit: 1
 exit_group: 1
 faccessat: 1
@@ -38,10 +45,11 @@ getdents64: 1
 getegid32: 1
 geteuid32: 1
 getgid32: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 getpid: 1
 getpriority: 1
 getresuid32: 1
+getsockopt: 1
 gettid: 1
 gettimeofday: 1
 getuid32: 1
@@ -60,9 +68,9 @@ madvise: 1
 memfd_create: 1
 mkdir: 1
 mknod: 1
-# Make sure PROT_WRITE (bit 1) and PROT_EXEC (bit 2) are not both set.
-mmap2: arg2 in 0xfffffffb || arg2 in 0xfffffffd
-mprotect: arg2 in 0xfffffffb || arg2 in 0xfffffffd
+# Prevent PROT_WRITE | PROT_EXEC.
+mmap2: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 munmap: 1
 nanosleep: 1
 open: 1
@@ -71,19 +79,25 @@ pipe: 1
 pipe2: 1
 poll: 1
 prctl: 1
+pread64: 1
 prlimit64: 1
 read: 1
+readlink: 1
+readlinkat: 1
 recvmsg: 1
 rt_sigaction: 1
 rt_sigprocmask: 1
 rt_sigreturn: 1
 sched_getattr: 1
+sched_getaffinity: 1
 sched_getparam: 1
 sched_getscheduler: 1
+sched_setaffinity: 1
 sched_setattr: 1
 sched_setscheduler: 1
 sched_yield: 1
 send: 1
+sendmsg: 1
 sendto: 1
 setgroups32: 1
 setgid32: 1
@@ -93,11 +107,14 @@ set_robust_list: 1
 setpriority: 1
 setresuid32: 1
 setresgid32: 1
+sigaltstack: 1
+shutdown: 1
 socket: arg0 == PF_UNIX
 socketpair: 1
 stat64: 1
 statx: 1
 tgkill: 1
+ugetrlimit: 1
 umask: 1
 uname: 1
 unlink: 1

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,22 +12,21 @@
 #include <vector>
 
 #include <base/compiler_specific.h>
-#include <base/macros.h>
 #include <base/observer_list.h>
 
+#include "power_manager/powerd/system/tagged_device.h"
 #include "power_manager/powerd/system/udev.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Stub implementation of UdevInterface for use in tests.
 class UdevStub : public UdevInterface {
  public:
-  UdevStub();
+  UdevStub() = default;
   UdevStub(const UdevStub&) = delete;
   UdevStub& operator=(const UdevStub&) = delete;
 
-  ~UdevStub() override;
+  ~UdevStub() override = default;
 
   // Returns true if |observer| is registered for |subsystem|.
   bool HasSubsystemObserver(const std::string& subsystem,
@@ -42,6 +41,9 @@ class UdevStub : public UdevInterface {
                            const base::FilePath& wakeup_device_path,
                            const std::string& tags);
   void TaggedDeviceRemoved(const std::string& syspath);
+
+  // Insert a powerd role to a certain path (used for lookup by HasPowerdRole).
+  void SetPowerdRole(const std::string& syspath, const std::string& role);
 
   // Makes SetSysattr() fail unless attribute is created with SetSysattr()
   // previously.
@@ -75,6 +77,8 @@ class UdevStub : public UdevInterface {
                   const std::string& value) override;
   bool GetDevlinks(const std::string& syspath,
                    std::vector<std::string>* out) override;
+  bool HasPowerdRole(const std::string& syspath,
+                     const std::string& role) override;
 
  private:
   // List of subsystem devices returned when GetSubsystemDevices is called.
@@ -92,6 +96,9 @@ class UdevStub : public UdevInterface {
   // Maps a syspath to the corresponding TaggedDevice.
   std::map<std::string, TaggedDevice> tagged_devices_;
 
+  // Maps a syspath to the corresponding powerd role.
+  std::map<std::string, std::string> powerd_roles_;
+
   // Maps a syspath to the corresponding devlinks.
   std::map<std::string, std::vector<std::string>> devlinks_;
 
@@ -101,10 +108,9 @@ class UdevStub : public UdevInterface {
   SysattrMap map_;
   // Make SetSysattr() fail under test if this is true and SetSysattr() hasn't
   // created the attribute already.
-  bool stop_accepting_sysattr_for_testing_;
+  bool stop_accepting_sysattr_for_testing_ = false;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_UDEV_STUB_H_

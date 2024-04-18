@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 
 #include <memory>
 #include <utility>
@@ -14,9 +15,10 @@
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
+#include <base/strings/string_split.h>
 #include <base/strings/stringprintf.h>
 
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 
 namespace shill {
 
@@ -24,6 +26,8 @@ class VPNUtilImpl : public VPNUtil {
  public:
   bool WriteConfigFile(const base::FilePath& filename,
                        const std::string& contents) const override;
+  bool PrepareConfigDirectory(
+      const base::FilePath& directory_path) const override;
   std::pair<base::ScopedFD, base::FilePath> WriteAnonymousConfigFile(
       const std::string& contents) const override;
   base::ScopedTempDir CreateScopedTempDir(
@@ -44,6 +48,31 @@ bool VPNUtilImpl::WriteConfigFile(const base::FilePath& filename,
 
   if (chown(filename.value().c_str(), -1, kVPNGid) != 0) {
     PLOG(ERROR) << "Failed to change gid of config file";
+    return false;
+  }
+
+  return true;
+}
+
+bool VPNUtilImpl::PrepareConfigDirectory(
+    const base::FilePath& directory_path) const {
+  if (!base::DirectoryExists(directory_path) &&
+      !base::CreateDirectory(directory_path)) {
+    PLOG(ERROR) << "Unable to create configuration directory  "
+                << directory_path.value();
+    return false;
+  }
+
+  if (chown(directory_path.value().c_str(), -1, VPNUtil::kVPNGid) != 0) {
+    PLOG(ERROR) << "Failed to change owner group of configuration directory "
+                << directory_path.value();
+    base::DeletePathRecursively(directory_path);
+    return false;
+  }
+
+  if (chmod(directory_path.value().c_str(), S_IRWXU | S_IRGRP | S_IXGRP)) {
+    LOG(ERROR) << "Failed to set permissions on " << directory_path.value();
+    base::DeletePathRecursively(directory_path);
     return false;
   }
 
@@ -96,6 +125,20 @@ std::unique_ptr<VPNUtil> VPNUtil::New() {
   return std::make_unique<VPNUtilImpl>();
 }
 
+// static
+bool VPNUtil::CheckKernelVersion(const base::Version& minimum_version) {
+  struct utsname buf;
+  if (uname(&buf) != 0) {
+    return false;
+  }
+  // Extract the numeric part of release string
+  std::string_view version = base::SplitStringPiece(
+      buf.release, "-", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)[0];
+  base::Version kernel_version = base::Version(version);
+  return kernel_version.IsValid() && kernel_version >= minimum_version;
+}
+
+// static
 ProcessManager::MinijailOptions VPNUtil::BuildMinijailOptions(
     uint64_t capmask) {
   ProcessManager::MinijailOptions options;
@@ -103,7 +146,6 @@ ProcessManager::MinijailOptions VPNUtil::BuildMinijailOptions(
   options.group = VPNUtil::kVPNGroup;
   options.capmask = capmask;
   options.inherit_supplementary_groups = true;
-  options.close_nonstd_fds = true;
   return options;
 }
 

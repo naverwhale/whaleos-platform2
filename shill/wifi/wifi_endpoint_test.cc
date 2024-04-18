@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,15 +13,17 @@
 
 #include <base/check.h>
 #include <base/containers/contains.h>
+#include <base/strings/string_split.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "shill/metrics.h"
 #include "shill/mock_log.h"
 #include "shill/net/ieee80211.h"
 #include "shill/net/mock_netlink_manager.h"
-#include "shill/property_store_test.h"
 #include "shill/refptr_types.h"
+#include "shill/store/property_store_test.h"
 #include "shill/supplicant/wpa_supplicant.h"
 #include "shill/tethering.h"
 #include "shill/wifi/mock_wake_on_wifi.h"
@@ -41,7 +43,7 @@ class WiFiEndpointTest : public PropertyStoreTest {
  public:
   WiFiEndpointTest()
       : wifi_(new NiceMock<MockWiFi>(
-            manager(), "wifi", kDeviceAddress, 0, new MockWakeOnWiFi())) {}
+            manager(), "wifi", kDeviceAddress, 0, 0, new MockWakeOnWiFi())) {}
   ~WiFiEndpointTest() override = default;
 
  protected:
@@ -59,19 +61,25 @@ class WiFiEndpointTest : public PropertyStoreTest {
     return props;
   }
 
+  void AddSecurityArgs(KeyValueStore& args,
+                       const std::string& security_protocol,
+                       std::initializer_list<const char*> key_managements) {
+    std::vector<std::string> km_vector;
+    for (auto km : key_managements) {
+      km_vector.push_back(km);
+    }
+    args.Set<KeyValueStore>(security_protocol,
+                            MakeKeyManagementArgs(km_vector));
+  }
+
   KeyValueStore MakeSecurityArgs(const std::string& security_protocol,
                                  const std::string& key_management_method) {
     KeyValueStore args;
-    std::vector<std::string> key_management_method_vector;
-    if (!key_management_method.empty()) {
-      key_management_method_vector = {key_management_method};
-    }
-    args.Set<KeyValueStore>(
-        security_protocol, MakeKeyManagementArgs(key_management_method_vector));
+    AddSecurityArgs(args, security_protocol, {key_management_method.c_str()});
     return args;
   }
 
-  const char* ParseSecurity(const KeyValueStore& properties) {
+  WiFiSecurity ParseSecurity(const KeyValueStore& properties) {
     WiFiEndpoint::SecurityFlags security_flags;
     return WiFiEndpoint::ParseSecurity(properties, &security_flags);
   }
@@ -150,15 +158,6 @@ class WiFiEndpointTest : public PropertyStoreTest {
     return rsn;
   }
 
-  bool ParseIEs(const KeyValueStore& properties,
-                Metrics::WiFiNetworkPhyMode* phy_mode,
-                WiFiEndpoint::VendorInformation* vendor_information,
-                std::string* country_code,
-                WiFiEndpoint::SupportedFeatures* supported_features) {
-    return WiFiEndpoint::ParseIEs(properties, phy_mode, vendor_information,
-                                  country_code, supported_features);
-  }
-
   void SetVendorInformation(
       const WiFiEndpointRefPtr& endpoint,
       const WiFiEndpoint::VendorInformation& vendor_information) {
@@ -192,6 +191,14 @@ class WiFiEndpointTest : public PropertyStoreTest {
   scoped_refptr<MockWiFi> wifi_;
 };
 
+TEST_F(WiFiEndpointTest, ParseKeyManagementMethodsOWE) {
+  std::set<WiFiEndpoint::KeyManagement> parsed_methods;
+  WiFiEndpoint::ParseKeyManagementMethods(MakeKeyManagementArgs({"owe"}),
+                                          &parsed_methods);
+  EXPECT_EQ(parsed_methods,
+            decltype(parsed_methods){WiFiEndpoint::kKeyManagementOWE});
+}
+
 TEST_F(WiFiEndpointTest, ParseKeyManagementMethodsEAP) {
   std::set<WiFiEndpoint::KeyManagement> parsed_methods;
   WiFiEndpoint::ParseKeyManagementMethods(
@@ -204,7 +211,22 @@ TEST_F(WiFiEndpointTest, ParseKeyManagementMethodsEAP) {
 TEST_F(WiFiEndpointTest, ParseKeyManagementMethodsPSK) {
   std::set<WiFiEndpoint::KeyManagement> parsed_methods;
   WiFiEndpoint::ParseKeyManagementMethods(
+      MakeKeyManagementArgs({"something-psk", "something-psk-sha256"}),
+      &parsed_methods);
+  EXPECT_TRUE(base::Contains(parsed_methods, WiFiEndpoint::kKeyManagementPSK));
+  EXPECT_FALSE(
+      base::Contains(parsed_methods, WiFiEndpoint::kKeyManagement802_1x));
+
+  parsed_methods.clear();
+  WiFiEndpoint::ParseKeyManagementMethods(
       MakeKeyManagementArgs({"something-psk"}), &parsed_methods);
+  EXPECT_TRUE(base::Contains(parsed_methods, WiFiEndpoint::kKeyManagementPSK));
+  EXPECT_FALSE(
+      base::Contains(parsed_methods, WiFiEndpoint::kKeyManagement802_1x));
+
+  parsed_methods.clear();
+  WiFiEndpoint::ParseKeyManagementMethods(
+      MakeKeyManagementArgs({"something-psk-sha256"}), &parsed_methods);
   EXPECT_TRUE(base::Contains(parsed_methods, WiFiEndpoint::kKeyManagementPSK));
   EXPECT_FALSE(
       base::Contains(parsed_methods, WiFiEndpoint::kKeyManagement802_1x));
@@ -213,7 +235,24 @@ TEST_F(WiFiEndpointTest, ParseKeyManagementMethodsPSK) {
 TEST_F(WiFiEndpointTest, ParseKeyManagementMethodsEAPAndPSK) {
   std::set<WiFiEndpoint::KeyManagement> parsed_methods;
   WiFiEndpoint::ParseKeyManagementMethods(
+      MakeKeyManagementArgs(
+          {"something-eap", "something-psk", "something-psk-sha256"}),
+      &parsed_methods);
+  EXPECT_TRUE(
+      base::Contains(parsed_methods, WiFiEndpoint::kKeyManagement802_1x));
+  EXPECT_TRUE(base::Contains(parsed_methods, WiFiEndpoint::kKeyManagementPSK));
+
+  parsed_methods.clear();
+  WiFiEndpoint::ParseKeyManagementMethods(
       MakeKeyManagementArgs({"something-eap", "something-psk"}),
+      &parsed_methods);
+  EXPECT_TRUE(
+      base::Contains(parsed_methods, WiFiEndpoint::kKeyManagement802_1x));
+  EXPECT_TRUE(base::Contains(parsed_methods, WiFiEndpoint::kKeyManagementPSK));
+
+  parsed_methods.clear();
+  WiFiEndpoint::ParseKeyManagementMethods(
+      MakeKeyManagementArgs({"something-eap", "something-psk-sha256"}),
       &parsed_methods);
   EXPECT_TRUE(
       base::Contains(parsed_methods, WiFiEndpoint::kKeyManagement802_1x));
@@ -221,44 +260,105 @@ TEST_F(WiFiEndpointTest, ParseKeyManagementMethodsEAPAndPSK) {
 }
 
 TEST_F(WiFiEndpointTest, ParseSecurityRSN802_1x) {
-  EXPECT_STREQ(kSecurity8021x,
-               ParseSecurity(MakeSecurityArgs("RSN", "wpa-eap-suite-b")));
-  EXPECT_STREQ(kSecurity8021x,
-               ParseSecurity(MakeSecurityArgs("RSN", "wpa-eap-suite-b-192")));
-  EXPECT_STREQ(kSecurity8021x,
-               ParseSecurity(MakeSecurityArgs("RSN", "wpa-eap")));
-  EXPECT_STREQ(kSecurity8021x,
-               ParseSecurity(MakeSecurityArgs("RSN", "wpa-eap-sha256")));
-  EXPECT_STREQ(kSecurity8021x,
-               ParseSecurity(MakeSecurityArgs("RSN", "wpa-ft-eap")));
+  EXPECT_EQ(WiFiSecurity::kWpa3Enterprise,
+            ParseSecurity(MakeSecurityArgs("RSN", "wpa-eap-suite-b")));
+  EXPECT_EQ(WiFiSecurity::kWpa3Enterprise,
+            ParseSecurity(MakeSecurityArgs("RSN", "wpa-eap-suite-b-192")));
+  EXPECT_EQ(WiFiSecurity::kWpa2Enterprise,
+            ParseSecurity(MakeSecurityArgs("RSN", "wpa-eap")));
+  EXPECT_EQ(WiFiSecurity::kWpa3Enterprise,
+            ParseSecurity(MakeSecurityArgs("RSN", "wpa-eap-sha256")));
+  EXPECT_EQ(WiFiSecurity::kWpa2Enterprise,
+            ParseSecurity(MakeSecurityArgs("RSN", "wpa-ft-eap")));
 }
 
 TEST_F(WiFiEndpointTest, ParseSecurityWPA802_1x) {
-  EXPECT_STREQ(kSecurity8021x,
-               ParseSecurity(MakeSecurityArgs("WPA", "something-eap")));
+  EXPECT_EQ(WiFiSecurity::kWpaEnterprise,
+            ParseSecurity(MakeSecurityArgs("WPA", "something-eap")));
 }
 
 TEST_F(WiFiEndpointTest, ParseSecurityRSNSAE) {
-  EXPECT_STREQ(kSecurityWpa3, ParseSecurity(MakeSecurityArgs("RSN", "sae")));
+  EXPECT_EQ(WiFiSecurity::kWpa3, ParseSecurity(MakeSecurityArgs("RSN", "sae")));
+}
+
+TEST_F(WiFiEndpointTest, ParseSecurityRSNOWE) {
+  EXPECT_EQ(WiFiSecurity::kOwe, ParseSecurity(MakeSecurityArgs("RSN", "owe")));
 }
 
 TEST_F(WiFiEndpointTest, ParseSecurityRSNPSK) {
-  EXPECT_STREQ(kSecurityRsn,
-               ParseSecurity(MakeSecurityArgs("RSN", "something-psk")));
+  EXPECT_EQ(WiFiSecurity::kWpa2,
+            ParseSecurity(
+                MakeSecurityArgs("RSN", "something-psk something-psk-sha256")));
+  EXPECT_EQ(WiFiSecurity::kWpa2,
+            ParseSecurity(MakeSecurityArgs("RSN", "something-psk")));
+  EXPECT_EQ(WiFiSecurity::kWpa2,
+            ParseSecurity(MakeSecurityArgs("RSN", "something-psk-sha256")));
 }
 
 TEST_F(WiFiEndpointTest, ParseSecurityWPAPSK) {
-  EXPECT_STREQ(kSecurityWpa,
-               ParseSecurity(MakeSecurityArgs("WPA", "something-psk")));
+  EXPECT_EQ(WiFiSecurity::kWpa,
+            ParseSecurity(
+                MakeSecurityArgs("WPA", "something-psk something-psk-sha256")));
+  EXPECT_EQ(WiFiSecurity::kWpa,
+            ParseSecurity(MakeSecurityArgs("WPA", "something-psk")));
+  EXPECT_EQ(WiFiSecurity::kWpa,
+            ParseSecurity(MakeSecurityArgs("WPA", "something-psk-sha256")));
+}
+
+TEST_F(WiFiEndpointTest, ParseSecurityMixedModes) {
+  KeyValueStore args;
+  AddSecurityArgs(args, "WPA", {"wpa-psk"});
+  AddSecurityArgs(args, "RSN", {"wpa-psk"});
+  EXPECT_EQ(WiFiSecurity::kWpaWpa2, ParseSecurity(args));
+
+  args.Clear();
+  AddSecurityArgs(args, "WPA", {"wpa-ft-psk"});
+  AddSecurityArgs(args, "RSN", {"wpa-ft-psk"});
+  EXPECT_EQ(WiFiSecurity::kWpaWpa2, ParseSecurity(args));
+
+  args.Clear();
+  AddSecurityArgs(args, "RSN", {"wpa-psk", "wpa-ft-psk", "sae"});
+  EXPECT_EQ(WiFiSecurity::kWpa2Wpa3, ParseSecurity(args));
+}
+
+TEST_F(WiFiEndpointTest, ParseSecurityMixedModes802_1x) {
+  KeyValueStore args;
+  AddSecurityArgs(args, "WPA", {"wpa-eap"});
+  AddSecurityArgs(args, "RSN", {"wpa-eap"});
+  EXPECT_EQ(WiFiSecurity::kWpaWpa2Enterprise, ParseSecurity(args));
+
+  args.Clear();
+  AddSecurityArgs(args, "WPA", {"wpa-ft-eap"});
+  AddSecurityArgs(args, "RSN", {"wpa-ft-eap"});
+  EXPECT_EQ(WiFiSecurity::kWpaWpa2Enterprise, ParseSecurity(args));
+
+  args.Clear();
+  AddSecurityArgs(args, "RSN", {"wpa-eap", "wpa-ft-eap", "wpa-eap-sha256"});
+  EXPECT_EQ(WiFiSecurity::kWpa2Wpa3Enterprise, ParseSecurity(args));
+
+  args.Clear();
+  AddSecurityArgs(args, "RSN", {"wpa-eap", "wpa-ft-eap", "wpa-eap-suite-b"});
+  EXPECT_EQ(WiFiSecurity::kWpa2Wpa3Enterprise, ParseSecurity(args));
+
+  args.Clear();
+  AddSecurityArgs(args, "RSN",
+                  {"wpa-eap", "wpa-ft-eap", "wpa-eap-suite-b-192"});
+  EXPECT_EQ(WiFiSecurity::kWpa2Wpa3Enterprise, ParseSecurity(args));
+
+  args.Clear();
+  AddSecurityArgs(args, "RSN",
+                  {"wpa-eap", "wpa-ft-eap", "wpa-eap-sha256", "wpa-eap-suite-b",
+                   "wpa-eap-suite-b-192"});
+  EXPECT_EQ(WiFiSecurity::kWpa2Wpa3Enterprise, ParseSecurity(args));
 }
 
 TEST_F(WiFiEndpointTest, ParseSecurityWEP) {
-  EXPECT_STREQ(kSecurityWep, ParseSecurity(MakePrivacyArgs(true)));
+  EXPECT_EQ(WiFiSecurity::kWep, ParseSecurity(MakePrivacyArgs(true)));
 }
 
 TEST_F(WiFiEndpointTest, ParseSecurityNone) {
   KeyValueStore top_params;
-  EXPECT_STREQ(kSecurityNone, ParseSecurity(top_params));
+  EXPECT_EQ(WiFiSecurity::kNone, ParseSecurity(top_params));
 }
 
 TEST_F(WiFiEndpointTest, SSIDAndBSSIDString) {
@@ -313,49 +413,43 @@ TEST_F(WiFiEndpointTest, DeterminePhyModeFromFrequency) {
 }
 
 TEST_F(WiFiEndpointTest, ParseIEs) {
+  auto ep = MakeOpenEndpoint(nullptr, nullptr, "TestSSID", "00:00:00:00:00:01");
   {
     std::vector<uint8_t> ies;
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_FALSE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                          &vendor_information, nullptr, &supported_features));
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyModeUndef, phy_mode);
-    EXPECT_FALSE(supported_features.krv_support.neighbor_list_supported);
-    EXPECT_FALSE(supported_features.krv_support.ota_ft_supported);
-    EXPECT_FALSE(supported_features.krv_support.otds_ft_supported);
-    EXPECT_FALSE(supported_features.krv_support.dms_supported);
-    EXPECT_FALSE(supported_features.krv_support.bss_max_idle_period_supported);
-    EXPECT_FALSE(supported_features.krv_support.bss_transition_supported);
+    EXPECT_FALSE(ep->supported_features_.krv_support.neighbor_list_supported);
+    EXPECT_FALSE(ep->supported_features_.krv_support.ota_ft_supported);
+    EXPECT_FALSE(ep->supported_features_.krv_support.otds_ft_supported);
+    EXPECT_FALSE(ep->supported_features_.krv_support.dms_supported);
+    EXPECT_FALSE(
+        ep->supported_features_.krv_support.bss_max_idle_period_supported);
+    EXPECT_FALSE(ep->supported_features_.krv_support.bss_transition_supported);
+    EXPECT_FALSE(ep->supported_features_.qos_support.scs_supported);
+    EXPECT_FALSE(ep->supported_features_.qos_support.mscs_supported);
+    EXPECT_FALSE(ep->supported_features_.qos_support.alternate_edca_supported);
   }
   {
     std::vector<uint8_t> ies;
     AddIE(IEEE_80211::kElemIdErp, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11g, phy_mode);
   }
   {
     std::vector<uint8_t> ies;
     AddIE(IEEE_80211::kElemIdHTCap, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11n, phy_mode);
   }
   {
     std::vector<uint8_t> ies;
     AddIE(IEEE_80211::kElemIdHTInfo, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11n, phy_mode);
   }
   {
@@ -363,30 +457,21 @@ TEST_F(WiFiEndpointTest, ParseIEs) {
     AddIE(IEEE_80211::kElemIdErp, &ies);
     AddIE(IEEE_80211::kElemIdHTCap, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11n, phy_mode);
   }
   {
     std::vector<uint8_t> ies;
     AddIE(IEEE_80211::kElemIdVHTCap, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11ac, phy_mode);
   }
   {
     std::vector<uint8_t> ies;
     AddIE(IEEE_80211::kElemIdVHTOperation, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11ac, phy_mode);
   }
   {
@@ -395,10 +480,7 @@ TEST_F(WiFiEndpointTest, ParseIEs) {
     AddIE(IEEE_80211::kElemIdHTCap, &ies);
     AddIE(IEEE_80211::kElemIdVHTCap, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11ac, phy_mode);
   }
   {
@@ -406,10 +488,7 @@ TEST_F(WiFiEndpointTest, ParseIEs) {
     std::vector<uint8_t> kExtTag(1, IEEE_80211::kElemIdExtHECap);
     AddIEWithData(IEEE_80211::kElemIdExt, kExtTag, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11ax, phy_mode);
   }
   {
@@ -417,10 +496,7 @@ TEST_F(WiFiEndpointTest, ParseIEs) {
     std::vector<uint8_t> kExtTag(1, IEEE_80211::kElemIdExtHEOperation);
     AddIEWithData(IEEE_80211::kElemIdExt, kExtTag, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11ax, phy_mode);
   }
   {
@@ -431,10 +507,7 @@ TEST_F(WiFiEndpointTest, ParseIEs) {
     AddIE(IEEE_80211::kElemIdVHTCap, &ies);
     AddIEWithData(IEEE_80211::kElemIdExt, kExtTag, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_TRUE(ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode,
-                         &vendor_information, nullptr, &supported_features));
+    EXPECT_TRUE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
     EXPECT_EQ(Metrics::kWiFiNetworkPhyMode11ax, phy_mode);
   }
   {
@@ -447,12 +520,9 @@ TEST_F(WiFiEndpointTest, ParseIEs) {
     AddIEWithData(IEEE_80211::kElemIdRmEnabledCap, kRmEnabledCap, &ies);
     AddIEWithData(IEEE_80211::kElemIdCountry, kCountryCodeAsVector, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    std::string country_code;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             &country_code, &supported_features);
-    EXPECT_TRUE(supported_features.krv_support.neighbor_list_supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(ep->supported_features_.krv_support.neighbor_list_supported);
   }
   {
     std::vector<uint8_t> ies;
@@ -463,64 +533,59 @@ TEST_F(WiFiEndpointTest, ParseIEs) {
     AddIEWithData(IEEE_80211::kElemIdRSN, rsn, &ies);
     AddIEWithData(IEEE_80211::kElemIdMDE, kMDE, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_TRUE(supported_features.krv_support.ota_ft_supported);
-    EXPECT_TRUE(supported_features.krv_support.otds_ft_supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(ep->supported_features_.krv_support.ota_ft_supported);
+    EXPECT_TRUE(ep->supported_features_.krv_support.otds_ft_supported);
   }
   {
     std::vector<uint8_t> ies;
-    const std::vector<uint8_t> kExtendedCapabilities{0x00, 0x00, 0x08, 0x04};
+    const std::vector<uint8_t> kExtendedCapabilities{
+        0x00, 0x00, 0x08, 0x04, 0x0, 0x0, 0x40, 0x1, 0x0, 0x0, 0x20};
     AddIEWithData(IEEE_80211::kElemIdExtendedCap, kExtendedCapabilities, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_TRUE(supported_features.krv_support.dms_supported);
-    EXPECT_TRUE(supported_features.krv_support.bss_transition_supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(ep->supported_features_.krv_support.dms_supported);
+    EXPECT_TRUE(ep->supported_features_.krv_support.bss_transition_supported);
+    EXPECT_TRUE(ep->supported_features_.qos_support.scs_supported);
+    EXPECT_TRUE(ep->supported_features_.qos_support.mscs_supported);
+    EXPECT_TRUE(ep->supported_features_.qos_support.alternate_edca_supported);
   }
   {
     std::vector<uint8_t> ies;
     const std::vector<uint8_t> kBSSMaxIdlePeriod(3, 0);
     AddIEWithData(IEEE_80211::kElemIdBSSMaxIdlePeriod, kBSSMaxIdlePeriod, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_TRUE(supported_features.krv_support.bss_max_idle_period_supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(
+        ep->supported_features_.krv_support.bss_max_idle_period_supported);
   }
 }
 
 TEST_F(WiFiEndpointTest, ParseVendorIEs) {
+  auto ep = MakeOpenEndpoint(nullptr, nullptr, "TestSSID", "00:00:00:00:00:01");
   {
     ScopedMockLog log;
-    EXPECT_CALL(log, Log(logging::LOGGING_ERROR, _,
+    EXPECT_CALL(log, Log(logging::LOGGING_WARNING, _,
                          HasSubstr("no room in IE for OUI and type field.")))
         .Times(1);
     std::vector<uint8_t> ies;
     AddIE(IEEE_80211::kElemIdVendor, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
   }
   {
     std::vector<uint8_t> ies;
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_EQ("", vendor_information.wps_manufacturer);
-    EXPECT_EQ("", vendor_information.wps_model_name);
-    EXPECT_EQ("", vendor_information.wps_model_number);
-    EXPECT_EQ("", vendor_information.wps_device_name);
-    EXPECT_EQ(0, vendor_information.oui_set.size());
+    ep->vendor_information_ = WiFiEndpoint::VendorInformation();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_EQ("", ep->vendor_information_.wps_manufacturer);
+    EXPECT_EQ("", ep->vendor_information_.wps_model_name);
+    EXPECT_EQ("", ep->vendor_information_.wps_model_number);
+    EXPECT_EQ("", ep->vendor_information_.wps_device_name);
+    EXPECT_EQ(0, ep->vendor_information_.oui_set.size());
   }
   {
     ScopedMockLog log;
@@ -531,36 +596,32 @@ TEST_F(WiFiEndpointTest, ParseVendorIEs) {
     AddVendorIE(0, 0, std::vector<uint8_t>(), &ies);
     ies.resize(ies.size() - 1);  // Cause an underrun in the data.
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
   }
   {
     std::vector<uint8_t> ies;
     const uint32_t kVendorOUI = 0xaabbcc;
     AddVendorIE(kVendorOUI, 0, std::vector<uint8_t>(), &ies);
+    AddVendorIE(IEEE_80211::kOUIVendorCiscoAironet,
+                IEEE_80211::kOUITypeCiscoExtendedCapabilitiesIE,
+                std::vector<uint8_t>(), &ies);
     AddVendorIE(IEEE_80211::kOUIVendorMicrosoft, 0, std::vector<uint8_t>(),
                 &ies);
     AddVendorIE(IEEE_80211::kOUIVendorEpigram, 0, std::vector<uint8_t>(), &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_EQ("", vendor_information.wps_manufacturer);
-    EXPECT_EQ("", vendor_information.wps_model_name);
-    EXPECT_EQ("", vendor_information.wps_model_number);
-    EXPECT_EQ("", vendor_information.wps_device_name);
-    EXPECT_EQ(1, vendor_information.oui_set.size());
-    EXPECT_FALSE(vendor_information.oui_set.find(kVendorOUI) ==
-                 vendor_information.oui_set.end());
+    ep->vendor_information_ = WiFiEndpoint::VendorInformation();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_EQ("", ep->vendor_information_.wps_manufacturer);
+    EXPECT_EQ("", ep->vendor_information_.wps_model_name);
+    EXPECT_EQ("", ep->vendor_information_.wps_model_number);
+    EXPECT_EQ("", ep->vendor_information_.wps_device_name);
+    EXPECT_EQ(2, ep->vendor_information_.oui_set.size());
+    EXPECT_TRUE(base::Contains(ep->vendor_information_.oui_set, kVendorOUI));
+    EXPECT_TRUE(base::Contains(ep->vendor_information_.oui_set,
+                               IEEE_80211::kOUIVendorCiscoAironet));
 
-    WiFiEndpointRefPtr endpoint = MakeOpenEndpoint(
-        nullptr, nullptr, std::string(1, 0), "00:00:00:00:00:01");
-    SetVendorInformation(endpoint, vendor_information);
     std::map<std::string, std::string> vendor_stringmap(
-        endpoint->GetVendorInformation());
+        ep->GetVendorInformation());
     EXPECT_FALSE(
         base::Contains(vendor_stringmap, kVendorWPSManufacturerProperty));
     EXPECT_FALSE(base::Contains(vendor_stringmap, kVendorWPSModelNameProperty));
@@ -568,11 +629,16 @@ TEST_F(WiFiEndpointTest, ParseVendorIEs) {
         base::Contains(vendor_stringmap, kVendorWPSModelNumberProperty));
     EXPECT_FALSE(
         base::Contains(vendor_stringmap, kVendorWPSDeviceNameProperty));
-    EXPECT_EQ("aa-bb-cc", vendor_stringmap[kVendorOUIListProperty]);
+    std::vector<std::string> oui_list = base::SplitString(
+        vendor_stringmap[kVendorOUIListProperty], base::kWhitespaceASCII,
+        base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+    EXPECT_EQ(2, oui_list.size());
+    EXPECT_TRUE(base::Contains(oui_list, "aa-bb-cc"));
+    EXPECT_TRUE(base::Contains(oui_list, "00-40-96"));
   }
   {
     ScopedMockLog log;
-    EXPECT_CALL(log, Log(logging::LOGGING_ERROR, _,
+    EXPECT_CALL(log, Log(logging::LOGGING_WARNING, _,
                          HasSubstr("WPS element extends past containing PDU")))
         .Times(1);
     std::vector<uint8_t> ies;
@@ -582,11 +648,9 @@ TEST_F(WiFiEndpointTest, ParseVendorIEs) {
     AddVendorIE(IEEE_80211::kOUIVendorMicrosoft, IEEE_80211::kOUIMicrosoftWPS,
                 wps, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_EQ("", vendor_information.wps_manufacturer);
+    ep->vendor_information_ = WiFiEndpoint::VendorInformation();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_EQ("", ep->vendor_information_.wps_manufacturer);
   }
   {
     std::vector<uint8_t> ies;
@@ -602,20 +666,15 @@ TEST_F(WiFiEndpointTest, ParseVendorIEs) {
     AddVendorIE(IEEE_80211::kOUIVendorMicrosoft, IEEE_80211::kOUIMicrosoftWPS,
                 wps, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_EQ(kManufacturer, vendor_information.wps_manufacturer);
-    EXPECT_EQ(kModelName, vendor_information.wps_model_name);
-    EXPECT_EQ(kModelNumber, vendor_information.wps_model_number);
-    EXPECT_EQ(kDeviceName, vendor_information.wps_device_name);
+    ep->vendor_information_ = WiFiEndpoint::VendorInformation();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_EQ(kManufacturer, ep->vendor_information_.wps_manufacturer);
+    EXPECT_EQ(kModelName, ep->vendor_information_.wps_model_name);
+    EXPECT_EQ(kModelNumber, ep->vendor_information_.wps_model_number);
+    EXPECT_EQ(kDeviceName, ep->vendor_information_.wps_device_name);
 
-    WiFiEndpointRefPtr endpoint = MakeOpenEndpoint(
-        nullptr, nullptr, std::string(1, 0), "00:00:00:00:00:01");
-    SetVendorInformation(endpoint, vendor_information);
     std::map<std::string, std::string> vendor_stringmap(
-        endpoint->GetVendorInformation());
+        ep->GetVendorInformation());
     EXPECT_EQ(kManufacturer, vendor_stringmap[kVendorWPSManufacturerProperty]);
     EXPECT_EQ(kModelName, vendor_stringmap[kVendorWPSModelNameProperty]);
     EXPECT_EQ(kModelNumber, vendor_stringmap[kVendorWPSModelNumberProperty]);
@@ -634,21 +693,17 @@ TEST_F(WiFiEndpointTest, ParseVendorIEs) {
     AddVendorIE(IEEE_80211::kOUIVendorMicrosoft, IEEE_80211::kOUIMicrosoftWPS,
                 wps, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_EQ("", vendor_information.wps_manufacturer);
-    EXPECT_EQ(kModelName, vendor_information.wps_model_name);
+    ep->vendor_information_ = WiFiEndpoint::VendorInformation();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_EQ("", ep->vendor_information_.wps_manufacturer);
+    EXPECT_EQ(kModelName, ep->vendor_information_.wps_model_name);
   }
   {
     std::vector<uint8_t> ies;
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_FALSE(supported_features.hs20_information.supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_FALSE(ep->supported_features_.hs20_information.supported);
   }
   {
     std::vector<uint8_t> ies;
@@ -656,11 +711,9 @@ TEST_F(WiFiEndpointTest, ParseVendorIEs) {
                 IEEE_80211::kOUITypeWiFiAllianceHS20Indicator,
                 std::vector<uint8_t>(), &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_FALSE(supported_features.hs20_information.supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_FALSE(ep->supported_features_.hs20_information.supported);
   }
   {
     std::vector<uint8_t> ies;
@@ -668,22 +721,18 @@ TEST_F(WiFiEndpointTest, ParseVendorIEs) {
     AddVendorIE(IEEE_80211::kOUIVendorWiFiAlliance,
                 IEEE_80211::kOUITypeWiFiAllianceHS20Indicator, data, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_TRUE(supported_features.hs20_information.supported);
-    EXPECT_EQ(2, supported_features.hs20_information.version);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(ep->supported_features_.hs20_information.supported);
+    EXPECT_EQ(2, ep->supported_features_.hs20_information.version);
   }
   {
     std::vector<uint8_t> ies;
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    EXPECT_FALSE(supported_features.mbo_support);
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_FALSE(supported_features.mbo_support);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->supported_features_.mbo_support);
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_FALSE(ep->supported_features_.mbo_support);
   }
   {
     std::vector<uint8_t> ies;
@@ -691,15 +740,44 @@ TEST_F(WiFiEndpointTest, ParseVendorIEs) {
                 IEEE_80211::kOUITypeWiFiAllianceMBO, std::vector<uint8_t>(),
                 &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_TRUE(supported_features.mbo_support);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(ep->supported_features_.mbo_support);
+  }
+  {
+    std::vector<uint8_t> ies;
+    AddVendorIE(IEEE_80211::kOUIVendorCiscoAironet,
+                IEEE_80211::kOUITypeCiscoExtendedCapabilitiesIE,
+                std::vector<uint8_t>({0x40}), &ies);
+    Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(ep->supported_features_.krv_support.adaptive_ft_supported);
+  }
+  {
+    std::vector<uint8_t> ies;
+    AddVendorIE(IEEE_80211::kOUIVendorCiscoAironet,
+                IEEE_80211::kOUITypeCiscoExtendedCapabilitiesIE,
+                std::vector<uint8_t>({0x00}), &ies);
+    Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_FALSE(ep->supported_features_.krv_support.adaptive_ft_supported);
+  }
+  {
+    std::vector<uint8_t> ies;
+    AddVendorIE(IEEE_80211::kOUIVendorCiscoAironet,
+                IEEE_80211::kOUITypeCiscoExtendedCapabilitiesIE,
+                std::vector<uint8_t>(), &ies);
+    Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_FALSE(ep->supported_features_.krv_support.adaptive_ft_supported);
   }
 }
 
 TEST_F(WiFiEndpointTest, ParseWPACapabilities) {
+  auto ep = MakeOpenEndpoint(nullptr, nullptr, "TestSSID", "00:00:00:00:00:01");
   {
     std::vector<uint8_t> ies;
     std::vector<uint32_t> authkeys(4, 0);
@@ -707,12 +785,10 @@ TEST_F(WiFiEndpointTest, ParseWPACapabilities) {
     std::vector<uint8_t> rsn = MakeRSNProperties(1, 4, authkeys);
     AddIEWithData(IEEE_80211::kElemIdRSN, rsn, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_FALSE(supported_features.krv_support.ota_ft_supported);
-    EXPECT_FALSE(supported_features.krv_support.otds_ft_supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_FALSE(ep->supported_features_.krv_support.ota_ft_supported);
+    EXPECT_FALSE(ep->supported_features_.krv_support.otds_ft_supported);
   }
   {
     std::vector<uint8_t> ies;
@@ -722,12 +798,10 @@ TEST_F(WiFiEndpointTest, ParseWPACapabilities) {
     std::vector<uint8_t> rsn = MakeRSNProperties(4, 3, authkeys);
     AddIEWithData(IEEE_80211::kElemIdRSN, rsn, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_FALSE(supported_features.krv_support.ota_ft_supported);
-    EXPECT_FALSE(supported_features.krv_support.otds_ft_supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_FALSE(ep->supported_features_.krv_support.ota_ft_supported);
+    EXPECT_FALSE(ep->supported_features_.krv_support.otds_ft_supported);
   }
   {
     std::vector<uint8_t> ies;
@@ -735,25 +809,20 @@ TEST_F(WiFiEndpointTest, ParseWPACapabilities) {
     std::vector<uint8_t> rsn = MakeRSNProperties(2, 4, authkeys);
     AddIEWithData(IEEE_80211::kElemIdRSN, rsn, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             nullptr, &supported_features);
-    EXPECT_FALSE(supported_features.krv_support.ota_ft_supported);
-    EXPECT_FALSE(supported_features.krv_support.otds_ft_supported);
+    ep->supported_features_ = WiFiEndpoint::SupportedFeatures();
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_FALSE(ep->supported_features_.krv_support.ota_ft_supported);
+    EXPECT_FALSE(ep->supported_features_.krv_support.otds_ft_supported);
   }
 }
 
 TEST_F(WiFiEndpointTest, ParseCountryCode) {
+  auto ep = MakeOpenEndpoint(nullptr, nullptr, "TestSSID", "00:00:00:00:00:01");
   {
     std::vector<uint8_t> ies;
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    std::string country_code;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             &country_code, &supported_features);
-    EXPECT_TRUE(country_code.empty());
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(ep->country_code().empty());
   }
   {
     const std::string kCountryCode("G");
@@ -762,12 +831,8 @@ TEST_F(WiFiEndpointTest, ParseCountryCode) {
     std::vector<uint8_t> ies;
     AddIEWithData(IEEE_80211::kElemIdCountry, kCountryCodeAsVector, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    std::string country_code;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             &country_code, &supported_features);
-    EXPECT_TRUE(country_code.empty());
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_TRUE(ep->country_code().empty());
   }
   {
     const std::string kCountryCode("GO");
@@ -776,12 +841,8 @@ TEST_F(WiFiEndpointTest, ParseCountryCode) {
     std::vector<uint8_t> ies;
     AddIEWithData(IEEE_80211::kElemIdCountry, kCountryCodeAsVector, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    std::string country_code;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             &country_code, &supported_features);
-    EXPECT_EQ(kCountryCode, country_code);
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_EQ(kCountryCode, ep->country_code());
   }
   {
     const std::string kCountryCode("GOO");
@@ -790,12 +851,8 @@ TEST_F(WiFiEndpointTest, ParseCountryCode) {
     std::vector<uint8_t> ies;
     AddIEWithData(IEEE_80211::kElemIdCountry, kCountryCodeAsVector, &ies);
     Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-    WiFiEndpoint::VendorInformation vendor_information;
-    WiFiEndpoint::SupportedFeatures supported_features;
-    std::string country_code;
-    ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode, &vendor_information,
-             &country_code, &supported_features);
-    EXPECT_EQ(std::string(kCountryCode, 0, 2), country_code);
+    EXPECT_FALSE(ep->ParseIEs(MakeBSSPropertiesWithIEs(ies), &phy_mode));
+    EXPECT_EQ(std::string(kCountryCode, 0, 2), ep->country_code());
   }
 }
 
@@ -803,12 +860,12 @@ TEST_F(WiFiEndpointTest, PropertiesChangedNone) {
   WiFiEndpointRefPtr endpoint =
       MakeOpenEndpoint(nullptr, wifi(), "ssid", "00:00:00:00:00:01");
   EXPECT_EQ(kModeManaged, endpoint->network_mode());
-  EXPECT_EQ(kSecurityNone, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kNone, endpoint->security_mode());
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(0);
   KeyValueStore no_changed_properties;
   endpoint->PropertiesChanged(no_changed_properties);
   EXPECT_EQ(kModeManaged, endpoint->network_mode());
-  EXPECT_EQ(kSecurityNone, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kNone, endpoint->security_mode());
 }
 
 TEST_F(WiFiEndpointTest, PropertiesChangedStrength) {
@@ -857,58 +914,58 @@ TEST_F(WiFiEndpointTest, PropertiesChangedFrequency) {
 TEST_F(WiFiEndpointTest, PropertiesChangedSecurityMode) {
   WiFiEndpointRefPtr endpoint =
       MakeOpenEndpoint(nullptr, wifi(), "ssid", "00:00:00:00:00:01");
-  EXPECT_EQ(kSecurityNone, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kNone, endpoint->security_mode());
 
   // Upgrade to WEP if privacy flag is added.
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(1);
   endpoint->PropertiesChanged(MakePrivacyArgs(true));
   Mock::VerifyAndClearExpectations(wifi().get());
-  EXPECT_EQ(kSecurityWep, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kWep, endpoint->security_mode());
 
   // Make sure we don't downgrade if no interesting arguments arrive.
   KeyValueStore no_changed_properties;
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(0);
   endpoint->PropertiesChanged(no_changed_properties);
   Mock::VerifyAndClearExpectations(wifi().get());
-  EXPECT_EQ(kSecurityWep, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kWep, endpoint->security_mode());
 
   // Another upgrade to 802.1x.
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(1);
   endpoint->PropertiesChanged(MakeSecurityArgs("RSN", "something-eap"));
   Mock::VerifyAndClearExpectations(wifi().get());
-  EXPECT_EQ(kSecurity8021x, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kWpa2Enterprise, endpoint->security_mode());
 
   // Add WPA-PSK, however this is trumped by RSN 802.1x above, so we don't
   // change our security nor do we notify anyone.
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(0);
   endpoint->PropertiesChanged(MakeSecurityArgs("WPA", "something-psk"));
   Mock::VerifyAndClearExpectations(wifi().get());
-  EXPECT_EQ(kSecurity8021x, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kWpa2Enterprise, endpoint->security_mode());
 
   // If nothing changes, we should stay the same.
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(0);
   endpoint->PropertiesChanged(no_changed_properties);
   Mock::VerifyAndClearExpectations(wifi().get());
-  EXPECT_EQ(kSecurity8021x, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kWpa2Enterprise, endpoint->security_mode());
 
   // However, if the BSS updates to no longer support 802.1x, we degrade
   // to WPA.
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(1);
   endpoint->PropertiesChanged(MakeSecurityArgs("RSN", ""));
   Mock::VerifyAndClearExpectations(wifi().get());
-  EXPECT_EQ(kSecurityWpa, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kWpa, endpoint->security_mode());
 
   // Losing WPA brings us back to WEP (since the privacy flag hasn't changed).
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(1);
   endpoint->PropertiesChanged(MakeSecurityArgs("WPA", ""));
   Mock::VerifyAndClearExpectations(wifi().get());
-  EXPECT_EQ(kSecurityWep, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kWep, endpoint->security_mode());
 
   // From WEP to open security.
   EXPECT_CALL(*wifi(), NotifyEndpointChanged(_)).Times(1);
   endpoint->PropertiesChanged(MakePrivacyArgs(false));
   Mock::VerifyAndClearExpectations(wifi().get());
-  EXPECT_EQ(kSecurityNone, endpoint->security_mode());
+  EXPECT_EQ(WiFiSecurity::kNone, endpoint->security_mode());
 }
 
 TEST_F(WiFiEndpointTest, HasRsnWpaProperties) {

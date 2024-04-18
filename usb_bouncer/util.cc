@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,10 @@
 #include "usb_bouncer/util_internal.h"
 
 #include <fcntl.h>
+#include <sys/capability.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -17,9 +19,12 @@
 
 #include <base/base64.h>
 #include <base/check.h>
+#include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/process/launch.h>
+#include <base/scoped_generic.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
@@ -28,12 +33,17 @@
 #include <brillo/file_utils.h>
 #include <brillo/files/file_util.h>
 #include <brillo/files/scoped_dir.h>
+#include <brillo/key_value_store.h>
 #include <brillo/userdb_utils.h>
+#include <metrics/structured_events.h>
 #include <openssl/sha.h>
+#include <re2/re2.h>
 #include <session_manager/dbus-proxies.h>
 #include <usbguard/Device.hpp>
 #include <usbguard/DeviceManager.hpp>
 #include <usbguard/DeviceManagerHooks.hpp>
+
+#include "usb_bouncer/metrics_allowlist.h"
 
 using brillo::GetFDPath;
 using brillo::SafeFD;
@@ -53,6 +63,8 @@ constexpr char kSysFSAuthorized[] = "authorized";
 constexpr char kSysFSEnabled[] = "1";
 
 constexpr char kUmaDeviceAttachedHistogram[] = "ChromeOS.USB.DeviceAttached";
+constexpr char kUmaExternalDeviceAttachedHistogram[] =
+    "ChromeOS.USB.ExternalDeviceAttached";
 
 constexpr int kMaxWriteAttempts = 10;
 constexpr int kAttemptDelayMicroseconds = 10000;
@@ -117,11 +129,11 @@ class UsbguardDeviceManagerHooksImpl : public usbguard::DeviceManagerHooks {
 };
 
 // |fd| is assumed to be non-blocking.
-bool WriteWithTimeout(SafeFD* fd,
-                      const std::string value,
-                      size_t max_tries = kMaxWriteAttempts,
-                      base::TimeDelta delay = base::TimeDelta::FromMicroseconds(
-                          kAttemptDelayMicroseconds)) {
+bool WriteWithTimeout(
+    SafeFD* fd,
+    const std::string value,
+    size_t max_tries = kMaxWriteAttempts,
+    base::TimeDelta delay = base::Microseconds(kAttemptDelayMicroseconds)) {
   size_t tries = 0;
   size_t total = 0;
   int written = 0;
@@ -357,7 +369,27 @@ UMADeviceClass MergeClasses(UMADeviceClass a, UMADeviceClass b) {
   return UMADeviceClass::kOther;
 }
 
+struct ScopedCapTTraits {
+  static cap_t InvalidValue() { return nullptr; }
+  static void Free(cap_t cap_ptr) { cap_free(cap_ptr); }
+};
+typedef base::ScopedGeneric<cap_t, ScopedCapTTraits> ScopedCapT;
+
 }  // namespace
+
+bool CanChown() {
+  ScopedCapT caps(cap_get_pid(0));
+  if (!caps.is_valid()) {
+    return false;
+  }
+
+  cap_flag_value_t value;
+  if (cap_get_flag(caps.get(), CAP_CHOWN, CAP_EFFECTIVE, &value) == -1) {
+    return false;
+  }
+
+  return value == CAP_SET;
+}
 
 std::string Hash(const std::string& content) {
   std::vector<uint8_t> digest(SHA256_DIGEST_LENGTH, 0);
@@ -455,6 +487,121 @@ void UMALogDeviceAttached(MetricsLibrary* metrics,
       static_cast<int>(timing), static_cast<int>(UMAEventTiming::kMaxValue));
 }
 
+void UMALogExternalDeviceAttached(MetricsLibrary* metrics,
+                                  const std::string& rule,
+                                  UMADeviceRecognized recognized,
+                                  UMAEventTiming timing,
+                                  UMAPortType port,
+                                  UMADeviceSpeed speed) {
+  usbguard::Rule parsed_rule = GetRuleFromString(rule);
+  if (!parsed_rule) {
+    return;
+  }
+
+  metrics->SendEnumToUMA(
+      base::StringPrintf("%s.%s.%s", kUmaExternalDeviceAttachedHistogram,
+                         to_string(recognized).c_str(),
+                         to_string(GetClassFromRule(parsed_rule)).c_str()),
+      static_cast<int>(timing), static_cast<int>(UMAEventTiming::kMaxValue));
+
+  // Another metrics on device class categorized by port type.
+  // Report this separately since port type is not related to
+  // Recongnized/Unrecognized and Event Timing.
+  metrics->SendEnumToUMA(base::StringPrintf("%s.%s.DeviceClass",
+                                            kUmaExternalDeviceAttachedHistogram,
+                                            to_string(port).c_str()),
+                         static_cast<int>(GetClassFromRule(parsed_rule)),
+                         static_cast<int>(UMADeviceClass::kMaxValue));
+
+  metrics->SendEnumToUMA(base::StringPrintf("%s.%s.DeviceSpeed",
+                                            kUmaExternalDeviceAttachedHistogram,
+                                            to_string(port).c_str()),
+                         static_cast<int>(speed),
+                         static_cast<int>(UMADeviceSpeed::kMaxValue));
+}
+
+void StructuredMetricsExternalDeviceAttached(
+    int VendorId,
+    std::string VendorName,
+    int ProductId,
+    std::string ProductName,
+    int DeviceClass,
+    std::vector<int64_t> InterfaceClass) {
+  // Limit string length to prevent badly behaving device from creating huge
+  // metrics packet.
+  int string_len_limit = 200;
+  VendorName = VendorName.substr(0, string_len_limit);
+  ProductName = ProductName.substr(0, string_len_limit);
+
+  // In case the size of InterfaceClass exceed the max number of interfaces
+  // supported by the UsbDeviceInfo metrics, just slice the vector and report.
+  // The max length supported is large enough that this is quite unlikely.
+  int max_interface = metrics::structured::events::usb_device::UsbDeviceInfo::
+      GetInterfaceClassMaxLength();
+  if (InterfaceClass.size() > max_interface) {
+    InterfaceClass.resize(max_interface);
+  }
+
+  metrics::structured::events::usb_device::UsbDeviceInfo()
+      .SetVendorId(VendorId)
+      .SetVendorName(VendorName)
+      .SetProductId(ProductId)
+      .SetProductName(ProductName)
+      .SetDeviceClass(DeviceClass)
+      .SetInterfaceClass(std::move(InterfaceClass))
+      .Record();
+}
+
+void StructuredMetricsUsbSessionEvent(UsbSessionMetric session_metric) {
+  // Only record UsbSessionEvents for devices in the USB metrics allowlist.
+  if (!DeviceInMetricsAllowlist(session_metric.vid, session_metric.pid))
+    return;
+
+  metrics::structured::events::usb_session::UsbSessionEvent()
+      .SetBootId(std::move(session_metric.boot_id))
+      .SetSystemTime(std::move(session_metric.system_time))
+      .SetAction(session_metric.action)
+      .SetDeviceNum(session_metric.devnum)
+      .SetBusNum(session_metric.busnum)
+      .SetDepth(session_metric.depth)
+      .SetVendorId(session_metric.vid)
+      .SetProductId(session_metric.pid)
+      .Record();
+}
+
+void StructuredMetricsHubError(int ErrorCode,
+                               int VendorId,
+                               int ProductId,
+                               int DeviceClass,
+                               std::string UsbTreePath,
+                               int ConnectedDuration) {
+  // Limit string length.
+  int string_len_limit = 20;
+  UsbTreePath = UsbTreePath.substr(0, string_len_limit);
+
+  // Mask VID/PID if the error was reported about an obscure device.
+  if (!DeviceInMetricsAllowlist(VendorId, ProductId)) {
+    VendorId = 0;
+    ProductId = 0;
+  }
+
+  metrics::structured::events::usb_error::HubError()
+      .SetErrorCode(ErrorCode)
+      .SetVendorId(VendorId)
+      .SetProductId(ProductId)
+      .SetDeviceClass(DeviceClass)
+      .SetDevicePath(UsbTreePath)
+      .SetConnectedDuration(ConnectedDuration)
+      .Record();
+}
+
+void StructuredMetricsXhciError(int ErrorCode, int DeviceClass) {
+  metrics::structured::events::usb_error::XhciError()
+      .SetErrorCode(ErrorCode)
+      .SetDeviceClass(DeviceClass)
+      .Record();
+}
+
 base::FilePath GetUserDBDir() {
   // Usb_bouncer is called by udev even during early boot. If D-Bus is
   // inaccessible, it is early boot and the user hasn't logged in.
@@ -524,6 +671,9 @@ bool IsLockscreenShown() {
 }
 
 std::string StripLeadingPathSeparators(const std::string& path) {
+  if (path.find_first_not_of('/') == std::string::npos)
+    return std::string();
+
   return path.substr(path.find_first_not_of('/'));
 }
 
@@ -546,8 +696,7 @@ SafeFD OpenStateFile(const base::FilePath& base_path,
   uid_t proc_uid = getuid();
   uid_t uid = proc_uid;
   gid_t gid = getgid();
-  if (uid == kRootUid &&
-      !brillo::userdb::GetUserInfo(kUsbBouncerUser, &uid, &gid)) {
+  if (CanChown() && !brillo::userdb::GetUserInfo(kUsbBouncerUser, &uid, &gid)) {
     LOG(ERROR) << "Failed to get uid & gid for \"" << kUsbBouncerUser << "\"";
     return SafeFD();
   }
@@ -696,6 +845,17 @@ const std::string to_string(UMADeviceRecognized recognized) {
 }
 #undef TO_STRING_HELPER
 
+#define TO_STRING_HELPER(x) \
+  case UMAPortType::k##x:   \
+    return #x
+const std::string to_string(UMAPortType port) {
+  switch (port) {
+    TO_STRING_HELPER(TypeC);
+    TO_STRING_HELPER(TypeA);
+  }
+}
+#undef TO_STRING_HELPER
+
 std::ostream& operator<<(std::ostream& out, UMADeviceClass device_class) {
   out << to_string(device_class);
   return out;
@@ -703,6 +863,11 @@ std::ostream& operator<<(std::ostream& out, UMADeviceClass device_class) {
 
 std::ostream& operator<<(std::ostream& out, UMADeviceRecognized recognized) {
   out << to_string(recognized);
+  return out;
+}
+
+std::ostream& operator<<(std::ostream& out, UMAPortType port) {
+  out << to_string(port);
   return out;
 }
 
@@ -733,6 +898,283 @@ UMADeviceClass GetClassFromRule(const usbguard::Rule& rule) {
         MergeClasses(device_class, GetClassEnumFromValue(interfaces.get(x)));
   }
   return device_class;
+}
+
+base::FilePath GetRootDevice(base::FilePath dev) {
+  auto dev_components = dev.GetComponents();
+  auto it = dev_components.begin();
+  base::FilePath root_dev(*it++);
+
+  for (; it != dev_components.end(); it++) {
+    root_dev = root_dev.Append(*it);
+    if (RE2::FullMatch(*it, R"((\d+)-(\d+))")) {
+      break;
+    }
+  }
+  return root_dev;
+}
+
+base::FilePath GetInterfaceDevice(base::FilePath intf) {
+  std::string dev;
+  if (!RE2::PartialMatch(intf.value(), R"((.*\/).*)", &dev))
+    return base::FilePath();
+
+  return base::FilePath(dev);
+}
+
+bool IsExternalDevice(base::FilePath normalized_devpath) {
+  std::string removable;
+  if (base::ReadFileToString(normalized_devpath.Append("removable"),
+                             &removable)) {
+    base::TrimWhitespaceASCII(removable, base::TRIM_ALL, &removable);
+    if (removable == "removable")
+      return true;
+  }
+
+  auto dev_components = normalized_devpath.GetComponents();
+  auto it = dev_components.begin();
+  base::FilePath dev(*it++);
+  for (; it != dev_components.end(); it++) {
+    dev = dev.Append(*it);
+    if (base::ReadFileToString(dev.Append("removable"), &removable)) {
+      base::TrimWhitespaceASCII(removable, base::TRIM_ALL, &removable);
+      if (removable == "removable")
+        return true;
+    }
+  }
+
+  std::string panel;
+  if (base::ReadFileToString(
+          normalized_devpath.Append("physical_location/panel"), &panel)) {
+    base::TrimWhitespaceASCII(panel, base::TRIM_ALL, &panel);
+    if (panel != "unknown")
+      return true;
+  }
+
+  return false;
+}
+
+bool IsFlexBoard() {
+  brillo::KeyValueStore store;
+  if (!store.Load(base::FilePath("/etc/lsb-release"))) {
+    LOG(WARNING) << "Could not read lsb-release";
+    return true;
+  }
+
+  std::string value;
+  if (!store.GetString("CHROMEOS_RELEASE_BOARD", &value)) {
+    LOG(WARNING) << "Could not determine board";
+    return true;
+  }
+
+  return value.find("reven") != std::string::npos;
+}
+
+UMAPortType GetPortType(base::FilePath normalized_devpath) {
+  std::string connector_uevent;
+  std::string devtype;
+  if (base::ReadFileToString(normalized_devpath.Append("port/connector/uevent"),
+                             &connector_uevent) &&
+      RE2::PartialMatch(connector_uevent, R"(DEVTYPE=(\w+))", &devtype) &&
+      devtype == "typec_port") {
+    return UMAPortType::kTypeC;
+  }
+
+  return UMAPortType::kTypeA;
+}
+
+UMADeviceSpeed GetDeviceSpeed(base::FilePath normalized_devpath) {
+  std::string speed;
+  if (base::ReadFileToString(normalized_devpath.Append("speed"), &speed)) {
+    base::TrimWhitespaceASCII(speed, base::TRIM_ALL, &speed);
+  }
+  std::string version;
+  if (base::ReadFileToString(normalized_devpath.Append("version"), &version)) {
+    base::TrimWhitespaceASCII(version, base::TRIM_ALL, &version);
+  }
+
+  if (speed == "20000") {
+    return UMADeviceSpeed::k20000;
+  } else if (speed == "10000") {
+    return UMADeviceSpeed::k10000;
+  } else if (speed == "5000") {
+    return UMADeviceSpeed::k5000;
+  } else if (speed == "480") {
+    if (version == "2.10") {
+      return UMADeviceSpeed::k480Fallback;
+    } else {
+      return UMADeviceSpeed::k480;
+    }
+  } else if (speed == "12") {
+    return UMADeviceSpeed::k12;
+  } else if (speed == "1.5") {
+    return UMADeviceSpeed::k1_5;
+  } else {
+    return UMADeviceSpeed::kOther;
+  }
+}
+
+int GetVendorId(base::FilePath normalized_devpath) {
+  std::string vendor_id;
+  int vendor_id_int;
+  if (base::ReadFileToString(normalized_devpath.Append("idVendor"),
+                             &vendor_id)) {
+    base::TrimWhitespaceASCII(vendor_id, base::TRIM_ALL, &vendor_id);
+    if (base::HexStringToInt(vendor_id, &vendor_id_int)) {
+      return vendor_id_int;
+    }
+  }
+
+  return 0;
+}
+
+std::string GetVendorName(base::FilePath normalized_devpath) {
+  std::string vendor_name;
+  if (base::ReadFileToString(normalized_devpath.Append("manufacturer"),
+                             &vendor_name)) {
+    base::TrimWhitespaceASCII(vendor_name, base::TRIM_ALL, &vendor_name);
+    return vendor_name;
+  }
+
+  return std::string();
+}
+
+int GetProductId(base::FilePath normalized_devpath) {
+  std::string product_id;
+  int product_id_int;
+  if (base::ReadFileToString(normalized_devpath.Append("idProduct"),
+                             &product_id)) {
+    base::TrimWhitespaceASCII(product_id, base::TRIM_ALL, &product_id);
+    if (base::HexStringToInt(product_id, &product_id_int)) {
+      return product_id_int;
+    }
+  }
+
+  return 0;
+}
+
+std::string GetProductName(base::FilePath normalized_devpath) {
+  std::string product_name;
+  if (base::ReadFileToString(normalized_devpath.Append("product"),
+                             &product_name)) {
+    base::TrimWhitespaceASCII(product_name, base::TRIM_ALL, &product_name);
+    return product_name;
+  }
+
+  return std::string();
+}
+
+void GetVidPidFromEnvVar(std::string product, int* vendor_id, int* product_id) {
+  *vendor_id = 0;
+  *product_id = 0;
+  std::size_t index1 = product.find('/');
+  std::size_t index2 = product.find('/', index1 + 1);
+  if (index1 == std::string::npos || index2 == std::string::npos)
+    return;
+
+  base::HexStringToInt(product.substr(0, index1), vendor_id);
+  base::HexStringToInt(product.substr(index1 + 1, index2 - index1 - 1),
+                       product_id);
+}
+
+int GetDeviceClass(base::FilePath normalized_devpath) {
+  std::string device_class;
+  int device_class_int;
+  if (base::ReadFileToString(normalized_devpath.Append("bDeviceClass"),
+                             &device_class)) {
+    base::TrimWhitespaceASCII(device_class, base::TRIM_ALL, &device_class);
+    if (base::HexStringToInt(device_class, &device_class_int) &&
+        device_class_int != 0) {
+      return device_class_int;
+    }
+  }
+
+  return 0;
+}
+
+std::vector<int64_t> GetInterfaceClass(base::FilePath normalized_devpath) {
+  std::vector<int64_t> ret;
+  base::FileEnumerator enumerator(normalized_devpath, false,
+                                  base::FileEnumerator::DIRECTORIES);
+  for (auto intf_path = enumerator.Next(); !intf_path.empty();
+       intf_path = enumerator.Next()) {
+    std::string intf_class;
+    int64_t intf_class_int;
+    if (!base::ReadFileToString(intf_path.Append("bInterfaceClass"),
+                                &intf_class)) {
+      continue;
+    }
+    base::TrimWhitespaceASCII(intf_class, base::TRIM_ALL, &intf_class);
+    if (base::HexStringToInt64(intf_class, &intf_class_int)) {
+      ret.push_back(intf_class_int);
+    }
+  }
+
+  return ret;
+}
+
+std::string GetUsbTreePath(base::FilePath normalized_devpath) {
+  std::string device_path;
+  if (base::ReadFileToString(normalized_devpath.Append("devpath"),
+                             &device_path)) {
+    base::TrimWhitespaceASCII(device_path, base::TRIM_ALL, &device_path);
+    return device_path;
+  }
+
+  return std::string();
+}
+
+int GetUsbTreeDepth(base::FilePath normalized_devpath) {
+  std::string devpath = GetUsbTreePath(normalized_devpath);
+  return std::count(devpath.begin(), devpath.end(), '.');
+}
+
+int GetConnectedDuration(base::FilePath normalized_devpath) {
+  std::string connected_duration;
+  int connected_duration_int;
+  if (base::ReadFileToString(
+          normalized_devpath.Append("power/connected_duration"),
+          &connected_duration)) {
+    base::TrimWhitespaceASCII(connected_duration, base::TRIM_ALL,
+                              &connected_duration);
+    if (base::StringToInt(connected_duration, &connected_duration_int)) {
+      return connected_duration_int;
+    }
+  }
+
+  return 0;
+}
+
+int GetPciDeviceClass(base::FilePath normalized_devpath) {
+  std::string device_class;
+  int device_class_int;
+  if (base::ReadFileToString(normalized_devpath.Append("class"),
+                             &device_class)) {
+    base::TrimWhitespaceASCII(device_class, base::TRIM_ALL, &device_class);
+    if (base::HexStringToInt(device_class, &device_class_int)) {
+      // The sysfs "class" file includes class, subclass and interface
+      // information. Shifting 16 bits to return only the device class.
+      return (device_class_int >> 16);
+    }
+  }
+
+  return 0;
+}
+
+std::string GetBootId() {
+  std::string boot_id;
+  if (base::ReadFileToString(base::FilePath("/proc/sys/kernel/random/boot_id"),
+                             &boot_id)) {
+    base::TrimWhitespaceASCII(boot_id, base::TRIM_ALL, &boot_id);
+    return boot_id;
+  }
+  return std::string();
+}
+
+int64_t GetSystemTime() {
+  struct timespec ts;
+  clock_gettime(CLOCK_BOOTTIME, &ts);
+  return ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 }  // namespace usb_bouncer

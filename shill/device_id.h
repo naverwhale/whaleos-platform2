@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,11 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/optional.h>
 
 namespace shill {
 
@@ -24,6 +24,7 @@ class DeviceId {
   enum class BusType {
     kPci,
     kUsb,
+    kSoc,
   };
 
   // Location of the device (Currently only supported for PCI devices).
@@ -67,14 +68,13 @@ class DeviceId {
 
  private:
   BusType bus_type_;
-  base::Optional<LocationType> location_type_;
-  base::Optional<uint16_t> vendor_id_;
-  base::Optional<uint16_t> product_id_;
+  std::optional<LocationType> location_type_;
+  std::optional<uint16_t> vendor_id_;
+  std::optional<uint16_t> product_id_;
 };
 
-}  // namespace shill
+std::ostream& operator<<(std::ostream& stream, const DeviceId& device_id);
 
-std::ostream& operator<<(std::ostream& stream,
-                         const shill::DeviceId& device_id);
+}  // namespace shill
 
 #endif  // SHILL_DEVICE_ID_H_

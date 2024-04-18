@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,9 @@
 namespace diagnostics {
 
 // Machines populated by uname().
-extern const char kUnameMachineX86_64[];
-extern const char kUnameMachineAArch64[];
-extern const char kUnameMachineArmv7l[];
+inline constexpr char kUnameMachineX86_64[] = "x86_64";
+inline constexpr char kUnameMachineAArch64[] = "aarch64";
+inline constexpr char kUnameMachineArmv7l[] = "armv7l";
 
 }  // namespace diagnostics
 

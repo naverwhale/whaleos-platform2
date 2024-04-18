@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
-  Copyright 2021 The Chromium OS Authors. All rights reserved.
+  Copyright 2021 The ChromiumOS Authors
   Use of this source code is governed by a BSD-style license that can be
   found in the LICENSE file.
 -->
@@ -20,17 +20,19 @@
         <annotation name="org.chromium.DBus.Method.Kind" value="simple" />
       </method>
 
-    <method name="AddFile">
+    <method name="AddFiles">
       <tp:docstring>
-        Adds file together with it's source to the database.
+        Adds files together with their sources to the database.
+        Rejects request if one of the resolved files is not on user's home dir
+        or created a long time ago.
       </tp:docstring>
       <arg name="request" type="ay" direction="in">
-        Serialized AddFileRequest message.
+        Serialized AddFilesRequest message.
       </arg>
       <arg name="response" type="ay" direction="out">
-        Serialized AddFileResponse message.
+        Serialized AddFilesResponse message.
       </arg>
-      <annotation name="org.chromium.DBus.Method.Kind" value="simple" />
+      <annotation name="org.chromium.DBus.Method.Kind" value="async" />
     </method>
 
     <method name="RequestFileAccess">
@@ -47,6 +49,32 @@
         |lifeline_fd| is a file descriptor by which the clients can manage the
         lifetime of the approved requests. Closing it will revoke the approval.
         |lifeline_fd| is already closed if the request was not allowed.
+      </arg>
+      <annotation name="org.chromium.DBus.Method.Kind" value="async" />
+    </method>
+
+     <method name="GetFilesSources">
+      <tp:docstring>
+        Returns sources for the requested files.
+      </tp:docstring>
+      <arg name="request" type="ay" direction="in">
+        Serialized GetFilesSourcesRequest message.
+      </arg>
+      <arg name="response" type="ay" direction="out">
+        Serialized GetFilesSourcesResponse message.
+      </arg>
+      <annotation name="org.chromium.DBus.Method.Kind" value="async" />
+    </method>
+
+    <method name="CheckFilesTransfer">
+      <tp:docstring>
+        Returns files disallowed to be transferred.
+      </tp:docstring>
+      <arg name="request" type="ay" direction="in">
+        Serialized CheckFilesTransferRequest message.
+      </arg>
+      <arg name="response" type="ay" direction="out">
+        Serialized CheckFilesTransferResponse message.
       </arg>
       <annotation name="org.chromium.DBus.Method.Kind" value="async" />
     </method>

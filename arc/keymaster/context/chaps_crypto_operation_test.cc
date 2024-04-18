@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <iterator>
+#include <optional>
 #include <vector>
 
 #include <brillo/secure_blob.h>
@@ -169,7 +170,7 @@ TEST_P(ChapsCryptoOperationTest, BeginUsesCorrectMechanism) {
 
 TEST_P(ChapsCryptoOperationTest, Update) {
   operation_.Begin(kDescription);
-  base::Optional<brillo::Blob> result = operation_.Update(kDataBlob);
+  std::optional<brillo::Blob> result = operation_.Update(kDataBlob);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_TRUE(result->empty());
@@ -177,7 +178,7 @@ TEST_P(ChapsCryptoOperationTest, Update) {
 
 TEST_P(ChapsCryptoOperationTest, Finish) {
   operation_.Begin(kDescription);
-  base::Optional<brillo::Blob> result = operation_.Finish();
+  std::optional<brillo::Blob> result = operation_.Finish();
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(result.value(), kSignatureBlob);

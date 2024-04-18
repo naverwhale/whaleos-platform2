@@ -1,17 +1,19 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "tpm_manager/server/tpm_initializer_impl.h"
 
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <base/check.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
+#include <brillo/secure_blob.h>
 #include <libhwsec/overalls/overalls_api.h>
 #include <tpm_manager-client/tpm_manager/dbus-constants.h>
 #include <trousers/scoped_tss_type.h>
@@ -32,6 +34,56 @@ constexpr char kWellKnownSrkSecret[] = "well_known_srk_secret";
 constexpr int kDelegateSecretSize = 20;
 constexpr uint8_t kDefaultDelegateLabel = 2;
 constexpr uint8_t kDefaultDelegateFamilyLabel = 1;
+
+// Checks the |delegate| has the reset lock permission or not, return true
+// when we should resave the delegate to storage.
+bool CheckResetLockPermissions(tpm_manager::AuthDelegate* delegate) {
+  if (!delegate->has_reset_lock_permissions()) {
+    // No need to resave the delegate.
+    return false;
+  }
+
+  if (!USE_DOUBLE_EXTEND_PCR_ISSUE) {
+    // No need to resave the delegate.
+    return false;
+  }
+
+  brillo::Blob blob = brillo::BlobFromString(delegate->blob());
+
+  uint64_t offset = 0;
+  TPM_DELEGATE_OWNER_BLOB owner_blob;
+
+  TSS_RESULT result = Trspi_UnloadBlob_TPM_DELEGATE_OWNER_BLOB_s(
+      &offset, blob.data(), blob.size(), &owner_blob);
+  if (result != TPM_SUCCESS) {
+    // Save the reset_lock_permissions to false.
+    delegate->set_has_reset_lock_permissions(false);
+    return true;
+  }
+
+  base::ScopedClosureRunner cleanup_owner_blob(base::BindOnce(
+      [](TPM_DELEGATE_OWNER_BLOB& owner_blob) {
+        free(owner_blob.pub.pcrInfo.pcrSelection.pcrSelect);
+        free(owner_blob.additionalArea);
+        free(owner_blob.sensitiveArea);
+      },
+      std::ref(owner_blob)));
+
+  // If the delegate is pound to any PCR, we may not be able to reset the lock.
+  if (owner_blob.pub.pcrInfo.pcrSelection.sizeOfSelect > 0 &&
+      owner_blob.pub.pcrInfo.pcrSelection.pcrSelect != nullptr) {
+    for (int i = 0; i < owner_blob.pub.pcrInfo.pcrSelection.sizeOfSelect; i++) {
+      if (owner_blob.pub.pcrInfo.pcrSelection.pcrSelect[i] != 0) {
+        // Save the reset_lock_permissions to false.
+        delegate->set_has_reset_lock_permissions(false);
+        return true;
+      }
+    }
+  }
+
+  // No need to resave the delegate.
+  return false;
+}
 
 }  // namespace
 
@@ -234,6 +286,14 @@ void TpmInitializerImpl::PruneStoredPasswords() {
   }
 }
 
+bool TpmInitializerImpl::ChangeOwnerPassword(const std::string& old_password,
+                                             const std::string& new_password) {
+  LOG(INFO) << __func__ << ": attempting to change old tpm owner password"
+            << " to a new owner password";
+  TpmConnection connection(old_password);
+  return ChangeOwnerPassword(&connection, new_password);
+}
+
 bool TpmInitializerImpl::InitializeEndorsementKey() {
   TpmConnection connection;
   trousers::ScopedTssKey local_key_handle(connection.GetContext());
@@ -372,7 +432,7 @@ bool TpmInitializerImpl::ChangeOwnerPassword(
   if (TPM_ERROR(
           result = Tspi_Policy_SetSecret(
               policy_handle, TSS_SECRET_MODE_PLAIN, owner_password.size(),
-              reinterpret_cast<BYTE*>(base::data(mutable_owner_password))))) {
+              reinterpret_cast<BYTE*>(std::data(mutable_owner_password))))) {
     TPM_LOG(ERROR, result) << "Error calling Tspi_Policy_SetSecret";
     return false;
   }
@@ -430,6 +490,14 @@ bool TpmInitializerImpl::EnsurePersistentOwnerDelegate() {
   }
   auto owner_delegate = local_data.mutable_owner_delegate();
   if (!owner_delegate->blob().empty() && !owner_delegate->secret().empty()) {
+    if (CheckResetLockPermissions(owner_delegate)) {
+      // Resave the local data.
+      if (!local_data_store_->Write(local_data)) {
+        LOG(ERROR) << __func__ << ": Failed to write local data change.";
+        return false;
+      }
+    }
+
     return true;
   }
   LOG(WARNING) << __func__ << ": Owner delegate is missing; re-creating.";

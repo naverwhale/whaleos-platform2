@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,10 @@
 #include <list>
 #include <string>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <gtest/gtest_prod.h>
 
 #include "smbfs/mojom/smbfs.mojom.h"
@@ -116,7 +116,7 @@ class RecursiveDeleteOperation {
 
   // Origin/constructor thread task runner.
   scoped_refptr<base::SingleThreadTaskRunner> main_task_runner_ =
-      base::ThreadTaskRunnerHandle::Get();
+      base::SingleThreadTaskRunner::GetCurrentDefault();
   SambaInterface* samba_impl_;
   const std::string base_share_path_;
   const base::FilePath root_path_;

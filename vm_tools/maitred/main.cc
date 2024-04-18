@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,9 @@
 #include <string.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/uio.h>
+#include <unistd.h>
 
 #include <linux/vm_sockets.h>  // Needs to come after sys/socket.h
 
@@ -15,14 +17,14 @@
 #include <string>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
@@ -60,18 +62,28 @@ constexpr char kMaitredPortParam[] = "maitred.listen_port=";
 constexpr char kMaitredPortParamFmt[] = "maitred.listen_port=%d";
 constexpr char kMaitredStartProcessesParam[] = "maitred.no_startup_processes";
 
-// File descriptor that points to /dev/kmsg.  Needs to be a global variable
-// because logging::LogMessageHandlerFunction is just a function pointer so we
-// can't bind any variables to it via base::Bind.
-int g_kmsg_fd = -1;
+// TODO(b/288361720): These are temporary while we test the 'provision'
+// mount option. Once we're satisfied things are stable, we'll make this
+// the default and remove the kernel parameter.
+constexpr char kMaitredMountProvisionParam[] = "maitred.provision_stateful";
+// Expected path to mount-stateful executable on Borealis.
+constexpr char kMountStatefulPath[] = "/etc/init.d/mount-stateful";
+// "provision" flag enables provisioning, see b/234764695.
+constexpr char kExt4MountProvisionFlag[] = "provision";
 
-bool LogToKmsg(logging::LogSeverity severity,
-               const char* file,
-               int line,
-               size_t message_start,
-               const string& message) {
-  DCHECK_NE(g_kmsg_fd, -1);
+// File descriptor for log messages. Defaults to stderr.
+// Needs to be a global variable because logging::LogMessageHandlerFunction is
+// just a function pointer so we can't bind any variables to it via
+// base::Bind*.
+int g_log_fd = STDERR_FILENO;
+// Prefix for log messages. Default is empty.
+const char* g_log_prefix = "";
 
+bool LogHandler(logging::LogSeverity severity,
+                const char* file,
+                int line,
+                size_t message_start,
+                const string& message) {
   const char* priority = nullptr;
   switch (severity) {
     case logging::LOGGING_VERBOSE:
@@ -100,8 +112,8 @@ bool LogToKmsg(logging::LogSeverity severity,
           .iov_len = strlen(priority),
       },
       {
-          .iov_base = static_cast<void*>(const_cast<char*>(kLogPrefix)),
-          .iov_len = sizeof(kLogPrefix) - 1,
+          .iov_base = static_cast<void*>(const_cast<char*>(g_log_prefix)),
+          .iov_len = strlen(g_log_prefix),
       },
       {
           .iov_base = static_cast<void*>(
@@ -115,8 +127,8 @@ bool LogToKmsg(logging::LogSeverity severity,
     count += iov.iov_len;
   }
 
-  ssize_t ret = HANDLE_EINTR(
-      writev(g_kmsg_fd, iovs, sizeof(iovs) / sizeof(struct iovec)));
+  ssize_t ret =
+      HANDLE_EINTR(writev(g_log_fd, iovs, sizeof(iovs) / sizeof(struct iovec)));
 
   // Even if the write wasn't successful, we can't log anything here because
   // this _is_ the logging function.  Just return whether the write succeeded.
@@ -141,21 +153,31 @@ int main(int argc, char** argv) {
     CHECK_EQ(fd, newfd);
   }
 
-  // Set up logging to /dev/kmsg.
-  base::ScopedFD kmsg_fd(open(kDevKmsg, O_WRONLY | O_CLOEXEC));
-  PCHECK(kmsg_fd.is_valid()) << "Failed to open " << kDevKmsg;
+  // Get PID of maitred to decide at runtime how maitred ran as PID 1 or
+  // non-PID 1. If maitred is non-PID 1, maitred will not have to run init
+  // functionality that systemd already does
+  bool maitred_is_pid1 = getpid() == 1;
+  LOG(INFO) << "maitred running as PID1 " << maitred_is_pid1;
 
-  g_kmsg_fd = kmsg_fd.get();
-  logging::SetLogMessageHandler(LogToKmsg);
+  // Set up logging to /dev/kmsg if maitred is PID 1.
+  if (maitred_is_pid1) {
+    g_log_fd = open(kDevKmsg, O_WRONLY | O_CLOEXEC);
+    CHECK_GE(g_log_fd, 0);
+    g_log_prefix = kLogPrefix;
+  }
+  logging::SetLogMessageHandler(LogHandler);
 
   std::unique_ptr<vm_tools::maitred::Init> init;
-  init = vm_tools::maitred::Init::Create();
+  init = vm_tools::maitred::Init::Create(maitred_is_pid1);
   CHECK(init);
 
   // Check for kernel parameter to set startup listener port.
   int startup_port = vm_tools::kDefaultStartupListenerPort;
   // Check for kernel parameter to disable startup processes.
   bool run_startup_processes = true;
+  // Check for the kernel parameter to enable "provision" flag when mounting
+  // stable. Only intended to be used for Borealis.
+  bool provision = false;
 
   // Parse kernel command line
   std::string kernel_parameters;
@@ -176,6 +198,8 @@ int main(int argc, char** argv) {
         startup_port = read_port;
       } else if (p == kMaitredStartProcessesParam) {
         run_startup_processes = false;
+      } else if (p == kMaitredMountProvisionParam) {
+        provision = true;
       }
     }
   }
@@ -213,6 +237,12 @@ int main(int argc, char** argv) {
       }
 
       std::vector<std::string> argv(req.argv().begin(), req.argv().end());
+      // If provisioning is being used, check if the current process is
+      // mounting stateful and append the "provision" option.
+      if (provision && argv.at(0) == kMountStatefulPath) {
+        argv.push_back(kExt4MountProvisionFlag);
+      }
+
       std::map<string, string> env;
       for (const auto& pair : req.env()) {
         env[pair.first] = pair.second;
@@ -247,14 +277,22 @@ int main(int argc, char** argv) {
     }
   }
 
+  base::Thread dbus_thread{"D-Bus Thread"};
+  if (!dbus_thread.StartWithOptions(
+          base::Thread::Options(base::MessagePumpType::IO, 0))) {
+    LOG(ERROR) << "Failed starting the D-Bus thread";
+    return -1;
+  }
+
   // Build the server.
   grpc::ServerBuilder builder;
   builder.AddListeningPort(
       base::StringPrintf("vsock:%u:%u", VMADDR_CID_ANY, vm_tools::kMaitredPort),
       grpc::InsecureServerCredentials());
 
-  vm_tools::maitred::ServiceImpl maitred_service(std::move(init));
-  if (!maitred_service.Init()) {
+  vm_tools::maitred::ServiceImpl maitred_service(std::move(init),
+                                                 maitred_is_pid1);
+  if (!maitred_service.Init(dbus_thread.task_runner())) {
     LOG(FATAL) << "Failed to initialize maitred service";
   }
   builder.RegisterService(&maitred_service);
@@ -275,12 +313,12 @@ int main(int argc, char** argv) {
 
   // The following line is very confusing but is equivalent to this code:
   //
-  // maitred_service.set_shutdown_cb(base::Bind(
+  // maitred_service.set_shutdown_cb(base::BindOnce(
   //     [](scoped_refptr<base::SingleThreadTaskRunner> runner,
   //        grpc::Server* server) {
   //       runner->PostTask(
   //           FROM_HERE,
-  //           base::Bind([](grpc::Server* s) { s->Shutdown(); }, server));
+  //           base::BindOnce([](grpc::Server* s) { s->Shutdown(); }, server));
   //     },
   //     shutdown_thread.task_runner(), server.get()));
   //
@@ -288,11 +326,11 @@ int main(int argc, char** argv) {
   // the code into a separate function, which would break up the flow of logic
   // and be arguably less readable than this code + comment.
   //
-  // Once base::Bind in chrome os has been updated to handle lambdas, we should
-  // consider replacing this with the above code instead.
-  maitred_service.set_shutdown_cb(base::Bind(
+  // Once base::BindOnce in chrome os has been updated to handle lambdas, we
+  // should consider replacing this with the above code instead.
+  maitred_service.set_shutdown_cb(base::BindOnce(
       &base::TaskRunner::PostTask, shutdown_thread.task_runner(), FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           static_cast<void (grpc::Server::*)(void)>(&grpc::Server::Shutdown),
           base::Unretained(server.get()))));
 
@@ -315,9 +353,10 @@ int main(int argc, char** argv) {
   // The following call will return once the server has been stopped.
   server->Wait();
 
-  LOG(INFO) << "Shutting down system NOW";
-
-  reboot(RB_AUTOBOOT);
+  if (maitred_is_pid1) {
+    LOG(INFO) << "Shutting down system NOW";
+    reboot(RB_AUTOBOOT);
+  }
 
   return 0;
 }

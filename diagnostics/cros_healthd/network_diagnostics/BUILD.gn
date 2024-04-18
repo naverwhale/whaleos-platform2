@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -16,14 +16,14 @@ source_set("libnetwork_diagnostics_adapter") {
   configs += [ ":libnetwork_diagnostics_pkg_deps" ]
   deps = [
     ":libnetwork_diagnostics_utils",
-    "//diagnostics/mojo:network_diagnostics_mojo_bindings",
+    "//diagnostics/mojom/external:libnetwork_diagnostics_mojo_bindings",
   ]
   sources = [ "network_diagnostics_adapter_impl.cc" ]
 }
 
 source_set("libnetwork_diagnostics_utils") {
   configs += [ ":libnetwork_diagnostics_pkg_deps" ]
-  deps = [ "//diagnostics/mojo:network_diagnostics_mojo_bindings" ]
+  deps = [ "//diagnostics/mojom/external:libnetwork_diagnostics_mojo_bindings" ]
   sources = [ "network_diagnostics_utils.cc" ]
 }
 
@@ -34,14 +34,11 @@ if (use.test) {
 
   source_set("network_diagnostics_test") {
     sources = [ "network_diagnostics_adapter_impl_test.cc" ]
-    configs += [
-      ":network_diagnostics_test_pkg_deps",
-      "//common-mk:test",
-    ]
+    configs += [ ":network_diagnostics_test_pkg_deps" ]
     deps = [
       ":libnetwork_diagnostics_adapter",
       ":libnetwork_diagnostics_utils",
-      "//diagnostics/common:mojo_testrunner",
+      "//diagnostics/base:healthd_testrunner",
     ]
   }
 }
@@ -55,7 +52,7 @@ if (use.test || use.fuzzer) {
     configs += [ ":libnetwork_diagnostics_adapter_test_utils_pkg_deps" ]
     deps = [
       ":libnetwork_diagnostics_adapter",
-      "//diagnostics/mojo:cros_healthd_mojo_bindings",
+      "//diagnostics/mojom/public:libcros_healthd_mojo_bindings",
     ]
     sources = [ "mock_network_diagnostics_adapter.cc" ]
   }

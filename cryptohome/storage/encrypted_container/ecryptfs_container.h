@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@
 
 #include "cryptohome/platform.h"
 #include "cryptohome/storage/encrypted_container/filesystem_key.h"
+#include "cryptohome/storage/keyring/keyring.h"
 
 namespace cryptohome {
 
@@ -20,21 +21,25 @@ class EcryptfsContainer : public EncryptedContainer {
  public:
   EcryptfsContainer(const base::FilePath& backing_dir,
                     const FileSystemKeyReference& key_reference,
-                    Platform* platform);
+                    Platform* platform,
+                    Keyring* keyring);
   ~EcryptfsContainer() = default;
 
-  bool Setup(const FileSystemKey& encryption_key, bool create) override;
+  bool Setup(const FileSystemKey& encryption_key) override;
   bool Teardown() override;
   bool Exists() override;
   bool Purge() override;
-  EncryptedContainerType GetType() override {
+  bool Reset() override;
+  EncryptedContainerType GetType() const override {
     return EncryptedContainerType::kEcryptfs;
   }
+  base::FilePath GetBackingLocation() const override;
 
  private:
   const base::FilePath backing_dir_;
-  const FileSystemKeyReference key_reference_;
+  FileSystemKeyReference key_reference_;
   Platform* platform_;
+  Keyring* keyring_;
 };
 
 }  // namespace cryptohome

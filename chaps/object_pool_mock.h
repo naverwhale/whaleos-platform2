@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "chaps/object.h"
@@ -38,6 +37,8 @@ class ObjectPoolMock : public ObjectPool {
   MOCK_METHOD1(GetModifiableObject, Object*(const Object*));
   MOCK_METHOD1(Flush, ObjectPool::Result(const Object*));
   MOCK_METHOD0(IsPrivateLoaded, bool());
+  MOCK_METHOD0(IsValid, bool());
+  MOCK_METHOD0(Invalidate, void());
   void SetupFake(int handle_base) {
     last_handle_ = handle_base;
     ON_CALL(*this, Insert(testing::_))
@@ -52,6 +53,7 @@ class ObjectPoolMock : public ObjectPool {
         .WillByDefault(
             testing::Invoke(this, &ObjectPoolMock::FakeFindByHandle));
     ON_CALL(*this, IsPrivateLoaded()).WillByDefault(testing::Return(true));
+    ON_CALL(*this, IsValid()).WillByDefault(testing::Return(true));
   }
 
  private:

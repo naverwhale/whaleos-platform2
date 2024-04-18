@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,66 +7,17 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/optional.h>
+#include <base/files/file_path.h>
 #include <brillo/errors/error.h>
-#include <lorgnette/proto_bindings/lorgnette_service.pb.h>
 #include <sane/sane.h>
 
+#include "lorgnette/sane_device.h"
+
 namespace lorgnette {
-
-struct ValidOptionValues {
-  std::vector<uint32_t> resolutions;
-  std::vector<DocumentSource> sources;
-  std::vector<std::string> color_modes;
-};
-
-enum FrameFormat {
-  kGrayscale,
-  kRGB,
-};
-
-struct ScanParameters {
-  FrameFormat format;
-  int bytes_per_line;
-  int pixels_per_line;
-  int lines;
-  int depth;
-};
-
-// This class represents an active connection to a scanning device.
-// At most 1 active connection to a particular device is allowed at once.
-// This class is thread-compatible, but not thread-safe.
-class SaneDevice {
- public:
-  virtual ~SaneDevice() {}
-
-  virtual base::Optional<ValidOptionValues> GetValidOptionValues(
-      brillo::ErrorPtr* error) = 0;
-
-  virtual base::Optional<int> GetScanResolution(brillo::ErrorPtr* error) = 0;
-  virtual bool SetScanResolution(brillo::ErrorPtr* error, int resolution) = 0;
-  virtual base::Optional<std::string> GetDocumentSource(
-      brillo::ErrorPtr* error) = 0;
-  virtual bool SetDocumentSource(brillo::ErrorPtr* error,
-                                 const std::string& source_name) = 0;
-  virtual base::Optional<ColorMode> GetColorMode(brillo::ErrorPtr* error) = 0;
-  virtual bool SetColorMode(brillo::ErrorPtr* error, ColorMode color_mode) = 0;
-  virtual bool SetScanRegion(brillo::ErrorPtr* error,
-                             const ScanRegion& region) = 0;
-  virtual SANE_Status StartScan(brillo::ErrorPtr* error) = 0;
-  virtual base::Optional<ScanParameters> GetScanParameters(
-      brillo::ErrorPtr* error) = 0;
-  virtual SANE_Status ReadScanData(brillo::ErrorPtr* error,
-                                   uint8_t* buf,
-                                   size_t count,
-                                   size_t* read_out) = 0;
-
-  // This function is thread-safe.
-  virtual bool CancelScan(brillo::ErrorPtr* error) = 0;
-};
 
 // This class represents a connection to the scanner library SANE.  Once
 // created, it will initialize a connection to SANE, and it will disconnect
@@ -77,13 +28,15 @@ class SaneClient {
  public:
   virtual ~SaneClient() {}
 
-  virtual base::Optional<std::vector<ScannerInfo>> ListDevices(
+  virtual std::optional<std::vector<ScannerInfo>> ListDevices(
       brillo::ErrorPtr* error) = 0;
   std::unique_ptr<SaneDevice> ConnectToDevice(brillo::ErrorPtr* error,
                                               SANE_Status* sane_status,
                                               const std::string& device_name);
 
  protected:
+  virtual base::FilePath IppUsbSocketDir() const;
+
   virtual std::unique_ptr<SaneDevice> ConnectToDeviceInternal(
       brillo::ErrorPtr* error,
       SANE_Status* sane_status,

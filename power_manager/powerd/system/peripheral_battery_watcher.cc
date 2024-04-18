@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,23 +10,25 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#include <base/time/time.h>
 #include <chromeos/dbus/service_constants.h>
 #include <re2/re2.h>
 
-#include "power_manager/common/util.h"
+#include "power_manager/common/metrics_constants.h"
+#include "power_manager/common/metrics_sender.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/powerd/system/dbus_wrapper.h"
 #include "power_manager/proto_bindings/peripheral_battery_status.pb.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -34,12 +36,15 @@ namespace {
 const char kDefaultPeripheralBatteryPath[] = "/sys/class/power_supply/";
 
 // Default interval for polling the device battery info.
-const int kDefaultPollIntervalMs = 600000;
+constexpr base::TimeDelta kDefaultPollInterval = base::Minutes(10);
 
 constexpr char kBluetoothAddressRegex[] =
     "^([0-9A-Fa-f]{2}:){5}([0-9A-Fa-f]{2})$";
 
-constexpr char kPeripheralChargerRegex[] = ".*/PCHG([0-9]+)$";
+// TODO(b/215381232): Temporarily support both 'PCHG' name and 'peripheral' name
+// till upstream kernel driver is merged.
+constexpr LazyRE2 kPeripheralChargerRegex = {
+    R"(/(?:peripheral|PCHG)(?:[0-9]+)$)"};
 
 // Reads |path| to |value_out| and trims trailing whitespace. False is returned
 // if the file doesn't exist or can't be read.
@@ -49,10 +54,6 @@ bool ReadStringFromFile(const base::FilePath& path, std::string* value_out) {
 
   base::TrimWhitespaceASCII(*value_out, base::TRIM_TRAILING, value_out);
   return true;
-}
-
-std::string SysnameFromBluetoothAddress(const std::string& address) {
-  return "hid-" + base::ToLowerASCII(address) + "-battery";
 }
 
 bool ExtractBluetoothAddress(const base::FilePath& path, std::string* address) {
@@ -99,9 +100,7 @@ const char PeripheralBatteryWatcher::kSerialNumberFile[] = "serial_number";
 const char PeripheralBatteryWatcher::kUdevSubsystem[] = "power_supply";
 
 PeripheralBatteryWatcher::PeripheralBatteryWatcher()
-    : dbus_wrapper_(nullptr),
-      peripheral_battery_path_(kDefaultPeripheralBatteryPath),
-      poll_interval_ms_(kDefaultPollIntervalMs),
+    : peripheral_battery_path_(kDefaultPeripheralBatteryPath),
       bluez_battery_provider_(std::make_unique<BluezBatteryProvider>()),
       weak_ptr_factory_(this) {}
 
@@ -117,12 +116,6 @@ void PeripheralBatteryWatcher::Init(DBusWrapperInterface* dbus_wrapper,
 
   dbus_wrapper_ = dbus_wrapper;
   ReadBatteryStatusesTimer();
-
-  dbus_wrapper->ExportMethod(
-      kRefreshBluetoothBatteryMethod,
-      base::BindRepeating(
-          &PeripheralBatteryWatcher::OnRefreshBluetoothBatteryMethodCall,
-          weak_ptr_factory_.GetWeakPtr()));
 
   dbus_wrapper->ExportMethod(
       kRefreshAllPeripheralBatteryMethod,
@@ -155,7 +148,7 @@ bool PeripheralBatteryWatcher::IsPeripheralDevice(
 bool PeripheralBatteryWatcher::IsPeripheralChargerDevice(
     const base::FilePath& device_path) const {
   // Peripheral chargers have specific names.
-  return (RE2::FullMatch(device_path.value(), kPeripheralChargerRegex));
+  return (RE2::PartialMatch(device_path.value(), *kPeripheralChargerRegex));
 }
 
 void PeripheralBatteryWatcher::GetBatteryList(
@@ -254,21 +247,24 @@ void PeripheralBatteryWatcher::ReadBatteryStatus(const base::FilePath& path,
   status = ReadChargeStatus(path);
   sn = ReadSerialNumber(path);
 
-  battery_readers_.push_back(std::make_unique<AsyncFileReader>());
-  AsyncFileReader* reader = battery_readers_.back().get();
+  battery_readers_[path] = std::make_unique<AsyncFileReader>();
+  AsyncFileReader* reader = battery_readers_[path].get();
 
+  base::TimeTicks start_time = base::TimeTicks::Now();
   if (reader->Init(capacity_path)) {
-    reader->StartRead(base::Bind(&PeripheralBatteryWatcher::ReadCallback,
-                                 base::Unretained(this), path, model_name,
-                                 status, sn, active_update),
-                      base::Bind(&PeripheralBatteryWatcher::ErrorCallback,
-                                 base::Unretained(this), path, model_name));
+    reader->StartRead(
+        base::BindOnce(&PeripheralBatteryWatcher::ReadCallback,
+                       base::Unretained(this), path, model_name, status, sn,
+                       active_update, start_time),
+        base::BindOnce(&PeripheralBatteryWatcher::ErrorCallback,
+                       base::Unretained(this), path, model_name, start_time));
   } else {
     LOG(ERROR) << "Can't read battery capacity " << capacity_path.value();
   }
 }
 
 void PeripheralBatteryWatcher::ReadBatteryStatuses() {
+  TRACE_EVENT("power", "PeripheralBatteryWatcher::ReadBatteryStatuses");
   battery_readers_.clear();
 
   std::vector<base::FilePath> new_battery_list;
@@ -282,9 +278,10 @@ void PeripheralBatteryWatcher::ReadBatteryStatuses() {
 void PeripheralBatteryWatcher::ReadBatteryStatusesTimer() {
   ReadBatteryStatuses();
 
-  poll_timer_.Start(FROM_HERE,
-                    base::TimeDelta::FromMilliseconds(poll_interval_ms_), this,
-                    &PeripheralBatteryWatcher::ReadBatteryStatuses);
+  poll_timer_.Start(
+      FROM_HERE, kDefaultPollInterval,
+      base::BindRepeating(&PeripheralBatteryWatcher::ReadBatteryStatuses,
+                          weak_ptr_factory_.GetWeakPtr()));
 }
 
 void PeripheralBatteryWatcher::SendBatteryStatus(
@@ -322,7 +319,9 @@ void PeripheralBatteryWatcher::ReadCallback(const base::FilePath& path,
                                             int status,
                                             const std::string& serial_number,
                                             bool active_update,
+                                            base::TimeTicks start_time,
                                             const std::string& data) {
+  base::TimeDelta latency = base::TimeTicks::Now() - start_time;
   std::string trimmed_data;
   base::TrimWhitespaceASCII(data, base::TRIM_ALL, &trimmed_data);
   int level = -1;
@@ -333,44 +332,27 @@ void PeripheralBatteryWatcher::ReadCallback(const base::FilePath& path,
     LOG(ERROR) << "Invalid battery level reading : [" << data << "]"
                << " from " << path.value();
   }
+  base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(
+      FROM_HERE, std::move(battery_readers_.extract(path).mapped()));
+  SendMetric(metrics::kPeripheralReadLatencyMs,
+             static_cast<int>(round(latency.InMillisecondsF())),
+             metrics::kPeripheralReadLatencyMsMin,
+             metrics::kPeripheralReadLatencyMsMax, metrics::kDefaultBuckets);
 }
 
 void PeripheralBatteryWatcher::ErrorCallback(const base::FilePath& path,
-                                             const std::string& model_name) {
+                                             const std::string& model_name,
+                                             base::TimeTicks start_time) {
+  base::TimeDelta latency = base::TimeTicks::Now() - start_time;
   SendBatteryStatus(path, model_name, -1,
                     PeripheralBatteryStatus_ChargeStatus_CHARGE_STATUS_UNKNOWN,
                     "", false);
-}
-
-void PeripheralBatteryWatcher::OnRefreshBluetoothBatteryMethodCall(
-    dbus::MethodCall* method_call,
-    dbus::ExportedObject::ResponseSender response_sender) {
-  dbus::MessageReader reader(method_call);
-
-  std::string address;
-  if (!reader.PopString(&address)) {
-    LOG(WARNING) << "Failed to pop Bluetooth device address from "
-                 << kRefreshBluetoothBatteryMethod << " D-Bus method call";
-    std::move(response_sender)
-        .Run(
-            std::unique_ptr<dbus::Response>(dbus::ErrorResponse::FromMethodCall(
-                method_call, DBUS_ERROR_INVALID_ARGS,
-                "Expected device address string")));
-    return;
-  }
-
-  // Only process requests for valid Bluetooth addresses.
-  if (RE2::FullMatch(address, kBluetoothAddressRegex)) {
-    base::FilePath path = base::FilePath(peripheral_battery_path_)
-                              .Append(SysnameFromBluetoothAddress(address));
-    ReadBatteryStatus(path,
-                      true /* active, as bluetooth will interrogate device */);
-  }
-
-  // Best effort, always return success.
-  std::unique_ptr<dbus::Response> response =
-      dbus::Response::FromMethodCall(method_call);
-  std::move(response_sender).Run(std::move(response));
+  base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(
+      FROM_HERE, std::move(battery_readers_.extract(path).mapped()));
+  SendMetric(metrics::kPeripheralReadErrorLatencyMs,
+             static_cast<int>(round(latency.InMillisecondsF())),
+             metrics::kPeripheralReadLatencyMsMin,
+             metrics::kPeripheralReadLatencyMsMax, metrics::kDefaultBuckets);
 }
 
 void PeripheralBatteryWatcher::OnRefreshAllPeripheralBatteryMethodCall(
@@ -386,5 +368,4 @@ void PeripheralBatteryWatcher::OnRefreshAllPeripheralBatteryMethodCall(
   std::move(response_sender).Run(std::move(response));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

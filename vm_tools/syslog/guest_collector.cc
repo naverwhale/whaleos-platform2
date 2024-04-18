@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,11 +20,11 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
@@ -32,7 +32,7 @@
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <chromeos/scoped_minijail.h>
 #include <grpcpp/grpcpp.h>
@@ -59,7 +59,7 @@ constexpr char kSyslog[] = "syslog";
 }  // namespace
 
 std::unique_ptr<GuestCollector> GuestCollector::Create(
-    base::Closure shutdown_closure) {
+    base::OnceClosure shutdown_closure) {
   auto collector = base::WrapUnique<GuestCollector>(
       new GuestCollector(std::move(shutdown_closure)));
 
@@ -69,7 +69,7 @@ std::unique_ptr<GuestCollector> GuestCollector::Create(
   return collector;
 }
 
-GuestCollector::GuestCollector(base::Closure shutdown_closure)
+GuestCollector::GuestCollector(base::OnceClosure shutdown_closure)
     : shutdown_closure_(std::move(shutdown_closure)), weak_factory_(this) {}
 
 GuestCollector::~GuestCollector() {
@@ -125,7 +125,8 @@ void GuestCollector::OnSignalReadable() {
   }
   DCHECK_EQ(info.ssi_signo, SIGTERM);
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, shutdown_closure_);
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, std::move(shutdown_closure_));
 }
 
 bool GuestCollector::SendUserLogs() {
@@ -171,7 +172,7 @@ std::unique_ptr<GuestCollector> GuestCollector::CreateForTesting(
     std::unique_ptr<vm_tools::LogCollector::Stub> stub) {
   CHECK(stub);
   auto collector =
-      base::WrapUnique<GuestCollector>(new GuestCollector(base::Closure()));
+      base::WrapUnique<GuestCollector>(new GuestCollector(base::OnceClosure()));
 
   if (!collector->InitForTesting(std::move(syslog_fd), std::move(stub))) {
     collector.reset();

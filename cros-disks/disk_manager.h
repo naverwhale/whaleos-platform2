@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <gtest/gtest_prod.h>
 
 #include "cros-disks/disk.h"
@@ -52,13 +52,12 @@ class DiskManager : public MountManager {
   // Returns true if mounting |source_path| is supported.
   bool CanMount(const std::string& source_path) const override;
 
-  // Returns the type of mount sources supported by the manager.
-  MountSourceType GetMountSourceType() const override {
+  MountSourceType GetMountSourceType() const final {
     return MOUNT_SOURCE_REMOVABLE_DEVICE;
   }
 
   // Unmounts all mounted paths.
-  bool UnmountAll() override;
+  void UnmountAll() override;
 
  protected:
   // Mounts |source_path| to |mount_path| as |filesystem_type| with |options|.
@@ -66,19 +65,16 @@ class DiskManager : public MountManager {
                                       const std::string& filesystem_type,
                                       const std::vector<std::string>& options,
                                       const base::FilePath& mount_path,
-                                      MountErrorType* error) override;
+                                      MountError* error) override;
 
   // Returns a suggested mount path for a source path.
   std::string SuggestMountPath(const std::string& source_path) const override;
 
   // Returns true to reserve a mount path on errors due to unknown or
   // unsupported filesystems.
-  bool ShouldReserveMountPathOnError(MountErrorType error_type) const override;
+  bool ShouldReserveMountPathOnError(MountError error_type) const override;
 
  private:
-  // MountPoint implementation that ejects the device on unmount.
-  class EjectingMountPoint;
-
   // Ejects media for the device |device_file|. Return true if the eject process
   // has started or |eject_device_on_unmount_| is false, or false if the eject
   // process failed.
@@ -97,10 +93,6 @@ class DiskManager : public MountManager {
 
   // Set to true if devices should be ejected upon unmount.
   bool eject_device_on_unmount_;
-
-  // A mapping from a mount path to the corresponding device that should
-  // be ejected on unmount.
-  std::unordered_map<std::string, Disk> devices_to_eject_on_unmount_;
 
   // Mapping of filesystem types to corresponding mounters.
   std::unordered_map<std::string, std::unique_ptr<Mounter>> mounters_;

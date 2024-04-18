@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,13 +18,13 @@ class RecoveryInstallerTest : public ::testing::Test {
 };
 
 TEST_F(RecoveryInstallerTest, RepartitionDiskFailure) {
-  EXPECT_CALL(mock_process_manager_, RunCommand(_, _))
+  EXPECT_CALL(mock_process_manager_, RunCommandWithOutput(_, _, _, _))
       .WillOnce(testing::Return(false));
   EXPECT_FALSE(recovery_installer_.RepartitionDisk());
 }
 
 TEST_F(RecoveryInstallerTest, RepeatedRepartitionDisk) {
-  EXPECT_CALL(mock_process_manager_, RunCommand(_, _))
+  EXPECT_CALL(mock_process_manager_, RunCommandWithOutput(_, _, _, _))
       .WillOnce(testing::Return(true));
   EXPECT_TRUE(recovery_installer_.RepartitionDisk());
 

@@ -1,42 +1,44 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "diagnostics/cros_healthd/fetchers/tpm_fetcher.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
 #include <attestation-client/attestation/dbus-proxies.h>
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/callback.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/time/time.h>
 #include <brillo/errors/error.h>
 #include <dbus/object_proxy.h>
 #include <tpm_manager-client/tpm_manager/dbus-proxies.h>
 
-#include "diagnostics/common/dbus_utils.h"
+#include "diagnostics/base/file_utils.h"
+#include "diagnostics/cros_healthd/utils/dbus_utils.h"
 #include "diagnostics/cros_healthd/utils/error_utils.h"
-#include "diagnostics/cros_healthd/utils/file_utils.h"
 
 namespace diagnostics {
+
 namespace {
 
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
+namespace mojom = ::ash::cros_healthd::mojom;
 
 // Tpm manager and attestation require a long timeout.
-const int64_t DBUS_TIMEOUT_MS =
-    base::TimeDelta::FromMinutes(2).InMilliseconds();
+const int64_t DBUS_TIMEOUT_MS = base::Minutes(2).InMilliseconds();
 
-mojo_ipc::TpmGSCVersion GetGscVersion(
+mojom::TpmGSCVersion GetGscVersion(
     const tpm_manager::GetVersionInfoReply& reply) {
   switch (reply.gsc_version()) {
     case tpm_manager::GSC_VERSION_NOT_GSC:
-      return mojo_ipc::TpmGSCVersion::kNotGSC;
+      return mojom::TpmGSCVersion::kNotGSC;
     case tpm_manager::GSC_VERSION_CR50:
-      return mojo_ipc::TpmGSCVersion::kCr50;
+      return mojom::TpmGSCVersion::kCr50;
     case tpm_manager::GSC_VERSION_TI50:
-      return mojo_ipc::TpmGSCVersion::kTi50;
+      return mojom::TpmGSCVersion::kTi50;
   }
 }
 
@@ -60,10 +62,10 @@ void TpmFetcher::HandleVersion(brillo::Error* err,
   }
   if (reply.status() != tpm_manager::STATUS_SUCCESS) {
     SendError("TpmManager::GetVersionInfo() returned error status: " +
-              std::to_string(reply.status()));
+              base::NumberToString(reply.status()));
     return;
   }
-  auto version = mojo_ipc::TpmVersion::New();
+  auto version = mojom::TpmVersion::New();
   version->gsc_version = GetGscVersion(reply);
   version->family = reply.family();
   version->spec_level = reply.spec_level();
@@ -71,8 +73,8 @@ void TpmFetcher::HandleVersion(brillo::Error* err,
   version->tpm_model = reply.tpm_model();
   version->firmware_version = reply.firmware_version();
   version->vendor_specific = reply.vendor_specific().empty()
-                                 ? base::nullopt
-                                 : base::make_optional(reply.vendor_specific());
+                                 ? std::nullopt
+                                 : std::make_optional(reply.vendor_specific());
   info_->version = std::move(version);
   CheckAndSendInfo();
 }
@@ -96,10 +98,10 @@ void TpmFetcher::HandleStatus(
   }
   if (reply.status() != tpm_manager::STATUS_SUCCESS) {
     SendError("TpmManager::GetTpmNonsensitiveStatus() returned error status: " +
-              std::to_string(reply.status()));
+              base::NumberToString(reply.status()));
     return;
   }
-  auto status = mojo_ipc::TpmStatus::New();
+  auto status = mojom::TpmStatus::New();
   status->enabled = reply.is_enabled();
   status->owned = reply.is_owned();
   status->owner_password_is_present = reply.is_owner_password_present();
@@ -126,11 +128,11 @@ void TpmFetcher::HandleDictionaryAttack(
   }
   if (reply.status() != tpm_manager::STATUS_SUCCESS) {
     SendError("TpmManager::GetDictionaryAttackInfo() returned error status: " +
-              std::to_string(reply.status()));
+              base::NumberToString(reply.status()));
     return;
   }
 
-  auto da = mojo_ipc::TpmDictionaryAttack::New();
+  auto da = mojom::TpmDictionaryAttack::New();
   da->counter = reply.dictionary_attack_counter();
   da->threshold = reply.dictionary_attack_threshold();
   da->lockout_in_effect = reply.dictionary_attack_lockout_in_effect();
@@ -157,11 +159,11 @@ void TpmFetcher::HandleAttestation(brillo::Error* err,
   }
   if (reply.status() != attestation::STATUS_SUCCESS) {
     SendError("TpmManager::GetDictionaryAttackInfo() returned error status: " +
-              std::to_string(reply.status()));
+              base::NumberToString(reply.status()));
     return;
   }
 
-  auto data = mojo_ipc::TpmAttestation::New();
+  auto data = mojom::TpmAttestation::New();
   data->prepared_for_enrollment = reply.prepared_for_enrollment();
   data->enrolled = reply.enrolled();
   info_->attestation = std::move(data);
@@ -186,11 +188,11 @@ void TpmFetcher::HandleSupportedFeatures(
   }
   if (reply.status() != tpm_manager::STATUS_SUCCESS) {
     SendError("TpmManager::GetSupportedFeatures() returned error status: " +
-              std::to_string(reply.status()));
+              base::NumberToString(reply.status()));
     return;
   }
 
-  auto data = mojo_ipc::TpmSupportedFeatures::New();
+  auto data = mojom::TpmSupportedFeatures::New();
   data->support_u2f = reply.support_u2f();
   data->support_pinweaver = reply.support_pinweaver();
   data->support_runtime_selection = reply.support_runtime_selection();
@@ -205,16 +207,15 @@ void TpmFetcher::CheckAndSendInfo() {
       !info_->attestation || !info_->supported_features) {
     return;
   }
-  SendResult(mojo_ipc::TpmResult::NewTpmInfo(std::move(info_)));
+  SendResult(mojom::TpmResult::NewTpmInfo(std::move(info_)));
 }
 
 void TpmFetcher::SendError(const std::string& message) {
-  SendResult(mojo_ipc::TpmResult::NewError(CreateAndLogProbeError(
-      mojo_ipc::ErrorType::kServiceUnavailable, message)));
+  SendResult(mojom::TpmResult::NewError(
+      CreateAndLogProbeError(mojom::ErrorType::kServiceUnavailable, message)));
 }
 
-void TpmFetcher::SendResult(
-    chromeos::cros_healthd::mojom::TpmResultPtr result) {
+void TpmFetcher::SendResult(mojom::TpmResultPtr result) {
   // Invalid all weak ptrs to prevent other callbacks to be run.
   weak_factory_.InvalidateWeakPtrs();
   if (pending_callbacks_.empty())
@@ -233,7 +234,7 @@ void TpmFetcher::FetchTpmInfo(TpmFetcher::FetchTpmInfoCallback&& callback) {
   if (pending_callbacks_.size() > 1)
     return;
 
-  info_ = mojo_ipc::TpmInfo::New();
+  info_ = mojom::TpmInfo::New();
   FetchVersion();
   FetchStatus();
   FetchDictionaryAttack();

@@ -1,24 +1,24 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "libhwsec/error/tpm2_error.h"
 #include "libhwsec-foundation/error/testing_helper.h"
 
-#include <sstream>
 #include <type_traits>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 namespace hwsec {
-namespace error {
 
-using ::hwsec_foundation::error::CreateError;
-using ::hwsec_foundation::error::ErrorBase;
-using ::hwsec_foundation::error::WrapError;
-using ::hwsec_foundation::error::testing::TestForCreateError;
-using ::hwsec_foundation::error::testing::TestForWrapError;
+using ::hwsec_foundation::error::testing::IsOk;
+using ::hwsec_foundation::error::testing::NotOk;
+using ::hwsec_foundation::status::MakeStatus;
+using ::hwsec_foundation::status::StatusChain;
+
+static_assert(unified_tpm_error::kHwsecTpmErrorBase == trunks::kTrunksErrorBase,
+              "kHwsecTpmErrorBase and kTrunksErrorBase mismatch.");
 
 class TestingTPM2ErrorTest : public ::testing::Test {
  public:
@@ -26,57 +26,40 @@ class TestingTPM2ErrorTest : public ::testing::Test {
   ~TestingTPM2ErrorTest() override = default;
 };
 
-TEST_F(TestingTPM2ErrorTest, CreateTPMErrorTest) {
-  EXPECT_FALSE((TestForCreateError<TPM2Error>::Check::value));
-  EXPECT_TRUE((TestForCreateError<TPM2Error, trunks::TPM_RC>::Check::value));
-  EXPECT_FALSE((TestForCreateError<TPM2Error, std::string>::Check::value));
-  auto err = CreateError<TPM2Error>(trunks::TPM_RC_SUCCESS);
-  EXPECT_EQ(nullptr, err);
-  err = CreateError<TPM2Error>(trunks::TPM_RC_HANDLE | trunks::TPM_RC_1);
-  EXPECT_NE(nullptr, err);
-}
+TEST_F(TestingTPM2ErrorTest, MakeStatus) {
+  StatusChain<TPM2Error> status = MakeStatus<TPM2Error>(trunks::TPM_RC_SUCCESS);
+  EXPECT_THAT(status, IsOk());
 
-TEST_F(TestingTPM2ErrorTest, TestForWrapError) {
-  EXPECT_FALSE((TestForWrapError<ErrorBase, ErrorBase>::Check::value));
-  EXPECT_FALSE(
-      (TestForWrapError<ErrorBase, ErrorBase, trunks::TPM_RC>::Check::value));
-  EXPECT_FALSE(
-      (TestForWrapError<ErrorBase, ErrorBase, std::string>::Check::value));
-  EXPECT_FALSE((TestForWrapError<ErrorBase, TPM2Error>::Check::value));
-  EXPECT_FALSE(
-      (TestForWrapError<ErrorBase, TPM2Error, trunks::TPM_RC>::Check::value));
-  EXPECT_FALSE(
-      (TestForWrapError<ErrorBase, TPM2Error, std::string>::Check::value));
-
-  EXPECT_FALSE((TestForWrapError<TPM2Error, ErrorBase>::Check::value));
-  EXPECT_TRUE(
-      (TestForWrapError<TPM2Error, ErrorBase, trunks::TPM_RC>::Check::value));
-  EXPECT_FALSE(
-      (TestForWrapError<TPM2Error, ErrorBase, std::string>::Check::value));
-  EXPECT_FALSE((TestForWrapError<TPM2Error, TPM2Error>::Check::value));
-  EXPECT_TRUE(
-      (TestForWrapError<TPM2Error, TPM2Error, trunks::TPM_RC>::Check::value));
-  EXPECT_FALSE(
-      (TestForWrapError<TPM2Error, TPM2Error, std::string>::Check::value));
-
-  EXPECT_FALSE((TestForWrapError<TPMError, TPM2Error>::Check::value));
-  EXPECT_FALSE(
-      (TestForWrapError<TPMError, TPM2Error, trunks::TPM_RC>::Check::value));
-  EXPECT_TRUE(
-      (TestForWrapError<TPMError, TPM2Error, const char[]>::Check::value));
-  EXPECT_TRUE((TestForWrapError<TPMError, TPM2Error, const char[],
-                                TPMRetryAction>::Check::value));
+  status = MakeStatus<TPM2Error>(trunks::TPM_RC_HANDLE | trunks::TPM_RC_1);
+  EXPECT_THAT(status, NotOk());
 }
 
 TEST_F(TestingTPM2ErrorTest, TPMRetryAction) {
-  auto err = CreateError<TPM2Error>(trunks::TPM_RC_HANDLE | trunks::TPM_RC_1);
-  EXPECT_EQ(err->ToTPMRetryAction(), TPMRetryAction::kLater);
-  auto err2 = WrapError<TPMError>(std::move(err), "OuO|||");
-  std::stringstream ss;
-  ss << *err2;
-  EXPECT_EQ("OuO|||: TPM2 error 0x18b (Handle 1: TPM_RC_HANDLE)", ss.str());
-  EXPECT_EQ(err2->ToTPMRetryAction(), TPMRetryAction::kLater);
+  StatusChain<TPMErrorBase> status =
+      MakeStatus<TPM2Error>(trunks::TPM_RC_HANDLE | trunks::TPM_RC_1);
+  EXPECT_EQ(status->ToTPMRetryAction(), TPMRetryAction::kLater);
+
+  StatusChain<TPMError> status2 =
+      MakeStatus<TPMError>("OuO|||").Wrap(std::move(status));
+  EXPECT_EQ("OuO|||: TPM2 error 0x18b (Handle 1: TPM_RC_HANDLE)",
+            status2.ToFullString());
+  EXPECT_EQ(status2->ToTPMRetryAction(), TPMRetryAction::kLater);
 }
 
-}  // namespace error
+TEST_F(TestingTPM2ErrorTest, UnifiedErrorUsual) {
+  StatusChain<TPMErrorBase> status =
+      MakeStatus<TPM2Error>(trunks::TPM_RC_HANDLE | trunks::TPM_RC_1);
+  EXPECT_EQ(status->UnifiedErrorCode(),
+            unified_tpm_error::kUnifiedErrorBit |
+                static_cast<int64_t>(trunks::TPM_RC_HANDLE | trunks::TPM_RC_1));
+}
+
+TEST_F(TestingTPM2ErrorTest, UnifiedErrorExtraLayers) {
+  StatusChain<TPMErrorBase> status =
+      MakeStatus<TPM2Error>(trunks::TRUNKS_RC_IPC_ERROR);
+  EXPECT_EQ(status->UnifiedErrorCode(),
+            static_cast<int64_t>(trunks::TRUNKS_RC_IPC_ERROR) |
+                unified_tpm_error::kUnifiedErrorBit);
+}
+
 }  // namespace hwsec

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,31 +28,22 @@ class SimProxy : public SimProxyInterface {
   ~SimProxy() override;
 
   // Inherited methods from SimProxyInterface.
-  void SendPin(const std::string& pin,
-               Error* error,
-               const ResultCallback& callback,
-               int timeout) override;
+  void SendPin(const std::string& pin, ResultCallback callback) override;
   void SendPuk(const std::string& puk,
                const std::string& pin,
-               Error* error,
-               const ResultCallback& callback,
-               int timeout) override;
+               ResultCallback callback) override;
   void EnablePin(const std::string& pin,
                  const bool enabled,
-                 Error* error,
-                 const ResultCallback& callback,
-                 int timeout) override;
+                 ResultCallback callback) override;
   void ChangePin(const std::string& old_pin,
                  const std::string& new_pin,
-                 Error* error,
-                 const ResultCallback& callback,
-                 int timeout) override;
+                 ResultCallback callback) override;
 
  private:
   // Callbacks for async method calls.
-  void OnOperationSuccess(const ResultCallback& callback,
+  void OnOperationSuccess(ResultCallback callback,
                           const std::string& operation);
-  void OnOperationFailure(const ResultCallback& callback,
+  void OnOperationFailure(ResultCallback callback,
                           const std::string& operation,
                           brillo::Error* dbus_error);
 

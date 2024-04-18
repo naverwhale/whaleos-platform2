@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,15 +20,12 @@ std::vector<int64_t>& TensorView<int64_t>::GetValues() {
 
 template <>
 bool TensorView<int64_t>::IsValidType() const {
-  return tensor_->data->which() == ValueList::Tag::INT64_LIST;
+  return tensor_->data->which() == ValueList::Tag::kInt64List;
 }
 
 template <>
 void TensorView<int64_t>::AllocateValues() {
-  tensor_->data->set_int64_list(Int64List::New());
-  // TODO(hidehiko): assigning std::vector<>() to `value` is unneeded
-  // on libmojo uprev. Remove them after the uprev.
-  tensor_->data->get_int64_list()->value = std::vector<int64_t>();
+  tensor_->data = ValueList::NewInt64List(Int64List::New());
 }
 
 template <>
@@ -38,15 +35,12 @@ std::vector<double>& TensorView<double>::GetValues() {
 
 template <>
 bool TensorView<double>::IsValidType() const {
-  return tensor_->data->which() == ValueList::Tag::FLOAT_LIST;
+  return tensor_->data->which() == ValueList::Tag::kFloatList;
 }
 
 template <>
 void TensorView<double>::AllocateValues() {
-  tensor_->data->set_float_list(FloatList::New());
-  // TODO(hidehiko): assigning std::vector<>() to `value` is unneeded
-  // on libmojo uprev. Remove them after the uprev.
-  tensor_->data->get_float_list()->value = std::vector<double>();
+  tensor_->data = ValueList::NewFloatList(FloatList::New());
 }
 
 }  // namespace ml

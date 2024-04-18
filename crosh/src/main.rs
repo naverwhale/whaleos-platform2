@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,14 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use crosh::dispatcher::{CompletionResult, Dispatcher};
 use crosh::{setup_dispatcher, util};
-use libc::{
-    c_int, c_void, fork, kill, pid_t, waitpid, SIGHUP, SIGINT, SIGKILL, STDERR_FILENO, WIFSTOPPED,
-};
+use libc::{c_int, c_void, fork, kill, pid_t, waitpid, SIGINT, SIGKILL, STDERR_FILENO, WIFSTOPPED};
 use libchromeos::chromeos::is_dev_mode;
+use libchromeos::handle_eintr_errno;
+use libchromeos::panic_handler::install_memfd_handler;
+use libchromeos::signal::{block_signal, unblock_signal};
+use libchromeos::syslog;
+use log::error;
+use nix::sys::signal::Signal;
 use rustyline::completion::Completer;
 use rustyline::config::Configurer;
 use rustyline::error::ReadlineError;
@@ -22,18 +26,21 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Context, Editor, Helper};
-use sys_util::{block_signal, error, handle_eintr_errno, syslog, unblock_signal};
 
 const HISTORY_FILENAME: &str = ".crosh_history";
+
+// Program name.
+const IDENT: &str = "crosh";
 
 fn usage(error: bool) {
     let usage_msg = r#"Usage: crosh [options] [-- [args]]
 
 Options:
-  --dev         Force dev mode.
-  --removable   Force removable (boot from USB/SD/etc...) mode.
-  --usb         Same as above.
-  --help, -h    Show this help string.
+  --dev(=true|false) Force dev mode commands to be available or not. '--dev' is
+                     the same as '--dev=true'.
+  --removable        Force removable (boot from USB/SD/etc...) mode.
+  --usb              Same as above.
+  --help, -h         Show this help string.
   -- <all args after this are a command to run>
                 Execute a single command and exit.
 "#;
@@ -46,7 +53,7 @@ Options:
 
 fn intro() {
     println!(
-        r#"Welcome to crosh, the Chrome OS developer shell.
+        r#"Welcome to crosh, the ChromeOS developer shell.
 
 If you got here by mistake, don't panic!  Just close this tab and carry on.
 
@@ -121,7 +128,7 @@ fn handle_cmd(dispatcher: &Dispatcher, args: Vec<String>) -> Result<(), ()> {
         dispatch_cmd(dispatcher, args);
     }
 
-    COMMAND_RUNNING_PID.store(pid as i32, Ordering::Release);
+    COMMAND_RUNNING_PID.store(pid, Ordering::Release);
 
     let mut status: c_int = 1;
     // Safe because status is owned.
@@ -159,7 +166,7 @@ fn dispatch_cmd(dispatcher: &Dispatcher, args: Vec<String>) {
                     eprintln!("ERROR: too many arguments");
                     ret = 1;
                 }
-                let list = ["exit", "help", "help_advanced", "ping", "top"];
+                let list = ["help", "help_advanced", "ping", "top"];
                 if dispatcher.help_string(&mut stdout(), Some(&list)).is_err() {
                     panic!();
                 }
@@ -206,15 +213,15 @@ extern "C" fn sigint_handler(_: c_int) {
 
 fn register_signal_handlers() {
     // Safe because sigint_handler is async-signal-safe.
-    unsafe { util::set_signal_handlers(&[SIGINT], sigint_handler) };
-    if let Err(err) = block_signal(SIGHUP) {
+    unsafe { util::set_signal_handlers(&[Signal::SIGINT], sigint_handler) };
+    if let Err(err) = block_signal(Signal::SIGHUP) {
         error!("Failed to block SIGHUP: {}", err);
     }
 }
 
 fn clear_signal_handlers() {
-    util::clear_signal_handlers(&[SIGINT]);
-    if let Err(err) = unblock_signal(SIGHUP) {
+    util::clear_signal_handlers(&[Signal::SIGINT]);
+    if let Err(err) = unblock_signal(Signal::SIGHUP) {
         error!("Failed to unblock SIGHUP: {}", err);
     }
 }
@@ -309,10 +316,11 @@ fn input_loop(dispatcher: Dispatcher) {
 }
 
 fn main() -> Result<(), ()> {
+    install_memfd_handler();
     let mut args = std::env::args();
 
-    if let Err(e) = syslog::init() {
-        eprintln!("failed to initiailize syslog: {}", e);
+    if let Err(e) = syslog::init(IDENT.to_string(), true /* log_to_stderr */) {
+        eprintln!("failed to initialize syslog: {}", e);
         return Err(());
     }
 
@@ -344,8 +352,11 @@ fn main() -> Result<(), ()> {
                     usage(false);
                     return Ok(());
                 }
-                "--dev" => {
+                "--dev" | "--dev=true" => {
                     util::set_dev_commands_included(true);
+                }
+                "--dev=false" => {
+                    util::set_dev_commands_included(false);
                 }
                 "--removable" | "--usb" => {
                     util::set_usb_commands_included(true);

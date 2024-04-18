@@ -1,21 +1,20 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "arc/container/obb-mounter/mount_obb_fuse_main.h"
 
 #include <fuse/fuse.h>
+#include <iterator>
+#include <optional>
 #include <time.h>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
-#include <base/macros.h>
-#include <base/optional.h>
-#include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <base/strings/utf_string_conversions.h>
 #include <base/synchronization/lock.h>
@@ -81,11 +80,11 @@ bool GetDirectoryEntry(const base::StringPiece16& path, DirectoryEntry* out) {
       next_slash = path.size();
     }
     base::StringPiece16 name(path.data() + pos, next_slash - pos);
-    base::Optional<DirectoryEntry> entry;
+    std::optional<DirectoryEntry> entry;
     if (!g_volume->ReadDirectory(current_directory_start_sector,
                                  base::BindRepeating(
                                      [](const base::StringPiece16& name,
-                                        base::Optional<DirectoryEntry>* entry,
+                                        std::optional<DirectoryEntry>* entry,
                                         const base::StringPiece16& name_in,
                                         const DirectoryEntry& entry_in) {
                                        // TODO(hashimoto): Consider using
@@ -238,7 +237,7 @@ int mount_obb_fuse_main(const std::string& file_system_name,
   SET_FAT_OP(release);
   SET_FAT_OP(readdir);
 #undef SET_FAT_OP
-  fuse_main(base::size(fuse_argv), const_cast<char**>(fuse_argv), &fat_ops,
+  fuse_main(std::size(fuse_argv), const_cast<char**>(fuse_argv), &fat_ops,
             nullptr);
   return 0;
 }

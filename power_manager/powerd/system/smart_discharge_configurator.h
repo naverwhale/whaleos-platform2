@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <stdint.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Configures Smart Discharge in EC.
 // to_zero_hr cutoff_ua hibernate_ua
@@ -21,7 +20,6 @@ void ConfigureSmartDischarge(int64_t to_zero_hr,
                              int64_t cutoff_ua,
                              int64_t hibernate_ua);
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_SMART_DISCHARGE_CONFIGURATOR_H_

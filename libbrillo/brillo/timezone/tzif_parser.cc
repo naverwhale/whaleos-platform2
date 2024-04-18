@@ -1,10 +1,12 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "brillo/timezone/tzif_parser.h"
 
 #include <arpa/inet.h>
+#include <iterator>
+#include <optional>
 #include <stdint.h>
 #include <string.h>
 #include <utility>
@@ -14,7 +16,6 @@
 #include <base/files/file.h>
 #include <base/files/file_path.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_util.h>
 
 namespace {
@@ -100,7 +101,7 @@ namespace brillo {
 
 namespace timezone {
 
-base::Optional<std::string> GetPosixTimezone(const base::FilePath& tzif_path) {
+std::optional<std::string> GetPosixTimezone(const base::FilePath& tzif_path) {
   base::FilePath to_parse;
   if (tzif_path.IsAbsolute()) {
     to_parse = tzif_path;
@@ -110,7 +111,7 @@ base::Optional<std::string> GetPosixTimezone(const base::FilePath& tzif_path) {
   base::File tzfile(to_parse, base::File::FLAG_OPEN | base::File::FLAG_READ);
   struct tzif_header first_header;
   if (!tzfile.IsValid() || !ParseTzifHeader(&tzfile, &first_header)) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   if (first_header.version == '\0') {
@@ -122,7 +123,7 @@ base::Optional<std::string> GetPosixTimezone(const base::FilePath& tzif_path) {
     //
     // Because of this, we're not going to try and handle this, and instead just
     // return an error.
-    return base::nullopt;
+    return std::nullopt;
   }
 
   // TZif versions 2 and 3 embed a POSIX-style TZ string after their
@@ -139,7 +140,7 @@ base::Optional<std::string> GetPosixTimezone(const base::FilePath& tzif_path) {
 
   struct tzif_header second_header;
   if (!ParseTzifHeader(&tzfile, &second_header)) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   int64_t second_body_size =
@@ -150,9 +151,9 @@ base::Optional<std::string> GetPosixTimezone(const base::FilePath& tzif_path) {
   int64_t offset = tzfile.Seek(base::File::FROM_CURRENT, second_body_size);
 
   std::string time_string(tzfile.GetLength() - offset, '\0');
-  if (tzfile.ReadAtCurrentPos(base::data(time_string), time_string.size()) !=
+  if (tzfile.ReadAtCurrentPos(time_string.data(), time_string.size()) !=
       time_string.size()) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   // According to the spec, the embedded string is enclosed by '\n' characters.

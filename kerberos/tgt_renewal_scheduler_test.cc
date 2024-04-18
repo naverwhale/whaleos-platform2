@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 #include <string>
 
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/test/test_mock_time_task_runner.h>
 #include <gmock/gmock.h>
@@ -147,10 +146,9 @@ TEST_F(TgtRenewalSchedulerTest, ValidTgtTriggersRescheduleAtSpecificDelays) {
          TgtRenewalScheduler::kExpirationHeadsUpTimeSeconds) {
     EXPECT_GT(kHugelyExcessiveNumber, ++count);
 
-    base::TimeDelta expected_delay =
-        base::TimeDelta::FromSeconds(static_cast<int>(
-            tgt_status.validity_seconds *
-            TgtRenewalScheduler::kTgtRenewValidityLifetimeFraction));
+    base::TimeDelta expected_delay = base::Seconds(static_cast<int>(
+        tgt_status.validity_seconds *
+        TgtRenewalScheduler::kTgtRenewValidityLifetimeFraction));
 
     LOG(INFO) << "Expecting delay of " << expected_delay;
 

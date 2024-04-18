@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,6 @@
 
 #include <string>
 #include <vector>
-
-#include <base/macros.h>
 
 #include "pkcs11/cryptoki.h"
 
@@ -121,7 +119,7 @@ class Session {
                                 int* new_private_key_handle) = 0;
   // Random number generation (see PKCS #11 v2.20: 11.15).
   virtual CK_RV SeedRandom(const std::string& seed) = 0;
-  virtual CK_RV GenerateRandom(int num_bytes, std::string* random_data) = 0;
+  virtual CK_RV GenerateRandom(size_t num_bytes, std::string* random_data) = 0;
   // Returns true if private objects are loaded and the session is ready for
   // operations with them without blocking.
   virtual bool IsPrivateLoaded() = 0;

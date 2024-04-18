@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,8 +28,6 @@
 
 namespace screenshot {
 namespace {
-
-constexpr int kBytesPerPixel = 4;
 
 GLuint LoadShader(const GLenum type, const char* const src) {
   GLuint shader = 0;
@@ -95,7 +93,7 @@ EGLImageKHR CreateImage(PFNEGLCREATEIMAGEKHRPROC CreateImageKHR,
   int num_planes = 0;
   // CreateImageKHR takes its own references to the dma-bufs, so closing the fds
   // at the end of the function is necessary and won't break the returned image.
-  base::ScopedFD fds[GBM_MAX_PLANES] = {};
+  std::vector<base::ScopedFD> fds = {};
   for (size_t plane = 0; plane < GBM_MAX_PLANES; plane++) {
     // getfb2() doesn't return the number of planes so get handles
     // and count planes until we find a handle that isn't set
@@ -105,13 +103,13 @@ EGLImageKHR CreateImage(PFNEGLCREATEIMAGEKHRPROC CreateImageKHR,
     int fd;
     int ret = drmPrimeHandleToFD(drm_fd, fb->handles[plane], 0, &fd);
     CHECK_EQ(ret, 0) << "drmPrimeHandleToFD failed";
-    fds[plane].reset(fd);
+    fds.emplace_back(fd);
     num_planes++;
   }
 
   CHECK_GT(num_planes, 0);
 
-  EGLint attr_list[46] = {
+  std::vector<EGLint> attr_list = {
       EGL_WIDTH,
       static_cast<EGLint>(fb->width),
       EGL_HEIGHT,
@@ -120,32 +118,30 @@ EGLImageKHR CreateImage(PFNEGLCREATEIMAGEKHRPROC CreateImageKHR,
       static_cast<EGLint>(fb->pixel_format),
   };
 
-  size_t attrs_index = 6;
-
   for (size_t plane = 0; plane < num_planes; plane++) {
-    attr_list[attrs_index++] = EGL_DMA_BUF_PLANE0_FD_EXT + plane * 3;
-    attr_list[attrs_index++] = fds[plane].get();
-    attr_list[attrs_index++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT + plane * 3;
-    attr_list[attrs_index++] = fb->offsets[plane];
-    attr_list[attrs_index++] = EGL_DMA_BUF_PLANE0_PITCH_EXT + plane * 3;
-    attr_list[attrs_index++] = fb->pitches[plane];
+    attr_list.emplace_back(EGL_DMA_BUF_PLANE0_FD_EXT + plane * 3);
+    attr_list.emplace_back(fds[plane].get());
+    attr_list.emplace_back(EGL_DMA_BUF_PLANE0_OFFSET_EXT + plane * 3);
+    attr_list.emplace_back(fb->offsets[plane]);
+    attr_list.emplace_back(EGL_DMA_BUF_PLANE0_PITCH_EXT + plane * 3);
+    attr_list.emplace_back(fb->pitches[plane]);
 
     // If DRM_MODE_FB_MODIFIERS is not set, it means the modifiers are
     // determined implicitly in a driver-specific manner. As such we only
     // set the modifier if we got a framebuffer with explicit modifier and
     // an EGL driver that supports explicit modifiers.
     if (import_modifiers_exist && (fb->flags & DRM_MODE_FB_MODIFIERS)) {
-      attr_list[attrs_index++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT + plane * 2;
-      attr_list[attrs_index++] = fb->modifier & 0xfffffffful;
-      attr_list[attrs_index++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT + plane * 2;
-      attr_list[attrs_index++] = fb->modifier >> 32;
+      attr_list.emplace_back(EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT + plane * 2);
+      attr_list.emplace_back(fb->modifier & 0xfffffffful);
+      attr_list.emplace_back(EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT + plane * 2);
+      attr_list.emplace_back(fb->modifier >> 32);
     }
   }
 
-  attr_list[attrs_index] = EGL_NONE;
+  attr_list.emplace_back(EGL_NONE);
 
   EGLImageKHR image = CreateImageKHR(display, EGL_NO_CONTEXT,
-                                     EGL_LINUX_DMA_BUF_EXT, 0, attr_list);
+                                     EGL_LINUX_DMA_BUF_EXT, 0, &attr_list[0]);
   CHECK(image != EGL_NO_IMAGE_KHR) << "Failed to create image";
 
   return image;
@@ -170,7 +166,7 @@ EglDisplayBuffer::EglDisplayBuffer(
       height_(height),
       device_(gbm_create_device(crtc_.file().GetPlatformFile())),
       display_(eglGetDisplay(EGL_DEFAULT_DISPLAY)),
-      buffer_(width_ * height_ * kBytesPerPixel) {
+      buffer_(width_ * height_) {
   CHECK(device_) << "gbm_create_device failed";
 
   CHECK(display_ != EGL_NO_DISPLAY) << "Could not get EGLDisplay";
@@ -288,20 +284,21 @@ EglDisplayBuffer::~EglDisplayBuffer() {
   eglTerminate(display_);
 }
 
-DisplayBuffer::Result EglDisplayBuffer::Capture() {
+DisplayBuffer::Result EglDisplayBuffer::Capture(bool rotate) {
   WaitVBlank(crtc_.file().GetPlatformFile());
 
   auto connected_planes = crtc_.GetConnectedPlanes();
   if (connected_planes.empty()) {
+    VLOG(3) << "Planes are empty, falling back to copying all";
     EGLImageKHR image =
         CreateImage(createImageKHR_, import_modifiers_exist_,
                     crtc_.file().GetPlatformFile(), display_, crtc_.fb2());
-    CHECK(image != EGL_NO_IMAGE_KHR) << "Failed to create image";
 
-    SetUVRect(/*crop_x=*/0, /*crop_y=*/0, /*crop_width=*/crtc_.fb2()->width,
-              /*crop_height=*/crtc_.fb2()->height,
-              /*src_width=*/crtc_.fb2()->width,
-              /*src_height=*/crtc_.fb2()->height);
+    SetUVRect(/*crop_x=*/0, /*crop_y=*/0,
+              /*crop_width=*/static_cast<float>(crtc_.fb2()->width),
+              /*crop_height=*/static_cast<float>(crtc_.fb2()->height),
+              /*src_width=*/static_cast<float>(crtc_.fb2()->width),
+              /*src_height=*/static_cast<float>(crtc_.fb2()->height));
     glViewport(0, 0, width_, height_);
     glEGLImageTargetTexture2DOES_(GL_TEXTURE_EXTERNAL_OES, image);
 
@@ -309,6 +306,7 @@ DisplayBuffer::Result EglDisplayBuffer::Capture() {
 
     destroyImageKHR_(display_, image);
   } else {
+    VLOG(3) << "Multiple connected planes.";
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -316,12 +314,12 @@ DisplayBuffer::Result EglDisplayBuffer::Capture() {
       EGLImageKHR image = CreateImage(createImageKHR_, import_modifiers_exist_,
                                       crtc_.file().GetPlatformFile(), display_,
                                       plane.first.get());
-      CHECK(image != EGL_NO_IMAGE_KHR) << "Failed to create image";
 
       // Handle the plane's crop rectangle.
       SetUVRect(plane.second.crop_x, plane.second.crop_y, plane.second.crop_w,
-                plane.second.crop_h, /*src_width=*/plane.first->width,
-                /*src_height=*/plane.first->height);
+                plane.second.crop_h,
+                /*src_width=*/static_cast<float>(plane.first->width),
+                /*src_height=*/static_cast<float>(plane.first->height));
 
       // TODO(andrescj): Handle rotation.
       glViewport(plane.second.x, plane.second.y, plane.second.w,
@@ -339,21 +337,26 @@ DisplayBuffer::Result EglDisplayBuffer::Capture() {
   // TODO(uekawa): potentially improve speed by creating a bo and writing to
   // it instead of reading out.
   glReadPixels(x_, y_, width_, height_, GL_BGRA_EXT, GL_UNSIGNED_BYTE,
-               buffer_.data());
+               reinterpret_cast<char*>(buffer_.data()));
 
-  return {
-      width_, height_,
-      width_ * kBytesPerPixel,            // stride
-      static_cast<void*>(buffer_.data())  // buffer
+  DisplayBuffer::Result result{
+      .width = width_,
+      .height = height_,
+      .stride = width_ * kBytesPerPixel,
+      .buffer = static_cast<void*>(buffer_.data()),
   };
+  if (rotate) {
+    Rotate(result, rotated_);
+  }
+  return result;
 }
 
 void EglDisplayBuffer::SetUVRect(float crop_x,
                                  float crop_y,
                                  float crop_width,
                                  float crop_height,
-                                 uint32_t src_width,
-                                 uint32_t src_height) {
+                                 float src_width,
+                                 float src_height) {
   const float uv_left = crop_x / src_width;
   const float uv_right = (crop_x + crop_width) / src_width;
   const float uv_top = crop_y / src_height;
@@ -369,6 +372,24 @@ void EglDisplayBuffer::SetUVRect(float crop_x,
       // clang-format on
   };
   glUniform2fv(uvs_uniform_location_, 4, uvs);
+}
+
+void EglDisplayBuffer::Rotate(DisplayBuffer::Result& result,
+                              std::vector<uint32_t>& rotated) {
+  const uint32_t width = result.width;
+  const uint32_t height = result.height;
+  uint32_t* buffer = reinterpret_cast<uint32_t*>(result.buffer);
+  rotated.resize(width * height);
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      rotated[x * height + (height - y - 1)] = buffer[x + y * width];
+    }
+  }
+  memcpy(reinterpret_cast<char*>(buffer), rotated.data(),
+         width * height * kBytesPerPixel);
+  result.width = height;
+  result.height = width;
+  result.stride = result.width * kBytesPerPixel;
 }
 
 }  // namespace screenshot

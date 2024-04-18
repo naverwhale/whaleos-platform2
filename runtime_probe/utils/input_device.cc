@@ -1,16 +1,20 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "runtime_probe/utils/input_device.h"
 
 #include <limits>
+#include <string>
+#include <string_view>
 #include <pcrecpp.h>
 
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+
+#include "runtime_probe/proto_bindings/runtime_probe.pb.h"
 
 namespace runtime_probe {
 
@@ -50,7 +54,7 @@ std::unique_ptr<InputDeviceImpl> InputDeviceImpl::From(
       DCHECK_EQ(line.length(), 0);
       continue;
     }
-    auto content = base::StringPiece(line).substr(3);
+    auto content = std::string_view(line).substr(3);
     base::StringPairs keyVals;
     switch (line[0]) {
       case 'I': {
@@ -155,15 +159,15 @@ bool InputDeviceImpl::IsTouchscreenDevice() const {
   return !IsTouchpadDevice() && ev_abs[kAbsMtSlot];
 }
 
-std::string InputDeviceImpl::type() const {
+InputDevice::Type InputDeviceImpl::type() const {
   if (IsStylusDevice()) {
-    return InputDeviceImpl::Type::STYLUS;
+    return InputDevice::TYPE_STYLUS;
   } else if (IsTouchpadDevice()) {
-    return InputDeviceImpl::Type::TOUCHPAD;
+    return InputDevice::TYPE_TOUCHPAD;
   } else if (IsTouchscreenDevice()) {
-    return InputDeviceImpl::Type::TOUCHSCREEN;
+    return InputDevice::TYPE_TOUCHSCREEN;
   } else {
-    return InputDeviceImpl::Type::UNKNOWN;
+    return InputDevice::TYPE_UNKNOWN;
   }
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,7 @@ class RetryDev : public DevInterface {
            int retries,
            const base::TimeDelta& delay)
       : device_(std::move(dev)), retries_(retries), delay_(delay) {}
-  ~RetryDev() {}
+  ~RetryDev() override = default;
   bool ReadDevice(uint8_t cmd, uint8_t* data, size_t len) override;
   bool WriteDevice(uint8_t cmd, const uint8_t* data, size_t len) override;
 

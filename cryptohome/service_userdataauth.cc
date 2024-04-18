@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,19 +6,20 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <brillo/cryptohome.h>
 #include <chromeos/constants/cryptohome.h>
-#include <chromeos/libhwsec/task_dispatching_framework.h>
+#include <cryptohome/proto_bindings/UserDataAuth.pb.h>
+#include <libhwsec-foundation/utility/task_dispatching_framework.h>
 
 #include "cryptohome/service_userdataauth.h"
 #include "cryptohome/userdataauth.h"
 
 namespace cryptohome {
 
-using ::hwsec::ThreadSafeDBusMethodResponse;
+using ::hwsec_foundation::utility::ThreadSafeDBusMethodResponse;
 
 void UserDataAuthAdaptor::IsMounted(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
@@ -28,13 +29,13 @@ void UserDataAuthAdaptor::IsMounted(
       FROM_HERE,
       base::BindOnce(
           &UserDataAuthAdaptor::DoIsMounted, base::Unretained(this),
-          in_request.username(),
+          Username(in_request.username()),
           ThreadSafeDBusMethodResponse<user_data_auth::IsMountedReply>::
               MakeThreadSafe(std::move(response))));
 }
 
 void UserDataAuthAdaptor::DoIsMounted(
-    const std::string username,
+    const Username& username,
     std::unique_ptr<
         brillo::dbus_utils::DBusMethodResponse<user_data_auth::IsMountedReply>>
         response) {
@@ -64,41 +65,8 @@ void UserDataAuthAdaptor::DoUnmount(
     std::unique_ptr<
         brillo::dbus_utils::DBusMethodResponse<user_data_auth::UnmountReply>>
         response) {
-  bool unmount_ok = service_->Unmount();
-
-  user_data_auth::UnmountReply reply;
-  if (!unmount_ok) {
-    reply.set_error(
-        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL);
-  }
+  user_data_auth::UnmountReply reply = service_->Unmount();
   response->Return(reply);
-}
-
-void UserDataAuthAdaptor::Mount(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::MountReply>> response,
-    const user_data_auth::MountRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoMount, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<
-              user_data_auth::MountReply>::MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoMount(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::MountReply>> response,
-    const user_data_auth::MountRequest& in_request) {
-  service_->DoMount(
-      in_request, base::BindOnce(
-                      [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-                             user_data_auth::MountReply>> local_response,
-                         const user_data_auth::MountReply& reply) {
-                        local_response->Return(reply);
-                      },
-                      std::move(response)));
 }
 
 void UserDataAuthAdaptor::StartAuthSession(
@@ -129,58 +97,597 @@ void UserDataAuthAdaptor::DoStartAuthSession(
           std::move(response)));
 }
 
-void UserDataAuthAdaptor::AddCredentials(
+void UserDataAuthAdaptor::InvalidateAuthSession(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::AddCredentialsReply>> response,
-    const user_data_auth::AddCredentialsRequest& in_request) {
+        user_data_auth::InvalidateAuthSessionReply>> response,
+    const user_data_auth::InvalidateAuthSessionRequest& in_request) {
   service_->PostTaskToMountThread(
       FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoAddCredentials, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::AddCredentialsReply>::
-              MakeThreadSafe(std::move(response)),
-          in_request));
+      base::BindOnce(&UserDataAuthAdaptor::DoInvalidateAuthSession,
+                     base::Unretained(this),
+                     ThreadSafeDBusMethodResponse<
+                         user_data_auth::InvalidateAuthSessionReply>::
+                         MakeThreadSafe(std::move(response)),
+                     in_request));
 }
 
-void UserDataAuthAdaptor::DoAddCredentials(
+void UserDataAuthAdaptor::DoInvalidateAuthSession(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::AddCredentialsReply>> response,
-    const user_data_auth::AddCredentialsRequest& in_request) {
-  service_->AddCredentials(
+        user_data_auth::InvalidateAuthSessionReply>> response,
+    const user_data_auth::InvalidateAuthSessionRequest& in_request) {
+  service_->InvalidateAuthSession(
       in_request,
       base::BindOnce(
           [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-                 user_data_auth::AddCredentialsReply>> local_response,
-             const user_data_auth::AddCredentialsReply& reply) {
+                 user_data_auth::InvalidateAuthSessionReply>> local_response,
+             const user_data_auth::InvalidateAuthSessionReply& reply) {
             local_response->Return(reply);
           },
           std::move(response)));
 }
 
-void UserDataAuthAdaptor::AuthenticateAuthSession(
+void UserDataAuthAdaptor::ExtendAuthSession(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::AuthenticateAuthSessionReply>> response,
-    const user_data_auth::AuthenticateAuthSessionRequest& in_request) {
+        user_data_auth::ExtendAuthSessionReply>> response,
+    const user_data_auth::ExtendAuthSessionRequest& in_request) {
   service_->PostTaskToMountThread(
       FROM_HERE,
-      base::BindOnce(&UserDataAuthAdaptor::DoAuthenticateAuthSession,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoExtendAuthSession, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::ExtendAuthSessionReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoExtendAuthSession(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::ExtendAuthSessionReply>> response,
+    const user_data_auth::ExtendAuthSessionRequest& in_request) {
+  service_->ExtendAuthSession(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::ExtendAuthSessionReply>> local_response,
+             const user_data_auth::ExtendAuthSessionReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::CreatePersistentUser(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::CreatePersistentUserReply>> response,
+    const user_data_auth::CreatePersistentUserRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE, base::BindOnce(&UserDataAuthAdaptor::DoCreatePersistentUser,
+                                base::Unretained(this),
+                                ThreadSafeDBusMethodResponse<
+                                    user_data_auth::CreatePersistentUserReply>::
+                                    MakeThreadSafe(std::move(response)),
+                                in_request));
+}
+
+void UserDataAuthAdaptor::DoCreatePersistentUser(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::CreatePersistentUserReply>> response,
+    const user_data_auth::CreatePersistentUserRequest& in_request) {
+  service_->CreatePersistentUser(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::CreatePersistentUserReply>> local_response,
+             const user_data_auth::CreatePersistentUserReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::PrepareGuestVault(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PrepareGuestVaultReply>> response,
+    const user_data_auth::PrepareGuestVaultRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoPrepareGuestVault, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::PrepareGuestVaultReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoPrepareGuestVault(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PrepareGuestVaultReply>> response,
+    const user_data_auth::PrepareGuestVaultRequest& in_request) {
+  service_->PrepareGuestVault(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::PrepareGuestVaultReply>> local_response,
+             const user_data_auth::PrepareGuestVaultReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::PrepareEphemeralVault(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PrepareEphemeralVaultReply>> response,
+    const user_data_auth::PrepareEphemeralVaultRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(&UserDataAuthAdaptor::DoPrepareEphemeralVault,
                      base::Unretained(this),
                      ThreadSafeDBusMethodResponse<
-                         user_data_auth::AuthenticateAuthSessionReply>::
+                         user_data_auth::PrepareEphemeralVaultReply>::
                          MakeThreadSafe(std::move(response)),
                      in_request));
 }
 
-void UserDataAuthAdaptor::DoAuthenticateAuthSession(
+void UserDataAuthAdaptor::DoPrepareEphemeralVault(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::AuthenticateAuthSessionReply>> response,
-    const user_data_auth::AuthenticateAuthSessionRequest& in_request) {
-  service_->AuthenticateAuthSession(
+        user_data_auth::PrepareEphemeralVaultReply>> response,
+    const user_data_auth::PrepareEphemeralVaultRequest& in_request) {
+  service_->PrepareEphemeralVault(
       in_request,
       base::BindOnce(
           [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-                 user_data_auth::AuthenticateAuthSessionReply>> local_response,
-             const user_data_auth::AuthenticateAuthSessionReply& reply) {
+                 user_data_auth::PrepareEphemeralVaultReply>> local_response,
+             const user_data_auth::PrepareEphemeralVaultReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::PreparePersistentVault(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PreparePersistentVaultReply>> response,
+    const user_data_auth::PreparePersistentVaultRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(&UserDataAuthAdaptor::DoPreparePersistentVault,
+                     base::Unretained(this),
+                     ThreadSafeDBusMethodResponse<
+                         user_data_auth::PreparePersistentVaultReply>::
+                         MakeThreadSafe(std::move(response)),
+                     in_request));
+}
+
+void UserDataAuthAdaptor::DoPreparePersistentVault(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PreparePersistentVaultReply>> response,
+    const user_data_auth::PreparePersistentVaultRequest& in_request) {
+  service_->PreparePersistentVault(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::PreparePersistentVaultReply>> local_response,
+             const user_data_auth::PreparePersistentVaultReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::EvictDeviceKey(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::EvictDeviceKeyReply>> response,
+    const user_data_auth::EvictDeviceKeyRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoEvictDeviceKey, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::EvictDeviceKeyReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoEvictDeviceKey(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::EvictDeviceKeyReply>> response,
+    const user_data_auth::EvictDeviceKeyRequest& in_request) {
+  service_->EvictDeviceKey(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::EvictDeviceKeyReply>> local_response,
+             const user_data_auth::EvictDeviceKeyReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::PrepareVaultForMigration(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PrepareVaultForMigrationReply>> response,
+    const user_data_auth::PrepareVaultForMigrationRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(&UserDataAuthAdaptor::DoPrepareVaultForMigration,
+                     base::Unretained(this),
+                     ThreadSafeDBusMethodResponse<
+                         user_data_auth::PrepareVaultForMigrationReply>::
+                         MakeThreadSafe(std::move(response)),
+                     in_request));
+}
+
+void UserDataAuthAdaptor::DoPrepareVaultForMigration(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PrepareVaultForMigrationReply>> response,
+    const user_data_auth::PrepareVaultForMigrationRequest& in_request) {
+  service_->PrepareVaultForMigration(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::PrepareVaultForMigrationReply>> local_response,
+             const user_data_auth::PrepareVaultForMigrationReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::AddAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::AddAuthFactorReply>> response,
+    const user_data_auth::AddAuthFactorRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoAddAuthFactor, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::AddAuthFactorReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoAddAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::AddAuthFactorReply>> response,
+    const user_data_auth::AddAuthFactorRequest& in_request) {
+  service_->AddAuthFactor(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::AddAuthFactorReply>> local_response,
+             const user_data_auth::AddAuthFactorReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::AuthenticateAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::AuthenticateAuthFactorReply>> response,
+    const user_data_auth::AuthenticateAuthFactorRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(&UserDataAuthAdaptor::DoAuthenticateAuthFactor,
+                     base::Unretained(this),
+                     ThreadSafeDBusMethodResponse<
+                         user_data_auth::AuthenticateAuthFactorReply>::
+                         MakeThreadSafe(std::move(response)),
+                     in_request));
+}
+
+void UserDataAuthAdaptor::DoAuthenticateAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::AuthenticateAuthFactorReply>> response,
+    const user_data_auth::AuthenticateAuthFactorRequest& in_request) {
+  service_->AuthenticateAuthFactor(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::AuthenticateAuthFactorReply>> local_response,
+             const user_data_auth::AuthenticateAuthFactorReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::UpdateAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::UpdateAuthFactorReply>> response,
+    const user_data_auth::UpdateAuthFactorRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoUpdateAuthFactor, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::UpdateAuthFactorReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoUpdateAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::UpdateAuthFactorReply>> response,
+    const user_data_auth::UpdateAuthFactorRequest& in_request) {
+  service_->UpdateAuthFactor(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::UpdateAuthFactorReply>> local_response,
+             const user_data_auth::UpdateAuthFactorReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::UpdateAuthFactorMetadata(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::UpdateAuthFactorMetadataReply>> response,
+    const user_data_auth::UpdateAuthFactorMetadataRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(&UserDataAuthAdaptor::DoUpdateAuthFactorMetadata,
+                     base::Unretained(this),
+                     ThreadSafeDBusMethodResponse<
+                         user_data_auth::UpdateAuthFactorMetadataReply>::
+                         MakeThreadSafe(std::move(response)),
+                     in_request));
+}
+
+void UserDataAuthAdaptor::DoUpdateAuthFactorMetadata(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::UpdateAuthFactorMetadataReply>> response,
+    const user_data_auth::UpdateAuthFactorMetadataRequest& in_request) {
+  service_->UpdateAuthFactorMetadata(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::UpdateAuthFactorMetadataReply>> local_response,
+             const user_data_auth::UpdateAuthFactorMetadataReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::RelabelAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::RelabelAuthFactorReply>> response,
+    const user_data_auth::RelabelAuthFactorRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoRelabelAuthFactor, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::RelabelAuthFactorReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoRelabelAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::RelabelAuthFactorReply>> response,
+    const user_data_auth::RelabelAuthFactorRequest& in_request) {
+  service_->RelabelAuthFactor(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::RelabelAuthFactorReply>> local_response,
+             const user_data_auth::RelabelAuthFactorReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::ReplaceAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::ReplaceAuthFactorReply>> response,
+    const user_data_auth::ReplaceAuthFactorRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoReplaceAuthFactor, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::ReplaceAuthFactorReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoReplaceAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::ReplaceAuthFactorReply>> response,
+    const user_data_auth::ReplaceAuthFactorRequest& in_request) {
+  service_->ReplaceAuthFactor(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::ReplaceAuthFactorReply>> local_response,
+             const user_data_auth::ReplaceAuthFactorReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::RemoveAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::RemoveAuthFactorReply>> response,
+    const user_data_auth::RemoveAuthFactorRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoRemoveAuthFactor, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::RemoveAuthFactorReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoRemoveAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::RemoveAuthFactorReply>> response,
+    const user_data_auth::RemoveAuthFactorRequest& in_request) {
+  service_->RemoveAuthFactor(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::RemoveAuthFactorReply>> local_response,
+             const user_data_auth::RemoveAuthFactorReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::ListAuthFactors(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::ListAuthFactorsReply>> response,
+    const user_data_auth::ListAuthFactorsRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoListAuthFactors, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::ListAuthFactorsReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoListAuthFactors(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::ListAuthFactorsReply>> response,
+    const user_data_auth::ListAuthFactorsRequest& in_request) {
+  service_->ListAuthFactors(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::ListAuthFactorsReply>> local_response,
+             const user_data_auth::ListAuthFactorsReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::GetAuthFactorExtendedInfo(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetAuthFactorExtendedInfoReply>> response,
+    const user_data_auth::GetAuthFactorExtendedInfoRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(&UserDataAuthAdaptor::DoGetAuthFactorExtendedInfo,
+                     base::Unretained(this),
+                     ThreadSafeDBusMethodResponse<
+                         user_data_auth::GetAuthFactorExtendedInfoReply>::
+                         MakeThreadSafe(std::move(response)),
+                     in_request));
+}
+
+void UserDataAuthAdaptor::DoGetAuthFactorExtendedInfo(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetAuthFactorExtendedInfoReply>> response,
+    const user_data_auth::GetAuthFactorExtendedInfoRequest& in_request) {
+  service_->GetAuthFactorExtendedInfo(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::GetAuthFactorExtendedInfoReply>>
+                 local_response,
+             const user_data_auth::GetAuthFactorExtendedInfoReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::PrepareAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PrepareAuthFactorReply>> response,
+    const user_data_auth::PrepareAuthFactorRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoPrepareAuthFactor, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::PrepareAuthFactorReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoPrepareAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::PrepareAuthFactorReply>> response,
+    const user_data_auth::PrepareAuthFactorRequest& in_request) {
+  service_->PrepareAuthFactor(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::PrepareAuthFactorReply>> local_response,
+             const user_data_auth::PrepareAuthFactorReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::TerminateAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::TerminateAuthFactorReply>> response,
+    const user_data_auth::TerminateAuthFactorRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE, base::BindOnce(&UserDataAuthAdaptor::DoTerminateAuthFactor,
+                                base::Unretained(this),
+                                ThreadSafeDBusMethodResponse<
+                                    user_data_auth::TerminateAuthFactorReply>::
+                                    MakeThreadSafe(std::move(response)),
+                                in_request));
+}
+
+void UserDataAuthAdaptor::DoTerminateAuthFactor(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::TerminateAuthFactorReply>> response,
+    const user_data_auth::TerminateAuthFactorRequest& in_request) {
+  service_->TerminateAuthFactor(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::TerminateAuthFactorReply>> local_response,
+             const user_data_auth::TerminateAuthFactorReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::GetRecoveryRequest(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetRecoveryRequestReply>> response,
+    const user_data_auth::GetRecoveryRequestRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE, base::BindOnce(&UserDataAuthAdaptor::DoGetRecoveryRequest,
+                                base::Unretained(this),
+                                ThreadSafeDBusMethodResponse<
+                                    user_data_auth::GetRecoveryRequestReply>::
+                                    MakeThreadSafe(std::move(response)),
+                                in_request));
+}
+
+void UserDataAuthAdaptor::DoGetRecoveryRequest(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetRecoveryRequestReply>> response,
+    const user_data_auth::GetRecoveryRequestRequest& in_request) {
+  service_->GetRecoveryRequest(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::GetRecoveryRequestReply>> local_response,
+             const user_data_auth::GetRecoveryRequestReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::CreateVaultKeyset(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::CreateVaultKeysetReply>> response,
+    const user_data_auth::CreateVaultKeysetRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoCreateVaultKeyset, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::CreateVaultKeysetReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoCreateVaultKeyset(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::CreateVaultKeysetReply>> response,
+    const user_data_auth::CreateVaultKeysetRequest& in_request) {
+  service_->CreateVaultKeyset(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::CreateVaultKeysetReply>> local_response,
+             const user_data_auth::CreateVaultKeysetReply& reply) {
             local_response->Return(reply);
           },
           std::move(response)));
@@ -203,305 +710,7 @@ void UserDataAuthAdaptor::DoRemove(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
         user_data_auth::RemoveReply>> response,
     const user_data_auth::RemoveRequest& in_request) {
-  user_data_auth::RemoveReply reply;
-  auto status = service_->Remove(in_request);
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::Rename(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::RenameReply>> response,
-    const user_data_auth::RenameRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoRename, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<
-              user_data_auth::RenameReply>::MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoRename(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::RenameReply>> response,
-    const user_data_auth::RenameRequest& in_request) {
-  user_data_auth::RenameReply reply;
-  auto status = service_->Rename(in_request);
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::ListKeys(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::ListKeysReply>> response,
-    const user_data_auth::ListKeysRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoListKeys, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::ListKeysReply>::
-              MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoListKeys(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::ListKeysReply>> response,
-    const user_data_auth::ListKeysRequest& in_request) {
-  // TODO(b/136152258): Add unit test for this method.
-  user_data_auth::ListKeysReply reply;
-  std::vector<std::string> labels;
-  auto status = service_->ListKeys(in_request, &labels);
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  if (status == user_data_auth::CRYPTOHOME_ERROR_NOT_SET) {
-    // The contents is |labels| is valid.
-    *reply.mutable_labels() = {labels.begin(), labels.end()};
-  }
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::GetKeyData(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::GetKeyDataReply>> response,
-    const user_data_auth::GetKeyDataRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoGetKeyData, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::GetKeyDataReply>::
-              MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoGetKeyData(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::GetKeyDataReply>> response,
-    const user_data_auth::GetKeyDataRequest& in_request) {
-  user_data_auth::GetKeyDataReply reply;
-  cryptohome::KeyData data_out;
-  bool found = false;
-  auto status = service_->GetKeyData(in_request, &data_out, &found);
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  if (reply.error() == user_data_auth::CRYPTOHOME_ERROR_NOT_SET && found) {
-    *reply.add_key_data() = data_out;
-  }
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::CheckKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::CheckKeyReply>> response,
-    const user_data_auth::CheckKeyRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoCheckKey, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::CheckKeyReply>::
-              MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoCheckKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::CheckKeyReply>> response,
-    const user_data_auth::CheckKeyRequest& in_request) {
-  service_->CheckKey(
-      in_request, base::BindOnce(&UserDataAuthAdaptor::DoCheckKeyDone,
-                                 base::Unretained(this), std::move(response)));
-}
-
-void UserDataAuthAdaptor::DoCheckKeyDone(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::CheckKeyReply>> response,
-    user_data_auth::CryptohomeErrorCode status) {
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  user_data_auth::CheckKeyReply reply;
-  reply.set_error(status);
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::AddKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::AddKeyReply>> response,
-    const user_data_auth::AddKeyRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoAddKey, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<
-              user_data_auth::AddKeyReply>::MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoAddKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::AddKeyReply>> response,
-    const user_data_auth::AddKeyRequest& in_request) {
-  user_data_auth::AddKeyReply reply;
-  auto status = service_->AddKey(in_request);
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::AddDataRestoreKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::AddDataRestoreKeyReply>> response,
-    const user_data_auth::AddDataRestoreKeyRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoAddDataRestoreKey, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::AddDataRestoreKeyReply>::
-              MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoAddDataRestoreKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::AddDataRestoreKeyReply>> response,
-    const user_data_auth::AddDataRestoreKeyRequest& in_request) {
-  user_data_auth::AddDataRestoreKeyReply reply;
-  brillo::SecureBlob data_restore_key;
-  auto status = service_->AddDataRestoreKey(in_request, &data_restore_key);
-
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  if (status == user_data_auth::CRYPTOHOME_ERROR_NOT_SET) {
-    reply.set_data_restore_key(data_restore_key.to_string());
-  }
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::RemoveKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::RemoveKeyReply>> response,
-    const user_data_auth::RemoveKeyRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoRemoveKey, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::RemoveKeyReply>::
-              MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoRemoveKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::RemoveKeyReply>> response,
-    const user_data_auth::RemoveKeyRequest& in_request) {
-  user_data_auth::RemoveKeyReply reply;
-  auto status = service_->RemoveKey(in_request);
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::MassRemoveKeys(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::MassRemoveKeysReply>> response,
-    const user_data_auth::MassRemoveKeysRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoMassRemoveKeys, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::MassRemoveKeysReply>::
-              MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoMassRemoveKeys(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::MassRemoveKeysReply>> response,
-    const user_data_auth::MassRemoveKeysRequest& in_request) {
-  user_data_auth::MassRemoveKeysReply reply;
-  auto status = service_->MassRemoveKeys(in_request);
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::MigrateKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::MigrateKeyReply>> response,
-    const user_data_auth::MigrateKeyRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &UserDataAuthAdaptor::DoMigrateKey, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::MigrateKeyReply>::
-              MakeThreadSafe(std::move(response)),
-          in_request));
-}
-
-void UserDataAuthAdaptor::DoMigrateKey(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::MigrateKeyReply>> response,
-    const user_data_auth::MigrateKeyRequest& in_request) {
-  user_data_auth::MigrateKeyReply reply;
-  auto status = service_->MigrateKey(in_request);
-  // Note, if there's no error, then |status| is set to CRYPTOHOME_ERROR_NOT_SET
-  // to indicate that.
-  reply.set_error(status);
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::StartFingerprintAuthSession(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::StartFingerprintAuthSessionReply>> response,
-    const user_data_auth::StartFingerprintAuthSessionRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(&UserDataAuthAdaptor::DoStartFingerprintAuthSession,
-                     base::Unretained(this),
-                     ThreadSafeDBusMethodResponse<
-                         user_data_auth::StartFingerprintAuthSessionReply>::
-                         MakeThreadSafe(std::move(response)),
-                     in_request));
-}
-
-void UserDataAuthAdaptor::DoStartFingerprintAuthSession(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::StartFingerprintAuthSessionReply>> response,
-    const user_data_auth::StartFingerprintAuthSessionRequest& in_request) {
-  service_->StartFingerprintAuthSession(
-      in_request,
-      base::BindOnce(&UserDataAuthAdaptor::DoStartFingerprintAuthSessionDone,
-                     base::Unretained(this), std::move(response)));
-}
-
-void UserDataAuthAdaptor::DoStartFingerprintAuthSessionDone(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::StartFingerprintAuthSessionReply>> response,
-    const user_data_auth::StartFingerprintAuthSessionReply& reply) {
-  response->Return(reply);
-}
-
-void UserDataAuthAdaptor::EndFingerprintAuthSession(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::EndFingerprintAuthSessionReply>> response,
-    const user_data_auth::EndFingerprintAuthSessionRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE, base::BindOnce(&UserDataAuth::EndFingerprintAuthSession,
-                                base::Unretained(service_)));
-
-  // This function returns immediately after ending the auth session.
-  // Also, this is always successful.
-  user_data_auth::EndFingerprintAuthSessionReply reply;
+  user_data_auth::RemoveReply reply = service_->Remove(in_request);
   response->Return(reply);
 }
 
@@ -523,6 +732,67 @@ void UserDataAuthAdaptor::DoGetWebAuthnSecret(
         user_data_auth::GetWebAuthnSecretReply>> response,
     const user_data_auth::GetWebAuthnSecretRequest& in_request) {
   response->Return(service_->GetWebAuthnSecret(in_request));
+}
+
+void UserDataAuthAdaptor::GetWebAuthnSecretHash(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetWebAuthnSecretHashReply>> response,
+    const user_data_auth::GetWebAuthnSecretHashRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(&UserDataAuthAdaptor::DoGetWebAuthnSecretHash,
+                     base::Unretained(this),
+                     ThreadSafeDBusMethodResponse<
+                         user_data_auth::GetWebAuthnSecretHashReply>::
+                         MakeThreadSafe(std::move(response)),
+                     in_request));
+}
+
+void UserDataAuthAdaptor::DoGetWebAuthnSecretHash(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetWebAuthnSecretHashReply>> response,
+    const user_data_auth::GetWebAuthnSecretHashRequest& in_request) {
+  response->Return(service_->GetWebAuthnSecretHash(in_request));
+}
+
+void UserDataAuthAdaptor::GetHibernateSecret(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetHibernateSecretReply>> response,
+    const user_data_auth::GetHibernateSecretRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE, base::BindOnce(&UserDataAuthAdaptor::DoGetHibernateSecret,
+                                base::Unretained(this),
+                                ThreadSafeDBusMethodResponse<
+                                    user_data_auth::GetHibernateSecretReply>::
+                                    MakeThreadSafe(std::move(response)),
+                                in_request));
+}
+
+void UserDataAuthAdaptor::DoGetHibernateSecret(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetHibernateSecretReply>> response,
+    const user_data_auth::GetHibernateSecretRequest& in_request) {
+  response->Return(service_->GetHibernateSecret(in_request));
+}
+
+void UserDataAuthAdaptor::GetEncryptionInfo(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetEncryptionInfoReply>> response,
+    const user_data_auth::GetEncryptionInfoRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoGetEncryptionInfo, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::GetEncryptionInfoReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoGetEncryptionInfo(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetEncryptionInfoReply>> response,
+    const user_data_auth::GetEncryptionInfoRequest& in_request) {
+  response->Return(service_->GetEncryptionInfo(in_request));
 }
 
 void UserDataAuthAdaptor::StartMigrateToDircrypto(
@@ -613,73 +883,36 @@ void UserDataAuthAdaptor::DoGetAccountDiskUsage(
   response->Return(reply);
 }
 
+void UserDataAuthAdaptor::AuthFactorStatusUpdateCallback(
+    user_data_auth::AuthFactorWithStatus auth_factor_with_status,
+    const std::string& broadcast_id) {
+  user_data_auth::AuthFactorStatusUpdate status_update;
+  *status_update.mutable_auth_factor_with_status() = auth_factor_with_status;
+  status_update.set_broadcast_id(broadcast_id);
+  SendAuthFactorStatusUpdateSignal(status_update);
+}
+
 void UserDataAuthAdaptor::LowDiskSpaceCallback(uint64_t free_disk_space) {
   user_data_auth::LowDiskSpace signal_payload;
   signal_payload.set_disk_free_bytes(free_disk_space);
   SendLowDiskSpaceSignal(signal_payload);
 }
 
-void ArcQuotaAdaptor::GetArcDiskFeatures(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::GetArcDiskFeaturesReply>> response,
-    const user_data_auth::GetArcDiskFeaturesRequest& in_request) {
-  user_data_auth::GetArcDiskFeaturesReply reply;
-  reply.set_quota_supported(service_->IsArcQuotaSupported());
-  response->Return(reply);
+void UserDataAuthAdaptor::FingerprintScanResultCallback(
+    user_data_auth::FingerprintScanResult result) {
+  user_data_auth::AuthScanResult signal_payload;
+  signal_payload.set_fingerprint_result(result);
+  SendAuthScanResultSignal(signal_payload);
 }
 
-void ArcQuotaAdaptor::GetCurrentSpaceForArcUid(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::GetCurrentSpaceForArcUidReply>> response,
-    const user_data_auth::GetCurrentSpaceForArcUidRequest& in_request) {
-  user_data_auth::GetCurrentSpaceForArcUidReply reply;
-  reply.set_cur_space(service_->GetCurrentSpaceForArcUid(in_request.uid()));
-  response->Return(reply);
+void UserDataAuthAdaptor::PrepareAuthFactorProgressCallback(
+    user_data_auth::PrepareAuthFactorProgress signal) {
+  SendPrepareAuthFactorProgressSignal(signal);
 }
 
-void ArcQuotaAdaptor::GetCurrentSpaceForArcGid(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::GetCurrentSpaceForArcGidReply>> response,
-    const user_data_auth::GetCurrentSpaceForArcGidRequest& in_request) {
-  user_data_auth::GetCurrentSpaceForArcGidReply reply;
-  reply.set_cur_space(service_->GetCurrentSpaceForArcGid(in_request.gid()));
-  response->Return(reply);
-}
-
-void ArcQuotaAdaptor::GetCurrentSpaceForArcProjectId(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::GetCurrentSpaceForArcProjectIdReply>> response,
-    const user_data_auth::GetCurrentSpaceForArcProjectIdRequest& in_request) {
-  user_data_auth::GetCurrentSpaceForArcProjectIdReply reply;
-  reply.set_cur_space(
-      service_->GetCurrentSpaceForArcProjectId(in_request.project_id()));
-  response->Return(reply);
-}
-
-void ArcQuotaAdaptor::SetProjectId(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::SetProjectIdReply>> response,
-    const user_data_auth::SetProjectIdRequest& in_request) {
-  user_data_auth::SetProjectIdReply reply;
-  reply.set_success(service_->SetProjectId(
-      in_request.project_id(), in_request.parent_path(),
-      FilePath(in_request.child_path()), in_request.account_id()));
-  response->Return(reply);
-}
-
-void ArcQuotaAdaptor::SetMediaRWDataFileProjectId(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::SetMediaRWDataFileProjectIdReply>> response,
-    const base::ScopedFD& in_fd,
-    const user_data_auth::SetMediaRWDataFileProjectIdRequest& in_request) {
-  int error = 0;
-  const bool success = service_->SetMediaRWDataFileProjectId(
-      in_request.project_id(), in_fd.get(), &error);
-  user_data_auth::SetMediaRWDataFileProjectIdReply reply;
-  reply.set_success(success);
-  if (!success)
-    reply.set_error(error);
-  response->Return(reply);
+void UserDataAuthAdaptor::AuthenticateAuthFactorCompletedCallback(
+    user_data_auth::AuthenticateAuthFactorCompleted signal) {
+  SendAuthenticateAuthFactorCompletedSignal(signal);
 }
 
 void Pkcs11Adaptor::Pkcs11IsTpmTokenReady(
@@ -711,7 +944,7 @@ void Pkcs11Adaptor::Pkcs11GetTpmTokenInfo(
     const user_data_auth::Pkcs11GetTpmTokenInfoRequest& in_request) {
   user_data_auth::Pkcs11GetTpmTokenInfoReply reply;
   *reply.mutable_token_info() =
-      service_->Pkcs11GetTpmTokenInfo(in_request.username());
+      service_->Pkcs11GetTpmTokenInfo(Username(in_request.username()));
   response->Return(reply);
 }
 
@@ -875,6 +1108,21 @@ void InstallAttributesAdaptor::GetFirmwareManagementParameters(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
         user_data_auth::GetFirmwareManagementParametersReply>> response,
     const user_data_auth::GetFirmwareManagementParametersRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &InstallAttributesAdaptor::DoGetFirmwareManagementParameters,
+          base::Unretained(this),
+          ThreadSafeDBusMethodResponse<
+              user_data_auth::GetFirmwareManagementParametersReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void InstallAttributesAdaptor::DoGetFirmwareManagementParameters(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetFirmwareManagementParametersReply>> response,
+    const user_data_auth::GetFirmwareManagementParametersRequest& in_request) {
   user_data_auth::GetFirmwareManagementParametersReply reply;
   user_data_auth::FirmwareManagementParameters fwmp;
   auto status = service_->GetFirmwareManagementParameters(&fwmp);
@@ -893,6 +1141,22 @@ void InstallAttributesAdaptor::RemoveFirmwareManagementParameters(
         user_data_auth::RemoveFirmwareManagementParametersReply>> response,
     const user_data_auth::RemoveFirmwareManagementParametersRequest&
         in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &InstallAttributesAdaptor::DoRemoveFirmwareManagementParameters,
+          base::Unretained(this),
+          ThreadSafeDBusMethodResponse<
+              user_data_auth::RemoveFirmwareManagementParametersReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void InstallAttributesAdaptor::DoRemoveFirmwareManagementParameters(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::RemoveFirmwareManagementParametersReply>> response,
+    const user_data_auth::RemoveFirmwareManagementParametersRequest&
+        in_request) {
   user_data_auth::RemoveFirmwareManagementParametersReply reply;
   if (!service_->RemoveFirmwareManagementParameters()) {
     reply.set_error(
@@ -903,6 +1167,21 @@ void InstallAttributesAdaptor::RemoveFirmwareManagementParameters(
 }
 
 void InstallAttributesAdaptor::SetFirmwareManagementParameters(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::SetFirmwareManagementParametersReply>> response,
+    const user_data_auth::SetFirmwareManagementParametersRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &InstallAttributesAdaptor::DoSetFirmwareManagementParameters,
+          base::Unretained(this),
+          ThreadSafeDBusMethodResponse<
+              user_data_auth::SetFirmwareManagementParametersReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void InstallAttributesAdaptor::DoSetFirmwareManagementParameters(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
         user_data_auth::SetFirmwareManagementParametersReply>> response,
     const user_data_auth::SetFirmwareManagementParametersRequest& in_request) {
@@ -960,8 +1239,8 @@ void CryptohomeMiscAdaptor::GetSanitizedUsername(
         user_data_auth::GetSanitizedUsernameReply>> response,
     const user_data_auth::GetSanitizedUsernameRequest& in_request) {
   user_data_auth::GetSanitizedUsernameReply reply;
-  reply.set_sanitized_username(
-      brillo::cryptohome::home::SanitizeUserName(in_request.username()));
+  reply.set_sanitized_username(*brillo::cryptohome::home::SanitizeUserName(
+      Username(in_request.username())));
   response->Return(reply);
 }
 
@@ -974,26 +1253,6 @@ void CryptohomeMiscAdaptor::GetLoginStatus(
   reply.set_is_locked_to_single_user(
       base::PathExists(base::FilePath(kLockedToSingleUserFile)));
   response->Return(reply);
-}
-
-void CryptohomeMiscAdaptor::GetStatusString(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::GetStatusStringReply>> response,
-    const user_data_auth::GetStatusStringRequest& in_request) {
-  service_->PostTaskToMountThread(
-      FROM_HERE,
-      base::BindOnce(
-          &CryptohomeMiscAdaptor::DoGetStatusString, base::Unretained(this),
-          ThreadSafeDBusMethodResponse<user_data_auth::GetStatusStringReply>::
-              MakeThreadSafe(std::move(response))));
-}
-
-void CryptohomeMiscAdaptor::DoGetStatusString(
-    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::GetStatusStringReply>> response) {
-  user_data_auth::GetStatusStringReply reply;
-  reply.set_status(service_->GetStatusString());
-  std::move(response)->Return(reply);
 }
 
 void CryptohomeMiscAdaptor::LockToSingleUserMountUntilReboot(
@@ -1023,12 +1282,91 @@ void CryptohomeMiscAdaptor::GetRsuDeviceId(
   response->Return(reply);
 }
 
-void CryptohomeMiscAdaptor::CheckHealth(
+void UserDataAuthAdaptor::GetAuthSessionStatus(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
-        user_data_auth::CheckHealthReply>> response,
-    const user_data_auth::CheckHealthRequest& in_request) {
-  user_data_auth::CheckHealthReply reply;
-  reply.set_requires_powerwash(service_->RequiresPowerwash());
+        user_data_auth::GetAuthSessionStatusReply>> response,
+    const user_data_auth::GetAuthSessionStatusRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE, base::BindOnce(&UserDataAuthAdaptor::DoGetAuthSessionStatus,
+                                base::Unretained(this),
+                                ThreadSafeDBusMethodResponse<
+                                    user_data_auth::GetAuthSessionStatusReply>::
+                                    MakeThreadSafe(std::move(response)),
+                                in_request));
+}
+
+void UserDataAuthAdaptor::DoGetAuthSessionStatus(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetAuthSessionStatusReply>> response,
+    const user_data_auth::GetAuthSessionStatusRequest& in_request) {
+  service_->GetAuthSessionStatus(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::GetAuthSessionStatusReply>> local_response,
+             const user_data_auth::GetAuthSessionStatusReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::ResetApplicationContainer(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::ResetApplicationContainerReply>> response,
+    const user_data_auth::ResetApplicationContainerRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(&UserDataAuthAdaptor::DoResetApplicationContainer,
+                     base::Unretained(this),
+                     ThreadSafeDBusMethodResponse<
+                         user_data_auth::ResetApplicationContainerReply>::
+                         MakeThreadSafe(std::move(response)),
+                     in_request));
+}
+
+void UserDataAuthAdaptor::DoResetApplicationContainer(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::ResetApplicationContainerReply>> response,
+    const user_data_auth::ResetApplicationContainerRequest& in_request) {
+  user_data_auth::ResetApplicationContainerReply reply =
+      service_->ResetApplicationContainer(in_request);
+  response->Return(reply);
+}
+
+void UserDataAuthAdaptor::RestoreDeviceKey(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::RestoreDeviceKeyReply>> response,
+    const user_data_auth::RestoreDeviceKeyRequest& in_request) {
+  service_->PostTaskToMountThread(
+      FROM_HERE,
+      base::BindOnce(
+          &UserDataAuthAdaptor::DoRestoreDeviceKey, base::Unretained(this),
+          ThreadSafeDBusMethodResponse<user_data_auth::RestoreDeviceKeyReply>::
+              MakeThreadSafe(std::move(response)),
+          in_request));
+}
+
+void UserDataAuthAdaptor::DoRestoreDeviceKey(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::RestoreDeviceKeyReply>> response,
+    const user_data_auth::RestoreDeviceKeyRequest& in_request) {
+  service_->RestoreDeviceKey(
+      in_request,
+      base::BindOnce(
+          [](std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+                 user_data_auth::RestoreDeviceKeyReply>> local_response,
+             const user_data_auth::RestoreDeviceKeyReply& reply) {
+            local_response->Return(reply);
+          },
+          std::move(response)));
+}
+
+void UserDataAuthAdaptor::GetArcDiskFeatures(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        user_data_auth::GetArcDiskFeaturesReply>> response,
+    const user_data_auth::GetArcDiskFeaturesRequest& in_request) {
+  user_data_auth::GetArcDiskFeaturesReply reply;
+  reply.set_quota_supported(service_->IsArcQuotaSupported());
   response->Return(reply);
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,18 +10,17 @@
 
 #include <base/files/file_path.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Represents a udev device with powerd tags associated to it.
 class TaggedDevice {
  public:
   // Default constructor for easier use with std::map.
-  TaggedDevice();
+  TaggedDevice() = default;
   TaggedDevice(const std::string& syspath,
                const base::FilePath& wakeup_device_path,
                const std::string& tags);
-  ~TaggedDevice();
+  ~TaggedDevice() = default;
 
   const std::string& syspath() const { return syspath_; }
   const base::FilePath& wakeup_device_path() const {
@@ -39,7 +38,6 @@ class TaggedDevice {
   std::unordered_set<std::string> tags_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_TAGGED_DEVICE_H_

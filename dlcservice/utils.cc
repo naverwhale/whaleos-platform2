@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,13 +13,17 @@
 #include <utility>
 #include <vector>
 
+#include <base/check.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/string_util.h>
 #include <brillo/file_utils.h>
 #include <crypto/secure_hash.h>
 #include <crypto/sha2.h>
+
+#include "dlcservice/system_state.h"
 
 using base::FilePath;
 using crypto::SecureHash;
@@ -67,12 +71,85 @@ char kDlcDirAName[] = "dlc_a";
 char kDlcDirBName[] = "dlc_b";
 
 char kDlcImageFileName[] = "dlc.img";
-char kManifestName[] = "imageloader.json";
 
 char kRootDirectoryInsideDlcModule[] = "root";
 
 const int kDlcFilePerms = 0644;
 const int kDlcDirectoryPerms = 0755;
+
+const char kCategoryInstall[] = "install";
+const char kCategoryUninstall[] = "uninstall";
+const char kCategoryInit[] = "init";
+const char kCategoryCleanup[] = "cleanup";
+
+bool SplitPartitionName(std::string partition_name,
+                        std::string* disk_name_out,
+                        int* partition_num_out) {
+  CHECK(disk_name_out);
+  CHECK(partition_num_out);
+  if (!base::StartsWith(partition_name, "/dev/",
+                        base::CompareCase::SENSITIVE)) {
+    LOG(ERROR) << "Invalid partition device name: " << partition_name;
+    return false;
+  }
+
+  // Loop twice if we hit the '_' case to handle NAND block devices.
+  for (int i = 0; i <= 1; ++i) {
+    auto nondigit_pos = partition_name.find_last_not_of("0123456789");
+    if (!isdigit(partition_name.back()) || nondigit_pos == string::npos) {
+      LOG(ERROR) << "Unable to parse partition device name: " << partition_name;
+      return false;
+    }
+
+    switch (partition_name[nondigit_pos]) {
+      // NAND block devices have weird naming which could be something like
+      // "/dev/ubiblock2_0". We discard "_0" in such a case.
+      case '_':
+        LOG(INFO) << "Shortening partition_name: " << partition_name;
+        partition_name = partition_name.substr(0, nondigit_pos);
+        break;
+      // Special case for MMC devices which have the following naming scheme:
+      //   mmcblk0p2
+      case 'p':
+        if (nondigit_pos != 0 && isdigit(partition_name[nondigit_pos - 1])) {
+          *disk_name_out = partition_name.substr(0, nondigit_pos);
+          base::StringToInt(partition_name.substr(nondigit_pos + 1),
+                            partition_num_out);
+          return true;
+        }
+        [[fallthrough]];
+      default:
+        *disk_name_out = partition_name.substr(0, nondigit_pos + 1);
+        base::StringToInt(partition_name.substr(nondigit_pos + 1),
+                          partition_num_out);
+        return true;
+    }
+  }
+  LOG(ERROR) << "Unable to parse partition device name: " << partition_name;
+  return false;
+}
+
+std::string JoinPartitionName(std::string device_name, int partition_num) {
+  if (partition_num < 1) {
+    LOG(ERROR) << "Invalid partition number: " << partition_num;
+    return {};
+  }
+
+  if (!base::StartsWith(device_name, "/dev/", base::CompareCase::SENSITIVE)) {
+    LOG(ERROR) << "Invalid device name: " << device_name;
+    return {};
+  }
+
+  if (isdigit(device_name.back())) {
+    // Special case for devices with names ending with a digit.
+    // Add "p" to separate the disk name from partition number,
+    // e.g. "/dev/loop0p2"
+    device_name += 'p';
+  }
+
+  device_name += std::to_string(partition_num);
+  return device_name;
+}
 
 bool WriteToFile(const FilePath& path, const string& data) {
   return WriteFile(path, data, /*truncate=*/true);
@@ -155,44 +232,6 @@ bool CreateFile(const base::FilePath& path, int64_t size) {
   return ResizeFile(path, size) && SetFilePermissions(path, kDlcFilePerms);
 }
 
-bool HashFile(const base::FilePath& path,
-              int64_t size,
-              vector<uint8_t>* sha256) {
-  base::File f(path, base::File::FLAG_OPEN | base::File::FLAG_READ);
-  if (!f.IsValid()) {
-    PLOG(ERROR) << "Failed to read file at " << path.value()
-                << ", reason: " << base::File::ErrorToString(f.error_details());
-    return false;
-  }
-
-  auto length = f.GetLength();
-  if (length < 0) {
-    LOG(ERROR) << "Failed to get length for file at " << path.value();
-    return false;
-  }
-  if (length < size) {
-    LOG(ERROR) << "File size " << length
-               << " is smaller than intended file size " << size;
-    return false;
-  }
-
-  constexpr int64_t kMaxBufSize = 4096;
-  unique_ptr<SecureHash> hash(SecureHash::Create(SecureHash::SHA256));
-
-  vector<char> buf(kMaxBufSize);
-  for (; size > 0; size -= kMaxBufSize) {
-    int bytes = std::min(kMaxBufSize, size);
-    if (f.ReadAtCurrentPos(buf.data(), bytes) != bytes) {
-      PLOG(ERROR) << "Failed to read from file at " << path.value();
-      return false;
-    }
-    hash->Update(buf.data(), bytes);
-  }
-  sha256->resize(crypto::kSHA256Length);
-  hash->Finish(sha256->data(), sha256->size());
-  return true;
-}
-
 bool CopyAndHashFile(const base::FilePath& from,
                      const base::FilePath& to,
                      int64_t size,
@@ -240,7 +279,10 @@ bool CopyAndHashFile(const base::FilePath& from,
   sha256->resize(crypto::kSHA256Length);
   hash->Finish(sha256->data(), sha256->size());
 
-  return SetFilePermissions(to, kDlcFilePerms);
+  if (!SetFilePermissions(to, kDlcFilePerms)) {
+    PLOG(WARNING) << "Failed to set permissions.";
+  }
+  return true;
 }
 
 FilePath GetDlcImagePath(const FilePath& dlc_module_root_path,
@@ -249,30 +291,6 @@ FilePath GetDlcImagePath(const FilePath& dlc_module_root_path,
                          BootSlot::Slot slot) {
   return JoinPaths(dlc_module_root_path, id, package, BootSlot::ToString(slot),
                    kDlcImageFileName);
-}
-
-// Extract details about a DLC module from its manifest file.
-std::shared_ptr<imageloader::Manifest> GetDlcManifest(
-    const FilePath& dlc_manifest_path,
-    const string& id,
-    const string& package) {
-  string dlc_json_str;
-  FilePath dlc_manifest_file =
-      JoinPaths(dlc_manifest_path, id, package, kManifestName);
-
-  if (!base::ReadFileToString(dlc_manifest_file, &dlc_json_str)) {
-    LOG(ERROR) << "Failed to read DLC manifest file '"
-               << dlc_manifest_file.value() << "'.";
-    return nullptr;
-  }
-
-  auto manifest = std::make_shared<imageloader::Manifest>();
-  if (!manifest->ParseManifest(dlc_json_str)) {
-    LOG(ERROR) << "Failed to parse DLC manifest for DLC:" << id << ".";
-    return nullptr;
-  }
-
-  return manifest;
 }
 
 set<string> ScanDirectory(const FilePath& dir) {
@@ -284,6 +302,22 @@ set<string> ScanDirectory(const FilePath& dir) {
     result.emplace(dir_path.BaseName().value());
   }
   return result;
+}
+
+std::vector<base::FilePath> GetPathsToDelete(const DlcId& id) {
+  const auto* system_state = SystemState::Get();
+  return {JoinPaths(system_state->content_dir(), id),
+          JoinPaths(system_state->dlc_prefs_dir(), id),
+          JoinPaths(system_state->factory_install_dir(), id)};
+}
+
+PartitionSlot ToPartitionSlot(BootSlot::Slot slot) {
+  switch (slot) {
+    case BootSlot::Slot::A:
+      return PartitionSlot::A;
+    case BootSlot::Slot::B:
+      return PartitionSlot::B;
+  }
 }
 
 }  // namespace dlcservice

@@ -1,20 +1,21 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ml/handwriting.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_path.h>
+#include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/memory/free_deleter.h>
 #include <base/native_library.h>
-#include <base/optional.h>
 #include <base/strings/string_util.h>
 
 #include "ml/util.h"
@@ -28,15 +29,17 @@ using chromeos::machine_learning::mojom::HandwritingRecognizerSpecPtr;
 
 constexpr char kHandwritingLibraryRelativePath[] = "libhandwriting.so";
 
-// A list of supported language code.
+// Language codes supported by Longform.
 constexpr char kLanguageCodeEn[] = "en";
-constexpr char kLanguageCodeEs[] = "es";  // Language Packs only
 constexpr char kLanguageCodeGesture[] = "gesture_in_context";
 
-// Returns HandwritingRecognizerModelPaths based on the `spec`.
+// Returns HandwritingRecognizerModelPaths based on the given `model_path`.
+// Language is required to handle exceptions, like "en" (no DLC) and "gesture".
 HandwritingRecognizerModelPaths GetModelPaths(
     const std::string& language, const base::FilePath& model_path) {
   HandwritingRecognizerModelPaths paths;
+  // English and Gesture are not served by Language Packs; they are installed
+  // in rootfs.
   if (language == kLanguageCodeEn) {
     paths.set_reco_model_path(model_path.Append("latin_indy.tflite").value());
     paths.set_seg_model_path(
@@ -46,22 +49,27 @@ HandwritingRecognizerModelPaths GetModelPaths(
     paths.set_fst_lm_path(model_path.Append("latin_indy.compact.fst").value());
     paths.set_recospec_path(model_path.Append("latin_indy.pb").value());
     return paths;
-  } else if (language == kLanguageCodeEs) {
-    // For Language Packs MVP, the VK is calling the ML Service Mojo API
-    // only for Spanish language.
-    paths.set_reco_model_path(model_path.Append("latin_indy.tflite").value());
-    paths.set_seg_model_path(
-        model_path.Append("latin_indy_seg.tflite").value());
-    paths.set_conf_model_path(
-        model_path.Append("latin_indy_conf.tflite").value());
-    paths.set_fst_lm_path(model_path.Append("compact.fst.local").value());
-    paths.set_recospec_path(model_path.Append("qrnn.recospec.local").value());
+  } else if (language == kLanguageCodeGesture) {
+    paths.set_reco_model_path(
+        model_path.Append("gic.reco_model.tflite").value());
+    paths.set_recospec_path(model_path.Append("gic.recospec.pb").value());
     return paths;
   }
 
-  DCHECK_EQ(language, kLanguageCodeGesture);
-  paths.set_reco_model_path(model_path.Append("gic.reco_model.tflite").value());
-  paths.set_recospec_path(model_path.Append("gic.recospec.pb").value());
+  // If we get here, it means that Language Packs are enabled.
+  // First load the language model and FST.
+  paths.set_fst_lm_path(model_path.Append("compact.fst.local").value());
+  paths.set_recospec_path(model_path.Append("qrnn.recospec.local").value());
+  // Load the model for the script (latin, cyrillic, etc).
+  paths.set_reco_model_path(model_path.Append("latin_indy.tflite").value());
+  // The following are optionals: segmentation and confidence models.
+  const auto seg_file_path = model_path.Append("latin_indy_seg.tflite");
+  if (base::PathExists(seg_file_path))
+    paths.set_seg_model_path(seg_file_path.value());
+  const auto conf_file_path = model_path.Append("latin_indy_conf.tflite");
+  if (base::PathExists(conf_file_path))
+    paths.set_conf_model_path(conf_file_path.value());
+
   return paths;
 }
 
@@ -95,7 +103,7 @@ class HandwritingLibraryImpl : public HandwritingLibrary {
   HandwritingLibraryImpl(const HandwritingLibraryImpl&) = delete;
   HandwritingLibraryImpl& operator=(const HandwritingLibraryImpl&) = delete;
 
-  base::Optional<base::ScopedNativeLibrary> library_;
+  std::optional<base::ScopedNativeLibrary> library_;
   Status status_;
   // Path that contains the library and the model files.
   const base::FilePath lib_path_;
@@ -103,7 +111,7 @@ class HandwritingLibraryImpl : public HandwritingLibrary {
   // Store the interface function pointers.
   // TODO(honglinyu) as pointed out by cjmcdonald@, we should group the pointers
   // into a single `HandwritingInterface` struct and make it optional, i.e.,
-  // declaring something like |base::Optional<HandwritingInterface> interface_|.
+  // declaring something like |std::optional<HandwritingInterface> interface_|.
   CreateHandwritingRecognizerFn create_handwriting_recognizer_;
   LoadHandwritingRecognizerFn load_handwriting_recognizer_;
   RecognizeHandwritingFn recognize_handwriting_;
@@ -206,7 +214,7 @@ bool HandwritingLibraryImpl::LoadHandwritingRecognizer(
   if (ml::HandwritingLibrary::IsUseLanguagePacksEnabled() &&
       spec->language_pack_path) {
     const std::string target_path = spec->language_pack_path.value();
-    const base::Optional<base::FilePath> real_language_pack_path =
+    const std::optional<base::FilePath> real_language_pack_path =
         GetRealPath(base::FilePath(target_path));
     if (!real_language_pack_path) {
       LOG(ERROR) << "Bad Language Pack path" << target_path;

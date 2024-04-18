@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "runtime_probe/probe_function.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include <base/check.h>
@@ -12,32 +13,40 @@
 #include <base/json/json_writer.h>
 #include <base/logging.h>
 
-#include "runtime_probe/system/context_instance.h"
+#include "runtime_probe/functions/all_functions.h"
+#include "runtime_probe/system/context.h"
 
 namespace runtime_probe {
 
 using DataType = typename ProbeFunction::DataType;
 
-ProbeFunction::ProbeFunction(base::Value&& raw_value) {}
+auto ProbeFunction::registered_functions_ =
+    AllFunctions::ConstructRegisteredFunctionTable();
+
+ProbeFunction::ProbeFunction() = default;
+
+ProbeFunction::~ProbeFunction() = default;
 
 std::unique_ptr<ProbeFunction> ProbeFunction::FromValue(const base::Value& dv) {
   if (!dv.is_dict()) {
     LOG(ERROR) << "ProbeFunction::FromValue takes a dictionary as parameter";
     return nullptr;
   }
+  const auto& dict = dv.GetDict();
 
-  if (dv.DictSize() == 0) {
+  auto size = dict.size();
+  if (size == 0) {
     LOG(ERROR) << "No function name found in the ProbeFunction dictionary";
     return nullptr;
   }
 
-  if (dv.DictSize() > 1) {
+  if (size > 1) {
     LOG(ERROR) << "More than 1 function names specified in the ProbeFunction"
                   " dictionary";
     return nullptr;
   }
 
-  const auto& it = dv.DictItems().begin();
+  const auto& it = dict.begin();
 
   // function_name is the only key exists in the dictionary */
   const auto& function_name = it->first;
@@ -51,58 +60,121 @@ std::unique_ptr<ProbeFunction> ProbeFunction::FromValue(const base::Value& dv) {
   }
 
   if (!kwargs.is_dict()) {
-    // TODO(stimim): implement syntax sugar.
     LOG(ERROR) << "Function argument should be a dictionary";
     return nullptr;
   }
 
   return static_cast<std::unique_ptr<ProbeFunction>>(
-      registered_functions_[function_name](kwargs));
+      registered_functions_[function_name](kwargs.GetDict()));
 }
 
-PrivilegedProbeFunction::PrivilegedProbeFunction(base::Value&& raw_value)
-    : raw_value_(std::move(raw_value)) {}
+void ProbeFunction::Eval(base::OnceCallback<void(DataType)> callback) const {
+  EvalAsyncImpl(std::move(callback));
+}
+
+int ProbeFunction::EvalInHelper(std::string* /*output*/) const {
+  LOG(ERROR) << "Probe function \"" << GetFunctionName()
+             << "\" cannot be invoked in helper.";
+  return -1;
+}
+
+void ProbeFunction::RegisterArgumentParser(const std::string field_name,
+                                           ArgumentParser* parser) {
+  CHECK(!argument_parsers_.count(field_name))
+      << "Register duplicated argument " << field_name;
+  argument_parsers_[field_name] = parser;
+}
+
+bool ProbeFunction::ParseArguments(const base::Value::Dict& arguments) {
+  arguments_ = arguments.Clone();
+  auto arguments_clone = arguments.Clone();
+  bool success = true;
+  for (const auto& [field_name, parser] : argument_parsers_) {
+    auto value = arguments_clone.Extract(field_name);
+    std::string err;
+    if (parser->Parse(value, err)) {
+      continue;
+    }
+    success = false;
+    LOG(ERROR) << "ProbeFunction \"" << GetFunctionName()
+               << "\" failed to parse argument \"" << field_name
+               << "\": " << err;
+  }
+  if (!arguments_clone.empty()) {
+    success = false;
+    for (const auto& [field_name, unused_value] : arguments_clone) {
+      LOG(ERROR) << "ProbeFunction \"" << GetFunctionName()
+                 << "\" got unexpected argument \"" << field_name << "\"";
+    }
+  }
+  return success ? PostParseArguments() : false;
+}
+
+DataType ProbeFunction::EvalImpl() const {
+  NOTREACHED_NORETURN()
+      << "Either |EvalImpl| or |EvalAsyncImpl| should be implemented.";
+}
+
+void ProbeFunction::EvalAsyncImpl(
+    base::OnceCallback<void(DataType)> callback) const {
+  std::move(callback).Run(EvalImpl());
+}
 
 bool PrivilegedProbeFunction::InvokeHelper(std::string* result) const {
+  base::Value::Dict probe_statement;
+  probe_statement.Set(GetFunctionName(), arguments().Clone());
   std::string probe_statement_str;
-  base::JSONWriter::Write(raw_value_, &probe_statement_str);
+  base::JSONWriter::Write(probe_statement, &probe_statement_str);
 
-  return ContextInstance::Get()->helper_invoker()->Invoke(
+  return Context::Get()->helper_invoker()->Invoke(
       /*probe_function=*/this, probe_statement_str, result);
 }
 
-base::Optional<base::Value> PrivilegedProbeFunction::InvokeHelperToJSON()
-    const {
+std::optional<base::Value> PrivilegedProbeFunction::InvokeHelperToJSON() const {
   std::string raw_output;
   if (!InvokeHelper(&raw_output)) {
-    return base::nullopt;
+    LOG(ERROR) << "Failed to invoke helper.";
+    return std::nullopt;
   }
-  VLOG(3) << "InvokeHelper raw output:\n" << raw_output;
-  return base::JSONReader::Read(raw_output);
+
+  auto json_output = base::JSONReader::Read(raw_output);
+  if (!json_output) {
+    LOG(ERROR) << "Failed to parse output into json format.";
+    VLOG(3) << "InvokeHelper raw output:\n" << raw_output;
+    return std::nullopt;
+  }
+
+  return json_output;
 }
 
-int ProbeFunction::EvalInHelper(std::string* output) const {
-  base::Value result = static_cast<base::Value>(EvalImpl());
+int PrivilegedProbeFunction::EvalInHelper(std::string* output) const {
+  DLOG(INFO) << "Invoking probe function \"" << GetFunctionName()
+             << "\" in helper.";
+  base::Value result{EvalImpl()};
   if (base::JSONWriter::Write(result, output))
     return 0;
   LOG(ERROR) << "Failed to serialize probed result to json string";
   return -1;
 }
 
-PrivilegedProbeFunction::DataType PrivilegedProbeFunction::Eval() const {
+void PrivilegedProbeFunction::Eval(
+    base::OnceCallback<void(DataType)> callback) const {
   auto json_output = InvokeHelperToJSON();
   if (!json_output) {
-    LOG(ERROR) << "Failed to invoke helper.";
-    return {};
+    std::move(callback).Run({});
+    return;
   }
   if (!json_output->is_list()) {
     LOG(ERROR) << "Failed to parse json output as list.";
-    return {};
+    VLOG(3) << "InvokeHelper output:\n" << *json_output;
+    std::move(callback).Run({});
+    return;
   }
 
-  auto result = json_output->TakeList();
+  DataType result = std::move(json_output->GetList());
   PostHelperEvalImpl(&result);
-  return result;
+  VLOG(3) << GetFunctionName() << " Eval output:\n" << result;
+  std::move(callback).Run(std::move(result));
 }
 
 }  // namespace runtime_probe

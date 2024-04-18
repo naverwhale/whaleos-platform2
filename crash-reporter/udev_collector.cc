@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,17 +11,21 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/process/process.h>
+#include <metrics/metrics_library.h>
 
+#include "crash-reporter/udev_bluetooth_util.h"
 #include "crash-reporter/util.h"
 
 using base::FilePath;
@@ -29,16 +33,23 @@ using base::FilePath;
 namespace {
 
 const char kCollectUdevSignature[] = "crash_reporter-udev-collection";
+const char kDefaultDevCoredumpDirectory[] = "/sys/class/devcoredump";
+const char kDevCoredumpFilePrefixFormat[] = "devcoredump_%s";
+const char kDevCoredumpMsmExecName[] = "devcoredump_msm";
+const char kUdevDrmExecName[] = "udev-drm";
 const char kUdevExecName[] = "udev";
 const char kUdevSignatureKey[] = "sig";
 const char kUdevSubsystemDevCoredump[] = "devcoredump";
-const char kDefaultDevCoredumpDirectory[] = "/sys/class/devcoredump";
-const char kDevCoredumpFilePrefixFormat[] = "devcoredump_%s";
+const char kUdevTouchscreenTrackpadExecName[] = "udev-i2c-atmel_mxt_ts";
+const char kUdevUsbExecName[] = "udev-usb";
 
 }  // namespace
 
-UdevCollector::UdevCollector()
-    : CrashCollector("udev"),
+UdevCollector::UdevCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("udev", metrics_lib),
       dev_coredump_directory_(kDefaultDevCoredumpDirectory) {}
 
 UdevCollector::~UdevCollector() {}
@@ -67,6 +78,24 @@ bool UdevCollector::IsSafeDevCoredump(
   return driver_name == "msm" || driver_name == "qcom-venus";
 }
 
+CrashCollector::ComputedCrashSeverity UdevCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  ComputedCrashSeverity computed_severity{
+      .crash_severity = CrashSeverity::kUnspecified,
+      .product_group = Product::kPlatform,
+  };
+
+  if (exec_name == kUdevUsbExecName) {
+    computed_severity.crash_severity = CrashSeverity::kError;
+  } else if ((exec_name == kDevCoredumpMsmExecName) ||
+             (exec_name == kUdevTouchscreenTrackpadExecName) ||
+             (exec_name == kUdevDrmExecName)) {
+    computed_severity.crash_severity = CrashSeverity::kWarning;
+  }
+
+  return computed_severity;
+}
+
 bool UdevCollector::HandleCrash(const std::string& udev_event) {
   // Process the udev event string.
   // First get all the key-value pairs.
@@ -77,15 +106,19 @@ bool UdevCollector::HandleCrash(const std::string& udev_event) {
     udev_event_map[key_value.first] = key_value.second;
   }
 
-  if (UdevCollector::IsSafeDevCoredump(udev_event_map)) {
+  FilePath coredump_path = FilePath(
+      base::StringPrintf("%s/devcd%s/data", dev_coredump_directory_.c_str(),
+                         udev_event_map["KERNEL_NUMBER"].c_str()));
+
+  if (bluetooth_util::IsCoredumpEnabled() &&
+      bluetooth_util::IsBluetoothCoredump(coredump_path)) {
+    LOG(INFO) << "Process bluetooth devcoredump.";
+  } else if (UdevCollector::IsSafeDevCoredump(udev_event_map)) {
     LOG(INFO) << "Safe device coredumps are always processed";
   } else if (util::IsDeveloperImage()) {
     LOG(INFO) << "developer image - collect udev crash info.";
   } else if (udev_event_map["SUBSYSTEM"] == kUdevSubsystemDevCoredump) {
     LOG(INFO) << "Device coredumps are not processed on non-developer images.";
-    FilePath coredump_path = FilePath(
-        base::StringPrintf("%s/devcd%s/data", dev_coredump_directory_.c_str(),
-                           udev_event_map["KERNEL_NUMBER"].c_str()));
     // Clear devcoredump memory before returning.
     ClearDevCoredump(coredump_path);
     return false;
@@ -157,6 +190,16 @@ bool UdevCollector::ProcessDevCoredump(const FilePath& crash_directory,
     return false;
   }
 
+  if (bluetooth_util::IsCoredumpEnabled() &&
+      bluetooth_util::IsBluetoothCoredump(coredump_path)) {
+    if (!AppendBluetoothCoredump(crash_directory, coredump_path,
+                                 instance_number)) {
+      ClearDevCoredump(coredump_path);
+      return false;
+    }
+    return ClearDevCoredump(coredump_path);
+  }
+
   // Add coredump file to the crash directory.
   if (!AppendDevCoredump(crash_directory, coredump_path, instance_number)) {
     ClearDevCoredump(coredump_path);
@@ -166,6 +209,33 @@ bool UdevCollector::ProcessDevCoredump(const FilePath& crash_directory,
   // Clear the coredump data to allow generation of future device coredumps
   // without having to wait for the 5-minutes timeout.
   return ClearDevCoredump(coredump_path);
+}
+
+bool UdevCollector::AppendBluetoothCoredump(const FilePath& crash_directory,
+                                            const FilePath& coredump_path,
+                                            int instance_number) {
+  std::string coredump_prefix = bluetooth_util::kBluetoothDevCoredumpExecName;
+  std::string dump_basename =
+      FormatDumpBasename(coredump_prefix, time(nullptr), instance_number);
+  FilePath target_path = GetCrashPath(crash_directory, dump_basename, "txt");
+  FilePath log_path = GetCrashPath(crash_directory, dump_basename, "log");
+  FilePath meta_path = GetCrashPath(crash_directory, dump_basename, "meta");
+  std::string crash_sig;
+
+  if (!bluetooth_util::ProcessBluetoothCoredump(coredump_path, target_path,
+                                                &crash_sig)) {
+    LOG(ERROR) << "Failed to parse bluetooth devcoredump.";
+    return false;
+  }
+
+  if (GetLogContents(log_config_path_, coredump_prefix, log_path)) {
+    AddCrashMetaUploadFile("logs", log_path.BaseName().value());
+  }
+
+  AddCrashMetaData(kUdevSignatureKey, crash_sig);
+  FinishCrash(meta_path, coredump_prefix, target_path.BaseName().value());
+
+  return true;
 }
 
 bool UdevCollector::AppendDevCoredump(const FilePath& crash_directory,
@@ -282,8 +352,12 @@ std::string UdevCollector::GetFailingDeviceDriverName(int instance_number) {
 }
 
 // static
-CollectorInfo UdevCollector::GetHandlerInfo(const std::string& udev_event) {
-  auto udev_collector = std::make_shared<UdevCollector>();
+CollectorInfo UdevCollector::GetHandlerInfo(
+    const std::string& udev_event,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
+  auto udev_collector = std::make_shared<UdevCollector>(metrics_lib);
   return {.collector = udev_collector,
           .handlers = {{
               .should_handle = !udev_event.empty(),

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,18 @@
 
 #include <unistd.h>
 
+#include <memory>
 #include <string>
 
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/string_split.h>
-
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library.h>
+#include <metrics/metrics_library_mock.h>
 
 #include "crash-reporter/test_util.h"
 
@@ -57,6 +61,11 @@ constexpr char kTestSecurityAnomalyMessageContent[] =
 
 class SecurityAnomalyCollectorMock : public SecurityAnomalyCollector {
  public:
+  SecurityAnomalyCollectorMock()
+      : SecurityAnomalyCollector(
+            base::MakeRefCounted<
+                base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+                std::make_unique<MetricsLibraryMock>())) {}
   MOCK_METHOD(void, SetUpDBus, (), (override));
 };
 
@@ -74,7 +83,9 @@ class SecurityAnomalyCollectorTest : public ::testing::Test {
     CreateDirectory(test_crash_directory_);
     collector_.set_crash_directory_for_test(test_crash_directory_);
     collector_.set_log_config_path(
-        test_util::GetTestDataPath(kLogConfigFileName).value());
+        test_util::GetTestDataPath(kLogConfigFileName,
+                                   /*use_testdata=*/false)
+            .value());
   }
 
  protected:

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,9 @@
 
 #include <string>
 
-#include "mojo/cros_healthd_diagnostics.mojom.h"
+#include <mojo/public/cpp/system/handle.h>
+
+#include "diagnostics/mojom/public/cros_healthd_diagnostics.mojom.h"
 
 namespace diagnostics {
 
@@ -16,16 +18,22 @@ namespace diagnostics {
 // Verifies that the given RoutineUpdateUnion is an interactive update with the
 // specified user message.
 void VerifyInteractiveUpdate(
-    const chromeos::cros_healthd::mojom::RoutineUpdateUnionPtr& update_union,
-    chromeos::cros_healthd::mojom::DiagnosticRoutineUserMessageEnum
+    const ash::cros_healthd::mojom::RoutineUpdateUnionPtr& update_union,
+    ash::cros_healthd::mojom::DiagnosticRoutineUserMessageEnum
         expected_user_message);
 
 // Verifies that the given RoutineUpdateUnion is a noninteractive update with
 // the specified status and status message.
 void VerifyNonInteractiveUpdate(
-    const chromeos::cros_healthd::mojom::RoutineUpdateUnionPtr& update_union,
-    chromeos::cros_healthd::mojom::DiagnosticRoutineStatusEnum expected_status,
+    const ash::cros_healthd::mojom::RoutineUpdateUnionPtr& update_union,
+    ash::cros_healthd::mojom::DiagnosticRoutineStatusEnum expected_status,
     const std::string& expected_status_message);
+
+// Gets content from a valid base::ReadOnlySharedMemoryMapping of passed
+// mojo::Handle.
+// Makes an unnecessary copying of data, should be used only for testing.
+std::string GetStringFromValidReadOnlySharedMemoryMapping(
+    mojo::ScopedHandle handle);
 
 }  // namespace diagnostics
 

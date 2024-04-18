@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,7 @@ namespace rmad {
 class MockCrosSystemUtils : public CrosSystemUtils {
  public:
   MockCrosSystemUtils() = default;
-  ~MockCrosSystemUtils() = default;
+  ~MockCrosSystemUtils() override = default;
 
   MOCK_METHOD(bool, SetInt, (const std::string&, int), (override));
   MOCK_METHOD(bool, GetInt, (const std::string&, int*), (const, override));

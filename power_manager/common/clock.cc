@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -33,7 +33,7 @@ int64_t ConvertTimespecToMicros(const struct timespec& ts) {
 // TODO(abhishekbh): Copied from Chrome's //base/time/time_now_posix.cc. Make
 // upstream code available via libchrome and use it here:
 // http://crbug.com/166153.
-// Returns count of |clk_id|. Retuns 0 if |clk_id| isn't present on the system.
+// Returns count of |clk_id|. Returns 0 if |clk_id| isn't present on the system.
 int64_t ClockNow(clockid_t clk_id) {
   struct timespec ts;
   if (clock_gettime(clk_id, &ts) != 0) {
@@ -44,10 +44,6 @@ int64_t ClockNow(clockid_t clk_id) {
 }
 
 }  // namespace
-
-Clock::Clock() {}
-
-Clock::~Clock() {}
 
 base::TimeTicks Clock::GetCurrentTime() {
   if (!current_time_for_testing_.is_null()) {
@@ -62,8 +58,7 @@ base::TimeTicks Clock::GetCurrentBootTime() {
     current_boot_time_for_testing_ += time_step_for_testing_;
     return current_boot_time_for_testing_;
   }
-  return base::TimeTicks() +
-         base::TimeDelta::FromMicroseconds(ClockNow(CLOCK_BOOTTIME));
+  return base::TimeTicks() + base::Microseconds(ClockNow(CLOCK_BOOTTIME));
 }
 
 base::Time Clock::GetCurrentWallTime() {

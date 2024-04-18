@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,11 +9,11 @@
 #include <stddef.h>
 #include <string.h>
 
+#include <iterator>
 #include <map>
 
 #include <base/files/file_util.h>
-#include <base/macros.h>
-#include <base/stl_util.h>
+#include <base/no_destructor.h>
 #include <base/strings/utf_string_conversions.h>
 
 #include "cros-camera/common.h"
@@ -30,9 +30,8 @@ class TimezoneMap {
   TimezoneMap(const TimezoneMap&) = delete;
   TimezoneMap& operator=(const TimezoneMap&) = delete;
   static TimezoneMap* GetInstance() {
-    // TODO(shik): change to base::NoDestructor after libchrome uprev.
-    static TimezoneMap* instance = new TimezoneMap();
-    return instance;
+    static base::NoDestructor<TimezoneMap> instance;
+    return instance.get();
   }
 
   std::string CountryCodeForTimezone(const std::string& olson_code) {
@@ -44,7 +43,6 @@ class TimezoneMap {
     return std::string();
   }
 
- private:
   TimezoneMap() {
     // These mappings are adapted from zone.tab, which is available at
     // <http://www.ietf.org/timezones/data/zone.tab> and is a part of public
@@ -475,8 +473,8 @@ class TimezoneMap {
         {"GB", "Etc/UCT"},
     };
 
-    for (size_t i = 0; i < base::size(olson_code_data); ++i)
-      map_[olson_code_data[i].olson_code] = olson_code_data[i].country_code;
+    for (auto const& code_data : olson_code_data)
+      map_[code_data.olson_code] = code_data.country_code;
 
     // These are mapping from old codenames to new codenames. They are also
     // part of public domain, and available at
@@ -598,10 +596,11 @@ class TimezoneMap {
         {"Zulu", "Etc/UTC"},
     };
 
-    for (size_t i = 0; i < base::size(link_data); ++i)
-      map_[link_data[i].old_code] = map_[link_data[i].new_code];
+    for (auto const& data : link_data)
+      map_[data.old_code] = map_[data.new_code];
   }
 
+ private:
   struct CompareCStrings {
     bool operator()(const char* str1, const char* str2) const {
       return strcmp(str1, str2) < 0;
@@ -629,10 +628,10 @@ std::string CountryCodeForCurrentTimezone() {
   return TimezoneMap::GetInstance()->CountryCodeForTimezone(olson_code);
 }
 
-PowerLineFrequency GetPowerLineFrequencyForLocation() {
+std::optional<v4l2_power_line_frequency> GetPowerLineFrequencyForLocation() {
   const std::string current_country = CountryCodeForCurrentTimezone();
   if (current_country.empty())
-    return PowerLineFrequency::FREQ_DEFAULT;
+    return std::nullopt;
   LOGF(INFO) << "Country: " << current_country;
   // Sorted out list of countries with 60Hz power line frequency, from
   // http://en.wikipedia.org/wiki/Mains_electricity_by_country
@@ -642,12 +641,12 @@ PowerLineFrequency GetPowerLineFrequencyForLocation() {
       "KN", "KR", "KY", "MS", "MX", "NI", "PA", "PE", "PF", "PH", "PR",
       "PW", "SA", "SR", "SV", "TT", "TW", "UM", "US", "VG", "VI", "VE"};
   const char** countries_using_60Hz_end =
-      countries_using_60Hz + base::size(countries_using_60Hz);
+      countries_using_60Hz + std::size(countries_using_60Hz);
   if (std::find(countries_using_60Hz, countries_using_60Hz_end,
                 current_country) == countries_using_60Hz_end) {
-    return PowerLineFrequency::FREQ_50HZ;
+    return V4L2_CID_POWER_LINE_FREQUENCY_50HZ;
   }
-  return PowerLineFrequency::FREQ_60HZ;
+  return V4L2_CID_POWER_LINE_FREQUENCY_60HZ;
 }
 
 }  // namespace cros

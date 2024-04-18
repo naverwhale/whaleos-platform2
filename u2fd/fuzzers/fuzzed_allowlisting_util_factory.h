@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@
 #define U2FD_FUZZERS_FUZZED_ALLOWLISTING_UTIL_FACTORY_H_
 
 #include <memory>
+#include <optional>
 
 #include <attestation/proto_bindings/interface.pb.h>
-#include <base/optional.h>
 #include <fuzzer/FuzzedDataProvider.h>
 
 #include "u2fd/allowlisting_util.h"
@@ -25,7 +25,7 @@ class FuzzedAllowlistingUtilFactory {
   std::unique_ptr<u2f::AllowlistingUtil> CreateAllowlistingUtil();
 
  private:
-  base::Optional<attestation::GetCertifiedNvIndexReply> GetCertifiedG2fCert(
+  std::optional<attestation::GetCertifiedNvIndexReply> GetCertifiedG2fCert(
       int g2f_cert_size);
 
   FuzzedDataProvider* const data_provider_;

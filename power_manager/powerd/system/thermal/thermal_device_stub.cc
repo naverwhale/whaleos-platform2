@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,7 @@
 
 #include <base/check.h>
 
-namespace power_manager {
-namespace system {
-
-ThermalDeviceStub::ThermalDeviceStub()
-    : current_state_(DeviceThermalState::kUnknown),
-      type_(ThermalDeviceType::kUnknown) {}
-
-ThermalDeviceStub::~ThermalDeviceStub() {}
+namespace power_manager::system {
 
 void ThermalDeviceStub::AddObserver(ThermalDeviceObserver* observer) {
   DCHECK(observer);
@@ -41,5 +34,4 @@ ThermalDeviceType ThermalDeviceStub::GetType() const {
   return type_;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

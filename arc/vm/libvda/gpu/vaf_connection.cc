@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,17 +12,17 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/single_thread_task_runner.h>
 #include <base/synchronization/lock.h>
 #include <base/synchronization/waitable_event.h>
+#include <base/task/single_thread_task_runner.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
@@ -34,6 +34,7 @@
 #include <sys/eventfd.h>
 
 #include "arc/vm/libvda/gpu/mojom/video_decode_accelerator.mojom.h"
+#include "arc/vm/libvda/gpu/mojom/video_decoder.mojom.h"
 #include "arc/vm/libvda/gpu/mojom/video_encode_accelerator.mojom.h"
 
 namespace arc {
@@ -72,9 +73,7 @@ void RunTaskOnThread(scoped_refptr<base::SingleThreadTaskRunner> task_runner,
 }
 
 VafConnection::VafConnection() : ipc_thread_("VafConnectionIpcThread") {
-  // TODO(alexlau): Use DETACH_FROM_THREAD macro after libchrome uprev
-  // (crbug.com/909719).
-  ipc_thread_checker_.DetachFromThread();
+  DETACH_FROM_THREAD(ipc_thread_checker_);
 
   mojo::core::Init();
   CHECK(ipc_thread_.StartWithOptions(
@@ -92,7 +91,7 @@ VafConnection::~VafConnection() {
 }
 
 void VafConnection::CleanupOnIpcThread() {
-  DCHECK(ipc_thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
   if (remote_factory_.is_bound())
     remote_factory_.reset();
 }
@@ -109,9 +108,7 @@ void VafConnection::InitializeOnIpcThread(bool* init_success) {
   // Since ipc_thread_checker_ binds to whichever thread it's created on, check
   // that we're on the correct thread first using BelongsToCurrentThread.
   DCHECK(ipc_thread_.task_runner()->BelongsToCurrentThread());
-  // TODO(alexlau): Use DCHECK_CALLED_ON_VALID_THREAD macro after libchrome
-  // uprev (crbug.com/909719).
-  DCHECK(ipc_thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
 
   dbus::Bus::Options opts;
   opts.bus_type = dbus::Bus::SYSTEM;
@@ -133,15 +130,16 @@ void VafConnection::InitializeOnIpcThread(bool* init_success) {
 
   dbus::MethodCall method_call(libvda::kLibvdaServiceInterface,
                                libvda::kProvideMojoConnectionMethod);
-  std::unique_ptr<dbus::Response> response(proxy->CallMethodAndBlock(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT));
-  if (!response.get()) {
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response(
+      proxy->CallMethodAndBlock(&method_call,
+                                dbus::ObjectProxy::TIMEOUT_USE_DEFAULT));
+  if (!response.has_value() || !response.value()) {
     DLOG(ERROR) << "Unable to get response from method call "
                 << libvda::kProvideMojoConnectionMethod;
     return;
   }
 
-  dbus::MessageReader reader(response.get());
+  dbus::MessageReader reader(response.value().get());
 
   // Read the mojo pipe FD.
   base::ScopedFD fd;
@@ -175,7 +173,7 @@ void VafConnection::InitializeOnIpcThread(bool* init_success) {
 
 void VafConnection::OnFactoryError(uint32_t custom_reason,
                                    const std::string& description) {
-  DCHECK(ipc_thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
   DLOG(ERROR) << "VideoAcceleratorFactory mojo connection error. custom_reason="
               << custom_reason << " description=" << description;
 }
@@ -187,6 +185,7 @@ scoped_refptr<base::SingleThreadTaskRunner> VafConnection::GetIpcTaskRunner() {
 mojo::Remote<arc::mojom::VideoDecodeAccelerator>
 VafConnection::CreateDecodeAccelerator() {
   mojo::Remote<arc::mojom::VideoDecodeAccelerator> remote_vda;
+  // Using Unretained is safe here as the IPC thread is owned by this class.
   RunTaskOnThread(
       ipc_thread_.task_runner(),
       base::BindOnce(&VafConnection::CreateDecodeAcceleratorOnIpcThread,
@@ -200,9 +199,24 @@ void VafConnection::CreateDecodeAcceleratorOnIpcThread(
       remote_vda->BindNewPipeAndPassReceiver());
 }
 
+mojo::Remote<arc::mojom::VideoDecoder> VafConnection::CreateVideoDecoder() {
+  mojo::Remote<arc::mojom::VideoDecoder> remote_vd;
+  // Using Unretained is safe here as the IPC thread is owned by this class.
+  RunTaskOnThread(ipc_thread_.task_runner(),
+                  base::BindOnce(&VafConnection::CreateVideoDecoderOnIpcThread,
+                                 base::Unretained(this), &remote_vd));
+  return remote_vd;
+}
+
+void VafConnection::CreateVideoDecoderOnIpcThread(
+    mojo::Remote<arc::mojom::VideoDecoder>* remote_vd) {
+  remote_factory_->CreateVideoDecoder(remote_vd->BindNewPipeAndPassReceiver());
+}
+
 mojo::Remote<arc::mojom::VideoEncodeAccelerator>
 VafConnection::CreateEncodeAccelerator() {
   mojo::Remote<arc::mojom::VideoEncodeAccelerator> remote_vea;
+  // Using Unretained is safe here as the IPC thread is owned by this class.
   RunTaskOnThread(
       ipc_thread_.task_runner(),
       base::BindOnce(&VafConnection::CreateEncodeAcceleratorOnIpcThread,

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -14,62 +16,66 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/timer/elapsed_timer.h>
 #include <brillo/secure_blob.h>
 #include <chromeos/constants/cryptohome.h>
 #include <dbus/cryptohome/dbus-constants.h>
+#include <libhwsec-foundation/status/status_chain.h>
 
-#include "cryptohome/cleanup/user_oldest_activity_timestamp_cache.h"
-#include "cryptohome/credentials.h"
 #include "cryptohome/crypto.h"
 #include "cryptohome/cryptohome_metrics.h"
+#include "cryptohome/error/action.h"
+#include "cryptohome/error/cryptohome_error.h"
+#include "cryptohome/error/location_utils.h"
 #include "cryptohome/filesystem_layout.h"
+#include "cryptohome/flatbuffer_schemas/auth_block_state.h"
+#include "cryptohome/key_objects.h"
 #include "cryptohome/platform.h"
-#include "cryptohome/storage/homedirs.h"
+#include "cryptohome/timestamp.pb.h"
 #include "cryptohome/vault_keyset.h"
 #include "cryptohome/vault_keyset_factory.h"
 
 using base::FilePath;
+using cryptohome::error::CryptohomeError;
+using cryptohome::error::CryptohomeMountError;
+using cryptohome::error::ErrorActionSet;
+using cryptohome::error::PossibleAction;
+using cryptohome::error::PrimaryAction;
+using hwsec_foundation::status::MakeStatus;
+using hwsec_foundation::status::OkStatus;
+using hwsec_foundation::status::StatusChain;
 
 namespace cryptohome {
 
 KeysetManagement::KeysetManagement(
     Platform* platform,
     Crypto* crypto,
-    const brillo::SecureBlob& system_salt,
-    UserOldestActivityTimestampCache* timestamp_cache,
     std::unique_ptr<VaultKeysetFactory> vault_keyset_factory)
     : platform_(platform),
       crypto_(crypto),
-      system_salt_(system_salt),
-      enterprise_owned_(false),
-      timestamp_cache_(timestamp_cache),
       vault_keyset_factory_(std::move(vault_keyset_factory)) {}
 
-bool KeysetManagement::AreCredentialsValid(const Credentials& creds) {
-  std::unique_ptr<VaultKeyset> vk = GetValidKeyset(creds, nullptr /* error */);
-  return vk.get() != nullptr;
-}
-
-std::unique_ptr<VaultKeyset> KeysetManagement::GetValidKeyset(
-    const Credentials& creds, MountError* error) {
-  if (error)
-    *error = MOUNT_ERROR_NONE;
-
-  std::string obfuscated = creds.GetObfuscatedUsername(system_salt_);
-
+MountStatusOr<std::unique_ptr<VaultKeyset>> KeysetManagement::GetValidKeyset(
+    const ObfuscatedUsername& obfuscated,
+    KeyBlobs key_blobs,
+    const std::optional<std::string>& label) {
   std::vector<int> key_indices;
   if (!GetVaultKeysets(obfuscated, &key_indices)) {
-    LOG(WARNING) << "No valid keysets on disk for " << obfuscated;
-    if (error)
-      *error = MOUNT_ERROR_VAULT_UNRECOVERABLE;
-    return nullptr;
+    return MakeStatus<CryptohomeMountError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocKeysetManagementGetKeysetsFailedInGetValidKeyset),
+        ErrorActionSet({PossibleAction::kReboot, PossibleAction::kDeleteVault}),
+        MOUNT_ERROR_VAULT_UNRECOVERABLE);
   }
 
   bool any_keyset_exists = false;
-  CryptoError last_crypto_error = CryptoError::CE_NONE;
+
+  CryptoStatus last_crypto_error;
+  last_crypto_error.HintUnknown();
   for (int index : key_indices) {
     std::unique_ptr<VaultKeyset> vk = LoadVaultKeysetForUser(obfuscated, index);
     if (!vk) {
@@ -78,79 +84,74 @@ std::unique_ptr<VaultKeyset> KeysetManagement::GetValidKeyset(
     any_keyset_exists = true;
     // Skip decrypt attempts if the label doesn't match.
     // Treat an empty creds label as a wildcard.
-    if (!creds.key_data().label().empty() &&
-        creds.key_data().label() != vk->GetLabel())
+    if (label.has_value() && !label.value().empty() &&
+        label != vk->GetLabel()) {
       continue;
+    }
     // Skip LE Credentials if not explicitly identified by a label, since we
     // don't want unnecessary wrong attempts.
-    if (creds.key_data().label().empty() &&
+    if ((!label.has_value() || label.value().empty()) &&
         (vk->GetFlags() & SerializedVaultKeyset::LE_CREDENTIAL)) {
       continue;
     }
-    bool locked_to_single_user =
-        platform_->FileExists(base::FilePath(kLockedToSingleUserFile));
-    if (vk->Decrypt(creds.passkey(), locked_to_single_user,
-                    &last_crypto_error)) {
+
+    last_crypto_error = vk->DecryptEx(key_blobs);
+    if (last_crypto_error.ok()) {
       return vk;
     }
   }
 
-  MountError local_error = MOUNT_ERROR_NONE;
   if (!any_keyset_exists) {
     LOG(ERROR) << "No parsable keysets found for " << obfuscated;
-    local_error = MOUNT_ERROR_VAULT_UNRECOVERABLE;
-  } else if (last_crypto_error == CryptoError::CE_NONE) {
+    return MakeStatus<CryptohomeMountError>(
+        CRYPTOHOME_ERR_LOC(kLocKeysetManagementNoKeysetsInGetValidKeyset),
+        ErrorActionSet({PossibleAction::kReboot, PossibleAction::kDeleteVault}),
+        MOUNT_ERROR_VAULT_UNRECOVERABLE);
+  } else if (last_crypto_error.ok()) {
     // If we're searching by label, don't let a no-key-found become
     // MOUNT_ERROR_FATAL.  In the past, no parseable key was a fatal
     // error.  Just treat it like an invalid key.  This allows for
     // multiple per-label requests then a wildcard, worst case, before
     // the Cryptohome is removed.
-    if (!creds.key_data().label().empty()) {
+    if (label.has_value() && !label.value().empty()) {
       LOG(ERROR) << "Failed to find the specified keyset for " << obfuscated;
-      local_error = MOUNT_ERROR_KEY_FAILURE;
+      return MakeStatus<CryptohomeMountError>(
+          CRYPTOHOME_ERR_LOC(
+              kLocKeysetManagementKeysetNotDecryptedInGetValidKeyset),
+          ErrorActionSet({PossibleAction::kAuth, PossibleAction::kReboot,
+                          PossibleAction::kDeleteVault}),
+          MOUNT_ERROR_KEY_FAILURE);
+
     } else {
       LOG(ERROR) << "Failed to find any suitable keyset for " << obfuscated;
-      local_error = MOUNT_ERROR_FATAL;
+      return MakeStatus<CryptohomeMountError>(
+          CRYPTOHOME_ERR_LOC(
+              kLocKeysetManagementNoKeysetsDecryptedInGetValidKeyset),
+          ErrorActionSet(
+              {PossibleAction::kReboot, PossibleAction::kDeleteVault}),
+          MOUNT_ERROR_FATAL);
     }
   } else {
-    switch (last_crypto_error) {
-      case CryptoError::CE_TPM_FATAL:
-      case CryptoError::CE_OTHER_FATAL:
-        local_error = MOUNT_ERROR_VAULT_UNRECOVERABLE;
-        break;
-      case CryptoError::CE_TPM_COMM_ERROR:
-        local_error = MOUNT_ERROR_TPM_COMM_ERROR;
-        break;
-      case CryptoError::CE_TPM_DEFEND_LOCK:
-        local_error = MOUNT_ERROR_TPM_DEFEND_LOCK;
-        break;
-      case CryptoError::CE_TPM_REBOOT:
-        local_error = MOUNT_ERROR_TPM_NEEDS_REBOOT;
-        break;
-      default:
-        local_error = MOUNT_ERROR_KEY_FAILURE;
-        break;
-    }
-    LOG(ERROR) << "Failed to decrypt any keysets for " << obfuscated
-               << ": mount error " << local_error << ", crypto error "
+    LOG(ERROR) << "Failed to decrypt any keysets for " << obfuscated << ": "
                << last_crypto_error;
+    return MakeStatus<CryptohomeMountError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocKeysetManagementDecryptFailedInGetValidKeyset))
+        .Wrap(std::move(last_crypto_error));
   }
-  if (error)
-    *error = local_error;
-  return nullptr;
 }
 
 std::unique_ptr<VaultKeyset> KeysetManagement::GetVaultKeyset(
-    const std::string& obfuscated_username,
+    const ObfuscatedUsername& obfuscated_username,
     const std::string& key_label) const {
   if (key_label.empty())
-    return NULL;
+    return nullptr;
 
   // Walk all indices to find a match.
   // We should move to label-derived suffixes to be efficient.
   std::vector<int> key_indices;
   if (!GetVaultKeysets(obfuscated_username, &key_indices)) {
-    return NULL;
+    return nullptr;
   }
   for (int index : key_indices) {
     std::unique_ptr<VaultKeyset> vk =
@@ -162,14 +163,13 @@ std::unique_ptr<VaultKeyset> KeysetManagement::GetVaultKeyset(
       return vk;
     }
   }
-  return NULL;
+  return nullptr;
 }
 
-// TODO(wad) Figure out how this might fit in with vault_keyset.cc
-bool KeysetManagement::GetVaultKeysets(const std::string& obfuscated,
+bool KeysetManagement::GetVaultKeysets(const ObfuscatedUsername& obfuscated,
                                        std::vector<int>* keysets) const {
   CHECK(keysets);
-  base::FilePath user_dir = ShadowRoot().Append(obfuscated);
+  base::FilePath user_dir = UserPath(obfuscated);
 
   std::unique_ptr<FileEnumerator> file_enumerator(platform_->GetFileEnumerator(
       user_dir, false, base::FileEnumerator::FILES));
@@ -199,115 +199,63 @@ bool KeysetManagement::GetVaultKeysets(const std::string& obfuscated,
   return keysets->size() != 0;
 }
 
-bool KeysetManagement::GetVaultKeysetLabelsAndData(
-    const std::string& obfuscated_username,
-    std::map<std::string, KeyData>* key_label_data) const {
-  CHECK(key_label_data);
-  base::FilePath user_dir = ShadowRoot().Append(obfuscated_username);
-
-  std::unique_ptr<FileEnumerator> file_enumerator(platform_->GetFileEnumerator(
-      user_dir, false /* Not recursive. */, base::FileEnumerator::FILES));
-  base::FilePath next_path;
-  while (!(next_path = file_enumerator->Next()).empty()) {
-    base::FilePath file_name = next_path.BaseName();
-    // Scan for key files.
-    if (file_name.RemoveFinalExtension().value() != kKeyFile) {
-      continue;
-    }
-    int index = 0;
-    std::string index_str = file_name.FinalExtension();
-    // StringToInt will only return true for a perfect conversion.
-    if (!base::StringToInt(&index_str[1], &index)) {
-      continue;
-    }
-    if (index < 0 || index >= kKeyFileMax) {
-      LOG(ERROR) << "Invalid key file range: " << index;
-      continue;
-    }
-    // Now parse the keyset to get its label and keydata or skip it. The
-    // VaultKeyset will not be decrypted during this step.
-    std::unique_ptr<VaultKeyset> vk =
-        LoadVaultKeysetForUser(obfuscated_username, index);
-    if (!vk) {
-      continue;
-    }
-    if (key_label_data->find(vk->GetLabel()) != key_label_data->end()) {
-      // This is a confirmation check, we do not expect to hit this.
-      LOG(INFO) << "Found a duplicate label, skipping it: " << vk->GetLabel();
-      continue;
-    }
-    key_label_data->insert({vk->GetLabel(), vk->GetKeyData()});
-  }
-
-  return (key_label_data->size() > 0);
-}
-
-bool KeysetManagement::GetVaultKeysetLabels(
-    const std::string& obfuscated_username,
-    std::vector<std::string>* labels) const {
-  CHECK(labels);
-  base::FilePath user_dir = ShadowRoot().Append(obfuscated_username);
-
-  std::unique_ptr<FileEnumerator> file_enumerator(platform_->GetFileEnumerator(
-      user_dir, false /* Not recursive. */, base::FileEnumerator::FILES));
-  base::FilePath next_path;
-  while (!(next_path = file_enumerator->Next()).empty()) {
-    base::FilePath file_name = next_path.BaseName();
-    // Scan for "master." files. // nocheck
-    if (file_name.RemoveFinalExtension().value() != kKeyFile) {
-      continue;
-    }
-    int index = 0;
-    std::string index_str = file_name.FinalExtension();
-    // StringToInt will only return true for a perfect conversion.
-    if (!base::StringToInt(&index_str[1], &index)) {
-      continue;
-    }
-    if (index < 0 || index >= kKeyFileMax) {
-      LOG(ERROR) << "Invalid key file range: " << index;
-      continue;
-    }
-    // Now parse the keyset to get its label or skip it.
-    std::unique_ptr<VaultKeyset> vk =
-        LoadVaultKeysetForUser(obfuscated_username, index);
-    if (!vk) {
-      continue;
-    }
-    labels->push_back(vk->GetLabel());
-  }
-
-  return (labels->size() > 0);
-}
-
-bool KeysetManagement::AddInitialKeyset(const Credentials& credentials) {
-  const brillo::SecureBlob passkey = credentials.passkey();
-  std::string obfuscated_username =
-      credentials.GetObfuscatedUsername(system_salt_);
-
+CryptohomeStatusOr<std::unique_ptr<VaultKeyset>>
+KeysetManagement::AddInitialKeyset(
+    const VaultKeysetIntent& vk_intent,
+    const ObfuscatedUsername& obfuscated_username,
+    const KeyData& key_data,
+    const std::optional<SerializedVaultKeyset_SignatureChallengeInfo>&
+        challenge_credentials_keyset_info,
+    const FileSystemKeyset& file_system_keyset,
+    KeyBlobs key_blobs,
+    std::unique_ptr<AuthBlockState> auth_state) {
   std::unique_ptr<VaultKeyset> vk(
       vault_keyset_factory_->New(platform_, crypto_));
-  vk->Initialize(platform_, crypto_);
-  vk->CreateRandom();
+  if (vk_intent.backup) {
+    vk.reset(vault_keyset_factory_->NewBackup(platform_, crypto_));
+  }
   vk->SetLegacyIndex(kInitialKeysetIndex);
-  vk->SetKeyData(credentials.key_data());
-
-  if (credentials.key_data().type() == KeyData::KEY_TYPE_CHALLENGE_RESPONSE) {
+  vk->SetKeyData(key_data);
+  vk->CreateFromFileSystemKeyset(file_system_keyset);
+  if (key_data.type() == KeyData::KEY_TYPE_CHALLENGE_RESPONSE) {
     vk->SetFlags(vk->GetFlags() |
                  SerializedVaultKeyset::SIGNATURE_CHALLENGE_PROTECTED);
-    vk->SetSignatureChallengeInfo(
-        credentials.challenge_credentials_keyset_info());
+    if (challenge_credentials_keyset_info.has_value()) {
+      vk->SetSignatureChallengeInfo(challenge_credentials_keyset_info.value());
+    }
+  }
+  CryptohomeStatus result = EncryptAndSaveKeyset(
+      *vk, key_blobs, *auth_state,
+      VaultKeysetPath(obfuscated_username, kInitialKeysetIndex));
+
+  if (!result.ok()) {
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocKeysetManagementEncryptAndSaveFailedInAddInitialKeyset))
+        .Wrap(std::move(result).err_status());
   }
 
-  if (!vk->Encrypt(passkey, obfuscated_username) ||
-      !vk->Save(VaultKeysetPath(obfuscated_username, kInitialKeysetIndex))) {
-    LOG(ERROR) << "Failed to encrypt and write keyset for the new user.";
-    return false;
-  }
-
-  return true;
+  return vk;
 }
 
 bool KeysetManagement::ShouldReSaveKeyset(VaultKeyset* vault_keyset) const {
+  // Ensure the cryptohome keys are initialized to handle the case where a user
+  // logged in while cryptohome was taking TPM ownership.  In that case, their
+  // vault keyset may be scrypt-wrapped. If the call to
+  // is_cryptohome_key_loaded() below succeed, allowing re-wrapping (migration)
+  // using the TPM.
+  CryptohomeKeysManager* keys_manager = crypto_->cryptohome_keys_manager();
+  if (keys_manager && !keys_manager->HasAnyCryptohomeKey()) {
+    keys_manager->Init();
+  }
+
+  if (!vault_keyset->HasWrappedChapsKey()) {
+    vault_keyset->CreateRandomChapsKey();
+    LOG(INFO) << "Migrating keyset " << vault_keyset->GetLegacyIndex()
+              << " as Cryptohome has taken TPM ownership";
+    return true;
+  }
+
   // If the vault keyset's TPM state is not the same as that configured for
   // the device, re-save the keyset (this will save in the device's default
   // method).
@@ -348,8 +296,7 @@ bool KeysetManagement::ShouldReSaveKeyset(VaultKeyset* vault_keyset) const {
 
   bool is_le_credential =
       (crypt_flags & SerializedVaultKeyset::LE_CREDENTIAL) != 0;
-  if (is_le_credential &&
-      !crypto_->NeedsPcrBinding(vault_keyset->GetLELabel())) {
+  if (is_le_credential) {
     return false;
   }
 
@@ -380,313 +327,184 @@ bool KeysetManagement::ShouldReSaveKeyset(VaultKeyset* vault_keyset) const {
   return true;
 }
 
-bool KeysetManagement::ReSaveKeyset(const Credentials& credentials,
-                                    VaultKeyset* keyset) const {
+CryptohomeStatus KeysetManagement::ReSaveKeyset(
+    VaultKeyset& vault_keyset,
+    KeyBlobs key_blobs,
+    std::unique_ptr<AuthBlockState> auth_state) const {
   // Save the initial keyset so we can roll-back any changes if we
   // failed to re-save.
-  VaultKeyset old_keyset;
-  old_keyset = *keyset;
-
-  std::string obfuscated_username =
-      credentials.GetObfuscatedUsername(system_salt_);
+  VaultKeyset old_keyset = vault_keyset;
 
   // We get the LE Label from keyset before we resave it. Once the keyset
   // is re-saved, a new label is generated making the old label obsolete.
   // It would be safe to delete that from PinWeaver tree after resave.
-  base::Optional<uint64_t> old_le_label;
-  if (keyset->HasLELabel()) {
-    old_le_label = keyset->GetLELabel();
+  std::optional<uint64_t> old_le_label;
+  if (vault_keyset.HasLELabel()) {
+    old_le_label = vault_keyset.GetLELabel();
   }
 
-  if (!keyset->Encrypt(credentials.passkey(), obfuscated_username) ||
-      !keyset->Save(keyset->GetSourceFile())) {
-    LOG(ERROR) << "Failed to encrypt and write the keyset.";
-    *keyset = old_keyset;
-    return false;
+  CryptohomeStatus result = EncryptAndSaveKeyset(
+      vault_keyset, key_blobs, *auth_state, vault_keyset.GetSourceFile());
+
+  if (!result.ok()) {
+    vault_keyset = old_keyset;
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocKeysetManagementEncryptAndSaveFailedInReSaveKeyset))
+        .Wrap(std::move(result).err_status());
   }
 
-  if ((keyset->GetFlags() & SerializedVaultKeyset::LE_CREDENTIAL) != 0 &&
+  if ((vault_keyset.GetFlags() & SerializedVaultKeyset::LE_CREDENTIAL) != 0 &&
       old_le_label.has_value()) {
-    CHECK_NE(old_le_label.value(), keyset->GetLELabel());
+    CHECK_NE(old_le_label.value(), vault_keyset.GetLELabel());
     if (!crypto_->RemoveLECredential(old_le_label.value())) {
       // This is non-fatal error.
       LOG(ERROR) << "Failed to remove label = " << old_le_label.value();
     }
   }
 
-  return true;
+  return OkStatus<CryptohomeError>();
 }
 
-bool KeysetManagement::ReSaveKeysetIfNeeded(const Credentials& credentials,
-                                            VaultKeyset* keyset) const {
-  // Calling EnsureTpm here handles the case where a user logged in while
-  // cryptohome was taking TPM ownership.  In that case, their vault keyset
-  // would be scrypt-wrapped and the TPM would not be connected.  If we're
-  // configured to use the TPM, calling EnsureTpm will try to connect, and
-  // if successful, the call to has_tpm() below will succeed, allowing
-  // re-wrapping (migration) using the TPM.
-  crypto_->EnsureTpm(false);
-
-  bool force_resave = false;
-  if (!keyset->HasWrappedChapsKey()) {
-    keyset->CreateRandomChapsKey();
-    force_resave = true;
-  }
-
-  if (force_resave || ShouldReSaveKeyset(keyset)) {
-    return ReSaveKeyset(credentials, keyset);
-  }
-
-  return true;
-}
-
-std::unique_ptr<VaultKeyset> KeysetManagement::LoadUnwrappedKeyset(
-    const Credentials& credentials, MountError* error) {
-  if (error) {
-    *error = MOUNT_ERROR_NONE;
-  }
-
-  std::unique_ptr<VaultKeyset> vk = GetValidKeyset(credentials, error);
-
-  if (!vk) {
-    LOG(INFO) << "Could not find keyset matching credentials for user: "
-              << credentials.username();
-    return nullptr;
-  }
-
-  // TODO(dlunev): we shall start checking whether re-save succeeded. We are not
-  // adding the check during the refactor to preserve behaviour.
-  ReSaveKeysetIfNeeded(credentials, vk.get());
-
-  return vk;
-}
-
-CryptohomeErrorCode KeysetManagement::AddKeyset(
-    const Credentials& existing_credentials,
-    const brillo::SecureBlob& new_passkey,
-    const KeyData* new_data,  // NULLable
-    bool clobber,
-    int* index) {
-  // TODO(wad) Determine how to best bubble up the failures MOUNT_ERROR
-  //           encapsulate wrt the TPM behavior.
-  std::string obfuscated =
-      existing_credentials.GetObfuscatedUsername(system_salt_);
-
-  std::unique_ptr<VaultKeyset> vk =
-      GetValidKeyset(existing_credentials, nullptr /* error */);
-  if (!vk) {
-    // Differentiate between failure and non-existent.
-    if (!existing_credentials.key_data().label().empty()) {
-      vk = GetVaultKeyset(obfuscated, existing_credentials.key_data().label());
-      if (!vk.get()) {
-        LOG(WARNING) << "AddKeyset: key not found";
-        return CRYPTOHOME_ERROR_AUTHORIZATION_KEY_NOT_FOUND;
-      }
-    }
-    LOG(WARNING) << "AddKeyset: invalid authentication provided";
-    return CRYPTOHOME_ERROR_AUTHORIZATION_KEY_FAILED;
-  }
-
-  // Check the privileges to ensure Add is allowed.
-  // Keys without extended data are considered fully privileged.
-  if (vk->HasKeyData() && !vk->GetKeyData().privileges().add()) {
-    // TODO(wad) Ensure this error can be returned as a KEY_DENIED error
-    //           for AddKeyEx.
-    LOG(WARNING) << "AddKeyset: no add() privilege";
-    return CRYPTOHOME_ERROR_AUTHORIZATION_KEY_DENIED;
-  }
-
-  // If the VaultKeyset doesn't have a reset seed, simply generate
-  // one and re-encrypt before proceeding.
-  bool has_reset_seed = vk->HasWrappedResetSeed();
-  ReportUsageOfLegacyCodePath(
-      LegacyCodePathLocation::kGenerateResetSeedDuringAddKey, has_reset_seed);
-  if (!has_reset_seed) {
-    LOG(INFO) << "Keyset lacks reset_seed; generating one.";
-    vk->CreateRandomResetSeed();
-    if (!vk->Encrypt(existing_credentials.passkey(), obfuscated) ||
-        !vk->Save(vk->GetSourceFile())) {
-      LOG(WARNING) << "Failed to re-encrypt the old keyset";
-      return CRYPTOHOME_ERROR_BACKING_STORE_FAILURE;
-    }
-  }
-
-  // Walk the namespace looking for the first free spot.
-  // Note, nothing is stopping simultaneous access to these files
-  // or enforcing mandatory locking.
-  int new_index = 0;
-  base::FilePath vk_path;
-  bool slot_found = false;
-  for (; new_index < kKeyFileMax; ++new_index) {
-    vk_path = VaultKeysetPath(obfuscated, new_index);
-    // Rely on fopen()'s O_EXCL|O_CREAT behavior to fail
-    // repeatedly until there is an opening.
-    base::ScopedFILE vk_file(platform_->OpenFile(vk_path, "wx"));
-    if (vk_file) {  // got one
-      slot_found = true;
-      break;
-    }
-  }
-
-  if (!slot_found) {
-    LOG(WARNING) << "Failed to find an available keyset slot";
-    return CRYPTOHOME_ERROR_KEY_QUOTA_EXCEEDED;
-  }
-
-  // Before persisting, check, in a racy-way, if there is
-  // an existing labeled credential.
-  if (new_data) {
-    std::unique_ptr<VaultKeyset> match =
-        GetVaultKeyset(obfuscated, new_data->label());
-    if (match.get()) {
-      LOG(INFO) << "Label already exists.";
-      platform_->DeleteFile(vk_path);
-      if (!clobber) {
-        return CRYPTOHOME_ERROR_KEY_LABEL_EXISTS;
-      }
-      new_index = match->GetLegacyIndex();
-      vk_path = match->GetSourceFile();
-    }
-  }
-
-  std::unique_ptr<VaultKeyset> keyset_to_add(
-      vault_keyset_factory_->New(platform_, crypto_));
-  keyset_to_add->InitializeToAdd(*vk);
-
-  // Sets KeyData if it is passed in.
-  if (new_data) {
-    keyset_to_add->SetKeyData(*new_data);
-  }
-
-  // Repersist the VK with the new creds.
-  CryptohomeErrorCode added = CRYPTOHOME_ERROR_NOT_SET;
-  if (!keyset_to_add->Encrypt(new_passkey, obfuscated) ||
-      !keyset_to_add->Save(vk_path)) {
-    LOG(WARNING) << "Failed to encrypt or write the new keyset";
-    added = CRYPTOHOME_ERROR_BACKING_STORE_FAILURE;
-    // If we're clobbering, don't delete on error.
-    if (!clobber) {
-      platform_->DeleteFile(vk_path);
-    }
-  } else {
-    *index = new_index;
-  }
-  return added;
-}
-
-// Overloaded AddKeyset for use with AuthSession.
-user_data_auth::CryptohomeErrorCode KeysetManagement::AddKeyset(
-    const Credentials& new_credentials, VaultKeyset vault_keyset) {
-  std::string obfuscated_username =
-      new_credentials.GetObfuscatedUsername(system_salt_);
-
-  // Walk the namespace looking for the first free spot.
-  // Note, nothing is stopping simultaneous access to these files
-  // or enforcing mandatory locking.
-  base::FilePath vk_path;
-  bool file_found = false;
-  for (int new_index = 0; new_index < kKeyFileMax; ++new_index) {
-    vk_path = VaultKeysetPath(obfuscated_username, new_index);
-    // Rely on fopen()'s O_EXCL|O_CREAT behavior to fail
-    // repeatedly until there is an opening.
-    base::ScopedFILE vk_file(base::OpenFile(vk_path, "wx"));
-    if (vk_file) {  // got one
-      file_found = true;
-      break;
-    }
-  }
-
-  if (!file_found) {
-    LOG(WARNING) << "Failed to find an available keyset slot";
-    return user_data_auth::CRYPTOHOME_ERROR_KEY_QUOTA_EXCEEDED;
-  }
-
+CryptohomeStatus KeysetManagement::AddKeyset(
+    const VaultKeysetIntent& vk_intent,
+    const ObfuscatedUsername& obfuscated_username_new,
+    const std::string& key_label,
+    const KeyData& key_data_new,
+    const VaultKeyset& vault_keyset_old,
+    KeyBlobs key_blobs_new,
+    std::unique_ptr<AuthBlockState> auth_state_new,
+    bool clobber) {
   // Before persisting, check if there is an existing labeled credential.
   std::unique_ptr<VaultKeyset> match =
-      GetVaultKeyset(obfuscated_username, new_credentials.key_data().label());
+      GetVaultKeyset(obfuscated_username_new, key_label);
+  base::FilePath vk_path;
   if (match.get()) {
-    LOG(INFO) << "Label already exists.";
-    platform_->DeleteFile(vk_path);
+    LOG(INFO) << "Label already exists, clobbering the existing Keyset.";
+    if (!clobber) {
+      return MakeStatus<CryptohomeError>(
+          CRYPTOHOME_ERR_LOC(kLocKeysetManagementVKDuplicateLabelAddKeyset),
+          ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                          PossibleAction::kReboot}),
+          user_data_auth::CryptohomeErrorCode::
+              CRYPTOHOME_ERROR_KEY_LABEL_EXISTS);
+    }
     vk_path = match->GetSourceFile();
+
+    RemoveLECredentials(obfuscated_username_new);
+  }
+
+  // If we need to create a new file, walk the namespace looking for the first
+  // free spot. Note, nothing is stopping simultaneous access to these files
+  // or enforcing mandatory locking.
+  if (vk_path.empty()) {
+    bool file_found = false;
+    for (int new_index = 0; new_index < kKeyFileMax; ++new_index) {
+      vk_path = VaultKeysetPath(obfuscated_username_new, new_index);
+      // Rely on fopen()'s O_EXCL|O_CREAT behavior to fail
+      // repeatedly until there is an opening.
+      base::ScopedFILE vk_file(platform_->OpenFile(vk_path, "wx"));
+      if (vk_file) {  // got one
+        file_found = true;
+        break;
+      }
+    }
+    if (!file_found) {
+      LOG(WARNING) << "Failed to find an available keyset slot";
+      return MakeStatus<CryptohomeError>(
+          CRYPTOHOME_ERR_LOC(kLocKeysetManagementKeyQuotaExceededAddKeyset),
+          ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                          PossibleAction::kReboot, PossibleAction::kPowerwash}),
+          user_data_auth::CryptohomeErrorCode::
+              CRYPTOHOME_ERROR_KEY_QUOTA_EXCEEDED);
+    }
   }
 
   std::unique_ptr<VaultKeyset> keyset_to_add(
       vault_keyset_factory_->New(platform_, crypto_));
-  keyset_to_add->InitializeToAdd(vault_keyset);
-  keyset_to_add->SetKeyData(new_credentials.key_data());
+  if (vk_intent.backup) {
+    keyset_to_add.reset(vault_keyset_factory_->NewBackup(platform_, crypto_));
+  }
+  keyset_to_add->InitializeToAdd(vault_keyset_old);
+  keyset_to_add->SetKeyData(key_data_new);
 
-  // Repersist the VK with the new creds.
-  user_data_auth::CryptohomeErrorCode ret_code =
-      user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
-  if (!keyset_to_add->Encrypt(new_credentials.passkey(), obfuscated_username) ||
-      !keyset_to_add->Save(vk_path)) {
-    LOG(WARNING) << "Failed to encrypt or write the new keyset";
-    ret_code = user_data_auth::CRYPTOHOME_ERROR_BACKING_STORE_FAILURE;
-    // If we're re-saving an existing keyset, don't delete on error.
-    if (!match.get()) {
+  CryptohomeStatus result = EncryptAndSaveKeyset(*keyset_to_add, key_blobs_new,
+                                                 *auth_state_new, vk_path);
+
+  if (!result.ok()) {
+    LOG(ERROR) << "Failed to encrypt the new keyset";
+    // If we're clobbering don't delete on error.
+    if (!clobber || !match.get()) {
       platform_->DeleteFile(vk_path);
     }
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocKeysetManagementFailedEncryptAndSaveKeysetWithKeyBlobs))
+        .Wrap(std::move(result).err_status());
   }
-  return ret_code;
+
+  return CryptohomeStatus();
 }
 
-CryptohomeErrorCode KeysetManagement::RemoveKeyset(
-    const Credentials& credentials, const KeyData& key_data) {
-  // This error condition should be caught by the caller.
-  if (key_data.label().empty())
-    return CRYPTOHOME_ERROR_KEY_NOT_FOUND;
-
-  const std::string obfuscated =
-      credentials.GetObfuscatedUsername(system_salt_);
-
-  std::unique_ptr<VaultKeyset> remove_vk =
-      GetVaultKeyset(obfuscated, key_data.label());
-  if (!remove_vk.get()) {
-    LOG(WARNING) << "RemoveKeyset: key to remove not found";
-    return CRYPTOHOME_ERROR_KEY_NOT_FOUND;
+CryptohomeStatus KeysetManagement::UpdateKeysetWithKeyBlobs(
+    const VaultKeysetIntent& vk_intent,
+    const ObfuscatedUsername& obfuscated_username_new,
+    const KeyData& key_data_new,
+    const VaultKeyset& vault_keyset,
+    KeyBlobs key_blobs,
+    std::unique_ptr<AuthBlockState> auth_state) {
+  // Check if there is an existing labeled keyset.
+  std::unique_ptr<VaultKeyset> match =
+      GetVaultKeyset(obfuscated_username_new, key_data_new.label());
+  if (!match.get()) {
+    LOG(ERROR) << "Label does not exist.";
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocKeysetManagementLabelNotFoundUpdateKeysetWithKeyBlobs),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot}),
+        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_KEY_LABEL_EXISTS);
   }
 
-  std::unique_ptr<VaultKeyset> vk =
-      GetValidKeyset(credentials, nullptr /* error */);
-  if (!vk) {
-    // Differentiate between failure and non-existent.
-    if (!credentials.key_data().label().empty()) {
-      vk = GetVaultKeyset(obfuscated, credentials.key_data().label());
-      if (!vk.get()) {
-        LOG(WARNING) << "RemoveKeyset: key not found";
-        return CRYPTOHOME_ERROR_AUTHORIZATION_KEY_NOT_FOUND;
-      }
-    }
-    LOG(WARNING) << "RemoveKeyset: invalid authentication provided";
-    return CRYPTOHOME_ERROR_AUTHORIZATION_KEY_FAILED;
-  }
-
-  // Legacy keys can remove any other key. Otherwise a key needs explicit
-  // privileges.
-  if (vk->HasKeyData() && !vk->GetKeyData().privileges().remove()) {
-    LOG(WARNING) << "RemoveKeyset: no remove() privilege";
-    return CRYPTOHOME_ERROR_AUTHORIZATION_KEY_DENIED;
-  }
-
-  if (!ForceRemoveKeyset(obfuscated, remove_vk->GetLegacyIndex())) {
-    LOG(ERROR) << "RemoveKeyset: failed to remove keyset file";
-    return CRYPTOHOME_ERROR_BACKING_STORE_FAILURE;
-  }
-  return CRYPTOHOME_ERROR_NOT_SET;
+  // We set clobber to be true as we are sure that there is an existing keyset.
+  return AddKeyset(vk_intent, obfuscated_username_new, key_data_new.label(),
+                   key_data_new, vault_keyset, std::move(key_blobs),
+                   std::move(auth_state),
+                   true /* we are updating existing keyset */);
 }
 
-bool KeysetManagement::ForceRemoveKeyset(const std::string& obfuscated,
-                                         int index) {
+CryptohomeStatus KeysetManagement::RemoveKeysetFile(
+    const VaultKeyset& remove_vk) {
+  if (!platform_->DeleteFileSecurely(remove_vk.GetSourceFile())) {
+    LOG(WARNING) << "Secure erase of VaultKeyset file is failed, deleting "
+                    "normal way.";
+    if (!platform_->DeleteFile(remove_vk.GetSourceFile()))
+      return MakeStatus<CryptohomeError>(
+          CRYPTOHOME_ERR_LOC(
+              kLocKeysetManagementFailedRemoveInRemoveKeysetFile),
+          ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+          user_data_auth::CRYPTOHOME_ERROR_BACKING_STORE_FAILURE);
+  }
+  return OkStatus<CryptohomeError>();
+}
+
+CryptohomeStatus KeysetManagement::ForceRemoveKeyset(
+    const ObfuscatedUsername& obfuscated, int index) {
   // Note, external callers should check credentials.
-  if (index < 0 || index >= kKeyFileMax)
-    return false;
+  if (index < 0 || index >= kKeyFileMax) {
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocKeysetManagementInvalidIndexInRemoveKeyset),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+        user_data_auth::CryptohomeErrorCode::
+            CRYPTOHOME_ERROR_BACKING_STORE_FAILURE);
+  }
 
   std::unique_ptr<VaultKeyset> vk = LoadVaultKeysetForUser(obfuscated, index);
   if (!vk) {
     LOG(WARNING) << "ForceRemoveKeyset: keyset " << index << " for "
                  << obfuscated << " does not exist";
     // Since it doesn't exist, then we're done.
-    return true;
+    return OkStatus<CryptohomeError>();
   }
 
   // Try removing the LE credential data, if applicable. But, don't abort if we
@@ -698,40 +516,19 @@ bool KeysetManagement::ForceRemoveKeyset(const std::string& obfuscated,
           << "ForceRemoveKeyset: Failed to remove LE credential metadata.";
     }
   }
-
-  base::FilePath path = VaultKeysetPath(obfuscated, index);
-  if (platform_->DeleteFileSecurely(path))
-    return true;
-
-  // TODO(wad) Add file zeroing here or centralize with other code.
-  return platform_->DeleteFile(path);
-}
-
-bool KeysetManagement::MoveKeyset(const std::string& obfuscated,
-                                  int src,
-                                  int dst) {
-  if (src < 0 || dst < 0 || src >= kKeyFileMax || dst >= kKeyFileMax)
-    return false;
-
-  base::FilePath src_path = VaultKeysetPath(obfuscated, src);
-  base::FilePath dst_path = VaultKeysetPath(obfuscated, dst);
-  if (!platform_->FileExists(src_path))
-    return false;
-  if (platform_->FileExists(dst_path))
-    return false;
-  // Grab the destination exclusively
-  FILE* vk_file = platform_->OpenFile(dst_path, "wx");
-  if (!vk_file)
-    return false;
-  // The creation occurred so there's no reason to keep the handle.
-  platform_->CloseFile(vk_file);
-  if (!platform_->Rename(src_path, dst_path))
-    return false;
-  return true;
+  CryptohomeStatus rm_status = RemoveKeysetFile(*vk);
+  if (!rm_status.ok()) {
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocKeysetManagementDeleteFailedInRemoveKeyset),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+        user_data_auth::CryptohomeErrorCode::
+            CRYPTOHOME_ERROR_BACKING_STORE_FAILURE);
+  }
+  return OkStatus<CryptohomeError>();
 }
 
 std::unique_ptr<VaultKeyset> KeysetManagement::LoadVaultKeysetForUser(
-    const std::string& obfuscated_user, int index) const {
+    const ObfuscatedUsername& obfuscated_user, int index) const {
   std::unique_ptr<VaultKeyset> keyset(
       vault_keyset_factory_->New(platform_, crypto_));
   // Load the encrypted keyset
@@ -746,128 +543,10 @@ std::unique_ptr<VaultKeyset> KeysetManagement::LoadVaultKeysetForUser(
   return keyset;
 }
 
-bool KeysetManagement::Migrate(const Credentials& newcreds,
-                               const brillo::SecureBlob& oldkey,
-                               int* migrated_key_index) {
-  CHECK(migrated_key_index);
-  Credentials oldcreds(newcreds.username(), oldkey);
-  std::string obfuscated = newcreds.GetObfuscatedUsername(system_salt_);
-
-  int key_index = -1;
-  std::unique_ptr<VaultKeyset> vk =
-      GetValidKeyset(oldcreds, nullptr /* error */);
-  if (!vk) {
-    LOG(ERROR) << "Can not retrieve keyset for the user: "
-               << newcreds.username();
-    return false;
-  }
-  key_index = vk->GetLegacyIndex();
-  if (key_index == -1) {
-    LOG(ERROR) << "Attempted migration of key-less mount.";
-    return false;
-  }
-
-  const KeyData* key_data = NULL;
-  if (vk->HasKeyData()) {
-    key_data = &(vk->GetKeyData());
-    // legacy keys are full privs
-    if (!key_data->privileges().add() || !key_data->privileges().remove()) {
-      LOG(ERROR) << "Migrate: key lacks sufficient privileges()";
-      return false;
-    }
-  }
-
-  int new_key_index = -1;
-  // For a labeled key with the same label as the old key,
-  //  this will overwrite the existing keyset file.
-  if (AddKeyset(oldcreds, newcreds.passkey(), key_data, true, &new_key_index) !=
-      CRYPTOHOME_ERROR_NOT_SET) {
-    LOG(ERROR) << "Migrate: failed to add the new keyset";
-    return false;
-  }
-
-  // For existing unlabeled keys, we need to remove the old key and swap
-  // the slot.  If the key was labeled and clobbered, the key indices will
-  // match.
-  if (new_key_index != key_index) {
-    if (!ForceRemoveKeyset(obfuscated, key_index)) {
-      LOG(ERROR) << "Migrate: unable to delete the old keyset: " << key_index;
-      // TODO(wad) Should we zero it or move it into space?
-      // Fallthrough
-    }
-    // Put the new one in its slot.
-    if (!MoveKeyset(obfuscated, new_key_index, key_index)) {
-      // This is bad, but non-terminal since we have a valid, migrated key.
-      LOG(ERROR) << "Migrate: failed to move the new key to the old slot";
-      key_index = new_key_index;
-    }
-  }
-
-  // Remove all other keysets during a "migration".
-  std::vector<int> key_indices;
-  if (!GetVaultKeysets(obfuscated, &key_indices)) {
-    LOG(WARNING) << "Failed to enumerate keysets after adding one. Weird.";
-    // Fallthrough: The user is migrated, but something else changed keys.
-  }
-  for (int index : key_indices) {
-    if (index == key_index)
-      continue;
-    LOG(INFO) << "Removing keyset " << index << " due to migration.";
-    ForceRemoveKeyset(obfuscated, index);  // Failure is ok.
-  }
-
-  *migrated_key_index = key_index;
-
-  return true;
-}
-
-void KeysetManagement::ResetLECredentials(const Credentials& creds) {
-  std::string obfuscated = creds.GetObfuscatedUsername(system_salt_);
-  std::vector<int> key_indices;
-  if (!GetVaultKeysets(obfuscated, &key_indices)) {
-    LOG(WARNING) << "No valid keysets on disk for " << obfuscated;
-    return;
-  }
-
-  bool credentials_checked = false;
-  std::unique_ptr<VaultKeyset> vk;
-  for (int index : key_indices) {
-    std::unique_ptr<VaultKeyset> vk_reset =
-        LoadVaultKeysetForUser(obfuscated, index);
-    if (!vk_reset || !vk_reset->IsLECredential() ||  // Skip non-LE Credentials.
-        crypto_->GetWrongAuthAttempts(vk_reset->GetLELabel()) == 0) {
-      continue;
-    }
-
-    if (!credentials_checked) {
-      // Make sure the credential can actually be used for sign-in.
-      // It is also the easiest way to get a valid keyset.
-      vk = GetValidKeyset(creds, nullptr /* error */);
-      if (!vk) {
-        LOG(WARNING) << "The provided credentials are incorrect or invalid"
-                        " for LE credential reset, reset skipped.";
-        return;
-      }
-      credentials_checked = true;
-    }
-
-    CryptoError err;
-    if (!crypto_->ResetLECredential(*vk_reset, *vk, &err)) {
-      LOG(WARNING) << "Failed to reset an LE credential: " << err;
-    } else {
-      vk_reset->SetAuthLocked(false);
-      if (!vk_reset->Save(vk_reset->GetSourceFile())) {
-        LOG(WARNING) << "Failed to clear auth_locked in VaultKeyset on disk.";
-      }
-    }
-  }
-}
-
 void KeysetManagement::RemoveLECredentials(
-    const std::string& obfuscated_username) {
+    const ObfuscatedUsername& obfuscated_username) {
   std::vector<int> key_indices;
   if (!GetVaultKeysets(obfuscated_username, &key_indices)) {
-    LOG(WARNING) << "No valid keysets on disk for " << obfuscated_username;
     return;
   }
 
@@ -892,80 +571,183 @@ void KeysetManagement::RemoveLECredentials(
   return;
 }
 
-bool KeysetManagement::UserExists(const std::string& obfuscated_username) {
-  base::FilePath user_dir = ShadowRoot().Append(obfuscated_username);
-  return platform_->DirectoryExists(user_dir);
-}
-
-brillo::SecureBlob KeysetManagement::GetPublicMountPassKey(
-    const std::string& account_id) {
-  brillo::SecureBlob public_mount_salt;
-  FilePath saltfile(kPublicMountSaltFilePath);
-  if (!crypto_->GetOrCreateSalt(saltfile, CRYPTOHOME_DEFAULT_SALT_LENGTH, false,
-                                &public_mount_salt)) {
-    LOG(ERROR) << "Could not get or create public salt from file";
-    // Ensure that it is empty so that caller can confirm there was an error.
-    public_mount_salt.clear();
-    return public_mount_salt;
+// TODO(b/205759690, dlunev): can be removed after a stepping stone release.
+base::Time KeysetManagement::GetPerIndexTimestampFileData(
+    const ObfuscatedUsername& obfuscated, int index) {
+  brillo::Blob tcontents;
+  if (!platform_->ReadFile(UserActivityPerIndexTimestampPath(obfuscated, index),
+                           &tcontents)) {
+    return base::Time();
   }
-  brillo::SecureBlob passkey;
-  Crypto::PasswordToPasskey(account_id.c_str(), public_mount_salt, &passkey);
-  return passkey;
+
+  Timestamp timestamp;
+  if (!timestamp.ParseFromArray(tcontents.data(), tcontents.size())) {
+    return base::Time();
+  }
+
+  return base::Time::FromInternalValue(timestamp.timestamp());
 }
 
-void KeysetManagement::AddUserTimestampToCache(const std::string& obfuscated) {
-  //  Add a timestamp for every key.
+// TODO(b/205759690, dlunev): can be removed after a stepping stone release.
+base::Time KeysetManagement::GetKeysetBoundTimestamp(
+    const ObfuscatedUsername& obfuscated) {
+  base::Time timestamp = base::Time();
+
   std::vector<int> key_indices;
-  // Failure is okay since the loop falls through.
   GetVaultKeysets(obfuscated, &key_indices);
-  // Collect the most recent time for a given user by walking all
-  // vaults.  This avoids trying to keep them in sync atomically.
-  base::Time timestamp = base::Time();  // This gives the current time.
-  // Update timestamps on each keyset for the |obfuscated| username unless it is
-  // greater than the current time.
   for (int index : key_indices) {
     std::unique_ptr<VaultKeyset> keyset =
         LoadVaultKeysetForUser(obfuscated, index);
     if (keyset.get() && keyset->HasLastActivityTimestamp()) {
-      const base::Time previous_timestamp =
+      const base::Time new_timestamp =
           base::Time::FromInternalValue(keyset->GetLastActivityTimestamp());
-      if (previous_timestamp > timestamp) {
-        timestamp = previous_timestamp;
+      if (new_timestamp > timestamp) {
+        timestamp = new_timestamp;
       }
     }
+    const base::Time ts_from_index_file =
+        GetPerIndexTimestampFileData(obfuscated, index);
+    if (ts_from_index_file > timestamp) {
+      timestamp = ts_from_index_file;
+    }
   }
-  if (!timestamp.is_null()) {
-    timestamp_cache_->AddExistingUser(obfuscated, timestamp);
+
+  return timestamp;
+}
+
+void KeysetManagement::RecordAllVaultKeysetMetrics(
+    const ObfuscatedUsername& obfuscated) const {
+  VaultKeysetMetrics keyset_metrics;
+  std::vector<int> key_indices;
+  GetVaultKeysets(obfuscated, &key_indices);
+  for (int index : key_indices) {
+    std::unique_ptr<VaultKeyset> vk = LoadVaultKeysetForUser(obfuscated, index);
+    if (!vk) {
+      continue;
+    } else {
+      RecordVaultKeysetMetrics(*vk.get(), keyset_metrics);
+    }
+  }
+  ReportVaultKeysetMetrics(keyset_metrics);
+}
+
+void KeysetManagement::RecordVaultKeysetMetrics(
+    const VaultKeyset& vk, VaultKeysetMetrics& keyset_metrics) const {
+  if (!vk.HasKeyData()) {
+    // Some legacy keysets were created without any key_data at all.
+    keyset_metrics.missing_key_data_count++;
+  } else if (vk.GetKeyData().label().empty()) {
+    // Note that we access the label via |GetKeyData()| instead of |GetLabel()|,
+    // because we want to report the number of keysets without an explicitly
+    // assigned label here, meanwhile |GetLabel()| would backfill an empty label
+    // with a "legacy-N" value.
+    if (vk.IsLECredential()) {
+      keyset_metrics.empty_label_le_cred_count++;
+    } else {
+      keyset_metrics.empty_label_count++;
+    }
+  } else if (vk.IsLECredential()) {
+    // VaultKeyset is PIN based, label is non-empty.
+    keyset_metrics.le_cred_count++;
+  } else if (!vk.GetKeyData().has_type()) {
+    // Check the case of a missing type separately, since otherwise the key
+    // would be misclassified below, based on |type()|s default return value
+    // |KEY_TYPE_PASSWORD|.
+    keyset_metrics.untyped_count++;
+    // TODO(b/204482221): Remove this log after collecting stats.
+    LOG(INFO) << "Untyped vault keyset " << vk.GetLabel() << ".";
+  } else {
+    switch (vk.GetKeyData().type()) {
+      case KeyData::KEY_TYPE_PASSWORD:
+        if (vk.GetKeyData().has_provider_data()) {
+          // VaultKeyset is based on SmartUnlock/EasyUnlock.
+          keyset_metrics.smart_unlock_count++;
+        } else {
+          // VaultKeyset is password based.
+          keyset_metrics.password_count++;
+        }
+        break;
+      case KeyData::KEY_TYPE_CHALLENGE_RESPONSE:
+        // VaultKeyset is smartcard/challenge-response based.
+        keyset_metrics.smartcard_count++;
+        break;
+      case KeyData::KEY_TYPE_FINGERPRINT:
+        // VaultKeyset is fingerprint-based.
+        keyset_metrics.fingerprint_count++;
+        break;
+      case KeyData::KEY_TYPE_KIOSK:
+        // VaultKeyset is kiosk-based.
+        keyset_metrics.kiosk_count++;
+        break;
+      default:
+        // TODO(b/204482221): Remove this log after collecting stats.
+        LOG(WARNING) << "Unexpected type " << vk.GetKeyData().type()
+                     << " in vault keyset " << vk.GetLabel() << ".";
+        keyset_metrics.unclassified_count++;
+        break;
+    }
   }
 }
 
-bool KeysetManagement::UpdateActivityTimestamp(const std::string& obfuscated,
-                                               int index,
-                                               int time_shift_sec) {
-  base::Time timestamp = platform_->GetCurrentTime();
-  if (time_shift_sec > 0) {
-    timestamp -= base::TimeDelta::FromSeconds(time_shift_sec);
+// TODO(b/205759690, dlunev): can be removed after a stepping stone release.
+void KeysetManagement::CleanupPerIndexTimestampFiles(
+    const ObfuscatedUsername& obfuscated) {
+  for (int i = 0; i < kKeyFileMax; ++i) {
+    std::ignore = platform_->DeleteFileDurable(
+        UserActivityPerIndexTimestampPath(obfuscated, i));
   }
+}
 
-  Timestamp ts_proto;
-  ts_proto.set_timestamp(timestamp.ToInternalValue());
-  std::string timestamp_str;
-  if (!ts_proto.SerializeToString(&timestamp_str)) {
+bool KeysetManagement::AddResetSeedIfMissing(VaultKeyset& vault_keyset) {
+  bool has_reset_seed = vault_keyset.HasWrappedResetSeed();
+
+  if (has_reset_seed) {
+    // No need to update the vault keyset.
     return false;
   }
 
-  base::FilePath ts_file = UserActivityTimestampPath(obfuscated, index);
-  if (!platform_->WriteStringToFileAtomicDurable(ts_file, timestamp_str,
-                                                 kKeyFilePermissions)) {
-    LOG(ERROR) << "Failed writing to timestamp file: " << ts_file;
+  // PIN VK shouldn't have any reset seed other than when it is first created.
+  // That initial reset seed is used to derive the reset secret and isn't saved.
+  // Don't add any other reset seed otherwise it may result in fake reset
+  // secrets.
+  if (vault_keyset.IsLECredential()) {
     return false;
   }
 
-  if (timestamp_cache_ && timestamp_cache_->initialized()) {
-    timestamp_cache_->UpdateExistingUser(obfuscated, timestamp);
-  }
+  ReportUsageOfLegacyCodePath(
+      LegacyCodePathLocation::kGenerateResetSeedDuringAddKey, has_reset_seed);
+
+  LOG(INFO) << "Keyset lacks reset_seed; generating one.";
+  vault_keyset.CreateRandomResetSeed();
 
   return true;
+}
+
+CryptohomeStatus KeysetManagement::EncryptAndSaveKeyset(
+    VaultKeyset& vault_keyset,
+    const KeyBlobs& key_blobs,
+    const AuthBlockState& auth_state,
+    const FilePath& save_path) const {
+  CryptohomeStatus result = vault_keyset.EncryptEx(key_blobs, auth_state);
+  if (!result.ok()) {
+    LOG(ERROR) << "Failed to save keyset with key blobs.";
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocKeysetManagementEncryptFailedInEncryptAndSaveKeyset))
+        .Wrap(std::move(result).err_status());
+  }
+
+  if (!vault_keyset.Save(save_path)) {
+    LOG(ERROR) << "Failed to write the vault_keyset.";
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocKeysetManagementSaveFailedInEncryptAndSaveKeyset),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot}),
+        user_data_auth::CryptohomeErrorCode::
+            CRYPTOHOME_ERROR_BACKING_STORE_FAILURE);
+  }
+  return CryptohomeStatus();
 }
 
 }  // namespace cryptohome

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef VM_TOOLS_SYSLOG_HOST_COLLECTOR_H_
@@ -9,7 +9,6 @@
 #include <chromeos/dbus/service_constants.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/time/time.h>
 #include <dbus/bus.h>
@@ -19,8 +18,7 @@
 
 #include "vm_tools/syslog/collector.h"
 
-namespace vm_tools {
-namespace syslog {
+namespace vm_tools::syslog {
 
 class LogPipeManager;
 
@@ -66,7 +64,6 @@ class HostCollector : public Collector {
   base::WeakPtrFactory<Collector> weak_factory_;
 };
 
-}  // namespace syslog
-}  // namespace vm_tools
+}  // namespace vm_tools::syslog
 
 #endif  // VM_TOOLS_SYSLOG_HOST_COLLECTOR_H_

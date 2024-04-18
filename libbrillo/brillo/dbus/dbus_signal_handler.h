@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,11 @@
 
 #include <functional>
 #include <string>
+#include <tuple>
 #include <utility>
 
-#include <base/bind.h>
-#include <brillo/dbus/dbus_param_reader.h>
+#include <base/functional/bind.h>
+#include <brillo/dbus/data_serialization.h>
 #include <dbus/message.h>
 #include <dbus/object_proxy.h>
 
@@ -37,30 +38,30 @@ void ConnectToSignal(
     ::dbus::ObjectProxy* object_proxy,
     const std::string& interface_name,
     const std::string& signal_name,
-    base::Callback<void(Args...)> signal_callback,
+    const base::RepeatingCallback<void(Args...)>& signal_callback,
     ::dbus::ObjectProxy::OnConnectedCallback on_connected_callback) {
-  // DBusParamReader::Invoke() needs a functor object, not a base::Callback.
-  // Wrap the callback with lambda so we can redirect the call.
-  auto signal_callback_wrapper = [signal_callback](const Args&... args) {
-    if (!signal_callback.is_null()) {
-      signal_callback.Run(args...);
-    }
-  };
-
   // Raw signal handler stub method. When called, unpacks the signal arguments
-  // from |signal| message buffer and redirects the call to
-  // |signal_callback_wrapper| which, in turn, would call the user-provided
-  // |signal_callback|.
-  auto dbus_signal_callback = [](std::function<void(const Args&...)> callback,
+  // from |signal| message buffer and redirects the call to |signal_callback|.
+  auto dbus_signal_callback = [](decltype(signal_callback) signal_callback,
                                  ::dbus::Signal* signal) {
     ::dbus::MessageReader reader(signal);
-    DBusParamReader<false, Args...>::Invoke(callback, &reader, nullptr);
+    std::tuple<StorageType<Args>...> tuple;
+    if (!ApplyReadDBusArgs(&reader, tuple)) {
+      return;
+    }
+    if (!signal_callback.is_null()) {
+      std::apply(
+          [signal_callback](auto&&... args) {
+            signal_callback.Run(std::forward<decltype(args)>(args)...);
+          },
+          std::move(tuple));
+    }
   };
 
   // Register our stub handler with D-Bus ObjectProxy.
   object_proxy->ConnectToSignal(
       interface_name, signal_name,
-      base::Bind(dbus_signal_callback, signal_callback_wrapper),
+      base::BindRepeating(dbus_signal_callback, signal_callback),
       std::move(on_connected_callback));
 }
 

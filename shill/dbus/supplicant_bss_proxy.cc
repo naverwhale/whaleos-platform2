@@ -1,11 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dbus/supplicant_bss_proxy.h"
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 
 #include "shill/logging.h"
@@ -29,10 +29,10 @@ SupplicantBSSProxy::SupplicantBSSProxy(const scoped_refptr<dbus::Bus>& bus,
       wifi_endpoint_(wifi_endpoint) {
   // Register signal handler.
   bss_proxy_->RegisterPropertiesChangedSignalHandler(
-      base::Bind(&SupplicantBSSProxy::PropertiesChanged,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&SupplicantBSSProxy::OnSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&SupplicantBSSProxy::PropertiesChanged,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&SupplicantBSSProxy::OnSignalConnected,
+                     weak_factory_.GetWeakPtr()));
 }
 
 SupplicantBSSProxy::~SupplicantBSSProxy() {

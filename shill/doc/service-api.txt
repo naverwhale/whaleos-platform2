@@ -96,6 +96,7 @@ Methods		dict GetProperties()
 					 [service].Error.OperationAborted
 					 [service].Error.InvalidService
 					 [service].Error.OperationFailed
+					 [service].Error.WepNotSupported
 
 		void Disconnect()
 
@@ -127,16 +128,12 @@ Methods		dict GetProperties()
 			this service, it will be re-configured there.
 
 			This method is not permitted for Ethernet devices;
-			it will generate a NotSupported error response.
+			it will generate a NotImplemented error response.
 
 			Possible Errors: [service].Error.InvalidArguments
-					 [service].Error.NotSupported
+					 [service].Error.NotImplemented
 
-		void ActivateCellularModem(string carrier)
-
-			Deprecated, do not use.
-
-			Expected Result: [service].Error.NotSupported
+			Expected Result: [service].Error.NotImplemented
 
 		void CompleteCellularActivation()
 
@@ -155,12 +152,12 @@ Methods		dict GetProperties()
 			If this method is called on a non-cellular service
 			or on a cellular service that is not being activated
 			over a non-cellular network, it will return a
-			NotSupported error.
+			NotImplemented error.
 
 			If the cellular service is already activated or being
 			activated, nothing is returned.
 
-			Possible Errors: [service].Error.NotSupported
+			Possible Errors: [service].Error.NotImplemented
 
 		dict GetLoadableProfileEntries()
 
@@ -177,14 +174,14 @@ Methods		dict GetProperties()
 		string GetWiFiPassphrase()
 
 			Return the passphrase for a given WiFi network if it
-			has one.  This will return a NotSupported error if
+			has one.  This will return a NotImplemented error if
 			called on a Service which is not WiFi, or if there is
 			no saved passphrase.  This is included as a separate
 			method instead of a property to help ensure that the
 			passphrase isn't accidentally leaked to the UI or
 			included in logs.
 
-			Possible Errors: [service].Error.NotSupported
+			Possible Errors: [service].Error.NotImplemented
 
 		string GetEapPassphrase()
 
@@ -196,7 +193,16 @@ Methods		dict GetProperties()
 			passphrase isn't accidentally leaked to the UI or
 			included in logs.
 
-			Possible Errors: [service].Error.NotSupported
+			Possible Errors: [service].Error.IllegalOperation
+
+		void RequestPortalDetection()
+
+			Request portal detection on the Service if it is
+			connected and detection is enabled. This will cause
+			portal detection to restart if it is already in
+			progress, resetting the interval between checks.
+
+			Possible Errors: [service].Error.OperationFailed
 
 		array{dict} RequestTrafficCounters()
 
@@ -211,12 +217,12 @@ Methods		dict GetProperties()
 
 			Resets the current traffic counters for a Service.
 
-		Signals	PropertyChanged(string name, variant value)
+Signals		PropertyChanged(string name, variant value)
 
 			This signal indicates a changed value of the given
 			property.
 
-		Properties string ArcVpn.TunnelChrome [writeonly]
+Properties	string ArcVpn.TunnelChrome [writeonly]
 
 			(VPN services of type arcvpn only) Specify whether
 			the service should tunnel Chrome traffic.  This
@@ -269,7 +275,9 @@ Methods		dict GetProperties()
 		string Cellular.ICCID [readonly]
 
 			(Cellular only) The Integrated Circuit Card Identifier
-			of the SIM card associated with the service.
+			of the SIM card associated with the service. If a pSIM
+			card exists on the inactive slot but the ICCID cannot
+			be read, this property will be set to "unknown-iccid".
 
 		string Cellular.IMSI [readonly]
 
@@ -281,7 +289,13 @@ Methods		dict GetProperties()
 
 		string Cellular.ActivationType [readwrite]
 
-			TODO(b/199688838)
+			(Cellular only) Mechanism by which this cellular
+			service can be activated. Valid types are
+			"NonCellular", "OMADM", "OTA", and "OTASP".
+
+			For 3GPP-based services (UMTS, HSPA, LTE) this is
+			generally going to be "OTA", and for CDMA it will
+			often be "OTASP".
 
 		dict Cellular.ServingOperator [readonly] [GSM only]
 
@@ -415,6 +429,48 @@ Methods		dict GetProperties()
 			use, the remembered last-good-APN is cleared. The
 			remembered last-good-APN is persistent across reboots.
 
+		array{dict} Cellular.CustomAPNList [readwrite]
+
+			(Cellular only) The APN list to be used with a 4G/5G carrier to
+			register to the network(Attach APN) and for making data
+			connections(DEFAULT, DUN, etc.). The property is an array of
+			dictionaries, with each (string, string) entry from the following
+			properties:
+
+			When an apn_type is not present in the CustomAPNList, shill will try
+			each modem and modb APN in a round robin fashion. When the list
+			contains at least 1 APN, shill will run all APN logic in manual
+			mode. This means that the round robin will only include APNs from
+			the CustomAPNList, and will ignore any modem or modb APNs.
+
+			There are 3 mandatory properties.
+			"apn" string The APN to use for making connections
+			"apn_types" array{string} The type of the APN. Multiple values are
+					allowed.
+					IA for Attach, DEFAULT for default data connection, DUN for
+					tethering.
+			"apn_source" string The source of the APN("ui", "admin")
+					Shill will use the "apn_source" tag to report metrics as
+					part of the existing structured metrics.
+					The "admin" value will be used to indicate APNs pushed by
+					the Admin Console.
+
+			The following are optional properties.
+			"username" string
+			"password" string
+			"authentication" string Options are: empty, "pap" or "chap".
+					If a username or password is entered, and no authentication
+					is selected, the "authentication" will default to "chap".
+			"ip_type" string IP type of the connection: Options are: empty,
+					"ipv4", "ipv6", or "ipv4v6". If ip_type is empty, shill
+					will default to ipv4.
+			"id" string An identifier of the APN. It's main purpose is as a way
+					for the client to identify each APN when they are copied
+					into other properties.
+
+			The CustomAPNList settings are persistent across reboots.
+
+
 		dict Cellular.LastGoodAPN [readonly] [GSM only]
 
 			(Cellular only) The APN information used in the
@@ -425,16 +481,20 @@ Methods		dict GetProperties()
 
 		dict Cellular.LastAttachAPN [readonly]
 
-			TODO(b/199688838)
+			(Cellular only) The last attach APN that was sent
+			to ModemManager as the initial EPS bearer for the
+			modem. The format of this property is the same as for
+			the Cellular.APN property.
 
 		boolean Cellular.OutOfCredits [readonly]
 
 			(Cellular only) Indicates whether a cellular service
 			has any remaining bandwidth credits with the carrier.
 
-		string Cellular.UsageUrl [readonly
+		string Cellular.UsageUrl [readonly]
 
-			TODO(b/199688838)
+			(Cellular only) If non-empty, a URL pointing to the web
+			service that will show the user's data usage.
 
 		string Cellular.PPP.Username [readwrite]
 
@@ -479,20 +539,6 @@ Methods		dict GetProperties()
 
 			A value of "/" indicates that the service is
 			not bound to any device.
-
-		string DHCPProperty.Hostname [readwrite]
-
-			This per-service property is supported in Shill for
-			go/jetstream. It is not used in Chrome OS. The value
-			will override the Manager property for this service
-			if set. See Manager for details about the property.
-
-		string DHCPProperty.VendorClass [readwrite]
-
-			This per-service property is supported in Shill for
-			go/jetstream. It is not used in Chrome OS. The value
-			will override the Manager property for this service
-			if set. See Manager for details about the property.
 
 		array{string} Diagnostics.Disconnects [readonly]
 
@@ -631,27 +677,25 @@ Methods		dict GetProperties()
 
 		array{string} EAP.RemoteCertification [readonly]
 
-			(WiFi only) The list of certificate subject names
-			reported by the remote RADIUS server.  This
-			property is set during 802.1x negotiation and
-			persists after disconnection for later inspection,
-			but is not persisted between connection manager
-			restarts.  It is also cleared at the beginning of
-			the next connection.
+			The list of certificate subject names reported by the
+			remote RADIUS server.  This property is set during
+			802.1x negotiation and persists after disconnection for
+			later inspection, but is not persisted between
+			connection manager restarts.  It is also cleared at the
+			beginning of the next connection.
 
 		string EAP.SubjectMatch [readwrite]
 
-			(WiFi only) A substring which the remote
-			RADIUS server certificate subject name must
-			contain.  If the subject does not contain this
-			substring, abort 802.1x negotiation.
+			A substring which the remote RADIUS server certificate
+			subject name must contain.  If the subject does not
+			contain this substring, abort 802.1x negotiation.
 
 		array{string} EAP.SubjectAlternativeNameMatch [readonly]
 
-			(WiFi only) A list of serialized subject alternative
-			names (SANs). Each SAN is defined by a type and a
-			value. SAN type can be "EMAIL", "DNS" or "URI"
-			according to the types supported by wpa_supplicant.
+			A list of serialized subject alternative names (SANs).
+			Each SAN is defined by a type and a value. SAN type can
+			be "EMAIL", "DNS" or "URI" according to the types
+			supported by wpa_supplicant.
 			For more information about specifying SANs please
 			refer to:
 			https://w1.fi/cgit/hostap/plain/wpa_supplicant/wpa_supplicant.conf
@@ -663,15 +707,54 @@ Methods		dict GetProperties()
 
 		array{string} EAP.DomainSuffixMatch [readonly]
 
-			(WiFi only) A list of constraints for the server domain name. If
-			set, the entries will be used as suffix match requirements against
-			the dNSName element(s) of the alternative subject name of an
-			authentication server certificate. When multiple match strings are
-			specified, a match with any one of the values is considered a
+			A list of constraints for the server domain name. If
+			set, the entries will be used as suffix match
+			requirements against the dNSName element(s) of the
+			alternative subject name of an authentication server
+			certificate. When multiple match strings are specified,
+			a match with any one of the values is considered a
 			sufficient match for the certificate.
-			For more information about specifying DomainSuffixMatch please
-			refer to:
+			For more information about specifying DomainSuffixMatch
+			please refer to:
 			https://w1.fi/cgit/hostap/plain/wpa_supplicant/wpa_supplicant.conf
+
+		string Passpoint.FQDN [readonly]
+
+			(WiFi only) A Fully Qualified Domain Name (FQDN) is
+			the matching domain representing the service provider
+			of the Passpoint Wi-Fi service. This property is only
+			non-empty if the Service was provisioned through
+			Passpoint.
+
+		string Passpoint.ProvisioningSource [readonly]
+
+			(WiFi only) The source for the creation of the
+			Passpoint service. For ARC created service this is
+			filled with the package name that added the
+			credentials. This property is only non-empty if the
+			Service was provisioned through Passpoint.
+
+		string Passpoint.MatchType [readonly]
+
+			(WiFi only) The match type between the Passpoint
+			credentials and the BSS. This property is only
+			non-empty if the Service was provisioned through
+			Passpoint. Passpoint.MatchType can be one of:
+
+			"home"		The network belongs to the service
+					provider.
+
+			"roaming"	The network belong to a partner of the
+					service provider.
+
+			"unknown"	The network match type is unknown.
+
+		string Passpoint.ID [readonly]
+
+			(WiFi only) An ID used by shill for the Passpoint
+			credentials. This is mostly used for debugging
+			purposes. This property is only non-empty if the
+			Service was provisioned through Passpoint.
 
 		string Error [readonly]
 
@@ -709,6 +792,74 @@ Methods		dict GetProperties()
 			intended for cross-referencing Service objects
 			to externally-maintained data.
 
+		string IKEv2.AuthenticationType [writeonly]
+
+			(VPN Services of type IKEv2 only) The authentication
+			method used by the client, i.e., how does the client
+			authenticate itself to the server. Possible values are
+			"PSK", "EAP", and "Cert". The current value of this
+			property is readable in the "Provider" property of this
+			Service.
+
+			If the value is "PSK", "IKEv2.PSK" must be set.
+
+			If the value is "EAP", "EAP.EAP", "EAP.Identity", and
+			"EAP.Password" must be set. Currently, only MSCHAPv2 is
+			supported for EAP.
+
+			If the value is "Cert", "IKEv2.ClientCertID" and
+			"IKEv2.ClientCertSlot" must be set.
+
+		array{string} IKEv2.CACertPEM [writeonly]
+
+			(VPN Services of type IKEv2 only) The list of x509 CA
+			certificates to be used to verify the remote server.
+			This field does not take effect when the authentication
+			type is "PSK". Any of these certificates can directly
+			sign the server certificate. Each x509 CA certificate
+			must be in in PEM format; specifically the base64
+			counterpart of the DER contents, optionally surrounded
+			by a "-----BEGIN CERTIFICATE-----" and "-----END
+			CERTIFICATE-----" line. The current value of this
+			property is readable in the "Provider" property of this
+			Service.
+
+		string IKEv2.ClientCertID [writeonly]
+
+			(VPN Services of type IKEv2 only) PKCS#11 key ID with
+			client certificate. Required to be set when
+			certificate-based IPsec authentication is used. The
+			current value of this property is readable in the
+			"Provider" property of this Service.
+
+		string IKEv2.ClientCertSlot [writeonly]
+
+			(VPN Services of type IKEv2 only) PKCS#11 slot with
+			client certificate. If certificate-based IPsec
+			authentication is used but this is not set, the default
+			value of "0" will be used. The current value of this
+			property is readable in the "Provider" property of this
+			Service.
+
+		string IKEv2.LocalIdentity [writeonly, optional]
+
+			(VPN Services of type IKEv2 only) The local identity
+			used in the IKE authentication. The current value of
+			this property is readable in the "Provider" property of
+			this Service.
+
+		string IKEv2.PSK [writeonly]
+
+			(VPN Services of type IKEv2 only) Pre-shared key value
+			when PSK-based authentication is used.
+
+		string IKEv2.RemoteIdentity [writeonly, optional]
+
+			(VPN Services of type IKEv2 only) The remote identity
+			used in the IKE authentication. The current value of
+			this property is readable in the "Provider" property of
+			this Service.
+
 		object IPConfig [readonly]
 
 			The object path of the associated IP configuration.
@@ -727,9 +878,9 @@ Methods		dict GetProperties()
 			detection has completed, or if a previous portal detection
 			attempt failed.
 
-		string L2TPIPsec.CACertPEM [writeonly]
+		array{string} L2TPIPsec.CACertPEM [writeonly]
 
-			(VPN Services of type l2tpipsec only) The list of
+			(VPN Services of type L2TP/IPsec only) The list of
 			x509 CA certificates to be used to verify the remote
 			server.  Any of these certificates can directly sign
 			the server certificate.  Each x509 CA certificate
@@ -742,14 +893,14 @@ Methods		dict GetProperties()
 
 		string L2TPIPsec.ClientCertID [writeonly]
 
-			(VPN Services of type l2tpipsec only) PKCS#11 key ID with client
+			(VPN Services of type L2TP/IPsec only) PKCS#11 key ID with client
 			certificate. Required to be set when certificate-based IPsec
 			authentication is used. The current value of this property is
 			readable in the "Provider" property of this Service.
 
 		string L2TPIPsec.ClientCertSlot [writeonly]
 
-			(VPN Services of type l2tpipsec only) PKCS#11 slot with client
+			(VPN Services of type L2TP/IPsec only) PKCS#11 slot with client
 			certificate. If certificate-based IPsec authentication is used but
 			this is not set, the default value of "0" will be used. The current
 			value of this property is readable in the "Provider" property of
@@ -757,7 +908,7 @@ Methods		dict GetProperties()
 
 		string L2TPIPsec.LCPEchoDisabled [writeonly]
 
-			(VPN Services of type l2tpipsec only) If "true", the l2tp layer will
+			(VPN Services of type L2TP/IPsec only) If "true", the l2tp layer will
 			not presume the connection to be dead if LCP echo requests
 			continuously fail to get valid echo replies.  The current value of
 			this property is readable in the "Provider" property of this
@@ -765,53 +916,75 @@ Methods		dict GetProperties()
 
 		string L2TPIPsec.Password [writeonly]
 
-			(VPN Services of type l2tpipsec only) The password at the l2tp
+			(VPN Services of type L2TP/IPsec only) The password at the l2tp
 			layer. This property must be set.
 
 		string L2TPIPsec.PIN [writeonly]
 
-			(VPN Services of type l2tpipsec only) PKCS#11 user PIN. Required to
+			(VPN Services of type L2TP/IPsec only) PKCS#11 user PIN. Required to
 			be set when certificate-based IPsec authentication is used. The
 			current value of this property is readable in the "Provider"
 			property of this Service.
 
 		string L2TPIPsec.PSK [writeonly]
 
-			(VPN Services of type l2tpipsec only) Pre-shared key value when
+			(VPN Services of type L2TP/IPsec only) Pre-shared key value when
 			PSK-based authentication is used.
 
 		string L2TPIPsec.PSKRequired [readonly]
 
-			(VPN Services of type l2tpipsec only) Indicates whether no
+			(VPN Services of type L2TP/IPsec only) Indicates whether no
 			credentials were provided (cert or psk), meaning that the
 			configuration is incomplete. The current value of this property is
 			readable in the "Provider" property of this Service.
 
 		string L2TPIPsec.User [writeonly]
 
-			(VPN Services of type l2tpipsec only) The username at the l2tp
+			(VPN Services of type L2TP/IPsec only) The username at the l2tp
 			layer. This property must be set. The current value of this property
 			is readable in the "Provider" property of this Service.
 
 		string L2TPIPsec.TunnelGroup [writeonly]
 
-			(VPN Services of type l2tpipsec only) The Cisco Tunnel Group Name,
+			(VPN Services of type L2TP/IPsec only) The Cisco Tunnel Group Name,
 			if used. The current value of this property is readable in the
 			"Provider" property of this Service.
 
 		string L2TPIPsec.XauthPassword [writeonly]
 
-			(VPN Services of type l2tpipsec only) The XAUTH password if XAUTH is
+			(VPN Services of type L2TP/IPsec only) The XAUTH password if XAUTH is
 			used. If this property is set, L2TPIPsec.XauthUser must also be
 			set. In addition, since XAUTH is an extension rather than
 			replacement of psk, L2TPIPsec.PSK must also be set.
 
 		string L2TPIPsec.XauthUser [writeonly]
 
-			(VPN Services of type l2tpipsec only) The XAUTH user if XAUTH is
+			(VPN Services of type L2TP/IPsec only) The XAUTH user if XAUTH is
 			used. If this property is set, L2TPIPsec.XauthPassword must also be
 			set. In addition, since XAUTH is an extension rather than
 			replacement of psk, L2TPIPsec.PSK must also be set.
+
+		uint64 LastConnected [readonly]
+
+			A UTC timestamp, in milliseconds, representing the time of the last
+			successful network connection.
+			The timestamp's value equals the number of milliseconds since the
+			Windows epoch (1601-01-01 00:00:00 UTC).
+
+		uint64 LastManualConnectAttempt [readonly]
+
+			A UTC timestamp, in milliseconds, representing the last manual
+			connection attempt. If the value has never been set, an AutoConnect
+			will initialize the value to the current time.
+			The timestamp's value equals the number of milliseconds since the
+			Windows epoch (1601-01-01 00:00:00 UTC).
+
+		uint64 LastOnline [readonly]
+
+			A UTC timestamp, in milliseconds, representing the time of the last
+			time the service transitioned to the Online state.
+			The timestamp's value equals the number of milliseconds since the
+			Windows epoch (1601-01-01 00:00:00 UTC).
 
 		boolean LinkMonitorDisable [readwrite]
 
@@ -1263,42 +1436,11 @@ Methods		dict GetProperties()
 			The current value of this property is readable in the
 			"Provider" property of this service.
 
-		int PPPoE.LCPEchoFailure
-
-			(PPPoE only) If set, the number of LCP echo responses
-			that this service will tolerate missing from the PPP
-			peer before terminating the connection.
-
-		int PPPoE.LCPEchoInterval
-
-			(PPPoE only) If set, used as the number of seconds
-			between sending LCP echo requests to the PPP peer.
-
-		int PPPoE.MaxAuthFailure
-
-			(PPPoE only) The maximum number of authentication
-			failures to allow before terminating the connection.  A
-			value of 0 means no limit.  The default is 3.
-
-		string PPPoE.Password
-
-			(PPPoE only) This string is used as the password
-			during authentication with a PPPoE server.  If empty,
-			it will still be used during authentication if
-			requested.
-
-		string PPPoE.Username
-
-			(PPPoE only) If non-empty, this string is used as the
-			username during authentication with a PPPoE server.  If
-			empty, it will still be used during authentication if
-			requested.
-
 		string Passphrase [readwrite]
 
 			If the service type is "wifi", then this property
 			holds a passphrase used in setting up services of
-			type "wep", "wpa", "rsn", "wpa3", "psk", or a private
+			type "wep", "wpa", "wpa2", "wpa3", "psk", or a private
 			key password used in setting up services of
 			type "802_1x".
 
@@ -1327,6 +1469,19 @@ Methods		dict GetProperties()
 			If the service type is "wifi", then this property
 			indicates if a passphrase or key (for WEP) is required.
 
+			If the service type is "vpn" and the provider type is
+			"ikev2", then this property indicates if a PSK, or EAP
+			identity or password is required, based on the
+			authentication type.
+
+			If the service type is "vpn" and the provider type is
+			"l2tpipsec", then this property indicates if a password
+			for L2TP is required.
+
+			If the service type is "vpn" and the provider type is
+			"openvpn", then this property indicates if a password or
+			token is required.
+
 			If a passphrase has been set already or if no
 			passphrase is needed, then this property will
 			be set to false.
@@ -1334,8 +1489,6 @@ Methods		dict GetProperties()
 			UI clients may monitor this property for a
 			PropertyChanged signals to prompt for a required
 			passphrase or key.
-
-			[We will be supporting this soon for VPN]
 
 		string PhysicalTechnology [readonly, optional]
 
@@ -1406,6 +1559,16 @@ Methods		dict GetProperties()
 			By default services are not assigned a priority;
 			clients must set one if they desire.  To remove an
 			existing priority use the ClearProperty method.
+
+		int32 EphemeralPriority [readwrite]
+
+			An optional value used to calculate the priority order
+			of this service, before the Priority property. This
+			value will not be persisted into the profile.
+
+			Intended for testing only to work around Shill behavior
+			that changes which Ethernet profile entry is loaded for
+			a Service when the sort order changes.
 
 		string ProbeUrl [readonly]
 
@@ -1534,8 +1697,8 @@ Methods		dict GetProperties()
 			value of this property is readable in the "Provider"
 			property of this service.
 
-			If Provider.Type is "openvpn" or "l2tpipsec" this
-			property contains an actual hostname.
+			If Provider.Type is "ikev2", "l2tpipsec", or "openvpn"
+			this property contains an actual hostname.
 
 			If Provider.Type is "wireguard" this property should
 			also be "wireguard".
@@ -1591,18 +1754,36 @@ Methods		dict GetProperties()
 			present and contains the security method or key
 			management setting.
 
-			Possible values are: "none" (no privacy),
-			"wep" (fixed key WEP), "wpa" (WPA-PSK), "rsn"
-			(IEEE 802.11i-PSK), "wpa3" (WPA3-SAE), "psk" ("wpa",
-			"rsn", "or "wpa3"), and "802_1x" (IEEE 802.11i with
-			802.1x authentication).
+			Possible values are listed below.
 
-			Note that "psk" is used as a catch-all for non-WEP
-			passphrase-based key management protocols (WPA, WPA-2,
-			and WPA-3) before we know which one is in use. See also
-			SecurityClass. Also note that WPA3-SAE is technically
-			also an RSN protocol, so we use the Wi-Fi Alliance
-			designation (WPA3) for clarity.
+			"none" - no privacy
+                        "owe"  - open network using OWE encryption
+			"wep"  - fixed key WEP
+			"wpa"  - WPA-PSK
+			"wpa2" - IEEE 802.11i-PSK
+			"rsn"  - deprecated name for "wpa2"
+			"wpa3" - WPA3-SAE
+
+			Equivalent modes with with 802.1x authentication:
+
+			"wpa-ent"
+			"wpa2-ent"
+			"wpa3-ent"
+
+			Transitional modes (when more then one possible value is
+			accepted):
+
+			"wpa+wpa2"
+			"wpa2+wpa3"
+			"wpa-all"
+			"wpa+wpa2-ent"
+			"wpa2+wpa3-ent"
+			"wpa-all-ent"
+
+			See also SecurityClass. Also note that WPA3-SAE
+			is technically also an RSN protocol, so we use
+			the Wi-Fi Alliance designation (WPA3) for
+			clarity.
 
 			This property is only present for WiFi services.
 
@@ -1647,7 +1828,7 @@ Methods		dict GetProperties()
 			"redirect-found" Layer 3 setup is complete but the HTTP
 					probe found a redirect.
 
-			"portal suspected" Layer 3 setup is complete but HTTP
+			"portal-suspected" Layer 3 setup is complete but HTTP
 					probe failed with no redirect or HTTPS
 					probe failed.
 
@@ -1690,7 +1871,6 @@ Methods		dict GetProperties()
 				int32 Mtu
 				array{string} NameServers
 				array{string} SearchDomains
-				string PeerAddress
 				int32 Prefixlen
 				array{string} ExcludedRoutes
 				array{string} IncludedRoutes
@@ -1709,7 +1889,6 @@ Methods		dict GetProperties()
 				int32 Mtu
 				array{string} NameServers
 				array{string} SearchDomains
-				string PeerAddress
 				int32 Prefixlen
 				array{string} ExcludedRoutes
 				array{string} IncludedRoutes
@@ -1722,31 +1901,6 @@ Methods		dict GetProperties()
 			This property will not be present for Ethernet
 			devices.
 
-		string Tethering [readonly]
-
-			Returns a string that indicates an estimate of
-			whether the service is likely to be providing
-			internet connectivity over a mobile network backhaul.
-			The possible values of this string are:
-
-				NotDetected: Tethering is not detected.
-				Suspected: Something in the network scan
-					provides circumstantial evidence
-					that this service is tethered.
-				Confirmed: Some definitive evidence has
-					been discovered that indicates
-					either this service is tethered
-					or the server is overtly pretending
-					to be tethered.
-
-			This property is only visible in service types
-			which can support tethering.  Currently only
-			Ethernet and WiFi services support this property
-			directly.  VPN services make this property visible
-			if the service they're using for connectivity does
-			(i.e., if VPN connectivity is gained via Ethernet
-			or WiFi).
-
 		uint64 TrafficCounterResetTime [readonly]
 
 			A UTC timestamp, in milliseconds, representing when
@@ -1755,14 +1909,23 @@ Methods		dict GetProperties()
 			seconds since the Windows epoch (1601-01-01
 			00:00:00 UTC).
 
+		uint32 UplinkSpeedKbps [readonly]
+
+			Theoretical maximal uplink speed of current service in Kbps, currently
+			only defined for physical networks (WiFi, Ethernet, Cellular).
+
+		uint32 DownlinkSpeedKbps [readonly]
+
+			Theoretical maximal downlink speed of current service in Kbps, currently
+			only defined for physical networks (WiFi, Ethernet, Cellular).
+
 		string Type [readonly]
 
 			The service type; one of:
 			  "ethernet"    (802.3 wired Ethernet),
 			  "wifi"        (IEEE 802.11),
 			  "cellular"    (3G Cellular),
-			  "vpn"         (Virtual Private Network), or
-			  "pppoe"       (Point-to-Point Protocol over Ethernet).
+			  "vpn"         (Virtual Private Network).
 
 			This information should only be used to determine
 			advanced properties or showing the correct icon
@@ -1832,6 +1995,26 @@ Methods		dict GetProperties()
 			"802.11n".  This value is for informational
 			purposes only.
 
+		string WiFi.RandomMACPolicy [writeonly]
+
+			(WiFi only) This property defines MAC Address
+			Randomization for connections behavior.
+			Possible values:
+
+			"Hardware"	Use MAC Address from Hardware,
+
+			"FullRandom"	Randomize Address every time we associate,
+
+			"OUIRandom"	Same as Full Random, but keeps OUI part intact
+					(% local admin bit),
+
+			"PersistentRandom"	Use random MAC address, different for
+						each SSID but persistent between associations,
+
+			"NonPersistentRandom"	Use random MAC address, different for
+						each SSID and changing at least
+						every 24 hours (upon association).
+
 		string WiFi.HexSSID [readonly]
 
 			(WiFi only) This property holds a hex-encoded copy
@@ -1898,6 +2081,18 @@ Methods		dict GetProperties()
 				Microsoft nor Epigram identifiers (the former
 				two are used for platform-neutral information).
 
+		int32 WiFi.SignalStrengthRssi [readonly]
+
+			(WiFi only) Indicates the RSSI value in dBm of the signal strength
+			of the service. This is typically between -90 and -20 dBm. Unknown
+			value is represented as -32768 dBm (int16 min value).
+
+		array{string} WireGuard.IPAddress [writeonly]
+
+			(VPN services of type WireGuard only) The list of IP addresses
+			configured for this WireGuard interface. At most 1 IPv4 address + 1
+			IPv6 address is supported now.
+
 		array{dict} WireGuard.Peers [writeonly]
 
 			(VPN services of type WireGuard only) The list of peers
@@ -1950,3 +2145,30 @@ Methods		dict GetProperties()
 			configured for the WireGuard interface on this device. This
 			property is only readable in the "Provider" property of this
 			service.
+
+		array{string} WiFi.BSSIDAllowlist [readwrite]
+
+			(WiFi only) List of BSSIDs that control what APs can be
+			connected to. The BSSID should be formatted as
+			colon-separated octets (e.g. "00:01:02:03:04:05").
+
+			Empty list: The WiFi network can associate with any AP.
+
+			Non-empty list: The WiFi network will only associate
+			with the specified BSSes.
+
+			["00:00:00:00:00:00"]: Special value indicating the
+			network shouldn't associate with any AP.
+			"00:00:00:00:00:00" shouldn't be a part of any other
+			list of values, otherwise an error will be
+			returned.
+
+		string WiFi.BSSIDRequested [readwrite]
+
+			(WiFi only) A BSSID of an AP that should be connected
+			to. If an AP with the requested BSSID is not in range or
+			not connectable, the Service will not fallback to a
+			different BSSID and will be seen as unconnectable.
+
+			The BSSID should be formatted as colon-separated octets
+			(e.g. "00:01:02:03:04:05").

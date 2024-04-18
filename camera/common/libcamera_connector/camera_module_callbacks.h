@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -7,7 +7,7 @@
 #ifndef CAMERA_COMMON_LIBCAMERA_CONNECTOR_CAMERA_MODULE_CALLBACKS_H_
 #define CAMERA_COMMON_LIBCAMERA_CONNECTOR_CAMERA_MODULE_CALLBACKS_H_
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <mojo/public/cpp/bindings/associated_receiver.h>
 #include <mojo/public/cpp/bindings/pending_associated_remote.h>
 
@@ -15,9 +15,9 @@
 
 namespace cros {
 
-class CameraModuleCallbacks final : public mojom::CameraModuleCallbacks {
+class CameraModuleCallbacks : public mojom::CameraModuleCallbacks {
  public:
-  using DeviceStatusCallback = base::Callback<void(int32_t, bool)>;
+  using DeviceStatusCallback = base::RepeatingCallback<void(int32_t, bool)>;
 
   explicit CameraModuleCallbacks(DeviceStatusCallback device_status_callback);
 

@@ -1,11 +1,9 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef AUTHPOLICY_JAIL_HELPER_H_
 #define AUTHPOLICY_JAIL_HELPER_H_
-
-#include <base/macros.h>
 
 #include "authpolicy/authpolicy_metrics.h"
 #include "authpolicy/path_service.h"

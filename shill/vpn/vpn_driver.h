@@ -1,22 +1,27 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_VPN_VPN_DRIVER_H_
 #define SHILL_VPN_VPN_DRIVER_H_
 
+#include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <base/cancelable_callback.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 #include "shill/callbacks.h"
-#include "shill/key_value_store.h"
+#include "shill/eap_credentials.h"
+#include "shill/ipconfig.h"
+#include "shill/metrics.h"
 #include "shill/mockable.h"
 #include "shill/service.h"
+#include "shill/store/key_value_store.h"
+#include "shill/vpn/vpn_types.h"
 
 namespace shill {
 
@@ -24,7 +29,6 @@ class ControlInterface;
 class Error;
 class EventDispatcher;
 class Manager;
-class Metrics;
 class ProcessManager;
 class PropertyStore;
 class StoreInterface;
@@ -52,7 +56,7 @@ class VPNDriver {
   class EventHandler {
    public:
     // Invoked on connection or reconnection done. The interface name and index
-    // of the VPN interface are passed via parameters. GetIPProperties() is
+    // of the VPN interface are passed via parameters. GetIPv4Properties() is
     // ready now.
     virtual void OnDriverConnected(const std::string& if_name,
                                    int if_index) = 0;
@@ -61,7 +65,7 @@ class VPNDriver {
     // event is supposed to be triggered only once before the next call of
     // ConnectAsync().
     virtual void OnDriverFailure(Service::ConnectFailure failure,
-                                 const std::string& error_details) = 0;
+                                 std::string_view error_details) = 0;
 
     // Indicates the driver is trying reconnecting now. Note that this event
     // might be triggered multiple times before OnConnected or OnFailure
@@ -75,8 +79,7 @@ class VPNDriver {
 
   // Might be returned by ConnectAsync() or OnDriverReconnecting(). Indicates
   // the VPNService should not set a timeout for this connection attempt.
-  static constexpr base::TimeDelta kTimeoutNone =
-      base::TimeDelta::FromSeconds(0);
+  static constexpr base::TimeDelta kTimeoutNone = base::Seconds(0);
 
   virtual ~VPNDriver();
 
@@ -90,8 +93,8 @@ class VPNDriver {
   // attempt might take at maximum.
   virtual base::TimeDelta ConnectAsync(EventHandler* handler) = 0;
   virtual void Disconnect() = 0;
-  virtual IPConfig::Properties GetIPProperties() const = 0;
-  virtual std::string GetProviderType() const = 0;
+  virtual std::unique_ptr<IPConfig::Properties> GetIPv4Properties() const = 0;
+  virtual std::unique_ptr<IPConfig::Properties> GetIPv6Properties() const = 0;
 
   // Makes the VPN driver fail because of the connection timeout. The driver
   // will clean up its internal state, and invokes OnDriverFailure to notify the
@@ -118,14 +121,18 @@ class VPNDriver {
   virtual void UnloadCredentials();
 
   // Power management events.
-  virtual void OnBeforeSuspend(const ResultCallback& callback);
+  virtual void OnBeforeSuspend(ResultCallback callback);
   virtual void OnAfterResume();
   virtual void OnDefaultPhysicalServiceEvent(DefaultPhysicalServiceEvent event);
 
   mockable std::string GetHost() const;
 
+  VPNType vpn_type() const { return vpn_type_; }
   KeyValueStore* args() { return &args_; }
   const KeyValueStore* const_args() const { return &args_; }
+  const EapCredentials* eap_credentials() const {
+    return eap_credentials_.get();
+  }
 
  protected:
   // Represents a property in |args_|, which can be read and/or written over
@@ -147,8 +154,10 @@ class VPNDriver {
 
   VPNDriver(Manager* manager,
             ProcessManager* process_manager,
+            VPNType vpn_type,
             const Property* properties,
-            size_t property_count);
+            size_t property_count,
+            bool use_eap = false);
   VPNDriver(const VPNDriver&) = delete;
   VPNDriver& operator=(const VPNDriver&) = delete;
 
@@ -165,7 +174,9 @@ class VPNDriver {
  private:
   friend class VPNDriverTest;
 
-  static const char kCredentialPrefix[];
+  // TODO(crbug.com/1084279): Migrate back to storing property names after
+  // crypto code is removed.
+  static constexpr char kCredentialPrefix[] = "Credential.";
 
   void ClearMappedStringProperty(const size_t& index, Error* error);
   void ClearMappedStringsProperty(const size_t& index, Error* error);
@@ -182,9 +193,12 @@ class VPNDriver {
   Manager* manager_;
   ProcessManager* process_manager_;
 
+  const VPNType vpn_type_;
   const Property* const properties_;
   const size_t property_count_;
   KeyValueStore args_;
+
+  std::unique_ptr<EapCredentials> eap_credentials_;
 };
 
 }  // namespace shill

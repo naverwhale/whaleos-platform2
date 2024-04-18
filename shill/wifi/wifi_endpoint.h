@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,9 +16,10 @@
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 #include "shill/event_dispatcher.h"
-#include "shill/key_value_store.h"
 #include "shill/metrics.h"
 #include "shill/refptr_types.h"
+#include "shill/store/key_value_store.h"
+#include "shill/wifi/wifi_security.h"
 
 namespace shill {
 
@@ -28,7 +29,9 @@ class SupplicantBSSProxyInterface;
 class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
  public:
   struct SecurityFlags {
+    bool rsn_8021x_wpa3 = false;
     bool rsn_8021x = false;
+    bool rsn_owe = false;
     bool rsn_psk = false;
     bool rsn_sae = false;
     bool wpa_8021x = false;
@@ -46,6 +49,7 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
     bool neighbor_list_supported = false;
     bool ota_ft_supported = false;
     bool otds_ft_supported = false;
+    bool adaptive_ft_supported = false;
     bool dms_supported = false;
     bool bss_max_idle_period_supported = false;
     bool bss_transition_supported = false;
@@ -54,10 +58,16 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
     bool supported = false;
     int version = 0;
   };
+  struct QosSupport {
+    bool scs_supported = false;
+    bool mscs_supported = false;
+    bool alternate_edca_supported = false;
+  };
   struct SupportedFeatures {
     Ap80211krvSupport krv_support;
     HS20Information hs20_information;
     bool mbo_support = false;
+    QosSupport qos_support;
   };
   WiFiEndpoint(ControlInterface* control_interface,
                const WiFiRefPtr& device,
@@ -89,19 +99,23 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
   // vendor of this AP.
   std::map<std::string, std::string> GetVendorInformation() const;
 
+  Metrics::WiFiConnectionAttemptInfo::ApSupportedFeatures
+  ToApSupportedFeatures() const;
+
   const std::vector<uint8_t>& ssid() const;
   const std::string& ssid_string() const;
   const std::string& ssid_hex() const;
+  const std::vector<uint8_t>& bssid() const;
   const std::string& bssid_string() const;
   const std::string& bssid_hex() const;
   const std::string& country_code() const;
   const WiFiRefPtr& device() const;
   int16_t signal_strength() const;
-  base::TimeTicks last_seen() const;
+  base::Time last_seen() const;
   uint16_t frequency() const;
   uint16_t physical_mode() const;
   const std::string& network_mode() const;
-  const std::string& security_mode() const;
+  WiFiSecurity::Mode security_mode() const;
   bool has_rsn_property() const;
   bool has_wpa_property() const;
   bool has_psk_property() const;
@@ -109,8 +123,10 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
   const Ap80211krvSupport& krv_support() const;
   const HS20Information& hs20_information() const;
   bool mbo_support() const;
+  const QosSupport& qos_support() const;
 
  private:
+  friend class ManagerTest;  // for MakeOpenEndpoint
   friend class WiFiEndpointTest;
   friend class WiFiIEsFuzz;
   friend class WiFiObjectTest;    // for MakeOpenEndpoint
@@ -118,7 +134,12 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
   friend class WiFiServiceTest;   // for MakeOpenEndpoint
   // For DeterminePhyModeFromFrequency
   FRIEND_TEST(WiFiEndpointTest, DeterminePhyModeFromFrequency);
+  FRIEND_TEST(WiFiEndpointTest, ParseIEs);
+  FRIEND_TEST(WiFiEndpointTest, ParseVendorIEs);
+  FRIEND_TEST(WiFiEndpointTest, ParseWPACapabilities);
+  FRIEND_TEST(WiFiEndpointTest, ParseCountryCode);
   // These test cases need access to the KeyManagement enum.
+  FRIEND_TEST(WiFiEndpointTest, ParseKeyManagementMethodsOWE);
   FRIEND_TEST(WiFiEndpointTest, ParseKeyManagementMethodsEAP);
   FRIEND_TEST(WiFiEndpointTest, ParseKeyManagementMethodsPSK);
   FRIEND_TEST(WiFiEndpointTest, ParseKeyManagementMethodsEAPAndPSK);
@@ -133,8 +154,10 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
 
   enum KeyManagement {
     kKeyManagement802_1x,
+    kKeyManagement802_1x_Wpa3,
     kKeyManagementPSK,
-    kKeyManagementSAE
+    kKeyManagementSAE,
+    kKeyManagementOWE,
   };
 
   // Build a simple WiFiEndpoint, for testing purposes.
@@ -163,8 +186,8 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
   // The stored data in the |flags| parameter is merged with the provided
   // properties, and the security value returned is the result of the
   // merger.
-  static const char* ParseSecurity(const KeyValueStore& properties,
-                                   SecurityFlags* flags);
+  static WiFiSecurity::Mode ParseSecurity(const KeyValueStore& properties,
+                                          SecurityFlags* flags);
   // Parses an Endpoint's properties' "RSN" or "WPA" sub-dictionary, to
   // identify supported key management methods (802.1x or PSK).
   static void ParseKeyManagementMethods(
@@ -178,11 +201,8 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
   // Parse information elements to determine the physical mode and other
   // information associated with the AP.  Returns true if a physical mode was
   // determined from the IE elements, false otherwise.
-  static bool ParseIEs(const KeyValueStore& properties,
-                       Metrics::WiFiNetworkPhyMode* phy_mode,
-                       VendorInformation* vendor_information,
-                       std::string* country_code,
-                       SupportedFeatures* supported_features);
+  bool ParseIEs(const KeyValueStore& properties,
+                Metrics::WiFiNetworkPhyMode* phy_mode);
   // Parse MDE information element and set *|otds_ft_supported| to true if
   // Over-the-DS Fast BSS Transition is supported by this AP.
   static void ParseMobilityDomainElement(
@@ -196,22 +216,26 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
   static void ParseExtendedCapabilities(
       std::vector<uint8_t>::const_iterator ie,
       std::vector<uint8_t>::const_iterator end,
-      Ap80211krvSupport* krv_support);
+      SupportedFeatures* supported_features);
+  // Get the value of the extended capability identified by |octet| and |bit|.
+  // Returns false if the information element is not long enough.
+  static bool GetExtendedCapability(std::vector<uint8_t>::const_iterator ie,
+                                    std::vector<uint8_t>::const_iterator end,
+                                    IEEE_80211::ExtendedCapOctet octet,
+                                    uint8_t bit);
   // Parse a WPA information element.
   static void ParseWPACapabilities(std::vector<uint8_t>::const_iterator ie,
                                    std::vector<uint8_t>::const_iterator end,
                                    bool* found_ft_cipher);
   // Parse a single vendor information element.
-  static void ParseVendorIE(std::vector<uint8_t>::const_iterator ie,
-                            std::vector<uint8_t>::const_iterator end,
-                            VendorInformation* vendor_information,
-                            SupportedFeatures* supported_features);
+  void ParseVendorIE(std::vector<uint8_t>::const_iterator ie,
+                     std::vector<uint8_t>::const_iterator end);
 
   // Assigns a value to |has_tethering_signature_|.
   void CheckForTetheringSignature();
 
   // Private setter used in unit tests.
-  void set_security_mode(const std::string& mode) { security_mode_ = mode; }
+  void set_security_mode(WiFiSecurity::Mode mode) { security_mode_ = mode; }
 
   const std::vector<uint8_t> ssid_;
   const std::vector<uint8_t> bssid_;
@@ -221,13 +245,13 @@ class WiFiEndpoint : public base::RefCounted<WiFiEndpoint> {
   const std::string bssid_hex_;
   std::string country_code_;
   int16_t signal_strength_;
-  base::TimeTicks last_seen_;
+  base::Time last_seen_;
   uint16_t frequency_;
   uint16_t physical_mode_;
-  // network_mode_ and security_mode_ are represented as flimflam names
+  // network_mode_ is represented as flimflam names
   // (not necessarily the same as wpa_supplicant names)
   std::string network_mode_;
-  std::string security_mode_;
+  WiFiSecurity::Mode security_mode_ = WiFiSecurity::kNone;
   VendorInformation vendor_information_;
   bool has_rsn_property_;
   bool has_wpa_property_;

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 
 #include "diagnostics/cros_healthd/fetchers/base_fetcher.h"
 #include "diagnostics/cros_healthd/fetchers/storage/device_manager.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
 
@@ -23,13 +23,13 @@ class DiskFetcher final : public BaseFetcher {
 
   // Returns a structure with either the device's non-removable block device
   // info or the error that occurred fetching the information.
-  chromeos::cros_healthd::mojom::NonRemovableBlockDeviceResultPtr
+  ash::cros_healthd::mojom::NonRemovableBlockDeviceResultPtr
   FetchNonRemovableBlockDevicesInfo();
 
  private:
   std::unique_ptr<StorageDeviceManager> manager_;
 
-  Status InitManager();
+  ash::cros_healthd::mojom::ProbeErrorPtr InitManager();
 };
 
 }  // namespace diagnostics

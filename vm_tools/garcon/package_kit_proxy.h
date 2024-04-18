@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,13 @@
 #include <string>
 #include <vector>
 
-#include <base/callback_forward.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <base/observer_list.h>
 #include <base/observer_list_types.h>
-#include <base/single_thread_task_runner.h>
 #include <base/sequence_checker.h>
 #include <base/synchronization/lock.h>
+#include <base/task/single_thread_task_runner.h>
 #include <dbus/bus.h>
 #include <dbus/object_proxy.h>
 #include <vm_protos/proto_bindings/container_guest.grpc.pb.h>
@@ -53,10 +52,10 @@ class PackageKitProxy {
     std::string summary;
   };
 
-  typedef base::Callback<void(bool success,
-                              bool pkg_found,
-                              const LinuxPackageInfo& pkg_info,
-                              const std::string& error)>
+  typedef base::OnceCallback<void(bool success,
+                                  bool pkg_found,
+                                  const LinuxPackageInfo& pkg_info,
+                                  const std::string& error)>
       PackageSearchCallback;
 
   // Creates an instance of PackageKitProxy that will use the calling thread for

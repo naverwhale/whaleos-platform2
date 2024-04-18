@@ -1,11 +1,13 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <brillo/dbus/async_event_sequencer.h>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <utility>
+
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -27,8 +29,8 @@ class AsyncEventSequencerTest : public ::testing::Test {
 
   void SetUp() {
     aec_ = new AsyncEventSequencer();
-    cb_ = base::Bind(&AsyncEventSequencerTest::HandleCompletion,
-                     base::Unretained(this));
+    cb_ = base::BindOnce(&AsyncEventSequencerTest::HandleCompletion,
+                         base::Unretained(this));
   }
 
   scoped_refptr<AsyncEventSequencer> aec_;
@@ -37,27 +39,27 @@ class AsyncEventSequencerTest : public ::testing::Test {
 
 TEST_F(AsyncEventSequencerTest, WaitForCompletionActions) {
   auto finished_handler = aec_->GetHandler("handler failed", false);
-  finished_handler.Run(true);
+  std::move(finished_handler).Run(true);
   EXPECT_CALL(*this, HandleCompletion(true)).Times(1);
-  aec_->OnAllTasksCompletedCall({cb_});
+  aec_->OnAllTasksCompletedCall(std::move(cb_));
 }
 
 TEST_F(AsyncEventSequencerTest, MultiInitActionsSucceed) {
   auto finished_handler1 = aec_->GetHandler("handler failed", false);
   auto finished_handler2 = aec_->GetHandler("handler failed", false);
-  aec_->OnAllTasksCompletedCall({cb_});
-  finished_handler1.Run(true);
+  aec_->OnAllTasksCompletedCall(std::move(cb_));
+  std::move(finished_handler1).Run(true);
   EXPECT_CALL(*this, HandleCompletion(true)).Times(1);
-  finished_handler2.Run(true);
+  std::move(finished_handler2).Run(true);
 }
 
 TEST_F(AsyncEventSequencerTest, SomeInitActionsFail) {
   auto finished_handler1 = aec_->GetHandler("handler failed", false);
   auto finished_handler2 = aec_->GetHandler("handler failed", false);
-  aec_->OnAllTasksCompletedCall({cb_});
-  finished_handler1.Run(false);
+  aec_->OnAllTasksCompletedCall(std::move(cb_));
+  std::move(finished_handler1).Run(false);
   EXPECT_CALL(*this, HandleCompletion(false)).Times(1);
-  finished_handler2.Run(true);
+  std::move(finished_handler2).Run(true);
 }
 
 TEST_F(AsyncEventSequencerTest, MultiDBusActionsSucceed) {
@@ -65,10 +67,10 @@ TEST_F(AsyncEventSequencerTest, MultiDBusActionsSucceed) {
                                          "method export failed", false);
   auto handler2 = aec_->GetExportHandler(kTestInterface, kTestMethod2,
                                          "method export failed", false);
-  aec_->OnAllTasksCompletedCall({cb_});
-  handler1.Run(kTestInterface, kTestMethod1, true);
+  aec_->OnAllTasksCompletedCall(std::move(cb_));
+  std::move(handler1).Run(kTestInterface, kTestMethod1, true);
   EXPECT_CALL(*this, HandleCompletion(true)).Times(1);
-  handler2.Run(kTestInterface, kTestMethod2, true);
+  std::move(handler2).Run(kTestInterface, kTestMethod2, true);
 }
 
 TEST_F(AsyncEventSequencerTest, SomeDBusActionsFail) {
@@ -76,20 +78,20 @@ TEST_F(AsyncEventSequencerTest, SomeDBusActionsFail) {
                                          "method export failed", false);
   auto handler2 = aec_->GetExportHandler(kTestInterface, kTestMethod2,
                                          "method export failed", false);
-  aec_->OnAllTasksCompletedCall({cb_});
-  handler1.Run(kTestInterface, kTestMethod1, true);
+  aec_->OnAllTasksCompletedCall(std::move(cb_));
+  std::move(handler1).Run(kTestInterface, kTestMethod1, true);
   EXPECT_CALL(*this, HandleCompletion(false)).Times(1);
-  handler2.Run(kTestInterface, kTestMethod2, false);
+  std::move(handler2).Run(kTestInterface, kTestMethod2, false);
 }
 
 TEST_F(AsyncEventSequencerTest, MixedActions) {
   auto handler1 = aec_->GetExportHandler(kTestInterface, kTestMethod1,
                                          "method export failed", false);
   auto handler2 = aec_->GetHandler("handler failed", false);
-  aec_->OnAllTasksCompletedCall({cb_});
-  handler1.Run(kTestInterface, kTestMethod1, true);
+  aec_->OnAllTasksCompletedCall(std::move(cb_));
+  std::move(handler1).Run(kTestInterface, kTestMethod1, true);
   EXPECT_CALL(*this, HandleCompletion(true)).Times(1);
-  handler2.Run(true);
+  std::move(handler2).Run(true);
 }
 
 }  // namespace dbus_utils

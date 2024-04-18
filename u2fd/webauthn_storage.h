@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,11 @@
 #define U2FD_WEBAUTHN_STORAGE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/optional.h>
 #include <brillo/secure_blob.h>
 #include <metrics/metrics_library.h>
 
@@ -27,6 +27,8 @@ struct WebAuthnRecord {
   // memory will hit RLIMIT_MEMLOCK. 2. With physical presence and auth-time
   // secret, this per-credential secret is more like a salt.
   brillo::Blob secret;
+  // Key blob containing wrapped TPM key, used in generic TPM case.
+  brillo::Blob key_blob;
   // The relying party id.
   std::string rp_id;
   // The relying party display name.
@@ -60,16 +62,22 @@ class WebAuthnStorage {
   // Clears in-memory records.
   virtual void Reset();
 
-  virtual base::Optional<brillo::Blob> GetSecretByCredentialId(
+  virtual std::optional<brillo::SecureBlob> GetSecretByCredentialId(
       const std::string& credential_id);
 
-  virtual base::Optional<WebAuthnRecord> GetRecordByCredentialId(
+  virtual bool GetSecretAndKeyBlobByCredentialId(
+      const std::string& credential_id,
+      brillo::SecureBlob* secret,
+      brillo::Blob* key_blob);
+
+  virtual std::optional<WebAuthnRecord> GetRecordByCredentialId(
       const std::string& credential_id);
 
-  // Writes auth-time secret hash to disk.
-  bool PersistAuthTimeSecretHash(const brillo::Blob& hash);
-  // Loads auth-time secret hash from disk.
-  std::unique_ptr<brillo::Blob> LoadAuthTimeSecretHash();
+  virtual int CountRecordsInTimeRange(int64_t timestamp_min,
+                                      int64_t timestamp_max);
+
+  virtual int DeleteRecordsInTimeRange(int64_t timestamp_min,
+                                       int64_t timestamp_max);
 
   // Sets the |allow_access_| which determines whether the backing storage
   // location can be accessed or not.
@@ -82,6 +90,8 @@ class WebAuthnStorage {
   void SetRootPathForTesting(const base::FilePath& root_path);
 
  private:
+  bool DeleteRecordWithCredentialId(const std::string& credential_id);
+
   base::FilePath root_path_;
   // Whether access to storage is allowed.
   bool allow_access_ = false;

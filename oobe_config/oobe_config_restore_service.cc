@@ -1,12 +1,17 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "oobe_config/oobe_config_restore_service.h"
 
+#include <memory>
 #include <string>
+#include <utility>
 
+#include "libhwsec/factory/factory.h"
+#include "libhwsec/frontend/oobe_config/frontend.h"
 #include "oobe_config/load_oobe_config_rollback.h"
+#include "oobe_config/metrics/enterprise_rollback_metrics_handler.h"
 #include "oobe_config/oobe_config.h"
 #include "oobe_config/proto_bindings/oobe_config.pb.h"
 
@@ -18,18 +23,16 @@ using brillo::dbus_utils::AsyncEventSequencer;
 namespace oobe_config {
 
 OobeConfigRestoreService::OobeConfigRestoreService(
-    std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object,
-    bool allow_unencrypted)
+    std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object)
     : org::chromium::OobeConfigRestoreAdaptor(this),
-      dbus_object_(std::move(dbus_object)),
-      allow_unencrypted_(allow_unencrypted) {}
+      dbus_object_(std::move(dbus_object)) {}
 
 OobeConfigRestoreService::~OobeConfigRestoreService() = default;
 
 void OobeConfigRestoreService::RegisterAsync(
-    const AsyncEventSequencer::CompletionAction& completion_callback) {
+    AsyncEventSequencer::CompletionAction completion_callback) {
   RegisterWithDBusObject(dbus_object_.get());
-  dbus_object_->RegisterAsync(completion_callback);
+  dbus_object_->RegisterAsync(std::move(completion_callback));
 }
 
 void OobeConfigRestoreService::ProcessAndGetOobeAutoConfig(
@@ -39,9 +42,13 @@ void OobeConfigRestoreService::ProcessAndGetOobeAutoConfig(
 
   LOG(INFO) << "Chrome requested OOBE config.";
 
-  OobeConfig oobe_config;
+  hwsec::FactoryImpl hwsec_factory(hwsec::ThreadingMode::kCurrentThread);
+  std::unique_ptr<const hwsec::OobeConfigFrontend> hwsec_oobe_config =
+      hwsec_factory.GetOobeConfigFrontend();
+  OobeConfig oobe_config(hwsec_oobe_config.get());
+  EnterpriseRollbackMetricsHandler rollback_metrics;
   LoadOobeConfigRollback load_oobe_config_rollback(&oobe_config,
-                                                   allow_unencrypted_);
+                                                   &rollback_metrics);
   std::string chrome_config_json, unused_enrollment_domain;
 
   // There is rollback data so attempt to parse it.

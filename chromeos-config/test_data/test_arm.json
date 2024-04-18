@@ -6,12 +6,11 @@
           "image-name": "some_unsigned"
         },
         "identity": {
-          "device-tree-compatible-match": "google,some"
+          "frid": "Google_Some"
         },
         "name": "some",
         "ui": {
-          "help-content-id": "some",
-          "serialized-ash-switches": "--device-help-content-id=some\u0000"
+          "help-content-id": "some"
         },
         "wallpaper": "some-wallpaper"
       },
@@ -20,13 +19,13 @@
           "image-name": "whitelabel_signed"
         },
         "identity": {
-          "device-tree-compatible-match": "google,whitelabel",
+          "custom-label-tag": "whitelabel1",
+          "frid": "Google_Some",
           "whitelabel-tag": "whitelabel1"
         },
         "name": "whitelabel",
         "ui": {
-          "help-content-id": "whitelabel1",
-          "serialized-ash-switches": "--device-help-content-id=whitelabel1\u0000"
+          "help-content-id": "whitelabel1"
         },
         "wallpaper": "whitelabel1-wallpaper"
       },
@@ -35,13 +34,13 @@
           "image-name": "whitelabel_signed"
         },
         "identity": {
-          "device-tree-compatible-match": "google,whitelabel",
+          "custom-label-tag": "whitelabel2",
+          "frid": "Google_Some",
           "whitelabel-tag": "whitelabel2"
         },
         "name": "whitelabel",
         "ui": {
-          "help-content-id": "whitelabel2",
-          "serialized-ash-switches": "--device-help-content-id=whitelabel2\u0000"
+          "help-content-id": "whitelabel2"
         },
         "wallpaper": "whitelabel2-wallpaper"
       },
@@ -50,13 +49,12 @@
           "image-name": "whitelabel_signed"
         },
         "identity": {
-          "device-tree-compatible-match": "google,whitelabel",
-          "whitelabel-tag": ""
+          "custom-label-tag": "",
+          "frid": "Google_Some"
         },
         "name": "whitelabel",
         "ui": {
-          "help-content-id": "whitelabel",
-          "serialized-ash-switches": "--device-help-content-id=whitelabel\u0000"
+          "help-content-id": "whitelabel"
         },
         "wallpaper": "whitelabel-default-wallpaper"
       },
@@ -65,14 +63,13 @@
           "image-name": "another1_firmware"
         },
         "identity": {
-          "device-tree-compatible-match": "google,another",
+          "frid": "Google_Another",
           "platform-name": "Another",
           "sku-id": 8
         },
         "name": "another1",
         "ui": {
-          "help-content-id": "another1",
-          "serialized-ash-switches": "--device-help-content-id=another1\u0000"
+          "help-content-id": "another1"
         }
       },
       {
@@ -80,14 +77,13 @@
           "image-name": "another2_firmware"
         },
         "identity": {
-          "device-tree-compatible-match": "google,another",
+          "frid": "Google_Another",
           "platform-name": "Another",
           "sku-id": 9
         },
         "name": "another2",
         "ui": {
-          "help-content-id": "another2",
-          "serialized-ash-switches": "--device-help-content-id=another2\u0000"
+          "help-content-id": "another2"
         }
       }
     ]

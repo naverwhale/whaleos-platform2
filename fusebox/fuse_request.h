@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@
 #include <fuse_lowlevel.h>
 
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace fusebox {
 
@@ -25,24 +27,29 @@ namespace fusebox {
 
 class FuseRequest {
  protected:
-  explicit FuseRequest(fuse_req_t req);
+  explicit FuseRequest(fuse_req_t req, fuse_file_info* fi = nullptr);
   FuseRequest(const FuseRequest&) = delete;
   FuseRequest& operator=(const FuseRequest&) = delete;
   virtual ~FuseRequest();
 
  public:
+  int flags() const { return flags_; }
+  uint64_t fh() const { return fh_; }
   bool IsInterrupted() const;
   int ReplyError(int error);
 
  protected:
   const fuse_req_t req_;
   bool replied_ = false;
+  uint64_t fh_;
+  int flags_;
 };
 
 // FUSE request with an OK response.
 class OkRequest : public FuseRequest {
  public:
-  explicit OkRequest(fuse_req_t req) : FuseRequest(req) {}
+  explicit OkRequest(fuse_req_t req, fuse_file_info* fi = nullptr)
+      : FuseRequest(req, fi) {}
   void ReplyOk();
 };
 
@@ -56,8 +63,15 @@ class NoneRequest : public FuseRequest {
 // FUSE request with an attribute stat response.
 class AttrRequest : public FuseRequest {
  public:
-  explicit AttrRequest(fuse_req_t req) : FuseRequest(req) {}
+  AttrRequest(fuse_req_t req, fuse_file_info* fi) : FuseRequest(req, fi) {}
   void ReplyAttr(const struct stat& attr, double timeout);
+};
+
+// FUSE request with a file-system attribute stat response.
+class FsattrRequest : public FuseRequest {
+ public:
+  explicit FsattrRequest(fuse_req_t req) : FuseRequest(req) {}
+  void ReplyFsattr(const struct statvfs& fs_attr);
 };
 
 // FUSE request with a fuse_entry_param response.
@@ -70,65 +84,111 @@ class EntryRequest : public FuseRequest {
 // FUSE request with an open file handle response.
 class OpenRequest : public FuseRequest {
  public:
-  explicit OpenRequest(fuse_req_t req) : FuseRequest(req) {}
+  OpenRequest(fuse_req_t req, fuse_file_info* fi) : FuseRequest(req, fi) {}
   void ReplyOpen(uint64_t fh);
+
+ protected:
+  // Set true, iff |this| is a CreateRequest.
+  bool create_ = false;
+  // Entry for fuse_reply_create(3) response.
+  fuse_entry_param entry_ = {0};
 };
 
 // FUSE request with an entry create response.
-class CreateRequest : public FuseRequest {
+class CreateRequest : public OpenRequest {
  public:
-  explicit CreateRequest(fuse_req_t req) : FuseRequest(req) {}
+  explicit CreateRequest(fuse_req_t req, fuse_file_info* fi)
+      : OpenRequest(req, fi) {
+    create_ = true;
+  }
   void ReplyCreate(const fuse_entry_param& entry, uint64_t fh);
+
+  // Entry for fuse_reply_create(3) response.
+  void SetEntry(const fuse_entry_param& entry) { entry_ = entry; }
 };
 
 // FUSE request with a data buffer response.
 class BufferRequest : public FuseRequest {
  public:
-  explicit BufferRequest(fuse_req_t req) : FuseRequest(req) {}
-  void ReplyBuffer(const char* buf, size_t length);
+  BufferRequest(fuse_req_t req, fuse_file_info* fi) : FuseRequest(req, fi) {}
+  void ReplyBuffer(const void* data, size_t size);
 };
 
 // FUSE request with a bytes written count response.
 class WriteRequest : public FuseRequest {
  public:
-  explicit WriteRequest(fuse_req_t req) : FuseRequest(req) {}
+  explicit WriteRequest(fuse_req_t req, fuse_file_info* fi)
+      : FuseRequest(req, fi) {}
   void ReplyWrite(size_t count);
 };
 
 // FUSE request with a DirEntry list response.
 class DirEntryRequest : public FuseRequest {
  public:
-  DirEntryRequest(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off);
-
-  // Directory ino.
-  fuse_ino_t parent() const { return parent_; }
+  DirEntryRequest(fuse_req_t req,
+                  fuse_file_info* fi,
+                  size_t buf_size,
+                  off_t dir_offset);
 
   // Entry buffer |buf_| size.
-  size_t size() const { return size_; }
+  size_t buf_size() const { return buf_size_; }
 
   // Add entry to |buf_|. Returns true if the entry was added.
-  bool AddEntry(struct DirEntry entry, off_t offset);
+  bool AddEntry(const struct DirEntry& entry, off_t dir_offset);
 
   // Space used in |buf_| by the added entries.
-  size_t used() const { return off_; }
+  size_t buf_used() const { return buf_offset_; }
 
   // Offset to the next entry.
-  off_t offset() const { return offset_; }
+  off_t dir_offset() const { return dir_offset_; }
 
   // Reply with the entry buffer result.
   void ReplyDone();
 
  private:
-  fuse_ino_t parent_;
-  const size_t size_;
-  off_t offset_;
+  const size_t buf_size_;  // Measured in bytes.
+  size_t buf_offset_ = 0;  // Measured in bytes.
   std::unique_ptr<char[]> buf_;
-  size_t off_ = 0;
+  // FUSE (the protocol) and libfuse (the library) does not mandate (it lets
+  // the program choose) what units the offset is measured in, other than 0
+  // means "from the beginning". This fusebox program uses "number of files".
+  off_t dir_offset_;
+};
+
+// Responds to multiple DirEntryRequests, each with the same FUSE handle.
+class DirEntryBuffer {
+ public:
+  DirEntryBuffer();
+
+  // Append |request| to the DirEntryRequest list.
+  void AppendRequest(std::unique_ptr<DirEntryRequest> request);
+
+  // Append |entry| DirEntry to the DirEntry list.
+  void AppendResponse(std::vector<struct DirEntry> entry, bool end = false);
+
+  // Append errno |error| to the DirEntry list. Returns |error|.
+  int AppendResponse(int error);
+
+ private:
+  // Called by AppendResponse() to respond to DirEntry requests.
+  void Respond();
+
+  // List of DirEntryRequest received from Kernel Fuse.
+  std::vector<std::unique_ptr<DirEntryRequest>> request_;
+
+  // List of DirEntry from the file system: readdir(2).
+  std::vector<struct DirEntry> entry_;
+
+  // Error state of the DirEntry list.
+  int error_ = 0;
+
+  // True when the DirEntry list is complete.
+  bool end_ = false;
 };
 
 struct DirEntry {
-  fuse_ino_t ino;
-  const char* name;
+  ino_t ino;
+  std::string name;
   mode_t mode;
 };
 

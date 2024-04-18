@@ -1,0 +1,21 @@
+#!/bin/sh
+
+# Copyright 2022 NAVER Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+whale_serial_number_fallback() {
+  serial_number="$1"
+  if [ -z "${serial_number}" ] || [ "${serial_number}" = "Default string" ]; then
+    eth0_addr='/sys/class/net/eth0/address'
+    wlan0_addr='/sys/class/net/wlan0/address'
+    if [ -r "${eth0_addr}" ]; then
+      serial_number=$(cat ${eth0_addr} | md5sum | awk '{print $1}')
+    elif [ -r "${wlan0_addr}" ]; then
+      serial_number=$(cat ${wlan0_addr} | md5sum | awk '{print $1}')
+    fi
+  fi
+
+  echo "${serial_number}"
+}
+

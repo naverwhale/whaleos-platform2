@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,7 +34,7 @@ class SystemMounter : public Mounter {
   std::unique_ptr<MountPoint> Mount(const std::string& source,
                                     const base::FilePath& target_path,
                                     std::vector<std::string> params,
-                                    MountErrorType* error) const override;
+                                    MountError* error) const override;
 
   // As there is no way to figure out beforehand if that would work, always
   // returns true, so this mounter is a "catch-all".
@@ -43,14 +43,13 @@ class SystemMounter : public Mounter {
                 base::FilePath* suggested_dir_name) const override;
 
  protected:
-  virtual MountErrorType ParseParams(
-      std::vector<std::string> params,
-      std::vector<std::string>* mount_options) const;
+  virtual MountError ParseParams(std::vector<std::string> params,
+                                 std::vector<std::string>* mount_options) const;
 
  private:
   const Platform* const platform_;
   const std::string filesystem_type_;
-  const int flags_;
+  const uint64_t flags_;
   const std::vector<std::string> options_;
 };
 

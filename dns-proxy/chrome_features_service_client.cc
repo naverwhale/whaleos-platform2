@@ -1,12 +1,13 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "dns-proxy/chrome_features_service_client.h"
 
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
@@ -50,7 +51,7 @@ void ChromeFeaturesServiceClient::OnWaitForServiceAndCallMethod(
     IsFeatureEnabledCallback callback,
     bool available) {
   if (!available) {
-    std::move(callback).Run(base::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
@@ -65,14 +66,14 @@ void ChromeFeaturesServiceClient::OnWaitForServiceAndCallMethod(
 void ChromeFeaturesServiceClient::HandleCallResponse(
     IsFeatureEnabledCallback callback, dbus::Response* response) {
   if (!response) {
-    std::move(callback).Run(base::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
   dbus::MessageReader reader(response);
   bool feature_enabled = false;
   if (!reader.PopBool(&feature_enabled)) {
-    std::move(callback).Run(base::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 

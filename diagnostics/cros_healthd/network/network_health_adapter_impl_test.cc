@@ -1,12 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 #include <utility>
 
-#include <base/callback.h>
-#include <base/optional.h>
+#include <base/functional/callback.h>
 #include <base/run_loop.h>
 #include <base/test/bind.h>
 #include <base/test/task_environment.h>
@@ -17,10 +16,10 @@
 #include <mojo/public/cpp/bindings/remote.h>
 
 #include "diagnostics/cros_healthd/network/network_health_adapter_impl.h"
-#include "mojo/network_health.mojom.h"
+#include "diagnostics/mojom/external/network_health.mojom.h"
+#include "diagnostics/mojom/external/network_health_types.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
 namespace network_health_ipc = chromeos::network_health::mojom;
@@ -125,8 +124,6 @@ class MockNetworkEventsObserver
   mojo::Receiver<network_health_ipc::NetworkEventsObserver> receiver_;
 };
 
-}  // namespace
-
 class NetworkHealthAdapterImplTest : public testing::Test {
  protected:
   NetworkHealthAdapterImplTest() = default;
@@ -151,30 +148,6 @@ class NetworkHealthAdapterImplTest : public testing::Test {
   std::unique_ptr<NetworkHealthAdapterImpl> network_health_adapter_;
 };
 
-// Test that the NetworkHealthAdapterImpl can set the NetworkHealthService
-// remote and request the NetworkHealthState.
-TEST_F(NetworkHealthAdapterImplTest, RequestNetworkHealthState) {
-  MockNetworkHealthService service;
-  network_health_adapter()->SetServiceRemote(service.pending_remote());
-
-  base::RunLoop run_loop;
-  auto canned_response = network_health_ipc::NetworkHealthState::New();
-  EXPECT_CALL(service, GetHealthSnapshot(testing::_))
-      .WillOnce(testing::Invoke([&](network_health_ipc::NetworkHealthService::
-                                        GetHealthSnapshotCallback callback) {
-        std::move(callback).Run(canned_response.Clone());
-      }));
-
-  network_health_adapter()->GetNetworkHealthState(base::BindLambdaForTesting(
-      [&](base::Optional<network_health_ipc::NetworkHealthStatePtr> response) {
-        ASSERT_TRUE(response.has_value());
-        EXPECT_EQ(canned_response, response);
-        run_loop.Quit();
-      }));
-
-  run_loop.Run();
-}
-
 // Test that NetworkHealthAdapterImpl can set the NetworkHealthService remote
 // and adds itself as an observer of the NetworkEventsObserver interface.
 TEST_F(NetworkHealthAdapterImplTest, AddNetworkEventsObserver) {
@@ -183,9 +156,9 @@ TEST_F(NetworkHealthAdapterImplTest, AddNetworkEventsObserver) {
 
   base::RunLoop run_loop;
   EXPECT_CALL(service, AddObserver(testing::_))
-      .WillOnce(testing::Invoke(
+      .WillOnce(
           [&](mojo::PendingRemote<network_health_ipc::NetworkEventsObserver>
-                  pending_remote) { run_loop.Quit(); }));
+                  pending_remote) { run_loop.Quit(); });
 
   // Add a NetworkObserver to the NetworkHealthAdapterImpl instance. The
   // NetworkHealthAdapterImpl instance should start listening for network
@@ -206,11 +179,10 @@ TEST_F(NetworkHealthAdapterImplTest, ReceiveConnectionStateChangeEvent) {
   MockNetworkEventsObserver mock_observer;
   auto network_state = network_health_ipc::NetworkState::kConnected;
   EXPECT_CALL(mock_observer, OnConnectionStateChanged(kFakeGuid, network_state))
-      .WillOnce(testing::Invoke(
-          [&](const std::string& guid,
-              chromeos::network_health::mojom::NetworkState state) {
+      .WillOnce(
+          [&](const std::string& guid, network_health_ipc::NetworkState state) {
             run_loop.Quit();
-          }));
+          });
 
   network_health_adapter()->AddObserver(mock_observer.pending_remote());
 
@@ -230,12 +202,11 @@ TEST_F(NetworkHealthAdapterImplTest, ReceiveSignalStrengthChangeEvent) {
   MockNetworkEventsObserver observer;
   uint32_t network_signal_strength = 50;
   EXPECT_CALL(observer, OnSignalStrengthChanged(kFakeGuid, testing::_))
-      .WillOnce(testing::Invoke(
-          [&](const std::string& guid,
-              network_health_ipc::UInt32ValuePtr signal_strength) {
-            EXPECT_EQ(signal_strength->value, network_signal_strength);
-            run_loop.Quit();
-          }));
+      .WillOnce([&](const std::string& guid,
+                    network_health_ipc::UInt32ValuePtr signal_strength) {
+        EXPECT_EQ(signal_strength->value, network_signal_strength);
+        run_loop.Quit();
+      });
 
   network_health_adapter()->AddObserver(observer.pending_remote());
 
@@ -247,25 +218,5 @@ TEST_F(NetworkHealthAdapterImplTest, ReceiveSignalStrengthChangeEvent) {
   run_loop.Run();
 }
 
-// Test a base::nullopt is returned if no remote is bound;
-TEST_F(NetworkHealthAdapterImplTest, NoRemote) {
-  base::RunLoop run_loop;
-  network_health_adapter()->GetNetworkHealthState(base::BindLambdaForTesting(
-      [&](base::Optional<network_health_ipc::NetworkHealthStatePtr> response) {
-        EXPECT_FALSE(response.has_value());
-        run_loop.Quit();
-      }));
-
-  run_loop.Run();
-}
-
-// Test that the correct status of the bound remote is returned on request.
-TEST_F(NetworkHealthAdapterImplTest, RemoteBoundCheck) {
-  EXPECT_FALSE(network_health_adapter()->ServiceRemoteBound());
-
-  MockNetworkHealthService service;
-  network_health_adapter()->SetServiceRemote(service.pending_remote());
-  EXPECT_TRUE(network_health_adapter()->ServiceRemoteBound());
-}
-
+}  // namespace
 }  // namespace diagnostics

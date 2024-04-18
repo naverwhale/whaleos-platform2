@@ -1,32 +1,39 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CRYPTOHOME_VAULT_KEYSET_H_
 #define CRYPTOHOME_VAULT_KEYSET_H_
 
-#include <memory>
+#include <optional>
 #include <string>
 
 #include <base/compiler_specific.h>
 #include <base/files/file_path.h>
 #include <base/gtest_prod_util.h>
-#include <base/macros.h>
-#include <base/optional.h>
 #include <brillo/secure_blob.h>
 
-#include "cryptohome/auth_block_state.h"
 #include "cryptohome/crypto.h"
-#include "cryptohome/crypto_error.h"
 #include "cryptohome/cryptohome_common.h"
+#include "cryptohome/error/cryptohome_crypto_error.h"
+#include "cryptohome/flatbuffer_schemas/auth_block_state.h"
 #include "cryptohome/key_objects.h"
-#include "cryptohome/timestamp.pb.h"
 #include "cryptohome/vault_keyset.pb.h"
 
 namespace cryptohome {
 
-class Crypto;
+class FileSystemKeyset;
 class Platform;
+
+// Defines the actual physical layout of a keyset.
+struct VaultKeysetKeys {
+  unsigned char fek[kCryptohomeDefaultKeySize];
+  unsigned char fek_sig[kCryptohomeDefaultKeySignatureSize];
+  unsigned char fek_salt[kCryptohomeDefaultKeySaltSize];
+  unsigned char fnek[kCryptohomeDefaultKeySize];
+  unsigned char fnek_sig[kCryptohomeDefaultKeySignatureSize];
+  unsigned char fnek_salt[kCryptohomeDefaultKeySaltSize];
+} __attribute__((__packed__));
 
 // VaultKeyset holds the File Encryption Key (FEK) and File Name Encryption Key
 // (FNEK) and their corresponding signatures.
@@ -37,11 +44,16 @@ class VaultKeyset {
   VaultKeyset(VaultKeyset&&) = default;
   VaultKeyset(const VaultKeyset&) = default;
   VaultKeyset& operator=(const VaultKeyset&) = default;
-  virtual ~VaultKeyset();
+  virtual ~VaultKeyset() = default;
 
   // Does not take ownership of platform and crypto. The objects pointed to by
   // them must outlive this object.
   virtual void Initialize(Platform* platform, Crypto* crypto);
+
+  // This function initializes the VaultKeyset as a backup keyset by setting the
+  // |backup_vk_| field to true. Does not take ownership of platform and crypto.
+  // The objects pointed to by them must outlive this object.
+  void InitializeAsBackup(Platform* platform, Crypto* crypto);
 
   // Populates the fields from a SerializedVaultKeyset.
   void InitializeFromSerialized(const SerializedVaultKeyset& serialized);
@@ -52,31 +64,34 @@ class VaultKeyset {
   //  The following methods deal with importing another object type into this
   //  VaultKeyset container.
   virtual void FromKeys(const VaultKeysetKeys& keys);
-  virtual bool FromKeysBlob(const brillo::SecureBlob& keys_blob);
+  [[nodiscard]] virtual bool FromKeysBlob(const brillo::SecureBlob& keys_blob);
 
   // The following two methods export this VaultKeyset container to other
   // objects.
-  virtual bool ToKeys(VaultKeysetKeys* keys) const;
-  virtual bool ToKeysBlob(brillo::SecureBlob* keys_blob) const;
+  [[nodiscard]] virtual bool ToKeys(VaultKeysetKeys* keys) const;
+  [[nodiscard]] virtual bool ToKeysBlob(brillo::SecureBlob* keys_blob) const;
 
   // Do not call Load directly, use KeysetManagement::LoadVaultKeysetForUser.
-  virtual bool Load(const base::FilePath& filename);
+  [[nodiscard]] virtual bool Load(const base::FilePath& filename);
 
   // Encrypt must be called first.
   virtual bool Save(const base::FilePath& filename);
 
-  // Load must be called first. |crypto_error| may be null.
-  virtual bool Decrypt(const brillo::SecureBlob& key,
-                       bool is_pcr_extended,
-                       CryptoError* crypto_error);
+  // Load must be called first.
+  // Decrypts the encrypted fields of the VaultKeyset from serialized with the
+  // provided |key_blobs|.
+  virtual CryptoStatus DecryptEx(const KeyBlobs& key_blobs);
 
-  virtual bool Encrypt(const brillo::SecureBlob& key,
-                       const std::string& obfuscated_username);
+  // Encrypts the VaultKeyset fields with the provided |key_blobs| based on the
+  // encryption mechanisms provided by the |auth_state|.
+  virtual CryptohomeStatus EncryptEx(const KeyBlobs& key_blobs,
+                                     const AuthBlockState& auth_state);
 
   // Convenience methods to initialize a new VaultKeyset with random values.
   virtual void CreateRandomChapsKey();
   virtual void CreateRandomResetSeed();
-  virtual void CreateRandom();
+  virtual void CreateFromFileSystemKeyset(
+      const FileSystemKeyset& file_system_keyset);
 
   // Methods to access runtime class state.
   virtual const base::FilePath& GetSourceFile() const;
@@ -101,6 +116,7 @@ class VaultKeyset {
   virtual bool HasPasswordRounds() const;
   virtual int32_t GetPasswordRounds() const;
 
+  // TODO(b/205759690, dlunev): can be removed after a stepping stone release.
   virtual bool HasLastActivityTimestamp() const;
   virtual int64_t GetLastActivityTimestamp() const;
 
@@ -108,6 +124,9 @@ class VaultKeyset {
   virtual void SetKeyData(const KeyData& key_data);
   virtual void ClearKeyData();
   virtual const KeyData& GetKeyData() const;
+
+  // Gets the KeyData or return default value if it's empty.
+  virtual KeyData GetKeyDataOrDefault() const;
 
   // Gets the label from the KeyData.
   virtual std::string GetLabel() const;
@@ -148,6 +167,9 @@ class VaultKeyset {
   virtual void SetFSCryptPolicyVersion(int32_t policy_version);
   virtual bool HasFSCryptPolicyVersion() const;
   virtual int32_t GetFSCryptPolicyVersion() const;
+
+  virtual bool HasVkkIv() const;
+  virtual const brillo::SecureBlob& GetVkkIv() const;
 
   // Group 2. Fields containing wrapped data.
 
@@ -196,24 +218,17 @@ class VaultKeyset {
   virtual void SetResetSecret(const brillo::SecureBlob& reset_secret);
   virtual const brillo::SecureBlob& GetResetSecret() const;
 
-  // This populates an AuthBlockState proto allocated by the caller.
-  bool GetAuthBlockState(AuthBlockState* auth_state) const WARN_UNUSED_RESULT;
-
- private:
-  // Converts the class to a protobuf for serialization to disk.
-  SerializedVaultKeyset ToSerialized() const;
-
-  // Clears all the fields set from the SerializedVaultKeyset.
-  void ResetVaultKeyset();
-
   // This populates each sub type of AuthBlockState into the caller allocated
   // object.
-  bool GetTpmBoundToPcrState(AuthBlockState* auth_state) const;
-  bool GetTpmNotBoundToPcrState(AuthBlockState* auth_state) const;
-  bool GetPinWeaverState(AuthBlockState* auth_state) const;
-  bool GetSignatureChallengeState(AuthBlockState* auth_state) const;
-  bool GetLibScryptCompatState(AuthBlockState* auth_state) const;
-  bool GetDoubleWrappedCompatState(AuthBlockState* auth_state) const;
+  [[nodiscard]] bool GetTpmBoundToPcrState(AuthBlockState* auth_state) const;
+  [[nodiscard]] bool GetTpmNotBoundToPcrState(AuthBlockState* auth_state) const;
+  [[nodiscard]] bool GetPinWeaverState(AuthBlockState* auth_state) const;
+  [[nodiscard]] bool GetSignatureChallengeState(
+      AuthBlockState* auth_state) const;
+  [[nodiscard]] bool GetScryptState(AuthBlockState* auth_state) const;
+  [[nodiscard]] bool GetDoubleWrappedCompatState(
+      AuthBlockState* auth_state) const;
+  [[nodiscard]] bool GetTpmEccState(AuthBlockState* auth_state) const;
 
   // Reads an auth block state and update the VaultKeyset with what it
   // returns.
@@ -224,18 +239,32 @@ class VaultKeyset {
       const TpmNotBoundToPcrAuthBlockState& auth_state);
   void SetTpmBoundToPcrState(const TpmBoundToPcrAuthBlockState& auth_state);
   void SetPinWeaverState(const PinWeaverAuthBlockState& auth_state);
-  void SetLibScryptCompatState(const LibScryptCompatAuthBlockState& auth_state);
+  void SetScryptState(const ScryptAuthBlockState& auth_state);
   void SetChallengeCredentialState(
       const ChallengeCredentialAuthBlockState& auth_state);
+  void SetTpmEccState(const TpmEccAuthBlockState& auth_state);
 
-  // This function serves as a factory method to return the authblock used in
-  // authentication creation.
-  std::unique_ptr<AuthBlock> GetAuthBlockForCreation() const;
+  // Returns whether the VaultKeyset is setup for backup purpose.
+  bool IsForBackup() const { return backup_vk_; }
+  // Returns whether the VaultKeyset is migrated to USS.
+  bool IsMigrated() const { return migrated_vk_; }
 
-  // This function serves as a factory method to return the authblock used in
-  // authentication derivation. The type of the AuthBlock is determined based on
-  // |flags_|.which derived from vault keyset.
-  std::unique_ptr<AuthBlock> GetAuthBlockForDerivation();
+  // Setter for the |backup_vk_|.
+  void set_backup_vk_for_testing(bool value) { backup_vk_ = value; }
+
+  // Setter for the |migrated_vk_|.
+  void set_migrated_vk_for_testing(bool value) { migrated_vk_ = value; }
+
+  // Marks the VaultKeyset migrated. Every migrated VaultKeyset to USS should be
+  // set as a backup VaultKeyset for USS.
+  void MarkMigrated(bool migrated);
+
+ private:
+  // Converts the class to a protobuf for serialization to disk.
+  SerializedVaultKeyset ToSerialized() const;
+
+  // Clears all the fields set from the SerializedVaultKeyset.
+  void ResetVaultKeyset();
 
   // This function decrypts a keyset that is encrypted with a VaultKeysetKey.
   //
@@ -243,10 +272,10 @@ class VaultKeyset {
   //   serialized - The serialized vault keyset protobuf.
   //   vkk_data - Key data includes the VaultKeysetKey to decrypt the serialized
   // keyset.
-  //   error (OUT) - The specific error code on failure.
-  bool UnwrapVKKVaultKeyset(const SerializedVaultKeyset& serialized,
-                            const KeyBlobs& vkk_data,
-                            CryptoError* error);
+  // Return
+  //   error - The specific error code on failure.
+  CryptoStatus UnwrapVKKVaultKeyset(const SerializedVaultKeyset& serialized,
+                                    const KeyBlobs& vkk_data);
 
   // This function decrypts a keyset that is encrypted with an scrypt derived
   // key.
@@ -254,22 +283,26 @@ class VaultKeyset {
   // Parameters
   //   serialized - The serialized vault keyset protobuf.
   //   vkk_data - Key data that includes the scrypt derived keys.
-  //   error (OUT) - The specific error code on failure.
-  bool UnwrapScryptVaultKeyset(const SerializedVaultKeyset& serialized,
-                               const KeyBlobs& vkk_data,
-                               CryptoError* error);
+  // Return
+  //   error - The specific error code on failure.
+  CryptoStatus UnwrapScryptVaultKeyset(const SerializedVaultKeyset& serialized,
+                                       const KeyBlobs& vkk_data);
 
   // This function encrypts a keyset with a VaultKeysetKey.
   //
   // Parameters
   //   key_blobs - Key bloc that stores VaultKeysetKey.
-  bool WrapVaultKeysetWithAesDeprecated(const KeyBlobs& blobs);
+  CryptohomeStatus WrapVaultKeysetWithAesDeprecated(const KeyBlobs& blobs);
 
   // This function encrypts a VaultKeyset with an scrypt derived key.
   //
   // Parameters
+  //   auth_block_state - AuthBlockState that stores salts for scrypt wrapping.
   //   key_blobs - Key blob that stores scrypt derived keys.
-  bool WrapScryptVaultKeyset(const KeyBlobs& key_blobs);
+  // Return
+  //   error - The specific error code on failure.
+  CryptohomeStatus WrapScryptVaultKeyset(const AuthBlockState& auth_block_state,
+                                         const KeyBlobs& key_blobs);
 
   // This function consumes the Vault Keyset Key (VKK) and IV, and produces
   // the unwrapped secrets from the Vault Keyset.
@@ -277,36 +310,19 @@ class VaultKeyset {
   // Parameters
   //   serialized - The serialized vault keyset protobuf.
   //   vkk_data - The VKK and the VKK IV.
-  //   error (OUT) - The specific error code on failure.
-  bool UnwrapVaultKeyset(const SerializedVaultKeyset& serialized,
-                         const KeyBlobs& vkk_data,
-                         CryptoError* error);
+  // Return
+  //   error - The specific error code on failure.
+  CryptoStatus UnwrapVaultKeyset(const SerializedVaultKeyset& serialized,
+                                 const KeyBlobs& vkk_data);
 
   // Decrypts an encrypted vault keyset which is obtained from the unwrapped
-  // secrets returned from UnwrapVaultKeyset().
+  // secrets returned from UnwrapVaultKeyset() using the key_blobs.
   //
   // Parameters
-  //   vault_key - The passkey used to decrypt the keyset.
-  //   locked_to_single_user - Whether the device has transitioned.
-  //   into user-specific modality by extending PCR4 with a user-specific
-  //   value.
-  //   error(OUT) - The specific error code on failure.
-  bool DecryptVaultKeyset(const brillo::SecureBlob& vault_key,
-                          bool locked_to_single_user,
-                          CryptoError* error);
-
-  // Encrypts the vault keyset with the given passkey
-  //
-  // Parameters
-  //   vault_key - The passkey used to encrypt the keyset.
-  //   obfuscated_username - The value of username obfuscated. It's the same
-  //                         value used as the folder name where the user data
-  //                         is stored.
-  //   auth_block_state - On success, the plaintext state needed to initialize
-  //                      the auth block.
-  bool EncryptVaultKeyset(const brillo::SecureBlob& vault_key,
-                          const std::string& obfuscated_username,
-                          AuthBlockState* auth_block_state);
+  //   key_blobs - KeyBlobs to decrypt serialized VaultKeyset.
+  // Return
+  //   error - The specific error code on failure.
+  CryptoStatus DecryptVaultKeysetEx(const KeyBlobs& key_blobs);
 
   // These store run time state for the class.
   Platform* platform_;
@@ -321,8 +337,14 @@ class VaultKeyset {
   // Group 1. AuthBlockState. This is metadata used to derive the keys,
   // persisted as plaintext.
   int32_t flags_;
+  // Field to tag the VaultKeyset as a backup VaultKeyset for USS.
+  bool backup_vk_;
+  // Field to tag the VaultKeyset as a migrated VaultKeyset to USS.
+  bool migrated_vk_;
   // The salt used to derive the user input in auth block.
   brillo::SecureBlob auth_salt_;
+  // The IV used to encrypt the encryption key.
+  std::optional<brillo::SecureBlob> vkk_iv_;
   // legacy_index_ is the index of the keyset for the user. It is called legacy
   // due to previous plans to fully switch to label-based addressing, which,
   // unfortunately, wasn't followed through.
@@ -331,48 +353,48 @@ class VaultKeyset {
   bool auth_locked_;
   // This is used by the TPM AuthBlocks to make sure the keyset was sealed to
   // the TPM on this system. It's not a security check, but a diagnostic.
-  base::Optional<brillo::SecureBlob> tpm_public_key_hash_;
+  std::optional<brillo::SecureBlob> tpm_public_key_hash_;
   // Passwords which are TPM backed, not PCR bound, and not run through scrypt
   // before the TPM operation, have a number of rounds to run the key derivation
   // function.
-  base::Optional<int32_t> password_rounds_;
+  std::optional<int32_t> password_rounds_;
   // An optional timestamp field.
-  base::Optional<int64_t> last_activity_timestamp_;
+  // TODO(b/205759690, dlunev): can be removed after a stepping stone release.
+  std::optional<int64_t> last_activity_timestamp_;
   // Plaintet metadata describing the key.
-  base::Optional<KeyData> key_data_;
+  std::optional<KeyData> key_data_;
   // Used for the reset seed wrapping.
-  base::Optional<brillo::SecureBlob> reset_iv_;
+  std::optional<brillo::SecureBlob> reset_iv_;
   // The label for PinWeaver secrets.
-  base::Optional<uint64_t> le_label_;
+  std::optional<uint64_t> le_label_;
   // IV for the file encryption key of PinWeaver credentials.
-  base::Optional<brillo::SecureBlob> le_fek_iv_;
+  std::optional<brillo::SecureBlob> le_fek_iv_;
   // IV for the chaps key wrapping of PinWeaver credentials.
-  base::Optional<brillo::SecureBlob> le_chaps_iv_;
+  std::optional<brillo::SecureBlob> le_chaps_iv_;
   // Used with the resed seed to derive the reset secret. PinWeaver only.
-  base::Optional<brillo::SecureBlob> reset_salt_;
+  std::optional<brillo::SecureBlob> reset_salt_;
   // Specifies which version of fscrypt encryption policy this is used with.
-  base::Optional<int32_t> fscrypt_policy_version_;
+  std::optional<int32_t> fscrypt_policy_version_;
 
   // Group 2. Wrapped stuff.
   // An encrypted copy of the VaultKeysetKeys struct, which holds important
   // fields such as a the file encryption key.
   brillo::SecureBlob wrapped_keyset_;
   // Wrapped copy of the key used to authenticate with the PKCS#11 service.
-  base::Optional<brillo::SecureBlob> wrapped_chaps_key_;
+  std::optional<brillo::SecureBlob> wrapped_chaps_key_;
   // The VaultKeysetKey encrypted with the user's password and TPM.
-  base::Optional<brillo::SecureBlob> tpm_key_;
+  std::optional<brillo::SecureBlob> tpm_key_;
   // Used by the PCR bound AuthBlock where the TPM's PCR is extended with the
   // username.
-  base::Optional<brillo::SecureBlob> extended_tpm_key_;
+  std::optional<brillo::SecureBlob> extended_tpm_key_;
   // The reset seed for LE credentials.
-  base::Optional<brillo::SecureBlob> wrapped_reset_seed_;
+  std::optional<brillo::SecureBlob> wrapped_reset_seed_;
   // Information specific to the signature-challenge response protection. This
   // has plaintext metadata in it, but also the sealed secret, so it goes here.
-  base::Optional<SerializedVaultKeyset::SignatureChallengeInfo>
+  std::optional<SerializedVaultKeyset::SignatureChallengeInfo>
       signature_challenge_info_;
 
   // Group 3. Unwrapped secrets.
-  // TODO(kerrnel): Make these base::Optional<>
   // The file encryption key present in all VaultKeysets.
   brillo::SecureBlob fek_;
   // Randomly generated key identifier.
@@ -403,12 +425,17 @@ class VaultKeyset {
   FRIEND_TEST_ALL_PREFIXES(CryptoTest, ScryptStepTest);
   FRIEND_TEST_ALL_PREFIXES(LeCredentialsManagerTest, Decrypt);
   FRIEND_TEST_ALL_PREFIXES(LeCredentialsManagerTest, Encrypt);
+  FRIEND_TEST_ALL_PREFIXES(LeCredentialsManagerTest, DecryptWithKeyBlobs);
+  FRIEND_TEST_ALL_PREFIXES(LeCredentialsManagerTest, EncryptWithKeyBlobs);
   FRIEND_TEST_ALL_PREFIXES(LeCredentialsManagerTest, EncryptFail);
   FRIEND_TEST_ALL_PREFIXES(LeCredentialsManagerTest, EncryptTestReset);
+  FRIEND_TEST_ALL_PREFIXES(VaultKeysetTest, GetEccAuthBlockStateTest);
   FRIEND_TEST_ALL_PREFIXES(VaultKeysetTest, EncryptionTest);
   FRIEND_TEST_ALL_PREFIXES(VaultKeysetTest, DecryptionTest);
   FRIEND_TEST_ALL_PREFIXES(VaultKeysetTest, LibScryptBackwardCompatibility);
   FRIEND_TEST_ALL_PREFIXES(KeysetManagementTest, AddInitialKeyset);
+  FRIEND_TEST_ALL_PREFIXES(KeysetManagementTest, AddResetSeed);
+  FRIEND_TEST_ALL_PREFIXES(KeysetManagementTest, AddWrappedResetSeed);
 };
 
 }  // namespace cryptohome

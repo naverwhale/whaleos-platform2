@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -38,8 +38,6 @@ pkg_config("target_defaults") {
 
 static_library("libsmbfs") {
   sources = [
-    "authpolicy_client.cc",
-    "authpolicy_client.h",
     "filesystem.cc",
     "filesystem.h",
     "fuse_session.cc",

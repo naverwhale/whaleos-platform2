@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,6 @@
 #include <map>
 #include <string>
 #include <vector>
-
-#include <base/macros.h>
 
 #include "dbus_bindings/org.chromium.flimflam.Service.h"
 #include "shill/adaptor_interfaces.h"
@@ -46,6 +44,7 @@ class ServiceDBusAdaptor : public org::chromium::flimflam::ServiceAdaptor,
   void EmitUint16sChanged(const std::string& name,
                           const Uint16s& value) override;
   void EmitUintChanged(const std::string& name, uint32_t value) override;
+  void EmitUint64Changed(const std::string& name, uint64_t value) override;
   void EmitIntChanged(const std::string& name, int value) override;
   void EmitRpcIdentifierChanged(const std::string& name,
                                 const RpcIdentifier& value) override;
@@ -53,6 +52,8 @@ class ServiceDBusAdaptor : public org::chromium::flimflam::ServiceAdaptor,
                          const std::string& value) override;
   void EmitStringmapChanged(const std::string& name,
                             const Stringmap& value) override;
+  void EmitStringmapsChanged(const std::string& name,
+                             const Stringmaps& value) override;
 
   // Implementation of ServiceAdaptor
   bool GetProperties(brillo::ErrorPtr* error,
@@ -69,8 +70,6 @@ class ServiceDBusAdaptor : public org::chromium::flimflam::ServiceAdaptor,
   bool Connect(brillo::ErrorPtr* error) override;
   bool Disconnect(brillo::ErrorPtr* error) override;
   bool Remove(brillo::ErrorPtr* error) override;
-  bool ActivateCellularModem(brillo::ErrorPtr* error,
-                             const std::string& carrier) override;
   bool CompleteCellularActivation(brillo::ErrorPtr* error) override;
   bool GetLoadableProfileEntries(
       brillo::ErrorPtr* error,
@@ -79,6 +78,7 @@ class ServiceDBusAdaptor : public org::chromium::flimflam::ServiceAdaptor,
                          std::string* out_passphrase) override;
   bool GetEapPassphrase(brillo::ErrorPtr* error,
                         std::string* out_passphrase) override;
+  bool RequestPortalDetection(brillo::ErrorPtr* error) override;
   void RequestTrafficCounters(
       DBusMethodResponsePtr<VariantDictionaries> response) override;
   bool ResetTrafficCounters(brillo::ErrorPtr* error) override;

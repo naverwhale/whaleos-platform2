@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,11 +15,9 @@ const BASE_COMMANDS: &[&str] = &[
     "authpolicy_debug",
     "battery_firmware",
     "battery_test",
-    "bt_console",
     "chaps_debug",
     "connectivity",
     "cras",
-    "cryptohome_status",
     "diag",
     "dump_emk",
     "enroll_status",
@@ -38,7 +36,6 @@ const BASE_COMMANDS: &[&str] = &[
     "p2p_update",
     "ping",
     "rlz",
-    "rollback",
     "route",
     "set_apn",
     "set_arpgw",
@@ -51,7 +48,6 @@ const BASE_COMMANDS: &[&str] = &[
     "syslog",
     "time_info",
     "top",
-    "tpm_status",
     "tracepath",
     "u2f_flags",
     "uname",
@@ -62,10 +58,9 @@ const BASE_COMMANDS: &[&str] = &[
     "vsh",
     "wifi_fw_dump",
     "wifi_power_save",
-    "wpa_debug",
 ];
 
-const DEV_COMMANDS: &[&str] = &["live_in_a_coal_mine", "systrace"];
+const DEV_COMMANDS: &[&str] = &["systrace"];
 
 const USB_COMMANDS: &[&str] = &["update_firmware", "install", "upgrade"];
 

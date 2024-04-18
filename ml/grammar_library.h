@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@
 #define ML_GRAMMAR_LIBRARY_H_
 
 #include <base/no_destructor.h>
-#include <base/optional.h>
 #include <base/scoped_native_library.h>
 #include <chromeos/libgrammar/grammar_interface.h>
+#include <optional>
 
 #include "chrome/knowledge/grammar/grammar_interface.pb.h"
 #include "ml/util.h"
@@ -91,7 +91,7 @@ class GrammarLibrary {
   GrammarLibrary(const GrammarLibrary&) = delete;
   GrammarLibrary& operator=(const GrammarLibrary&) = delete;
 
-  base::Optional<base::ScopedNativeLibrary> library_;
+  std::optional<base::ScopedNativeLibrary> library_;
   Status status_;
 
   // Store the interface function pointers.

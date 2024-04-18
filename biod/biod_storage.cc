@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,23 +9,26 @@
 #include <sys/types.h>
 
 #include <algorithm>
+#include <optional>
 #include <sstream>
 #include <utility>
 
 #include <base/base64.h>
+#include <base/files/dir_reader_posix.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/important_file_writer.h>
-#include <base/guid.h>
 #include <base/json/json_reader.h>
 #include <base/json/json_string_value_serializer.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
+#include <base/uuid.h>
 #include <base/values.h>
+#include <brillo/files/file_util.h>
 #include <brillo/scoped_umask.h>
 
-#include "biod/biometrics_manager_record.h"
+#include "biod/biometrics_manager_record_interface.h"
 #include "biod/utils.h"
 
 namespace biod {
@@ -33,9 +36,7 @@ namespace biod {
 using base::FilePath;
 
 namespace {
-constexpr char kDaemonStorePath[] = "/run/daemon-store";
 constexpr char kRecordFileName[] = "Record";
-constexpr char kBiod[] = "biod";
 
 // Members of the JSON file.
 constexpr char kBioManagerMember[] = "biomanager";
@@ -44,44 +45,58 @@ constexpr char kLabel[] = "label";
 constexpr char kRecordId[] = "record_id";
 constexpr char kValidationVal[] = "match_validation_value";
 constexpr char kVersionMember[] = "version";
+
+bool DirIsEmpty(const base::FilePath& source_dir) {
+  bool is_empty = true;
+
+  base::DirReaderPosix reader(source_dir.value().c_str());
+  if (!reader.IsValid()) {
+    LOG(ERROR) << "Error opening source directory";
+    return is_empty;
+  }
+
+  while (reader.Next()) {
+    // Don't count ".", ".."
+    if (reader.name() == std::string(base::FilePath::kCurrentDirectory) ||
+        reader.name() == std::string(base::FilePath::kParentDirectory)) {
+      continue;
+    }
+    is_empty = false;
+    break;
+  }
+
+  return is_empty;
+}
+
 }  // namespace
 
-BiodStorage::BiodStorage(const std::string& biometrics_manager_name)
-    : root_path_(kDaemonStorePath),
+BiodStorage::BiodStorage(const base::FilePath& root_path,
+                         const std::string& biometrics_manager_name)
+    : root_path_(root_path),
       biometrics_manager_name_(biometrics_manager_name),
       allow_access_(false) {}
 
-void BiodStorage::SetRootPathForTesting(const base::FilePath& root_path) {
-  root_path_ = root_path;
-}
-
-bool BiodStorage::WriteRecord(const BiometricsManagerRecord& record,
-                              base::Value data) {
+bool BiodStorage::WriteRecord(
+    const BiodStorageInterface::RecordMetadata& record_metadata,
+    base::Value data) {
   if (!allow_access_) {
     LOG(ERROR) << "Access to the storage mounts not allowed.";
     return false;
   }
 
-  if (!record.IsValidUTF8()) {
+  if (!record_metadata.IsValidUTF8()) {
     LOG(ERROR) << "Record contains invalid UTF8.";
     return false;
   }
 
-  const std::string& record_id(record.GetId());
-  base::Value record_value(base::Value::Type::DICTIONARY);
-  record_value.SetStringKey(kLabel, record.GetLabel());
-  record_value.SetStringKey(kRecordId, record_id);
-
-  if (record.SupportsPositiveMatchSecret()) {
-    record_value.SetStringKey(kValidationVal, record.GetValidationValBase64());
-    record_value.SetIntKey(kVersionMember, kRecordFormatVersion);
-  } else {
-    record_value.SetIntKey(kVersionMember,
-                           kRecordFormatVersionNoValidationValue);
-  }
-
-  record_value.SetKey(kData, std::move(data));
-  record_value.SetStringKey(kBioManagerMember, biometrics_manager_name_);
+  const std::string& record_id(record_metadata.record_id);
+  base::Value::Dict record_value;
+  record_value.Set(kLabel, record_metadata.label);
+  record_value.Set(kRecordId, record_id);
+  record_value.Set(kValidationVal, record_metadata.GetValidationValBase64());
+  record_value.Set(kVersionMember, kRecordFormatVersion);
+  record_value.Set(kData, std::move(data));
+  record_value.Set(kBioManagerMember, biometrics_manager_name_);
 
   std::string json_string;
   JSONStringValueSerializer json_serializer(&json_string);
@@ -91,7 +106,7 @@ bool BiodStorage::WriteRecord(const BiometricsManagerRecord& record,
     return false;
   }
 
-  FilePath record_storage_filename = GetRecordFilename(record);
+  FilePath record_storage_filename = GetRecordFilename(record_metadata);
   if (record_storage_filename.empty()) {
     LOG(ERROR) << "Unable to get filename for record.";
     return false;
@@ -102,7 +117,7 @@ bool BiodStorage::WriteRecord(const BiometricsManagerRecord& record,
 
     if (!base::CreateDirectory(record_storage_filename.DirName())) {
       PLOG(ERROR) << "Cannot create directory for user "
-                  << LogSafeID(record.GetUserId()) << ".";
+                  << LogSafeID(record_metadata.user_id) << ".";
       return false;
     }
   }
@@ -113,7 +128,7 @@ bool BiodStorage::WriteRecord(const BiometricsManagerRecord& record,
     if (!base::ImportantFileWriter::WriteFileAtomically(record_storage_filename,
                                                         json_string)) {
       LOG(ERROR) << "Failed to write JSON file for record "
-                 << LogSafeID(record.GetId()) << ".";
+                 << LogSafeID(record_metadata.record_id) << ".";
       return false;
     }
   }
@@ -124,32 +139,21 @@ bool BiodStorage::WriteRecord(const BiometricsManagerRecord& record,
 }
 
 std::unique_ptr<std::vector<uint8_t>>
-BiodStorage::ReadValidationValueFromRecord(int record_format_version,
-                                           const base::Value& record_dictionary,
-                                           const FilePath& record_path) {
+BiodStorage::ReadValidationValueFromRecord(
+    const base::Value::Dict& record_dictionary, const FilePath& record_path) {
   std::string validation_val_str;
-  if (record_format_version == kRecordFormatVersion) {
-    const std::string* validation_val_str_ptr =
-        record_dictionary.FindStringKey(kValidationVal);
-    if (!validation_val_str_ptr) {
-      LOG(ERROR) << "Cannot read validation value from " << record_path.value()
+
+  const std::string* validation_val_str_ptr =
+      record_dictionary.FindString(kValidationVal);
+  if (!validation_val_str_ptr) {
+    LOG(WARNING) << "Cannot read validation value from " << record_path.value()
                  << ".";
-      return nullptr;
-    }
-    validation_val_str = *validation_val_str_ptr;
-    if (!base::Base64Decode(validation_val_str, &validation_val_str)) {
-      LOG(ERROR) << "Unable to base64 decode validation value from "
-                 << record_path.value() << ".";
-      return nullptr;
-    }
-  } else if (record_format_version == kRecordFormatVersionNoValidationValue) {
-    // If the record has format version 1, it should have no validation value
-    // field. In that case, load an empty validation value.
-    LOG(INFO) << "Record from " << record_path.value() << " does not have "
-              << "validation value and needs migration.";
-  } else {
-    LOG(ERROR) << "Invalid format version from record " << record_path.value()
-               << ".";
+    return nullptr;
+  }
+  validation_val_str = *validation_val_str_ptr;
+  if (!base::Base64Decode(validation_val_str, &validation_val_str)) {
+    LOG(ERROR) << "Unable to base64 decode validation value from "
+               << record_path.value() << ".";
     return nullptr;
   }
 
@@ -157,24 +161,20 @@ BiodStorage::ReadValidationValueFromRecord(int record_format_version,
                                                 validation_val_str.end());
 }
 
-BiodStorageInterface::ReadRecordResult BiodStorage::ReadRecords(
+std::vector<BiodStorageInterface::Record> BiodStorage::ReadRecords(
     const std::unordered_set<std::string>& user_ids) {
-  ReadRecordResult ret;
+  std::vector<BiodStorageInterface::Record> ret;
   for (const auto& user_id : user_ids) {
     auto result = ReadRecordsForSingleUser(user_id);
-    for (const auto& valid : result.valid_records) {
-      ret.valid_records.emplace_back(valid);
-    }
-    for (const auto& invalid : result.invalid_records) {
-      ret.invalid_records.emplace_back(invalid);
-    }
+    ret.insert(ret.end(), std::make_move_iterator(result.begin()),
+               std::make_move_iterator(result.end()));
   }
   return ret;
 }
 
-BiodStorageInterface::ReadRecordResult BiodStorage::ReadRecordsForSingleUser(
+std::vector<BiodStorageInterface::Record> BiodStorage::ReadRecordsForSingleUser(
     const std::string& user_id) {
-  BiodStorageInterface::ReadRecordResult ret;
+  std::vector<BiodStorageInterface::Record> ret;
 
   if (!allow_access_) {
     LOG(ERROR) << "Access to the storage mounts not yet allowed.";
@@ -182,89 +182,142 @@ BiodStorageInterface::ReadRecordResult BiodStorage::ReadRecordsForSingleUser(
   }
 
   FilePath biod_path =
-      root_path_.Append(kBiod).Append(user_id).Append(biometrics_manager_name_);
+      root_path_.Append(user_id).Append(biometrics_manager_name_);
   base::FileEnumerator enum_records(biod_path, false,
                                     base::FileEnumerator::FILES, "Record*");
   for (FilePath record_path = enum_records.Next(); !record_path.empty();
        record_path = enum_records.Next()) {
-    std::string json_string;
-    BiodStorageInterface::Record cur_record;
+    auto record = ReadRecordFromPath(record_path);
+    // In this function we are enumerating files, so if Optional returned
+    // by ReadRecordFromPath is empty, then there is something wrong with biod.
+    CHECK(record);
+    record->metadata.user_id = user_id;
 
-    cur_record.metadata.user_id = user_id;
-
-    if (!base::ReadFileToString(record_path, &json_string)) {
-      LOG(ERROR) << "Failed to read the string from " << record_path.value()
-                 << ".";
-      ret.invalid_records.emplace_back(cur_record);
-      continue;
-    }
-
-    auto record_value = base::JSONReader::ReadAndReturnValueWithError(
-        json_string, base::JSON_ALLOW_TRAILING_COMMAS);
-
-    if (!record_value.value) {
-      LOG_IF(ERROR, !record_value.error_message.empty())
-          << "JSON error message: " << record_value.error_message << ".";
-      ret.invalid_records.emplace_back(cur_record);
-      continue;
-    }
-
-    if (!record_value.value->is_dict()) {
-      LOG(ERROR) << "Value " << record_path.value() << " is not a dictionary.";
-      ret.invalid_records.emplace_back(cur_record);
-      continue;
-    }
-    base::Value record_dictionary = std::move(*record_value.value);
-
-    const std::string* label = record_dictionary.FindStringKey(kLabel);
-
-    if (!label) {
-      LOG(ERROR) << "Cannot read label from " << record_path.value() << ".";
-      ret.invalid_records.emplace_back(cur_record);
-      continue;
-    }
-    cur_record.metadata.label = *label;
-
-    const std::string* record_id = record_dictionary.FindStringKey(kRecordId);
-
-    if (!record_id) {
-      LOG(ERROR) << "Cannot read record id from " << record_path.value() << ".";
-      ret.invalid_records.emplace_back(cur_record);
-      continue;
-    }
-    cur_record.metadata.record_id = *record_id;
-
-    base::Optional<int> record_format_version =
-        record_dictionary.FindIntKey(kVersionMember);
-    if (!record_format_version.has_value()) {
-      LOG(ERROR) << "Cannot read record format version from "
-                 << record_path.value() << ".";
-      ret.invalid_records.emplace_back(cur_record);
-      continue;
-    }
-    cur_record.metadata.record_format_version = *record_format_version;
-
-    std::unique_ptr<std::vector<uint8_t>> validation_val =
-        ReadValidationValueFromRecord(*record_format_version, record_dictionary,
-                                      record_path);
-    if (!validation_val) {
-      ret.invalid_records.emplace_back(cur_record);
-      continue;
-    }
-    cur_record.metadata.validation_val = *validation_val;
-
-    const base::Value* data = record_dictionary.FindKey(kData);
-
-    if (!data) {
-      LOG(ERROR) << "Cannot read data from " << record_path.value() << ".";
-      ret.invalid_records.emplace_back(cur_record);
-      continue;
-    }
-    cur_record.data = data->GetString();
-
-    ret.valid_records.emplace_back(cur_record);
+    ret.emplace_back(std::move(*record));
   }
   return ret;
+}
+
+std::optional<BiodStorageInterface::Record> BiodStorage::ReadSingleRecord(
+    const std::string& user_id, const std::string& record_id) {
+  if (!allow_access_) {
+    LOG(ERROR) << "Access to the storage mounts not yet allowed.";
+    return std::nullopt;
+  }
+
+  base::FilePath record_path = root_path_.Append(user_id)
+                                   .Append(biometrics_manager_name_)
+                                   .Append(kRecordFileName + record_id);
+
+  auto record = ReadRecordFromPath(record_path);
+  if (record) {
+    record->metadata.user_id = user_id;
+  }
+
+  return record;
+}
+
+std::optional<BiodStorageInterface::Record> BiodStorage::ReadRecordFromPath(
+    const base::FilePath& record_path) {
+  std::string json_string;
+
+  if (!base::ReadFileToString(record_path, &json_string)) {
+    LOG(ERROR) << "Failed to read the string from " << record_path.value()
+               << ".";
+    // Biod can't find this file.
+    return std::nullopt;
+  }
+
+  // File was found. Return Record (valid or invalid) to indicate that it
+  // exists.
+  BiodStorageInterface::Record record;
+  record.valid = false;
+
+  // Get RecordId from path. In case of mismatch this RecordId is more
+  // important because it allows upper layers to remove invalid record
+  // properly.
+  std::string record_id_path = record_path.BaseName().value();
+  record_id_path.erase(0, sizeof(kRecordFileName) - 1);
+  record.metadata.record_id = record_id_path;
+
+  auto record_value = base::JSONReader::ReadAndReturnValueWithError(
+      json_string, base::JSON_ALLOW_TRAILING_COMMAS);
+
+  if (!record_value.has_value()) {
+    LOG_IF(ERROR, !record_value.error().message.empty())
+        << "JSON error message: " << record_value.error().message << ".";
+    return record;
+  }
+
+  if (!record_value->is_dict()) {
+    LOG(ERROR) << "Value " << record_path.value() << " is not a dictionary.";
+    return record;
+  }
+  base::Value::Dict record_dictionary = std::move(record_value->GetDict());
+
+  const std::string* record_id = record_dictionary.FindString(kRecordId);
+
+  if (!record_id) {
+    LOG(ERROR) << "Cannot read record id from " << record_path.value() << ".";
+    return record;
+  }
+  // If RecordId from path is different than stored in the file then
+  // record is not valid.
+  if (record.metadata.record_id != *record_id) {
+    LOG(ERROR) << "RecordId from path " << LogSafeID(record.metadata.record_id)
+               << " is different than RecordId stored in file "
+               << LogSafeID(*record_id);
+    return record;
+  }
+
+  const std::string* label = record_dictionary.FindString(kLabel);
+
+  if (!label) {
+    LOG(ERROR) << "Cannot read label from " << record_path.value() << ".";
+    return record;
+  }
+  record.metadata.label = *label;
+
+  std::optional<int> record_format_version =
+      record_dictionary.FindInt(kVersionMember);
+  if (!record_format_version.has_value()) {
+    LOG(ERROR) << "Cannot read record format version from "
+               << record_path.value() << ".";
+    return record;
+  }
+  record.metadata.record_format_version = *record_format_version;
+
+  if (*record_format_version < 0 ||
+      *record_format_version > kRecordFormatVersion) {
+    LOG(ERROR) << "Invalid format version from record " << record_path.value()
+               << ".";
+    return record;
+  }
+
+  std::unique_ptr<std::vector<uint8_t>> validation_val =
+      ReadValidationValueFromRecord(record_dictionary, record_path);
+  // Validation value was introduced in format version 2, so it might not be
+  // present in older records.
+  if (!validation_val) {
+    if (*record_format_version >= kRecordFormatVersion) {
+      return record;
+    }
+    // If format version is older than 2, then it is valid old record (without
+    // validation value).
+    validation_val = std::make_unique<std::vector<uint8_t>>();
+  }
+  record.metadata.validation_val = *validation_val;
+
+  const std::string* data = record_dictionary.FindString(kData);
+
+  if (!data) {
+    LOG(ERROR) << "Cannot read data from " << record_path.value() << ".";
+    return record;
+  }
+  record.data = *data;
+
+  record.valid = true;
+  return record;
 }
 
 bool BiodStorage::DeleteRecord(const std::string& user_id,
@@ -274,10 +327,11 @@ bool BiodStorage::DeleteRecord(const std::string& user_id,
     return false;
   }
 
-  FilePath record_storage_filename = root_path_.Append(kBiod)
-                                         .Append(user_id)
-                                         .Append(biometrics_manager_name_)
-                                         .Append(kRecordFileName + record_id);
+  FilePath user_storage_dirname = root_path_.Append(user_id);
+  FilePath record_storage_dirname =
+      user_storage_dirname.Append(biometrics_manager_name_);
+  FilePath record_storage_filename =
+      record_storage_dirname.Append(kRecordFileName + record_id);
 
   if (!base::PathExists(record_storage_filename)) {
     LOG(INFO) << "Trying to delete record " << LogSafeID(record_id)
@@ -290,21 +344,40 @@ bool BiodStorage::DeleteRecord(const std::string& user_id,
     return false;
   }
   LOG(INFO) << "Done deleting record " << LogSafeID(record_id) << " from disk.";
+
+  // If the directory is empty now, let's delete the directory too.
+  if (DirIsEmpty(record_storage_dirname)) {
+    if (!brillo::DeleteFile(record_storage_dirname)) {
+      LOG(WARNING) << "Failed to delete empty record directory.";
+    } else {
+      LOG(INFO) << "Deleted empty record directory.";
+    }
+    // Furthermore check whether the user directory as a whole should be
+    // removed. This is necessary because we should not keep user directories
+    // after they're removed from the device.
+    if (DirIsEmpty(user_storage_dirname)) {
+      if (!brillo::DeleteFile(user_storage_dirname)) {
+        LOG(WARNING) << "Failed to delete empty user directory.";
+      } else {
+        LOG(INFO) << "Deleted empty user directory.";
+      }
+    }
+  }
   return true;
 }
 
 std::string BiodStorage::GenerateNewRecordId() {
-  std::string record_id(base::GenerateGUID());
+  std::string record_id(base::Uuid::GenerateRandomV4().AsLowercaseString());
   // dbus member names only allow '_'
   std::replace(record_id.begin(), record_id.end(), '-', '_');
   return record_id;
 }
 
 base::FilePath BiodStorage::GetRecordFilename(
-    const BiometricsManagerRecord& record) {
-  std::vector<FilePath> paths = {FilePath(kBiod), FilePath(record.GetUserId()),
-                                 FilePath(biometrics_manager_name_),
-                                 FilePath(kRecordFileName + record.GetId())};
+    const BiodStorageInterface::RecordMetadata& record_metadata) {
+  std::vector<FilePath> paths = {
+      FilePath(record_metadata.user_id), FilePath(biometrics_manager_name_),
+      FilePath(kRecordFileName + record_metadata.record_id)};
 
   FilePath record_storage_filename = root_path_;
   for (const auto& path : paths) {

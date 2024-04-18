@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,10 @@
 package utils
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io/ioutil"
-	"net/http"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -166,18 +164,8 @@ func setReferencedProfileIfNecessary(
 // ScannerCapabilities object is invalid when the returned error is non-nil. Any
 // fields in ScannerCapabilities which were missing from the scanner's response
 // will be left at their zero values.
-func GetScannerCapabilities(addr string) (caps ScannerCapabilities, err error) {
-	// Deliberately ignore certificate errors because printers normally
-	// have self-signed certificates.
-	tlsConfig := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true,
-	}
-	tr := &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
-	client := &http.Client{Transport: tr}
-	resp, err := client.Get(addr + "ScannerCapabilities")
+func GetScannerCapabilities(info LorgnetteScannerInfo) (caps ScannerCapabilities, err error) {
+	resp, err := info.HTTPGet("/eSCL/ScannerCapabilities")
 	if err != nil {
 		return
 	}
@@ -228,6 +216,11 @@ func GetScannerCapabilities(addr string) (caps ScannerCapabilities, err error) {
 func ParseLorgnetteCapabilities(rawData string) (caps LorgnetteCapabilities, err error) {
 	err = json.Unmarshal([]byte(rawData), &caps)
 	return
+}
+
+// IsPopulated returns returns true iff `source` is non-empty.
+func (source LorgnetteSource) IsPopulated() bool {
+	return !cmp.Equal(source, LorgnetteSource{})
 }
 
 // IsPopulated returns returns true iff `caps` is non-empty.

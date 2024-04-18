@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,8 +17,7 @@
 
 #include "power_manager/powerd/system/dbus_wrapper.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Stub implementation of DBusWrapperInterface for testing.
 class DBusWrapperStub : public DBusWrapperInterface {
@@ -64,8 +63,7 @@ class DBusWrapperStub : public DBusWrapperInterface {
   void ClearSentSignals();
 
   // Returns true if |method_name| has been exported.
-  bool IsMethodExported(const std::string& method_name) const
-      WARN_UNUSED_RESULT;
+  [[nodiscard]] bool IsMethodExported(const std::string& method_name) const;
 
   // Invokes a method previously exported with ExportedMethod().
   void CallExportedMethod(dbus::MethodCall* method_call,
@@ -77,8 +75,9 @@ class DBusWrapperStub : public DBusWrapperInterface {
   // registered via RegisterForSignal().
   void EmitRegisteredSignal(dbus::ObjectProxy* proxy, dbus::Signal* signal);
 
-  using MethodCallback = base::Callback<std::unique_ptr<dbus::Response>(
-      dbus::ObjectProxy*, dbus::MethodCall*)>;
+  using MethodCallback =
+      base::RepeatingCallback<std::unique_ptr<dbus::Response>(
+          dbus::ObjectProxy*, dbus::MethodCall*)>;
 
   // Sets a callback to be invoked in response to calls to CallMethod*().
   void SetMethodCallback(const MethodCallback& callback);
@@ -167,7 +166,6 @@ class DBusWrapperStub : public DBusWrapperInterface {
   MethodCallback method_callback_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_DBUS_WRAPPER_STUB_H_

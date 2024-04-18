@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,21 +18,26 @@ class MockFingerprintManager : public FingerprintManager {
 
   MOCK_METHOD(void,
               StartAuthSessionAsyncForUser,
-              (const std::string& user,
-               base::OnceCallback<void(bool success)>
-                   auth_session_start_client_callback),
+              (const ObfuscatedUsername& user,
+               StartSessionCallback auth_session_start_client_callback),
               (override));
 
   MOCK_METHOD(void,
               SetAuthScanDoneCallback,
-              (base::RepeatingCallback<void(FingerprintScanStatus status)>
-                   auth_scan_done_callback),
+              (ResultCallback auth_scan_done_callback),
+              (override));
+
+  MOCK_METHOD(void,
+              SetSignalCallback,
+              (SignalCallback signal_callback),
               (override));
 
   MOCK_METHOD(bool,
               HasAuthSessionForUser,
-              (const std::string& user),
+              (const ObfuscatedUsername& user),
               (override));
+
+  MOCK_METHOD(void, EndAuthSession, (), (override));
 };
 
 }  // namespace cryptohome

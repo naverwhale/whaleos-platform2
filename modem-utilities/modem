@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -72,10 +72,12 @@ reset() {
 }
 
 status() {
+  mmcli -m any 2>/dev/null
   all_modem_status 2>/dev/null
 }
 
 status_feedback() {
+  mmcli -m any 2>/dev/null | mask_mmcli_fields
   all_modem_status 2>/dev/null | mask_modem_properties
 }
 
@@ -137,6 +139,7 @@ usage() {
   echo "  activate [-modem <modem>] [<carrier>]        Activate modem"
   echo "  connect [-modem <modem>] [phone number]      Connect modem"
   echo "  esim use_test_certs <true/false>             Use test certs for TLS"
+  echo "  esim set_test_mode <true/false>              Display test profiles"
   echo "  esim refresh_profiles [-euicc <euicc>]       Get list of profiles " \
     "from eSIM"
   echo "  esim request_pending_profiles [-euicc <euicc>] [smds] " \

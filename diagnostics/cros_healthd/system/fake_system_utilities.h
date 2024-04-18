@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,8 @@
 
 #include <sys/utsname.h>
 
+#include <optional>
 #include <string>
-
-#include <base/optional.h>
 
 #include "diagnostics/cros_healthd/system/system_utilities.h"
 #include "diagnostics/cros_healthd/system/system_utilities_constants.h"
@@ -31,7 +30,7 @@ class FakeSystemUtilities final : public SystemUtilities {
   // used to populate the Uname() call's |buf|.machine output parameter. The
   // other fields of |buf| will be left empty.
   void SetUnameResponse(int ret_code,
-                        const base::Optional<std::string>& machine);
+                        const std::optional<std::string>& machine);
 
  private:
   // Used as the return value for any Uname() calls received. Defaults to

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,6 +26,8 @@ class CrosECUtil : public ECUtil {
   bool ModeEntrySupported() override;
   bool EnterMode(int port, TypeCMode mode) override;
   bool ExitMode(int port) override;
+  bool DpState(int port, bool* entered) override;
+  bool HpdState(int port, bool* hpd) override;
 
  private:
   FRIEND_TEST(CrosEcUtilTest, ModeEntrySupported);

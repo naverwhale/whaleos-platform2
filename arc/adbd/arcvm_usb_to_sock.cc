@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -11,9 +11,9 @@
 
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 

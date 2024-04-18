@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,7 @@ class PeakMemorySamplerTest : public ::testing::Test {
  protected:
   base::test::TaskEnvironment task_environment_{
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
-  base::TimeDelta sampling_interval_ = base::TimeDelta::FromSeconds(1);
+  base::TimeDelta sampling_interval_ = base::Seconds(1);
 };
 
 TEST_F(PeakMemorySamplerTest, BasicFunctions) {

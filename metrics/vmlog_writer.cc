@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <optional>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -16,14 +17,14 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/cpu.h>
 #include <base/files/file.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/string_number_conversions.h>
@@ -61,6 +62,9 @@ bool VmStatsParseStats(std::istream* input_stream,
        .optional = false},
       // pgmajfault_f and pgmajfault_a may not be present in all kernels.
       // Don't fuss if they are not.
+      //
+      // Only available on kernels up to 4.19.
+      // TODO(b/288959865): Remove if we remove the last kernel 4.19 device.
       {.name = "pgmajfault_f",
        .value_p = &record->file_page_faults_,
        .found = false,
@@ -144,27 +148,16 @@ bool ParseCpuTime(std::istream* input, CpuTimeRecord* record) {
   return true;
 }
 
-base::Optional<std::vector<int>> GetOnlineCpus(std::istream& proc_cpuinfo) {
-  if (!proc_cpuinfo) {
-    return base::nullopt;
-  }
-
+std::optional<std::vector<int>> GetOnlineCpus(const brillo::CpuInfo& cpuinfo) {
   // Search for lines like "processor : 0" in /proc/cpuinfo and add the CPU ID
   // part to the result list.
   std::vector<int> cpus;
-  for (std::string line; std::getline(proc_cpuinfo, line);) {
-    auto tokens = base::SplitString(line, ":", base::TRIM_WHITESPACE,
-                                    base::SPLIT_WANT_ALL);
-    if (tokens.size() != 2) {
+  for (int i = 0; i < cpuinfo.NumProcRecords(); i++) {
+    std::optional<std::string_view> v = cpuinfo.LookUp(i, "processor");
+    if (!v.has_value() || v.value() == "")
       continue;
-    }
-
-    if (tokens[0] != "processor") {
-      continue;
-    }
-
     int cpu = 0;
-    if (base::StringToInt(tokens[1], &cpu)) {
+    if (base::StringToInt(v.value(), &cpu)) {
       cpus.push_back(cpu);
     }
   }
@@ -398,10 +391,10 @@ void VmlogWriter::Init(const base::FilePath& vmlog_dir,
   // good time set for naming files. Wait 5 minutes.
   //
   // See crbug.com/724175 for details.
-  if (now - base::Time::UnixEpoch() < base::TimeDelta::FromDays(1)) {
+  if (now - base::Time::UnixEpoch() < base::Days(1)) {
     LOG(WARNING) << "Time seems incorrect, too close to epoch: " << now;
     valid_time_delay_timer_.Start(
-        FROM_HERE, base::TimeDelta::FromMinutes(5),
+        FROM_HERE, base::Minutes(5),
         base::BindOnce(&VmlogWriter::Init, base::Unretained(this), vmlog_dir,
                        log_interval));
     return;
@@ -441,8 +434,12 @@ void VmlogWriter::Init(const base::FilePath& vmlog_dir,
   // The IDs of online CPUs are not necessarily in the set of [0,
   // sysconf(_SC_NPROCESSORS_ONLN) - 1]. Query the system to get the set of
   // online CPUs.
-  std::ifstream proc_cpuinfo("/proc/cpuinfo");
-  auto online_cpus = GetOnlineCpus(proc_cpuinfo);
+  std::optional<brillo::CpuInfo> cpuinfo = brillo::CpuInfo::Create();
+  if (!cpuinfo.has_value()) {
+    LOG(ERROR) << "couldn't read or parse cpuinfo";
+    return;
+  }
+  auto online_cpus = GetOnlineCpus(cpuinfo.value());
   if (!online_cpus.has_value() || online_cpus->size() == 0) {
     PLOG(WARNING) << "Failed to get the list of online CPUs.";
 

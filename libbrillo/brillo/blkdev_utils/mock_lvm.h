@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@
 #include "brillo/blkdev_utils/lvm.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,44 +44,46 @@ class MockLogicalVolumeManager : public LogicalVolumeManager {
       : LogicalVolumeManager(std::make_shared<MockLvmCommandRunner>()) {}
   virtual ~MockLogicalVolumeManager() {}
 
-  MOCK_METHOD(base::Optional<PhysicalVolume>,
+  MOCK_METHOD(std::optional<PhysicalVolume>,
               GetPhysicalVolume,
               (const base::FilePath&),
               (override));
-  MOCK_METHOD(base::Optional<VolumeGroup>,
+  MOCK_METHOD(std::optional<VolumeGroup>,
               GetVolumeGroup,
               (const PhysicalVolume&),
               (override));
-  MOCK_METHOD(base::Optional<Thinpool>,
+  MOCK_METHOD(std::optional<Thinpool>,
               GetThinpool,
               (const VolumeGroup&, const std::string&),
               (override));
-  MOCK_METHOD(base::Optional<LogicalVolume>,
+  MOCK_METHOD(std::optional<LogicalVolume>,
               GetLogicalVolume,
               (const VolumeGroup&, const std::string&),
               (override));
   MOCK_METHOD(std::vector<LogicalVolume>,
               ListLogicalVolumes,
-              (const VolumeGroup&),
+              (const VolumeGroup&, const std::string&),
               (override));
 
-  MOCK_METHOD(base::Optional<PhysicalVolume>,
+  MOCK_METHOD(std::optional<PhysicalVolume>,
               CreatePhysicalVolume,
               (const base::FilePath&),
               (override));
-  MOCK_METHOD(base::Optional<VolumeGroup>,
+  MOCK_METHOD(std::optional<VolumeGroup>,
               CreateVolumeGroup,
               (const PhysicalVolume&, const std::string&),
               (override));
-  MOCK_METHOD(base::Optional<Thinpool>,
+  MOCK_METHOD(std::optional<Thinpool>,
               CreateThinpool,
-              (const VolumeGroup&, const base::DictionaryValue&),
+              (const VolumeGroup&, const base::Value&),
               (override));
-  MOCK_METHOD(base::Optional<LogicalVolume>,
+  MOCK_METHOD(std::optional<LogicalVolume>,
               CreateLogicalVolume,
-              (const VolumeGroup&,
-               const Thinpool&,
-               const base::DictionaryValue&),
+              (const VolumeGroup&, const Thinpool&, const base::Value::Dict&),
+              (override));
+  MOCK_METHOD(bool,
+              RemoveLogicalVolume,
+              (const VolumeGroup&, const std::string&),
               (override));
 };
 

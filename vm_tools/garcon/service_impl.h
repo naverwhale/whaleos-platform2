@@ -1,16 +1,14 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef VM_TOOLS_GARCON_SERVICE_IMPL_H_
 #define VM_TOOLS_GARCON_SERVICE_IMPL_H_
 
-#include <base/macros.h>
-#include <base/task_runner.h>
+#include <base/task/task_runner.h>
 #include <grpcpp/grpcpp.h>
 #include <vm_protos/proto_bindings/container_guest.grpc.pb.h>
 
-#include "vm_tools/garcon/ansible_playbook_application.h"
 #include "vm_tools/garcon/host_notifier.h"
 
 namespace vm_tools {
@@ -24,7 +22,8 @@ class ServiceImpl final : public vm_tools::container::Garcon::Service {
  public:
   explicit ServiceImpl(PackageKitProxy* package_kit_proxy,
                        base::TaskRunner* task_runner,
-                       HostNotifier* host_notifier);
+                       HostNotifier* host_notifier,
+                       bool startup_notify_allowed);
   ServiceImpl(const ServiceImpl&) = delete;
   ServiceImpl& operator=(const ServiceImpl&) = delete;
 
@@ -91,10 +90,16 @@ class ServiceImpl final : public vm_tools::container::Garcon::Service {
       const vm_tools::container::RemoveFileWatchRequest* request,
       vm_tools::container::RemoveFileWatchResponse* response) override;
 
+  grpc::Status GetGarconSessionInfo(
+      grpc::ServerContext* ctx,
+      const vm_tools::container::GetGarconSessionInfoRequest* request,
+      vm_tools::container::GetGarconSessionInfoResponse* response) override;
+
  private:
   PackageKitProxy* package_kit_proxy_;  // Not owned.
   base::TaskRunner* task_runner_;
   HostNotifier* host_notifier_;
+  bool startup_notify_allowed_;
 };
 
 }  // namespace garcon

@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Chromium OS Authors. All rights reserved.
+ * Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -24,8 +24,10 @@ enum : uint32_t {
   kQuirkUserSpaceTimestamp = 1 << 5,
   kQuirkAndroidExternal = 1 << 6,
   kQuirkPreferLargePreviewResolution = 1 << 7,
-  kQuirkFacingFront = 1 << 8,
-  kQuirkFacingBack = 1 << 9,
+  kQuirkInfrared = 1 << 8,
+  kQuirkAndroidLegacy = 1 << 9,
+  kQuirkFacingFront = 1 << 29,
+  kQuirkFacingBack = 1 << 30,
 };
 
 uint32_t GetQuirks(const std::string& vid, const std::string& pid);

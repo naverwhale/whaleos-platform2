@@ -1,11 +1,11 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <base/check.h>
 #include <brillo/http/http_connection_fake.h>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <brillo/http/http_request.h>
 #include <brillo/mime_utils.h>
@@ -58,32 +58,32 @@ bool Connection::FinishRequest(brillo::ErrorPtr* /* error */) {
   return true;
 }
 
-RequestID Connection::FinishRequestAsync(
-    const SuccessCallback& success_callback,
-    const ErrorCallback& error_callback) {
+RequestID Connection::FinishRequestAsync(SuccessCallback success_callback,
+                                         ErrorCallback error_callback) {
   // Make sure the produced Closure holds a reference to the instance of this
   // connection.
   auto connection = std::static_pointer_cast<Connection>(shared_from_this());
   auto callback = [](std::shared_ptr<Connection> connection,
-                     const SuccessCallback& success_callback,
-                     const ErrorCallback& error_callback) {
-    connection->FinishRequestAsyncHelper(success_callback, error_callback);
+                     SuccessCallback success_callback,
+                     ErrorCallback error_callback) {
+    connection->FinishRequestAsyncHelper(std::move(success_callback),
+                                         std::move(error_callback));
   };
   transport_->RunCallbackAsync(
       FROM_HERE,
-      base::Bind(callback, connection, success_callback, error_callback));
+      base::BindOnce(callback, connection, std::move(success_callback),
+                     std::move(error_callback)));
   return 1;
 }
 
-void Connection::FinishRequestAsyncHelper(
-    const SuccessCallback& success_callback,
-    const ErrorCallback& error_callback) {
+void Connection::FinishRequestAsyncHelper(SuccessCallback success_callback,
+                                          ErrorCallback error_callback) {
   brillo::ErrorPtr error;
   if (!FinishRequest(&error)) {
-    error_callback.Run(1, error.get());
+    std::move(error_callback).Run(1, error.get());
   } else {
     std::unique_ptr<Response> response{new Response{shared_from_this()}};
-    success_callback.Run(1, std::move(response));
+    std::move(success_callback).Run(1, std::move(response));
   }
 }
 

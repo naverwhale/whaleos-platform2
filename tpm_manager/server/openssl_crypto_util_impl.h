@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,6 @@
 #define TPM_MANAGER_SERVER_OPENSSL_CRYPTO_UTIL_IMPL_H_
 
 #include <string>
-
-#include <base/compiler_specific.h>
-#include <base/macros.h>
 
 #include "tpm_manager/server/openssl_crypto_util.h"
 
@@ -29,8 +26,8 @@ class OpensslCryptoUtilImpl : public OpensslCryptoUtil {
   ~OpensslCryptoUtilImpl() override = default;
 
   // OpensslCryptoUtil methods.
-  bool GetRandomBytes(size_t num_bytes,
-                      std::string* random_data) override WARN_UNUSED_RESULT;
+  [[nodiscard]] bool GetRandomBytes(size_t num_bytes,
+                                    std::string* random_data) override;
 };
 
 }  // namespace tpm_manager

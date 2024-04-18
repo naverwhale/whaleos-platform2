@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,10 +20,10 @@ using std::vector;
 
 class UtilTest : public ::testing::Test {};
 
-const string GetSourceFile(const string& file) {
+const base::FilePath GetSourceFile(const base::FilePath& file) {
   static const char* srcdir = getenv("SRC");
 
-  return srcdir ? string(srcdir) + "/" + file : file;
+  return srcdir ? base::FilePath(srcdir).Append(file) : file;
 }
 
 TEST(UtilTest, RunCommandTest) {
@@ -39,9 +39,11 @@ TEST(UtilTest, RunCommandTest) {
 
 TEST(UtilTest, LsbReleaseValueTest) {
   string result_string;
-  string lsb_file = GetSourceFile("lsb-release-test.txt");
+  base::FilePath lsb_file =
+      GetSourceFile(base::FilePath("lsb-release-test.txt"));
 
-  EXPECT_EQ(LsbReleaseValue("bogus", "CHROMEOS_RELEASE_BOARD", &result_string),
+  EXPECT_EQ(LsbReleaseValue(base::FilePath("bogus"), "CHROMEOS_RELEASE_BOARD",
+                            &result_string),
             false);
 
   EXPECT_EQ(LsbReleaseValue(lsb_file, "CHROMEOS_RELEASE_BOARD", &result_string),
@@ -58,70 +60,115 @@ TEST(UtilTest, LsbReleaseValueTest) {
 }
 
 TEST(UtilTest, GetBlockDevFromPartitionDev) {
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/sda3"), "/dev/sda");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/sda321"), "/dev/sda");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/sda"), "/dev/sda");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/mmcblk0p3"), "/dev/mmcblk0");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/mmcblk12p321"), "/dev/mmcblk12");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/mmcblk0"), "/dev/mmcblk0");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/loop0"), "/dev/loop0");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/loop32p12"), "/dev/loop32");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/mtd0"), "/dev/mtd0");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/ubi1_0"), "/dev/mtd0");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/mtd2_0"), "/dev/mtd0");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/ubiblock3_0"), "/dev/mtd0");
-  EXPECT_EQ(GetBlockDevFromPartitionDev("/dev/nvme0n1p12"), "/dev/nvme0n1");
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/sda3")),
+            base::FilePath("/dev/sda"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/sda321")),
+            base::FilePath("/dev/sda"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/sda")),
+            base::FilePath("/dev/sda"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/mmcblk0p3")),
+            base::FilePath("/dev/mmcblk0"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/mmcblk12p321")),
+            base::FilePath("/dev/mmcblk12"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/mmcblk0")),
+            base::FilePath("/dev/mmcblk0"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/loop0")),
+            base::FilePath("/dev/loop0"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/loop32p12")),
+            base::FilePath("/dev/loop32"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/mtd0")),
+            base::FilePath("/dev/mtd0"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/ubi1_0")),
+            base::FilePath("/dev/mtd0"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/mtd2_0")),
+            base::FilePath("/dev/mtd0"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/ubiblock3_0")),
+            base::FilePath("/dev/mtd0"));
+  EXPECT_EQ(GetBlockDevFromPartitionDev(base::FilePath("/dev/nvme0n1p12")),
+            base::FilePath("/dev/nvme0n1"));
 }
 
 TEST(UtilTest, GetPartitionDevTest) {
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/sda3"), 3);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/sda321"), 321);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/sda"), 0);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/mmcblk0p3"), 3);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/mmcblk12p321"), 321);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/mmcblk1"), 0);
-  EXPECT_EQ(GetPartitionFromPartitionDev("3"), 3);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/loop1"), 0);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/loop1p12"), 12);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/mtd0"), 0);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/ubi1_0"), 1);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/mtd2_0"), 2);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/ubiblock3_0"), 3);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/mtd4_0"), 4);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/ubiblock5_0"), 5);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/mtd6_0"), 6);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/ubiblock7_0"), 7);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/ubi8_0"), 8);
-  EXPECT_EQ(GetPartitionFromPartitionDev("/dev/nvme0n1p12"), 12);
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/sda3")),
+            PartitionNum(3));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/sda321")),
+            PartitionNum(321));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/sda")),
+            PartitionNum(0));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/mmcblk0p3")),
+            PartitionNum(3));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/mmcblk12p321")),
+            PartitionNum(321));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/mmcblk1")),
+            PartitionNum(0));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("3")), PartitionNum(3));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/loop1")),
+            PartitionNum(0));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/loop1p12")),
+            PartitionNum(12));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/mtd0")),
+            PartitionNum(0));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/ubi1_0")),
+            PartitionNum(1));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/mtd2_0")),
+            PartitionNum(2));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/ubiblock3_0")),
+            PartitionNum(3));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/mtd4_0")),
+            PartitionNum(4));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/ubiblock5_0")),
+            PartitionNum(5));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/mtd6_0")),
+            PartitionNum(6));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/ubiblock7_0")),
+            PartitionNum(7));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/ubi8_0")),
+            PartitionNum(8));
+  EXPECT_EQ(GetPartitionFromPartitionDev(base::FilePath("/dev/nvme0n1p12")),
+            PartitionNum(12));
 }
 
 TEST(UtilTest, MakePartitionDevTest) {
-  EXPECT_EQ(MakePartitionDev("/dev/sda", 3), "/dev/sda3");
-  EXPECT_EQ(MakePartitionDev("/dev/sda", 321), "/dev/sda321");
-  EXPECT_EQ(MakePartitionDev("/dev/mmcblk0", 3), "/dev/mmcblk0p3");
-  EXPECT_EQ(MakePartitionDev("/dev/mmcblk12", 321), "/dev/mmcblk12p321");
-  EXPECT_EQ(MakePartitionDev("/dev/loop16", 321), "/dev/loop16p321");
-  EXPECT_EQ(MakePartitionDev("", 0), "0");
-  EXPECT_EQ(MakePartitionDev("/dev/mtd0", 0), "/dev/mtd0");
-  EXPECT_EQ(MakePartitionDev("/dev/mtd0", 1), "/dev/ubi1_0");
-  EXPECT_EQ(MakePartitionDev("/dev/mtd0", 2), "/dev/mtd2");
-  EXPECT_EQ(MakePartitionDev("/dev/mtd0", 3), "/dev/ubiblock3_0");
-  EXPECT_EQ(MakePartitionDev("/dev/mtd0", 4), "/dev/mtd4");
-  EXPECT_EQ(MakePartitionDev("/dev/mtd0", 5), "/dev/ubiblock5_0");
-  EXPECT_EQ(MakePartitionDev("/dev/nvme0n1", 12), "/dev/nvme0n1p12");
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/sda"), PartitionNum(3)),
+            base::FilePath("/dev/sda3"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/sda"), PartitionNum(321)),
+            base::FilePath("/dev/sda321"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/mmcblk0"), PartitionNum(3)),
+            base::FilePath("/dev/mmcblk0p3"));
+  EXPECT_EQ(
+      MakePartitionDev(base::FilePath("/dev/mmcblk12"), PartitionNum(321)),
+      base::FilePath("/dev/mmcblk12p321"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/loop16"), PartitionNum(321)),
+            base::FilePath("/dev/loop16p321"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath(), PartitionNum(0)),
+            base::FilePath("0"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/mtd0"), PartitionNum(0)),
+            base::FilePath("/dev/mtd0"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/mtd0"), PartitionNum(1)),
+            base::FilePath("/dev/ubi1_0"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/mtd0"), PartitionNum(2)),
+            base::FilePath("/dev/mtd2"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/mtd0"), PartitionNum(3)),
+            base::FilePath("/dev/ubiblock3_0"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/mtd0"), PartitionNum(4)),
+            base::FilePath("/dev/mtd4"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/mtd0"), PartitionNum(5)),
+            base::FilePath("/dev/ubiblock5_0"));
+  EXPECT_EQ(MakePartitionDev(base::FilePath("/dev/nvme0n1"), PartitionNum(12)),
+            base::FilePath("/dev/nvme0n1p12"));
 }
 
 TEST(UtilTest, RemovePackFileTest) {
   // Setup
   EXPECT_EQ(RunCommand({"rm", "-rf", "/tmp/PackFileTest"}), 0);
   EXPECT_EQ(RunCommand({"mkdir", "/tmp/PackFileTest"}), 0);
-  EXPECT_EQ(Touch("/tmp/PackFileTest/foo"), true);
-  EXPECT_EQ(Touch("/tmp/PackFileTest/foo.pack"), true);
-  EXPECT_EQ(Touch("/tmp/PackFileTest/foopack"), true);
-  EXPECT_EQ(Touch("/tmp/PackFileTest/.foo.pack"), true);
+  EXPECT_EQ(Touch(base::FilePath("/tmp/PackFileTest/foo")), true);
+  EXPECT_EQ(Touch(base::FilePath("/tmp/PackFileTest/foo.pack")), true);
+  EXPECT_EQ(Touch(base::FilePath("/tmp/PackFileTest/foopack")), true);
+  EXPECT_EQ(Touch(base::FilePath("/tmp/PackFileTest/.foo.pack")), true);
 
   // Test
-  EXPECT_EQ(RemovePackFiles("/tmp/PackFileTest"), true);
+  EXPECT_EQ(RemovePackFiles(base::FilePath("/tmp/PackFileTest")), true);
 
   // Test to see which files were removed
   struct stat stats;
@@ -132,7 +179,7 @@ TEST(UtilTest, RemovePackFileTest) {
   EXPECT_EQ(stat("/tmp/PackFileTest/.foo.pack", &stats), 0);
 
   // Bad dir name
-  EXPECT_EQ(RemovePackFiles("/fuzzy"), false);
+  EXPECT_EQ(RemovePackFiles(base::FilePath("/fuzzy")), false);
 
   // Cleanup
   EXPECT_EQ(RunCommand({"rm", "-rf", "/tmp/PackFileTest"}), 0);
@@ -142,16 +189,16 @@ TEST(UtilTest, TouchTest) {
   unlink("/tmp/fuzzy");
 
   // Touch a non-existent file
-  EXPECT_EQ(Touch("/tmp/fuzzy"), true);
+  EXPECT_EQ(Touch(base::FilePath("/tmp/fuzzy")), true);
 
   // Touch an existent file
-  EXPECT_EQ(Touch("/tmp/fuzzy"), true);
+  EXPECT_EQ(Touch(base::FilePath("/tmp/fuzzy")), true);
 
   // This touch creates files, and so can't touch a dir
-  EXPECT_EQ(Touch("/tmp"), false);
+  EXPECT_EQ(Touch(base::FilePath("/tmp")), false);
 
   // Bad Touch
-  EXPECT_EQ(Touch("/fuzzy/wuzzy"), false);
+  EXPECT_EQ(Touch(base::FilePath("/fuzzy/wuzzy")), false);
 
   unlink("/tmp/fuzzy");
 }
@@ -273,12 +320,12 @@ TEST(UtilTest, SetKernelArgTest) {
 }
 
 TEST(UtilTest, IsReadonlyTest) {
-  EXPECT_EQ(IsReadonly("/dev/sda3"), false);
-  EXPECT_EQ(IsReadonly("/dev/dm-0"), true);
-  EXPECT_EQ(IsReadonly("/dev/dm-1"), true);
-  EXPECT_EQ(IsReadonly("/dev/ubi1_0"), true);
-  EXPECT_EQ(IsReadonly("/dev/ubo1_0"), false);
-  EXPECT_EQ(IsReadonly("/dev/ubiblock1_0"), true);
+  EXPECT_EQ(IsReadonly(base::FilePath("/dev/sda3")), false);
+  EXPECT_EQ(IsReadonly(base::FilePath("/dev/dm-0")), true);
+  EXPECT_EQ(IsReadonly(base::FilePath("/dev/dm-1")), true);
+  EXPECT_EQ(IsReadonly(base::FilePath("/dev/ubi1_0")), true);
+  EXPECT_EQ(IsReadonly(base::FilePath("/dev/ubo1_0")), false);
+  EXPECT_EQ(IsReadonly(base::FilePath("/dev/ubiblock1_0")), true);
 }
 
 TEST(UtilTest, ReplaceAllTest) {
@@ -295,37 +342,37 @@ TEST(UtilTest, ReplaceAllTest) {
 }
 
 TEST(UtilTest, ScopedPathRemoverWithFile) {
-  const string filename = tmpnam(NULL);
-  EXPECT_EQ(base::WriteFile(base::FilePath(filename), "abc"), true);
-  ASSERT_EQ(access(filename.c_str(), F_OK), 0);
+  const base::FilePath filename = base::FilePath(tmpnam(NULL));
+  EXPECT_TRUE(base::WriteFile(filename, "abc"));
+  ASSERT_TRUE(base::PathExists(filename));
 
   // Release early to prevent removal.
   {
     ScopedPathRemover remover(filename);
     remover.Release();
   }
-  EXPECT_EQ(access(filename.c_str(), F_OK), 0);
+  EXPECT_TRUE(base::PathExists(filename));
 
   // No releasing, the file should be removed.
   { ScopedPathRemover remover(filename); }
-  EXPECT_EQ(access(filename.c_str(), F_OK), -1);
+  EXPECT_FALSE(base::PathExists(filename));
 }
 
 TEST(UtilTest, ScopedPathRemoverWithDirectory) {
-  const string dirname = tmpnam(NULL);
-  const string filename = dirname + "/abc";
-  ASSERT_EQ(mkdir(dirname.c_str(), 0700), 0);
-  ASSERT_EQ(access(dirname.c_str(), F_OK), 0);
-  EXPECT_EQ(base::WriteFile(base::FilePath(filename), "abc"), true);
-  ASSERT_EQ(access(filename.c_str(), F_OK), 0);
+  const base::FilePath dirname = base::FilePath(tmpnam(NULL));
+  const base::FilePath filename = dirname.Append("abc");
+  ASSERT_TRUE(base::CreateDirectory(dirname));
+  ASSERT_TRUE(base::PathExists(dirname));
+  EXPECT_TRUE(base::WriteFile(filename, "abc"));
+  ASSERT_TRUE(base::PathExists(filename));
   { ScopedPathRemover remover(dirname); }
-  EXPECT_EQ(access(filename.c_str(), F_OK), -1);
-  EXPECT_EQ(access(dirname.c_str(), F_OK), -1);
+  EXPECT_FALSE(base::PathExists(filename));
+  EXPECT_FALSE(base::PathExists(dirname));
 }
 
 TEST(UtilTest, ScopedPathRemoverWithNonExistingPath) {
-  string filename = tmpnam(NULL);
-  ASSERT_EQ(access(filename.c_str(), F_OK), -1);
+  base::FilePath filename = base::FilePath(tmpnam(NULL));
+  ASSERT_FALSE(base::PathExists(filename));
   { ScopedPathRemover remover(filename); }
   // There should be no crash.
 }

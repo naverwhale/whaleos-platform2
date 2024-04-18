@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -62,6 +62,13 @@ class MockPolicySession : public PolicySession {
   MOCK_METHOD0(PolicyAuthValue, TPM_RC());
   MOCK_METHOD0(PolicyRestart, TPM_RC());
   MOCK_METHOD1(SetEntityAuthorizationValue, void(const std::string&));
+  MOCK_METHOD6(PolicyNV,
+               TPM_RC(uint32_t,
+                      uint32_t,
+                      bool,
+                      TPM2B_OPERAND,
+                      TPM_EO,
+                      AuthorizationDelegate*));
 };
 
 }  // namespace trunks

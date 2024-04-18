@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -6,19 +6,24 @@ import("//common-mk/pkg_config.gni")
 
 group("all") {
   deps = [
+    ":chromeos_startup",
     ":clobber-state",
     ":cros_sysrq_init",
     ":file_attrs_cleaner_tool",
     ":net_poll_tool",
     ":periodic_scheduler",
+    ":process_killer",
     ":static_node_tool",
     ":usermode-helper",
+    ":usr_share_cros_init_scripts",
   ]
   if (use.test) {
     deps += [
+      ":chromeos_startup_test",
       ":clobber_state_test",
       ":file_attrs_cleaner_test",
       ":periodic_scheduler_test",
+      ":process_killer_test",
       ":usermode-helper_test",
       ":utils_test",
     ]
@@ -27,29 +32,33 @@ group("all") {
 
 pkg_config("target_defaults") {
   defines = [
-    "USE_LVM_STATEFUL_PARTITION=${use.lvm_stateful_partition}",
+    "USE_DIRENCRYPTION=${use.direncryption}",
+    "USE_ENCRYPTED_REBOOT_VAULT=${use.encrypted_reboot_vault}",
     "USE_ENCRYPTED_STATEFUL=${use.encrypted_stateful}",
+    "USE_FSVERITY=${use.fsverity}",
+    "USE_LVM_MIGRATION=${use.lvm_migration}",
+    "USE_LVM_STATEFUL_PARTITION=${use.lvm_stateful_partition}",
+    "USE_PRJQUOTA=${use.prjquota}",
+    "USE_TPM2=${use.tpm2}",
+    "USE_TPM_INSECURE_FALLBACK=${use.tpm_insecure_fallback}",
   ]
   pkg_deps = [
     "libbrillo",
     "libchrome",
+    "libcrossystem",
     "libcrypto",
+    "libdlcservice-utils",
+    "libimageloader-manifest",
     "libmetrics",
+    "libselinux",
+    "re2",
     "vboot_host",
   ]
   libs = [
+    "bootstat",
     "rootdev",
     "secure_erase_file",
   ]
-}
-
-static_library("libcrossystem") {
-  sources = [
-    "crossystem.cc",
-    "crossystem_fake.cc",
-    "crossystem_impl.cc",
-  ]
-  configs += [ ":target_defaults" ]
 }
 
 static_library("utils") {
@@ -57,13 +66,47 @@ static_library("utils") {
   configs += [ ":target_defaults" ]
 }
 
+static_library("libcrosstartup") {
+  sources = [
+    "startup/chromeos_startup.cc",
+    "startup/factory_mode_mount_helper.cc",
+    "startup/flags.h",
+    "startup/mount_helper.cc",
+    "startup/mount_helper_factory.cc",
+    "startup/platform_impl.cc",
+    "startup/security_manager.cc",
+    "startup/standard_mount_helper.cc",
+    "startup/stateful_mount.cc",
+    "startup/test_mode_mount_helper.cc",
+    "startup/uefi_startup.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  defines = []
+  libs = [ "hwsec-foundation" ]
+  deps = [
+    ":file_attrs_cleaner_lib",
+    ":libclobber",
+    ":utils",
+  ]
+}
+
 static_library("libclobber") {
   sources = [
     "clobber_state.cc",
+    "clobber_state_log.cc",
     "clobber_ui.cc",
   ]
   configs += [ ":target_defaults" ]
   deps = [ ":utils" ]
+}
+
+executable("chromeos_startup") {
+  sources = [ "startup/main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [
+    ":libclobber",
+    ":libcrosstartup",
+  ]
 }
 
 executable("clobber-state") {
@@ -71,7 +114,6 @@ executable("clobber-state") {
   configs += [ ":target_defaults" ]
   deps = [
     ":libclobber",
-    ":libcrossystem",
     ":utils",
   ]
 }
@@ -85,6 +127,21 @@ executable("file_attrs_cleaner_tool") {
   sources = [ "file_attrs_cleaner_tool.cc" ]
   configs += [ ":target_defaults" ]
   deps = [ ":file_attrs_cleaner_lib" ]
+}
+
+static_library("process_killer_lib") {
+  sources = [
+    "process_killer/process.cc",
+    "process_killer/process_killer.cc",
+    "process_killer/process_manager.cc",
+  ]
+  configs += [ ":target_defaults" ]
+}
+
+executable("process_killer") {
+  sources = [ "process_killer/main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":process_killer_lib" ]
 }
 
 executable("periodic_scheduler") {
@@ -122,9 +179,39 @@ executable("usermode-helper") {
   deps = [ ":usermode-helper_lib" ]
 }
 
+install_config("usr_share_cros_init_scripts") {
+  sources = [ "send-boot-metrics.sh" ]
+  install_path = "/usr/share/cros/init"
+  type = "executable"
+}
+
 if (use.test) {
   pkg_config("test_config") {
-    pkg_deps = [ "libchrome-test" ]
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+    ]
+  }
+
+  executable("chromeos_startup_test") {
+    sources = [
+      "startup/chromeos_startup_test.cc",
+      "startup/fake_platform_impl.cc",
+      "startup/security_manager_test.cc",
+      "startup/stateful_mount_test.cc",
+      "startup/uefi_startup_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":test_config",
+    ]
+    run_test = true
+    deps = [
+      ":libcrosstartup",
+      "//common-mk/testrunner",
+    ]
+    pkg_deps = [ "libcrossystem-test" ]
   }
 
   executable("clobber_state_test") {
@@ -137,12 +224,13 @@ if (use.test) {
       ":target_defaults",
       ":test_config",
     ]
+    run_test = true
     deps = [
       ":libclobber",
-      ":libcrossystem",
       ":utils",
       "//common-mk/testrunner",
     ]
+    pkg_deps = [ "libcrossystem-test" ]
   }
 
   executable("file_attrs_cleaner_test") {
@@ -152,8 +240,27 @@ if (use.test) {
       ":target_defaults",
       ":test_config",
     ]
+    run_test = true
     deps = [
       ":file_attrs_cleaner_lib",
+      "//common-mk/testrunner",
+    ]
+  }
+
+  executable("process_killer_test") {
+    sources = [
+      "process_killer/process_killer_test.cc",
+      "process_killer/process_manager_test.cc",
+      "process_killer/process_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":test_config",
+    ]
+    run_test = true
+    deps = [
+      ":process_killer_lib",
       "//common-mk/testrunner",
     ]
   }
@@ -168,6 +275,7 @@ if (use.test) {
       ":target_defaults",
       ":test_config",
     ]
+    run_test = true
     deps = [ "//common-mk/testrunner" ]
   }
 
@@ -178,6 +286,7 @@ if (use.test) {
       ":target_defaults",
       ":test_config",
     ]
+    run_test = true
     deps = [
       ":usermode-helper_lib",
       "//common-mk/testrunner",
@@ -191,6 +300,7 @@ if (use.test) {
       ":target_defaults",
       ":test_config",
     ]
+    run_test = true
     deps = [
       ":utils",
       "//common-mk/testrunner",

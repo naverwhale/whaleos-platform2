@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -59,6 +59,46 @@ TEST(UtilsTest, ConvertToTensorFlowExampleProto) {
               string_feature.has_bytes_list());
   EXPECT_THAT(string_feature.bytes_list().value(),
               ElementsAre("abc", "123", "xyz"));
+}
+
+TEST(UtilsTest, FilePaths) {
+  const std::string sanitized_username = "foo";
+  const std::string client_name = "bar";
+  EXPECT_EQ(GetDatabasePath(sanitized_username).value(),
+            "/run/daemon-store/federated/foo/examples.db");
+  EXPECT_EQ(GetBaseDir(sanitized_username, client_name).value(),
+            "/run/daemon-store/federated/foo/bar");
+}
+
+TEST(UtilsTest, ValidBrellaLibVersion) {
+  // Valid release versions.
+  auto brella_lib_version = ConvertBrellaLibVersion("15217.0.0");
+  EXPECT_TRUE(brella_lib_version.has_value());
+  EXPECT_EQ(brella_lib_version.value(), "chromeos_152170000000000");
+
+  brella_lib_version = ConvertBrellaLibVersion("15217.123.4");
+  EXPECT_TRUE(brella_lib_version.has_value());
+  EXPECT_EQ(brella_lib_version.value(), "chromeos_152170001230004");
+
+  brella_lib_version = ConvertBrellaLibVersion("123456789.123456.7890");
+  EXPECT_TRUE(brella_lib_version.has_value());
+  EXPECT_EQ(brella_lib_version.value(), "chromeos_1234567891234567890");
+}
+
+TEST(UtilsTest, InValidClientVersion) {
+  // Major version is too long.
+  EXPECT_EQ(ConvertBrellaLibVersion("1521715127.12345.67"), std::nullopt);
+
+  // Minor version is too long.
+  EXPECT_EQ(ConvertBrellaLibVersion("15217.1234567.8"), std::nullopt);
+
+  // Sub version is too long.
+  EXPECT_EQ(ConvertBrellaLibVersion("15217.123.45678"), std::nullopt);
+
+  // Malformed patterns
+  EXPECT_EQ(ConvertBrellaLibVersion("15217.123"), std::nullopt);
+  EXPECT_EQ(ConvertBrellaLibVersion("15217.123.4.5"), std::nullopt);
+  EXPECT_EQ(ConvertBrellaLibVersion("R109-15217.123.4"), std::nullopt);
 }
 
 }  // namespace

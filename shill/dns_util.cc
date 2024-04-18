@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,7 +32,7 @@ const int kMaxNameLength = 255;
 namespace shill {
 
 // Based on DJB's public domain code.
-bool DNSDomainFromDot(const base::StringPiece& dotted, std::string* out) {
+bool DNSDomainFromDot(std::string_view dotted, std::string* out) {
   const char* buf = dotted.data();
   size_t n = dotted.size();
   char label[kMaxLabelLength];
@@ -86,7 +86,7 @@ bool DNSDomainFromDot(const base::StringPiece& dotted, std::string* out) {
   return true;
 }
 
-bool IsValidDNSDomain(const base::StringPiece& dotted) {
+bool IsValidDNSDomain(std::string_view dotted) {
   std::string dns_formatted;
   return DNSDomainFromDot(dotted, &dns_formatted);
 }

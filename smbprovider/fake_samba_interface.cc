@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,6 @@
 #include <base/check_op.h>
 #include <base/files/file_path.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/notreached.h>
 #include <brillo/any.h>
 

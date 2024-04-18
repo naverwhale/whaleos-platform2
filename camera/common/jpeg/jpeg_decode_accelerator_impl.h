@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -17,6 +17,7 @@
 #include <mojo/public/cpp/bindings/remote.h>
 
 #include "camera/mojo/cros_camera_service.mojom.h"
+#include "camera/mojo/gpu/jpeg_accelerator.mojom.h"
 #include "cros-camera/camera_metrics.h"
 #include "cros-camera/camera_mojo_channel_manager.h"
 #include "cros-camera/future.h"
@@ -30,29 +31,30 @@ class JpegDecodeAcceleratorTest;
 
 // Encapsulates a JPEG decoder. This class is not thread-safe.
 // Before using this class, make sure mojo is initialized first.
-class JpegDecodeAcceleratorImpl final : public JpegDecodeAccelerator {
+class JpegDecodeAcceleratorImpl : public JpegDecodeAccelerator {
  public:
   explicit JpegDecodeAcceleratorImpl(CameraMojoChannelManager* mojo_manager);
   JpegDecodeAcceleratorImpl(const JpegDecodeAcceleratorImpl&) = delete;
   JpegDecodeAcceleratorImpl& operator=(const JpegDecodeAcceleratorImpl&) =
       delete;
 
-  ~JpegDecodeAcceleratorImpl() final;
+  ~JpegDecodeAcceleratorImpl() override;
 
   // JpegDecodeAccelerator implementation.
 
-  bool Start() final;
+  bool Start() override;
 
-  JpegDecodeAccelerator::Error DecodeSync(int input_fd,
-                                          uint32_t input_buffer_size,
-                                          uint32_t input_buffer_offset,
-                                          buffer_handle_t output_buffer) final;
+  JpegDecodeAccelerator::Error DecodeSync(
+      int input_fd,
+      uint32_t input_buffer_size,
+      uint32_t input_buffer_offset,
+      buffer_handle_t output_buffer) override;
 
   int32_t Decode(int input_fd,
                  uint32_t input_buffer_size,
                  uint32_t input_buffer_offset,
                  buffer_handle_t output_buffer,
-                 DecodeCallback callback) final;
+                 DecodeCallback callback) override;
 
  private:
   // IPCBridge wraps all the IPC-related calls. Most of its methods should/will
@@ -66,7 +68,7 @@ class JpegDecodeAcceleratorImpl final : public JpegDecodeAccelerator {
     ~IPCBridge();
 
     // Initialize Mojo channel to GPU pcorss in chrome.
-    void Start(base::Callback<void(bool)> callback);
+    void Start(base::OnceCallback<void(bool)> callback);
 
     // Destroy the instance.
     void Destroy();
@@ -80,7 +82,7 @@ class JpegDecodeAcceleratorImpl final : public JpegDecodeAccelerator {
                 DecodeCallback callback);
 
     // For synced Decode API.
-    void DecodeSyncCallback(base::Callback<void(int)> callback,
+    void DecodeSyncCallback(base::OnceCallback<void(int)> callback,
                             int32_t buffer_id,
                             int error);
 
@@ -95,8 +97,11 @@ class JpegDecodeAcceleratorImpl final : public JpegDecodeAccelerator {
     bool IsReady();
 
    private:
+    // Request the kCrosJpegAccelerator service from Mojo Service Manager.
+    void RequestAcceleratorFromServiceManager();
+
     // Initialize the JpegDecodeAccelerator.
-    void Initialize(base::Callback<void(bool)> callback);
+    void Initialize(base::OnceCallback<void(bool)> callback);
 
     // Error handler for JDA mojo channel.
     void OnJpegDecodeAcceleratorError();
@@ -123,6 +128,8 @@ class JpegDecodeAcceleratorImpl final : public JpegDecodeAccelerator {
 
     // Tracking the buffer ids sent to decoder.
     std::set<int32_t> inflight_buffer_ids_;
+
+    mojo::Remote<mojom::JpegAcceleratorProvider> accelerator_provider_;
 
     base::WeakPtrFactory<IPCBridge> weak_ptr_factory_{this};
   };

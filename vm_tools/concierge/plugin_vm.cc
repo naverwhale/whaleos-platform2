@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,23 +9,29 @@
 #include <sys/un.h>
 
 #include <algorithm>
+#include <memory>
 #include <sstream>
 #include <utility>
 #include <vector>
 
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/notreached.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
 
+#include "vm_tools/common/vm_id.h"
+#include "vm_tools/concierge/network/plugin_vm_network.h"
+#include "vm_tools/concierge/plugin_vm_config.h"
 #include "vm_tools/concierge/plugin_vm_helper.h"
 #include "vm_tools/concierge/tap_device_builder.h"
+#include "vm_tools/concierge/vm_base_impl.h"
 #include "vm_tools/concierge/vm_builder.h"
 #include "vm_tools/concierge/vm_permission_interface.h"
 #include "vm_tools/concierge/vm_util.h"
@@ -33,45 +39,14 @@
 
 using std::string;
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 namespace {
 
-// Path to the plugin binaries and other assets.
-constexpr char kPluginDir[] = "/opt/pita";
-constexpr char kPluginDlcDir[] = "/run/imageloader/pita/package/root/opt/pita";
-
-// Name of the plugin VM binary.
-constexpr char kPluginBin[] = "prl_vm_app";
-// Name of the sub-directory containing plugin's seccomp policy.
-constexpr char kPluginPolicyDir[] = "policy";
-
-// Name of the runtime directory inside the jail.
-constexpr char kRuntimeDir[] = "/run/pvm";
-
-// Name of the stateful directory inside the jail.
-constexpr char kStatefulDir[] = "/pvm";
-
-// Name of the directory holding ISOs inside the jail.
-constexpr char kIsoDir[] = "/iso";
-
 // How long we give VM to suspend.
-constexpr base::TimeDelta kVmSuspendTimeout = base::TimeDelta::FromSeconds(25);
+constexpr base::TimeDelta kVmSuspendTimeout = base::Seconds(25);
 
 // How long to wait before timing out on child process exits.
-constexpr base::TimeDelta kChildExitTimeout = base::TimeDelta::FromSeconds(10);
-
-// The CPU cgroup where all the PluginVm crosvm processes should belong to.
-constexpr char kPluginVmCpuCgroup[] = "/sys/fs/cgroup/cpu/vms/plugin";
-
-// Offset in a subnet of the client/guest.
-constexpr size_t kGuestAddressOffset = 1;
-
-std::unique_ptr<patchpanel::Subnet> MakeSubnet(
-    const patchpanel::IPv4Subnet& subnet) {
-  return std::make_unique<patchpanel::Subnet>(
-      subnet.base_addr(), subnet.prefix_len(), base::DoNothing());
-}
+constexpr base::TimeDelta kChildExitTimeout = base::Seconds(10);
 
 void TrySuspendVm(scoped_refptr<dbus::Bus> bus,
                   dbus::ObjectProxy* vmplugin_service_proxy,
@@ -94,7 +69,7 @@ void TrySuspendVm(scoped_refptr<dbus::Bus> bus,
           LOG(INFO) << "Dispatcher is shutting down, will retry suspend";
           dispatcher_shutting_down = true;
         }
-        base::PlatformThread::Sleep(base::TimeDelta::FromSeconds(1));
+        base::PlatformThread::Sleep(base::Seconds(1));
         break;
 
       case pvm::dispatcher::VmOpResult::DISPATCHER_NOT_AVAILABLE:
@@ -115,30 +90,17 @@ void TrySuspendVm(scoped_refptr<dbus::Bus> bus,
 }  // namespace
 
 // static
-std::unique_ptr<PluginVm> PluginVm::Create(
-    VmId id,
-    base::FilePath stateful_dir,
-    base::FilePath iso_dir,
-    base::FilePath root_dir,
-    base::FilePath runtime_dir,
-    std::unique_ptr<patchpanel::Client> network_client,
-    int subnet_index,
-    bool enable_vnet_hdr,
-    scoped_refptr<dbus::Bus> bus,
-    std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-    dbus::ObjectProxy* vm_permission_service_proxy,
-    dbus::ObjectProxy* vmplugin_service_proxy,
-    VmBuilder vm_builder) {
-  auto vm = std::unique_ptr<PluginVm>(new PluginVm(
-      std::move(id), std::move(network_client), std::move(bus),
-      std::move(seneschal_server_proxy), vm_permission_service_proxy,
-      vmplugin_service_proxy, std::move(iso_dir), std::move(root_dir),
-      std::move(runtime_dir)));
+std::unique_ptr<PluginVm> PluginVm::Create(Config config) {
+  auto stateful_dir = std::move(config.stateful_dir);
+  auto enable_vnet_hdr = std::move(config.enable_vnet_hdr);
+  auto vm_builder = std::move(config.vm_builder);
+
+  auto vm = base::WrapUnique(new PluginVm(std::move(config)));
 
   if (!vm->CreateUsbListeningSocket() ||
-      !vm->Start(std::move(stateful_dir), subnet_index, enable_vnet_hdr,
+      !vm->Start(std::move(stateful_dir), enable_vnet_hdr,
                  std::move(vm_builder))) {
-    vm.reset();
+    return {};
   }
 
   return vm;
@@ -149,14 +111,6 @@ PluginVm::~PluginVm() {
 }
 
 bool PluginVm::StopVm() {
-  // Notify arc-patchpanel that the VM is down.
-  // This should run before the process existence check below since we still
-  // want to release the network resources on crash.
-  // Note the client will only be null during testing.
-  if (network_client_ && !network_client_->NotifyPluginVmShutdown(id_hash_)) {
-    LOG(WARNING) << "Unable to notify networking services";
-  }
-
   // Notify permission service of VM destruction.
   if (!permission_token_.empty()) {
     vm_permission::UnregisterVm(bus_, vm_permission_service_proxy_, id_);
@@ -193,28 +147,23 @@ bool PluginVm::StopVm() {
 }
 
 bool PluginVm::Shutdown() {
-  // Notify arc-patchpanel that the VM is down.
-  // This should run before the process existence check below since we still
-  // want to release the network resources on crash.
-  // Note the client will only be null during testing.
-  if (network_client_ && !network_client_->NotifyPluginVmShutdown(id_hash_)) {
-    LOG(WARNING) << "Unable to notify networking services";
-  }
-
   return !CheckProcessExists(process_.pid()) ||
          pvm::dispatcher::ShutdownVm(bus_, vmplugin_service_proxy_, id_) ==
              pvm::dispatcher::VmOpResult::SUCCESS;
 }
 
-VmInterface::Info PluginVm::GetInfo() {
-  VmInterface::Info info = {
-      .ipv4_address = subnet_->AddressAtOffset(kGuestAddressOffset),
+VmBaseImpl::Info PluginVm::GetInfo() const {
+  VmBaseImpl::Info info = {
+      .ipv4_address = static_cast<PluginVmNetwork*>(GetNetwork())
+                          ->Allocation()
+                          .parallels_ipv4_address.ToInAddr()
+                          .s_addr,
       .pid = process_.pid(),
       .cid = 0,
       .seneschal_server_handle = seneschal_server_handle(),
       .permission_token = permission_token_,
-      .status = VmInterface::Status::RUNNING,
-      .type = VmInfo::PLUGIN_VM,
+      .status = VmBaseImpl::Status::RUNNING,
+      .type = apps::VmType::PLUGIN_VM,
   };
 
   return info;
@@ -279,7 +228,9 @@ base::ScopedFD PluginVm::CreateUnixSocket(const base::FilePath& path,
 // static
 bool PluginVm::SetVmCpuRestriction(CpuRestrictionState cpu_restriction_state) {
   return VmBaseImpl::SetVmCpuRestriction(cpu_restriction_state,
-                                         kPluginVmCpuCgroup);
+                                         kPluginVmCpuCgroup) &&
+         VmBaseImpl::SetVmCpuRestriction(cpu_restriction_state,
+                                         kPluginVmVcpuCpuCgroup);
 }
 
 bool PluginVm::CreateUsbListeningSocket() {
@@ -312,7 +263,7 @@ bool PluginVm::AttachUsbDevice(uint8_t bus,
                                uint16_t vid,
                                uint16_t pid,
                                int fd,
-                               UsbControlResponse* response) {
+                               uint8_t* out_port) {
   base::ScopedFD dup_fd(dup(fd));
   if (!dup_fd.is_valid()) {
     PLOG(ERROR) << "Unable to duplicate incoming file descriptor";
@@ -346,19 +297,15 @@ bool PluginVm::AttachUsbDevice(uint8_t bus,
   req.DevInfo.pid = pid;
   usb_req_waiting_xmit_.emplace_back(std::move(req), std::move(dup_fd));
 
-  // TODO(dtor): report status only when plugin responds; requires changes to
-  // the VM interface API.
-  response->type = UsbControlResponseType::OK;
-  response->port = usb_last_handle_;
+  *out_port = usb_last_handle_;
   return true;
 }
 
-bool PluginVm::DetachUsbDevice(uint8_t port, UsbControlResponse* response) {
+bool PluginVm::DetachUsbDevice(uint8_t port) {
   auto iter = std::find_if(
       usb_devices_.begin(), usb_devices_.end(),
       [port](const auto& info) { return std::get<2>(info) == port; });
   if (iter == usb_devices_.end()) {
-    response->type = UsbControlResponseType::NO_SUCH_PORT;
     return true;
   }
 
@@ -386,18 +333,16 @@ bool PluginVm::DetachUsbDevice(uint8_t port, UsbControlResponse* response) {
   usb_req_waiting_xmit_.emplace_back(req, base::ScopedFD());
 
   // TODO(dtor): report status only when plugin responds; requires changes to
-  // the VM interface API.
-  response->type = UsbControlResponseType::OK;
-  response->port = port;
+  // the VmBaseImpl API.
   return true;
 }
 
-bool PluginVm::ListUsbDevice(std::vector<UsbDevice>* device) {
+bool PluginVm::ListUsbDevice(std::vector<UsbDeviceEntry>* device) {
   device->resize(usb_devices_.size());
   std::transform(usb_devices_.begin(), usb_devices_.end(), device->begin(),
                  [](const auto& info) {
-                   UsbDevice d{};
-                   std::tie(d.vid, d.pid, d.port) = info;
+                   UsbDeviceEntry d{};
+                   std::tie(d.vendor_id, d.product_id, d.port) = info;
                    return d;
                  });
   return true;
@@ -598,7 +543,7 @@ bool PluginVm::WriteResolvConf(const base::FilePath& parent_dir,
     }
   }
 
-  constexpr char kResolvConfOptions[] =
+  static constexpr char kResolvConfOptions[] =
       "options single-request timeout:1 attempts:5\n";
   if (!file.WriteAtCurrentPos(kResolvConfOptions, strlen(kResolvConfOptions))) {
     LOG(ERROR) << "Failed to write search resolver options to temporary file";
@@ -632,42 +577,30 @@ void PluginVm::VmToolsStateChanged(bool running) {
     pvm::helper::CleanUpAfterInstall(id_, iso_dir_);
 }
 
-PluginVm::PluginVm(VmId id,
-                   std::unique_ptr<patchpanel::Client> network_client,
-                   scoped_refptr<dbus::Bus> bus,
-                   std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-                   dbus::ObjectProxy* vm_permission_service_proxy,
-                   dbus::ObjectProxy* vmplugin_service_proxy,
-                   base::FilePath iso_dir,
-                   base::FilePath root_dir,
-                   base::FilePath runtime_dir)
-    : VmBaseImpl(std::move(network_client),
-                 std::move(seneschal_server_proxy),
-                 std::move(runtime_dir)),
-      id_(std::move(id)),
-      iso_dir_(std::move(iso_dir)),
-      bus_(std::move(bus)),
-      vm_permission_service_proxy_(vm_permission_service_proxy),
-      vmplugin_service_proxy_(vmplugin_service_proxy),
-      usb_last_handle_(0) {
+PluginVm::PluginVm(Config config)
+    : VmBaseImpl(VmBaseImpl::Config{
+          .network = std::move(config.network),
+          .seneschal_server_proxy = std::move(config.seneschal_server_proxy),
+          .runtime_dir = std::move(config.runtime_dir),
+      }),
+      id_(std::move(config.id)),
+      iso_dir_(std::move(config.iso_dir)),
+      bus_(std::move(config.bus)),
+      vm_permission_service_proxy_(config.vm_permission_service_proxy),
+      vmplugin_service_proxy_(config.vmplugin_service_proxy) {
   CHECK(vm_permission_service_proxy_);
   CHECK(vmplugin_service_proxy_);
   CHECK(base::DirectoryExists(iso_dir_));
-  CHECK(base::DirectoryExists(root_dir));
+  CHECK(base::DirectoryExists(config.root_dir));
 
   // Take ownership of the root and runtime directories.
-  CHECK(root_dir_.Set(root_dir));
-
-  std::ostringstream oss;
-  oss << id_;
-  id_hash_ = std::hash<std::string>{}(oss.str());
+  CHECK(root_dir_.Set(config.root_dir));
 }
 
 bool PluginVm::Start(base::FilePath stateful_dir,
-                     int subnet_index,
                      bool enable_vnet_hdr,
                      VmBuilder vm_builder) {
-  if (!pvm::helper::IsDlcVm()) {
+  if (!base::PathExists(base::FilePath(pvm::kApplicationDir))) {
     LOG(ERROR) << "PluginVM DLC is not installed.";
     return false;
   }
@@ -681,27 +614,21 @@ bool PluginVm::Start(base::FilePath stateful_dir,
     return false;
   }
 
-  // Get the network interface.
-  patchpanel::NetworkDevice network_device;
-  if (!network_client_->NotifyPluginVmStartup(id_hash_, subnet_index,
-                                              &network_device)) {
-    LOG(ERROR) << "No network devices available";
-    return false;
-  }
-  subnet_ = MakeSubnet(network_device.ipv4_subnet());
-
   // Open the tap device.
-  base::ScopedFD tap_fd = OpenTapDevice(
-      network_device.ifname(), enable_vnet_hdr, nullptr /*ifname_out*/);
+  PluginVmNetwork* network = static_cast<PluginVmNetwork*>(GetNetwork());
+  base::ScopedFD tap_fd =
+      OpenTapDevice(network->Allocation().tap_device_ifname, enable_vnet_hdr,
+                    nullptr /*ifname_out*/);
   if (!tap_fd.is_valid()) {
     LOG(ERROR) << "Unable to open and configure TAP device "
-               << network_device.ifname();
+               << network->Allocation().tap_device_ifname;
     return false;
   }
 
-  auto plugin_bin_path = base::FilePath(kPluginDlcDir).Append(kPluginBin);
+  auto plugin_bin_path =
+      base::FilePath(pvm::kApplicationDir).Append(pvm::plugin::kCommand);
   auto plugin_policy_dir =
-      base::FilePath(kPluginDlcDir).Append(kPluginPolicyDir);
+      base::FilePath(pvm::kApplicationDir).Append(pvm::plugin::kPolicyDir);
   vm_builder.AppendTapFd(std::move(tap_fd))
       .AppendCustomParam("--plugin", plugin_bin_path.value())
       .AppendCustomParam("--seccomp-policy-dir", plugin_policy_dir.value())
@@ -711,16 +638,16 @@ bool PluginVm::Start(base::FilePath stateful_dir,
   // These are bind mounts with parts may change (i.e. they are either VM
   // or config specific).
   std::vector<string> bind_mounts = {
-      base::StringPrintf("%s:%s:false", kPluginDlcDir, kPluginDir),
       // This is directory where the VM image resides.
       base::StringPrintf("%s:%s:true", stateful_dir.value().c_str(),
-                         kStatefulDir),
+                         pvm::plugin::kStatefulDir),
       // This is directory where ISO images for the VM reside.
-      base::StringPrintf("%s:%s:false", iso_dir_.value().c_str(), kIsoDir),
+      base::StringPrintf("%s:%s:false", iso_dir_.value().c_str(),
+                         pvm::plugin::kIsoDir),
       // This is directory where control socket, 9p socket, and other axillary
       // runtime data lives.
       base::StringPrintf("%s:%s:true", runtime_dir_.GetPath().value().c_str(),
-                         kRuntimeDir),
+                         pvm::kRuntimeDir),
       // Plugin '/etc' directory.
       base::StringPrintf("%s:%s:true",
                          root_dir_.GetPath().Append("etc").value().c_str(),
@@ -744,11 +671,13 @@ bool PluginVm::Start(base::FilePath stateful_dir,
     bind_mounts.push_back("/run/cras/plugin/playback:/run/cras:true");
   }
 
-  // TODO(kimjae): This is a temporary hack to have relative files to be found
-  // even when started from DLC paths. Clean this up once a cleaner solution
-  // can be leveraged.
-  bind_mounts.push_back(
-      base::StringPrintf("%s:%s:false", kPluginDlcDir, kPluginDlcDir));
+  // Mount application files into jail, firs the DLC path, then the static
+  // path that Parallels uses to locate their components.
+  bind_mounts.push_back(base::StringPrintf("%s:%s:false", pvm::kApplicationDir,
+                                           pvm::kApplicationDir));
+  bind_mounts.push_back(base::StringPrintf("%s:%s:false", pvm::kApplicationDir,
+                                           pvm::plugin::kPitaDir));
+
   for (auto& mount : bind_mounts)
     vm_builder.AppendCustomParam("--plugin-mount", std::move(mount));
 
@@ -764,7 +693,14 @@ bool PluginVm::Start(base::FilePath stateful_dir,
   process_.SetPreExecCallback(base::BindOnce(
       &SetUpCrosvmProcess, base::FilePath(kPluginVmCpuCgroup).Append("tasks")));
 
-  if (!StartProcess(vm_builder.BuildVmArgs())) {
+  std::optional<base::StringPairs> args =
+      std::move(vm_builder).BuildVmArgs(nullptr);
+  if (!args) {
+    LOG(ERROR) << "Failed to build VM arguments";
+    return false;
+  }
+
+  if (!StartProcess(std::move(args).value())) {
     LOG(ERROR) << "Failed to start VM process";
     return false;
   }
@@ -772,5 +708,4 @@ bool PluginVm::Start(base::FilePath stateful_dir,
   return true;
 }
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge

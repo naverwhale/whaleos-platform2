@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 #include <string>
 
 #include "shill/mock_adaptors.h"
-#include "shill/property_accessor.h"
+#include "shill/store/property_accessor.h"
 
 namespace shill {
 
@@ -19,7 +19,7 @@ const char ServiceUnderTest::kStringsProperty[] = "strings";
 const char ServiceUnderTest::kStorageId[] = "service";
 
 ServiceUnderTest::ServiceUnderTest(Manager* manager)
-    : Service(manager, Technology::kUnknown), disconnectable_(true) {
+    : Service(manager, Technology::kWiFi) {
   mutable_store()->RegisterStrings(kStringsProperty, &strings_);
   mutable_store()->RegisterDerivedKeyValueStore(
       kKeyValueStoreProperty,
@@ -59,6 +59,10 @@ bool ServiceUnderTest::IsDisconnectable(Error* error) const {
   if (!Service::IsDisconnectable(error))
     return false;
   return disconnectable_;
+}
+
+void ServiceUnderTest::OnConnect(Error* error) {
+  connect_calls_++;
 }
 
 }  // namespace shill

@@ -1,100 +1,234 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef PATCHPANEL_MOCK_DATAPATH_H_
 #define PATCHPANEL_MOCK_DATAPATH_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include <base/macros.h>
+#include <gmock/gmock.h>
 
 #include "patchpanel/datapath.h"
+#include "patchpanel/iptables.h"
+#include "patchpanel/shill_client.h"
 
 namespace patchpanel {
 
 // ARC networking data path configuration utility.
 class MockDatapath : public Datapath {
  public:
-  explicit MockDatapath() : Datapath(nullptr, nullptr, nullptr) {}
+  MockDatapath();
   MockDatapath(const MockDatapath&) = delete;
   MockDatapath& operator=(const MockDatapath&) = delete;
 
-  ~MockDatapath() = default;
+  ~MockDatapath();
 
-  MOCK_METHOD0(Start, void());
-  MOCK_METHOD0(Stop, void());
-  MOCK_METHOD2(NetnsAttachName,
-               bool(const std::string& netns_name, pid_t netns_pid));
-  MOCK_METHOD1(NetnsDeleteName, bool(const std::string& netns_name));
+  MOCK_METHOD(void, Start, (), (override));
+  MOCK_METHOD(void, Stop, (), (override));
+  MOCK_METHOD(bool,
+              NetnsAttachName,
+              (const std::string& netns_name, pid_t netns_pid),
+              (override));
+  MOCK_METHOD(bool,
+              NetnsDeleteName,
+              (const std::string& netns_name),
+              (override));
 
-  MOCK_METHOD3(AddBridge,
-               bool(const std::string& ifname,
-                    uint32_t ipv4_addr,
-                    uint32_t prefix_len));
-  MOCK_METHOD1(RemoveBridge, void(const std::string& ifname));
-  MOCK_METHOD2(AddToBridge,
-               bool(const std::string& br_ifname, const std::string& ifname));
+  MOCK_METHOD(bool,
+              AddBridge,
+              (const std::string& ifname, const net_base::IPv4CIDR& cidr),
+              (override));
+  MOCK_METHOD(void, RemoveBridge, (const std::string& ifname), (override));
+  MOCK_METHOD(bool,
+              AddToBridge,
+              (const std::string& br_ifname, const std::string& ifname),
+              (override));
 
-  MOCK_METHOD4(AddTAP,
-               std::string(const std::string& name,
-                           const MacAddress* mac_addr,
-                           const SubnetAddress* ipv4_addr,
-                           const std::string& user));
-  MOCK_METHOD8(ConnectVethPair,
-               bool(pid_t pid,
-                    const std::string& netns_name,
-                    const std::string& veth_ifname,
-                    const std::string& peer_ifname,
-                    const MacAddress& remote_mac_addr,
-                    uint32_t remote_ipv4_addr,
-                    uint32_t remote_ipv4_prefix_len,
-                    bool remote_multicast_flag));
-  MOCK_METHOD1(RemoveInterface, void(const std::string& ifname));
-  MOCK_METHOD6(StartRoutingDevice,
-               void(const std::string& ext_ifname,
-                    const std::string& int_ifname,
-                    uint32_t int_ipv4_addr,
-                    TrafficSource source,
-                    bool route_on_vpn,
-                    uint32_t peer_ipv4_addr));
-  MOCK_METHOD5(StopRoutingDevice,
-               void(const std::string& ext_ifname,
-                    const std::string& int_ifname,
-                    uint32_t int_ipv4_addr,
-                    TrafficSource source,
-                    bool route_on_vpn));
-  MOCK_METHOD3(MaskInterfaceFlags,
-               bool(const std::string& ifname, uint16_t on, uint16_t off));
-  MOCK_METHOD2(AddIPv6Forwarding,
-               bool(const std::string& ifname1, const std::string& ifname2));
-  MOCK_METHOD2(RemoveIPv6Forwarding,
-               void(const std::string& ifname1, const std::string& ifname2));
-  MOCK_METHOD3(AddIPv4Route, bool(uint32_t gw, uint32_t dst, uint32_t netmask));
-  MOCK_METHOD1(SetConntrackHelpers, bool(const bool enable_helpers));
-  MOCK_METHOD2(SetRouteLocalnet,
-               bool(const std::string& ifname, const bool enable));
-  MOCK_METHOD2(DumpIptables,
-               std::string(IpFamily family, const std::string& table));
-  MOCK_METHOD1(ModprobeAll, bool(const std::vector<std::string>& modules));
-  MOCK_METHOD2(AddInboundIPv4DNAT,
-               void(const std::string& ifname, const std::string& ipv4_addr));
-  MOCK_METHOD2(RemoveInboundIPv4DNAT,
-               void(const std::string& ifname, const std::string& ipv4_addr));
-  MOCK_METHOD1(AddAdbPortAccessRule, bool(const std::string& ifname));
-  MOCK_METHOD1(DeleteAdbPortAccessRule, void(const std::string& ifname));
-  MOCK_METHOD5(ModifyChain,
-               bool(IpFamily family,
-                    const std::string& table,
-                    const std::string& op,
-                    const std::string& chain,
-                    bool log_failures));
-  MOCK_METHOD4(ModifyIptables,
-               bool(IpFamily family,
-                    const std::string& table,
-                    const std::vector<std::string>& argv,
-                    bool log_failures));
+  MOCK_METHOD(std::string,
+              AddTunTap,
+              (const std::string& name,
+               const std::optional<MacAddress>& mac_addr,
+               const std::optional<net_base::IPv4CIDR>& ipv4_cidr,
+               const std::string& user,
+               DeviceMode dev_mode),
+              (override));
+  MOCK_METHOD(void,
+              RemoveTunTap,
+              (const std::string& ifname, DeviceMode dev_mode),
+              (override));
+  MOCK_METHOD(bool,
+              ConnectVethPair,
+              (pid_t pid,
+               const std::string& netns_name,
+               const std::string& veth_ifname,
+               const std::string& peer_ifname,
+               const MacAddress& remote_mac_addr,
+               const net_base::IPv4CIDR& remote_ipv4_cidr,
+               const std::optional<net_base::IPv6CIDR>& remote_ipv6_cidr,
+               bool remote_multicast_flag),
+              (override));
+  MOCK_METHOD(void, RemoveInterface, (const std::string& ifname), (override));
+  MOCK_METHOD(void,
+              StartRoutingDevice,
+              (const ShillClient::Device& shill_device,
+               const std::string& int_ifname,
+               TrafficSource source,
+               bool static_ipv6),
+              (override));
+  MOCK_METHOD(void,
+              StartRoutingDeviceAsSystem,
+              (const std::string& int_ifname,
+               TrafficSource source,
+               bool static_ipv6),
+              (override));
+  MOCK_METHOD(void,
+              StartRoutingDeviceAsUser,
+              (const std::string& int_ifname,
+               TrafficSource source,
+               const net_base::IPv4Address& int_ipv4_addr,
+               std::optional<net_base::IPv4Address> peer_ipv4_addr,
+               std::optional<net_base::IPv6Address> int_ipv6_addr,
+               std::optional<net_base::IPv6Address> peer_ipv6_addr),
+              (override));
+  MOCK_METHOD(void,
+              StopRoutingDevice,
+              (const std::string& int_ifname),
+              (override));
+  MOCK_METHOD(bool,
+              MaskInterfaceFlags,
+              (const std::string& ifname, uint16_t on, uint16_t off),
+              (override));
+  MOCK_METHOD(bool,
+              AddIPv4RouteToTable,
+              (const std::string& ifname,
+               const net_base::IPv4CIDR& ipv4_cidr,
+               int table_id),
+              (override));
+  MOCK_METHOD(void,
+              DeleteIPv4RouteFromTable,
+              (const std::string& ifname,
+               const net_base::IPv4CIDR& ipv4_cidr,
+               int table_id),
+              (override));
+  MOCK_METHOD(bool,
+              AddIPv4Route,
+              (const net_base::IPv4Address& gateway_addr,
+               const net_base::IPv4CIDR& cidr),
+              (override));
+  MOCK_METHOD(bool,
+              SetConntrackHelpers,
+              (const bool enable_helpers),
+              (override));
+  MOCK_METHOD(bool,
+              SetRouteLocalnet,
+              (const std::string& ifname, const bool enable),
+              (override));
+  MOCK_METHOD(std::string,
+              DumpIptables,
+              (IpFamily family, Iptables::Table table),
+              (override));
+  MOCK_METHOD(bool,
+              ModprobeAll,
+              (const std::vector<std::string>& modules),
+              (override));
+  MOCK_METHOD(void,
+              AddInboundIPv4DNAT,
+              (AutoDNATTarget auto_dnat_target,
+               const ShillClient::Device& shill_device,
+               const net_base::IPv4Address& ipv4_addr),
+              (override));
+  MOCK_METHOD(void,
+              RemoveInboundIPv4DNAT,
+              (AutoDNATTarget auto_dnat_target,
+               const ShillClient::Device& shill_device,
+               const net_base::IPv4Address& ipv4_addr),
+              (override));
+  MOCK_METHOD(void, EnableQoSDetection, (), (override));
+  MOCK_METHOD(void, DisableQoSDetection, (), (override));
+  MOCK_METHOD(void, EnableQoSApplyingDSCP, (std::string_view), (override));
+  MOCK_METHOD(void, DisableQoSApplyingDSCP, (std::string_view), (override));
+  MOCK_METHOD(void,
+              UpdateDoHProvidersForQoS,
+              (IpFamily, const std::vector<net_base::IPAddress>&),
+              (override));
+  MOCK_METHOD(bool,
+              AddAdbPortAccessRule,
+              (const std::string& ifname),
+              (override));
+  MOCK_METHOD(void,
+              DeleteAdbPortAccessRule,
+              (const std::string& ifname),
+              (override));
+  MOCK_METHOD(bool,
+              CheckChain,
+              (IpFamily family,
+               Iptables::Table table,
+               const std::string& chain),
+              (override));
+  MOCK_METHOD(bool,
+              AddChain,
+              (IpFamily family,
+               Iptables::Table table,
+               const std::string& chain),
+              (override));
+  MOCK_METHOD(bool,
+              RemoveChain,
+              (IpFamily family,
+               Iptables::Table table,
+               const std::string& chain),
+              (override));
+  MOCK_METHOD(bool,
+              FlushChain,
+              (IpFamily family,
+               Iptables::Table table,
+               const std::string& chain),
+              (override));
+  MOCK_METHOD(bool,
+              ModifyChain,
+              (IpFamily family,
+               Iptables::Table table,
+               Iptables::Command command,
+               std::string_view chain,
+               bool log_failures),
+              (override));
+  MOCK_METHOD(bool,
+              ModifyClatAcceptRules,
+              (Iptables::Command command, const std::string& ifname),
+              (override));
+  MOCK_METHOD(bool,
+              ModifyIptables,
+              (IpFamily family,
+               Iptables::Table table,
+               Iptables::Command command,
+               std::string_view chain,
+               const std::vector<std::string>& argv,
+               bool log_failures,
+               std::optional<base::TimeDelta> timeout),
+              (override));
+  MOCK_METHOD(bool,
+              AddIPv6NeighborProxy,
+              (const std::string& ifname,
+               const net_base::IPv6Address& ipv6_addr),
+              (override));
+  MOCK_METHOD(void,
+              RemoveIPv6NeighborProxy,
+              (const std::string& ifname,
+               const net_base::IPv6Address& ipv6_addr),
+              (override));
+  MOCK_METHOD(bool,
+              AddIPv6HostRoute,
+              (const std::string& ifname,
+               const net_base::IPv6CIDR& ipv6_cidr,
+               const std::optional<net_base::IPv6Address>& src_addr),
+              (override));
+  MOCK_METHOD(void,
+              RemoveIPv6HostRoute,
+              (const net_base::IPv6CIDR& ipv6_cidr),
+              (override));
 };
 
 }  // namespace patchpanel

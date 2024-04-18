@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,10 +17,6 @@ use std::str;
 use std::time::Duration;
 
 // Imported from main program
-use errno;
-use get_runnables;
-use get_vmstats;
-use strerror;
 use Dbus;
 use FileWatcher;
 use Paths;
@@ -30,9 +26,7 @@ use SampleQueue;
 use SampleType;
 use Sampler;
 use Timer;
-use PAGE_SIZE;
 use SAMPLE_QUEUE_LENGTH;
-use VMSTAT_VALUES_COUNT;
 
 // Different levels of emulated available RAM in MB.
 const LOW_MEM_LOW_AVAILABLE: usize = 150;
@@ -40,6 +34,8 @@ const LOW_MEM_MEDIUM_AVAILABLE: usize = 300;
 const LOW_MEM_HIGH_AVAILABLE: usize = 1000;
 const LOW_MEM_MARGIN: usize = 200;
 const MOCK_DBUS_FIFO_NAME: &str = "mock-dbus-fifo";
+
+const PAGE_SIZE: usize = 4096;
 
 macro_rules! print_to_path {
     ($path:expr, $format:expr $(, $arg:expr)*) => {{
@@ -49,6 +45,48 @@ macro_rules! print_to_path {
             Ok(mut f) => f.write_all(format!($format $(, $arg)*).as_bytes())
         }
     }}
+}
+
+fn errno() -> i32 {
+    // _errno_location() is trivially safe to call and dereferencing the
+    // returned pointer is always safe because it's guaranteed to be valid and
+    // point to thread-local data.  (Thanks to Zach for this comment.)
+    unsafe { *libc::__errno_location() }
+}
+
+// Returns the string for posix error number |err|.
+fn strerror(err: i32) -> String {
+    let mut buffer = vec![0u8; 128];
+    // |err| is valid because it is the libc errno at all call sites.  |buffer|
+    // is converted to a valid address, and |buffer.len()| is a valid length.
+    let ret = unsafe {
+        libc::strerror_r(
+            err,
+            &mut buffer[0] as *mut u8 as *mut libc::c_char,
+            buffer.len(),
+        )
+    };
+    if ret != 0 {
+        panic!(
+            "strerror_r failed with '{}'; the original error number was '{}'",
+            ret, err
+        );
+    }
+    buffer.resize(
+        buffer
+            .iter()
+            .position(|&a| a == 0u8)
+            .unwrap_or(buffer.len()),
+        0u8,
+    );
+    match String::from_utf8(buffer) {
+        Ok(s) => s,
+        Err(e) => {
+            // Ouch---an error while trying to process another error.
+            // Very unlikely so we just panic.
+            panic!("error {:?} converting to UTF8", e);
+        }
+    }
 }
 
 fn duration_to_millis(duration: &Duration) -> i64 {
@@ -66,8 +104,8 @@ fn write_string(string: &str, path: &Path, append: bool) -> Result<()> {
     Ok(())
 }
 
-fn read_nonblocking_pipe(file: &mut File, mut buf: &mut [u8]) -> Result<usize> {
-    let status = file.read(&mut buf);
+fn read_nonblocking_pipe(file: &mut File, buf: &mut [u8]) -> Result<usize> {
+    let status = file.read(buf);
     let read_bytes = match status {
         Ok(n) => n,
         Err(_) if errno() == libc::EAGAIN => 0,
@@ -148,7 +186,7 @@ impl TestEvent {
         }
     }
 
-    fn low_mem_notify(&self, amount: usize, paths: &Paths, mut low_mem_device: &mut File) {
+    fn low_mem_notify(&self, amount: usize, paths: &Paths, low_mem_device: &mut File) {
         write_string(&amount.to_string(), &paths.available, false)
             .expect("available file: write failed");
         if amount == LOW_MEM_LOW_AVAILABLE {
@@ -158,8 +196,7 @@ impl TestEvent {
         } else {
             debug!("clearing low-mem device");
             let mut buf = [0; PAGE_SIZE];
-            read_nonblocking_pipe(&mut low_mem_device, &mut buf)
-                .expect("low-mem-device: clear failed");
+            read_nonblocking_pipe(low_mem_device, &mut buf).expect("low-mem-device: clear failed");
         }
     }
 
@@ -316,8 +353,8 @@ impl Dbus for MockDbus {
     fn process_dbus_events(
         &mut self,
         _watcher: &mut FileWatcher,
-    ) -> Result<Vec<(Event_Type, i64)>> {
-        let mut events: Vec<(Event_Type, i64)> = Vec::new();
+    ) -> Result<Vec<(event::Type, i64)>> {
+        let mut events: Vec<(event::Type, i64)> = Vec::new();
         let mut buf = [0u8; 4096];
         let read_bytes = read_nonblocking_pipe(&mut self.fifo_in, &mut buf)?;
         let mock_events = str::from_utf8(&buf[..read_bytes])?.lines();
@@ -327,8 +364,8 @@ impl Dbus for MockDbus {
             let event_time_string = split_iterator.next().unwrap();
             let event_time = event_time_string.parse::<i64>()?;
             match event_type {
-                "tab-discard" => events.push((Event_Type::TAB_DISCARD, event_time)),
-                "oom-kill" => events.push((Event_Type::OOM_KILL, event_time)),
+                "tab-discard" => events.push((event::Type::TAB_DISCARD, event_time)),
+                "oom-kill" => events.push((event::Type::OOM_KILL, event_time)),
                 other => return Err(format!("unexpected mock event {:?}", other).into()),
             };
         }
@@ -562,11 +599,11 @@ fn expected_clips(descriptor: &[u8]) -> Vec<(i64, i64)> {
 
     for &c in descriptor {
         if c != previous_char {
-            if (previous_char as char).is_digit(10) {
+            if (previous_char as char).is_ascii_digit() {
                 // End of clip.
                 clips.push((clip_start_time, time));
             }
-            if (c as char).is_digit(10) {
+            if (c as char).is_ascii_digit() {
                 // Start of clip.
                 clip_start_time = time;
                 assert_eq!(c, previous_clip + 1, "malformed clip descriptor");
@@ -582,7 +619,7 @@ fn expected_clips(descriptor: &[u8]) -> Vec<(i64, i64)> {
 // Converts a string starting with a timestamp in seconds (#####.##, with two
 // decimal digits) to a timestamp in milliseconds.
 fn time_from_sample_string(line: &str) -> Result<i64> {
-    let mut tokens = line.split(|c: char| !c.is_digit(10));
+    let mut tokens = line.split(|c: char| !c.is_ascii_digit());
     let seconds = match tokens.next() {
         Some(digits) => digits.parse::<i64>().unwrap(),
         None => return Err("no digits in string".into()),
@@ -737,20 +774,15 @@ pub fn setup_test_environment(paths: &Paths) {
     std::fs::create_dir(&paths.testing_root)
         .unwrap_or_else(|_| panic!("cannot create {}", paths.testing_root.to_str().unwrap()));
     mkfifo(&paths.testing_root.join(MOCK_DBUS_FIFO_NAME)).expect("failed to make mock dbus fifo");
-    create_dir_all(paths.vmstat.parent().unwrap()).expect("cannot create /proc");
     create_dir_all(paths.available.parent().unwrap()).expect("cannot create ../chromeos-low-mem");
     let sys_vm = paths.testing_root.join("proc/sys/vm");
     create_dir_all(&sys_vm).expect("cannot create /proc/sys/vm");
     create_dir_all(paths.low_mem_device.parent().unwrap()).expect("cannot create /dev");
 
-    let vmstat_content = include_str!("vmstat_content");
     let zoneinfo_content = include_str!("zoneinfo_content");
-    print_to_path!(&paths.vmstat, "{}", vmstat_content).expect("cannot initialize vmstat");
     print_to_path!(&paths.zoneinfo, "{}", zoneinfo_content).expect("cannot initialize zoneinfo");
     print_to_path!(&paths.available, "{}\n", LOW_MEM_HIGH_AVAILABLE)
         .expect("cannot initialize available");
-    print_to_path!(&paths.runnables, "0.16 0.18 0.22 4/981 8504")
-        .expect("cannot initialize runnables");
     print_to_path!(
         &paths.low_mem_margin,
         "{} {}",
@@ -767,37 +799,6 @@ pub fn setup_test_environment(paths: &Paths) {
         .expect("cannot initialize extra_free_kbytes");
 
     mkfifo(&paths.low_mem_device).expect("could not make mock low-mem device");
-}
-
-pub fn read_loadavg() {
-    // Calling getpid() is always safe.
-    let temp_file_name = format!("/tmp/memd-loadavg-{}", unsafe { libc::getpid() });
-    let mut temp_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(&temp_file_name)
-        .expect("cannot create");
-    // Unlink file immediately for more reliable cleanup.
-    std::fs::remove_file(&temp_file_name).expect("cannot remove");
-
-    temp_file
-        .write_all("0.42 0.31 1.50 44/1234 56789".as_bytes())
-        .expect("cannot write");
-    temp_file
-        .seek(std::io::SeekFrom::Start(0))
-        .expect("cannot seek");
-    assert_eq!(get_runnables(&temp_file).unwrap(), 44);
-    temp_file
-        .seek(std::io::SeekFrom::Start(0))
-        .expect("cannot seek");
-    temp_file
-        .write_all("1122.12 25.87 19.51 33/1234 56789".as_bytes())
-        .expect("cannot write");
-    temp_file
-        .seek(std::io::SeekFrom::Start(0))
-        .expect("cannot seek");
-    assert_eq!(get_runnables(&temp_file).unwrap(), 33);
 }
 
 pub fn queue_loop() {
@@ -819,18 +820,4 @@ pub fn queue_loop() {
     sq.head = 30;
     sq.count = 30;
     sq.output_from_time(&mut file, /*start_time=*/ 0).unwrap();
-}
-
-pub fn read_vmstat(paths: &Paths) {
-    setup_test_environment(paths);
-    let mut vmstat_values: [u64; VMSTAT_VALUES_COUNT] = [0, 0, 0, 0, 0];
-    get_vmstats(
-        &File::open(&paths.vmstat).expect("cannot open vmstat"),
-        &mut vmstat_values,
-    )
-    .expect("get_vmstats failure");
-    // Check one simple and one accumulated value.
-    assert_eq!(vmstat_values[1], 678);
-    assert_eq!(vmstat_values[2], 66);
-    teardown_test_environment(paths);
 }

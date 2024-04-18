@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,14 +12,14 @@
 #include <dbus/mock_object_manager.h>
 #include <dbus/mock_object_proxy.h>
 #include <gtest/gtest.h>
+#include "power_manager/powerd/testing/test_environment.h"
 
 using ::testing::_;
 using ::testing::AnyNumber;
 using ::testing::Return;
 using ::testing::SaveArg;
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -31,13 +31,13 @@ constexpr char kTestAddressPath[] = "12_34_56_AB_CD_EF";
 
 }  // namespace
 
-class BluezBatteryProviderTest : public ::testing::Test {
+class BluezBatteryProviderTest : public TestEnvironment {
  public:
-  BluezBatteryProviderTest() {}
+  BluezBatteryProviderTest() = default;
   BluezBatteryProviderTest(const BluezBatteryProviderTest&) = delete;
   BluezBatteryProviderTest& operator=(const BluezBatteryProviderTest&) = delete;
 
-  ~BluezBatteryProviderTest() override {}
+  ~BluezBatteryProviderTest() override = default;
 
   void SetUp() override { bus_ = new dbus::MockBus(dbus::Bus::Options()); }
 
@@ -149,5 +149,4 @@ TEST_F(BluezBatteryProviderTest, BatteryUpdate) {
   bluez_battery_provider_.Reset();
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

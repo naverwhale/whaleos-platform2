@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,9 @@
 #define MINIOS_SCREEN_INTERFACE_H_
 
 #include <string>
+
+#include <brillo/errors/error.h>
+#include <minios/proto_bindings/minios.pb.h>
 
 #include "minios/screen_types.h"
 
@@ -34,6 +37,15 @@ class ScreenInterface {
 
   // Get the name of the screen as a string.
   virtual std::string GetName() = 0;
+
+  // Get the `State` for each screen.
+  virtual State GetState() = 0;
+
+  // Advance to the next screen iff all requirements are satisfied.
+  virtual bool MoveForward(brillo::ErrorPtr* error) = 0;
+
+  // Advance to the previous screen iff all requirements are satisfied.
+  virtual bool MoveBackward(brillo::ErrorPtr* error) = 0;
 };
 
 }  // namespace minios

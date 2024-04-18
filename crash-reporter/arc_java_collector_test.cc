@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,14 +12,19 @@
 
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/stringprintf.h>
 #include <base/test/simple_test_clock.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library.h>
+#include <metrics/metrics_library_mock.h>
 
 #include "crash-reporter/arc_util.h"
 #include "crash-reporter/paths.h"
 #include "crash-reporter/test_util.h"
-#include "crash-reporter/util.h"
+
+using ::testing::TestWithParam;
 
 namespace {
 
@@ -34,14 +39,25 @@ constexpr char kLsbContents[] =
     "CHROMEOS_RELEASE_CHROME_MILESTONE=82\n"
     "CHROMEOS_RELEASE_TRACK=beta-channel\n"
     "CHROMEOS_RELEASE_DESCRIPTION=6727.0.2015_01_26_0853 (Test Build - foo)";
-const base::Time kFakeOsTime =
-    base::Time::UnixEpoch() + base::TimeDelta::FromDays(1234);
+const base::Time kFakeOsTime = base::Time::UnixEpoch() + base::Days(1234);
+
+#if USE_ARCPP
+constexpr char kARCStatus[] = "Built with ARC++";
+#elif USE_ARCVM
+constexpr char kARCStatus[] = "Built with ARCVM";
+#else
+constexpr char kARCStatus[] = "Not built with ARC";
+#endif
 
 }  // namespace
 
 class TestArcJavaCollector : public ArcJavaCollector {
  public:
-  explicit TestArcJavaCollector(const base::FilePath& crash_directory) {
+  explicit TestArcJavaCollector(const base::FilePath& crash_directory)
+      : ArcJavaCollector(
+            base::MakeRefCounted<
+                base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+                std::make_unique<MetricsLibraryMock>())) {
     Initialize(false /* early */);
     set_crash_directory_for_test(crash_directory);
   }
@@ -70,8 +86,7 @@ class ArcJavaCollectorTest : public ::testing::Test {
 
     std::unique_ptr<base::SimpleTestClock> test_clock =
         std::make_unique<base::SimpleTestClock>();
-    test_clock->SetNow(base::Time::UnixEpoch() +
-                       base::TimeDelta::FromMilliseconds(kFakeNow));
+    test_clock->SetNow(base::Time::UnixEpoch() + base::Milliseconds(kFakeNow));
     collector_->set_test_clock(std::move(test_clock));
     collector_->set_test_kernel_info(kKernelName, kKernelVersion);
 
@@ -81,6 +96,8 @@ class ArcJavaCollectorTest : public ::testing::Test {
     ASSERT_TRUE(base::TouchFile(lsb_release, kFakeOsTime, kFakeOsTime));
     collector_->set_lsb_release_for_test(lsb_release);
   }
+
+  void TearDown() override { paths::SetPrefixForTesting(base::FilePath()); }
 
  protected:
   base::ScopedTempDir scoped_temp_dir_;
@@ -136,8 +153,7 @@ TEST_F(ArcJavaCollectorTest, CreateReportForJavaCrash) {
       "\n" +
       exception_info;
 
-  const base::TimeDelta uptime_value =
-      base::TimeDelta::FromMilliseconds(123456);
+  const base::TimeDelta uptime_value = base::Milliseconds(123456);
   const std::string uptime_formatted = "2min 3s";
 
   bool out_of_capacity = false;
@@ -179,6 +195,9 @@ TEST_F(ArcJavaCollectorTest, CreateReportForJavaCrash) {
       "upload_var_package=com.android.settings v30 (11)\n"
       "upload_text_exception_info=%s\n"
       "upload_var_channel=beta\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Arc\n"
+      "upload_var_arc_status=%s\n"
       "upload_var_reportTimeMillis=%" PRId64
       "\n"
       "exec_name=com.android.settings\n"
@@ -191,8 +210,8 @@ TEST_F(ArcJavaCollectorTest, CreateReportForJavaCrash) {
       "upload_var_osVersion=%s\n"
       "payload=%s\n"
       "done=1\n",
-      uptime_formatted.c_str(), info_path.BaseName().value().c_str(), kFakeNow,
-      product_version.c_str(),
+      uptime_formatted.c_str(), info_path.BaseName().value().c_str(),
+      kARCStatus, kFakeNow, product_version.c_str(),
       (kFakeOsTime - base::Time::UnixEpoch()).InMilliseconds(), kKernelName,
       kKernelVersion, log_path.BaseName().value().c_str());
   base::FilePath meta_path;
@@ -208,7 +227,7 @@ TEST_F(ArcJavaCollectorTest, AddArcMetaData) {
   const std::string crash_type = "system_app";
 
   const base::TimeDelta uptime_value =
-      base::TimeDelta::FromMilliseconds(123456789);  // 1d 10h 17min 36s
+      base::Milliseconds(123456789);  // 1d 10h 17min 36s
   const std::string uptime_formatted = "1d 10h 17min 36s";
 
   collector_->AddArcMetaData(process_name, crash_type, uptime_value);
@@ -217,3 +236,56 @@ TEST_F(ArcJavaCollectorTest, AddArcMetaData) {
   EXPECT_TRUE(
       collector_->HasMetaData(arc_util::kUptimeField, uptime_formatted));
 }
+
+struct ArcJavaCollectorComputeCrashSeverityTestCase {
+  std::string crash_type;
+  CrashCollector::CrashSeverity expected_severity;
+  CrashCollector::Product expected_product;
+};
+
+class ComputeArcJavaCollectorCrashSeverityParameterizedTest
+    : public ::testing::Test,
+      public ::testing::WithParamInterface<
+          ArcJavaCollectorComputeCrashSeverityTestCase> {};
+
+TEST_P(ComputeArcJavaCollectorCrashSeverityParameterizedTest,
+       ComputeCrashSeverity_Arc) {
+  const ArcJavaCollectorComputeCrashSeverityTestCase& test_case = GetParam();
+  ArcJavaCollector java_collector(
+      (base::MakeRefCounted<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+          std::make_unique<MetricsLibraryMock>())));
+  java_collector.SetCrashTypeForTesting(test_case.crash_type);
+
+  CrashCollector::ComputedCrashSeverity computed_severity =
+      java_collector.ComputeSeverity("test_exec_name");
+
+  EXPECT_EQ(computed_severity.crash_severity, test_case.expected_severity);
+  EXPECT_EQ(computed_severity.product_group, test_case.expected_product);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ComputeArcJavaCollectorCrashSeverityParameterizedTest,
+    ComputeArcJavaCollectorCrashSeverityParameterizedTest,
+    testing::ValuesIn<ArcJavaCollectorComputeCrashSeverityTestCase>({
+        {"data_app_anr", CrashCollector::CrashSeverity::kWarning,
+         CrashCollector::Product::kArc},
+        {"data_app_crash", CrashCollector::CrashSeverity::kWarning,
+         CrashCollector::Product::kArc},
+        {"data_app_native_crash", CrashCollector::CrashSeverity::kWarning,
+         CrashCollector::Product::kArc},
+        {"native_crash", CrashCollector::CrashSeverity::kError,
+         CrashCollector::Product::kArc},
+        {"system_app_anr", CrashCollector::CrashSeverity::kError,
+         CrashCollector::Product::kArc},
+        {"system_app_crash", CrashCollector::CrashSeverity::kError,
+         CrashCollector::Product::kArc},
+        {"system_app_wtf", CrashCollector::CrashSeverity::kInfo,
+         CrashCollector::Product::kArc},
+        {"system_server_wtf", CrashCollector::CrashSeverity::kInfo,
+         CrashCollector::Product::kArc},
+        {"system_server_crash", CrashCollector::CrashSeverity::kFatal,
+         CrashCollector::Product::kArc},
+        {"system_server_watchdog", CrashCollector::CrashSeverity::kFatal,
+         CrashCollector::Product::kArc},
+    }));

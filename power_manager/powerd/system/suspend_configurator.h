@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,24 @@
 #include <memory>
 #include <string>
 
+#include "power_manager/powerd/system/dbus_wrapper.h"
+
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/time/time.h>
-#include <components/timers/alarm_timer_chromeos.h>
+#include <featured/feature_library.h>
 
 namespace power_manager {
 
 class PrefsInterface;
 
 namespace system {
+
+class DBusWrapperInterface;
+
+extern const char kCpuInfoPath[];
+extern const char kSuspendToHibernateFeatureName[];
+extern const char kSnapshotDevicePath[];
+extern const char kHibermanExecutablePath[];
 
 // Interface to configure suspend-related kernel parameters on startup or
 // before suspend as needed.
@@ -31,8 +39,9 @@ class SuspendConfiguratorInterface {
   virtual ~SuspendConfiguratorInterface() = default;
 
   // Do pre-suspend configuration and logging just before asking kernel to
-  // suspend.
-  virtual void PrepareForSuspend(const base::TimeDelta& suspend_duration) = 0;
+  // suspend. Returns the wakealarm time that gets programmed into the RTC.
+  virtual uint64_t PrepareForSuspend(
+      const base::TimeDelta& suspend_duration) = 0;
   // Do post-suspend work just after resuming from suspend. Returns false if the
   // last suspend was a failure. Returns true otherwise.
   virtual bool UndoPrepareForSuspend() = 0;
@@ -51,10 +60,11 @@ class SuspendConfigurator : public SuspendConfiguratorInterface {
 
   ~SuspendConfigurator() override = default;
 
-  void Init(PrefsInterface* prefs);
+  void Init(feature::PlatformFeaturesInterface* platform_features,
+            PrefsInterface* prefs);
 
   // SuspendConfiguratorInterface implementation.
-  void PrepareForSuspend(const base::TimeDelta& suspend_duration) override;
+  uint64_t PrepareForSuspend(const base::TimeDelta& suspend_duration) override;
   bool UndoPrepareForSuspend() override;
   bool IsHibernateAvailable() override;
 
@@ -71,6 +81,18 @@ class SuspendConfigurator : public SuspendConfiguratorInterface {
   // Returns true if the serial console is enabled.
   bool IsSerialConsoleEnabled();
 
+  // Get cpu information of the system
+  // Reads from /proc/cpuinfo by default
+  bool ReadCpuInfo(std::string& cpuInfo);
+
+  // Returns true if running on an Intel CPU.
+  bool HasIntelCpu();
+
+  // Returns true if a hiberimage exists.
+  // hiberimage is an LVM volume which will only be active after hiberman has
+  // configured hiberimage.
+  bool HiberimageExists();
+
   // Reads preferences and sets |suspend_mode_|.
   void ReadSuspendMode();
 
@@ -78,24 +100,17 @@ class SuspendConfigurator : public SuspendConfiguratorInterface {
   // given file path.
   base::FilePath GetPrefixedFilePath(const base::FilePath& file_path) const;
 
-  PrefsInterface* prefs_ = nullptr;  // weak
+  // Used for communicating with featured.
+  feature::PlatformFeaturesInterface* platform_features_ = nullptr;  // unowned
+  PrefsInterface* prefs_ = nullptr;                                  // unowned
+
   // Prefixing all paths for testing with a temp directory. Empty (no
   // prefix) by default.
   base::FilePath prefix_path_for_testing_;
 
-  // Timer to wake the system from suspend. Set when suspend_duration is passed
-  // to  PrepareForSuspend().
-  std::unique_ptr<timers::SimpleAlarmTimer> alarm_ =
-      timers::SimpleAlarmTimer::Create();
-
   // Mode for suspend. One of Suspend-to-idle, Power-on-suspend, or
   // Suspend-to-RAM.
   std::string suspend_mode_;
-
-  // Whether hibernate support has already been checked, and what the
-  // result of the check was.
-  bool hibernate_availability_known_ = false;
-  bool hibernate_available_;
 };
 
 }  // namespace system

@@ -1,189 +1,224 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef PATCHPANEL_MANAGER_H_
 #define PATCHPANEL_MANAGER_H_
 
-#include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/files/file_descriptor_watcher_posix.h>
+#include <base/files/scoped_file.h>
 #include <base/memory/weak_ptr.h>
-#include <brillo/daemons/dbus_daemon.h>
-#include <brillo/process/process_reaper.h>
-#include <chromeos/dbus/service_constants.h>
 #include <patchpanel/proto_bindings/patchpanel_service.pb.h>
 
 #include "patchpanel/address_manager.h"
 #include "patchpanel/arc_service.h"
+#include "patchpanel/clat_service.h"
 #include "patchpanel/counters_service.h"
 #include "patchpanel/crostini_service.h"
 #include "patchpanel/datapath.h"
-#include "patchpanel/helper_process.h"
+#include "patchpanel/dhcp_server_controller.h"
+#include "patchpanel/downstream_network_service.h"
+#include "patchpanel/guest_ipv6_service.h"
+#include "patchpanel/multicast_counters_service.h"
+#include "patchpanel/multicast_metrics.h"
 #include "patchpanel/network_monitor_service.h"
 #include "patchpanel/routing_service.h"
+#include "patchpanel/rtnl_client.h"
 #include "patchpanel/shill_client.h"
-#include "patchpanel/socket.h"
-#include "patchpanel/subnet.h"
+#include "patchpanel/subprocess_controller.h"
+#include "patchpanel/system.h"
 
 namespace patchpanel {
 
-// Struct to specify which forwarders to start and stop.
-struct ForwardingSet {
-  bool ipv6;
-  bool multicast;
-};
+class QoSService;
 
-// Main class that runs the mainloop and responds to LAN interface changes.
-class Manager final : public brillo::DBusDaemon {
+// The core implementation of the patchpanel daemon.
+class Manager {
  public:
-  Manager(std::unique_ptr<HelperProcess> adb_proxy,
-          std::unique_ptr<HelperProcess> mcast_proxy,
-          std::unique_ptr<HelperProcess> nd_proxy);
+  // The notification callbacks to the client side.
+  class ClientNotifier {
+   public:
+    // Takes ownership of |virtual_device|.
+    virtual void OnNetworkDeviceChanged(
+        NetworkDevice* virtual_device,
+        NetworkDeviceChangedSignal::Event event) = 0;
+    virtual void OnNetworkConfigurationChanged() = 0;
+    virtual void OnNeighborReachabilityEvent(
+        int ifindex,
+        const net_base::IPAddress& ip_addr,
+        NeighborLinkMonitor::NeighborRole role,
+        NeighborReachabilityEventSignal::EventType event_type) = 0;
+  };
+
+  // The caller should guarantee |system|, |process_manager|, |metrics| and
+  // |client| variables outlive the created Manager instance.
+  Manager(const base::FilePath& cmd_path,
+          System* system,
+          shill::ProcessManager* process_manager,
+          MetricsLibraryInterface* metrics,
+          ClientNotifier* client_notifier,
+          std::unique_ptr<ShillClient> shill_client,
+          std::unique_ptr<RTNLClient> rtnl_client);
   Manager(const Manager&) = delete;
   Manager& operator=(const Manager&) = delete;
+  virtual ~Manager();
 
-  ~Manager() = default;
+  // Queries the list of virtual devices managed by patchpanel.
+  GetDevicesResponse GetDevices() const;
 
-  void StartForwarding(const std::string& ifname_physical,
-                       const std::string& ifname_virtual,
-                       const ForwardingSet& fs = {.ipv6 = true,
-                                                  .multicast = true});
+  // Handles notification indicating ARC++ is booting up.
+  bool ArcStartup(pid_t pid);
 
-  void StopForwarding(const std::string& ifname_physical,
-                      const std::string& ifname_virtual,
-                      const ForwardingSet& fs = {.ipv6 = true,
-                                                 .multicast = true});
+  // Handles notification indicating ARC++ is spinning down.
+  void ArcShutdown();
 
-  // This function is used to enable specific features only on selected
-  // combination of Android version, Chrome version, and boards.
-  // Empty |supportedBoards| means that the feature should be enabled on all
-  // board.
-  static bool ShouldEnableFeature(
-      int min_android_sdk_version,
-      int min_chrome_milestone,
-      const std::vector<std::string>& supported_boards,
-      const std::string& feature_name);
+  // Handles notification indicating ARCVM is booting up.
+  std::optional<patchpanel::ArcVmStartupResponse> ArcVmStartup(uint32_t cid);
 
- protected:
-  int OnInit() override;
+  // Handles notification indicating ARCVM is spinning down.
+  void ArcVmShutdown(uint32_t cid);
+
+  // Handles notification indicating a Termina VM is booting up.
+  const CrostiniService::CrostiniDevice* const TerminaVmStartup(uint64_t vm_id);
+
+  // Handles notification indicating a Termina VM is spinning down.
+  void TerminaVmShutdown(uint64_t vm_id);
+
+  // Handles notification indicating a Parallels VM is booting up.
+  const CrostiniService::CrostiniDevice* const ParallelsVmStartup(
+      uint64_t vm_id, uint32_t subnet_index);
+
+  // Handles notification indicating a Parallels VM is spinning down.
+  void ParallelsVmShutdown(uint64_t vm_id);
+
+  // Handles notification indicating a Bruschetta VM is booting up.
+  const CrostiniService::CrostiniDevice* const BruschettaVmStartup(
+      uint64_t vm_id);
+
+  // Handles notification indicating a Bruschetta VM is spinning down.
+  void BruschettaVmShutdown(uint64_t vm_id);
+
+  // Sets a VPN intent fwmark on a socket.
+  bool SetVpnIntent(SetVpnIntentRequest::VpnRoutingPolicy policy,
+                    const base::ScopedFD& sockfd);
+
+  // Connects and routes an existing network namespace created via minijail or
+  // through rtnetlink RTM_NEWNSID.
+  ConnectNamespaceResponse ConnectNamespace(
+      const patchpanel::ConnectNamespaceRequest& request,
+      const base::ScopedFD& client_fd);
+
+  // Queries traffic counters.
+  std::map<CountersService::CounterKey, CountersService::Counter>
+  GetTrafficCounters(const std::set<std::string>& shill_devices) const;
+
+  // Creates iptables rules requests from permission_broker.
+  bool ModifyPortRule(const patchpanel::ModifyPortRuleRequest& request);
+
+  // Starts or stops VPN lockdown.
+  void SetVpnLockdown(bool enable_vpn_lockdown);
+
+  // Creates iptables rules requests from dns-proxy.
+  bool SetDnsRedirectionRule(
+      const patchpanel::SetDnsRedirectionRuleRequest& request,
+      const base::ScopedFD& client_fd);
+
+  // Creates an L3 network on a network interface and tethered to an upstream
+  // network.
+  DownstreamNetworkResult CreateTetheredNetwork(
+      const TetheredNetworkRequest& request, const base::ScopedFD& client_fd);
+
+  // Creates a local-only L3 network on a network interface.
+  DownstreamNetworkResult CreateLocalOnlyNetwork(
+      const LocalOnlyNetworkRequest& request, const base::ScopedFD& client_fd);
+
+  // Provides L3 and DHCP client information about clients connected to a
+  // network created with CreateTetheredNetwork or CreateLocalOnlyNetwork.
+  std::optional<
+      std::pair<DownstreamNetworkInfo, std::vector<DownstreamClientInfo>>>
+  GetDownstreamNetworkInfo(const std::string& downstream_ifname) const;
+
+  // Start/Stop forwarding multicast traffic to ARC when ARC power state
+  // changes.
+  // When power state changes into interactive, start forwarding IPv4 and IPv6
+  // multicast mDNS and SSDP traffic for all non-WiFi interfaces, and for WiFi
+  // interface only when Android WiFi multicast lock is held by any app in ARC.
+  // When power state changes into non-interactive, stop forwarding multicast
+  // traffic for all interfaces if enabled.
+  void NotifyAndroidInteractiveState(bool is_interactive);
+
+  // Start/Stop forwarding WiFi multicast traffic to and from ARC when Android
+  // WiFi multicast lock held status changes. Start forwarding IPv4 and IPv6
+  // multicast mDNS and SSDP traffic for WiFi interfaces only when
+  // device power state is interactive and Android WiFi multicast lock is held
+  // by any app in ARC, otherwise stop multicast forwarder for ARC WiFi
+  // interface.
+  void NotifyAndroidWifiMulticastLockChange(bool is_held);
+
+  // Apply changes based on the socket connection event.
+  // Currently this is only used for ARC socket connections and applies QoS
+  // setup and resets the QoS setup on connection closed.
+  void NotifySocketConnectionEvent(
+      const NotifySocketConnectionEventRequest& request);
+
+  // Set feature enabled flag.
+  bool SetFeatureFlag(patchpanel::SetFeatureFlagRequest::FeatureFlag flag,
+                      bool enabled);
+
+  // Returns the CurHopLimit of upstream from sysctl minus 1.
+  static std::optional<int> CalculateDownstreamCurHopLimit(
+      System* system, const std::string& upstream_iface);
 
  private:
+  friend class ManagerTest;
+
+  // Struct to specify which forwarders to start and stop.
+  struct ForwardingSet {
+    bool ipv6;
+    bool multicast;
+  };
+
+  // Callbacks from |shill_client_|.
   void OnShillDefaultLogicalDeviceChanged(
-      const ShillClient::Device& new_device,
-      const ShillClient::Device& prev_device);
+      const ShillClient::Device* new_device,
+      const ShillClient::Device* prev_device);
   void OnShillDefaultPhysicalDeviceChanged(
-      const ShillClient::Device& new_device,
-      const ShillClient::Device& prev_device);
-  void OnShillDevicesChanged(const std::vector<std::string>& added,
-                             const std::vector<std::string>& removed);
-  void OnIPConfigsChanged(const std::string& ifname,
-                          const ShillClient::IPConfig& ipconfig);
+      const ShillClient::Device* new_device,
+      const ShillClient::Device* prev_device);
+  void OnShillDevicesChanged(const std::vector<ShillClient::Device>& added,
+                             const std::vector<ShillClient::Device>& removed);
+  void OnIPConfigsChanged(const ShillClient::Device& shill_device);
+  void OnIPv6NetworkChanged(const ShillClient::Device& shill_device);
+  void OnDoHProvidersChanged(const ShillClient::DoHProviders& doh_providers);
 
-  void OnGuestDeviceChanged(const Device& virtual_device,
-                            Device::ChangeEvent event,
-                            GuestMessage::GuestType guest_type);
+  // Callbacks from |arc_svc_| and |cros_svc_| to notify Manager about new
+  // or removed virtual Devices.
+  void OnArcDeviceChanged(const ShillClient::Device& shill_device,
+                          const ArcService::ArcDevice& arc_device,
+                          ArcService::ArcDeviceEvent event);
+  void OnCrostiniDeviceEvent(
+      const CrostiniService::CrostiniDevice& virtual_device,
+      CrostiniService::CrostiniDeviceEvent event);
 
-  void InitialSetup();
-
-  bool StartArc(pid_t pid);
-  void StopArc();
-  bool StartArcVm(uint32_t cid);
-  void StopArcVm(uint32_t cid);
-  bool StartCrosVm(uint64_t vm_id,
-                   GuestMessage::GuestType vm_type,
-                   uint32_t subnet_index = kAnySubnetIndex);
-  void StopCrosVm(uint64_t vm_id, GuestMessage::GuestType vm_type);
-
-  // Callback from ProcessReaper to notify Manager that one of the
-  // subprocesses died.
-  void OnSubprocessExited(pid_t pid, const siginfo_t& info);
-  void RestartSubprocess(HelperProcess* subproc);
-
-  // Callback from Daemon to notify that the message loop exits and before
-  // Daemon::Run() returns.
-  void OnShutdown(int* exit_code) override;
-
-  // Callback from NDProxy telling us to add a new IPv6 route to guest or IPv6
-  // address to guest-facing interface.
-  void OnNDProxyMessage(const NDProxyMessage& msg);
-
-  // Handles DBus request for querying the list of virtual devices managed by
-  // patchpanel.
-  std::unique_ptr<dbus::Response> OnGetDevices(dbus::MethodCall* method_call);
-
-  // Handles DBus notification indicating ARC++ is booting up.
-  std::unique_ptr<dbus::Response> OnArcStartup(dbus::MethodCall* method_call);
-
-  // Handles DBus notification indicating ARC++ is spinning down.
-  std::unique_ptr<dbus::Response> OnArcShutdown(dbus::MethodCall* method_call);
-
-  // Handles DBus notification indicating ARCVM is booting up.
-  std::unique_ptr<dbus::Response> OnArcVmStartup(dbus::MethodCall* method_call);
-
-  // Handles DBus notification indicating ARCVM is spinning down.
-  std::unique_ptr<dbus::Response> OnArcVmShutdown(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus notification indicating a Termina VM is booting up.
-  std::unique_ptr<dbus::Response> OnTerminaVmStartup(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus notification indicating a Termina VM is spinning down.
-  std::unique_ptr<dbus::Response> OnTerminaVmShutdown(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus notification indicating a Plugin VM is booting up.
-  std::unique_ptr<dbus::Response> OnPluginVmStartup(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus notification indicating a Plugin VM is spinning down.
-  std::unique_ptr<dbus::Response> OnPluginVmShutdown(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus requests for setting a VPN intent fwmark on a socket.
-  std::unique_ptr<dbus::Response> OnSetVpnIntent(dbus::MethodCall* method_call);
-
-  // Handles DBus requests for connect and routing an existing network
-  // namespace created via minijail or through rtnetlink RTM_NEWNSID.
-  std::unique_ptr<dbus::Response> OnConnectNamespace(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus requests for querying traffic counters.
-  std::unique_ptr<dbus::Response> OnGetTrafficCounters(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus requests for creating iptables rules requests from
-  // permission_broker.
-  std::unique_ptr<dbus::Response> OnModifyPortRule(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus requests for starting and stopping VPN lockdown.
-  std::unique_ptr<dbus::Response> OnSetVpnLockdown(
-      dbus::MethodCall* method_call);
-
-  // Handles DBus requests for creating iptables rules requests from dns-proxy.
-  std::unique_ptr<dbus::Response> OnSetDnsRedirectionRule(
-      dbus::MethodCall* method_call);
-
-  // Sends out DBus signal for notifying neighbor reachability event.
+  // Callback from |network_monitor_svc_|.
   void OnNeighborReachabilityEvent(
       int ifindex,
-      const shill::IPAddress& ip_addr,
+      const net_base::IPAddress& ip_addr,
       NeighborLinkMonitor::NeighborRole role,
       NeighborReachabilityEventSignal::EventType event_type);
 
-  std::unique_ptr<patchpanel::ConnectNamespaceResponse> ConnectNamespace(
-      base::ScopedFD client_fd,
-      const patchpanel::ConnectNamespaceRequest& request);
-
-  // Helper functions for process lifetime tracking.
-  int AddLifelineFd(int dbus_fd);
+  // Helper functions for tracking DBus request lifetime with file descriptors
+  // provided by DBus clients. Returns a duplicate wrapped in base::ScopedFD of
+  // |dbus_fd|. The duplicate is added to the list of file descriptors watched
+  // for invalidation. Returns an invalid ScopedFD object if it fails.
+  base::ScopedFD AddLifelineFd(const base::ScopedFD& dbus_fd);
   bool DeleteLifelineFd(int dbus_fd);
 
   // Detects if any file descriptor committed in patchpanel's DBus API has been
@@ -191,8 +226,34 @@ class Manager final : public brillo::DBusDaemon {
   // found.
   void OnLifelineFdClosed(int client_fd);
 
-  bool RedirectDns(base::ScopedFD client_fd,
-                   const patchpanel::SetDnsRedirectionRuleRequest& request);
+  void StartForwarding(const ShillClient::Device& shill_device,
+                       const std::string& ifname_virtual,
+                       const ForwardingSet& fs = {.ipv6 = true,
+                                                  .multicast = true},
+                       const std::optional<int>& mtu = std::nullopt,
+                       const std::optional<int>& hop_limit = std::nullopt);
+  void StopForwarding(const ShillClient::Device& shill_device,
+                      const std::string& ifname_virtual,
+                      const ForwardingSet& fs = {.ipv6 = true,
+                                                 .multicast = true});
+
+  const CrostiniService::CrostiniDevice* StartCrosVm(
+      uint64_t vm_id,
+      CrostiniService::VMType vm_type,
+      uint32_t subnet_index = kAnySubnetIndex);
+  void StopCrosVm(uint64_t vm_id, CrostiniService::VMType vm_type);
+
+  // Checks the validaty of a CreateTetheredNetwork or CreatedLocalOnlyNetwork
+  // DBus request.
+  bool ValidateDownstreamNetworkRequest(const DownstreamNetworkInfo& info);
+  // Creates a downstream L3 network on the network interface specified by the
+  // |info|. If successful, |client_fd| is monitored and triggers the teardown
+  // of the network setup when closed.
+  DownstreamNetworkResult HandleDownstreamNetworkInfo(
+      const base::ScopedFD& client_fd, const DownstreamNetworkInfo& info);
+
+  std::vector<DownstreamClientInfo> GetDownstreamClientInfo(
+      const std::string& downstream_ifname) const;
 
   // Disable and re-enable IPv6 inside a namespace.
   void RestartIPv6(const std::string& netns_name);
@@ -200,53 +261,84 @@ class Manager final : public brillo::DBusDaemon {
   // Dispatch |msg| to child processes.
   void SendGuestMessage(const GuestMessage& msg);
 
-  friend std::ostream& operator<<(std::ostream& stream, const Manager& manager);
+  // b/294287313: Temporary solution to support tethering with a multiplexed PDN
+  // brought up specifically for tethering and with no associated shill Device.
+  // This method creates a fake ShillClient::Device and creates the minimal
+  // Datapath setup to support CreateTetheredNetwork() pointing at
+  // |upstream_ifname| as the upstream network.
+  std::optional<ShillClient::Device> StartTetheringUpstreamNetwork(
+      const TetheredNetworkRequest& request);
+  // Teardowns the minimal Datapath setup created with
+  // StartTetheringUpstreamNetwork().
+  void StopTetheringUpstreamNetwork(
+      // const std::string& upstream_ifname);
+      const ShillClient::Device& upstream_network);
 
+  // patchpanel::System shared for all subsystems.
+  System* system_;
+
+  // UMA metrics client.
+  MetricsLibraryInterface* metrics_;
+
+  // The client of the Manager.
+  ClientNotifier* client_notifier_;
+
+  // Shill Dbus client.
   std::unique_ptr<ShillClient> shill_client_;
-  std::unique_ptr<RoutingService> routing_svc_;
 
-  // Guest services.
+  // rtnetlink client.
+  std::unique_ptr<RTNLClient> rtnl_client_;
+
+  // High level routing and iptables controller service.
+  std::unique_ptr<Datapath> datapath_;
+  // Routing service.
+  std::unique_ptr<RoutingService> routing_svc_;
+  // ARC++/ARCVM service.
   std::unique_ptr<ArcService> arc_svc_;
+  // Crostini and other VM service.
   std::unique_ptr<CrostiniService> cros_svc_;
 
-  // DBus service.
-  dbus::ExportedObject* dbus_svc_path_;  // Owned by |bus_|.
+  // adb connection forwarder service.
+  std::unique_ptr<SubprocessController> adb_proxy_;
+  // IPv4 and IPv6 Multicast forwarder service.
+  std::unique_ptr<SubprocessController> mcast_proxy_;
+  // IPv6 neighbor discovery forwarder process handler.
+  std::unique_ptr<SubprocessController> nd_proxy_;
 
-  // Other services.
-  brillo::ProcessReaper process_reaper_;
-  std::unique_ptr<HelperProcess> adb_proxy_;
-  std::unique_ptr<HelperProcess> mcast_proxy_;
-  std::unique_ptr<HelperProcess> nd_proxy_;
+  // IPv6 address provisioning / ndp forwarding service.
+  std::unique_ptr<GuestIPv6Service> ipv6_svc_;
+  // CLAT service.
+  std::unique_ptr<ClatService> clat_svc_;
+  // Traffic counter service.
   std::unique_ptr<CountersService> counters_svc_;
+  // Multicast packet counter service.
+  std::unique_ptr<MulticastCountersService> multicast_counters_svc_;
+  // L2 neighbor monitor service.
   std::unique_ptr<NetworkMonitorService> network_monitor_svc_;
+  // QoS service.
+  std::unique_ptr<QoSService> qos_svc_;
 
+  // The DHCP server controllers, keyed by its downstream interface.
+  std::map<std::string, std::unique_ptr<DHCPServerController>>
+      dhcp_server_controllers_;
+
+  // IPv4 prefix and address manager.
   AddressManager addr_mgr_;
-
-  // |cached_feature_enabled| stores the cached result of if a feature should be
-  // enabled.
-  static std::map<const std::string, bool> cached_feature_enabled_;
-
-  std::unique_ptr<Datapath> datapath_;
-
-  // TODO(b/174538233) Introduce ForwardingGroup to properly track the state of
-  // traffic forwarding (ndproxy, multicast) between upstream devices managed by
-  // shill and downstream devices managed by patchpanel.
-  // All downstream interfaces managed by patchpanel for which multicast
-  // forwarding was enabled. This information cannot always be retrieved from
-  // the IFF_MULTICAST flag of the upstream interface managed by shill if it
-  // does not exist anymore.
-  std::set<std::string> multicast_virtual_ifnames_;
-  // All downstream interfaces managed by patchpanel for which IPv6 neighbor
-  // discovery proxy was enabled. This information cannot always be retrieved
-  // from the technology type of the upstream interface managed by shill if it
-  // does not exist anymore.
-  std::set<std::string> ndproxy_virtual_ifnames_;
 
   // All namespaces currently connected through patchpanel ConnectNamespace
   // API, keyed by file descriptors committed by clients when calling
   // ConnectNamespace.
   std::map<int, ConnectedNamespace> connected_namespaces_;
   int connected_namespaces_next_id_{0};
+
+  // DNS proxy's IPv4 and IPv6 addresses keyed by its guest interface.
+  std::map<std::string, net_base::IPv4Address> dns_proxy_ipv4_addrs_;
+  std::map<std::string, net_base::IPv6Address> dns_proxy_ipv6_addrs_;
+
+  // All external network interfaces currently managed by patchpanel through
+  // the CreateTetheredNetwork or CreateLocalOnlyNetwork DBus APIs, keyed by the
+  // file descriptors committed by the DBus clients.
+  std::map<int, DownstreamNetworkInfo> downstream_networks_;
 
   // All rules currently created through patchpanel RedirectDns
   // API, keyed by file descriptors committed by clients when calling the
@@ -258,9 +350,19 @@ class Manager final : public brillo::DBusDaemon {
   std::map<int, std::unique_ptr<base::FileDescriptorWatcher::Controller>>
       lifeline_fd_controllers_;
 
+  // Whether multicast lock is held by any app in ARC, used to decide whether
+  // to start/stop forwarding multicast traffic to ARC on WiFi.
+  bool android_wifi_multicast_lock_held_ = false;
+
+  // Whether device is interactive, used to decide whether to start/stop
+  // forwarding multicast traffic to ARC on all multicast enabled networks.
+  bool is_arc_interactive_ = true;
+
+  // Fetches and reports multicast packet count to UMA metrics.
+  std::unique_ptr<MulticastMetrics> multicast_metrics_;
+
   base::WeakPtrFactory<Manager> weak_factory_{this};
 };
 
 }  // namespace patchpanel
-
 #endif  // PATCHPANEL_MANAGER_H_

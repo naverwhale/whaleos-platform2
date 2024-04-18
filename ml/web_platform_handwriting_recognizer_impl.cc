@@ -1,9 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ml/web_platform_handwriting_recognizer_impl.h"
 
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -100,7 +101,7 @@ void WebPlatformHandwritingRecognizerImpl::GetPrediction(
     }
   }
   // Recognition failed, run callback on empty result.
-  std::move(callback).Run(base::nullopt);
+  std::move(callback).Run(std::nullopt);
   request_metrics.RecordRequestEvent(
       HandwritingRecognizerResult::Status::ERROR);
 }

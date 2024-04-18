@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <set>
@@ -16,7 +17,6 @@
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/threading/thread.h>
 
@@ -119,13 +119,19 @@ class MojoProxy {
   using FstatCallback = base::OnceCallback<void(int, int64_t)>;
   void Fstat(int64_t handle, FstatCallback callback);
 
+  // Requests to call ftruncate(2) for the file in the other side represented by
+  // the handle.
+  // The callback will be called with errno.
+  using FtruncateCallback = base::OnceCallback<void(int)>;
+  void Ftruncate(int64_t handle, int64_t length, FtruncateCallback);
+
  private:
   // Callback called when a new mojo message is available.
   void OnMojoMessageAvailable();
 
   // Handles a message sent from the other side's proxy.
   bool HandleMessage(arc_proxy::MojoMessage* message,
-                     std::vector<base::ScopedFD>* received_fds);
+                     std::vector<base::ScopedFD> fds);
 
   // Stops this proxy.
   void Stop();
@@ -134,7 +140,7 @@ class MojoProxy {
   // TODO(crbug.com/842960): Use pass-by-value when protobuf is upreved enough
   // to support rvalues. (At least, 3.5, or maybe 3.6).
   bool OnClose(arc_proxy::Close* close);
-  bool OnData(arc_proxy::Data* data, std::vector<base::ScopedFD>* received_fds);
+  bool OnData(arc_proxy::Data* data);
   bool OnDataInternal(arc_proxy::Data* data);
   bool OnConnectRequest(arc_proxy::ConnectRequest* request);
   bool OnConnectResponse(arc_proxy::ConnectResponse* response);
@@ -147,6 +153,10 @@ class MojoProxy {
   void OnFstatRequest(arc_proxy::FstatRequest* request);
   void SendFstatResponse(int64_t cookie, arc_proxy::FstatResponse response);
   bool OnFstatResponse(arc_proxy::FstatResponse* response);
+  void OnFtruncateRequest(arc_proxy::FtruncateRequest* request);
+  void SendFtruncateResponse(int64_t cookie,
+                             arc_proxy::FtruncateResponse response);
+  bool OnFtruncateResponse(arc_proxy::FtruncateResponse* response);
 
   // Callback called when local file descriptor gets ready to read.
   // Reads Message from the file descriptor corresponding to the |handle|,
@@ -197,6 +207,12 @@ class MojoProxy {
   std::map<int64_t, PreadCallback> pending_pread_;
   std::map<int64_t, PwriteCallback> pending_pwrite_;
   std::map<int64_t, FstatCallback> pending_fstat_;
+  std::map<int64_t, FtruncateCallback> pending_ftruncate_;
+
+  // Virtwl doesn't maintain message boundaries, and doesn't synchronize
+  // between the data and fd stream. Keep a queue of received fds to handle the
+  // fact that we may receive a message's fds before we read the message frame.
+  std::deque<base::ScopedFD> received_fds_;
 
   // WeakPtrFactory needs to be declared as the member of the class, so that
   // on destruction, any pending Callbacks bound to WeakPtr are cancelled

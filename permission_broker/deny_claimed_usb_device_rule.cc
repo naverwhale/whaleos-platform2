@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,10 @@
 #include <string>
 
 #include "base/logging.h"
-#include "base/strings/string_number_conversions.h"
+#include "featured/feature_library.h"
+#include "permission_broker/allow_lists.h"
+#include "permission_broker/rule.h"
+#include "permission_broker/rule_utils.h"
 #include "permission_broker/udev_scopers.h"
 
 #include <base/check.h>
@@ -53,26 +56,15 @@ RemovableAttr GetRemovableSysattr(udev_device* device) {
   return ParseRemovableSysattr(removable);
 }
 
-bool GetUIntSysattr(udev_device* device, const char* key, uint32_t* val) {
-  CHECK(val);
+bool HasRemovableParent(udev_device* device) {
+  for (udev_device* parent = udev_device_get_parent(device); parent != nullptr;
+       parent = udev_device_get_parent(parent)) {
+    const char* removable = udev_device_get_sysattr_value(parent, "removable");
+    if (!removable)
+      break;
 
-  const char* str_val = udev_device_get_sysattr_value(device, key);
-  return str_val && base::HexStringToUInt(str_val, val);
-}
-
-// Check if a USB vendor:product ID pair is in the provided list.
-// Entries in the list with |product_id| of 0 match any product with the
-// corresponding |vendor_id|.
-template <typename Iterator>
-bool UsbDeviceListContainsId(Iterator first,
-                             Iterator last,
-                             uint16_t vendor_id,
-                             uint16_t product_id) {
-  while (first != last) {
-    if (first->vendor_id == vendor_id &&
-        (!first->product_id || first->product_id == product_id))
+    if (ParseRemovableSysattr(removable) == RemovableAttr::kRemovable)
       return true;
-    ++first;
   }
   return false;
 }
@@ -174,57 +166,61 @@ bool IsInterfaceSafeToDetach(udev_device* iface) {
 }
 
 bool IsDeviceAllowedSerial(udev_device* device) {
-  // The Arduino vendor IDs are derived from https://raw.githubusercontent.com
-  // /arduino/ArduinoCore-avr/master/boards.txt
-  // /arduino/ArduinoCore-sam/master/boards.txt
-  // /arduino/ArduinoCore-samd/master/boards.txt
-  // using
-  // grep -o -E  "vid\..*=(0x.*)" *boards.txt | sed "s/vid\..=//g" | sort -f | \
-  // uniq -i
-  const DevicePolicy::UsbDeviceId kAllowedIds[] = {
-      {0x0d28, 0x0204},  // BBC micro:bit
-
-      {0x2341, 0},  // Arduino
-      {0x1b4f, 0},  // Sparkfun
-      {0x239a, 0},  // Adafruit
-      {0x2a03, 0},  // doghunter.org
-      {0x10c4, 0},  // Silicon Labs
-
-      {0x2c99, 0},  // Prusa Research
-
-      {0x2e8a, 0},  // Raspberry Pi
-
-      {0x18d1, 0x5002},  // Google Servo V2
-      {0x18d1, 0x5003},  // Google Servo V2
-      {0x18d1, 0x500a},  // Google twinkie
-      {0x18d1, 0x500b},  // Google Plankton
-      {0x18d1, 0x500c},  // Google Plankton
-      {0x18d1, 0x5014},  // Google Cr50
-      {0x18d1, 0x501a},  // Google Servo micro
-      {0x18d1, 0x501b},  // Google Servo V4
-      {0x18d1, 0x501f},  // Google Suzyq
-      {0x18d1, 0x5020},  // Google Sweetberry
-      {0x18d1, 0x5027},  // Google Tigertail
-      {0x18d1, 0x5036},  // Google Chocodile
-
-      {0x1d50, 0x6140},  // QuickLogic QuickFeather evaluation board bootloader
-      {0x1d50, 0x6130},  // TinyFPGA BX Bootloader old openmoko VID:PID
-      {0x1209, 0x2100},  // TinyFPGA BX Bootloader new pid.codes VID:PID
-      {0x1209, 0x5bf0},  // Arty FPGA board
-  };
   uint32_t vendor_id, product_id;
   if (!GetUIntSysattr(device, "idVendor", &vendor_id) ||
       !GetUIntSysattr(device, "idProduct", &product_id))
     return false;
 
-  return UsbDeviceListContainsId(std::begin(kAllowedIds), std::end(kAllowedIds),
-                                 vendor_id, product_id);
+  return UsbDeviceListContainsId(std::begin(kSerialAllowedIds),
+                                 std::end(kSerialAllowedIds), vendor_id,
+                                 product_id);
+}
+
+bool IsDeviceAllowedHID(udev_device* device) {
+  uint32_t vendor_id, product_id;
+  if (!GetUIntSysattr(device, "idVendor", &vendor_id) ||
+      !GetUIntSysattr(device, "idProduct", &product_id))
+    return false;
+
+  return UsbDeviceListContainsId(std::begin(kHIDAllowedIds),
+                                 std::end(kHIDAllowedIds), vendor_id,
+                                 product_id);
+}
+
+bool IsDeviceAllowedFixed(udev_device* device) {
+  uint32_t vendor_id, product_id;
+  if (!GetUIntSysattr(device, "idVendor", &vendor_id) ||
+      !GetUIntSysattr(device, "idProduct", &product_id))
+    return false;
+
+  return UsbDeviceListContainsId(std::begin(kFixedAllowedIds),
+                                 std::end(kFixedAllowedIds), vendor_id,
+                                 product_id);
 }
 
 Rule::Result DenyClaimedUsbDeviceRule::ProcessUsbDevice(udev_device* device) {
   const char* device_syspath = udev_device_get_syspath(device);
   if (!device_syspath) {
+    VLOG(1) << "Device to be processed is lacking syspath";
     return DENY;
+  }
+  auto features_lib = feature::PlatformFeatures::Get();
+  // TODO(b/267951284) Consider consolidating or caching this via
+  // PlatformFeatures::ListenForRefetchNeeded.
+  if (!features_lib) {
+    LOG(ERROR) << "Unable to get PlatformFeatures library, will not enable "
+                  "permissive features";
+  } else if (features_lib->IsEnabledBlocking(
+                 RuleUtils::kEnablePermissiveUsbPassthrough)) {
+    // If permissive USB is enabled, we should potentially still allow claimed
+    // interfaces, pending the result of other rules e.g.
+    // AllowExternallyTaggedUsbDeviceRule.
+    auto cros_usb_location = GetCrosUsbLocationProperty(device);
+
+    if (cros_usb_location.has_value() &&
+        cros_usb_location != CrosUsbLocationProperty::kUnknown) {
+      return IGNORE;
+    }
   }
 
   udev* udev = udev_device_get_udev(device);
@@ -278,8 +274,11 @@ Rule::Result DenyClaimedUsbDeviceRule::ProcessUsbDevice(udev_device* device) {
   }
 
   if (found_claimed_interface) {
-    // Don't allow detaching the driver from fixed (internal) USB devices.
-    if (GetRemovableSysattr(device) == RemovableAttr::kFixed) {
+    // Fixed devices are likely internal, but in some cases external USB devices
+    // are marked as fixed. Don't allow detaching the driver for a fixed USB
+    // device unless it has a removable parent or is in the allow list.
+    if (GetRemovableSysattr(device) == RemovableAttr::kFixed &&
+        !IsDeviceAllowedFixed(device) && !HasRemovableParent(device)) {
       LOG(INFO) << "Denying fixed USB device with driver.";
       return DENY;
     }
@@ -288,7 +287,8 @@ Rule::Result DenyClaimedUsbDeviceRule::ProcessUsbDevice(udev_device* device) {
       LOG(INFO) << "Found only detachable interface(s), safe to claim.";
 
     if (IsDeviceDetachableByPolicy(device) || IsDeviceAllowedSerial(device) ||
-        found_adb_interface || found_only_safe_interfaces)
+        IsDeviceAllowedHID(device) || found_adb_interface ||
+        found_only_safe_interfaces)
       return ALLOW_WITH_DETACH;
     else
       return found_unclaimed_interface ? ALLOW_WITH_LOCKDOWN : DENY;

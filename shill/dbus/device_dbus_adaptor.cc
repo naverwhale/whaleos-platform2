@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,7 +35,7 @@ DeviceDBusAdaptor::DeviceDBusAdaptor(const scoped_refptr<dbus::Bus>& bus,
 }
 
 DeviceDBusAdaptor::~DeviceDBusAdaptor() {
-  dbus_object()->UnregisterAsync();
+  dbus_object()->UnregisterAndBlock();
   device_ = nullptr;
 }
 
@@ -147,27 +147,21 @@ bool DeviceDBusAdaptor::ClearProperty(brillo::ErrorPtr* error,
 
 void DeviceDBusAdaptor::Enable(DBusMethodResponsePtr<> response) {
   SLOG(this, 2) << __func__;
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->SetEnabledPersistent(true, &e, callback);
-  ReturnResultOrDefer(callback, e);
+  device_->SetEnabledPersistent(true,
+                                GetMethodReplyCallback(std::move(response)));
 }
 
 void DeviceDBusAdaptor::Disable(DBusMethodResponsePtr<> response) {
   SLOG(this, 2) << __func__ << ": Device " << device_->UniqueName();
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->SetEnabledPersistent(false, &e, callback);
-  ReturnResultOrDefer(callback, e);
+  device_->SetEnabledPersistent(false,
+                                GetMethodReplyCallback(std::move(response)));
 }
 
 void DeviceDBusAdaptor::Register(DBusMethodResponsePtr<> response,
                                  const std::string& network_id) {
   SLOG(this, 2) << __func__ << ": " << network_id;
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->RegisterOnNetwork(network_id, &e, callback);
-  ReturnResultOrDefer(callback, e);
+  device_->RegisterOnNetwork(network_id,
+                             GetMethodReplyCallback(std::move(response)));
 }
 
 void DeviceDBusAdaptor::RequirePin(DBusMethodResponsePtr<> response,
@@ -175,20 +169,15 @@ void DeviceDBusAdaptor::RequirePin(DBusMethodResponsePtr<> response,
                                    bool require) {
   SLOG(this, 2) << __func__;
 
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->RequirePin(pin, require, &e, callback);
-  ReturnResultOrDefer(callback, e);
+  device_->RequirePin(pin, require,
+                      GetMethodReplyCallback(std::move(response)));
 }
 
 void DeviceDBusAdaptor::EnterPin(DBusMethodResponsePtr<> response,
                                  const std::string& pin) {
   SLOG(this, 2) << __func__;
 
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->EnterPin(pin, &e, callback);
-  ReturnResultOrDefer(callback, e);
+  device_->EnterPin(pin, GetMethodReplyCallback(std::move(response)));
 }
 
 void DeviceDBusAdaptor::UnblockPin(DBusMethodResponsePtr<> response,
@@ -196,10 +185,8 @@ void DeviceDBusAdaptor::UnblockPin(DBusMethodResponsePtr<> response,
                                    const std::string& pin) {
   SLOG(this, 2) << __func__;
 
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->UnblockPin(unblock_code, pin, &e, callback);
-  ReturnResultOrDefer(callback, e);
+  device_->UnblockPin(unblock_code, pin,
+                      GetMethodReplyCallback(std::move(response)));
 }
 
 void DeviceDBusAdaptor::ChangePin(DBusMethodResponsePtr<> response,
@@ -207,43 +194,14 @@ void DeviceDBusAdaptor::ChangePin(DBusMethodResponsePtr<> response,
                                   const std::string& new_pin) {
   SLOG(this, 2) << __func__;
 
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->ChangePin(old_pin, new_pin, &e, callback);
-  ReturnResultOrDefer(callback, e);
+  device_->ChangePin(old_pin, new_pin,
+                     GetMethodReplyCallback(std::move(response)));
 }
 
 void DeviceDBusAdaptor::Reset(DBusMethodResponsePtr<> response) {
   SLOG(this, 2) << __func__;
 
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->Reset(&e, callback);
-  ReturnResultOrDefer(callback, e);
-}
-
-bool DeviceDBusAdaptor::RenewDHCPLease(brillo::ErrorPtr* error) {
-  SLOG(this, 2) << __func__;
-  Error e;
-  device_->RenewDHCPLease(true, &e);
-  return !e.ToChromeosError(error);
-}
-
-bool DeviceDBusAdaptor::PerformTDLSOperation(brillo::ErrorPtr* error,
-                                             const std::string& operation,
-                                             const std::string& peer,
-                                             std::string* out_state) {
-  SLOG(this, 2) << __func__;
-
-  Error e;
-  Error::PopulateAndLog(FROM_HERE, &e, Error::kNotSupported,
-                        "PerformTDLSOperation is deprecated");
-  return false;
-}
-
-bool DeviceDBusAdaptor::ResetByteCounters(brillo::ErrorPtr* error) {
-  device_->ResetByteCounters();
-  return true;
+  device_->Reset(GetMethodReplyCallback(std::move(response)));
 }
 
 bool DeviceDBusAdaptor::RequestRoam(brillo::ErrorPtr* error,
@@ -258,10 +216,8 @@ void DeviceDBusAdaptor::SetUsbEthernetMacAddressSource(
     DBusMethodResponsePtr<> response, const std::string& source) {
   SLOG(this, 2) << __func__;
 
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  device_->SetUsbEthernetMacAddressSource(source, &e, callback);
-  ReturnResultOrDefer(callback, e);
+  device_->SetUsbEthernetMacAddressSource(
+      source, GetMethodReplyCallback(std::move(response)));
 }
 
 }  // namespace shill

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,9 +12,9 @@
 #include <algorithm>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/posix/eintr_wrapper.h>
 #include <brillo/errors/error_codes.h>
 #include <brillo/message_loops/message_loop.h>
@@ -85,68 +85,42 @@ class FileDescriptor : public FileStream::FileDescriptorInterface {
     return own_ ? IGNORE_EINTR(close(fd)) : 0;
   }
 
-  bool WaitForData(Stream::AccessMode mode,
-                   const DataCallback& data_callback,
-                   ErrorPtr* error) override {
-    if (stream_utils::IsReadAccessMode(mode)) {
-      CHECK(read_data_callback_.is_null());
-      read_watcher_ = base::FileDescriptorWatcher::WatchReadable(
-          fd_, base::BindRepeating(&FileDescriptor::OnReadable,
-                                   base::Unretained(this)));
-      if (!read_watcher_) {
-        Error::AddTo(error, FROM_HERE, errors::stream::kDomain,
-                     errors::stream::kInvalidParameter,
-                     "File descriptor doesn't support watching for reading.");
-        return false;
-      }
-      read_data_callback_ = data_callback;
+  bool WaitForDataRead(DataCallback data_callback, ErrorPtr* error) override {
+    CHECK(read_data_callback_.is_null());
+    read_watcher_ = base::FileDescriptorWatcher::WatchReadable(
+        fd_, base::BindRepeating(&FileDescriptor::OnReadable,
+                                 base::Unretained(this)));
+    if (!read_watcher_) {
+      Error::AddTo(error, FROM_HERE, errors::stream::kDomain,
+                   errors::stream::kInvalidParameter,
+                   "File descriptor doesn't support watching for reading.");
+      return false;
     }
-    if (stream_utils::IsWriteAccessMode(mode)) {
-      CHECK(write_data_callback_.is_null());
-      write_watcher_ = base::FileDescriptorWatcher::WatchWritable(
-          fd_, base::BindRepeating(&FileDescriptor::OnWritable,
-                                   base::Unretained(this)));
-      if (!write_watcher_) {
-        Error::AddTo(error, FROM_HERE, errors::stream::kDomain,
-                     errors::stream::kInvalidParameter,
-                     "File descriptor doesn't support watching for writing.");
-        return false;
-      }
-      write_data_callback_ = data_callback;
-    }
+    read_data_callback_ = std::move(data_callback);
     return true;
   }
 
-  int WaitForDataBlocking(Stream::AccessMode in_mode,
-                          base::TimeDelta timeout,
-                          Stream::AccessMode* out_mode) override {
-    fd_set read_fds;
-    fd_set write_fds;
-    fd_set error_fds;
+  int WaitForDataReadBlocking(base::TimeDelta timeout) override {
+    return WaitForDataBlocking(Stream::AccessMode::READ, timeout);
+  }
 
-    FD_ZERO(&read_fds);
-    FD_ZERO(&write_fds);
-    FD_ZERO(&error_fds);
-
-    if (stream_utils::IsReadAccessMode(in_mode))
-      FD_SET(fd_, &read_fds);
-
-    if (stream_utils::IsWriteAccessMode(in_mode))
-      FD_SET(fd_, &write_fds);
-
-    FD_SET(fd_, &error_fds);
-    timeval timeout_val = {};
-    if (!timeout.is_max()) {
-      const timespec ts = timeout.ToTimeSpec();
-      TIMESPEC_TO_TIMEVAL(&timeout_val, &ts);
+  bool WaitForDataWrite(DataCallback data_callback, ErrorPtr* error) override {
+    CHECK(write_data_callback_.is_null());
+    write_watcher_ = base::FileDescriptorWatcher::WatchWritable(
+        fd_, base::BindRepeating(&FileDescriptor::OnWritable,
+                                 base::Unretained(this)));
+    if (!write_watcher_) {
+      Error::AddTo(error, FROM_HERE, errors::stream::kDomain,
+                   errors::stream::kInvalidParameter,
+                   "File descriptor doesn't support watching for writing.");
+      return false;
     }
-    int res = HANDLE_EINTR(select(fd_ + 1, &read_fds, &write_fds, &error_fds,
-                                  timeout.is_max() ? nullptr : &timeout_val));
-    if (res > 0 && out_mode) {
-      *out_mode = stream_utils::MakeAccessMode(FD_ISSET(fd_, &read_fds),
-                                               FD_ISSET(fd_, &write_fds));
-    }
-    return res;
+    write_data_callback_ = std::move(data_callback);
+    return true;
+  }
+
+  int WaitForDataWriteBlocking(base::TimeDelta timeout) override {
+    return WaitForDataBlocking(Stream::AccessMode::WRITE, timeout);
   }
 
   void CancelPendingAsyncOperations() override {
@@ -162,19 +136,42 @@ class FileDescriptor : public FileStream::FileDescriptorInterface {
     CHECK(!read_data_callback_.is_null());
 
     read_watcher_ = nullptr;
-    DataCallback cb = std::move(read_data_callback_);
-    cb.Run(Stream::AccessMode::READ);
+    std::move(read_data_callback_).Run();
   }
 
   void OnWritable() {
     CHECK(!write_data_callback_.is_null());
 
     write_watcher_ = nullptr;
-    DataCallback cb = std::move(write_data_callback_);
-    cb.Run(Stream::AccessMode::WRITE);
+    std::move(write_data_callback_).Run();
   }
 
  private:
+  int WaitForDataBlocking(Stream::AccessMode mode, base::TimeDelta timeout) {
+    fd_set read_fds;
+    fd_set write_fds;
+    fd_set error_fds;
+
+    FD_ZERO(&read_fds);
+    FD_ZERO(&write_fds);
+    FD_ZERO(&error_fds);
+
+    if (stream_utils::IsReadAccessMode(mode))
+      FD_SET(fd_, &read_fds);
+
+    if (stream_utils::IsWriteAccessMode(mode))
+      FD_SET(fd_, &write_fds);
+
+    FD_SET(fd_, &error_fds);
+    timeval timeout_val = {};
+    if (!timeout.is_max()) {
+      const timespec ts = timeout.ToTimeSpec();
+      TIMESPEC_TO_TIMEVAL(&timeout_val, &ts);
+    }
+    return HANDLE_EINTR(select(fd_ + 1, &read_fds, &write_fds, &error_fds,
+                               timeout.is_max() ? nullptr : &timeout_val));
+  }
+
   // The actual file descriptor we are working with. Will contain -1 if the
   // file stream has been closed.
   int fd_;
@@ -498,23 +495,42 @@ bool FileStream::CloseBlocking(ErrorPtr* error) {
   return true;
 }
 
-bool FileStream::WaitForData(AccessMode mode,
-                             const base::Callback<void(AccessMode)>& callback,
-                             ErrorPtr* error) {
+bool FileStream::WaitForDataRead(base::OnceClosure callback, ErrorPtr* error) {
   if (!IsOpen())
     return stream_utils::ErrorStreamClosed(FROM_HERE, error);
 
-  return fd_interface_->WaitForData(mode, callback, error);
+  return fd_interface_->WaitForDataRead(std::move(callback), error);
 }
 
-bool FileStream::WaitForDataBlocking(AccessMode in_mode,
-                                     base::TimeDelta timeout,
-                                     AccessMode* out_mode,
-                                     ErrorPtr* error) {
+bool FileStream::WaitForDataReadBlocking(base::TimeDelta timeout,
+                                         ErrorPtr* error) {
   if (!IsOpen())
     return stream_utils::ErrorStreamClosed(FROM_HERE, error);
 
-  int ret = fd_interface_->WaitForDataBlocking(in_mode, timeout, out_mode);
+  int ret = fd_interface_->WaitForDataReadBlocking(timeout);
+  if (ret < 0) {
+    errors::system::AddSystemError(error, FROM_HERE, errno);
+    return false;
+  }
+  if (ret == 0)
+    return stream_utils::ErrorOperationTimeout(FROM_HERE, error);
+
+  return true;
+}
+
+bool FileStream::WaitForDataWrite(base::OnceClosure callback, ErrorPtr* error) {
+  if (!IsOpen())
+    return stream_utils::ErrorStreamClosed(FROM_HERE, error);
+
+  return fd_interface_->WaitForDataWrite(std::move(callback), error);
+}
+
+bool FileStream::WaitForDataWriteBlocking(base::TimeDelta timeout,
+                                          ErrorPtr* error) {
+  if (!IsOpen())
+    return stream_utils::ErrorStreamClosed(FROM_HERE, error);
+
+  int ret = fd_interface_->WaitForDataWriteBlocking(timeout);
   if (ret < 0) {
     errors::system::AddSystemError(error, FROM_HERE, errno);
     return false;

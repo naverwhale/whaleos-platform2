@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,20 +12,20 @@
 #include <set>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/contains.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/memory/free_deleter.h>
 #include <base/notreached.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/stringprintf.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/thread.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <chromeos/dbus/service_constants.h>
 
 #include "mtpd/device_event_delegate.h"
@@ -197,8 +197,8 @@ DeviceManager::DeviceManager(DeviceEventDelegate* delegate)
   LIBMTP_Init();
 
   // Create and start the libmtp poller thread.
-  mtp_poller_ =
-      std::make_unique<MtpPoller>(base::ThreadTaskRunnerHandle::Get());
+  mtp_poller_ = std::make_unique<MtpPoller>(
+      base::SingleThreadTaskRunner::GetCurrentDefault());
   CHECK(mtp_poller_->Start());
 
   // Trigger a device scan.
@@ -640,21 +640,21 @@ void DeviceManager::HandleDeviceNotification(udev_device* device) {
   if (kEventAction == "add") {
     // Some devices do not respond well when immediately probed. Thus there is
     // a 1 second wait here to give the device to settle down.
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
         base::BindOnce(&DeviceManager::AddDevices,
                        weak_ptr_factory_.GetWeakPtr()),
-        base::TimeDelta::FromSeconds(1));
+        base::Seconds(1));
     return;
   }
   if (kEventAction == "remove") {
     // libmtp still detects the mtp device as connected now, so add a 1 second
     // wait to ensure libmtp does not detect the device.
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
         base::BindOnce(&DeviceManager::RemoveDevices,
                        weak_ptr_factory_.GetWeakPtr(), false /* !remove_all */),
-        base::TimeDelta::FromSeconds(1));
+        base::Seconds(1));
     return;
   }
   // udev notes the existence of other actions like "change" and "move", but
@@ -731,6 +731,11 @@ void DeviceManager::AddOrUpdateDevices(
     if (duplicated_string.get())
       fallback_product = duplicated_string.get();
 
+    duplicated_string.reset(LIBMTP_Get_Serialnumber(mtp_device));
+    std::string serial_number;
+    if (duplicated_string.get())
+      serial_number = duplicated_string.get();
+
     MtpStorageMap new_storage_map;
     MtpStorageMap* storage_map_ptr;
     if (add_update)
@@ -763,7 +768,7 @@ void DeviceManager::AddOrUpdateDevices(
       const std::string storage_name =
           StorageToString(usb_bus_str, storage->id);
       StorageInfo info(storage_name, raw_devices[i].device_entry, *storage,
-                       fallback_vendor, fallback_product);
+                       fallback_vendor, fallback_product, serial_number);
       bool storage_added =
           storage_map_ptr->insert(std::make_pair(storage->id, info)).second;
       CHECK(storage_added);

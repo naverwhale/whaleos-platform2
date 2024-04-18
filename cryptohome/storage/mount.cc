@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,54 +13,49 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <tuple>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <absl/cleanup/cleanup.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
-#include <base/logging.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/hash/sha1.h>
+#include <base/location.h>
+#include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/threading/platform_thread.h>
-#include <chaps/isolate.h>
-#include <chaps/token_manager_client.h>
 #include <brillo/cryptohome.h>
 #include <brillo/process/process.h>
 #include <brillo/scoped_umask.h>
 #include <brillo/secure_blob.h>
 #include <chromeos/constants/cryptohome.h>
-#include <google/protobuf/util/message_differencer.h>
+#include <cryptohome/proto_bindings/UserDataAuth.pb.h>
+#include <libhwsec-foundation/crypto/secure_blob_util.h>
+#include <libhwsec-foundation/status/status_chain_macros.h>
 
-#include "cryptohome/chaps_client_factory.h"
-#include "cryptohome/crypto/secure_blob_util.h"
-#include "cryptohome/cryptohome_common.h"
 #include "cryptohome/cryptohome_metrics.h"
-#include "cryptohome/dircrypto_data_migrator/migration_helper.h"
-#include "cryptohome/dircrypto_util.h"
+#include "cryptohome/data_migrator/migration_helper.h"
 #include "cryptohome/filesystem_layout.h"
-#include "cryptohome/pkcs11_init.h"
 #include "cryptohome/platform.h"
+#include "cryptohome/storage/dircrypto_migration_helper_delegate.h"
+#include "cryptohome/storage/error.h"
 #include "cryptohome/storage/homedirs.h"
-#include "cryptohome/storage/mount_utils.h"
-#include "cryptohome/tpm.h"
+#include "cryptohome/storage/mount_helper_interface.h"
+#include "cryptohome/storage/out_of_process_mount_helper.h"
 #include "cryptohome/vault_keyset.h"
-#include "cryptohome/vault_keyset.pb.h"
 
 using base::FilePath;
 using base::StringPrintf;
 using brillo::BlobToString;
 using brillo::SecureBlob;
-using brillo::cryptohome::home::GetRootPath;
-using brillo::cryptohome::home::GetUserPath;
 using brillo::cryptohome::home::IsSanitizedUserName;
-using brillo::cryptohome::home::kGuestUserName;
 using brillo::cryptohome::home::SanitizeUserName;
-using brillo::cryptohome::home::SanitizeUserNameWithSalt;
-using chaps::IsolateCredentialManager;
-using google::protobuf::util::MessageDifferencer;
+using cryptohome::data_migrator::MigrationHelper;
+using hwsec_foundation::SecureBlobToHex;
 
 namespace {
 constexpr bool __attribute__((unused)) MountUserSessionOOP() {
@@ -71,262 +66,120 @@ constexpr bool __attribute__((unused)) MountUserSessionOOP() {
 
 namespace cryptohome {
 
-const char kChapsUserName[] = "chaps";
-const char kDefaultSharedAccessGroup[] = "chronos-access";
-
-void StartUserFileAttrsCleanerService(cryptohome::Platform* platform,
-                                      const std::string& username) {
-  std::unique_ptr<brillo::Process> file_attrs =
-      platform->CreateProcessInstance();
-
-  file_attrs->AddArg("/sbin/initctl");
-  file_attrs->AddArg("start");
-  file_attrs->AddArg("--no-wait");
-  file_attrs->AddArg("file_attrs_cleaner_tool");
-  file_attrs->AddArg(
-      base::StringPrintf("OBFUSCATED_USERNAME=%s", username.c_str()));
-
-  if (file_attrs->Run() != 0)
-    PLOG(WARNING) << "Error while running file_attrs_cleaner_tool";
-}
-
-Mount::Mount(Platform* platform, HomeDirs* homedirs)
-    : default_user_(-1),
-      chaps_user_(-1),
-      default_group_(-1),
-      default_access_group_(-1),
-      system_salt_(),
-      platform_(platform),
+Mount::Mount(Platform* platform,
+             HomeDirs* homedirs,
+             std::unique_ptr<MountHelperInterface> mount_helper)
+    : platform_(platform),
       homedirs_(homedirs),
-      pkcs11_state_(kUninitialized),
-      legacy_mount_(true),
-      bind_mount_downloads_(true),
-      mount_type_(MountType::NONE),
-      default_chaps_client_factory_(new ChapsClientFactory()),
-      chaps_client_factory_(default_chaps_client_factory_.get()),
       dircrypto_migration_stopped_condition_(&active_dircrypto_migrator_lock_),
-      mount_guest_session_out_of_process_(true),
-      mount_ephemeral_session_out_of_process_(true),
-      mount_non_ephemeral_session_out_of_process_(true),
-      mount_guest_session_non_root_namespace_(true) {}
+      active_mounter_(std::move(mount_helper)) {}
 
-Mount::Mount() : Mount(nullptr, nullptr) {}
+Mount::Mount() : Mount(nullptr, nullptr, nullptr) {}
 
 Mount::~Mount() {
   if (IsMounted())
     UnmountCryptohome();
 }
 
-bool Mount::Init() {
-  bool result = true;
+StorageStatus Mount::MountEphemeralCryptohome(const Username& username) {
+  username_ = username;
+  ObfuscatedUsername obfuscated_username = SanitizeUserName(username_);
 
-  // Get the user id and group id of the default user
-  if (!platform_->GetUserId(kDefaultSharedUser, &default_user_,
-                            &default_group_)) {
-    result = false;
+  absl::Cleanup unmount_on_exit = [this]() { UnmountCryptohome(); };
+
+  // Ephemeral cryptohome can't be mounted twice.
+  CHECK(active_mounter_->CanPerformEphemeralMount());
+
+  user_cryptohome_vault_ = homedirs_->GetVaultFactory()->Generate(
+      obfuscated_username, FileSystemKeyReference(),
+      EncryptedContainerType::kEphemeral);
+
+  if (!user_cryptohome_vault_) {
+    return StorageStatus::Make(FROM_HERE, "Failed to generate ephemeral vault.",
+                               MOUNT_ERROR_FATAL);
   }
 
-  // Get the user id of the chaps user.
-  gid_t not_used;
-  if (!platform_->GetUserId(kChapsUserName, &chaps_user_, &not_used)) {
-    result = false;
-  }
+  RETURN_IF_ERROR(user_cryptohome_vault_->Setup(FileSystemKey())).LogError()
+      << "Failed to setup ephemeral vault";
 
-  // Get the group id of the default shared access group.
-  if (!platform_->GetGroupId(kDefaultSharedAccessGroup,
-                             &default_access_group_)) {
-    result = false;
-  }
+  RETURN_IF_ERROR(
+      active_mounter_->PerformEphemeralMount(
+          username, user_cryptohome_vault_->GetContainerBackingLocation()))
+          .LogError()
+      << "PerformEphemeralMount() failed, aborting ephemeral mount";
 
-  // One-time load of the global system salt (used in generating username
-  // hashes)
-  if (!homedirs_->GetSystemSalt(&system_salt_)) {
-    LOG(ERROR) << "Failed to load or create the system salt";
-    result = false;
-  }
-
-  mounter_.reset(new MountHelper(
-      default_user_, default_group_, default_access_group_, system_salt_,
-      legacy_mount_, bind_mount_downloads_, platform_));
-
-  //  cryptohome_namespace_mounter enters the Chrome mount namespace and mounts
-  //  the user cryptohome in that mount namespace if the flags are enabled.
-  //  Chrome mount namespace is created by session_manager. cryptohome knows
-  //  the path at which this mount namespace is created and uses that path to
-  //  enter it.
-  std::unique_ptr<MountNamespace> chrome_mnt_ns;
-  if (mount_guest_session_non_root_namespace_ || IsolateUserSession()) {
-    chrome_mnt_ns = std::make_unique<MountNamespace>(
-        base::FilePath(kUserSessionMountNamespacePath), platform_);
-  }
-
-  if (mount_guest_session_out_of_process_ ||
-      mount_non_ephemeral_session_out_of_process_ ||
-      mount_ephemeral_session_out_of_process_) {
-    out_of_process_mounter_.reset(new OutOfProcessMountHelper(
-        system_salt_, std::move(chrome_mnt_ns), legacy_mount_,
-        bind_mount_downloads_, platform_));
-  }
-
-  return result;
+  std::move(unmount_on_exit).Cancel();
+  return StorageStatus::Ok();
 }
 
-MountError Mount::MountEphemeralCryptohome(const std::string& username) {
+StorageStatus Mount::MountCryptohome(
+    const Username& username,
+    const FileSystemKeyset& file_system_keyset,
+    const CryptohomeVault::Options& vault_options) {
   username_ = username;
+  ObfuscatedUsername obfuscated_username = SanitizeUserName(username_);
 
-  if (homedirs_->IsOrWillBeOwner(username_)) {
-    return MOUNT_ERROR_EPHEMERAL_MOUNT_BY_OWNER;
-  }
+  ReportTimerStart(kVaultSetupTimer);
 
-  MountHelperInterface* ephemeral_mounter = nullptr;
-  base::OnceClosure cleanup;
-  if (mount_ephemeral_session_out_of_process_) {
-    // Ephemeral cryptohomes for non-Guest ephemeral sessions are mounted
-    // out-of-process.
-    ephemeral_mounter = out_of_process_mounter_.get();
-    // Ephemeral mounts don't require dropping keys since they're not dircrypto
-    // mounts.
-    // This callback will be executed in the destructor at the latest so
-    // |out_of_process_mounter_| will always be valid. Error reporting is done
-    // in the helper process in cryptohome_namespace_mounter.cc.
-    cleanup = base::BindOnce(
-        base::IgnoreResult(&OutOfProcessMountHelper::TearDownEphemeralMount),
-        base::Unretained(out_of_process_mounter_.get()));
-  } else {
-    ephemeral_mounter = mounter_.get();
-    // This callback will be executed in the destructor at the latest so
-    // |this| will always be valid.
-    cleanup =
-        base::BindOnce(&Mount::TearDownEphemeralMount, base::Unretained(this));
-  }
+  ASSIGN_OR_RETURN(EncryptedContainerType vault_type,
+                   homedirs_->PickVaultType(obfuscated_username, vault_options),
+                   (_.LogError() << "Could't pick vault type"));
 
-  if (!MountEphemeralCryptohomeInternal(username_, ephemeral_mounter,
-                                        std::move(cleanup))) {
-    std::string obfuscated_username =
-        SanitizeUserNameWithSalt(username_, system_salt_);
-    homedirs_->Remove(obfuscated_username);
-    return MOUNT_ERROR_FATAL;
-  }
+  user_cryptohome_vault_ = homedirs_->GetVaultFactory()->Generate(
+      obfuscated_username, file_system_keyset.KeyReference(), vault_type,
+      homedirs_->KeylockerForStorageEncryptionEnabled());
 
-  return MOUNT_ERROR_NONE;
-}
-
-bool Mount::MountCryptohome(const std::string& username,
-                            const FileSystemKeyset& file_system_keyset,
-                            const Mount::MountArgs& mount_args,
-                            bool is_pristine,
-                            MountError* mount_error) {
-  username_ = username;
-  std::string obfuscated_username =
-      SanitizeUserNameWithSalt(username_, system_salt_);
-
-  if (!mounter_->EnsureUserMountPoints(username_)) {
-    LOG(ERROR) << "Error creating mountpoint.";
-    *mount_error = MOUNT_ERROR_CREATE_CRYPTOHOME_FAILED;
-    return false;
-  }
-
-  CryptohomeVault::Options vault_options;
-  if (mount_args.force_dircrypto) {
-    // If dircrypto is forced, it's an error to mount ecryptfs home unless
-    // we are migrating from ecryptfs.
-    vault_options.block_ecryptfs = true;
-  } else if (mount_args.create_as_ecryptfs) {
-    vault_options.force_type = EncryptedContainerType::kEcryptfs;
-  }
-
-  vault_options.migrate = mount_args.to_migrate_from_ecryptfs;
-
-  user_cryptohome_vault_ = homedirs_->GenerateCryptohomeVault(
-      obfuscated_username, file_system_keyset.KeyReference(), vault_options,
-      is_pristine, mount_error);
-  if (*mount_error != MOUNT_ERROR_NONE) {
-    return false;
-  }
-
-  mount_type_ = user_cryptohome_vault_->GetMountType();
-
-  if (mount_type_ == MountType::NONE) {
+  if (GetMountType() == MountType::NONE) {
     // TODO(dlunev): there should be a more proper error code set. CREATE_FAILED
     // is a temporary returned error to keep the behaviour unchanged while
     // refactoring.
-    *mount_error = MOUNT_ERROR_CREATE_CRYPTOHOME_FAILED;
-    return false;
-  }
-
-  pkcs11_token_auth_data_ = file_system_keyset.chaps_key();
-
-  MountHelperInterface* helper;
-  if (mount_non_ephemeral_session_out_of_process_) {
-    helper = out_of_process_mounter_.get();
-  } else {
-    helper = mounter_.get();
-  }
-
-  // Set up the cryptohome vault for mount.
-  *mount_error =
-      user_cryptohome_vault_->Setup(file_system_keyset.Key(), is_pristine);
-  if (*mount_error != MOUNT_ERROR_NONE) {
-    return false;
+    return StorageStatus::Make(FROM_HERE, "Could't generate vault",
+                               MOUNT_ERROR_CREATE_CRYPTOHOME_FAILED);
   }
 
   // Ensure we don't leave any mounts hanging on intermediate errors.
   // The closure won't outlive the class so |this| will always be valid.
-  // |out_of_process_mounter_|/|mounter_| will always be valid since this
-  // callback runs in the destructor at the latest.
-  base::ScopedClosureRunner unmount_and_drop_keys_runner(base::BindOnce(
-      &Mount::UnmountAndDropKeys, base::Unretained(this),
-      base::BindOnce(&MountHelperInterface::TearDownNonEphemeralMount,
-                     base::Unretained(helper))));
+  // |active_mounter_| will always be valid since this callback runs in the
+  // destructor at the latest.
+  absl::Cleanup unmount_on_exit = [this]() { UnmountCryptohome(); };
 
-  // Mount cryptohome
-  // /home/.shadow: owned by root
-  // /home/.shadow/$hash: owned by root
-  // /home/.shadow/$hash/vault: owned by root
-  // /home/.shadow/$hash/mount: owned by root
-  // /home/.shadow/$hash/mount/root: owned by root
-  // /home/.shadow/$hash/mount/user: owned by chronos
-  // /home/chronos: owned by chronos
-  // /home/chronos/user: owned by chronos
-  // /home/user/$hash: owned by chronos
-  // /home/root/$hash: owned by root
-
-  mount_point_ = GetUserMountDirectory(obfuscated_username);
-  // Since Service::Mount cleans up stale mounts, we should only reach
-  // this point if someone attempts to re-mount an in-use mount point.
-  if (platform_->IsDirectoryMounted(mount_point_)) {
-    LOG(ERROR) << "Mount point is busy: " << mount_point_.value();
-    *mount_error = MOUNT_ERROR_FATAL;
-    return false;
-  }
+  // Set up the cryptohome vault for mount.
+  RETURN_IF_ERROR(user_cryptohome_vault_->Setup(file_system_keyset.Key()))
+          .LogError()
+      << "Failed to setup persistent vault";
+  ReportTimerStop(kVaultSetupTimer);
 
   std::string key_signature =
       SecureBlobToHex(file_system_keyset.KeyReference().fek_sig);
   std::string fnek_signature =
       SecureBlobToHex(file_system_keyset.KeyReference().fnek_sig);
 
-  MountHelper::Options mount_opts = {mount_type_,
-                                     mount_args.to_migrate_from_ecryptfs};
+  ReportTimerStart(kPerformMountTimer);
+  RETURN_IF_ERROR(active_mounter_->PerformMount(GetMountType(), username_,
+                                                key_signature, fnek_signature))
+          .LogError()
+      << "MountHelper::PerformMount failed";
 
-  cryptohome::ReportTimerStart(cryptohome::kPerformMountTimer);
-  if (!helper->PerformMount(mount_opts, username_, key_signature,
-                            fnek_signature, is_pristine, mount_error)) {
-    LOG(ERROR) << "MountHelper::PerformMount failed, error = " << *mount_error;
-    return false;
-  }
+  ReportTimerStop(kPerformMountTimer);
 
-  cryptohome::ReportTimerStop(cryptohome::kPerformMountTimer);
+  // Once mount is complete, do a deferred teardown for on the vault.
+  // The teardown occurs when the vault's containers has no references ie. no
+  // mount holds the containers open.
+  // This is useful if cryptohome crashes: on recovery, if cryptohome decides to
+  // cleanup mounts, the underlying devices (in case of dm-crypt cryptohome)
+  // will be automatically torn down.
 
-  // At this point we're done mounting so move the clean-up closure to the
-  // instance variable.
-  mount_cleanup_ = unmount_and_drop_keys_runner.Release();
+  // TODO(sarthakkukreti): remove this in favor of using the session-manager
+  // as the source-of-truth during crash recovery. That would allow us to
+  // reconstruct the run-time state of cryptohome vault(s) at the time of crash.
+  std::ignore = user_cryptohome_vault_->SetLazyTeardownWhenUnused();
 
-  *mount_error = MOUNT_ERROR_NONE;
+  // At this point we're done mounting.
+  std::move(unmount_on_exit).Cancel();
 
   user_cryptohome_vault_->ReportVaultEncryptionType();
 
-  // Start file attribute cleaner service.
-  StartUserFileAttrsCleanerService(platform_, obfuscated_username);
+  ReportTimerStart(kSELinuxRelabelTimer);
 
   // TODO(fqj,b/116072767) Ignore errors since unlabeled files are currently
   // still okay during current development progress.
@@ -334,89 +187,71 @@ bool Mount::MountCryptohome(const std::string& username,
   // directory to decide on the action on failure when we  move on to the next
   // phase in the cryptohome SELinux development, i.e. making cryptohome
   // enforcing.
-  if (platform_->RestoreSELinuxContexts(
-          GetUserDirectoryForUser(obfuscated_username), true /*recursive*/)) {
-    ReportRestoreSELinuxContextResultForHomeDir(true);
-  } else {
-    ReportRestoreSELinuxContextResultForHomeDir(false);
-    LOG(ERROR) << "RestoreSELinuxContexts("
-               << GetUserDirectoryForUser(obfuscated_username) << ") failed.";
+  std::vector<base::FilePath> exclude_path;
+  // The exclusion of android-data is intentional here because the directory and
+  // all its contents are labelled by the Android policy and cryptohome should
+  // not attempt to label them.
+  base::FilePath path_ap = GetUserMountDirectory(obfuscated_username)
+                               .Append("root")
+                               .Append("android-data")
+                               .Append("data");
+  exclude_path.push_back(path_ap);
+  platform_->AddGlobalSELinuxRestoreconExclusion(exclude_path);
+
+  // Restore context for UserPath.
+  bool result = platform_->RestoreSELinuxContexts(UserPath(obfuscated_username),
+                                                  true /*recursive*/);
+
+  // For dm-crypt cryptohomes, cache volumes may be reset as a part of the
+  // cleanup mechanism; the newly created filesystem's root inode will be
+  // unlabeled. Relabel the mounted cache directory unconditionally; this will
+  // be a no-op if the cache directory was already relabelled but if the cache
+  // volume is reset, this will restore the SELinux contexts of the cache
+  // volume.
+  base::FilePath user_cache_dir =
+      GetDmcryptUserCacheDirectory(obfuscated_username);
+  if (base::PathExists(user_cache_dir)) {
+    result &=
+        platform_->RestoreSELinuxContexts(user_cache_dir, true /*recursive*/);
   }
 
-  // TODO(crbug.com/1287022): Remove in M101.
-  // Remove the Chrome Logs if they are too large. This is a mitigation for
-  // crbug.com/1231192.
-  if (!RemoveLargeChromeLogs())
-    LOG(ERROR) << "Failed to remove Chrome logs";
-
-  return true;
-}
-
-bool Mount::MountEphemeralCryptohomeInternal(
-    const std::string& username,
-    MountHelperInterface* ephemeral_mounter,
-    base::OnceClosure cleanup) {
-  // Ephemeral cryptohome can't be mounted twice.
-  CHECK(ephemeral_mounter->CanPerformEphemeralMount());
-
-  base::ScopedClosureRunner cleanup_runner(std::move(cleanup));
-
-  if (!ephemeral_mounter->PerformEphemeralMount(username)) {
-    LOG(ERROR) << "PerformEphemeralMount() failed, aborting ephemeral mount";
-    return false;
+  if (!result) {
+    LOG(ERROR) << "RestoreSELinuxContexts(" << UserPath(obfuscated_username)
+               << ") failed.";
   }
+  ReportTimerStop(kSELinuxRelabelTimer);
 
-  // Mount succeeded, move the clean-up closure to the instance variable.
-  mount_cleanup_ = cleanup_runner.Release();
+  ReportRestoreSELinuxContextResultForHomeDir(result);
 
-  mount_type_ = MountType::EPHEMERAL;
-  return true;
-}
-
-void Mount::TearDownEphemeralMount() {
-  if (!mounter_->TearDownEphemeralMount()) {
-    ReportCryptohomeError(kEphemeralCleanUpFailed);
-  }
-}
-
-void Mount::UnmountAndDropKeys(base::OnceClosure unmounter) {
-  std::move(unmounter).Run();
-
-  // Resetting the vault teardowns the enclosed containers if setup succeeded.
-  user_cryptohome_vault_.reset();
-
-  mount_type_ = MountType::NONE;
+  return StorageStatus::Ok();
 }
 
 bool Mount::UnmountCryptohome() {
   // There should be no file access when unmounting.
   // Stop dircrypto migration if in progress.
-  MaybeCancelActiveDircryptoMigrationAndWait();
+  MaybeCancelMigrateEncryptionAndWait();
 
-  if (!mount_cleanup_.is_null()) {
-    std::move(mount_cleanup_).Run();
-  }
-
-  if (homedirs_->AreEphemeralUsersEnabled())
-    homedirs_->RemoveNonOwnerCryptohomes();
-
-  RemovePkcs11Token();
+  active_mounter_->UnmountAll();
 
   // Resetting the vault teardowns the enclosed containers if setup succeeded.
   user_cryptohome_vault_.reset();
 
-  mount_type_ = MountType::NONE;
-
   return true;
 }
 
+void Mount::UnmountCryptohomeFromMigration() {
+  active_mounter_->UnmountAll();
+
+  // Resetting the vault teardowns the enclosed containers if setup succeeded.
+  user_cryptohome_vault_.reset();
+}
+
 bool Mount::IsMounted() const {
-  return (mounter_ && mounter_->MountPerformed()) ||
-         (out_of_process_mounter_ && out_of_process_mounter_->MountPerformed());
+  return active_mounter_ && active_mounter_->MountPerformed();
 }
 
 bool Mount::IsEphemeral() const {
-  return mount_type_ == MountType::EPHEMERAL;
+  return GetMountType() == MountType::EPHEMERAL;
 }
 
 bool Mount::IsNonEphemeralMounted() const {
@@ -424,130 +259,150 @@ bool Mount::IsNonEphemeralMounted() const {
 }
 
 bool Mount::OwnsMountPoint(const FilePath& path) const {
-  return (mounter_ && mounter_->IsPathMounted(path)) ||
-         (out_of_process_mounter_ &&
-          out_of_process_mounter_->IsPathMounted(path));
+  return active_mounter_ && active_mounter_->IsPathMounted(path);
 }
 
-bool Mount::CreateTrackedSubdirectories(const std::string& username) const {
-  std::string obfuscated_username =
-      SanitizeUserNameWithSalt(username, system_salt_);
-  return mounter_->CreateTrackedSubdirectories(obfuscated_username,
-                                               mount_type_);
+StorageStatus Mount::EvictCryptohomeKey() {
+  if (user_cryptohome_vault_) {
+    return user_cryptohome_vault_->EvictKey();
+  }
+  return StorageStatus::Make(FROM_HERE, "Failed to evict cryptohome key.",
+                             MOUNT_ERROR_INVALID_ARGS);
 }
 
-bool Mount::MountGuestCryptohome() {
-  username_ = "";
-  MountHelperInterface* ephemeral_mounter = nullptr;
-  base::OnceClosure cleanup;
-
-  if (mount_guest_session_out_of_process_) {
-    // Ephemeral cryptohomes for Guest sessions are mounted out-of-process.
-    ephemeral_mounter = out_of_process_mounter_.get();
-    // This callback will be executed in the destructor at the latest so
-    // |out_of_process_mounter_| will always be valid. Error reporting is done
-    // in the helper process in cryptohome_namespace_mounter.cc.
-    cleanup = base::BindOnce(
-        base::IgnoreResult(&OutOfProcessMountHelper::TearDownEphemeralMount),
-        base::Unretained(out_of_process_mounter_.get()));
-  } else {
-    ephemeral_mounter = mounter_.get();
-    // This callback will be executed in the destructor at the latest so
-    // |this| will always be valid.
-    cleanup =
-        base::BindOnce(&Mount::TearDownEphemeralMount, base::Unretained(this));
+StorageStatus Mount::RestoreCryptohomeKey(
+    const FileSystemKeyset& file_system_keyset) {
+  if (!user_cryptohome_vault_) {
+    return StorageStatus::Make(FROM_HERE, "Cryptohome vault has not set up.",
+                               MOUNT_ERROR_KEY_RESTORE_FAILED);
+  }
+  if (!IsNonEphemeralMounted()) {
+    return StorageStatus::Make(
+        FROM_HERE, "Non-mounted or ephemeral mount can't restore key.",
+        MOUNT_ERROR_KEY_RESTORE_FAILED);
   }
 
-  return MountEphemeralCryptohomeInternal(kGuestUserName, ephemeral_mounter,
-                                          std::move(cleanup));
+  RETURN_IF_ERROR(user_cryptohome_vault_->RestoreKey(file_system_keyset.Key()))
+          .LogError()
+      << "Failed to restore key of the persistent vault";
+  return StorageStatus::Ok();
 }
 
-FilePath Mount::GetUserDirectoryForUser(
-    const std::string& obfuscated_username) const {
-  return ShadowRoot().Append(obfuscated_username);
-}
-
-bool Mount::CheckChapsDirectory(const FilePath& dir) {
-  // If the Chaps database directory does not exist, create it.
-  if (!platform_->DirectoryExists(dir)) {
-    if (!platform_->SafeCreateDirAndSetOwnershipAndPermissions(
-            dir, S_IRWXU | S_IRGRP | S_IXGRP, chaps_user_,
-            default_access_group_)) {
-      LOG(ERROR) << "Failed to create " << dir.value();
-      return false;
-    }
-    return true;
+MountType Mount::GetMountType() const {
+  if (!user_cryptohome_vault_) {
+    return MountType::NONE;
   }
-  return true;
+  return user_cryptohome_vault_->GetMountType();
 }
 
-bool Mount::InsertPkcs11Token() {
-  FilePath token_dir = homedirs_->GetChapsTokenDir(username_);
-  if (!CheckChapsDirectory(token_dir))
+bool Mount::MigrateEncryption(const MigrationCallback& callback,
+                              MigrationType migration_type) {
+  if (!IsMounted()) {
+    LOG(ERROR) << "Not mounted.";
     return false;
-  // We may create a salt file and, if so, we want to restrict access to it.
-  brillo::ScopedUmask scoped_umask(kDefaultUmask);
-
-  std::unique_ptr<chaps::TokenManagerClient> chaps_client(
-      chaps_client_factory_->New());
-
-  Pkcs11Init pkcs11init;
-  int slot_id = 0;
-  if (!chaps_client->LoadToken(
-          IsolateCredentialManager::GetDefaultIsolateCredential(), token_dir,
-          pkcs11_token_auth_data_,
-          pkcs11init.GetTpmTokenLabelForUser(username_), &slot_id)) {
-    LOG(ERROR) << "Failed to load PKCS #11 token.";
-    ReportCryptohomeError(kLoadPkcs11TokenFailed);
   }
-  pkcs11_token_auth_data_.clear();
-  ReportTimerStop(kPkcs11InitTimer);
-  return true;
-}
 
-void Mount::RemovePkcs11Token() {
-  FilePath token_dir = homedirs_->GetChapsTokenDir(username_);
-  std::unique_ptr<chaps::TokenManagerClient> chaps_client(
-      chaps_client_factory_->New());
-  chaps_client->UnloadToken(
-      IsolateCredentialManager::GetDefaultIsolateCredential(), token_dir);
-}
+  auto migration_helper_callback = base::BindRepeating(
+      [](const MigrationCallback& callback, uint64_t current_bytes,
+         uint64_t total_bytes) {
+        user_data_auth::DircryptoMigrationProgress progress;
+        if (total_bytes == 0) {
+          // Since total_bytes and current_bytes in |progress| are discarded by
+          // client unless |progress.status| is DIRCRYPTO_MIGRATION_IN_PROGRESS,
+          // they are left with the default value of 0 here.
+          progress.set_status(user_data_auth::DIRCRYPTO_MIGRATION_INITIALIZING);
+        } else {
+          progress.set_status(user_data_auth::DIRCRYPTO_MIGRATION_IN_PROGRESS);
+          progress.set_current_bytes(current_bytes);
+          progress.set_total_bytes(total_bytes);
+        }
+        callback.Run(progress);
+      },
+      callback);
 
-std::string Mount::GetMountTypeString() const {
-  switch (mount_type_) {
-    case MountType::NONE:
-      return "none";
-    case MountType::ECRYPTFS:
-      return "ecryptfs";
-    case MountType::DIR_CRYPTO:
-      return "dircrypto";
-    case MountType::EPHEMERAL:
-      return "ephemeral";
-    case MountType::DMCRYPT:
-      return "dmcrypt";
+  auto mount_type = GetMountType();
+  if (mount_type == MountType::ECRYPTFS_TO_DIR_CRYPTO ||
+      mount_type == MountType::ECRYPTFS_TO_DMCRYPT) {
+    return MigrateFromEcryptfs(migration_helper_callback, migration_type);
   }
-  return "";
+  if (mount_type == MountType::DIR_CRYPTO_TO_DMCRYPT) {
+    return MigrateFromDircrypto(migration_helper_callback, migration_type);
+  }
+  LOG(ERROR) << "Not mounted for migration.";
+  return false;
 }
 
-bool Mount::MigrateToDircrypto(
-    const dircrypto_data_migrator::MigrationHelper::ProgressCallback& callback,
+bool Mount::MigrateFromEcryptfs(
+    const MigrationHelper::ProgressCallback& callback,
     MigrationType migration_type) {
-  std::string obfuscated_username =
-      SanitizeUserNameWithSalt(username_, system_salt_);
-  FilePath temporary_mount =
-      GetUserTemporaryMountDirectory(obfuscated_username);
-  if (!IsMounted() || mount_type_ != MountType::DIR_CRYPTO ||
-      !platform_->DirectoryExists(temporary_mount) ||
-      !OwnsMountPoint(temporary_mount)) {
-    LOG(ERROR) << "Not mounted for eCryptfs->dircrypto migration.";
+  ObfuscatedUsername obfuscated_username = SanitizeUserName(username_);
+  FilePath source = GetUserTemporaryMountDirectory(obfuscated_username);
+  FilePath destination = GetUserMountDirectory(obfuscated_username);
+  FilePath status_files_dir = UserPath(obfuscated_username);
+
+  if (!platform_->DirectoryExists(source) || !OwnsMountPoint(source)) {
+    LOG(ERROR) << "Unexpected ecryptfs source state.";
     return false;
   }
   // Do migration.
+  if (!PerformMigration(callback, source, destination, status_files_dir,
+                        migration_type)) {
+    return false;
+  }
+
+  // Clean up.
+  FilePath vault_path = GetEcryptfsUserVaultPath(obfuscated_username);
+  if (!platform_->DeletePathRecursively(source) ||
+      !platform_->DeletePathRecursively(vault_path)) {
+    LOG(ERROR) << "Failed to delete the old vault.";
+    return false;
+  }
+
+  return true;
+}
+
+bool Mount::MigrateFromDircrypto(
+    const MigrationHelper::ProgressCallback& callback,
+    MigrationType migration_type) {
+  ObfuscatedUsername obfuscated_username = SanitizeUserName(username_);
+  FilePath source = GetUserMountDirectory(obfuscated_username);
+  FilePath destination = GetUserTemporaryMountDirectory(obfuscated_username);
+  FilePath status_files_dir = UserPath(obfuscated_username);
+
+  if (!platform_->DirectoryExists(destination) ||
+      !OwnsMountPoint(destination)) {
+    LOG(ERROR) << "Unexpected dmcrypt destination state.";
+    return false;
+  }
+  // Do migration.
+  if (!PerformMigration(callback, source, destination, status_files_dir,
+                        migration_type)) {
+    return false;
+  }
+
+  // Clean up, in case of dircrypto source is the vault path, and destination
+  // is a temp mount point.
+  FilePath vault_path = GetEcryptfsUserVaultPath(obfuscated_username);
+  if (!platform_->DeletePathRecursively(source) ||
+      !platform_->DeletePathRecursively(destination)) {
+    LOG(ERROR) << "Failed to delete the old vault.";
+    return false;
+  }
+
+  return true;
+}
+
+bool Mount::PerformMigration(const MigrationHelper::ProgressCallback& callback,
+                             const base::FilePath& source,
+                             const base::FilePath& destination,
+                             const base::FilePath& status_files_dir,
+                             MigrationType migration_type) {
   constexpr uint64_t kMaxChunkSize = 128 * 1024 * 1024;
-  dircrypto_data_migrator::MigrationHelper migrator(
-      platform_, temporary_mount, mount_point_,
-      GetUserDirectoryForUser(obfuscated_username), kMaxChunkSize,
-      migration_type);
+  DircryptoMigrationHelperDelegate delegate(platform_, destination,
+                                            migration_type);
+  MigrationHelper migrator(platform_, &delegate, source, destination,
+                           status_files_dir, kMaxChunkSize);
+
   {  // Abort if already cancelled.
     base::AutoLock lock(active_dircrypto_migrator_lock_);
     if (is_dircrypto_migration_cancelled_)
@@ -556,18 +411,8 @@ bool Mount::MigrateToDircrypto(
     active_dircrypto_migrator_ = &migrator;
   }
   bool success = migrator.Migrate(callback);
-  // This closure will be run immediately so |mounter_|/
-  // |out_of_process_mounter_| will be valid.
-  MountHelperInterface* helper;
-  if (mount_non_ephemeral_session_out_of_process_) {
-    helper = out_of_process_mounter_.get();
-  } else {
-    helper = mounter_.get();
-  }
 
-  UnmountAndDropKeys(
-      base::BindOnce(&MountHelperInterface::TearDownNonEphemeralMount,
-                     base::Unretained(helper)));
+  UnmountCryptohomeFromMigration();
   {  // Signal the waiting thread.
     base::AutoLock lock(active_dircrypto_migrator_lock_);
     active_dircrypto_migrator_ = nullptr;
@@ -577,17 +422,19 @@ bool Mount::MigrateToDircrypto(
     LOG(ERROR) << "Failed to migrate.";
     return false;
   }
-  // Clean up.
-  FilePath vault_path = GetEcryptfsUserVaultPath(obfuscated_username);
-  if (!platform_->DeletePathRecursively(temporary_mount) ||
-      !platform_->DeletePathRecursively(vault_path)) {
-    LOG(ERROR) << "Failed to delete the old vault.";
-    return false;
-  }
   return true;
 }
 
-void Mount::MaybeCancelActiveDircryptoMigrationAndWait() {
+bool Mount::ResetApplicationContainer(const std::string& application) {
+  if (!user_cryptohome_vault_) {
+    LOG(ERROR) << "No active vault containers to reset.";
+    return false;
+  }
+
+  return user_cryptohome_vault_->ResetApplicationContainer(application);
+}
+
+void Mount::MaybeCancelMigrateEncryptionAndWait() {
   base::AutoLock lock(active_dircrypto_migrator_lock_);
   is_dircrypto_migration_cancelled_ = true;
   while (active_dircrypto_migrator_) {
@@ -596,26 +443,6 @@ void Mount::MaybeCancelActiveDircryptoMigrationAndWait() {
     dircrypto_migration_stopped_condition_.Wait();
     LOG(INFO) << "Dircrypto migration stopped.";
   }
-}
-
-// TODO(crbug.com/1287022): Remove in M101.
-// Remove the Chrome Logs if they are too large. This is a mitigation for
-// crbug.com/1231192.
-bool Mount::RemoveLargeChromeLogs() const {
-  base::FilePath path("/home/chronos/user/log/chrome");
-
-  int64_t size;
-  if (!platform_->GetFileSize(path, &size)) {
-    LOG(ERROR) << "Failed to get the size of Chrome logs";
-    return false;
-  }
-
-  // Only remove the Chrome logs if they are larger than 200 MiB.
-  if (size < 200 * 1024 * 1024) {
-    return true;
-  }
-
-  return platform_->DeleteFile(path);
 }
 
 }  // namespace cryptohome

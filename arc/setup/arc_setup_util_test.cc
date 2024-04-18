@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,14 +18,17 @@
 #include <unistd.h>
 
 #include <limits>
+#include <optional>
+#include <set>
+#include <utility>
 
 #include <base/base64.h>
-#include <base/bind.h>
 #include <base/environment.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
 #include <base/rand_util.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
@@ -35,17 +38,12 @@
 #include <brillo/file_utils.h>
 #include <brillo/files/safe_fd.h>
 #include <gtest/gtest.h>
+#include <libsegmentation/feature_management.h>
+#include <libsegmentation/feature_management_fake.h>
 
 namespace arc {
 
 namespace {
-
-bool FindLineCallback(std::string* out_prop, const std::string& line) {
-  if (line != "string_to_find")
-    return false;
-  *out_prop = "FOUND";
-  return true;
-}
 
 constexpr char kTestProperitesFromFileContent[] =
     ""
@@ -63,7 +61,7 @@ constexpr char kTestProperitesFromFileContentBad[] =
     "ro.product.board board\n";  // no '=' separator
 
 struct FilterMediaProfileParam {
-  base::Optional<std::string> test_config_content;
+  std::optional<std::string> test_config_content;
   std::string media_profile_content;
   std::string result_content;
 };
@@ -310,7 +308,7 @@ class FilterMediaProfileTest
     : public ::testing::TestWithParam<FilterMediaProfileParam> {};
 
 const FilterMediaProfileParam kFilterMediaProfileParam[] = {
-    {base::nullopt,
+    {std::nullopt,
      TestMediaProfile(/* has_front_camera */ true, /* has_back_camera */ true),
      TestMediaProfile(/* has_front_camera */ true, /* has_back_camera */ true)},
     {R"({"enable_front_camera": true, "enable_back_camera": true})",
@@ -324,6 +322,53 @@ const FilterMediaProfileParam kFilterMediaProfileParam[] = {
      TestMediaProfile(/* has_front_camera */ true, /* has_back_camera */ true),
      TestMediaProfile(/* has_front_camera */ true,
                       /* has_back_camera */ false)},
+};
+
+struct AppendFeatureManagementParam {
+  std::set<std::string> test_features;
+  std::string hardware_property_content;
+  std::string result_content;
+};
+
+const char BasicHardwareFeatureContent[] =
+    R"(<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+  <unavailable-feature name="android.hardware.camera"/>
+  <unavailable-feature name="android.hardware.camera.capability.manual_sensor"/>
+  <feature name="android.hardware.sensor.light"/>
+</permissions>
+)";
+
+const char OneFeatureHardwareFeatureContent[] =
+    R"(<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+  <unavailable-feature name="android.hardware.camera"/>
+  <unavailable-feature name="android.hardware.camera.capability.manual_sensor"/>
+  <feature name="android.hardware.sensor.light"/>
+  <feature name="org.chromium.arc.feature_management.Feat1"/>
+</permissions>
+)";
+
+const char TwoFeatureHardwareFeatureContent[] =
+    R"(<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+  <unavailable-feature name="android.hardware.camera"/>
+  <unavailable-feature name="android.hardware.camera.capability.manual_sensor"/>
+  <feature name="android.hardware.sensor.light"/>
+  <feature name="org.chromium.arc.feature_management.Feat1"/>
+  <feature name="org.chromium.arc.feature_management.Feat2"/>
+</permissions>
+)";
+
+class AppendFeatureManagementTest
+    : public ::testing::TestWithParam<AppendFeatureManagementParam> {};
+
+const AppendFeatureManagementParam kAppendFeatureManagementParam[] = {
+    {{}, BasicHardwareFeatureContent, BasicHardwareFeatureContent},
+    {{"Feat1"}, BasicHardwareFeatureContent, OneFeatureHardwareFeatureContent},
+    {{"Feat1", "Feat2"},
+     BasicHardwareFeatureContent,
+     TwoFeatureHardwareFeatureContent},
 };
 
 }  // namespace
@@ -367,7 +412,7 @@ TEST(ArcSetupUtil, TestCreateOrTruncate) {
 }
 
 TEST(ArcSetupUtil, TestWaitForPaths) {
-  constexpr base::TimeDelta timeout = base::TimeDelta::FromSeconds(1);
+  constexpr base::TimeDelta timeout = base::Seconds(1);
 
   base::ScopedTempDir temp_dir;
   ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
@@ -540,153 +585,6 @@ TEST(ArcSetupUtil, TestGetPropertiesFromFileBad) {
   EXPECT_TRUE(properties.empty());
 }
 
-TEST(ArcSetupUtil, TestGetFingerprintAndSdkVersionFromPackagesXml) {
-  base::ScopedTempDir temp_directory;
-  ASSERT_TRUE(temp_directory.CreateUniqueTempDir());
-  base::FilePath packages_file =
-      temp_directory.GetPath().Append("packages.xml");
-
-  // Create a new file and read it.
-  ASSERT_TRUE(WriteToFile(
-      packages_file, 0700,
-      "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
-      "<packages>\n"
-      "  <version sdkVersion=\"25\" databaseVersion=\"3\" fingerprint=\"f1\">\n"
-      "  <version volumeUuid=\"primary_physical\" "
-      "sdkVersion=\"25\" databaseVersion=\"25\" fingerprint=\"f2\">\n"
-      "</packages>"));
-  std::string fingerprint;
-  std::string sdk_version;
-  EXPECT_TRUE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-  EXPECT_EQ("f1", fingerprint);
-  EXPECT_EQ("25", sdk_version);
-
-  ASSERT_TRUE(WriteToFile(
-      packages_file, 0700,
-      // Reverse the order of the version elements.
-      "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
-      "<packages>\n"
-      "  <version volumeUuid=\"primary_physical\" "
-      "sdkVersion=\"25\" databaseVersion=\"25\" fingerprint=\"f2\">\n"
-      "  <version sdkVersion=\"25\" databaseVersion=\"3\" fingerprint=\"f1\">\n"
-      "</packages>"));
-  fingerprint.clear();
-  sdk_version.clear();
-  EXPECT_TRUE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-  EXPECT_EQ("f1", fingerprint);
-  EXPECT_EQ("25", sdk_version);
-
-  // Test invalid <version>s.
-  ASSERT_TRUE(WriteToFile(
-      packages_file, 0700,
-      // "external" version only.
-      "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
-      "<packages>\n"
-      "  <version volumeUuid=\"primary_physical\" "
-      "sdkVersion=\"25\" databaseVersion=\"25\" fingerprint=\"f2\">\n"
-      "</packages>"));
-  EXPECT_FALSE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-
-  ASSERT_TRUE(
-      WriteToFile(packages_file, 0700,
-                  // No sdkVersion.
-                  "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
-                  "<packages>\n"
-                  "  <version databaseVersion=\"3\" fingerprint=\"f1\">\n"
-                  "</packages>"));
-  EXPECT_FALSE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-
-  ASSERT_TRUE(
-      WriteToFile(packages_file, 0700,
-                  // No databaseVersion.
-                  "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
-                  "<packages>\n"
-                  "  <version sdkVersion=\"25\" fingerprint=\"f1\">\n"
-                  "</packages>"));
-  EXPECT_FALSE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-
-  ASSERT_TRUE(
-      WriteToFile(packages_file, 0700,
-                  // No fingerprint.
-                  "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
-                  "<packages>\n"
-                  "  <version sdkVersion=\"25\" databaseVersion=\"3\">\n"
-                  "</packages>"));
-  EXPECT_FALSE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-
-  ASSERT_TRUE(WriteToFile(
-      packages_file, 0700,
-      // No valid fingerprint.
-      "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
-      "<packages>\n"
-      "  <version sdkVersion=\"25\" databaseVersion=\"3\" fingerprint=\"X>\n"
-      "</packages>"));
-  EXPECT_FALSE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-
-  ASSERT_TRUE(
-      WriteToFile(packages_file, 0700,
-                  // No <version> elements.
-                  "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
-                  "<packages/>\n"));
-  EXPECT_FALSE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-
-  ASSERT_TRUE(WriteToFile(packages_file, 0700,
-                          // Empty file.
-                          ""));
-  EXPECT_FALSE(GetFingerprintAndSdkVersionFromPackagesXml(
-      packages_file, &fingerprint, &sdk_version));
-}
-
-TEST(ArcSetupUtil, TestFindLine) {
-  base::ScopedTempDir temp_directory;
-  ASSERT_TRUE(temp_directory.CreateUniqueTempDir());
-  base::FilePath file = temp_directory.GetPath().Append("test.file");
-
-  // Create a new prop file and read it.
-  ASSERT_TRUE(WriteToFile(file, 0700, "string_to_find"));
-  std::string v;
-  EXPECT_TRUE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  EXPECT_EQ("FOUND", v);
-
-  // Test with multi-line files.
-  v.clear();
-  ASSERT_TRUE(WriteToFile(file, 0700, "string_to_find\nline"));
-  EXPECT_TRUE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  EXPECT_EQ("FOUND", v);
-  v.clear();
-  ASSERT_TRUE(WriteToFile(file, 0700, "line\nstring_to_find\nline"));
-  EXPECT_TRUE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  EXPECT_EQ("FOUND", v);
-  v.clear();
-  ASSERT_TRUE(WriteToFile(file, 0700, "line\nstring_to_find"));
-  EXPECT_TRUE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  EXPECT_EQ("FOUND", v);
-  v.clear();
-  ASSERT_TRUE(WriteToFile(file, 0700, "line\nstring_to_find\n"));
-  EXPECT_TRUE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  EXPECT_EQ("FOUND", v);
-
-  // Test without the target string.
-  ASSERT_TRUE(WriteToFile(file, 0700, "string_to_findX"));
-  EXPECT_FALSE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  ASSERT_TRUE(WriteToFile(file, 0700, "string_to_fin"));
-  EXPECT_FALSE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  ASSERT_TRUE(WriteToFile(file, 0700, "string_to_fin\nd"));
-  EXPECT_FALSE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  ASSERT_TRUE(WriteToFile(file, 0700, "s\ntring_to_find"));
-  EXPECT_FALSE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-  ASSERT_TRUE(WriteToFile(file, 0700, ""));
-  EXPECT_FALSE(FindLine(file, base::Bind(&FindLineCallback, &v)));
-}
-
 TEST(ArcSetupUtil, TestInstallDirectory) {
   base::ScopedTempDir temp_directory;
   ASSERT_TRUE(temp_directory.CreateUniqueTempDir());
@@ -800,6 +698,28 @@ TEST(ArcSetupUtil, TestLaunchAndWait) {
 
   EXPECT_FALSE(LaunchAndWait({"/bin/false"}));
   EXPECT_FALSE(LaunchAndWait({"/no_such_binary"}));
+}
+
+TEST(ArcSetupUtil, TestLaunchAndDoNotWait) {
+  base::ElapsedTimer timer;
+  // Check that LaunchAndDoNotWait does not wait until sleep returns.
+  EXPECT_TRUE(LaunchAndDoNotWait({"/usr/bin/sleep", "3"}));
+  EXPECT_LE(0, timer.Elapsed().InSeconds());
+}
+
+TEST(ArcSetupUtil, TestLaunchAndWaitWithExitCodeZero) {
+  base::ElapsedTimer timer;
+  int exit_code = -1;
+  // Check that LaunchAndReturnExitCode waits and returns the exit code.
+  EXPECT_TRUE(LaunchAndWait({"/usr/bin/sleep", "1"}, &exit_code));
+  EXPECT_LE(1, timer.Elapsed().InSeconds());
+  EXPECT_EQ(0, exit_code);
+}
+
+TEST(ArcSetupUtil, TestLaunchAndWaitWithExitCodeNonzero) {
+  int exit_code = -1;
+  EXPECT_TRUE(LaunchAndWait({"/no_such_binary"}, &exit_code));
+  EXPECT_EQ(127 /* command not found */, exit_code);
 }
 
 TEST(ArcSetupUtil, TestGenerateFakeSerialNumber) {
@@ -1076,7 +996,7 @@ TEST(ArcSetupUtil, TestParseContainerState) {
   const base::FilePath kRootfsPath(
       "/opt/google/containers/android/rootfs/root");
 
-  constexpr char kJsonTemplate[] = R"json(
+  static constexpr char kJsonTemplate[] = R"json(
     {
       "ociVersion": "1.0",
       "id": "android-container",
@@ -1161,6 +1081,12 @@ TEST(ArcSetupUtil, TestShouldDeleteAndroidData) {
                                        AndroidSdkVersion::ANDROID_P));
   EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_R,
                                        AndroidSdkVersion::ANDROID_R));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_S,
+                                       AndroidSdkVersion::ANDROID_S));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_S_V2,
+                                       AndroidSdkVersion::ANDROID_S_V2));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_TIRAMISU,
+                                       AndroidSdkVersion::ANDROID_TIRAMISU));
 
   // Shouldn't delete data for initial installation.
   EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_M,
@@ -1171,6 +1097,22 @@ TEST(ArcSetupUtil, TestShouldDeleteAndroidData) {
                                        AndroidSdkVersion::UNKNOWN));
   EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_R,
                                        AndroidSdkVersion::UNKNOWN));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_S,
+                                       AndroidSdkVersion::UNKNOWN));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_S_V2,
+                                       AndroidSdkVersion::UNKNOWN));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_TIRAMISU,
+                                       AndroidSdkVersion::UNKNOWN));
+
+  // Shouldn't delete data for expected upgrades.
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_N_MR1,
+                                       AndroidSdkVersion::ANDROID_M));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_P,
+                                       AndroidSdkVersion::ANDROID_N_MR1));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_R,
+                                       AndroidSdkVersion::ANDROID_P));
+  EXPECT_FALSE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_TIRAMISU,
+                                       AndroidSdkVersion::ANDROID_R));
 
   // All sorts of downgrades should delete data.
   EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_N_MR1,
@@ -1179,6 +1121,12 @@ TEST(ArcSetupUtil, TestShouldDeleteAndroidData) {
                                       AndroidSdkVersion::ANDROID_N_MR1));
   EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_P,
                                       AndroidSdkVersion::ANDROID_R));
+  EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_R,
+                                      AndroidSdkVersion::ANDROID_S));
+  EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_S,
+                                      AndroidSdkVersion::ANDROID_S_V2));
+  EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_R,
+                                      AndroidSdkVersion::ANDROID_TIRAMISU));
 
   // Explicitly delete data when ARC++ is upgraded from M to >= P.
   EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_P,
@@ -1187,6 +1135,15 @@ TEST(ArcSetupUtil, TestShouldDeleteAndroidData) {
   // Explicitly delete data when ARC++ is upgraded from N to R.
   EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_R,
                                       AndroidSdkVersion::ANDROID_N_MR1));
+
+  // Explicitly delete data when ARC++ is upgraded from P to S, S_V2 or
+  // TIRAMISU.
+  EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_S,
+                                      AndroidSdkVersion::ANDROID_P));
+  EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_S_V2,
+                                      AndroidSdkVersion::ANDROID_P));
+  EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_TIRAMISU,
+                                      AndroidSdkVersion::ANDROID_P));
 
   // Delete data for upgrades from a release version to a development version.
   EXPECT_TRUE(ShouldDeleteAndroidData(AndroidSdkVersion::ANDROID_DEVELOPMENT,
@@ -1230,20 +1187,23 @@ TEST(ArcSetupUtil, SafeCopyFile) {
 }
 
 TEST(ArcSetupUtil, GenerateFirstStageFstab) {
-  constexpr const char kFakeCombinedBuildPropPath[] = "/path/to/build.prop";
-  constexpr const char kAnotherFakeCombinedBuildPropPath[] =
+  static constexpr const char kFakeCombinedBuildPropPath[] =
+      "/path/to/build.prop";
+  static constexpr const char kAnotherFakeCombinedBuildPropPath[] =
       "/foo/bar/baz.prop";
-  constexpr const char kCachePartition[] = "/cache";
+  static constexpr const char kCachePartition[] = "/cache";
 
   std::string content;
   base::ScopedTempDir dir;
   ASSERT_TRUE(dir.CreateUniqueTempDir());
   const base::FilePath fstab(dir.GetPath().Append("fstab"));
+  const base::FilePath vendor_image_path;
   std::string cache_partition;
 
   // Generate the fstab and verify the content.
-  EXPECT_TRUE(GenerateFirstStageFstab(
-      base::FilePath(kFakeCombinedBuildPropPath), fstab, cache_partition));
+  EXPECT_TRUE(
+      GenerateFirstStageFstab(base::FilePath(kFakeCombinedBuildPropPath), fstab,
+                              vendor_image_path, cache_partition));
   EXPECT_TRUE(base::ReadFileToString(fstab, &content));
   EXPECT_NE(std::string::npos, content.find(kFakeCombinedBuildPropPath));
   EXPECT_EQ(std::string::npos, content.find(kCachePartition));
@@ -1251,7 +1211,7 @@ TEST(ArcSetupUtil, GenerateFirstStageFstab) {
   // Generate the fstab again with the other prop file and verify the content.
   EXPECT_TRUE(
       GenerateFirstStageFstab(base::FilePath(kAnotherFakeCombinedBuildPropPath),
-                              fstab, cache_partition));
+                              fstab, vendor_image_path, cache_partition));
   EXPECT_TRUE(base::ReadFileToString(fstab, &content));
   EXPECT_EQ(std::string::npos, content.find(kFakeCombinedBuildPropPath));
   EXPECT_NE(std::string::npos, content.find(kAnotherFakeCombinedBuildPropPath));
@@ -1265,11 +1225,13 @@ TEST(ArcSetupUtil, GenerateFirstStageFstab_WithCachePartition) {
   base::ScopedTempDir dir;
   ASSERT_TRUE(dir.CreateUniqueTempDir());
   const base::FilePath fstab(dir.GetPath().Append("fstab"));
+  const base::FilePath vendor_image_path;
 
   const std::string cache_partition = "vdc";
   // Generate the fstab and verify if the disk number for cache is correctly set
-  EXPECT_TRUE(GenerateFirstStageFstab(
-      base::FilePath(kFakeCombinedBuildPropPath), fstab, cache_partition));
+  EXPECT_TRUE(
+      GenerateFirstStageFstab(base::FilePath(kFakeCombinedBuildPropPath), fstab,
+                              vendor_image_path, cache_partition));
   EXPECT_TRUE(base::ReadFileToString(fstab, &content));
   EXPECT_NE(std::string::npos, content.find(cache_partition));
 
@@ -1278,9 +1240,46 @@ TEST(ArcSetupUtil, GenerateFirstStageFstab_WithCachePartition) {
   // number
   EXPECT_TRUE(
       GenerateFirstStageFstab(base::FilePath(kFakeCombinedBuildPropPath), fstab,
-                              cache_partition_with_demo));
+                              vendor_image_path, cache_partition_with_demo));
   EXPECT_TRUE(base::ReadFileToString(fstab, &content));
   EXPECT_NE(std::string::npos, content.find(cache_partition_with_demo));
+}
+
+TEST(ArcSetupUtil, GenerateFirstStageFstab_VendorImageType) {
+  constexpr const char kFakeCombinedBuildPropPath[] = "/path/to/build.prop";
+
+  std::string content;
+  base::ScopedTempDir dir;
+  ASSERT_TRUE(dir.CreateUniqueTempDir());
+  const base::FilePath fstab(dir.GetPath().Append("fstab"));
+  const base::FilePath vendor_image_path(
+      dir.GetPath().Append("vendor.raw.img"));
+  std::string cache_partition;
+
+  // By default, "squashfs" should be set as the vendor file system type.
+  EXPECT_TRUE(
+      GenerateFirstStageFstab(base::FilePath(kFakeCombinedBuildPropPath), fstab,
+                              vendor_image_path, cache_partition));
+  EXPECT_TRUE(base::ReadFileToString(fstab, &content));
+  EXPECT_EQ(0, content.find("/dev/block/vdb /vendor squashfs "));
+
+  // Create a fake EROFS image, which has the EROFS magic number at 1024 byte.
+  const uint32_t kErofsMagicNumber = 0xe0f5e1e2;
+  base::ScopedFD fd(
+      open(vendor_image_path.value().c_str(), O_CREAT | O_WRONLY, 0600));
+  ASSERT_TRUE(fd.is_valid());
+  ASSERT_EQ(lseek(fd.get(), 1024, SEEK_SET), 1024);
+  const std::string data(reinterpret_cast<const char*>(&kErofsMagicNumber),
+                         sizeof(kErofsMagicNumber));
+  ASSERT_TRUE(base::WriteFileDescriptor(fd.get(), data));
+
+  // Pass the fake EROFS image as |vendor_image_path|.
+  // "erofs" should be set as the vendor file system type.
+  EXPECT_TRUE(
+      GenerateFirstStageFstab(base::FilePath(kFakeCombinedBuildPropPath), fstab,
+                              vendor_image_path, cache_partition));
+  EXPECT_TRUE(base::ReadFileToString(fstab, &content));
+  EXPECT_EQ(0, content.find("/dev/block/vdb /vendor erofs "));
 }
 
 TEST_P(FilterMediaProfileTest, All) {
@@ -1315,5 +1314,39 @@ TEST_P(FilterMediaProfileTest, All) {
 INSTANTIATE_TEST_SUITE_P(All,
                          FilterMediaProfileTest,
                          testing::ValuesIn(kFilterMediaProfileParam));
+
+TEST_P(AppendFeatureManagementTest, All) {
+  base::ScopedTempDir temp_directory;
+  ASSERT_TRUE(temp_directory.CreateUniqueTempDir());
+
+  const base::FilePath hardware_property_file =
+      temp_directory.GetPath().Append("hw.xml");
+  ASSERT_TRUE(WriteToFile(hardware_property_file, 0755,
+                          GetParam().hardware_property_content));
+
+  auto fake = std::make_unique<segmentation::fake::FeatureManagementFake>();
+  segmentation::fake::FeatureManagementFake* fake_feature_management_ =
+      fake.get();
+  segmentation::FeatureManagement feature_management(std::move(fake));
+  for (auto feature = GetParam().test_features.begin();
+       feature != GetParam().test_features.end(); feature++) {
+    fake_feature_management_->SetFeature(*feature, segmentation::USAGE_ANDROID);
+  }
+  auto result =
+      AppendFeatureManagement(hardware_property_file, feature_management);
+  ASSERT_TRUE(result);
+  auto remove_space = [](const std::string& s) {
+    return base::JoinString(
+        base::SplitStringPiece(s, " \t\n", base::TRIM_WHITESPACE,
+                               base::SPLIT_WANT_NONEMPTY),
+        "");
+  };
+
+  ASSERT_EQ(remove_space(GetParam().result_content), remove_space(*result));
+}
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         AppendFeatureManagementTest,
+                         testing::ValuesIn(kAppendFeatureManagementParam));
 
 }  // namespace arc

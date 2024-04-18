@@ -1,98 +1,164 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MISSIVE_UTIL_TEST_SUPPORT_CALLBACKS_H_
 #define MISSIVE_UTIL_TEST_SUPPORT_CALLBACKS_H_
 
-#include <atomic>
+#include <optional>
 #include <tuple>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
+#include <base/atomic_ref_count.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_forward.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
+#include <base/memory/weak_ptr.h>
 #include <base/run_loop.h>
+#include <base/synchronization/lock.h>
+#include <base/task/bind_post_task.h>
+#include <base/task/sequenced_task_runner.h>
+#include <base/thread_annotations.h>
+#include <gtest/gtest.h>
 
-namespace reporting {
-namespace test {
-
-// Usage (in tests only):
-//
-//   TestEvent<ResType> e;
-//   ... Do some async work passing e.cb() as a completion callback of
-//   base::OnceCallback<void(ResType res)> type which also may perform some
-//   other action specified by |done| callback provided by the caller.
-//   ... = e.result();  // Will wait for e.cb() to be called and return the
-//   collected result.
-//
-template <typename ResType>
-class TestEvent {
- public:
-  TestEvent() : run_loop_(base::RunLoop::Type::kNestableTasksAllowed) {}
-  ~TestEvent() = default;
-  TestEvent(const TestEvent& other) = delete;
-  TestEvent& operator=(const TestEvent& other) = delete;
-  ResType result() {
-    run_loop_.Run();
-    return std::forward<ResType>(result_);
-  }
-
-  // Repeating callback to hand over to the processing method.
-  // Even though it is repeating, it can be only called once, since
-  // it quits run_loop; repeating declaration is only needed for cases
-  // when the caller requires it.
-  // If the caller expects OnceCallback, result will be converted automatically.
-  base::RepeatingCallback<void(ResType res)> cb() {
-    return base::BindRepeating(
-        [](base::RunLoop* run_loop, ResType* result, ResType res) {
-          *result = std::forward<ResType>(res);
-          run_loop->Quit();
-        },
-        base::Unretained(&run_loop_), base::Unretained(&result_));
-  }
-
- private:
-  base::RunLoop run_loop_;
-  ResType result_;
-};
+namespace reporting::test {
 
 // Usage (in tests only):
 //
 //   TestMultiEvent<ResType1, Restype2, ...> e;
+//
 //   ... Do some async work passing e.cb() as a completion callback of
 //   base::OnceCallback<void(ResType1, Restype2, ...)> type which also may
 //   perform some other action specified by |done| callback provided by the
-//   caller. std::tie(res1, res2, ...) = e.result();  // Will wait for e.cb() to
-//   be called and return the collected results.
+//   caller. Now wait for e.cb() to be called and return the collected results.
+//
+//   std::tie(res1, res2, ...) = e.result();
 //
 template <typename... ResType>
 class TestMultiEvent {
  public:
-  TestMultiEvent() : run_loop_(base::RunLoop::Type::kNestableTasksAllowed) {}
+  TestMultiEvent() = default;
   ~TestMultiEvent() = default;
   TestMultiEvent(const TestMultiEvent& other) = delete;
   TestMultiEvent& operator=(const TestMultiEvent& other) = delete;
-  std::tuple<ResType...> result() {
-    run_loop_.Run();
-    return std::forward<std::tuple<ResType...>>(result_);
+
+  using TupleType = std::tuple<std::remove_reference_t<ResType>...>;
+
+  [[nodiscard]] const TupleType& ref_result() {
+    static_assert(
+        !IsMovable<TupleType>(),
+        "std::tuple<ResType...> is not movable. Please use result().");
+    RunUntilHasResult();
+    CHECK(result_.has_value()) << "Result must have been set";
+    return result_.value();
   }
 
+  [[nodiscard]] TupleType result() {
+    static_assert(
+        IsMovable<TupleType>(),
+        "std::tuple<ResType...> is movable. Please use ref_result().");
+    CHECK(!result_retrieved_) << "Result already retrieved";
+    RunUntilHasResult();
+    CHECK(result_.has_value()) << "Result must have been set";
+    auto value = std::move(result_.value());
+    result_.reset();
+    result_retrieved_ = true;
+    return value;
+  }
+
+  // Returns true if the event callback was never invoked.
+  [[nodiscard]] bool no_result() const { return !result_.has_value(); }
+
   // Completion callback to hand over to the processing method.
-  base::RepeatingCallback<void(ResType... res)> cb() {
-    return base::BindRepeating(
-        [](base::RunLoop* run_loop, std::tuple<ResType...>* result,
-           ResType... res) {
-          *result = std::forward_as_tuple(res...);
-          run_loop->Quit();
+  [[nodiscard]] base::OnceCallback<void(ResType... res)> cb() {
+    return base::BindPostTaskToCurrentDefault(base::BindOnce(
+        &TestMultiEvent::SetResult, weak_ptr_factory_.GetWeakPtr()));
+  }
+
+  // Repeating completion callback to hand over to the processing method.
+  // Even though it is repeating, it can be only called once, since
+  // `result` only waits for one value; repeating declaration is only needed
+  // for cases when the caller requires it.
+  [[nodiscard]] base::RepeatingCallback<void(ResType... res)> repeating_cb() {
+    return base::BindPostTaskToCurrentDefault(base::BindRepeating(
+        [](base::WeakPtr<TestMultiEvent<ResType...>> self, ResType... res) {
+          if (!self) {
+            return;
+          }
+          ASSERT_FALSE(self->repeated_cb_called_)
+              << "repeating_cb() called more than once, but it is only "
+                 "intended to be called once.";
+          self->SetResult(std::forward<ResType>(res)...);
+          self->repeated_cb_called_ = true;
         },
-        base::Unretained(&run_loop_), base::Unretained(&result_));
+        weak_ptr_factory_.GetWeakPtr()));
+  }
+
+ protected:
+  // Can type T be moved from, i.e., T is move constructible and assignable.
+  template <typename T>
+  static constexpr bool IsMovable() {
+    return std::is_move_constructible_v<T> && std::is_move_assignable_v<T>;
   }
 
  private:
-  base::RunLoop run_loop_;
-  std::tuple<ResType...> result_;
+  void RunUntilHasResult() {
+    base::RunLoop run_loop;
+    while (true) {
+      {
+        base::AutoLock auto_lock(lock_);
+        if (result_.has_value()) {
+          break;
+        }
+      }
+      run_loop.RunUntilIdle();
+    }
+  }
+
+  void SetResult(ResType... res) {
+    base::AutoLock auto_lock(lock_);
+    CHECK(!result_.has_value()) << "Can only be called once";
+    result_.emplace(std::forward<ResType>(res)...);
+  }
+
+  base::Lock lock_;
+  std::optional<TupleType> result_;
+  bool repeated_cb_called_ = false;
+  bool result_retrieved_ = false;
+  base::WeakPtrFactory<TestMultiEvent<ResType...>> weak_ptr_factory_{this};
+};
+
+// Usage (in tests only):
+//
+//   TestEvent<ResType> e;
+//
+//   ... Do some async work passing e.cb() as a completion callback of
+//   base::OnceCallback<void(ResType res)> type which also may perform some
+//   other action specified by |done| callback provided by the caller.
+//   Now wait for e.cb() to be called and return the collected result.
+//
+//   ... = e.result();
+//
+template <typename ResType>
+class TestEvent : public TestMultiEvent<ResType> {
+ public:
+  TestEvent() = default;
+  ~TestEvent() = default;
+  TestEvent(const TestEvent& other) = delete;
+  TestEvent& operator=(const TestEvent& other) = delete;
+
+  [[nodiscard]] const ResType& ref_result() {
+    static_assert(!TestMultiEvent<ResType>::template IsMovable<ResType>(),
+                  "ResType is movable. Please use result().");
+    return std::get<0>(TestMultiEvent<ResType>::ref_result());
+  }
+
+  [[nodiscard]] ResType result() {
+    static_assert(TestMultiEvent<ResType>::template IsMovable<ResType>(),
+                  "ResType is not movable. Please use ref_result().");
+    return std::get<0>(TestMultiEvent<ResType>::result());
+  }
 };
 
 // Usage (in tests only):
@@ -110,40 +176,38 @@ class TestMultiEvent {
 //
 //  And  in each of N actions: waiter.Signal(); when done
 
-class TestCallbackWaiter {
+class TestCallbackWaiter : public TestEvent<bool> {
  public:
   TestCallbackWaiter();
   ~TestCallbackWaiter();
   TestCallbackWaiter(const TestCallbackWaiter& other) = delete;
   TestCallbackWaiter& operator=(const TestCallbackWaiter& other) = delete;
 
-  void Attach(size_t more = 1) {
-    const size_t old_counter = counter_.fetch_add(more);
-    DCHECK_GT(old_counter, 0u) << "Cannot attach when already being released";
+  void Attach(int more = 1) {
+    const int old_counter = counter_.Increment(more);
+    CHECK_GT(old_counter, 0) << "Cannot attach when already being released";
   }
 
   void Signal() {
-    const size_t old_counter = counter_.fetch_sub(1);
-    DCHECK_GT(old_counter, 0u) << "Already being released";
-    if (old_counter > 1u) {
+    if (counter_.Decrement()) {
       // There are more owners.
       return;
     }
     // Dropping the last owner.
-    run_loop_.Quit();
+    std::move(signaled_cb_).Run(true);
   }
 
   void Wait() {
     Signal();  // Rid of the constructor's ownership.
-    run_loop_.Run();
+    ASSERT_TRUE(result());
   }
 
  private:
-  std::atomic<size_t> counter_{1};  // Owned by constructor.
-  base::RunLoop run_loop_;
+  base::AtomicRefCount counter_{1};  // Owned by constructor.
+  base::OnceCallback<void(bool)> signaled_cb_;
 };
 
-// RAAI wrapper for TestCallbackWaiter.
+// RAII wrapper for TestCallbackWaiter.
 //
 // Usage:
 // {
@@ -158,8 +222,6 @@ class TestCallbackAutoWaiter : public TestCallbackWaiter {
   TestCallbackAutoWaiter();
   ~TestCallbackAutoWaiter();
 };
-
-}  // namespace test
-}  // namespace reporting
+}  // namespace reporting::test
 
 #endif  // MISSIVE_UTIL_TEST_SUPPORT_CALLBACKS_H_

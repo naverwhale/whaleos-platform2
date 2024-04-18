@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,6 @@
 #include <vector>
 
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
-#include <base/optional.h>
 
 #include "arc/vm/mojo_proxy/message.pb.h"
 
@@ -33,7 +31,8 @@ class MessageStream {
 
   // Writes the serialized |message| to the socket.
   // Returns true iff the whole message is written.
-  bool Write(const arc_proxy::MojoMessage& message);
+  bool Write(const arc_proxy::MojoMessage& message,
+             const std::vector<base::ScopedFD>& fds);
 
  private:
   base::ScopedFD fd_;

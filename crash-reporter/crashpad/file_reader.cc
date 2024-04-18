@@ -36,8 +36,6 @@ class FileReaderReadExactly final : public internal::ReadExactlyInternal {
   }
 
   FileReaderInterface* file_reader_;  // weak
-
-  DISALLOW_COPY_AND_ASSIGN(FileReaderReadExactly);
 };
 
 }  // namespace

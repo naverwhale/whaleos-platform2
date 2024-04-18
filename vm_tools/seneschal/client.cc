@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,7 +24,7 @@
 #include <dbus/object_path.h>
 #include <dbus/object_proxy.h>
 #include <seneschal/proto_bindings/seneschal_service.pb.h>
-#include <vm_concierge/proto_bindings/concierge_service.pb.h>
+#include <vm_concierge/concierge_service.pb.h>
 
 using std::string;
 
@@ -37,6 +37,9 @@ constexpr char kStorageTeamDrives[] = "teamdrives";
 constexpr char kStorageComputers[] = "computers";
 constexpr char kStorageRemovable[] = "removable";
 constexpr char kStoragePlayFiles[] = "playfiles";
+constexpr char kStoragePlayFilesGuestOs[] = "playfilesguestos";
+constexpr char kStorageLinuxFiles[] = "linuxfiles";
+constexpr char kStorageGuestOsFiles[] = "guestosfiles";
 
 int StartServer(dbus::ObjectProxy* proxy, uint64_t port, uint64_t accept_cid) {
   if (port == 0) {
@@ -75,8 +78,11 @@ int StartServer(dbus::ObjectProxy* proxy, uint64_t port, uint64_t accept_cid) {
     return EXIT_FAILURE;
   }
 
-  std::unique_ptr<dbus::Response> dbus_response = proxy->CallMethodAndBlock(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+  std::unique_ptr<dbus::Response> dbus_response =
+      proxy
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to seneschal service";
     return EXIT_FAILURE;
@@ -123,8 +129,11 @@ int StopServer(dbus::ObjectProxy* proxy, uint64_t handle) {
     return EXIT_FAILURE;
   }
 
-  std::unique_ptr<dbus::Response> dbus_response = proxy->CallMethodAndBlock(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+  std::unique_ptr<dbus::Response> dbus_response =
+      proxy
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to seneschal service";
     return EXIT_FAILURE;
@@ -149,7 +158,7 @@ int StopServer(dbus::ObjectProxy* proxy, uint64_t handle) {
 int SharePath(dbus::ObjectProxy* proxy,
               uint64_t handle,
               string owner_id,
-              string drivefs_mount_name,
+              string mount_name,
               string storage_location,
               string path,
               bool writable) {
@@ -178,22 +187,21 @@ int SharePath(dbus::ObjectProxy* proxy,
     }
     location = vm_tools::seneschal::SharePathRequest::MY_FILES;
   } else if (storage_location == kStorageMyDrive) {
-    if (drivefs_mount_name.empty()) {
-      LOG(ERROR)
-          << "--drivefs_mount_name is required for --storage_location=mydrive";
+    if (mount_name.empty()) {
+      LOG(ERROR) << "--mount_name is required for --storage_location=mydrive";
       return EXIT_FAILURE;
     }
     location = vm_tools::seneschal::SharePathRequest::DRIVEFS_MY_DRIVE;
   } else if (storage_location == kStorageTeamDrives) {
-    if (drivefs_mount_name.empty()) {
-      LOG(ERROR) << "--drivefs_mount_name is required for "
+    if (mount_name.empty()) {
+      LOG(ERROR) << "--mount_name is required for "
                     "--storage_location=teamdrives";
       return EXIT_FAILURE;
     }
     location = vm_tools::seneschal::SharePathRequest::DRIVEFS_TEAM_DRIVES;
   } else if (storage_location == kStorageComputers) {
-    if (drivefs_mount_name.empty()) {
-      LOG(ERROR) << "--drivefs_mount_name is required for "
+    if (mount_name.empty()) {
+      LOG(ERROR) << "--mount_name is required for "
                     "--storage_location=computers";
       return EXIT_FAILURE;
     }
@@ -202,10 +210,30 @@ int SharePath(dbus::ObjectProxy* proxy,
     location = vm_tools::seneschal::SharePathRequest::REMOVABLE;
   } else if (storage_location == kStoragePlayFiles) {
     location = vm_tools::seneschal::SharePathRequest::PLAY_FILES;
+  } else if (storage_location == kStoragePlayFilesGuestOs) {
+    location = vm_tools::seneschal::SharePathRequest::PLAY_FILES_GUEST_OS;
+  } else if (storage_location == kStorageLinuxFiles) {
+    if (owner_id.empty()) {
+      LOG(ERROR) << "--owner_id is required for --storage_location=linuxfiles";
+      return EXIT_FAILURE;
+    }
+    location = vm_tools::seneschal::SharePathRequest::LINUX_FILES;
+  } else if (storage_location == kStorageGuestOsFiles) {
+    if (owner_id.empty()) {
+      LOG(ERROR)
+          << "--owner_id is required for --storage_location=guestosfiles";
+      return EXIT_FAILURE;
+    }
+    if (mount_name.empty()) {
+      LOG(ERROR)
+          << "--mount_name is required for --storage_location=guestosfiles";
+      return EXIT_FAILURE;
+    }
+    location = vm_tools::seneschal::SharePathRequest::GUEST_OS_FILES;
   } else {
     LOG(ERROR) << "--storage_location is required "
                   "(myfiles|downloads|mydrive|teamdrives|computers|removable|"
-                  "playfiles)";
+                  "playfiles|linuxfiles|guestosfiles)";
     return EXIT_FAILURE;
   }
 
@@ -227,7 +255,8 @@ int SharePath(dbus::ObjectProxy* proxy,
   vm_tools::seneschal::SharePathRequest request;
   request.set_handle(static_cast<uint32_t>(handle));
   request.set_owner_id(std::move(owner_id));
-  request.set_drivefs_mount_name(std::move(drivefs_mount_name));
+  request.set_drivefs_mount_name(mount_name);
+  request.set_guest_os_mount_name(std::move(mount_name));
   request.set_storage_location(location);
 
   vm_tools::seneschal::SharedPath* shared_path = request.mutable_shared_path();
@@ -239,8 +268,11 @@ int SharePath(dbus::ObjectProxy* proxy,
     return EXIT_FAILURE;
   }
 
-  std::unique_ptr<dbus::Response> dbus_response = proxy->CallMethodAndBlock(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+  std::unique_ptr<dbus::Response> dbus_response =
+      proxy
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to seneschal service";
     return EXIT_FAILURE;
@@ -260,7 +292,7 @@ int SharePath(dbus::ObjectProxy* proxy,
   }
 
   std::cout << request.shared_path().path() << " is available at path "
-            << "/mnt/chromeos" << response.path() << std::endl;
+            << "/mnt/chromeos/" << response.path() << std::endl;
   return EXIT_SUCCESS;
 }
 
@@ -296,8 +328,11 @@ int UnsharePath(dbus::ObjectProxy* proxy, uint64_t handle, string path) {
     return EXIT_FAILURE;
   }
 
-  std::unique_ptr<dbus::Response> dbus_response = proxy->CallMethodAndBlock(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+  std::unique_ptr<dbus::Response> dbus_response =
+      proxy
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to seneschal service";
     return EXIT_FAILURE;
@@ -341,8 +376,10 @@ bool GetServerHandle(scoped_refptr<dbus::Bus> bus,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      concierge_proxy->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      concierge_proxy
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to concierge service";
     return false;
@@ -378,13 +415,13 @@ int main(int argc, char** argv) {
   // Parameters.
   DEFINE_string(vm_name, "", "The name for the VM");
   DEFINE_string(owner_id, "", "The cryptohome id of the user");
-  DEFINE_string(drivefs_mount_name, "",
-                "The DriveFS mount directory name at /media/fuse with format "
-                "drivefs-<drivefs-hash>");
   DEFINE_string(
-      storage_location, kStorageMyFiles,
-      "The storage location of path to share "
-      "(myfiles|downloads|mydrive|teamdrives|computers|removable|playfiles)");
+      mount_name, "",
+      "The mount directory name within /media/fuse for DriveFS or GuestOs");
+  DEFINE_string(storage_location, kStorageMyFiles,
+                "The storage location of path to share "
+                "(myfiles|downloads|mydrive|teamdrives|computers|removable|"
+                "playfiles|linuxfiles|guestosfiles)");
   DEFINE_uint64(handle, 0, "The handle for the server");
   DEFINE_uint64(port, 0, "Port number on which the server should listen");
   DEFINE_uint64(
@@ -449,7 +486,7 @@ int main(int argc, char** argv) {
 
     if (FLAGS_share_path) {
       return SharePath(proxy, handle, std::move(FLAGS_owner_id),
-                       std::move(FLAGS_drivefs_mount_name),
+                       std::move(FLAGS_mount_name),
                        std::move(FLAGS_storage_location), std::move(FLAGS_path),
                        FLAGS_writable);
     } else if (FLAGS_unshare_path) {

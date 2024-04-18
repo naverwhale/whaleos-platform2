@@ -205,7 +205,7 @@ common_config: &common_config
   brand-code: "{{$brand-code}}"
   identity:
     platform-name: "SomePlatform"
-    smbios-name-match: "SomePlatform"
+    frid: "Google_SomeFirmware"
     sku-id: "{{$sku-id}}"
   firmware-signing:
     key-id: "{{$key-id}}"
@@ -234,7 +234,7 @@ chromeos:
       brand-code: "YYYY"
       identity:
         platform-name: "SomePlatform"
-        smbios-name-match: "SomePlatform"
+        frid: "Google_SomeFirmware"
         sku-id: 0
       firmware-signing:
         key-id: "SOME-KEY-ID"
@@ -244,7 +244,7 @@ chromeos:
       brand-code: "YYYY"
       identity:
         platform-name: "SomePlatform"
-        smbios-name-match: "SomePlatform"
+        frid: "Google_SomeFirmware"
         sku-id: 1
       firmware-signing:
         key-id: "SOME-KEY-ID"
@@ -341,6 +341,65 @@ directories, and properties representing files.
 This file gets installed at `/usr/share/chromeos-config/configfs.img`, and is
 used internally by the `cros_configfs` tool.
 
+### FRID identity combination generation
+
+Some models may use multiple FRID match values in their identity configurations.
+While only the configured combinations should be present in finalized production
+devices, for devices in the factory process and for development devices, the
+FRID may be set to another FRID used by that model until the firmware has been
+updated to one with the final FRID. To support devices in this state, identity
+configurations are generated to cover all FRID combinations. That is, for each
+identity object with the FRID ignored, one config instance is generated for each
+FRID value used within that model. For example, given the example input below:
+
+```yaml
+chromeos:
+  models:
+    - name: "SomeDevice"
+      identity:
+        frid: "SomePlatform"
+        sku-id: 0
+    - name: "SomeDevice"
+      identity:
+        frid: "SomePlatform_WithSuffix"
+        sku-id: 1
+    - name: "AnotherDevice"
+      identity:
+        frid: "AnotherPlatform"
+        sku-id: 2
+```
+
+a configuration equivalent to the following would be generated to cover all
+combinations of sku-id and frid:
+
+```yaml
+chromeos:
+  models:
+    - name: "SomeDevice"
+      identity:
+        frid: "SomePlatform"
+        sku-id: 0
+    - name: "SomeDevice"
+      identity:
+        frid: "SomePlatform_WithSuffix"
+        sku-id: 0
+    - name: "SomeDevice"
+      identity:
+        frid: "SomePlatform"
+        sku-id: 1
+    - name: "SomeDevice"
+      identity:
+        frid: "SomePlatform_WithSuffix"
+        sku-id: 1
+    - name: "AnotherDevice"
+      identity:
+        frid: "AnotherPlatform"
+        sku-id: 2
+```
+
+In practice, this step takes place during the YAML transform step above, once
+the configuration has been flattened.
+
 ### Making changes to a YAML model file
 
 When modifying a `model.yaml` file there are few steps that need to be taken to
@@ -408,43 +467,64 @@ In the tables below,
 ### model
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| alt-firmware | [alt-firmware](#alt_firmware) |  | False |  | False |  |
 | arc | [arc](#arc) |  | False |  | False |  |
 | audio | [audio](#audio) |  | False |  | False |  |
 | auto-night-light | boolean |  | False |  | False | Whether the auto-night-light feature is enabled on the device, which sets the schedule for Night light automatically to sunset-to-sunrise. |
+| battery | [battery](#battery) |  | False |  | False |  |
 | bluetooth | [bluetooth](#bluetooth) |  | False |  | False |  |
 | brand-code | string |  | False |  | False | Brand code of the model (also called RLZ code). |
+| branding | [branding](#branding) |  | False |  | False | Contains branding characteristics for this model. |
 | camera | [camera](#camera) |  | False |  | False |  |
-| cros-healthd | [cros-healthd](#cros_healthd) |  | False |  | False | Contains properties used by cros_healthd for model-specific telemetry. Each property represents a category of information and contains boolean properties that indicate whether a device supports a particular telemetry item. See cros_healthd_probe.mojom for descriptions of each property. |
+| cros-healthd | [cros-healthd](#cros_healthd) |  | False |  | False | Contains properties used by cros_healthd for model-specific telemetry and diagnostics. |
 | cross-device | [cross-device](#cross_device) |  | False |  | False | Contains properties to configure cross-device features between ChromeOS devices and other devices, such as Instant Tethering and Smart Lock. |
 | demo-mode | [demo-mode](#demo_mode) |  | False |  | False | Properties related to the ChromeOS Demo Mode, defining the user experience when the device is used in retail. |
 | detachable-base | [detachable-base](#detachable_base) |  | False |  | False | Contains the configuration for the hammerd which is used to update the detachable base firmware. |
+| dgpu | [dgpu](#dgpu) |  | False |  | False | Contains details about the model's dgpu implementation. |
+| displays | array - [displays](#displays) |  | False |  | False | Additional display properties beyond what is available thru standards such as EDID.  The display matches based on the libdrm connector type. |
+| efi | [efi](#efi) |  | False |  | False | Contains settings related to EFI firmware. |
 | fingerprint | [fingerprint](#fingerprint) |  | False |  | False | Contains details about the model's fingerprint implementation. |
 | firmware | [firmware](#firmware) |  | False |  | False |  |
 | firmware-signing | [firmware-signing](#firmware_signing) |  | False |  | True |  |
 | hardware-properties | [hardware-properties](#hardware_properties) |  | False |  | False | Contains boolean flags or enums for hardware properties of this board, for example if it's convertible, has a touchscreen, has a camera, etc. This information is used to auto-generate C code that is consumed by the EC build process in order to do run-time configuration. If a value is defined within a config file, but not for a specific model, that value will be assumed to be false for that model. If a value is an enum and is not specified for a specific model, it will default to "none". All properties must be booleans or enums. If non-boolean properties are desired, the generation code in cros_config_schema.py must be updated to support them. |
+| hdmi-cec | [hdmi-cec](#hdmi_cec) |  | False |  | False | Configurable parameters for HDMI-CEC. |
+| hps | [hps](#hps) |  | False |  | False | Contains details about the model's hps (go/cros-hps) implementation. |
 | hwid-override | string | ```[A-Z0-9]+(-[A-Z]{4})?( [0-9A-F]+(-[0-9A-F]+)*)? ([A-Z2-7]{4}(-[A-Z2-7]{4})*\|[A-Z2-7][2-9][A-Z2-7](-[A-Z2-7][2-9][A-Z2-7])*)``` | False |  | False | Override the HWID reported by crossystem.  This property should only be used for devices supporting non-ChromeOS firmware, where we don't have the ability to set the HWID in GBB.  |
-| identity | [identity](#identity) |  | False |  | False | Defines attributes that are used by cros_config to detect the identity of the platform and which corresponding config should be used. This tuple must either contain x86 properties only or ARM properties only. |
+| identity | [identity](#identity) |  | False |  | False | Defines attributes that are used by cros_config to detect the identity of the platform and which corresponding config should be used. |
 | keyboard | [keyboard](#keyboard) |  | False |  | False | Contains details about the model's keyboard. |
 | modem | [modem](#modem) |  | False |  | False |  |
 | name | string | ```^[_a-zA-Z0-9]{3,}``` | True |  | False | Google code name for the given model. While it is OK to use this string for human-display purposes (such as in a debug log or help dialog), or for a searchable-key in metrics collection, it is not recommended to use this property for creating model-specific behaviors. In this case, add a property to the schema which describes your behavior and use that instead. |
+| nnapi | [nnapi](#nnapi) |  | False |  | False | Configurable parameters for the NNAPI (Neural Networks API) package. |
 | nnpalm | [nnpalm](#nnpalm) |  | False |  | False |  |
 | oem-id | string | ```[0-9]+``` | False |  | False | Some projects store SKU ID, OEM ID and Board Revision in an EEPROM and only SKU ID can be updated in the factory and RMA flow but others should be pre-flashed in the chip level. In this case, we would like to validate whether oem-id here from the updated SKU ID matches the one in the EEPROM so we can prevent this device from being updated to another OEM's devices.  |
-| power | [power](#power) |  | False |  | False | Defines settings that control power management functions. This mostly defines power_manager preferences, but there are a few other power related settings included. For details about each power_manager preference, see - src/platform2/power_manager/common/power_constants.h/cc For examples on setting these properties (including multiline examples), see the power config example in libcros_config/test.yaml |
+| power | [power](#power) |  | False |  | False | Defines settings that control power management functions. This mostly defines power_manager preferences, but there are a few other power related settings included. For details about each power_manager preference, see - src/platform2/power_manager/common/power_constants.h/cc For examples on setting these properties (including multiline examples), see the power config example in test_data/test.yaml |
 | proximity-sensor | [proximity-sensor](#proximity_sensor) |  | False |  | False | Defines the proximity sensor settings for devices such as /dev/proximity-wifi and /dev/proximity-wifi-lte typically used for SAR. |
+| pvs | [pvs](#pvs) |  | False |  | False | Contains information needed to run PVS for this model. |
 | regulatory-label | string |  | False |  | False | Base name of the directory containing the regulatory label files to show on this device. |
+| resource | [resource](#resource) |  | False |  | False | Defines settings that configure resourced. https://chromium.googlesource.com/chromiumos/config/+/main/proto/chromiumos/config/api/software/resource_config.proto |
+| rmad | [rmad](#rmad) |  | False |  | False | ChromeOS Shimless RMA daemon configurations. |
 | scheduler-tune | [scheduler-tune](#scheduler_tune) |  | False |  | False | ChromeOS scheduler's tunable values. |
 | test-label | string |  | False |  | False | Test alias (model) label that will be applied in Autotest and reported for test results. |
 | thermal | [thermal](#thermal) |  | False |  | False |  |
 | touch | [touch](#touch) |  | False |  | False |  |
+| typecd | [typecd](#typecd) |  | False |  | False | Configurable parameters for the Chrome OS Type C daemon. |
 | ui | [ui](#ui) |  | False |  | False |  |
+| uwb | [uwb](#uwb) |  | False |  | False | Contains details about the model's uwb implementation. |
 | wallpaper | string |  | False |  | False | Base filename of the default wallpaper to show on this device. |
-| wifi | [wifi](#wifi) |  | False |  | False | Sets limits on maximum WiFi transmit power for tablet and non-tablet device configurations. This config must contain properties for ath10k wifi driver, rtw88 wifi driver, mtk driver, or intel driver. Note that configs for the intel driver are delivered as encoded wifi sar hex files. |
+| wifi | [wifi](#wifi) |  | False |  | False | Sets limits on maximum WiFi transmit power for tablet and non-tablet device configurations. This config must contain properties for ath10k driver, rtw88 driver, rtw89 driver, mtk driver, or intel driver. Note that configs for the intel driver are delivered as encoded wifi sar hex files. |
+
+### alt-firmware
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| has-alt-firmware | boolean |  | False |  | False | Indicates whether the altfw feature is present |
 
 ### arc
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | build-properties | [build-properties](#build_properties) |  | True |  | False |  |
 | hardware-features | [hardware-features](#hardware_features) |  | False |  | False | Defines hardware_features.xml file provided to ARC during initialization.  |
+| media-codecs | [media-codecs](#media_codecs) |  | False |  | False | Defines media_codecs_c2.xml file provided to ARC during initialization.  |
+| media-codecs-performance | [media-codecs-performance](#media_codecs_performance) |  | False |  | False | Defines media_codecs_performance_c2.xml file provided to ARC during initialization.  |
 | media-profiles | [media-profiles](#media_profiles) |  | False |  | False | Defines media_profiles.xml file provided to ARC during initialization.  |
 | scale | integer |  | False |  | False | The screen density value in dpi that will be used for ARC apps. This value should be from the list of DPIs in android cdd. |
 
@@ -465,6 +545,18 @@ In the tables below,
 | build-path | string |  | True |  | True | Source of the file relative to the build system. |
 | system-path | string |  | True |  | False | Installation path for the file on the system image. |
 
+### media-codecs
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| build-path | string |  | True |  | True | Source of the file relative to the build system. |
+| system-path | string |  | True |  | False | Installation path for the file on the system image. |
+
+### media-codecs-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| build-path | string |  | True |  | True | Source of the file relative to the build system. |
+| system-path | string |  | True |  | False | Installation path for the file on the system image. |
+
 ### media-profiles
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
@@ -480,9 +572,10 @@ In the tables below,
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | cras-config-dir | string |  | True |  | False | Subdirectory for model-specific configuration. |
-| disable-profile | string |  | False |  | False | Optional --disable_profile parameter for CRAS deamon. |
+| disable-profile | string |  | False |  | False | Optional --disable_profile parameter for CRAS daemon. |
 | files | array - [files](#files) |  | False |  | True |  |
 | sound-card-init-conf | string |  | False |  | False | Optional model specific config filename for sound_card_init. |
+| speaker-amp | string |  | False |  | False | Specifies the name of the speaker amplifier on the device. |
 | ucm-suffix | string |  | False |  | False | Optional UCM suffix used to determine model specific config. |
 
 ### files
@@ -490,6 +583,11 @@ In the tables below,
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | destination | string |  | False |  | True | Installation path for the file on the system image. |
 | source | string |  | False |  | True | Source of the file relative to the build system. |
+
+### battery
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| no-battery-boot-supported | boolean |  | False |  | False | Device supports booting without a battery. |
 
 ### bluetooth
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -499,9 +597,17 @@ In the tables below,
 ### flags
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| block-floss-availability | boolean |  | False |  | False | Block Floss from enablement by chrome. |
+| enable-bluetooth-offload | boolean |  | False |  | False | Enable audio offload path. |
 | enable-suspend-management | boolean |  | False |  | False | Enable powerd suspend management callbacks. |
 | reset-on-resume | boolean |  | False |  | False | Expect bluetooth chip to have reset on resume. |
 | stop-on-suspend | boolean |  | False |  | False | Stop the bluetooth adapter on suspend and start it on resume. |
+
+### branding
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| marketing-name | string |  | False |  | False | Name of this model as it is called in the market, reported in 'ro.product.model'. This often starts with '{oem-name}'. |
+| oem-name | string |  | False |  | False | Original Equipment Manufacturer for this model. Generally this means the OEM name printed on the device. This field can only be included after the product has been publicly announced AND should be filled by OEM. It is recommended not to use this field directly, and use cros_healthd Mojo interface instead as a general solution.  |
 
 ### camera
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -522,12 +628,14 @@ In the tables below,
 ### devices
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| detachable | boolean |  | False |  | False | Whether the camera module is detachable. |
 | facing | string |  | True |  | False | Direction the camera faces relative to device screen. |
 | flags | [flags](#flags) |  | True |  | False | Bit flags representing camera capabilities of this device. A camera module can be mounted on this slot only if all the flags match. |
 | has-privacy-switch | boolean |  | False |  | False | The camera has a privacy switch that can disable the output when enabled. |
 | ids | array - string |  | False |  | False | An identifier string of camera module. For USB cameras this must be 4-digit hexadecimal VID and PID separated by a colon, e.g. 0123:abcd. For MIPI cameras it depends on vendor software usage. |
 | interface | string |  | True |  | False | The interface type of the camera device. |
 | orientation | integer |  | True |  | False | Clockwise angle through which the output image needs to be rotated to be upright on the device screen in its native orientation. |
+| privacy-switch-is-delayed | boolean |  | False |  | False | The state of the privacy switch can be read only when the camera stream is active. |
 
 ### flags
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -540,6 +648,7 @@ In the tables below,
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | battery | [battery](#battery) |  | False |  | False |  |
 | cached-vpd | [cached-vpd](#cached_vpd) |  | False |  | False |  |
+| routines | [routines](#routines) |  | False |  | False |  |
 
 ### battery
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -550,6 +659,56 @@ In the tables below,
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | has-sku-number | boolean |  | False |  | False |  |
+
+### routines
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| battery-health | [battery-health](#battery_health) |  | False |  | False |  |
+| fingerprint-diag | [fingerprint-diag](#fingerprint_diag) |  | False |  | False |  |
+| nvme-wear-level | [nvme-wear-level](#nvme_wear_level) |  | False |  | False |  |
+
+### battery-health
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| percent-battery-wear-allowed | integer |  | False |  | False | Upper bound for the battery's wear percentage. Battery health routine in cros_healthd uses this field as a threshold to determine whether the battery is in good condition.  Minimum value: 0x0. Maximum value: 0x64. |
+
+### fingerprint-diag
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| detect-zones | array - [detect-zones](#detect_zones) |  | False |  | False | Rectangles [x1, y1, x2, y2].  |
+| max-dead-pixels | integer |  | True |  | False | The maximum allowed number of dead pixels on the fingerprint sensor.  Minimum value: 0x0. |
+| max-dead-pixels-in-detect-zone | integer |  | True |  | False | The maximum allowed number of dead pixels in the detection zone.  Minimum value: 0x0. |
+| max-error-reset-pixels | integer |  | True |  | False | The maximum allowed number of error pixels when doing the reset test on the fingerprint sensor.  Minimum value: 0x0. |
+| max-pixel-dev | integer |  | True |  | False | The maximum deviation from the median for a pixel.  Minimum value: 0x0. |
+| max-reset-pixel-dev | integer |  | True |  | False | The maximum deviation from the median for a pixel when doing the reset test.  Minimum value: 0x0. |
+| num-detect-zone | integer |  | True |  | False | The number of detect zone.  Minimum value: 0x0. |
+| pixel-median | [pixel-median](#pixel_median) |  | True |  | False | Range constraints of the pixel median value of the checkerboards.  |
+| routine-enable | boolean |  | True |  | False | Enable fingerprint diagnostic routine or not.  |
+
+### detect-zones
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| x1 | integer |  | True |  | False | `x1` should be smaller than `x2`.  Minimum value: 0x0. |
+| x2 | integer |  | True |  | False | `x1` should be smaller than `x2`.  Minimum value: 0x0. |
+| y1 | integer |  | True |  | False | `y1` should be smaller than `y2`.  Minimum value: 0x0. |
+| y2 | integer |  | True |  | False | `y1` should be smaller than `y2`.  Minimum value: 0x0. |
+
+### pixel-median
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cb-type1-lower | integer |  | True |  | False | Checkerboard type1 lower bound.  Minimum value: 0x0. Maximum value: 0xff. |
+| cb-type1-upper | integer |  | True |  | False | Checkerboard type1 upper bound.  Minimum value: 0x0. Maximum value: 0xff. |
+| cb-type2-lower | integer |  | True |  | False | Checkerboard type2 lower bound.  Minimum value: 0x0. Maximum value: 0xff. |
+| cb-type2-upper | integer |  | True |  | False | Checkerboard type2 upper bound.  Minimum value: 0x0. Maximum value: 0xff. |
+| icb-type1-lower | integer |  | True |  | False | Inverted checkerboard type1 lower bound.  Minimum value: 0x0. Maximum value: 0xff. |
+| icb-type1-upper | integer |  | True |  | False | Inverted checkerboard type1 upper bound.  Minimum value: 0x0. Maximum value: 0xff. |
+| icb-type2-lower | integer |  | True |  | False | Inverted checkerboard type2 lower bound.  Minimum value: 0x0. Maximum value: 0xff. |
+| icb-type2-upper | integer |  | True |  | False | Inverted checkerboard type2 upper bound.  Minimum value: 0x0. Maximum value: 0xff. |
+
+### nvme-wear-level
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| wear-level-threshold | integer |  | False |  | False | Threshold number in percentage which NVMe wear level routine (only available to wilco devices) in cros_healthd examines wear level status against.  Minimum value: 0x0. Maximum value: 0x63. |
 
 ### cross-device
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -572,10 +731,10 @@ In the tables below,
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | ec-image-name | string |  | False |  | False | The target EC binary name which is placed under /lib/firmware. |
 | files | array - [files](#files) |  | False |  | True |  |
-| product-id | integer |  | False |  | False | The Product ID of the detachable base. This value can be queried by command 'lsusb'. By taking this as an example: Bus 001 Device 032: ID 18d1:503c Google Inc. the product-id is 20540(=0x503c). |
+| product-id | integer |  | False |  | False | The Product ID of the detachable base. This value can be queried by command 'lsusb'. By taking this as an example: Bus 001 Device 032: ID 18d1:503c Google LLC the product-id is 20540(=0x503c). |
 | touch-image-name | string |  | False |  | False | The touchpad binary name which is placed under /lib/firmware. This is only needed if the detachable base contains touchpad. |
 | usb-path | string |  | False |  | False | Searches and finds the idVendor and idProduct under sysfs /sys/bus/usb/devices/* which matches the vendor-id and product-id. By taking this as an example: '/sys/bus/usb/devices/1-1.1' The usb-path is '1-1.1'. |
-| vendor-id | integer |  | False |  | False | The Vendor ID of the detachable base. This value can be queried by command 'lsusb'. By taking this as an example: Bus 001 Device 032: ID 18d1:503c Google Inc. the vendor-id is 6353(=0x18d1). |
+| vendor-id | integer |  | False |  | False | The Vendor ID of the detachable base. This value can be queried by command 'lsusb'. By taking this as an example: Bus 001 Device 032: ID 18d1:503c Google LLC the vendor-id is 6353(=0x18d1). |
 
 ### files
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -583,6 +742,31 @@ In the tables below,
 | destination | string |  | False |  | True | Installation path for the file on the system image. |
 | source | string |  | False |  | True | Source of the file relative to the build system ${FILESDIR} |
 | symlink | string |  | False |  | True | Symlink file that will be installed pointing to the destination. |
+
+### dgpu
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| dgpu-type | string |  | False |  | False | type of dGPU. |
+| has-dgpu | boolean |  | False |  | False | Whether the model has discrete GPU. |
+
+### displays
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| connector-type | integer |  | False |  | False | The libdrm connector type that must match for the properties to apply to this display.  For example, specify 14 for eDP.  See drm_mode.h included with libdrm for all possible values. Minimum value: 0x0. Maximum value: 0x14. |
+| rounded-corners | [rounded-corners](#rounded_corners) |  | False |  | False | Specify the radius of each corner. |
+
+### rounded-corners
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| bottom-left | integer |  | False |  | False | The radius, in physical pixels, of the rounded corner. Minimum value: 0x0. |
+| bottom-right | integer |  | False |  | False | The radius, in physical pixels, of the rounded corner. Minimum value: 0x0. |
+| top-left | integer |  | False |  | False | The radius, in physical pixels, of the rounded corner. Minimum value: 0x0. |
+| top-right | integer |  | False |  | False | The radius, in physical pixels, of the rounded corner. Minimum value: 0x0. |
+
+### efi
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| bootvar-name-override | string | ```[a-zA-Z0-9 ]+``` | False |  | False | Override the label/description of EFI boot entries managed by postinstall. The default is hard-coded in postinstall. This should be used by devices with  non-ChromeOS firmware, in conjunction with the `manage_efi_boot_entries` USE flag.  |
 
 ### fingerprint
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -597,14 +781,16 @@ In the tables below,
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | bcs-overlay | string |  | False |  | True | BCS overlay path used to determine BCS file path for binary firmware downloads. |
 | build-targets | [build-targets](#build_targets) |  | False |  | True |  |
+| detachable-ui | boolean |  | False |  | True | Enables the firmware detachable UI. |
 | ec-ro-image | string |  | False |  | True | Name of the file located in BCS under the respective bcs-overlay. |
+| ec-rw-image | string |  | False |  | True | Name of the file located in BCS under the respective bcs-overlay. |
 | firmware-config | integer |  | False |  | False | The firmware config bitmap to be flashed to the CBI. This field is used in the factory. |
 | image-name | string |  | False |  | False | The name of the firmware image used by the firmware updater. Typically the device name, but can differ when a device may have two or more different firmware images. |
 | key-id | string |  | False |  | True | Key ID from the signer key set that is used to sign the given firmware image. |
 | main-ro-image | string |  | False |  | True | Name of the file located in BCS under the respective bcs-overlay. |
 | main-rw-image | string |  | False |  | True | Name of the file located in BCS under the respective bcs-overlay. |
 | name | string |  | False |  | True | This is a human-recognizable name used to refer to the firmware. It will be used when generating the shellball via firmware packer. Mainly, this is only for compatibility testing with device tree (since DT allowed firmwares to be named). |
-| no-firmware | boolean |  | False |  | True | Does nothing and pending removal. Do not set. ([Bug](https://crbug.com/1072007)) |
+| no-firmware | boolean |  | False |  | True | Set this flag to True to indicate the sku has no firmware bundle (bios+ec) and should be included in the firmware section even if `build-targets` is not specified. |
 | pd-ro-image | string |  | False |  | True | Name of the file located in BCS under the respective bcs-overlay. |
 
 ### build-targets
@@ -615,11 +801,12 @@ In the tables below,
 | coreboot | string |  | False |  | True | Build target that will be considered dirty when building/testing locally. |
 | depthcharge | string |  | False |  | True | Build target that will be considered dirty when building/testing locally. |
 | ec | string |  | False |  | True | Build target that will be considered dirty when building/testing locally. |
-| ec_extras | array - string |  | False |  | True | Extra EC build targets to build within chromeos-ec. |
+| ec-extras | array - string |  | False |  | True | Extra EC build targets to build within chromeos-ec. |
 | gsc | string |  | False |  | True | Build target that will be considered dirty when building/testing locally. |
 | ish | string |  | False |  | True | Build target that will be considered dirty when building/testing locally. |
 | libpayload | string |  | False |  | True | Build target that will be considered dirty when building/testing locally. |
 | u-boot | string |  | False |  | True | Build target that will be considered dirty when building/testing locally. |
+| zephyr-detachable-base | string |  | False |  | True | Specifies the detachable base of Zephyr-based firmware target to build. |
 | zephyr-ec | string |  | False |  | True | Specifies the list of Zephyr-based firmware targets to build. |
 
 ### firmware-signing
@@ -633,75 +820,109 @@ In the tables below,
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | display-type | string |  | False |  | False | Denotes the type of display this device contains. |
+| fan-count | integer |  | False |  | False | The number of fan in the device. Minimum value: 0x0. Maximum value: 0x7. |
 | form-factor | string |  | False |  | False | Denotes the form factor of the device. |
+| has-audio-jack | boolean |  | False |  | False | True if the device has an audio jack. |
 | has-backlight | boolean |  | False |  | False | Does the device have a backlight. |
 | has-base-accelerometer | boolean |  | False |  | False | Is there an accelerometer in the base of the device. |
 | has-base-gyroscope | boolean |  | False |  | False | Is there a gyroscope in the base of the device. |
 | has-base-light-sensor | boolean |  | False |  | False | Is there a light sensor in the base of the device. |
 | has-base-magnetometer | boolean |  | False |  | False | Is there a magnetometer in the base of the device. |
+| has-camera-light-sensor | boolean |  | False |  | False | Is there a light sensor in the camera of the device. |
+| has-hdmi | boolean |  | False |  | False | True if the device has an HDMI port. |
 | has-lid-accelerometer | boolean |  | False |  | False | Is there an accelerometer in the lid of the device. |
 | has-lid-gyroscope | boolean |  | False |  | False | Is there a gyroscope in the lid of the device. |
 | has-lid-light-sensor | boolean |  | False |  | False | Is there a light sensor in the lid of the device. |
 | has-lid-magnetometer | boolean |  | False |  | False | Is there a magnetometer in the lid of the device. |
+| has-poe-peripheral-support | boolean |  | False |  | False | Does the device have hardware for connecting PoE peripherals. |
+| has-privacy-screen | boolean |  | False |  | False | Does the device have a privacy screen. |
+| has-sd-reader | boolean |  | False |  | False | True if the device has an SD card reader. |
+| has-side-volume-button | boolean |  | False |  | False | True if the device has a side volume button. |
 | has-touchscreen | boolean |  | False |  | False | Does the device have a touchscreen. |
 | is-lid-convertible | boolean |  | False |  | False | Can the lid be rotated 360 degrees. |
 | psu-type | string |  | False |  | False | Type of PSU the device has: - battery: the device has a battery intended for primary use - AC_primary: the device has a battery, but it is not intended for primary use - AC_only: the device has no battery - no_power: the device does not receive power in any direct manner (e.g., it is virtualized)  |
+| recovery-input | string |  | False |  | False | Denotes the input method for entering device recovery. |
+| storage-type | string |  | False |  | False | Type of the fixed storage device. |
 | stylus-category | string |  | False |  | False | Denotes the category of stylus this device contains. |
+
+### hdmi-cec
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| power-off-displays-on-shutdown | boolean |  | False |  | False | Automatically power off all connected displays on shutdown. |
+| power-on-displays-on-boot | boolean |  | False |  | False | Automatically power on all connected displays on boot. |
+
+### hps
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| has-hps | boolean |  | False |  | False | Whether the model has an hps device. |
 
 ### identity
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
-| customization-id | string |  | False | x86 | False | 'customization_id' value set in the VPD for non-unibuild Zergs and Whitelabels. Deprecated for use in new products since 2017/07/26. |
-| platform-name | string |  | False | x86 | False | Defines the name of the mosys platform used. Mosys is the only software which is allowed to used this value. |
-| sku-id | integer |  | False | x86 | False | SKU/Board strapping pins [configured during board manufacturing](https://chromium.googlesource.com/chromiumos/docs/+/HEAD/design_docs/cros_board_info.md#SKU_ID). Leaving this value unset will cause the config to match any SKU ID. Minimum value: -0x1. Maximum value: 0x7fffffff. |
-| smbios-name-match | string |  | False | x86 | False | [x86] Firmware name built into the firmware and reflected back out in the SMBIOS tables. Leaving this value unset will cause the config to match any SMBIOS product name. |
-| whitelabel-tag | string |  | False | x86 | False | 'whitelabel_tag' value set in the VPD, to add Whitelabel branding over an unbranded base model. |
-| customization-id | string |  | False | ARM | False | 'customization_id' value set in the VPD for non-unibuild Zergs and Whitelabels. Deprecated for use in new products since 2017/07/26. |
-| device-tree-compatible-match | string |  | False | ARM | False | [ARM] String pattern (partial) that is matched against the contents of /proc/device-tree/compatible on ARM devices. |
-| platform-name | string |  | False | ARM | False | Defines the name of the mosys platform used. Mosys is the only software which is allowed to used this value. |
-| sku-id | integer |  | False | ARM | False | SKU/Board strapping pins [configured during board manufacturing](https://chromium.googlesource.com/chromiumos/docs/+/HEAD/design_docs/cros_board_info.md#SKU_ID). Leaving this value unset will cause the config to match any SKU ID. Minimum value: -0x1. Maximum value: 0x7fffffff. |
-| whitelabel-tag | string |  | False | ARM | False | 'whitelabel_tag' value set in the VPD, to add Whitelabel branding over an unbranded base model. |
+| custom-label-tag | string |  | False |  | False | `custom_label_tag` value set in the VPD, to add branding over an unbranded base model.  Note that `whitelabel_tag` is the historical name for this VPD value, and is accepted as well.  |
+| customization-id | string |  | False |  | False | 'customization_id' value set in the VPD for non-unibuild Zergs and Whitelabels. Deprecated for use in new products since 2017/07/26. |
+| feature-device-type | string |  | False |  | False | Type of feature enablement for this device |
+| frid | string |  | False |  | False | String which must match the AP firmware FRID (first part before the period) in order for the config to match.  Leaving this value unset will cause the config to match any FRID.  |
+| platform-name | string |  | False |  | False | Do not set or use this value.  It is no longer used and is pending deletion. |
+| sku-id | integer |  | False |  | False | SKU/Board strapping pins [configured during board manufacturing](https://chromium.googlesource.com/chromiumos/docs/+/HEAD/design_docs/cros_board_info.md#SKU_ID). Leaving this value unset will cause the config to match any SKU ID. Minimum value: -0x1. Maximum value: 0x7fffffff. |
 
 ### keyboard
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | backlight | boolean |  | False |  | False | Specifies the existence of backlight. |
+| mcutype | string |  | False |  | False | Type of MCU firmware, if present. |
 | numpad | boolean |  | False |  | False | Specifies the existence of numpad. |
 
 ### modem
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
-| attach-apn-required | boolean |  | False |  | False | Try to explicitly setup an attach APN when registering to the LTE network. |
 | firmware-variant | string |  | False |  | False | Variant of the modem firmware to be used. This value is read by modemfwd to match against the variant field of a firmware entry in a firmware manifest. In most cases, we simply use the model name as the value. |
+| modem-type | string | ```[0-9]+``` | False |  | False | The type of modem present on the device. |
 | wedge-reboot-delay-ms | string | ```[0-9]+``` | False |  | False | Delay in milliseconds after which we pulse the modem reset GPIO if it hasn't appeared on the USB bus. This value is used by modemfwd and defaults to 5 minutes if not defined. |
+
+### nnapi
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| drivers | array - [drivers](#drivers) |  | False |  | False |  |
+
+### drivers
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| name | string |  | True |  | False |  |
+| shared-library | string |  | True |  | False |  |
 
 ### nnpalm
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| model | string |  | False |  | False | Optional - model version to use, empty by default. |
 | radius-polynomial | string |  | False |  | False | Optional - empty by default. |
 | touch-compatible | boolean |  | False |  | False | Optional - false by default but should be true for compatible devices. |
 
 ### power
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| adaptive-charging-alarm-sec | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| adaptive-charging-enabled | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| adaptive-charging-hold-delta-percent | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| adaptive-charging-hold-percent | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| adaptive-charging-min-probability | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | allow-ambient-eq | string | ```^[01]$``` | False |  | False | Enable (1) or disable (0) Ambient EQ. |
 | als-smoothing-constant | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | autobrightness | [autobrightness](#autobrightness) |  | False |  | False |  |
 | avoid-suspend-when-headphone-jack-plugged | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | battery-poll-interval-initial-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | battery-poll-interval-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| battery-stabilized-after-battery-saver-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | battery-stabilized-after-line-power-connected-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | battery-stabilized-after-line-power-disconnected-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | battery-stabilized-after-resume-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | battery-stabilized-after-startup-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| charge-limit-enabled | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | charging-ports | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | cutoff-power-ua | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
-| dark-resume-devices | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
-| dark-resume-sources | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | defer-external-display-timeout | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | detect-hover | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | disable-dark-resume | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
-| disable-hibernate | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | disable-idle-suspend | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | enable-console-during-suspend | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | external-ambient-light-sensor | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
@@ -709,8 +930,10 @@ In the tables below,
 | external-display-only | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | factory-mode | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | has-ambient-light-sensor | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| has-barreljack | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | has-charge-controller | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | has-keyboard-backlight | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| has-machine-quirks | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | hibernate-power-ua | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | ignore-external-policy | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | instant-transitions-below-min-level | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
@@ -722,50 +945,61 @@ In the tables below,
 | keyboard-backlight-keep-on-during-video-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | keyboard-backlight-keep-on-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | keyboard-backlight-no-als-brightness | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
-| keyboard-backlight-turn-on-for-user-activity | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | keyboard-backlight-user-steps | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | legacy-power-button | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | low-battery-shutdown-percent | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | low-battery-shutdown-time-s | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | lower-power-from-suspend-sec | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| manual-eventlog-add | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | max-charge-samples | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | max-current-samples | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | max-dark-suspend-delay-timeout-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | min-visible-backlight-level | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
-| mosys-eventlog | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | multiple-batteries | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | num-sessions-on-current-charge | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | plugged-dim-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | plugged-off-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| plugged-quick-dim-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| plugged-quick-lock-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | plugged-suspend-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | power-supply-full-factor | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| preferred-lid-device | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | require-usb-input-device-to-suspend | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | retry-suspend-attempts | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | retry-suspend-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| send-feedback-if-undimmed | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| set-cellular-regulatory-domain-mapping | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-cellular-transmit-power-dpr-gpio | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-cellular-transmit-power-for-activity-proximity | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-cellular-transmit-power-for-proximity | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-cellular-transmit-power-for-tablet-mode | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-cellular-transmit-power-level-mapping | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| set-default-proximity-state-high | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-transmit-power-prefer-far-for-proximity | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-wifi-transmit-power-for-activity-proximity | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-wifi-transmit-power-for-proximity | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | set-wifi-transmit-power-for-tablet-mode | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| slow-adaptive-charging-enabled | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | smart-discharge-to-zero-hr | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | suspend-mode | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| suspend-prevention-models | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | suspend-to-idle | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| suspend-to-idle-models | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | touchpad-wakeup | string | ```^[01]$``` | False |  | False | Enable (1) or disable (0) wake from touchpad. If not set, default to enable. When set to enable, on many devices, firmware is in charge of controlling whether to wake from touchpad. This flag is reserved for older devices without firmware support (Nami and Coral) and please do not set for new devices. |
 | tpm-counter-suspend-threshold | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | tpm-status-interval-sec | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | turn-off-screen-timeout-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | unplugged-dim-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | unplugged-off-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| unplugged-quick-dim-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| unplugged-quick-lock-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | unplugged-suspend-ms | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | usb-min-ac-watts | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | use-cras | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | use-lid | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | use-modemmanager-for-dynamic-sar | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | use-multi-power-level-dynamic-sar | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
+| use-regulatory-domain-for-dynamic-sar | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | wake-on-dp | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | wakeup-input-device-names | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
 | wifi-transmit-power-mode-for-static-device | string |  | False |  | False | For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/ |
@@ -784,52 +1018,1402 @@ In the tables below,
 ### proximity-sensor
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
-| lte | [lte](#lte) |  | False |  | False |  |
-| wifi | [wifi](#wifi) |  | False |  | False |  |
-| wifi-lte | [wifi-lte](#wifi_lte) |  | False |  | False |  |
+| semtech-config | array - [semtech-config](#semtech_config) |  | False |  | False |  |
 
-### lte
+### semtech-config
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
-| channel | string | ```^[a-zA-Z0-9_]+$``` | False |  | False | Proximity sensor channel. |
-| hardwaregain | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor hardware gain. |
-| sampling-frequency | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor sampling frequency. |
-| thresh-falling | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling threshold. |
-| thresh-falling-hysteresis | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling hysteresis. |
-| thresh-falling-period | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling threshold period (debounce). |
-| thresh-rising | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising threshold. |
-| thresh-rising-hysteresis | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising hysteresis. |
-| thresh-rising-period | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising threshold period (debounce). |
+| file | [file](#file) |  | True |  | False |  |
+| location | string |  | True |  | False |  |
 
-### wifi
+### file
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
-| channel | string | ```^[a-zA-Z0-9_]+$``` | False |  | False | Proximity sensor channel. |
-| hardwaregain | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor hardware gain. |
-| sampling-frequency | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor sampling frequency. |
-| thresh-falling | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling threshold. |
-| thresh-falling-hysteresis | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling hysteresis. |
-| thresh-falling-period | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling threshold period (debounce). |
-| thresh-rising | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising threshold. |
-| thresh-rising-hysteresis | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising hysteresis. |
-| thresh-rising-period | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising threshold period (debounce). |
+| build-path | string |  | True |  | True | Source of the file relative to the build system. |
+| system-path | string |  | True |  | False | Installation path for the file on the system image. |
 
-### wifi-lte
+### pvs
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
-| channel | string | ```^[a-zA-Z0-9_]+$``` | False |  | False | Proximity sensor channel. |
-| hardwaregain | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor hardware gain. |
-| sampling-frequency | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor sampling frequency. |
-| thresh-falling | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling threshold. |
-| thresh-falling-hysteresis | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling hysteresis. |
-| thresh-falling-period | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor falling threshold period (debounce). |
-| thresh-rising | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising threshold. |
-| thresh-rising-hysteresis | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising hysteresis. |
-| thresh-rising-period | string | ```^[0-9.]+$``` | False |  | False | Proximity sensor rising threshold period (debounce). |
+| program | string |  | False |  | False | The program that corresponds to this model. |
+| project | string |  | False |  | False | The project that corresponds to this model. |
+
+### resource
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| ac | [ac](#ac) |  | False |  | False | Defines settings that configure resourced based on power source. https://chromium.googlesource.com/chromiumos/config/+/main/proto/chromiumos/config/api/software/resource_config.proto |
+| dc | [dc](#dc) |  | False |  | False | Defines settings that configure resourced based on power source. https://chromium.googlesource.com/chromiumos/config/+/main/proto/chromiumos/config/api/software/resource_config.proto |
+
+### ac
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| arcvm-gaming-power-preferences | [arcvm-gaming-power-preferences](#arcvm_gaming_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| battery-saver-power-preferences | [battery-saver-power-preferences](#battery_saver_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| borealis-gaming-power-preferences | [borealis-gaming-power-preferences](#borealis_gaming_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| default-power-preferences | [default-power-preferences](#default_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| fullscreen-power-preferences | [fullscreen-power-preferences](#fullscreen_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| vm-boot-power-preferences | [vm-boot-power-preferences](#vm_boot_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| web-rtc-power-preferences | [web-rtc-power-preferences](#web_rtc_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+
+### arcvm-gaming-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### battery-saver-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### borealis-gaming-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### fullscreen-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### vm-boot-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### web-rtc-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### dc
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| arcvm-gaming-power-preferences | [arcvm-gaming-power-preferences](#arcvm_gaming_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| battery-saver-power-preferences | [battery-saver-power-preferences](#battery_saver_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| borealis-gaming-power-preferences | [borealis-gaming-power-preferences](#borealis_gaming_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| default-power-preferences | [default-power-preferences](#default_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| fullscreen-power-preferences | [fullscreen-power-preferences](#fullscreen_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| vm-boot-power-preferences | [vm-boot-power-preferences](#vm_boot_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+| web-rtc-power-preferences | [web-rtc-power-preferences](#web_rtc_power_preferences) |  | False |  | False | For config details, see https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/resourced/README.md; For governor (CPUfreq scaling governor) and epp (Energy-Performance Preference), see https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html |
+
+### arcvm-gaming-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### battery-saver-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### borealis-gaming-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### fullscreen-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### vm-boot-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### web-rtc-power-preferences
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| cpu-offline | [cpu-offline](#cpu_offline) |  | False |  | False | The policy to offline CPUs to reduce power consumption. Mainly used by battery-saver mode (battery-saver-power-preferences). Empty by default and CPU won't be offlined. |
+| epp | [epp](#epp) |  | False |  | False |  |
+| governor | [governor](#governor) |  | False |  | False |  |
+
+### cpu-offline
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| half | [half](#half) |  | False | GROUP(0) | False | Offline half of the cores. |
+| small-core | [small-core](#small_core) |  | False | GROUP(0) | False | Offline small cores. |
+| smt | [smt](#smt) |  | False | GROUP(0) | False | Offline Simultaneous Multithreading (SMT). |
+
+### half
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### small-core
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### smt
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| min-active-threads | integer |  | False |  | False | The minimum number of active threads required. If not set, resourced sets default to 2. |
+
+### epp
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| balance-performance | [balance-performance](#balance_performance) |  | False | GROUP(0) | False |  |
+| balance-power | [balance-power](#balance_power) |  | False | GROUP(0) | False |  |
+| default | [default](#default) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| power | [power](#power) |  | False | GROUP(0) | False |  |
+
+### balance-performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### balance-power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### default
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### power
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### governor
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| conservative | [conservative](#conservative) |  | False | GROUP(0) | False |  |
+| ondemand | [ondemand](#ondemand) |  | False | GROUP(0) | False |  |
+| performance | [performance](#performance) |  | False | GROUP(0) | False |  |
+| powersave | [powersave](#powersave) |  | False | GROUP(0) | False |  |
+| schedutil | [schedutil](#schedutil) |  | False | GROUP(0) | False |  |
+| userspace | [userspace](#userspace) |  | False | GROUP(0) | False |  |
+
+### conservative
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### ondemand
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| powersave-bias | integer |  | False |  | False |  |
+| sampling-rate-ms | integer |  | False |  | False |  |
+
+### performance
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### powersave
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### schedutil
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### userspace
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+
+### rmad
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| enabled | boolean |  | False |  | False | Whether enable Shimless RMA. |
+| has-cbi | boolean |  | False |  | False | Whether the device has CBI. |
+| ssfc | [ssfc](#ssfc) |  | False |  | False | Configs to generate the SSFC value on a device. |
+| use-legacy-custom-label | boolean |  | False |  | False | Whether use the legacy custom label key in VPD. |
+
+### ssfc
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| component-type-configs | array - [component-type-configs](#component_type_configs) |  | False |  | False | Configs for each component type. |
+| mask | integer |  | False |  | False | SSFC bitmap mask for bits that should be preserved after RMA, e.g. configs that can only be set by the factory but not the RMA center. Minimum value: 0x0. Maximum value: 0xffffffff. |
+
+### component-type-configs
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| component-type | string |  | False |  | False | Component type, e.g. gyroscope. |
+| default-value | integer |  | False |  | False | Default SSFC value if none of the component in |probed_componentns| is probed. Minimum value: 0x0. Maximum value: 0xffffffff. |
+| probeable-components | array - [probeable-components](#probeable_components) |  | False |  | False | Mapping of probeable components to SSFC values. |
+
+### probeable-components
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| identifier | string |  | False |  | False | Component name in the probe statement, e.g. gyroscope_1. |
+| value | integer |  | False |  | False | SSFC value of the component. Minimum value: 0x0. Maximum value: 0xffffffff. |
 
 ### scheduler-tune
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| boost-arcvm | number |  | False |  | False | (Optional) Global scheduler's boost factor of the ARCVM vcores and host services. For normal architectures, the boost-arcvm is directly converted to % boost value, where 1.0 is 100%. For the little.Big architecture, the ARCVM will be boosted by a % value, calculated from the formula little-core-freq / big-core-freq * boost-arcvm. Besides boosting the scheduler for the VM by a % value, the cgroup's uclamp.latency_sensitive attribute is enabled to further reduce the scheduling latency. Note - this is intended to be a temporary solution, which will be removed upon having the more appropriate scheduler improvements ready. |
+| boost-top-app | integer |  | False |  | False | (Optional) Scheduler's boost value(%) for ARCVM topmost applications. When top-app class application is running, ARCVM applies this value to scheduler attribute. Tasks with higher boost value are more likely to have higher operating power point even when the system is low-utilized. If it is not set, the default value will be calculated by the performance ratio of the highest performance core and the lowest performance core. So the recommended value is higher than that. 0 means no boost and is not recommended. Minimum value: 0x0. Maximum value: 0x64. |
 | boost-urgent | integer |  | False |  | False | (Optional) Scheduler's boost value(%) for urgent tasks. When an urgent thread is created, chrome applies this value to scheduler attribute. Tasks with higher boost value are more likely to have higher operating power point even when the system is low utilized. Minimum value: 0x0. Maximum value: 0x64. |
 | cpuset-nonurgent | string | ```^[0-9]+(-[0-9]+\|(,[0-9]+)+)$``` | False |  | False | (Optional) non-urgent task are only allowed to use given CPUs. |
 | input-boost | integer |  | False |  | False | (Optional) chromium kernel has a cpu-boost feature, which boosts CPUs for a short duration when user intraction is detected from input devices. This value specifies how much CPUs will be boosted. Minimum value: 0x0. Maximum value: 0x64. |
@@ -858,10 +2442,17 @@ In the tables below,
 | source | string |  | False |  | True | Source of the file relative to the build system ${FILESDIR} |
 | symlink | string |  | False |  | True | Symlink file that will be installed pointing to the destination. |
 
+### typecd
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| mode-entry-dp-only | boolean |  | False |  | False | AP driven alternate mode entry on this system should be restricted to DisplayPort alternate mode. |
+
 ### ui
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | apps | [apps](#apps) |  | False |  | False |  |
+| ash-disabled-features | array - string |  | False |  | True | Disabled features passed to the Ash window manager and system UI. Each entry should be a string of the form FeatureName. If this property is not set, features will be determined by other cros_config properties. Serialized to a null byte separated string when written to configfs.img |
+| ash-enabled-features | array - string |  | False |  | True | Enabled features passed to the Ash window manager and system UI. Each entry should be a string of the form FeatureName. If this property is not set, features will be determined by other cros_config properties. Serialized to a null byte separated string when written to configfs.img |
 | extra-ash-flags | array - string |  | False |  | True | Switches passed to the Ash window manager and system UI. Each entry should be a string of the form --<key>=<value>, or --<key> for boolean switches. If this property is not set, flags will be determined by other cros_config properties. Serialized to a null byte separated string when written to configfs.img |
 | handwriting-recognition-web-platform-api | boolean |  | False |  | False | Whether the handwriting recognition web platform API is supported. |
 | help-content-id | string |  | False |  | False | Identifier passed to the Showoff app to identify any device-specific help content to be displayed. |
@@ -885,6 +2476,11 @@ In the tables below,
 | region | string |  | False |  | False |  |
 | side | string |  | False |  | False |  |
 
+### uwb
+| Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
+| --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
+| has-uwb | boolean |  | False |  | False | Whether the model has UWB equipped. |
+
 ### wifi
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
@@ -893,8 +2489,8 @@ In the tables below,
 | geo-offsets-eu | [geo-offsets-eu](#geo_offsets_eu) |  | False | rtw | False | Offsets which are applied to WiFi power limits depending on the current regulatory domain. Offsets in units of 0.125 dBm. The sum of a geo offset and any power limit to which it applies cannot exceed 255. When the current regulatory domain is unknown or has yet to be determined, the base transmit power limits are used without any geo offsets applied. 'geo-offsets-fcc' is used for regulatory domains which follow FCC guidelines, 'geo-offsets-eu' is used for regulatory domains which follow ETSI guidelines, and 'geo-offsets-rest-of-world' is used for regulatory domains which don't follow FCC or ETSI guidelines. |
 | geo-offsets-fcc | [geo-offsets-fcc](#geo_offsets_fcc) |  | False | rtw | False | Offsets which are applied to WiFi power limits depending on the current regulatory domain. Offsets in units of 0.125 dBm. The sum of a geo offset and any power limit to which it applies cannot exceed 255. When the current regulatory domain is unknown or has yet to be determined, the base transmit power limits are used without any geo offsets applied. 'geo-offsets-fcc' is used for regulatory domains which follow FCC guidelines, 'geo-offsets-eu' is used for regulatory domains which follow ETSI guidelines, and 'geo-offsets-rest-of-world' is used for regulatory domains which don't follow FCC or ETSI guidelines. |
 | geo-offsets-rest-of-world | [geo-offsets-rest-of-world](#geo_offsets_rest_of_world) |  | False | rtw | False | Offsets which are applied to WiFi power limits depending on the current regulatory domain. Offsets in units of 0.125 dBm. The sum of a geo offset and any power limit to which it applies cannot exceed 255. When the current regulatory domain is unknown or has yet to be determined, the base transmit power limits are used without any geo offsets applied. 'geo-offsets-fcc' is used for regulatory domains which follow FCC guidelines, 'geo-offsets-eu' is used for regulatory domains which follow ETSI guidelines, and 'geo-offsets-rest-of-world' is used for regulatory domains which don't follow FCC or ETSI guidelines. |
-| non-tablet-mode-power-table-rtw | [non-tablet-mode-power-table-rtw](#non_tablet_mode_power_table_rtw) |  | False | rtw | False | [rtw] WiFi power chain for use with Realtek rtw88 drivers. Limits in units of 0.125 dBm. 5g band 2 (channels 5.35G-5.47G) power limit is not supported. |
-| tablet-mode-power-table-rtw | [tablet-mode-power-table-rtw](#tablet_mode_power_table_rtw) |  | False | rtw | False | [rtw] WiFi power chain for use with Realtek rtw88 drivers. Limits in units of 0.125 dBm. 5g band 2 (channels 5.35G-5.47G) power limit is not supported. |
+| non-tablet-mode-power-table-rtw | [non-tablet-mode-power-table-rtw](#non_tablet_mode_power_table_rtw) |  | False | rtw | False | [rtw] WiFi power chain for use with Realtek rtw88 or rtw89 drivers. Limits in units of 0.125 dBm for rtw88 and 0.25 dBm for rtw89. 5g band 2 (channels 5.35G-5.47G) power limit is not supported. |
+| tablet-mode-power-table-rtw | [tablet-mode-power-table-rtw](#tablet_mode_power_table_rtw) |  | False | rtw | False | [rtw] WiFi power chain for use with Realtek rtw88 or rtw89 drivers. Limits in units of 0.125 dBm for rtw88 and 0.25 dBm for rtw89. 5g band 2 (channels 5.35G-5.47G) power limit is not supported. |
 | eu-power-table-mtk | [eu-power-table-mtk](#eu_power_table_mtk) |  | False | mtk | False | [mtk] WiFi power chain of regulatory domain for use with MediaTek mt7921 driver. Limits in units of 0.25 dBm, Offset in units of 0.25 dBm |
 | fcc-power-table-mtk | [fcc-power-table-mtk](#fcc_power_table_mtk) |  | False | mtk | False | [mtk] WiFi power chain of regulatory domain for use with MediaTek mt7921 driver. Limits in units of 0.25 dBm, Offset in units of 0.25 dBm |
 | non-tablet-mode-power-table-mtk | [non-tablet-mode-power-table-mtk](#non_tablet_mode_power_table_mtk) |  | False | mtk | False | [mtk] WiFi power chain for use with MediaTek mt7921 driver. Limits in units of 0.25 dBm. |
@@ -919,18 +2515,21 @@ In the tables below,
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | offset-2g | integer |  | False |  | False | Value to be added to the 2.4GHz WiFi band. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-5g | integer |  | False |  | False | Value to be added to all 5GHz WiFi bands. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| offset-6g | integer |  | False |  | False | Value to be added to all 6GHz WiFi bands. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### geo-offsets-fcc
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | offset-2g | integer |  | False |  | False | Value to be added to the 2.4GHz WiFi band. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-5g | integer |  | False |  | False | Value to be added to all 5GHz WiFi bands. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| offset-6g | integer |  | False |  | False | Value to be added to all 6GHz WiFi bands. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### geo-offsets-rest-of-world
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | offset-2g | integer |  | False |  | False | Value to be added to the 2.4GHz WiFi band. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-5g | integer |  | False |  | False | Value to be added to all 5GHz WiFi bands. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| offset-6g | integer |  | False |  | False | Value to be added to all 6GHz WiFi bands. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### non-tablet-mode-power-table-rtw
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -939,6 +2538,12 @@ In the tables below,
 | limit-5g-1 | integer |  | False |  | False | 5G band 1 power limit: 5.15G-5.35G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g-3 | integer |  | False |  | False | 5G band 3 power limit: 5.47G-5.725G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g-4 | integer |  | False |  | False | 5G band 4 power limit: 5.725G-5.95G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-1 | integer |  | False |  | False | 6G band 1 power limit: 5.955G-6.155G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-2 | integer |  | False |  | False | 6G band 1 power limit: 6.175G-6.415G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-3 | integer |  | False |  | False | 6G band 1 power limit: 6.435G-6.515G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-4 | integer |  | False |  | False | 6G band 1 power limit: 6.535G-6.695G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-5 | integer |  | False |  | False | 6G band 1 power limit: 6.715G-6.855G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-6 | integer |  | False |  | False | 6G band 1 power limit: 6.895G-7.115G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### tablet-mode-power-table-rtw
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -947,22 +2552,32 @@ In the tables below,
 | limit-5g-1 | integer |  | False |  | False | 5G band 1 power limit: 5.15G-5.35G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g-3 | integer |  | False |  | False | 5G band 3 power limit: 5.47G-5.725G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g-4 | integer |  | False |  | False | 5G band 4 power limit: 5.725G-5.95G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-1 | integer |  | False |  | False | 6G band 1 power limit: 5.955G-6.155G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-2 | integer |  | False |  | False | 6G band 1 power limit: 6.175G-6.415G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-3 | integer |  | False |  | False | 6G band 1 power limit: 6.435G-6.515G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-4 | integer |  | False |  | False | 6G band 1 power limit: 6.535G-6.695G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-5 | integer |  | False |  | False | 6G band 1 power limit: 6.715G-6.855G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-6 | integer |  | False |  | False | 6G band 1 power limit: 6.895G-7.115G channels. (0.125 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### eu-power-table-mtk
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | limit-2g | integer |  | False |  | False | 2G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g | integer |  | False |  | False | 5G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g | integer |  | False |  | False | 6G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-2g | integer |  | False |  | False | Value to be added to the 2.4GHz WiFi band. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-5g | integer |  | False |  | False | Value to be added to all 5GHz WiFi bands. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| offset-6g | integer |  | False |  | False | Value to be added to all 6GHz WiFi bands. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### fcc-power-table-mtk
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | limit-2g | integer |  | False |  | False | 2G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g | integer |  | False |  | False | 5G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g | integer |  | False |  | False | 6G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-2g | integer |  | False |  | False | Value to be added to the 2.4GHz WiFi band. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-5g | integer |  | False |  | False | Value to be added to all 5GHz WiFi bands. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| offset-6g | integer |  | False |  | False | Value to be added to all 6GHz WiFi bands. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### non-tablet-mode-power-table-mtk
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -972,14 +2587,22 @@ In the tables below,
 | limit-5g-2 | integer |  | False |  | False | 5G band 2 power limit: 5.35G-5.47G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g-3 | integer |  | False |  | False | 5G band 3 power limit: 5.47G-5.725G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g-4 | integer |  | False |  | False | 5G band 4 power limit: 5.725G-5.95G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-1 | integer |  | False |  | False | 6G band 1 power limit: 5.945G-6.165G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-2 | integer |  | False |  | False | 6G band 2 power limit: 6.165G-6.405G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-3 | integer |  | False |  | False | 6G band 3 power limit: 6.405G-6.525G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-4 | integer |  | False |  | False | 6G band 4 power limit: 6.525G-6.705G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-5 | integer |  | False |  | False | 6G band 5 power limit: 6.705G-6.865G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-6 | integer |  | False |  | False | 6G band 6 power limit: 6.865G-7.125G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### rest-of-world-power-table-mtk
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
 | --------- | ------ | --------- | -------- | ----------- | ---------- | ----------- |
 | limit-2g | integer |  | False |  | False | 2G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g | integer |  | False |  | False | 5G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g | integer |  | False |  | False | 6G band geo power limit. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-2g | integer |  | False |  | False | Value to be added to the 2.4GHz WiFi band. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | offset-5g | integer |  | False |  | False | Value to be added to all 5GHz WiFi bands. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| offset-6g | integer |  | False |  | False | Value to be added to all 6GHz WiFi bands. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### tablet-mode-power-table-mtk
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -989,6 +2612,12 @@ In the tables below,
 | limit-5g-2 | integer |  | False |  | False | 5G band 2 power limit: 5.35G-5.47G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g-3 | integer |  | False |  | False | 5G band 3 power limit: 5.47G-5.725G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 | limit-5g-4 | integer |  | False |  | False | 5G band 4 power limit: 5.725G-5.95G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-1 | integer |  | False |  | False | 6G band 1 power limit: 5.945G-6.165G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-2 | integer |  | False |  | False | 6G band 2 power limit: 6.165G-6.405G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-3 | integer |  | False |  | False | 6G band 3 power limit: 6.405G-6.525G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-4 | integer |  | False |  | False | 6G band 4 power limit: 6.525G-6.705G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-5 | integer |  | False |  | False | 6G band 5 power limit: 6.705G-6.865G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
+| limit-6g-6 | integer |  | False |  | False | 6G band 6 power limit: 6.865G-7.125G frequency. (0.25 dBm) Minimum value: 0x0. Maximum value: 0xff. |
 
 ### sar-file
 | Attribute | Type   | RegEx     | Required | Oneof Group | Build-only | Description |
@@ -1014,7 +2643,9 @@ corresponding directory then gets mounted (via a bind mount) to
 Identity matching is done by comparing properties which come from
 `/identity` to the corresponding values from firmware.  If properties
 are left unspecified in `/identity`, they will match any value from
-firmware, or even a missing value.
+firmware, or even a missing value.  There is one exception, if there
+is a `custom_label_tag` in VPD, the `custom-label-tag` in `/identity`
+should be matched no matter is it a missing value or not.
 
 The first config with a matching identity is selected.
 
@@ -1022,21 +2653,30 @@ The files in the table below, exposed from firmware by the kernel, are
 used to compare the values from firmware.  Strings are compared
 *case-insensitive*.
 
-| Property (from `/identity`)    | x86 file                                | ARM file                                     |
-|--------------------------------|-----------------------------------------|----------------------------------------------|
-| `smbios-name-match`            | `/sys/class/dmi/id/product_name`        | N/A                                          |
-| `device-tree-compatible-match` | N/A                                     | `/proc/device-tree/compatible`               |
-| `sku-id`                       | `/sys/class/dmi/id/product_sku`         | `/proc/device-tree/firmware/coreboot/sku-id` |
-| `customization-id`             | `/sys/firmware/vpd/ro/customization_id` | `/sys/firmware/vpd/ro/customization_id`      |
-| `whitelabel-tag`               | `/sys/firmware/vpd/ro/whitelabel_tag`   | `/sys/firmware/vpd/ro/whitelabel_tag`        |
+| Property (from `/identity`) | x86 file                                   | ARM file                                                        |
+|-----------------------------|--------------------------------------------|-----------------------------------------------------------------|
+| `frid`                      | `/sys/devices/platform/chromeos_acpi/FRID` or `/sys/devices/platform/GGL0001:00/FRID` or `/sys/devices/platform/GOOG0016:00/FRID` | `/proc/device-tree/firmware/chromeos/readonly-firmware-version` |
+| `sku-id`                    | `/sys/class/dmi/id/product_sku`            | `/proc/device-tree/firmware/coreboot/sku-id`                    |
+| `customization-id`          | `/sys/firmware/vpd/ro/customization_id`    | `/sys/firmware/vpd/ro/customization_id`                         |
+| `custom-label-tag`          | `/sys/firmware/vpd/ro/custom_label_tag`    | `/sys/firmware/vpd/ro/custom_label_tag`                         |
+| `feature-device-type`       | `/sys/firmware/vpd/rw/feature_device_type` | `/sys/firmware/vpd/rw/feature_device_type`                      |
+
+Note: Prior to 2022, the VPD key for `custom-label-tag` was called
+`whitelabel_tag`.  If `/sys/firmware/vpd/ro/custom_label_tag` does not
+exist, `/sys/firmware/vpd/ro/whitelabel_tag` is checked instead.
+
+Note: `feature_device_type`, being stored in RW VPD, is at greater risk of
+corruption in shipped units. This is mitigated by enforcing that an
+"off" configuration with an otherwise-equivalent identity match is present for
+every identity with a non-"off" value, acting as a fallback configuration.
+Additionally, libsegmentation will calculate the expected value and repopulate
+it in RW VPD if necessary.
 
 #### File Parsing Notes
 
 All files are parsed as strings, except where mentioned below:
 
-`/proc/device-tree/compatible`: This file contains a list of
-null-terminated strings.  If any of the strings in the list match
-`device-tree-compatible-match`, it is considered to be a match.
+FRID files: Everything up to the first period (`.`) in the file is used.
 
 `/sys/class/dmi/id/product_sku`: This file is parsed as
 `scanf("sku%u", &sku_id)`.
@@ -1072,11 +2712,16 @@ To introduce a new property, first add its definition to the schema:
 chromeos-config/cros_config_host/cros_config_schema.yaml
 ```
 
-Then update the `README.md` automatically via (unit tests will check this):
+Then update generated files and the `README.md` automatically via (unit tests
+will check this):
 
 ```bash
-(chroot) $ python -m cros_config_host.generate_schema_doc -o README.md
+src/platform2/chromeos-config/regen.sh
 ```
+
+You'll want to run `./regen.sh` when adding or changing the schema, power
+management preferences, or anything which modifies the outputs of
+`cros_config_schema`.
 
 To install the updated schema, run:
 
@@ -1102,19 +2747,12 @@ At this point the updated config is located at:
 To query your new item run the test command in the chroot:
 
 ```bash
-(chroot) $  cros_config_host -c /build/${BOARD}/usr/share/chromeos-config/yaml/config.yaml -m <MODEL> get </path/to/property> <property name>
+(chroot) $ cros_config_host -c /build/${BOARD}/usr/share/chromeos-config/yaml/config.yaml -m <MODEL> get </path/to/property> <property name>
 ```
 
 For instance:
 
 ```bash
-(chroot) $ cros_config_host -c /build/coral/usr/share/chromeos-config/yaml /config.yaml -m robo360 get /firmware key-id
-(chroot) $ cros_config_host -c /build/coral/usr/share/chromeos-config/yaml /config.yaml list-models
+(chroot) $ cros_config_host -c /build/coral/usr/share/chromeos-config/yaml/config.yaml -m robo360 get /firmware key-id
+(chroot) $ cros_config_host -c /build/coral/usr/share/chromeos-config/yaml/config.yaml list-models
 ```
-
-## Device Testing
-
-To test configuration changes on actual devices use the `platform.CrosConfig`
-Tast test. This will run `cros_config` tests for unibuilds and mosys
-for all devices.
-See [HOWTO](https://chromium.googlesource.com/chromiumos/platform/tast-tests/+/HEAD/src/chromiumos/tast/local/bundles/cros/platform/cros_config.md).

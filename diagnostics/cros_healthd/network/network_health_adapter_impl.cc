@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,10 @@
 
 #include <utility>
 
-#include <base/callback.h>
 #include <base/logging.h>
-#include <base/optional.h>
 
-#include "mojo/network_health.mojom.h"
+#include "diagnostics/mojom/external/network_health.mojom.h"
+#include "diagnostics/mojom/external/network_health_types.mojom.h"
 
 namespace diagnostics {
 
@@ -18,29 +17,10 @@ namespace {
 
 namespace network_health_ipc = chromeos::network_health::mojom;
 
-// Forwards the response from the network health remote to |callback|.
-void OnNetworkHealthStateReceived(
-    base::OnceCallback<void(
-        base::Optional<network_health_ipc::NetworkHealthStatePtr>)> callback,
-    network_health_ipc::NetworkHealthStatePtr response) {
-  std::move(callback).Run(std::move(response));
-}
-
 }  // namespace
 
 NetworkHealthAdapterImpl::NetworkHealthAdapterImpl() = default;
 NetworkHealthAdapterImpl::~NetworkHealthAdapterImpl() = default;
-
-void NetworkHealthAdapterImpl::GetNetworkHealthState(
-    FetchNetworkStateCallback callback) {
-  if (!network_health_remote_.is_bound()) {
-    std::move(callback).Run(base::nullopt);
-    return;
-  }
-
-  network_health_remote_->GetHealthSnapshot(
-      base::BindOnce(&OnNetworkHealthStateReceived, std::move(callback)));
-}
 
 void NetworkHealthAdapterImpl::SetServiceRemote(
     mojo::PendingRemote<network_health_ipc::NetworkHealthService> remote) {
@@ -78,10 +58,6 @@ void NetworkHealthAdapterImpl::OnSignalStrengthChanged(
     observer->OnSignalStrengthChanged(
         guid, network_health_ipc::UInt32Value::New(value));
   }
-}
-
-bool NetworkHealthAdapterImpl::ServiceRemoteBound() {
-  return network_health_remote_.is_bound();
 }
 
 }  // namespace diagnostics

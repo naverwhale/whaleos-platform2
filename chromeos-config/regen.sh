@@ -1,5 +1,5 @@
-#!/bin/sh
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+#!/bin/bash
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -9,7 +9,13 @@
 set -e
 
 # Change to the directory of this script.
-cd "$(dirname "$0")"
+HERE="$(dirname "$(realpath -e "${BASH_SOURCE[0]}")")"
+cd "${HERE}"
+
+# Ensure we use the Python packages from the source tree so that people don't
+# need to update_chroot or emerge anything to pick up local changes.
+SRC="${HERE}/../.."
+export PYTHONPATH="${HERE}:${SRC}/config/python:${PYTHONPATH:-}"
 
 # Regen power manager prefs schema
 python3 -m cros_config_host.power_manager_prefs_gen_schema \
@@ -23,20 +29,19 @@ python3 -m cros_config_host.cros_config_schema -c test_data/test_import.yaml \
         -o test_data/test_import.json
 python3 -m cros_config_host.cros_config_schema -o test_data/test_merge.json \
         -m test_data/test_merge_base.yaml test_data/test_merge_overlay.yaml
-python3 -m cros_config_host.cros_config_schema --zephyr-ec-configs-only \
-        -o test_data/test_zephyr.json -m test_data/test.yaml
+python3 -m cros_config_host.cros_config_schema -o test_data/test_build.json \
+        -m test_data/test.yaml
 
-regen_test_data_with_c_bindings() {
+regen_test_data() {
     python3 -m cros_config_host.cros_config_schema -f True \
-            -c "test_data/${1}.yaml" -o "test_data/${1}.json" \
-            -g test_data
-    # TODO(jrosenth): cros_config_schema doesn't let us specify where to
-    # put the C file directly?  Refactor later.
-    mv test_data/config.c "test_data/${1}.c"
+            -c "test_data/${1}.yaml" -o "test_data/${1}.json"
 }
 
 # ARM test data
-regen_test_data_with_c_bindings test_arm
+regen_test_data test_arm
 
 # x86 test data
-regen_test_data_with_c_bindings test
+regen_test_data test
+
+# Regen proto_converter test data.
+python3 -m cros_config_host.cros_config_proto_converter --regen

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,8 @@
 #include <sysexits.h>
 #include <time.h>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/run_loop.h>
 
@@ -67,10 +67,10 @@ int Daemon::OnInit() {
   async_signal_handler_.Init();
   for (int signal : {SIGTERM, SIGINT}) {
     async_signal_handler_.RegisterHandler(
-        signal, base::Bind(&Daemon::Shutdown, base::Unretained(this)));
+        signal, base::BindRepeating(&Daemon::Shutdown, base::Unretained(this)));
   }
   async_signal_handler_.RegisterHandler(
-      SIGHUP, base::Bind(&Daemon::Restart, base::Unretained(this)));
+      SIGHUP, base::BindRepeating(&Daemon::Restart, base::Unretained(this)));
   return EX_OK;
 }
 

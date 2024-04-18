@@ -1,8 +1,13 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <optional>
+
 #include <gtest/gtest.h>
+
+#include <base/files/file_util.h>
+#include <base/files/scoped_temp_dir.h>
 
 #include "libmems/common_types.h"
 #include "libmems/test_fakes.h"
@@ -27,8 +32,8 @@ constexpr char kDevice12Attr[] = "iio:device12";
 
 class IioDeviceTest : public fakes::FakeIioDevice, public ::testing::Test {
  public:
-  static base::Optional<int> GetIdAfterPrefix(const char* id_str,
-                                              const char* prefix) {
+  static std::optional<int> GetIdAfterPrefix(const char* id_str,
+                                             const char* prefix) {
     return IioDevice::GetIdAfterPrefix(id_str, prefix);
   }
 
@@ -52,6 +57,27 @@ class IioDeviceTest : public fakes::FakeIioDevice, public ::testing::Test {
   fakes::FakeIioChannel* channel1_;
   fakes::FakeIioChannel* channel2_;
 };
+
+TEST_F(IioDeviceTest, GetAbsoluteSysPath) {
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  base::FilePath foo_dir = temp_dir.GetPath().Append("foo_dir");
+  base::FilePath bar_dir = temp_dir.GetPath().Append("bar_dir");
+  ASSERT_TRUE(base::CreateDirectory(foo_dir));
+  ASSERT_TRUE(base::CreateDirectory(bar_dir));
+  base::FilePath link_from = foo_dir.Append("from_file"), link_to;
+
+  ASSERT_TRUE(base::CreateTemporaryFileInDir(bar_dir, &link_to));
+  ASSERT_TRUE(base::CreateSymbolicLink(
+      base::FilePath("../bar_dir").Append(link_to.BaseName()), link_from))
+      << "Failed to create file symlink.";
+
+  SetPath(link_from);
+
+  auto sys_path = GetAbsoluteSysPath();
+  EXPECT_TRUE(sys_path.has_value());
+  EXPECT_EQ(sys_path->value().compare(link_to.value()), 0);
+}
 
 TEST_F(IioDeviceTest, GetIdAfterPrefixTest) {
   EXPECT_EQ(GetIdAfterPrefix(kTrigger0Attr, kTriggerIdPrefix), 0);
@@ -124,6 +150,43 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple("0.0 a b c 100.0 ", false, 0.0, 0.0),
         std::make_tuple("0.0 1.0 100.0 ", true, 1.0, 100.0),
         std::make_tuple("0.0 2.0 a b c 100.0 ", true, 2.0, 100.0)));
+
+class IioDeviceTestOnLocationWithParam
+    : public ::testing::TestWithParam<std::tuple<std::optional<std::string>,
+                                                 std::optional<std::string>,
+                                                 std::optional<std::string>>> {
+ protected:
+  void SetUp() override {
+    device_ = std::make_unique<libmems::fakes::FakeIioDevice>(
+        nullptr, kFakeDeviceName, kFakeDeviceId);
+
+    if (std::get<0>(GetParam()).has_value()) {
+      EXPECT_TRUE(device_->WriteStringAttribute(
+          kLabelAttr, std::get<0>(GetParam()).value()));
+    }
+    if (std::get<1>(GetParam()).has_value()) {
+      EXPECT_TRUE(device_->WriteStringAttribute(
+          kLocationAttr, std::get<1>(GetParam()).value()));
+    }
+  }
+
+  std::unique_ptr<libmems::fakes::FakeIioDevice> device_;
+};
+
+TEST_P(IioDeviceTestOnLocationWithParam, GetLocation) {
+  EXPECT_EQ(device_->GetLocation(), std::get<2>(GetParam()));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    IioDeviceTestOnLocationWithParamRun,
+    IioDeviceTestOnLocationWithParam,
+    ::testing::Values(std::make_tuple(std::nullopt, std::nullopt, std::nullopt),
+                      std::make_tuple(std::nullopt, "base", "base"),
+                      std::make_tuple(std::nullopt, "lid", "lid"),
+                      std::make_tuple(std::nullopt, "camera", "camera"),
+                      std::make_tuple("accel-base", std::nullopt, "base"),
+                      std::make_tuple("accel-display", "base", "lid"),
+                      std::make_tuple("accel-camera", "lid", "camera")));
 
 }  // namespace
 

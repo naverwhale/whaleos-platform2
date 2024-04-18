@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,7 @@
 
 #include <unordered_map>
 
-#include <base/macros.h>
-
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 // Aggregates votes from one or more sensors about the user's physical
 // proximity to the device.
@@ -44,7 +41,6 @@ class UserProximityVoting {
   bool prefer_far_ = false;
 };
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy
 
 #endif  //  POWER_MANAGER_POWERD_POLICY_USER_PROXIMITY_VOTING_H_

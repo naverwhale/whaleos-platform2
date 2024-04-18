@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -8,17 +8,20 @@
 #define CAMERA_FEATURES_HDRNET_HDRNET_PROCESSOR_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/scoped_file.h>
-#include <base/single_thread_task_runner.h>
+#include <base/functional/callback.h>
+#include <base/task/single_thread_task_runner.h>
 #include <system/camera_metadata.h>
 
 #include "common/camera_hal3_helpers.h"
 #include "cros-camera/common_types.h"
 #include "features/hdrnet/hdrnet_config.h"
+#include "features/hdrnet/hdrnet_metrics.h"
 #include "features/hdrnet/hdrnet_processor_device_adapter.h"
+#include "gpu/gpu_resources.h"
 #include "gpu/image_processor.h"
 #include "gpu/shared_image.h"
 
@@ -35,7 +38,7 @@ class HdrNetProcessor {
   struct Options {
     // MetadataLogger instance for logging and dumping per-frame metadata.
     // Mainly used for testing and debugging.
-    base::Optional<MetadataLogger*> metadata_logger;
+    std::optional<MetadataLogger*> metadata_logger;
   };
 
   virtual ~HdrNetProcessor() = default;
@@ -43,7 +46,8 @@ class HdrNetProcessor {
   // Initializes the HDRnet pipeline. |input_size| is the size of the input
   // buffer (usually in NV12 or P010 format). |output_sizes| are the set of
   // possible output buffer sizes that the pipeline will need to render into.
-  virtual bool Initialize(Size input_size,
+  virtual bool Initialize(GpuResources* gpu_resources,
+                          Size input_size,
                           const std::vector<Size>& output_sizes) = 0;
 
   virtual void TearDown() = 0;
@@ -71,7 +75,8 @@ class HdrNetProcessor {
       const HdrNetConfig::Options& options,
       const SharedImage& input_yuv,
       base::ScopedFD input_release_fence,
-      const std::vector<buffer_handle_t>& output_nv12_buffers) = 0;
+      const std::vector<buffer_handle_t>& output_nv12_buffers,
+      HdrnetMetrics* hdrnet_metrics) = 0;
 };
 
 }  // namespace cros

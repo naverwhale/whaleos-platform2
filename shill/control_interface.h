@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,54 +9,52 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 
 #include "shill/data_types.h"
 #include "shill/logging.h"
 
 namespace shill {
 
+#if !defined(DISABLE_FLOSS)
+class BluetoothAdapterProxyInterface;
+class BluetoothBlueZProxyInterface;
+class BluetoothManagerProxyInterface;
+#endif  // DISABLE_FLOSS
+class DBusObjectManagerProxyInterface;
+class DBusPropertiesProxy;
 class Device;
 class DeviceAdaptorInterface;
+class DHCPCDListenerInterface;
+class DHCPProvider;
+class DHCPProxyInterface;
 class IPConfig;
 class IPConfigAdaptorInterface;
 class Manager;
 class ManagerAdaptorInterface;
+class PowerManagerProxyDelegate;
+class PowerManagerProxyInterface;
 class Profile;
 class ProfileAdaptorInterface;
 class RpcTask;
 class RpcTaskAdaptorInterface;
 class Service;
 class ServiceAdaptorInterface;
-class ThirdPartyVpnDriver;
-class ThirdPartyVpnAdaptorInterface;
-
-class DBusObjectManagerProxyInterface;
-class DBusPropertiesProxy;
-class DHCPCDListenerInterface;
-class DHCPProvider;
-class DHCPProxyInterface;
-class PowerManagerProxyDelegate;
-class PowerManagerProxyInterface;
-class UpstartProxyInterface;
-
-#if !defined(DISABLE_WIFI)
 class SupplicantBSSProxyInterface;
-class WiFiEndpoint;
-#endif  // DISABLE_WIFI
-
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 class SupplicantEventDelegateInterface;
 class SupplicantInterfaceProxyInterface;
 class SupplicantNetworkProxyInterface;
 class SupplicantProcessProxyInterface;
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
+class ThirdPartyVpnDriver;
+class ThirdPartyVpnAdaptorInterface;
+class UpstartProxyInterface;
+class WiFiEndpoint;
 
 namespace mm1 {
 
 class ModemLocationProxyInterface;
 class ModemModem3gppProxyInterface;
-class ModemModemCdmaProxyInterface;
+class ModemModem3gppProfileManagerProxyInterface;
 class ModemProxyInterface;
 class ModemSimpleProxyInterface;
 class ModemSignalProxyInterface;
@@ -70,7 +68,7 @@ class ControlInterface {
  public:
   virtual ~ControlInterface() = default;
   virtual void RegisterManagerObject(
-      Manager* manager, const base::Closure& registration_done_callback) = 0;
+      Manager* manager, base::OnceClosure registration_done_callback) = 0;
   virtual std::unique_ptr<DeviceAdaptorInterface> CreateDeviceAdaptor(
       Device* device) = 0;
   virtual std::unique_ptr<IPConfigAdaptorInterface> CreateIPConfigAdaptor(
@@ -92,14 +90,13 @@ class ControlInterface {
   // the proxy.
   virtual std::unique_ptr<PowerManagerProxyInterface> CreatePowerManagerProxy(
       PowerManagerProxyDelegate* delegate,
-      const base::Closure& service_appeared_callback,
-      const base::Closure& service_vanished_callback) = 0;
+      const base::RepeatingClosure& service_appeared_callback,
+      const base::RepeatingClosure& service_vanished_callback) = 0;
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   virtual std::unique_ptr<SupplicantProcessProxyInterface>
   CreateSupplicantProcessProxy(
-      const base::Closure& service_appeared_callback,
-      const base::Closure& service_vanished_callback) = 0;
+      const base::RepeatingClosure& service_appeared_callback,
+      const base::RepeatingClosure& service_vanished_callback) = 0;
 
   virtual std::unique_ptr<SupplicantInterfaceProxyInterface>
   CreateSupplicantInterfaceProxy(SupplicantEventDelegateInterface* delegate,
@@ -107,13 +104,10 @@ class ControlInterface {
 
   virtual std::unique_ptr<SupplicantNetworkProxyInterface>
   CreateSupplicantNetworkProxy(const RpcIdentifier& object_path) = 0;
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
-#if !defined(DISABLE_WIFI)
   // See comment in supplicant_bss_proxy.h, about bare pointer.
   virtual std::unique_ptr<SupplicantBSSProxyInterface> CreateSupplicantBSSProxy(
       WiFiEndpoint* wifi_endpoint, const RpcIdentifier& object_path) = 0;
-#endif  // DISABLE_WIFI
 
   virtual std::unique_ptr<UpstartProxyInterface> CreateUpstartProxy() = 0;
 
@@ -123,7 +117,6 @@ class ControlInterface {
   virtual std::unique_ptr<DHCPProxyInterface> CreateDHCPProxy(
       const std::string& service) = 0;
 
-#if !defined(DISABLE_CELLULAR)
   virtual std::unique_ptr<DBusPropertiesProxy> CreateDBusPropertiesProxy(
       const RpcIdentifier& path, const std::string& service) = 0;
 
@@ -131,8 +124,8 @@ class ControlInterface {
   CreateDBusObjectManagerProxy(
       const RpcIdentifier& path,
       const std::string& service,
-      const base::Closure& service_appeared_callback,
-      const base::Closure& service_vanished_callback) = 0;
+      const base::RepeatingClosure& service_appeared_callback,
+      const base::RepeatingClosure& service_vanished_callback) = 0;
 
   virtual std::unique_ptr<mm1::ModemLocationProxyInterface>
   CreateMM1ModemLocationProxy(const RpcIdentifier& path,
@@ -142,9 +135,9 @@ class ControlInterface {
   CreateMM1ModemModem3gppProxy(const RpcIdentifier& path,
                                const std::string& service) = 0;
 
-  virtual std::unique_ptr<mm1::ModemModemCdmaProxyInterface>
-  CreateMM1ModemModemCdmaProxy(const RpcIdentifier& path,
-                               const std::string& service) = 0;
+  virtual std::unique_ptr<mm1::ModemModem3gppProfileManagerProxyInterface>
+  CreateMM1ModemModem3gppProfileManagerProxy(const RpcIdentifier& path,
+                                             const std::string& service) = 0;
 
   virtual std::unique_ptr<mm1::ModemProxyInterface> CreateMM1ModemProxy(
       const RpcIdentifier& path, const std::string& service) = 0;
@@ -159,7 +152,18 @@ class ControlInterface {
 
   virtual std::unique_ptr<mm1::SimProxyInterface> CreateMM1SimProxy(
       const RpcIdentifier& path, const std::string& service) = 0;
-#endif  // DISABLE_CELLULAR
+
+#if !defined(DISABLE_FLOSS)
+  virtual std::unique_ptr<BluetoothManagerProxyInterface>
+  CreateBluetoothManagerProxy(
+      const base::RepeatingClosure& service_appeared_callback) = 0;
+
+  virtual std::unique_ptr<BluetoothAdapterProxyInterface>
+  CreateBluetoothAdapterProxy(int32_t hci) = 0;
+
+  virtual std::unique_ptr<BluetoothBlueZProxyInterface>
+  CreateBluetoothBlueZProxy() = 0;
+#endif  // DISABLE_FLOSS
 };
 
 }  // namespace shill

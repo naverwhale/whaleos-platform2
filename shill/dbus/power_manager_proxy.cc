@@ -1,12 +1,12 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dbus/power_manager_proxy.h"
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <google/protobuf/message_lite.h>
 
@@ -47,8 +47,8 @@ PowerManagerProxy::PowerManagerProxy(
     EventDispatcher* dispatcher,
     const scoped_refptr<dbus::Bus>& bus,
     PowerManagerProxyDelegate* delegate,
-    const base::Closure& service_appeared_callback,
-    const base::Closure& service_vanished_callback)
+    const base::RepeatingClosure& service_appeared_callback,
+    const base::RepeatingClosure& service_vanished_callback)
     : proxy_(new org::chromium::PowerManagerProxy(bus)),
       dispatcher_(dispatcher),
       delegate_(delegate),
@@ -57,22 +57,23 @@ PowerManagerProxy::PowerManagerProxy(
       service_available_(false) {
   // Register signal handlers.
   proxy_->RegisterSuspendImminentSignalHandler(
-      base::Bind(&PowerManagerProxy::SuspendImminent,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&PowerManagerProxy::OnSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&PowerManagerProxy::SuspendImminent,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&PowerManagerProxy::OnSignalConnected,
+                     weak_factory_.GetWeakPtr()));
   proxy_->RegisterSuspendDoneSignalHandler(
-      base::Bind(&PowerManagerProxy::SuspendDone, weak_factory_.GetWeakPtr()),
-      base::Bind(&PowerManagerProxy::OnSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&PowerManagerProxy::SuspendDone,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&PowerManagerProxy::OnSignalConnected,
+                     weak_factory_.GetWeakPtr()));
   proxy_->RegisterDarkSuspendImminentSignalHandler(
-      base::Bind(&PowerManagerProxy::DarkSuspendImminent,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&PowerManagerProxy::OnSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&PowerManagerProxy::DarkSuspendImminent,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&PowerManagerProxy::OnSignalConnected,
+                     weak_factory_.GetWeakPtr()));
 
   // One time callback when service becomes available.
-  proxy_->GetObjectProxy()->WaitForServiceToBeAvailable(base::Bind(
+  proxy_->GetObjectProxy()->WaitForServiceToBeAvailable(base::BindOnce(
       &PowerManagerProxy::OnServiceAvailable, weak_factory_.GetWeakPtr()));
 }
 
@@ -155,24 +156,24 @@ bool PowerManagerProxy::RecordDarkResumeWakeReason(
   return true;
 }
 
-bool PowerManagerProxy::ChangeRegDomain(
+void PowerManagerProxy::ChangeRegDomain(
     power_manager::WifiRegDomainDbus domain) {
   LOG(INFO) << __func__;
 
   if (!service_available_) {
     LOG(ERROR) << "PowerManager service not available";
-    return false;
+    return;
   }
-  brillo::ErrorPtr error;
 
-  proxy_->ChangeWifiRegDomain(domain, &error);
-
-  if (error) {
-    LOG(ERROR) << "Failed to change reg domain: " << error->GetCode() << " "
-               << error->GetMessage();
-    return false;
-  }
-  return true;
+  proxy_->ChangeWifiRegDomainAsync(
+      domain, base::DoNothing(),
+      base::BindOnce(
+          [](power_manager::WifiRegDomainDbus domain, brillo::Error* error) {
+            LOG(ERROR) << "Failed to change reg domain to " << domain
+                       << ", reason : " << error->GetCode() << " "
+                       << error->GetMessage();
+          },
+          domain));
 }
 
 bool PowerManagerProxy::RegisterSuspendDelayInternal(
@@ -321,14 +322,14 @@ void PowerManagerProxy::OnServiceAvailable(bool available) {
   CHECK(available);
 
   // Service is available now, continuously monitor the service owner changes.
-  proxy_->GetObjectProxy()->SetNameOwnerChangedCallback(base::Bind(
+  proxy_->GetObjectProxy()->SetNameOwnerChangedCallback(base::BindRepeating(
       &PowerManagerProxy::OnServiceOwnerChanged, weak_factory_.GetWeakPtr()));
 
   // The callback might invoke calls to the ObjectProxy, so defer the callback
   // to event loop.
   dispatcher_->PostTask(FROM_HERE,
-                        base::Bind(&PowerManagerProxy::OnServiceAppeared,
-                                   weak_factory_.GetWeakPtr()));
+                        base::BindOnce(&PowerManagerProxy::OnServiceAppeared,
+                                       weak_factory_.GetWeakPtr()));
 
   service_available_ = true;
 }
@@ -341,15 +342,15 @@ void PowerManagerProxy::OnServiceOwnerChanged(const std::string& old_owner,
     // The callback might invoke calls to the ObjectProxy, so defer the
     // callback to event loop.
     dispatcher_->PostTask(FROM_HERE,
-                          base::Bind(&PowerManagerProxy::OnServiceVanished,
-                                     weak_factory_.GetWeakPtr()));
+                          base::BindOnce(&PowerManagerProxy::OnServiceVanished,
+                                         weak_factory_.GetWeakPtr()));
     service_available_ = false;
   } else {
     // The callback might invoke calls to the ObjectProxy, so defer the
     // callback to event loop.
     dispatcher_->PostTask(FROM_HERE,
-                          base::Bind(&PowerManagerProxy::OnServiceAppeared,
-                                     weak_factory_.GetWeakPtr()));
+                          base::BindOnce(&PowerManagerProxy::OnServiceAppeared,
+                                         weak_factory_.GetWeakPtr()));
     service_available_ = true;
   }
 }

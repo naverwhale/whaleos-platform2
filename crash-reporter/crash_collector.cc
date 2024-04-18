@@ -1,34 +1,41 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/crash_collector.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>  // For file creation modes.
 #include <inttypes.h>
 #include <linux/limits.h>  // PATH_MAX
-#include <sys/mman.h>      // for memfd_create
-#include <sys/types.h>     // for mode_t and gid_t.
-#include <sys/utsname.h>   // For uname.
-#include <sys/wait.h>      // For waitpid.
-#include <unistd.h>        // For execv and fork.
+#include <string.h>
+#include <sys/mman.h>     // for memfd_create
+#include <sys/types.h>    // for mode_t and gid_t.
+#include <sys/utsname.h>  // For uname.
+#include <sys/wait.h>     // For waitpid.
+#include <unistd.h>       // For execv and fork.
 
 #include <ctime>
 #include <map>
+#include <optional>
 #include <set>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_enumerator.h>
+#include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/notreached.h>
 #include <base/posix/eintr_wrapper.h>
+#include <base/ranges/algorithm.h>
 #include <base/rand_util.h>
 #include <base/run_loop.h>
 #include <base/scoped_clear_last_error.h>
@@ -37,14 +44,18 @@
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <brillo/dbus/data_serialization.h>
 #include <brillo/key_value_store.h>
 #include <brillo/process/process.h>
 #include <brillo/syslog_logging.h>
 #include <brillo/userdb_utils.h>
 #include <debugd/dbus-constants.h>
+#include <metrics/metrics_library.h>
 #include <policy/device_policy_impl.h>
 #include <re2/re2.h>
+#include <redaction_tool/libmetrics_metrics_recorder.h>
+#include <redaction_tool/redaction_tool.h>
 #include <zlib.h>
 
 #include "crash-reporter/constants.h"
@@ -59,13 +70,15 @@ const char kDefaultLogConfig[] = "/etc/crash_reporter_logs.conf";
 const char kDefaultUserName[] = "chronos";
 const char kShellPath[] = "/bin/sh";
 const char kCollectorNameKey[] = "collector";
-const char kCrashLoopModeKey[] = "crash_loop_mode";
+const char kDaemonStoreKey[] = "using_daemon_store";
 const char kEarlyCrashKey[] = "is_early_boot";
 const char kChannelKey[] = "channel";
 // These should be kept in sync with variations::kNumExperimentsKey and
 // variations::kExperimentListKey in the chromium repo.
 const char kVariationsKey[] = "variations";
 const char kNumExperimentsKey[] = "num-experiments";
+const char kLacrosVariationsKey[] = "lacros-variations";
+const char kLacrosNumExperimentsKey[] = "lacros-num-experiments";
 // Arbitrarily say we won't accept more than 1MiB for the variations file
 const int64_t kArbitraryMaxVariationsSize = 1 << 20;
 
@@ -83,16 +96,38 @@ const char kLsbChannelKey[] = "CHROMEOS_RELEASE_TRACK";
 
 // Environment variable set by minijail that includes the path to a seccomp
 // policy if one is defined.
-constexpr char kEnvSecompPolicyPath[] = "SECCOMP_POLICY_PATH";
+constexpr char kEnvSeccompPolicyPath[] = "SECCOMP_POLICY_PATH=";
+
+// Sentinel value indicating CrashSeverityEnumToString() received a non-enum
+// value.
+constexpr char kUnknownCrashSeverityEnumString[] =
+    "unknown-crash-severity-enum";
+
+// Sentinel value indicating ProductEnumToString() received a non-enum value.
+constexpr char kUnknownProductEnumString[] = "unknown-product-enum";
+
+// UMA histogram names to record the computed crash severity and product.
+constexpr char kStabilityErrorHistogram[] = "ChromeOS.Stability.Error";
+constexpr char kStabilityFatalHistogram[] = "ChromeOS.Stability.Fatal";
+constexpr char kStabilityInfoHistogram[] = "ChromeOS.Stability.Info";
+constexpr char kStabilityUnknownEnumValueHistogram[] =
+    "ChromeOS.Stability.UnknownValue";
+constexpr char kStabilityUnspecifiedHistogram[] =
+    "ChromeOS.Stability.Unspecified";
+constexpr char kStabilityWarningHistogram[] = "ChromeOS.Stability.Warning";
+
+// UMA histogram name to record the result of adding a weight for crash metrics.
+constexpr char kAddWeightResultHistogram[] =
+    "Platform.CrashCollector.AddWeightResult";
 
 #if !USE_KVM_GUEST
 // Directory mode of the user crash spool directory.
 // This is SGID so that files created in it are also accessible to the group.
 const mode_t kUserCrashPathMode = 02770;
 
-// Directory mode of the non-chronos cryptohome spool directory.  This has the
-// sticky bit set to prevent different crash collectors from messing with each
-// others files.
+// Directory mode of the daemon store spool directory.  This has the sticky bit
+// set to prevent different crash collectors from messing with each others
+// files.
 const mode_t kDaemonStoreCrashPathMode = 03770;
 #endif
 
@@ -122,6 +157,52 @@ constexpr size_t kMaxParentProcessLogs = 8;
 
 const char kCollectionErrorSignature[] = "crash_reporter-user-collection";
 
+#if USE_ARCPP
+constexpr char kARCStatus[] = "Built with ARC++";
+#elif USE_ARCVM
+constexpr char kARCStatus[] = "Built with ARCVM";
+#else
+constexpr char kARCStatus[] = "Not built with ARC";
+#endif
+
+// All the files under /sys/class/dmi/id/ appear to be 4096 bytes, though the
+// actual contents are smaller. I can't find where in the spec it says how big
+// DMI fields can be, but it looks like the kernel "dmi_header" uses a u8 to
+// store the length.
+constexpr int64_t kDmiMaxSize = 256;
+constexpr char kProductNameKey[] = "chromeosflex_product_name";
+constexpr char kProductVersionKey[] = "chromeosflex_product_version";
+// This string is intentionally different to match the field as used elsewhere.
+constexpr char kSysVendorKey[] = "chromeosflex_product_vendor";
+
+#define NCG(x) "(?:" x ")"
+#define OPT_NCG(x) NCG(x) "?"
+#define DEC_OCTET NCG("1[0-9][0-9]|2[0-4][0-9]|25[0-5]|[1-9][0-9]|[0-9]")
+#define IPV4ADDRESS DEC_OCTET "\\." DEC_OCTET "\\." DEC_OCTET "\\." DEC_OCTET
+#define HEXDIG "[0-9a-f]"
+#define H16 NCG(HEXDIG) "{1,4}"
+#define LS32 NCG(H16 ":" H16 "|" IPV4ADDRESS)
+#define WB "\\b"
+// clang-format off
+#define IPV6ADDRESS "(?i)(" NCG( \
+                                          WB NCG(H16 ":") "{6}" LS32 WB "|" \
+                                        "::" NCG(H16 ":") "{5}" LS32 WB "|" \
+  /* NOLINTNEXTLINE(whitespace/parens) */ \
+  OPT_NCG( WB                      H16) "::" NCG(H16 ":") "{4}" LS32 WB "|" \
+  /* NOLINTNEXTLINE(whitespace/parens) */ \
+  OPT_NCG( WB NCG(H16 ":") "{0,1}" H16) "::" NCG(H16 ":") "{3}" LS32 WB "|" \
+  /* NOLINTNEXTLINE(whitespace/parens) */ \
+  OPT_NCG( WB NCG(H16 ":") "{0,2}" H16) "::" NCG(H16 ":") "{2}" LS32 WB "|" \
+  /* NOLINTNEXTLINE(whitespace/parens) */ \
+  OPT_NCG( WB NCG(H16 ":") "{0,3}" H16) "::" NCG(H16 ":")       LS32 WB "|" \
+  /* NOLINTNEXTLINE(whitespace/parens) */ \
+  OPT_NCG( WB NCG(H16 ":") "{0,4}" H16) "::"                    LS32 WB "|" \
+  /* NOLINTNEXTLINE(whitespace/parens) */ \
+  OPT_NCG( WB NCG(H16 ":") "{0,5}" H16) "::"                    H16  WB "|" \
+  /* NOLINTNEXTLINE(whitespace/parens) */ \
+  OPT_NCG( WB NCG(H16 ":") "{0,6}" H16) "::") ")"
+// clang-format on
+
 }  // namespace
 
 const char* const CrashCollector::kUnknownValue = "unknown";
@@ -135,8 +216,6 @@ const char* const CrashCollector::kUnknownValue = "unknown";
 // be left on the file system, we stop adding crashes when either the
 // number of core files or minidumps reaches this number.
 const int CrashCollector::kMaxCrashDirectorySize = 32;
-
-const uid_t CrashCollector::kRootUid = 0;
 
 // metrics user for creating /run/metrics/external/crash-reporter.
 constexpr char kMetricsUserName[] = "metrics";
@@ -152,8 +231,7 @@ using base::FilePath;
 using base::StringPrintf;
 
 bool ValidatePathAndOpen(const FilePath& dir, int* outfd) {
-  std::vector<FilePath::StringType> components;
-  dir.GetComponents(&components);
+  std::vector<std::string> components = dir.GetComponents();
   int parentfd = AT_FDCWD;
 
   for (const auto& component : components) {
@@ -171,6 +249,75 @@ bool ValidatePathAndOpen(const FilePath& dir, int* outfd) {
     parentfd = dirfd;
   }
   *outfd = parentfd;
+  return true;
+}
+
+void ExtractEnvironmentVars(const std::string& contents,
+                            std::ostringstream* stream) {
+  // SplitString is used instead of base::SplitStringIntoKeyValuePairs because
+  // base::SplitStringIntoKeyValuePairs fails when there are two delimiters in
+  // a row which happens in practice.
+  std::vector<std::string> environ =
+      SplitString(contents, std::string(1, '\0'), base::TRIM_WHITESPACE,
+                  base::SPLIT_WANT_NONEMPTY);
+  for (const std::string& line : environ) {
+    if (base::StartsWith(line, kEnvSeccompPolicyPath)) {
+      *stream << line << std::endl;
+      break;
+    }
+  }
+}
+
+// static
+bool CrashCollector::OpenCrashDirectory(const base::FilePath& dir,
+                                        mode_t expected_mode,
+                                        uid_t expected_owner,
+                                        gid_t expected_group,
+                                        int* dirfd_out) {
+  const FilePath parent_dir = dir.DirName();
+  const FilePath final_dir = dir.BaseName();
+
+  base::ScopedFD parentfd;
+  if (!ValidatePathAndOpen(parent_dir,
+                           base::ScopedFD::Receiver(parentfd).get())) {
+    return false;
+  }
+
+  // Now handle the final part of the crash dir. Note: We omit O_CLOEXEC on
+  // purpose as children will use it. (Which is why we can't get use
+  // ValidatePathAndOpen to get this file descriptor.)
+  const char* final_dir_str = final_dir.value().c_str();
+  int dirfd_int = openat(parentfd.get(), final_dir_str,
+                         O_DIRECTORY | O_NOFOLLOW | O_RDONLY);
+  if (dirfd_int < 0) {
+    PLOG(ERROR) << "Unable to open crash directory " << dir.value() << ": ";
+    return false;
+  }
+  base::ScopedFD dirfd(dirfd_int);
+
+  struct stat st;
+  if (fstat(dirfd.get(), &st) < 0) {
+    PLOG(ERROR) << "Unable to stat crash path: " << dir.value();
+    return false;
+  }
+
+  if (st.st_uid != expected_owner) {
+    LOG(ERROR) << "Incorrect owner for " << dir.value() << "; expected "
+               << expected_owner << " got " << st.st_uid;
+    return false;
+  }
+  if (st.st_gid != expected_group) {
+    LOG(ERROR) << "Incorrect group for " << dir.value() << "; expected "
+               << expected_group << " got " << st.st_gid;
+    return false;
+  }
+  if ((st.st_mode & 07777) != expected_mode) {
+    LOG(ERROR) << "Incorrect mode for " << dir.value() << "; expected "
+               << expected_mode << " got " << st.st_mode;
+    return false;
+  }
+
+  *dirfd_out = dirfd.release();
   return true;
 }
 
@@ -197,9 +344,19 @@ bool CrashCollector::CreateDirectoryWithSettings(const FilePath& dir,
   int dirfd =
       openat(parentfd, final_dir_str, O_DIRECTORY | O_NOFOLLOW | O_RDONLY);
   if (dirfd < 0) {
+    // We expect the directory will not always exist, so don't write an error
+    // message until the creation fails as well.
+    const char* errno_message = strerrordesc_np(errno);
+    if (errno_message == nullptr) {
+      errno_message = "Invalid errno";
+    }
+    std::string original_error =
+        base::StrCat({"Unable to open directory ", dir.value(), ": ",
+                      errno_message, "; trying to create..."});
     if (errno != ENOENT) {
       // Delete whatever is there.
       if (unlinkat(parentfd, final_dir_str, 0) < 0) {
+        LOG(ERROR) << original_error;
         PLOG(ERROR) << "Unable to clean up crash path: " << dir.value();
         close(parentfd);
         return false;
@@ -209,6 +366,7 @@ bool CrashCollector::CreateDirectoryWithSettings(const FilePath& dir,
     // It doesn't exist, so create it!  We'll recheck the mode below.
     if (mkdirat(parentfd, final_dir_str, mode) < 0) {
       if (errno != EEXIST) {
+        LOG(ERROR) << original_error;
         PLOG(ERROR) << "Unable to create crash directory: " << dir.value();
         close(parentfd);
         return false;
@@ -365,19 +523,45 @@ bool CarefullyReadFileToStringWithMaxSize(const base::FilePath& path,
   return true;
 }
 
-CrashCollector::CrashCollector(const std::string& collector_name,
-                               const std::string& tag)
+std::optional<std::string> ReadDmiIdBestEffort(const std::string& file) {
+  const base::FilePath path = paths::Get(paths::kDmiIdDirectory).Append(file);
+
+  std::string contents;
+  if (!base::ReadFileToStringWithMaxSize(path, &contents, kDmiMaxSize)) {
+    LOG(INFO) << "Couldn't read " << path.value();
+    return std::nullopt;
+  }
+
+  // The kernel adds a trailing newline to the DMI files it
+  // exposes. Trim that character, but don't trim any other trailing
+  // whitespace as that would be in the DMI data itself.
+  if (base::EndsWith(contents, "\n")) {
+    contents.pop_back();
+  }
+
+  return contents;
+}
+
+CrashCollector::CrashCollector(
+    const std::string& collector_name,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib,
+    const std::string& tag)
     : CrashCollector(collector_name,
                      kUseNormalCrashDirectorySelectionMethod,
                      kNormalCrashSendMode,
+                     metrics_lib,
                      tag) {}
 
 CrashCollector::CrashCollector(
     const std::string& collector_name,
     CrashDirectorySelectionMethod crash_directory_selection_method,
     CrashSendingMode crash_sending_mode,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib,
     const std::string& tag)
-
     : collector_name_(collector_name),
       lsb_release_(FilePath(paths::kEtcDirectory).Append(paths::kLsbRelease)),
       system_crash_path_(paths::kSystemCrashDirectory),
@@ -386,16 +570,17 @@ CrashCollector::CrashCollector(
       max_log_size_(kMaxLogSize),
       device_policy_loaded_(false),
       device_policy_(std::make_unique<policy::DevicePolicyImpl>()),
-      crash_sending_mode_(crash_sending_mode),
       crash_directory_selection_method_(crash_directory_selection_method),
+      crash_sending_mode_(crash_sending_mode),
+      force_daemon_store_(std::nullopt),
       is_finished_(false),
       bytes_written_(0),
+      metrics_lib_(metrics_lib),
       tag_(tag) {
   AddCrashMetaUploadData(kCollectorNameKey, collector_name);
   if (crash_sending_mode_ == kCrashLoopSendingMode) {
-    AddCrashMetaUploadData(kCrashLoopModeKey, "true");
+    AddCrashMetaUploadData(constants::kCrashLoopModeKey, "true");
   }
-  metrics_lib_ = std::make_unique<MetricsLibrary>();
 }
 
 CrashCollector::~CrashCollector() {
@@ -407,6 +592,7 @@ void CrashCollector::Initialize(bool early) {
   // For early boot crash collectors, /var and /home will not be accessible.
   // Instead, collect the crashes into /run.
   if (early) {
+    early_ = true;
     AddCrashMetaUploadData(kEarlyCrashKey, "true");
     system_crash_path_ = base::FilePath(paths::kSystemRunCrashDirectory);
   }
@@ -462,7 +648,7 @@ base::ScopedFD CrashCollector::GetNewFileHandle(
       fd = HANDLE_EINTR(
           open(filename_cstr,
                O_CREAT | O_WRONLY | O_TRUNC | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-               kSystemCrashFilesMode));
+               constants::kSystemCrashFilesMode));
       if (fd < 0) {
         PLOG(ERROR) << "Could not open " << filename_cstr;
       }
@@ -485,10 +671,12 @@ int CrashCollector::WriteNewFile(const FilePath& filename,
                                  base::StringPiece data) {
   base::ScopedFD fd = GetNewFileHandle(filename);
   if (!fd.is_valid()) {
+    PLOG(ERROR) << "WriteNewFile: Cannot open " << filename.value();
     return -1;
   }
 
   if (!base::WriteFileDescriptor(fd.get(), data)) {
+    PLOG(ERROR) << "WriteNewFile: Cannot write " << filename.value();
     base::ScopedClearLastError restore_error;
     fd.reset();
     return -1;
@@ -519,6 +707,40 @@ bool CrashCollector::CopyFdToNewFile(base::ScopedFD source_fd,
   }
   base::File target = base::File(std::move(target_fd));
   return base::CopyFileContents(source, target);
+}
+
+std::optional<int> CrashCollector::CopyFirstNBytesOfFdToNewFile(
+    int source_pipe_fd, const base::FilePath& target_path, int bytes_to_copy) {
+  int bytes_written = 0;
+  base::ScopedFD target_fd = GetNewFileHandle(target_path);
+  if (!target_fd.is_valid()) {
+    return std::nullopt;
+  }
+
+  while (bytes_to_copy > bytes_written) {
+    // splice() allows us to ask the kernel to transfer the data directly from
+    // the pipe (normally STDIN) to disk, without passing through our userspace.
+    // In the best case, this is a zero-copy operation where the kernel just
+    // transfers ownership of the memory pages from the input pipe to the
+    // output. This is considerably more efficient than having us read the pipe
+    // to a buffer and then write the buffer.
+    ssize_t res = splice(source_pipe_fd, /*off_in=*/nullptr, target_fd.get(),
+                         /*off_out=*/nullptr,
+                         /*length=*/bytes_to_copy - bytes_written, /*flags=*/0);
+    if (res == 0) {
+      // man page: "A return value of 0 means end of input."
+      return bytes_written;
+    }
+
+    if (res < 0) {
+      PLOG(ERROR) << "splice failed: ";
+      return std::nullopt;
+    }
+
+    bytes_written += res;
+  }
+
+  return bytes_written;
 }
 
 base::ScopedFD CrashCollector::OpenNewCompressedFileForWriting(
@@ -671,24 +893,22 @@ bool CrashCollector::RemoveNewFile(const base::FilePath& file_name) {
       return base::DeleteFile(file_name);
     }
     case kCrashLoopSendingMode: {
-      base::FilePath base_name = file_name.BaseName();
-      for (auto it = in_memory_files_.begin(); it != in_memory_files_.end();
-           ++it) {
-        if (std::get<0>(*it) == base_name.value()) {
-          struct stat file_stat;
-          const brillo::dbus_utils::FileDescriptor& fd = std::get<1>(*it);
-          if (fstat(fd.get(), &file_stat) == 0) {
-            bytes_written_ -= file_stat.st_size;
-          }
-          // Resources for memfd_create files are automatically released once
-          // the last file descriptor is closed, and this will close what should
-          // be the last file descriptor, so we are effectively deleting the
-          // file by erasing the vector entry.
-          in_memory_files_.erase(it);
-          return true;
-        }
+      auto it = base::ranges::find(
+          in_memory_files_, file_name.BaseName().value(),
+          [](const auto& elem) { return std::get<0>(elem); });
+      if (it == in_memory_files_.end()) {
+        return false;
       }
-      return false;
+      struct stat file_stat;
+      if (fstat(std::get<1>(*it).get(), &file_stat) == 0) {
+        bytes_written_ -= file_stat.st_size;
+      }
+      // Resources for memfd_create files are automatically released once
+      // the last file descriptor is closed, and this will close what should
+      // be the last file descriptor, so we are effectively deleting the
+      // file by erasing the vector entry.
+      in_memory_files_.erase(it);
+      return true;
     }
     default:
       NOTREACHED();
@@ -708,122 +928,17 @@ std::string CrashCollector::Sanitize(const std::string& name) {
 }
 
 void CrashCollector::StripSensitiveData(std::string* contents) {
-  // At the moment, the only sensitive data we strip is MAC addresses, emails
-  // and serial numbers.
-  StripMacAddresses(contents);
-  StripEmailAddresses(contents);
-  StripSerialNumbers(contents);
-}
-
-void CrashCollector::StripMacAddresses(std::string* contents) {
-  std::ostringstream result;
-  re2::StringPiece input(*contents);
-  std::string pre_re_str;
-  std::string re_str;
-
-  // Get rid of things that look like MAC addresses, since they could possibly
-  // give information about where someone has been.  This is strings that look
-  // like this: 11:22:33:44:55:66
-  // Complications:
-  // - Within a given log, we want to be able to tell when the same MAC
-  //   was used more than once.  Thus, we'll consistently replace the first
-  //   MAC found with 00:00:00:00:00:01, the second with ...:02, etc.
-  // - ACPI commands look like MAC addresses.  We'll specifically avoid getting
-  //   rid of those.
-  std::map<std::string, std::string> mac_map;
-
-  // This RE will find the next MAC address and can return us the data preceding
-  // the MAC and the MAC itself.
-  RE2::Options opt;
-  opt.set_dot_nl(true);
-
-  RE2 mac_re(
-      "(.*?)("
-      "[0-9a-fA-F][0-9a-fA-F]:"
-      "[0-9a-fA-F][0-9a-fA-F]:"
-      "[0-9a-fA-F][0-9a-fA-F]:"
-      "[0-9a-fA-F][0-9a-fA-F]:"
-      "[0-9a-fA-F][0-9a-fA-F]:"
-      "[0-9a-fA-F][0-9a-fA-F])",
-      opt);
-
-  // This RE will identify when the 'pre_mac_str' shows that the MAC address
-  // was really an ACPI cmd.  The full string looks like this:
-  //   ata1.00: ACPI cmd ef/10:03:00:00:00:a0 (SET FEATURES) filtered out
-  RE2 acpi_re("(?m)ACPI cmd ef/$", opt);
-
-  // Keep consuming, building up a result string as we go.
-  while (RE2::Consume(&input, mac_re, &pre_re_str, &re_str)) {
-    if (RE2::PartialMatch(pre_re_str, acpi_re)) {
-      // We really saw an ACPI command; add to result w/ no stripping.
-      result << pre_re_str << re_str;
-    } else {
-      // Found a MAC address; look up in our hash for the mapping.
-      std::string replacement_mac = mac_map[re_str];
-      if (replacement_mac == "") {
-        // It wasn't present, so build up a replacement string.
-        int mac_id = mac_map.size();
-
-        // Handle up to 2^32 unique MAC address; overkill, but doesn't hurt.
-        replacement_mac = StringPrintf(
-            "00:00:%02x:%02x:%02x:%02x", (mac_id & 0xff000000) >> 24,
-            (mac_id & 0x00ff0000) >> 16, (mac_id & 0x0000ff00) >> 8,
-            (mac_id & 0x000000ff));
-        mac_map[re_str] = replacement_mac;
-      }
-
-      // Dump the string before the MAC and the fake MAC address into result.
-      result << pre_re_str << replacement_mac;
-    }
-  }
-
-  // One last bit of data might still be in the input.
-  result << input;
-
-  // We'll just assign right back to |contents|.
-  *contents = result.str();
-}
-
-void CrashCollector::StripEmailAddresses(std::string* contents) {
-  // Simplified email-matching regex based on
-  // https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input/email#Validation
-  RE2 email_re(R"(\b)"
-               R"([a-zA-Z0-9.!#$%&’*+/=?^_`{|}~-]{1,256})"
-               "@"
-               R"([a-zA-Z0-9-\.]{1,256}[^\.])"
-               R"(\b)");
-  CHECK_EQ("", email_re.error());
-
-  RE2::GlobalReplace(contents, email_re, "<redacted email address>");
-}
-
-void CrashCollector::StripSerialNumbers(std::string* contents) {
-  std::ostringstream result;
-  re2::StringPiece input(*contents);
-  std::string pre_re_str;
-  std::string re_str;
-  // Adapted from chromium:components/feedback/anonymizer_tool.cc
-  RE2::Options opt;
-  opt.set_dot_nl(true);
-  opt.set_case_sensitive(false);
-  RE2 serialnumber_re(R"((.*?)(\bserial\s*_?(?:number)?['"]?\s*[:=]\s*['"]?))"
-                      R"(([0-9a-zA-Z\-.:\/\\\x00-\x09\x0B-\x1F]+)(\b))",
-                      opt);
-
-  CHECK_EQ("", serialnumber_re.error());
-
-  while (RE2::Consume(&input, serialnumber_re, &pre_re_str, &re_str)) {
-    result << pre_re_str << "<redacted serial number>";
-  }
-  result << input;
-  *contents = result.str();
+  redaction::RedactionTool redactor(
+      nullptr,
+      std::make_unique<redaction::LibMetricsMetricsRecorder>(metrics_lib_));
+  *contents = redactor.Redact(*contents);
 }
 
 std::string CrashCollector::FormatDumpBasename(const std::string& exec_name,
                                                time_t timestamp,
                                                pid_t pid) {
   struct tm tm;
-  localtime_r(&timestamp, &tm);
+  gmtime_r(&timestamp, &tm);
   std::string sanitized_exec_name = Sanitize(exec_name);
   // Add a random 5-digit number to reduce the chance of filename collisions.
   int rand = base::RandGenerator(100'000);
@@ -840,10 +955,10 @@ FilePath CrashCollector::GetCrashPath(const FilePath& crash_directory,
       StringPrintf("%s.%s", basename.c_str(), extension.c_str()));
 }
 
-bool CrashCollector::GetUserCrashDirectories(std::vector<FilePath>* directories,
-                                             bool use_non_chronos_cryptohome) {
+bool CrashCollector::GetUserCrashDirectoriesOld(
+    std::vector<FilePath>* directories, bool use_daemon_store) {
   SetUpDBus();
-  if (use_non_chronos_cryptohome) {
+  if (use_daemon_store) {
     return util::GetDaemonStoreCrashDirectories(session_manager_proxy_.get(),
                                                 directories);
   } else {
@@ -852,22 +967,21 @@ bool CrashCollector::GetUserCrashDirectories(std::vector<FilePath>* directories,
   }
 }
 
-FilePath CrashCollector::GetUserCrashDirectory(
-    bool use_non_chronos_cryptohome) {
+FilePath CrashCollector::GetUserCrashDirectoryOld(bool use_daemon_store) {
   FilePath user_directory = FilePath(paths::kFallbackUserCrashDirectory);
   // When testing, store crashes in the fallback crash directory; otherwise, the
   // test framework can't get to them after logging the user out. We don't so
   // this when using the daemon-store crash directory because crash_reporter
   // won't be able to write to the fallback directory.
   if ((util::IsTestImage() || ShouldHandleChromeCrashes()) &&
-      !use_non_chronos_cryptohome) {
+      !use_daemon_store) {
     return user_directory;
   }
   // In this multiprofile world, there is no one-specific user dir anymore.
   // Ask the session manager for the active ones, then just run with the
   // first result we get back.
   std::vector<FilePath> directories;
-  if (!GetUserCrashDirectories(&directories, use_non_chronos_cryptohome) ||
+  if (!GetUserCrashDirectoriesOld(&directories, use_daemon_store) ||
       directories.empty()) {
     LOG(ERROR) << "Could not get user crash directories, using default.";
     return user_directory;
@@ -877,10 +991,45 @@ FilePath CrashCollector::GetUserCrashDirectory(
   return user_directory;
 }
 
-base::Optional<FilePath> CrashCollector::GetCrashDirectoryInfo(
+std::optional<FilePath> CrashCollector::GetUserCrashDirectoryNew() {
+  if (util::IsTestImage() || ShouldHandleChromeCrashes()) {
+    // When testing, store crashes in the fallback crash directory
+    // (/var/spool/crash or /home/chronos/crash); otherwise,
+    // the test framework can't get to them after logging the user out.
+    return std::nullopt;
+  }
+  // In this multiprofile world, there is no one-specific user dir anymore.
+  // Ask the session manager for the active ones, then just run with the
+  // first result we get back.
+  std::vector<FilePath> directories;
+  SetUpDBus();
+  if (!util::GetDaemonStoreCrashDirectories(session_manager_proxy_.get(),
+                                            &directories) ||
+      directories.empty()) {
+    LOG(ERROR) << "Could not get user crash directories";
+    return std::nullopt;
+  }
+
+  return directories[0];
+}
+
+bool CrashCollector::UseDaemonStore() {
+  if (force_daemon_store_.has_value()) {
+    LOG(WARNING) << "force_daemon_store_ is " << force_daemon_store_.value()
+                 << ". Returning that.";
+    return force_daemon_store_.value();
+  }
+
+  if (early_) {
+    // When early in boot, daemon-store isn't available, so don't try it.
+    return false;
+  }
+  return true;
+}
+
+std::optional<FilePath> CrashCollector::GetCrashDirectoryInfoOld(
     uid_t process_euid,
     uid_t default_user_id,
-    bool use_non_chronos_cryptohome,
     mode_t* mode,
     uid_t* directory_owner,
     gid_t* directory_group) {
@@ -889,13 +1038,14 @@ base::Optional<FilePath> CrashCollector::GetCrashDirectoryInfo(
   // mounted, so we use the system crash path.
 #if !USE_KVM_GUEST
   if (process_euid == default_user_id ||
-      crash_directory_selection_method_ == kAlwaysUseUserCrashDirectory) {
-    if (use_non_chronos_cryptohome) {
+      crash_directory_selection_method_ == kAlwaysUseUserCrashDirectory ||
+      crash_directory_selection_method_ == kAlwaysUseDaemonStore) {
+    if (crash_directory_selection_method_ == kAlwaysUseDaemonStore) {
       *mode = kDaemonStoreCrashPathMode;
       if (!brillo::userdb::GetGroupInfo(constants::kCrashName,
                                         directory_owner)) {
         PLOG(ERROR) << "Couldn't look up user " << constants::kCrashName;
-        return base::nullopt;
+        return std::nullopt;
       }
     } else {
       *mode = kUserCrashPathMode;
@@ -905,26 +1055,110 @@ base::Optional<FilePath> CrashCollector::GetCrashDirectoryInfo(
                                       directory_group)) {
       PLOG(ERROR) << "Couldn't look up group "
                   << constants::kCrashUserGroupName;
-      return base::nullopt;
+      return std::nullopt;
     }
-    return GetUserCrashDirectory(use_non_chronos_cryptohome);
+    return GetUserCrashDirectoryOld(crash_directory_selection_method_ ==
+                                    kAlwaysUseDaemonStore);
   }
 #endif  // !USE_KVM_GUEST
   *mode = kSystemCrashDirectoryMode;
-  *directory_owner = kRootUid;
+  *directory_owner = constants::kRootUid;
   if (!brillo::userdb::GetGroupInfo(constants::kCrashGroupName,
                                     directory_group)) {
     PLOG(ERROR) << "Couldn't look up group " << constants::kCrashGroupName;
-    return base::nullopt;
+    return std::nullopt;
   }
   return system_crash_path_;
 }
 
-bool CrashCollector::GetCreatedCrashDirectoryByEuid(
-    uid_t euid,
-    FilePath* crash_directory,
-    bool* out_of_capacity,
-    bool use_non_chronos_cryptohome) {
+std::optional<FilePath> CrashCollector::GetCrashDirectoryInfoNew(
+    uid_t process_euid,
+    uid_t default_user_id,
+    bool* can_create_or_fix,
+    mode_t* mode,
+    uid_t* directory_owner,
+    gid_t* directory_group) {
+  // Crashes that happen while a user is logged-in should go into the
+  // cryptohome, since they may contain PII.
+  // For crashes that occur when no one is logged in, or test device
+  // crashes:
+  // * For user crashes, we use /home/chronos/crash, as the cryptohome is
+  //   unavailable and we don't have access to /var/spool/crash.
+  // * For system crashes, we use the system crash path.
+  // For crashes that occur during integration tests of the crash reporter
+  // system itself, we use regular (non-test-device) behavior.
+  *can_create_or_fix = false;
+  *mode = kSystemCrashDirectoryMode;
+  *directory_owner = constants::kRootUid;
+  *directory_group = 0;
+
+#if USE_KVM_GUEST
+  // In the VM, there is no cryptohome or /home/chronos, so we'll fall back to
+  // the system crash directory after the #if.
+#else
+  if (crash_directory_selection_method_ != kAlwaysUseSystemCrashDirectory) {
+    *mode = kDaemonStoreCrashPathMode;
+    if (!brillo::userdb::GetGroupInfo(constants::kCrashName, directory_owner)) {
+      PLOG(ERROR) << "Couldn't look up user " << constants::kCrashName;
+      return std::nullopt;
+    }
+    if (!brillo::userdb::GetGroupInfo(constants::kCrashUserGroupName,
+                                      directory_group)) {
+      PLOG(ERROR) << "Couldn't look up group "
+                  << constants::kCrashUserGroupName;
+      return std::nullopt;
+    }
+    std::optional<FilePath> maybe_path = GetUserCrashDirectoryNew();
+    if (maybe_path) {
+      // We *cannot* create or fix /run/daemon-store/crash/..., so don't try.
+      // Only cryptohome's namespace mounter is capable of mounting it
+      // correctly.
+      *can_create_or_fix = false;
+      return maybe_path;
+    }
+  }
+
+  if (crash_directory_selection_method_ == kAlwaysUseDaemonStore) {
+    LOG(ERROR) << "Using daemon-store failed but daemon-store was required";
+    return std::nullopt;
+  }
+
+  // Otherwise, we can't use daemon store, so try the fallback directory if
+  // appropriate.
+  if (process_euid == default_user_id ||
+      crash_directory_selection_method_ == kAlwaysUseUserCrashDirectory) {
+    if (!brillo::userdb::GetGroupInfo(constants::kCrashUserGroupName,
+                                      directory_group)) {
+      PLOG(ERROR) << "Couldn't look up group "
+                  << constants::kCrashUserGroupName;
+      return std::nullopt;
+    }
+    *mode = kUserCrashPathMode;
+    *directory_owner = default_user_id;
+    // We could create /home/chronos/crash if needed
+    *can_create_or_fix = true;
+
+    // Fall back to /home/chronos/crash
+    return paths::Get(paths::kFallbackUserCrashDirectory);
+  }
+#endif  // USE_KVM_GUEST
+  // Otherwise, no one is logged in and crash_reporter is running as something
+  // other than chronos, so fall back to the system directory.
+  *mode = kSystemCrashDirectoryMode;
+  *directory_owner = constants::kRootUid;
+  // We could create /var/spool/crash if needed
+  *can_create_or_fix = true;
+  if (!brillo::userdb::GetGroupInfo(constants::kCrashGroupName,
+                                    directory_group)) {
+    PLOG(ERROR) << "Couldn't look up group " << constants::kCrashGroupName;
+    return std::nullopt;
+  }
+  return system_crash_path_;
+}
+
+bool CrashCollector::GetCreatedCrashDirectoryByEuid(uid_t euid,
+                                                    FilePath* crash_directory,
+                                                    bool* out_of_capacity) {
   if (out_of_capacity)
     *out_of_capacity = false;
 
@@ -951,9 +1185,23 @@ bool CrashCollector::GetCreatedCrashDirectoryByEuid(
   mode_t directory_mode;
   uid_t directory_owner;
   gid_t directory_group;
-  base::Optional<base::FilePath> maybe_path = GetCrashDirectoryInfo(
-      euid, default_user_id, use_non_chronos_cryptohome, &directory_mode,
-      &directory_owner, &directory_group);
+  std::optional<base::FilePath> maybe_path;
+  bool can_create_or_fix = true;
+  // Roll a die to decide whether to attempt using daemon-store. Even if this
+  // comes up as true, we might not use daemon-store (for example if the user is
+  // logged out, or we otherwise fail to get the daemon-store directory)
+  // TODO(b/186659673): Validate daemon-store usage and always use it.
+  if (UseDaemonStore()) {
+    AddCrashMetaUploadData(kDaemonStoreKey, "true");
+    maybe_path = GetCrashDirectoryInfoNew(euid, default_user_id,
+                                          &can_create_or_fix, &directory_mode,
+                                          &directory_owner, &directory_group);
+  } else {
+    AddCrashMetaUploadData(kDaemonStoreKey, "false");
+    maybe_path =
+        GetCrashDirectoryInfoOld(euid, default_user_id, &directory_mode,
+                                 &directory_owner, &directory_group);
+  }
   if (!maybe_path) {
     return false;
   }
@@ -964,10 +1212,18 @@ bool CrashCollector::GetCreatedCrashDirectoryByEuid(
   // be accessible in the children (when dropping privs), and we don't want to
   // pass the direct path in the filesystem as it'd be subject to TOCTOU.
   int dirfd;
-  if (!CreateDirectoryWithSettings(full_path, directory_mode, directory_owner,
-                                   directory_group, &dirfd)) {
-    LOG(ERROR) << "CreateDirectory failed";
-    return false;
+  if (can_create_or_fix) {
+    if (!CreateDirectoryWithSettings(full_path, directory_mode, directory_owner,
+                                     directory_group, &dirfd)) {
+      LOG(ERROR) << "CreateDirectory failed";
+      return false;
+    }
+  } else {
+    if (!OpenCrashDirectory(full_path, directory_mode, directory_owner,
+                            directory_group, &dirfd)) {
+      LOG(ERROR) << "OpenCrashDirectory(" << full_path.value() << ") failed";
+      return false;
+    }
   }
 
   // Have all the rest of the tools access the directory by file handle.  This
@@ -989,20 +1245,26 @@ bool CrashCollector::GetCreatedCrashDirectoryByEuid(
 
 // static
 FilePath CrashCollector::GetProcessPath(pid_t pid) {
-  return FilePath(StringPrintf("/proc/%d", pid));
+  return paths::Get(StringPrintf("/proc/%d", pid));
 }
 
-// static
+void CrashCollector::set_current_uptime_for_test(base::TimeDelta uptime) {
+  override_uptime_for_testing_ = std::make_unique<base::TimeDelta>(uptime);
+}
+
 bool CrashCollector::GetUptime(base::TimeDelta* uptime) {
+  if (override_uptime_for_testing_) {
+    *uptime = *override_uptime_for_testing_;
+    return true;
+  }
   timespec boot_time;
   if (clock_gettime(CLOCK_BOOTTIME, &boot_time) != 0) {
     PLOG(ERROR) << "Failed to get boot time.";
     return false;
   }
 
-  *uptime = base::TimeDelta::FromSeconds(boot_time.tv_sec) +
-            base::TimeDelta::FromMicroseconds(
-                boot_time.tv_nsec / base::Time::kNanosecondsPerMicrosecond);
+  *uptime =
+      base::Seconds(boot_time.tv_sec) + base::Nanoseconds(boot_time.tv_nsec);
   return true;
 }
 
@@ -1021,14 +1283,13 @@ bool CrashCollector::GetUptimeAtProcessStart(pid_t pid,
     return false;
   }
 
-  *uptime = base::TimeDelta::FromSecondsD(static_cast<double>(ticks) /
-                                          sysconf(_SC_CLK_TCK));
+  *uptime = base::Seconds(static_cast<double>(ticks) / sysconf(_SC_CLK_TCK));
 
   return true;
 }
 
-bool CrashCollector::GetExecutableBaseNameFromPid(pid_t pid,
-                                                  std::string* base_name) {
+bool CrashCollector::GetExecutableBaseNameAndDirectoryFromPid(
+    pid_t pid, std::string* base_name, base::FilePath* exec_directory) {
   FilePath target;
   FilePath process_path = GetProcessPath(pid);
   FilePath exe_path = process_path.Append("exe");
@@ -1049,6 +1310,7 @@ bool CrashCollector::GetExecutableBaseNameFromPid(pid_t pid,
     return false;
   }
   *base_name = target.BaseName().value();
+  *exec_directory = target.DirName();
   return true;
 }
 
@@ -1090,6 +1352,18 @@ bool CrashCollector::CheckHasCapacity(const FilePath& crash_directory,
                    << " already full with " << kMaxCrashDirectorySize
                    << " pending reports";
       full = true;
+
+      if (util::IsTestImage()) {
+        // Drop a file indicating to developers that the directory is now full,
+        // so crashes were lost.
+        // base::TouchFile sounds like what we want, but it fails if the file
+        // does not already exist.
+        if (!base::WriteFile(
+                crash_directory.Append(paths::kAlreadyFullFileName), "")) {
+          PLOG(WARNING) << "Failed to update informational directory-full file "
+                        << paths::kAlreadyFullFileName;
+        }
+      }
       break;
     }
   }
@@ -1135,7 +1409,7 @@ bool CrashCollector::GetMultipleLogContents(
     brillo::ProcessImpl diag_process;
     diag_process.AddArg(kShellPath);
     diag_process.AddStringOption("-c", command);
-    diag_process.RedirectOutput(raw_output_file.value());
+    diag_process.RedirectOutput(raw_output_file);
 
     const int result = diag_process.Run();
 
@@ -1172,19 +1446,24 @@ bool CrashCollector::GetMultipleLogContents(
   if (collated_log_contents.empty())
     return false;
 
-  // Always do this after collated_log_contents is "finished" so we don't
-  // accidentally leak data.
-  StripSensitiveData(&collated_log_contents);
+  return WriteLogContents(collated_log_contents, output_file);
+}
+
+bool CrashCollector::WriteLogContents(std::string& log_contents,
+                                      const base::FilePath& output_file) {
+  // Don't accidentally leak sensitive data.
+  StripSensitiveData(&log_contents);
 
   if (output_file.FinalExtension() == ".gz") {
-    if (!WriteNewCompressedFile(output_file, collated_log_contents.data(),
-                                collated_log_contents.size())) {
-      LOG(WARNING) << "Error writing sanitized log to " << output_file.value();
+    if (!WriteNewCompressedFile(output_file, log_contents.data(),
+                                log_contents.size())) {
+      LOG(WARNING) << "Error writing compressed sanitized log to "
+                   << output_file.value();
       return false;
     }
   } else {
-    if (WriteNewFile(output_file, collated_log_contents) !=
-        static_cast<int>(collated_log_contents.length())) {
+    if (WriteNewFile(output_file, log_contents) !=
+        static_cast<int>(log_contents.length())) {
       PLOG(WARNING) << "Error writing sanitized log to " << output_file.value();
       return false;
     }
@@ -1220,16 +1499,7 @@ bool CrashCollector::GetProcessTree(pid_t pid,
     // Include values of interest from the environment.
     if (!base::ReadFileToString(proc_path.Append("environ"), &contents))
       break;
-    base::StringPairs environ;
-    if (base::SplitStringIntoKeyValuePairs(contents, '=', '\0', &environ)) {
-      for (const auto& key_value : environ) {
-        if (key_value.first == kEnvSecompPolicyPath) {
-          stream << kEnvSecompPolicyPath << '=' << key_value.second
-                 << std::endl;
-          break;
-        }
-      }
-    }
+    ExtractEnvironmentVars(contents, &stream);
     stream << std::endl;
 
     // Pull out the parent pid from the status file.  The line will look like:
@@ -1261,7 +1531,8 @@ bool CrashCollector::GetProcessTree(pid_t pid,
   StripSensitiveData(&log);
 
   if (WriteNewFile(output_file, log) != static_cast<int>(log.size())) {
-    PLOG(WARNING) << "Error writing sanitized log to " << output_file.value();
+    PLOG(WARNING) << "Error writing sanitized PStree to "
+                  << output_file.value();
     return false;
   }
 
@@ -1314,8 +1585,19 @@ void CrashCollector::AddCrashMetaUploadFile(const std::string& key,
 
 void CrashCollector::AddCrashMetaUploadData(const std::string& key,
                                             const std::string& value) {
-  if (!value.empty())
-    AddCrashMetaData(constants::kUploadVarPrefix + key, value);
+  if (value.empty()) {
+    return;
+  }
+  if (key == "weight") {
+    LOG(ERROR) << "Tried adding a crash weight of " << value
+               << " in AddCrashMetaUploadData(). Weights must be added with "
+                  "AddCrashMetaWeight()";
+    metrics_lib_->data->SendEnumToUMA(kAddWeightResultHistogram,
+                                      AddWeightResult::kAddedInWrongMethod);
+    return;
+  }
+
+  AddCrashMetaData(constants::kUploadVarPrefix + key, value);
 }
 
 void CrashCollector::AddCrashMetaUploadText(const std::string& key,
@@ -1329,9 +1611,65 @@ void CrashCollector::AddCrashMetaUploadText(const std::string& key,
   }
 }
 
+void CrashCollector::AddCrashMetaWeight(int weight) {
+  if (weight_ != 1) {
+    LOG(ERROR) << "Tried adding crash weight twice. Tried changing weight from "
+               << weight_ << " to " << weight;
+    metrics_lib_->data->SendEnumToUMA(kAddWeightResultHistogram,
+                                      AddWeightResult::kAddedTwice);
+    return;
+  }
+  if (weight < 1) {
+    LOG(ERROR) << "Tried adding an invalid crash weight: " << weight;
+    metrics_lib_->data->SendEnumToUMA(kAddWeightResultHistogram,
+                                      AddWeightResult::kBadValue);
+    return;
+  }
+  metrics_lib_->data->SendEnumToUMA(kAddWeightResultHistogram,
+                                    AddWeightResult::kGoodValue);
+  weight_ = weight;
+  AddCrashMetaData(constants::kUploadVarPrefix + std::string("weight"),
+                   base::NumberToString(weight_));
+}
+
+void CrashCollector::AddDetailedHardwareData() {
+  // Don't send if we're not supposed to.
+  if (!send_detailed_hw_) {
+    return;
+  }
+
+  const std::optional<std::string> product_name(
+      ReadDmiIdBestEffort(paths::kProductNameFile));
+  const std::optional<std::string> product_version(
+      ReadDmiIdBestEffort(paths::kProductVersionFile));
+  const std::optional<std::string> sys_vendor(
+      ReadDmiIdBestEffort(paths::kSysVendorFile));
+
+  // For these three we really care about the distinction between not having
+  // read it and having read it but the file being empty -- some OEMs put/leave
+  // "useless" values (like empty strings or "To be filled by O.E.M.") in there,
+  // but even those can provide some signal.
+  // Use AddCrashMetaData so present-but-empty values aren't filtered out.
+  if (product_name.has_value()) {
+    AddCrashMetaData(constants::kUploadVarPrefix + std::string(kProductNameKey),
+                     product_name.value());
+  }
+  if (product_version.has_value()) {
+    AddCrashMetaData(
+        constants::kUploadVarPrefix + std::string(kProductVersionKey),
+        product_version.value());
+  }
+  if (sys_vendor.has_value()) {
+    AddCrashMetaData(constants::kUploadVarPrefix + std::string(kSysVendorKey),
+                     sys_vendor.value());
+  }
+}
+
 std::string CrashCollector::GetLsbReleaseValue(const std::string& key) const {
-  std::vector<base::FilePath> directories = {crash_reporter_state_path_,
-                                             lsb_release_.DirName()};
+  std::vector<base::FilePath> directories = {lsb_release_.DirName()};
+  if (use_saved_lsb_) {
+    directories.insert(directories.begin(), crash_reporter_state_path_);
+  }
 
   std::string value;
   if (util::GetCachedKeyValue(lsb_release_.BaseName(), key, directories,
@@ -1395,12 +1733,12 @@ std::string CrashCollector::GetKernelVersion() const {
   return StringPrintf("%s %s", buf.release, buf.version);
 }
 
-base::Optional<bool> CrashCollector::IsEnterpriseEnrolled() {
+std::optional<bool> CrashCollector::IsEnterpriseEnrolled() {
   DCHECK(device_policy_);
   if (!device_policy_loaded_) {
-    if (!device_policy_->LoadPolicy()) {
+    if (!device_policy_->LoadPolicy(/*delete_invalid_files=*/false)) {
       LOG(ERROR) << "Failed to load device policy";
-      return base::nullopt;
+      return std::nullopt;
     }
     device_policy_loaded_ = true;
   }
@@ -1425,6 +1763,15 @@ static void IgnoreErrorResponsePointer(base::OnceCallback<void()> callback,
   std::move(callback).Run();
 }
 
+// TODO(b/285611845): Add full logic to stub implementation.
+CrashCollector::ComputedCrashSeverity CrashCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  return CrashCollector::ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kUnspecified,
+      .product_group = Product::kUnspecified,
+  };
+}
+
 void CrashCollector::FinishCrash(const FilePath& meta_path,
                                  const std::string& exec_name,
                                  const std::string& payload_name) {
@@ -1440,8 +1787,14 @@ void CrashCollector::FinishCrash(const FilePath& meta_path,
 
   LOG(INFO) << "Finishing crash. Meta file: " << meta_path.value();
 
-  if (!AddVariations()) {
+  if (!AddVariations(paths::kVariationsListFile, kVariationsKey,
+                     kNumExperimentsKey)) {
     LOG(ERROR) << "Failed to add variations to report";
+  }
+
+  if (!AddVariations(paths::kLacrosVariationsListFile, kLacrosVariationsKey,
+                     kLacrosNumExperimentsKey)) {
+    LOG(ERROR) << "Failed to add lacros variations to report";
   }
 
   const std::string product_version = GetProductVersion();
@@ -1450,6 +1803,7 @@ void CrashCollector::FinishCrash(const FilePath& meta_path,
 
   const std::string milestone = GetOsMilestone();
   const std::string description = GetOsDescription();
+  // TODO(b/270434087): Use timestamp of old lsb-release?
   base::Time os_timestamp = util::GetOsTimestamp();
   std::string os_timestamp_str;
   if (!os_timestamp.is_null()) {
@@ -1480,11 +1834,21 @@ void CrashCollector::FinishCrash(const FilePath& meta_path,
   std::string version_info =
       product_version_info + lsb_release_info + kernel_info;
 
-  base::Optional<bool> is_enterprise_enrolled = IsEnterpriseEnrolled();
+  std::optional<bool> is_enterprise_enrolled = IsEnterpriseEnrolled();
   if (is_enterprise_enrolled.has_value()) {
     AddCrashMetaUploadData("is-enterprise-enrolled",
                            *is_enterprise_enrolled ? "true" : "false");
   }
+
+  AddDetailedHardwareData();
+
+  ComputedCrashSeverity computed_crash_severity = ComputeSeverity(exec_name);
+  std::string crash_severity =
+      CrashSeverityEnumToString(computed_crash_severity.crash_severity);
+  std::string product_group =
+      ProductEnumToString(computed_crash_severity.product_group);
+  AddCrashMetaUploadData("client_computed_severity", crash_severity);
+  AddCrashMetaUploadData("client_computed_product", product_group);
 
   std::string in_progress_test;
   if (base::ReadFileToString(paths::GetAt(paths::kSystemRunStateDirectory,
@@ -1492,6 +1856,8 @@ void CrashCollector::FinishCrash(const FilePath& meta_path,
                              &in_progress_test)) {
     AddCrashMetaUploadData("in_progress_integration_test", in_progress_test);
   }
+
+  AddCrashMetaUploadData("arc_status", kARCStatus);
 
   std::string exec_name_line;
   if (!exec_name.empty()) {
@@ -1513,11 +1879,19 @@ void CrashCollector::FinishCrash(const FilePath& meta_path,
   // do not want to write with root access to a symlink that an attacker
   // might have created.
   if (WriteNewFile(meta_path, meta_data) < 0) {
-    PLOG(ERROR) << "Unable to write " << meta_path.value();
+    PLOG(ERROR) << "Unable to write meta " << meta_path.value();
   }
 
   // Record report created metric in UMA.
-  metrics_lib_->SendCrosEventToUMA(kReportCountEnum);
+  metrics_lib_->data->SendCrosEventToUMA(kReportCountEnum);
+
+  // Record computed severity and product in UMA.
+  computed_crash_severity.product_group =
+      ValidateProductGroupForHistogram(computed_crash_severity.product_group);
+  const std::string histogram =
+      CrashSeverityEnumToHistogram(computed_crash_severity.crash_severity);
+  metrics_lib_->data->SendRepeatedEnumToUMA(
+      histogram, computed_crash_severity.product_group, weight_);
 
   if (crash_sending_mode_ == kCrashLoopSendingMode) {
     SetUpDBus();
@@ -1533,8 +1907,13 @@ void CrashCollector::FinishCrash(const FilePath& meta_path,
     dbus::MethodCall method_call(debugd::kDebugdInterface,
                                  debugd::kUploadSingleCrash);
     dbus::MessageWriter writer(&method_call);
-    brillo::dbus_utils::DBusParamWriter::Append(&writer,
-                                                std::move(in_memory_files_));
+
+    // Append the file list.
+    brillo::dbus_utils::WriteDBusArgs(
+        &writer,
+        /*in_files=*/in_memory_files_,
+        /*consent_already_checked_by_crash_reporter=*/true);
+
     debugd_proxy_->GetObjectProxy()->CallMethodWithErrorCallback(
         &method_call, 0 /*timeout_ms*/,
         base::BindOnce(IgnoreResponsePointer, quit_closure),
@@ -1543,6 +1922,83 @@ void CrashCollector::FinishCrash(const FilePath& meta_path,
   }
 
   is_finished_ = true;
+}
+
+std::string CrashCollector::CrashSeverityEnumToString(
+    CrashSeverity crash_severity) const {
+  switch (crash_severity) {
+    case CrashSeverity::kUnspecified:
+      return "UNSPECIFIED";
+    case CrashSeverity::kFatal:
+      return "FATAL";
+    case CrashSeverity::kError:
+      return "ERROR";
+    case CrashSeverity::kWarning:
+      return "WARNING";
+    case CrashSeverity::kInfo:
+      return "INFO";
+    default:
+      LOG(ERROR) << "Unexpected enum value for CrashSeverity: "
+                 << static_cast<int>(crash_severity);
+      return kUnknownCrashSeverityEnumString;
+  }
+}
+
+std::string CrashCollector::ProductEnumToString(Product product) const {
+  switch (product) {
+    case Product::kUnspecified:
+      return "Unspecified";
+    case Product::kUi:
+      return "Ui";
+    case Product::kPlatform:
+      return "Platform";
+    case Product::kArc:
+      return "Arc";
+    case Product::kLacros:
+      return "Lacros";
+    default:
+      LOG(ERROR) << "Unexpected enum value for Product: "
+                 << static_cast<int>(product);
+      return kUnknownProductEnumString;
+  }
+}
+
+std::string CrashCollector::CrashSeverityEnumToHistogram(
+    CrashSeverity crash_severity) const {
+  switch (crash_severity) {
+    case CrashSeverity::kUnspecified:
+      return kStabilityUnspecifiedHistogram;
+    case CrashSeverity::kFatal:
+      return kStabilityFatalHistogram;
+    case CrashSeverity::kError:
+      return kStabilityErrorHistogram;
+    case CrashSeverity::kWarning:
+      return kStabilityWarningHistogram;
+    case CrashSeverity::kInfo:
+      return kStabilityInfoHistogram;
+    default:
+      LOG(ERROR)
+          << "Unexpected severity enum value for ChromeOS.Stability histogram: "
+          << static_cast<int>(crash_severity);
+      return kStabilityUnknownEnumValueHistogram;
+  }
+}
+
+CrashCollector::Product CrashCollector::ValidateProductGroupForHistogram(
+    Product product) const {
+  switch (product) {
+    case Product::kUnspecified:
+    case Product::kUi:
+    case Product::kPlatform:
+    case Product::kArc:
+    case Product::kLacros:
+      return product;
+    default:
+      LOG(ERROR)
+          << "Unexpected product enum value for ChromeOS.Stability histogram: "
+          << static_cast<int>(product);
+      return Product::kUnknownValue;
+  }
 }
 
 bool CrashCollector::ShouldHandleChromeCrashes() {
@@ -1562,14 +2018,14 @@ bool CrashCollector::ShouldHandleChromeCrashes() {
 
 bool CrashCollector::InitializeSystemCrashDirectories(bool early) {
   if (!CreateDirectoryWithSettings(FilePath(paths::kSystemRunStateDirectory),
-                                   kSystemRunStateDirectoryMode, kRootUid,
-                                   kRootGroup, nullptr))
+                                   kSystemRunStateDirectoryMode,
+                                   constants::kRootUid, kRootGroup, nullptr))
     return false;
 
   if (early) {
     if (!CreateDirectoryWithSettings(FilePath(paths::kSystemRunCrashDirectory),
-                                     kSystemRunStateDirectoryMode, kRootUid,
-                                     kRootGroup, nullptr))
+                                     kSystemRunStateDirectoryMode,
+                                     constants::kRootUid, kRootGroup, nullptr))
       return false;
   } else {
     gid_t directory_group;
@@ -1578,15 +2034,16 @@ bool CrashCollector::InitializeSystemCrashDirectories(bool early) {
       PLOG(ERROR) << "Group " << constants::kCrashGroupName << " doesn't exist";
       return false;
     }
-    if (!CreateDirectoryWithSettings(FilePath(paths::kSystemCrashDirectory),
-                                     kSystemCrashDirectoryMode, kRootUid,
-                                     directory_group, nullptr,
-                                     /*files_mode=*/kSystemCrashFilesMode))
+    if (!CreateDirectoryWithSettings(
+            FilePath(paths::kSystemCrashDirectory), kSystemCrashDirectoryMode,
+            constants::kRootUid, directory_group, nullptr,
+            /*files_mode=*/constants::kSystemCrashFilesMode))
       return false;
 
     if (!CreateDirectoryWithSettings(
             FilePath(paths::kCrashReporterStateDirectory),
-            kCrashReporterStateDirectoryMode, kRootUid, kRootGroup, nullptr))
+            kCrashReporterStateDirectoryMode, constants::kRootUid, kRootGroup,
+            nullptr))
       return false;
   }
 
@@ -1649,9 +2106,11 @@ bool CrashCollector::ParseProcessTicksFromStat(base::StringPiece stat,
          base::StringToUint64(fields[kStartTimePos], ticks);
 }
 
-bool CrashCollector::AddVariations() {
+bool CrashCollector::AddVariations(base::StringPiece file,
+                                   base::StringPiece variation_key,
+                                   base::StringPiece num_experiment_key) {
   std::vector<FilePath> directories;
-  if (extra_metadata_.find(kVariationsKey) != std::string::npos) {
+  if (extra_metadata_.find(variation_key) != std::string::npos) {
     // Don't add variations a second time if something (e.g. chrome) already
     // did.
     return true;
@@ -1675,7 +2134,7 @@ bool CrashCollector::AddVariations() {
   // TODO(mutexlox): When anomaly-detector invokes crash_reporter it cannot read
   // this file as it's in the user's home dir. Get the info to anomaly-detector
   // some other way.
-  base::FilePath to_read = home_directory.Append(paths::kVariationsListFile);
+  base::FilePath to_read = home_directory.Append(file);
   if (!CarefullyReadFileToStringWithMaxSize(
           to_read, kArbitraryMaxVariationsSize, &contents)) {
     LOG(ERROR) << "Couldn't read " << to_read.value();
@@ -1699,8 +2158,8 @@ bool CrashCollector::AddVariations() {
                << " from contents " << contents;
     return false;
   }
-  AddCrashMetaUploadData(kVariationsKey, variations);
-  AddCrashMetaUploadData(kNumExperimentsKey, num_exp);
+  AddCrashMetaUploadData(std::string(variation_key), variations);
+  AddCrashMetaUploadData(std::string(num_experiment_key), num_exp);
   return true;
 }
 

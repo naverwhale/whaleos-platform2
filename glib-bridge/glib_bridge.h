@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,9 +14,9 @@
 #include <memory>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/cancelable_callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/bind.h>
 
 #include "glib-bridge/glib_bridge_export.h"
 

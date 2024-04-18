@@ -1,13 +1,27 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+pkg_config("cros_health_tool_pkg_deps") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libmojo",
+    "mojo_service_manager",
+  ]
+}
+
 executable("cros-health-tool") {
-  sources = [ "main.cc" ]
+  sources = [
+    "main.cc",
+    "mojo_util.cc",
+    "output_util.cc",
+  ]
+  configs += [ ":cros_health_tool_pkg_deps" ]
   deps = [
     "diag:libdiag",
     "event:libevent",
-    "status:libstatus",
     "telem:libtelem",
   ]
+  install_path = "bin"
 }

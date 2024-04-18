@@ -1,12 +1,12 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chaps/object_policy_public_key.h"
 
+#include <iterator>
+
 #include <base/logging.h>
-#include <base/macros.h>
-#include <base/stl_util.h>
 
 namespace chaps {
 
@@ -29,7 +29,7 @@ static const AttributePolicy kPublicKeyPolicies[] = {
 };
 
 ObjectPolicyPublicKey::ObjectPolicyPublicKey() {
-  AddPolicies(kPublicKeyPolicies, base::size(kPublicKeyPolicies));
+  AddPolicies(kPublicKeyPolicies, std::size(kPublicKeyPolicies));
 }
 
 ObjectPolicyPublicKey::~ObjectPolicyPublicKey() {}
@@ -63,7 +63,7 @@ void ObjectPolicyPublicKey::SetDefaultAttributes() {
   ObjectPolicyKey::SetDefaultAttributes();
   CK_ATTRIBUTE_TYPE false_values[] = {
       CKA_ENCRYPT, CKA_VERIFY, CKA_VERIFY_RECOVER, CKA_WRAP, CKA_TRUSTED};
-  for (size_t i = 0; i < base::size(false_values); ++i) {
+  for (size_t i = 0; i < std::size(false_values); ++i) {
     if (!object_->IsAttributePresent(false_values[i]))
       object_->SetAttributeBool(false_values[i], false);
   }

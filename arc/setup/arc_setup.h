@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 #include <string>
 #include <utility>
 
-#include <base/macros.h>
+#include <base/component_export.h>
 
 #include "arc/setup/android_sdk_version.h"
 #include "arc/setup/arc_setup_metrics.h"
@@ -84,7 +84,7 @@ enum class Mode {
 };
 
 // A class that does the actual setup (and stop) operations.
-class ArcSetup {
+class COMPONENT_EXPORT(LIBARC_SETUP) ArcSetup {
  public:
   ArcSetup(Mode mode, const base::FilePath& config_json);
   ArcSetup(const ArcSetup&) = delete;
@@ -106,6 +106,12 @@ class ArcSetup {
 
   void MountOnOnetimeSetupForTesting();
   void UnmountOnOnetimeStopForTesting();
+
+  void set_create_tagged_ashmem(bool create_tagged_ashmem) {
+    if (create_tagged_ashmem)
+      CHECK_EQ(mode_, Mode::PRE_CHROOT);
+    create_tagged_ashmem_ = create_tagged_ashmem;
+  }
 
  private:
   enum class PlayStoreAutoUpdate { kDefault, kOn, kOff };
@@ -175,7 +181,7 @@ class ArcSetup {
   bool GenerateHostSideCode(const base::FilePath& host_dalvik_cache_directory);
 
   // Calls InstallHostSideCodeInternal() for each isa the device supports.
-  bool InstallLinksToHostSideCode();
+  void InstallLinksToHostSideCode();
 
   // Installs links to *boot*.{art,oat} files to |dest_isa_directory|. Returns
   // false when |src_isa_directory| is empty.
@@ -190,8 +196,7 @@ class ArcSetup {
   // Create fake procfs entries expected by android.
   void CreateFakeProcfsFiles();
 
-  // Bind-mounts /sys/kernel/debug/tracing to
-  // |arc_paths.debugfs_directory|/tracing.
+  // Bind-mounts /sys/kernel/tracing to |arc_paths.debugfs_directory|/tracing.
   void SetUpMountPointForDebugFilesystem(bool is_dev_mode);
 
   // Sets up media mount points such as arc-removable-media and arc-myfiles.
@@ -229,6 +234,9 @@ class ArcSetup {
   // TODO(ejcaruso, b/78300746): remove this when we can use genfs_contexts
   void SetUpPowerSysfsContext();
 
+  // Initializes the testharness directory and key file inside for testharness.
+  void SetUpTestharness(bool is_dev_mode);
+
   // Notifies networking service that the container is starting.
   void StartNetworking();
 
@@ -243,6 +251,14 @@ class ArcSetup {
 
   // Sets up a default apps.
   void SetUpDefaultApps();
+
+  // Creates an ashmem device file with the boot ID appended to its basename.
+  // This is needed for container only. Otherwise, the file is created in
+  // DeviceHandler::HandleAshmemUevent in init:
+  // http://cs/rvc-arc/system/core/init/devices.cpp;l=444;rcl=e87d4841a777e35ee6f7e15d5ce8357a7e47dc3f
+  // We don't do this for P, as P has not historically done so, so it is not
+  // tested, and P doesn't require this in its Selinux policy. See b/260273725
+  void CreateTaggedAshmem(const base::FilePath& rootfs);
 
   // Cleans up binfmt_misc handlers that run arm binaries on x86.
   void CleanUpBinFmtMiscSetUp();
@@ -259,6 +275,9 @@ class ArcSetup {
 
   // Removes the FIFO file for emulating /dev/kmsg.
   void RemoveAndroidKmsgFifo();
+
+  // Removes ARC /data in LVM stateful partition.
+  void RemoveDataInLvm();
 
   // Fills |out_boot_type| with the boot type.
   // If Android's packages.xml exists, fills |out_data_sdk_version| with the SDK
@@ -315,9 +334,6 @@ class ArcSetup {
   // Unmounts image files that have been mounted in MountOnOnetimeSetup.
   void UnmountOnOnetimeStop();
 
-  // Performs sensor setup.
-  void SetupSensorOnPreChroot(const base::FilePath& rootfs);
-
   // Various bind-mounts inside the container's mount namespace on pre-chroot
   // stage.
   void BindMountInContainerNamespaceOnPreChroot(
@@ -340,6 +356,10 @@ class ArcSetup {
   // implemented for upgrade from P (b/179233339).
   void DeleteAndroidMediaProviderDataOnUpgrade(
       AndroidSdkVersion data_sdk_version);
+
+  // Deletes Android data if data has invalid SELinux contexts
+  // (caused by b/228881316).
+  void DeleteAndroidDataIfDataHasIncorrectSELinuxContexts();
 
   // Converts |version_str| to the enum.
   AndroidSdkVersion SdkVersionFromString(const std::string& version_str);
@@ -407,6 +427,9 @@ class ArcSetup {
   // read, it's content is stored here. If map is empty this indicates that
   // properties file was never read.
   std::map<std::string, std::string> system_properties_;
+
+  // Whether to create an ashmem file suffixed with the current boot ID.
+  bool create_tagged_ashmem_{false};
 };
 
 }  // namespace arc

@@ -1,37 +1,33 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include <base/check_op.h>
-#include <base/guid.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/time/time.h>
+#include <base/uuid.h>
 #include <brillo/dbus/dbus_proxy_util.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
+#include <dbus/error.h>
 #include <dbus/exported_object.h>
 #include <dbus/message.h>
 #include <dbus/object_proxy.h>
-#include <dbus/scoped_dbus_error.h>
 
-#include <vm_plugin_dispatcher/proto_bindings/vm_plugin_dispatcher.pb.h>
+#include <vm_plugin_dispatcher/vm_plugin_dispatcher.pb.h>
 
+#include "vm_tools/concierge/plugin_vm_config.h"
 #include "vm_tools/concierge/vmplugin_dispatcher_interface.h"
 
-namespace vm_tools {
-namespace concierge {
-namespace pvm {
-namespace dispatcher {
+namespace vm_tools::concierge::pvm::dispatcher {
 namespace {
 
-constexpr char kVmpluginImageDir[] = "/run/pvm-images";
-
-constexpr base::TimeDelta kVmShutdownTimeout = base::TimeDelta::FromMinutes(2);
-constexpr base::TimeDelta kVmSuspendTimeout = base::TimeDelta::FromSeconds(20);
+constexpr base::TimeDelta kVmShutdownTimeout = base::Minutes(2);
+constexpr base::TimeDelta kVmSuspendTimeout = base::Seconds(20);
 
 // Native Parallels error codes.
 constexpr int PRL_ERR_SUCCESS = 0;
@@ -84,7 +80,7 @@ VmOpResult ConvertDispatcherResult(plugin_dispatcher::VmErrorCode result,
 bool GetVmInfo(scoped_refptr<dbus::Bus> bus,
                dbus::ObjectProxy* proxy,
                const VmId& vm_id,
-               base::Optional<vm_tools::plugin_dispatcher::VmInfo>* info) {
+               std::optional<vm_tools::plugin_dispatcher::VmInfo>* info) {
   dbus::MethodCall method_call(
       vm_tools::plugin_dispatcher::kVmPluginDispatcherInterface,
       vm_tools::plugin_dispatcher::kListVmsMethod);
@@ -121,7 +117,7 @@ bool GetVmInfo(scoped_refptr<dbus::Bus> bus,
     return false;
   }
 
-  *info = base::nullopt;
+  *info = std::nullopt;
   for (const auto& vm_info : response.vm_info()) {
     if (vm_info.name() == vm_id.name()) {
       *info = vm_info;
@@ -154,14 +150,14 @@ bool RegisterVm(scoped_refptr<dbus::Bus> bus,
 
   request.set_owner_id(vm_id.owner_id());
   request.set_new_name(vm_id.name());
-  base::FilePath dispatcher_image_path(base::FilePath(kVmpluginImageDir)
+  base::FilePath dispatcher_image_path(base::FilePath(kImageDir)
                                            .Append(vm_id.owner_id())
                                            .Append(image_path.BaseName()));
   LOG(INFO) << "Registering VM at " << dispatcher_image_path.value();
   request.set_path(dispatcher_image_path.value());
   // We do not track VMs by uuid but rather by their name, so always generate
   // new one.
-  request.set_new_uuid(base::GenerateGUID());
+  request.set_new_uuid(base::Uuid::GenerateRandomV4().AsLowercaseString());
   request.set_preserve_uuid(false);
   request.set_regenerate_src_uuid(true);
 
@@ -244,7 +240,7 @@ bool IsVmRegistered(scoped_refptr<dbus::Bus> bus,
                     bool* result) {
   LOG(INFO) << "Checking whether VM " << vm_id << " is registered";
 
-  base::Optional<vm_tools::plugin_dispatcher::VmInfo> info;
+  std::optional<vm_tools::plugin_dispatcher::VmInfo> info;
   if (!GetVmInfo(bus, proxy, vm_id, &info))
     return false;
 
@@ -258,7 +254,7 @@ bool IsVmShutDown(scoped_refptr<dbus::Bus> bus,
                   bool* result) {
   LOG(INFO) << "Checking whether VM " << vm_id << " is shut down";
 
-  base::Optional<vm_tools::plugin_dispatcher::VmInfo> info;
+  std::optional<vm_tools::plugin_dispatcher::VmInfo> info;
   if (!GetVmInfo(bus, proxy, vm_id, &info))
     return false;
 
@@ -290,19 +286,19 @@ VmOpResult ShutdownVm(scoped_refptr<dbus::Bus> bus,
     return VmOpResult::INTERNAL_ERROR;
   }
 
-  dbus::ScopedDBusError dbus_error;
+  dbus::Error dbus_error;
   std::unique_ptr<dbus::Response> dbus_response =
       brillo::dbus_utils::CallDBusMethodWithErrorResponse(
           bus, proxy, &method_call, kVmShutdownTimeout.InMilliseconds(),
           &dbus_error);
   if (!dbus_response) {
-    if (dbus_error.is_set() &&
-        strcmp(dbus_error.name(), DBUS_ERROR_SERVICE_UNKNOWN) == 0) {
+    if (dbus_error.IsValid() &&
+        dbus_error.name() == DBUS_ERROR_SERVICE_UNKNOWN) {
       LOG(ERROR) << "Failed to send ShutdownVm request to dispatcher: service "
                     "unavailable";
       return VmOpResult::DISPATCHER_NOT_AVAILABLE;
-    } else if (dbus_error.is_set() &&
-               strcmp(dbus_error.name(), DBUS_ERROR_NO_REPLY) == 0) {
+    } else if (dbus_error.IsValid() &&
+               dbus_error.name() == DBUS_ERROR_NO_REPLY) {
       LOG(ERROR) << "ShutdownVm request to dispatcher timed out";
       return VmOpResult::DISPATCHER_TIMEOUT;
     } else {
@@ -341,17 +337,17 @@ VmOpResult SuspendVm(scoped_refptr<dbus::Bus> bus,
     return VmOpResult::INTERNAL_ERROR;
   }
 
-  dbus::ScopedDBusError dbus_error;
+  dbus::Error dbus_error;
   std::unique_ptr<dbus::Response> dbus_response =
       brillo::dbus_utils::CallDBusMethodWithErrorResponse(
           bus, proxy, &method_call, kVmSuspendTimeout.InMilliseconds(),
           &dbus_error);
   if (!dbus_response) {
-    if (dbus_error.is_set() &&
-        strcmp(dbus_error.name(), DBUS_ERROR_SERVICE_UNKNOWN) == 0) {
+    if (dbus_error.IsValid() &&
+        dbus_error.name() == DBUS_ERROR_SERVICE_UNKNOWN) {
       return VmOpResult::DISPATCHER_NOT_AVAILABLE;
-    } else if (dbus_error.is_set() &&
-               strcmp(dbus_error.name(), DBUS_ERROR_NO_REPLY) == 0) {
+    } else if (dbus_error.IsValid() &&
+               dbus_error.name() == DBUS_ERROR_NO_REPLY) {
       return VmOpResult::DISPATCHER_TIMEOUT;
     } else {
       LOG(ERROR) << "Failed to send SuspendVm message to dispatcher service";
@@ -404,7 +400,4 @@ bool ParseVmToolsChangedSignal(dbus::Signal* signal,
   return true;
 }
 
-}  // namespace dispatcher
-}  // namespace pvm
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge::pvm::dispatcher

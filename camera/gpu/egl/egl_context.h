@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,11 +9,23 @@
 
 #include <memory>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
+#include <EGL/eglplatform.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
 namespace cros {
+
+class EglContext;
+
+struct EglContextOptions {
+  // The EGL context to share GL objects with.
+  const EglContext* share_context = nullptr;
+
+  // The major and minor GLES API version.
+  EGLint context_major_version = 3;
+  EGLint context_minor_version = 1;
+};
 
 // A RAII helper class that encapsulates an EGLContext object.
 //
@@ -23,11 +35,16 @@ class EglContext {
   // Gets a surfaceless EGL context for offscreen rendering. This requires the
   // EGL_KHR_surfaceless_context extension, which should be supported on all
   // CrOS devices.
-  static std::unique_ptr<EglContext> GetSurfacelessContext();
+  static std::unique_ptr<EglContext> GetSurfacelessContext(
+      const EglContextOptions& options = EglContextOptions());
+
+  // Default constructor creates an invalid context.
+  EglContext() = default;
 
   // Creates and initializes an EGLContext. Does not take ownership of
   // |display|.
-  explicit EglContext(EGLDisplay display);
+  explicit EglContext(EGLDisplay display,
+                      const EglContextOptions& options = EglContextOptions());
 
   EglContext(const EglContext& other) = delete;
   EglContext(EglContext&& other);
@@ -42,6 +59,9 @@ class EglContext {
 
   // Makes the EglContext the current context.
   bool MakeCurrent();
+
+  // Gets underlying EGLContext object.
+  EGLContext Get() const;
 
  private:
   // Invalidates the EglContext instance.

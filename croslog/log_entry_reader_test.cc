@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,9 +15,8 @@ namespace croslog {
 class LogEntryReaderTest : public ::testing::Test {
  public:
   LogEntryReaderTest() = default;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(LogEntryReaderTest);
+  LogEntryReaderTest(const LogEntryReaderTest&) = delete;
+  LogEntryReaderTest& operator=(const LogEntryReaderTest&) = delete;
 };
 
 TEST_F(LogEntryReaderTest, GetNextEntry) {

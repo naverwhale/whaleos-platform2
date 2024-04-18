@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,19 +14,20 @@
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
+#include <base/time/time.h>
 #include <linux/fb.h>
 
 #include "power_manager/common/clock.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/common/util.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
-// When animating a brightness level transition, amount of time in milliseconds
-// to wait between each update.
-const int kTransitionIntervalMs = 20;
+// When animating a brightness level transition, amount of time to wait between
+// each update.
+constexpr base::TimeDelta kTransitionInterval = base::Milliseconds(20);
 
 }  // namespace
 
@@ -34,16 +35,6 @@ const char InternalBacklight::kBrightnessFilename[] = "brightness";
 const char InternalBacklight::kMaxBrightnessFilename[] = "max_brightness";
 const char InternalBacklight::kBlPowerFilename[] = "bl_power";
 const char InternalBacklight::kScaleFilename[] = "scale";
-
-InternalBacklight::InternalBacklight()
-    : clock_(new Clock),
-      max_brightness_level_(0),
-      current_brightness_level_(0),
-      brightness_scale_(BrightnessScale::kUnknown),
-      transition_start_level_(0),
-      transition_end_level_(0) {}
-
-InternalBacklight::~InternalBacklight() {}
 
 bool InternalBacklight::Init(const base::FilePath& base_path,
                              const std::string& pattern) {
@@ -116,7 +107,7 @@ void InternalBacklight::AddObserver(BacklightObserver* observer) {}
 
 void InternalBacklight::RemoveObserver(BacklightObserver* observer) {}
 
-bool InternalBacklight::DeviceExists() {
+bool InternalBacklight::DeviceExists() const {
   return true;
 }
 
@@ -128,19 +119,14 @@ int64_t InternalBacklight::GetCurrentBrightnessLevel() {
   return current_brightness_level_;
 }
 
-bool InternalBacklight::SetBrightnessLevel(int64_t level,
-                                           base::TimeDelta interval) {
-  if (brightness_path_.empty()) {
-    LOG(ERROR) << "Cannot find backlight brightness file.";
-    return false;
-  }
-
+bool InternalBacklight::DoSetBrightnessLevel(int64_t level,
+                                             base::TimeDelta interval) {
   if (level == current_brightness_level_) {
     CancelTransition();
     return true;
   }
 
-  if (interval.InMilliseconds() <= kTransitionIntervalMs) {
+  if (interval <= kTransitionInterval) {
     CancelTransition();
     return WriteBrightness(level);
   }
@@ -150,12 +136,21 @@ bool InternalBacklight::SetBrightnessLevel(int64_t level,
   transition_start_level_ = current_brightness_level_;
   transition_end_level_ = level;
   if (!transition_timer_.IsRunning()) {
-    transition_timer_.Start(
-        FROM_HERE, base::TimeDelta::FromMilliseconds(kTransitionIntervalMs),
-        this, &InternalBacklight::HandleTransitionTimeout);
+    transition_timer_.Start(FROM_HERE, kTransitionInterval, this,
+                            &InternalBacklight::HandleTransitionTimeout);
     transition_timer_start_time_ = transition_start_time_;
   }
   return true;
+}
+
+bool InternalBacklight::SetBrightnessLevel(int64_t level,
+                                           base::TimeDelta interval) {
+  if (brightness_path_.empty()) {
+    LOG(ERROR) << "Cannot find backlight brightness file.";
+    return false;
+  }
+
+  return DoSetBrightnessLevel(level, interval);
 }
 
 BacklightInterface::BrightnessScale InternalBacklight::GetBrightnessScale() {
@@ -186,6 +181,7 @@ bool InternalBacklight::WriteBrightness(int64_t new_level) {
 }
 
 void InternalBacklight::HandleTransitionTimeout() {
+  TRACE_EVENT("power", "InternalBacklight::HandleTransitionTimeout");
   base::TimeTicks now = clock_->GetCurrentTime();
   int64_t new_level = 0;
 
@@ -196,9 +192,9 @@ void InternalBacklight::HandleTransitionTimeout() {
     double transition_fraction =
         (now - transition_start_time_).InMillisecondsF() /
         (transition_end_time_ - transition_start_time_).InMillisecondsF();
-    int64_t intermediate_amount =
-        lround(transition_fraction *
-               (transition_end_level_ - transition_start_level_));
+    int64_t intermediate_amount = lround(
+        transition_fraction *
+        static_cast<double>((transition_end_level_ - transition_start_level_)));
     new_level = transition_start_level_ + intermediate_amount;
   }
 
@@ -216,5 +212,4 @@ void InternalBacklight::CancelTransition() {
   transition_end_level_ = current_brightness_level_;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

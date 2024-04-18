@@ -1,11 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dbus/supplicant_network_proxy.h"
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 
 #include "shill/logging.h"
@@ -40,17 +40,17 @@ SupplicantNetworkProxy::SupplicantNetworkProxy(
     : network_proxy_(new fi::w1::wpa_supplicant1::NetworkProxy(
           bus, WPASupplicant::kDBusAddr, object_path)) {
   // Register properties.
-  properties_.reset(
-      new PropertySet(network_proxy_->GetObjectProxy(), kInterfaceName,
-                      base::Bind(&SupplicantNetworkProxy::OnPropertyChanged,
-                                 weak_factory_.GetWeakPtr())));
+  properties_.reset(new PropertySet(
+      network_proxy_->GetObjectProxy(), kInterfaceName,
+      base::BindRepeating(&SupplicantNetworkProxy::OnPropertyChanged,
+                          weak_factory_.GetWeakPtr())));
 
   // Register signal handler.
   network_proxy_->RegisterPropertiesChangedSignalHandler(
-      base::Bind(&SupplicantNetworkProxy::PropertiesChanged,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&SupplicantNetworkProxy::OnSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&SupplicantNetworkProxy::PropertiesChanged,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&SupplicantNetworkProxy::OnSignalConnected,
+                     weak_factory_.GetWeakPtr()));
 
   // Connect property signals and initialize cached values. Based on
   // recommendations from src/dbus/property.h.

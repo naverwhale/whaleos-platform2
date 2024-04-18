@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -115,12 +115,11 @@ bool FileCopyProgress::OpenCopyTarget(const std::string& file_path,
 }
 
 void FileCopyProgress::CloseCopySourceAndTarget() {
-  int32_t result;
   if (source_fd_ >= 0) {
-    result = samba_interface_->CloseFile(source_fd_);
+    (void)samba_interface_->CloseFile(source_fd_);
   }
   if (target_fd_ >= 0) {
-    result = samba_interface_->CloseFile(target_fd_);
+    (void)samba_interface_->CloseFile(target_fd_);
   }
 }
 

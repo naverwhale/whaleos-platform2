@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,12 @@
 #include <cstdlib>
 
 #include <base/barrier_closure.h>
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/callback.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/run_loop.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <dbus/wilco_dtc_supportd/dbus-constants.h>
 #include <mojo/core/embedder/embedder.h>
@@ -21,17 +21,17 @@
 #include "diagnostics/wilco_dtc_supportd/service_util.h"
 
 namespace diagnostics {
+namespace wilco {
 
 // The time (in TimeDelta) after which ForceShutdown will be called if graceful
 // shutdown wasn't done within that time.
-constexpr base::TimeDelta kForceShutdownDelayTimeDelta =
-    base::TimeDelta::FromSeconds(2);
+constexpr base::TimeDelta kForceShutdownDelayTimeDelta = base::Seconds(2);
 
 Daemon::Daemon()
     : DBusServiceDaemon(kWilcoDtcSupportdServiceName /* service_name */),
       mojo_service_factory_(
           &mojo_grpc_adapter_,
-          base::Bind(&brillo::Daemon::Quit, base::Unretained(this))),
+          base::BindRepeating(&brillo::Daemon::Quit, base::Unretained(this))),
       wilco_dtc_supportd_core_(&wilco_dtc_supportd_core_delegate_impl_,
                                &grpc_client_manager_,
                                {GetWilcoDtcSupportdGrpcHostVsockUri(),
@@ -57,7 +57,8 @@ int Daemon::OnInit() {
   // Init the Mojo Embedder API.
   mojo::core::Init();
   ipc_support_ = std::make_unique<mojo::core::ScopedIPCSupport>(
-      base::ThreadTaskRunnerHandle::Get() /* io_thread_task_runner */,
+      base::SingleThreadTaskRunner::
+          GetCurrentDefault() /* io_thread_task_runner */,
       mojo::core::ScopedIPCSupport::ShutdownPolicy::
           CLEAN /* blocking shutdown */);
 
@@ -92,4 +93,5 @@ void Daemon::ForceShutdown() {
   std::exit(EXIT_FAILURE);
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

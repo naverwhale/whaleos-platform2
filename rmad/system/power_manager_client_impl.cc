@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,12 +12,6 @@
 #include <dbus/message.h>
 #include <dbus/object_proxy.h>
 #include <dbus/power_manager/dbus-constants.h>
-
-namespace {
-
-constexpr int kDefaultTimeoutMs = 10 * 1000;  // 10 seconds.
-
-}  // namespace
 
 namespace rmad {
 
@@ -35,10 +29,11 @@ bool PowerManagerClientImpl::Restart() {
   writer.AppendInt32(power_manager::REQUEST_RESTART_OTHER);
   writer.AppendString("rmad request restart");
 
-  std::unique_ptr<dbus::Response> response =
-      proxy_->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response =
+      proxy_->CallMethodAndBlock(&method_call,
+                                 dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
 
-  if (!response.get()) {
+  if (!response.has_value() || !response.value()) {
     LOG(ERROR) << "Failed to call powerd service";
     return false;
   }
@@ -52,10 +47,11 @@ bool PowerManagerClientImpl::Shutdown() {
   writer.AppendInt32(power_manager::REQUEST_SHUTDOWN_OTHER);
   writer.AppendString("rmad request shutdown");
 
-  std::unique_ptr<dbus::Response> response =
-      proxy_->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response =
+      proxy_->CallMethodAndBlock(&method_call,
+                                 dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
 
-  if (!response.get()) {
+  if (!response.has_value() || !response.value()) {
     LOG(ERROR) << "Failed to call powerd service";
     return false;
   }

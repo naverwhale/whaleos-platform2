@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,10 @@
 #include "tpm_manager/server/tpm_status.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <base/logging.h>
-#include <base/macros.h>
 #include <trunks/tpm_state.h>
 #include <trunks/trunks_factory.h>
 
@@ -48,6 +48,12 @@ class Tpm2StatusImpl : public TpmStatus {
   GscVersion GetGscVersion() override;
   bool GetRoVerificationStatus(
       tpm_manager::RoVerificationStatus* status) override;
+  bool GetAlertsData(AlertsData* alerts) override;
+  bool GetTi50Stats(uint32_t* fs_init_time,
+                    uint32_t* fs_size,
+                    uint32_t* aprov_time,
+                    uint32_t* aprov_status) override;
+  bool GetRwVersion(std::string* rw_version) override;
 
  private:
   // Refreshes the Tpm state information. Can be called as many times as needed

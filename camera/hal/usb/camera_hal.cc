@@ -1,4 +1,4 @@
-/* Copyright 2016 The Chromium OS Authors. All rights reserved.
+/* Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -7,17 +7,18 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/no_destructor.h>
+#include <base/strings/string_piece.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
-#include <chromeos-config/libcros_config/cros_config.h>
 #include "cros-camera/common.h"
 #include "cros-camera/constants.h"
 #include "cros-camera/cros_camera_hal.h"
@@ -67,7 +68,8 @@ bool FillMetadata(const DeviceInfo& device_info,
   if (!device_info.usb_pid.empty()) {
     static_metadata->update(kVendorTagProductId, device_info.usb_pid);
   }
-  static_metadata->update(kVendorTagDevicePath, device_info.device_path);
+  static_metadata->update(kVendorTagDevicePath,
+                          device_info.device_path.value());
   static_metadata->update(kVendorTagModelName, V4L2CameraDevice::GetModelName(
                                                    device_info.device_path));
 
@@ -153,6 +155,12 @@ ScopedCameraMetadata StaticMetadataForAndroid(
         std::vector<uint8_t>{ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL_EXTERNAL});
   }
 
+  if (device_info.quirks & kQuirkAndroidLegacy) {
+    data.update(
+        ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL,
+        std::vector<uint8_t>{ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY});
+  }
+
   std::unique_ptr<CameraConfig> camera_config =
       CameraConfig::Create(constants::kCrosCameraConfigPathString);
   int max_width =
@@ -222,6 +230,7 @@ const char* GetPreferredPath(udev_device* dev) {
     return udev_device_get_devnode(dev);
   }
 
+  const char* found_entry_name = nullptr;
   for (udev_list_entry* entry = udev_device_get_devlinks_list_entry(dev);
        entry != nullptr; entry = udev_list_entry_get_next(entry)) {
     const char* name = udev_list_entry_get_name(entry);
@@ -235,14 +244,23 @@ const char* GetPreferredPath(udev_device* dev) {
     // 60-persistent-v4l.rules, and supposed to be persistent for built-in
     // cameras so we can safely reuse it across suspend/resume cycles, without
     // updating |path_to_id_| for them.
-    // TODO(shik): Fix https://github.com/systemd/systemd/issues/10683 in the
-    // upstream udev.
-    if (base::StartsWith(name, "/dev/v4l/by-path/",
-                         base::CompareCase::SENSITIVE)) {
-      return name;
+    if (!base::StartsWith(name, "/dev/v4l/by-path/",
+                          base::CompareCase::SENSITIVE)) {
+      continue;
+    }
+
+    // There are two kinds of ID path.
+    // 1. With USB revision (e.g. {PATH}-usbv{REVISION}-0:{PORT})
+    // 2. Without USB revision (e.g. {PATH}-usb-0:{PORT})
+    // Always prefer the former one if it presents.
+    if (found_entry_name == nullptr ||
+        base::StringPiece(name).find("-usbv") != base::StringPiece::npos) {
+      found_entry_name = name;
     }
   }
-
+  if (found_entry_name != nullptr) {
+    return found_entry_name;
+  }
   return udev_device_get_devnode(dev);
 }
 
@@ -258,7 +276,7 @@ std::string GetModelId(const DeviceInfo& info) {
 CameraHal::CameraHal()
     : task_runner_(nullptr),
       udev_watcher_(std::make_unique<UdevWatcher>(this, "video4linux")),
-      cros_device_config_(CrosDeviceConfig::Create()),
+      cros_device_config_(DeviceConfig::Create()),
       camera_metrics_(CameraMetrics::New()) {
   thread_checker_.DetachFromThread();
 }
@@ -296,7 +314,7 @@ int CameraHal::OpenDevice(int id,
     return -EBUSY;
   }
   if (!cameras_.empty() &&
-      (cros_device_config_ != nullptr &&
+      (cros_device_config_.has_value() &&
        (cros_device_config_->GetModelName() == "treeya360" ||
         cros_device_config_->GetModelName() == "nuwani360" ||
         cros_device_config_->GetModelName() == "pompom"))) {
@@ -320,15 +338,17 @@ int CameraHal::OpenDevice(int id,
     static_metadata = static_metadata_[id].get();
     request_template = request_template_[id].get();
   }
-  cameras_[id].reset(new CameraClient(id, device_infos_[id], *static_metadata,
-                                      *request_template, module, hw_device,
-                                      &privacy_switch_monitor_, client_type));
+  const auto& device_info = device_infos_[id];
+
+  cameras_[id] = std::make_unique<CameraClient>(
+      id, device_info, *static_metadata, *request_template, module, hw_device,
+      &v4l2_event_monitor_, client_type, sw_privacy_switch_on_);
   if (cameras_[id]->OpenDevice()) {
     cameras_.erase(id);
     return -ENODEV;
   }
   if (!task_runner_) {
-    task_runner_ = base::ThreadTaskRunnerHandle::Get();
+    task_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
   }
   return 0;
 }
@@ -363,7 +383,11 @@ int CameraHal::GetCameraInfo(int id,
       return -EINVAL;
   }
   info->orientation = device_infos_[id].sensor_orientation;
-  info->device_version = CAMERA_DEVICE_API_VERSION_3_5;
+  // Set CAMERA_DEVICE_API_VERSION_3_5 to device version for Android P
+  // (API level: 28).
+  info->device_version = DeviceConfig::GetArcApiLevel() >= 30
+                             ? CAMERA_DEVICE_API_VERSION_3_6
+                             : CAMERA_DEVICE_API_VERSION_3_5;
   if (client_type == ClientType::kAndroid) {
     info->static_camera_characteristics = static_metadata_android_[id].get();
   } else {
@@ -373,6 +397,16 @@ int CameraHal::GetCameraInfo(int id,
   info->conflicting_devices = nullptr;
   info->conflicting_devices_length = 0;
   return 0;
+}
+
+void CameraHal::SetPrivacySwitchState(bool on) {
+  if (sw_privacy_switch_on_ == on) {
+    return;
+  }
+  sw_privacy_switch_on_ = on;
+  for (const auto& [_, camera_client] : cameras_) {
+    camera_client->SetPrivacySwitchState(on);
+  }
 }
 
 int CameraHal::GetCameraInfo(int id, struct camera_info* info) {
@@ -397,12 +431,13 @@ int CameraHal::SetCallbacks(const camera_module_callbacks_t* callbacks) {
 int CameraHal::Init() {
   DCHECK(thread_checker_.CalledOnValidThread());
 
-  if (cros_device_config_ == nullptr) {
+  if (!cros_device_config_.has_value()) {
     LOGF(WARNING) << "Failed to initialize CrOS device config, camera HAL may "
                      "function incorrectly";
   }
 
-  if (!udev_watcher_->Start(base::ThreadTaskRunnerHandle::Get())) {
+  if (!udev_watcher_->Start(
+          base::SingleThreadTaskRunner::GetCurrentDefault())) {
     LOGF(ERROR) << "Failed to Start()";
     return -ENODEV;
   }
@@ -416,7 +451,7 @@ int CameraHal::Init() {
   // camera as "camera1" in |characteristics_|. It's a workaround for them until
   // we revise our config format. (b/111770440)
   if (device_infos_.size() == 1 && device_infos_.cbegin()->first == 1 &&
-      num_builtin_cameras_ == 2) {
+      num_builtin_cameras_ == 1) {
     LOGF(INFO) << "Renumber camera1 to camera0";
 
     device_infos_.emplace(0, std::move(device_infos_[1]));
@@ -447,16 +482,18 @@ int CameraHal::Init() {
     request_template_android_.emplace(0,
                                       std::move(request_template_android_[1]));
     request_template_android_.erase(1);
-
-    num_builtin_cameras_ = 1;
   }
 
   bool enough_camera_probed = true;
-  if (cros_device_config_ != nullptr &&
-      cros_device_config_->IsUsbCameraCountAvailable()) {
-    if (num_builtin_cameras_ != cros_device_config_->GetUsbCameraCount()) {
-      LOGF(ERROR) << "Expected " << cros_device_config_->GetUsbCameraCount()
-                  << " cameras from Chrome OS config, found "
+  std::optional<int> num_builtin_cameras_from_config;
+  if (cros_device_config_) {
+    num_builtin_cameras_from_config = cros_device_config_->GetCameraCount(
+        Interface::kUsb, /*detachable=*/false);
+  }
+  if (num_builtin_cameras_from_config.has_value()) {
+    if (num_builtin_cameras_ != *num_builtin_cameras_from_config) {
+      LOGF(ERROR) << "Expected " << *num_builtin_cameras_from_config
+                  << " cameras from cros_config, found "
                   << num_builtin_cameras_;
       enough_camera_probed = false;
     }
@@ -500,15 +537,15 @@ void CameraHal::TearDown() {
 
 void CameraHal::SetPrivacySwitchCallback(
     PrivacySwitchStateChangeCallback callback) {
-  privacy_switch_monitor_.RegisterCallback(std::move(callback));
+  v4l2_event_monitor_.RegisterCallback(std::move(callback));
 }
 
 void CameraHal::CloseDeviceOnOpsThread(int id) {
   DCHECK(task_runner_);
   auto future = cros::Future<void>::Create(nullptr);
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&CameraHal::CloseDevice, base::Unretained(this), id,
-                            base::RetainedRef(future)));
+      FROM_HERE, base::BindOnce(&CameraHal::CloseDevice, base::Unretained(this),
+                                id, base::RetainedRef(future)));
   future->Wait();
 }
 
@@ -533,6 +570,7 @@ void CameraHal::OnDeviceAdded(ScopedUdevDevicePtr dev) {
     return;
   }
 
+  const base::FilePath file_path(path);
   const char* vid = "";
   const char* pid = "";
   const char* bcdDevice = "";
@@ -587,46 +625,59 @@ void CameraHal::OnDeviceAdded(ScopedUdevDevicePtr dev) {
     }
   }
 
-  if (!V4L2CameraDevice::IsCameraDevice(path)) {
+  if (!V4L2CameraDevice::IsCameraDevice(file_path)) {
     VLOGF(1) << path << " is not a camera device";
     return;
+  }
+
+  DeviceInfo info;
+  bool is_external = true;
+  if (const DeviceInfo* info_ptr = characteristics_.Find(vid, pid)) {
+    is_external = false;
+    info = *info_ptr;
+    const CrosConfigCameraInfo* cros_config_info =
+        cros_device_config_
+            ? cros_device_config_->GetCrosConfigInfoFromFacing(info.lens_facing)
+            : nullptr;
+    if (cros_config_info) {
+      info.sensor_orientation = cros_config_info->orientation;
+      info.is_detachable = cros_config_info->detachable;
+      info.has_privacy_switch = cros_config_info->has_privacy_switch;
+    }
+    if (info.constant_framerate_unsupported) {
+      LOGF(WARNING) << "Camera module " << vid << ":" << pid
+                    << " does not support constant frame rate";
+    }
   }
 
   if (is_vivid) {
     LOGF(INFO) << "New vivid camera device at " << path;
   } else {
-    LOGF(INFO) << "New usb camera device at " << path << ", vid:pid = " << vid
-               << ":" << pid << ", bcdDevice = " << bcdDevice;
+    LOGF(INFO) << "New "
+               << (is_external
+                       ? "external"
+                       : (info.is_detachable ? "detachable" : "built-in"))
+               << " camera device " << V4L2CameraDevice::GetModelName(file_path)
+               << ", vid:pid = " << vid << ":" << pid
+               << ", bcdDevice = " << bcdDevice << " at " << path;
+  }
+  if ((is_external || info.is_detachable) && !callbacks_) {
+    VLOGF(1) << "No callbacks set, ignore it for now";
+    return;
   }
 
-  DeviceInfo info;
-  const DeviceInfo* info_ptr = characteristics_.Find(vid, pid);
-  if (info_ptr != nullptr) {
-    VLOGF(1) << "Found a built-in camera";
-    info = *info_ptr;
-    num_builtin_cameras_ = std::max(num_builtin_cameras_, info.camera_id + 1);
-    if (info.constant_framerate_unsupported) {
-      LOGF(WARNING) << "Camera module " << vid << ":" << pid
-                    << " does not support constant frame rate";
-    }
-  } else {
-    VLOGF(1) << "Found an external camera";
-    if (callbacks_ == nullptr) {
-      VLOGF(1) << "No callbacks set, ignore it for now";
-      return;
-    }
-  }
-
-  info.device_path = path;
+  info.device_path = file_path;
   info.usb_vid = vid;
   info.usb_pid = pid;
   info.is_vivid = is_vivid;
-  info.power_line_frequency = V4L2CameraDevice::GetPowerLineFrequency(path);
-  info.constant_framerate_unsupported |=
-      !V4L2CameraDevice::IsControlSupported(path, kControlExposureAutoPriority);
-  RoiControl roi_control;
+  info.constant_framerate_unsupported |= !V4L2CameraDevice::IsControlSupported(
+      file_path, kControlExposureAutoPriority);
+  ControlType control_roi_auto;
+  RoiControlApi api;
+  uint32_t max_roi_auto;
   info.region_of_interest_supported =
-      V4L2CameraDevice::IsRegionOfInterestSupported(path, &roi_control);
+      V4L2CameraDevice::IsRegionOfInterestSupported(
+          file_path, &control_roi_auto, &api, &max_roi_auto);
 
   if (info.region_of_interest_supported) {
     if (!info.enable_face_detection) {
@@ -650,16 +701,23 @@ void CameraHal::OnDeviceAdded(ScopedUdevDevicePtr dev) {
     LOGF(INFO) << "force disable face ae";
     info.enable_face_detection = false;
   }
+  // Whalebook gets quirks to decide to overwrite lens facing.
   info.quirks |= GetQuirks(vid, pid);
+
+  if (info.quirks & kQuirkInfrared) {
+    LOGF(INFO) << "Ignoring infrared camera";
+    return;
+  }
 
   // Mark the camera as v1 if it is a built-in camera and the CrOS device is
   // marked as a v1 device.
-  if (info_ptr != nullptr && cros_device_config_ != nullptr &&
+  if (!is_external && cros_device_config_.has_value() &&
       cros_device_config_->IsV1Device()) {
     info.quirks |= kQuirkV1Device;
   }
 
-  if (info_ptr == nullptr) {
+  // Treats detachable camera as external.
+  if (is_external || info.is_detachable) {
     info.lens_facing = LensFacing::kExternal;
 
     // Try to reuse the same id for the same camera.
@@ -678,7 +736,10 @@ void CameraHal::OnDeviceAdded(ScopedUdevDevicePtr dev) {
 
     // Uses software timestamp from userspace for external cameras, because the
     // hardware timestamp is not reliable and sometimes even jump backwards.
-    info.quirks |= kQuirkUserSpaceTimestamp;
+    // Exclude detachable camera modules on some devices.
+    if (!info.is_detachable) {
+      info.quirks |= kQuirkUserSpaceTimestamp;
+    }
   }
 
   android::CameraMetadata static_metadata, request_template;
@@ -688,18 +749,24 @@ void CameraHal::OnDeviceAdded(ScopedUdevDevicePtr dev) {
                      "camera would be ignored";
       return;
     } else {
-      LOGF(FATAL) << "FillMetadata failed for a built-in "
+      LOGF(ERROR) << "FillMetadata failed for a built-in "
                      "camera, please check your camera config";
+      return;
     }
   }
 
+  if (info.lens_facing != LensFacing::kExternal) {
+    num_builtin_cameras_++;
+  }
+
+  // camera characteristics for each Whalebook.
   if (info.quirks & kQuirkFacingFront) {
     info.lens_facing = LensFacing::kFront;
   } else if (info.quirks & kQuirkFacingBack) {
     info.lens_facing = LensFacing::kBack;
   }
 
-  path_to_id_[info.device_path] = info.camera_id;
+  path_to_id_[info.device_path.value()] = info.camera_id;
   device_infos_[info.camera_id] = info;
   static_metadata_android_[info.camera_id] =
       StaticMetadataForAndroid(static_metadata, info);
@@ -710,8 +777,10 @@ void CameraHal::OnDeviceAdded(ScopedUdevDevicePtr dev) {
   request_template_[info.camera_id] =
       ScopedCameraMetadata(request_template.release());
 
-  privacy_switch_monitor_.TrySubscribe(info.camera_id, info.device_path);
+  v4l2_event_monitor_.TrySubscribe(info.camera_id, info.device_path,
+                                   info.has_privacy_switch);
 
+  // Whalebook updates status in case of lens facing overwriting.
   if (info.quirks & kQuirkFacingFront ||
       info.quirks & kQuirkFacingBack ||
       info.lens_facing == LensFacing::kExternal) {
@@ -736,11 +805,11 @@ void CameraHal::OnDeviceRemoved(ScopedUdevDevicePtr dev) {
   int id = it->second;
 
   if (id < num_builtin_cameras_) {
-    VLOGF(1) << "Camera " << id << "is a built-in camera, ignore it";
+    VLOGF(1) << "Camera " << id << " is a built-in camera, ignore it";
     return;
   }
 
-  privacy_switch_monitor_.Unsubscribe(id);
+  v4l2_event_monitor_.Unsubscribe(id);
 
   LOGF(INFO) << "Camera " << id << " at " << path << " removed";
 
@@ -772,7 +841,6 @@ static int camera_device_open_ext(const hw_module_t* module,
                                   const char* name,
                                   hw_device_t** device,
                                   ClientType client_type) {
-  VLOGF_ENTER();
   // Make sure hal adapter loads the correct symbol.
   if (module != &HAL_MODULE_INFO_SYM.common) {
     LOGF(ERROR) << std::hex << "Invalid module 0x" << module << " expected 0x"
@@ -850,6 +918,10 @@ static int get_camera_info_ext(int id,
   return CameraHal::GetInstance().GetCameraInfo(id, info, client_type);
 }
 
+static void set_privacy_switch_state(bool on) {
+  CameraHal::GetInstance().SetPrivacySwitchState(on);
+}
+
 int camera_device_close(struct hw_device_t* hw_device) {
   camera3_device_t* cam_dev = reinterpret_cast<camera3_device_t*>(hw_device);
   CameraClient* cam = static_cast<CameraClient*>(cam_dev->priv);
@@ -870,11 +942,11 @@ static hw_module_methods_t gCameraModuleMethods = {
 
 camera_module_t HAL_MODULE_INFO_SYM CROS_CAMERA_EXPORT = {
     .common = {.tag = HARDWARE_MODULE_TAG,
-               .module_api_version = CAMERA_MODULE_API_VERSION_2_4,
+               .module_api_version = CAMERA_MODULE_API_VERSION_2_5,
                .hal_api_version = HARDWARE_HAL_API_VERSION,
                .id = CAMERA_HARDWARE_MODULE_ID,
                .name = "V4L2 UVC Camera HAL v3",
-               .author = "The Chromium OS Authors",
+               .author = "The ChromiumOS Authors",
                .methods = &gCameraModuleMethods,
                .dso = NULL,
                .reserved = {0}},
@@ -892,4 +964,5 @@ cros::cros_camera_hal_t CROS_CAMERA_HAL_INFO_SYM CROS_CAMERA_EXPORT = {
     .tear_down = cros::tear_down,
     .set_privacy_switch_callback = cros::set_privacy_switch_callback,
     .camera_device_open_ext = cros::camera_device_open_ext,
-    .get_camera_info_ext = cros::get_camera_info_ext};
+    .get_camera_info_ext = cros::get_camera_info_ext,
+    .set_privacy_switch_state = cros::set_privacy_switch_state};

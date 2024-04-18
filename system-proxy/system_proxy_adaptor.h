@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef SYSTEM_PROXY_SYSTEM_PROXY_ADAPTOR_H_
@@ -12,7 +12,6 @@
 #include <brillo/dbus/async_event_sequencer.h>
 #include <brillo/http/http_proxy.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
-#include <patchpanel/proto_bindings/patchpanel_service.pb.h>
 
 #include "bindings/worker_common.pb.h"
 #include "system_proxy/org.chromium.SystemProxy.h"
@@ -41,9 +40,8 @@ class SystemProxyAdaptor : public org::chromium::SystemProxyAdaptor,
   virtual ~SystemProxyAdaptor();
 
   // Registers the D-Bus object and interfaces.
-  void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction&
-          completion_callback);
+  void RegisterAsync(brillo::dbus_utils::AsyncEventSequencer::CompletionAction
+                         completion_callback);
 
   // org::chromium::SystemProxyInterface: (see org.chromium.SystemProxy.xml).
   std::vector<uint8_t> SetAuthenticationDetails(
@@ -55,7 +53,7 @@ class SystemProxyAdaptor : public org::chromium::SystemProxyAdaptor,
 
   void GetChromeProxyServersAsync(
       const std::string& target_url,
-      const brillo::http::GetChromeProxyServersCallback& callback);
+      brillo::http::GetChromeProxyServersCallback callback);
 
   void RequestAuthenticationCredentials(
       const worker::ProtectionSpace& protection_space,

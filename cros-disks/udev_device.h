@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest_prod.h>
 
@@ -61,7 +61,7 @@ class UdevDevice {
   size_t GetPartitionCount() const;
 
   // Gets the device media type used on the device.
-  DeviceMediaType GetDeviceMediaType() const;
+  DeviceType GetDeviceMediaType() const;
 
   // Gets the USB vendor and product ID of the device. Returns true if the
   // IDs are found.

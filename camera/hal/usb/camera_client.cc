@@ -1,4 +1,4 @@
-/* Copyright 2016 The Chromium OS Authors. All rights reserved.
+/* Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -12,6 +12,7 @@
 
 #include <base/check.h>
 #include <base/posix/safe_strerror.h>
+#include <base/threading/platform_thread.h>
 #include <sync/sync.h>
 #include <system/camera_metadata.h>
 
@@ -22,8 +23,12 @@
 #include "hal/usb/camera_hal_device_ops.h"
 #include "hal/usb/quirks.h"
 #include "hal/usb/stream_format.h"
+#include "hal/usb/tracing.h"
+#include "hal/usb/v4l2_event_monitor.h"
 
 namespace cros {
+
+namespace {
 
 const int kBufferFenceReady = -1;
 
@@ -34,24 +39,81 @@ const int kBufferFenceReady = -1;
 // 16:9=1.778, 16:10=1.6, 3:2=1.5, 4:3=1.333
 const float kAspectRatioMargin = 0.04;
 
+// Chrome and camera service uses GRALLOC_USAGE_PRIVATE_1 to indicate still
+// capture YUV buffers.
+constexpr uint32_t GRALLOC_USAGE_STILL_CAPTURE = GRALLOC_USAGE_PRIVATE_1;
+
+// Resolves to a supported frame rate within the given target fps range in
+// |metadata|. If it fails, try the one that is closest to the target range.
+// If there are two candidates, choose the larger one.
+int ResolvedFrameRateFromMetadata(const android::CameraMetadata& metadata,
+                                  const SupportedFormats& qualified_formats,
+                                  const Size& resolution,
+                                  const int& device_id) {
+  DCHECK(metadata.exists(ANDROID_CONTROL_AE_TARGET_FPS_RANGE));
+
+  int resolved_fps = 0;
+
+  const SupportedFormat* format = FindFormatByResolution(
+      qualified_formats, resolution.width, resolution.height);
+  if (format == nullptr) {
+    LOGFID(ERROR, device_id)
+        << "Cannot find resolution in supported list: width "
+        << resolution.width << ", height " << resolution.height;
+    return resolved_fps;
+  }
+
+  camera_metadata_ro_entry entry =
+      metadata.find(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
+  const int target_min_fps = entry.data.i32[0];
+  const int target_max_fps = entry.data.i32[1];
+  int min_diff = std::numeric_limits<int>::max();
+  for (const float& frame_rate : format->frame_rates) {
+    int fps = std::round(frame_rate);
+    int diff_to_max = std::max(0, fps - target_max_fps);
+    int diff_to_min = std::max(0, target_min_fps - fps);
+    int diff = diff_to_max > 0 ? diff_to_max : diff_to_min;
+    if (diff < min_diff || (diff == min_diff && fps > resolved_fps)) {
+      resolved_fps = fps;
+      min_diff = diff;
+    }
+  }
+  if (min_diff > 0) {
+    LOGFID_THROTTLED(WARNING, device_id, 60)
+        << "Cannot resolve to a valid frame rate within the target range ("
+        << target_min_fps << ", " << target_max_fps
+        << "). Resolved to:  " << resolved_fps;
+  }
+  return resolved_fps;
+}
+
+}  // namespace
+
 CameraClient::CameraClient(int id,
                            const DeviceInfo& device_info,
                            const camera_metadata_t& static_metadata,
                            const camera_metadata_t& request_template,
                            const hw_module_t* module,
                            hw_device_t** hw_device,
-                           CameraPrivacySwitchMonitor* privacy_switch_monitor,
-                           ClientType client_type)
+                           V4L2EventMonitor* v4l2_event_monitor,
+                           ClientType client_type,
+                           bool sw_privacy_switch_on)
     : id_(id),
       device_info_(device_info),
       static_metadata_(clone_camera_metadata(&static_metadata)),
-      device_(new V4L2CameraDevice(device_info, privacy_switch_monitor)),
+      device_(new V4L2CameraDevice(
+          device_info, v4l2_event_monitor, sw_privacy_switch_on)),
       callback_ops_(nullptr),
+      sw_privacy_switch_on_(sw_privacy_switch_on),
       request_thread_("Capture request thread"),
       camera_metrics_(CameraMetrics::New()) {
   memset(&camera3_device_, 0, sizeof(camera3_device_));
   camera3_device_.common.tag = HARDWARE_DEVICE_TAG;
-  camera3_device_.common.version = CAMERA_DEVICE_API_VERSION_3_5;
+  // Set CAMERA_DEVICE_API_VERSION_3_5 to device version for Android P
+  // (API level: 28).
+  camera3_device_.common.version = DeviceConfig::GetArcApiLevel() >= 30
+                                       ? CAMERA_DEVICE_API_VERSION_3_6
+                                       : CAMERA_DEVICE_API_VERSION_3_5;
   camera3_device_.common.close = cros::camera_device_close;
   camera3_device_.common.module = const_cast<hw_module_t*>(module);
   camera3_device_.ops = &g_camera_device_ops;
@@ -102,7 +164,9 @@ int CameraClient::OpenDevice() {
 
   int ret = device_->Connect(device_info_.device_path);
   if (ret) {
-    LOGFID(ERROR, id_) << "Connect failed: " << base::safe_strerror(-ret);
+    LOGF(ERROR) << V4L2CameraDevice::GetModelName(device_info_.device_path)
+                << " id: " << id_
+                << ": Connect failed: " << base::safe_strerror(-ret);
     return ret;
   }
 
@@ -122,6 +186,22 @@ int CameraClient::CloseDevice() {
   StreamOff();
   device_->Disconnect();
   return 0;
+}
+
+void CameraClient::SetPrivacySwitchState(bool on) {
+  if (sw_privacy_switch_on_ == on) {
+    return;
+  }
+  sw_privacy_switch_on_ = on;
+  if (request_handler_) {
+    request_task_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CameraClient::RequestHandler::SetPrivacySwitchState,
+                       base::Unretained(request_handler_.get()), on));
+  } else {
+    // While not streaming, directly set the state to |device_|.
+    device_->SetPrivacySwitchState(on);
+  }
 }
 
 int CameraClient::Initialize(const camera3_callback_ops_t* callback_ops) {
@@ -160,71 +240,11 @@ int CameraClient::ConfigureStreams(
     return -EINVAL;
   }
 
-  VLOGFID(1, id_) << "Number of Streams: " << stream_config->num_streams;
-
-  Size stream_on_resolution(0, 0);
   std::vector<camera3_stream_t*> streams;
-  int crop_rotate_scale_degrees = 0;
-  for (size_t i = 0; i < stream_config->num_streams; i++) {
-    VLOGFID(1, id_) << "Stream[" << i
-                    << "] type=" << stream_config->streams[i]->stream_type
-                    << " width=" << stream_config->streams[i]->width
-                    << " height=" << stream_config->streams[i]->height
-                    << " rotation=" << stream_config->streams[i]->rotation
-                    << " degrees="
-                    << stream_config->streams[i]->crop_rotate_scale_degrees
-                    << " format=0x" << std::hex
-                    << stream_config->streams[i]->format << std::dec;
+  auto streamon_params = BuildStreamOnParameters(stream_config, streams);
 
-    if (!IsFormatSupported(qualified_formats_, *(stream_config->streams[i]))) {
-      LOGF(ERROR) << "Unsupported stream parameters. Width: "
-                  << stream_config->streams[i]->width
-                  << ", height: " << stream_config->streams[i]->height
-                  << ", format: " << stream_config->streams[i]->format;
-      return -EINVAL;
-    }
-    streams.push_back(stream_config->streams[i]);
-    if (i && stream_config->streams[i]->crop_rotate_scale_degrees !=
-                 stream_config->streams[i - 1]->crop_rotate_scale_degrees) {
-      LOGF(ERROR) << "Unsupported different crop ratate scale degrees";
-      return -EINVAL;
-    }
-    // Here assume the attribute of all streams are the same.
-    switch (stream_config->streams[i]->crop_rotate_scale_degrees) {
-      case CAMERA3_STREAM_ROTATION_0:
-        crop_rotate_scale_degrees = 0;
-        break;
-      case CAMERA3_STREAM_ROTATION_90:
-        crop_rotate_scale_degrees = 90;
-        break;
-      case CAMERA3_STREAM_ROTATION_270:
-        crop_rotate_scale_degrees = 270;
-        break;
-      default:
-        LOGF(ERROR) << "Unrecognized crop_rotate_scale_degrees: "
-                    << stream_config->streams[i]->crop_rotate_scale_degrees;
-        return -EINVAL;
-    }
-
-    // Skip BLOB format to avoid to use too large resolution as preview size,
-    // unless we prefer large preview for the camera and JDA is capable of the
-    // resolution.
-    const bool try_blob =
-        device_info_.quirks & kQuirkPreferLargePreviewResolution;
-    const bool is_jda_capable =
-        stream_config->streams[i]->width <= jda_resolution_cap_.width &&
-        stream_config->streams[i]->height <= jda_resolution_cap_.height;
-    if (!(try_blob && is_jda_capable) &&
-        stream_config->streams[i]->format == HAL_PIXEL_FORMAT_BLOB &&
-        stream_config->num_streams > 1)
-      continue;
-
-    // Find maximum area of stream_config to stream on.
-    if (stream_config->streams[i]->width * stream_config->streams[i]->height >
-        stream_on_resolution.width * stream_on_resolution.height) {
-      stream_on_resolution.width = stream_config->streams[i]->width;
-      stream_on_resolution.height = stream_config->streams[i]->height;
-    }
+  if (!streamon_params.has_value()) {
+    return streamon_params.error();
   }
 
   if (!IsValidStreamSet(streams)) {
@@ -232,23 +252,14 @@ int CameraClient::ConfigureStreams(
     return -EINVAL;
   }
 
-  Size resolution(0, 0);
-  bool use_native_sensor_ratio;
-  use_native_sensor_ratio =
-      ShouldUseNativeSensorRatio(*stream_config, &resolution);
-  if (use_native_sensor_ratio) {
-    stream_on_resolution = resolution;
-  }
-
-  int num_buffers;
-  int ret = StreamOn(stream_on_resolution, crop_rotate_scale_degrees,
-                     &num_buffers, use_native_sensor_ratio);
-  if (ret) {
-    LOGFID(ERROR, id_) << "StreamOn failed";
+  auto ret = StreamOn(streamon_params.value());
+  if (!ret.has_value()) {
+    LOGF(ERROR) << V4L2CameraDevice::GetModelName(device_info_.device_path)
+                << " id: " << id_ << ": StreamOn failed";
     StreamOff();
-    return ret;
+    return ret.error();
   }
-  SetUpStreams(num_buffers, &streams);
+  SetUpStreams(ret.value(), &streams);
 
   return 0;
 }
@@ -270,7 +281,7 @@ int CameraClient::ProcessCaptureRequest(camera3_capture_request_t* request) {
   }
 
   if (request == nullptr) {
-    LOGFID(ERROR, id_) << "NULL request recieved";
+    LOGFID(ERROR, id_) << "NULL request received";
     return -EINVAL;
   }
 
@@ -304,6 +315,12 @@ int CameraClient::ProcessCaptureRequest(camera3_capture_request_t* request) {
                   << ", format: " << buffer->stream->format;
       return -EINVAL;
     }
+    // TODO(b/226688669): Remove this check after the buffer management APIs are
+    // enabled.
+    if (*buffer->buffer == nullptr) {
+      LOGF(ERROR) << "Buffer handles are not attached to the request";
+      return -EINVAL;
+    }
   }
 
   // We cannot use |request| after this function returns. So we have to copy
@@ -312,9 +329,9 @@ int CameraClient::ProcessCaptureRequest(camera3_capture_request_t* request) {
   std::unique_ptr<CaptureRequest> capture_request(
       new CaptureRequest(*request, latest_request_metadata_));
   request_task_runner_->PostTask(
-      FROM_HERE, base::Bind(&CameraClient::RequestHandler::HandleRequest,
-                            base::Unretained(request_handler_.get()),
-                            base::Passed(&capture_request)));
+      FROM_HERE, base::BindOnce(&CameraClient::RequestHandler::HandleRequest,
+                                base::Unretained(request_handler_.get()),
+                                std::move(capture_request)));
   return 0;
 }
 
@@ -386,33 +403,205 @@ void CameraClient::SetUpStreams(int num_buffers,
   }
 }
 
-int CameraClient::StreamOn(Size stream_on_resolution,
-                           int crop_rotate_scale_degrees,
-                           int* num_buffers,
-                           bool use_native_sensor_ratio) {
+base::expected<CameraClient::StreamOnParameters, CameraClient::Error>
+CameraClient::BuildStreamOnParameters(
+    const camera3_stream_configuration_t* stream_config,
+    std::vector<camera3_stream_t*>& streams) {
+  VLOGFID(1, id_) << "Number of Streams: " << stream_config->num_streams;
+
+  StreamOnParameters streamon_params;
+  android::CameraMetadata session_params_metadata(
+      clone_camera_metadata(stream_config->session_parameters));
+
+  // Find the largest resolution of BLOB stream
+  Size largest_blob_resolution(0, 0);
+  for (size_t i = 0; i < stream_config->num_streams; i++) {
+    if (stream_config->streams[i]->format == HAL_PIXEL_FORMAT_BLOB) {
+      if (stream_config->streams[i]->width > largest_blob_resolution.width &&
+          stream_config->streams[i]->height > largest_blob_resolution.height) {
+        largest_blob_resolution.width = stream_config->streams[i]->width;
+        largest_blob_resolution.height = stream_config->streams[i]->height;
+      }
+    }
+  }
+  auto isPreviewStream = [](const camera3_stream_t* stream) {
+    if (stream && (CAMERA3_STREAM_OUTPUT == stream->stream_type) &&
+        (GRALLOC_USAGE_HW_COMPOSER ==
+         (GRALLOC_USAGE_HW_COMPOSER & stream->usage))) {
+      return true;
+    }
+    return false;
+  };
+  auto isVideoStream = [](const camera3_stream_t* stream) {
+    if (stream && (0 != (GRALLOC_USAGE_HW_VIDEO_ENCODER & stream->usage))) {
+      return true;
+    }
+    return false;
+  };
+  int skipped_stream_count = 0;
+  for (size_t i = 0; i < stream_config->num_streams; i++) {
+    VLOGFID(1, id_) << "Stream[" << i
+                    << "] type=" << stream_config->streams[i]->stream_type
+                    << " width=" << stream_config->streams[i]->width
+                    << " height=" << stream_config->streams[i]->height
+                    << " rotation=" << stream_config->streams[i]->rotation
+                    << " degrees="
+                    << stream_config->streams[i]->crop_rotate_scale_degrees
+                    << " format=0x" << std::hex
+                    << stream_config->streams[i]->format << std::dec;
+
+    if (!IsFormatSupported(qualified_formats_, *(stream_config->streams[i]))) {
+      LOGF(ERROR) << "Unsupported stream parameters. Width: "
+                  << stream_config->streams[i]->width
+                  << ", height: " << stream_config->streams[i]->height
+                  << ", format: " << stream_config->streams[i]->format;
+      return base::unexpected(-EINVAL);
+    }
+    streams.push_back(stream_config->streams[i]);
+    if (i && stream_config->streams[i]->crop_rotate_scale_degrees !=
+                 stream_config->streams[i - 1]->crop_rotate_scale_degrees) {
+      LOGF(ERROR) << "Unsupported different crop ratate scale degrees";
+      return base::unexpected(-EINVAL);
+    }
+    // Here assume the attribute of all streams are the same.
+    switch (stream_config->streams[i]->crop_rotate_scale_degrees) {
+      case CAMERA3_STREAM_ROTATION_0:
+        streamon_params.crop_rotate_scale_degrees = 0;
+        break;
+      case CAMERA3_STREAM_ROTATION_90:
+        streamon_params.crop_rotate_scale_degrees = 90;
+        break;
+      case CAMERA3_STREAM_ROTATION_270:
+        streamon_params.crop_rotate_scale_degrees = 270;
+        break;
+      default:
+        LOGF(ERROR) << "Unrecognized crop_rotate_scale_degrees: "
+                    << stream_config->streams[i]->crop_rotate_scale_degrees;
+        return base::unexpected(-EINVAL);
+    }
+
+    // Skip BLOB format to avoid to use too large resolution as preview size,
+    // unless we prefer large preview for the camera and JDA is capable of the
+    // resolution.
+    const bool try_blob =
+        device_info_.quirks & kQuirkPreferLargePreviewResolution;
+    const bool is_jda_capable =
+        stream_config->streams[i]->width <= jda_resolution_cap_.width &&
+        stream_config->streams[i]->height <= jda_resolution_cap_.height;
+    if (!(try_blob && is_jda_capable) &&
+        skipped_stream_count + 1 < stream_config->num_streams) {
+      if (stream_config->streams[i]->format == HAL_PIXEL_FORMAT_BLOB) {
+        skipped_stream_count += 1;
+        continue;
+      }
+      // Also skip the yuv stream with the same resolution as the BLOB stream,
+      // but don't skip preview stream or video stream
+      if (stream_config->streams[i]->format == HAL_PIXEL_FORMAT_YCbCr_420_888 &&
+          stream_config->streams[i]->width == largest_blob_resolution.width &&
+          stream_config->streams[i]->height == largest_blob_resolution.height &&
+          !isPreviewStream(stream_config->streams[i]) &&
+          !isVideoStream(stream_config->streams[i])) {
+        skipped_stream_count += 1;
+        continue;
+      }
+    }
+    const Size resolution(stream_config->streams[i]->width,
+                          stream_config->streams[i]->height);
+    int frame_rate = 0;
+
+    if (session_params_metadata.exists(ANDROID_CONTROL_AE_TARGET_FPS_RANGE)) {
+      frame_rate = ResolvedFrameRateFromMetadata(
+          session_params_metadata, qualified_formats_, resolution, id_);
+    } else {
+      const SupportedFormat* format = FindFormatByResolution(
+          qualified_formats_, resolution.width, resolution.height);
+      DCHECK_NE(format, nullptr);
+      frame_rate = GetMaximumFrameRate(*format);
+    }
+
+    constexpr int kMinPreviewFps = 15;
+    // Select the resolution with the highest fps when
+    // other resolutions have too low fps.
+    if (frame_rate > streamon_params.frame_rate &&
+        streamon_params.frame_rate < kMinPreviewFps) {
+      streamon_params.resolution = resolution;
+      streamon_params.frame_rate = frame_rate;
+      continue;
+    }
+
+    // Skip resolutions with low fps.
+    // Some devices, e.g. Kinect, do not enumerate any frame rates, see
+    // |V4L2CameraDevice::GetFrameRateList()|. The fps is set to 0,
+    // consider them as high fps.
+    if (frame_rate != 0 && frame_rate < kMinPreviewFps) {
+      continue;
+    }
+
+    // Find maximum area of stream_config to stream on.
+    if (streamon_params.resolution < resolution) {
+      streamon_params.resolution = resolution;
+      streamon_params.frame_rate = frame_rate;
+    }
+  }
+
+  {
+    // Make sure |resolution| is not used outside of this scope.
+    Size resolution(0, 0);
+    streamon_params.use_native_sensor_ratio =
+        ShouldUseNativeSensorRatio(*stream_config, &resolution);
+    if (streamon_params.use_native_sensor_ratio) {
+      streamon_params.resolution = resolution;
+      const SupportedFormat* format = FindFormatByResolution(
+          qualified_formats_, streamon_params.resolution.width,
+          streamon_params.resolution.height);
+      DCHECK_NE(format, nullptr);
+      streamon_params.frame_rate = GetMaximumFrameRate(*format);
+    }
+  }
+
+  std::string session_params_fps_range = "[]";
+  if (session_params_metadata.exists(ANDROID_CONTROL_AE_TARGET_FPS_RANGE)) {
+    auto fps_entry =
+        session_params_metadata.find(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
+    session_params_fps_range = base::StringPrintf(
+        "[%d,%d]", fps_entry.data.i32[0], fps_entry.data.i32[1]);
+  }
+  LOGF(INFO) << "size: " << streamon_params.resolution.ToString()
+             << ", fps: " << streamon_params.frame_rate
+             << ", crop_rotate_scale_degrees: "
+             << streamon_params.crop_rotate_scale_degrees
+             << ", use_native_sensor_ratio: "
+             << streamon_params.use_native_sensor_ratio
+             << ", session_parameters fps: " << session_params_fps_range;
+
+  return base::ok(streamon_params);
+}
+
+base::expected<int, CameraClient::Error> CameraClient::StreamOn(
+    const CameraClient::StreamOnParameters& streamon_params) {
   DCHECK(ops_thread_checker_.CalledOnValidThread());
 
   if (!request_handler_.get()) {
     if (!request_thread_.Start()) {
       LOGFID(ERROR, id_) << "Request thread failed to start";
-      return -EINVAL;
+      return base::unexpected(-EINVAL);
     }
     request_task_runner_ = request_thread_.task_runner();
 
-    request_handler_.reset(new RequestHandler(
+    request_handler_ = std::make_unique<RequestHandler>(
         id_, device_info_, static_metadata_, device_.get(), callback_ops_,
-        request_task_runner_, metadata_handler_.get()));
+        request_task_runner_, metadata_handler_.get(), sw_privacy_switch_on_);
   }
 
-  auto future = cros::Future<int>::Create(nullptr);
-  base::Callback<void(int, int)> streamon_callback =
-      base::Bind(&CameraClient::StreamOnCallback, base::Unretained(this),
-                 base::RetainedRef(future), num_buffers);
+  auto future =
+      cros::Future<base::expected<int, CameraClient::Error>>::Create(nullptr);
+  base::OnceCallback<void(int, int)> streamon_callback =
+      base::BindOnce(&CameraClient::StreamOnCallback, base::Unretained(this),
+                     base::RetainedRef(future));
   request_task_runner_->PostTask(
-      FROM_HERE, base::Bind(&CameraClient::RequestHandler::StreamOn,
-                            base::Unretained(request_handler_.get()),
-                            stream_on_resolution, crop_rotate_scale_degrees,
-                            use_native_sensor_ratio, streamon_callback));
+      FROM_HERE, base::BindOnce(&CameraClient::RequestHandler::StreamOn,
+                                base::Unretained(request_handler_.get()),
+                                streamon_params, std::move(streamon_callback)));
   return future->Get();
 }
 
@@ -420,13 +609,13 @@ void CameraClient::StreamOff() {
   DCHECK(ops_thread_checker_.CalledOnValidThread());
   if (request_handler_.get()) {
     auto future = cros::Future<int>::Create(nullptr);
-    base::Callback<void(int)> streamoff_callback =
-        base::Bind(&CameraClient::StreamOffCallback, base::Unretained(this),
-                   base::RetainedRef(future));
+    base::OnceCallback<void(int)> streamoff_callback =
+        base::BindOnce(&CameraClient::StreamOffCallback, base::Unretained(this),
+                       base::RetainedRef(future));
     request_task_runner_->PostTask(
-        FROM_HERE, base::Bind(&CameraClient::RequestHandler::StreamOff,
-                              base::Unretained(request_handler_.get()),
-                              streamoff_callback));
+        FROM_HERE, base::BindOnce(&CameraClient::RequestHandler::StreamOff,
+                                  base::Unretained(request_handler_.get()),
+                                  std::move(streamoff_callback)));
     int ret = future->Get();
     if (ret) {
       LOGFID(ERROR, id_) << "StreamOff failed";
@@ -436,19 +625,21 @@ void CameraClient::StreamOff() {
   }
 }
 
-void CameraClient::StreamOnCallback(scoped_refptr<cros::Future<int>> future,
-                                    int* out_num_buffers,
-                                    int num_buffers,
-                                    int result) {
-  if (!result && out_num_buffers) {
-    *out_num_buffers = num_buffers;
+void CameraClient::StreamOnCallback(
+    scoped_refptr<cros::Future<base::expected<int, CameraClient::Error>>>
+        future,
+    int num_buffers,
+    CameraClient::Error error) {
+  if (!error) {
+    future->Set(base::ok(num_buffers));
+  } else {
+    future->Set(base::unexpected(error));
   }
-  future->Set(result);
 }
 
-void CameraClient::StreamOffCallback(scoped_refptr<cros::Future<int>> future,
-                                     int result) {
-  future->Set(result);
+void CameraClient::StreamOffCallback(scoped_refptr<cros::Future<Error>> future,
+                                     Error error) {
+  future->Set(error);
 }
 
 bool CameraClient::ShouldUseNativeSensorRatio(
@@ -493,7 +684,7 @@ bool CameraClient::ShouldUseNativeSensorRatio(
   }
 
   bool use_native_sensor_ratio = false;
-  // Find the same ratio maximium resolution with minimum 30 fps.
+  // Find the same ratio maximum resolution with minimum 30 fps.
   float target_aspect_ratio =
       static_cast<float>(device_info_.sensor_info_pixel_array_size_width) /
       device_info_.sensor_info_pixel_array_size_height;
@@ -545,7 +736,8 @@ CameraClient::RequestHandler::RequestHandler(
     V4L2CameraDevice* device,
     const camera3_callback_ops_t* callback_ops,
     const scoped_refptr<base::SingleThreadTaskRunner>& task_runner,
-    MetadataHandler* metadata_handler)
+    MetadataHandler* metadata_handler,
+    bool sw_privacy_switch_on)
     : device_id_(device_id),
       device_info_(device_info),
       static_metadata_(static_metadata),
@@ -562,7 +754,8 @@ CameraClient::RequestHandler::RequestHandler(
       current_buffer_timestamp_in_user_(0),
       flush_started_(false),
       is_video_recording_(false),
-      max_num_detected_faces_(0) {
+      max_num_detected_faces_(0),
+      sw_privacy_switch_on_(sw_privacy_switch_on) {
   SupportedFormats supported_formats =
       device_->GetDeviceSupportedFormats(device_info_.device_path);
   qualified_formats_ =
@@ -572,45 +765,42 @@ CameraClient::RequestHandler::RequestHandler(
 CameraClient::RequestHandler::~RequestHandler() {}
 
 void CameraClient::RequestHandler::StreamOn(
-    Size stream_on_resolution,
-    int crop_rotate_scale_degrees,
-    bool use_native_sensor_ratio,
-    const base::Callback<void(int, int)>& callback) {
+    const CameraClient::StreamOnParameters& streamon_params,
+    base::OnceCallback<void(int, int)> callback) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  crop_rotate_scale_degrees_ = crop_rotate_scale_degrees;
+  crop_rotate_scale_degrees_ = streamon_params.crop_rotate_scale_degrees;
 
-  const SupportedFormat* format =
-      FindFormatByResolution(qualified_formats_, stream_on_resolution.width,
-                             stream_on_resolution.height);
+  const SupportedFormat* format = FindFormatByResolution(
+      qualified_formats_, streamon_params.resolution.width,
+      streamon_params.resolution.height);
   if (format == nullptr) {
     LOGFID(ERROR, device_id_)
         << "Cannot find resolution in supported list: width "
-        << stream_on_resolution.width << ", height "
-        << stream_on_resolution.height;
-    callback.Run(0, -EINVAL);
+        << streamon_params.resolution.width << ", height "
+        << streamon_params.resolution.height;
+    std::move(callback).Run(0, -EINVAL);
     return;
   }
-  int ret = StreamOnImpl(stream_on_resolution, use_native_sensor_ratio,
-                         GetMaximumFrameRate(*format));
+  int ret = StreamOnImpl(streamon_params);
   if (ret) {
-    callback.Run(0, ret);
+    std::move(callback).Run(0, ret);
     return;
   }
-  default_resolution_ = stream_on_resolution;
+  default_resolution_ = streamon_params.resolution;
   // Some camera modules need a lot of time to output the first frame.
   // It causes some CTS tests failed. Wait the first frame to be ready in
   // ConfigureStream can make sure there is no delay to output frames.
   // NOTE: ConfigureStream should be returned in 1000 ms.
   SkipFramesAfterStreamOn(1);
-  callback.Run(input_buffers_.size(), 0);
+  std::move(callback).Run(input_buffers_.size(), 0);
 }
 
 void CameraClient::RequestHandler::StreamOff(
-    const base::Callback<void(int)>& callback) {
+    base::OnceCallback<void(int)> callback) {
   DCHECK(task_runner_->BelongsToCurrentThread());
   int ret = StreamOffImpl();
-  callback.Run(ret);
+  std::move(callback).Run(ret);
 }
 
 void CameraClient::RequestHandler::HandleRequest(
@@ -626,6 +816,34 @@ void CameraClient::RequestHandler::HandleRequest(
   capture_result.num_output_buffers = output_stream_buffers->size();
   capture_result.output_buffers = &(*output_stream_buffers)[0];
 
+  // If the buffer management APIs are enabled, requests do not contain output
+  // buffer handles and HAL needs to request buffers using
+  // request_stream_buffers().
+  camera3_stream_buffer_t* returned_output_buffers =
+      const_cast<camera3_stream_buffer_t*>(capture_result.output_buffers);
+  if (*capture_result.output_buffers[0].buffer == nullptr) {
+    std::vector<camera3_buffer_request_t> buf_reqs;
+    std::vector<camera3_stream_buffer_ret_t> returned_buf_reqs(
+        capture_result.num_output_buffers, camera3_stream_buffer_ret_t{});
+
+    // Prepare |buf_reqs| and |returned_buf_reqs|.
+    for (size_t i = 0; i < capture_result.num_output_buffers; ++i) {
+      buf_reqs.push_back({.stream = capture_result.output_buffers[i].stream,
+                          .num_buffers_requested = 1});
+      returned_buf_reqs[i].output_buffers = returned_output_buffers + i;
+    }
+
+    uint32_t num_returned_buf_reqs;
+    camera3_buffer_request_status_t ret = callback_ops_->request_stream_buffers(
+        callback_ops_, capture_result.num_output_buffers, buf_reqs.data(),
+        &num_returned_buf_reqs, returned_buf_reqs.data());
+    if (ret != CAMERA3_BUF_REQ_OK) {
+      LOGF(ERROR) << "Failed to request stream buffers: " << ret;
+      NotifyRequestError(capture_result.frame_number);
+      return;
+    }
+  }
+
   if (flush_started_) {
     VLOGFID(1, device_id_) << "Request Frame:" << capture_result.frame_number
                            << " is aborted due to flush";
@@ -639,7 +857,7 @@ void CameraClient::RequestHandler::HandleRequest(
     return;
   }
 
-  VLOGFID(1, device_id_) << "Request Frame:" << capture_result.frame_number
+  VLOGFID(1, device_id_) << "Request Frame: " << capture_result.frame_number
                          << ", Number of output buffers: "
                          << capture_result.num_output_buffers;
   android::CameraMetadata* metadata = request->GetMetadata();
@@ -652,33 +870,40 @@ void CameraClient::RequestHandler::HandleRequest(
     // needed, we don't switch the resolution back in the end of request.
     // We keep the resolution until next request and see whether we need to
     // change current resolution.
-    // (Note: We only support one blob format stream.)
-    bool have_blob_buffer = false;
+    // When taking pictures, we always switch to the still capture resolution to
+    // ensure it has the largest FoV. Since BLOB and still YUV buffers can be
+    // requested from camera service for one still capture, we choose the
+    // largest one among them.
+    std::optional<Size> max_still_capture_size;
     for (size_t i = 0; i < capture_result.num_output_buffers; i++) {
-      const camera3_stream_buffer_t* buffer = &capture_result.output_buffers[i];
-      if (buffer->stream->format == HAL_PIXEL_FORMAT_BLOB) {
-        have_blob_buffer = true;
-        new_resolution.width = buffer->stream->width;
-        new_resolution.height = buffer->stream->height;
-        break;
+      const camera3_stream_t* stream = capture_result.output_buffers[i].stream;
+      const Size stream_size(stream->width, stream->height);
+      if ((stream->format == HAL_PIXEL_FORMAT_BLOB ||
+           stream->usage & GRALLOC_USAGE_STILL_CAPTURE) &&
+          (!max_still_capture_size || *max_still_capture_size < stream_size)) {
+        max_still_capture_size = stream_size;
       }
     }
-    if (!have_blob_buffer) {
-      new_resolution = default_resolution_;
-    }
-    if (new_resolution.width != stream_on_resolution_.width ||
-        new_resolution.height != stream_on_resolution_.height) {
+    new_resolution = max_still_capture_size.value_or(default_resolution_);
+    if (new_resolution != stream_on_resolution_) {
       stream_resolution_reconfigure = true;
     }
   }
 
-  int target_frame_rate =
-      ResolvedFrameRateFromMetadata(*metadata, new_resolution);
+  int target_frame_rate = ResolvedFrameRateFromMetadata(
+      *metadata, qualified_formats_, new_resolution, device_id_);
   bool should_update_frame_rate =
       device_->CanUpdateFrameRate() &&
       target_frame_rate != device_->GetFrameRate() &&
       IsValidFrameRate(target_frame_rate);
-  if (stream_resolution_reconfigure || should_update_frame_rate) {
+
+  StreamOnParameters streamon_params = {
+      .resolution = new_resolution,
+      .crop_rotate_scale_degrees = use_native_sensor_ratio_,
+      .frame_rate = target_frame_rate};
+
+  if (stream_resolution_reconfigure || should_update_frame_rate ||
+      sw_privacy_switch_error_occurred_) {
     VLOGFID(1, device_id_) << "Restart stream";
     int ret = StreamOffImpl();
     if (ret) {
@@ -686,12 +911,12 @@ void CameraClient::RequestHandler::HandleRequest(
       return;
     }
 
-    ret = StreamOnImpl(new_resolution, use_native_sensor_ratio_,
-                       target_frame_rate);
+    ret = StreamOnImpl(streamon_params);
     if (ret) {
       HandleAbortedRequest(&capture_result);
       return;
     }
+    sw_privacy_switch_error_occurred_ = false;
   }
 
   // Get frame data from device only for the first buffer.
@@ -707,7 +932,7 @@ void CameraClient::RequestHandler::HandleRequest(
   bool keep_trying;
   do {
     VLOGFID(2, device_id_) << "before DequeueV4L2Buffer";
-    ret = DequeueV4L2Buffer(pattern_mode);
+    ret = DequeueV4L2Buffer(pattern_mode, capture_result.frame_number);
     keep_trying = false;
     if (!ret) {
       if (metadata_handler_->PreHandleRequest(
@@ -722,8 +947,7 @@ void CameraClient::RequestHandler::HandleRequest(
       if (StreamOffImpl() != 0) {
         break;
       }
-      if (StreamOnImpl(new_resolution, use_native_sensor_ratio_,
-                       target_frame_rate) != 0) {
+      if (StreamOnImpl(streamon_params) != 0) {
         break;
       }
       keep_trying = true;
@@ -772,19 +996,35 @@ void CameraClient::RequestHandler::HandleRequest(
 }
 
 void CameraClient::RequestHandler::HandleFlush(
-    const base::Callback<void(int)>& callback) {
+    base::OnceCallback<void(int)> callback) {
   VLOGFID(1, device_id_);
   {
     base::AutoLock l(flush_lock_);
     flush_started_ = true;
   }
-  task_runner_->PostTask(FROM_HERE,
-                         base::Bind(&CameraClient::RequestHandler::FlushDone,
-                                    base::Unretained(this), callback));
+  task_runner_->PostTask(
+      FROM_HERE, base::BindOnce(&CameraClient::RequestHandler::FlushDone,
+                                base::Unretained(this), std::move(callback)));
 }
 
 int CameraClient::RequestHandler::GetMaxNumDetectedFaces() {
   return max_num_detected_faces_;
+}
+
+void CameraClient::RequestHandler::SetPrivacySwitchState(bool on) {
+  DCHECK(task_runner_->BelongsToCurrentThread());
+  if (sw_privacy_switch_on_ == on) {
+    return;
+  }
+  sw_privacy_switch_on_ = on;
+  if (device_->SetPrivacySwitchState(on) < 0) {
+    LOGF(ERROR) << "Failed to set the SW privacy switch state to"
+                << "V4L2CameraDevice";
+    sw_privacy_switch_error_occurred_ = true;
+    return;
+  }
+  frames_to_skip_after_privacy_switch_disabled_ =
+      device_info_.frames_to_skip_after_streamon;
 }
 
 void CameraClient::RequestHandler::DiscardOutdatedBuffers() {
@@ -797,17 +1037,16 @@ void CameraClient::RequestHandler::DiscardOutdatedBuffers() {
   SkipFramesAfterStreamOn(filled_count);
 }
 
-int CameraClient::RequestHandler::StreamOnImpl(Size stream_on_resolution,
-                                               bool use_native_sensor_ratio,
-                                               float target_frame_rate) {
+int CameraClient::RequestHandler::StreamOnImpl(
+    const CameraClient::StreamOnParameters& streamon_params) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
   int ret;
   // If new stream configuration is the same as current stream, do nothing.
-  if (stream_on_resolution.width == stream_on_resolution_.width &&
-      stream_on_resolution.height == stream_on_resolution_.height &&
-      use_native_sensor_ratio == use_native_sensor_ratio_ &&
-      target_frame_rate == stream_on_fps_) {
+  if (streamon_params.resolution.width == stream_on_resolution_.width &&
+      streamon_params.resolution.height == stream_on_resolution_.height &&
+      streamon_params.use_native_sensor_ratio == use_native_sensor_ratio_ &&
+      static_cast<float>(streamon_params.frame_rate) == stream_on_fps_) {
     VLOGFID(1, device_id_) << "Skip stream on for the same configuration";
     DiscardOutdatedBuffers();
     return 0;
@@ -819,26 +1058,27 @@ int CameraClient::RequestHandler::StreamOnImpl(Size stream_on_resolution,
       return ret;
     }
   }
-  const SupportedFormat* format =
-      FindFormatByResolution(qualified_formats_, stream_on_resolution.width,
-                             stream_on_resolution.height);
+  const SupportedFormat* format = FindFormatByResolution(
+      qualified_formats_, streamon_params.resolution.width,
+      streamon_params.resolution.height);
   if (format == nullptr) {
     LOGFID(ERROR, device_id_)
         << "Cannot find resolution in supported list: width "
-        << stream_on_resolution.width << ", height "
-        << stream_on_resolution.height;
+        << streamon_params.resolution.width << ", height "
+        << streamon_params.resolution.height;
     return -EINVAL;
   }
 
   VLOGFID(1, device_id_) << "streamOn with width " << format->width
                          << ", height " << format->height << ", fps "
-                         << target_frame_rate << ", format "
+                         << streamon_params.frame_rate << ", format "
                          << FormatToString(format->fourcc);
 
   std::vector<base::ScopedFD> fds;
   std::vector<uint32_t> buffer_sizes;
   ret = device_->StreamOn(format->width, format->height, format->fourcc,
-                          target_frame_rate, &fds, &buffer_sizes);
+                          static_cast<float>(streamon_params.frame_rate), &fds,
+                          &buffer_sizes);
   if (ret) {
     LOGFID(ERROR, device_id_)
         << "StreamOn failed: " << base::safe_strerror(-ret);
@@ -851,7 +1091,7 @@ int CameraClient::RequestHandler::StreamOnImpl(Size stream_on_resolution,
         format->fourcc);
     ret = frame->Map();
     if (ret) {
-      return -errno;
+      return ret;
     }
     VLOGFID(1, device_id_) << "Buffer " << i << ", fd: " << frame->GetFd()
                            << " address: " << std::hex
@@ -860,9 +1100,9 @@ int CameraClient::RequestHandler::StreamOnImpl(Size stream_on_resolution,
     input_buffers_.push_back(std::move(frame));
   }
 
-  stream_on_resolution_ = stream_on_resolution;
-  use_native_sensor_ratio_ = use_native_sensor_ratio;
-  stream_on_fps_ = target_frame_rate;
+  stream_on_resolution_ = streamon_params.resolution;
+  use_native_sensor_ratio_ = streamon_params.use_native_sensor_ratio;
+  stream_on_fps_ = static_cast<float>(streamon_params.frame_rate);
   current_buffer_timestamp_in_v4l2_ = 0;
   current_buffer_timestamp_in_user_ = 0;
   SkipFramesAfterStreamOn(device_info_.frames_to_skip_after_streamon);
@@ -875,6 +1115,7 @@ int CameraClient::RequestHandler::StreamOnImpl(Size stream_on_resolution,
   }
   test_pattern_.reset(new TestPattern(
       Size(entry.data.i32[0], entry.data.i32[1]), stream_on_resolution_));
+  InitializeBlackFrame();
   return 0;
 }
 
@@ -943,6 +1184,7 @@ int CameraClient::RequestHandler::WriteStreamBuffers(
     const android::CameraMetadata& request_metadata,
     camera3_capture_result_t* capture_result) {
   DCHECK(task_runner_->BelongsToCurrentThread());
+  TRACE_USB_HAL("frame_number", capture_result->frame_number);
 
   std::vector<std::unique_ptr<FrameBuffer>> output_frames;
   for (size_t i = 0; i < capture_result->num_output_buffers; i++) {
@@ -956,17 +1198,23 @@ int CameraClient::RequestHandler::WriteStreamBuffers(
         *buffer->buffer, buffer->stream->width, buffer->stream->height));
   }
 
-  const FrameBuffer* input_frame =
-      test_pattern_->IsTestPatternEnabled()
-          ? test_pattern_->GetTestPattern()
-          : input_buffers_[current_v4l2_buffer_id_].get();
+  FrameBuffer* input_frame;
+  if (sw_privacy_switch_on_ ||
+      frames_to_skip_after_privacy_switch_disabled_ > 0) {
+    --frames_to_skip_after_privacy_switch_disabled_;
+    input_frame = black_frame_.get();
+  } else if (test_pattern_->IsTestPatternEnabled()) {
+    input_frame = test_pattern_->GetTestPattern();
+  } else {
+    input_frame = input_buffers_[current_v4l2_buffer_id_].get();
+  }
 
   std::vector<int> output_frame_status;
   std::vector<human_sensing::CrosFace>* faces_ptr =
       device_info_.enable_face_detection ? &detected_faces_ : nullptr;
   int ret = cached_frame_.Convert(
       static_metadata_, request_metadata, crop_rotate_scale_degrees_,
-      *input_frame, output_frames, &output_frame_status, faces_ptr);
+      *input_frame, output_frames, output_frame_status, faces_ptr);
 
   if (ret) {
     EnqueueV4L2Buffer();
@@ -993,8 +1241,8 @@ void CameraClient::RequestHandler::SkipFramesAfterStreamOn(int num_frames) {
   for (size_t i = 0; i < num_frames; i++) {
     uint32_t buffer_id, data_size;
     uint64_t v4l2_ts, user_ts;
-    int ret =
-        device_->GetNextFrameBuffer(&buffer_id, &data_size, &v4l2_ts, &user_ts);
+    int ret = device_->GetNextFrameBuffer(&buffer_id, &data_size, &v4l2_ts,
+                                          &user_ts, -1);
     if (!ret) {
       current_buffer_timestamp_in_v4l2_ = v4l2_ts;
       current_buffer_timestamp_in_user_ = user_ts;
@@ -1071,16 +1319,47 @@ void CameraClient::RequestHandler::NotifyRequestError(uint32_t frame_number) {
   callback_ops_->notify(callback_ops_, &m);
 }
 
-int CameraClient::RequestHandler::DequeueV4L2Buffer(int32_t pattern_mode) {
+int CameraClient::RequestHandler::DequeueV4L2Buffer(int32_t pattern_mode,
+                                                    int frame_number) {
   DCHECK(task_runner_->BelongsToCurrentThread());
   int ret;
+  if (sw_privacy_switch_on_) {
+    // Wait for |delta| ns to keep the frame rate constant.
+    struct timespec ts;
+    ret = V4L2CameraDevice::GetUserSpaceTimestamp(ts);
+    if (ret < 0) {
+      return ret;
+    }
+    uint64_t target_ts_ns = current_buffer_timestamp_in_user_ +
+                            static_cast<uint64_t>(1e9 / stream_on_fps_);
+    uint64_t current_ts_ns = ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+    if (target_ts_ns > current_ts_ns) {
+      base::PlatformThread::Sleep(
+          base::Nanoseconds(target_ts_ns - current_ts_ns));
+    }
+    ret = V4L2CameraDevice::GetUserSpaceTimestamp(ts);
+    if (ret < 0) {
+      return ret;
+    }
+    uint64_t previous_buffer_timestamp_in_user_ =
+        current_buffer_timestamp_in_user_;
+    current_buffer_timestamp_in_user_ =
+        ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+    // Increment |current_buffer_timestamp_in_v4l2_| by the same amount as
+    // |current_buffer_timestamp_in_user_|. |current_buffer_timestamp_in_v4l2_|
+    // needs to be monotonically increasing.
+    current_buffer_timestamp_in_v4l2_ +=
+        current_buffer_timestamp_in_user_ - previous_buffer_timestamp_in_user_;
+    return 0;
+  }
+
   uint32_t buffer_id = 0, data_size = 0;
   uint64_t v4l2_ts, user_ts;
   uint64_t delta_user_ts = 0, delta_v4l2_ts = 0;
   // If frame duration between user space and v4l2 buffer shifts 20%,
   // we should return next frame.
   const uint64_t allowed_shift_frame_duration_ns =
-      (1'000'000'000LL / stream_on_fps_) * 0.2;
+      static_cast<uint64_t>((1e9 / stream_on_fps_) * 0.2);
   size_t drop_count = 0;
 
   // Some requests take a long time and cause several frames are buffered in
@@ -1106,11 +1385,13 @@ int CameraClient::RequestHandler::DequeueV4L2Buffer(int32_t pattern_mode) {
     }
     // If device_->GetNextFrameBuffer returns error, the buffer is still in
     // driver side. Therefore we don't need to enqueue the buffer.
-    ret =
-        device_->GetNextFrameBuffer(&buffer_id, &data_size, &v4l2_ts, &user_ts);
+    ret = device_->GetNextFrameBuffer(&buffer_id, &data_size, &v4l2_ts,
+                                      &user_ts, frame_number);
     if (ret) {
-      LOGFID(ERROR, device_id_)
-          << "GetNextFrameBuffer failed: " << base::safe_strerror(-ret);
+      LOGF_THROTTLED(ERROR, 60)
+          << V4L2CameraDevice::GetModelName(device_info_.device_path)
+          << " id: " << device_id_
+          << ": GetNextFrameBuffer failed: " << base::safe_strerror(-ret);
       return ret;
     }
     // If this is the first frame after stream on, just use it.
@@ -1136,6 +1417,13 @@ int CameraClient::RequestHandler::DequeueV4L2Buffer(int32_t pattern_mode) {
   // so we need to return the buffer back if any error happens.
   current_v4l2_buffer_id_ = buffer_id;
 
+  if (data_size == 0) {
+    LOGFID(ERROR, device_id_)
+        << "No content for input buffer id: " << buffer_id;
+    EnqueueV4L2Buffer();
+    return -EAGAIN;
+  }
+
   ret = input_buffers_[buffer_id]->SetDataSize(data_size);
   if (ret) {
     LOGFID(ERROR, device_id_)
@@ -1154,6 +1442,9 @@ int CameraClient::RequestHandler::DequeueV4L2Buffer(int32_t pattern_mode) {
 
 int CameraClient::RequestHandler::EnqueueV4L2Buffer() {
   DCHECK(task_runner_->BelongsToCurrentThread());
+  if (sw_privacy_switch_on_) {
+    return 0;
+  }
   int ret = device_->ReuseFrameBuffer(current_v4l2_buffer_id_);
   if (ret) {
     LOGFID(ERROR, device_id_)
@@ -1165,53 +1456,27 @@ int CameraClient::RequestHandler::EnqueueV4L2Buffer() {
 }
 
 void CameraClient::RequestHandler::FlushDone(
-    const base::Callback<void(int)>& callback) {
+    base::OnceCallback<void(int)> callback) {
   DCHECK(task_runner_->BelongsToCurrentThread());
   VLOGFID(1, device_id_);
-  callback.Run(0);
+  std::move(callback).Run(0);
   {
     base::AutoLock l(flush_lock_);
     flush_started_ = false;
   }
 }
 
-int CameraClient::RequestHandler::ResolvedFrameRateFromMetadata(
-    const android::CameraMetadata& metadata, Size resolution) {
-  DCHECK(metadata.exists(ANDROID_CONTROL_AE_TARGET_FPS_RANGE));
-
-  int resolved_fps = 0;
-
-  const SupportedFormat* format = FindFormatByResolution(
-      qualified_formats_, resolution.width, resolution.height);
-  if (format == nullptr) {
-    LOGFID(ERROR, device_id_)
-        << "Cannot find resolution in supported list: width "
-        << resolution.width << ", height " << resolution.height;
-    return resolved_fps;
-  }
-
-  camera_metadata_ro_entry entry =
-      metadata.find(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
-  int target_min_fps = entry.data.i32[0];
-  int target_max_fps = entry.data.i32[1];
-  int min_diff = std::numeric_limits<int>::max();
-  for (const float& frame_rate : format->frame_rates) {
-    int fps = std::round(frame_rate);
-    int diff_to_max = std::max(0, fps - target_max_fps);
-    int diff_to_min = std::max(0, target_min_fps - fps);
-    int diff = diff_to_max > 0 ? diff_to_max : diff_to_min;
-    if (diff < min_diff || (diff == min_diff && fps > resolved_fps)) {
-      resolved_fps = fps;
-      min_diff = diff;
-    }
-  }
-  if (min_diff > 0) {
-    LOGFID(WARNING, device_id_)
-        << "Cannot resolve to a valid frame rate within the target range ("
-        << target_min_fps << ", " << target_max_fps
-        << "). Resolved to:  " << resolved_fps;
-  }
-  return resolved_fps;
+void CameraClient::RequestHandler::InitializeBlackFrame() {
+  int number_of_pixels =
+      stream_on_resolution_.width * stream_on_resolution_.height;
+  black_frame_ = std::make_unique<SharedFrameBuffer>(number_of_pixels * 1.5);
+  black_frame_->SetFourcc(V4L2_PIX_FMT_YUV420);
+  black_frame_->SetWidth(stream_on_resolution_.width);
+  black_frame_->SetHeight(stream_on_resolution_.height);
+  black_frame_->SetDataSize(number_of_pixels * 1.5);
+  uint8_t* data = black_frame_->GetData();
+  memset(data, 0, number_of_pixels);
+  memset(data + number_of_pixels, 128, number_of_pixels / 2);
 }
 
 }  // namespace cros

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,11 @@
 
 #include <stdint.h>
 
-#include "base/callback.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
-#include "base/sequenced_task_runner.h"
-#include "base/task_runner_util.h"
+#include "base/functional/callback.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
 #include "components/feedback/feedback_report.h"
 
 namespace feedback {
@@ -19,7 +19,7 @@ namespace {
 const char kFeedbackPostUrl[] =
     "https://www.google.com/tools/feedback/chrome/__submit";
 
-const int64_t kRetryDelayMinutes = 60;
+constexpr base::TimeDelta kRetryDelay = base::Hours(1);
 
 const base::FilePath::CharType kFeedbackReportPath[] =
     FILE_PATH_LITERAL("Feedback Reports");
@@ -42,7 +42,7 @@ FeedbackUploader::FeedbackUploader(
     scoped_refptr<base::SingleThreadTaskRunner> task_runner,
     const std::string& url)
     : report_path_(path.Append(kFeedbackReportPath)),
-      retry_delay_(base::TimeDelta::FromMinutes(kRetryDelayMinutes)),
+      retry_delay_(kRetryDelay),
       task_runner_(task_runner),
       url_(url) {
   Init();

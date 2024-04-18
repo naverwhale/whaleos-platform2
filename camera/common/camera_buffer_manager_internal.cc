@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -26,6 +26,14 @@ struct gbm_device* CreateGbmDevice() {
   int32_t min_node = kMinNodeNumber;
   int32_t max_node = kMinNodeNumber + kDrmNumNodes;
   struct gbm_device* gbm = nullptr;
+
+#ifdef MINIGBM
+  gbm = minigbm_create_default_device(&fd);
+  if (gbm && fd >= 0) {
+    VLOGF(1) << "Opened gbm device with minigbm helper";
+    return gbm;
+  }
+#endif
 
   for (int i = min_node; i < max_node; i++) {
     fd = drmOpenRender(i);

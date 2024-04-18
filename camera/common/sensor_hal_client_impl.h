@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,12 +9,13 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/memory/weak_ptr.h>
-#include <base/single_thread_task_runner.h>
 #include <base/synchronization/lock.h>
+#include <base/task/single_thread_task_runner.h>
 #include <iioservice/mojo/cros_sensor_service.mojom.h>
 #include <iioservice/mojo/sensor.mojom.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
@@ -31,21 +32,21 @@ namespace cros {
 
 class CameraMojoChannelManager;
 
-class SensorHalClientImpl final : public SensorHalClient {
+class SensorHalClientImpl : public SensorHalClient {
  public:
   explicit SensorHalClientImpl(CameraMojoChannelManager* mojo_manager);
   SensorHalClientImpl(const SensorHalClientImpl&) = delete;
   SensorHalClientImpl& operator=(const SensorHalClientImpl&) = delete;
 
-  ~SensorHalClientImpl();
+  ~SensorHalClientImpl() override;
 
   // SensorHalClient implementations.
-  bool HasDevice(DeviceType type, Location location);
+  bool HasDevice(DeviceType type, Location location) override;
   bool RegisterSamplesObserver(DeviceType type,
                                Location location,
                                double frequency,
-                               SamplesObserver* samples_observer);
-  void UnregisterSamplesObserver(SamplesObserver* samples_observer);
+                               SamplesObserver* samples_observer) override;
+  void UnregisterSamplesObserver(SamplesObserver* samples_observer) override;
 
  private:
   // IPCBridge wraps all the IPC-related calls. Most of its methods should/will
@@ -57,7 +58,7 @@ class SensorHalClientImpl final : public SensorHalClient {
               CancellationRelay* cancellation_relay);
 
     // It should only be triggered on IPC thread to ensure thread-safety.
-    ~IPCBridge();
+    ~IPCBridge() override;
 
     // Will only be called once, right after the c'tor.
     void Start();
@@ -74,11 +75,11 @@ class SensorHalClientImpl final : public SensorHalClient {
 
     // SensorHalClient Mojo interface implementation.
     void SetUpChannel(
-        mojo::PendingRemote<mojom::SensorService> pending_remote) final;
+        mojo::PendingRemote<mojom::SensorService> pending_remote) override;
 
     // SensorServiceNewDevicesObserver Mojo interface implementation.
     void OnNewDeviceAdded(int32_t iio_device_id,
-                          const std::vector<mojom::DeviceType>& types) final;
+                          const std::vector<mojom::DeviceType>& types) override;
 
     bool ClientIsBound() { return receiver_.is_bound(); }
     bool IsReady() { return sensor_service_remote_.is_bound(); }
@@ -92,8 +93,8 @@ class SensorHalClientImpl final : public SensorHalClient {
       bool ignored = false;
 
       std::vector<mojom::DeviceType> types;
-      base::Optional<Location> location;
-      base::Optional<double> scale;
+      std::optional<Location> location;
+      std::optional<double> scale;
 
       // Temporarily stores the remote, waiting for its attributes information.
       // It'll be passed to SensorDevice's constructor as an argument after all
@@ -129,7 +130,7 @@ class SensorHalClientImpl final : public SensorHalClient {
     void GetAttributesCallback(
         int32_t iio_device_id,
         const std::vector<std::string> attr_names,
-        const std::vector<base::Optional<std::string>>& values);
+        const std::vector<std::optional<std::string>>& values);
 
     void IgnoreDevice(int32_t iio_device_id);
     // Return true if all devices of |type| are initialized and attributes are

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,7 +36,7 @@ extern "C" {
 #include <base/strings/string_number_conversions.h>
 #include <brillo/syslog_logging.h>
 
-#include "shill/ppp_device.h"
+#include "shill/ppp_daemon.h"
 #include "shill/rpc_task.h"
 #include "shill/shims/environment.h"
 #include "shill/shims/task_proxy.h"

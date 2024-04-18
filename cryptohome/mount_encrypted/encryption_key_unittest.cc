@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@
 
 #include <memory>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 
@@ -191,6 +191,8 @@ class EncryptionKeyTest : public testing::Test {
     ASSERT_TRUE(tmpdir_.CreateUniqueTempDir());
     ASSERT_TRUE(base::CreateDirectory(
         tmpdir_.GetPath().AppendASCII("mnt/stateful_partition")));
+    ASSERT_TRUE(base::CreateDirectory(
+        tmpdir_.GetPath().AppendASCII(paths::cryptohome::kTpmOwned).DirName()));
 
     metrics_singleton_ = std::make_unique<ScopedMountEncryptedMetricsSingleton>(
         tmpdir_.GetPath().AppendASCII("metrics").value());

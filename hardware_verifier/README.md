@@ -4,7 +4,7 @@ Hardware Verifier is a command line tool that checks if the device is
 compliant.  The program obtains the hardware
 [probe result](https://chromium.googlesource.com/chromiumos/platform/factory/+/HEAD/py/probe/README.md#output-format)
 from the
-[Rumtime Probe](https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/runtime_probe/README.md)
+[Runtime Probe](/runtime_probe/README.md)
 and compares it with the hardware verification spec.  The hardware
 verification spec is generated from the DLM (Device Lifecycle Management) and
 the AVL (Approved Vendor List) services and contains both the qualification
@@ -32,7 +32,7 @@ check and only available in the manufacturing environment.
 
 # Usage
 
-## Command Line Interface (Not Implemented Yet)
+## Command Line Interface
 
 Users can call the tool directly by invoking the binary with arguments:
 
@@ -47,6 +47,20 @@ Users can call the tool directly by invoking the binary with arguments:
 The tool loads the correct probe result data and the hardware verification spec
 based on the given arguments.  Then it outputs the verification results to the
 standard output.
+
+## D-Bus Interface
+
+Users can call the tool using D-Bus.  It owns the service name
+`org.chromium.HardwareVerifier` at the service path
+`/org.chromium/HardwareVerifier` and exports an interface named
+[`org.chromium.HardwareVerifier`](dbus_bindings/org.chromium.HardwareVerifier.xml).
+
+Example command:
+
+```
+dbus-send --system --print-reply --dest=org.chromium.HardwareVerifier \
+  /org/chromium/HardwareVerifier <method>
+```
 
 # Testing
 

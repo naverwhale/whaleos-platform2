@@ -1,17 +1,15 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "minios/network_manager.h"
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/errors/error_codes.h>
 #include <brillo/message_loops/message_loop.h>
 #include <dbus/shill/dbus-constants.h>
-
-#include "minios/shill_utils.h"
 
 namespace minios {
 
@@ -25,7 +23,9 @@ std::string ToString(brillo::Error* error) {
 }  // namespace
 
 NetworkManager::NetworkManager(std::unique_ptr<ShillProxyInterface> shill_proxy)
-    : shill_proxy_(std::move(shill_proxy)), weak_ptr_factory_(this) {}
+    : num_scan_retries_(0),
+      shill_proxy_(std::move(shill_proxy)),
+      weak_ptr_factory_(this) {}
 
 void NetworkManager::Connect(const std::string& ssid,
                              const std::string& passphrase) {
@@ -38,7 +38,7 @@ void NetworkManager::Connect(const std::string& ssid,
   iter = connect_map_.find(ssid);
 
   shill_proxy_->ManagerRequestScan(
-      WifiTechnologyType::WIFI,
+      shill::kTypeWifi,
       base::BindRepeating(static_cast<void (NetworkManager::*)(ConnectMapIter)>(
                               &NetworkManager::RequestScanSuccess),
                           weak_ptr_factory_.GetWeakPtr(), iter),
@@ -52,16 +52,15 @@ void NetworkManager::RequestScanSuccess(ConnectMapIter iter) {
   LOG(INFO) << "RequestScan success for SSID=" << iter->first;
 
   // If there is no passphrase, default to no security.
-  const auto& security = iter->second.passphrase.empty()
-                             ? ToString(WifiSecurityType::NONE)
-                             : ToString(WifiSecurityType::PSK);
+  const std::string security = iter->second.passphrase.empty()
+                                   ? shill::kSecurityClassNone
+                                   : shill::kSecurityClassPsk;
   const brillo::VariantDictionary properties = {
       // Mode needs to be set from supported station type.
-      {shill::kModeProperty, brillo::Any(ToString(WifiStationType::MANAGED))},
-      // SSID of the wireless network.
+      {shill::kModeProperty, brillo::Any(std::string(shill::kModeManaged))},
       {shill::kNameProperty, brillo::Any(iter->first)},
       {shill::kSecurityClassProperty, brillo::Any(security)},
-      {shill::kTypeProperty, brillo::Any(ToString(WifiTechnologyType::WIFI))},
+      {shill::kTypeProperty, brillo::Any(std::string(shill::kTypeWifi))},
   };
   shill_proxy_->ManagerFindMatchingService(
       properties,
@@ -189,7 +188,7 @@ void NetworkManager::ConnectToNetworkError(ConnectMapIter iter,
         FROM_HERE,
         base::BindOnce(&NetworkManager::ServiceConnect,
                        weak_ptr_factory_.GetWeakPtr(), iter),
-        base::TimeDelta::FromMilliseconds(kConnectionRetryMsDelay));
+        base::Milliseconds(kConnectionRetryMsDelay));
   } else if (error_code == shill::kErrorResultAlreadyConnected) {
     LOG(INFO) << "ConnectToNetwork failed, but already connected for SSID="
               << iter->first;
@@ -216,7 +215,7 @@ void NetworkManager::GetServiceCheckConnectionSuccess(
             FROM_HERE,
             base::BindOnce(&NetworkManager::ConnectToNetworkSuccess,
                            weak_ptr_factory_.GetWeakPtr(), iter),
-            base::TimeDelta::FromMilliseconds(kCheckConnectionRetryMsDelay));
+            base::Milliseconds(kCheckConnectionRetryMsDelay));
       } else {
         Return(iter,
                brillo::Error::Create(
@@ -255,14 +254,21 @@ void NetworkManager::GetNetworks() {
   GetNetworksListIter iter =
       get_networks_list_.insert(get_networks_list_.end(), GetNetworksField());
 
+  // Reset retry counter before starting scan.
+  num_scan_retries_ = kMaxNumScanRetries;
+  RequestScan(iter);
+}
+
+void NetworkManager::RequestScan(GetNetworksListIter iter) {
   shill_proxy_->ManagerRequestScan(
-      WifiTechnologyType::WIFI,
+      shill::kTypeWifi,
       base::BindRepeating(static_cast<GetNetworksRequestScanSuccessType>(
                               &NetworkManager::RequestScanSuccess),
                           weak_ptr_factory_.GetWeakPtr(), iter),
       base::BindRepeating(static_cast<GetNetworksRequestScanErrorType>(
                               &NetworkManager::RequestScanError),
                           weak_ptr_factory_.GetWeakPtr(), iter));
+  --num_scan_retries_;
 }
 
 void NetworkManager::RequestScanSuccess(GetNetworksListIter iter) {
@@ -289,7 +295,6 @@ void NetworkManager::GetGlobalPropertiesSuccess(
           brillo::GetVariantValueOrDefault<std::vector<dbus::ObjectPath>>(
               dict, pr.first);
       if (services.empty()) {
-        LOG(ERROR) << "No services found.";
         break;
       }
       // Move the list of services to read from.
@@ -307,7 +312,21 @@ void NetworkManager::GetGlobalPropertiesSuccess(
       return;
     }
   }
-  Return(iter);
+  // No services were found. Retry if we can else error out.
+  if (num_scan_retries_ > 0) {
+    LOG(WARNING) << "No services found - Retrying scan.";
+    brillo::MessageLoop::current()->PostDelayedTask(
+        FROM_HERE,
+        base::BindOnce(&NetworkManager::RequestScan,
+                       weak_ptr_factory_.GetWeakPtr(), iter),
+        kScanRetryMsDelay);
+    return;
+  }
+  LOG(ERROR) << "No services found.";
+  Return(iter,
+         brillo::Error::Create(FROM_HERE, brillo::errors::dbus::kDomain,
+                               DBUS_ERROR_FAILED, "No network devices found.")
+             .get());
 }
 
 void NetworkManager::GetGlobalPropertiesError(GetNetworksListIter iter,

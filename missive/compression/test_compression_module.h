@@ -1,23 +1,22 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MISSIVE_COMPRESSION_TEST_COMPRESSION_MODULE_H_
 #define MISSIVE_COMPRESSION_TEST_COMPRESSION_MODULE_H_
 
+#include <optional>
 #include <string>
 
-#include <base/callback.h>
-#include <base/strings/string_piece.h>
+#include <base/functional/callback.h>
+#include <base/memory/scoped_refptr.h>
+#include <gmock/gmock.h>
 
 #include "missive/compression/compression_module.h"
 #include "missive/proto/record.pb.h"
-#include "missive/util/statusor.h"
-#include "testing/gmock/include/gmock/gmock.h"
-#include "testing/gtest/include/gtest/gtest.h"
+#include "missive/resources/resource_manager.h"
 
-namespace reporting {
-namespace test {
+namespace reporting::test {
 
 // An |CompressionModuleInterface| that does no compression.
 class TestCompressionModuleStrict : public CompressionModule {
@@ -27,8 +26,9 @@ class TestCompressionModuleStrict : public CompressionModule {
   MOCK_METHOD(void,
               CompressRecord,
               (std::string record,
+               scoped_refptr<ResourceManager> memory_resource,
                base::OnceCallback<void(
-                   std::string, base::Optional<CompressionInformation>)> cb),
+                   std::string, std::optional<CompressionInformation>)> cb),
               (const override));
 
  protected:
@@ -38,7 +38,6 @@ class TestCompressionModuleStrict : public CompressionModule {
 // Most of the time no need to log uninterested calls to |EncryptRecord|.
 typedef ::testing::NiceMock<TestCompressionModuleStrict> TestCompressionModule;
 
-}  // namespace test
-}  // namespace reporting
+}  // namespace reporting::test
 
 #endif  // MISSIVE_COMPRESSION_TEST_COMPRESSION_MODULE_H_

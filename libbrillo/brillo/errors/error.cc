@@ -1,9 +1,11 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <brillo/errors/error.h>
 
+#include <cstdarg>
+#include <string_view>
 #include <utility>
 
 #include <base/logging.h>
@@ -14,9 +16,11 @@ using brillo::ErrorPtr;
 
 namespace {
 inline void LogError(const base::Location& location,
-                     const std::string& domain,
-                     const std::string& code,
-                     const std::string& message) {
+                     std::string_view domain,
+                     std::string_view code,
+                     std::string_view message) {
+  if (!LOG_IS_ON(ERROR))
+    return;
   // Use logging::LogMessage() directly instead of LOG(ERROR) to substitute
   // the current error location with the location passed in to the Error object.
   // This way the log will contain the actual location of the error, and not
@@ -31,27 +35,35 @@ inline void LogError(const base::Location& location,
 }  // anonymous namespace
 
 ErrorPtr Error::Create(const base::Location& location,
-                       const std::string& domain,
-                       const std::string& code,
-                       const std::string& message) {
+                       std::string_view domain,
+                       std::string_view code,
+                       std::string_view message) {
   return Create(location, domain, code, message, ErrorPtr());
 }
 
 ErrorPtr Error::Create(const base::Location& location,
-                       const std::string& domain,
-                       const std::string& code,
-                       const std::string& message,
+                       std::string_view domain,
+                       std::string_view code,
+                       std::string_view message,
                        ErrorPtr inner_error) {
   LogError(location, domain, code, message);
+  return CreateNoLog(location, domain, code, message, std::move(inner_error));
+}
+
+ErrorPtr Error::CreateNoLog(const base::Location& location,
+                            std::string_view domain,
+                            std::string_view code,
+                            std::string_view message,
+                            ErrorPtr inner_error) {
   return ErrorPtr(
       new Error(location, domain, code, message, std::move(inner_error)));
 }
 
 void Error::AddTo(ErrorPtr* error,
                   const base::Location& location,
-                  const std::string& domain,
-                  const std::string& code,
-                  const std::string& message) {
+                  std::string_view domain,
+                  std::string_view code,
+                  std::string_view message) {
   if (error) {
     *error = Create(location, domain, code, message, std::move(*error));
   } else {
@@ -63,8 +75,8 @@ void Error::AddTo(ErrorPtr* error,
 
 void Error::AddToPrintf(ErrorPtr* error,
                         const base::Location& location,
-                        const std::string& domain,
-                        const std::string& code,
+                        std::string_view domain,
+                        std::string_view code,
                         const char* format,
                         ...) {
   va_list ap;
@@ -80,11 +92,11 @@ ErrorPtr Error::Clone() const {
       new Error(location_, domain_, code_, message_, std::move(inner_error)));
 }
 
-bool Error::HasDomain(const std::string& domain) const {
+bool Error::HasDomain(std::string_view domain) const {
   return FindErrorOfDomain(this, domain) != nullptr;
 }
 
-bool Error::HasError(const std::string& domain, const std::string& code) const {
+bool Error::HasError(std::string_view domain, std::string_view code) const {
   return FindError(this, domain, code) != nullptr;
 }
 
@@ -96,9 +108,9 @@ const Error* Error::GetFirstError() const {
 }
 
 Error::Error(const base::Location& location,
-             const std::string& domain,
-             const std::string& code,
-             const std::string& message,
+             std::string_view domain,
+             std::string_view code,
+             std::string_view message,
              ErrorPtr inner_error)
     : domain_(domain),
       code_(code),
@@ -107,7 +119,7 @@ Error::Error(const base::Location& location,
       inner_error_(std::move(inner_error)) {}
 
 const Error* Error::FindErrorOfDomain(const Error* error_chain_start,
-                                      const std::string& domain) {
+                                      std::string_view domain) {
   while (error_chain_start) {
     if (error_chain_start->GetDomain() == domain)
       break;
@@ -117,8 +129,8 @@ const Error* Error::FindErrorOfDomain(const Error* error_chain_start,
 }
 
 const Error* Error::FindError(const Error* error_chain_start,
-                              const std::string& domain,
-                              const std::string& code) {
+                              std::string_view domain,
+                              std::string_view code) {
   while (error_chain_start) {
     if (error_chain_start->GetDomain() == domain &&
         error_chain_start->GetCode() == code)

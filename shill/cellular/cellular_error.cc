@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <string>
 
 #include <ModemManager/ModemManager.h>
+#include <libmbim-glib/libmbim-glib.h>
 
 // TODO(armansito): Once we refactor the code to handle the ModemManager D-Bus
 // bindings in a dedicated class, this code should move there.
@@ -16,28 +17,43 @@ namespace shill {
 
 namespace {
 
-const char kErrorGprsMissingOrUnknownApn[] =
-    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".GprsMissingOrUnknownApn";
+// TODO(b/217612447): How can we prevent a change in MM from messing up
+// the hardcoded strings?
+const char kErrorMissingOrUnknownApn[] =
+    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".MissingOrUnknownApn";
 
-const char kErrorGprsServiceOptionNotSubscribed[] =
-    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".GprsServiceOptionNotSubscribed";
+const char kErrorServiceOptionNotSubscribed[] =
+    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".ServiceOptionNotSubscribed";
 
-const char kErrorGprsUserAuthenticationFailed[] =
-    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".GprsUserAuthenticationFailed";
+const char kErrorUserAuthenticationFailed[] =
+    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".UserAuthenticationFailed";
 
 const char kErrorIncorrectPassword[] =
     MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".IncorrectPassword";
 
-// TODO(b/190725498): Replace this error with a `MM_` error when we downstream
-// the error reporting changes made in ModemManager MR!533.
-const char kErrorQmiProtocolCallFailed[] =
-    "org.freedesktop.libqmi.Error.Protocol.CallFailed";
+const char kErrorIpv4OnlyAllowed[] =
+    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".Ipv4OnlyAllowed";
+
+const char kErrorIpv6OnlyAllowed[] =
+    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".Ipv6OnlyAllowed";
+
+const char kErrorIpv4v6OnlyAllowed[] =
+    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".Ipv4v6OnlyAllowed";
+
+const char kErrorNoCellsInArea[] =
+    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".NoCellsInArea";
 
 const char kErrorSimPin[] = MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".SimPin";
 
 const char kErrorSimPuk[] = MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".SimPuk";
 
 const char kErrorWrongState[] = MM_CORE_ERROR_DBUS_PREFIX ".WrongState";
+
+const char kErrorMobileEquipmentUnknown[] =
+    MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX ".Unknown";
+
+const char kErrorOperationNotAllowed[] =
+    MBIM_STATUS_ERROR_DBUS_PREFIX ".OperationNotAllowed";
 
 }  // namespace
 
@@ -62,23 +78,26 @@ void CellularError::FromMM1ChromeosDBusError(brillo::Error* dbus_error,
     type = Error::kPinRequired;
   else if (name == kErrorSimPuk)
     type = Error::kPinBlocked;
-  else if (name == kErrorGprsMissingOrUnknownApn)
+  else if (name == kErrorMissingOrUnknownApn ||
+           name == kErrorServiceOptionNotSubscribed ||
+           name == kErrorUserAuthenticationFailed ||
+           name == kErrorIpv4OnlyAllowed || name == kErrorIpv6OnlyAllowed ||
+           name == kErrorIpv4v6OnlyAllowed)
     type = Error::kInvalidApn;
-  else if (name == kErrorGprsServiceOptionNotSubscribed)
-    type = Error::kInvalidApn;
-  else if (name == kErrorGprsUserAuthenticationFailed)
-    type = Error::kInvalidApn;
-  else if (name == kErrorQmiProtocolCallFailed)
-    type = Error::kInvalidApn;
+  else if (name == kErrorNoCellsInArea)
+    type = Error::kNoCarrier;
+  else if (name == kErrorMobileEquipmentUnknown)
+    type = Error::kInternalError;
   else if (name == kErrorWrongState)
     type = Error::kWrongState;
+  else if (name == kErrorOperationNotAllowed)
+    type = Error::kOperationNotAllowed;
   else
     type = Error::kOperationFailed;
 
   if (!msg.empty())
-    return error->Populate(type, msg);
+    return error->Populate(type, msg, name);
   else
-    return error->Populate(type);
+    return error->Populate(type, "", name);
 }
-
 }  // namespace shill

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -238,7 +238,7 @@ TEST(Any, Swap) {
   EXPECT_EQ(2.7, val2.Get<double>());
 }
 
-TEST(Any, TypeMismatch) {
+TEST(AnyDeathTest, TypeMismatch) {
   Any val(12);
   EXPECT_DEATH(val.Get<double>(),
                "Requesting value of type 'double' from variant containing "

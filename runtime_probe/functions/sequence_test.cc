@@ -1,8 +1,7 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <algorithm>
 #include <memory>
 #include <set>
 #include <string>
@@ -16,8 +15,8 @@
 #include <gtest/gtest.h>
 
 #include "runtime_probe/functions/sequence.h"
-#include "runtime_probe/functions/shell.h"
 #include "runtime_probe/probe_function.h"
+#include "runtime_probe/utils/function_test_utils.h"
 
 namespace runtime_probe {
 
@@ -26,26 +25,21 @@ typedef ProbeFunction::DataType DataType;
 class MockProbeFunction : public ProbeFunction {
  public:
   NAME_PROBE_FUNCTION("mock_function");
-  MOCK_METHOD(DataType, Eval, (), (const, override));
-  DataType EvalImpl() const override { return {}; }
+  MOCK_METHOD(DataType, EvalImpl, (), (const, override));
 };
 
 TEST(SequenceFunctionTest, TestEvalFailTooManyResults) {
   auto mock_probe_function_1 = std::make_unique<MockProbeFunction>();
 
-  base::Value a(base::Value::Type::DICTIONARY);
-  a.SetBoolKey("a", true);
+  base::Value::Dict a = base::Value::Dict().Set("a", true);
 
-  base::Value b(base::Value::Type::DICTIONARY);
-  b.SetBoolKey("b", true);
+  base::Value::Dict b = base::Value::Dict().Set("b", true);
 
   DataType val;
-  // val{std::move(a), std::move(b)} implicitly calls the copy constructor which
-  // is not possible.
-  val.push_back(std::move(a));
-  val.push_back(std::move(b));
+  val.Append(std::move(a));
+  val.Append(std::move(b));
 
-  EXPECT_CALL(*mock_probe_function_1, Eval())
+  EXPECT_CALL(*mock_probe_function_1, EvalImpl())
       .WillOnce(testing::Return(testing::ByMove(std::move(val))));
 
   auto mock_probe_function_2 = std::make_unique<MockProbeFunction>();
@@ -56,7 +50,7 @@ TEST(SequenceFunctionTest, TestEvalFailTooManyResults) {
   sequence.functions_.push_back(std::move(mock_probe_function_1));
   sequence.functions_.push_back(std::move(mock_probe_function_2));
 
-  DataType results = sequence.Eval();
+  DataType results = EvalProbeFunction(&sequence);
 
   std::stringstream stream;
   for (auto& result : results) {
@@ -71,45 +65,40 @@ TEST(SequenceFunctionTest, TestEvalFailTooManyResults) {
 TEST(SequenceFunctionTest, TestEvalSuccess) {
   auto mock_probe_function_1 = std::make_unique<MockProbeFunction>();
 
-  base::Value a(base::Value::Type::DICTIONARY);
-  a.SetBoolKey("a", true);
-  a.SetBoolKey("c", false);
+  base::Value::Dict a = base::Value::Dict().Set("a", true).Set("c", false);
 
   DataType val_a;
-  val_a.push_back(std::move(a));
+  val_a.Append(std::move(a));
 
-  EXPECT_CALL(*mock_probe_function_1, Eval())
+  EXPECT_CALL(*mock_probe_function_1, EvalImpl())
       .WillOnce(testing::Return(testing::ByMove(std::move(val_a))));
 
   auto mock_probe_function_2 = std::make_unique<MockProbeFunction>();
 
-  base::Value b(base::Value::Type::DICTIONARY);
-  b.SetBoolKey("b", true);
-  b.SetBoolKey("c", true);
+  base::Value::Dict b = base::Value::Dict().Set("b", true).Set("c", true);
 
   DataType val_b;
-  val_b.push_back(std::move(b));
+  val_b.Append(std::move(b));
 
-  EXPECT_CALL(*mock_probe_function_2, Eval())
+  EXPECT_CALL(*mock_probe_function_2, EvalImpl())
       .WillOnce(testing::Return(testing::ByMove(std::move(val_b))));
 
   SequenceFunction sequence{};
   sequence.functions_.push_back(std::move(mock_probe_function_1));
   sequence.functions_.push_back(std::move(mock_probe_function_2));
 
-  DataType results = sequence.Eval();
+  DataType results = EvalProbeFunction(&sequence);
 
   std::stringstream stream;
   for (auto& result : results) {
     stream << result;
   }
-  // The `results` should be empty.
   ASSERT_EQ(results.size(), 1) << "unexpected results: " << stream.str();
 
   std::set<std::string> result_keys;
   LOG(ERROR) << results[0];
 
-  for (const auto& entry : results[0].DictItems()) {
+  for (const auto& entry : results[0].GetDict()) {
     ASSERT_TRUE(entry.second.is_bool()) << "unexpected result: " << results[0];
     ASSERT_TRUE(entry.second.GetBool()) << "unexpected result: " << results[0];
     result_keys.insert(entry.first);

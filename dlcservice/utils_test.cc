@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,11 +9,12 @@
 
 #include <string>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/test/mock_log.h>
 #include <brillo/file_utils.h>
 #include <crypto/sha2.h>
 #include <gmock/gmock.h>
@@ -21,8 +22,12 @@
 
 #include "dlcservice/test_utils.h"
 #include "dlcservice/utils.h"
+#include "dlcservice/utils/utils.h"
 
 namespace dlcservice {
+
+using ::testing::_;
+using ::testing::HasSubstr;
 
 namespace {
 constexpr char kDlcRootPath[] = "/tmp/dlc/";
@@ -253,6 +258,86 @@ TEST(UtilsTest, GetDlcModuleImagePathB) {
                             BootSlot::Slot::B)
                 .value(),
             "/tmp/dlc/id/package/dlc_b/dlc.img");
+}
+
+TEST(UtilsTest, SplitAndJoinPartitionNameTest) {
+  std::string disk;
+  int part_num;
+
+  EXPECT_TRUE(SplitPartitionName("/dev/sda3", &disk, &part_num));
+  EXPECT_EQ("/dev/sda", disk);
+  EXPECT_EQ(3, part_num);
+
+  EXPECT_TRUE(SplitPartitionName("/dev/sdp1234", &disk, &part_num));
+  EXPECT_EQ("/dev/sdp", disk);
+  EXPECT_EQ(1234, part_num);
+
+  EXPECT_TRUE(SplitPartitionName("/dev/mmcblk0p3", &disk, &part_num));
+  EXPECT_EQ("/dev/mmcblk0", disk);
+  EXPECT_EQ(3, part_num);
+
+  EXPECT_TRUE(SplitPartitionName("/dev/ubiblock3_2", &disk, &part_num));
+  EXPECT_EQ("/dev/ubiblock", disk);
+  EXPECT_EQ(3, part_num);
+
+  EXPECT_TRUE(SplitPartitionName("/dev/loop10", &disk, &part_num));
+  EXPECT_EQ("/dev/loop", disk);
+  EXPECT_EQ(10, part_num);
+
+  EXPECT_TRUE(SplitPartitionName("/dev/loop28p11", &disk, &part_num));
+  EXPECT_EQ("/dev/loop28", disk);
+  EXPECT_EQ(11, part_num);
+
+  EXPECT_TRUE(SplitPartitionName("/dev/loop10_0", &disk, &part_num));
+  EXPECT_EQ("/dev/loop", disk);
+  EXPECT_EQ(10, part_num);
+
+  EXPECT_TRUE(SplitPartitionName("/dev/loop28p11_0", &disk, &part_num));
+  EXPECT_EQ("/dev/loop28", disk);
+  EXPECT_EQ(11, part_num);
+
+  EXPECT_TRUE(SplitPartitionName("/dev/123", &disk, &part_num));
+  EXPECT_EQ("/dev/", disk);
+  EXPECT_EQ(123, part_num);
+
+  EXPECT_FALSE(SplitPartitionName("/dev/mmcblk0p", &disk, &part_num));
+  EXPECT_FALSE(SplitPartitionName("/dev/sda", &disk, &part_num));
+  EXPECT_FALSE(SplitPartitionName("/dev/foo/bar", &disk, &part_num));
+  EXPECT_FALSE(SplitPartitionName("/", &disk, &part_num));
+  EXPECT_FALSE(SplitPartitionName("", &disk, &part_num));
+  EXPECT_FALSE(SplitPartitionName("/dev/_100", &disk, &part_num));
+}
+
+TEST(UtilsTest, JoinPartitionNameTest) {
+  EXPECT_EQ("/dev/sda3", JoinPartitionName("/dev/sda", 3));
+  EXPECT_EQ("/dev/sdp1234", JoinPartitionName("/dev/sdp", 1234));
+  EXPECT_EQ("/dev/sdp0p1234", JoinPartitionName("/dev/sdp0", 1234));
+  EXPECT_EQ("/dev/mmcblk0p3", JoinPartitionName("/dev/mmcblk0", 3));
+  EXPECT_EQ("", JoinPartitionName("foobar", 123));
+  EXPECT_EQ("", JoinPartitionName("/dev/sda", 0));
+}
+
+TEST(UtilsTest, AlertLogTagCreationTest) {
+  auto category = "test_category";
+  auto default_component = "CoreServicesAlert";
+  EXPECT_EQ(base::StringPrintf("[%s<%s>] ", default_component, category),
+            AlertLogTag(category));
+}
+
+TEST(UtilsTest, AlertLogTagLogTest) {
+  base::test::MockLog mock_log;
+  mock_log.StartCapturingLogs();
+
+  auto category = "test_category";
+  auto test_msg = "Test Error Message: ";
+  auto test_id = 10;
+  auto expected_log = base::StringPrintf(
+      "%s%s%d", AlertLogTag(category).c_str(), test_msg, test_id);
+
+  EXPECT_CALL(mock_log,
+              Log(::logging::LOGGING_ERROR, _, _, _, HasSubstr(expected_log)));
+
+  LOG(ERROR) << AlertLogTag(category) << test_msg << test_id;
 }
 
 }  // namespace dlcservice

@@ -1,16 +1,22 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/ec_collector.h"
 
+#include <memory>
 #include <string>
 
 #include <base/base64.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/strcat.h>
 #include <base/strings/stringprintf.h>
+#include <libec/ec_command.h>
+#include <libec/ec_panicinfo.h>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/util.h"
 
@@ -24,17 +30,21 @@ namespace {
 
 const char kECDebugFSPath[] = "/sys/kernel/debug/cros_ec/";
 const char kECPanicInfo[] = "panicinfo";
-const char kECPanicInfoParser[] = "/usr/sbin/ec_parse_panicinfo";
 const char kECExecName[] = "embedded-controller";
 
 }  // namespace
 
-ECCollector::ECCollector()
-    : CrashCollector("ec"), debugfs_path_(kECDebugFSPath) {}
+ECCollector::ECCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("ec", metrics_lib), debugfs_path_(kECDebugFSPath) {}
 
 ECCollector::~ECCollector() {}
 
-bool ECCollector::Collect() {
+bool ECCollector::Collect(bool use_saved_lsb) {
+  SetUseSavedLsb(use_saved_lsb);
+
   char data[1024];
   int len;
   FilePath panicinfo_path = debugfs_path_.Append(kECPanicInfo);
@@ -69,27 +79,16 @@ bool ECCollector::Collect() {
     return true;
   }
 
-  ProcessImpl panicinfo_parser;
-  panicinfo_parser.AddArg(kECPanicInfoParser);
-  panicinfo_parser.RedirectInput(panicinfo_path.value());
-  // Combine stdout and stderr.
-  panicinfo_parser.RedirectOutputToMemory(true);
-
+  base::span<uint8_t> sdata = base::make_span(reinterpret_cast<uint8_t*>(data),
+                                              static_cast<size_t>(len));
+  auto result = ec::ParsePanicInfo(sdata);
   std::string output;
-  const int result = panicinfo_parser.Run();
-  output = panicinfo_parser.GetOutputString(STDOUT_FILENO);
-  if (result != 0) {
-    PLOG(ERROR) << "Failed to run ec_parse_panicinfo. Error=" << result;
-    // Append error code and raw crash on error.
-    output = base::StrCat(
-        {output,
-         base::StringPrintf(
-             "\nERROR: ec_parse_panicinfo: Non-zero return value (%d).\n",
-             result),
-         "Raw data: ",
-         base::Base64Encode(
-             base::make_span(reinterpret_cast<uint8_t*>(data), len)),
-         "\n"});
+
+  if (!result.has_value()) {
+    LOG(ERROR) << "Failed to get valid eccrash. Error=" << result.error();
+    return false;
+  } else {
+    output = result.value();
   }
 
   std::string dump_basename = FormatDumpBasename(kECExecName, time(nullptr), 0);
@@ -122,4 +121,12 @@ bool ECCollector::Collect() {
   LOG(INFO) << "Stored EC crash to " << ec_crash_path.value();
 
   return true;
+}
+
+CrashCollector::ComputedCrashSeverity ECCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  return ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kFatal,
+      .product_group = Product::kPlatform,
+  };
 }

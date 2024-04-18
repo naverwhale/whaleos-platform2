@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,17 @@
 #include "biod/biometrics_manager.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 #include <base/values.h>
 #include <dbus/bus.h>
-#include <base/timer/timer.h>
 
-#include "biod/biod_storage.h"
 #include "biod/cros_fp_device.h"
+#include "biod/cros_fp_record_manager.h"
+#include "biod/maintenance_scheduler.h"
 #include "biod/power_button_filter_interface.h"
 
 namespace biod {
@@ -28,9 +29,9 @@ class CrosFpBiometricsManager : public BiometricsManager {
  public:
   CrosFpBiometricsManager(
       std::unique_ptr<PowerButtonFilterInterface> power_button_filter,
-      std::unique_ptr<CrosFpDeviceInterface> cros_fp_device,
-      std::unique_ptr<BiodMetricsInterface> biod_metrics,
-      std::unique_ptr<BiodStorageInterface> biod_storage);
+      std::unique_ptr<ec::CrosFpDeviceInterface> cros_fp_device,
+      BiodMetricsInterface* biod_metrics,
+      std::unique_ptr<CrosFpRecordManagerInterface> record_manager);
   CrosFpBiometricsManager(const CrosFpBiometricsManager&) = delete;
   CrosFpBiometricsManager& operator=(const CrosFpBiometricsManager&) = delete;
 
@@ -41,7 +42,8 @@ class CrosFpBiometricsManager : public BiometricsManager {
   BiometricsManager::EnrollSession StartEnrollSession(
       std::string user_id, std::string label) override;
   BiometricsManager::AuthSession StartAuthSession() override;
-  std::vector<std::unique_ptr<BiometricsManagerRecord>> GetRecords() override;
+  std::vector<std::unique_ptr<BiometricsManagerRecordInterface>>
+  GetLoadedRecords() override;
   bool DestroyAllRecords() override;
   void RemoveRecordsFromMemory() override;
   bool ReadRecordsForSingleUser(const std::string& user_id) override;
@@ -59,16 +61,26 @@ class CrosFpBiometricsManager : public BiometricsManager {
 
   bool ResetSensor() override;
 
-  bool ResetEntropy(bool factory_init) override;
+  // Returns RecordMetadata for given record.
+  virtual std::optional<BiodStorageInterface::RecordMetadata> GetRecordMetadata(
+      const std::string& record_id) const;
+
+  // Clear FPMCU context and re-upload all records from storage.
+  bool ReloadAllRecords(std::string user_id);
+
+  // Updates record metadata on disk.
+  bool UpdateRecordMetadata(
+      const BiodStorageInterface::RecordMetadata& record_metadata);
+
+  // Removes record from disk and from FPMCU.
+  bool RemoveRecord(const std::string& id);
 
  protected:
   void EndEnrollSession() override;
   void EndAuthSession() override;
 
-  virtual void OnMaintenanceTimerFired();
-  virtual bool WriteRecord(const BiometricsManagerRecord& record,
-                           uint8_t* tmpl_data,
-                           size_t tmpl_size);
+  // Returns RecordId for given template id.
+  virtual std::optional<std::string> GetLoadedRecordId(int id);
 
   std::vector<int> GetDirtyList();
   /**
@@ -85,35 +97,18 @@ class CrosFpBiometricsManager : public BiometricsManager {
 
   bool LoadRecord(const BiodStorage::Record record);
 
+  base::WeakPtrFactory<CrosFpBiometricsManager> session_weak_factory_;
+  base::WeakPtrFactory<CrosFpBiometricsManager> weak_factory_;
+
  private:
   // For testing.
   friend class CrosFpBiometricsManagerPeer;
 
   using SessionAction = base::RepeatingCallback<void(const uint32_t event)>;
 
-  class Record : public BiometricsManagerRecord {
-   public:
-    Record(const base::WeakPtr<CrosFpBiometricsManager>& biometrics_manager,
-           int index)
-        : biometrics_manager_(biometrics_manager), index_(index) {}
-
-    // BiometricsManager::Record overrides:
-    const std::string& GetId() const override;
-    const std::string& GetUserId() const override;
-    const std::string& GetLabel() const override;
-    const std::vector<uint8_t>& GetValidationVal() const override;
-    bool SetLabel(std::string label) override;
-    bool Remove() override;
-    bool SupportsPositiveMatchSecret() const override;
-
-   private:
-    base::WeakPtr<CrosFpBiometricsManager> biometrics_manager_;
-    int index_;
-  };
-
   void OnEnrollScanDone(ScanResult result,
                         const BiometricsManager::EnrollStatus& enroll_status);
-  void OnAuthScanDone(ScanResult result,
+  void OnAuthScanDone(FingerprintMessage result,
                       const BiometricsManager::AttemptMatches& matches);
   void OnSessionFailed();
 
@@ -133,26 +128,19 @@ class CrosFpBiometricsManager : public BiometricsManager {
                              uint32_t event);
   void DoMatchEvent(int attempt, uint32_t event);
   void DoMatchFingerUpEvent(uint32_t event);
-  bool ValidationValueIsCorrect(uint32_t match_idx);
-  BiometricsManager::AttemptMatches CalculateMatches(int match_idx,
-                                                     bool matched);
+  bool CheckPositiveMatchSecret(const std::string& record_id, int match_idx);
 
   void KillMcuSession();
 
   void OnTaskComplete();
 
-  // Clear FPMCU context and re-upload all records from storage.
-  bool ReloadAllRecords(std::string user_id);
-  // BiodMetrics must come before CrosFpDevice, since CrosFpDevice has a
-  // raw pointer to BiodMetrics. We must ensure CrosFpDevice is destructed
-  // first.
-  std::unique_ptr<BiodMetricsInterface> biod_metrics_;
-  std::unique_ptr<CrosFpDeviceInterface> cros_dev_;
+  BiodMetricsInterface* biod_metrics_ = nullptr;  // Not owned.
+  std::unique_ptr<ec::CrosFpDeviceInterface> cros_dev_;
 
   SessionAction next_session_action_;
 
-  // This list of records should be matching the templates loaded on the MCU.
-  std::vector<BiodStorageInterface::RecordMetadata> records_;
+  // This vector contains RecordIds of templates loaded into the MCU.
+  std::vector<std::string> loaded_records_;
 
   // Set of templates that came with a wrong validation value in matching.
   std::unordered_set<uint32_t> suspicious_templates_;
@@ -161,16 +149,13 @@ class CrosFpBiometricsManager : public BiometricsManager {
   BiometricsManager::AuthScanDoneCallback on_auth_scan_done_;
   BiometricsManager::SessionFailedCallback on_session_failed_;
 
-  base::WeakPtrFactory<CrosFpBiometricsManager> session_weak_factory_;
-  base::WeakPtrFactory<CrosFpBiometricsManager> weak_factory_;
-
   std::unique_ptr<PowerButtonFilterInterface> power_button_filter_;
 
-  std::unique_ptr<BiodStorageInterface> biod_storage_;
+  std::unique_ptr<CrosFpRecordManagerInterface> record_manager_;
 
-  bool use_positive_match_secret_;
+  std::unique_ptr<MaintenanceScheduler> maintenance_scheduler_;
 
-  std::unique_ptr<base::RepeatingTimer> maintenance_timer_;
+  uint8_t num_enrollment_captures_ = 0;
 };
 
 }  // namespace biod

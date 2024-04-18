@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <base/files/file_path.h>
@@ -27,14 +28,12 @@ class WireGuardDriver : public VPNDriver {
 
   ~WireGuardDriver();
 
-  // Inherited from VPNDriver. During ConnectAsync(), we will try to create the
-  // tunnel in the kernel at first. If that fails, then we will try to let the
-  // userspace program open the tunnel.
+  // Inherited from VPNDriver.
   base::TimeDelta ConnectAsync(EventHandler* event_handler) override;
   void Disconnect() override;
   void OnConnectTimeout() override;
-  IPConfig::Properties GetIPProperties() const override;
-  std::string GetProviderType() const override;
+  std::unique_ptr<IPConfig::Properties> GetIPv4Properties() const override;
+  std::unique_ptr<IPConfig::Properties> GetIPv6Properties() const override;
 
   // These functions (including GetProvider() below) are overridden for
   // implementing the "WireGuard.Peers" property in both property store (as an
@@ -73,32 +72,23 @@ class WireGuardDriver : public VPNDriver {
 
   void CreateKernelWireGuardInterface();
 
-  void StartUserspaceWireGuardTunnel();
-
-  // Spawns the userspace wireguard process, which will setup the tunnel
-  // interface and do the data tunneling. WireGuardProcessExited() will be
-  // invoked if that process exits unexpectedly.
-  bool SpawnWireGuard();
-  void WireGuardProcessExited(int exit_code);
-
   // Generates the contents for the config file that will be used by
   // wireguard-tools from the profile. Returns an empty string on failure.
   std::string GenerateConfigFileContents();
 
   // Configures the interface via wireguard-tools when the interface is ready.
-  void ConfigureInterface(bool created_in_kernel,
-                          const std::string& interface_name,
+  void ConfigureInterface(const std::string& interface_name,
                           int interface_index);
   void OnConfigurationDone(int exit_code);
 
-  // Fills in |ip_properties_| (especially, the address and routes fields)
+  // Fills in |ipv4_properties_| (especially, the address and routes fields)
   // according to the properties in the profile.
   bool PopulateIPProperties();
 
   // Calls Cleanup(), and if there is a service associated through
   // ConnectAsync(), notifies it of the failure.
   void FailService(Service::ConnectFailure failure,
-                   const std::string& error_details);
+                   std::string_view error_details);
   // Resets states and deallocate all resources.
   void Cleanup();
 
@@ -112,7 +102,8 @@ class WireGuardDriver : public VPNDriver {
   EventHandler* event_handler_;
   pid_t wireguard_pid_ = -1;
   int interface_index_ = -1;
-  IPConfig::Properties ip_properties_;
+  IPConfig::Properties ipv4_properties_;
+  IPConfig::Properties ipv6_properties_;
   base::ScopedFD config_fd_;
 
   // Indicates that whether we have an open wg interface in the kernel which is

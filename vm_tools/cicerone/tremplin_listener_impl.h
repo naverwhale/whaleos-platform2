@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,14 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 #include <base/time/time.h>
 #include <grpcpp/grpcpp.h>
-#include <vm_applications/proto_bindings/apps.pb.h>
+#include <vm_applications/apps.pb.h>
 #include <vm_protos/proto_bindings/tremplin.grpc.pb.h>
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 
 class Service;
 
@@ -55,6 +53,11 @@ class TremplinListenerImpl final
   grpc::Status UpdateStartStatus(
       grpc::ServerContext* ctx,
       const vm_tools::tremplin::ContainerStartProgress* request,
+      vm_tools::tremplin::EmptyMessage* response) override;
+
+  grpc::Status UpdateStopStatus(
+      grpc::ServerContext* ctx,
+      const vm_tools::tremplin::ContainerStopProgress* request,
       vm_tools::tremplin::EmptyMessage* response) override;
 
   grpc::Status UpdateExportStatus(
@@ -102,7 +105,6 @@ class TremplinListenerImpl final
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
 };
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone
 
 #endif  // VM_TOOLS_CICERONE_TREMPLIN_LISTENER_IMPL_H_

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,18 +7,20 @@
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
 
-#include "shill/cellular/cellular_capability.h"
+#include "base/containers/contains.h"
+#include "dbus/shill/dbus-constants.h"
+#include "shill/cellular/cellular_capability_3gpp.h"
 #include "shill/cellular/cellular_service_provider.h"
 #include "shill/cellular/mock_cellular.h"
 #include "shill/cellular/mock_mobile_operator_info.h"
 #include "shill/cellular/mock_modem_info.h"
-#include "shill/fake_store.h"
 #include "shill/mock_adaptors.h"
 #include "shill/mock_control.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
 #include "shill/mock_profile.h"
 #include "shill/service_property_change_test.h"
+#include "shill/store/fake_store.h"
 
 using testing::_;
 using testing::AnyNumber;
@@ -51,8 +53,8 @@ class CellularServiceTest : public testing::Test {
     EXPECT_CALL(manager_, cellular_service_provider())
         .WillRepeatedly(Return(&cellular_service_provider_));
 
-    device_ = new MockCellular(&manager_, "usb0", kAddress, 3,
-                               Cellular::kTypeCdma, "", RpcIdentifier(""));
+    device_ =
+        new MockCellular(&manager_, "usb0", kAddress, 3, "", RpcIdentifier(""));
 
     // CellularService expects an IMSI and SIM ID be set in the Device.
     Cellular::SimProperties sim_properties;
@@ -201,15 +203,15 @@ TEST_F(CellularServiceTest, SetAttachApn) {
   testapn[kApnUsernameProperty] = kUsername;
   testapn[kApnAttachProperty] = kApnAttachProperty;
   EXPECT_CALL(*adaptor_, EmitStringmapChanged(kCellularApnProperty, _));
-  EXPECT_CALL(*device_, ReAttach());
   service_->SetApn(testapn, &error);
   EXPECT_TRUE(error.IsSuccess());
   Stringmap resultapn = service_->GetApn(&error);
   EXPECT_TRUE(error.IsSuccess());
   Stringmap::const_iterator it = resultapn.find(kApnProperty);
   EXPECT_TRUE(it != resultapn.end() && it->second == kApn);
-  it = resultapn.find(kApnAttachProperty);
-  EXPECT_TRUE(it != resultapn.end() && it->second == kApnAttachProperty);
+  it = resultapn.find(kApnTypesProperty);
+  ASSERT_TRUE(it != resultapn.end());
+  EXPECT_STREQ(it->second.c_str(), "DEFAULT,IA");
   EXPECT_NE(nullptr, service_->GetUserSpecifiedApn());
 }
 
@@ -247,8 +249,14 @@ TEST_F(CellularServiceTest, LastGoodApn) {
   testapn[kApnProperty] = kApn;
   testapn[kApnUsernameProperty] = kUsername;
   EXPECT_CALL(*adaptor_, EmitStringmapChanged(kCellularLastGoodApnProperty, _));
+  EXPECT_CALL(*adaptor_, EmitStringmapChanged(
+                             kCellularLastConnectedDefaultApnProperty, _));
   service_->SetLastGoodApn(testapn);
   Stringmap* resultapn = service_->GetLastGoodApn();
+  ASSERT_NE(nullptr, resultapn);
+  EXPECT_EQ(kApn, (*resultapn)[kApnProperty]);
+  EXPECT_EQ(kUsername, (*resultapn)[kApnUsernameProperty]);
+  resultapn = service_->GetLastConnectedDefaultApn();
   ASSERT_NE(nullptr, resultapn);
   EXPECT_EQ(kApn, (*resultapn)[kApnProperty]);
   EXPECT_EQ(kUsername, (*resultapn)[kApnUsernameProperty]);
@@ -264,6 +272,46 @@ TEST_F(CellularServiceTest, LastGoodApn) {
   ASSERT_NE(nullptr, service_->GetLastGoodApn());
   EXPECT_EQ(kApn, (*resultapn)[kApnProperty]);
   EXPECT_EQ(kUsername, (*resultapn)[kApnUsernameProperty]);
+}
+
+TEST_F(CellularServiceTest, LastConnectedAttachApn) {
+  static const char kApn[] = "TheAPN";
+  static const char kUsername[] = "commander.data";
+  service_->set_profile(profile_);
+  Stringmap testapn;
+  testapn[kApnProperty] = kApn;
+  testapn[kApnUsernameProperty] = kUsername;
+  EXPECT_CALL(*adaptor_,
+              EmitStringmapChanged(kCellularLastConnectedAttachApnProperty, _));
+  service_->SetLastConnectedAttachApn(testapn);
+  Stringmap* resultapn = service_->GetLastConnectedAttachApn();
+  ASSERT_NE(nullptr, resultapn);
+  EXPECT_EQ(kApn, (*resultapn)[kApnProperty]);
+  EXPECT_EQ(kUsername, (*resultapn)[kApnUsernameProperty]);
+  ASSERT_TRUE(service_->Save(&storage_));
+
+  // Clear the LastConnectedAttachAPN.
+  EXPECT_CALL(*adaptor_,
+              EmitStringmapChanged(kCellularLastConnectedAttachApnProperty, _));
+  service_->ClearLastConnectedAttachApn();
+  ASSERT_EQ(nullptr, service_->GetLastConnectedAttachApn());
+
+  // Load the LastConnectedAttachAPN.
+  ASSERT_TRUE(service_->Load(&storage_));
+  resultapn = service_->GetLastConnectedAttachApn();
+  ASSERT_NE(nullptr, resultapn);
+  EXPECT_EQ(kApn, (*resultapn)[kApnProperty]);
+  EXPECT_EQ(kUsername, (*resultapn)[kApnUsernameProperty]);
+
+  // Clear the LastConnectedAttachAPN again and save.
+  EXPECT_CALL(*adaptor_,
+              EmitStringmapChanged(kCellularLastConnectedAttachApnProperty, _));
+  service_->ClearLastConnectedAttachApn();
+  ASSERT_EQ(nullptr, service_->GetLastConnectedAttachApn());
+  ASSERT_TRUE(service_->Save(&storage_));
+
+  // Load the LastConnectedAttachAPN.
+  ASSERT_EQ(nullptr, service_->GetLastConnectedAttachApn());
 }
 
 TEST_F(CellularServiceTest, IsAutoConnectable) {
@@ -284,16 +332,6 @@ TEST_F(CellularServiceTest, IsAutoConnectable) {
   EXPECT_FALSE(IsAutoConnectable(&reason));
   EXPECT_STREQ(CellularService::kAutoConnNotRegistered, reason);
   device_->set_state_for_testing(Cellular::State::kRegistered);
-
-  // If we're in a process of activation, don't auto-connect.
-  EXPECT_CALL(*modem_info_.mock_pending_activation_store(),
-              GetActivationState(_, _))
-      .WillOnce(Return(PendingActivationStore::kStatePending));
-  EXPECT_FALSE(IsAutoConnectable(&reason));
-  EXPECT_STREQ(CellularService::kAutoConnActivating, reason);
-  EXPECT_CALL(*modem_info_.mock_pending_activation_store(),
-              GetActivationState(_, _))
-      .WillRepeatedly(Return(PendingActivationStore::kStateActivated));
 
   // Auto-connect should be suppressed if we're out of credits.
   service_->NotifySubscriptionStateChanged(SubscriptionState::kOutOfCredits);
@@ -375,10 +413,10 @@ TEST_F(CellularServiceTest, LoadResetsPPPAuthFailure) {
   }
 }
 
-// The default storage_identifier_ will be {kCellular}_{kIccid}, however older
+// The default |storage_id_| will be {kCellular}_{kIccid}, however older
 // profile/storage entries may use a different identifier. This sets up an entry
 // with a matching ICCID but an arbitrary storage id and ensures that the older
-// storage_identifer_ value is set.
+// |storage_id_| value is set.
 TEST_F(CellularServiceTest, LoadFromProfileMatchingIccid) {
   std::string initial_storage_id = storage_id_;
   std::string matching_storage_id = "another-storage-id";
@@ -426,6 +464,9 @@ TEST_F(CellularServiceTest, SaveAndLoadApn) {
   static const char kPassword[] = "arlet";
   static const char kAuthentication[] = "chap";
 
+  std::string attach;
+  const std::string attach_key =
+      std::string(CellularService::kStorageAPN) + "." + kApnAttachProperty;
   Error error;
   Stringmap testapn;
   testapn[kApnProperty] = kApn;
@@ -436,6 +477,12 @@ TEST_F(CellularServiceTest, SaveAndLoadApn) {
   service_->SetApn(testapn, &error);
   ASSERT_TRUE(error.IsSuccess());
   EXPECT_TRUE(service_->Save(&storage_));
+  // kApnAttachProperty will be converted into kApnTypesProperty
+  EXPECT_FALSE(storage_.GetString(storage_id_, attach_key, &attach));
+  EXPECT_TRUE(storage_.GetString(
+      storage_id_,
+      std::string(CellularService::kStorageAPN) + "." + kApnTypesProperty,
+      &attach));
 
   // Clear the APN, and then load it from storage again.
   Stringmap emptyapn;
@@ -450,7 +497,18 @@ TEST_F(CellularServiceTest, SaveAndLoadApn) {
   EXPECT_EQ(kUsername, resultapn[kApnUsernameProperty]);
   EXPECT_EQ(kPassword, resultapn[kApnPasswordProperty]);
   EXPECT_EQ(kAuthentication, resultapn[kApnAuthenticationProperty]);
-  EXPECT_EQ(kApnAttachProperty, kApnAttachProperty);
+  EXPECT_TRUE(base::Contains(resultapn, kApnAttachProperty));
+  EXPECT_EQ("DEFAULT,IA", resultapn[kApnTypesProperty]);
+
+  // Force storing kApnAttachProperty and reset kApnTypesProperty to verify the
+  // value is migrated on Load.
+  EXPECT_TRUE(storage_.SetString(storage_id_, attach_key, kApnAttachProperty));
+  EXPECT_TRUE(storage_.DeleteKey(storage_id_, kApnTypesProperty));
+  EXPECT_TRUE(service_->Save(&storage_));
+  EXPECT_TRUE(service_->Load(&storage_));
+  resultapn = service_->GetApn(&error);
+  EXPECT_TRUE(base::Contains(resultapn, kApnAttachProperty));
+  EXPECT_EQ("DEFAULT,IA", resultapn[kApnTypesProperty]);
 }
 
 TEST_F(CellularServiceTest, IgnoreUnversionedLastGoodApn) {
@@ -459,14 +517,34 @@ TEST_F(CellularServiceTest, IgnoreUnversionedLastGoodApn) {
   Stringmap testapn;
   testapn[kApnProperty] = kApn;
   testapn[kApnUsernameProperty] = kUsername;
+  EXPECT_CALL(*adaptor_, EmitStringmapChanged(kCellularLastGoodApnProperty, _));
+  EXPECT_CALL(*adaptor_, EmitStringmapChanged(
+                             kCellularLastConnectedDefaultApnProperty, _));
   service_->SetLastGoodApn(testapn);
   ASSERT_TRUE(service_->Save(&storage_));
+  EXPECT_NE(nullptr, service_->GetLastGoodApn());
+  EXPECT_NE(nullptr, service_->GetLastConnectedDefaultApn());
 
-  // Now clear the LastGoodAPN and try to load it. It should be ignored.
+  // Clear the LastGoodAPN. The LastConnectedDefaultAPN should be unaffected.
+  EXPECT_CALL(*adaptor_, EmitStringmapChanged(kCellularLastGoodApnProperty, _));
+  EXPECT_CALL(*adaptor_,
+              EmitStringmapChanged(kCellularLastConnectedDefaultApnProperty, _))
+      .Times(0);
   service_->ClearLastGoodApn();
+  EXPECT_EQ(nullptr, service_->GetLastGoodApn());
+  EXPECT_NE(nullptr, service_->GetLastConnectedDefaultApn());
+
+  // Force the LastConnectedDefaultAPN to be cleared.
+  service_->GetLastConnectedDefaultApn()->clear();
+
+  // Load the LastGoodAPN and LastConnectedDefaultAPN. The LastGoodAPN should be
+  // ignored.
   ASSERT_TRUE(service_->Load(&storage_));
-  Stringmap* resultapn = service_->GetLastGoodApn();
-  EXPECT_EQ(nullptr, resultapn);
+  EXPECT_EQ(nullptr, service_->GetLastGoodApn());
+  Stringmap* resultapn = service_->GetLastConnectedDefaultApn();
+  EXPECT_NE(nullptr, resultapn);
+  EXPECT_EQ(kApn, (*resultapn)[kApnProperty]);
+  EXPECT_EQ(kUsername, (*resultapn)[kApnUsernameProperty]);
 }
 
 TEST_F(CellularServiceTest, MergeDetailsFromApnList) {
@@ -613,7 +691,7 @@ TEST_F(CellularServiceTest, SetRoamingState) {
   EXPECT_EQ(kRoamingStateHome, service_->roaming_state());
 
   // Check that a disconnect occurs if we begin roaming when it isn't allowed.
-  service_->set_allow_roaming_for_testing(false);
+  service_->set_allow_roaming(false);
   EXPECT_CALL(*device_, Disconnect(_, _)).Times(1);
   EXPECT_CALL(*adaptor_,
               EmitStringChanged(kRoamingStateProperty, kRoamingStateRoaming));

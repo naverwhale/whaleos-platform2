@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,9 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/command_line.h>
+#include <base/functional/bind.h>
 #include <base/strings/string_number_conversions.h>
 
 #include "camera3_test/camera3_perf_log.h"
@@ -235,7 +235,7 @@ int Camera3Service::Camera3DeviceService::Initialize() {
     LOGF(ERROR) << "Failed to start thread";
     return -EINVAL;
   }
-  cam_device_.RegisterResultMetadataOutputBufferCallback(base::Bind(
+  cam_device_.RegisterResultMetadataOutputBufferCallback(base::BindRepeating(
       &Camera3Service::Camera3DeviceService::ProcessResultMetadataOutputBuffers,
       base::Unretained(this)));
   repeating_preview_metadata_.reset(clone_camera_metadata(
@@ -258,11 +258,10 @@ int Camera3Service::Camera3DeviceService::StartPreview(
     const ResolutionInfo& preview_resolution,
     const ResolutionInfo& still_capture_resolution,
     const ResolutionInfo& recording_resolution) {
-  VLOGF_ENTER();
   int result = -EIO;
   service_thread_.PostTaskSync(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &Camera3Service::Camera3DeviceService::StartPreviewOnServiceThread,
           base::Unretained(this), preview_resolution, still_capture_resolution,
           recording_resolution, &result));
@@ -270,11 +269,10 @@ int Camera3Service::Camera3DeviceService::StartPreview(
 }
 
 void Camera3Service::Camera3DeviceService::StopPreview() {
-  VLOGF_ENTER();
   auto future = cros::Future<void>::Create(nullptr);
   service_thread_.PostTaskAsync(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &Camera3Service::Camera3DeviceService::StopPreviewOnServiceThread,
           base::Unretained(this), cros::GetFutureCallback(future)));
   if (!future->Wait(kWaitForStopPreviewTimeoutMs)) {
@@ -285,32 +283,32 @@ void Camera3Service::Camera3DeviceService::StopPreview() {
 void Camera3Service::Camera3DeviceService::StartAutoFocus() {
   service_thread_.PostTaskAsync(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &Camera3Service::Camera3DeviceService::StartAutoFocusOnServiceThread,
           base::Unretained(this)));
 }
 
 int Camera3Service::Camera3DeviceService::WaitForAutoFocusDone() {
-  VLOGF_ENTER();
   auto future = cros::Future<void>::Create(nullptr);
   int32_t result;
   service_thread_.PostTaskAsync(
-      FROM_HERE, base::Bind(&Camera3Service::Camera3DeviceService::
-                                AddMetadataListenerOnServiceThread,
-                            base::Unretained(this), ANDROID_CONTROL_AF_STATE,
-                            std::unordered_set<int32_t>(
-                                {ANDROID_CONTROL_AF_STATE_FOCUSED_LOCKED,
-                                 ANDROID_CONTROL_AF_STATE_NOT_FOCUSED_LOCKED}),
-                            cros::GetFutureCallback(future), &result));
+      FROM_HERE,
+      base::BindOnce(&Camera3Service::Camera3DeviceService::
+                         AddMetadataListenerOnServiceThread,
+                     base::Unretained(this), ANDROID_CONTROL_AF_STATE,
+                     std::unordered_set<int32_t>(
+                         {ANDROID_CONTROL_AF_STATE_FOCUSED_LOCKED,
+                          ANDROID_CONTROL_AF_STATE_NOT_FOCUSED_LOCKED}),
+                     cros::GetFutureCallback(future), &result));
   if (!future->Wait(GetWaitForFocusDoneTimeoutMs())) {
     service_thread_.PostTaskSync(
         FROM_HERE,
-        base::Bind(&Camera3Service::Camera3DeviceService::
-                       DeleteMetadataListenerOnServiceThread,
-                   base::Unretained(this), ANDROID_CONTROL_AF_STATE,
-                   std::unordered_set<int32_t>(
-                       {ANDROID_CONTROL_AF_STATE_FOCUSED_LOCKED,
-                        ANDROID_CONTROL_AF_STATE_NOT_FOCUSED_LOCKED})));
+        base::BindOnce(&Camera3Service::Camera3DeviceService::
+                           DeleteMetadataListenerOnServiceThread,
+                       base::Unretained(this), ANDROID_CONTROL_AF_STATE,
+                       std::unordered_set<int32_t>(
+                           {ANDROID_CONTROL_AF_STATE_FOCUSED_LOCKED,
+                            ANDROID_CONTROL_AF_STATE_NOT_FOCUSED_LOCKED})));
     return -ETIMEDOUT;
   }
   if (result == ANDROID_CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) {
@@ -320,29 +318,30 @@ int Camera3Service::Camera3DeviceService::WaitForAutoFocusDone() {
 }
 
 int Camera3Service::Camera3DeviceService::WaitForAWBConvergedAndLock() {
-  VLOGF_ENTER();
   auto future = cros::Future<void>::Create(nullptr);
   service_thread_.PostTaskAsync(
-      FROM_HERE, base::Bind(&Camera3Service::Camera3DeviceService::
-                                AddMetadataListenerOnServiceThread,
-                            base::Unretained(this), ANDROID_CONTROL_AWB_STATE,
-                            std::unordered_set<int32_t>(
-                                {ANDROID_CONTROL_AWB_STATE_CONVERGED}),
-                            cros::GetFutureCallback(future), nullptr));
+      FROM_HERE,
+      base::BindOnce(
+          &Camera3Service::Camera3DeviceService::
+              AddMetadataListenerOnServiceThread,
+          base::Unretained(this), ANDROID_CONTROL_AWB_STATE,
+          std::unordered_set<int32_t>({ANDROID_CONTROL_AWB_STATE_CONVERGED}),
+          cros::GetFutureCallback(future), nullptr));
   if (!future->Wait(GetWaitForAWBConvergedTimeoutMs())) {
     service_thread_.PostTaskSync(
-        FROM_HERE, base::Bind(&Camera3Service::Camera3DeviceService::
-                                  DeleteMetadataListenerOnServiceThread,
-                              base::Unretained(this), ANDROID_CONTROL_AWB_STATE,
-                              std::unordered_set<int32_t>(
-                                  {ANDROID_CONTROL_AWB_STATE_CONVERGED})));
+        FROM_HERE,
+        base::BindOnce(&Camera3Service::Camera3DeviceService::
+                           DeleteMetadataListenerOnServiceThread,
+                       base::Unretained(this), ANDROID_CONTROL_AWB_STATE,
+                       std::unordered_set<int32_t>(
+                           {ANDROID_CONTROL_AWB_STATE_CONVERGED})));
     return -ETIMEDOUT;
   }
 
   if (cam_device_.GetStaticInfo()->IsAWBLockSupported()) {
     service_thread_.PostTaskAsync(
         FROM_HERE,
-        base::Bind(
+        base::BindOnce(
             &Camera3Service::Camera3DeviceService::LockAWBOnServiceThread,
             base::Unretained(this)));
   }
@@ -350,33 +349,33 @@ int Camera3Service::Camera3DeviceService::WaitForAWBConvergedAndLock() {
 }
 
 void Camera3Service::Camera3DeviceService::StartAEPrecapture() {
-  VLOGF_ENTER();
   service_thread_.PostTaskAsync(
-      FROM_HERE, base::Bind(&Camera3Service::Camera3DeviceService::
-                                StartAEPrecaptureOnServiceThread,
-                            base::Unretained(this)));
+      FROM_HERE, base::BindOnce(&Camera3Service::Camera3DeviceService::
+                                    StartAEPrecaptureOnServiceThread,
+                                base::Unretained(this)));
 }
 
 int Camera3Service::Camera3DeviceService::WaitForAEStable() {
-  VLOGF_ENTER();
   auto future = cros::Future<void>::Create(nullptr);
   int32_t result;
   service_thread_.PostTaskAsync(
-      FROM_HERE, base::Bind(&Camera3Service::Camera3DeviceService::
-                                AddMetadataListenerOnServiceThread,
-                            base::Unretained(this), ANDROID_CONTROL_AE_STATE,
-                            std::unordered_set<int32_t>(
-                                {ANDROID_CONTROL_AE_STATE_CONVERGED,
-                                 ANDROID_CONTROL_AE_STATE_FLASH_REQUIRED}),
-                            cros::GetFutureCallback(future), &result));
+      FROM_HERE,
+      base::BindOnce(&Camera3Service::Camera3DeviceService::
+                         AddMetadataListenerOnServiceThread,
+                     base::Unretained(this), ANDROID_CONTROL_AE_STATE,
+                     std::unordered_set<int32_t>(
+                         {ANDROID_CONTROL_AE_STATE_CONVERGED,
+                          ANDROID_CONTROL_AE_STATE_FLASH_REQUIRED}),
+                     cros::GetFutureCallback(future), &result));
   if (!future->Wait(GetWaitForFocusDoneTimeoutMs())) {
     service_thread_.PostTaskSync(
-        FROM_HERE, base::Bind(&Camera3Service::Camera3DeviceService::
-                                  DeleteMetadataListenerOnServiceThread,
-                              base::Unretained(this), ANDROID_CONTROL_AE_STATE,
-                              std::unordered_set<int32_t>(
-                                  {ANDROID_CONTROL_AE_STATE_CONVERGED,
-                                   ANDROID_CONTROL_AE_STATE_FLASH_REQUIRED})));
+        FROM_HERE,
+        base::BindOnce(&Camera3Service::Camera3DeviceService::
+                           DeleteMetadataListenerOnServiceThread,
+                       base::Unretained(this), ANDROID_CONTROL_AE_STATE,
+                       std::unordered_set<int32_t>(
+                           {ANDROID_CONTROL_AE_STATE_CONVERGED,
+                            ANDROID_CONTROL_AE_STATE_FLASH_REQUIRED})));
     return -ETIMEDOUT;
   }
   if (result == ANDROID_CONTROL_AE_STATE_FLASH_REQUIRED) {
@@ -386,30 +385,27 @@ int Camera3Service::Camera3DeviceService::WaitForAEStable() {
 }
 
 void Camera3Service::Camera3DeviceService::StartFaceDetection() {
-  VLOGF_ENTER();
   service_thread_.PostTaskAsync(
-      FROM_HERE, base::BindRepeating(&Camera3Service::Camera3DeviceService::
-                                         StartFaceDetectionOnServiceThread,
-                                     base::Unretained(this)));
+      FROM_HERE, base::BindOnce(&Camera3Service::Camera3DeviceService::
+                                    StartFaceDetectionOnServiceThread,
+                                base::Unretained(this)));
 }
 
 void Camera3Service::Camera3DeviceService::StopFaceDetection() {
-  VLOGF_ENTER();
   service_thread_.PostTaskAsync(
-      FROM_HERE, base::BindRepeating(&Camera3Service::Camera3DeviceService::
-                                         StopFaceDetectionOnServiceThread,
-                                     base::Unretained(this)));
+      FROM_HERE, base::BindOnce(&Camera3Service::Camera3DeviceService::
+                                    StopFaceDetectionOnServiceThread,
+                                base::Unretained(this)));
 }
 
 void Camera3Service::Camera3DeviceService::TakeStillCapture(
     const camera_metadata_t* metadata) {
-  VLOGF_ENTER();
   auto future = cros::Future<void>::Create(nullptr);
   service_thread_.PostTaskAsync(
-      FROM_HERE, base::Bind(&Camera3Service::Camera3DeviceService::
-                                TakeStillCaptureOnServiceThread,
-                            base::Unretained(this), metadata,
-                            cros::GetFutureCallback(future)));
+      FROM_HERE, base::BindOnce(&Camera3Service::Camera3DeviceService::
+                                    TakeStillCaptureOnServiceThread,
+                                base::Unretained(this), metadata,
+                                cros::GetFutureCallback(future)));
   // Wait for ProcessPreviewRequestOnServiceThread() to finish processing
   // |metadata|
   future->Wait();
@@ -417,22 +413,20 @@ void Camera3Service::Camera3DeviceService::TakeStillCapture(
 
 int Camera3Service::Camera3DeviceService::StartRecording(
     const camera_metadata_t* metadata) {
-  VLOGF_ENTER();
   auto future = cros::Future<int>::Create(nullptr);
   service_thread_.PostTaskSync(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &Camera3Service::Camera3DeviceService::StartRecordingOnServiceThread,
           base::Unretained(this), metadata, cros::GetFutureCallback(future)));
   return future->Wait();
 }
 
 void Camera3Service::Camera3DeviceService::StopRecording() {
-  VLOGF_ENTER();
   auto future = cros::Future<void>::Create(nullptr);
   service_thread_.PostTaskAsync(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &Camera3Service::Camera3DeviceService::StopRecordingOnServiceThread,
           base::Unretained(this), cros::GetFutureCallback(future)));
   if (!future->Wait(kWaitForStopRecordingTimeoutMs)) {
@@ -442,7 +436,6 @@ void Camera3Service::Camera3DeviceService::StopRecording() {
 
 int Camera3Service::Camera3DeviceService::WaitForPreviewFrames(
     uint32_t num_frames, uint32_t timeout_ms) {
-  VLOGF_ENTER();
   while (sem_trywait(&preview_frame_sem_) == 0) {
   }
   for (uint32_t i = 0; i < num_frames; ++i) {
@@ -475,13 +468,12 @@ void Camera3Service::Camera3DeviceService::ProcessResultMetadataOutputBuffers(
     uint32_t frame_number,
     ScopedCameraMetadata metadata,
     std::vector<cros::ScopedBufferHandle> buffers) {
-  VLOGF_ENTER();
   service_thread_.PostTaskAsync(
       FROM_HERE,
-      base::Bind(&Camera3Service::Camera3DeviceService::
-                     ProcessResultMetadataOutputBuffersOnServiceThread,
-                 base::Unretained(this), frame_number, base::Passed(&metadata),
-                 base::Passed(&buffers)));
+      base::BindOnce(&Camera3Service::Camera3DeviceService::
+                         ProcessResultMetadataOutputBuffersOnServiceThread,
+                     base::Unretained(this), frame_number, std::move(metadata),
+                     std::move(buffers)));
 }
 
 void Camera3Service::Camera3DeviceService::StartPreviewOnServiceThread(
@@ -490,7 +482,7 @@ void Camera3Service::Camera3DeviceService::StartPreviewOnServiceThread(
     const ResolutionInfo recording_resolution,
     int* result) {
   DCHECK(service_thread_.IsCurrentThread());
-  VLOGF_ENTER();
+
   if (preview_state_ != PREVIEW_STOPPED) {
     LOGF(ERROR) << "Failed to start preview because it is not stopped";
     *result = -EAGAIN;
@@ -506,6 +498,16 @@ void Camera3Service::Camera3DeviceService::StartPreviewOnServiceThread(
     cam_device_.AddOutputStream(
         HAL_PIXEL_FORMAT_YCbCr_420_888, recording_resolution.Width(),
         recording_resolution.Height(), CAMERA3_STREAM_ROTATION_0);
+    // Use recording template for preview to sync camera3_recording_test
+    // with CTS testBasicRecording. See b/269378305 for details.
+    repeating_preview_metadata_.reset(
+        clone_camera_metadata(cam_device_.ConstructDefaultRequestSettings(
+            CAMERA3_TEMPLATE_VIDEO_RECORD)));
+    if (!repeating_preview_metadata_) {
+      LOGF(ERROR) << "Failed to create preview metadata";
+      *result = -ENOMEM;
+      return;
+    }
   }
   cam_device_.AddOutputStream(
       HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, preview_resolution.Width(),
@@ -547,7 +549,7 @@ void Camera3Service::Camera3DeviceService::StartPreviewOnServiceThread(
   for (uint32_t i = 0; i < number_of_capture_requests_; i++) {
     std::vector<const camera3_stream_t*> streams(1, preview_stream);
     std::vector<camera3_stream_buffer_t> output_buffers;
-    if (cam_device_.AllocateOutputBuffersByStreams(streams, &output_buffers) !=
+    if (cam_device_.PrepareOutputBuffersByStreams(streams, &output_buffers) !=
         0) {
       ADD_FAILURE() << "Failed to allocate output buffer";
       *result = -EINVAL;
@@ -571,14 +573,14 @@ void Camera3Service::Camera3DeviceService::StartPreviewOnServiceThread(
 }
 
 void Camera3Service::Camera3DeviceService::StopPreviewOnServiceThread(
-    base::Callback<void()> cb) {
+    base::OnceCallback<void()> cb) {
   DCHECK(service_thread_.IsCurrentThread());
-  VLOGF_ENTER();
+
   if (preview_state_ != PREVIEW_STARTED && preview_state_ != PREVIEW_STARTING) {
     return;
   }
   preview_state_ = PREVIEW_STOPPING;
-  stop_preview_cb_ = cb;
+  stop_preview_cb_ = std::move(cb);
 }
 
 void Camera3Service::Camera3DeviceService::StartAutoFocusOnServiceThread() {
@@ -598,10 +600,10 @@ void Camera3Service::Camera3DeviceService::StartAutoFocusOnServiceThread() {
 void Camera3Service::Camera3DeviceService::AddMetadataListenerOnServiceThread(
     int32_t key,
     std::unordered_set<int32_t> values,
-    base::Callback<void()> cb,
+    base::OnceCallback<void()> cb,
     int32_t* result) {
   DCHECK(service_thread_.IsCurrentThread());
-  metadata_listener_list_.emplace_back(key, values, cb, result);
+  metadata_listener_list_.emplace_back(key, values, std::move(cb), result);
 }
 
 void Camera3Service::Camera3DeviceService::
@@ -650,28 +652,29 @@ void Camera3Service::Camera3DeviceService::StopFaceDetectionOnServiceThread() {
 }
 
 void Camera3Service::Camera3DeviceService::TakeStillCaptureOnServiceThread(
-    const camera_metadata_t* metadata, base::Callback<void()> cb) {
+    const camera_metadata_t* metadata, base::OnceCallback<void()> cb) {
   DCHECK(service_thread_.IsCurrentThread());
   still_capture_metadata_ = metadata;
-  still_capture_cb_ = cb;
+  still_capture_cb_ = std::move(cb);
 }
 
 void Camera3Service::Camera3DeviceService::StartRecordingOnServiceThread(
-    const camera_metadata_t* metadata, base::Callback<void(int)> cb) {
+    const camera_metadata_t* metadata, base::OnceCallback<void(int)> cb) {
   DCHECK(service_thread_.IsCurrentThread());
-  VLOGF_ENTER();
+
   if (!metadata) {
     LOGF(ERROR) << "Invalid metadata settings";
-    cb.Run(-EINVAL);
+    std::move(cb).Run(-EINVAL);
     return;
   }
   if (preview_state_ != PREVIEW_STARTED) {
     VLOGF(2) << "Preview is not started yet. Retrying...";
     usleep(500);
     service_thread_.PostTaskAsync(
-        FROM_HERE, base::Bind(&Camera3Service::Camera3DeviceService::
-                                  StartRecordingOnServiceThread,
-                              base::Unretained(this), metadata, cb));
+        FROM_HERE,
+        base::BindOnce(&Camera3Service::Camera3DeviceService::
+                           StartRecordingOnServiceThread,
+                       base::Unretained(this), metadata, std::move(cb)));
     return;
   }
   auto it = std::find_if(
@@ -680,7 +683,7 @@ void Camera3Service::Camera3DeviceService::StartRecordingOnServiceThread(
       });
   if (it == streams_.end()) {
     ADD_FAILURE() << "Failed to find configured recording stream";
-    cb.Run(-EINVAL);
+    std::move(cb).Run(-EINVAL);
     return;
   }
   const camera3_stream_t* record_stream = *it;
@@ -688,24 +691,23 @@ void Camera3Service::Camera3DeviceService::StartRecordingOnServiceThread(
   for (uint32_t i = 0; i < number_of_capture_requests_; i++) {
     std::vector<const camera3_stream_t*> streams(1, record_stream);
     std::vector<camera3_stream_buffer_t> output_buffers;
-    if (cam_device_.AllocateOutputBuffersByStreams(streams, &output_buffers) !=
+    if (cam_device_.PrepareOutputBuffersByStreams(streams, &output_buffers) !=
         0) {
       ADD_FAILURE() << "Failed to allocate output buffer";
-      cb.Run(-EINVAL);
+      std::move(cb).Run(-EINVAL);
       return;
     }
     output_stream_buffers_[i][kRecordingOutputStreamIdx] =
         output_buffers.front();
   }
   recording_metadata_ = metadata;
-  cb.Run(0);
+  std::move(cb).Run(0);
 }
 
 void Camera3Service::Camera3DeviceService::StopRecordingOnServiceThread(
-    base::Callback<void()> cb) {
-  VLOGF_ENTER();
+    base::OnceCallback<void()> cb) {
   recording_metadata_ = nullptr;
-  stop_recording_cb_ = cb;
+  stop_recording_cb_ = std::move(cb);
 }
 
 void Camera3Service::Camera3DeviceService::
@@ -740,7 +742,7 @@ void Camera3Service::Camera3DeviceService::
     std::vector<const camera3_stream_t*> streams(1, still_capture_stream);
     std::vector<camera3_stream_buffer_t> output_buffers;
     ASSERT_EQ(
-        0, cam_device_.AllocateOutputBuffersByStreams(streams, &output_buffers))
+        0, cam_device_.PrepareOutputBuffersByStreams(streams, &output_buffers))
         << "Failed to allocate output buffer";
     request->settings = still_capture_metadata_;
     output_stream_buffers_[capture_request_idx][request->num_output_buffers] =
@@ -760,7 +762,17 @@ void Camera3Service::Camera3DeviceService::
   VLOGF(1) << "  Frame " << request->frame_number;
   VLOGF(1) << "  Index " << capture_request_idx;
   for (size_t i = 0; i < request->num_output_buffers; i++) {
-    VLOGF(1) << "  Buffer " << *request->output_buffers[i].buffer
+    // If the buffer management APIs are enabled, the buffer handle in output
+    // buffers is set to nullptr.
+    // See b/226688669, b/292194220 for details.
+    std::ostringstream buffer_adr;
+    if (request->output_buffers[i].buffer != nullptr) {
+      buffer_adr << *request->output_buffers[i].buffer;
+    } else {
+      buffer_adr << "nullptr";
+    }
+
+    VLOGF(1) << "  Buffer " << buffer_adr.str()
              << " (format:" << request->output_buffers[i].stream->format << ","
              << request->output_buffers[i].stream->width << "x"
              << request->output_buffers[i].stream->height << ")";
@@ -768,7 +780,7 @@ void Camera3Service::Camera3DeviceService::
   VLOGF(1) << "  Settings " << request->settings;
   if (still_capture_metadata_) {
     still_capture_metadata_ = nullptr;
-    still_capture_cb_.Run();
+    std::move(still_capture_cb_).Run();
   } else if (!recording_metadata_ && !still_capture_metadata_ &&
              oneshot_preview_metadata_.get()) {
     oneshot_preview_metadata_.reset(nullptr);
@@ -807,7 +819,7 @@ void Camera3Service::Camera3DeviceService::
       if (it->result) {
         *it->result = entry.data.i32[0];
       }
-      it->cb.Run();
+      std::move(it->cb).Run();
       it = metadata_listener_list_.erase(it);
     } else {
       it++;
@@ -885,16 +897,16 @@ void Camera3Service::Camera3DeviceService::
   sem_post(&preview_frame_sem_);
 
   if (!stop_recording_cb_.is_null() && !have_yuv_buffer) {
-    stop_recording_cb_.Run();
-    stop_recording_cb_.Reset();
+    std::move(stop_recording_cb_).Run();
   }
   if (stopping_preview) {
     VLOGF(1) << "Stopping preview ... (" << number_of_in_flight_requests_
              << " requests in flight";
     if (number_of_in_flight_requests_ == 0) {
       preview_state_ = PREVIEW_STOPPED;
-      stop_preview_cb_.Run();
-      stop_preview_cb_.Reset();
+      if (!stop_preview_cb_.is_null()) {
+        std::move(stop_preview_cb_).Run();
+      }
     }
     return;
   }

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,13 +18,16 @@ namespace rmad {
 
 class SetupCalibrationStateHandler : public BaseStateHandler {
  public:
-  explicit SetupCalibrationStateHandler(scoped_refptr<JsonStore> json_store);
+  explicit SetupCalibrationStateHandler(
+      scoped_refptr<JsonStore> json_store,
+      scoped_refptr<DaemonCallback> daemon_callback);
 
   ASSIGN_STATE(RmadState::StateCase::kSetupCalibration);
   SET_REPEATABLE;
 
   RmadErrorCode InitializeState() override;
   GetNextStateCaseReply GetNextStateCase(const RmadState& state) override;
+  GetNextStateCaseReply TryGetNextStateCaseAtBoot() override;
 
  protected:
   ~SetupCalibrationStateHandler() override = default;

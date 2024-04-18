@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,6 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/writable_shared_memory_region.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_util.h>
@@ -59,9 +58,8 @@ vda_profile_t GetVideoFileProfile(const base::FilePath& video_file) {
 bool WaitForDecodesDone(arc::test::DecodeEventThread* event_thread,
                         uint32_t* waiting_decodes,
                         uint32_t max_decodes) {
-  constexpr base::TimeDelta wait_interval =
-      base::TimeDelta::FromMilliseconds(5);
-  constexpr base::TimeDelta max_wait_time = base::TimeDelta::FromSeconds(5);
+  constexpr base::TimeDelta wait_interval = base::Milliseconds(5);
+  constexpr base::TimeDelta max_wait_time = base::Seconds(5);
   base::ElapsedTimer wait_timer;
   while (wait_timer.Elapsed() < max_wait_time) {
     *waiting_decodes -=

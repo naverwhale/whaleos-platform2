@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 #include <string>
 #include <utility>
 
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/callback.h>
 #include <base/run_loop.h>
 #include <base/test/task_environment.h>
 #include <gmock/gmock.h>
@@ -17,24 +17,23 @@
 
 #include "cras/dbus-proxy-mocks.h"
 #include "diagnostics/cros_healthd/events/audio_events_impl.h"
+#include "diagnostics/cros_healthd/events/mock_event_observer.h"
 #include "diagnostics/cros_healthd/system/mock_context.h"
-#include "mojo/cros_healthd_events.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_events.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
+namespace mojom = ::ash::cros_healthd::mojom;
+
 using ::testing::_;
-using ::testing::Invoke;
 using ::testing::SaveArg;
 using ::testing::StrictMock;
 
-class MockAudioObserver
-    : public chromeos::cros_healthd::mojom::CrosHealthdAudioObserver {
+class MockAudioObserver : public mojom::CrosHealthdAudioObserver {
  public:
   explicit MockAudioObserver(
-      mojo::PendingReceiver<
-          chromeos::cros_healthd::mojom::CrosHealthdAudioObserver> receiver)
+      mojo::PendingReceiver<mojom::CrosHealthdAudioObserver> receiver)
       : receiver_{this /* impl */, std::move(receiver)} {
     DCHECK(receiver_.is_bound());
   }
@@ -45,11 +44,8 @@ class MockAudioObserver
   MOCK_METHOD(void, OnSevereUnderrun, (), (override));
 
  private:
-  mojo::Receiver<chromeos::cros_healthd::mojom::CrosHealthdAudioObserver>
-      receiver_;
+  mojo::Receiver<mojom::CrosHealthdAudioObserver> receiver_;
 };
-
-}  // namespace
 
 // Tests for the AudioEventsImpl class.
 class AudioEventsImplTest : public testing::Test {
@@ -68,33 +64,55 @@ class AudioEventsImplTest : public testing::Test {
 
     audio_events_impl_ = std::make_unique<AudioEventsImpl>(&mock_context_);
 
-    mojo::PendingRemote<chromeos::cros_healthd::mojom::CrosHealthdAudioObserver>
-        observer;
-    observer_ = std::make_unique<StrictMock<MockAudioObserver>>(
+    mojo::PendingRemote<mojom::EventObserver> observer;
+    mojo::PendingReceiver<mojom::EventObserver> observer_receiver(
         observer.InitWithNewPipeAndPassReceiver());
+    observer_ = std::make_unique<StrictMock<MockEventObserver>>(
+        std::move(observer_receiver));
     audio_events_impl_->AddObserver(std::move(observer));
+
+    mojo::PendingRemote<mojom::CrosHealthdAudioObserver> deprecated_observer;
+    deprecated_observer_ = std::make_unique<StrictMock<MockAudioObserver>>(
+        deprecated_observer.InitWithNewPipeAndPassReceiver());
+    audio_events_impl_->AddObserver(std::move(deprecated_observer));
   }
 
   // Simulate signal is fired and then callback is run.
-  void InvokeUnderrunEvent() { underrun_callback_.Run(); }
-  void InvokeSevereUnderrunEvent() { severe_underrun_callback_.Run(); }
+  void InvokeUnderrunEvent() { std::move(underrun_callback_).Run(); }
+  void InvokeSevereUnderrunEvent() {
+    std::move(severe_underrun_callback_).Run();
+  }
 
-  MockAudioObserver* mock_observer() { return observer_.get(); }
+  void SetExpectedEvent(mojom::AudioEventInfo::State state) {
+    EXPECT_CALL(*mock_observer(), OnEvent(_))
+        .WillOnce([=](mojom::EventInfoPtr info) {
+          EXPECT_TRUE(info->is_audio_event_info());
+          const auto& audio_event_info = info->get_audio_event_info();
+          EXPECT_EQ(audio_event_info->state, state);
+        });
+  }
+
+  MockEventObserver* mock_observer() { return observer_.get(); }
+  MockAudioObserver* mock_deprecated_observer() {
+    return deprecated_observer_.get();
+  }
 
  private:
   base::test::TaskEnvironment task_environment_;
   MockContext mock_context_;
   std::unique_ptr<AudioEventsImpl> audio_events_impl_;
-  std::unique_ptr<StrictMock<MockAudioObserver>> observer_;
-  base::Callback<void()> underrun_callback_;
-  base::Callback<void()> severe_underrun_callback_;
+  std::unique_ptr<StrictMock<MockEventObserver>> observer_;
+  std::unique_ptr<StrictMock<MockAudioObserver>> deprecated_observer_;
+  base::OnceCallback<void()> underrun_callback_;
+  base::OnceCallback<void()> severe_underrun_callback_;
 };
 
 TEST_F(AudioEventsImplTest, UnderrunEvent) {
   base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnUnderrun()).WillOnce(Invoke([&]() {
+  SetExpectedEvent(mojom::AudioEventInfo::State::kUnderrun);
+  EXPECT_CALL(*mock_deprecated_observer(), OnUnderrun()).WillOnce([&]() {
     run_loop.Quit();
-  }));
+  });
 
   InvokeUnderrunEvent();
 
@@ -103,13 +121,15 @@ TEST_F(AudioEventsImplTest, UnderrunEvent) {
 
 TEST_F(AudioEventsImplTest, SevereUnderrunEvent) {
   base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnSevereUnderrun()).WillOnce(Invoke([&]() {
+  SetExpectedEvent(mojom::AudioEventInfo::State::kSevereUnderrun);
+  EXPECT_CALL(*mock_deprecated_observer(), OnSevereUnderrun()).WillOnce([&]() {
     run_loop.Quit();
-  }));
+  });
 
   InvokeSevereUnderrunEvent();
 
   run_loop.Run();
 }
 
+}  // namespace
 }  // namespace diagnostics

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,23 +8,23 @@
 #include <type_traits>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/run_loop.h>
 #include <base/test/task_environment.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "diagnostics/mojom/public/cros_healthd_diagnostics.mojom.h"
 #include "diagnostics/wilco_dtc_supportd/fake_diagnostics_service.h"
 #include "diagnostics/wilco_dtc_supportd/routine_service.h"
-#include "mojo/cros_healthd_diagnostics.mojom.h"
-
-using testing::ElementsAreArray;
 
 namespace diagnostics {
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
-
+namespace wilco {
 namespace {
+
+namespace mojo_ipc = ::ash::cros_healthd::mojom;
+using ::testing::ElementsAreArray;
 
 grpc_api::RunRoutineRequest MakeBatteryRoutineRequest() {
   grpc_api::RunRoutineRequest request;
@@ -121,17 +121,17 @@ grpc_api::RunRoutineRequest MakeDiskRandomReadRoutineRequest() {
 }
 
 void SaveGetAvailableRoutinesResponse(
-    base::Closure callback,
+    base::OnceClosure callback,
     grpc_api::GetAvailableRoutinesResponse* response,
     const std::vector<grpc_api::DiagnosticRoutine>& returned_routines,
     grpc_api::RoutineServiceStatus service_status) {
   for (const auto& routine : returned_routines)
     response->add_routines(routine);
   response->set_service_status(service_status);
-  callback.Run();
+  std::move(callback).Run();
 }
 
-void SaveRunRoutineResponse(base::Closure callback,
+void SaveRunRoutineResponse(base::OnceClosure callback,
                             grpc_api::RunRoutineResponse* response,
                             int uuid,
                             grpc_api::DiagnosticRoutineStatus status,
@@ -139,11 +139,11 @@ void SaveRunRoutineResponse(base::Closure callback,
   response->set_uuid(uuid);
   response->set_status(status);
   response->set_service_status(service_status);
-  callback.Run();
+  std::move(callback).Run();
 }
 
 void SaveGetRoutineUpdateResponse(
-    base::Closure callback,
+    base::OnceClosure callback,
     grpc_api::GetRoutineUpdateResponse* response,
     int uuid,
     grpc_api::DiagnosticRoutineStatus status,
@@ -159,7 +159,7 @@ void SaveGetRoutineUpdateResponse(
   response->set_output(output);
   response->set_status_message(status_message);
   response->set_service_status(service_status);
-  callback.Run();
+  std::move(callback).Run();
 }
 
 // Tests for the RoutineService class.
@@ -174,7 +174,7 @@ class RoutineServiceTest : public testing::Test {
   grpc_api::GetAvailableRoutinesResponse ExecuteGetAvailableRoutines() {
     base::RunLoop run_loop;
     grpc_api::GetAvailableRoutinesResponse response;
-    service_.GetAvailableRoutines(base::Bind(
+    service_.GetAvailableRoutines(base::BindOnce(
         &SaveGetAvailableRoutinesResponse, run_loop.QuitClosure(), &response));
     run_loop.Run();
     return response;
@@ -184,8 +184,9 @@ class RoutineServiceTest : public testing::Test {
       const grpc_api::RunRoutineRequest& request) {
     base::RunLoop run_loop;
     grpc_api::RunRoutineResponse response;
-    service_.RunRoutine(request, base::Bind(&SaveRunRoutineResponse,
-                                            run_loop.QuitClosure(), &response));
+    service_.RunRoutine(
+        request, base::BindOnce(&SaveRunRoutineResponse, run_loop.QuitClosure(),
+                                &response));
     run_loop.Run();
     return response;
   }
@@ -196,9 +197,10 @@ class RoutineServiceTest : public testing::Test {
       const bool include_output) {
     base::RunLoop run_loop;
     grpc_api::GetRoutineUpdateResponse response;
-    service_.GetRoutineUpdate(uuid, command, include_output,
-                              base::Bind(&SaveGetRoutineUpdateResponse,
-                                         run_loop.QuitClosure(), &response));
+    service_.GetRoutineUpdate(
+        uuid, command, include_output,
+        base::BindOnce(&SaveGetRoutineUpdateResponse, run_loop.QuitClosure(),
+                       &response));
     run_loop.Run();
     return response;
   }
@@ -759,5 +761,5 @@ INSTANTIATE_TEST_SUITE_P(
                     MakeDiskRandomReadRoutineRequest()));
 
 }  // namespace
-
+}  // namespace wilco
 }  // namespace diagnostics

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,26 +21,6 @@ std::map<BuiltinModelId, BuiltinModelMetadata> GetBuiltinModelMetadata() {
           },
       },
       {
-          BuiltinModelId::SMART_DIM_20181115,
-          {
-              BuiltinModelId::SMART_DIM_20181115,
-              "mlservice-model-smart_dim-20181115.tflite",
-              {{"input", 3}},
-              {{"output", 4}},
-              "SmartDimModel",
-          },
-      },
-      {
-          BuiltinModelId::SMART_DIM_20190221,
-          {
-              BuiltinModelId::SMART_DIM_20190221,
-              "mlservice-model-smart_dim-20190221.tflite",
-              {{"input", 3}},
-              {{"output", 4}},
-              "SmartDimModel",
-          },
-      },
-      {
           BuiltinModelId::SMART_DIM_20190521,
           {
               BuiltinModelId::SMART_DIM_20190521,
@@ -51,13 +31,23 @@ std::map<BuiltinModelId, BuiltinModelMetadata> GetBuiltinModelMetadata() {
           },
       },
       {
-          BuiltinModelId::SEARCH_RANKER_20190923,
+          BuiltinModelId::ADAPTIVE_CHARGING_20230314,
           {
-              BuiltinModelId::SEARCH_RANKER_20190923,
-              "mlservice-model-search_ranker-20190923.tflite",
-              {{"input", 7}},
-              {{"output", 8}},
-              "SearchRankerModel",
+              BuiltinModelId::ADAPTIVE_CHARGING_20230314,
+              "mlservice-model-adaptive_charging-20230314.tflite",
+              {{"input", 0}},
+              {{"output", 13}},
+              "AdaptiveChargingModel",
+          },
+      },
+      {
+          BuiltinModelId::PONCHO_PALM_REJECTION_20230907,
+          {
+              BuiltinModelId::PONCHO_PALM_REJECTION_20230907,
+              "mlservice-model-poncho_palm_rejection-20230907-v0.tflite",
+              {{"input", 0}},
+              {{"output", 23}},
+              "PonchoPalmRejectionModel",
           },
       },
   };

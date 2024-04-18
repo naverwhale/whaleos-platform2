@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,9 +27,10 @@ void ExtractFspm(const string& partition, const base::FilePath& fspm_path) {
   if (!CreateTemporaryFile(&fw_bin_path))
     return;
 
+  // TODO(roccochen): replace direct flashrom call with futility call.
   vector<string> cmd = {"/usr/sbin/flashrom",
                         "-p",
-                        "host",
+                        "internal",
                         "-r",
                         "-i",
                         "FW_MAIN_" + partition + ":" + fw_bin_path.value()};
@@ -55,7 +56,8 @@ void ExtractFspm(const string& partition, const base::FilePath& fspm_path) {
 void SlowBootNotifyPreFwUpdate(const base::FilePath& fspm_main) {
   char partition[VB_MAX_STRING_PROPERTY];
 
-  if (!VbGetSystemPropertyString("mainfw_act", partition, sizeof(partition)))
+  if (VbGetSystemPropertyString("mainfw_act", partition, sizeof(partition)) !=
+      0)
     return;
 
   ExtractFspm(partition, fspm_main);
@@ -65,7 +67,8 @@ void SlowBootNotifyPostFwUpdate(const base::FilePath& fspm_next) {
   // After firmware update, get the ID of the new partition/region. If there is
   // no firmware update, region returned by fw_try_next is the same as
   // mainfw_act.
-  const char* partition = VbGetSystemPropertyString("fw_try_next", NULL, 0);
+  char partition[VB_MAX_STRING_PROPERTY];
+  VbGetSystemPropertyString("fw_try_next", partition, sizeof(partition));
   ExtractFspm(partition, fspm_next);
 }
 

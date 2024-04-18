@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,18 +10,13 @@
 
 namespace shill {
 
-// TODO(rochberg): The cellular constructor does work.  Ought to fix
-// this so that we don't depend on passing real values in for Type.
-
 MockCellular::MockCellular(Manager* manager,
                            const std::string& link_name,
                            const std::string& address,
                            int interface_index,
-                           Type type,
                            const std::string& service,
                            const RpcIdentifier& path)
-    : Cellular(
-          manager, link_name, address, interface_index, type, service, path) {}
+    : Cellular(manager, link_name, address, interface_index, service, path) {}
 
 MockCellular::~MockCellular() = default;
 

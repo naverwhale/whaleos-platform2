@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/hash/sha1.h>
 #include <base/logging.h>
 #include <base/metrics/histogram.h>
@@ -17,7 +17,7 @@
 #include <base/metrics/histogram_snapshot_manager.h>
 #include <base/metrics/sparse_histogram.h>
 #include <base/metrics/statistics_recorder.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 #include "metrics/serialization/metric_sample.h"
 #include "metrics/serialization/serialization_utils.h"
@@ -51,7 +51,7 @@ void UploadService::Init(const base::TimeDelta& upload_interval,
   skip_upload_ = !uploads_enabled;
 
   if (!testing_) {
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
         base::BindOnce(&UploadService::UploadEventCallback,
                        base::Unretained(this), upload_interval),
@@ -70,7 +70,7 @@ void UploadService::StartNewLog() {
 void UploadService::UploadEventCallback(const base::TimeDelta& interval) {
   UploadEvent();
 
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
       base::BindOnce(&UploadService::UploadEventCallback,
                      base::Unretained(this), interval),

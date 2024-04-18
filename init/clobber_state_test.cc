@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,31 +18,20 @@
 #include <base/files/scoped_temp_dir.h>
 #include <brillo/blkdev_utils/mock_lvm.h>
 #include <brillo/blkdev_utils/lvm.h>
-#include <brillo/process/process.h>
+#include <brillo/files/file_util.h>
 #include <gtest/gtest.h>
+#include <libcrossystem/crossystem.h>
+#include <libcrossystem/crossystem_fake.h>
+#include <libdlcservice/mock_utils.h>
+#include <libdlcservice/utils.h>
 
-#include "init/crossystem.h"
-#include "init/crossystem_fake.h"
+#include "gmock/gmock.h"
 
 namespace {
 using ::testing::_;
 using ::testing::DoAll;
-
-// Commands for disk formatting utility sfdisk.
-// Specify that partition table should use gpt format.
-constexpr char kSfdiskPartitionTableTypeCommand[] = "label: gpt\n";
-// Templates for partition command (size specified in number of sectors).
-constexpr char kSfdiskCommandFormat[] = "size=1, type=%s, name=\"%s\"\n";
-constexpr char kSfdiskCommandWithAttrsFormat[] =
-    "size=1, type=%s, name=\"%s\", attrs=\"%s\"\n";
-
-// UUIDs for various partition types in gpt partition tables.
-constexpr char kKernelPartition[] = "FE3A2A5D-4F32-41A7-B725-ACCC3285A309";
-constexpr char kRootPartition[] = "3CB8E202-3B7E-47DD-8A3C-7FF2A13CFCEC";
-constexpr char kDataPartition[] = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
-constexpr char kReservedPartition[] = "2E0A753D-9E48-43B0-8337-B15192CB1B5E";
-constexpr char kRWFWPartition[] = "CAB6E88E-ABF3-4102-A07A-D4BB9BE3C1D3";
-constexpr char kEFIPartition[] = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+using ::testing::Return;
+using ::testing::StrictMock;
 
 constexpr char kPhysicalVolumeReport[] =
     "{\"report\": [{ \"pv\": [ {\"pv_name\":\"/dev/mmcblk0p1\", "
@@ -75,6 +64,7 @@ TEST(ParseArgv, EmptyArgs) {
   EXPECT_FALSE(args.keepimg);
   EXPECT_FALSE(args.safe_wipe);
   EXPECT_FALSE(args.rollback_wipe);
+  EXPECT_FALSE(args.preserve_lvs);
 }
 
 TEST(ParseArgv, AllArgsIndividual) {
@@ -86,6 +76,7 @@ TEST(ParseArgv, AllArgsIndividual) {
   EXPECT_TRUE(args.keepimg);
   EXPECT_TRUE(args.safe_wipe);
   EXPECT_TRUE(args.rollback_wipe);
+  EXPECT_FALSE(args.preserve_lvs);
 }
 
 TEST(ParseArgv, AllArgsSquished) {
@@ -97,6 +88,7 @@ TEST(ParseArgv, AllArgsSquished) {
   EXPECT_TRUE(args.keepimg);
   EXPECT_TRUE(args.safe_wipe);
   EXPECT_TRUE(args.rollback_wipe);
+  EXPECT_FALSE(args.preserve_lvs);
 }
 
 TEST(ParseArgv, SomeArgsIndividual) {
@@ -107,6 +99,7 @@ TEST(ParseArgv, SomeArgsIndividual) {
   EXPECT_TRUE(args.keepimg);
   EXPECT_FALSE(args.safe_wipe);
   EXPECT_TRUE(args.rollback_wipe);
+  EXPECT_FALSE(args.preserve_lvs);
 }
 
 TEST(ParseArgv, SomeArgsSquished) {
@@ -117,6 +110,43 @@ TEST(ParseArgv, SomeArgsSquished) {
   EXPECT_FALSE(args.keepimg);
   EXPECT_TRUE(args.safe_wipe);
   EXPECT_TRUE(args.rollback_wipe);
+  EXPECT_FALSE(args.preserve_lvs);
+}
+
+TEST(ParseArgv, PreserveLogicalVolumesWipe) {
+  {
+    std::vector<const char*> argv{"clobber-state", "preserve_lvs"};
+    ClobberState::Arguments args =
+        ClobberState::ParseArgv(argv.size(), &argv[0]);
+    EXPECT_FALSE(args.safe_wipe);
+#if USE_LVM_STATEFUL_PARTITION
+    EXPECT_TRUE(args.preserve_lvs);
+#else
+    EXPECT_FALSE(args.preserve_lvs);
+#endif  // USE_LVM_STATEFUL_PARTITION
+  }
+  {
+    std::vector<const char*> argv{"clobber-state", "safe preserve_lvs"};
+    ClobberState::Arguments args =
+        ClobberState::ParseArgv(argv.size(), &argv[0]);
+    EXPECT_TRUE(args.safe_wipe);
+#if USE_LVM_STATEFUL_PARTITION
+    EXPECT_TRUE(args.preserve_lvs);
+#else
+    EXPECT_FALSE(args.preserve_lvs);
+#endif  // USE_LVM_STATEFUL_PARTITION
+  }
+  {
+    std::vector<const char*> argv{"clobber-state", "safe", "preserve_lvs"};
+    ClobberState::Arguments args =
+        ClobberState::ParseArgv(argv.size(), &argv[0]);
+    EXPECT_TRUE(args.safe_wipe);
+#if USE_LVM_STATEFUL_PARTITION
+    EXPECT_TRUE(args.preserve_lvs);
+#else
+    EXPECT_FALSE(args.preserve_lvs);
+#endif  // USE_LVM_STATEFUL_PARTITION
+  }
 }
 
 TEST(IncrementFileCounter, Nonexistent) {
@@ -399,179 +429,14 @@ TEST(PreserveFiles, ManyFiles) {
   EXPECT_EQ(contents_b, "data");
 }
 
-TEST(GetDevicePathComponents, ErrorCases) {
-  std::string base_device;
-  int partition_number;
-  EXPECT_FALSE(ClobberState::GetDevicePathComponents(base::FilePath(""),
-                                                     nullptr, nullptr));
-  EXPECT_FALSE(ClobberState::GetDevicePathComponents(
-      base::FilePath(""), nullptr, &partition_number));
-  EXPECT_FALSE(ClobberState::GetDevicePathComponents(base::FilePath(""),
-                                                     &base_device, nullptr));
-  EXPECT_FALSE(ClobberState::GetDevicePathComponents(
-      base::FilePath(""), &base_device, &partition_number));
-  EXPECT_FALSE(ClobberState::GetDevicePathComponents(
-      base::FilePath("24728"), &base_device, &partition_number));
-  EXPECT_FALSE(ClobberState::GetDevicePathComponents(
-      base::FilePath("bad_dev"), &base_device, &partition_number));
-  EXPECT_FALSE(ClobberState::GetDevicePathComponents(
-      base::FilePath("/dev/"), &base_device, &partition_number));
-}
-
-TEST(GetDevicePathComponents, ValidCases) {
-  std::string base_device;
-  int partition_number;
-  EXPECT_TRUE(ClobberState::GetDevicePathComponents(
-      base::FilePath("/dev/sda273"), &base_device, &partition_number));
-  EXPECT_EQ(base_device, "/dev/sda");
-  EXPECT_EQ(partition_number, 273);
-
-  EXPECT_TRUE(ClobberState::GetDevicePathComponents(
-      base::FilePath("/dev/mmcblk5p193448"), &base_device, &partition_number));
-  EXPECT_EQ(base_device, "/dev/mmcblk5p");
-  EXPECT_EQ(partition_number, 193448);
-
-  EXPECT_TRUE(ClobberState::GetDevicePathComponents(
-      base::FilePath("/dev/nvme7n2p11"), &base_device, &partition_number));
-  EXPECT_EQ(base_device, "/dev/nvme7n2p");
-  EXPECT_EQ(partition_number, 11);
-
-  EXPECT_TRUE(ClobberState::GetDevicePathComponents(
-      base::FilePath("/dev/ubiblock17_0"), &base_device, &partition_number));
-  EXPECT_EQ(base_device, "/dev/ubiblock");
-  EXPECT_EQ(partition_number, 17);
-
-  EXPECT_TRUE(ClobberState::GetDevicePathComponents(
-      base::FilePath("/dev/ubi9_0"), &base_device, &partition_number));
-  EXPECT_EQ(base_device, "/dev/ubi");
-  EXPECT_EQ(partition_number, 9);
-
-  EXPECT_TRUE(ClobberState::GetDevicePathComponents(
-      base::FilePath("/dev/mtd0"), &base_device, &partition_number));
-  EXPECT_EQ(base_device, "/dev/mtd");
-  EXPECT_EQ(partition_number, 0);
-}
-
-class CgptTest : public testing::Test {
- protected:
-  void SetUp() override {
-    constexpr int kSectorSize = 512;
-    constexpr int kSectorCount = 25 * 1024;
-
-    ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
-    test_image_path_ = temp_dir_.GetPath().Append("test.img");
-    base::File test_image(test_image_path_,
-                          base::File::FLAG_CREATE | base::File::FLAG_WRITE);
-    ASSERT_TRUE(test_image.IsValid());
-    ASSERT_GE(test_image.SetLength(kSectorSize * kSectorCount), 0);
-    test_image.Close();
-
-    base::FilePath sfdisk_input_path =
-        temp_dir_.GetPath().Append("sfdisk_input");
-    base::File sfdisk_input(sfdisk_input_path,
-                            base::File::FLAG_CREATE | base::File::FLAG_WRITE);
-    ASSERT_TRUE(sfdisk_input.IsValid());
-    std::vector<std::string> sfdisk_commands{
-        kSfdiskPartitionTableTypeCommand,
-        base::StringPrintf(kSfdiskCommandFormat, kDataPartition, "STATE"),
-        base::StringPrintf(kSfdiskCommandWithAttrsFormat, kKernelPartition,
-                           "KERN-A", "GUID:49,56"),
-        base::StringPrintf(kSfdiskCommandFormat, kRootPartition, "ROOT-A"),
-        base::StringPrintf(kSfdiskCommandWithAttrsFormat, kKernelPartition,
-                           "KERN-B", "GUID:48"),
-        base::StringPrintf(kSfdiskCommandFormat, kRootPartition, "ROOT-B"),
-        base::StringPrintf(kSfdiskCommandWithAttrsFormat, kKernelPartition,
-                           "KERN-C", "GUID:52,53,54,55"),
-        base::StringPrintf(kSfdiskCommandFormat, kRootPartition, "ROOT-C"),
-        base::StringPrintf(kSfdiskCommandFormat, kDataPartition, "OEM"),
-        base::StringPrintf(kSfdiskCommandFormat, kReservedPartition,
-                           "reserved"),
-        base::StringPrintf(kSfdiskCommandFormat, kReservedPartition,
-                           "reserved"),
-        base::StringPrintf(kSfdiskCommandFormat, kRWFWPartition, "RWFW"),
-        base::StringPrintf(kSfdiskCommandFormat, kEFIPartition, "EFI-SYSTEM")};
-    for (const std::string& command : sfdisk_commands) {
-      EXPECT_EQ(
-          sfdisk_input.WriteAtCurrentPos(command.c_str(), command.length()),
-          command.length());
-    }
-    sfdisk_input.Close();
-
-    // Build partition table on backing file.
-    brillo::ProcessImpl sfdisk;
-    sfdisk.AddArg("/sbin/sfdisk");
-    sfdisk.AddArg(test_image_path_.value());
-    sfdisk.RedirectInput(sfdisk_input_path.value());
-    ASSERT_EQ(sfdisk.Run(), 0);
-  }
-
-  base::FilePath test_image_path_;
-
- private:
-  base::ScopedTempDir temp_dir_;
-};
-
-TEST_F(CgptTest, FindInvalidPartitions) {
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, ""), -1);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "NONEXISTENT"),
-            -1);
-  // return -1 here because there are multiple partitions labeled "reserved".
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "reserved"), -1);
-}
-
-TEST_F(CgptTest, FindValidPartitions) {
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "STATE"), 1);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "KERN-A"), 2);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "ROOT-A"), 3);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "KERN-B"), 4);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "ROOT-B"), 5);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "KERN-C"), 6);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "ROOT-C"), 7);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "OEM"), 8);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "RWFW"), 11);
-  EXPECT_EQ(ClobberState::GetPartitionNumber(test_image_path_, "EFI-SYSTEM"),
-            12);
-}
-
-TEST_F(CgptTest, ReadPartitionMetadata) {
-  bool successful;
-  int priority;
-  EXPECT_TRUE(ClobberState::ReadPartitionMetadata(test_image_path_, 2,
-                                                  &successful, &priority));
-  EXPECT_TRUE(successful);
-  EXPECT_EQ(priority, 2);
-  EXPECT_TRUE(ClobberState::ReadPartitionMetadata(test_image_path_, 4,
-                                                  &successful, &priority));
-  EXPECT_FALSE(successful);
-  EXPECT_EQ(priority, 1);
-  EXPECT_TRUE(ClobberState::ReadPartitionMetadata(test_image_path_, 6,
-                                                  &successful, &priority));
-  EXPECT_FALSE(successful);
-  EXPECT_EQ(priority, 0);
-}
-
-TEST_F(CgptTest, EnsureKernelIsBootable) {
-  ClobberState::EnsureKernelIsBootable(test_image_path_, 4);
-  bool successful;
-  int priority;
-  EXPECT_TRUE(ClobberState::ReadPartitionMetadata(test_image_path_, 4,
-                                                  &successful, &priority));
-  EXPECT_TRUE(successful);
-  EXPECT_GT(priority, 0);
-
-  ClobberState::EnsureKernelIsBootable(test_image_path_, 6);
-  EXPECT_TRUE(ClobberState::ReadPartitionMetadata(test_image_path_, 6,
-                                                  &successful, &priority));
-  EXPECT_TRUE(successful);
-  EXPECT_GT(priority, 0);
-}
-
 class MarkDeveloperModeTest : public ::testing::Test {
  protected:
   MarkDeveloperModeTest()
-      : cros_system_(new CrosSystemFake()),
+      : crossystem_fake_(std::make_unique<crossystem::fake::CrossystemFake>()),
+        cros_system_(crossystem_fake_.get()),
         clobber_(ClobberState::Arguments(),
-                 std::unique_ptr<CrosSystem>(cros_system_),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::move(crossystem_fake_)),
                  std::make_unique<ClobberUi>(DevNull()),
                  std::make_unique<brillo::MockLogicalVolumeManager>()) {}
 
@@ -581,7 +446,8 @@ class MarkDeveloperModeTest : public ::testing::Test {
     clobber_.SetStatefulForTest(fake_stateful_);
   }
 
-  CrosSystemFake* cros_system_;
+  std::unique_ptr<crossystem::fake::CrossystemFake> crossystem_fake_;
+  crossystem::fake::CrossystemFake* cros_system_;
   ClobberState clobber_;
   base::ScopedTempDir temp_dir_;
   base::FilePath fake_stateful_;
@@ -591,24 +457,32 @@ TEST_F(MarkDeveloperModeTest, NotDeveloper) {
   clobber_.MarkDeveloperMode();
   EXPECT_FALSE(base::PathExists(fake_stateful_.Append(".developer_mode")));
 
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDevSwitchBoot, 0));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDevSwitchBoot, 0));
   clobber_.MarkDeveloperMode();
   EXPECT_FALSE(base::PathExists(fake_stateful_.Append(".developer_mode")));
 
-  ASSERT_TRUE(
-      cros_system_->SetString(CrosSystem::kMainFirmwareActive, "recovery"));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyString(
+      crossystem::Crossystem::kMainFirmwareActive, "recovery"));
   clobber_.MarkDeveloperMode();
   EXPECT_FALSE(base::PathExists(fake_stateful_.Append(".developer_mode")));
 
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDevSwitchBoot, 1));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDevSwitchBoot, 1));
+  clobber_.MarkDeveloperMode();
+  EXPECT_FALSE(base::PathExists(fake_stateful_.Append(".developer_mode")));
+
+  cros_system_->UnsetSystemPropertyValue(
+      crossystem::Crossystem::kMainFirmwareActive);
   clobber_.MarkDeveloperMode();
   EXPECT_FALSE(base::PathExists(fake_stateful_.Append(".developer_mode")));
 }
 
 TEST_F(MarkDeveloperModeTest, IsDeveloper) {
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDevSwitchBoot, 1));
-  ASSERT_TRUE(
-      cros_system_->SetString(CrosSystem::kMainFirmwareActive, "not_recovery"));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDevSwitchBoot, 1));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyString(
+      crossystem::Crossystem::kMainFirmwareActive, "not_recovery"));
   clobber_.MarkDeveloperMode();
   EXPECT_TRUE(base::PathExists(fake_stateful_.Append(".developer_mode")));
 }
@@ -616,9 +490,11 @@ TEST_F(MarkDeveloperModeTest, IsDeveloper) {
 class GetPreservedFilesListTest : public ::testing::Test {
  protected:
   GetPreservedFilesListTest()
-      : cros_system_(new CrosSystemFake()),
+      : crossystem_fake_(std::make_unique<crossystem::fake::CrossystemFake>()),
+        cros_system_(crossystem_fake_.get()),
         clobber_(ClobberState::Arguments(),
-                 std::unique_ptr<CrosSystem>(cros_system_),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::move(crossystem_fake_)),
                  std::make_unique<ClobberUi>(DevNull()),
                  std::make_unique<brillo::MockLogicalVolumeManager>()) {}
 
@@ -638,6 +514,16 @@ class GetPreservedFilesListTest : public ::testing::Test {
         CreateDirectoryAndWriteFile(extensions.Append("fileC.tar"), ""));
     ASSERT_TRUE(
         CreateDirectoryAndWriteFile(extensions.Append("fileD.bmp"), ""));
+
+    base::FilePath dlc_factory =
+        fake_stateful_.Append("unencrypted/dlc-factory-images");
+    ASSERT_TRUE(base::CreateDirectory(dlc_factory));
+    ASSERT_TRUE(CreateDirectoryAndWriteFile(
+        dlc_factory.Append("test-dlc1/package/dlc.img"), ""));
+    ASSERT_TRUE(CreateDirectoryAndWriteFile(
+        dlc_factory.Append("test-dlc2/package/dlc.img"), ""));
+    ASSERT_TRUE(
+        CreateDirectoryAndWriteFile(dlc_factory.Append("test-dlc3"), ""));
   }
 
   void SetCompare(std::set<std::string> expected,
@@ -652,17 +538,20 @@ class GetPreservedFilesListTest : public ::testing::Test {
     }
   }
 
-  CrosSystemFake* cros_system_;
+  std::unique_ptr<crossystem::fake::CrossystemFake> crossystem_fake_;
+  crossystem::fake::CrossystemFake* cros_system_;
   ClobberState clobber_;
   base::ScopedTempDir temp_dir_;
   base::FilePath fake_stateful_;
 };
 
 TEST_F(GetPreservedFilesListTest, NoOptions) {
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDebugBuild, 0));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDebugBuild, 0));
   EXPECT_EQ(clobber_.GetPreservedFilesList().size(), 0);
 
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDebugBuild, 1));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDebugBuild, 1));
   std::vector<base::FilePath> preserved_files =
       clobber_.GetPreservedFilesList();
   std::set<base::FilePath> preserved_set(preserved_files.begin(),
@@ -676,50 +565,13 @@ TEST_F(GetPreservedFilesListTest, SafeWipe) {
   args.safe_wipe = true;
   clobber_.SetArgsForTest(args);
 
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDebugBuild, 0));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDebugBuild, 0));
   std::vector<base::FilePath> preserved_files =
       clobber_.GetPreservedFilesList();
   std::set<base::FilePath> preserved_set(preserved_files.begin(),
                                          preserved_files.end());
   std::set<std::string> expected_preserved_set{
-      "unencrypted/preserve/powerwash_count",
-      "unencrypted/preserve/tpm_firmware_update_request",
-      "unencrypted/preserve/update_engine/prefs/rollback-happened",
-      "unencrypted/preserve/update_engine/prefs/rollback-version",
-      "unencrypted/preserve/update_engine/prefs/last-active-ping-day",
-      "unencrypted/preserve/update_engine/prefs/last-roll-call-ping-day",
-      "unencrypted/cros-components/offline-demo-mode-resources/image.squash",
-      "unencrypted/cros-components/offline-demo-mode-resources/"
-      "imageloader.json",
-      "unencrypted/cros-components/offline-demo-mode-resources/"
-      "imageloader.sig.1",
-      "unencrypted/cros-components/offline-demo-mode-resources/"
-      "imageloader.sig.2",
-      "unencrypted/cros-components/offline-demo-mode-resources/"
-      "manifest.fingerprint",
-      "unencrypted/cros-components/offline-demo-mode-resources/manifest.json",
-      "unencrypted/cros-components/offline-demo-mode-resources/table"};
-  SetCompare(expected_preserved_set, preserved_set);
-}
-
-TEST_F(GetPreservedFilesListTest, SafeAndRollbackWipe) {
-  ClobberState::Arguments args;
-  args.safe_wipe = true;
-  args.rollback_wipe = true;
-  clobber_.SetArgsForTest(args);
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDebugBuild, 0));
-
-  std::vector<base::FilePath> preserved_files =
-      clobber_.GetPreservedFilesList();
-  std::set<base::FilePath> preserved_set(preserved_files.begin(),
-                                         preserved_files.end());
-  std::set<std::string> expected_preserved_set{
-      "unencrypted/preserve/powerwash_count",
-      "unencrypted/preserve/tpm_firmware_update_request",
-      "unencrypted/preserve/update_engine/prefs/rollback-happened",
-      "unencrypted/preserve/update_engine/prefs/rollback-version",
-      "unencrypted/preserve/update_engine/prefs/last-active-ping-day",
-      "unencrypted/preserve/update_engine/prefs/last-roll-call-ping-day",
       "unencrypted/cros-components/offline-demo-mode-resources/image.squash",
       "unencrypted/cros-components/offline-demo-mode-resources/"
       "imageloader.json",
@@ -731,7 +583,91 @@ TEST_F(GetPreservedFilesListTest, SafeAndRollbackWipe) {
       "manifest.fingerprint",
       "unencrypted/cros-components/offline-demo-mode-resources/manifest.json",
       "unencrypted/cros-components/offline-demo-mode-resources/table",
-      "unencrypted/preserve/rollback_data"};
+      "unencrypted/preserve/flex/flex_id",
+      "unencrypted/preserve/gsc_prev_crash_log_id",
+      "unencrypted/preserve/last_active_dates",
+      "unencrypted/preserve/powerwash_count",
+      "unencrypted/preserve/tpm_firmware_update_request",
+      "unencrypted/preserve/update_engine/prefs/last-active-ping-day",
+      "unencrypted/preserve/update_engine/prefs/last-roll-call-ping-day",
+      "unencrypted/preserve/update_engine/prefs/rollback-happened",
+      "unencrypted/preserve/update_engine/prefs/rollback-version"};
+  SetCompare(expected_preserved_set, preserved_set);
+}
+
+TEST_F(GetPreservedFilesListTest, SafeAndRollbackWipe) {
+  ClobberState::Arguments args;
+  args.safe_wipe = true;
+  args.rollback_wipe = true;
+  clobber_.SetArgsForTest(args);
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDebugBuild, 0));
+
+  std::vector<base::FilePath> preserved_files =
+      clobber_.GetPreservedFilesList();
+  std::set<base::FilePath> preserved_set(preserved_files.begin(),
+                                         preserved_files.end());
+  std::set<std::string> expected_preserved_set{
+      "unencrypted/cros-components/offline-demo-mode-resources/image.squash",
+      "unencrypted/cros-components/offline-demo-mode-resources/"
+      "imageloader.json",
+      "unencrypted/cros-components/offline-demo-mode-resources/"
+      "imageloader.sig.1",
+      "unencrypted/cros-components/offline-demo-mode-resources/"
+      "imageloader.sig.2",
+      "unencrypted/cros-components/offline-demo-mode-resources/"
+      "manifest.fingerprint",
+      "unencrypted/cros-components/offline-demo-mode-resources/manifest.json",
+      "unencrypted/cros-components/offline-demo-mode-resources/table",
+      "unencrypted/preserve/enterprise-rollback-metrics-data",
+      "unencrypted/preserve/flex/flex_id",
+      "unencrypted/preserve/gsc_prev_crash_log_id",
+      "unencrypted/preserve/last_active_dates",
+      "unencrypted/preserve/powerwash_count",
+      "unencrypted/preserve/rollback_data",
+      "unencrypted/preserve/rollback_data_tpm",
+      "unencrypted/preserve/tpm_firmware_update_request",
+      "unencrypted/preserve/update_engine/prefs/last-active-ping-day",
+      "unencrypted/preserve/update_engine/prefs/last-roll-call-ping-day",
+      "unencrypted/preserve/update_engine/prefs/rollback-happened",
+      "unencrypted/preserve/update_engine/prefs/rollback-version"};
+  SetCompare(expected_preserved_set, preserved_set);
+}
+
+TEST_F(GetPreservedFilesListTest, SafeAndAdMigrationWipe) {
+  ClobberState::Arguments args;
+  args.safe_wipe = true;
+  args.ad_migration_wipe = true;
+  clobber_.SetArgsForTest(args);
+
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDebugBuild, 0));
+  std::vector<base::FilePath> preserved_files =
+      clobber_.GetPreservedFilesList();
+  std::set<base::FilePath> preserved_set(preserved_files.begin(),
+                                         preserved_files.end());
+  std::set<std::string> expected_preserved_set{
+      "unencrypted/cros-components/offline-demo-mode-resources/image.squash",
+      "unencrypted/cros-components/offline-demo-mode-resources/"
+      "imageloader.json",
+      "unencrypted/cros-components/offline-demo-mode-resources/"
+      "imageloader.sig.1",
+      "unencrypted/cros-components/offline-demo-mode-resources/"
+      "imageloader.sig.2",
+      "unencrypted/cros-components/offline-demo-mode-resources/"
+      "manifest.fingerprint",
+      "unencrypted/cros-components/offline-demo-mode-resources/manifest.json",
+      "unencrypted/cros-components/offline-demo-mode-resources/table",
+      "unencrypted/preserve/chromad_migration_skip_oobe",
+      "unencrypted/preserve/flex/flex_id",
+      "unencrypted/preserve/gsc_prev_crash_log_id",
+      "unencrypted/preserve/last_active_dates",
+      "unencrypted/preserve/powerwash_count",
+      "unencrypted/preserve/tpm_firmware_update_request",
+      "unencrypted/preserve/update_engine/prefs/last-active-ping-day",
+      "unencrypted/preserve/update_engine/prefs/last-roll-call-ping-day",
+      "unencrypted/preserve/update_engine/prefs/rollback-happened",
+      "unencrypted/preserve/update_engine/prefs/rollback-version"};
   SetCompare(expected_preserved_set, preserved_set);
 }
 
@@ -740,12 +676,15 @@ TEST_F(GetPreservedFilesListTest, FactoryWipe) {
   args.factory_wipe = true;
   clobber_.SetArgsForTest(args);
 
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDebugBuild, 0));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDebugBuild, 0));
   std::vector<base::FilePath> preserved_files =
       clobber_.GetPreservedFilesList();
   std::set<base::FilePath> preserved_set(preserved_files.begin(),
                                          preserved_files.end());
   std::set<std::string> expected_preserved_set{
+      "unencrypted/dlc-factory-images/test-dlc1/package/dlc.img",
+      "unencrypted/dlc-factory-images/test-dlc2/package/dlc.img",
       "unencrypted/import_extensions/extensions/fileA.crx",
       "unencrypted/import_extensions/extensions/fileB.crx"};
   SetCompare(expected_preserved_set, preserved_set);
@@ -758,18 +697,13 @@ TEST_F(GetPreservedFilesListTest, SafeRollbackFactoryWipe) {
   args.factory_wipe = true;
   clobber_.SetArgsForTest(args);
 
-  ASSERT_TRUE(cros_system_->SetInt(CrosSystem::kDebugBuild, 0));
+  ASSERT_TRUE(cros_system_->VbSetSystemPropertyInt(
+      crossystem::Crossystem::kDebugBuild, 0));
   std::vector<base::FilePath> preserved_files =
       clobber_.GetPreservedFilesList();
   std::set<base::FilePath> preserved_set(preserved_files.begin(),
                                          preserved_files.end());
   std::set<std::string> expected_preserved_set{
-      "unencrypted/preserve/powerwash_count",
-      "unencrypted/preserve/tpm_firmware_update_request",
-      "unencrypted/preserve/update_engine/prefs/rollback-happened",
-      "unencrypted/preserve/update_engine/prefs/rollback-version",
-      "unencrypted/preserve/update_engine/prefs/last-active-ping-day",
-      "unencrypted/preserve/update_engine/prefs/last-roll-call-ping-day",
       "unencrypted/cros-components/offline-demo-mode-resources/image.squash",
       "unencrypted/cros-components/offline-demo-mode-resources/"
       "imageloader.json",
@@ -781,9 +715,22 @@ TEST_F(GetPreservedFilesListTest, SafeRollbackFactoryWipe) {
       "manifest.fingerprint",
       "unencrypted/cros-components/offline-demo-mode-resources/manifest.json",
       "unencrypted/cros-components/offline-demo-mode-resources/table",
-      "unencrypted/preserve/rollback_data",
+      "unencrypted/dlc-factory-images/test-dlc1/package/dlc.img",
+      "unencrypted/dlc-factory-images/test-dlc2/package/dlc.img",
       "unencrypted/import_extensions/extensions/fileA.crx",
-      "unencrypted/import_extensions/extensions/fileB.crx"};
+      "unencrypted/import_extensions/extensions/fileB.crx",
+      "unencrypted/preserve/enterprise-rollback-metrics-data",
+      "unencrypted/preserve/flex/flex_id",
+      "unencrypted/preserve/gsc_prev_crash_log_id",
+      "unencrypted/preserve/last_active_dates",
+      "unencrypted/preserve/powerwash_count",
+      "unencrypted/preserve/rollback_data",
+      "unencrypted/preserve/rollback_data_tpm",
+      "unencrypted/preserve/tpm_firmware_update_request",
+      "unencrypted/preserve/update_engine/prefs/last-active-ping-day",
+      "unencrypted/preserve/update_engine/prefs/last-roll-call-ping-day",
+      "unencrypted/preserve/update_engine/prefs/rollback-happened",
+      "unencrypted/preserve/update_engine/prefs/rollback-version"};
   SetCompare(expected_preserved_set, preserved_set);
 }
 
@@ -791,7 +738,7 @@ TEST_F(GetPreservedFilesListTest, SafeRollbackFactoryWipe) {
 class ClobberStateMock : public ClobberState {
  public:
   ClobberStateMock(const Arguments& args,
-                   std::unique_ptr<CrosSystem> cros_system,
+                   std::unique_ptr<crossystem::Crossystem> cros_system,
                    std::unique_ptr<ClobberUi> ui)
       : ClobberState(args,
                      std::move(cros_system),
@@ -807,6 +754,10 @@ class ClobberStateMock : public ClobberState {
     secure_erase_supported_ = supported;
   }
 
+  void SetWipeDevice(bool ret) { wipe_device_ret_ = ret; }
+
+  uint64_t WipeDeviceCalled() { return wipe_device_called_; }
+
  protected:
   int Stat(const base::FilePath& path, struct stat* st) override {
     if (st == nullptr || result_map_.count(path.value()) == 0) {
@@ -818,7 +769,7 @@ class ClobberStateMock : public ClobberState {
   }
 
   bool SecureErase(const base::FilePath& path) override {
-    return secure_erase_supported_ && base::DeleteFile(path);
+    return secure_erase_supported_ && brillo::DeleteFile(path);
   }
 
   bool DropCaches() override { return secure_erase_supported_; }
@@ -831,17 +782,27 @@ class ClobberStateMock : public ClobberState {
     return "STATEFULSTATEFUL";
   }
 
+  bool WipeDevice(const base::FilePath& device_name,
+                  bool discard = false) override {
+    ++wipe_device_called_;
+    return wipe_device_ret_;
+  }
+
  private:
   std::unordered_map<std::string, struct stat> result_map_;
-  uint64_t stateful_partition_size_ = 5UL * 1024 * 1024 * 1024;
+  uint64_t stateful_partition_size_ = 5ULL * 1024 * 1024 * 1024;
   bool secure_erase_supported_;
+
+  uint64_t wipe_device_called_ = 0;
+  bool wipe_device_ret_ = true;
 };
 
 class IsRotationalTest : public ::testing::Test {
  protected:
   IsRotationalTest()
       : clobber_(ClobberState::Arguments(),
-                 std::make_unique<CrosSystemFake>(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::make_unique<crossystem::fake::CrossystemFake>()),
                  std::make_unique<ClobberUi>(DevNull())) {}
 
   void SetUp() override {
@@ -990,7 +951,8 @@ class AttemptSwitchToFastWipeTest : public ::testing::Test {
  protected:
   AttemptSwitchToFastWipeTest()
       : clobber_(ClobberState::Arguments(),
-                 std::make_unique<CrosSystemFake>(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::make_unique<crossystem::fake::CrossystemFake>()),
                  std::make_unique<ClobberUi>(DevNull())) {}
 
   void SetUp() override {
@@ -1015,15 +977,22 @@ class AttemptSwitchToFastWipeTest : public ::testing::Test {
         shadow.Append("vault/fileB"),
     });
 
-    keyset_paths_ = std::vector<base::FilePath>({
+    key_material_paths_ = std::vector<base::FilePath>({
         fake_stateful_.Append("encrypted.key"),
         fake_stateful_.Append("encrypted.needs-finalization"),
         fake_stateful_.Append("home/.shadow/cryptohome.key"),
+        fake_stateful_.Append("home/.shadow/extra_dir/master"),
+        fake_stateful_.Append("home/.shadow/other_dir/master"),
+        fake_stateful_.Append("home/.shadow/random_dir/master.0"),
+        fake_stateful_.Append("home/.shadow/random_dir/master.1"),
+        fake_stateful_.Append(
+            "home/.shadow/new_dir/auth_factors/password.first"),
+        fake_stateful_.Append(
+            "home/.shadow/new_dir/auth_factors/password.second"),
+        fake_stateful_.Append("home/.shadow/new_dir/auth_factors/pin.other"),
+        fake_stateful_.Append("home/.shadow/new_dir/user_secret_stash/uss.0"),
         fake_stateful_.Append("home/.shadow/salt"),
         fake_stateful_.Append("home/.shadow/salt.sum"),
-        fake_stateful_.Append("home/.shadow/random_dir/master"),
-        fake_stateful_.Append("home/.shadow/other_dir/master"),
-        fake_stateful_.Append("home/.shadow/extra_dir/master"),
     });
 
     shredded_paths_ = std::vector<base::FilePath>(
@@ -1034,7 +1003,7 @@ class AttemptSwitchToFastWipeTest : public ::testing::Test {
       ASSERT_TRUE(CreateDirectoryAndWriteFile(path, kContents));
     }
 
-    for (const base::FilePath& path : keyset_paths_) {
+    for (const base::FilePath& path : key_material_paths_) {
       ASSERT_TRUE(CreateDirectoryAndWriteFile(path, kContents));
     }
 
@@ -1076,8 +1045,8 @@ class AttemptSwitchToFastWipeTest : public ::testing::Test {
   base::FilePath fake_stateful_;
   // Files which are deleted by ShredRotationalStatefulPaths.
   std::vector<base::FilePath> encrypted_stateful_paths_;
-  // Files which are deleted by WipeKeysets.
-  std::vector<base::FilePath> keyset_paths_;
+  // Files which are deleted by WipeKeyMaterial.
+  std::vector<base::FilePath> key_material_paths_;
   // Files which will be shredded (overwritten) but not deleted by
   // ShredRotationalStatefulPaths.
   std::vector<base::FilePath> shredded_paths_;
@@ -1092,7 +1061,7 @@ TEST_F(AttemptSwitchToFastWipeTest, NotRotationalNoSecureErase) {
   clobber_.AttemptSwitchToFastWipe(false);
   EXPECT_FALSE(clobber_.GetArgsForTest().fast_wipe);
   CheckPathsUntouched(encrypted_stateful_paths_);
-  CheckPathsUntouched(keyset_paths_);
+  CheckPathsUntouched(key_material_paths_);
   CheckPathsUntouched(shredded_paths_);
 }
 
@@ -1105,7 +1074,7 @@ TEST_F(AttemptSwitchToFastWipeTest, AlreadyFast) {
   clobber_.AttemptSwitchToFastWipe(true);
   EXPECT_TRUE(clobber_.GetArgsForTest().fast_wipe);
   CheckPathsUntouched(encrypted_stateful_paths_);
-  CheckPathsUntouched(keyset_paths_);
+  CheckPathsUntouched(key_material_paths_);
   CheckPathsUntouched(shredded_paths_);
 }
 
@@ -1118,7 +1087,7 @@ TEST_F(AttemptSwitchToFastWipeTest, RotationalNoSecureErase) {
   clobber_.AttemptSwitchToFastWipe(true);
   EXPECT_TRUE(clobber_.GetArgsForTest().fast_wipe);
   CheckPathsDeleted(encrypted_stateful_paths_);
-  CheckPathsShredded(keyset_paths_);
+  CheckPathsShredded(key_material_paths_);
   CheckPathsShredded(shredded_paths_);
 }
 
@@ -1131,7 +1100,7 @@ TEST_F(AttemptSwitchToFastWipeTest, SecureEraseNotRotational) {
   clobber_.AttemptSwitchToFastWipe(false);
   EXPECT_TRUE(clobber_.GetArgsForTest().fast_wipe);
   CheckPathsUntouched(encrypted_stateful_paths_);
-  CheckPathsDeleted(keyset_paths_);
+  CheckPathsDeleted(key_material_paths_);
   CheckPathsUntouched(shredded_paths_);
 }
 
@@ -1145,7 +1114,7 @@ TEST_F(AttemptSwitchToFastWipeTest, SecureEraseNotRotationalFactoryWipe) {
   clobber_.AttemptSwitchToFastWipe(false);
   EXPECT_TRUE(clobber_.GetArgsForTest().fast_wipe);
   CheckPathsUntouched(encrypted_stateful_paths_);
-  CheckPathsDeleted(keyset_paths_);
+  CheckPathsDeleted(key_material_paths_);
   CheckPathsUntouched(shredded_paths_);
 }
 
@@ -1158,7 +1127,7 @@ TEST_F(AttemptSwitchToFastWipeTest, RotationalSecureErase) {
   clobber_.AttemptSwitchToFastWipe(true);
   EXPECT_TRUE(clobber_.GetArgsForTest().fast_wipe);
   CheckPathsDeleted(encrypted_stateful_paths_);
-  CheckPathsShredded(keyset_paths_);
+  CheckPathsShredded(key_material_paths_);
   CheckPathsShredded(shredded_paths_);
 }
 
@@ -1172,7 +1141,7 @@ TEST_F(AttemptSwitchToFastWipeTest, RotationalSecureEraseFactoryWipe) {
   clobber_.AttemptSwitchToFastWipe(true);
   EXPECT_TRUE(clobber_.GetArgsForTest().fast_wipe);
   CheckPathsDeleted(encrypted_stateful_paths_);
-  CheckPathsShredded(keyset_paths_);
+  CheckPathsShredded(key_material_paths_);
   CheckPathsShredded(shredded_paths_);
 }
 
@@ -1180,7 +1149,8 @@ class ShredRotationalStatefulFilesTest : public ::testing::Test {
  protected:
   ShredRotationalStatefulFilesTest()
       : clobber_(ClobberState::Arguments(),
-                 std::make_unique<CrosSystemFake>(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::make_unique<crossystem::fake::CrossystemFake>()),
                  std::make_unique<ClobberUi>(DevNull())) {}
 
   void SetUp() override {
@@ -1192,15 +1162,15 @@ class ShredRotationalStatefulFilesTest : public ::testing::Test {
     base::FilePath shadow = fake_stateful_.Append("home/.shadow");
 
     deleted_paths_ = std::vector<base::FilePath>({
+        fake_stateful_.Append("dev_image/fileA"),
+        fake_stateful_.Append("dev_image/fileB"),
         fake_stateful_.Append("encrypted.block"),
         fake_stateful_.Append("var_overlay/fileA"),
         fake_stateful_.Append("var_overlay/fileB"),
-        fake_stateful_.Append("dev_image/fileA"),
-        fake_stateful_.Append("dev_image/fileB"),
+        shadow.Append("other/vault/fileA"),
         shadow.Append("uninteresting/vault/fileA"),
         shadow.Append("uninteresting/vault/fileB"),
         shadow.Append("uninteresting/vault/fileC"),
-        shadow.Append("other/vault/fileA"),
         shadow.Append("vault/fileA"),
         shadow.Append("vault/fileB"),
     });
@@ -1262,11 +1232,12 @@ TEST_F(ShredRotationalStatefulFilesTest, Mounted) {
   CheckPathsShredded(shredded_paths_);
 }
 
-class WipeKeysetsTest : public ::testing::Test {
+class WipeCryptohomeTest : public ::testing::Test {
  protected:
-  WipeKeysetsTest()
+  WipeCryptohomeTest()
       : clobber_(ClobberState::Arguments(),
-                 std::make_unique<CrosSystemFake>(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::make_unique<crossystem::fake::CrossystemFake>()),
                  std::make_unique<ClobberUi>(DevNull())) {}
 
   void SetUp() override {
@@ -1278,18 +1249,25 @@ class WipeKeysetsTest : public ::testing::Test {
         fake_stateful_.Append("encrypted.key"),
         fake_stateful_.Append("encrypted.needs-finalization"),
         fake_stateful_.Append("home/.shadow/cryptohome.key"),
+        fake_stateful_.Append("home/.shadow/extra_dir/master"),
+        fake_stateful_.Append("home/.shadow/other_dir/master"),
+        fake_stateful_.Append("home/.shadow/random_dir/master.0"),
+        fake_stateful_.Append("home/.shadow/random_dir/master.1"),
+        fake_stateful_.Append(
+            "home/.shadow/new_dir/auth_factors/password.first"),
+        fake_stateful_.Append(
+            "home/.shadow/new_dir/auth_factors/password.second"),
+        fake_stateful_.Append("home/.shadow/new_dir/auth_factors/pin.other"),
+        fake_stateful_.Append("home/.shadow/new_dir/user_secret_stash/uss.0"),
         fake_stateful_.Append("home/.shadow/salt"),
         fake_stateful_.Append("home/.shadow/salt.sum"),
-        fake_stateful_.Append("home/.shadow/random_dir/master"),
-        fake_stateful_.Append("home/.shadow/other_dir/master"),
-        fake_stateful_.Append("home/.shadow/extra_dir/master"),
     });
 
     ignored_paths_ = std::vector<base::FilePath>({
-        fake_stateful_.Append("uninteresting/file/definitely/not/an/rsa/key"),
-        fake_stateful_.Append("hopefully/not/a/copy/of/etc/passwd"),
         fake_stateful_.Append("home/.shadow/extra_dir/unimportant"),
         fake_stateful_.Append("home/.shadow/other_dir/unimportant"),
+        fake_stateful_.Append("hopefully/not/a/copy/of/etc/passwd"),
+        fake_stateful_.Append("uninteresting/file/definitely/not/an/rsa/key"),
     });
 
     for (const base::FilePath& path : deleted_paths_) {
@@ -1326,22 +1304,22 @@ class WipeKeysetsTest : public ::testing::Test {
   std::vector<base::FilePath> ignored_paths_;
 };
 
-TEST_F(WipeKeysetsTest, NotSupported) {
+TEST_F(WipeCryptohomeTest, NotSupported) {
   clobber_.SetSecureEraseSupported(false);
   CheckPathsUntouched(deleted_paths_);
   CheckPathsUntouched(ignored_paths_);
 
-  EXPECT_FALSE(clobber_.WipeKeysets());
+  EXPECT_FALSE(clobber_.WipeKeyMaterial());
 
   CheckPathsUntouched(ignored_paths_);
 }
 
-TEST_F(WipeKeysetsTest, Supported) {
+TEST_F(WipeCryptohomeTest, Supported) {
   clobber_.SetSecureEraseSupported(true);
   CheckPathsUntouched(deleted_paths_);
   CheckPathsUntouched(ignored_paths_);
 
-  EXPECT_TRUE(clobber_.WipeKeysets());
+  EXPECT_TRUE(clobber_.WipeKeyMaterial());
 
   CheckPathsDeleted(deleted_paths_);
   CheckPathsUntouched(ignored_paths_);
@@ -1413,6 +1391,20 @@ TEST_F(GetDevicesToWipeTest, NVME_b_active) {
   EXPECT_EQ(wipe_info.active_kernel_partition, partitions_.kernel_b);
 }
 
+TEST_F(GetDevicesToWipeTest, UFS) {
+  base::FilePath root_disk("/dev/sda1");
+  base::FilePath root_device("/dev/sda5");
+
+  ClobberState::DeviceWipeInfo wipe_info;
+  EXPECT_TRUE(ClobberState::GetDevicesToWipe(root_disk, root_device,
+                                             partitions_, &wipe_info));
+  EXPECT_EQ(wipe_info.stateful_partition_device.value(), "/dev/sda1");
+  EXPECT_EQ(wipe_info.inactive_root_device.value(), "/dev/sda3");
+  EXPECT_EQ(wipe_info.inactive_kernel_device.value(), "/dev/sda2");
+  EXPECT_FALSE(wipe_info.is_mtd_flash);
+  EXPECT_EQ(wipe_info.active_kernel_partition, partitions_.kernel_b);
+}
+
 TEST_F(GetDevicesToWipeTest, SDA) {
   partitions_.stateful = 7;
   partitions_.kernel_a = 1;
@@ -1439,8 +1431,10 @@ TEST(WipeBlockDevice, Nonexistent) {
   base::FilePath file_system_path = temp_dir.GetPath().Append("fs");
   ClobberUi ui(DevNull());
 
-  EXPECT_FALSE(ClobberState::WipeBlockDevice(file_system_path, &ui, false));
-  EXPECT_FALSE(ClobberState::WipeBlockDevice(file_system_path, &ui, true));
+  EXPECT_FALSE(
+      ClobberState::WipeBlockDevice(file_system_path, &ui, false, false));
+  EXPECT_FALSE(
+      ClobberState::WipeBlockDevice(file_system_path, &ui, true, false));
 }
 
 TEST(WipeBlockDevice, Fast) {
@@ -1466,7 +1460,7 @@ TEST(WipeBlockDevice, Fast) {
   device.Close();
 
   ClobberUi ui(DevNull());
-  EXPECT_TRUE(ClobberState::WipeBlockDevice(device_path, &ui, true));
+  EXPECT_TRUE(ClobberState::WipeBlockDevice(device_path, &ui, true, false));
 
   device =
       base::File(device_path, base::File::FLAG_OPEN | base::File::FLAG_READ);
@@ -1518,7 +1512,8 @@ TEST(WipeBlockDevice, Slow) {
   EXPECT_EQ(mkfs.Run(), 0);
 
   ClobberUi ui(DevNull());
-  EXPECT_TRUE(ClobberState::WipeBlockDevice(file_system_path, &ui, false));
+  EXPECT_TRUE(
+      ClobberState::WipeBlockDevice(file_system_path, &ui, false, false));
 
   file_system = base::File(file_system_path,
                            base::File::FLAG_OPEN | base::File::FLAG_READ);
@@ -1538,7 +1533,8 @@ class LogicalVolumeStatefulPartitionTest : public ::testing::Test {
             {.stateful_partition_device = base::FilePath("/dev/mmcblk0p1")}),
         lvm_command_runner_(std::make_shared<brillo::MockLvmCommandRunner>()),
         clobber_(ClobberState::Arguments(),
-                 std::make_unique<CrosSystemFake>(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::make_unique<crossystem::fake::CrossystemFake>()),
                  std::make_unique<ClobberUi>(DevNull())) {
     std::unique_ptr<brillo::LogicalVolumeManager> lvm =
         std::make_unique<brillo::LogicalVolumeManager>(lvm_command_runner_);
@@ -1550,31 +1546,23 @@ class LogicalVolumeStatefulPartitionTest : public ::testing::Test {
 
   void ExpectStatefulLogicalVolume() {
     // Expect physical volume and volume group.
-    std::vector<std::string> pvdisplay = {
-        "/sbin/pvdisplay", "-C", "--reportformat", "json", "/dev/mmcblk0p1"};
-    EXPECT_CALL(*lvm_command_runner_.get(), RunProcess(pvdisplay, _))
+    std::vector<std::string> pvs = {"/sbin/pvs", "--reportformat", "json",
+                                    "/dev/mmcblk0p1"};
+    EXPECT_CALL(*lvm_command_runner_.get(), RunProcess(pvs, _))
         .WillRepeatedly(
             DoAll(SetArgPointee<1>(std::string(kPhysicalVolumeReport)),
                   Return(true)));
     // Expect thinpool.
-    std::vector<std::string> thinpool_display = {"/sbin/lvdisplay",
-                                                 "-S",
-                                                 "pool_lv=\"\"",
-                                                 "-C",
-                                                 "--reportformat",
-                                                 "json",
-                                                 "STATEFULSTATEFUL/thinpool"};
+    std::vector<std::string> thinpool_display = {
+        "/sbin/lvs",      "-S",   "pool_lv=\"\"",
+        "--reportformat", "json", "STATEFULSTATEFUL/thinpool"};
     EXPECT_CALL(*lvm_command_runner_.get(), RunProcess(thinpool_display, _))
         .WillRepeatedly(DoAll(SetArgPointee<1>(std::string(kThinpoolReport)),
                               Return(true)));
     // Expect logical volume.
-    std::vector<std::string> lv_display = {"/sbin/lvdisplay",
-                                           "-S",
-                                           "pool_lv!=\"\"",
-                                           "-C",
-                                           "--reportformat",
-                                           "json",
-                                           "STATEFULSTATEFUL/unencrypted"};
+    std::vector<std::string> lv_display = {
+        "/sbin/lvs",      "-S",   "pool_lv!=\"\"",
+        "--reportformat", "json", "STATEFULSTATEFUL/unencrypted"};
     EXPECT_CALL(*lvm_command_runner_.get(), RunProcess(lv_display, _))
         .WillRepeatedly(DoAll(
             SetArgPointee<1>(std::string(kLogicalVolumeReport)), Return(true)));
@@ -1594,13 +1582,14 @@ TEST_F(LogicalVolumeStatefulPartitionTest, RemoveLogicalVolumeStackCheck) {
       RunCommand(std::vector<std::string>({"vgchange", "-an", "stateful"})))
       .Times(1)
       .WillOnce(Return(true));
-  EXPECT_CALL(*lvm_command_runner_.get(),
-              RunCommand(std::vector<std::string>({"vgremove", "stateful"})))
-      .Times(1)
-      .WillOnce(Return(true));
   EXPECT_CALL(
       *lvm_command_runner_.get(),
-      RunCommand(std::vector<std::string>({"pvremove", "/dev/mmcblk0p1"})))
+      RunCommand(std::vector<std::string>({"vgremove", "-f", "stateful"})))
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*lvm_command_runner_.get(),
+              RunCommand(std::vector<std::string>(
+                  {"pvremove", "-ff", "/dev/mmcblk0p1"})))
       .Times(1)
       .WillOnce(Return(true));
 
@@ -1620,9 +1609,11 @@ TEST_F(LogicalVolumeStatefulPartitionTest, CreateLogicalVolumeStackCheck) {
       .Times(1)
       .WillOnce(Return(true));
 
-  std::vector<std::string> tp_create = {
-      "lvcreate", "--size",     "5017M",    "--poolmetadatasize",
-      "50M",      "--thinpool", "thinpool", "STATEFULSTATEFUL"};
+  std::vector<std::string> tp_create = {"lvcreate", "--zero",
+                                        "n",        "--size",
+                                        "5017M",    "--poolmetadatasize",
+                                        "50M",      "--thinpool",
+                                        "thinpool", "STATEFULSTATEFUL"};
   EXPECT_CALL(*lvm_command_runner_.get(), RunCommand(tp_create))
       .Times(1)
       .WillOnce(Return(true));
@@ -1650,4 +1641,736 @@ TEST_F(LogicalVolumeStatefulPartitionTest, CreateLogicalVolumeStackCheck) {
       .WillOnce(Return(true));
 
   clobber_.CreateLogicalVolumeStack();
+}
+
+class LogicalVolumeStatefulPartitionMockedTest : public ::testing::Test {
+ public:
+  LogicalVolumeStatefulPartitionMockedTest()
+      : clobber_(ClobberState::Arguments(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::make_unique<crossystem::fake::CrossystemFake>()),
+                 std::make_unique<ClobberUi>(DevNull())),
+        mock_lvm_command_runner_(
+            std::make_shared<brillo::MockLvmCommandRunner>()) {}
+
+  LogicalVolumeStatefulPartitionMockedTest(
+      const LogicalVolumeStatefulPartitionMockedTest&) = delete;
+  LogicalVolumeStatefulPartitionMockedTest& operator=(
+      const LogicalVolumeStatefulPartitionMockedTest&) = delete;
+
+  void SetUp() override {
+    auto mock_lvm =
+        std::make_unique<StrictMock<brillo::MockLogicalVolumeManager>>();
+    mock_lvm_ptr_ = mock_lvm.get();
+
+    clobber_.SetLogicalVolumeManagerForTesting(std::move(mock_lvm));
+  }
+
+ protected:
+  ClobberStateMock clobber_;
+  std::shared_ptr<brillo::MockLvmCommandRunner> mock_lvm_command_runner_;
+  brillo::MockLogicalVolumeManager* mock_lvm_ptr_ = nullptr;
+};
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeNoPhysicalVolume) {
+  std::optional<brillo::PhysicalVolume> pv;
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+  EXPECT_FALSE(clobber_.PreserveLogicalVolumesWipe({}));
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 0);
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeNoVolumeGroup) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  std::optional<brillo::VolumeGroup> vg;
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  EXPECT_FALSE(clobber_.PreserveLogicalVolumesWipe({}));
+
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 0);
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeEmptyInfoNoLvs) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  auto vg = std::make_optional(
+      brillo::VolumeGroup("foobar_vg", mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  std::vector<brillo::LogicalVolume> lvs;
+  EXPECT_CALL(*mock_lvm_ptr_, ListLogicalVolumes(_, _)).WillOnce(Return(lvs));
+
+  // Must always have unencrypted.
+  EXPECT_FALSE(clobber_.PreserveLogicalVolumesWipe({}));
+
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 0);
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeEmptyInfo) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  auto vg = std::make_optional(
+      brillo::VolumeGroup("foobar_vg", mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  std::vector<brillo::LogicalVolume> lvs{
+      brillo::LogicalVolume{"lv-name-1", "vg-name-1", mock_lvm_command_runner_},
+  };
+  EXPECT_CALL(*mock_lvm_ptr_, ListLogicalVolumes(_, _)).WillOnce(Return(lvs));
+
+  EXPECT_CALL(*mock_lvm_command_runner_.get(),
+              RunCommand(std::vector<std::string>{"lvremove", "--force",
+                                                  lvs[0].GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_FALSE(clobber_.PreserveLogicalVolumesWipe({}));
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeIncludeInfoNoLvs) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  auto vg = std::make_optional(
+      brillo::VolumeGroup("foobar_vg", mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  auto lv = std::make_optional(brillo::LogicalVolume(
+      kUnencrypted, vg->GetName(), mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, kUnencrypted))
+      .WillOnce(Return(lv));
+
+  std::vector<brillo::LogicalVolume> lvs;
+  EXPECT_CALL(*mock_lvm_ptr_, ListLogicalVolumes(_, _)).WillOnce(Return(lvs));
+
+  EXPECT_TRUE(clobber_.PreserveLogicalVolumesWipe({
+      {
+          .lv_name = kUnencrypted,
+          .preserve = true,
+          .zero = false,
+      },
+  }));
+
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 0);
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeNoInfoMatch) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  auto vg = std::make_optional(
+      brillo::VolumeGroup("foobar_vg", mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  auto lv = std::make_optional(brillo::LogicalVolume(
+      kUnencrypted, vg->GetName(), mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, kUnencrypted))
+      .WillOnce(Return(lv));
+
+  std::vector<brillo::LogicalVolume> lvs{
+      brillo::LogicalVolume{"lv-name-1", "vg-name-1", mock_lvm_command_runner_},
+  };
+  EXPECT_CALL(*mock_lvm_ptr_, ListLogicalVolumes(_, _)).WillOnce(Return(lvs));
+
+  EXPECT_CALL(*mock_lvm_command_runner_.get(),
+              RunCommand(std::vector<std::string>{"lvremove", "--force",
+                                                  lvs[0].GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*mock_lvm_command_runner_,
+              RunCommand(std::vector<std::string>{"vgrename", "foobar_vg",
+                                                  "STATEFULSTATEFUL"}))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*mock_lvm_command_runner_, RunCommand(std::vector<std::string>{
+                                             "lvchange", "-ay", lv->GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(clobber_.PreserveLogicalVolumesWipe({
+      {
+          .lv_name = kUnencrypted,
+          .preserve = true,
+          .zero = false,
+      },
+  }));
+
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 0);
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeInfoMatchPreserve) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  auto vg = std::make_optional(
+      brillo::VolumeGroup("foobar_vg", mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  auto lv = std::make_optional(brillo::LogicalVolume(
+      kUnencrypted, vg->GetName(), mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, kUnencrypted))
+      .WillOnce(Return(lv));
+
+  std::vector<brillo::LogicalVolume> lvs{
+      brillo::LogicalVolume{kUnencrypted, "vg-name-1",
+                            mock_lvm_command_runner_},
+  };
+  EXPECT_CALL(*mock_lvm_ptr_, ListLogicalVolumes(_, _)).WillOnce(Return(lvs));
+
+  EXPECT_CALL(*mock_lvm_command_runner_.get(),
+              RunCommand(std::vector<std::string>{"lvremove", "--force",
+                                                  lvs[0].GetName()}))
+      .Times(0);
+
+  EXPECT_CALL(*mock_lvm_command_runner_,
+              RunCommand(std::vector<std::string>{"vgrename", "foobar_vg",
+                                                  "STATEFULSTATEFUL"}))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*mock_lvm_command_runner_, RunCommand(std::vector<std::string>{
+                                             "lvchange", "-ay", lv->GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(clobber_.PreserveLogicalVolumesWipe({
+      {
+          .lv_name = kUnencrypted,
+          .preserve = true,
+          .zero = false,
+      },
+  }));
+
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 0);
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeInfoMatchZero) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  auto vg = std::make_optional(
+      brillo::VolumeGroup("foobar_vg", mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  auto lv = std::make_optional(brillo::LogicalVolume(
+      kUnencrypted, vg->GetName(), mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, kUnencrypted))
+      .WillOnce(Return(lv));
+
+  std::vector<brillo::LogicalVolume> lvs{
+      brillo::LogicalVolume{kUnencrypted, "vg-name-1",
+                            mock_lvm_command_runner_},
+  };
+  EXPECT_CALL(*mock_lvm_ptr_, ListLogicalVolumes(_, _)).WillOnce(Return(lvs));
+
+  EXPECT_TRUE(clobber_.PreserveLogicalVolumesWipe({
+      {
+          .lv_name = kUnencrypted,
+          .preserve = false,
+          .zero = true,
+      },
+  }));
+
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 1);
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeInfoMatchPreserveAndZero) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  auto vg = std::make_optional(
+      brillo::VolumeGroup("foobar_vg", mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  auto lv = std::make_optional(brillo::LogicalVolume(
+      kUnencrypted, vg->GetName(), mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, kUnencrypted))
+      .WillOnce(Return(lv));
+
+  std::vector<brillo::LogicalVolume> lvs{
+      brillo::LogicalVolume{kUnencrypted, "vg-name-1",
+                            mock_lvm_command_runner_},
+  };
+  EXPECT_CALL(*mock_lvm_ptr_, ListLogicalVolumes(_, _)).WillOnce(Return(lvs));
+
+  EXPECT_TRUE(clobber_.PreserveLogicalVolumesWipe({
+      {
+          .lv_name = kUnencrypted,
+          .preserve = true,
+          .zero = true,
+      },
+  }));
+
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 1);
+}
+
+TEST_F(LogicalVolumeStatefulPartitionMockedTest,
+       PreserveLogicalVolumesWipeInfoMatchPreserveAndZeroWithNoMatchLv) {
+  auto pv = std::make_optional(brillo::PhysicalVolume(
+      base::FilePath{"/foobar"}, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetPhysicalVolume(_)).WillOnce(Return(pv));
+
+  auto vg = std::make_optional(
+      brillo::VolumeGroup("foobar_vg", mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetVolumeGroup(_)).WillOnce(Return(vg));
+
+  auto lv = std::make_optional(brillo::LogicalVolume(
+      kUnencrypted, vg->GetName(), mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, kUnencrypted))
+      .WillOnce(Return(lv));
+
+  std::vector<brillo::LogicalVolume> lvs{
+      brillo::LogicalVolume{"foobar", "vg-name-1", mock_lvm_command_runner_},
+      brillo::LogicalVolume{kThinpool, "vg-name-1", mock_lvm_command_runner_},
+  };
+  EXPECT_CALL(*mock_lvm_ptr_, ListLogicalVolumes(_, _)).WillOnce(Return(lvs));
+
+  for (const auto& lv : lvs) {
+    EXPECT_CALL(*mock_lvm_command_runner_.get(),
+                RunCommand(std::vector<std::string>{"lvremove", "--force",
+                                                    lv.GetName()}))
+        .WillOnce(Return(true));
+  }
+
+  EXPECT_CALL(*mock_lvm_command_runner_,
+              RunCommand(std::vector<std::string>{"vgrename", "foobar_vg",
+                                                  "STATEFULSTATEFUL"}))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*mock_lvm_command_runner_, RunCommand(std::vector<std::string>{
+                                             "lvchange", "-ay", lv->GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(clobber_.PreserveLogicalVolumesWipe({
+      {
+          .lv_name = kUnencrypted,
+          .preserve = true,
+          .zero = true,
+      },
+  }));
+
+  EXPECT_EQ(clobber_.WipeDeviceCalled(), 1);
+}
+
+class PreserveEncryptedFilesTest : public ::testing::Test {
+ protected:
+  PreserveEncryptedFilesTest()
+      : crossystem_fake_(std::make_unique<crossystem::fake::CrossystemFake>()),
+        cros_system_(crossystem_fake_.get()),
+        clobber_(ClobberState::Arguments(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::move(crossystem_fake_)),
+                 std::make_unique<ClobberUi>(DevNull()),
+                 std::make_unique<brillo::MockLogicalVolumeManager>()) {}
+
+  void SetUp() override {
+    ASSERT_TRUE(temp_stateful_.CreateUniqueTempDir());
+    fake_stateful_ = temp_stateful_.GetPath();
+    clobber_.SetStatefulForTest(fake_stateful_);
+
+    ASSERT_TRUE(temp_root_.CreateUniqueTempDir());
+    fake_root_ = temp_root_.GetPath();
+    clobber_.SetRootPathForTest(fake_root_);
+  }
+
+  std::unique_ptr<crossystem::fake::CrossystemFake> crossystem_fake_;
+  crossystem::fake::CrossystemFake* cros_system_;
+  ClobberState clobber_;
+  base::ScopedTempDir temp_root_;
+  base::ScopedTempDir temp_stateful_;
+  base::FilePath fake_root_;
+  base::FilePath fake_stateful_;
+};
+
+TEST_F(PreserveEncryptedFilesTest, UpdateEnginePrefsArePreserved) {
+  ASSERT_TRUE(CreateDirectoryAndWriteFile(
+      fake_root_.Append("var/lib/update_engine/prefs/last-active-ping-day"),
+      "1234"));
+  ASSERT_TRUE(CreateDirectoryAndWriteFile(
+      fake_root_.Append("var/lib/update_engine/prefs/last-roll-call-ping-day"),
+      "5678"));
+  clobber_.PreserveEncryptedFiles();
+  ASSERT_TRUE(base::PathExists(
+      fake_stateful_.Append("unencrypted/preserve/update_engine/prefs/")));
+  ASSERT_TRUE(base::PathExists(fake_stateful_.Append(
+      "unencrypted/preserve/update_engine/prefs/last-active-ping-day")));
+  ASSERT_TRUE(base::PathExists(fake_stateful_.Append(
+      "unencrypted/preserve/update_engine/prefs/last-roll-call-ping-day")));
+}
+
+TEST_F(PreserveEncryptedFilesTest, PsmPrefsArePreserved) {
+  ASSERT_TRUE(CreateDirectoryAndWriteFile(
+      fake_root_.Append("var/lib/private_computing/last_active_dates"),
+      "1234"));
+  clobber_.PreserveEncryptedFiles();
+  ASSERT_TRUE(base::PathExists(
+      fake_stateful_.Append("unencrypted/preserve/last_active_dates")));
+}
+
+TEST_F(PreserveEncryptedFilesTest, FlexFilesArePreserved) {
+  ASSERT_TRUE(CreateDirectoryAndWriteFile(
+      fake_root_.Append("var/lib/flex_id/flex_id"), "1234"));
+  clobber_.PreserveEncryptedFiles();
+  ASSERT_TRUE(base::PathExists(
+      fake_stateful_.Append("unencrypted/preserve/flex/flex_id")));
+}
+
+class ProcessInfoTest : public ::testing::Test {
+ public:
+  ProcessInfoTest()
+      : clobber_(ClobberState::Arguments(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::make_unique<crossystem::fake::CrossystemFake>()),
+                 std::make_unique<ClobberUi>(DevNull())),
+        mock_lvm_command_runner_(
+            std::make_shared<brillo::MockLvmCommandRunner>()) {}
+
+  ProcessInfoTest(const ProcessInfoTest&) = delete;
+  ProcessInfoTest& operator=(const ProcessInfoTest&) = delete;
+
+  void SetUp() override {
+    auto mock_lvm =
+        std::make_unique<StrictMock<brillo::MockLogicalVolumeManager>>();
+    mock_lvm_ptr_ = mock_lvm.get();
+
+    clobber_.SetLogicalVolumeManagerForTesting(std::move(mock_lvm));
+
+    mock_utils_.reset(new dlcservice::MockUtils);
+    mock_utils_ptr_ = mock_utils_.get();
+  }
+
+ protected:
+  ClobberStateMock clobber_;
+  std::shared_ptr<brillo::MockLvmCommandRunner> mock_lvm_command_runner_;
+  brillo::MockLogicalVolumeManager* mock_lvm_ptr_ = nullptr;
+  std::unique_ptr<dlcservice::MockUtils> mock_utils_;
+  dlcservice::MockUtils* mock_utils_ptr_ = nullptr;
+};
+
+TEST_F(ProcessInfoTest, MissingLogicalVolume) {
+  const std::string& lv_name("some-lv");
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, lv_name))
+      .WillOnce(Return(std::nullopt));
+  EXPECT_TRUE(clobber_.ProcessInfo({"some-vg", nullptr}, {.lv_name = lv_name},
+                                   nullptr));
+}
+
+TEST_F(ProcessInfoTest, InvalidLogicalVolume) {
+  const std::string& vg_name("some-vg");
+  const std::string& lv_name("");
+  auto lv = std::make_optional(
+      brillo::LogicalVolume(lv_name, vg_name, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, lv_name))
+      .WillOnce(Return(lv));
+  EXPECT_TRUE(
+      clobber_.ProcessInfo({vg_name, nullptr}, {.lv_name = lv_name}, nullptr));
+}
+
+TEST_F(ProcessInfoTest, VerifyDigestInfoOfLogicalVolumeHashingFailure) {
+  const std::string& vg_name("some-vg");
+  const std::string& lv_name("some-lv");
+  auto lv = std::make_optional(
+      brillo::LogicalVolume(lv_name, vg_name, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, lv_name))
+      .WillOnce(Return(lv));
+
+  int64_t bytes = 123;
+  ClobberState::PreserveLogicalVolumesWipeInfo::DigestInfo digest_info{
+      .bytes = bytes,
+      .digest = {1, 2, 3},
+  };
+
+  EXPECT_CALL(*mock_utils_ptr_, HashFile(_, _, _, _)).WillOnce(Return(false));
+
+  EXPECT_CALL(*mock_lvm_command_runner_, RunCommand(std::vector<std::string>{
+                                             "lvchange", "-ay", lv->GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*mock_lvm_command_runner_,
+              RunCommand(std::vector<std::string>{"lvremove", "--force",
+                                                  lv->GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(clobber_.ProcessInfo(
+      {vg_name, nullptr},
+      {.lv_name = lv_name, .preserve = true, .digest_info = digest_info},
+      std::move(mock_utils_)));
+}
+
+TEST_F(ProcessInfoTest, VerifyDigestInfoOfLogicalVolumeHashingMismatch) {
+  const std::string& vg_name("some-vg");
+  const std::string& lv_name("some-lv");
+  auto lv = std::make_optional(
+      brillo::LogicalVolume(lv_name, vg_name, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, lv_name))
+      .WillOnce(Return(lv));
+
+  int64_t bytes = 123;
+  std::vector<uint8_t> digest{1, 2, 3};
+  ClobberState::PreserveLogicalVolumesWipeInfo::DigestInfo digest_info{
+      .bytes = bytes,
+      .digest = digest,
+  };
+
+  EXPECT_CALL(*mock_utils_ptr_, HashFile(_, _, _, _))
+      .WillOnce(DoAll(SetArgPointee<2>(std::vector<uint8_t>{}), Return(true)));
+
+  EXPECT_CALL(*mock_lvm_command_runner_, RunCommand(std::vector<std::string>{
+                                             "lvchange", "-ay", lv->GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*mock_lvm_command_runner_,
+              RunCommand(std::vector<std::string>{"lvremove", "--force",
+                                                  lv->GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(clobber_.ProcessInfo(
+      {vg_name, nullptr},
+      {.lv_name = lv_name, .preserve = true, .digest_info = digest_info},
+      std::move(mock_utils_)));
+}
+
+TEST_F(ProcessInfoTest, VerifyDigestInfoOfLogicalVolume) {
+  const std::string& vg_name("some-vg");
+  const std::string& lv_name("some-lv");
+  auto lv = std::make_optional(
+      brillo::LogicalVolume(lv_name, vg_name, mock_lvm_command_runner_));
+  EXPECT_CALL(*mock_lvm_ptr_, GetLogicalVolume(_, lv_name))
+      .WillOnce(Return(lv));
+
+  int64_t bytes = 123;
+  ClobberState::PreserveLogicalVolumesWipeInfo::DigestInfo digest_info{
+      .bytes = bytes,
+      .digest = {1, 2, 3},
+  };
+
+  EXPECT_CALL(*mock_utils_ptr_, HashFile(_, bytes, _, _))
+      .WillOnce(
+          DoAll(SetArgPointee<2>(std::vector<uint8_t>{1, 2, 3}), Return(true)));
+
+  EXPECT_CALL(*mock_lvm_command_runner_, RunCommand(std::vector<std::string>{
+                                             "lvchange", "-ay", lv->GetName()}))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*mock_lvm_command_runner_,
+              RunCommand(std::vector<std::string>{"lvremove", "--force",
+                                                  lv->GetName()}))
+      .Times(0);
+
+  EXPECT_TRUE(clobber_.ProcessInfo(
+      {vg_name, nullptr},
+      {.lv_name = lv_name, .preserve = true, .digest_info = digest_info},
+      std::move(mock_utils_)));
+}
+
+class DlcPreserveLogicalVolumesWipeArgsTest : public ::testing::Test {
+ public:
+  DlcPreserveLogicalVolumesWipeArgsTest()
+      : clobber_(ClobberState::Arguments(),
+                 std::make_unique<crossystem::Crossystem>(
+                     std::make_unique<crossystem::fake::CrossystemFake>()),
+                 std::make_unique<ClobberUi>(DevNull())) {}
+
+  DlcPreserveLogicalVolumesWipeArgsTest(
+      const DlcPreserveLogicalVolumesWipeArgsTest&) = delete;
+  DlcPreserveLogicalVolumesWipeArgsTest& operator=(
+      const DlcPreserveLogicalVolumesWipeArgsTest&) = delete;
+
+  void SetUp() override {
+    ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
+
+    mock_utils_.reset(new dlcservice::MockUtils);
+    mock_utils_ptr_ = mock_utils_.get();
+  }
+
+ protected:
+  base::ScopedTempDir temp_dir_;
+  ClobberStateMock clobber_;
+  std::unique_ptr<dlcservice::MockUtils> mock_utils_;
+  dlcservice::MockUtils* mock_utils_ptr_;
+};
+
+TEST_F(DlcPreserveLogicalVolumesWipeArgsTest, MissingPowerwashFile) {
+  const auto& dlcs = clobber_.DlcPreserveLogicalVolumesWipeArgs(
+      temp_dir_.GetPath(), temp_dir_.GetPath(), dlcservice::PartitionSlot::A,
+      nullptr);
+  EXPECT_TRUE(dlcs.empty());
+}
+
+TEST_F(DlcPreserveLogicalVolumesWipeArgsTest, EmptyPowerwashFile) {
+  const auto& ps_file_path = temp_dir_.GetPath().Append("psfile");
+  ASSERT_TRUE(CreateDirectoryAndWriteFile(ps_file_path, ""));
+  const auto& dlcs = clobber_.DlcPreserveLogicalVolumesWipeArgs(
+      ps_file_path, temp_dir_.GetPath(), dlcservice::PartitionSlot::A, nullptr);
+  EXPECT_TRUE(dlcs.empty());
+}
+
+TEST_F(DlcPreserveLogicalVolumesWipeArgsTest, MismatchingPowerwashFile) {
+  const auto& ps_file_path = temp_dir_.GetPath().Append("psfile");
+  ASSERT_TRUE(CreateDirectoryAndWriteFile(ps_file_path, "some-dlc"));
+
+  auto manifest = std::make_unique<imageloader::Manifest>();
+  manifest->ParseManifest(R"(
+    "manifest-version": 1,
+    "image-sha256-hash": "A",
+    "table-sha256-hash": "B",
+    "version": 1,
+    "fs-type": "squashfs",
+    "powerwash-safe": false
+  )");
+  EXPECT_CALL(*mock_utils_ptr_, GetDlcManifest(_, _, _))
+      .WillOnce(Return(std::move(manifest)));
+  // DO NOT USE `manifest` beyond this point.
+
+  const auto& dlcs = clobber_.DlcPreserveLogicalVolumesWipeArgs(
+      ps_file_path, temp_dir_.GetPath(), dlcservice::PartitionSlot::A,
+      std::move(mock_utils_));
+  // DO NOT USE `mock_utils_` beyond this point.
+
+  EXPECT_TRUE(dlcs.empty());
+}
+
+TEST_F(DlcPreserveLogicalVolumesWipeArgsTest, SingleDlcPowerwashFile) {
+  const std::string& dlc("some-dlc");
+  const auto& ps_file_path = temp_dir_.GetPath().Append("psfile");
+  ASSERT_TRUE(CreateDirectoryAndWriteFile(ps_file_path, dlc));
+
+  auto manifest = std::make_unique<imageloader::Manifest>();
+  const base::Value::Dict manifest_dict =
+      base::Value::Dict()
+          .Set("powerwash-safe", true)
+          .Set("image-sha256-hash",
+               "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+               "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+          .Set("table-sha256-hash",
+               "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+               "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+          .Set("version", "1")
+          .Set("manifest-version", 1);
+  ASSERT_TRUE(manifest->ParseManifest(manifest_dict));
+  EXPECT_CALL(*mock_utils_ptr_, GetDlcManifest(temp_dir_.GetPath(), dlc, _))
+      .WillOnce(Return(std::move(manifest)));
+  // DO NOT USE `manifest` beyond this point.
+
+  const auto& active_slot = dlcservice::PartitionSlot::A;
+  const auto& inactive_slot = dlcservice::PartitionSlot::B;
+  const auto& dlc_active_lv_name =
+      dlcservice::LogicalVolumeName(dlc, active_slot);
+  const auto& dlc_inactive_lv_name =
+      dlcservice::LogicalVolumeName(dlc, inactive_slot);
+
+  EXPECT_CALL(*mock_utils_ptr_, LogicalVolumeName(dlc, active_slot))
+      .WillOnce(Return(dlc_active_lv_name));
+  EXPECT_CALL(*mock_utils_ptr_, LogicalVolumeName(dlc, inactive_slot))
+      .WillOnce(Return(dlc_inactive_lv_name));
+
+  const auto& dlcs = clobber_.DlcPreserveLogicalVolumesWipeArgs(
+      ps_file_path, temp_dir_.GetPath(), active_slot, std::move(mock_utils_));
+  // DO NOT USE `mock_utils_` beyond this point.
+
+  ASSERT_EQ(dlcs.size(), 2);
+
+  const auto& active_iter = dlcs.find({.lv_name = dlc_active_lv_name});
+  EXPECT_NE(active_iter, dlcs.end());
+  const auto& inactive_iter = dlcs.find({.lv_name = dlc_inactive_lv_name});
+  EXPECT_NE(inactive_iter, dlcs.end());
+
+  EXPECT_TRUE(active_iter->preserve);
+  EXPECT_TRUE(inactive_iter->preserve);
+
+  EXPECT_FALSE(active_iter->zero);
+  EXPECT_TRUE(inactive_iter->zero);
+}
+
+TEST_F(DlcPreserveLogicalVolumesWipeArgsTest, MixedDlcPowerwashFile) {
+  const auto& ps_file_path = temp_dir_.GetPath().Append("psfile");
+  ASSERT_TRUE(
+      CreateDirectoryAndWriteFile(ps_file_path, "some-dlc\nid-ps\nid-not-ps"));
+
+  auto manifest_ps = std::make_unique<imageloader::Manifest>();
+  {
+    const base::Value::Dict manifest_dict =
+        base::Value::Dict()
+            .Set("powerwash-safe", true)
+            .Set("image-sha256-hash",
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .Set("table-sha256-hash",
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .Set("version", "1")
+            .Set("manifest-version", 1);
+    ASSERT_TRUE(manifest_ps->ParseManifest(manifest_dict));
+  }
+  auto manifest_not_ps = std::make_unique<imageloader::Manifest>();
+  {
+    const base::Value::Dict manifest_dict =
+        base::Value::Dict()
+            .Set("powerwash-safe", false)
+            .Set("image-sha256-hash",
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .Set("table-sha256-hash",
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .Set("version", "1")
+            .Set("manifest-version", 1);
+    ASSERT_TRUE(manifest_not_ps->ParseManifest(manifest_dict));
+  }
+
+  const std::string& dlc_ps("id-ps");
+  EXPECT_CALL(*mock_utils_ptr_, GetDlcManifest(temp_dir_.GetPath(), dlc_ps, _))
+      .WillOnce(Return(std::move(manifest_ps)));
+  EXPECT_CALL(*mock_utils_ptr_,
+              GetDlcManifest(temp_dir_.GetPath(), "id-not-ps", _))
+      .WillOnce(Return(std::move(manifest_not_ps)));
+  EXPECT_CALL(*mock_utils_ptr_,
+              GetDlcManifest(temp_dir_.GetPath(), "some-dlc", _))
+      .WillOnce(Return(std::make_unique<imageloader::Manifest>()));
+  // DO NOT USE `manifest_*` beyond this point.
+
+  const auto& active_slot = dlcservice::PartitionSlot::A;
+  const auto& inactive_slot = dlcservice::PartitionSlot::B;
+  const auto& dlc_active_lv_name =
+      dlcservice::LogicalVolumeName(dlc_ps, active_slot);
+  const auto& dlc_inactive_lv_name =
+      dlcservice::LogicalVolumeName(dlc_ps, inactive_slot);
+
+  EXPECT_CALL(*mock_utils_ptr_, LogicalVolumeName(dlc_ps, active_slot))
+      .WillOnce(Return(dlc_active_lv_name));
+  EXPECT_CALL(*mock_utils_ptr_, LogicalVolumeName(dlc_ps, inactive_slot))
+      .WillOnce(Return(dlc_inactive_lv_name));
+
+  const auto& dlcs = clobber_.DlcPreserveLogicalVolumesWipeArgs(
+      ps_file_path, temp_dir_.GetPath(), active_slot, std::move(mock_utils_));
+  // DO NOT USE `mock_utils_` beyond this point.
+
+  ASSERT_EQ(dlcs.size(), 2);
+
+  const auto& active_iter = dlcs.find({.lv_name = dlc_active_lv_name});
+  EXPECT_NE(active_iter, dlcs.end());
+  const auto& inactive_iter = dlcs.find({.lv_name = dlc_inactive_lv_name});
+  EXPECT_NE(inactive_iter, dlcs.end());
+
+  EXPECT_TRUE(active_iter->preserve);
+  EXPECT_TRUE(inactive_iter->preserve);
+
+  EXPECT_FALSE(active_iter->zero);
+  EXPECT_TRUE(inactive_iter->zero);
 }

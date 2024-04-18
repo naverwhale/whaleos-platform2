@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,7 +34,8 @@ PolicyProvider::~PolicyProvider() {}
 bool PolicyProvider::Reload() {
   if (!device_policy_)
     return false;
-  device_policy_is_loaded_ = device_policy_->LoadPolicy();
+  device_policy_is_loaded_ =
+      device_policy_->LoadPolicy(/*delete_invalid_files=*/false);
   if (!device_policy_is_loaded_) {
     LOG(WARNING) << "Could not load the device policy file.";
   }
@@ -57,8 +58,8 @@ bool PolicyProvider::IsConsumerDevice() const {
 
   const std::string& device_mode = install_attributes_reader_->GetAttribute(
       InstallAttributesReader::kAttrMode);
-  return device_mode != InstallAttributesReader::kDeviceModeEnterprise &&
-         device_mode != InstallAttributesReader::kDeviceModeEnterpriseAD;
+  return device_mode.empty() ||
+         device_mode == InstallAttributesReader::kDeviceModeConsumerKiosk;
 }
 
 bool PolicyProvider::IsEnterpriseEnrolledDevice() const {
@@ -67,8 +68,7 @@ bool PolicyProvider::IsEnterpriseEnrolledDevice() const {
 
   const std::string& device_mode = install_attributes_reader_->GetAttribute(
       InstallAttributesReader::kAttrMode);
-  return device_mode == InstallAttributesReader::kDeviceModeEnterprise ||
-         device_mode == InstallAttributesReader::kDeviceModeEnterpriseAD;
+  return device_mode == InstallAttributesReader::kDeviceModeEnterprise;
 }
 
 void PolicyProvider::SetDevicePolicyForTesting(

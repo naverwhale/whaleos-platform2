@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define LIBBRILLO_BRILLO_BLKDEV_UTILS_LVM_DEVICE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,7 +32,7 @@ class BRILLO_EXPORT LvmCommandRunner {
                           std::string* output = nullptr);
 
   // Unwraps LVM2 JSON reports into the contents stored at |key|.
-  virtual base::Optional<base::Value> UnwrapReportContents(
+  virtual std::optional<base::Value> UnwrapReportContents(
       const std::string& output, const std::string& key);
 };
 
@@ -66,6 +67,7 @@ class BRILLO_EXPORT VolumeGroup {
   bool Repair();
   bool Deactivate();
   bool Remove();
+  bool Rename(const std::string& volume_group_name);
   std::string GetName() const { return volume_group_name_; }
   bool IsValid() { return !volume_group_name_.empty(); }
   base::FilePath GetPath() const;
@@ -81,7 +83,7 @@ class BRILLO_EXPORT Thinpool {
            const std::string& volume_group_name,
            std::shared_ptr<LvmCommandRunner> lvm_);
   ~Thinpool() = default;
-  bool Activate();
+  bool Activate(bool check = false);
   bool Check();
   bool Repair();
   bool Deactivate();
@@ -89,6 +91,8 @@ class BRILLO_EXPORT Thinpool {
     return thinpool_name_.empty() ? ""
                                   : volume_group_name_ + "/" + thinpool_name_;
   }
+  std::string GetRawName() const { return thinpool_name_; }
+  std::string GetVolumeGroupName() const { return volume_group_name_; }
   bool IsValid() { return !thinpool_name_.empty(); }
   bool Remove();
   bool GetTotalSpace(int64_t* size);
@@ -116,6 +120,8 @@ class BRILLO_EXPORT LogicalVolume {
                ? ""
                : volume_group_name_ + "/" + logical_volume_name_;
   }
+  std::string GetRawName() const { return logical_volume_name_; }
+  std::string GetVolumeGroupName() { return volume_group_name_; }
 
  private:
   std::string logical_volume_name_;

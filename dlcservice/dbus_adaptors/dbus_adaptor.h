@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@
 
 #include <base/memory/weak_ptr.h>
 #include <dlcservice/proto_bindings/dlcservice.pb.h>
+#include <imageloader/proto_bindings/imageloader.pb.h>
 #include <imageloader/dbus-proxies.h>
 
 #include "dlcservice/dbus_adaptors/org.chromium.DlcServiceInterface.h"
@@ -25,12 +26,12 @@ class DBusService : public org::chromium::DlcServiceInterfaceInterface {
   ~DBusService() = default;
 
   // org::chromium::DlServiceInterfaceInterface overrides:
-  bool InstallDlc(brillo::ErrorPtr* err, const std::string& id_in) override;
-  bool InstallWithOmahaUrl(brillo::ErrorPtr* err,
-                           const std::string& id_in,
-                           const std::string& omaha_url_in) override;
+  void Install(
+      std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<>> response,
+      const dlcservice::InstallRequest& in_install_request) override;
   bool Uninstall(brillo::ErrorPtr* err, const std::string& id_in) override;
   bool Purge(brillo::ErrorPtr* err, const std::string& id_in) override;
+  bool Deploy(brillo::ErrorPtr* err, const std::string& id_in) override;
   bool GetDlcState(brillo::ErrorPtr* err,
                    const std::string& id_in,
                    DlcState* dlc_state_out) override;

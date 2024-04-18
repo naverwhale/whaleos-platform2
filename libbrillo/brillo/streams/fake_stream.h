@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,7 @@
 #include <queue>
 #include <string>
 
-#include <base/callback_forward.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <base/time/clock.h>
 #include <base/time/time.h>
 #include <brillo/secure_blob.h>
@@ -106,13 +105,12 @@ class FakeStream : public Stream {
                         ErrorPtr* error) override;
   bool FlushBlocking(ErrorPtr* error) override;
   bool CloseBlocking(ErrorPtr* error) override;
-  bool WaitForData(AccessMode mode,
-                   const base::Callback<void(AccessMode)>& callback,
-                   ErrorPtr* error) override;
-  bool WaitForDataBlocking(AccessMode in_mode,
-                           base::TimeDelta timeout,
-                           AccessMode* out_mode,
-                           ErrorPtr* error) override;
+  bool WaitForDataRead(base::OnceClosure callback, ErrorPtr* error) override;
+  bool WaitForDataReadBlocking(base::TimeDelta timeout,
+                               ErrorPtr* error) override;
+  bool WaitForDataWrite(base::OnceClosure callback, ErrorPtr* error) override;
+  bool WaitForDataWriteBlocking(base::TimeDelta timeout,
+                                ErrorPtr* error) override;
 
  private:
   // Input data packet to be placed on the read queue.

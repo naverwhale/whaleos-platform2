@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 #include <base/memory/ref_counted.h>
 #include <gmock/gmock.h>
 
-#include "shill/key_value_store.h"
 #include "shill/refptr_types.h"
+#include "shill/store/key_value_store.h"
 #include "shill/wifi/wake_on_wifi.h"
 #include "shill/wifi/wifi.h"
 #include "shill/wifi/wifi_endpoint.h"
@@ -30,21 +30,17 @@ class MockWiFi : public WiFi {
            const std::string& link_name,
            const std::string& address,
            int interface_index,
+           uint32_t phy_index,
            WakeOnWiFiInterface* wake_on_wifi);
   MockWiFi(const MockWiFi&) = delete;
   MockWiFi& operator=(const MockWiFi&) = delete;
 
   ~MockWiFi() override;
 
-  MOCK_METHOD(void,
-              Start,
-              (Error*, const EnabledStateChangedCallback&),
-              (override));
-  MOCK_METHOD(void,
-              Stop,
-              (Error*, const EnabledStateChangedCallback&),
-              (override));
-  MOCK_METHOD(void, Scan, (Error*, const std::string&), (override));
+  MOCK_METHOD(void, Start, (EnabledStateChangedCallback), (override));
+  MOCK_METHOD(void, Stop, (EnabledStateChangedCallback), (override));
+  MOCK_METHOD(void, Scan, (Error*, const std::string&, bool), (override));
+  MOCK_METHOD(void, Restart, (), (override));
   MOCK_METHOD(void, DisconnectFromIfActive, (WiFiService*), (override));
   MOCK_METHOD(void, DisconnectFrom, (WiFiService*), (override));
   MOCK_METHOD(void, ClearCachedCredentials, (const WiFiService*), (override));
@@ -58,9 +54,17 @@ class MockWiFi : public WiFi {
               (const WiFiEndpointConstRefPtr&),
               (override));
   MOCK_METHOD(bool, IsCurrentService, (const WiFiService* service), (const));
-  MOCK_METHOD(void, DestroyIPConfigLease, (const std::string&), (override));
-  MOCK_METHOD(bool, IsConnectedViaTether, (), (const, override));
   MOCK_METHOD(int16_t, GetSignalLevelForActiveService, (), (override));
+  MOCK_METHOD(void,
+              EmitStationInfoRequestEvent,
+              (WiFiLinkStatistics::Trigger trigger),
+              (override));
+  MOCK_METHOD(bool,
+              UpdateSupplicantProperties,
+              (const WiFiService* service,
+               const KeyValueStore& kv,
+               Error* error),
+              (override));
 };
 
 }  // namespace shill

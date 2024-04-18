@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #include <base/compiler_specific.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/observer_list.h>
 #include <base/timer/timer.h>
 
@@ -18,8 +17,7 @@
 #include "power_manager/powerd/system/display/display_watcher_observer.h"
 #include "power_manager/powerd/system/udev_subsystem_observer.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 struct UdevEvent;
 class UdevInterface;
@@ -27,7 +25,7 @@ class UdevInterface;
 // Watches for displays being connected or disconnected.
 class DisplayWatcherInterface {
  public:
-  virtual ~DisplayWatcherInterface() {}
+  virtual ~DisplayWatcherInterface() = default;
 
   // Returns the current list of connected displays.
   virtual const std::vector<DisplayInfo>& GetDisplays() const = 0;
@@ -58,7 +56,7 @@ class DisplayWatcher : public DisplayWatcherInterface,
   // unknown.
   static const char kDrmStatusUnknown[];
 
-  DisplayWatcher();
+  DisplayWatcher() = default;
   DisplayWatcher(const DisplayWatcher&) = delete;
   DisplayWatcher& operator=(const DisplayWatcher&) = delete;
 
@@ -105,7 +103,7 @@ class DisplayWatcher : public DisplayWatcherInterface,
   // Scans /sys and updates |displays_|.
   void UpdateDisplays();
 
-  UdevInterface* udev_;  // weak pointer
+  UdevInterface* udev_ = nullptr;  // owned elsewhere
 
   base::ObserverList<DisplayWatcherObserver> observers_;
 
@@ -120,7 +118,6 @@ class DisplayWatcher : public DisplayWatcherInterface,
   base::FilePath i2c_dev_path_for_testing_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_DISPLAY_DISPLAY_WATCHER_H_

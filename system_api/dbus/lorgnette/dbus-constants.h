@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,13 +14,21 @@ const char kManagerServiceError[] = "org.chromium.lorgnette.Error";
 // Methods.
 const char kListScannersMethod[] = "ListScanners";
 const char kGetScannerCapabilitiesMethod[] = "GetScannerCapabilities";
+const char kOpenScannerMethod[] = "OpenScanner";
+const char kCloseScannerMethod[] = "CloseScanner";
+const char kSetOptionsMethod[] = "SetOptions";
+const char kStartPreparedScanMethod[] = "StartPreparedScan";
+const char kReadScanDataMethod[] = "ReadScanData";
 const char kScanImageMethod[] = "ScanImage";
 const char kStartScanMethod[] = "StartScan";
 const char kCancelScanMethod[] = "CancelScan";
 const char kGetNextImageMethod[] = "GetNextImage";
+const char kStartScannerDiscoveryMethod[] = "StartScannerDiscovery";
+const char kStopScannerDiscoveryMethod[] = "StopScannerDiscovery";
 
 // Signals.
 const char kScanStatusChangedSignal[] = "ScanStatusChanged";
+const char kScannerListChangedSignal[] = "ScannerListChanged";
 
 // Parameters supplied to a "ScanImage" request.
 const char kScanPropertyMode[] = "Mode";

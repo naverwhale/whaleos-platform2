@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -20,7 +20,6 @@
 #include <base/containers/fixed_flat_set.h>
 #include <base/no_destructor.h>
 
-#include <chromeos-config/libcros_config/cros_config.h>
 #include "cros-camera/common.h"
 #include "cros-camera/utils/camera_config.h"
 #include "hal/usb/quirks.h"
@@ -399,6 +398,10 @@ int MetadataHandler::FillDefaultMetadata(
   // android.sync
   update_static(ANDROID_SYNC_MAX_LATENCY, ANDROID_SYNC_MAX_LATENCY_UNKNOWN);
 
+  // Allowed configuration in session parameters
+  update_static(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS,
+                std::vector<int32_t>{ANDROID_CONTROL_AE_TARGET_FPS_RANGE});
+
   return update_static.ok() && update_request.ok() ? 0 : -EINVAL;
 }
 
@@ -602,10 +605,17 @@ int MetadataHandler::FillMetadataFromSupportedFormats(
     //
     // The official document for this field:
     // https://developer.android.com/reference/android/hardware/camera2/CameraCharacteristics.html#SENSOR_INFO_PIXEL_ARRAY_SIZE
-    update_static(
-        ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
-        std::vector<int32_t>{static_cast<int32_t>(max_dimensions.width),
-                             static_cast<int32_t>(max_dimensions.height)});
+    if (device_info.sensor_info_pixel_array_size_width > 0 &&
+        device_info.sensor_info_pixel_array_size_height > 0) {
+      update_static(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
+                    std::vector<int32_t>{
+                        device_info.sensor_info_pixel_array_size_width,
+                        device_info.sensor_info_pixel_array_size_height});
+    } else {
+      update_static(
+          ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
+          std::vector<int32_t>{active_array_size[2], active_array_size[3]});
+    }
   }
 
   return update_static.ok() && update_request.ok() ? 0 : -EINVAL;
@@ -818,6 +828,15 @@ int MetadataHandler::FillMetadataFromDeviceInfo(
   update_static(ANDROID_SENSOR_ORIENTATION, device_info.sensor_orientation);
   update_static(ANDROID_LENS_FACING,
                 static_cast<uint8_t>(device_info.lens_facing));
+
+  // Whalebook has some lens facing quirks supposed to be effective in ARC too.
+  if (device_info.quirks & kQuirkFacingFront) {
+    update_static(ANDROID_LENS_FACING,
+                  static_cast<uint8_t>(LensFacing::kFront));
+  } else if (device_info.quirks & kQuirkFacingBack) {
+    update_static(ANDROID_LENS_FACING,
+                  static_cast<uint8_t>(LensFacing::kBack));
+  }
 
   if (is_v3_builtin) {
     update_static(ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL,
@@ -1337,9 +1356,6 @@ int MetadataHandler::PostHandleRequest(
   if (device_info_.enable_face_detection) {
     std::vector<int32_t> face_rectangles;
     std::vector<uint8_t> face_scores;
-    Rect<int> roi(0, 0, resolution.width, resolution.height);
-    Rect<int> largest_face;
-    int largest_size = 0;
     for (auto& face : faces) {
       float x1 = std::max(face.bounding_box.x1,
                           static_cast<float>(active_array_size.data.i32[0]));
@@ -1358,18 +1374,23 @@ int MetadataHandler::PostHandleRequest(
       face_rectangles.push_back(x2);
       face_rectangles.push_back(y2);
       face_scores.push_back(face.confidence * 100);
-      int size = (x2 - x1) * (y2 - y1);
-      if (size > largest_size) {
-        largest_face = Rect<int>(x1, y1, x2 - x1 + 1, y2 - y1 + 1);
-        largest_size = size;
-        // Set ROI with largest face to trigger 3A.
-        roi = largest_face;
-      }
     }
     update_request(ANDROID_STATISTICS_FACE_RECTANGLES, face_rectangles);
     update_request(ANDROID_STATISTICS_FACE_SCORES, face_scores);
     if (device_info_.region_of_interest_supported) {
-      device_->SetRegionOfInterest(roi);
+      Rect<int> roi(
+          active_array_size.data.i32[0], active_array_size.data.i32[1],
+          active_array_size.data.i32[2], active_array_size.data.i32[3]);
+      if (faces.size() == 1) {
+        roi = Rect<int>(face_rectangles[0], face_rectangles[1],
+                        face_rectangles[2] - face_rectangles[0] + 1,
+                        face_rectangles[3] - face_rectangles[1] + 1);
+      }
+      device_->SetRegionOfInterest(roi,
+                                   Rect<int>(active_array_size.data.i32[0],
+                                             active_array_size.data.i32[1],
+                                             active_array_size.data.i32[2],
+                                             active_array_size.data.i32[3]));
     }
   }
 

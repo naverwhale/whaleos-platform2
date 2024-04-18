@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 
 #include <base/check.h>
 #include <base/command_line.h>
+#include <base/files/file_path.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 #include <base/strings/string_number_conversions.h>
@@ -190,9 +191,11 @@ void FlagHelper::ResetForTesting() {
   instance_ = nullptr;
 }
 
-void FlagHelper::Init(int argc,
+bool FlagHelper::Init(int argc,
                       const char* const* argv,
-                      std::string help_usage) {
+                      std::string help_usage,
+                      InitFuncType func_type,
+                      std::vector<ParseResultsEntry>* out) {
   brillo::FlagHelper* helper = GetInstance();
   if (!helper->command_line_) {
     if (!base::CommandLine::InitializedForCurrentProcess())
@@ -202,10 +205,24 @@ void FlagHelper::Init(int argc,
 
   GetInstance()->SetUsageMessage(help_usage);
 
-  GetInstance()->UpdateFlagValues();
+  GetInstance()->SetProgramName(argv[0]);
+
+  int exit_code = GetInstance()->UpdateFlagValues(out);
+
+  if (exit_code == EX_OK)
+    return true;
+
+  switch (func_type) {
+    case InitFuncType::kExit:
+      exit(exit_code);
+    case InitFuncType::kAbort:
+      abort();
+    case InitFuncType::kReturn:
+      return false;
+  }
 }
 
-void FlagHelper::UpdateFlagValues() {
+int FlagHelper::UpdateFlagValues(std::vector<ParseResultsEntry>* out) {
   std::string error_msg;
   int error_code = EX_OK;
 
@@ -215,7 +232,7 @@ void FlagHelper::UpdateFlagValues() {
   // If the --help flag exists, print out help message and exit.
   if (command_line_->HasSwitch("help")) {
     puts(GetHelpMessage().c_str());
-    exit(EX_OK);
+    exit(error_code);
   }
 
   // Iterate over the base::CommandLine switches.  Update the value
@@ -235,23 +252,36 @@ void FlagHelper::UpdateFlagValues() {
     if (df_it != defined_flags_.end()) {
       Flag* flag = df_it->second.get();
       if (!flag->SetValue(value)) {
-        base::StringAppendF(
-            &error_msg,
-            "ERROR: illegal value '%s' specified for %s flag '%s'\n",
-            value.c_str(), flag->GetType(), flag->name_);
+        base::StringAppendF(&error_msg,
+                            "%s: ERROR: illegal value '%s' "
+                            "specified for %s flag '%s'\n",
+                            GetProgramName().c_str(), value.c_str(),
+                            flag->GetType(), flag->name_);
         error_code = EX_DATAERR;
+        flag->SetValue(flag->default_value_);
+        if (out) {
+          out->push_back(
+              {.flag_name = key, .failure_type = ParseFailure::kBadValue});
+        }
       }
     } else {
-      base::StringAppendF(&error_msg, "ERROR: unknown command line flag '%s'\n",
-                          key.c_str());
+      base::StringAppendF(&error_msg,
+                          "%s: ERROR: "
+                          "unknown command line flag '%s'\n",
+                          GetProgramName().c_str(), key.c_str());
       error_code = EX_USAGE;
+      if (out) {
+        out->push_back(
+            {.flag_name = key, .failure_type = ParseFailure::kUnknownFlag});
+      }
     }
   }
 
   if (error_code != EX_OK) {
-    puts(error_msg.c_str());
-    exit(error_code);
+    fputs(error_msg.c_str(), stderr);
   }
+
+  return error_code;
 }
 
 void FlagHelper::AddFlag(std::unique_ptr<Flag> flag) {
@@ -274,6 +304,15 @@ std::string FlagHelper::GetHelpMessage() const {
     }
   }
   return help;
+}
+
+void FlagHelper::SetProgramName(std::string prog_name) {
+  std::string prog_name_base = base::FilePath(prog_name).BaseName().value();
+  program_name_.assign(std::move(prog_name_base));
+}
+
+std::string FlagHelper::GetProgramName() const {
+  return program_name_;
 }
 
 }  // namespace brillo

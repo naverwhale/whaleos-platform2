@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #include <string>
 
-#include "base/macros.h"
 #include "base/metrics/histogram.h"
 #include "base/time/time.h"
 #include "metrics/uploader/proto/chrome_user_metrics_extension.pb.h"

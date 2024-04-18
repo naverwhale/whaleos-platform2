@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,20 +12,20 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/stl_util.h>
 #include <base/strings/string_split.h>
 #include <gtest/gtest.h>
 
@@ -39,7 +39,7 @@ namespace libcontainer {
 
 namespace {
 
-using MinijailHookCallback = base::Callback<int()>;
+using MinijailHookCallback = base::RepeatingCallback<int()>;
 
 constexpr int kTestCpuShares = 200;
 constexpr int kTestCpuQuota = 20000;
@@ -266,7 +266,7 @@ class ContainerTest : public ::testing::Test {
         "cgroup", "ipc", "mount", "network", "pid", "user",
     };
     container_config_namespaces(config_->get(), kNamespaces,
-                                base::size(kNamespaces));
+                                std::size(kNamespaces));
 
     container_config_set_cpu_shares(config_->get(), kTestCpuShares);
     container_config_set_cpu_cfs_params(config_->get(), kTestCpuQuota,
@@ -650,7 +650,8 @@ int minijail_add_hook(struct minijail* j,
                       minijail_hook_event_t event) {
   auto it = libcontainer::g_mock_minijail_state->hooks.insert(
       std::make_pair(event, std::vector<libcontainer::MinijailHookCallback>()));
-  it.first->second.emplace_back(base::Bind(hook, base::Unretained(payload)));
+  it.first->second.emplace_back(
+      base::BindRepeating(hook, base::Unretained(payload)));
   return 0;
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,9 @@
 #include <base/check_op.h>
 #include <base/files/file_path.h>
 #include <base/logging.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
+#include <chromeos/constants/imageloader.h>
 #include <chromeos/dbus/service_constants.h>
 
 namespace imageloader {
@@ -28,8 +29,7 @@ constexpr char kSeccompFilterPath[] =
 // static
 const char ImageLoader::kImageLoaderGroupName[] = "imageloaderd";
 const char ImageLoader::kImageLoaderUserName[] = "imageloaderd";
-constexpr base::TimeDelta kShutdownTimeout = base::TimeDelta::FromSeconds(20);
-const char ImageLoader::kLoadedMountsBase[] = "/run/imageloader";
+constexpr base::TimeDelta kShutdownTimeout = base::Seconds(20);
 
 ImageLoader::ImageLoader(ImageLoaderConfig config,
                          std::unique_ptr<HelperProcessProxy> proxy)
@@ -51,6 +51,7 @@ void ImageLoader::EnterSandbox() {
   minijail_remount_proc_readonly(jail.get());
   CHECK_EQ(0, minijail_change_user(jail.get(), kImageLoaderUserName));
   CHECK_EQ(0, minijail_change_group(jail.get(), kImageLoaderGroupName));
+  minijail_inherit_usergroups(jail.get());
   minijail_enter(jail.get());
 }
 
@@ -67,6 +68,8 @@ int ImageLoader::OnInit() {
       FROM_HERE, helper_process_proxy_->pid(),
       base::BindOnce(&ImageLoader::OnSubprocessExited,
                      weak_factory_.GetWeakPtr(), helper_process_proxy_->pid()));
+
+  impl_.Initialize();
 
   PostponeShutdown();
 
@@ -88,13 +91,15 @@ void ImageLoader::OnShutdown(int* return_code) {
 }
 
 void ImageLoader::OnSubprocessExited(pid_t pid, const siginfo_t& info) {
-  LOG(FATAL) << "Subprocess " << pid << " exited unexpectedly.";
+  LOG(ERROR) << "Subprocess " << pid << " exited unexpectedly.";
+  // TODO(b/195419571): Force the shutdown.
+  shutdown_callback_.callback().Run();
 }
 
 void ImageLoader::PostponeShutdown() {
   shutdown_callback_.Reset(
-      base::BindRepeating(&brillo::Daemon::Quit, weak_factory_.GetWeakPtr()));
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+      base::BindOnce(&brillo::Daemon::Quit, weak_factory_.GetWeakPtr()));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, shutdown_callback_.callback(), kShutdownTimeout);
 }
 
@@ -147,6 +152,14 @@ bool ImageLoader::LoadDlcImage(brillo::ErrorPtr* err,
   return true;
 }
 
+bool ImageLoader::LoadDlc(brillo::ErrorPtr* err,
+                          const LoadDlcRequest& request,
+                          std::string* out_mount_point) {
+  *out_mount_point = impl_.LoadDlc(request, helper_process_proxy_.get());
+  PostponeShutdown();
+  return true;
+}
+
 bool ImageLoader::RemoveComponent(brillo::ErrorPtr* err,
                                   const std::string& name,
                                   bool* out_success) {
@@ -169,7 +182,7 @@ bool ImageLoader::UnmountComponent(brillo::ErrorPtr* err,
                                    const std::string& name,
                                    bool* out_success) {
   base::FilePath component_mount_root =
-      base::FilePath(imageloader::ImageLoader::kLoadedMountsBase).Append(name);
+      base::FilePath(imageloader::kImageloaderMountBase).Append(name);
   *out_success = impl_.CleanupAll(false, component_mount_root, nullptr,
                                   helper_process_proxy_.get());
   PostponeShutdown();

@@ -1,9 +1,10 @@
 #!/bin/sh
-# Copyright 2014 The Chromium OS Authors. All rights reserved.
+# Copyright 2014 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-cat $1 |
+# shellcheck disable=SC2002
+cat "$1" |
   # Mark descriptions and actions in the body.
   sed 's/^[0-9. ]*Command and Response$/_COMMAND_SECTION/' |
   sed 's/^[0-9. ]*Detailed Actions$/_ACTIONS_SECTION/' |

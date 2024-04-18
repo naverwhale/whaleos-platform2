@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <vector>
 
-#include <base/macros.h>
 #include <base/observer_list.h>
 
 #include "power_manager/powerd/policy/backlight_controller.h"
@@ -15,17 +14,16 @@
 #include "power_manager/proto_bindings/backlight.pb.h"
 #include "power_manager/proto_bindings/policy.pb.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 // policy::BacklightController implementation that returns dummy values.
 class BacklightControllerStub : public policy::BacklightController {
  public:
-  BacklightControllerStub();
+  BacklightControllerStub() = default;
   BacklightControllerStub(const BacklightControllerStub&) = delete;
   BacklightControllerStub& operator=(const BacklightControllerStub&) = delete;
 
-  ~BacklightControllerStub() override;
+  ~BacklightControllerStub() override = default;
 
   const std::vector<PowerSource>& power_source_changes() const {
     return power_source_changes_;
@@ -62,6 +60,9 @@ class BacklightControllerStub : public policy::BacklightController {
   bool suspended() const { return suspended_; }
   bool shutting_down() const { return shutting_down_; }
   bool forced_off() const { return forced_off_; }
+  bool ambient_light_metrics_callback_registered() const {
+    return ambient_light_metrics_callback_registered_;
+  }
 
   void set_percent(double percent) { percent_ = percent; }
   void set_num_als_adjustments(int num) { num_als_adjustments_ = num; }
@@ -88,6 +89,8 @@ class BacklightControllerStub : public policy::BacklightController {
   void HandleTabletModeChange(TabletMode mode) override;
   void HandlePolicyChange(const PowerManagementPolicy& policy) override;
   void HandleDisplayServiceStart() override;
+  void HandleBatterySaverModeChange(
+      const BatterySaverModeState& state) override;
   void SetDimmedForInactivity(bool dimmed) override;
   void SetOffForInactivity(bool off) override;
   void SetSuspended(bool suspended) override;
@@ -101,6 +104,9 @@ class BacklightControllerStub : public policy::BacklightController {
   int GetNumUserAdjustments() const override { return num_user_adjustments_; }
   double LevelToPercent(int64_t level) const override;
   int64_t PercentToLevel(double percent) const override;
+
+  void RegisterAmbientLightResumeMetricsHandler(
+      AmbientLightOnResumeMetricsCallback callback) override;
 
  private:
   base::ObserverList<BacklightControllerObserver> observers_;
@@ -120,19 +126,20 @@ class BacklightControllerStub : public policy::BacklightController {
   std::vector<PowerManagementPolicy> policy_changes_;
   int display_service_starts_ = 0;
   int wake_notification_reports_ = 0;
+  int battery_saver_changes_ = 0;
 
   bool dimmed_ = false;
   bool off_ = false;
   bool suspended_ = false;
   bool shutting_down_ = false;
   bool forced_off_ = false;
+  bool ambient_light_metrics_callback_registered_ = false;
 
   // Counts to be returned by GetNum*Adjustments().
   int num_als_adjustments_ = 0;
   int num_user_adjustments_ = 0;
 };
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy
 
 #endif  // POWER_MANAGER_POWERD_POLICY_BACKLIGHT_CONTROLLER_STUB_H_

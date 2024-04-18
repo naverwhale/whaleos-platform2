@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 #include <memory>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/test/simple_test_clock.h>
 #include <brillo/message_loops/mock_message_loop.h>
 #include <gmock/gmock.h>
@@ -182,7 +182,7 @@ TEST_F(FakeStreamTest, ReadMultiplePackets) {
 TEST_F(FakeStreamTest, ReadPacketsWithDelay) {
   CreateStream(Stream::AccessMode::READ);
   stream_->AddReadPacketString({}, "foobar");
-  stream_->AddReadPacketString(base::TimeDelta::FromSeconds(1), "baz");
+  stream_->AddReadPacketString(base::Seconds(1), "baz");
   std::string data;
   bool eos = false;
   EXPECT_TRUE(ReadString(100, &data, &eos));
@@ -197,7 +197,7 @@ TEST_F(FakeStreamTest, ReadPacketsWithDelay) {
   EXPECT_FALSE(eos);
   EXPECT_TRUE(data.empty());
 
-  clock_.Advance(base::TimeDelta::FromSeconds(1));
+  clock_.Advance(base::Seconds(1));
 
   EXPECT_TRUE(ReadString(100, &data, &eos));
   EXPECT_FALSE(eos);
@@ -207,8 +207,7 @@ TEST_F(FakeStreamTest, ReadPacketsWithDelay) {
 TEST_F(FakeStreamTest, ReadPacketsWithError) {
   CreateStream(Stream::AccessMode::READ);
   stream_->AddReadPacketString({}, "foobar");
-  stream_->QueueReadErrorWithMessage(base::TimeDelta::FromSeconds(1),
-                                     "Dummy error");
+  stream_->QueueReadErrorWithMessage(base::Seconds(1), "Dummy error");
   stream_->AddReadPacketString({}, "baz");
 
   std::string data;
@@ -225,7 +224,7 @@ TEST_F(FakeStreamTest, ReadPacketsWithError) {
   EXPECT_FALSE(eos);
   EXPECT_TRUE(data.empty());
 
-  clock_.Advance(base::TimeDelta::FromSeconds(1));
+  clock_.Advance(base::Seconds(1));
 
   EXPECT_FALSE(ReadString(100, &data, &eos));
 
@@ -240,31 +239,24 @@ TEST_F(FakeStreamTest, WaitForDataRead) {
   EXPECT_CALL(mock_loop_, PostDelayedTask(_, _, kZeroDelay)).Times(2);
 
   int call_count = 0;
-  auto callback = base::Bind(
-      [](int* call_count, Stream::AccessMode mode) {
-        (*call_count)++;
-        EXPECT_EQ(Stream::AccessMode::READ, mode);
-      },
-      &call_count);
+  auto callback = base::BindRepeating([](int* call_count) { (*call_count)++; },
+                                      &call_count);
 
-  EXPECT_TRUE(
-      stream_->WaitForData(Stream::AccessMode::READ, callback, nullptr));
+  EXPECT_TRUE(stream_->WaitForDataRead(callback, nullptr));
   mock_loop_.Run();
   EXPECT_EQ(1, call_count);
 
   stream_->AddReadPacketString({}, "foobar");
-  EXPECT_TRUE(
-      stream_->WaitForData(Stream::AccessMode::READ, callback, nullptr));
+  EXPECT_TRUE(stream_->WaitForDataRead(callback, nullptr));
   mock_loop_.Run();
   EXPECT_EQ(2, call_count);
 
   stream_->ClearReadQueue();
 
-  auto one_sec_delay = base::TimeDelta::FromSeconds(1);
+  auto one_sec_delay = base::Seconds(1);
   stream_->AddReadPacketString(one_sec_delay, "baz");
   EXPECT_CALL(mock_loop_, PostDelayedTask(_, _, one_sec_delay)).Times(1);
-  EXPECT_TRUE(
-      stream_->WaitForData(Stream::AccessMode::READ, callback, nullptr));
+  EXPECT_TRUE(stream_->WaitForDataRead(callback, nullptr));
   mock_loop_.Run();
   EXPECT_EQ(3, call_count);
 }
@@ -274,7 +266,7 @@ TEST_F(FakeStreamTest, ReadAsync) {
   std::string input_data = "foobar-baz";
   size_t split_pos = input_data.find('-');
 
-  auto one_sec_delay = base::TimeDelta::FromSeconds(1);
+  auto one_sec_delay = base::Seconds(1);
   stream_->AddReadPacketString({}, input_data.substr(0, split_pos));
   stream_->AddReadPacketString(one_sec_delay, input_data.substr(split_pos));
 
@@ -295,8 +287,8 @@ TEST_F(FakeStreamTest, ReadAsync) {
   };
 
   EXPECT_TRUE(stream_->ReadAllAsync(
-      buffer.data(), buffer.size(), base::Bind(on_success, &success_count),
-      base::Bind(on_failure, &error_count), nullptr));
+      buffer.data(), buffer.size(), base::BindOnce(on_success, &success_count),
+      base::BindOnce(on_failure, &error_count), nullptr));
   mock_loop_.Run();
   EXPECT_EQ(1, success_count);
   EXPECT_EQ(0, error_count);
@@ -356,7 +348,7 @@ TEST_F(FakeStreamTest, WriteAndVerifyData) {
 TEST_F(FakeStreamTest, WriteWithDelay) {
   CreateStream(Stream::AccessMode::WRITE);
 
-  const auto delay = base::TimeDelta::FromMilliseconds(500);
+  const auto delay = base::Milliseconds(500);
 
   stream_->ExpectWritePacketSize({}, 3);
   stream_->ExpectWritePacketSize(delay, 3);
@@ -373,7 +365,7 @@ TEST_F(FakeStreamTest, WriteWithDelay) {
 TEST_F(FakeStreamTest, WriteWithError) {
   CreateStream(Stream::AccessMode::WRITE);
 
-  const auto delay = base::TimeDelta::FromMilliseconds(500);
+  const auto delay = base::Milliseconds(500);
 
   stream_->ExpectWritePacketSize({}, 3);
   stream_->QueueWriteError({});
@@ -398,31 +390,24 @@ TEST_F(FakeStreamTest, WaitForDataWrite) {
   EXPECT_CALL(mock_loop_, PostDelayedTask(_, _, kZeroDelay)).Times(2);
 
   int call_count = 0;
-  auto callback = base::Bind(
-      [](int* call_count, Stream::AccessMode mode) {
-        (*call_count)++;
-        EXPECT_EQ(Stream::AccessMode::WRITE, mode);
-      },
-      &call_count);
+  auto callback = base::BindRepeating([](int* call_count) { (*call_count)++; },
+                                      &call_count);
 
-  EXPECT_TRUE(
-      stream_->WaitForData(Stream::AccessMode::WRITE, callback, nullptr));
+  EXPECT_TRUE(stream_->WaitForDataWrite(callback, nullptr));
   mock_loop_.Run();
   EXPECT_EQ(1, call_count);
 
   stream_->ExpectWritePacketString({}, "foobar");
-  EXPECT_TRUE(
-      stream_->WaitForData(Stream::AccessMode::WRITE, callback, nullptr));
+  EXPECT_TRUE(stream_->WaitForDataWrite(callback, nullptr));
   mock_loop_.Run();
   EXPECT_EQ(2, call_count);
 
   stream_->ClearWriteQueue();
 
-  auto one_sec_delay = base::TimeDelta::FromSeconds(1);
+  auto one_sec_delay = base::Seconds(1);
   stream_->ExpectWritePacketString(one_sec_delay, "baz");
   EXPECT_CALL(mock_loop_, PostDelayedTask(_, _, one_sec_delay)).Times(1);
-  EXPECT_TRUE(
-      stream_->WaitForData(Stream::AccessMode::WRITE, callback, nullptr));
+  EXPECT_TRUE(stream_->WaitForDataWrite(callback, nullptr));
   mock_loop_.Run();
   EXPECT_EQ(3, call_count);
 }
@@ -432,7 +417,7 @@ TEST_F(FakeStreamTest, WriteAsync) {
   std::string output_data = "foobar-baz";
   size_t split_pos = output_data.find('-');
 
-  auto one_sec_delay = base::TimeDelta::FromSeconds(1);
+  auto one_sec_delay = base::Seconds(1);
   stream_->ExpectWritePacketString({}, output_data.substr(0, split_pos));
   stream_->ExpectWritePacketString(one_sec_delay,
                                    output_data.substr(split_pos));
@@ -451,69 +436,13 @@ TEST_F(FakeStreamTest, WriteAsync) {
   };
 
   EXPECT_TRUE(stream_->WriteAllAsync(output_data.data(), output_data.size(),
-                                     base::Bind(on_success, &success_count),
-                                     base::Bind(on_failure, &error_count),
+                                     base::BindOnce(on_success, &success_count),
+                                     base::BindOnce(on_failure, &error_count),
                                      nullptr));
   mock_loop_.Run();
   EXPECT_EQ(1, success_count);
   EXPECT_EQ(0, error_count);
   EXPECT_EQ(output_data, stream_->GetFlushedOutputDataAsString());
-}
-
-TEST_F(FakeStreamTest, WaitForDataReadWrite) {
-  CreateStream(Stream::AccessMode::READ_WRITE);
-  auto one_sec_delay = base::TimeDelta::FromSeconds(1);
-  auto two_sec_delay = base::TimeDelta::FromSeconds(2);
-
-  int call_count = 0;
-  auto callback = base::Bind(
-      [](int* call_count, Stream::AccessMode mode,
-         Stream::AccessMode expected_mode) {
-        (*call_count)++;
-        EXPECT_EQ(static_cast<int>(expected_mode), static_cast<int>(mode));
-      },
-      &call_count);
-
-  stream_->AddReadPacketString(one_sec_delay, "foo");
-  stream_->ExpectWritePacketString(two_sec_delay, "bar");
-
-  EXPECT_CALL(mock_loop_, PostDelayedTask(_, _, one_sec_delay)).Times(1);
-  EXPECT_TRUE(stream_->WaitForData(
-      Stream::AccessMode::READ_WRITE,
-      base::Bind(callback, Stream::AccessMode::READ), nullptr));
-  mock_loop_.Run();
-  EXPECT_EQ(1, call_count);
-
-  // The above step has adjusted the clock by 1 second already.
-  stream_->ClearReadQueue();
-  stream_->AddReadPacketString(two_sec_delay, "foo");
-  EXPECT_CALL(mock_loop_, PostDelayedTask(_, _, one_sec_delay)).Times(1);
-  EXPECT_TRUE(stream_->WaitForData(
-      Stream::AccessMode::READ_WRITE,
-      base::Bind(callback, Stream::AccessMode::WRITE), nullptr));
-  mock_loop_.Run();
-  EXPECT_EQ(2, call_count);
-
-  clock_.Advance(one_sec_delay);
-
-  EXPECT_CALL(mock_loop_, PostDelayedTask(_, _, kZeroDelay)).Times(1);
-  EXPECT_TRUE(stream_->WaitForData(
-      Stream::AccessMode::READ_WRITE,
-      base::Bind(callback, Stream::AccessMode::READ_WRITE), nullptr));
-  mock_loop_.Run();
-  EXPECT_EQ(3, call_count);
-
-  stream_->ClearReadQueue();
-  stream_->ClearWriteQueue();
-  stream_->AddReadPacketString(one_sec_delay, "foo");
-  stream_->ExpectWritePacketString(one_sec_delay, "bar");
-
-  EXPECT_CALL(mock_loop_, PostDelayedTask(_, _, one_sec_delay)).Times(1);
-  EXPECT_TRUE(stream_->WaitForData(
-      Stream::AccessMode::READ_WRITE,
-      base::Bind(callback, Stream::AccessMode::READ_WRITE), nullptr));
-  mock_loop_.Run();
-  EXPECT_EQ(4, call_count);
 }
 
 }  // namespace brillo

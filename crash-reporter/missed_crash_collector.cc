@@ -1,50 +1,29 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/missed_crash_collector.h"
 
 #include <memory>
+#include <string>
 
-#include <base/bind.h>
+#include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/string_number_conversions.h>
+#include <metrics/metrics_library.h>
 
-constexpr int64_t MissedCrashCollector::kDefaultChunkSize;
+#include "crash-reporter/constants.h"
 
-MissedCrashCollector::MissedCrashCollector()
-    : CrashCollector("missed_crash"), input_file_(stdin) {}
+MissedCrashCollector::MissedCrashCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("missed_crash", metrics_lib), input_file_(stdin) {}
 
 MissedCrashCollector::~MissedCrashCollector() = default;
-
-// static
-bool MissedCrashCollector::ReadFILEToString(FILE* file, std::string* contents) {
-  // This is very much a rewording of base::ReadFileToString(), except that:
-  // a) We pass in a FILE* instead of opening one. We don't use
-  //    base::ReadFileToString() because we often in fd-exhaustion when a missed
-  //    crash occurs and we don't want to risk opening more file descriptors.
-  // b) We don't try to find a file size since stdin isn't going to give us a
-  //    file size.
-  size_t bytes_read_this_pass;
-  size_t bytes_read_so_far = 0;
-  clearerr(file);
-  contents->clear();
-  contents->resize(kDefaultChunkSize);
-
-  while ((bytes_read_this_pass = fread(&(*contents)[bytes_read_so_far], 1,
-                                       kDefaultChunkSize, file)) > 0) {
-    bytes_read_so_far += bytes_read_this_pass;
-    // Last fread syscall (after EOF) can be avoided via feof, which is just a
-    // flag check.
-    if (feof(file))
-      break;
-    contents->resize(bytes_read_so_far + kDefaultChunkSize);
-  }
-  bool read_status = !ferror(file);
-  contents->resize(bytes_read_so_far);
-
-  return read_status;
-}
 
 bool MissedCrashCollector::Collect(int pid,
                                    int recent_miss_count,
@@ -53,7 +32,7 @@ bool MissedCrashCollector::Collect(int pid,
   LOG(INFO) << "Processing missed crash for process " << pid;
 
   std::string logs;
-  if (!ReadFILEToString(input_file_, &logs)) {
+  if (!base::ReadStreamToString(input_file_, &logs)) {
     LOG(ERROR) << "Could not read input logs";
     logs += "<failed read>";
     // Keep going in hopes of getting some information.
@@ -69,7 +48,8 @@ bool MissedCrashCollector::Collect(int pid,
   // "correct" userid here would mean allowing writes to many more locations in
   // that minijail config. I'd rather keep the write restrictions as tight as
   // possible unless we actually have sensitive information here.
-  if (!GetCreatedCrashDirectoryByEuid(kRootUid, &crash_directory, nullptr)) {
+  if (!GetCreatedCrashDirectoryByEuid(constants::kRootUid, &crash_directory,
+                                      nullptr)) {
     LOG(WARNING) << "Could not get crash directory (full?)";
     return true;
   }
@@ -100,12 +80,25 @@ bool MissedCrashCollector::Collect(int pid,
   return true;
 }
 
-CollectorInfo MissedCrashCollector::GetHandlerInfo(bool missed_chrome_crash,
-                                                   int32_t pid,
-                                                   int32_t recent_miss_count,
-                                                   int32_t recent_match_count,
-                                                   int32_t pending_miss_count) {
-  auto missed_crash_collector = std::make_shared<MissedCrashCollector>();
+CrashCollector::ComputedCrashSeverity MissedCrashCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  return ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kInfo,
+      .product_group = Product::kPlatform,
+  };
+}
+
+CollectorInfo MissedCrashCollector::GetHandlerInfo(
+    bool missed_chrome_crash,
+    int32_t pid,
+    int32_t recent_miss_count,
+    int32_t recent_match_count,
+    int32_t pending_miss_count,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
+  auto missed_crash_collector =
+      std::make_shared<MissedCrashCollector>(metrics_lib);
   return {
       .collector = missed_crash_collector,
       .handlers = {{

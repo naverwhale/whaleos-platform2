@@ -1,9 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "typecd/utils.h"
 
+#include <iomanip>
+#include <sstream>
 #include <string>
 
 #include <base/files/file_util.h>
@@ -27,6 +29,12 @@ bool ReadHexFromPath(const base::FilePath& path, uint32_t* val) {
   }
 
   return true;
+}
+
+std::string FormatHexString(uint32_t val, int width) {
+  std::stringstream out;
+  out << std::hex << std::setfill('0') << std::setw(width) << val;
+  return out.str();
 }
 
 }  // namespace typecd

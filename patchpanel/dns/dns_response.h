@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/macros.h"
 #include "base/memory/ref_counted.h"
-#include "base/optional.h"
-#include "base/strings/string_piece.h"
 #include "base/time/time.h"
 #include "brillo/brillo_export.h"
 
@@ -59,7 +58,7 @@ struct BRILLO_EXPORT DnsResourceRecord {
   uint16_t klass = 0;
   uint32_t ttl = 0;
   // Points to the original response buffer or otherwise to |owned_rdata|.
-  base::StringPiece rdata;
+  std::string_view rdata;
   // Used to construct a DnsResponse from data. This field is empty if |rdata|
   // points to the response buffer.
   std::string owned_rdata;
@@ -82,7 +81,10 @@ class BRILLO_EXPORT DnsRecordParser {
   bool AtEnd() const { return cur_ == packet_ + length_; }
 
   // Returns current offset into the packet.
-  size_t GetOffset() const { return cur_ - packet_; }
+  size_t GetOffset() const {
+    // Cast to size_t is safe assuming class invariant packet_ <= cur_ is true.
+    return static_cast<size_t>(cur_ - packet_);
+  }
 
   // Parses a (possibly compressed) DNS name from the packet starting at
   // |pos|. Stores output (even partial) in |out| unless |out| is NULL. |out|
@@ -91,7 +93,7 @@ class BRILLO_EXPORT DnsRecordParser {
   // This is exposed to allow parsing compressed names within RRDATA for TYPEs
   // such as NS, CNAME, PTR, MX, SOA.
   // See RFC 1035 section 4.1.4.
-  unsigned ReadName(const void* pos, std::string* out) const;
+  size_t ReadName(const void* pos, std::string* out) const;
 
   // Parses the next resource record into |record|. Returns true if succeeded.
   bool ReadRecord(DnsResourceRecord* record);
@@ -124,7 +126,7 @@ class BRILLO_EXPORT DnsResponse {
     DNS_ADDRESS_TTL_MISMATCH,  // OBSOLETE. No longer used.
     DNS_NO_ADDRESSES,          // OBSOLETE. No longer used.
     // Only add new values here.
-    DNS_PARSE_RESULT_MAX,      // Bounding value for histograms.
+    DNS_PARSE_RESULT_MAX,  // Bounding value for histograms.
   };
 
   // Constructs a response buffer large enough to store one byte more than
@@ -138,7 +140,7 @@ class BRILLO_EXPORT DnsResponse {
               const std::vector<DnsResourceRecord>& answers,
               const std::vector<DnsResourceRecord>& authority_records,
               const std::vector<DnsResourceRecord>& additional_records,
-              const base::Optional<DnsQuery>& query,
+              const std::optional<DnsQuery>& query,
               uint8_t rcode = dns_protocol::kRcodeNOERROR);
 
   // Constructs a response buffer of given length. Used for TCP transactions.
@@ -178,7 +180,7 @@ class BRILLO_EXPORT DnsResponse {
   // nullopt if the ID is unknown. The ID will only be known if the response is
   // successfully constructed from data or if InitParse...() has been able to
   // parse at least as far as the ID (not necessarily a fully successful parse).
-  base::Optional<uint16_t> id() const;
+  std::optional<uint16_t> id() const;
 
   // Returns true if response is valid, that is, after successful InitParse, or
   // after successful construction of a new response from data.
@@ -195,7 +197,7 @@ class BRILLO_EXPORT DnsResponse {
   unsigned additional_answer_count() const;
 
   // Accessors to the question. The qname is unparsed.
-  base::StringPiece qname() const;
+  std::string_view qname() const;
   uint16_t qtype() const;
 
   // Returns qname in dotted format.
@@ -214,7 +216,7 @@ class BRILLO_EXPORT DnsResponse {
                    const DnsResourceRecord& record);
   bool WriteAnswer(base::BigEndianWriter* writer,
                    const DnsResourceRecord& answer,
-                   const base::Optional<DnsQuery>& query);
+                   const std::optional<DnsQuery>& query);
 
   // Convenience for header access.
   const dns_protocol::Header* header() const;

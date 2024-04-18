@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -49,7 +49,9 @@ MockExampleDatabase::FakeIterator(const int n) {
              SQLITE_OK);
   }
 
-  return std::make_tuple(std::move(db_ptr), Iterator(db, "fake_client"));
+  return std::make_tuple(
+      std::move(db_ptr),
+      Iterator(db, "fake_client", base::Time(), base::Time(), false, 0));
 }
 
 }  // namespace federated

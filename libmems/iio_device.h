@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,18 @@
 
 #include <iio.h>
 
+#include <linux/iio/events.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/containers/flat_map.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
-#include <base/optional.h>
 #include <base/time/time.h>
 
 #include "libmems/export.h"
+#include "libmems/iio_event.h"
 
 namespace libmems {
 
@@ -52,22 +53,26 @@ class LIBMEMS_EXPORT IioDevice {
   // read/write attribute accessors below.
   virtual base::FilePath GetPath() const = 0;
 
+  std::optional<base::FilePath> GetAbsoluteSysPath() const;
+
+  std::optional<std::string> GetLocation() const;
+
   // Reads the |name| attribute of this device and returns the value
-  // as a string. It will return base::nullopt if the attribute cannot
+  // as a string. It will return std::nullopt if the attribute cannot
   // be read.
-  virtual base::Optional<std::string> ReadStringAttribute(
+  virtual std::optional<std::string> ReadStringAttribute(
       const std::string& name) const = 0;
 
   // Reads the |name| attribute of this device and returns the value
-  // as a signed number. It will return base::nullopt if the attribute
+  // as a signed number. It will return std::nullopt if the attribute
   // cannot be read or is not a valid number.
-  virtual base::Optional<int64_t> ReadNumberAttribute(
+  virtual std::optional<int64_t> ReadNumberAttribute(
       const std::string& name) const = 0;
 
   // Reads the |name| attribute of this device and returns the value
-  // as a double precision floating point. It will return base::nullopt
+  // as a double precision floating point. It will return std::nullopt
   // if the attribute cannot be read or is not a valid number.
-  virtual base::Optional<double> ReadDoubleAttribute(
+  virtual std::optional<double> ReadDoubleAttribute(
       const std::string& name) const = 0;
 
   // Writes the string |value| to the attribute |name| of this device. Returns
@@ -121,9 +126,19 @@ class LIBMEMS_EXPORT IioDevice {
   // It will return nullptr if no such channel can be found.
   IioChannel* GetChannel(const std::string& name);
 
+  // Returns all events belonging to this device.
+  std::vector<IioEvent*> GetAllEvents();
+
+  // Enables all events belonging to this device.
+  void EnableAllEvents();
+
+  // Finds the IIO event |index| as the index in this device and returns it.
+  // It will return nullptr if no such channel can be found.
+  IioEvent* GetEvent(int32_t index);
+
   // Returns the sample size in this device.
-  // Returns base::nullopt on failure.
-  virtual base::Optional<size_t> GetSampleSize() const = 0;
+  // Returns std::nullopt on failure.
+  virtual std::optional<size_t> GetSampleSize() const = 0;
 
   // Enables the IIO buffer on this device and configures it to return
   // |num| samples on access. This buffer's lifetime can exceed that of the
@@ -150,22 +165,30 @@ class LIBMEMS_EXPORT IioDevice {
 
   // Gets the file descriptor to poll for samples if the IIO buffer is created
   // by CreateBuffer.
-  // Returns base::nullopt on failure.
+  // Returns std::nullopt on failure.
   // The buffer's lifetime is managed by the IioDevice, which will be disabled
   // when the IioDevice along with the IioContext gets destroyed. It should not
   // be used along with EnableBuffer.
-  virtual base::Optional<int32_t> GetBufferFd() = 0;
+  virtual std::optional<int32_t> GetBufferFd() = 0;
 
   // Reads & returns one sample if the IIO buffer is created by CreateBuffer.
-  // Returns base::nullopt on failure.
+  // Returns std::nullopt on failure.
   // The buffer's lifetime is managed by the IioDevice, which will be disabled
   // when the IioDevice along with the IioContext gets destroyed. It should not
   // be used along with EnableBuffer.
-  virtual base::Optional<IioSample> ReadSample() = 0;
+  virtual std::optional<IioSample> ReadSample() = 0;
 
   // Frees the IIO buffer created by CreateBuffer if it exists. It should not be
   // used along with EnableBuffer.
   virtual void FreeBuffer() = 0;
+
+  // Gets the file descriptor to poll for events.
+  // Returns std::nullopt on failure.
+  virtual std::optional<int32_t> GetEventFd() = 0;
+
+  // Reads & returns one event.
+  // Returns std::nullopt on failure.
+  virtual std::optional<iio_event_data> ReadEvent() = 0;
 
   bool GetMinMaxFrequency(double* min_freq, double* max_freq);
 
@@ -175,14 +198,15 @@ class LIBMEMS_EXPORT IioDevice {
     std::unique_ptr<IioChannel> chn;
   };
 
-  static base::Optional<int> GetIdAfterPrefix(const char* id_str,
-                                              const char* prefix);
+  static std::optional<int> GetIdAfterPrefix(const char* id_str,
+                                             const char* prefix);
 
   IioDevice() = default;
   IioDevice(const IioDevice&) = delete;
   IioDevice& operator=(const IioDevice&) = delete;
 
   std::vector<ChannelData> channels_;
+  std::vector<std::unique_ptr<IioEvent>> events_;
 };
 
 }  // namespace libmems

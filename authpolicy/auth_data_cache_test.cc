@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
-#include <base/macros.h>
 #include <base/test/simple_test_clock.h>
 #include <gtest/gtest.h>
 
@@ -31,10 +30,10 @@ constexpr char kInvalidData[] = "data'); DROP TABLE DataCache;--";
 
 constexpr char kNonExistingFile[] = "does_not_exist";
 
-constexpr base::TimeDelta kTwoDays = base::TimeDelta::FromDays(2);
-constexpr base::TimeDelta kThreeDays = base::TimeDelta::FromDays(3);
-constexpr base::TimeDelta kEightDays = base::TimeDelta::FromDays(8);
-constexpr base::TimeDelta kMinusOneSecond = base::TimeDelta::FromSeconds(-1);
+constexpr base::TimeDelta kTwoDays = base::Days(2);
+constexpr base::TimeDelta kThreeDays = base::Days(3);
+constexpr base::TimeDelta kEightDays = base::Days(8);
+constexpr base::TimeDelta kMinusOneSecond = base::Seconds(-1);
 
 }  // namespace
 

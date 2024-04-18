@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,14 +26,7 @@ namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kModem;
-static std::string ObjectID(const ModemInfo* m) {
-  return "(modem info)";
-}
 }  // namespace Logging
-
-namespace {
-constexpr int kGetManagedObjectsTimeout = 5000;
-}
 
 ModemInfo::ModemInfo(ControlInterface* control_interface, Manager* manager)
     : control_interface_(control_interface),
@@ -45,7 +38,7 @@ ModemInfo::~ModemInfo() {
 }
 
 void ModemInfo::Start() {
-  SLOG(this, 1) << "ModemInfo::Start";
+  LOG(INFO) << __func__;
 
   pending_activation_store_.reset(new PendingActivationStore());
   pending_activation_store_->InitStorage(manager_->storage_path());
@@ -55,7 +48,7 @@ void ModemInfo::Start() {
 }
 
 void ModemInfo::Stop() {
-  SLOG(this, 1) << "ModemInfo::Stop";
+  LOG(INFO) << __func__;
   pending_activation_store_.reset();
   proxy_.reset();
   Disconnect();
@@ -72,18 +65,20 @@ std::unique_ptr<DBusObjectManagerProxyInterface> ModemInfo::CreateProxy() {
       control_interface_->CreateDBusObjectManagerProxy(
           RpcIdentifier(modemmanager::kModemManager1ServicePath),
           modemmanager::kModemManager1ServiceName,
-          base::Bind(&ModemInfo::OnAppeared, weak_ptr_factory_.GetWeakPtr()),
-          base::Bind(&ModemInfo::OnVanished, weak_ptr_factory_.GetWeakPtr()));
-  proxy->set_interfaces_added_callback(Bind(&ModemInfo::OnInterfacesAddedSignal,
-                                            weak_ptr_factory_.GetWeakPtr()));
-  proxy->set_interfaces_removed_callback(Bind(
+          base::BindRepeating(&ModemInfo::OnAppeared,
+                              weak_ptr_factory_.GetWeakPtr()),
+          base::BindRepeating(&ModemInfo::OnVanished,
+                              weak_ptr_factory_.GetWeakPtr()));
+  proxy->set_interfaces_added_callback(base::BindRepeating(
+      &ModemInfo::OnInterfacesAddedSignal, weak_ptr_factory_.GetWeakPtr()));
+  proxy->set_interfaces_removed_callback(base::BindRepeating(
       &ModemInfo::OnInterfacesRemovedSignal, weak_ptr_factory_.GetWeakPtr()));
   return proxy;
 }
 
 std::unique_ptr<Modem> ModemInfo::CreateModem(
     const RpcIdentifier& path, const InterfaceToProperties& properties) {
-  SLOG(this, 1) << __func__ << ": " << path.value();
+  SLOG(1) << __func__ << ": " << path.value();
   auto modem = std::make_unique<Modem>(modemmanager::kModemManager1ServiceName,
                                        path, manager_->device_info());
   modem->CreateDevice(properties);
@@ -91,23 +86,20 @@ std::unique_ptr<Modem> ModemInfo::CreateModem(
 }
 
 void ModemInfo::Connect() {
-  SLOG(this, 1) << __func__;
+  LOG(INFO) << __func__;
   service_connected_ = true;
-  Error error;
   CHECK(proxy_);
-  proxy_->GetManagedObjects(&error,
-                            Bind(&ModemInfo::OnGetManagedObjectsReply,
-                                 weak_ptr_factory_.GetWeakPtr()),
-                            kGetManagedObjectsTimeout);
+  proxy_->GetManagedObjects(base::BindOnce(&ModemInfo::OnGetManagedObjectsReply,
+                                           weak_ptr_factory_.GetWeakPtr()));
 }
 
 void ModemInfo::Disconnect() {
+  LOG(INFO) << __func__;
   modems_.clear();
   service_connected_ = false;
 }
 
 bool ModemInfo::ModemExists(const RpcIdentifier& path) const {
-  CHECK(service_connected_);
   return base::Contains(modems_, path);
 }
 
@@ -117,30 +109,32 @@ void ModemInfo::AddModem(const RpcIdentifier& path,
     LOG(WARNING) << "Modem " << path.value() << " already exists.";
     return;
   }
-  SLOG(this, 1) << __func__ << ": " << path.value();
-  std::unique_ptr<Modem> modem = CreateModem(path, properties);
-  modems_[modem->path()] = std::move(modem);
+  LOG(INFO) << __func__ << ": " << path.value();
+  modems_[path] = CreateModem(path, properties);
 }
 
 void ModemInfo::RemoveModem(const RpcIdentifier& path) {
-  SLOG(this, 1) << __func__ << ": " << path.value();
-  CHECK(service_connected_);
+  LOG(INFO) << __func__ << ": " << path.value();
   modems_.erase(path);
 }
 
 void ModemInfo::OnAppeared() {
-  SLOG(this, 1) << __func__;
+  LOG(INFO) << __func__;
   Connect();
 }
 
 void ModemInfo::OnVanished() {
-  SLOG(this, 1) << __func__;
+  LOG(INFO) << __func__;
   Disconnect();
 }
 
 void ModemInfo::OnInterfacesAddedSignal(
     const RpcIdentifier& object_path, const InterfaceToProperties& properties) {
-  SLOG(this, 2) << __func__ << ": " << object_path.value();
+  LOG(INFO) << __func__ << ": " << object_path.value();
+  if (!service_connected_) {
+    LOG(WARNING) << "Interfaces added, but ModemManager is no longer available";
+    return;
+  }
   if (!base::Contains(properties, MM_DBUS_INTERFACE_MODEM)) {
     LOG(ERROR) << "Interfaces added, but not modem interface.";
     return;
@@ -151,7 +145,12 @@ void ModemInfo::OnInterfacesAddedSignal(
 void ModemInfo::OnInterfacesRemovedSignal(
     const RpcIdentifier& object_path,
     const std::vector<std::string>& interfaces) {
-  SLOG(this, 2) << __func__ << ": " << object_path.value();
+  LOG(INFO) << __func__ << ": " << object_path.value();
+  if (!service_connected_) {
+    LOG(WARNING)
+        << "Interfaces removed, but ModemManager is no longer available";
+    return;
+  }
   if (!base::Contains(interfaces, MM_DBUS_INTERFACE_MODEM)) {
     // In theory, a modem could drop, say, 3GPP, but not CDMA.  In
     // practice, we don't expect this.
@@ -163,9 +162,11 @@ void ModemInfo::OnInterfacesRemovedSignal(
 
 void ModemInfo::OnGetManagedObjectsReply(const ObjectsWithProperties& objects,
                                          const Error& error) {
-  if (!error.IsSuccess())
+  LOG(INFO) << __func__ << ": " << error.IsSuccess();
+  if (!error.IsSuccess()) {
+    error.Log();
     return;
-  SLOG(this, 2) << __func__;
+  }
   for (const auto& object_properties_pair : objects) {
     OnInterfacesAddedSignal(object_properties_pair.first,
                             object_properties_pair.second);

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,6 @@ class CrosConfigTest : public testing::Test {};
 
 TEST_F(CrosConfigTest, CheckName) {
   brillo::CrosConfig cros_config;
-  EXPECT_TRUE(cros_config.Init());
-
   std::string name;
   EXPECT_TRUE(cros_config.GetString("/", "name", &name));
   EXPECT_NE(name, "");

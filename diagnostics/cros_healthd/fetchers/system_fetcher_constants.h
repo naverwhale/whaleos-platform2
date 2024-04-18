@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,6 +18,7 @@ inline constexpr char kFileNameModelName[] = "model_name";
 inline constexpr char kFileNameRegion[] = "region";
 inline constexpr char kFileNameSerialNumber[] = "serial_number";
 inline constexpr char kFileNameSkuNumber[] = "sku_number";
+inline constexpr char kFileNameOemName[] = "oem_name";
 
 // Relative path to DMI information.
 inline constexpr char kRelativePathDmiInfo[] = "sys/class/dmi/id";
@@ -37,13 +38,6 @@ inline constexpr char kFileNameSysVendor[] = "sys_vendor";
 
 // Files for boot mode information.
 inline constexpr char kFilePathProcCmdline[] = "proc/cmdline";
-// Files of EFI global namespace (EFI_GLOBAL_VARIABLE, fixed UUID
-// 8be4df61-93ca-11d2-aa0d-00e098032b8c)
-// See also:
-// https://uefi.org/sites/default/files/resources/UEFI_Spec_2_9_2021_03_18.pdf
-inline constexpr char kFileUEFISecurityBoot[] =
-    "sys/firmware/efi/vars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c/"
-    "data";
 
 }  // namespace diagnostics
 

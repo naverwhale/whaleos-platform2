@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <sstream>
 
 #include <base/strings/stringprintf.h>
+#include <base/types/cxx23_to_underlying.h>
 #include <gtest/gtest.h>
 
 namespace patchpanel {
@@ -122,6 +123,7 @@ TEST_F(RoutingServiceTest, FwmarkAndMaskConstants) {
   EXPECT_EQ("0x00008000", kFwmarkRouteOnVpn.ToString());
   EXPECT_EQ("0x00004000", kFwmarkBypassVpn.ToString());
   EXPECT_EQ("0x00002000", kFwmarkForwardedSourcesMask.ToString());
+  EXPECT_EQ("0x000000e0", kFwmarkQoSCategoryMask.ToString());
 
   EXPECT_EQ(0x00003f00, kFwmarkAllSourcesMask.Value());
   EXPECT_EQ(0xffff0000, kFwmarkRoutingMask.Value());
@@ -130,20 +132,30 @@ TEST_F(RoutingServiceTest, FwmarkAndMaskConstants) {
   EXPECT_EQ(0x00008000, kFwmarkRouteOnVpn.Value());
   EXPECT_EQ(0x00004000, kFwmarkBypassVpn.Value());
   EXPECT_EQ(0x00002000, kFwmarkForwardedSourcesMask.Value());
+  EXPECT_EQ(0x000000e0, kFwmarkQoSCategoryMask.Value());
 }
 
 TEST_F(RoutingServiceTest, FwmarkSources) {
-  EXPECT_EQ("0x00000000", Fwmark::FromSource(UNKNOWN).ToString());
-  EXPECT_EQ("0x00000100", Fwmark::FromSource(CHROME).ToString());
-  EXPECT_EQ("0x00000200", Fwmark::FromSource(USER).ToString());
-  EXPECT_EQ("0x00000300", Fwmark::FromSource(UPDATE_ENGINE).ToString());
-  EXPECT_EQ("0x00000400", Fwmark::FromSource(SYSTEM).ToString());
-  EXPECT_EQ("0x00000500", Fwmark::FromSource(HOST_VPN).ToString());
-  EXPECT_EQ("0x00002000", Fwmark::FromSource(ARC).ToString());
-  EXPECT_EQ("0x00002100", Fwmark::FromSource(CROSVM).ToString());
-  EXPECT_EQ("0x00002200", Fwmark::FromSource(PLUGINVM).ToString());
-  EXPECT_EQ("0x00002300", Fwmark::FromSource(TETHER_DOWNSTREAM).ToString());
-  EXPECT_EQ("0x00002400", Fwmark::FromSource(ARC_VPN).ToString());
+  EXPECT_EQ("0x00000000",
+            Fwmark::FromSource(TrafficSource::kUnknown).ToString());
+  EXPECT_EQ("0x00000100",
+            Fwmark::FromSource(TrafficSource::kChrome).ToString());
+  EXPECT_EQ("0x00000200", Fwmark::FromSource(TrafficSource::kUser).ToString());
+  EXPECT_EQ("0x00000300",
+            Fwmark::FromSource(TrafficSource::kUpdateEngine).ToString());
+  EXPECT_EQ("0x00000400",
+            Fwmark::FromSource(TrafficSource::kSystem).ToString());
+  EXPECT_EQ("0x00000500",
+            Fwmark::FromSource(TrafficSource::kHostVpn).ToString());
+  EXPECT_EQ("0x00002000", Fwmark::FromSource(TrafficSource::kArc).ToString());
+  EXPECT_EQ("0x00002100",
+            Fwmark::FromSource(TrafficSource::kCrosVM).ToString());
+  EXPECT_EQ("0x00002200",
+            Fwmark::FromSource(TrafficSource::kParallelsVM).ToString());
+  EXPECT_EQ("0x00002300",
+            Fwmark::FromSource(TrafficSource::kTetherDownstream).ToString());
+  EXPECT_EQ("0x00002400",
+            Fwmark::FromSource(TrafficSource::kArcVpn).ToString());
 
   for (auto ts : kLocalSources) {
     EXPECT_EQ(
@@ -163,6 +175,24 @@ TEST_F(RoutingServiceTest, FwmarkSources) {
   for (auto ts : kForwardedSources) {
     EXPECT_EQ("0x00000000",
               (Fwmark::FromSource(ts) & ~kFwmarkAllSourcesMask).ToString());
+  }
+}
+
+TEST_F(RoutingServiceTest, FwmarkQoSCategories) {
+  constexpr QoSCategory kAllCategories[] = {
+      QoSCategory::kDefault, QoSCategory::kRealTimeInteractive,
+      QoSCategory::kMultimediaConferencing, QoSCategory::kNetworkControl,
+      QoSCategory::kWebRTC};
+  // The offset of the qos fields defined in Fwmark.
+  constexpr auto kOffset = 5;
+
+  for (const auto category : kAllCategories) {
+    uint32_t category_int = base::to_underlying(category);
+    EXPECT_EQ(category_int, Fwmark::FromQoSCategory(category).qos_category);
+    EXPECT_EQ(category_int << kOffset,
+              Fwmark::FromQoSCategory(category).Value());
+    EXPECT_EQ(hex(category_int << kOffset),
+              Fwmark::FromQoSCategory(category).ToString());
   }
 }
 
@@ -266,15 +296,15 @@ TEST_F(RoutingServiceTest, LocalSourceSpecsPrettyPrinting) {
     std::string expected_output;
   } testcases[] = {
       {{}, "{source: UNKNOWN, uid: , classid: 0, is_on_vpn: false}"},
-      {{TrafficSource::CHROME, kUidChronos, 0, true},
+      {{TrafficSource::kChrome, kUidChronos, 0, true},
        "{source: CHROME, uid: chronos, classid: 0, is_on_vpn: true}"},
-      {{TrafficSource::USER, kUidDebugd, 0, true},
+      {{TrafficSource::kUser, kUidDebugd, 0, true},
        "{source: USER, uid: debugd, classid: 0, is_on_vpn: true}"},
-      {{TrafficSource::SYSTEM, kUidTlsdate, 0, true},
+      {{TrafficSource::kSystem, kUidTlsdate, 0, true},
        "{source: SYSTEM, uid: tlsdate, classid: 0, is_on_vpn: true}"},
-      {{TrafficSource::USER, kUidPluginvm, 0, true},
+      {{TrafficSource::kUser, kUidPluginvm, 0, true},
        "{source: USER, uid: pluginvm, classid: 0, is_on_vpn: true}"},
-      {{TrafficSource::UPDATE_ENGINE, "", 1234, false},
+      {{TrafficSource::kUpdateEngine, "", 1234, false},
        "{source: UPDATE_ENGINE, uid: , classid: 1234, is_on_vpn: false}"},
   };
 

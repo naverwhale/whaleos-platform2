@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,9 +17,9 @@
 #include <gtest/gtest.h>
 
 #include "power_manager/common/power_constants.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 namespace {
 
 // Creates and writes |val| to |sys_path|. Also creates all necessary parent
@@ -31,7 +31,8 @@ void CreateDirectoryAndWriteFile(const base::FilePath& sys_path,
 }
 
 }  // namespace
-class WakeupDeviceTest : public testing::Test {
+
+class WakeupDeviceTest : public TestEnvironment {
  public:
   WakeupDeviceTest() {
     CHECK(temp_dir_.CreateUniqueTempDir());
@@ -52,7 +53,7 @@ class WakeupDeviceTest : public testing::Test {
   WakeupDeviceTest(const WakeupDeviceTest&) = delete;
   WakeupDeviceTest& operator=(const WakeupDeviceTest&) = delete;
 
-  ~WakeupDeviceTest() override {}
+  ~WakeupDeviceTest() override = default;
 
  protected:
   std::unique_ptr<WakeupDeviceInterface> wakeup_device_;
@@ -130,5 +131,4 @@ TEST_F(WakeupDeviceTest, TestWakeupCountReadFailAfterResume) {
   EXPECT_FALSE(wakeup_device_->CausedLastWake());
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

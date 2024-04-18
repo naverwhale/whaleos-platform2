@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,13 +17,13 @@
 // Usage example.  Add an action to a hook table like this:
 //
 //   HookTable hook_table_(&event_dispatcher);
-//   Closure start_callback = Bind(&MyService::Disconnect, &my_service);
-//   hook_table_.Add("MyService", start_callback);
+//   OnceClosure start_callback = BindOnce(&MyService::Disconnect, &my_service);
+//   hook_table_.Add("MyService", std::move(start_callback));
 //
 // The code that catches an event runs the actions of the hook table like this:
 //
-//   ResultCallback done_callback = Bind(Manager::OnDisconnect, &manager);
-//   hook_table_.Run(kTimeout, done_callback);
+//   ResultCallback done_callback = BindOnce(Manager::OnDisconnect, &manager);
+//   hook_table_.Run(kTimeout, std::move(done_callback));
 //
 // When |my_service| has completed its disconnect process,
 // Manager::OnDisconnect() gets called with Error::kSuccess.  If |my_service|
@@ -32,9 +32,10 @@
 
 #include <map>
 #include <string>
+#include <utility>
 
 #include <base/cancelable_callback.h>
-#include <base/macros.h>
+#include <base/time/time.h>
 #include <gtest/gtest_prod.h>
 
 #include "shill/callbacks.h"
@@ -54,7 +55,7 @@ class HookTable {
   // Adds a closure to the hook table.  |name| should be unique; otherwise, a
   // previous closure by the same name will be replaced.  |start| will be called
   // when Run() is called.
-  void Add(const std::string& name, const base::Closure& start);
+  void Add(const std::string& name, base::OnceClosure start);
 
   // Users call this function to report the completion of an action |name|.
   void ActionComplete(const std::string& name);
@@ -67,7 +68,7 @@ class HookTable {
   // starts a timer for completion in |timeout_ms|.  If all actions complete
   // successfully within the timeout period, |done| is called with a value of
   // Error::kSuccess.  Otherwise, it is called with Error::kOperationTimeout.
-  void Run(int timeout_ms, const ResultCallback& done);
+  void Run(base::TimeDelta timeout, ResultCallback done);
 
   bool IsEmpty() const { return hook_table_.empty(); }
 
@@ -77,15 +78,14 @@ class HookTable {
   // For each action, there is a |start| callback which is stored in this
   // structure.
   struct HookAction {
-    explicit HookAction(const base::Closure& start_callback)
-        : start_callback(start_callback), started(false), completed(false) {}
-    base::Closure start_callback;
+    explicit HookAction(base::OnceClosure start_callback)
+        : start_callback(std::move(start_callback)),
+          started(false),
+          completed(false) {}
+    base::OnceClosure start_callback;
     bool started;
     bool completed;
   };
-
-  // Each action is stored in this table.  The key is |name| passed to Add().
-  using HookTableMap = std::map<std::string, HookAction>;
 
   // Returns true if all started actions have completed; false otherwise.  If no
   // actions have started, returns true.
@@ -96,8 +96,8 @@ class HookTable {
   // kOperationTimeout.
   void ActionsTimedOut();
 
-  // Each action is stored in this table.
-  HookTableMap hook_table_;
+  // Each action is stored in this table.  The key is |name| passed to Add().
+  std::map<std::string, HookAction> hook_table_;
 
   // This is the user-supplied callback to Run().
   ResultCallback done_callback_;
@@ -105,7 +105,7 @@ class HookTable {
   // This callback is created in Run() and is queued to the event dispatcher to
   // run after a timeout period.  If all the actions complete before the
   // timeout, then this callback is canceled.
-  base::CancelableClosure timeout_callback_;
+  base::CancelableOnceClosure timeout_callback_;
 
   // Used for setting a timeout action to run in case all the actions do not
   // complete in time.

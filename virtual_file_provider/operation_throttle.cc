@@ -1,11 +1,11 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "virtual_file_provider/operation_throttle.h"
 
-#include <base/bind.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 
 namespace virtual_file_provider {
 

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,8 +16,7 @@
 #include "power_manager/common/battery_percentage_converter.h"
 #include "power_manager/powerd/system/charge_controller_helper_interface.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -205,10 +204,13 @@ bool ChargeController::ApplyPolicyChange(const PowerManagementPolicy& policy) {
   DCHECK(helper_);
 
   // Try to apply as many changes as possible.
-  return ApplyPeakShiftChange(policy) & ApplyBootOnAcChange(policy) &
-         ApplyUsbPowerShareChange(policy) &
-         ApplyAdvancedBatteryChargeModeChange(policy) &
-         ApplyBatteryChargeModeChange(policy);
+  bool success = ApplyPeakShiftChange(policy);
+  success &= ApplyBootOnAcChange(policy);
+  success &= ApplyUsbPowerShareChange(policy);
+  success &= ApplyAdvancedBatteryChargeModeChange(policy);
+  success &= ApplyBatteryChargeModeChange(policy);
+
+  return success;
 }
 
 bool ChargeController::ApplyPeakShiftChange(
@@ -420,5 +422,4 @@ bool ChargeController::IsPolicyEqualToCache(
   return true;
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

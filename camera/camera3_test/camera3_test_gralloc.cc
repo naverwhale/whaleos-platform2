@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -82,16 +82,6 @@ int Camera3TestGralloc::GetFormat(buffer_handle_t buffer) {
 // static
 uint32_t Camera3TestGralloc::GetV4L2PixelFormat(buffer_handle_t buffer) {
   return cros::CameraBufferManager::GetInstance()->GetV4L2PixelFormat(buffer);
-}
-
-// static
-uint32_t Camera3TestGralloc::GetWidth(buffer_handle_t buffer) {
-  return cros::CameraBufferManager::GetInstance()->GetWidth(buffer);
-}
-
-// static
-uint32_t Camera3TestGralloc::GetHeight(buffer_handle_t buffer) {
-  return cros::CameraBufferManager::GetInstance()->GetHeight(buffer);
 }
 
 }  // namespace camera3_test

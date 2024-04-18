@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,23 +7,26 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/cancelable_callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
+#include <chromeos/patchpanel/dbus/client.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
-#include <patchpanel/proto_bindings/patchpanel_service.pb.h>
+#include <net-base/mac_address.h>
+#include <net-base/rtnl_handler.h>
+#include <net-base/rtnl_listener.h>
+#include <net-base/rtnl_message.h>
+#include <net-base/socket.h>
 
-#include "shill/net/byte_string.h"
-#include "shill/net/ip_address.h"
-#include "shill/net/shill_time.h"
-#include "shill/net/sockets.h"
+#include "shill/metrics.h"
+#include "shill/mockable.h"
 #include "shill/refptr_types.h"
 #include "shill/technology.h"
 
@@ -31,17 +34,9 @@ namespace shill {
 
 class EventDispatcher;
 class Manager;
-class Metrics;
-class RoutingTable;
-class RTNLHandler;
-class RTNLListener;
-class RTNLMessage;
-class Sockets;
-
-#if !defined(DISABLE_WIFI)
 class NetlinkManager;
 class Nl80211Message;
-#endif  // DISABLE_WIFI
+class RoutingTable;
 
 class DeviceInfo {
  public:
@@ -74,43 +69,39 @@ class DeviceInfo {
 
   virtual DeviceRefPtr GetDevice(int interface_index) const;
 
-  virtual bool GetMacAddress(int interface_index, ByteString* address) const;
+  virtual std::optional<net_base::MacAddress> GetMacAddress(
+      int interface_index) const;
 
-  // Queries the kernel for a MAC address for |interface_index|.  Returns an
-  // empty ByteString on failure.
-  virtual ByteString GetMacAddressFromKernel(int interface_index) const;
+  // Queries the kernel for a MAC address for |interface_index|.
+  // Returns std::nullopt on failure.
+  virtual std::optional<net_base::MacAddress> GetMacAddressFromKernel(
+      int interface_index) const;
 
-  // Queries the kernel for the MAC address of |peer| on |interface_index|.
-  // Returns true and populates |mac_address| on success, otherwise returns
-  // false.
-  virtual bool GetMacAddressOfPeer(int interface_index,
-                                   const IPAddress& peer,
-                                   ByteString* mac_address) const;
+  // Returns hardware (permanent) MAC address for |interface_index|.  The
+  // address is returned either from cache (if it is available from netlink
+  // notifications or previous calls) or from query to the kernel.
+  // Returns std::nullopt on failure.
+  mockable std::optional<net_base::MacAddress> GetPermAddress(
+      int interface_index);
+  // Queries the kernel for a hardware (permanent) MAC address for
+  // |interface_index|.  Returns std::nullopt on failure.
+  std::optional<net_base::MacAddress> GetPermAddressFromKernel(
+      int interface_index) const;
+
+  // Query IDs that identify the adapter (e.g. PCI IDs). Returns |false| if
+  // there was an error. Even if there was an error (say, when probing the
+  // |subsystem_id|), the method will still set the IDs it managed to detect,
+  // even it could not probe successfully all the IDs. IDs that could not be
+  // probed are left untouched.
+  bool GetWiFiHardwareIds(int interface_index,
+                          int* vendor_id,
+                          int* product_id,
+                          int* subsystem_id) const;
 
   virtual bool GetFlags(int interface_index, unsigned int* flags) const;
   virtual bool GetByteCounts(int interface_index,
                              uint64_t* rx_bytes,
                              uint64_t* tx_bytes) const;
-  virtual std::vector<IPAddress> GetAddresses(int interface_index) const;
-
-  // Flush all addresses associated with |interface_index|.
-  virtual void FlushAddresses(int interface_index) const;
-  // Returns whether this interface does not have |this_address|
-  // but has another non-temporary address of the same family.
-  virtual bool HasOtherAddress(int interface_index,
-                               const IPAddress& this_address) const;
-
-  // Get the IPv6 DNS server addresses for |interface_index|. This method
-  // returns true and sets |address_list| and |life_time_seconds| if the IPv6
-  // DNS server addresses exists. Otherwise, it returns false and leave
-  // |address_list| and |life_time_seconds| unmodified. |life_time_seconds|
-  // indicates the number of the seconds the DNS server is still valid for at
-  // the time of this function call. Value of 0 means the DNS server is not
-  // valid anymore, and value of 0xFFFFFFFF means the DNS server is valid
-  // forever.
-  virtual bool GetIPv6DnsServerAddresses(int interface_index,
-                                         std::vector<IPAddress>* address_list,
-                                         uint32_t* life_time_seconds);
 
   virtual bool CreateTunnelInterface(LinkReadyCallback callback);
   virtual int OpenTunnelInterface(const std::string& interface_name) const;
@@ -124,6 +115,25 @@ class DeviceInfo {
                                         LinkReadyCallback link_ready_callback,
                                         base::OnceClosure failure_callback);
 
+  // Creates a XFRM interface in the kernel with name |interface_name|, index of
+  // the underlying interface |underlying_if_index| and the XFRM interface
+  // identifier |xfrm_if_id|. See the following link for more details about
+  // these two parameters:
+  // https://wiki.strongswan.org/projects/strongswan/wiki/RouteBasedVPN#XFRM-Interfaces-on-Linux.
+  // Returns true if we send the message to the kernel successfully.
+  // |link_ready_callback| will be invoked when the created link is ready,
+  // otherwise |failure_callback| will be invoked if the kernel rejects our
+  // request.
+  virtual bool CreateXFRMInterface(const std::string& interface_name,
+                                   int underlying_if_index,
+                                   int xfrm_if_id,
+                                   LinkReadyCallback link_ready_callback,
+                                   base::OnceClosure failure_callback);
+
+  virtual VirtualDevice* CreatePPPDevice(Manager* manager,
+                                         const std::string& ifname,
+                                         int ifindex);
+
   virtual bool DeleteInterface(int interface_index) const;
   virtual void AddVirtualInterfaceReadyCallback(
       const std::string& interface_name, LinkReadyCallback callback);
@@ -131,12 +141,9 @@ class DeviceInfo {
   // Returns the interface index for |interface_name| or -1 if unknown.
   virtual int GetIndex(const std::string& interface_name) const;
 
-  // Sets the system hostname to |hostname|.
-  virtual bool SetHostname(const std::string& hostname) const;
-
   // Gets the real user ID of the given |user_name| and returns it via |uid|.
   // Returns true on success.
-  virtual bool GetUserId(const std::string& user_name, uid_t* uid);
+  virtual bool GetUserId(const std::string& user_name, uid_t* uid) const;
 
   // Notifies this object that patchpanel::Client is ready in Manager. Registers
   // neighbor connected events handler via manager_->patchpanel_client().
@@ -149,38 +156,27 @@ class DeviceInfo {
   friend class DeviceInfoMockedGetUserId;
   friend class DeviceInfoTechnologyTest;
   friend class DeviceInfoTest;
-  FRIEND_TEST(CellularTest, StartLinked);
   FRIEND_TEST(DeviceInfoTest, DeviceRemovedEvent);
   FRIEND_TEST(DeviceInfoTest, GetUninitializedTechnologies);
-  FRIEND_TEST(DeviceInfoTest, HasSubdir);           // For HasSubdir.
-  FRIEND_TEST(DeviceInfoTest, IPv6AddressChanged);  // For infos_.
+  FRIEND_TEST(DeviceInfoTest, HasSubdir);  // For HasSubdir.
   FRIEND_TEST(DeviceInfoTest, StartStop);
-  FRIEND_TEST(DeviceInfoTest, IPv6DnsServerAddressesChanged);  // For infos_.
   FRIEND_TEST(DeviceInfoMockedGetUserId,
               AddRemoveAllowedInterface);  // For rtnl_handler_, routing_table_.
   FRIEND_TEST(DeviceInfoTest, CreateDeviceTunnel);  // For pending_links_.
-
-  struct AddressData {
-    AddressData() : address(IPAddress::kFamilyUnknown), flags(0), scope(0) {}
-    AddressData(const IPAddress& address_in,
-                unsigned char flags_in,
-                unsigned char scope_in)
-        : address(address_in), flags(flags_in), scope(scope_in) {}
-    IPAddress address;
-    unsigned char flags;
-    unsigned char scope;
-  };
 
   struct Info {
     Info();
 
     DeviceRefPtr device;
     std::string name;
-    ByteString mac_address;
-    std::vector<AddressData> ip_addresses;
-    std::vector<IPAddress> ipv6_dns_server_addresses;
-    uint32_t ipv6_dns_server_lifetime_seconds;
-    time_t ipv6_dns_server_received_time_seconds;
+    // MAC addresses of the device. |mac_address| is the address currently used
+    // and |perm_address| is a hardware MAC.  These two should be the same with
+    // the following exceptions:
+    // - when MAC randomization is turned on for a given device (e.g. WiFi) then
+    //   |mac_address| will be changing,
+    // - virtual devices do not have |perm_address|, only |mac_address|.
+    std::optional<net_base::MacAddress> mac_address;
+    std::optional<net_base::MacAddress> perm_address;
     unsigned int flags;
     uint64_t rx_bytes;
     uint64_t tx_bytes;
@@ -204,35 +200,47 @@ class DeviceInfo {
 
   // Return the ARP type (ARPHRD_* from <net/if_arp.h>) of interface
   // |iface_name|.
-  int GetDeviceArpType(const std::string& iface_name);
+  int GetDeviceArpType(const std::string& iface_name) const;
   // Return the FilePath for a given |path_name| in the device sysinfo for
   // a specific interface |iface_name|.
   base::FilePath GetDeviceInfoPath(const std::string& iface_name,
-                                   const std::string& path_name);
-  // Return the preferred globally scoped IPv6 address for |interface_index|.
-  // If no primary IPv6 address exists, return nullptr.
-  const IPAddress* GetPrimaryIPv6Address(int interface_index);
+                                   const std::string& path_name) const;
   // Return the contents of the device info file |path_name| for interface
   // |iface_name| in output parameter |contents_out|.  Returns true if file
   // read succeeded, false otherwise.
   bool GetDeviceInfoContents(const std::string& iface_name,
                              const std::string& path_name,
-                             std::string* contents_out);
+                             std::string* contents_out) const;
 
   // Return the filepath for the target of the device info symbolic link
   // |path_name| for interface |iface_name| in output parameter |path_out|.
   // Returns true if symbolic link read succeeded, false otherwise.
   bool GetDeviceInfoSymbolicLink(const std::string& iface_name,
                                  const std::string& path_name,
-                                 base::FilePath* path_out);
+                                 base::FilePath* path_out) const;
+  // Return the path of the lower device, if any
+  bool GetLowerDeviceInfoPath(const std::string& iface_name,
+                              base::FilePath* path_out) const;
   // Classify the device named |iface_name| with RTNL kind |kind|, and return
   // an identifier indicating its type.
   virtual Technology GetDeviceTechnology(
-      const std::string& iface_name, const base::Optional<std::string>& kind);
+      const std::string& iface_name,
+      const std::optional<std::string>& kind) const;
   // Checks the device specified by |iface_name| to see if it's a modem device.
   // This method assumes that |iface_name| has already been determined to be
   // using the cdc_ether / cdc_ncm driver.
-  bool IsCdcEthernetModemDevice(const std::string& iface_name);
+  bool IsCdcEthernetModemDevice(const std::string& iface_name) const;
+  // Query the IDs that identify the WiFi adapter of integrated chipsets like
+  // the ones included in some Qualcomm SoCs.
+  // To be compatible with the IDs of PCIe adapters, we set the vendor ID to the
+  // value 0x0000 (Metrics::kWiFiIntegratedAdapterVendorId) that is not assigned
+  // by the PCI-SIG. Integrated adapters are identified by the tuple
+  // (Metrics::kWiFiIntegratedAdapterVendorId, product_id, subsystem_id).
+  // Returns true if an integrated adapter was detected, false otherwise.
+  bool GetIntegratedWiFiHardwareIds(const std::string& iface_name,
+                                    int* vendor_id,
+                                    int* product_id,
+                                    int* subsystem_id) const;
   // Returns true if |base_dir| has a subdirectory named |subdir|.
   // |subdir| can be an immediate subdirectory of |base_dir| or can be
   // several levels deep.
@@ -241,46 +249,45 @@ class DeviceInfo {
 
   // Returns true and sets |link_name| to the interface name contained
   // in |msg| if one is provided.  Returns false otherwise.
-  bool GetLinkNameFromMessage(const RTNLMessage& msg, std::string* link_name);
+  bool GetLinkNameFromMessage(const net_base::RTNLMessage& msg,
+                              std::string* link_name);
 
   // Returns true if |msg| pertains to a blocked device whose link name
   // is now different from the name it was assigned before.
-  bool IsRenamedBlockedDevice(const RTNLMessage& msg);
+  bool IsRenamedBlockedDevice(const net_base::RTNLMessage& msg);
 
-  void AddLinkMsgHandler(const RTNLMessage& msg);
-  void DelLinkMsgHandler(const RTNLMessage& msg);
-  void LinkMsgHandler(const RTNLMessage& msg);
-  void AddressMsgHandler(const RTNLMessage& msg);
-  void RdnssMsgHandler(const RTNLMessage& msg);
+  void AddLinkMsgHandler(const net_base::RTNLMessage& msg);
+  void DelLinkMsgHandler(const net_base::RTNLMessage& msg);
+  void LinkMsgHandler(const net_base::RTNLMessage& msg);
 
   const Info* GetInfo(int interface_index) const;
   void DelayDeviceCreation(int interface_index);
   void DelayedDeviceCreationTask();
-  void RetrieveLinkStatistics(int interface_index, const RTNLMessage& msg);
+  void RetrieveLinkStatistics(int interface_index,
+                              const net_base::RTNLMessage& msg);
   void RequestLinkStatistics();
 
-#if !defined(DISABLE_WIFI)
   // Use nl80211 to get information on |interface_index|.
   void GetWiFiInterfaceInfo(int interface_index);
   void OnWiFiInterfaceInfoReceived(const Nl80211Message& message);
   void RecordDarkResumeWakeReason(const std::string& wake_reason);
-#endif  // DISABLE_WIFI
 
   // Returns whether a device with name |interface_name| is guest.
-  bool IsGuestDevice(const std::string& interface_name);
+  bool IsGuestDevice(const std::string& interface_name) const;
 
   void OnNeighborReachabilityEvent(
-      const patchpanel::NeighborReachabilityEventSignal& signal);
+      const patchpanel::Client::NeighborReachabilityEvent& event);
 
-  // Callback registered in CreateWireGuardInterface() and invoked by
-  // RTNLHandler, to notify the acknowledgement from the kernel for the adding
-  // link request.
-  void OnCreateWireGuardInterfaceResponse(const std::string& interface_name,
-                                          base::OnceClosure failure_callback,
-                                          int32_t error);
+  // Callback registered in CreateWireGuardInterface() and
+  // CreateXFRMInterface(). Invoked by net_base::RTNLHandler, to notify the
+  // acknowledgement from the kernel for the adding link request.
+  void OnCreateInterfaceResponse(const std::string& interface_name,
+                                 base::OnceClosure failure_callback,
+                                 int32_t error);
 
-  void set_sockets_for_test(std::unique_ptr<Sockets> sockets) {
-    sockets_ = std::move(sockets);
+  void set_socket_factory_for_test(
+      std::unique_ptr<net_base::SocketFactory> factory) {
+    socket_factory_ = std::move(factory);
   }
 
   Manager* manager_;
@@ -290,18 +297,16 @@ class DeviceInfo {
   std::map<int, Info> infos_;           // Maps interface index to Info.
   std::map<std::string, int> indices_;  // Maps interface name to index.
 
-  std::unique_ptr<RTNLListener> link_listener_;
-  std::unique_ptr<RTNLListener> address_listener_;
-  std::unique_ptr<RTNLListener> rdnss_listener_;
+  std::unique_ptr<net_base::RTNLListener> link_listener_;
   std::set<std::string> blocked_list_;
   base::FilePath device_info_root_;
 
   // Keep track of devices that require a delayed call to CreateDevice().
-  base::CancelableClosure delayed_devices_callback_;
+  base::CancelableOnceClosure delayed_devices_callback_;
   std::set<int> delayed_devices_;
 
   // Maintain a callback for the periodic link statistics poll task.
-  base::CancelableClosure request_link_statistics_callback_;
+  base::CancelableOnceClosure request_link_statistics_callback_;
 
   // Maintain the list of callbacks awaiting link ready event.
   // Used by VPNServices for tunnel (through calling CreateTunnel with
@@ -311,16 +316,14 @@ class DeviceInfo {
   std::map<std::string, LinkReadyCallback> pending_links_;
 
   // Cache copy of singleton pointers.
-  RoutingTable* routing_table_;
-  RTNLHandler* rtnl_handler_;
-#if !defined(DISABLE_WIFI)
+  net_base::RTNLHandler* rtnl_handler_;
   NetlinkManager* netlink_manager_;
-#endif  // DISABLE_WIFI
 
-  // A member of the class so that a mock can be injected for testing.
-  std::unique_ptr<Sockets> sockets_;
+  // Used to create net_base::Socket. Keep it as a class member so that a mock
+  // can be injected for testing.
+  std::unique_ptr<net_base::SocketFactory> socket_factory_ =
+      std::make_unique<net_base::SocketFactory>();
 
-  Time* time_;
   base::WeakPtrFactory<DeviceInfo> weak_factory_{this};
 };
 

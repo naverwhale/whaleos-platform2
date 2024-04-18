@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,10 @@
 #include <utility>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/message_loop/message_pump_type.h>
 #include <base/posix/eintr_wrapper.h>

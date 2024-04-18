@@ -1,9 +1,9 @@
-[TOC]
-
 # vm_tools - Utilities for Virtual Machine (VM) orchestration
 
 This directory contains various tools for managing the lifetime of VM instances
 and for providing any services those VMs may need while they are running.
+
+[TOC]
 
 ## chunnel
 
@@ -19,8 +19,9 @@ will connect back to `chunneld`.
 
 ## vm_concierge
 
-`vm_concierge` is a system daemon that runs in Chrome OS userspace and is
-responsible for managing the lifetime of all VMs.  It exposes a [D-Bus
+[`vm_concierge`](concierge/README.md) is a system daemon that runs in Chrome OS
+userspace and is responsible for managing the lifetime of all VMs.  It exposes a
+[D-Bus
 API](https://chromium.googlesource.com/chromiumos/platform/system_api/+/HEAD/dbus/vm_concierge/)
 for starting and stopping VMs.
 
@@ -139,6 +140,13 @@ the core dump over a pipe to that program.  `crash_collector` then parses the
 core dump and converts it to a minidump before sending it out to the host.
 The host daemon passes the report on to `crash-reporter`, which takes care of
 uploading it to Google servers.
+
+## metric_collector
+
+`metric_collector` is an IO reporting daemon for the default Crostini container.
+It periodically polls the vmstats of the container (or really, the whole termina
+VM, since the stats are not namespaced) and reports those to UMA by invoking
+`garcon`.
 
 ## VM <-> host communication
 

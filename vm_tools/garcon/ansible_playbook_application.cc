@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,14 +14,14 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/posix/safe_strerror.h>
 #include <base/synchronization/waitable_event.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 #include "vm_tools/common/spawn_util.h"
 
@@ -35,8 +35,7 @@ constexpr char kStdoutCallbackName[] = "garcon";
 constexpr char kDefaultCallbackPluginPath[] =
     "/usr/share/ansible/plugins/callback";
 // How long we should wait for a ansible-playbook process to finish.
-constexpr base::TimeDelta kAnsibleProcessTimeout =
-    base::TimeDelta::FromHours(1);
+constexpr base::TimeDelta kAnsibleProcessTimeout = base::Hours(1);
 
 bool CreatePipe(base::ScopedFD* read_fd,
                 base::ScopedFD* write_fd,
@@ -55,7 +54,7 @@ bool CreatePipe(base::ScopedFD* read_fd,
 }  // namespace
 
 AnsiblePlaybookApplication::AnsiblePlaybookApplication()
-    : task_runner_(base::ThreadTaskRunnerHandle::Get()),
+    : task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       weak_ptr_factory_(this) {}
 
 void AnsiblePlaybookApplication::AddObserver(Observer* observer) {
@@ -187,7 +186,7 @@ void AnsiblePlaybookApplication::SetUpStdIOWatchers(base::WaitableEvent* event,
 }
 
 void AnsiblePlaybookApplication::OnStdoutReadable() {
-  char buffer[100];
+  char buffer[1000];
   ssize_t count = read(read_stdout_.get(), buffer, sizeof(buffer));
   if (count <= 0) {
     stdout_watcher_.reset();
@@ -195,11 +194,25 @@ void AnsiblePlaybookApplication::OnStdoutReadable() {
     return;
   }
   stdout_.write(buffer, count);
-  return;
+  int index = 0;
+  std::vector<std::string> lines;
+  for (int i = 0; i < count; i++) {
+    if (buffer[i] == '\n') {
+      lines.push_back(std::string(buffer, index, i));
+      index = i;
+    }
+  }
+  if (index != count)
+    lines.push_back(std::string(buffer, index, count));
+  for (auto& observer : observers_) {
+    observer.OnApplyAnsiblePlaybookProgress(lines);
+  }
 }
 
 void AnsiblePlaybookApplication::OnStderrReadable() {
-  char buffer[100];
+  char buffer[1000];
+  int index = 0;
+  std::vector<std::string> lines;
   ssize_t count = read(read_stderr_.get(), buffer, sizeof(buffer));
   if (count <= 0) {
     stderr_watcher_.reset();
@@ -207,7 +220,17 @@ void AnsiblePlaybookApplication::OnStderrReadable() {
     return;
   }
   stderr_.write(buffer, count);
-  return;
+  for (int i = 0; i < count; i++) {
+    if (buffer[i] == '\n') {
+      lines.push_back(std::string(buffer, index, i));
+      index = i;
+    }
+  }
+  if (index != count)
+    lines.push_back(std::string(buffer, index, count));
+  for (auto& observer : observers_) {
+    observer.OnApplyAnsiblePlaybookProgress(lines);
+  }
 }
 
 void AnsiblePlaybookApplication::OnStdIOProcessed(bool is_stderr) {

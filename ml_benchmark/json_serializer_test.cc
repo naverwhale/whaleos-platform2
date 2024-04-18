@@ -1,11 +1,13 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ml_benchmark/json_serializer.h"
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -13,20 +15,8 @@
 
 using chrome::ml_benchmark::BenchmarkResults;
 using chrome::ml_benchmark::Metric;
-
-namespace {
-
-// Helps avoid having to do separate checks for key presence and value
-// correctness.
-base::Optional<std::string> GetStringKey(const base::Value& v,
-                                         base::StringPiece key) {
-  const std::string* result = v.FindStringKey(key);
-  if (result)
-    return *result;
-  return base::nullopt;
-}
-
-}  // namespace
+using ::testing::Eq;
+using ::testing::Pointee;
 
 namespace ml_benchmark {
 
@@ -35,11 +25,11 @@ TEST(BenchmarkResultsToJson, Basics) {
   results.set_status(chrome::ml_benchmark::RUNTIME_ERROR);
   results.set_results_message("Test error");
 
-  const base::Optional<base::Value> json =
+  const std::optional<base::Value::Dict> json =
       ml_benchmark::BenchmarkResultsToJson(results);
   ASSERT_TRUE(json);
-  EXPECT_EQ(json->FindIntKey("status"), chrome::ml_benchmark::RUNTIME_ERROR);
-  EXPECT_EQ(GetStringKey(*json, "results_message"), "Test error");
+  EXPECT_EQ(json->FindInt("status"), chrome::ml_benchmark::RUNTIME_ERROR);
+  EXPECT_THAT(json->FindString("results_message"), Pointee(Eq("Test error")));
 }
 
 TEST(BenchmarkResultsToJson, Percentiles) {
@@ -50,16 +40,16 @@ TEST(BenchmarkResultsToJson, Percentiles) {
   latency_map[95] = 3000;
   latency_map[99] = 4000;
 
-  const base::Optional<base::Value> json =
+  const std::optional<base::Value::Dict> json =
       ml_benchmark::BenchmarkResultsToJson(results);
   ASSERT_TRUE(json);
-  const base::Value* latencies = json->FindKeyOfType(
-      "percentile_latencies_in_us", base::Value::Type::DICTIONARY);
+  const base::Value::Dict* latencies =
+      json->FindDict("percentile_latencies_in_us");
   ASSERT_TRUE(json);
-  EXPECT_EQ(latencies->FindIntKey("50"), 1000);
-  EXPECT_EQ(latencies->FindIntKey("90"), 2000);
-  EXPECT_EQ(latencies->FindIntKey("95"), 3000);
-  EXPECT_EQ(latencies->FindIntKey("99"), 4000);
+  EXPECT_EQ(latencies->FindInt("50"), 1000);
+  EXPECT_EQ(latencies->FindInt("90"), 2000);
+  EXPECT_EQ(latencies->FindInt("95"), 3000);
+  EXPECT_EQ(latencies->FindInt("99"), 4000);
 }
 
 TEST(BenchmarkResultsToJson, Metrics) {
@@ -84,60 +74,61 @@ TEST(BenchmarkResultsToJson, Metrics) {
     m->add_values(42);
   }
 
-  const base::Optional<base::Value> json =
+  const std::optional<base::Value::Dict> json =
       ml_benchmark::BenchmarkResultsToJson(results);
   ASSERT_TRUE(json);
-  const base::Value* metrics =
-      json->FindKeyOfType("metrics", base::Value::Type::LIST);
-  EXPECT_EQ(metrics->GetList().size(), 2);
+  const base::Value::List* metrics = json->FindList("metrics");
+  EXPECT_EQ(metrics->size(), 2);
 
   {
-    const auto& m = metrics->GetList()[0];
-    EXPECT_EQ(GetStringKey(m, "name"), "Multiple ms metric");
-    EXPECT_EQ(GetStringKey(m, "units"), "ms");
-    EXPECT_EQ(GetStringKey(m, "improvement_direction"), "smaller_is_better");
-    EXPECT_EQ(GetStringKey(m, "cardinality"), "multiple");
+    assert((*metrics)[0].is_dict());
+    const auto& m = (*metrics)[0].GetDict();
+    EXPECT_THAT(m.FindString("name"), Pointee(Eq("Multiple ms metric")));
+    EXPECT_THAT(m.FindString("units"), Pointee(Eq("ms")));
+    EXPECT_THAT(m.FindString("improvement_direction"),
+                Pointee(Eq("smaller_is_better")));
+    EXPECT_THAT(m.FindString("cardinality"), Pointee(Eq("multiple")));
 
-    const base::Value* values =
-        m.FindKeyOfType("values", base::Value::Type::LIST);
+    const base::Value::List* values = m.FindList("values");
     ASSERT_TRUE(values);
-    EXPECT_EQ(values->GetList().size(), 3);
-    EXPECT_EQ(values->GetList()[0].GetDouble(), 1);
-    EXPECT_EQ(values->GetList()[1].GetDouble(), 2);
-    EXPECT_EQ(values->GetList()[2].GetDouble(), 3);
+    EXPECT_EQ(values->size(), 3);
+    EXPECT_EQ((*values)[0].GetIfDouble(), 1);
+    EXPECT_EQ((*values)[1].GetIfDouble(), 2);
+    EXPECT_EQ((*values)[2].GetIfDouble(), 3);
   }
 
   {
-    const auto& m = metrics->GetList()[1];
-    EXPECT_EQ(GetStringKey(m, "name"), "Single unitless metric");
-    EXPECT_EQ(GetStringKey(m, "units"), "unitless");
-    EXPECT_EQ(GetStringKey(m, "improvement_direction"), "bigger_is_better");
-    EXPECT_EQ(GetStringKey(m, "cardinality"), "single");
+    assert((*metrics)[1].is_dict());
+    const auto& m = (*metrics)[1].GetDict();
+    EXPECT_THAT(m.FindString("name"), Pointee(Eq("Single unitless metric")));
+    EXPECT_THAT(m.FindString("units"), Pointee(Eq("unitless")));
+    EXPECT_THAT(m.FindString("improvement_direction"),
+                Pointee(Eq("bigger_is_better")));
+    EXPECT_THAT(m.FindString("cardinality"), Pointee(Eq("single")));
 
-    const base::Value* values =
-        m.FindKeyOfType("values", base::Value::Type::LIST);
+    const base::Value::List* values = m.FindList("values");
     ASSERT_TRUE(values);
-    EXPECT_EQ(values->GetList().size(), 1);
-    EXPECT_EQ(values->GetList()[0].GetDouble(), 42);
+    EXPECT_EQ(values->size(), 1);
+    EXPECT_EQ((*values)[0].GetIfDouble(), 42);
   }
 }
 
 TEST(BenchmarkResultsToJson, MetricsCardinality) {
   auto get_metrics_size =
-      [](const BenchmarkResults& results) -> base::Optional<size_t> {
-    const base::Optional<base::Value> json =
+      [](const BenchmarkResults& results) -> std::optional<size_t> {
+    const std::optional<base::Value::Dict> json =
         ml_benchmark::BenchmarkResultsToJson(results);
     if (!json)
-      return base::nullopt;
+      return std::nullopt;
 
-    const base::Value* metrics =
-        json->FindKeyOfType("metrics", base::Value::Type::LIST);
+    const base::Value::List* metrics = json->FindList("metrics");
     CHECK(metrics);
-    const auto& m = metrics->GetList()[0];
-    const base::Value* values =
-        m.FindKeyOfType("values", base::Value::Type::LIST);
+    CHECK(!metrics->empty());
+    CHECK((*metrics)[0].is_dict());
+    const auto& m = (*metrics)[0].GetDict();
+    const base::Value::List* values = m.FindList("values");
     CHECK(values);
-    return values->GetList().size();
+    return values->size();
   };
 
   {
@@ -174,7 +165,7 @@ TEST(BenchmarkResultsToJson, MetricsCardinality) {
     m->add_values(1);
     m->add_values(2);
     m->add_values(3);
-    EXPECT_EQ(get_metrics_size(results), base::nullopt);
+    EXPECT_EQ(get_metrics_size(results), std::nullopt);
   }
 
   {
@@ -182,8 +173,18 @@ TEST(BenchmarkResultsToJson, MetricsCardinality) {
     Metric* m = results.add_metrics();
     m->set_cardinality(Metric::SINGLE);
     // No results instead of a single one is not OK.
-    EXPECT_EQ(get_metrics_size(results), base::nullopt);
+    EXPECT_EQ(get_metrics_size(results), std::nullopt);
   }
+}
+
+TEST(BenchmarkResultsToJson, PowerNormalizationFactor) {
+  BenchmarkResults results;
+  results.set_power_normalization_factor(100);
+
+  const std::optional<base::Value::Dict> json =
+      ml_benchmark::BenchmarkResultsToJson(results);
+  ASSERT_TRUE(json);
+  EXPECT_EQ(json->FindDouble("power_normalization_factor"), 100);
 }
 
 }  // namespace ml_benchmark

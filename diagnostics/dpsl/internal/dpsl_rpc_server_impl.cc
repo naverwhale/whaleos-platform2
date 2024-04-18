@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,14 @@
 #include <functional>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
 #include <base/notreached.h>
 #include <base/run_loop.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 #include "diagnostics/constants/grpc_constants.h"
 #include "diagnostics/dpsl/internal/callback_utils.h"
@@ -43,7 +43,7 @@ DpslRpcServerImpl::DpslRpcServerImpl(DpslRpcHandler* rpc_handler,
                                      GrpcServerUri grpc_server_uri,
                                      const std::string& grpc_server_uri_string)
     : rpc_handler_(rpc_handler),
-      async_grpc_server_(base::ThreadTaskRunnerHandle::Get(),
+      async_grpc_server_(base::SingleThreadTaskRunner::GetCurrentDefault(),
                          {grpc_server_uri_string}) {
   DCHECK(rpc_handler_);
   auto handle_message_from_ui_handler =
@@ -57,24 +57,25 @@ DpslRpcServerImpl::DpslRpcServerImpl(DpslRpcHandler* rpc_handler,
   }
   async_grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandleMessageFromUi,
-      base::Bind(handle_message_from_ui_handler, base::Unretained(this)));
+      base::BindRepeating(handle_message_from_ui_handler,
+                          base::Unretained(this)));
 
   async_grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandleEcNotification,
-      base::Bind(&DpslRpcServerImpl::HandleEcNotification,
-                 base::Unretained(this)));
+      base::BindRepeating(&DpslRpcServerImpl::HandleEcNotification,
+                          base::Unretained(this)));
   async_grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandlePowerNotification,
-      base::Bind(&DpslRpcServerImpl::HandlePowerNotification,
-                 base::Unretained(this)));
+      base::BindRepeating(&DpslRpcServerImpl::HandlePowerNotification,
+                          base::Unretained(this)));
   async_grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandleConfigurationDataChanged,
-      base::Bind(&DpslRpcServerImpl::HandleConfigurationDataChanged,
-                 base::Unretained(this)));
+      base::BindRepeating(&DpslRpcServerImpl::HandleConfigurationDataChanged,
+                          base::Unretained(this)));
   async_grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandleBluetoothDataChanged,
-      base::Bind(&DpslRpcServerImpl::HandleBluetoothDataChanged,
-                 base::Unretained(this)));
+      base::BindRepeating(&DpslRpcServerImpl::HandleBluetoothDataChanged,
+                          base::Unretained(this)));
 }
 
 DpslRpcServerImpl::~DpslRpcServerImpl() {
@@ -93,66 +94,67 @@ bool DpslRpcServerImpl::Init() {
 
 void DpslRpcServerImpl::HandleMessageFromUi(
     std::unique_ptr<grpc_api::HandleMessageFromUiRequest> request,
-    const HandleMessageFromUiCallback& callback) {
+    HandleMessageFromUiCallback callback) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
 
   rpc_handler_->HandleMessageFromUi(
       std::move(request),
       MakeStdFunctionFromCallbackGrpc(
-          MakeOriginTaskRunnerPostingCallback(FROM_HERE, callback)));
+          MakeOriginTaskRunnerPostingCallback(FROM_HERE, std::move(callback))));
 }
 
 void DpslRpcServerImpl::HandleMessageFromUiStub(
     std::unique_ptr<grpc_api::HandleMessageFromUiRequest> request,
-    const HandleMessageFromUiCallback& callback) {
+    HandleMessageFromUiCallback callback) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
 
-  callback.Run(grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "Unimplemented"),
-               nullptr /* response */);
+  std::move(callback).Run(
+      grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "Unimplemented"),
+      nullptr /* response */);
 }
 
 void DpslRpcServerImpl::HandleEcNotification(
     std::unique_ptr<grpc_api::HandleEcNotificationRequest> request,
-    const HandleEcNotificationCallback& callback) {
+    HandleEcNotificationCallback callback) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
 
   rpc_handler_->HandleEcNotification(
       std::move(request),
       MakeStdFunctionFromCallbackGrpc(
-          MakeOriginTaskRunnerPostingCallback(FROM_HERE, callback)));
+          MakeOriginTaskRunnerPostingCallback(FROM_HERE, std::move(callback))));
 }
 
 void DpslRpcServerImpl::HandlePowerNotification(
     std::unique_ptr<grpc_api::HandlePowerNotificationRequest> request,
-    const HandlePowerNotificationCallback& callback) {
+    HandlePowerNotificationCallback callback) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
 
   rpc_handler_->HandlePowerNotification(
       std::move(request),
       MakeStdFunctionFromCallbackGrpc(
-          MakeOriginTaskRunnerPostingCallback(FROM_HERE, callback)));
+          MakeOriginTaskRunnerPostingCallback(FROM_HERE, std::move(callback))));
 }
 
 void DpslRpcServerImpl::HandleConfigurationDataChanged(
     std::unique_ptr<grpc_api::HandleConfigurationDataChangedRequest> request,
-    const HandleConfigurationDataChangedCallback& callback) {
+    HandleConfigurationDataChangedCallback callback) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
 
   rpc_handler_->HandleConfigurationDataChanged(
       std::move(request),
       MakeStdFunctionFromCallbackGrpc(
-          MakeOriginTaskRunnerPostingCallback(FROM_HERE, callback)));
+          MakeOriginTaskRunnerPostingCallback(FROM_HERE, std::move(callback))));
 }
 
 void DpslRpcServerImpl::HandleBluetoothDataChanged(
     std::unique_ptr<grpc_api::HandleBluetoothDataChangedRequest> request,
-    const HandleBluetoothDataChangedCallback& callback) {
+    HandleBluetoothDataChangedCallback callback) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
 
   rpc_handler_->HandleBluetoothDataChanged(
       std::move(request),
       MakeStdFunctionFromCallbackGrpc(
-          MakeOriginTaskRunnerPostingCallback(FROM_HERE, callback)));
+          MakeOriginTaskRunnerPostingCallback(FROM_HERE, std::move(callback))));
 }
 
 // static

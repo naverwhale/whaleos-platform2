@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,12 +19,19 @@ class MockCrosConfigUtils : public CrosConfigUtils {
   MockCrosConfigUtils() = default;
   ~MockCrosConfigUtils() override = default;
 
+  MOCK_METHOD(bool, GetRmadConfig, (RmadConfig*), (const, override));
   MOCK_METHOD(bool, GetModelName, (std::string*), (const, override));
-  MOCK_METHOD(bool, GetCurrentSkuId, (int*), (const, override));
-  MOCK_METHOD(bool, GetCurrentWhitelabelTag, (std::string*), (const, override));
-  MOCK_METHOD(bool, GetSkuIdList, (std::vector<int>*), (const override));
+  MOCK_METHOD(bool, GetBrandCode, (std::string*), (const, override));
+  MOCK_METHOD(bool, GetSkuId, (uint32_t*), (const, override));
+  MOCK_METHOD(bool, GetCustomLabelTag, (std::string*), (const, override));
+  MOCK_METHOD(bool, GetFirmwareConfig, (uint32_t*), (const, override));
   MOCK_METHOD(bool,
-              GetWhitelabelTagList,
+              GetDesignConfigList,
+              (std::vector<DesignConfig>*),
+              (const override));
+  MOCK_METHOD(bool, GetSkuIdList, (std::vector<uint32_t>*), (const override));
+  MOCK_METHOD(bool,
+              GetCustomLabelTagList,
               (std::vector<std::string>*),
               (const override));
 };

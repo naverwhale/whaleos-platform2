@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,11 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
+#include <brillo/files/file_util.h>
 
 namespace arc {
 namespace appfuse {
@@ -64,7 +65,7 @@ base::ScopedFD AppfuseMount::Mount() {
     return base::ScopedFD();
   }
   // OnDataFilterStopped will be called when the data filter stops on an error.
-  data_filter_.set_on_stopped_callback(base::Bind(
+  data_filter_.set_on_stopped_callback(base::BindOnce(
       &AppfuseMount::OnDataFilterStopped, weak_ptr_factory_.GetWeakPtr()));
   return data_filter_.Start(std::move(dev_fuse));
 }
@@ -76,7 +77,7 @@ bool AppfuseMount::Unmount() {
     PLOG(ERROR) << "Failed to unmount " << mount_point_.value();
     return false;
   }
-  if (!base::DeletePathRecursively(mount_point_)) {
+  if (!brillo::DeletePathRecursively(mount_point_)) {
     PLOG(ERROR) << "Failed to delete " << mount_point_.value();
     return false;
   }

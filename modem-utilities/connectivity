@@ -1,6 +1,6 @@
 #!/bin/dash
 
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -28,6 +28,7 @@ MASKED_PROPERTIES="
   EAP.PIN
   EAP.SubjectMatch
   Name
+  UIData
   WiFi.BSSID
   WiFi.HexSSID
   WiFi.SSID
@@ -46,7 +47,7 @@ get_flimflam_objects() {
 
   dbus_call "${OCF}" / "${OCF}.Manager.GetProperties" \
     | extract_dbus_match "${kind}" \
-    | grep "${filter}"
+    | grep -e "${filter}"
 }
 
 print_properties() {

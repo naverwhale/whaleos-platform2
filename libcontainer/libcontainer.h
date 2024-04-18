@@ -1,4 +1,4 @@
-/* Copyright 2016 The Chromium OS Authors. All rights reserved.
+/* Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -350,7 +350,7 @@ BRILLO_EXPORT void container_destroy(struct container* c);
  * config - Details of how the container should be run.
  */
 BRILLO_EXPORT int container_start(struct container* c,
-                                  const struct container_config* config);
+                                  struct container_config* config);
 
 /* Get the path to the root of the container. */
 BRILLO_EXPORT const char* container_root(struct container* c);

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,6 +15,16 @@ const char kSpacedServiceName[] = "org.chromium.Spaced";
 const char kGetFreeDiskSpaceMethod[] = "GetFreeDiskSpace";
 const char kGetTotalDiskSpaceMethod[] = "GetTotalDiskSpace";
 const char kGetRootDeviceSizeMethod[] = "GetRootDeviceSize";
+const char kIsQuotaSupportedMethod[] = "IsQuotaSupported";
+const char kGetQuotaCurrentSpaceForUidMethod[] = "GetQuotaCurrentSpaceForUid";
+const char kGetQuotaCurrentSpaceForGidMethod[] = "GetQuotaCurrentSpaceForGid";
+const char kGetQuotaCurrentSpaceForProjectIdMethod[] =
+    "GetQuotaCurrentSpaceForProjectId";
+const char kSetProjectIdMethod[] = "SetProjectId";
+const char kSetProjectInheritanceFlagMethod[] = "SetProjectInheritanceFlag";
+
+// Signals.
+const char kStatefulDiskSpaceUpdate[] = "StatefulDiskSpaceUpdate";
 
 }  // namespace spaced
 

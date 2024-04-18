@@ -1,15 +1,16 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <net/if.h>
 
-#include <base/callback_helpers.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <dbus/message.h>
 #include <fuzzer/FuzzedDataProvider.h>
 
 #include "patchpanel/dbus/client.h"
+#include "patchpanel/dbus/mock_patchpanel_proxy.h"
 
 namespace patchpanel {
 
@@ -20,75 +21,44 @@ class Environment {
   }
 };
 
-class FakeObjectProxy : public dbus::ObjectProxy {
- public:
-  explicit FakeObjectProxy(dbus::Bus* bus)
-      : dbus::ObjectProxy(bus, "svc", dbus::ObjectPath("/obj/path"), 0) {}
+net_base::IPv4Address ConsumeIPv4Address(FuzzedDataProvider& provider) {
+  const auto bytes =
+      provider.ConsumeBytes<uint8_t>(net_base::IPv4Address::kAddressLength);
+  return net_base::IPv4Address::CreateFromBytes(bytes).value_or(
+      net_base::IPv4Address());
+}
 
-  std::unique_ptr<dbus::Response> CallMethodAndBlockWithErrorDetails(
-      dbus::MethodCall* method_call,
-      int timeout_ms,
-      dbus::ScopedDBusError* error) override {
-    return nullptr;
-  }
+net_base::IPv4CIDR ConsumeIPv4CIDR(FuzzedDataProvider& provider) {
+  const auto addr = ConsumeIPv4Address(provider);
+  const int prefix_len = provider.ConsumeIntegralInRange(0, 32);
+  return *net_base::IPv4CIDR::CreateFromAddressAndPrefix(addr, prefix_len);
+}
 
-  std::unique_ptr<dbus::Response> CallMethodAndBlock(
-      dbus::MethodCall* method_call, int timeout_ms) override {
-    return nullptr;
-  }
-
-  void CallMethod(dbus::MethodCall* method_call,
-                  int timeout_ms,
-                  ResponseCallback callback) override {}
-
-  void CallMethodWithErrorResponse(dbus::MethodCall* method_call,
-                                   int timeout_ms,
-                                   ResponseOrErrorCallback callback) override {}
-
-  void CallMethodWithErrorCallback(dbus::MethodCall* method_call,
-                                   int timeout_ms,
-                                   ResponseCallback callback,
-                                   ErrorCallback error_callback) override {}
-
-  void ConnectToSignal(const std::string& interface_name,
-                       const std::string& signal_name,
-                       SignalCallback signal_callback,
-                       OnConnectedCallback on_connected_callback) override {}
-
-  void WaitForServiceToBeAvailable(
-      WaitForServiceToBeAvailableCallback callback) override {}
-
-  void Detach() override {}
-};
+net_base::IPv6Address ConsumeIPv6Address(FuzzedDataProvider& provider) {
+  const auto bytes =
+      provider.ConsumeBytes<uint8_t>(net_base::IPv6Address::kAddressLength);
+  return net_base::IPv6Address::CreateFromBytes(bytes).value_or(
+      net_base::IPv6Address());
+}
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   static Environment env;
   dbus::Bus::Options options;
   scoped_refptr<dbus::Bus> bus = new dbus::Bus(options);
-  scoped_refptr<dbus::ObjectProxy> proxy(new FakeObjectProxy(bus.get()));
-  auto client = Client::New(bus, proxy.get());
+  auto client = Client::NewForTesting(
+      bus, std::unique_ptr<org::chromium::PatchPanelProxyInterface>(
+               new testing::NiceMock<MockPatchPanelProxy>()));
   FuzzedDataProvider provider(data, size);
 
   while (provider.remaining_bytes() > 0) {
     client->NotifyArcStartup(provider.ConsumeIntegral<pid_t>());
     client->NotifyArcVmStartup(provider.ConsumeIntegral<uint32_t>());
     client->NotifyArcVmShutdown(provider.ConsumeIntegral<uint32_t>());
-    NetworkDevice device;
-    device.set_ifname(provider.ConsumeRandomLengthString(IFNAMSIZ * 2));
-    device.set_ipv4_addr(provider.ConsumeIntegral<uint32_t>());
-    device.mutable_ipv4_subnet()->set_base_addr(
-        provider.ConsumeIntegral<uint32_t>());
-    device.mutable_ipv4_subnet()->set_prefix_len(
-        provider.ConsumeIntegral<uint32_t>());
-    IPv4Subnet subnet;
-    subnet.set_base_addr(provider.ConsumeIntegral<uint32_t>());
-    subnet.set_prefix_len(provider.ConsumeIntegral<uint32_t>());
-    client->NotifyTerminaVmStartup(provider.ConsumeIntegral<uint32_t>(),
-                                   &device, &subnet);
+    client->NotifyTerminaVmStartup(provider.ConsumeIntegral<uint32_t>());
     client->NotifyTerminaVmShutdown(provider.ConsumeIntegral<uint32_t>());
-    client->NotifyPluginVmStartup(provider.ConsumeIntegral<uint64_t>(),
-                                  provider.ConsumeIntegral<int>(), &device);
-    client->NotifyPluginVmShutdown(provider.ConsumeIntegral<uint64_t>());
+    client->NotifyParallelsVmStartup(provider.ConsumeIntegral<uint64_t>(),
+                                     provider.ConsumeIntegral<int>());
+    client->NotifyParallelsVmShutdown(provider.ConsumeIntegral<uint64_t>());
     // TODO(garrick): Enable the following once the memory leaks in Chrome OS
     // DBus are resolved.
     //    client->DefaultVpnRouting(provider.ConsumeIntegral<int>());
@@ -97,7 +67,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     client->ConnectNamespace(provider.ConsumeIntegral<pid_t>(),
                              provider.ConsumeRandomLengthString(100),
                              provider.ConsumeBool(), provider.ConsumeBool(),
-                             TrafficCounter::SYSTEM);
+                             Client::TrafficSource::kSystem);
     std::set<std::string> devices_for_counters;
     for (int i = 0; i < 10; i++) {
       if (provider.ConsumeBool()) {

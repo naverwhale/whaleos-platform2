@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/brillo_export.h>
 #include <brillo/dbus/dbus_object.h>
@@ -96,7 +96,7 @@ class BRILLO_EXPORT ExportedObjectManager
   // exported on the path given in the constructor. Must be called on the
   // origin thread.
   virtual void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction&
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction
           completion_callback);
 
   // Trigger a signal that |path| has added an interface |interface_name|

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,12 +12,12 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 #include "shill/rpc_task.h"
 
 namespace shill {
@@ -34,7 +34,7 @@ class ExternalTask : public RpcTaskDelegate {
   ExternalTask(ControlInterface* control,
                ProcessManager* process_manager,
                const base::WeakPtr<RpcTaskDelegate>& task_delegate,
-               const base::Callback<void(pid_t, int)>& death_callback);
+               base::OnceCallback<void(pid_t, int)> death_callback);
   ExternalTask(const ExternalTask&) = delete;
   ExternalTask& operator=(const ExternalTask&) = delete;
 
@@ -102,7 +102,7 @@ class ExternalTask : public RpcTaskDelegate {
 
   std::unique_ptr<RpcTask> rpc_task_;
   base::WeakPtr<RpcTaskDelegate> task_delegate_;
-  base::Callback<void(pid_t, int)> death_callback_;
+  base::OnceCallback<void(pid_t, int)> death_callback_;
 
   // The PID of the spawned process. May be 0 if no process has been
   // spawned yet or the process has died.

@@ -1,12 +1,12 @@
-# Chrome OS Power Management
+# ChromeOS Power Management
 
-The Chrome OS power manager consists of several components:
+The ChromeOS power manager consists of several components:
 
 -   `powerd`: C++ system daemon running as the `power` user that initiates
     dimming the screen, suspending the system, etc.
 -   `powerd_setuid_helper`: setuid root binary used by powerd to perform actions
     requiring additional privileges.
--   `powerd_dbus_suspend`: shell script executed by powerd (by way of
+-   `powerd_suspend`: shell script executed by powerd (by way of
     `powerd_setuid_helper`) to suspend and resume the system.
 -   `send_metrics_on_resume`: shell script executed by `powerd_suspend` and by
     the `send-boot-metrics` Upstart job to report suspend-related metrics.
@@ -17,8 +17,14 @@ The [`docs/`](docs/) subdirectory contains additional documentation. Along with
 answers to [frequently-asked questions](docs/faq.md), the following information
 is available:
 
+-   [Adaptive Charging](docs/adaptive_charging.md) describes how charging is
+    delayed for maintaining battery health.
+-   [ALS Backlight](docs/als_backlight_prefs.md) describes ALS prefs for backlight
+    in powerd.
 -   [Battery Notifications](docs/battery_notifications.md) describes when
     low-battery notifications are shown by the UI.
+-   [Hibernation](docs/hibernation.md) describes how powerd handles the
+    hibernation process.
 -   [Inactivity Delays](docs/inactivity_delays.md) describes powerd's logic for
     taking action (e.g. dimming the backlight or suspending) when the user is
     inactive.
@@ -32,7 +38,7 @@ is available:
     determining the state of power supplies (e.g. batteries or line power).
 -   [Screen Brightness](docs/screen_brightness.md) describes powerd's logic for
     controlling the display backlight.
--   [Shutdown and Reboot](docs/shutdown.md) describes why and how Chrome OS
+-   [Shutdown and Reboot](docs/shutdown.md) describes why and how ChromeOS
     systems shut down and reboot.
 -   [Suspend and Resume](docs/suspend_resume.md) describes powerd's process for
     suspending and resuming the system.

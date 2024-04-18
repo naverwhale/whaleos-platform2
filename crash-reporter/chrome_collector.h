@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,20 +10,27 @@
 #ifndef CRASH_REPORTER_CHROME_COLLECTOR_H_
 #define CRASH_REPORTER_CHROME_COLLECTOR_H_
 
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 
 // Chrome crash collector.
 class ChromeCollector : public CrashCollector {
  public:
-  explicit ChromeCollector(CrashSendingMode crash_sending_mode);
+  explicit ChromeCollector(
+      CrashSendingMode crash_sending_mode,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   ChromeCollector(const ChromeCollector&) = delete;
   ChromeCollector& operator=(const ChromeCollector&) = delete;
 
@@ -36,7 +43,8 @@ class ChromeCollector : public CrashCollector {
   bool HandleCrash(const base::FilePath& dump_file_path,
                    pid_t pid,
                    uid_t uid,
-                   const std::string& exe_name);
+                   const std::string& exe_name,
+                   int signal);
 
   // Handle a specific chrome crash through a memfd instead of a file.
   // Returns true on success.
@@ -45,25 +53,43 @@ class ChromeCollector : public CrashCollector {
                                uid_t uid,
                                const std::string& executable_name,
                                const std::string& non_exe_error_key,
-                               const std::string& dump_dir);
+                               const std::string& dump_dir,
+                               int signal);
 
-  static CollectorInfo GetHandlerInfo(CrashSendingMode mode,
-                                      const std::string& dump_file_path,
-                                      int memfd,
-                                      pid_t pid,
-                                      uid_t uid,
-                                      const std::string& executable_name,
-                                      const std::string& non_exe_error_key,
-                                      const std::string& chrome_dump_dir);
+  static CollectorInfo GetHandlerInfo(
+      CrashSendingMode mode,
+      const std::string& dump_file_path,
+      int memfd,
+      pid_t pid,
+      uid_t uid,
+      const std::string& executable_name,
+      const std::string& non_exe_error_key,
+      const std::string& chrome_dump_dir,
+      int signal,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
 
   void set_max_upload_bytes_for_test(int max_upload_bytes) {
     max_upload_bytes_ = max_upload_bytes;
   }
 
+ protected:
+  // Returns the severity level and product group of the crash. The logic for
+  // computing crash severity is the same for both UI and Lacros crashes.
+  // Note: The parameter `exec_name` is not used to compute severity.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
+
  private:
   friend class ChromeCollectorTest;
+  friend class ComputeChromeCollectorCrashSeverityParameterizedTest;
   FRIEND_TEST(ChromeCollectorTest, GoodValues);
   FRIEND_TEST(ChromeCollectorTest, GoodLacros);
+  FRIEND_TEST(ChromeCollectorTest, GoodShutdown);
+  FRIEND_TEST(ChromeCollectorTest, ProcessTypeCheck);
+  FRIEND_TEST(ChromeCollectorTest, HandleCrashWithDumpData_JavaScriptError);
+  FRIEND_TEST(ChromeCollectorTest, HandleCrashWithDumpData_ExecutableCrash);
   FRIEND_TEST(ChromeCollectorTest, ParseCrashLogNoDump);
   FRIEND_TEST(ChromeCollectorTest, ParseCrashLogJSStack);
   FRIEND_TEST(ChromeCollectorTest, BadValues);
@@ -72,6 +98,17 @@ class ChromeCollector : public CrashCollector {
   FRIEND_TEST(ChromeCollectorTest, HandleCrash);
   FRIEND_TEST(ChromeCollectorTest, HandleCrashWithEmbeddedNuls);
   FRIEND_TEST(ChromeCollectorTest, HandleCrashWithWeirdFilename);
+  FRIEND_TEST(ChromeCollectorTest, HandleCrashWithDumpData_ShutdownHang);
+  FRIEND_TEST(ChromeCollectorTest,
+              HandleCrashWithDumpData_NotShutdownHang_NoShutdownBrowserPidFile);
+  FRIEND_TEST(ChromeCollectorTest,
+              HandleCrashWithDumpData_NotShutdownHang_WrongShutdownBrowserPid);
+  FRIEND_TEST(ChromeCollectorTest, HandleCrashWithDumpData_Signal_Fatal);
+  FRIEND_TEST(ChromeCollectorTest, ComputedSeverity_JavaScriptError);
+  FRIEND_TEST(ChromeCollectorTest, ComputedSeverity_NonFatalSignal);
+  FRIEND_TEST(ChromeCollectorTest, ComputedSeverity_HasProcessTypeRenderer);
+  FRIEND_TEST(ComputeChromeCollectorCrashSeverityParameterizedTest,
+              ComputeCrashSeverity_ChromeCollector);
 
   enum CrashType {
     // An executable received a signal like SIGSEGV or SIGILL; the sort of thing
@@ -90,7 +127,10 @@ class ChromeCollector : public CrashCollector {
                                uid_t uid,
                                const std::string& executable_name,
                                const std::string& non_exe_error_key,
-                               const std::string& dump_dir);
+                               const std::string& dump_dir,
+                               const std::string& aborted_browser_pid_path,
+                               const std::string& shutdown_browser_pid_path,
+                               int signal);
 
   // Crashes are expected to be in a TLV-style format of:
   // <name>:<length>:<value>
@@ -114,20 +154,56 @@ class ChromeCollector : public CrashCollector {
                               const std::string& dump_basename,
                               base::FilePath* payload_path);
 
-  // Gets the GPU's error state from debugd and writes it to |error_state_path|.
-  // Returns true on success.
-  bool GetDriErrorState(const base::FilePath& error_state_path);
+  // Callback for the call to debugd to get the DriErrorState. Debugd sends us
+  // the data in |dri_error_state_str|, which we then write to
+  // |dri_error_state_path|. On success, the (metadata key name, base file name)
+  // pair is added to |logs|. Regardless of success or failure,
+  // |completion_closure| is called once we are finished.
+  void HandleDriErrorState(base::FilePath dri_error_state_path,
+                           std::map<std::string, base::FilePath>* logs,
+                           base::RepeatingClosure completion_closure,
+                           const std::string& dri_error_state_str);
+  // Helper for HandleDriErrorState. Decodes the information from debugd in
+  // |dri_error_state_str| and writes it to |error_state_path|. Separate
+  // function to make error handling easier. Returns true on success.
+  bool ProcessDriErrorState(const std::string& dri_error_state_str,
+                            const base::FilePath& error_state_path);
+  // Callback if the debugd call to get DriErrorState fails. |error| is nullptr
+  // if the call never returned (normally means it timed out), otherwise it has
+  // the failure reason.
+  static void HandleDriErrorStateError(
+      base::RepeatingClosure completion_closure, brillo::Error* error);
+
+  // Callback for the call to debugd to get dmesg output. Debugd sends us
+  // the dmesg output in |dmesg_out|, which we then write to |dmseg_path|.
+  // On success, the (metadata key name, base file name) pair is added to
+  // |logs|. Regardless of success or failure, |completion_closure| is called
+  // once we are finished.
+  void HandleDmesg(base::FilePath dmseg_path,
+                   std::map<std::string, base::FilePath>* logs,
+                   base::RepeatingClosure completion_closure,
+                   const std::string& dmesg_out);
+  // Helper for HandleDmesg. Strips out any sensitive data in |dmesg_out| and
+  // then writes it to |dmseg_path|. Separate function to make error handling
+  // easier. Returns true on success.
+  bool ProcessDmesgOutput(std::string dmesg_out,
+                          const base::FilePath& dmseg_path);
+  // Callback if the debugd call to get dmesg output. |error| is nullptr
+  // if the call never returned (normally means it timed out), otherwise it has
+  // the failure reason.
+  static void HandleDmesgError(base::RepeatingClosure completion_closure,
+                               brillo::Error* error);
 
   // Writes additional logs for the crash to files based on |basename| within
   // |dir|. |key_for_logs| is the key into crash_reporter_logs.conf file. Crash
-  // report metadata key names and the corresponding file paths are returned.
+  // report metadata key names and the corresponding file names are returned.
   std::map<std::string, base::FilePath> GetAdditionalLogs(
       const base::FilePath& dir,
       const std::string& basename,
       const std::string& key_for_logs,
       CrashType crash_type);
 
-  // Add the (|log_map_key|, |complete_file_name|) pair to |logs| if we are not
+  // Add the (|log_map_key|, base file name) pair to |logs| if we are not
   // over kDefaultMaxUploadBytes. If we are over kDefaultMaxUploadBytes,
   // delete the file |complete_file_name| instead and don't change |logs|.
   // |complete_file_name| must be a file created by
@@ -137,6 +213,22 @@ class ChromeCollector : public CrashCollector {
                          const base::FilePath& complete_file_name,
                          std::map<std::string, base::FilePath>* logs);
 
+  // Returns true if the signal number of the crash is fatal. This should check
+  // against the simulated (non-fatal) signal number in chromium.
+  // Reference: `kSimulatedSigno` in
+  // third_party/crashpad/crashpad/util/posix/signals.h in the chromium repo.
+  bool is_signal_fatal() const { return signal_ != -1; }
+
+  // Returns true if the crash is caused by a hang during browser shutdown.
+  bool is_browser_shutdown_hang() const { return is_browser_shutdown_hang_; }
+
+  // Returns true if constants::kShutdownTypeKey is in the crash log. Used for
+  // computing crash severity.
+  bool is_shutdown_crash() const { return is_shutdown_crash_; }
+
+  // Getter to determine whether `crash_type_` is `kJavaScriptError`.
+  bool IsJavaScriptError() const;
+
   // The file where we write our special "done" marker (to indicate to Chrome
   // that we are finished dumping). Always stdout in production.
   FILE* output_file_ptr_;
@@ -145,6 +237,19 @@ class ChromeCollector : public CrashCollector {
   // would make the report larger than max_upload_bytes_. In production, this
   // is always kDefaultMaxUploadBytes.
   int max_upload_bytes_;
+
+  // Signal number of crash (if applicable). Used for computing crash severity.
+  int signal_ = -1;
+
+  bool is_lacros_crash_ = false;
+
+  bool is_browser_shutdown_hang_ = false;
+
+  bool is_shutdown_crash_ = false;
+
+  CrashType crash_type_ = kExecutableCrash;
+
+  std::string process_type_;
 };
 
 #endif  // CRASH_REPORTER_CHROME_COLLECTOR_H_

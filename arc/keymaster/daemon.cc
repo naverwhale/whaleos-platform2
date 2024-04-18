@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,15 @@
 
 #include <sysexits.h>
 
+#include <cstdint>
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/task/single_thread_task_runner.h>
 #include <chromeos/dbus/service_constants.h>
 #include <mojo/core/embedder/embedder.h>
 #include <mojo/public/cpp/bindings/self_owned_receiver.h>
@@ -34,7 +36,7 @@ int Daemon::OnInit() {
 
   mojo::core::Init();
   ipc_support_ = std::make_unique<mojo::core::ScopedIPCSupport>(
-      base::ThreadTaskRunnerHandle::Get(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
       mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
   LOG(INFO) << "Mojo init succeeded.";
 
@@ -49,8 +51,8 @@ void Daemon::InitDBus() {
   CHECK(exported_object);
   CHECK(exported_object->ExportMethodAndBlock(
       kArcKeymasterInterfaceName, kBootstrapMojoConnectionMethod,
-      base::Bind(&Daemon::BootstrapMojoConnection,
-                 weak_factory_.GetWeakPtr())));
+      base::BindRepeating(&Daemon::BootstrapMojoConnection,
+                          weak_factory_.GetWeakPtr())));
   CHECK(bus_->RequestOwnershipAndBlock(kArcKeymasterServiceName,
                                        dbus::Bus::REQUIRE_PRIMARY));
   LOG(INFO) << "D-Bus registration succeeded";
@@ -98,18 +100,36 @@ void Daemon::AcceptProxyConnection(base::ScopedFD fd) {
       std::make_unique<CertStoreInstance>(keymaster_server->GetWeakPtr());
 
   {
-    mojo::ScopedMessagePipeHandle child_pipe =
-        invitation.ExtractMessagePipe("arc-keymaster-pipe");
+    mojo::ScopedMessagePipeHandle child_pipe;
+    if (mojo::core::IsMojoIpczEnabled()) {
+      constexpr uint64_t kKeymasterPipeAttachment = 0;
+      child_pipe = invitation.ExtractMessagePipe(kKeymasterPipeAttachment);
+    } else {
+      child_pipe = invitation.ExtractMessagePipe("arc-keymaster-pipe");
+    }
+    if (!child_pipe.is_valid()) {
+      LOG(ERROR) << "Could not extract KeymasterServer pipe.";
+      return;
+    }
     mojo::MakeSelfOwnedReceiver(
         std::move(keymaster_server),
         mojo::PendingReceiver<arc::mojom::KeymasterServer>(
             std::move(child_pipe)));
   }
   {
-    mojo::ScopedMessagePipeHandle child_pipe =
-        invitation.ExtractMessagePipe("arc-cert-store-pipe");
+    mojo::ScopedMessagePipeHandle child_pipe;
+    if (mojo::core::IsMojoIpczEnabled()) {
+      constexpr uint64_t kCertStorePipeAttachment = 1;
+      child_pipe = invitation.ExtractMessagePipe(kCertStorePipeAttachment);
+    } else {
+      child_pipe = invitation.ExtractMessagePipe("arc-cert-store-pipe");
+    }
 
     // TODO(b/147573396): remove strong binding to be able to use cert store.
+    if (!child_pipe.is_valid()) {
+      LOG(ERROR) << "Could not extract CertStoreInstance pipe.";
+      return;
+    }
     mojo::MakeSelfOwnedReceiver(
         std::move(cert_store_instance),
         mojo::PendingReceiver<arc::keymaster::mojom::CertStoreInstance>(

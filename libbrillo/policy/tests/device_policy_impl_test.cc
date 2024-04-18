@@ -1,6 +1,8 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include <optional>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -8,6 +10,7 @@
 #include "policy/device_policy_impl.h"
 
 #include "bindings/chrome_device_policy.pb.h"
+#include "bindings/device_management_backend.pb.h"
 #include "install_attributes/mock_install_attributes_reader.h"
 
 namespace em = enterprise_management;
@@ -18,12 +21,20 @@ namespace policy {
 
 class DevicePolicyImplTest : public testing::Test, public DevicePolicyImpl {
  protected:
+  // When |device_mode| is nullptr, the function assumes it's a customer
+  // owned device and sets empty install attributes.
   void InitializePolicy(const char* device_mode,
                         const em::ChromeDeviceSettingsProto& proto) {
     device_policy_.set_policy_for_testing(proto);
-    device_policy_.set_install_attributes_for_testing(
-        std::make_unique<MockInstallAttributesReader>(device_mode,
-                                                      true /* initialized */));
+    if (device_mode) {
+      device_policy_.set_install_attributes_for_testing(
+          std::make_unique<MockInstallAttributesReader>(
+              device_mode, true /* initialized */));
+    } else {
+      device_policy_.set_install_attributes_for_testing(
+          std::make_unique<MockInstallAttributesReader>(
+              cryptohome::SerializedInstallAttributes()));
+    }
   }
 
   DevicePolicyImpl device_policy_;
@@ -125,19 +136,6 @@ TEST_F(DevicePolicyImplTest, GetRollbackAllowedMilestones_Set) {
   EXPECT_EQ(3, value);
 }
 
-// RollbackAllowedMilestones is set to a valid value, using AD.
-TEST_F(DevicePolicyImplTest, GetRollbackAllowedMilestones_SetAD) {
-  em::ChromeDeviceSettingsProto device_policy_proto;
-  em::AutoUpdateSettingsProto* auto_update_settings =
-      device_policy_proto.mutable_auto_update_settings();
-  auto_update_settings->set_rollback_allowed_milestones(3);
-  InitializePolicy(InstallAttributesReader::kDeviceModeEnterpriseAD,
-                   device_policy_proto);
-  int value = -1;
-  ASSERT_TRUE(device_policy_.GetRollbackAllowedMilestones(&value));
-  EXPECT_EQ(3, value);
-}
-
 // RollbackAllowedMilestones is set to a valid value, but it's not an enterprise
 // device.
 TEST_F(DevicePolicyImplTest, GetRollbackAllowedMilestones_SetConsumer) {
@@ -145,8 +143,7 @@ TEST_F(DevicePolicyImplTest, GetRollbackAllowedMilestones_SetConsumer) {
   em::AutoUpdateSettingsProto* auto_update_settings =
       device_policy_proto.mutable_auto_update_settings();
   auto_update_settings->set_rollback_allowed_milestones(3);
-  InitializePolicy(InstallAttributesReader::kDeviceModeConsumer,
-                   device_policy_proto);
+  InitializePolicy(/*device_mode=*/nullptr, device_policy_proto);
 
   int value = -1;
   ASSERT_FALSE(device_policy_.GetRollbackAllowedMilestones(&value));
@@ -211,23 +208,6 @@ TEST_F(DevicePolicyImplTest, GetDeviceUpdateStagingSchedule_Valid) {
                                             DayPercentagePair{10, 100}));
 }
 
-// Update staging schedule has valid values, set using AD.
-TEST_F(DevicePolicyImplTest, GetDeviceUpdateStagingSchedule_Valid_AD) {
-  em::ChromeDeviceSettingsProto device_policy_proto;
-  em::AutoUpdateSettingsProto* auto_update_settings =
-      device_policy_proto.mutable_auto_update_settings();
-  auto_update_settings->set_staging_schedule(
-      "[{\"days\": 4, \"percentage\": 40}, {\"days\": 10, \"percentage\": "
-      "100}]");
-  InitializePolicy(InstallAttributesReader::kDeviceModeEnterpriseAD,
-                   device_policy_proto);
-
-  std::vector<DayPercentagePair> staging_schedule;
-  ASSERT_TRUE(device_policy_.GetDeviceUpdateStagingSchedule(&staging_schedule));
-  EXPECT_THAT(staging_schedule, ElementsAre(DayPercentagePair{4, 40},
-                                            DayPercentagePair{10, 100}));
-}
-
 // Update staging schedule has values with values set larger than the max
 // allowed days/percentage and smaller than the min allowed days/percentage.
 TEST_F(DevicePolicyImplTest,
@@ -253,8 +233,7 @@ TEST_F(DevicePolicyImplTest, GetUpdateDisabled_SetConsumer) {
   em::AutoUpdateSettingsProto* auto_update_settings =
       device_policy_proto.mutable_auto_update_settings();
   auto_update_settings->set_update_disabled(true);
-  InitializePolicy(InstallAttributesReader::kDeviceModeConsumer,
-                   device_policy_proto);
+  InitializePolicy(/*device_mode=*/nullptr, device_policy_proto);
 
   bool value;
   ASSERT_FALSE(device_policy_.GetUpdateDisabled(&value));
@@ -266,8 +245,7 @@ TEST_F(DevicePolicyImplTest, GetTargetVersionPrefix_SetConsumer) {
   em::AutoUpdateSettingsProto* auto_update_settings =
       device_policy_proto.mutable_auto_update_settings();
   auto_update_settings->set_target_version_prefix("hello");
-  InitializePolicy(InstallAttributesReader::kDeviceModeConsumer,
-                   device_policy_proto);
+  InitializePolicy(/*device_mode=*/nullptr, device_policy_proto);
 
   std::string value = "";
   ASSERT_FALSE(device_policy_.GetTargetVersionPrefix(&value));
@@ -280,8 +258,7 @@ TEST_F(DevicePolicyImplTest, GetAllowedConnectionTypesForUpdate_SetConsumer) {
       device_policy_proto.mutable_auto_update_settings();
   auto_update_settings->add_allowed_connection_types(
       em::AutoUpdateSettingsProto::CONNECTION_TYPE_ETHERNET);
-  InitializePolicy(InstallAttributesReader::kDeviceModeConsumer,
-                   device_policy_proto);
+  InitializePolicy(/*device_mode=*/nullptr, device_policy_proto);
 
   std::set<std::string> value;
   ASSERT_FALSE(device_policy_.GetAllowedConnectionTypesForUpdate(&value));
@@ -296,8 +273,7 @@ TEST_F(DevicePolicyImplTest, GetDisallowedTimeIntervals_SetConsumer) {
       "[{\"start\": {\"day_of_week\": \"Monday\", \"hours\": 10, \"minutes\": "
       "0}, \"end\": {\"day_of_week\": \"Monday\", \"hours\": 10, \"minutes\": "
       "0}}]");
-  InitializePolicy(InstallAttributesReader::kDeviceModeConsumer,
-                   device_policy_proto);
+  InitializePolicy(/*device_mode=*/nullptr, device_policy_proto);
 
   std::vector<WeeklyTimeInterval> value;
   ASSERT_FALSE(device_policy_.GetDisallowedTimeIntervals(&value));
@@ -327,8 +303,7 @@ TEST_F(DevicePolicyImplTest, GetDeviceQuickFixBuildToken_NotSet) {
   em::AutoUpdateSettingsProto* auto_update_settings =
       device_policy_proto.mutable_auto_update_settings();
   auto_update_settings->set_device_quick_fix_build_token(kToken);
-  InitializePolicy(InstallAttributesReader::kDeviceModeConsumer,
-                   device_policy_proto);
+  InitializePolicy(/*device_mode=*/nullptr, device_policy_proto);
   std::string value;
   EXPECT_FALSE(device_policy_.GetDeviceQuickFixBuildToken(&value));
   EXPECT_TRUE(value.empty());
@@ -449,8 +424,7 @@ TEST_F(DevicePolicyImplTest, GetHighestDeviceMinimumVersion_SetConsumer) {
       "\"warning_period\" : 7, \"aue_warning_period\" : 14},  "
       "{\"chromeos_version\" : \"13315.60.12\", \"warning_period\" : 5, "
       "\"aue_warning_period\" : 13}], \"unmanaged_user_restricted\" : true}");
-  InitializePolicy(InstallAttributesReader::kDeviceModeConsumer,
-                   device_policy_proto);
+  InitializePolicy(/*device_mode=*/nullptr, device_policy_proto);
 
   base::Version version;
   ASSERT_FALSE(device_policy_.GetHighestDeviceMinimumVersion(&version));
@@ -485,4 +459,206 @@ TEST_F(DevicePolicyImplTest, GetDeviceMarketSegment_NotSet) {
   DeviceMarketSegment segment;
   EXPECT_FALSE(device_policy_.GetDeviceMarketSegment(&segment));
 }
+
+TEST_F(DevicePolicyImplTest,
+       GetDeviceKeylockerForStorageEncryptionEnabled_SetEnabled) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  em::DeviceKeylockerForStorageEncryptionEnabledProto* kl_proto =
+      device_policy_proto.mutable_keylocker_for_storage_encryption_enabled();
+  kl_proto->set_enabled(true);
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  bool kl_enabled = false;
+  EXPECT_TRUE(device_policy_.GetDeviceKeylockerForStorageEncryptionEnabled(
+      &kl_enabled));
+  EXPECT_TRUE(kl_enabled);
+}
+
+TEST_F(DevicePolicyImplTest,
+       GetDeviceKeylockerForStorageEncryptionEnabled_NotSet) {
+  em::PolicyData policy_data;
+  device_policy_.set_policy_data_for_testing(policy_data);
+  bool kl_enabled = false;
+  EXPECT_FALSE(device_policy_.GetDeviceKeylockerForStorageEncryptionEnabled(
+      &kl_enabled));
+}
+
+// Policy should only apply to enterprise devices.
+TEST_F(DevicePolicyImplTest, GetRunAutomaticCleanupOnLogin_SetConsumer) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  em::BooleanPolicyProto* run_settings =
+      device_policy_proto.mutable_device_run_automatic_cleanup_on_login();
+  run_settings->set_value(true);
+  InitializePolicy(/*device_mode=*/nullptr, device_policy_proto);
+
+  ASSERT_THAT(device_policy_.GetRunAutomaticCleanupOnLogin(),
+              testing::Eq(std::nullopt));
+}
+
+TEST_F(DevicePolicyImplTest, GetRunAutomaticCleanupOnLogin_Set) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  em::BooleanPolicyProto* run_settings =
+      device_policy_proto.mutable_device_run_automatic_cleanup_on_login();
+  run_settings->set_value(true);
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  ASSERT_THAT(device_policy_.GetRunAutomaticCleanupOnLogin(),
+              testing::Eq(std::optional(true)));
+}
+
+TEST_F(DevicePolicyImplTest, GetReportDeviceSecurityStatus_NotSet) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  ASSERT_THAT(device_policy_.GetReportDeviceSecurityStatus(),
+              testing::Eq(std::nullopt));
+}
+
+TEST_F(DevicePolicyImplTest, GetReportDeviceSecurityStatus_Set) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  em::DeviceReportingProto* device_reporting =
+      device_policy_proto.mutable_device_reporting();
+  device_reporting->set_report_security_status(true);
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  ASSERT_THAT(device_policy_.GetReportDeviceSecurityStatus(),
+              testing::Eq(std::optional(true)));
+}
+
+TEST_F(DevicePolicyImplTest, GetDeviceReportXDREvents_NotSet) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  ASSERT_THAT(device_policy_.GetDeviceReportXDREvents(),
+              testing::Eq(std::nullopt));
+}
+
+TEST_F(DevicePolicyImplTest, GetDeviceReportXDREvents_Set) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  em::DeviceReportXDREventsProto* xdr_reporting =
+      device_policy_proto.mutable_device_report_xdr_events();
+  xdr_reporting->set_enabled(true);
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  ASSERT_THAT(device_policy_.GetDeviceReportXDREvents(),
+              testing::Eq(std::optional(true)));
+}
+
+TEST_F(DevicePolicyImplTest, GetEphemeralSettings_NotSet) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  DevicePolicy::EphemeralSettings ephemeral_settings;
+  EXPECT_FALSE(device_policy_.GetEphemeralSettings(&ephemeral_settings));
+  EXPECT_FALSE(ephemeral_settings.global_ephemeral_users_enabled);
+  EXPECT_TRUE(ephemeral_settings.specific_ephemeral_users.empty());
+  EXPECT_TRUE(ephemeral_settings.specific_nonephemeral_users.empty());
+}
+
+TEST_F(DevicePolicyImplTest,
+       GetEphemeralSettings_Set_EphemeralUsersEnabled_True) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  device_policy_proto.mutable_ephemeral_users_enabled()
+      ->set_ephemeral_users_enabled(true);
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  DevicePolicy::EphemeralSettings ephemeral_settings;
+  EXPECT_TRUE(device_policy_.GetEphemeralSettings(&ephemeral_settings));
+  EXPECT_TRUE(ephemeral_settings.global_ephemeral_users_enabled);
+  EXPECT_TRUE(ephemeral_settings.specific_ephemeral_users.empty());
+  EXPECT_TRUE(ephemeral_settings.specific_nonephemeral_users.empty());
+}
+
+TEST_F(DevicePolicyImplTest,
+       GetEphemeralSettings_Set_EphemeralUsersEnabled_False) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  device_policy_proto.mutable_ephemeral_users_enabled()
+      ->set_ephemeral_users_enabled(false);
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  DevicePolicy::EphemeralSettings ephemeral_settings;
+  EXPECT_TRUE(device_policy_.GetEphemeralSettings(&ephemeral_settings));
+  EXPECT_FALSE(ephemeral_settings.global_ephemeral_users_enabled);
+  EXPECT_TRUE(ephemeral_settings.specific_ephemeral_users.empty());
+  EXPECT_TRUE(ephemeral_settings.specific_nonephemeral_users.empty());
+}
+
+TEST_F(DevicePolicyImplTest, GetEphemeralSettings_Set_Non_Ephemeral_User) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  em::DeviceLocalAccountInfoProto* account =
+      device_policy_proto.mutable_device_local_accounts()->add_account();
+  account->set_account_id("account");
+  account->set_ephemeral_mode(
+      em::DeviceLocalAccountInfoProto::EPHEMERAL_MODE_DISABLE);
+
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  DevicePolicy::EphemeralSettings ephemeral_settings;
+  EXPECT_TRUE(device_policy_.GetEphemeralSettings(&ephemeral_settings));
+  EXPECT_FALSE(ephemeral_settings.global_ephemeral_users_enabled);
+  EXPECT_TRUE(ephemeral_settings.specific_ephemeral_users.empty());
+  EXPECT_EQ(1, ephemeral_settings.specific_nonephemeral_users.size());
+  EXPECT_EQ("6163636f756e74@public-accounts.device-local.localhost",
+            ephemeral_settings.specific_nonephemeral_users[0]);
+}
+
+TEST_F(DevicePolicyImplTest, GetEphemeralSettings_Set_Ephemeral_User) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  em::DeviceLocalAccountInfoProto* account =
+      device_policy_proto.mutable_device_local_accounts()->add_account();
+  account->set_account_id("account");
+  account->set_ephemeral_mode(
+      em::DeviceLocalAccountInfoProto::EPHEMERAL_MODE_ENABLE);
+
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  DevicePolicy::EphemeralSettings ephemeral_settings;
+  EXPECT_TRUE(device_policy_.GetEphemeralSettings(&ephemeral_settings));
+  EXPECT_FALSE(ephemeral_settings.global_ephemeral_users_enabled);
+  EXPECT_EQ(1, ephemeral_settings.specific_ephemeral_users.size());
+  EXPECT_EQ("6163636f756e74@public-accounts.device-local.localhost",
+            ephemeral_settings.specific_ephemeral_users[0]);
+  EXPECT_TRUE(ephemeral_settings.specific_nonephemeral_users.empty());
+}
+
+TEST_F(DevicePolicyImplTest, GetEphemeralSettings_Set_EphemeralMode_Unset) {
+  em::ChromeDeviceSettingsProto device_policy_proto;
+  device_policy_proto.mutable_ephemeral_users_enabled()
+      ->set_ephemeral_users_enabled(true);
+  em::DeviceLocalAccountsProto* device_local_accounts =
+      device_policy_proto.mutable_device_local_accounts();
+
+  em::DeviceLocalAccountInfoProto* account1 =
+      device_local_accounts->add_account();
+  account1->set_account_id("account1");
+  account1->set_ephemeral_mode(
+      em::DeviceLocalAccountInfoProto::EPHEMERAL_MODE_UNSET);
+
+  em::DeviceLocalAccountInfoProto* account2 =
+      device_local_accounts->add_account();
+  account2->set_account_id("account2");
+  account2->set_ephemeral_mode(em::DeviceLocalAccountInfoProto::
+                                   EPHEMERAL_MODE_FOLLOW_DEVICE_WIDE_POLICY);
+
+  InitializePolicy(InstallAttributesReader::kDeviceModeEnterprise,
+                   device_policy_proto);
+
+  DevicePolicy::EphemeralSettings ephemeral_settings;
+  EXPECT_TRUE(device_policy_.GetEphemeralSettings(&ephemeral_settings));
+  EXPECT_TRUE(ephemeral_settings.global_ephemeral_users_enabled);
+  EXPECT_TRUE(ephemeral_settings.specific_ephemeral_users.empty());
+  EXPECT_TRUE(ephemeral_settings.specific_nonephemeral_users.empty());
+}
+
 }  // namespace policy

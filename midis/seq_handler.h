@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,13 +25,16 @@ class DeviceTracker;
 // external clients.
 class SeqHandler {
  public:
-  using AddDeviceCallback = base::Callback<void(std::unique_ptr<Device>)>;
-  using RemoveDeviceCallback = base::Callback<void(uint32_t, uint32_t)>;
-  using HandleReceiveDataCallback =
-      base::Callback<void(uint32_t, uint32_t, uint32_t, const char*, size_t)>;
-  using IsDevicePresentCallback = base::Callback<bool(uint32_t, uint32_t)>;
+  using AddDeviceCallback =
+      base::RepeatingCallback<void(std::unique_ptr<Device>)>;
+  using RemoveDeviceCallback =
+      base::RepeatingCallback<void(uint32_t, uint32_t)>;
+  using HandleReceiveDataCallback = base::RepeatingCallback<void(
+      uint32_t, uint32_t, uint32_t, const char*, size_t)>;
+  using IsDevicePresentCallback =
+      base::RepeatingCallback<bool(uint32_t, uint32_t)>;
   using IsPortPresentCallback =
-      base::Callback<bool(uint32_t, uint32_t, uint32_t)>;
+      base::RepeatingCallback<bool(uint32_t, uint32_t, uint32_t)>;
 
   struct SeqDeleter {
     void operator()(snd_seq_t* seq) const { snd_seq_close(seq); }

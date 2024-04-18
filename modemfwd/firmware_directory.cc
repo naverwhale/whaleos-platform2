@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include <base/files/file_path.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <cros_config/cros_config.h>
 
 #include "modemfwd/firmware_manifest.h"
@@ -17,42 +16,16 @@
 
 namespace modemfwd {
 
-namespace {
-
-const char kManifestName[] = "firmware_manifest.prototxt";
-
-}  // namespace
-
 const char FirmwareDirectory::kGenericCarrierId[] = "generic";
-
-// Returns the modem firmware variant for the current model of the device by
-// reading the /modem/firmware-variant property of the current model via
-// chromeos-config. Returns an empty string if it fails to read the modem
-// firmware variant from chromeos-config or no modem firmware variant is
-// specified.
-std::string GetModemFirmwareVariant() {
-  brillo::CrosConfig config;
-  if (!config.Init()) {
-    LOG(WARNING) << "Failed to load Chrome OS configuration";
-    return std::string();
-  }
-
-  std::string variant;
-  if (!config.GetString("/modem", "firmware-variant", &variant)) {
-    LOG(INFO) << "No modem firmware variant is specified";
-    return std::string();
-  }
-
-  LOG(INFO) << "Use modem firmware variant: " << variant;
-  return variant;
-}
 
 class FirmwareDirectoryImpl : public FirmwareDirectory {
  public:
-  FirmwareDirectoryImpl(FirmwareIndex index, const base::FilePath& directory)
+  FirmwareDirectoryImpl(std::unique_ptr<FirmwareIndex> index,
+                        const base::FilePath& fw_manifest_directory,
+                        std::string variant)
       : index_(std::move(index)),
-        directory_(directory),
-        variant_(GetModemFirmwareVariant()) {}
+        fw_manifest_directory_(fw_manifest_directory),
+        variant_(variant) {}
   FirmwareDirectoryImpl(const FirmwareDirectoryImpl&) = delete;
   FirmwareDirectoryImpl& operator=(const FirmwareDirectoryImpl&) = delete;
 
@@ -62,8 +35,8 @@ class FirmwareDirectoryImpl : public FirmwareDirectory {
     FirmwareDirectory::Files result;
 
     DeviceType type{device_id, variant_};
-    auto device_it = index_.find(type);
-    if (device_it == index_.end()) {
+    auto device_it = index_->find(type);
+    if (device_it == index_->end()) {
       ELOG(INFO) << "Firmware directory has no firmware for device ID ["
                  << device_id << "]";
       return result;
@@ -78,6 +51,9 @@ class FirmwareDirectoryImpl : public FirmwareDirectory {
         result.main_firmware = info;
       if (FindSpecificFirmware(cache.oem_firmware, kGenericCarrierId, &info))
         result.oem_firmware = info;
+      if (result.main_firmware.has_value())
+        FindAssociatedFirmware(cache, result.main_firmware.value().version,
+                               &result.assoc_firmware);
       return result;
     }
 
@@ -90,8 +66,18 @@ class FirmwareDirectoryImpl : public FirmwareDirectory {
     if (FindFirmwareForCarrier(cache.oem_firmware, carrier_id, &info))
       result.oem_firmware = info;
 
+    // Add associated firmware.
+    if (result.main_firmware.has_value()) {
+      FindAssociatedFirmware(cache, result.main_firmware.value().version,
+                             &result.assoc_firmware);
+    }
+
     return result;
   }
+
+  const base::FilePath& GetFirmwarePath() override {
+    return fw_manifest_directory_;
+  };
 
   // modemfwd::IsUsingSameFirmware overrides.
   bool IsUsingSameFirmware(const std::string& device_id,
@@ -102,25 +88,34 @@ class FirmwareDirectoryImpl : public FirmwareDirectory {
       return true;
 
     DeviceType type{device_id, variant_};
-    auto device_it = index_.find(type);
+    auto device_it = index_->find(type);
     // no firmware for this device
-    if (device_it == index_.end())
+    if (device_it == index_->end())
       return true;
 
     const DeviceFirmwareCache& cache = device_it->second;
-    auto main_a = cache.main_firmware.find(carrier_a);
-    auto main_b = cache.main_firmware.find(carrier_b);
-    auto cust_a = cache.carrier_firmware.find(carrier_a);
-    auto cust_b = cache.carrier_firmware.find(carrier_b);
-    // one or several firmwares are missing
-    if (main_a == cache.main_firmware.end() ||
-        main_b == cache.main_firmware.end() ||
-        cust_a == cache.carrier_firmware.end() ||
-        cust_b == cache.carrier_firmware.end())
+    auto main_a = GetFirmwareForCarrier(cache.main_firmware, carrier_a);
+    auto main_b = GetFirmwareForCarrier(cache.main_firmware, carrier_b);
+    auto cust_a = GetFirmwareForCarrier(cache.carrier_firmware, carrier_a);
+    auto cust_b = GetFirmwareForCarrier(cache.carrier_firmware, carrier_b);
+
+    if (cust_a == cache.carrier_firmware.end() ||
+        cust_b == cache.carrier_firmware.end() ||
+        main_a == cache.main_firmware.end() ||
+        main_b == cache.main_firmware.end()) {
       return main_a == main_b && cust_a == cust_b;
+    }
     // same firmware if they are pointing to the 2 same files.
     return main_a->second == main_b->second && cust_a->second == cust_b->second;
   }
+
+  // modemfwd::OverrideVariantForTesting overrides.
+  void OverrideVariantForTesting(const std::string& variant) override {
+    if (variant.empty() || variant == variant_)
+      return;
+    LOG(INFO) << "Override variant value: " << variant;
+    variant_ = variant;
+  };
 
  private:
   bool FindFirmwareForCarrier(
@@ -150,21 +145,47 @@ class FirmwareDirectoryImpl : public FirmwareDirectory {
     return true;
   }
 
-  FirmwareIndex index_;
-  base::FilePath directory_;
+  DeviceFirmwareCache::CarrierIndex::const_iterator GetFirmwareForCarrier(
+      const DeviceFirmwareCache::CarrierIndex& carrier_index,
+      std::string carrier_id) {
+    auto it = carrier_index.find(carrier_id);
+    return (it == carrier_index.end()) ? carrier_index.find(kGenericCarrierId)
+                                       : it;
+  }
+
+  void FindAssociatedFirmware(
+      const DeviceFirmwareCache& cache,
+      const std::string& main_version,
+      std::map<std::string, FirmwareFileInfo>* out_firmware) {
+    for (const auto& main_firmware : cache.main_firmware) {
+      FirmwareFileInfo* const main_info = main_firmware.second;
+      if (main_version != main_info->version)
+        continue;
+
+      auto it = cache.assoc_firmware.find(main_info);
+      if (it == cache.assoc_firmware.end())
+        return;
+
+      for (const auto& assoc_firmware_entry : it->second) {
+        (*out_firmware)[assoc_firmware_entry.first] =
+            *assoc_firmware_entry.second;
+      }
+
+      return;
+    }
+  }
+
+  std::unique_ptr<FirmwareIndex> index_;
+  base::FilePath fw_manifest_directory_;
   std::string variant_;
 };
 
 std::unique_ptr<FirmwareDirectory> CreateFirmwareDirectory(
-    const base::FilePath& directory) {
-  FirmwareIndex index;
-  if (!ParseFirmwareManifestV2(directory.Append(kManifestName), &index)) {
-    LOG(INFO) << "Firmware manifest did not parse as V2, falling back to V1";
-    if (!ParseFirmwareManifest(directory.Append(kManifestName), &index))
-      return nullptr;
-  }
-
-  return std::make_unique<FirmwareDirectoryImpl>(std::move(index), directory);
+    std::unique_ptr<FirmwareIndex> index,
+    const base::FilePath& directory,
+    const std::string& variant) {
+  return std::make_unique<FirmwareDirectoryImpl>(std::move(index), directory,
+                                                 variant);
 }
 
 }  // namespace modemfwd

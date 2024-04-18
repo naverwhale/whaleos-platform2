@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 
@@ -24,7 +24,7 @@ SubDeviceClientFdHolder::SubDeviceClientFdHolder(
     : client_id_(client_id),
       subdevice_id_(subdevice_id),
       fd_(std::move(fd)),
-      client_data_cb_(client_data_cb),
+      client_data_cb_(std::move(client_data_cb)),
       queue_(std::make_unique<midi::MidiMessageQueue>(true)),
       weak_factory_(this) {}
 
@@ -36,7 +36,7 @@ std::unique_ptr<SubDeviceClientFdHolder> SubDeviceClientFdHolder::Create(
     base::ScopedFD fd,
     ClientDataCallback client_data_cb) {
   auto holder = std::make_unique<SubDeviceClientFdHolder>(
-      client_id, subdevice_id, std::move(fd), client_data_cb);
+      client_id, subdevice_id, std::move(fd), std::move(client_data_cb));
   if (!holder->StartClientMonitoring()) {
     return nullptr;
   }

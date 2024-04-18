@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -41,8 +41,8 @@ class FakeControl : public MockControl {
 
   std::unique_ptr<PowerManagerProxyInterface> CreatePowerManagerProxy(
       PowerManagerProxyDelegate* delegate,
-      const base::Closure& service_appeared_callback,
-      const base::Closure& service_vanished_callback) override {
+      const base::RepeatingClosure& service_appeared_callback,
+      const base::RepeatingClosure& service_vanished_callback) override {
     CHECK(power_manager_proxy_);
     delegate_ = delegate;
     // Passes ownership.
@@ -75,17 +75,10 @@ class PowerManagerTest : public Test {
   static const int kDelayId2 = 5;
 
   PowerManagerTest()
-      : kTimeout(base::TimeDelta::FromSeconds(3)),
+      : kTimeout(base::Seconds(3)),
         power_manager_(&control_),
         power_manager_proxy_(control_.power_manager_proxy()),
-        delegate_(control_.delegate()) {
-    suspend_imminent_callback_ = base::Bind(
-        &PowerManagerTest::SuspendImminentAction, base::Unretained(this));
-    suspend_done_callback_ = base::Bind(&PowerManagerTest::SuspendDoneAction,
-                                        base::Unretained(this));
-    dark_suspend_imminent_callback_ = base::Bind(
-        &PowerManagerTest::DarkSuspendImminentAction, base::Unretained(this));
-  }
+        delegate_(control_.delegate()) {}
 
   MOCK_METHOD(void, SuspendImminentAction, ());
   MOCK_METHOD(void, SuspendDoneAction, ());
@@ -93,9 +86,14 @@ class PowerManagerTest : public Test {
 
  protected:
   void SetUp() override {
-    power_manager_.Start(kTimeout, suspend_imminent_callback_,
-                         suspend_done_callback_,
-                         dark_suspend_imminent_callback_);
+    power_manager_.Start(
+        kTimeout,
+        base::BindRepeating(&PowerManagerTest::SuspendImminentAction,
+                            base::Unretained(this)),
+        base::BindRepeating(&PowerManagerTest::SuspendDoneAction,
+                            base::Unretained(this)),
+        base::BindRepeating(&PowerManagerTest::DarkSuspendImminentAction,
+                            base::Unretained(this)));
   }
 
   void TearDown() override { power_manager_.Stop(); }
@@ -150,8 +148,7 @@ class PowerManagerTest : public Test {
 
   void AddProxyExpectationForChangeRegDomain(
       power_manager::WifiRegDomainDbus domain, bool return_value) {
-    EXPECT_CALL(*power_manager_proxy_, ChangeRegDomain(domain))
-        .WillOnce(Return(return_value));
+    EXPECT_CALL(*power_manager_proxy_, ChangeRegDomain(domain));
   }
 
   void RegisterSuspendDelays() {
@@ -185,9 +182,6 @@ class PowerManagerTest : public Test {
   PowerManager power_manager_;
   MockPowerManagerProxy* const power_manager_proxy_;
   PowerManagerProxyDelegate* const delegate_;
-  PowerManager::SuspendImminentCallback suspend_imminent_callback_;
-  PowerManager::SuspendDoneCallback suspend_done_callback_;
-  PowerManager::DarkSuspendImminentCallback dark_suspend_imminent_callback_;
 };
 
 const char PowerManagerTest::kDescription[] = "shill";

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,11 @@
 #include <fuse/fuse_lowlevel.h>
 #include <fuse/fuse_opt.h>
 
+#include <iterator>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 
 namespace arc {
 
@@ -25,9 +25,11 @@ struct fuse_chan* Mount(const base::FilePath& mount_path,
   const char* argv[] = {
       "",  // Dummy argv[0],
       subtype_option.c_str(),
+      "-oallow_other",  // Allow other users to use FDs.
+      "-onoexec",
   };
   struct fuse_args args =
-      FUSE_ARGS_INIT(base::size(argv), const_cast<char**>(argv));
+      FUSE_ARGS_INIT(std::size(argv), const_cast<char**>(argv));
   auto* channel = fuse_mount(mount_path.value().c_str(), &args);
   fuse_opt_free_args(&args);
   return channel;

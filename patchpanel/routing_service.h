@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,17 @@
 #define PATCHPANEL_ROUTING_SERVICE_H_
 
 #include <arpa/inet.h>
+#include <limits.h>
 #include <stdint.h>
 #include <sys/socket.h>
 
 #include <array>
+#include <optional>
 #include <ostream>
 #include <string>
 
 #include <base/strings/stringprintf.h>
+#include <base/types/cxx23_to_underlying.h>
 
 #include <patchpanel/proto_bindings/patchpanel_service.pb.h>
 
@@ -27,7 +30,7 @@ namespace patchpanel {
 // TODO(b/161507671) Consolidate with shill::kInterfaceTableIdIncrement
 // in platform2/shill/routing_table.cc once routing and ip rule configuration
 // is migrated to patchpanel.
-constexpr const uint32_t kInterfaceTableIdIncrement = 1000;
+constexpr const int kInterfaceTableIdIncrement = 1000;
 
 // The list of all sources of traffic that need to be distinguished
 // for routing or traffic accounting. Currently 6 bits are used for encoding
@@ -36,44 +39,68 @@ constexpr const uint32_t kInterfaceTableIdIncrement = 1000;
 // offset by 0x20 so that their most significant bit is always set and can be
 // easily matched separately from local sources.
 enum TrafficSource {
-  UNKNOWN = 0,
+  kUnknown = 0,
 
   // Local sources:
   // Traffic corresponding to uid "chronos".
-  CHROME = 1,
+  kChrome = 1,
   // Other uids classified as "user" for traffic purposes: debugd, cups,
-  // tlsdate, pluginvm, etc.
-  USER = 2,
+  // tlsdate, pluginvm (Parallels), etc.
+  kUser = 2,
   // Traffic from Update engine.
-  UPDATE_ENGINE = 3,
+  kUpdateEngine = 3,
   // Other system traffic.
-  SYSTEM = 4,
+  kSystem = 4,
   // Traffic emitted on an underlying physical network by the built-in OpenVPN
   // and L2TP clients, or Chrome 3rd party VPN Apps. This traffic constitutes
   // the VPN tunnel.
-  HOST_VPN = 5,
+  kHostVpn = 5,
 
   // Forwarded sources:
   // ARC++ and ARCVM.
-  ARC = 0x20,
+  kArc = 0x20,
   // Crostini VMs and lxc containers.
-  CROSVM = 0x21,
-  // Other plugin VMs.
-  PLUGINVM = 0x22,
+  kCrosVM = 0x21,
+  // Parallels VMs.
+  kParallelsVM = 0x22,
   // A tethered downstream network. Currently reserved for future use.
-  TETHER_DOWNSTREAM = 0x23,
+  kTetherDownstream = 0x23,
   // Traffic emitted by Android VPNs for their tunnelled connections.
-  ARC_VPN = 0x24,
+  kArcVpn = 0x24,
+};
+
+// QoSCategory in fwmark indicates the inferred result from each QoS detector
+// (e.g., WebRTC detector, ARC connection monitor). The final QoS decision
+// (e.g., the DSCP value used in WiFi QoS) will be decided by QoSService.
+// Currently 3 bits are used for encoding QoSCategory in a fwmark.
+enum class QoSCategory : uint8_t {
+  // Either unknown or uninteresting in terms of QoS.
+  kDefault = 0,
+
+  // The QoS category specified via the patchpanel API. Note that currently that
+  // API will only be used by ARC++ connection monitor.
+  kRealTimeInteractive = 1,
+  kMultimediaConferencing = 2,
+
+  // Network control traffics, e.g., TCP handshake packets, DNS packets.
+  kNetworkControl = 3,
+
+  // WebRTC traffic detected by the WebRTC detector.
+  kWebRTC = 4,
 };
 
 const std::string& TrafficSourceName(TrafficSource source);
+
+// Returns the "mark/mask" string for `category` which can be used as an
+// argument to call iptables, e.g., "0x00000040/0x000000e0".
+std::string QoSFwmarkWithMask(QoSCategory category);
 
 // A representation of how fwmark bits are split and used for tagging and
 // routing traffic. The 32 bits of the fwmark are currently organized as such:
 //    0                   1                   2                   3
 //    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-//   |        routing table id       |VPN|source enum|   reserved  |*|
+//   |        routing table id       |VPN|source enum| QoS | rsvd. |*|
 //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //
 // routing table id (16bits): the routing table id of a physical device managed
@@ -82,9 +109,10 @@ const std::string& TrafficSourceName(TrafficSource source);
 //              or bypass VPN routing.
 // source enum(6bits): policy bits controlled by patchpanel for grouping
 //                     originated traffic by domain.
-// reserved(7bits): no usage at the moment.
+// QoS (3bits): the QoS category of the packet, used by QoSService.
+// reserved(4bits): no usage at the moment.
 // legacy SNAT(1bit): legacy bit used for setting up SNAT for ARC, Crostini, and
-//                    PluginVMs with iptables MASQUERADE.
+//                    Parallels VMs with iptables MASQUERADE.
 //
 // Note that bitfields are not a portable way to define a
 // stable Fwmark. Also note that the in-memory representation of values of
@@ -93,10 +121,15 @@ const std::string& TrafficSourceName(TrafficSource source);
 // through pointers. In practice client code should not rely on a specific
 // memory representation and should instead use ToString() and Value().
 union Fwmark {
+  // Note that the memory layout of bit-field is implementation-defined. Since
+  // the definition below does not straddle bytes, we should be able to get a
+  // consistent behavior across platforms.
   struct {
     // The LSB is currently only used for applying IPv4 SNAT to egress traffic
     // from ARC and other VMs; indicated by a value of 1.
-    uint8_t legacy;
+    uint8_t legacy : 5;
+    // The QoS category for the packet. Used by QoS service.
+    uint8_t qos_category : 3;
     // The 3rd byte is used to store the intent and policy to be applied to the
     // traffic. The first 2 bits are used for host processes to select a VPN
     // routing intent via patchpanel SetVpnIntent API. The next 6 bits of are
@@ -109,16 +142,25 @@ union Fwmark {
   // The raw memory representation of this fwmark as a uint32_t.
   uint32_t fwmark;
 
-  // Returns a String representation of this Fwmark. This should
-  std::string ToString() const {
-    return base::StringPrintf("0x%04x%02x%02x", rt_table_id, policy, legacy);
-  }
+  // Returns a String representation of this Fwmark.
+  std::string ToString() const { return base::StringPrintf("0x%08x", Value()); }
 
   // Returns the logical uint32_t value of this Fwmark.
-  uint32_t Value() const { return rt_table_id << 16 | policy << 8 | legacy; }
+  constexpr uint32_t Value() const {
+    return static_cast<uint32_t>(rt_table_id) << 16 |
+           static_cast<uint32_t>(policy) << 8 |
+           static_cast<uint32_t>(qos_category) << 5 |
+           static_cast<uint32_t>(legacy);
+  }
 
   constexpr TrafficSource Source() {
     return static_cast<TrafficSource>(policy & 0x3f);
+  }
+
+  // Note: naming it as QoSCategory() will hide the definition of the enum,
+  // which incurs a compile error.
+  constexpr QoSCategory GetQoSCategory() {
+    return static_cast<QoSCategory>(qos_category);
   }
 
   constexpr bool operator==(Fwmark that) const { return fwmark == that.fwmark; }
@@ -133,16 +175,29 @@ union Fwmark {
 
   constexpr Fwmark operator~() const { return {.fwmark = ~fwmark}; }
 
-  static Fwmark FromSource(TrafficSource source) {
-    return {
-        .policy = static_cast<uint8_t>(source), .legacy = 0, .rt_table_id = 0};
+  static constexpr Fwmark FromSource(TrafficSource source) {
+    return {.legacy = 0,
+            .qos_category = 0,
+            .policy = static_cast<uint8_t>(source),
+            .rt_table_id = 0};
   }
 
-  static Fwmark FromIfIndex(uint32_t ifindex) {
-    uint32_t table_id = ifindex + kInterfaceTableIdIncrement;
-    return {.policy = 0,
-            .legacy = 0,
-            .rt_table_id = static_cast<uint16_t>(table_id)};
+  static constexpr std::optional<Fwmark> FromIfIndex(int ifindex) {
+    int table_id = ifindex + kInterfaceTableIdIncrement;
+    if (ifindex < 0 || table_id > INT16_MAX) {
+      return std::nullopt;
+    }
+    return {{.legacy = 0,
+             .qos_category = 0,
+             .policy = 0,
+             .rt_table_id = static_cast<uint16_t>(table_id)}};
+  }
+
+  static constexpr Fwmark FromQoSCategory(QoSCategory category) {
+    return {.legacy = 0,
+            .qos_category = base::to_underlying(category),
+            .policy = 0,
+            .rt_table_id = 0};
   }
 };
 
@@ -176,7 +231,7 @@ constexpr char kUidKerberosdExec[] = "kerberosd-exec";
 // to sync time immediately after boot on the sign-in screen when no VPN can
 // be active.
 constexpr char kUidTlsdate[] = "tlsdate";
-// Plugin vm problem report utility (b/160916677)
+// Parallels VM problem report utility (b/160916677)
 constexpr char kUidPluginvm[] = "pluginvm";
 // smbfs SMB filesystem daemon
 constexpr char kUidFuseSmbfs[] = "fuse-smbfs";
@@ -188,37 +243,32 @@ constexpr char kUidFuseSmbfs[] = "fuse-smbfs";
 // source (or 0 if none is defined), and 4) if the traffic originated from that
 // source should be routed through VPN connections by default or not.
 constexpr std::array<LocalSourceSpecs, 10> kLocalSourceTypes{{
-    {TrafficSource::CHROME, kUidChronos, 0, true},
-    {TrafficSource::USER, kUidDebugd, 0, true},
-    {TrafficSource::USER, kUidCups, 0, true},
-    {TrafficSource::USER, kUidLpadmin, 0, true},
-    {TrafficSource::SYSTEM, kUidKerberosd, 0, true},
-    {TrafficSource::SYSTEM, kUidKerberosdExec, 0, true},
-    {TrafficSource::SYSTEM, kUidTlsdate, 0, true},
-    {TrafficSource::USER, kUidPluginvm, 0, true},
-    {TrafficSource::SYSTEM, kUidFuseSmbfs, 0, true},
+    {TrafficSource::kChrome, kUidChronos, 0, true},
+    {TrafficSource::kUser, kUidDebugd, 0, true},
+    {TrafficSource::kUser, kUidCups, 0, true},
+    {TrafficSource::kUser, kUidLpadmin, 0, true},
+    {TrafficSource::kSystem, kUidKerberosd, 0, true},
+    {TrafficSource::kSystem, kUidKerberosdExec, 0, true},
+    {TrafficSource::kSystem, kUidTlsdate, 0, true},
+    {TrafficSource::kUser, kUidPluginvm, 0, true},
+    {TrafficSource::kSystem, kUidFuseSmbfs, 0, true},
     // The classid value for update engine must stay in sync with
     // src/aosp/system/update_engine/init/update-engine.conf.
-    {TrafficSource::UPDATE_ENGINE, "", 0x10001, false},
+    {TrafficSource::kUpdateEngine, "", 0x10001, false},
 }};
 
 // All local sources
 constexpr std::array<TrafficSource, 5> kLocalSources{
-    {CHROME, USER, UPDATE_ENGINE, SYSTEM, HOST_VPN}};
+    {kChrome, kUser, kUpdateEngine, kSystem, kHostVpn}};
 
 // All forwarded sources
 constexpr std::array<TrafficSource, 5> kForwardedSources{
-    {ARC, CROSVM, PLUGINVM, TETHER_DOWNSTREAM, ARC_VPN}};
+    {kArc, kCrosVM, kParallelsVM, kTetherDownstream, kArcVpn}};
 
 // All sources
 constexpr std::array<TrafficSource, 10> kAllSources{
-    {CHROME, USER, UPDATE_ENGINE, SYSTEM, HOST_VPN, ARC, CROSVM, PLUGINVM,
-     TETHER_DOWNSTREAM, ARC_VPN}};
-
-// iptables type keywords for neighbor discovery packets
-constexpr std::array<char[32], 4> kNeighborDiscoveryTypes{
-    {"router-solicitation", "router-advertisement", "neighbour-solicitation",
-     "neighbour-advertisement"}};
+    {kChrome, kUser, kUpdateEngine, kSystem, kHostVpn, kArc, kCrosVM,
+     kParallelsVM, kTetherDownstream, kArcVpn}};
 
 // Constant fwmark value for tagging traffic with the "route-on-vpn" intent.
 constexpr const Fwmark kFwmarkRouteOnVpn = {.policy = 0x80};
@@ -237,6 +287,8 @@ constexpr const Fwmark kFwmarkPolicyMask = {.policy = 0xff};
 // Both the mask and fwmark values for legacy SNAT rules used for ARC and other
 // containers.
 constexpr const Fwmark kFwmarkLegacySNAT = {.legacy = 0x1};
+// Constant fmwark value for mask for the QoS category bits.
+constexpr const Fwmark kFwmarkQoSCategoryMask = {.qos_category = 0x7};
 
 // Service implementing routing features of patchpanel.
 // TODO(hugobenichi) Explain how this coordinates with shill's RoutingTable.

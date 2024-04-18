@@ -1,4 +1,4 @@
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -132,6 +132,16 @@ dbus_property() {
 
   dbus_call "${dest}" "${object}" org.freedesktop.DBus.Properties.Get \
     "string:${interface}" "string:${property}"
+}
+
+# Invokes a DBus introspect on a DBus object using gdbus.
+gdbus_introspect() {
+  local dest="$1"
+  local object="$2"
+  shift 2
+
+  gdbus introspect --system --dest="${dest}" -o "${object}"  --recurse \
+    --only-properties "$@"
 }
 
 # Gets all DBus properties of an interface of a DBus object.

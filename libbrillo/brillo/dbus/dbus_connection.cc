@@ -1,10 +1,14 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <brillo/dbus/dbus_connection.h>
 
 #include <base/logging.h>
+
+namespace {
+constexpr base::TimeDelta kDbusConnectWaitTime = base::Milliseconds(100);
+}  // namespace
 
 namespace brillo {
 
@@ -36,10 +40,10 @@ scoped_refptr<dbus::Bus> DBusConnection::ConnectWithTimeout(
       bus_ = bus;
       return bus_;
     }
-    LOG(WARNING) << "Failed to get system bus.";
-    // Wait 1 second to prevent trashing the device while waiting for the
-    // dbus-daemon to start.
-    sleep(1);
+    // Wait a bit to prevent trashing the device while waiting for the
+    // dbus-daemon to start. Balance this with making sure we don't wait too
+    // long and introduce unnecessary latency to the caller.
+    base::PlatformThread::Sleep(kDbusConnectWaitTime);
   } while (base::TimeTicks::Now() < deadline);
 
   LOG(ERROR) << "Failed to get system bus after " << timeout.InSeconds()

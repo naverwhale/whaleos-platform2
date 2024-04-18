@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "modemfwd/modem.h"
@@ -24,10 +23,18 @@ class MockModem : public Modem {
   MOCK_METHOD(std::string, GetDeviceId, (), (const, override));
   MOCK_METHOD(std::string, GetEquipmentId, (), (const, override));
   MOCK_METHOD(std::string, GetCarrierId, (), (const, override));
+  MOCK_METHOD(std::string, GetPrimaryPort, (), (const, override));
+  MOCK_METHOD(int, GetHeartbeatFailures, (), (const, override));
+  MOCK_METHOD(void, ResetHeartbeatFailures, (), (override));
+  MOCK_METHOD(void, IncrementHeartbeatFailures, (), (override));
   MOCK_METHOD(std::string, GetMainFirmwareVersion, (), (const, override));
   MOCK_METHOD(std::string, GetOemFirmwareVersion, (), (const, override));
   MOCK_METHOD(std::string, GetCarrierFirmwareId, (), (const, override));
   MOCK_METHOD(std::string, GetCarrierFirmwareVersion, (), (const, override));
+  MOCK_METHOD(std::string,
+              GetAssocFirmwareVersion,
+              (std::string),
+              (const, override));
 
   MOCK_METHOD(bool, SetInhibited, (bool), (override));
 

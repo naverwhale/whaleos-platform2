@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,15 +14,14 @@
 
 #include <curl/curl.h>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/strings/stringprintf.h>
 #include <base/task/single_thread_task_executor.h>
 #include <base/test/test_mock_time_task_runner.h>
 #include <brillo/message_loops/base_message_loop.h>
-#include <chromeos/patchpanel/net_util.h>
 #include <chromeos/patchpanel/socket.h>
 #include <chromeos/patchpanel/socket_forwarder.h>
 
@@ -142,8 +141,7 @@ TEST_F(ProxyConnectJobTest, SlowlorisTimeout) {
   task_runner->RunUntilIdle();
 
   EXPECT_EQ(1, task_runner->GetPendingTaskCount());
-  constexpr base::TimeDelta kDoubleWaitClientConnectTimeout =
-      base::TimeDelta::FromSeconds(4);
+  constexpr base::TimeDelta kDoubleWaitClientConnectTimeout = base::Seconds(4);
   // Move the time ahead so that the client connection timeout callback is
   // triggered.
   task_runner->FastForwardBy(kDoubleWaitClientConnectTimeout);

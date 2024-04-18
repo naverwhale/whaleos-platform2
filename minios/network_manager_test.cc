@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,6 @@
 #include "minios/mock_network_manager.h"
 #include "minios/mock_shill_proxy.h"
 #include "minios/network_manager.h"
-#include "minios/shill_utils.h"
 
 using ::testing::_;
 using ::testing::ElementsAre;
@@ -48,7 +47,7 @@ class NetworkManagerTest : public ::testing::Test {
 
 TEST_F(NetworkManagerTest, Connect) {
   EXPECT_CALL(*mock_shill_proxy_ptr_,
-              ManagerRequestScan(WifiTechnologyType::WIFI, _, _));
+              ManagerRequestScan(shill::kTypeWifi, _, _));
   network_manager_->Connect("ssid-foo", "passphrase");
 
   // It's okay to request the same SSID for connection, a no-op.
@@ -59,7 +58,7 @@ TEST_F(NetworkManagerTest, Connect) {
 
   // Connecting to a different SSID should be successful.
   EXPECT_CALL(*mock_shill_proxy_ptr_,
-              ManagerRequestScan(WifiTechnologyType::WIFI, _, _));
+              ManagerRequestScan(shill::kTypeWifi, _, _));
   network_manager_->Connect("ssid-bar", "passphrase");
 }
 
@@ -67,11 +66,11 @@ TEST_F(NetworkManagerTest, Connect_RequestScanSuccess_NoPassphrase) {
   network_manager_->connect_map_["ssid"] = NetworkManager::ConnectField();
   auto iter_no_passphrase = network_manager_->connect_map_.begin();
   const brillo::VariantDictionary properties = {
-      {shill::kModeProperty, brillo::Any(ToString(WifiStationType::MANAGED))},
+      {shill::kModeProperty, brillo::Any(std::string(shill::kModeManaged))},
       {shill::kNameProperty, brillo::Any(iter_no_passphrase->first)},
       {shill::kSecurityClassProperty,
-       brillo::Any(ToString(WifiSecurityType::NONE))},
-      {shill::kTypeProperty, brillo::Any(ToString(WifiTechnologyType::WIFI))},
+       brillo::Any(std::string(shill::kSecurityClassNone))},
+      {shill::kTypeProperty, brillo::Any(std::string(shill::kTypeWifi))},
   };
   EXPECT_CALL(*mock_shill_proxy_ptr_,
               ManagerFindMatchingService(properties, _, _));
@@ -83,11 +82,11 @@ TEST_F(NetworkManagerTest, Connect_RequestScanSuccess_Passphrase) {
       NetworkManager::ConnectField{.passphrase = "passphrase"};
   auto iter_passphrase = network_manager_->connect_map_.begin();
   const brillo::VariantDictionary properties = {
-      {shill::kModeProperty, brillo::Any(ToString(WifiStationType::MANAGED))},
+      {shill::kModeProperty, brillo::Any(std::string(shill::kModeManaged))},
       {shill::kNameProperty, brillo::Any(iter_passphrase->first)},
       {shill::kSecurityClassProperty,
-       brillo::Any(ToString(WifiSecurityType::PSK))},
-      {shill::kTypeProperty, brillo::Any(ToString(WifiTechnologyType::WIFI))},
+       brillo::Any(std::string(shill::kSecurityClassPsk))},
+      {shill::kTypeProperty, brillo::Any(std::string(shill::kTypeWifi))},
   };
   EXPECT_CALL(*mock_shill_proxy_ptr_,
               ManagerFindMatchingService(properties, _, _));
@@ -157,7 +156,7 @@ TEST_F(NetworkManagerTest,
 
   EXPECT_CALL(*mock_shill_proxy_ptr_,
               ServiceConnect(iter->second.service_path, _, _));
-  clock_.Advance(base::TimeDelta::FromSeconds(1));
+  clock_.Advance(base::Seconds(1));
   loop_.RunOnce(false);
 }
 
@@ -227,15 +226,15 @@ TEST_F(NetworkManagerTest,
 
   EXPECT_CALL(*mock_shill_proxy_ptr_,
               ServiceGetProperties(iter->second.service_path, _, _));
-  clock_.Advance(base::TimeDelta::FromSeconds(
-      NetworkManager::kCheckConnectionRetryMsDelay * 2));
+  clock_.Advance(
+      base::Seconds(NetworkManager::kCheckConnectionRetryMsDelay * 2));
   loop_.RunOnce(false);
 }
 
 TEST_F(NetworkManagerTest, GetNetworks) {
   EXPECT_TRUE(network_manager_->get_networks_list_.empty());
   EXPECT_CALL(*mock_shill_proxy_ptr_,
-              ManagerRequestScan(WifiTechnologyType::WIFI, _, _));
+              ManagerRequestScan(shill::kTypeWifi, _, _));
   network_manager_->GetNetworks();
   EXPECT_EQ(network_manager_->get_networks_list_.size(), 1);
 
@@ -263,13 +262,28 @@ TEST_F(NetworkManagerTest, GetGlobalPropertiesSuccess_MultipleServices) {
   EXPECT_EQ(iter->service_paths.size(), 1);
 }
 
-TEST_F(NetworkManagerTest, GetGlobalPropertiesSuccess_EmptyServices) {
+TEST_F(NetworkManagerTest,
+       GetGlobalPropertiesSuccess_EmptyServices_DoneRetries) {
   auto iter = network_manager_->get_networks_list_.insert(
       network_manager_->get_networks_list_.begin(),
       NetworkManager::GetNetworksField());
+  network_manager_->num_scan_retries_ = 0;
   EXPECT_CALL(mock_network_manager_observer_,
-              OnGetNetworks(testing::_, IsNull()));
+              OnGetNetworks(testing::_, NotNull()));
   network_manager_->GetGlobalPropertiesSuccess(iter, {});
+}
+
+TEST_F(NetworkManagerTest, GetGlobalPropertiesSuccess_EmptyServices_Retry) {
+  auto iter = network_manager_->get_networks_list_.insert(
+      network_manager_->get_networks_list_.begin(),
+      NetworkManager::GetNetworksField());
+  network_manager_->num_scan_retries_ = 1;
+  EXPECT_CALL(*mock_shill_proxy_ptr_,
+              ManagerRequestScan(shill::kTypeWifi, _, _));
+  network_manager_->GetGlobalPropertiesSuccess(iter, {});
+  clock_.Advance(NetworkManager::kScanRetryMsDelay * 2);
+  loop_.RunOnce(false);
+  EXPECT_EQ(network_manager_->num_scan_retries_, 0);
 }
 
 TEST_F(NetworkManagerTest, IterateOverServicePropertiesSuccess_EmptyServices) {

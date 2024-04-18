@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 
 #include "shill/adaptor_interfaces.h"
 #include "shill/error.h"
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 
@@ -113,7 +113,7 @@ class ManagerMockAdaptor : public ManagerAdaptorInterface {
 
   MOCK_METHOD(void,
               RegisterAsync,
-              (const base::Callback<void(bool)>&),
+              (base::OnceCallback<void(bool)>),
               (override));
   MOCK_METHOD(void, EmitBoolChanged, (const std::string&, bool), (override));
   MOCK_METHOD(void,
@@ -213,6 +213,11 @@ class ServiceMockAdaptor : public ServiceAdaptorInterface {
               EmitUintChanged,
               (const std::string&, uint32_t),
               (override));
+  MOCK_METHOD(void,
+              EmitUint64Changed,
+              (const std::string&, uint64_t),
+              (override));
+
   MOCK_METHOD(void, EmitIntChanged, (const std::string&, int), (override));
   MOCK_METHOD(void,
               EmitRpcIdentifierChanged,
@@ -225,6 +230,10 @@ class ServiceMockAdaptor : public ServiceAdaptorInterface {
   MOCK_METHOD(void,
               EmitStringmapChanged,
               (const std::string&, const Stringmap&),
+              (override));
+  MOCK_METHOD(void,
+              EmitStringmapsChanged,
+              (const std::string&, const Stringmaps&),
               (override));
 
  private:

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,13 @@
 
 #include "arc/setup/arc_setup.h"
 
+#include <iterator>
 #include <set>
 
 #include <base/command_line.h>
 #include <base/environment.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/macros.h>
-#include <base/stl_util.h>
 #include <gtest/gtest.h>
 
 #include "arc/setup/arc_setup_util.h"
@@ -47,14 +46,9 @@ class MockArcMounter : public ArcMounter {
 
   bool LoopMount(const std::string& source,
                  const base::FilePath& target,
+                 LoopMountFilesystemType filesystem_type,
                  unsigned long mount_flags) override {  // NOLINT(runtime/int)
     loop_mount_points_.insert(target.value());
-    return true;
-  }
-
-  bool BindMountWithNoPathResolution(const base::FilePath& old_path,
-                                     const base::FilePath& new_path) override {
-    mount_points_.insert(new_path.value());
     return true;
   }
 
@@ -114,8 +108,10 @@ TEST(ArcSetup, TestMockArcMounter) {
   EXPECT_FALSE(mounter.Umount(base::FilePath("/b")));  // now /b is unknown
 
   // Do the same for loop.
-  EXPECT_TRUE(mounter.LoopMount("/a.img", base::FilePath("/d"), 0U));
-  EXPECT_TRUE(mounter.LoopMount("/c.img", base::FilePath("/d"), 0U));
+  EXPECT_TRUE(mounter.LoopMount("/a.img", base::FilePath("/d"),
+                                LoopMountFilesystemType::kSquashFS, 0U));
+  EXPECT_TRUE(mounter.LoopMount("/c.img", base::FilePath("/d"),
+                                LoopMountFilesystemType::kExt4, 0U));
   EXPECT_EQ(2U, mounter.loop_mount_points_.size());
   EXPECT_FALSE(mounter.LoopUmount(base::FilePath("/x")));  // unknown path
   EXPECT_TRUE(mounter.LoopUmount(base::FilePath("/d")));
@@ -128,7 +124,7 @@ TEST(ArcSetup, TestMockArcMounter) {
 // Tests --mode=onetime-setup and --mode=onetime-stop.
 TEST(ArcSetup, TestOnetimeSetupStop) {
   const char* argv[] = {"test", "--mode=onetime-setup"};
-  base::CommandLine::ForCurrentProcess()->InitFromArgv(base::size(argv), argv);
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(std::size(argv), argv);
   std::unique_ptr<base::Environment> env(base::Environment::Create());
 
   // ArcSetup needs some config variables.

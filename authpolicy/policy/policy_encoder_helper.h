@@ -1,14 +1,15 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef AUTHPOLICY_POLICY_POLICY_ENCODER_HELPER_H_
 #define AUTHPOLICY_POLICY_POLICY_ENCODER_HELPER_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/values.h>
 
 #include <components/policy/core/common/policy_types.h>
@@ -73,13 +74,7 @@ bool LoadPRegFilesIntoDict(const std::vector<base::FilePath>& preg_files,
 // Similar to base::Value::GetAsBoolean(), but in addition it converts int
 // values of 0 or 1 to bool. Returns true on success and stores the output in
 // bool_value.
-bool GetAsBoolean(const base::Value* value, bool* bool_value);
-
-// Same as base::Value::GetAsInteger(), no type conversion (yet).
-bool GetAsInteger(const base::Value* value, int* int_value);
-
-// Same as base::Value::GetAsString(), no type conversion (yet).
-bool GetAsString(const base::Value* value, std::string* string_value);
+std::optional<bool> GetAsBoolean(const base::Value* value, bool* bool_value);
 
 // Prints an error log. Used if value cannot be converted to a target type.
 void PrintConversionError(const base::Value* value,
@@ -104,12 +99,12 @@ void SetPolicyOptions(enterprise_management::PolicyOptions* options,
                       PolicyLevel level);
 
 // Boolean policies.
-base::Optional<bool> EncodeBooleanPolicy(const char* policy_name,
-                                         PolicyValueCallback get_policy_value,
-                                         bool log_policy_value);
+std::optional<bool> EncodeBooleanPolicy(const char* policy_name,
+                                        PolicyValueCallback get_policy_value,
+                                        bool log_policy_value);
 
 // Integer in range policies.
-base::Optional<int> EncodeIntegerInRangePolicy(
+std::optional<int> EncodeIntegerInRangePolicy(
     const char* policy_name,
     PolicyValueCallback get_policy_value,
     int range_min,
@@ -117,7 +112,7 @@ base::Optional<int> EncodeIntegerInRangePolicy(
     bool log_policy_value);
 
 // String policies.
-base::Optional<std::string> EncodeStringPolicy(
+std::optional<std::string> EncodeStringPolicy(
     const char* policy_name,
     PolicyValueCallback get_policy_value,
     bool log_policy_value);
@@ -125,7 +120,7 @@ base::Optional<std::string> EncodeStringPolicy(
 // String list policies are a little different. Unlike the basic types they
 // are not stored as registry value, but as registry key with values 1, 2, ...
 // for the entries.
-base::Optional<std::vector<std::string>> EncodeStringListPolicy(
+std::optional<std::vector<std::string>> EncodeStringListPolicy(
     const char* policy_name,
     PolicyValueCallback get_policy_value,
     bool log_policy_value);

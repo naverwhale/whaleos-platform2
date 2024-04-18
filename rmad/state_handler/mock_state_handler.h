@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,17 +13,22 @@ namespace rmad {
 
 class MockStateHandler : public BaseStateHandler {
  public:
-  explicit MockStateHandler(scoped_refptr<JsonStore> json_store)
-      : BaseStateHandler(json_store) {}
+  explicit MockStateHandler(scoped_refptr<JsonStore> json_store,
+                            scoped_refptr<DaemonCallback> daemon_callback)
+      : BaseStateHandler(json_store, daemon_callback) {}
 
   MOCK_METHOD(RmadState::StateCase, GetStateCase, (), (const, override));
-  MOCK_METHOD(const RmadState&, GetState, (), (const, override));
+  MOCK_METHOD(const RmadState&, GetState, (bool), (const, override));
   MOCK_METHOD(bool, IsRepeatable, (), (const, override));
   MOCK_METHOD(RmadErrorCode, InitializeState, (), (override));
   MOCK_METHOD(void, CleanUpState, (), (override));
   MOCK_METHOD(BaseStateHandler::GetNextStateCaseReply,
               GetNextStateCase,
               (const RmadState&),
+              (override));
+  MOCK_METHOD(BaseStateHandler::GetNextStateCaseReply,
+              TryGetNextStateCaseAtBoot,
+              (),
               (override));
 
  protected:

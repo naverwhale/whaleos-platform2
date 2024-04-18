@@ -1,10 +1,12 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "hwsec-test-utils/fake_pca_agent/issue_certificate.h"
 
 #include <openssl/x509.h>
+
+#include <optional>
 
 #include <base/logging.h>
 
@@ -105,7 +107,7 @@ crypto::ScopedX509 IssueTestCertificate(const crypto::ScopedEVP_PKEY& subject) {
   return x509;
 }
 
-base::Optional<std::string> IssueTestCertificateDer(
+std::optional<std::string> IssueTestCertificateDer(
     const crypto::ScopedEVP_PKEY& subject) {
   crypto::ScopedX509 x509 = IssueTestCertificate(subject);
   if (!x509) {

@@ -1,6 +1,9 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 access: 1
 arch_prctl: 1
@@ -15,6 +18,7 @@ exit_group: 1
 fchdir: 1
 fcntl: 1
 fstat: 1
+fstatfs: 1
 getdents: 1
 getdents64: 1
 geteuid: 1
@@ -32,6 +36,7 @@ newfstatat: 1
 openat: 1
 pipe2: 1
 pipe: 1
+pread64: 1
 prlimit64: 1
 read: 1
 restart_syscall: 1

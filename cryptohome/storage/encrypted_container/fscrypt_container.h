@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@
 
 #include "cryptohome/platform.h"
 #include "cryptohome/storage/encrypted_container/filesystem_key.h"
+#include "cryptohome/storage/keyring/keyring.h"
 
 namespace cryptohome {
 
@@ -21,22 +22,29 @@ class FscryptContainer : public EncryptedContainer {
   FscryptContainer(const base::FilePath& backing_dir,
                    const FileSystemKeyReference& key_reference,
                    bool allow_v2,
-                   Platform* platform);
+                   Platform* platform,
+                   Keyring* keyring);
   ~FscryptContainer() = default;
 
-  bool Setup(const FileSystemKey& encryption_key, bool create) override;
+  bool Setup(const FileSystemKey& encryption_key) override;
   bool Teardown() override;
   bool Exists() override;
+  bool Reset() override;
   bool Purge() override;
-  EncryptedContainerType GetType() override {
+  EncryptedContainerType GetType() const override {
     return EncryptedContainerType::kFscrypt;
   }
+  base::FilePath GetBackingLocation() const override;
 
  private:
+  // Deduces whether V1 or V2 policy should be used.
+  bool UseV2();
+
   const base::FilePath backing_dir_;
-  dircrypto::KeyReference key_reference_;
+  FileSystemKeyReference key_reference_;
   bool allow_v2_;
   Platform* platform_;
+  Keyring* keyring_;
 };
 
 }  // namespace cryptohome

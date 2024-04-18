@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,10 +17,12 @@
 #ifndef CRASH_REPORTER_ANOMALY_DETECTOR_H_
 #define CRASH_REPORTER_ANOMALY_DETECTOR_H_
 
-#include <base/optional.h>
 #include <base/time/time.h>
 #include <dbus/bus.h>
+#include <metrics/metrics_library.h>
 
+#include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <vector>
@@ -39,9 +41,9 @@ struct CrashReport {
 bool operator==(const CrashReport& lhs, const CrashReport& rhs);
 std::ostream& operator<<(std::ostream& out, const CrashReport& cr);
 
-using MaybeCrashReport = base::Optional<CrashReport>;
+using MaybeCrashReport = std::optional<CrashReport>;
 
-constexpr size_t HASH_BITMAP_SIZE(1 << 15);
+inline constexpr size_t HASH_BITMAP_SIZE(1 << 15);
 
 class Parser {
  public:
@@ -112,6 +114,13 @@ class KernelParser : public Parser {
     None,
     Start,
   };
+  enum class Ath11kLineType {
+    // The following enum values are used to parse the Ath11k error. The None
+    // value means that there is no error detected in the log. The Start value
+    // means that the first line of the dump was found.
+    None,
+    Start,
+  };
   const bool testonly_send_all_;
 
   LineType last_line_ = LineType::None;
@@ -119,8 +128,11 @@ class KernelParser : public Parser {
   std::string iwlwifi_text_;
   Ath10kLineType ath10k_last_line_ = Ath10kLineType::None;
   std::string ath10k_text_;
+  Ath11kLineType ath11k_last_line_ = Ath11kLineType::None;
+  std::string ath11k_text_;
   std::string text_;
   std::string flag_;
+  int ah11k_line_counter_ = 0;
 
   // Timestamp of last time crash_reporter failed.
   base::TimeTicks crash_reporter_last_crashed_ = base::TimeTicks();
@@ -141,21 +153,57 @@ class SuspendParser : public Parser {
 
 class TerminaParser {
  public:
-  explicit TerminaParser(scoped_refptr<dbus::Bus> dbus);
-  MaybeCrashReport ParseLogEntry(int cid, const std::string& line);
+  explicit TerminaParser(scoped_refptr<dbus::Bus> dbus,
+                         std::unique_ptr<MetricsLibraryInterface> metrics_lib,
+                         bool testonly_send_all);
+  MaybeCrashReport ParseLogEntryForBtrfs(int cid, const std::string& line);
+  MaybeCrashReport ParseLogEntryForOom(int cid, const std::string& line);
 
  private:
   scoped_refptr<dbus::Bus> dbus_;
+  std::unique_ptr<MetricsLibraryInterface> metrics_lib_;
+  const bool testonly_send_all_;
 };
 
 class CryptohomeParser : public Parser {
  public:
+  explicit CryptohomeParser(bool testonly_send_all);
   MaybeCrashReport ParseLogEntry(const std::string& line) override;
+
+ private:
+  bool testonly_send_all_;
 };
 
 class TcsdParser : public Parser {
  public:
   MaybeCrashReport ParseLogEntry(const std::string& line) override;
+};
+
+class ShillParser : public Parser {
+ public:
+  explicit ShillParser(bool testonly_send_all);
+  MaybeCrashReport ParseLogEntry(const std::string& line) override;
+
+ private:
+  const bool testonly_send_all_;
+};
+
+class HermesParser : public Parser {
+ public:
+  explicit HermesParser(bool testonly_send_all);
+  MaybeCrashReport ParseLogEntry(const std::string& line) override;
+
+ private:
+  const bool testonly_send_all_;
+};
+
+class ModemfwdParser : public Parser {
+ public:
+  explicit ModemfwdParser(bool testonly_send_all);
+  MaybeCrashReport ParseLogEntry(const std::string& line) override;
+
+ private:
+  const bool testonly_send_all_;
 };
 
 }  // namespace anomaly

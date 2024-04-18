@@ -1,12 +1,12 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/common/activity_logger.h"
 
 #include <base/check.h>
-#include <base/macros.h>
 #include <base/memory/ptr_util.h>
+#include <base/test/task_environment.h>
 #include <gtest/gtest.h>
 
 #include "power_manager/common/clock.h"
@@ -19,15 +19,15 @@ class ActivityLoggerTest : public testing::Test {
   ActivityLoggerTest(const ActivityLoggerTest&) = delete;
   ActivityLoggerTest& operator=(const ActivityLoggerTest&) = delete;
 
-  ~ActivityLoggerTest() override {}
+  ~ActivityLoggerTest() override = default;
 
   // Initialize |logger| for testing. Ownership remains with the caller.
   void Init(BaseActivityLogger* logger) {
     logger_ = logger;
     logger_->clock_for_test()->set_current_time_for_testing(
-        base::TimeTicks::FromInternalValue(100));  // Arbitrary.
-    logger_->SetLogCallbackForTest(
-        base::Bind(&ActivityLoggerTest::SaveMessage, base::Unretained(this)));
+        base::TimeTicks() + base::Microseconds(100));  // Arbitrary.
+    logger_->SetLogCallbackForTest(base::BindRepeating(
+        &ActivityLoggerTest::SaveMessage, base::Unretained(this)));
   }
 
   void AdvanceTime(base::TimeDelta delta) {
@@ -43,6 +43,10 @@ class ActivityLoggerTest : public testing::Test {
   }
 
  protected:
+  base::test::SingleThreadTaskEnvironment task_environment_{
+      base::test::TaskEnvironment::MainThreadType::IO,
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+
   const std::string kName;
 
   BaseActivityLogger* logger_;  // Not owned.
@@ -77,7 +81,7 @@ TEST_F(ActivityLoggerTest, StartStopNoDelay) {
 }
 
 TEST_F(ActivityLoggerTest, StartStopWithDelay) {
-  const base::TimeDelta kStoppedDelay = base::TimeDelta::FromSeconds(5);
+  const base::TimeDelta kStoppedDelay = base::Seconds(5);
   StartStopActivityLogger logger(kName, kStoppedDelay, base::TimeDelta());
   Init(&logger);
   EXPECT_EQ("", PopMessage());
@@ -112,8 +116,8 @@ TEST_F(ActivityLoggerTest, StartStopWithDelay) {
 }
 
 TEST_F(ActivityLoggerTest, StartStopWithOngoing) {
-  const base::TimeDelta kStoppedDelay = base::TimeDelta::FromSeconds(5);
-  const base::TimeDelta kOngoingDelay = base::TimeDelta::FromSeconds(30);
+  const base::TimeDelta kStoppedDelay = base::Seconds(5);
+  const base::TimeDelta kOngoingDelay = base::Seconds(30);
   StartStopActivityLogger logger(kName, kStoppedDelay, kOngoingDelay);
   Init(&logger);
   EXPECT_EQ("", PopMessage());
@@ -163,7 +167,7 @@ TEST_F(ActivityLoggerTest, StartStopDuplicateStop) {
 }
 
 TEST_F(ActivityLoggerTest, PeriodicNoOngoing) {
-  const base::TimeDelta kStoppedDelay = base::TimeDelta::FromSeconds(10);
+  const base::TimeDelta kStoppedDelay = base::Seconds(10);
   PeriodicActivityLogger logger(kName, kStoppedDelay, base::TimeDelta());
   Init(&logger);
   EXPECT_EQ("", PopMessage());
@@ -187,8 +191,8 @@ TEST_F(ActivityLoggerTest, PeriodicNoOngoing) {
 }
 
 TEST_F(ActivityLoggerTest, PeriodicWithOngoing) {
-  const base::TimeDelta kStoppedDelay = base::TimeDelta::FromSeconds(20);
-  const base::TimeDelta kOngoingDelay = base::TimeDelta::FromSeconds(25);
+  const base::TimeDelta kStoppedDelay = base::Seconds(20);
+  const base::TimeDelta kOngoingDelay = base::Seconds(25);
   PeriodicActivityLogger logger(kName, kStoppedDelay, kOngoingDelay);
   Init(&logger);
   EXPECT_EQ("", PopMessage());
@@ -199,25 +203,25 @@ TEST_F(ActivityLoggerTest, PeriodicWithOngoing) {
   EXPECT_EQ(kOngoingDelay, logger.GetOngoingTimerDelayForTest());
 
   // Send a second report after 15 seconds to keep the activity going.
-  AdvanceTime(base::TimeDelta::FromSeconds(15));
+  AdvanceTime(base::Seconds(15));
   logger.OnActivityReported();
   EXPECT_EQ("", PopMessage());
 
   // Advance the clock the remaining 10 seconds to the ongoing interval.
-  AdvanceTime(base::TimeDelta::FromSeconds(10));
+  AdvanceTime(base::Seconds(10));
   ASSERT_TRUE(logger.TriggerOngoingTimerForTest());
   EXPECT_EQ(kName + " ongoing; last reported 10 sec ago", PopMessage());
 
   // Now let the "stopped" timer fire 10 seconds later and check that the
   // "ongoing" timer is also stopped.
-  AdvanceTime(base::TimeDelta::FromSeconds(10));
+  AdvanceTime(base::Seconds(10));
   ASSERT_TRUE(logger.TriggerStoppedTimerForTest());
   EXPECT_EQ(kName + " stopped; last reported 20 sec ago", PopMessage());
   EXPECT_EQ(base::TimeDelta(), logger.GetOngoingTimerDelayForTest());
 }
 
 TEST_F(ActivityLoggerTest, OngoingState) {
-  const base::TimeDelta kOngoingDelay = base::TimeDelta::FromSeconds(10);
+  const base::TimeDelta kOngoingDelay = base::Seconds(10);
   OngoingStateActivityLogger logger(kOngoingDelay);
   Init(&logger);
   EXPECT_EQ("", PopMessage());

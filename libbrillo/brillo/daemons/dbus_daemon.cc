@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,16 @@
 
 #include <sysexits.h>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <brillo/dbus/async_event_sequencer.h>
 #include <brillo/dbus/exported_object_manager.h>
 
 using brillo::dbus_utils::AsyncEventSequencer;
 using brillo::dbus_utils::ExportedObjectManager;
+
+namespace {
+constexpr base::TimeDelta kDbusConnectTimeout = base::Seconds(10);
+}  // namespace
 
 namespace brillo {
 
@@ -23,7 +27,7 @@ int DBusDaemon::OnInit() {
   if (exit_code != EX_OK)
     return exit_code;
 
-  bus_ = dbus_connection_.Connect();
+  bus_ = dbus_connection_.ConnectWithTimeout(kDbusConnectTimeout);
   CHECK(bus_);
 
   return exit_code;
@@ -55,8 +59,8 @@ int DBusServiceDaemon::OnInit() {
         sequencer->GetHandler("ObjectManager.RegisterAsync() failed.", true));
   }
   RegisterDBusObjectsAsync(sequencer.get());
-  sequencer->OnAllTasksCompletedCall({base::Bind(
-      &DBusServiceDaemon::TakeServiceOwnership, base::Unretained(this))});
+  sequencer->OnAllTasksCompletedCall(base::BindOnce(
+      &DBusServiceDaemon::TakeServiceOwnership, base::Unretained(this)));
   return EX_OK;
 }
 

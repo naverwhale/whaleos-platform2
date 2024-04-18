@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Chromium OS Authors. All rights reserved.
+ * Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,18 +9,19 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/numerics/safe_conversions.h>
-#include <base/optional.h>
 #include <camera/camera_metadata.h>
 #include <sync/sync.h>
 #include <system/camera_metadata.h>
 
+#include "common/camera_hal3_helpers.h"
 #include "cros-camera/camera_metadata_utils.h"
 #include "cros-camera/common.h"
 #include "cros-camera/constants.h"
@@ -99,7 +100,8 @@ ZslBuffer::ZslBuffer(uint32_t frame_number, camera3_stream_buffer_t buffer)
       selected(false) {}
 
 void ZslBuffer::AttachToRequest(Camera3CaptureDescriptor* capture_request) {
-  capture_request->AppendOutputBuffer(buffer);
+  capture_request->AppendOutputBuffer(
+      Camera3StreamBuffer::MakeRequestOutput(buffer));
 }
 
 ZslBufferManager::ZslBufferManager()
@@ -201,7 +203,6 @@ ZslHelper::ZslHelper(const camera_metadata_t* static_info)
     : zsl_buffer_manager_(new ZslBufferManager),
       fence_sync_thread_("FenceSyncThread"),
       override_current_timestamp_for_testing_(kOverrideCurrentTimestampNotSet) {
-  VLOGF_ENTER();
   if (!IsCapabilitySupported(
           static_info,
           ANDROID_REQUEST_AVAILABLE_CAPABILITIES_PRIVATE_REPROCESSING)) {
@@ -402,12 +403,8 @@ bool ZslHelper::IsZslRequested(const Camera3CaptureDescriptor* request) {
   return false;
 }
 
-bool ZslHelper::IsAttachedZslBuffer(const camera3_stream_buffer_t* buffer) {
-  return buffer && buffer->stream == bi_stream_.get();
-}
-
-bool ZslHelper::IsTransformedZslBuffer(const camera3_stream_buffer_t* buffer) {
-  return buffer && buffer->stream == bi_stream_.get();
+bool ZslHelper::IsTransformedZslBuffer(const Camera3StreamBuffer& buffer) {
+  return buffer.stream() == bi_stream_.get();
 }
 
 void ZslHelper::TryReleaseBuffer() {
@@ -444,7 +441,7 @@ void ZslHelper::TryReleaseBuffer() {
 
 bool ZslHelper::ProcessZslCaptureRequest(Camera3CaptureDescriptor* request,
                                          SelectionStrategy strategy) {
-  if (request->GetInputBuffer() != nullptr) {
+  if (request->has_input_buffer()) {
     return false;
   }
   bool transformed = false;
@@ -460,8 +457,6 @@ bool ZslHelper::ProcessZslCaptureRequest(Camera3CaptureDescriptor* request,
 }
 
 void ZslHelper::AttachRequest(Camera3CaptureDescriptor* request) {
-  VLOGF_ENTER();
-
   base::AutoLock l(ring_buffer_lock_);
   TryReleaseBuffer();
   auto* buffer = zsl_buffer_manager_->GetBuffer();
@@ -470,10 +465,13 @@ void ZslHelper::AttachRequest(Camera3CaptureDescriptor* request) {
     return;
   }
   // Attach our ZSL output buffer.
-  camera3_stream_buffer_t stream_buffer;
-  stream_buffer.buffer = buffer;
-  stream_buffer.stream = bi_stream_.get();
-  stream_buffer.acquire_fence = stream_buffer.release_fence = -1;
+  camera3_stream_buffer_t stream_buffer = {
+      .stream = bi_stream_.get(),
+      .buffer = buffer,
+      .status = CAMERA3_BUFFER_STATUS_OK,
+      .acquire_fence = -1,
+      .release_fence = -1,
+  };
 
   ZslBuffer zsl_buffer(request->frame_number(), stream_buffer);
   zsl_buffer.AttachToRequest(request);
@@ -482,7 +480,6 @@ void ZslHelper::AttachRequest(Camera3CaptureDescriptor* request) {
 
 bool ZslHelper::TransformRequest(Camera3CaptureDescriptor* request,
                                  SelectionStrategy strategy) {
-  VLOGF_ENTER();
   base::AutoLock l(ring_buffer_lock_);
 
   const int32_t jpeg_orientation = [&]() {
@@ -515,7 +512,8 @@ bool ZslHelper::TransformRequest(Camera3CaptureDescriptor* request,
   selected_buffer_it->buffer.stream = bi_stream_.get();
   selected_buffer_it->buffer.acquire_fence = -1;
   selected_buffer_it->buffer.acquire_fence = -1;
-  request->SetInputBuffer(selected_buffer_it->buffer);
+  request->SetInputBuffer(
+      Camera3StreamBuffer::MakeRequestInput(selected_buffer_it->buffer));
 
   // The result metadata for the RAW buffers come from the preview frames. We
   // need to add JPEG orientation back so that the resulting JPEG is of the
@@ -535,22 +533,19 @@ bool ZslHelper::TransformRequest(Camera3CaptureDescriptor* request,
 
 void ZslHelper::ProcessZslCaptureResult(Camera3CaptureDescriptor* result,
                                         bool* is_input_transformed) {
-  VLOGF_ENTER();
-  std::vector<camera3_stream_buffer_t> zsl_detached_output_buffers;
-  for (const auto& buffer : result->GetOutputBuffers()) {
-    if (buffer.stream == bi_stream_.get()) {
-      WaitAttachedFrame(result->frame_number(), buffer.release_fence);
+  for (auto& buffer : result->AcquireOutputBuffers()) {
+    if (buffer.stream() == bi_stream_.get()) {
+      WaitAttachedFrame(result->frame_number(),
+                        base::ScopedFD(buffer.take_release_fence()));
     } else {
-      zsl_detached_output_buffers.push_back(buffer);
+      result->AppendOutputBuffer(std::move(buffer));
     }
   }
-  result->SetOutputBuffers(zsl_detached_output_buffers);
 
-  const camera3_stream_buffer_t* input_buffer = result->GetInputBuffer();
-  if (input_buffer != nullptr && IsTransformedZslBuffer(input_buffer)) {
+  const Camera3StreamBuffer* input_buffer = result->GetInputBuffer();
+  if (input_buffer && IsTransformedZslBuffer(*input_buffer)) {
     *is_input_transformed = true;
-    ReleaseStreamBuffer(*input_buffer);
-    result->ResetInputBuffer();
+    ReleaseStreamBuffer(result->AcquireInputBuffer());
   } else {
     *is_input_transformed = false;
   }
@@ -566,7 +561,12 @@ void ZslHelper::ProcessZslCaptureResult(Camera3CaptureDescriptor* result,
 
   if (result->partial_result() != 0) {  // Result has metadata. Merge it.
     const camera3_capture_result_t* locked_result = result->LockForResult();
-    it->metadata.append(locked_result->result);
+    if (locked_result->result) {
+      it->metadata.append(locked_result->result);
+    } else {
+      LOGF(ERROR) << "No result metadata although partial_result = "
+                  << result->partial_result();
+    }
     result->Unlock();
     if (result->partial_result() == partial_result_count_) {
       it->metadata_ready = true;
@@ -581,17 +581,18 @@ void ZslHelper::OnNotifyError(const camera3_error_msg_t& error_msg) {
   }
 }
 
-void ZslHelper::WaitAttachedFrame(uint32_t frame_number, int release_fence) {
+void ZslHelper::WaitAttachedFrame(uint32_t frame_number,
+                                  base::ScopedFD release_fence) {
   fence_sync_thread_.task_runner()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&ZslHelper::WaitAttachedFrameOnFenceSyncThread,
-                     base::Unretained(this), frame_number, release_fence));
+      FROM_HERE, base::BindOnce(&ZslHelper::WaitAttachedFrameOnFenceSyncThread,
+                                base::Unretained(this), frame_number,
+                                std::move(release_fence)));
 }
 
-void ZslHelper::WaitAttachedFrameOnFenceSyncThread(uint32_t frame_number,
-                                                   int release_fence) {
-  if (release_fence != -1 &&
-      sync_wait(release_fence, ZslHelper::kZslSyncWaitTimeoutMs)) {
+void ZslHelper::WaitAttachedFrameOnFenceSyncThread(
+    uint32_t frame_number, base::ScopedFD release_fence) {
+  if (release_fence.is_valid() &&
+      sync_wait(release_fence.get(), ZslHelper::kZslSyncWaitTimeoutMs)) {
     LOGF(WARNING) << "Failed to wait for release fence on attached ZSL buffer";
   } else {
     base::AutoLock ring_buffer_lock(ring_buffer_lock_);
@@ -605,25 +606,27 @@ void ZslHelper::WaitAttachedFrameOnFenceSyncThread(uint32_t frame_number,
     return;
   }
   fence_sync_thread_.task_runner()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&ZslHelper::WaitAttachedFrameOnFenceSyncThread,
-                     base::Unretained(this), frame_number, release_fence));
+      FROM_HERE, base::BindOnce(&ZslHelper::WaitAttachedFrameOnFenceSyncThread,
+                                base::Unretained(this), frame_number,
+                                std::move(release_fence)));
 }
 
-void ZslHelper::ReleaseStreamBuffer(camera3_stream_buffer_t buffer) {
+void ZslHelper::ReleaseStreamBuffer(std::optional<Camera3StreamBuffer> buffer) {
+  if (!buffer) {
+    return;
+  }
   fence_sync_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&ZslHelper::ReleaseStreamBufferOnFenceSyncThread,
-                     base::Unretained(this), std::move(buffer)));
+                     base::Unretained(this), std::move(buffer.value())));
 }
 
 void ZslHelper::ReleaseStreamBufferOnFenceSyncThread(
-    camera3_stream_buffer_t buffer) {
-  if (buffer.release_fence != -1 &&
-      sync_wait(buffer.release_fence, ZslHelper::kZslSyncWaitTimeoutMs)) {
+    Camera3StreamBuffer buffer) {
+  if (!buffer.WaitOnAndClearReleaseFence(ZslHelper::kZslSyncWaitTimeoutMs)) {
     LOGF(WARNING) << "Failed to wait for release fence on ZSL input buffer";
   } else {
-    if (!zsl_buffer_manager_->ReleaseBuffer(*buffer.buffer)) {
+    if (!zsl_buffer_manager_->ReleaseBuffer(*buffer.buffer())) {
       LOGF(ERROR) << "Failed to release this stream buffer";
     }
     // The above error should only happen when the mapping in buffer manager
@@ -651,8 +654,6 @@ bool ZslHelper::SelectZslStreamSize(const camera_metadata_t* static_info,
                                     uint32_t* bi_width,
                                     uint32_t* bi_height,
                                     int64_t* min_frame_duration) {
-  VLOGF_ENTER();
-
   *bi_width = 0;
   *bi_height = 0;
   camera_metadata_ro_entry entry;
@@ -848,6 +849,17 @@ void ZslHelper::SetZslBufferManagerForTesting(
 
 void ZslHelper::OverrideCurrentTimestampForTesting(int64_t timestamp) {
   override_current_timestamp_for_testing_ = timestamp;
+}
+
+bool AddVendorTags(VendorTagManager& vendor_tag_manager) {
+  if (!vendor_tag_manager.Add(kCrosZslVendorTagCanAttempt,
+                              kCrosZslVendorTagSectionName,
+                              kCrosZslVendorTagCanAttemptName, TYPE_BYTE)) {
+    LOGF(ERROR)
+        << "Failed to add the vendor tag for CrOS ZSL attemptable indicator";
+    return false;
+  }
+  return true;
 }
 
 bool TryAddEnableZslKey(android::CameraMetadata* metadata) {

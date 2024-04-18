@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,6 +21,7 @@
 #include <base/posix/eintr_wrapper.h>
 #include <base/process/process.h>
 #include <base/stl_util.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <brillo/flag_helper.h>
 #include <brillo/message_loops/base_message_loop.h>
@@ -31,8 +32,8 @@
 #include <dbus/message.h>
 #include <dbus/object_path.h>
 #include <dbus/object_proxy.h>
-#include <vm_cicerone/proto_bindings/cicerone_service.pb.h>
-#include <vm_concierge/proto_bindings/concierge_service.pb.h>
+#include <vm_cicerone/cicerone_service.pb.h>
+#include <vm_concierge/concierge_service.pb.h>
 
 #include "vm_tools/vsh/scoped_termios.h"
 #include "vm_tools/vsh/utils.h"
@@ -70,6 +71,21 @@ dbus::ObjectProxy* GetServiceProxy(const scoped_refptr<dbus::Bus>& bus,
   return proxy;
 }
 
+// Parse list of container features like "1,3". Number should correspond to the
+// enum values of vm_tools.cicerone.ContainerFeature, but no validation is done.
+std::vector<int> ParseContainerFeatures(const std::string& container_features) {
+  std::vector<int> result;
+  for (const auto& piece :
+       base::SplitStringPiece(container_features, ",", base::KEEP_WHITESPACE,
+                              base::SPLIT_WANT_NONEMPTY)) {
+    int value;
+    if (base::StringToInt(piece, &value)) {
+      result.push_back(value);
+    }
+  }
+  return result;
+}
+
 bool GetCid(dbus::ObjectProxy* concierge_proxy,
             const std::string& owner_id,
             const std::string& vm_name,
@@ -88,7 +104,8 @@ bool GetCid(dbus::ObjectProxy* concierge_proxy,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      concierge_proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      concierge_proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to concierge service";
     return false;
@@ -114,6 +131,7 @@ bool LaunchVshd(dbus::ObjectProxy* cicerone_proxy,
                 const std::string& owner_id,
                 const std::string& vm_name,
                 const std::string& container_name,
+                const std::vector<int>& container_features,
                 unsigned int port,
                 uint32_t* cid) {
   DCHECK(cid);
@@ -126,6 +144,10 @@ bool LaunchVshd(dbus::ObjectProxy* cicerone_proxy,
   request.set_container_name(container_name);
   request.set_port(port);
   request.set_owner_id(owner_id);
+  for (int feature : container_features) {
+    request.add_container_features(
+        static_cast<vm_tools::cicerone::ContainerFeature>(feature));
+  }
 
   if (!writer.AppendProtoAsArrayOfBytes(request)) {
     LOG(ERROR) << "Failed to encode LaunchVshdRequest protobuf";
@@ -133,7 +155,8 @@ bool LaunchVshd(dbus::ObjectProxy* cicerone_proxy,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      cicerone_proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      cicerone_proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return false;
@@ -162,7 +185,8 @@ bool ListenForVshd(dbus::ObjectProxy* cicerone_proxy,
                    base::ScopedFD* peer_sock_fd,
                    const std::string& owner_id,
                    const std::string& vm_name,
-                   const std::string& container_name) {
+                   const std::string& container_name,
+                   const std::vector<int>& container_features) {
   DCHECK(peer_sock_fd);
 
   // Create a socket to listen for incoming vsh connections.
@@ -200,16 +224,22 @@ bool ListenForVshd(dbus::ObjectProxy* cicerone_proxy,
   // The socket is listening. Request that cicerone start vshd.
   uint32_t expected_cid;
   if (!LaunchVshd(cicerone_proxy, owner_id, vm_name, container_name,
-                  addr.svm_port, &expected_cid))
+                  container_features, addr.svm_port, &expected_cid))
     return false;
 
   struct pollfd pollfds[] = {
       {listen_fd.get(), POLLIN, 0},
   };
-  const int num_pollfds = base::size(pollfds);
+  const int num_pollfds = std::size(pollfds);
 
-  if (HANDLE_EINTR(poll(pollfds, num_pollfds, 5000)) < 0) {
-    PLOG(ERROR) << "Failed to poll";
+  // Keep polling until we get a POLLIN. Previously we would timeout after 5
+  // seconds and treat it as a success.
+  if (HANDLE_EINTR(poll(pollfds, num_pollfds, 5000)) <= 0) {
+    if (!(pollfds[0].revents & POLLIN)) {
+      LOG(ERROR) << "Poll timed out after waiting 5 seconds.";
+    } else {
+      PLOG(ERROR) << "Failed to poll";
+    }
     return false;
   }
 
@@ -255,7 +285,8 @@ void RegisterVshSession(dbus::ObjectProxy* cicerone_proxy,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      cicerone_proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      cicerone_proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return;
@@ -288,6 +319,9 @@ int main(int argc, char** argv) {
   DEFINE_string(user, "", "Target user in the VM");
   DEFINE_string(target_container, "", "Target container");
   DEFINE_string(cwd, "", "Current working directory");
+  DEFINE_string(container_features, "",
+                "Features to enable in the container as a comma-separated list "
+                "of enum ids (integers).");
 
   brillo::FlagHelper::Init(argc, argv, kVshUsage);
 
@@ -343,9 +377,12 @@ int main(int argc, char** argv) {
     if (!cicerone_proxy)
       return EXIT_FAILURE;
 
+    std::vector<int> container_features =
+        ParseContainerFeatures(FLAGS_container_features);
     base::ScopedFD sock_fd;
     if (!ListenForVshd(cicerone_proxy, port, &sock_fd, FLAGS_owner_id,
-                       FLAGS_vm_name, FLAGS_target_container)) {
+                       FLAGS_vm_name, FLAGS_target_container,
+                       container_features)) {
       return EXIT_FAILURE;
     }
 
@@ -365,6 +402,10 @@ int main(int argc, char** argv) {
     if ((FLAGS_cid != 0 && !FLAGS_vm_name.empty()) ||
         (FLAGS_cid == 0 && FLAGS_vm_name.empty())) {
       LOG(ERROR) << "Exactly one of --cid or --vm_name is required";
+      return EXIT_FAILURE;
+    }
+    if (!FLAGS_vm_name.empty() && FLAGS_owner_id.empty()) {
+      LOG(ERROR) << "If using --vm_name, you must also specify --owner_id";
       return EXIT_FAILURE;
     }
     unsigned int cid;

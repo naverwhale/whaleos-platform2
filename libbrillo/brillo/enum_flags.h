@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <type_traits>
 
-#include <base/stl_util.h>
+#include <base/types/cxx23_to_underlying.h>
 
 // This is a helper for generating type-safe bitwise operators for flags that
 // are defined by an enumeration.  By default, when a bitwise operation is

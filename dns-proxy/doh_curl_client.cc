@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,11 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/containers/contains.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 namespace dns_proxy {
 namespace {
@@ -29,15 +29,8 @@ DoHCurlClient::CurlResult::CurlResult(CURLcode curl_code,
       http_code(http_code),
       retry_delay_ms(retry_delay_ms) {}
 
-DoHCurlClient::State::State(CURL* curl,
-                            const QueryCallback& callback,
-                            void* ctx,
-                            int request_id)
-    : curl(curl),
-      callback(callback),
-      ctx(ctx),
-      header_list(nullptr),
-      request_id(request_id) {}
+DoHCurlClient::State::State(CURL* curl, const QueryCallback& callback)
+    : curl(curl), callback(callback), header_list(nullptr) {}
 
 DoHCurlClient::State::~State() {
   curl_easy_cleanup(curl);
@@ -47,7 +40,7 @@ DoHCurlClient::State::~State() {
 void DoHCurlClient::State::RunCallback(CURLMsg* curl_msg, int64_t http_code) {
   // TODO(jasongustaman): Use HTTP 429, Retry-After header value.
   CurlResult res(curl_msg->data.result, http_code, 0 /* retry_delay_ms */);
-  callback.Run(ctx, res, response.data(), response.size());
+  callback.Run(res, response.data(), response.size());
 }
 
 void DoHCurlClient::State::SetResponse(char* msg, size_t len) {
@@ -58,10 +51,8 @@ void DoHCurlClient::State::SetResponse(char* msg, size_t len) {
   response.insert(response.end(), msg, msg + len);
 }
 
-DoHCurlClient::DoHCurlClient(base::TimeDelta timeout,
-                             int max_concurrent_queries)
-    : timeout_seconds_(timeout.InSeconds()),
-      max_concurrent_queries_(max_concurrent_queries) {
+DoHCurlClient::DoHCurlClient(base::TimeDelta timeout)
+    : timeout_seconds_(timeout.InSeconds()) {
   // Initialize CURL.
   curl_global_init(CURL_GLOBAL_DEFAULT);
   curlm_ = curl_multi_init();
@@ -83,9 +74,10 @@ DoHCurlClient::DoHCurlClient(base::TimeDelta timeout,
 
 DoHCurlClient::~DoHCurlClient() {
   // Cancel all in-flight queries.
-  for (const auto& requests : requests_) {
-    CancelRequest(requests.second);
+  for (const auto& state : states_) {
+    curl_multi_remove_handle(curlm_, state.first);
   }
+  states_.clear();
   curl_multi_cleanup(curlm_);
   curlm_ = nullptr;
   curl_global_cleanup();
@@ -105,15 +97,12 @@ void DoHCurlClient::HandleResult(CURLMsg* curl_msg) {
   int64_t http_code = 0;
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
-  // Run the callback if the current request is the first successful request
-  // or the current request is the last request (noted by the number of request
-  // with the same |request_id| is 1).
-  if (http_code == kHTTPOk || requests_[state->request_id].size() == 1) {
-    state->RunCallback(curl_msg, http_code);
-    CancelRequest(state->request_id);
-    return;
-  }
-  // TODO(jasongustaman): Get and save curl metrics.
+  // Run the callback.
+  state->RunCallback(curl_msg, http_code);
+
+  // Clean states.
+  curl_multi_remove_handle(curlm_, state->curl);
+  states_.erase(state->curl);
 }
 
 void DoHCurlClient::CheckMultiInfo() {
@@ -132,7 +121,7 @@ void DoHCurlClient::OnFileCanReadWithoutBlocking(curl_socket_t socket_fd) {
   CURLMcode rc = curl_multi_socket_action(curlm_, socket_fd, CURL_CSELECT_IN,
                                           &still_running);
   if (rc != CURLM_OK) {
-    LOG(INFO) << "Failed to read from socket: " << curl_multi_strerror(rc);
+    LOG(ERROR) << "Failed to read from socket: " << curl_multi_strerror(rc);
     return;
   }
   CheckMultiInfo();
@@ -143,7 +132,7 @@ void DoHCurlClient::OnFileCanWriteWithoutBlocking(curl_socket_t socket_fd) {
   CURLMcode rc = curl_multi_socket_action(curlm_, socket_fd, CURL_CSELECT_OUT,
                                           &still_running);
   if (rc != CURLM_OK) {
-    LOG(INFO) << "Failed to write to socket: " << curl_multi_strerror(rc);
+    LOG(ERROR) << "Failed to write to socket: " << curl_multi_strerror(rc);
     return;
   }
   CheckMultiInfo();
@@ -207,16 +196,22 @@ void DoHCurlClient::TimeoutCallback() {
   CheckMultiInfo();
 }
 
-int DoHCurlClient::TimerCallback(CURLM* multi, long timeout_ms, void* userp) {
+int DoHCurlClient::TimerCallback(CURLM* multi,
+                                 long timeout_ms,  // NOLINT(runtime/int)
+                                 void* userp) {
   DoHCurlClient* client = static_cast<DoHCurlClient*>(userp);
   if (timeout_ms > 0) {
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
         base::BindRepeating(&DoHCurlClient::TimeoutCallback,
                             client->GetWeakPtr()),
-        base::TimeDelta::FromMilliseconds(timeout_ms));
+        base::Milliseconds(timeout_ms));
   } else if (timeout_ms == 0) {
-    client->TimeoutCallback();
+    // Libcurl explicitly disallow calling its API directly from it's callback.
+    // Post the call such that is run outside the callback.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindRepeating(&DoHCurlClient::TimeoutCallback,
+                                       client->GetWeakPtr()));
   }
   return 0;
 }
@@ -242,39 +237,12 @@ size_t DoHCurlClient::HeaderCallback(char* data,
   return len;
 }
 
-void DoHCurlClient::SetNameServers(
-    const std::vector<std::string>& name_servers) {
-  name_servers_ = base::JoinString(name_servers, ",");
-}
-
-void DoHCurlClient::SetDoHProviders(
-    const std::vector<std::string>& doh_providers) {
-  doh_providers_ = doh_providers;
-}
-
-void DoHCurlClient::CancelRequest(const std::set<State*>& states) {
-  for (const auto& state : states) {
-    curl_multi_remove_handle(curlm_, state->curl);
-    states_.erase(state->curl);
-  }
-}
-
-void DoHCurlClient::CancelRequest(int request_id) {
-  auto requests = requests_.find(request_id);
-  if (requests == requests_.end()) {
-    return;
-  }
-  // Cancel in-flight queries and delete the state.
-  CancelRequest(requests->second);
-  requests_.erase(request_id);
-}
-
 std::unique_ptr<DoHCurlClient::State> DoHCurlClient::InitCurl(
     const std::string& doh_provider,
     const char* msg,
     int len,
     const QueryCallback& callback,
-    void* ctx) {
+    const std::vector<std::string>& name_servers) {
   CURL* curl;
   curl = curl_easy_init();
   if (!curl) {
@@ -283,15 +251,15 @@ std::unique_ptr<DoHCurlClient::State> DoHCurlClient::InitCurl(
   }
 
   // Allocate a state for the request.
-  std::unique_ptr<State> state =
-      std::make_unique<State>(curl, callback, ctx, next_request_id_);
+  std::unique_ptr<State> state = std::make_unique<State>(curl, callback);
 
   // Set the target URL which is the DoH provider to query to.
   curl_easy_setopt(curl, CURLOPT_URL, doh_provider.c_str());
 
   // Set the DNS name servers to resolve the URL(s) / DoH provider(s).
   // This uses ares and will be done asynchronously.
-  curl_easy_setopt(curl, CURLOPT_DNS_SERVERS, name_servers_.c_str());
+  curl_easy_setopt(curl, CURLOPT_DNS_SERVERS,
+                   base::JoinString(name_servers, ",").c_str());
 
   // Set the HTTP header to the needed DoH header. The stored value needs to
   // be released when query is finished.
@@ -330,44 +298,21 @@ std::unique_ptr<DoHCurlClient::State> DoHCurlClient::InitCurl(
 bool DoHCurlClient::Resolve(const char* msg,
                             int len,
                             const QueryCallback& callback,
-                            void* ctx) {
-  if (name_servers_.empty() || doh_providers_.empty()) {
-    LOG(DFATAL) << "DNS and DoH server must not be empty";
+                            const std::vector<std::string>& name_servers,
+                            const std::string& doh_provider) {
+  std::unique_ptr<State> state =
+      InitCurl(doh_provider, msg, len, callback, name_servers);
+  if (!state) {
     return false;
   }
+  CURL* curl = state->curl;
 
-  std::set<State*> requests;
-  int num_concurrent_queries = 0;
-  for (const auto& doh_provider : doh_providers_) {
-    std::unique_ptr<State> state =
-        InitCurl(doh_provider, msg, len, callback, ctx);
-    if (!state.get()) {
-      continue;
-    }
-    State* state_ptr = state.get();
+  // Create state structure to store required data of each query.
+  states_.emplace(curl, std::move(state));
 
-    // Create state structure to store required data of each query.
-    states_.emplace(state_ptr->curl, std::move(state));
-    requests.emplace(state_ptr);
+  // Runs the query asynchronously.
+  curl_multi_add_handle(curlm_, curl);
 
-    // Runs the query asynchronously.
-    curl_multi_add_handle(curlm_, state_ptr->curl);
-
-    // Queries at most |max_concurrent_queries_| times concurrently.
-    num_concurrent_queries++;
-    if (num_concurrent_queries >= max_concurrent_queries_) {
-      break;
-    }
-  }
-
-  if (requests.empty()) {
-    LOG(ERROR) << "No requests for query";
-    return false;
-  }
-
-  // Store the concurrent requests and increment |next_request_id_|.
-  requests_.emplace(next_request_id_, requests);
-  next_request_id_++;
   return true;
 }
 }  // namespace dns_proxy

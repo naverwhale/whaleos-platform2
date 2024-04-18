@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -39,6 +39,27 @@ DocumentSource CreateDocumentSource(const std::string& name,
   source.mutable_resolutions()->Add(resolutions.begin(), resolutions.end());
   source.mutable_color_modes()->Add(color_modes.begin(), color_modes.end());
   return source;
+}
+
+libusb_device_descriptor MakeMinimalDeviceDescriptor() {
+  libusb_device_descriptor descriptor;
+  memset(&descriptor, 0, sizeof(descriptor));
+  descriptor.bLength = sizeof(descriptor);
+  descriptor.bDescriptorType = LIBUSB_DT_DEVICE;
+  descriptor.idVendor = 0x1234;
+  descriptor.idProduct = 0x4321;
+  return descriptor;
+}
+
+std::unique_ptr<libusb_interface_descriptor> MakeIppUsbInterfaceDescriptor() {
+  auto descriptor = std::make_unique<libusb_interface_descriptor>();
+  descriptor->bLength = sizeof(libusb_interface_descriptor);
+  descriptor->bDescriptorType = LIBUSB_DT_INTERFACE;
+  descriptor->bInterfaceNumber = 0;
+  descriptor->bAlternateSetting = 1;
+  descriptor->bInterfaceClass = LIBUSB_CLASS_PRINTER;
+  descriptor->bInterfaceProtocol = 0x04;  // IPP-USB protocol.
+  return descriptor;
 }
 
 }  // namespace lorgnette

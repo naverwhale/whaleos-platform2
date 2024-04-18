@@ -1,18 +1,18 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "vm_tools/concierge/seneschal_server_proxy.h"
 
 #include <base/logging.h>
+#include <base/memory/ptr_util.h>
 #include <brillo/dbus/dbus_proxy_util.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
 #include <dbus/object_path.h>
 #include <seneschal/proto_bindings/seneschal_service.pb.h>
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 
 // static
 std::unique_ptr<SeneschalServerProxy>
@@ -40,7 +40,7 @@ SeneschalServerProxy::SeneschalCreateProxy(scoped_refptr<dbus::Bus> bus,
     return nullptr;
   }
 
-  return std::unique_ptr<SeneschalServerProxy>(
+  return base::WrapUnique(
       new SeneschalServerProxy(bus, seneschal_proxy, response.handle()));
 }
 
@@ -144,5 +144,4 @@ SeneschalServerProxy::~SeneschalServerProxy() {
   }
 }
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge

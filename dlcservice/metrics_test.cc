@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,11 +35,6 @@ class MetricsTest : public testing::Test {
   MetricsTest(const MetricsTest&) = delete;
   MetricsTest& operator=(const MetricsTest&) = delete;
 };
-
-TEST_F(MetricsTest, Init) {
-  EXPECT_CALL(*metrics_library_, Init());
-  metrics_->Init();
-}
 
 TEST_F(MetricsTest, SendInstallResultSuccess_InstalledByUpdateEngine) {
   EXPECT_CALL(
@@ -132,9 +127,18 @@ TEST_F(MetricsTest, SendInstallResult_Failures) {
                               "msg");
   metrics_->SendInstallResultFailure(&err);
   testing::Mock::VerifyAndClearExpectations(&metrics_library_);
+  EXPECT_CALL(
+      *metrics_library_,
+      SendEnumToUMA(metrics::kMetricInstallResult,
+                    11 /*kFailedCreationDuringHibernateResume*/, num_consts));
+  err =
+      brillo::Error::Create(FROM_HERE, kDlcErrorDomain,
+                            error::kFailedCreationDuringHibernateResume, "msg");
+  metrics_->SendInstallResultFailure(&err);
+  testing::Mock::VerifyAndClearExpectations(&metrics_library_);
 
   // Check that all values were tested.
-  EXPECT_EQ(11, static_cast<int>(InstallResult::kNumConstants));
+  EXPECT_EQ(12, static_cast<int>(InstallResult::kNumConstants));
 }
 
 TEST_F(MetricsTest, SendUninstallResult_Success) {

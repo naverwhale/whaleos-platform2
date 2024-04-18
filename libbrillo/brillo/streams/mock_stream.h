@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,15 +35,14 @@ class MockStream : public Stream {
               ReadAsync,
               (void*,
                size_t,
-               const base::Callback<void(size_t)>&,
-               const ErrorCallback&,
+               base::OnceCallback<void(size_t)>,
+               ErrorCallback,
                ErrorPtr*),
               (override));
-  MOCK_METHOD(
-      bool,
-      ReadAllAsync,
-      (void*, size_t, const base::Closure&, const ErrorCallback&, ErrorPtr*),
-      (override));
+  MOCK_METHOD(bool,
+              ReadAllAsync,
+              (void*, size_t, base::OnceClosure, ErrorCallback, ErrorPtr*),
+              (override));
   MOCK_METHOD(bool,
               ReadNonBlocking,
               (void*, size_t, size_t*, bool*, ErrorPtr*),
@@ -58,18 +57,15 @@ class MockStream : public Stream {
               WriteAsync,
               (const void*,
                size_t,
-               const base::Callback<void(size_t)>&,
-               const ErrorCallback&,
+               base::OnceCallback<void(size_t)>,
+               ErrorCallback,
                ErrorPtr*),
               (override));
-  MOCK_METHOD(bool,
-              WriteAllAsync,
-              (const void*,
-               size_t,
-               const base::Closure&,
-               const ErrorCallback&,
-               ErrorPtr*),
-              (override));
+  MOCK_METHOD(
+      bool,
+      WriteAllAsync,
+      (const void*, size_t, base::OnceClosure, ErrorCallback, ErrorPtr*),
+      (override));
   MOCK_METHOD(bool,
               WriteNonBlocking,
               (const void*, size_t, size_t*, ErrorPtr*),
@@ -87,12 +83,20 @@ class MockStream : public Stream {
   MOCK_METHOD(bool, CloseBlocking, (ErrorPtr*), (override));
 
   MOCK_METHOD(bool,
-              WaitForData,
-              (AccessMode, const base::Callback<void(AccessMode)>&, ErrorPtr*),
+              WaitForDataRead,
+              (base::OnceClosure, ErrorPtr*),
               (override));
   MOCK_METHOD(bool,
-              WaitForDataBlocking,
-              (AccessMode, base::TimeDelta, AccessMode*, ErrorPtr*),
+              WaitForDataReadBlocking,
+              (base::TimeDelta, ErrorPtr*),
+              (override));
+  MOCK_METHOD(bool,
+              WaitForDataWrite,
+              (base::OnceClosure, ErrorPtr*),
+              (override));
+  MOCK_METHOD(bool,
+              WaitForDataWriteBlocking,
+              (base::TimeDelta, ErrorPtr*),
               (override));
 };
 

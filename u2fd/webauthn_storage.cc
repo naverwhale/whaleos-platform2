@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "u2fd/webauthn_storage.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -18,9 +19,11 @@
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/values.h>
+#include <brillo/scoped_umask.h>
+#include <brillo/secure_blob.h>
+#include <brillo/secure_string.h>
 
-#include "brillo/scoped_umask.h"
-#include "u2fd/util.h"
+#include "u2fd/client/util.h"
 
 namespace u2f {
 
@@ -31,11 +34,11 @@ namespace {
 constexpr const char kDaemonStorePath[] = "/run/daemon-store/u2f";
 constexpr const char kWebAuthnDirName[] = "webauthn";
 constexpr const char kRecordFileNamePrefix[] = "Record_";
-constexpr const char kAuthTimeSecretHashFileName[] = "AuthTimeSecretHash";
 
 // Members of the JSON file
 constexpr const char kCredentialIdKey[] = "credential_id";
 constexpr const char kSecretKey[] = "secret";
+constexpr const char kKeyBlobKey[] = "key_blob";
 constexpr const char kRpIdKey[] = "rp_id";
 constexpr const char kRpDisplayNameKey[] = "rp_display_name";
 constexpr const char kUserIdKey[] = "user_id";
@@ -65,16 +68,19 @@ bool WebAuthnStorage::WriteRecord(const WebAuthnRecord& record) {
     return false;
   }
 
-  base::Value record_value(base::Value::Type::DICTIONARY);
-  record_value.SetStringKey(kCredentialIdKey, credential_id_hex);
-  record_value.SetStringKey(kSecretKey, base::Base64Encode(record.secret));
-  record_value.SetStringKey(kRpIdKey, record.rp_id);
-  record_value.SetStringKey(kRpDisplayNameKey, record.rp_display_name);
-  record_value.SetStringKey(kUserIdKey, base::HexEncode(record.user_id.data(),
-                                                        record.user_id.size()));
-  record_value.SetStringKey(kUserDisplayNameKey, record.user_display_name);
-  record_value.SetDoubleKey(kCreatedTimestampKey, record.timestamp);
-  record_value.SetBoolKey(kIsResidentKeyKey, record.is_resident_key);
+  base::Value::Dict record_value =
+      base::Value::Dict()
+          .Set(kCredentialIdKey, credential_id_hex)
+          .Set(kSecretKey, base::Base64Encode(brillo::Blob(
+                               record.secret.begin(), record.secret.end())))
+          .Set(kKeyBlobKey, base::Base64Encode(record.key_blob))
+          .Set(kRpIdKey, record.rp_id)
+          .Set(kRpDisplayNameKey, record.rp_display_name)
+          .Set(kUserIdKey,
+               base::HexEncode(record.user_id.data(), record.user_id.size()))
+          .Set(kUserDisplayNameKey, record.user_display_name)
+          .Set(kCreatedTimestampKey, record.timestamp)
+          .Set(kIsResidentKeyKey, record.is_resident_key);
 
   std::string json_string;
   JSONStringValueSerializer json_serializer(&json_string);
@@ -121,8 +127,8 @@ bool WebAuthnStorage::WriteRecord(const WebAuthnRecord& record) {
     }
   }
 
-  LOG(INFO) << "Done writing record with id " << credential_id_hex
-            << " to file successfully. ";
+  VLOG(1) << "Done writing record with id " << credential_id_hex
+          << " to file successfully. ";
 
   records_.emplace_back(record);
   return true;
@@ -150,24 +156,24 @@ bool WebAuthnStorage::LoadRecords() {
     auto record_value = base::JSONReader::ReadAndReturnValueWithError(
         json_string, base::JSON_ALLOW_TRAILING_COMMAS);
 
-    if (!record_value.value) {
+    if (!record_value.has_value()) {
       LOG(ERROR) << "Error in deserializing JSON from path "
                  << record_path.value();
-      LOG_IF(ERROR, !record_value.error_message.empty())
-          << "JSON error message: " << record_value.error_message << ".";
+      LOG_IF(ERROR, !record_value.error().message.empty())
+          << "JSON error message: " << record_value.error().message << ".";
       read_all_records_successfully = false;
       continue;
     }
 
-    if (!record_value.value->is_dict()) {
+    if (!record_value->is_dict()) {
       LOG(ERROR) << "Value " << record_path.value() << " is not a dictionary.";
       read_all_records_successfully = false;
       continue;
     }
-    base::Value record_dictionary = std::move(*record_value.value);
+    base::Value::Dict record_dictionary = std::move(*record_value).TakeDict();
 
     const std::string* credential_id_hex =
-        record_dictionary.FindStringKey(kCredentialIdKey);
+        record_dictionary.FindString(kCredentialIdKey);
     std::string credential_id;
     if (!credential_id_hex ||
         !base::HexStringToString(*credential_id_hex, &credential_id)) {
@@ -177,8 +183,7 @@ bool WebAuthnStorage::LoadRecords() {
       continue;
     }
 
-    const std::string* secret_base64 =
-        record_dictionary.FindStringKey(kSecretKey);
+    const std::string* secret_base64 = record_dictionary.FindString(kSecretKey);
     std::string secret;
     if (!secret_base64 || !base::Base64Decode(*secret_base64, &secret)) {
       LOG(ERROR) << "Cannot read credential secret from " << record_path.value()
@@ -187,7 +192,19 @@ bool WebAuthnStorage::LoadRecords() {
       continue;
     }
 
-    const std::string* rp_id = record_dictionary.FindStringKey(kRpIdKey);
+    const std::string* key_blob_base64 =
+        record_dictionary.FindString(kKeyBlobKey);
+    std::string key_blob;
+    // key blob can be empty for backward compatibility. New key blobs generated
+    // in gsc case are empty strings.
+    if (key_blob_base64 && !base::Base64Decode(*key_blob_base64, &key_blob)) {
+      LOG(ERROR) << "Failed to decode credential secret from "
+                 << record_path.value() << ".";
+      read_all_records_successfully = false;
+      continue;
+    }
+
+    const std::string* rp_id = record_dictionary.FindString(kRpIdKey);
     if (!rp_id) {
       LOG(ERROR) << "Cannot read rp_id from " << record_path.value() << ".";
       read_all_records_successfully = false;
@@ -195,7 +212,7 @@ bool WebAuthnStorage::LoadRecords() {
     }
 
     const std::string* rp_display_name =
-        record_dictionary.FindStringKey(kRpDisplayNameKey);
+        record_dictionary.FindString(kRpDisplayNameKey);
     if (!rp_display_name) {
       LOG(ERROR) << "Cannot read rp_display_name from " << record_path.value()
                  << ".";
@@ -203,8 +220,7 @@ bool WebAuthnStorage::LoadRecords() {
       continue;
     }
 
-    const std::string* user_id_hex =
-        record_dictionary.FindStringKey(kUserIdKey);
+    const std::string* user_id_hex = record_dictionary.FindString(kUserIdKey);
     std::string user_id;
     if (!user_id_hex) {
       LOG(ERROR) << "Cannot read user_id from " << record_path.value() << ".";
@@ -221,7 +237,7 @@ bool WebAuthnStorage::LoadRecords() {
     }
 
     const std::string* user_display_name =
-        record_dictionary.FindStringKey(kUserDisplayNameKey);
+        record_dictionary.FindString(kUserDisplayNameKey);
     if (!user_display_name) {
       LOG(ERROR) << "Cannot read user_display_name from " << record_path.value()
                  << ".";
@@ -229,16 +245,16 @@ bool WebAuthnStorage::LoadRecords() {
       continue;
     }
 
-    const base::Optional<double> timestamp =
-        record_dictionary.FindDoubleKey(kCreatedTimestampKey);
+    const std::optional<double> timestamp =
+        record_dictionary.FindDouble(kCreatedTimestampKey);
     if (!timestamp) {
       LOG(ERROR) << "Cannot read timestamp from " << record_path.value() << ".";
       read_all_records_successfully = false;
       continue;
     }
 
-    const base::Optional<bool> is_resident_key =
-        record_dictionary.FindBoolKey(kIsResidentKeyKey);
+    const std::optional<bool> is_resident_key =
+        record_dictionary.FindBool(kIsResidentKeyKey);
     if (!is_resident_key.has_value()) {
       LOG(ERROR) << "Cannot read is_resident_key from " << record_path.value()
                  << ".";
@@ -247,11 +263,18 @@ bool WebAuthnStorage::LoadRecords() {
     }
 
     records_.emplace_back(WebAuthnRecord{
-        credential_id, brillo::Blob(secret.begin(), secret.end()), *rp_id,
-        *rp_display_name, user_id, *user_display_name, *timestamp,
-        *is_resident_key});
+        .credential_id = credential_id,
+        .secret = brillo::BlobFromString(secret),
+        .key_blob = brillo::Blob(key_blob.begin(), key_blob.end()),
+        .rp_id = *rp_id,
+        .rp_display_name = *rp_display_name,
+        .user_id = user_id,
+        .user_display_name = *user_display_name,
+        .timestamp = *timestamp,
+        .is_resident_key = *is_resident_key});
+    brillo::SecureClearContainer(secret);
   }
-  LOG(INFO) << "Loaded " << records_.size() << " WebAuthn records to memory.";
+  VLOG(1) << "Loaded " << records_.size() << " WebAuthn records to memory.";
   return read_all_records_successfully;
 }
 
@@ -261,71 +284,71 @@ bool WebAuthnStorage::SendRecordCountToUMA(MetricsLibraryInterface* metrics) {
                             kRecordCountBuckets);
 }
 
-base::Optional<brillo::Blob> WebAuthnStorage::GetSecretByCredentialId(
+std::optional<brillo::SecureBlob> WebAuthnStorage::GetSecretByCredentialId(
     const std::string& credential_id) {
   for (const WebAuthnRecord& record : records_) {
     if (record.credential_id == credential_id) {
-      return record.secret;
+      return brillo::SecureBlob(record.secret);
     }
   }
-  return base::nullopt;
+  return std::nullopt;
 }
 
-base::Optional<WebAuthnRecord> WebAuthnStorage::GetRecordByCredentialId(
+bool WebAuthnStorage::GetSecretAndKeyBlobByCredentialId(
+    const std::string& credential_id,
+    brillo::SecureBlob* secret,
+    brillo::Blob* key_blob) {
+  for (const WebAuthnRecord& record : records_) {
+    if (record.credential_id == credential_id) {
+      if (secret) {
+        *secret = brillo::SecureBlob(record.secret);
+      }
+      if (key_blob) {
+        *key_blob = record.key_blob;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<WebAuthnRecord> WebAuthnStorage::GetRecordByCredentialId(
     const std::string& credential_id) {
   for (const WebAuthnRecord& record : records_) {
     if (record.credential_id == credential_id) {
       return record;
     }
   }
-  return base::nullopt;
+  return std::nullopt;
 }
 
-bool WebAuthnStorage::PersistAuthTimeSecretHash(const brillo::Blob& hash) {
-  DCHECK(allow_access_ && !sanitized_user_.empty());
-
-  FilePath path = FilePath(kDaemonStorePath)
-                      .Append(sanitized_user_)
-                      .Append(kWebAuthnDirName)
-                      .Append(kAuthTimeSecretHashFileName);
-
-  {
-    brillo::ScopedUmask owner_only_umask(~(0700));
-    if (!base::CreateDirectory(path.DirName())) {
-      LOG(ERROR) << "Cannot create directory: " << path.DirName().value()
-                 << ".";
-      return false;
+int WebAuthnStorage::CountRecordsInTimeRange(int64_t timestamp_min,
+                                             int64_t timestamp_max) {
+  int num_records = 0;
+  for (const WebAuthnRecord& record : records_) {
+    if (timestamp_min <= record.timestamp &&
+        record.timestamp <= timestamp_max) {
+      num_records++;
     }
   }
-
-  {
-    brillo::ScopedUmask owner_only_umask(~(0600));
-    if (!base::ImportantFileWriter::WriteFileAtomically(
-            path, base::Base64Encode(hash))) {
-      LOG(ERROR) << "Failed to persist auth time secret hash to disk.";
-      return false;
-    }
-  }
-
-  return true;
+  return num_records;
 }
 
-std::unique_ptr<brillo::Blob> WebAuthnStorage::LoadAuthTimeSecretHash() {
-  DCHECK(allow_access_ && !sanitized_user_.empty());
-
-  FilePath path = FilePath(kDaemonStorePath)
-                      .Append(sanitized_user_)
-                      .Append(kWebAuthnDirName)
-                      .Append(kAuthTimeSecretHashFileName);
-  std::string hash_str_base64;
-  std::string hash_str;
-  if (!base::ReadFileToString(path, &hash_str_base64) ||
-      !base::Base64Decode(hash_str_base64, &hash_str)) {
-    LOG(ERROR) << "Failed to read auth time secret hash from disk.";
-    return nullptr;
+int WebAuthnStorage::DeleteRecordsInTimeRange(int64_t timestamp_min,
+                                              int64_t timestamp_max) {
+  size_t original_size = records_.size();
+  auto remove_begin =
+      std::remove_if(records_.begin(), records_.end(),
+                     [timestamp_min, timestamp_max](const auto& record) {
+                       return timestamp_min <= record.timestamp &&
+                              record.timestamp <= timestamp_max;
+                     });
+  for (auto record = remove_begin; record != records_.end(); record++) {
+    DeleteRecordWithCredentialId(record->credential_id);
   }
-
-  return std::make_unique<brillo::Blob>(hash_str.begin(), hash_str.end());
+  records_.erase(remove_begin, records_.end());
+  size_t updated_size = records_.size();
+  return original_size - updated_size;
 }
 
 void WebAuthnStorage::Reset() {
@@ -336,6 +359,33 @@ void WebAuthnStorage::Reset() {
 
 void WebAuthnStorage::SetRootPathForTesting(const base::FilePath& root_path) {
   root_path_ = root_path;
+}
+
+bool WebAuthnStorage::DeleteRecordWithCredentialId(
+    const std::string& credential_id) {
+  // Use the hash of credential_id for the filename because the hex encode of
+  // credential_id itself is too long and would cause ENAMETOOLONG.
+  const std::vector<uint8_t> credential_id_hash = util::Sha256(credential_id);
+  std::vector<FilePath> paths = {
+      FilePath(sanitized_user_), FilePath(kWebAuthnDirName),
+      FilePath(kRecordFileNamePrefix +
+               base::HexEncode(credential_id_hash.data(),
+                               credential_id_hash.size()))};
+
+  FilePath record_storage_filename = root_path_;
+  for (const auto& path : paths) {
+    DCHECK(!path.IsAbsolute());
+    record_storage_filename = record_storage_filename.Append(path);
+  }
+
+  if (!base::DeleteFile(record_storage_filename)) {
+    LOG(ERROR) << "Failed to delete file: " << record_storage_filename.value()
+               << ".";
+    return false;
+  }
+  VLOG(1) << "Successfully deleted file: " << record_storage_filename.value()
+          << ".";
+  return true;
 }
 
 }  // namespace u2f

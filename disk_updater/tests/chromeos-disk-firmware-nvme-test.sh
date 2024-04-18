@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2017 The Chromium OS Authors. All rights reserved.
+# Copyright 2017 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
@@ -31,11 +31,11 @@ declare -i id_idx
 
 disk_nvme_id_info() {
   local rc=${nvme_id_rc[${id_idx}]}
-  if [ ${rc} -eq 0 ]; then
+  if [ "${rc}" -eq 0 ]; then
     cat "tests/${nvme_id_files[${id_idx}]}.nvme"
   fi
   : $(( id_idx += 1))
-  return ${rc}
+  return "${rc}"
 }
 
 prepare_test() {
@@ -52,7 +52,7 @@ check_test() {
   local exp_result=$2_${test_id}
   local test_exp_rc=$3
   local test_rc=$4
-  if [ ${test_exp_rc} -ne ${test_rc} ]; then
+  if [ "${test_exp_rc}" -ne "${test_rc}" ]; then
     echo "Expected ${test_exp_rc}, got ${test_rc}"
     exit 1
   fi
@@ -153,5 +153,21 @@ nvme_id_rc=(0 0 0)
 run_test
 check_test 5 nvme_upgraded 0 $?
 echo NVME PASS 5
+
+disk_nmve_reset() {
+  echo "mock reset for $1"
+}
+
+# Upgrade BH799 device
+prepare_test
+nvme_id_files=(
+  'BAYHUB-HynixhC8aP_303064GB-Disk-10100050'
+  'BAYHUB-HynixhC8aP_303064GB-Disk-10100065'
+  'BAYHUB-HynixhC8aP_303064GB-Disk-10100065'
+)
+nvme_id_rc=(0 0 0)
+run_test
+check_test 6 nvme_upgraded 0 $?
+echo NVME PASS 6
 
 rm -rf "${DISK_TEMP}"

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,18 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/strings/string_piece.h>
 #include <dbus/message.h>
 #include <dbus/wilco_dtc_supportd/dbus-constants.h>
-#include <mojo/public/cpp/bindings/interface_request.h>
+#include <mojo/public/cpp/bindings/pending_remote.h>
 #include <mojo/public/cpp/system/buffer.h>
 
-#include "diagnostics/common/mojo_utils.h"
+#include "diagnostics/wilco_dtc_supportd/utils/mojo_utils.h"
 
 namespace diagnostics {
+namespace wilco {
 
 using MojomWilcoDtcSupportdService =
     chromeos::wilco_dtc_supportd::mojom::WilcoDtcSupportdService;
@@ -39,26 +40,26 @@ FakeBrowser::~FakeBrowser() = default;
 
 bool FakeBrowser::BootstrapMojoConnection(
     FakeMojoFdGenerator* fake_mojo_fd_generator,
-    const base::Closure& bootstrap_mojo_connection_callback) {
+    base::OnceClosure bootstrap_mojo_connection_callback) {
   if (!CallBootstrapMojoConnectionDBusMethod(fake_mojo_fd_generator)) {
-    bootstrap_mojo_connection_callback.Run();
+    std::move(bootstrap_mojo_connection_callback).Run();
     return false;
   }
 
-  CallGetServiceMojoMethod(bootstrap_mojo_connection_callback);
+  CallGetServiceMojoMethod(std::move(bootstrap_mojo_connection_callback));
   return true;
 }
 
 bool FakeBrowser::SendUiMessageToWilcoDtc(
     const std::string& json_message,
-    const base::Callback<void(mojo::ScopedHandle)>& callback) {
+    base::OnceCallback<void(mojo::ScopedHandle)> callback) {
   mojo::ScopedHandle handle = CreateReadOnlySharedMemoryRegionMojoHandle(
       base::StringPiece(json_message));
   if (!handle.is_valid()) {
     return false;
   }
   wilco_dtc_supportd_service_->SendUiMessageToWilcoDtc(std::move(handle),
-                                                       callback);
+                                                       std::move(callback));
   return true;
 }
 
@@ -78,7 +79,7 @@ bool FakeBrowser::CallBootstrapMojoConnectionDBusMethod(
 
   // Storage for the output data returned by the D-Bus call.
   std::unique_ptr<dbus::Response> response;
-  const auto response_writer_callback = base::Bind(
+  const auto response_writer_callback = base::BindRepeating(
       [](std::unique_ptr<dbus::Response>* response,
          std::unique_ptr<dbus::Response> passed_response) {
         *response = std::move(passed_response);
@@ -94,7 +95,7 @@ bool FakeBrowser::CallBootstrapMojoConnectionDBusMethod(
 }
 
 void FakeBrowser::CallGetServiceMojoMethod(
-    const base::Closure& get_service_mojo_method_callback) {
+    base::OnceClosure get_service_mojo_method_callback) {
   // Queue a Mojo GetService() method call that allows to establish full-duplex
   // Mojo communication with the tested Mojo service.
   // After this call, |wilco_dtc_supportd_service_| can be used for requests
@@ -111,7 +112,8 @@ void FakeBrowser::CallGetServiceMojoMethod(
   (*wilco_dtc_supportd_service_factory_)
       ->GetService(wilco_dtc_supportd_service_.BindNewPipeAndPassReceiver(),
                    std::move(wilco_dtc_supportd_client_proxy),
-                   get_service_mojo_method_callback);
+                   std::move(get_service_mojo_method_callback));
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

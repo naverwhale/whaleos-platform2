@@ -1,12 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <iterator>
 #include <set>
 #include <sstream>
 #include <vector>
-
-#include <base/stl_util.h>
 
 #include <libyuv.h>
 #include "camera3_test/camera3_exif_validator.h"
@@ -360,7 +359,7 @@ void Camera3ReprocessingTest::DoTemplateCapture(
 
   std::vector<camera3_stream_buffer_t> buffers;
   ASSERT_EQ(
-      0, cam_device_.AllocateOutputBuffersByStreams({output_stream}, &buffers));
+      0, cam_device_.PrepareOutputBuffersByStreams({output_stream}, &buffers));
   camera3_capture_request_t capture_request = {.frame_number = UINT32_MAX,
                                                .settings = metadata,
                                                .input_buffer = NULL,
@@ -393,7 +392,7 @@ void Camera3ReprocessingTest::DoReprocessingCapture(
         exif_test_data.thumbnail_resolution.Height()};
     EXPECT_EQ(0,
               UpdateMetadata(ANDROID_JPEG_THUMBNAIL_SIZE, thumbnail_resolution,
-                             base::size(thumbnail_resolution), in_metadata));
+                             std::size(thumbnail_resolution), in_metadata));
     EXPECT_EQ(0, UpdateMetadata(ANDROID_JPEG_ORIENTATION,
                                 &exif_test_data.orientation, 1, in_metadata));
     EXPECT_EQ(0, UpdateMetadata(ANDROID_JPEG_QUALITY,
@@ -413,8 +412,8 @@ void Camera3ReprocessingTest::DoReprocessingCapture(
 
   // prepare output_stream_buffer
   std::vector<camera3_stream_buffer_t> output_buffers;
-  ASSERT_EQ(0, cam_device_.AllocateOutputBuffersByStreams({out_stream},
-                                                          &output_buffers));
+  ASSERT_EQ(0, cam_device_.PrepareOutputBuffersByStreams({out_stream},
+                                                         &output_buffers));
 
   camera3_capture_request_t capture_request = {
       .frame_number = UINT32_MAX,

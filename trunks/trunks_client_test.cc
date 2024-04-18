@@ -1,28 +1,29 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "trunks/trunks_client_test.h"
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <random>
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/rand_util.h>
-#include <base/stl_util.h>
 #include <crypto/openssl_util.h>
 #include <crypto/libcrypto-compat.h>
 #include <crypto/scoped_openssl_types.h>
 #include <crypto/sha2.h>
+#include <libhwsec-foundation/crypto/rsa.h>
 #include <openssl/bn.h>
 #include <openssl/err.h>
 #include <openssl/rsa.h>
@@ -37,6 +38,10 @@
 #include "trunks/tpm_state.h"
 #include "trunks/tpm_utility.h"
 #include "trunks/trunks_factory_impl.h"
+
+using brillo::BlobFromString;
+using hwsec_foundation::CreateRSAFromNumber;
+using hwsec_foundation::kWellKnownExponent;
 
 namespace {
 
@@ -113,6 +118,7 @@ bool TrunksClientTest::SignTest() {
     LOG(ERROR) << "Error loading signing key: " << GetErrorString(result);
   }
   ScopedKeyHandle scoped_key(factory_, signing_key);
+  scoped_key.set_synchronized(true);
   session->SetEntityAuthorizationValue(key_authorization);
   std::string signature;
   result = utility->Sign(signing_key, TPM_ALG_RSASSA, TPM_ALG_SHA256,
@@ -155,6 +161,7 @@ bool TrunksClientTest::DecryptTest() {
     LOG(ERROR) << "Error loading decrypt key: " << GetErrorString(result);
   }
   ScopedKeyHandle scoped_key(factory_, decrypt_key);
+  scoped_key.set_synchronized(true);
   return PerformRSAEncryptAndDecrypt(scoped_key.get(), key_authorization,
                                      session.get());
 }
@@ -185,6 +192,7 @@ bool TrunksClientTest::ImportTest() {
     return false;
   }
   ScopedKeyHandle scoped_key(factory_, key_handle);
+  scoped_key.set_synchronized(true);
   return PerformRSAEncryptAndDecrypt(scoped_key.get(), key_authorization,
                                      session.get());
 }
@@ -212,6 +220,7 @@ bool TrunksClientTest::AuthChangeTest() {
     LOG(ERROR) << "Error loading change auth key: " << GetErrorString(result);
   }
   ScopedKeyHandle scoped_key(factory_, key_handle);
+  scoped_key.set_synchronized(true);
   session->SetEntityAuthorizationValue("old_pass");
   result = utility->ChangeKeyAuthorizationData(
       key_handle, key_authorization, session->GetDelegate(), &key_blob);
@@ -273,7 +282,9 @@ bool TrunksClientTest::VerifyKeyCreationTest() {
     return false;
   }
   ScopedKeyHandle certify_key(factory_, key_handle);
+  certify_key.set_synchronized(true);
   ScopedKeyHandle alternate_key(factory_, alternate_key_handle);
+  alternate_key.set_synchronized(true);
   result = utility->CertifyCreation(certify_key.get(), creation_blob);
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << "Error certifying key: " << GetErrorString(result);
@@ -307,6 +318,7 @@ bool TrunksClientTest::SealedDataTest() {
   std::string auth_value("auth_value");
   std::string sealed_data;
   result = utility->SealData(data_to_seal, policy_digest, auth_value,
+                             /*require_admin_with_policy=*/true,
                              session->GetDelegate(), &sealed_data);
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << "Error creating Sealed Object: " << GetErrorString(result);
@@ -394,6 +406,7 @@ bool TrunksClientTest::SealedToMultiplePCRDataTest() {
   std::string data_to_seal("seal_data");
   std::string sealed_data;
   result = utility->SealData(data_to_seal, policy_digest, "",
+                             /*require_admin_with_policy=*/true,
                              session->GetDelegate(), &sealed_data);
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << "Error creating Sealed Object: " << GetErrorString(result);
@@ -532,7 +545,7 @@ bool TrunksClientTest::PolicyAuthValueTest() {
     return false;
   }
   ScopedKeyHandle scoped_key(factory_, key_handle);
-
+  scoped_key.set_synchronized(true);
   // Now we can reset the hmac_session.
   hmac_session.reset();
 
@@ -664,7 +677,7 @@ bool TrunksClientTest::PolicyAndTest() {
     return false;
   }
   ScopedKeyHandle scoped_key(factory_, key_handle);
-
+  scoped_key.set_synchronized(true);
   // Now we can reset the hmac_session.
   hmac_session.reset();
 
@@ -851,7 +864,7 @@ bool TrunksClientTest::PolicyOrTest() {
     return false;
   }
   ScopedKeyHandle scoped_key(factory_, key_handle);
-
+  scoped_key.set_synchronized(true);
   // Now we can reset the hmac_session.
   hmac_session.reset();
 
@@ -937,7 +950,7 @@ bool TrunksClientTest::NvramTest(const std::string& owner_password) {
     return false;
   }
   // Setup auto-cleanup of the NVRAM space.
-  auto cleanup = base::Bind(
+  auto cleanup = base::BindOnce(
       [](HmacSession* session, const std::string& owner_password,
          TpmUtility* utility, uint32_t index) {
         session->SetEntityAuthorizationValue(owner_password);
@@ -947,7 +960,7 @@ bool TrunksClientTest::NvramTest(const std::string& owner_password) {
         }
       },
       session.get(), owner_password, utility.get(), index);
-  base::ScopedClosureRunner scoper(cleanup);
+  base::ScopedClosureRunner scoper(std::move(cleanup));
 
   session->SetEntityAuthorizationValue(owner_password);
   result = utility->WriteNVSpace(index, 0, nv_data, true /*owner*/,
@@ -1014,6 +1027,7 @@ bool TrunksClientTest::ManyKeysTest() {
   std::map<TPM_HANDLE, std::string> public_key_map;
   for (size_t i = 0; i < kNumKeys; ++i) {
     std::unique_ptr<ScopedKeyHandle> key_handle(new ScopedKeyHandle(factory_));
+    key_handle->set_synchronized(true);
     std::string public_key;
     if (!LoadSigningKey(key_handle.get(), &public_key)) {
       LOG(ERROR) << "Error loading key " << i << " into TPM.";
@@ -1032,10 +1046,7 @@ bool TrunksClientTest::ManyKeysTest() {
       LOG(ERROR) << "Error signing with key " << i;
     }
   }
-  // TODO(emaxx): This needs to be replaced by base::RandomShuffle() introduced
-  // by https://crrev.com/c/1023495.
-  std::mt19937 urng(base::RandUint64());
-  std::shuffle(key_handles.begin(), key_handles.end(), urng);
+  base::RandomShuffle(key_handles.begin(), key_handles.end());
   for (size_t i = 0; i < kNumKeys; ++i) {
     const ScopedKeyHandle& key_handle = *key_handles[i];
     const std::string& public_key = public_key_map[key_handle.get()];
@@ -1063,6 +1074,7 @@ bool TrunksClientTest::ManySessionsTest() {
   }
   CHECK_EQ(sessions.size(), kNumSessions);
   ScopedKeyHandle key_handle(factory_);
+  key_handle.set_synchronized(true);
   std::string public_key;
   if (!LoadSigningKey(&key_handle, &public_key)) {
     return false;
@@ -1072,10 +1084,7 @@ bool TrunksClientTest::ManySessionsTest() {
       LOG(ERROR) << "Error signing with hmac session " << i;
     }
   }
-  // TODO(emaxx): This needs to be replaced by base::RandomShuffle() introduced
-  // by https://crrev.com/c/1023495.
-  std::mt19937 urng(base::RandUint64());
-  std::shuffle(sessions.begin(), sessions.end(), urng);
+  base::RandomShuffle(sessions.begin(), sessions.end());
   for (size_t i = 0; i < kNumSessions; ++i) {
     if (!SignAndVerify(key_handle, public_key, sessions[i]->GetDelegate())) {
       LOG(ERROR) << "Error signing with shuffled hmac session " << i;
@@ -1181,22 +1190,17 @@ bool TrunksClientTest::PerformRSAEncryptAndDecrypt(
 void TrunksClientTest::GenerateRSAKeyPair(std::string* modulus,
                                           std::string* prime_factor,
                                           std::string* public_key) {
-  crypto::ScopedRSA rsa(RSA_new());
-  CHECK(rsa);
-  crypto::ScopedBIGNUM exponent(BN_new());
-  CHECK(exponent);
-  CHECK(BN_set_word(exponent.get(), RSA_F4));
-  CHECK(RSA_generate_key_ex(rsa.get(), 2048, exponent.get(), nullptr))
-      << "Failed to generate RSA key: " << GetOpenSSLError();
+  crypto::ScopedRSA rsa = hwsec_foundation::GenerateRsa(2048);
+  CHECK(rsa) << "Failed to generate RSA key: " << GetOpenSSLError();
   modulus->resize(RSA_size(rsa.get()), 0);
   const BIGNUM* n;
   RSA_get0_key(rsa.get(), &n, nullptr, nullptr);
-  CHECK(BN_bn2bin(n, reinterpret_cast<unsigned char*>(base::data(*modulus))));
+  CHECK(BN_bn2bin(n, reinterpret_cast<unsigned char*>(std::data(*modulus))));
   const BIGNUM* p;
   RSA_get0_factors(rsa.get(), &p, nullptr);
   prime_factor->resize(BN_num_bytes(p), 0);
-  CHECK(BN_bn2bin(p,
-                  reinterpret_cast<unsigned char*>(base::data(*prime_factor))));
+  CHECK(
+      BN_bn2bin(p, reinterpret_cast<unsigned char*>(std::data(*prime_factor))));
   if (public_key) {
     unsigned char* buffer = NULL;
     int length = i2d_RSAPublicKey(rsa.get(), &buffer);
@@ -1217,7 +1221,7 @@ bool TrunksClientTest::VerifyRSASignature(const std::string& public_key,
   auto digest_buffer = reinterpret_cast<const unsigned char*>(digest.data());
   std::string mutable_signature(signature);
   unsigned char* signature_buffer =
-      reinterpret_cast<unsigned char*>(base::data(mutable_signature));
+      reinterpret_cast<unsigned char*>(std::data(mutable_signature));
   return (RSA_verify(NID_sha256, digest_buffer, digest.size(), signature_buffer,
                      signature.size(), rsa.get()) == 1);
 }
@@ -1279,17 +1283,11 @@ bool TrunksClientTest::GetRSAPublicKeyFromHandle(
     LOG(ERROR) << __func__ << GetErrorString(result);
     return false;
   }
-  // Copied from cryptohome::PublicAreaToPublicKeyDER
-  crypto::ScopedRSA rsa(RSA_new());
+
+  brillo::Blob modulus =
+      BlobFromString(StringFrom_TPM2B_PUBLIC_KEY_RSA(public_area.unique.rsa));
+  crypto::ScopedRSA rsa = CreateRSAFromNumber(modulus, kWellKnownExponent);
   CHECK(rsa);
-  crypto::ScopedBIGNUM e(BN_new()), n(BN_new());
-  CHECK(e);
-  CHECK(n);
-  CHECK(BN_set_word(e.get(), 0x10001)) << "Error setting exponent for RSA.";
-  CHECK(BN_bin2bn(public_area.unique.rsa.buffer, public_area.unique.rsa.size,
-                  n.get()))
-      << "Error setting modulus for RSA.";
-  CHECK(RSA_set0_key(rsa.get(), n.release(), e.release(), nullptr));
 
   int der_length = i2d_RSAPublicKey(rsa.get(), nullptr);
   if (der_length < 0) {
@@ -1298,7 +1296,7 @@ bool TrunksClientTest::GetRSAPublicKeyFromHandle(
   }
   public_key->resize(der_length);
   unsigned char* der_buffer =
-      reinterpret_cast<unsigned char*>(base::data(*public_key));
+      reinterpret_cast<unsigned char*>(std::data(*public_key));
   der_length = i2d_RSAPublicKey(rsa.get(), &der_buffer);
   if (der_length < 0) {
     LOG(ERROR) << "Failed to DER-encode public key.";
@@ -1428,6 +1426,7 @@ bool TrunksClientTest::PolicyFidoSignedTest(TPM_ALG_ID signing_algo) {
   std::string sealed_data;
 
   result = utility->SealData(data_to_seal, policy_digest, "",
+                             /*require_admin_with_policy=*/true,
                              session->GetDelegate(), &sealed_data);
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << "Error creating Sealed Object: " << GetErrorString(result);

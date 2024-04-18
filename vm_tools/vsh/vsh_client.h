@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,6 @@
 
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <brillo/asynchronous_signal_handler.h>
 #include <brillo/message_loops/message_loop.h>
 #include <google/protobuf/message_lite.h>
@@ -20,8 +19,7 @@
 
 #include "vm_tools/vsh/scoped_termios.h"
 
-namespace vm_tools {
-namespace vsh {
+namespace vm_tools::vsh {
 
 // VshClient encapsulates a vsh client session.
 class VshClient {
@@ -39,8 +37,8 @@ class VshClient {
                                                      base::ScopedFD stderr_fd);
   ~VshClient() = default;
 
-  int32_t container_shell_pid();
-  int exit_code();
+  int32_t container_shell_pid() const;
+  int exit_code() const;
 
   // Helper function defined in vsh_client_fuzzer.cc.
   friend void vsh_client_fuzzer_run(const HostMessage& msg);
@@ -67,7 +65,7 @@ class VshClient {
   void CancelStdinTask();
 
   base::ScopedFD sock_fd_;
-  int32_t container_shell_pid_;
+  int32_t container_shell_pid_ = 0;
   std::unique_ptr<base::FileDescriptorWatcher::Controller> sock_watcher_;
   std::unique_ptr<base::FileDescriptorWatcher::Controller> stdin_watcher_;
 
@@ -83,7 +81,6 @@ class VshClient {
   int exit_code_;
 };
 
-}  // namespace vsh
-}  // namespace vm_tools
+}  // namespace vm_tools::vsh
 
 #endif  // VM_TOOLS_VSH_VSH_CLIENT_H_

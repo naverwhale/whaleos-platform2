@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 
 #include "hermes/context.h"
 #include "hermes/dbus_bindings/org.chromium.Hermes.Manager.h"
@@ -25,7 +26,7 @@ class Manager final : public EuiccManagerInterface {
   void OnEuiccUpdated(uint8_t physical_slot, EuiccSlotInfo slot_info) override;
   void OnEuiccRemoved(uint8_t physical_slot) override;
   void OnLogicalSlotUpdated(uint8_t physical_slot,
-                            base::Optional<uint8_t> logical_slot) override;
+                            std::optional<uint8_t> logical_slot) override;
 
  private:
   void UpdateAvailableEuiccsProperty();

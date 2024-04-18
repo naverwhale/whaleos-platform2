@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include <base/strings/string_piece.h>
 #include <base/strings/string_split.h>
 #include <brillo/file_utils.h>
+#include <brillo/files/file_util.h>
 #include <chromeos/dbus/debugd/dbus-constants.h>
 
 #include "debugd/src/process_with_output.h"
@@ -27,7 +28,7 @@ constexpr char kJobName[] = "u2fd";
 
 constexpr const char* kKnownFlags[] = {
     u2f_flags::kU2f,      u2f_flags::kG2f,           u2f_flags::kVerbose,
-    u2f_flags::kUserKeys, u2f_flags::kAllowlistData,
+    u2f_flags::kUserKeys, u2f_flags::kAllowlistData, u2f_flags::kCorpProtocol,
 };
 
 int ControlU2fd(bool start) {
@@ -60,7 +61,7 @@ std::string U2fTool::SetFlags(const std::string& flags) {
     all_flags.insert(cur);
 
     // Clean-up existing flag.
-    base::DeleteFile(FlagFile(cur));
+    brillo::DeleteFile(FlagFile(cur));
   }
 
   // Iterate over the new flags.

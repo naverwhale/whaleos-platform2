@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,20 +8,19 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/macros.h>
+#include <base/functional/bind.h>
 #include <base/run_loop.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
 
 #include "power_manager/powerd/system/audio_observer.h"
 #include "power_manager/powerd/system/dbus_wrapper_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 namespace {
 
 // Trivial implementation of AudioObserver for unit tests.
@@ -53,20 +52,20 @@ class TestObserver : public AudioObserver {
 
 }  // namespace
 
-class AudioClientTest : public testing::Test {
+class AudioClientTest : public TestEnvironment {
  public:
   AudioClientTest() {
     cras_proxy_ = dbus_wrapper_.GetObjectProxy(cras::kCrasServiceName,
                                                cras::kCrasServicePath);
-    dbus_wrapper_.SetMethodCallback(
-        base::Bind(&AudioClientTest::HandleMethodCall, base::Unretained(this)));
+    dbus_wrapper_.SetMethodCallback(base::BindRepeating(
+        &AudioClientTest::HandleMethodCall, base::Unretained(this)));
     CHECK(run_dir_.CreateUniqueTempDir());
     CHECK(run_dir_.IsValid());
   }
   AudioClientTest(const AudioClientTest&) = delete;
   AudioClientTest& operator=(const AudioClientTest&) = delete;
 
-  ~AudioClientTest() override {}
+  ~AudioClientTest() override = default;
 
   void Init() { audio_client_.Init(&dbus_wrapper_, run_dir_.GetPath()); }
 
@@ -273,5 +272,4 @@ TEST_F(AudioClientTest, PowerdCrashAfterAudioSuspended) {
   EXPECT_FALSE(audio_suspended_);
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

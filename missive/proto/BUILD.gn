@@ -1,48 +1,132 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.  Use
-# of this source code is governed by a BSD-style license that can
-# be found in the LICENSE file.
+# Copyright 2021 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
 import("//common-mk/proto_library.gni")
 
-proto_library("status_proto") {
-  sources = [ "status.proto" ]
+# Temporary replacement for `Priority_Name` that does
+# not work in certain CQ.
+# TODO(b/294756107): Remove this function once fixed.
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+  ]
 
-  proto_in_dir = "//missive/proto"
+  if (use.fuzzer) {
+    pkg_deps += [ "protobuf" ]
+  } else {
+    pkg_deps += [ "protobuf-lite" ]
+  }
+}
+
+source_set("priority_name") {
+  sources = [
+    "priority_name.cc",
+    "priority_name.h",
+  ]
+
+  configs += [ ":target_defaults" ]
+
+  deps = [ ":libmissiveprotorecordconstants" ]
+}
+
+# Only used by the reporting-proto ebuild.
+group("all") {
+  deps = [ ":libmissive-interface-goprotos" ]
+}
+
+proto_library("libmissiveprotostatus") {
+  sources = [ "synced/pipeline/status.proto" ]
+
+  proto_in_dir = "//missive/proto/synced/pipeline"
   proto_out_dir = "include/missive/proto"
   standalone = true
 }
 
 # Record constants for use with the reporting messaging library.
-proto_library("record_constants") {
-  sources = [ "record_constants.proto" ]
+proto_library("libmissiveprotorecordconstants") {
+  sources = [ "synced/pipeline/record_constants.proto" ]
 
-  proto_in_dir = "//missive/proto"
+  proto_in_dir = "//missive/proto/synced/pipeline"
   proto_out_dir = "include/missive/proto"
   standalone = true
 }
 
 # Record definitions for reporting.
-proto_library("record_proto") {
-  sources = [ "record.proto" ]
+proto_library("libmissiveprotorecord") {
+  sources = [ "synced/pipeline/record.proto" ]
 
-  proto_in_dir = "//missive/proto"
-  proto_out_dir = "include/missive/proto"
-  standalone = true
-
-  deps = [ ":record_constants" ]
-}
-
-proto_library("interface_proto") {
-  sources = [ "interface.proto" ]
-
-  proto_in_dir = "//missive/proto"
+  proto_in_dir = "//missive/proto/synced/pipeline"
   proto_out_dir = "include/missive/proto"
   standalone = true
 
   deps = [
-    ":record_constants",
-    ":record_proto",
-    ":status_proto",
+    ":libmissiveprotohealth",
+    ":libmissiveprotorecordconstants",
+  ]
+}
+
+proto_library("test_proto") {
+  sources = [ "test.proto" ]
+
+  proto_in_dir = "//missive/proto"
+  proto_out_dir = "include/missive/proto"
+  standalone = true
+}
+
+proto_library("libmissiveprotohealth") {
+  sources = [ "synced/pipeline/health.proto" ]
+
+  proto_in_dir = "//missive/proto/synced/pipeline"
+  proto_out_dir = "include/missive/proto"
+  standalone = true
+
+  deps = [
+    ":libmissiveprotorecordconstants",
+    ":libmissiveprotostatus",
+  ]
+}
+
+proto_library("libmissiveprotointerface") {
+  sources = [ "synced/pipeline/interface.proto" ]
+
+  proto_in_dir = "//missive/proto/synced/pipeline"
+  proto_out_dir = "include/missive/proto/"
+  standalone = true
+
+  deps = [
+    ":libmissiveprotorecord",
+    ":libmissiveprotorecordconstants",
+    ":libmissiveprotostatus",
+  ]
+}
+
+goproto_library("libmissive-interface-goprotos") {
+  proto_in_dir = "//missive/proto/synced/pipeline"
+  proto_out_dir = "go/src/"
+  proto_lib_dirs = [ "//missive/proto/" ]
+  import_mapping = [
+    "app_types.proto=chromiumos/reporting",
+    "health.proto=chromiumos/reporting",
+    "metric_data.proto=chromiumos/reporting",
+    "pipeline_interface_sym_for_tast.proto=chromiumos/reporting",
+    "record.proto=chromiumos/reporting",
+    "record_constants.proto=chromiumos/reporting",
+    "status.proto=chromiumos/reporting",
+    "session_affiliated_user.proto=chromiumos/reporting",
+    "upload_tracker.proto=chromiumos/reporting",
+  ]
+  sources = [
+    "pipeline_interface_sym_for_tast.proto",  # b/261096728
+    "synced/pipeline/app_types.proto",
+    "synced/pipeline/health.proto",
+    "synced/pipeline/metric_data.proto",
+    "synced/pipeline/record.proto",
+    "synced/pipeline/record_constants.proto",
+    "synced/pipeline/session_affiliated_user.proto",
+    "synced/pipeline/status.proto",
+    "synced/pipeline/upload_tracker.proto",
   ]
 }

@@ -1,20 +1,22 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <cryptohome/proto_bindings/auth_factor.pb.h>
 #include <sysexits.h>
 #include <memory>
 #include <string>
 
-#include <base/bind.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/memory/scoped_refptr.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/daemons/daemon.h>
 #include <brillo/dbus/mock_dbus_method_response.h>
 #include <brillo/errors/error.h>
+#include <brillo/files/file_util.h>
 #include <chromeos/dbus/service_constants.h>
 #include <cryptohome/proto_bindings/UserDataAuth.pb.h>
 #include <dbus/bus.h>
@@ -23,14 +25,15 @@
 #include <fuzzer/FuzzedDataProvider.h>
 #include <gmock/gmock.h>
 #include <google/protobuf/descriptor.h>
+#include <libhwsec/factory/fuzzed_factory.h>
 #include <libprotobuf-mutator/src/libfuzzer/libfuzzer_macro.h>
 #include <metrics/metrics_library_mock.h>
-#include <trunks/fuzzed_command_transceiver.h>
 #include <user_data_auth-client-test/user_data_auth/dbus-proxy-mocks.h>
 
 #include "u2fd/fuzzers/fuzzed_allowlisting_util_factory.h"
 #include "u2fd/fuzzers/fuzzed_user_state.h"
 #include "u2fd/fuzzers/webauthn_fuzzer_data.pb.h"
+#include "u2fd/u2f_command_processor_vendor.h"
 #include "u2fd/webauthn_handler.h"
 
 namespace {
@@ -48,7 +51,6 @@ using google::protobuf::Reflection;
 
 constexpr char kStorageRootPath[] = "/tmp/webauthn_fuzzer";
 const std::string kCredentialSecret('E', 64);
-constexpr size_t kMaxTpmMessageLength = 512;
 
 class WebAuthnFuzzer : public brillo::Daemon {
  public:
@@ -86,9 +88,7 @@ class WebAuthnFuzzer : public brillo::Daemon {
 
     PrepareMockCryptohome();
 
-    tpm_proxy_ = std::make_unique<u2f::TpmVendorCommandProxy>(
-        std::make_unique<trunks::FuzzedCommandTransceiver>(
-            &data_provider_, kMaxTpmMessageLength));
+    hwsec_factory_ = std::make_unique<hwsec::FuzzedFactory>(data_provider_);
 
     user_state_ = std::make_unique<u2f::FuzzedUserState>(&data_provider_);
 
@@ -104,14 +104,17 @@ class WebAuthnFuzzer : public brillo::Daemon {
         allowlisting_util_factory_->CreateAllowlistingUtil();
 
     PrepareStorage();
+    auto u2f_command_processor =
+        std::make_unique<u2f::U2fCommandProcessorVendor>(
+            hwsec_factory_->GetU2fVendorFrontend(), request_presence);
 
-    handler_->Initialize(mock_bus_.get(), tpm_proxy_.get(), user_state_.get(),
-                         u2f_mode, request_presence,
+    handler_->Initialize(mock_bus_.get(), user_state_.get(), u2f_mode,
+                         std::move(u2f_command_processor),
                          std::move(allowlisting_util), &mock_metrics_);
   }
 
   void ScheduleFuzzDbusApi() {
-    base::SequencedTaskRunnerHandle::Get()->PostTask(
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(&WebAuthnFuzzer::FuzzDbusApi, base::Unretained(this)));
   }
@@ -176,7 +179,7 @@ class WebAuthnFuzzer : public brillo::Daemon {
     EXPECT_CALL(*mock_auth_dialog_proxy_, CallMethodAndBlock(_, _))
         .WillRepeatedly([this](Unused, Unused) {
           GenerateMockAuthDialogResponse();
-          return std::move(mock_auth_dialog_response_);
+          return base::ok(std::move(mock_auth_dialog_response_));
         });
   }
 
@@ -201,9 +204,10 @@ class WebAuthnFuzzer : public brillo::Daemon {
                                           auto success_callback,
                                           auto error_callback, int timeout_ms) {
             if (success) {
-              base::SequencedTaskRunnerHandle::Get()->PostNonNestableTask(
-                  FROM_HERE, base::BindOnce(std::move(success_callback),
-                                            get_web_authn_secret_reply));
+              base::SequencedTaskRunner::GetCurrentDefault()
+                  ->PostNonNestableTask(
+                      FROM_HERE, base::BindOnce(std::move(success_callback),
+                                                get_web_authn_secret_reply));
             } else {
               // TODO(domen): Prevent showing the error message.
               // |brillo::Error| shows the error message regardless of the
@@ -214,15 +218,17 @@ class WebAuthnFuzzer : public brillo::Daemon {
           });
     }
 
-    // GetKeyData
+    // ListAuthFactors
     {
-      bool has_key_data = data_provider_.ConsumeBool();
-      EXPECT_CALL(*mock_cryptohome_proxy, GetKeyData)
-          .WillRepeatedly([has_key_data](auto in_request, auto out_reply,
-                                         brillo::ErrorPtr* error,
-                                         int timeout_ms) {
-            if (has_key_data)
-              out_reply->add_key_data();
+      bool has_pin_factor = data_provider_.ConsumeBool();
+      EXPECT_CALL(*mock_cryptohome_proxy, ListAuthFactors)
+          .WillRepeatedly([has_pin_factor](auto in_request, auto out_reply,
+                                           brillo::ErrorPtr* error,
+                                           int timeout_ms) {
+            if (has_pin_factor) {
+              auto* factor = out_reply->add_configured_auth_factors();
+              factor->set_type(user_data_auth::AUTH_FACTOR_TYPE_PIN);
+            }
             return true;
           });
     }
@@ -232,7 +238,7 @@ class WebAuthnFuzzer : public brillo::Daemon {
   }
 
   void PrepareStorage() {
-    if (!base::DeletePathRecursively(base::FilePath(kStorageRootPath))) {
+    if (!brillo::DeletePathRecursively(base::FilePath(kStorageRootPath))) {
       PLOG(FATAL) << "Failed to clear directory for WebAuthnStorage.";
     }
     auto webauthn_storage = std::make_unique<u2f::WebAuthnStorage>();
@@ -243,7 +249,7 @@ class WebAuthnFuzzer : public brillo::Daemon {
   std::unique_ptr<u2f::WebAuthnHandler> handler_;
   scoped_refptr<dbus::MockBus> mock_bus_;
   scoped_refptr<dbus::MockObjectProxy> mock_auth_dialog_proxy_;
-  std::unique_ptr<u2f::TpmVendorCommandProxy> tpm_proxy_;
+  std::unique_ptr<hwsec::FuzzedFactory> hwsec_factory_;
   std::unique_ptr<dbus::Response> mock_auth_dialog_response_;
   std::unique_ptr<u2f::FuzzedUserState> user_state_;
   std::unique_ptr<u2f::FuzzedAllowlistingUtilFactory>

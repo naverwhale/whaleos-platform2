@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,12 +22,6 @@ using ::testing::DoAll;
 namespace cryptohome {
 
 namespace {
-constexpr char kPhysicalVolumeReport[] =
-    "{\"report\": [{ \"pv\": [ {\"pv_name\":\"/dev/mmcblk0p1\", "
-    "\"vg_name\":\"stateful\"}]}]}";
-constexpr char kThinpoolReport[] =
-    "{\"report\": [{ \"lv\": [ {\"lv_name\":\"thinpool\", "
-    "\"vg_name\":\"stateful\"}]}]}";
 constexpr char kLogicalVolumeReport[] =
     "{\"report\": [{ \"lv\": [ {\"lv_name\":\"foo\", "
     "\"vg_name\":\"stateful\"}]}]}";
@@ -36,55 +30,39 @@ constexpr char kLogicalVolumeReport[] =
 class LogicalVolumeBackingDeviceTest : public ::testing::Test {
  public:
   LogicalVolumeBackingDeviceTest()
-      : config_({.type = BackingDeviceType::kLogicalVolumeBackingDevice,
+      : lvm_command_runner_(std::make_shared<brillo::MockLvmCommandRunner>()),
+        mock_lvm_(std::make_unique<brillo::LogicalVolumeManager>(
+            lvm_command_runner_)),
+        config_({.type = BackingDeviceType::kLogicalVolumeBackingDevice,
                  .name = "foo",
                  .size = 1024,
-                 .logical_volume = {.thinpool_name = "thinpool",
-                                    .physical_volume =
-                                        base::FilePath("/dev/mmcblk0p1")}}),
-        lvm_command_runner_(std::make_shared<brillo::MockLvmCommandRunner>()),
+                 .logical_volume =
+                     {.vg = std::make_shared<brillo::VolumeGroup>(
+                          "stateful", lvm_command_runner_),
+                      .thinpool = std::make_shared<brillo::Thinpool>(
+                          "thinpool", "stateful", lvm_command_runner_)}}),
         backing_device_(std::make_unique<LogicalVolumeBackingDevice>(
-            config_,
-            std::make_unique<brillo::LogicalVolumeManager>(
-                lvm_command_runner_))) {}
+            config_, mock_lvm_.get())) {}
   ~LogicalVolumeBackingDeviceTest() override = default;
 
-  void ExpectVolumeGroup() {
-    std::vector<std::string> pvdisplay = {
-        "/sbin/pvdisplay", "-C", "--reportformat", "json",
-        config_.logical_volume.physical_volume.value()};
-    EXPECT_CALL(*lvm_command_runner_.get(), RunProcess(pvdisplay, _))
-        .WillRepeatedly(
-            DoAll(SetArgPointee<1>(std::string(kPhysicalVolumeReport)),
-                  Return(true)));
-  }
-
-  void ExpectThinpool() {
-    std::vector<std::string> thinpool_display = {
-        "/sbin/lvdisplay", "-S",   "pool_lv=\"\"",     "-C",
-        "--reportformat",  "json", "stateful/thinpool"};
-    EXPECT_CALL(*lvm_command_runner_.get(), RunProcess(thinpool_display, _))
-        .WillRepeatedly(DoAll(SetArgPointee<1>(std::string(kThinpoolReport)),
-                              Return(true)));
-  }
   void ExpectLogicalVolume() {
     std::vector<std::string> thinpool_display = {
-        "/sbin/lvdisplay", "-S",   "pool_lv!=\"\"",           "-C",
-        "--reportformat",  "json", "stateful/" + config_.name};
+        "/sbin/lvs",      "-S",   "pool_lv!=\"\"",
+        "--reportformat", "json", "stateful/" + config_.name};
     EXPECT_CALL(*lvm_command_runner_.get(), RunProcess(thinpool_display, _))
-        .WillRepeatedly(DoAll(
-            SetArgPointee<1>(std::string(kLogicalVolumeReport)), Return(true)));
+        .WillOnce(DoAll(SetArgPointee<1>(std::string(kLogicalVolumeReport)),
+                        Return(true)));
   }
 
  protected:
-  BackingDeviceConfig config_;
   std::shared_ptr<brillo::MockLvmCommandRunner> lvm_command_runner_;
+  std::unique_ptr<brillo::LogicalVolumeManager> mock_lvm_;
+  BackingDeviceConfig config_;
 
   std::unique_ptr<BackingDevice> backing_device_;
 };
 
 TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDeviceSetup) {
-  ExpectVolumeGroup();
   ExpectLogicalVolume();
 
   std::vector<std::string> lv_enable = {"lvchange", "-ay", "stateful/foo"};
@@ -96,9 +74,6 @@ TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDeviceSetup) {
 }
 
 TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDeviceCreate) {
-  ExpectVolumeGroup();
-  ExpectThinpool();
-
   std::vector<std::string> lv_create = {
       "lvcreate",   "--thin",           "-V", "1024M", "-n",
       config_.name, "stateful/thinpool"};
@@ -110,7 +85,6 @@ TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDeviceCreate) {
 }
 
 TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDeviceTeardown) {
-  ExpectVolumeGroup();
   ExpectLogicalVolume();
 
   std::vector<std::string> lv_disable = {"lvchange", "-an", "stateful/foo"};
@@ -122,7 +96,6 @@ TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDeviceTeardown) {
 }
 
 TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDevicePurge) {
-  ExpectVolumeGroup();
   ExpectLogicalVolume();
 
   std::vector<std::string> lv_disable = {"lvremove", "--force", "stateful/foo"};
@@ -131,6 +104,34 @@ TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDevicePurge) {
       .WillOnce(Return(true));
 
   EXPECT_TRUE(backing_device_->Purge());
+}
+
+TEST_F(LogicalVolumeBackingDeviceTest, LogicalVolumeDeviceCaching) {
+  // Expect logical volume object to be fetched once.
+  ExpectLogicalVolume();
+
+  std::vector<std::string> lv_enable = {"lvchange", "-ay", "stateful/foo"};
+  std::vector<std::string> lv_purge = {"lvremove", "--force", "stateful/foo"};
+
+  EXPECT_CALL(*lvm_command_runner_.get(), RunCommand(lv_enable))
+      .Times(1)
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(backing_device_->Setup());
+  EXPECT_EQ(backing_device_->GetPath(), base::FilePath("/dev/stateful/foo"));
+
+  EXPECT_CALL(*lvm_command_runner_.get(), RunCommand(lv_purge))
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_TRUE(backing_device_->Purge());
+
+  // Post purge, the logical volume object will be re-fetched.
+  ExpectLogicalVolume();
+  EXPECT_CALL(*lvm_command_runner_.get(), RunCommand(lv_enable))
+      .Times(1)
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(backing_device_->Setup());
 }
 
 }  // namespace cryptohome

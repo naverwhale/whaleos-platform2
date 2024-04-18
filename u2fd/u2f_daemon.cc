@@ -1,41 +1,40 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "u2fd/u2f_daemon.h"
 
+#include <sysexits.h>
+
 #include <functional>
 #include <string>
-#include <sysexits.h>
 #include <utility>
 #include <vector>
 
-#include <attestation/proto_bindings/interface.pb.h>
-#include <attestation-client/attestation/dbus-constants.h>
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/synchronization/waitable_event.h>
 #include <dbus/u2f/dbus-constants.h>
+#include <libhwsec/factory/factory_impl.h>
 #include <policy/device_policy.h>
 #include <policy/libpolicy.h>
-#include <trunks/cr50_headers/virtual_nvmem.h>
+#include <user_data_auth-client/user_data_auth/dbus-proxies.h>
 
-#include "u2fd/u2fhid.h"
-#include "u2fd/uhid_device.h"
+#include "u2fd/u2f_command_processor.h"
+#include "u2fd/u2f_command_processor_generic.h"
+#include "u2fd/u2f_command_processor_vendor.h"
+#include "u2fd/u2fhid_service_impl.h"
 
 namespace u2f {
 
 namespace {
 
-constexpr char kDeviceName[] = "Integrated U2F";
 constexpr int kWinkSignalMinIntervalMs = 1000;
-constexpr base::TimeDelta kRequestPresenceDelay =
-    base::TimeDelta::FromMilliseconds(500);
+constexpr base::TimeDelta kRequestPresenceDelay = base::Milliseconds(500);
 
-// The U2F counter stored in cr50 is stored in a format resistant to rollbacks,
-// and that guarantees monotonicity even in the presence of partial writes.
-// See //platform/ec/include/nvcounter.h
+// The U2F counter stored in cr50 is stored in a format resistant to
+// rollbacks, and that guarantees monotonicity even in the presence of partial
+// writes. See //platform/ec/include/nvcounter.h
 //
 // The counter is stored across 2 pages of flash - a high page and a low page,
 // with each page containing 512 4-byte words. The counter increments using
@@ -45,10 +44,10 @@ constexpr base::TimeDelta kRequestPresenceDelay =
 // the maximum value below.
 // See //platform/ec/common/nvcounter.c for more details.
 constexpr uint32_t kMaxCr50U2fCounterValue = (2048 * 4097) + 4096;
-// If we are supporting legacy key handles, we initialize the counter such that
-// it is always larger than the maximum possible value cr50 could have returned,
-// and therefore guarantee that we provide a monotonically increasing counter
-// value for migrated key handles.
+// If we are supporting legacy key handles, we initialize the counter such
+// that it is always larger than the maximum possible value cr50 could have
+// returned, and therefore guarantee that we provide a monotonically
+// increasing counter value for migrated key handles.
 constexpr uint32_t kLegacyKhCounterMin = kMaxCr50U2fCounterValue + 1;
 
 bool U2fPolicyReady() {
@@ -86,34 +85,6 @@ const char* U2fModeToString(U2fMode mode) {
   return "unknown";
 }
 
-U2fMode GetU2fMode(bool force_u2f, bool force_g2f) {
-  U2fMode policy_mode = ReadU2fPolicy();
-
-  LOG(INFO) << "Requested Mode: Policy[" << U2fModeToString(policy_mode)
-            << "], force_u2f[" << force_u2f << "], force_g2f[" << force_g2f
-            << "]";
-
-  // Always honor the administrator request to disable even if given
-  // contradictory override flags.
-  if (policy_mode == U2fMode::kDisabled) {
-    LOG(INFO) << "Mode: Disabled (explicitly by policy)";
-    return U2fMode::kDisabled;
-  }
-
-  if (force_g2f || policy_mode == U2fMode::kU2fExtended) {
-    LOG(INFO) << "Mode: U2F+extensions";
-    return U2fMode::kU2fExtended;
-  }
-
-  if (force_u2f || policy_mode == U2fMode::kU2f) {
-    LOG(INFO) << "Mode:U2F";
-    return U2fMode::kU2f;
-  }
-
-  LOG(INFO) << "Mode: Disabled";
-  return U2fMode::kDisabled;
-}
-
 void OnPolicySignalConnected(const std::string& interface,
                              const std::string& signal,
                              bool success) {
@@ -127,17 +98,23 @@ void OnPolicySignalConnected(const std::string& interface,
 
 U2fDaemon::U2fDaemon(bool force_u2f,
                      bool force_g2f,
+                     bool enable_corp_protocol,
                      bool g2f_allowlist_data,
-                     bool legacy_kh_fallback,
-                     uint32_t vendor_id,
-                     uint32_t product_id)
-    : brillo::DBusServiceDaemon(u2f::kU2FServiceName),
+                     bool legacy_kh_fallback)
+    : brillo::DBusServiceDaemon(kU2FServiceName),
       force_u2f_(force_u2f),
       force_g2f_(force_g2f),
+      enable_corp_protocol_(enable_corp_protocol),
       g2f_allowlist_data_(g2f_allowlist_data),
       legacy_kh_fallback_(legacy_kh_fallback),
-      vendor_id_(vendor_id),
-      product_id_(product_id) {}
+      service_started_(false),
+      hwsec_factory_(hwsec::ThreadingMode::kCurrentThread) {
+  auto u2f_vendor_frontend = hwsec_factory_.GetU2fVendorFrontend();
+  if (u2f_vendor_frontend->IsEnabled().value_or(false)) {
+    u2fhid_service_ =
+        std::make_unique<U2fHidServiceImpl>(std::move(u2f_vendor_frontend));
+  }
+}
 
 int U2fDaemon::OnInit() {
   int rc = brillo::DBusServiceDaemon::OnInit();
@@ -148,12 +125,12 @@ int U2fDaemon::OnInit() {
     return EX_IOERR;
   }
 
-  user_state_ = std::make_unique<u2f::UserState>(
+  user_state_ = std::make_unique<UserState>(
       sm_proxy_.get(), legacy_kh_fallback_ ? kLegacyKhCounterMin : 0);
 
   sm_proxy_->RegisterPropertyChangeCompleteSignalHandler(
-      base::Bind(&U2fDaemon::TryStartService, base::Unretained(this)),
-      base::Bind(&OnPolicySignalConnected));
+      base::BindRepeating(&U2fDaemon::TryStartService, base::Unretained(this)),
+      base::BindOnce(&OnPolicySignalConnected));
 
   bool policy_ready = U2fPolicyReady();
 
@@ -168,9 +145,9 @@ int U2fDaemon::OnInit() {
   }
 
   if (policy_ready) {
-    LOG(INFO) << "U2F currently disabled, waiting for policy updates...";
+    VLOG(1) << "U2F currently disabled, waiting for policy updates...";
   } else {
-    LOG(INFO) << "Policy not available, waiting...";
+    VLOG(1) << "Policy not available, waiting...";
   }
 
   return EX_OK;
@@ -178,8 +155,7 @@ int U2fDaemon::OnInit() {
 
 void U2fDaemon::TryStartService(
     const std::string& /* unused dbus signal status */) {
-  // If there's u2fhid_ then we have already started service.
-  if (u2fhid_)
+  if (service_started_)
     return;
 
   if (!U2fPolicyReady())
@@ -199,14 +175,25 @@ int U2fDaemon::StartService() {
   int status = StartU2fHidService();
 
   U2fMode u2f_mode = GetU2fMode(force_u2f_, force_g2f_);
-  LOG(INFO) << "Initializing WebAuthn handler.";
-  InitializeWebAuthnHandler(u2f_mode);
+  VLOG(1) << "Initializing WebAuthn handler.";
+  // If initialize WebAuthn handler failed, it means that the whole u2fd service
+  // is unavailable (it can't happen on devices we enable U2fHid service), and
+  // there's no point to keep running it.
+  if (!InitializeWebAuthnHandler(u2f_mode)) {
+    LOG(INFO) << "Initialize WebAuthn handler failed, quiting.";
+    return EX_UNAVAILABLE;
+  }
 
   return status;
 }
 
 int U2fDaemon::StartU2fHidService() {
-  if (u2fhid_) {
+  if (!u2fhid_service_) {
+    // No need to start u2f HID service on this device.
+    return EX_OK;
+  }
+
+  if (service_started_) {
     // Any failures in previous calls to this function would have caused the
     // program to terminate, so we can assume we have successfully started.
     return EX_OK;
@@ -217,34 +204,32 @@ int U2fDaemon::StartU2fHidService() {
     return EX_CONFIG;
   }
 
-  LOG(INFO) << "Starting U2fHid service.";
+  LOG(INFO) << "Starting U2fHid service, enable_corp_protocol: "
+            << enable_corp_protocol_ << ".";
 
   // If g2f is enabled by policy, we always include allowlisting data.
   bool include_g2f_allowlist_data =
       g2f_allowlist_data_ || (ReadU2fPolicy() == U2fMode::kU2fExtended);
 
-  CreateU2fMsgHandler(
-      u2f_mode == U2fMode::kU2fExtended /* Allow G2F Attestation */,
-      include_g2f_allowlist_data);
+  std::function<void()> request_presence = [this]() {
+    IgnorePowerButtonPress();
+    SendWinkSignal();
+  };
 
-  CreateU2fHid();
+  service_started_ = true;
 
-  return u2fhid_->Init() ? EX_OK : EX_PROTOCOL;
+  return u2fhid_service_->CreateU2fHid(
+             u2f_mode == U2fMode::kU2fExtended /* Allow G2F Attestation */,
+             include_g2f_allowlist_data, enable_corp_protocol_,
+             request_presence, user_state_.get(), sm_proxy_.get(),
+             &metrics_library_)
+             ? EX_OK
+             : EX_PROTOCOL;
 }
 
 bool U2fDaemon::InitializeDBusProxies() {
-  if (!tpm_proxy_.Init()) {
-    LOG(ERROR) << "Failed to initialize trunksd DBus proxy";
-    return false;
-  }
-
-  attestation_proxy_ = bus_->GetObjectProxy(
-      attestation::kAttestationServiceName,
-      dbus::ObjectPath(attestation::kAttestationServicePath));
-
-  if (!attestation_proxy_) {
-    LOG(ERROR) << "Failed to initialize attestationd DBus proxy";
-    return false;
+  if (u2fhid_service_) {
+    u2fhid_service_->InitializeDBusProxies(bus_.get());
   }
 
   pm_proxy_ = std::make_unique<org::chromium::PowerManagerProxy>(bus_.get());
@@ -257,12 +242,12 @@ bool U2fDaemon::InitializeDBusProxies() {
 void U2fDaemon::RegisterDBusObjectsAsync(
     brillo::dbus_utils::AsyncEventSequencer* sequencer) {
   dbus_object_.reset(new brillo::dbus_utils::DBusObject(
-      nullptr, bus_, dbus::ObjectPath(u2f::kU2FServicePath)));
+      nullptr, bus_, dbus::ObjectPath(kU2FServicePath)));
 
-  auto u2f_interface = dbus_object_->AddOrGetInterface(u2f::kU2FInterface);
+  auto u2f_interface = dbus_object_->AddOrGetInterface(kU2FInterface);
 
-  wink_signal_ = u2f_interface->RegisterSignal<u2f::UserNotification>(
-      u2f::kU2FUserNotificationSignal);
+  wink_signal_ = u2f_interface->RegisterSignal<UserNotification>(
+      kU2FUserNotificationSignal);
 
   // Handlers for the WebAuthn DBus API.
   u2f_interface->AddMethodHandler(kU2FMakeCredential,
@@ -285,6 +270,11 @@ void U2fDaemon::RegisterDBusObjectsAsync(
                                         base::Unretained(&webauthn_handler_),
                                         &WebAuthnHandler::Cancel);
 
+  u2f_interface->AddSimpleMethodHandler(
+      kU2FIsPlatformAuthenticatorInitialized,
+      base::Unretained(&webauthn_handler_),
+      &WebAuthnHandler::IsPlatformAuthenticatorInitialized);
+
   u2f_interface->AddMethodHandler(kU2FIsUvpaa,
                                   base::Unretained(&webauthn_handler_),
                                   &WebAuthnHandler::IsUvpaa);
@@ -293,54 +283,63 @@ void U2fDaemon::RegisterDBusObjectsAsync(
                                         base::Unretained(&webauthn_handler_),
                                         &WebAuthnHandler::IsU2fEnabled);
 
+  u2f_interface->AddSimpleMethodHandler(
+      kU2FCountCredentialsInTimeRange, base::Unretained(&webauthn_handler_),
+      &WebAuthnHandler::CountCredentialsInTimeRange);
+
+  u2f_interface->AddSimpleMethodHandler(
+      kU2FDeleteCredentialsInTimeRange, base::Unretained(&webauthn_handler_),
+      &WebAuthnHandler::DeleteCredentialsInTimeRange);
+
+  u2f_interface->AddSimpleMethodHandler(kU2FGetAlgorithms,
+                                        base::Unretained(&webauthn_handler_),
+                                        &WebAuthnHandler::GetAlgorithms);
+
+  u2f_interface->AddSimpleMethodHandler(kU2FGetSupportedFeatures,
+                                        base::Unretained(&webauthn_handler_),
+                                        &WebAuthnHandler::GetSupportedFeatures);
+
   dbus_object_->RegisterAsync(
       sequencer->GetHandler("Failed to register DBus Interface.", true));
 }
 
-void U2fDaemon::CreateU2fMsgHandler(bool allow_g2f_attestation,
-                                    bool include_g2f_allowlisting_data) {
-  std::function<void()> request_presence = [this]() {
-    IgnorePowerButtonPress();
-    SendWinkSignal();
-  };
-
-  auto allowlisting_util =
-      include_g2f_allowlisting_data
-          ? std::make_unique<u2f::AllowlistingUtil>([this](int cert_size) {
-              return GetCertifiedG2fCert(cert_size);
-            })
-          : std::unique_ptr<u2f::AllowlistingUtil>(nullptr);
-
-  u2f_msg_handler_ = std::make_unique<u2f::U2fMessageHandler>(
-      std::move(allowlisting_util), request_presence, user_state_.get(),
-      &tpm_proxy_, &metrics_library_, legacy_kh_fallback_,
-      allow_g2f_attestation);
-}
-
-void U2fDaemon::CreateU2fHid() {
-  u2fhid_ = std::make_unique<u2f::U2fHid>(
-      std::make_unique<u2f::UHidDevice>(vendor_id_, product_id_, kDeviceName,
-                                        "u2fd-tpm-cr50"),
-      u2f_msg_handler_.get());
-}
-
-void U2fDaemon::InitializeWebAuthnHandler(U2fMode u2f_mode) {
+bool U2fDaemon::InitializeWebAuthnHandler(U2fMode u2f_mode) {
   std::function<void()> request_presence = [this]() {
     IgnorePowerButtonPress();
     SendWinkSignal();
     base::PlatformThread::Sleep(kRequestPresenceDelay);
   };
 
-  std::unique_ptr<u2f::AllowlistingUtil> allowlisting_util;
+  std::unique_ptr<AllowlistingUtil> allowlisting_util;
+  std::unique_ptr<U2fCommandProcessor> u2f_command_processor;
+
   // If g2f is enabled by policy, we always include allowlisting data.
-  if (g2f_allowlist_data_ || (ReadU2fPolicy() == U2fMode::kU2fExtended)) {
-    allowlisting_util = std::make_unique<u2f::AllowlistingUtil>(
-        [this](int cert_size) { return GetCertifiedG2fCert(cert_size); });
+  if (u2fhid_service_ &&
+      (g2f_allowlist_data_ || (ReadU2fPolicy() == U2fMode::kU2fExtended))) {
+    allowlisting_util =
+        std::make_unique<AllowlistingUtil>([this](int cert_size) {
+          return u2fhid_service_->GetCertifiedG2fCert(cert_size);
+        });
   }
 
-  webauthn_handler_.Initialize(bus_.get(), &tpm_proxy_, user_state_.get(),
-                               u2f_mode, request_presence,
+  if (auto u2f_vendor_frontend = hwsec_factory_.GetU2fVendorFrontend();
+      u2f_vendor_frontend->IsEnabled().value_or(false)) {
+    u2f_command_processor = std::make_unique<U2fCommandProcessorVendor>(
+        std::move(u2f_vendor_frontend), request_presence);
+  } else if (auto u2f_frontend = hwsec_factory_.GetU2fFrontend();
+             u2f_frontend->IsEnabled().value_or(false)) {
+    u2f_command_processor = std::make_unique<U2fCommandProcessorGeneric>(
+        user_state_.get(),
+        std::make_unique<org::chromium::UserDataAuthInterfaceProxy>(bus_.get()),
+        std::move(u2f_frontend));
+  } else {
+    return false;
+  }
+
+  webauthn_handler_.Initialize(bus_.get(), user_state_.get(), u2f_mode,
+                               std::move(u2f_command_processor),
                                std::move(allowlisting_util), &metrics_library_);
+  return true;
 }
 
 void U2fDaemon::SendWinkSignal() {
@@ -348,8 +347,8 @@ void U2fDaemon::SendWinkSignal() {
   base::TimeDelta elapsed = base::TimeTicks::Now() - last_sent;
 
   if (elapsed.InMilliseconds() > kWinkSignalMinIntervalMs) {
-    u2f::UserNotification notification;
-    notification.set_event_type(u2f::UserNotification::TOUCH_NEEDED);
+    UserNotification notification;
+    notification.set_event_type(UserNotification::TOUCH_NEEDED);
 
     wink_signal_.lock()->Send(notification);
 
@@ -359,7 +358,7 @@ void U2fDaemon::SendWinkSignal() {
 
 void U2fDaemon::IgnorePowerButtonPress() {
   // Duration of the user presence persistence on the firmware side.
-  const base::TimeDelta kPresenceTimeout = base::TimeDelta::FromSeconds(10);
+  const base::TimeDelta kPresenceTimeout = base::Seconds(10);
 
   brillo::ErrorPtr err;
   // Mask the next power button press for the UI
@@ -367,53 +366,39 @@ void U2fDaemon::IgnorePowerButtonPress() {
                                         &err, -1);
 }
 
-namespace {
+U2fMode U2fDaemon::GetU2fMode(bool force_u2f, bool force_g2f) {
+  U2fMode policy_mode = ReadU2fPolicy();
 
-constexpr char kKeyLabelEmk[] = "attest-ent-machine";
+  LOG(INFO) << "Requested Mode: Policy[" << U2fModeToString(policy_mode)
+            << "], force_u2f[" << force_u2f << "], force_g2f[" << force_g2f
+            << "]";
 
-}  // namespace
-
-base::Optional<attestation::GetCertifiedNvIndexReply>
-U2fDaemon::GetCertifiedG2fCert(int g2f_cert_size) {
-  if (g2f_cert_size < 1 || g2f_cert_size > VIRTUAL_NV_INDEX_G2F_CERT_SIZE) {
-    LOG(ERROR)
-        << "Invalid G2F cert size specified for whitelisting data request";
-    return base::nullopt;
+  // Always honor the administrator request to disable even if given
+  // contradictory override flags.
+  if (policy_mode == U2fMode::kDisabled) {
+    LOG(INFO) << "Mode: Disabled (explicitly by policy)";
+    return U2fMode::kDisabled;
   }
 
-  attestation::GetCertifiedNvIndexRequest request;
-
-  request.set_nv_index(VIRTUAL_NV_INDEX_G2F_CERT);
-  request.set_nv_size(g2f_cert_size);
-  request.set_key_label(kKeyLabelEmk);
-
-  brillo::ErrorPtr error;
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallMethodAndBlock(
-          attestation_proxy_, attestation::kAttestationInterface,
-          attestation::kGetCertifiedNvIndex, &error, request);
-
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to retrieve certified G2F cert from attestationd";
-    return base::nullopt;
+  // On devices without GSC, power button can't be used as security key so U2F
+  // and G2F modes are not supported.
+  if (!u2fhid_service_) {
+    LOG(INFO) << "Mode: Disabled (not supported)";
+    return U2fMode::kDisabled;
   }
 
-  attestation::GetCertifiedNvIndexReply reply;
-
-  dbus::MessageReader reader(dbus_response.get());
-  if (!reader.PopArrayOfBytesAsProto(&reply)) {
-    LOG(ERROR) << "Failed to parse GetCertifiedNvIndexReply";
-    return base::nullopt;
+  if (force_g2f || policy_mode == U2fMode::kU2fExtended) {
+    LOG(INFO) << "Mode: U2F+extensions";
+    return U2fMode::kU2fExtended;
   }
 
-  if (reply.status() != attestation::AttestationStatus::STATUS_SUCCESS) {
-    LOG(ERROR) << "Call get GetCertifiedNvIndex failed, status: "
-               << reply.status();
-    return base::nullopt;
+  if (force_u2f || policy_mode == U2fMode::kU2f) {
+    LOG(INFO) << "Mode: U2F";
+    return U2fMode::kU2f;
   }
 
-  return reply;
+  LOG(INFO) << "Mode: Disabled";
+  return U2fMode::kDisabled;
 }
 
 }  // namespace u2f

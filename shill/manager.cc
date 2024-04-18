@@ -1,27 +1,30 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/manager.h"
 
-#include <arpa/inet.h>
 #include <stdio.h>
 #include <sys/types.h>
 #include <time.h>
 
 #include <algorithm>
+#include <initializer_list>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/contains.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
 #include <base/notreached.h>
@@ -29,22 +32,27 @@
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <brillo/userdb_utils.h>
+#include <base/time/time.h>
 #include <chromeos/dbus/service_constants.h>
 #include <chromeos/dbus/shill/dbus-constants.h>
 #include <chromeos/patchpanel/dbus/client.h>
+#include <net-base/ip_address.h>
 
 #include "shill/adaptor_interfaces.h"
+#if !defined(DISABLE_FLOSS)
+#include "shill/bluetooth/bluetooth_manager.h"
+#endif  // DISABLE_FLOSS
 #include "shill/callbacks.h"
-#include "shill/connection.h"
+#include "shill/cellular/cellular_service_provider.h"
+#include "shill/cellular/modem_info.h"
 #include "shill/control_interface.h"
 #include "shill/dbus/dbus_control.h"
 #include "shill/default_profile.h"
 #include "shill/device.h"
-#include "shill/device_claimer.h"
 #include "shill/device_info.h"
 #include "shill/ephemeral_profile.h"
 #include "shill/error.h"
+#include "shill/ethernet/ethernet_eap_provider.h"
 #include "shill/ethernet/ethernet_provider.h"
 #include "shill/ethernet/ethernet_temporary_service.h"
 #include "shill/event_dispatcher.h"
@@ -52,67 +60,48 @@
 #include "shill/hook_table.h"
 #include "shill/http_url.h"
 #include "shill/logging.h"
+#include "shill/metrics.h"
+#include "shill/network/network.h"
+#include "shill/network/network_priority.h"
 #include "shill/profile.h"
-#include "shill/property_accessor.h"
 #include "shill/resolver.h"
 #include "shill/result_aggregator.h"
 #include "shill/service.h"
+#include "shill/store/property_accessor.h"
+#include "shill/supplicant/supplicant_manager.h"
 #include "shill/technology.h"
 #include "shill/throttler.h"
 #include "shill/vpn/vpn_provider.h"
 #include "shill/vpn/vpn_service.h"
-
-#if !defined(DISABLE_CELLULAR)
-#include "shill/cellular/cellular_service_provider.h"
-#include "shill/cellular/modem_info.h"
-#endif  // DISABLE_CELLULAR
-
-#if !defined(DISABLE_WIFI)
+#include "shill/wifi/passpoint_credentials.h"
 #include "shill/wifi/wifi.h"
 #include "shill/wifi/wifi_provider.h"
 #include "shill/wifi/wifi_service.h"
-#endif  // DISABLE_WIFI
-
-#if !defined(DISABLE_WIRED_8021X)
-#include "shill/ethernet/ethernet_eap_provider.h"
-#include "shill/ethernet/ethernet_eap_service.h"
-#endif  // DISABLE_WIRED_8021X
-
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
-#include "shill/supplicant/supplicant_manager.h"
-#endif  // !DISABLE_WIFI || !DISABLE_WIRED_8021X
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kManager;
-static std::string ObjectID(const Manager* m) {
-  return "manager";
-}
 }  // namespace Logging
 
 namespace {
 
 constexpr char kErrorTypeRequired[] = "must specify service type";
 
-constexpr char kErrorUnsupportedServiceType[] = "service type is unsupported";
-
 // Time to wait for termination actions to complete, which should be less than
 // the upstart job timeout, or otherwise stats for termination actions might be
 // lost.
-constexpr int kTerminationActionsTimeoutMilliseconds = 19500;
+constexpr base::TimeDelta kTerminationActionsTimeout =
+    base::Milliseconds(19500);
 
 // Interval for probing various device status, and report them to UMA stats.
-constexpr int kDeviceStatusCheckIntervalMilliseconds =
-    180000;  // every 3 minutes
+constexpr base::TimeDelta kDeviceStatusCheckInterval = base::Minutes(3);
 
 // Interval for attempting to initialize patchpanel connection.
-constexpr base::TimeDelta kInitPatchpanelClientInterval =
-    base::TimeDelta::FromMinutes(1);
+constexpr base::TimeDelta kInitPatchpanelClientInterval = base::Minutes(1);
 
 // Interval for polling patchpanel and refreshing traffic counters.
-constexpr base::TimeDelta kTrafficCounterRefreshInterval =
-    base::TimeDelta::FromMinutes(5);
+constexpr base::TimeDelta kTrafficCounterRefreshInterval = base::Minutes(5);
 
 // Technologies to probe for.
 const char* const kProbeTechnologies[] = {
@@ -138,51 +127,33 @@ const Technology kNoAutoConnectTechnologiesBeforeLoggedIn[] = {
     Technology::kCellular,
 };
 
-// Name of the default claimer.
-constexpr char kDefaultClaimerName[] = "";
-
-// For VPN drivers that only want to pass traffic for specific users,
-// these are the usernames that will be used to create the routing policy
-// rules. Also, when an AlwaysOnVpnPackage is set and a corresponding VPN
-// service is not active, traffic from these users will blackholed.
-// Currently the "user traffic" as defined by these usernames does not include
-// e.g. Android apps or system processes like the update engine.
-const char* const kUserTrafficUsernames[] = {
-    "chronos",         // Traffic originating from chrome and nacl applications
-    "debugd",          // crosh terminal
-    "cups",            // built-in printing using the cups daemon
-    "lpadmin",         // printer configuration utility used by cups
-    "kerberosd",       // Chrome OS Kerberos daemon
-    "kerberosd-exec",  // Kerberos third party untrusted code
-    // While tlsdate is not user traffic, time sync should be attempted over
-    // VPN. It is OK to send tlsdate traffic over VPN because it will also try
-    // to sync time immediately after boot on the sign-in screen when no VPN can
-    // be active.
-    // TODO(https://crbug.com/1065378): Find a way for tlsdate to try both with
-    // and without VPN explicitly.
-    "tlsdate",    // tlsdate daemon (secure time sync)
-    "pluginvm",   // plugin vm problem report utility (b/160916677)
-    "fuse-smbfs"  // smbfs SMB filesystem daemon
-};
-
 // Backoff time increment used to compute the delay before always-on VPN next
 // attempt after a connection failure.
-constexpr base::TimeDelta kAlwaysOnVpnBackoffDelay =
-    base::TimeDelta::FromMilliseconds(500);
+constexpr base::TimeDelta kAlwaysOnVpnBackoffDelay = base::Milliseconds(500);
 // Maximum shift value used to compute the always-on VPN backoff time.
 constexpr uint32_t kAlwaysOnVpnBackoffMaxShift = 7u;
 
-// Copied from patchpanel/net_util.h so avoid circular build dependency with
-// libpatchpanel-util.
-constexpr uint32_t IPv4Addr(uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
-  return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
-}
-
 // Known IPv4 address range valid for DNS proxy.
-constexpr const struct in_addr kDNSProxyBaseAddr = {
-    .s_addr = IPv4Addr(100, 115, 92, 0)};
-constexpr const struct in_addr kDNSProxyNetmask = {
-    .s_addr = IPv4Addr(255, 255, 254, 0)};
+const net_base::IPv4CIDR kDNSProxyAllocationRange =
+    *net_base::IPv4CIDR::CreateFromAddressAndPrefix(
+        net_base::IPv4Address(100, 115, 92, 0), 23);
+
+constexpr std::initializer_list<Technology> kDefaultTechnologyOrder = {
+    Technology::kVPN, Technology::kEthernet, Technology::kWiFi,
+    Technology::kCellular};
+
+// Note that the generated code of std::sort is huge (~8KB for this case).
+void SortServicesImpl(bool compare_connectivity_state,
+                      const std::vector<Technology>& tech_order,
+                      std::vector<ServiceRefPtr>* services) {
+  std::sort(services->begin(), services->end(),
+            [compare_connectivity_state, &tech_order](
+                const ServiceRefPtr& a, const ServiceRefPtr& b) -> bool {
+              return Service::Compare(a, b, compare_connectivity_state,
+                                      tech_order)
+                  .first;
+            });
+}
 
 }  // namespace
 
@@ -201,21 +172,14 @@ Manager::Manager(ControlInterface* control_interface,
       user_profile_list_path_(Profile::kUserProfileListPathname),
       adaptor_(control_interface->CreateManagerAdaptor(this)),
       device_info_(this),
-#if !defined(DISABLE_CELLULAR)
       modem_info_(new ModemInfo(control_interface, this)),
+      power_opt_(new PowerOpt(this)),
       cellular_service_provider_(new CellularServiceProvider(this)),
-#endif  // DISABLE_CELLULAR
       ethernet_provider_(new EthernetProvider(this)),
-#if !defined(DISABLE_WIRED_8021X)
       ethernet_eap_provider_(new EthernetEapProvider(this)),
-#endif  // DISABLE_WIRED_8021X
       vpn_provider_(new VPNProvider(this)),
-#if !defined(DISABLE_WIFI)
-      wifi_provider_(new WiFiProvider(this)),
-#endif  // DISABLE_WIFI
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
       supplicant_manager_(new SupplicantManager(this)),
-#endif  // !DISABLE_WIFI || !DISABLE_WIRED_8021X
+      wifi_provider_(new WiFiProvider(this)),
       throttler_(new Throttler(dispatcher, this)),
       resolver_(Resolver::GetInstance()),
       running_(false),
@@ -225,9 +189,10 @@ Manager::Manager(ControlInterface* control_interface,
       always_on_vpn_service_(nullptr),
       always_on_vpn_connect_attempts_(0u),
       ephemeral_profile_(new EphemeralProfile(this)),
-      use_startup_portal_list_(false),
-      device_status_check_task_(
-          base::Bind(&Manager::DeviceStatusCheckTask, base::Unretained(this))),
+#if !defined(DISABLE_FLOSS)
+      bluetooth_manager_(new BluetoothManager(control_interface)),
+#endif  // DISABLE_FLOSS
+      technology_order_(kDefaultTechnologyOrder),
       pending_traffic_counter_request_(false),
       termination_actions_(dispatcher),
       is_wake_on_lan_enabled_(true),
@@ -235,17 +200,22 @@ Manager::Manager(ControlInterface* control_interface,
       suppress_autoconnect_(false),
       is_connected_state_(false),
       has_user_session_(false),
-      dhcp_properties_(new DhcpProperties(this)),
       network_throttling_enabled_(false),
       download_rate_kbits_(0),
       upload_rate_kbits_(0),
-      should_blackhole_user_traffic_(false) {
+      tethering_manager_(new TetheringManager(this)),
+      was_last_online_(false),
+      last_default_technology_(Technology::kUnknown),
+      time_online_timer_(new chromeos_metrics::Timer),
+      time_to_drop_timer_(new chromeos_metrics::Timer) {
   HelpRegisterConstDerivedRpcIdentifier(
       kActiveProfileProperty, &Manager::GetActiveProfileRpcIdentifier);
   HelpRegisterDerivedString(kAlwaysOnVpnPackageProperty,
                             &Manager::GetAlwaysOnVpnPackage,
                             &Manager::SetAlwaysOnVpnPackage);
   store_.RegisterBool(kArpGatewayProperty, &props_.arp_gateway);
+  store_.RegisterBool(kEnableDHCPQoSProperty, &props_.enable_dhcp_qos);
+  store_.RegisterBool(kEnableRFC8925Property, &props_.enable_rfc_8925);
   HelpRegisterConstDerivedStrings(kAvailableTechnologiesProperty,
                                   &Manager::AvailableTechnologies);
   HelpRegisterDerivedString(kCheckPortalListProperty,
@@ -260,13 +230,14 @@ Manager::Manager(ControlInterface* control_interface,
       kDefaultServiceProperty, &Manager::GetDefaultServiceRpcIdentifier);
   HelpRegisterConstDerivedRpcIdentifiers(kDevicesProperty,
                                          &Manager::EnumerateDevices);
-#if !defined(DISABLE_WIFI)
   HelpRegisterDerivedBool(kDisableWiFiVHTProperty, &Manager::GetDisableWiFiVHT,
                           &Manager::SetDisableWiFiVHT);
   HelpRegisterDerivedBool(kWifiGlobalFTEnabledProperty, &Manager::GetFTEnabled,
                           &Manager::SetFTEnabled);
   store_.RegisterBool(kWifiScanAllowRoamProperty, &props_.scan_allow_roam);
-#endif  // DISABLE_WIFI
+  HelpRegisterDerivedString(kWifiRequestScanTypeProperty,
+                            &Manager::GetWiFiRequestScanType,
+                            &Manager::SetWiFiRequestScanType);
   HelpRegisterConstDerivedStrings(kEnabledTechnologiesProperty,
                                   &Manager::EnabledTechnologies);
   HelpRegisterDerivedString(kIgnoredDNSSearchPathsProperty,
@@ -274,11 +245,14 @@ Manager::Manager(ControlInterface* control_interface,
                             &Manager::SetIgnoredDNSSearchPaths);
   store_.RegisterString(kNoAutoConnectTechnologiesProperty,
                         &props_.no_auto_connect_technologies);
-  store_.RegisterConstString(kPortalHttpUrlProperty, &props_.portal_http_url);
-  store_.RegisterConstString(kPortalHttpsUrlProperty, &props_.portal_https_url);
-  HelpRegisterDerivedString(kPortalFallbackUrlsStringProperty,
-                            &Manager::GetPortalFallbackUrlsString,
-                            &Manager::SetPortalFallbackUrlsString);
+  store_.RegisterString(kPortalHttpUrlProperty, &props_.portal_http_url);
+  store_.RegisterString(kPortalHttpsUrlProperty, &props_.portal_https_url);
+  HelpRegisterDerivedString(kPortalFallbackHttpUrlsProperty,
+                            &Manager::GetPortalFallbackHttpUrls,
+                            &Manager::SetPortalFallbackHttpUrls);
+  HelpRegisterDerivedString(kPortalFallbackHttpsUrlsProperty,
+                            &Manager::GetPortalFallbackHttpsUrls,
+                            &Manager::SetPortalFallbackHttpsUrls);
   HelpRegisterConstDerivedRpcIdentifiers(kProfilesProperty,
                                          &Manager::EnumerateProfiles);
   HelpRegisterDerivedString(kProhibitedTechnologiesProperty,
@@ -300,14 +274,18 @@ Manager::Manager(ControlInterface* control_interface,
                                    &Manager::GetDNSProxyDOHProviders,
                                    &Manager::SetDNSProxyDOHProviders);
   store_.RegisterConstString(kSupportedVPNTypesProperty, &supported_vpn_);
+  store_.RegisterString(kDhcpPropertyHostnameProperty, &props_.dhcp_hostname);
+
+  tethering_manager_->InitPropertyStore(&store_);
+
+  HelpRegisterDerivedKeyValueStore(kLOHSConfigProperty, &Manager::GetLOHSConfig,
+                                   &Manager::SetLOHSConfig);
 
   UpdateProviderMapping();
 
   supported_vpn_ = vpn_provider_->GetSupportedType();
 
-  dhcp_properties_->InitPropertyStore(&store_);
-
-  SLOG(this, 2) << "Manager initialized.";
+  SLOG(2) << "Manager initialized.";
 }
 
 Manager::~Manager() {
@@ -334,15 +312,8 @@ Manager::~Manager() {
 }
 
 void Manager::RegisterAsync(
-    const base::Callback<void(bool)>& completion_callback) {
-  adaptor_->RegisterAsync(completion_callback);
-}
-
-void Manager::OnDhcpPropertyChanged(const std::string& key,
-                                    const std::string& value) {
-  adaptor_->EmitStringChanged(key, value);
-  if (profiles_.size() > 0)
-    profiles_.front()->Save();
+    base::OnceCallback<void(bool)> completion_callback) {
+  adaptor_->RegisterAsync(std::move(completion_callback));
 }
 
 void Manager::SetBlockedDevices(
@@ -357,48 +328,46 @@ void Manager::SetAllowedDevices(
 
 void Manager::Start() {
   LOG(INFO) << "Manager started.";
-
-  user_traffic_uids_ = ComputeUserTrafficUids();
-
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   supplicant_manager_->Start();
-#endif  // !DISABLE_WIFI || !DISABLE_WIRED_8021X
-
+  tethering_manager_->Start();
   power_manager_.reset(new PowerManager(control_interface_));
   power_manager_->Start(
-      base::TimeDelta::FromMilliseconds(kTerminationActionsTimeoutMilliseconds),
-      base::Bind(&Manager::OnSuspendImminent, weak_factory_.GetWeakPtr()),
-      base::Bind(&Manager::OnSuspendDone, weak_factory_.GetWeakPtr()),
-      base::Bind(&Manager::OnDarkSuspendImminent, weak_factory_.GetWeakPtr()));
+      kTerminationActionsTimeout,
+      base::BindRepeating(&Manager::OnSuspendImminent,
+                          weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&Manager::OnSuspendDone, weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&Manager::OnDarkSuspendImminent,
+                          weak_factory_.GetWeakPtr()));
   upstart_.reset(new Upstart(control_interface_));
+#if !defined(DISABLE_FLOSS)
+  if (!bluetooth_manager_->Start()) {
+    LOG(ERROR) << "Failed to start BT manager interface.";
+  }
+#endif  // DISABLE_FLOSS
 
   CHECK(base::CreateDirectory(run_path_)) << run_path_.value();
   const auto filepath = run_path_.Append("resolv.conf");
   CHECK(!filepath.empty());
   resolver_->set_path(filepath);
 
-  if (metrics_) {
-    AddDefaultServiceObserver(metrics_);
-  }
-
   InitializeProfiles();
   running_ = true;
   device_info_.Start();
-#if !defined(DISABLE_CELLULAR)
   modem_info_->Start();
-#endif  // DISABLE_CELLULAR
   for (const auto& provider_mapping : providers_) {
     provider_mapping.second->Start();
   }
   InitializePatchpanelClient();
 
   // Start task for checking connection status.
+  device_status_check_task_.Reset(base::BindOnce(
+      &Manager::DeviceStatusCheckTask, weak_factory_.GetWeakPtr()));
   dispatcher_->PostDelayedTask(FROM_HERE, device_status_check_task_.callback(),
-                               kDeviceStatusCheckIntervalMilliseconds);
+                               kDeviceStatusCheckInterval);
 }
 
 void Manager::Stop() {
-  SLOG(this, 1) << __func__;
+  SLOG(1) << __func__;
   running_ = false;
   // Persist device information to disk;
   for (const auto& device : devices_) {
@@ -412,6 +381,8 @@ void Manager::Stop() {
     // only time multiple default profiles are loaded are during autotests.
     profile->Save();
   }
+
+  tethering_manager_->Stop();
 
   Error e;
   for (const auto& service : services_) {
@@ -427,17 +398,15 @@ void Manager::Stop() {
   for (const auto& provider_mapping : providers_) {
     provider_mapping.second->Stop();
   }
-#if !defined(DISABLE_CELLULAR)
-  modem_info_->Stop();
-#endif  // DISABLE_CELLULAR
+  modem_info_.reset();
   device_info_.Stop();
   device_status_check_task_.Cancel();
   sort_services_task_.Cancel();
   init_patchpanel_client_task_.Cancel();
   refresh_traffic_counter_task_.Cancel();
-  if (metrics_) {
-    RemoveDefaultServiceObserver(metrics_);
-  }
+#if !defined(DISABLE_FLOSS)
+  bluetooth_manager_->Stop();
+#endif  // DISABLE_FLOSS
   power_manager_->Stop();
   power_manager_.reset();
   patchpanel_client_.reset();
@@ -486,7 +455,7 @@ void Manager::InitializeProfiles() {
 void Manager::CreateProfile(const std::string& name,
                             std::string* path,
                             Error* error) {
-  SLOG(this, 2) << __func__ << " " << name;
+  SLOG(2) << __func__ << " " << name;
   Profile::Identifier ident;
   if (!Profile::ParseIdentifier(name, &ident)) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
@@ -576,6 +545,13 @@ void Manager::PushProfileInternal(const Profile::Identifier& ident,
   }
 
   profiles_.push_back(profile);
+  // TODO(b/172224298): skip loading PasspointCredential for the default
+  // profile.
+  wifi_provider_->LoadCredentialsFromProfile(profile);
+  // TODO(b/172224298): prefer using Profile::IsDefault.
+  if (!profile->GetUser().empty()) {
+    tethering_manager_->LoadConfigFromProfile(profile);
+  }
 
   for (ServiceRefPtr& service : services_) {
     service->ClearExplicitlyDisconnected();
@@ -612,7 +588,7 @@ void Manager::PushProfileInternal(const Profile::Identifier& ident,
 void Manager::PushProfile(const std::string& name,
                           std::string* path,
                           Error* error) {
-  SLOG(this, 2) << __func__ << " " << name;
+  SLOG(2) << __func__ << " " << name;
   Profile::Identifier ident;
   if (!Profile::ParseIdentifier(name, &ident)) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
@@ -626,7 +602,7 @@ void Manager::InsertUserProfile(const std::string& name,
                                 const std::string& user_hash,
                                 std::string* path,
                                 Error* error) {
-  SLOG(this, 2) << __func__ << " " << name;
+  SLOG(2) << __func__ << " " << name;
   Profile::Identifier ident;
   if (!Profile::ParseIdentifier(name, &ident) || ident.user.empty()) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
@@ -680,6 +656,15 @@ void Manager::PopProfileInternal() {
     // Service was totally unloaded. No advance of iterator in this
     // case, as UnloadService has updated the iterator for us.
   }
+  // TODO(b/172224298): prefer using Profile::IsDefault.
+  if (!active_profile->GetUser().empty()) {
+    tethering_manager_->UnloadConfigFromProfile();
+  }
+  // Remove Passpoint credentials attached to this profile.
+  // TODO(b/172224298): skip unloading PasspointCredential for the default
+  // profile.
+  wifi_provider_->UnloadCredentialsFromProfile(active_profile);
+
   SortServices();
   OnProfilesChanged();
   LOG(INFO) << __func__ << " finished; " << profiles_.size()
@@ -702,7 +687,7 @@ void Manager::OnProfilesChanged() {
 }
 
 void Manager::PopProfile(const std::string& name, Error* error) {
-  SLOG(this, 2) << __func__ << " " << name;
+  SLOG(2) << __func__ << " " << name;
   Profile::Identifier ident;
   if (profiles_.empty()) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kNotFound,
@@ -716,7 +701,7 @@ void Manager::PopProfile(const std::string& name, Error* error) {
     return;
   }
   if (!active_profile->MatchesIdentifier(ident)) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
+    Error::PopulateAndLog(FROM_HERE, error, Error::kWrongState,
                           name + " is not the active profile");
     return;
   }
@@ -724,7 +709,7 @@ void Manager::PopProfile(const std::string& name, Error* error) {
 }
 
 void Manager::PopAnyProfile(Error* error) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   Profile::Identifier ident;
   if (profiles_.empty()) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kNotFound,
@@ -735,7 +720,7 @@ void Manager::PopAnyProfile(Error* error) {
 }
 
 void Manager::PopAllUserProfiles(Error* /*error*/) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   while (!profiles_.empty() && !profiles_.back()->GetUser().empty()) {
     PopProfileInternal();
   }
@@ -791,10 +776,8 @@ bool Manager::DeviceManagementAllowed(const std::string& device_name) {
   return false;
 }
 
-void Manager::ClaimDevice(const std::string& claimer_name,
-                          const std::string& device_name,
-                          Error* error) {
-  SLOG(this, 2) << __func__;
+void Manager::ClaimDevice(const std::string& device_name, Error* error) {
+  SLOG(2) << __func__;
 
   // Basic check for device name.
   if (device_name.empty()) {
@@ -809,47 +792,25 @@ void Manager::ClaimDevice(const std::string& claimer_name,
     return;
   }
 
-  // Verify default claimer.
-  if (claimer_name.empty() &&
-      (!device_claimer_ || !device_claimer_->default_claimer())) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
-                          "No default claimer");
+  // Check if device is claimed already.
+  if (claimed_devices_.find(device_name) != claimed_devices_.end()) {
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kInvalidArguments,
+        "Device " + device_name + " had already been claimed");
     return;
   }
 
-  // Create a new device claimer if one doesn't exist yet.
-  if (!device_claimer_) {
-    // Start a device claimer.  No need to verify the existence of the claimer,
-    // since we are using message sender as the claimer name.
-    device_claimer_.reset(
-        new DeviceClaimer(claimer_name, &device_info_, false));
-  }
+  // Block the device.
+  device_info_.BlockDevice(device_name);
 
-  // Verify claimer's name, since we only allow one claimer to exist at a time.
-  if (device_claimer_->name() != claimer_name) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
-                          "Invalid claimer name " + claimer_name +
-                              ". Claimer " + device_claimer_->name() +
-                              " already exist");
-    return;
-  }
-
-  // Error will be populated by the claimer if failed to claim the device.
-  if (!device_claimer_->Claim(device_name, error)) {
-    return;
-  }
+  claimed_devices_.insert(device_name);
 
   // Deregister the device from manager if it is registered.
   DeregisterDeviceByLinkName(device_name);
 }
 
-void Manager::ReleaseDevice(const std::string& claimer_name,
-                            const std::string& device_name,
-                            bool* claimer_removed,
-                            Error* error) {
-  SLOG(this, 2) << __func__;
-
-  *claimer_removed = false;
+void Manager::ReleaseDevice(const std::string& device_name, Error* error) {
+  SLOG(2) << __func__;
 
   if (!DeviceManagementAllowed(device_name)) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
@@ -857,38 +818,23 @@ void Manager::ReleaseDevice(const std::string& claimer_name,
     return;
   }
 
-  if (!device_claimer_) {
+  if (claimed_devices_.find(device_name) == claimed_devices_.end()) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
-                          "Device claimer doesn't exist");
+                          "Device " + device_name + " have not been claimed");
     return;
   }
 
-  // Verify claimer's name, since we only allow one claimer to exist at a time.
-  if (device_claimer_->name() != claimer_name) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
-                          "Invalid claimer name " + claimer_name +
-                              ". Claimer " + device_claimer_->name() +
-                              " already exist");
-    return;
-  }
+  // Unblock the device.
+  device_info_.AllowDevice(device_name);
 
-  // Release the device from the claimer. Error should be populated by the
-  // claimer if it failed to release the given device.
-  device_claimer_->Release(device_name, error);
-
-  // Reset claimer if this is not the default claimer and no more devices are
-  // claimed by this claimer.
-  if (!device_claimer_->default_claimer() &&
-      !device_claimer_->DevicesClaimed()) {
-    device_claimer_.reset();
-    *claimer_removed = true;
-  }
+  claimed_devices_.erase(device_name);
 }
 
 void Manager::RemoveService(const ServiceRefPtr& service) {
   LOG(INFO) << __func__ << " for service " << service->log_name();
   if (!IsServiceEphemeral(service)) {
     service->profile()->AbandonService(service);
+    providers_[service->technology()]->AbandonService(service);
     if (MatchProfileWithService(service)) {
       // We found another profile to adopt the service; no need to unload.
       UpdateService(service);
@@ -910,6 +856,7 @@ bool Manager::HandleProfileEntryDeletion(const ProfileRefPtr& profile,
     if ((*it)->profile().get() == profile.get() &&
         (*it)->GetStorageIdentifier() == entry_name) {
       profile->AbandonService(*it);
+      providers_[(*it)->technology()]->AbandonService(*it);
       if (MatchProfileWithService(*it) || !UnloadService(&it)) {
         ++it;
       }
@@ -957,8 +904,7 @@ ServiceRefPtr Manager::GetServiceWithStorageIdentifierFromProfile(
     }
   }
 
-  SLOG(this, 2) << "Entry " << entry_name
-                << " is not registered in the manager";
+  SLOG(2) << "Entry " << entry_name << " is not registered in the manager";
   return nullptr;
 }
 
@@ -973,7 +919,7 @@ ServiceRefPtr Manager::GetServiceWithRpcIdentifier(const RpcIdentifier& id) {
 
 ServiceRefPtr Manager::CreateTemporaryServiceFromProfile(
     const ProfileRefPtr& profile, const std::string& entry_name, Error* error) {
-  Technology technology = Technology::CreateFromStorageGroup(entry_name);
+  Technology technology = TechnologyFromStorageGroup(entry_name);
   if (technology == Technology::kUnknown) {
     Error::PopulateAndLog(
         FROM_HERE, error, Error::kInternalError,
@@ -988,8 +934,10 @@ ServiceRefPtr Manager::CreateTemporaryServiceFromProfile(
   }
 
   if (!service) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
-                          kErrorUnsupportedServiceType);
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kInternalError,
+        "Could not create temporary service for technology: " +
+            TechnologyName(technology));
     return nullptr;
   }
 
@@ -1010,14 +958,14 @@ ServiceRefPtr Manager::GetServiceWithGUID(const std::string& guid,
   if (error) {
     error->Populate(Error::kNotFound, error_string);
   }
-  SLOG(this, 2) << error_string;
+  SLOG(2) << error_string;
   return nullptr;
 }
 
 ServiceRefPtr Manager::GetDefaultService() const {
-  SLOG(this, 2) << __func__;
-  if (services_.empty() || !services_[0]->connection().get()) {
-    SLOG(this, 2) << "In " << __func__ << ": No default connection exists.";
+  SLOG(2) << __func__;
+  if (services_.empty() || !services_[0]->IsConnected()) {
+    SLOG(2) << "In " << __func__ << ": No default connection exists.";
     return nullptr;
   }
   return services_[0];
@@ -1043,11 +991,6 @@ bool Manager::IsTechnologyInList(const std::string& technology_list,
 
 bool Manager::IsPortalDetectionEnabled(Technology tech) {
   return IsTechnologyInList(GetCheckPortalList(nullptr), tech);
-}
-
-void Manager::SetStartupPortalList(const std::string& portal_list) {
-  startup_portal_list_ = portal_list;
-  use_startup_portal_list_ = true;
 }
 
 bool Manager::IsProfileBefore(const ProfileRefPtr& a,
@@ -1089,9 +1032,7 @@ bool Manager::IsTechnologyProhibited(Technology technology) const {
 }
 
 void Manager::OnProfileStorageInitialized(Profile* profile) {
-#if !defined(DISABLE_WIFI)
   wifi_provider_->UpdateStorage(profile);
-#endif  // DISABLE_WIFI
 }
 
 DeviceRefPtr Manager::GetEnabledDeviceWithTechnology(
@@ -1116,9 +1057,9 @@ bool Manager::IsActiveProfile(const ProfileRefPtr& profile) const {
 bool Manager::MoveServiceToProfile(const ServiceRefPtr& to_move,
                                    const ProfileRefPtr& destination) {
   const ProfileRefPtr from = to_move->profile();
-  SLOG(this, 2) << "Moving service " << to_move->log_name() << " to profile "
-                << destination->GetFriendlyName() << " from "
-                << from->GetFriendlyName();
+  SLOG(2) << "Moving service " << to_move->log_name() << " to profile "
+          << destination->GetFriendlyName() << " from "
+          << from->GetFriendlyName();
   return destination->AdoptService(to_move) && from->AbandonService(to_move);
 }
 
@@ -1162,22 +1103,22 @@ void Manager::SetProfileForService(const ServiceRefPtr& to_set,
 void Manager::SetEnabledStateForTechnology(const std::string& technology_name,
                                            bool enabled_state,
                                            bool persist,
-                                           const ResultCallback& callback) {
+                                           ResultCallback callback) {
   Error error;
-  Technology id = Technology::CreateFromName(technology_name);
+  Technology id = TechnologyFromName(technology_name);
   if (id == Technology::kUnknown) {
     error.Populate(Error::kInvalidArguments, "Unknown technology");
-    callback.Run(error);
+    std::move(callback).Run(error);
     return;
   }
   if (enabled_state && IsTechnologyProhibited(id)) {
     error.Populate(Error::kPermissionDenied,
                    "The " + technology_name + " technology is prohibited");
-    callback.Run(error);
+    std::move(callback).Run(error);
     return;
   }
 
-  SLOG(this, 2) << __func__ << ": " << technology_name << ": " << enabled_state;
+  SLOG(2) << __func__ << ": " << technology_name << ": " << enabled_state;
 
   if (id == Technology::kVPN) {
     // VPN needs special handling since there are no permanent VPN devices.
@@ -1186,29 +1127,33 @@ void Manager::SetEnabledStateForTechnology(const std::string& technology_name,
     if (!enabled_state) {
       vpn_provider()->DisconnectAll();
     }
-    callback.Run(error);
+    std::move(callback).Run(error);
     return;
   }
 
-  auto result_aggregator(base::MakeRefCounted<ResultAggregator>(callback));
+  // "Enable cellular failed" is detected by anomaly_detector. Please change
+  // anomaly_detector.cc if the error_prefix to result_aggregator changes.
+  auto result_aggregator(base::MakeRefCounted<ResultAggregator>(
+      std::move(callback), FROM_HERE,
+      "Enable " + technology_name + " failed: "));
   for (auto& device : devices_) {
     if (device->technology() != id)
       continue;
 
-    error.Populate(Error::kOperationInitiated);
     ResultCallback aggregator_callback(
-        base::Bind(&ResultAggregator::ReportResult, result_aggregator));
-
-    if (persist) {
-      device->SetEnabledPersistent(enabled_state, &error, aggregator_callback);
-    } else {
-      device->SetEnabledNonPersistent(enabled_state, &error,
-                                      aggregator_callback);
-    }
-
-    if (!error.IsOngoing())
-      result_aggregator->ReportResult(error);
+        base::BindOnce(&ResultAggregator::ReportResult, result_aggregator));
+    device->SetEnabledChecked(enabled_state, persist,
+                              std::move(aggregator_callback));
   }
+}
+
+DHCPProvider::Options Manager::CreateDefaultDHCPOption() const {
+  return DHCPProvider::Options{
+      .use_arp_gateway = props_.arp_gateway,
+      .use_rfc_8925 = props_.enable_rfc_8925,
+      .apply_dscp = props_.enable_dhcp_qos,
+      .hostname = props_.dhcp_hostname,
+  };
 }
 
 void Manager::UpdateEnabledTechnologies() {
@@ -1223,54 +1168,9 @@ void Manager::UpdateUninitializedTechnologies() {
                                UninitializedTechnologies(&error));
 }
 
-void Manager::SetPassiveMode() {
-  CHECK(!device_claimer_);
-  // Create a default device claimer to claim devices from  shill as they're
-  // detected.  Devices will be managed by remote application, which will use
-  // the default claimer to specify the devices for shill to manage.
-  device_claimer_.reset(
-      new DeviceClaimer(kDefaultClaimerName, &device_info_, true));
-}
-
 void Manager::SetIgnoreUnknownEthernet(bool ignore) {
-  SLOG(this, 2) << __func__ << "(" << ignore << ")";
+  SLOG(2) << __func__ << "(" << ignore << ")";
   ignore_unknown_ethernet_ = ignore;
-}
-
-void Manager::SetPrependDNSServers(const std::string& prepend_dns_servers) {
-  props_.prepend_dns_servers = prepend_dns_servers;
-}
-
-void Manager::SetAcceptHostnameFrom(const std::string& hostname_from) {
-  accept_hostname_from_ = hostname_from;
-}
-
-bool Manager::ShouldAcceptHostnameFrom(const std::string& device_name) const {
-  return base::MatchPattern(device_name, accept_hostname_from_);
-}
-
-void Manager::SetDHCPv6EnabledDevices(
-    const std::vector<std::string>& device_list) {
-  dhcpv6_enabled_devices_ = device_list;
-}
-
-bool Manager::IsDHCPv6EnabledForDevice(const std::string& device_name) const {
-  return base::Contains(dhcpv6_enabled_devices_, device_name);
-}
-
-std::vector<std::string> Manager::FilterPrependDNSServersByFamily(
-    IPAddress::Family family) const {
-  std::vector<std::string> dns_servers;
-  std::vector<std::string> split_servers =
-      base::SplitString(props_.prepend_dns_servers, ",", base::TRIM_WHITESPACE,
-                        base::SPLIT_WANT_ALL);
-  for (const auto& server : split_servers) {
-    const IPAddress address(server);
-    if (address.family() == family) {
-      dns_servers.push_back(server);
-    }
-  }
-  return dns_servers;
 }
 
 bool Manager::IsSuspending() {
@@ -1282,17 +1182,6 @@ bool Manager::IsSuspending() {
 
 void Manager::RegisterDevice(const DeviceRefPtr& to_manage) {
   LOG(INFO) << "Device " << to_manage->link_name() << " registered.";
-  // Manager is running in passive mode when default claimer is created, which
-  // means devices are being managed by remote application. Only manage the
-  // device if it was explicitly released by remote application through
-  // default claimer.
-  if (device_claimer_ && device_claimer_->default_claimer()) {
-    if (!device_claimer_->IsDeviceReleased(to_manage->link_name())) {
-      Error error;
-      device_claimer_->Claim(to_manage->link_name(), &error);
-      return;
-    }
-  }
 
   for (const auto& device : devices_) {
     if (to_manage == device)
@@ -1303,20 +1192,18 @@ void Manager::RegisterDevice(const DeviceRefPtr& to_manage) {
   LoadDeviceFromProfiles(to_manage);
 
   if (IsTechnologyProhibited(to_manage->technology())) {
-    Error unused_error;
     LOG(INFO) << "Technology prohibited, disabling: "
-              << to_manage->technology().GetName();
-    to_manage->SetEnabledNonPersistent(false, &unused_error, ResultCallback());
+              << to_manage->GetTechnologyName();
+    to_manage->SetEnabledNonPersistent(false, base::DoNothing());
   }
 
   // If |to_manage| is new, it needs to be persisted.
   UpdateDevice(to_manage);
 
   if (network_throttling_enabled_ &&
-      to_manage->technology().IsPrimaryConnectivityTechnology()) {
+      IsPrimaryConnectivityTechnology(to_manage->technology())) {
     if (devices_.size() == 1) {
-      ResultCallback fake;
-      throttler_->ThrottleInterfaces(fake, upload_rate_kbits_,
+      throttler_->ThrottleInterfaces(base::DoNothing(), upload_rate_kbits_,
                                      download_rate_kbits_);
     } else {
       // Apply any existing network bandwidth throttling.
@@ -1328,8 +1215,8 @@ void Manager::RegisterDevice(const DeviceRefPtr& to_manage) {
   // unit tests sometimes do things in otherwise invalid states.
   if (running_ && (to_manage->enabled_persistent() ||
                    to_manage->IsUnderlyingDeviceEnabled())) {
-    SLOG(this, 2) << "Enabling registered device type: "
-                  << to_manage->technology().GetName();
+    SLOG(2) << "Enabling registered device type: "
+            << to_manage->GetTechnologyName();
     to_manage->SetEnabled(true);
   }
 
@@ -1337,10 +1224,9 @@ void Manager::RegisterDevice(const DeviceRefPtr& to_manage) {
 }
 
 void Manager::DeregisterDevice(const DeviceRefPtr& to_forget) {
-  LOG(INFO) << __func__ << "(" << to_forget->link_name() << ")";
   for (auto it = devices_.begin(); it != devices_.end(); ++it) {
     if (to_forget.get() == it->get()) {
-      SLOG(this, 2) << "Deregistered device: " << to_forget->link_name();
+      LOG(INFO) << "Deregistering device: " << to_forget->link_name();
       UpdateDevice(to_forget);
       to_forget->SetEnabled(false);
       device_geolocation_info_.erase(to_forget);
@@ -1349,7 +1235,7 @@ void Manager::DeregisterDevice(const DeviceRefPtr& to_forget) {
       return;
     }
   }
-  SLOG(this, 2) << __func__ << " unknown device: " << to_forget->link_name();
+  LOG(WARNING) << __func__ << " unknown device: " << to_forget->link_name();
 }
 
 void Manager::DeregisterDeviceByLinkName(const std::string& link_name) {
@@ -1362,15 +1248,8 @@ void Manager::DeregisterDeviceByLinkName(const std::string& link_name) {
 }
 
 std::vector<std::string> Manager::ClaimedDevices(Error* error) {
-  std::vector<std::string> results;
-  if (!device_claimer_) {
-    return results;
-  }
-
-  const auto& devices = device_claimer_->claimed_device_names();
-  results.resize(devices.size());
-  std::copy(devices.begin(), devices.end(), results.begin());
-  return results;
+  // set to vector conversion.
+  return {claimed_devices_.begin(), claimed_devices_.end()};
 }
 
 void Manager::LoadDeviceFromProfiles(const DeviceRefPtr& device) {
@@ -1394,30 +1273,14 @@ void Manager::EmitDeviceProperties() {
                                UninitializedTechnologies(&error));
 }
 
-void Manager::OnInnerDevicesChanged() {
-  EmitDeviceProperties();
-}
-
-void Manager::OnDeviceClaimerVanished() {
-  // Reset device claimer.
-  device_claimer_.reset();
-}
-
 RpcIdentifiers Manager::EnumerateDevices(Error* /*error*/) {
   RpcIdentifiers device_rpc_ids;
   for (const auto& device : devices_) {
     device_rpc_ids.push_back(device->GetRpcIdentifier());
   }
-  // Enumerate devices that are internal to the services, such as PPPoE devices.
-  for (const auto& service : services_) {
-    if (!service->GetInnerDeviceRpcIdentifier().value().empty()) {
-      device_rpc_ids.push_back(service->GetInnerDeviceRpcIdentifier());
-    }
-  }
   return device_rpc_ids;
 }
 
-#if !defined(DISABLE_WIFI)
 bool Manager::SetDisableWiFiVHT(const bool& disable_wifi_vht, Error* error) {
   if (disable_wifi_vht == wifi_provider_->disable_vht()) {
     return false;
@@ -1441,7 +1304,6 @@ bool Manager::GetFTEnabled(Error* error) {
   }
   return true;
 }
-#endif  // DISABLE_WIFI
 
 bool Manager::SetProhibitedTechnologies(
     const std::string& prohibited_technologies, Error* error) {
@@ -1450,13 +1312,13 @@ bool Manager::SetProhibitedTechnologies(
                                      &technology_vector, error)) {
     return false;
   }
-  SLOG(this, 1) << __func__ << ": " << prohibited_technologies;
+  SLOG(1) << __func__ << ": " << prohibited_technologies;
   for (const auto& technology : technology_vector) {
-    ResultCallback result_callback(base::Bind(
+    ResultCallback result_callback(base::BindOnce(
         &Manager::OnTechnologyProhibited, base::Unretained(this), technology));
     const bool kPersistentSave = false;
-    SetEnabledStateForTechnology(technology.GetName(), false, kPersistentSave,
-                                 result_callback);
+    SetEnabledStateForTechnology(TechnologyName(technology), false,
+                                 kPersistentSave, std::move(result_callback));
   }
   props_.prohibited_technologies = prohibited_technologies;
 
@@ -1465,7 +1327,7 @@ bool Manager::SetProhibitedTechnologies(
 
 void Manager::OnTechnologyProhibited(Technology technology,
                                      const Error& error) {
-  SLOG(this, 2) << __func__ << " for " << technology;
+  SLOG(2) << __func__ << " for " << technology;
 }
 
 std::string Manager::GetProhibitedTechnologies(Error* error) {
@@ -1481,7 +1343,7 @@ bool Manager::HasService(const ServiceRefPtr& service) {
 }
 
 void Manager::RegisterService(const ServiceRefPtr& to_manage) {
-  SLOG(this, 2) << "Registering service " << to_manage->log_name();
+  SLOG(2) << "Registering service " << to_manage->log_name();
 
   MatchProfileWithService(to_manage);
 
@@ -1494,14 +1356,12 @@ void Manager::RegisterService(const ServiceRefPtr& to_manage) {
 }
 
 void Manager::DeregisterService(const ServiceRefPtr& to_forget) {
-  SLOG(this, 2) << "Deregistering service " << to_forget->log_name();
+  SLOG(2) << "Deregistering service " << to_forget->log_name();
   for (auto it = services_.begin(); it != services_.end(); ++it) {
     if (to_forget->serial_number() == (*it)->serial_number()) {
-      DLOG_IF(FATAL, (*it)->connection())
-          << "Service " << (*it)->log_name()
-          << " still has a connection (in call to " << __func__ << ")";
       (*it)->Unload();
       (*it)->SetProfile(nullptr);
+      (*it)->SetEapSlotGetter(nullptr);
       // We expect the service being deregistered to be destroyed here as well,
       // so need to remove any remaining reference to it.
       if (*it == last_default_physical_service_) {
@@ -1526,8 +1386,8 @@ bool Manager::UnloadService(
     SetAlwaysOnVpn(kAlwaysOnVpnModeOff, nullptr);
   }
 
-  DCHECK(!(**service_iterator)->connection());
   (**service_iterator)->SetProfile(nullptr);
+  (**service_iterator)->SetEapSlotGetter(nullptr);
   *service_iterator = services_.erase(*service_iterator);
 
   return true;
@@ -1557,10 +1417,10 @@ void Manager::UpdateService(const ServiceRefPtr& to_update) {
   if (is_interesting_state_change) {
     LOG(INFO) << log_message;
   } else {
-    SLOG(this, 2) << log_message;
+    SLOG(2) << log_message;
   }
-  SLOG(this, 2) << "IsConnected(): " << to_update->IsConnected();
-  SLOG(this, 2) << "IsConnecting(): " << to_update->IsConnecting();
+  SLOG(2) << "IsConnected(): " << to_update->IsConnected();
+  SLOG(2) << "IsConnecting(): " << to_update->IsConnecting();
   if (to_update->IsConnected()) {
     to_update->EnableAndRetainAutoConnect();
     // Ensure that a connected Service is not ephemeral (i.e., we actually
@@ -1608,39 +1468,38 @@ void Manager::PersistService(const ServiceRefPtr& to_update) {
 }
 
 void Manager::LoadProperties(const scoped_refptr<DefaultProfile>& profile) {
-  SLOG(this, 2) << __func__;
-  profile->LoadManagerProperties(&props_, dhcp_properties_.get());
+  SLOG(2) << __func__;
+  profile->LoadManagerProperties(&props_);
   SetIgnoredDNSSearchPaths(props_.ignored_dns_search_paths, nullptr);
 }
 
 void Manager::AddTerminationAction(const std::string& name,
-                                   const base::Closure& start) {
-  termination_actions_.Add(name, start);
+                                   base::OnceClosure start) {
+  termination_actions_.Add(name, std::move(start));
 }
 
 void Manager::TerminationActionComplete(const std::string& name) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   termination_actions_.ActionComplete(name);
 }
 
 void Manager::RemoveTerminationAction(const std::string& name) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   termination_actions_.Remove(name);
 }
 
-void Manager::RunTerminationActions(const ResultCallback& done_callback) {
+void Manager::RunTerminationActions(ResultCallback done_callback) {
   LOG(INFO) << "Running termination actions.";
-  termination_actions_.Run(kTerminationActionsTimeoutMilliseconds,
-                           done_callback);
+  termination_actions_.Run(kTerminationActionsTimeout,
+                           std::move(done_callback));
 }
 
 bool Manager::RunTerminationActionsAndNotifyMetrics(
-    const ResultCallback& done_callback) {
+    ResultCallback done_callback) {
   if (termination_actions_.IsEmpty())
     return false;
 
-  metrics_->NotifyTerminationActionsStarted();
-  RunTerminationActions(done_callback);
+  RunTerminationActions(std::move(done_callback));
   return true;
 }
 
@@ -1669,9 +1528,9 @@ void Manager::UpdateDefaultServices(const ServiceRefPtr& logical_service,
   if (physical_service_changed) {
     // The dns-proxy must be not be used unless the default service is online.
     if (!physical_service_online) {
-      UseDNSProxy("");
-    } else if (!props_.dns_proxy_ipv4_address.empty()) {
-      UseDNSProxy(props_.dns_proxy_ipv4_address);
+      UseDNSProxy({});
+    } else if (!props_.dns_proxy_addresses.empty()) {
+      UseDNSProxy(props_.dns_proxy_addresses);
     }
 
     last_default_physical_service_ = physical_service;
@@ -1697,6 +1556,9 @@ void Manager::UpdateDefaultServices(const ServiceRefPtr& logical_service,
       observer.OnDefaultPhysicalServiceChanged(physical_service);
     }
   }
+  if (logical_service_changed) {
+    NotifyDefaultLogicalServiceChanged(logical_service);
+  }
 }
 
 bool Manager::EmitDefaultService() {
@@ -1720,23 +1582,20 @@ void Manager::OnSuspendImminent() {
     return;
   }
   auto result_aggregator(base::MakeRefCounted<ResultAggregator>(
-      base::Bind(&Manager::OnSuspendActionsComplete,
-                 weak_factory_.GetWeakPtr()),
-      dispatcher_, kTerminationActionsTimeoutMilliseconds));
+      base::BindOnce(&Manager::OnSuspendActionsComplete,
+                     weak_factory_.GetWeakPtr()),
+      FROM_HERE, "", dispatcher_, kTerminationActionsTimeout));
   for (const auto& service : services_) {
-    ResultCallback aggregator_callback(
-        base::Bind(&ResultAggregator::ReportResult, result_aggregator));
-    service->OnBeforeSuspend(aggregator_callback);
+    service->OnBeforeSuspend(
+        base::BindOnce(&ResultAggregator::ReportResult, result_aggregator));
   }
   for (const auto& device : devices_) {
-    ResultCallback aggregator_callback(
-        base::Bind(&ResultAggregator::ReportResult, result_aggregator));
-    device->OnBeforeSuspend(aggregator_callback);
+    device->OnBeforeSuspend(
+        base::BindOnce(&ResultAggregator::ReportResult, result_aggregator));
   }
 }
 
 void Manager::OnSuspendDone() {
-  metrics_->NotifySuspendDone();
   // Un-suppress auto-connect in case this flag was left set in dark resume.
   set_suppress_autoconnect(false);
   for (const auto& service : services_) {
@@ -1749,7 +1608,6 @@ void Manager::OnSuspendDone() {
 }
 
 void Manager::OnDarkSuspendImminent() {
-  metrics_->NotifyDarkResumeActionsStarted();
   if (devices_.empty()) {
     // If there are no devices, then suspend actions succeeded synchronously.
     // Make a call to the Manager::OnDarkResumeActionsComplete directly, since
@@ -1758,13 +1616,12 @@ void Manager::OnDarkSuspendImminent() {
     return;
   }
   auto result_aggregator(base::MakeRefCounted<ResultAggregator>(
-      base::Bind(&Manager::OnDarkResumeActionsComplete,
-                 weak_factory_.GetWeakPtr()),
-      dispatcher_, kTerminationActionsTimeoutMilliseconds));
+      base::BindOnce(&Manager::OnDarkResumeActionsComplete,
+                     weak_factory_.GetWeakPtr()),
+      FROM_HERE, "", dispatcher_, kTerminationActionsTimeout));
   for (const auto& device : devices_) {
-    ResultCallback aggregator_callback(
-        base::Bind(&ResultAggregator::ReportResult, result_aggregator));
-    device->OnDarkResume(aggregator_callback);
+    device->OnDarkResume(
+        base::BindOnce(&ResultAggregator::ReportResult, result_aggregator));
   }
 }
 
@@ -1776,7 +1633,6 @@ void Manager::OnSuspendActionsComplete(const Error& error) {
 
 void Manager::OnDarkResumeActionsComplete(const Error& error) {
   LOG(INFO) << "Finished dark resume actions. Result: " << error;
-  metrics_->NotifyDarkResumeActionsCompleted(error.IsSuccess());
   power_manager_->ReportDarkSuspendReadiness();
 }
 
@@ -1790,21 +1646,21 @@ std::vector<DeviceRefPtr> Manager::FilterByTechnology(Technology tech) const {
 }
 
 void Manager::HelpRegisterConstDerivedRpcIdentifier(
-    const std::string& name, RpcIdentifier (Manager::*get)(Error* error)) {
+    std::string_view name, RpcIdentifier (Manager::*get)(Error* error)) {
   store_.RegisterDerivedRpcIdentifier(
       name, RpcIdentifierAccessor(new CustomAccessor<Manager, RpcIdentifier>(
                 this, get, nullptr)));
 }
 
 void Manager::HelpRegisterConstDerivedRpcIdentifiers(
-    const std::string& name, RpcIdentifiers (Manager::*get)(Error* error)) {
+    std::string_view name, RpcIdentifiers (Manager::*get)(Error* error)) {
   store_.RegisterDerivedRpcIdentifiers(
       name, RpcIdentifiersAccessor(new CustomAccessor<Manager, RpcIdentifiers>(
                 this, get, nullptr)));
 }
 
 void Manager::HelpRegisterDerivedString(
-    const std::string& name,
+    std::string_view name,
     std::string (Manager::*get)(Error* error),
     bool (Manager::*set)(const std::string&, Error*)) {
   store_.RegisterDerivedString(
@@ -1812,7 +1668,7 @@ void Manager::HelpRegisterDerivedString(
       StringAccessor(new CustomAccessor<Manager, std::string>(this, get, set)));
 }
 
-void Manager::HelpRegisterConstDerivedStrings(const std::string& name,
+void Manager::HelpRegisterConstDerivedStrings(std::string_view name,
                                               Strings (Manager::*get)(Error*)) {
   store_.RegisterDerivedStrings(
       name, StringsAccessor(
@@ -1820,7 +1676,7 @@ void Manager::HelpRegisterConstDerivedStrings(const std::string& name,
 }
 
 void Manager::HelpRegisterDerivedKeyValueStore(
-    const std::string& name,
+    std::string_view name,
     KeyValueStore (Manager::*get)(Error* error),
     bool (Manager::*set)(const KeyValueStore& store, Error* error)) {
   store_.RegisterDerivedKeyValueStore(
@@ -1828,7 +1684,7 @@ void Manager::HelpRegisterDerivedKeyValueStore(
                 new CustomAccessor<Manager, KeyValueStore>(this, get, set)));
 }
 
-void Manager::HelpRegisterDerivedBool(const std::string& name,
+void Manager::HelpRegisterDerivedBool(std::string_view name,
                                       bool (Manager::*get)(Error* error),
                                       bool (Manager::*set)(const bool&,
                                                            Error* error)) {
@@ -1844,69 +1700,64 @@ void Manager::SortServices() {
   // Defer this work to the event loop.
   if (sort_services_task_.IsCancelled()) {
     sort_services_task_.Reset(
-        base::Bind(&Manager::SortServicesTask, weak_factory_.GetWeakPtr()));
+        base::BindOnce(&Manager::SortServicesTask, weak_factory_.GetWeakPtr()));
     dispatcher_->PostTask(FROM_HERE, sort_services_task_.callback());
   }
 }
 
 void Manager::SortServicesTask() {
-  SLOG(this, 4) << "In " << __func__;
+  SLOG(4) << "In " << __func__;
   sort_services_task_.Cancel();
 
   // Refresh all traffic counters before the sort.
   RefreshAllTrafficCountersTask();
 
-  sort(services_.begin(), services_.end(),
-       [&order = technology_order_](ServiceRefPtr a, ServiceRefPtr b) {
-         return Service::Compare(a, b, true /* compare connectivity */, order)
-             .first;
-       });
+  SortServicesImpl(/*compare_connectivity_state=*/true, technology_order_,
+                   &services_);
 
-  uint32_t priority = Connection::kDefaultPriority;
+  uint32_t ranking_order = 0;
   bool found_dns = false;
-  ServiceRefPtr old_logical;
-  int old_logical_priority;
   ServiceRefPtr new_logical;
   ServiceRefPtr new_physical;
   for (const auto& service : services_) {
-    ConnectionRefPtr conn = service->connection();
-    if (!new_physical && service->technology() != Technology::kVPN) {
-      new_physical = service;
-    }
-    if (conn) {
-      if (!found_dns && !conn->dns_servers().empty()) {
+    auto* network = FindActiveNetworkFromService(service);
+    if (network) {
+      DCHECK(network->IsConnected());
+      bool use_dns;
+      if (!found_dns && !network->GetDNSServers().empty()) {
         found_dns = true;
-        conn->SetUseDNS(true);
+        use_dns = true;
       } else {
-        conn->SetUseDNS(false);
+        use_dns = false;
       }
 
-      new_logical = new_logical ? new_logical : service;
-
-      priority += Connection::kPriorityStep;
-      if (conn->IsDefault()) {
-        old_logical = service;
-        old_logical_priority = priority;
-      } else {
-        conn->SetPriority(priority, new_physical == service);
+      if (!new_logical) {
+        new_logical = service;
       }
+      if (!new_physical && service->technology() != Technology::kVPN) {
+        new_physical = service;
+      }
+
+      NetworkPriority network_priority = {
+          .is_primary_logical = (service == new_logical),
+          .is_primary_physical = (service == new_physical),
+          .is_primary_for_dns = use_dns,
+          .ranking_order = ranking_order};
+      network->SetPriority(network_priority);
+      ++ranking_order;
     }
   }
 
-  if (old_logical && old_logical != new_logical) {
-    old_logical->connection()->SetPriority(old_logical_priority,
-                                           old_logical == new_physical);
-  }
   if (new_logical) {
-    bool is_primary_physical = new_logical == new_physical;
-    new_logical->connection()->SetPriority(Connection::kDefaultPriority,
-                                           is_primary_physical);
     auto device = FindDeviceFromService(new_logical);
-    if (device && device->technology().IsPrimaryConnectivityTechnology() &&
+    // Whenever the primary logical device is portalled (regardless of whether
+    // it changed), restart portal detection. This will reset the backoff scheme
+    // on any scan or other change that triggers a sort. See b/230030693 for
+    // additional discussion.
+    if (device && IsPrimaryConnectivityTechnology(device->technology()) &&
         new_logical->IsPortalled()) {
-      SLOG(this, 2)
-          << "Restarting portal detection for the new primary device.";
-      device->RestartPortalDetection();
+      SLOG(2) << "Restarting portal detection for the new primary device.";
+      device->UpdatePortalDetector(Network::ValidationReason::kServiceReorder);
     }
   }
 
@@ -1927,10 +1778,8 @@ void Manager::SortServicesTask() {
                                ConnectedTechnologies(&error));
   adaptor_->EmitStringChanged(kDefaultTechnologyProperty,
                               DefaultTechnology(&error));
-  UpdateBlackholeUserTraffic();
   UpdateDefaultServices(new_logical, new_physical);
   RefreshConnectionState();
-  DetectMultiHomedDevices();
   if (ethernet_provider_)
     ethernet_provider_->RefreshGenericEthernetService();
 
@@ -1943,17 +1792,17 @@ void Manager::ApplyAlwaysOnVpn(const ServiceRefPtr& physical_service) {
     return;
   }
 
-  SLOG(this, 2) << __func__ << " mode=" << always_on_vpn_mode_ << " service="
-                << (always_on_vpn_service_
-                        ? always_on_vpn_service_->GetRpcIdentifier().value()
-                        : "");
+  SLOG(2) << __func__ << " mode=" << always_on_vpn_mode_ << " service="
+          << (always_on_vpn_service_
+                  ? always_on_vpn_service_->GetRpcIdentifier().value()
+                  : "");
 
   if (always_on_vpn_mode_ == kAlwaysOnVpnModeOff || !always_on_vpn_service_) {
     // No VPN service to automatically wake-up.
     return;
   }
 
-  if (!physical_service->IsOnline()) {
+  if (!physical_service || !physical_service->IsOnline()) {
     // No physical network, we can't connect a VPN.
     ResetAlwaysOnVpnBackoff();
     return;
@@ -1996,10 +1845,9 @@ void Manager::ApplyAlwaysOnVpn(const ServiceRefPtr& physical_service) {
       std::min(always_on_vpn_connect_attempts_, kAlwaysOnVpnBackoffMaxShift);
   base::TimeDelta delay = (1 << shifter) * kAlwaysOnVpnBackoffDelay;
   always_on_vpn_connect_task_.Reset(
-      base::Bind(&Manager::ConnectAlwaysOnVpn, base::Unretained(this)));
+      base::BindOnce(&Manager::ConnectAlwaysOnVpn, base::Unretained(this)));
   dispatcher_->PostDelayedTask(FROM_HERE,
-                               always_on_vpn_connect_task_.callback(),
-                               delay.InMilliseconds());
+                               always_on_vpn_connect_task_.callback(), delay);
 
   LOG(INFO) << "Delayed " << always_on_vpn_service_->friendly_name()
             << " connection in " << delay << " (attempt #"
@@ -2026,12 +1874,21 @@ void Manager::UpdateAlwaysOnVpnWith(const ProfileRefPtr& profile) {
 
 void Manager::SetAlwaysOnVpn(const std::string& mode,
                              VPNServiceRefPtr service) {
-  LOG(INFO) << "Setting always-on-vpn to mode=" << mode
+  LOG(INFO) << "Setting always-on VPN to mode=" << mode
             << " service=" << (service ? service->log_name() : "nullptr");
 
   const std::string previous_mode = always_on_vpn_mode_;
   always_on_vpn_mode_ = mode;
+  const VPNServiceRefPtr previous_service = always_on_vpn_service_;
   always_on_vpn_service_ = service;
+
+  if (previous_service != always_on_vpn_service_) {
+    // As the service changed, the backoff mechanism has to be reset to avoid to
+    // apply a connection retry/delay on a new service. It also cancels any
+    // in-flight connect task to connect to prevent the connection of a null
+    // service (see b/218005248).
+    ResetAlwaysOnVpnBackoff();
+  }
 
   // Update VpnLockdown mode below if necessary.
   if (!patchpanel_client_ || previous_mode == mode)
@@ -2049,7 +1906,7 @@ void Manager::SetAlwaysOnVpn(const std::string& mode,
 }
 
 void Manager::ConnectAlwaysOnVpn() {
-  SLOG(this, 4) << "In " << __func__;
+  SLOG(4) << "In " << __func__;
 
   Error error;
   always_on_vpn_service_->Connect(&error, "Always-on VPN");
@@ -2058,7 +1915,7 @@ void Manager::ConnectAlwaysOnVpn() {
 }
 
 void Manager::ResetAlwaysOnVpnBackoff() {
-  SLOG(this, 4) << "In " << __func__;
+  SLOG(4) << "In " << __func__;
 
   always_on_vpn_connect_attempts_ = 0u;
   always_on_vpn_connect_task_.Cancel();
@@ -2071,27 +1928,14 @@ bool Manager::IsServiceAlwaysOnVpn(const ServiceConstRefPtr& service) const {
 }
 
 void Manager::DeviceStatusCheckTask() {
-  SLOG(this, 4) << "In " << __func__;
+  SLOG(4) << "In " << __func__;
 
-  ConnectionStatusCheck();
   DevicePresenceStatusCheck();
 
+  device_status_check_task_.Reset(base::BindOnce(
+      &Manager::DeviceStatusCheckTask, weak_factory_.GetWeakPtr()));
   dispatcher_->PostDelayedTask(FROM_HERE, device_status_check_task_.callback(),
-                               kDeviceStatusCheckIntervalMilliseconds);
-}
-
-void Manager::ConnectionStatusCheck() {
-  SLOG(this, 4) << "In " << __func__;
-  // Report current connection status.
-  Metrics::ConnectionStatus status = Metrics::kConnectionStatusOffline;
-  if (IsConnected()) {
-    status = Metrics::kConnectionStatusConnected;
-    // Check if device is online as well.
-    if (IsOnline()) {
-      metrics_->NotifyDeviceConnectionStatus(Metrics::kConnectionStatusOnline);
-    }
-  }
-  metrics_->NotifyDeviceConnectionStatus(status);
+                               kDeviceStatusCheckInterval);
 }
 
 void Manager::DevicePresenceStatusCheck() {
@@ -2100,9 +1944,11 @@ void Manager::DevicePresenceStatusCheck() {
       AvailableTechnologies(&error);
 
   for (const auto& technology : kProbeTechnologies) {
-    bool presence = base::Contains(available_technologies, technology);
-    metrics_->NotifyDevicePresenceStatus(Technology::CreateFromName(technology),
-                                         presence);
+    auto presence = base::Contains(available_technologies, technology)
+                        ? Metrics::kDevicePresenceStatusYes
+                        : Metrics::kDevicePresenceStatusNo;
+    metrics_->SendEnumToUMA(Metrics::kMetricDevicePresenceStatus,
+                            TechnologyFromName(technology), presence);
   }
 }
 
@@ -2136,7 +1982,7 @@ void Manager::AutoConnect() {
   }
 
   if (SLOG_IS_ON(Manager, 4)) {
-    SLOG(this, 4) << "Sorted service list for AutoConnect: ";
+    SLOG(4) << "Sorted service list for AutoConnect: ";
     for (size_t i = 0; i < services_.size(); ++i) {
       ServiceRefPtr service = services_[i];
       const char* compare_reason = nullptr;
@@ -2149,34 +1995,29 @@ void Manager::AutoConnect() {
       } else {
         compare_reason = "last";
       }
-      SLOG(this, 4) << "Service " << service->log_name()
-                    << " Profile: " << service->profile()->GetFriendlyName()
-                    << " IsConnected: " << service->IsConnected()
-                    << " IsConnecting: " << service->IsConnecting()
-                    << " HasEverConnected: " << service->has_ever_connected()
-                    << " IsFailed: " << service->IsFailed()
-                    << " connectable: " << service->connectable()
-                    << " auto_connect: " << service->auto_connect()
-                    << " retain_auto_connect: "
-                    << service->retain_auto_connect()
-                    << " priority: " << service->priority()
-                    << " crypto_algorithm: " << service->crypto_algorithm()
-                    << " key_rotation: " << service->key_rotation()
-                    << " endpoint_auth: " << service->endpoint_auth()
-                    << " strength: " << service->strength()
-                    << " sorted: " << compare_reason;
+      SLOG(4) << "Service " << service->log_name()
+              << " Profile: " << service->profile()->GetFriendlyName()
+              << " IsConnected: " << service->IsConnected()
+              << " IsConnecting: " << service->IsConnecting()
+              << " HasEverConnected: " << service->has_ever_connected()
+              << " IsFailed: " << service->IsFailed()
+              << " connectable: " << service->connectable()
+              << " auto_connect: " << service->auto_connect()
+              << " retain_auto_connect: " << service->retain_auto_connect()
+              << " priority: " << service->priority()
+              << " crypto_algorithm: " << service->crypto_algorithm()
+              << " key_rotation: " << service->key_rotation()
+              << " endpoint_auth: " << service->endpoint_auth()
+              << " strength: " << service->strength()
+              << " sorted: " << compare_reason;
     }
   }
-
-#if !defined(DISABLE_WIFI)
   // Report the number of auto-connectable wifi services available when wifi is
   // idle (no active or pending connection), which will trigger auto connect
   // for wifi services.
   if (IsWifiIdle()) {
     wifi_provider_->ReportAutoConnectableServices();
   }
-#endif  // DISABLE_WIFI
-
   // Perform auto-connect.
   for (const auto& service : services_) {
     if (service->auto_connect()) {
@@ -2185,19 +2026,29 @@ void Manager::AutoConnect() {
   }
 }
 
-void Manager::ConnectToBestServices(Error* /*error*/) {
-  dispatcher_->PostTask(FROM_HERE,
-                        base::Bind(&Manager::ConnectToBestServicesTask,
-                                   weak_factory_.GetWeakPtr()));
+void Manager::ScanAndConnectToBestServices(Error* error) {
+  DeviceRefPtr wifi = GetEnabledDeviceWithTechnology(Technology::kWiFi);
+  if (wifi) {
+    LOG(INFO) << "ScanAndConnectToBestServices: ensure scan";
+    static_cast<WiFi*>(wifi.get())->EnsureScanAndConnectToBestService(error);
+  } else {
+    LOG(INFO) << "ScanAndConnectToBestServices: no WiFi device available";
+  }
+  dispatcher_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&Manager::ConnectToBestServicesForTechnologies,
+                     weak_factory_.GetWeakPtr(), /* is_wifi */ false));
 }
 
-void Manager::ConnectToBestServicesTask() {
+void Manager::ConnectToBestWiFiService() {
+  ConnectToBestServicesForTechnologies(/* is_wifi */ true);
+}
+
+void Manager::ConnectToBestServicesForTechnologies(bool is_wifi) {
   std::vector<ServiceRefPtr> services_copy = services_;
   constexpr bool kCompareConnectivityState = false;
-  sort(services_copy.begin(), services_copy.end(),
-       [&order = technology_order_](ServiceRefPtr a, ServiceRefPtr b) {
-         return Service::Compare(a, b, kCompareConnectivityState, order).first;
-       });
+  SortServicesImpl(kCompareConnectivityState, technology_order_,
+                   &services_copy);
   std::set<Technology> connecting_technologies;
   for (const auto& service : services_copy) {
     if (!service->connectable()) {
@@ -2209,7 +2060,10 @@ void Manager::ConnectToBestServicesTask() {
       continue;
     }
     Technology technology = service->technology();
-    if (!technology.IsPrimaryConnectivityTechnology() && !IsConnected()) {
+    if (is_wifi != (technology == Technology::kWiFi)) {
+      continue;
+    }
+    if (!IsPrimaryConnectivityTechnology(technology) && !IsConnected()) {
       // Non-primary services need some other service connected first.
       continue;
     }
@@ -2235,7 +2089,7 @@ void Manager::ConnectToBestServicesTask() {
   }
 
   if (SLOG_IS_ON(Manager, 4)) {
-    SLOG(this, 4) << "Sorted service list for ConnectToBestServicesTask: ";
+    SLOG(4) << "Sorted service list for ConnectToBestServicesForTechnologies: ";
     for (size_t i = 0; i < services_copy.size(); ++i) {
       ServiceRefPtr service = services_copy[i];
       const char* compare_reason = nullptr;
@@ -2252,22 +2106,21 @@ void Manager::ConnectToBestServicesTask() {
       } else {
         compare_reason = "last";
       }
-      SLOG(this, 4) << "Service " << service->log_name()
-                    << " Profile: " << service->profile()->GetFriendlyName()
-                    << " IsConnected: " << service->IsConnected()
-                    << " IsConnecting: " << service->IsConnecting()
-                    << " HasEverConnected: " << service->has_ever_connected()
-                    << " IsFailed: " << service->IsFailed()
-                    << " connectable: " << service->connectable()
-                    << " auto_connect: " << service->auto_connect()
-                    << " retain_auto_connect: "
-                    << service->retain_auto_connect()
-                    << " priority: " << service->priority()
-                    << " crypto_algorithm: " << service->crypto_algorithm()
-                    << " key_rotation: " << service->key_rotation()
-                    << " endpoint_auth: " << service->endpoint_auth()
-                    << " strength: " << service->strength()
-                    << " sorted: " << compare_reason;
+      SLOG(4) << "Service " << service->log_name()
+              << " Profile: " << service->profile()->GetFriendlyName()
+              << " IsConnected: " << service->IsConnected()
+              << " IsConnecting: " << service->IsConnecting()
+              << " HasEverConnected: " << service->has_ever_connected()
+              << " IsFailed: " << service->IsFailed()
+              << " connectable: " << service->connectable()
+              << " auto_connect: " << service->auto_connect()
+              << " retain_auto_connect: " << service->retain_auto_connect()
+              << " priority: " << service->priority()
+              << " crypto_algorithm: " << service->crypto_algorithm()
+              << " key_rotation: " << service->key_rotation()
+              << " endpoint_auth: " << service->endpoint_auth()
+              << " strength: " << service->strength()
+              << " sorted: " << compare_reason;
     }
   }
 }
@@ -2275,27 +2128,15 @@ void Manager::ConnectToBestServicesTask() {
 void Manager::CreateConnectivityReport(Error* /*error*/) {
   LOG(INFO) << "Creating Connectivity Report";
 
-  // For each of the connected services, perform a single portal detection
-  // test to assess connectivity.  The results should be written to the log.
-  for (const auto& service : services_) {
-    if (!service->IsConnected()) {
-      // Service sort order guarantees that no service beyond this one will be
-      // connected either.
-      break;
-    }
-    // Get the underlying device for this service and perform connectivity test.
-    for (const auto& device : devices_) {
-      if (device->IsConnectedToService(service)) {
-        if (device->StartConnectivityTest()) {
-          SLOG(this, 3) << "Started connectivity test for service "
-                        << service->log_name();
-        } else {
-          SLOG(this, 3) << "Failed to start connectivity test for service "
-                        << service->log_name()
-                        << " device not reporting IsConnected.";
-        }
-        break;
+  for (const auto& device : devices_) {
+    auto network = device->GetPrimaryNetwork();
+    if (network) {
+      if (!network->IsConnected()) {
+        LOG(INFO) << device->LoggingTag()
+                  << ": Skipping connectivity test: no Network connection";
+        return;
       }
+      network->StartConnectivityTest(GetPortalDetectorProbingConfiguration());
     }
   }
 }
@@ -2339,7 +2180,7 @@ void Manager::RefreshConnectionState() {
 std::vector<std::string> Manager::AvailableTechnologies(Error* /*error*/) {
   std::set<std::string> unique_technologies;
   for (const auto& device : devices_) {
-    unique_technologies.insert(device->technology().GetName());
+    unique_technologies.insert(device->GetTechnologyName());
   }
   return std::vector<std::string>(unique_technologies.begin(),
                                   unique_technologies.end());
@@ -2349,7 +2190,7 @@ std::vector<std::string> Manager::ConnectedTechnologies(Error* /*error*/) {
   std::set<std::string> unique_technologies;
   for (const auto& device : devices_) {
     if (device->IsConnected())
-      unique_technologies.insert(device->technology().GetName());
+      unique_technologies.insert(device->GetTechnologyName());
   }
   return std::vector<std::string>(unique_technologies.begin(),
                                   unique_technologies.end());
@@ -2365,7 +2206,7 @@ bool Manager::IsTechnologyConnected(Technology technology) const {
 
 std::string Manager::DefaultTechnology(Error* /*error*/) {
   return (!services_.empty() && services_[0]->IsConnected())
-             ? services_[0]->GetTechnologyString()
+             ? services_[0]->GetTechnologyName()
              : "";
 }
 
@@ -2373,7 +2214,7 @@ std::vector<std::string> Manager::EnabledTechnologies(Error* /*error*/) {
   std::set<std::string> unique_technologies;
   for (const auto& device : devices_) {
     if (device->enabled())
-      unique_technologies.insert(device->technology().GetName());
+      unique_technologies.insert(device->GetTechnologyName());
   }
   return std::vector<std::string>(unique_technologies.begin(),
                                   unique_technologies.end());
@@ -2426,16 +2267,18 @@ RpcIdentifier Manager::GetActiveProfileRpcIdentifier(Error* /*error*/) {
 }
 
 std::string Manager::GetCheckPortalList(Error* /*error*/) {
-  return use_startup_portal_list_ ? startup_portal_list_
-                                  : props_.check_portal_list;
+  return props_.check_portal_list;
 }
 
 bool Manager::SetCheckPortalList(const std::string& portal_list, Error* error) {
-  use_startup_portal_list_ = false;
   if (props_.check_portal_list == portal_list) {
     return false;
   }
   props_.check_portal_list = portal_list;
+  for (const auto& device : devices_) {
+    device->UpdatePortalDetector(
+        Network::ValidationReason::kManagerPropertyUpdate);
+  }
   return true;
 }
 
@@ -2458,12 +2301,16 @@ bool Manager::SetIgnoredDNSSearchPaths(const std::string& ignored_paths,
   return true;
 }
 
-std::string Manager::GetPortalFallbackUrlsString(Error* /*error*/) {
+std::string Manager::GetPortalFallbackHttpUrls(Error* /*error*/) {
   return base::JoinString(props_.portal_fallback_http_urls, ",");
 }
 
-bool Manager::SetPortalFallbackUrlsString(const std::string& urls,
-                                          Error* /*error*/) {
+std::string Manager::GetPortalFallbackHttpsUrls(Error* /*error*/) {
+  return base::JoinString(props_.portal_fallback_https_urls, ",");
+}
+
+bool Manager::SetPortalFallbackHttpUrls(const std::string& urls,
+                                        Error* /*error*/) {
   if (urls.empty()) {
     return false;
   }
@@ -2473,10 +2320,15 @@ bool Manager::SetPortalFallbackUrlsString(const std::string& urls,
   return true;
 }
 
-PortalDetector::Properties Manager::GetPortalCheckProperties() const {
-  return PortalDetector::Properties(GetPortalCheckHttpUrl(),
-                                    GetPortalCheckHttpsUrl(),
-                                    GetPortalCheckFallbackHttpUrls());
+bool Manager::SetPortalFallbackHttpsUrls(const std::string& urls,
+                                         Error* /*error*/) {
+  if (urls.empty()) {
+    return false;
+  }
+  auto url_list =
+      base::SplitString(urls, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+  props_.portal_fallback_https_urls = url_list;
+  return true;
 }
 
 // called via RPC (e.g., from ManagerDBusAdaptor)
@@ -2493,7 +2345,7 @@ ServiceRefPtr Manager::GetService(const KeyValueStore& args, Error* error) {
 ServiceRefPtr Manager::GetServiceInner(const KeyValueStore& args,
                                        Error* error) {
   if (args.Contains<std::string>(kGuidProperty)) {
-    SLOG(this, 2) << __func__ << ": searching by GUID";
+    SLOG(2) << __func__ << ": searching by GUID";
     ServiceRefPtr service =
         GetServiceWithGUID(args.Get<std::string>(kGuidProperty), nullptr);
     if (service) {
@@ -2508,14 +2360,15 @@ ServiceRefPtr Manager::GetServiceInner(const KeyValueStore& args,
   }
 
   std::string type = args.Get<std::string>(kTypeProperty);
-  Technology technology = Technology::CreateFromName(type);
+  Technology technology = TechnologyFromName(type);
   if (!base::Contains(providers_, technology)) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
-                          kErrorUnsupportedServiceType);
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kTechnologyNotAvailable,
+        "Could not get service for technology: " + TechnologyName(technology));
     return nullptr;
   }
 
-  SLOG(this, 2) << __func__ << ": getting " << type << " Service";
+  SLOG(2) << __func__ << ": getting " << type << " Service";
   return providers_[technology]->GetService(args, error);
 }
 
@@ -2542,18 +2395,17 @@ ServiceRefPtr Manager::ConfigureService(const KeyValueStore& args,
 
   // First pull in any stored configuration associated with the service.
   if (service->profile() == profile) {
-    SLOG(this, 2) << __func__ << ": service " << service->log_name()
-                  << " is already a member of profile "
-                  << profile->GetFriendlyName()
-                  << " so a load is not necessary.";
+    SLOG(2) << __func__ << ": service " << service->log_name()
+            << " is already a member of profile " << profile->GetFriendlyName()
+            << " so a load is not necessary.";
   } else if (profile->LoadService(service)) {
-    SLOG(this, 2) << __func__ << ": applied stored information from profile "
-                  << profile->GetFriendlyName() << " into service "
-                  << service->log_name();
+    SLOG(2) << __func__ << ": applied stored information from profile "
+            << profile->GetFriendlyName() << " into service "
+            << service->log_name();
   } else {
-    SLOG(this, 2) << __func__ << ": no previous information in profile "
-                  << profile->GetFriendlyName() << " exists for service "
-                  << service->log_name();
+    SLOG(2) << __func__ << ": no previous information in profile "
+            << profile->GetFriendlyName() << " exists for service "
+            << service->log_name();
   }
 
   // Overlay this with the passed-in configuration parameters.
@@ -2572,8 +2424,7 @@ ServiceRefPtr Manager::ConfigureService(const KeyValueStore& args,
     // profiles.
     if (IsServiceEphemeral(service) ||
         (profile_specified && service->profile() != profile)) {
-      SLOG(this, 2) << "Moving service to profile "
-                    << profile->GetFriendlyName();
+      SLOG(2) << "Moving service to profile " << profile->GetFriendlyName();
       if (!MoveServiceToProfile(service, profile)) {
         Error::PopulateAndLog(FROM_HERE, error, Error::kInternalError,
                               "Unable to move service to profile");
@@ -2597,11 +2448,12 @@ ServiceRefPtr Manager::ConfigureServiceForProfile(
   }
 
   std::string type = args.Get<std::string>(kTypeProperty);
-  Technology technology = Technology::CreateFromName(type);
+  Technology technology = TechnologyFromName(type);
 
   if (!base::Contains(providers_, technology)) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
-                          kErrorUnsupportedServiceType);
+    Error::PopulateAndLog(FROM_HERE, error, Error::kTechnologyNotAvailable,
+                          "Failed to configure service for technology: " +
+                              TechnologyName(technology));
     return nullptr;
   }
 
@@ -2625,11 +2477,11 @@ ServiceRefPtr Manager::ConfigureServiceForProfile(
   // Non-Cellular Services are primarily identified by GUID. Cellular Services
   // are always identified by ICCID.
   if (type != kTypeCellular && args.Contains<std::string>(kGuidProperty)) {
-    SLOG(this, 2) << __func__ << ": searching by GUID";
+    SLOG(2) << __func__ << ": searching by GUID";
     service = GetServiceWithGUID(args.Get<std::string>(kGuidProperty), nullptr);
     if (service && service->technology() != technology) {
       Error::PopulateAndLog(
-          FROM_HERE, error, Error::kNotSupported,
+          FROM_HERE, error, Error::kInvalidArguments,
           base::StringPrintf("This GUID matches a non-%s service",
                              type.c_str()));
       return nullptr;
@@ -2695,6 +2547,7 @@ void Manager::SetupServiceInProfile(ServiceRefPtr service,
                                     ProfileRefPtr profile,
                                     const KeyValueStore& args,
                                     Error* error) {
+  service->SetEapSlotGetter(profile->GetSlotGetter());
   service->SetProfile(profile);
   service->Configure(args, error);
   profile->UpdateService(service);
@@ -2707,16 +2560,22 @@ ServiceRefPtr Manager::FindMatchingService(const KeyValueStore& args,
       return service;
     }
   }
-  error->Populate(Error::kNotFound, "Matching service was not found");
+  error->Populate(Error::kNotFound, Error::kServiceNotFoundMsg, FROM_HERE);
   return nullptr;
 }
 
-DeviceRefPtr Manager::FindDeviceFromService(const ServiceRefPtr& service) {
+DeviceRefPtr Manager::FindDeviceFromService(
+    const ServiceRefPtr& service) const {
   if (!service) {
     return nullptr;
   }
 
-  for (auto& device : devices_) {
+  const auto virtual_device = service->GetVirtualDevice();
+  if (virtual_device) {
+    return virtual_device;
+  }
+
+  for (const auto& device : devices_) {
     if (device->selected_service() == service) {
       return device;
     }
@@ -2724,11 +2583,27 @@ DeviceRefPtr Manager::FindDeviceFromService(const ServiceRefPtr& service) {
   return nullptr;
 }
 
+Network* Manager::FindActiveNetworkFromService(
+    const ServiceRefPtr& service) const {
+  if (!service || !service->IsConnected()) {
+    return nullptr;
+  }
+  auto device = FindDeviceFromService(service);
+  if (!device) {
+    return nullptr;
+  }
+  auto primary_network = device->GetPrimaryNetwork();
+  if (!primary_network || !primary_network->IsConnected()) {
+    return nullptr;
+  }
+  return primary_network;
+}
+
 ServiceRefPtr Manager::GetPrimaryPhysicalService() {
   // Note that |services_| is kept sorted in order of highest priority to
   // lowest.
   for (const auto& service : services_) {
-    if (service->technology().IsPrimaryConnectivityTechnology()) {
+    if (IsPrimaryConnectivityTechnology(service->technology())) {
       return service;
     }
   }
@@ -2746,14 +2621,18 @@ ServiceRefPtr Manager::GetFirstEthernetService() {
 
 std::map<std::string, std::vector<GeolocationInfo>>
 Manager::GetNetworksForGeolocation() const {
+  base::Time oldest_timestamp = base::Time::Max();
+  base::Time newest_timestamp = base::Time::Min();
   std::map<std::string, std::vector<GeolocationInfo>> geolocation_infos;
   for (const auto& entry : device_geolocation_info_) {
-    const DeviceRefPtr& device = entry.first;
+    const DeviceConstRefPtr& device = entry.first;
     const std::vector<GeolocationInfo>& device_info = entry.second;
     std::vector<GeolocationInfo>* network_geolocation_info = nullptr;
-    if (device->technology() == Technology::kWifi) {
+    if (device->technology() == Technology::kWiFi) {
       network_geolocation_info =
           &geolocation_infos[kGeoWifiAccessPointsProperty];
+      GeolocationInfoAgeRange(device_info, &oldest_timestamp,
+                              &newest_timestamp);
     } else if (device->technology() == Technology::kCellular) {
       network_geolocation_info = &geolocation_infos[kGeoCellTowersProperty];
     } else {
@@ -2768,60 +2647,43 @@ Manager::GetNetworksForGeolocation() const {
                    std::back_inserter(*network_geolocation_info),
                    &PrepareGeolocationInfoForExport);
   }
+  if (!base::Contains(geolocation_infos, kGeoWifiAccessPointsProperty)) {
+    LOG(INFO) << "The WiFi AP list is empty";
+  } else {
+    LOG(INFO) << "The size of the WiFi AP list is "
+              << geolocation_infos[kGeoWifiAccessPointsProperty].size();
+    if (!oldest_timestamp.is_inf() && !newest_timestamp.is_inf()) {
+      LOG(INFO) << "The oldest endpoint was seen at " << oldest_timestamp
+                << ", the newest endpoint was seen at " << newest_timestamp;
+    }
+    for (auto geoinfo : geolocation_infos[kGeoWifiAccessPointsProperty]) {
+      SLOG(4) << GeolocationInfoToString(geoinfo);
+    }
+  }
 
   return geolocation_infos;
 }
 
 void Manager::OnDeviceGeolocationInfoUpdated(const DeviceRefPtr& device) {
-  SLOG(this, 2) << __func__ << " for device " << device->UniqueName();
-  device_geolocation_info_[device] = device->GetGeolocationObjects();
+  SLOG(2) << __func__ << " for device " << device->UniqueName();
+  device->UpdateGeolocationObjects(&device_geolocation_info_[device]);
 }
 
 void Manager::RecheckPortal(Error* /*error*/) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   for (const auto& device : devices_) {
-    device->RequestPortalDetection();
-  }
-}
-
-void Manager::RecheckPortalOnService(const ServiceRefPtr& service) {
-  for (const auto& device : devices_) {
-    if (device->IsConnectedToService(service)) {
-      // As opposed to RecheckPortal() above, we explicitly stop and then
-      // restart portal detection, since the service to recheck was explicitly
-      // specified.
-      device->RestartPortalDetection();
-      break;
-    }
+    device->UpdatePortalDetector(Network::ValidationReason::kDBusRequest);
   }
 }
 
 void Manager::RequestScan(const std::string& technology, Error* error) {
-  Technology technology_identifier;
-  // TODO(benchan): To maintain backward compatibility, we treat an unspecified
-  // technology as WiFi. We should remove this special handling and treat an
-  // unspecified technology as an error after we update existing clients of
-  // this API to specify a valid technology when calling this method.
-  if (technology.empty()) {
-    technology_identifier = Technology::kWifi;
-  } else {
-    technology_identifier = Technology::CreateFromName(technology);
-  }
+  Technology technology_identifier = TechnologyFromName(technology);
 
   switch (technology_identifier) {
     case Technology::kCellular:
+    case Technology::kWiFi:
       for (const auto& device : FilterByTechnology(technology_identifier)) {
-        // TODO(benchan): Add a metric to track user-initiated scan for cellular
-        // technology.
-        device->Scan(error, __func__);
-      }
-      break;
-
-    case Technology::kWifi:
-      for (const auto& device : FilterByTechnology(technology_identifier)) {
-        metrics_->NotifyUserInitiatedEvent(
-            Metrics::kUserInitiatedEventWifiScan);
-        device->Scan(error, __func__);
+        device->Scan(error, __func__, true);
       }
       break;
 
@@ -2837,10 +2699,22 @@ void Manager::RequestScan(const std::string& technology, Error* error) {
   }
 }
 
+void Manager::RequestWiFiRestart(Error* error) {
+  DeviceRefPtr wifi = GetEnabledDeviceWithTechnology(Technology::kWiFi);
+  if (wifi) {
+    LOG(ERROR) << "RequestWiFiRestart: restarting WiFi device";
+    metrics_->SendEnumToUMA(Metrics::kMetricNetworkWiFiRestartReason,
+                            Metrics::kRestartReasonCannotAssoc);
+    static_cast<WiFi*>(wifi.get())->Restart();
+  } else {
+    LOG(ERROR) << "RequestWiFiRestart: no WiFi device available";
+  }
+}
+
 std::string Manager::GetTechnologyOrder() {
   std::vector<std::string> technology_names;
   for (const auto& technology : technology_order_) {
-    technology_names.push_back(technology.GetName());
+    technology_names.push_back(TechnologyName(technology));
   }
 
   return base::JoinString(technology_names, ",");
@@ -2848,7 +2722,7 @@ std::string Manager::GetTechnologyOrder() {
 
 void Manager::SetTechnologyOrder(const std::string& order, Error* error) {
   std::vector<Technology> new_order;
-  SLOG(this, 2) << "Setting technology order to " << order;
+  SLOG(2) << "Setting technology order to " << order;
   if (!GetTechnologyVectorFromString(order, &new_order, error)) {
     return;
   }
@@ -2865,7 +2739,7 @@ bool Manager::IsWifiIdle() {
   // Since services are sorted by connection state, status of the wifi device
   // can be determine by examing the connection state of the first wifi service.
   for (const auto& service : services_) {
-    if (service->technology() == Technology::kWifi) {
+    if (service->technology() == Technology::kWiFi) {
       if (!service->IsConnecting() && !service->IsConnected()) {
         ret = true;
       }
@@ -2876,17 +2750,11 @@ bool Manager::IsWifiIdle() {
 }
 
 void Manager::UpdateProviderMapping() {
-#if !defined(DISABLE_CELLULAR)
   providers_[Technology::kCellular] = cellular_service_provider_.get();
-#endif  // DISABLE_CELLULAR
   providers_[Technology::kEthernet] = ethernet_provider_.get();
-#if !defined(DISABLE_WIRED_8021X)
   providers_[Technology::kEthernetEap] = ethernet_eap_provider_.get();
-#endif  // DISABLE_WIRED_8021X
   providers_[Technology::kVPN] = vpn_provider_.get();
-#if !defined(DISABLE_WIFI)
-  providers_[Technology::kWifi] = wifi_provider_.get();
-#endif  // DISABLE_WIFI
+  providers_[Technology::kWiFi] = wifi_provider_.get();
 }
 
 std::vector<std::string> Manager::GetDeviceInterfaceNames() {
@@ -2894,59 +2762,12 @@ std::vector<std::string> Manager::GetDeviceInterfaceNames() {
 
   for (const auto& device : devices_) {
     Technology technology = device->technology();
-    if (technology.IsPrimaryConnectivityTechnology()) {
+    if (IsPrimaryConnectivityTechnology(technology)) {
       interfaces.push_back(device->link_name());
-      SLOG(this, 4) << "Adding device: " << device->link_name();
+      SLOG(4) << "Adding device: " << device->link_name();
     }
   }
   return interfaces;
-}
-
-bool Manager::ShouldBlackholeUserTraffic(const std::string& device_name) const {
-  if (!should_blackhole_user_traffic_) {
-    return false;
-  }
-  for (const auto& device : devices_) {
-    if (device->UniqueName() == device_name)
-      return true;
-  }
-  return false;
-}
-
-void Manager::UpdateBlackholeUserTraffic() {
-  bool before_update = should_blackhole_user_traffic_;
-  if (props_.always_on_vpn_package.empty()) {
-    should_blackhole_user_traffic_ = false;
-  } else {
-    should_blackhole_user_traffic_ = true;
-    for (const auto& service : services_) {
-      if (service->IsOnline() &&
-          service->IsAlwaysOnVpn(props_.always_on_vpn_package)) {
-        should_blackhole_user_traffic_ = false;
-        break;
-      }
-    }
-  }
-  if (should_blackhole_user_traffic_ == before_update) {
-    return;
-  }
-  for (const auto& device : devices_) {
-    device->UpdateBlackholeUserTraffic();
-  }
-}
-
-// static
-std::vector<uint32_t> Manager::ComputeUserTrafficUids() {
-  std::vector<uint32_t> uids;
-  for (const auto& username : kUserTrafficUsernames) {
-    uid_t uid;
-    if (!brillo::userdb::GetUserInfo(username, &uid, nullptr)) {
-      LOG(WARNING) << "Unable to look up UID for " << username;
-      continue;
-    }
-    uids.push_back(static_cast<uint32_t>(uid));
-  }
-  return uids;
 }
 
 void Manager::InitializePatchpanelClient() {
@@ -2955,11 +2776,11 @@ void Manager::InitializePatchpanelClient() {
   patchpanel_client_ = patchpanel::Client::New();
   if (!patchpanel_client_) {
     LOG(ERROR) << "Failed to connect to patchpanel client";
-    init_patchpanel_client_task_.Reset(base::Bind(
+    init_patchpanel_client_task_.Reset(base::BindOnce(
         &Manager::InitializePatchpanelClient, weak_factory_.GetWeakPtr()));
-    dispatcher_->PostDelayedTask(
-        FROM_HERE, init_patchpanel_client_task_.callback(),
-        kInitPatchpanelClientInterval.InMilliseconds());
+    dispatcher_->PostDelayedTask(FROM_HERE,
+                                 init_patchpanel_client_task_.callback(),
+                                 kInitPatchpanelClientInterval);
     return;
   }
 
@@ -2967,11 +2788,11 @@ void Manager::InitializePatchpanelClient() {
   device_info_.OnPatchpanelClientReady();
 
   // Start task for refreshing traffic counters.
-  refresh_traffic_counter_task_.Reset(base::Bind(
+  refresh_traffic_counter_task_.Reset(base::BindOnce(
       &Manager::RefreshAllTrafficCountersTask, weak_factory_.GetWeakPtr()));
   dispatcher_->PostDelayedTask(FROM_HERE,
                                refresh_traffic_counter_task_.callback(),
-                               kTrafficCounterRefreshInterval.InMilliseconds());
+                               kTrafficCounterRefreshInterval);
 
   // Ensure that VPN lockdown starts if needed.
   std::string always_on_vpn_mode = always_on_vpn_mode_;
@@ -2980,10 +2801,11 @@ void Manager::InitializePatchpanelClient() {
 }
 
 void Manager::RefreshAllTrafficCountersCallback(
-    const std::vector<patchpanel::TrafficCounter>& counters) {
-  std::map<std::string, std::vector<patchpanel::TrafficCounter>> counter_map;
+    const std::vector<patchpanel::Client::TrafficCounter>& counters) {
+  std::map<std::string, std::vector<patchpanel::Client::TrafficCounter>>
+      counter_map;
   for (const auto& counter : counters) {
-    std::string link_name = counter.device();
+    std::string link_name = counter.ifname;
     counter_map[link_name].push_back(counter);
   }
   for (const auto& device : devices_) {
@@ -2996,12 +2818,12 @@ void Manager::RefreshAllTrafficCountersCallback(
 }
 
 void Manager::RefreshAllTrafficCountersTask() {
-  SLOG(this, 2) << __func__;
-  refresh_traffic_counter_task_.Reset(base::Bind(
+  SLOG(2) << __func__;
+  refresh_traffic_counter_task_.Reset(base::BindOnce(
       &Manager::RefreshAllTrafficCountersTask, weak_factory_.GetWeakPtr()));
   dispatcher_->PostDelayedTask(FROM_HERE,
                                refresh_traffic_counter_task_.callback(),
-                               kTrafficCounterRefreshInterval.InMilliseconds());
+                               kTrafficCounterRefreshInterval);
 
   if (pending_traffic_counter_request_) {
     return;
@@ -3024,56 +2846,94 @@ std::string Manager::GetAlwaysOnVpnPackage(Error* /*error*/) {
 
 bool Manager::SetAlwaysOnVpnPackage(const std::string& package_name,
                                     Error* error) {
-  if (props_.always_on_vpn_package == package_name)
+  LOG(INFO) << "Setting ARC always-on VPN package: \"" << package_name << "\"";
+
+  // Until the legacy ARC always-on VPN has migrated to SetAlwaysOnVpn, always
+  // assume that the always-on VPN mode is Strict if Chrome called the Manager
+  // SetAlwaysOnVpnPackage DBus method, and ensures that lockdown VPN rules are
+  // enabled in patchpanel. If Android always-on VPN App is cleared or if the
+  // Android always-on VPN lockdown mode is disabled, ARC will notify Chrome
+  // and Chrome will clear the always-on VPN packae name. Ensure that lockdown
+  // VPN rules are disabled in patchpanel.
+  bool is_android_vpn_lockdown_enabled = !package_name.empty();
+  bool was_android_vpn_lockdown_enabled = !props_.always_on_vpn_package.empty();
+  if (props_.always_on_vpn_package == package_name) {
     return false;
+  }
+
+  if (is_android_vpn_lockdown_enabled && !was_android_vpn_lockdown_enabled) {
+    LOG(INFO) << "Starting VPN lockdown";
+    patchpanel_client_->SetVpnLockdown(true);
+  }
+
+  if (!is_android_vpn_lockdown_enabled && was_android_vpn_lockdown_enabled) {
+    LOG(INFO) << "Stopping VPN lockdown";
+    patchpanel_client_->SetVpnLockdown(false);
+  }
+
   props_.always_on_vpn_package = package_name;
-  UpdateBlackholeUserTraffic();
   return true;
 }
 
-std::string Manager::GetDNSProxyIPv4Address(Error* /* error */) {
-  return props_.dns_proxy_ipv4_address;
-}
-
-bool Manager::SetDNSProxyIPv4Address(const std::string& addr, Error* error) {
-  if (props_.dns_proxy_ipv4_address == addr)
+bool Manager::SetDNSProxyAddresses(const std::vector<std::string>& addrs,
+                                   Error* error) {
+  if (props_.dns_proxy_addresses == addrs)
     return false;
 
-  if (!addr.empty()) {
-    struct in_addr p_addr;
-    if (inet_pton(AF_INET, addr.c_str(), &p_addr) != 1) {
-      Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
-                            "Invalid address: " + addr);
-      return false;
-    }
-    if ((p_addr.s_addr & kDNSProxyNetmask.s_addr) != kDNSProxyBaseAddr.s_addr) {
+  if (addrs.empty()) {
+    ClearDNSProxyAddresses();
+    return true;
+  }
+
+  for (const auto& addr : addrs) {
+    const auto ipv4_addr = net_base::IPv4Address::CreateFromString(addr);
+    if (ipv4_addr) {
+      // Verify proxy's IPv4 address.
+      if (kDNSProxyAllocationRange.InSameSubnetWith(*ipv4_addr)) {
+        continue;
+      }
+      ClearDNSProxyAddresses();
+      LOG(ERROR) << "IPv4 DNS proxy address " << addr
+                 << " is not allowed, cleared DNS proxy address(es)";
       Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidProperty,
                             "Address not allowed: " + addr);
       return false;
     }
+
+    const auto ipv6_addr = net_base::IPv6Address::CreateFromString(addr);
+    if (!ipv6_addr) {
+      ClearDNSProxyAddresses();
+      LOG(ERROR) << "DNS proxy address " << addr
+                 << " is not valid, cleared DNS proxy address(es)";
+      Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
+                            "Invalid address: " + addr);
+      return false;
+    }
   }
 
-  props_.dns_proxy_ipv4_address = addr;
+  props_.dns_proxy_addresses = addrs;
 
-  // Assign or clear the dns-proxy addresses on the Resolver;
+  // Assign the dns-proxy addresses on the Resolver;
   // existing DNS configuration for the connection will be preserved.
-  // If the proxy address is being cleared, always pass this along to the
-  // resolver; otherwise only do so if the default service is online -
+  // Only pass the nameservers to the resolver if the default service is online.
   // UpdateDefaultService will propagate the change when the service comes
   // online.
-  if (addr.empty()) {
-    UseDNSProxy("");
-  } else if (last_default_physical_service_online_) {
-    UseDNSProxy(addr);
+  if (last_default_physical_service_online_) {
+    UseDNSProxy(props_.dns_proxy_addresses);
   }
   return true;
 }
 
-void Manager::UseDNSProxy(const std::string& proxy_addr) {
+void Manager::ClearDNSProxyAddresses() {
+  props_.dns_proxy_addresses.clear();
+  UseDNSProxy({});
+}
+
+void Manager::UseDNSProxy(const std::vector<std::string>& proxy_addrs) {
   if (!running_)
     return;
 
-  resolver_->SetDNSProxy(proxy_addr);
+  resolver_->SetDNSProxyAddresses(proxy_addrs);
 }
 
 KeyValueStore Manager::GetDNSProxyDOHProviders(Error* /* error */) {
@@ -3097,7 +2957,7 @@ bool Manager::SetDNSProxyDOHProviders(const KeyValueStore& providers,
     for (const auto& ns :
          base::SplitString(nameservers.TryGet<std::string>(""), ",",
                            base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL)) {
-      if (!IPAddress(ns).IsValid()) {
+      if (!net_base::IPAddress::CreateFromString(ns).has_value()) {
         Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
                               "Invalid address: " + ns);
         return false;
@@ -3111,11 +2971,102 @@ bool Manager::SetDNSProxyDOHProviders(const KeyValueStore& providers,
   return true;
 }
 
-bool Manager::SetNetworkThrottlingStatus(const ResultCallback& callback,
+bool Manager::AddPasspointCredentials(const std::string& profile_rpcid,
+                                      const KeyValueStore& properties,
+                                      Error* error) {
+  if (error)
+    error->Reset();
+
+  ProfileRefPtr profile = LookupProfileByRpcIdentifier(profile_rpcid);
+  if (!profile) {
+    Error::PopulateAndLog(FROM_HERE, error, Error::kNotFound,
+                          "Profile " + profile_rpcid + " not found");
+    return false;
+  }
+  if (profile->IsDefault()) {
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
+                          "Can't add credentials to default profile");
+    return false;
+  }
+
+  auto [creds, result] =
+      PasspointCredentials::CreatePasspointCredentials(properties, error);
+  if (!creds) {
+    // We expect |error| to be filled by the Passpoint credentials "factory".
+    LOG(ERROR) << "failed to create Passpoint credentials";
+    PasspointCredentials::RecordProvisioningEvent(metrics_, result, nullptr);
+    return false;
+  }
+
+  // TODO(b/245660875): Consider updating the previous credentials.
+  if (wifi_provider_->HasCredentials(creds, profile)) {
+    LOG(INFO) << "Not adding duplicate Passpoint credentials";
+    PasspointCredentials::RecordProvisioningEvent(
+        metrics_, Metrics::kPasspointProvisioningCredentialsAlreadyExist,
+        creds);
+    return true;
+  }
+
+  if (!profile->AdoptCredentials(creds)) {
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kOperationFailed,
+        "failed to save credentials to profile " + profile_rpcid);
+    PasspointCredentials::RecordProvisioningEvent(
+        metrics_, Metrics::kPasspointProvisioningShillProfileError, nullptr);
+    return false;
+  }
+
+  if (IsActiveProfile(profile)) {
+    // The API allow to add Passpoint credentials to any user profile but we
+    // must forward the credentials to the provider only and only if the
+    // specified profile is the current active profile (see b/239682395).
+    wifi_provider_->AddCredentials(creds);
+  }
+
+  PasspointCredentials::RecordProvisioningEvent(metrics_, result, creds);
+  return true;
+}
+
+bool Manager::RemovePasspointCredentials(const std::string& profile_rpcid,
+                                         const KeyValueStore& properties,
+                                         Error* error) {
+  if (error)
+    error->Reset();
+
+  ProfileRefPtr profile = LookupProfileByRpcIdentifier(profile_rpcid);
+  if (!profile) {
+    metrics()->SendEnumToUMA(Metrics::kMetricPasspointRemovalResult,
+                             Metrics::kPasspointRemovalNotFound);
+    Error::PopulateAndLog(FROM_HERE, error, Error::kNotFound,
+                          "Profile " + profile_rpcid + " not found");
+    return false;
+  }
+  if (profile->IsDefault()) {
+    metrics()->SendEnumToUMA(Metrics::kMetricPasspointRemovalResult,
+                             Metrics::kPasspointRemovalNoActiveUserProfile);
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
+                          "Can't remove credentials from default profile");
+    return false;
+  }
+
+  if (!wifi_provider_->DeleteCredentials(properties)) {
+    metrics()->SendEnumToUMA(Metrics::kMetricPasspointRemovalResult,
+                             Metrics::kPasspointRemovalFailure);
+    Error::PopulateAndLog(FROM_HERE, error, Error::kOperationFailed,
+                          "Failed to remove Passpoint credentials");
+    return false;
+  }
+
+  metrics()->SendEnumToUMA(Metrics::kMetricPasspointRemovalResult,
+                           Metrics::kPasspointRemovalSuccess);
+  return true;
+}
+
+bool Manager::SetNetworkThrottlingStatus(ResultCallback callback,
                                          bool enabled,
                                          uint32_t upload_rate_kbits,
                                          uint32_t download_rate_kbits) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
 
   LOG(INFO) << "Received command for network throttling "
             << (enabled ? "enabling" : "disabling");
@@ -3130,10 +3081,10 @@ bool Manager::SetNetworkThrottlingStatus(const ResultCallback& callback,
 
     LOG(INFO) << "Asked for upload rate (kbits/s) : " << upload_rate_kbits_
               << " download rate (kbits/s) : " << download_rate_kbits_;
-    result = throttler_->ThrottleInterfaces(callback, upload_rate_kbits_,
-                                            download_rate_kbits_);
+    result = throttler_->ThrottleInterfaces(
+        std::move(callback), upload_rate_kbits_, download_rate_kbits_);
   } else {
-    result = throttler_->DisableThrottlingOnAllInterfaces(callback);
+    result = throttler_->DisableThrottlingOnAllInterfaces(std::move(callback));
   }
   return result;
 }
@@ -3147,32 +3098,116 @@ DeviceRefPtr Manager::GetDeviceConnectedToService(ServiceRefPtr service) {
   return nullptr;
 }
 
-void Manager::DetectMultiHomedDevices() {
-  std::map<std::string, std::vector<DeviceRefPtr>> subnet_buckets;
-  for (const auto& device : devices_) {
-    const auto& connection = device->connection();
-    std::string subnet_name;
-    if (connection) {
-      subnet_name = connection->GetSubnetName();
+void Manager::SetLOHSEnabled(
+    base::OnceCallback<void(std::string result)> callback, bool enabled) {
+  // TODO(b/257880335): Implement setting LOHS state.
+  std::move(callback).Run(kErrorResultNotImplemented);
+}
+
+KeyValueStore Manager::GetLOHSConfig(Error* /* error */) {
+  // TODO(b/257880335): Implement getting the LOHSconfig.
+  return KeyValueStore();
+}
+
+bool Manager::SetLOHSConfig(const KeyValueStore& properties, Error* error) {
+  // TODO(b/257880335): Implement setting the LOHS config.
+  return false;
+}
+
+void Manager::TetheringStatusChanged() {
+  auto status = tethering_manager_->GetStatus();
+  adaptor_->EmitKeyValueStoreChanged(kTetheringStatusProperty, status);
+}
+
+PortalDetector::ProbingConfiguration
+Manager::GetPortalDetectorProbingConfiguration() const {
+  PortalDetector::ProbingConfiguration config;
+  auto http_url = HttpUrl::CreateFromString(props_.portal_http_url);
+  auto https_url = HttpUrl::CreateFromString(props_.portal_https_url);
+  if (!http_url) {
+    LOG(WARNING) << __func__ << ": could not parse default HTTP URL "
+                 << props_.portal_http_url;
+    return PortalDetector::DefaultProbingConfiguration();
+  }
+  if (!https_url) {
+    LOG(WARNING) << __func__ << ": could not parse default HTTPS URL "
+                 << props_.portal_http_url;
+    return PortalDetector::DefaultProbingConfiguration();
+  }
+  config.portal_http_url = *http_url;
+  config.portal_https_url = *https_url;
+  for (const auto& url_string : props_.portal_fallback_http_urls) {
+    auto url = HttpUrl::CreateFromString(url_string);
+    if (!url) {
+      LOG(WARNING) << __func__ << ": could not parse fallback HTTP URL "
+                   << url_string;
+      return PortalDetector::DefaultProbingConfiguration();
     }
-    if (subnet_name.empty()) {
-      device->SetIsMultiHomed(false);
-    } else {
-      subnet_buckets[subnet_name].push_back(device);
+    config.portal_fallback_http_urls.push_back(*url);
+  }
+  for (const auto& url_string : props_.portal_fallback_https_urls) {
+    auto url = HttpUrl::CreateFromString(url_string);
+    if (!url) {
+      LOG(WARNING) << __func__ << ": could not parse fallback HTTPS URL "
+                   << url_string;
+      return PortalDetector::DefaultProbingConfiguration();
     }
+    config.portal_fallback_https_urls.push_back(*url);
+  }
+  return config;
+}
+
+std::optional<std::string> Manager::GetCellularOperatorCountryCode() {
+  return cellular_service_provider()->GetOperatorCountryCode();
+}
+
+void Manager::NotifyDefaultLogicalServiceChanged(
+    const ServiceRefPtr& logical_service) {
+  base::TimeDelta elapsed_seconds;
+  Technology technology = logical_service ? logical_service->technology()
+                                          : Technology(Technology::kUnknown);
+  if (technology != last_default_technology_) {
+    if (last_default_technology_ != Technology::kUnknown) {
+      metrics_->SendToUMA(Metrics::kMetricTimeOnlineSeconds,
+                          last_default_technology_,
+                          elapsed_seconds.InSeconds());
+    }
+    last_default_technology_ = technology;
+    time_online_timer_->Start();
   }
 
-  for (const auto& subnet_bucket : subnet_buckets) {
-    const auto& device_list = subnet_bucket.second;
-    if (device_list.size() > 1) {
-      for (const auto& device : device_list) {
-        device->SetIsMultiHomed(true);
-      }
-    } else {
-      DCHECK_EQ(1U, device_list.size());
-      device_list.back()->SetIsMultiHomed(false);
-    }
+  // Only consider transitions from online to offline and vice-versa; i.e.
+  // ignore switching between wired and wireless or wireless and cellular.
+  // TimeToDrop measures time online regardless of how we are connected.
+  bool staying_online = ((logical_service != nullptr) && was_last_online_);
+  bool staying_offline = ((logical_service == nullptr) && !was_last_online_);
+  if (staying_online || staying_offline) {
+    return;
   }
+
+  if (logical_service == nullptr) {
+    time_to_drop_timer_->GetElapsedTime(&elapsed_seconds);
+    metrics_->SendToUMA(Metrics::kMetricTimeToDropSeconds,
+                        elapsed_seconds.InSeconds());
+  } else {
+    time_to_drop_timer_->Start();
+  }
+
+  was_last_online_ = (logical_service != nullptr);
+}
+
+bool Manager::SetWiFiRequestScanType(const std::string& type, Error* error) {
+  if (type != kWiFiRequestScanTypeActive &&
+      type != kWiFiRequestScanTypeDefault &&
+      type != kWiFiRequestScanTypePassive) {
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kInvalidArguments,
+        base::StringPrintf("WiFi RequestScan Type %s is invalid.",
+                           type.c_str()));
+    return false;
+  }
+  props_.request_scan_type = type;
+  return true;
 }
 
 }  // namespace shill

@@ -1,0 +1,213 @@
+# Copyright 2023 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/generate-dbus-adaptors.gni")
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+group("all") {
+  deps = [
+    ":device_management_client",
+    ":device_managementd",
+    ":install_init",
+    ":install_minijail_conf",
+    ":install_policy",
+    ":install_systemd",
+    ":install_tmpfiles_config",
+  ]
+  if (use.test) {
+    deps += [ ":device_management_testrunner" ]
+  }
+}
+
+config("local_proto_include") {
+  # This config is used when any build target used the local protobufs.
+  # The local protobuf used some other protos in system_api, so we'll need
+  # to fix the include path so that it builds correctly.
+  include_dirs = [ "${sysroot}/usr/include/device_management/proto_bindings/" ]
+}
+
+config("local_print_proto_include") {
+  # This config is used when any build target used the print_proto.
+  include_dirs = [ "${target_gen_dir}/.." ]
+}
+
+install_config("install_init") {
+  sources = [ "init/device_managementd.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "minijail/device_managementd.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_tmpfiles_config") {
+  sources = [ "tmpfiles.d/device_managementd.conf" ]
+  install_path = "tmpfilesd"
+}
+
+install_config("install_policy") {
+  _arch = getenv("ARCH")
+  sources = [ "seccomp/device_managementd-seccomp-${_arch}.policy" ]
+  install_path = "seccomp_policy"
+  outputs = [ "device_managementd-seccomp.policy" ]
+}
+
+install_config("install_systemd") {
+  sources = [ "org.chromium.DeviceManagement.conf" ]
+  install_path = "dbus_system_d"
+}
+
+generate_dbus_adaptors("device_management_adaptors") {
+  sources = [ "dbus_bindings/org.chromium.DeviceManagement.xml" ]
+  dbus_adaptors_out_dir = "include/device_management/dbus_adaptors"
+  dbus_service_config =
+      "dbus_bindings/dbus-service-config-device_management.json"
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    # This is a list of pkg-config dependencies
+    "libbrillo",
+    "libchrome",
+  ]
+  libs = [
+    "hwsec",
+    "hwsec-foundation",
+    "installattributes",
+  ]
+  defines = [
+    "PLATFORM_FWMP_INDEX=${use.generic_tpm2}",
+    "USE_TPM_INSECURE_FALLBACK=${use.tpm_insecure_fallback}",
+  ]
+
+  cflags = [ "-Wconsumed" ]
+}
+
+source_set("device_management_server_library") {
+  sources = [
+    "device_management_adaptor.cc",
+    "device_management_daemon.cc",
+    "device_management_service.cc",
+    "fwmp/firmware_management_parameters.cc",
+    "install_attributes/install_attributes.cc",
+    "install_attributes/lockbox.cc",
+    "install_attributes/platform.cc",
+  ]
+  configs += [
+    ":target_defaults",
+    ":local_proto_include",
+  ]
+  deps = [ ":proto_library" ]
+}
+
+action("print_proto_library") {
+  dbus_proto_path = "${sysroot}/usr/include/chromeos/dbus/device_management"
+  script = "../libhwsec-foundation/utility/proto_print.py"
+  inputs = [ "${dbus_proto_path}/device_management_interface.proto" ]
+  outputs =
+      [ "${target_gen_dir}/common/print_device_management_interface_proto.cc" ]
+  args = [
+           "--subdir",
+           "common",
+           "--proto-include",
+           "device_management/proto_bindings",
+           "--output-dir",
+           "${target_gen_dir}/common",
+         ] + inputs
+}
+
+source_set("proto_library") {
+  sources = get_target_outputs(":print_proto_library")
+  configs += [
+    "//common-mk:nouse_thin_archive",
+    "//common-mk:pic",
+    ":local_print_proto_include",
+    ":target_defaults",
+  ]
+  public_deps = [ ":print_proto_library" ]
+}
+
+executable("device_management_client") {
+  sources = [
+    "client/client.cc",
+    "client/tool.cc",
+  ]
+  configs += [
+    ":local_print_proto_include",
+    ":target_defaults",
+  ]
+  pkg_deps = [
+    "protobuf",
+    "system_api",
+  ]
+  libs = [ "hwsec-foundation" ]
+  deps = [ ":proto_library" ]
+  install_path = "sbin"
+}
+
+# Main programs.
+executable("device_managementd") {
+  sources = [ "main.cc" ]
+  configs += [
+    ":target_defaults",
+    ":local_proto_include",
+  ]
+
+  pkg_deps = [
+    "protobuf",
+    "system_api",
+  ]
+
+  deps = [
+    ":device_management_adaptors",
+    ":device_management_server_library",
+    ":proto_library",
+  ]
+
+  install_path = "sbin"
+}
+
+if (use.test) {
+  pkg_config("device_management_testrunner_config") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+      "libmetrics",
+    ]
+  }
+  executable("device_management_testrunner") {
+    sources = [
+      "device_management_service_test.cc",
+      "device_management_testrunner.cc",
+      "fwmp/firmware_management_parameters_test.cc",
+      "install_attributes/fake_platform.cc",
+      "install_attributes/install_attributes_test.cc",
+      "install_attributes/lockbox_test.cc",
+      "install_attributes/mock_lockbox.cc",
+      "install_attributes/mock_platform.cc",
+    ]
+    libs = [
+      "hwsec_test",
+      "policy",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":device_management_testrunner_config",
+      ":local_proto_include",
+      ":target_defaults",
+    ]
+    run_test = true
+    pkg_deps = [
+      "absl",
+      "protobuf-lite",
+      "system_api",
+    ]
+    deps = [
+      ":device_management_server_library",
+      ":proto_library",
+    ]
+  }
+}

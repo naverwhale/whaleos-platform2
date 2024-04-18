@@ -75,11 +75,12 @@ forever.
 ## Suspend Freezer
 
 IPC mechanisms such as FUSE (Filesystem in Userspace) create issues for the
-freeze step in the kernel. This is because the framework holds onto kernel locks
+[freeze step](https://www.kernel.org/doc/html/latest/power/freezing-of-tasks.html)
+in the kernel. This is because the framework holds onto kernel locks
 while waiting on a userspace process. A task can't freeze while it's holding
 onto one of these locks. To address this, we impose an ordering on freeze in
-userspace utilizing cgroup freezers. Only the children of the root freezer can
-be ordered.
+userspace utilizing [cgroup freezers](https://www.kernel.org/doc/Documentation/cgroup-v1/freezer-subsystem.txt).
+Only the children of the root freezer can be ordered.
 
 -   The order is specified in pref files, `suspend_freezer_deps_<cgroup name>`.
     These files contain one dependency per line for the cgroup. For instance, if
@@ -122,11 +123,11 @@ the system. Otherwise, it re-suspends immediately.
 ## Dark Resume to Hibernate
 
 On some systems, instead of shutting down after a certain amount of time as
-described above, the system may opt to suspend to disk instead (AKA hibernate).
-Hibernate represents a compromise between staying in suspend and shutting down.
-User state is perfectly preserved, much like a regular suspend, and power usage
-is identical to shutdown. The cost of this power savings is additional latency at
-resume, expected to be similar in latency to a fresh boot.
+described above, the system may opt to suspend to disk instead (AKA
+[hibernate]). Hibernate represents a compromise between staying in suspend and
+shutting down. User state is perfectly preserved, much like a regular suspend,
+and power usage is identical to shutdown. The cost of this power savings is
+additional latency at resume, expected to be similar in latency to a fresh boot.
 
 ## Enable console during suspend
 
@@ -189,3 +190,4 @@ The value is specified in seconds, and its default is 0 (which disables it).
 [/sys/power/wakeup_count]: https://lwn.net/Articles/393314/
 [flashrom]: https://dev.chromium.org/chromium-os/packages/cros-flashrom
 [power states]: https://www.kernel.org/doc/Documentation/power/states.txt
+[hibernate]: ./hibernation.md

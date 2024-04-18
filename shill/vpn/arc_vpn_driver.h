@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_VPN_ARC_VPN_DRIVER_H_
 #define SHILL_VPN_ARC_VPN_DRIVER_H_
 
+#include <memory>
 #include <string>
 
 #include <gtest/gtest_prod.h>
@@ -23,12 +24,11 @@ class ArcVpnDriver : public VPNDriver {
 
   ~ArcVpnDriver() override = default;
 
-  std::string GetProviderType() const override;
-
   base::TimeDelta ConnectAsync(EventHandler* handler) override;
   void Disconnect() override;
   void OnConnectTimeout() override;
-  IPConfig::Properties GetIPProperties() const override;
+  std::unique_ptr<IPConfig::Properties> GetIPv4Properties() const override;
+  std::unique_ptr<IPConfig::Properties> GetIPv6Properties() const override;
 
  private:
   static const Property kProperties[];

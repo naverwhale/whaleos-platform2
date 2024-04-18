@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
-#include <base/sequenced_task_runner.h>
+#include <base/files/scoped_file.h>
+#include <base/task/sequenced_task_runner.h>
 #include <base/time/time.h>
 #include <dbus/bus.h>
 
@@ -40,19 +40,29 @@ class PermissionBroker : public org::chromium::PermissionBrokerAdaptor,
 
   // Register the D-Bus object and interfaces.
   void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb);
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb);
 
  private:
   // D-Bus methods.
   bool CheckPathAccess(const std::string& in_path) override;
   bool OpenPath(brillo::ErrorPtr* error,
                 const std::string& in_path,
-                brillo::dbus_utils::FileDescriptor* out_fd) override;
+                base::ScopedFD* out_fd) override;
   bool ClaimDevicePath(brillo::ErrorPtr* error,
                        const std::string& in_path,
                        uint32_t drop_privileges_mask,
                        const base::ScopedFD& in_lifeline_fd,
-                       brillo::dbus_utils::FileDescriptor* out_fd) override;
+                       base::ScopedFD* out_fd) override;
+  bool OpenPathAndRegisterClient(brillo::ErrorPtr* error,
+                                 const std::string& in_path,
+                                 uint32_t drop_privileges_mask,
+                                 const base::ScopedFD& in_lifeline_fd,
+                                 base::ScopedFD* out_fd,
+                                 std::string* out_client_id) override;
+  bool DetachInterface(const std::string& client_id,
+                       uint8_t iface_num) override;
+  bool ReattachInterface(const std::string& client_id,
+                         uint8_t iface_num) override;
   bool RequestTcpPortAccess(uint16_t in_port,
                             const std::string& in_interface,
                             const base::ScopedFD& dbus_fd) override;
@@ -89,7 +99,9 @@ class PermissionBroker : public org::chromium::PermissionBrokerAdaptor,
                     const std::string& in_path,
                     uint32_t drop_privileges_mask,
                     int lifeline_fd,
-                    brillo::dbus_utils::FileDescriptor* out_fd);
+                    bool to_detach,
+                    base::ScopedFD* out_fd,
+                    std::string* out_client_id);
 
   RuleEngine rule_engine_;
   brillo::dbus_utils::DBusObject dbus_object_;

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -123,6 +123,15 @@ TEST(TextSuggesterMojomConversionTest, ExperimentGroupToCorrectProto) {
                 MultiWordExperimentGroup::kGboardRelaxedC),
             chrome_knowledge::MultiWordExperiment::
                 MULTI_WORD_EXPERIMENT_GBOARD_RELAXED_C);
+  EXPECT_EQ(
+      MultiWordExperimentGroupToProto(MultiWordExperimentGroup::kGboardD),
+      chrome_knowledge::MultiWordExperiment::MULTI_WORD_EXPERIMENT_GBOARD_D);
+  EXPECT_EQ(
+      MultiWordExperimentGroupToProto(MultiWordExperimentGroup::kGboardE),
+      chrome_knowledge::MultiWordExperiment::MULTI_WORD_EXPERIMENT_GBOARD_E);
+  EXPECT_EQ(
+      MultiWordExperimentGroupToProto(MultiWordExperimentGroup::kGboardF),
+      chrome_knowledge::MultiWordExperiment::MULTI_WORD_EXPERIMENT_GBOARD_F);
   EXPECT_EQ(
       MultiWordExperimentGroupToProto(MultiWordExperimentGroup::kDefault),
       chrome_knowledge::MultiWordExperiment::MULTI_WORD_EXPERIMENT_UNSPECIFIED);

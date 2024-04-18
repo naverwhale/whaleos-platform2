@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <memory>
 
 #include <base/compiler_specific.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/observer_list.h>
 #include <base/time/time.h>
@@ -67,7 +66,8 @@ class InternalBacklightController : public BacklightController,
   // If an ambient light reading hasn't been seen after this many seconds,
   // give up on waiting for the sensor to be initialized and just set
   // |use_ambient_light_| to false.
-  static const int kAmbientLightSensorTimeoutSec;
+  static constexpr base::TimeDelta kAmbientLightSensorTimeout =
+      base::Seconds(10);
 
   InternalBacklightController();
   InternalBacklightController(const InternalBacklightController&) = delete;
@@ -102,6 +102,8 @@ class InternalBacklightController : public BacklightController,
   void HandleTabletModeChange(TabletMode mode) override;
   void HandlePolicyChange(const PowerManagementPolicy& policy) override;
   void HandleDisplayServiceStart() override;
+  void HandleBatterySaverModeChange(
+      const BatterySaverModeState& state) override;
   void SetDimmedForInactivity(bool dimmed) override;
   void SetOffForInactivity(bool off) override;
   void SetSuspended(bool suspended) override;
@@ -119,6 +121,11 @@ class InternalBacklightController : public BacklightController,
       double brightness_percent,
       AmbientLightHandler::BrightnessChangeCause cause) override;
   void OnColorTemperatureChanged(int color_temperature) override;
+  void ReportAmbientLightOnResumeMetrics(int lux) override;
+  bool IsUsingAmbientLight() const override;
+
+  void RegisterAmbientLightResumeMetricsHandler(
+      AmbientLightOnResumeMetricsCallback callback) override;
 
  private:
   // Snaps |percent| to the nearest step, as defined by |step_percent_|.
@@ -187,6 +194,14 @@ class InternalBacklightController : public BacklightController,
   bool suspended_ = false;
   bool shutting_down_ = false;
   bool forced_off_ = false;
+  bool battery_saver_ = false;
+
+  // Have we logged that the user increased brightness above what battery saver
+  // set?
+  bool battery_saver_user_brightened_logged_ = false;
+
+  // Time at which battery saver was activated.
+  base::TimeTicks battery_saver_enabled_time_;
 
   // Time at which Init() was called.
   base::TimeTicks init_time_;
@@ -208,9 +223,15 @@ class InternalBacklightController : public BacklightController,
   // |ambient_light_handler_|.
   double ambient_light_brightness_percent_ = 100.0;
 
+  // Ambient Light Sensor On Resume metrics reporting callback;
+  AmbientLightOnResumeMetricsCallback ambient_light_metrics_callback_;
+
   // User- or policy-set brightness percent when on AC or battery power.
   double ac_explicit_brightness_percent_ = 100.0;
   double battery_explicit_brightness_percent_ = 100.0;
+
+  // Brightness percent when on battery power with battery saver on.
+  double battery_saver_explicit_brightness_percent_ = 30.0;
 
   // True if the most-recently-received policy message requested a specific
   // brightness and no user adjustments have been made since then.
@@ -254,6 +275,10 @@ class InternalBacklightController : public BacklightController,
   // at the lower end of the range and less at the upper end. (Initialized to a
   // const value in c'tor.)
   double level_to_percent_exponent_;
+
+  // Percentage, in the range [0.0, 100.0], to which we dim the backlight when
+  // battery saver is enabled.
+  double battery_saver_brightness_percent_;
 
   // |backlight_|'s current brightness level (or the level to which it's
   // transitioning).

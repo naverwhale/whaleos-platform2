@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,6 +9,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include <base/location.h>
 #include <base/threading/thread.h>
@@ -22,6 +23,9 @@ namespace cros {
 class CROS_CAMERA_EXPORT CameraThread {
  public:
   explicit CameraThread(std::string name) : thread_(name) {}
+
+  CameraThread(const CameraThread&) = delete;
+  CameraThread& operator=(const CameraThread&) = delete;
 
   // Starts the thread. Returns true if the thread was successfully started.
   bool Start() {
@@ -48,19 +52,18 @@ class CROS_CAMERA_EXPORT CameraThread {
   // return -EIO.
   template <typename T>
   int PostTaskSync(const base::Location& from_here,
-                   base::Callback<T()> task,
+                   base::OnceCallback<T()> task,
                    T* result) {
-    VLOGF_ENTER();
     if (!thread_.task_runner()) {
       LOG(ERROR) << "Thread is not started";
       return -EIO;
     }
 
     auto future = cros::Future<T>::Create(nullptr);
-    base::Closure closure =
-        base::Bind(&CameraThread::ProcessSyncTaskOnThread<T>,
-                   base::Unretained(this), task, future);
-    if (!thread_.task_runner()->PostTask(from_here, closure)) {
+    base::OnceClosure closure =
+        base::BindOnce(&CameraThread::ProcessSyncTaskOnThread<T>,
+                       base::Unretained(this), std::move(task), future);
+    if (!thread_.task_runner()->PostTask(from_here, std::move(closure))) {
       LOG(ERROR) << "Failed to post task";
       return -EIO;
     }
@@ -72,17 +75,17 @@ class CROS_CAMERA_EXPORT CameraThread {
   // Posts the given task to be run asynchronously. Return 0 if succeed.
   // Otherwise return -EIO.
   template <typename T>
-  int PostTaskAsync(const base::Location& from_here, base::Callback<T()> task) {
-    VLOGF_ENTER();
+  int PostTaskAsync(const base::Location& from_here,
+                    base::OnceCallback<T()> task) {
     if (!thread_.task_runner()) {
       LOG(ERROR) << "Thread is not started";
       return -EIO;
     }
-    base::Closure closure =
-        base::Bind(&CameraThread::ProcessASyncTaskOnThread<T>,
-                   base::Unretained(this), task);
+    base::OnceClosure closure =
+        base::BindOnce(&CameraThread::ProcessAsyncTaskOnThread<T>,
+                       base::Unretained(this), std::move(task));
 
-    if (!thread_.task_runner()->PostTask(from_here, closure)) {
+    if (!thread_.task_runner()->PostTask(from_here, std::move(closure))) {
       LOG(ERROR) << "Failed to post task";
       return -EIO;
     }
@@ -91,18 +94,17 @@ class CROS_CAMERA_EXPORT CameraThread {
 
   // Posts the given task to be run and wait till it is finished.
   // Return 0 if succeed. Otherwise return -EIO.
-  int PostTaskSync(const base::Location& from_here, base::Closure task) {
-    VLOGF_ENTER();
+  int PostTaskSync(const base::Location& from_here, base::OnceClosure task) {
     if (!thread_.task_runner()) {
       LOG(ERROR) << "Thread is not started";
       return -EIO;
     }
 
     auto future = cros::Future<void>::Create(nullptr);
-    base::Closure closure =
-        base::Bind(&CameraThread::ProcessClosureSyncTaskOnThread,
-                   base::Unretained(this), task, future);
-    if (!thread_.task_runner()->PostTask(from_here, closure)) {
+    base::OnceClosure closure =
+        base::BindOnce(&CameraThread::ProcessClosureSyncTaskOnThread,
+                       base::Unretained(this), std::move(task), future);
+    if (!thread_.task_runner()->PostTask(from_here, std::move(closure))) {
       LOG(ERROR) << "Failed to post task";
       return -EIO;
     }
@@ -117,28 +119,23 @@ class CROS_CAMERA_EXPORT CameraThread {
 
  private:
   template <typename T>
-  void ProcessSyncTaskOnThread(const base::Callback<T()>& task,
+  void ProcessSyncTaskOnThread(base::OnceCallback<T()> task,
                                scoped_refptr<cros::Future<T>> future) {
-    VLOGF_ENTER();
-    future->Set(task.Run());
+    future->Set(std::move(task).Run());
   }
 
   template <typename T>
-  void ProcessASyncTaskOnThread(const base::Callback<T()>& task) {
-    VLOGF_ENTER();
-    task.Run();
+  void ProcessAsyncTaskOnThread(base::OnceCallback<T()> task) {
+    std::move(task).Run();
   }
 
   void ProcessClosureSyncTaskOnThread(
-      const base::Closure& task, scoped_refptr<cros::Future<void>> future) {
-    VLOGF_ENTER();
-    task.Run();
+      base::OnceClosure task, scoped_refptr<cros::Future<void>> future) {
+    std::move(task).Run();
     future->Set();
   }
 
   base::Thread thread_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(CameraThread);
 };
 
 }  // namespace cros

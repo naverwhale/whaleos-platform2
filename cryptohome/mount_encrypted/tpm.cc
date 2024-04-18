@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,12 +17,10 @@
 #include <base/strings/string_number_conversions.h>
 #include <crypto/libcrypto-compat.h>
 #include <crypto/scoped_openssl_types.h>
-
+#include <libhwsec-foundation/crypto/rsa.h>
+#include <openssl/rand.h>
 #include <vboot/tlcl.h>
 
-#include <openssl/rand.h>
-
-#include "cryptohome/crypto/rsa.h"
 #include "cryptohome/mount_encrypted/mount_encrypted.h"
 
 namespace mount_encrypted {
@@ -442,7 +440,7 @@ NvramSpace* Tpm::GetLockboxSpace() {
     return lockbox_space_.get();
   }
 
-  lockbox_space_.reset(new NvramSpace(this, kLockboxIndex));
+  lockbox_space_ = std::make_unique<NvramSpace>(this, kLockboxIndex);
 
   // Reading the NVRAM takes 40ms. Instead of querying the NVRAM area for its
   // size (which takes time), just read the expected size. If it fails, then
@@ -466,7 +464,7 @@ NvramSpace* Tpm::GetEncStatefulSpace() {
     return encstateful_space_.get();
   }
 
-  encstateful_space_.reset(new NvramSpace(this, kEncStatefulIndex));
+  encstateful_space_ = std::make_unique<NvramSpace>(this, kEncStatefulIndex);
 
   if (encstateful_space_->Read(kEncStatefulSize) == RESULT_SUCCESS) {
     LOG(INFO) << "Found encstateful NVRAM area.";
@@ -504,26 +502,18 @@ result_code Tpm::TakeOwnership() {
     return RESULT_FAIL_FATAL;
   }
 
-  crypto::ScopedRSA rsa(RSA_new());
-  crypto::ScopedBIGNUM e(BN_new()), n(BN_new());
-  if (!rsa || !e || !n) {
-    LOG(ERROR) << "Failed to allocate RSA or BIGNUM.";
-    return RESULT_FAIL_FATAL;
-  }
-  if (!BN_set_word(e.get(), public_exponent) ||
-      !BN_bin2bn(modulus, modulus_size, n.get())) {
-    LOG(ERROR) << "Failed to convert BIGNUM for RSA.";
-    return RESULT_FAIL_FATAL;
-  }
-  if (!RSA_set0_key(rsa.get(), n.release(), e.release(), nullptr)) {
-    LOG(ERROR) << "Failed to set modulus or exponent for RSA.";
+  crypto::ScopedRSA rsa = hwsec_foundation::CreateRSAFromNumber(
+      brillo::Blob(modulus, modulus + modulus_size), public_exponent);
+  if (!rsa) {
+    LOG(ERROR) << "Failed to create RSA.";
     return RESULT_FAIL_FATAL;
   }
 
   // Encrypt the well-known owner secret under the EK.
   brillo::SecureBlob owner_auth(kOwnerSecret, kOwnerSecret + kOwnerSecretSize);
   brillo::SecureBlob enc_auth;
-  if (!cryptohome::TpmCompatibleOAEPEncrypt(rsa.get(), owner_auth, &enc_auth)) {
+  if (!hwsec_foundation::TpmCompatibleOAEPEncrypt(rsa.get(), owner_auth,
+                                                  &enc_auth)) {
     LOG(ERROR) << "Failed to encrypt owner secret.";
     return RESULT_FAIL_FATAL;
   }

@@ -1,10 +1,12 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "arc/vm/mojo_proxy/server_proxy.h"
 
+#include <linux/sync_file.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -14,15 +16,16 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/posix/unix_domain_socket.h>
 #include <base/stl_util.h>
 #include <base/synchronization/waitable_event.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <brillo/files/file_util.h>
 #include <brillo/userdb_utils.h>
 
 #include "arc/vm/mojo_proxy/file_descriptor_util.h"
@@ -39,7 +42,7 @@ constexpr char kVirtwlSocketPath[] = "/run/arcvm/mojo/mojo-proxy.sock";
 // Sets up a socket to accept virtwl connections.
 base::ScopedFD SetupVirtwlSocket() {
   // Delete the socket created by a previous run if any.
-  if (!base::DeleteFile(base::FilePath(kVirtwlSocketPath))) {
+  if (!brillo::DeleteFile(base::FilePath(kVirtwlSocketPath))) {
     PLOG(ERROR) << "DeleteFile() failed " << kVirtwlSocketPath;
     return {};
   }
@@ -58,14 +61,8 @@ base::ScopedFD SetupVirtwlSocket() {
     return {};
   }
   // Make it accessible to crosvm.
-  uid_t uid = 0;
-  gid_t gid = 0;
-  if (!brillo::userdb::GetUserInfo("crosvm", &uid, &gid)) {
-    LOG(ERROR) << "Failed to get crosvm user info.";
-    return {};
-  }
-  if (lchown(kVirtwlSocketPath, uid, gid) != 0) {
-    PLOG(ERROR) << "lchown failed";
+  if (chmod(kVirtwlSocketPath, 0666) == -1) {
+    PLOG(ERROR) << "Failed to set permission";
     return {};
   }
   // Start listening on the socket.
@@ -84,7 +81,7 @@ ServerProxy::ServerProxy(
     base::OnceClosure quit_closure)
     : proxy_file_system_task_runner_(proxy_file_system_task_runner),
       proxy_file_system_(this,
-                         base::ThreadTaskRunnerHandle::Get(),
+                         base::SingleThreadTaskRunner::GetCurrentDefault(),
                          proxy_file_system_mount_path),
       quit_closure_(std::move(quit_closure)) {}
 
@@ -146,10 +143,16 @@ base::ScopedFD ServerProxy::CreateProxiedRegularFile(int64_t handle,
 bool ServerProxy::SendMessage(const arc_proxy::MojoMessage& message,
                               const std::vector<base::ScopedFD>& fds) {
   if (!fds.empty()) {
-    LOG(ERROR) << "It's not allowed to send FDs from host to guest.";
-    return false;
+    for (const auto& fd : fds) {
+      // Virtwl only supports sending sync_files from the host to the guest.
+      struct sync_file_info info = {};
+      if (ioctl(fd.get(), SYNC_IOC_FILE_INFO, &info)) {
+        LOG(ERROR) << "Unsupported host FD";
+        return false;
+      }
+    }
   }
-  return message_stream_->Write(message);
+  return message_stream_->Write(message, fds);
 }
 
 bool ServerProxy::ReceiveMessage(arc_proxy::MojoMessage* message,
@@ -181,6 +184,12 @@ void ServerProxy::Close(int64_t handle) {
 
 void ServerProxy::Fstat(int64_t handle, FstatCallback callback) {
   mojo_proxy_->Fstat(handle, std::move(callback));
+}
+
+void ServerProxy::Ftruncate(int64_t handle,
+                            int64_t length,
+                            FtruncateCallback callback) {
+  mojo_proxy_->Ftruncate(handle, length, std::move(callback));
 }
 
 }  // namespace arc

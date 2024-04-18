@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,6 +35,20 @@ TEST_F(BiodSystemTest, IsHardwareWriteProtectEnabledFalse) {
   EXPECT_CALL(biod_system, VbGetSystemPropertyInt("wpsw_cur"))
       .WillOnce(Return(0));
   EXPECT_FALSE(biod_system.HardwareWriteProtectIsEnabled());
+}
+
+TEST_F(BiodSystemTest, IsDevModeBootFromSignedKernelTrue) {
+  MockBiodSystem biod_system;
+  EXPECT_CALL(biod_system, VbGetSystemPropertyInt("dev_boot_signed_only"))
+      .WillOnce(Return(1));
+  EXPECT_TRUE(biod_system.OnlyBootSignedKernel());
+}
+
+TEST_F(BiodSystemTest, IsDevModeBootFromSignedKernelFalse) {
+  MockBiodSystem biod_system;
+  EXPECT_CALL(biod_system, VbGetSystemPropertyInt("dev_boot_signed_only"))
+      .WillOnce(Return(0));
+  EXPECT_FALSE(biod_system.OnlyBootSignedKernel());
 }
 
 }  // namespace

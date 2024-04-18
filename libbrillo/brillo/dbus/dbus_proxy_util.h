@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,6 +16,10 @@
 #include <dbus/message.h>
 #include <dbus/object_proxy.h>
 
+namespace dbus {
+class Error;
+}  // namespace dbus
+
 namespace brillo {
 namespace dbus_utils {
 
@@ -32,7 +36,7 @@ BRILLO_EXPORT std::unique_ptr<dbus::Response> CallDBusMethodWithErrorResponse(
     dbus::ObjectProxy* proxy,
     dbus::MethodCall* method_call,
     int timeout_ms,
-    dbus::ScopedDBusError* error);
+    dbus::Error* error);
 
 }  // namespace dbus_utils
 }  // namespace brillo

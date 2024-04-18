@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,25 +18,19 @@
 #include <gtest/gtest.h>
 
 #include "diagnostics/cros_healthd/fetchers/storage/mock/mock_device_lister.h"
-#include "diagnostics/cros_healthd/fetchers/storage/mock/mock_device_resolver.h"
 #include "diagnostics/cros_healthd/fetchers/storage/mock/mock_platform.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
-
-}  // namespace
-
-using testing::_;
-using testing::ByMove;
-using testing::DoAll;
-using testing::Return;
-using testing::SetArgPointee;
-using testing::StrictMock;
-using testing::UnorderedElementsAre;
+namespace mojom = ::ash::cros_healthd::mojom;
+using ::testing::_;
+using ::testing::ByMove;
+using ::testing::Return;
+using ::testing::ReturnPointee;
+using ::testing::StrictMock;
+using ::testing::UnorderedElementsAre;
 
 // Tests that the StorageDeviceInfo structures are correctly populated and
 // preserved between fetch calls.
@@ -49,10 +43,6 @@ TEST(StorageDeviceManagerTest, NoRecreation) {
   const std::string kBlockClass = "block";
   const std::string kNvmeClass = "nvme";
   const std::string kEmmcClass = "mmc";
-  constexpr mojo_ipc::StorageDevicePurpose kNvmePurpose =
-      mojo_ipc::StorageDevicePurpose::kSwapDevice;
-  constexpr mojo_ipc::StorageDevicePurpose kEmmcPurpose =
-      mojo_ipc::StorageDevicePurpose::kBootDevice;
   const uint64_t kNvmeSize = 1024;
   const uint64_t kEmmcSize = 768;
   const uint64_t kBlockSize = 512;
@@ -62,13 +52,13 @@ TEST(StorageDeviceManagerTest, NoRecreation) {
 
   // TODO(dlunev) querying size shall be cached as well and allow WillOnce.
   EXPECT_CALL(*mock_platform, GetDeviceSizeBytes(kNvmeDev))
-      .WillRepeatedly(Return(kNvmeSize));
+      .WillRepeatedly(ReturnPointee(&kNvmeSize));
   EXPECT_CALL(*mock_platform, GetDeviceBlockSizeBytes(kNvmeDev))
-      .WillRepeatedly(Return(kBlockSize));
+      .WillRepeatedly(ReturnPointee(&kBlockSize));
   EXPECT_CALL(*mock_platform, GetDeviceSizeBytes(kEmmcDev))
-      .WillRepeatedly(Return(kEmmcSize));
+      .WillRepeatedly(ReturnPointee(&kEmmcSize));
   EXPECT_CALL(*mock_platform, GetDeviceBlockSizeBytes(kEmmcDev))
-      .WillRepeatedly(Return(kBlockSize));
+      .WillRepeatedly(ReturnPointee(&kBlockSize));
 
   auto mock_nvme_udev = std::make_unique<StrictMock<brillo::MockUdevDevice>>();
   auto mock_nvme_parent_udev =
@@ -114,33 +104,28 @@ TEST(StorageDeviceManagerTest, NoRecreation) {
       .WillOnce(Return(ByMove(std::move(mock_emmc_udev))))
       .WillOnce(Return(ByMove(std::move(mock_nvme_udev))));
 
-  auto mock_resolver =
-      std::make_unique<StrictMock<MockStorageDeviceResolver>>();
-  EXPECT_CALL(*mock_resolver, GetDevicePurpose(_))
-      .WillOnce(Return(kNvmePurpose))
-      .WillOnce(Return(kEmmcPurpose));
-
   auto mock_lister = std::make_unique<StrictMock<MockStorageDeviceLister>>();
   EXPECT_CALL(*mock_lister, ListDevices(base::FilePath(kFakeRoot)))
       .WillRepeatedly(Return(listed));
 
-  StorageDeviceManager manager(std::move(mock_lister), std::move(mock_resolver),
-                               std::move(mock_udev), std::move(mock_platform));
+  StorageDeviceManager manager(std::move(mock_lister), std::move(mock_udev),
+                               std::move(mock_platform));
 
   // Do multiple cycles. If the device info preservation is not working,
   // the WillOnce of udev mock will fail.
   for (int i = 0; i < 5; i++) {
-    auto result_or = manager.FetchDevicesInfo(kFakeRoot);
-    ASSERT_TRUE(result_or.ok()) << result_or.status().message();
-    auto& result = result_or.value();
+    auto devices_result = manager.FetchDevicesInfo(kFakeRoot);
+    ASSERT_TRUE(devices_result.has_value()) << devices_result.error()->msg;
+    auto& devices = devices_result.value();
 
-    std::vector<std::string> result_devs;
-    for (const auto& info_ptr : result) {
-      result_devs.push_back(info_ptr->path);
+    std::vector<std::string> device_infos;
+    for (const auto& info_ptr : devices) {
+      device_infos.push_back(info_ptr->path);
     }
-    EXPECT_THAT(result_devs,
+    EXPECT_THAT(device_infos,
                 UnorderedElementsAre(kNvmeDev.value(), kEmmcDev.value()));
   }
 }
 
+}  // namespace
 }  // namespace diagnostics

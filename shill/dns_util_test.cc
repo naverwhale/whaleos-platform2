@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dns_util.h"
 
-#include <base/stl_util.h>
+#include <iterator>
+
 #include <gtest/gtest.h>
 
 namespace {
@@ -108,7 +109,7 @@ TEST(DNSUtilTest, IsValidDNSDomain) {
   // change the calls to from |IsValidDNSDomainName| to |IsValidDNSDomain|, and
   // remove |IsValidDNSDomainName| (defined above).
 
-  for (size_t i = 0; i < base::size(bad_hostnames); ++i) {
+  for (size_t i = 0; i < std::size(bad_hostnames); ++i) {
     EXPECT_FALSE(IsValidDNSDomainName(bad_hostnames[i]));
   }
 
@@ -118,7 +119,7 @@ TEST(DNSUtilTest, IsValidDNSDomain) {
       "www_.noodles.blorg",  "www.noodles.blorg.", "_privet._tcp.local",
   };
 
-  for (size_t i = 0; i < base::size(good_hostnames); ++i) {
+  for (size_t i = 0; i < std::size(good_hostnames); ++i) {
     EXPECT_TRUE(IsValidDNSDomainName(good_hostnames[i]));
   }
 }

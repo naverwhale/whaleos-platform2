@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,15 +10,18 @@
 #include <chromeos/dbus/service_constants.h>
 
 #include <base/command_line.h>
-#include <base/macros.h>
+#include <base/files/file_util.h>
+#include <base/memory/weak_ptr.h>
 #include <base/values.h>
-
 #include <brillo/dbus/exported_object_manager.h>
 #include <brillo/dbus/exported_property_set.h>
 #include <brillo/dbus/dbus_method_response.h>
 #include <brillo/errors/error.h>
 #include <brillo/syslog_logging.h>
 #include <brillo/variant_dictionary.h>
+#include <featured/feature_library.h>
+#include <featured/proto_bindings/featured.pb.h>
+#include <session_manager/dbus-proxies.h>
 
 #include <memory>
 #include <string>
@@ -27,7 +30,12 @@
 #include <utility>
 #include <vector>
 
+#include "featured/store_interface.h"
+#include "featured/tmp_storage_interface.h"
+
 namespace featured {
+
+// FeatureCommand is the base class for all commands to enable a feature.
 class FeatureCommand {
  public:
   explicit FeatureCommand(const std::string& name) : name_(name) {}
@@ -36,54 +44,115 @@ class FeatureCommand {
   // of an abstract class. See PlatformFeature class definition.
   virtual ~FeatureCommand() = default;
 
-  std::string name() { return name_; }
+  std::string name() const { return name_; }
+
+  // Run the command to enable the feature, returning true on success.
   virtual bool Execute() = 0;
 
  private:
   std::string name_;
 };
 
+// Write a specified value to a specified path.
 class WriteFileCommand : public FeatureCommand {
  public:
   WriteFileCommand(const std::string& file_name, const std::string& value);
   WriteFileCommand(WriteFileCommand&& other) = default;
+
+  // Attempt to write the file, returning true on success.
   bool Execute() override;
+
+  void SetPrefixForTesting(const base::FilePath& prefix) { prefix_ = prefix; }
 
  private:
   std::string file_name_;
   std::string value_;
+  base::FilePath prefix_;
 };
 
-class FileExistsCommand : public FeatureCommand {
+// Create a directory at a specified path, and all parent directories.
+class MkdirCommand : public FeatureCommand {
+ public:
+  explicit MkdirCommand(const std::string& path);
+  MkdirCommand(MkdirCommand&& other) = default;
+
+  // Attempt to make the directory, returning true on success.
+  bool Execute() override;
+
+  void SetPrefixForTesting(const base::FilePath& prefix) { prefix_ = prefix; }
+
+ private:
+  base::FilePath path_;
+  base::FilePath prefix_;
+};
+
+// SupportCheckCommand is the base class for all commands to check whether a
+// feature is supported.
+class SupportCheckCommand {
+ public:
+  explicit SupportCheckCommand(const std::string& name) : name_(name) {}
+  SupportCheckCommand(SupportCheckCommand&& other) = default;
+  // virtual destructor is required because we create a unique pointer
+  // of an abstract class. See PlatformFeature class definition.
+  virtual ~SupportCheckCommand() = default;
+
+  std::string name() const { return name_; }
+
+  // Return true if the feature is supported on this device. (false otherwise)
+  virtual bool IsSupported() = 0;
+
+ private:
+  std::string name_;
+};
+
+// Mark the device as supported if a file at a given path exists.
+class FileExistsCommand : public SupportCheckCommand {
  public:
   explicit FileExistsCommand(const std::string& file_name);
   FileExistsCommand(FileExistsCommand&& other) = default;
-  bool Execute() override;
+  bool IsSupported() override;
 
  private:
   std::string file_name_;
 };
 
-class AlwaysSupportedCommand : public FeatureCommand {
+// Mark the device as supported if a file at a given path *does not* exist.
+class FileNotExistsCommand : public SupportCheckCommand {
  public:
-  AlwaysSupportedCommand() : FeatureCommand("AlwaysSupported") {}
+  explicit FileNotExistsCommand(const std::string& file_name);
+  FileNotExistsCommand(FileNotExistsCommand&& other) = default;
+  bool IsSupported() override;
+
+ private:
+  std::string file_name_;
+};
+
+// Trivial support check command that always returns true.
+class AlwaysSupportedCommand : public SupportCheckCommand {
+ public:
+  AlwaysSupportedCommand() : SupportCheckCommand("AlwaysSupported") {}
   AlwaysSupportedCommand(AlwaysSupportedCommand&& other) = default;
-  bool Execute() override { return true; }
+  bool IsSupported() override { return true; }
 };
 
 class PlatformFeature {
  public:
-  PlatformFeature(const std::string& name,
-                  std::vector<std::unique_ptr<FeatureCommand>>&& query_cmds,
-                  std::vector<std::unique_ptr<FeatureCommand>>&& feature_cmds)
+  PlatformFeature(
+      const std::string& name,
+      std::vector<std::unique_ptr<SupportCheckCommand>>&& query_cmds,
+      std::vector<std::unique_ptr<FeatureCommand>>&& feature_cmds)
       : exec_cmds_(std::move(feature_cmds)),
         support_check_cmds_(std::move(query_cmds)),
-        name_(name) {}
+        name_(std::make_unique<std::string>(name)),
+        feature_{name_->c_str(), FEATURE_DISABLED_BY_DEFAULT} {}
   PlatformFeature(PlatformFeature&& other) = default;
   PlatformFeature(const PlatformFeature& other) = delete;
   PlatformFeature& operator=(const PlatformFeature& other) = delete;
 
-  std::string name() { return name_; }
+  const std::string& name() const { return *name_; }
+
+  // Don't copy this because address must *not* change across lookups.
+  const VariationsFeature* const feature() const { return &feature_; }
 
   // Check if feature is supported on the device
   bool IsSupported() const;
@@ -91,17 +160,27 @@ class PlatformFeature {
   // Execute a sequence of commands to enable a feature
   bool Execute() const;
 
+  // Get the names of the exec commands. Used for testing.
+  std::vector<std::string> ExecCommandNamesForTesting() const;
+
+  // Get the names of the support check commands. Used for testing.
+  std::vector<std::string> SupportCheckCommandNamesForTesting() const;
+
  private:
   std::vector<std::unique_ptr<FeatureCommand>> exec_cmds_;
-  std::vector<std::unique_ptr<FeatureCommand>> support_check_cmds_;
-  std::string name_;
+  std::vector<std::unique_ptr<SupportCheckCommand>> support_check_cmds_;
+  // The string in this unique_ptr must not be modified since feature_ contains
+  // a pointer to the underlying c_str().
+  std::unique_ptr<const std::string> name_;
+  VariationsFeature feature_;
 };
 
 class FeatureParserBase {
  public:
   using FeatureMap = std::unordered_map<std::string, PlatformFeature>;
-  virtual bool ParseFile(const base::FilePath& path, std::string* err_str) = 0;
+  virtual bool ParseFileContents(const std::string& file_contents) = 0;
   virtual ~FeatureParserBase() = default;
+  bool AreFeaturesParsed() const { return features_parsed_; }
   const FeatureMap* GetFeatureMap() { return &feature_map_; }
 
  protected:
@@ -112,18 +191,22 @@ class FeatureParserBase {
 
 class JsonFeatureParser : public FeatureParserBase {
  public:
-  // Implements the meat of the JSON parsing functionality given a JSON path
-  bool ParseFile(const base::FilePath& path, std::string* err_str) override;
+  // Implements the meat of the JSON parsing functionality given a JSON blob
+  bool ParseFileContents(const std::string& file_contents) override;
 
  private:
   // Helper to build a PlatformFeature object by parsing a JSON feature object
   std::optional<PlatformFeature> MakeFeatureObject(
-      const base::Value& feature_obj, std::string* err_str);
+      const base::Value::Dict& feature_obj);
 };
 
 class DbusFeaturedService {
  public:
-  DbusFeaturedService() : parser_(std::make_unique<JsonFeatureParser>()) {}
+  explicit DbusFeaturedService(std::unique_ptr<StoreInterface> store,
+                               std::unique_ptr<TmpStorageInterface> tmp_storage)
+      : parser_(std::make_unique<JsonFeatureParser>()),
+        store_(std::move(store)),
+        tmp_storage_(std::move(tmp_storage)) {}
   DbusFeaturedService(const DbusFeaturedService&) = delete;
   DbusFeaturedService& operator=(const DbusFeaturedService&) = delete;
 
@@ -132,20 +215,29 @@ class DbusFeaturedService {
   bool Start(dbus::Bus* bus, std::shared_ptr<DbusFeaturedService> ptr);
 
  private:
+  friend class DbusFeaturedServiceTestBase;
+
   // Helpers to invoke a feature parser
-  bool ParseFeatureList(std::string* err_str);
+  bool ParseFeatureList();
+
+  // Enable all features that are supported and which Chrome tells us should be
+  // enabled.
+  bool EnableFeatures();
+
+  void OnSessionStateChanged(const std::string& state);
+
+  // Save fetched finch seed from Chrome to disk.
+  void HandleSeedFetched(dbus::MethodCall* method_call,
+                         dbus::ExportedObject::ResponseSender sender);
+
   std::unique_ptr<FeatureParserBase> parser_;
+  std::unique_ptr<StoreInterface> store_;
+  std::unique_ptr<TmpStorageInterface> tmp_storage_;
+  std::unique_ptr<org::chromium::SessionManagerInterfaceProxyInterface>
+      session_manager_ = nullptr;
+  bool evaluated_platform_features_json_ = false;
 
-  // List all the platform features supported by the platform
-  bool GetFeatureList(std::string* csv_list, std::string* err_str);
-  void PlatformFeatureList(dbus::MethodCall* method_call,
-                           dbus::ExportedObject::ResponseSender sender);
-
-  // Wraps PlatformFeatureEnable, providing the interface that dbus expects
-  void PlatformFeatureEnableWrap(dbus::MethodCall* method_call,
-                                 dbus::ExportedObject::ResponseSender sender);
-
-  bool PlatformFeatureEnable(const std::string& name, std::string* err_str);
+  base::WeakPtrFactory<DbusFeaturedService> weak_ptr_factory_{this};
 };
 
 }  // namespace featured

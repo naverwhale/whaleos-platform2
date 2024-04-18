@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -11,11 +11,14 @@ import("//common-mk/proto_library.gni")
 group("all") {
   deps = [
     ":chromeos-pgmem",
+    ":install_minijail_conf",
     ":libmetrics",
     ":libmetrics_daemon",
     ":libupload_service",
     ":metrics_client",
     "//metrics/structured:libstructuredmetrics",
+    "//metrics/structured:libstructuredmetrics_pkg_config",
+    "//metrics/structured:update_reset_counter",
   ]
   if (use.passive_metrics) {
     deps += [ ":metrics_daemon" ]
@@ -41,6 +44,11 @@ group("all") {
   }
 }
 
+install_config("install_minijail_conf") {
+  sources = [ "minijail/metrics_daemon.conf" ]
+  install_path = "minijail_conf"
+}
+
 shared_library("libmetrics") {
   pkg_deps = [
     "libbrillo",
@@ -51,6 +59,7 @@ shared_library("libmetrics") {
     "c_metrics_library.cc",
     "cumulative_metrics.cc",
     "metrics_library.cc",
+    "metrics_writer.cc",
     "persistent_integer.cc",
     "serialization/metric_sample.cc",
     "serialization/serialization_utils.cc",
@@ -63,6 +72,16 @@ shared_library("libmetrics") {
   if (use.metrics_uploader) {
     defines = [ "USE_METRICS_UPLOADER=1" ]
   }
+}
+
+source_set("metrics_test_support") {
+  sources = [ "fake_metrics_library.cc" ]
+  configs += [ ":target_defaults" ]
+  if (use.metrics_uploader) {
+    defines = [ "USE_METRICS_UPLOADER=1" ]
+  }
+  include_dirs = [ "." ]
+  public_deps = [ ":libmetrics" ]
 }
 
 pkg_config("target_defaults_pkg_deps") {
@@ -177,11 +196,20 @@ if (use.test) {
       "//common-mk:test",
       ":target_defaults",
     ]
-    deps = [ "../common-mk/testrunner:testrunner" ]
+    deps = [ "//common-mk/testrunner:testrunner" ]
+  }
+  executable("hold_lock_file") {
+    sources = [ "serialization/hold_lock_file.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+    ]
   }
   executable("metrics_library_test") {
     sources = [
+      "fake_metrics_library_test.cc",
       "metrics_library_test.cc",
+      "metrics_writer_test.cc",
       "serialization/serialization_utils_test.cc",
     ]
     configs += [
@@ -190,8 +218,10 @@ if (use.test) {
     ]
     libs = [ "policy" ]
     deps = [
+      ":hold_lock_file",
       ":libmetrics",
-      "../common-mk/testrunner:testrunner",
+      ":metrics_test_support",
+      "//common-mk/testrunner:testrunner",
     ]
   }
   executable("process_meter_test") {
@@ -214,7 +244,7 @@ if (use.test) {
       "//common-mk:test",
       ":target_defaults",
     ]
-    deps = [ "../common-mk/testrunner:testrunner" ]
+    deps = [ "//common-mk/testrunner:testrunner" ]
   }
   executable("upload_service_test") {
     sources = [
@@ -231,7 +261,7 @@ if (use.test) {
     include_dirs = [ "." ]
     deps = [
       ":libupload_service",
-      "../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 }

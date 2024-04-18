@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include <base/compiler_specific.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/timer/timer.h>
 #include <base/time/time.h>
@@ -43,7 +42,7 @@ class InputEventHandler : public system::InputObserver {
   // InputEventHandler.
   class Delegate {
    public:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
 
     // Handles the lid being closed.
     virtual void HandleLidClosed() = 0;
@@ -64,7 +63,7 @@ class InputEventHandler : public system::InputObserver {
     // TabletMode::UNSUPPORTED will never be passed.
     virtual void HandleTabletModeChange(TabletMode mode) = 0;
 
-    // Shuts the system down in reponse to the power button being pressed while
+    // Shuts the system down in response to the power button being pressed while
     // no display is connected.
     virtual void ShutDownForPowerButtonWithNoDisplay() = 0;
 
@@ -80,7 +79,7 @@ class InputEventHandler : public system::InputObserver {
 
   // Amount of time to wait for Chrome to acknowledge power button presses.
   static constexpr base::TimeDelta kPowerButtonAcknowledgmentTimeout =
-      base::TimeDelta::FromSeconds(2);
+      base::Seconds(2);
 
   InputEventHandler();
   InputEventHandler(const InputEventHandler&) = delete;

@@ -1,10 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 use std::io::{self, Read, Write};
 
-use sys_util::{debug, error};
+use log::{debug, error};
 
 /// A Read adapter that ensures that the wrapped reader is always read until EOF.  This is useful
 /// for ensuring that we always read complete HTTP messages from the IPP over USB device we're

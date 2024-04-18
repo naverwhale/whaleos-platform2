@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,8 @@
 #include <base/files/file_path.h>
 #include <base/memory/ref_counted.h>
 #include <base/values.h>
+
+#include "rmad/utils/type_conversions.h"
 
 namespace rmad {
 
@@ -31,7 +33,10 @@ class JsonStore : public base::RefCounted<JsonStore> {
     READ_ERROR_MAX_ENUM
   };
 
-  explicit JsonStore(const base::FilePath& file_path);
+  explicit JsonStore(const base::FilePath& file_path, bool read_only);
+
+  // Initialize from the file.
+  bool InitFromFile(bool read_only);
 
   // Set a (key, value) pair to the dictionary. Return true if there's no
   // update or the updated data is successfully written to the file, false if
@@ -55,8 +60,7 @@ class JsonStore : public base::RefCounted<JsonStore> {
   // true if the key is found in the dictionary, false if the key is not found.
   template <typename T>
   bool GetValue(const std::string& key, T* result) const {
-    DCHECK(data_.is_dict());
-    return GetValueInternal(data_.FindKey(key), result);
+    return ConvertFromValue(data_.Find(key), result);
   }
 
   // Get the value associated to the key, and assign its const pointer to
@@ -71,7 +75,11 @@ class JsonStore : public base::RefCounted<JsonStore> {
   bool GetValue(const std::string& key, base::Value* result) const;
 
   // Get the complete copy of the dictionary.
-  base::Value GetValues() const;
+  base::Value::Dict GetValues() const;
+
+  // Remove a key in the dictionary. Return true if the key is removed, return
+  // false otherwise.
+  bool RemoveKey(const std::string& key);
 
   // Clear the dictionary. Return true on success, false if failed to write to
   // the file.
@@ -87,9 +95,15 @@ class JsonStore : public base::RefCounted<JsonStore> {
   // Return true if the file existed when read was attempted.
   bool Exists() const { return read_error_ != READ_ERROR_NO_SUCH_FILE; }
 
+  // Return true if the file exists and contains a valid JSON string.
+  bool Initialized() const { return initialized_; }
+
   // Return true if the file cannot be written, such as access denied, or the
   // file already exists but contains invalid JSON format.
-  bool ReadOnly() const { return read_only_; }
+  bool ReadOnly() const { return !initialized_ || read_only_; }
+
+  // Sync the state file.
+  bool Sync() const;
 
  private:
   // Hide the destructor so we don't accidentally delete this while there are
@@ -100,89 +114,16 @@ class JsonStore : public base::RefCounted<JsonStore> {
   // Read result returned from internal read tasks.
   struct ReadResult;
 
-  // Convert the input type to base::Value. The input type should be supported
-  // by base::Value (bool, int, double, string).
-  template <typename T>
-  base::Value ConvertToValue(const T& value) {
-    return base::Value(value);
-  }
-
-  // Convert a vector to base::Value. The vector type should be supported
-  // by base::Value (bool, int, double, string) or vector/map of these types.
-  template <typename T>
-  base::Value ConvertToValue(const std::vector<T>& values) {
-    base::Value list(base::Value::Type::LIST);
-    for (const auto& value : values) {
-      list.Append(ConvertToValue(value));
-    }
-    return list;
-  }
-
-  // Convert a map to base::Value. The value type should be supported by
-  // base::Value (bool, int, double, string) or vector/map of these types.
-  // TODO(chenghan): Support more types, e.g. unordered_map.
-  template <typename T>
-  base::Value ConvertToValue(const std::map<std::string, T>& values) {
-    base::Value dict(base::Value::Type::DICTIONARY);
-    for (const auto& [key, value] : values) {
-      dict.SetKey(key, ConvertToValue(value));
-    }
-    return dict;
-  }
-
-  static bool GetValueInternal(const base::Value* data, bool* result);
-  static bool GetValueInternal(const base::Value* data, int* result);
-  static bool GetValueInternal(const base::Value* data, double* result);
-  static bool GetValueInternal(const base::Value* data, std::string* result);
-
-  template <typename T>
-  static bool GetValueInternal(const base::Value* data,
-                               std::vector<T>* result) {
-    if (!data || !data->is_list()) {
-      return false;
-    }
-    std::vector<T> r;
-    for (const auto& child_data : data->GetList()) {
-      if (T child_result; GetValueInternal(&child_data, &child_result)) {
-        r.push_back(child_result);
-      } else {
-        return false;
-      }
-    }
-    if (result) {
-      *result = std::move(r);
-    }
-    return true;
-  }
-
-  template <typename T>
-  static bool GetValueInternal(const base::Value* data,
-                               std::map<std::string, T>* result) {
-    if (!data || !data->is_dict()) {
-      return false;
-    }
-    std::map<std::string, T> r;
-    for (const auto& [key, child_data] : data->DictItems()) {
-      if (T child_result; GetValueInternal(&child_data, &child_result)) {
-        r.insert({key, child_result});
-      } else {
-        return false;
-      }
-    }
-    if (result) {
-      *result = std::move(r);
-    }
-    return true;
-  }
-
-  void InitFromFile();
   std::unique_ptr<JsonStore::ReadResult> ReadFromFile();
-  bool WriteToFile();
+  // This function is guarded by |read_only_|, but can be overridden by |force|
+  // argument.
+  bool WriteToFile(bool force = false);
 
   const base::FilePath file_path_;
-  base::Value data_;
+  base::Value::Dict data_;
   ReadError read_error_;
   bool read_only_;
+  bool initialized_;
 };
 
 }  // namespace rmad

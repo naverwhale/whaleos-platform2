@@ -1,4 +1,4 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,6 +8,7 @@ pkg_config("egl_pkgconfig") {
   pkg_deps = [
     "egl",
     "libcros_camera_android_deps",
+    "libdrm",
   ]
 }
 
@@ -22,4 +23,7 @@ source_set("egl") {
     ":egl_pkgconfig",
     "//camera/build:cros_camera_common",
   ]
+
+  # -fPIC needed by the libcros_camera.so shared library.
+  configs += [ "//common-mk:pic" ]
 }

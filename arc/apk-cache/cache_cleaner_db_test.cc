@@ -1,15 +1,14 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "arc/apk-cache/cache_cleaner_db.h"
 
-#include <base/bind.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/optional.h>
+#include <base/functional/bind.h>
 #include <base/time/time.h>
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -233,7 +232,7 @@ TEST_F(CacheCleanerDBTest, ExpiredOpenSessions) {
   // Let session expire.
   UpdateSessionTimestampForTesting(
       db_path, kTestSessionId,
-      base::Time::Now() - kSessionMaxAge - base::TimeDelta::FromSeconds(1));
+      base::Time::Now() - kSessionMaxAge - base::Seconds(1));
   // Clean.
   EXPECT_TRUE(OpaqueFilesCleaner(temp_path()).Clean());
   // Test session should be removed.
@@ -284,7 +283,7 @@ TEST_F(CacheCleanerDBTest, ExpiredFile) {
   EXPECT_TRUE(CreateValidPackage(db_path, files_path));
   // Update timestamp so that base APK is expired.
   base::Time access_time =
-      base::Time::Now() - kValidityPeriod - base::TimeDelta::FromSeconds(1);
+      base::Time::Now() - kValidityPeriod - base::Seconds(1);
   ASSERT_TRUE(
       UpdateFileAccessTimeForTesting(db_path, kTestBaseApkId, access_time));
   // Clean.

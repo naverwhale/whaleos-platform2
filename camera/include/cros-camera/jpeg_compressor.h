@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -32,7 +32,9 @@ class CROS_CAMERA_EXPORT JpegCompressor {
   static std::unique_ptr<JpegCompressor> GetInstance(
       CameraMojoChannelManagerToken* token);
 
-  virtual ~JpegCompressor() {}
+  static bool IsSizeSupported(int width, int height);
+
+  virtual ~JpegCompressor() = default;
 
   // Compresses YU12 image to JPEG format with HW encode acceleration. It would
   // fallback to SW encode if HW encode fails by default.

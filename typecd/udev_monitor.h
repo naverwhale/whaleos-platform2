@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,8 +21,10 @@
 
 namespace typecd {
 
+constexpr char kPartnerRegex[] = R"(port(\d+)-partner)";
 constexpr char kTypeCSubsystem[] = "typec";
 constexpr char kUdevMonitorName[] = "udev";
+constexpr char kUsbPdSubsystem[] = "usb_power_delivery";
 
 // Class to monitor udev events on the Type C subsystem and inform other
 // objects / classes of these events.
@@ -37,12 +39,12 @@ class UdevMonitor {
   // notifications to other classes.
   bool ScanDevices();
 
-  // Start monitoring udev for typec events.
+  // Start monitoring udev for typec and usb events.
   bool BeginMonitoring();
 
-  class Observer : public base::CheckedObserver {
+  class TypecObserver : public base::CheckedObserver {
    public:
-    virtual ~Observer() {}
+    virtual ~TypecObserver() {}
     // Callback that is executed when a port is connected or disconnected.
     //
     // The |path| argument refers to the sysfs device path of the port.
@@ -62,7 +64,8 @@ class UdevMonitor {
     // otherwise.
     virtual void OnPartnerAddedOrRemoved(const base::FilePath& path,
                                          int port_num,
-                                         bool added) = 0;
+                                         bool added,
+                                         bool is_hotplug) = 0;
 
     // Callback that is executed when a port partner alt mode is registered or
     // removed.
@@ -101,6 +104,12 @@ class UdevMonitor {
     virtual void OnCableAltModeAdded(const base::FilePath& path,
                                      int port_num) = 0;
 
+    // Callback that is executed when a USB PD device is registered or removed.
+    //
+    // The |path| argument refers to the sysfs path of the PD object.
+    virtual void OnPdDeviceAddedOrRemoved(const base::FilePath& path,
+                                          bool added) = 0;
+
     // Callback that is executed when a partner "change" event is received.
     //
     // The |port_num| argument refers to the port's index number.
@@ -112,25 +121,30 @@ class UdevMonitor {
     virtual void OnPortChanged(int port_num) = 0;
   };
 
-  void AddObserver(Observer* obs);
-  void RemoveObserver(Observer* obs);
+  void AddTypecObserver(TypecObserver* obs);
+  void RemoveTypecObserver(TypecObserver* obs);
 
  private:
   friend class UdevMonitorTest;
-  FRIEND_TEST(UdevMonitorTest, TestBasic);
-  FRIEND_TEST(UdevMonitorTest, TestHotplug);
-  FRIEND_TEST(UdevMonitorTest, TestInvalidPortSyspath);
-  FRIEND_TEST(UdevMonitorTest, TestCableAndAltModeAddition);
-  FRIEND_TEST(UdevMonitorTest, TestPartnerChanged);
-  FRIEND_TEST(UdevMonitorTest, TestPortChanged);
+  friend class UdevMonitorFuzzer;
+  FRIEND_TEST(UdevMonitorTest, Basic);
+  FRIEND_TEST(UdevMonitorTest, Hotplug);
+  FRIEND_TEST(UdevMonitorTest, InvalidPortSyspath);
+  FRIEND_TEST(UdevMonitorTest, CableAndAltModeAddition);
+  FRIEND_TEST(UdevMonitorTest, PartnerChanged);
+  FRIEND_TEST(UdevMonitorTest, PortChanged);
+  FRIEND_TEST(UdevMonitorTest, PdDevice);
 
   // Set the |udev_| pointer to a MockUdev device. *Only* used by unit tests.
   void SetUdev(std::unique_ptr<brillo::MockUdev> udev) {
     udev_ = std::move(udev);
   }
 
-  // Handle a udev event which causes a Type C device to be added/removed.
-  bool HandleDeviceAddedRemoved(const base::FilePath& path, bool added);
+  // Handle a udev event which causes a Type C device and/or USB device to be
+  // added/removed.
+  bool HandleDeviceAddedRemoved(const base::FilePath& path,
+                                bool added,
+                                bool is_initial_scan = false);
 
   // Handle a udev "change" event for a Type C device.
   void HandleDeviceChange(const base::FilePath& path);
@@ -142,7 +156,7 @@ class UdevMonitor {
   std::unique_ptr<brillo::UdevMonitor> udev_monitor_;
   std::unique_ptr<base::FileDescriptorWatcher::Controller>
       udev_monitor_watcher_;
-  base::ObserverList<Observer> observer_list_;
+  base::ObserverList<TypecObserver> typec_observer_list_;
 };
 
 }  // namespace typecd

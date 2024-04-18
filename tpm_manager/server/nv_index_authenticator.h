@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,9 +19,9 @@
 namespace tpm_manager {
 
 // Enable salting for global session.
-const bool kGlobalSessionSalted = true;
+inline constexpr bool kGlobalSessionSalted = true;
 // Enable encryption for global session.
-const bool kGlobalSessionEncryption = true;
+inline constexpr bool kGlobalSessionEncryption = true;
 
 /*
  * NvIndexAuthenticator is a helper class which hold the needed variable used
@@ -91,6 +91,7 @@ class NvIndexAuthenticator {
         return password_delegate_.get();
       case TpmStatus::kTpmOwned:
       case TpmStatus::kTpmSrkNoAuth:
+      case TpmStatus::kTpmDisabled:
         // return error if TPM is owned but the owner_password is not available
         if (owner_password.empty()) {
           // The owner password has been destroyed.

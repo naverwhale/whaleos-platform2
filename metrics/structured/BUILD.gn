@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -47,18 +47,24 @@ shared_library("libstructuredmetrics") {
   pkg_deps = [
     "libbrillo",
     "libchrome",
+    "protobuf-lite",
   ]
 
   sources = [
     "c_structured_metrics.cc",
     "event_base.cc",
     "event_base.h",
+    "fake_recorder.cc",
+    "fake_recorder.h",
     "key_data.cc",
     "key_data.h",
     "persistent_proto.cc",
     "persistent_proto.h",
-    "recorder.cc",
     "recorder.h",
+    "recorder_impl.cc",
+    "recorder_impl.h",
+    "recorder_singleton.cc",
+    "recorder_singleton.h",
   ]
 
   # Also include the generated event files.
@@ -69,4 +75,20 @@ shared_library("libstructuredmetrics") {
     ":storage",
     "//metrics:libmetrics",
   ]
+}
+
+generate_pkg_config("libstructuredmetrics_pkg_config") {
+  name = "libstructuredmetrics"
+  deps = [ ":libstructuredmetrics" ]
+  description = "Chrome OS structured metrics library"
+  version = "${libbase_ver}"
+  requires_private = [ "libmetrics" ]
+  cflags = [ "-I/usr/include/metrics" ]
+  libs = [ "-lstructuredmetrics" ]
+}
+
+executable("update_reset_counter") {
+  pkg_deps = [ "libchrome" ]
+  sources = [ "reset_counter_updater.cc" ]
+  install_path = "bin"
 }

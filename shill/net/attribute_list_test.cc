@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,13 @@
 #include <linux/netlink.h>
 
 #include <string>
+#include <vector>
 
-#include <base/bind.h>
+#include <base/containers/span.h>
+#include <base/functional/bind.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-
-#include "shill/net/byte_string.h"
+#include <net-base/byte_utils.h>
 
 using testing::_;
 using testing::InSequence;
@@ -25,7 +26,7 @@ namespace shill {
 
 class AttributeListTest : public Test {
  public:
-  MOCK_METHOD(bool, AttributeMethod, (int, const ByteString&));
+  MOCK_METHOD(bool, AttributeMethod, (int, base::span<const uint8_t>));
 
  protected:
   static const uint16_t kHeaderLength = 4;
@@ -33,51 +34,55 @@ class AttributeListTest : public Test {
   static const uint16_t kType2 = 2;
   static const uint16_t kType3 = 3;
 
-  static ByteString MakeNetlinkAttribute(uint16_t len,
-                                         uint16_t type,
-                                         const std::string& payload) {
-    nlattr attribute{len, type};
-    ByteString data(reinterpret_cast<const char*>(&attribute),
-                    sizeof(attribute));
-    data.Append(ByteString(payload, false));
+  static std::vector<uint8_t> MakeNetlinkAttribute(
+      uint16_t len, uint16_t type, const std::string& payload_string) {
+    const nlattr attribute{len, type};
+    const std::vector<uint8_t> payload =
+        net_base::byte_utils::ByteStringToBytes(payload_string);
+
+    std::vector<uint8_t> data = net_base::byte_utils::ToBytes(attribute);
+    data.insert(data.end(), payload.begin(), payload.end());
     return data;
   }
 
-  static ByteString MakePaddedNetlinkAttribute(uint16_t len,
-                                               uint16_t type,
-                                               const std::string& payload) {
-    ByteString data(MakeNetlinkAttribute(len, type, payload));
-    ByteString padding(NLA_ALIGN(data.GetLength()) - data.GetLength());
-    data.Append(padding);
+  static std::vector<uint8_t> MakePaddedNetlinkAttribute(
+      uint16_t len, uint16_t type, const std::string& payload) {
+    std::vector<uint8_t> data(MakeNetlinkAttribute(len, type, payload));
+    data.resize(NLA_ALIGN(data.size()), 0);
     return data;
   }
 };
 
 MATCHER_P(PayloadIs, payload, "") {
-  return arg.Equals(ByteString(std::string(payload), false));
+  return std::vector<uint8_t>(arg.begin(), arg.end()) ==
+         net_base::byte_utils::ByteStringToBytes(payload);
 }
 
 TEST_F(AttributeListTest, IterateEmptyPayload) {
   EXPECT_CALL(*this, AttributeMethod(_, _)).Times(0);
   AttributeListRefPtr list(new AttributeList());
   EXPECT_TRUE(list->IterateAttributes(
-      ByteString(), 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      {}, 0,
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
 }
 
 TEST_F(AttributeListTest, IteratePayload) {
-  ByteString payload;
-  payload.Append(
-      MakePaddedNetlinkAttribute(kHeaderLength + 10, kType1, "0123456789"));
+  std::vector<uint8_t> payload =
+      MakePaddedNetlinkAttribute(kHeaderLength + 10, kType1, "0123456789");
   const uint16_t kLength1 = kHeaderLength + 10 + 2;  // 2 bytes padding.
-  ASSERT_EQ(kLength1, payload.GetLength());
-  payload.Append(MakePaddedNetlinkAttribute(kHeaderLength + 3, kType2, "123"));
-  const uint16_t kLength2 = kLength1 + kHeaderLength + 3 + 1;  // 1 byte pad.
-  ASSERT_EQ(kLength2, payload.GetLength());
+  ASSERT_EQ(kLength1, payload.size());
 
-  payload.Append(MakeNetlinkAttribute(kHeaderLength + 5, kType3, "12345"));
+  const auto attr2 =
+      MakePaddedNetlinkAttribute(kHeaderLength + 3, kType2, "123");
+  payload.insert(payload.end(), attr2.begin(), attr2.end());
+  const uint16_t kLength2 = kLength1 + kHeaderLength + 3 + 1;  // 1 byte pad.
+  ASSERT_EQ(kLength2, payload.size());
+
+  const auto attr3 = MakeNetlinkAttribute(kHeaderLength + 5, kType3, "12345");
+  payload.insert(payload.end(), attr3.begin(), attr3.end());
   const uint16_t kLength3 = kLength2 + kHeaderLength + 5;
-  ASSERT_EQ(kLength3, payload.GetLength());
+  ASSERT_EQ(kLength3, payload.size());
 
   InSequence seq;
   EXPECT_CALL(*this, AttributeMethod(kType1, PayloadIs("0123456789")))
@@ -89,7 +94,8 @@ TEST_F(AttributeListTest, IteratePayload) {
   AttributeListRefPtr list(new AttributeList());
   EXPECT_TRUE(list->IterateAttributes(
       payload, 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 
   // If a valid offset is provided only the attributes that follow should
@@ -101,7 +107,8 @@ TEST_F(AttributeListTest, IteratePayload) {
       .WillOnce(Return(true));
   EXPECT_TRUE(list->IterateAttributes(
       payload, kLength1,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 
   // If one of the attribute methods returns false, the iteration should abort.
@@ -112,7 +119,8 @@ TEST_F(AttributeListTest, IteratePayload) {
   EXPECT_CALL(*this, AttributeMethod(kType3, PayloadIs("12345"))).Times(0);
   EXPECT_FALSE(list->IterateAttributes(
       payload, 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 }
 
@@ -120,26 +128,32 @@ TEST_F(AttributeListTest, SmallPayloads) {
   // A payload must be at least 4 bytes long to incorporate the nlattr header.
   EXPECT_CALL(*this, AttributeMethod(_, _)).Times(0);
   AttributeListRefPtr list(new AttributeList());
+  const auto payload1 = MakeNetlinkAttribute(kHeaderLength - 1, kType1, "0123");
   EXPECT_FALSE(list->IterateAttributes(
-      MakeNetlinkAttribute(kHeaderLength - 1, kType1, "0123"), 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      payload1, 0,
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 
   // This is a minimal valid payload.
+  const auto payload2 = MakeNetlinkAttribute(kHeaderLength, kType2, "");
   EXPECT_CALL(*this, AttributeMethod(kType2, PayloadIs("")))
       .WillOnce(Return(true));
   EXPECT_TRUE(list->IterateAttributes(
-      MakeNetlinkAttribute(kHeaderLength, kType2, ""), 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      payload2, 0,
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 
   // This is a minmal payload except there are not enough bytes to retrieve
   // the attribute value.
   const uint16_t kType3 = 1;
+  const auto payload3 = MakeNetlinkAttribute(kHeaderLength + 1, kType3, "");
   EXPECT_CALL(*this, AttributeMethod(_, _)).Times(0);
   EXPECT_FALSE(list->IterateAttributes(
-      MakeNetlinkAttribute(kHeaderLength + 1, kType3, ""), 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      payload3, 0,
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
 }
 
 TEST_F(AttributeListTest, TrailingGarbage) {
@@ -149,13 +163,15 @@ TEST_F(AttributeListTest, TrailingGarbage) {
   // |LEN|TYP|0|
   // +-+-+-+-+-+
   // Well formed frame.
-  ByteString payload(MakeNetlinkAttribute(kHeaderLength + 1, kType1, "0"));
+  std::vector<uint8_t> payload =
+      MakeNetlinkAttribute(kHeaderLength + 1, kType1, "0");
   EXPECT_CALL(*this, AttributeMethod(kType1, PayloadIs("0")))
       .WillOnce(Return(true));
   AttributeListRefPtr list(new AttributeList());
   EXPECT_TRUE(list->IterateAttributes(
       payload, 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 
   // +---------------+
@@ -164,12 +180,14 @@ TEST_F(AttributeListTest, TrailingGarbage) {
   // |LEN|TYP|0|1|2|3|
   // +-+-+-+-+-+-+-+-+
   // "123" assumed to be padding for attr1.
-  payload.Append(ByteString(std::string("123"), false));
+  const auto attr1 = net_base::byte_utils::ByteStringToBytes("123");
+  payload.insert(payload.end(), attr1.begin(), attr1.end());
   EXPECT_CALL(*this, AttributeMethod(kType1, PayloadIs("0")))
       .WillOnce(Return(true));
   EXPECT_TRUE(list->IterateAttributes(
       payload, 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 
   // +---------------+-----+
@@ -179,12 +197,14 @@ TEST_F(AttributeListTest, TrailingGarbage) {
   // +-+-+-+-+-+-+-+-+-+-+-+
   // "456" is acceptable since it is not long enough to complete an netlink
   // attribute header.
-  payload.Append(ByteString(std::string("456"), false));
+  const auto attr2 = net_base::byte_utils::ByteStringToBytes("456");
+  payload.insert(payload.end(), attr2.begin(), attr2.end());
   EXPECT_CALL(*this, AttributeMethod(kType1, PayloadIs("0")))
       .WillOnce(Return(true));
   EXPECT_TRUE(list->IterateAttributes(
       payload, 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 
   // +---------------+-------+
@@ -195,12 +215,14 @@ TEST_F(AttributeListTest, TrailingGarbage) {
   // This is a broken frame, since '4567' can be interpreted as a complete
   // nlatter header, but is malformed since there is not enough payload to
   // satisfy the "length" parameter.
-  payload.Append(ByteString(std::string("7"), false));
+  const auto attr3 = net_base::byte_utils::ByteStringToBytes("7");
+  payload.insert(payload.end(), attr3.begin(), attr3.end());
   EXPECT_CALL(*this, AttributeMethod(kType1, PayloadIs("0")))
       .WillOnce(Return(true));
   EXPECT_FALSE(list->IterateAttributes(
       payload, 0,
-      base::Bind(&AttributeListTest::AttributeMethod, base::Unretained(this))));
+      base::BindRepeating(&AttributeListTest::AttributeMethod,
+                          base::Unretained(this))));
   Mock::VerifyAndClearExpectations(this);
 }
 

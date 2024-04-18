@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include <base/memory/scoped_refptr.h>
 #include <gtest/gtest.h>
 
+#include "rmad/daemon/daemon_callback.h"
 #include "rmad/utils/json_store.h"
 
 namespace rmad {
@@ -25,6 +26,7 @@ class StateHandlerTest : public testing::Test {
   base::ScopedTempDir temp_dir_;
   base::FilePath file_path_;
   scoped_refptr<JsonStore> json_store_;
+  scoped_refptr<DaemonCallback> daemon_callback_;
 };
 
 }  // namespace rmad

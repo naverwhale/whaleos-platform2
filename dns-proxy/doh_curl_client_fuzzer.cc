@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,32 +29,16 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   loop.SetAsCurrent();
 
   FuzzedDataProvider provider(data, size);
-  DoHCurlClient curl_client(base::TimeDelta::FromSeconds(1), 1);
+  DoHCurlClient curl_client(base::Seconds(1));
 
   while (provider.remaining_bytes() > 0) {
-    size_t n = provider.ConsumeIntegralInRange<size_t>(0, 99);
-    std::vector<std::string> s;
-    s.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-      s.emplace_back(provider.ConsumeRandomLengthString(
-          std::numeric_limits<unsigned int>::max()));
-    }
-    curl_client.SetNameServers(s);
-    curl_client.SetDoHProviders(s);
-
-    s.clear();
-    s.emplace_back("8.8.8.8");
-    curl_client.SetNameServers(s);
-    s.clear();
-    s.emplace_back("https://dns.google/dns-query");
-    curl_client.SetDoHProviders(s);
     auto msg =
         provider.ConsumeBytes<char>(std::numeric_limits<unsigned int>::max());
     curl_client.Resolve(
         msg.data(), msg.size(),
-        base::BindRepeating([](void*, const DoHCurlClientInterface::CurlResult&,
-                               uint8_t*, size_t) {}),
-        nullptr);
+        base::BindRepeating(
+            [](const DoHCurlClientInterface::CurlResult&, uint8_t*, size_t) {}),
+        {"8.8.8.8"}, "https://dns.google/dns-query");
     base::RunLoop().RunUntilIdle();
   }
   return 0;

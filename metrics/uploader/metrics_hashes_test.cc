@@ -1,11 +1,10 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "metrics/uploader/metrics_hashes.h"
 
 #include <base/format_macros.h>
-#include <base/macros.h>
 #include <base/stl_util.h>
 #include <base/strings/stringprintf.h>
 #include <gtest/gtest.h>
@@ -23,7 +22,7 @@ TEST(MetricsUtilTest, HashMetricName) {
       {"NewTab", "0x290eb683f96572f1"},
   };
 
-  for (size_t i = 0; i < base::size(cases); ++i) {
+  for (size_t i = 0; i < std::size(cases); ++i) {
     uint64_t hash = HashMetricName(cases[i].input);
     std::string hash_hex = base::StringPrintf("0x%016" PRIx64, hash);
     EXPECT_EQ(cases[i].output, hash_hex);

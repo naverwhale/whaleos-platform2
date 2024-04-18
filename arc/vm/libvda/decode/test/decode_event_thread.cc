@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,11 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/posix/eintr_wrapper.h>
@@ -48,10 +48,7 @@ DecodeEventThread::~DecodeEventThread() {
 }
 
 void DecodeEventThread::Start() {
-  // TODO(alexlau): don't hardcode this path, see comment in gpu_impl.cc.
-  gbm_device_fd_.reset(HANDLE_EINTR(open("/dev/dri/renderD128", O_RDWR)));
-  ASSERT_TRUE(gbm_device_fd_.is_valid());
-  gbm_device_.reset(gbm_create_device(gbm_device_fd_.get()));
+  gbm_device_ = arc::ScopedGbmDevice::Create();
   ASSERT_NE(gbm_device_.get(), nullptr);
 
   vda_format_ = caps_->output_formats[0];
@@ -83,12 +80,8 @@ void DecodeEventThread::StartWatching() {
   // Since thread_checker_ binds to whichever thread it's created on, check
   // that we're on the correct thread first using BelongsToCurrentThread.
   DCHECK(thread_.task_runner()->BelongsToCurrentThread());
-  // TODO(alexlau): Use DETACH_FROM_THREAD macro after libchrome uprev
-  // (crbug.com/909719).
-  thread_checker_.DetachFromThread();
-  // TODO(alexlau): Use DCHECK_CALLED_ON_VALID_THREAD macro after libchrome
-  // uprev (crbug.com/909719).
-  DCHECK(thread_checker_.CalledOnValidThread());
+  DETACH_FROM_THREAD(thread_checker_);
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   event_pipe_fd_controller_ = base::FileDescriptorWatcher::WatchReadable(
       session_->event_pipe_fd,
@@ -97,14 +90,14 @@ void DecodeEventThread::StartWatching() {
 }
 
 void DecodeEventThread::StopWatching() {
-  DCHECK(thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   event_pipe_fd_controller_.reset();
   picture_buffer_id_to_bo_map_.clear();
 }
 
 void DecodeEventThread::OnEventPipeReadable() {
-  DCHECK(thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   vda_event_t event;
   if (!base::ReadFromFD(session_->event_pipe_fd,
@@ -136,7 +129,7 @@ void DecodeEventThread::OnEventPipeReadable() {
 }
 
 void DecodeEventThread::OnNotifyEndOfBitstreamBuffer(int32_t bitstream_id) {
-  DCHECK(thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   VLOG(3) << "NOTIFY_END_OF_BITSTREAM_BUFFER event: bitstream_id "
           << bitstream_id;
@@ -152,7 +145,7 @@ uint32_t DecodeEventThread::GetAndClearEndOfBitstreamBufferEventCount() {
 }
 
 void DecodeEventThread::OnPictureReady(const picture_ready_event_data_t& data) {
-  DCHECK(thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   VLOG(3) << "PICTURE_READY event: picture_buffer_id " << data.picture_buffer_id
           << " bitstream_id " << data.bitstream_id << " crop_left "
@@ -172,7 +165,7 @@ void DecodeEventThread::OnPictureReady(const picture_ready_event_data_t& data) {
 
 void DecodeEventThread::CallUseOutputBuffer(int32_t picture_buffer_id,
                                             gbm_bo* bo) {
-  DCHECK(thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   int plane_count = gbm_bo_get_plane_count(bo);
   int plane_fd = gbm_bo_get_fd(bo);
@@ -200,7 +193,7 @@ void DecodeEventThread::CallUseOutputBuffer(int32_t picture_buffer_id,
 
 void DecodeEventThread::OnProvidePictureBuffers(
     const provide_picture_buffers_event_data_t& data) {
-  DCHECK(thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   VLOG(3) << "PROVIDE_PICTURE_BUFFERS event: min_num_buffers "
           << data.min_num_buffers << " width " << data.width << " height "

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,10 @@
 #define SHILL_CELLULAR_MODEM_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
-#include <base/optional.h>
 #include <base/files/file_util.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
@@ -42,11 +41,10 @@ class Modem {
   void OnDeviceInfoAvailable(const std::string& link_name);
 
   const std::string& link_name() const { return link_name_; }
-  Cellular::Type type() const { return type_; }
   const std::string& service() const { return service_; }
   const RpcIdentifier& path() const { return path_; }
 
-  base::Optional<int> interface_index_for_testing() const {
+  std::optional<int> interface_index_for_testing() const {
     return interface_index_;
   }
   bool has_pending_device_info_for_testing() const {
@@ -58,11 +56,6 @@ class Modem {
   static constexpr char kFakeDevNameFormat[] = "no_netdev_%zu";
   static const char kFakeDevAddress[];
   static const int kFakeDevInterfaceIndex;
-
- protected:
-  void set_rtnl_handler_for_testing(RTNLHandler* rtnl_handler) {
-    rtnl_handler_ = rtnl_handler;
-  }
 
  private:
   friend class ModemTest;
@@ -78,7 +71,7 @@ class Modem {
   // Finds the interface index and MAC address for the kernel network device
   // with name |link_name_|. If no interface index exists, returns nullopt.
   // Otherwise sets |mac_address| if available and returns the interface index.
-  base::Optional<int> GetDeviceParams(std::string* mac_address);
+  std::optional<int> GetLinkDetailsFromDeviceInfo(std::string* mac_address);
 
   CellularRefPtr GetOrCreateCellularDevice(int interface_index,
                                            const std::string& mac_address);
@@ -90,11 +83,9 @@ class Modem {
   const RpcIdentifier path_;
 
   DeviceInfo* device_info_;
-  base::Optional<int> interface_index_;
+  std::optional<int> interface_index_;
   std::string link_name_;
-  Cellular::Type type_;
   bool has_pending_device_info_ = false;
-  RTNLHandler* rtnl_handler_;
 
   // Serial number used to uniquify fake device names for Cellular
   // devices that don't have network devices. (Names must be unique

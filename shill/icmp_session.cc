@@ -1,24 +1,26 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/icmp_session.h"
+
+#include <cstdint>
+#include <utility>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/icmp6.h>
 #include <netinet/ip.h>
 
 #include <base/check_op.h>
+#include <base/containers/span.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/time/default_tick_clock.h>
+#include <base/time/time.h>
 
 #include "shill/event_dispatcher.h"
 #include "shill/logging.h"
-#include "shill/net/byte_string.h"
-#include "shill/net/io_handler_factory.h"
-#include "shill/net/ip_address.h"
-#include "shill/net/sockets.h"
 
 namespace {
 const int kIPHeaderLengthUnitBytes = 4;
@@ -28,23 +30,13 @@ namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kWiFi;
-static std::string ObjectID(const IcmpSession* i) {
-  return "(icmp_session)";
-}
 }  // namespace Logging
 
 uint16_t IcmpSession::kNextUniqueEchoId = 0;
-const int IcmpSession::kTotalNumEchoRequests = 3;
-const int IcmpSession::kEchoRequestIntervalSeconds = 1;  // default for ping
-// We should not need more than 1 second after the last request is sent to
-// receive the final reply.
-const size_t IcmpSession::kTimeoutSeconds =
-    kEchoRequestIntervalSeconds * kTotalNumEchoRequests + 1;
 
 IcmpSession::IcmpSession(EventDispatcher* dispatcher)
     : weak_ptr_factory_(this),
       dispatcher_(dispatcher),
-      io_handler_factory_(IOHandlerFactory::GetInstance()),
       icmp_(new Icmp()),
       echo_id_(kNextUniqueEchoId),
       current_sequence_number_(0),
@@ -58,9 +50,9 @@ IcmpSession::~IcmpSession() {
   Stop();
 }
 
-bool IcmpSession::Start(const IPAddress& destination,
+bool IcmpSession::Start(const net_base::IPAddress& destination,
                         int interface_index,
-                        const IcmpSessionResultCallback& result_callback) {
+                        IcmpSessionResultCallback result_callback) {
   if (!dispatcher_) {
     LOG(ERROR) << "Invalid dispatcher";
     return false;
@@ -72,19 +64,20 @@ bool IcmpSession::Start(const IPAddress& destination,
   if (!icmp_->Start(destination, interface_index)) {
     return false;
   }
-  echo_reply_handler_.reset(io_handler_factory_->CreateIOInputHandler(
-      icmp_->socket(),
-      Bind(&IcmpSession::OnEchoReplyReceived, weak_ptr_factory_.GetWeakPtr()),
-      Bind(&IcmpSession::OnEchoReplyError, weak_ptr_factory_.GetWeakPtr())));
-  result_callback_ = result_callback;
-  timeout_callback_.Reset(Bind(&IcmpSession::ReportResultAndStopSession,
-                               weak_ptr_factory_.GetWeakPtr()));
+
+  icmp_watcher_ = base::FileDescriptorWatcher::WatchReadable(
+      icmp_->socket()->Get(), base::BindRepeating(&IcmpSession::OnIcmpReadable,
+                                                  base::Unretained(this)));
+  result_callback_ = std::move(result_callback);
+  timeout_callback_.Reset(BindOnce(&IcmpSession::ReportResultAndStopSession,
+                                   weak_ptr_factory_.GetWeakPtr()));
   dispatcher_->PostDelayedTask(FROM_HERE, timeout_callback_.callback(),
-                               kTimeoutSeconds * 1000);
+                               kTimeout);
   seq_num_to_sent_recv_time_.clear();
   received_echo_reply_seq_numbers_.clear();
-  dispatcher_->PostTask(FROM_HERE, Bind(&IcmpSession::TransmitEchoRequestTask,
-                                        weak_ptr_factory_.GetWeakPtr()));
+  dispatcher_->PostTask(FROM_HERE,
+                        base::BindOnce(&IcmpSession::TransmitEchoRequestTask,
+                                       weak_ptr_factory_.GetWeakPtr()));
 
   return true;
 }
@@ -94,7 +87,7 @@ void IcmpSession::Stop() {
     return;
   }
   timeout_callback_.Cancel();
-  echo_reply_handler_.reset();
+  icmp_watcher_.reset();
   icmp_->Stop();
 }
 
@@ -151,28 +144,31 @@ void IcmpSession::TransmitEchoRequestTask() {
   // requests are sent.
 
   if (seq_num_to_sent_recv_time_.size() != kTotalNumEchoRequests) {
-    dispatcher_->PostDelayedTask(FROM_HERE,
-                                 Bind(&IcmpSession::TransmitEchoRequestTask,
-                                      weak_ptr_factory_.GetWeakPtr()),
-                                 kEchoRequestIntervalSeconds * 1000);
+    dispatcher_->PostDelayedTask(
+        FROM_HERE,
+        base::BindOnce(&IcmpSession::TransmitEchoRequestTask,
+                       weak_ptr_factory_.GetWeakPtr()),
+        kEchoRequestInterval);
   }
 }
 
-int IcmpSession::OnV4EchoReplyReceived(InputData* data) {
-  DCHECK_GE(data->len, 0);
+int IcmpSession::OnV4EchoReplyReceived(base::span<const uint8_t> message) {
+  if (message.size() < sizeof(struct iphdr)) {
+    LOG(WARNING) << "Received ICMP packet is too short to contain IP header";
+    return -1;
+  }
+  const struct iphdr* received_ip_header =
+      reinterpret_cast<const struct iphdr*>(message.data());
 
-  ByteString message(data->buf, data->len);
-  if (message.GetLength() < sizeof(struct iphdr) + sizeof(struct icmphdr)) {
+  if (message.size() < received_ip_header->ihl * kIPHeaderLengthUnitBytes +
+                           sizeof(struct icmphdr)) {
     LOG(WARNING) << "Received ICMP packet is too short to contain ICMP header";
     return -1;
   }
-
-  const struct iphdr* received_ip_header =
-      reinterpret_cast<const struct iphdr*>(message.GetConstData());
   const struct icmphdr* received_icmp_header =
-      reinterpret_cast<const struct icmphdr*>(message.GetConstData() +
-                                              received_ip_header->ihl *
-                                                  kIPHeaderLengthUnitBytes);
+      reinterpret_cast<const struct icmphdr*>(
+          message.data() + received_ip_header->ihl * kIPHeaderLengthUnitBytes);
+
   // We might have received other types of ICMP traffic, so ensure that the
   // message is an echo reply before handling it.
   if (received_icmp_header->type != ICMP_ECHOREPLY) {
@@ -186,19 +182,17 @@ int IcmpSession::OnV4EchoReplyReceived(InputData* data) {
   }
 
   if (received_icmp_header->un.echo.id != echo_id_) {
-    SLOG(this, 3) << "received message echo id ("
-                  << received_icmp_header->un.echo.id
-                  << ") does not match this ICMP session's echo id ("
-                  << echo_id_ << ")";
+    SLOG(2) << "received message echo id (" << received_icmp_header->un.echo.id
+            << ") does not match this ICMP session's echo id (" << echo_id_
+            << ")";
     return -1;
   }
 
   return received_icmp_header->un.echo.sequence;
 }
 
-int IcmpSession::OnV6EchoReplyReceived(InputData* data) {
-  ByteString message(data->buf, data->len);
-  if (message.GetLength() < sizeof(struct icmp6_hdr)) {
+int IcmpSession::OnV6EchoReplyReceived(base::span<const uint8_t> message) {
+  if (message.size() < sizeof(struct icmp6_hdr)) {
     LOG(WARNING)
         << "Received ICMP packet is too short to contain ICMPv6 header";
     return -1;
@@ -207,7 +201,7 @@ int IcmpSession::OnV6EchoReplyReceived(InputData* data) {
   // Per RFC3542 section 3, ICMPv6 raw sockets do not contain the IP header
   // (unlike ICMPv4 raw sockets).
   const struct icmp6_hdr* received_icmp_header =
-      reinterpret_cast<const struct icmp6_hdr*>(message.GetConstData());
+      reinterpret_cast<const struct icmp6_hdr*>(message.data());
   // We might have received other types of ICMP traffic, so ensure that the
   // message is an echo reply before handling it.
   if (received_icmp_header->icmp6_type != ICMP6_ECHO_REPLY) {
@@ -221,26 +215,41 @@ int IcmpSession::OnV6EchoReplyReceived(InputData* data) {
   }
 
   if (received_icmp_header->icmp6_id != echo_id_) {
-    SLOG(this, 3) << "received message echo id ("
-                  << received_icmp_header->icmp6_id
-                  << ") does not match this ICMPv6 session's echo id ("
-                  << echo_id_ << ")";
+    SLOG(2) << "received message echo id (" << received_icmp_header->icmp6_id
+            << ") does not match this ICMPv6 session's echo id (" << echo_id_
+            << ")";
     return -1;
   }
 
   return received_icmp_header->icmp6_seq;
 }
 
-void IcmpSession::OnEchoReplyReceived(InputData* data) {
-  DCHECK_GE(data->len, 0);
+void IcmpSession::OnIcmpReadable() {
+  std::vector<uint8_t> message;
+  if (icmp_->socket()->RecvMessage(&message)) {
+    OnEchoReplyReceived(message);
+  } else {
+    PLOG(ERROR) << __func__ << ": failed to receive message from socket";
+    // Do nothing when we encounter an IO error, so we can continue receiving
+    // other pending echo replies.
+  }
+}
+
+void IcmpSession::OnEchoReplyReceived(base::span<const uint8_t> message) {
+  const auto& destination = icmp_->destination();
+  if (!destination) {
+    LOG(WARNING) << "Failed to get ICMP destination";
+    return;
+  }
 
   int received_seq_num = -1;
-  if (icmp_->destination().family() == IPAddress::kFamilyIPv4) {
-    received_seq_num = OnV4EchoReplyReceived(data);
-  } else if (icmp_->destination().family() == IPAddress::kFamilyIPv6) {
-    received_seq_num = OnV6EchoReplyReceived(data);
-  } else {
-    NOTREACHED();
+  switch (destination->GetFamily()) {
+    case net_base::IPFamily::kIPv4:
+      received_seq_num = OnV4EchoReplyReceived(message);
+      break;
+    case net_base::IPFamily::kIPv6:
+      received_seq_num = OnV6EchoReplyReceived(message);
+      break;
   }
 
   if (received_seq_num < 0) {
@@ -289,12 +298,6 @@ std::vector<base::TimeDelta> IcmpSession::GenerateIcmpResult() {
   return latencies;
 }
 
-void IcmpSession::OnEchoReplyError(const std::string& error_msg) {
-  LOG(ERROR) << __func__ << ": " << error_msg;
-  // Do nothing when we encounter an IO error, so we can continue receiving
-  // other pending echo replies.
-}
-
 void IcmpSession::ReportResultAndStopSession() {
   if (!IsStarted()) {
     LOG(WARNING) << "ICMP session not started";
@@ -305,7 +308,7 @@ void IcmpSession::ReportResultAndStopSession() {
   // might delete this object. (Any subsequent call to IcmpSession::Stop leads
   // to a segfault since this function belongs to the deleted object.)
   if (!result_callback_.is_null()) {
-    result_callback_.Run(GenerateIcmpResult());
+    std::move(result_callback_).Run(GenerateIcmpResult());
   }
 }
 

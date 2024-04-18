@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,9 +15,9 @@
 #include <gtest/gtest.h>
 
 #include "power_manager/common/util.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -30,7 +30,7 @@ std::string JoinPaths(const std::vector<base::FilePath>& paths) {
 
 }  // namespace
 
-class LockfileCheckerTest : public ::testing::Test {
+class LockfileCheckerTest : public TestEnvironment {
  public:
   LockfileCheckerTest() {
     CHECK(temp_dir_.CreateUniqueTempDir());
@@ -116,5 +116,4 @@ TEST_F(LockfileCheckerTest, NonexistentPid) {
   EXPECT_EQ("", JoinPaths(CreateChecker({})->GetValidLockfiles()));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,12 @@ VaultKeysetFactory::~VaultKeysetFactory() {}
 VaultKeyset* VaultKeysetFactory::New(Platform* platform, Crypto* crypto) {
   VaultKeyset* v = new VaultKeyset();
   v->Initialize(platform, crypto);
+  return v;
+}
+
+VaultKeyset* VaultKeysetFactory::NewBackup(Platform* platform, Crypto* crypto) {
+  VaultKeyset* v = new VaultKeyset();
+  v->InitializeAsBackup(platform, crypto);
   return v;
 }
 

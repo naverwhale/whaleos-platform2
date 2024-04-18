@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,9 +15,9 @@
 #include <base/timer/timer.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 #include <patchpanel/proto_bindings/patchpanel_service.pb.h>
-#include <shill/net/ip_address.h>
-#include <shill/net/rtnl_listener.h>
-#include <shill/net/rtnl_message.h>
+#include <net-base/rtnl_listener.h>
+#include <net-base/ip_address.h>
+#include <net-base/rtnl_message.h>
 
 #include "patchpanel/shill_client.h"
 
@@ -78,8 +78,7 @@ namespace patchpanel {
 //   state.
 class NeighborLinkMonitor {
  public:
-  static constexpr base::TimeDelta kActiveProbeInterval =
-      base::TimeDelta::FromSeconds(60);
+  static constexpr base::TimeDelta kActiveProbeInterval = base::Seconds(60);
 
   // Possible neighbor roles in the ipconfig. Represents each individual role by
   // a single bit to make the internal implementation easier.
@@ -91,13 +90,13 @@ class NeighborLinkMonitor {
 
   using NeighborReachabilityEventHandler = base::RepeatingCallback<void(
       int ifindex,
-      const shill::IPAddress& ip_addr,
+      const net_base::IPAddress& ip_addr,
       NeighborRole role,
       NeighborReachabilityEventSignal::EventType event_type)>;
 
   NeighborLinkMonitor(int ifindex,
                       const std::string& ifname,
-                      shill::RTNLHandler* rtnl_handler,
+                      net_base::RTNLHandler* rtnl_handler,
                       NeighborReachabilityEventHandler* neighbor_event_handler);
   ~NeighborLinkMonitor() = default;
 
@@ -136,13 +135,13 @@ class NeighborLinkMonitor {
       kReachable,
     };
 
-    WatchingEntry(shill::IPAddress addr, NeighborRole role);
+    WatchingEntry(const net_base::IPAddress& addr, NeighborRole role);
     WatchingEntry(const WatchingEntry&) = delete;
     WatchingEntry& operator=(const WatchingEntry&) = delete;
 
     std::string ToString() const;
 
-    shill::IPAddress addr;
+    net_base::IPAddress addr;
     NeighborRole role;
 
     // Reflects the NUD state of |addr| in the kernel neighbor table. Notes that
@@ -168,28 +167,27 @@ class NeighborLinkMonitor {
   void Start();
   void Stop();
 
-  void AddWatchingEntries(int prefix_length,
-                          const std::string& addr,
-                          const std::string& gateway,
+  void AddWatchingEntries(const net_base::IPCIDR& local_cidr,
+                          const net_base::IPAddress& gateway,
                           const std::vector<std::string>& dns_addresses);
 
   // Creates a new entry if not exist or updates the role of an existing entry.
-  void UpdateWatchingEntry(const shill::IPAddress& addr, NeighborRole role);
+  void UpdateWatchingEntry(const net_base::IPAddress& addr, NeighborRole role);
 
   void SendNeighborDumpRTNLMessage();
   void SendNeighborProbeRTNLMessage(const WatchingEntry& entry);
-  void OnNeighborMessage(const shill::RTNLMessage& msg);
+  void OnNeighborMessage(const net_base::RTNLMessage& msg);
 
   int ifindex_;
   const std::string ifname_;
-  std::map<shill::IPAddress, WatchingEntry> watching_entries_;
-  std::unique_ptr<shill::RTNLListener> listener_;
+  std::map<net_base::IPAddress, WatchingEntry> watching_entries_;
+  std::unique_ptr<net_base::RTNLListener> listener_;
 
   // Timer for running ProbeAll().
   base::RepeatingTimer probe_timer_;
 
   // RTNLHandler is a singleton object. Stores it here for test purpose.
-  shill::RTNLHandler* rtnl_handler_;
+  net_base::RTNLHandler* rtnl_handler_;
 
   const NeighborReachabilityEventHandler* neighbor_event_handler_;
 };
@@ -208,10 +206,9 @@ class NetworkMonitorService {
   void Start();
 
  private:
-  void OnShillDevicesChanged(const std::vector<std::string>& added,
-                             const std::vector<std::string>& removed);
-  void OnIPConfigsChanged(const std::string& ifname,
-                          const ShillClient::IPConfig& ipconfig);
+  void OnShillDevicesChanged(const std::vector<ShillClient::Device>& added,
+                             const std::vector<ShillClient::Device>& removed);
+  void OnIPConfigsChanged(const ShillClient::Device& device);
 
   // ifname => NeighborLinkMonitor.
   std::map<std::string, std::unique_ptr<NeighborLinkMonitor>>
@@ -219,7 +216,7 @@ class NetworkMonitorService {
   NeighborLinkMonitor::NeighborReachabilityEventHandler neighbor_event_handler_;
   ShillClient* shill_client_;
   // RTNLHandler is a singleton object. Stores it here for test purpose.
-  shill::RTNLHandler* rtnl_handler_;
+  net_base::RTNLHandler* rtnl_handler_;
 
   FRIEND_TEST(NetworkMonitorServiceTest, StartRTNLHanlderOnServiceStart);
   FRIEND_TEST(NetworkMonitorServiceTest, CallGetDevicePropertiesOnNewDevice);

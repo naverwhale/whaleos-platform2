@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -94,9 +94,9 @@ int main(int argc, char* argv[]) {
 
   // Wait for the response and process the result.
   LOG(INFO) << "Gathering logs, please wait";
-  std::unique_ptr<dbus::Response> response(
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response(
       debugd_proxy->CallMethodAndBlock(&method_call, FLAGS_timeout_ms));
-  CHECK(response) << debugd::kDumpDebugLogs << " failed";
+  CHECK(response.has_value()) << debugd::kDumpDebugLogs << " failed";
   LOG(INFO) << "Logs saved to " << output.value();
 
   return EXIT_SUCCESS;

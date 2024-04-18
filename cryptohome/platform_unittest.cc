@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,6 +21,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "cryptohome/util/get_random_suffix.h"
+
 using base::FilePath;
 
 namespace cryptohome {
@@ -30,7 +32,6 @@ class PlatformTest : public ::testing::Test {
   virtual ~PlatformTest() {}
 
  protected:
-  std::string GetRandomSuffix() { return platform_.GetRandomSuffix(); }
   FilePath GetTempName() {
     FilePath temp_directory;
     EXPECT_TRUE(base::GetTempDir(&temp_directory));
@@ -39,18 +40,6 @@ class PlatformTest : public ::testing::Test {
 
   Platform platform_;
 };
-
-TEST_F(PlatformTest, DataSyncFileHasValidReturnCodes) {
-  const FilePath filename(GetTempName());
-  const FilePath dirname(GetTempName());
-  platform_.CreateDirectory(dirname);
-  EXPECT_FALSE(platform_.DataSyncFile(dirname));
-  EXPECT_FALSE(platform_.DataSyncFile(filename));
-  EXPECT_TRUE(platform_.WriteStringToFile(filename, "bla"));
-  EXPECT_TRUE(platform_.DataSyncFile(filename));
-  platform_.DeleteFile(filename);
-  platform_.DeletePathRecursively(dirname);
-}
 
 TEST_F(PlatformTest, SyncFileHasValidReturnCodes) {
   const FilePath filename(GetTempName());
@@ -89,7 +78,7 @@ TEST_F(PlatformTest, HasExtendedFileAttribute) {
   EXPECT_TRUE(platform_.HasExtendedFileAttribute(filename, name));
 
   EXPECT_FALSE(
-      platform_.HasExtendedFileAttribute(FilePath("file_not_exist"), name));
+      platform_.HasExtendedFileAttribute(FilePath("/file_not_exist"), name));
   EXPECT_FALSE(
       platform_.HasExtendedFileAttribute(filename, "user.name_not_exist"));
   platform_.DeleteFile(filename);
@@ -115,8 +104,8 @@ TEST_F(PlatformTest, ListExtendedFileAttribute) {
   EXPECT_THAT(attrs, testing::UnorderedElementsAre(name, name2));
 
   attrs.clear();
-  EXPECT_FALSE(
-      platform_.ListExtendedFileAttributes(FilePath("file_not_exist"), &attrs));
+  EXPECT_FALSE(platform_.ListExtendedFileAttributes(FilePath("/file_not_exist"),
+                                                    &attrs));
   EXPECT_TRUE(attrs.empty());
   platform_.DeleteFile(filename);
 }
@@ -136,7 +125,7 @@ TEST_F(PlatformTest, GetExtendedAttributeAsString) {
   EXPECT_EQ(value, got);
 
   EXPECT_FALSE(platform_.GetExtendedFileAttributeAsString(
-      FilePath("file_not_exist"), name, &got));
+      FilePath("/file_not_exist"), name, &got));
   EXPECT_FALSE(platform_.GetExtendedFileAttributeAsString(
       filename, "user.name_not_exist", &got));
   platform_.DeleteFile(filename);
@@ -158,7 +147,7 @@ TEST_F(PlatformTest, GetExtendedAttribute) {
   EXPECT_EQ(value, got);
 
   EXPECT_FALSE(platform_.GetExtendedFileAttribute(
-      FilePath("file_not_exist"), name, reinterpret_cast<char*>(&got),
+      FilePath("/file_not_exist"), name, reinterpret_cast<char*>(&got),
       sizeof(got)));
   EXPECT_FALSE(platform_.GetExtendedFileAttribute(
       filename, "user.name_not_exist", reinterpret_cast<char*>(&got),
@@ -186,7 +175,7 @@ TEST_F(PlatformTest, SetExtendedAttribute) {
   EXPECT_EQ(value, std::string(got.data(), got.size()));
 
   EXPECT_FALSE(platform_.SetExtendedFileAttribute(
-      FilePath("file_not_exist"), name, value.c_str(), sizeof(value)));
+      FilePath("/file_not_exist"), name, value.c_str(), sizeof(value)));
   platform_.DeleteFile(filename);
 }
 
@@ -203,7 +192,7 @@ TEST_F(PlatformTest, RemoveExtendedAttribute) {
   EXPECT_EQ(ENODATA, errno);
 
   EXPECT_FALSE(
-      platform_.RemoveExtendedFileAttribute(FilePath("file_not_exist"), name));
+      platform_.RemoveExtendedFileAttribute(FilePath("/file_not_exist"), name));
   EXPECT_FALSE(
       platform_.RemoveExtendedFileAttribute(filename, "attribute_not_exist"));
   platform_.DeleteFile(filename);
@@ -216,12 +205,15 @@ TEST_F(PlatformTest, GetExtFileAttributes) {
 
   int fd;
   ASSERT_GT(fd = HANDLE_EINTR(open(filename.value().c_str(), O_RDONLY)), 0);
-  int flags = FS_UNRM_FL | FS_NODUMP_FL;
+
+  int flags;
+  ASSERT_GE(ioctl(fd, FS_IOC_GETFLAGS, &flags), 0);
+  flags |= FS_UNRM_FL | FS_NODUMP_FL;
   ASSERT_GE(ioctl(fd, FS_IOC_SETFLAGS, &flags), 0);
 
   int got;
   EXPECT_TRUE(platform_.GetExtFileAttributes(filename, &got));
-  EXPECT_EQ(flags, got & flags);
+  EXPECT_EQ(flags, got);
   close(fd);
   platform_.DeleteFile(filename);
 }
@@ -253,11 +245,8 @@ TEST_F(PlatformTest, HasNoDumpFileAttribute) {
 
   int fd;
   ASSERT_GT(fd = open(filename.value().c_str(), O_RDONLY), 0);
-  int flags;
-  ASSERT_GE(ioctl(fd, FS_IOC_GETFLAGS, &flags), 0);
-  flags |= FS_UNRM_FL | FS_NODUMP_FL;
-  ASSERT_GE(ioctl(fd, FS_IOC_SETFLAGS, &flags), 0);
-
+  EXPECT_TRUE(
+      platform_.SetExtFileAttributes(filename, FS_UNRM_FL | FS_NODUMP_FL));
   EXPECT_TRUE(platform_.HasNoDumpFileAttribute(filename));
   close(fd);
   platform_.DeleteFile(filename);

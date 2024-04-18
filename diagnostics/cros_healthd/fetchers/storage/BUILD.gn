@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,30 +7,27 @@ import("//common-mk/pkg_config.gni")
 # Library that provides information about present storage devices to
 # cros_healthd.
 pkg_config("storage_data_source_common_pkg_deps") {
-  pkg_deps = [ "libchrome" ]
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+  ]
 }
 
 source_set("storage_data_source") {
   configs += [ ":storage_data_source_common_pkg_deps" ]
   deps = [
-    "//diagnostics/common:libcommon",
+    "//diagnostics/base",
     "//diagnostics/cros_healthd/utils:libcros_healthd_utils",
-    "//diagnostics/mojo:cros_healthd_mojo_bindings",
+    "//diagnostics/mojom/public:libcros_healthd_mojo_bindings",
   ]
   libs = [
     "mount",
     "rootdev",
   ]
   sources = [
-    "caching_device_adapter.cc",
-    "default_device_adapter.cc",
     "device_info.cc",
     "device_lister.cc",
     "device_manager.cc",
-    "device_resolver.cc",
-    "disk_iostat.cc",
-    "emmc_device_adapter.cc",
-    "nvme_device_adapter.cc",
     "platform.cc",
   ]
 }
@@ -40,15 +37,9 @@ if (use.test) {
     configs += [ ":storage_data_source_common_pkg_deps" ]
     deps = [ ":storage_data_source" ]
     sources = [
-      "caching_device_adapter_test.cc",
-      "default_device_adapter_test.cc",
       "device_info_test.cc",
       "device_lister_test.cc",
       "device_manager_test.cc",
-      "device_resolver_test.cc",
-      "disk_iostat_test.cc",
-      "emmc_device_adapter_test.cc",
-      "nvme_device_adapter_test.cc",
     ]
   }
 }

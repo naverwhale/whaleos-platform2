@@ -1,11 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_MOCK_POWER_MANAGER_H_
 #define SHILL_MOCK_POWER_MANAGER_H_
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/power_manager.h"
@@ -32,7 +31,7 @@ class MockPowerManager : public PowerManager {
                const PowerManager::DarkSuspendImminentCallback&),
               (override));
   MOCK_METHOD(void, Stop, (), (override));
-  MOCK_METHOD(bool, ChangeRegDomain, (nl80211_dfs_regions), (override));
+  MOCK_METHOD(void, ChangeRegDomain, (nl80211_dfs_regions), (override));
 };
 
 }  // namespace shill

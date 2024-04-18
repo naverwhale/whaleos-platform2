@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,18 @@
 #include <string>
 #include <vector>
 
+#include "power_manager/common/battery_percentage_converter.h"
+#include "power_manager/common/power_constants.h"
+#include "power_manager/powerd/policy/adaptive_charging_controller.h"
+#include "power_manager/powerd/system/cros_ec_helper_interface.h"
+#include "power_manager/powerd/system/suspend_freezer.h"
+
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <dbus/bus.h>
+#include <featured/feature_library.h>
+#include <libec/charge_control_set_command.h>
+#include <libec/charge_current_limit_set_command.h>
+#include <ml/dbus-proxies.h>
 
 namespace power_manager {
 
@@ -25,6 +35,7 @@ class AcpiWakeupHelperInterface;
 class AmbientLightSensorInterface;
 class AmbientLightSensorManagerInterface;
 class AmbientLightSensorWatcherInterface;
+class AmbientLightSensorWatcherMojo;
 class AudioClientInterface;
 class BacklightInterface;
 class ChargeControllerHelperInterface;
@@ -36,8 +47,10 @@ class EcHelperInterface;
 class ExternalAmbientLightSensorFactoryInterface;
 class InputWatcherInterface;
 class LockfileCheckerInterface;
+class MachineQuirksInterface;
 class PeripheralBatteryWatcher;
 class PowerSupplyInterface;
+class SensorServiceHandler;
 class SuspendConfiguratorInterface;
 class ThermalDeviceInterface;
 class UdevInterface;
@@ -53,11 +66,11 @@ class PrefsInterface;
 // objects.
 class DaemonDelegate {
  public:
-  DaemonDelegate() {}
+  DaemonDelegate() = default;
   DaemonDelegate(const DaemonDelegate&) = delete;
   DaemonDelegate& operator=(const DaemonDelegate&) = delete;
 
-  virtual ~DaemonDelegate() {}
+  virtual ~DaemonDelegate() = default;
 
   // Crashes if prefs can't be loaded (e.g. due to a missing directory).
   virtual std::unique_ptr<PrefsInterface> CreatePrefs() = 0;
@@ -68,14 +81,20 @@ class DaemonDelegate {
   // Crashes if udev initialization fails.
   virtual std::unique_ptr<system::UdevInterface> CreateUdev() = 0;
 
+  virtual std::unique_ptr<system::SensorServiceHandler>
+  CreateSensorServiceHandler() = 0;
   virtual std::unique_ptr<system::AmbientLightSensorManagerInterface>
-  CreateAmbientLightSensorManager(PrefsInterface* prefs) = 0;
+  CreateAmbientLightSensorManager(
+      PrefsInterface* prefs,
+      system::SensorServiceHandler* sensor_service_handler) = 0;
 
   virtual std::unique_ptr<system::AmbientLightSensorWatcherInterface>
-  CreateAmbientLightSensorWatcher(system::UdevInterface* udev) = 0;
+  CreateAmbientLightSensorWatcher(
+      system::SensorServiceHandler* sensor_service_handler) = 0;
 
   virtual std::unique_ptr<system::ExternalAmbientLightSensorFactoryInterface>
-  CreateExternalAmbientLightSensorFactory() = 0;
+  CreateExternalAmbientLightSensorFactory(
+      system::AmbientLightSensorWatcherMojo* watcher) = 0;
 
   virtual std::unique_ptr<system::DisplayWatcherInterface> CreateDisplayWatcher(
       system::UdevInterface* udev) = 0;
@@ -103,6 +122,9 @@ class DaemonDelegate {
                                    const base::FilePath& base_path,
                                    const std::string& pattern) = 0;
 
+  virtual std::unique_ptr<ec::EcCommandFactoryInterface>
+  CreateEcCommandFactory() = 0;
+
   virtual std::unique_ptr<policy::BacklightController>
   CreateInternalBacklightController(
       system::BacklightInterface* backlight,
@@ -113,14 +135,12 @@ class DaemonDelegate {
       LidState initial_lid_state) = 0;
 
   virtual std::unique_ptr<policy::BacklightController>
-  CreateKeyboardBacklightController(
-      system::BacklightInterface* backlight,
-      PrefsInterface* prefs,
-      system::AmbientLightSensorInterface* sensor,
-      system::DBusWrapperInterface* dbus_wrapper,
-      policy::BacklightController* display_backlight_controller,
-      LidState initial_lid_state,
-      TabletMode initial_tablet_mode) = 0;
+  CreateKeyboardBacklightController(system::BacklightInterface* backlight,
+                                    PrefsInterface* prefs,
+                                    system::AmbientLightSensorInterface* sensor,
+                                    system::DBusWrapperInterface* dbus_wrapper,
+                                    LidState initial_lid_state,
+                                    TabletMode initial_tablet_mode) = 0;
 
   virtual std::unique_ptr<system::InputWatcherInterface> CreateInputWatcher(
       PrefsInterface* prefs, system::UdevInterface* udev) = 0;
@@ -138,15 +158,19 @@ class DaemonDelegate {
 
   virtual std::unique_ptr<system::PowerSupplyInterface> CreatePowerSupply(
       const base::FilePath& power_supply_path,
+      const base::FilePath& cros_ec_path,
+      ec::EcCommandFactoryInterface* ec_command_factory,
       PrefsInterface* prefs,
       system::UdevInterface* udev,
       system::DBusWrapperInterface* dbus_wrapper,
       BatteryPercentageConverter* battery_percentage_converter) = 0;
 
   virtual std::unique_ptr<system::UserProximityWatcherInterface>
-  CreateUserProximityWatcher(PrefsInterface* prefs,
-                             system::UdevInterface* udev,
-                             TabletMode initial_tablet_mode) = 0;
+  CreateUserProximityWatcher(
+      PrefsInterface* prefs,
+      system::UdevInterface* udev,
+      TabletMode initial_tablet_mode,
+      system::SensorServiceHandler* sensor_service_handler) = 0;
 
   virtual std::unique_ptr<system::DarkResumeInterface> CreateDarkResume(
       PrefsInterface* prefs,
@@ -160,13 +184,34 @@ class DaemonDelegate {
   CreateLockfileChecker(const base::FilePath& dir,
                         const std::vector<base::FilePath>& files) = 0;
 
+  virtual std::unique_ptr<system::MachineQuirksInterface> CreateMachineQuirks(
+      PrefsInterface* prefs) = 0;
+
+  virtual feature::PlatformFeaturesInterface* CreatePlatformFeatures(
+      system::DBusWrapperInterface* dbus_wrapper) = 0;
   virtual std::unique_ptr<MetricsSenderInterface> CreateMetricsSender() = 0;
 
   virtual std::unique_ptr<system::ChargeControllerHelperInterface>
   CreateChargeControllerHelper() = 0;
 
+  virtual std::unique_ptr<policy::AdaptiveChargingControllerInterface>
+  CreateAdaptiveChargingController(
+      policy::AdaptiveChargingControllerInterface::Delegate* delegate,
+      policy::BacklightController* backlight_controller,
+      system::InputWatcherInterface* input_watcher,
+      system::PowerSupplyInterface* power_supply,
+      system::DBusWrapperInterface* dbus_wrapper,
+      feature::PlatformFeaturesInterface* platform_features,
+      PrefsInterface* prefs) = 0;
+
+  virtual std::unique_ptr<
+      org::chromium::MachineLearning::AdaptiveChargingProxyInterface>
+  CreateAdaptiveChargingProxy(const scoped_refptr<dbus::Bus>& bus) = 0;
+
   virtual std::unique_ptr<system::SuspendConfiguratorInterface>
-  CreateSuspendConfigurator(PrefsInterface* prefs) = 0;
+  CreateSuspendConfigurator(
+      feature::PlatformFeaturesInterface* platform_features,
+      PrefsInterface* prefs) = 0;
 
   virtual std::unique_ptr<system::SuspendFreezerInterface> CreateSuspendFreezer(
       PrefsInterface* prefs) = 0;

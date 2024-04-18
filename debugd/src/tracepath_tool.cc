@@ -1,12 +1,14 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "debugd/src/tracepath_tool.h"
 
-#include "debugd/src/process_with_id.h"
+#include <unistd.h>
 
 #include <base/logging.h>
+
+#include "debugd/src/process_with_id.h"
 
 namespace debugd {
 

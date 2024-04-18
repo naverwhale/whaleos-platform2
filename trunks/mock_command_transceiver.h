@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <gmock/gmock.h>
 
 #include "trunks/command_transceiver.h"
@@ -23,7 +22,7 @@ class MockCommandTransceiver : public CommandTransceiver {
 
   ~MockCommandTransceiver() override;
 
-  MOCK_METHOD2(SendCommand, void(const std::string&, const ResponseCallback&));
+  MOCK_METHOD2(SendCommand, void(const std::string&, ResponseCallback));
   MOCK_METHOD1(SendCommandAndWait, std::string(const std::string&));
 };
 

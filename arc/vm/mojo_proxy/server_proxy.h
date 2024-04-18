@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 
 #include "arc/vm/mojo_proxy/message_stream.h"
@@ -58,6 +57,9 @@ class ServerProxy : public MojoProxy::Delegate,
               PwriteCallback callback) override;
   void Close(int64_t handle) override;
   void Fstat(int64_t handle, FstatCallback callback) override;
+  void Ftruncate(int64_t handle,
+                 int64_t length,
+                 FtruncateCallback callback) override;
 
  private:
   scoped_refptr<base::TaskRunner> proxy_file_system_task_runner_;

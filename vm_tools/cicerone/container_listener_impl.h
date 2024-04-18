@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,15 +9,14 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 #include <base/time/time.h>
 #include <grpcpp/grpcpp.h>
 #include <vm_protos/proto_bindings/container_host.grpc.pb.h>
+#include <vm_protos/proto_bindings/container_host.pb.h>
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 
 class Service;
 
@@ -93,18 +92,30 @@ class ContainerListenerImpl final
       grpc::ServerContext* ctx,
       const vm_tools::container::SelectFileRequest* request,
       vm_tools::container::SelectFileResponse* response) override;
-  grpc::Status GetDiskInfo(
+  grpc::Status ReportMetrics(
       grpc::ServerContext* ctx,
-      const vm_tools::container::GetDiskInfoRequest* request,
-      vm_tools::container::GetDiskInfoResponse* response) override;
-  grpc::Status RequestSpace(
+      const vm_tools::container::ReportMetricsRequest* request,
+      vm_tools::container::ReportMetricsResponse* response) override;
+  grpc::Status InstallShaderCache(
       grpc::ServerContext* ctx,
-      const vm_tools::container::RequestSpaceRequest* request,
-      vm_tools::container::RequestSpaceResponse* response) override;
-  grpc::Status ReleaseSpace(
+      const vm_tools::container::InstallShaderCacheRequest* request,
+      vm_tools::EmptyMessage* response) override;
+  grpc::Status UninstallShaderCache(
       grpc::ServerContext* ctx,
-      const vm_tools::container::ReleaseSpaceRequest* request,
-      vm_tools::container::ReleaseSpaceResponse* response) override;
+      const vm_tools::container::UninstallShaderCacheRequest* request,
+      vm_tools::EmptyMessage* response) override;
+  grpc::Status UnmountShaderCache(
+      grpc::ServerContext* ctx,
+      const vm_tools::container::UnmountShaderCacheRequest* request,
+      vm_tools::EmptyMessage* response) override;
+  grpc::Status InhibitScreensaver(
+      grpc::ServerContext* ctx,
+      const vm_tools::container::InhibitScreensaverInfo* request,
+      vm_tools::EmptyMessage* response) override;
+  grpc::Status UninhibitScreensaver(
+      grpc::ServerContext* ctx,
+      const vm_tools::container::UninhibitScreensaverInfo* request,
+      vm_tools::EmptyMessage* response) override;
 
  private:
   // Returns 0 on failure, otherwise the parsed vsock cid from a
@@ -130,11 +141,10 @@ class ContainerListenerImpl final
   // We rate limit the requests to open a window/tab in Chrome to prevent an
   // accidental DOS of Chrome from a bad script in Linux. We use a fixed window
   // rate control algorithm to do this.
-  uint32_t open_count_;
+  uint32_t open_count_ = 0;
   base::TimeTicks open_rate_window_start_;
 };
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone
 
 #endif  // VM_TOOLS_CICERONE_CONTAINER_LISTENER_IMPL_H_

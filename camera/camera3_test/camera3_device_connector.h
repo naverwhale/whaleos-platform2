@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -44,13 +44,20 @@ class DeviceConnector {
 
   // Flush all currently in-process captures and all buffers in the pipeline.
   virtual int Flush() = 0;
+
+  // Signal stream flush.
+  virtual void SignalStreamFlush(uint32_t num_streams,
+                                 const camera3_stream_t* const* streams) = 0;
 };
 
-class HalDeviceConnector final : public DeviceConnector {
+class HalDeviceConnector : public DeviceConnector {
  public:
   HalDeviceConnector(int cam_id, camera3_device_t* cam_device);
 
-  ~HalDeviceConnector();
+  HalDeviceConnector(const HalDeviceConnector&) = delete;
+  HalDeviceConnector& operator=(const HalDeviceConnector&) = delete;
+
+  ~HalDeviceConnector() override;
 
   // DeviceConnector implementation.
   int Initialize(const camera3_callback_ops_t* callback_ops,
@@ -60,6 +67,8 @@ class HalDeviceConnector final : public DeviceConnector {
   int ProcessCaptureRequest(
       camera3_capture_request_t* capture_request) override;
   int Flush() override;
+  void SignalStreamFlush(uint32_t num_streams,
+                         const camera3_stream_t* const* streams) override;
 
  private:
   void InitializeOnThread(const camera3_callback_ops_t* callback_ops,
@@ -83,17 +92,17 @@ class HalDeviceConnector final : public DeviceConnector {
   cros::CameraThread dev_thread_;
 
   THREAD_CHECKER(thread_checker_);
-
-  HalDeviceConnector(const HalDeviceConnector&) = delete;
-  HalDeviceConnector& operator=(const HalDeviceConnector&) = delete;
 };
 
-class ClientDeviceConnector final : public DeviceConnector,
-                                    public cros::mojom::Camera3CallbackOps {
+class ClientDeviceConnector : public DeviceConnector,
+                              public cros::mojom::Camera3CallbackOps {
  public:
   ClientDeviceConnector();
 
-  ~ClientDeviceConnector();
+  ClientDeviceConnector(const ClientDeviceConnector&) = delete;
+  ClientDeviceConnector& operator=(const ClientDeviceConnector&) = delete;
+
+  ~ClientDeviceConnector() override;
 
   mojo::PendingReceiver<cros::mojom::Camera3DeviceOps> GetDeviceOpsReceiver();
 
@@ -105,6 +114,8 @@ class ClientDeviceConnector final : public DeviceConnector,
   int ProcessCaptureRequest(
       camera3_capture_request_t* capture_request) override;
   int Flush() override;
+  void SignalStreamFlush(uint32_t num_streams,
+                         const camera3_stream_t* const* streams) override;
 
  private:
   void MakeDeviceOpsReceiverOnThread(
@@ -131,9 +142,17 @@ class ClientDeviceConnector final : public DeviceConnector,
                                      base::OnceCallback<void(int32_t)> cb);
   cros::mojom::Camera3StreamBufferPtr PrepareStreamBufferPtr(
       const camera3_stream_buffer_t* buffer);
+  void FlushOnThread(base::OnceCallback<void(int)> cb);
+  void SignalStreamFlushOnThread(uint32_t num_streams,
+                                 const camera3_stream_t* const* streams);
   void Notify(cros::mojom::Camera3NotifyMsgPtr message) override;
   void ProcessCaptureResult(
       cros::mojom::Camera3CaptureResultPtr result) override;
+  void RequestStreamBuffers(
+      std::vector<cros::mojom::Camera3BufferRequestPtr> buffer_req_ptrs,
+      RequestStreamBuffersCallback cb) override;
+  void ReturnStreamBuffers(
+      std::vector<cros::mojom::Camera3StreamBufferPtr> buffer_ptrs) override;
   int DecodeStreamBufferPtr(
       const cros::mojom::Camera3StreamBufferPtr& buffer_ptr,
       camera3_stream_buffer_t* buffer);
@@ -147,9 +166,6 @@ class ClientDeviceConnector final : public DeviceConnector,
   std::map<int, cros::internal::ScopedCameraMetadata> default_req_settings_map_;
   base::Lock buffer_handle_map_lock_;
   std::map<uint64_t, buffer_handle_t*> buffer_handle_map_;
-
-  ClientDeviceConnector(const ClientDeviceConnector&) = delete;
-  ClientDeviceConnector& operator=(const ClientDeviceConnector&) = delete;
 };
 
 }  // namespace camera3_test

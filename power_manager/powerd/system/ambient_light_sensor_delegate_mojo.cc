@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,19 +8,19 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <map>
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/flat_map.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include "base/strings/string_number_conversions.h"
 #include <base/strings/stringprintf.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -86,7 +86,7 @@ void AmbientLightSensorDelegateMojo::OnSampleUpdated(
     return;
 
   auto it = sample.find(illuminance_index_.value());
-  base::Optional<int> lux_value, color_temperature;
+  std::optional<int> lux_value, color_temperature;
   if (it == sample.end()) {
     VLOG(2) << "No channel " << cros::mojom::kLightChannel
             << " found in the sample.";
@@ -264,7 +264,7 @@ void AmbientLightSensorDelegateMojo::GetAllChannelIdsCallback(
   }
 
   if (enable_color_support_ &&
-      color_indices_.size() == base::size(kColorChannelConfig)) {
+      color_indices_.size() == std::size(kColorChannelConfig)) {
     for (const auto& color_index : color_indices_)
       channel_indices_.push_back(color_index.second);
   } else {
@@ -307,20 +307,20 @@ AmbientLightSensorDelegateMojo::GetRemote() {
   return pending_remote;
 }
 
-base::Optional<int> AmbientLightSensorDelegateMojo::GetColorValue(
+std::optional<int> AmbientLightSensorDelegateMojo::GetColorValue(
     const base::flat_map<int32_t, int64_t>& sample, ChannelType type) {
   auto it_color_index = color_indices_.find(type);
   if (it_color_index == color_indices_.end())
-    return base::nullopt;
+    return std::nullopt;
 
   auto it = sample.find(it_color_index->second);
   if (it == sample.end())
-    return base::nullopt;
+    return std::nullopt;
 
   return it->second;
 }
 
-base::Optional<int> AmbientLightSensorDelegateMojo::GetColorTemperature(
+std::optional<int> AmbientLightSensorDelegateMojo::GetColorTemperature(
     const base::flat_map<int32_t, int64_t>& sample) {
   std::map<ChannelType, int> readings;
   for (const ColorChannelInfo& channel : kColorChannelConfig) {
@@ -339,8 +339,8 @@ void AmbientLightSensorDelegateMojo::OnObserverDisconnect() {
 
   LOG(ERROR) << "OnObserverDisconnect error, assuming IIO Service crashes and "
                 "waiting for it to relaunch";
-  // Don't reset |sensor_device_remote_| so that AmbientLightSensorManager can
-  // get the disconnection.
+  // Don't reset |sensor_device_remote_| so that AmbientLightSensorManager and
+  // AmbientLightSensorWatcher can get the disconnection.
   receiver_.reset();
 }
 
@@ -396,5 +396,4 @@ void AmbientLightSensorDelegateMojo::FinishInitialization() {
     std::move(init_closure_).Run();
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

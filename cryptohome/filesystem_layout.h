@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,63 +10,101 @@
 #include <base/files/file_path.h>
 #include <brillo/secure_blob.h>
 
-#include "cryptohome/crypto.h"
 #include "cryptohome/platform.h"
+#include "cryptohome/proto_bindings/rpc.pb.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
 // Name of the vault directory which is used with eCryptfs cryptohome.
-constexpr char kEcryptfsVaultDir[] = "vault";
+inline constexpr char kEcryptfsVaultDir[] = "vault";
 // Name of the mount directory.
-constexpr char kMountDir[] = "mount";
+inline constexpr char kMountDir[] = "mount";
 // Name of the temporary mount directory used during migration.
-constexpr char kTemporaryMountDir[] = "temporary_mount";
+inline constexpr char kTemporaryMountDir[] = "temporary_mount";
 // Name of the dm-crypt cache directory.
-constexpr char kDmcryptCacheDir[] = "cache";
+inline constexpr char kDmcryptCacheDir[] = "cache";
 // Device Mapper directory.
-constexpr char kDeviceMapperDir[] = "/dev/mapper";
+inline constexpr char kDeviceMapperDir[] = "/dev/mapper";
 
 // Suffix for cryptohome dm-crypt container.
-constexpr char kDmcryptCacheContainerSuffix[] = "cache";
-constexpr char kDmcryptDataContainerSuffix[] = "data";
+inline constexpr char kDmcryptCacheContainerSuffix[] = "cache";
+inline constexpr char kDmcryptDataContainerSuffix[] = "data";
 
-constexpr mode_t kKeyFilePermissions = 0600;
-constexpr int kKeyFileMax = 100;       // master.0 ... master.99 // nocheck
-constexpr char kKeyFile[] = "master";  // nocheck
-constexpr char kKeyLegacyPrefix[] = "legacy-";
+inline constexpr mode_t kKeyFilePermissions = 0600;
+inline constexpr int kKeyFileMax = 100;  // master.0 ... master.99 // nocheck
+inline constexpr char kKeyFile[] = "master";  // nocheck
+inline constexpr char kKeyLegacyPrefix[] = "legacy-";
 
-constexpr int kInitialKeysetIndex = 0;
-constexpr char kTsFile[] = "timestamp";
+inline constexpr int kInitialKeysetIndex = 0;
+inline constexpr char kTsFile[] = "timestamp";
 
-constexpr char kDmcryptContainerMountType[] = "ext4";
-constexpr char kDmcryptContainerMountOptions[] = "discard,commit=600";
+inline constexpr char kDmcryptContainerMountType[] = "ext4";
+inline constexpr char kDmcryptContainerMountOptions[] = "discard,commit=600";
 
-constexpr char kUserSecretStashDir[] = "user_secret_stash";
-constexpr char kUserSecretStashFile[] = "uss";
+inline constexpr char kUserSecretStashDir[] = "user_secret_stash";
+inline constexpr char kUserSecretStashFileBase[] = "uss";
+inline constexpr int kUserSecretStashDefaultSlot = 0;
+inline constexpr char kAuthFactorsDir[] = "auth_factors";
+inline constexpr char kAuthFactorsBackupDir[] = "auth_factors_backup";
+
+inline constexpr char kUserPolicyDir[] = "policy";
+inline constexpr char kPolicyFile[] = "user_policy";
 
 base::FilePath ShadowRoot();
-base::FilePath SaltFile();
+base::FilePath SystemSaltFile();
+base::FilePath PublicMountSaltFile();
 base::FilePath SkelDir();
-base::FilePath VaultKeysetPath(const std::string& obfuscated, int index);
-base::FilePath UserActivityTimestampPath(const std::string& obfuscated,
-                                         int index);
-base::FilePath UserSecretStashPath(const std::string& obfuscated_username);
+base::FilePath UserPath(const ObfuscatedUsername& obfuscated);
+base::FilePath VaultKeysetPath(const ObfuscatedUsername& obfuscated, int index);
+base::FilePath UserActivityPerIndexTimestampPath(
+    const ObfuscatedUsername& obfuscated, int index);
+base::FilePath UserActivityTimestampPath(const ObfuscatedUsername& obfuscated);
+base::FilePath UserSecretStashPath(
+    const ObfuscatedUsername& obfuscated_username, int slot);
+base::FilePath AuthFactorsDirPath(const ObfuscatedUsername& obfuscated_username
+    , bool is_backup = false
+    );
+base::FilePath AuthFactorPath(const ObfuscatedUsername& obfuscated_username,
+                              const std::string& auth_factor_type_string,
+                              const std::string& auth_factor_label
+                              , bool is_backup = false
+    );
 
-std::string LogicalVolumePrefix(const std::string& obfuscated_username);
-std::string DmcryptVolumePrefix(const std::string& obfuscated_username);
+std::string LogicalVolumePrefix(const ObfuscatedUsername& obfuscated_username);
+std::string DmcryptVolumePrefix(const ObfuscatedUsername& obfuscated_username);
 
-base::FilePath GetEcryptfsUserVaultPath(const std::string& obfuscated_username);
-base::FilePath GetUserMountDirectory(const std::string& obfuscated_username);
+base::FilePath GetUserPolicyPath(const ObfuscatedUsername& obfuscated_username);
+base::FilePath GetEcryptfsUserVaultPath(
+    const ObfuscatedUsername& obfuscated_username);
+base::FilePath GetUserMountDirectory(
+    const ObfuscatedUsername& obfuscated_username);
 base::FilePath GetUserTemporaryMountDirectory(
-    const std::string& obfuscated_username);
+    const ObfuscatedUsername& obfuscated_username);
 base::FilePath GetDmcryptUserCacheDirectory(
-    const std::string& obfuscated_username);
-base::FilePath GetDmcryptDataVolume(const std::string& obfuscated_username);
-base::FilePath GetDmcryptCacheVolume(const std::string& obfuscated_username);
+    const ObfuscatedUsername& obfuscated_username);
+base::FilePath GetDmcryptDataVolume(
+    const ObfuscatedUsername& obfuscated_username);
+base::FilePath GetDmcryptCacheVolume(
+    const ObfuscatedUsername& obfuscated_username);
+base::FilePath LogicalVolumeSnapshotPath(
+    const ObfuscatedUsername& obfuscated_username,
+    const std::string& container_name);
 
-bool InitializeFilesystemLayout(Platform* platform,
-                                Crypto* crypto,
-                                brillo::SecureBlob* salt);
+// Gets existing system salt, or creates one if it doesn't exist.
+bool GetSystemSalt(Platform* platform, brillo::SecureBlob* salt);
+
+// Gets an existing kiosk mount salt, or creates one if it doesn't exist.
+bool GetPublicMountSalt(Platform* platform, brillo::SecureBlob* salt);
+
+// Gets full path for serialized RecoveryId.
+base::FilePath GetRecoveryIdPath(const AccountIdentifier& account_id);
+
+bool InitializeFilesystemLayout(Platform* platform, brillo::SecureBlob* salt);
+
+// Checks if a given named flag file exists. The name must be a filename and
+// cannot be an arbitrary path.
+bool DoesFlagFileExist(const std::string& name, Platform* platform);
 
 }  // namespace cryptohome
 

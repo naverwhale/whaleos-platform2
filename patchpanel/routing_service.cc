@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,12 @@
 #include <map>
 
 #include <base/logging.h>
+#include <base/strings/strcat.h>
 
 namespace patchpanel {
+
+// Make sure that the compiler is not doing padding.
+static_assert(sizeof(Fwmark) == sizeof(uint32_t));
 
 RoutingService::RoutingService() {}
 
@@ -68,23 +72,29 @@ bool RoutingService::SetVpnFwmark(
   return SetFwmark(sockfd, mark, kFwmarkVpnMask);
 }
 
+std::string QoSFwmarkWithMask(QoSCategory category) {
+  auto mark = Fwmark::FromQoSCategory(category);
+  return base::StrCat(
+      {mark.ToString(), "/", kFwmarkQoSCategoryMask.ToString()});
+}
+
 const std::string& TrafficSourceName(TrafficSource source) {
   static std::map<TrafficSource, std::string> kTrafficSourceNames = {
-      {CHROME, "CHROME"},
-      {USER, "USER"},
-      {UPDATE_ENGINE, "UPDATE_ENGINE"},
-      {SYSTEM, "SYSTEM"},
-      {HOST_VPN, "HOST_VPN"},
-      {ARC, "ARC"},
-      {CROSVM, "CROSVM"},
-      {PLUGINVM, "PLUGINVM"},
-      {TETHER_DOWNSTREAM, "TETHER_DOWNSTREAM"},
-      {ARC_VPN, "ARC_VPN"},
-      {UNKNOWN, "UNKNOWN"},
+      {kChrome, "CHROME"},
+      {kUser, "USER"},
+      {kUpdateEngine, "UPDATE_ENGINE"},
+      {kSystem, "SYSTEM"},
+      {kHostVpn, "HOST_VPN"},
+      {kArc, "ARC"},
+      {kCrosVM, "CROSVM"},
+      {kParallelsVM, "PARALLELS_VM"},
+      {kTetherDownstream, "TETHER_DOWNSTREAM"},
+      {kArcVpn, "ARC_VPN"},
+      {kUnknown, "UNKNOWN"},
   };
   const auto& it = kTrafficSourceNames.find(source);
   if (it == kTrafficSourceNames.end()) {
-    return kTrafficSourceNames.find(UNKNOWN)->second;
+    return kTrafficSourceNames.find(kUnknown)->second;
   }
   return it->second;
 }

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,15 +13,18 @@
 #include <string>
 #include <vector>
 
+#include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <base/notreached.h>
+#include <base/threading/thread.h>
 #include <base/time/time.h>
 #include <brillo/process/process.h>
-#include <chromeos/patchpanel/mac_address_generator.h>
-#include <chromeos/patchpanel/subnet.h>
-#include <patchpanel/proto_bindings/patchpanel_service.pb.h>
-#include <vm_concierge/proto_bindings/concierge_service.pb.h>
+#include <brillo/grpc/async_grpc_client.h>
+#include <chromeos/patchpanel/dbus/client.h>
+#include <spaced/proto_bindings/spaced.pb.h>
+#include <net-base/ipv4_address.h>
+#include <vm_concierge/concierge_service.pb.h>
 #include <vm_protos/proto_bindings/vm_guest.grpc.pb.h>
 
 #include "vm_tools/common/vm_id.h"
@@ -31,23 +34,46 @@
 #include "vm_tools/concierge/vm_util.h"
 #include "vm_tools/concierge/vsock_cid_pool.h"
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
+
+class GuestOsNetwork;
+class ScopedWlSocket;
+
+// The CPU cgroup where all the Termina main crosvm process should belong to.
+constexpr char kTerminaVcpuCpuCgroup[] = "/sys/fs/cgroup/cpu/termina-vcpus";
+
+// The cpuset cgroup where the Borealis vGPU server threads are to go into.
+constexpr char kBorealisGpuServerCpusetCgroup[] =
+    "/sys/fs/cgroup/cpuset/borealis-vgpuserver";
+
+// The CPU cgroup where all the Termina crosvm processes other than main should
+// belong to.
+constexpr char kTerminaCpuCgroup[] = "/sys/fs/cgroup/cpu/termina";
+
+// Name of the control socket used for controlling crosvm.
+constexpr char kTerminaCrosvmSocket[] = "crosvm.sock";
 
 struct VmFeatures {
   // Enable GPU in the started VM.
   bool gpu;
+  // Enable DGPU passthrough in the started VM.
+  bool dgpu_passthrough;
   bool vulkan;
   bool big_gl;
+  bool virtgpu_native_context;
+  bool render_server;
 
-  // Provide software-based virtual Trusted Platform Module to the VM.
-  bool software_tpm;
+  // Provide vtpm connection to the VM.
+  bool vtpm_proxy;
 
   // Enable audio capture function in the started VM.
   bool audio_capture;
 
   // Extra kernel cmdline params passed to the VM.
   std::vector<std::string> kernel_params;
+
+  // Type 11 SMBIOS DMI OEM strings passed to the VM.
+  std::vector<std::string> oem_strings;
 };
 
 // Represents a single instance of a running termina VM.
@@ -68,22 +94,28 @@ class TerminaVm final : public VmBaseImpl {
     SHRINK,
   };
 
+  struct Config {
+    uint32_t vsock_cid;
+    std::unique_ptr<GuestOsNetwork> network;
+    std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy;
+    std::string cros_vm_socket{kTerminaCrosvmSocket};
+    base::FilePath runtime_dir;
+    base::FilePath log_path;
+    std::string stateful_device;
+    uint64_t stateful_size;
+    VmFeatures features;
+    dbus::ObjectProxy* vm_permission_service_proxy;
+    scoped_refptr<dbus::Bus> bus;
+    VmId id;
+    apps::VmType classification;
+    bool storage_ballooning;
+    VmBuilder vm_builder;
+    std::unique_ptr<ScopedWlSocket> socket;
+  };
+
   // Starts a new virtual machine.  Returns nullptr if the virtual machine
   // failed to start for any reason.
-  static std::unique_ptr<TerminaVm> Create(
-      uint32_t vsock_cid,
-      std::unique_ptr<patchpanel::Client> network_client,
-      std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-      base::FilePath runtime_dir,
-      base::FilePath log_path,
-      std::string stateful_device,
-      uint64_t stateful_size,
-      VmFeatures features,
-      dbus::ObjectProxy* vm_permission_service_proxy,
-      scoped_refptr<dbus::Bus> bus,
-      VmId id,
-      bool is_termina,
-      VmBuilder vm_builder);
+  static std::unique_ptr<TerminaVm> Create(Config config);
   ~TerminaVm() override;
 
   // Configures the network interfaces inside the VM.  Returns true iff
@@ -94,6 +126,7 @@ class TerminaVm final : public VmBaseImpl {
   // Configures the VM to allow it to support a (single) container guest API
   // endpoint using |vm_token| as the container token.
   bool ConfigureContainerGuest(const std::string& vm_token,
+                               const std::string& vm_username,
                                std::string* out_error);
 
   // Mounts a file system inside the VM.  Both |source| (if it is a file path)
@@ -133,32 +166,27 @@ class TerminaVm final : public VmBaseImpl {
   // Set the guest time to the current time as given by gettimeofday.
   bool SetTime(std::string* failure_reason) override;
 
+  // Set VM timezone by calling Maitred.SetTimeZone.
+  bool SetTimezone(const std::string& timezone,
+                   std::string* out_error) override;
+
   // The pid of the child process.
-  pid_t pid() { return process_.pid(); }
+  pid_t pid() const { return process_.pid(); }
 
   // The VM's cid.
   uint32_t cid() const { return vsock_cid_; }
 
-  // The IPv4 address of the VM's gateway in network byte order.
-  uint32_t GatewayAddress() const;
+  // The IPv4 address of the VM's gateway.
+  net_base::IPv4Address GatewayAddress() const;
 
-  // The IPv4 address of the VM in network byte order.
-  uint32_t IPv4Address() const;
+  // The IPv4 address of the VM.
+  net_base::IPv4Address IPv4Address() const;
 
-  // The netmask of the VM's subnet in network byte order.
-  uint32_t Netmask() const;
+  // The IPv4 netmask of the VM's subnet.
+  net_base::IPv4Address Netmask() const;
 
-  // The VM's container subnet netmask in network byte order. Returns INADDR_ANY
-  // if there is no container subnet.
-  uint32_t ContainerNetmask() const;
-
-  // The VM's container subnet prefix length. Returns 0 if there is no container
-  // subnet.
-  size_t ContainerPrefixLength() const;
-
-  // The first address in the VM's container subnet in network byte order.
-  // Returns INADDR_ANY if there is no container subnet.
-  uint32_t ContainerSubnet() const;
+  // The IPv4 CIDR address with the first address in the VM's container subnet.
+  net_base::IPv4CIDR ContainerCIDRAddress() const;
 
   // Token assigned to the VM by the permission service. Used for communicating
   // with the permission service.
@@ -170,7 +198,7 @@ class TerminaVm final : public VmBaseImpl {
   // Whether a TremplinStartedSignal has been received for the VM.
   bool IsTremplinStarted() const { return is_tremplin_started_; }
 
-  // VmInterface overrides.
+  // VmBaseImpl overrides.
   // Shuts down the VM.  First attempts a clean shutdown of the VM by sending
   // a Shutdown RPC to maitre'd.  If that fails, attempts to shut down the VM
   // using the control socket for the hypervisor.  If that fails, then sends a
@@ -178,15 +206,15 @@ class TerminaVm final : public VmBaseImpl {
   // by sending it a SIGKILL.  Returns true if the VM was shut down and false
   // otherwise.
   bool Shutdown() override;
-  VmInterface::Info GetInfo() override;
+  VmBaseImpl::Info GetInfo() const override;
   bool AttachUsbDevice(uint8_t bus,
                        uint8_t addr,
                        uint16_t vid,
                        uint16_t pid,
                        int fd,
-                       UsbControlResponse* response) override;
-  bool DetachUsbDevice(uint8_t port, UsbControlResponse* response) override;
-  bool ListUsbDevice(std::vector<UsbDevice>* devices) override;
+                       uint8_t* out_port) override;
+  bool DetachUsbDevice(uint8_t port) override;
+  bool ListUsbDevice(std::vector<UsbDeviceEntry>* devices) override;
   bool GetVmEnterpriseReportingInfo(
       GetVmEnterpriseReportingInfoResponse* response) override;
   vm_tools::concierge::DiskImageStatus ResizeDisk(
@@ -202,8 +230,14 @@ class TerminaVm final : public VmBaseImpl {
   // Adjusts the amount of CPU the Termina VM processes are allowed to use.
   static bool SetVmCpuRestriction(CpuRestrictionState cpu_restriction_state);
 
+  // Sends a stateful update to be handled by the VM. Generally this means
+  // adjusting the size of a storage balloon and/or tweaking disk settings (i.e
+  // proc/sys/vm/dirty_ratio).
+  void HandleStatefulUpdate(
+      const spaced::StatefulDiskSpaceUpdate update) override;
+
   static std::unique_ptr<TerminaVm> CreateForTesting(
-      std::unique_ptr<patchpanel::Subnet> subnet,
+      std::unique_ptr<GuestOsNetwork> network,
       uint32_t vsock_cid,
       base::FilePath runtime_dir,
       base::FilePath log_path,
@@ -211,40 +245,25 @@ class TerminaVm final : public VmBaseImpl {
       uint64_t stateful_size,
       std::string kernel_version,
       std::unique_ptr<vm_tools::Maitred::Stub> stub,
-      bool is_termina,
       VmBuilder vm_builder);
 
- private:
-  TerminaVm(uint32_t vsock_cid,
-            std::unique_ptr<patchpanel::Client> network_client,
-            std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-            base::FilePath runtime_dir,
-            base::FilePath log_path,
-            std::string stateful_device,
-            uint64_t stateful_size,
-            VmFeatures features,
-            dbus::ObjectProxy* vm_permission_service_proxy,
-            scoped_refptr<dbus::Bus> bus,
-            VmId id,
-            bool is_termina);
+  // In production, maitred shutdown happens ~whenever. In tests we need to
+  // force the shutdown to happen before cleanup.
+  void StopMaitredForTesting(base::OnceClosure stop_callback);
 
-  // Constructor for testing only.
-  TerminaVm(std::unique_ptr<patchpanel::Subnet> subnet,
-            uint32_t vsock_cid,
-            std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-            base::FilePath runtime_dir,
-            base::FilePath log_path,
-            std::string stateful_device,
-            uint64_t stateful_size,
-            VmFeatures features,
-            bool is_termina);
+ private:
+  // Helper class for asynchronously cleaning up the GRPC client.
+  struct MaitredDeleter {
+    void operator()(brillo::AsyncGrpcClient<vm_tools::Maitred>* maitred) const;
+  };
+
+  explicit TerminaVm(Config config);
+
   TerminaVm(const TerminaVm&) = delete;
   TerminaVm& operator=(const TerminaVm&) = delete;
 
   void HandleSuspendImminent() override;
   void HandleSuspendDone() override;
-  // Returns the path to the VM control socket.
-  std::string GetVmSocketPath() const;
 
   // Returns the string value of the 'serial' arg passed to crosvm.
   // If |log_path_| is empty, syslog will be used.
@@ -256,8 +275,9 @@ class TerminaVm final : public VmBaseImpl {
   // Starts the VM with the given kernel and root file system.
   bool Start(VmBuilder vm_builder);
 
-  // Runs a crosvm subcommend.
-  void RunCrosvmCommand(std::string command);
+  // Initialized the maitred service (i.e. the one where concierge calls
+  // maitred) for this VM.
+  void InitializeMaitredService(std::unique_ptr<vm_tools::Maitred::Stub> stub);
 
   // Helper version to record the VM kernel version at startup.
   void RecordKernelVersionForEnterpriseReporting();
@@ -265,17 +285,12 @@ class TerminaVm final : public VmBaseImpl {
   bool ResizeDiskImage(uint64_t new_size);
   bool ResizeFilesystem(uint64_t new_size);
 
+  // Sends a gRPC message to the VM to shutdown.
+  grpc::Status SendVMShutdownMessage();
+
+  GuestOsNetwork* Network() const;
+
   void set_kernel_version_for_testing(std::string kernel_version);
-  void set_stub_for_testing(std::unique_ptr<vm_tools::Maitred::Stub> stub);
-
-  // The /30 subnet assigned to the VM.
-  std::unique_ptr<patchpanel::Subnet> subnet_;
-
-  // An optional /28 container subnet.
-  std::unique_ptr<patchpanel::Subnet> container_subnet_;
-
-  // Termina network device.
-  patchpanel::NetworkDevice network_device_;
 
   // Flags passed to vmc start.
   VmFeatures features_;
@@ -283,8 +298,15 @@ class TerminaVm final : public VmBaseImpl {
   // Token assigned to the VM by the permission service.
   std::string permission_token_;
 
-  // Stub for making RPC requests to the maitre'd process inside the VM.
-  std::unique_ptr<vm_tools::Maitred::Stub> stub_;
+  // Used for making RPC requests to the maitre'd process inside the VM.
+  std::unique_ptr<brillo::AsyncGrpcClient<vm_tools::Maitred>, MaitredDeleter>
+      maitred_handle_;
+
+  // A handle to the maitred service, used for synchronous operations. Owned by
+  // |maitred_handle_|.
+  //
+  // TODO(b/294160898): remove stub_ when all the RPCs called on it are async.
+  vm_tools::Maitred::Stub* stub_;
 
   // Whether a TremplinStartedSignal has been received for the VM.
   bool is_tremplin_started_ = false;
@@ -304,7 +326,7 @@ class TerminaVm final : public VmBaseImpl {
 
   // Type of disk resize currently in progress.
   // If this is NONE, then no resize is in progress right now.
-  enum DiskResizeType stateful_resize_type_;
+  enum DiskResizeType stateful_resize_type_ = DiskResizeType::NONE;
 
   // Status of the current resize operation (or most recent resize operation,
   // if no resize is currently in progress).
@@ -323,12 +345,20 @@ class TerminaVm final : public VmBaseImpl {
   // Proxy to the dispatcher service.  Not owned.
   dbus::ObjectProxy* vm_permission_service_proxy_;
 
-  // Confusingly, this class is also used for non-termina VMs that don't fit in
-  // other types. This bool indicates if the VM is really a termina VM.
-  const bool is_termina_;
+  // Record's this VM's "type" in the classification sense (e.g. termina,
+  // borealis, other...).
+  const apps::VmType classification_;
+
+  // Whether this VM uses storage ballooning.
+  const bool storage_ballooning_;
+
+  // Handle to the wayland socket used by this VM. This object cleans up the
+  // server/socket in its destructor.
+  //
+  // TODO(b/237960042): this should be in vm_base once all VMs use it.
+  std::unique_ptr<ScopedWlSocket> socket_;
 };
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge
 
 #endif  // VM_TOOLS_CONCIERGE_TERMINA_VM_H_

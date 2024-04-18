@@ -1,34 +1,39 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/util.h"
 
-#include <stdlib.h>
-
 #include <fcntl.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+
 #include <limits>
 #include <memory>
-#include <sys/mman.h>
+#include <utility>
 
 #include <base/command_line.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/rand_util.h>
+#include <base/strings/strcat.h>
 #include <base/test/simple_test_clock.h>
 #include <base/time/time.h>
-#include <brillo/crossystem/crossystem_fake.h>
+#include <libcrossystem/crossystem_fake.h>
 #include <brillo/process/process.h>
 #include <brillo/streams/memory_stream.h>
+#include <brillo/syslog_logging.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library_mock.h>
 
 #include "crash-reporter/crash_sender_paths.h"
 #include "crash-reporter/crossystem.h"
 #include "crash-reporter/paths.h"
 #include "crash-reporter/test_util.h"
-#include "metrics/metrics_library_mock.h"
 
 // The QEMU emulator we use to run unit tests on simulated ARM boards does not
 // support memfd_create. (https://bugs.launchpad.net/qemu/+bug/1734792) Skip
@@ -41,6 +46,12 @@
 
 namespace util {
 namespace {
+
+using ::testing::AllOf;
+using ::testing::Eq;
+using ::testing::HasSubstr;
+using ::testing::Optional;
+using ::testing::StrEq;
 
 constexpr char kLsbReleaseContents[] =
     "CHROMEOS_RELEASE_BOARD=bob\n"
@@ -246,7 +257,7 @@ TEST_F(CrashCommonUtilTest, GetOsTimestamp) {
 
   base::FilePath lsb_file_path = paths::Get("/etc/lsb-release");
   ASSERT_TRUE(test_util::CreateFile(lsb_file_path, "foo=bar"));
-  base::Time old_time = base::Time::Now() - base::TimeDelta::FromDays(366);
+  base::Time old_time = base::Time::Now() - base::Days(366);
   ASSERT_TRUE(base::TouchFile(lsb_file_path, old_time, old_time));
   // ext2/ext3 seem to have a timestamp granularity of 1s.
   EXPECT_EQ(util::GetOsTimestamp().ToTimeVal().tv_sec,
@@ -262,50 +273,60 @@ TEST_F(CrashCommonUtilTest, IsBuildTimestampTooOldForUploads) {
   EXPECT_TRUE(util::IsBuildTimestampTooOldForUploads(0, &clock));
 
   EXPECT_FALSE(util::IsBuildTimestampTooOldForUploads(
-      now_millis - base::TimeDelta::FromDays(179).InMilliseconds(), &clock));
+      now_millis - base::Days(179).InMilliseconds(), &clock));
   EXPECT_TRUE(util::IsBuildTimestampTooOldForUploads(
-      now_millis - base::TimeDelta::FromDays(181).InMilliseconds(), &clock));
+      now_millis - base::Days(181).InMilliseconds(), &clock));
 
   // Crashes with invalid timestamps should upload.
   EXPECT_FALSE(util::IsBuildTimestampTooOldForUploads(
-      now_millis + base::TimeDelta::FromDays(1).InMilliseconds(), &clock));
+      now_millis + base::Days(1).InMilliseconds(), &clock));
   EXPECT_FALSE(util::IsBuildTimestampTooOldForUploads(-1, &clock));
   EXPECT_TRUE(util::IsBuildTimestampTooOldForUploads(
       std::numeric_limits<uint64_t>::min(), &clock));
 }
 
 TEST_F(CrashCommonUtilTest, GetHardwareClass) {
-  std::unique_ptr<brillo::fake::CrossystemFake> stub_crossystem =
-      std::make_unique<brillo::fake::CrossystemFake>();
-  auto old_instance = crossystem::ReplaceInstanceForTest(stub_crossystem.get());
+  crossystem::Crossystem stub_crossystem(
+      std::make_unique<crossystem::fake::CrossystemFake>());
+  auto old_instance = crossystem::ReplaceInstanceForTest(&stub_crossystem);
 
   // HWID file not found and failed to get the "hwid" system property.
   EXPECT_EQ("undefined", GetHardwareClass());
 
   // HWID file not found and but manage to get the "hwid" system property.
-  stub_crossystem->VbSetSystemPropertyString("hwid", "TEST_HWID_123");
+  stub_crossystem.VbSetSystemPropertyString("hwid", "TEST_HWID_123\n");
   EXPECT_EQ("TEST_HWID_123", GetHardwareClass());
 
   // When the HWID file exists, it should prioritize to return the file content.
+  // .../chromeos_acpi/HWID is prior to
+  // .../GGL0001:00/HWID and .../GOOG0016:00/HWID for backward compatible.
+  ASSERT_TRUE(test_util::CreateFile(
+      paths::Get("/sys/devices/platform/GOOG0016:00/HWID"), "TEST_HWID_321\n"));
+  EXPECT_EQ("TEST_HWID_321", GetHardwareClass());
+
+  ASSERT_TRUE(test_util::CreateFile(
+      paths::Get("/sys/devices/platform/GGL0001:00/HWID"), "TEST_HWID_000\n"));
+  EXPECT_EQ("TEST_HWID_000", GetHardwareClass());
+
   ASSERT_TRUE(test_util::CreateFile(
       paths::Get("/sys/devices/platform/chromeos_acpi/HWID"),
-      kHwClassContents));
+      std::string(kHwClassContents) + "\n"));
   EXPECT_EQ(kHwClassContents, GetHardwareClass());
 
   crossystem::ReplaceInstanceForTest(old_instance);
 }
 
 TEST_F(CrashCommonUtilTest, GetBootModeString) {
-  std::unique_ptr<brillo::fake::CrossystemFake> stub_crossystem =
-      std::make_unique<brillo::fake::CrossystemFake>();
-  auto old_instance = crossystem::ReplaceInstanceForTest(stub_crossystem.get());
+  crossystem::Crossystem stub_crossystem(
+      std::make_unique<crossystem::fake::CrossystemFake>());
+  auto old_instance = crossystem::ReplaceInstanceForTest(&stub_crossystem);
 
   EXPECT_EQ("missing-crossystem", GetBootModeString());
 
-  stub_crossystem->VbSetSystemPropertyInt("devsw_boot", 1);
+  stub_crossystem.VbSetSystemPropertyInt("devsw_boot", 1);
   EXPECT_EQ("dev", GetBootModeString());
 
-  stub_crossystem->VbSetSystemPropertyInt("devsw_boot", 123);
+  stub_crossystem.VbSetSystemPropertyInt("devsw_boot", 123);
   EXPECT_EQ("", GetBootModeString());
 
   ASSERT_TRUE(
@@ -455,32 +476,65 @@ TEST_F(CrashCommonUtilTest, ReadFdToStream) {
   EXPECT_EQ(kReadFdToStreamContents, stream.str());
 }
 
+TEST_F(CrashCommonUtilTest, GetNextLine) {
+  std::string test_line_1 = "test line 1";
+  std::string test_line_2 = "line 2";
+  base::FilePath test_file_path = test_dir_.Append("testfile");
+
+  ASSERT_TRUE(test_util::CreateFile(
+      test_file_path, base::StrCat({test_line_1, "\n", test_line_2})));
+
+  base::File test_file(test_file_path,
+                       base::File::FLAG_OPEN | base::File::FLAG_READ);
+  ASSERT_TRUE(test_file.IsValid());
+
+  std::string line;
+  // Read a line and verify correct data is read.
+  EXPECT_EQ(util::GetNextLine(test_file, line), test_line_1.length());
+  EXPECT_EQ(line, test_line_1);
+  // Read last line which may not end with a '\n', so read till EOF.
+  EXPECT_EQ(util::GetNextLine(test_file, line), test_line_2.length());
+  EXPECT_EQ(line, test_line_2);
+  // Verify that nothing is read once EOF is reached.
+  EXPECT_EQ(util::GetNextLine(test_file, line), 0);
+}
+
 TEST_F(CrashCommonUtilTest, IsFeedbackAllowedMock) {
-  MetricsLibraryMock mock_metrics;
-  mock_metrics.set_metrics_enabled(false);
+  std::unique_ptr<MetricsLibraryMock> mock_metrics =
+      std::make_unique<MetricsLibraryMock>();
+  mock_metrics->set_metrics_enabled(false);
+  scoped_refptr<base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>
+      mock_metrics_refptr = base::MakeRefCounted<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+          std::move(mock_metrics));
 
   ASSERT_TRUE(test_util::CreateFile(paths::Get("/etc/lsb-release"),
                                     "CHROMEOS_RELEASE_TRACK=testimage-channel\n"
                                     "CHROMEOS_RELEASE_DESCRIPTION=12985.0.0 "
                                     "(Official Build) dev-channel asuka test"));
 
-  EXPECT_FALSE(IsFeedbackAllowed(&mock_metrics));
+  EXPECT_FALSE(IsFeedbackAllowed(mock_metrics_refptr));
   ASSERT_TRUE(test_util::CreateFile(
       paths::GetAt(paths::kSystemRunStateDirectory, paths::kMockConsent), ""));
   EXPECT_TRUE(HasMockConsent());
 
-  EXPECT_TRUE(IsFeedbackAllowed(&mock_metrics));
+  EXPECT_TRUE(IsFeedbackAllowed(mock_metrics_refptr));
 }
 
 TEST_F(CrashCommonUtilTest, IsFeedbackAllowedDev) {
-  MetricsLibraryMock mock_metrics;
-  mock_metrics.set_metrics_enabled(false);
+  std::unique_ptr<MetricsLibraryMock> mock_metrics =
+      std::make_unique<MetricsLibraryMock>();
+  mock_metrics->set_metrics_enabled(false);
+  scoped_refptr<base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>
+      mock_metrics_refptr = base::MakeRefCounted<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+          std::move(mock_metrics));
 
-  EXPECT_FALSE(IsFeedbackAllowed(&mock_metrics));
+  EXPECT_FALSE(IsFeedbackAllowed(mock_metrics_refptr));
 
   ASSERT_TRUE(test_util::CreateFile(paths::Get(paths::kLeaveCoreFile), ""));
 
-  EXPECT_TRUE(IsFeedbackAllowed(&mock_metrics));
+  EXPECT_TRUE(IsFeedbackAllowed(mock_metrics_refptr));
 }
 
 // Disable this test when in a VM because there's no easy way to mock the
@@ -489,13 +543,58 @@ TEST_F(CrashCommonUtilTest, IsFeedbackAllowedDev) {
 // use a fake implementation here to set metrics consent appropriately.
 #if !USE_KVM_GUEST
 TEST_F(CrashCommonUtilTest, IsFeedbackAllowedRespectsMetricsLib) {
-  MetricsLibraryMock mock_metrics;
-  mock_metrics.set_metrics_enabled(false);
+  std::unique_ptr<MetricsLibraryMock> mock_metrics =
+      std::make_unique<MetricsLibraryMock>();
+  MetricsLibraryMock* mock_metrics_ptr = mock_metrics.get();
+  mock_metrics_ptr->set_metrics_enabled(false);
+  scoped_refptr<base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>
+      mock_metrics_refptr = base::MakeRefCounted<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+          std::move(mock_metrics));
 
-  EXPECT_FALSE(IsFeedbackAllowed(&mock_metrics));
+  EXPECT_FALSE(IsFeedbackAllowed(mock_metrics_refptr));
 
-  mock_metrics.set_metrics_enabled(true);
-  EXPECT_TRUE(IsFeedbackAllowed(&mock_metrics));
+  mock_metrics_ptr->set_metrics_enabled(true);
+  EXPECT_TRUE(IsFeedbackAllowed(mock_metrics_refptr));
+}
+
+TEST_F(CrashCommonUtilTest, IsBootFeedbackAllowedRespectsMetricsLib) {
+  std::unique_ptr<MetricsLibraryMock> mock_metrics =
+      std::make_unique<MetricsLibraryMock>();
+  MetricsLibraryMock* mock_metrics_ptr = mock_metrics.get();
+  mock_metrics_ptr->set_metrics_enabled(false);
+  scoped_refptr<base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>
+      mock_metrics_refptr = base::MakeRefCounted<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+          std::move(mock_metrics));
+
+  EXPECT_FALSE(IsBootFeedbackAllowed(mock_metrics_refptr));
+
+  mock_metrics_ptr->set_metrics_enabled(true);
+  EXPECT_TRUE(IsBootFeedbackAllowed(mock_metrics_refptr));
+}
+
+TEST_F(CrashCommonUtilTest, IsBootFeedbackAllowedRespectsFile) {
+  std::unique_ptr<MetricsLibraryMock> mock_metrics =
+      std::make_unique<MetricsLibraryMock>();
+  MetricsLibraryMock* mock_metrics_ptr = mock_metrics.get();
+  mock_metrics_ptr->set_metrics_enabled(true);
+  scoped_refptr<base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>
+      mock_metrics_refptr = base::MakeRefCounted<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+          std::move(mock_metrics));
+  ASSERT_TRUE(test_util::CreateFile(paths::Get(paths::kBootConsentFile), "0"));
+
+  // Last user opted out, so we should disable.
+  EXPECT_FALSE(IsBootFeedbackAllowed(mock_metrics_refptr));
+
+  // Both last user opted in as well as device owner, opt in.
+  ASSERT_TRUE(test_util::CreateFile(paths::Get(paths::kBootConsentFile), "1"));
+  EXPECT_TRUE(IsBootFeedbackAllowed(mock_metrics_refptr));
+
+  // Last user opted in, but device owner opted out, so opt out.
+  mock_metrics_ptr->set_metrics_enabled(false);
+  EXPECT_FALSE(IsBootFeedbackAllowed(mock_metrics_refptr));
 }
 #endif  // USE_KVM_GUEST
 
@@ -648,6 +747,132 @@ TEST_F(CrashCommonUtilTest, RedactDigests) {
     EXPECT_EQ(RedactDigests(&input), ret);
     EXPECT_EQ(input, expected);
   }
+}
+
+TEST_F(CrashCommonUtilTest, ExtractChromeVersionFromMetadata_Success) {
+  constexpr char kChromeMetadata[] =
+      R"--({
+  "content": {
+    "version": "104.0.5106.0"
+  },
+  "metadata_version": 1
+})--";
+  base::FilePath metadata_path = test_dir_.Append("metadata.json");
+  ASSERT_TRUE(test_util::CreateFile(metadata_path, kChromeMetadata));
+
+  EXPECT_THAT(ExtractChromeVersionFromMetadata(metadata_path),
+              Optional(StrEq("104.0.5106.0")));
+}
+
+TEST_F(CrashCommonUtilTest, ExtractChromeVersionFromMetadata_NoSuchFile) {
+  brillo::ClearLog();
+  base::FilePath metadata_path = test_dir_.Append("metadata.json");
+  EXPECT_THAT(ExtractChromeVersionFromMetadata(metadata_path),
+              Eq(std::nullopt));
+  EXPECT_THAT(brillo::GetLog(),
+              HasSubstr("Could not read Chrome metadata file"));
+}
+
+TEST_F(CrashCommonUtilTest, ExtractChromeVersionFromMetadata_NotJSON) {
+  brillo::ClearLog();
+  base::FilePath metadata_path = test_dir_.Append("metadata.json");
+  ASSERT_TRUE(test_util::CreateFile(metadata_path, "Not JSON data"));
+
+  EXPECT_THAT(ExtractChromeVersionFromMetadata(metadata_path),
+              Eq(std::nullopt));
+  EXPECT_THAT(brillo::GetLog(),
+              AllOf(HasSubstr("Error parsing Chrome metadata file"),
+                    HasSubstr("as JSON")));
+}
+
+TEST_F(CrashCommonUtilTest,
+       ExtractChromeVersionFromMetadata_NotOuterDictionary) {
+  brillo::ClearLog();
+  base::FilePath metadata_path = test_dir_.Append("metadata.json");
+  ASSERT_TRUE(test_util::CreateFile(metadata_path, R"("104.0.5106.0")"));
+
+  EXPECT_THAT(ExtractChromeVersionFromMetadata(metadata_path),
+              Eq(std::nullopt));
+  EXPECT_THAT(
+      brillo::GetLog(),
+      AllOf(
+          HasSubstr("Error parsing Chrome metadata file"),
+          HasSubstr(
+              "expected outermost value to be a DICTIONARY but got a string")));
+}
+
+TEST_F(CrashCommonUtilTest, ExtractChromeVersionFromMetadata_NoContent) {
+  brillo::ClearLog();
+  base::FilePath metadata_path = test_dir_.Append("metadata.json");
+  constexpr char kChromeMetadata[] =
+      R"--({
+  "metadata_version": 2,
+  "someotherwayofgettingversion": {
+    "something": "104.0.5106.0"
+  }
+})--";
+  ASSERT_TRUE(test_util::CreateFile(metadata_path, kChromeMetadata));
+
+  EXPECT_THAT(ExtractChromeVersionFromMetadata(metadata_path),
+              Eq(std::nullopt));
+  EXPECT_THAT(brillo::GetLog(),
+              AllOf(HasSubstr("Error parsing Chrome metadata file"),
+                    HasSubstr("could not find 'content' key")));
+}
+
+TEST_F(CrashCommonUtilTest, ExtractChromeVersionFromMetadata_ContentNotDict) {
+  brillo::ClearLog();
+  base::FilePath metadata_path = test_dir_.Append("metadata.json");
+  constexpr char kChromeMetadata[] =
+      R"--({
+  "metadata_version": 2,
+  "content": "104.0.5106.0"
+})--";
+  ASSERT_TRUE(test_util::CreateFile(metadata_path, kChromeMetadata));
+
+  EXPECT_THAT(ExtractChromeVersionFromMetadata(metadata_path),
+              Eq(std::nullopt));
+  EXPECT_THAT(brillo::GetLog(),
+              AllOf(HasSubstr("Error parsing Chrome metadata file"),
+                    HasSubstr("content is not a DICT but instead a string")));
+}
+
+TEST_F(CrashCommonUtilTest, ExtractChromeVersionFromMetadata_NoVersion) {
+  brillo::ClearLog();
+  base::FilePath metadata_path = test_dir_.Append("metadata.json");
+  constexpr char kChromeMetadata[] =
+      R"--({
+  "metadata_version": 2,
+  "content": {
+    "chrome_version": "104.0.5106.0"
+  }
+})--";
+  ASSERT_TRUE(test_util::CreateFile(metadata_path, kChromeMetadata));
+
+  EXPECT_THAT(ExtractChromeVersionFromMetadata(metadata_path),
+              Eq(std::nullopt));
+  EXPECT_THAT(brillo::GetLog(),
+              AllOf(HasSubstr("Error parsing Chrome metadata file"),
+                    HasSubstr("could not find 'version' key")));
+}
+
+TEST_F(CrashCommonUtilTest, ExtractChromeVersionFromMetadata_VersionNotString) {
+  brillo::ClearLog();
+  base::FilePath metadata_path = test_dir_.Append("metadata.json");
+  constexpr char kChromeMetadata[] =
+      R"--({
+  "metadata_version": 2,
+  "content": {
+    "version": 104
+  }
+})--";
+  ASSERT_TRUE(test_util::CreateFile(metadata_path, kChromeMetadata));
+
+  EXPECT_THAT(ExtractChromeVersionFromMetadata(metadata_path),
+              Eq(std::nullopt));
+  EXPECT_THAT(brillo::GetLog(),
+              AllOf(HasSubstr("Error parsing Chrome metadata file"),
+                    HasSubstr("version is not a string but instead a int")));
 }
 
 }  // namespace util

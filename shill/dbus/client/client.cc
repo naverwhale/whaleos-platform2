@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,11 @@
 
 #include <set>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <brillo/variant_dictionary.h>
-#include <shill/net/ip_address.h>
+#include <dbus/shill/dbus-constants.h>
+#include <net-base/ip_address.h>
 
 using org::chromium::flimflam::DeviceProxy;
 using org::chromium::flimflam::DeviceProxyInterface;
@@ -31,7 +32,6 @@ Client::Device::Type ParseDeviceType(const std::string& type_str) {
       {shill::kTypeGuestInterface, Client::Device::Type::kGuestInterface},
       {shill::kTypeLoopback, Client::Device::Type::kLoopback},
       {shill::kTypePPP, Client::Device::Type::kPPP},
-      {shill::kTypePPPoE, Client::Device::Type::kPPPoE},
       {shill::kTypeTunnel, Client::Device::Type::kTunnel},
       {shill::kTypeWifi, Client::Device::Type::kWifi},
       {shill::kTypeVPN, Client::Device::Type::kVPN},
@@ -44,7 +44,6 @@ Client::Device::Type ParseDeviceType(const std::string& type_str) {
 Client::Device::ConnectionState ParseConnectionState(const std::string& s) {
   static const std::map<std::string, Client::Device::ConnectionState> m{
       {shill::kStateIdle, Client::Device::ConnectionState::kIdle},
-      {shill::kStateCarrier, Client::Device::ConnectionState::kCarrier},
       {shill::kStateAssociation, Client::Device::ConnectionState::kAssociation},
       {shill::kStateConfiguration,
        Client::Device::ConnectionState::kConfiguration},
@@ -59,8 +58,6 @@ Client::Device::ConnectionState ParseConnectionState(const std::string& s) {
       {shill::kStateOffline, Client::Device::ConnectionState::kOffline},
       {shill::kStateFailure, Client::Device::ConnectionState::kFailure},
       {shill::kStateDisconnect, Client::Device::ConnectionState::kDisconnect},
-      {shill::kStateActivationFailure,
-       Client::Device::ConnectionState::kActivationFailure},
   };
   const auto it = m.find(s);
   return it != m.end() ? it->second : Client::Device::ConnectionState::kUnknown;
@@ -69,7 +66,6 @@ Client::Device::ConnectionState ParseConnectionState(const std::string& s) {
 const char* ToString(Client::Device::ConnectionState state) {
   static const std::map<Client::Device::ConnectionState, const char*> m{
       {Client::Device::ConnectionState::kIdle, shill::kStateIdle},
-      {Client::Device::ConnectionState::kCarrier, shill::kStateCarrier},
       {Client::Device::ConnectionState::kAssociation, shill::kStateAssociation},
       {Client::Device::ConnectionState::kConfiguration,
        shill::kStateConfiguration},
@@ -84,11 +80,36 @@ const char* ToString(Client::Device::ConnectionState state) {
       {Client::Device::ConnectionState::kOffline, shill::kStateOffline},
       {Client::Device::ConnectionState::kFailure, shill::kStateFailure},
       {Client::Device::ConnectionState::kDisconnect, shill::kStateDisconnect},
-      {Client::Device::ConnectionState::kActivationFailure,
-       shill::kStateActivationFailure},
   };
   const auto it = m.find(state);
   return it != m.end() ? it->second : "unknown";
+}
+
+bool IsConnectedState(Client::Device::ConnectionState state) {
+  switch (state) {
+    case Client::Device::ConnectionState::kUnknown:
+    case Client::Device::ConnectionState::kIdle:
+    case Client::Device::ConnectionState::kAssociation:
+    case Client::Device::ConnectionState::kConfiguration:
+    case Client::Device::ConnectionState::kOffline:
+    case Client::Device::ConnectionState::kFailure:
+    case Client::Device::ConnectionState::kDisconnect:
+      return false;
+    case Client::Device::ConnectionState::kReady:
+    case Client::Device::ConnectionState::kNoConnectivity:
+    case Client::Device::ConnectionState::kRedirectFound:
+    case Client::Device::ConnectionState::kPortalSuspected:
+    case Client::Device::ConnectionState::kOnline:
+      return true;
+  }
+}
+
+std::string GetCellularProviderCountryCode(
+    const brillo::VariantDictionary& device_properties) {
+  auto operator_info =
+      brillo::GetVariantValueOrDefault<std::map<std::string, std::string>>(
+          device_properties, kHomeProviderProperty);
+  return operator_info[shill::kOperatorCountryKey];
 }
 
 }  // namespace
@@ -99,14 +120,10 @@ Client::Client(scoped_refptr<dbus::Bus> bus) : bus_(bus) {
           &Client::OnOwnerChange, weak_factory_.GetWeakPtr()));
   manager_proxy_ = std::make_unique<ManagerProxy>(bus_);
   manager_proxy_->RegisterPropertyChangedSignalHandler(
-      base::Bind(&Client::OnManagerPropertyChange, weak_factory_.GetWeakPtr()),
-      base::Bind(&Client::OnManagerPropertyChangeRegistration,
-                 weak_factory_.GetWeakPtr()));
-}
-
-Client::~Client() {
-  bus_->RemoveObjectProxy(kFlimflamServiceName, dbus::ObjectPath("/"),
-                          base::DoNothing());
+      base::BindRepeating(&Client::OnManagerPropertyChange,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&Client::OnManagerPropertyChangeRegistration,
+                     weak_factory_.GetWeakPtr()));
 }
 
 void Client::NewDefaultServiceProxy(const dbus::ObjectPath& service_path) {
@@ -116,14 +133,13 @@ void Client::NewDefaultServiceProxy(const dbus::ObjectPath& service_path) {
 void Client::SetupDefaultServiceProxy(const dbus::ObjectPath& service_path) {
   NewDefaultServiceProxy(service_path);
   default_service_proxy_->RegisterPropertyChangedSignalHandler(
-      base::Bind(&Client::OnDefaultServicePropertyChange,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&Client::OnDefaultServicePropertyChangeRegistration,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&Client::OnDefaultServicePropertyChange,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&Client::OnDefaultServicePropertyChangeRegistration,
+                     weak_factory_.GetWeakPtr()));
 }
 
 void Client::ReleaseDefaultServiceProxy() {
-  default_service_connected_ = false;
   default_device_path_.clear();
 
   if (default_service_proxy_) {
@@ -145,10 +161,11 @@ void Client::SetupDeviceProxy(const dbus::ObjectPath& device_path) {
   devices_.emplace(device_path.value(),
                    std::make_unique<DeviceWrapper>(bus_, std::move(proxy)));
   ptr->RegisterPropertyChangedSignalHandler(
-      base::Bind(&Client::OnDevicePropertyChange, weak_factory_.GetWeakPtr(),
-                 false /*device_added*/, device_path.value()),
-      base::Bind(&Client::OnDevicePropertyChangeRegistration,
-                 weak_factory_.GetWeakPtr(), device_path.value()));
+      base::BindRepeating(&Client::OnDevicePropertyChange,
+                          weak_factory_.GetWeakPtr(), false /*device_added*/,
+                          device_path.value()),
+      base::BindOnce(&Client::OnDevicePropertyChangeRegistration,
+                     weak_factory_.GetWeakPtr(), device_path.value()));
 }
 
 std::unique_ptr<ServiceProxyInterface> Client::NewServiceProxy(
@@ -168,10 +185,10 @@ void Client::SetupSelectedServiceProxy(const dbus::ObjectPath& service_path,
   auto* ptr = proxy.get();
   it->second->set_service_proxy(std::move(proxy));
   ptr->RegisterPropertyChangedSignalHandler(
-      base::Bind(&Client::OnServicePropertyChange, weak_factory_.GetWeakPtr(),
-                 device_path.value()),
-      base::Bind(&Client::OnServicePropertyChangeRegistration,
-                 weak_factory_.GetWeakPtr(), device_path.value()));
+      base::BindRepeating(&Client::OnServicePropertyChange,
+                          weak_factory_.GetWeakPtr(), device_path.value()),
+      base::BindOnce(&Client::OnServicePropertyChangeRegistration,
+                     weak_factory_.GetWeakPtr(), device_path.value()));
 }
 
 void Client::RegisterOnAvailableCallback(
@@ -223,14 +240,24 @@ void Client::RegisterDeviceRemovedHandler(const DeviceChangedHandler& handler) {
 
 void Client::OnOwnerChange(const std::string& old_owner,
                            const std::string& new_owner) {
+  // Avoid resetting client state when |old_owner| is empty as there might be
+  // race between owner change callback and shill startup callback. See also
+  // b/307671293.
+  if (old_owner.empty()) {
+    return;
+  }
+
   ReleaseDefaultServiceProxy();
+  for (const auto& device : devices_) {
+    device.second->release_object_proxy();
+  }
   devices_.clear();
 
   bool reset = !new_owner.empty();
   if (reset)
-    LOG(INFO) << "Shill reset";
+    VLOG(2) << "Shill reset";
   else
-    LOG(INFO) << "Shill lost";
+    VLOG(2) << "Shill lost";
 
   if (!process_handler_.is_null())
     process_handler_.Run(reset);
@@ -246,7 +273,8 @@ void Client::OnManagerPropertyChangeRegistration(const std::string& interface,
   }
   brillo::VariantDictionary properties;
   if (!manager_proxy_ || !manager_proxy_->GetProperties(&properties, nullptr)) {
-    LOG(ERROR) << "Unable to get shill Manager properties";
+    LOG(WARNING) << "Unable to get shill Manager properties, likely because "
+                    "shill is unavailable";
     return;
   }
 
@@ -291,6 +319,10 @@ void Client::HandleDefaultServiceChanged(const brillo::Any& property_value) {
     for (auto& handler : default_service_handlers_) {
       handler.Run("");
     }
+    VLOG(2) << "Default service device is removed";
+    for (auto& handler : default_device_handlers_) {
+      handler.Run(nullptr);
+    }
     return;
   }
 
@@ -302,7 +334,7 @@ void Client::AddDevice(const dbus::ObjectPath& device_path) {
   if (devices_.find(path) != devices_.end())
     return;
 
-  LOG(INFO) << "Device [" << path << "] added";
+  VLOG(2) << "Device [" << path << "] added";
   SetupDeviceProxy(device_path);
 }
 
@@ -316,10 +348,11 @@ void Client::HandleDevicesChanged(const brillo::Any& property_value) {
 
   for (auto it = devices_.begin(); it != devices_.end();) {
     if (latest.find(it->first) == latest.end()) {
-      LOG(INFO) << "Device [" << it->first << "] removed";
+      VLOG(2) << "Device [" << it->first << "] removed";
       for (auto& handler : device_removed_handlers_) {
         handler.Run(it->second->device());
       }
+      it->second->release_object_proxy();
       it = devices_.erase(it);
     } else {
       ++it;
@@ -372,34 +405,21 @@ void Client::OnDefaultServicePropertyChangeRegistration(
 
 void Client::OnDefaultServicePropertyChange(const std::string& property_name,
                                             const brillo::Any& property_value) {
-  if (property_name == kIsConnectedProperty) {
-    bool connected = property_value.TryGet<bool>();
-    if (connected == default_service_connected_)
-      return;
-
-    std::string service_path;
-    if (default_service_proxy_)
-      service_path = default_service_proxy_->GetObjectPath().value();
-
-    LOG(INFO) << "Default service [" << service_path << "] "
-              << (connected ? "is now connected" : "disconnected");
-    default_service_connected_ = connected;
-  } else if (property_name == kDeviceProperty) {
-    std::string path = property_value.TryGet<dbus::ObjectPath>().value();
-    if (path == default_device_path_)
-      return;
-
-    LOG(INFO) << "Default service device changed from [" << default_device_path_
-              << "] to [" << path << "]";
-    default_device_path_ = path;
-  } else {
+  if (property_name != kDeviceProperty) {
     return;
   }
 
+  std::string path = property_value.TryGet<dbus::ObjectPath>().value();
+  if (path == default_device_path_) {
+    return;
+  }
+
+  VLOG(2) << "Default service device changed to [" << path << "]";
+  default_device_path_ = path;
+
   // When there is no service, run the handlers with a nullptr to indicate this
   // condition.
-  if (!default_service_connected_ || default_device_path_ == "" ||
-      default_device_path_ == "/") {
+  if (default_device_path_ == "" || default_device_path_ == "/") {
     for (auto& handler : default_device_handlers_) {
       handler.Run(nullptr);
     }
@@ -455,6 +475,12 @@ void Client::OnDevicePropertyChangeRegistration(const std::string& device_path,
     return;
   }
 
+  if (device->type == Client::Device::Type::kCellular) {
+    device->cellular_country_code = GetCellularProviderCountryCode(properties);
+    device->cellular_primary_ifname =
+        brillo::GetVariantValueOrDefault<std::string>(
+            properties, kPrimaryMultiplexedInterfaceProperty);
+  }
   // Obtain and monitor properties on this device's selected service and treat
   // them as if they are instrinsically characteristic of the device itself.
   const auto service_path = brillo::GetVariantValueOrDefault<dbus::ObjectPath>(
@@ -481,11 +507,33 @@ void Client::OnDevicePropertyChange(bool device_added,
       return;
     }
     device = it->second->device();
-    device->ipconfig = ParseIPConfigsProperty(device_path, property_value);
+    auto paths = property_value.TryGet<std::vector<dbus::ObjectPath>>();
+    if (paths.empty() && IsConnectedState(device->state)) {
+      LOG(WARNING) << "Device [" << device_path << "] has no IPConfigs";
+    } else {
+      device->ipconfig = ParseIPConfigsProperty(device_path, paths);
+    }
   } else if (property_name == kSelectedServiceProperty) {
     device = HandleSelectedServiceChanged(device_path, property_value);
     if (!device)
       return;
+  } else if (property_name == kHomeProviderProperty) {
+    auto it = devices_.find(device_path);
+    if (it == devices_.end()) {
+      LOG(ERROR) << "Device [" << device_path << "] not found";
+      return;
+    }
+    device = it->second->device();
+    device->cellular_country_code = property_value.TryGet<
+        std::map<std::string, std::string>>()[shill::kOperatorCountryKey];
+  } else if (property_name == kPrimaryMultiplexedInterfaceProperty) {
+    auto it = devices_.find(device_path);
+    if (it == devices_.end()) {
+      LOG(ERROR) << "Device [" << device_path << "] not found";
+      return;
+    }
+    device = it->second->device();
+    device->cellular_primary_ifname = property_value.TryGet<std::string>();
   } else {
     return;
   }
@@ -524,7 +572,7 @@ Client::Device* Client::HandleSelectedServiceChanged(
   auto service_path = property_value.TryGet<dbus::ObjectPath>();
   if (!service_path.IsValid() || service_path.value() == "/") {
     device->state = Device::ConnectionState::kUnknown;
-    LOG(INFO) << "Device [" << device_path << "] has no service";
+    VLOG(2) << "Device [" << device_path << "] has no service";
     return device;
   }
 
@@ -550,14 +598,8 @@ Client::Device* Client::HandleSelectedServiceChanged(
 }
 
 Client::IPConfig Client::ParseIPConfigsProperty(
-    const std::string& device_path, const brillo::Any& property_value) const {
-  IPConfig ipconfig;
-  auto paths = property_value.TryGet<std::vector<dbus::ObjectPath>>();
-  if (paths.empty()) {
-    LOG(WARNING) << "Device [" << device_path << "] has no IPConfigs";
-    return ipconfig;
-  }
-
+    const std::string& device_path,
+    const std::vector<dbus::ObjectPath>& ipconfig_paths) const {
   std::unique_ptr<IPConfigProxy> proxy;
   auto reset_proxy = [&](const dbus::ObjectPath& path) {
     if (proxy)
@@ -567,7 +609,8 @@ Client::IPConfig Client::ParseIPConfigsProperty(
       proxy.reset(new IPConfigProxy(bus_, path));
   };
 
-  for (const auto& path : paths) {
+  IPConfig ipconfig;
+  for (const auto& path : ipconfig_paths) {
     reset_proxy(path);
     brillo::VariantDictionary properties;
     if (!proxy->GetProperties(&properties, nullptr)) {
@@ -578,23 +621,44 @@ Client::IPConfig Client::ParseIPConfigsProperty(
       continue;
     }
 
-    std::string addr = brillo::GetVariantValueOrDefault<std::string>(
+    const std::string addr = brillo::GetVariantValueOrDefault<std::string>(
         properties, kAddressProperty);
     if (addr.empty()) {
-      LOG(WARNING) << "Empty property [" << kAddressProperty
-                   << "] in IPConfig [" << path.value() << "] on device ["
-                   << device_path << "]";
+      // On IPv6 only network, dhcp is expected to fail, nevertheless shill
+      // will still expose a mostly empty IPConfig object, On dual stack
+      // networks, the IPv6 configuration may be available before dhcp has
+      // finished. Avoid logging spurious WARNING messages in these two cases.
       continue;
     }
 
-    const IPAddress ip_addr(addr);
-    if (ip_addr.family() == IPAddress::kFamilyUnknown) {
+    const int len =
+        brillo::GetVariantValueOrDefault<int>(properties, kPrefixlenProperty);
+    const auto ip_cidr = net_base::IPCIDR::CreateFromStringAndPrefix(addr, len);
+    if (!ip_cidr) {
       LOG(WARNING) << "Invalid address [" << addr << "] in IPConfig ["
-                   << path.value() << "] on device [" << device_path << "]";
+                   << path.value() << "] on device [" << device_path
+                   << "] with prefix length " << len;
+      continue;
+    }
+    if (len == 0) {
+      LOG(WARNING) << "Property [" << kPrefixlenProperty << "] in IPConfig ["
+                   << path.value() << "] on device [" << device_path
+                   << "] has a value of 0. May indicate an invalid setup.";
+    }
+
+    // While multiple IPv6 addresses are valid, we expect shill to provide at
+    // most one for now.
+    // TODO(garrick): Support multiple IPv6 configurations.
+    if ((ip_cidr->GetFamily() == net_base::IPFamily::kIPv4 &&
+         !ipconfig.ipv4_address.empty()) ||
+        (ip_cidr->GetFamily() == net_base::IPFamily::kIPv6 &&
+         !ipconfig.ipv6_address.empty())) {
+      LOG(WARNING) << "Duplicate [" << ip_cidr->GetFamily()
+                   << "] IPConfig found on device [" << device_path << "]";
       continue;
     }
 
-    std::string gw = brillo::GetVariantValueOrDefault<std::string>(
+    const std::string gw = brillo::GetVariantValueOrDefault<std::string>(
         properties, kGatewayProperty);
     if (gw.empty()) {
       LOG(WARNING) << "Empty property [" << kGatewayProperty
@@ -603,53 +667,36 @@ Client::IPConfig Client::ParseIPConfigsProperty(
       continue;
     }
 
-    int len =
-        brillo::GetVariantValueOrDefault<int>(properties, kPrefixlenProperty);
-    if (len <= 0) {
-      LOG(WARNING) << "Empty property [" << kPrefixlenProperty
-                   << "] in IPConfig [" << path.value() << "] on device ["
-                   << device_path << "]";
-      continue;
-    }
-
-    // While multiple IPv6 addresses are valid, we expect shill to provide at
-    // most one for now.
-    // TODO(garrick): Support multiple IPv6 configurations.
-    if ((ip_addr.family() == IPAddress::kFamilyIPv4 &&
-         !ipconfig.ipv4_address.empty()) ||
-        (ip_addr.family() == IPAddress::kFamilyIPv6 &&
-         !ipconfig.ipv6_address.empty())) {
-      LOG(WARNING) << "Duplicate [" << ip_addr.family() << "] IPConfig found"
-                   << " on device [" << device_path << "]";
-      continue;
-    }
-
-    // TODO(garrick): Accommodate missing name servers.
+    // Note that empty name server list may indicates the network does not have
+    // Internet connectivity.
     auto ns = brillo::GetVariantValueOrDefault<std::vector<std::string>>(
         properties, kNameServersProperty);
-    if (ns.empty()) {
-      LOG(WARNING) << "Empty property [" << kNameServersProperty
-                   << "] in IPConfig [" << path.value() << "] on device ["
-                   << device_path << "]";
-      continue;
-    }
+    auto search_domains =
+        brillo::GetVariantValueOrDefault<std::vector<std::string>>(
+            properties, kSearchDomainsProperty);
 
-    if (ip_addr.family() == IPAddress::kFamilyIPv4) {
-      ipconfig.ipv4_prefix_length = len;
-      ipconfig.ipv4_address = addr;
-      ipconfig.ipv4_gateway = gw;
-      ipconfig.ipv4_dns_addresses = ns;
-    } else {  // is_ipv6_type
-      ipconfig.ipv6_prefix_length = len;
-      ipconfig.ipv6_address = addr;
-      ipconfig.ipv6_gateway = gw;
-      ipconfig.ipv6_dns_addresses = ns;
+    switch (ip_cidr->GetFamily()) {
+      case net_base::IPFamily::kIPv4:
+        ipconfig.ipv4_prefix_length = len;
+        ipconfig.ipv4_address = addr;
+        ipconfig.ipv4_gateway = gw;
+        ipconfig.ipv4_dns_addresses = ns;
+        ipconfig.ipv4_search_domains = search_domains;
+        break;
+      case net_base::IPFamily::kIPv6:
+        ipconfig.ipv6_prefix_length = len;
+        ipconfig.ipv6_address = addr;
+        ipconfig.ipv6_gateway = gw;
+        ipconfig.ipv6_dns_addresses = ns;
+        ipconfig.ipv6_search_domains = search_domains;
+        break;
     }
   }
   reset_proxy(dbus::ObjectPath());
 
   return ipconfig;
 }
+
 void Client::OnServicePropertyChangeRegistration(const std::string& device_path,
                                                  const std::string& interface,
                                                  const std::string& signal_name,
@@ -706,8 +753,11 @@ void Client::OnServicePropertyChange(const std::string& device_path,
   if (device->state == state)
     return;
 
-  LOG(INFO) << "Device [" << device_path << "] connection state changed from ["
-            << ToString(device->state) << "] to [" << ToString(state) << "]";
+  if (IsConnectedState(device->state) || IsConnectedState(state)) {
+    LOG(INFO) << "Device [" << device_path
+              << "] connection state changed from [" << ToString(device->state)
+              << "] to [" << ToString(state) << "]";
+  }
   device->state = state;
 
   for (auto& handler : device_handlers_)
@@ -727,6 +777,8 @@ std::vector<std::unique_ptr<Client::Device>> Client::GetDevices() const {
     device->ifname = dev->device()->ifname;
     device->state = dev->device()->state;
     device->ipconfig = dev->device()->ipconfig;
+    device->cellular_country_code = dev->device()->cellular_country_code;
+    device->cellular_primary_ifname = dev->device()->cellular_primary_ifname;
     devices.emplace_back(std::move(device));
   }
   return devices;
@@ -736,6 +788,35 @@ std::unique_ptr<Client::ManagerPropertyAccessor> Client::ManagerProperties(
     const base::TimeDelta& timeout) const {
   return std::make_unique<PropertyAccessor<ManagerProxyInterface>>(
       manager_proxy_.get(), timeout);
+}
+
+std::unique_ptr<Client::ServicePropertyAccessor>
+Client::DefaultServicePropertyAccessor(const base::TimeDelta& timeout) const {
+  if (default_service_proxy_.get() == nullptr) {
+    LOG(ERROR) << "Failed to create property accessor because "
+                  "there is no default service.";
+    return nullptr;
+  }
+  return std::make_unique<PropertyAccessor<ServiceProxyInterface>>(
+      default_service_proxy_.get(), timeout);
+}
+
+std::unique_ptr<brillo::VariantDictionary> Client::GetDefaultServiceProperties(
+    const base::TimeDelta& timeout) const {
+  brillo::ErrorPtr error;
+  brillo::VariantDictionary properties;
+
+  auto property_accessor = DefaultServicePropertyAccessor(timeout);
+  if (!property_accessor)
+    return nullptr;
+
+  if (!property_accessor->Get(&properties, &error)) {
+    LOG(ERROR) << "Failed to obtain default service properties: "
+               << error->GetMessage();
+    return nullptr;
+  }
+
+  return std::make_unique<brillo::VariantDictionary>(std::move(properties));
 }
 
 std::unique_ptr<Client::Device> Client::DefaultDevice(bool exclude_vpn) {
@@ -803,6 +884,12 @@ std::unique_ptr<Client::Device> Client::DefaultDevice(bool exclude_vpn) {
       device_path.value(),
       brillo::GetVariantValueOrDefault<std::vector<dbus::ObjectPath>>(
           properties, kIPConfigsProperty));
+  if (device->type == Client::Device::Type::kCellular) {
+    device->cellular_country_code = GetCellularProviderCountryCode(properties);
+    device->cellular_primary_ifname =
+        brillo::GetVariantValueOrDefault<std::string>(
+            properties, kPrimaryMultiplexedInterfaceProperty);
+  }
   return device;
 }
 

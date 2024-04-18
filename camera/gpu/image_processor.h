@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -12,9 +12,21 @@
 #include "gpu/gles/shader_program.h"
 #include "gpu/gles/texture_2d.h"
 
+#include "cros-camera/common_types.h"
+#include "cros-camera/export.h"
+
 namespace cros {
 
-class GpuImageProcessor {
+enum class FilterMode {
+  // Nearest-neighboar sampling (GL_NEAREST).
+  kNearest,
+  // Bilinear filtering (GL_LINEAR).
+  kBilinear,
+  // Bicubic filtering (calculated with 2x2 GL_LINEAR samples).
+  kBicubic,
+};
+
+class CROS_CAMERA_EXPORT GpuImageProcessor {
  public:
   GpuImageProcessor();
 
@@ -126,6 +138,34 @@ class GpuImageProcessor {
                 const Texture2D& y_output,
                 const Texture2D& uv_output);
 
+  // Convert the input YUYV |yx_input| and |yuyv_input| textures to NV12.
+  // |yx_input| and |yuyv_input| are bound to the same YUYV buffer, but they are
+  // interpreted as different numbers of channels for the purpose of reading Y
+  // and UV values.
+  //
+  // Args:
+  //    |yx_input|:
+  //        The input 2D texture for reading Y from the 1st channel.  The
+  //        texture must be of format GR88.
+  //    |yuyv_input|:
+  //        The input 2D texture for reading U and V from the 2nd and 4th
+  //        channels respectively.  The texture must be of format ABGR8888.
+  //        The pixel dimension must be (|yx_input|.width / 2, |yx_input|).
+  //    |y_output|:
+  //        The output 2D texture for Y plane.  The texture must be of format
+  //        R8.
+  //    |uv_output|:
+  //        The output 2D texture for UV plane.  The texture must be of format
+  //        GR8.  The pixel dimension must be
+  //        (|y_output|.width / 2, |y_output|.height / 2).
+  //
+  // Returns:
+  //    true if GL commands are successfully submitted; false otherwise.
+  bool YUYVToNV12(const Texture2D& yx_input,
+                  const Texture2D& yuyv_input,
+                  const Texture2D& y_output,
+                  const Texture2D& uv_output);
+
   // Apply the Gamma curve: OUT = pow(IN, 1/|gamma_value|) to each of the RGB
   // channels of |rgba_input|.  The results are written to |rgba_output|.
   //
@@ -171,7 +211,60 @@ class GpuImageProcessor {
                    const Texture2D& rgba_input,
                    const Texture2D& rgba_output);
 
+  // Crop the YUV input image with planes given by |y_input| and |uv_input|
+  // following the rectangle specified by |crop_region|, and scale and write the
+  // result to the YUV output image with planes given by |y_output| and
+  // |uv_output| with bilinear filtering.
+  //
+  // Args:
+  //    |y_input|:
+  //        The input 2D texture for Y plane.  The texture must be of format
+  //        R8.
+  //    |uv_input|:
+  //        The input 2D texture for UV plane.  The texture must be of format
+  //        GR8.  The pixel dimension must be
+  //        (|y_input|.width / 2, |y_input|.height / 2).
+  //    |crop_region|:
+  //        The (crop_x, crop_y, crop_width, crop_height) rectangle to crop.
+  //        (crop_x, crop_y) is the top-left coordinate of the rectangle, and
+  //        (crop_width, crop_height) is the dimension of the rectangle. The
+  //        crop coordinate and dimension are normalized with respect to the
+  //        input image size.
+  //    |y_output|:
+  //        The output 2D texture for Y plane.  The texture must be of format
+  //        R8.
+  //    |uv_output|:
+  //        The output 2D texture for UV plane.  The texture must be of format
+  //        GR8.  The pixel dimension must be
+  //        (|y_output|.width / 2, |y_output|.height / 2).
+  //    |filter_mode|:
+  //        The filtering algorithm to sample the input textures.
+  //
+  // Returns:
+  //    true if GL commands are successfully submitted; false otherwise.
+  bool CropYuv(const Texture2D& y_input,
+               const Texture2D& uv_input,
+               Rect<float> crop_region,
+               const Texture2D& y_output,
+               const Texture2D& uv_output,
+               FilterMode filter_mode);
+
+  // Subsamples the chroma plane |input_uv| to produce the output chroma plane
+  // |output_uv|.
+  //
+  // Args:
+  //     |input_uv|:
+  //         The input 2D texture of format GR8 for the input UV plane.
+  //     |output_uv|:
+  //         The output 2D texture of format GB8 for the output UV plane.
+  //
+  // Returns:
+  //   true if GL commands are successfully submitted; false otherwise.
+  bool SubsampleChroma(const Texture2D& input_uv, const Texture2D& output_uv);
+
  private:
+  Sampler& GetSampler(FilterMode filter_mode);
+
   ScreenSpaceRect rect_;
 
   ShaderProgram rgba_to_nv12_program_;
@@ -181,6 +274,9 @@ class GpuImageProcessor {
   ShaderProgram nv12_to_nv12_program_;
   ShaderProgram gamma_correction_program_;
   ShaderProgram lut_program_;
+  ShaderProgram crop_yuv_program_;
+  ShaderProgram yuyv_to_nv12_program_;
+  ShaderProgram subsample_chroma_program_;
 
   Sampler nearest_clamp_to_edge_;
   Sampler linear_clamp_to_edge_;

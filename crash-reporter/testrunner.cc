@@ -1,11 +1,14 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <brillo/test_helpers.h>
-#include <gtest/gtest.h>
+#include "brillo/syslog_logging.h"
+#include "common-mk/testrunner.h"
 
 int main(int argc, char** argv) {
-  SetUpTests(&argc, argv, true);
-  return RUN_ALL_TESTS();
+  brillo::InitLog(brillo::kLogToStderr);
+  brillo::LogToString(true);
+
+  auto runner = platform2::TestRunner(argc, argv);
+  return runner.Run();
 }

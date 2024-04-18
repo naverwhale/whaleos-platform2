@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,8 +30,7 @@ bool FpFrameCommand::Run(int fd) {
         if (Result() == EC_RES_BUSY && retries < kMaxRetries) {
           retries++;
           LOG(INFO) << "Retrying FP_FRAME, attempt " << retries;
-          base::PlatformThread::Sleep(
-              base::TimeDelta::FromMilliseconds(kRetryDelayMs));
+          Sleep(base::Milliseconds(kRetryDelayMs));
           continue;
         }
       }
@@ -51,6 +50,10 @@ std::unique_ptr<std::vector<uint8_t>> FpFrameCommand::frame() {
 
 bool FpFrameCommand::EcCommandRun(int fd) {
   return EcCommand::Run(fd);
+}
+
+void FpFrameCommand::Sleep(base::TimeDelta duration) {
+  base::PlatformThread::Sleep(duration);
 }
 
 }  // namespace ec

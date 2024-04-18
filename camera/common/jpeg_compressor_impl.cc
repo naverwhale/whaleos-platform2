@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -49,6 +49,11 @@ std::unique_ptr<JpegCompressor> JpegCompressor::GetInstance(
   return std::make_unique<JpegCompressorImpl>(token);
 }
 
+// static
+bool JpegCompressor::IsSizeSupported(int width, int height) {
+  return width > 0 && height > 0 && width % 8 == 0 && height % 2 == 0;
+}
+
 JpegCompressorImpl::JpegCompressorImpl(CameraMojoChannelManagerToken* token)
     : camera_metrics_(CameraMetrics::New()),
       hw_encoder_(nullptr),
@@ -81,7 +86,7 @@ bool JpegCompressorImpl::CompressImage(const void* image,
                                        void* out_buffer,
                                        uint32_t* out_data_size,
                                        bool enable_hw_encode) {
-  if (width % 8 != 0 || height % 2 != 0) {
+  if (!IsSizeSupported(width, height)) {
     LOGF(ERROR) << "Image size can not be handled: " << width << "x" << height;
     return false;
   }
@@ -142,7 +147,7 @@ bool JpegCompressorImpl::CompressImageFromHandle(buffer_handle_t input,
                                                  uint32_t app1_size,
                                                  uint32_t* out_data_size,
                                                  bool enable_hw_encode) {
-  if (width % 8 != 0 || height % 2 != 0) {
+  if (!IsSizeSupported(width, height)) {
     LOGF(ERROR) << "Input image size can not be handled: " << width << "x"
                 << height;
     return false;
@@ -158,8 +163,29 @@ bool JpegCompressorImpl::CompressImageFromHandle(buffer_handle_t input,
     return false;
   }
 
-  cros::CameraBufferManager* buffer_manager =
-      cros::CameraBufferManager::GetInstance();
+  ScopedMapping input_mapping(input);
+  if (!input_mapping.is_valid()) {
+    LOGF(ERROR) << "Failed to map input buffer";
+    return false;
+  }
+  if (input_mapping.v4l2_format() != V4L2_PIX_FMT_NV12 &&
+      input_mapping.v4l2_format() != V4L2_PIX_FMT_NV12M) {
+    LOGF(ERROR) << "Unexpected input buffer format: "
+                << FormatToString(input_mapping.v4l2_format());
+    return false;
+  }
+
+  ScopedMapping output_mapping(output);
+  if (!output_mapping.is_valid()) {
+    LOGF(ERROR) << "Failed to map output buffer";
+    return false;
+  }
+  if (output_mapping.num_planes() != 1) {
+    LOGF(ERROR) << "Unexpected output buffer format: "
+                << FormatToString(output_mapping.v4l2_format());
+    return false;
+  }
+
   auto method_used = [&]() -> const char* {
     if (enable_hw_encode) {
       // Try HW encode.
@@ -173,35 +199,19 @@ bool JpegCompressorImpl::CompressImageFromHandle(buffer_handle_t input,
       LOGF(WARNING) << "Tried HW encode but failed. Fall back to SW encode";
     }
 
-    struct android_ycbcr mapped_input;
-    void* output_ptr;
-    auto status =
-        buffer_manager->LockYCbCr(input, 0, 0, 0, 0, 0, &mapped_input);
-    if (status != 0) {
-      LOGF(WARNING) << "Failed to lock input buffer handle for sw encode.";
-      return nullptr;
-    }
-    status = buffer_manager->Lock(output, 0, 0, 0, 0, 0, &output_ptr);
-    if (status != 0) {
-      LOGF(WARNING) << "Failed to lock output buffer handle for sw encode.";
-      return nullptr;
-    }
-
-    auto input_format = buffer_manager->GetV4L2PixelFormat(input);
-    auto output_buffer_size = buffer_manager->GetPlaneSize(output, 0);
+    android_ycbcr input_ycbcr = {
+        .y = input_mapping.plane(0).addr,
+        .cb = input_mapping.plane(1).addr,
+        .cr = input_mapping.plane(1).addr + 1,
+        .ystride = input_mapping.plane(0).stride,
+        .cstride = input_mapping.plane(1).stride,
+        .chroma_step = 2,
+    };
     // Try SW encode.
     bool is_success =
-        EncodeSw(mapped_input, input_format, output_ptr, output_buffer_size,
+        EncodeSw(input_ycbcr, input_mapping.v4l2_format(),
+                 output_mapping.plane(0).addr, output_mapping.plane(0).size,
                  width, height, quality, app1_ptr, app1_size, out_data_size);
-
-    status = buffer_manager->Unlock(input);
-    if (status != 0) {
-      LOGF(WARNING) << "Failed to unlock input buffer handle for sw encode.";
-    }
-    status = buffer_manager->Unlock(output);
-    if (status != 0) {
-      LOGF(WARNING) << "Failed to unlock output buffer handle for sw encode.";
-    }
 
     if (is_success) {
       return "software";
@@ -232,7 +242,7 @@ bool JpegCompressorImpl::CompressImageFromMemory(void* input,
                                                  const void* app1_ptr,
                                                  uint32_t app1_size,
                                                  uint32_t* out_data_size) {
-  if (width % 8 != 0 || height % 2 != 0) {
+  if (!IsSizeSupported(width, height)) {
     LOGF(ERROR) << "Input image size can not be handled: " << width << "x"
                 << height;
     return false;
@@ -278,12 +288,7 @@ bool JpegCompressorImpl::GenerateThumbnail(const void* image,
                                            uint32_t out_buffer_size,
                                            void* out_buffer,
                                            uint32_t* out_data_size) {
-  if (thumbnail_width == 0 || thumbnail_height == 0) {
-    LOGF(ERROR) << "Invalid thumbnail resolution " << thumbnail_width << "x"
-                << thumbnail_height;
-    return false;
-  }
-  if (thumbnail_width % 8 != 0 || thumbnail_height % 2 != 0) {
+  if (!IsSizeSupported(thumbnail_width, thumbnail_height)) {
     LOGF(ERROR) << "Image size can not be handled: " << thumbnail_width << "x"
                 << thumbnail_height;
     return false;
@@ -555,10 +560,12 @@ bool JpegCompressorImpl::EncodeHw(buffer_handle_t input_handle,
     return false;
   }
 
+  const uint64_t input_modifier =
+      cros::CameraBufferManager::GetModifier(input_handle);
   int status = hw_encoder_->EncodeSync(
       input_format, std::move(input_planes), std::move(output_planes),
       static_cast<const uint8_t*>(app1_ptr), app1_size, width, height, quality,
-      out_data_size);
+      input_modifier, out_data_size);
   if (status == cros::JpegEncodeAccelerator::TRY_START_AGAIN) {
     // There might be some mojo errors. We will give a second try.
     LOGF(WARNING) << "EncodeSync() returns TRY_START_AGAIN.";
@@ -567,7 +574,7 @@ bool JpegCompressorImpl::EncodeHw(buffer_handle_t input_handle,
       status = hw_encoder_->EncodeSync(
           input_format, std::move(input_planes), std::move(output_planes),
           static_cast<const uint8_t*>(app1_ptr), app1_size, width, height,
-          quality, out_data_size);
+          quality, input_modifier, out_data_size);
     } else {
       LOGF(ERROR) << "JPEG encode accelerator can't be started.";
     }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -35,32 +35,6 @@ fi
 
 if [ -n "${ALLOWED_DEVICES}" ]; then
   set -- "$@" --devices-allowed="${ALLOWED_DEVICES}"
-fi
-
-if [ -n "${SHILL_PASSIVE_MODE}" ]; then
-  set -- "$@" --passive-mode
-fi
-
-if [ -n "${SHILL_PREPEND_DNS_SERVERS}" ]; then
-  set -- "$@" --prepend-dns-servers="${SHILL_PREPEND_DNS_SERVERS}"
-fi
-
-if [ -n "${SHILL_ACCEPT_HOSTNAME_FROM}" ]; then
-  set -- "$@" --accept-hostname-from="${SHILL_ACCEPT_HOSTNAME_FROM}"
-fi
-
-if [ -n "${SHILL_MINIMUM_MTU}" ]; then
-  set -- "$@" --minimum-mtu="${SHILL_MINIMUM_MTU}"
-fi
-
-if [ -n "${DHCPV6_ENABLED_DEVICES}" ]; then
-  set -- "$@" --dhcpv6-enabled-devices="${DHCPV6_ENABLED_DEVICES}"
-fi
-
-# If OOBE has not completed (i.e. EULA not agreed to), do not run
-# portal checks
-if [ ! -f /home/chronos/.oobe_completed ]; then
-  set -- "$@" --portal-list=
 fi
 
 # Run shill as shill user/group in a minijail:

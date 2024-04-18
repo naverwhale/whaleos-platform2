@@ -1,9 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef HERMES_EUICC_MANAGER_INTERFACE_H_
 #define HERMES_EUICC_MANAGER_INTERFACE_H_
+
+#include <optional>
 
 #include "hermes/euicc_slot_info.h"
 
@@ -21,7 +23,7 @@ class EuiccManagerInterface {
   virtual void OnEuiccRemoved(uint8_t physical_slot) = 0;
 
   virtual void OnLogicalSlotUpdated(uint8_t physical_slot,
-                                    base::Optional<uint8_t> logical_slot) = 0;
+                                    std::optional<uint8_t> logical_slot) = 0;
 };
 
 }  // namespace hermes

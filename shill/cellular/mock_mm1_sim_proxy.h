@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/cellular/mm1_sim_proxy_interface.h"
@@ -23,30 +22,18 @@ class MockSimProxy : public SimProxyInterface {
 
   ~MockSimProxy() override;
 
-  MOCK_METHOD(void,
-              SendPin,
-              (const std::string&, Error*, const ResultCallback&, int),
-              (override));
+  MOCK_METHOD(void, SendPin, (const std::string&, ResultCallback), (override));
   MOCK_METHOD(void,
               SendPuk,
-              (const std::string&,
-               const std::string&,
-               Error*,
-               const ResultCallback&,
-               int),
+              (const std::string&, const std::string&, ResultCallback),
               (override));
-  MOCK_METHOD(
-      void,
-      EnablePin,
-      (const std::string&, const bool, Error*, const ResultCallback&, int),
-      (override));
+  MOCK_METHOD(void,
+              EnablePin,
+              (const std::string&, const bool, ResultCallback),
+              (override));
   MOCK_METHOD(void,
               ChangePin,
-              (const std::string&,
-               const std::string&,
-               Error*,
-               const ResultCallback&,
-               int),
+              (const std::string&, const std::string&, ResultCallback),
               (override));
 };
 

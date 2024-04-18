@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,6 +28,7 @@ const char* kAllowlist[] = {
     "ahci",      // AHCI driver
     "igb",       // Intel Gigabit Ethernet driver
     "igc",       // Intel I225-LM/I225-V Ethernet controller driver
+    "atlantic",  // Aquantia 10gbps Ethernet NIC driver
 };
 
 }  // namespace
@@ -100,9 +101,9 @@ int SysfsUtils::OnInit(void) {
     return EX_IOERR;
   }
 
-  for (auto drvr_name : kAllowlist) {
-    if (base::WriteFile(allowlist_path_, drvr_name, sizeof(drvr_name)) ==
-        sizeof(drvr_name))
+  for (const char* drvr_name : kAllowlist) {
+    auto len = strlen(drvr_name);
+    if (base::WriteFile(allowlist_path_, drvr_name, len) == len)
       LOG(INFO) << "Allowed " << drvr_name;
     else
       PLOG(ERROR) << "Couldn't allow " << drvr_name;

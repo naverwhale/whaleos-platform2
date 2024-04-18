@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,18 @@
 // Generic utility functions that need to be shared between the vsh client
 // and server.
 
+#include <string>
+
 #include <stddef.h>
 #include <stdint.h>
 #include <unistd.h>
 
 #include <base/files/scoped_file.h>
+#include <base/logging.h>
 
 #include <google/protobuf/message_lite.h>
 
-namespace vm_tools {
-namespace vsh {
+namespace vm_tools::vsh {
 
 // Path to the /dev node for the controlling terminal.
 constexpr char kDevTtyPath[] = "/dev/tty";
@@ -44,7 +46,13 @@ bool RecvMessage(int sockfd, google::protobuf::MessageLite* message);
 // Posts a task to the main message loop to shut down.
 void Shutdown();
 
-}  // namespace vsh
-}  // namespace vm_tools
+// Format a log message for dmesg and write it to the given fd.
+bool WriteKernelLogToFd(int fd,
+                        logging::LogSeverity severity,
+                        std::string_view prefix,
+                        const std::string& message,
+                        size_t message_start);
+
+}  // namespace vm_tools::vsh
 
 #endif  // VM_TOOLS_VSH_UTILS_H_

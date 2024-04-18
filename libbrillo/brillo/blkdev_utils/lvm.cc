@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,8 +21,10 @@
 
 #include "brillo/blkdev_utils/lvm.h"
 
+#include <optional>
+
 #include <base/logging.h>
-#include <base/optional.h>
+#include <base/strings/pattern.h>
 
 namespace brillo {
 
@@ -37,53 +39,57 @@ bool LogicalVolumeManager::ValidatePhysicalVolume(
     const base::FilePath& device_path, std::string* volume_group_name) {
   std::string output;
 
-  if (!lvm_->RunProcess({"/sbin/pvdisplay", "-C", "--reportformat", "json",
-                         device_path.value()},
-                        &output)) {
-    LOG(ERROR) << "Failed to get output from pvdisplay";
+  if (!lvm_->RunProcess(
+          {"/sbin/pvs", "--reportformat", "json", device_path.value()},
+          &output)) {
+    LOG(ERROR) << "Failed to get output from pvs";
     return false;
   }
 
-  base::Optional<base::Value> report_contents =
+  std::optional<base::Value> pv_value =
       lvm_->UnwrapReportContents(output, "pv");
-  base::DictionaryValue* pv_dictionary;
 
-  if (!report_contents || !report_contents->GetAsDictionary(&pv_dictionary)) {
+  if (!pv_value || !pv_value->is_dict()) {
     LOG(ERROR) << "Failed to get report contents";
     return false;
   }
+  const auto& pv_dictionary = pv_value->GetDict();
 
-  std::string pv_name;
-  if (!pv_dictionary->GetString("pv_name", &pv_name) &&
-      pv_name != device_path.value()) {
+  const std::string* pv_name = pv_dictionary.FindString("pv_name");
+  if (!pv_name) {
+    LOG(ERROR) << "Missing value \"pv_name\".";
+    return false;
+  } else if (*pv_name != device_path.value()) {
     LOG(ERROR) << "Mismatched value: expected: " << device_path
-               << " actual: " << pv_name;
+               << " actual: " << *pv_name;
     return false;
   }
 
   if (volume_group_name) {
-    if (!pv_dictionary->GetString("vg_name", volume_group_name)) {
+    const std::string* vg_name = pv_dictionary.FindString("vg_name");
+    if (!vg_name) {
       LOG(ERROR) << "Failed to fetch volume group name";
       return false;
     }
+    *volume_group_name = *vg_name;
   }
 
   return true;
 }
 
-base::Optional<PhysicalVolume> LogicalVolumeManager::GetPhysicalVolume(
+std::optional<PhysicalVolume> LogicalVolumeManager::GetPhysicalVolume(
     const base::FilePath& device_path) {
   return ValidatePhysicalVolume(device_path, nullptr)
-             ? base::make_optional(PhysicalVolume(device_path, lvm_))
-             : base::nullopt;
+             ? std::make_optional(PhysicalVolume(device_path, lvm_))
+             : std::nullopt;
 }
 
-base::Optional<VolumeGroup> LogicalVolumeManager::GetVolumeGroup(
+std::optional<VolumeGroup> LogicalVolumeManager::GetVolumeGroup(
     const PhysicalVolume& pv) {
   std::string vg_name;
   return ValidatePhysicalVolume(pv.GetPath(), &vg_name)
-             ? base::make_optional(VolumeGroup(vg_name, lvm_))
-             : base::nullopt;
+             ? std::make_optional(VolumeGroup(vg_name, lvm_))
+             : std::nullopt;
 }
 
 bool LogicalVolumeManager::ValidateLogicalVolume(const VolumeGroup& vg,
@@ -94,137 +100,168 @@ bool LogicalVolumeManager::ValidateLogicalVolume(const VolumeGroup& vg,
 
   std::string pool_lv_check = is_thinpool ? "pool_lv=\"\"" : "pool_lv!=\"\"";
 
-  if (!lvm_->RunProcess({"/sbin/lvdisplay", "-S", pool_lv_check, "-C",
-                         "--reportformat", "json", vg_name + "/" + lv_name},
+  if (!lvm_->RunProcess({"/sbin/lvs", "-S", pool_lv_check, "--reportformat",
+                         "json", vg_name + "/" + lv_name},
                         &output)) {
-    LOG(ERROR) << "Failed to get output from lvdisplay";
+    LOG(ERROR) << "Failed to get output from lvs";
     return false;
   }
 
-  base::Optional<base::Value> report_contents =
+  std::optional<base::Value> lv_value =
       lvm_->UnwrapReportContents(output, "lv");
-  base::DictionaryValue* lv_dictionary;
 
-  if (!report_contents || !report_contents->GetAsDictionary(&lv_dictionary)) {
+  if (!lv_value || !lv_value->is_dict()) {
     LOG(ERROR) << "Failed to get report contents";
     return false;
   }
+  const auto& lv_dictionary = lv_value->GetDict();
 
-  std::string output_lv_name;
-  if (!lv_dictionary->GetString("lv_name", &output_lv_name) &&
-      output_lv_name != lv_name) {
+  const std::string* output_lv_name = lv_dictionary.FindString("lv_name");
+  if (!output_lv_name) {
+    LOG(ERROR) << "Missing value \"lv_name\".";
+    return false;
+  } else if (*output_lv_name != lv_name) {
     LOG(ERROR) << "Mismatched value: expected: " << lv_name
-               << " actual: " << output_lv_name;
+               << " actual: " << *output_lv_name;
     return false;
   }
 
   return true;
 }
 
-base::Optional<Thinpool> LogicalVolumeManager::GetThinpool(
+std::optional<Thinpool> LogicalVolumeManager::GetThinpool(
     const VolumeGroup& vg, const std::string& thinpool_name) {
   return ValidateLogicalVolume(vg, thinpool_name, true /* is_thinpool */)
-             ? base::make_optional(Thinpool(thinpool_name, vg.GetName(), lvm_))
-             : base::nullopt;
+             ? std::make_optional(Thinpool(thinpool_name, vg.GetName(), lvm_))
+             : std::nullopt;
 }
 
-base::Optional<LogicalVolume> LogicalVolumeManager::GetLogicalVolume(
+std::optional<LogicalVolume> LogicalVolumeManager::GetLogicalVolume(
     const VolumeGroup& vg, const std::string& lv_name) {
   return ValidateLogicalVolume(vg, lv_name, false /* is_thinpool */)
-             ? base::make_optional(LogicalVolume(lv_name, vg.GetName(), lvm_))
-             : base::nullopt;
+             ? std::make_optional(LogicalVolume(lv_name, vg.GetName(), lvm_))
+             : std::nullopt;
 }
 
 std::vector<LogicalVolume> LogicalVolumeManager::ListLogicalVolumes(
-    const VolumeGroup& vg) {
+    const VolumeGroup& vg, const std::string& pattern) {
   std::string output;
   std::string vg_name = vg.GetName();
   std::vector<LogicalVolume> lv_vector;
 
-  if (!lvm_->RunProcess({"/sbin/lvdisplay", "-S", "pool_lv!=\"\"", "-C",
-                         "--reportformat", "json", vg_name},
+  if (!lvm_->RunProcess({"/sbin/lvs", "-S", "pool_lv!=\"\"", "--reportformat",
+                         "json", vg_name},
                         &output)) {
-    LOG(ERROR) << "Failed to get output from lvdisplay";
+    LOG(ERROR) << "Failed to get output from lvs";
     return lv_vector;
   }
 
-  base::Optional<base::Value> report_contents =
-      lvm_->UnwrapReportContents(output, "lv");
-  base::ListValue* lv_list;
-  if (!report_contents || !report_contents->GetAsList(&lv_list)) {
+  std::optional<base::Value> lv_list = lvm_->UnwrapReportContents(output, "lv");
+  if (!lv_list || !lv_list->is_list()) {
     LOG(ERROR) << "Failed to get report contents";
     return lv_vector;
   }
 
-  for (size_t i = 0; i < lv_list->GetSize(); i++) {
-    base::DictionaryValue* lv_dictionary;
-    if (!lv_list->GetDictionary(i, &lv_dictionary)) {
+  for (const auto& lv_value : lv_list->GetList()) {
+    if (!lv_value.is_dict()) {
       LOG(ERROR) << "Failed to get dictionary value for physical volume";
       continue;
     }
+    const auto& lv_dictionary = lv_value.GetDict();
 
-    std::string output_lv_name;
-    if (!lv_dictionary->GetString("lv_name", &output_lv_name)) {
+    const std::string* output_lv_name = lv_dictionary.FindString("lv_name");
+    if (!output_lv_name) {
       LOG(ERROR) << "Failed to get logical volume name";
       continue;
     }
 
-    lv_vector.push_back(LogicalVolume(output_lv_name, vg_name, lvm_));
+    if (!pattern.empty() && !base::MatchPattern(*output_lv_name, pattern)) {
+      LOG(INFO) << "Logical volume=" << *output_lv_name
+                << " does not match pattern=" << pattern;
+      continue;
+    }
+
+    lv_vector.push_back(LogicalVolume(*output_lv_name, vg_name, lvm_));
   }
 
   return lv_vector;
 }
 
-base::Optional<PhysicalVolume> LogicalVolumeManager::CreatePhysicalVolume(
+std::optional<PhysicalVolume> LogicalVolumeManager::CreatePhysicalVolume(
     const base::FilePath& device_path) {
   return lvm_->RunCommand({"pvcreate", "-ff", "--yes", device_path.value()})
-             ? base::make_optional(PhysicalVolume(device_path, lvm_))
-             : base::nullopt;
+             ? std::make_optional(PhysicalVolume(device_path, lvm_))
+             : std::nullopt;
 }
 
-base::Optional<VolumeGroup> LogicalVolumeManager::CreateVolumeGroup(
+std::optional<VolumeGroup> LogicalVolumeManager::CreateVolumeGroup(
     const PhysicalVolume& pv, const std::string& vg_name) {
   return lvm_->RunCommand(
              {"vgcreate", "-p", "1", vg_name, pv.GetPath().value()})
-             ? base::make_optional(VolumeGroup(vg_name, lvm_))
-             : base::nullopt;
+             ? std::make_optional(VolumeGroup(vg_name, lvm_))
+             : std::nullopt;
 }
 
-base::Optional<Thinpool> LogicalVolumeManager::CreateThinpool(
-    const VolumeGroup& vg, const base::DictionaryValue& config) {
-  std::vector<std::string> cmd = {"lvcreate"};
-  std::string size, metadata_size, name;
-  if (!config.GetString("size", &size) || !config.GetString("name", &name) ||
-      !config.GetString("metadata_size", &metadata_size)) {
+std::optional<Thinpool> LogicalVolumeManager::CreateThinpool(
+    const VolumeGroup& vg, const base::Value& config) {
+  if (!config.is_dict()) {
     LOG(ERROR) << "Invalid configuration";
-    return base::nullopt;
+    return std::nullopt;
+  }
+  const auto& config_dict = config.GetDict();
+
+  std::vector<std::string> cmd = {"lvcreate"};
+  const std::string* size = config_dict.FindString("size");
+  const std::string* metadata_size = config_dict.FindString("metadata_size");
+  const std::string* name = config_dict.FindString("name");
+  if (!size || !name || !metadata_size) {
+    LOG(ERROR) << "Invalid configuration";
+    return std::nullopt;
   }
 
   cmd.insert(cmd.end(),
-             {"--size", size + "M", "--poolmetadatasize", metadata_size + "M",
-              "--thinpool", name, vg.GetName()});
+             {"--zero", "n", "--size", *size + "M", "--poolmetadatasize",
+              *metadata_size + "M", "--thinpool", *name, vg.GetName()});
 
   return lvm_->RunCommand(cmd)
-             ? base::make_optional(Thinpool(name, vg.GetName(), lvm_))
-             : base::nullopt;
+             ? std::make_optional(Thinpool(*name, vg.GetName(), lvm_))
+             : std::nullopt;
 }
 
-base::Optional<LogicalVolume> LogicalVolumeManager::CreateLogicalVolume(
+std::optional<LogicalVolume> LogicalVolumeManager::CreateLogicalVolume(
     const VolumeGroup& vg,
     const Thinpool& thinpool,
-    const base::DictionaryValue& config) {
+    const base::Value::Dict& config) {
   std::vector<std::string> cmd = {"lvcreate", "--thin"};
-  std::string size, name;
-  if (!config.GetString("size", &size) || !config.GetString("name", &name)) {
+  const std::string* size = config.FindString("size");
+  const std::string* name = config.FindString("name");
+  if (!size || !name) {
     LOG(ERROR) << "Invalid configuration";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  cmd.insert(cmd.end(), {"-V", size + "M", "-n", name, thinpool.GetName()});
+  cmd.insert(cmd.end(), {"-V", *size + "M", "-n", *name, thinpool.GetName()});
 
   return lvm_->RunCommand(cmd)
-             ? base::make_optional(LogicalVolume(name, vg.GetName(), lvm_))
-             : base::nullopt;
+             ? std::make_optional(LogicalVolume(*name, vg.GetName(), lvm_))
+             : std::nullopt;
+}
+
+bool LogicalVolumeManager::RemoveLogicalVolume(const VolumeGroup& vg,
+                                               const std::string& lv_name) {
+  std::optional<LogicalVolume> lv = GetLogicalVolume(vg, lv_name);
+
+  if (!lv || !lv->IsValid()) {
+    LOG(WARNING) << "Logical volume " << lv_name << " does not exist.";
+    return true;
+  }
+
+  bool ret = lv->Remove();
+  if (!ret) {
+    LOG(ERROR) << "Failed to remove logical volume.";
+  }
+
+  return ret;
 }
 
 }  // namespace brillo

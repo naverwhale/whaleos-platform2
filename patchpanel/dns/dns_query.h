@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
-#include "base/macros.h"
 #include "base/memory/ref_counted.h"
 #include "base/strings/string_piece.h"
 #include "brillo/brillo_export.h"
@@ -51,12 +51,12 @@ class BRILLO_EXPORT DnsQuery {
 
   // DnsQuery field accessors.
   uint16_t id() const;
-  base::StringPiece qname() const;
+  std::string_view qname() const;
   uint16_t qtype() const;
 
   // Returns the Question section of the query.  Used when matching the
   // response.
-  base::StringPiece question() const;
+  std::string_view question() const;
 
   // Returns the size of the question section.
   size_t question_size() const;

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -6,9 +6,10 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check_op.h>
 #include <base/containers/contains.h>
+#include <base/files/file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/numerics/safe_conversions.h>
 
@@ -36,8 +37,8 @@ int32_t CameraGPUAlgorithm::Initialize(
   callback_ops_ = callback_ops;
   // Initialize the algorithms asynchronously
   thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&CameraGPUAlgorithm::InitializeOnThread,
-                            base::Unretained(this)));
+      FROM_HERE, base::BindOnce(&CameraGPUAlgorithm::InitializeOnThread,
+                                base::Unretained(this)));
   return 0;
 }
 
@@ -90,25 +91,30 @@ void CameraGPUAlgorithm::DeregisterBuffers(const int32_t buffer_handles[],
   }
 }
 
+void CameraGPUAlgorithm::Deinitialize() {
+  if (thread_.IsRunning()) {
+    thread_.Stop();
+  }
+  callback_ops_ = nullptr;
+  is_initialized_ = false;
+}
+
 CameraGPUAlgorithm::CameraGPUAlgorithm()
     : thread_("Camera Algorithm Thread"),
       callback_ops_(nullptr),
       is_initialized_(false) {}
 
 void CameraGPUAlgorithm::InitializeOnThread() {
-  VLOGF_ENTER();
   if (!portrait_processor_.Init()) {
     LOGF(ERROR) << "Failed to initialize portrait processor";
     return;
   }
   is_initialized_ = true;
-  VLOGF_EXIT();
 }
 
 void CameraGPUAlgorithm::RequestOnThread(uint32_t req_id,
                                          std::vector<uint8_t> req_header,
                                          int32_t buffer_handle) {
-  VLOGF_ENTER();
   auto* header =
       reinterpret_cast<const CameraGPUAlgoCmdHeader*>(req_header.data());
   auto callback = [&](uint32_t status) {
@@ -117,7 +123,7 @@ void CameraGPUAlgorithm::RequestOnThread(uint32_t req_id,
   };
   if (!is_initialized_) {
     LOGF(ERROR) << "Algorithm is not initialized yet";
-    callback(EAGAIN);
+    callback(EINVAL);
     return;
   }
   if (req_header.size() < sizeof(CameraGPUAlgoCmdHeader)) {
@@ -149,13 +155,20 @@ void CameraGPUAlgorithm::RequestOnThread(uint32_t req_id,
         shm_region_map_.at(params.input_buffer_handle).Map();
     base::WritableSharedMemoryMapping output_shm_mapping =
         shm_region_map_.at(params.output_buffer_handle).Map();
-    if (!input_shm_mapping.IsValid() || !output_shm_mapping.IsValid() ||
-        !portrait_processor_.Process(
+    if (!input_shm_mapping.IsValid() || !output_shm_mapping.IsValid()) {
+      LOGF(ERROR) << "Failed to map shared memory";
+      callback(EINVAL);
+      return;
+    }
+    if (!portrait_processor_.Process(
             req_id, portrait_request,
             input_shm_mapping.GetMemoryAs<const uint8_t>(),
             output_shm_mapping.GetMemoryAs<uint8_t>())) {
-      LOGF(ERROR) << "Run portrait processor failed";
-      callback(EINVAL);
+      // We process portrait images using Google3 portrait library. Not
+      // processing cases is primarily due to no human face being detected.
+      // We assume the failure here is not containing a clear face.
+      LOGF(WARNING) << "Portrait processor failed with no human face detected.";
+      callback(ECANCELED);
       return;
     }
     callback(0);
@@ -165,7 +178,6 @@ void CameraGPUAlgorithm::RequestOnThread(uint32_t req_id,
                        header->command);
     callback(EINVAL);
   }
-  VLOGF_EXIT();
 }
 
 static int32_t Initialize(const camera_algorithm_callback_ops_t* callback_ops) {
@@ -188,6 +200,10 @@ static void DeregisterBuffers(const int32_t buffer_handles[], uint32_t size) {
   CameraGPUAlgorithm::GetInstance()->DeregisterBuffers(buffer_handles, size);
 }
 
+static void Deinitialize() {
+  return CameraGPUAlgorithm::GetInstance()->Deinitialize();
+}
+
 }  // namespace cros
 
 extern "C" {
@@ -195,5 +211,6 @@ camera_algorithm_ops_t CAMERA_ALGORITHM_MODULE_INFO_SYM CROS_CAMERA_EXPORT = {
     .initialize = cros::Initialize,
     .register_buffer = cros::RegisterBuffer,
     .request = cros::Request,
-    .deregister_buffers = cros::DeregisterBuffers};
+    .deregister_buffers = cros::DeregisterBuffers,
+    .deinitialize = cros::Deinitialize};
 }

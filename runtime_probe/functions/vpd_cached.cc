@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,7 +30,7 @@ VPDCached::DataType VPDCached::EvalImpl() const {
   PrependToDVKey(&*dict_value, kKeyPrefix);
 
   VPDCached::DataType result{};
-  result.push_back(std::move(*dict_value));
+  result.Append(std::move(*dict_value));
   return result;
 }
 

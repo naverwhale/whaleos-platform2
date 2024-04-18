@@ -1,11 +1,18 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//common-mk/generate-dbus-adaptors.gni")
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":runtime_probe" ]
+  deps = [
+    ":install_minijail_conf",
+    ":runtime_probe",
+    "//runtime_probe/dbus",
+    "//runtime_probe/init",
+    "//runtime_probe/sandbox",
+  ]
   if (use.test) {
     deps += [ ":unittest_runner" ]
   }
@@ -15,115 +22,99 @@ group("all") {
       ":runtime_probe_resultchecker_fuzzer",
     ]
   }
-  if (use.factory_runtime_probe) {
-    deps += [ ":factory_runtime_probe_installer" ]
-  }
 }
 
 pkg_config("target_defaults") {
-  # NOSORT
   pkg_deps = [
+    "cros_healthd-client",
     "libbrillo",
     "libchrome",
     "libcros_config",
-    "libpcrecpp",
+    "libmojo",
     "libshill-client",
-
-    # system_api depends on protobuf (or protobuf-lite). It must appear
-    # before protobuf here or the linker flags won't be in the right
-    # order.
-    "system_api",
+    "mojo_service_manager",
     "protobuf",
-    "vboot_host",
+    "system_api",
   ]
-  defines = [ "USE_FACTORY_RUNTIME_PROBE=${use.factory_runtime_probe}" ]
 }
 
-static_library("libruntime_probe") {
+install_config("install_minijail_conf") {
+  sources = [ "minijail/runtime_probe.conf" ]
+  install_path = "minijail_conf"
+}
+
+# TODO(chungsheng): We should consider moving these into a subdirectory.
+source_set("lib") {
   sources = [
+    "avl_probe_config_loader.cc",
     "component_category.cc",
     "field_converter.cc",
-    "function_templates/network.cc",
-    "function_templates/storage.cc",
-    "functions/all_functions.cc",
-    "functions/ata_storage.cc",
-    "functions/cellular_network.cc",
-    "functions/ectool_i2cread.cc",
-    "functions/edid.cc",
-    "functions/ethernet_network.cc",
-    "functions/generic_battery.cc",
-    "functions/generic_network.cc",
-    "functions/generic_storage.cc",
-    "functions/input_device.cc",
-    "functions/memory.cc",
-    "functions/mmc_storage.cc",
-    "functions/nvme_storage.cc",
-    "functions/sequence.cc",
-    "functions/sysfs.cc",
-    "functions/usb_camera.cc",
-    "functions/vpd_cached.cc",
-    "functions/wireless_network.cc",
+    "generic_probe_config_loader.cc",
     "probe_config.cc",
-    "probe_config_loader_impl.cc",
+    "probe_config_loader.cc",
     "probe_function.cc",
     "probe_function_argument.cc",
     "probe_result_checker.cc",
     "probe_statement.cc",
-    "system_property_impl.cc",
-    "utils/edid.cc",
-    "utils/file_utils.cc",
-    "utils/input_device.cc",
-    "utils/pipe_utils.cc",
-    "utils/type_utils.cc",
-    "utils/value_utils.cc",
+    "ssfc_probe_config_loader.cc",
   ]
-  configs += [
-    ":target_defaults",
-    "system:libsystem_common_pkg_deps",
+  configs += [ ":target_defaults" ]
+  deps = [
+    "//runtime_probe/functions",
+    "//runtime_probe/system:system_base",
+    "//runtime_probe/utils",
   ]
-  deps = [ "system:libsystem" ]
+}
+
+source_set("daemon") {
+  sources = [ "daemon.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":dbus-adaptors" ]
 }
 
 executable("runtime_probe") {
   sources = [ "runtime_probe.cc" ]
-  configs += [
-    ":target_defaults",
-    "system:libsystem_common_pkg_deps",
+  configs += [ ":target_defaults" ]
+  assert_no_deps = [ "//runtime_probe/system:context_factory" ]
+  install_path = "bin"
+  deps = [
+    ":daemon",
+    ":lib",
+    "//runtime_probe/system:context_production",
   ]
-  deps = [ ":libruntime_probe" ]
-  if (use.factory_runtime_probe) {
-    output_name = "factory_runtime_probe"
-  } else {
-    sources += [ "daemon.cc" ]
-  }
 }
 
 if (use.test) {
   executable("unittest_runner") {
     sources = [
+      "avl_probe_config_loader_test.cc",
+      "component_category_test.cc",
+      "daemon_test.cc",
       "field_converter_test.cc",
-      "functions/sequence_test.cc",
-      "functions/sysfs_test.cc",
-      "probe_config_loader_impl_test.cc",
+      "generic_probe_config_loader_test.cc",
       "probe_config_test.cc",
       "probe_function_argument_test.cc",
       "probe_result_checker_test.cc",
       "probe_statement_test.cc",
-      "utils/file_utils_test.cc",
+      "ssfc_probe_config_loader_test.cc",
     ]
     configs += [
-      "//common-mk:test",
       ":target_defaults",
-      "system:libsystem_test_pkg_deps",
+      "//common-mk:test",
     ]
     data = [
       "testdata/probe_config.json",
       "testdata/test.txt",
     ]
+    run_test = true
     deps = [
-      ":libruntime_probe",
-      "system:libsystem_test",
+      ":daemon",
+      ":lib",
       "//common-mk/testrunner",
+      "//runtime_probe/function_templates:test",
+      "//runtime_probe/functions:test",
+      "//runtime_probe/system:test_utils",
+      "//runtime_probe/utils:test",
     ]
   }
 }
@@ -132,32 +123,19 @@ if (use.fuzzer) {
   executable("runtime_probe_resultchecker_fuzzer") {
     sources = [ "runtime_probe_resultchecker_fuzzer.cc" ]
     configs += [ "//common-mk/common_fuzzer" ]
-    deps = [ ":libruntime_probe" ]
+    deps = [ ":lib" ]
     pkg_deps = [ "libchrome-test" ]
   }
   executable("runtime_probe_probestatement_fuzzer") {
     sources = [ "runtime_probe_probestatement_fuzzer.cc" ]
     configs += [ "//common-mk/common_fuzzer" ]
-    deps = [ ":libruntime_probe" ]
+    deps = [ ":lib" ]
     pkg_deps = [ "libchrome-test" ]
   }
 }
 
-if (use.factory_runtime_probe) {
-  action("factory_runtime_probe_installer") {
-    script = "bundler.py"
-    deps = [ ":runtime_probe" ]
-    inputs = [ "$root_build_dir/factory_runtime_probe" ]
-    outputs = [ "$root_build_dir/factory_runtime_probe_installer" ]
-    args = [
-             "--root-dir",
-             getenv("SYSROOT"),
-             "--target-path",
-           ] + inputs +
-           [
-             "--bundle-description",
-             "Installer of the standalone version of factory_runtime_probe.",
-             "--output-path",
-           ] + outputs
-  }
+generate_dbus_adaptors("dbus-adaptors") {
+  sources = [ "dbus_bindings/org.chromium.RuntimeProbe.xml" ]
+  dbus_adaptors_out_dir = "include/runtime_probe/dbus_adaptors"
+  dbus_service_config = "dbus_bindings/dbus-service-config.json"
 }

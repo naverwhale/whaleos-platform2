@@ -1,10 +1,12 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
 
 #include "cros-camera/camera_face_detection.h"
+
+#include <optional>
 
 #include <base/at_exit.h>
 #include <gtest/gtest.h>
@@ -16,7 +18,7 @@ TEST(FaceDetector, GetCoordinateTransformTest) {
     Size src{1280, 720};
     Size dst{1920, 1080};
 
-    base::Optional<std::tuple<float, float, float>> transform =
+    std::optional<std::tuple<float, float, float>> transform =
         FaceDetector::GetCoordinateTransform(src, dst);
 
     const float scale = std::get<0>(*transform);
@@ -32,7 +34,7 @@ TEST(FaceDetector, GetCoordinateTransformTest) {
     Size src{1280, 720};
     Size dst{2560, 1920};
 
-    base::Optional<std::tuple<float, float, float>> transform =
+    std::optional<std::tuple<float, float, float>> transform =
         FaceDetector::GetCoordinateTransform(src, dst);
 
     const float scale = std::get<0>(*transform);
@@ -48,7 +50,7 @@ TEST(FaceDetector, GetCoordinateTransformTest) {
     Size src{640, 480};
     Size dst{1920, 1080};
 
-    base::Optional<std::tuple<float, float, float>> transform =
+    std::optional<std::tuple<float, float, float>> transform =
         FaceDetector::GetCoordinateTransform(src, dst);
 
     const float scale = std::get<0>(*transform);
@@ -64,7 +66,7 @@ TEST(FaceDetector, GetCoordinateTransformTest) {
     Size src{640, 360};
     Size dst{640, 480};
 
-    base::Optional<std::tuple<float, float, float>> transform =
+    std::optional<std::tuple<float, float, float>> transform =
         FaceDetector::GetCoordinateTransform(src, dst);
 
     const float scale = std::get<0>(*transform);
@@ -80,7 +82,7 @@ TEST(FaceDetector, GetCoordinateTransformTest) {
     Size src{960, 720};
     Size dst{1280, 720};
 
-    base::Optional<std::tuple<float, float, float>> transform =
+    std::optional<std::tuple<float, float, float>> transform =
         FaceDetector::GetCoordinateTransform(src, dst);
 
     const float scale = std::get<0>(*transform);
@@ -96,7 +98,7 @@ TEST(FaceDetector, GetCoordinateTransformTest) {
     Size src{1600, 1200};
     Size dst{1920, 1080};
 
-    base::Optional<std::tuple<float, float, float>> transform =
+    std::optional<std::tuple<float, float, float>> transform =
         FaceDetector::GetCoordinateTransform(src, dst);
 
     ASSERT_FALSE(transform.has_value());

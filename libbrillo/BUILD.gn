@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -19,10 +19,12 @@ group("all") {
       ":libbrillo_tests",
       ":libinstallattributes_tests",
       ":libpolicy_tests",
+      ":secure_blob_test_runner",
     ]
   }
   if (use.fuzzer) {
     deps += [
+      ":libbrillo_cryptohome_fuzzer",
       ":libbrillo_data_encoding_fuzzer",
       ":libbrillo_dbus_data_serialization_fuzzer",
       ":libbrillo_http_form_data_fuzzer",
@@ -34,6 +36,7 @@ group("all") {
 default_pkg_deps = [ "libchrome" ]
 pkg_config("target_defaults_pkg_deps") {
   pkg_deps = default_pkg_deps
+  defines = [ "USE_ENTERPRISE_ROLLBACK_REVEN=${use.enterprise_rollback_reven}" ]
 }
 
 config("target_defaults") {
@@ -41,7 +44,7 @@ config("target_defaults") {
   include_dirs = [ "../libbrillo" ]
   defines = [
     "USE_DBUS=${use.dbus}",
-    "USE_RTTI_FOR_TYPE_TAGS",
+    "USE_RTTI_FOR_TYPE_TAGS=1",
   ]
 }
 
@@ -66,6 +69,7 @@ libbrillo_sublibs = [
     sources = [
       "brillo/asynchronous_signal_handler.cc",
       "brillo/backoff_entry.cc",
+      "brillo/cpuinfo.cc",
       "brillo/daemons/daemon.cc",
       "brillo/data_encoding.cc",
       "brillo/errors/error.cc",
@@ -74,6 +78,8 @@ libbrillo_sublibs = [
       "brillo/files/file_util.cc",
       "brillo/files/safe_fd.cc",
       "brillo/flag_helper.cc",
+      "brillo/hash/MurmurHash3.cc",
+      "brillo/kernel_config_utils.cc",
       "brillo/key_value_store.cc",
       "brillo/message_loops/base_message_loop.cc",
       "brillo/message_loops/message_loop.cc",
@@ -81,18 +87,18 @@ libbrillo_sublibs = [
       "brillo/mime_utils.cc",
       "brillo/osrelease_reader.cc",
       "brillo/process/process.cc",
-      "brillo/process/process_information.cc",
       "brillo/process/process_reaper.cc",
       "brillo/scoped_umask.cc",
       "brillo/secure_blob.cc",
       "brillo/secure_string.cc",
       "brillo/strings/string_utils.cc",
       "brillo/syslog_logging.cc",
+      "brillo/timers/alarm_timer.cc",
       "brillo/timezone/tzif_parser.cc",
+      "brillo/tracing.cc",
       "brillo/type_name_undecorate.cc",
       "brillo/url_utils.cc",
       "brillo/userdb_utils.cc",
-      "brillo/value_conversion.cc",
     ]
     sources += [
       "brillo/whaleos_util.cc",
@@ -112,18 +118,29 @@ libbrillo_sublibs = [
         "brillo/dbus/dbus_signal.cc",
         "brillo/dbus/exported_object_manager.cc",
         "brillo/dbus/exported_property_set.cc",
-        "brillo/dbus/introspectable_helper.cc",
         "brillo/dbus/utils.cc",
       ]
     }
   },
 
   {
-    library_name = "brillo-blockdeviceutils"
+    library_name = "brillo-storage"
     deps = [ ":libbrillo-core" ]
-    sources = [ "brillo/blkdev_utils/loop_device.cc" ]
+    sources = [
+      "brillo/blkdev_utils/disk_iostat.cc",
+      "brillo/blkdev_utils/emmc.cc",
+      "brillo/blkdev_utils/loop_device.cc",
+      "brillo/blkdev_utils/storage_device.cc",
+      "brillo/blkdev_utils/storage_utils.cc",
+      "brillo/blkdev_utils/ufs.cc",
+    ]
+    libs = [ "rootdev" ]
+    if (use.udev) {
+      sources += [ "brillo/blkdev_utils/get_backing_block_device.cc" ]
+      deps += [ ":libbrillo-udev" ]
+    }
     if (use.device_mapper) {
-      libs = [ "lvm2cmd" ]
+      libs += [ "lvm2cmd" ]
       pkg_deps = [ "devmapper" ]
       sources += [
         "brillo/blkdev_utils/device_mapper.cc",
@@ -132,6 +149,7 @@ libbrillo_sublibs = [
         "brillo/blkdev_utils/lvm_device.cc",
       ]
     }
+    sources += [ "brillo/storage_balloon.cc" ]
   },
 
   {
@@ -158,17 +176,14 @@ libbrillo_sublibs = [
   {
     library_name = "brillo-streams"
     deps = [ ":libbrillo-core" ]
-    all_dependent_pkg_deps = [ "openssl" ]
     sources = [
       "brillo/streams/file_stream.cc",
       "brillo/streams/input_stream_set.cc",
       "brillo/streams/memory_containers.cc",
       "brillo/streams/memory_stream.cc",
-      "brillo/streams/openssl_stream_bio.cc",
       "brillo/streams/stream.cc",
       "brillo/streams/stream_errors.cc",
       "brillo/streams/stream_utils.cc",
-      "brillo/streams/tls_stream.cc",
     ]
   },
 
@@ -177,6 +192,9 @@ libbrillo_sublibs = [
     all_dependent_pkg_deps = [ "openssl" ]
     deps = [ ":libbrillo-core" ]
     sources = [ "brillo/cryptohome.cc" ]
+
+    # OpenSSL 3.0 has deprecated declarations.
+    cflags_cc = [ "-Wno-deprecated-declarations" ]
   },
 
   {
@@ -203,9 +221,8 @@ libbrillo_sublibs = [
 
   {
     library_name = "brillo-grpc"
-    public_pkg_deps = [ "grpc" ]
     all_dependent_pkg_deps = [
-      "gpr",
+      "grpc",
       "grpc++",
       "protobuf",
     ]
@@ -220,10 +237,15 @@ libbrillo_sublibs = [
   },
 
   {
-    library_name = "brillo-crossystem"
-    deps = [ ":libbrillo-core" ]
-    sources = [ "brillo/crossystem/crossystem.cc" ]
-    pkg_deps = [ "vboot_host" ]
+    library_name = "brillo-vboot"
+    all_dependent_pkg_deps = [ "vboot_host" ]
+    sources = [ "brillo/dump_kernel_config.cc" ]
+  },
+
+  {
+    library_name = "brillo-compression"
+    all_dependent_pkg_deps = [ "zlib" ]
+    sources = [ "brillo/compression/zlib_compressor.cc" ]
   },
 ]
 
@@ -238,6 +260,32 @@ if (use.udev) {
         "brillo/udev/udev_enumerate.cc",
         "brillo/udev/udev_list_entry.cc",
         "brillo/udev/udev_monitor.cc",
+        "brillo/udev/utils.cc",
+      ]
+    },
+  ]
+}
+
+if (use.usb && use.udev) {
+  libbrillo_sublibs += [
+    {
+      library_name = "brillo-usb"
+
+      deps = [ ":libbrillo-udev" ]
+      all_dependent_pkg_deps = [ "libusb-1.0" ]
+      sources = [
+        "brillo/usb/usb_bulk_transfer.cc",
+        "brillo/usb/usb_config_descriptor.cc",
+        "brillo/usb/usb_constants.cc",
+        "brillo/usb/usb_device.cc",
+        "brillo/usb/usb_device_descriptor.cc",
+        "brillo/usb/usb_device_event_notifier.cc",
+        "brillo/usb/usb_endpoint_descriptor.cc",
+        "brillo/usb/usb_error.cc",
+        "brillo/usb/usb_interface.cc",
+        "brillo/usb/usb_interface_descriptor.cc",
+        "brillo/usb/usb_manager.cc",
+        "brillo/usb/usb_transfer.cc",
       ]
     },
   ]
@@ -265,6 +313,9 @@ foreach(attr, libbrillo_sublibs) {
     if (defined(attr.cflags)) {
       cflags = attr.cflags
     }
+    if (defined(attr.cflags_cc)) {
+      cflags_cc = attr.cflags_cc
+    }
     if (defined(attr.configs)) {
       configs += attr.configs
     }
@@ -290,7 +341,7 @@ generate_pkg_config("libbrillo_pc") {
       requires_private += sublib.all_dependent_pkg_deps
     }
   }
-  defines = [ "USE_RTTI_FOR_TYPE_TAGS" ]
+  defines = [ "USE_RTTI_FOR_TYPE_TAGS=1" ]
   libs = [ "-lbrillo" ]
 }
 
@@ -347,7 +398,7 @@ generate_pkg_config("libbrillo-test_pc") {
 static_library("libbrillo-test") {
   sources = [
     "brillo/blkdev_utils/loop_device_fake.cc",
-    "brillo/crossystem/crossystem_fake.cc",
+    "brillo/fake_cryptohome.cc",
     "brillo/http/http_connection_fake.cc",
     "brillo/http/http_transport_fake.cc",
     "brillo/message_loops/fake_message_loop.cc",
@@ -356,6 +407,9 @@ static_library("libbrillo-test") {
   ]
   if (use.device_mapper) {
     sources += [ "brillo/blkdev_utils/device_mapper_fake.cc" ]
+  }
+  if (use.udev) {
+    sources += [ "brillo/udev/fake_udev_list.cc" ]
   }
   configs -= [ "//common-mk:use_thin_archive" ]
   configs += [
@@ -371,18 +425,33 @@ static_library("libbrillo-test") {
   }
 }
 
+proto_library("install_attributes_proto") {
+  proto_in_dir = "${sysroot}/usr/include/proto"
+  proto_out_dir = "include/brillo/proto_bindings"
+  sources = [ "${proto_in_dir}/install_attributes.proto" ]
+
+  # the library is used by a shared_libary, hence PIC is needed.
+  configs = [ "//common-mk:pic" ]
+  standalone = true
+}
+
 shared_library("libinstallattributes") {
   sources = [ "install_attributes/libinstallattributes.cc" ]
   configs += [ ":target_defaults" ]
   deps = [
+    ":install_attributes_proto",
     ":libinstallattributes-includes",
-    "../common-mk/external_dependencies:install_attributes-proto",
   ]
-  all_dependent_pkg_deps = [ "protobuf-lite" ]
+  if (use.fuzzer) {
+    all_dependent_pkg_deps = [ "protobuf" ]
+  } else {
+    all_dependent_pkg_deps = [ "protobuf-lite" ]
+  }
 }
 
 shared_library("libpolicy") {
   sources = [
+    "policy/device_local_account_policy_util.cc",
     "policy/device_policy.cc",
     "policy/device_policy_impl.cc",
     "policy/libpolicy.cc",
@@ -394,7 +463,7 @@ shared_library("libpolicy") {
   deps = [
     ":libinstallattributes",
     ":libpolicy-includes",
-    "../common-mk/external_dependencies:policy-protos",
+    "//common-mk/external_dependencies:policy-protos",
   ]
   all_dependent_pkg_deps = [
     "openssl",
@@ -430,7 +499,11 @@ if (use.test) {
     sources = [
       "brillo/asynchronous_signal_handler_test.cc",
       "brillo/backoff_entry_test.cc",
+      "brillo/blkdev_utils/disk_iostat_test.cc",
       "brillo/blkdev_utils/loop_device_test.cc",
+      "brillo/blkdev_utils/storage_utils_test.cc",
+      "brillo/compression/compressor_test.cc",
+      "brillo/cpuinfo_test.cc",
       "brillo/cryptohome_test.cc",
       "brillo/data_encoding_test.cc",
       "brillo/enum_flags_test.cc",
@@ -440,11 +513,13 @@ if (use.test) {
       "brillo/files/file_util_test.cc",
       "brillo/files/safe_fd_test.cc",
       "brillo/flag_helper_test.cc",
+      "brillo/hash/murmurhash_test.cc",
       "brillo/http/http_connection_curl_test.cc",
       "brillo/http/http_form_data_test.cc",
       "brillo/http/http_request_test.cc",
       "brillo/http/http_transport_curl_test.cc",
       "brillo/http/http_utils_test.cc",
+      "brillo/kernel_config_utils_test.cc",
       "brillo/key_value_store_test.cc",
       "brillo/map_utils_test.cc",
       "brillo/message_loops/base_message_loop_test.cc",
@@ -458,19 +533,21 @@ if (use.test) {
       "brillo/scoped_umask_test.cc",
       "brillo/secure_blob_test.cc",
       "brillo/secure_string_test.cc",
+      "brillo/storage_balloon_test.cc",
       "brillo/streams/fake_stream_test.cc",
       "brillo/streams/file_stream_test.cc",
       "brillo/streams/input_stream_set_test.cc",
       "brillo/streams/memory_containers_test.cc",
       "brillo/streams/memory_stream_test.cc",
-      "brillo/streams/openssl_stream_bio_test.cc",
       "brillo/streams/stream_test.cc",
       "brillo/streams/stream_utils_test.cc",
       "brillo/strings/string_utils_test.cc",
+      "brillo/syslog_logging_test.cc",
+      "brillo/timers/alarm_timer_test.cc",
       "brillo/timezone/tzif_parser_test.cc",
+      "brillo/tracing_test.cc",
       "brillo/unittest_utils.cc",
       "brillo/url_utils_test.cc",
-      "brillo/value_conversion_test.cc",
       "brillo/vcsid_set_test.cc",
       "brillo/vcsid_unset_test.cc",
       "testrunner.cc",
@@ -483,9 +560,8 @@ if (use.test) {
         "brillo/dbus/data_serialization_test.cc",
         "brillo/dbus/dbus_method_invoker_test.cc",
         "brillo/dbus/dbus_object_test.cc",
-        "brillo/dbus/dbus_param_reader_test.cc",
-        "brillo/dbus/dbus_param_writer_test.cc",
         "brillo/dbus/dbus_signal_handler_test.cc",
+        "brillo/dbus/dbus_signature_test.cc",
         "brillo/dbus/exported_object_manager_test.cc",
         "brillo/dbus/exported_property_set_test.cc",
         "brillo/http/http_proxy_test.cc",
@@ -500,12 +576,34 @@ if (use.test) {
         "brillo/blkdev_utils/lvm_test.cc",
       ]
     }
+    if (use.udev) {
+      sources += [
+        "brillo/blkdev_utils/get_backing_block_device_test.cc",
+        "brillo/udev/utils_test.cc",
+      ]
+    }
+    if (use.usb && use.udev) {
+      sources += [
+        "brillo/usb/usb_config_descriptor_test.cc",
+        "brillo/usb/usb_constants_test.cc",
+        "brillo/usb/usb_device_descriptor_test.cc",
+        "brillo/usb/usb_device_event_notifier_test.cc",
+        "brillo/usb/usb_endpoint_descriptor_test.cc",
+        "brillo/usb/usb_error_test.cc",
+        "brillo/usb/usb_interface_descriptor_test.cc",
+        "brillo/usb/usb_manager_test.cc",
+        "brillo/usb/usb_transfer_test.cc",
+      ]
+    }
     configs += [
       "//common-mk:test",
       ":target_defaults",
     ]
     cflags = [ "-Wno-format-zero-length" ]
-    pkg_deps = [ "libchrome-test" ]
+    pkg_deps = [
+      "libchrome-test",
+      "perfetto",
+    ]
     deps = [
       ":libbrillo-test",
       ":libbrillo_static",
@@ -530,14 +628,14 @@ if (use.test) {
     ]
     deps = [
       ":libinstallattributes",
-      "../common-mk/external_dependencies:install_attributes-proto",
-      "../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 
   executable("libpolicy_tests") {
     sources = [
       "install_attributes/mock_install_attributes_reader.cc",
+      "policy/tests/device_local_account_policy_util_test.cc",
       "policy/tests/device_policy_impl_test.cc",
       "policy/tests/libpolicy_test.cc",
       "policy/tests/policy_util_test.cc",
@@ -550,9 +648,8 @@ if (use.test) {
     deps = [
       ":libinstallattributes",
       ":libpolicy",
-      "../common-mk/external_dependencies:install_attributes-proto",
-      "../common-mk/external_dependencies:policy-protos",
-      "../common-mk/testrunner:testrunner",
+      "//common-mk/external_dependencies:policy-protos",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 
@@ -569,8 +666,46 @@ if (use.test) {
     deps = [
       ":grpc_test_rpcs_protolib",
       ":libbrillo-grpc",
-      "../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
+  }
+
+  executable("secure_blob_test_helper") {
+    sources = [ "brillo/secure_blob_test_helper.cc" ]
+    configs += [ ":target_defaults" ]
+    cflags = [ "-Wno-format-zero-length" ]
+    deps = [ ":libbrillo_static" ]
+
+    if (is_debug) {
+      cflags += [
+        "-fprofile-arcs",
+        "-ftest-coverage",
+        "-fno-inline",
+      ]
+      libs = [ "gcov" ]
+    }
+  }
+
+  executable("secure_blob_test_runner") {
+    sources = [ "brillo/secure_blob_test_runner.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+    ]
+    cflags = [ "-Wno-format-zero-length" ]
+    deps = [
+      ":libbrillo_static",
+      ":secure_blob_test_helper",
+    ]
+
+    if (is_debug) {
+      cflags += [
+        "-fprofile-arcs",
+        "-ftest-coverage",
+        "-fno-inline",
+      ]
+      libs = [ "gcov" ]
+    }
   }
 }
 
@@ -609,6 +744,17 @@ if (use.fuzzer) {
     include_dirs = [ "../libbrillo" ]
     deps = [ ":libbrillo-core" ]
   }
+
+  executable("libbrillo_cryptohome_fuzzer") {
+    sources = [ "brillo/cryptohome_fuzzer.cc" ]
+    configs += [ "//common-mk/common_fuzzer:common_fuzzer" ]
+    pkg_deps = [ "libchrome" ]
+    include_dirs = [ "../libbrillo" ]
+    deps = [
+      ":libbrillo-core",
+      ":libbrillo-cryptohome",
+    ]
+  }
 }
 
 copy("libinstallattributes-includes") {
@@ -619,6 +765,7 @@ copy("libinstallattributes-includes") {
 
 copy("libpolicy-includes") {
   sources = [
+    "policy/device_local_account_policy_util.h",
     "policy/device_policy.h",
     "policy/device_policy_impl.h",
     "policy/libpolicy.h",

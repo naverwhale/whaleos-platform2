@@ -1,13 +1,15 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <base/json/json_reader.h>
 #include <fuzzer/FuzzedDataProvider.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include <string>
+
+#include <base/json/json_reader.h>
+#include <base/logging.h>
 
 #include "runtime_probe/probe_function.h"
 #include "runtime_probe/probe_result_checker.h"

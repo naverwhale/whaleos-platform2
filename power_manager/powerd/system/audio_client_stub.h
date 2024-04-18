@@ -1,17 +1,15 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef POWER_MANAGER_POWERD_SYSTEM_AUDIO_CLIENT_STUB_H_
 #define POWER_MANAGER_POWERD_SYSTEM_AUDIO_CLIENT_STUB_H_
 
-#include <base/macros.h>
 #include <base/observer_list.h>
 
 #include "power_manager/powerd/system/audio_client_interface.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Stub implementation of AudioClientInterface for use by tests.
 class AudioClientStub : public AudioClientInterface {
@@ -44,7 +42,6 @@ class AudioClientStub : public AudioClientInterface {
   base::ObserverList<AudioObserver> observers_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_AUDIO_CLIENT_STUB_H_

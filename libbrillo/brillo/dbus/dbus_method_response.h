@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,12 +9,11 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <brillo/brillo_export.h>
-#include <brillo/dbus/dbus_param_writer.h>
+#include <brillo/dbus/data_serialization.h>
 #include <brillo/errors/error.h>
 #include <dbus/exported_object.h>
 #include <dbus/message.h>
@@ -37,7 +36,7 @@ class BRILLO_EXPORT DBusMethodResponseBase {
   DBusMethodResponseBase(DBusMethodResponseBase&& other)
       : sender_(std::exchange(
             other.sender_,
-            base::Bind([](std::unique_ptr<dbus::Response> response) {
+            base::BindOnce([](std::unique_ptr<dbus::Response> response) {
               LOG(DFATAL)
                   << "Empty DBusMethodResponseBase attempts to send a response";
             }))),
@@ -101,7 +100,7 @@ class DBusMethodResponse : public DBusMethodResponseBase {
     CheckCanSendResponse();
     auto response = CreateCustomResponse();
     ::dbus::MessageWriter writer(response.get());
-    DBusParamWriter::Append(&writer, return_values...);
+    WriteDBusArgs(&writer, return_values...);
     SendRawResponse(std::move(response));
   }
 };

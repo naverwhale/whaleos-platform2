@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <libmems/iio_context.h>
 #include <libmems/iio_device.h>
@@ -38,12 +39,13 @@ class SamplesHandler : public SamplesHandlerBase {
   static ScopedSamplesHandler Create(
       scoped_refptr<base::SequencedTaskRunner> ipc_task_runner,
       scoped_refptr<base::SingleThreadTaskRunner> sample_task_runner,
-      libmems::IioDevice* iio_device);
+      DeviceData* const device_data);
 
   virtual ~SamplesHandler();
 
   void ResetWithReason(cros::mojom::SensorDeviceDisconnectReason reason,
-                       std::string description);
+                       std::string description,
+                       base::OnceCallback<void()> callback);
 
   // It's the user's responsibility to maintain |client_data| before being
   // removed or this class being destructed.
@@ -72,7 +74,7 @@ class SamplesHandler : public SamplesHandlerBase {
   // use fifo
   SamplesHandler(scoped_refptr<base::SequencedTaskRunner> ipc_task_runner,
                  scoped_refptr<base::SingleThreadTaskRunner> sample_task_runner,
-                 libmems::IioDevice* iio_device,
+                 DeviceData* const device_data,
                  double min_freq,
                  double max_freq);
 
@@ -113,6 +115,9 @@ class SamplesHandler : public SamplesHandlerBase {
 
   double dev_min_frequency_ = 0.0;
   double dev_max_frequency_ = 0.0;
+
+  int accel_axis_indices_[3] = {-1, -1, -1};
+  double accel_matrix_[3][3];
 
   std::unique_ptr<base::FileDescriptorWatcher::Controller> watcher_;
 

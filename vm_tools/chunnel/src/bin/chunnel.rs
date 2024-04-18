@@ -1,34 +1,35 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 use std::env;
-use std::ffi::CStr;
 use std::fmt;
 use std::process;
 use std::result;
 
-use getopts::Options;
-use libchromeos::syslog;
-use log::warn;
-use sys_util::{self, block_signal, PollContext, PollToken};
-
 use chunnel::forwarder::{ForwarderError, ForwarderSession};
 use chunnel::stream::{StreamSocket, StreamSocketError};
+use getopts::Options;
+use libchromeos::deprecated::{PollContext, PollToken};
+use libchromeos::panic_handler::install_memfd_handler;
+use libchromeos::signal::block_signal;
+use libchromeos::syslog;
+use log::warn;
+use nix::sys::signal::Signal;
 
 // Program name.
-const IDENT: &[u8] = b"chunnel\0";
+const IDENT: &str = "chunnel";
 
 #[remain::sorted]
 #[derive(Debug)]
 enum Error {
-    BlockSigpipe(sys_util::signal::Error),
+    BlockSigpipe(nix::Error),
     ConnectSocket(StreamSocketError),
     Forward(ForwarderError),
-    PollContextDelete(sys_util::Error),
-    PollContextNew(sys_util::Error),
-    PollWait(sys_util::Error),
-    Syslog(log::SetLoggerError),
+    PollContextDelete(nix::Error),
+    PollContextNew(nix::Error),
+    PollWait(nix::Error),
+    Syslog(libchromeos::syslog::Error),
 }
 
 type Result<T> = result::Result<T, Error>;
@@ -57,7 +58,7 @@ fn print_usage(program: &str, opts: &Options) {
 }
 
 fn run_forwarder(local_stream: StreamSocket, remote_stream: StreamSocket) -> Result<()> {
-    block_signal(libc::SIGPIPE).map_err(Error::BlockSigpipe)?;
+    block_signal(Signal::SIGPIPE).map_err(Error::BlockSigpipe)?;
 
     #[derive(PollToken)]
     enum Token {
@@ -102,6 +103,7 @@ fn run_forwarder(local_stream: StreamSocket, remote_stream: StreamSocket) -> Res
 }
 
 fn main() -> Result<()> {
+    install_memfd_handler();
     let args: Vec<String> = env::args().collect();
     let program = args[0].clone();
 
@@ -124,10 +126,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Safe because this string is defined above in this file and it contains exactly
-    // one nul byte, which appears at the end.
-    let ident = CStr::from_bytes_with_nul(IDENT).unwrap();
-    syslog::init(ident).map_err(Error::Syslog)?;
+    syslog::init(IDENT.to_string(), false /* log_to_stderr */).map_err(Error::Syslog)?;
 
     let local_sockaddr = match matches.opt_str("l") {
         Some(sockaddr) => sockaddr,

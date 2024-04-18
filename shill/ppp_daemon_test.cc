@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,19 +6,22 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/memory/weak_ptr.h>
 #include <gtest/gtest.h>
 
 #include "shill/error.h"
 #include "shill/external_task.h"
+#include "shill/ipconfig.h"
 #include "shill/mock_control.h"
-#include "shill/mock_process_manager.h"
+#include "shill/net/mock_process_manager.h"
 #include "shill/ppp_daemon.h"
 #include "shill/rpc_task.h"
+#include "shill/service.h"
 
 namespace shill {
 
@@ -40,10 +43,10 @@ class PPPDaemonTest : public Test, public RpcTaskDelegate {
                                       const std::string& device,
                                       Error* error) {
     PPPDaemon::DeathCallback callback(
-        base::Bind(&PPPDaemonTest::DeathCallback, base::Unretained(this)));
+        base::BindOnce(&PPPDaemonTest::DeathCallback, base::Unretained(this)));
     return PPPDaemon::Start(&control_, &process_manager_,
                             weak_ptr_factory_.GetWeakPtr(), options, device,
-                            callback, error);
+                            std::move(callback), error);
   }
 
   bool CaptureArgv(const std::vector<std::string>& argv) {
@@ -68,7 +71,7 @@ class PPPDaemonTest : public Test, public RpcTaskDelegate {
 };
 
 TEST_F(PPPDaemonTest, PluginUsed) {
-  EXPECT_CALL(process_manager_, StartProcess(_, _, _, _, _, _))
+  EXPECT_CALL(process_manager_, StartProcess(_, _, _, _, _, _, _))
       .WillOnce(WithArg<2>(Invoke(this, &PPPDaemonTest::CaptureArgv)));
 
   Error error;
@@ -83,7 +86,7 @@ TEST_F(PPPDaemonTest, PluginUsed) {
 }
 
 TEST_F(PPPDaemonTest, OptionsConverted) {
-  EXPECT_CALL(process_manager_, StartProcess(_, _, _, _, _, _))
+  EXPECT_CALL(process_manager_, StartProcess(_, _, _, _, _, _, _))
       .WillOnce(WithArg<2>(Invoke(this, &PPPDaemonTest::CaptureArgv)));
 
   PPPDaemon::Options options;
@@ -109,7 +112,7 @@ TEST_F(PPPDaemonTest, OptionsConverted) {
 }
 
 TEST_F(PPPDaemonTest, ErrorPropagated) {
-  EXPECT_CALL(process_manager_, StartProcess(_, _, _, _, _, _))
+  EXPECT_CALL(process_manager_, StartProcess(_, _, _, _, _, _, _))
       .WillOnce(Return(-1));
 
   PPPDaemon::Options options;
@@ -118,6 +121,43 @@ TEST_F(PPPDaemonTest, ErrorPropagated) {
 
   EXPECT_NE(error.type(), Error::kSuccess);
   EXPECT_EQ(nullptr, task);
+}
+
+TEST_F(PPPDaemonTest, GetInterfaceName) {
+  std::map<std::string, std::string> config;
+  config[kPPPInterfaceName] = "ppp0";
+  config["foo"] = "bar";
+  EXPECT_EQ("ppp0", PPPDaemon::GetInterfaceName(config));
+}
+
+TEST_F(PPPDaemonTest, ParseIPConfiguration) {
+  std::map<std::string, std::string> config;
+  config[kPPPInternalIP4Address] = "4.5.6.7";
+  config[kPPPExternalIP4Address] = "33.44.55.66";
+  config[kPPPGatewayAddress] = "192.168.1.1";
+  config[kPPPDNS1] = "1.1.1.1";
+  config[kPPPDNS2] = "2.2.2.2";
+  config[kPPPInterfaceName] = "ppp0";
+  config[kPPPLNSAddress] = "99.88.77.66";
+  config[kPPPMRU] = "1492";
+  config["foo"] = "bar";  // Unrecognized keys don't cause crash.
+  IPConfig::Properties props = PPPDaemon::ParseIPConfiguration(config);
+  EXPECT_EQ(net_base::IPFamily::kIPv4, props.address_family);
+  EXPECT_EQ(net_base::IPv4CIDR::kMaxPrefixLength, props.subnet_prefix);
+  EXPECT_EQ("4.5.6.7", props.address);
+  EXPECT_EQ("33.44.55.66", props.peer_address);
+  EXPECT_EQ("192.168.1.1", props.gateway);
+  ASSERT_EQ(2, props.dns_servers.size());
+  EXPECT_EQ("1.1.1.1", props.dns_servers[0]);
+  EXPECT_EQ("2.2.2.2", props.dns_servers[1]);
+  EXPECT_EQ("99.88.77.66/32", props.exclusion_list[0]);
+  EXPECT_EQ(1, props.exclusion_list.size());
+  EXPECT_EQ(1492, props.mtu);
+
+  // No gateway specified.
+  config.erase(kPPPGatewayAddress);
+  IPConfig::Properties props2 = PPPDaemon::ParseIPConfiguration(config);
+  EXPECT_EQ("33.44.55.66", props2.gateway);
 }
 
 }  // namespace shill

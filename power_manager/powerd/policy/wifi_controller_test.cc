@@ -1,19 +1,18 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/policy/wifi_controller.h"
 
 #include <base/check_op.h>
-#include <base/macros.h>
 #include <gtest/gtest.h>
 
 #include "power_manager/common/fake_prefs.h"
 #include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/system/udev_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 namespace {
 
 // Stub implementation of WifiController::Delegate for use by tests.
@@ -31,21 +30,25 @@ class TestWifiControllerDelegate : public WifiController::Delegate {
     return last_transmit_power_;
   }
   WifiRegDomain last_reg_domain() const { return last_reg_domain_; }
+  TriggerSource last_trigger_source() const { return last_trigger_source_; }
 
   // Resets stat members.
   void ResetStats() {
     num_set_calls_ = 0;
     last_transmit_power_ = RadioTransmitPower::UNSPECIFIED;
     last_reg_domain_ = WifiRegDomain::NONE;
+    last_trigger_source_ = TriggerSource::UNKNOWN;
   }
 
   // WifiController::Delegate:
   void SetWifiTransmitPower(RadioTransmitPower power,
-                            WifiRegDomain domain) override {
+                            WifiRegDomain domain,
+                            TriggerSource source) override {
     CHECK_NE(power, RadioTransmitPower::UNSPECIFIED);
     num_set_calls_++;
     last_transmit_power_ = power;
     last_reg_domain_ = domain;
+    last_trigger_source_ = source;
   }
 
  private:
@@ -56,11 +59,13 @@ class TestWifiControllerDelegate : public WifiController::Delegate {
   RadioTransmitPower last_transmit_power_ = RadioTransmitPower::UNSPECIFIED;
 
   WifiRegDomain last_reg_domain_ = WifiRegDomain::NONE;
+
+  TriggerSource last_trigger_source_ = TriggerSource::UNKNOWN;
 };
 
 }  // namespace
 
-class WifiControllerTest : public ::testing::Test {
+class WifiControllerTest : public TestEnvironment {
  public:
   WifiControllerTest() = default;
   WifiControllerTest(const WifiControllerTest&) = delete;
@@ -198,6 +203,15 @@ TEST_F(WifiControllerTest, IgnoreTabletEventIfProximity) {
   EXPECT_EQ(RadioTransmitPower::LOW, delegate_.last_transmit_power());
 }
 
+TEST_F(WifiControllerTest, IgnoreProximityIfTabletEvent) {
+  set_transmit_power_proximity_pref_value_ = true;
+  Init(TabletMode::UNSUPPORTED);
+  controller_.HandleTabletModeChange(TabletMode::ON);
+  EXPECT_EQ(RadioTransmitPower::LOW, delegate_.last_transmit_power());
+  controller_.ProximitySensorDetected(UserProximity::FAR);
+  EXPECT_EQ(RadioTransmitPower::LOW, delegate_.last_transmit_power());
+}
+
 TEST_F(WifiControllerTest, SetRegDomainOnRegDomainEventIfTablet) {
   set_transmit_power_tablet_pref_value_ = true;
   Init(TabletMode::ON);
@@ -292,5 +306,4 @@ TEST_F(WifiControllerTest, InvalidStaticDeviceModeConfiguration) {
   Init(TabletMode::UNSUPPORTED);
   EXPECT_EQ(0, delegate_.num_set_calls());
 }
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

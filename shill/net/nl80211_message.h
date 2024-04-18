@@ -1,18 +1,17 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_NET_NL80211_MESSAGE_H_
 #define SHILL_NET_NL80211_MESSAGE_H_
 
-#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
-#include <base/macros.h>
+#include <base/containers/span.h>
 #include <base/no_destructor.h>
 
-#include "shill/net/byte_string.h"
 #include "shill/net/generic_netlink_message.h"
 #include "shill/net/shill_export.h"
 
@@ -68,7 +67,7 @@ class SHILL_EXPORT Nl80211Frame {
     kIllegalFrameType = 0xff
   };
 
-  explicit Nl80211Frame(const ByteString& init);
+  explicit Nl80211Frame(base::span<const uint8_t> raw_frame);
   Nl80211Frame(const Nl80211Frame&) = delete;
   Nl80211Frame& operator=(const Nl80211Frame&) = delete;
 
@@ -86,7 +85,7 @@ class SHILL_EXPORT Nl80211Frame {
   uint8_t frame_type_;
   uint16_t reason_;
   uint16_t status_;
-  ByteString frame_;
+  std::vector<uint8_t> frame_;
 };
 
 //
@@ -164,6 +163,16 @@ class SHILL_EXPORT DeleteStationMessage : public Nl80211Message {
   DeleteStationMessage& operator=(const DeleteStationMessage&) = delete;
 };
 
+class SHILL_EXPORT DelWiphyMessage : public Nl80211Message {
+ public:
+  static const uint8_t kCommand;
+  static const char kCommandString[];
+
+  DelWiphyMessage() : Nl80211Message(kCommand, kCommandString) {}
+  DelWiphyMessage(const DelWiphyMessage&) = delete;
+  DelWiphyMessage& operator=(const DelInterfaceMessage&) = delete;
+};
+
 class SHILL_EXPORT DisassociateMessage : public Nl80211Message {
  public:
   static const uint8_t kCommand;
@@ -202,6 +211,16 @@ class SHILL_EXPORT GetRegMessage : public Nl80211Message {
   GetRegMessage();
   GetRegMessage(const GetRegMessage&) = delete;
   GetRegMessage& operator=(const GetRegMessage&) = delete;
+};
+
+class SHILL_EXPORT ReqSetRegMessage : public Nl80211Message {
+ public:
+  static const uint8_t kCommand;
+  static const char kCommandString[];
+
+  ReqSetRegMessage();
+  ReqSetRegMessage(const ReqSetRegMessage&) = delete;
+  ReqSetRegMessage& operator=(const ReqSetRegMessage&) = delete;
 };
 
 class SHILL_EXPORT GetStationMessage : public Nl80211Message {
@@ -502,6 +521,29 @@ class SHILL_EXPORT GetMeshProxyPathMessage : public Nl80211Message {
   GetMeshProxyPathMessage();
   GetMeshProxyPathMessage(const GetMeshProxyPathMessage&) = delete;
   GetMeshProxyPathMessage& operator=(const GetMeshProxyPathMessage&) = delete;
+};
+
+class SHILL_EXPORT NewPeerCandidateMessage : public Nl80211Message {
+ public:
+  static const uint8_t kCommand;
+  static const char kCommandString[];
+
+  NewPeerCandidateMessage() : Nl80211Message(kCommand, kCommandString) {}
+  NewPeerCandidateMessage(const NewPeerCandidateMessage&) = delete;
+  NewPeerCandidateMessage& operator=(const NewPeerCandidateMessage&) = delete;
+};
+
+class SHILL_EXPORT ControlPortFrameTxStatusMessage : public Nl80211Message {
+ public:
+  static const uint8_t kCommand;
+  static const char kCommandString[];
+
+  ControlPortFrameTxStatusMessage()
+      : Nl80211Message(kCommand, kCommandString) {}
+  ControlPortFrameTxStatusMessage(const ControlPortFrameTxStatusMessage&) =
+      delete;
+  ControlPortFrameTxStatusMessage& operator=(
+      const ControlPortFrameTxStatusMessage&) = delete;
 };
 
 }  // namespace shill

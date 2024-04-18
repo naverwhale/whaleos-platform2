@@ -1,11 +1,11 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ATTESTATION_SERVER_DATABASE_H_
 #define ATTESTATION_SERVER_DATABASE_H_
 
-#include "attestation/common/database.pb.h"
+#include <attestation/proto_bindings/database.pb.h>
 
 namespace attestation {
 

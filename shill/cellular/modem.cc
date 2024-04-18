@@ -1,15 +1,16 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/cellular/modem.h"
 
-#include <limits>
+#include <optional>
 #include <tuple>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
+#include <base/strings/string_number_conversions.h>
 
 #include <ModemManager/ModemManager.h>
 
@@ -17,8 +18,6 @@
 #include "shill/control_interface.h"
 #include "shill/device_info.h"
 #include "shill/logging.h"
-#include "shill/manager.h"
-#include "shill/net/rtnl_handler.h"
 
 namespace shill {
 
@@ -29,12 +28,6 @@ static std::string ObjectID(const Modem* m) {
 }
 }  // namespace Logging
 
-namespace {
-// TODO(b/175305412): Remove kRmnetIpa0 and kRmnetData0.
-constexpr char kRmnetIpa0[] = "rmnet_ipa0";
-constexpr char kRmnetData0[] = "rmnet_data0";
-}  // namespace
-
 // statics
 constexpr char Modem::kFakeDevNameFormat[];
 const char Modem::kFakeDevAddress[] = "000000000000";
@@ -44,11 +37,7 @@ size_t Modem::fake_dev_serial_ = 0;
 Modem::Modem(const std::string& service,
              const RpcIdentifier& path,
              DeviceInfo* device_info)
-    : service_(service),
-      path_(path),
-      device_info_(device_info),
-      type_(Cellular::kTypeInvalid),
-      rtnl_handler_(RTNLHandler::GetInstance()) {
+    : service_(service), path_(path), device_info_(device_info) {
   SLOG(this, 1) << "Modem() Path: " << path.value();
 }
 
@@ -71,7 +60,7 @@ Modem::~Modem() {
 void Modem::CreateDevice(const InterfaceToProperties& properties) {
   SLOG(this, 1) << __func__;
 
-  uint32_t capabilities = std::numeric_limits<uint32_t>::max();
+  uint32_t capabilities = MM_MODEM_CAPABILITY_NONE;
   const auto iter = properties.find(MM_DBUS_INTERFACE_MODEM);
   if (iter == properties.end()) {
     LOG(ERROR) << "Cellular device with no modem properties";
@@ -83,11 +72,8 @@ void Modem::CreateDevice(const InterfaceToProperties& properties) {
         modem_props.Get<uint32_t>(MM_MODEM_PROPERTY_CURRENTCAPABILITIES);
   }
 
-  if (capabilities & (MM_MODEM_CAPABILITY_GSM_UMTS | MM_MODEM_CAPABILITY_LTE)) {
-    type_ = Cellular::kType3gpp;
-  } else if (capabilities & MM_MODEM_CAPABILITY_CDMA_EVDO) {
-    type_ = Cellular::kTypeCdma;
-  } else {
+  if (!(capabilities & (MM_MODEM_CAPABILITY_GSM_UMTS | MM_MODEM_CAPABILITY_LTE |
+                        MM_MODEM_CAPABILITY_5GNR))) {
     LOG(ERROR) << "Unsupported capabilities: " << capabilities;
     return;
   }
@@ -122,14 +108,6 @@ bool Modem::GetLinkName(const KeyValueStore& modem_props,
   for (const auto& port_pair : ports) {
     if (std::get<1>(port_pair) == MM_MODEM_PORT_TYPE_NET) {
       net_port = std::get<0>(port_pair);
-      // TODO(b/175305412): Remove the special handling of `kRmnetIpa0`.
-      // Now that ModemManager supports multiplexing, it reports the parent
-      // interface name when the modem is created and the child link
-      // `kRmnetData0` when the bearer is created. Shill only cares about the
-      // child link. Until shill can handle this correctly, we override the
-      // parent name with the child name.
-      if (std::get<0>(port_pair) == kRmnetIpa0)
-        net_port = kRmnetData0;
       break;
     }
   }
@@ -156,16 +134,11 @@ void Modem::CreateDeviceFromModemProperties(
 
   std::string mac_address;
   if (GetLinkName(modem_props, &link_name_)) {
-    interface_index_ = GetDeviceParams(&mac_address);
+    interface_index_ = GetLinkDetailsFromDeviceInfo(&mac_address);
     if (!interface_index_.has_value()) {
-      LOG(ERROR) << "Unable to create cellular device -- no interface index.";
-      return;
-    }
-    if (mac_address.empty()) {
       // Save our properties, wait for OnDeviceInfoAvailable to be called.
-      LOG(WARNING)
-          << __func__
-          << ": No hardware address, device creation pending device info.";
+      LOG(WARNING) << "Delaying cellular device creation for interface "
+                   << link_name_ << ".";
       initial_properties_ = properties;
       has_pending_device_info_ = true;
       return;
@@ -194,19 +167,19 @@ void Modem::CreateDeviceFromModemProperties(
                 << " Enabled: " << device->enabled();
 }
 
-base::Optional<int> Modem::GetDeviceParams(std::string* mac_address) {
-  // TODO(petkov): Get the interface index from DeviceInfo, similar to the MAC
-  // address below.
-  int interface_index = rtnl_handler_->GetInterfaceIndex(link_name_);
+std::optional<int> Modem::GetLinkDetailsFromDeviceInfo(
+    std::string* mac_address) {
+  int interface_index = device_info_->GetIndex(link_name_);
   if (interface_index < 0) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  ByteString address_bytes;
-  if (device_info_->GetMacAddress(interface_index, &address_bytes)) {
-    *mac_address = address_bytes.HexEncode();
+  const auto addr = device_info_->GetMacAddress(interface_index);
+  if (!addr) {
+    return std::nullopt;
   }
 
+  *mac_address = base::HexEncode(addr->ToBytes());
   return interface_index;
 }
 
@@ -219,8 +192,7 @@ CellularRefPtr Modem::GetOrCreateCellularDevice(
     cellular = nullptr;
     device_info_->DeregisterDevice(interface_index);
   }
-  if (cellular &&
-      (cellular->type() != type_ || cellular->dbus_service() != service_)) {
+  if (cellular && (cellular->dbus_service() != service_)) {
     SLOG(this, 1) << "Cellular service changed: " << service_;
     cellular = nullptr;
     device_info_->DeregisterDevice(interface_index);
@@ -233,7 +205,7 @@ CellularRefPtr Modem::GetOrCreateCellularDevice(
   }
 
   cellular = new Cellular(device_info_->manager(), link_name_, mac_address,
-                          interface_index, type_, service_, path_);
+                          interface_index, service_, path_);
   device_info_->RegisterDevice(cellular);
   return cellular;
 }
@@ -242,7 +214,7 @@ CellularRefPtr Modem::GetExistingCellularDevice(int interface_index) const {
   DeviceRefPtr device = device_info_->GetDevice(interface_index);
   if (!device)
     return nullptr;
-  DCHECK_EQ(device->technology(), Technology::kCellular);
+  CHECK_EQ(device->technology(), Technology::kCellular);
   return static_cast<Cellular*>(device.get());
 }
 

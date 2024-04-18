@@ -1,11 +1,10 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef POWER_MANAGER_COMMON_CLOCK_H_
 #define POWER_MANAGER_COMMON_CLOCK_H_
 
-#include <base/macros.h>
 #include <base/time/time.h>
 
 namespace power_manager {
@@ -22,11 +21,11 @@ namespace power_manager {
 // base::TickClock.
 class Clock {
  public:
-  Clock();
+  Clock() = default;
   Clock(const Clock&) = delete;
   Clock& operator=(const Clock&) = delete;
 
-  ~Clock();
+  ~Clock() = default;
 
   void set_current_time_for_testing(base::TimeTicks now) {
     current_time_for_testing_ = now;

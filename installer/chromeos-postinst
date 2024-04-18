@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -18,6 +18,17 @@ INSTALL_ROOT=$(dirname "$0")
 
 # Set up the mount points userland needs/expects.
 MOUNTS="/proc /dev /sys /tmp /run /var /mnt/stateful_partition"
+
+# Include chromeos-config, which is a submount of /run
+MOUNTS="${MOUNTS} /run/chromeos-config/v1"
+
+# Include efivarfs, which is a submount of /sys, if it's present.
+# This will only exist on efi systems with the appropriate kernel module. On
+# those systems this is needed for efi boot entry management.
+EFIVARS="/sys/firmware/efi/efivars"
+if [ -d "${EFIVARS}" ]; then
+  MOUNTS="${MOUNTS} ${EFIVARS}"
+fi
 
 cleanup() {
   local d

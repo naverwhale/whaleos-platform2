@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,12 @@
 
 #include <base/check.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 BacklightStub::BacklightStub(int64_t max_level,
                              int64_t current_level,
                              BrightnessScale scale)
     : max_level_(max_level), current_level_(current_level), scale_(scale) {}
-
-BacklightStub::~BacklightStub() {}
 
 void BacklightStub::NotifyDeviceChanged() {
   for (BacklightObserver& observer : observers_)
@@ -31,7 +28,7 @@ void BacklightStub::RemoveObserver(BacklightObserver* observer) {
   observers_.RemoveObserver(observer);
 }
 
-bool BacklightStub::DeviceExists() {
+bool BacklightStub::DeviceExists() const {
   return device_exists_;
 }
 
@@ -69,5 +66,4 @@ void BacklightStub::SetBrightnessScale(
   scale_ = scale;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

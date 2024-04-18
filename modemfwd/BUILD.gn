@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,15 +8,17 @@ import("//common-mk/pkg_config.gni")
 import("//common-mk/proto_library.gni")
 
 group("all") {
-  deps = [ ":modemfwd" ]
+  deps = [
+    ":install_dbus_config",
+    ":install_init_config",
+    ":install_minijail_config",
+    ":modemfwd",
+  ]
   if (use.test) {
     deps += [ ":modemfw_test" ]
   }
   if (use.fuzzer) {
-    deps += [
-      ":firmware_manifest_fuzzer",
-      ":firmware_manifest_v2_fuzzer",
-    ]
+    deps += [ ":firmware_manifest_v2_fuzzer" ]
   }
 }
 
@@ -26,6 +28,9 @@ pkg_config("target_defaults") {
     "libchrome",
     "libbrillo",
     "libcros_config",
+    "libdlcservice-client",
+    "libmetrics",
+    "libminijail",
     "libshill-client",
     "liblzma",
     "ModemManager",
@@ -46,6 +51,11 @@ generate_dbus_proxies("modemmanager_proxies") {
   ]
 }
 
+generate_dbus_proxies("upstart_proxies") {
+  proxy_output_file = "include/upstart/dbus-proxies.h"
+  sources = [ "dbus_bindings/upstart-job-hermes.dbus-xml" ]
+}
+
 generate_dbus_adaptors("modemfwd_adaptors") {
   dbus_service_config = "dbus_bindings/dbus-service-config.json"
   dbus_adaptors_out_dir = "include/modemfwd/dbus_adaptors"
@@ -54,24 +64,34 @@ generate_dbus_adaptors("modemfwd_adaptors") {
 
 static_library("libmodemfw") {
   sources = [
+    "dlc_manager.cc",
+    "error.cc",
     "file_decompressor.cc",
     "firmware_directory.cc",
     "firmware_file.cc",
-    "firmware_manifest.cc",
     "firmware_manifest_v2.cc",
     "journal.cc",
     "logging.cc",
+    "metrics.cc",
     "modem.cc",
     "modem_flasher.cc",
     "modem_helper.cc",
     "modem_helper_directory.cc",
+    "modem_sandbox.cc",
     "modem_tracker.cc",
+    "notification_manager.cc",
     "scoped_temp_file.cc",
+    "upstart_job_controller.cc",
   ]
   configs += [ ":target_defaults" ]
   deps = [
     ":modemmanager_proxies",
+    ":upstart_proxies",
     "//modemfwd//proto:modemfw-protos",
+  ]
+  pkg_deps = [
+    "libstructuredmetrics",
+    "re2",
   ]
 }
 
@@ -81,27 +101,50 @@ executable("modemfwd") {
     "main.cc",
   ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
   deps = [
     ":libmodemfw",
     ":modemfwd_adaptors",
   ]
 }
 
+install_config("install_init_config") {
+  sources = [ "modemfwd.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_dbus_config") {
+  sources = [ "dbus/org.chromium.Modemfwd.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_minijail_config") {
+  sources = [ "minijail/modemfwd.conf" ]
+  install_path = "minijail_conf"
+}
+
 if (use.test) {
   executable("modemfw_test") {
     sources = [
+      "dlc_manager_test.cc",
+      "error_test.cc",
       "file_decompressor_test.cc",
       "firmware_directory_stub.cc",
       "firmware_directory_test.cc",
       "firmware_file_test.cc",
       "journal_test.cc",
+      "metrics_test.cc",
       "modem_flasher_test.cc",
     ]
     configs += [
       ":target_defaults",
       "//common-mk:test",
     ]
-    pkg_deps = [ "libchrome-test" ]
+    run_test = true
+    pkg_deps = [
+      "libchrome-test",
+      "libdlcservice-client-test",
+    ]
     deps = [
       ":libmodemfw",
       "//common-mk/testrunner:testrunner",
@@ -110,15 +153,6 @@ if (use.test) {
 }
 
 if (use.fuzzer) {
-  executable("firmware_manifest_fuzzer") {
-    sources = [ "firmware_manifest_fuzzer.cc" ]
-    configs += [
-      "//common-mk/common_fuzzer",
-      ":target_defaults",
-    ]
-    pkg_deps = [ "libprotobuf-mutator" ]
-    deps = [ ":libmodemfw" ]
-  }
   executable("firmware_manifest_v2_fuzzer") {
     sources = [ "firmware_manifest_v2_fuzzer.cc" ]
     configs += [

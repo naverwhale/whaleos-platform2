@@ -1,16 +1,16 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CUPS_PROXY_MHD_HTTP_REQUEST_H_
 #define CUPS_PROXY_MHD_HTTP_REQUEST_H_
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
 
 #include <base/strings/string_piece.h>
-#include <microhttpd.h>
 
 namespace cups_proxy {
 

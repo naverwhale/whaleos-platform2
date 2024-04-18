@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <grp.h>
 #include <limits.h>
 #include <mntent.h>
 #include <signal.h>
@@ -22,27 +21,29 @@
 #include <linux/vm_sockets.h>  // needs to come after sys/socket.h
 
 #include <algorithm>
+#include <ranges>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/stl_util.h>
+#include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <brillo/file_utils.h>
 #include <chromeos/dbus/service_constants.h>
@@ -52,8 +53,7 @@
 
 using std::string;
 
-namespace vm_tools {
-namespace seneschal {
+namespace vm_tools::seneschal {
 namespace {
 // Path to the runtime directory where we will create server jails.
 constexpr char kRuntimeDir[] = "/run/seneschal";
@@ -66,14 +66,11 @@ constexpr gid_t kChronosGid = 1000;
 constexpr gid_t kAndroidEverybodyGid = 665357;
 constexpr gid_t kSupplementaryGroups[] = {kAndroidEverybodyGid};
 
-// The gid of the chronos-access group.
-constexpr gid_t kChronosAccessGid = 1001;
-
 // The uid used for authenticating with DBus.
 constexpr uid_t kDbusAuthUid = 20115;
 
 // How long we should wait for a server process to exit.
-constexpr base::TimeDelta kServerExitTimeout = base::TimeDelta::FromSeconds(2);
+constexpr base::TimeDelta kServerExitTimeout = base::Seconds(2);
 
 // Path to the 9p server.
 constexpr char kServerPath[] = "/usr/bin/9s";
@@ -82,6 +79,9 @@ constexpr char kSeccompPolicyPath[] = "/usr/share/policy/9s-seccomp.policy";
 
 // Static prefix of SmbFs mount names.
 constexpr char kSmbFsMountNamePrefix[] = "smbfs-";
+
+// Static prefix of GuestOS mount names.
+constexpr char kGuestOsMountNamePrefix[] = "guestos+";
 
 // Max number of open files allowed per server.
 constexpr rlim_t kMaxOpenFiles = 64 * 1024;
@@ -95,8 +95,7 @@ bool MkdirRecursively(const base::FilePath& full_path) {
   }
 
   // Collect a list of all parent directories.
-  std::vector<std::string> components;
-  full_path.GetComponents(&components);
+  std::vector<std::string> components = full_path.GetComponents();
   DCHECK(!components.empty());
 
   base::ScopedFD fd(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
@@ -149,7 +148,8 @@ bool MkdirRecursively(const base::FilePath& full_path) {
 // |response_sender|. If |handler| returns NULL, an empty response is created
 // and sent.
 void HandleSynchronousDBusMethodCall(
-    base::Callback<std::unique_ptr<dbus::Response>(dbus::MethodCall*)> handler,
+    base::RepeatingCallback<std::unique_ptr<dbus::Response>(dbus::MethodCall*)>
+        handler,
     dbus::MethodCall* method_call,
     dbus::ExportedObject::ResponseSender response_sender) {
   std::unique_ptr<dbus::Response> response = handler.Run(method_call);
@@ -217,8 +217,8 @@ Service::ServerInfo::~ServerInfo() {
   }
 
   // Now unmount everything in reverse order.
-  for (auto iter = mounts.rbegin(), end = mounts.rend(); iter != end; ++iter) {
-    if (umount(iter->c_str()) != 0) {
+  for (auto& mount : std::ranges::reverse_view(mounts)) {
+    if (umount(mount.c_str()) != 0) {
       PLOG(ERROR) << "Unable to unmount path; not deleting runtime directory";
       root_dir_.Take();
       return;
@@ -227,7 +227,7 @@ Service::ServerInfo::~ServerInfo() {
 }
 
 // static
-std::unique_ptr<Service> Service::Create(base::Closure quit_closure) {
+std::unique_ptr<Service> Service::Create(base::OnceClosure quit_closure) {
   std::unique_ptr<Service> service(new Service(std::move(quit_closure)));
 
   if (!service->Init()) {
@@ -237,10 +237,8 @@ std::unique_ptr<Service> Service::Create(base::Closure quit_closure) {
   return service;
 }
 
-Service::Service(base::Closure quit_closure)
-    : next_server_handle_(1),
-      quit_closure_(std::move(quit_closure)),
-      weak_factory_(this) {}
+Service::Service(base::OnceClosure quit_closure)
+    : quit_closure_(std::move(quit_closure)), weak_factory_(this) {}
 
 bool Service::Init() {
   // Set up the dbus service.
@@ -273,22 +271,6 @@ bool Service::Init() {
     return false;
   }
 
-  // Add chronos-access to our list of supplementary groups.  This is needed so
-  // that we can access the user's files in the /home directory.
-  gid_t list[NGROUPS_MAX] = {};
-  int count = getgroups(NGROUPS_MAX, list);
-  if (count < 0) {
-    PLOG(ERROR) << "Failed to get supplementary groups";
-    return false;
-  }
-  CHECK_LT(count, NGROUPS_MAX);
-
-  list[count++] = kChronosAccessGid;
-  if (setgroups(count, list) != 0) {
-    PLOG(ERROR) << "Failed to add chronos-access to supplementary groups";
-    return false;
-  }
-
   exported_object_ =
       bus_->GetExportedObject(dbus::ObjectPath(kSeneschalServicePath));
   if (!exported_object_) {
@@ -308,8 +290,9 @@ bool Service::Init() {
   for (const auto& iter : kServiceMethods) {
     bool ret = exported_object_->ExportMethodAndBlock(
         kSeneschalInterface, iter.first,
-        base::Bind(&HandleSynchronousDBusMethodCall,
-                   base::Bind(iter.second, base::Unretained(this))));
+        base::BindRepeating(
+            &HandleSynchronousDBusMethodCall,
+            base::BindRepeating(iter.second, base::Unretained(this))));
     if (!ret) {
       LOG(ERROR) << "Failed to export method " << iter.first;
       return false;
@@ -411,7 +394,10 @@ void Service::HandleSigterm() {
   bus_->ShutdownAndBlock();
 
   // Stop the message loop.
-  base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, quit_closure_);
+  if (quit_closure_) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, std::move(quit_closure_));
+  }
 }
 
 // Handles a request to start a new 9p server.
@@ -592,7 +578,7 @@ std::unique_ptr<dbus::Response> Service::StartServer(
   }
 
   // Add android-everybody for access to android files.
-  minijail_set_supplementary_gids(jail.get(), base::size(kSupplementaryGroups),
+  minijail_set_supplementary_gids(jail.get(), std::size(kSupplementaryGroups),
                                   kSupplementaryGroups);
   minijail_change_uid(jail.get(), kChronosUid);
   minijail_change_gid(jail.get(), kChronosGid);
@@ -615,7 +601,6 @@ std::unique_ptr<dbus::Response> Service::StartServer(
   minijail_no_new_privs(jail.get());
 
   // Use a seccomp filter.
-  minijail_log_seccomp_filter_failures(jail.get());
   minijail_parse_seccomp_filters(jail.get(), kSeccompPolicyPath);
   minijail_use_seccomp_filter(jail.get());
 
@@ -696,10 +681,10 @@ std::unique_ptr<dbus::Response> Service::StopServer(
     return dbus_response;
   }
 
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&Service::KillServer, weak_factory_.GetWeakPtr(),
-                 request.handle()),
+      base::BindOnce(&Service::KillServer, weak_factory_.GetWeakPtr(),
+                     request.handle()),
       kServerExitTimeout);
 
   response.set_success(true);
@@ -754,7 +739,8 @@ std::unique_ptr<dbus::Response> Service::SharePath(
   bool owner_id_required =
       request.storage_location() == SharePathRequest::DOWNLOADS ||
       request.storage_location() == SharePathRequest::MY_FILES ||
-      request.storage_location() == SharePathRequest::LINUX_FILES;
+      request.storage_location() == SharePathRequest::LINUX_FILES ||
+      request.storage_location() == SharePathRequest::GUEST_OS_FILES;
   if (owner_id.ReferencesParent() || owner_id.BaseName() != owner_id ||
       (owner_id_required && owner_id.value().size() == 0)) {
     LOG(ERROR) << "owner_id references parent, or is "
@@ -773,9 +759,9 @@ std::unique_ptr<dbus::Response> Service::SharePath(
       request.storage_location() == SharePathRequest::DRIVEFS_FILES_BY_ID ||
       request.storage_location() ==
           SharePathRequest::DRIVEFS_SHORTCUT_TARGETS_BY_ID;
-  if (drivefs_mount_name.ReferencesParent() ||
-      drivefs_mount_name.BaseName() != drivefs_mount_name ||
-      (drivefs_mount_name_required &&
+  if (drivefs_mount_name_required &&
+      (drivefs_mount_name.ReferencesParent() ||
+       drivefs_mount_name.BaseName() != drivefs_mount_name ||
        !base::StartsWith(drivefs_mount_name.value(), "drivefs-",
                          base::CompareCase::SENSITIVE))) {
     LOG(ERROR) << "drivefs_mount_name references parent, or is "
@@ -806,6 +792,30 @@ std::unique_ptr<dbus::Response> Service::SharePath(
     // that is named based on the share ID itself.
     smbfs_dst_prefix = smbfs_mount_name.value().substr(
         std::string(kSmbFsMountNamePrefix).size());
+  }
+
+  // Validate guest_os_mount_name and set guest_os_dst_prefix.
+  base::FilePath guest_os_mount_name(request.guest_os_mount_name());
+  std::string guest_os_dst_prefix;
+  if (request.storage_location() == SharePathRequest::GUEST_OS_FILES) {
+    if (guest_os_mount_name.ReferencesParent() ||
+        guest_os_mount_name.BaseName() != guest_os_mount_name ||
+        !base::StartsWith(
+            guest_os_mount_name.value(),
+            base::StrCat({kGuestOsMountNamePrefix, owner_id.value(), "+"}),
+            base::CompareCase::SENSITIVE)) {
+      LOG(ERROR) << "guest_os_mount_name references parent, or is more than 1 "
+                    "component, or is not populated";
+      response.set_failure_reason(
+          "guest_os_mount_name must be a single valid component");
+      writer.AppendProtoAsArrayOfBytes(response);
+      return dbus_response;
+    }
+    // Once we strip the prefix and owner id we're left with an encoded vm name
+    // and container name, which gives us a per-guest identifier. Use this as
+    // the root for sharing that guests's folders in to the target.
+    guest_os_dst_prefix = guest_os_mount_name.value().substr(
+        strlen(kGuestOsMountNamePrefix) + owner_id.value().length() + 1);
   }
 
   // Build the source and destination directories.
@@ -866,11 +876,19 @@ std::unique_ptr<dbus::Response> Service::SharePath(
       src = base::FilePath("/run/arc/sdcard/write/emulated/0");
       dst = dst.Append("PlayFiles");
       break;
+    case SharePathRequest::PLAY_FILES_GUEST_OS:
+      src = base::FilePath("/media/fuse/android_files");
+      dst = dst.Append("PlayFiles");
+      break;
     case SharePathRequest::LINUX_FILES:
       src = base::FilePath("/media/fuse/")
                 .Append(base::JoinString(
                     {"crostini", owner_id.value(), "termina", "penguin"}, "_"));
       dst = dst.Append("LinuxFiles");
+      break;
+    case SharePathRequest::GUEST_OS_FILES:
+      src = base::FilePath("/media/fuse/").Append(guest_os_mount_name),
+      dst = dst.Append("GuestOsFiles").Append(guest_os_dst_prefix);
       break;
     case SharePathRequest::FONTS:
       src = base::FilePath("/usr/share/fonts");
@@ -1056,11 +1074,9 @@ std::unique_ptr<dbus::Response> Service::UnsharePath(
   // <server_root>/MyFiles/a/b2, then we only delete from
   // <server_root>/MyFiles/a/b1.
   base::FilePath path_to_delete = server_root;
-  std::vector<std::string> server_root_components;
-  server_root.GetComponents(&server_root_components);
+  std::vector<std::string> server_root_components = server_root.GetComponents();
   size_t path_to_delete_depth = server_root_components.size();
-  std::vector<std::string> dst_components;
-  dst.GetComponents(&dst_components);
+  std::vector<std::string> dst_components = dst.GetComponents();
 
   // Ensure path is listed in /proc/self/mounts and has no parents within
   // server_root.
@@ -1093,8 +1109,8 @@ std::unique_ptr<dbus::Response> Service::UnsharePath(
       path_has_parent_mount = true;
     } else {
       // Modify path_to_delete if required so it does not contain mount_point.
-      std::vector<std::string> mount_point_components;
-      mount_point.GetComponents(&mount_point_components);
+      std::vector<std::string> mount_point_components =
+          mount_point.GetComponents();
       for (size_t i = 0;
            i < dst_components.size() - 1 && i < mount_point_components.size() &&
            dst_components[i] == mount_point_components[i];
@@ -1125,24 +1141,23 @@ std::unique_ptr<dbus::Response> Service::UnsharePath(
   }
 
   // In reverse order, unmount paths.
-  for (auto iter = mount_points.rbegin(), end = mount_points.rend();
-       iter != end; ++iter) {
-    if (umount(iter->value().c_str()) != 0) {
+  for (auto& mount_point : std::ranges::reverse_view(mount_points)) {
+    if (umount(mount_point.value().c_str()) != 0) {
       // When MyFiles is shared, its MyFiles/Downloads mount propagates. It
       // seems that the kernel does not allow us to unmount MyFiles/Downloads
       // with EINVAL, and then also fails to unmount MyFiles with EBUSY even
       // when no files are open.
       if (errno == EINVAL && dst == my_files &&
-          iter->value() == my_files_downloads.value()) {
+          mount_point.value() == my_files_downloads.value()) {
         // Ignore EINVAL when unsharing MyFiles and MyFiles/Downloads fails.
         PLOG(WARNING)
             << "Unmount MyFiles/Downloads failed with EINVAL, ignoring";
         continue;
-      } else if (errno == EBUSY && iter->value() == my_files.value()) {
+      } else if (errno == EBUSY && mount_point.value() == my_files.value()) {
         // If/when unmount MyFiles fails with EBUSY, we retry with MNT_DETACH.
         PLOG(WARNING)
             << "Unmount MyFiles failed with EBUSY, attempting MNT_DETACH";
-        if (umount2(iter->value().c_str(), MNT_DETACH) == 0) {
+        if (umount2(mount_point.value().c_str(), MNT_DETACH) == 0) {
           continue;
         }
       }
@@ -1181,5 +1196,4 @@ void Service::KillServer(uint32_t handle) {
   // We reap the child process through the normal sigchld handling mechanism.
 }
 
-}  // namespace seneschal
-}  // namespace vm_tools
+}  // namespace vm_tools::seneschal

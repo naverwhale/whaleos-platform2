@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -183,9 +183,9 @@ TEST_F(PairTest, ChallengeUnknownError) {
               SendSubcommandReceiveResponse(
                   UpdateExtraCommand::kPairChallenge, request_payload_, _,
                   sizeof(PairChallengeResponse), false))
-      .WillOnce(SetChallengeResponse(EcResponseStatus::kInvalidParam,
-                                     std::vector<uint8_t>(),
-                                     std::vector<uint8_t>(), false));
+      .WillRepeatedly(SetChallengeResponse(EcResponseStatus::kInvalidParam,
+                                           std::vector<uint8_t>(),
+                                           std::vector<uint8_t>(), false));
   EXPECT_CALL(dbus_wrapper_, SendSignal(kPairChallengeFailedSignal));
   EXPECT_EQ(pair_manager_.PairChallenge(&fw_updater_, &dbus_wrapper_),
             ChallengeStatus::kUnknownError);

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,6 +20,7 @@ const char* kLogFiles[] = {"messages",
                            "secure",
                            "net.log",
                            "faillog",
+                           "fwupd.log",
                            "session_manager",
                            "atrus.log",
                            "tlsdate.log",
@@ -69,8 +70,7 @@ base::Time GetOldestTimestampFromLogFiles(const base::FilePath& dir_path,
     // prior to the last modifiled time of the file (assumeing the file is
     // rotated daily).
     if (last_modified.is_null())
-      last_modified =
-          e.GetInfo().GetLastModifiedTime() - base::TimeDelta::FromDays(1);
+      last_modified = e.GetInfo().GetLastModifiedTime() - base::Days(1);
 
     if (last_modified.is_null())
       continue;

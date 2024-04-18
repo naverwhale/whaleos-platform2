@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,36 +36,28 @@ class UserDataAuthDaemon : public brillo::DBusServiceDaemon {
       brillo::dbus_utils::AsyncEventSequencer* sequencer) override {
     // Initialize the UserDataAuth service.
     // Note that the initialization should be done after setting the options.
-    CHECK(service_->Initialize());
+    CHECK(service_->Initialize(nullptr));
 
-    service_->set_dbus(bus_);
-
-    DCHECK(!dbus_object_);
+    CHECK(!dbus_object_);
     dbus_object_ = std::make_unique<brillo::dbus_utils::DBusObject>(
         nullptr, bus_,
         dbus::ObjectPath(::user_data_auth::kUserDataAuthServicePath));
 
-    userdataauth_adaptor_.reset(
-        new UserDataAuthAdaptor(bus_, dbus_object_.get(), service_.get()));
+    userdataauth_adaptor_ = std::make_unique<UserDataAuthAdaptor>(
+        bus_, dbus_object_.get(), service_.get());
     userdataauth_adaptor_->RegisterAsync();
 
-    arc_quota_adaptor_.reset(
-        new ArcQuotaAdaptor(bus_, dbus_object_.get(), service_.get()));
-    arc_quota_adaptor_->RegisterAsync();
-
-    pkcs11_adaptor_.reset(
-        new Pkcs11Adaptor(bus_, dbus_object_.get(), service_.get()));
+    pkcs11_adaptor_ = std::make_unique<Pkcs11Adaptor>(bus_, dbus_object_.get(),
+                                                      service_.get());
     pkcs11_adaptor_->RegisterAsync();
 
-    install_attributes_adaptor_.reset(
-        new InstallAttributesAdaptor(bus_, dbus_object_.get(), service_.get()));
+    install_attributes_adaptor_ = std::make_unique<InstallAttributesAdaptor>(
+        bus_, dbus_object_.get(), service_.get());
     install_attributes_adaptor_->RegisterAsync();
 
-    misc_adaptor_.reset(
-        new CryptohomeMiscAdaptor(bus_, dbus_object_.get(), service_.get()));
+    misc_adaptor_ = std::make_unique<CryptohomeMiscAdaptor>(
+        bus_, dbus_object_.get(), service_.get());
     misc_adaptor_->RegisterAsync();
-
-    service_->PostDBusInitialize();
 
     dbus_object_->RegisterAsync(
         sequencer->GetHandler("RegisterAsync() for UserDataAuth failed", true));
@@ -73,7 +65,6 @@ class UserDataAuthDaemon : public brillo::DBusServiceDaemon {
 
  private:
   std::unique_ptr<UserDataAuthAdaptor> userdataauth_adaptor_;
-  std::unique_ptr<ArcQuotaAdaptor> arc_quota_adaptor_;
   std::unique_ptr<Pkcs11Adaptor> pkcs11_adaptor_;
   std::unique_ptr<InstallAttributesAdaptor> install_attributes_adaptor_;
   std::unique_ptr<CryptohomeMiscAdaptor> misc_adaptor_;

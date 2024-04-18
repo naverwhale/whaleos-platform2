@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,7 +21,7 @@ scoped_refptr<JsonStore> CreateTestEmptyJsonStore(
     const base::FilePath& file_path) {
   base::WriteFile(file_path, kTestEmptyJsonStore,
                   std::size(kTestEmptyJsonStore) - 1);
-  return base::MakeRefCounted<JsonStore>(file_path);
+  return base::MakeRefCounted<JsonStore>(file_path, false);
 }
 
 }  // namespace
@@ -30,6 +30,7 @@ void StateHandlerTest::SetUp() {
   ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
   file_path_ = temp_dir_.GetPath().AppendASCII(kTestJsonStoreFileName);
   json_store_ = CreateTestEmptyJsonStore(file_path_);
+  daemon_callback_ = base::MakeRefCounted<DaemonCallback>();
 }
 
 }  // namespace rmad

@@ -1,30 +1,33 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef RUNTIME_PROBE_PROBE_FUNCTION_H_
 #define RUNTIME_PROBE_PROBE_FUNCTION_H_
 
+#include <array>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
-#include <variant>
-#include <vector>
+#include <utility>
 
+#include <base/functional/callback.h>
 #include <base/json/json_writer.h>
-#include <base/values.h>
+#include <base/notreached.h>
 #include <base/strings/string_util.h>
-
-#include "runtime_probe/probe_function_argument.h"
+#include <base/values.h>
 
 namespace runtime_probe {
 
 // Creates a probe function. This is a syntax suger for |FromKwargsValue|.
 template <typename T>
-constexpr auto CreateProbeFunction = &T::template FromKwargsValue<T>;
+std::unique_ptr<T> CreateProbeFunction(
+    const base::Value::Dict& dict_value = {}) {
+  return T::template FromKwargsValue<T>(dict_value);
+}
 
 class ProbeFunction {
   // ProbeFunction is the base class for all probe functions.  A derived
@@ -49,27 +52,24 @@ class ProbeFunction {
   //       "optional_keys": ["opt_key_1"]
   //     }
   //   }
-  //
-  // TODO(stimim): implement the following syntax.
-  //
-  // Alternative Syntax::
-  //   1. single string ("<function_name:string>"), this is equivalent to::
-  //      {
-  //        <function_name:string>: {}
-  //      }
-  //
-  //   2. single string ("<function_name:string>:<arg:string>"), this is
-  //      equivalent to::
-  //      {
-  //        <function_name:string>: {
-  //          "__only_required_argument": {
-  //            <arg:string>
-  //          }
-  //        }
-  //      }
 
  public:
-  using DataType = std::vector<base::Value>;
+  using DataType = base::Value::List;
+
+  // Interface to parse a function argument. See RegisterArgumentParser().
+  class ArgumentParser {
+   public:
+    ArgumentParser() = default;
+    virtual ~ArgumentParser() = default;
+
+    // Implement this to parse the argument from a value. |value| set to
+    // |std::nullopt| means that the field is not found in the argument list.
+    // Returns true if parse succeeds. Set |err| to some error messages which
+    // will be logged with the function name and the field name (|err| will be
+    // ignored if returning true).
+    virtual bool Parse(const std::optional<base::Value>& value,
+                       std::string& err) = 0;
+  };
 
   // Returns the name of the probe function.  The returned value should always
   // identical to the static member |function_name| of the derived class.
@@ -82,18 +82,26 @@ class ProbeFunction {
   // on failure.
   static std::unique_ptr<ProbeFunction> FromValue(const base::Value& dv);
 
-  // Creates a probe function of type |T| with empty argument.
-  // This function can be overridden by the derived classes.  See
-  // `functions/sysfs.h` about how to implement this function.
+  // Creates a probe function of type |T| with arguments. Returns nullptr if
+  // arguments cannot be parsed.
   template <typename T>
-  static auto FromKwargsValue(const base::Value& dict_value) {
-    PARSE_BEGIN();
-    PARSE_END();
+  static std::unique_ptr<T> FromKwargsValue(
+      const base::Value::Dict& dict_value) {
+    std::unique_ptr<T> fun{new T()};
+    if (fun->ParseArguments(dict_value)) {
+      return fun;
+    }
+    return nullptr;
   }
 
-  // Evaluates this probe function. Returns a list of base::Value. For the probe
-  // function that requests sandboxing, see |PrivilegedProbeFunction|.
-  virtual DataType Eval() const { return EvalImpl(); }
+  ProbeFunction(const ProbeFunction&) = delete;
+  ProbeFunction& operator=(const ProbeFunction&) = delete;
+  virtual ~ProbeFunction();
+
+  // Evaluates this probe function. The callback will get a list of base::Value.
+  // For the probe function that requests sandboxing, see
+  // |PrivilegedProbeFunction|.
+  virtual void Eval(base::OnceCallback<void(DataType)> callback) const;
 
   // This is for helper to evaluate the probe function. Helper is designed for
   // portion that need extended sandbox. See |PrivilegedProbeFunction| for more
@@ -102,27 +110,52 @@ class ProbeFunction {
   // Output will be an integer and the interpretation of the integer on
   // purposely leaves to the caller because it might execute other binary
   // in sandbox environment and we might want to preserve the exit code.
-  int EvalInHelper(std::string* output) const;
+  virtual int EvalInHelper(std::string* output) const;
+
+  // Registers an ArgumentParser. The callers need to guarantee the lifecycle of
+  // ArgumentParser object. It should be alive when calling
+  // |ParseArguments()|.
+  void RegisterArgumentParser(const std::string field_name,
+                              ArgumentParser* parser);
 
   using FactoryFunctionType =
-      std::function<std::unique_ptr<ProbeFunction>(const base::Value&)>;
+      std::function<std::unique_ptr<ProbeFunction>(const base::Value::Dict&)>;
+
+  using RegisteredFunctionTableType =
+      std::map<std::string_view, FactoryFunctionType>;
 
   // Mapping from |function_name| to FromKwargsValue() of each derived classes.
-  static std::map<std::string_view, FactoryFunctionType> registered_functions_;
-
-  virtual ~ProbeFunction() = default;
+  static RegisteredFunctionTableType registered_functions_;
 
  protected:
-  ProbeFunction() = default;
-  ProbeFunction(const ProbeFunction&) = delete;
-  explicit ProbeFunction(base::Value&& raw_value);
+  ProbeFunction();
 
- private:
   // Implement this method to provide the probing. The output should be a list
   // of base::Value.
-  virtual DataType EvalImpl() const = 0;
+  virtual DataType EvalImpl() const;
 
-  // Each probe function must define their own args type.
+  // Asynchronously implementation of the probe function. if the probe function
+  // involve asynchronous call, this method should be override. Either
+  // |EvalImpl| or |EvalAsyncImpl| should be implemented for any probe function.
+  virtual void EvalAsyncImpl(base::OnceCallback<void(DataType)> callback) const;
+
+  // Implement this to verify the parsed arguments or do other set up which
+  // based on arguments (e.g. create other probe functions with the arguments).
+  // It is called after all ArgumentParser are executed. Returning false makes
+  // the |ParseArguments()| fail.
+  virtual bool PostParseArguments() { return true; }
+
+  // Gets the arguments. It is the raw arguments passed to this function.
+  const base::Value::Dict& arguments() const { return arguments_; }
+
+ private:
+  // Parses the probe function arguments. Returns false when error.
+  bool ParseArguments(const base::Value::Dict& arguments);
+
+  // A map of argument field names to argument parsers.
+  std::map<std::string, ArgumentParser*> argument_parsers_;
+  // The raw arguments.
+  base::Value::Dict arguments_;
 };
 
 class PrivilegedProbeFunction : public ProbeFunction {
@@ -136,30 +169,23 @@ class PrivilegedProbeFunction : public ProbeFunction {
   //
   // For each |PrivilegedProbeFunction|, please modify `sandbox/args.json` and
   // `sandbox/${ARCH}/${function_name}-seccomp.policy`.
- public:
-  DataType Eval() const final;
+  using ProbeFunction::ProbeFunction;
 
-  // Redefine this to access protected constructor.
-  template <typename T>
-  static auto FromKwargsValue(const base::Value& dict_value) {
-    PARSE_BEGIN();
-    PARSE_END();
-  }
+ public:
+  // ProbeFunction overrides.
+  void Eval(base::OnceCallback<void(DataType)> callback) const final;
+  int EvalInHelper(std::string* output) const final;
 
  protected:
-  PrivilegedProbeFunction() = delete;
-  PrivilegedProbeFunction(const PrivilegedProbeFunction&) = delete;
-  explicit PrivilegedProbeFunction(base::Value&& raw_value);
-
   // Serializes this probe function and passes it to helper. The output of the
   // helper will store in |result|. Returns true if success on executing helper.
   bool InvokeHelper(std::string* result) const;
 
   // Serializes this probe function and passes it to helper.  Helper function
   // for InvokeHelper() where the output is known in advanced in JSON format.
-  // The transform of JSON will be automatically applied.  Returns base::nullopt
+  // The transform of JSON will be automatically applied.  Returns std::nullopt
   // on failure.
-  base::Optional<base::Value> InvokeHelperToJSON() const;
+  std::optional<base::Value> InvokeHelperToJSON() const;
 
  private:
   // This method is called after |EvalImpl()| finished. The |result| is the
@@ -169,9 +195,29 @@ class PrivilegedProbeFunction : public ProbeFunction {
   // logic out of helper and modify the |result|. See b/185292404 for the
   // discussion about this two steps EvalImpl.
   virtual void PostHelperEvalImpl(DataType* result) const {}
+};
 
-  // The value to describe this probe function.
-  base::Value raw_value_;
+// Tells if T is a subclass of ProbeFunction.
+template <typename T>
+inline constexpr auto is_probe_function_v = std::is_base_of_v<ProbeFunction, T>;
+
+// Represents a list of ProbeFunction.
+template <typename... Ts>
+class ProbeFunctions {
+  static_assert((is_probe_function_v<Ts> && ...),
+                "Ts must be a subclass of ProbeFunction");
+
+ public:
+  // Gets an array of all function names.
+  static constexpr std::array<const char*, sizeof...(Ts)> GetFunctionNames() {
+    return {Ts::function_name...};
+  }
+
+  // Constructs a table mapping function name to its factory method.
+  static ProbeFunction::RegisteredFunctionTableType
+  ConstructRegisteredFunctionTable() {
+    return {{Ts::function_name, CreateProbeFunction<Ts>}...};
+  }
 };
 
 #define NAME_PROBE_FUNCTION(name)                       \

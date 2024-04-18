@@ -1,15 +1,16 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "image-burner/image_burn_service.h"
 
 #include <string>
+#include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 namespace imageburn {
 
@@ -33,9 +34,9 @@ ImageBurnService::ImageBurnService(scoped_refptr<dbus::Bus> bus,
 ImageBurnService::~ImageBurnService() = default;
 
 void ImageBurnService::RegisterAsync(
-    const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb) {
+    brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb) {
   RegisterWithDBusObject(&dbus_object_);
-  dbus_object_.RegisterAsync(cb);
+  dbus_object_.RegisterAsync(std::move(cb));
 }
 
 bool ImageBurnService::BurnImage(brillo::ErrorPtr* error,
@@ -49,7 +50,7 @@ bool ImageBurnService::BurnImage(brillo::ErrorPtr* error,
 
   burning_ = true;
   amount_burnt_for_next_signal_ = 0;
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&ImageBurnService::BurnImageInternal,
                                 base::Unretained(this), from_path, to_path));
 

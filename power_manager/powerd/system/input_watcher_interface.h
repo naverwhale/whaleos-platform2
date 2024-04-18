@@ -1,27 +1,24 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef POWER_MANAGER_POWERD_SYSTEM_INPUT_WATCHER_INTERFACE_H_
 #define POWER_MANAGER_POWERD_SYSTEM_INPUT_WATCHER_INTERFACE_H_
 
-#include <base/macros.h>
-
 #include "power_manager/common/power_constants.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class InputObserver;
 
 // An interface for querying vaguely-input-related state.
 class InputWatcherInterface {
  public:
-  InputWatcherInterface() {}
+  InputWatcherInterface() = default;
   InputWatcherInterface(const InputWatcherInterface&) = delete;
   InputWatcherInterface& operator=(const InputWatcherInterface&) = delete;
 
-  virtual ~InputWatcherInterface() {}
+  virtual ~InputWatcherInterface() = default;
 
   // Adds or removes an observer.
   virtual void AddObserver(InputObserver* observer) = 0;
@@ -39,7 +36,6 @@ class InputWatcherInterface {
   virtual bool IsUSBInputDeviceConnected() const = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_INPUT_WATCHER_INTERFACE_H_

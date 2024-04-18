@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,11 @@
 
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 #include <dbus/kerberos/dbus-constants.h>
@@ -21,15 +21,13 @@ namespace system_proxy {
 
 namespace {
 // The kerberos files are written in the mount namespace of the System-proxy
-// darmon.
+// daemon.
 constexpr char kKrb5ConfFile[] = "/tmp/krb5.conf";
 constexpr char kCCacheFile[] = "/tmp/ccache";
 
 // Additional kerberos canonicalization settings and default realm. kerberosd
 // doesn't set a default_realm. Chrome doesn't need it as it specifies the
 // principal name when invoking gssapi methods.
-// TODO(acostinas, crbug.com/1087312): Set DNS canonicalization from user
-// policy.
 constexpr char kKrb5Settings[] =
     "[libdefaults]\n"
     "\tdns_canonicalize_hostname = false\n"

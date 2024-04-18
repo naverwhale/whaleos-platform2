@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,8 +17,7 @@
 
 #include "power_manager/powerd/system/ambient_light_sensor_interface.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -46,16 +45,7 @@ constexpr size_t AmbientLightHandler::kNumRecentReadingsToLog;
 
 AmbientLightHandler::AmbientLightHandler(
     system::AmbientLightSensorInterface* sensor, Delegate* delegate)
-    : sensor_(sensor),
-      delegate_(delegate),
-      power_source_(PowerSource::AC),
-      smoothed_lux_at_last_adjustment_(0),
-      smoothed_lux_(0),
-      smoothing_constant_(1.0),
-      hysteresis_state_(HysteresisState::IMMEDIATE),
-      hysteresis_count_(0),
-      step_index_(0),
-      sent_initial_adjustment_(false) {
+    : sensor_(sensor), delegate_(delegate) {
   DCHECK(sensor_);
   DCHECK(delegate_);
   recent_lux_readings_.reserve(kNumRecentReadingsToLog);
@@ -71,10 +61,9 @@ void AmbientLightHandler::Init(const std::string& steps_pref_value,
                                double smoothing_constant) {
   std::vector<std::string> lines = base::SplitString(
       steps_pref_value, "\n", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
-  for (std::vector<std::string>::iterator iter = lines.begin();
-       iter != lines.end(); ++iter) {
+  for (std::string& line : lines) {
     std::vector<std::string> segments = base::SplitString(
-        *iter, " ", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
+        line, " ", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
     BrightnessStep new_step;
     if (segments.size() == 3 &&
         base::StringToDouble(segments[0], &new_step.ac_target_percent) &&
@@ -91,7 +80,7 @@ void AmbientLightHandler::Init(const std::string& steps_pref_value,
                                  &new_step.increase_lux_threshold)) {
       // Okay, we've read all the fields.
     } else {
-      LOG(FATAL) << "Steps pref has invalid line \"" << *iter << "\"";
+      LOG(FATAL) << "Steps pref has invalid line \"" << line << "\"";
     }
     steps_.push_back(new_step);
   }
@@ -158,6 +147,7 @@ void AmbientLightHandler::HandlePowerSourceChange(PowerSource source) {
 
 void AmbientLightHandler::HandleResume() {
   hysteresis_state_ = HysteresisState::RESUMING;
+  report_on_resuming_ = true;
 }
 
 std::string AmbientLightHandler::GetRecentReadingsString() const {
@@ -177,7 +167,12 @@ void AmbientLightHandler::OnAmbientLightUpdated(
 
   // Discard first reading after resume as it is probably cached value.
   if (hysteresis_state_ == HysteresisState::RESUMING) {
-    hysteresis_state_ = HysteresisState::IMMEDIATE;
+    if (delegate_->IsUsingAmbientLight()) {
+      hysteresis_state_ = HysteresisState::IMMEDIATE;
+    } else {
+      // Return to stable state if ALS is not being used by delegate
+      hysteresis_state_ = HysteresisState::STABLE;
+    }
     return;
   }
 
@@ -185,6 +180,11 @@ void AmbientLightHandler::OnAmbientLightUpdated(
   if (raw_lux < 0) {
     LOG(WARNING) << "Sensor doesn't have valid value";
     return;
+  }
+
+  if (report_on_resuming_) {
+    report_on_resuming_ = false;
+    delegate_->ReportAmbientLightOnResumeMetrics(raw_lux);
   }
 
   // Currently we notify on every color temperature change.
@@ -298,5 +298,4 @@ void AmbientLightHandler::UpdateSmoothedLux(int raw_lux) {
   }
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

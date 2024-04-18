@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -8,8 +8,10 @@
 
 #include <vector>
 
+#include <hardware/camera3.h>
 #include <mojo/public/cpp/system/platform_handle.h>
 
+#include "common/camera_hal3_helpers.h"
 #include "cros-camera/ipc_util.h"
 
 namespace cros {
@@ -36,7 +38,12 @@ cros::mojom::Camera3StreamBufferPtr SerializeStreamBuffer(
     }
   }
   if (it == streams.end()) {
-    LOGF(ERROR) << "Unknown stream set in buffer";
+    LOGF(ERROR) << "Unknown stream set in buffer: "
+                << GetDebugString(buffer->stream);
+    for (const auto& stream : streams) {
+      LOGF(ERROR) << "Configured stream: "
+                  << GetDebugString(stream.second.get());
+    }
     ret.reset();
     return ret;
   }
@@ -48,7 +55,8 @@ cros::mojom::Camera3StreamBufferPtr SerializeStreamBuffer(
     return ret;
   }
   if (buffer_handles.find(handle->buffer_id) == buffer_handles.end()) {
-    LOGF(ERROR) << "Unknown buffer handle";
+    LOGF(ERROR) << "Unknown buffer handle " << handle->buffer_id
+                << " on stream " << GetDebugString(buffer->stream);
     ret.reset();
     return ret;
   }
@@ -59,6 +67,7 @@ cros::mojom::Camera3StreamBufferPtr SerializeStreamBuffer(
   if (buffer->acquire_fence != -1) {
     ret->acquire_fence =
         mojo::WrapPlatformFile(base::ScopedPlatformFile(buffer->acquire_fence));
+    const_cast<camera3_stream_buffer_t*>(buffer)->acquire_fence = -1;
     if (!ret->acquire_fence.is_valid()) {
       LOGF(ERROR) << "Failed to wrap acquire_fence";
       ret.reset();
@@ -69,6 +78,7 @@ cros::mojom::Camera3StreamBufferPtr SerializeStreamBuffer(
   if (buffer->release_fence != -1) {
     ret->release_fence =
         mojo::WrapPlatformFile(base::ScopedPlatformFile(buffer->release_fence));
+    const_cast<camera3_stream_buffer_t*>(buffer)->release_fence = -1;
     if (!ret->release_fence.is_valid()) {
       LOGF(ERROR) << "Failed to wrap release_fence";
       ret.reset();
@@ -91,6 +101,14 @@ int DeserializeStreamBuffer(
     return -EINVAL;
   }
   out_buffer->stream = it->second.get();
+
+  if (ptr->buffer_id == cros::mojom::NO_BUFFER_BUFFER_ID) {
+    out_buffer->buffer = nullptr;
+    out_buffer->status = CAMERA3_BUFFER_STATUS_OK;
+    out_buffer->acquire_fence = -1;
+    out_buffer->release_fence = -1;
+    return 0;
+  }
 
   auto buffer_handle = buffer_handles.find(ptr->buffer_id);
   if (buffer_handle == buffer_handles.end()) {
@@ -179,17 +197,46 @@ ScopedCameraMetadata DeserializeCameraMetadata(
   if (metadata.is_null() || !metadata->entries.has_value()) {
     return result;
   }
-  camera_metadata_t* allocated_data = allocate_camera_metadata(
-      metadata->entry_capacity, metadata->data_capacity);
+
+  // Validates the entries to ensure they are self consistent.
+  const auto& entries = *metadata->entries;
+  size_t data_count = 0;
+  for (const auto& entry : entries) {
+    int type = get_camera_metadata_tag_type(static_cast<uint32_t>(entry->tag));
+    if (type == -1 || static_cast<int>(entry->type) != type) {
+      LOGF(ERROR) << "Inconsistent tag type";
+      return result;
+    }
+
+    size_t type_size = camera_metadata_type_size[type];
+    if (entry->data.size() % type_size != 0) {
+      LOGF(ERROR) << "Unexpected entry size";
+      return result;
+    }
+
+    size_t count = entry->data.size() / type_size;
+    if (count != entry->count) {
+      LOGF(ERROR) << "Inconsistent entry data count";
+      return result;
+    }
+
+    // This might be different from entry->data.size(), since small data could
+    // be inlined and the storage is 8 bytes aligned.
+    data_count += calculate_camera_metadata_entry_data_size(type, count);
+  }
+
+  camera_metadata_t* allocated_data =
+      allocate_camera_metadata(entries.size(), data_count);
   if (!allocated_data) {
     LOGF(ERROR) << "Failed to allocate camera metadata";
     return result;
   }
+
   result.reset(allocated_data);
-  for (size_t i = 0; i < metadata->entry_count; ++i) {
-    int ret = add_camera_metadata_entry(
-        result.get(), static_cast<uint32_t>((*metadata->entries)[i]->tag),
-        (*metadata->entries)[i]->data.data(), (*metadata->entries)[i]->count);
+  for (const auto& entry : entries) {
+    int ret = add_camera_metadata_entry(result.get(),
+                                        static_cast<uint32_t>(entry->tag),
+                                        entry->data.data(), entry->count);
     if (ret) {
       LOGF(ERROR) << "Failed to add camera metadata entry";
       result.reset();

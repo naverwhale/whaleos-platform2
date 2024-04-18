@@ -1,25 +1,37 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "cryptohome/challenge_credentials/challenge_credentials_verify_key_operation.h"
 
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <crypto/scoped_openssl_types.h>
+#include <libhwsec/frontend/cryptohome/frontend.h>
+#include <libhwsec/status.h>
 #include <openssl/evp.h>
 #include <openssl/x509.h>
 
-#include "cryptohome/tpm.h"
+#include "cryptohome/error/location_utils.h"
 
 using brillo::Blob;
-using brillo::BlobFromString;
-using hwsec::error::TPMErrorBase;
+using cryptohome::error::CryptohomeCryptoError;
+using cryptohome::error::CryptohomeError;
+using cryptohome::error::CryptohomeTPMError;
+using cryptohome::error::ErrorActionSet;
+using cryptohome::error::PossibleAction;
+using cryptohome::error::PrimaryAction;
+using hwsec::TPMError;
+using hwsec::TPMErrorBase;
+using hwsec::TPMRetryAction;
+using hwsec_foundation::status::MakeStatus;
+using hwsec_foundation::status::OkStatus;
+using hwsec_foundation::status::StatusChain;
 
 namespace cryptohome {
 
@@ -29,37 +41,38 @@ namespace {
 constexpr int kChallengeByteCount = 20;
 
 // Returns the signature algorithm to be used for the verification.
-base::Optional<ChallengeSignatureAlgorithm> ChooseChallengeAlgorithm(
-    const ChallengePublicKeyInfo& public_key_info) {
-  DCHECK(public_key_info.signature_algorithm_size());
-  base::Optional<ChallengeSignatureAlgorithm> currently_chosen_algorithm;
+std::optional<SerializedChallengeSignatureAlgorithm> ChooseChallengeAlgorithm(
+    const SerializedChallengePublicKeyInfo& public_key_info) {
+  std::optional<SerializedChallengeSignatureAlgorithm>
+      currently_chosen_algorithm;
   // Respect the input's algorithm prioritization, with the exception of
   // considering SHA-1 as the least preferred option.
-  for (int index = 0; index < public_key_info.signature_algorithm_size();
-       ++index) {
-    currently_chosen_algorithm = public_key_info.signature_algorithm(index);
-    if (*currently_chosen_algorithm != CHALLENGE_RSASSA_PKCS1_V1_5_SHA1)
+  for (auto algo : public_key_info.signature_algorithm) {
+    currently_chosen_algorithm = algo;
+    if (*currently_chosen_algorithm !=
+        SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha1)
       break;
   }
   return currently_chosen_algorithm;
 }
 
-int GetOpenSslSignatureAlgorithmNid(ChallengeSignatureAlgorithm algorithm) {
+int GetOpenSslSignatureAlgorithmNid(
+    SerializedChallengeSignatureAlgorithm algorithm) {
   switch (algorithm) {
-    case CHALLENGE_RSASSA_PKCS1_V1_5_SHA1:
+    case SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha1:
       return NID_sha1;
-    case CHALLENGE_RSASSA_PKCS1_V1_5_SHA256:
+    case SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha256:
       return NID_sha256;
-    case CHALLENGE_RSASSA_PKCS1_V1_5_SHA384:
+    case SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha384:
       return NID_sha384;
-    case CHALLENGE_RSASSA_PKCS1_V1_5_SHA512:
+    case SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha512:
       return NID_sha512;
   }
   return 0;
 }
 
 bool IsValidSignature(const Blob& public_key_spki_der,
-                      ChallengeSignatureAlgorithm algorithm,
+                      SerializedChallengeSignatureAlgorithm algorithm,
                       const Blob& input,
                       const Blob& signature) {
   const int openssl_algorithm_nid = GetOpenSslSignatureAlgorithmNid(algorithm);
@@ -111,17 +124,15 @@ bool IsValidSignature(const Blob& public_key_spki_der,
 
 ChallengeCredentialsVerifyKeyOperation::ChallengeCredentialsVerifyKeyOperation(
     KeyChallengeService* key_challenge_service,
-    Tpm* tpm,
-    const std::string& account_id,
-    const KeyData& key_data,
+    const hwsec::CryptohomeFrontend* hwsec,
+    const Username& account_id,
+    const SerializedChallengePublicKeyInfo& public_key_info,
     CompletionCallback completion_callback)
     : ChallengeCredentialsOperation(key_challenge_service),
-      tpm_(tpm),
+      hwsec_(hwsec),
       account_id_(account_id),
-      key_data_(key_data),
-      completion_callback_(std::move(completion_callback)) {
-  DCHECK_EQ(key_data.type(), KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-}
+      public_key_info_(public_key_info),
+      completion_callback_(std::move(completion_callback)) {}
 
 ChallengeCredentialsVerifyKeyOperation::
     ~ChallengeCredentialsVerifyKeyOperation() = default;
@@ -129,74 +140,86 @@ ChallengeCredentialsVerifyKeyOperation::
 void ChallengeCredentialsVerifyKeyOperation::Start() {
   DCHECK(thread_checker_.CalledOnValidThread());
 
-  if (!key_data_.challenge_response_key_size()) {
-    LOG(ERROR) << "Missing challenge-response key information";
-    Complete(&completion_callback_, /*is_key_valid=*/false);
-    return;
-  }
-  if (key_data_.challenge_response_key_size() > 1) {
-    LOG(ERROR)
-        << "Using multiple challenge-response keys at once is unsupported";
-    Complete(&completion_callback_, /*is_key_valid=*/false);
-    return;
-  }
-  const ChallengePublicKeyInfo public_key_info =
-      key_data_.challenge_response_key(0);
-  const Blob public_key_spki_der =
-      BlobFromString(public_key_info.public_key_spki_der());
-  if (!public_key_info.signature_algorithm_size()) {
+  const brillo::Blob& public_key_spki_der =
+      public_key_info_.public_key_spki_der;
+  if (!public_key_info_.signature_algorithm.size()) {
     LOG(ERROR) << "The key does not support any signature algorithm";
-    Complete(&completion_callback_, /*is_key_valid=*/false);
+    Complete(&completion_callback_,
+             MakeStatus<CryptohomeCryptoError>(
+                 CRYPTOHOME_ERR_LOC(kLocChalCredVerifyNoAlgorithm),
+                 ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+                 CryptoError::CE_OTHER_CRYPTO));
     return;
   }
-  const base::Optional<ChallengeSignatureAlgorithm> chosen_challenge_algorithm =
-      ChooseChallengeAlgorithm(public_key_info);
+  const std::optional<SerializedChallengeSignatureAlgorithm>
+      chosen_challenge_algorithm = ChooseChallengeAlgorithm(public_key_info_);
   if (!chosen_challenge_algorithm) {
     LOG(ERROR) << "Failed to choose verification signature challenge algorithm";
-    Complete(&completion_callback_, /*is_key_valid=*/false);
+    Complete(&completion_callback_,
+             MakeStatus<CryptohomeCryptoError>(
+                 CRYPTOHOME_ERR_LOC(kLocChalCredVerifyNoAlgorithmChosen),
+                 ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+                 CryptoError::CE_OTHER_CRYPTO));
     return;
   }
-  Blob challenge;
-  if (TPMErrorBase err =
-          tpm_->GetRandomDataBlob(kChallengeByteCount, &challenge)) {
+  hwsec::StatusOr<Blob> challenge = hwsec_->GetRandomBlob(kChallengeByteCount);
+  if (!challenge.ok()) {
     LOG(ERROR)
         << "Failed to generate random bytes for the verification challenge: "
-        << *err;
-    Complete(&completion_callback_, /*is_key_valid=*/false);
+        << challenge.status();
+    Complete(&completion_callback_,
+             MakeStatus<CryptohomeCryptoError>(
+                 CRYPTOHOME_ERR_LOC(kLocChalCredVerifyGetRandomFailed))
+                 .Wrap(MakeStatus<CryptohomeTPMError>(
+                     std::move(challenge).err_status())));
     return;
   }
   MakeKeySignatureChallenge(
-      account_id_, public_key_spki_der, challenge, *chosen_challenge_algorithm,
+      account_id_, public_key_spki_der, challenge.value(),
+      *chosen_challenge_algorithm,
       base::BindOnce(
           &ChallengeCredentialsVerifyKeyOperation::OnChallengeResponse,
           weak_ptr_factory_.GetWeakPtr(), public_key_spki_der,
-          *chosen_challenge_algorithm, challenge));
+          *chosen_challenge_algorithm, challenge.value()));
 }
 
-void ChallengeCredentialsVerifyKeyOperation::Abort() {
+void ChallengeCredentialsVerifyKeyOperation::Abort(
+    CryptoStatus status [[clang::param_typestate(unconsumed)]]) {
   DCHECK(thread_checker_.CalledOnValidThread());
-  Complete(&completion_callback_, /*is_key_valid=*/false);
+  Complete(&completion_callback_,
+           MakeStatus<CryptohomeCryptoError>(
+               CRYPTOHOME_ERR_LOC(kLocChalCredVerifyAborted))
+               .Wrap(std::move(status)));
   // |this| can be already destroyed at this point.
 }
 
 void ChallengeCredentialsVerifyKeyOperation::OnChallengeResponse(
     const Blob& public_key_spki_der,
-    ChallengeSignatureAlgorithm challenge_algorithm,
+    SerializedChallengeSignatureAlgorithm challenge_algorithm,
     const Blob& challenge,
-    std::unique_ptr<Blob> challenge_response) {
+    CryptoStatusOr<std::unique_ptr<Blob>> challenge_response_status) {
   DCHECK(thread_checker_.CalledOnValidThread());
-  if (!challenge_response) {
+  if (!challenge_response_status.ok()) {
     LOG(ERROR) << "Verification signature challenge failed";
-    Complete(&completion_callback_, /*is_key_valid=*/false);
+    Complete(&completion_callback_,
+             MakeStatus<CryptohomeCryptoError>(
+                 CRYPTOHOME_ERR_LOC(kLocChalCredVerifyChallengeFailed))
+                 .Wrap(std::move(challenge_response_status).err_status()));
     return;
   }
+  std::unique_ptr<Blob> challenge_response =
+      std::move(challenge_response_status).value();
   if (!IsValidSignature(public_key_spki_der, challenge_algorithm, challenge,
                         *challenge_response)) {
     LOG(ERROR) << "Invalid signature for the verification challenge";
-    Complete(&completion_callback_, /*is_key_valid=*/false);
+    Complete(&completion_callback_,
+             MakeStatus<CryptohomeCryptoError>(
+                 CRYPTOHOME_ERR_LOC(kLocChalCredVerifyInvalidSignature),
+                 ErrorActionSet(PrimaryAction::kIncorrectAuth),
+                 CryptoError::CE_OTHER_CRYPTO));
     return;
   }
-  Complete(&completion_callback_, /*is_key_valid=*/true);
+  Complete(&completion_callback_, OkStatus<CryptohomeCryptoError>());
 }
 
 }  // namespace cryptohome

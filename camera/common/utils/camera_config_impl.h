@@ -1,4 +1,4 @@
-/* Copyright 2018 The Chromium OS Authors. All rights reserved.
+/* Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -19,29 +19,29 @@ namespace cros {
 
 // Read config from camera configure file.
 // Reference for all options from: include/cros-camera/constants.h
-class CameraConfigImpl final : public CameraConfig {
+class CameraConfigImpl : public CameraConfig {
  public:
-  ~CameraConfigImpl() final;
+  ~CameraConfigImpl() override;
 
-  bool HasKey(const std::string& key) const final;
+  bool HasKey(const std::string& key) const override;
 
-  bool GetBoolean(const std::string& path, bool default_value) const final;
+  bool GetBoolean(const std::string& path, bool default_value) const override;
 
-  int GetInteger(const std::string& path, int default_value) const final;
+  int GetInteger(const std::string& path, int default_value) const override;
 
   std::string GetString(const std::string& path,
-                        const std::string& default_value) const final;
+                        const std::string& default_value) const override;
 
   std::vector<std::string> GetStrings(
       const std::string& path,
-      const std::vector<std::string>& default_value) const final;
+      const std::vector<std::string>& default_value) const override;
 
  private:
-  explicit CameraConfigImpl(base::Value config);
+  explicit CameraConfigImpl(base::Value::Dict config);
   friend std::unique_ptr<CameraConfig> CameraConfig::Create(
       const std::string& config_path_string);
 
-  base::Value config_;
+  base::Value::Dict config_;
 };
 
 }  // namespace cros

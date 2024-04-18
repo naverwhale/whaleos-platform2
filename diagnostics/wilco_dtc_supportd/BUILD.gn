@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -17,17 +17,16 @@ source_set("libwilco_dtc_supportd") {
   configs += [ ":common_pkg_deps" ]
   deps = [
     "telemetry:libtelemetry",
-    "//diagnostics/common:libcommon",
+    "utils:libutils",
     "//diagnostics/constants:libconstants",
     "//diagnostics/grpc:wilco_dtc_grpc_protos",
-    "//diagnostics/mojo:cros_healthd_mojo_bindings",
-    "//diagnostics/mojo:wilco_dtc_supportd_mojo_bindings",
+    "//diagnostics/mojom/public:libcros_healthd_mojo_bindings",
+    "//diagnostics/mojom/public:wilco_dtc_supportd_mojo_bindings",
   ]
   sources = [
     "core.cc",
     "core_delegate_impl.cc",
     "dbus_service.cc",
-    "ec_constants.cc",
     "grpc_client_manager.cc",
     "grpc_service.cc",
     "json_utils.cc",
@@ -46,10 +45,16 @@ executable("wilco_dtc_supportd") {
   ]
   configs += [ ":common_pkg_deps" ]
   deps = [ ":libwilco_dtc_supportd" ]
+  if (use.wilco) {
+    install_path = "bin"
+  }
 }
 
 if (use.test) {
   executable("wilco_dtc_supportd_test") {
+    if (use.wilco) {
+      run_test = true
+    }
     sources = [
       "core_test.cc",
       "dbus_service_test.cc",
@@ -71,7 +76,7 @@ if (use.test) {
     deps = [
       ":libwilco_dtc_supportd",
       "telemetry:telemetry_test",
-      "//diagnostics/common:mojo_testrunner",
+      "utils:mojo_testrunner",
     ]
   }
 }

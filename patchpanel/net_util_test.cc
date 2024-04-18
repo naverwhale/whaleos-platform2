@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,121 +12,40 @@
 
 namespace patchpanel {
 
-const uint8_t ping_frame[] =
-    "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x86\xdd\x60\x0b"
-    "\x8d\xb4\x00\x40\x3a\x40\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-    "\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-    "\x00\x00\x00\x00\x00\x01\x80\x00\xb9\x3c\x13\x8f\x00\x09\xde\x6a"
-    "\x78\x5d\x00\x00\x00\x00\x8e\x13\x0f\x00\x00\x00\x00\x00\x10\x11"
-    "\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20\x21"
-    "\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31"
-    "\x32\x33\x34\x35\x36\x37";
+const uint8_t ping_frame[] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x86, 0xdd, 0x60, 0x0b, 0x8d, 0xb4, 0x00, 0x40, 0x3a, 0x40, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x00, 0xb9, 0x3c, 0x13, 0x8f,
+    0x00, 0x09, 0xde, 0x6a, 0x78, 0x5d, 0x00, 0x00, 0x00, 0x00, 0x8e, 0x13,
+    0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+    0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21,
+    0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+    0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37};
 
-const uint8_t rs_frame[] =
-    "\x33\x33\x00\x00\x00\x02\x1a\x9b\x82\xbd\xc0\xa0\x86\xdd\x60\x00"
-    "\x00\x00\x00\x10\x3a\xff\xfe\x80\x00\x00\x00\x00\x00\x00\x2d\x75"
-    "\xb2\x80\x97\x83\x76\xbf\xff\x02\x00\x00\x00\x00\x00\x00\x00\x00"
-    "\x00\x00\x00\x00\x00\x02\x85\x00\x2f\xfc\x00\x00\x00\x00\x01\x01"
-    "\x1a\x9b\x82\xbd\xc0\xa0";
+const uint8_t rs_frame[] = {
+    0x33, 0x33, 0x00, 0x00, 0x00, 0x02, 0x1a, 0x9b, 0x82, 0xbd, 0xc0, 0xa0,
+    0x86, 0xdd, 0x60, 0x00, 0x00, 0x00, 0x00, 0x10, 0x3a, 0xff, 0xfe, 0x80,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2d, 0x75, 0xb2, 0x80, 0x97, 0x83,
+    0x76, 0xbf, 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x85, 0x00, 0x2f, 0xfc, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x01, 0x1a, 0x9b, 0x82, 0xbd, 0xc0, 0xa0};
 
-const uint8_t ip_header[] =
-    "\x45\x00\x00\x3d\x7c\x8e\x40\x00\x40\x11\x3d\x36\x64\x73\x5c\x02"
-    "\x64\x73\x5c\x03";
+const uint8_t ip_header[] = {0x45, 0x00, 0x00, 0x3d, 0x7c, 0x8e, 0x40,
+                             0x00, 0x40, 0x11, 0x3d, 0x36, 0x64, 0x73,
+                             0x5c, 0x02, 0x64, 0x73, 0x5c, 0x03};
 
-const uint8_t udp_packet[] =
-    "\x45\x00\x00\x65\x44\xf7\x40\x00\x3f\x11\x7d\x62\x64\x57\x54\x5a"
-    "\x64\x73\x5c\x0a\x9d\x6c\x09\xa4\x00\x51\x58\xfb\x70\x72\x6f\x74"
-    "\x6f\x63\x6f\x6c\x20\x20\x61\x73\x73\x75\x6d\x65\x73\x20\x20\x74"
-    "\x68\x61\x74\x20\x74\x68\x65\x20\x49\x6e\x74\x65\x72\x6e\x65\x74"
-    "\x20\x20\x50\x72\x6f\x74\x6f\x63\x6f\x6c\x20\x20\x28\x49\x50\x29"
-    "\x20\x20\x5b\x31\x5d\x20\x69\x73\x20\x75\x73\x65\x64\x20\x61\x73"
-    "\x20\x74\x68\x65\x0a";
-
-TEST(Byteswap, 16bits) {
-  uint32_t test_cases[] = {
-      0x0000, 0x0001, 0x1000, 0xffff, 0x2244, 0xfffe,
-  };
-
-  for (uint32_t value : test_cases) {
-    EXPECT_EQ(Byteswap16(value), bswap_16(value));
-    EXPECT_EQ(ntohs(value), Ntohs(value));
-    EXPECT_EQ(htons(value), Htons(value));
-  }
-}
-
-TEST(Byteswap, 32bits) {
-  uint32_t test_cases[] = {
-      0x00000000, 0x00000001, 0x10000000, 0xffffffff, 0x11335577, 0xdeadbeef,
-  };
-
-  for (uint32_t value : test_cases) {
-    EXPECT_EQ(Byteswap32(value), bswap_32(value));
-    EXPECT_EQ(ntohl(value), Ntohl(value));
-    EXPECT_EQ(htonl(value), Htonl(value));
-  }
-}
-
-TEST(Ipv4, CreationAndStringConversion) {
-  struct {
-    std::string literal_address;
-    uint8_t bytes[4];
-  } test_cases[] = {
-      {"0.0.0.0", {0, 0, 0, 0}},
-      {"8.8.8.8", {8, 8, 8, 8}},
-      {"8.8.4.4", {8, 8, 4, 4}},
-      {"192.168.0.0", {192, 168, 0, 0}},
-      {"100.115.92.5", {100, 115, 92, 5}},
-      {"100.115.92.6", {100, 115, 92, 6}},
-      {"224.0.0.251", {224, 0, 0, 251}},
-      {"255.255.255.255", {255, 255, 255, 255}},
-  };
-
-  for (auto const& test_case : test_cases) {
-    uint32_t addr = Ipv4Addr(test_case.bytes[0], test_case.bytes[1],
-                             test_case.bytes[2], test_case.bytes[3]);
-    EXPECT_EQ(test_case.literal_address, IPv4AddressToString(addr));
-  }
-}
-
-TEST(Ipv6, CreationAndStringConversion) {
-  struct {
-    std::string literal_address;
-    uint8_t bytes[16];
-  } test_cases[] = {
-      {"::", {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
-      {"2001:da8:ff:5002:1034:56ff:fe78:9abc",
-       {0x20, 0x01, 0xd, 0xa8, 0, 0xff, 0x50, 0x02, 0x10, 0x34, 0x56, 0xff,
-        0xfe, 0x78, 0x9a, 0xbc}},
-      {"fe80::1122",
-       {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x22}},
-  };
-
-  for (auto const& test_case : test_cases) {
-    struct in6_addr addr = {};
-    memcpy(addr.s6_addr, test_case.bytes, sizeof(addr.s6_addr));
-    EXPECT_EQ(test_case.literal_address, IPv6AddressToString(addr));
-  }
-}
-
-TEST(Ipv4, CreationAndCidrStringConversion) {
-  struct {
-    std::string literal_address;
-    uint8_t bytes[4];
-    uint32_t prefix_length;
-  } test_cases[] = {
-      {"0.0.0.0/0", {0, 0, 0, 0}, 0},
-      {"192.168.0.0/24", {192, 168, 0, 0}, 24},
-      {"100.115.92.5/30", {100, 115, 92, 5}, 30},
-      {"100.115.92.6/30", {100, 115, 92, 6}, 30},
-  };
-
-  for (auto const& test_case : test_cases) {
-    uint32_t addr = Ipv4Addr(test_case.bytes[0], test_case.bytes[1],
-                             test_case.bytes[2], test_case.bytes[3]);
-    EXPECT_EQ(test_case.literal_address,
-              IPv4AddressToCidrString(addr, test_case.prefix_length));
-  }
-}
+const uint8_t udp_packet[] = {
+    0x45, 0x00, 0x00, 0x65, 0x44, 0xf7, 0x40, 0x00, 0x3f, 0x11, 0x7d, 0x62,
+    0x64, 0x57, 0x54, 0x5a, 0x64, 0x73, 0x5c, 0x0a, 0x9d, 0x6c, 0x09, 0xa4,
+    0x00, 0x51, 0x58, 0xfb, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x63, 0x6f, 0x6c,
+    0x20, 0x20, 0x61, 0x73, 0x73, 0x75, 0x6d, 0x65, 0x73, 0x20, 0x20, 0x74,
+    0x68, 0x61, 0x74, 0x20, 0x74, 0x68, 0x65, 0x20, 0x49, 0x6e, 0x74, 0x65,
+    0x72, 0x6e, 0x65, 0x74, 0x20, 0x20, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x63,
+    0x6f, 0x6c, 0x20, 0x20, 0x28, 0x49, 0x50, 0x29, 0x20, 0x20, 0x5b, 0x31,
+    0x5d, 0x20, 0x69, 0x73, 0x20, 0x75, 0x73, 0x65, 0x64, 0x20, 0x61, 0x73,
+    0x20, 0x74, 0x68, 0x65, 0x0a};
 
 TEST(Ipv4, IpChecksum) {
   alignas(4) uint8_t buffer[IP_MAXPACKET];
@@ -142,13 +61,12 @@ TEST(Ipv4, IpChecksum) {
 TEST(Ipv4, UdpChecksum) {
   alignas(4) uint8_t buffer[IP_MAXPACKET];
 
-  iphdr* ip = reinterpret_cast<iphdr*>(buffer);
   udphdr* udp = reinterpret_cast<udphdr*>(buffer + sizeof(iphdr));
 
   memcpy(buffer, udp_packet, sizeof(udp_packet));
   uint16_t ori_cksum = udp->check;
   udp->check = 0;
-  EXPECT_EQ(ori_cksum, Udpv4Checksum(ip, udp));
+  EXPECT_EQ(ori_cksum, Udpv4Checksum(buffer, sizeof(udp_packet)));
 }
 
 TEST(Ipv6, IcmpChecksum) {
@@ -162,12 +80,16 @@ TEST(Ipv6, IcmpChecksum) {
   memcpy(buffer, ping_frame, sizeof(ping_frame));
   uint16_t ori_cksum = icmp6->icmp6_cksum;
   icmp6->icmp6_cksum = 0;
-  EXPECT_EQ(ori_cksum, Icmpv6Checksum(ip6, icmp6));
+  size_t ip6_packet_len = sizeof(ping_frame) - ETHER_HDR_LEN;
+  EXPECT_EQ(ori_cksum, Icmpv6Checksum(reinterpret_cast<const uint8_t*>(ip6),
+                                      ip6_packet_len));
 
   memcpy(buffer, rs_frame, sizeof(rs_frame));
   ori_cksum = icmp6->icmp6_cksum;
   icmp6->icmp6_cksum = 0;
-  EXPECT_EQ(ori_cksum, Icmpv6Checksum(ip6, icmp6));
+  ip6_packet_len = sizeof(rs_frame) - ETHER_HDR_LEN;
+  EXPECT_EQ(ori_cksum, Icmpv6Checksum(reinterpret_cast<const uint8_t*>(ip6),
+                                      ip6_packet_len));
 }
 
 TEST(Ipv6, EUI64Addr) {
@@ -193,59 +115,19 @@ TEST(Ipv6, EUI64Addr) {
   }
 }
 
-TEST(Ipv4, BroadcastAddr) {
-  uint32_t base = Ipv4Addr(100, 115, 92, 0);
-  struct {
-    uint32_t prefix_len;
-    uint32_t want;
-  } test_cases[] = {
-      {24, Ipv4Addr(100, 115, 92, 255)},
-      {29, Ipv4Addr(100, 115, 92, 7)},
-      {30, Ipv4Addr(100, 115, 92, 3)},
-      {31, Ipv4Addr(100, 115, 92, 1)},
-  };
-
-  for (const auto& t : test_cases) {
-    EXPECT_EQ(Ipv4BroadcastAddr(base, t.prefix_len), t.want);
-  }
-}
-
 TEST(IPv4, SetSockaddrIn) {
   struct sockaddr_storage sockaddr = {};
   std::ostringstream stream;
 
-  SetSockaddrIn((struct sockaddr*)&sockaddr, 0);
+  SetSockaddrIn((struct sockaddr*)&sockaddr, {});
   stream << sockaddr;
   EXPECT_EQ("{family: AF_INET, port: 0, addr: 0.0.0.0}", stream.str());
 
   stream.str("");
-  SetSockaddrIn((struct sockaddr*)&sockaddr, Ipv4Addr(192, 168, 1, 37));
+  SetSockaddrIn((struct sockaddr*)&sockaddr,
+                net_base::IPv4Address(192, 168, 1, 37));
   stream << sockaddr;
   EXPECT_EQ("{family: AF_INET, port: 0, addr: 192.168.1.37}", stream.str());
-}
-
-TEST(IpFamily, GetIpFamily) {
-  struct {
-    std::string ip_address;
-    sa_family_t family;
-  } test_cases[] = {
-      {"0.0.0.0", AF_INET},
-      {"100.115.92.6", AF_INET},
-      {"255.255.255.255", AF_INET},
-      {"::", AF_INET6},
-      {"fe80::", AF_INET6},
-      {"fe80::f699:9fff:fef4:4fe4", AF_INET6},
-      {"", AF_UNSPEC},
-      {"1234", AF_UNSPEC},
-      {"0.0.0.0/0", AF_UNSPEC},
-      {"1.1.1.256", AF_UNSPEC},
-      {"fe80:f699:9fff:fef4:4fe4", AF_UNSPEC},
-      {"fg80::", AF_UNSPEC},
-  };
-
-  for (const auto& t : test_cases) {
-    EXPECT_EQ(GetIpFamily(t.ip_address), t.family);
-  }
 }
 
 TEST(PrettyPrint, SocketAddrIn) {
@@ -257,7 +139,7 @@ TEST(PrettyPrint, SocketAddrIn) {
 
   ipv4_sockaddr.sin_family = AF_INET;
   ipv4_sockaddr.sin_port = htons(1234);
-  ipv4_sockaddr.sin_addr.s_addr = Ipv4Addr(100, 115, 92, 10);
+  ipv4_sockaddr.sin_addr = net_base::IPv4Address(100, 115, 92, 10).ToInAddr();
   std::string expected_output =
       "{family: AF_INET, port: 1234, addr: 100.115.92.10}";
 
@@ -387,9 +269,9 @@ TEST(PrettyPrint, Rtentry) {
       "null, rt_flags: 0}",
       stream.str());
 
-  SetSockaddrIn(&route.rt_dst, Ipv4Addr(100, 115, 92, 128));
-  SetSockaddrIn(&route.rt_genmask, Ipv4Addr(255, 255, 255, 252));
-  SetSockaddrIn(&route.rt_gateway, Ipv4Addr(192, 168, 1, 1));
+  SetSockaddrIn(&route.rt_dst, net_base::IPv4Address(100, 115, 92, 128));
+  SetSockaddrIn(&route.rt_genmask, net_base::IPv4Address(255, 255, 255, 252));
+  SetSockaddrIn(&route.rt_gateway, net_base::IPv4Address(192, 168, 1, 1));
   std::string rt_dev = "eth0";
   route.rt_dev = const_cast<char*>(rt_dev.c_str());
   route.rt_flags =

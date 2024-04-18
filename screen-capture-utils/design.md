@@ -47,37 +47,29 @@ We use KMS/DRM for grabbing the current display.
 For devices that expose capability of capturing multiple planes we support
 scanning multiple planes and merging.
 
-There are three major types of boards that this code handles. The flags
-`--method=bo` or `--method=egl` would try to force which method is being used.
-
-#### non-getfb2-capable
-
-Kernel before 4.4 do not have
-[getfb2 ioctl backported](http://crrev.com/c/2001263), so they will use the
-`--method=bo`. This does not support multiple planes and assumes framebuffer is
-readable in ARGB format.
-
-Development was done typically with caroline.
+There are two major types of boards that this code handles.
 
 #### getfb2-capable
 
-framebuffer is converted every frame to ARGB format using EGL call. This depends
-on getfb2 ioctl being available, which is only available on kernel 4.4 or later.
+framebuffer is converted every frame to ARGB format using EGL call. This only
+depends on getfb2 ioctl being available (kernel 4.4 or later).
 
-Development was done typically with samus.
+The last known device with this configuration is hana.
 
 #### getfb2-capable and atomic_modeset capable
 
 planes are scanned and merged so that when multiple planes are being used they
-are correctly rendered.
+are correctly rendered. This needs getfb2 and in addition support for
+`DRM_CLIENT_CAP_ATOMIC`.
 
 Development was done typically with rammus.
 
 ### Display orientation
 
-Tablets can be rotated, and we don't handle this yet, sorry! You will have to
-turn you head 90 degrees to the left to view the display in the correct
-orientation for now.
+Tablets can be rotated, you can pass --rotate to `screenshot` and `kmsvnc`
+to rotate the captured screeen 90 degrees clockwise. This works correctly
+with `kukui` devices. Other orientations are not supported at this moment
+in the sprit of YAGNI.
 
 ### Keyboard handling
 

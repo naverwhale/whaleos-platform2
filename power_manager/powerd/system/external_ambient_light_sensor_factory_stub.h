@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,18 +10,16 @@
 
 #include "power_manager/powerd/system/external_ambient_light_sensor_factory_interface.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Creates external ambient light sensors that are stubs for testing.
 class ExternalAmbientLightSensorFactoryStub
     : public ExternalAmbientLightSensorFactoryInterface {
  public:
   std::unique_ptr<AmbientLightSensorInterface> CreateSensor(
-      const std::string& device_name) const override;
+      const AmbientLightSensorInfo& als_info) const override;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_EXTERNAL_AMBIENT_LIGHT_SENSOR_FACTORY_STUB_H_

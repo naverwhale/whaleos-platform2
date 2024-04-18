@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,17 +14,20 @@
 #include <base/check_op.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/notreached.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 
+#include "runtime_probe/proto_bindings/runtime_probe.pb.h"
+#include "runtime_probe/system/context.h"
 #include "runtime_probe/utils/file_utils.h"
 #include "runtime_probe/utils/input_device.h"
 
 namespace runtime_probe {
 
 namespace {
-constexpr auto kInputDevicesPath = "/proc/bus/input/devices";
+constexpr auto kInputDevicesPath = "proc/bus/input/devices";
 
 using FieldType = std::pair<std::string, std::string>;
 
@@ -32,6 +35,22 @@ const std::vector<FieldType> kTouchscreenI2cFields = {
     {"name", "name"}, {"product", "hw_version"}, {"fw_version", "fw_version"}};
 const std::map<std::string, std::string> kTouchscreenI2cDriverToVid = {
     {"elants_i2c", "04f3"}, {"raydium_ts", "27a3"}, {"atmel_ext_ts", "03eb"}};
+
+std::string DeviceTypeEnumToString(InputDevice::Type device_type) {
+  switch (device_type) {
+    case InputDevice::TYPE_STYLUS:
+      return "stylus";
+    case InputDevice::TYPE_TOUCHPAD:
+      return "touchpad";
+    case InputDevice::TYPE_TOUCHSCREEN:
+      return "touchscreen";
+    case InputDevice::TYPE_UNKNOWN:
+      return "unknown";
+    default:
+      NOTREACHED() << "Invalid device_type: " << device_type;
+      return "unknown";
+  }
+}
 
 std::string GetDriverName(const base::FilePath& node_path) {
   const auto driver_path = node_path.Append("driver");
@@ -43,11 +62,12 @@ std::string GetDriverName(const base::FilePath& node_path) {
 }
 
 void FixTouchscreenI2cDevice(base::Value* device) {
-  const auto* path = device->FindStringKey("path");
+  auto& device_dict = device->GetDict();
+  const auto* path = device_dict.FindString("path");
   if (!path)
     return;
 
-  const auto* vid_old = device->FindStringKey("vendor");
+  const auto* vid_old = device_dict.FindString("vendor");
   if (vid_old && *vid_old != "0000")
     return;
 
@@ -58,36 +78,40 @@ void FixTouchscreenI2cDevice(base::Value* device) {
     return;
 
   // Refer to http://crrev.com/c/1825942.
-  auto dict_value = MapFilesToDict(node_path, kTouchscreenI2cFields, {});
+  auto dict_value = MapFilesToDict(node_path, kTouchscreenI2cFields);
   if (!dict_value) {
     DVLOG(1) << "touchscreen_i2c-specific fields do not exist on node \""
              << node_path << "\"";
     return;
   }
 
-  device->SetStringKey("vendor", entry->second);
-  device->MergeDictionary(&*dict_value);
+  device_dict.Set("vendor", entry->second);
+  device_dict.Merge(std::move(dict_value->GetDict()));
   return;
 }
 
 void AppendInputDevice(InputDeviceFunction::DataType* list_value,
                        std::unique_ptr<InputDeviceImpl> input_device,
                        const std::string& device_type_filter) {
-  std::string device_type = input_device->type();
+  const auto device_type = DeviceTypeEnumToString(input_device->type());
   if (!device_type_filter.empty() && device_type_filter != device_type)
     return;
-  base::Value value(base::Value::Type::DICTIONARY);
-  value.SetStringKey("bus", input_device->bus);
-  value.SetStringKey("event", input_device->event);
-  value.SetStringKey("name", input_device->name);
-  value.SetStringKey("product", input_device->product);
-  value.SetStringKey("vendor", input_device->vendor);
-  value.SetStringKey("version", input_device->version);
-  value.SetStringKey("path",
-                     base::StringPrintf("/sys%s", input_device->sysfs.c_str()));
-  value.SetStringKey("device_type", device_type);
+
+  auto path = Context::Get()->root_dir().Append(
+      base::StringPrintf("sys%s", input_device->sysfs.c_str()));
+
+  base::Value value(base::Value::Type::DICT);
+  auto& dict = value.GetDict();
+  dict.Set("bus", input_device->bus);
+  dict.Set("event", input_device->event);
+  dict.Set("name", input_device->name);
+  dict.Set("product", input_device->product);
+  dict.Set("vendor", input_device->vendor);
+  dict.Set("version", input_device->version);
+  dict.Set("path", path.value());
+  dict.Set("device_type", InputDevice::Type_Name(input_device->type()));
   FixTouchscreenI2cDevice(&value);
-  list_value->push_back(std::move(value));
+  list_value->Append(std::move(value));
 }
 
 }  // namespace
@@ -95,9 +119,12 @@ void AppendInputDevice(InputDeviceFunction::DataType* list_value,
 InputDeviceFunction::DataType InputDeviceFunction::EvalImpl() const {
   InputDeviceFunction::DataType results{};
   std::string input_devices_str;
-  if (!base::ReadFileToString(base::FilePath(kInputDevicesPath),
-                              &input_devices_str)) {
-    LOG(ERROR) << "Failed to read " << kInputDevicesPath << ".";
+
+  const base::FilePath procfs_path(
+      Context::Get()->root_dir().Append(kInputDevicesPath));
+
+  if (!base::ReadFileToString(procfs_path, &input_devices_str)) {
+    LOG(ERROR) << "Failed to read " << procfs_path.value() << ".";
     return {};
   }
 

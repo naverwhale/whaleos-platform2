@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #include <string>
 
-#include <base/bind.h>
 #include <base/logging.h>
 #include <metrics/metrics_library_mock.h>
 
@@ -18,8 +17,6 @@
 #include "p2p/server/fake_file_watcher.h"
 #include "p2p/server/mock_http_server.h"
 #include "p2p/server/mock_service_publisher.h"
-
-using base::Bind;
 
 using testing::_;
 using testing::AtLeast;

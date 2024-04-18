@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,15 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/file_path.h>
+#include <base/json/json_reader.h>
 #include <base/logging.h>
 #include <base/process/launch.h>
 #include <base/stl_util.h>
@@ -25,6 +28,7 @@
 #include <libmems/iio_context.h>
 #include <libmems/iio_device.h>
 #include <libmems/iio_device_impl.h>
+#include <libsar/sar_config_reader.h>
 
 #include "mems_setup/sensor_location.h"
 
@@ -35,8 +39,8 @@ namespace {
 struct ImuVpdCalibrationEntry {
   std::string name;
   std::string calib;
-  base::Optional<int> max_value;
-  base::Optional<int> value;
+  std::optional<int> max_value;
+  std::optional<int> value;
   bool missing_is_error;
 };
 
@@ -47,22 +51,21 @@ struct LightVpdCalibrationEntry {
 
 struct LightColorCalibrationEntry {
   std::string iio_name;
-  base::Optional<double> value;
+  std::optional<double> value;
   libmems::IioChannel* chn;
 };
 
-#if USE_IIOSERVICE
+#if !USE_IIOSERVICE_PROXIMITY
+constexpr char kPowerGroupName[] = "power";
+#endif  // !USE_IIOSERVICE_PROXIMITY
 constexpr char kIioServiceGroupName[] = "iioservice";
-#else
-constexpr char kArcSensorGroupName[] = "arc-sensor";
-#endif  // USE_IIOSERVICE
 
 constexpr char kCalibrationBias[] = "bias";
 constexpr char kCalibrationScale[] = "scale";
 constexpr char kSysfsTriggerPrefix[] = "sysfstrig";
 
 constexpr int kGyroMaxVpdCalibration = 16384;  // 16dps
-constexpr int kAccelMaxVpdCalibration = 103;   // .100g
+constexpr int kAccelMaxVpdCalibration = 256;   // .250g
 constexpr int kAccelSysfsTriggerId = 0;
 
 constexpr int kSysfsTriggerId = -1;
@@ -75,9 +78,7 @@ constexpr std::initializer_list<const char*> kAccelAxes = {
 
 constexpr char kTriggerString[] = "trigger";
 
-#if USE_IIOSERVICE
-constexpr char kDevString[] = "/dev/";
-#endif  // USE_IIOSERVICE
+constexpr char kDevlinkPrefix[] = "/dev/proximity";
 
 constexpr char kFilesToSetReadAndOwnership[][28] = {
     "buffer/hwfifo_timeout", "buffer/hwfifo_watermark_max", "buffer/enable",
@@ -93,15 +94,17 @@ constexpr char kFilesToSetWriteAndOwnership[][24] = {"sampling_frequency",
 
 constexpr char kScanElementsString[] = "scan_elements";
 
+constexpr char kEventsString[] = "events";
+
 }  // namespace
 
-// static
 const char* Configuration::GetGroupNameForSysfs() {
-#if USE_IIOSERVICE
+#if !USE_IIOSERVICE_PROXIMITY
+  if (kind_ == SensorKind::PROXIMITY)
+    return kPowerGroupName;
+#endif  // !USE_IIOSERVICE_PROXIMITY
+
   return kIioServiceGroupName;
-#else
-  return kArcSensorGroupName;
-#endif  // USE_IIOSERVICE
 }
 
 Configuration::Configuration(libmems::IioContext* context,
@@ -127,7 +130,6 @@ bool Configuration::Configure() {
   if (!SetupPermissions())
     return false;
 
-#if USE_IIOSERVICE
   // If the buffer is enabled, which means mems_setup has already been used on
   // this sensor and iioservice is reading the samples from it, skip setting the
   // frequency.
@@ -136,7 +138,6 @@ bool Configuration::Configure() {
     for (auto& channel : sensor_->GetAllChannels())
       channel->WriteDoubleAttribute(libmems::kSamplingFrequencyAttr, 0.0);
   }
-#endif  // USE_IIOSERVICE
 
   // Ignores the error as it may fail on kernel 4.4 or HID stack sensors.
   sensor_->WriteStringAttribute("current_timestamp_clock", "boottime");
@@ -179,9 +180,9 @@ bool Configuration::CopyLightCalibrationFromVpd() {
    * RGB sensors may need per channel calibration.
    */
   std::vector<LightColorCalibrationEntry> calib_color_entries = {
-      {"illuminance_red", base::nullopt, nullptr},
-      {"illuminance_green", base::nullopt, nullptr},
-      {"illuminance_blue", base::nullopt, nullptr},
+      {"illuminance_red", std::nullopt, nullptr},
+      {"illuminance_green", std::nullopt, nullptr},
+      {"illuminance_blue", std::nullopt, nullptr},
   };
   for (auto& color_entry : calib_color_entries) {
     color_entry.chn = sensor_->GetChannel(color_entry.iio_name);
@@ -229,7 +230,7 @@ bool Configuration::CopyLightCalibrationFromVpd() {
 
 bool Configuration::CopyImuCalibationFromVpd(int max_value) {
   if (sensor_->IsSingleSensor()) {
-    auto location = sensor_->ReadStringAttribute("location");
+    auto location = sensor_->GetLocation();
     if (!location || location->empty()) {
       LOG(ERROR) << "cannot read a valid sensor location";
       return false;
@@ -248,13 +249,13 @@ bool Configuration::CopyImuCalibationFromVpd(int max_value,
   std::string kind = SensorKindToString(kind_);
 
   std::vector<ImuVpdCalibrationEntry> calib_attributes = {
-      {"x", kCalibrationBias, max_value, base::nullopt, true},
-      {"y", kCalibrationBias, max_value, base::nullopt, true},
-      {"z", kCalibrationBias, max_value, base::nullopt, true},
+      {"x", kCalibrationBias, max_value, std::nullopt, true},
+      {"y", kCalibrationBias, max_value, std::nullopt, true},
+      {"z", kCalibrationBias, max_value, std::nullopt, true},
 
-      {"x", kCalibrationScale, base::nullopt, base::nullopt, false},
-      {"y", kCalibrationScale, base::nullopt, base::nullopt, false},
-      {"z", kCalibrationScale, base::nullopt, base::nullopt, false},
+      {"x", kCalibrationScale, std::nullopt, std::nullopt, false},
+      {"y", kCalibrationScale, std::nullopt, std::nullopt, false},
+      {"z", kCalibrationScale, std::nullopt, std::nullopt, false},
   };
 
   for (auto& calib_attribute : calib_attributes) {
@@ -370,7 +371,7 @@ bool Configuration::AddSysfsTrigger(int sysfs_trigger_id) {
 
   base::FilePath trigger_now = triggers[0]->GetPath().Append("trigger_now");
 
-  base::Optional<gid_t> chronos_gid = delegate_->FindGroupId("chronos");
+  std::optional<gid_t> chronos_gid = delegate_->FindGroupId("chronos");
   if (!chronos_gid) {
     LOG(ERROR) << "chronos group not found";
     return false;
@@ -459,7 +460,7 @@ bool Configuration::EnableKeyboardAngle() {
     return true;
   }
 
-  base::Optional<gid_t> power_gid = delegate_->FindGroupId("power");
+  std::optional<gid_t> power_gid = delegate_->FindGroupId("power");
   if (!power_gid) {
     LOG(ERROR) << "cannot configure ownership on the wake angle file";
     return false;
@@ -491,6 +492,8 @@ bool Configuration::ConfigureOnKind() {
     case SensorKind::LID_ANGLE:
       // No other configs needed.
       return true;
+    case SensorKind::PROXIMITY:
+      return ConfigProximity();
     case SensorKind::BAROMETER:
       // TODO(chenghaoyang): Setup calibrations for the barometer.
       return true;
@@ -517,9 +520,6 @@ bool Configuration::ConfigAccelerometer() {
   if (!AddSysfsTrigger(kAccelSysfsTriggerId))
     return false;
 
-  if (!USE_IIOSERVICE && !EnableAccelScanElements())
-    return false;
-
   if (!EnableKeyboardAngle())
     return false;
 
@@ -527,20 +527,29 @@ bool Configuration::ConfigAccelerometer() {
    * Gather gyroscope. If one of them is on the same plane, set
    * accelerometer range to 4g to meet Android 10 CCD Requirements
    * (Section 7.1.4, C.1.4).
-   * If no gyro found, set range to 4g on the lid accel.
+   * If no gyro found, set range to 4g on the lid accel if there are 2 accels
    */
   int range = 0;
-  auto location = sensor_->ReadStringAttribute("location");
+  auto location = sensor_->GetLocation();
   if (location && !location->empty()) {
     auto gyros = context_->GetDevicesByName("cros-ec-gyro");
-    if (gyros.size() != 1 && strcmp(location->c_str(), kLidSensorLocation) == 0)
+    if (gyros.size() > 1) {
       range = 4;
-    else if (gyros.size() == 1 &&
-             strcmp(location->c_str(),
-                    gyros[0]->ReadStringAttribute("location")->c_str()) == 0)
-      range = 4;
-    else
-      range = 2;
+    } else if (gyros.size() == 1) {
+      if (strcmp(location->c_str(), gyros[0]->GetLocation()->c_str()) == 0)
+        range = 4;
+      else
+        range = 2;
+    } else {
+      auto accels = context_->GetDevicesByName("cros-ec-accel");
+      if (accels.size() == 1)
+        range = 4;
+      else if (accels.size() > 1 &&
+               strcmp(location->c_str(), kLidSensorLocation) == 0)
+        range = 4;
+      else
+        range = 2;
+    }
 
     if (!sensor_->WriteNumberAttribute(kCalibrationScale, range))
       return false;
@@ -551,7 +560,7 @@ bool Configuration::ConfigAccelerometer() {
 }
 
 bool Configuration::ConfigIlluminance() {
-  if (USE_IIOSERVICE && strcmp(sensor_->GetName(), "acpi-als") == 0) {
+  if (strcmp(sensor_->GetName(), "acpi-als") == 0) {
     std::string trigger_name =
         base::StringPrintf(libmems::kHrtimerNameFormatString, sensor_->GetId());
     if (context_->GetTriggersByName(trigger_name).empty()) {
@@ -599,15 +608,164 @@ bool Configuration::ConfigIlluminance() {
   return true;
 }
 
+bool Configuration::ConfigProximity() {
+  auto* cros_config = delegate_->GetCrosConfig();
+
+  auto sys_path = sensor_->GetAbsoluteSysPath();
+  if (!sys_path.has_value()) {
+    LOG(ERROR) << "Invalid absolute SysPath";
+    return false;
+  }
+
+  bool isSar;
+
+  auto devlink_opt = delegate_->GetIioSarSensorDevlink(sys_path->value());
+  if (devlink_opt.has_value())
+    isSar = true;
+  else if (IsIioActivitySensor(sys_path->value()))
+    isSar = false;
+  else
+    return false;
+
+  if (isSar) {
+    // |devlink_opt.value()| should have prefix "/dev/proximity_" or
+    // "/dev/proximity-".
+    if (devlink_opt.value().compare(0, std::strlen(kDevlinkPrefix),
+                                    kDevlinkPrefix) != 0) {
+      LOG(ERROR) << "Devlink isn't in the proper format: "
+                 << devlink_opt.value();
+      return false;
+    }
+
+    auto sar_config_reader =
+        libsar::SarConfigReader(cros_config, devlink_opt.value(),
+                                delegate_->GetSarConfigReaderDelegate());
+
+    if (!sar_config_reader.isCellular() && !sar_config_reader.isWifi()) {
+      LOG(ERROR) << "Invalid devlink: " << devlink_opt.value()
+                 << ", neither lte nor wifi";
+      return false;
+    }
+
+    auto config_dict_opt = sar_config_reader.GetSarConfigDict();
+    if (!config_dict_opt.has_value())
+      return false;
+
+    const base::Value::Dict& config_dict = config_dict_opt.value();
+
+    std::optional<double> sampling_frequency =
+        config_dict.FindDouble("samplingFrequency");
+    if (sampling_frequency.has_value()) {
+      if (!sensor_->WriteDoubleAttribute(libmems::kSamplingFrequencyAttr,
+                                         sampling_frequency.value())) {
+        LOG(ERROR) << "Could not set proximity sensor sampling frequency";
+        return false;
+      }
+    }
+
+    const base::Value::List* channel_list =
+        config_dict.FindList("channelConfig");
+    if (channel_list) {
+      // Semtech supports multiple channels, a given observer may received
+      // FAR/NEAR message from multiple channels.
+      for (const base::Value& channel : *channel_list) {
+        const base::Value::Dict& channel_dict = channel.GetDict();
+        const std::string* channel_name = channel_dict.FindString("channel");
+        if (!channel_name) {
+          LOG(ERROR) << "channel identifier required";
+          return false;
+        }
+        int channel_int;
+        if (!base::StringToInt(*channel_name, &channel_int)) {
+          LOG(ERROR) << "Invalid channel_name: " << channel_name;
+          return false;
+        }
+
+        std::optional<int> hardwaregain = channel_dict.FindInt("hardwaregain");
+        if (hardwaregain.has_value()) {
+          auto* iio_channel = sensor_->GetChannel("proximity" + *channel_name);
+          if (!iio_channel || !iio_channel->WriteNumberAttribute(
+                                  "hardwaregain", hardwaregain.value())) {
+            LOG(ERROR) << "Could not set proximity sensor hardware gain";
+            return false;
+          }
+        }
+
+        if (!SetIioRisingFallingValue(
+                channel_dict, "", "events/in_proximity" + *channel_name + "_",
+                "_value")) {
+          return false;
+        }
+
+        if (!SetIioRisingFallingValue(
+                channel_dict, "Hysteresis",
+                "events/in_proximity" + *channel_name + "_", "_hysteresis")) {
+          return false;
+        }
+      }
+    }
+
+    if (!SetIioRisingFallingValue(config_dict, "Period", "events/", "_period"))
+      return false;
+  }
+
+  LOG(INFO) << "proximity configuration complete";
+  return true;
+}
+
+bool Configuration::IsIioActivitySensor(const std::string& sys_path) {
+  return sys_path.find("-activity") != std::string::npos;
+}
+
+bool Configuration::SetIioRisingFallingValue(
+    const base::Value::Dict& config_dict,
+    const std::string& config_postfix,
+    const std::string& path_prefix,
+    const std::string& postfix) {
+  std::string rising_config = "threshRising" + config_postfix;
+  std::string falling_config = "threshFalling" + config_postfix;
+  std::optional<int> rising_value = config_dict.FindInt(rising_config);
+  std::optional<int> falling_value = config_dict.FindInt(falling_config);
+
+  if (!rising_value.has_value() && !falling_value.has_value())
+    return true;
+
+  bool try_either = rising_value.has_value() && falling_value.has_value() &&
+                    falling_value.value() == rising_value.value();
+
+  std::string prefix = path_prefix + "thresh_";
+  std::string falling_path = prefix + "falling" + postfix;
+  std::string rising_path = prefix + "rising" + postfix;
+  std::string either_path = prefix + "either" + postfix;
+
+  if (!try_either ||
+      !sensor_->WriteNumberAttribute(either_path, rising_value.value())) {
+    if (rising_value.has_value() &&
+        !sensor_->WriteNumberAttribute(rising_path, rising_value.value())) {
+      LOG(ERROR) << "Could not set proximity sensor " << rising_path << " to "
+                 << rising_value.value();
+      return false;
+    }
+    if (falling_value.has_value() &&
+        !sensor_->WriteNumberAttribute(falling_path, falling_value.value())) {
+      LOG(ERROR) << "Could not set proximity sensor " << falling_path << " to "
+                 << falling_value.value();
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool Configuration::SetupPermissions() {
   std::vector<base::FilePath> files_to_set_read_own;
   std::vector<base::FilePath> files_to_set_write_own;
 
   std::string dev_name =
       libmems::IioDeviceImpl::GetStringFromId(sensor_->GetId());
-#if USE_IIOSERVICE
   // /dev/iio:deviceX
-  base::FilePath dev_path = base::FilePath(kDevString).Append(dev_name.c_str());
+  base::FilePath dev_path =
+      base::FilePath(libmems::kDevString).Append(dev_name.c_str());
   if (!delegate_->Exists(dev_path)) {
     LOG(ERROR) << "Missing path: " << dev_path.value();
     return false;
@@ -615,7 +773,6 @@ bool Configuration::SetupPermissions() {
 
   files_to_set_read_own.push_back(dev_path);
   files_to_set_write_own.push_back(dev_path);
-#endif  // USE_IIOSERVICE
 
   // /sys/bus/iio/devices/iio:deviceX
   base::FilePath sys_dev_path = sensor_->GetPath();
@@ -633,6 +790,16 @@ bool Configuration::SetupPermissions() {
   // Files under /sys/bus/iio/devices/iio:deviceX/scan_elements/.
   files =
       delegate_->EnumerateAllFiles(sys_dev_path.Append(kScanElementsString));
+  files_to_set_read_own.insert(files_to_set_read_own.end(), files.begin(),
+                               files.end());
+  for (const base::FilePath& file : files) {
+    std::string name = file.BaseName().value();
+    if (RE2::FullMatch(name, "in_.*_en"))
+      files_to_set_write_own.push_back(file);
+  }
+
+  // Files under /sys/bus/iio/devices/iio:deviceX/events/.
+  files = delegate_->EnumerateAllFiles(sys_dev_path.Append(kEventsString));
   files_to_set_read_own.insert(files_to_set_read_own.end(), files.begin(),
                                files.end());
   for (const base::FilePath& file : files) {

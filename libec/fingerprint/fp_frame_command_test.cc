@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <base/test/task_environment.h>
+#include <base/time/time.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -17,13 +18,13 @@ namespace {
 
 using ::testing::Return;
 
-constexpr int kValidMaxReadSize = 128;
+constexpr int kValidMaxWriteSize = 128;
 constexpr int kValidFrameSize = 4096;
 constexpr int kValidIndex = 0;
 
 TEST(FpFrameCommand, FpFrameCommand) {
   auto cmd =
-      FpFrameCommand::Create(kValidIndex, kValidFrameSize, kValidMaxReadSize);
+      FpFrameCommand::Create(kValidIndex, kValidFrameSize, kValidMaxWriteSize);
   EXPECT_TRUE(cmd);
   EXPECT_EQ(cmd->Version(), 0);
   EXPECT_EQ(cmd->Command(), EC_CMD_FP_FRAME);
@@ -50,7 +51,7 @@ TEST(FpFrameCommand, MaxReadSizeEqualsMaxPacketSize) {
 TEST(FpFrameCommand, ZeroFrameSize) {
   constexpr int kInvalidFrameSize = 0;
   EXPECT_FALSE(FpFrameCommand::Create(kValidIndex, kInvalidFrameSize,
-                                      kValidMaxReadSize));
+                                      kValidMaxWriteSize));
 }
 
 // Mock the underlying EcCommand to test
@@ -67,6 +68,7 @@ class FpFrameCommandTest : public testing::Test {
     MOCK_METHOD(bool, EcCommandRun, (int fd), (override));
     MOCK_METHOD(FpFramePacket*, Resp, (), (override));
     MOCK_METHOD(uint32_t, Result, (), (const, override));
+    MOCK_METHOD(void, Sleep, (base::TimeDelta duration), (override));
   };
 
  protected:

@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "system-proxy/sandboxed_worker.h"
 
 #include <inttypes.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/types.h>
 
@@ -12,15 +13,14 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/http/http_transport.h>
-#include <chromeos/patchpanel/net_util.h>
 #include <google/protobuf/repeated_field.h>
 
 #include "system-proxy/protobuf_util.h"
@@ -78,14 +78,6 @@ bool SandboxedWorker::Start() {
     return false;
   }
 
-  // Make sure the pipes never block.
-  if (!base::SetNonBlocking(child_stdin))
-    LOG(WARNING) << "Failed to set stdin non-blocking";
-  if (!base::SetNonBlocking(child_stdout))
-    LOG(WARNING) << "Failed to set stdout non-blocking";
-  if (!base::SetNonBlocking(child_stderr))
-    LOG(WARNING) << "Failed to set stderr non-blocking";
-
   stdin_pipe_.reset(child_stdin);
   stdout_pipe_.reset(child_stdout);
   stderr_pipe_.reset(child_stderr);
@@ -109,9 +101,10 @@ void SandboxedWorker::SetCredentials(const worker::Credentials& credentials) {
   }
 }
 
-bool SandboxedWorker::SetListeningAddress(uint32_t addr, int port) {
+bool SandboxedWorker::SetListeningAddress(const net_base::IPv4Address& addr,
+                                          int port) {
   worker::SocketAddress address;
-  address.set_addr(addr);
+  address.set_addr(addr.ToByteString());
   address.set_port(port);
   worker::WorkerConfigs configs;
   *configs.mutable_listening_address() = address;
@@ -120,8 +113,8 @@ bool SandboxedWorker::SetListeningAddress(uint32_t addr, int port) {
     LOG(ERROR) << "Failed to set local proxy address for worker " << pid_;
     return false;
   }
-  local_proxy_host_and_port_ = base::StringPrintf(
-      "%s:%d", patchpanel::IPv4AddressToString(addr).c_str(), port);
+  local_proxy_host_and_port_ =
+      base::StringPrintf("%s:%d", addr.ToString().c_str(), port);
   LOG(INFO) << "Set proxy address " << local_proxy_host_and_port_
             << " for worker " << pid_;
   return true;

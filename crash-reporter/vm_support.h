@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,6 +18,11 @@ class VmSupport {
   // If we are running in a VM, returns a handle to the VM-support wrapper,
   // otherwise returns nullptr.
   static VmSupport* Get();
+
+  // For testing, override the value returned by VmSupport::Get(). Does not
+  // take ownership of the supplied pointer. Call with nullptr to restore the
+  // default behavior.
+  static void SetForTesting(VmSupport* vm_support);
 
   virtual ~VmSupport();
 

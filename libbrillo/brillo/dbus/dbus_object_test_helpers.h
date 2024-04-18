@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,8 +15,8 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/dbus/dbus_method_invoker.h>
 #include <brillo/dbus/dbus_object.h>
@@ -69,8 +69,8 @@ inline std::unique_ptr<::dbus::Response> CallMethod(
     ResponseHolder response_holder;
     DBusInterfaceTestHelper::HandleMethodCall(
         itf, method_call,
-        base::Bind(&ResponseHolder::ReceiveResponse,
-                   response_holder.AsWeakPtr()));
+        base::BindOnce(&ResponseHolder::ReceiveResponse,
+                       response_holder.AsWeakPtr()));
     response = std::move(response_holder.response_);
   }
   return response;
@@ -103,8 +103,8 @@ struct MethodHandlerInvoker {
     method_call.SetSerial(123);
     std::unique_ptr<DBusMethodResponse<RetType>> method_response{
         new DBusMethodResponse<RetType>(
-            &method_call, base::Bind(&ResponseHolder::ReceiveResponse,
-                                     response_holder.AsWeakPtr()))};
+            &method_call, base::BindOnce(&ResponseHolder::ReceiveResponse,
+                                         response_holder.AsWeakPtr()))};
     (instance->*method)(std::move(method_response), args...);
     CHECK(response_holder.response_.get())
         << "No response received. Asynchronous methods are not supported.";
@@ -128,9 +128,9 @@ struct MethodHandlerInvoker<void> {
     ::dbus::MethodCall method_call("test.interface", "TestMethod");
     method_call.SetSerial(123);
     std::unique_ptr<DBusMethodResponse<>> method_response{
-        new DBusMethodResponse<>(&method_call,
-                                 base::Bind(&ResponseHolder::ReceiveResponse,
-                                            response_holder.AsWeakPtr()))};
+        new DBusMethodResponse<>(
+            &method_call, base::BindOnce(&ResponseHolder::ReceiveResponse,
+                                         response_holder.AsWeakPtr()))};
     (instance->*method)(std::move(method_response), args...);
     CHECK(response_holder.response_.get())
         << "No response received. Asynchronous methods are not supported.";

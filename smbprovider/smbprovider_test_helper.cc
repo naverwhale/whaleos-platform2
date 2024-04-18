@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,9 +36,9 @@ GetSharesOptionsProto CreateGetSharesOptionsProto(
   return options;
 }
 
-authpolicy::KerberosFiles CreateKerberosFilesProto(
-    const std::string& krb5cc, const std::string& krb5conf) {
-  authpolicy::KerberosFiles kerberos_files;
+kerberos::KerberosFiles CreateKerberosFilesProto(const std::string& krb5cc,
+                                                 const std::string& krb5conf) {
+  kerberos::KerberosFiles kerberos_files;
   kerberos_files.set_krb5cc(krb5cc);
   kerberos_files.set_krb5conf(krb5conf);
   return kerberos_files;

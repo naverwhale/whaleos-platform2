@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,42 +7,51 @@
 #include <memory>
 #include <utility>
 
-#include "rmad/utils/crossystem_utils_impl.h"
+#include <base/files/file_path.h>
+
+#include "rmad/utils/write_protect_utils_impl.h"
 
 #include <base/logging.h>
 
 namespace rmad {
 
-namespace {
-
-// crossystem HWWP property name.
-constexpr char kWriteProtectProperty[] = "wpsw_cur";
-
-}  // namespace
-
 WriteProtectEnablePhysicalStateHandler::WriteProtectEnablePhysicalStateHandler(
-    scoped_refptr<JsonStore> json_store)
-    : BaseStateHandler(json_store) {
-  crossystem_utils_ = std::make_unique<CrosSystemUtilsImpl>();
+    scoped_refptr<JsonStore> json_store,
+    scoped_refptr<DaemonCallback> daemon_callback)
+    : BaseStateHandler(json_store, daemon_callback) {
+  write_protect_utils_ = std::make_unique<WriteProtectUtilsImpl>();
 }
 
 WriteProtectEnablePhysicalStateHandler::WriteProtectEnablePhysicalStateHandler(
     scoped_refptr<JsonStore> json_store,
-    std::unique_ptr<CrosSystemUtils> crossystem_utils)
-    : BaseStateHandler(json_store),
-      crossystem_utils_(std::move(crossystem_utils)) {}
+    scoped_refptr<DaemonCallback> daemon_callback,
+    std::unique_ptr<WriteProtectUtils> write_protect_utils)
+    : BaseStateHandler(json_store, daemon_callback),
+      write_protect_utils_(std::move(write_protect_utils)) {}
 
 RmadErrorCode WriteProtectEnablePhysicalStateHandler::InitializeState() {
-  if (!state_.has_wp_enable_physical()) {
+  if (!state_.has_wp_enable_physical() && !RetrieveState()) {
     state_.set_allocated_wp_enable_physical(
         new WriteProtectEnablePhysicalState);
-  }
-  if (!write_protect_signal_sender_) {
-    return RMAD_ERROR_STATE_HANDLER_INITIALIZATION_FAILED;
+    // Enable SWWP when entering the state for the first time.
+    if (!write_protect_utils_->EnableSoftwareWriteProtection()) {
+      LOG(ERROR) << "Failed to enable software write protection";
+      return RMAD_ERROR_STATE_HANDLER_INITIALIZATION_FAILED;
+    }
+    StoreState();
   }
 
-  PollUntilWriteProtectOn();
   return RMAD_ERROR_OK;
+}
+
+void WriteProtectEnablePhysicalStateHandler::RunState() {
+  DLOG(INFO) << "Start polling write protection";
+  if (timer_.IsRunning()) {
+    timer_.Stop();
+  }
+  timer_.Start(
+      FROM_HERE, kPollInterval, this,
+      &WriteProtectEnablePhysicalStateHandler::CheckWriteProtectOnTask);
 }
 
 void WriteProtectEnablePhysicalStateHandler::CleanUpState() {
@@ -57,39 +66,27 @@ WriteProtectEnablePhysicalStateHandler::GetNextStateCase(
     const RmadState& state) {
   if (!state.has_wp_enable_physical()) {
     LOG(ERROR) << "RmadState missing |write protection enable| state.";
-    return {.error = RMAD_ERROR_REQUEST_INVALID, .state_case = GetStateCase()};
+    return NextStateCaseWrapper(RMAD_ERROR_REQUEST_INVALID);
   }
 
-  int hwwp_status;
-  if (crossystem_utils_->GetInt(kWriteProtectProperty, &hwwp_status) &&
-      hwwp_status == 1) {
-    return {.error = RMAD_ERROR_OK,
-            .state_case = RmadState::StateCase::kFinalize};
+  bool hwwp_enabled;
+  if (write_protect_utils_->GetHardwareWriteProtectionStatus(&hwwp_enabled) &&
+      hwwp_enabled) {
+    return NextStateCaseWrapper(RmadState::StateCase::kFinalize);
   }
-  return {.error = RMAD_ERROR_WAIT, .state_case = GetStateCase()};
-}
-
-void WriteProtectEnablePhysicalStateHandler::PollUntilWriteProtectOn() {
-  LOG(INFO) << "Start polling write protection";
-  if (timer_.IsRunning()) {
-    timer_.Stop();
-  }
-  timer_.Start(
-      FROM_HERE, kPollInterval, this,
-      &WriteProtectEnablePhysicalStateHandler::CheckWriteProtectOnTask);
+  return NextStateCaseWrapper(RMAD_ERROR_WAIT);
 }
 
 void WriteProtectEnablePhysicalStateHandler::CheckWriteProtectOnTask() {
-  DCHECK(write_protect_signal_sender_);
-  LOG(INFO) << "Check write protection";
+  VLOG(1) << "Check write protection";
 
-  int hwwp_status;
-  if (!crossystem_utils_->GetInt(kWriteProtectProperty, &hwwp_status)) {
+  bool hwwp_enabled;
+  if (!write_protect_utils_->GetHardwareWriteProtectionStatus(&hwwp_enabled)) {
     LOG(ERROR) << "Failed to get HWWP status";
     return;
   }
-  if (hwwp_status == 1) {
-    write_protect_signal_sender_->Run(true);
+  if (hwwp_enabled) {
+    daemon_callback_->GetWriteProtectSignalCallback().Run(true);
     timer_.Stop();
   }
 }

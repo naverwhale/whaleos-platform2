@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,17 +26,23 @@
 #include <brillo/flag_helper.h>
 #include <chromeos/constants/imageloader.h>
 #include <dbus/bus.h>
+#include <dbus/dlcservice/dbus-constants.h>
 #include <dlcservice/proto_bindings/dlcservice.pb.h>
 #include <libimageloader/manifest.h>
 #include <libminijail.h>
 #include <scoped_minijail.h>
 
 #include "dlcservice/dbus-proxies.h"
+#include "dlcservice/proto_utils.h"
 #include "dlcservice/utils.h"
+#include "dlcservice/utils/utils.h"
 
 using base::FilePath;
 using base::Value;
+using Dict = base::Value::Dict;
+using List = base::Value::List;
 using dlcservice::DlcState;
+using dlcservice::DlcsWithContent;
 using org::chromium::DlcServiceInterfaceProxy;
 using std::string;
 using std::vector;
@@ -44,6 +50,7 @@ using std::vector;
 namespace {
 
 constexpr uid_t kRootUid = 0;
+constexpr uid_t kChronosUid = 1000;
 constexpr uid_t kDlcServiceUid = 20118;
 constexpr char kDlcServiceUser[] = "dlcservice";
 constexpr char kDlcServiceGroup[] = "dlcservice";
@@ -76,10 +83,29 @@ class DlcServiceUtil : public brillo::Daemon {
 
  private:
   int OnEventLoopStarted() override {
+    int error = EX_OK;
+    if (!Init(&error)) {
+      LOG(ERROR) << "Failed to initialize client.";
+      return error;
+    }
+    dlc_service_proxy_->GetObjectProxy()->WaitForServiceToBeAvailable(
+        base::BindOnce(&DlcServiceUtil::Process,
+                       weak_ptr_factory_.GetWeakPtr()));
+    return EX_OK;
+  }
+
+  void Process(bool is_available) {
+    if (!is_available) {
+      LOG(ERROR) << "dlcservice is not available.";
+      QuitWithExitCode(EX_SOFTWARE);
+      return;
+    }
+
     // "--install" related flags.
     DEFINE_bool(install, false, "Install a single DLC.");
     DEFINE_string(omaha_url, "",
                   "Overrides the default Omaha URL in the update_engine.");
+    DEFINE_bool(reserve, false, "Reserve the DLC on install success/failure.");
 
     // "--uninstall" related flags.
     DEFINE_bool(uninstall, false, "Uninstall a single DLC.");
@@ -87,11 +113,18 @@ class DlcServiceUtil : public brillo::Daemon {
     // "--purge" related flags.
     DEFINE_bool(purge, false, "Purge a single DLC.");
 
+    // "--deploy" related flags.
+    DEFINE_bool(deploy, false, "Load a deployed DLC.");
+
     // "--install", "--purge", and "--uninstall" related flags.
     DEFINE_string(id, "", "The ID of the DLC.");
 
     // "--dlc_state" related flags.
     DEFINE_bool(dlc_state, false, "Get the state of a given DLC.");
+
+    // "--get_existing" related flags.
+    DEFINE_bool(get_existing, false,
+                "Returns a list of DLCs that have content on disk.");
 
     // "--list" related flags.
     DEFINE_bool(list, false, "List installed DLC(s).");
@@ -101,38 +134,49 @@ class DlcServiceUtil : public brillo::Daemon {
     brillo::FlagHelper::Init(argc_, argv_, "dlcservice_util");
 
     // Enforce mutually exclusive flags.
-    vector<bool> exclusive_flags = {FLAGS_install, FLAGS_uninstall, FLAGS_purge,
-                                    FLAGS_list, FLAGS_dlc_state};
+    vector<bool> exclusive_flags = {
+        FLAGS_install, FLAGS_uninstall, FLAGS_purge,       FLAGS_deploy,
+        FLAGS_list,    FLAGS_dlc_state, FLAGS_get_existing};
     if (std::count(exclusive_flags.begin(), exclusive_flags.end(), true) != 1) {
       LOG(ERROR) << "Only one of --install, --uninstall, --purge, --list, "
-                    "--dlc_state must be set.";
-      return EX_SOFTWARE;
-    }
-
-    int error = EX_OK;
-    if (!Init(&error)) {
-      LOG(ERROR) << "Failed to initialize client.";
-      return error;
+                    "--deploy, --get_existing, --dlc_state must be set.";
+      QuitWithExitCode(EX_SOFTWARE);
+      return;
     }
 
     // Called with "--list".
     if (FLAGS_list) {
       vector<DlcState> installed_dlcs;
-      if (!GetInstalled(&installed_dlcs))
-        return EX_SOFTWARE;
+      if (!GetInstalled(&installed_dlcs)) {
+        QuitWithExitCode(EX_SOFTWARE);
+        return;
+      }
       PrintInstalled(FLAGS_dump, installed_dlcs);
       Quit();
-      return EX_OK;
+      return;
+    }
+
+    // Called with "--get_existing".
+    if (FLAGS_get_existing) {
+      DlcsWithContent dlcs_with_content;
+      if (!GetExisting(&dlcs_with_content)) {
+        QuitWithExitCode(EX_SOFTWARE);
+        return;
+      }
+      PrintDlcsWithContent(FLAGS_dump, dlcs_with_content);
+      Quit();
+      return;
     }
 
     if (FLAGS_id.empty()) {
       LOG(ERROR) << "Please specify a single DLC ID.";
-      Quit();
-      return EX_SOFTWARE;
+      QuitWithExitCode(EX_SOFTWARE);
+      return;
     }
 
     dlc_id_ = FLAGS_id;
     omaha_url_ = FLAGS_omaha_url;
+    reserve_ = FLAGS_reserve;
 
     // Called with "--install".
     if (FLAGS_install) {
@@ -142,17 +186,14 @@ class DlcServiceUtil : public brillo::Daemon {
                               weak_ptr_factory_.GetWeakPtr()),
           base::BindOnce(&DlcServiceUtil::OnDlcStateChangedConnect,
                          weak_ptr_factory_.GetWeakPtr()));
-      if (Install()) {
-        // Don't |Quit()| as we will need to wait for signal of install.
-        return EX_OK;
-      }
+      return;
     }
 
     // Called with "--uninstall".
     if (FLAGS_uninstall) {
       if (Uninstall(false)) {
         Quit();
-        return EX_OK;
+        return;
       }
     }
 
@@ -160,22 +201,31 @@ class DlcServiceUtil : public brillo::Daemon {
     if (FLAGS_purge) {
       if (Uninstall(true)) {
         Quit();
-        return EX_OK;
+        return;
+      }
+    }
+
+    // Called with "--deploy".
+    if (FLAGS_deploy) {
+      if (Deploy()) {
+        Quit();
+        return;
       }
     }
 
     // Called with "--dlc_state".
     if (FLAGS_dlc_state) {
       DlcState state;
-      if (!GetDlcState(dlc_id_, &state))
-        return EX_SOFTWARE;
+      if (!GetDlcState(dlc_id_, &state)) {
+        QuitWithExitCode(EX_SOFTWARE);
+        return;
+      }
       PrintDlcState(FLAGS_dump, state);
       Quit();
-      return EX_OK;
+      return;
     }
 
-    Quit();
-    return EX_SOFTWARE;
+    QuitWithExitCode(EX_SOFTWARE);
   }
 
   // Initialize the dlcservice proxy. Returns true on success, false otherwise.
@@ -209,6 +259,11 @@ class DlcServiceUtil : public brillo::Daemon {
                   << "% installed DLC: " << dlc_id_;
         break;
       case DlcState::NOT_INSTALLED:
+        if (dlc_state.last_error_code() == dlcservice::kErrorBusy) {
+          LOG(INFO) << "Busy error code, posting another installation.";
+          PostInstall();
+          return;
+        }
         LOG(ERROR) << "Failed to install DLC: " << dlc_id_
                    << " with error code: " << dlc_state.last_error_code();
         QuitWithExitCode(EX_SOFTWARE);
@@ -225,21 +280,58 @@ class DlcServiceUtil : public brillo::Daemon {
     if (!success) {
       LOG(ERROR) << "Error connecting " << interface_name << "." << signal_name;
       QuitWithExitCode(EX_SOFTWARE);
+      return;
     }
+    InstallWrapper();
+  }
+
+  void PostInstall() {
+    if (delayed_install_id_ != brillo::MessageLoop::kTaskIdNull) {
+      LOG(INFO) << "Another delayed installation already posted.";
+      return;
+    }
+    delayed_install_id_ = brillo::MessageLoop::current()->PostDelayedTask(
+        FROM_HERE,
+        base::BindOnce(&DlcServiceUtil::InstallWrapper,
+                       weak_ptr_factory_.GetWeakPtr()),
+        base::Seconds(1));
+  }
+
+  void InstallWrapper() {
+    delayed_install_id_ = brillo::MessageLoop::kTaskIdNull;
+    bool retry = false;
+    if (Install(retry)) {
+      // Don't |Quit()| as we will need to wait for signal of install.
+      return;
+    }
+    if (retry) {
+      PostInstall();
+      return;
+    }
+    QuitWithExitCode(EX_SOFTWARE);
+    return;
   }
 
   // Install current DLC module. Returns true if current module can be
   // installed. False otherwise.
-  bool Install() {
+  bool Install(bool& retry) {
     brillo::ErrorPtr err;
     LOG(INFO) << "Attempting to install DLC modules: " << dlc_id_;
     // TODO(b/177932564): Temporary increase in timeout to unblock CQ cases that
     // hit DLC installation while dlcservice is busy.
-    if (!dlc_service_proxy_->InstallWithOmahaUrl(
-            dlc_id_, omaha_url_, &err,
-            /*timeout_ms=*/5 * 60 * 1000)) {
-      LOG(ERROR) << "Failed to install: " << dlc_id_ << ", "
-                 << ErrorPtrStr(err);
+    auto install_request =
+        dlcservice::CreateInstallRequest(dlc_id_, omaha_url_, reserve_);
+    if (!dlc_service_proxy_->Install(install_request, &err,
+                                     /*timeout_ms=*/5 * 60 * 1000)) {
+      retry = err->GetCode() == dlcservice::kErrorBusy;
+      if (retry) {
+        LOG(WARNING) << "Failed to install due to busy status, indicating "
+                        "retry to caller: "
+                     << ErrorPtrStr(err);
+      } else {
+        LOG(ERROR) << "Failed to install: " << dlc_id_ << ", "
+                   << ErrorPtrStr(err);
+      }
       return false;
     }
     return true;
@@ -264,6 +356,18 @@ class DlcServiceUtil : public brillo::Daemon {
     return true;
   }
 
+  bool Deploy() {
+    brillo::ErrorPtr err;
+    LOG(INFO) << "Attempting to load deployed DLC image: " << dlc_id_;
+    if (!dlc_service_proxy_->Deploy(dlc_id_, &err)) {
+      LOG(ERROR) << "Failed to load deployed DLC: " << dlc_id_ << ", "
+                 << ErrorPtrStr(err);
+      return false;
+    }
+    LOG(INFO) << "Successfully loaded deployed DLC: " << dlc_id_;
+    return true;
+  }
+
   // Gets the state of current DLC module.
   bool GetDlcState(const string& id, DlcState* state) {
     brillo::ErrorPtr err;
@@ -277,13 +381,14 @@ class DlcServiceUtil : public brillo::Daemon {
 
   // Prints the DLC state.
   void PrintDlcState(const string& dump, const DlcState& state) {
-    Value dict(Value::Type::DICTIONARY);
-    dict.SetStringKey("id", state.id());
-    dict.SetStringKey("last_error_code", state.last_error_code());
-    dict.SetDoubleKey("progress", state.progress());
-    dict.SetStringKey("root_path", state.root_path());
-    dict.SetIntKey("state", state.state());
-    PrintToFileOrStdout(dump, dict);
+    Dict dict;
+    dict.Set("id", state.id());
+    dict.Set("last_error_code", state.last_error_code());
+    dict.Set("progress", state.progress());
+    dict.Set("root_path", state.root_path());
+    dict.Set("state", state.state());
+    dict.Set("is_verified", state.is_verified());
+    PrintToFileOrStdout(dump, Value(std::move(dict)));
   }
 
   // Retrieves a list of all installed DLC modules. Returns true if the list is
@@ -306,6 +411,35 @@ class DlcServiceUtil : public brillo::Daemon {
     return true;
   }
 
+  // Prints the information for DLCs with content.
+  void PrintDlcsWithContent(const string& dump,
+                            const dlcservice::DlcsWithContent& dlcs) {
+    List list;
+    for (const auto& dlc_info : dlcs.dlc_infos()) {
+      Dict info;
+      info.Set("id", dlc_info.id());
+      info.Set("name", dlc_info.name());
+      info.Set("description", dlc_info.description());
+      info.Set("used_bytes_on_disk",
+               base::NumberToString(dlc_info.used_bytes_on_disk()));
+      info.Set("is_removable", dlc_info.is_removable());
+      list.Append(std::move(info));
+    }
+    PrintToFileOrStdout(dump, Value(std::move(list)));
+  }
+
+  // Retrieves a list of all existing DLC modules. Returns true if the list is
+  // retrieved successfully, false otherwise.
+  bool GetExisting(dlcservice::DlcsWithContent* dlcs) {
+    brillo::ErrorPtr err;
+    if (!dlc_service_proxy_->GetExistingDlcs(dlcs, &err)) {
+      LOG(ERROR) << "Failed to get the list of existing DLC modules, "
+                 << ErrorPtrStr(err);
+      return false;
+    }
+    return true;
+  }
+
   decltype(auto) GetPackages(const string& id) {
     return dlcservice::ScanDirectory(
         dlcservice::JoinPaths(imageloader::kDlcManifestRootpath, id));
@@ -318,10 +452,10 @@ class DlcServiceUtil : public brillo::Daemon {
   }
 
   // Helper to print to file, or stdout if |path| is empty.
-  void PrintToFileOrStdout(const string& path, const Value& dict) {
+  void PrintToFileOrStdout(const string& path, const Value& value) {
     string json;
     if (!base::JSONWriter::WriteWithOptions(
-            dict, base::JSONWriter::OPTIONS_PRETTY_PRINT, &json)) {
+            value, base::JSONWriter::OPTIONS_PRETTY_PRINT, &json)) {
       LOG(ERROR) << "Failed to write json.";
       return;
     }
@@ -334,47 +468,46 @@ class DlcServiceUtil : public brillo::Daemon {
   }
 
   void PrintInstalled(const string& dump, const vector<DlcState>& dlcs) {
-    Value dict(Value::Type::DICTIONARY);
+    Dict dict;
     for (const auto& dlc_state : dlcs) {
       const auto& id = dlc_state.id();
       const auto& packages = GetPackages(id);
       if (packages.empty())
         continue;
-      Value dlc_info_list(Value::Type::LIST);
+      List dlc_info_list;
       for (const auto& package : packages) {
         auto manifest = GetManifest(id, package);
         if (!manifest)
           return;
-        Value dlc_info(Value::Type::DICTIONARY);
-        dlc_info.SetStringKey("name", manifest->name());
-        dlc_info.SetStringKey("id", manifest->id());
-        dlc_info.SetStringKey("package", manifest->package());
-        dlc_info.SetStringKey("version", manifest->version());
-        dlc_info.SetStringKey(
-            "preallocated_size",
-            base::NumberToString(manifest->preallocated_size()));
-        dlc_info.SetStringKey("size", base::NumberToString(manifest->size()));
-        dlc_info.SetStringKey("image_type", manifest->image_type());
+        Dict dlc_info;
+        dlc_info.Set("name", manifest->name());
+        dlc_info.Set("id", manifest->id());
+        dlc_info.Set("package", manifest->package());
+        dlc_info.Set("version", manifest->version());
+        dlc_info.Set("preallocated_size",
+                     base::NumberToString(manifest->preallocated_size()));
+        dlc_info.Set("size", base::NumberToString(manifest->size()));
+        dlc_info.Set("image_type", manifest->image_type());
         switch (manifest->fs_type()) {
           case imageloader::FileSystem::kExt4:
-            dlc_info.SetStringKey("fs-type", "ext4");
+            dlc_info.Set("fs-type", "ext4");
             break;
           case imageloader::FileSystem::kSquashFS:
-            dlc_info.SetStringKey("fs-type", "squashfs");
+            dlc_info.Set("fs-type", "squashfs");
             break;
         }
-        dlc_info.SetStringKey(
+        dlc_info.Set(
             "manifest",
             dlcservice::JoinPaths(FilePath(imageloader::kDlcManifestRootpath),
                                   id, package, dlcservice::kManifestName)
                 .value());
-        dlc_info.SetStringKey("root_mount", dlc_state.root_path());
+        dlc_info.Set("root_mount", dlc_state.root_path());
         dlc_info_list.Append(std::move(dlc_info));
       }
-      dict.SetKey(id, std::move(dlc_info_list));
+      dict.Set(id, std::move(dlc_info_list));
     }
 
-    PrintToFileOrStdout(dump, dict);
+    PrintToFileOrStdout(dump, Value(std::move(dict)));
   }
 
   std::unique_ptr<DlcServiceInterfaceProxy> dlc_service_proxy_;
@@ -387,6 +520,12 @@ class DlcServiceUtil : public brillo::Daemon {
   string dlc_id_;
   // Customized Omaha server URL (empty being the default URL).
   string omaha_url_;
+  // Reserve the DLC on install success/failure.
+  bool reserve_ = false;
+
+  // Delayed install task ID, to not dupe installation calls.
+  brillo::MessageLoop::TaskId delayed_install_id_ =
+      brillo::MessageLoop::kTaskIdNull;
 
   base::WeakPtrFactory<DlcServiceUtil> weak_ptr_factory_;
 
@@ -400,10 +539,12 @@ int main(int argc, const char** argv) {
     case kRootUid:
       EnterMinijail();
       break;
+    case kChronosUid:
     case kDlcServiceUid:
       break;
     default:
-      LOG(ERROR) << "dlcservice_util can only be run as root or dlcservice";
+      LOG(ERROR) << "dlcservice_util can only be run as "
+                    "root, chronos, or dlcservice";
       return 1;
   }
   DlcServiceUtil client(argc, argv);

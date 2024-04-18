@@ -1,10 +1,12 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "sommelier-ctx.h"  // NOLINT(build/include_directory)
 
 #include <assert.h>
+#include <cerrno>
+#include <string>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <wayland-util.h>
@@ -23,7 +25,7 @@
 // values: If `atoms[i].value = j`, i is the ATOM_ enum value and j is the
 // X protocol atom.
 //
-// If the given value is out of range of the ATOM_ enum, returns NULL.
+// If the given value is out of range of the ATOM_ enum, returns nullptr.
 const char* sl_context_atom_name(int atom_enum) {
   switch (atom_enum) {
     case ATOM_WM_S0:
@@ -86,102 +88,122 @@ const char* sl_context_atom_name(int atom_enum) {
       return "_WL_SELECTION";
     case ATOM_GTK_THEME_VARIANT:
       return "_GTK_THEME_VARIANT";
+    case ATOM_STEAM_GAME:
+      return "STEAM_GAME";
     case ATOM_XWAYLAND_RANDR_EMU_MONITOR_RECTS:
       return "_XWAYLAND_RANDR_EMU_MONITOR_RECTS";
+    case ATOM_SOMMELIER_QUIRK_APPLIED:
+      return "SOMMELIER_QUIRK_APPLIED";
   }
-  return NULL;
+  return nullptr;
 }
 
 void sl_context_init_default(struct sl_context* ctx) {
   *ctx = {0};
-  ctx->runprog = NULL;
-  ctx->display = NULL;
-  ctx->host_display = NULL;
-  ctx->client = NULL;
-  ctx->compositor = NULL;
-  ctx->subcompositor = NULL;
-  ctx->shm = NULL;
-  ctx->shell = NULL;
-  ctx->data_device_manager = NULL;
-  ctx->xdg_shell = NULL;
-  ctx->aura_shell = NULL;
-  ctx->viewporter = NULL;
-  ctx->linux_dmabuf = NULL;
-  ctx->keyboard_extension = NULL;
-  ctx->text_input_manager = NULL;
+  ctx->runprog = nullptr;
+  ctx->display = nullptr;
+  ctx->host_display = nullptr;
+  ctx->client = nullptr;
+  ctx->compositor = nullptr;
+  ctx->subcompositor = nullptr;
+  ctx->shm = nullptr;
+  ctx->shell = nullptr;
+  ctx->data_device_manager = nullptr;
+  ctx->xdg_shell = nullptr;
+  ctx->aura_shell = nullptr;
+  ctx->viewporter = nullptr;
+  ctx->linux_dmabuf = nullptr;
+  ctx->keyboard_extension = nullptr;
+  ctx->text_input_manager = nullptr;
+  ctx->text_input_extension = nullptr;
+  ctx->xdg_output_manager = nullptr;
+  ctx->fractional_scale_manager = nullptr;
 #ifdef GAMEPAD_SUPPORT
-  ctx->gaming_input_manager = NULL;
+  ctx->gaming_input_manager = nullptr;
+  ctx->gaming_seat = nullptr;
 #endif
-  ctx->display_event_source = NULL;
-  ctx->display_ready_event_source = NULL;
-  ctx->sigchld_event_source = NULL;
-  ctx->sigusr1_event_source = NULL;
+  ctx->display_event_source = nullptr;
+  ctx->display_ready_event_source = nullptr;
+  ctx->sigchld_event_source = nullptr;
+  ctx->sigusr1_event_source = nullptr;
   ctx->wm_fd = -1;
   ctx->wayland_channel_fd = -1;
   ctx->virtwl_socket_fd = -1;
   ctx->virtwl_display_fd = -1;
-  ctx->wayland_channel_event_source = NULL;
-  ctx->virtwl_socket_event_source = NULL;
+  ctx->wayland_channel_event_source = nullptr;
+  ctx->virtwl_socket_event_source = nullptr;
   ctx->vm_id = DEFAULT_VM_NAME;
-  ctx->drm_device = NULL;
-  ctx->gbm = NULL;
+  ctx->drm_device = nullptr;
+  ctx->gbm = nullptr;
   ctx->xwayland = 0;
   ctx->xwayland_pid = -1;
   ctx->child_pid = -1;
   ctx->peer_pid = -1;
-  ctx->xkb_context = NULL;
+  ctx->xkb_context = nullptr;
   ctx->next_global_id = 1;
-  ctx->connection = NULL;
-  ctx->connection_event_source = NULL;
-  ctx->xfixes_extension = NULL;
-  ctx->screen = NULL;
+  ctx->connection = nullptr;
+  ctx->connection_event_source = nullptr;
+  ctx->xfixes_extension = nullptr;
+  ctx->screen = nullptr;
   ctx->window = 0;
-  ctx->host_focus_window = NULL;
+  ctx->host_focus_window = nullptr;
   ctx->needs_set_input_focus = 0;
   ctx->desired_scale = 1.0;
   ctx->scale = 1.0;
-  ctx->application_id = NULL;
+  ctx->virt_scale_x = 1.0;
+  ctx->virt_scale_y = 1.0;
+  ctx->xdg_scale_x = 1.0;
+  ctx->xdg_scale_y = 1.0;
+  ctx->application_id = nullptr;
+  ctx->application_id_property_name = nullptr;
   ctx->exit_with_child = 1;
-  ctx->sd_notify = NULL;
+  ctx->sd_notify = nullptr;
   ctx->clipboard_manager = 0;
   ctx->frame_color = 0xffffffff;
   ctx->dark_frame_color = 0xff000000;
   ctx->support_damage_buffer = true;
   ctx->fullscreen_mode = ZAURA_SURFACE_FULLSCREEN_MODE_IMMERSIVE;
-  ctx->default_seat = NULL;
+  ctx->default_seat = nullptr;
   ctx->selection_window = XCB_WINDOW_NONE;
   ctx->selection_owner = XCB_WINDOW_NONE;
   ctx->selection_incremental_transfer = 0;
   ctx->selection_request.requestor = XCB_NONE;
   ctx->selection_request.property = XCB_ATOM_NONE;
   ctx->selection_timestamp = XCB_CURRENT_TIME;
-  ctx->selection_data_device = NULL;
-  ctx->selection_data_offer = NULL;
-  ctx->selection_data_source = NULL;
+  ctx->selection_data_device = nullptr;
+  ctx->selection_data_offer = nullptr;
+  ctx->selection_data_source = nullptr;
   ctx->selection_data_source_send_fd = -1;
-  ctx->selection_send_event_source = NULL;
-  ctx->selection_property_reply = NULL;
+  ctx->selection_send_event_source = nullptr;
+  ctx->selection_property_reply = nullptr;
   ctx->selection_property_offset = 0;
-  ctx->selection_event_source = NULL;
+  ctx->selection_event_source = nullptr;
   ctx->selection_data_offer_receive_fd = -1;
   ctx->selection_data_ack_pending = 0;
   for (unsigned i = 0; i < ARRAY_SIZE(ctx->atoms); i++) {
     const char* name = sl_context_atom_name(i);
-    assert(name != NULL);
+    assert(name != nullptr);
     ctx->atoms[i].name = name;
   }
-  ctx->timing = NULL;
-  ctx->trace_filename = NULL;
+  ctx->timing = nullptr;
+  ctx->trace_filename = nullptr;
+#ifdef QUIRKS_SUPPORT
+  new (&ctx->quirks) Quirks();
+#endif
+  ctx->enable_xshape = false;
+  ctx->enable_x11_move_windows = false;
   ctx->trace_system = false;
+  ctx->use_direct_scale = false;
+  ctx->stable_scaling = false;
 
   wl_list_init(&ctx->accelerators);
+  wl_list_init(&ctx->windowed_accelerators);
   wl_list_init(&ctx->registries);
   wl_list_init(&ctx->globals);
   wl_list_init(&ctx->outputs);
   wl_list_init(&ctx->seats);
   wl_list_init(&ctx->windows);
   wl_list_init(&ctx->unpaired_windows);
-  wl_list_init(&ctx->host_outputs);
   wl_list_init(&ctx->selection_data_source_send_pending);
 #ifdef GAMEPAD_SUPPORT
   wl_list_init(&ctx->gamepads);
@@ -249,8 +271,9 @@ static int sl_handle_wayland_channel_event(int fd, uint32_t mask, void* data) {
     ctx->clipboard_event_source.reset(
         wl_event_loop_add_fd(event_loop, pipe_read_fd, WL_EVENT_READABLE,
                              sl_handle_clipboard_event, ctx));
-  } else if (event_type != WaylandChannelEvent::Receive)
+  } else if (event_type != WaylandChannelEvent::Receive) {
     return 1;
+  }
 
   buffer_iov.iov_base = receive.data;
   buffer_iov.iov_len = receive.data_size;
@@ -321,7 +344,7 @@ static int sl_handle_virtwl_socket_event(int fd, uint32_t mask, void* data) {
   // If there were any FDs recv'd by recvmsg, there will be some data in the
   // msg_control buffer. To get the FDs out we iterate all cmsghdr's within and
   // unpack the FDs if the cmsghdr type is SCM_RIGHTS.
-  for (cmsg = msg.msg_controllen != 0 ? CMSG_FIRSTHDR(&msg) : NULL; cmsg;
+  for (cmsg = msg.msg_controllen != 0 ? CMSG_FIRSTHDR(&msg) : nullptr; cmsg;
        cmsg = CMSG_NXTHDR(&msg, cmsg)) {
     size_t cmsg_fd_count;
 
@@ -353,6 +376,10 @@ static int sl_handle_virtwl_socket_event(int fd, uint32_t mask, void* data) {
 bool sl_context_init_wayland_channel(struct sl_context* ctx,
                                      struct wl_event_loop* event_loop,
                                      bool display) {
+  if (ctx->channel == nullptr) {
+    // Running in noop mode, without virtualization.
+    return true;
+  }
   int rv = ctx->channel->init();
   if (rv) {
     fprintf(stderr, "error: could not initialize wayland channel: %s\n",
@@ -388,4 +415,19 @@ bool sl_context_init_wayland_channel(struct sl_context* ctx,
         sl_handle_wayland_channel_event, ctx));
   }
   return true;
+}
+
+sl_window* sl_context_lookup_window_for_surface(struct sl_context* ctx,
+                                                wl_resource* resource) {
+  sl_window* surface_window = nullptr;
+  sl_window* window;
+
+  wl_list_for_each(window, &ctx->windows, link) {
+    if (window->host_surface_id == wl_resource_get_id(resource)) {
+      surface_window = window;
+      break;
+    }
+  }
+
+  return surface_window;
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,9 +31,8 @@ void MetricsSenderInterface::SetInstance(MetricsSenderInterface* instance) {
   instance_ = instance;
 }
 
-MetricsSender::MetricsSender(
-    std::unique_ptr<MetricsLibraryInterface> metrics_lib)
-    : metrics_lib_(std::move(metrics_lib)) {
+MetricsSender::MetricsSender(MetricsLibraryInterface& metrics_lib)
+    : metrics_lib_(&metrics_lib) {
   MetricsSenderInterface::SetInstance(this);
 }
 

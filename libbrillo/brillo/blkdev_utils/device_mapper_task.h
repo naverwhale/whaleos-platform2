@@ -1,6 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+// brillo::DevmapperTask is a lower level device-mapper construct which denotes
+// an operation on a dm target. This class is mostly meant to be used as a
+// building block for the simpler, application-friendly brillo::DeviceMapper
+// interface.
 
 #ifndef LIBBRILLO_BRILLO_BLKDEV_UTILS_DEVICE_MAPPER_TASK_H_
 #define LIBBRILLO_BRILLO_BLKDEV_UTILS_DEVICE_MAPPER_TASK_H_
@@ -14,6 +19,21 @@
 namespace brillo {
 
 using DmTaskPtr = std::unique_ptr<dm_task, void (*)(dm_task*)>;
+
+// The device mapper driver maintains versions for both its kernel drivers and
+// for each specific target. Specifically, version numbers are used to signal
+// whether a particular feature is supported, either by the kernel driver or
+// by a specific target.
+struct DeviceMapperVersion {
+  uint32_t major;
+  uint32_t minor;
+  uint32_t patchlevel;
+
+  bool operator<(const DeviceMapperVersion& rhs) const {
+    return std::tie(major, minor, patchlevel) <
+           std::tie(rhs.major, rhs.minor, rhs.patchlevel);
+  }
+};
 
 // Abstract class to manage DM devices.
 // This class implements the bare minimum set of functions
@@ -34,11 +54,18 @@ using DmTaskPtr = std::unique_ptr<dm_task, void (*)(dm_task*)>;
 // - DM_DEVICE_TABLE: used in DeviceMapper::GetTable and
 //                    DeviceMapper::WipeTable.
 // - DM_DEVICE_RELOAD: used in DeviceMapper::WipeTable.
+// - DM_GET_TARGET_VERSION: used in DeviceMapper::GetVersion.
+// - DM_DEVICE_TARGET_MSG: used in Devicemapper::Message
+// - DM_DEVICE_SUSPEND: used in DeviceMapper::Suspend.
+// - DM_DEVICE_RESUME: used in DeviceMapper::Resume.
 class DevmapperTask {
  public:
   virtual ~DevmapperTask() = default;
   // Sets device name for the command.
   virtual bool SetName(const std::string& name) = 0;
+
+  // Sets message to a command.
+  virtual bool SetMessage(const std::string& msg) = 0;
 
   // Adds a target to the command. Should be followed by a Run();
   // Parameters:
@@ -73,6 +100,19 @@ class DevmapperTask {
   //              prevent both udevd and libdevmapper from attempting to
   //              add or remove files.
   virtual bool Run(bool udev_sync = false) = 0;
+
+  // Returns version for the current task's target type. Each device
+  // mapper target maintains a separate version in source that acts as an
+  // indicator of whether a feature (eg. keyring support for dm-crypt) is
+  // supported. On failure, return {0, 0, 0} which disallows any
+  // version-specific features.
+  virtual DeviceMapperVersion GetVersion() = 0;
+
+  // Set deferred removal for the task. If set to true, the device is removed
+  // once the last user closes it.
+  // Deferred removal is supported from kernel 3.13 onwards.
+  // Returns true if the flag is successfully set.
+  virtual bool SetDeferredRemove() = 0;
 };
 
 // Libdevmapper implementation for DevmapperTask.
@@ -81,6 +121,7 @@ class DevmapperTaskImpl : public DevmapperTask {
   explicit DevmapperTaskImpl(int type);
   ~DevmapperTaskImpl() override = default;
   bool SetName(const std::string& name) override;
+  bool SetMessage(const std::string& msg) override;
   bool AddTarget(uint64_t start,
                  uint64_t sectors,
                  const std::string& target,
@@ -90,6 +131,8 @@ class DevmapperTaskImpl : public DevmapperTask {
                      std::string* target,
                      SecureBlob* parameters) override;
   bool Run(bool udev_sync = true) override;
+  DeviceMapperVersion GetVersion() override;
+  bool SetDeferredRemove() override;
 
  private:
   DmTaskPtr task_;

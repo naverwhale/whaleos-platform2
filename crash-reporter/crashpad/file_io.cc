@@ -16,7 +16,6 @@
 
 #include <base/check_op.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/numerics/safe_conversions.h>
 
 namespace crashpad {
@@ -41,8 +40,6 @@ class FileIOReadExactly final : public internal::ReadExactlyInternal {
   }
 
   FileHandle file_;
-
-  DISALLOW_COPY_AND_ASSIGN(FileIOReadExactly);
 };
 
 class FileIOWriteAll final : public internal::WriteAllInternal {
@@ -57,8 +54,6 @@ class FileIOWriteAll final : public internal::WriteAllInternal {
   }
 
   FileHandle file_;
-
-  DISALLOW_COPY_AND_ASSIGN(FileIOWriteAll);
 };
 
 }  // namespace

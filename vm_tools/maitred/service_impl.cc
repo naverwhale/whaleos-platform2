@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/ethtool.h>
+#include <linux/limits.h>
 #include <linux/sockios.h>
 #include <net/if.h>
 #include <net/route.h>
@@ -26,16 +27,18 @@
 #include <linux/fs.h>
 #include <linux/vm_sockets.h>
 
+#include <algorithm>
+#include <csignal>
 #include <map>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include "base/files/file_path.h"
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
-#include <base/synchronization/lock.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/posix/safe_strerror.h>
@@ -43,8 +46,13 @@
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#include <base/synchronization/lock.h>
 #include <base/system/sys_info.h>
+#include <brillo/dbus/dbus_proxy_util.h>
 #include <brillo/file_utils.h>
+#include <brillo/files/file_util.h>
+#include <dbus/message.h>
+#include <dbus/object_path.h>
 
 #include "vm_tools/common/paths.h"
 
@@ -58,8 +66,6 @@ namespace {
 constexpr char kInterfaceName[] = "eth0";
 constexpr char kLoopbackName[] = "lo";
 
-constexpr char kHostIpPath[] = "/run/host_ip";
-
 const std::vector<string> kDefaultNameservers = {
     "8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"};
 constexpr char kResolvConfOptions[] =
@@ -70,6 +76,15 @@ constexpr char kTmpResolvConfPath[] = "/run/resolv.conf.tmp";
 
 constexpr char kBashRc[] = "/etc/bash/bashrc.d/";
 constexpr char kSetPathScript[] = "set-path-for-lxd-next.sh";
+
+constexpr char kLocaltimePath[] = "/etc/localtime";
+constexpr char kZoneInfoPath[] = "/usr/share/zoneinfo";
+
+constexpr int64_t kGiB = 1024 * 1024 * 1024;
+
+constexpr char kLogindManagerInterface[] = "org.freedesktop.login1.Manager";
+constexpr char kLogindServicePath[] = "/org/freedesktop/login1";
+constexpr char kLogindServiceName[] = "org.freedesktop.login1";
 
 // Convert a 32-bit int in network byte order into a printable string.
 string AddressToString(uint32_t address) {
@@ -135,41 +150,6 @@ bool SetSysctl(const char* path, const char* val, string* out_error) {
   if (count != strlen(val)) {
     PLogAndSaveError(
         base::StringPrintf("failed to write sysctl node: %s", path), out_error);
-    return false;
-  }
-
-  return true;
-}
-
-bool EnableLro(const char* ifname, string* out_error) {
-  DCHECK(out_error);
-
-  base::ScopedFD sockfd(socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0));
-  if (!sockfd.is_valid()) {
-    PLogAndSaveError("failed to create socket for ethtool ioctl", out_error);
-    return false;
-  }
-
-  struct ifreq ifr;
-  strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
-
-  struct ethtool_value val;
-  val.cmd = ETHTOOL_GFLAGS;
-  ifr.ifr_data = reinterpret_cast<char*>(&val);
-
-  if (HANDLE_EINTR(ioctl(sockfd.get(), SIOCETHTOOL, &ifr)) != 0) {
-    PLogAndSaveError(
-        base::StringPrintf("failed to get ethtool flags for %s", ifname),
-        out_error);
-    return false;
-  }
-
-  val.cmd = ETHTOOL_SFLAGS;
-  val.data |= ETH_FLAG_LRO;
-
-  if (HANDLE_EINTR(ioctl(sockfd.get(), SIOCETHTOOL, &ifr)) != 0) {
-    PLogAndSaveError(base::StringPrintf("failed to enable LRO for %s", ifname),
-                     out_error);
     return false;
   }
 
@@ -251,12 +231,54 @@ bool PrefixPath(const char* env_name, std::string new_val) {
 
 }  // namespace
 
-ServiceImpl::ServiceImpl(std::unique_ptr<vm_tools::maitred::Init> init)
-    : init_(std::move(init)),
+ServiceImpl::ServiceImpl(std::unique_ptr<vm_tools::maitred::Init> init,
+                         bool maitred_is_pid1)
+    : maitred_is_pid1_(maitred_is_pid1),
+      init_(std::move(init)),
       lxd_env_({{"LXD_DIR", "/mnt/stateful/lxd"},
-                {"LXD_CONF", "/mnt/stateful/lxd_conf"}}) {}
+                {"LXD_CONF", "/mnt/stateful/lxd_conf"}}),
+      localtime_file_path_(kLocaltimePath),
+      zoneinfo_file_path_(kZoneInfoPath) {}
 
-bool ServiceImpl::Init() {
+bool ServiceImpl::Init(
+    scoped_refptr<base::SequencedTaskRunner> dbus_task_runner) {
+  if (!maitred_is_pid1_) {
+    dbus::Bus::Options opts;
+    opts.bus_type = dbus::Bus::SYSTEM;
+    opts.dbus_task_runner = dbus_task_runner;
+    bus_ = new dbus::Bus(std::move(opts));
+    base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
+                              base::WaitableEvent::InitialState::NOT_SIGNALED);
+    bool success;
+    bool ret = dbus_task_runner->PostTask(
+        FROM_HERE, base::BindOnce(
+                       [](scoped_refptr<dbus::Bus> bus,
+                          base::WaitableEvent* event, bool* success) {
+                         if (!bus->Connect()) {
+                           *success = false;
+                         }
+                         *success = true;
+                         event->Signal();
+                       },
+                       bus_, &event, &success));
+    if (!ret) {
+      LOG(ERROR) << "Failed to schedule D-Bus connection";
+      return false;
+    }
+    event.Wait();
+    if (!success) {
+      LOG(ERROR) << "Failed to connect to system bus";
+      return false;
+    }
+
+    logind_service_proxy_ = bus_->GetObjectProxy(
+        kLogindServiceName, dbus::ObjectPath(kLogindServicePath));
+    if (!logind_service_proxy_) {
+      LOG(ERROR) << "Failed to get dbus proxy for " << kLogindServiceName;
+      return false;
+    }
+  }
+
   string error;
 
   return WriteResolvConf(kDefaultNameservers, {}, &error);
@@ -280,8 +302,7 @@ grpc::Status ServiceImpl::ConfigureNetwork(grpc::ServerContext* ctx,
     return grpc::Status(grpc::INVALID_ARGUMENT, "IPv4 gateway cannot be 0");
   }
 
-  // Enable IP forwarding first. This will disable LRO, which we'll then have
-  // to reenable manually later.
+  // Enable IP forwarding.
   string error;
   if (!SetSysctl("/proc/sys/net/ipv4/ip_forward", "1", &error)) {
     return grpc::Status(grpc::INTERNAL, error);
@@ -359,16 +380,6 @@ grpc::Status ServiceImpl::ConfigureNetwork(grpc::ServerContext* ctx,
   }
   LOG(INFO) << "Set interface " << kInterfaceName << " up and running";
 
-  // Forcibly enables Large Receive Offload via ethtool. Linux will
-  // conservatively disable LRO if IP forwarding is enabled since LRO mangles
-  // packets in a way that makes it unsafe to forward. virtio-net uses Generic
-  // Receive Offload, which is safe to use with IP forwarding.
-  if (!EnableLro(kInterfaceName, &error)) {
-    // Don't fail the entire network config since this may run with a 4.19
-    // kernel that doesn't support setting LRO on virtio-net.
-    LOG(WARNING) << "Failed to enable LRO: " << error;
-  }
-
   // Bring up the loopback interface too.
   ret = EnableInterface(fd.get(), kLoopbackName);
   if (ret) {
@@ -410,21 +421,6 @@ grpc::Status ServiceImpl::ConfigureNetwork(grpc::ServerContext* ctx,
   LOG(INFO) << "Set default IPv4 gateway for interface " << kInterfaceName
             << " to " << gateway_str;
 
-  // Write the host IP address to a file for LXD containers to use.
-  base::FilePath host_ip_path(kHostIpPath);
-  size_t gateway_str_len = gateway_str.size();
-  if (base::WriteFile(host_ip_path, gateway_str.c_str(), gateway_str_len) !=
-      gateway_str_len) {
-    LOG(ERROR) << "Failed to write host IPv4 address to file";
-    return grpc::Status(grpc::INTERNAL, "failed to write host IPv4 address");
-  }
-
-  if (!base::SetPosixFilePermissions(host_ip_path, 0644)) {
-    LOG(ERROR) << "Failed to set host IPv4 address file permissions";
-    return grpc::Status(grpc::INTERNAL,
-                        "failed to set host IPv4 address permissions");
-  }
-
   return grpc::Status::OK;
 }
 
@@ -433,13 +429,23 @@ grpc::Status ServiceImpl::Shutdown(grpc::ServerContext* ctx,
                                    EmptyMessage* response) {
   LOG(INFO) << "Received shutdown request";
 
-  if (!init_) {
-    return grpc::Status(grpc::FAILED_PRECONDITION, "not running as init");
+  if (maitred_is_pid1_) {
+    init_->Shutdown();
+    std::move(shutdown_cb_).Run();
+    return grpc::Status::OK;
   }
 
-  init_->Shutdown();
-
-  shutdown_cb_.Run();
+  // When running as a service, ask logind to shut down the system.
+  dbus::MethodCall method_call(kLogindManagerInterface, "PowerOff");
+  dbus::MessageWriter writer(&method_call);
+  writer.AppendBool(false);  // interactive = false
+  auto dbus_response = brillo::dbus_utils::CallDBusMethod(
+      bus_, logind_service_proxy_, &method_call,
+      dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+  if (!dbus_response) {
+    return grpc::Status(grpc::INTERNAL,
+                        "failed to send power off request to logind");
+  }
 
   return grpc::Status::OK;
 }
@@ -515,7 +521,14 @@ grpc::Status ServiceImpl::LaunchProcess(
 grpc::Status ServiceImpl::Mount(grpc::ServerContext* ctx,
                                 const MountRequest* request,
                                 MountResponse* response) {
-  LOG(INFO) << "Received mount request";
+  LOG(INFO) << "Received mount request for " << request->target();
+
+  // TODO(b/280685257): concierge shouldn't send requests to mount the external
+  // disk. The code to do it should be removed once the relevant vms' uprevs
+  // pass. Then, this workaround can be removed.
+  if (request->target() == "/mnt/external/0") {
+    return grpc::Status::OK;
+  }
 
   const base::FilePath target_path = base::FilePath(request->target());
   if (request->create_target()) {
@@ -625,30 +638,29 @@ grpc::Status ServiceImpl::ConfigureContainerGuest(
   LOG(INFO) << "Received ConfigureContainerGuest request";
   Init::ProcessLaunchInfo launch_info;
 
-  // Tell garcon what the host ip is.
-  unlink(vm_tools::kGarconHostIpFile);
-  if (symlink(kHostIpPath, vm_tools::kGarconHostIpFile) != 0) {
-    return grpc::Status(
-        grpc::INTERNAL,
-        string("failed to link host ip where garcon expects it: ") +
-            strerror(errno));
+  base::ScopedFD token_fd(
+      HANDLE_EINTR(open(vm_tools::kGarconContainerTokenFile,
+                        O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644)));
+  if (!token_fd.is_valid()) {
+    return grpc::Status(grpc::INTERNAL,
+                        "failed to open container token for writing");
   }
 
   // Tell garcon what the token is.
-  base::FilePath token_path{vm_tools::kGarconContainerTokenFile};
-  if (base::WriteFile(token_path, request->container_token().c_str(),
-                      request->container_token().size()) !=
-      request->container_token().size()) {
+  if (!base::WriteFileDescriptor(token_fd.get(),
+                                 request->container_token().c_str())) {
     return grpc::Status(grpc::INTERNAL,
                         "failed to write container token to file");
   }
 
+#if USE_VM_BOREALIS
   // Run garcon.
   if (!init_->Spawn({"/etc/init.d/cros-garcon", "daemon"}, {}, true /*respawn*/,
                     false /*use_console*/, false /*wait_for_exit*/,
                     &launch_info)) {
     return grpc::Status(grpc::INTERNAL, "failed to launch garcon");
   }
+#endif
   return grpc::Status::OK;
 }
 
@@ -705,18 +717,18 @@ grpc::Status ServiceImpl::StartTermina(grpc::ServerContext* ctx,
   }
 
   for (const auto feature : request->feature()) {
-    if (feature == StartTerminaRequest::LXD_4_LTS) {
+    if (feature == StartTerminaRequest::LXD_5_LTS) {
       // Create a marker file to record the LXD transition state so we won't go
       // backwards even if concierge stops passing us this flag later.
-      base::File(base::FilePath("/mnt/stateful/lxd-4.0-transition"),
+      base::File(base::FilePath("/mnt/stateful/lxd-5.0-transition"),
                  base::File::FLAG_CREATE | base::File::FLAG_READ);
       // Don't check if creating the file succeeded here, we check for path
       // existence below and if it failed we just ignore the feature flag.
     }
   }
 
-  if (base::PathExists(base::FilePath("/mnt/stateful/lxd-4.0-transition"))) {
-    LOG(INFO) << "This system has transitioned to LXD 4.0.x";
+  if (base::PathExists(base::FilePath("/mnt/stateful/lxd-5.0-transition"))) {
+    LOG(INFO) << "This system has transitioned to LXD 5.0.x";
     // Set PATH and LD_LIBRARY_PATH to prefer things in the lxd-next
     // directory. Note that we don't just want to affect our child processes,
     // we want to affect our own path resolution, since we call lxcfs by name
@@ -906,8 +918,8 @@ grpc::Status ServiceImpl::ResizeFilesystem(
                      std::to_string(request->size()), "/mnt/stateful"},
                     lxd_env_, false /*respawn*/, true /*use_console*/,
                     false /*wait_for_exit*/, &launch_info,
-                    base::Bind(&ServiceImpl::ResizeCommandExitCallback,
-                               base::Unretained(this)))) {
+                    base::BindOnce(&ServiceImpl::ResizeCommandExitCallback,
+                                   base::Unretained(this)))) {
     return grpc::Status(grpc::INTERNAL, "failed to spawn btrfs resize");
   }
 
@@ -1003,6 +1015,15 @@ grpc::Status ServiceImpl::Mount9P(grpc::ServerContext* ctx,
     return grpc::Status(grpc::INTERNAL, "unable to connect to server");
   }
 
+  const base::FilePath target_path = base::FilePath(request->target());
+  // Create a mount point if it doesn't exist.
+  if (!brillo::MkdirRecursively(target_path, 0755).is_valid()) {
+    PLOG(ERROR) << "Failed to create " << request->target();
+    return grpc::Status(grpc::INTERNAL,
+                        base::StringPrintf("failed to create a directory: %s",
+                                           request->target().c_str()));
+  }
+
   // Do the mount.
   string data = base::StringPrintf(
       "trans=fd,rfdno=%d,wfdno=%d,cache=none,access=any,version=9p2000.L",
@@ -1070,6 +1091,63 @@ grpc::Status ServiceImpl::SetTime(grpc::ServerContext* ctx,
   return grpc::Status::OK;
 }
 
+grpc::Status ServiceImpl::SetTimezoneSymlink(const std::string& zoneinfo) {
+  std::error_code ec;
+  if (!brillo::DeleteFile(localtime_file_path_)) {
+    LOG(ERROR) << "Failed to delete " << localtime_file_path_
+               << " symlink: " << ec.message();
+    return grpc::Status(grpc::INTERNAL, "failed to delete existing symlink");
+  }
+
+  LOG(INFO) << "Creating symlink from " << localtime_file_path_ << " to "
+            << zoneinfo;
+  if (!base::CreateSymbolicLink(base::FilePath(zoneinfo),
+                                localtime_file_path_)) {
+    return grpc::Status(grpc::INTERNAL, "failed to create symlink");
+  }
+  return grpc::Status::OK;
+}
+
+// TODO(b/237960004): deprecate bind-mount implementation once Steam supports
+// chained symlinks.
+grpc::Status ServiceImpl::SetTimezoneBindMount(const std::string& bind_source) {
+  LOG(INFO) << "Re-mounting " << localtime_file_path_;
+  umount(localtime_file_path_.value().c_str());
+  auto result = mount(bind_source.c_str(), localtime_file_path_.value().c_str(),
+                      NULL, MS_BIND, NULL);
+  if (result < 0) {
+    LOG(ERROR) << "Failed to create bind-mount: " << result;
+    return grpc::Status(grpc::INTERNAL, "failed to create bind-mount");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status ServiceImpl::SetTimezone(
+    grpc::ServerContext* ctx,
+    const vm_tools::SetTimezoneRequest* request,
+    vm_tools::EmptyMessage* response) {
+  if (request->timezone_name().empty()) {
+    return grpc::Status(grpc::INTERNAL, "timezone cannot be empty");
+  }
+
+  LOG(INFO) << "Setting timezone to " << request->timezone_name();
+
+  base::FilePath zoneinfo_file =
+      zoneinfo_file_path_.Append(request->timezone_name());
+
+  // TODO(b/237963590): Add support to update timezone in VM using
+  // tzif_parser data if zoneinfo file is missing or outdated.
+  if (!base::PathExists(zoneinfo_file)) {
+    LOG(ERROR) << "Zoneinfo file does not exist in VM, unable to set timezone";
+    return grpc::Status(grpc::INTERNAL, "zone info file does not exist");
+  }
+
+  if (request->use_bind_mount()) {
+    return SetTimezoneBindMount(zoneinfo_file.value());
+  }
+  return SetTimezoneSymlink(zoneinfo_file.value());
+}
+
 grpc::Status ServiceImpl::GetKernelVersion(
     grpc::ServerContext* ctx,
     const EmptyMessage* request,
@@ -1098,6 +1176,26 @@ grpc::Status ServiceImpl::PrepareToSuspend(grpc::ServerContext* ctx,
   // Commit filesystem caches to disks. This is important especially when a disk
   // is on external storage which can be unplugged while the device is asleep.
   sync();
+
+  return grpc::Status::OK;
+}
+
+grpc::Status ServiceImpl::UpdateStorageBalloon(
+    grpc::ServerContext* ctx,
+    const vm_tools::UpdateStorageBalloonRequest* request,
+    vm_tools::UpdateStorageBalloonResponse* response) {
+  response->set_result(vm_tools::UpdateStorageBalloonResult::SUCCESS);
+  if (!balloon_) {
+    balloon_ = std::make_unique<brillo::StorageBalloon>(
+        base::FilePath("/mnt/stateful/"));
+  }
+  if (!balloon_->Adjust(std::max(
+          int64_t(request->free_space_bytes() - (1 * kGiB)), int64_t(0)))) {
+    LOG(ERROR) << "Failed to adjust balloon, free_space_bytes:"
+               << request->free_space_bytes() << " state:" << request->state();
+    response->set_result(
+        vm_tools::UpdateStorageBalloonResult::BALLOON_INFLATE_FAILED);
+  }
 
   return grpc::Status::OK;
 }

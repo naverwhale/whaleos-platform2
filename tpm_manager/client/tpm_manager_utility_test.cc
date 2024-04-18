@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -85,7 +86,7 @@ class TpmManagerUtilityTest : public Test {
 
   void RunReadSpaceTest(bool use_owner_auth,
                         tpm_manager::NvramResult result,
-                        base::Optional<std::string> value,
+                        std::optional<std::string> value,
                         bool expect_success);
 
   void RunDefineSpaceTest(bool write_define,
@@ -385,44 +386,6 @@ TEST_F(TpmManagerUtilityTest, ExtraInitializationCall) {
   EXPECT_TRUE(tpm_manager_utility_.Initialize());
 }
 
-TEST_F(TpmManagerUtilityTest, OwnershipTakenSignal) {
-  bool result_is_successful;
-  bool result_has_received;
-  LocalData result_local_data;
-
-  // Tests the initial state.
-  EXPECT_FALSE(tpm_manager_utility_.GetOwnershipTakenSignalStatus(
-      &result_is_successful, &result_has_received, &result_local_data));
-
-  // Tests the signal connection failure.
-  tpm_manager_utility_.OnSignalConnected("", "", false);
-  EXPECT_TRUE(tpm_manager_utility_.GetOwnershipTakenSignalStatus(
-      &result_is_successful, &result_has_received, &result_local_data));
-  EXPECT_FALSE(result_is_successful);
-
-  // Tests the signal connection success.
-  tpm_manager_utility_.OnSignalConnected("", "", true);
-  EXPECT_TRUE(tpm_manager_utility_.GetOwnershipTakenSignalStatus(
-      &result_is_successful, &result_has_received, &result_local_data));
-  EXPECT_TRUE(result_is_successful);
-  EXPECT_FALSE(result_has_received);
-
-  OwnershipTakenSignal signal;
-  signal.mutable_local_data()->set_owner_password("owner password");
-  signal.mutable_local_data()->set_endorsement_password("endorsement password");
-  tpm_manager_utility_.OnOwnershipTaken(signal);
-  EXPECT_TRUE(tpm_manager_utility_.GetOwnershipTakenSignalStatus(
-      &result_is_successful, &result_has_received, &result_local_data));
-  EXPECT_TRUE(result_is_successful);
-  EXPECT_TRUE(result_has_received);
-  EXPECT_EQ(result_local_data.SerializeAsString(),
-            signal.local_data().SerializeAsString());
-
-  // Tests if the null parameters break the code.
-  EXPECT_TRUE(tpm_manager_utility_.GetOwnershipTakenSignalStatus(
-      nullptr, nullptr, nullptr));
-}
-
 void TpmManagerUtilityTest::RunDefineSpaceTest(bool write_define,
                                                bool bind_to_pcr0,
                                                bool firmware_readable,
@@ -494,7 +457,7 @@ TEST_F(TpmManagerUtilityTest, DestroySpaceFail) {
 
 void TpmManagerUtilityTest::RunReadSpaceTest(bool use_owner_auth,
                                              tpm_manager::NvramResult result,
-                                             base::Optional<std::string> value,
+                                             std::optional<std::string> value,
                                              bool expect_success) {
   constexpr uint32_t kNvIndex = 0x0123456;
   tpm_manager::ReadSpaceRequest request;

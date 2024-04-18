@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -74,6 +74,7 @@ uint32_t ParseQuirks(const std::string& value) {
           {"report_least_fps_ranges", kQuirkReportLeastFpsRanges},
           {"v1device", kQuirkV1Device},
           {"android_external", kQuirkAndroidExternal},
+          {"android_legacy", kQuirkAndroidLegacy},
       });
   std::vector<std::string> names = base::SplitString(
       value, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
@@ -99,11 +100,16 @@ void SetEntry(const std::string& key,
     std::istringstream(value) >> std::boolalpha >>
         info->constant_framerate_unsupported;
   } else if (key == "quirks") {
-    info->quirks = ParseQuirks(value);
+    info->quirks |= ParseQuirks(value);
   } else if (key == "lens_facing") {
     info->lens_facing = static_cast<LensFacing>(stoi(value));
   } else if (key == "sensor_orientation") {
-    info->sensor_orientation = stoi(value);
+    int sensor_orientation = stoi(value);
+    if (sensor_orientation != 0) {
+      LOGF(FATAL) << "sensor_orientation is set to a non-zero value: "
+                  << sensor_orientation;
+    }
+    LOGF(WARNING) << "sensor_orientation is deprecated";
   } else if (key == "lens_info_available_apertures") {
     info->lens_info_available_apertures = ParseCommaSeparated<float>(value);
   } else if (key == "lens_info_available_focal_lengths") {

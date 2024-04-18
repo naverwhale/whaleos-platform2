@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,9 @@
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
 #include "base/files/important_file_writer.h"
-#include "base/guid.h"
-#include "base/sequenced_task_runner.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/uuid.h"
 
 #include <base/check.h>
 
@@ -48,8 +48,9 @@ FeedbackReport::FeedbackReport(
       reports_task_runner_(task_runner) {
   if (reports_path_.empty())
     return;
-  file_ = reports_path_.AppendASCII(kFeedbackReportFilenamePrefix +
-                                    base::GenerateGUID());
+  file_ = reports_path_.AppendASCII(
+      kFeedbackReportFilenamePrefix +
+      base::Uuid::GenerateRandomV4().AsLowercaseString());
 
   reports_task_runner_->PostTask(
       FROM_HERE,

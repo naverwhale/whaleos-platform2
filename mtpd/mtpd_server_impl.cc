@@ -1,8 +1,10 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "mtpd/mtpd_server_impl.h"
+
+#include <utility>
 
 #include <base/containers/contains.h>
 #include <base/location.h>
@@ -280,9 +282,9 @@ bool MtpdServer::IsOpenedWithWrite(const std::string& handle) {
 }
 
 void MtpdServer::RegisterAsync(
-    const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb) {
+    brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb) {
   RegisterWithDBusObject(&dbus_object_);
-  dbus_object_.RegisterAsync(cb);
+  dbus_object_.RegisterAsync(std::move(cb));
 }
 
 }  // namespace mtpd

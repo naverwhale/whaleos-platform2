@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,17 +9,38 @@
 
 namespace cryptohome {
 
-typedef struct {
+struct FileSystemKey {
   brillo::SecureBlob fek;
   brillo::SecureBlob fnek;
   brillo::SecureBlob fek_salt;
   brillo::SecureBlob fnek_salt;
-} FileSystemKey;
+};
 
-typedef struct {
+struct FileSystemKeyReference {
   brillo::SecureBlob fek_sig;
   brillo::SecureBlob fnek_sig;
-} FileSystemKeyReference;
+};
+
+// TODO(dlunev): those are inline since otherwise they cause symbol collision
+// in mount_encrypted. Fix the hierarchy so that doesn't need to be inline.
+inline bool operator==(const FileSystemKey& lhs, const FileSystemKey& rhs) {
+  return (lhs.fek == rhs.fek && lhs.fnek == rhs.fnek &&
+          lhs.fek_salt == rhs.fek_salt && lhs.fnek_salt == rhs.fnek_salt);
+}
+
+inline bool operator!=(const FileSystemKey& lhs, const FileSystemKey& rhs) {
+  return !(lhs == rhs);
+}
+
+inline bool operator==(const FileSystemKeyReference& lhs,
+                       const FileSystemKeyReference& rhs) {
+  return (lhs.fek_sig == rhs.fek_sig && lhs.fnek_sig == rhs.fnek_sig);
+}
+
+inline bool operator!=(const FileSystemKeyReference& lhs,
+                       const FileSystemKeyReference& rhs) {
+  return !(lhs == rhs);
+}
 
 }  // namespace cryptohome
 

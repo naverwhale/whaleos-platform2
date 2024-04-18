@@ -1,34 +1,31 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_PORTAL_DETECTOR_H_
 #define SHILL_PORTAL_DETECTOR_H_
 
+#include <array>
 #include <memory>
 #include <ostream>
-#include <set>
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/cancelable_callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <base/time/time.h>
 #include <brillo/http/http_request.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <net-base/ip_address.h>
 
 #include "shill/http_request.h"
 #include "shill/http_url.h"
-#include "shill/net/ip_address.h"
-#include "shill/net/sockets.h"
-#include "shill/service.h"
 
 namespace shill {
 
 class EventDispatcher;
-class Metrics;
 
 // The PortalDetector class implements the portal detection facility in shill,
 // which is responsible for checking to see if a connection has "general
@@ -66,6 +63,52 @@ class Metrics;
 //   |kPortalCheckInterval| parameter.
 class PortalDetector {
  public:
+  // Default URL used for the first HTTP probe sent by PortalDetector on a new
+  // network connection.
+  static constexpr char kDefaultHttpUrl[] =
+      "http://www.gstatic.com/generate_204";
+  // Default URL used for the first HTTPS probe sent by PortalDetector on a new
+  // network connection.
+  static constexpr char kDefaultHttpsUrl[] =
+      "https://www.google.com/generate_204";
+  // Set of fallback URLs used for retrying the HTTP probe when portal detection
+  // is not conclusive.
+  static constexpr std::array<const char*, 3> kDefaultFallbackHttpUrls = {
+      "http://safebrowsing.google.com/generate_204",
+      "http://www.googleapis.com/generate_204",
+      "http://connectivitycheck.gstatic.com/generate_204",
+  };
+  // Set of fallback URLs used for retrying the HTTPS probe when portal
+  // detection is not conclusive.
+  static constexpr std::array<const char*, 3> kDefaultFallbackHttpsUrls = {
+      "https://www.gstatic.com/generate_204",
+      "https://accounts.google.com/generate_204",
+      "https://www.googleapis.com/generate_204",
+  };
+  // Default comma separated list of technologies for which portal detection is
+  // enabled.
+  static constexpr char kDefaultCheckPortalList[] = "ethernet,wifi,cellular";
+
+  // List of URLs to use for portal detection probes.
+  struct ProbingConfiguration {
+    // URL used for the first HTTP probe sent by PortalDetector on a new network
+    // connection.
+    HttpUrl portal_http_url;
+    // URL used for the first HTTPS probe sent by PortalDetector on a new
+    // network connection.
+    HttpUrl portal_https_url;
+    // Set of fallback URLs used for retrying the HTTP probe when portal
+    // detection is not conclusive.
+    std::vector<HttpUrl> portal_fallback_http_urls;
+    // Set of fallback URLs used for retrying the HTTPS probe when portal
+    // detection is not conclusive.
+    std::vector<HttpUrl> portal_fallback_https_urls;
+  };
+
+  // Returns the default ProbingConfiguration using the default URLs defined in
+  // PortalDetector.
+  static ProbingConfiguration DefaultProbingConfiguration();
+
   // The Phase enum indicates the phase at which the probe fails.
   enum class Phase {
     kUnknown,
@@ -77,32 +120,20 @@ class PortalDetector {
 
   enum class Status { kFailure, kSuccess, kTimeout, kRedirect };
 
-  struct Properties {
-    Properties()
-        : http_url_string(kDefaultHttpUrl),
-          https_url_string(kDefaultHttpsUrl),
-          fallback_http_url_strings(kDefaultFallbackHttpUrls) {}
-    Properties(const std::string& http_url_string,
-               const std::string& https_url_string,
-               const std::vector<std::string>& fallback_http_url_strings)
-        : http_url_string(http_url_string),
-          https_url_string(https_url_string),
-          fallback_http_url_strings(fallback_http_url_strings) {}
-    bool operator==(const Properties& b) const {
-      return http_url_string == b.http_url_string &&
-             https_url_string == b.https_url_string &&
-             std::set<std::string>(fallback_http_url_strings.begin(),
-                                   fallback_http_url_strings.end()) ==
-                 std::set<std::string>(b.fallback_http_url_strings.begin(),
-                                       b.fallback_http_url_strings.end());
-    }
-
-    std::string http_url_string;
-    std::string https_url_string;
-    std::vector<std::string> fallback_http_url_strings;
+  // Represents the possible outcomes of a portal detection attempt.
+  enum class ValidationState {
+    // All validation probes have succeeded with the expected
+    // result.
+    kInternetConnectivity,
+    // Validation probes have all failed or timed out.
+    kNoConnectivity,
+    // Some validation probes have failed or timed out.
+    kPartialConnectivity,
+    // The HTTP probe has been redirected to a different location.
+    kPortalRedirect,
   };
 
-  // Represents the result of a complete portal detection attempt (DNS
+  // Represents the detailed result of a complete portal detection attempt (DNS
   // resolution, HTTP probe, HTTPS probe).
   struct Result {
     // Final Phase of the HTTP probe when the trial finished.
@@ -129,23 +160,28 @@ class PortalDetector {
     bool http_probe_completed = false;
     bool https_probe_completed = false;
 
+    // Total HTTP and HTTPS probe durations, recorded if the respective probe
+    // successfully started. The todal duration of the network validation
+    // attempt is the longest of the two durations.
+    base::TimeDelta http_duration = base::TimeDelta();
+    base::TimeDelta https_duration = base::TimeDelta();
+
     // Returns true if both http and https probes have completed, successfully
     // or not.
     bool IsComplete() const;
 
-    // Returns the Service ConnectionState value inferred from this captive
-    // portal detection result.
-    Service::ConnectState GetConnectionState() const;
+    // Returns the ValidationState value inferred from this captive portal
+    // detection result.
+    ValidationState GetValidationState() const;
+
+    // If the HTTP probe completed normally, returns a HTTP code equivalent to
+    // log with UMA. Used for metrics only.
+    std::optional<int> GetHTTPResponseCodeMetricResult() const;
   };
 
-  static const char kDefaultHttpUrl[];
-  static const char kDefaultHttpsUrl[];
-  static const std::vector<std::string> kDefaultFallbackHttpUrls;
-  static const char kDefaultCheckPortalList[];
-
   PortalDetector(EventDispatcher* dispatcher,
-                 Metrics* metrics,
-                 base::Callback<void(const Result&)> callback);
+                 const ProbingConfiguration& probing_configuration,
+                 base::RepeatingCallback<void(const Result&)> callback);
   PortalDetector(const PortalDetector&) = delete;
   PortalDetector& operator=(const PortalDetector&) = delete;
 
@@ -160,6 +196,10 @@ class PortalDetector {
   // status string. This method supports success, timeout and failure.
   static const std::string StatusToString(Status status);
 
+  // Static method to map from the validation state of a portal detection Result
+  // to a string.
+  static const std::string ValidationStateToString(ValidationState state);
+
   // Static method mapping from HttpRequest responses to PortalDetection
   // Phases. For example, if the HttpRequest result is kResultDNSFailure,
   // this method returns Phase::kDNS.
@@ -170,48 +210,75 @@ class PortalDetector {
   // this method returns Status::kFailure.
   static Status GetPortalStatusForRequestResult(HttpRequest::Result result);
 
-  // Start a portal detection test.  Returns true if |props.http_url_string| and
-  // |props.https_url_string| correctly parse as URLs.  Returns false (and does
-  // not start) if they fail to parse.
-  //
-  // As each attempt completes the callback handed to the constructor will
-  // be called.
-  virtual bool Start(const Properties& props,
-                     const std::string& ifname,
-                     const IPAddress& src_address,
-                     const std::vector<std::string>& dns_list,
-                     base::TimeDelta delay = kZeroTimeDelta);
+  // Starts and schedules a new portal detection attempt according to the value
+  // of GetNextAttemptDelay. If an attempt is already scheduled to run but has
+  // not run yet, the new attempt will override the old attempt. Nothing happens
+  // if an attempt is already running.
+  virtual void Start(const std::string& ifname,
+                     net_base::IPFamily ip_family,
+                     const std::vector<net_base::IPAddress>& dns_list,
+                     const std::string& logging_tag);
 
   // End the current portal detection process if one exists, and do not call
   // the callback.
   virtual void Stop();
 
-  // Returns whether portal request is "in progress".
-  virtual bool IsInProgress();
+  // Resets the delay calculation for scheduling retries requested with
+  // Restart(). This has no impact on probe rotation logic.
+  virtual void ResetAttemptDelays();
 
   // Returns the time delay for scheduling the next portal detection attempt
-  // with Start().
-  virtual base::TimeDelta GetNextAttemptDelay();
+  // with Restart().
+  base::TimeDelta GetNextAttemptDelay() const;
+
+  // Returns whether portal request is "in progress".
+  virtual bool IsInProgress() const;
+
+  // Returns true if a new trial is scheduled to run but has not started yet.
+  bool IsTrialScheduled() const;
 
   // Return |logging_tag_| appended with the |attempt_count_|.
   std::string LoggingTag() const;
 
+  // Return the total number of detection attempts scheduled so far.
+  int attempt_count() const { return attempt_count_; }
+
+  // To use in unit tests only.
+  void set_probing_configuration_for_testing(
+      const ProbingConfiguration& probing_configuration) {
+    probing_configuration_ = probing_configuration;
+  }
+
+ protected:
+  base::RepeatingCallback<void(const Result&)>& portal_result_callback() {
+    return portal_result_callback_;
+  }
+
  private:
   friend class PortalDetectorTest;
-  FRIEND_TEST(PortalDetectorTest, StartAttemptFailed);
-  FRIEND_TEST(PortalDetectorTest, AdjustStartDelayImmediate);
-  FRIEND_TEST(PortalDetectorTest, AdjustStartDelayAfterDelay);
   FRIEND_TEST(PortalDetectorTest, AttemptCount);
-  FRIEND_TEST(PortalDetectorTest, RequestSuccess);
-  FRIEND_TEST(PortalDetectorTest, RequestHTTPFailureHTTPSSuccess);
+  FRIEND_TEST(PortalDetectorTest, AttemptCount);
+  FRIEND_TEST(PortalDetectorTest, FailureToStartDoesNotCauseImmeidateRestart);
+  FRIEND_TEST(PortalDetectorTest, GetNextAttemptDelayUnchangedUntilTrialStarts);
+  FRIEND_TEST(PortalDetectorTest, HttpStartAttemptFailed);
+  FRIEND_TEST(PortalDetectorTest, HttpsStartAttemptFailed);
   FRIEND_TEST(PortalDetectorTest, IsInProgress);
+  FRIEND_TEST(PortalDetectorTest, MultipleRestarts);
+  FRIEND_TEST(PortalDetectorTest, PickProbeUrlTest);
+  FRIEND_TEST(PortalDetectorTest, RequestFail);
+  FRIEND_TEST(PortalDetectorTest, RequestHTTPFailureHTTPSSuccess);
+  FRIEND_TEST(PortalDetectorTest, RequestRedirect);
+  FRIEND_TEST(PortalDetectorTest, RequestSuccess);
+  FRIEND_TEST(PortalDetectorTest, RequestTempRedirect);
+  FRIEND_TEST(PortalDetectorTest, ResetAttemptDelays);
+  FRIEND_TEST(PortalDetectorTest, ResetAttemptDelaysAndRestart);
+  FRIEND_TEST(PortalDetectorTest, Restart);
 
-  static constexpr base::TimeDelta kZeroTimeDelta = base::TimeDelta();
-
-  // Picks the HTTP probe URL based on |attempt_count_|. Returns kDefaultHttpUrl
-  // if this is the first attempt. Otherwise, randomly returns an element of
-  // kDefaultFallbackHttpUrls.
-  const std::string PickHttpProbeUrl(const Properties& props);
+  // Picks the next probe URL based on |attempt_count_|. Returns |default_url|
+  // if this is the first attempt. Otherwise, randomly returns with equal
+  // probability |default_url| or an element of |fallback_urls|.
+  const HttpUrl& PickProbeUrl(const HttpUrl& default_url,
+                              const std::vector<HttpUrl>& fallback_urls) const;
 
   // Internal method used to start the actual connectivity trial, called after
   // the start delay completes.
@@ -239,25 +306,34 @@ class PortalDetector {
   // HttpRequest.
   void CleanupTrial();
 
-  std::string logging_tag_;
-  int attempt_count_;
-  base::Time last_attempt_start_time_;
   EventDispatcher* dispatcher_;
-  Metrics* metrics_;
-  base::WeakPtrFactory<PortalDetector> weak_ptr_factory_;
-  base::Callback<void(const Result&)> portal_result_callback_;
+  std::string logging_tag_;
+  bool is_active_ = false;
+  // The total number of detection attempts scheduled so far. Only used in logs
+  // for debugging purposes, and for selecting the URL of detection and
+  // validation probes.
+  int attempt_count_ = 0;
+  // The power-of-two exponent used for computing exponentially increasing
+  // delays between portal detection attempts.
+  int delay_backoff_exponent_ = 0;
+  // Timestamp updated when StartTrialTask runs and used to determine when to
+  // schedule the next portal detection attempt after this one.
+  base::TimeTicks last_attempt_start_time_ = base::TimeTicks();
+  base::RepeatingCallback<void(const Result&)> portal_result_callback_;
   std::unique_ptr<HttpRequest> http_request_;
   std::unique_ptr<HttpRequest> https_request_;
   std::unique_ptr<Result> result_;
-
-  std::string http_url_string_;
-  std::string https_url_string_;
-  base::CancelableClosure trial_;
-  bool is_active_;
+  HttpUrl http_url_;
+  HttpUrl https_url_;
+  ProbingConfiguration probing_configuration_;
+  base::CancelableOnceClosure trial_;
+  base::WeakPtrFactory<PortalDetector> weak_ptr_factory_{this};
 };
 
 std::ostream& operator<<(std::ostream& stream, PortalDetector::Phase phase);
 std::ostream& operator<<(std::ostream& stream, PortalDetector::Status status);
+std::ostream& operator<<(std::ostream& stream,
+                         PortalDetector::ValidationState state);
 
 }  // namespace shill
 

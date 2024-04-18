@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,20 @@
 #include <sysexits.h>
 
 #include <memory>
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/task/single_thread_task_runner.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
 #include <mojo/core/embedder/embedder.h>
 #include <mojo/public/cpp/system/invitation.h>
 
+#include "federated/device_status_monitor.h"
 #include "federated/federated_service_impl.h"
 #include "federated/storage_manager.h"
 
@@ -34,15 +37,21 @@ int Daemon::OnInit() {
 
   // Initializes storage_manager_.
   StorageManager::GetInstance()->InitializeSessionManagerProxy(bus_.get());
+  // Create DeviceStatusMonitor
+  auto device_status_monitor = DeviceStatusMonitor::CreateFromDBus(bus_.get());
 
-  // Creates the scheduler and schedules the tasks.
+  // Creates the scheduler.
   scheduler_ =
-      std::make_unique<Scheduler>(StorageManager::GetInstance(), bus_.get());
-  scheduler_->Schedule();
+      std::make_unique<Scheduler>(StorageManager::GetInstance(),
+                                  std::move(device_status_monitor), bus_.get());
+  // Starts the scheduling if it's initialized so.
+  if (should_schedule_) {
+    scheduler_->Schedule(/*client_launch_stage=*/std::nullopt);
+  }
 
   mojo::core::Init();
   ipc_support_ = std::make_unique<mojo::core::ScopedIPCSupport>(
-      base::ThreadTaskRunnerHandle::Get(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
       mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
   InitDBus();
 
@@ -59,7 +68,7 @@ void Daemon::InitDBus() {
   CHECK(federated_service_exported_object->ExportMethodAndBlock(
       kFederatedInterfaceName, kBootstrapMojoConnectionMethod,
       base::BindRepeating(&Daemon::BootstrapMojoConnection,
-                          weak_ptr_factory_.GetWeakPtr())));
+                          weak_ptr_factory_.GetMutableWeakPtr())));
 
   // Takes ownership of the Federated service.
   CHECK(bus_->RequestOwnershipAndBlock(kFederatedServiceName,
@@ -115,7 +124,7 @@ void Daemon::BootstrapMojoConnection(
   federated_service_ = std::make_unique<FederatedServiceImpl>(
       invitation.ExtractMessagePipe(kBootstrapMojoConnectionChannelToken),
       base::BindOnce(&Daemon::OnMojoDisconnection, base::Unretained(this)),
-      StorageManager::GetInstance());
+      StorageManager::GetInstance(), scheduler_.get());
 
   // Sends success response.
   std::move(response_sender).Run(dbus::Response::FromMethodCall(method_call));

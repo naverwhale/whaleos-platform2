@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -6,7 +6,10 @@ import("//common-mk/generate-dbus-adaptors.gni")
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":permission_broker" ]
+  deps = [
+    ":install_minijail_conf",
+    ":permission_broker",
+  ]
   if (use.test) {
     deps += [ ":permission_broker_test" ]
   }
@@ -15,11 +18,17 @@ group("all") {
   }
 }
 
+install_config("install_minijail_conf") {
+  sources = [ "minijail/permission_broker.conf" ]
+  install_path = "minijail_conf"
+}
+
 pkg_config("target_defaults_deps") {
   pkg_deps = [
     "dbus-1",
     "libbrillo",
     "libchrome",
+    "libnet-base",
     "libpatchpanel-client",
     "libudev",
     "libusb-1.0",
@@ -44,6 +53,7 @@ generate_dbus_adaptors("permission_broker_adaptors") {
 
 static_library("libpermission_broker") {
   sources = [
+    "allow_external_tagged_usb_device_rule.cc",
     "allow_group_tty_device_rule.cc",
     "allow_hidraw_device_rule.cc",
     "allow_tty_device_rule.cc",
@@ -52,6 +62,7 @@ static_library("libpermission_broker") {
     "deny_claimed_usb_device_rule.cc",
     "deny_fwupdate_hidraw_device_rule.cc",
     "deny_group_tty_device_rule.cc",
+    "deny_hammer_device_rule.cc",
     "deny_uninitialized_device_rule.cc",
     "deny_unsafe_hidraw_device_rule.cc",
     "deny_usb_device_class_rule.cc",
@@ -62,6 +73,7 @@ static_library("libpermission_broker") {
     "port_tracker.cc",
     "rule.cc",
     "rule_engine.cc",
+    "rule_utils.cc",
     "tty_subsystem_udev_rule.cc",
     "udev_scopers.cc",
     "usb_control.cc",
@@ -70,7 +82,10 @@ static_library("libpermission_broker") {
   ]
   configs += [ ":target_defaults" ]
   libs = [ "policy" ]
-  deps = [ ":permission_broker_adaptors" ]
+  deps = [
+    ":permission_broker_adaptors",
+    "//featured:libfeatures",
+  ]
 }
 
 executable("permission_broker") {
@@ -88,6 +103,7 @@ if (use.test) {
   }
   executable("permission_broker_test") {
     sources = [
+      "allow_external_tagged_usb_device_rule_test.cc",
       "allow_tty_device_rule_test.cc",
       "allow_usb_device_rule_test.cc",
       "deny_claimed_hidraw_device_rule_test.cc",
@@ -102,6 +118,7 @@ if (use.test) {
       "rule_engine_test.cc",
       "rule_test.cc",
       "usb_control_test.cc",
+      "usb_driver_tracker_test.cc",
     ]
     configs += [
       "//common-mk:test",
@@ -110,7 +127,8 @@ if (use.test) {
     ]
     deps = [
       ":libpermission_broker",
-      "../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
+      "//featured:libfake_platform_features",
     ]
   }
 }

@@ -1,8 +1,8 @@
 # tmpfiles.d Configuration Files
 
-These `.conf` files define filesystem operations that are needed to setup paths.
-This is commonly creating specific files and directories with specific
-permissions and ownership prior to running a system daemon. For example an
+These `.conf` files define filesystem operations that are needed to set up
+paths. This is commonly creating specific files and directories with specific
+permissions and ownership before running a system daemon. For example an
 upstart job with:
 
 ```bash
@@ -19,42 +19,119 @@ Can be replaced with a `tmpfiles.d` file with:
 d= /run/dbus 0755 messagebus messagebus
 d= /var/lib/dbus 0755 root root
 ```
+See the [upstream documentation] for the configuration file format. On Chrome OS
+the `=` is used to remove a path if it has the wrong type (FIFO vs.
+directory vs. file vs. etc.) instead of failing with an error.
 
 This configuration will take care of creating the listed paths with the correct
-type, ownership, permissions, and SELinux labels. If the type is wrong (e.g. a
-symlink instead of a directory) the path will be recreated. If the path already
-exists with the wrong ownership or permissions they will be changed to match the
-configuration. Remember the root-fs is read-only and uses verity for integrity
-checking so you cannot create or change paths on it without building a new
-image.
-
-Also, tmpfiles.d checks to make sure symlinks in the parent directories paths do
-not cross from lower privilege to higher privilege. Directories owned by root
-are allowed to contain symlinks to directories owned by a different user id. If
-the parent directory is not owned by root and the symlink points to a path owned
-by a different user, it is treated as an unsafe transition. Currently, an unsafe
-transition in a configured path will cause tmpfiles.d to fail with an error and
-chromeos_startup will trigger a cleanup of the stateful partition.
-
-This file should have the `.conf` extension and be installed to
-`/usr/lib/tmpfiles.d` using `dotmpfiles` or `newtmpfiles` from
-[tmpfiles.eclass]. For more information about the `conf` format see the
-[upstream documentation](https://www.freedesktop.org/software/systemd/man/tmpfiles.d.html).
+type, ownership, permissions, and SELinux labels. If the path already exists
+with the wrong ownership or permissions they will be changed to match the
+configuration with some caveats (see the note below). Remember the root-fs is
+read-only and uses verity for integrity checking so you cannot create or change
+paths on it without building a new image. Also, tmpfiles.d checks to make sure
+symlinks in the parent directories paths do not cross from lower privilege to
+higher privilege.
 
 ***note
 **Note:**
-The = action is still in the process of being upstreamed so upstream
-documentation may not exist yet. It enables a feature that checks file types
-for the path if it exists or the first existing parent path. If the type check
-fails, the offending path is removed before executing the creation rule.
-
-It does not apply to all rules, but specifically to ones that create or open
-file-system objects as opposed to ones that change permissions for or delete a
-glob path.
+If the parent directory is not owned by root and a sub path is owned
+by a different user, it is treated as an unsafe transition. Currently, an unsafe
+transition in a configured path will cause tmpfiles.d to fail with an error and
+chromeos_startup will trigger a cleanup of the stateful partition.
 ***
 
 The preferred location of these config files in the source tree is a
 subdirectory of the parent project named `tmpfiles.d`.
+
+## When not to use tmpfiles.d
+
+Not all paths should be used with the tmpfiles.d mechanism.
+
+For device-related paths under `/dev` and `/sys`, use udev rules instead to
+set ownership & permissions.  These react well according to when the kernel
+finishes initialization and avoid race conditions with userland.
+
+## Configuration application timing
+
+There are three primary ways to apply a tmpfiles.d configuration on Chrome OS.
+1. As part of the early system start-up.
+2. By using a tmpfiles stanza in an upstart job.
+3. By calling systemd-tmpfiles directly on a configuration.
+
+Note that these are not mutually exclusive, so different combinations can be
+used if appropriate.
+
+### Early startup
+
+Configurations intended to be applied from startup should have the `.conf`
+extension and be installed to `/usr/lib/tmpfiles.d` using `dotmpfiles` or
+`newtmpfiles` from [tmpfiles.eclass]. The `--boot` flag is supplied here so
+configuration entries with the `!` action will be applied.
+
+[pre-startup.conf] applies configurations for the following path prefixes:
+
+* `/dev`
+* `/proc`
+* `/run`
+
+`/sys` can be added, but care needs to be taken because some subpaths are
+mounted at a later time like cgroups.
+
+After [pre-startup.conf] finishes, [chromeos_startup] is executed, which covers
+the following path prefixes:
+
+* `/home`
+* `/media`
+* `/mnt/stateful_partition`
+* `/var`
+
+Additional path prefixes can be added as needed, but care needs to be taking to
+make sure the parent paths are mounted before applying the configuration.
+
+### Upstart job pre-start
+
+Adding a tmpfiles stanza to an upstart config applies the config before running
+the pre-start stanza. This does not prevent the config from also being applied
+at early boot.
+
+Some reasons you might want a tmpfiles stanza are for paths created dynamically,
+or to reduce the risk of a compromise persisting between user-sessions (without
+a reboot).
+
+Here is an excerpt from [vm_concierge.conf] with an example:
+
+```
+start on start-user-session
+stop on stopping ui
+respawn
+expect daemon
+
+tmpfiles /usr/lib/tmpfiles.d/arcvm.conf /usr/lib/tmpfiles.d/vm_tools.conf
+```
+
+The Chrome OS upstart patch that adds the tmpfiles stanza does not set the
+`--boot` flag so configuration entries with the `!` action will not be applied.
+
+### On demand
+
+Configurations that can not be applied in early boot should be installed to
+`/usr/lib/tmpfiles.d/on-demand` using `doins` or `newins`. These need either:
+* A tmpfiles stanza to the appropriate upstart config as shown in the previous
+section
+* A direct call to systemd-tmpfiles. Here is an example:
+
+```
+systemd-tmpfiles --create --remove --clean <absolute path to your-tmpfiles-d.conf>
+```
+
+***note
+**Note:**
+You may not need all the options `--create`, `--remove`, or `--clean` depending
+on the actions being applied. See the [upstream documentation] for more details.
+***
+
+One reason why this might be necessary is the cases a tmpfiles.d configuration
+has a path inside a mount that is created on demand.
 
 ## Testing
 
@@ -64,7 +141,7 @@ config file to a different path and invoke it manually (or from an upstart job)
 with:
 
 ```sh
-/bin/systemd-tmpfiles --boot --create --remove --clean <your-tmpfiles-d.conf>
+/usr/bin/systemd-tmpfiles --boot --create --remove --clean <absolute path to your-tmpfiles-d.conf>
 ```
 
 Generally, no errors are printed on success. If extra verbosity is desired, use:
@@ -73,7 +150,19 @@ Generally, no errors are printed on success. If extra verbosity is desired, use:
 export SYSTEMD_LOG_LEVEL=debug
 ```
 
-## Common Obstacles
+## Troubleshooting and Common Obstacles
+
+For tmpfiles.d configurations applied at startup, errors cause a clobber of
+the stateful partition. Warnings and errors are logged to `/run/tmpfiles.log`
+because the system log is set up after [chromeos_startup] executes and writes to
+the stateful partition which may be clobbered. The [clobber_state_collector]
+crash collector preserves this log across stateful_partition clobbers and writes
+it to `/var/spool/crash` which can be checked when troubleshooting.
+
+Warnings do not result in the stateful_partition being clobbered and the
+[collect-early-logs] upstart job applies the contents of `/run/tmpfiles.log` to
+the system log once it is available. These entries are prefixed with
+"tmpfiles.d".
 
 Here are some common errors with known resolutions.
 
@@ -111,6 +200,12 @@ More information about defining the SELinux policy can be found in the
 [SELinux documentation].
 
 [chromeos_file_contexts]: /sepolicy/file_contexts/chromeos_file_contexts
+[chromeos_startup]: /init/chromeos_startup
+[clobber_state_collector]:  /crash-reporter/clobber_state_collector.cc
+[collect-early-logs]: /init/upstart/collect-early-logs.conf
 [file.te]: /sepolicy/policy/base/file.te
+[pre-startup.conf]: /init/upstart/pre-startup.conf
 [SELinux documentation]: https://chromium.googlesource.com/chromiumos/docs/+/HEAD/security/selinux.md
 [tmpfiles.eclass]: https://chromium.googlesource.com/chromiumos/overlays/portage-stable/+/HEAD/eclass/tmpfiles.eclass
+[upstream documentation]: https://www.freedesktop.org/software/systemd/man/tmpfiles.d.html
+[vm_concierge.conf]: /vm_tools/init/vm_concierge.conf

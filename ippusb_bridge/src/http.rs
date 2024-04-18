@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Write};
 use std::num::ParseIntError;
 use std::str::FromStr;
 
-use sys_util::{debug, error};
+use log::{debug, error};
 use tiny_http::{Header, Method};
 
 use crate::io_adapters::{ChunkedWriter, CompleteReader, LoggingReader};
@@ -415,4 +415,45 @@ pub fn handle_request(
 
     debug!("* Finished processing request");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_support() {
+        use ascii::AsciiString;
+
+        assert!(!supports_request_body(&Method::Get));
+        assert!(!supports_request_body(&Method::Head));
+        assert!(!supports_request_body(&Method::Options));
+        assert!(!supports_request_body(&Method::Delete));
+        assert!(!supports_request_body(&Method::Trace));
+        assert!(supports_request_body(&Method::Post));
+        assert!(supports_request_body(&Method::Put));
+        assert!(supports_request_body(&Method::Patch));
+        assert!(supports_request_body(&Method::NonStandard(
+            AsciiString::from_ascii("TEST".to_string()).unwrap()
+        )));
+    }
+
+    #[test]
+    fn e2e_header() {
+        let header = Header::from_bytes(&b"Content-Type"[..], &b"text/xml"[..]).unwrap();
+        assert!(is_end_to_end(&header));
+
+        let header = Header::from_bytes(&b"Connection"[..], &b"close"[..]).unwrap();
+        assert!(!is_end_to_end(&header));
+
+        let header = Header::from_bytes(&b"Keep-Alive"[..], &b"timeout=5, max=10"[..]).unwrap();
+        assert!(!is_end_to_end(&header));
+
+        let header = Header::from_bytes(&b"Transfer-Encoding"[..], &b"chunked"[..]).unwrap();
+        assert!(!is_end_to_end(&header));
+
+        // Special case since Expect is normally end-to-end.
+        let header = Header::from_bytes(&b"Expect"[..], &b"100-continue"[..]).unwrap();
+        assert!(!is_end_to_end(&header));
+    }
 }

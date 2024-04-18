@@ -1,19 +1,18 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/vpn/vpn_service.h"
 
 #include <string>
+#include <vector>
 
 #include <base/memory/ptr_util.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
 
 #include "shill/error.h"
-#include "shill/fake_store.h"
 #include "shill/mock_adaptors.h"
-#include "shill/mock_connection.h"
 #include "shill/mock_control.h"
 #include "shill/mock_device_info.h"
 #include "shill/mock_manager.h"
@@ -22,9 +21,12 @@
 #include "shill/mock_service.h"
 #include "shill/mock_virtual_device.h"
 #include "shill/service_property_change_test.h"
+#include "shill/store/fake_store.h"
 #include "shill/test_event_dispatcher.h"
 #include "shill/vpn/mock_vpn_driver.h"
 #include "shill/vpn/mock_vpn_provider.h"
+#include "shill/vpn/vpn_provider.h"
+#include "shill/vpn/vpn_types.h"
 
 using testing::_;
 using testing::ByMove;
@@ -38,48 +40,47 @@ using testing::SaveArg;
 
 namespace {
 
-const char kInterfaceName[] = "tun0";
-const int kInterfaceIndex = 123;
+constexpr char kInterfaceName[] = "tun0";
+constexpr int kInterfaceIndex = 123;
 
 }  // namespace
 
 namespace shill {
 
+class VPNServiceInTest : public VPNService {
+ public:
+  VPNServiceInTest(Manager* manager, VPNDriver* driver)
+      : VPNService(manager, base::WrapUnique(driver)) {}
+
+  bool CreateDevice(const std::string& if_name, int if_index) override {
+    device_ = new MockVirtualDevice(this->manager(), if_name, if_index,
+                                    Technology::kVPN);
+    return true;
+  }
+};
+
 class VPNServiceTest : public testing::Test {
  public:
   VPNServiceTest()
       : interface_name_("test-interface"),
-        manager_(&control_, &dispatcher_, &metrics_),
-        device_info_(&manager_) {
+        manager_(&control_, &dispatcher_, &metrics_) {
     Service::SetNextSerialNumberForTesting(0);
     driver_ = new MockVPNDriver();
-    EXPECT_CALL(*driver_, GetProviderType())
-        .WillRepeatedly(Return(kProviderL2tpIpsec));
-    connection_ = new NiceMock<MockConnection>(&device_info_);
     // There is at least one online service when the test service is created.
     EXPECT_CALL(manager_, IsOnline()).WillOnce(Return(true));
-    service_ = new VPNService(&manager_, base::WrapUnique(driver_));
+    service_ = new VPNServiceInTest(&manager_, driver_);
   }
 
   ~VPNServiceTest() override = default;
 
  protected:
   void SetUp() override {
-    ON_CALL(*connection_, interface_name())
-        .WillByDefault(ReturnRef(interface_name_));
-    ON_CALL(*connection_, ipconfig_rpc_identifier())
-        .WillByDefault(ReturnRef(ipconfig_rpc_identifier_));
-    manager_.set_mock_device_info(&device_info_);
     manager_.vpn_provider_ = std::make_unique<MockVPNProvider>();
     manager_.vpn_provider_->manager_ = &manager_;
-    manager_.user_traffic_uids_.push_back(1000);
     manager_.UpdateProviderMapping();
   }
 
-  void TearDown() override {
-    manager_.vpn_provider_.reset();
-    EXPECT_CALL(device_info_, FlushAddresses(0));
-  }
+  void TearDown() override { manager_.vpn_provider_.reset(); }
 
   void SetServiceState(Service::ConnectState state) {
     service_->state_ = state;
@@ -117,13 +118,6 @@ class VPNServiceTest : public testing::Test {
     return static_cast<ServiceMockAdaptor*>(service_->adaptor());
   }
 
-  ServiceRefPtr CreateUnderlyingService(
-      ConnectionRefPtr underlying_connection) {
-    auto service = new MockService(&manager_);
-    service->set_mock_connection(underlying_connection);
-    return service;
-  }
-
   std::string interface_name_;
   RpcIdentifier ipconfig_rpc_identifier_;
   MockVPNDriver* driver_;  // Owned by |service_|.
@@ -131,13 +125,11 @@ class VPNServiceTest : public testing::Test {
   MockMetrics metrics_;
   EventDispatcherForTest dispatcher_;
   MockManager manager_;
-  MockDeviceInfo device_info_;
-  scoped_refptr<NiceMock<MockConnection>> connection_;
   VPNServiceRefPtr service_;
 };
 
 TEST_F(VPNServiceTest, LogName) {
-  EXPECT_EQ("vpn_l2tpipsec_0", service_->log_name());
+  EXPECT_EQ("vpn_ikev2_0", service_->log_name());
 }
 
 TEST_F(VPNServiceTest, ConnectAlreadyConnected) {
@@ -175,7 +167,7 @@ TEST_F(VPNServiceTest, CreateStorageIdentifierNoName) {
   Error error;
   args.Set<std::string>(kProviderHostProperty, "10.8.0.1");
   EXPECT_EQ("", VPNService::CreateStorageIdentifier(args, &error));
-  EXPECT_EQ(Error::kNotSupported, error.type());
+  EXPECT_EQ(Error::kInvalidProperty, error.type());
 }
 
 TEST_F(VPNServiceTest, CreateStorageIdentifier) {
@@ -194,23 +186,9 @@ TEST_F(VPNServiceTest, GetStorageIdentifier) {
   EXPECT_EQ("foo", service_->GetStorageIdentifier());
 }
 
-TEST_F(VPNServiceTest, IsAlwaysOnVpn) {
-  const std::string kPackage = "com.foo.vpn";
-  const std::string kOtherPackage = "com.bar.vpn";
-  EXPECT_FALSE(service_->IsAlwaysOnVpn(kPackage));
-
-  EXPECT_CALL(*driver_, GetHost()).WillRepeatedly(Return(kPackage));
-  EXPECT_FALSE(service_->IsAlwaysOnVpn(kPackage));
-
-  EXPECT_CALL(*driver_, GetProviderType())
-      .WillRepeatedly(Return(kProviderArcVpn));
-  EXPECT_TRUE(service_->IsAlwaysOnVpn(kPackage));
-  EXPECT_FALSE(service_->IsAlwaysOnVpn(kOtherPackage));
-}
-
 TEST_F(VPNServiceTest, Load) {
   FakeStore storage;
-  static const char kStorageID[] = "storage-id";
+  static constexpr char kStorageID[] = "storage-id";
   service_->set_storage_id(kStorageID);
   storage.SetString(kStorageID, Service::kStorageType, kTypeVPN);
   EXPECT_CALL(*driver_, Load(&storage, kStorageID)).WillOnce(Return(true));
@@ -219,7 +197,7 @@ TEST_F(VPNServiceTest, Load) {
 
 TEST_F(VPNServiceTest, Save) {
   FakeStore storage;
-  static const char kStorageID[] = "storage-id";
+  static constexpr char kStorageID[] = "storage-id";
   service_->set_storage_id(kStorageID);
   EXPECT_CALL(*driver_, Save(&storage, kStorageID, false))
       .WillOnce(Return(true));
@@ -231,7 +209,7 @@ TEST_F(VPNServiceTest, Save) {
 
 TEST_F(VPNServiceTest, SaveCredentials) {
   FakeStore storage;
-  static const char kStorageID[] = "storage-id";
+  static constexpr char kStorageID[] = "storage-id";
   service_->set_storage_id(kStorageID);
   service_->set_save_credentials(true);
   EXPECT_CALL(*driver_, Save(&storage, kStorageID, true))
@@ -317,9 +295,9 @@ TEST_F(VPNServiceTest, IsAutoConnectable) {
 TEST_F(VPNServiceTest, SetNamePropertyTrivial) {
   Error error;
   // A null change returns false, but with error set to success.
-  EXPECT_FALSE(service_->mutable_store()->SetAnyProperty(
-      kNameProperty, brillo::Any(service_->friendly_name()), &error));
-  EXPECT_FALSE(error.IsFailure());
+  service_->mutable_store()->SetAnyProperty(
+      kNameProperty, brillo::Any(service_->friendly_name()), &error);
+  EXPECT_TRUE(error.IsSuccess());
 }
 
 TEST_F(VPNServiceTest, SetNameProperty) {
@@ -332,8 +310,9 @@ TEST_F(VPNServiceTest, SetNameProperty) {
   EXPECT_CALL(*profile, DeleteEntry(kOldId, _));
   EXPECT_CALL(*profile, UpdateService(_));
   service_->set_profile(profile);
-  EXPECT_TRUE(service_->mutable_store()->SetAnyProperty(
-      kNameProperty, brillo::Any(kName), &error));
+  service_->mutable_store()->SetAnyProperty(kNameProperty, brillo::Any(kName),
+                                            &error);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_NE(service_->GetStorageIdentifier(), kOldId);
   EXPECT_EQ(kName, service_->friendly_name());
 }
@@ -356,9 +335,6 @@ TEST_F(VPNServiceTest, CustomSetterNoopChange) {
 }
 
 TEST_F(VPNServiceTest, GetPhysicalTechnologyPropertyFailsIfNoCarrier) {
-  service_->SetConnection(connection_);
-  EXPECT_EQ(connection_, service_->connection());
-
   // Simulate an error by causing GetPrimaryPhysicalService() to return nullptr.
   EXPECT_CALL(manager_, GetPrimaryPhysicalService()).WillOnce(Return(nullptr));
 
@@ -368,76 +344,34 @@ TEST_F(VPNServiceTest, GetPhysicalTechnologyPropertyFailsIfNoCarrier) {
 }
 
 TEST_F(VPNServiceTest, GetPhysicalTechnologyPropertyOverWifi) {
-  EXPECT_CALL(*connection_, technology()).Times(0);
-  service_->SetConnection(connection_);
-  EXPECT_EQ(connection_, service_->connection());
-
-  scoped_refptr<NiceMock<MockConnection>> lower_connection =
-      new NiceMock<MockConnection>(&device_info_);
+  auto underlying_service = new MockService(&manager_);
   EXPECT_CALL(manager_, GetPrimaryPhysicalService())
-      .WillOnce(Return(ByMove(CreateUnderlyingService(lower_connection))));
-
-  // Set the type of the lower connection to "wifi" and expect that type to be
-  // returned by GetPhysicalTechnologyProperty().
-  EXPECT_CALL(*lower_connection, technology())
-      .WillOnce(Return(Technology::kWifi));
+      .WillOnce(Return(underlying_service));
+  EXPECT_CALL(*underlying_service, technology())
+      .WillOnce(Return(Technology::kWiFi));
 
   Error error;
   EXPECT_EQ(kTypeWifi, service_->GetPhysicalTechnologyProperty(&error));
   EXPECT_TRUE(error.IsSuccess());
-
-  // Clear expectations now, so the Return(lower_connection) action releases
-  // the reference to |lower_connection| allowing it to be destroyed now.
-  Mock::VerifyAndClearExpectations(connection_.get());
-  // Destroying the |lower_connection| at function exit will also call an extra
-  // FlushAddresses on the |device_info_| object.
-  EXPECT_CALL(device_info_, FlushAddresses(0));
 }
 
 TEST_F(VPNServiceTest, GetTethering) {
-  service_->SetConnection(connection_);
-  EXPECT_EQ(connection_, service_->connection());
+  // Service is not connected.
+  EXPECT_EQ(Service::TetheringState::kUnknown, service_->GetTethering());
 
+  service_->SetState(Service::kStateConnected);
   // Simulate an error by causing GetPrimaryPhysicalService() to return nullptr.
   EXPECT_CALL(manager_, GetPrimaryPhysicalService()).WillOnce(Return(nullptr));
+  EXPECT_EQ(Service::TetheringState::kUnknown, service_->GetTethering());
 
-  {
-    Error error;
-    EXPECT_EQ("", service_->GetTethering(&error));
-    EXPECT_EQ(Error::kOperationFailed, error.type());
-  }
-
-  scoped_refptr<NiceMock<MockConnection>> lower_connection =
-      new NiceMock<MockConnection>(&device_info_);
-
-  EXPECT_CALL(*connection_, tethering()).Times(0);
-
-  const char kTethering[] = "moon unit";
-  EXPECT_CALL(*lower_connection, tethering())
-      .WillOnce(ReturnRefOfCopy(std::string(kTethering)))
-      .WillOnce(ReturnRefOfCopy(std::string()));
-
-  {
-    EXPECT_CALL(manager_, GetPrimaryPhysicalService())
-        .WillOnce(Return(ByMove(CreateUnderlyingService(lower_connection))));
-    Error error;
-    EXPECT_EQ(kTethering, service_->GetTethering(&error));
-    EXPECT_TRUE(error.IsSuccess());
-  }
-  {
-    EXPECT_CALL(manager_, GetPrimaryPhysicalService())
-        .WillOnce(Return(ByMove(CreateUnderlyingService(lower_connection))));
-    Error error;
-    EXPECT_EQ("", service_->GetTethering(&error));
-    EXPECT_EQ(Error::kNotSupported, error.type());
-  }
-
-  // Clear expectations now, so the Return(lower_connection) action releases
-  // the reference to |lower_connection| allowing it to be destroyed now.
-  Mock::VerifyAndClearExpectations(connection_.get());
-  // Destroying the |lower_connection| at function exit will also call an extra
-  // FlushAddresses on the |device_info_| object.
-  EXPECT_CALL(device_info_, FlushAddresses(0));
+  auto underlying_service = new MockService(&manager_);
+  EXPECT_CALL(manager_, GetPrimaryPhysicalService())
+      .WillRepeatedly(Return(underlying_service));
+  EXPECT_CALL(*underlying_service, GetTethering())
+      .WillOnce([]() { return Service::TetheringState::kNotDetected; })
+      .WillOnce([]() { return Service::TetheringState::kUnknown; });
+  EXPECT_EQ(Service::TetheringState::kNotDetected, service_->GetTethering());
+  EXPECT_EQ(Service::TetheringState::kUnknown, service_->GetTethering());
 }
 
 TEST_F(VPNServiceTest, ConfigureDeviceAndCleanupDevice) {
@@ -446,15 +380,42 @@ TEST_F(VPNServiceTest, ConfigureDeviceAndCleanupDevice) {
   service_->device_ = device;
 
   EXPECT_CALL(*device, SetEnabled(true));
-  EXPECT_CALL(*driver_, GetIPProperties())
-      .WillOnce(Return(IPConfig::Properties()));
-  EXPECT_CALL(*device, UpdateIPConfig(_));
-  service_->ConfigureDevice();
+  EXPECT_CALL(*device, UpdateIPConfig(_, _));
+  service_->ConfigureDevice(std::make_unique<IPConfig::Properties>(), nullptr);
 
   EXPECT_CALL(*device, SetEnabled(false));
   EXPECT_CALL(*device, DropConnection());
   service_->CleanupDevice();
   EXPECT_FALSE(service_->device_);
+}
+
+TEST_F(VPNServiceTest, ReportIPTypeMetrics) {
+  const auto return_ip_props = []() {
+    return std::make_unique<IPConfig::Properties>();
+  };
+  const auto return_nullptr = []() { return nullptr; };
+
+  scoped_refptr<MockVirtualDevice> device = new MockVirtualDevice(
+      &manager_, kInterfaceName, kInterfaceIndex, Technology::kVPN);
+  service_->device_ = device;
+
+  EXPECT_CALL(*driver_, GetIPv4Properties()).WillOnce(return_ip_props);
+  EXPECT_CALL(*driver_, GetIPv6Properties()).WillOnce(return_nullptr);
+  EXPECT_CALL(metrics_, SendEnumToUMA(Metrics::kMetricVpnIPType, _,
+                                      Metrics::kIPTypeIPv4Only));
+  service_->OnDriverConnected(kInterfaceName, kInterfaceIndex);
+
+  EXPECT_CALL(*driver_, GetIPv4Properties()).WillOnce(return_nullptr);
+  EXPECT_CALL(*driver_, GetIPv6Properties()).WillOnce(return_ip_props);
+  EXPECT_CALL(metrics_, SendEnumToUMA(Metrics::kMetricVpnIPType, _,
+                                      Metrics::kIPTypeIPv6Only));
+  service_->OnDriverConnected(kInterfaceName, kInterfaceIndex);
+
+  EXPECT_CALL(*driver_, GetIPv4Properties()).WillOnce(return_ip_props);
+  EXPECT_CALL(*driver_, GetIPv6Properties()).WillOnce(return_ip_props);
+  EXPECT_CALL(metrics_, SendEnumToUMA(Metrics::kMetricVpnIPType, _,
+                                      Metrics::kIPTypeDualStack));
+  service_->OnDriverConnected(kInterfaceName, kInterfaceIndex);
 }
 
 TEST_F(VPNServiceTest, ConnectFlow) {
@@ -469,11 +430,11 @@ TEST_F(VPNServiceTest, ConnectFlow) {
   EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(Service::kStateAssociating, service_->state());
 
-  EXPECT_CALL(*driver_, GetIPProperties())
-      .WillOnce(Return(IPConfig::Properties()));
+  EXPECT_CALL(*driver_, GetIPv4Properties())
+      .WillOnce(Return(ByMove(std::make_unique<IPConfig::Properties>())));
   driver_event_handler->OnDriverConnected(kInterfaceName, kInterfaceIndex);
   EXPECT_TRUE(service_->device_);
-  EXPECT_EQ(Service::kStateOnline, service_->state());
+  EXPECT_EQ(Service::kStateConfiguring, service_->state());
 
   // Driver-originated reconnection
   EXPECT_CALL(*driver_, Disconnect()).Times(0);
@@ -538,7 +499,9 @@ TEST_F(VPNServiceTest, OnPhysicalDefaultServiceChanged) {
 TEST_F(VPNServiceTest, ConnectTimeout) {
   Error error;
   VPNDriver::EventHandler* driver_event_handler;
-  constexpr base::TimeDelta kTestTimeout = base::TimeDelta::FromSeconds(10);
+  constexpr base::TimeDelta kTestTimeout = base::Seconds(10);
+  ON_CALL(*driver_, GetIPv4Properties())
+      .WillByDefault(Return(ByMove(std::make_unique<IPConfig::Properties>())));
 
   // Timeout triggered.
   EXPECT_CALL(*driver_, ConnectAsync(_))
@@ -576,7 +539,9 @@ TEST_F(VPNServiceTest, ConnectTimeout) {
 TEST_F(VPNServiceTest, ReconnectTimeout) {
   Error error;
   VPNDriver::EventHandler* driver_event_handler;
-  constexpr base::TimeDelta kTestTimeout = base::TimeDelta::FromSeconds(10);
+  constexpr base::TimeDelta kTestTimeout = base::Seconds(10);
+  ON_CALL(*driver_, GetIPv4Properties())
+      .WillByDefault(Return(ByMove(std::make_unique<IPConfig::Properties>())));
   EXPECT_CALL(*driver_, ConnectAsync(_))
       .WillRepeatedly(DoAll(SaveArg<0>(&driver_event_handler),
                             Return(VPNDriver::kTimeoutNone)));
@@ -599,6 +564,56 @@ TEST_F(VPNServiceTest, ReconnectTimeout) {
   driver_event_handler->OnDriverReconnecting(kTestTimeout);
   EXPECT_CALL(*driver_, OnConnectTimeout()).Times(1);
   dispatcher_.task_environment().FastForwardBy(kTestTimeout);
+}
+
+TEST_F(VPNServiceTest, MigrateWireGuardIPv4Address) {
+  FakeStore storage;
+  constexpr char kStorageID[] = "storage-id";
+  const std::string kAddr1 = "1.2.3.4";
+  const std::string kAddr2 = "4.3.2.1";
+  using Strings = std::vector<std::string>;
+
+  storage.SetString(kStorageID, Service::kStorageType, kTypeVPN);
+
+  // We don't care about this function in this test, but another EXPECT_CALL for
+  // this function is set in  VPNServiceTest() so we cannot use ON_CALL here.
+  EXPECT_CALL(manager_, IsOnline()).WillRepeatedly(Return(true));
+
+  const auto setup_wg_and_static_addr = [&](const std::string* wg_prop_addr,
+                                            const std::string* static_addr) {
+    driver_ = new MockVPNDriver(VPNType::kWireGuard);
+    service_ = new VPNService(&manager_, base::WrapUnique(driver_));
+    service_->set_storage_id(kStorageID);
+    if (wg_prop_addr) {
+      driver_->args()->Set<Strings>(kWireGuardIPAddress, {*wg_prop_addr});
+    }
+    if (static_addr) {
+      KeyValueStore args;
+      args.Set<std::string>(kAddressProperty, *static_addr);
+      Error not_used_err;
+      service_->mutable_store()->SetKeyValueStoreProperty(
+          kStaticIPConfigProperty, args, &not_used_err);
+    }
+    service_->MigrateDeprecatedStorage(&storage);
+  };
+
+  setup_wg_and_static_addr(nullptr, &kAddr1);
+  EXPECT_EQ(driver_->args()->Get<Strings>(kWireGuardIPAddress),
+            Strings{kAddr1});
+  EXPECT_EQ(service_->static_network_config_for_testing().ipv4_address,
+            std::nullopt);
+
+  setup_wg_and_static_addr(&kAddr2, &kAddr1);
+  EXPECT_EQ(driver_->args()->Get<Strings>(kWireGuardIPAddress),
+            Strings{kAddr2});
+  EXPECT_EQ(service_->static_network_config_for_testing().ipv4_address,
+            std::nullopt);
+
+  setup_wg_and_static_addr(&kAddr2, nullptr);
+  EXPECT_EQ(driver_->args()->Get<Strings>(kWireGuardIPAddress),
+            Strings{kAddr2});
+  EXPECT_EQ(service_->static_network_config_for_testing().ipv4_address,
+            std::nullopt);
 }
 
 }  // namespace shill

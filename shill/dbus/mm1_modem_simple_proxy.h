@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,30 +29,21 @@ class ModemSimpleProxy : public ModemSimpleProxyInterface {
 
   // Inherited methods from SimpleProxyInterface.
   void Connect(const KeyValueStore& properties,
-               const RpcIdentifierCallback& callback,
+               RpcIdentifierCallback callback,
                int timeout) override;
   void Disconnect(const RpcIdentifier& bearer,
-                  const ResultCallback& callback,
+                  ResultCallback callback,
                   int timeout) override;
-  void GetStatus(const KeyValueStoreCallback& callback, int timeout) override;
 
  private:
   // Callbacks for Connect async call.
-  void OnConnectSuccess(const RpcIdentifierCallback& callback,
+  void OnConnectSuccess(RpcIdentifierCallback callback,
                         const dbus::ObjectPath& path);
-  void OnConnectFailure(const RpcIdentifierCallback& callback,
-                        brillo::Error* error);
+  void OnConnectFailure(RpcIdentifierCallback callback, brillo::Error* error);
 
   // Callbacks for Disconnect async call.
-  void OnDisconnectSuccess(const ResultCallback& callback);
-  void OnDisconnectFailure(const ResultCallback& callbac,
-                           brillo::Error* dbus_error);
-
-  // Callbacks for GetStatus async call.
-  void OnGetStatusSuccess(const KeyValueStoreCallback& callback,
-                          const brillo::VariantDictionary& status);
-  void OnGetStatusFailure(const KeyValueStoreCallback& callback,
-                          brillo::Error* error);
+  void OnDisconnectSuccess(ResultCallback callback);
+  void OnDisconnectFailure(ResultCallback callback, brillo::Error* dbus_error);
 
   std::unique_ptr<org::freedesktop::ModemManager1::Modem::SimpleProxy> proxy_;
 

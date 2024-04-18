@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,16 +29,15 @@ constexpr int kDeviceId = 1;
 constexpr char kAccelSamplingFrequency[] = "in_accel_sampling_frequency";
 constexpr char kInvalidSamplingFrequency[] = "accel_sampling_frequency";
 
-constexpr char kDevString[] = "/dev/";
 constexpr char kScanElementsString[] = "scan_elements";
 
 constexpr char kFakeChannel[] = "in_accel_a_en";
 constexpr char kInvalidChannel[] = "in_accel_a_enn";
 
-class HidAccelerometerTest : public SensorTestBase {
+class HidAccelerometerTest : public SensorTestBase, public ::testing::Test {
  public:
   HidAccelerometerTest() : SensorTestBase("accel_3d", kDeviceId) {
-    mock_delegate_->AddGroup(Configuration::GetGroupNameForSysfs(),
+    mock_delegate_->AddGroup(GetConfiguration()->GetGroupNameForSysfs(),
                              kIioserviceGroupId);
   }
 
@@ -90,7 +89,8 @@ TEST_F(HidAccelerometerTest, CheckPermissionsAndOwnership) {
       base::FILE_PERMISSION_READ_BY_GROUP);
 
   // /dev/iio:deviceX
-  base::FilePath dev_path = base::FilePath(kDevString).Append(dev_name.c_str());
+  base::FilePath dev_path =
+      base::FilePath(libmems::kDevString).Append(dev_name.c_str());
 
   CheckPermissionsAndOwnershipForFile(dev_path,
                                       base::FILE_PERMISSION_WRITE_BY_GROUP |

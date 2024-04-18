@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <base/observer_list_types.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class BacklightInterface;
 
@@ -19,10 +18,9 @@ class BacklightObserver : public base::CheckedObserver {
   virtual void OnBacklightDeviceChanged(BacklightInterface* backlight) = 0;
 
  protected:
-  virtual ~BacklightObserver() = default;
+  ~BacklightObserver() override = default;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_BACKLIGHT_OBSERVER_H_

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/cellular/mm1_modem_signal_proxy_interface.h"
@@ -25,7 +24,12 @@ class MockModemSignalProxy : public ModemSignalProxyInterface {
 
   MOCK_METHOD(void,
               Setup,
-              (const int, Error*, const ResultCallback&, int),
+              (const int, Error*, ResultCallback, int),
+              (override));
+
+  MOCK_METHOD(void,
+              SetupThresholds,
+              (const KeyValueStore& settings, Error*, ResultCallback, int),
               (override));
 };
 

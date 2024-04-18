@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,12 @@
 #define IIOSERVICE_DAEMON_SENSOR_DEVICE_FUSION_GRAVITY_H_
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
-#include <base/optional.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 
 #include "iioservice/daemon/sensor_device_fusion.h"
 #include "iioservice/mojo/sensor.mojom.h"
@@ -63,7 +63,7 @@ class SensorDeviceFusionGravity final : public SensorDeviceFusion {
       int32_t gyro_id);
 
   void GetScaleCallback(cros::mojom::DeviceType type,
-                        const std::vector<base::Optional<std::string>>& values);
+                        const std::vector<std::optional<std::string>>& values);
   void OnReadFailed(cros::mojom::DeviceType type);
 
   IioDeviceHandler* accel_;

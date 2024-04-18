@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,9 +14,13 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
+#include "base/posix/eintr_wrapper.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "base/threading/platform_thread.h"
+#include "base/time/time.h"
 #include "metrics/serialization/metric_sample.h"
 
 #include <base/check.h>
@@ -26,6 +30,10 @@
 
 namespace metrics {
 namespace {
+
+// Timeout used to wait if the lock to write the metrics file is unavailable.
+constexpr base::TimeDelta kWaitForLockAvailableSleepTime =
+    base::Milliseconds(20);
 
 // Magic string that gets written at the beginning of the message file
 // when the file has been partially uploaded.
@@ -152,6 +160,30 @@ bool ReadMessage(int fd, std::string* message_out, size_t* bytes_used_out) {
   return true;
 }
 
+// Attempts to acquire the lock to |file_descriptor|.
+//
+// If |use_nonblocking_lock| is set to true, this function does at most two
+// nonblocking attempts to acquire the lock. If the first attempt fails,
+// |sleep_function| will run before trying again, giving time for the lock to
+// become available.
+//
+// If |use_nonblocking_lock| is set to false, this function blocks if unable to
+// acquire the file lock.
+bool AcquireLock(const base::ScopedFD& file_descriptor,
+                 bool use_nonblocking_lock,
+                 base::OnceCallback<void(base::TimeDelta)> sleep_function) {
+  int flags = LOCK_EX;
+  if (use_nonblocking_lock) {
+    flags |= LOCK_NB;
+    if (HANDLE_EINTR(flock(file_descriptor.get(), flags)) == 0) {
+      return true;
+    }
+    std::move(sleep_function).Run(kWaitForLockAvailableSleepTime);
+  }
+
+  return HANDLE_EINTR(flock(file_descriptor.get(), flags)) == 0;
+}
+
 }  // namespace
 
 MetricSample SerializationUtils::ParseSample(const std::string& sample) {
@@ -173,16 +205,16 @@ MetricSample SerializationUtils::ParseSample(const std::string& sample) {
   const std::string& name = parts[0];
   const std::string& value = parts[1];
 
-  if (base::LowerCaseEqualsASCII(name, "crash")) {
-    return MetricSample::CrashSample(value);
-  } else if (base::LowerCaseEqualsASCII(name, "histogram")) {
+  if (base::EqualsCaseInsensitiveASCII(name, "crash")) {
+    return MetricSample::ParseCrash(value);
+  } else if (base::EqualsCaseInsensitiveASCII(name, "histogram")) {
     return MetricSample::ParseHistogram(value);
-  } else if (base::LowerCaseEqualsASCII(name, "linearhistogram")) {
+  } else if (base::EqualsCaseInsensitiveASCII(name, "linearhistogram")) {
     return MetricSample::ParseLinearHistogram(value);
-  } else if (base::LowerCaseEqualsASCII(name, "sparsehistogram")) {
+  } else if (base::EqualsCaseInsensitiveASCII(name, "sparsehistogram")) {
     return MetricSample::ParseSparseHistogram(value);
-  } else if (base::LowerCaseEqualsASCII(name, "useraction")) {
-    return MetricSample::UserActionSample(value);
+  } else if (base::EqualsCaseInsensitiveASCII(name, "useraction")) {
+    return MetricSample::ParseUserAction(value);
   } else {
     LOG(ERROR) << "invalid event type: " << name << ", value: " << value;
   }
@@ -193,7 +225,7 @@ bool SerializationUtils::ReadAndTruncateMetricsFromFile(
     const std::string& filename,
     std::vector<MetricSample>* metrics,
     size_t sample_batch_max_length) {
-  struct stat stat_buf;
+  struct stat stat_buf = {};
   int result;
   off_t total_length = 0;
 
@@ -209,7 +241,7 @@ bool SerializationUtils::ReadAndTruncateMetricsFromFile(
     // Also nothing to collect.
     return true;
   }
-  base::ScopedFD fd(open(filename.c_str(), O_RDWR));
+  base::ScopedFD fd(open(filename.c_str(), O_RDWR | O_CLOEXEC));
   if (fd.get() < 0) {
     PLOG(ERROR) << filename << ": cannot open";
     return true;
@@ -267,7 +299,18 @@ bool SerializationUtils::ReadAndTruncateMetricsFromFile(
 }
 
 bool SerializationUtils::WriteMetricsToFile(
-    const std::vector<MetricSample>& samples, const std::string& filename) {
+    const std::vector<MetricSample>& samples,
+    const std::string& filename,
+    bool use_nonblocking_lock) {
+  return WriteMetricsToFile(samples, filename, use_nonblocking_lock,
+                            base::BindOnce(&base::PlatformThread::Sleep));
+}
+
+bool SerializationUtils::WriteMetricsToFile(
+    const std::vector<MetricSample>& samples,
+    const std::string& filename,
+    bool use_nonblocking_lock,
+    base::OnceCallback<void(base::TimeDelta)> sleep_function) {
   std::string output;
   for (const auto& sample : samples) {
     if (!sample.IsValid()) {
@@ -284,7 +327,7 @@ bool SerializationUtils::WriteMetricsToFile(
   }
 
   base::ScopedFD file_descriptor(open(filename.c_str(),
-                                      O_WRONLY | O_APPEND | O_CREAT,
+                                      O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC,
                                       READ_WRITE_ALL_FILE_FLAGS));
 
   if (file_descriptor.get() < 0) {
@@ -294,16 +337,23 @@ bool SerializationUtils::WriteMetricsToFile(
 
   // Grab a lock to avoid chrome truncating the file underneath us. Keep the
   // file locked as briefly as possible. Freeing file_descriptor will close the
-  // file and remove the lock.
-  if (HANDLE_EINTR(flock(file_descriptor.get(), LOCK_EX)) < 0) {
+  // file and remove the lock IFF the process was not forked in the meantime,
+  // which will leave the flock hanging and deadlock the reporting until the
+  // forked process is killed otherwise. Thus we have to explicitly unlock the
+  // file below.
+  if (!AcquireLock(file_descriptor, use_nonblocking_lock,
+                   std::move(sleep_function))) {
     PLOG(ERROR) << filename << ": cannot lock";
     return false;
   }
 
   if (!base::WriteFileDescriptor(file_descriptor.get(), output)) {
     PLOG(ERROR) << "error writing output";
+    std::ignore = flock(file_descriptor.get(), LOCK_UN);
     return false;
   }
+
+  std::ignore = flock(file_descriptor.get(), LOCK_UN);
 
   return true;
 }

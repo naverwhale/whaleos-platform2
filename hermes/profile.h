@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,10 +22,12 @@ class Profile : public org::chromium::Hermes::ProfileInterface,
   template <typename... T>
   using DBusResponse = brillo::dbus_utils::DBusMethodResponse<T...>;
 
-  static std::unique_ptr<Profile> Create(const lpa::proto::ProfileInfo& profile,
-                                         const uint32_t physical_slot,
-                                         const std::string& eid,
-                                         bool is_pending);
+  static std::unique_ptr<Profile> Create(
+      const lpa::proto::ProfileInfo& profile,
+      const uint32_t physical_slot,
+      const std::string& eid,
+      bool is_pending,
+      base::RepeatingCallback<void(const std::string&)> on_profile_enabled_cb);
 
   // org::chromium::Hermes::ProfileInterface overrides.
   void Enable(std::unique_ptr<DBusResponse<>> resp) override;
@@ -42,21 +44,33 @@ class Profile : public org::chromium::Hermes::ProfileInterface,
   void OnEnabled(int error, std::shared_ptr<DBusResponse<>> response);
   void OnDisabled(int error, std::shared_ptr<DBusResponse<>> response);
 
-  // org::chromium::Hermes::ProfileAdaptor override.
-  bool ValidateNickname(brillo::ErrorPtr* error,
-                        const std::string& value) override;
-  void SetProfileNickname(std::string nickname);
-
   // Functions that call eponymous LPA methods. Called after channel acquisition
   void EnableProfile(std::unique_ptr<DBusResponse<>> response);
   void DisableProfile(std::unique_ptr<DBusResponse<>> response);
 
   // Sends notifications to smdp if !err. Always returns success on dbus
-  void FinishProfileOpCb(std::shared_ptr<DBusResponse<>> response, int err);
+  void FinishProfileOpCb(EuiccOp euicc_op,
+                         std::shared_ptr<DBusResponse<>> response,
+                         int err);
 
-  void SetNicknameProperty(std::string nickname);
   void SetNicknameMethod(std::string nickname,
                          std::unique_ptr<DBusResponse<>> response);
+  void OnRestoreActiveSlot(std::shared_ptr<DBusResponse<>> response, int error);
+  void SendDBusError(EuiccOp euicc_op,
+                     std::shared_ptr<Profile::DBusResponse<>> response,
+                     int lpa_error,
+                     int modem_error);
+  template <typename T>
+  void RunOnSuccess(EuiccOp euicc_op,
+                    base::OnceCallback<void(T)> cb,
+                    T response,
+                    int err);
+  void SendDBusSuccess(EuiccOp euicc_op,
+                       std::shared_ptr<Profile::DBusResponse<>> response);
+  int GetMCCMNCAsInt();
+
+  // Used to set other profiles as disabled when a new profile is enabled
+  base::RepeatingCallback<void(const std::string&)> on_profile_enabled_cb_;
 
   Context* context_;
   dbus::ObjectPath object_path_;

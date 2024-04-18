@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -78,7 +78,14 @@ message BacklightBrightnessChange {
     MODEL = 9;
     // A notification that is allowed to wake the device was created or updated.
     WAKE_NOTIFICATION = 10;
-    // Next value to use: 11
+    // Backlights were toggled off by the user (typically due to the
+    // user pressing the keyboard backlight toggle keyboard key).
+    USER_TOGGLED_OFF = 11;
+    // Backlights are toggled on by user.
+    USER_TOGGLED_ON = 12;
+    // Changed due to battery saver state change.
+    BATTERY_SAVER_STATE_CHANGED = 13;
+    // Next value to use: 14
   }
   optional Cause cause = 2;
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,17 +8,17 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/containers/flat_map.h>
 #include <base/containers/flat_set.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
-#include <base/synchronization/lock.h>
+#include <base/sequence_checker.h>
 #include <base/time/time.h>
 #include <brillo/errors/error.h>
 #include <lorgnette/proto_bindings/lorgnette_service.pb.h>
@@ -38,6 +38,23 @@ class ExportedObjectManager;
 }  // namespace brillo
 
 namespace lorgnette {
+
+// This enum corresponds to Chromium's ScanJobFailureReason in
+// src/ash/webui/scanning/scanning_uma.h
+// DO NOT CHANGE THESE VALUES without changing values in the original file.
+enum class ScanJobFailureReason {
+  kUnknownScannerError = 0,
+  kScannerNotFound = 1,
+  kUnsupportedScanToPath = 2,
+  kSaveToDiskFailed = 3,
+  kDeviceBusy = 4,
+  kAdfJammed = 5,
+  kAdfEmpty = 6,
+  kFlatbedOpen = 7,
+  kIoError = 8,
+  kSuccess = 9,
+  kMaxValue = kSuccess,
+};
 
 namespace impl {
 
@@ -61,43 +78,44 @@ using StatusSignalSender =
 
 class FirewallManager;
 
-class Manager : public org::chromium::lorgnette::ManagerAdaptor,
-                public org::chromium::lorgnette::ManagerInterface {
+class Manager {
  public:
-  Manager(base::RepeatingCallback<void(size_t)> activity_callback,
-          std::unique_ptr<SaneClient> sane_client);
+  Manager(base::RepeatingCallback<void(base::TimeDelta)> activity_callback,
+          SaneClient* sane_client);
   Manager(const Manager&) = delete;
   Manager& operator=(const Manager&) = delete;
   virtual ~Manager();
 
-  void RegisterAsync(brillo::dbus_utils::ExportedObjectManager* object_manager,
-                     brillo::dbus_utils::AsyncEventSequencer* sequencer);
+  void SetFirewallManager(FirewallManager* firewall_manager);
 
   // Implementation of MethodInterface.
-  bool ListScanners(brillo::ErrorPtr* error,
-                    std::vector<uint8_t>* scanner_list_out) override;
-  bool GetScannerCapabilities(brillo::ErrorPtr* error,
-                              const std::string& device_name,
-                              std::vector<uint8_t>* capabilities) override;
-  std::vector<uint8_t> StartScan(
-      const std::vector<uint8_t>& start_scan_request) override;
-  void GetNextImage(
-      std::unique_ptr<DBusMethodResponse<std::vector<uint8_t>>> response,
-      const std::vector<uint8_t>& get_next_image_request,
-      const base::ScopedFD& out_fd) override;
-  std::vector<uint8_t> CancelScan(
-      const std::vector<uint8_t>& cancel_scan_request) override;
+  virtual bool ListScanners(brillo::ErrorPtr* error,
+                            ListScannersResponse* scanner_list_out);
+  virtual bool GetScannerCapabilities(brillo::ErrorPtr* error,
+                                      const std::string& device_name,
+                                      ScannerCapabilities* capabilities);
+  virtual StartScanResponse StartScan(const StartScanRequest& request);
+  virtual void GetNextImage(
+      std::unique_ptr<DBusMethodResponse<GetNextImageResponse>> response,
+      const GetNextImageRequest& get_next_image_request,
+      const base::ScopedFD& out_fd);
+  virtual CancelScanResponse CancelScan(
+      const CancelScanRequest& cancel_scan_request);
 
   void SetProgressSignalInterval(base::TimeDelta interval);
 
   // Register the callback to call when we send a ScanStatusChanged signal for
   // tests.
-  void SetScanStatusChangedSignalSenderForTest(StatusSignalSender sender);
+  void SetScanStatusChangedSignalSender(StatusSignalSender sender);
 
   void RemoveDuplicateScanners(std::vector<ScannerInfo>* scanners,
                                base::flat_set<std::string> seen_vidpid,
                                base::flat_set<std::string> seen_busdev,
                                const std::vector<ScannerInfo>& sane_scanners);
+
+  // Returns false if a particular scanner model is blocked (e.g. because of
+  // known backend incompatibilities).
+  static bool ScannerCanBeUsed(const ScannerInfo& scanner);
 
  private:
   friend class ManagerTest;
@@ -110,7 +128,7 @@ class Manager : public org::chromium::lorgnette::ManagerAdaptor,
     int current_page = 1;
     // The total number of pages to scan for the scan job. If this is nullopt,
     // keep scanning until we get an error.
-    base::Optional<int> total_pages;
+    std::optional<int> total_pages;
     // The image format for scanned images for the scan job.
     ImageFormat format;
   };
@@ -118,6 +136,7 @@ class Manager : public org::chromium::lorgnette::ManagerAdaptor,
   static const char kMetricScanRequested[];
   static const char kMetricScanSucceeded[];
   static const char kMetricScanFailed[];
+  static const char kMetricScanFailedFailureReason[];
 
   bool StartScanInternal(brillo::ErrorPtr* error,
                          ScanFailureMode* failure_mode,
@@ -126,17 +145,20 @@ class Manager : public org::chromium::lorgnette::ManagerAdaptor,
 
   void GetNextImageInternal(const std::string& uuid,
                             ScanJobState* scan_state,
-                            base::ScopedFILE out_file);
+                            base::ScopedFILE out_file,
+                            size_t expected_lines);
 
   ScanState RunScanLoop(brillo::ErrorPtr* error,
                         ScanFailureMode* failure_mode,
                         ScanJobState* scan_state,
                         base::ScopedFILE out_file,
+                        size_t expected_lines,
                         const std::string& scan_uuid);
 
   void ReportScanRequested(const std::string& device_name);
   void ReportScanSucceeded(const std::string& device_name);
-  void ReportScanFailed(const std::string& device_name);
+  void ReportScanFailed(const std::string& device_name,
+                        const ScanFailureMode failure_mode);
 
   void SendStatusSignal(const std::string& uuid,
                         const ScanState state,
@@ -148,27 +170,33 @@ class Manager : public org::chromium::lorgnette::ManagerAdaptor,
                          const std::string& failure_reason,
                          const ScanFailureMode failure_mode);
 
-  std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object_;
-  base::RepeatingCallback<void(size_t)> activity_callback_;
-  std::unique_ptr<MetricsLibraryInterface> metrics_library_;
+  SEQUENCE_CHECKER(sequence_checker_);
+
+  base::RepeatingCallback<void(base::TimeDelta)> activity_callback_
+      GUARDED_BY_CONTEXT(sequence_checker_);
+  std::unique_ptr<MetricsLibraryInterface> metrics_library_
+      GUARDED_BY_CONTEXT(sequence_checker_);
 
   // Manages port access for receiving replies from network scanners.
-  std::unique_ptr<FirewallManager> firewall_manager_;
+  // Not owned.
+  FirewallManager* firewall_manager_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   // Manages connection to SANE for listing and connecting to scanners.
-  std::unique_ptr<SaneClient> sane_client_;
+  // Not owned.
+  SaneClient* sane_client_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   // A callback to call when we attempt to send a D-Bus signal. This is used
   // for testing in order to track the signals sent from StartScan.
   StatusSignalSender status_signal_sender_;
   base::TimeDelta progress_signal_interval_;
 
-  base::Lock active_scans_lock_;
   // Mapping from scan UUIDs to the state for that scan job.
-  base::flat_map<std::string, ScanJobState> active_scans_;
+  base::flat_map<std::string, ScanJobState> active_scans_
+      GUARDED_BY_CONTEXT(sequence_checker_);
 
   // Keep as the last member variable.
-  base::WeakPtrFactory<Manager> weak_factory_{this};
+  base::WeakPtrFactory<Manager> weak_factory_
+      GUARDED_BY_CONTEXT(sequence_checker_){this};
 };
 
 }  // namespace lorgnette

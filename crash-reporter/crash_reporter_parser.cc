@@ -1,9 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/crash_reporter_parser.h"
 
+#include <optional>
 #include <utility>
 
 #include <base/files/file_enumerator.h>
@@ -58,9 +59,7 @@ CrashReporterParser::CrashReporterParser(
     bool testonly_send_all)
     : clock_(std::move(clock)),
       metrics_lib_(std::move(metrics_lib)),
-      always_capture_logs_for_test_(testonly_send_all) {
-  metrics_lib_->Init();
-}
+      always_capture_logs_for_test_(testonly_send_all) {}
 
 CrashReport CrashReporterParser::MakeCrashReport(const UnmatchedCrash& crash) {
   // Note that we don't have a good signature -- we don't have any way to
@@ -254,7 +253,7 @@ MaybeCrashReport CrashReporterParser::ParseLogEntry(const std::string& line) {
     crash.collector = Collector::USER;
     crash.timestamp = clock_->Now();
   } else {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   // Find the matching entry in our unmatched_crashes_ vector. We expect each
@@ -273,7 +272,7 @@ MaybeCrashReport CrashReporterParser::ParseLogEntry(const std::string& line) {
         LOG(WARNING) << "Could not mark Chrome crash as correctly processed";
       }
       recent_matched_crash_times_.push_back(clock_->Now());
-      return base::nullopt;
+      return std::nullopt;
     }
   }
 
@@ -282,7 +281,7 @@ MaybeCrashReport CrashReporterParser::ParseLogEntry(const std::string& line) {
   }
 
   unmatched_crashes_.push_back(crash);
-  return base::nullopt;
+  return std::nullopt;
 }
 
 MaybeCrashReport CrashReporterParser::PeriodicUpdate() {

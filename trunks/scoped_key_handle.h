@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -49,9 +49,12 @@ class TRUNKS_EXPORT ScopedKeyHandle {
   // might be stale.
   virtual TPM_HANDLE get() const;
 
+  virtual void set_synchronized(bool sync);
+
  private:
   const TrunksFactory& factory_;
   TPM_HANDLE handle_;
+  bool sync_ = false;
   void FlushHandleContext(TPM_HANDLE handle);
 };
 

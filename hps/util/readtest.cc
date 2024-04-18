@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
 
 #include <base/command_line.h>
 #include <base/strings/string_number_conversions.h>
@@ -44,8 +45,8 @@ int ReadTest(std::unique_ptr<hps::HPS> hps,
   }
   for (int i = 0; i < iterations; i++) {
     for (int reg = 0; reg <= static_cast<int>(hps::HpsReg::kMax); reg++) {
-      int result = hps->Device()->ReadReg(hps::HpsReg(reg));
-      if (result < 0) {
+      std::optional<uint16_t> result = hps->Device()->ReadReg(hps::HpsReg(reg));
+      if (!result) {
         std::cout << std::endl
                   << "Error on iteration " << i << " register " << i
                   << std::endl;
@@ -54,7 +55,7 @@ int ReadTest(std::unique_ptr<hps::HPS> hps,
         std::cout << std::endl
                   << " Iteration " << i << " Bad register value - reg: " << reg
                   << " value: 0x" << std::ios::hex << std::setfill('0')
-                  << std::setw(4) << result << std::endl;
+                  << std::setw(4) << result.value() << std::endl;
         std::cout.unsetf(std::ios::hex);
       }
     }

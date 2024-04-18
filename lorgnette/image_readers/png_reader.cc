@@ -1,11 +1,13 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "lorgnette/image_readers/png_reader.h"
 
+#include <optional>
 #include <utility>
 
+#include <base/check.h>
 #include <dbus/lorgnette/dbus-constants.h>
 
 #include "lorgnette/constants.h"
@@ -34,6 +36,7 @@ int LibpngErrorWrap(brillo::ErrorPtr* error,
   int result = setjmp(*buf);
   if (result != 0) {
     // |libpng_function| failed and longjmp'ed here.
+    // Note that error is not set here. It needs to be set by the caller.
     return result;
   }
   libpng_function(png, args...);
@@ -49,13 +52,13 @@ int LibpngErrorWrap(brillo::ErrorPtr* error,
 std::unique_ptr<ImageReader> PngReader::Create(
     brillo::ErrorPtr* error,
     const ScanParameters& params,
-    const base::Optional<int>& resolution,
-    base::ScopedFILE out_file) {
-  std::unique_ptr<PngReader> reader(new PngReader(params, std::move(out_file)));
+    const std::optional<int>& resolution,
+    FILE* out_file) {
+  std::unique_ptr<PngReader> reader(new PngReader(params, out_file));
 
   if (!reader->ValidateParams(error) ||
       !reader->Initialize(error, resolution)) {
-    return nullptr;
+    return nullptr;  // brillo::Error::AddTo already called.
   }
 
   return reader;
@@ -80,6 +83,7 @@ bool PngReader::ReadRow(brillo::ErrorPtr* error, uint8_t* data) {
                                "Writing PNG row failed with result %d", ret);
     return false;
   }
+  fflush(out_file_);
 
   return true;
 }
@@ -102,12 +106,12 @@ bool PngReader::Finalize(brillo::ErrorPtr* error) {
   return true;
 }
 
-PngReader::PngReader(const ScanParameters& params, base::ScopedFILE out_file)
-    : ImageReader(params, std::move(out_file)) {}
+PngReader::PngReader(const ScanParameters& params, FILE* out_file)
+    : ImageReader(params, out_file) {}
 
 bool PngReader::ValidateParams(brillo::ErrorPtr* error) {
   if (!ImageReader::ValidateParams(error)) {
-    return false;
+    return false;  // brillo::Error::AddTo already called.
   }
 
   if (params_.depth != 1 && params_.depth != 8 && params_.depth != 16) {
@@ -121,7 +125,7 @@ bool PngReader::ValidateParams(brillo::ErrorPtr* error) {
 }
 
 bool PngReader::Initialize(brillo::ErrorPtr* error,
-                           const base::Optional<int>& resolution) {
+                           const std::optional<int>& resolution) {
   png_ =
       png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
   if (!png_) {
@@ -153,7 +157,7 @@ bool PngReader::Initialize(brillo::ErrorPtr* error,
                  PNG_RESOLUTION_METER);
   }
 
-  png_init_io(png_, out_file_.get());
+  png_init_io(png_, out_file_);
   int ret = LibpngErrorWrap(error, png_write_info, png_, info_);
   if (ret != 0) {
     brillo::Error::AddToPrintf(error, FROM_HERE, kDbusDomain,

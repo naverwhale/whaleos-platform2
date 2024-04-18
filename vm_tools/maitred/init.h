@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,18 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/threading/thread.h>
 
 namespace vm_tools {
 namespace maitred {
+
+// Given the contents of /etc/hostname, return the hostname to set, or an
+// empty string on failure.
+std::string ParseHostname(const std::string& etc_hostname_contents);
 
 // Encapsulates all the functionality for which maitred is responsible when it
 // runs as pid 1 on a VM.
@@ -63,7 +67,7 @@ class Init final {
   // Creates a new instance of this class and performs various bits of early
   // setup up like mounting file systems, creating directories, and setting
   // up signal handlers.
-  static std::unique_ptr<Init> Create();
+  static std::unique_ptr<Init> Create(bool maitred_is_pid1);
   ~Init();
 
   // Spawn a process with the given argv and environment.  |argv[0]| must be
@@ -76,15 +80,15 @@ class Init final {
              bool use_console,
              bool wait_for_exit,
              ProcessLaunchInfo* launch_info,
-             base::Optional<base::Callback<void(ProcessStatus, int)>> exit_cb =
-                 base::nullopt);
+             std::optional<base::OnceCallback<void(ProcessStatus, int)>>
+                 exit_cb = std::nullopt);
 
   // Shuts down the system, killing all child processes first with SIGTERM and
   // finally with SIGKILL.
   void Shutdown();
 
  private:
-  Init() = default;
+  explicit Init(bool maitred_is_pid1);
   Init(const Init&) = delete;
   Init& operator=(const Init&) = delete;
 
@@ -101,6 +105,9 @@ class Init final {
 
   // The actual worker thread.
   base::Thread worker_thread_{"init worker thread"};
+
+  // Check at runtime if maitred is pid 1, true is maitred is pid 1.
+  bool maitred_is_pid1_;
 };
 
 }  //  namespace maitred

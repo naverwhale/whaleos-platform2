@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/vpn/vpn_provider.h"
 
 #include <algorithm>
+#include <map>
 #include <memory>
 #include <utility>
 
@@ -12,29 +13,27 @@
 #include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <chromeos/dbus/service_constants.h>
+#include <chromeos/dbus/shill/dbus-constants.h>
 
-#include "shill/connection.h"
 #include "shill/error.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 #include "shill/profile.h"
-#include "shill/routing_policy_entry.h"
-#include "shill/store_interface.h"
+#include "shill/store/store_interface.h"
 #include "shill/vpn/arc_vpn_driver.h"
+#include "shill/vpn/ikev2_driver.h"
 #include "shill/vpn/l2tp_ipsec_driver.h"
 #include "shill/vpn/openvpn_driver.h"
 #include "shill/vpn/third_party_vpn_driver.h"
 #include "shill/vpn/vpn_service.h"
+#include "shill/vpn/vpn_types.h"
 #include "shill/vpn/wireguard_driver.h"
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kVPN;
-static std::string ObjectID(const VPNProvider* v) {
-  return "(vpn_provider)";
-}
 }  // namespace Logging
 
 namespace {
@@ -48,17 +47,17 @@ bool GetServiceParametersFromArgs(const KeyValueStore& args,
                                   std::string* name_ptr,
                                   std::string* host_ptr,
                                   Error* error) {
-  SLOG(nullptr, 2) << __func__;
+  SLOG(2) << __func__;
   const auto type = args.Lookup<std::string>(kProviderTypeProperty, "");
   if (type.empty()) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidProperty,
                           "Missing VPN type property.");
     return false;
   }
 
   const auto host = args.Lookup<std::string>(kProviderHostProperty, "");
   if (host.empty()) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidProperty,
                           "Missing VPN host property.");
     return false;
   }
@@ -113,8 +112,6 @@ bool GetServiceParametersFromStorage(const StoreInterface* storage,
 
 }  // namespace
 
-const char VPNProvider::kArcBridgeIfName[] = "arcbr0";
-
 VPNProvider::VPNProvider(Manager* manager) : manager_(manager) {}
 
 VPNProvider::~VPNProvider() = default;
@@ -124,7 +121,7 @@ void VPNProvider::Start() {}
 void VPNProvider::Stop() {}
 
 ServiceRefPtr VPNProvider::GetService(const KeyValueStore& args, Error* error) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   std::string type;
   std::string name;
   std::string host;
@@ -148,7 +145,7 @@ ServiceRefPtr VPNProvider::GetService(const KeyValueStore& args, Error* error) {
 
 ServiceRefPtr VPNProvider::FindSimilarService(const KeyValueStore& args,
                                               Error* error) const {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   std::string type;
   std::string name;
   std::string host;
@@ -160,7 +157,7 @@ ServiceRefPtr VPNProvider::FindSimilarService(const KeyValueStore& args,
   // Find a service in the provider list which matches these parameters.
   VPNServiceRefPtr service = FindService(type, name, host);
   if (!service) {
-    error->Populate(Error::kNotFound, "Matching service was not found");
+    error->Populate(Error::kNotFound, Error::kServiceNotFoundMsg, FROM_HERE);
   }
 
   return service;
@@ -174,7 +171,7 @@ void VPNProvider::RemoveService(VPNServiceRefPtr service) {
 }
 
 void VPNProvider::CreateServicesFromProfile(const ProfileRefPtr& profile) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   const StoreInterface* storage = profile->GetConstStorage();
   KeyValueStore args;
   args.Set<std::string>(kTypeProperty, kTypeVPN);
@@ -191,7 +188,7 @@ void VPNProvider::CreateServicesFromProfile(const ProfileRefPtr& profile) {
     if (service != nullptr) {
       // If the service already exists, it does not need to be configured,
       // since PushProfile would have already called ConfigureService on it.
-      SLOG(this, 2) << "Service already exists " << group;
+      SLOG(2) << "Service already exists " << group;
       continue;
     }
 
@@ -214,12 +211,12 @@ VPNServiceRefPtr VPNProvider::CreateServiceInner(const std::string& type,
                                                  const std::string& name,
                                                  const std::string& storage_id,
                                                  Error* error) {
-  SLOG(this, 2) << __func__ << " type " << type << " name " << name
-                << " storage id " << storage_id;
+  SLOG(2) << __func__ << " type " << type << " name " << name << " storage id "
+          << storage_id;
 #if defined(DISABLE_VPN)
 
-  Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
-                        "VPN is not supported.");
+  Error::PopulateAndLog(FROM_HERE, error, Error::kTechnologyNotAvailable,
+                        "VPN technology is not available.");
   return nullptr;
 
 #else
@@ -229,6 +226,8 @@ VPNServiceRefPtr VPNProvider::CreateServiceInner(const std::string& type,
     driver.reset(new OpenVPNDriver(manager_, ProcessManager::GetInstance()));
   } else if (type == kProviderL2tpIpsec) {
     driver.reset(new L2TPIPsecDriver(manager_, ProcessManager::GetInstance()));
+  } else if (type == kProviderIKEv2) {
+    driver.reset(new IKEv2Driver(manager_, ProcessManager::GetInstance()));
   } else if (type == kProviderThirdPartyVpn) {
     // For third party VPN host contains extension ID
     driver.reset(
@@ -238,8 +237,8 @@ VPNServiceRefPtr VPNProvider::CreateServiceInner(const std::string& type,
   } else if (type == kProviderWireGuard) {
     driver.reset(new WireGuardDriver(manager_, ProcessManager::GetInstance()));
   } else {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
-                          "Unsupported VPN type: " + type);
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
+                          "Invalid VPN type: " + type);
     return nullptr;
   }
 
@@ -270,8 +269,13 @@ VPNServiceRefPtr VPNProvider::CreateService(const std::string& type,
 VPNServiceRefPtr VPNProvider::FindService(const std::string& type,
                                           const std::string& name,
                                           const std::string& host) const {
+  const auto vpn_type = VPNTypeStringToEnum(type);
+  if (!vpn_type) {
+    LOG(WARNING) << "Invalid VPN type " << type;
+    return nullptr;
+  }
   for (const auto& service : services_) {
-    if (type == service->driver()->GetProviderType() &&
+    if (*vpn_type == service->driver()->vpn_type() &&
         name == service->friendly_name() &&
         host == service->driver()->GetHost()) {
       return service;
@@ -312,6 +316,8 @@ ServiceRefPtr VPNProvider::CreateTemporaryServiceFromProfile(
   return CreateServiceInner(type, name, entry_name, error);
 }
 
+void VPNProvider::AbandonService(const ServiceRefPtr& service) {}
+
 bool VPNProvider::HasActiveService() const {
   for (const auto& service : services_) {
     if (service->IsConnecting() || service->IsConnected()) {
@@ -333,6 +339,9 @@ std::string VPNProvider::GetSupportedType() {
 #ifndef DISABLE_VPN
   std::vector<std::string> list({kProviderL2tpIpsec, kProviderOpenVpn,
                                  kProviderThirdPartyVpn, kProviderArcVpn});
+  if (IKEv2Driver::IsSupported()) {
+    list.push_back(kProviderIKEv2);
+  }
   if (WireGuardDriver::IsSupported()) {
     list.push_back(kProviderWireGuard);
   }

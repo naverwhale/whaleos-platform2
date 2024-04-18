@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,7 @@
 
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/files/file_util.h>
 #include <base/logging.h>
 
 namespace trunks {
@@ -31,6 +32,10 @@ MeiClientSocket::MeiClientSocket(const std::string& mei_path,
 
 MeiClientSocket::~MeiClientSocket() {
   Uninitialize();
+}
+
+bool MeiClientSocket::IsSupport() {
+  return base::PathExists(base::FilePath(mei_path_));
 }
 
 bool MeiClientSocket::Initialize() {
@@ -92,7 +97,7 @@ bool MeiClientSocket::Receive(std::string* data) {
   for (ssize_t remaining_size = message_size; remaining_size > 0;) {
     const ssize_t rsize = read(fd_, buffer, remaining_size);
     if (rsize < 0) {
-      LOG(ERROR) << ": Error calling `read()`: " << errno;
+      PLOG(ERROR) << ": Error calling `read()`";
       data->clear();
       return false;
     }
@@ -107,7 +112,7 @@ bool MeiClientSocket::InitializeInternal() {
 
   fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd_ == -1) {
-    LOG(ERROR) << __func__ << ": Error calling `socket()`." << errno;
+    PLOG(ERROR) << __func__ << ": Error calling `socket()`";
     return false;
   }
   struct sockaddr_un addr = {};
@@ -115,7 +120,7 @@ bool MeiClientSocket::InitializeInternal() {
   CHECK_LT(mei_path_.size(), sizeof(addr.sun_path));
   strncpy(addr.sun_path, mei_path_.c_str(), sizeof(addr.sun_path));
   if (connect(fd_, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
-    LOG(ERROR) << __func__ << ": Error when connecting socket: " << errno;
+    PLOG(ERROR) << __func__ << ": Error when connecting socket";
     return false;
   }
   return true;

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/stl_util.h>
 
 namespace arc {
@@ -117,9 +116,9 @@ vda_result FakeContext::Flush() {
 
 FakeVdaImpl::FakeVdaImpl() {
   LOG(INFO) << "Creating new fake implementation.";
-  capabilities_.num_input_formats = base::size(kInputFormats);
+  capabilities_.num_input_formats = std::size(kInputFormats);
   capabilities_.input_formats = kInputFormats;
-  capabilities_.num_output_formats = base::size(kOutputFormats);
+  capabilities_.num_output_formats = std::size(kOutputFormats);
   capabilities_.output_formats = kOutputFormats;
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 #define PROGRAM_NAME "nand_partition"
 
 #include <base/command_line.h>
-#include <base/macros.h>
 #include <base/strings/string_number_conversions.h>
 
 #include "installer/nand_partition.h"
@@ -40,7 +39,7 @@ int main(int argc, char** argv) {
   if (args.size() > 2) {
     int optind = 0;
     string command = args[optind++];
-    string dev = args[optind++];
+    base::FilePath dev = base::FilePath(args[optind++]);
     string s_part_no = args[optind++];
     int part_no = 0;
     if (!base::StringToInt(s_part_no, &part_no)) {

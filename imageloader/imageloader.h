@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef IMAGELOADER_IMAGELOADER_H_
@@ -10,12 +10,13 @@
 
 #include <signal.h>
 
-#include <base/callback.h>
 #include <base/cancelable_callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/daemons/dbus_daemon.h>
 #include <brillo/errors/error.h>
 #include <brillo/process/process_reaper.h>
+#include <imageloader/proto_bindings/imageloader.pb.h>
 
 #include "imageloader/dbus_adaptors/org.chromium.ImageLoaderInterface.h"
 #include "imageloader/helper_process_proxy.h"
@@ -32,8 +33,6 @@ class ImageLoader : public brillo::DBusServiceDaemon,
   // User and group to run imageloader as.
   static const char kImageLoaderGroupName[];
   static const char kImageLoaderUserName[];
-
-  static const char kLoadedMountsBase[];
 
   ImageLoader(ImageLoaderConfig config,
               std::unique_ptr<HelperProcessProxy> proxy);
@@ -75,6 +74,11 @@ class ImageLoader : public brillo::DBusServiceDaemon,
                     const std::string& a_or_b,
                     std::string* out_mount_point) override;
 
+  // Load and mount a DLC image based on the proto.
+  bool LoadDlc(brillo::ErrorPtr* err,
+               const LoadDlcRequest& request,
+               std::string* out_mount_point) override;
+
   // Remove a component given component |name|.
   bool RemoveComponent(brillo::ErrorPtr* err,
                        const std::string& name,
@@ -115,14 +119,11 @@ class ImageLoader : public brillo::DBusServiceDaemon,
   // the timer.
   void PostponeShutdown();
 
-  // Daemon will automatically shutdown after this length of idle time.
-  static const int kShutdownTimeoutMilliseconds;
-
   std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object_;
   ImageLoaderImpl impl_;
   std::unique_ptr<HelperProcessProxy> helper_process_proxy_;
   brillo::ProcessReaper process_reaper_;
-  base::CancelableClosure shutdown_callback_;
+  base::CancelableOnceClosure shutdown_callback_;
   org::chromium::ImageLoaderInterfaceAdaptor dbus_adaptor_{this};
 
   base::WeakPtrFactory<ImageLoader> weak_factory_{this};

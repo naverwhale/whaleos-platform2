@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 #include <base/logging.h>
 #include <base/no_destructor.h>
 
-namespace reporting {
-namespace internal {
+namespace reporting::internal {
 
 // static
 const Status& StatusOrHelper::NotInitializedStatus() {
@@ -29,6 +28,4 @@ void StatusOrHelper::Crash(const Status& status) {
   LOG(FATAL) << "Attempting to fetch value instead of handling error "
              << status.ToString();
 }
-
-}  // namespace internal
-}  // namespace reporting
+}  // namespace reporting::internal

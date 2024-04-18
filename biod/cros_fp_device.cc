@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,28 +9,42 @@
 #include <sys/ioctl.h>
 
 #include <algorithm>
+#include <optional>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
 #include <chromeos/ec/cros_ec_dev.h>
+#include <libec/add_entropy_command.h>
 #include <libec/ec_command.h>
 #include <libec/ec_command_async.h>
-#include <libec/fingerprint/fp_context_command_factory.h>
+#include <libec/flash_protect_command_factory.h>
 #include <libec/fingerprint/fp_frame_command.h>
+#include <libec/fingerprint/fp_mode_command.h>
+#include <libec/fingerprint/fp_read_match_secret_command.h>
+#include <libec/fingerprint/fp_stats_command.h>
+#include <libec/get_protocol_info_command.h>
+#include <libec/get_version_command.h>
+#include <libec/reboot_command.h>
 #include <libec/versions_command.h>
 
 using ec::EcCmdVersionSupportStatus;
 using ec::EcCommand;
 using ec::EcCommandAsync;
 using ec::EmptyParam;
-using ec::FpFlashProtectCommand;
+using ec::FlashProtectCommand;
 using ec::FpMode;
+using ec::FpModeCommand;
+using ec::FpReadMatchSecretCommand;
 using ec::FpSensorErrors;
+using ec::FpStatsCommand;
+using ec::GetFpModeCommand;
+using ec::GetProtocolInfoCommand;
+using ec::GetVersionCommand;
+using ec::RebootCommand;
 using ec::VersionsCommand;
 
 namespace {
@@ -53,31 +67,24 @@ CrosFpDevice::~CrosFpDevice() {
     ResetContext();
 }
 
-base::Optional<CrosFpDevice::EcProtocolInfo> CrosFpDevice::EcProtoInfo() {
+std::optional<CrosFpDevice::EcProtocolInfo> CrosFpDevice::EcProtoInfo() {
   /* read max request / response size from the MCU for protocol v3+ */
-  EcCommand<EmptyParam, struct ec_response_get_protocol_info> cmd(
-      EC_CMD_GET_PROTOCOL_INFO);
+  GetProtocolInfoCommand cmd;
   // We retry this command because it is known to occasionally fail
   // with ETIMEDOUT on first attempt.
   if (!cmd.RunWithMultipleAttempts(cros_fd_.get(), kMaxIoAttempts)) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  uint16_t max_read =
-      cmd.Resp()->max_response_packet_size - sizeof(struct ec_host_response);
-  // TODO(vpalatin): workaround for b/78544921, can be removed if MCU is fixed.
-  uint16_t max_write =
-      cmd.Resp()->max_request_packet_size - sizeof(struct ec_host_request) - 4;
-
   return EcProtocolInfo{
-      .max_read = max_read,
-      .max_write = max_write,
+      .max_read = cmd.MaxReadBytes(),
+      .max_write = cmd.MaxWriteBytes(),
   };
 }
 
-base::Optional<std::string> CrosFpDevice::ReadVersion() {
+std::optional<std::string> CrosFpDevice::ReadVersion() {
   // TODO(b/131438292): Remove the hardcoded size for the version buffer.
-  std::array<uint8_t, 80> version_buf;
+  std::array<uint8_t, 82> version_buf;
   for (int retry = 0; retry < kMaxIoAttempts; retry++) {
     ssize_t bytes_read =
         read(cros_fd_.get(), version_buf.data(), version_buf.size());
@@ -91,7 +98,7 @@ base::Optional<std::string> CrosFpDevice::ReadVersion() {
 
       size_t newline_pos = str.find_first_of('\n');
       if (newline_pos == std::string::npos) {
-        return base::nullopt;
+        return std::nullopt;
       }
 
       return str.substr(0, newline_pos);
@@ -100,20 +107,20 @@ base::Optional<std::string> CrosFpDevice::ReadVersion() {
       PLOG(ERROR) << "FPMCU failed to read cros_fp device on attempt "
                   << retry + 1 << "/" << kMaxIoAttempts
                   << ", retry is not allowed for error";
-      return base::nullopt;
+      return std::nullopt;
     }
     PLOG(ERROR) << "FPMCU failed to read cros_fp device on attempt "
                 << retry + 1 << "/" << kMaxIoAttempts;
   }
 
-  return base::nullopt;
+  return std::nullopt;
 }
 
 bool CrosFpDevice::EcDevInit() {
   // This is a special read (before events are enabled) that can fail due
   // to ETIMEDOUT. This is because the first read with events disabled
   // triggers a get_version request to the FPMCU, which can timeout.
-  base::Optional<std::string> version = ReadVersion();
+  std::optional<std::string> version = ReadVersion();
   if (!version) {
     LOG(ERROR) << "Failed to read cros_fp device version.";
     return false;
@@ -124,7 +131,7 @@ bool CrosFpDevice::EcDevInit() {
     return false;
   }
 
-  base::Optional<EcProtocolInfo> info = EcProtoInfo();
+  std::optional<EcProtocolInfo> info = EcProtoInfo();
   if (!info) {
     LOG(ERROR) << "Failed to get cros_fp protocol info.";
     return false;
@@ -157,8 +164,8 @@ void CrosFpDevice::OnEventReadable() {
 }
 
 bool CrosFpDevice::SetFpMode(const FpMode& mode) {
-  EcCommand<struct ec_params_fp_mode, struct ec_response_fp_mode> cmd(
-      EC_CMD_FP_MODE, ec::kVersionZero, {.mode = mode.RawVal()});
+  FpModeCommand cmd(mode);
+
   bool ret = cmd.Run(cros_fd_.get());
   if (ret) {
     return true;
@@ -185,9 +192,8 @@ bool CrosFpDevice::SetFpMode(const FpMode& mode) {
 }
 
 FpMode CrosFpDevice::GetFpMode() {
-  EcCommand<struct ec_params_fp_mode, struct ec_response_fp_mode> cmd(
-      EC_CMD_FP_MODE, ec::kVersionZero,
-      {.mode = static_cast<uint32_t>(FP_MODE_DONT_CHANGE)});
+  GetFpModeCommand cmd;
+
   if (!cmd.Run(cros_fd_.get())) {
     LOG(ERROR) << "Failed to get FP mode from MCU.";
     return FpMode(FpMode::Mode::kModeInvalid);
@@ -218,21 +224,19 @@ bool CrosFpDevice::SupportsPositiveMatchSecret() {
   }
 }
 
-base::Optional<brillo::SecureVector> CrosFpDevice::FpReadMatchSecret(
+std::optional<brillo::SecureVector> CrosFpDevice::FpReadMatchSecret(
     uint16_t index) {
-  EcCommand<struct ec_params_fp_read_match_secret,
-            struct ec_response_fp_read_match_secret>
-      cmd(EC_CMD_FP_READ_MATCH_SECRET, 0, {.fgr = index});
+  FpReadMatchSecretCommand cmd(index);
 
   if (!cmd.Run(cros_fd_.get()) &&
       cmd.Result() == ec::kEcCommandUninitializedResult) {
     LOG(ERROR) << "Failed to run EC_CMD_FP_READ_MATCH_SECRET command.";
-    return base::nullopt;
+    return std::nullopt;
   }
   if (cmd.Result() != EC_RES_SUCCESS) {
     LOG(ERROR) << "Failed to read positive match secret, result: "
                << cmd.Result() << ".";
-    return base::nullopt;
+    return std::nullopt;
   }
   brillo::SecureVector secret(sizeof(cmd.Resp()->positive_match_secret));
   std::copy(cmd.Resp()->positive_match_secret,
@@ -241,6 +245,31 @@ base::Optional<brillo::SecureVector> CrosFpDevice::FpReadMatchSecret(
             secret.begin());
   brillo::SecureClearContainer(cmd.Resp()->positive_match_secret);
   return secret;
+}
+
+std::optional<ec::CrosFpDeviceInterface::GetSecretReply>
+CrosFpDevice::FpReadMatchSecretWithPubkey(int index,
+                                          const brillo::Blob& pk_in_x,
+                                          const brillo::Blob& pk_in_y) {
+  auto read_secret_cmd =
+      ec_command_factory_->FpReadMatchSecretWithPubkeyCommand(index, pk_in_x,
+                                                              pk_in_y);
+  if (!read_secret_cmd) {
+    LOG(ERROR) << "Invalid read secret params.";
+    return std::nullopt;
+  }
+  if (!read_secret_cmd->Run(cros_fd_.get())) {
+    LOG(ERROR) << "Failed to read secret, result: "
+               << read_secret_cmd->Result();
+    return std::nullopt;
+  }
+
+  return ec::CrosFpDeviceInterface::GetSecretReply{
+      .encrypted_secret = read_secret_cmd->EncryptedSecret(),
+      .iv = read_secret_cmd->Iv(),
+      .pk_out_x = read_secret_cmd->PkOutX(),
+      .pk_out_y = read_secret_cmd->PkOutY(),
+  };
 }
 
 bool CrosFpDevice::UpdateFpInfo() {
@@ -254,15 +283,15 @@ bool CrosFpDevice::UpdateFpInfo() {
   return true;
 }
 
-base::Optional<CrosFpDeviceInterface::FpStats> CrosFpDevice::GetFpStats() {
-  EcCommand<EmptyParam, struct ec_response_fp_stats> cmd(EC_CMD_FP_STATS);
+std::optional<ec::CrosFpDeviceInterface::FpStats> CrosFpDevice::GetFpStats() {
+  FpStatsCommand cmd;
   if (!cmd.Run(cros_fd_.get())) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   uint8_t inval = cmd.Resp()->timestamps_invalid;
   if (inval & (FPSTATS_CAPTURE_INV | FPSTATS_MATCHING_INV)) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   FpStats stats = {
@@ -276,9 +305,9 @@ base::Optional<CrosFpDeviceInterface::FpStats> CrosFpDevice::GetFpStats() {
 
 // static
 bool CrosFpDevice::WaitOnEcBoot(const base::ScopedFD& cros_fp_fd,
-                                ec_current_image expected_image) {
+                                ec_image expected_image) {
   int tries = 50;
-  ec_current_image image = EC_IMAGE_UNKNOWN;
+  ec_image image = EC_IMAGE_UNKNOWN;
 
   while (tries) {
     tries--;
@@ -287,47 +316,42 @@ bool CrosFpDevice::WaitOnEcBoot(const base::ScopedFD& cros_fp_fd,
         EC_CMD_GET_VERSION);
     if (!cmd.Run(cros_fp_fd.get())) {
       LOG(ERROR) << "Failed to retrieve cros_fp firmware version.";
-      base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(500));
+      base::PlatformThread::Sleep(base::Milliseconds(500));
       continue;
     }
-    image = static_cast<ec_current_image>(cmd.Resp()->current_image);
+    image = static_cast<ec_image>(cmd.Resp()->current_image);
     if (image == expected_image) {
       LOG(INFO) << "EC image is " << (image == EC_IMAGE_RO ? "RO" : "RW")
                 << ".";
       return true;
     }
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(100));
+    base::PlatformThread::Sleep(base::Milliseconds(100));
   }
   LOG(ERROR) << "EC rebooted to incorrect image " << image;
   return false;
 }
 
 // static
-base::Optional<CrosFpDeviceInterface::EcVersion> CrosFpDevice::GetVersion(
+std::optional<ec::CrosFpDeviceInterface::EcVersion> CrosFpDevice::GetVersion(
     const base::ScopedFD& cros_fp_fd) {
-  EcCommand<EmptyParam, struct ec_response_get_version> cmd(EC_CMD_GET_VERSION);
+  GetVersionCommand cmd;
+
   if (!cmd.Run(cros_fp_fd.get())) {
     LOG(ERROR) << "Failed to fetch cros_fp firmware version.";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  // buffers should already be null terminated -- this is a safeguard
-  cmd.Resp()->version_string_ro[sizeof(cmd.Resp()->version_string_ro) - 1] =
-      '\0';
-  cmd.Resp()->version_string_rw[sizeof(cmd.Resp()->version_string_rw) - 1] =
-      '\0';
-
   return EcVersion{
-      .ro_version = std::string(cmd.Resp()->version_string_ro),
-      .rw_version = std::string(cmd.Resp()->version_string_rw),
-      .current_image = static_cast<ec_current_image>(cmd.Resp()->current_image),
+      .ro_version = cmd.ROVersion(),
+      .rw_version = cmd.RWVersion(),
+      .current_image = cmd.Image(),
   };
 }
 
-bool CrosFpDevice::EcReboot(ec_current_image to_image) {
+bool CrosFpDevice::EcReboot(ec_image to_image) {
   DCHECK(to_image == EC_IMAGE_RO || to_image == EC_IMAGE_RW);
 
-  EcCommand<EmptyParam, EmptyParam> cmd_reboot(EC_CMD_REBOOT);
+  RebootCommand cmd_reboot;
   // Don't expect a return code, cros_fp has rebooted.
   cmd_reboot.Run(cros_fd_.get());
 
@@ -350,7 +374,7 @@ bool CrosFpDevice::EcReboot(ec_current_image to_image) {
   // EC jumps to RW after 1 second. Wait enough time in case we want to reboot
   // to RW. In case we wanted to remain in RO, wait anyway to ensure that the EC
   // received the instructions.
-  base::PlatformThread::Sleep(base::TimeDelta::FromSeconds(3));
+  base::PlatformThread::Sleep(base::Seconds(3));
 
   if (!WaitOnEcBoot(cros_fd_, to_image)) {
     LOG(ERROR) << "EC did not load the right image.";
@@ -362,19 +386,7 @@ bool CrosFpDevice::EcReboot(ec_current_image to_image) {
 
 bool CrosFpDevice::AddEntropy(bool reset) {
   // Create the secret.
-  EcCommandAsync<struct ec_params_rollback_add_entropy, EmptyParam>
-      cmd_add_entropy(EC_CMD_ADD_ENTROPY, ADD_ENTROPY_GET_RESULT,
-                      {.poll_for_result_num_attempts = 20,
-                       .poll_interval = base::TimeDelta::FromMilliseconds(100),
-                       // The EC temporarily stops responding to EC commands
-                       // when this command is run, so we will keep trying until
-                       // we get success (or time out).
-                       .validate_poll_result = false});
-  if (reset) {
-    cmd_add_entropy.SetReq({.action = ADD_ENTROPY_RESET_ASYNC});
-  } else {
-    cmd_add_entropy.SetReq({.action = ADD_ENTROPY_ASYNC});
-  }
+  ec::AddEntropyCommand cmd_add_entropy(reset);
 
   if (cmd_add_entropy.Run(cros_fd_.get())) {
     LOG(INFO) << "Entropy has been successfully added.";
@@ -384,18 +396,18 @@ bool CrosFpDevice::AddEntropy(bool reset) {
   return false;
 }
 
-base::Optional<int32_t> CrosFpDevice::GetRollBackInfoId() {
+std::optional<int32_t> CrosFpDevice::GetRollBackInfoId() {
   EcCommand<EmptyParam, struct ec_response_rollback_info> cmd_rb_info(
       EC_CMD_ROLLBACK_INFO);
   if (!cmd_rb_info.Run(cros_fd_.get())) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   return cmd_rb_info.Resp()->id;
 }
 
 bool CrosFpDevice::InitEntropy(bool reset) {
-  base::Optional<int32_t> block_id = GetRollBackInfoId();
+  std::optional<int32_t> block_id = GetRollBackInfoId();
   if (!block_id) {
     LOG(ERROR) << "Failed to read block ID from FPMCU.";
     return false;
@@ -444,18 +456,30 @@ bool CrosFpDevice::Init() {
   LOG(INFO) << "  Model ID   : 0x" << std::hex << info_->sensor_id()->model_id;
   LOG(INFO) << "  Version    : " << info_->sensor_id()->version;
   std::string error_flags;
-  if ((info_->GetFpSensorErrors() & FpSensorErrors::kNoIrq) !=
-      FpSensorErrors::kNone)
-    error_flags += "NO_IRQ ";
-  if ((info_->GetFpSensorErrors() & FpSensorErrors::kSpiCommunication) !=
-      FpSensorErrors::kNone)
-    error_flags += "SPI_COMM ";
-  if ((info_->GetFpSensorErrors() & FpSensorErrors::kBadHardwareID) !=
-      FpSensorErrors::kNone)
-    error_flags += "BAD_HWID ";
-  if ((info_->GetFpSensorErrors() & FpSensorErrors::kInitializationFailure) !=
-      FpSensorErrors::kNone)
-    error_flags += "INIT_FAIL";
+
+  bool no_irq_error = (info_->GetFpSensorErrors() & FpSensorErrors::kNoIrq) !=
+                      FpSensorErrors::kNone;
+  error_flags += (no_irq_error ? "NO_IRQ " : "");
+  biod_metrics_->SendFpSensorErrorNoIrq(no_irq_error);
+
+  bool spi_communication_error =
+      (info_->GetFpSensorErrors() & FpSensorErrors::kSpiCommunication) !=
+      FpSensorErrors::kNone;
+  error_flags += (spi_communication_error ? "SPI_COMM " : "");
+  biod_metrics_->SendFpSensorErrorSpiCommunication(spi_communication_error);
+
+  bool bad_hwid_error =
+      (info_->GetFpSensorErrors() & FpSensorErrors::kBadHardwareID) !=
+      FpSensorErrors::kNone;
+  error_flags += (bad_hwid_error ? "BAD_HWID " : "");
+  biod_metrics_->SendFpSensorErrorBadHardwareID(bad_hwid_error);
+
+  bool init_failure_error =
+      (info_->GetFpSensorErrors() & FpSensorErrors::kInitializationFailure) !=
+      FpSensorErrors::kNone;
+  error_flags += (init_failure_error ? "INIT_FAIL" : "");
+  biod_metrics_->SendFpSensorErrorInitializationFailure(init_failure_error);
+
   LOG(INFO) << "  Errors     : " << error_flags;
   LOG(INFO) << "CROS FP Image Info ";
   // Prints the pixel format in FOURCC format.
@@ -475,14 +499,14 @@ bool CrosFpDevice::Init() {
   if (!fp_resp) {
     LOG(ERROR) << "Unable to read flash protect state";
   } else {
-    LOG(INFO) << "Flash Protect Flags : 0x" << std::hex << fp_resp->flags
-              << "\t: " << FpFlashProtectCommand::ParseFlags(fp_resp->flags);
-    LOG(INFO) << "Valid Flags         : 0x" << std::hex << fp_resp->valid_flags
-              << "\t: "
-              << FpFlashProtectCommand::ParseFlags(fp_resp->valid_flags);
+    LOG(INFO) << "Flash Protect Flags : 0x" << std::hex << fp_resp->GetFlags()
+              << "\t: " << FlashProtectCommand::ParseFlags(fp_resp->GetFlags());
+    LOG(INFO) << "Valid Flags         : 0x" << std::hex
+              << fp_resp->GetValidFlags() << "\t: "
+              << FlashProtectCommand::ParseFlags(fp_resp->GetValidFlags());
     LOG(INFO) << "writable flags      : 0x" << std::hex
-              << fp_resp->writable_flags << "\t: "
-              << FpFlashProtectCommand::ParseFlags(fp_resp->writable_flags);
+              << fp_resp->GetValidFlags() << "\t: "
+              << FlashProtectCommand::ParseFlags(fp_resp->GetWritableFlags());
   }
 
   watcher_ = base::FileDescriptorWatcher::WatchReadable(
@@ -501,37 +525,52 @@ bool CrosFpDevice::Init() {
   return true;
 }
 
-base::Optional<std::bitset<32>> CrosFpDevice::GetDirtyMap() {
+std::optional<std::bitset<32>> CrosFpDevice::GetDirtyMap() {
   // Retrieve the up-to-date dirty bitmap from the MCU.
   if (!UpdateFpInfo()) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   return info_->template_info()->dirty;
 }
 
-base::Optional<int> CrosFpDevice::GetIndexOfLastTemplate() {
+std::optional<int> CrosFpDevice::GetIndexOfLastTemplate() {
   if (!UpdateFpInfo()) {
-    return base::nullopt;
+    return std::nullopt;
   }
   int index = info_->template_info()->num_valid - 1;
   if (index < 0 || index >= MaxTemplateCount()) {
     LOG(ERROR) << "Invalid index of last template: " << index << ".";
-    return base::nullopt;
+    return std::nullopt;
   }
   return index;
 }
 
-base::Optional<brillo::SecureVector> CrosFpDevice::GetPositiveMatchSecret(
+std::optional<brillo::SecureVector> CrosFpDevice::GetPositiveMatchSecret(
     int index) {
-  auto opt_index = base::make_optional<int>(index);
+  auto opt_index = std::make_optional<int>(index);
   if (opt_index == kLastTemplate) {
     opt_index = GetIndexOfLastTemplate();
     if (!opt_index) {
-      return base::nullopt;
+      return std::nullopt;
     }
   }
   return FpReadMatchSecret(static_cast<uint16_t>(*opt_index));
+}
+
+std::optional<ec::CrosFpDeviceInterface::GetSecretReply>
+CrosFpDevice::GetPositiveMatchSecretWithPubkey(int index,
+                                               const brillo::Blob& pk_in_x,
+                                               const brillo::Blob& pk_in_y) {
+  auto opt_index = std::make_optional<int>(index);
+  if (index == kLastTemplate) {
+    opt_index = GetIndexOfLastTemplate();
+    if (!opt_index.has_value()) {
+      return std::nullopt;
+    }
+  }
+  return FpReadMatchSecretWithPubkey(static_cast<uint16_t>(*opt_index), pk_in_x,
+                                     pk_in_y);
 }
 
 std::unique_ptr<VendorTemplate> CrosFpDevice::GetTemplate(int index) {
@@ -562,44 +601,74 @@ std::unique_ptr<VendorTemplate> CrosFpDevice::GetTemplate(int index) {
   return fp_frame_cmd->frame();
 }
 
-bool CrosFpDevice::UploadTemplate(const VendorTemplate& tmpl) {
-  union cmd_with_data {
-    struct ec_params_fp_template req;
-    uint8_t _fullsize[ec::kMaxPacketSize];
-  };
-  EcCommand<union cmd_with_data, EmptyParam> cmd(EC_CMD_FP_TEMPLATE);
-  struct ec_params_fp_template* req = &cmd.Req()->req;
+bool CrosFpDevice::PreloadTemplate(size_t idx, const VendorTemplate& tmpl) {
+  auto fp_preload_template_cmd = ec_command_factory_->FpPreloadTemplateCommand(
+      static_cast<uint16_t>(idx), tmpl, ec_protocol_info_.max_write);
 
-  size_t max_chunk = ec_protocol_info_.max_write -
-                     offsetof(struct ec_params_fp_template, data);
-
-  auto pos = tmpl.begin();
-  while (pos < tmpl.end()) {
-    size_t remaining = tmpl.end() - pos;
-    uint32_t tlen = std::min(max_chunk, remaining);
-    req->offset = pos - tmpl.begin();
-    req->size = tlen | (remaining == tlen ? FP_TEMPLATE_COMMIT : 0);
-    std::copy(pos, pos + tlen, req->data);
-    cmd.SetReqSize(tlen + sizeof(struct ec_params_fp_template));
-    if (!cmd.Run(cros_fd_.get())) {
-      LOG(ERROR) << "Failed to run FP_TEMPLATE command";
-      biod_metrics_->SendUploadTemplateResult(metrics::kCmdRunFailure);
-      return false;
-    }
-    if (cmd.Result() != EC_RES_SUCCESS) {
-      LOG(ERROR) << "FP_TEMPLATE command failed @ " << pos - tmpl.begin();
-      biod_metrics_->SendUploadTemplateResult(cmd.Result());
-      return false;
-    }
-    pos += tlen;
+  if (!fp_preload_template_cmd->Run(cros_fd_.get())) {
+    LOG(ERROR) << "Failed to run FP_PRELOAD_TEMPLATE command";
+    return false;
   }
-  biod_metrics_->SendUploadTemplateResult(EC_RES_SUCCESS);
+
+  if (fp_preload_template_cmd->Result() != EC_RES_SUCCESS) {
+    LOG(ERROR) << "FP_PRELOAD_TEMPLATE command failed";
+    return false;
+  }
+
   return true;
 }
 
-std::unique_ptr<struct ec_response_flash_protect>
-CrosFpDevice::GetFlashProtect() const {
-  auto fp_cmd = ec_command_factory_->FpFlashProtectCommand(0, 0);
+bool CrosFpDevice::ReloadTemplates(size_t num) {
+  for (size_t idx = 0; idx < num; idx++) {
+    auto fp_preload_template_cmd =
+        ec_command_factory_->FpPreloadTemplateCommand(
+            static_cast<uint16_t>(idx), brillo::Blob(),
+            ec_protocol_info_.max_write);
+    if (!fp_preload_template_cmd->Run(cros_fd_.get())) {
+      LOG(ERROR) << "Failed to run FP_PRELOAD_TEMPLATE command";
+      return false;
+    }
+    if (fp_preload_template_cmd->Result() != EC_RES_SUCCESS) {
+      LOG(ERROR) << "FP_PRELOAD_TEMPLATE command failed";
+      return false;
+    }
+    auto fp_template_cmd = ec_command_factory_->FpTemplateCommand(
+        brillo::Blob(), ec_protocol_info_.max_write);
+    if (!fp_template_cmd->Run(cros_fd_.get())) {
+      LOG(ERROR) << "Failed to run FP_TEMPLATE command";
+      return false;
+    }
+    if (fp_template_cmd->Result() != EC_RES_SUCCESS) {
+      LOG(ERROR) << "FP_TEMPLATE command failed";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CrosFpDevice::UploadTemplate(const VendorTemplate& tmpl) {
+  auto fp_template_cmd =
+      ec_command_factory_->FpTemplateCommand(tmpl, ec_protocol_info_.max_write);
+
+  if (!fp_template_cmd->Run(cros_fd_.get())) {
+    LOG(ERROR) << "Failed to run FP_TEMPLATE command";
+    biod_metrics_->SendUploadTemplateResult(metrics::kCmdRunFailure);
+    return false;
+  }
+
+  biod_metrics_->SendUploadTemplateResult(fp_template_cmd->Result());
+
+  if (fp_template_cmd->Result() != EC_RES_SUCCESS) {
+    LOG(ERROR) << "FP_TEMPLATE command failed";
+    return false;
+  }
+
+  return true;
+}
+
+std::unique_ptr<ec::FlashProtectCommand> CrosFpDevice::GetFlashProtect() {
+  auto fp_cmd = ec_command_factory_->FlashProtectCommand(
+      this, ec::flash_protect::Flags::kNone, ec::flash_protect::Flags::kNone);
 
   if (!fp_cmd) {
     LOG(ERROR) << "Unable to create FP flash protect command";
@@ -611,10 +680,7 @@ CrosFpDevice::GetFlashProtect() const {
     return nullptr;
   }
 
-  auto ret = std::make_unique<struct ec_response_flash_protect>();
-  memcpy(ret.get(), fp_cmd->Resp(), fp_cmd->RespSize());
-
-  return ret;
+  return fp_cmd;
 }
 
 bool CrosFpDevice::SetContext(std::string user_hex) {
@@ -666,6 +732,36 @@ bool CrosFpDevice::SetContext(std::string user_hex) {
   return success;
 }
 
+bool CrosFpDevice::SetNonceContext(const brillo::Blob& nonce,
+                                   const brillo::Blob& encrypted_user_id,
+                                   const brillo::Blob& iv) {
+  auto set_nonce_context_cmd = ec_command_factory_->FpSetNonceContextCommand(
+      nonce, encrypted_user_id, iv);
+  if (!set_nonce_context_cmd) {
+    LOG(ERROR) << "Invalid set nonce context params.";
+    return false;
+  }
+  if (!set_nonce_context_cmd->Run(cros_fd_.get())) {
+    LOG(ERROR) << "Failed to set nonce context, result: "
+               << set_nonce_context_cmd->Result();
+    return false;
+  }
+  return true;
+}
+
+std::optional<brillo::Blob> CrosFpDevice::GetNonce() {
+  auto get_nonce_cmd = ec_command_factory_->FpGetNonceCommand();
+  if (!get_nonce_cmd) {
+    LOG(ERROR) << "Invalid get nonce params.";
+    return std::nullopt;
+  }
+  if (!get_nonce_cmd->Run(cros_fd_.get())) {
+    LOG(ERROR) << "Failed to get nonce, result: " << get_nonce_cmd->Result();
+    return std::nullopt;
+  }
+  return get_nonce_cmd->Nonce();
+}
+
 bool CrosFpDevice::ResetContext() {
   FpMode cur_mode = GetFpMode();
   if (cur_mode == FpMode(FpMode::Mode::kModeInvalid)) {
@@ -677,7 +773,11 @@ bool CrosFpDevice::ResetContext() {
   // exists to make sure that we have disabled any matching in the firmware
   // when this is called. See https://crbug.com/980614 for details.
   if (cur_mode != FpMode(FpMode::Mode::kNone)) {
-    LOG(ERROR) << "Attempting to reset context with mode: " << cur_mode;
+    LOG(WARNING) << "Attempting to reset context with mode: " << cur_mode;
+    if (!SetFpMode(FpMode(FpMode::Mode::kNone))) {
+      LOG(ERROR) << "Failed to set FP Mode to none.";
+      // Let's continue, it might wtill work out.
+    }
   }
 
   CHECK(biod_metrics_);
@@ -688,7 +788,7 @@ bool CrosFpDevice::ResetContext() {
 
 bool CrosFpDevice::UpdateEntropy(bool reset) {
   // Stash the most recent block id.
-  base::Optional<int32_t> block_id = GetRollBackInfoId();
+  std::optional<int32_t> block_id = GetRollBackInfoId();
   if (!block_id) {
     LOG(ERROR) << "Failed to block ID from FPMCU before entropy reset.";
     return false;
@@ -712,7 +812,7 @@ bool CrosFpDevice::UpdateEntropy(bool reset) {
     return false;
   }
 
-  base::Optional<int32_t> new_block_id = GetRollBackInfoId();
+  std::optional<int32_t> new_block_id = GetRollBackInfoId();
   if (!new_block_id) {
     LOG(ERROR) << "Failed to block ID from FPMCU after entropy reset.";
     return false;
@@ -726,6 +826,55 @@ bool CrosFpDevice::UpdateEntropy(bool reset) {
   if (new_block_id != *block_id + block_id_diff) {
     LOG(ERROR) << "Entropy source has not been updated; old block_id: "
                << *block_id << ", new block_id: " << *new_block_id;
+    return false;
+  }
+  return true;
+}
+
+std::optional<ec::CrosFpDeviceInterface::PairingKeyKeygenReply>
+CrosFpDevice::PairingKeyKeygen() {
+  auto keygen_cmd = ec_command_factory_->FpPairingKeyKeygenCommand();
+  if (!keygen_cmd) {
+    LOG(ERROR) << "Invalid generate Pk params.";
+    return std::nullopt;
+  }
+  if (!keygen_cmd->Run(cros_fd_.get())) {
+    LOG(ERROR) << "Failed to generate Pk: " << keygen_cmd->Result();
+    return std::nullopt;
+  }
+  return ec::CrosFpDeviceInterface::PairingKeyKeygenReply{
+      .pub_x = keygen_cmd->PubX(),
+      .pub_y = keygen_cmd->PubY(),
+      .encrypted_private_key = keygen_cmd->EncryptedKey(),
+  };
+}
+
+std::optional<brillo::Blob> CrosFpDevice::PairingKeyWrap(
+    const brillo::Blob& pub_x,
+    const brillo::Blob& pub_y,
+    const brillo::Blob& encrypted_priv) {
+  auto wrap_cmd = ec_command_factory_->FpPairingKeyWrapCommand(pub_x, pub_y,
+                                                               encrypted_priv);
+  if (!wrap_cmd) {
+    LOG(ERROR) << "Invalid wrap Pk params.";
+    return std::nullopt;
+  }
+  if (!wrap_cmd->Run(cros_fd_.get())) {
+    LOG(ERROR) << "Failed to wrap Pk: " << wrap_cmd->Result();
+    return std::nullopt;
+  }
+  return wrap_cmd->EncryptedPairingKey();
+}
+
+bool CrosFpDevice::LoadPairingKey(const brillo::Blob& encrypted_pairing_key) {
+  auto load_cmd =
+      ec_command_factory_->FpPairingKeyLoadCommand(encrypted_pairing_key);
+  if (!load_cmd) {
+    LOG(ERROR) << "Invalid load Pk params.";
+    return false;
+  }
+  if (!load_cmd->Run(cros_fd_.get())) {
+    LOG(ERROR) << "Failed to load Pk: " << load_cmd->Result();
     return false;
   }
   return true;
@@ -756,6 +905,14 @@ int CrosFpDevice::DeadPixelCount() {
   CHECK(info_);
   CHECK(info_->template_info());
   return info_->NumDeadPixels();
+}
+
+FpSensorErrors CrosFpDevice::GetHwErrors() {
+  if (!info_) {
+    UpdateFpInfo();
+  }
+  CHECK(info_);
+  return info_->GetFpSensorErrors();
 }
 
 void CrosFpDevice::SetMkbpEventCallback(CrosFpDevice::MkbpCallback callback) {

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,20 +8,27 @@
 #ifndef CRASH_REPORTER_USER_COLLECTOR_BASE_H_
 #define CRASH_REPORTER_USER_COLLECTOR_BASE_H_
 
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/optional.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/time/time.h>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 
 class UserCollectorBase : public CrashCollector {
  public:
-  UserCollectorBase(
+  explicit UserCollectorBase(
       const std::string& collector_name,
-      CrashDirectorySelectionMethod crash_directory_selection_method);
+      CrashDirectorySelectionMethod crash_directory_selection_method,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
 
   void Initialize(bool directory_failure, bool early);
 
@@ -45,7 +52,7 @@ class UserCollectorBase : public CrashCollector {
   // For example, an input string 123456:11:1000:2000:foobar is pid
   // 123456, signal 11, uid 1000, gid 2000, and exec name "foobar".
   // See man 5 core for details on the format.
-  static base::Optional<CrashAttributes> ParseCrashAttributes(
+  static std::optional<CrashAttributes> ParseCrashAttributes(
       const std::string& crash_attributes);
 
  protected:
@@ -59,7 +66,7 @@ class UserCollectorBase : public CrashCollector {
     kIdMax
   };
 
-  bool ShouldDump(base::Optional<pid_t> pid, std::string* reason) const;
+  bool ShouldDump(std::optional<pid_t> pid, std::string* reason) const;
 
   bool ShouldDump(std::string* reason) const;
 
@@ -83,6 +90,10 @@ class UserCollectorBase : public CrashCollector {
   bool GetStateFromStatus(const std::vector<std::string>& status_lines,
                           std::string* state);
 
+  // Checks if Rust panic signature was left behind by the ChromeOS panic hook,
+  // and if so, returns true and sets |panic_sig|.
+  bool GetRustSignature(pid_t pid, std::string* panic_sig);
+
   bool ClobberContainerDirectory(const base::FilePath& container_dir);
 
   // Returns the command and arguments for process |pid|. Returns an empty list
@@ -98,9 +109,21 @@ class UserCollectorBase : public CrashCollector {
   static const char* kGroupId;
 
  private:
+  FRIEND_TEST(UserCollectorTest, HandleSyscall);
+
   // Send DBus message announcing the crash. Virtual so that we can mock out
   // during unit tests.
-  virtual void AccounceUserCrash();
+  virtual void AnnounceUserCrash();
+
+  // Called early in HandleCrash, specifically before ShouldDump. This can be
+  // overridden by child classes to set up state based on the executable name
+  // and directory that is needed in multiple places later in the crash handling
+  // process (such as in both ShouldDump and ConvertCoreToMinidump).
+  //
+  // Default is a no-op.
+  virtual void BeginHandlingCrash(pid_t pid,
+                                  const std::string& exec,
+                                  const base::FilePath& exec_directory);
 
   virtual bool ShouldDump(pid_t pid,
                           uid_t uid,
@@ -120,8 +143,13 @@ class UserCollectorBase : public CrashCollector {
                                    const std::string& exec,
                                    uid_t supplied_ruid,
                                    gid_t supplied_rgid,
+                                   int signal,
                                    const base::TimeDelta& crash_time,
                                    bool* out_of_capacity);
+
+  // Helper function for populating seccomp related fields from the contents of
+  // /proc/<pid>/syscall.
+  void HandleSyscall(const std::string& exec, const std::string& contents);
 
   // Determines the crash directory for given pid based on pid's owner,
   // and creates the directory if necessary with appropriate permissions.

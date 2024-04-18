@@ -1,16 +1,16 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "camera3_test/camera3_still_capture_fixture.h"
 
 #include <algorithm>
+#include <iterator>
 
 #include <camera/camera_metadata.h>
 
 #include <base/command_line.h>
 #include <base/files/file_util.h>
-#include <base/stl_util.h>
 #include <base/threading/platform_thread.h>
 #include <base/time/time.h>
 
@@ -19,11 +19,11 @@
 namespace camera3_test {
 
 void Camera3StillCaptureFixture::SetUp() {
-  ASSERT_EQ(
-      0, cam_service_.Initialize(
-             base::Bind(&Camera3StillCaptureFixture::ProcessStillCaptureResult,
-                        base::Unretained(this)),
-             Camera3Service::ProcessRecordingResultCallback()))
+  ASSERT_EQ(0, cam_service_.Initialize(
+                   base::BindRepeating(
+                       &Camera3StillCaptureFixture::ProcessStillCaptureResult,
+                       base::Unretained(this)),
+                   Camera3Service::ProcessRecordingResultCallback()))
       << "Failed to initialize camera service";
   for (const auto& it : cam_ids_) {
     jpeg_max_sizes_[it] = cam_service_.GetStaticInfo(it)->GetJpegMaxSize();
@@ -35,7 +35,6 @@ void Camera3StillCaptureFixture::ProcessStillCaptureResult(
     uint32_t frame_number,
     ScopedCameraMetadata metadata,
     cros::ScopedBufferHandle buffer) {
-  VLOGF_ENTER();
   StillCaptureResult* result = &still_capture_results_[cam_id];
   result->result_metadatas.emplace_back(std::move(metadata));
   result->buffer_handles.emplace_back(std::move(buffer));
@@ -148,7 +147,7 @@ TEST_P(Camera3SimpleStillCaptureTest, JpegExifTest) {
   struct timespec timeout;
   clock_gettime(CLOCK_REALTIME, &timeout);
   timeout.tv_sec += ARRAY_SIZE(exif_test_data);  // 1 second per capture
-  for (size_t i = 0; i < base::size(exif_test_data); i++) {
+  for (size_t i = 0; i < std::size(exif_test_data); i++) {
     ASSERT_EQ(0, WaitStillCaptureResult(cam_id_, timeout))
         << "Waiting for still capture result timeout";
   }
@@ -239,7 +238,7 @@ void Camera3SimpleStillCaptureTest::TakePictureTest(uint32_t num_still_pictures,
 
       // Take a brief pause to allow ZSL to accumulate raw buffers that can be
       // selected for private reprocessing.
-      base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(500));
+      base::PlatformThread::Sleep(base::Milliseconds(500));
     }
     zsl_metadata.unlock(raw_zsl_metadata);
   } else {

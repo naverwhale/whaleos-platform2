@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,17 +9,15 @@
 #include <string>
 #include <vector>
 
+#include <base/files/file_descriptor_watcher_posix.h>
 #include <base/memory/weak_ptr.h>
 
 #include "shill/callbacks.h"
 #include "shill/file_io.h"
 #include "shill/manager.h"
-#include "shill/net/io_handler.h"
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 
 namespace shill {
-
-class IOHandlerFactory;
 
 // The Throttler class implements bandwidth throttling for inbound/outbound
 // traffic, using Linux's 'traffic control'(tc) tool from the iproute2 code.
@@ -43,8 +41,8 @@ class Throttler {
 
   virtual ~Throttler();
 
-  virtual bool DisableThrottlingOnAllInterfaces(const ResultCallback& callback);
-  virtual bool ThrottleInterfaces(const ResultCallback& callback,
+  virtual bool DisableThrottlingOnAllInterfaces(ResultCallback callback);
+  virtual bool ThrottleInterfaces(ResultCallback callback,
                                   uint32_t upload_rate_kbits,
                                   uint32_t download_rate_kbits);
 
@@ -64,13 +62,16 @@ class Throttler {
   FRIEND_TEST(ThrottlerTest, ThrottleCallsTCExpectedTimesAndSetsState);
   FRIEND_TEST(ThrottlerTest, NewlyAddedInterfaceIsThrottled);
   FRIEND_TEST(ThrottlerTest, DisablingThrottleClearsState);
+  FRIEND_TEST(ThrottlerTest, DisablingThrottleWhenNoThrottleExists);
 
   // Required for spawning the 'tc' process
   // and communicating with it.
   FileIO* file_io_;
   int tc_stdin_;
 
-  std::unique_ptr<IOHandler> tc_stdin_handler_;
+  // Watcher to wait for |tc_stdin_| ready to write. It should be
+  // destructed prior than |tc_stdin_| is closed.
+  std::unique_ptr<base::FileDescriptorWatcher::Controller> tc_stdin_watcher_;
 
   // Statekeeping while spawning 'tc'
   pid_t tc_pid_;
@@ -89,19 +90,19 @@ class Throttler {
 
   virtual bool StartTCForCommands(const std::vector<std::string>& commands);
 
-  virtual bool Throttle(const ResultCallback& callback,
+  virtual bool Throttle(ResultCallback callback,
                         const std::string& interface_name,
                         uint32_t upload_rate_kbits,
                         uint32_t download_rate_kbits);
 
   // Used to write to 'tc''s stdin
-  virtual void WriteTCCommands(int fd);
+  virtual void WriteTCCommands();
 
   // Called when the tc command is processed.
   virtual void OnProcessExited(int exit_status);
 
   // Helpers
-  virtual void Done(const ResultCallback& callback,
+  virtual void Done(ResultCallback callback,
                     Error::Type error_type,
                     const std::string& message);
 
@@ -112,8 +113,6 @@ class Throttler {
 
   // To get a list of interfaces to throttle
   Manager* manager_;
-  // For I/O handling with the spawned process
-  IOHandlerFactory* io_handler_factory_;
   // For spawning 'tc'
   ProcessManager* process_manager_;
 

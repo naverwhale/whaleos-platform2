@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,11 +27,7 @@ class TokenManagerClientMock : public TokenManagerClient {
                     const std::string&,
                     int*));
   MOCK_METHOD2(UnloadToken,
-               void(const brillo::SecureBlob&, const base::FilePath&));
-  MOCK_METHOD3(ChangeTokenAuthData,
-               void(const base::FilePath&,
-                    const brillo::SecureBlob&,
-                    const brillo::SecureBlob&));
+               bool(const brillo::SecureBlob&, const base::FilePath&));
   MOCK_METHOD3(GetTokenPath,
                bool(const brillo::SecureBlob&, int, base::FilePath*));
   MOCK_METHOD2(GetTokenList,

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,21 +7,21 @@
 #include <errno.h>
 
 #include <algorithm>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_piece.h>
 #include <base/synchronization/waitable_event.h>
-#include <base/task_runner.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/task/task_runner.h>
 
 #include "arc/vm/mojo_proxy/fuse_mount.h"
 
@@ -41,6 +41,14 @@ void Lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
 
 void GetAttr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi) {
   GetFileSystem(req)->GetAttr(req, ino, fi);
+}
+
+void SetAttr(fuse_req_t req,
+             fuse_ino_t ino,
+             struct stat* attr,
+             int to_set,
+             struct fuse_file_info* fi) {
+  GetFileSystem(req)->SetAttr(req, ino, attr, to_set, fi);
 }
 
 void Open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi) {
@@ -105,7 +113,7 @@ ProxyFileSystem::~ProxyFileSystem() {
 
 bool ProxyFileSystem::Init() {
   DCHECK(!init_task_runner_) << "Init can only be called once.";
-  init_task_runner_ = base::ThreadTaskRunnerHandle::Get();
+  init_task_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
 
   const std::string path_str = mount_path_.value();
   const char* fuse_argv[] = {
@@ -115,6 +123,7 @@ bool ProxyFileSystem::Init() {
   constexpr struct fuse_lowlevel_ops operations = {
       .lookup = arc::Lookup,
       .getattr = arc::GetAttr,
+      .setattr = arc::SetAttr,
       .open = arc::Open,
       .read = arc::Read,
       .write = arc::Write,
@@ -122,7 +131,7 @@ bool ProxyFileSystem::Init() {
       .readdir = arc::ReadDir,
   };
   fuse_mount_ = std::make_unique<FuseMount>(mount_path_, kFileSystemName);
-  if (!fuse_mount_->Init(base::size(fuse_argv), const_cast<char**>(fuse_argv),
+  if (!fuse_mount_->Init(std::size(fuse_argv), const_cast<char**>(fuse_argv),
                          operations, this)) {
     return false;
   }
@@ -166,6 +175,7 @@ void ProxyFileSystem::GetAttr(fuse_req_t req,
   if (!state.has_value()) {
     LOG(ERROR) << "Inode not found: " << ino;
     fuse_reply_err(req, ENOENT);
+    return;
   }
 
   struct stat stat = {};
@@ -203,6 +213,51 @@ void ProxyFileSystem::GetAttrInternal(fuse_req_t req,
                                  }
                                },
                                req, stat));
+}
+
+void ProxyFileSystem::SetAttr(fuse_req_t req,
+                              fuse_ino_t ino,
+                              struct stat* attr,
+                              int to_set,
+                              struct fuse_file_info* fi) {
+  auto state = GetState(ino);
+  if (!state.has_value()) {
+    LOG(ERROR) << "Inode not found: " << ino;
+    fuse_reply_err(req, ENOENT);
+    return;
+  }
+  // FUSE_SET_ATTR_SIZE is the only supported flag.
+  if (to_set != FUSE_SET_ATTR_SIZE) {
+    LOG(ERROR) << "Unsupported to_set flags: " << to_set;
+    fuse_reply_err(req, EINVAL);
+    return;
+  }
+  struct stat new_attr = {};
+  new_attr.st_ino = ino;
+  new_attr.st_mode = S_IFREG;
+  new_attr.st_nlink = 1;
+  new_attr.st_size = attr->st_size;
+
+  delegate_task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&ProxyFileSystem::SetAttrInternal, base::Unretained(this),
+                     req, state->handle, new_attr));
+}
+
+void ProxyFileSystem::SetAttrInternal(fuse_req_t req,
+                                      int64_t handle,
+                                      struct stat attr) {
+  delegate_->Ftruncate(
+      handle, attr.st_size,
+      base::BindOnce(
+          [](fuse_req_t req, struct stat attr, int error_code) {
+            if (error_code == 0) {
+              fuse_reply_attr(req, &attr, 0);
+            } else {
+              fuse_reply_err(req, error_code);
+            }
+          },
+          req, attr));
 }
 
 void ProxyFileSystem::Open(fuse_req_t req,
@@ -361,12 +416,12 @@ base::ScopedFD ProxyFileSystem::RegisterHandle(int64_t handle, int32_t flags) {
            new_flags)));
 }
 
-base::Optional<ProxyFileSystem::State> ProxyFileSystem::GetState(
+std::optional<ProxyFileSystem::State> ProxyFileSystem::GetState(
     fuse_ino_t inode) {
   base::AutoLock lock_(inode_lock_);
   auto iter = inode_to_state_.find(inode);
   if (iter == inode_to_state_.end())
-    return base::nullopt;
+    return std::nullopt;
   return iter->second;
 }
 

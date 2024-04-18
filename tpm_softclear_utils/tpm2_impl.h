@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,11 @@
 
 #include "tpm_softclear_utils/tpm.h"
 
+#include <optional>
 #include <string>
 
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
-#include <base/macros.h>
-#include <base/optional.h>
 #include <trunks/trunks_factory.h>
 #include <trunks/trunks_factory_impl.h>
 
@@ -40,7 +39,7 @@ class Tpm2Impl : public Tpm {
   // an error, returns an empty Optional object.
   //
   // Note: Initialize() should be called before calling this function.
-  base::Optional<std::string> GetAuthForOwnerReset() override;
+  std::optional<std::string> GetAuthForOwnerReset() override;
 
   // Clears the TPM ownership, including resetting the owner hierarchy and
   // endorsement hierarchy, using the lockout password in

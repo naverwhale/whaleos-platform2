@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,7 @@ constexpr int kAttestationServiceTimeoutInMs = 5 * 60 * 1000;
 
 // Methods exported by attestation.
 constexpr char kCreateGoogleAttestedKey[] = "CreateGoogleAttestedKey";
+constexpr char kGetFeatures[] = "GetFeatures";
 constexpr char kGetKeyInfo[] = "GetKeyInfo";
 constexpr char kGetEndorsementInfo[] = "GetEndorsementInfo";
 constexpr char kGetAttestationKeyInfo[] = "GetAttestationKeyInfo";

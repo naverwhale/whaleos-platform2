@@ -1,10 +1,11 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/deps.gni")
 import("//common-mk/generate-dbus-adaptors.gni")
 import("//common-mk/generate-dbus-proxies.gni")
+import("//common-mk/mojom_bindings_generator.gni")
 import("//common-mk/pkg_config.gni")
 import("//common-mk/proto_library.gni")
 import("//common-mk/protoctxt.gni")
@@ -15,22 +16,39 @@ group("all") {
     ":mobile_operator_db",
     ":mobile_operator_db-db",
     ":mobile_operator_db-protos",
+    ":mojo_policy",
     ":openvpn-script",
     ":shill",
     ":shill-chromeos-dbus-adaptors",
   ]
   if (use.cellular) {
-    deps += [ ":set-apn-helper" ]
+    deps += [
+      ":cellular_mobile_operator_info_tester",
+      ":set-apn-helper",
+    ]
   }
-  if (use.cellular || use.vpn || use.pppoe) {
+
+  if (use.cellular || use.vpn) {
     deps += [ ":shill-pppd-plugin" ]
   }
   if (use.fuzzer) {
     deps += [
       ":cellular_pco_fuzzer",
+      ":dhcpv4_static_routes_fuzzer",
+      ":shill_http_url_fuzzer",
+      ":shill_profile_fuzzer",
+      ":shill_service_fuzzer",
+      ":shill_technology_fuzzer",
       ":verizon_subscription_state_fuzzer",
       ":wifi_ies_fuzzer",
+      ":wifi_service_fuzzer",
     ]
+    if (use.vpn) {
+      deps += [
+        ":openvpn_management_server_fuzzer",
+        ":vpn_ipsec_connection_fuzzer",
+      ]
+    }
   }
   if (use.test) {
     deps += [ ":shill_unittest" ]
@@ -56,24 +74,14 @@ pkg_config("target_defaults") {
     "RUNDIR=\"/run/shill\"",
     "SHIMDIR=\"${libdir}/shill/shims\"",
   ]
-  if (!use.cellular) {
-    defines += [ "DISABLE_CELLULAR" ]
-  } else {
-    # TODO(chromium:954634) Temporarily disable tests that depend on
-    # CellularCapabilityClassic until they are ported to use
-    # CellularCapability3gpp.
-    defines += [ "DISABLE_CELLULAR_CAPABILITY_CLASSIC_TESTS" ]
+
+  # TODO(b/262602479): Remove the 'floss' USE flag once all boards have migrated
+  # to Floss.
+  if (!use.floss) {
+    defines += [ "DISABLE_FLOSS" ]
   }
 
-  if (!use.dhcpv6) {
-    defines += [ "DISABLE_DHCPV6" ]
-  }
-
-  if (!use.pppoe) {
-    defines += [ "DISABLE_PPPOE" ]
-  }
-
-  if (use.test) {
+  if (use.test || use.fuzzer) {
     # For the "mockable" keyword.
     defines += [ "TEST_BUILD" ]
   }
@@ -86,14 +94,6 @@ pkg_config("target_defaults") {
     defines += [ "DISABLE_WAKE_ON_WIFI" ]
   }
 
-  if (!use.wifi) {
-    defines += [ "DISABLE_WIFI" ]
-  }
-
-  if (!use.wired_8021x) {
-    defines += [ "DISABLE_WIRED_8021X" ]
-  }
-
   if (!use.wpa3_sae) {
     defines += [ "DISABLE_WPA3_SAE" ]
   }
@@ -102,15 +102,19 @@ pkg_config("target_defaults") {
     "dbus-1",
     "libbrillo",
     "libchrome",
+    "libcros_config",
+    "libmojo",
+    "libnet-base",
     "libpatchpanel-client",
     "libshill-net",
-    "libtirpc",
+    "mojo_service_manager",
     "re2",
 
     # system_api depends on protobuf (or protobuf-lite). It must appear
     # before protobuf here or the linker flags won't be in the right
     # order.
     "system_api",
+    "uuid",
   ]
   if (use.fuzzer) {
     pkg_deps += [ "protobuf" ]
@@ -131,7 +135,7 @@ protoc_text_to_bin("mobile_operator_db-db") {
   protoc_text_dir = "mobile_operator_db"
   protoc_proto_dir = "mobile_operator_db"
   protoc_bin_dir = "${root_out_dir}"
-  sources = [ "${protoc_text_dir}/serviceproviders.prototxt" ]
+  sources = [ "${protoc_text_dir}/serviceproviders.textproto" ]
 }
 
 protoc_text_to_bin("mobile_operator_db-test-db") {
@@ -141,14 +145,12 @@ protoc_text_to_bin("mobile_operator_db-test-db") {
   protoc_proto_dir = "mobile_operator_db"
   protoc_bin_dir = "${root_out_dir}"
   sources = [
-    "${protoc_text_dir}/data_test.prototxt",
-    "${protoc_text_dir}/init_test_empty_db_init.prototxt",
-    "${protoc_text_dir}/init_test_multiple_db_init_1.prototxt",
-    "${protoc_text_dir}/init_test_multiple_db_init_2.prototxt",
-    "${protoc_text_dir}/init_test_override_db_init_1.prototxt",
-    "${protoc_text_dir}/init_test_override_db_init_2.prototxt",
-    "${protoc_text_dir}/init_test_successful_init.prototxt",
-    "${protoc_text_dir}/main_test.prototxt",
+    "${protoc_text_dir}/data_test.textproto",
+    "${protoc_text_dir}/init_test_empty_db_init.textproto",
+    "${protoc_text_dir}/init_test_multiple_db_init_1.textproto",
+    "${protoc_text_dir}/init_test_multiple_db_init_2.textproto",
+    "${protoc_text_dir}/init_test_successful_init.textproto",
+    "${protoc_text_dir}/main_test.textproto",
   ]
 }
 
@@ -175,15 +177,10 @@ generate_dbus_adaptors("shill-chromeos-dbus-adaptors") {
 
 pkg_config("libshill_config") {
   pkg_deps = [
+    "ModemManager",
     "libcares",
     "libshill-client",
   ]
-}
-
-if (use.cellular) {
-  pkg_config("libshill_cellular_config") {
-    pkg_deps = [ "ModemManager" ]
-  }
 }
 
 generate_dbus_proxies("generate_cellular_proxies") {
@@ -191,6 +188,7 @@ generate_dbus_proxies("generate_cellular_proxies") {
   proxy_output_file = "include/cellular/dbus-proxies.h"
   sources = [
     "${modemmanager_in_dir}/org.freedesktop.ModemManager1.Modem.Location.xml",
+    "${modemmanager_in_dir}/org.freedesktop.ModemManager1.Modem.Modem3gpp.ProfileManager.xml",
     "${modemmanager_in_dir}/org.freedesktop.ModemManager1.Modem.Modem3gpp.xml",
     "${modemmanager_in_dir}/org.freedesktop.ModemManager1.Modem.ModemCdma.xml",
     "${modemmanager_in_dir}/org.freedesktop.ModemManager1.Modem.Signal.xml",
@@ -220,53 +218,106 @@ generate_dbus_proxies("generate_supplicant_proxies") {
   proxy_output_file = "include/supplicant/dbus-proxies.h"
   sources = [
     "dbus_bindings/supplicant-bss.dbus-xml",
+    "dbus_bindings/supplicant-group.dbus-xml",
     "dbus_bindings/supplicant-interface.dbus-xml",
     "dbus_bindings/supplicant-network.dbus-xml",
+    "dbus_bindings/supplicant-p2pdevice.dbus-xml",
+    "dbus_bindings/supplicant-peer.dbus-xml",
     "dbus_bindings/supplicant-process.dbus-xml",
   ]
 }
 
+generate_dbus_proxies("generate_bluetooth_proxies") {
+  proxy_output_file = "include/bluetooth/dbus-proxies.h"
+  sources = [
+    "dbus_bindings/bluetooth.dbus-xml",
+    "dbus_bindings/bluetooth_bluez.dbus-xml",
+    "dbus_bindings/bluetooth_manager.dbus-xml",
+  ]
+}
+
+generate_mojom_bindings("mojo_bindings") {
+  sources = [ "mojom/passpoint.mojom" ]
+}
+
+install_config("mojo_policy") {
+  sources = [ "mojom/shill_mojo.json" ]
+  install_path = "/etc/mojo/service_manager/policy"
+}
+
 static_library("libshill") {
   sources = [
+    "capport_proxy.cc",
+    "cellular/apn_list.cc",
+    "cellular/carrier_entitlement.cc",
+    "cellular/cellular.cc",
+    "cellular/cellular_bearer.cc",
+    "cellular/cellular_capability_3gpp.cc",
+    "cellular/cellular_error.cc",
+    "cellular/cellular_helpers.cc",
+    "cellular/cellular_pco.cc",
+    "cellular/cellular_service.cc",
+    "cellular/cellular_service_provider.cc",
+    "cellular/mobile_operator_info.cc",
+    "cellular/mobile_operator_mapper.cc",
+    "cellular/mobile_operator_storage.cc",
+    "cellular/modem.cc",
+    "cellular/modem_info.cc",
+    "cellular/pending_activation_store.cc",
+    "cellular/power_opt.cc",
+    "cellular/subscription_state.cc",
+    "cellular/verizon_subscription_state.cc",
     "certificate_file.cc",
-    "connection.cc",
     "connection_diagnostics.cc",
-    "crypto.cc",
     "daemon_task.cc",
     "dbus/dbus_adaptor.cc",
     "dbus/dbus_control.cc",
-    "dbus/dbus_service_watcher.cc",
-    "dbus/dbus_service_watcher_factory.cc",
+    "dbus/dbus_objectmanager_proxy.cc",
+    "dbus/dbus_properties_proxy.cc",
     "dbus/device_dbus_adaptor.cc",
     "dbus/dhcpcd_listener.cc",
     "dbus/dhcpcd_proxy.cc",
     "dbus/ipconfig_dbus_adaptor.cc",
     "dbus/manager_dbus_adaptor.cc",
+    "dbus/mm1_modem_location_proxy.cc",
+    "dbus/mm1_modem_modem3gpp_profile_manager_proxy.cc",
+    "dbus/mm1_modem_modem3gpp_proxy.cc",
+    "dbus/mm1_modem_proxy.cc",
+    "dbus/mm1_modem_signal_proxy.cc",
+    "dbus/mm1_modem_simple_proxy.cc",
+    "dbus/mm1_sim_proxy.cc",
     "dbus/power_manager_proxy.cc",
     "dbus/profile_dbus_adaptor.cc",
     "dbus/rpc_task_dbus_adaptor.cc",
     "dbus/service_dbus_adaptor.cc",
+    "dbus/supplicant_bss_proxy.cc",
+    "dbus/supplicant_group_proxy.cc",
+    "dbus/supplicant_interface_proxy.cc",
+    "dbus/supplicant_network_proxy.cc",
+    "dbus/supplicant_p2pdevice_proxy.cc",
+    "dbus/supplicant_peer_proxy.cc",
+    "dbus/supplicant_process_proxy.cc",
     "dbus/third_party_vpn_dbus_adaptor.cc",
     "dbus/upstart_proxy.cc",
     "default_profile.cc",
     "device.cc",
-    "device_claimer.cc",
     "device_id.cc",
     "device_info.cc",
-    "dhcp/dhcp_config.cc",
-    "dhcp/dhcp_properties.cc",
-    "dhcp/dhcp_provider.cc",
-    "dhcp/dhcpv4_config.cc",
     "dns_client.cc",
     "dns_util.cc",
+    "eap_credentials.cc",
     "ephemeral_profile.cc",
     "error.cc",
+    "ethernet/eap_listener.cc",
     "ethernet/ethernet.cc",
+    "ethernet/ethernet_eap_provider.cc",
+    "ethernet/ethernet_eap_service.cc",
     "ethernet/ethernet_provider.cc",
     "ethernet/ethernet_service.cc",
     "ethernet/ethernet_temporary_service.cc",
     "ethernet/virtio_ethernet.cc",
     "event_dispatcher.cc",
+    "event_history.cc",
     "external_task.cc",
     "file_io.cc",
     "geolocation_info.cc",
@@ -275,24 +326,34 @@ static_library("libshill") {
     "http_url.cc",
     "icmp.cc",
     "icmp_session.cc",
-    "ip_address_store.cc",
     "ipconfig.cc",
-    "key_file_store.cc",
-    "key_value_store.cc",
     "logging.cc",
+    "mac_address.cc",
     "manager.cc",
     "metrics.cc",
-    "pkcs11_data_store.cc",
+    "mojom/mojo_passpoint_service.cc",
+    "mojom/mojo_service_provider.cc",
+    "network/address_service.cc",
+    "network/compound_network_config.cc",
+    "network/dhcp_controller.cc",
+    "network/dhcp_provider.cc",
+    "network/dhcpv4_config.cc",
+    "network/network.cc",
+    "network/network_applier.cc",
+    "network/network_config.cc",
+    "network/network_priority.cc",
+    "network/proc_fs_stub.cc",
+    "network/routing_policy_service.cc",
+    "network/routing_table.cc",
+    "network/routing_table_entry.cc",
+    "network/slaac_controller.cc",
     "portal_detector.cc",
     "power_manager.cc",
-    "process_manager.cc",
+    "ppp_daemon.cc",
     "profile.cc",
-    "property_store.cc",
+    "protobuf_lite_streams.cc",
     "resolver.cc",
     "result_aggregator.cc",
-    "routing_policy_entry.cc",
-    "routing_table.cc",
-    "routing_table_entry.cc",
     "rpc_task.cc",
     "scope_logger.cc",
     "service.cc",
@@ -301,14 +362,47 @@ static_library("libshill") {
     "shill_daemon.cc",
     "shill_test_config.cc",
     "static_ip_parameters.cc",
+    "store/crypto.cc",
+    "store/key_file_store.cc",
+    "store/key_value_store.cc",
+    "store/pkcs11_cert_store.cc",
+    "store/pkcs11_data_store.cc",
+    "store/pkcs11_slot_getter.cc",
+    "store/pkcs11_util.cc",
+    "store/property_store.cc",
+    "supplicant/supplicant_eap_state_handler.cc",
+    "supplicant/supplicant_manager.cc",
+    "supplicant/wpa_supplicant.cc",
     "technology.cc",
     "tethering.cc",
+    "tethering_manager.cc",
     "throttler.cc",
+    "time.cc",
     "upstart/upstart.cc",
     "virtual_device.cc",
     "vpn/vpn_driver.cc",
     "vpn/vpn_provider.cc",
     "vpn/vpn_service.cc",
+    "vpn/vpn_types.cc",
+    "wifi/hotspot_device.cc",
+    "wifi/hotspot_service.cc",
+    "wifi/local_device.cc",
+    "wifi/local_service.cc",
+    "wifi/p2p_device.cc",
+    "wifi/p2p_manager.cc",
+    "wifi/passpoint_credentials.cc",
+    "wifi/wake_on_wifi.cc",
+    "wifi/wifi.cc",
+    "wifi/wifi_cqm.cc",
+    "wifi/wifi_endpoint.cc",
+    "wifi/wifi_link_statistics.cc",
+    "wifi/wifi_metrics_utils.cc",
+    "wifi/wifi_phy.cc",
+    "wifi/wifi_provider.cc",
+    "wifi/wifi_rf.cc",
+    "wifi/wifi_security.cc",
+    "wifi/wifi_service.cc",
+    "wifi/wifi_state.cc",
   ]
   configs += [
     ":libshill_config",
@@ -321,6 +415,13 @@ static_library("libshill") {
     "rt",
   ]
 
+  # Workaround for b/266863330: disable PCH when the user generates
+  # compilation database for an editor.
+  if (!use.compdb_only && !use.compilation_database) {
+    precompiled_header = "pch.h"
+    precompiled_source = "pch.h"
+  }
+
   all_dependent_pkg_deps = [
     "libcares",
     "libmetrics",
@@ -328,64 +429,33 @@ static_library("libshill") {
     "libpower_manager-client",
   ]
   deps = [
+    ":generate_cellular_proxies",
     ":generate_dhcpcd_proxies",
+    ":generate_supplicant_proxies",
     ":generate_upstart_proxies",
     ":mobile_operator_db",
+    ":mojo_bindings",
     ":shill-chromeos-dbus-adaptors",
   ]
+  pkg_deps = [ "libstructuredmetrics" ]
 
-  if (use.cellular) {
+  if (use.floss) {
     sources += [
-      "cellular/cellular.cc",
-      "cellular/cellular_bearer.cc",
-      "cellular/cellular_capability.cc",
-      "cellular/cellular_capability_3gpp.cc",
-      "cellular/cellular_capability_cdma.cc",
-      "cellular/cellular_error.cc",
-      "cellular/cellular_pco.cc",
-      "cellular/cellular_service.cc",
-      "cellular/cellular_service_provider.cc",
-      "cellular/mobile_operator_info.cc",
-      "cellular/mobile_operator_info_impl.cc",
-      "cellular/modem.cc",
-      "cellular/modem_info.cc",
-      "cellular/pending_activation_store.cc",
-      "cellular/subscription_state.cc",
-      "cellular/verizon_subscription_state.cc",
-      "dbus/dbus_objectmanager_proxy.cc",
-      "dbus/dbus_properties_proxy.cc",
-      "dbus/mm1_modem_location_proxy.cc",
-      "dbus/mm1_modem_modem3gpp_proxy.cc",
-      "dbus/mm1_modem_modemcdma_proxy.cc",
-      "dbus/mm1_modem_proxy.cc",
-      "dbus/mm1_modem_signal_proxy.cc",
-      "dbus/mm1_modem_simple_proxy.cc",
-      "dbus/mm1_sim_proxy.cc",
-      "protobuf_lite_streams.cc",
+      "bluetooth/bluetooth_manager.cc",
+      "dbus/bluetooth_adapter_proxy.cc",
+      "dbus/bluetooth_bluez_proxy.cc",
+      "dbus/bluetooth_manager_proxy.cc",
     ]
-    configs += [ ":libshill_cellular_config" ]
-    deps += [ ":generate_cellular_proxies" ]
-  }
-
-  if (use.cellular || use.vpn || use.pppoe) {
-    sources += [
-      "ppp_daemon.cc",
-      "ppp_device.cc",
-      "ppp_device_factory.cc",
-    ]
-  }
-
-  if (use.pppoe) {
-    sources += [ "pppoe/pppoe_service.cc" ]
+    deps += [ ":generate_bluetooth_proxies" ]
   }
 
   if (use.vpn) {
     sources += [
       "vpn/arc_vpn_driver.cc",
+      "vpn/ikev2_driver.cc",
       "vpn/ipsec_connection.cc",
       "vpn/l2tp_connection.cc",
       "vpn/l2tp_ipsec_driver.cc",
-      "vpn/new_l2tp_ipsec_driver.cc",
       "vpn/openvpn_driver.cc",
       "vpn/openvpn_management_server.cc",
       "vpn/third_party_vpn_driver.cc",
@@ -393,43 +463,6 @@ static_library("libshill") {
       "vpn/vpn_util.cc",
       "vpn/wireguard_driver.cc",
     ]
-  }
-
-  if (use.wifi) {
-    sources += [
-      "wifi/wake_on_wifi.cc",
-      "wifi/wifi.cc",
-      "wifi/wifi_cqm.cc",
-      "wifi/wifi_endpoint.cc",
-      "wifi/wifi_provider.cc",
-      "wifi/wifi_service.cc",
-    ]
-  }
-
-  if (use.wifi || use.wired_8021x) {
-    sources += [
-      "dbus/supplicant_bss_proxy.cc",
-      "dbus/supplicant_interface_proxy.cc",
-      "dbus/supplicant_network_proxy.cc",
-      "dbus/supplicant_process_proxy.cc",
-      "eap_credentials.cc",
-      "eap_listener.cc",
-      "supplicant/supplicant_eap_state_handler.cc",
-      "supplicant/supplicant_manager.cc",
-      "supplicant/wpa_supplicant.cc",
-    ]
-    deps += [ ":generate_supplicant_proxies" ]
-  }
-
-  if (use.wired_8021x) {
-    sources += [
-      "ethernet/ethernet_eap_provider.cc",
-      "ethernet/ethernet_eap_service.cc",
-    ]
-  }
-
-  if (use.dhcpv6) {
-    sources += [ "dhcp/dhcpv6_config.cc" ]
   }
 }
 
@@ -476,7 +509,15 @@ if (use.cellular) {
   }
 }
 
-if (use.cellular || use.vpn || use.pppoe) {
+if (use.cellular) {
+  executable("cellular_mobile_operator_info_tester") {
+    sources = [ "cellular/cellular_mobile_operator_info_tester.cc" ]
+    configs += [ ":target_defaults" ]
+    deps = [ ":libshill" ]
+  }
+}
+
+if (use.cellular || use.vpn) {
   shared_library("shill-pppd-plugin") {
     sources = [
       "shims/c_ppp.cc",
@@ -493,15 +534,71 @@ if (use.cellular || use.vpn || use.pppoe) {
 }
 
 if (use.fuzzer) {
-  pkg_config("fuzzed_data_config") {
-    pkg_deps = [ "libchrome-test" ]
-  }
   executable("cellular_pco_fuzzer") {
     sources = [ "cellular/cellular_pco_fuzzer.cc" ]
     configs += [
       "//common-mk/common_fuzzer",
       ":fuzzed_data_config",
       ":target_defaults",
+    ]
+    deps = [ ":libshill" ]
+  }
+  executable("dhcpv4_static_routes_fuzzer") {
+    sources = [ "network/dhcpv4_static_routes_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":target_defaults",
+      ":shill_config",
+    ]
+    deps = [ ":libshill" ]
+  }
+  executable("openvpn_management_server_fuzzer") {
+    sources = [ "vpn/openvpn_management_server_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":target_defaults",
+      ":shill_config",
+    ]
+    deps = [ ":libshill" ]
+  }
+  executable("shill_http_url_fuzzer") {
+    sources = [ "http_url_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":fuzzed_data_config",
+      ":target_defaults",
+    ]
+    deps = [ ":libshill" ]
+  }
+  executable("shill_profile_fuzzer") {
+    sources = [ "profile_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":fuzzed_data_config",
+      ":target_defaults",
+      ":shill_config",
+    ]
+    deps = [ ":libshill" ]
+  }
+  executable("shill_service_fuzzer") {
+    sources = [
+      "service_fuzzer.cc",
+      "store/fake_store.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":fuzzed_data_config",
+      ":target_defaults",
+      ":shill_config",
+    ]
+    deps = [ ":libshill" ]
+  }
+  executable("shill_technology_fuzzer") {
+    sources = [ "technology_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":target_defaults",
+      ":shill_config",
     ]
     deps = [ ":libshill" ]
   }
@@ -513,8 +610,8 @@ if (use.fuzzer) {
     ]
     deps = [ ":libshill" ]
   }
-  executable("wifi_ies_fuzzer") {
-    sources = [ "wifi/wifi_ies_fuzzer.cc" ]
+  executable("vpn_ipsec_connection_fuzzer") {
+    sources = [ "vpn/ipsec_connection_fuzzer.cc" ]
     configs += [
       "//common-mk/common_fuzzer",
       ":target_defaults",
@@ -522,76 +619,151 @@ if (use.fuzzer) {
     ]
     deps = [ ":libshill" ]
   }
+  executable("wifi_ies_fuzzer") {
+    sources = [
+      "bluetooth/mock_bluetooth_manager_proxy.cc",
+      "ethernet/mock_ethernet_provider.cc",
+      "mock_adaptors.cc",
+      "mock_control.cc",
+      "mock_device_info.cc",
+      "mock_event_dispatcher.cc",
+      "mock_manager.cc",
+      "mock_metrics.cc",
+      "supplicant/mock_supplicant_process_proxy.cc",
+      "wifi/mock_wifi.cc",
+      "wifi/wifi_ies_fuzzer.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      "//common-mk:test",
+      ":target_defaults",
+      ":shill_config",
+    ]
+    deps = [ ":libshill" ]
+  }
+  executable("wifi_service_fuzzer") {
+    sources = [
+      "bluetooth/mock_bluetooth_manager_proxy.cc",
+      "ethernet/mock_ethernet_provider.cc",
+      "mock_adaptors.cc",
+      "mock_control.cc",
+      "mock_device_info.cc",
+      "mock_event_dispatcher.cc",
+      "mock_manager.cc",
+      "mock_metrics.cc",
+      "supplicant/mock_supplicant_process_proxy.cc",
+      "wifi/mock_wifi_provider.cc",
+      "wifi/wifi_service_fuzzer.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      "//common-mk:test",
+      ":shill_config",
+      ":target_defaults",
+    ]
+    deps = [ ":libshill" ]
+  }
+  pkg_config("fuzzed_data_config") {
+    pkg_deps = [ "libchrome-test" ]
+  }
 }
 
 if (use.test) {
   pkg_config("shill_unittest_config") {
     pkg_deps = [
+      "libbrillo-test",
       "libchrome-test",
       "libminijail",
     ]
-    if (use.cellular) {
-      pkg_deps += [ "ModemManager" ]
-    }
   }
 
   executable("shill_unittest") {
+    run_test = true
     sources = [
-      "arp_client_test_helper.cc",
+      "bluetooth/mock_bluetooth_manager_proxy.cc",
+      "capport_proxy_test.cc",
+      "cellular/apn_list_test.cc",
+      "cellular/carrier_entitlement_test.cc",
+      "cellular/cellular_bearer_test.cc",
+      "cellular/cellular_capability_3gpp_test.cc",
+      "cellular/cellular_error_test.cc",
+      "cellular/cellular_helpers_test.cc",
+      "cellular/cellular_pco_test.cc",
+      "cellular/cellular_service_provider_test.cc",
+      "cellular/cellular_service_test.cc",
+      "cellular/cellular_test.cc",
+      "cellular/mobile_operator_info_carriers_test.cc",
+      "cellular/mobile_operator_info_test.cc",
+      "cellular/mobile_operator_mapper_test.cc",
+      "cellular/mock_cellular.cc",
+      "cellular/mock_cellular_service.cc",
+      "cellular/mock_dbus_objectmanager_proxy.cc",
+      "cellular/mock_mm1_modem_location_proxy.cc",
+      "cellular/mock_mm1_modem_modem3gpp_profile_manager_proxy.cc",
+      "cellular/mock_mm1_modem_modem3gpp_proxy.cc",
+      "cellular/mock_mm1_modem_proxy.cc",
+      "cellular/mock_mm1_modem_signal_proxy.cc",
+      "cellular/mock_mm1_modem_simple_proxy.cc",
+      "cellular/mock_mm1_sim_proxy.cc",
+      "cellular/mock_mobile_operator_info.cc",
+      "cellular/mock_mobile_operator_mapper.cc",
+      "cellular/mock_modem_info.cc",
+      "cellular/mock_pending_activation_store.cc",
+      "cellular/modem_info_test.cc",
+      "cellular/modem_test.cc",
+      "cellular/pending_activation_store_test.cc",
+      "cellular/power_opt_test.cc",
+      "cellular/verizon_subscription_state_test.cc",
       "certificate_file_test.cc",
       "connection_diagnostics_test.cc",
-      "connection_test.cc",
-      "crypto_test.cc",
       "daemon_task_test.cc",
       "dbus/dbus_adaptor_test.cc",
-      "dbus/manager_dbus_adaptor_test.cc",
+      "dbus/dbus_properties_proxy_test.cc",
+      "dbus/fake_properties_proxy.cc",
       "default_profile_test.cc",
-      "device_claimer_test.cc",
       "device_id_test.cc",
       "device_info_test.cc",
+      "device_portal_detector_test.cc",
       "device_test.cc",
-      "dhcp/dhcp_config_test.cc",
-      "dhcp/dhcp_properties_test.cc",
-      "dhcp/dhcp_provider_test.cc",
-      "dhcp/dhcpv4_config_test.cc",
-      "dhcp/mock_dhcp_config.cc",
-      "dhcp/mock_dhcp_properties.cc",
-      "dhcp/mock_dhcp_provider.cc",
-      "dhcp/mock_dhcp_proxy.cc",
       "dns_client_test.cc",
       "dns_util_test.cc",
+      "eap_credentials_test.cc",
       "error_test.cc",
+      "ethernet/eap_listener_test.cc",
+      "ethernet/ethernet_eap_provider_test.cc",
+      "ethernet/ethernet_eap_service_test.cc",
       "ethernet/ethernet_provider.cc",
       "ethernet/ethernet_provider_test.cc",
       "ethernet/ethernet_service_test.cc",
       "ethernet/ethernet_test.cc",
+      "ethernet/mock_eap_listener.cc",
       "ethernet/mock_ethernet.cc",
+      "ethernet/mock_ethernet_eap_provider.cc",
       "ethernet/mock_ethernet_provider.cc",
       "ethernet/mock_ethernet_service.cc",
+      "event_history_test.cc",
       "external_task_test.cc",
-      "fake_store.cc",
       "hook_table_test.cc",
       "http_request_test.cc",
       "http_url_test.cc",
       "icmp_session_test.cc",
       "icmp_test.cc",
-      "ip_address_store_test.cc",
       "ipconfig_test.cc",
-      "key_file_store_test.cc",
-      "key_value_store_test.cc",
+      "mac_address_test.cc",
       "manager_test.cc",
       "metrics_test.cc",
+      "mobile_operator_db/service_providers_test.cc",
       "mock_adaptors.cc",
       "mock_ares.cc",
-      "mock_arp_client.cc",
       "mock_certificate_file.cc",
-      "mock_connection.cc",
       "mock_control.cc",
       "mock_device.cc",
       "mock_device_info.cc",
       "mock_dns_client.cc",
+      "mock_eap_credentials.cc",
       "mock_event_dispatcher.cc",
       "mock_external_task.cc",
+      "mock_file_io.cc",
       "mock_icmp.cc",
       "mock_icmp_session.cc",
       "mock_ipconfig.cc",
@@ -599,41 +771,100 @@ if (use.test) {
       "mock_log_test.cc",
       "mock_manager.cc",
       "mock_metrics.cc",
-      "mock_portal_detector.cc",
       "mock_power_manager.cc",
       "mock_power_manager_proxy.cc",
-      "mock_process_manager.cc",
       "mock_profile.cc",
       "mock_resolver.cc",
-      "mock_routing_table.cc",
       "mock_service.cc",
       "mock_throttler.cc",
+      "mock_time.cc",
       "mock_virtual_device.cc",
-      "pkcs11_data_store_test.cc",
+      "network/compound_network_config_test.cc",
+      "network/dhcp_controller_test.cc",
+      "network/dhcp_provider_test.cc",
+      "network/dhcpv4_config_test.cc",
+      "network/mock_dhcp_controller.cc",
+      "network/mock_dhcp_provider.cc",
+      "network/mock_dhcp_proxy.cc",
+      "network/mock_network.cc",
+      "network/mock_network_applier.cc",
+      "network/mock_proc_fs_stub.cc",
+      "network/mock_routing_policy_service.cc",
+      "network/mock_routing_table.cc",
+      "network/mock_slaac_controller.cc",
+      "network/network_applier_test.cc",
+      "network/network_test.cc",
+      "network/routing_policy_service_test.cc",
+      "network/routing_table_test.cc",
+      "network/slaac_controller_test.cc",
       "portal_detector_test.cc",
       "power_manager_test.cc",
-      "process_manager_test.cc",
+      "ppp_daemon_test.cc",
       "profile_test.cc",
-      "property_accessor_test.cc",
-      "property_store_test.cc",
       "resolver_test.cc",
       "result_aggregator_test.cc",
-      "routing_table_test.cc",
       "rpc_task_test.cc",
       "scope_logger_test.cc",
       "service_property_change_test.cc",
       "service_test.cc",
       "service_under_test.cc",
       "static_ip_parameters_test.cc",
+      "store/crypto_test.cc",
+      "store/fake_store.cc",
+      "store/key_file_store_test.cc",
+      "store/key_value_store_test.cc",
+      "store/mock_pkcs11_slot_getter.cc",
+      "store/pkcs11_data_store_test.cc",
+      "store/pkcs11_slot_getter_test.cc",
+      "store/property_accessor_test.cc",
+      "store/property_store_test.cc",
+      "supplicant/mock_supplicant_bss_proxy.cc",
+      "supplicant/mock_supplicant_eap_state_handler.cc",
+      "supplicant/mock_supplicant_interface_proxy.cc",
+      "supplicant/mock_supplicant_network_proxy.cc",
+      "supplicant/mock_supplicant_process_proxy.cc",
+      "supplicant/supplicant_eap_state_handler_test.cc",
+      "supplicant/supplicant_manager_test.cc",
+      "supplicant/wpa_supplicant_test.cc",
       "technology_test.cc",
+      "testing.cc",
       "testrunner.cc",
+      "tethering_manager_test.cc",
       "throttler_test.cc",
-      "timeout_set_test.cc",
+      "time_test.cc",
       "upstart/mock_upstart.cc",
       "upstart/mock_upstart_proxy.cc",
       "upstart/upstart_test.cc",
       "virtual_device_test.cc",
       "vpn/mock_vpn_provider.cc",
+      "wifi/hotspot_device_test.cc",
+      "wifi/hotspot_service_test.cc",
+      "wifi/local_device_test.cc",
+      "wifi/local_service_test.cc",
+      "wifi/mock_hotspot_device.cc",
+      "wifi/mock_local_device.cc",
+      "wifi/mock_passpoint_credentials.cc",
+      "wifi/mock_wake_on_wifi.cc",
+      "wifi/mock_wifi.cc",
+      "wifi/mock_wifi_link_statistics.cc",
+      "wifi/mock_wifi_phy.cc",
+      "wifi/mock_wifi_provider.cc",
+      "wifi/mock_wifi_service.cc",
+      "wifi/p2p_device_test.cc",
+      "wifi/p2p_manager_test.cc",
+      "wifi/passpoint_credentials_test.cc",
+      "wifi/wake_on_wifi_test.cc",
+      "wifi/wifi_cqm_test.cc",
+      "wifi/wifi_endpoint_test.cc",
+      "wifi/wifi_link_statistics_test.cc",
+      "wifi/wifi_metrics_utils_test.cc",
+      "wifi/wifi_phy_test.cc",
+      "wifi/wifi_provider_test.cc",
+      "wifi/wifi_rf_test.cc",
+      "wifi/wifi_security_test.cc",
+      "wifi/wifi_service_test.cc",
+      "wifi/wifi_state_test.cc",
+      "wifi/wifi_test.cc",
     ]
     configs += [
       "//common-mk:test",
@@ -641,62 +872,21 @@ if (use.test) {
       ":shill_unittest_config",
       ":target_defaults",
     ]
-    deps = [ ":libshill" ]
 
-    if (use.cellular) {
-      sources += [
-        "cellular/cellular_bearer_test.cc",
-        "cellular/cellular_capability_3gpp_test.cc",
-        "cellular/cellular_capability_cdma_test.cc",
-        "cellular/cellular_error_test.cc",
-        "cellular/cellular_pco_test.cc",
-        "cellular/cellular_service_provider_test.cc",
-        "cellular/cellular_service_test.cc",
-        "cellular/cellular_test.cc",
-        "cellular/mobile_operator_info_test.cc",
-        "cellular/mock_cellular.cc",
-        "cellular/mock_cellular_service.cc",
-        "cellular/mock_dbus_objectmanager_proxy.cc",
-        "cellular/mock_mm1_modem_location_proxy.cc",
-        "cellular/mock_mm1_modem_modem3gpp_proxy.cc",
-        "cellular/mock_mm1_modem_modemcdma_proxy.cc",
-        "cellular/mock_mm1_modem_proxy.cc",
-        "cellular/mock_mm1_modem_signal_proxy.cc",
-        "cellular/mock_mm1_modem_simple_proxy.cc",
-        "cellular/mock_mm1_sim_proxy.cc",
-        "cellular/mock_mobile_operator_info.cc",
-        "cellular/mock_modem_info.cc",
-        "cellular/mock_pending_activation_store.cc",
-        "cellular/modem_info_test.cc",
-        "cellular/modem_test.cc",
-        "cellular/pending_activation_store_test.cc",
-        "cellular/verizon_subscription_state_test.cc",
-        "dbus/dbus_properties_proxy_test.cc",
-        "dbus/fake_properties_proxy.cc",
-        "mobile_operator_db/service_providers_test.cc",
-      ]
-      deps += [
-        ":mobile_operator_db-db",
-        ":mobile_operator_db-test-db",
-      ]
+    # Workaround for b/266863330: disable PCH when the user generates
+    # compilation database for an editor.
+    if (!use.compdb_only && !use.compilation_database) {
+      precompiled_header = "pch_test.h"
+      precompiled_source = "pch_test.h"
     }
-
-    if (use.cellular || use.vpn || use.pppoe) {
-      sources += [
-        "mock_ppp_device.cc",
-        "mock_ppp_device_factory.cc",
-        "ppp_daemon_test.cc",
-        "ppp_device_test.cc",
-      ]
-    }
-
-    if (use.dhcpv6) {
-      sources += [ "dhcp/dhcpv6_config_test.cc" ]
-    }
-
-    if (use.pppoe) {
-      sources += [ "pppoe/pppoe_service_test.cc" ]
-    }
+    deps = [
+      ":libshill",
+      ":mobile_operator_db-db",
+      ":mobile_operator_db-test-db",
+      "//metrics:metrics_test_support",
+      "//net-base:net_base_test_support",
+      "//shill/net:net_test_support",
+    ]
 
     if (use.vpn) {
       sources += [
@@ -704,13 +894,14 @@ if (use.test) {
         "shims/environment_test.cc",
         "vpn/arc_vpn_driver_test.cc",
         "vpn/fake_vpn_util.cc",
+        "vpn/ikev2_driver_test.cc",
         "vpn/ipsec_connection_test.cc",
         "vpn/l2tp_connection_test.cc",
         "vpn/l2tp_ipsec_driver_test.cc",
+        "vpn/mock_openvpn_driver.cc",
         "vpn/mock_openvpn_management_server.cc",
         "vpn/mock_vpn_driver.cc",
         "vpn/mock_vpn_service.cc",
-        "vpn/new_l2tp_ipsec_driver_test.cc",
         "vpn/openvpn_driver_test.cc",
         "vpn/openvpn_management_server_test.cc",
         "vpn/third_party_vpn_driver_test.cc",
@@ -720,46 +911,6 @@ if (use.test) {
         "vpn/vpn_provider_test.cc",
         "vpn/vpn_service_test.cc",
         "vpn/wireguard_driver_test.cc",
-      ]
-    }
-
-    if (use.wifi) {
-      sources += [
-        "supplicant/mock_supplicant_bss_proxy.cc",
-        "wifi/mock_wake_on_wifi.cc",
-        "wifi/mock_wifi.cc",
-        "wifi/mock_wifi_provider.cc",
-        "wifi/mock_wifi_service.cc",
-        "wifi/wake_on_wifi_test.cc",
-        "wifi/wifi_cqm_test.cc",
-        "wifi/wifi_endpoint_test.cc",
-        "wifi/wifi_provider_test.cc",
-        "wifi/wifi_service_test.cc",
-        "wifi/wifi_test.cc",
-      ]
-    }
-
-    if (use.wifi || use.wired_8021x) {
-      sources += [
-        "eap_credentials_test.cc",
-        "eap_listener_test.cc",
-        "mock_eap_credentials.cc",
-        "mock_eap_listener.cc",
-        "supplicant/mock_supplicant_eap_state_handler.cc",
-        "supplicant/mock_supplicant_interface_proxy.cc",
-        "supplicant/mock_supplicant_network_proxy.cc",
-        "supplicant/mock_supplicant_process_proxy.cc",
-        "supplicant/supplicant_eap_state_handler_test.cc",
-        "supplicant/supplicant_manager_test.cc",
-        "supplicant/wpa_supplicant_test.cc",
-      ]
-    }
-
-    if (use.wired_8021x) {
-      sources += [
-        "ethernet/ethernet_eap_provider_test.cc",
-        "ethernet/ethernet_eap_service_test.cc",
-        "ethernet/mock_ethernet_eap_provider.cc",
       ]
     }
   }

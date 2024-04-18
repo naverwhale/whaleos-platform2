@@ -1,11 +1,10 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chaps/object_policy_data.h"
 
-#include <base/macros.h>
-#include <base/stl_util.h>
+#include <iterator>
 
 namespace chaps {
 
@@ -23,7 +22,7 @@ static const AttributePolicy kDataPolicies[] = {
 };
 
 ObjectPolicyData::ObjectPolicyData() {
-  AddPolicies(kDataPolicies, base::size(kDataPolicies));
+  AddPolicies(kDataPolicies, std::size(kDataPolicies));
 }
 
 ObjectPolicyData::~ObjectPolicyData() {}

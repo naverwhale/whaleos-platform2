@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -15,6 +15,12 @@
 #include <cutils/native_handle.h>
 
 namespace cros {
+
+struct DmaBufPlane {
+  const int fd;
+  const int stride;
+  const int offset;
+};
 
 // A RAII helper class that encapsulates an EGLImageKHR object.  We mainly use
 // the EGLImageKHR to import DMA-buf and bind the image as textures to avoid
@@ -34,6 +40,12 @@ class EglImage {
                                   int width,
                                   int height,
                                   uint32_t drm_format);
+
+  // Creates an EglImage from the given DMA-buf FDs of |planes|.
+  static EglImage FromDmaBufFds(const std::vector<DmaBufPlane>& planes,
+                                int width,
+                                int height,
+                                uint32_t drm_format);
 
   // Default constructor creates an invalid EglImage.
   EglImage() = default;

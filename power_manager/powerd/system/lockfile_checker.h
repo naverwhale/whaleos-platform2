@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,8 @@
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // LockfileCheckerInterface checks lockfiles that are created to prevent powerd
 // from taking various actions. Each file is expected to contain an
@@ -52,7 +50,6 @@ class LockfileChecker : public LockfileCheckerInterface {
   const std::vector<base::FilePath> files_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_LOCKFILE_CHECKER_H_

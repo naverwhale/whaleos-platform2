@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,11 +13,13 @@
 #include <base/logging.h>
 #include <base/memory/free_deleter.h>
 #include <base/notreached.h>
-#include <base/stl_util.h>
 #include <brillo/secure_blob.h>
 #include <crypto/libcrypto-compat.h>
 #include <crypto/scoped_openssl_types.h>
 #include <crypto/sha2.h>
+#include <libhwsec/structures/key.h>
+#include <libhwsec-foundation/crypto/openssl.h>
+#include <libhwsec-foundation/crypto/rsa.h>
 #include <openssl/rsa.h>
 #include <openssl/sha.h>
 #include <trousers/scoped_tss_type.h>
@@ -26,35 +28,38 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #define TPM_LOG(severity, result)                               \
   LOG(severity) << "TPM error 0x" << std::hex << result << " (" \
                 << Trspi_Error_String(result) << "): "
 
+using hwsec::KeyRestriction;
+using hwsec_foundation::CreateRSAFromNumber;
+using hwsec_foundation::kWellKnownExponent;
 using trousers::ScopedTssContext;
 using trousers::ScopedTssKey;
 using trousers::ScopedTssMemory;
 using trousers::ScopedTssPcrs;
 using trousers::ScopedTssPolicy;
+
 namespace {
 
 using ScopedByteArray = std::unique_ptr<BYTE, base::FreeDeleter>;
 using ScopedTssEncryptedData = trousers::ScopedTssObject<TSS_HENCDATA>;
 using ScopedTssHash = trousers::ScopedTssObject<TSS_HHASH>;
 
-constexpr unsigned int kDigestSize = sizeof(TPM_DIGEST);
 constexpr unsigned int kDefaultTpmRsaKeyBits = 2048;
 constexpr unsigned int kDefaultTpmRsaKeyFlag = TSS_KEY_SIZE_2048;
-constexpr unsigned int kWellKnownExponent = 65537;
 constexpr unsigned char kSha256DigestInfo[] = {
     0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
     0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
-constexpr size_t kSelectBitmapSize = 2;
 
 BYTE* StringAsTSSBuffer(std::string* s) {
-  return reinterpret_cast<BYTE*>(base::data(*s));
+  return reinterpret_cast<BYTE*>(std::data(*s));
 }
 
 BYTE* StringAsTSSBuffer(const std::string* s) {
@@ -63,32 +68,6 @@ BYTE* StringAsTSSBuffer(const std::string* s) {
 
 std::string TSSBufferAsString(const BYTE* buffer, size_t length) {
   return std::string(reinterpret_cast<const char*>(buffer), length);
-}
-
-// Builds the seciralized TPM_PCR_COMPOSITE stream, where |pcr_index| is the PCR
-// index, and |quoted_pcr_value| is the value of the register.
-std::string buildPcrComposite(uint32_t pcr_index,
-                              const std::string& quoted_pcr_value) {
-  CHECK_LT(pcr_index, kSelectBitmapSize * 8);
-  struct __attribute__((packed)) {
-    // Corresponding to TPM_PCR_SELECTION.sizeOfSelect.
-    uint16_t select_size;
-    // Corresponding to TPM_PCR_SELECTION.pcrSelect.
-    uint8_t select_bitmap[kSelectBitmapSize];
-    // Corresponding to  TPM_PCR_COMPOSITE.valueSize.
-    uint32_t value_size;
-  } composite_header = {0};
-  static_assert(sizeof(composite_header) ==
-                    sizeof(uint16_t) + kSelectBitmapSize + sizeof(uint32_t),
-                "Expect no padding between composite struct.");
-  // Sets to 2 bytes.
-  composite_header.select_size = (htons(2u));
-  composite_header.select_bitmap[pcr_index / 8] = 1 << (pcr_index % 8);
-  composite_header.value_size = htonl(quoted_pcr_value.length());
-  const char* composite_header_buffer =
-      reinterpret_cast<const char*>(&composite_header);
-  return std::string(composite_header_buffer, sizeof(composite_header)) +
-         quoted_pcr_value;
 }
 
 // Checks if `delegate_blob`'s flag `TPM_DELEGATE_OwnerReadInternalPub` is set.
@@ -154,6 +133,10 @@ bool TpmUtilityV1::Initialize() {
                  << "not be available until ownership is taken.";
   }
   return true;
+}
+
+std::vector<KeyType> TpmUtilityV1::GetSupportedKeyTypes() {
+  return {KEY_TYPE_RSA};
 }
 
 bool TpmUtilityV1::ActivateIdentity(const std::string& identity_key_blob,
@@ -224,15 +207,18 @@ bool TpmUtilityV1::ActivateIdentityForTpm2(
   return false;
 }
 
-bool TpmUtilityV1::CreateCertifiedKey(KeyType key_type,
-                                      KeyUsage key_usage,
-                                      const std::string& identity_key_blob,
-                                      const std::string& external_data,
-                                      std::string* key_blob,
-                                      std::string* public_key,
-                                      std::string* public_key_tpm_format,
-                                      std::string* key_info,
-                                      std::string* proof) {
+bool TpmUtilityV1::CreateCertifiedKey(
+    KeyType key_type,
+    KeyUsage key_usage,
+    KeyRestriction key_restriction,
+    std::optional<CertificateProfile> profile_hint,
+    const std::string& identity_key_blob,
+    const std::string& external_data,
+    std::string* key_blob,
+    std::string* public_key,
+    std::string* public_key_tpm_format,
+    std::string* key_info,
+    std::string* proof) {
   CHECK(key_blob && public_key && public_key_tpm_format && key_info && proof);
   if (!InitializeContextHandle(__func__)) {
     return false;
@@ -243,6 +229,15 @@ bool TpmUtilityV1::CreateCertifiedKey(KeyType key_type,
   }
   if (key_type != KEY_TYPE_RSA) {
     LOG(ERROR) << "Only RSA supported on TPM v1.2.";
+    return false;
+  }
+  if (key_restriction == KeyRestriction::kRestricted) {
+    LOG(ERROR) << "restricted key is not support for TPM1.2.";
+    return false;
+  }
+  if (key_usage == KEY_USAGE_DECRYPT) {
+    LOG(ERROR) << __func__
+               << ": The creation of decrypt key is deprecated in TPM1.2";
     return false;
   }
 
@@ -329,108 +324,6 @@ bool TpmUtilityV1::CreateCertifiedKey(KeyType key_type,
   // Get the certification proof.
   proof->assign(TSSBufferAsString(validation.rgbValidationData,
                                   validation.ulValidationDataLength));
-  return true;
-}
-
-bool TpmUtilityV1::SealToPCR0(const std::string& data,
-                              std::string* sealed_data) {
-  CHECK(sealed_data);
-  if (!InitializeContextHandle(__func__)) {
-    return false;
-  }
-  if (!SetupSrk()) {
-    LOG(ERROR) << "SRK is not ready.";
-    return false;
-  }
-  // Create a PCRS object which holds the value of PCR0.
-  ScopedTssPcrs pcrs_handle(context_handle_);
-  TSS_RESULT result;
-  if (TPM_ERROR(result = Tspi_Context_CreateObject(
-                    context_handle_, TSS_OBJECT_TYPE_PCRS, TSS_PCRS_STRUCT_INFO,
-                    pcrs_handle.ptr()))) {
-    TPM_LOG(ERROR, result) << __func__
-                           << ": Error calling Tspi_Context_CreateObject";
-    return false;
-  }
-  UINT32 pcr_length = 0;
-  ScopedTssMemory pcr_value(context_handle_);
-  Tspi_TPM_PcrRead(tpm_handle_, 0, &pcr_length, pcr_value.ptr());
-  Tspi_PcrComposite_SetPcrValue(pcrs_handle, 0, pcr_length, pcr_value.value());
-
-  // Create a ENCDATA object to receive the sealed data.
-  ScopedTssKey encrypted_data_handle(context_handle_);
-  if (TPM_ERROR(result = Tspi_Context_CreateObject(
-                    context_handle_, TSS_OBJECT_TYPE_ENCDATA, TSS_ENCDATA_SEAL,
-                    encrypted_data_handle.ptr()))) {
-    TPM_LOG(ERROR, result) << __func__
-                           << ": Error calling Tspi_Context_CreateObject";
-    return false;
-  }
-
-  // Seal the given value with the SRK.
-  std::string mutable_data(data);
-  BYTE* data_buffer = StringAsTSSBuffer(&mutable_data);
-  if (TPM_ERROR(result =
-                    Tspi_Data_Seal(encrypted_data_handle, srk_handle_,
-                                   data.size(), data_buffer, pcrs_handle))) {
-    TPM_LOG(ERROR, result) << __func__ << ": Error calling Tspi_Data_Seal";
-    return false;
-  }
-
-  // Extract the sealed value.
-  ScopedTssMemory encrypted_data(context_handle_);
-  UINT32 encrypted_data_length = 0;
-  if (TPM_ERROR(result = Tspi_GetAttribData(
-                    encrypted_data_handle, TSS_TSPATTRIB_ENCDATA_BLOB,
-                    TSS_TSPATTRIB_ENCDATABLOB_BLOB, &encrypted_data_length,
-                    encrypted_data.ptr()))) {
-    TPM_LOG(ERROR, result) << __func__ << ": Error calling Tspi_GetAttribData";
-    return false;
-  }
-  sealed_data->assign(
-      TSSBufferAsString(encrypted_data.value(), encrypted_data_length));
-  return true;
-}
-
-bool TpmUtilityV1::Unseal(const std::string& sealed_data, std::string* data) {
-  CHECK(data);
-  if (!SetupSrk()) {
-    LOG(ERROR) << "SRK is not ready.";
-    return false;
-  }
-
-  // Create an ENCDATA object with the sealed value.
-  ScopedTssKey encrypted_data_handle(context_handle_);
-  TSS_RESULT result;
-  if (TPM_ERROR(result = Tspi_Context_CreateObject(
-                    context_handle_, TSS_OBJECT_TYPE_ENCDATA, TSS_ENCDATA_SEAL,
-                    encrypted_data_handle.ptr()))) {
-    TPM_LOG(ERROR, result) << __func__
-                           << ": Error calling Tspi_Context_CreateObject";
-    return false;
-  }
-
-  std::string mutable_sealed_data(sealed_data);
-  BYTE* sealed_data_buffer = StringAsTSSBuffer(&mutable_sealed_data);
-  if (TPM_ERROR(result = Tspi_SetAttribData(
-                    encrypted_data_handle, TSS_TSPATTRIB_ENCDATA_BLOB,
-                    TSS_TSPATTRIB_ENCDATABLOB_BLOB, sealed_data.size(),
-                    sealed_data_buffer))) {
-    TPM_LOG(ERROR, result) << __func__ << ": Error calling Tspi_SetAttribData";
-    return false;
-  }
-
-  // Unseal using the SRK.
-  ScopedTssMemory decrypted_data(context_handle_);
-  UINT32 decrypted_data_length = 0;
-  if (TPM_ERROR(result = Tspi_Data_Unseal(encrypted_data_handle, srk_handle_,
-                                          &decrypted_data_length,
-                                          decrypted_data.ptr()))) {
-    TPM_LOG(ERROR, result) << __func__ << ": Error calling Tspi_Data_Unseal";
-    return false;
-  }
-  data->assign(
-      TSSBufferAsString(decrypted_data.value(), decrypted_data_length));
   return true;
 }
 
@@ -554,12 +447,12 @@ bool TpmUtilityV1::GetEndorsementCertificate(KeyType key_type,
     return false;
   }
   if (memcmp(kStoredCertHeader, &nvram_value[kStoredCertHeaderOffset],
-             base::size(kStoredCertHeader)) != 0) {
+             std::size(kStoredCertHeader)) != 0) {
     LOG(ERROR) << "Malformed EK certificate: Bad PCCLIENT_STORED_CERT.";
     return false;
   }
   if (memcmp(kFullCertHeader, &nvram_value[kFullCertHeaderOffset],
-             base::size(kFullCertHeader)) != 0) {
+             std::size(kFullCertHeader)) != 0) {
     LOG(ERROR) << "Malformed EK certificate: Bad PCCLIENT_FULL_CERT.";
     return false;
   }
@@ -573,7 +466,7 @@ bool TpmUtilityV1::GetEndorsementCertificate(KeyType key_type,
   }
   // The X.509 certificate follows the header bytes.
   size_t full_cert_end =
-      kTotalHeaderBytes + full_cert_size - base::size(kFullCertHeader);
+      kTotalHeaderBytes + full_cert_size - std::size(kFullCertHeader);
   certificate->assign(nvram_value.begin() + kTotalHeaderBytes,
                       nvram_value.begin() + full_cert_end);
   return true;
@@ -666,103 +559,6 @@ bool TpmUtilityV1::Sign(const std::string& key_blob,
   return true;
 }
 
-bool TpmUtilityV1::QuotePCR(uint32_t pcr_index,
-                            const std::string& key_blob,
-                            std::string* quoted_pcr_value,
-                            std::string* quoted_data,
-                            std::string* quote) {
-  if (!InitializeContextHandle(__func__)) {
-    return false;
-  }
-  // Load the Storage Root Key.
-  TSS_RESULT result;
-  if (!SetupSrk()) {
-    LOG(ERROR) << __func__ << ": Failed to setup SRK.";
-    return false;
-  }
-  // Load the AIK (which is wrapped by the SRK).
-  ScopedTssKey identity_key(context_handle_);
-  BYTE* key_blob_ptr = StringAsTSSBuffer(&key_blob);
-  result =
-      Tspi_Context_LoadKeyByBlob(context_handle_, srk_handle_, key_blob.size(),
-                                 key_blob_ptr, identity_key.ptr());
-  if (TPM_ERROR(result)) {
-    TPM_LOG(ERROR, result) << __func__ << ": Failed to load AIK.";
-    return false;
-  }
-
-  // Create a PCRS object and select the index.
-  ScopedTssPcrs pcrs(context_handle_);
-  result = Tspi_Context_CreateObject(context_handle_, TSS_OBJECT_TYPE_PCRS,
-                                     TSS_PCRS_STRUCT_INFO, pcrs.ptr());
-  if (TPM_ERROR(result)) {
-    TPM_LOG(ERROR, result) << __func__ << ": Failed to create PCRS object.";
-    return false;
-  }
-  result = Tspi_PcrComposite_SelectPcrIndex(pcrs, pcr_index);
-  if (TPM_ERROR(result)) {
-    TPM_LOG(ERROR, result) << __func__ << ": Failed to select PCR.";
-    return false;
-  }
-  // Generate the quote.
-  TSS_VALIDATION validation = {};
-  // it's a difference from |TpmImpl| in |cryptohomed|, which uses OpenSSL to
-  // generate the random number. Here we use well-known string value for
-  // consistency with |TpmUtilityV2|, which doesn't supply any qualifying data
-  // from caller while in TPM 1.2 it's required to have non-empty external data.
-  BYTE well_known_external_data[kDigestSize] = {};
-  validation.ulExternalDataLength = kDigestSize;
-  validation.rgbExternalData = well_known_external_data;
-  result = Tspi_TPM_Quote(tpm_handle_, identity_key, pcrs, &validation);
-  if (TPM_ERROR(result)) {
-    TPM_LOG(ERROR, result) << __func__ << ": Failed to generate quote.";
-    return false;
-  }
-  ScopedTssMemory scoped_quoted_data(context_handle_, validation.rgbData);
-  ScopedTssMemory scoped_quote(context_handle_, validation.rgbValidationData);
-
-  // Get the PCR value that was quoted.
-  ScopedTssMemory pcr_value_buffer(context_handle_);
-  UINT32 pcr_value_length = 0;
-  result = Tspi_PcrComposite_GetPcrValue(pcrs, pcr_index, &pcr_value_length,
-                                         pcr_value_buffer.ptr());
-  if (TPM_ERROR(result)) {
-    TPM_LOG(ERROR, result) << __func__ << ": Failed to get PCR value.";
-    return false;
-  }
-  *quoted_pcr_value =
-      TSSBufferAsString(pcr_value_buffer.value(), pcr_value_length);
-  // Get the data that was quoted.
-  *quoted_data = TSSBufferAsString(validation.rgbData, validation.ulDataLength);
-  // Get the quote.
-  *quote = TSSBufferAsString(validation.rgbValidationData,
-                             validation.ulValidationDataLength);
-  return true;
-}
-
-bool TpmUtilityV1::IsQuoteForPCR(const std::string& quoted_pcr_value,
-                                 const std::string& quoted_data,
-                                 const std::string& quote,
-                                 uint32_t pcr_index) const {
-  // Checks that the quoted value matches the given PCR value by reconstructing
-  // the TPM_PCR_COMPOSITE structure the TPM would create.
-  const std::string pcr_digest =
-      base::SHA1HashString(buildPcrComposite(pcr_index, quoted_pcr_value));
-
-  // The PCR digest should appear starting at 8th byte of the quoted data. See
-  // the TPM_QUOTE_INFO structure.
-  if (quoted_data.length() < pcr_digest.length() + 8) {
-    LOG(ERROR) << __func__ << ": Quoted data too short.";
-    return false;
-  }
-  if (!std::equal(pcr_digest.begin(), pcr_digest.end(),
-                  quoted_data.begin() + 8)) {
-    LOG(ERROR) << __func__ << "PCR value mismatch.";
-    return false;
-  }
-  return true;
-}
-
 bool TpmUtilityV1::ReadPCR(uint32_t pcr_index, std::string* pcr_value) {
   if (!InitializeContextHandle(__func__)) {
     return false;
@@ -778,20 +574,6 @@ bool TpmUtilityV1::ReadPCR(uint32_t pcr_index, std::string* pcr_value) {
   pcr_value->assign(pcr_value_buffer.value(),
                     pcr_value_buffer.value() + pcr_len);
   return true;
-}
-
-bool TpmUtilityV1::GetNVDataSize(uint32_t nv_index, uint16_t* nv_size) const {
-  LOG(ERROR) << __func__ << ": Not implemented.";
-  return false;
-}
-
-bool TpmUtilityV1::CertifyNV(uint32_t nv_index,
-                             int nv_size,
-                             const std::string& key_blob,
-                             std::string* quoted_data,
-                             std::string* quote) {
-  LOG(ERROR) << __func__ << ": Not implemented.";
-  return false;
 }
 
 bool TpmUtilityV1::ConnectContextAsUser(ScopedTssContext* context,
@@ -1227,49 +1009,28 @@ bool TpmUtilityV1::GetRSAPublicKeyFromTpmPublicKey(
     return false;
   }
   ScopedByteArray scoped_exponent(parms.exponent);
-  crypto::ScopedRSA rsa(RSA_new());
-  crypto::ScopedBIGNUM e(BN_new()), n(BN_new());
-  if (!rsa || !e || !n) {
-    LOG(ERROR) << "Failed to allocate RSA or BIGNUM.";
-    return false;
-  }
-  // Get the public exponent.
+
+  crypto::ScopedRSA rsa = nullptr;
+  brillo::Blob modulus(parsed.pubKey.key,
+                       parsed.pubKey.key + parsed.pubKey.keyLength);
   if (parms.exponentSize == 0) {
-    if (!BN_set_word(e.get(), kWellKnownExponent)) {
-      LOG(ERROR) << "Failed to set exponent to WellKnownExponent.";
-      return false;
-    }
+    rsa = CreateRSAFromNumber(modulus, kWellKnownExponent);
   } else {
-    if (!BN_bin2bn(parms.exponent, parms.exponentSize, e.get())) {
-      LOG(ERROR) << "Failed to convert exponent to BIGNUM.";
-      return false;
-    }
+    rsa = CreateRSAFromNumber(
+        modulus,
+        brillo::Blob(parms.exponent, parms.exponent + parms.exponentSize));
   }
-  // Get the modulus.
-  if (!BN_bin2bn(parsed.pubKey.key, parsed.pubKey.keyLength, n.get())) {
-    LOG(ERROR) << "Failed to convert public key to BIGNUM.";
-    return false;
-  }
-  if (!RSA_set0_key(rsa.get(), n.release(), e.release(), nullptr)) {
-    LOG(ERROR) << ": Failed to set exponent or modulus.";
+  if (rsa == nullptr) {
+    LOG(ERROR) << "Failed to create RSA public key.";
     return false;
   }
 
   // DER encode.
-  int der_length = i2d_RSAPublicKey(rsa.get(), nullptr);
-  if (der_length < 0) {
+  *public_key_der = hwsec_foundation::RSAPublicKeyToString(rsa);
+  if (public_key_der->empty()) {
     LOG(ERROR) << "Failed to DER-encode public key.";
     return false;
   }
-  public_key_der->resize(der_length);
-  unsigned char* der_buffer =
-      reinterpret_cast<unsigned char*>(base::data(*public_key_der));
-  der_length = i2d_RSAPublicKey(rsa.get(), &der_buffer);
-  if (der_length < 0) {
-    LOG(ERROR) << "Failed to DER-encode public key.";
-    return false;
-  }
-  public_key_der->resize(der_length);
   return true;
 }
 
@@ -1403,7 +1164,7 @@ bool TpmUtilityV1::MakeIdentity(std::string* identity_public_key_der,
   }
   result = Tspi_SetAttribData(pca_public_key_object, TSS_TSPATTRIB_RSAKEY_INFO,
                               TSS_TSPATTRIB_KEYINFO_RSA_MODULUS,
-                              base::size(modulus_buffer), modulus_buffer);
+                              std::size(modulus_buffer), modulus_buffer);
   if (TPM_ERROR(result)) {
     TPM_LOG(ERROR, result)
         << "MakeIdentity: Cannot set modulus to PCA public key.";
@@ -1489,20 +1250,6 @@ bool TpmUtilityV1::MakeIdentity(std::string* identity_public_key_der,
     return false;
   }
   return true;
-}
-
-bool TpmUtilityV1::GetRsuDeviceId(std::string* rsu_device_id) {
-  LOG(ERROR) << __func__ << ": Not implemented.";
-  return false;
-}
-
-std::string TpmUtilityV1::GetPCRValueForMode(const std::string& mode) {
-  const std::string mode_digest = base::SHA1HashString(mode);
-
-  // PCR0 value immediately after power on.
-  const std::string pcr_initial_value(base::kSHA1Length, 0);
-
-  return base::SHA1HashString(pcr_initial_value + mode_digest);
 }
 
 bool TpmUtilityV1::InitializeContextHandle(const std::string& consumer_name) {

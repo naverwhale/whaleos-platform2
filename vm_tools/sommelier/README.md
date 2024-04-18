@@ -184,7 +184,7 @@ the "launcher" button during normal usage. The "launcher" button event is
 forwarded to Linux programs by default so it won’t work when a Linux program
 has keyboard focus unless this shortcut is explicitly listed as an accelerator.
 
-Sommelier provides the `--accelerator=ACCELERATORS` flag for this purpose.
+Sommelier provides the `--accelerators=ACCELERATORS` flag for this purpose.
 `ACCELERATORS` is a comma separated list of accelerators that shouldn’t be
 forwarded to the Linux program but instead handled by the host compositor.
 Each accelerator can contain a list of modifiers (e.g. `<Control><Alt>`) and
@@ -194,7 +194,12 @@ above (which happens to have XKB keysym `Super_L` on the Chromebook Pixel),
 `--accelerators=Super_L` needs to be passed to sommelier for the this button to
 bring up the application launcher when Linux programs have keyboard focus.
 
-Consistent with other flags, `SOMMELIER_ACCELERATORS` environment variable can
+There is also the `--windowed-accelerators=WINDOWED_ACCELERATORS` flag for
+accelerators that should be handled by the host compositor when the focused
+window is windowed but not while it is fullscreen.
+
+Consistent with other flags, `SOMMELIER_ACCELERATORS` and
+`SOMMELIER_WINDOWED_ACCELERATORS` environment variable can
 be used as an alternative to the command line flag.
 
 ## Examples
@@ -225,3 +230,11 @@ compositor instead of being sent to gedit:
 ```
 sommelier --accelerators="<Alt>Bracketright,<Alt>Bracketleft" gedit
 ```
+
+## Gamepad Support
+
+See [gaming.md](gaming.md).
+
+## Writing unit tests
+
+See [TESTING.md](TESTING.md).

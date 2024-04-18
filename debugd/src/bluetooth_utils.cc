@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,13 @@
 #include <stdio.h>
 #include <string>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
+#include <brillo/files/file_util.h>
 #include <brillo/process/process.h>
 
 #include "debugd/src/sandboxed_process.h"
@@ -23,6 +24,7 @@ namespace {
 
 constexpr char kBunzip2Command[] = "/bin/bunzip2";
 constexpr char kBtmonCommand[] = "/usr/bin/btmon";
+constexpr char kBtclientCommand[] = "/usr/bin/btclient";
 
 constexpr char btsnoop_infile[] = "/var/log/bluetooth/log.bz2";
 constexpr char btsnoop_outfile[] = "/var/log/bluetooth/log";
@@ -46,8 +48,9 @@ void GetBluetoothBqr() {
   }
 
   // Remove btsnoop_outfile at exit.
-  base::ScopedClosureRunner delete_outfile(base::BindOnce(
-      base::IgnoreResult(&base::DeleteFile), base::FilePath(btsnoop_outfile)));
+  base::ScopedClosureRunner delete_outfile(
+      base::BindOnce(base::IgnoreResult(&brillo::DeleteFile),
+                     base::FilePath(btsnoop_outfile)));
 
   // The process is used to decompress the Bluetooth log.
   //   - input: btsnoop_infile
@@ -74,11 +77,37 @@ void GetBluetoothBqr() {
   sp.AddArg(kBtmonCommand);
   sp.AddArg("--analyze");
   sp.AddArg(btsnoop_outfile);
-  sp.RedirectUsingFile(STDOUT_FILENO, std::string(report_file));
+  sp.RedirectUsingFile(STDOUT_FILENO, base::FilePath(report_file));
   ret = sp.Run();
-  if (ret)
+  if (ret) {
     PLOG(WARNING) << "Failed to btmon analyze " << btsnoop_outfile
                   << BQR_UNAVAILABLE;
+    return;
+  }
+
+  // The process is used to create the Bluetooth media log.
+  //   - input: the "media log" command argument
+  //   - output: memory
+  // Note: this process should be sandboxed.
+  SandboxedProcess sp2;
+  sp2.SandboxAs("bluetooth", "bluetooth");
+  sp2.AddArg(kBtclientCommand);
+  sp2.AddArg("--command");
+  sp2.AddArg("media log");
+  // Set timeout to 1 second.
+  sp2.AddArg("--timeout");
+  sp2.AddArg("1");
+  sp2.RedirectUsingMemory(STDOUT_FILENO);
+  ret = sp2.Run();
+  if (ret) {
+    PLOG(WARNING) << "Failed to get the btclient media log";
+    return;
+  }
+  // Append the media log to bluetooth quality report.
+  std::string media_log = sp2.GetOutputString(STDOUT_FILENO);
+  if (!base::AppendToFile(base::FilePath(report_file), media_log)) {
+    PLOG(WARNING) << "Failed to append media log to bluetooth quality report";
+  }
 }
 
 }  // namespace debugd

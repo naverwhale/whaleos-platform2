@@ -1,17 +1,21 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "libmems/test_fakes.h"
 
+#include <linux/iio/events.h>
 #include <sys/eventfd.h>
+
+#include <array>
+#include <iterator>
+#include <optional>
 
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include "base/posix/eintr_wrapper.h"
-#include <base/stl_util.h>
 
 #include "libmems/common_types.h"
 
@@ -31,23 +35,23 @@ bool FakeIioChannel::SetScanElementsEnabled(bool en) {
 }
 
 template <typename T>
-base::Optional<T> FakeReadAttributes(const std::string& name,
-                                     std::map<std::string, T> attributes) {
+std::optional<T> FakeReadAttributes(const std::string& name,
+                                    std::map<std::string, T> attributes) {
   auto k = attributes.find(name);
   if (k == attributes.end())
-    return base::nullopt;
+    return std::nullopt;
   return k->second;
 }
 
-base::Optional<std::string> FakeIioChannel::ReadStringAttribute(
+std::optional<std::string> FakeIioChannel::ReadStringAttribute(
     const std::string& name) const {
   return FakeReadAttributes<>(name, text_attributes_);
 }
-base::Optional<int64_t> FakeIioChannel::ReadNumberAttribute(
+std::optional<int64_t> FakeIioChannel::ReadNumberAttribute(
     const std::string& name) const {
   return FakeReadAttributes<>(name, numeric_attributes_);
 }
-base::Optional<double> FakeIioChannel::ReadDoubleAttribute(
+std::optional<double> FakeIioChannel::ReadDoubleAttribute(
     const std::string& name) const {
   return FakeReadAttributes<>(name, double_attributes_);
 }
@@ -68,20 +72,58 @@ bool FakeIioChannel::WriteDoubleAttribute(const std::string& name,
   return true;
 }
 
-base::Optional<int64_t> FakeIioChannel::GetData(int index) {
-  if (!enabled_ || index < 0 || index >= base::size(kFakeAccelSamples))
-    return base::nullopt;
+std::optional<int64_t> FakeIioChannel::GetData(int index) {
+  if (!enabled_ || index < 0 || index >= std::size(kFakeAccelSamples))
+    return std::nullopt;
 
   auto raw = ReadNumberAttribute(kRawAttr);
   if (raw.has_value())
     return raw;
 
-  for (int i = 0; i < base::size(kFakeAccelChns); ++i) {
+  for (int i = 0; i < std::size(kFakeAccelChns); ++i) {
     if (id_.compare(kFakeAccelChns[i]) == 0)
       return kFakeAccelSamples[index][i];
   }
 
-  return base::nullopt;
+  return std::nullopt;
+}
+
+FakeIioEvent::FakeIioEvent(iio_chan_type chan_type,
+                           iio_event_type event_type,
+                           iio_event_direction direction,
+                           int channel)
+    : IioEvent(chan_type, event_type, direction, channel) {}
+
+void FakeIioEvent::SetEnabled(bool en) {
+  enabled_ = en;
+}
+
+std::optional<std::string> FakeIioEvent::ReadStringAttribute(
+    const std::string& name) const {
+  auto k = text_attributes_.find(name);
+  if (k == text_attributes_.end())
+    return std::nullopt;
+  return k->second;
+}
+
+bool FakeIioEvent::WriteStringAttribute(const std::string& name,
+                                        const std::string& value) {
+  text_attributes_[name] = value;
+  return true;
+}
+
+std::optional<uint64_t> FakeIioEvent::GetData(int index) {
+  if (index >= kEventNumber)
+    return std::nullopt;
+
+  iio_event_direction dir =
+      (direction_ == iio_event_direction::IIO_EV_DIR_EITHER)
+          ? (dir_turn_ ? iio_event_direction::IIO_EV_DIR_RISING
+                       : iio_event_direction::IIO_EV_DIR_FALLING)
+          : direction_;
+
+  dir_turn_ = !dir_turn_;
+  return IioEventCode(chan_type_, event_type_, dir, channel_);
 }
 
 FakeIioDevice::FakeIioDevice(FakeIioContext* ctx,
@@ -98,17 +140,17 @@ base::FilePath FakeIioDevice::GetPath() const {
   return base::FilePath(kSysDevString).Append(id_str);
 }
 
-base::Optional<std::string> FakeIioDevice::ReadStringAttribute(
+std::optional<std::string> FakeIioDevice::ReadStringAttribute(
     const std::string& name) const {
   if (name.compare(kDeviceName) == 0)
     return name_;
   return FakeReadAttributes<>(name, text_attributes_);
 }
-base::Optional<int64_t> FakeIioDevice::ReadNumberAttribute(
+std::optional<int64_t> FakeIioDevice::ReadNumberAttribute(
     const std::string& name) const {
   return FakeReadAttributes<>(name, numeric_attributes_);
 }
-base::Optional<double> FakeIioDevice::ReadDoubleAttribute(
+std::optional<double> FakeIioDevice::ReadDoubleAttribute(
     const std::string& name) const {
   return FakeReadAttributes<>(name, double_attributes_);
 }
@@ -155,150 +197,247 @@ bool FakeIioDevice::CreateBuffer() {
 
   int fd = eventfd(0, 0);
   CHECK_GE(fd, 0);
-  sample_fd_.reset(fd);
+  sample_fd_.fd.reset(fd);
 
-  if (sample_index_ >= base::size(kFakeAccelSamples) || is_paused_)
+  if (sample_fd_.index >= std::size(kFakeAccelSamples) || sample_fd_.is_paused)
     return true;
 
-  if (!WriteByte()) {
-    ClosePipe();
+  if (!sample_fd_.WriteByte()) {
+    sample_fd_.ClosePipe();
     return false;
   }
 
   return true;
 }
 
-base::Optional<int32_t> FakeIioDevice::GetBufferFd() {
+std::optional<int32_t> FakeIioDevice::GetBufferFd() {
   if (disabled_fd_ || !sample_fd_.is_valid())
-    return base::nullopt;
+    return std::nullopt;
 
   return sample_fd_.get();
 }
 
-base::Optional<IioDevice::IioSample> FakeIioDevice::ReadSample() {
-  if (is_paused_ || disabled_fd_ || !sample_fd_.is_valid())
-    return base::nullopt;
+std::optional<IioDevice::IioSample> FakeIioDevice::ReadSample() {
+  if (sample_fd_.is_paused || disabled_fd_ || !sample_fd_.is_valid())
+    return std::nullopt;
 
-  if (!failed_read_queue_.empty()) {
-    CHECK_GE(failed_read_queue_.top(), sample_index_);
-    if (failed_read_queue_.top() == sample_index_) {
-      failed_read_queue_.pop();
-      return base::nullopt;
+  if (!sample_fd_.failed_read_queue.empty()) {
+    CHECK_GE(sample_fd_.failed_read_queue.top(), sample_fd_.index);
+    if (sample_fd_.failed_read_queue.top() == sample_fd_.index) {
+      sample_fd_.failed_read_queue.pop();
+      return std::nullopt;
     }
   }
 
-  if (!ReadByte())
-    return base::nullopt;
+  if (!sample_fd_.ReadByte())
+    return std::nullopt;
 
-  base::Optional<double> freq_opt = ReadDoubleAttribute(kSamplingFrequencyAttr);
+  std::optional<double> freq_opt = ReadDoubleAttribute(kSamplingFrequencyAttr);
   if (!freq_opt.has_value()) {
     LOG(ERROR) << "sampling_frequency not set";
-    return base::nullopt;
+    return std::nullopt;
   }
   double frequency = freq_opt.value();
   if (frequency <= 0.0) {
     LOG(ERROR) << "Invalid frequency: " << frequency;
-    return base::nullopt;
+    return std::nullopt;
   }
 
   IioDevice::IioSample sample;
   auto channels = GetAllChannels();
   for (int32_t i = 0; i < channels.size(); ++i) {
     FakeIioChannel* chn = dynamic_cast<FakeIioChannel*>(channels[i]);
-    auto value = chn->GetData(sample_index_);
+    auto value = chn->GetData(sample_fd_.index);
     if (!value.has_value()) {
       LOG(ERROR) << "Channel: " << channels_[i].chn_id << " has no sample";
-      return base::nullopt;
+      return std::nullopt;
     }
 
     sample[i] = value.value();
   }
 
-  sample_index_ += 1;
+  sample_fd_.index += 1;
 
-  if (sample_index_ < base::size(kFakeAccelSamples)) {
-    if (pause_index_.has_value() && sample_index_ == pause_index_.value())
-      SetPause();
-    else if (!WriteByte())
-      return base::nullopt;
+  if (sample_fd_.index < std::size(kFakeAccelSamples)) {
+    if (sample_fd_.pause_index.has_value() &&
+        sample_fd_.index == sample_fd_.pause_index.value()) {
+      sample_fd_.SetPause();
+    } else if (!sample_fd_.WriteByte()) {
+      return std::nullopt;
+    }
   }
 
   return sample;
 }
 
 void FakeIioDevice::FreeBuffer() {
-  ClosePipe();
+  sample_fd_.ClosePipe();
+}
+
+std::optional<int32_t> FakeIioDevice::GetEventFd() {
+  if (disabled_fd_)
+    return std::nullopt;
+
+  if (!event_fd_.is_valid()) {
+    int fd = eventfd(0, 0);
+    CHECK_GE(fd, 0);
+    event_fd_.fd.reset(fd);
+
+    if (event_fd_.index < kEventNumber && !event_fd_.is_paused &&
+        !event_fd_.readable) {
+      if (!event_fd_.WriteByte()) {
+        event_fd_.ClosePipe();
+        return std::nullopt;
+      }
+    }
+  }
+
+  return event_fd_.get();
+}
+
+std::optional<iio_event_data> FakeIioDevice::ReadEvent() {
+  if (event_fd_.is_paused || disabled_fd_ || !event_fd_.is_valid())
+    return std::nullopt;
+
+  if (!event_fd_.failed_read_queue.empty()) {
+    CHECK_GE(event_fd_.failed_read_queue.top(), event_fd_.index);
+    if (event_fd_.failed_read_queue.top() == event_fd_.index) {
+      event_fd_.failed_read_queue.pop();
+      return std::nullopt;
+    }
+  }
+
+  if (!event_fd_.ReadByte())
+    return std::nullopt;
+
+  iio_event_data data;
+  data.timestamp = 1000000000LL * (int64_t)event_fd_.index;
+
+  auto iio_events = GetAllEvents();
+  if (!iio_events.empty()) {
+    FakeIioEvent* iio_event = dynamic_cast<FakeIioEvent*>(
+        iio_events[event_fd_.index % iio_events.size()]);
+    auto value = iio_event->GetData(event_fd_.index);
+    if (value.has_value()) {
+      data.id = value.value();
+    } else {
+      LOG(ERROR) << "Event: " << event_fd_.index % iio_events.size()
+                 << " has no data";
+    }
+  }
+
+  event_fd_.index += 1;
+
+  if (event_fd_.index < kEventNumber) {
+    if (event_fd_.pause_index.has_value() &&
+        event_fd_.index == event_fd_.pause_index.value()) {
+      event_fd_.SetPause();
+    } else if (!event_fd_.WriteByte()) {
+      return std::nullopt;
+    }
+  }
+
+  return data;
 }
 
 void FakeIioDevice::DisableFd() {
   disabled_fd_ = true;
-  if (readable_fd_)
-    CHECK(ReadByte());
+  if (sample_fd_.readable)
+    CHECK(sample_fd_.ReadByte());
 }
 
 void FakeIioDevice::AddFailedReadAtKthSample(int k) {
-  CHECK_GE(k, sample_index_);
+  CHECK_GE(k, sample_fd_.index);
 
-  failed_read_queue_.push(k);
+  sample_fd_.failed_read_queue.push(k);
 }
 
 void FakeIioDevice::SetPauseCallbackAtKthSamples(
     int k, base::OnceCallback<void()> callback) {
-  CHECK_GE(k, sample_index_);
-  CHECK_LE(k, base::size(kFakeAccelSamples));
-  CHECK(!pause_index_.has_value());  // pause callback hasn't been set
+  CHECK_GE(k, sample_fd_.index);
+  CHECK_LE(k, std::size(kFakeAccelSamples));
+  CHECK(!sample_fd_.pause_index.has_value());  // pause callback hasn't been set
 
-  pause_index_ = k;
-  pause_callback_ = std::move(callback);
+  sample_fd_.pause_index = k;
+  sample_fd_.pause_callback = std::move(callback);
 
-  if (pause_index_.value() != sample_index_)
+  if (sample_fd_.pause_index.value() != sample_fd_.index)
     return;
 
-  SetPause();
+  sample_fd_.SetPause();
 }
 
 void FakeIioDevice::ResumeReadingSamples() {
-  CHECK(is_paused_);
-
-  is_paused_ = false;
-  if (sample_fd_.is_valid() && !readable_fd_)
-    CHECK(WriteByte());
+  sample_fd_.ResumeReading();
 }
 
-bool FakeIioDevice::WriteByte() {
-  if (!sample_fd_.is_valid())
+void FakeIioDevice::AddFailedReadAtKthEvent(int k) {
+  CHECK_GE(k, event_fd_.index);
+
+  event_fd_.failed_read_queue.push(k);
+}
+
+void FakeIioDevice::SetPauseCallbackAtKthEvents(
+    int k, base::OnceCallback<void()> callback) {
+  CHECK_GE(k, event_fd_.index);
+  CHECK_LE(k, kEventNumber);
+  CHECK(!event_fd_.pause_index.has_value());  // pause callback hasn't been set
+
+  event_fd_.pause_index = k;
+  event_fd_.pause_callback = std::move(callback);
+
+  if (event_fd_.pause_index.value() != event_fd_.index)
+    return;
+
+  event_fd_.SetPause();
+}
+
+void FakeIioDevice::ResumeReadingEvents() {
+  event_fd_.ResumeReading();
+}
+
+bool FakeIioDevice::FakeFD::WriteByte() {
+  if (!is_valid())
     return false;
 
-  CHECK(!readable_fd_);
+  CHECK(!readable);
   uint64_t val = 1;
-  CHECK_EQ(write(sample_fd_.get(), &val, sizeof(uint64_t)), sizeof(uint64_t));
-  readable_fd_ = true;
+  CHECK_EQ(write(get(), &val, sizeof(uint64_t)), sizeof(uint64_t));
+  readable = true;
 
   return true;
 }
 
-bool FakeIioDevice::ReadByte() {
-  if (!sample_fd_.is_valid())
+bool FakeIioDevice::FakeFD::ReadByte() {
+  if (!is_valid())
     return false;
 
-  CHECK(readable_fd_);
+  CHECK(readable);
   int64_t val = 1;
-  CHECK_EQ(read(sample_fd_.get(), &val, sizeof(uint64_t)), sizeof(uint64_t));
-  readable_fd_ = false;
+  CHECK_EQ(read(get(), &val, sizeof(uint64_t)), sizeof(uint64_t));
+  readable = false;
 
   return true;
 }
 
-void FakeIioDevice::ClosePipe() {
-  sample_fd_.reset();
+void FakeIioDevice::FakeFD::ClosePipe() {
+  fd.reset();
 }
 
-void FakeIioDevice::SetPause() {
-  is_paused_ = true;
-  pause_index_.reset();
-  std::move(pause_callback_).Run();
-  if (readable_fd_)
+void FakeIioDevice::FakeFD::SetPause() {
+  is_paused = true;
+  pause_index.reset();
+  std::move(pause_callback).Run();
+  if (readable)
     CHECK(ReadByte());
+}
+
+void FakeIioDevice::FakeFD::ResumeReading() {
+  CHECK(is_paused);
+
+  is_paused = false;
+  if (is_valid() && !readable)
+    CHECK(WriteByte());
 }
 
 void FakeIioContext::AddDevice(std::unique_ptr<FakeIioDevice> device) {

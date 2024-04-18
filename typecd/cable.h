@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -72,6 +72,9 @@ class Cable : public Peripheral {
 
   // Check whether the cable supports Thunderbolt3 speed requirements.
   bool TBT3PDIdentityCheck();
+
+  // Check whether the cable supports USB4 requirements.
+  bool USB4PDIdentityCheck();
 
   // Check whether SOP' PD discovery is complete (and we have all the PD
   // information that the kernel can provide). To determine this, we check

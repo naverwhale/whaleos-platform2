@@ -1,19 +1,16 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/tethering.h"
 
+#include <iterator>
 #include <set>
 #include <vector>
-
-#include <base/macros.h>
-#include <base/stl_util.h>
 
 namespace shill {
 
 // static
-const char Tethering::kAndroidVendorEncapsulatedOptions[] = "ANDROID_METERED";
 const uint8_t Tethering::kAndroidBSSIDPrefix[] = {0x02, 0x1a, 0x11};
 const uint32_t Tethering::kIosOui = 0x0017f2;
 const uint8_t Tethering::kLocallyAdministratedMacBit = 0x02;
@@ -21,11 +18,11 @@ const uint8_t Tethering::kLocallyAdministratedMacBit = 0x02;
 // static
 bool Tethering::IsAndroidBSSID(const std::vector<uint8_t>& bssid) {
   std::vector<uint8_t> truncated_bssid = bssid;
-  truncated_bssid.resize(base::size(kAndroidBSSIDPrefix));
+  truncated_bssid.resize(std::size(kAndroidBSSIDPrefix));
   return truncated_bssid ==
          std::vector<uint8_t>(
              kAndroidBSSIDPrefix,
-             kAndroidBSSIDPrefix + base::size(kAndroidBSSIDPrefix));
+             kAndroidBSSIDPrefix + std::size(kAndroidBSSIDPrefix));
 }
 
 // static

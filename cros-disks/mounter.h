@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,7 +32,7 @@ class Mounter {
   virtual std::unique_ptr<MountPoint> Mount(const std::string& source,
                                             const base::FilePath& target_path,
                                             std::vector<std::string> params,
-                                            MountErrorType* error) const = 0;
+                                            MountError* error) const = 0;
 
   // Whether this mounter is able to mount given |source| with provided
   // |params|. If so - it may suggest a directory name for the mount point
@@ -43,7 +43,6 @@ class Mounter {
                         const std::vector<std::string>& params,
                         base::FilePath* suggested_dir_name) const = 0;
 };
-
 
 }  // namespace cros_disks
 

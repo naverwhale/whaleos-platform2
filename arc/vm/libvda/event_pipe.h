@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 #define ARC_VM_LIBVDA_EVENT_PIPE_H_
 
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/threading/thread.h>
 
 typedef struct vda_event vda_event_t;

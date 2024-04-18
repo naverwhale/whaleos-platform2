@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/no_destructor.h>
 
@@ -43,12 +42,13 @@ class Resolver {
       const std::vector<std::string>& name_servers,
       const std::vector<std::string>& domain_search_list);
 
-  // Tells the resolver that DNS should go through the proxy provided.
-  // If |proxy_addr| is non-empty, this name server will be used instead of
-  // any provided by SetDNSFromLists. Previous name servers are not forgotten,
-  // and will be restored if this method is called again with |proxy_addr|
-  // empty.
-  virtual bool SetDNSProxy(const std::string& proxy_addr);
+  // Tells the resolver that DNS should go through the proxy address(es)
+  // provided. If |proxy_addrs| is non-empty, this name server will be used
+  // instead of any provided by SetDNSFromLists. Previous name servers are not
+  // forgotten, and will be restored if this method is called again with
+  // |proxy_addrs| empty.
+  virtual bool SetDNSProxyAddresses(
+      const std::vector<std::string>& proxy_addrs);
 
   // Remove any created domain name service file.
   virtual bool ClearDNS();
@@ -77,7 +77,7 @@ class Resolver {
   std::vector<std::string> name_servers_;
   std::vector<std::string> domain_search_list_;
   std::vector<std::string> ignored_search_list_;
-  std::string dns_proxy_addr_;
+  std::vector<std::string> dns_proxy_addrs_;
 };
 
 }  // namespace shill

@@ -1,13 +1,14 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEBUGD_SRC_KERNEL_FEATURE_TOOL_H_
 #define DEBUGD_SRC_KERNEL_FEATURE_TOOL_H_
 
+#include <memory>
 #include <string>
+#include <unordered_map>
 
-#include <base/macros.h>
 #include <base/values.h>
 #include <brillo/errors/error.h>
 #include <vector>
@@ -15,7 +16,7 @@
 namespace debugd {
 class FeatureCommand {
  public:
-  FeatureCommand(const std::string& name) : name_(name) {}
+  explicit FeatureCommand(const std::string& name) : name_(name) {}
   FeatureCommand(FeatureCommand&& other) = default;
   // virtual destructor is required because we create a unique pointer
   // of an abstract class. See KernelFeature class definition.
@@ -41,7 +42,7 @@ class WriteFileCommand : public FeatureCommand {
 
 class FileExistsCommand : public FeatureCommand {
  public:
-  FileExistsCommand(const std::string& file_name);
+  explicit FileExistsCommand(const std::string& file_name);
   FileExistsCommand(FileExistsCommand&& other) = default;
   bool Execute() override;
 
@@ -101,7 +102,7 @@ class JsonFeatureParser : public FeatureParserBase {
   bool ParseFile(const base::FilePath& path, std::string* err_str) override;
 
  private:
-  bool MakeFeatureObject(base::Value* feature_obj,
+  bool MakeFeatureObject(base::Value::Dict& feature_obj,
                          std::string* err_str,
                          KernelFeature& kf);
 };

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,12 +14,12 @@
 #include <gtest/gtest.h>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/strings/string_util.h>
 #include <base/task/single_thread_task_executor.h>
 #include <brillo/dbus/async_event_sequencer.h>
@@ -27,6 +27,7 @@
 #include <chromeos/patchpanel/socket.h>
 #include <chromeos/patchpanel/socket_forwarder.h>
 #include "bindings/worker_common.pb.h"
+
 #include "system-proxy/protobuf_util.h"
 #include "system-proxy/proxy_connect_job.h"
 
@@ -123,11 +124,11 @@ class ServerProxyTest : public ::testing::Test {
     server_proxy_->Init();
   }
   // SystemProxyAdaptor instance that creates fake worker processes.
+  base::ScopedFD stdin_read_fd_, stdin_write_fd_, stdout_read_fd_,
+      stdout_write_fd_;
   std::unique_ptr<MockServerProxy> server_proxy_;
   base::SingleThreadTaskExecutor task_executor_{base::MessagePumpType::IO};
   brillo::BaseMessageLoop brillo_loop_{task_executor_.task_runner()};
-  base::ScopedFD stdin_read_fd_, stdin_write_fd_, stdout_read_fd_,
-      stdout_write_fd_;
 };
 
 TEST_F(ServerProxyTest, FetchCredentials) {
@@ -154,7 +155,7 @@ TEST_F(ServerProxyTest, FetchCredentials) {
 
 TEST_F(ServerProxyTest, FetchListeningAddress) {
   worker::SocketAddress address;
-  address.set_addr(INADDR_ANY);
+  address.set_addr(std::vector<uint8_t>{0, 0, 0, 0}.data(), 4);
   address.set_port(kTestPort);
   worker::WorkerConfigs configs;
   *configs.mutable_listening_address() = address;
@@ -164,7 +165,7 @@ TEST_F(ServerProxyTest, FetchListeningAddress) {
   EXPECT_TRUE(WriteProtobuf(stdin_write_fd_.get(), configs));
   brillo_loop_.RunOnce(false);
 
-  EXPECT_EQ(server_proxy_->listening_addr_, INADDR_ANY);
+  EXPECT_EQ(server_proxy_->listening_addr_, net_base::IPv4Address(0, 0, 0, 0));
   EXPECT_EQ(server_proxy_->listening_port_, kTestPort);
 }
 
@@ -176,7 +177,7 @@ TEST_F(ServerProxyTest, FetchListeningAddress) {
 // - client is sent an HTTP error code in case of failure;
 // - the failed connection job is removed from the queue.
 TEST_F(ServerProxyTest, HandleConnectRequest) {
-  server_proxy_->listening_addr_ = htonl(INADDR_LOOPBACK);
+  server_proxy_->listening_addr_ = net_base::IPv4Address(127, 0, 0, 1);
   server_proxy_->listening_port_ = kTestPort;
   // Redirect the worker stdin and stdout pipes.
   RedirectStdPipes();
@@ -296,7 +297,7 @@ TEST_F(ServerProxyTest, HandlePendingJobs) {
 // Test to ensure proxy resolution requests are correctly handled if the
 // associated job is canceled before resolution.
 TEST_F(ServerProxyTest, HandleCanceledJobWhilePendingProxyResolution) {
-  server_proxy_->listening_addr_ = htonl(INADDR_LOOPBACK);
+  server_proxy_->listening_addr_ = net_base::IPv4Address(127, 0, 0, 1);
   server_proxy_->listening_port_ = 3129;
   // Redirect the worker stdin and stdout pipes.
   RedirectStdPipes();
@@ -357,7 +358,7 @@ TEST_F(ServerProxyTest, HandlePendingAuthRequests) {
   server_proxy_->AuthenticationRequired(
       protection_space.origin(), protection_space.scheme(),
       protection_space.realm(), /* bad_cached_credentials = */ "",
-      base::Bind(
+      base::BindRepeating(
           [](std::string* actual_credentials, const std::string& credentials) {
             *actual_credentials = credentials;
           },
@@ -409,7 +410,7 @@ TEST_F(ServerProxyTest, HandlePendingAuthRequestsNoCredentials) {
   server_proxy_->AuthenticationRequired(
       protection_space.origin(), protection_space.scheme(),
       protection_space.realm(), /* bad_cached_credentials = */ "",
-      base::Bind(
+      base::BindRepeating(
           [](std::string* actual_credentials, const std::string& credentials) {
             *actual_credentials = credentials;
           },
@@ -459,7 +460,7 @@ TEST_F(ServerProxyTest, HandlePendingAuthRequestsCachedCredentials) {
   server_proxy_->AuthenticationRequired(
       protection_space.origin(), protection_space.scheme(),
       protection_space.realm(), /* bad_cached_credentials = */ "",
-      base::Bind(
+      base::BindRepeating(
           [](std::string* actual_credentials, const std::string& credentials) {
             *actual_credentials = credentials;
           },
@@ -517,7 +518,7 @@ TEST_F(ServerProxyTest, AuthRequestsBadCachedCredentials) {
   server_proxy_->AuthenticationRequired(
       protection_space.origin(), protection_space.scheme(),
       protection_space.realm(), kBadCachedCredetials,
-      base::Bind(
+      base::BindRepeating(
           [](std::string* actual_credentials, const std::string& credentials) {
             *actual_credentials = credentials;
           },

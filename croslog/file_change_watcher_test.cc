@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,13 @@
 
 #include <string>
 
-#include "base/bind.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
+#include "base/threading/platform_thread.h"
+#include "base/time/time.h"
 #include "gtest/gtest.h"
 
 namespace croslog {
@@ -28,11 +30,10 @@ class FileChangeWatcherTest : public ::testing::Test,
   void OnFileNameMaybeChanged() override {}
 
   bool WaitForCounterValue(uint32_t target_value) {
-    const int kTinyTimeoutMs = 100;
+    constexpr base::TimeDelta kTinyTimeout = base::Milliseconds(100);
     int max_try = 50;
     while (counter() < target_value) {
-      base::PlatformThread::Sleep(
-          base::TimeDelta::FromMilliseconds(kTinyTimeoutMs));
+      base::PlatformThread::Sleep(kTinyTimeout);
       base::RunLoop().RunUntilIdle();
       if (--max_try == 0)
         return false;

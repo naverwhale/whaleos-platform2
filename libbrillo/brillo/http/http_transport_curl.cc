@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,16 @@
 #include <brillo/http/http_transport_curl.h>
 
 #include <limits>
+#include <optional>
+#include <utility>
 
-#include <base/bind.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/http/http_connection_curl.h>
 #include <brillo/http/http_request.h>
 #include <brillo/strings/string_utils.h>
@@ -21,6 +24,28 @@
 namespace brillo {
 namespace http {
 namespace curl {
+
+namespace {
+using RepeatingSuccessCallback =
+    base::RepeatingCallback<void(RequestID, std::unique_ptr<Response>)>;
+using RepeatingErrorCallback =
+    base::RepeatingCallback<void(RequestID, const brillo::Error*)>;
+
+// Wraps the given OnceCallback into a RepeatingCallback that relays its
+// invocation to the original OnceCallback on the first invocation. The
+// following invocations are just ignored.
+template <typename... Args>
+base::RepeatingCallback<void(Args...)> AdaptOnceCallbackForRepeating(
+    base::OnceCallback<void(Args...)> callback) {
+  return base::BindRepeating(
+      [](base::OnceCallback<void(Args...)>& cb, Args... args) {
+        if (!cb.is_null()) {
+          std::move(cb).Run(std::forward<Args>(args)...);
+        }
+      },
+      base::OwnedRef(std::move(callback)));
+}
+}  // namespace
 
 // This is a class that stores connection data on particular CURL socket
 // and provides file descriptor watcher to monitor read and/or write operations
@@ -90,8 +115,8 @@ class Transport::SocketPollData {
 // connection.
 struct Transport::AsyncRequestData {
   // Success/error callbacks to be invoked at the end of the request.
-  SuccessCallback success_callback;
-  ErrorCallback error_callback;
+  RepeatingSuccessCallback success_callback;
+  RepeatingErrorCallback error_callback;
   // We store a connection here to make sure the object is alive for
   // as long as asynchronous operation is running.
   std::shared_ptr<Connection> connection;
@@ -174,9 +199,28 @@ std::shared_ptr<http::Connection> Transport::CreateConnection(
                                             static_cast<int>(timeout_ms));
     }
   }
-  if (code == CURLE_OK && !ip_address_.empty()) {
+  if (code == CURLE_OK && !interface_.empty()) {
     code = curl_interface_->EasySetOptStr(curl_handle, CURLOPT_INTERFACE,
-                                          ip_address_.c_str());
+                                          interface_);
+  } else if (code == CURLE_OK && !ip_address_.empty()) {
+    code = curl_interface_->EasySetOptStr(curl_handle, CURLOPT_INTERFACE,
+                                          ip_address_);
+  }
+  if (code == CURLE_OK && !dns_servers_.empty()) {
+    code = curl_interface_->EasySetOptStr(curl_handle, CURLOPT_DNS_SERVERS,
+                                          base::JoinString(dns_servers_, ","));
+  }
+  if (code == CURLE_OK && !dns_interface_.empty()) {
+    code = curl_interface_->EasySetOptStr(curl_handle, CURLOPT_DNS_INTERFACE,
+                                          dns_interface_);
+  }
+  if (code == CURLE_OK && !dns_ipv4_addr_.empty()) {
+    code = curl_interface_->EasySetOptStr(curl_handle, CURLOPT_DNS_LOCAL_IP4,
+                                          dns_ipv4_addr_);
+  }
+  if (code == CURLE_OK && !dns_ipv6_addr_.empty()) {
+    code = curl_interface_->EasySetOptStr(curl_handle, CURLOPT_DNS_LOCAL_IP6,
+                                          dns_ipv6_addr_);
   }
   if (code == CURLE_OK && host_list_) {
     code = curl_interface_->EasySetOptPtr(curl_handle, CURLOPT_RESOLVE,
@@ -230,19 +274,30 @@ std::shared_ptr<http::Connection> Transport::CreateConnection(
 }
 
 void Transport::RunCallbackAsync(const base::Location& from_here,
-                                 const base::Closure& callback) {
-  base::ThreadTaskRunnerHandle::Get()->PostTask(from_here, callback);
+                                 base::OnceClosure callback) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      from_here, std::move(callback));
 }
 
 RequestID Transport::StartAsyncTransfer(http::Connection* connection,
-                                        const SuccessCallback& success_callback,
-                                        const ErrorCallback& error_callback) {
+                                        SuccessCallback success_callback,
+                                        ErrorCallback error_callback) {
   brillo::ErrorPtr error;
   if (!SetupAsyncCurl(&error)) {
-    RunCallbackAsync(
-        FROM_HERE, base::Bind(error_callback, 0, base::Owned(error.release())));
+    RunCallbackAsync(FROM_HERE, base::BindOnce(std::move(error_callback), 0,
+                                               base::Owned(error.release())));
     return 0;
   }
+
+  // Wrap the |success_callback| and |error_callback| into RepeatingCallbacks
+  // to prevent crashes when they are invoked more than once accidentally.
+  // This pattern should be avoided when possible since it subverts the
+  // Once/Repeating paradigm. We should consider migrating them to OnceCallbcks
+  // when their lifetimes are more clear.
+  auto repeating_success_callback =
+      AdaptOnceCallbackForRepeating(std::move(success_callback));
+  auto repeating_error_callback =
+      AdaptOnceCallbackForRepeating(std::move(error_callback));
 
   RequestID request_id = ++last_request_id_;
 
@@ -251,8 +306,8 @@ RequestID Transport::StartAsyncTransfer(http::Connection* connection,
   // Add the request data to |async_requests_| before adding the CURL handle
   // in case CURL feels like calling the socket callback synchronously which
   // will need the data to be in |async_requests_| map already.
-  request_data->success_callback = success_callback;
-  request_data->error_callback = error_callback;
+  request_data->success_callback = repeating_success_callback;
+  request_data->error_callback = repeating_error_callback;
   request_data->connection =
       std::static_pointer_cast<Connection>(curl_connection->shared_from_this());
   request_data->request_id = request_id;
@@ -265,8 +320,8 @@ RequestID Transport::StartAsyncTransfer(http::Connection* connection,
   if (code != CURLM_OK) {
     brillo::ErrorPtr error;
     AddMultiCurlError(&error, FROM_HERE, code, curl_interface_.get());
-    RunCallbackAsync(
-        FROM_HERE, base::Bind(error_callback, 0, base::Owned(error.release())));
+    RunCallbackAsync(FROM_HERE, base::BindOnce(repeating_error_callback, 0,
+                                               base::Owned(error.release())));
     async_requests_.erase(curl_connection);
     request_id_map_.erase(request_id);
     return 0;
@@ -292,8 +347,28 @@ void Transport::SetDefaultTimeout(base::TimeDelta timeout) {
   connection_timeout_ = timeout;
 }
 
+void Transport::SetInterface(const std::string& ifname) {
+  interface_ = "if!" + ifname;
+}
+
 void Transport::SetLocalIpAddress(const std::string& ip_address) {
   ip_address_ = "host!" + ip_address;
+}
+
+void Transport::SetDnsServers(const std::vector<std::string>& dns_servers) {
+  dns_servers_ = dns_servers;
+}
+
+void Transport::SetDnsInterface(const std::string& dns_interface) {
+  dns_interface_ = dns_interface;
+}
+
+void Transport::SetDnsLocalIPv4Address(const std::string& dns_ipv4_addr) {
+  dns_ipv4_addr_ = dns_ipv4_addr;
+}
+
+void Transport::SetDnsLocalIPv6Address(const std::string& dns_ipv6_addr) {
+  dns_ipv6_addr_ = dns_ipv6_addr;
 }
 
 void Transport::UseDefaultCertificate() {
@@ -314,11 +389,11 @@ void Transport::ResolveHostToIp(const std::string& host,
           .c_str());
 }
 
-void Transport::SetBufferSize(base::Optional<int> buffer_size) {
+void Transport::SetBufferSize(std::optional<int> buffer_size) {
   buffer_size_ = buffer_size;
 }
 
-void Transport::SetUploadBufferSize(base::Optional<int> buffer_size) {
+void Transport::SetUploadBufferSize(std::optional<int> buffer_size) {
   upload_buffer_size_ = buffer_size;
 }
 
@@ -410,7 +485,8 @@ int Transport::MultiSocketCallback(
     poll_data->StopWatcher();
     // This method can be called indirectly from SocketPollData::OnSocketReady,
     // so delay destruction of SocketPollData object till the next loop cycle.
-    base::ThreadTaskRunnerHandle::Get()->DeleteSoon(FROM_HERE, poll_data);
+    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
+                                                                  poll_data);
     return 0;
   }
 
@@ -434,11 +510,11 @@ int Transport::MultiTimerCallback(CURLM* /* multi */,
   // Cancel any previous timer callbacks.
   transport->weak_ptr_factory_for_timer_.InvalidateWeakPtrs();
   if (timeout_ms >= 0) {
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&Transport::OnTimer,
-                   transport->weak_ptr_factory_for_timer_.GetWeakPtr()),
-        base::TimeDelta::FromMilliseconds(timeout_ms));
+        base::BindOnce(&Transport::OnTimer,
+                       transport->weak_ptr_factory_for_timer_.GetWeakPtr()),
+        base::Milliseconds(timeout_ms));
   }
   return 0;
 }
@@ -478,9 +554,9 @@ void Transport::OnTransferComplete(Connection* connection, CURLcode code) {
   if (code != CURLE_OK) {
     brillo::ErrorPtr error;
     AddEasyCurlError(&error, FROM_HERE, code, curl_interface_.get());
-    RunCallbackAsync(FROM_HERE, base::Bind(request_data->error_callback,
-                                           p->second->request_id,
-                                           base::Owned(error.release())));
+    RunCallbackAsync(FROM_HERE, base::BindOnce(request_data->error_callback,
+                                               p->second->request_id,
+                                               base::Owned(error.release())));
   } else {
     if (connection->GetResponseStatusCode() != status_code::Ok) {
       LOG(INFO) << "Response: " << connection->GetResponseStatusCode() << " ("
@@ -491,14 +567,14 @@ void Transport::OnTransferComplete(Connection* connection, CURLcode code) {
     // read the data back.
     const auto& stream = request_data->connection->response_data_stream_;
     if (stream && stream->CanSeek() && !stream->SetPosition(0, &error)) {
-      RunCallbackAsync(FROM_HERE, base::Bind(request_data->error_callback,
-                                             p->second->request_id,
-                                             base::Owned(error.release())));
+      RunCallbackAsync(FROM_HERE, base::BindOnce(request_data->error_callback,
+                                                 p->second->request_id,
+                                                 base::Owned(error.release())));
     } else {
       std::unique_ptr<Response> resp{new Response{request_data->connection}};
       RunCallbackAsync(FROM_HERE,
-                       base::Bind(request_data->success_callback,
-                                  p->second->request_id, base::Passed(&resp)));
+                       base::BindOnce(request_data->success_callback,
+                                      p->second->request_id, std::move(resp)));
     }
   }
   // In case of an error on CURL side, we would have dispatched the error
@@ -510,8 +586,8 @@ void Transport::OnTransferComplete(Connection* connection, CURLcode code) {
   // there is a chance that this object might be deleted.
   // Instead, schedule an asynchronous task to clean up the connection.
   RunCallbackAsync(FROM_HERE,
-                   base::Bind(&Transport::CleanAsyncConnection,
-                              weak_ptr_factory_.GetWeakPtr(), connection));
+                   base::BindOnce(&Transport::CleanAsyncConnection,
+                                  weak_ptr_factory_.GetWeakPtr(), connection));
 }
 
 void Transport::CleanAsyncConnection(Connection* connection) {

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <attestation/proto_bindings/google_key.pb.h>
@@ -16,7 +17,6 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/strings/string_number_conversions.h>
 #include <brillo/cryptohome.h>
 #include <brillo/daemons/dbus_daemon.h>
@@ -25,6 +25,9 @@
 #include <brillo/syslog_logging.h>
 #include <brillo/userdb_utils.h>
 #include <dbus/attestation/dbus-constants.h>
+#include <libhwsec-foundation/profiling/profiling.h>
+#include <libhwsec-foundation/vpd_reader/vpd_reader_impl.h>
+#include <libhwsec-foundation/tpm_error/tpm_error_uma_reporter.h>
 #include <libminijail.h>
 #include <scoped_minijail.h>
 
@@ -40,6 +43,12 @@ const char kAttestationGroup[] = "attestation";
 const char kAttestationSeccompPath[] =
     "/usr/share/policy/attestationd-seccomp.policy";
 constexpr char kGoogleKeysPath[] = "/run/attestation/google_keys.data";
+
+namespace vpd_key {
+
+constexpr char kAttestedDeviceId[] = "attested_device_id";
+
+}
 
 namespace env {
 static const char kAttestationBasedEnrollmentDataFile[] = "ABE_DATA_FILE";
@@ -65,7 +74,7 @@ std::string ReadAbeDataFileContents() {
   return data;
 }
 
-base::Optional<attestation::GoogleKeys> ReadGoogleKeysIfExists() {
+std::optional<attestation::GoogleKeys> ReadGoogleKeysIfExists() {
   base::FilePath file_path(kGoogleKeysPath);
   std::string data;
   if (!base::ReadFileToString(file_path, &data)) {
@@ -121,10 +130,11 @@ using brillo::dbus_utils::AsyncEventSequencer;
 class AttestationDaemon : public brillo::DBusServiceDaemon {
  public:
   AttestationDaemon(brillo::SecureBlob abe_data,
-                    base::Optional<attestation::GoogleKeys> google_keys)
+                    std::string attested_device_id,
+                    std::optional<attestation::GoogleKeys> google_keys)
       : brillo::DBusServiceDaemon(attestation::kAttestationServiceName),
         abe_data_(std::move(abe_data)),
-        attestation_service_(&abe_data_) {
+        attestation_service_(&abe_data_, attested_device_id) {
     if (google_keys) {
       attestation_service_.set_google_keys(*google_keys);
     }
@@ -163,6 +173,11 @@ int main(int argc, char* argv[]) {
     flags |= brillo::kLogToStderr;
   }
   brillo::InitLog(flags);
+
+  // Set TPM metrics client ID.
+  hwsec_foundation::SetTpmMetricsClientID(
+      hwsec_foundation::TpmMetricsClientID::kAttestation);
+
   // read whole abe_data_file before we init minijail.
   std::string abe_data_hex = ReadAbeDataFileContents();
   // Reads the system salt before we init minijail.
@@ -175,8 +190,27 @@ int main(int argc, char* argv[]) {
   if (!GetAttestationEnrollmentData(abe_data_hex, &abe_data)) {
     LOG(ERROR) << "Invalid attestation-based enterprise enrollment data.";
   }
-  AttestationDaemon daemon(abe_data, ReadGoogleKeysIfExists());
+
+  hwsec_foundation::VpdReaderImpl vpd_reader;
+  std::optional<std::string> attested_device_id =
+      vpd_reader.Get(vpd_key::kAttestedDeviceId);
+  if (!attested_device_id.has_value()) {
+    LOG(INFO) << "No ADID found.";
+#if USE_TPM2_SIMULATOR
+    constexpr char kFakeAttestedDeviceId[] = "fake_attested_device_id_";
+    LOG(INFO) << "Setting ADID to " << kFakeAttestedDeviceId
+              << " for simulator.";
+    attested_device_id = "fake_attested_device_id_";
+#endif
+  }
+
+  AttestationDaemon daemon(abe_data, attested_device_id.value_or(""),
+                           ReadGoogleKeysIfExists());
   LOG(INFO) << "Attestation Daemon Started.";
   InitMinijailSandbox();
+
+  // Start profiling.
+  hwsec_foundation::SetUpProfiling();
+
   return daemon.Run();
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,10 @@
 #include <memory>
 #include <unordered_map>
 
-#include <base/macros.h>
-
+#include "power_manager/common/prefs.h"
 #include "power_manager/powerd/policy/user_proximity_voting.h"
 #include "power_manager/powerd/system/user_proximity_observer.h"
-#include "power_manager/powerd/system/user_proximity_watcher.h"
+#include "power_manager/powerd/system/user_proximity_watcher_interface.h"
 
 namespace power_manager {
 

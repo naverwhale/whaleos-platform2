@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -46,10 +46,14 @@ const gid_t kMountGID = 201;
 const base::FilePath kWorkingDir("/wkdir");
 const base::FilePath kMountDir("/mnt");
 const Uri kSomeSource("sshfs", "src");
+const Uri kSftpSource("sftp", "33:4321");
 
-std::vector<std::string> ParseOptions(const SandboxedProcess& sandbox) {
+std::vector<std::string> ParseOptions(const SandboxedProcess& sandbox,
+                                      bool sshfs) {
   CHECK_EQ(3, sandbox.arguments().size());
-  CHECK_EQ("src", sandbox.arguments()[0]);
+  if (sshfs) {
+    CHECK_EQ("src", sandbox.arguments()[0]);
+  }
   CHECK_EQ("-o", sandbox.arguments()[1]);
   return base::SplitString(sandbox.arguments()[2], ",",
                            base::WhitespaceHandling::KEEP_WHITESPACE,
@@ -98,14 +102,14 @@ class SshfsHelperTest : public ::testing::Test {
   }
 
  protected:
-  MountErrorType ConfigureSandbox(const std::string& source,
-                                  std::vector<std::string> params,
-                                  std::vector<std::string>* args) {
+  MountError ConfigureSandbox(const std::string& source,
+                              std::vector<std::string> params,
+                              std::vector<std::string>* args) {
     FakeSandboxedProcess sandbox;
-    MountErrorType error = helper_->ConfigureSandbox(
-        source, kMountDir, std::move(params), &sandbox);
-    if (error == MOUNT_ERROR_NONE) {
-      *args = ParseOptions(sandbox);
+    MountError error = helper_->ConfigureSandbox(source, kMountDir,
+                                                 std::move(params), &sandbox);
+    if (error == MountError::kSuccess) {
+      *args = ParseOptions(sandbox, source.substr(0, 5) == "sshfs");
     }
     return error;
   }
@@ -129,7 +133,7 @@ TEST_F(SshfsHelperTest, ConfigureSandbox) {
 
   std::vector<std::string> args;
   EXPECT_EQ(
-      MOUNT_ERROR_NONE,
+      MountError::kSuccess,
       ConfigureSandbox(
           kSomeSource.value(),
           {"IdentityBase64=YWJjCg==", "UserKnownHostsBase64=MTIzNDUK"}, &args));
@@ -169,11 +173,12 @@ TEST_F(SshfsHelperTest, ConfigureSandbox) {
 
 TEST_F(SshfsHelperTest, ConfigureSandboxWithHostAndPort) {
   std::vector<std::string> args;
-  EXPECT_EQ(MOUNT_ERROR_NONE, ConfigureSandbox(kSomeSource.value(),
-                                               {"IdentityBase64=YWJjCg==",
-                                                "UserKnownHostsBase64=MTIzNDUK",
-                                                "HostName=foobar", "Port=1234"},
-                                               &args));
+  EXPECT_EQ(MountError::kSuccess,
+            ConfigureSandbox(
+                kSomeSource.value(),
+                {"IdentityBase64=YWJjCg==", "UserKnownHostsBase64=MTIzNDUK",
+                 "HostName=foobar", "Port=1234"},
+                &args));
 
   EXPECT_THAT(args,
               IsSupersetOf({StrEq("HostName=foobar"), StrEq("Port=1234")}));
@@ -183,7 +188,7 @@ TEST_F(SshfsHelperTest, ConfigureSandboxFailsWithInvalidSource) {
   EXPECT_CALL(platform_, SetOwnership).Times(0);
   std::vector<std::string> args;
   EXPECT_NE(
-      MOUNT_ERROR_NONE,
+      MountError::kSuccess,
       ConfigureSandbox(
           "foo://bar",
           {"IdentityBase64=YWJjCg==", "UserKnownHostsBase64=MTIzNDUK"}, &args));
@@ -192,7 +197,7 @@ TEST_F(SshfsHelperTest, ConfigureSandboxFailsWithInvalidSource) {
 TEST_F(SshfsHelperTest, ConfigureSandboxFailsWithoutId) {
   EXPECT_CALL(platform_, SetOwnership).Times(0);
   std::vector<std::string> args;
-  EXPECT_NE(MOUNT_ERROR_NONE,
+  EXPECT_NE(MountError::kSuccess,
             ConfigureSandbox(kSomeSource.value(),
                              {"UserKnownHostsBase64=MTIzNDUK"}, &args));
 }
@@ -200,7 +205,7 @@ TEST_F(SshfsHelperTest, ConfigureSandboxFailsWithoutId) {
 TEST_F(SshfsHelperTest, ConfigureSandboxFailsWithoutKnownHosts) {
   EXPECT_CALL(platform_, SetOwnership).Times(0);
   std::vector<std::string> args;
-  EXPECT_NE(MOUNT_ERROR_NONE,
+  EXPECT_NE(MountError::kSuccess,
             ConfigureSandbox(kSomeSource.value(), {"IdentityBase64=YWJjCg=="},
                              &args));
 }
@@ -210,7 +215,7 @@ TEST_F(SshfsHelperTest, ConfigureSandboxFailsWithoutDir) {
   ASSERT_TRUE(working_dir_.Delete());
   std::vector<std::string> args;
   EXPECT_NE(
-      MOUNT_ERROR_NONE,
+      MountError::kSuccess,
       ConfigureSandbox(
           kSomeSource.value(),
           {"IdentityBase64=YWJjCg==", "UserKnownHostsBase64=MTIzNDUK"}, &args));
@@ -228,9 +233,19 @@ TEST_F(SshfsHelperTest, CanMount) {
   EXPECT_EQ("usr@host_com:", name.value());
   EXPECT_TRUE(helper_->CanMount("sshfs://host:/some/path/..", {}, &name));
   EXPECT_EQ("host:$some$path$__", name.value());
+  EXPECT_TRUE(helper_->CanMount("sftp://32:1234", {}, &name));
+  EXPECT_EQ("32:1234", name.value());
 
   EXPECT_FALSE(helper_->CanMount("sshfss://foo", {}, &name));
   EXPECT_FALSE(helper_->CanMount("ssh://foo", {}, &name));
+}
+
+TEST_F(SshfsHelperTest, ConfigureSandboxWithCidAndPort) {
+  std::vector<std::string> args;
+  EXPECT_EQ(MountError::kSuccess,
+            ConfigureSandbox(Uri("sftp", "32:1234").value(), {}, &args));
+
+  EXPECT_THAT(args, IsSupersetOf({StrEq("vsock=32:1234")}));
 }
 
 }  // namespace cros_disks

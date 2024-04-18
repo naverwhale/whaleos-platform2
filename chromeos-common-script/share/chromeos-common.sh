@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+# Copyright 2010 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
@@ -16,7 +16,7 @@
 # command, as sudo does.
 # This way we avoid using sudo when running on a device in verified mode.
 maybe_sudo() {
-   if [ "${UID:-$(id -u)}" = "0" ]; then
+   if [ "$(id -u)" = "0" ]; then
      PATH="${PATH}:/sbin:/usr/sbin" "$@"
    else
      sudo "$@"
@@ -122,7 +122,7 @@ partsize() {
 # (-> /dev/mmcblk0).
 get_block_dev_from_partition_dev() {
   local partition="$1"
-  if ! (expr match "${partition}" ".*[0-9]$" >/dev/null) ; then
+  if ! (expr "${partition}" : ".*[0-9]$" >/dev/null) ; then
     echo "Invalid partition name: ${partition}" >&2
     exit 1
   fi
@@ -130,7 +130,7 @@ get_block_dev_from_partition_dev() {
   local block
   block="$(echo "${partition}" | sed -e 's/[0-9]*$//')"
   # If needed, strip the trailing 'p'.
-  if (expr match "${block}" ".*[0-9]p$" >/dev/null); then
+  if (expr "${block}" : ".*[0-9]p$" >/dev/null); then
     echo "${block%p}"
   else
     echo "${block}"
@@ -141,7 +141,7 @@ get_block_dev_from_partition_dev() {
 # This works for /dev/sda3 (-> 3) as well as /dev/mmcblk0p2 (-> 2).
 get_partition_number() {
   local partition="$1"
-  if ! (expr match "${partition}" ".*[0-9]$" >/dev/null) ; then
+  if ! (expr "${partition}" : ".*[0-9]$" >/dev/null) ; then
     echo "Invalid partition name: ${partition}" >&2
     exit 1
   fi
@@ -158,7 +158,7 @@ make_partition_dev() {
   local num="$2"
   # If the disk block device ends with a number, we add a 'p' before the
   # partition number.
-  if (expr match "${block}" ".*[0-9]$" >/dev/null) ; then
+  if (expr "${block}" : ".*[0-9]$" >/dev/null) ; then
     echo "${block}p${num}"
   else
     echo "${block}${num}"
@@ -176,6 +176,7 @@ get_device_type() {
   local dev
   local vdr
   local type_file
+  local dev_node
   # True device path of a NVMe device is just a simple PCI device.
   # (there are no other buses),
   # Use the device name to identify the type precisely.
@@ -187,6 +188,7 @@ get_device_type() {
       ;;
   esac
 
+  dev_node="/sys/block/${dev}/device"
   type_file="/sys/block/${dev}/device/type"
   # To detect device managed by the MMC stack
   case $(readlink -f "${type_file}") in
@@ -199,9 +201,9 @@ get_device_type() {
       echo "USB"
       ;;
     *ufs*)
-        # Check if it is a UFS device.
-        echo "UFS"
-        ;;
+      # Check if it is UFS device on Platform bus.
+      echo "UFS"
+      ;;
     *target*)
       # Other SCSI devices.
       # Check if it is an ATA device.
@@ -209,7 +211,18 @@ get_device_type() {
       if [ "${vdr%% *}" = "ATA" ]; then
         echo "ATA"
       else
-        echo "OTHER"
+        # Check if it is UFS device on PCIe bus. The dev node points to the
+        # /sys/devices and '..' on a link will get parents of the target. We
+        # aim to find the driver node of a SCSI device, which should point to
+        # ufshcd driver.
+        case $(readlink -f "${dev_node}/../../../driver") in
+          */ufshcd)
+            echo "UFS"
+            ;;
+          *)
+            echo "OTHER"
+            ;;
+        esac
       fi
       ;;
     *)
@@ -340,6 +353,7 @@ get_fixed_dst_drive() {
   if [ -n "${DEFAULT_ROOTDEV}" ]; then
     # No " here, the variable may contain wildcards.
     for rootdev in ${DEFAULT_ROOTDEV}; do
+      [ -d "${rootdev}" ] || continue
       dev="/dev/$(basename "${rootdev}")"
       if [ -b "${dev}" ]; then
         case "${dev}" in
@@ -359,9 +373,19 @@ get_fixed_dst_drive() {
 }
 
 # Check if rootfs is mounted on a removable device.
+# Returns 0 for a removable device, otherwise returns 1.
 rootdev_removable() {
-  local dst_drive="$(get_fixed_dst_drive)"
-  local root_drive="$(rootdev -s -d)"
+  # Use the is_running_from_installer program if it exists. This is
+  # needed to support boards that don't have a fixed destination drive.
+  if [ -e "/usr/sbin/is_running_from_installer" ]; then
+    [ "$(is_running_from_installer)" != "no" ]
+    return $?
+  fi
+
+  local dst_drive
+  dst_drive="$(get_fixed_dst_drive)"
+  local root_drive
+  root_drive="$(rootdev -s -d)"
 
   if [ "${dst_drive}" != "${root_drive}" ]; then
     return 0
@@ -371,13 +395,11 @@ rootdev_removable() {
 
 edit_mbr() {
   locate_gpt
-  # TODO(icoolidge): Get this from disk_layout somehow.
-  local PARTITION_NUM_EFI_SYSTEM=12
   local start_esp
   local num_esp_sectors
 
-  start_esp="$(partoffset "$1" "${PARTITION_NUM_EFI_SYSTEM}")"
-  num_esp_sectors="$(partsize "$1" "${PARTITION_NUM_EFI_SYSTEM}")"
+  start_esp="$(partoffset "$1" "$2")"
+  num_esp_sectors="$(partsize "$1" "$2")"
   maybe_sudo sfdisk -w never -X dos "${1}" <<EOF
 unit: sectors
 
@@ -399,7 +421,7 @@ install_hybrid_mbr() {
   # cf. crbug.com/343681.
 
   echo "Creating hybrid MBR"
-  if ! edit_mbr "${1}"; then
+  if ! edit_mbr "${1}" "${2}"; then
     udevadm settle
     maybe_sudo blockdev --rereadpt "${1}"
   fi

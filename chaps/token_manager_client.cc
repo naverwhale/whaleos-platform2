@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <base/logging.h>
 #include <brillo/secure_blob.h>
 
+#include "chaps/chaps.h"
 #include "chaps/chaps_proxy.h"
 #include "chaps/chaps_utility.h"
 
@@ -17,7 +18,7 @@ using std::vector;
 
 namespace chaps {
 
-TokenManagerClient::TokenManagerClient() {}
+TokenManagerClient::TokenManagerClient(ThreadingMode mode) : mode_(mode) {}
 
 TokenManagerClient::~TokenManagerClient() {}
 
@@ -80,23 +81,14 @@ bool TokenManagerClient::LoadToken(const SecureBlob& isolate_credential,
   return result;
 }
 
-void TokenManagerClient::UnloadToken(const SecureBlob& isolate_credential,
+bool TokenManagerClient::UnloadToken(const SecureBlob& isolate_credential,
                                      const FilePath& path) {
   if (!Connect()) {
     LOG(ERROR) << __func__ << ": Failed to connect to the Chaps daemon.";
-    return;
+    return false;
   }
-  proxy_->UnloadToken(isolate_credential, path.value());
-}
-
-void TokenManagerClient::ChangeTokenAuthData(const FilePath& path,
-                                             const SecureBlob& old_auth_data,
-                                             const SecureBlob& new_auth_data) {
-  if (!Connect()) {
-    LOG(ERROR) << __func__ << ": Failed to connect to the Chaps daemon.";
-    return;
-  }
-  proxy_->ChangeTokenAuthData(path.value(), old_auth_data, new_auth_data);
+  bool result = proxy_->UnloadToken(isolate_credential, path.value());
+  return result;
 }
 
 bool TokenManagerClient::GetTokenPath(const SecureBlob& isolate_credential,
@@ -114,7 +106,7 @@ bool TokenManagerClient::GetTokenPath(const SecureBlob& isolate_credential,
 
 bool TokenManagerClient::Connect() {
   if (!proxy_)
-    proxy_ = ChapsProxyImpl::Create(false /* shadow_at_exit */);
+    proxy_ = ChapsProxyImpl::Create(/*shadow_at_exit=*/false, mode_);
   return proxy_.get() != nullptr;
 }
 

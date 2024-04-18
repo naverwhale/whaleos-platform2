@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -305,8 +305,6 @@ constexpr FeatureMappingEntry kFeaturesMap[] = {
     {"CastMediaRouteProvider", "1", "cast-media-route-provider", 1},
     {"CdmFactoryDaemon", "0", "cdm-factory-daemon", 2},
     {"CdmFactoryDaemon", "1", "cdm-factory-daemon", 1},
-    {"CellularUseAttachApn", "0", "cellular-use-attach-apn", 2},
-    {"CellularUseAttachApn", "1", "cellular-use-attach-apn", 1},
     {"ChangePasswordAffiliationInfo", "0", "change-password-affiliation", 2},
     {"ChangePasswordAffiliationInfo", "1", "change-password-affiliation", 1},
     {"CheckOfflineCapability", "0", "check-offline-capability", 4},
@@ -574,8 +572,6 @@ constexpr FeatureMappingEntry kFeaturesMap[] = {
     {"ExoGamepadVibration", "1", "exo-gamepad-vibration", 1},
     {"ExoOrdinalMotion", "0", "exo-ordinal-motion", 2},
     {"ExoOrdinalMotion", "1", "exo-ordinal-motion", 1},
-    {"ExoPointerLock", "0", "exo-pointer-lock", 2},
-    {"ExoPointerLock", "1", "exo-pointer-lock", 1},
     {"ExpensiveBackgroundTimerThrottling", "0",
      "expensive-background-timer-throttling", 2},
     {"ExpensiveBackgroundTimerThrottling", "1",

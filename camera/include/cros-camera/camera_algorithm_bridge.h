@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -51,6 +51,10 @@ enum class CameraAlgorithmBackend {
 
 class CROS_CAMERA_EXPORT CameraAlgorithmBridge {
  public:
+  // Disallow copy and assign
+  CameraAlgorithmBridge(const CameraAlgorithmBridge&) = delete;
+  void operator=(const CameraAlgorithmBridge&) = delete;
+
   // [DEPRECATED]
   //
   // This method creates and returns the CameraAlgorithmBridge instance of
@@ -72,7 +76,7 @@ class CROS_CAMERA_EXPORT CameraAlgorithmBridge {
   static std::unique_ptr<CameraAlgorithmBridge> CreateInstance(
       CameraAlgorithmBackend backend, CameraMojoChannelManagerToken* token);
 
-  virtual ~CameraAlgorithmBridge() {}
+  virtual ~CameraAlgorithmBridge() = default;
 
   // This method is one-time initialization that registers a callback function
   // for the camera algorithm library to return a buffer handle. It must be
@@ -127,13 +131,20 @@ class CROS_CAMERA_EXPORT CameraAlgorithmBridge {
   virtual void DeregisterBuffers(
       const std::vector<int32_t>& buffer_handles) = 0;
 
- protected:
-  CameraAlgorithmBridge() {}
+  // This method returns the result for an update from the camera algorithm
+  // library.
+  //
+  // Args:
+  //    |upd_id|: The ID that uniquely identifies the update from camera
+  //      algorithm library.
+  //    |status|: Result of the update.
+  //    |buffer_fd|: The buffer file descriptor to return.
+  virtual void UpdateReturn(uint32_t upd_id,
+                            uint32_t status,
+                            int buffer_fd) = 0;
 
- private:
-  // Disallow copy and assign
-  CameraAlgorithmBridge(const CameraAlgorithmBridge&) = delete;
-  void operator=(const CameraAlgorithmBridge&) = delete;
+ protected:
+  CameraAlgorithmBridge() = default;
 };
 
 }  // namespace cros

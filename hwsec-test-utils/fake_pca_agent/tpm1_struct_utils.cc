@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "hwsec-test-utils/fake_pca_agent/tpm1_struct_utils.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <arpa/inet.h>
@@ -12,9 +13,9 @@
 #include <base/hash/sha1.h>
 #include <base/logging.h>
 #include <base/memory/free_deleter.h>
-#include <base/optional.h>
 #include <base/sys_byteorder.h>
 #include <crypto/scoped_openssl_types.h>
+#include <libhwsec-foundation/crypto/rsa.h>
 #include <trousers/trousers.h>
 #include <trousers/tss.h>
 
@@ -24,12 +25,14 @@
   LOG(severity) << "TPM error 0x" << std::hex << result << " (" \
                 << Trspi_Error_String(result) << "): "
 
+using hwsec_foundation::CreateRSAFromNumber;
+using hwsec_foundation::kWellKnownExponent;
+
 namespace hwsec_test_utils {
 namespace fake_pca_agent {
 
 namespace {
 
-constexpr int kWellKnownExponent = 65537;
 constexpr int kExpectedPcrLength = 20;
 
 // The implementation of attestation service always selects 16 bits.
@@ -73,38 +76,22 @@ crypto::ScopedEVP_PKEY TpmPublicKeyToEVP(
     return nullptr;
   }
   std::unique_ptr<BYTE, base::FreeDeleter> scoped_exponent(parms.exponent);
-  crypto::ScopedRSA rsa(RSA_new());
-  if (!rsa) {
-    LOG(ERROR) << "Failed to allocate RSA: " << GetOpenSSLError();
-    return nullptr;
+
+  crypto::ScopedRSA rsa = nullptr;
+  brillo::Blob modulus(parsed.pubKey.key,
+                       parsed.pubKey.key + parsed.pubKey.keyLength);
+  if (parms.exponentSize == 0) {
+    rsa = CreateRSAFromNumber(modulus, kWellKnownExponent);
+  } else {
+    rsa = CreateRSAFromNumber(
+        modulus,
+        brillo::Blob(parms.exponent, parms.exponent + parms.exponentSize));
   }
-  crypto::ScopedBIGNUM e(BN_new()), n(BN_new());
-  if (!e || !n) {
-    LOG(ERROR) << "Failed to allocate RSA or BIGNUM.";
+  if (!rsa) {
+    LOG(ERROR) << __func__ << ": Failed to create RSA.";
     return nullptr;
   }
 
-  // Get the public exponent.
-  if (parms.exponentSize == 0) {
-    if (!BN_set_word(e.get(), kWellKnownExponent)) {
-      LOG(ERROR) << "Failed to set exponent to WellKnownExponent.";
-      return nullptr;
-    }
-  } else {
-    if (!BN_bin2bn(parms.exponent, parms.exponentSize, e.get())) {
-      LOG(ERROR) << "Failed to convert exponent to BIGNUM.";
-      return nullptr;
-    }
-  }
-  // Get the modulus.
-  if (!BN_bin2bn(parsed.pubKey.key, parsed.pubKey.keyLength, n.get())) {
-    LOG(ERROR) << "Failed to convert public key to BIGNUM.";
-    return nullptr;
-  }
-  if (!RSA_set0_key(rsa.get(), n.release(), e.release(), nullptr)) {
-    LOG(ERROR) << ": Failed to set exponent or modulus.";
-    return nullptr;
-  }
   crypto::ScopedEVP_PKEY key(EVP_PKEY_new());
   if (!key) {
     LOG(ERROR) << ": Failed to call EVP_PKEY_new: " << GetOpenSSLError();
@@ -168,7 +155,7 @@ std::string Serialize(TPM_SYM_CA_ATTESTATION* contents) {
   return std::string(blob.get(), blob.get() + offset);
 }
 
-base::Optional<std::string> ParseDigestFromTpmCertifyInfo(
+std::optional<std::string> ParseDigestFromTpmCertifyInfo(
     const std::string& serialized) {
   TPM_CERTIFY_INFO parsed{};
   uint64_t offset = 0;

@@ -1,0 +1,39 @@
+# Copyright 2021 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/mojom_bindings_generator.gni")
+import("//common-mk/pkg_config.gni")
+
+generate_mojom_bindings("libcros_healthd_mojo_bindings") {
+  mojo_root = "${platform2_root}"
+  install_package = "cros_healthd-client"
+  deps = [
+    "//diagnostics/mojom/external:libcros_healthd_internal",
+    "//diagnostics/mojom/external:libmojo_base",
+    "//diagnostics/mojom/external:libnetwork_diagnostics_mojo_bindings",
+    "//diagnostics/mojom/external:libnetwork_health_mojo_bindings",
+    "//diagnostics/mojom/external:libpublic_dependencies",
+  ]
+  sources = [
+    "cros_healthd.mojom",
+    "cros_healthd_diagnostics.mojom",
+    "cros_healthd_event_reporters.mojom",
+    "cros_healthd_events.mojom",
+    "cros_healthd_exception.mojom",
+    "cros_healthd_probe.mojom",
+    "cros_healthd_routines.mojom",
+    "nullable_primitives.mojom",
+    "wilco_ec.mojom",
+  ]
+  mojo_extra_args = [
+    "--typemap",
+    rebase_path("//diagnostics/mojom/external/type_mappings.json"),
+  ]
+}
+
+generate_mojom_bindings("wilco_dtc_supportd_mojo_bindings") {
+  mojo_root = "${platform2_root}"
+  sources = [ "wilco_dtc_supportd.mojom" ]
+  deps = [ ":libcros_healthd_mojo_bindings" ]
+}

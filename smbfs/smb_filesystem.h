@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,20 +10,20 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/containers/mru_cache.h>
+#include <base/containers/lru_cache.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <base/synchronization/lock.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/thread.h>
 #include <base/time/time.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <gtest/gtest_prod.h>
 
 #include "smbfs/filesystem.h"
@@ -76,6 +76,11 @@ class SmbFilesystem : public Filesystem {
   };
 
   SmbFilesystem(Delegate* delegate, Options options);
+
+  SmbFilesystem() = delete;
+  SmbFilesystem(const SmbFilesystem&) = delete;
+  SmbFilesystem& operator=(const SmbFilesystem&) = delete;
+
   ~SmbFilesystem() override;
 
   base::WeakPtr<SmbFilesystem> GetWeakPtr();
@@ -105,7 +110,7 @@ class SmbFilesystem : public Filesystem {
   void GetAttr(std::unique_ptr<AttrRequest> request, fuse_ino_t inode) override;
   void SetAttr(std::unique_ptr<AttrRequest> request,
                fuse_ino_t inode,
-               base::Optional<uint64_t> file_handle,
+               std::optional<uint64_t> file_handle,
                const struct stat& attr,
                int to_set) override;
   void Open(std::unique_ptr<OpenRequest> request,
@@ -197,11 +202,11 @@ class SmbFilesystem : public Filesystem {
   void GetAttrInternal(std::unique_ptr<AttrRequest> request, fuse_ino_t inode);
   void SetAttrInternal(std::unique_ptr<AttrRequest> request,
                        fuse_ino_t inode,
-                       base::Optional<uint64_t> file_handle,
+                       std::optional<uint64_t> file_handle,
                        const struct stat& attr,
                        int to_set);
   int SetFileSizeInternal(const std::string& share_file_path,
-                          base::Optional<uint64_t> file_handle,
+                          std::optional<uint64_t> file_handle,
                           off_t size,
                           const struct stat& current_stat,
                           struct stat* reply_stat);
@@ -324,7 +329,7 @@ class SmbFilesystem : public Filesystem {
 
   // Origin/constructor thread task runner.
   scoped_refptr<base::SingleThreadTaskRunner> main_task_runner_ =
-      base::ThreadTaskRunnerHandle::Get();
+      base::SingleThreadTaskRunner::GetCurrentDefault();
 
   std::unordered_map<uint64_t, SMBCFILE*> open_files_;
   uint64_t open_files_seq_ = 1;
@@ -336,7 +341,7 @@ class SmbFilesystem : public Filesystem {
   std::unique_ptr<SambaInterface> samba_impl_;
 
   // Cache stat information during ReadDir() to speed up subsequent access.
-  base::HashingMRUCache<ino_t, StatCacheItem> stat_cache_;
+  base::HashingLRUCache<ino_t, StatCacheItem> stat_cache_;
 
   // Whether a successful connection to the SMB server has been made. Used to
   // determine whether or not to request auth credentials.
@@ -350,8 +355,6 @@ class SmbFilesystem : public Filesystem {
   std::unique_ptr<RecursiveDeleteOperation> recursive_delete_operation_;
 
   base::WeakPtrFactory<SmbFilesystem> weak_factory_{this};
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(SmbFilesystem);
 };
 
 std::ostream& operator<<(std::ostream& out, SmbFilesystem::ConnectError error);

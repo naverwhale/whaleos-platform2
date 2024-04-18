@@ -1,9 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "biod/cros_fp_biometrics_manager.h"
 
+#include <optional>
 #include <utility>
 
 #include <errno.h>
@@ -12,150 +13,37 @@
 #include <sys/types.h>
 
 #include <base/base64.h>
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_piece.h>
 #include <base/threading/platform_thread.h>
-#include <base/time/time.h>
 #include <crypto/random.h>
+#include <dbus/bus.h>
 #include <metrics/metrics_library.h>
-#include <base/timer/timer.h>
 
 #include "biod/biod_crypto.h"
 #include "biod/biod_metrics.h"
-#include "biod/biod_storage.h"
+#include "biod/biometrics_manager_record.h"
+#include "biod/maintenance_scheduler.h"
 #include "biod/power_button_filter.h"
 #include "biod/utils.h"
-
-namespace {
-
-std::string MatchResultToString(int result) {
-  switch (result) {
-    case EC_MKBP_FP_ERR_MATCH_NO:
-      return "No match";
-    case EC_MKBP_FP_ERR_MATCH_NO_INTERNAL:
-      return "Internal error";
-    case EC_MKBP_FP_ERR_MATCH_NO_TEMPLATES:
-      return "No templates";
-    case EC_MKBP_FP_ERR_MATCH_NO_LOW_QUALITY:
-      return "Low quality";
-    case EC_MKBP_FP_ERR_MATCH_NO_LOW_COVERAGE:
-      return "Low coverage";
-    case EC_MKBP_FP_ERR_MATCH_YES:
-      return "Finger matched";
-    case EC_MKBP_FP_ERR_MATCH_YES_UPDATED:
-      return "Finger matched, template updated";
-    case EC_MKBP_FP_ERR_MATCH_YES_UPDATE_FAILED:
-      return "Finger matched, template updated failed";
-    default:
-      return "Unknown matcher result";
-  }
-}
-
-std::string EnrollResultToString(int result) {
-  switch (result) {
-    case EC_MKBP_FP_ERR_ENROLL_OK:
-      return "Success";
-    case EC_MKBP_FP_ERR_ENROLL_LOW_QUALITY:
-      return "Low quality";
-    case EC_MKBP_FP_ERR_ENROLL_IMMOBILE:
-      return "Same area";
-    case EC_MKBP_FP_ERR_ENROLL_LOW_COVERAGE:
-      return "Low coverage";
-    case EC_MKBP_FP_ERR_ENROLL_INTERNAL:
-      return "Internal error";
-    default:
-      return "Unknown enrollment result";
-  }
-}
-
-};  // namespace
+#include "libec/fingerprint/cros_fp_device_interface.h"
+#include "libec/fingerprint/fp_mode.h"
+#include "libec/fingerprint/fp_sensor_errors.h"
 
 namespace biod {
 
 using Mode = ec::FpMode::Mode;
 
-const std::string& CrosFpBiometricsManager::Record::GetId() const {
-  CHECK(biometrics_manager_);
-  CHECK(index_ < biometrics_manager_->records_.size());
-  return biometrics_manager_->records_[index_].record_id;
-}
-
-const std::string& CrosFpBiometricsManager::Record::GetUserId() const {
-  CHECK(biometrics_manager_);
-  CHECK(index_ <= biometrics_manager_->records_.size());
-  return biometrics_manager_->records_[index_].user_id;
-}
-
-const std::string& CrosFpBiometricsManager::Record::GetLabel() const {
-  CHECK(biometrics_manager_);
-  CHECK(index_ < biometrics_manager_->records_.size());
-  return biometrics_manager_->records_[index_].label;
-}
-
-const std::vector<uint8_t>& CrosFpBiometricsManager::Record::GetValidationVal()
-    const {
-  CHECK(biometrics_manager_);
-  CHECK(index_ <= biometrics_manager_->records_.size());
-  return biometrics_manager_->records_[index_].validation_val;
-}
-
-bool CrosFpBiometricsManager::Record::SetLabel(std::string label) {
-  CHECK(biometrics_manager_);
-  CHECK(index_ < biometrics_manager_->records_.size());
-  std::string old_label = biometrics_manager_->records_[index_].label;
-
-  std::unique_ptr<VendorTemplate> tmpl =
-      biometrics_manager_->cros_dev_->GetTemplate(index_);
-  // TODO(vpalatin): would be faster to read it from disk
-  if (!tmpl) {
-    return false;
-  }
-  biometrics_manager_->records_[index_].label = std::move(label);
-
-  if (!biometrics_manager_->WriteRecord(*this, tmpl->data(), tmpl->size())) {
-    biometrics_manager_->records_[index_].label = std::move(old_label);
-    return false;
-  }
-  return true;
-}
-
-bool CrosFpBiometricsManager::Record::SupportsPositiveMatchSecret() const {
-  return biometrics_manager_->use_positive_match_secret_;
-}
-
-bool CrosFpBiometricsManager::Record::Remove() {
-  if (!biometrics_manager_)
-    return false;
-  if (index_ >= biometrics_manager_->records_.size())
-    return false;
-
-  const auto& record = biometrics_manager_->records_[index_];
-  std::string user_id = record.user_id;
-
-  // TODO(mqg): only delete record if user_id is primary user.
-  if (!biometrics_manager_->biod_storage_->DeleteRecord(user_id,
-                                                        record.record_id))
-    return false;
-
-  // We cannot remove only one record if we want to stay in sync with the MCU,
-  // Clear and reload everything.
-  return biometrics_manager_->ReloadAllRecords(user_id);
-}
-
 bool CrosFpBiometricsManager::ReloadAllRecords(std::string user_id) {
   // Here we need a copy of user_id because the user_id could be part of
-  // records_ which is cleared in this method.
-  records_.clear();
+  // loaded_records_ which is cleared in this method.
+  loaded_records_.clear();
   suspicious_templates_.clear();
-  cros_dev_->SetContext(user_id);
-  auto result = biod_storage_->ReadRecordsForSingleUser(user_id);
-  for (const auto& record : result.valid_records) {
-    LoadRecord(std::move(record));
-  }
-  return result.invalid_records.empty();
+
+  return ReadRecordsForSingleUser(user_id);
 }
 
 BiometricType CrosFpBiometricsManager::GetType() {
@@ -167,21 +55,37 @@ BiometricsManager::EnrollSession CrosFpBiometricsManager::StartEnrollSession(
   LOG(INFO) << __func__;
   // Another session is on-going, fail early ...
   if (!next_session_action_.is_null()) {
-    LOG(ERROR) << "Another EnrollSession already exists";
-    return BiometricsManager::EnrollSession();
+    LOG(ERROR) << kEnrollSessionExists;
+    BiometricsManager::EnrollSession enroll_session;
+    enroll_session.set_error(kEnrollSessionExists);
+    return enroll_session;
   }
 
-  if (records_.size() >= cros_dev_->MaxTemplateCount()) {
-    LOG(ERROR) << "No space for an additional template.";
-    return BiometricsManager::EnrollSession();
+  if (loaded_records_.size() >= cros_dev_->MaxTemplateCount()) {
+    LOG(ERROR) << kTemplatesFull;
+    BiometricsManager::EnrollSession enroll_session;
+    enroll_session.set_error(kTemplatesFull);
+    return enroll_session;
   }
 
   std::vector<uint8_t> validation_val;
   if (!RequestEnrollImage(BiodStorageInterface::RecordMetadata{
           kRecordFormatVersion, BiodStorage::GenerateNewRecordId(),
-          std::move(user_id), std::move(label), std::move(validation_val)}))
-    return BiometricsManager::EnrollSession();
+          std::move(user_id), std::move(label), std::move(validation_val)})) {
+    LOG(ERROR) << kEnrollImageNotRequested;
+    BiometricsManager::EnrollSession enroll_session;
+    enroll_session.set_error(kEnrollImageNotRequested);
+    return enroll_session;
+  }
 
+  if (cros_dev_->GetHwErrors() != ec::FpSensorErrors::kNone) {
+    LOG(ERROR) << kFpHwUnavailable;
+    BiometricsManager::EnrollSession enroll_session;
+    enroll_session.set_error(kFpHwUnavailable);
+    return enroll_session;
+  }
+
+  num_enrollment_captures_ = 0;
   return BiometricsManager::EnrollSession(session_weak_factory_.GetWeakPtr());
 }
 
@@ -189,50 +93,101 @@ BiometricsManager::AuthSession CrosFpBiometricsManager::StartAuthSession() {
   LOG(INFO) << __func__;
   // Another session is on-going, fail early ...
   if (!next_session_action_.is_null()) {
-    LOG(ERROR) << "Another AuthSession already exists";
-    return BiometricsManager::AuthSession();
+    LOG(ERROR) << kAuthSessionExists;
+    BiometricsManager::AuthSession auth_session;
+    auth_session.set_error(kAuthSessionExists);
+    return auth_session;
   }
 
-  if (!RequestMatch())
-    return BiometricsManager::AuthSession();
+  if (!RequestMatch()) {
+    LOG(ERROR) << kMatchNotRequested;
+    BiometricsManager::AuthSession auth_session;
+    auth_session.set_error(kMatchNotRequested);
+    return auth_session;
+  }
+
+  if (cros_dev_->GetHwErrors() != ec::FpSensorErrors::kNone) {
+    LOG(ERROR) << kFpHwUnavailable;
+    BiometricsManager::AuthSession auth_session;
+    auth_session.set_error(kFpHwUnavailable);
+    return auth_session;
+  }
 
   return BiometricsManager::AuthSession(session_weak_factory_.GetWeakPtr());
 }
 
-std::vector<std::unique_ptr<BiometricsManagerRecord>>
-CrosFpBiometricsManager::GetRecords() {
-  std::vector<std::unique_ptr<BiometricsManagerRecord>> records;
-  for (int i = 0; i < records_.size(); i++)
-    records.emplace_back(
-        std::make_unique<Record>(weak_factory_.GetWeakPtr(), i));
+std::vector<std::unique_ptr<BiometricsManagerRecordInterface>>
+CrosFpBiometricsManager::GetLoadedRecords() {
+  std::vector<std::unique_ptr<BiometricsManagerRecordInterface>> records;
+
+  for (const auto& record_id : loaded_records_) {
+    records.emplace_back(std::make_unique<BiometricsManagerRecord>(
+        weak_factory_.GetWeakPtr(), record_id));
+  }
+
   return records;
 }
 
-bool CrosFpBiometricsManager::DestroyAllRecords() {
-  // Enumerate through records_ and delete each record.
-  bool delete_all_records = true;
-  for (auto& record : records_) {
-    delete_all_records &=
-        biod_storage_->DeleteRecord(record.user_id, record.record_id);
+std::optional<BiodStorageInterface::RecordMetadata>
+CrosFpBiometricsManager::GetRecordMetadata(const std::string& record_id) const {
+  return record_manager_->GetRecordMetadata(record_id);
+}
+
+std::optional<std::string> CrosFpBiometricsManager::GetLoadedRecordId(int id) {
+  if (id < 0 || id >= loaded_records_.size()) {
+    return std::nullopt;
   }
-  RemoveRecordsFromMemory();
-  return delete_all_records;
+  return loaded_records_[id];
+}
+
+bool CrosFpBiometricsManager::DestroyAllRecords() {
+  return record_manager_->DeleteAllRecords();
 }
 
 void CrosFpBiometricsManager::RemoveRecordsFromMemory() {
-  records_.clear();
+  record_manager_->RemoveRecordsFromMemory();
+  loaded_records_.clear();
   suspicious_templates_.clear();
   cros_dev_->ResetContext();
+}
+
+bool CrosFpBiometricsManager::RemoveRecord(const std::string& record_id) {
+  const auto record = record_manager_->GetRecordMetadata(record_id);
+  if (!record) {
+    LOG(ERROR) << "Can't find metadata for record " << LogSafeID(record_id);
+    return false;
+  }
+
+  std::string user_id = record->user_id;
+
+  // TODO(b/115399954): only delete record if user_id is primary user.
+  if (!record_manager_->DeleteRecord(record_id))
+    return false;
+
+  // We cannot remove only one record if we want to stay in sync with the MCU,
+  // Clear and reload everything.
+  return ReloadAllRecords(user_id);
+}
+
+bool CrosFpBiometricsManager::UpdateRecordMetadata(
+    const BiodStorageInterface::RecordMetadata& record_metadata) {
+  return record_manager_->UpdateRecordMetadata(record_metadata);
 }
 
 bool CrosFpBiometricsManager::ReadRecordsForSingleUser(
     const std::string& user_id) {
   cros_dev_->SetContext(user_id);
-  auto result = biod_storage_->ReadRecordsForSingleUser(user_id);
-  for (const auto& record : result.valid_records) {
-    LoadRecord(record);
+  auto valid_records = record_manager_->GetRecordsForUser(user_id);
+  for (const auto& record : valid_records) {
+    LoadRecord(std::move(record));
   }
-  return result.invalid_records.empty();
+
+  if (record_manager_->UserHasInvalidRecords(user_id)) {
+    record_manager_->DeleteInvalidRecords();
+    return false;
+  }
+
+  return true;
 }
 
 void CrosFpBiometricsManager::SetEnrollScanDoneHandler(
@@ -252,15 +207,15 @@ void CrosFpBiometricsManager::SetSessionFailedHandler(
 
 bool CrosFpBiometricsManager::SendStatsOnLogin() {
   bool rc = true;
-  rc = biod_metrics_->SendEnrolledFingerCount(records_.size()) && rc;
+  rc = biod_metrics_->SendEnrolledFingerCount(loaded_records_.size()) && rc;
   // Even though it looks a bit redundant with the finger count, it's easier to
   // discover and interpret.
-  rc = biod_metrics_->SendFpUnlockEnabled(!records_.empty()) && rc;
+  rc = biod_metrics_->SendFpUnlockEnabled(!loaded_records_.empty()) && rc;
   return rc;
 }
 
 void CrosFpBiometricsManager::SetDiskAccesses(bool allow) {
-  biod_storage_->set_allow_access(allow);
+  record_manager_->SetAllowAccess(allow);
 }
 
 bool CrosFpBiometricsManager::ResetSensor() {
@@ -282,7 +237,7 @@ bool CrosFpBiometricsManager::ResetSensor() {
       reset_complete = true;
       break;
     }
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(100));
+    base::PlatformThread::Sleep(base::Milliseconds(100));
   }
 
   if (!reset_complete) {
@@ -290,16 +245,6 @@ bool CrosFpBiometricsManager::ResetSensor() {
     return false;
   }
 
-  return true;
-}
-
-bool CrosFpBiometricsManager::ResetEntropy(bool factory_init) {
-  bool success = cros_dev_->InitEntropy(!factory_init);
-  if (!success) {
-    LOG(INFO) << "Entropy source reset failed.";
-    return false;
-  }
-  LOG(INFO) << "Entropy source has been successfully reset.";
   return true;
 }
 
@@ -322,37 +267,28 @@ void CrosFpBiometricsManager::KillMcuSession() {
 
 CrosFpBiometricsManager::CrosFpBiometricsManager(
     std::unique_ptr<PowerButtonFilterInterface> power_button_filter,
-    std::unique_ptr<CrosFpDeviceInterface> cros_fp_device,
-    std::unique_ptr<BiodMetricsInterface> biod_metrics,
-    std::unique_ptr<BiodStorageInterface> biod_storage)
-    : biod_metrics_(std::move(biod_metrics)),
-      cros_dev_(std::move(cros_fp_device)),
-      session_weak_factory_(this),
+    std::unique_ptr<ec::CrosFpDeviceInterface> cros_fp_device,
+    BiodMetricsInterface* biod_metrics,
+    std::unique_ptr<CrosFpRecordManagerInterface> record_manager)
+    : session_weak_factory_(this),
       weak_factory_(this),
+      biod_metrics_(biod_metrics),
+      cros_dev_(std::move(cros_fp_device)),
       power_button_filter_(std::move(power_button_filter)),
-      biod_storage_(std::move(biod_storage)),
-      use_positive_match_secret_(false),
-      maintenance_timer_(std::make_unique<base::RepeatingTimer>()) {
+      record_manager_(std::move(record_manager)),
+      maintenance_scheduler_(std::make_unique<MaintenanceScheduler>(
+          cros_dev_.get(), biod_metrics_)) {
   CHECK(power_button_filter_);
   CHECK(cros_dev_);
   CHECK(biod_metrics_);
-  CHECK(maintenance_timer_);
+  CHECK(record_manager_);
 
   cros_dev_->SetMkbpEventCallback(base::BindRepeating(
       &CrosFpBiometricsManager::OnMkbpEvent, base::Unretained(this)));
 
-  use_positive_match_secret_ = cros_dev_->SupportsPositiveMatchSecret();
+  CHECK(cros_dev_->SupportsPositiveMatchSecret());
 
-// TODO(b/187951992): The following automatic maintenance routine needs to
-// be re-enabled in such a way that it will not interfere with the
-// auth/unlock or enroll session. This maintenance timer was disabled due
-// to b/184783529.
-#if 0
-  maintenance_timer_->Start(
-      FROM_HERE, base::TimeDelta::FromDays(1),
-      base::BindRepeating(&CrosFpBiometricsManager::OnMaintenanceTimerFired,
-                 base::Unretained(this)));
-#endif
+  maintenance_scheduler_->Start();
 }
 
 CrosFpBiometricsManager::~CrosFpBiometricsManager() {}
@@ -364,7 +300,8 @@ void CrosFpBiometricsManager::OnEnrollScanDone(
 }
 
 void CrosFpBiometricsManager::OnAuthScanDone(
-    ScanResult result, const BiometricsManager::AttemptMatches& matches) {
+    FingerprintMessage result,
+    const BiometricsManager::AttemptMatches& matches) {
   if (!on_auth_scan_done_.is_null())
     on_auth_scan_done_.Run(result, matches);
 }
@@ -462,6 +399,7 @@ void CrosFpBiometricsManager::DoEnrollImageEvent(
   }
 
   int percent = EC_MKBP_FP_ENROLL_PROGRESS(event);
+  ++num_enrollment_captures_;
 
   if (percent < 100) {
     BiometricsManager::EnrollStatus enroll_status = {false, percent};
@@ -475,8 +413,9 @@ void CrosFpBiometricsManager::DoEnrollImageEvent(
     return;
   }
 
-  // we are done with captures, save the template.
+  // we are done with captures, send metrics and save the template.
   OnTaskComplete();
+  biod_metrics_->SendEnrollmentCapturesCount(num_enrollment_captures_);
 
   std::unique_ptr<VendorTemplate> tmpl =
       cros_dev_->GetTemplate(CrosFpDevice::kLastTemplate);
@@ -486,33 +425,33 @@ void CrosFpBiometricsManager::DoEnrollImageEvent(
     return;
   }
 
-  if (use_positive_match_secret_) {
-    base::Optional<brillo::SecureVector> secret =
-        cros_dev_->GetPositiveMatchSecret(CrosFpDevice::kLastTemplate);
-    if (!secret) {
-      LOG(ERROR) << "Failed to get positive match secret.";
-      OnSessionFailed();
-      return;
-    }
-
-    std::vector<uint8_t> validation_val;
-    if (!BiodCrypto::ComputeValidationValue(*secret, record.user_id,
-                                            &validation_val)) {
-      LOG(ERROR) << "Failed to compute validation value.";
-      OnSessionFailed();
-      return;
-    }
-    record.validation_val = std::move(validation_val);
-    LOG(INFO) << "Computed validation value for enrolled finger.";
-  }
-
-  records_.emplace_back(record);
-  Record current_record(weak_factory_.GetWeakPtr(), records_.size() - 1);
-  if (!WriteRecord(current_record, tmpl->data(), tmpl->size())) {
-    records_.pop_back();
+  std::optional<brillo::SecureVector> secret =
+      cros_dev_->GetPositiveMatchSecret(CrosFpDevice::kLastTemplate);
+  if (!secret) {
+    LOG(ERROR) << "Failed to get positive match secret.";
     OnSessionFailed();
     return;
   }
+
+  std::vector<uint8_t> validation_val;
+  if (!BiodCrypto::ComputeValidationValue(*secret, record.user_id,
+                                          &validation_val)) {
+    LOG(ERROR) << "Failed to compute validation value.";
+    OnSessionFailed();
+    return;
+  }
+  record.validation_val = std::move(validation_val);
+  LOG(INFO) << "Computed validation value for enrolled finger.";
+
+  std::string record_id = record.record_id;
+
+  if (!record_manager_->CreateRecord(record, std::move(tmpl))) {
+    OnSessionFailed();
+    return;
+  }
+
+  // This record is now loaded in FPMCU, so add it to the list.
+  loaded_records_.emplace_back(record_id);
 
   BiometricsManager::EnrollStatus enroll_status = {true, 100};
   OnEnrollScanDone(ScanResult::SCAN_RESULT_SUCCESS, enroll_status);
@@ -541,26 +480,33 @@ void CrosFpBiometricsManager::DoMatchFingerUpEvent(uint32_t event) {
     OnSessionFailed();
 }
 
-bool CrosFpBiometricsManager::ValidationValueIsCorrect(uint32_t match_idx) {
-  base::Optional<brillo::SecureVector> secret =
+bool CrosFpBiometricsManager::CheckPositiveMatchSecret(
+    const std::string& record_id, int match_idx) {
+  std::optional<brillo::SecureVector> secret =
       cros_dev_->GetPositiveMatchSecret(match_idx);
   biod_metrics_->SendReadPositiveMatchSecretSuccess(secret.has_value());
+
   if (!secret) {
     LOG(ERROR) << "Failed to read positive match secret on match for finger "
                << match_idx << ".";
     return false;
   }
 
-  std::vector<uint8_t> validation_value;
-  if (!BiodCrypto::ComputeValidationValue(*secret, records_[match_idx].user_id,
-                                          &validation_value)) {
-    LOG(ERROR) << "Got positive match secret but failed to compute validation "
-                  "value for finger "
-               << match_idx << ".";
+  const auto record_metadata = record_manager_->GetRecordMetadata(record_id);
+  if (!record_metadata) {
+    LOG(ERROR) << "Can't find metadata for record " << LogSafeID(record_id);
     return false;
   }
 
-  if (validation_value != records_[match_idx].validation_val) {
+  std::vector<uint8_t> validation_value;
+  if (!BiodCrypto::ComputeValidationValue(*secret, record_metadata->user_id,
+                                          &validation_value)) {
+    LOG(ERROR) << "Failed to compute validation value for finger " << match_idx
+               << ".";
+    return false;
+  }
+
+  if (validation_value != record_metadata->validation_val) {
     LOG(ERROR) << "Validation value does not match for finger " << match_idx;
     biod_metrics_->SendPositiveMatchSecretCorrect(false);
     suspicious_templates_.emplace(match_idx);
@@ -571,24 +517,6 @@ bool CrosFpBiometricsManager::ValidationValueIsCorrect(uint32_t match_idx) {
   biod_metrics_->SendPositiveMatchSecretCorrect(true);
   suspicious_templates_.erase(match_idx);
   return true;
-}
-
-BiometricsManager::AttemptMatches CrosFpBiometricsManager::CalculateMatches(
-    int match_idx, bool matched) {
-  BiometricsManager::AttemptMatches matches;
-  if (!matched)
-    return matches;
-
-  if (match_idx >= records_.size()) {
-    LOG(ERROR) << "Invalid finger index " << match_idx;
-    return matches;
-  }
-
-  if (!use_positive_match_secret_ || ValidationValueIsCorrect(match_idx)) {
-    matches.emplace(records_[match_idx].user_id,
-                    std::vector<std::string>({records_[match_idx].record_id}));
-  }
-  return matches;
 }
 
 void CrosFpBiometricsManager::DoMatchEvent(int attempt, uint32_t event) {
@@ -624,7 +552,6 @@ void CrosFpBiometricsManager::DoMatchEvent(int attempt, uint32_t event) {
   }
 
   biod_metrics_->SendIgnoreMatchEventOnPowerButtonPress(false);
-  ScanResult result;
   int match_result = EC_MKBP_FP_ERRCODE(event);
 
   // If the finger is positioned slightly off the sensor, retry a few times
@@ -661,7 +588,9 @@ void CrosFpBiometricsManager::DoMatchEvent(int attempt, uint32_t event) {
     dirty_list = GetDirtyList();
   }
 
-  bool matched = false;
+  FingerprintMessage result;
+  std::optional<std::string> matched_record_id;
+  std::optional<RecordMetadata> matched_record_meta;
 
   uint32_t match_idx = EC_MKBP_FP_MATCH_IDX(event);
   LOG(INFO) << __func__ << " result: '" << MatchResultToString(match_result)
@@ -669,28 +598,41 @@ void CrosFpBiometricsManager::DoMatchEvent(int attempt, uint32_t event) {
   switch (match_result) {
     case EC_MKBP_FP_ERR_MATCH_NO_TEMPLATES:
       LOG(ERROR) << "No templates to match: " << std::hex << event;
-      result = ScanResult::SCAN_RESULT_SUCCESS;
+      result.set_error(FingerprintError::ERROR_NO_TEMPLATES);
       break;
     case EC_MKBP_FP_ERR_MATCH_NO_INTERNAL:
       LOG(ERROR) << "Internal error when matching templates: " << std::hex
                  << event;
-      result = ScanResult::SCAN_RESULT_SUCCESS;
+      result.set_error(FingerprintError::ERROR_UNABLE_TO_PROCESS);
       break;
     case EC_MKBP_FP_ERR_MATCH_NO:
-      // This is the API: empty matches but still SCAN_RESULT_SUCCESS.
-      result = ScanResult::SCAN_RESULT_SUCCESS;
+      result.set_scan_result(ScanResult::SCAN_RESULT_NO_MATCH);
       break;
     case EC_MKBP_FP_ERR_MATCH_YES:
     case EC_MKBP_FP_ERR_MATCH_YES_UPDATED:
     case EC_MKBP_FP_ERR_MATCH_YES_UPDATE_FAILED:
-      result = ScanResult::SCAN_RESULT_SUCCESS;
-      matched = true;
+      // We are on a good path to successfully authenticate user, but
+      // we still need to confirm that positive match secret is correct.
+      // Set UNABLE_TO_PROCESS error for now, it will be changed to
+      // SUCCESS scan result when positive match secret is validated.
+      result.set_error(FingerprintError::ERROR_UNABLE_TO_PROCESS);
+      matched_record_id = GetLoadedRecordId(match_idx);
+      if (matched_record_id) {
+        matched_record_meta =
+            record_manager_->GetRecordMetadata(*matched_record_id);
+        if (!matched_record_meta) {
+          LOG(ERROR) << "Can't find metadata for record "
+                     << LogSafeID(*matched_record_id);
+        }
+      } else {
+        LOG(ERROR) << "Invalid finger index " << match_idx;
+      }
       break;
     case EC_MKBP_FP_ERR_MATCH_NO_LOW_QUALITY:
-      result = ScanResult::SCAN_RESULT_INSUFFICIENT;
+      result.set_scan_result(ScanResult::SCAN_RESULT_INSUFFICIENT);
       break;
     case EC_MKBP_FP_ERR_MATCH_NO_LOW_COVERAGE:
-      result = ScanResult::SCAN_RESULT_PARTIAL;
+      result.set_scan_result(ScanResult::SCAN_RESULT_PARTIAL);
       break;
     default:
       LOG(ERROR) << "Unexpected result from matching templates: " << std::hex
@@ -699,18 +641,29 @@ void CrosFpBiometricsManager::DoMatchEvent(int attempt, uint32_t event) {
       return;
   }
 
-  BiometricsManager::AttemptMatches matches =
-      CalculateMatches(match_idx, matched);
-  if (matches.empty())
-    matched = false;
+  BiometricsManager::AttemptMatches matches;
+
+  if (matched_record_meta) {
+    // CrosFp says that match was successful, let's check if this is true
+    if (CheckPositiveMatchSecret(matched_record_meta->record_id, match_idx)) {
+      matches.emplace(
+          matched_record_meta->user_id,
+          std::vector<std::string>({matched_record_meta->record_id}));
+      result.set_scan_result(ScanResult::SCAN_RESULT_SUCCESS);
+      biod_metrics_->SendPartialAttemptsBeforeSuccess(attempt);
+    } else {
+      LOG(ERROR) << "Failed to check Secure Secret for " << match_idx;
+      matched_record_meta = std::nullopt;
+    }
+  }
 
   // Send back the result directly (as we are running on the main thread).
-  OnAuthScanDone(result, std::move(matches));
+  OnAuthScanDone(std::move(result), std::move(matches));
 
-  base::Optional<CrosFpDeviceInterface::FpStats> stats =
+  std::optional<ec::CrosFpDeviceInterface::FpStats> stats =
       cros_dev_->GetFpStats();
   if (stats) {
-    biod_metrics_->SendFpLatencyStats(matched, *stats);
+    biod_metrics_->SendFpLatencyStats(matched_record_meta.has_value(), *stats);
   }
 
   // Record updated templates
@@ -727,7 +680,7 @@ bool CrosFpBiometricsManager::LoadRecord(
   std::string tmpl_data_str;
   base::Base64Decode(record.data, &tmpl_data_str);
 
-  if (records_.size() >= cros_dev_->MaxTemplateCount()) {
+  if (loaded_records_.size() >= cros_dev_->MaxTemplateCount()) {
     LOG(ERROR) << "No space to upload template from "
                << LogSafeID(record.metadata.record_id) << ".";
     return false;
@@ -742,8 +695,7 @@ bool CrosFpBiometricsManager::LoadRecord(
     LOG(ERROR) << "Version mismatch between template ("
                << metadata->struct_version << ") and hardware ("
                << cros_dev_->TemplateVersion() << ")";
-    biod_storage_->DeleteRecord(record.metadata.user_id,
-                                record.metadata.record_id);
+    record_manager_->DeleteRecord(record.metadata.record_id);
     return false;
   }
   if (!cros_dev_->UploadTemplate(tmpl)) {
@@ -752,39 +704,15 @@ bool CrosFpBiometricsManager::LoadRecord(
     return false;
   }
 
-  records_.emplace_back(std::move(record.metadata));
+  loaded_records_.emplace_back(record.metadata.record_id);
   return true;
-}
-
-bool CrosFpBiometricsManager::WriteRecord(const BiometricsManagerRecord& record,
-                                          uint8_t* tmpl_data,
-                                          size_t tmpl_size) {
-  base::StringPiece tmpl_sp(reinterpret_cast<char*>(tmpl_data), tmpl_size);
-  std::string tmpl_base64;
-  base::Base64Encode(tmpl_sp, &tmpl_base64);
-
-  return biod_storage_->WriteRecord(record,
-                                    base::Value(std::move(tmpl_base64)));
-}
-
-void CrosFpBiometricsManager::OnMaintenanceTimerFired() {
-  LOG(INFO) << "Maintenance timer fired";
-
-  // Report the number of dead pixels
-  cros_dev_->UpdateFpInfo();
-  biod_metrics_->SendDeadPixelCount(cros_dev_->DeadPixelCount());
-
-  // The maintenance operation can take a couple hundred milliseconds, so it's
-  // an asynchronous mode (the state is cleared by the FPMCU after it is
-  // finished with the operation).
-  cros_dev_->SetFpMode(ec::FpMode(Mode::kSensorMaintenance));
 }
 
 std::vector<int> CrosFpBiometricsManager::GetDirtyList() {
   std::vector<int> dirty_list;
 
   // Retrieve which templates have been updated.
-  base::Optional<std::bitset<32>> dirty_bitmap = cros_dev_->GetDirtyMap();
+  std::optional<std::bitset<32>> dirty_bitmap = cros_dev_->GetDirtyMap();
   if (!dirty_bitmap) {
     LOG(ERROR) << "Failed to get updated templates map";
     return dirty_list;
@@ -807,6 +735,12 @@ bool CrosFpBiometricsManager::UpdateTemplatesOnDisk(
     const std::unordered_set<uint32_t>& suspicious_templates) {
   bool ret = true;
   for (int i : dirty_list) {
+    if (!GetLoadedRecordId(i)) {
+      LOG(ERROR)
+          << "Index " << i
+          << " is on dirty list, but corresponding record doesn't exist.";
+      continue;
+    }
     // If the template previously came with wrong validation value, do not
     // accept it until it comes with correct validation value.
     if (suspicious_templates.find(i) != suspicious_templates.end()) {
@@ -820,9 +754,17 @@ bool CrosFpBiometricsManager::UpdateTemplatesOnDisk(
       continue;
     }
 
-    Record current_record(weak_factory_.GetWeakPtr(), i);
-    if (!WriteRecord(current_record, templ->data(), templ->size())) {
-      LOG(ERROR) << "Cannot update record " << LogSafeID(records_[i].record_id)
+    const auto record_metadata =
+        record_manager_->GetRecordMetadata(*GetLoadedRecordId(i));
+    if (!record_metadata) {
+      LOG(ERROR) << "Can't find metadata for record "
+                 << LogSafeID(*GetLoadedRecordId(i));
+      ret = false;
+    }
+
+    if (!record_manager_->UpdateRecord(*record_metadata, std::move(templ))) {
+      LOG(ERROR) << "Cannot update record "
+                 << LogSafeID(GetLoadedRecordId(i).value())
                  << " in storage during AuthSession because writing failed.";
       ret = false;
     }

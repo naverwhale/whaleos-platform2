@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,27 +10,32 @@
 #include <base/logging.h>
 #include <base/notreached.h>
 
+#include "rmad/logs/logs_utils.h"
 #include "rmad/system/power_manager_client_impl.h"
 #include "rmad/utils/dbus_utils.h"
 
 namespace rmad {
 
-RestockStateHandler::RestockStateHandler(scoped_refptr<JsonStore> json_store)
-    : BaseStateHandler(json_store) {
+RestockStateHandler::RestockStateHandler(
+    scoped_refptr<JsonStore> json_store,
+    scoped_refptr<DaemonCallback> daemon_callback)
+    : BaseStateHandler(json_store, daemon_callback) {
   power_manager_client_ =
       std::make_unique<PowerManagerClientImpl>(GetSystemBus());
 }
 
 RestockStateHandler::RestockStateHandler(
     scoped_refptr<JsonStore> json_store,
+    scoped_refptr<DaemonCallback> daemon_callback,
     std::unique_ptr<PowerManagerClient> power_manager_client)
-    : BaseStateHandler(json_store),
+    : BaseStateHandler(json_store, daemon_callback),
       power_manager_client_(std::move(power_manager_client)) {}
 
 RmadErrorCode RestockStateHandler::InitializeState() {
   if (!state_.has_restock() && !RetrieveState()) {
     state_.set_allocated_restock(new RestockState);
   }
+  shutdown_scheduled_ = false;
   return RMAD_ERROR_OK;
 }
 
@@ -38,40 +43,40 @@ BaseStateHandler::GetNextStateCaseReply RestockStateHandler::GetNextStateCase(
     const RmadState& state) {
   if (!state.has_restock()) {
     LOG(ERROR) << "RmadState missing |restock| state.";
-    return {.error = RMAD_ERROR_REQUEST_INVALID, .state_case = GetStateCase()};
+    return NextStateCaseWrapper(RMAD_ERROR_REQUEST_INVALID);
+  }
+  if (shutdown_scheduled_) {
+    return NextStateCaseWrapper(RMAD_ERROR_EXPECT_SHUTDOWN);
   }
 
-  state_ = state;
-  StoreState();
-
-  switch (state_.restock().choice()) {
+  // For the first bootup after restock and shutdown, the state machine will try
+  // to automatically transition to the next state. Therefore, we do not store
+  // the state to prevent the continuous shutdown.
+  switch (state.restock().choice()) {
     case RestockState::RMAD_RESTOCK_UNKNOWN:
-      return {.error = RMAD_ERROR_REQUEST_ARGS_MISSING,
-              .state_case = GetStateCase()};
+      return NextStateCaseWrapper(RMAD_ERROR_REQUEST_ARGS_MISSING);
     case RestockState::RMAD_RESTOCK_SHUTDOWN_AND_RESTOCK:
-      // Set the choice to "Continue", so the device can auto-transition to the
-      // next state on next boot.
-      state_.mutable_restock()->set_choice(
-          RestockState::RMAD_RESTOCK_CONTINUE_RMA);
-      StoreState();
+      RecordRestockOptionToLogs(json_store_, /*restock=*/true);
       // Wait for a while before shutting down.
       timer_.Start(FROM_HERE, kShutdownDelay, this,
                    &RestockStateHandler::Shutdown);
-      return {.error = RMAD_ERROR_EXPECT_SHUTDOWN,
-              .state_case = GetStateCase()};
+      shutdown_scheduled_ = true;
+      return NextStateCaseWrapper(GetStateCase(), RMAD_ERROR_EXPECT_SHUTDOWN,
+                                  RMAD_ADDITIONAL_ACTIVITY_SHUTDOWN);
     case RestockState::RMAD_RESTOCK_CONTINUE_RMA:
-      return {.error = RMAD_ERROR_OK,
-              .state_case = RmadState::StateCase::kUpdateDeviceInfo};
+      RecordRestockOptionToLogs(json_store_, /*restock=*/false);
+      return NextStateCaseWrapper(RmadState::StateCase::kUpdateDeviceInfo);
     default:
       break;
   }
   NOTREACHED();
-  return {.error = RMAD_ERROR_NOT_SET,
-          .state_case = RmadState::StateCase::STATE_NOT_SET};
+  return NextStateCaseWrapper(RmadState::StateCase::STATE_NOT_SET,
+                              RMAD_ERROR_NOT_SET,
+                              RMAD_ADDITIONAL_ACTIVITY_NOTHING);
 }
 
 void RestockStateHandler::Shutdown() {
-  LOG(INFO) << "Shutting down to restock";
+  DLOG(INFO) << "Shutting down to restock";
   if (!power_manager_client_->Shutdown()) {
     LOG(ERROR) << "Failed to shut down";
   }

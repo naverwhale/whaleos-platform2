@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 
 #include "shill/ethernet/ethernet_service.h"
@@ -40,6 +40,7 @@ class EthernetProvider : public ProviderInterface {
   ServiceRefPtr CreateTemporaryServiceFromProfile(const ProfileRefPtr& profile,
                                                   const std::string& entry_name,
                                                   Error* error) override;
+  void AbandonService(const ServiceRefPtr& service) override;
   void Start() override;
   void Stop() override;
 

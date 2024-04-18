@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define POWER_MANAGER_POWERD_POLICY_WIFI_CONTROLLER_H_
 
 #include <string>
-
-#include <base/macros.h>
 
 #include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/policy/user_proximity_handler.h"
@@ -31,7 +29,8 @@ class WifiController : public system::UdevSubsystemObserver,
 
     // Updates the wifi transmit power to |power|.
     virtual void SetWifiTransmitPower(RadioTransmitPower power,
-                                      WifiRegDomain domain) = 0;
+                                      WifiRegDomain domain,
+                                      TriggerSource source) = 0;
   };
 
   // Net subsystem and wlan devtype for udev events.
@@ -84,16 +83,12 @@ class WifiController : public system::UdevSubsystemObserver,
     }
   }
 
-  // Updates transmit power via |delegate_|. Ends up invoking either one of
-  // UpdateTransmitPowerFor*() depending on |update_power_input_source_|.
-  void UpdateTransmitPower();
+  // Updates transmit power via |delegate_|.
+  // Decide which power setting to use based on current input source(s) state.
+  void UpdateTransmitPower(TriggerSource source);
 
-  void UpdateTransmitPowerForStaticMode();
-  void UpdateTransmitPowerForTabletMode();
-  void UpdateTransmitPowerForProximity();
+  RadioTransmitPower DetermineTransmitPower() const;
 
-  UpdatePowerInputSource update_power_input_source_ =
-      UpdatePowerInputSource::NONE;
   Delegate* delegate_ = nullptr;           // Not owned.
   system::UdevInterface* udev_ = nullptr;  // Not owned.
 

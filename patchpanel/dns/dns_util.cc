@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 #include <errno.h>
 #include <limits.h>
 
+#include <optional>
 #include <string>
-
-#include "base/optional.h"
+#include <string_view>
 
 #include "patchpanel/dns/dns_protocol.h"
 
@@ -40,7 +40,7 @@ namespace patchpanel {
 namespace {
 
 // Based on DJB's public domain code.
-bool DNSDomainFromDot(const base::StringPiece& dotted,
+bool DNSDomainFromDot(std::string_view dotted,
                       bool is_unrestricted,
                       std::string* out) {
   const char* buf = dotted.data();
@@ -98,7 +98,7 @@ bool DNSDomainFromDot(const base::StringPiece& dotted,
 
 }  // namespace
 
-bool DNSDomainFromDot(const base::StringPiece& dotted, std::string* out) {
+bool DNSDomainFromDot(std::string_view dotted, std::string* out) {
   return DNSDomainFromDot(dotted, false /* is_unrestricted */, out);
 }
 
@@ -107,24 +107,25 @@ bool IsValidHostLabelCharacter(char c, bool is_first_char) {
          (c >= '0' && c <= '9') || (!is_first_char && c == '-') || c == '_';
 }
 
-base::Optional<std::string> DnsDomainToString(base::StringPiece domain) {
+std::optional<std::string> DnsDomainToString(std::string_view domain) {
   std::string ret;
 
-  for (unsigned i = 0; i < domain.size() && domain[i]; i += domain[i] + 1) {
+  for (unsigned i = 0; i < domain.size() && domain[i];
+       i += static_cast<unsigned>(domain[i]) + 1) {
 #if CHAR_MIN < 0
     if (domain[i] < 0)
-      return base::nullopt;
+      return std::nullopt;
 #endif
     if (domain[i] > kMaxLabelLength)
-      return base::nullopt;
+      return std::nullopt;
 
     if (i)
       ret += ".";
 
     if (static_cast<unsigned>(domain[i]) + i + 1 > domain.size())
-      return base::nullopt;
+      return std::nullopt;
 
-    ret.append(domain.data() + i + 1, domain[i]);
+    ret.append(domain.data() + i + 1, static_cast<size_t>(domain[i]));
   }
   return ret;
 }

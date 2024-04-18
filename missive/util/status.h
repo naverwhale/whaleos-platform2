@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,21 @@
 #include <cstdint>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 
 #include <base/check.h>
 #include <base/compiler_specific.h>
-#include <base/strings/string_piece.h>
 
-#include "missive/proto/status.pb.h"
+#include <missive/proto/status.pb.h>
 
 namespace reporting {
 namespace error {
-
+// These values must match error codes defined in google/rpc/code.proto
+// This also must match the order EnterpriseCloudReportingStatusCode at
+// tools/metrics/histograms/enums.xml and the integer of option shouldn't be
+// changed.
+// If two assumptions above conflict, please create a new enum for metrics
+// purposes and keep the original order.
 enum Code : int32_t {
   OK = 0,
   CANCELLED = 1,
@@ -27,7 +32,6 @@ enum Code : int32_t {
   NOT_FOUND = 5,
   ALREADY_EXISTS = 6,
   PERMISSION_DENIED = 7,
-  UNAUTHENTICATED = 16,
   RESOURCE_EXHAUSTED = 8,
   FAILED_PRECONDITION = 9,
   ABORTED = 10,
@@ -36,10 +40,13 @@ enum Code : int32_t {
   INTERNAL = 13,
   UNAVAILABLE = 14,
   DATA_LOSS = 15,
+  UNAUTHENTICATED = 16,
+  // The value should always be kept last.
+  MAX_VALUE
 };
 }  // namespace error
 
-class WARN_UNUSED_RESULT Status {
+class [[nodiscard]] Status {
  public:
   // Creates a "successful" status.
   Status();
@@ -48,7 +55,7 @@ class WARN_UNUSED_RESULT Status {
   // code, and error message.  If "code == 0", error_message is
   // ignored and a Status object identical to Status::OK is
   // constructed.
-  Status(error::Code error_code, base::StringPiece error_message);
+  Status(error::Code error_code, std::string_view error_message);
   Status(const Status&);
   Status& operator=(const Status& x);
   ~Status() = default;
@@ -60,8 +67,8 @@ class WARN_UNUSED_RESULT Status {
   bool ok() const { return error_code_ == error::OK; }
   int error_code() const { return error_code_; }
   error::Code code() const { return error_code_; }
-  base::StringPiece error_message() const { return error_message_; }
-  base::StringPiece message() const { return error_message_; }
+  std::string_view error_message() const { return error_message_; }
+  std::string_view message() const { return error_message_; }
 
   bool operator==(const Status& x) const;
   bool operator!=(const Status& x) const { return !operator==(x); }

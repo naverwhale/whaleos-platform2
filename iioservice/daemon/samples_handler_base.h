@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 #include <vector>
 
 #include <base/memory/weak_ptr.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 
 #include "iioservice/daemon/common_types.h"
 
@@ -20,6 +20,25 @@ namespace iioservice {
 
 class SamplesHandlerBase {
  protected:
+  class SampleData {
+   public:
+    explicit SampleData(ClientData* client_data = nullptr);
+    ~SampleData();
+
+    void SetTimeoutTask();
+    void SampleTimeout(uint64_t sample_index);
+
+    ClientData* client_data_ = nullptr;
+    scoped_refptr<base::SequencedTaskRunner> task_runner_;
+
+    // The starting index of the next sample.
+    uint64_t sample_index_ = 0;
+    // Moving averages of channels except for channels that have no batch mode
+    std::map<int32_t, int64_t> chns_;
+
+    base::WeakPtrFactory<SampleData> weak_factory_{this};
+  };
+
   explicit SamplesHandlerBase(
       scoped_refptr<base::SequencedTaskRunner> task_runner);
 
@@ -50,7 +69,6 @@ class SamplesHandlerBase {
   virtual bool UpdateRequestedFrequencyOnThread() = 0;
 
   void SetTimeoutTaskOnThread(ClientData* client_data);
-  void SampleTimeout(ClientData* client_data, uint64_t sample_index);
 
   virtual void OnSampleAvailableOnThread(
       const base::flat_map<int32_t, int64_t>& sample);
@@ -61,7 +79,7 @@ class SamplesHandlerBase {
   // Clients that either have invalid frequency or no enabled channels.
   std::set<ClientData*> inactive_clients_;
   // First is the active client, second is its data.
-  std::map<ClientData*, SampleData> clients_map_;
+  std::map<ClientData*, std::unique_ptr<SampleData>> clients_map_;
 
   // Requested frequencies from clients.
   std::multiset<double> frequencies_;
@@ -82,6 +100,8 @@ class SamplesHandlerBase {
   std::set<int32_t> no_batch_chn_indices_;
 
  private:
+  bool need_invert_;
+
   base::WeakPtrFactory<SamplesHandlerBase> weak_factory_{this};
 };
 

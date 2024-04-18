@@ -1,4 +1,4 @@
-/* Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+/* Copyright 2012 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  *
@@ -17,9 +17,12 @@
 #include <utility>
 #include <vector>
 
+#include <brillo/whaleos_util.h>
+
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
+#include <brillo/blkdev_utils/lvm.h>
 #include <brillo/flag_helper.h>
 #include <brillo/secure_blob.h>
 #include <brillo/syslog_logging.h>
@@ -43,13 +46,28 @@ struct timeval tick = {};
 struct timeval tick_start = {};
 #endif
 
+using mount_encrypted::paths::cryptohome::kTpmOwned;
+
 namespace {
 constexpr char kBioCryptoInitPath[] = "/usr/bin/bio_crypto_init";
 constexpr char kBioTpmSeedSalt[] = "biod";
 constexpr char kBioTpmSeedTmpDir[] = "/run/bio_crypto_init";
 constexpr char kBioTpmSeedFile[] = "seed";
+constexpr char kHibermanPath[] = "/usr/sbin/hiberman";
+constexpr char kHibermanTpmSeedSalt[] = "hiberman";
+constexpr char kHibermanTpmSeedTmpDir[] = "/run/hiberman";
+constexpr char kHibermanTpmSeedFile[] = "tpm_seed";
+constexpr char kFeaturedTpmSeedSalt[] = "featured";
+constexpr char kFeaturedTpmSeedTmpDir[] = "/run/featured_seed";
+constexpr char kFeaturedTpmSeedFile[] = "tpm_seed";
+constexpr char kOldTpmOwnershipStateFile[] =
+    "mnt/stateful_partition/.tpm_owned";
 static const uid_t kBiodUid = 282;
 static const gid_t kBiodGid = 282;
+static const uid_t kHibermanUid = 20184;
+static const gid_t kHibermanGid = 20184;
+static const uid_t kRootUid = 0;
+static const gid_t kRootGid = 0;
 
 constexpr char kNvramExport[] = "/tmp/lockbox.nvram";
 constexpr char kMountEncryptedMetricsPath[] =
@@ -59,12 +77,11 @@ constexpr char kMountEncryptedMetricsPath[] =
 static result_code get_system_property(const char* prop,
                                        char* buf,
                                        size_t length) {
-  const char* rc;
+  int rc = VbGetSystemPropertyString(prop, buf, length);
+  LOG(INFO) << "Got System Property '" << prop
+            << "': " << ((rc == 0) ? buf : "FAIL");
 
-  rc = VbGetSystemPropertyString(prop, buf, length);
-  LOG(INFO) << "Got System Property '" << prop << "': " << (rc ? buf : "FAIL");
-
-  return rc != NULL ? RESULT_SUCCESS : RESULT_FAIL_FATAL;
+  return rc == 0 ? RESULT_SUCCESS : RESULT_FAIL_FATAL;
 }
 
 static int has_chromefw(void) {
@@ -83,65 +100,7 @@ static int has_chromefw(void) {
 }
 
 static bool shall_use_tpm_for_system_key() {
-  if (has_chromefw()) {
-    return true;
-  }
-
-  /* Don't use tpm for system key if we are using runtime TPM selection. */
-  if (USE_TPM_DYNAMIC) {
-    return false;
-  }
-
-  /* Assume we have tpm for system_key when we are using vtpm tpm2 simulator. */
-  return USE_TPM2_SIMULATOR && USE_VTPM_PROXY;
-}
-
-// This triggers the live encryption key to be written to disk, encrypted by the
-// system key. It is intended to be called by Cryptohome once the TPM is done
-// being set up. If the system key is passed as an argument, use it, otherwise
-// attempt to query the TPM again.
-static result_code finalize_from_cmdline(
-    mount_encrypted::EncryptedFs* encrypted_fs,
-    const base::FilePath& rootdir,
-    const char* key) {
-  // Load the system key.
-  brillo::SecureBlob system_key;
-  if (!brillo::SecureBlob::HexStringToSecureBlob(std::string(key),
-                                                 &system_key) ||
-      system_key.size() != DIGEST_LENGTH) {
-    LOG(ERROR) << "Failed to parse system key.";
-    return RESULT_FAIL_FATAL;
-  }
-
-  mount_encrypted::FixedSystemKeyLoader loader(system_key);
-  mount_encrypted::EncryptionKey key_manager(&loader, rootdir);
-  result_code rc = key_manager.SetTpmSystemKey();
-  if (rc != RESULT_SUCCESS) {
-    return rc;
-  }
-
-  // If there already is an encrypted system key on disk, there is nothing to
-  // do. This also covers cases where the system key is not derived from the
-  // lockbox space contents (e.g. TPM 2.0 devices, TPM 1.2 devices with
-  // encrypted stateful space, factory keys, etc.), for which it is not
-  // appropriate to replace the system key. For cases where finalization is
-  // unfinished, we clear any stale system keys from disk to make sure we pass
-  // the check here.
-  if (base::PathExists(key_manager.key_path())) {
-    return RESULT_SUCCESS;
-  }
-
-  // Load the encryption key.
-  brillo::SecureBlob encryption_key = encrypted_fs->GetKey();
-  if (encryption_key.empty()) {
-    LOG(ERROR) << "Could not get mount encryption key";
-    return RESULT_FAIL_FATAL;
-  }
-
-  // Persist the encryption key to disk.
-  key_manager.PersistEncryptionKey(encryption_key);
-
-  return RESULT_SUCCESS;
+  return false;
 }
 
 static result_code report_info(mount_encrypted::EncryptedFs* encrypted_fs,
@@ -238,51 +197,115 @@ void nvram_export(const brillo::SecureBlob& contents) {
   close(fd);
 }
 
-// Send a secret derived from the system key to the biometric managers, if
-// available, via a tmpfs file which will be read by bio_crypto_init.
-bool SendSecretToBiodTmpFile(const mount_encrypted::EncryptionKey& key) {
-  // If there isn't a bio-sensor, don't bother.
-  if (!base::PathExists(base::FilePath(kBioCryptoInitPath))) {
-    LOG(INFO) << "There is no biod, so skip sending TPM seed.";
-    return true;
-  }
-
-  brillo::SecureBlob tpm_seed =
-      key.GetDerivedSystemKey(std::string(kBioTpmSeedSalt));
+bool SendSecretToTmpFile(const mount_encrypted::EncryptionKey& key,
+                         const std::string& salt,
+                         const base::FilePath& tmp_dir,
+                         const std::string& filename,
+                         uid_t user_id,
+                         gid_t group_id,
+                         cryptohome::Platform* platform) {
+  brillo::SecureBlob tpm_seed = key.GetDerivedSystemKey(salt);
   if (tpm_seed.empty()) {
-    LOG(ERROR) << "TPM Seed provided is empty, not writing to tmpfs.";
+    LOG(ERROR) << "TPM Seed provided for " << filename << " is empty";
     return false;
   }
 
-  auto dirname = base::FilePath(kBioTpmSeedTmpDir);
-  if (!base::CreateDirectory(dirname)) {
-    LOG(ERROR) << "Failed to create dir for TPM seed.";
+  if (!platform->SafeCreateDirAndSetOwnershipAndPermissions(
+          tmp_dir,
+          /* mode=700 */ S_IRUSR | S_IWUSR | S_IXUSR, user_id, group_id)) {
+    PLOG(ERROR) << "Failed to CreateDir or SetOwnershipAndPermissions of "
+                << tmp_dir;
     return false;
   }
 
-  if (chown(kBioTpmSeedTmpDir, kBiodUid, kBiodGid) == -1) {
-    PLOG(ERROR) << "Failed to change ownership of biod tmpfs dir.";
+  auto file = tmp_dir.Append(filename);
+  if (!platform->WriteStringToFileAtomic(file, tpm_seed.to_string(),
+                                         /* mode=600 */ S_IRUSR | S_IWUSR)) {
+    PLOG(ERROR) << "Failed to write TPM seed to tmpfs file " << filename;
     return false;
   }
 
-  auto filename = dirname.Append(kBioTpmSeedFile);
-  if (base::WriteFile(filename, tpm_seed.char_data(), tpm_seed.size()) !=
-      tpm_seed.size()) {
-    LOG(ERROR) << "Failed to write TPM seed to tmpfs file.";
-    return false;
-  }
-
-  if (chown(filename.value().c_str(), kBiodUid, kBiodGid) == -1) {
-    PLOG(ERROR) << "Failed to change ownership of biod tmpfs file.";
+  if (!platform->SetOwnership(file, user_id, group_id, true)) {
+    PLOG(ERROR) << "Failed to change ownership/perms of tmpfs file "
+                << filename;
+    // Remove the file as it contains the tpm seed with incorrect owner.
+    PLOG_IF(ERROR, !base::DeleteFile(file)) << "Unable to remove file!";
     return false;
   }
 
   return true;
 }
 
+// Send a secret derived from the system key to the biometric managers, if
+// available, via a tmpfs file which will be read by bio_crypto_init. The tmpfs
+// directory will be created if it doesn't exist.
+bool SendSecretToBiodTmpFile(const mount_encrypted::EncryptionKey& key,
+                             cryptohome::Platform* platform) {
+  // If there isn't a bio-sensor, don't bother.
+  if (!base::PathExists(base::FilePath(kBioCryptoInitPath))) {
+    LOG(INFO)
+        << "There is no bio_crypto_init binary, so skip sending TPM seed.";
+    return true;
+  }
+
+  return SendSecretToTmpFile(key, std::string(kBioTpmSeedSalt),
+                             base::FilePath(kBioTpmSeedTmpDir), kBioTpmSeedFile,
+                             kBiodUid, kBiodGid, platform);
+}
+
+// Send a secret derived from the system key to hiberman, if available, via a
+// tmpfs file which will be read by hiberman. The tmpfs directory will be
+// created if it doesn't exist.
+bool SendSecretToHibermanTmpFile(const mount_encrypted::EncryptionKey& key,
+                                 cryptohome::Platform* platform) {
+  if (!base::PathExists(base::FilePath(kHibermanPath))) {
+    LOG(INFO) << "There is no hiberman binary, so skip sending TPM seed.";
+    return true;
+  }
+
+  return SendSecretToTmpFile(key, std::string(kHibermanTpmSeedSalt),
+                             base::FilePath(kHibermanTpmSeedTmpDir),
+                             kHibermanTpmSeedFile, kHibermanUid, kHibermanGid,
+                             platform);
+}
+
+// Send a secret derived from the system key to featured, if available, via a
+// tmpfs file which will be read by featured. The tmpfs directory will be
+// created if it doesn't exist.
+bool SendSecretToFeaturedTmpFile(const mount_encrypted::EncryptionKey& key,
+                                 cryptohome::Platform* platform) {
+  return SendSecretToTmpFile(key, std::string(kFeaturedTpmSeedSalt),
+                             base::FilePath(kFeaturedTpmSeedTmpDir),
+                             kFeaturedTpmSeedFile, kRootUid, kRootGid,
+                             platform);
+}
+
+// Originally .tpm_owned file is located in /mnt/stateful_partition. Since the
+// directory can only be written by root, .tpm_owned won't be able to get
+// touched by tpm_managerd if we run it in minijail. Therefore, we need to
+// migrate the files from /mnt/stateful_partition to the files into
+// /mnt/stateful_partition/unencrypted/tpm_manager. The migration is written
+// here since mount-encrypted is started before tpm_managerd.
+bool migrate_tpm_owership_state_file() {
+  auto dirname = base::FilePath(kTpmOwned).DirName();
+  if (!base::CreateDirectory(dirname)) {
+    LOG(ERROR) << "Failed to create dir for TPM pwnership state file.";
+    return false;
+  }
+
+  if (base::PathExists(base::FilePath(kOldTpmOwnershipStateFile))) {
+    LOG(INFO) << kOldTpmOwnershipStateFile << " exists. "
+              << "Moving it to " << kTpmOwned;
+    return base::Move(base::FilePath(kOldTpmOwnershipStateFile),
+                      base::FilePath((kTpmOwned)));
+  }
+  return true;
+}
+
 static result_code mount_encrypted_partition(
     mount_encrypted::EncryptedFs* encrypted_fs,
     const base::FilePath& rootdir,
+    cryptohome::Platform* platform,
     bool safe_mount) {
   result_code rc;
 
@@ -294,6 +317,10 @@ static result_code mount_encrypted_partition(
   rc = encrypted_fs->CheckStates();
   if (rc != RESULT_SUCCESS)
     return rc;
+
+  if (!migrate_tpm_owership_state_file()) {
+    LOG(ERROR) << "Failed to migrate tpm owership state file to" << kTpmOwned;
+  }
 
   mount_encrypted::Tpm tpm;
   auto loader = mount_encrypted::SystemKeyLoader::Create(&tpm, rootdir);
@@ -324,11 +351,22 @@ static result_code mount_encrypted_partition(
 
   /* Log errors during sending seed to biod, but don't stop execution. */
   if (has_chromefw()) {
-    if (!SendSecretToBiodTmpFile(key)) {
-      LOG(ERROR) << "Failed to send TPM secret to biod.";
-    }
+    LOG_IF(ERROR, !SendSecretToBiodTmpFile(key, platform))
+        << "Failed to send TPM secret to biod.";
   } else {
-    LOG(ERROR) << "Failed to load system key, biod won't get a TPM seed.";
+    LOG(ERROR) << "biod won't get a TPM seed without chromefw.";
+  }
+
+  /* Log errors during sending seed to hiberman and featured, but don't stop
+   * execution. */
+  if (shall_use_tpm_for_system_key()) {
+    LOG_IF(ERROR, !SendSecretToHibermanTmpFile(key, platform))
+        << "Failed to send TPM secret to hiberman.";
+    LOG_IF(ERROR, !SendSecretToFeaturedTmpFile(key, platform))
+        << "Failed to send TPM secret to featured.";
+  } else {
+    LOG(ERROR) << "Failed to load TPM system key, hiberman and featured won't "
+                  "get a TPM seed.";
   }
 
   cryptohome::FileSystemKey encryption_key;
@@ -378,8 +416,9 @@ int main(int argc, const char* argv[]) {
   cryptohome::Platform platform;
   cryptohome::EncryptedContainerFactory encrypted_container_factory(&platform);
   brillo::DeviceMapper device_mapper;
+  brillo::LogicalVolumeManager lvm;
   auto encrypted_fs = mount_encrypted::EncryptedFs::Generate(
-      rootdir, &platform, &device_mapper, &encrypted_container_factory);
+      rootdir, &platform, &device_mapper, &lvm, &encrypted_container_factory);
 
   if (!encrypted_fs) {
     LOG(ERROR) << "Failed to create encrypted fs handler.";
@@ -394,14 +433,11 @@ int main(int argc, const char* argv[]) {
     } else if (args[0] == "info") {
       // Report info from the encrypted mount.
       return report_info(encrypted_fs.get(), rootdir);
-    } else if (args[0] == "finalize") {
-      return finalize_from_cmdline(encrypted_fs.get(), rootdir,
-                                   args.size() >= 2 ? args[1].c_str() : NULL);
     } else if (args[0] == "set") {
       return set_system_key(rootdir, args.size() >= 2 ? args[1].c_str() : NULL,
                             &platform);
     } else if (args[0] == "mount") {
-      return mount_encrypted_partition(encrypted_fs.get(), rootdir,
+      return mount_encrypted_partition(encrypted_fs.get(), rootdir, &platform,
                                        !FLAGS_unsafe);
     } else {
       print_usage(argv[0]);
@@ -410,5 +446,6 @@ int main(int argc, const char* argv[]) {
   }
 
   // default operation is mount encrypted partition.
-  return mount_encrypted_partition(encrypted_fs.get(), rootdir, !FLAGS_unsafe);
+  return mount_encrypted_partition(encrypted_fs.get(), rootdir, &platform,
+                                   !FLAGS_unsafe);
 }

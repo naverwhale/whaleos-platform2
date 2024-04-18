@@ -1,5 +1,5 @@
 #
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 #
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
@@ -8,7 +8,7 @@ shared_config: &shared_config
   name: "{{$name}}"
   identity:
     platform-name: "PlatformName"
-    smbios-name-match: "SMBiosNameMatch"
+    frid: "Google_SomeDevice"
     sku-id: "{{$sku-id}}"
   firmware:
     image-name: "{{$name}}_firmware"

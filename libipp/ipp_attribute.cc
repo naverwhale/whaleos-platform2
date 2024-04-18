@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,28 +6,34 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <vector>
 
+#include "frame.h"  // needed for ipp::Code
+
 namespace {
 
-ipp::InternalType InternalTypeForUnknownAttribute(ipp::AttrType type) {
+// Maximum size of fields name and value (separately) in TNV.
+constexpr size_t kMaxSizeOfNameOrValue = std::numeric_limits<int16_t>::max();
+
+ipp::InternalType InternalTypeForUnknownAttribute(ipp::ValueTag type) {
   switch (type) {
-    case ipp::AttrType::collection:
+    case ipp::ValueTag::collection:
       return ipp::InternalType::kCollection;
-    case ipp::AttrType::boolean:
-    case ipp::AttrType::integer:
-    case ipp::AttrType::enum_:
+    case ipp::ValueTag::boolean:
+    case ipp::ValueTag::integer:
+    case ipp::ValueTag::enum_:
       return ipp::InternalType::kInteger;
-    case ipp::AttrType::dateTime:
+    case ipp::ValueTag::dateTime:
       return ipp::InternalType::kDateTime;
-    case ipp::AttrType::resolution:
+    case ipp::ValueTag::resolution:
       return ipp::InternalType::kResolution;
-    case ipp::AttrType::rangeOfInteger:
+    case ipp::ValueTag::rangeOfInteger:
       return ipp::InternalType::kRangeOfInteger;
-    case ipp::AttrType::name:
-    case ipp::AttrType::text:
+    case ipp::ValueTag::nameWithLanguage:
+    case ipp::ValueTag::textWithLanguage:
       return ipp::InternalType::kStringWithLanguage;
     default:
       return ipp::InternalType::kString;
@@ -54,7 +60,7 @@ namespace {
 // |out_val| cannot be nullptr.
 template <typename InputType, typename OutputType>
 struct Converter {
-  static bool Convert(AttrName name,
+  static bool Convert(const std::string& name,
                       const AttrDef& def,
                       const InputType& in_val,
                       OutputType* out_val) {
@@ -63,7 +69,7 @@ struct Converter {
 };
 template <typename Type>
 struct Converter<Type, Type> {
-  static bool Convert(AttrName name,
+  static bool Convert(const std::string& name,
                       const AttrDef& def,
                       const Type& in_val,
                       Type* out_val) {
@@ -73,7 +79,7 @@ struct Converter<Type, Type> {
 };
 template <>
 struct Converter<std::string, std::string> {
-  static bool Convert(AttrName name,
+  static bool Convert(const std::string& name,
                       const AttrDef& def,
                       const std::string& in_val,
                       std::string* out_val) {
@@ -83,7 +89,7 @@ struct Converter<std::string, std::string> {
 };
 template <typename InputType>
 struct Converter<InputType, std::string> {
-  static bool Convert(AttrName name,
+  static bool Convert(const std::string& name,
                       const AttrDef& def,
                       const InputType& in_val,
                       std::string* out_val) {
@@ -93,16 +99,19 @@ struct Converter<InputType, std::string> {
 };
 template <>
 struct Converter<int32_t, std::string> {
-  static bool Convert(AttrName name,
+  static bool Convert(const std::string& name,
                       const AttrDef& def,
                       int32_t in_val,
                       std::string* out_val) {
-    if (def.ipp_type == AttrType::boolean) {
+    if (def.ipp_type == ValueTag::boolean) {
       *out_val = ToString(static_cast<bool>(in_val));
-    } else if (def.ipp_type == AttrType::enum_ ||
-               def.ipp_type == AttrType::keyword) {
-      *out_val = ToString(name, in_val);
-    } else if (def.ipp_type == AttrType::integer) {
+    } else if (def.ipp_type == ValueTag::enum_ ||
+               def.ipp_type == ValueTag::keyword) {
+      AttrName attr_name;
+      if (!FromString(name, &attr_name))
+        return false;
+      *out_val = ToString(attr_name, in_val);
+    } else if (def.ipp_type == ValueTag::integer) {
       *out_val = ToString(in_val);
     } else {
       return false;
@@ -112,7 +121,7 @@ struct Converter<int32_t, std::string> {
 };
 template <>
 struct Converter<std::string, bool> {
-  static bool Convert(AttrName name,
+  static bool Convert(const std::string& name,
                       const AttrDef& def,
                       const std::string& in_val,
                       bool* out_val) {
@@ -121,23 +130,26 @@ struct Converter<std::string, bool> {
 };
 template <>
 struct Converter<std::string, int32_t> {
-  static bool Convert(AttrName name,
+  static bool Convert(const std::string& name,
                       const AttrDef& def,
                       const std::string& in_val,
                       int32_t* out_val) {
     bool result = false;
-    if (def.ipp_type == AttrType::boolean) {
+    if (def.ipp_type == ValueTag::boolean) {
       bool out;
       result = FromString(in_val, &out);
       if (result)
         *out_val = out;
-    } else if (def.ipp_type == AttrType::enum_ ||
-               def.ipp_type == AttrType::keyword) {
+    } else if (def.ipp_type == ValueTag::enum_ ||
+               def.ipp_type == ValueTag::keyword) {
+      AttrName attr_name;
+      if (!FromString(name, &attr_name))
+        return false;
       int out;
-      result = FromString(in_val, name, &out);
+      result = FromString(in_val, attr_name, &out);
       if (result)
         *out_val = out;
-    } else if (def.ipp_type == AttrType::integer) {
+    } else if (def.ipp_type == ValueTag::integer) {
       int out;
       result = FromString(in_val, &out);
       if (result)
@@ -148,7 +160,7 @@ struct Converter<std::string, int32_t> {
 };
 template <>
 struct Converter<std::string, StringWithLanguage> {
-  static bool Convert(AttrName name,
+  static bool Convert(const std::string& name,
                       const AttrDef& def,
                       const std::string& in_val,
                       StringWithLanguage* out_val) {
@@ -165,10 +177,6 @@ void* CreateValue(const AttrDef& def) {
     return 0;
   return new Type();
 }
-template <>
-void* CreateValue<Collection*>(const AttrDef& def) {
-  return def.constructor();
-}
 
 // Deletes value saved as void*.
 template <typename Type>
@@ -176,10 +184,6 @@ void DeleteValue(void* value) {
   if (sizeof(Type) <= sizeof(void*) && alignof(Type) <= alignof(void*))
     return;
   delete reinterpret_cast<Type*>(value);
-}
-template <>
-void DeleteValue<Collection*>(void* value) {
-  delete reinterpret_cast<Collection*>(value);
 }
 
 // Returns pointer to a value stored as void*.
@@ -212,165 +216,136 @@ void ResizeVector<Collection*>(const AttrDef& def,
     delete v->at(i);
   v->resize(new_size);
   for (size_t i = old_size; i < new_size; ++i)
-    (*v)[i] = def.constructor();
+    (*v)[i] = new Collection;
 }
 
-// Deletes whole attribute |name|,|def| from |values|.
+// Deletes the whole attribute's |values|.
 template <typename Type>
-void DeleteAttrTyped(std::map<AttrName, void*>* values,
-                     AttrName name,
-                     const AttrDef& def) {
-  auto it = values->find(name);
-  if (it == values->end())
+void DeleteAttrTyped(void*& values, const AttrDef& def) {
+  if (values == nullptr)
     return;
-  if (def.is_a_set) {
-    auto pv = reinterpret_cast<std::vector<Type>*>(it->second);
-    ResizeVector<Type>(def, pv, 0);
-    delete pv;
-  } else {
-    DeleteValue<Type>(it->second);
-  }
-  values->erase(it);
+  auto pv = reinterpret_cast<std::vector<Type>*>(values);
+  ResizeVector<Type>(def, pv, 0);
+  delete pv;
+  values = nullptr;
 }
 
 // The same as previous one, just chooses correct template instantiation.
-void DeleteAttr(std::map<AttrName, void*>* values,
-                AttrName name,
-                const AttrDef& def) {
+void DeleteAttr(void*& values, const AttrDef& def) {
   switch (def.cc_type) {
     case InternalType::kInteger:
-      DeleteAttrTyped<int32_t>(values, name, def);
+      DeleteAttrTyped<int32_t>(values, def);
       break;
     case InternalType::kString:
-      DeleteAttrTyped<std::string>(values, name, def);
+      DeleteAttrTyped<std::string>(values, def);
       break;
     case InternalType::kResolution:
-      DeleteAttrTyped<Resolution>(values, name, def);
+      DeleteAttrTyped<Resolution>(values, def);
       break;
     case InternalType::kRangeOfInteger:
-      DeleteAttrTyped<RangeOfInteger>(values, name, def);
+      DeleteAttrTyped<RangeOfInteger>(values, def);
       break;
     case InternalType::kDateTime:
-      DeleteAttrTyped<DateTime>(values, name, def);
+      DeleteAttrTyped<DateTime>(values, def);
       break;
     case InternalType::kStringWithLanguage:
-      DeleteAttrTyped<StringWithLanguage>(values, name, def);
+      DeleteAttrTyped<StringWithLanguage>(values, def);
       break;
     case InternalType::kCollection:
-      DeleteAttrTyped<Collection*>(values, name, def);
+      DeleteAttrTyped<Collection*>(values, def);
       break;
   }
 }
 
-// Returns a pointer to a value at position |index| in an attribute |name|.
+// Returns a pointer to a value at position |index| in an attribute's |values|.
 // If the attribute is too short, it is resized to (|index|+1) when possible.
 // When |cut_if_longer| is set, the attribute is shrunk to (|index|+1) values if
 // it is longer. If |cut_if_longer| equals false, the attribute is no
-// downsized. Returns nullptr <=> the attribute is too short and cannot be
-// resized to reach (|index|+1) values.
+// downsized. The function never returns nullptr.
 template <typename Type>
-Type* ResizeAttrGetValuePtr(std::map<AttrName, void*>* values,
-                            AttrName name,
+Type* ResizeAttrGetValuePtr(void*& values,
                             const AttrDef& def,
                             size_t index,
                             bool cut_if_longer) {
-  if (!def.is_a_set && index > 0)
-    return nullptr;
-  // Get an entry from |values|, add new if not exists.
-  auto it_inserted = values->insert({name, nullptr});
-  std::map<AttrName, void*>::iterator it = it_inserted.first;
-  if (it_inserted.second) {
-    if (def.is_a_set) {
-      it->second = new std::vector<Type>();
-    } else {
-      it->second = CreateValue<Type>(def);
-    }
+  // Create |values| if not exists.
+  if (values == nullptr) {
+    values = new std::vector<Type>();
   }
   // Returns the pointer, resize the attribute when needed.
-  if (def.is_a_set) {
-    std::vector<Type>* v = reinterpret_cast<std::vector<Type>*>(it->second);
-    if (cut_if_longer || v->size() <= index)
-      ResizeVector<Type>(def, v, index + 1);
-    return (v->data() + index);
-  } else {
-    return ReadValuePtr<Type>(&it->second);
-  }
+  std::vector<Type>* v = reinterpret_cast<std::vector<Type>*>(values);
+  if (cut_if_longer || v->size() <= index)
+    ResizeVector<Type>(def, v, index + 1);
+  return (v->data() + index);
 }
 
-// Resizes an attribute |name|,|def| to |new_size| values. The parameter
+// Resizes an attribute's |values| to |new_size| values. The parameter
 // |cut_if_longer| works in the same way as in the previous template function.
-// Returns false when the attribute is not a set and |new_size| > 1.
-bool ResizeAttr(std::map<AttrName, void*>* values,
-                AttrName name,
+void ResizeAttr(void*& values,
                 const AttrDef& def,
                 size_t new_size,
                 bool cut_if_longer) {
   if (new_size == 0) {
-    DeleteAttr(values, name, def);
-    return true;
+    DeleteAttr(values, def);
+    return;
   }
   switch (def.cc_type) {
     case InternalType::kInteger:
-      return ResizeAttrGetValuePtr<int32_t>(values, name, def, new_size - 1,
-                                            cut_if_longer) != nullptr;
+      ResizeAttrGetValuePtr<int32_t>(values, def, new_size - 1, cut_if_longer);
+      break;
     case InternalType::kString:
-      return ResizeAttrGetValuePtr<std::string>(values, name, def, new_size - 1,
-                                                cut_if_longer) != nullptr;
+      ResizeAttrGetValuePtr<std::string>(values, def, new_size - 1,
+                                         cut_if_longer);
+      break;
     case InternalType::kResolution:
-      return ResizeAttrGetValuePtr<Resolution>(values, name, def, new_size - 1,
-                                               cut_if_longer) != nullptr;
+      ResizeAttrGetValuePtr<Resolution>(values, def, new_size - 1,
+                                        cut_if_longer);
+      break;
     case InternalType::kRangeOfInteger:
-      return ResizeAttrGetValuePtr<RangeOfInteger>(
-                 values, name, def, new_size - 1, cut_if_longer) != nullptr;
+      ResizeAttrGetValuePtr<RangeOfInteger>(values, def, new_size - 1,
+                                            cut_if_longer);
+      break;
     case InternalType::kDateTime:
-      return ResizeAttrGetValuePtr<DateTime>(values, name, def, new_size - 1,
-                                             cut_if_longer) != nullptr;
+      ResizeAttrGetValuePtr<DateTime>(values, def, new_size - 1, cut_if_longer);
+      break;
     case InternalType::kStringWithLanguage:
-      return ResizeAttrGetValuePtr<StringWithLanguage>(
-                 values, name, def, new_size - 1, cut_if_longer) != nullptr;
+      ResizeAttrGetValuePtr<StringWithLanguage>(values, def, new_size - 1,
+                                                cut_if_longer);
+      break;
     case InternalType::kCollection:
-      return ResizeAttrGetValuePtr<Collection*>(values, name, def, new_size - 1,
-                                                cut_if_longer) != nullptr;
+      ResizeAttrGetValuePtr<Collection*>(values, def, new_size - 1,
+                                         cut_if_longer);
+      break;
   }
-  return false;
 }
 
-// Reads a value at position |index| in an attribute |name|,|def| and saves it
+// Reads a value at position |index| in an attribute's |values| and saves it
 // to |value|. Proper conversion is applied when needed. The function returns
 // true if succeeds and false when one of the following occurs:
 // * |value| is nullptr
 // * the attribute has less than |index|+1 values
 // * required conversion is not possible
 template <typename InternalType, typename ApiType>
-bool ReadConvertValueTyped(const std::map<AttrName, void*>& values,
-                           AttrName name,
+bool ReadConvertValueTyped(void* const& values,
+                           const std::string& name,
                            const AttrDef& def,
                            size_t index,
                            ApiType* value) {
   if (value == nullptr)
     return false;
-  auto it = values.find(name);
-  if (it == values.end())
-    return false;
+
   const InternalType* internal_value = nullptr;
-  if (def.is_a_set) {
-    auto v = ReadValueConstPtr<std::vector<InternalType>>(&it->second);
-    if (v->size() <= index)
-      return false;
-    internal_value = v->data() + index;
-  } else {
-    if (index != 0)
-      return false;
-    internal_value = ReadValueConstPtr<InternalType>(&it->second);
-  }
+  auto v = ReadValueConstPtr<std::vector<InternalType>>(&values);
+  if (v->size() <= index)
+    return false;
+  internal_value = v->data() + index;
   return Converter<InternalType, ApiType>::Convert(name, def, *internal_value,
                                                    value);
 }
 
 // The same as previous one, just chooses correct template instantiation.
 template <typename ApiType>
-bool ReadConvertValue(const std::map<AttrName, void*>& values,
-                      AttrName name,
+bool ReadConvertValue(void* const& values,
+                      const std::string& name,
                       const AttrDef& def,
                       size_t index,
                       ApiType* value) {
@@ -402,12 +377,10 @@ bool ReadConvertValue(const std::map<AttrName, void*>& values,
 // Saves |value| to position |index| in an attribute |name|,|def|. Proper
 // conversion is applied when needed. The attribute is also resized when |index|
 // is greater than the attribute's size. The function returns true if succeeds
-// and false when one of the following occurs:
-// * the attribute is not a set and |index| > 0
-// * required conversion is not possible (|value| is incorrect)
+// and false when the required conversion is not possible.
 template <typename InternalType, typename ApiType>
-bool SaveValueTyped(std::map<AttrName, void*>* values,
-                    AttrName name,
+bool SaveValueTyped(void*& values,
+                    const std::string& name,
                     const AttrDef& def,
                     size_t index,
                     const ApiType& value) {
@@ -416,73 +389,68 @@ bool SaveValueTyped(std::map<AttrName, void*>* values,
                                                  &internal_value))
     return false;
   InternalType* internal_ptr =
-      ResizeAttrGetValuePtr<InternalType>(values, name, def, index, false);
-  if (internal_ptr == nullptr)
-    return false;
+      ResizeAttrGetValuePtr<InternalType>(values, def, index, false);
   *internal_ptr = internal_value;
   return true;
 }
 
 }  // end of namespace
 
-std::string ToString(AttrState s) {
-  switch (s) {
-    case AttrState::unset:
-      return "unset";
-    case AttrState::set:
-      return "set";
-    case AttrState::unsupported:
-      return "unsupported";
-    case AttrState::unknown:
-      return "unknown";
-    case AttrState::novalue_:
-      return "novalue";
-    case AttrState::not_settable:
-      return "not-settable";
-    case AttrState::delete_attribute:
-      return "delete-attribute";
-    case AttrState::admin_define:
-      return "admin-define";
+std::string_view ToStrView(ValueTag tag) {
+  switch (tag) {
+    case ValueTag::unsupported:
+      return std::string_view("unsupported");
+    case ValueTag::unknown:
+      return std::string_view("unknown");
+    case ValueTag::no_value:
+      return std::string_view("no-value");
+    case ValueTag::not_settable:
+      return std::string_view("not-settable");
+    case ValueTag::delete_attribute:
+      return std::string_view("delete-attribute");
+    case ValueTag::admin_define:
+      return std::string_view("admin-define");
+    case ValueTag::integer:
+      return std::string_view("integer");
+    case ValueTag::boolean:
+      return std::string_view("boolean");
+    case ValueTag::enum_:
+      return std::string_view("enum");
+    case ValueTag::octetString:
+      return std::string_view("octetString");
+    case ValueTag::dateTime:
+      return std::string_view("dateTime");
+    case ValueTag::resolution:
+      return std::string_view("resolution");
+    case ValueTag::rangeOfInteger:
+      return std::string_view("rangeOfInteger");
+    case ValueTag::collection:
+      return std::string_view("collection");
+    case ValueTag::textWithLanguage:
+      return std::string_view("textWithLanguage");
+    case ValueTag::nameWithLanguage:
+      return std::string_view("nameWithLanguage");
+    case ValueTag::textWithoutLanguage:
+      return std::string_view("textWithoutLanguage");
+    case ValueTag::nameWithoutLanguage:
+      return std::string_view("nameWithoutLanguage");
+    case ValueTag::keyword:
+      return std::string_view("keyword");
+    case ValueTag::uri:
+      return std::string_view("uri");
+    case ValueTag::uriScheme:
+      return std::string_view("uriScheme");
+    case ValueTag::charset:
+      return std::string_view("charset");
+    case ValueTag::naturalLanguage:
+      return std::string_view("naturalLanguage");
+    case ValueTag::mimeMediaType:
+      return std::string_view("mimeMediaType");
   }
-  return "";
-}
-
-std::string ToString(AttrType at) {
-  switch (at) {
-    case AttrType::integer:
-      return "integer";
-    case AttrType::boolean:
-      return "boolean";
-    case AttrType::enum_:
-      return "enum";
-    case AttrType::octetString:
-      return "octetString";
-    case AttrType::dateTime:
-      return "dateTime";
-    case AttrType::resolution:
-      return "resolution";
-    case AttrType::rangeOfInteger:
-      return "rangeOfInteger";
-    case AttrType::collection:
-      return "collection";
-    case AttrType::text:
-      return "text";
-    case AttrType::name:
-      return "name";
-    case AttrType::keyword:
-      return "keyword";
-    case AttrType::uri:
-      return "uri";
-    case AttrType::uriScheme:
-      return "uriScheme";
-    case AttrType::charset:
-      return "charset";
-    case AttrType::naturalLanguage:
-      return "naturalLanguage";
-    case AttrType::mimeMediaType:
-      return "mimeMediaType";
+  if (IsValid(tag)) {
+    return std::string_view("<unknown_ValueTag>");
   }
-  return "";
+  return std::string_view("<invalid_ValueTag>");
 }
 
 std::string ToString(bool v) {
@@ -580,376 +548,638 @@ bool FromString(const std::string& s, int* out) {
   return true;
 }
 
-// Final class for Attribute represents unknown attribute, i.e.: an attribute
-// defined during runtime.
-class UnknownAttribute : public Attribute {
- public:
-  UnknownAttribute(Collection* owner, AttrName name)
-      : Attribute(nullptr, name), owner_(owner) {}
-  Collection* const owner_;
-};
-
-Collection* Attribute::GetOwner() const {
-  if (offset_ == std::numeric_limits<int16_t>::min())
-    return static_cast<const UnknownAttribute*>(this)->owner_;
-  return reinterpret_cast<Collection*>(reinterpret_cast<std::intptr_t>(this) -
-                                       offset_);
+Attribute::~Attribute() {
+  DeleteAttr(values_, def_);
 }
 
-AttrType Attribute::GetType() const {
-  return GetOwner()->GetAttributeDefinition(name_).ipp_type;
+ValueTag Attribute::Tag() const {
+  return def_.ipp_type;
 }
 
-bool Attribute::IsASet() const {
-  return GetOwner()->GetAttributeDefinition(name_).is_a_set;
-}
-
-AttrState Attribute::GetState() const {
-  Collection* coll = GetOwner();
-  if (coll->values_.count(name_))
-    return AttrState::set;
-  auto it = coll->states_.find(name_);
-  if (it != coll->states_.end())
-    return it->second;
-  return AttrState::unset;
-}
-
-void Attribute::SetState(AttrState status) {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  if (status == AttrState::set) {
-    ResizeAttr(&coll->values_, name_, def, 1, false);
-    return;
-  }
-  DeleteAttr(&coll->values_, name_, def);
-  if (status != AttrState::unset) {
-    coll->states_[name_] = status;
+Attribute::Attribute(std::string_view name, AttrDef def)
+    : name_(name), def_(def) {
+  // Attributes with non-out-of-band tag must have at least one value.
+  if (!IsOutOfBand(def.ipp_type)) {
+    ResizeAttr(values_, def_, 1, false);
   }
 }
 
-Attribute::Attribute(Collection* owner, AttrName name)
-    : offset_((owner == nullptr) ? (std::numeric_limits<int16_t>::min())
-                                 : (reinterpret_cast<std::intptr_t>(this) -
-                                    reinterpret_cast<std::intptr_t>(owner))),
-      name_(name) {
-  if (owner != nullptr)
-    assert(GetOwner() == owner);
+std::string_view Attribute::Name() const {
+  return name_;
 }
 
 size_t Attribute::GetSize() const {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  auto it = coll->values_.find(name_);
-  if (it == coll->values_.end())
+  if (values_ == nullptr)
     return 0;
-  if (!def.is_a_set)
-    return 1;
-  switch (def.cc_type) {
+  switch (def_.cc_type) {
     case InternalType::kInteger:
-      return ReadValueConstPtr<std::vector<int32_t>>(&it->second)->size();
+      return ReadValueConstPtr<std::vector<int32_t>>(&values_)->size();
     case InternalType::kString:
-      return ReadValueConstPtr<std::vector<std::string>>(&it->second)->size();
+      return ReadValueConstPtr<std::vector<std::string>>(&values_)->size();
     case InternalType::kResolution:
-      return ReadValueConstPtr<std::vector<Resolution>>(&it->second)->size();
+      return ReadValueConstPtr<std::vector<Resolution>>(&values_)->size();
     case InternalType::kRangeOfInteger:
-      return ReadValueConstPtr<std::vector<RangeOfInteger>>(&it->second)
-          ->size();
+      return ReadValueConstPtr<std::vector<RangeOfInteger>>(&values_)->size();
     case InternalType::kDateTime:
-      return ReadValueConstPtr<std::vector<DateTime>>(&it->second)->size();
+      return ReadValueConstPtr<std::vector<DateTime>>(&values_)->size();
     case InternalType::kStringWithLanguage:
-      return ReadValueConstPtr<std::vector<StringWithLanguage>>(&it->second)
+      return ReadValueConstPtr<std::vector<StringWithLanguage>>(&values_)
           ->size();
     case InternalType::kCollection:
-      return ReadValueConstPtr<std::vector<Collection*>>(&it->second)->size();
+      return ReadValueConstPtr<std::vector<Collection*>>(&values_)->size();
   }
   return 0;
 }
 
+size_t Attribute::Size() const {
+  return GetSize();
+}
+
 void Attribute::Resize(size_t new_size) {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  if (ResizeAttr(&coll->values_, name_, def, new_size, true)) {
-    if (new_size > 0)
-      coll->states_.erase(name_);
+  if (IsOutOfBand(def_.ipp_type) || new_size == 0)
+    return;
+  ResizeAttr(values_, def_, new_size, true);
+}
+
+Code Attribute::GetValue(size_t index, bool& val) const {
+  if (def_.ipp_type != ValueTag::boolean)
+    return Code::kIncompatibleType;
+  auto values = ReadValueConstPtr<std::vector<int32_t>>(&values_);
+  if (index >= values->size())
+    return Code::kIndexOutOfRange;
+  val = values->at(index);
+  return Code::kOK;
+}
+
+Code Attribute::GetValue(size_t index, int32_t& val) const {
+  if (!IsInteger(def_.ipp_type))
+    return Code::kIncompatibleType;
+  auto values = ReadValueConstPtr<std::vector<int32_t>>(&values_);
+  if (index >= values->size())
+    return Code::kIndexOutOfRange;
+  val = values->at(index);
+  return Code::kOK;
+}
+
+Code Attribute::GetValue(size_t index, std::string& val) const {
+  if (!IsString(def_.ipp_type) && def_.ipp_type != ValueTag::octetString)
+    return Code::kIncompatibleType;
+  auto values = ReadValueConstPtr<std::vector<std::string>>(&values_);
+  if (index >= values->size())
+    return Code::kIndexOutOfRange;
+  val = values->at(index);
+  return Code::kOK;
+}
+
+Code Attribute::GetValue(size_t index, StringWithLanguage& val) const {
+  if (def_.ipp_type == ValueTag::nameWithLanguage ||
+      def_.ipp_type == ValueTag::textWithLanguage) {
+    auto values = ReadValueConstPtr<std::vector<StringWithLanguage>>(&values_);
+    if (index >= values->size())
+      return Code::kIndexOutOfRange;
+    val = values->at(index);
+    return Code::kOK;
   }
-}
-
-bool Attribute::GetValue(std::string* val, size_t index) const {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  return ReadConvertValue(coll->values_, name_, def, index, val);
-}
-
-bool Attribute::GetValue(StringWithLanguage* val, size_t index) const {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  return ReadConvertValue(coll->values_, name_, def, index, val);
-}
-
-bool Attribute::GetValue(int* val, size_t index) const {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  return ReadConvertValue(coll->values_, name_, def, index, val);
-}
-
-bool Attribute::GetValue(Resolution* val, size_t index) const {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  return ReadConvertValue(coll->values_, name_, def, index, val);
-}
-
-bool Attribute::GetValue(RangeOfInteger* val, size_t index) const {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  return ReadConvertValue(coll->values_, name_, def, index, val);
-}
-
-bool Attribute::GetValue(DateTime* val, size_t index) const {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  return ReadConvertValue(coll->values_, name_, def, index, val);
-}
-
-bool Attribute::SetValue(const std::string& val, size_t index) {
-  Collection* coll = GetOwner();
-  return coll->SaveValue(name_, index, val);
-}
-
-bool Attribute::SetValue(const StringWithLanguage& val, size_t index) {
-  Collection* coll = GetOwner();
-  return coll->SaveValue(name_, index, val);
-}
-
-bool Attribute::SetValue(const int& val, size_t index) {
-  Collection* coll = GetOwner();
-  return coll->SaveValue(name_, index, val);
-}
-
-bool Attribute::SetValue(const Resolution& val, size_t index) {
-  Collection* coll = GetOwner();
-  return coll->SaveValue(name_, index, val);
-}
-
-bool Attribute::SetValue(const RangeOfInteger& val, size_t index) {
-  Collection* coll = GetOwner();
-  return coll->SaveValue(name_, index, val);
-}
-
-bool Attribute::SetValue(const DateTime& val, size_t index) {
-  Collection* coll = GetOwner();
-  return coll->SaveValue(name_, index, val);
-}
-
-Collection* Attribute::GetCollection(size_t index) {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  if (def.cc_type != InternalType::kCollection)
-    return nullptr;
-  auto it = coll->values_.find(name_);
-  if (it == coll->values_.end())
-    return nullptr;
-  Collection* p = nullptr;
-  if (def.is_a_set) {
-    auto v = ReadValuePtr<std::vector<Collection*>>(&it->second);
-    if (v->size() > index)
-      p = *(v->data() + index);
-  } else {
-    p = *(ReadValuePtr<Collection*>(&it->second));
+  if (def_.ipp_type == ValueTag::nameWithoutLanguage ||
+      def_.ipp_type == ValueTag::textWithoutLanguage) {
+    auto values = ReadValueConstPtr<std::vector<std::string>>(&values_);
+    if (index >= values->size())
+      return Code::kIndexOutOfRange;
+    val.value = values->at(index);
+    val.language = "";
+    return Code::kOK;
   }
-  return p;
+  return Code::kIncompatibleType;
 }
 
-const Collection* Attribute::GetCollection(size_t index) const {
-  Collection* coll = GetOwner();
-  const AttrDef def = coll->GetAttributeDefinition(name_);
-  if (def.cc_type != InternalType::kCollection)
-    return nullptr;
-  auto it = coll->values_.find(name_);
-  if (it == coll->values_.end())
-    return nullptr;
-  const Collection* p = nullptr;
-  if (def.is_a_set) {
-    auto v = ReadValueConstPtr<std::vector<Collection*>>(&it->second);
-    if (v->size() > index)
-      p = *(v->data() + index);
-  } else {
-    p = *(ReadValueConstPtr<Collection*>(&it->second));
+Code Attribute::GetValue(size_t index, DateTime& val) const {
+  if (def_.ipp_type != ValueTag::dateTime)
+    return Code::kIncompatibleType;
+  auto values = ReadValueConstPtr<std::vector<DateTime>>(&values_);
+  if (index >= values->size())
+    return Code::kIndexOutOfRange;
+  val = values->at(index);
+  return Code::kOK;
+}
+
+Code Attribute::GetValue(size_t index, Resolution& val) const {
+  if (def_.ipp_type != ValueTag::resolution)
+    return Code::kIncompatibleType;
+  auto values = ReadValueConstPtr<std::vector<Resolution>>(&values_);
+  if (index >= values->size())
+    return Code::kIndexOutOfRange;
+  val = values->at(index);
+  return Code::kOK;
+}
+
+Code Attribute::GetValue(size_t index, RangeOfInteger& val) const {
+  if (def_.ipp_type == ValueTag::rangeOfInteger) {
+    auto values = ReadValueConstPtr<std::vector<RangeOfInteger>>(&values_);
+    if (index >= values->size())
+      return Code::kIndexOutOfRange;
+    val = values->at(index);
+    return Code::kOK;
   }
-  return p;
-}
-
-Collection::~Collection() {
-  std::vector<AttrName> names;
-  for (auto& name_value : values_)
-    names.push_back(name_value.first);
-  for (auto& name : names) {
-    const AttrDef def = GetAttributeDefinition(name);
-    DeleteAttr(&values_, name, def);
+  if (def_.ipp_type == ValueTag::integer) {
+    auto values = ReadValueConstPtr<std::vector<int32_t>>(&values_);
+    if (index >= values->size())
+      return Code::kIndexOutOfRange;
+    val.min_value = val.max_value = values->at(index);
+    return Code::kOK;
   }
-  for (auto& name_attr : unknown_attributes) {
-    delete static_cast<UnknownAttribute*>(name_attr.second.object);
+  return Code::kIncompatibleType;
+}
+
+CollsView Attribute::Colls() {
+  if (Tag() != ValueTag::collection || Size() == 0) {
+    return CollsView();
   }
+  return CollsView(*ReadValuePtr<std::vector<Collection*>>(&values_));
 }
 
-AttrDef Collection::GetAttributeDefinition(AttrName name) const {
-  auto it2 = unknown_attributes.find(name);
-  if (it2 != unknown_attributes.end())
-    return it2->second.def;
-  auto it = definitions_->find(name);
-  if (it != definitions_->end())
-    return it->second;
-  return {AttrType::integer, InternalType::kInteger, false};
+Code Attribute::GetValues(std::vector<bool>& values) const {
+  if (def_.ipp_type != ValueTag::boolean)
+    return Code::kIncompatibleType;
+  const std::vector<int32_t>* vints =
+      ReadValueConstPtr<std::vector<int32_t>>(&values_);
+  values.assign(vints->begin(), vints->end());
+  return Code::kOK;
 }
 
-Attribute* Collection::GetAttribute(AttrName an) {
-  const std::vector<Attribute*> known_attr = GetKnownAttributes();
-  for (auto a : known_attr)
-    if (a->GetNameAsEnum() == an)
-      return a;
-  auto it2 = unknown_attributes.find(an);
-  if (it2 != unknown_attributes.end())
-    return it2->second.object;
-  return nullptr;
+Code Attribute::GetValues(std::vector<int32_t>& values) const {
+  if (!IsInteger(def_.ipp_type))
+    return Code::kIncompatibleType;
+  values = *ReadValueConstPtr<std::vector<int32_t>>(&values_);
+  return Code::kOK;
 }
 
-const Attribute* Collection::GetAttribute(AttrName an) const {
-  const std::vector<const Attribute*> known_attr = GetKnownAttributes();
-  for (auto a : known_attr)
-    if (a->GetNameAsEnum() == an)
-      return a;
-  auto it2 = unknown_attributes.find(an);
-  if (it2 != unknown_attributes.end())
-    return it2->second.object;
-  return nullptr;
+Code Attribute::GetValues(std::vector<std::string>& values) const {
+  if (!IsString(def_.ipp_type) && def_.ipp_type != ValueTag::octetString)
+    return Code::kIncompatibleType;
+  values = *ReadValueConstPtr<std::vector<std::string>>(&values_);
+  return Code::kOK;
 }
 
-Attribute* Collection::GetAttribute(const std::string& name) {
-  AttrName an = AttrName::_unknown;
-  if (!FromString(name, &an)) {
-    for (const auto& e : unknown_names) {
-      if (e.second == name) {
-        an = e.first;
-        break;
-      }
+Code Attribute::GetValues(std::vector<StringWithLanguage>& values) const {
+  if (def_.ipp_type == ValueTag::nameWithLanguage ||
+      def_.ipp_type == ValueTag::textWithLanguage) {
+    values = *ReadValueConstPtr<std::vector<StringWithLanguage>>(&values_);
+    return Code::kOK;
+  }
+  if (def_.ipp_type == ValueTag::nameWithoutLanguage ||
+      def_.ipp_type == ValueTag::textWithoutLanguage) {
+    auto org_values = ReadValueConstPtr<std::vector<std::string>>(&values_);
+    values.resize(org_values->size());
+    for (size_t i = 0; i < values.size(); ++i) {
+      values[i].value = (*org_values)[i];
+      values[i].language.clear();
     }
+    return Code::kOK;
   }
-  return GetAttribute(an);
+  return Code::kIncompatibleType;
 }
 
-const Attribute* Collection::GetAttribute(const std::string& name) const {
-  AttrName an = AttrName::_unknown;
-  if (!FromString(name, &an)) {
-    for (const auto& e : unknown_names) {
-      if (e.second == name) {
-        an = e.first;
-        break;
-      }
+Code Attribute::GetValues(std::vector<DateTime>& values) const {
+  if (def_.ipp_type != ValueTag::dateTime)
+    return Code::kIncompatibleType;
+  values = *ReadValueConstPtr<std::vector<DateTime>>(&values_);
+  return Code::kOK;
+}
+
+Code Attribute::GetValues(std::vector<Resolution>& values) const {
+  if (def_.ipp_type != ValueTag::resolution)
+    return Code::kIncompatibleType;
+  values = *ReadValueConstPtr<std::vector<Resolution>>(&values_);
+  return Code::kOK;
+}
+
+Code Attribute::GetValues(std::vector<RangeOfInteger>& values) const {
+  if (def_.ipp_type == ValueTag::rangeOfInteger) {
+    values = *ReadValueConstPtr<std::vector<RangeOfInteger>>(&values_);
+    return Code::kOK;
+  }
+  if (def_.ipp_type == ValueTag::integer) {
+    auto org_values = ReadValueConstPtr<std::vector<int32_t>>(&values_);
+    values.resize(org_values->size());
+    for (size_t i = 0; i < values.size(); ++i) {
+      values[i].min_value = values[i].max_value = (*org_values)[i];
     }
+    return Code::kOK;
   }
-  return GetAttribute(an);
+  return Code::kIncompatibleType;
 }
 
-Attribute* Collection::AddUnknownAttribute(const std::string& name,
-                                           bool is_a_set,
-                                           AttrType type) {
-  // name cannot be empty
-  if (name.empty())
-    return nullptr;
-  // type must be correct
-  if (ToString(type) == "")
-    return nullptr;
-  //
-  AttrName an = AttrName::_unknown;
-  if (!FromString(name, &an)) {
-    for (const auto& e : unknown_names) {
-      if (e.second == name)
-        return nullptr;
-    }
-    if (unknown_names.empty()) {
-      an = static_cast<AttrName>(std::numeric_limits<uint16_t>::max());
-    } else {
-      an = static_cast<AttrName>(
-          static_cast<uint16_t>(unknown_names.begin()->first) - 1);
-    }
-    unknown_names[an] = name;
-  } else if (GetAttribute(an) != nullptr) {
-    return nullptr;
+Code Attribute::SetValues(bool value) {
+  return SetValues(std::vector<bool>{value});
+}
+
+Code Attribute::SetValues(int32_t value) {
+  return SetValues(std::vector<int32_t>{value});
+}
+
+Code Attribute::SetValues(const std::string& value) {
+  return SetValues(std::vector<std::string>{value});
+}
+
+Code Attribute::SetValues(const StringWithLanguage& value) {
+  return SetValues(std::vector<StringWithLanguage>{value});
+}
+
+Code Attribute::SetValues(DateTime value) {
+  return SetValues(std::vector<DateTime>{value});
+}
+
+Code Attribute::SetValues(Resolution value) {
+  return SetValues(std::vector<Resolution>{value});
+}
+
+Code Attribute::SetValues(RangeOfInteger value) {
+  return SetValues(std::vector<RangeOfInteger>{value});
+}
+
+Code Attribute::SetValues(const std::vector<bool>& values) {
+  if (def_.ipp_type != ValueTag::boolean)
+    return Code::kIncompatibleType;
+  std::vector<int32_t>* vints = ReadValuePtr<std::vector<int32_t>>(&values_);
+  vints->assign(values.begin(), values.end());
+  return Code::kOK;
+}
+
+Code Attribute::SetValues(const std::vector<int32_t>& values) {
+  switch (def_.ipp_type) {
+    case ValueTag::boolean:
+      for (int32_t v : values)
+        if (v < 0 || v > 1)
+          return Code::kValueOutOfRange;
+      [[fallthrough]];
+    case ValueTag::enum_:
+    case ValueTag::integer:
+      *ReadValuePtr<std::vector<int32_t>>(&values_) = values;
+      return Code::kOK;
+    default:
+      return Code::kIncompatibleType;
   }
-  unknown_attributes[an].def.ipp_type = type;
-  unknown_attributes[an].def.is_a_set = is_a_set;
-  unknown_attributes[an].def.cc_type = InternalTypeForUnknownAttribute(type);
-  unknown_attributes[an].object = new UnknownAttribute(this, an);
-  if (type == AttrType::collection) {
-    unknown_attributes[an].def.constructor = []() -> Collection* {
-      return new EmptyCollection();
-    };
+}
+
+Code Attribute::SetValues(const std::vector<std::string>& values) {
+  if (!IsString(def_.ipp_type) && def_.ipp_type != ValueTag::octetString)
+    return Code::kIncompatibleType;
+  for (const std::string& v : values) {
+    if (v.size() > kMaxSizeOfNameOrValue)
+      return Code::kValueOutOfRange;
   }
-  return unknown_attributes[an].object;
+  *ReadValuePtr<std::vector<std::string>>(&values_) = values;
+  return Code::kOK;
 }
 
-std::vector<Attribute*> Collection::GetAllAttributes() {
-  const std::vector<Attribute*> known_attr = GetKnownAttributes();
-  std::vector<Attribute*> v;
-  v.reserve(known_attr.size() + unknown_attributes.size());
-  v.insert(v.end(), known_attr.begin(), known_attr.end());
-  for (const auto& e : unknown_attributes)
-    v.push_back(e.second.object);
-  return v;
+Code Attribute::SetValues(const std::vector<StringWithLanguage>& values) {
+  if (def_.ipp_type != ValueTag::nameWithLanguage &&
+      def_.ipp_type != ValueTag::textWithLanguage) {
+    return Code::kIncompatibleType;
+  }
+  for (const StringWithLanguage& v : values) {
+    // nameWithLanguage and textWithLanguage values are saved as a sequence of
+    // the following fields (see section 3.9 from rfc8010):
+    // * int16_t (2 bytes) - length of the language field = L
+    // * string (L bytes) - content of the language field
+    // * int16_t (2 bytes) - length of the value field = V
+    // * string (V bytes) - content of the value field
+    // The total size (2 + L + 2 + V) cannot exceed the threshold.
+    if (v.value.size() + v.language.size() + 4 > kMaxSizeOfNameOrValue)
+      return Code::kValueOutOfRange;
+  }
+  *ReadValuePtr<std::vector<StringWithLanguage>>(&values_) = values;
+  return Code::kOK;
 }
 
-std::vector<const Attribute*> Collection::GetAllAttributes() const {
-  const std::vector<const Attribute*> known_attr = GetKnownAttributes();
-  std::vector<const Attribute*> v;
-  v.reserve(known_attr.size() + unknown_attributes.size());
-  v.insert(v.end(), known_attr.begin(), known_attr.end());
-  for (const auto& e : unknown_attributes)
-    v.push_back(e.second.object);
-  return v;
+Code Attribute::SetValues(const std::vector<DateTime>& values) {
+  if (def_.ipp_type != ValueTag::dateTime)
+    return Code::kIncompatibleType;
+  *ReadValuePtr<std::vector<DateTime>>(&values_) = values;
+  return Code::kOK;
 }
 
-// Saves |value| to attribute |name| at position |index| in collection |coll|.
-// Proper conversion is applied when needed. The attribute is also resized when
-// |index| is greater than the attribute's size. |coll| cannot be nullptr. The
-// function returns true if succeeds and false when one of the following occurs:
-// * the attribute is not a set and |index| > 0
-// * required conversion is not possible (|value| is incorrect)
+Code Attribute::SetValues(const std::vector<Resolution>& values) {
+  if (def_.ipp_type != ValueTag::resolution)
+    return Code::kIncompatibleType;
+  *ReadValuePtr<std::vector<Resolution>>(&values_) = values;
+  return Code::kOK;
+}
+
+Code Attribute::SetValues(const std::vector<RangeOfInteger>& values) {
+  if (def_.ipp_type != ValueTag::rangeOfInteger)
+    return Code::kIncompatibleType;
+  *ReadValuePtr<std::vector<RangeOfInteger>>(&values_) = values;
+  return Code::kOK;
+}
+
+ConstCollsView Attribute::Colls() const {
+  if (Tag() != ValueTag::collection || Size() == 0) {
+    return ConstCollsView();
+  }
+  return ConstCollsView(*ReadValueConstPtr<std::vector<Collection*>>(&values_));
+}
+
+Collection::Collection() = default;
+
+Collection::~Collection() = default;
+
+Collection::iterator Collection::GetAttr(std::string_view name) {
+  auto it = attributes_index_.find(name);
+  if (it == attributes_index_.end())
+    return iterator(attributes_.end());
+  auto it2 = attributes_.begin();
+  std::advance(it2, it->second);
+  return iterator(it2);
+}
+
+Collection::const_iterator Collection::GetAttr(std::string_view name) const {
+  auto it = attributes_index_.find(name);
+  if (it == attributes_index_.end())
+    return const_iterator(attributes_.end());
+  auto it2 = attributes_.begin();
+  std::advance(it2, it->second);
+  return const_iterator(it2);
+}
+
+Code Collection::CreateNewAttribute(const std::string& name,
+                                    ValueTag type,
+                                    Attribute*& new_attr) {
+  // Check all constraints.
+  if (name.empty() || name.size() > kMaxSizeOfNameOrValue) {
+    return Code::kInvalidName;
+  }
+  if (attributes_index_.count(name)) {
+    return Code::kNameConflict;
+  }
+  if (!IsValid(type))
+    return Code::kInvalidValueTag;
+  // Create new attribute.
+  AttrDef def;
+  def.ipp_type = type;
+  def.cc_type = InternalTypeForUnknownAttribute(type);
+  new_attr = attributes_.emplace_back(new Attribute(name, def)).get();
+  attributes_index_[new_attr->Name()] = attributes_.size() - 1;
+  return Code::kOK;
+}
+
 template <typename ApiType>
-bool Collection::SaveValue(AttrName name, size_t index, const ApiType& value) {
-  const AttrDef def = GetAttributeDefinition(name);
+Code Collection::AddAttributeToCollection(const std::string& name,
+                                          ValueTag tag,
+                                          const std::vector<ApiType>& values) {
+  if (values.empty() && !IsOutOfBand(tag)) {
+    return Code::kValueOutOfRange;
+  }
+
+  // Create a new attribute. For non-Out-Of-Band tags set the values.
+  Attribute* attr = nullptr;
+  if (Code result = CreateNewAttribute(name, tag, attr); result != Code::kOK) {
+    return result;
+  }
+  if (!IsOutOfBand(tag)) {
+    attr->SetValues(values);
+  }
+
+  return Code::kOK;
+}
+
+Code Collection::AddAttr(const std::string& name, ValueTag tag) {
+  if (IsOutOfBand(tag)) {
+    return AddAttributeToCollection(name, tag, std::vector<int32_t>());
+  }
+  return IsValid(tag) ? Code::kIncompatibleType : Code::kInvalidValueTag;
+}
+
+Code Collection::AddAttr(const std::string& name, ValueTag tag, int32_t value) {
+  return AddAttr(name, tag, std::vector<int32_t>{value});
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         const std::string& value) {
+  return AddAttr(name, tag, std::vector<std::string>{value});
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         const StringWithLanguage& value) {
+  return AddAttr(name, tag, std::vector<StringWithLanguage>{value});
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         DateTime value) {
+  return AddAttr(name, tag, std::vector<DateTime>{value});
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         Resolution value) {
+  return AddAttr(name, tag, std::vector<Resolution>{value});
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         RangeOfInteger value) {
+  return AddAttr(name, tag, std::vector<RangeOfInteger>{value});
+}
+
+Code Collection::AddAttr(const std::string& name, bool value) {
+  return AddAttr(name, std::vector<bool>{value});
+}
+
+Code Collection::AddAttr(const std::string& name, int32_t value) {
+  return AddAttr(name, std::vector<int32_t>{value});
+}
+
+Code Collection::AddAttr(const std::string& name, DateTime value) {
+  return AddAttr(name, std::vector<DateTime>{value});
+}
+
+Code Collection::AddAttr(const std::string& name, Resolution value) {
+  return AddAttr(name, std::vector<Resolution>{value});
+}
+
+Code Collection::AddAttr(const std::string& name, RangeOfInteger value) {
+  return AddAttr(name, std::vector<RangeOfInteger>{value});
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         const std::vector<int32_t>& values) {
+  switch (tag) {
+    case ValueTag::integer:
+      break;
+    case ValueTag::enum_:  // see rfc8011-5.1.5
+      for (int32_t v : values) {
+        if (v < 1 || v > std::numeric_limits<int16_t>::max()) {
+          return Code::kValueOutOfRange;
+        }
+      }
+      break;
+    case ValueTag::boolean:
+      for (int32_t v : values) {
+        if (v != 0 && v != 1) {
+          return Code::kValueOutOfRange;
+        }
+      }
+      break;
+    default:
+      return IsValid(tag) ? Code::kIncompatibleType : Code::kInvalidValueTag;
+  }
+  return AddAttributeToCollection(name, tag, values);
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         const std::vector<std::string>& values) {
+  if (tag == ValueTag::octetString || IsString(tag)) {
+    for (const std::string& value : values) {
+      if (value.size() > kMaxSizeOfNameOrValue)
+        return Code::kValueOutOfRange;
+    }
+    return AddAttributeToCollection(name, tag, values);
+  }
+  return IsValid(tag) ? Code::kIncompatibleType : Code::kInvalidValueTag;
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         const std::vector<StringWithLanguage>& values) {
+  if (tag == ValueTag::nameWithLanguage || tag == ValueTag::textWithLanguage) {
+    for (const StringWithLanguage& value : values) {
+      // nameWithLanguage and textWithLanguage values are saved as a sequence of
+      // the following fields (see section 3.9 from rfc8010):
+      // * int16_t (2 bytes) - length of the language field = L
+      // * string (L bytes) - content of the language field
+      // * int16_t (2 bytes) - length of the value field = V
+      // * string (V bytes) - content of the value field
+      // The total size (2 + L + 2 + V) cannot exceed the threshold.
+      if (value.value.size() + value.language.size() + 4 >
+          kMaxSizeOfNameOrValue)
+        return Code::kValueOutOfRange;
+    }
+    return AddAttributeToCollection(name, tag, values);
+  }
+  return IsValid(tag) ? Code::kIncompatibleType : Code::kInvalidValueTag;
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         const std::vector<DateTime>& values) {
+  if (tag == ValueTag::dateTime) {
+    return AddAttributeToCollection(name, tag, values);
+  }
+  return IsValid(tag) ? Code::kIncompatibleType : Code::kInvalidValueTag;
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         const std::vector<Resolution>& values) {
+  if (tag == ValueTag::resolution) {
+    return AddAttributeToCollection(name, tag, values);
+  }
+  return IsValid(tag) ? Code::kIncompatibleType : Code::kInvalidValueTag;
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         ValueTag tag,
+                         const std::vector<RangeOfInteger>& values) {
+  if (tag == ValueTag::rangeOfInteger) {
+    return AddAttributeToCollection(name, tag, values);
+  }
+  return IsValid(tag) ? Code::kIncompatibleType : Code::kInvalidValueTag;
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         const std::vector<bool>& values) {
+  return AddAttributeToCollection(name, ValueTag::boolean, values);
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         const std::vector<int32_t>& values) {
+  return AddAttributeToCollection(name, ValueTag::integer, values);
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         const std::vector<DateTime>& values) {
+  return AddAttributeToCollection(name, ValueTag::dateTime, values);
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         const std::vector<Resolution>& values) {
+  return AddAttributeToCollection(name, ValueTag::resolution, values);
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         const std::vector<RangeOfInteger>& values) {
+  return AddAttributeToCollection(name, ValueTag::rangeOfInteger, values);
+}
+
+Code Collection::AddAttr(const std::string& name, CollsView::iterator& coll) {
+  CollsView colls;
+  Code code = AddAttr(name, 1, colls);
+  if (code == Code::kOK)
+    coll = colls.begin();
+  return code;
+}
+
+Code Collection::AddAttr(const std::string& name,
+                         size_t size,
+                         CollsView& colls) {
+  if (size == 0) {
+    return Code::kValueOutOfRange;
+  }
+  // Create the attribute and retrieve the pointers.
+  Attribute* attr = nullptr;
+  if (Code result = CreateNewAttribute(name, ValueTag::collection, attr);
+      result != Code::kOK) {
+    return result;
+  }
+  attr->Resize(size);
+
+  colls = attr->Colls();
+  return Code::kOK;
+}
+
+// Saves |value| at position |index|. Proper conversion is applied when needed.
+// The attribute is also resized when |index| is greater than the attribute's
+// size. The function returns true if succeeds and false when the required
+// conversion is not possible (|value| is incorrect).
+template <typename ApiType>
+bool Attribute::SaveValue(size_t index, const ApiType& value) {
+  if (IsOutOfBand(def_.ipp_type))
+    return false;
   bool result = false;
-  switch (def.cc_type) {
+  switch (def_.cc_type) {
     case InternalType::kInteger:
       result =
-          SaveValueTyped<int32_t, ApiType>(&values_, name, def, index, value);
+          SaveValueTyped<int32_t, ApiType>(values_, name_, def_, index, value);
       break;
     case InternalType::kString:
-      result = SaveValueTyped<std::string, ApiType>(&values_, name, def, index,
+      result = SaveValueTyped<std::string, ApiType>(values_, name_, def_, index,
                                                     value);
       break;
     case InternalType::kResolution:
-      result = SaveValueTyped<Resolution, ApiType>(&values_, name, def, index,
+      result = SaveValueTyped<Resolution, ApiType>(values_, name_, def_, index,
                                                    value);
       break;
     case InternalType::kRangeOfInteger:
-      result = SaveValueTyped<RangeOfInteger, ApiType>(&values_, name, def,
+      result = SaveValueTyped<RangeOfInteger, ApiType>(values_, name_, def_,
                                                        index, value);
       break;
     case InternalType::kDateTime:
       result =
-          SaveValueTyped<DateTime, ApiType>(&values_, name, def, index, value);
+          SaveValueTyped<DateTime, ApiType>(values_, name_, def_, index, value);
       break;
     case InternalType::kStringWithLanguage:
-      result = SaveValueTyped<StringWithLanguage, ApiType>(&values_, name, def,
+      result = SaveValueTyped<StringWithLanguage, ApiType>(values_, name_, def_,
                                                            index, value);
       break;
     case InternalType::kCollection:
       return false;
   }
-  if (result)
-    states_.erase(name);
   return result;
 }
-
-const std::map<AttrName, AttrDef> EmptyCollection::defs_;
 
 }  // namespace ipp

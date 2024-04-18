@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,35 +11,35 @@
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/remote.h>
 
-#include "mojo/cros_healthd.mojom.h"
-#include "wilco_dtc_supportd.pb.h"  // NOLINT(build/include)
+#include "diagnostics/mojom/public/cros_healthd.mojom.h"
+#include "wilco_dtc_supportd.pb.h"  // NOLINT(build/include_directory)
 
 namespace diagnostics {
+namespace wilco {
 
 // The routine service is responsible for creating and managing diagnostic
 // routines.
 class RoutineService final {
  public:
-  using GetAvailableRoutinesToServiceCallback = base::Callback<void(
+  using GetAvailableRoutinesToServiceCallback = base::OnceCallback<void(
       const std::vector<grpc_api::DiagnosticRoutine>& routines,
       grpc_api::RoutineServiceStatus service_status)>;
   using RunRoutineToServiceCallback =
-      base::Callback<void(int uuid,
-                          grpc_api::DiagnosticRoutineStatus status,
-                          grpc_api::RoutineServiceStatus service_status)>;
-  using GetRoutineUpdateRequestToServiceCallback =
-      base::Callback<void(int uuid,
-                          grpc_api::DiagnosticRoutineStatus status,
-                          int progress_percent,
-                          grpc_api::DiagnosticRoutineUserMessage user_message,
-                          const std::string& output,
-                          const std::string& status_message,
-                          grpc_api::RoutineServiceStatus service_status)>;
+      base::OnceCallback<void(int uuid,
+                              grpc_api::DiagnosticRoutineStatus status,
+                              grpc_api::RoutineServiceStatus service_status)>;
+  using GetRoutineUpdateRequestToServiceCallback = base::OnceCallback<void(
+      int uuid,
+      grpc_api::DiagnosticRoutineStatus status,
+      int progress_percent,
+      grpc_api::DiagnosticRoutineUserMessage user_message,
+      const std::string& output,
+      const std::string& status_message,
+      grpc_api::RoutineServiceStatus service_status)>;
 
   class Delegate {
    public:
@@ -51,7 +51,7 @@ class RoutineService final {
     // the time this is called.
     virtual bool GetCrosHealthdDiagnosticsService(
         mojo::PendingReceiver<
-            chromeos::cros_healthd::mojom::CrosHealthdDiagnosticsService>
+            ash::cros_healthd::mojom::CrosHealthdDiagnosticsService>
             service) = 0;
   };
 
@@ -62,32 +62,29 @@ class RoutineService final {
 
   ~RoutineService();
 
-  void GetAvailableRoutines(
-      const GetAvailableRoutinesToServiceCallback& callback);
+  void GetAvailableRoutines(GetAvailableRoutinesToServiceCallback callback);
   void RunRoutine(const grpc_api::RunRoutineRequest& request,
-                  const RunRoutineToServiceCallback& callback);
-  void GetRoutineUpdate(
-      int uuid,
-      grpc_api::GetRoutineUpdateRequest::Command command,
-      bool include_output,
-      const GetRoutineUpdateRequestToServiceCallback& callback);
+                  RunRoutineToServiceCallback callback);
+  void GetRoutineUpdate(int uuid,
+                        grpc_api::GetRoutineUpdateRequest::Command command,
+                        bool include_output,
+                        GetRoutineUpdateRequestToServiceCallback callback);
 
  private:
   // Forwards and wraps the result of a GetAvailableRoutines call into a gRPC
   // response.
   void ForwardGetAvailableRoutinesResponse(
       size_t callback_key,
-      const std::vector<chromeos::cros_healthd::mojom::DiagnosticRoutineEnum>&
+      const std::vector<ash::cros_healthd::mojom::DiagnosticRoutineEnum>&
           mojo_routines);
   // Forwards and wraps the result of a RunRoutine call into a gRPC response.
   void ForwardRunRoutineResponse(
       size_t callback_key,
-      chromeos::cros_healthd::mojom::RunRoutineResponsePtr response);
+      ash::cros_healthd::mojom::RunRoutineResponsePtr response);
   // Forwards and wraps the result of a GetRoutineUpdate call into a gRPC
   // response.
   void ForwardGetRoutineUpdateResponse(
-      size_t callback_key,
-      chromeos::cros_healthd::mojom::RoutineUpdatePtr response);
+      size_t callback_key, ash::cros_healthd::mojom::RoutineUpdatePtr response);
 
   // Binds |service_ptr_| to an implementation of CrosHealthdDiagnosticsService,
   // if it is not already bound. Returns false if wilco_dtc_supportd's mojo
@@ -104,7 +101,7 @@ class RoutineService final {
   // Mojo interface to the CrosHealthdDiagnosticsService endpoint.
   //
   // In production this interface is implemented by the cros_healthd process.
-  mojo::Remote<chromeos::cros_healthd::mojom::CrosHealthdDiagnosticsService>
+  mojo::Remote<ash::cros_healthd::mojom::CrosHealthdDiagnosticsService>
       service_;
 
   // The following three maps each hold in flight callbacks to |service_ptr_|.
@@ -138,6 +135,7 @@ class RoutineService final {
   base::WeakPtrFactory<RoutineService> weak_ptr_factory_{this};
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_ROUTINE_SERVICE_H_

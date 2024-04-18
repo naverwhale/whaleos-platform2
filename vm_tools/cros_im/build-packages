@@ -1,0 +1,148 @@
+#!/bin/bash
+# Copyright 2022 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# Builds the cros-im Debian package for listed architectures and Debian
+# releases. Currently supports bullseye and bookworm only.
+# Usage: ./build-packages or ./build-packages <arch>
+
+set -ex
+
+ALL_ARCHES="arm64 amd64 i386"
+RELEASES="bullseye bookworm"
+ARTIFACTS="artifacts"
+
+usage() {
+  cat<<END
+Usage: $(basename "$0") [DIST] [ARCH]
+Builds cros_im for ARCH on DIST.
+DIST should be one of: ${RELEASES}.
+ARCH should be one of: ${ALL_ARCHES}.
+If arguments are omitted, this script will build for all supported
+architectures and distributions.
+END
+}
+
+create_changelog() {
+  local dist="$1"
+  # Set version number to number of commits in main.
+  local version
+  version="$(git rev-list --count HEAD)"
+  if [[ "${dist}" == "bullseye" ]]; then
+    version+="~cros11"
+  fi
+
+  # Use the timestamp of the last commit so the build is reproducible.
+  local timestamp
+  timestamp="$(git show -s --format=%cD HEAD)"
+
+  cat > debian/changelog <<END
+cros-im (${version}) UNRELEASED; urgency=medium
+
+  * Please view commit history at
+    https://chromium.googlesource.com/chromiumos/platform2/+log/main/vm_tools/cros_im
+
+ -- The ChromiumOS Authors <chromium-os-dev@chromium.org>  ${timestamp}
+END
+}
+
+setup_deps() {
+  apt-get update
+  apt-get install -y debian-archive-keyring pbuilder debootstrap devscripts \
+    qemu-user-static debhelper
+
+  cp .pbuilderrc /root/
+
+  # Copy the .xml dependencies to protocols/ for the pbuilder chroot
+  mkdir -p protocols
+  cp ../sommelier/protocol/text-input-crostini-unstable-v1.xml protocols
+  cp ../sommelier/protocol/text-input-extension-unstable-v1.xml protocols
+  cp ../sommelier/protocol/text-input-unstable-v1.xml protocols
+  cp ../sommelier/protocol/text-input-x11-unstable-v1.xml protocols
+}
+
+cleanup() {
+  # Remove the temporary .xml files
+  rm -rf protocols
+}
+
+make_chroot() {
+  local dist="$1"
+  local arch="$2"
+  local basetgz="$3"
+
+  export DIST="${dist}"
+  export ARCH="${arch}"
+
+  pbuilder create \
+    --mirror http://deb.debian.org/debian \
+    --distribution "${dist}" \
+    --architecture "${arch}" \
+    --basetgz "${basetgz}" \
+    --debootstrapopts \
+        --keyring="/usr/share/keyrings/debian-archive-keyring.gpg"
+}
+
+build_package() {
+  local dist="$1"
+  local arch="$2"
+  local basetgz="$3"
+  pdebuild --buildresult "${ARTIFACTS}" \
+    -- \
+    --architecture "${arch}" \
+    --basetgz "${basetgz}" \
+    --distribution "${dist}"
+}
+
+
+main() {
+  cd "$(dirname "$0")"
+  local arches_to_build="${ALL_ARCHES}"
+  local dists_to_build="${RELEASES}"
+  if [[ $# -eq 0 ]]; then
+    echo "No arguments specified, compiling for all archs and distros."
+  elif [[ $# -eq 1 && " ${ALL_ARCHES} " == *" $1 "* ]]; then
+    # TODO(sophialin): This part is kept for Legacy reasons where kokoro called
+    # the script with one arch as argument. Remove once the new jobs work.
+    echo "Building cros-im for $1 only on bullseye"
+    arches_to_build="$1"
+  elif [[ " ${RELEASES} " == *" $1 "* && " ${ALL_ARCHES} " == *" $2 "* ]]; then
+    echo "Building cros-im for $1-$2 only"
+    dists_to_build="$1"
+    arches_to_build="$2"
+  else
+    usage >&2
+    return
+  fi
+
+  setup_deps
+
+  local arch
+  local dist
+  for dist in ${dists_to_build}; do
+    ln -sf "debian-${dist}" debian
+    for arch in ${arches_to_build}; do
+      create_changelog "${dist}"
+      mkdir -p "/var/cache/pbuilder/aptcache/debian-${dist}-${arch}"
+
+      basetgz="/var/cache/pbuilder/base-${dist}-${arch}.tgz"
+      if [ -f "${basetgz}" ]; then
+          pbuilder update --basetgz "${basetgz}"
+      else
+          make_chroot "${dist}" "${arch}" "${basetgz}"
+      fi
+
+      build_package "${dist}" "${arch}" "${basetgz}"
+    done
+    local deb_dir="${dist}_cros_im_debs"
+    mkdir -p "${deb_dir}"
+    mv "${ARTIFACTS}"/cros-im_*.deb "${deb_dir}"
+
+    rm -f debian
+  done
+
+  cleanup
+}
+
+main "$@"

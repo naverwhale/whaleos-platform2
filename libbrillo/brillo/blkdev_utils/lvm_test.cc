@@ -1,6 +1,8 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include <optional>
 
 #include "brillo/blkdev_utils/mock_lvm.h"
 
@@ -31,7 +33,7 @@ TEST(GetPhysicalVolumeTest, InvalidReportTest) {
       .WillOnce(DoAll(SetArgPointee<1>(report), Return(true)));
 
   auto pv = lvmanager.GetPhysicalVolume(base::FilePath("/dev/pv"));
-  EXPECT_EQ(pv, base::nullopt);
+  EXPECT_EQ(pv, std::nullopt);
 }
 
 TEST(GetPhysicalVolumeTest, ValidReportTest) {
@@ -44,7 +46,7 @@ TEST(GetPhysicalVolumeTest, ValidReportTest) {
       .WillOnce(DoAll(SetArgPointee<1>(report), Return(true)));
 
   auto pv = lvmanager.GetPhysicalVolume(base::FilePath("/dev/pv"));
-  EXPECT_NE(pv, base::nullopt);
+  EXPECT_NE(pv, std::nullopt);
   EXPECT_TRUE(pv->IsValid());
   EXPECT_EQ(base::FilePath("/dev/pv"), pv->GetPath());
 }
@@ -60,7 +62,7 @@ TEST(GetVolumeGroupTest, InvalidReportTest) {
 
   auto vg = lvmanager.GetVolumeGroup(pv);
 
-  EXPECT_EQ(vg, base::nullopt);
+  EXPECT_EQ(vg, std::nullopt);
 }
 
 TEST(GetVolumeGroupTest, ValidReportTest) {
@@ -74,7 +76,7 @@ TEST(GetVolumeGroupTest, ValidReportTest) {
       .WillOnce(DoAll(SetArgPointee<1>(report), Return(true)));
 
   auto vg = lvmanager.GetVolumeGroup(pv);
-  EXPECT_NE(vg, base::nullopt);
+  EXPECT_NE(vg, std::nullopt);
   EXPECT_TRUE(vg->IsValid());
   EXPECT_EQ("bar", vg->GetName());
 }
@@ -90,7 +92,7 @@ TEST(GetThinpoolTest, InvalidReportTest) {
 
   auto thinpool = lvmanager.GetThinpool(vg, "thinpool");
 
-  EXPECT_EQ(thinpool, base::nullopt);
+  EXPECT_EQ(thinpool, std::nullopt);
 }
 
 TEST(GetThinpoolTest, ValidReportTest) {
@@ -105,7 +107,7 @@ TEST(GetThinpoolTest, ValidReportTest) {
 
   auto thinpool = lvmanager.GetThinpool(vg, "thinpool");
 
-  EXPECT_NE(thinpool, base::nullopt);
+  EXPECT_NE(thinpool, std::nullopt);
   EXPECT_TRUE(thinpool->IsValid());
   EXPECT_EQ("bar/thinpool", thinpool->GetName());
 }
@@ -120,7 +122,7 @@ TEST(GetLogicalVolumeTest, InvalidReportTest) {
       .WillOnce(DoAll(SetArgPointee<1>(report), Return(true)));
 
   auto lv = lvmanager.GetLogicalVolume(vg, "foo");
-  EXPECT_EQ(lv, base::nullopt);
+  EXPECT_EQ(lv, std::nullopt);
 }
 
 TEST(GetLogicalVolumeTest, ValidReportTest) {
@@ -135,7 +137,7 @@ TEST(GetLogicalVolumeTest, ValidReportTest) {
 
   auto lv = lvmanager.GetLogicalVolume(vg, "foo");
 
-  EXPECT_NE(lv, base::nullopt);
+  EXPECT_NE(lv, std::nullopt);
   EXPECT_TRUE(lv->IsValid());
   EXPECT_EQ("bar/foo", lv->GetName());
   EXPECT_EQ(base::FilePath("/dev/bar/foo"), lv->GetPath());
@@ -172,6 +174,88 @@ TEST(ListLogicalVolumesTest, ValidReportTest) {
     EXPECT_EQ(base::FilePath(base::StringPrintf("/dev/bar/foo%d", i)),
               lv_vector[i].GetPath());
   }
+}
+
+TEST(ListLogicalVolumesTest, PatternMatchingTest) {
+  auto lvm = std::make_shared<MockLvmCommandRunner>();
+  LogicalVolumeManager lvmanager(lvm);
+  VolumeGroup vg("bar", lvm);
+  std::string report =
+      base::StringPrintf(kSampleMultiReport, "lv", "lv_name", "foo0", "vg_name",
+                         "bar", "lv_name", "foo1", "vg_name", "bar");
+
+  EXPECT_CALL(*lvm, RunProcess(_, _))
+      .WillRepeatedly(DoAll(SetArgPointee<1>(report), Return(true)));
+
+  {
+    auto lv_vector = lvmanager.ListLogicalVolumes(vg, /*pattern=*/"");
+    ASSERT_EQ(lv_vector.size(), 2);
+    EXPECT_EQ("bar/foo0", lv_vector[0].GetName());
+    EXPECT_EQ("bar/foo1", lv_vector[1].GetName());
+  }
+  {
+    auto lv_vector = lvmanager.ListLogicalVolumes(vg, /*pattern=*/"foo*");
+    ASSERT_EQ(lv_vector.size(), 2);
+    EXPECT_EQ("bar/foo0", lv_vector[0].GetName());
+    EXPECT_EQ("bar/foo1", lv_vector[1].GetName());
+  }
+  {
+    auto lv_vector = lvmanager.ListLogicalVolumes(vg, /*pattern=*/"foo0");
+    ASSERT_EQ(lv_vector.size(), 1);
+    EXPECT_EQ("bar/foo0", lv_vector[0].GetName());
+  }
+  {
+    auto lv_vector = lvmanager.ListLogicalVolumes(vg, /*pattern=*/"*1");
+    ASSERT_EQ(lv_vector.size(), 1);
+    EXPECT_EQ("bar/foo1", lv_vector[0].GetName());
+  }
+}
+
+TEST(RemoveLogicalVolumeTest, NonexistingLvTest) {
+  auto lvm = std::make_shared<MockLvmCommandRunner>();
+  LogicalVolumeManager lvmanager(lvm);
+  VolumeGroup vg("bar", lvm);
+  std::string report(kSampleReport);
+
+  EXPECT_CALL(*lvm, RunProcess(_, _))
+      .WillOnce(DoAll(SetArgPointee<1>(report), Return(true)));
+
+  // Expect the remove function to return true for a non-existent volume.
+  EXPECT_TRUE(lvmanager.RemoveLogicalVolume(vg, "foo"));
+}
+
+TEST(RemoveLogicalVolumeTest, FailedRemovalTest) {
+  auto lvm = std::make_shared<MockLvmCommandRunner>();
+  LogicalVolumeManager lvmanager(lvm);
+  VolumeGroup vg("bar", lvm);
+  std::string report = base::StringPrintf(kSampleReport, "lv", "lv_name", "foo",
+                                          "vg_name", "bar");
+  std::vector<std::string> lv_remove = {"lvremove", "--force", "bar/foo"};
+
+  EXPECT_CALL(*lvm, RunCommand(lv_remove)).WillOnce(Return(false));
+
+  EXPECT_CALL(*lvm, RunProcess(_, _))
+      .WillOnce(DoAll(SetArgPointee<1>(report), Return(true)));
+
+  // Expect the remove function to return false for failed deletion.
+  EXPECT_FALSE(lvmanager.RemoveLogicalVolume(vg, "foo"));
+}
+
+TEST(RemoveLogicalVolumeTest, SuccessfulRemovalTest) {
+  auto lvm = std::make_shared<MockLvmCommandRunner>();
+  LogicalVolumeManager lvmanager(lvm);
+  VolumeGroup vg("bar", lvm);
+  std::string report = base::StringPrintf(kSampleReport, "lv", "lv_name", "foo",
+                                          "vg_name", "bar");
+  std::vector<std::string> lv_remove = {"lvremove", "--force", "bar/foo"};
+
+  EXPECT_CALL(*lvm, RunCommand(lv_remove)).WillOnce(Return(true));
+
+  EXPECT_CALL(*lvm, RunProcess(_, _))
+      .WillOnce(DoAll(SetArgPointee<1>(report), Return(true)));
+
+  // Expect the remove function to return true if deletion succeeded.
+  EXPECT_TRUE(lvmanager.RemoveLogicalVolume(vg, "foo"));
 }
 
 }  // namespace brillo

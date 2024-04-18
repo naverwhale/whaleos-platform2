@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -65,6 +65,12 @@ class DrawInterface {
   // Defaults to done if requested icon not found.
   virtual void ShowStepper(const std::vector<std::string>& steps) = 0;
 
+  // Shows advanced options button at the bottom of the screen.
+  virtual void ShowAdvancedOptionsButton(bool focused) = 0;
+
+  // Shows power button at the bottom of the screen.
+  virtual void ShowPowerButton(bool focused) = 0;
+
   // Clears screen and shows footer and language drop down menu.
   virtual void MessageBaseScreen() = 0;
 
@@ -83,8 +89,17 @@ class DrawInterface {
   // repainting the screen. Called after `LanguageDropdown` is done.
   virtual void LocaleChange(int selected_locale) = 0;
 
+  // Show an empty progress bar.
+  virtual void ShowProgressBar() = 0;
+
   // Show progress bar at percentage given.
   virtual void ShowProgressPercentage(double progress) = 0;
+
+  // Show indeterminate progress bar.
+  virtual void ShowIndeterminateProgressBar() = 0;
+
+  // Hide/Stop indeterminate progress bar.
+  virtual void HideIndeterminateProgressBar() = 0;
 
   // Returns number of locales.
   virtual int GetSupportedLocalesSize() = 0;
@@ -96,7 +111,7 @@ class DrawInterface {
   virtual int GetFreconCanvasSize() = 0;
 
   // Returns the screen assets path.
-  virtual base::FilePath GetScreenPath() = 0;
+  virtual base::FilePath GetScreensPath() = 0;
 
   // Returns whether the current locale is read from right to left.
   virtual bool IsLocaleRightToLeft() = 0;

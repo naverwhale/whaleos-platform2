@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,10 @@
 #include <memory>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/memory/weak_ptr.h>
+#include <gtest/gtest_prod.h>
 
 namespace shill {
 
@@ -20,7 +22,7 @@ class SupplicantProcessProxyInterface;
 
 class SupplicantManager {
  public:
-  using SupplicantListenerCallback = base::Callback<void(bool)>;
+  using SupplicantListenerCallback = base::RepeatingCallback<void(bool)>;
 
   class ScopedSupplicantListener {
    public:
@@ -35,7 +37,6 @@ class SupplicantManager {
    private:
     SupplicantListenerCallback callback_;
     SupplicantManager* const supplicant_manager_;
-
   };
 
   explicit SupplicantManager(Manager* manager);
@@ -48,10 +49,18 @@ class SupplicantManager {
 
   SupplicantProcessProxyInterface* proxy() const { return proxy_.get(); }
 
+  base::WeakPtr<SupplicantManager> AsWeakPtr() {
+    return weak_factory_.GetWeakPtr();
+  }
+
  private:
-  friend class WiFiObjectTest;
   friend class EthernetTest;
+  friend class HotspotDeviceTest;
   friend class SupplicantManagerTest;
+  friend class WiFiObjectTest;
+  friend class DaemonTaskTest;
+
+  FRIEND_TEST(DaemonTaskTest, SupplicantAppearsAfterStop);
 
   void AddSupplicantListener(
       const SupplicantListenerCallback& present_callback);
@@ -68,6 +77,8 @@ class SupplicantManager {
   std::unique_ptr<SupplicantProcessProxyInterface> proxy_;
   std::vector<SupplicantListenerCallback> listeners_;
   bool present_ = false;
+
+  base::WeakPtrFactory<SupplicantManager> weak_factory_{this};
 };
 
 }  // namespace shill

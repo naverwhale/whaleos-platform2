@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,13 +13,13 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
-
+#include <base/strings/string_util.h>
 #include <brillo/file_utils.h>
+#include <libhwsec-foundation/crypto/aes.h>
+#include <libhwsec-foundation/crypto/hmac.h>
+#include <libhwsec-foundation/crypto/secure_blob_util.h>
+#include <libhwsec-foundation/crypto/sha.h>
 
-#include "cryptohome/crypto/aes.h"
-#include "cryptohome/crypto/hmac.h"
-#include "cryptohome/crypto/secure_blob_util.h"
-#include "cryptohome/crypto/sha.h"
 #include "cryptohome/mount_encrypted/mount_encrypted.h"
 #include "cryptohome/mount_encrypted/tpm.h"
 
@@ -51,11 +51,11 @@ bool ReadKeyFile(const base::FilePath& path,
     return false;
   }
 
-  if (!cryptohome::AesDecryptSpecifyBlockMode(
-          brillo::SecureBlob(ciphertext), 0, ciphertext.size(), encryption_key,
-          brillo::SecureBlob(cryptohome::kAesBlockSize),
-          cryptohome::PaddingScheme::kPaddingStandard,
-          cryptohome::BlockMode::kCbc, plaintext)) {
+  if (!hwsec_foundation::AesDecryptSpecifyBlockMode(
+          brillo::BlobFromString(ciphertext), 0, ciphertext.size(),
+          encryption_key, brillo::Blob(hwsec_foundation::kAesBlockSize),
+          hwsec_foundation::PaddingScheme::kPaddingStandard,
+          hwsec_foundation::BlockMode::kCbc, plaintext)) {
     LOG(ERROR) << "Decryption failed for data from " << path;
     return false;
   }
@@ -88,12 +88,12 @@ bool WriteKeyFile(const base::FilePath& path,
   // Ideally, we'd generate a random IV and stored it to disk as well, but
   // switching over to the safer scheme would have to be done in a
   // backwards-compatible way, so for now it isn't worth it.
-  brillo::SecureBlob ciphertext;
-  if (!cryptohome::AesEncryptSpecifyBlockMode(
+  brillo::Blob ciphertext;
+  if (!hwsec_foundation::AesEncryptSpecifyBlockMode(
           plaintext, 0, plaintext.size(), encryption_key,
-          brillo::SecureBlob(cryptohome::kAesBlockSize),
-          cryptohome::PaddingScheme::kPaddingStandard,
-          cryptohome::BlockMode::kCbc, &ciphertext)) {
+          brillo::Blob(hwsec_foundation::kAesBlockSize),
+          hwsec_foundation::PaddingScheme::kPaddingStandard,
+          hwsec_foundation::BlockMode::kCbc, &ciphertext)) {
     LOG(ERROR) << "Encryption failed for " << path;
     return false;
   }
@@ -156,7 +156,7 @@ void ShredFile(const base::FilePath& file) {
 
 brillo::SecureBlob Sha256(const std::string& str) {
   brillo::SecureBlob blob(str);
-  return cryptohome::Sha256(blob);
+  return hwsec_foundation::Sha256(blob);
 }
 
 brillo::SecureBlob GetUselessKey() {
@@ -269,7 +269,8 @@ result_code EncryptionKey::LoadChromeOSSystemKey() {
   if (system_key_.empty()) {
     LOG(INFO) << "Attempting to generate fresh NVRAM system key.";
 
-    const auto key_material = cryptohome::CreateSecureRandomBlob(DIGEST_LENGTH);
+    const auto key_material =
+        hwsec_foundation::CreateSecureRandomBlob(DIGEST_LENGTH);
     result_code rc = loader_->Initialize(key_material, &system_key_);
     if (rc != RESULT_SUCCESS) {
       LOG(ERROR) << "Failed to initialize system key NV space contents.";
@@ -318,7 +319,7 @@ result_code EncryptionKey::LoadEncryptionKey() {
                    GetUselessKey())) {
     // This is a brand new system with no keys, so generate a fresh one.
     LOG(INFO) << "Generating new encryption key.";
-    encryption_key_ = cryptohome::CreateSecureRandomBlob(DIGEST_LENGTH);
+    encryption_key_ = hwsec_foundation::CreateSecureRandomBlob(DIGEST_LENGTH);
     encryption_key_status_ = EncryptionKeyStatus::kFresh;
   } else {
     encryption_key_status_ = EncryptionKeyStatus::kNeedsFinalization;
@@ -354,18 +355,11 @@ result_code EncryptionKey::LoadEncryptionKey() {
   return RESULT_SUCCESS;
 }
 
-void EncryptionKey::PersistEncryptionKey(
-    const brillo::SecureBlob& encryption_key) {
-  encryption_key_ = encryption_key;
-  base::DeleteFile(key_path_);
-  Finalize();
-}
-
 brillo::SecureBlob EncryptionKey::GetDerivedSystemKey(
     const std::string& label) const {
   if (!system_key_.empty() &&
       system_key_status_ == EncryptionKey::SystemKeyStatus::kNVRAMEncstateful) {
-    return cryptohome::HmacSha256(system_key_, brillo::SecureBlob(label));
+    return hwsec_foundation::HmacSha256(system_key_, brillo::SecureBlob(label));
   }
 
   return brillo::SecureBlob();

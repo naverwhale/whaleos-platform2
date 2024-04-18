@@ -160,8 +160,6 @@ class ReadExactlyInternal {
   //! \return The number of bytes read and placed into \a buffer, or `-1` on
   //!     error. When returning `-1`, if \a can_log is `true`, logs a message.
   virtual crashpad::FileOperationResult Read(void* buffer, size_t size, bool can_log) = 0;
-
-  DISALLOW_COPY_AND_ASSIGN(ReadExactlyInternal);
 };
 
 //! \brief The internal implementation of WriteFile() and its wrappers.
@@ -188,8 +186,6 @@ class WriteAllInternal {
   //!
   //! \return The number of bytes written from \a buffer, or `-1` on error.
   virtual crashpad::FileOperationResult Write(const void* buffer, size_t size) = 0;
-
-  DISALLOW_COPY_AND_ASSIGN(WriteAllInternal);
 };
 
 //! \brief Writes to a file, retrying when interrupted on POSIX.

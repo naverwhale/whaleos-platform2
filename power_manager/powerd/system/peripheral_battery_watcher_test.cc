@@ -1,10 +1,11 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/system/peripheral_battery_watcher.h"
 
 #include <string>
+#include <sys/resource.h>
 
 #include <base/check.h>
 #include <base/compiler_specific.h>
@@ -12,28 +13,36 @@
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/string_split.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library_mock.h>
 
+#include "power_manager/common/metrics_constants.h"
+#include "power_manager/common/metrics_sender.h"
 #include "power_manager/common/test_main_loop_runner.h"
 #include "power_manager/powerd/system/dbus_wrapper_stub.h"
 #include "power_manager/powerd/system/mock_bluez_battery_provider.h"
 #include "power_manager/powerd/system/udev_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 #include "power_manager/proto_bindings/peripheral_battery_status.pb.h"
 
-namespace power_manager {
-namespace system {
+using ::testing::_;
+using ::testing::Gt;
+using ::testing::Return;
+using ::testing::StrictMock;
+
+namespace power_manager::system {
 
 using std::string;
 
 namespace {
 
 // Abort if it an expected battery update hasn't been received after this long.
-constexpr base::TimeDelta kUpdateTimeout = base::TimeDelta::FromSeconds(3);
+constexpr base::TimeDelta kUpdateTimeout = base::Seconds(3);
 
 // Shorter update timeout to use when failure is expected.
-constexpr base::TimeDelta kShortUpdateTimeout =
-    base::TimeDelta::FromMilliseconds(100);
+constexpr base::TimeDelta kShortUpdateTimeout = base::Milliseconds(100);
 
 const char kDeviceModelName[] = "Test HID Mouse";
 const char kWacomUevent[] = "HID_UNIQ=aa:aa:aa:aa:aa:aa";
@@ -44,15 +53,37 @@ constexpr char kPeripheralBatterySerialNumber2[] = "DG-0123456789ABCDEF";
 constexpr char kBluetoothBatterySysname[] = "hid-11:22:33:aa:bb:cc-battery";
 constexpr char kWacomBatterySysname[] = "wacom_battery_1";
 constexpr char kNonPeripheralBatterySysname[] = "AC";
-constexpr char kPeripheralChargerBatterySysname[] = "PCHG0";
+constexpr char kPeripheralChargerBatterySysname[] = "peripheral0";
+// TODO(b/215381232): Temporarily support both 'PCHG' name and 'peripheral' name
+// till upstream kernel driver is merged.
+constexpr char kPeripheralChargerBatteryPCHGSysname[] = "PCHG0";
+
+int GetNumberOfOpenFiles() {
+  std::string status;
+  CHECK(base::ReadFileToString(base::FilePath("/proc/self/status"), &status));
+  base::StringPairs pairs;
+  base::SplitStringIntoKeyValuePairs(status, ':', '\n', &pairs);
+  for (const auto& pair : pairs) {
+    const auto& key = pair.first;
+    if (key == "FDSize") {
+      const auto value_str =
+          base::TrimWhitespaceASCII(pair.second, base::TRIM_ALL);
+      int value;
+      CHECK(base::StringToInt(value_str, &value));
+      return value;
+    }
+  }
+  NOTREACHED();
+  return 0;
+}
 
 class TestWrapper : public DBusWrapperStub {
  public:
-  TestWrapper() {}
+  TestWrapper() = default;
   TestWrapper(const TestWrapper&) = delete;
   TestWrapper& operator=(const TestWrapper&) = delete;
 
-  ~TestWrapper() override {}
+  ~TestWrapper() override = default;
 
   // Runs |loop_| until battery status is sent through D-Bus.
   bool RunUntilSignalSent(const base::TimeDelta& timeout) {
@@ -77,14 +108,14 @@ class TestWrapper : public DBusWrapperStub {
 
 }  // namespace
 
-class PeripheralBatteryWatcherTest : public ::testing::Test {
+class PeripheralBatteryWatcherTest : public TestEnvironment {
  public:
-  PeripheralBatteryWatcherTest() {}
+  PeripheralBatteryWatcherTest() = default;
   PeripheralBatteryWatcherTest(const PeripheralBatteryWatcherTest&) = delete;
   PeripheralBatteryWatcherTest& operator=(const PeripheralBatteryWatcherTest&) =
       delete;
 
-  ~PeripheralBatteryWatcherTest() override {}
+  ~PeripheralBatteryWatcherTest() override = default;
 
   void SetUp() override {
     auto bluez_battery_provider = std::make_unique<MockBluezBatteryProvider>();
@@ -136,8 +167,26 @@ class PeripheralBatteryWatcherTest : public ::testing::Test {
     non_peripheral_capacity_file_ =
         device_dir.Append(PeripheralBatteryWatcher::kCapacityFile);
 
-    // Create a fake peripheral-charger directory (it is named PCHG.)
-    device_dir = temp_dir_.GetPath().Append(kPeripheralChargerBatterySysname);
+    battery_.set_battery_path_for_testing(temp_dir_.GetPath());
+  }
+
+  void TearDown() override {
+    // Make sure async file readers are cleaned up.
+    task_env()->RunUntilIdle();
+  }
+
+ protected:
+  void WriteFile(const base::FilePath& path, const string& str) {
+    ASSERT_EQ(str.size(), base::WriteFile(path, str.data(), str.size()));
+  }
+
+  // TODO(b/215381232): Temporarily support both 'PCHG' name and 'peripheral'
+  // name till upstream kernel driver is merged.
+  void SetupPeripheralChargerDirectory(bool use_pchg = false) {
+    // Create a fake peripheral-charger directory (it is named peripheral.)
+    base::FilePath device_dir = temp_dir_.GetPath().Append(
+        use_pchg ? kPeripheralChargerBatteryPCHGSysname
+                 : kPeripheralChargerBatterySysname);
     CHECK(base::CreateDirectory(device_dir));
     scope_file_ = device_dir.Append(PeripheralBatteryWatcher::kScopeFile);
     WriteFile(scope_file_, PeripheralBatteryWatcher::kScopeValueDevice);
@@ -148,13 +197,6 @@ class PeripheralBatteryWatcherTest : public ::testing::Test {
         device_dir.Append(PeripheralBatteryWatcher::kStatusFile);
     peripheral_charger_health_file_ =
         device_dir.Append(PeripheralBatteryWatcher::kHealthFile);
-
-    battery_.set_battery_path_for_testing(temp_dir_.GetPath());
-  }
-
- protected:
-  void WriteFile(const base::FilePath& path, const string& str) {
-    ASSERT_EQ(str.size(), base::WriteFile(path, str.data(), str.size()));
   }
 
   // Temporary directory mimicking a /sys directory containing a set of sensor
@@ -360,48 +402,6 @@ TEST_F(PeripheralBatteryWatcherTest, NonPeripheralUdevEvents) {
   EXPECT_FALSE(test_wrapper_.RunUntilSignalSent(kShortUpdateTimeout));
 }
 
-TEST_F(PeripheralBatteryWatcherTest, RefreshBluetoothBattery) {
-  battery_.Init(&test_wrapper_, &udev_);
-
-  // Initialize non-Bluetooth peripheral.
-  WriteFile(peripheral_capacity_file_, base::NumberToString(90));
-  // Initialize Bluetooth peripheral.
-  WriteFile(bluetooth_capacity_file_, base::NumberToString(80));
-
-  // RefreshBluetoothBattery is called.
-  dbus::MethodCall method_call(kPowerManagerInterface,
-                               kRefreshBluetoothBatteryMethod);
-  dbus::MessageWriter(&method_call).AppendString("11:22:33:AA:BB:CC");
-  std::unique_ptr<dbus::Response> response =
-      test_wrapper_.CallExportedMethodSync(&method_call);
-  ASSERT_TRUE(response);
-  ASSERT_EQ(dbus::Message::MESSAGE_METHOD_RETURN, response->GetMessageType());
-  // Check that powerd does not send the signal because Bluetooth batteries are
-  // reported separately to BlueZ.
-  ASSERT_FALSE(test_wrapper_.RunUntilSignalSent(kShortUpdateTimeout));
-  ASSERT_EQ(0, test_wrapper_.num_sent_signals());
-
-  // RefreshBluetoothBattery is called for non-Bluetooth device.
-  dbus::MethodCall method_call2(kPowerManagerInterface,
-                                kRefreshBluetoothBatteryMethod);
-  dbus::MessageWriter(&method_call2).AppendString("someperipheral");
-  response = test_wrapper_.CallExportedMethodSync(&method_call2);
-  ASSERT_TRUE(response);
-  ASSERT_EQ(dbus::Message::MESSAGE_METHOD_RETURN, response->GetMessageType());
-  // Check that powerd ignores the request.
-  EXPECT_FALSE(test_wrapper_.RunUntilSignalSent(kShortUpdateTimeout));
-
-  // RefreshBluetoothBattery is called for non-existing device.
-  dbus::MethodCall method_call3(kPowerManagerInterface,
-                                kRefreshBluetoothBatteryMethod);
-  dbus::MessageWriter(&method_call3).AppendString("non-existing");
-  response = test_wrapper_.CallExportedMethodSync(&method_call3);
-  ASSERT_TRUE(response);
-  ASSERT_EQ(dbus::Message::MESSAGE_METHOD_RETURN, response->GetMessageType());
-  // Check that powerd ignores the request.
-  EXPECT_FALSE(test_wrapper_.RunUntilSignalSent(kShortUpdateTimeout));
-}
-
 TEST_F(PeripheralBatteryWatcherTest, RefreshAllBatteries) {
   std::string level = base::NumberToString(80);
   WriteFile(peripheral_capacity_file_, level);
@@ -444,6 +444,7 @@ TEST_F(PeripheralBatteryWatcherTest, RefreshAllBatteries) {
 }
 
 TEST_F(PeripheralBatteryWatcherTest, Charger) {
+  SetupPeripheralChargerDirectory();
   // Chargers should be reported.
   WriteFile(peripheral_charger_capacity_file_, base::NumberToString(60));
   WriteFile(peripheral_charger_status_file_,
@@ -463,6 +464,7 @@ TEST_F(PeripheralBatteryWatcherTest, Charger) {
 }
 
 TEST_F(PeripheralBatteryWatcherTest, ChargerFull) {
+  SetupPeripheralChargerDirectory();
   // Chargers should be reported.
   WriteFile(peripheral_charger_capacity_file_, base::NumberToString(100));
   WriteFile(peripheral_charger_status_file_,
@@ -483,6 +485,7 @@ TEST_F(PeripheralBatteryWatcherTest, ChargerFull) {
 }
 
 TEST_F(PeripheralBatteryWatcherTest, ChargerDetached) {
+  SetupPeripheralChargerDirectory();
   // Chargers should be reported.
   WriteFile(peripheral_charger_capacity_file_, base::NumberToString(0));
   WriteFile(peripheral_charger_status_file_,
@@ -502,6 +505,7 @@ TEST_F(PeripheralBatteryWatcherTest, ChargerDetached) {
 }
 
 TEST_F(PeripheralBatteryWatcherTest, ChargerError) {
+  SetupPeripheralChargerDirectory();
   // Chargers health error should be reported.
   WriteFile(peripheral_charger_capacity_file_, base::NumberToString(50));
   WriteFile(peripheral_charger_status_file_,
@@ -517,6 +521,55 @@ TEST_F(PeripheralBatteryWatcherTest, ChargerError) {
   EXPECT_EQ(50, proto.level());
   EXPECT_TRUE(proto.has_charge_status());
   EXPECT_EQ(PeripheralBatteryStatus_ChargeStatus_CHARGE_STATUS_ERROR,
+            proto.charge_status());
+}
+
+// TODO(b/215381232): Temporarily support both 'PCHG' name and 'peripheral' name
+// till upstream kernel driver is merged. Remove test case when upstream kernel
+// driver is merged.
+TEST_F(PeripheralBatteryWatcherTest, Charger_PCHG) {
+  SetupPeripheralChargerDirectory(/*use_pchg=*/true);
+
+  // Chargers should be reported.
+  WriteFile(peripheral_charger_capacity_file_, base::NumberToString(60));
+  WriteFile(peripheral_charger_status_file_,
+            PeripheralBatteryWatcher::kStatusValueCharging);
+  WriteFile(peripheral_charger_health_file_,
+            PeripheralBatteryWatcher::kHealthValueGood);
+  battery_.Init(&test_wrapper_, &udev_);
+  ASSERT_TRUE(test_wrapper_.RunUntilSignalSent(kUpdateTimeout));
+
+  EXPECT_EQ(1, test_wrapper_.num_sent_signals());
+  PeripheralBatteryStatus proto;
+  EXPECT_TRUE(test_wrapper_.GetSentSignal(0, kPeripheralBatteryStatusSignal,
+                                          &proto, nullptr));
+  EXPECT_EQ(60, proto.level());
+  EXPECT_EQ(PeripheralBatteryStatus_ChargeStatus_CHARGE_STATUS_CHARGING,
+            proto.charge_status());
+}
+
+// TODO(b/215381232): Temporarily support both 'PCHG' name and 'peripheral' name
+// till upstream kernel driver is merged.Remove test case when upstream kernel
+// driver is merged.
+TEST_F(PeripheralBatteryWatcherTest, ChargerFull_PCHG) {
+  SetupPeripheralChargerDirectory(/*use_pchg=*/true);
+
+  // Chargers should be reported.
+  WriteFile(peripheral_charger_capacity_file_, base::NumberToString(100));
+  WriteFile(peripheral_charger_status_file_,
+            PeripheralBatteryWatcher::kStatusValueFull);
+  WriteFile(peripheral_charger_health_file_,
+            PeripheralBatteryWatcher::kHealthValueGood);
+  battery_.Init(&test_wrapper_, &udev_);
+  ASSERT_TRUE(test_wrapper_.RunUntilSignalSent(kUpdateTimeout));
+
+  EXPECT_EQ(1, test_wrapper_.num_sent_signals());
+  PeripheralBatteryStatus proto;
+  EXPECT_TRUE(test_wrapper_.GetSentSignal(0, kPeripheralBatteryStatusSignal,
+                                          &proto, nullptr));
+  EXPECT_EQ(100, proto.level());
+  EXPECT_TRUE(proto.has_charge_status());
+  EXPECT_EQ(PeripheralBatteryStatus_ChargeStatus_CHARGE_STATUS_FULL,
             proto.charge_status());
 }
 
@@ -640,5 +693,53 @@ TEST_F(PeripheralBatteryWatcherTest, UdevEventsWithSerial) {
   EXPECT_FALSE(test_wrapper_.RunUntilSignalSent(kShortUpdateTimeout));
 }
 
-}  // namespace system
-}  // namespace power_manager
+TEST_F(PeripheralBatteryWatcherTest, SpammyUdevEvents) {
+  // This is a regression test to make sure we don't keep opening new file
+  // descriptors in response to the same udev device being reconnected many
+  // times.
+  WriteFile(peripheral_capacity_file_, base::NumberToString(50));
+  battery_.Init(&test_wrapper_, &udev_);
+  ASSERT_TRUE(test_wrapper_.RunUntilSignalSent(kUpdateTimeout));
+
+  const size_t kDevicesToAdd = 32;
+  int fd_count = GetNumberOfOpenFiles();
+  rlimit rlim_orig;
+  getrlimit(RLIMIT_NOFILE, &rlim_orig);
+
+  // Temporarily drop the open file count limit.
+  rlimit rlim = rlim_orig;
+  rlim.rlim_cur = fd_count + kDevicesToAdd / 2;
+  setrlimit(RLIMIT_NOFILE, &rlim);
+
+  for (size_t i = 0; i < kDevicesToAdd; i++) {
+    udev_.NotifySubsystemObservers({{PeripheralBatteryWatcher::kUdevSubsystem,
+                                     "", kPeripheralBatterySysname, ""},
+                                    UdevEvent::Action::ADD});
+    ASSERT_TRUE(test_wrapper_.RunUntilSignalSent(kUpdateTimeout));
+  }
+
+  // Make sure we didn't leak file descriptors and can still open a file.
+  WriteFile(peripheral_capacity_file_, base::NumberToString(40));
+
+  // Restore the original file count limit.
+  setrlimit(RLIMIT_NOFILE, &rlim_orig);
+}
+
+TEST_F(PeripheralBatteryWatcherTest, ReadLatencyMetrics) {
+  StrictMock<MetricsLibraryMock> metrics_lib;
+  MetricsSender metrics_sender{metrics_lib};
+
+  EXPECT_CALL(metrics_lib, SendToUMA("Power.PeripheralReadLatencyMs", Gt(0),
+                                     metrics::kPeripheralReadLatencyMsMin,
+                                     metrics::kPeripheralReadLatencyMsMax,
+                                     metrics::kDefaultBuckets))
+      .Times(1)
+      .WillOnce(Return(true))
+      .RetiresOnSaturation();
+
+  WriteFile(peripheral_capacity_file_, base::NumberToString(50));
+  battery_.Init(&test_wrapper_, &udev_);
+  ASSERT_TRUE(test_wrapper_.RunUntilSignalSent(kUpdateTimeout));
+}
+
+}  // namespace power_manager::system

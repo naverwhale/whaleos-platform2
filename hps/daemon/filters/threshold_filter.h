@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <memory>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "hps/daemon/filters/filter.h"
 
 namespace hps {
@@ -18,11 +18,11 @@ class ThresholdFilter : public Filter {
   explicit ThresholdFilter(int threshold);
   ThresholdFilter(const ThresholdFilter&) = delete;
   ThresholdFilter& operator=(const ThresholdFilter&) = delete;
-  virtual ~ThresholdFilter() = default;
+  ~ThresholdFilter() override = default;
 
  private:
   // Metehods for Filter
-  bool ProcessResultImpl(int result) override;
+  HpsResult ProcessResultImpl(int result, bool valid) override;
 
   const int threshold_;
 };

@@ -1,52 +1,26 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
-#include <utility>
 
-#include <base/check.h>
-#include <base/run_loop.h>
 #include <base/test/task_environment.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <mojo/core/embedder/embedder.h>
-#include <mojo/public/cpp/bindings/pending_receiver.h>
-#include <mojo/public/cpp/bindings/receiver.h>
+#include <power_manager/dbus-proxy-mocks.h>
 
-#include "diagnostics/common/system/fake_powerd_adapter.h"
+#include "diagnostics/cros_healthd/events/event_observer_test_future.h"
 #include "diagnostics/cros_healthd/events/lid_events_impl.h"
 #include "diagnostics/cros_healthd/system/mock_context.h"
-#include "mojo/cros_healthd_events.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_events.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
+namespace mojom = ::ash::cros_healthd::mojom;
 
-using ::testing::Invoke;
-using ::testing::StrictMock;
-
-class MockCrosHealthdLidObserver : public mojo_ipc::CrosHealthdLidObserver {
- public:
-  explicit MockCrosHealthdLidObserver(
-      mojo::PendingReceiver<mojo_ipc::CrosHealthdLidObserver> receiver)
-      : receiver_{this /* impl */, std::move(receiver)} {
-    DCHECK(receiver_.is_bound());
-  }
-  MockCrosHealthdLidObserver(const MockCrosHealthdLidObserver&) = delete;
-  MockCrosHealthdLidObserver& operator=(const MockCrosHealthdLidObserver&) =
-      delete;
-
-  MOCK_METHOD(void, OnLidClosed, (), (override));
-  MOCK_METHOD(void, OnLidOpened, (), (override));
-
- private:
-  mojo::Receiver<mojo_ipc::CrosHealthdLidObserver> receiver_;
-};
-
-}  // namespace
+using ::testing::_;
+using ::testing::SaveArg;
 
 // Tests for the LidEventsImpl class.
 class LidEventsImplTest : public testing::Test {
@@ -56,78 +30,54 @@ class LidEventsImplTest : public testing::Test {
   LidEventsImplTest& operator=(const LidEventsImplTest&) = delete;
 
   void SetUp() override {
-    // Before any observers have been added, we shouldn't have subscribed to
-    // powerd_adapter.
-    ASSERT_FALSE(fake_adapter()->HasLidObserver(&lid_events_impl_));
-
-    mojo::PendingRemote<mojo_ipc::CrosHealthdLidObserver> observer;
-    mojo::PendingReceiver<mojo_ipc::CrosHealthdLidObserver> observer_receiver(
-        observer.InitWithNewPipeAndPassReceiver());
-    observer_ = std::make_unique<StrictMock<MockCrosHealthdLidObserver>>(
-        std::move(observer_receiver));
-    lid_events_impl_.AddObserver(std::move(observer));
-    // Now that an observer has been added, we should have subscribed to
-    // powerd_adapter.
-    ASSERT_TRUE(fake_adapter()->HasLidObserver(&lid_events_impl_));
+    EXPECT_CALL(*mock_power_manager_proxy(),
+                DoRegisterLidClosedSignalHandler(_, _))
+        .WillOnce(SaveArg<0>(&lid_closed_callback_));
+    EXPECT_CALL(*mock_power_manager_proxy(),
+                DoRegisterLidOpenedSignalHandler(_, _))
+        .WillOnce(SaveArg<0>(&lid_opened_callback_));
+    lid_events_impl_ = std::make_unique<LidEventsImpl>(&mock_context_);
+    lid_events_impl_->AddObserver(event_observer_.BindNewPendingRemote());
   }
 
-  LidEventsImpl* lid_events_impl() { return &lid_events_impl_; }
-
-  FakePowerdAdapter* fake_adapter() {
-    return mock_context_.fake_powerd_adapter();
+  org::chromium::PowerManagerProxyMock* mock_power_manager_proxy() {
+    return mock_context_.mock_power_manager_proxy();
   }
 
-  MockCrosHealthdLidObserver* mock_observer() { return observer_.get(); }
+  EventObserverTestFuture& event_observer() { return event_observer_; }
 
-  void DestroyMojoObserver() {
-    observer_.reset();
+  void EmitLidClosedSignal() { lid_closed_callback_.Run(); }
 
-    // Make sure |lid_events_impl_| gets a chance to observe the connection
-    // error.
-    task_environment_.RunUntilIdle();
-  }
+  void EmitLidOpenedSignal() { lid_opened_callback_.Run(); }
 
  private:
   base::test::TaskEnvironment task_environment_;
   MockContext mock_context_;
-  std::unique_ptr<StrictMock<MockCrosHealthdLidObserver>> observer_;
-  LidEventsImpl lid_events_impl_{&mock_context_};
+  EventObserverTestFuture event_observer_;
+  std::unique_ptr<LidEventsImpl> lid_events_impl_;
+  base::RepeatingClosure lid_closed_callback_;
+  base::RepeatingClosure lid_opened_callback_;
 };
 
 // Test that we can receive lid closed events.
 TEST_F(LidEventsImplTest, ReceiveLidClosedEvent) {
-  base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnLidClosed()).WillOnce(Invoke([&]() {
-    run_loop.Quit();
-  }));
+  EmitLidClosedSignal();
 
-  fake_adapter()->EmitLidClosedSignal();
-
-  run_loop.Run();
+  auto info = event_observer().WaitForEvent();
+  ASSERT_TRUE(info->is_lid_event_info());
+  const auto& lid_event_info = info->get_lid_event_info();
+  EXPECT_EQ(lid_event_info->state, mojom::LidEventInfo::State::kClosed);
 }
 
 // Test that we can receive lid opened events.
 TEST_F(LidEventsImplTest, ReceiveLidOpenedEvent) {
-  base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnLidOpened()).WillOnce(Invoke([&]() {
-    run_loop.Quit();
-  }));
+  EmitLidOpenedSignal();
 
-  fake_adapter()->EmitLidOpenedSignal();
-
-  run_loop.Run();
+  auto info = event_observer().WaitForEvent();
+  ASSERT_TRUE(info->is_lid_event_info());
+  const auto& lid_event_info = info->get_lid_event_info();
+  EXPECT_EQ(lid_event_info->state, mojom::LidEventInfo::State::kOpened);
 }
 
-// Test that LidEvents unsubscribes to PowerdAdapter when LidEvents loses all of
-// its mojo observers.
-TEST_F(LidEventsImplTest, UnsubscribeFromPowerdAdapterWhenAllObserversLost) {
-  DestroyMojoObserver();
-
-  // Emit an event, so that LidEventsImpl has a chance to check for any
-  // remaining mojo observers.
-  fake_adapter()->EmitLidClosedSignal();
-
-  EXPECT_FALSE(fake_adapter()->HasLidObserver(lid_events_impl()));
-}
-
+}  // namespace
 }  // namespace diagnostics

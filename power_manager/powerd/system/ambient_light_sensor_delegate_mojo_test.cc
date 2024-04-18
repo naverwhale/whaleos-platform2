@@ -1,10 +1,12 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/system/ambient_light_sensor_delegate_mojo.h"
 
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -14,10 +16,12 @@
 #include <gtest/gtest.h>
 
 #include "power_manager/powerd/system/ambient_light_observer.h"
-#include "power_manager/powerd/system/fake_sensor_device.h"
+#include "power_manager/powerd/system/ambient_light_sensor.h"
+#include "power_manager/powerd/system/ambient_light_sensor_interface.h"
+#include "power_manager/powerd/system/fake_light.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -59,15 +63,15 @@ class TestObserver : public AmbientLightObserver {
 
 }  // namespace
 
-class AmbientLightSensorDelegateMojoTest : public ::testing::Test {
+class AmbientLightSensorDelegateMojoTest : public MojoTestEnvironment {
  public:
   AmbientLightSensorDelegateMojoTest(
       const AmbientLightSensorDelegateMojoTest&) = delete;
   AmbientLightSensorDelegateMojoTest& operator=(
       const AmbientLightSensorDelegateMojoTest&) = delete;
 
-  AmbientLightSensorDelegateMojoTest() {}
-  ~AmbientLightSensorDelegateMojoTest() override {}
+  AmbientLightSensorDelegateMojoTest() = default;
+  ~AmbientLightSensorDelegateMojoTest() override = default;
 
  protected:
   void SetUp() override {
@@ -78,13 +82,13 @@ class AmbientLightSensorDelegateMojoTest : public ::testing::Test {
   void TearDown() override { sensor_->RemoveObserver(&observer_); }
 
   void InitSensor(bool color_delegate, bool fake_color_sensor) {
-    sensor_device_ = std::make_unique<FakeSensorDevice>(
-        fake_color_sensor, /*name=*/base::nullopt, /*location=*/base::nullopt);
+    fake_light_ = std::make_unique<FakeLight>(
+        fake_color_sensor, /*name=*/std::nullopt, /*location=*/std::nullopt);
 
     base::RunLoop loop;
 
     mojo::Remote<cros::mojom::SensorDevice> remote;
-    id_ = sensor_device_->AddReceiver(remote.BindNewPipeAndPassReceiver());
+    id_ = fake_light_->AddReceiver(remote.BindNewPipeAndPassReceiver());
     auto light = AmbientLightSensorDelegateMojo::Create(
         kFakeSensorId, std::move(remote), color_delegate, loop.QuitClosure());
     light_ = light.get();
@@ -99,25 +103,31 @@ class AmbientLightSensorDelegateMojoTest : public ::testing::Test {
     base::flat_map<int32_t, int64_t> sample;
     sample[0] = lux;
 
-    light_->OnSampleUpdated(std::move(sample));
+    fake_light_->OnSampleUpdated(std::move(sample));
+
+    // Wait until the sample is updated.
+    base::RunLoop().RunUntilIdle();
   }
 
   // The indices of [0, 1, 2, 3] imply channels [lux, ChannelType::X,
   // ChannelType::Y, ChannelType::Z].
   void WriteColorLux(int64_t lux, std::vector<int64_t> color_lux) {
-    CHECK_EQ(color_lux.size(), base::size(kColorChannelConfig));
+    CHECK_EQ(color_lux.size(), std::size(kColorChannelConfig));
 
     base::flat_map<int32_t, int64_t> sample;
     sample[0] = lux;
     for (size_t i = 0; i < color_lux.size(); ++i)
       sample[i + 1] = color_lux[i];
 
-    light_->OnSampleUpdated(std::move(sample));
+    fake_light_->OnSampleUpdated(std::move(sample));
+
+    // Wait until the sample is updated.
+    base::RunLoop().RunUntilIdle();
   }
 
   TestObserver observer_;
 
-  std::unique_ptr<FakeSensorDevice> sensor_device_;
+  std::unique_ptr<FakeLight> fake_light_;
 
   std::unique_ptr<AmbientLightSensor> sensor_;
   AmbientLightSensorDelegateMojo* light_;
@@ -137,14 +147,14 @@ TEST_F(AmbientLightSensorDelegateMojoTest, NoColorSensor) {
   observer_.CheckSample(200);
 
   // Simulate disconnection of the observer channel.
-  sensor_device_->ResetObserverRemote(id_);
+  fake_light_->ResetSamplesObserverRemote(id_);
 
   // Wait until the disconnection is done.
   base::RunLoop().RunUntilIdle();
 
   // OnObserverDisconnect shouldn't reset SensorDevice's mojo endpoint so that
   // AmbientLightSensorManager can get the disconnection.
-  EXPECT_TRUE(sensor_device_->HasReceivers());
+  EXPECT_TRUE(fake_light_->HasReceivers());
 }
 
 TEST_F(AmbientLightSensorDelegateMojoTest, NoColorDelegateOnColorSensor) {
@@ -202,10 +212,9 @@ TEST_F(AmbientLightSensorDelegateMojoTest, GiveUpAfterTooManyFailures) {
   light_->OnErrorOccurred(cros::mojom::ObserverErrorType::READ_FAILED);
   light_->OnErrorOccurred(cros::mojom::ObserverErrorType::READ_FAILED);
 
-  // Wait until |sensor_device_| is disconnected.
+  // Wait until |fake_light_| is disconnected.
   base::RunLoop().RunUntilIdle();
-  EXPECT_FALSE(sensor_device_->HasReceivers());
+  EXPECT_FALSE(fake_light_->HasReceivers());
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

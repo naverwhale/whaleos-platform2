@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include <trunks/error_codes.h>
 #include <trunks/tpm_generated.h>
 #include <trunks/trunks_factory_impl.h>
+#include <trunks/cr50_headers/ap_ro_status.h>
 
 using trunks::TPM_RC;
 using trunks::TPM_RC_SUCCESS;
@@ -22,18 +23,170 @@ namespace tpm_manager {
 
 namespace {
 
-tpm_manager::RoVerificationStatus MapRoStatus(
-    const trunks::TpmUtility::ApRoStatus& raw_status) {
+// Keep it with sync to UMA enum list
+// https://chromium.googlesource.com/chromium/src/+/HEAD/tools/metrics/histograms/enums.xml
+// These values are persisted to logs, and should therefore never be renumbered
+// nor reused.
+enum class TpmAlerts {
+  kCamoBreach = 1,
+  kDmemParity = 2,
+  kDrfParity = 3,
+  kImemParity = 4,
+  kPgmFault = 5,
+  kCpuDIfBusError = 6,
+  kCpuDIfUpdateWatchdog = 7,
+  kCpuIIfBusError = 8,
+  kCpuIIfUpdateWatchdog = 9,
+  kCpuSIfBusError = 10,
+  kCpuSIfUpdateWatchdog = 11,
+  kDmaIfBusErr = 12,
+  kDmaIfUpdateWatchdog = 13,
+  kSpsIfBusErr = 14,
+  kSpsIfUpdateWatchdog = 15,
+  kUsbIfBusErr = 16,
+  kUsbIfUpdateWatchdog = 17,
+  kFuseDefaults = 18,
+  kDiffFail = 19,
+  kSoftwareAlert0 = 20,
+  kSoftwareAlert1 = 21,
+  kSoftwareAlert2 = 22,
+  kSoftwareAlert3 = 23,
+  kHearbitFail = 24,
+  kProcOpcodeHash = 25,
+  kSramParityScrub = 26,
+  kAesExecCtrMax = 27,
+  kAesHkey = 28,
+  kCertLookup = 29,
+  kFlashEntry = 30,
+  kPw = 31,
+  kShaExecCtrMax = 32,
+  kShaFault = 33,
+  kShaHkey = 34,
+  kPmuBatteryMon = 35,
+  kPmuWatchdog = 36,
+  kRtcDead = 37,
+  kTempMax = 38,
+  kTempMaxDiff = 39,
+  kTempMin = 40,
+  kRngOutOfSpec = 41,
+  kRngTimeout = 42,
+  kVoltageError = 43,
+  kXoJitteryTrim = 44,
+
+  kTPMAlertNumBuckets,  // Must be the last entry.
+};
+
+constexpr size_t kTPMAlertNumBuckets =
+    static_cast<size_t>(TpmAlerts::kTPMAlertNumBuckets);
+
+static_assert(kTPMAlertNumBuckets <= trunks::kAlertsMaxSize + 1,
+              "Number of UMA enums less than alerts set size");
+
+// Maps alerts identifiers received from TMP firmware to UMA identifiers
+constexpr TpmAlerts kH1AlertsMap[trunks::kH1AlertsSize] = {
+    TpmAlerts::kCamoBreach,
+    TpmAlerts::kDmemParity,
+    TpmAlerts::kDrfParity,
+    TpmAlerts::kImemParity,
+    TpmAlerts::kPgmFault,
+    TpmAlerts::kCpuDIfBusError,
+    TpmAlerts::kCpuDIfUpdateWatchdog,
+    TpmAlerts::kCpuIIfBusError,
+    TpmAlerts::kCpuIIfUpdateWatchdog,
+    TpmAlerts::kCpuSIfBusError,
+    TpmAlerts::kCpuSIfUpdateWatchdog,
+    TpmAlerts::kDmaIfBusErr,
+    TpmAlerts::kDmaIfUpdateWatchdog,
+    TpmAlerts::kSpsIfBusErr,
+    TpmAlerts::kSpsIfUpdateWatchdog,
+    TpmAlerts::kUsbIfBusErr,
+    TpmAlerts::kUsbIfUpdateWatchdog,
+    TpmAlerts::kFuseDefaults,
+    TpmAlerts::kDiffFail,
+    TpmAlerts::kSoftwareAlert0,
+    TpmAlerts::kSoftwareAlert1,
+    TpmAlerts::kSoftwareAlert2,
+    TpmAlerts::kSoftwareAlert3,
+    TpmAlerts::kHearbitFail,
+    TpmAlerts::kProcOpcodeHash,
+    TpmAlerts::kSramParityScrub,
+    TpmAlerts::kAesExecCtrMax,
+    TpmAlerts::kAesHkey,
+    TpmAlerts::kCertLookup,
+    TpmAlerts::kFlashEntry,
+    TpmAlerts::kPw,
+    TpmAlerts::kShaExecCtrMax,
+    TpmAlerts::kShaFault,
+    TpmAlerts::kShaHkey,
+    TpmAlerts::kPmuBatteryMon,
+    TpmAlerts::kPmuWatchdog,
+    TpmAlerts::kRtcDead,
+    TpmAlerts::kTempMax,
+    TpmAlerts::kTempMaxDiff,
+    TpmAlerts::kTempMin,
+    TpmAlerts::kRngOutOfSpec,
+    TpmAlerts::kRngTimeout,
+    TpmAlerts::kVoltageError,
+    TpmAlerts::kXoJitteryTrim,
+};
+
+std::optional<tpm_manager::RoVerificationStatus> MapRoStatus(
+    ap_ro_status raw_status) {
   switch (raw_status) {
-    case trunks::TpmUtility::ApRoStatus::kApRoNotRun:
+    case AP_RO_NOT_RUN:
       return tpm_manager::RO_STATUS_NOT_TRIGGERED;
-    case trunks::TpmUtility::ApRoStatus::kApRoPass:
-      return tpm_manager::RO_STATUS_PASS;
-    case trunks::TpmUtility::ApRoStatus::kApRoFail:
+    case AP_RO_PASS_UNVERIFIED_GBB:
+      return tpm_manager::RO_STATUS_PASS_UNVERIFIED_GBB;
+    case AP_RO_FAIL:
       return tpm_manager::RO_STATUS_FAIL;
-    case trunks::TpmUtility::ApRoStatus::kApRoUnsupported:
+    case AP_RO_UNSUPPORTED_UNKNOWN:
       return tpm_manager::RO_STATUS_UNSUPPORTED;
+    case AP_RO_UNSUPPORTED_NOT_TRIGGERED:
+      return tpm_manager::RO_STATUS_UNSUPPORTED_NOT_TRIGGERED;
+    case AP_RO_UNSUPPORTED_TRIGGERED:
+      return tpm_manager::RO_STATUS_UNSUPPORTED_TRIGGERED;
+    case AP_RO_PASS:
+      return tpm_manager::RO_STATUS_PASS;
+    case AP_RO_IN_PROGRESS:
+      return tpm_manager::RO_STATUS_IN_PROGRESS;
+    case AP_RO_V2_SUCCESS:
+      return tpm_manager::RO_STATUS_V2_SUCCESS;
+    case AP_RO_V2_FAILED_VERIFICATION:
+      return tpm_manager::RO_STATUS_V2_FAILED_VERIFICATION;
+    case AP_RO_V2_INCONSISTENT_GSCVD:
+      return tpm_manager::RO_STATUS_V2_INCONSISTENT_GSCVD;
+    case AP_RO_V2_INCONSISTENT_KEYBLOCK:
+      return tpm_manager::RO_STATUS_V2_INCONSISTENT_KEYBLOCK;
+    case AP_RO_V2_INCONSISTENT_KEY:
+      return tpm_manager::RO_STATUS_V2_INCONSISTENT_KEY;
+    case AP_RO_V2_SPI_READ:
+      return tpm_manager::RO_STATUS_V2_SPI_READ;
+    case AP_RO_V2_UNSUPPORTED_CRYPTO_ALGORITHM:
+      return tpm_manager::RO_STATUS_V2_UNSUPPORTED_CRYPTO_ALGORITHM;
+    case AP_RO_V2_VERSION_MISMATCH:
+      return tpm_manager::RO_STATUS_V2_VERSION_MISMATCH;
+    case AP_RO_V2_OUT_OF_MEMORY:
+      return tpm_manager::RO_STATUS_V2_OUT_OF_MEMORY;
+    case AP_RO_V2_INTERNAL:
+      return tpm_manager::RO_STATUS_V2_INTERNAL;
+    case AP_RO_V2_TOO_BIG:
+      return tpm_manager::RO_STATUS_V2_TOO_BIG;
+    case AP_RO_V2_MISSING_GSCVD:
+      return tpm_manager::RO_STATUS_V2_MISSING_GSCVD;
+    case AP_RO_V2_BOARD_ID_MISMATCH:
+      return tpm_manager::RO_STATUS_V2_BOARD_ID_MISMATCH;
+    case AP_RO_V2_SETTING_NOT_PROVISIONED:
+      return tpm_manager::RO_STATUS_V2_SETTING_NOT_PROVISIONED;
+    case AP_RO_V2_NON_ZERO_GBB_FLAGS:
+      return tpm_manager::RO_STATUS_V2_NON_ZERO_GBB_FLAGS;
+    case AP_RO_V2_WRONG_ROOT_KEY:
+      return tpm_manager::RO_STATUS_V2_WRONG_ROOT_KEY;
+    case AP_RO_V2_UNKNOWN:
+      return tpm_manager::RO_STATUS_V2_UNKNOWN;
   }
+  LOG(ERROR) << __func__
+             << ": unexpected status: " << static_cast<uint8_t>(raw_status);
+  return std::nullopt;
 }
 
 }  // namespace
@@ -156,12 +309,7 @@ void Tpm2StatusImpl::MarkRandomOwnerPasswordSet() {
 }
 
 bool Tpm2StatusImpl::SupportU2f() {
-  // We support U2F on Cr50.
-  if (trunks_tpm_utility_->IsCr50()) {
-    return true;
-  }
-
-  return false;
+  return true;
 }
 
 bool Tpm2StatusImpl::SupportPinweaver() {
@@ -176,10 +324,10 @@ bool Tpm2StatusImpl::SupportPinweaver() {
 }
 
 GscVersion Tpm2StatusImpl::GetGscVersion() {
-  // Currently we don't have method to distinguish Ti50.
-
-  if (trunks_tpm_utility_->IsCr50()) {
+  if (USE_CR50_ONBOARD) {
     return GscVersion::GSC_VERSION_CR50;
+  } else if (USE_TI50_ONBOARD) {
+    return GscVersion::GSC_VERSION_TI50;
   }
 
   return GscVersion::GSC_VERSION_NOT_GSC;
@@ -230,13 +378,81 @@ bool Tpm2StatusImpl::TestTpmSrkAndSaltingSession() {
 
 bool Tpm2StatusImpl::GetRoVerificationStatus(
     tpm_manager::RoVerificationStatus* status) {
-  trunks::TpmUtility::ApRoStatus raw_status;
+  ap_ro_status raw_status;
   TPM_RC result = trunks_tpm_utility_->GetRoVerificationStatus(&raw_status);
   if (result != TPM_RC_SUCCESS) {
     return false;
   }
-  *status = MapRoStatus(raw_status);
+  std::optional<tpm_manager::RoVerificationStatus> map_result =
+      MapRoStatus(raw_status);
+  if (!map_result.has_value()) {
+    return false;
+  }
+  *status = map_result.value();
   return true;
 }
 
+bool Tpm2StatusImpl::GetAlertsData(AlertsData* alerts) {
+  trunks::TpmAlertsData trunks_alerts;
+  TPM_RC result = trunks_tpm_utility_->GetAlertsData(&trunks_alerts);
+  if (result == trunks::TPM_RC_NO_SUCH_COMMAND) {
+    LOG(INFO) << "TPM GetAlertsData vendor command is not implemented";
+    return false;
+  } else if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << "Error getting alerts data: "
+               << trunks::GetErrorString(result);
+    memset(alerts, 0, sizeof(AlertsData));
+    return true;
+  } else if (trunks_alerts.chip_family != trunks::kFamilyH1) {
+    // Currently we support only H1 alerts
+    LOG(ERROR) << "Unknown alerts family: " << trunks_alerts.chip_family;
+    return false;
+  }
+  memset(alerts, 0, sizeof(AlertsData));
+  for (int i = 0; i < trunks_alerts.alerts_num; i++) {
+    size_t uma_idx = static_cast<size_t>(kH1AlertsMap[i]);
+    if (uma_idx <= 0 || uma_idx >= kTPMAlertNumBuckets) {
+      LOG(ERROR) << "Alert index " << i << " maps into invalid UMA enum index "
+                 << uma_idx;
+    } else {
+      alerts->counters[uma_idx] = trunks_alerts.counters[i];
+    }
+  }
+  return true;
+}
+
+bool Tpm2StatusImpl::GetTi50Stats(uint32_t* fs_init_time,
+                                  uint32_t* fs_size,
+                                  uint32_t* aprov_time,
+                                  uint32_t* aprov_status) {
+  TPM_RC result = trunks_tpm_utility_->GetTi50Stats(fs_init_time, fs_size,
+                                                    aprov_time, aprov_status);
+  if (result != trunks::TPM_RC_SUCCESS) {
+    return false;
+  }
+  return true;
+}
+
+bool Tpm2StatusImpl::GetRwVersion(std::string* rw_version) {
+  CHECK(rw_version);
+  if (!Refresh()) {
+    return false;
+  }
+
+  if (GetGscVersion() == GscVersion::GSC_VERSION_NOT_GSC) {
+    *rw_version = "0.0.0";
+    VLOG(1) << "Report all zeros rw firmware version for non-GSC devices.";
+    return true;
+  }
+  uint32_t epoch;
+  uint32_t major;
+  uint32_t minor;
+  TPM_RC result = trunks_tpm_utility_->GetRwVersion(&epoch, &major, &minor);
+  if (result != trunks::TPM_RC_SUCCESS) {
+    return false;
+  }
+  *rw_version = std::to_string(epoch) + "." + std::to_string(major) + "." +
+                std::to_string(minor);
+  return true;
+}
 }  // namespace tpm_manager

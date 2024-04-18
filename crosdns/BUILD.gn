@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,8 +10,14 @@ group("all") {
   deps = [
     ":crosdns",
     ":crosdns_proxies",
+    ":install_dbus_conf",
+    ":install_init_conf",
+    ":install_minijail_conf",
     ":libcrosdns_static",
   ]
+  if (use.seccomp) {
+    deps += [ ":install_seccomp_policy" ]
+  }
   if (use.test) {
     deps += [ ":run_tests" ]
   }
@@ -56,10 +62,35 @@ executable("crosdns") {
     "main.cc",
   ]
   configs += [ ":target_defaults" ]
+  install_path = "sbin"
   deps = [
     ":crosdns_adaptors",
     ":libcrosdns_static",
   ]
+}
+
+install_config("install_dbus_conf") {
+  sources = [ "dbus_permissions/org.chromium.CrosDns.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_init_conf") {
+  sources = [ "init/crosdns.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "minijail/crosdns.conf" ]
+  install_path = "minijail_conf"
+}
+
+if (use.seccomp) {
+  install_config("install_seccomp_policy") {
+    _arch = getenv("ARCH")
+    sources = [ "init/crosdns-seccomp-${_arch}.policy" ]
+    install_path = "seccomp_policy"
+    outputs = [ "crosdns-seccomp.policy" ]
+  }
 }
 
 if (use.test) {
@@ -69,6 +100,7 @@ if (use.test) {
       "//common-mk:test",
       ":target_defaults",
     ]
+    run_test = true
     deps = [
       ":libcrosdns_static",
       "//common-mk/testrunner:testrunner",

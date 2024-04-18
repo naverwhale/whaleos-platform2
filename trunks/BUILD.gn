@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,6 +7,9 @@ import("//common-mk/proto_library.gni")
 
 group("all") {
   deps = [
+    ":install_freezer_tmpfilesd",
+    ":install_tmpfiles_config",
+    ":install_trunksd_conf",
     ":libtrunks",
     ":pinweaver_client",
     ":pinweaver_provision",
@@ -16,6 +19,13 @@ group("all") {
     ":trunks_send",
     ":trunksd",
   ]
+
+  # TODO(b/265866896): provider better abstraction by adding trunks-pre-init
+  # event instead
+  # TODO(b/267399953): remove use.generic_tpm2 once keeby-cq is removed.
+  if (!use.cr50_onboard && !use.ti50_onboard && !use.generic_tpm2) {
+    deps += [ ":install_pre_init_config" ]
+  }
   if (use.test) {
     deps += [ ":trunks_testrunner" ]
   }
@@ -47,10 +57,11 @@ pkg_config("target_default_pkg_deps") {
 
 config("target_defaults") {
   configs = [ ":target_default_pkg_deps" ]
-  defines = [ "USE_GENERIC_TPM2=${use.generic_tpm2}" ]
-  if (use.tpm2_simulator) {
-    defines += [ "USE_SIMULATOR=1" ]
-  }
+  defines = [
+    "USE_GENERIC_TPM2=${use.generic_tpm2}",
+    "USE_PINWEAVER_CSME=${use.pinweaver_csme}",
+  ]
+  libs = [ "hwsec-foundation" ]
 }
 
 proto_library("interface_proto") {
@@ -73,21 +84,46 @@ proto_library("pinweaver_proto") {
   standalone = true
 }
 
-shared_library("trunks") {
+# The static library of pinweaver-csme.
+# Note: this is dedicatedly built for `trunks.so` to link against.
+# multiple linkages could lead ODR violation.
+source_set("pinweaver_csme_lib") {
   sources = [
-    "background_command_transceiver.cc",
-    "blob_parser.cc",
     "csme/mei_client_char_device.cc",
     "csme/mei_client_factory.cc",
     "csme/mei_client_socket.cc",
     "csme/pinweaver_core_client.cc",
+    "csme/pinweaver_core_client_null.cc",
     "csme/pinweaver_provision_client.cc",
+    "csme/pinweaver_provision_impl.cc",
+  ]
+  if (use.pinweaver_csme) {
+    sources += [ "csme/pinweaver_core_client_impl.cc" ]
+  }
+  configs += [
+    ":target_defaults",
+
+    # -fPIC needed for a shared library to link against.
+    "//common-mk:pic",
+  ]
+  defines = [ "USE_CSME_EMULATOR=${use.csme_emulator}" ]
+  deps = [ ":pinweaver_proto" ]
+}
+
+shared_library("trunks") {
+  sources = [
+    "background_command_transceiver.cc",
+    "blob_parser.cc",
+    "command_codes.cc",
     "error_codes.cc",
     "hmac_authorization_delegate.cc",
     "hmac_session_impl.cc",
+    "multiple_authorization_delegate.cc",
     "openssl_utility.cc",
     "password_authorization_delegate.cc",
     "policy_session_impl.cc",
+    "real_command_parser.cc",
+    "real_response_serializer.cc",
     "scoped_key_handle.cc",
     "session_manager_impl.cc",
     "tpm_cache_impl.cc",
@@ -95,12 +131,14 @@ shared_library("trunks") {
     "tpm_generated.cc",
     "tpm_pinweaver.cc",
     "tpm_state_impl.cc",
+    "tpm_structure_parser.cc",
+    "tpm_u2f.cc",
     "tpm_utility_impl.cc",
     "trunks_dbus_proxy.cc",
     "trunks_factory_impl.cc",
+    "vtpm_client_support/create_dbus_proxy.cc",
   ]
   configs += [ ":target_defaults" ]
-  libs = [ "hwsec-foundation" ]
   defines = [ "USE_CSME_EMULATOR=${use.csme_emulator}" ]
   if (use.ftdi_tpm) {
     sources += [
@@ -111,8 +149,10 @@ shared_library("trunks") {
     libs += [ "ftdi1" ]
     defines += [ "SPI_OVER_FTDI=1" ]
   }
+  pkg_deps = [ "absl" ]
   deps = [
     ":interface_proto",
+    ":pinweaver_csme_lib",
     ":pinweaver_proto",
   ]
 }
@@ -124,10 +164,7 @@ executable("pinweaver_client") {
 }
 
 executable("pinweaver_provision") {
-  sources = [
-    "csme/pinweaver_provision_impl.cc",
-    "csme/pinweaver_provision_main.cc",
-  ]
+  sources = [ "csme/pinweaver_provision_main.cc" ]
   configs += [ ":target_defaults" ]
   deps = [ ":trunks" ]
 }
@@ -162,9 +199,9 @@ pkg_config("trunksd_lib_all_dependent_pkg_deps") {
 static_library("trunksd_lib") {
   sources = [
     "power_manager.cc",
+    "resilience/write_error_tracker_impl.cc",
     "resource_manager.cc",
     "tpm_handle.cc",
-    "tpm_simulator_handle.cc",
     "trunks_dbus_service.cc",
     "trunks_metrics.cc",
   ]
@@ -177,6 +214,8 @@ static_library("trunksd_lib") {
     ":trunksd_lib_all_dependent_pkg_deps",
     ":trunksd_lib_config",
   ]
+  configs -= [ "//common-mk:use_thin_archive" ]
+  configs += [ "//common-mk:nouse_thin_archive" ]
   deps = [ ":trunks" ]
 }
 
@@ -186,20 +225,18 @@ pkg_config("trunksd_pkg_deps") {
 
 executable("trunksd") {
   sources = [ "trunksd.cc" ]
+  libs = [ "hwsec-profiling" ]
   configs += [
     ":target_defaults",
     ":trunksd_pkg_deps",
   ]
+  if (use.ftdi_tpm) {
+    defines = [ "SPI_OVER_FTDI=1" ]
+  }
   deps = [
     ":trunks",
     ":trunksd_lib",
   ]
-  if (use.ftdi_tpm) {
-    defines = [ "SPI_OVER_FTDI=1" ]
-  }
-  if (use.tpm2_simulator) {
-    libs = [ "tpm2" ]
-  }
 }
 
 executable("tpm_tunneld") {
@@ -225,8 +262,10 @@ static_library("trunks_test") {
     "mock_tpm_cache.cc",
     "mock_tpm_state.cc",
     "mock_tpm_utility.cc",
+    "tpm_simulator_handle.cc",
     "trunks_factory_for_test.cc",
   ]
+  libs = [ "tpm2" ]
   configs -= [ "//common-mk:use_thin_archive" ]
   configs += [
     "//common-mk:nouse_thin_archive",
@@ -248,10 +287,13 @@ if (use.test) {
       "csme/mei_client_char_device_test.cc",
       "hmac_authorization_delegate_test.cc",
       "hmac_session_test.cc",
+      "multiple_authorization_delegate_test.cc",
       "openssl_utility_test.cc",
       "password_authorization_delegate_test.cc",
       "policy_session_test.cc",
       "power_manager_test.cc",
+      "real_command_parser_test.cc",
+      "real_response_serializer_test.cc",
       "resource_manager_test.cc",
       "scoped_global_session_test.cc",
       "scoped_key_handle_test.cc",
@@ -259,6 +301,8 @@ if (use.test) {
       "tpm_cache_test.cc",
       "tpm_generated_test.cc",
       "tpm_state_test.cc",
+      "tpm_structure_parser_test.cc",
+      "tpm_u2f_test.cc",
       "tpm_utility_test.cc",
       "trunks_dbus_proxy_test.cc",
       "trunks_factory_test.cc",
@@ -341,6 +385,30 @@ if (use.fuzzer) {
     ]
     deps = [ ":trunks" ]
   }
+}
+
+install_config("install_trunksd_conf") {
+  sources = [ "trunksd.conf" ]
+  install_path = "upstart"
+}
+
+# We invoke systemd-tmpfiles explicitly from the upstart config
+# since it needs to run when /sys/fs/cgroup is available.
+install_config("install_freezer_tmpfilesd") {
+  sources = [ "tmpfiles.d/trunks_freezer.conf" ]
+  install_path = "tmpfiled_ondemand"
+}
+
+# TODO(b/265866896): provider better abstraction by adding trunks-pre-init event
+# instead.
+install_config("install_pre_init_config") {
+  sources = [ "placeholders/cr50-result.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_tmpfiles_config") {
+  sources = [ "tmpfiles.d/trunks.conf" ]
+  install_path = "tmpfilesd"
 }
 
 generate_pkg_config("libtrunks") {

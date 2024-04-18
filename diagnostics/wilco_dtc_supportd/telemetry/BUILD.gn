@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,7 +10,11 @@ pkg_config("libtelemetry_pkg_deps") {
 
 source_set("libtelemetry") {
   configs += [ ":libtelemetry_pkg_deps" ]
-  deps = [ "//diagnostics/common:libcommon" ]
+  deps = [
+    "//diagnostics/mojom/public:libcros_healthd_mojo_bindings",
+    "//diagnostics/mojom/public:wilco_dtc_supportd_mojo_bindings",
+    "//diagnostics/wilco_dtc_supportd/utils:libutils",
+  ]
   sources = [
     "bluetooth_event_service.cc",
     "bluetooth_event_service_impl.cc",
@@ -25,13 +29,13 @@ source_set("libtelemetry") {
 if (use.test) {
   source_set("telemetry_test") {
     configs += [ ":libtelemetry_pkg_deps" ]
-    deps = [ "//diagnostics/common:libcommon_test_utils" ]
+    deps = [
+      ":libtelemetry",
+      "//diagnostics/wilco_dtc_supportd/utils:libutils_test_utils",
+    ]
     sources = [
       "bluetooth_event_service_impl_test.cc",
-
-      # TODO: crbug.com/1100960
-      # Disabling the test as it is causing flaky compiler crash in CQ.
-      #"ec_service_test.cc",
+      "ec_service_test.cc",
       "ec_service_test_utils.cc",
       "ec_service_test_utils_test.cc",
       "fake_bluetooth_event_service.cc",

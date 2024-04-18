@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,6 +8,7 @@ import("//common-mk/pkg_config.gni")
 pkg_config("libcros_healthd_system_pkg_deps") {
   pkg_deps = [
     "dbus-1",
+    "iioservice_ipc",
     "libattestation-client",
     "libbrillo",
     "libchrome",
@@ -15,31 +16,51 @@ pkg_config("libcros_healthd_system_pkg_deps") {
     "libdebugd-client",
     "libmojo",
     "libpci",
+    "libpower_manager-client",
+    "libspaced",
     "libtpm_manager-client",
     "libudev",
+    "mojo_service_manager",
     "protobuf",
     "system_api",
   ]
 }
 
+config("pcilib_config") {
+  cflags = [ "-Wno-format-nonliteral" ]
+}
+
+source_set("libcros_healthd_system_pci_util") {
+  configs += [
+    ":libcros_healthd_system_pkg_deps",
+    ":pcilib_config",
+  ]
+  sources = [ "pci_util_impl.cc" ]
+}
+
 source_set("libcros_healthd_system") {
   configs += [ ":libcros_healthd_system_pkg_deps" ]
   deps = [
-    "//diagnostics:dbus-proxies",
-    "//diagnostics/common:libcommon",
+    ":libcros_healthd_system_pci_util",
+    "//diagnostics/base",
     "//diagnostics/cros_healthd/executor:libcros_healthd_executor",
     "//diagnostics/cros_healthd/network:libnetwork_health_adapter",
     "//diagnostics/cros_healthd/network_diagnostics:libnetwork_diagnostics_adapter",
+    "//diagnostics/dbus_bindings",
+    "//diagnostics/mojom/external:libcros_healthd_internal",
   ]
   sources = [
+    "bluez_controller.cc",
+    "bluez_event_hub.cc",
     "context.cc",
-    "pci_util_impl.cc",
+    "floss_callback_services.cc",
+    "floss_controller.cc",
+    "floss_event_hub.cc",
+    "ground_truth.cc",
+    "mojo_service_impl.cc",
+    "powerd_adapter_impl.cc",
     "system_config.cc",
-    "system_config_constants.cc",
-    "system_utilities_constants.cc",
     "system_utilities_impl.cc",
-    "udev_hwdb_impl.cc",
-    "udev_impl.cc",
   ]
 }
 
@@ -55,10 +76,21 @@ if (use.test || use.fuzzer) {
       "libcros_config",
       "libdebugd-client",
       "libdebugd-client-test",
+      "libpower_manager-client",
+      "libpower_manager-client-test",
+      "libspaced",
+      "libspaced-test",
       "libtpm_manager-client",
       "libtpm_manager-client-test",
       "protobuf",
       "system_api",
+    ]
+  }
+
+  pkg_config("libcros_healthd_system_test_utils_public_pkg_deps") {
+    pkg_deps = [
+      "iioservice_ipc",
+      "mojo_service_manager",
     ]
   }
 
@@ -67,43 +99,55 @@ if (use.test || use.fuzzer) {
       ":libcros_healthd_system_test_utils_pkg_deps",
       "//common-mk:test",
     ]
+    public_configs = [ ":libcros_healthd_system_test_utils_public_pkg_deps" ]
     deps = [
       ":libcros_healthd_system",
-      "//diagnostics/common:libcommon_test_utils",
-      "//diagnostics/cros_healthd/executor:libcros_healthd_executor_test_utils",
+      "//diagnostics/cros_healthd/fake:libfake_cros_healthd",
       "//diagnostics/cros_healthd/network:libnetwork_health_adapter_test_utils",
       "//diagnostics/cros_healthd/network_diagnostics:libnetwork_diagnostics_adapter_test_utils",
+      "//diagnostics/cros_healthd/utils:libcros_healthd_utils_test_utils",
     ]
     sources = [
+      "fake_bluez_event_hub.cc",
+      "fake_floss_event_hub.cc",
+      "fake_mojo_service.cc",
       "fake_pci_util.cc",
+      "fake_powerd_adapter.cc",
       "fake_system_config.cc",
       "fake_system_utilities.cc",
-      "fake_udev.cc",
-      "fake_udev_hwdb.cc",
       "mock_context.cc",
     ]
   }
 }
 
 if (use.test) {
-  pkg_config("system_config_test_pkg_deps") {
+  pkg_config("libcros_healthd_system_test_pkg_deps") {
     pkg_deps = [
       "libchrome",
       "libchrome-test",
       "libcros_config",
+      "libdebugd-client",
+      "libdebugd-client-test",
+      "libpower_manager-client",
+      "libpower_manager-client-test",
     ]
   }
 
-  source_set("system_config_test") {
-    sources = [ "system_config_test.cc" ]
-    configs += [
-      ":system_config_test_pkg_deps",
-      "//common-mk:test",
+  source_set("libcros_healthd_system_test") {
+    sources = [
+      "bluez_event_hub_test.cc",
+      "floss_event_hub_test.cc",
+      "ground_truth_test.cc",
+      "powerd_adapter_impl_test.cc",
+      "system_config_test.cc",
     ]
+    configs += [ ":libcros_healthd_system_test_pkg_deps" ]
     deps = [
       ":libcros_healthd_system",
-      "//common-mk/testrunner:testrunner",
-      "//diagnostics/common:libcommon_test_utils",
+      ":libcros_healthd_system_test_utils",
+      "//diagnostics/base",
+      "//diagnostics/base:healthd_testrunner",
+      "//diagnostics/cros_healthd/utils:libcros_healthd_utils_test_utils",
     ]
   }
 }

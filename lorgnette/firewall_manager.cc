@@ -1,14 +1,18 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "lorgnette/firewall_manager.h"
 
+#include <unistd.h>
+
 #include <algorithm>
+#include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <brillo/errors/error.h>
 
 using std::string;
@@ -41,19 +45,16 @@ PortToken::~PortToken() {
 FirewallManager::FirewallManager(const std::string& interface)
     : interface_(interface) {}
 
-void FirewallManager::Init(const scoped_refptr<dbus::Bus>& bus) {
+void FirewallManager::Init(
+    std::unique_ptr<org::chromium::PermissionBrokerProxyInterface>
+        permission_broker_proxy) {
   CHECK(!permission_broker_proxy_) << "Already started";
 
   if (!SetupLifelinePipe()) {
     return;
   }
 
-  if (!bus) {
-    LOG(ERROR) << "Bus is null; assuming we are in tests.";
-    return;
-  }
-
-  permission_broker_proxy_.reset(new org::chromium::PermissionBrokerProxy(bus));
+  permission_broker_proxy_ = std::move(permission_broker_proxy);
 
   // This will connect the name owner changed signal in DBus object proxy,
   // The callback will be invoked as soon as service is avalilable and will
@@ -97,7 +98,7 @@ bool FirewallManager::SetupLifelinePipe() {
 }
 
 void FirewallManager::OnServiceAvailable(bool service_available) {
-  LOG(INFO) << "FirewallManager::OnServiceAvailabe " << service_available;
+  LOG(INFO) << "FirewallManager::OnServiceAvailable " << service_available;
   // Nothing to be done if proxy service is not available.
   if (!service_available) {
     return;
@@ -125,6 +126,8 @@ void FirewallManager::RequestAllPortsAccess() {
 }
 
 void FirewallManager::SendPortAccessRequest(uint16_t port) {
+  LOG(INFO) << "Received port access request for UDP port " << port;
+
   if (!permission_broker_proxy_) {
     LOG(INFO) << "Permission broker does not exist (yet); adding request for "
               << "port " << port << " to queue.";
@@ -137,7 +140,8 @@ void FirewallManager::SendPortAccessRequest(uint16_t port) {
   // process.
   brillo::ErrorPtr error;
   if (!permission_broker_proxy_->RequestUdpPortAccess(
-          port, interface_, lifeline_read_.get(), &allowed, &error)) {
+          port, interface_, base::ScopedFD(dup(lifeline_read_.get())), &allowed,
+          &error)) {
     LOG(ERROR) << "Failed to request UDP port access: " << error->GetCode()
                << " " << error->GetMessage();
     return;

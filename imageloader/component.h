@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,6 @@
 #include <base/files/file.h>
 #include <base/files/file_path.h>
 #include <base/gtest_prod_util.h>
-#include <base/macros.h>
 #include <crypto/secure_hash.h>
 
 #include "imageloader/helper_process_proxy.h"

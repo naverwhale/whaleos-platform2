@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/time/time.h>
 #include <gmock/gmock.h>
 
@@ -18,8 +18,7 @@ namespace cryptohome {
 
 class MockLowDiskSpaceHandler : public LowDiskSpaceHandler {
  public:
-  MockLowDiskSpaceHandler()
-      : LowDiskSpaceHandler(nullptr, nullptr, nullptr, nullptr) {}
+  MockLowDiskSpaceHandler() : LowDiskSpaceHandler(nullptr, nullptr, nullptr) {}
   virtual ~MockLowDiskSpaceHandler() = default;
 
   MOCK_METHOD(
@@ -37,6 +36,7 @@ class MockLowDiskSpaceHandler : public LowDiskSpaceHandler {
               (const base::RepeatingCallback<void()>&),
               (override));
   MOCK_METHOD(void, Stop, (), (override));
+  MOCK_METHOD(DiskCleanup*, disk_cleanup, (), (override, const));
 };
 
 }  // namespace cryptohome

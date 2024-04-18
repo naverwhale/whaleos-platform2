@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Chromium OS Authors. All rights reserved.
+ * Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -12,13 +12,14 @@
 #include <set>
 #include <string>
 
+#include "cros-camera/export.h"
 #include "system/camera_vendor_tags.h"
 
 namespace cros {
 
 // These are half-closed intervals as [kFooStart, kFooEnd).
-const uint32_t kReprocessEffectVendorTagStart = 0x80000000;
-const uint32_t kReprocessEffectVendorTagEnd = 0x80010000;
+const uint32_t kPortraitModeVendorTagStart = 0x80000000;
+const uint32_t kPortraitModeVendorTagEnd = 0x80010000;
 
 const uint32_t kUsbHalVendorTagStart = 0x80010000;
 const uint32_t kUsbHalVendorTagEnd = 0x80020000;
@@ -32,13 +33,19 @@ const uint32_t kArcvmVendorTagEnd = 0x80040000;
 const uint32_t kIntelIpu6VendorTagStart = 0x80040000;
 const uint32_t kintelIpu6VendorTagEnd = 0x80050000;
 
+const uint32_t kCrosZslVendorTagStart = 0x80050000;
+const uint32_t kCrosZslVendorTagEnd = 0x80060000;
+
+const uint32_t kCrosRotateAndCropVendorTagStart = 0x80060000;
+const uint32_t kCrosRotateAndCropVendorTagEnd = 0x80070000;
+
 // Please update this value when allocating a new interval, such as
 // const uint32_t kFooVendorTagStart = {value of kNextAvailableVendorTag};
 // const uint32_t kFooVendorTagEnd = ...;
 // const uint32_t kNextAvailableVendorTag = {value of kFooVendorTagEnd};
-const uint32_t kNextAvailableVendorTag = 0x80050000;
+const uint32_t kNextAvailableVendorTag = kCrosRotateAndCropVendorTagEnd;
 
-class VendorTagManager : public vendor_tag_ops_t {
+class CROS_CAMERA_EXPORT VendorTagManager : public vendor_tag_ops_t {
  public:
   VendorTagManager();
   VendorTagManager(const VendorTagManager&) = default;

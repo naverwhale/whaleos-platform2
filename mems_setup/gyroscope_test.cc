@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,15 +26,14 @@ namespace {
 
 static gid_t kIioserviceGroupId = 777;
 
-class GyroscopeTest : public SensorTestBase {
+class GyroscopeTest : public SensorTestBase, public ::testing::Test {
  public:
   GyroscopeTest() : SensorTestBase("cros-ec-gyro", 2) {
-    mock_delegate_->AddGroup(Configuration::GetGroupNameForSysfs(),
+    mock_delegate_->AddGroup(GetConfiguration()->GetGroupNameForSysfs(),
                              kIioserviceGroupId);
   }
 };
 
-#if USE_IIOSERVICE
 TEST_F(GyroscopeTest, FrequencyReset) {
   SetSingleSensor(kBaseSensorLocation);
   ConfigureVpd({{"in_anglvel_x_base_calibbias", "100"}});
@@ -46,7 +45,6 @@ TEST_F(GyroscopeTest, FrequencyReset) {
   EXPECT_TRUE(frequency_opt.has_value());
   EXPECT_EQ(frequency_opt.value(), 0.0);
 }
-#endif  // USE_IIOSERVICE
 
 TEST_F(GyroscopeTest, MissingVpd) {
   SetSingleSensor(kBaseSensorLocation);

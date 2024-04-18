@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,6 @@
 #include <base/test/simple_test_clock.h>
 #include <base/time/time.h>
 
-#include <brillo/brillo_export.h>
 #include <brillo/message_loops/fake_message_loop.h>
 #include <brillo/message_loops/message_loop.h>
 
@@ -23,7 +22,7 @@ namespace brillo {
 // FakeMessageLoop implementation.
 // This message loop implementation is useful to check interaction with the
 // message loop when running unittests.
-class BRILLO_EXPORT MockMessageLoop : public MessageLoop {
+class MockMessageLoop : public MessageLoop {
  public:
   // Create a FakeMessageLoop optionally using a SimpleTestClock to update the
   // time when Run() or RunOnce(true) are called and should block.

@@ -1,21 +1,32 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/user_collector_base.h"
 
-#include "crash-reporter/vm_support.h"
+#include <signal.h>  // SIGSYS
+
+#include <memory>
+#include <optional>
 
 #include <base/check.h>
+#include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
+#include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/process/process.h>
+#include <libminijail.h>
+#include <metrics/metrics_library.h>
 #include <re2/re2.h>
 
 #include "crash-reporter/constants.h"
 #include "crash-reporter/util.h"
+#include "crash-reporter/vm_support.h"
 
 using base::FilePath;
 using base::ReadFileToString;
@@ -23,9 +34,28 @@ using base::StringPrintf;
 
 namespace {
 
+const char kRustPanicSigFileTarget[] = "/memfd:RUST_PANIC_SIG (deleted)";
 const char kStatePrefix[] = "State:\t";
 const char kUptimeField[] = "ptime";
 const char kUserCrashSignal[] = "org.chromium.CrashReporter.UserCrash";
+
+// Linux syscall numbers are `long`, so we need to handle the edge cases when
+// parsing since long is 32-bit for ARM while long is 64-bit for x86_64 and
+// aarch64.
+// NOLINTNEXTLINE(runtime/int)
+bool StringToSyscallNumber(base::StringPiece input, long* output) {
+  static_assert(sizeof(long) <= sizeof(int64_t));  // NOLINT(runtime/int)
+  int64_t parsed;
+  if (!base::StringToInt64(input, &parsed)) {
+    return false;
+  }
+  // NOLINTNEXTLINE(runtime/int)
+  if (parsed < 0 || (sizeof(int64_t) > sizeof(long) && parsed > LONG_MAX)) {
+    return false;
+  }
+  *output = static_cast<long>(parsed);  // NOLINT(runtime/int)
+  return true;
+}
 
 }  // namespace
 
@@ -34,10 +64,14 @@ const char* UserCollectorBase::kGroupId = "Gid:\t";
 
 UserCollectorBase::UserCollectorBase(
     const std::string& collector_name,
-    CrashDirectorySelectionMethod crash_directory_selection_method)
+    CrashDirectorySelectionMethod crash_directory_selection_method,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
     : CrashCollector(collector_name,
                      crash_directory_selection_method,
                      kNormalCrashSendMode,
+                     metrics_lib,
                      collector_name) {}
 
 void UserCollectorBase::Initialize(bool directory_failure, bool early) {
@@ -46,7 +80,7 @@ void UserCollectorBase::Initialize(bool directory_failure, bool early) {
   directory_failure_ = directory_failure;
 }
 
-void UserCollectorBase::AccounceUserCrash() {
+void UserCollectorBase::AnnounceUserCrash() {
   brillo::ProcessImpl dbus;
   dbus.AddArg("/usr/bin/dbus-send");
   dbus.AddArg("--type=signal");
@@ -80,14 +114,19 @@ bool UserCollectorBase::HandleCrash(
   GetUptime(&crash_time);
 
   std::string exec;
+  base::FilePath exec_directory;
   if (force_exec) {
     exec.assign(force_exec);
-  } else if (!GetExecutableBaseNameFromPid(attrs.pid, &exec)) {
+    // Leave exec_directory blank.
+  } else if (!GetExecutableBaseNameAndDirectoryFromPid(attrs.pid, &exec,
+                                                       &exec_directory)) {
     // If we cannot find the exec name, use the kernel supplied name.
     // We don't always use the kernel's since it truncates the name to
     // 16 characters.
     exec = StringPrintf("supplied_%s", attrs.exec_name.c_str());
   }
+
+  BeginHandlingCrash(attrs.pid, exec, exec_directory);
 
   std::string reason;
   bool dump = ShouldDump(attrs.pid, attrs.uid, exec, &reason);
@@ -100,13 +139,14 @@ bool UserCollectorBase::HandleCrash(
   LogCrash(message, reason);
 
   if (dump) {
-    AccounceUserCrash();
+    AnnounceUserCrash();
 
     AddExtraMetadata(exec, attrs.pid);
 
     bool out_of_capacity = false;
-    ErrorType error_type = ConvertAndEnqueueCrash(
-        attrs.pid, exec, attrs.uid, attrs.gid, crash_time, &out_of_capacity);
+    ErrorType error_type =
+        ConvertAndEnqueueCrash(attrs.pid, exec, attrs.uid, attrs.gid,
+                               attrs.signal, crash_time, &out_of_capacity);
     if (error_type != kErrorNone) {
       if (!out_of_capacity) {
         EnqueueCollectionErrorLog(error_type, exec);
@@ -118,18 +158,21 @@ bool UserCollectorBase::HandleCrash(
   return true;
 }
 
-base::Optional<UserCollectorBase::CrashAttributes>
+std::optional<UserCollectorBase::CrashAttributes>
 UserCollectorBase::ParseCrashAttributes(const std::string& crash_attributes) {
   RE2 re("(\\d+):(\\d+):(\\d+):(\\d+):(.*)");
   UserCollectorBase::CrashAttributes attrs;
   if (!RE2::FullMatch(crash_attributes, re, &attrs.pid, &attrs.signal,
                       &attrs.uid, &attrs.gid, &attrs.exec_name)) {
-    return base::nullopt;
+    return std::nullopt;
   }
   return attrs;
 }
 
-bool UserCollectorBase::ShouldDump(base::Optional<pid_t> pid,
+void UserCollectorBase::BeginHandlingCrash(
+    pid_t pid, const std::string& exec, const base::FilePath& exec_directory) {}
+
+bool UserCollectorBase::ShouldDump(std::optional<pid_t> pid,
                                    std::string* reason) const {
   VmSupport* vm_support = VmSupport::Get();
   if (vm_support) {
@@ -148,7 +191,7 @@ bool UserCollectorBase::ShouldDump(base::Optional<pid_t> pid,
 }
 
 bool UserCollectorBase::ShouldDump(std::string* reason) const {
-  return ShouldDump(base::nullopt, reason);
+  return ShouldDump(std::nullopt, reason);
 }
 
 bool UserCollectorBase::GetFirstLineWithPrefix(
@@ -200,6 +243,38 @@ bool UserCollectorBase::GetStateFromStatus(
   return true;
 }
 
+bool UserCollectorBase::GetRustSignature(pid_t pid, std::string* panic_sig) {
+  const FilePath proc_path = GetProcessPath(pid);
+
+  // Check for a memfd labeled RUST_PANIC_SIG. If it exists, it should be
+  // used as the crash signature.
+  FilePath process_fd_path = proc_path.Append("fd");
+  base::FileEnumerator files(
+      process_fd_path, /*recursive=*/false,
+      base::FileEnumerator::FILES | base::FileEnumerator::SHOW_SYM_LINKS);
+  for (FilePath name = files.Next(); !name.empty(); name = files.Next()) {
+    FilePath target;
+    if (!ReadSymbolicLink(name, &target)) {
+      continue;
+    }
+
+    if (target.value() != kRustPanicSigFileTarget) {
+      continue;
+    }
+
+    std::string contents;
+    if (!base::ReadFileToString(name, &contents)) {
+      LOG(ERROR) << "Unable to recover Rust backtrace: " << name;
+      break;
+    }
+
+    base::TrimWhitespaceASCII(contents.substr(0, contents.find('\n')),
+                              base::TRIM_ALL, panic_sig);
+    return true;
+  }
+  return false;
+}
+
 bool UserCollectorBase::ClobberContainerDirectory(
     const base::FilePath& container_dir) {
   // Delete a pre-existing directory from crash reporter that may have
@@ -227,8 +302,20 @@ UserCollectorBase::ErrorType UserCollectorBase::ConvertAndEnqueueCrash(
     const std::string& exec,
     uid_t supplied_ruid,
     gid_t supplied_rgid,
+    int signal,
     const base::TimeDelta& crash_time,
     bool* out_of_capacity) {
+#if USE_DIRENCRYPTION
+  // Join the session keyring, if one exists.
+  // Must be *before* we do anything wrt getting the directory, since if that
+  // fails we'll need to write a report to the directory.
+  //
+  // NOTE: In most cases, init will have already joined the keyring for us, so
+  // we won't need to do this. This is only necessary if we're invoked via
+  // usermode-helper (e.g. via core_pattern).
+  util::JoinSessionKeyring();
+#endif  // USE_DIRENCRYPTION
+
   FilePath crash_path;
   if (!GetCreatedCrashDirectory(pid, supplied_ruid, &crash_path,
                                 out_of_capacity)) {
@@ -259,10 +346,10 @@ UserCollectorBase::ErrorType UserCollectorBase::ConvertAndEnqueueCrash(
     AddCrashMetaUploadFile("process_tree", proc_log_path.BaseName().value());
   }
 
-#if USE_DIRENCRYPTION
-  // Join the session keyring, if one exists.
-  util::JoinSessionKeyring();
-#endif  // USE_DIRENCRYPTION
+  std::string rust_panic_sig;
+  if (GetRustSignature(pid, &rust_panic_sig)) {
+    AddCrashMetaData("sig", rust_panic_sig);
+  }
 
   ErrorType error_type =
       ConvertCoreToMinidump(pid, container_dir, core_path, minidump_path);
@@ -281,6 +368,18 @@ UserCollectorBase::ErrorType UserCollectorBase::ConvertAndEnqueueCrash(
     // inside the cryptohome and this will be unnecessary.
     if (!VmSupport::Get()) {
       LOG(INFO) << "Stored minidump to " << target.value();
+    }
+  }
+
+  // Add SIGSYS-specific information to help debug seccomp failures.
+  if (signal == SIGSYS) {
+    base::FilePath syscall_file = container_dir.Append("syscall");
+    std::string contents;
+    if (!base::ReadFileToString(syscall_file, &contents) || contents.empty()) {
+      LOG(WARNING) << "Failed to read syscall file, continuing anyway.";
+    } else {
+      contents.pop_back();  // remove trailing newline
+      HandleSyscall(exec, contents);
     }
   }
 
@@ -307,6 +406,38 @@ UserCollectorBase::ErrorType UserCollectorBase::ConvertAndEnqueueCrash(
 
   base::DeletePathRecursively(container_dir);
   return kErrorNone;
+}
+
+void UserCollectorBase::HandleSyscall(const std::string& exec,
+                                      const std::string& contents) {
+  std::vector<std::string> split = base::SplitString(
+      contents, " ", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
+  AddCrashMetaUploadData("seccomp_blocked_syscall_nr", split[0]);
+  AddCrashMetaUploadData("seccomp_proc_pid_syscall", contents);
+
+  long syscall_num;  // NOLINT(runtime/int) The kernel uses long for syscalls
+  if (!StringToSyscallNumber(split[0], &syscall_num)) {
+    LOG(WARNING) << "Failed to parse syscall number: " << split[0];
+    return;
+  }
+
+  const char* name = minijail_syscall_name(nullptr, syscall_num);
+  if (name == nullptr) {
+    LOG(WARNING) << "Failed to lookup syscall name for: " << syscall_num;
+    return;
+  }
+
+  AddCrashMetaUploadData("seccomp_blocked_syscall_name", name);
+
+  // The main information needed to act on this crash report is the syscall
+  // name and seccomp policy file, so use the syscall name in the crash
+  // signature and surface it to the system log. The policy file path is
+  // sometimes available as an environment variable which gets included with
+  // the process information, but isn't available here, so it isn't included
+  // in the signature.
+  AddCrashMetaData("sig", exec + std::string("-seccomp-violation-") + name);
+  LOG(ERROR) << "'" << exec << "' called syscall '" << name
+             << "' not included in its seccomp policy";
 }
 
 bool UserCollectorBase::GetCreatedCrashDirectory(pid_t pid,

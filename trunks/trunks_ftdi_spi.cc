@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -75,7 +75,7 @@ void TrunksFtdiSpi::StartTransaction(bool read_write,
   SpiFrameHeader header;
 
   usleep(10000);  // give it 10 ms. TODO(vbendeb): remove this once
-                  // cr50 SPS TPM driver performance is fixed.
+                  // GSC SPS TPM driver performance is fixed.
 
   // The first byte of the frame header encodes the transaction type (read or
   // write) and size (set to lenth - 1).
@@ -199,7 +199,7 @@ bool TrunksFtdiSpi::Init() {
 }
 
 void TrunksFtdiSpi::SendCommand(const std::string& command,
-                                const ResponseCallback& callback) {
+                                ResponseCallback callback) {
   printf("%s invoked\n", __func__);
 }
 

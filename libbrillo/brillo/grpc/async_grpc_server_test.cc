@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,11 @@
 #include <base/logging.h>
 #include <base/run_loop.h>
 #include <base/task/single_thread_task_executor.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <gtest/gtest.h>
 
 #include "brillo/grpc/async_grpc_server.h"
-#include "test_rpcs.grpc.pb.h"  // NOLINT(build/include)
+#include "test_rpcs.grpc.pb.h"  // NOLINT(build/include_directory)
 
 namespace brillo {
 
@@ -50,7 +50,7 @@ class AsyncGrpcServerTest : public ::testing::Test {
     DCHECK(!server_);
     server_ = std::make_unique<
         AsyncGrpcServer<test_rpcs::ExampleService::AsyncService>>(
-        base::ThreadTaskRunnerHandle::Get(),
+        base::SingleThreadTaskRunner::GetCurrentDefault(),
         std::vector<std::string>{service_uri});
   }
 

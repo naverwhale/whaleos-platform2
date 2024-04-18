@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@
 
 #include <linux/vm_sockets.h>
 
+#include <optional>
 #include <tuple>
 
 #include <base/command_line.h>
@@ -18,7 +19,7 @@
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/optional.h>
+#include <brillo/files/file_util.h>
 #include <brillo/syslog_logging.h>
 
 #include "arc/vm/boot_notification_server/util.h"
@@ -52,7 +53,7 @@ int main(int argc, const char** argv) {
     return -1;
 
   // Delete host socket path if it exists.
-  if (!base::DeleteFile(base::FilePath(kHostSocketPath)))
+  if (!brillo::DeleteFile(base::FilePath(kHostSocketPath)))
     LOG(FATAL) << "Unable to delete pre-existing socket at " << kHostSocketPath;
 
   // Listen for connection from host/Chrome. Chrome expects that by the time it
@@ -83,13 +84,13 @@ int main(int argc, const char** argv) {
   if (!host_client.is_valid())
     LOG(FATAL) << "Unable to accept connection from host";
 
-  base::Optional<std::string> props = ReadFD(host_client.get());
+  std::optional<std::string> props = ReadFD(host_client.get());
   if (!props)
     LOG(FATAL) << "Did not receive props from host";
 
   LOG(INFO) << "Received " << *props << " from host.";
 
-  base::Optional<std::pair<unsigned int, std::string>> extracted =
+  std::optional<std::pair<unsigned int, std::string>> extracted =
       ExtractCidValue(*props);
   if (!extracted)
     LOG(FATAL) << "The received props did not contain 'CID=<CID>' line";
@@ -112,7 +113,7 @@ int main(int argc, const char** argv) {
     }
 
     // Ignore connection if the CID of connection peer is not what we expect.
-    base::Optional<unsigned int> peer_cid = GetPeerCid(vm_client.get());
+    std::optional<unsigned int> peer_cid = GetPeerCid(vm_client.get());
     if (!peer_cid) {
       LOG(ERROR) << "Unable to get CID of VM client connection.";
       continue;

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,8 @@
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringize_macros.h>
 #include <base/time/time.h>
@@ -30,9 +32,6 @@ using brillo::ProcessImpl;
 
 namespace {
 
-// "native_crash" is a tag defined in Android.
-const char kCrashType[] = "native_crash";
-
 const FilePath kContainersDir("/run/containers");
 const char kArcDirPattern[] = "android*";
 const FilePath kContainerPid("container.pid");
@@ -44,10 +43,6 @@ const char kCoreCollector32Path[] = "/usr/bin/core_collector32";
 const char kCoreCollector64Path[] = "/usr/bin/core_collector64";
 
 // Keys for build properties.
-const char kBoardProperty[] = "ro.product.board";
-const char kCpuAbiProperty[] = "ro.product.cpu.abi";
-const char kDeviceProperty[] = "ro.product.device";
-const char kFingerprintProperty[] = "ro.build.fingerprint";
 const char kAbiMigrationStateProperty[] = "arc.abi.migrationstatus";
 
 inline bool IsAppProcess(const std::string& name) {
@@ -55,7 +50,6 @@ inline bool IsAppProcess(const std::string& name) {
 }
 
 bool GetArcRoot(FilePath* root);
-bool GetArcProperties(arc_util::BuildProperty* build_property);
 // Get ARC primary ABI 32 bits to 64 bits migration status from ARC container.
 // This is for container only. ARCVM should have separate implementation.
 // See b/170238737 for detail.
@@ -63,12 +57,30 @@ bool GetAbiMigrationState(std::string* state);
 
 }  // namespace
 
-ArcppCxxCollector::ArcppCxxCollector()
-    : ArcppCxxCollector(ContextPtr(new ArcContext(this))) {}
+ArcppCxxCollector::ArcppCxxCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : ArcppCxxCollector(ContextPtr(new ArcContext(this)), metrics_lib) {}
 
-ArcppCxxCollector::ArcppCxxCollector(ContextPtr context)
-    : UserCollectorBase("ARCPP_cxx", kAlwaysUseUserCrashDirectory),
+ArcppCxxCollector::ArcppCxxCollector(
+    ContextPtr context,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : UserCollectorBase("ARCPP_cxx", kAlwaysUseUserCrashDirectory, metrics_lib),
       context_(std::move(context)) {}
+
+// The parameter |exec_name| is unused as we are computing the crash severity
+// based on the crash type, which is always going to be `kNativeCrash` in this
+// collector.
+CrashCollector::ComputedCrashSeverity ArcppCxxCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  return ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kError,
+      .product_group = Product::kArc,
+  };
+}
 
 bool ArcppCxxCollector::IsArcProcess(pid_t pid) const {
   pid_t arc_pid;
@@ -142,9 +154,10 @@ bool ArcppCxxCollector::ArcContext::GetPidNamespace(pid_t pid,
   return true;
 }
 
-bool ArcppCxxCollector::ArcContext::GetExeBaseName(pid_t pid,
-                                                   std::string* exe) const {
-  return collector_->CrashCollector::GetExecutableBaseNameFromPid(pid, exe);
+bool ArcppCxxCollector::ArcContext::GetExecBaseNameAndDirectory(
+    pid_t pid, std::string* exec, base::FilePath* exec_directory) const {
+  return collector_->CrashCollector::GetExecutableBaseNameAndDirectoryFromPid(
+      pid, exec, exec_directory);
 }
 
 bool ArcppCxxCollector::ArcContext::GetCommand(pid_t pid,
@@ -170,9 +183,9 @@ std::string ArcppCxxCollector::GetProductVersion() const {
   return arc_util::GetProductVersion();
 }
 
-bool ArcppCxxCollector::GetExecutableBaseNameFromPid(pid_t pid,
-                                                     std::string* base_name) {
-  if (!context_->GetExeBaseName(pid, base_name))
+bool ArcppCxxCollector::GetExecutableBaseNameAndDirectoryFromPid(
+    pid_t pid, std::string* base_name, base::FilePath* exec_directory) {
+  if (!context_->GetExecBaseNameAndDirectory(pid, base_name, exec_directory))
     return false;
 
   // The runtime for non-native ARC apps overwrites its command line with the
@@ -245,7 +258,9 @@ UserCollectorBase::ErrorType ArcppCxxCollector::ConvertCoreToMinidump(
 
   if (exit_code == EX_OK) {
     std::string process;
-    ArcppCxxCollector::GetExecutableBaseNameFromPid(pid, &process);
+    base::FilePath exec_directory;
+    ArcppCxxCollector::GetExecutableBaseNameAndDirectoryFromPid(
+        pid, &process, &exec_directory);
     AddArcMetaData(process);
     return kErrorNone;
   }
@@ -266,7 +281,7 @@ UserCollectorBase::ErrorType ArcppCxxCollector::ConvertCoreToMinidump(
 
 void ArcppCxxCollector::AddArcMetaData(const std::string& process) {
   for (const auto& metadata :
-       arc_util::ListBasicARCRelatedMetadata(process, kCrashType)) {
+       arc_util::ListBasicARCRelatedMetadata(process, arc_util::kNativeCrash)) {
     AddCrashMetaUploadData(metadata.first, metadata.second);
   }
   AddCrashMetaUploadData(arc_util::kChromeOsVersionField, GetOsVersion());
@@ -278,11 +293,11 @@ void ArcppCxxCollector::AddArcMetaData(const std::string& process) {
                            arc_util::FormatDuration(uptime));
   }
 
-  if (arc_util::IsSilentReport(kCrashType))
+  if (arc_util::IsSilentReport(arc_util::kNativeCrash))
     AddCrashMetaData(arc_util::kSilentKey, "true");
 
   arc_util::BuildProperty build_property;
-  if (GetArcProperties(&build_property)) {
+  if (GetArcProperties(FilePath(kArcBuildProp), &build_property)) {
     for (const auto& metadata :
          arc_util::ListMetadataForBuildProperty(build_property)) {
       AddCrashMetaUploadData(metadata.first, metadata.second);
@@ -347,6 +362,37 @@ UserCollectorBase::ErrorType ArcppCxxCollector::Is64BitProcess(
   return kErrorNone;
 }
 
+bool GetArcProperties(const base::FilePath& build_prop_path,
+                      arc_util::BuildProperty* build_property) {
+  FilePath root;
+  brillo::KeyValueStore store;
+  // The property name used in kArcBuildProp for the device name differs based
+  // on the Android version. This only applies to the host-generated file. In
+  // final set of system properties visible to the guest, both properties
+  // appear.
+
+  if (!store.Load(build_prop_path)) {
+    LOG(ERROR) << "Failed to load build prop file: " << kArcBuildProp;
+    return false;
+  }
+
+  // See
+  // http://cs/chromeos_internal/src/private-overlays/project-cheets-private/scripts/board_specific_setup.py?l=960-966
+  if (!store.GetString(kDevicePropertyP, &(build_property->device)) &&
+      !store.GetString(kDevicePropertyR, &(build_property->device))) {
+    LOG(ERROR) << "Failed to get device property";
+    return false;
+  }
+
+  if (store.GetString(kFingerprintProperty, &(build_property->fingerprint)) &&
+      store.GetString(kBoardProperty, &(build_property->board)) &&
+      store.GetString(kCpuAbiProperty, &(build_property->cpu_abi)))
+    return true;
+
+  LOG(ERROR) << "Failed to get ARC properties";
+  return false;
+}
+
 namespace {
 
 bool GetArcRoot(FilePath* root) {
@@ -365,20 +411,6 @@ bool GetArcRoot(FilePath* root) {
   return false;
 }
 
-bool GetArcProperties(arc_util::BuildProperty* build_property) {
-  FilePath root;
-  brillo::KeyValueStore store;
-  if (store.Load(FilePath(kArcBuildProp)) &&
-      store.GetString(kFingerprintProperty, &(build_property->fingerprint)) &&
-      store.GetString(kDeviceProperty, &(build_property->device)) &&
-      store.GetString(kBoardProperty, &(build_property->board)) &&
-      store.GetString(kCpuAbiProperty, &(build_property->cpu_abi)))
-    return true;
-
-  LOG(ERROR) << "Failed to get ARC properties";
-  return false;
-}
-
 bool GetAbiMigrationState(std::string* state) {
   brillo::ProcessImpl androidsh;
   androidsh.AddArg("/usr/sbin/android-sh");
@@ -390,7 +422,7 @@ bool GetAbiMigrationState(std::string* state) {
     LOG(ERROR) << "Fail to create tmp file to receive result from getprop cmd.";
     return false;
   }
-  androidsh.RedirectOutput(temp_file.value());
+  androidsh.RedirectOutput(temp_file);
   int result = androidsh.Run();
   if (result == 0) {
     if (!base::ReadFileToString(temp_file, state)) {

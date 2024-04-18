@@ -1,34 +1,31 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <power_manager/proto_bindings/power_supply_properties.pb.h>
 #include <power_manager/proto_bindings/suspend.pb.h>
 
-#include "diagnostics/common/system/fake_powerd_adapter.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/powerd_event_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/powerd_event_service_impl.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/fake_powerd_adapter.h"
 
 using ::testing::StrictMock;
 
 using PowerEventType =
-    diagnostics::PowerdEventService::Observer::PowerEventType;
+    diagnostics::wilco::PowerdEventService::Observer::PowerEventType;
 
 namespace diagnostics {
-
+namespace wilco {
 namespace {
 
 class MockPowerdEventServiceObserver : public PowerdEventService::Observer {
  public:
   MOCK_METHOD(void, OnPowerdEvent, (PowerEventType), (override));
 };
-
-}  // namespace
 
 class PowerdEventServiceImplTest : public ::testing::Test {
  public:
@@ -102,4 +99,6 @@ TEST_F(PowerdEventServiceImplTest, OnSuspendDoneSignal) {
   fake_powerd_adapter_.EmitSuspendDoneSignal(kSuspendDone);
 }
 
+}  // namespace
+}  // namespace wilco
 }  // namespace diagnostics

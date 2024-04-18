@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -43,6 +43,8 @@ main() {
   get_cbi 5
   get_cbi 6
   get_cbi 7
+  get_cbi 8
+  get_cbi 9
 }
 
 main "$@"

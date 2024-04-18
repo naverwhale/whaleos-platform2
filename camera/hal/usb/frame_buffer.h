@@ -1,4 +1,4 @@
-/* Copyright 2017 The Chromium OS Authors. All rights reserved.
+/* Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -103,7 +103,7 @@ class SharedFrameBuffer : public FrameBuffer {
   void SetStride();
   // base::UnsafeSharedMemoryRegion, instead of the Writable alternative, is
   // used to allow getting (and duplicating in
-  // JpecDecodeAcceleratorImpl::IPCBridge::Decode) the fd.
+  // JpegDecodeAcceleratorImpl::IPCBridge::Decode) the fd.
   base::UnsafeSharedMemoryRegion shm_region_;
   base::WritableSharedMemoryMapping shm_mapping_;
 };

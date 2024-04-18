@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,8 @@
 
 #include <string>
 
-#include <base/callback_forward.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <base/strings/string_piece.h>
 
 namespace chromeos_metrics {

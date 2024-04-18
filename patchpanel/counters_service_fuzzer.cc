@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 
 #include "patchpanel/counters_service.h"
 #include "patchpanel/datapath.h"
+#include "patchpanel/iptables.h"
 
 namespace patchpanel {
 namespace {
@@ -30,7 +31,7 @@ class FakeDatapath : public Datapath {
   FakeDatapath& operator=(const FakeDatapath&) = delete;
   ~FakeDatapath() = default;
 
-  std::string DumpIptables(IpFamily family, const std::string& table) override {
+  std::string DumpIptables(IpFamily family, Iptables::Table table) override {
     return data_;
   }
 

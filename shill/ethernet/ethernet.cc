@@ -1,60 +1,55 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ethernet/ethernet.h"
 
 #include <linux/ethtool.h>
-#include <netinet/ether.h>
-#include <netinet/in.h>
-#include <linux/if.h>  // NOLINT - Needs definitions from netinet/ether.h
-#include <linux/netdevice.h>
 #include <linux/sockios.h>
-#include <set>
-#include <stdio.h>
 #include <string.h>
-#include <time.h>
 
-#include <base/bind.h>
+#include <memory>
+#include <set>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include <base/check.h>
+#include <base/containers/fixed_flat_map.h>
+#include <base/containers/fixed_flat_set.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/notreached.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <chromeos/dbus/shill/dbus-constants.h>
+#include <net-base/mac_address.h>
 
 #include "shill/adaptor_interfaces.h"
 #include "shill/control_interface.h"
 #include "shill/device.h"
 #include "shill/device_id.h"
 #include "shill/device_info.h"
+#include "shill/eap_credentials.h"
+#include "shill/ethernet/eap_listener.h"
+#include "shill/ethernet/ethernet_eap_provider.h"
 #include "shill/ethernet/ethernet_provider.h"
 #include "shill/ethernet/ethernet_service.h"
 #include "shill/event_dispatcher.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/net/rtnl_handler.h"
 #include "shill/profile.h"
-#include "shill/property_accessor.h"
 #include "shill/refptr_types.h"
-#include "shill/store_interface.h"
-
-#if !defined(DISABLE_PPPOE)
-#include "shill/pppoe/pppoe_service.h"
-#endif  // DISABLE_PPPOE
-
-#if !defined(DISABLE_WIRED_8021X)
-#include "shill/eap_credentials.h"
-#include "shill/eap_listener.h"
-#include "shill/ethernet/ethernet_eap_provider.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/store_interface.h"
 #include "shill/supplicant/supplicant_interface_proxy_interface.h"
 #include "shill/supplicant/supplicant_manager.h"
 #include "shill/supplicant/supplicant_process_proxy_interface.h"
 #include "shill/supplicant/wpa_supplicant.h"
-#endif  // DISABLE_WIRED_8021X
 
 namespace shill {
 
@@ -71,6 +66,17 @@ namespace {
 constexpr char kVpdEthernetMacFilePath[] = "/sys/firmware/vpd/ro/ethernet_mac0";
 // Path to file with |dock_mac| VPD field value.
 constexpr char kVpdDockMacFilePath[] = "/sys/firmware/vpd/ro/dock_mac";
+
+// Constant used to notify metrics of failed attempt to get ethernet driver name
+// from ETHTOOL.
+constexpr char kEthernetDriverNameError[] = "error";
+
+// kDriverNameSize represents maximal length of driver name, this number is
+// taken from definition of driver field of ethtool_dvrinfo struct.
+constexpr int kDriverNameSize = 32;
+
+// Factor used to convert mbps to kbps.
+constexpr uint32_t kMbpsToKbpsFactor = 1e3;
 
 bool IsValidMac(const std::string& mac_address) {
   if (mac_address.length() != 12) {
@@ -128,75 +134,67 @@ Ethernet::Ethernet(Manager* manager,
              Technology::kEthernet),
       link_up_(false),
       bus_type_(GetDeviceBusType()),
-#if !defined(DISABLE_WIRED_8021X)
       is_eap_authenticated_(false),
       is_eap_detected_(false),
-      eap_listener_(new EapListener(interface_index)),
-#endif  // DISABLE_WIRED_8021X
-      sockets_(new Sockets()),
-      permanent_mac_address_(GetPermanentMacAddressFromKernel()),
+      eap_listener_(std::make_unique<EapListener>(interface_index, link_name)),
       weak_ptr_factory_(this) {
   PropertyStore* store = this->mutable_store();
-#if !defined(DISABLE_WIRED_8021X)
   store->RegisterConstBool(kEapAuthenticationCompletedProperty,
                            &is_eap_authenticated_);
   store->RegisterConstBool(kEapAuthenticatorDetectedProperty,
                            &is_eap_detected_);
-#endif  // DISABLE_WIRED_8021X
   store->RegisterConstBool(kLinkUpProperty, &link_up_);
   store->RegisterConstString(kDeviceBusTypeProperty, &bus_type_);
-  store->RegisterDerivedBool(
-      kPPPoEProperty,
-      BoolAccessor(new CustomAccessor<Ethernet, bool>(
-          this, &Ethernet::GetPPPoEMode, &Ethernet::ConfigurePPPoEMode,
-          &Ethernet::ClearPPPoEMode)));
   store->RegisterDerivedString(
       kUsbEthernetMacAddressSourceProperty,
-      StringAccessor(new CustomAccessor<Ethernet, std::string>(
+      StringAccessor(std::make_unique<CustomAccessor<Ethernet, std::string>>(
           this, &Ethernet::GetUsbEthernetMacAddressSource, nullptr)));
 
-#if !defined(DISABLE_WIRED_8021X)
-  eap_listener_->set_request_received_callback(
-      base::Bind(&Ethernet::OnEapDetected, weak_ptr_factory_.GetWeakPtr()));
-#endif  // DISABLE_WIRED_8021X
+  auto perm_mac = manager->device_info()->GetPermAddress(interface_index);
+  if (perm_mac) {
+    permanent_mac_address_ = perm_mac->ToHexString();
+  } else {
+    LOG(WARNING) << "Ethernet device with missing perm MAC: " << link_name;
+  }
+
+  eap_listener_->set_request_received_callback(base::BindRepeating(
+      &Ethernet::OnEapDetected, weak_ptr_factory_.GetWeakPtr()));
   SLOG(this, 2) << "Ethernet device " << link_name << " initialized.";
 
   if (bus_type_ == kDeviceBusTypeUsb) {
     // Force change MAC address to |permanent_mac_address_| if
     // |mac_address_| != |permanent_mac_address_|.
     SetUsbEthernetMacAddressSource(kUsbEthernetMacAddressSourceUsbAdapterMac,
-                                   nullptr, ResultCallback());
+                                   base::DoNothing());
   }
 }
 
-Ethernet::~Ethernet() {}
+Ethernet::~Ethernet() = default;
 
-void Ethernet::Start(Error* error,
-                     const EnabledStateChangedCallback& /*callback*/) {
+void Ethernet::Start(EnabledStateChangedCallback callback) {
   if (IsExternalPciDev(link_name())) {
     if (!DisableOffloadFeatures()) {
       LOG(ERROR) << link_name()
                  << " Interface disabled due to security reasons "
                  << "(failed to disable Offload features)";
-      error->Populate(Error::kPermissionDenied);
-      OnEnabledStateChanged(EnabledStateChangedCallback(), *error);
+      std::move(callback).Run(Error(Error::kPermissionDenied));
       return;
     }
   }
 
   rtnl_handler()->SetInterfaceFlags(interface_index(), IFF_UP, IFF_UP);
-  OnEnabledStateChanged(EnabledStateChangedCallback(), Error());
   LOG(INFO) << "Registering " << link_name() << " with manager.";
   if (!service_) {
-    service_ = CreateEthernetService();
+    service_ = GetProvider()->CreateService(weak_ptr_factory_.GetWeakPtr());
   }
   RegisterService(service_);
-  if (error)
-    error->Reset();  // indicate immediate completion
+
+  NotifyEthernetDriverName();
+
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
-void Ethernet::Stop(Error* error,
-                    const EnabledStateChangedCallback& /*callback*/) {
+void Ethernet::Stop(EnabledStateChangedCallback callback) {
   DeregisterService(service_);
   // EthernetProvider::DeregisterService will ResetEthernet() when the Service
   // being deregistered is the only Service remaining (instead of releasing the
@@ -205,12 +203,9 @@ void Ethernet::Stop(Error* error,
   if (!service_->HasEthernet()) {
     service_ = nullptr;
   }
-#if !defined(DISABLE_WIRED_8021X)
   StopSupplicant();
-#endif  // DISABLE_WIRED_8021X
-  OnEnabledStateChanged(EnabledStateChangedCallback(), Error());
-  if (error)
-    error->Reset();  // indicate immediate completion
+
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
 void Ethernet::LinkEvent(unsigned int flags, unsigned int change) {
@@ -226,9 +221,7 @@ void Ethernet::LinkEvent(unsigned int flags, unsigned int change) {
       service_->OnVisibilityChanged();
     }
     SetupWakeOnLan();
-#if !defined(DISABLE_WIRED_8021X)
     eap_listener_->Start();
-#endif  // DISABLE_WIRED_8021X
   } else if ((flags & IFF_LOWER_UP) == 0 && link_up_) {
     link_up_ = false;
     adaptor()->EmitBoolChanged(kLinkUpProperty, link_up_);
@@ -237,7 +230,6 @@ void Ethernet::LinkEvent(unsigned int flags, unsigned int change) {
       manager()->UpdateService(service_);
       service_->OnVisibilityChanged();
     }
-#if !defined(DISABLE_WIRED_8021X)
     is_eap_detected_ = false;
     adaptor()->EmitBoolChanged(kEapAuthenticatorDetectedProperty,
                                is_eap_detected_);
@@ -245,7 +237,6 @@ void Ethernet::LinkEvent(unsigned int flags, unsigned int change) {
     SetIsEapAuthenticated(false);
     StopSupplicant();
     eap_listener_->Stop();
-#endif  // DISABLE_WIRED_8021X
   }
 }
 
@@ -255,22 +246,10 @@ bool Ethernet::Load(const StoreInterface* storage) {
     SLOG(this, 2) << "Device is not available in the persistent store: " << id;
     return false;
   }
-
-  bool pppoe = false;
-  storage->GetBool(id, kPPPoEProperty, &pppoe);
-
-  Error error;
-  ConfigurePPPoEMode(pppoe, &error);
-  if (!error.IsSuccess()) {
-    LOG(WARNING) << "Error configuring PPPoE mode.  Ignoring!";
-  }
-
   return Device::Load(storage);
 }
 
 bool Ethernet::Save(StoreInterface* storage) {
-  const std::string id = GetStorageIdentifier();
-  storage->SetBool(id, kPPPoEProperty, GetPPPoEMode(nullptr));
   return Device::Save(storage);
 }
 
@@ -278,25 +257,30 @@ void Ethernet::ConnectTo(EthernetService* service) {
   CHECK(service_) << "Service should not be null";
   CHECK(service == service_.get()) << "Ethernet was asked to connect the "
                                    << "wrong service?";
-  CHECK(!GetPPPoEMode(nullptr)) << "We should never connect in PPPoE mode!";
   if (!link_up_) {
     return;
   }
   SelectService(service);
-  if (AcquireIPConfigWithLeaseName(service->GetStorageIdentifier())) {
-    SetServiceState(Service::kStateConfiguring);
-  } else {
-    LOG(ERROR) << "Unable to acquire DHCP config.";
-    SetServiceState(Service::kStateFailure);
-    DestroyIPConfig();
-  }
+  auto dhcp_opts = manager()->CreateDefaultDHCPOption();
+  dhcp_opts.use_arp_gateway = false;
+  Network::StartOptions opts = {
+      .dhcp = dhcp_opts,
+      .accept_ra = true,
+      .ignore_link_monitoring = service->link_monitor_disabled(),
+      .probing_configuration =
+          manager()->GetPortalDetectorProbingConfiguration(),
+  };
+  GetPrimaryNetwork()->Start(opts);
+  SetServiceState(Service::kStateConfiguring);
+
+  // Update link speeds. link speeds are expected to be constant during the L2
+  // connection for ethernet.
+  UpdateLinkSpeed();
 }
 
-std::string Ethernet::GetStorageIdentifier() const {
-  if (!permanent_mac_address_.empty()) {
-    return "device_" + permanent_mac_address_;
-  }
-  return Device::GetStorageIdentifier();
+std::string Ethernet::DeviceStorageSuffix() const {
+  return permanent_mac_address().empty() ? Device::DeviceStorageSuffix()
+                                         : permanent_mac_address();
 }
 
 void Ethernet::DisconnectFrom(EthernetService* service) {
@@ -312,9 +296,8 @@ EthernetProvider* Ethernet::GetProvider() {
   return provider;
 }
 
-#if !defined(DISABLE_WIRED_8021X)
 void Ethernet::TryEapAuthentication() {
-  try_eap_authentication_callback_.Reset(base::Bind(
+  try_eap_authentication_callback_.Reset(base::BindOnce(
       &Ethernet::TryEapAuthenticationTask, weak_ptr_factory_.GetWeakPtr()));
   dispatcher()->PostTask(FROM_HERE,
                          try_eap_authentication_callback_.callback());
@@ -334,16 +317,18 @@ void Ethernet::Certification(const KeyValueStore& properties) {
   uint32_t depth;
   if (WPASupplicant::ExtractRemoteCertification(properties, &subject, &depth)) {
     dispatcher()->PostTask(
-        FROM_HERE, base::Bind(&Ethernet::CertificationTask,
-                              weak_ptr_factory_.GetWeakPtr(), subject, depth));
+        FROM_HERE,
+        base::BindOnce(&Ethernet::CertificationTask,
+                       weak_ptr_factory_.GetWeakPtr(), subject, depth));
   }
 }
 
 void Ethernet::EAPEvent(const std::string& status,
                         const std::string& parameter) {
   dispatcher()->PostTask(
-      FROM_HERE, base::Bind(&Ethernet::EAPEventTask,
-                            weak_ptr_factory_.GetWeakPtr(), status, parameter));
+      FROM_HERE,
+      base::BindOnce(&Ethernet::EAPEventTask, weak_ptr_factory_.GetWeakPtr(),
+                     status, parameter));
 }
 
 void Ethernet::PropertiesChanged(const KeyValueStore& properties) {
@@ -353,13 +338,23 @@ void Ethernet::PropertiesChanged(const KeyValueStore& properties) {
   }
   dispatcher()->PostTask(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &Ethernet::SupplicantStateChangedTask, weak_ptr_factory_.GetWeakPtr(),
           properties.Get<std::string>(WPASupplicant::kInterfacePropertyState)));
 }
 
 void Ethernet::ScanDone(const bool& /*success*/) {
-  NOTREACHED() << __func__ << " is not implented for Ethernet";
+  NOTREACHED() << __func__ << " is not implemented for Ethernet";
+}
+
+void Ethernet::InterworkingAPAdded(const RpcIdentifier& /*BSS*/,
+                                   const RpcIdentifier& /*cred*/,
+                                   const KeyValueStore& /*properties*/) {
+  NOTREACHED() << __func__ << " is not implemented for Ethernet";
+}
+
+void Ethernet::InterworkingSelectDone() {
+  NOTREACHED() << __func__ << " is not implemented for Ethernet";
 }
 
 EthernetEapProvider* Ethernet::GetEapProvider() {
@@ -380,8 +375,8 @@ void Ethernet::OnEapDetected() {
                              is_eap_detected_);
   eap_listener_->Stop();
   GetEapProvider()->SetCredentialChangeCallback(
-      this, base::Bind(&Ethernet::TryEapAuthentication,
-                       weak_ptr_factory_.GetWeakPtr()));
+      this, base::BindRepeating(&Ethernet::TryEapAuthentication,
+                                weak_ptr_factory_.GetWeakPtr()));
   TryEapAuthentication();
 }
 
@@ -444,6 +439,7 @@ bool Ethernet::StartEapAuthentication() {
   }
   CHECK(!supplicant_network_path_.value().empty());
 
+  LOG(INFO) << LoggingTag() << ": Triggering EAP authentication";
   supplicant_interface_proxy_->SelectNetwork(supplicant_network_path_);
   supplicant_interface_proxy_->EAPLogon();
   return true;
@@ -533,27 +529,10 @@ void Ethernet::TryEapAuthenticationTask() {
 SupplicantProcessProxyInterface* Ethernet::supplicant_process_proxy() const {
   return manager()->supplicant_manager()->proxy();
 }
-#endif  // DISABLE_WIRED_8021X
 
 void Ethernet::SetupWakeOnLan() {
-  int sock;
-  struct ifreq interface_command;
   struct ethtool_wolinfo wake_on_lan_command;
-
-  if (link_name().length() >= sizeof(interface_command.ifr_name)) {
-    LOG(WARNING) << "Interface name " << link_name()
-                 << " too long: " << link_name().size()
-                 << " >= " << sizeof(interface_command.ifr_name);
-    return;
-  }
-
-  sock = sockets_->Socket(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_IP);
-  if (sock < 0) {
-    LOG(WARNING) << "Failed to allocate socket: " << sockets_->ErrorString()
-                 << ".";
-    return;
-  }
-  ScopedSocketCloser socket_closer(sockets_.get(), sock);
+  struct ifreq interface_command;
 
   memset(&interface_command, 0, sizeof(interface_command));
   memset(&wake_on_lan_command, 0, sizeof(wake_on_lan_command));
@@ -562,33 +541,18 @@ void Ethernet::SetupWakeOnLan() {
     wake_on_lan_command.wolopts = WAKE_MAGIC;
   }
   interface_command.ifr_data = &wake_on_lan_command;
-  memcpy(interface_command.ifr_name, link_name().data(), link_name().length());
 
-  int res = sockets_->Ioctl(sock, SIOCETHTOOL, &interface_command);
-  if (res < 0) {
-    LOG(WARNING) << "Failed to enable wake-on-lan: " << sockets_->ErrorString()
-                 << ".";
+  if (!RunEthtoolCmd(&interface_command)) {
+    PLOG(WARNING) << "Failed to enable wake-on-lan";
     return;
   }
 }
 
 bool Ethernet::DisableOffloadFeatures() {
-  int sock;
   struct ifreq interface_command;
-
-  LOG(INFO) << "Disabling offloading features for " << link_name();
-
   memset(&interface_command, 0, sizeof(interface_command));
-  strncpy(interface_command.ifr_name, link_name().c_str(),
-          sizeof(interface_command.ifr_name) - 1);
 
-  sock = sockets_->Socket(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_IP);
-  if (sock < 0) {
-    PLOG(ERROR) << "Failed to allocate socket: " << sockets_->ErrorString();
-    return false;
-  }
-  ScopedSocketCloser socket_closer(sockets_.get(), sock);
-
+  LOG(INFO) << LoggingTag() << ": Disabling offloading features";
   // Prepare and send a ETHTOOL_GSSET_INFO(ETH_SS_FEATURES) command to
   // get number of features.
   struct {
@@ -601,10 +565,15 @@ bool Ethernet::DisableOffloadFeatures() {
   sset_info->reserved = 0;
   sset_info->sset_mask = 1ULL << ETH_SS_FEATURES;
   interface_command.ifr_data = sset_info;
-  int res = sockets_->Ioctl(sock, SIOCETHTOOL, &interface_command);
-  if (res < 0 || !sset_info->sset_mask || !sset_info_buf.num_features) {
-    PLOG(ERROR) << "ETHTOOL_GSSET_INFO(ETH_SS_FEATURES) failed "
-                << sockets_->ErrorString();
+  bool res = RunEthtoolCmd(&interface_command);
+  if (!res) {
+    PLOG(ERROR) << LoggingTag()
+                << ": ETHTOOL_GSSET_INFO(ETH_SS_FEATURES) failed.";
+    return false;
+  }
+  if (!sset_info->sset_mask || !sset_info_buf.num_features) {
+    LOG(ERROR) << LoggingTag()
+               << ": ETHTOOL_GSSET_INFO(ETH_SS_FEATURES) failed.";
     return false;
   }
 
@@ -618,17 +587,16 @@ bool Ethernet::DisableOffloadFeatures() {
     ethtool_gstrings gstrings;
     char features[MAX_FEATURE_COUNT][ETH_GSTRING_LEN];
   };
-  std::unique_ptr<GstringsBuf> gstrings_buf(new GstringsBuf);
+  auto gstrings_buf = std::make_unique<GstringsBuf>();
   memset(gstrings_buf.get(), 0, sizeof(GstringsBuf));
   struct ethtool_gstrings* gstrings = &gstrings_buf->gstrings;
   gstrings->cmd = ETHTOOL_GSTRINGS;
   gstrings->string_set = ETH_SS_FEATURES;
   gstrings->len = num_features;
   interface_command.ifr_data = gstrings;
-  res = sockets_->Ioctl(sock, SIOCETHTOOL, &interface_command);
-  if (res < 0) {
-    PLOG(ERROR) << "ETHTOOL_GSTRINGS(ETH_SS_FEATURES) failed "
-                << sockets_->ErrorString();
+  if (!RunEthtoolCmd(&interface_command)) {
+    PLOG(ERROR) << LoggingTag()
+                << ": ETHTOOL_GSTRINGS(ETH_SS_FEATURES) failed.";
     return false;
   }
 
@@ -648,10 +616,8 @@ bool Ethernet::DisableOffloadFeatures() {
   gfeatures->cmd = ETHTOOL_GFEATURES;
   gfeatures->size = num_feature_blocks;
   interface_command.ifr_data = gfeatures;
-  res = sockets_->Ioctl(sock, SIOCETHTOOL, &interface_command);
-  if (res < 0) {
-    PLOG(ERROR) << "ETHTOOL_GFEATURES command failed: "
-                << sockets_->ErrorString();
+  if (!RunEthtoolCmd(&interface_command)) {
+    PLOG(ERROR) << LoggingTag() << ": ETHTOOL_GFEATURES command failed.";
     return false;
   }
 
@@ -698,143 +664,49 @@ bool Ethernet::DisableOffloadFeatures() {
     }
     sfeatures->features[block_num].valid |= feature_mask;
     sfeatures->features[block_num].requested &= ~feature_mask;
-    LOG(INFO) << link_name() << ": Disabling [" << i << "] " << feature;
+    LOG(INFO) << LoggingTag() << ": Disabling [" << i << "] " << feature;
   }
 
   for (const auto& feature : features_to_disable)
     LOG(INFO) << "[No Such Feature] Skipped disabling: " << feature;
 
   interface_command.ifr_data = sfeatures;
-  res = sockets_->Ioctl(sock, SIOCETHTOOL, &interface_command);
-  if (res < 0) {
-    PLOG(ERROR) << "Failed to disable offloading features: "
-                << sockets_->ErrorString();
+  if (!RunEthtoolCmd(&interface_command)) {
+    PLOG(ERROR) << "Failed to disable offloading features.";
     return false;
   }
-  LOG(INFO) << link_name() << ": Disabled offloading features successfully";
+  LOG(INFO) << LoggingTag() << ": Disabled offloading features successfully";
 
   return ret;
-}
-
-bool Ethernet::ConfigurePPPoEMode(const bool& enable, Error* error) {
-#if defined(DISABLE_PPPOE)
-  if (enable) {
-    LOG(WARNING) << "PPPoE support is not implemented.  Ignoring attempt "
-                 << "to configure " << link_name();
-    error->Populate(Error::kNotSupported);
-  }
-  return false;
-#else
-  if (!service_) {
-    // If |service_| is null, we haven't started this Device yet.
-    if (enable) {
-      // Create a PPPoEService but let Start() register it.
-      service_ = CreatePPPoEService();
-    } else {
-      // Reset |service_| and let Start() create and register a standard
-      // EthernetService.
-      service_ = nullptr;
-    }
-    return true;
-  }
-
-  EthernetServiceRefPtr service = nullptr;
-  if (enable && service_->technology() != Technology::kPPPoE) {
-    service = CreatePPPoEService();
-    if (!manager()->HasService(service_)) {
-      // |service_| is unregistered, which means the Device is not started.
-      // Create a PPPoEService, but let Start() register it.
-      service_ = service;
-      return true;
-    }
-  } else if (!enable && service_->technology() == Technology::kPPPoE) {
-    if (!manager()->HasService(service_)) {
-      // |service_| is unregistered, which means ths Device is not started. Let
-      // Start() create and register a standard EthernetService.
-      service_ = nullptr;
-      return true;
-    }
-    service = CreateEthernetService();
-  } else {
-    return false;
-  }
-
-  CHECK(service);
-  // If |service_| has not begun to connect (i.e. this method is called prior to
-  // Manager::SortServicesTask being executed and triggering an autoconnect),
-  // Disconnect would return an error. We can get away with ignoring any error
-  // here because DisconnectFrom does not have any failure scenarios.
-  //
-  // TODO(crbug.com/1003958) If/when PPPoE is redesigned, this hack will be
-  // unnecessary to begin with.
-  Error unused_error;
-  service_->Disconnect(&unused_error, __func__);
-  DeregisterService(service_);
-  service_ = service;
-  RegisterService(service_);
-
-  return true;
-#endif  // DISABLE_PPPOE
-}
-
-bool Ethernet::GetPPPoEMode(Error* error) {
-  if (service_ == nullptr) {
-    return false;
-  }
-  return service_->technology() == Technology::kPPPoE;
-}
-
-void Ethernet::ClearPPPoEMode(Error* error) {
-  ConfigurePPPoEMode(false, error);
 }
 
 std::string Ethernet::GetUsbEthernetMacAddressSource(Error* error) {
   return usb_ethernet_mac_address_source_;
 }
 
-EthernetServiceRefPtr Ethernet::CreateEthernetService() {
-  return GetProvider()->CreateService(weak_ptr_factory_.GetWeakPtr());
-}
-
-EthernetServiceRefPtr Ethernet::CreatePPPoEService() {
-#if defined(DISABLE_PPPOE)
-  NOTREACHED() << __func__ << " should not be called when PPPoE is disabled";
-  return nullptr;
-#else
-  return new PPPoEService(manager(), weak_ptr_factory_.GetWeakPtr());
-#endif  // DISABLE_PPPOE
-}
-
 void Ethernet::RegisterService(EthernetServiceRefPtr service) {
   if (!service) {
     return;
   }
-  if (service->technology() == Technology::kPPPoE) {
-    manager()->RegisterService(service);
-  } else {
-    GetProvider()->RegisterService(service);
-  }
+  GetProvider()->RegisterService(service);
 }
 
 void Ethernet::DeregisterService(EthernetServiceRefPtr service) {
   if (!service) {
     return;
   }
-  if (service->technology() == Technology::kPPPoE) {
-    manager()->DeregisterService(service);
-  } else {
-    GetProvider()->DeregisterService(service);
-  }
+  GetProvider()->DeregisterService(service);
 }
 
 void Ethernet::SetUsbEthernetMacAddressSource(const std::string& source,
-                                              Error* error,
-                                              const ResultCallback& callback) {
+                                              ResultCallback callback) {
   SLOG(this, 2) << __func__ << " " << source;
 
   if (bus_type_ != kDeviceBusTypeUsb) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
-                          "Not supported for non-USB devices: " + bus_type_);
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kIllegalOperation,
+                          "Not allowed on non-USB devices: " + bus_type_);
+    std::move(callback).Run(error);
     return;
   }
 
@@ -848,15 +720,30 @@ void Ethernet::SetUsbEthernetMacAddressSource(const std::string& source,
   } else if (source == kUsbEthernetMacAddressSourceUsbAdapterMac) {
     new_mac_address = permanent_mac_address_;
   } else {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kInvalidArguments,
                           "Unknown source: " + source);
+    std::move(callback).Run(error);
     return;
   }
 
   if (new_mac_address.empty()) {
+    Error error;
     Error::PopulateAndLog(
-        FROM_HERE, error, Error::kNotSupported,
+        FROM_HERE, &error, Error::kNotFound,
         "Failed to find out new MAC address for source: " + source);
+    std::move(callback).Run(error);
+    return;
+  }
+
+  std::vector<uint8_t> mac_addr_bytes;
+  if (!base::HexStringToBytes(new_mac_address, &mac_addr_bytes) ||
+      mac_addr_bytes.size() != net_base::MacAddress::kAddressLength) {
+    Error error;
+    Error::PopulateAndLog(
+        FROM_HERE, &error, Error::kInvalidArguments,
+        "Failed to convert the hex string to MAC address: " + new_mac_address);
+    std::move(callback).Run(error);
     return;
   }
 
@@ -867,9 +754,7 @@ void Ethernet::SetUsbEthernetMacAddressSource(const std::string& source,
       adaptor()->EmitStringChanged(kUsbEthernetMacAddressSourceProperty,
                                    usb_ethernet_mac_address_source_);
     }
-    if (error) {
-      error->Populate(Error::kSuccess);
-    }
+    std::move(callback).Run(Error(Error::kSuccess));
     return;
   }
 
@@ -878,10 +763,10 @@ void Ethernet::SetUsbEthernetMacAddressSource(const std::string& source,
                 << new_mac_address;
 
   rtnl_handler()->SetInterfaceMac(
-      interface_index(), ByteString::CreateFromHexString(new_mac_address),
+      interface_index(), *net_base::MacAddress::CreateFromBytes(mac_addr_bytes),
       base::BindOnce(&Ethernet::OnSetInterfaceMacResponse,
                      weak_ptr_factory_.GetWeakPtr(), source, new_mac_address,
-                     callback));
+                     std::move(callback)));
 }
 
 std::string Ethernet::ReadMacAddressFromFile(const base::FilePath& file_path) {
@@ -902,13 +787,13 @@ std::string Ethernet::ReadMacAddressFromFile(const base::FilePath& file_path) {
 
 void Ethernet::OnSetInterfaceMacResponse(const std::string& mac_address_source,
                                          const std::string& new_mac_address,
-                                         const ResultCallback& callback,
+                                         ResultCallback callback,
                                          int32_t error) {
   if (error) {
     LOG(ERROR) << __func__ << " received response with error "
                << strerror(error);
     if (!callback.is_null()) {
-      callback.Run(Error(Error::kNotSupported));
+      std::move(callback).Run(Error(Error::kOperationFailed));
     }
     return;
   }
@@ -921,7 +806,7 @@ void Ethernet::OnSetInterfaceMacResponse(const std::string& mac_address_source,
 
   set_mac_address(new_mac_address);
   if (!callback.is_null()) {
-    callback.Run(Error(Error::kSuccess));
+    std::move(callback).Run(Error(Error::kSuccess));
   }
 }
 
@@ -949,56 +834,6 @@ void Ethernet::set_mac_address(const std::string& new_mac_address) {
   }
 }
 
-std::string Ethernet::GetPermanentMacAddressFromKernel() {
-  struct ifreq ifr;
-  if (link_name().length() >= sizeof(ifr.ifr_name)) {
-    LOG(WARNING) << "Interface name " << link_name()
-                 << " too long: " << link_name().size()
-                 << " >= " << sizeof(ifr.ifr_name);
-    return std::string();
-  }
-
-  memset(&ifr, 0, sizeof(ifr));
-  memcpy(ifr.ifr_name, link_name().data(), link_name().length());
-
-  constexpr int kPermAddrBufferSize =
-      sizeof(struct ethtool_perm_addr) + MAX_ADDR_LEN;
-  char perm_addr_buffer[kPermAddrBufferSize];
-  memset(perm_addr_buffer, 0, kPermAddrBufferSize);
-  struct ethtool_perm_addr* perm_addr = static_cast<struct ethtool_perm_addr*>(
-      static_cast<void*>(perm_addr_buffer));
-  perm_addr->cmd = ETHTOOL_GPERMADDR;
-  perm_addr->size = MAX_ADDR_LEN;
-
-  ifr.ifr_data = perm_addr;
-
-  const int fd = sockets_->Socket(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-  if (fd < 0) {
-    PLOG(WARNING) << "Failed to allocate socket";
-    return std::string();
-  }
-
-  ScopedSocketCloser socket_closer(sockets_.get(), fd);
-  int err = sockets_->Ioctl(fd, SIOCETHTOOL, &ifr);
-  if (err < 0) {
-    PLOG(WARNING) << "Failed to read permanent MAC address";
-    return std::string();
-  }
-
-  if (perm_addr->size != ETH_ALEN) {
-    LOG(WARNING) << "Invalid permanent MAC address size: " << perm_addr->size;
-    return std::string();
-  }
-
-  std::string mac_address =
-      base::ToLowerASCII(ByteString(perm_addr->data, ETH_ALEN).HexEncode());
-  if (!IsValidMac(mac_address)) {
-    LOG(ERROR) << "Invalid permanent MAC address: " << mac_address;
-    return std::string();
-  }
-  return mac_address;
-}
-
 std::string Ethernet::GetDeviceBusType() const {
   auto device_id = DeviceId::CreateFromSysfs(base::FilePath(
       base::StringPrintf("/sys/class/net/%s/device", link_name().c_str())));
@@ -1012,6 +847,180 @@ std::string Ethernet::GetDeviceBusType() const {
     return kDeviceBusTypeUsb;
   }
   return std::string();
+}
+
+void Ethernet::UpdateLinkSpeed() {
+  if (!selected_service()) {
+    return;
+  }
+
+  struct ethtool_cmd ecmd;
+  struct ifreq ifr;
+
+  memset(&ecmd, 0, sizeof(ecmd));
+  memset(&ifr, 0, sizeof(ifr));
+  ecmd.cmd = ETHTOOL_GSET;
+  ifr.ifr_data = &ecmd;
+
+  if (!RunEthtoolCmd(&ifr)) {
+    PLOG(ERROR) << LoggingTag() << " " << __func__
+                << " ETHTOOL_GSET command failed ";
+    return;
+  }
+  // Value we get from ecmd is mbps, convert it to kbps to keep
+  // with other technologies.
+  selected_service()->SetUplinkSpeedKbps(ethtool_cmd_speed(&ecmd) *
+                                         kMbpsToKbpsFactor);
+  selected_service()->SetDownlinkSpeedKbps(ethtool_cmd_speed(&ecmd) *
+                                           kMbpsToKbpsFactor);
+}
+
+bool Ethernet::RunEthtoolCmd(ifreq* interface_command) {
+  auto socket =
+      socket_factory_->Create(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_IP);
+  if (!socket) {
+    return false;
+  }
+
+  strncpy(interface_command->ifr_name, link_name().c_str(),
+          sizeof(interface_command->ifr_name));
+
+  return socket->Ioctl(SIOCETHTOOL, interface_command).has_value();
+}
+
+void Ethernet::OnNeighborReachabilityEvent(
+    int net_interface_index,
+    const net_base::IPAddress& ip_address,
+    patchpanel::Client::NeighborRole role,
+    patchpanel::Client::NeighborStatus status) {
+  DCHECK(net_interface_index == interface_index());
+
+  using Role = patchpanel::Client::NeighborRole;
+  using Status = patchpanel::Client::NeighborStatus;
+  if (role != Role::kGateway && role != Role::kGatewayAndDnsServer) {
+    return;
+  }
+
+  if (!selected_service()) {
+    LOG(INFO) << LoggingTag()
+              << ": No selected service, ignoring neighbor reachability event";
+    return;
+  }
+
+  // When a reachability failure event is received and the connection is thought
+  // to be healthy, make sure that network validation runs to confirm if there
+  // is no link connectivity anymore.
+  if (status == Status::kFailed &&
+      selected_service()->state() == Service::kStateOnline) {
+    LOG(INFO) << LoggingTag()
+              << ": gateway reachability failure in 'online' state.";
+    // Network validation is expected to time out, do not force a restart in
+    // case some other mechanism has already triggered a revalidation which
+    // would otherwise get cancelled.
+    UpdatePortalDetector(
+        Network::ValidationReason::kEthernetGatewayUnreachable);
+  }
+
+  // When a reachability success event is received and the connection is thought
+  // to be unhealthy, make sure that network validation runs to confirm if link
+  // connectivity has been recovered.
+  if (status == Status::kReachable &&
+      selected_service()->state() == Service::kStateNoConnectivity) {
+    LOG(INFO) << LoggingTag()
+              << ": gateway reachability event in 'no-connectivity' state.";
+    // Validation should be confirmed as soon as possible. If Internet is
+    // validation is expected to be short so a restart is always forced.
+    UpdatePortalDetector(Network::ValidationReason::kEthernetGatewayReachable);
+  }
+}
+
+void Ethernet::NotifyEthernetDriverName() {
+  struct ethtool_drvinfo drv;
+  struct ifreq ifr;
+  char dvrname[kDriverNameSize];
+  std::string driver;
+
+  memset(&drv, 0, sizeof(drv));
+  memset(&ifr, 0, sizeof(ifr));
+
+  drv.cmd = ETHTOOL_GDRVINFO;
+  ifr.ifr_data = &drv;
+
+  if (!RunEthtoolCmd(&ifr)) {
+    PLOG(ERROR) << LoggingTag() << ": Failed to get ethernet driver name";
+    driver = kEthernetDriverNameError;
+  } else {
+    strncpy(dvrname, drv.driver, sizeof(dvrname));
+    // Add a trailing \0 to avoid driver name we got from dvr.driver
+    // is not \0 terminated.
+    dvrname[kDriverNameSize - 1] = '\0';
+    driver = dvrname;
+  }
+
+  // Ignore virtual interface drivers used in testing for reporting driver
+  // names.
+  static constexpr auto ignoredDrivers =
+      base::MakeFixedFlatSet<std::string_view>({
+          // Name of the /drivers/net/veth.c driver. For interfaces managed by
+          // shill, this driver is only used in tast to simulate
+          // physical networks.
+          "veth",
+          // Name of the /drivers/net/virtio_net.c driver. This driver is only
+          // used on the
+          // host when ChromeOS itself runs on a VM.
+          "virtio_net",
+      });
+  if (ignoredDrivers.find(driver) != ignoredDrivers.end()) {
+    return;
+  }
+
+  static constexpr auto driverName2enum =
+      base::MakeFixedFlatMap<std::string_view, Metrics::EthernetDriver>({
+          {"alx", Metrics::kEthernetDriverAlx},
+          {"aqc111", Metrics::kEthernetDriverAqc111},
+          {"asix", Metrics::kEthernetDriverAsix},
+          {"atl1c", Metrics::kEthernetDriverAtl1c},
+          {"atlantic", Metrics::kEthernetDriverAtlantic},
+          {"ax88179_178a", Metrics::kEthernetDriverAx88179_178a},
+          {"cdc_eem", Metrics::kEthernetDriverCdcEem},
+          {"cdc_ether", Metrics::kEthernetDriverCdcEther},
+          {"cdc_mbim", Metrics::kEthernetDriverCdcMbim},
+          {"cdc_ncm", Metrics::kEthernetDriverCdcNcm},
+          {"dm9601", Metrics::kEthernetDriverDm9601},
+          {"e100", Metrics::kEthernetDriverE100},
+          {"e1000", Metrics::kEthernetDriverE1000},
+          {"e1000e", Metrics::kEthernetDriverE1000e},
+          {"forcedeth", Metrics::kEthernetDriverNForce},
+          {"igb", Metrics::kEthernetDriverIgb},
+          {"igbvf", Metrics::kEthernetDriverIgbvf},
+          {"igc", Metrics::kEthernetDriverIgc},
+          {"ipheth", Metrics::kEthernetDriverIpheth},
+          {"jme", Metrics::kEthernetDriverJme},
+          {"mcs7830", Metrics::kEthernetDriverMcs7830},
+          {"MOSCHIP usb-ethernet driver", Metrics::kEthernetDriverMcs7830},
+          {"pegasus", Metrics::kEthernetDriverPegasus},
+          {"r8152", Metrics::kEthernetDriverR8152},
+          {"r8169", Metrics::kEthernetDriverR8169},
+          {"rndis_host", Metrics::kEthernetDriverRndisHost},
+          {"rtl8150", Metrics::kEthernetDriverRtl8150},
+          {"sky2", Metrics::kEthernetDriverSky2},
+          {"smsc75xx", Metrics::kEthernetDriverSmsc75xx},
+          {"smsc95xx", Metrics::kEthernetDriverSmsc95xx},
+          {"st_gmac", Metrics::kEthernetDriverStGmac},
+          {"r8153_ecm", Metrics::kEthernetDriverR8153},
+          {"tg3", Metrics::kEthernetDriverTg3},
+          {"error", Metrics::kEthernetDriverError},
+      });
+
+  const auto it = driverName2enum.find(driver);
+  if (it == driverName2enum.end()) {
+    metrics()->SendEnumToUMA(Metrics::kMetricEthernetDriver,
+                             Metrics::kEthernetDriverUnknown);
+    LOG(WARNING) << LoggingTag() << ": Unknown ethernet driver name " << '"'
+                 << driver << '"';
+    return;
+  }
+  metrics()->SendEnumToUMA(Metrics::kMetricEthernetDriver, it->second);
 }
 
 }  // namespace shill

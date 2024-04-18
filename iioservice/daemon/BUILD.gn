@@ -1,11 +1,21 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":iioservice" ]
+  deps = [
+    ":iioservice",
+    ":install_dbus_conf",
+    ":install_init_conf",
+    ":install_minijail_conf",
+    ":install_policy",
+  ]
+
+  if (use.seccomp) {
+    deps += [ ":install_seccomp_policy" ]
+  }
 
   if (use.test) {
     deps += [ ":iioservice_testrunner" ]
@@ -14,10 +24,13 @@ group("all") {
 
 pkg_config("target_defaults_pkg_deps") {
   pkg_deps = [
+    "iioservice_ipc",
     "libbrillo",
     "libchrome",
+    "libmems",
     "libmetrics",
     "libmojo",
+    "mojo_service_manager",
   ]
 }
 
@@ -25,7 +38,9 @@ static_library("libiioservice") {
   sources = [
     "common_types.cc",
     "daemon.cc",
+    "events_handler.cc",
     "fusion.cc",
+    "iio_sensor.cc",
     "samples_handler.cc",
     "samples_handler_base.cc",
     "samples_handler_fusion.cc",
@@ -33,22 +48,49 @@ static_library("libiioservice") {
     "sensor_device_fusion.cc",
     "sensor_device_fusion_gravity.cc",
     "sensor_device_impl.cc",
-    "sensor_hal_server_impl.cc",
     "sensor_metrics.cc",
     "sensor_service_impl.cc",
   ]
   configs += [ ":target_defaults_pkg_deps" ]
   public_pkg_deps = [ "libmems" ]
-  deps = [
-    "//iioservice/libiioservice_ipc:libiioservice_ipc",
-    "//iioservice/libiioservice_ipc:libiioservice_ipc_mojom",
-  ]
 }
 
 executable("iioservice") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults_pkg_deps" ]
+  install_path = "sbin"
   deps = [ ":libiioservice" ]
+}
+
+install_config("install_init_conf") {
+  sources = [
+    "init/cros-ec-accel.conf",
+    "init/iioservice.conf",
+  ]
+  install_path = "upstart"
+}
+
+install_config("install_dbus_conf") {
+  sources = [ "dbus/org.chromium.Iioservice.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "minijail/iioservice.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_policy") {
+  sources = [ "mojo_policy/iioservice_mojo.json" ]
+  install_path = "/etc/mojo/service_manager/policy"
+}
+
+if (use.seccomp) {
+  install_config("install_seccomp_policy") {
+    sources = [ "seccomp/iioservice-" + getenv("ARCH") + ".policy" ]
+    install_path = "seccomp_policy"
+    outputs = [ "iioservice-seccomp.policy" ]
+  }
 }
 
 if (use.test) {
@@ -62,12 +104,13 @@ if (use.test) {
 
   executable("iioservice_testrunner") {
     sources = [
+      "events_handler_test.cc",
+      "iio_sensor_test.cc",
       "samples_handler_fusion_test.cc",
       "samples_handler_test.cc",
       "sensor_device_fusion_gravity_test.cc",
       "sensor_device_fusion_test.cc",
       "sensor_device_impl_test.cc",
-      "sensor_hal_server_impl_test.cc",
       "sensor_metrics_mock.cc",
       "sensor_service_impl_test.cc",
       "test_fakes.cc",
@@ -78,6 +121,7 @@ if (use.test) {
       ":iioservice_testrunner_pkg_deps",
       ":target_defaults_pkg_deps",
     ]
+    run_test = true
     pkg_deps = [ "libmems_test_support" ]
     deps = [
       ":libiioservice",

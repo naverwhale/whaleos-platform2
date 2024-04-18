@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -10,13 +10,14 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
-#include <base/callback_forward.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_forward.h>
 #include <base/memory/ref_counted.h>
 #include <iioservice/mojo/cros_sensor_service.mojom.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/pending_remote.h>
 #include <mojo/public/cpp/bindings/remote.h>
+#include <mojo_service_manager/lib/mojom/service_manager.mojom.h>
 
 #include "camera/mojo/algorithm/camera_algorithm.mojom.h"
 #include "camera/mojo/cros_camera_service.mojom.h"
@@ -64,24 +65,6 @@ class CROS_CAMERA_EXPORT CameraMojoChannelManager
           on_construct_callback,
       Callback on_error_callback) = 0;
 
-  // Creates a new MjpegDecodeAccelerator connection by |receiver|.
-  // This method is expected to be called on the IPC thread and the
-  // |on_construct_callback| and |on_error_callback| will be run on the IPC
-  // thread as well.
-  virtual void CreateMjpegDecodeAccelerator(
-      mojo::PendingReceiver<mojom::MjpegDecodeAccelerator> receiver,
-      Callback on_construct_callback,
-      Callback on_error_callback) = 0;
-
-  // Creates a new JpegEncodeAccelerator connection by |receiver|.
-  // This method is expected to be called on the IPC thread and the
-  // |on_construct_callback| and |on_error_callback| will be run on the IPC
-  // thread as well.
-  virtual void CreateJpegEncodeAccelerator(
-      mojo::PendingReceiver<mojom::JpegEncodeAccelerator> receiver,
-      Callback on_construct_callback,
-      Callback on_error_callback) = 0;
-
   // Create a new CameraAlgorithmOps remote.
   virtual mojo::Remote<mojom::CameraAlgorithmOps>
   CreateCameraAlgorithmOpsRemote(const std::string& socket_path,
@@ -93,6 +76,15 @@ class CROS_CAMERA_EXPORT CameraMojoChannelManager
       mojom::CameraHalDispatcher::RegisterSensorClientWithTokenCallback
           on_construct_callback,
       Callback on_error_callback) = 0;
+
+  virtual void RequestServiceFromMojoServiceManager(
+      const std::string& service_name,
+      mojo::ScopedMessagePipeHandle receiver) = 0;
+
+  virtual void RegisterServiceToMojoServiceManager(
+      const std::string& service_name,
+      mojo::PendingRemote<
+          chromeos::mojo_service_manager::mojom::ServiceProvider> remote) = 0;
 };
 
 }  // namespace cros

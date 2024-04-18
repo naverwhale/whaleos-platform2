@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,7 +34,7 @@ ProfileDBusAdaptor::ProfileDBusAdaptor(const scoped_refptr<dbus::Bus>& bus,
 }
 
 ProfileDBusAdaptor::~ProfileDBusAdaptor() {
-  dbus_object()->UnregisterAsync();
+  dbus_object()->UnregisterAndBlock();
   profile_ = nullptr;
 }
 

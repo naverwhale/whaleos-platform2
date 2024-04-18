@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <memory>
 #include <string>
 
-#include <base/macros.h>
 #include <trunks/trunks_factory.h>
 
 #include "tpm_manager/common/typedefs.h"
@@ -59,6 +58,8 @@ class Tpm2InitializerImpl : public TpmInitializer {
   DictionaryAttackResetStatus ResetDictionaryAttackLock() override;
   TpmInitializerStatus DisableDictionaryAttackMitigation() override;
   void PruneStoredPasswords() override;
+  bool ChangeOwnerPassword(const std::string& old_password,
+                           const std::string& new_password) override;
 
  private:
   // Seeds the onboard Tpm random number generator with random bytes from

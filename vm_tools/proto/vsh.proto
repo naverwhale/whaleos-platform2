@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@ option cc_enable_arenas = true;
 option optimize_for = LITE_RUNTIME;
 
 package vm_tools.vsh;
+
+option go_package = "chromiumos/vm_tools/vsh_proto";
 
 // Indicates the status of a connection.
 enum ConnectionStatus {

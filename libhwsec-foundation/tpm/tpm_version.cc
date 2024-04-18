@@ -1,15 +1,15 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "libhwsec-foundation/tpm/tpm_version.h"
 
+#include <optional>
 #include <string>
 #include <type_traits>
 
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
-#include <base/optional.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/synchronization/lock.h>
@@ -23,11 +23,11 @@ namespace {
 constexpr char kTPMVersionMajonPath[] = "/sys/class/tpm/tpm0/tpm_version_major";
 }  // namespace
 
-TPMVer RuntimeTPMVer(base::Optional<TPMVer> set_value_for_testing) {
+TPMVer RuntimeTPMVer(std::optional<TPMVer> set_value_for_testing) {
   static base::Lock cache_lock;
-  static base::Optional<TPMVer> cache_version;
-  static_assert(std::is_trivially_destructible<base::Optional<TPMVer>>::value,
-                "base::Optional<TPMVer> must be trivially destructible");
+  static std::optional<TPMVer> cache_version;
+  static_assert(std::is_trivially_destructible<std::optional<TPMVer>>::value,
+                "std::optional<TPMVer> must be trivially destructible");
 
   {
     base::AutoLock lock(cache_lock);
@@ -68,6 +68,18 @@ TPMVer RuntimeTPMVer(base::Optional<TPMVer> set_value_for_testing) {
   base::AutoLock lock(cache_lock);
   cache_version = TPMVer::kUnknown;
   return TPMVer::kUnknown;
+}
+
+#else
+
+TPMVer BuildTimeTPMVer() {
+#if USE_TPM1
+  return TPMVer::kTPM1;
+#elif USE_TPM2
+  return TPMVer::kTPM2;
+#else
+  return TPMVer::kNoTPM;
+#endif
 }
 
 #endif

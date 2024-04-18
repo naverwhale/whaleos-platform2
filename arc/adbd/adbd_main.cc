@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Chromium OS Authors. All rights reserved.
+ * Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,6 +9,7 @@
 #include <base/at_exit.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
+#include <base/system/sys_info.h>
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
 
@@ -54,7 +55,7 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  const std::string board = adbd::GetStrippedReleaseBoard();
+  const std::string board = base::SysInfo::HardwareModelName();
 
   const base::FilePath control_pipe_path = runtime_path.Append("ep0");
   if (!FLAGS_arcvm && !adbd::CreatePipe(control_pipe_path))

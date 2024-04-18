@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,12 +28,6 @@ class RarMounter : public ArchiveMounter {
   RarMounter& operator=(const RarMounter&) = delete;
 
   ~RarMounter() override;
-
- protected:
-  MountErrorType FormatInvocationCommand(
-      const base::FilePath& archive,
-      std::vector<std::string> params,
-      SandboxedProcess* sandbox) const override;
 
  private:
   // Increments a sequence of digits or letters [begin, end). Returns true if
@@ -112,7 +106,8 @@ class RarMounter : public ArchiveMounter {
   // ...
   // basename999.rar
   // etc.
-  std::vector<std::string> GetBindPaths(base::StringPiece original_path) const;
+  std::vector<std::string> GetBindPaths(
+      base::StringPiece original_path) const override;
 
   FRIEND_TEST(RarMounterTest, Increment);
   FRIEND_TEST(RarMounterTest, ParseDigits);

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,21 +7,21 @@
 #include <memory>
 #include <string>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/time/time.h>
 #include <dbus/message.h>
 
-#include "power_manager/common/util.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/powerd/system/dbus_wrapper.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
 // Timeout for D-Bus method calls to Chrome.
-const int kDisplayServiceDBusTimeoutMs = 5000;
+constexpr base::TimeDelta kDisplayServiceDBusTimeout = base::Seconds(5);
 
 std::string DisplayPowerStateToString(chromeos::DisplayPowerState state) {
   switch (state) {
@@ -40,11 +40,6 @@ std::string DisplayPowerStateToString(chromeos::DisplayPowerState state) {
 
 }  // namespace
 
-DisplayPowerSetter::DisplayPowerSetter()
-    : dbus_wrapper_(nullptr), display_service_proxy_(nullptr) {}
-
-DisplayPowerSetter::~DisplayPowerSetter() {}
-
 void DisplayPowerSetter::Init(DBusWrapperInterface* dbus_wrapper) {
   DCHECK(dbus_wrapper);
   dbus_wrapper_ = dbus_wrapper;
@@ -59,8 +54,8 @@ void DisplayPowerSetter::SetDisplayPower(chromeos::DisplayPowerState state,
     SendStateToDisplayService(state);
   } else {
     timer_.Start(FROM_HERE, delay,
-                 base::Bind(&DisplayPowerSetter::SendStateToDisplayService,
-                            base::Unretained(this), state));
+                 base::BindOnce(&DisplayPowerSetter::SendStateToDisplayService,
+                                base::Unretained(this), state));
   }
 }
 
@@ -72,23 +67,26 @@ void DisplayPowerSetter::SetDisplaySoftwareDimming(bool dimmed) {
       chromeos::kDisplayServiceSetSoftwareDimmingMethod);
   dbus::MessageWriter writer(&method_call);
   writer.AppendBool(dimmed);
-  dbus_wrapper_->CallMethodSync(
-      display_service_proxy_, &method_call,
-      base::TimeDelta::FromMilliseconds(kDisplayServiceDBusTimeoutMs));
+  dbus_wrapper_->CallMethodSync(display_service_proxy_, &method_call,
+                                kDisplayServiceDBusTimeout);
 }
 
 void DisplayPowerSetter::SendStateToDisplayService(
     chromeos::DisplayPowerState state) {
+  TRACE_EVENT("power", "DisplayPowerSetter::SendStateToDisplayService", "state",
+              DisplayPowerStateToString(state));
   LOG(INFO) << "Asking DisplayService to turn "
             << DisplayPowerStateToString(state);
   dbus::MethodCall method_call(chromeos::kDisplayServiceInterface,
                                chromeos::kDisplayServiceSetPowerMethod);
   dbus::MessageWriter writer(&method_call);
   writer.AppendInt32(state);
-  dbus_wrapper_->CallMethodSync(
-      display_service_proxy_, &method_call,
-      base::TimeDelta::FromMilliseconds(kDisplayServiceDBusTimeoutMs));
+  dbus_wrapper_->CallMethodSync(display_service_proxy_, &method_call,
+                                kDisplayServiceDBusTimeout);
 }
 
-}  // namespace system
-}  // namespace power_manager
+void DisplayPowerSetter::FireTimerForTesting() {
+  timer_.FireNow();
+}
+
+}  // namespace power_manager::system

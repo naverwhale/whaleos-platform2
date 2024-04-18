@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,6 @@
 #include "shill/icmp_session.h"
 
 #include <gmock/gmock.h>
-
-#include "shill/net/ip_address.h"
 
 namespace shill {
 
@@ -23,9 +21,9 @@ class MockIcmpSession : public IcmpSession {
 
   MOCK_METHOD(bool,
               Start,
-              (const IPAddress&,
+              (const net_base::IPAddress&,
                int,
-               const IcmpSession::IcmpSessionResultCallback&),
+               IcmpSession::IcmpSessionResultCallback),
               (override));
   MOCK_METHOD(void, Stop, (), (override));
 };

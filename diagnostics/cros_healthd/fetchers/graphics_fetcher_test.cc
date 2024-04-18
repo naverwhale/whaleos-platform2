@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,16 +10,13 @@
 #include <gtest/gtest.h>
 
 #include "diagnostics/cros_healthd/fetchers/graphics_fetcher.h"
-#include "diagnostics/cros_healthd/system/mock_context.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
+namespace mojom = ::ash::cros_healthd::mojom;
 
-using ::testing::_;
 using ::testing::ByMove;
 using ::testing::Return;
 
@@ -36,8 +33,6 @@ constexpr char kFakeEGLVendor[] = "Mesa Project";
 constexpr char kFakeEGLClientApi[] = "OpenGL OpenGL_ES";
 constexpr char kFakeEGLExtensions[] = "ext3 ext4";
 
-}  // namespace
-
 class MockEglManager final : public EglManager {
  public:
   MockEglManager() = default;
@@ -45,28 +40,12 @@ class MockEglManager final : public EglManager {
   MockEglManager& operator=(const MockEglManager&) = delete;
   ~MockEglManager() override = default;
 
-  MOCK_METHOD(mojo_ipc::GLESInfoPtr, FetchGLESInfo, (), ());
-  MOCK_METHOD(mojo_ipc::EGLInfoPtr, FetchEGLInfo, (), ());
+  MOCK_METHOD(mojom::GLESInfoPtr, FetchGLESInfo, (), ());
+  MOCK_METHOD(mojom::EGLInfoPtr, FetchEGLInfo, (), ());
 };
 
-class GraphicsFetcherTest : public ::testing::Test {
- protected:
-  GraphicsFetcherTest() = default;
-  GraphicsFetcherTest(const GraphicsFetcherTest&) = delete;
-  GraphicsFetcherTest& operator=(const GraphicsFetcherTest&) = delete;
-
-  mojo_ipc::GraphicsResultPtr FetchGraphicsInfo(
-      std::unique_ptr<EglManager> mock_egl_manager) {
-    return graphics_fetcher_.FetchGraphicsInfo(std::move(mock_egl_manager));
-  }
-
- private:
-  MockContext mock_context_;
-  GraphicsFetcher graphics_fetcher_{&mock_context_};
-};
-
-TEST_F(GraphicsFetcherTest, FetchGraphicsInfo) {
-  auto gles_info = mojo_ipc::GLESInfo::New();
+TEST(GraphicsFetcherTest, FetchGraphicsInfo) {
+  auto gles_info = mojom::GLESInfo::New();
   gles_info->version = kFakeOpenGLESVersion;
   gles_info->shading_version = kFakeOpenGLESShadingVersion;
   gles_info->vendor = kFakeOpenGLESVendor;
@@ -76,7 +55,7 @@ TEST_F(GraphicsFetcherTest, FetchGraphicsInfo) {
                         base::SPLIT_WANT_NONEMPTY);
   gles_info->extensions = expected_gles_extensions;
 
-  auto egl_info = mojo_ipc::EGLInfo::New();
+  auto egl_info = mojom::EGLInfo::New();
   egl_info->version = kFakeEGLVersion;
   egl_info->vendor = kFakeEGLVendor;
   egl_info->client_api = kFakeEGLClientApi;
@@ -109,4 +88,5 @@ TEST_F(GraphicsFetcherTest, FetchGraphicsInfo) {
   EXPECT_EQ(info->egl_info->extensions, expected_egl_extensions);
 }
 
+}  // namespace
 }  // namespace diagnostics

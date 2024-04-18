@@ -1,8 +1,10 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "installer/inst_util.h"
+
+#include <array>
 
 #include <ctype.h>
 #include <dirent.h>
@@ -27,6 +29,8 @@ extern "C" {
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
+#include <base/strings/string_number_conversions.h>
+#include <base/strings/string_piece.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <brillo/process/process.h>
@@ -37,38 +41,74 @@ using std::vector;
 // Used by LoggingTimerStart/Finish methods.
 static time_t START_TIME = 0;
 
+const char kEnvIsInstall[] = "IS_INSTALL";
+const char kEnvIsFactoryInstall[] = "IS_FACTORY_INSTALL";
+const char kEnvIsRecoveryInstall[] = "IS_RECOVERY_INSTALL";
+
 namespace {
 
 // This function returns the appropriate device name for the corresponding
 // |partition| number on a NAND setup. It favors a mountable device name such
 // as "/dev/ubiblockX_0" over the read-write devices such as "/dev/ubiX_0".
-string MakeNandPartitionDevForMounting(int partition) {
-  if (partition == 0) {
-    return "/dev/mtd0";
+base::FilePath MakeNandPartitionDevForMounting(PartitionNum partition) {
+  if (partition.Value() == 0) {
+    return base::FilePath("/dev/mtd0");
   }
-  if (partition == PART_NUM_KERN_A || partition == PART_NUM_KERN_B ||
-      partition == PART_NUM_KERN_C) {
-    return "/dev/mtd" + std::to_string(partition);
+  if (partition.IsKernel()) {
+    return base::FilePath("/dev/mtd" + partition.ToString());
   }
-  if (partition == PART_NUM_ROOT_A || partition == PART_NUM_ROOT_B ||
-      partition == PART_NUM_ROOT_C) {
-    return "/dev/ubiblock" + std::to_string(partition) + "_0";
+  if (partition.IsRoot()) {
+    return base::FilePath("/dev/ubiblock" + partition.ToString() + "_0");
   }
-  return "/dev/ubi" + std::to_string(partition) + "_0";
+  return base::FilePath("/dev/ubi" + partition.ToString() + "_0");
 }
 
+// This is an array of device names that are allowed in end in a digit, and
+// which use the 'p' notation to denote partitions.
+constexpr std::array<base::StringPiece, 3> kNumberedDevices = {
+    "/dev/loop", "/dev/mmcblk", "/dev/nvme"};
+
 }  // namespace
+
+const PartitionNum PartitionNum::KERN_A = PartitionNum(2);
+const PartitionNum PartitionNum::ROOT_A = PartitionNum(3);
+const PartitionNum PartitionNum::KERN_B = PartitionNum(4);
+const PartitionNum PartitionNum::ROOT_B = PartitionNum(5);
+const PartitionNum PartitionNum::KERN_C = PartitionNum(6);
+const PartitionNum PartitionNum::ROOT_C = PartitionNum(7);
+const PartitionNum PartitionNum::EFI_SYSTEM = PartitionNum(12);
+
+bool PartitionNum::IsKernel() const {
+  return *this == KERN_A || *this == KERN_B || *this == KERN_C;
+}
+
+bool PartitionNum::IsRoot() const {
+  return *this == ROOT_A || *this == ROOT_B || *this == ROOT_C;
+}
+
+std::string PartitionNum::ToString() const {
+  return std::to_string(num_);
+}
+
+bool PartitionNum::operator==(const PartitionNum& other) const {
+  return num_ == other.num_;
+}
+
+std::ostream& operator<<(std::ostream& os, const PartitionNum& partition) {
+  os << "PartitionNum(" << partition.Value() << ")";
+  return os;
+}
 
 ScopedPathRemover::~ScopedPathRemover() {
   if (root_.empty()) {
     return;
   }
-  if (!base::DeletePathRecursively(base::FilePath(root_)))
-    warn("Cannot remove path %s", root_.c_str());
+  if (!base::DeletePathRecursively(root_))
+    PLOG(ERROR) << "Cannot remove path " << root_;
 }
 
-string ScopedPathRemover::Release() {
-  string r = root_;
+base::FilePath ScopedPathRemover::Release() {
+  base::FilePath r = root_;
   root_.clear();
   return r;
 }
@@ -134,11 +174,13 @@ bool WriteFullyToFileDescriptor(const string& content, int fd) {
 // Look up a keyed value from a /etc/lsb-release formatted file.
 // TODO(dgarrett): If we ever call this more than once, cache
 // file contents to avoid reparsing.
-bool LsbReleaseValue(const string& file, const string& key, string* result) {
+bool LsbReleaseValue(const base::FilePath& file,
+                     const string& key,
+                     string* result) {
   string preamble = key + "=";
 
   string file_contents;
-  if (!base::ReadFileToString(base::FilePath(file), &file_contents))
+  if (!base::ReadFileToString(file, &file_contents))
     return false;
 
   vector<string> file_lines = base::SplitString(
@@ -155,16 +197,14 @@ bool LsbReleaseValue(const string& file, const string& key, string* result) {
   return false;
 }
 
-// This is an array of device names that are allowed in end in a digit, and
-// which use the 'p' notation to denote partitions.
-const char* numbered_devices[] = {"/dev/loop", "/dev/mmcblk", "/dev/nvme"};
-
-string GetBlockDevFromPartitionDev(const string& partition_dev) {
+base::FilePath GetBlockDevFromPartitionDev(
+    const base::FilePath& partition_dev_path) {
+  const std::string& partition_dev = partition_dev_path.value();
   if (base::StartsWith(partition_dev, "/dev/mtd",
                        base::CompareCase::SENSITIVE) ||
       base::StartsWith(partition_dev, "/dev/ubi",
                        base::CompareCase::SENSITIVE)) {
-    return "/dev/mtd0";
+    return base::FilePath("/dev/mtd0");
   }
 
   size_t i = partition_dev.length();
@@ -172,15 +212,13 @@ string GetBlockDevFromPartitionDev(const string& partition_dev) {
   while (i > 0 && isdigit(partition_dev[i - 1]))
     i--;
 
-  for (const char** nd = begin(numbered_devices); nd != end(numbered_devices);
-       nd++) {
-    size_t nd_len = strlen(*nd);
-    // numbered_devices are of the form "/dev/mmcblk12p34"
-    if (partition_dev.compare(0, nd_len, *nd) == 0) {
-      if ((i == nd_len) || (partition_dev[i - 1] != 'p')) {
+  for (const base::StringPiece nd : kNumberedDevices) {
+    // kNumberedDevices are of the form "/dev/mmcblk12p34"
+    if (base::StartsWith(partition_dev, nd)) {
+      if ((i == nd.size()) || (partition_dev[i - 1] != 'p')) {
         // If there was no partition at the end (/dev/mmcblk12) return
         // unmodified.
-        return partition_dev;
+        return base::FilePath(partition_dev);
       } else {
         // If it ends with a p, strip off the p.
         i--;
@@ -188,61 +226,64 @@ string GetBlockDevFromPartitionDev(const string& partition_dev) {
     }
   }
 
-  return partition_dev.substr(0, i);
+  return base::FilePath(partition_dev.substr(0, i));
 }
 
-int GetPartitionFromPartitionDev(const string& partition_dev) {
-  size_t i = partition_dev.length();
+PartitionNum GetPartitionFromPartitionDev(
+    const base::FilePath& partition_dev_path) {
+  base::StringPiece partition_dev = partition_dev_path.value();
   if (base::EndsWith(partition_dev, "_0", base::CompareCase::SENSITIVE)) {
-    i -= 2;
+    partition_dev = partition_dev.substr(0, partition_dev.size() - 2);
   }
+  size_t i = partition_dev.length();
 
   while (i > 0 && isdigit(partition_dev[i - 1]))
     i--;
 
-  for (const char** nd = begin(numbered_devices); nd != end(numbered_devices);
-       nd++) {
-    size_t nd_len = strlen(*nd);
-    // numbered_devices are of the form "/dev/mmcblk12p34"
+  for (const base::StringPiece nd : kNumberedDevices) {
+    // kNumberedDevices are of the form "/dev/mmcblk12p34"
     // If there is no ending p, there is no partition at the end (/dev/mmcblk12)
-    if ((partition_dev.compare(0, nd_len, *nd) == 0) &&
-        ((i == nd_len) || (partition_dev[i - 1] != 'p'))) {
-      return 0;
+    if (base::StartsWith(partition_dev, nd) &&
+        ((i == nd.size()) || (partition_dev[i - 1] != 'p'))) {
+      return PartitionNum(0);
     }
   }
 
-  string partition_str = partition_dev.substr(i, i + 1);
+  base::StringPiece partition_str = partition_dev.substr(i, i + 1);
 
-  int result = atoi(partition_str.c_str());
+  int result = 0;
+  if (!base::StringToInt(partition_str, &result)) {
+    result = 0;
+  }
 
   if (result == 0)
     LOG(ERROR) << "Bad partition number from " << partition_dev;
 
-  return result;
+  return PartitionNum(result);
 }
 
-string MakePartitionDev(const string& block_dev, int partition) {
+base::FilePath MakePartitionDev(const base::FilePath& block_dev_path,
+                                PartitionNum partition) {
+  const std::string& block_dev = block_dev_path.value();
   if (base::StartsWith(block_dev, "/dev/mtd", base::CompareCase::SENSITIVE) ||
       base::StartsWith(block_dev, "/dev/ubi", base::CompareCase::SENSITIVE)) {
     return MakeNandPartitionDevForMounting(partition);
   }
 
-  for (const char** nd = begin(numbered_devices); nd != end(numbered_devices);
-       nd++) {
-    size_t nd_len = strlen(*nd);
-    if (block_dev.compare(0, nd_len, *nd) == 0)
-      return block_dev + "p" + std::to_string(partition);
+  for (const base::StringPiece nd : kNumberedDevices) {
+    if (base::StartsWith(block_dev, nd))
+      return base::FilePath(block_dev + "p" + partition.ToString());
   }
 
-  return block_dev + std::to_string(partition);
+  return base::FilePath(block_dev + partition.ToString());
 }
 
 // rm *pack from /dirname
-bool RemovePackFiles(const string& dirname) {
+bool RemovePackFiles(const base::FilePath& dirname) {
   DIR* dp;
   struct dirent* ep;
 
-  dp = opendir(dirname.c_str());
+  dp = opendir(dirname.value().c_str());
 
   if (dp == NULL)
     return false;
@@ -258,10 +299,10 @@ bool RemovePackFiles(const string& dirname) {
         (filename.compare(filename.size() - 4, 4, "pack") != 0))
       continue;
 
-    string full_filename = dirname + '/' + filename;
+    base::FilePath full_filename = dirname.Append(filename);
 
     LOG(INFO) << "Unlinked file: " << full_filename;
-    unlink(full_filename.c_str());
+    unlink(full_filename.value().c_str());
   }
 
   closedir(dp);
@@ -269,8 +310,8 @@ bool RemovePackFiles(const string& dirname) {
   return true;
 }
 
-bool Touch(const string& filename) {
-  int fd = open(filename.c_str(), O_WRONLY | O_CREAT,
+bool Touch(const base::FilePath& filename) {
+  int fd = open(filename.value().c_str(), O_WRONLY | O_CREAT,
                 S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   if (fd == -1)
@@ -314,10 +355,10 @@ void ReplaceAll(string* target, const string& pattern, const string& value) {
   }
 }
 
-bool MakeFileSystemRw(const string& dev_name) {
+bool MakeFileSystemRw(const base::FilePath& dev_name) {
   const int offset = 0x464 + 3;  // Set 'highest' byte
 
-  base::ScopedFD fd(open(dev_name.c_str(), O_RDWR));
+  base::ScopedFD fd(open(dev_name.value().c_str(), O_RDWR));
   if (!fd.is_valid()) {
     PLOG(ERROR) << "Failed to open: " << dev_name;
     return false;
@@ -373,10 +414,11 @@ __attribute__((__format__(__printf__, 1, 2))) void VbExError(const char* format,
 }
 }
 
-string DumpKernelConfig(const string& kernel_dev) {
+string DumpKernelConfig(const base::FilePath& kernel_dev) {
   string result;
 
-  char* config = FindKernelConfig(kernel_dev.c_str(), USE_PREAMBLE_LOAD_ADDR);
+  char* config =
+      FindKernelConfig(kernel_dev.value().c_str(), USE_PREAMBLE_LOAD_ADDR);
   if (!config) {
     LOG(ERROR) << "Error retrieving kernel config from " << kernel_dev;
     return result;
@@ -478,9 +520,11 @@ bool SetKernelArg(const string& key,
 
 // For the purposes of ChromeOS, devices that start with
 // "/dev/dm" are to be treated as read-only.
-bool IsReadonly(const string& device) {
-  return base::StartsWith(device, "/dev/dm", base::CompareCase::SENSITIVE) ||
-         base::StartsWith(device, "/dev/ubi", base::CompareCase::SENSITIVE);
+bool IsReadonly(const base::FilePath& device) {
+  return base::StartsWith(device.value(), "/dev/dm",
+                          base::CompareCase::SENSITIVE) ||
+         base::StartsWith(device.value(), "/dev/ubi",
+                          base::CompareCase::SENSITIVE);
 }
 
 bool GetKernelInfo(std::string* result) {

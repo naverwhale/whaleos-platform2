@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,39 +23,47 @@
 #include <algorithm>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include <brillo/whaleos_util.h>
 #include <base/bits.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
-#include <base/strings/stringprintf.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/strings/string_split.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <base/strings/stringprintf.h>
+#include <brillo/blkdev_utils/get_backing_block_device.h>
 #include <brillo/blkdev_utils/lvm.h>
+#include <brillo/blkdev_utils/storage_device.h>
+#include <brillo/blkdev_utils/storage_utils.h>
+#include <brillo/files/file_util.h>
 #include <brillo/process/process.h>
+#include <chromeos/constants/imageloader.h>
 #include <crypto/random.h>
+#include <libdlcservice/utils.h>
+#include <libcrossystem/crossystem.h>
 #include <rootdev/rootdev.h>
-#include <vboot/cgpt_params.h>
-#include <vboot/vboot_host.h>
 #include <chromeos/secure_erase_file/secure_erase_file.h>
 
-#include "init/crossystem.h"
+#include "init/clobber_state_log.h"
 #include "init/utils.h"
 
 namespace {
 
 constexpr char kStatefulPath[] = "/mnt/stateful_partition";
 constexpr char kPowerWashCountPath[] = "unencrypted/preserve/powerwash_count";
+constexpr char kStartupManifestPath[] = "unencrypted/preserve/startup_manifest.json";
 constexpr char kLastPowerWashTimePath[] =
     "unencrypted/preserve/last_powerwash_time";
 constexpr char kRmaStateFilePath[] = "unencrypted/rma-data/state";
-constexpr char kClobberLogPath[] = "/tmp/clobber-state.log";
 constexpr char kBioWashPath[] = "/usr/bin/bio_wash";
 constexpr char kPreservedFilesTarPath[] = "/tmp/preserve.tar";
 constexpr char kStatefulClobberLogPath[] = "unencrypted/clobber.log";
@@ -64,11 +72,23 @@ constexpr char kRollbackFileForPstorePath[] =
     "/var/lib/oobe_config_save/data_for_pstore";
 constexpr char kPstoreInputPath[] = "/dev/pmsg0";
 // Keep file names in sync with update_engine prefs.
-constexpr char kLastPingDate[] = "last-active-ping-day";
-constexpr char kLastRollcallDate[] = "last-roll-call-ping-day";
-constexpr char kUpdateEnginePrefsPath[] = "/var/lib/update_engine/prefs/";
+const char* kUpdateEnginePrefsFiles[] = {"last-active-ping-day",
+                                         "last-roll-call-ping-day"};
+constexpr char kUpdateEnginePrefsPath[] = "var/lib/update_engine/prefs/";
 constexpr char kUpdateEnginePreservePath[] =
     "unencrypted/preserve/update_engine/prefs/";
+constexpr char kChromadMigrationSkipOobePreservePath[] =
+    "unencrypted/preserve/chromad_migration_skip_oobe";
+// CrOS Private Computing (go/chromeos-data-pc) will save the device last
+// active dates in different use cases into a file.
+constexpr char kPsmDeviceActiveLocalPrefPath[] =
+    "var/lib/private_computing/last_active_dates";
+constexpr char kPsmDeviceActivePreservePath[] =
+    "unencrypted/preserve/last_active_dates";
+constexpr char kFlexLocalPath[] = "var/lib/flex_id/";
+constexpr char kFlexPreservePath[] = "unencrypted/preserve/flex/";
+constexpr char kFlexIdFile[] = "flex_id";
+
 // Size of string for volume group name.
 constexpr int kVolumeGroupNameSize = 16;
 
@@ -85,7 +105,7 @@ constexpr char kUbiRootDisk[] = "/dev/mtd0";
 constexpr char kUbiDevicePrefix[] = "/dev/ubi";
 constexpr char kUbiDeviceStatefulFormat[] = "/dev/ubi%d_0";
 
-constexpr base::TimeDelta kMinClobberDuration = base::TimeDelta::FromMinutes(5);
+constexpr base::TimeDelta kMinClobberDuration = base::Minutes(5);
 
 // |strip_partition| attempts to remove the partition number from the result.
 base::FilePath GetRootDevice(bool strip_partition) {
@@ -97,11 +117,6 @@ base::FilePath GetRootDevice(bool strip_partition) {
     return base::FilePath();
   }
 }
-
-void CgptFindShowFunctionNoOp(struct CgptFindParams*,
-                              const char*,
-                              int,
-                              GptEntry*) {}
 
 // Calculate the maximum number of bad blocks per 1024 blocks for UBI.
 int CalculateUBIMaxBadBlocksPer1024(int partition_number) {
@@ -134,12 +149,9 @@ bool GetBlockCount(const base::FilePath& device_path,
   dumpe2fs.AddArg("-h");
   dumpe2fs.AddArg(device_path.value());
 
-  base::FilePath temp_file;
-  base::CreateTemporaryFile(&temp_file);
-  dumpe2fs.RedirectOutput(temp_file.value());
+  dumpe2fs.RedirectOutputToMemory(true);
   if (dumpe2fs.Run() == 0) {
-    std::string output;
-    base::ReadFileToString(temp_file, &output);
+    std::string output = dumpe2fs.GetOutputString(STDOUT_FILENO);
     size_t label = output.find("Block count");
     size_t value_start = output.find_first_of("0123456789", label);
     size_t value_end = output.find_first_not_of("0123456789", value_start);
@@ -173,20 +185,6 @@ bool GetBlockCount(const base::FilePath& device_path,
     }
   }
   return false;
-}
-
-void AppendFileToLog(const base::FilePath& file) {
-  std::string file_contents;
-  if (!base::ReadFileToString(file, &file_contents)) {
-    // Even if reading file failed, some of its contents may have been read
-    // successfully, so we still attempt to append them to our log file.
-    PLOG(ERROR) << "Reading from temporary file failed: " << file.value();
-  }
-
-  if (!base::AppendToFile(base::FilePath(kClobberLogPath), file_contents)) {
-    PLOG(ERROR) << "Appending " << file.value()
-                << " to clobber-state log failed";
-  }
 }
 
 // Attempt to save logs from the boot when the clobber happened into the
@@ -224,6 +222,27 @@ void UnmountEncryptedStateful() {
     }
   }
   PLOG(ERROR) << "Failed to unmount encrypted stateful.";
+}
+
+void UnmountStateful(const base::FilePath& stateful) {
+  LOG(INFO) << "Unmounting stateful partition";
+  for (int attempts = 0; attempts < 10; ++attempts) {
+    int ret = umount(stateful.value().c_str());
+    if (ret) {
+      // Disambiguate failures from busy or already unmounted stateful partition
+      // from other generic failures.
+      if (errno == EBUSY) {
+        PLOG(ERROR) << "Failed to unmount busy stateful partition";
+        base::PlatformThread::Sleep(base::Milliseconds(200));
+        continue;
+      } else if (errno != EINVAL) {
+        PLOG(ERROR) << "Unable to unmount " << stateful;
+      } else {
+        PLOG(INFO) << "Stateful partition already unmounted";
+      }
+    }
+    return;
+  }
 }
 
 void MoveRollbackFileToPstore() {
@@ -278,6 +297,8 @@ ClobberState::Arguments ClobberState::ParseArgv(int argc,
   for (const std::string& arg : split_args) {
     if (arg == "factory") {
       args.factory_wipe = true;
+      // Factory mode implies fast wipe.
+      args.fast_wipe = true;
     } else if (arg == "fast") {
       args.fast_wipe = true;
     } else if (arg == "keepimg") {
@@ -289,17 +310,14 @@ ClobberState::Arguments ClobberState::ParseArgv(int argc,
     } else if (base::StartsWith(
                    arg, "reason=", base::CompareCase::INSENSITIVE_ASCII)) {
       args.reason = arg;
-    } else if (arg == "setup_lvm") {
-      args.setup_lvm = true;
     } else if (arg == "rma") {
       args.rma_wipe = true;
+    } else if (arg == "ad_migration") {
+      args.ad_migration_wipe = true;
+    } else if (arg == "preserve_lvs") {
+      args.preserve_lvs = USE_LVM_STATEFUL_PARTITION;
     }
   }
-
-  if (USE_LVM_STATEFUL_PARTITION) {
-    args.setup_lvm = true;
-  }
-
   return args;
 }
 
@@ -328,7 +346,7 @@ int ClobberState::PreserveFiles(
     const std::vector<base::FilePath>& preserved_files,
     const base::FilePath& tar_file_path) {
   // Remove any stale tar files from previous clobber-state runs.
-  base::DeleteFile(tar_file_path);
+  brillo::DeleteFile(tar_file_path);
 
   // We want to preserve permissions and recreate the directory structure
   // for all of the files in |preserved_files|. In order to do so we run tar
@@ -378,41 +396,6 @@ int ClobberState::PreserveFiles(
     tar.AddArg(*it);
   }
   return tar.Run();
-}
-
-// static
-bool ClobberState::GetDevicePathComponents(const base::FilePath& device,
-                                           std::string* base_device_out,
-                                           int* partition_out) {
-  if (!partition_out || !base_device_out)
-    return false;
-  const std::string& path = device.value();
-
-  // MTD devices sometimes have a trailing "_0" after the partition which
-  // we should ignore.
-  std::string mtd_suffix = "_0";
-  size_t suffix_index = path.length();
-  if (base::EndsWith(path, mtd_suffix, base::CompareCase::SENSITIVE)) {
-    suffix_index = path.length() - mtd_suffix.length();
-  }
-
-  size_t last_non_numeric =
-      path.find_last_not_of("0123456789", suffix_index - 1);
-
-  // If there are no non-numeric characters, this is a malformed device.
-  if (last_non_numeric == std::string::npos) {
-    return false;
-  }
-
-  std::string partition_number_string =
-      path.substr(last_non_numeric + 1, suffix_index - (last_non_numeric + 1));
-  int partition_number;
-  if (!base::StringToInt(partition_number_string, &partition_number)) {
-    return false;
-  }
-  *partition_out = partition_number;
-  *base_device_out = path.substr(0, last_non_numeric + 1);
-  return true;
 }
 
 bool ClobberState::IsRotational(const base::FilePath& device_path) {
@@ -481,8 +464,8 @@ bool ClobberState::GetDevicesToWipe(
 
   std::string base_device;
   int active_root_partition;
-  if (!GetDevicePathComponents(root_device, &base_device,
-                               &active_root_partition)) {
+  if (!utils::GetDevicePathComponents(root_device, &base_device,
+                                      &active_root_partition)) {
     LOG(ERROR) << "Extracting partition number and base device from "
                   "root_device failed: "
                << root_device.value();
@@ -570,7 +553,8 @@ bool ClobberState::WipeMTDDevice(
 
   std::string base_device;
   int partition_number;
-  if (!GetDevicePathComponents(device_path, &base_device, &partition_number)) {
+  if (!utils::GetDevicePathComponents(device_path, &base_device,
+                                      &partition_number)) {
     LOG(ERROR) << "Getting partition number from device failed: "
                << device_path.value();
     return false;
@@ -589,9 +573,6 @@ bool ClobberState::WipeMTDDevice(
                << device_path.value();
   }
 
-  base::FilePath temp_file;
-  base::CreateTemporaryFile(&temp_file);
-
   std::string physical_device =
       base::StringPrintf("/dev/ubi%d", partition_number);
   struct stat st;
@@ -602,9 +583,9 @@ bool ClobberState::WipeMTDDevice(
     ubiattach.AddArg("/bin/ubiattach");
     ubiattach.AddIntOption("-m", partition_number);
     ubiattach.AddIntOption("-d", partition_number);
-    ubiattach.RedirectOutput(temp_file.value());
+    ubiattach.RedirectOutputToMemory(true);
     ubiattach.Run();
-    AppendFileToLog(temp_file);
+    init::AppendToLog("ubiattach", ubiattach.GetOutputString(STDOUT_FILENO));
   }
 
   int max_bad_blocks_per_1024 =
@@ -618,9 +599,9 @@ bool ClobberState::WipeMTDDevice(
   brillo::ProcessImpl ubidetach;
   ubidetach.AddArg("/bin/ubidetach");
   ubidetach.AddIntOption("-d", partition_number);
-  ubidetach.RedirectOutput(temp_file.value());
+  ubidetach.RedirectOutputToMemory(true);
   int detach_ret = ubidetach.Run();
-  AppendFileToLog(temp_file);
+  init::AppendToLog("ubidetach", ubidetach.GetOutputString(STDOUT_FILENO));
   if (detach_ret) {
     LOG(ERROR) << "Detaching MTD volume failed with code " << detach_ret;
   }
@@ -630,9 +611,9 @@ bool ClobberState::WipeMTDDevice(
   ubiformat.AddArg("-y");
   ubiformat.AddIntOption("-e", 0);
   ubiformat.AddArg(base::StringPrintf("/dev/mtd%d", partition_number));
-  ubiformat.RedirectOutput(temp_file.value());
+  ubiformat.RedirectOutputToMemory(true);
   int format_ret = ubiformat.Run();
-  AppendFileToLog(temp_file);
+  init::AppendToLog("ubiformat", ubiformat.GetOutputString(STDOUT_FILENO));
   if (format_ret) {
     LOG(ERROR) << "Formatting MTD volume failed with code " << format_ret;
   }
@@ -644,9 +625,9 @@ bool ClobberState::WipeMTDDevice(
   ubiattach.AddIntOption("-d", partition_number);
   ubiattach.AddIntOption("-m", partition_number);
   ubiattach.AddIntOption("--max-beb-per1024", max_bad_blocks_per_1024);
-  ubiattach.RedirectOutput(temp_file.value());
+  ubiattach.RedirectOutputToMemory(true);
   int attach_ret = ubiattach.Run();
-  AppendFileToLog(temp_file);
+  init::AppendToLog("ubiattach", ubiattach.GetOutputString(STDOUT_FILENO));
   if (attach_ret) {
     LOG(ERROR) << "Reattaching MTD volume failed with code " << attach_ret;
   }
@@ -656,9 +637,9 @@ bool ClobberState::WipeMTDDevice(
   ubimkvol.AddIntOption("-s", volume_size);
   ubimkvol.AddStringOption("-N", partition_name);
   ubimkvol.AddArg(physical_device);
-  ubimkvol.RedirectOutput(temp_file.value());
+  ubimkvol.RedirectOutputToMemory(true);
   int mkvol_ret = ubimkvol.Run();
-  AppendFileToLog(temp_file);
+  init::AppendToLog("ubimkvol", ubimkvol.GetOutputString(STDOUT_FILENO));
   if (mkvol_ret) {
     LOG(ERROR) << "Making MTD volume failed with code " << mkvol_ret;
   }
@@ -674,19 +655,22 @@ bool ClobberState::WipeMTDDevice(
 // static
 bool ClobberState::WipeBlockDevice(const base::FilePath& device_path,
                                    ClobberUi* ui,
-                                   bool fast) {
+                                   bool fast,
+                                   bool discard) {
   const int write_block_size = 4 * 1024 * 1024;
   int64_t to_write = 0;
+
+  struct stat st;
+  if (stat(device_path.value().c_str(), &st) == -1) {
+    PLOG(ERROR) << "Unable to stat " << device_path.value();
+    return false;
+  }
+
   if (fast) {
     to_write = write_block_size;
   } else {
     // Wipe the filesystem size if we can determine it. Full partition wipe
     // takes a long time on 16G SSD or rotating media.
-    struct stat st;
-    if (stat(device_path.value().c_str(), &st) == -1) {
-      PLOG(ERROR) << "Unable to stat " << device_path.value();
-      return false;
-    }
     int64_t block_size = st.st_blksize;
     int64_t block_count;
     if (!GetBlockCount(device_path, block_size, &block_count)) {
@@ -722,32 +706,32 @@ bool ClobberState::WipeBlockDevice(const base::FilePath& device_path,
 
   uint64_t total_written = 0;
 
-  // Attempt to use the BLKZEROOUT ioctl since it is significantly faster if
-  // supported by the device. It is not supported on kernels before 4.4.
-  // If the device does not support it, the kernel will fall back to writing
-  // 0's manually.
-  // We call BLKZEROOUT in chunks 5% (1/20th) of the disk size so that we can
-  // update progress as we go. Round up the chunk size to a multiple of 128MiB.
-  // BLKZEROOUT requires that its arguments are aligned to at least 512 bytes.
-  const uint64_t zero_block_size =
-      base::bits::AlignUp(to_write / 20, 128 * 1024 * 1024);
+  // We call wiping in chunks 5% (1/20th) of the disk size so that we can
+  // update progress as we go. Round up the chunk size to a multiple of 128MiB,
+  // since the wiping ioctl requires that its arguments are aligned to at least
+  // 512 bytes.
+  const uint64_t zero_block_size = base::bits::AlignUp(
+      static_cast<uint64_t>(to_write / 20), uint64_t{128 * 1024 * 1024});
+  const uint64_t zero_block_size_1mib = base::bits::AlignUp(
+      static_cast<uint64_t>(to_write / 20), uint64_t{1024 * 1024});
+
+  base::FilePath base_dev =
+      brillo::GetBackingPhysicalDeviceForBlock(st.st_rdev);
+  std::unique_ptr<brillo::StorageDevice> storage_device =
+      brillo::GetStorageDevice(base_dev);
   while (total_written < to_write) {
     uint64_t write_size = std::min(zero_block_size, to_write - total_written);
-    uint64_t range[2] = {total_written, write_size};
-    LOG(INFO) << "Wiping from " << total_written << " to "
-              << (total_written + write_size);
-    int ret = ioctl(device.GetPlatformFile(), BLKZEROOUT, &range);
-    if (ret == 0) {
-      total_written += write_size;
-      if (display_progress) {
-        ui->UpdateWipeProgress(total_written);
-      }
-    } else if (errno == ENOTTY) {
-      LOG(INFO) << "BLKZEROOUT is not supported";
+    // For `discard` case, chunk smaller for first 128MiB wipes.
+    if (discard && total_written < zero_block_size) {
+      write_size = std::min(zero_block_size_1mib, to_write - total_written);
+    }
+    if (!storage_device->WipeBlkDev(device_path, total_written, write_size,
+                                    false, discard)) {
       break;
-    } else {
-      PLOG(ERROR) << "Wiping with BLKZEROOUT failed";
-      break;
+    }
+    total_written += write_size;
+    if (display_progress) {
+      ui->UpdateWipeProgress(total_written);
     }
   }
 
@@ -769,6 +753,12 @@ bool ClobberState::WipeBlockDevice(const base::FilePath& device_path,
       LOG(ERROR) << "Wrote " << total_written << " bytes before failing";
       return false;
     }
+    if (discard && !storage_device->DiscardBlockDevice(
+                       device_path, total_written, write_size)) {
+      PLOG(ERROR) << "Failed to discard blocks of " << device_path.value()
+                  << " at offset=" << total_written << " size=" << write_size;
+      return false;
+    }
     total_written += bytes_written;
     if (display_progress) {
       ui->UpdateWipeProgress(total_written);
@@ -781,98 +771,38 @@ bool ClobberState::WipeBlockDevice(const base::FilePath& device_path,
 }
 
 // static
-int ClobberState::GetPartitionNumber(const base::FilePath& drive_name,
-                                     const std::string& partition_label) {
-  // TODO(C++20): Switch to aggregate initialization once we require C++20.
-  CgptFindParams params = {};
-  params.set_label = 1;
-  params.label = partition_label.c_str();
-  params.drive_name = drive_name.value().c_str();
-  params.show_fn = &CgptFindShowFunctionNoOp;
-  CgptFind(&params);
-  if (params.hits != 1) {
-    LOG(ERROR) << "Could not find partition number for partition "
-               << partition_label;
-    return -1;
+void ClobberState::RemoveVpdKeys() {
+  constexpr std::array<const char*, 1> keys_to_remove{
+      // This key is used for caching the feature level.
+      // Need to remove it, as it must be recalculated when re-entering normal
+      // mode.
+      "feature_device_info",
+  };
+  for (auto key : keys_to_remove) {
+    brillo::ProcessImpl vpd;
+    vpd.AddArg("/usr/sbin/vpd");
+    vpd.AddStringOption("-i", "RW_VPD");
+    vpd.AddStringOption("-d", key);
+    // Do not report failures as the key might not even exist in the VPD.
+    vpd.RedirectOutputToMemory(true);
+    vpd.Run();
+    init::AppendToLog("vpd", vpd.GetOutputString(STDOUT_FILENO));
   }
-  return params.match_partnum;
-}
-
-// static
-bool ClobberState::ReadPartitionMetadata(const base::FilePath& disk,
-                                         int partition_number,
-                                         bool* successful_out,
-                                         int* priority_out) {
-  if (!successful_out || !priority_out)
-    return false;
-  // TODO(C++20): Switch to aggregate initialization once we require C++20.
-  CgptAddParams params = {};
-  params.drive_name = disk.value().c_str();
-  params.partition = partition_number;
-  if (CgptGetPartitionDetails(&params) == CGPT_OK) {
-    *successful_out = params.successful;
-    *priority_out = params.priority;
-    return true;
-  } else {
-    return false;
-  }
-}
-
-// static
-void ClobberState::EnsureKernelIsBootable(const base::FilePath root_disk,
-                                          int kernel_partition) {
-  bool successful = false;
-  int priority = 0;
-  if (!ReadPartitionMetadata(root_disk, kernel_partition, &successful,
-                             &priority)) {
-    LOG(ERROR) << "Failed to read partition metadata from partition "
-               << kernel_partition << " on disk " << root_disk.value();
-    // If we couldn't read, we'll err on the side of caution and try to set the
-    // successful bit and priority anyways.
-  }
-
-  if (!successful) {
-    // TODO(C++20): Switch to aggregate initialization once we require C++20.
-    CgptAddParams params = {};
-    params.partition = kernel_partition;
-    params.set_successful = 1;
-    params.drive_name = root_disk.value().c_str();
-    params.successful = 1;
-    if (CgptAdd(&params) != CGPT_OK) {
-      LOG(ERROR) << "Failed to set sucessful for active kernel partition: "
-                 << kernel_partition;
-    }
-  }
-
-  if (priority < 1) {
-    // TODO(C++20): Switch to aggregate initialization once we require C++20.
-    CgptPrioritizeParams params = {};
-    params.set_partition = kernel_partition;
-    params.drive_name = root_disk.value().c_str();
-    // When reordering kernel priorities to set the active kernel to highest,
-    // use 3 as the highest value. Since there are only 3 kernel partitions,
-    // this ensures that all priorities are unique.
-    params.max_priority = 3;
-    if (CgptPrioritize(&params) != CGPT_OK) {
-      LOG(ERROR) << "Failed to prioritize active kernel partition: "
-                 << kernel_partition;
-    }
-  }
-
-  sync();
 }
 
 ClobberState::ClobberState(const Arguments& args,
-                           std::unique_ptr<CrosSystem> cros_system,
+                           std::unique_ptr<crossystem::Crossystem> cros_system,
                            std::unique_ptr<ClobberUi> ui,
                            std::unique_ptr<brillo::LogicalVolumeManager> lvm)
     : args_(args),
       cros_system_(std::move(cros_system)),
       ui_(std::move(ui)),
       stateful_(kStatefulPath),
+      root_path_("/"),
       dev_("/dev"),
       sys_("/sys"),
-      lvm_(std::move(lvm)) {}
+      lvm_(std::move(lvm)),
+      weak_ptr_factory_(this) {}
 
 std::vector<base::FilePath> ClobberState::GetPreservedFilesList() {
   std::vector<std::string> stateful_paths;
@@ -884,6 +814,9 @@ std::vector<base::FilePath> ClobberState::GetPreservedFilesList() {
   //   update check where device policy was available. Needed to avoid forced
   //   updates after rollbacks (device policy is not yet loaded at this time).
   if (args_.safe_wipe) {
+    if (base::PathExists(stateful_.Append(kStartupManifestPath))) {
+      stateful_paths.push_back(kStartupManifestPath);
+    }
     stateful_paths.push_back(kPowerWashCountPath);
     stateful_paths.push_back(
         "unencrypted/preserve/tpm_firmware_update_request");
@@ -892,10 +825,19 @@ std::vector<base::FilePath> ClobberState::GetPreservedFilesList() {
     stateful_paths.push_back(std::string(kUpdateEnginePreservePath) +
                              "rollback-version");
 
-    stateful_paths.push_back(std::string(kUpdateEnginePreservePath) +
-                             std::string(kLastPingDate));
-    stateful_paths.push_back(std::string(kUpdateEnginePreservePath) +
-                             std::string(kLastRollcallDate));
+    for (const auto* ue_prefs_filename : kUpdateEnginePrefsFiles) {
+      stateful_paths.push_back(std::string(kUpdateEnginePreservePath) +
+                               std::string(ue_prefs_filename));
+    }
+    // Preserve the device last active dates to Private Set Computing (psm).
+    stateful_paths.push_back(kPsmDeviceActivePreservePath);
+
+    // For the Chromad to cloud migration, we store a flag file to indicate that
+    // some OOBE screens should be skipped after the device is powerwashed.
+    if (args_.ad_migration_wipe) {
+      stateful_paths.push_back(kChromadMigrationSkipOobePreservePath);
+    }
+
     // Preserve pre-installed demo mode resources for offline Demo Mode.
     std::string demo_mode_resources_dir =
         "unencrypted/cros-components/offline-demo-mode-resources/";
@@ -907,11 +849,26 @@ std::vector<base::FilePath> ClobberState::GetPreservedFilesList() {
     stateful_paths.push_back(demo_mode_resources_dir + "manifest.json");
     stateful_paths.push_back(demo_mode_resources_dir + "table");
 
-    // For rollback wipes, we preserve additional data as defined in
-    // oobe_config/rollback_data.proto.
+    // For rollback wipes, we preserve the rollback metrics file and additional
+    // data as defined in oobe_config/rollback_data.proto.
     if (args_.rollback_wipe) {
+      stateful_paths.push_back(
+          "unencrypted/preserve/enterprise-rollback-metrics-data");
+      // Devices produced >= 2023 use the new rollback data
+      // ("rollback_data_tpm") encryption.
+      stateful_paths.push_back("unencrypted/preserve/rollback_data_tpm");
+      // TODO(b/263065223) Preservation of the old format ("rollback_data") can
+      // be removed when all devices produced before 2023 are EOL.
       stateful_paths.push_back("unencrypted/preserve/rollback_data");
     }
+
+    // Preserve the latest GSC crash ID to prevent uploading previously seen GSC
+    // crashes on every boot.
+    stateful_paths.push_back("unencrypted/preserve/gsc_prev_crash_log_id");
+
+    // Preserve the Flex ID file on ChromeOS Flex devices.
+    stateful_paths.push_back(std::string(kFlexPreservePath) +
+                             std::string(kFlexIdFile));
   }
 
   // Preserve RMA state file in RMA mode.
@@ -924,9 +881,9 @@ std::vector<base::FilePath> ClobberState::GetPreservedFilesList() {
   // important recovery behaviors (cf. the recover_duts upstart job).
   // We need those behaviors to survive across power wash, otherwise,
   // the current boot could wind up as a black hole.
-  int debug_build;
-  if (cros_system_->GetInt(CrosSystem::kDebugBuild, &debug_build) &&
-      debug_build == 1) {
+  std::optional<int> debug_build =
+      cros_system_->VbGetSystemPropertyInt(crossystem::Crossystem::kDebugBuild);
+  if (debug_build == 1) {
     stateful_paths.push_back(".labmachine");
   }
 
@@ -936,14 +893,29 @@ std::vector<base::FilePath> ClobberState::GetPreservedFilesList() {
   }
 
   if (args_.factory_wipe) {
-    base::FileEnumerator enumerator(
+    base::FileEnumerator crx_enumerator(
         stateful_.Append("unencrypted/import_extensions/extensions"), false,
         base::FileEnumerator::FileType::FILES, "*.crx");
-    for (base::FilePath name = enumerator.Next(); !name.empty();
-         name = enumerator.Next()) {
+    for (base::FilePath name = crx_enumerator.Next(); !name.empty();
+         name = crx_enumerator.Next()) {
       preserved_files.push_back(
           base::FilePath("unencrypted/import_extensions/extensions")
               .Append(name.BaseName()));
+    }
+
+    base::FileEnumerator dlc_enumerator(
+        stateful_.Append("unencrypted/dlc-factory-images"), false,
+        base::FileEnumerator::DIRECTORIES);
+    for (base::FilePath dir = dlc_enumerator.Next(); !dir.empty();
+         dir = dlc_enumerator.Next()) {
+      base::FilePath dlc_image_path =
+          base::FilePath("unencrypted/dlc-factory-images")
+              .Append(dir.BaseName())
+              .Append("package")
+              .Append("dlc.img");
+      if (base::PathExists(stateful_.Append(dlc_image_path))) {
+        preserved_files.push_back(dlc_image_path);
+      }
     }
   }
 
@@ -966,13 +938,13 @@ std::string ClobberState::GenerateRandomVolumeGroupName() {
 void ClobberState::RemoveLogicalVolumeStack() {
   // For logical volume stateful partition, deactivate the volume group before
   // wiping the device.
-  base::Optional<brillo::PhysicalVolume> pv = lvm_->GetPhysicalVolume(
+  std::optional<brillo::PhysicalVolume> pv = lvm_->GetPhysicalVolume(
       base::FilePath(wipe_info_.stateful_partition_device));
   if (!pv || !pv->IsValid()) {
     LOG(WARNING) << "Failed to get physical volume.";
     return;
   }
-  base::Optional<brillo::VolumeGroup> vg = lvm_->GetVolumeGroup(*pv);
+  std::optional<brillo::VolumeGroup> vg = lvm_->GetVolumeGroup(*pv);
   if (!vg || !vg->IsValid()) {
     LOG(WARNING) << "Failed to get volume group.";
     return;
@@ -986,6 +958,191 @@ void ClobberState::RemoveLogicalVolumeStack() {
   pv->Remove();
 }
 
+bool ClobberState::ProcessInfo(
+    const brillo::VolumeGroup& vg,
+    const PreserveLogicalVolumesWipeInfo& info,
+    std::unique_ptr<dlcservice::UtilsInterface> utils) {
+  auto lv = lvm_->GetLogicalVolume(vg, info.lv_name);
+  if (!lv || !lv->IsValid()) {
+    LOG(INFO) << "Skipping over logical volume: " << info.lv_name;
+    return true;
+  }
+
+  // Active logical volumes as not all have udev rule to active by default.
+  if (!lv->Activate()) {
+    LOG(ERROR) << "Failed to active logical volume: " << info.lv_name;
+    return false;
+  }
+
+  // Zero the logical volume.
+  if (info.zero) {
+    if (!WipeDevice(lv->GetPath(), /*discard=*/true)) {
+      LOG(ERROR) << "Failed to wipe logical volume: " << info.lv_name;
+      return false;
+    }
+  }
+
+  // Preserve the logical volume.
+  if (info.preserve) {
+    LOG(INFO) << "Preserving logical volume: " << info.lv_name;
+  } else if (!lv->Remove()) {
+    LOG(ERROR) << "Failed to remove logical volume: " << info.lv_name;
+    return false;
+  }
+
+  bool remove_lv = false;
+  // Verify digest of the logical volume.
+  if (info.digest_info) {
+    std::vector<uint8_t> actual_digest;
+    // Logical volumes MUST skip size checking. Stats on it are going to return
+    // the wrong size or 0.
+    if (!utils->HashFile(lv->GetPath(), info.digest_info->bytes, &actual_digest,
+                         /*skip_size_check=*/true)) {
+      LOG(ERROR) << "Failed to check digest of logical volume: "
+                 << info.lv_name;
+      // Continue to return `true`, as we DO NOT want all other preservations to
+      // fail due to a bad digest.
+      remove_lv = true;
+    } else if (info.digest_info->digest != actual_digest) {
+      LOG(ERROR) << "Digests do not match for logical volume: " << info.lv_name;
+      // Continue to return `true`, as we DO NOT want all other preservations to
+      // fail due to a bad digest.
+      remove_lv = true;
+    }
+  }
+
+  if (remove_lv && !lv->Remove()) {
+    LOG(ERROR) << "Failed to remove logical volume: " << info.lv_name;
+  }
+
+  return true;
+}
+
+bool ClobberState::PreserveLogicalVolumesWipe(
+    const PreserveLogicalVolumesWipeInfos& infos) {
+  auto pv = lvm_->GetPhysicalVolume({wipe_info_.stateful_partition_device});
+  if (!pv || !pv->IsValid()) {
+    LOG(WARNING) << "Failed to get physical volume.";
+    return false;
+  }
+  auto vg = lvm_->GetVolumeGroup(*pv);
+  if (!vg || !vg->IsValid()) {
+    LOG(WARNING) << "Failed to get volume group.";
+    return false;
+  }
+
+  // Remove all logical volumes we don't need to handle with care.
+  for (auto& lv : lvm_->ListLogicalVolumes(*vg)) {
+    const auto& lv_raw_name = lv.GetRawName();
+    auto it = infos.find({.lv_name = lv_raw_name});
+    bool found = it != infos.end();
+
+    if (found)
+      continue;
+
+    if (!lv.Remove()) {
+      LOG(ERROR) << "Failed to remove logical volume: " << lv_raw_name;
+      return false;
+    }
+  }
+
+  // We must handle logical volume with additional care based on the
+  // `PreserveLogicalVolumesWipeInfo`.
+  for (const auto& info : infos) {
+    if (info.lv_name == kUnencrypted)
+      continue;
+    if (!ProcessInfo(*vg, info, std::make_unique<dlcservice::Utils>()))
+      return false;
+  }
+  // Note: Always process unencrypted stateful last.
+  // This is so when there are crashes, the powerwash file is still accessible
+  // within unencrypted logical volume to go through and perform the powerwash
+  // again.
+  {
+    auto lv_name = kUnencrypted;
+    auto info_it = infos.find({.lv_name = lv_name});
+    if (info_it == infos.end()) {
+      LOG(ERROR) << "Missing " << lv_name
+                 << " in preserve logical volumes wipe info.";
+      return false;
+    }
+    if (!ProcessInfo(*vg, *info_it, std::make_unique<dlcservice::Utils>()))
+      return false;
+  }
+
+  auto old_vg_name = vg->GetName();
+  auto new_vg_name = GenerateRandomVolumeGroupName();
+  if (!vg->Rename(new_vg_name)) {
+    LOG(ERROR) << "Failed to rename volume group from=" << old_vg_name
+               << " to=" << new_vg_name;
+    return false;
+  }
+
+  return true;
+}
+
+void ClobberState::CreateUnencryptedStatefulLV(const brillo::VolumeGroup& vg,
+                                               const brillo::Thinpool& thinpool,
+                                               uint64_t lv_size) {
+  base::Value::Dict lv_config;
+  lv_config.Set("name", kUnencrypted);
+  lv_config.Set("size", base::NumberToString(lv_size));
+
+  std::optional<brillo::LogicalVolume> lv =
+      lvm_->CreateLogicalVolume(vg, thinpool, lv_config);
+  if (!lv || !lv->IsValid()) {
+    LOG(ERROR) << "Failed to create " << kUnencrypted << " logical volume.";
+    return;
+  }
+
+  lv->Activate();
+}
+
+std::optional<uint64_t> ClobberState::GetPartitionSize(
+    const base::FilePath& base_device) {
+  uint64_t partition_size = GetBlkSize(base_device) / (1024 * 1024);
+  if (partition_size < kMinStatefulPartitionSizeMb) {
+    LOG(ERROR) << "Invalid partition size (" << partition_size
+               << ") for: " << base_device.value();
+    return std::nullopt;
+  }
+  return {partition_size};
+}
+
+void ClobberState::CreateLogicalVolumeStackForPreserved() {
+  std::optional<uint64_t> partition_size =
+      GetPartitionSize(wipe_info_.stateful_partition_device);
+  if (!partition_size) {
+    LOG(ERROR) << "Failed to get partition size.";
+    return;
+  }
+
+  auto pv = lvm_->GetPhysicalVolume({wipe_info_.stateful_partition_device});
+  if (!pv || !pv->IsValid()) {
+    LOG(WARNING) << "Failed to get physical volume.";
+    return;
+  }
+
+  auto vg = lvm_->GetVolumeGroup(*pv);
+  if (!vg || !vg->IsValid()) {
+    LOG(WARNING) << "Failed to get volume group.";
+    return;
+  }
+
+  wipe_info_.stateful_filesystem_device = base::FilePath(
+      base::StringPrintf("/dev/%s/unencrypted", vg->GetName().c_str()));
+
+  std::optional<brillo::Thinpool> thinpool = lvm_->GetThinpool(*vg, kThinpool);
+  if (!thinpool || !thinpool->IsValid()) {
+    LOG(ERROR) << "Failed to get thinpool.";
+    return;
+  }
+
+  int64_t thinpool_size = partition_size.value() * kThinpoolSizePercent / 100;
+  uint64_t lv_size = thinpool_size * kLogicalVolumeSizePercent / 100;
+  CreateUnencryptedStatefulLV(*vg, *thinpool, lv_size);
+}
+
 void ClobberState::CreateLogicalVolumeStack() {
   base::FilePath base_device = wipe_info_.stateful_partition_device;
   std::string vg_name = GenerateRandomVolumeGroupName();
@@ -995,13 +1152,13 @@ void ClobberState::CreateLogicalVolumeStack() {
   // Get partition size to determine the sizes of the thin pool and the
   // logical volume. Use partition size in megabytes: thinpool (and logical
   // volume) sizes need to be a multiple of 512.
-  uint64_t partition_size = GetBlkSize(base_device) / (1024 * 1024);
-  if (partition_size < kMinStatefulPartitionSizeMb) {
-    LOG(ERROR) << "Invalid partition size.";
+  std::optional<uint64_t> partition_size = GetPartitionSize(base_device);
+  if (!partition_size) {
+    LOG(ERROR) << "Failed to get partition size.";
     return;
   }
 
-  base::Optional<brillo::PhysicalVolume> pv =
+  std::optional<brillo::PhysicalVolume> pv =
       lvm_->CreatePhysicalVolume(base_device);
 
   if (!pv || !pv->IsValid()) {
@@ -1009,8 +1166,7 @@ void ClobberState::CreateLogicalVolumeStack() {
     return;
   }
 
-  base::Optional<brillo::VolumeGroup> vg =
-      lvm_->CreateVolumeGroup(*pv, vg_name);
+  std::optional<brillo::VolumeGroup> vg = lvm_->CreateVolumeGroup(*pv, vg_name);
   if (!vg || !vg->IsValid()) {
     LOG(ERROR) << "Failed to create volume group.";
     return;
@@ -1018,70 +1174,91 @@ void ClobberState::CreateLogicalVolumeStack() {
 
   vg->Activate();
 
-  base::DictionaryValue thinpool_config;
-  int64_t thinpool_size = partition_size * kThinpoolSizePercent / 100;
+  base::Value thinpool_config(base::Value::Type::DICT);
+  int64_t thinpool_size = partition_size.value() * kThinpoolSizePercent / 100;
   int64_t thinpool_metadata_size =
       thinpool_size * kThinpoolMetadataSizePercent / 100;
-  thinpool_config.SetString("name", "thinpool");
-  thinpool_config.SetString("size", base::NumberToString(thinpool_size));
-  thinpool_config.SetString("metadata_size",
-                            base::NumberToString(thinpool_metadata_size));
+  auto& dict = thinpool_config.GetDict();
+  dict.Set("name", kThinpool);
+  dict.Set("size", base::NumberToString(thinpool_size));
+  dict.Set("metadata_size", base::NumberToString(thinpool_metadata_size));
 
-  base::Optional<brillo::Thinpool> thinpool =
+  std::optional<brillo::Thinpool> thinpool =
       lvm_->CreateThinpool(*vg, thinpool_config);
   if (!thinpool || !thinpool->IsValid()) {
     LOG(ERROR) << "Failed to create thinpool.";
     return;
   }
 
-  base::DictionaryValue lv_config;
-  lv_config.SetString("name", "unencrypted");
-  lv_config.SetString(
-      "size",
-      base::NumberToString(thinpool_size * kLogicalVolumeSizePercent / 100));
-
-  base::Optional<brillo::LogicalVolume> lv =
-      lvm_->CreateLogicalVolume(*vg, *thinpool, lv_config);
-  if (!lv || !lv->IsValid()) {
-    LOG(ERROR) << "Failed to create logical volume.";
-    return;
-  }
-
-  lv->Activate();
+  uint64_t lv_size = thinpool_size * kLogicalVolumeSizePercent / 100;
+  CreateUnencryptedStatefulLV(*vg, *thinpool, lv_size);
 }
 
-int ClobberState::CreateStatefulFileSystem() {
-  base::FilePath temp_file;
-  base::CreateTemporaryFile(&temp_file);
-
-  if (args_.setup_lvm) {
-    CreateLogicalVolumeStack();
-  } else {
-    // Set up the stateful filesystem on top of the stateful partition.
-    wipe_info_.stateful_filesystem_device =
-        wipe_info_.stateful_partition_device;
-  }
-
+int ClobberState::CreateStatefulFileSystem(
+    const std::string& stateful_filesystem_device) {
   brillo::ProcessImpl mkfs;
   if (wipe_info_.is_mtd_flash) {
     mkfs.AddArg("/sbin/mkfs.ubifs");
     mkfs.AddArg("-y");
     mkfs.AddStringOption("-x", "none");
     mkfs.AddIntOption("-R", 0);
-    mkfs.AddArg(wipe_info_.stateful_filesystem_device.value());
+    mkfs.AddArg(stateful_filesystem_device);
   } else {
     mkfs.AddArg("/sbin/mkfs.ext4");
     // Check if encryption is supported. If yes, enable the flag during mkfs.
     if (base::PathExists(base::FilePath(kExt4DircryptoSupportedPath)))
       mkfs.AddStringOption("-O", "encrypt");
-    mkfs.AddArg(wipe_info_.stateful_filesystem_device.value());
+    mkfs.AddArg(stateful_filesystem_device);
     // TODO(wad) tune2fs.
   }
-  mkfs.RedirectOutput(temp_file.value());
+  mkfs.RedirectOutputToMemory(true);
   LOG(INFO) << "Creating stateful file system";
   int ret = mkfs.Run();
-  AppendFileToLog(temp_file);
+  init::AppendToLog("mkfs.ubifs", mkfs.GetOutputString(STDOUT_FILENO));
   return ret;
+}
+
+void ClobberState::PreserveEncryptedFiles() {
+  // Preserve Update Engine prefs when the device is powerwashed.
+  base::FilePath ue_prefs_path(root_path_.Append(kUpdateEnginePrefsPath));
+  base::FilePath ue_preserve_prefs_path(
+      stateful_.Append(kUpdateEnginePreservePath));
+  if (base::CreateDirectory(ue_preserve_prefs_path)) {
+    for (const auto* ue_prefs_filename : kUpdateEnginePrefsFiles) {
+      base::FilePath ue_prefs_file(ue_prefs_path.Append(ue_prefs_filename));
+      base::FilePath ue_preserved_prefs_file(
+          ue_preserve_prefs_path.Append(ue_prefs_filename));
+      if (!base::CopyFile(ue_prefs_file, ue_preserved_prefs_file))
+        LOG(ERROR) << "Error copying file. Source: " << ue_prefs_file
+                   << " Target: " << ue_preserved_prefs_file;
+    }
+  } else {
+    LOG(ERROR) << "Error creating directory: " << ue_preserve_prefs_path;
+  }
+
+  // Preserve the psm device active dates when the device is powerwashed.
+  base::FilePath psm_local_pref_file(
+      root_path_.Append(kPsmDeviceActiveLocalPrefPath));
+  base::FilePath psm_preserved_pref_file(
+      stateful_.Append(kPsmDeviceActivePreservePath));
+  if (!base::CopyFile(psm_local_pref_file, psm_preserved_pref_file))
+    LOG(ERROR) << "Error copying file. Source: " << psm_local_pref_file
+               << " Target: " << psm_preserved_pref_file;
+
+  // Preserve the Flex ID file on ChromeOS Flex devices.
+  base::FilePath flex_path(root_path_.Append(kFlexLocalPath));
+  base::FilePath flex_preserve_path(stateful_.Append(kFlexPreservePath));
+  if (base::CreateDirectory(flex_preserve_path)) {
+    base::FilePath flex_id_file(flex_path.Append(kFlexIdFile));
+    base::FilePath flex_preserved_id_file(
+        flex_preserve_path.Append(kFlexIdFile));
+    if (!base::CopyFile(flex_id_file, flex_preserved_id_file)) {
+      LOG(ERROR) << "Error copying file. Source: " << flex_id_file
+                 << " Target: " << flex_preserved_id_file;
+    }
+  } else {
+    LOG(ERROR) << "Error creating directory: " << flex_preserve_path;
+  }
 }
 
 int ClobberState::Run() {
@@ -1093,7 +1270,7 @@ int ClobberState::Run() {
   // will be preserved after a reboot.
   base::ScopedClosureRunner relocate_clobber_state_log(base::BindRepeating(
       [](base::FilePath stateful_path) {
-        base::Move(base::FilePath(kClobberLogPath),
+        base::Move(base::FilePath(init::kClobberLogPath),
                    stateful_path.Append("unencrypted/clobber-state.log"));
       },
       stateful_));
@@ -1130,12 +1307,22 @@ int ClobberState::Run() {
   LOG(INFO) << "Rollback wipe: " << args_.rollback_wipe;
   LOG(INFO) << "Reason: " << args_.reason;
   LOG(INFO) << "RMA wipe: " << args_.rma_wipe;
+  LOG(INFO) << "AD migration wipe: " << args_.ad_migration_wipe;
 
   // Most effective means of destroying user data is run at the start: Throwing
   // away the key to encrypted stateful by requesting the TPM to be cleared at
   // next boot.
-  if (!cros_system_->SetInt(CrosSystem::kClearTpmOwnerRequest, 1)) {
+  if (!cros_system_->VbSetSystemPropertyInt(
+          crossystem::Crossystem::kClearTpmOwnerRequest, 1)) {
     LOG(ERROR) << "Requesting TPM wipe via crossystem failed";
+  }
+  if (brillo::IsWhalebook2Model()) {
+    base::WriteFile(base::FilePath("/sys/class/tpm/tpm0/ppi/request"), "5", 1);
+
+    std::string response;
+    base::ReadFileToString(
+        base::FilePath("/sys/class/tpm/tpm0/ppi/response"), &response);
+    LOG(INFO) << "TPM clear result: " << response;
   }
 
   // In cases where biometric sensors are available, reset the internal entropy
@@ -1148,25 +1335,26 @@ int ClobberState::Run() {
   // Try to mount encrypted stateful to save some files from there.
   bool encrypted_stateful_mounted = false;
 
+  // Update Engine and OOBE config utilities require preservation of files in
+  // /var across powerwash. Attempt to mount the encrypted stateful partition
+  // if:
+  // 1. The encrypted stateful partition is enabled on the device.
+  // 2. clobber-state is not running in factory mode: mount-encrypted is not
+  //    accessible within the factory environment.
+  // Failure to mount the encrypted stateful partition prevents the preservation
+  // of these files across powerwash, but functionally does not affect clobber.
   encrypted_stateful_mounted =
-      USE_ENCRYPTED_STATEFUL && MountEncryptedStateful();
+      USE_ENCRYPTED_STATEFUL && !args_.factory_wipe && MountEncryptedStateful();
 
   if (args_.safe_wipe) {
     IncrementFileCounter(stateful_.Append(kPowerWashCountPath));
-    if (encrypted_stateful_mounted) {
-      base::FilePath preserve_path =
-          stateful_.Append(kUpdateEnginePreservePath);
-      base::FilePath prefs_path(kUpdateEnginePrefsPath);
-      base::CopyFile(prefs_path.Append(kLastPingDate),
-                     preserve_path.Append(kLastPingDate));
-      base::CopyFile(prefs_path.Append(kLastRollcallDate),
-                     preserve_path.Append(kLastRollcallDate));
-    }
+    if (encrypted_stateful_mounted)
+      PreserveEncryptedFiles();
   }
 
   // Clear clobber log if needed.
   if (!preserve_sensitive_files) {
-    base::DeleteFile(stateful_.Append(kStatefulClobberLogPath));
+    brillo::DeleteFile(stateful_.Append(kStatefulClobberLogPath));
   }
 
   std::vector<base::FilePath> preserved_files = GetPreservedFilesList();
@@ -1219,11 +1407,11 @@ int ClobberState::Run() {
   LOG(INFO) << "Root disk: " << root_disk_.value();
   LOG(INFO) << "Root device: " << root_device.value();
 
-  partitions_.stateful = GetPartitionNumber(root_disk_, "STATE");
-  partitions_.root_a = GetPartitionNumber(root_disk_, "ROOT-A");
-  partitions_.root_b = GetPartitionNumber(root_disk_, "ROOT-B");
-  partitions_.kernel_a = GetPartitionNumber(root_disk_, "KERN-A");
-  partitions_.kernel_b = GetPartitionNumber(root_disk_, "KERN-B");
+  partitions_.stateful = utils::GetPartitionNumber(root_disk_, "STATE");
+  partitions_.root_a = utils::GetPartitionNumber(root_disk_, "ROOT-A");
+  partitions_.root_b = utils::GetPartitionNumber(root_disk_, "ROOT-B");
+  partitions_.kernel_a = utils::GetPartitionNumber(root_disk_, "KERN-A");
+  partitions_.kernel_b = utils::GetPartitionNumber(root_disk_, "KERN-B");
 
   if (!GetDevicesToWipe(root_disk_, root_device, partitions_, &wipe_info_)) {
     LOG(ERROR) << "Getting devices to wipe failed, aborting run";
@@ -1243,13 +1431,11 @@ int ClobberState::Run() {
   LOG(INFO) << "Inactive kernel device: "
             << wipe_info_.inactive_kernel_device.value();
 
-  base::FilePath temp_file;
-  base::CreateTemporaryFile(&temp_file);
-
   brillo::ProcessImpl log_preserve;
   log_preserve.AddArg("/sbin/clobber-log");
   log_preserve.AddArg("--preserve");
   log_preserve.AddArg("clobber-state");
+
   if (args_.factory_wipe)
     log_preserve.AddArg("factory");
   if (args_.fast_wipe)
@@ -1264,39 +1450,46 @@ int ClobberState::Run() {
     log_preserve.AddArg(args_.reason);
   if (args_.rma_wipe)
     log_preserve.AddArg("rma");
-  log_preserve.RedirectOutput(temp_file.value());
+  if (args_.ad_migration_wipe)
+    log_preserve.AddArg("ad_migration");
+
+  log_preserve.RedirectOutputToMemory(true);
   log_preserve.Run();
-  AppendFileToLog(temp_file);
+  init::AppendToLog("clobber-log", log_preserve.GetOutputString(STDOUT_FILENO));
 
   AttemptSwitchToFastWipe(is_rotational);
 
   // Make sure the stateful partition has been unmounted.
-  LOG(INFO) << "Unmounting stateful partition";
-  ret = umount(stateful_.value().c_str());
-  if (ret) {
-    // Disambiguate failures from busy or already unmounted stateful partition
-    // from other generic failures.
-    if (errno == EBUSY) {
-      PLOG(ERROR) << "Failed to unmount busy stateful partition";
-    } else if (errno != EINVAL) {
-      PLOG(ERROR) << "Unable to unmount " << stateful_.value();
+  UnmountStateful(stateful_);
+
+  base::ScopedClosureRunner reset_stateful(base::BindOnce(
+      &ClobberState::ResetStatefulPartition, weak_ptr_factory_.GetWeakPtr()));
+
+  if (args_.preserve_lvs) {
+    if (!PreserveLogicalVolumesWipe(PreserveLogicalVolumesWipeArgs())) {
+      args_.preserve_lvs = false;
+      LOG(WARNING) << "Preserve logical volumes wipe failed "
+                   << "(falling back to default LVM stateful wipe).";
     } else {
-      PLOG(INFO) << "Stateful partition already unmounted";
+      LOG(INFO) << "Preserve logical volumes, skipping device level wipe.";
+      reset_stateful.ReplaceClosure(base::DoNothing());
     }
   }
 
-  // Attempt to remove the logical volume stack unconditionally: this covers the
-  // situation where a device may rollback to a version that doesn't support
-  // the LVM stateful partition setup.
-  RemoveLogicalVolumeStack();
+  reset_stateful.RunAndReset();
 
-  // Destroy user data: wipe the stateful partition.
-  if (!WipeDevice(wipe_info_.stateful_partition_device)) {
-    LOG(ERROR) << "Unable to wipe device "
-               << wipe_info_.stateful_partition_device.value();
+  // `preserve_lvs` precedence check over creating a blank LVM setup.
+  if (args_.preserve_lvs) {
+    CreateLogicalVolumeStackForPreserved();
+  } else if (USE_LVM_STATEFUL_PARTITION) {
+    CreateLogicalVolumeStack();
+  } else {
+    // Set up the stateful filesystem on top of the stateful partition.
+    wipe_info_.stateful_filesystem_device =
+        wipe_info_.stateful_partition_device;
   }
 
-  ret = CreateStatefulFileSystem();
+  ret = CreateStatefulFileSystem(wipe_info_.stateful_filesystem_device.value());
   if (ret)
     LOG(ERROR) << "Unable to create stateful file system. Error code: " << ret;
 
@@ -1315,9 +1508,9 @@ int ClobberState::Run() {
     tar.AddStringOption("-C", stateful_.value());
     tar.AddArg("-x");
     tar.AddStringOption("-f", preserved_tar_file.value());
-    tar.RedirectOutput(temp_file.value());
+    tar.RedirectOutputToMemory(true);
     ret = tar.Run();
-    AppendFileToLog(temp_file);
+    init::AppendToLog("tar", tar.GetOutputString(STDOUT_FILENO));
     if (ret != 0) {
       LOG(WARNING) << "Restoring preserved files failed with code " << ret;
     }
@@ -1335,22 +1528,26 @@ int ClobberState::Run() {
   log_restore.AddArg("/sbin/clobber-log");
   log_restore.AddArg("--restore");
   log_restore.AddArg("clobber-state");
-  log_restore.RedirectOutput(temp_file.value());
+  log_restore.RedirectOutputToMemory(true);
   ret = log_restore.Run();
-  AppendFileToLog(temp_file);
+  init::AppendToLog("clobber-log", log_restore.GetOutputString(STDOUT_FILENO));
   if (ret != 0) {
     LOG(WARNING) << "Restoring clobber.log failed with code " << ret;
   }
 
   // Attempt to collect crashes into the reboot vault crash directory. Do not
-  // collect crashes if this is a user triggered powerwash.
-  if (preserve_sensitive_files) {
+  // collect crashes if this is a user triggered or a factory powerwash.
+  if (preserve_sensitive_files && !args_.factory_wipe) {
     if (utils::CreateEncryptedRebootVault())
       CollectClobberCrashReports();
   }
 
+  // Remove keys that may alter device state.
+  RemoveVpdKeys();
+
   if (!args_.keepimg) {
-    EnsureKernelIsBootable(root_disk_, wipe_info_.active_kernel_partition);
+    utils::EnsureKernelIsBootable(root_disk_,
+                                  wipe_info_.active_kernel_partition);
     WipeDevice(wipe_info_.inactive_root_device);
     WipeDevice(wipe_info_.inactive_kernel_device);
   }
@@ -1383,13 +1580,16 @@ int ClobberState::Run() {
 }
 
 bool ClobberState::IsInDeveloperMode() {
-  std::string firmware_name;
-  int dev_mode_flag;
-  return cros_system_->GetInt(CrosSystem::kDevSwitchBoot, &dev_mode_flag) &&
-         dev_mode_flag == 1 &&
-         cros_system_->GetString(CrosSystem::kMainFirmwareActive,
-                                 &firmware_name) &&
-         firmware_name != "recovery";
+  std::optional<int> dev_mode_flag = cros_system_->VbGetSystemPropertyInt(
+      crossystem::Crossystem::kDevSwitchBoot);
+  // No flag or not in dev mode:
+  if (!dev_mode_flag || *dev_mode_flag != 1)
+    return false;
+  std::optional<std::string> firmware_name =
+      cros_system_->VbGetSystemPropertyString(
+          crossystem::Crossystem::kMainFirmwareActive);
+  // We are running ChromeOS firmware and we are not in recovery:
+  return firmware_name && *firmware_name != "recovery";
 }
 
 bool ClobberState::MarkDeveloperMode() {
@@ -1410,18 +1610,18 @@ void ClobberState::AttemptSwitchToFastWipe(bool is_rotational) {
     LOG(INFO) << "Switching to fast wipe";
   }
 
-  // For drives that support secure erasure, wipe the keysets,
-  // and then run the drives through "fast" mode.
+  // For drives that support secure erasure, wipe the stateful key material, and
+  // then run the drives through "fast" mode.
   //
   // Note: currently only eMMC-based SSDs are supported.
   if (!args_.fast_wipe) {
-    LOG(INFO) << "Attempting to wipe encryption keysets";
-    if (WipeKeysets()) {
-      LOG(INFO) << "Wiping encryption keysets succeeded";
+    LOG(INFO) << "Attempting to wipe key material";
+    if (WipeKeyMaterial()) {
+      LOG(INFO) << "Wiping key material succeeded";
       args_.fast_wipe = true;
       LOG(INFO) << "Switching to fast wipe";
     } else {
-      LOG(INFO) << "Wiping encryption keysets failed";
+      LOG(INFO) << "Wiping key material failed";
     }
   }
 }
@@ -1429,9 +1629,9 @@ void ClobberState::AttemptSwitchToFastWipe(bool is_rotational) {
 void ClobberState::ShredRotationalStatefulFiles() {
   // Directly remove things that are already encrypted (which are also the
   // large things), or are static from images.
-  base::DeleteFile(stateful_.Append("encrypted.block"));
-  base::DeletePathRecursively(stateful_.Append("var_overlay"));
-  base::DeletePathRecursively(stateful_.Append("dev_image"));
+  brillo::DeleteFile(stateful_.Append("encrypted.block"));
+  brillo::DeletePathRecursively(stateful_.Append("var_overlay"));
+  brillo::DeletePathRecursively(stateful_.Append("dev_image"));
 
   base::FileEnumerator shadow_files(
       stateful_.Append("home/.shadow"),
@@ -1439,12 +1639,9 @@ void ClobberState::ShredRotationalStatefulFiles() {
   for (base::FilePath path = shadow_files.Next(); !path.empty();
        path = shadow_files.Next()) {
     if (path.BaseName() == base::FilePath("vault")) {
-      base::DeletePathRecursively(path);
+      brillo::DeletePathRecursively(path);
     }
   }
-
-  base::FilePath temp_file;
-  base::CreateTemporaryFile(&temp_file);
 
   // Shred everything else. We care about contents not filenames, so do not
   // use "-u" since metadata updates via fdatasync dominate the shred time.
@@ -1460,14 +1657,15 @@ void ClobberState::ShredRotationalStatefulFiles() {
        path = stateful_files.Next()) {
     shred.AddArg(path.value());
   }
-  shred.RedirectOutput(temp_file.value());
+  shred.RedirectOutputToMemory(true);
   shred.Run();
-  AppendFileToLog(temp_file);
+  init::AppendToLog("shred", shred.GetOutputString(STDOUT_FILENO));
 
   sync();
 }
 
-bool ClobberState::WipeKeysets() {
+bool ClobberState::WipeKeyMaterial() {
+  // Delete all of the top-level key files.
   std::vector<std::string> key_files{
       "encrypted.key", "encrypted.needs-finalization",
       "home/.shadow/cryptohome.key", "home/.shadow/salt",
@@ -1484,22 +1682,45 @@ bool ClobberState::WipeKeysets() {
     }
   }
 
-  // Delete files named 'master' in directories contained in '.shadow'.
+  // Delete user-specific keyfiles in individual user shadow directories.
   base::FileEnumerator directories(stateful_.Append("home/.shadow"),
                                    /*recursive=*/false,
                                    base::FileEnumerator::FileType::DIRECTORIES);
-  for (base::FilePath dir = directories.Next(); !dir.empty();
-       dir = directories.Next()) {
-    base::FileEnumerator files(dir, /*recursive=*/false,
-                               base::FileEnumerator::FileType::FILES);
-    for (base::FilePath file = files.Next(); !file.empty();
-         file = files.Next()) {
-      if (file.RemoveExtension().BaseName() == base::FilePath("master")) {
-        found_file = true;
-        if (!SecureErase(file)) {
-          LOG(ERROR) << "Securely erasing file failed: " << file.value();
-          return false;
-        }
+  for (base::FilePath user_dir = directories.Next(); !user_dir.empty();
+       user_dir = directories.Next()) {
+    std::vector<base::FilePath> files_to_erase;
+    // Find old-style vault keyset files. This support can be removed once
+    // cryptohomed no longer has support for reading from VaultKeyset files.
+    base::FileEnumerator vk_files(user_dir, /*recursive=*/false,
+                                  base::FileEnumerator::FileType::FILES);
+    for (base::FilePath file = vk_files.Next(); !file.empty();
+         file = vk_files.Next()) {
+      if (file.RemoveFinalExtension().BaseName() == base::FilePath("master")) {
+        files_to_erase.push_back(std::move(file));
+      }
+    }
+    // Find new-style auth factor files.
+    base::FileEnumerator af_files(user_dir.Append("auth_factors"),
+                                  /*recursive=*/false,
+                                  base::FileEnumerator::FileType::FILES);
+    for (base::FilePath file = af_files.Next(); !file.empty();
+         file = af_files.Next()) {
+      files_to_erase.push_back(std::move(file));
+    }
+    // Find user secret stashes.
+    base::FileEnumerator uss_files(
+        user_dir.Append("user_secret_stash"),
+        /*recursive=*/false, base::FileEnumerator::FileType::FILES, "uss.*");
+    for (base::FilePath file = uss_files.Next(); !file.empty();
+         file = uss_files.Next()) {
+      files_to_erase.push_back(std::move(file));
+    }
+    // Try to erase all of the found files.
+    for (const base::FilePath& file : files_to_erase) {
+      found_file = true;
+      if (!SecureErase(file)) {
+        LOG(ERROR) << "Securely erasing file failed: " << file.value();
+        return false;
       }
     }
   }
@@ -1519,7 +1740,7 @@ void ClobberState::ForceDelay() {
   LOG(INFO) << "Clobber has already run for " << elapsed.InSeconds()
             << " seconds";
   base::TimeDelta remaining = kMinClobberDuration - elapsed;
-  if (remaining <= base::TimeDelta::FromSeconds(0)) {
+  if (remaining <= base::Seconds(0)) {
     LOG(INFO) << "Skipping forced delay";
     return;
   }
@@ -1559,11 +1780,11 @@ uint64_t ClobberState::GetBlkSize(const base::FilePath& device) {
   return size;
 }
 
-bool ClobberState::WipeDevice(const base::FilePath& device_path) {
+bool ClobberState::WipeDevice(const base::FilePath& device_path, bool discard) {
   if (wipe_info_.is_mtd_flash) {
     return WipeMTDDevice(device_path, partitions_);
   } else {
-    return WipeBlockDevice(device_path, ui_.get(), args_.fast_wipe);
+    return WipeBlockDevice(device_path, ui_.get(), args_.fast_wipe, discard);
   }
 }
 
@@ -1577,6 +1798,10 @@ ClobberState::Arguments ClobberState::GetArgsForTest() {
 
 void ClobberState::SetStatefulForTest(const base::FilePath& stateful_path) {
   stateful_ = stateful_path;
+}
+
+void ClobberState::SetRootPathForTest(const base::FilePath& root_path) {
+  root_path_ = root_path;
 }
 
 void ClobberState::SetDevForTest(const base::FilePath& dev_path) {
@@ -1614,4 +1839,105 @@ void ClobberState::Reboot() {
   }
   // If we've reached here, reboot (probably) failed.
   LOG(ERROR) << "Requesting reboot failed with failure code " << ret;
+}
+
+void ClobberState::ResetStatefulPartition() {
+  // Attempt to remove the logical volume stack unconditionally: this covers the
+  // situation where a device may rollback to a version that doesn't support
+  // the LVM stateful partition setup.
+  RemoveLogicalVolumeStack();
+
+  // Destroy user data: wipe the stateful partition.
+  if (!WipeDevice(wipe_info_.stateful_partition_device)) {
+    LOG(ERROR) << "Unable to wipe device "
+               << wipe_info_.stateful_partition_device.value();
+  }
+}
+
+ClobberState::PreserveLogicalVolumesWipeInfos
+ClobberState::DlcPreserveLogicalVolumesWipeArgs(
+    const base::FilePath& ps_file_path,
+    const base::FilePath& dlc_manifest_root_path,
+    dlcservice::PartitionSlot active_slot,
+    std::unique_ptr<dlcservice::UtilsInterface> utils) {
+  if (!base::PathExists(ps_file_path)) {
+    LOG(WARNING) << "DLC powerwash safe file missing, skipping preservation.";
+    return {};
+  }
+  std::string ps_file_content;
+  if (!base::ReadFileToString(ps_file_path, &ps_file_content)) {
+    // Don't end PLOGs with (period).
+    PLOG(ERROR) << "Failed to read DLC powerwash safe file";
+    return {};
+  }
+  auto dlcs = base::SplitString(ps_file_content, "\n", base::TRIM_WHITESPACE,
+                                base::SPLIT_WANT_NONEMPTY);
+  LOG(INFO) << "The powerwash safe DLCs are=" << base::JoinString(dlcs, ",");
+
+  ClobberState::PreserveLogicalVolumesWipeInfos verified_dlcs;
+  for (const auto& dlc : dlcs) {
+    const auto& manifest = utils->GetDlcManifest(dlc_manifest_root_path, dlc,
+                                                 dlcservice::kPackage);
+
+    // Verify against rootfs that these DLCs are in fact, powerwash safe.
+    if (!manifest->powerwash_safe()) {
+      LOG(WARNING) << "DLC=" << dlc << " is not powerwash safe, but list in "
+                   << "powerwash safe file, skipping it.";
+      continue;
+    }
+
+    LOG(INFO) << "DLC=" << dlc << " is set to be preserved.";
+
+    // We add the active DLC logical volume.
+    const auto& dlc_active_lv_name = utils->LogicalVolumeName(dlc, active_slot);
+    verified_dlcs.emplace(PreserveLogicalVolumesWipeInfo{
+        .lv_name = dlc_active_lv_name,
+        .preserve = true,
+        .zero = false,
+        .digest_info =
+            PreserveLogicalVolumesWipeInfo::DigestInfo{
+                .bytes = manifest->size(),
+                .digest = manifest->image_sha256(),
+            },
+    });
+
+    // We also add the inactive DLC logical volume, but simply clear (zero) it.
+    const auto& dlc_inactive_lv_name = utils->LogicalVolumeName(
+        dlc, active_slot == dlcservice::PartitionSlot::A
+                 ? dlcservice::PartitionSlot::B
+                 : dlcservice::PartitionSlot::A);
+    verified_dlcs.emplace(PreserveLogicalVolumesWipeInfo{
+        .lv_name = dlc_inactive_lv_name,
+        .preserve = true,
+        .zero = true,
+    });
+  }
+
+  return verified_dlcs;
+}
+
+ClobberState::PreserveLogicalVolumesWipeInfos
+ClobberState::PreserveLogicalVolumesWipeArgs() {
+  PreserveLogicalVolumesWipeInfos infos;
+  infos.insert({
+      {
+          .lv_name = kThinpool,
+          .preserve = true,
+          .zero = false,
+      },
+      {
+          .lv_name = kUnencrypted,
+          .preserve = false,
+          .zero = true,
+      },
+  });
+  const auto& dlcs = DlcPreserveLogicalVolumesWipeArgs(
+      base::FilePath(dlcservice::kDlcPowerwashSafeFile),
+      base::FilePath(imageloader::kDlcManifestRootpath),
+      wipe_info_.active_kernel_partition == partitions_.kernel_a
+          ? dlcservice::PartitionSlot::A
+          : dlcservice::PartitionSlot::B,
+      std::make_unique<dlcservice::Utils>());
+  infos.insert(std::cbegin(dlcs), std::cend(dlcs));
+  return infos;
 }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 get_volume_group() {
   local physical_volume="$1"
 
-  pvdisplay -C --quiet --noheadings --separator '|' \
+  pvs --quiet --readonly --noheadings --separator '|' \
     -o vg_name "${physical_volume}" | tr -d '[:space:]'
 }
 
@@ -42,7 +42,7 @@ generate_random_vg_name() {
     vg_name="$(generate_random_label)"
     # If there is no volume group on the device with the generated vg name
     # return.
-    if ! sudo vgdisplay "${vg_name}" >/dev/null; then
+    if ! vgs "${vg_name}" >/dev/null; then
       # shellcheck disable=SC2059
       printf "${vg_name}"
       return

@@ -1,4 +1,4 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,7 +8,10 @@ import("//common-mk/proto_library.gni")
 group("all") {
   deps = [
     ":dnsproxyd",
+    ":install_init_config",
+    ":install_seccomp_policy",
     ":libdnsproxy",
+    "//dns-proxy/tmpfiles.d",
   ]
   if (use.fuzzer) {
     deps += [
@@ -30,19 +33,26 @@ pkg_config("target_defaults") {
     "libchrome",
     "libmetrics",
     "libminijail",
+    "libnet-base",
     "libpatchpanel-client",
     "libpatchpanel-util",
     "libsession_manager-client",
     "libshill-client",
     "libshill-dbus-client",
     "libshill-net",
-
-    # system_api depends on protobuf (or protobuf-lite). It must
-    # appear before protobuf or the linker flags won't be in the right
-    # order.
     "system_api",
-    "protobuf-lite",
   ]
+  if (use.fuzzer) {
+    pkg_deps += [ "protobuf" ]
+  } else {
+    pkg_deps += [ "protobuf-lite" ]
+  }
+}
+
+proto_library("dnsproxy_ipc_protos") {
+  proto_in_dir = "."
+  proto_out_dir = "include/dns-proxy"
+  sources = [ "${proto_in_dir}/ipc.proto" ]
 }
 
 static_library("libdnsproxy") {
@@ -50,24 +60,38 @@ static_library("libdnsproxy") {
     "ares_client.cc",
     "chrome_features_service_client.cc",
     "controller.cc",
+    "dns_util.cc",
     "doh_curl_client.cc",
     "metrics.cc",
     "proxy.cc",
+    "resolv_conf.cc",
     "resolver.cc",
     "session_monitor.cc",
   ]
   configs += [ ":target_defaults" ]
-  deps = []
+  deps = [ ":dnsproxy_ipc_protos" ]
 }
 
 executable("dnsproxyd") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "sbin"
   all_dependent_pkg_deps = [
     "libcares",
     "libcurl",
   ]
   deps = [ ":libdnsproxy" ]
+}
+
+install_config("install_init_config") {
+  sources = [ "init/dns-proxy.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_seccomp_policy") {
+  sources = [ "seccomp/dns-proxy-seccomp-" + getenv("ARCH") + ".policy" ]
+  install_path = "seccomp_policy"
+  outputs = [ "dns-proxy-seccomp.policy" ]
 }
 
 if (use.fuzzer) {
@@ -117,12 +141,17 @@ if (use.test) {
     pkg_deps = [
       "libchrome",
       "libchrome-test",
+      "libpatchpanel-util",
       "libshill-client-test",
     ]
   }
   executable("dns-proxy_test") {
     sources = [
+      "controller_test.cc",
+      "dns_util_test.cc",
+      "mock_resolv_conf.cc",
       "proxy_test.cc",
+      "resolv_conf_test.cc",
       "resolver_test.cc",
     ]
     configs += [
@@ -131,6 +160,7 @@ if (use.test) {
       ":target_defaults",
     ]
     defines = [ "UNIT_TEST" ]
+    run_test = true
     all_dependent_pkg_deps = [
       "libcares",
       "libcurl",

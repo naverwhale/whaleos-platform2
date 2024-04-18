@@ -1,59 +1,78 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "cryptohome/challenge_credentials/challenge_credentials_generate_new_operation.h"
 
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/optional.h>
+#include <libhwsec/frontend/cryptohome/frontend.h>
+#include <libhwsec/status.h>
 
 #include "cryptohome/challenge_credentials/challenge_credentials_constants.h"
-#include "cryptohome/credentials.h"
-#include "cryptohome/signature_sealed_data.pb.h"
-#include "cryptohome/tpm.h"
+#include "cryptohome/error/location_utils.h"
+#include "cryptohome/username.h"
 
 using brillo::Blob;
-using brillo::BlobFromString;
-using brillo::BlobToString;
 using brillo::CombineBlobs;
 using brillo::SecureBlob;
-using hwsec::error::TPMErrorBase;
+using cryptohome::error::CryptohomeCryptoError;
+using cryptohome::error::CryptohomeTPMError;
+using cryptohome::error::ErrorActionSet;
+using cryptohome::error::PossibleAction;
+using cryptohome::error::PrimaryAction;
+using hwsec_foundation::status::MakeStatus;
+using hwsec_foundation::status::OkStatus;
+using hwsec_foundation::status::StatusChain;
 
 namespace cryptohome {
 
 namespace {
 
-std::vector<ChallengeSignatureAlgorithm> GetSealingAlgorithms(
-    const ChallengePublicKeyInfo& public_key_info) {
-  std::vector<ChallengeSignatureAlgorithm> sealing_algorithms;
-  for (int index = 0; index < public_key_info.signature_algorithm_size();
-       ++index) {
-    sealing_algorithms.push_back(public_key_info.signature_algorithm(index));
-  }
-  return sealing_algorithms;
-}
+// Size, in bytes, of the secret value that will be sealed by HWSec signature
+// sealing.
+constexpr int kSecretSizeBytes = 32;
 
 // Returns the signature algorithm that should be used for signing salt from the
 // set of algorithms supported by the given key. Returns nullopt when no
 // suitable algorithm was found.
-base::Optional<ChallengeSignatureAlgorithm> ChooseSaltSignatureAlgorithm(
-    const ChallengePublicKeyInfo& public_key_info) {
-  DCHECK(public_key_info.signature_algorithm_size());
-  base::Optional<ChallengeSignatureAlgorithm> currently_chosen_algorithm;
+std::optional<SerializedChallengeSignatureAlgorithm>
+ChooseSaltSignatureAlgorithm(
+    const SerializedChallengePublicKeyInfo& public_key_info) {
+  std::optional<SerializedChallengeSignatureAlgorithm>
+      currently_chosen_algorithm;
   // Respect the input's algorithm prioritization, with the exception of
   // considering SHA-1 as the least preferred option.
-  for (int index = 0; index < public_key_info.signature_algorithm_size();
-       ++index) {
-    currently_chosen_algorithm = public_key_info.signature_algorithm(index);
-    if (*currently_chosen_algorithm != CHALLENGE_RSASSA_PKCS1_V1_5_SHA1)
+  for (auto algo : public_key_info.signature_algorithm) {
+    currently_chosen_algorithm = algo;
+    if (*currently_chosen_algorithm !=
+        SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha1)
       break;
   }
   return currently_chosen_algorithm;
+}
+
+using HwsecAlgorithm = hwsec::CryptohomeFrontend::SignatureSealingAlgorithm;
+
+HwsecAlgorithm ConvertAlgorithm(
+    SerializedChallengeSignatureAlgorithm algorithm) {
+  switch (algorithm) {
+    case SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha1:
+      return HwsecAlgorithm::kRsassaPkcs1V15Sha1;
+    case SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha256:
+      return HwsecAlgorithm::kRsassaPkcs1V15Sha256;
+    case SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha384:
+      return HwsecAlgorithm::kRsassaPkcs1V15Sha384;
+    case SerializedChallengeSignatureAlgorithm::kRsassaPkcs1V15Sha512:
+      return HwsecAlgorithm::kRsassaPkcs1V15Sha512;
+  }
+  NOTREACHED();
+  return static_cast<HwsecAlgorithm>(algorithm);
 }
 
 }  // namespace
@@ -61,39 +80,38 @@ base::Optional<ChallengeSignatureAlgorithm> ChooseSaltSignatureAlgorithm(
 ChallengeCredentialsGenerateNewOperation::
     ChallengeCredentialsGenerateNewOperation(
         KeyChallengeService* key_challenge_service,
-        Tpm* tpm,
-        const brillo::Blob& delegate_blob,
-        const brillo::Blob& delegate_secret,
-        const std::string& account_id,
-        const KeyData& key_data,
-        const std::vector<std::map<uint32_t, brillo::Blob>>& pcr_restrictions,
+        const hwsec::CryptohomeFrontend* hwsec,
+        const Username& account_id,
+        const SerializedChallengePublicKeyInfo& public_key_info,
+        const ObfuscatedUsername& obfuscated_username,
         CompletionCallback completion_callback)
     : ChallengeCredentialsOperation(key_challenge_service),
-      tpm_(tpm),
-      delegate_blob_(delegate_blob),
-      delegate_secret_(delegate_secret),
       account_id_(account_id),
-      key_data_(key_data),
-      pcr_restrictions_(pcr_restrictions),
+      public_key_info_(public_key_info),
+      obfuscated_username_(obfuscated_username),
       completion_callback_(std::move(completion_callback)),
-      signature_sealing_backend_(tpm_->GetSignatureSealingBackend()) {
-  DCHECK_EQ(key_data.type(), KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-}
+      hwsec_(hwsec) {}
 
 ChallengeCredentialsGenerateNewOperation::
     ~ChallengeCredentialsGenerateNewOperation() = default;
 
 void ChallengeCredentialsGenerateNewOperation::Start() {
   DCHECK(thread_checker_.CalledOnValidThread());
-  if (!StartProcessing()) {
+  CryptoStatus status = StartProcessing();
+  if (!status.ok()) {
     LOG(ERROR) << "Failed to start the generation operation";
-    Abort();
+    Abort(std::move(status));
     // |this| can be already destroyed at this point.
   }
 }
 
-void ChallengeCredentialsGenerateNewOperation::Abort() {
+void ChallengeCredentialsGenerateNewOperation::Abort(
+    CryptoStatus status [[clang::param_typestate(unconsumed)]]) {
   DCHECK(thread_checker_.CalledOnValidThread());
+  CryptoStatus return_status = MakeStatus<CryptohomeCryptoError>(
+                                   CRYPTOHOME_ERR_LOC(kLocChalCredNewAborted))
+                                   .Wrap(std::move(status));
+
   // Invalidate weak pointers in order to cancel all jobs that are currently
   // waiting, to prevent them from running and consuming resources after our
   // abortion (in case |this| doesn't get destroyed immediately).
@@ -103,125 +121,167 @@ void ChallengeCredentialsGenerateNewOperation::Abort() {
   // cancellation is not supported by the challenges IPC API currently, neither
   // it is supported by the API for smart card drivers in Chrome OS.
   weak_ptr_factory_.InvalidateWeakPtrs();
-  Complete(&completion_callback_, nullptr /* credentials */);
+  CompleteWithError(&completion_callback_, std::move(return_status));
   // |this| can be already destroyed at this point.
 }
 
-bool ChallengeCredentialsGenerateNewOperation::StartProcessing() {
-  if (!signature_sealing_backend_) {
+CryptoStatus ChallengeCredentialsGenerateNewOperation::StartProcessing() {
+  if (!hwsec_) {
     LOG(ERROR) << "Signature sealing is disabled";
-    return false;
+    return MakeStatus<CryptohomeCryptoError>(
+        CRYPTOHOME_ERR_LOC(kLocChalCredNewNoBackend),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+        CryptoError::CE_OTHER_CRYPTO);
   }
-  if (!key_data_.challenge_response_key_size()) {
-    LOG(ERROR) << "Missing challenge-response key information";
-    return false;
-  }
-  if (key_data_.challenge_response_key_size() > 1) {
-    LOG(ERROR)
-        << "Using multiple challenge-response keys at once is unsupported";
-    return false;
-  }
-  public_key_info_ = key_data_.challenge_response_key(0);
-  if (!public_key_info_.signature_algorithm_size()) {
+  if (!public_key_info_.signature_algorithm.size()) {
     LOG(ERROR) << "The key does not support any signature algorithm";
-    return false;
+    return MakeStatus<CryptohomeCryptoError>(
+        CRYPTOHOME_ERR_LOC(kLocChalCredNewNoAlgorithm),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+        CryptoError::CE_OTHER_CRYPTO);
   }
-  if (!GenerateSalt() || !StartGeneratingSaltSignature())
-    return false;
+
+  CryptoStatus status = GenerateSalt();
+  if (!status.ok()) {
+    return status;
+  }
+  status = StartGeneratingSaltSignature();
+  if (!status.ok()) {
+    return status;
+  }
   // TODO(crbug.com/842791): This is buggy: |this| may be already deleted by
   // that point, in case when the salt's challenge request failed synchronously.
-  if (!CreateTpmProtectedSecret())
-    return false;
+  status = CreateTpmProtectedSecret();
+  if (!status.ok()) {
+    return status;
+  }
   ProceedIfComputationsDone();
-  return true;
+  return OkStatus<CryptohomeCryptoError>();
 }
 
-bool ChallengeCredentialsGenerateNewOperation::GenerateSalt() {
-  Blob salt_random_bytes;
-  if (TPMErrorBase err = tpm_->GetRandomDataBlob(
-          kChallengeCredentialsSaltRandomByteCount, &salt_random_bytes)) {
-    LOG(ERROR) << "Failed to generate random bytes for the salt: " << *err;
-    return false;
+CryptoStatus ChallengeCredentialsGenerateNewOperation::GenerateSalt() {
+  hwsec::StatusOr<Blob> salt_random_bytes =
+      hwsec_->GetRandomBlob(kChallengeCredentialsSaltRandomByteCount);
+  if (!salt_random_bytes.ok()) {
+    LOG(ERROR) << "Failed to generate random bytes for the salt: "
+               << salt_random_bytes.status();
+    return MakeStatus<CryptohomeCryptoError>(
+               CRYPTOHOME_ERR_LOC(kLocChalCredNewGenerateRandomSaltFailed),
+               ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                               PossibleAction::kReboot}),
+               CryptoError::CE_OTHER_CRYPTO)
+        .Wrap(MakeStatus<CryptohomeTPMError>(
+            std::move(salt_random_bytes).err_status()));
   }
-  DCHECK_EQ(kChallengeCredentialsSaltRandomByteCount, salt_random_bytes.size());
+  CHECK_EQ(kChallengeCredentialsSaltRandomByteCount, salt_random_bytes->size());
   // IMPORTANT: Make sure the salt is prefixed with a constant. See the comment
   // on GetChallengeCredentialsSaltConstantPrefix() for details.
   salt_ = CombineBlobs(
-      {GetChallengeCredentialsSaltConstantPrefix(), salt_random_bytes});
-  return true;
+      {GetChallengeCredentialsSaltConstantPrefix(), salt_random_bytes.value()});
+  return OkStatus<CryptohomeCryptoError>();
 }
 
-bool ChallengeCredentialsGenerateNewOperation::StartGeneratingSaltSignature() {
-  DCHECK(!salt_.empty());
-  base::Optional<ChallengeSignatureAlgorithm> chosen_salt_signature_algorithm =
-      ChooseSaltSignatureAlgorithm(public_key_info_);
+CryptoStatus
+ChallengeCredentialsGenerateNewOperation::StartGeneratingSaltSignature() {
+  CHECK(!salt_.empty());
+  std::optional<SerializedChallengeSignatureAlgorithm>
+      chosen_salt_signature_algorithm =
+          ChooseSaltSignatureAlgorithm(public_key_info_);
   if (!chosen_salt_signature_algorithm) {
     LOG(ERROR) << "Failed to choose salt signature algorithm";
-    return false;
+    return MakeStatus<CryptohomeCryptoError>(
+        CRYPTOHOME_ERR_LOC(kLocChalCredNewCantChooseSaltSignatureAlgorithm),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+        CryptoError::CE_OTHER_CRYPTO);
   }
   salt_signature_algorithm_ = *chosen_salt_signature_algorithm;
   MakeKeySignatureChallenge(
-      account_id_, BlobFromString(public_key_info_.public_key_spki_der()),
-      salt_, salt_signature_algorithm_,
+      account_id_, public_key_info_.public_key_spki_der, salt_,
+      salt_signature_algorithm_,
       base::BindOnce(
           &ChallengeCredentialsGenerateNewOperation::OnSaltChallengeResponse,
           weak_ptr_factory_.GetWeakPtr()));
-  return true;
+  return OkStatus<CryptohomeCryptoError>();
 }
 
-bool ChallengeCredentialsGenerateNewOperation::CreateTpmProtectedSecret() {
-  SecureBlob local_tpm_protected_secret_value;
-  if (TPMErrorBase err = signature_sealing_backend_->CreateSealedSecret(
-          BlobFromString(public_key_info_.public_key_spki_der()),
-          GetSealingAlgorithms(public_key_info_), pcr_restrictions_,
-          delegate_blob_, delegate_secret_, &local_tpm_protected_secret_value,
-          &tpm_sealed_secret_data_)) {
-    LOG(ERROR) << "Failed to create TPM-protected secret: " << *err;
-    return false;
+CryptoStatus
+ChallengeCredentialsGenerateNewOperation::CreateTpmProtectedSecret() {
+  hwsec::StatusOr<SecureBlob> tpm_protected_secret_value =
+      hwsec_->GetRandomSecureBlob(kSecretSizeBytes);
+  if (!tpm_protected_secret_value.ok()) {
+    LOG(ERROR) << "Failed to generated random secure blob: "
+               << tpm_protected_secret_value.status();
+    TPMStatus status = MakeStatus<CryptohomeTPMError>(
+        std::move(tpm_protected_secret_value).err_status());
+    return MakeStatus<CryptohomeCryptoError>(
+               CRYPTOHOME_ERR_LOC(kLocChalCredGenRandFailed))
+        .Wrap(std::move(status));
   }
-  DCHECK(local_tpm_protected_secret_value.size());
-  tpm_protected_secret_value_ =
-      std::make_unique<SecureBlob>(std::move(local_tpm_protected_secret_value));
-  return true;
+
+  std::vector<HwsecAlgorithm> key_sealing_algorithms;
+  for (auto algo : public_key_info_.signature_algorithm) {
+    key_sealing_algorithms.push_back(ConvertAlgorithm(algo));
+  }
+
+  hwsec::StatusOr<hwsec::SignatureSealedData> sealed_data =
+      hwsec_->SealWithSignatureAndCurrentUser(
+          *obfuscated_username_, tpm_protected_secret_value.value(),
+          public_key_info_.public_key_spki_der, key_sealing_algorithms);
+  if (!sealed_data.ok()) {
+    LOG(ERROR) << "Failed to create hardware-protected secret: "
+               << sealed_data.status();
+    TPMStatus status =
+        MakeStatus<CryptohomeTPMError>(std::move(sealed_data).err_status());
+    return MakeStatus<CryptohomeCryptoError>(
+               CRYPTOHOME_ERR_LOC(kLocChalCredNewSealFailed))
+        .Wrap(std::move(status));
+  }
+
+  tpm_protected_secret_value_ = std::make_unique<SecureBlob>(
+      std::move(tpm_protected_secret_value).value());
+  tpm_sealed_secret_data_ = std::move(sealed_data).value();
+
+  return OkStatus<CryptohomeCryptoError>();
 }
 
 void ChallengeCredentialsGenerateNewOperation::OnSaltChallengeResponse(
-    std::unique_ptr<Blob> salt_signature) {
+    CryptoStatusOr<std::unique_ptr<Blob>> salt_signature) {
   DCHECK(thread_checker_.CalledOnValidThread());
-  if (!salt_signature) {
+  if (!salt_signature.ok()) {
     LOG(ERROR) << "Salt signature challenge failed";
-    Abort();
+    Abort(std::move(salt_signature).err_status());
     // |this| can be already destroyed at this point.
     return;
   }
-  salt_signature_ = std::move(salt_signature);
+  salt_signature_ = std::move(salt_signature).value();
   ProceedIfComputationsDone();
 }
 
 void ChallengeCredentialsGenerateNewOperation::ProceedIfComputationsDone() {
   if (!salt_signature_ || !tpm_protected_secret_value_)
     return;
-  auto credentials = std::make_unique<Credentials>(
-      account_id_,
+
+  auto signature_challenge_info =
+      std::make_unique<SerializedSignatureChallengeInfo>(
+          ConstructKeysetSignatureChallengeInfo());
+
+  auto passkey = std::make_unique<brillo::SecureBlob>(
       ConstructPasskey(*tpm_protected_secret_value_, *salt_signature_));
-  credentials->set_key_data(key_data_);
-  credentials->set_challenge_credentials_keyset_info(
-      ConstructKeysetSignatureChallengeInfo());
-  Complete(&completion_callback_, std::move(credentials));
+  Complete(&completion_callback_,
+           ChallengeCredentialsHelper::GenerateNewOrDecryptResult(
+               std::move(signature_challenge_info), std::move(passkey)));
   // |this| can be already destroyed at this point.
 }
 
-ChallengeCredentialsGenerateNewOperation::KeysetSignatureChallengeInfo
-ChallengeCredentialsGenerateNewOperation::
+SerializedSignatureChallengeInfo ChallengeCredentialsGenerateNewOperation::
     ConstructKeysetSignatureChallengeInfo() const {
-  KeysetSignatureChallengeInfo keyset_signature_challenge_info;
-  keyset_signature_challenge_info.set_public_key_spki_der(
-      public_key_info_.public_key_spki_der());
-  *keyset_signature_challenge_info.mutable_sealed_secret() =
-      tpm_sealed_secret_data_;
-  keyset_signature_challenge_info.set_salt(BlobToString(salt_));
-  keyset_signature_challenge_info.set_salt_signature_algorithm(
-      salt_signature_algorithm_);
+  SerializedSignatureChallengeInfo keyset_signature_challenge_info;
+  keyset_signature_challenge_info.public_key_spki_der =
+      public_key_info_.public_key_spki_der;
+  keyset_signature_challenge_info.sealed_secret = tpm_sealed_secret_data_;
+  keyset_signature_challenge_info.salt = salt_;
+  keyset_signature_challenge_info.salt_signature_algorithm =
+      salt_signature_algorithm_;
   return keyset_signature_challenge_info;
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,15 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "diagnostics/common/file_test_utils.h"
+#include "diagnostics/base/file_test_utils.h"
 #include "diagnostics/cros_healthd/fetchers/timezone_fetcher.h"
 #include "diagnostics/cros_healthd/system/mock_context.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
+namespace mojom = ::ash::cros_healthd::mojom;
 
 constexpr char kLocaltimeFile[] = "var/lib/timezone/localtime";
 constexpr char kZoneInfoPath[] = "usr/share/zoneinfo";
@@ -35,7 +34,7 @@ class TimezoneFetcherTest : public ::testing::Test {
 
   const base::FilePath& root_dir() { return mock_context_.root_dir(); }
 
-  mojo_ipc::TimezoneResultPtr FetchTimezoneInfo() {
+  mojom::TimezoneResultPtr FetchTimezoneInfo() {
     return timezone_fetcher_.FetchTimezoneInfo();
   }
 
@@ -71,9 +70,8 @@ TEST_F(TimezoneFetcherTest, TestGetTimezone) {
 TEST_F(TimezoneFetcherTest, TestGetTimezoneFailure) {
   auto result = FetchTimezoneInfo();
   ASSERT_TRUE(result->is_error());
-  EXPECT_EQ(result->get_error()->type, mojo_ipc::ErrorType::kFileReadError);
+  EXPECT_EQ(result->get_error()->type, mojom::ErrorType::kFileReadError);
 }
 
 }  // namespace
-
 }  // namespace diagnostics

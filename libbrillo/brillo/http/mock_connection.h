@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <memory>
 #include <string>
 
-#include <base/macros.h>
 #include <brillo/http/http_connection.h>
 #include <gmock/gmock.h>
 
@@ -28,7 +27,7 @@ class MockConnection : public Connection {
   MOCK_METHOD(bool, FinishRequest, (ErrorPtr*), (override));
   MOCK_METHOD(RequestID,
               FinishRequestAsync,
-              (const SuccessCallback&, const ErrorCallback&),
+              (SuccessCallback, ErrorCallback),
               (override));
   MOCK_METHOD(int, GetResponseStatusCode, (), (const, override));
   MOCK_METHOD(std::string, GetResponseStatusText, (), (const, override));

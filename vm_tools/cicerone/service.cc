@@ -1,10 +1,9 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "vm_tools/cicerone/service.h"
 
-#include <arpa/inet.h>
 #include <signal.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
@@ -14,38 +13,42 @@
 #include <linux/vm_sockets.h>  // Needs to come after sys/socket.h
 
 #include <algorithm>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_path.h>
 #include <base/files/file_path_watcher.h>
 #include <base/files/file_util.h>
-#include <base/guid.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/no_destructor.h>
-#include <base/strings/stringprintf.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <base/strings/stringprintf.h>
 #include <base/synchronization/waitable_event.h>
 #include <base/system/sys_info.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/uuid.h>
 #include <brillo/timezone/tzif_parser.h>
+#include <chromeos/constants/vm_tools.h>
 #include <chromeos/dbus/service_constants.h>
 #include <chunneld/proto_bindings/chunneld_service.pb.h>
 #include <dbus/object_proxy.h>
-#include <chromeos/constants/vm_tools.h>
+#include <dbus/shadercached/dbus-constants.h>
+#include <vm_protos/proto_bindings/container_host.pb.h>
+#include <vm_tools/cicerone/shadercached_helper.h>
 
 using std::string;
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 
 namespace {
 
@@ -74,18 +77,23 @@ constexpr char kLocaltimePath[] = "/etc/localtime";
 // TCP4 ports restricted from tunneling to the container.
 const uint16_t kRestrictedPorts[] = {
     2222,  // cros-sftp service
-    5355,  // link-local mDNS
+    5355,  // Link-Local Multicast Name Resolution
 };
 
 // Path to the unix domain socket Concierge listens on for connections
 // from Plugin VMs.
 constexpr char kHostDomainSocket[] = "/run/vm_cicerone/client/host.sock";
 
+// These rate limits ensure metrics can't be reported too frequently.
+constexpr base::TimeDelta kMetricRateWindow = base::Seconds(60);
+constexpr uint32_t kMetricRateLimit = 6;
+
 // Passes |method_call| to |handler| and passes the response to
 // |response_sender|. If |handler| returns NULL, an empty response is created
 // and sent.
 void HandleSynchronousDBusMethodCall(
-    base::Callback<std::unique_ptr<dbus::Response>(dbus::MethodCall*)> handler,
+    base::RepeatingCallback<std::unique_ptr<dbus::Response>(dbus::MethodCall*)>
+        handler,
     dbus::MethodCall* method_call,
     dbus::ExportedObject::ResponseSender response_sender) {
   std::unique_ptr<dbus::Response> response = handler.Run(method_call);
@@ -143,8 +151,8 @@ bool SetupListenerService(base::Thread* grpc_thread,
   base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   bool ret = grpc_thread->task_runner()->PostTask(
-      FROM_HERE, base::Bind(&RunListenerService, listener_impl,
-                            listener_addresses, &event, server_copy));
+      FROM_HERE, base::BindOnce(&RunListenerService, listener_impl,
+                                listener_addresses, &event, server_copy));
   if (!ret) {
     LOG(ERROR) << "Failed to post server startup task to grpc thread";
     return false;
@@ -158,19 +166,6 @@ bool SetupListenerService(base::Thread* grpc_thread,
     return false;
   }
 
-  return true;
-}
-
-// Converts an IPv4 address to a string. The result will be stored in |str|
-// on success.
-bool IPv4AddressToString(const uint32_t address, std::string* str) {
-  CHECK(str);
-
-  char result[INET_ADDRSTRLEN];
-  if (inet_ntop(AF_INET, &address, result, sizeof(result)) != result) {
-    return false;
-  }
-  *str = std::string(result);
   return true;
 }
 
@@ -322,7 +317,7 @@ void SetTimezoneForContainer(VirtualMachine* vm,
   }
 }
 
-base::Optional<tremplin::StartContainerRequest_PrivilegeLevel>
+std::optional<tremplin::StartContainerRequest_PrivilegeLevel>
 ConvertPrivilegeLevelFromCiceroneToTremplin(
     StartLxdContainerRequest_PrivilegeLevel privilege_level) {
   switch (privilege_level) {
@@ -334,7 +329,7 @@ ConvertPrivilegeLevelFromCiceroneToTremplin(
       return tremplin::StartContainerRequest_PrivilegeLevel_PRIVILEGED;
     default:
       LOG(ERROR) << "Bad privilege level value: " << privilege_level;
-      return base::nullopt;
+      return std::nullopt;
   }
 }
 
@@ -379,13 +374,17 @@ void OnFileSelected(std::vector<std::string>* result,
 
 }  // namespace
 
+// Should Service create GuestMetric instance on initialization?  Used for
+// testing.
+bool Service::create_guest_metrics_ = true;
+
 // Should Service start GRPC servers for ContainerListener and TremplinListener
 // Used for testing
 bool Service::run_grpc_ = true;
 
 std::unique_ptr<Service> Service::Create(
-    base::Closure quit_closure,
-    const base::Optional<base::FilePath>& unix_socket_path_for_testing,
+    base::OnceClosure quit_closure,
+    const std::optional<base::FilePath>& unix_socket_path_for_testing,
     scoped_refptr<dbus::Bus> bus) {
   auto service =
       base::WrapUnique(new Service(std::move(quit_closure), std::move(bus)));
@@ -397,7 +396,7 @@ std::unique_ptr<Service> Service::Create(
   return service;
 }
 
-Service::Service(base::Closure quit_closure, scoped_refptr<dbus::Bus> bus)
+Service::Service(base::OnceClosure quit_closure, scoped_refptr<dbus::Bus> bus)
     : bus_(std::move(bus)),
       quit_closure_(std::move(quit_closure)),
       weak_ptr_factory_(this) {
@@ -673,9 +672,64 @@ void Service::LxdContainerStarting(const uint32_t cid,
   event->Signal();
 }
 
+void Service::LxdContainerStopping(const uint32_t cid,
+                                   std::string container_name,
+                                   Service::StopStatus status,
+                                   std::string failure_reason,
+                                   bool* result,
+                                   base::WaitableEvent* event) {
+  DCHECK(sequence_checker_.CalledOnValidSequence());
+  CHECK(result);
+  CHECK(event);
+  *result = false;
+  VirtualMachine* vm;
+  std::string vm_name;
+  std::string owner_id;
+  if (container_name.empty()) {
+    LOG(ERROR) << "container_name must be provided";
+    event->Signal();
+    return;
+  }
+  if (!GetVirtualMachineForCidOrToken(cid, "", &vm, &owner_id, &vm_name)) {
+    event->Signal();
+    return;
+  }
+
+  dbus::Signal signal(kVmCiceroneInterface, kLxdContainerStoppingSignal);
+  vm_tools::cicerone::LxdContainerStoppingSignal proto;
+
+  proto.mutable_vm_name()->swap(vm_name);
+  proto.set_container_name(container_name);
+  proto.mutable_owner_id()->swap(owner_id);
+  proto.set_failure_reason(failure_reason);
+  switch (status) {
+    case Service::StopStatus::STOPPED:
+      proto.set_status(LxdContainerStoppingSignal::STOPPED);
+      break;
+    case Service::StopStatus::STOPPING:
+      proto.set_status(LxdContainerStoppingSignal::STOPPING);
+      break;
+    case Service::StopStatus::CANCELLED:
+      proto.set_status(LxdContainerStoppingSignal::CANCELLED);
+      break;
+    case Service::StopStatus::FAILED:
+      proto.set_status(LxdContainerStoppingSignal::FAILED);
+      break;
+    default:
+      proto.set_status(LxdContainerStoppingSignal::UNKNOWN);
+      break;
+  }
+
+  dbus::MessageWriter(&signal).AppendProtoAsArrayOfBytes(proto);
+  exported_object_->SendSignal(&signal);
+  *result = true;
+  event->Signal();
+}
+
 void Service::ContainerStartupCompleted(const std::string& container_token,
                                         const uint32_t cid,
                                         const uint32_t garcon_vsock_port,
+                                        const uint32_t sftp_port,
                                         bool* result,
                                         base::WaitableEvent* event) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
@@ -708,20 +762,16 @@ void Service::ContainerStartupCompleted(const std::string& container_token,
     VirtualMachine::GetLxdContainerInfoStatus status =
         vm->GetLxdContainerInfo(container->name(), &info, &error);
     if (status != VirtualMachine::GetLxdContainerInfoStatus::RUNNING) {
-      LOG(ERROR) << "Failed to retreive IPv4 address for container: " << error;
+      LOG(ERROR) << "Failed to retrieve IPv4 address for container: " << error;
       event->Signal();
       return;
     }
-    container->set_ipv4_address(info.ipv4_address);
+    DCHECK(info.ipv4_address);
+    container->set_ipv4_address(*info.ipv4_address);
 
     // Found the VM with a matching CID, register the IP address for the
     // container with that VM object.
-    if (!IPv4AddressToString(info.ipv4_address, &string_ip)) {
-      LOG(ERROR) << "Failed converting IP address to string: "
-                 << info.ipv4_address;
-      event->Signal();
-      return;
-    }
+    string_ip = info.ipv4_address->ToString();
   }
   if (!vm->RegisterContainer(container_token, garcon_vsock_port, string_ip)) {
     LOG(ERROR) << "Invalid container token passed back from VM " << vm_name
@@ -735,8 +785,8 @@ void Service::ContainerStartupCompleted(const std::string& container_token,
 
   std::string username;
   std::string homedir;
-  if (owner_id == primary_owner_id_) {
-    // Register this with the hostname resolver.
+  if (owner_id == primary_owner_id_ && string_ip != "0.0.0.0") {
+    // Register the IP address with the hostname resolver if it isn't 0.
     RegisterHostname(
         base::StringPrintf("%s.%s.linux.test", container_name.c_str(),
                            vm_name.c_str()),
@@ -766,6 +816,8 @@ void Service::ContainerStartupCompleted(const std::string& container_token,
   proto.set_container_username(username);
   proto.set_container_homedir(homedir);
   proto.set_ipv4_address(string_ip);
+  proto.set_sftp_vsock_port(sftp_port);
+  proto.set_container_token(container_token);
   dbus::MessageWriter(&signal).AppendProtoAsArrayOfBytes(proto);
   exported_object_->SendSignal(&signal);
   *result = true;
@@ -911,8 +963,10 @@ void Service::SendListeningPorts() {
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      chunneld_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      chunneld_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     // If there's some issue with the chunneld service, don't make that
     // propagate to a higher level failure and just log it. We have logic for
@@ -1038,8 +1092,10 @@ void Service::UpdateApplicationList(const std::string& container_token,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      vm_applications_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      vm_applications_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to crostini app registry";
   } else {
@@ -1085,20 +1141,14 @@ void Service::OpenUrl(const std::string& container_token,
     event->Signal();
     return;
   }
-  if (vm->GetType() == VirtualMachine::VmType::ApplicationList_VmType_TERMINA) {
+  if (vm->GetType() == VirtualMachine::VmType::TERMINA) {
     Container* container = vm->GetContainerForToken(container_token);
     if (!container) {
       LOG(ERROR) << "No container found matching token: " << container_token;
       event->Signal();
       return;
     }
-    std::string container_ip_str;
-    if (!IPv4AddressToString(container->ipv4_address(), &container_ip_str)) {
-      LOG(ERROR) << "Failed converting IP address to string: "
-                 << container->ipv4_address();
-      event->Signal();
-      return;
-    }
+    std::string container_ip_str = container->ipv4_address().ToString();
     if (container_ip_str == linuxhost_ip_) {
       container_ip_str = kDefaultContainerHostname;
     }
@@ -1108,8 +1158,10 @@ void Service::OpenUrl(const std::string& container_token,
     writer.AppendString(url);
   }
   std::unique_ptr<dbus::Response> dbus_response =
-      url_handler_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      url_handler_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to Chrome for OpenUrl";
   } else {
@@ -1145,7 +1197,8 @@ void Service::SelectFile(const std::string& container_token,
   select_file->set_vm_name(vm_name);
   select_file->set_container_name(container_name);
   select_file->set_owner_id(owner_id);
-  std::string select_file_token = base::GenerateGUID();
+  std::string select_file_token =
+      base::Uuid::GenerateRandomV4().AsLowercaseString();
   select_file->set_select_file_token(select_file_token);
   dbus::MethodCall method_call(
       vm_tools::apps::kVmApplicationsServiceInterface,
@@ -1164,8 +1217,10 @@ void Service::SelectFile(const std::string& container_token,
                                base::BindOnce(&OnFileSelected, files, event));
 
   std::unique_ptr<dbus::Response> dbus_response =
-      vm_applications_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      vm_applications_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to Chrome for SelectFile";
     select_file_dialogs_.erase(select_file_token);
@@ -1236,8 +1291,10 @@ void Service::OpenTerminal(const std::string& container_token,
   dbus::MessageWriter(&method_call)
       .AppendProtoAsArrayOfBytes(std::move(terminal_params));
   std::unique_ptr<dbus::Response> dbus_response =
-      vm_applications_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      vm_applications_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to Chrome for OpenTerminal";
   } else {
@@ -1275,8 +1332,10 @@ void Service::ForwardSecurityKeyMessage(
   dbus::MessageWriter(&method_call)
       .AppendProtoAsArrayOfBytes(std::move(security_key_message));
   std::unique_ptr<dbus::Response> dbus_response =
-      vm_sk_forwarding_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      vm_sk_forwarding_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to Chrome for "
                << "ForwardSecurityKeyMessage";
@@ -1324,8 +1383,10 @@ void Service::UpdateMimeTypes(const std::string& container_token,
   dbus::MessageWriter(&method_call)
       .AppendProtoAsArrayOfBytes(std::move(mime_types));
   std::unique_ptr<dbus::Response> dbus_response =
-      vm_applications_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      vm_applications_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to Chrome for UpdateMimeTypes";
   } else {
@@ -1334,48 +1395,191 @@ void Service::UpdateMimeTypes(const std::string& container_token,
   event->Signal();
 }
 
-void Service::GetDiskInfo(
+void Service::ReportMetrics(
     const std::string& container_token,
     const uint32_t cid,
-    vm_tools::disk_management::GetDiskInfoResponse* result,
+    const vm_tools::container::ReportMetricsRequest& request,
+    vm_tools::container::ReportMetricsResponse* response,
     base::WaitableEvent* event) {
-  vm_tools::disk_management::GetDiskInfoRequest get_disk_info_request;
-  SendDiskMethod(
-      vm_tools::disk_management::kVmDiskManagementServiceGetDiskInfoMethod,
-      container_token, cid, &get_disk_info_request, result);
+  DCHECK(sequence_checker_.CalledOnValidSequence());
+  CHECK(response);
+  CHECK(event);
+  VirtualMachine* vm;
+  std::string owner_id;
+  std::string vm_name;
+
+  if (!GetVirtualMachineForCidOrToken(cid, "", &vm, &owner_id, &vm_name)) {
+    LOG(ERROR) << "Failed to get VirtualMachine for cid: " << cid;
+    response->set_error(1);
+    event->Signal();
+    return;
+  }
+
+  std::string container_name = vm->GetContainerNameForToken(container_token);
+  if (container_name.empty()) {
+    LOG(ERROR) << "Could not get container name for token";
+    response->set_error(1);
+    event->Signal();
+    return;
+  }
+
+  // Check on rate limiting for the VM before processing any further.
+  if (!CheckReportMetricsRateLimit(vm_name)) {
+    LOG(ERROR) << "ReportMetrics rate limit exceeded, blocking request";
+    response->set_error(1);
+    event->Signal();
+    return;
+  }
+
+  for (const auto& metric : request.metric()) {
+    if (!guest_metrics_->HandleMetric(owner_id, vm_name, container_name,
+                                      metric.name(), metric.value())) {
+      LOG(ERROR) << "Error handling metric " << metric.name() << " for VM "
+                 << vm_name << " container " << container_name;
+      response->set_error(1);
+      break;
+    }
+  }
+
   event->Signal();
 }
 
-void Service::RequestSpace(
-    const std::string& container_token,
+void Service::InstallVmShaderCache(
     const uint32_t cid,
-    const uint64_t space_requested,
-    vm_tools::disk_management::RequestSpaceResponse* result,
+    const vm_tools::container::InstallShaderCacheRequest* request,
+    std::string* error_out,
     base::WaitableEvent* event) {
-  vm_tools::disk_management::RequestSpaceRequest request_space_request;
-  request_space_request.set_space_requested(space_requested);
-  SendDiskMethod(
-      vm_tools::disk_management::kVmDiskManagementServiceRequestSpaceMethod,
-      container_token, cid, &request_space_request, result);
+  VirtualMachine* vm;
+  std::string owner_id;
+  std::string vm_name;
+
+  if (!GetVirtualMachineForCidOrToken(cid, "", &vm, &owner_id, &vm_name)) {
+    *error_out =
+        base::StringPrintf("Could not get virtual machine for cid %du", cid);
+    event->Signal();
+    return;
+  }
+
+  if (!vm->GetContainerForToken(request->token())) {
+    *error_out = "Invalid container token: " + request->token();
+    event->Signal();
+    return;
+  }
+
+  if (vm->GetType() != VirtualMachine::VmType::BOREALIS) {
+    *error_out = "Only Borealis VM supported";
+    event->Signal();
+    return;
+  }
+
+  shadercached_helper_->InstallShaderCache(
+      owner_id, vm_name, request, error_out, event, shadercached_proxy_);
+}
+
+void Service::UninstallVmShaderCache(
+    const uint32_t cid,
+    const vm_tools::container::UninstallShaderCacheRequest* request,
+    std::string* error_out,
+    base::WaitableEvent* event) {
+  VirtualMachine* vm;
+  std::string owner_id;
+  std::string vm_name;
+
+  if (!GetVirtualMachineForCidOrToken(cid, "", &vm, &owner_id, &vm_name)) {
+    *error_out =
+        base::StringPrintf("Could not get virtual machine for cid %du", cid);
+    event->Signal();
+    return;
+  }
+
+  if (!vm->GetContainerForToken(request->token())) {
+    *error_out = "Invalid container token: " + request->token();
+    event->Signal();
+    return;
+  }
+
+  if (vm->GetType() != VirtualMachine::VmType::BOREALIS) {
+    *error_out = "Only Borealis VM supported";
+    event->Signal();
+    return;
+  }
+
+  shadercached_helper_->UninstallShaderCache(
+      owner_id, vm_name, request, error_out, event, shadercached_proxy_);
+}
+
+void Service::UnmountVmShaderCache(
+    const uint32_t cid,
+    const vm_tools::container::UnmountShaderCacheRequest* request,
+    std::string* error_out,
+    base::WaitableEvent* event) {
+  VirtualMachine* vm;
+  std::string owner_id;
+  std::string vm_name;
+
+  if (!GetVirtualMachineForCidOrToken(cid, "", &vm, &owner_id, &vm_name)) {
+    *error_out =
+        base::StringPrintf("Could not get virtual machine for cid %du", cid);
+    event->Signal();
+    return;
+  }
+
+  if (!vm->GetContainerForToken(request->token())) {
+    *error_out = "Invalid container token: " + request->token();
+    event->Signal();
+    return;
+  }
+
+  if (vm->GetType() != VirtualMachine::VmType::BOREALIS) {
+    *error_out = "Only Borealis VM supported";
+    event->Signal();
+    return;
+  }
+
+  shadercached_helper_->UnmountShaderCache(
+      owner_id, vm_name, request, error_out, event, shadercached_proxy_);
+}
+
+void Service::InhibitScreensaver(const std::string& container_token,
+                                 const uint32_t cid,
+                                 InhibitScreensaverSignal* signal,
+                                 bool* result,
+                                 base::WaitableEvent* event) {
+  *result = SendSignal(kInhibitScreensaverSignal, container_token, cid, signal);
   event->Signal();
 }
 
-void Service::ReleaseSpace(
-    const std::string& container_token,
-    const uint32_t cid,
-    const uint64_t space_to_release,
-    vm_tools::disk_management::ReleaseSpaceResponse* result,
-    base::WaitableEvent* event) {
-  vm_tools::disk_management::ReleaseSpaceRequest release_space_request;
-  release_space_request.set_space_to_release(space_to_release);
-  SendDiskMethod(
-      vm_tools::disk_management::kVmDiskManagementServiceReleaseSpaceMethod,
-      container_token, cid, &release_space_request, result);
+void Service::UninhibitScreensaver(const std::string& container_token,
+                                   const uint32_t cid,
+                                   UninhibitScreensaverSignal* signal,
+                                   bool* result,
+                                   base::WaitableEvent* event) {
+  *result =
+      SendSignal(kUninhibitScreensaverSignal, container_token, cid, signal);
   event->Signal();
+}
+
+bool Service::CheckReportMetricsRateLimit(const std::string& vm_name) {
+  RateLimitState& state = metric_rate_limit_state_[vm_name];
+  base::TimeTicks now = base::TimeTicks::Now();
+  if (now - state.window_start > kMetricRateWindow) {
+    // Beyond the window, reset the window start time and counter.
+    state.window_start = now;
+    state.count = 1;
+    return true;
+  }
+  if (++state.count <= kMetricRateLimit)
+    return true;
+  // Only log the first one over the limit to prevent log spam if this is
+  // getting hit quickly.
+  LOG_IF(ERROR, state.count == kMetricRateLimit + 1)
+      << "ReportMetrics rate limit hit, blocking requests until window "
+         "closes";
+  return false;
 }
 
 bool Service::Init(
-    const base::Optional<base::FilePath>& unix_socket_path_for_testing) {
+    const std::optional<base::FilePath>& unix_socket_path_for_testing) {
   if (!bus_->Connect()) {
     LOG(ERROR) << "Failed to connect to system bus";
     return false;
@@ -1404,6 +1608,7 @@ bool Service::Init(
       {kCreateLxdContainerMethod, &Service::CreateLxdContainer},
       {kDeleteLxdContainerMethod, &Service::DeleteLxdContainer},
       {kStartLxdContainerMethod, &Service::StartLxdContainer},
+      {kStopLxdContainerMethod, &Service::StopLxdContainer},
       {kSetTimezoneMethod, &Service::SetTimezone},
       {kGetLxdContainerUsernameMethod, &Service::GetLxdContainerUsername},
       {kSetUpLxdContainerUserMethod, &Service::SetUpLxdContainerUser},
@@ -1423,13 +1628,19 @@ bool Service::Init(
       {kRegisterVshSessionMethod, &Service::RegisterVshSession},
       {kGetVshSessionMethod, &Service::GetVshSession},
       {kFileSelectedMethod, &Service::FileSelected},
+      {kAttachUsbToContainerMethod, &Service::AttachUsbToContainer},
+      {kDetachUsbFromContainerMethod, &Service::DetachUsbFromContainer},
+      {kListRunningContainersMethod, &Service::ListRunningContainers},
+      {kGetGarconSessionInfoMethod, &Service::GetGarconSessionInfo},
+      {kUpdateContainerDevicesMethod, &Service::UpdateContainerDevices},
   };
 
   for (const auto& iter : kServiceMethods) {
     bool ret = exported_object_->ExportMethodAndBlock(
         kVmCiceroneInterface, iter.first,
-        base::Bind(&HandleSynchronousDBusMethodCall,
-                   base::Bind(iter.second, base::Unretained(this))));
+        base::BindRepeating(
+            &HandleSynchronousDBusMethodCall,
+            base::BindRepeating(iter.second, base::Unretained(this))));
     if (!ret) {
       LOG(ERROR) << "Failed to export method " << iter.first;
       return false;
@@ -1445,8 +1656,8 @@ bool Service::Init(
   // Set up the D-Bus client for shill.
   shill_client_ = std::make_unique<ShillClient>(bus_);
   shill_client_->RegisterDefaultServiceChangedHandler(
-      base::Bind(&Service::OnDefaultNetworkServiceChanged,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(&Service::OnDefaultNetworkServiceChanged,
+                          weak_ptr_factory_.GetWeakPtr()));
 
   // Get the D-Bus proxy for communicating with the crostini registry in Chrome
   // and for the URL handler service.
@@ -1482,7 +1693,7 @@ bool Service::Init(
                << crosdns::kCrosDnsServiceName;
     return false;
   }
-  crosdns_service_proxy_->WaitForServiceToBeAvailable(base::Bind(
+  crosdns_service_proxy_->WaitForServiceToBeAvailable(base::BindOnce(
       &Service::OnCrosDnsServiceAvailable, weak_ptr_factory_.GetWeakPtr()));
 
   concierge_service_proxy_ = bus_->GetObjectProxy(
@@ -1501,15 +1712,16 @@ bool Service::Init(
                << vm_tools::sk_forwarding::kVmSKForwardingServiceName;
     return false;
   }
-  vm_disk_management_service_proxy_ = bus_->GetObjectProxy(
-      vm_tools::disk_management::kVmDiskManagementServiceName,
-      dbus::ObjectPath(
-          vm_tools::disk_management::kVmDiskManagementServicePath));
-  if (!vm_disk_management_service_proxy_) {
+  shadercached_proxy_ = bus_->GetObjectProxy(
+      shadercached::kShaderCacheServiceName,
+      dbus::ObjectPath(shadercached::kShaderCacheServicePath));
+  if (!shadercached_proxy_) {
     LOG(ERROR) << "Unable to get dbus proxy for "
-               << vm_tools::disk_management::kVmDiskManagementServiceName;
+               << shadercached::kShaderCacheServiceName;
     return false;
   }
+  shadercached_helper_ =
+      std::make_unique<ShadercachedHelper>(shadercached_proxy_);
 
   std::vector<std::string> container_listener_addresses = {
       base::StringPrintf("vsock:%u:%u", VMADDR_CID_ANY, vm_tools::kGarconPort),
@@ -1599,6 +1811,11 @@ bool Service::Init(
                            base::BindRepeating(&Service::OnLocaltimeFileChanged,
                                                weak_ptr_factory_.GetWeakPtr()));
 
+  if (create_guest_metrics_) {
+    // Setup metric accumulator for Borealis swap and disk IO.
+    guest_metrics_ = std::make_unique<GuestMetrics>(bus_);
+  }
+
   return true;
 }
 
@@ -1636,7 +1853,10 @@ void Service::HandleChildExit() {
 void Service::HandleSigterm() {
   LOG(INFO) << "Shutting down due to SIGTERM";
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, quit_closure_);
+  if (quit_closure_) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, std::move(quit_closure_));
+  }
 }
 
 std::unique_ptr<dbus::Response> Service::NotifyVmStarted(
@@ -1862,17 +2082,36 @@ std::unique_ptr<dbus::Response> Service::LaunchContainerApplication(
     display_scaling = vm_tools::container::LaunchApplicationRequest::SCALED;
   }
 
+  std::vector<vm_tools::container::ContainerFeature> container_features;
+  for (int feature : request.container_features()) {
+    container_features.emplace_back(
+        static_cast<vm_tools::container::ContainerFeature>(feature));
+  }
+
   std::string error_msg;
   response.set_success(container->LaunchContainerApplication(
       request.desktop_file_id(),
       std::vector<string>(
           std::make_move_iterator(request.mutable_files()->begin()),
           std::make_move_iterator(request.mutable_files()->end())),
-      display_scaling, &error_msg));
+      display_scaling, std::move(container_features), &error_msg));
   response.set_failure_reason(error_msg);
   writer.AppendProtoAsArrayOfBytes(response);
   return dbus_response;
 }
+
+namespace {
+DesktopIcon::Format ConvertFormat(
+    vm_tools::container::DesktopIcon::Format format) {
+  switch (format) {
+    case container::DesktopIcon::SVG:
+      return DesktopIcon::SVG;
+
+    default:
+      return DesktopIcon::PNG;
+  }
+}
+}  // namespace
 
 std::unique_ptr<dbus::Response> Service::GetContainerAppIcon(
     dbus::MethodCall* method_call) {
@@ -1933,6 +2172,7 @@ std::unique_ptr<dbus::Response> Service::GetContainerAppIcon(
     *icon->mutable_desktop_file_id() =
         std::move(container_icon.desktop_file_id);
     *icon->mutable_icon() = std::move(container_icon.content);
+    icon->set_format(ConvertFormat(container_icon.format));
   }
 
   writer.AppendProtoAsArrayOfBytes(response);
@@ -1991,8 +2231,15 @@ std::unique_ptr<dbus::Response> Service::LaunchVshd(
     return dbus_response;
   }
 
+  std::vector<vm_tools::container::ContainerFeature> container_features;
+  for (int feature : request.container_features()) {
+    container_features.emplace_back(
+        static_cast<vm_tools::container::ContainerFeature>(feature));
+  }
+
   std::string error_msg;
-  container->LaunchVshd(request.port(), &error_msg);
+  container->LaunchVshd(request.port(), std::move(container_features),
+                        &error_msg);
 
   response.set_success(true);
   response.set_failure_reason(error_msg);
@@ -2358,19 +2605,6 @@ std::unique_ptr<dbus::Response> Service::StartLxdContainer(
                                    ? kDefaultContainerName
                                    : request.container_name();
 
-  std::string container_private_key, host_public_key;
-  std::string error_msg;
-  if (!GetContainerSshKeys(request.owner_id(), request.vm_name(),
-                           container_name, &host_public_key,
-                           nullptr,  // host private key
-                           nullptr,  // container public key
-                           &container_private_key,
-                           nullptr,  // hostname
-                           &error_msg)) {
-    response.set_failure_reason(error_msg);
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
-  }
   std::string container_token = vm->GenerateContainerToken(container_name);
   Container* container = vm->GetPendingContainerForToken(container_token);
   CHECK(container);
@@ -2383,9 +2617,10 @@ std::unique_ptr<dbus::Response> Service::StartLxdContainer(
     writer.AppendProtoAsArrayOfBytes(response);
     return dbus_response;
   }
-  VirtualMachine::StartLxdContainerStatus status = vm->StartLxdContainer(
-      container_name, container_private_key, host_public_key, container_token,
-      *privilege_level, &error_msg);
+  std::string error_msg;
+  VirtualMachine::StartLxdContainerStatus status =
+      vm->StartLxdContainer(container_name, container_token, *privilege_level,
+                            request.disable_audio_capture(), &error_msg);
 
   switch (status) {
     case VirtualMachine::StartLxdContainerStatus::UNKNOWN:
@@ -2414,6 +2649,61 @@ std::unique_ptr<dbus::Response> Service::StartLxdContainer(
   }
 
   response.set_failure_reason(error_msg);
+  writer.AppendProtoAsArrayOfBytes(response);
+  return dbus_response;
+}
+
+std::unique_ptr<dbus::Response> Service::StopLxdContainer(
+    dbus::MethodCall* method_call) {
+  DCHECK(sequence_checker_.CalledOnValidSequence());
+  LOG(INFO) << "Received StopLxdContainer request";
+  std::unique_ptr<dbus::Response> dbus_response(
+      dbus::Response::FromMethodCall(method_call));
+
+  dbus::MessageReader reader(method_call);
+  dbus::MessageWriter writer(dbus_response.get());
+
+  StopLxdContainerRequest request;
+  StopLxdContainerResponse response;
+  if (!reader.PopArrayOfBytesAsProto(&request)) {
+    LOG(ERROR) << "Unable to parse StopLxdRequest from message";
+    response.set_failure_reason("unable to parse StopLxdRequest from message");
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  VirtualMachine* vm = FindVm(request.owner_id(), request.vm_name());
+  if (!vm) {
+    LOG(ERROR) << "Requested VM does not exist:" << request.vm_name();
+    response.set_failure_reason(base::StringPrintf(
+        "requested VM does not exist: %s", request.vm_name().c_str()));
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  std::string error_msg;
+  VirtualMachine::StopLxdContainerStatus status =
+      vm->StopLxdContainer(request.container_name(), &error_msg);
+
+  switch (status) {
+    case VirtualMachine::StopLxdContainerStatus::UNKNOWN:
+      response.set_status(StopLxdContainerResponse::UNKNOWN);
+      break;
+    case VirtualMachine::StopLxdContainerStatus::STOPPED:
+      response.set_status(StopLxdContainerResponse::STOPPED);
+      break;
+    case VirtualMachine::StopLxdContainerStatus::STOPPING:
+      response.set_status(StopLxdContainerResponse::STOPPING);
+      break;
+    case VirtualMachine::StopLxdContainerStatus::DOES_NOT_EXIST:
+      response.set_status(StopLxdContainerResponse::DOES_NOT_EXIST);
+      break;
+    case VirtualMachine::StopLxdContainerStatus::FAILED:
+      response.set_status(StopLxdContainerResponse::FAILED);
+      break;
+  }
+  response.set_failure_reason(error_msg);
+
   writer.AppendProtoAsArrayOfBytes(response);
   return dbus_response;
 }
@@ -2458,9 +2748,8 @@ std::unique_ptr<dbus::Response> Service::SetTimezone(
                                  container_names, &results, &error_msg);
     if (success) {
       response.set_successes(response.successes() + results.successes);
-      for (int i = 0; i < results.failure_reasons.size(); i++) {
-        response.add_failure_reasons("VM " + vm_name + ": " +
-                                     results.failure_reasons[i]);
+      for (const auto& failure_reason : results.failure_reasons) {
+        response.add_failure_reasons("VM " + vm_name + ": " + failure_reason);
       }
     } else {
       response.add_failure_reasons("Setting timezone failed entirely for VM " +
@@ -3157,6 +3446,113 @@ std::unique_ptr<dbus::Response> Service::CancelUpgradeContainer(
   return dbus_response;
 }
 
+std::unique_ptr<dbus::Response> Service::AttachUsbToContainer(
+    dbus::MethodCall* method_call) {
+  DCHECK(sequence_checker_.CalledOnValidSequence());
+  LOG(INFO) << "Received AttachUsbToContainer request";
+
+  auto dbus_response = dbus::Response::FromMethodCall(method_call);
+
+  dbus::MessageReader reader(method_call);
+  dbus::MessageWriter writer(dbus_response.get());
+
+  AttachUsbToContainerRequest request;
+  AttachUsbToContainerResponse response;
+  if (!reader.PopArrayOfBytesAsProto(&request)) {
+    std::string error_reason =
+        "Unable to parse AttachUsbToContainerRequest from message";
+    LOG(ERROR) << error_reason;
+    response.set_status(AttachUsbToContainerResponse::FAILED);
+    response.set_failure_reason(std::move(error_reason));
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  VirtualMachine* vm = FindVm(request.owner_id(), request.vm_name());
+  if (!vm) {
+    std::string error_reason = base::StringPrintf(
+        "requested VM does not exist: %s", request.vm_name().c_str());
+    LOG(ERROR) << error_reason;
+    response.set_status(AttachUsbToContainerResponse::FAILED);
+    response.set_failure_reason(std::move(error_reason));
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  Container* container = vm->GetContainerForName(request.container_name());
+  if (!container) {
+    std::string error_reason = base::StringPrintf(
+        "requested container %s does not exist on VM %s",
+        request.container_name().c_str(), request.vm_name().c_str());
+    LOG(ERROR) << error_reason;
+    response.set_status(AttachUsbToContainerResponse::NO_SUCH_CONTAINER);
+    response.set_failure_reason(std::move(error_reason));
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  std::string error_msg;
+  VirtualMachine::AttachUsbToContainerStatus status =
+      vm->AttachUsbToContainer(container, request.port_num(), &error_msg);
+
+  response.set_status(AttachUsbToContainerResponse::UNKNOWN);
+  if (AttachUsbToContainerResponse::Status_IsValid(static_cast<int>(status))) {
+    response.set_status(
+        static_cast<AttachUsbToContainerResponse::Status>(status));
+  }
+  response.set_failure_reason(error_msg);
+  writer.AppendProtoAsArrayOfBytes(response);
+  return dbus_response;
+}
+
+std::unique_ptr<dbus::Response> Service::DetachUsbFromContainer(
+    dbus::MethodCall* method_call) {
+  DCHECK(sequence_checker_.CalledOnValidSequence());
+  LOG(INFO) << "Received DetachUsbFromContainer request";
+
+  auto dbus_response = dbus::Response::FromMethodCall(method_call);
+
+  dbus::MessageReader reader(method_call);
+  dbus::MessageWriter writer(dbus_response.get());
+
+  DetachUsbFromContainerRequest request;
+  DetachUsbFromContainerResponse response;
+  if (!reader.PopArrayOfBytesAsProto(&request)) {
+    std::string error_reason =
+        "Unable to parse DetachUsbFromContainerRequest from message";
+    LOG(ERROR) << error_reason;
+    response.set_status(DetachUsbFromContainerResponse::FAILED);
+    response.set_failure_reason(std::move(error_reason));
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  VirtualMachine* vm = FindVm(request.owner_id(), request.vm_name());
+  if (!vm) {
+    std::string error_reason = base::StringPrintf(
+        "requested VM does not exist: %s", request.vm_name().c_str());
+    LOG(ERROR) << error_reason;
+    response.set_status(DetachUsbFromContainerResponse::FAILED);
+    response.set_failure_reason(std::move(error_reason));
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  std::string error_msg;
+  VirtualMachine::DetachUsbFromContainerStatus status =
+      vm->DetachUsbFromContainer(request.port_num(), &error_msg);
+
+  response.set_status(DetachUsbFromContainerResponse::UNKNOWN);
+  if (DetachUsbFromContainerResponse::Status_IsValid(
+          static_cast<int>(status))) {
+    response.set_status(
+        static_cast<DetachUsbFromContainerResponse::Status>(status));
+  }
+  response.set_failure_reason(error_msg);
+  writer.AppendProtoAsArrayOfBytes(response);
+  return dbus_response;
+}
+
 std::unique_ptr<dbus::Response> Service::StartLxd(
     dbus::MethodCall* method_call) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
@@ -3422,6 +3818,7 @@ std::unique_ptr<dbus::Response> Service::GetVshSession(
   writer.AppendProtoAsArrayOfBytes(response);
   return dbus_response;
 }
+
 std::unique_ptr<dbus::Response> Service::FileSelected(
     dbus::MethodCall* method_call) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
@@ -3471,6 +3868,148 @@ std::unique_ptr<dbus::Response> Service::FileSelected(
   return dbus_response;
 }
 
+std::unique_ptr<dbus::Response> Service::ListRunningContainers(
+    dbus::MethodCall* method_call) {
+  DCHECK(sequence_checker_.CalledOnValidSequence());
+  LOG(INFO) << "Received ListRunningContainers request";
+  std::unique_ptr<dbus::Response> dbus_response(
+      dbus::Response::FromMethodCall(method_call));
+
+  dbus::MessageReader reader(method_call);
+  dbus::MessageWriter writer(dbus_response.get());
+
+  ListRunningContainersRequest request;
+  ListRunningContainersResponse response;
+  if (!reader.PopArrayOfBytesAsProto(&request)) {
+    LOG(ERROR) << "Unable to parse ListRunningContainersRequest from message";
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  for (const auto& vm : vms_) {
+    if (vm.first.first != request.owner_id()) {
+      continue;
+    }
+    for (const auto& container_entry : vm.second->GetContainers()) {
+      auto* info = response.add_containers();
+      info->set_vm_name(vm.first.second);
+      info->set_container_name(container_entry.second->name());
+      info->set_container_token(container_entry.second->token());
+      auto* os_release =
+          vm.second->GetOsReleaseForContainer(container_entry.second->name());
+      if (os_release) {
+        info->mutable_os_release()->MergeFrom(*os_release);
+      }
+    }
+  }
+  writer.AppendProtoAsArrayOfBytes(response);
+  return dbus_response;
+}
+
+std::unique_ptr<dbus::Response> Service::GetGarconSessionInfo(
+    dbus::MethodCall* method_call) {
+  DCHECK(sequence_checker_.CalledOnValidSequence());
+  LOG(INFO) << "Received GetGarconSessionInfo request";
+  std::unique_ptr<dbus::Response> dbus_response(
+      dbus::Response::FromMethodCall(method_call));
+
+  dbus::MessageReader reader(method_call);
+  dbus::MessageWriter writer(dbus_response.get());
+
+  GetGarconSessionInfoRequest request;
+  GetGarconSessionInfoResponse response;
+  response.set_status(GetGarconSessionInfoResponse::UNKNOWN);
+  if (!reader.PopArrayOfBytesAsProto(&request)) {
+    LOG(ERROR) << "Unable to parse GetGarconSessionInfoRequest from message";
+    response.set_failure_reason("unable to parse request protobuf");
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  VirtualMachine* vm = FindVm(request.owner_id(), request.vm_name());
+  if (!vm) {
+    LOG(ERROR) << "Requested VM does not exist:" << request.vm_name();
+    response.set_failure_reason("requested VM does not exist");
+    response.set_status(GetGarconSessionInfoResponse::NOT_FOUND);
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+  Container* container = vm->GetContainerForName(request.container_name());
+  if (!container) {
+    LOG(ERROR) << "Requested container does not exist: "
+               << request.container_name();
+    response.set_failure_reason("requested container does not exist");
+    response.set_status(GetGarconSessionInfoResponse::NOT_FOUND);
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  uint32_t sftp_vsock_port;
+  if (container->GetGarconSessionInfo(response.mutable_failure_reason(),
+                                      response.mutable_container_username(),
+                                      response.mutable_container_homedir(),
+                                      &sftp_vsock_port)) {
+    response.set_status(GetGarconSessionInfoResponse::SUCCEEDED);
+    response.set_sftp_vsock_port(sftp_vsock_port);
+  } else {
+    response.set_status(GetGarconSessionInfoResponse::FAILED);
+  }
+  writer.AppendProtoAsArrayOfBytes(response);
+  return dbus_response;
+}
+
+std::unique_ptr<dbus::Response> Service::UpdateContainerDevices(
+    dbus::MethodCall* method_call) {
+  DCHECK(sequence_checker_.CalledOnValidSequence());
+  LOG(INFO) << "Received UpdateContainerDevices request";
+  std::unique_ptr<dbus::Response> dbus_response(
+      dbus::Response::FromMethodCall(method_call));
+
+  dbus::MessageReader reader(method_call);
+  dbus::MessageWriter writer(dbus_response.get());
+
+  UpdateContainerDevicesRequest request;
+  UpdateContainerDevicesResponse response;
+  response.set_status(UpdateContainerDevicesResponse::UNKNOWN);
+
+  if (!reader.PopArrayOfBytesAsProto(&request)) {
+    LOG(ERROR) << "Unable to parse UpdateContainerDevices from message";
+    response.set_failure_reason("unable to parse request protobuf");
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+
+  VirtualMachine* vm = FindVm(request.owner_id(), request.vm_name());
+  if (!vm) {
+    LOG(ERROR) << "Requested VM does not exist:" << request.vm_name();
+    response.set_failure_reason("requested VM does not exist");
+    response.set_status(UpdateContainerDevicesResponse::NO_SUCH_CONTAINER);
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+  Container* container = vm->GetContainerForName(request.container_name());
+  if (!container) {
+    LOG(ERROR) << "Requested container does not exist: "
+               << request.container_name();
+    response.set_failure_reason("requested container does not exist");
+    response.set_status(UpdateContainerDevicesResponse::NO_SUCH_CONTAINER);
+    writer.AppendProtoAsArrayOfBytes(response);
+    return dbus_response;
+  }
+  VirtualMachine::UpdateContainerDevicesStatus status =
+      vm->UpdateContainerDevices(container, request.updates(),
+                                 response.mutable_results(),
+                                 response.mutable_failure_reason());
+  if (UpdateContainerDevicesResponse::Status_IsValid(
+          static_cast<int>(status))) {
+    response.set_status(
+        static_cast<UpdateContainerDevicesResponse::Status>(status));
+  }
+
+  writer.AppendProtoAsArrayOfBytes(response);
+  return dbus_response;
+}
+
 bool Service::GetVirtualMachineForCidOrToken(const uint32_t cid,
                                              const std::string& vm_token,
                                              VirtualMachine** vm_out,
@@ -3490,8 +4029,7 @@ bool Service::GetVirtualMachineForCidOrToken(const uint32_t cid,
       *owner_id_out = vm.first.first;
       *name_out = vm.first.second;
       *vm_out = vm.second.get();
-      DCHECK((*vm_out)->GetType() !=
-             VirtualMachine::VmType::ApplicationList_VmType_PLUGIN_VM);
+      DCHECK((*vm_out)->GetType() != VirtualMachine::VmType::PLUGIN_VM);
       return true;
     }
     return false;
@@ -3506,68 +4044,12 @@ bool Service::GetVirtualMachineForCidOrToken(const uint32_t cid,
       // This DCHECK is asserting the inputs are valid. Since fuzzers are
       // intended to give us invalid inputs, skip the DCHECK when fuzzing.
 #ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-      DCHECK((*vm_out)->GetType() ==
-             VirtualMachine::VmType::ApplicationList_VmType_PLUGIN_VM);
+      DCHECK((*vm_out)->GetType() == VirtualMachine::VmType::PLUGIN_VM);
 #endif  // FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
       return true;
     }
     return false;
   }
-}
-
-bool Service::GetContainerSshKeys(const std::string& owner_id,
-                                  const std::string& vm_name,
-                                  const std::string& container_name,
-                                  std::string* host_pubkey_out,
-                                  std::string* host_privkey_out,
-                                  std::string* container_pubkey_out,
-                                  std::string* container_privkey_out,
-                                  std::string* hostname_out,
-                                  std::string* error_out) {
-  DCHECK(error_out);
-  // Request SSH keys from concierge.
-  dbus::MethodCall method_call(vm_tools::concierge::kVmConciergeInterface,
-                               vm_tools::concierge::kGetContainerSshKeysMethod);
-  vm_tools::concierge::ContainerSshKeysRequest request;
-  vm_tools::concierge::ContainerSshKeysResponse response;
-  dbus::MessageWriter writer(&method_call);
-
-  request.set_cryptohome_id(owner_id);
-  request.set_vm_name(vm_name);
-  request.set_container_name(container_name);
-  writer.AppendProtoAsArrayOfBytes(request);
-  std::unique_ptr<dbus::Response> dbus_response =
-      concierge_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to get SSH keys from concierge";
-    error_out->assign("failed to get SSH keys from concierge");
-    return false;
-  }
-  dbus::MessageReader reader(dbus_response.get());
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Unable to parse ContainerSshKeysResponse from message";
-    error_out->assign("unable to parse ContainerSshKeysResponse from message");
-    return false;
-  }
-
-  if (host_pubkey_out) {
-    *host_pubkey_out = std::move(response.host_public_key());
-  }
-  if (host_privkey_out) {
-    *host_privkey_out = std::move(response.host_private_key());
-  }
-  if (container_pubkey_out) {
-    *container_pubkey_out = std::move(response.container_public_key());
-  }
-  if (container_privkey_out) {
-    *container_privkey_out = std::move(response.container_private_key());
-  }
-  if (hostname_out) {
-    *hostname_out = std::move(response.hostname());
-  }
-
-  return true;
 }
 
 void Service::RegisterHostname(const std::string& hostname,
@@ -3581,8 +4063,10 @@ void Service::RegisterHostname(const std::string& hostname,
   writer.AppendString(ip);
   writer.AppendString("");
   std::unique_ptr<dbus::Response> dbus_response =
-      crosdns_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      crosdns_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     // If there's some issue with the resolver service, don't make that
     // propagate to a higher level failure and just log it. We have logic for
@@ -3645,8 +4129,10 @@ void Service::UnregisterHostname(const std::string& hostname) {
   dbus::MessageWriter writer(&method_call);
   writer.AppendString(hostname);
   std::unique_ptr<dbus::Response> dbus_response =
-      crosdns_service_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      crosdns_service_proxy_
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!dbus_response) {
     // If there's some issue with the resolver service, don't make that
     // propagate to a higher level failure and just log it. We have logic for
@@ -3702,8 +4188,8 @@ void Service::OnLocaltimeFileChanged(const base::FilePath& path, bool error) {
         vm.second->SetTimezone(system_timezone_name.value(), posix_tz_string,
                                container_names, &results, &error_msg);
     if (success) {
-      for (int i = 0; i < results.failure_reasons.size(); i++) {
-        LOG(ERROR) << "VM " << vm_name << ": " << results.failure_reasons[i];
+      for (const auto& failure_reason : results.failure_reasons) {
+        LOG(ERROR) << "VM " << vm_name << ": " << failure_reason;
       }
     } else {
       LOG(ERROR) << "Setting timezone failed entirely for VM " << vm_name
@@ -3714,7 +4200,7 @@ void Service::OnLocaltimeFileChanged(const base::FilePath& path, bool error) {
 
 void Service::OnCrosDnsServiceAvailable(bool service_is_available) {
   if (service_is_available) {
-    crosdns_service_proxy_->SetNameOwnerChangedCallback(base::Bind(
+    crosdns_service_proxy_->SetNameOwnerChangedCallback(base::BindRepeating(
         &Service::OnCrosDnsNameOwnerChanged, weak_ptr_factory_.GetWeakPtr()));
   }
 }
@@ -3736,5 +4222,4 @@ VirtualMachine* Service::FindVm(const std::string& owner_id,
   return nullptr;
 }
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone

@@ -1,9 +1,22 @@
+# Copyright 2022 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
 /sys/kernel/debug(/.*)?                    u:object_r:debugfs:s0
 /sys/kernel/debug/dri(/.*)?                u:object_r:debugfs_gpu:s0
 /sys/kernel/debug/sync(/.*)?               u:object_r:debugfs_sync:s0
 /sys/kernel/debug/sync/sw_sync             u:object_r:debugfs_sw_sync:s0
+# Include both /sys/kernel/tracing and /sys/kernel/debug/tracing paths, since
+# some processes may reach it by either path.
 /sys/kernel/debug/tracing(/.*)?            u:object_r:debugfs_tracing:s0
+/sys/kernel/debug/tracing/instances/(/.*)? u:object_r:debugfs_tracing_instances:s0
 /sys/kernel/debug/tracing/trace_marker     u:object_r:debugfs_trace_marker:s0
+/sys/kernel/mm/lru_gen/min_ttl_ms          u:object_r:sysfs_lru_gen_min_ttl_ms:s0
+/sys/kernel/tracing(/.*)?                  u:object_r:debugfs_tracing:s0
+/sys/kernel/tracing/instances/(/.*)?       u:object_r:debugfs_tracing_instances:s0
+/sys/kernel/tracing/trace_marker           u:object_r:debugfs_trace_marker:s0
+
+/sys/firmware/efi/efivars(/.*)?            u:object_r:efivarfs:s0
 
 /sys/class/net(/.*)?                       u:object_r:sysfs_net:s0
 /sys/class/tpm(/.*)?                       u:object_r:sysfs_tpm:s0
@@ -11,6 +24,9 @@
 /sys/class/devcoredump(/.*)?               u:object_r:sysfs_class_devcoredump:s0
 
 /sys/devices/system/cpu(/.*)?                                   u:object_r:sysfs_devices_system_cpu:s0
+
+/sys/devices/system/cpu/cpuidle(/.*)                            u:object_r:sysfs_cpuidle:s0
+
 # Use u:object_r:sysfs:s0 for writable files to disallow regular apps to
 # access them.
 /sys/devices/system/cpu/cpufreq/ondemand/ignore_nice_load       u:object_r:sysfs:s0
@@ -21,6 +37,7 @@
 /sys/devices/system/cpu/cpufreq/ondemand/up_threshold           u:object_r:sysfs:s0
 /sys/devices/system/cpu/cpufreq/schedutil/down_rate_limit_us    u:object_r:sysfs:s0
 /sys/devices/system/cpu/cpufreq/schedutil/up_rate_limit_us      u:object_r:sysfs:s0
+/sys/devices/system/cpu/cpufreq/schedutil/rate_limit_us         u:object_r:sysfs:s0
 /sys/devices/system/cpu/cpufreq/policy[0-9]+/cpb                u:object_r:sysfs:s0
 /sys/devices/system/cpu/cpufreq/policy[0-9]+/stats/reset        u:object_r:sysfs:s0
 /sys/devices/system/cpu/(cpu[0-9]+/)?(cache/)?(index[0-9]+/)?hotplug/fail               u:object_r:sysfs:s0
@@ -50,7 +67,6 @@
 # For Intel
 /sys/devices/system/cpu/(cpu[0-9]+/)?power/energy_perf_bias     u:object_r:sysfs:s0
 /sys/devices/system/cpu/cpufreq/policy[0-9]*/energy_performance_preference u:object_r:sysfs:s0
-/sys/devices/system/cpu/cpuidle/current_governor                u:object_r:sysfs:s0
 /sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost          u:object_r:sysfs:s0
 /sys/devices/system/cpu/intel_pstate/max_perf_pct               u:object_r:sysfs:s0
 /sys/devices/system/cpu/intel_pstate/min_perf_pct               u:object_r:sysfs:s0
@@ -71,4 +87,3 @@
 /sys/devices/system/cpu/cpufreq/policy[0-9]+/schedutil/down_rate_limit_us u:object_r:sysfs:s0
 /sys/devices/system/cpu/cpufreq/policy[0-9]+/schedutil/up_rate_limit_us u:object_r:sysfs:s0
 /sys/devices/system/cpu/cpufreq/policy[0-9]+/schedutil/rate_limit_us u:object_r:sysfs:s0
-

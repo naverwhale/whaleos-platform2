@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,6 +10,9 @@ import("//common-mk/proto_library.gni")
 
 group("all") {
   deps = [
+    ":check_tpm_preinit_condition",
+    ":install_minijail_conf",
+    ":install_tmpfiles_config",
     ":local_data_migration",
     ":tpm_managerd",
   ]
@@ -26,9 +29,9 @@ pkg_config("target_default_deps") {
   pkg_deps = [
     "libbrillo",
     "libchrome",
-    "libtpmcrypto",
     "openssl",
   ]
+  libs = [ "hwsec" ]
   if (use.fuzzer) {
     pkg_deps += [ "protobuf" ]
   } else {
@@ -39,9 +42,14 @@ pkg_config("target_default_deps") {
 config("target_defaults") {
   configs = [ ":target_default_deps" ]
   defines = [
+    "USE_DOUBLE_EXTEND_PCR_ISSUE=${use.double_extend_pcr_issue}",
     "USE_TPM_DYNAMIC=${use.tpm_dynamic}",
     "USE_TPM1=${use.tpm}",
     "USE_TPM2=${use.tpm2}",
+    "USE_TPM_INSECURE_FALLBACK=${use.tpm_insecure_fallback}",
+    "USE_OS_INSTALL_SERVICE=${use.os_install_service}",
+    "USE_CR50_ONBOARD=${use.cr50_onboard}",
+    "USE_TI50_ONBOARD=${use.ti50_onboard}",
   ]
 }
 
@@ -60,10 +68,7 @@ config("server_library_tpm2_config") {
 }
 
 config("server_library_tpm1_config") {
-  libs = [
-    "hwsec",
-    "tspi",
-  ]
+  libs = [ "tspi" ]
 }
 
 static_library("server_library") {
@@ -72,6 +77,7 @@ static_library("server_library") {
     "server/local_data_migration.cc",
     "server/local_data_store_impl.cc",
     "server/openssl_crypto_util_impl.cc",
+    "server/pinweaver_provision.cc",
     "server/tpm_allowlist_impl.cc",
     "server/tpm_manager_metrics.cc",
     "server/tpm_manager_service.cc",
@@ -127,6 +133,7 @@ executable("tpm_managerd") {
     ":target_defaults",
     ":tpm_managerd_config",
   ]
+  libs = [ "hwsec-profiling" ]
   deps = [ ":server_library" ]
 
   # NOSORT
@@ -139,18 +146,19 @@ executable("tpm_managerd") {
   ]
 }
 
-config("local_data_migration_config") {
-  libs = [ "tpmcrypto" ]
-}
-
 # Local data migrator.
 executable("local_data_migration") {
   sources = [ "server/local_data_migration_main.cc" ]
-  configs += [
-    ":local_data_migration_config",
-    ":target_defaults",
-  ]
+  configs += [ ":target_defaults" ]
   deps = [ ":server_library" ]
+}
+
+# Determine whether to touch NoPreinitFlagFile.
+executable("check_tpm_preinit_condition") {
+  install_path = "sbin"
+  sources = [ "server/check_tpm_preinit_condition.cc" ]
+  configs += [ ":target_defaults" ]
+  libs = [ "rootdev" ]
 }
 
 # A library for externally useful tpm_manager_testtest code.
@@ -277,4 +285,14 @@ if (use.fuzzer) {
     configs = [ ":local_proto_include" ]
     sources = [ "${proto_in_dir}/tpm_manager_service_fuzzer_data.proto" ]
   }
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "server/minijail/tpm_managerd.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_tmpfiles_config") {
+  sources = [ "server/tmpfiles.d/tpm_manager.conf" ]
+  install_path = "tmpfilesd"
 }

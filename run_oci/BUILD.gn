@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,6 +14,9 @@ group("all") {
       ":container_config_parser_test",
       ":run_oci_test",
     ]
+  }
+  if (use.fuzzer) {
+    deps += [ ":run_oci_utils_fuzzer" ]
   }
 }
 
@@ -48,6 +51,7 @@ executable("run_oci") {
     ":run_oci_config",
     ":target_defaults",
   ]
+  install_path = "bin"
   configs -= [ "//common-mk:no_exceptions" ]
 }
 
@@ -67,6 +71,7 @@ if (use.test) {
       ":test_config",
     ]
     configs -= [ "//common-mk:no_exceptions" ]
+    run_test = true
     deps = [ "//common-mk/testrunner" ]
   }
 
@@ -82,6 +87,20 @@ if (use.test) {
       ":test_config",
     ]
     configs -= [ "//common-mk:no_exceptions" ]
+    run_test = true
     deps = [ "//common-mk/testrunner" ]
+  }
+}
+
+if (use.fuzzer) {
+  executable("run_oci_utils_fuzzer") {
+    sources = [
+      "run_oci_utils.cc",
+      "run_oci_utils_fuzzer.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":target_defaults",
+    ]
   }
 }

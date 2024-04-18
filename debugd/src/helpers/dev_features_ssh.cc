@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,7 @@
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
+#include <brillo/files/file_util.h>
 #include <brillo/flag_helper.h>
 
 #include "debugd/src/process_with_output.h"
@@ -21,7 +22,7 @@ namespace {
 
 const char kUsageMessage[] =
     "\n"
-    "Configures sshd and installs SSH test keys, or queries whether sshd has\n"
+    "Configures sshd and SSH test key access, or queries whether sshd has\n"
     "been configured (based on the existence of the required files).\n"
     "\n";
 
@@ -30,7 +31,7 @@ const char kUsageMessage[] =
 // needed. The InstallFile class below is used to simplify combining paths.
 const char kKeySourceDir[] = "/usr/share/chromeos-ssh-config/keys";
 const char kKeyInstallDir[] = "/root/.ssh";
-const char* const kKeyFilenames[] = {"authorized_keys", "id_rsa", "id_rsa.pub"};
+const char* const kKeyFilenames[] = {"authorized_keys"};
 
 const char kInitSourceDir[] = "/usr/share/chromeos-ssh-config/init";
 const char kInitInstallDir[] = "/etc/init";
@@ -142,7 +143,7 @@ bool ConfigureSsh(const std::vector<InstallFile>& install_files) {
   bool install_success = true;
   for (const auto& install_file : install_files) {
     // We need to overwrite anything that might be at the install location.
-    base::DeletePathRecursively(install_file.install_path());
+    brillo::DeletePathRecursively(install_file.install_path());
     if (!base::CreateSymbolicLink(install_file.source_path(),
                                   install_file.install_path())) {
       install_success = false;

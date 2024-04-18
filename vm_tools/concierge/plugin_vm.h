@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,12 +19,10 @@
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/notreached.h>
 #include <brillo/process/process.h>
 #include <dbus/exported_object.h>
-#include <chromeos/patchpanel/subnet.h>
-#include <vm_concierge/proto_bindings/concierge_service.pb.h>
+#include <vm_concierge/concierge_service.pb.h>
 
 #include "vm_tools/common/vm_id.h"
 #include "vm_tools/concierge/plugin_vm_usb.h"
@@ -32,30 +30,38 @@
 #include "vm_tools/concierge/vm_base_impl.h"
 #include "vm_tools/concierge/vm_builder.h"
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
+
+class PluginVmNetwork;
+
+// The CPU cgroup where all the PluginVm crosvm processes (other than vcpu)
+// should belong to.
+constexpr char kPluginVmCpuCgroup[] = "/sys/fs/cgroup/cpu/plugin";
+// The CPU cgroup where all the PluginVm crosvm vcpu processes should belong to.
+constexpr char kPluginVmVcpuCpuCgroup[] = "/sys/fs/cgroup/cpu/plugin-vcpus";
 
 class PluginVm final : public VmBaseImpl {
  public:
-  static std::unique_ptr<PluginVm> Create(
-      const VmId id,
-      base::FilePath stateful_dir,
-      base::FilePath iso_dir,
-      base::FilePath root_dir,
-      base::FilePath runtime_dir,
-      std::unique_ptr<patchpanel::Client> network_client,
-      int subnet_index,
-      bool enable_vnet_hdr,
-      scoped_refptr<dbus::Bus> bus,
-      std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-      dbus::ObjectProxy* vm_permission_service_proxy,
-      dbus::ObjectProxy* vmplugin_service_proxy,
-      VmBuilder vm_builder);
+  struct Config {
+    const VmId id;
+    base::FilePath stateful_dir;
+    base::FilePath iso_dir;
+    base::FilePath root_dir;
+    base::FilePath runtime_dir;
+    bool enable_vnet_hdr;
+    scoped_refptr<dbus::Bus> bus;
+    std::unique_ptr<PluginVmNetwork> network;
+    std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy;
+    dbus::ObjectProxy* vm_permission_service_proxy;
+    dbus::ObjectProxy* vmplugin_service_proxy;
+    VmBuilder vm_builder;
+  };
+  static std::unique_ptr<PluginVm> Create(Config config);
   ~PluginVm() override;
 
-  // VmInterface overrides.
+  // VmBaseImpl overrides.
   bool Shutdown() override;
-  VmInterface::Info GetInfo() override;
+  VmBaseImpl::Info GetInfo() const override;
   const std::unique_ptr<BalloonPolicyInterface>& GetBalloonPolicy(
       const MemoryMargins& margins, const std::string& vm) override {
     // Never initialized, so a balloon policy will not run.
@@ -69,18 +75,28 @@ class PluginVm final : public VmBaseImpl {
                        uint16_t vid,
                        uint16_t pid,
                        int fd,
-                       UsbControlResponse* response) override;
-  bool DetachUsbDevice(uint8_t port, UsbControlResponse* response) override;
-  bool ListUsbDevice(std::vector<UsbDevice>* devices) override;
+                       uint8_t* out_port) override;
+  bool DetachUsbDevice(uint8_t port) override;
+  bool ListUsbDevice(std::vector<UsbDeviceEntry>* devices) override;
   bool SetResolvConfig(const std::vector<std::string>& nameservers,
                        const std::vector<std::string>& search_domains) override;
   bool SetTime(std::string* failure_reason) override { return true; }
+  // This VM does not use maitred to set timezone.
+  bool SetTimezone(const std::string& timezone,
+                   std::string* out_error) override {
+    *out_error = "";
+    return true;
+  };
   void SetTremplinStarted() override { NOTREACHED(); }
   void VmToolsStateChanged(bool running) override;
   vm_tools::concierge::DiskImageStatus ResizeDisk(
       uint64_t new_size, std::string* failure_reason) override;
   vm_tools::concierge::DiskImageStatus GetDiskResizeStatus(
       std::string* failure_reason) override;
+
+  // Do nothing on HandleStatefulUpdate.
+  void HandleStatefulUpdate(
+      const spaced::StatefulDiskSpaceUpdate update) override {}
 
   static bool WriteResolvConf(const base::FilePath& parent_dir,
                               const std::vector<std::string>& nameservers,
@@ -103,22 +119,13 @@ class PluginVm final : public VmBaseImpl {
   }
 
  private:
-  PluginVm(const VmId id,
-           std::unique_ptr<patchpanel::Client> network_client,
-           scoped_refptr<dbus::Bus> bus,
-           std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-           dbus::ObjectProxy* vm_permission_service_proxy,
-           dbus::ObjectProxy* vmplugin_service_proxy,
-           base::FilePath iso_dir,
-           base::FilePath root_dir,
-           base::FilePath runtime_dir);
+  explicit PluginVm(Config config);
   PluginVm(const PluginVm&) = delete;
   PluginVm& operator=(const PluginVm&) = delete;
 
   void HandleSuspendImminent() override {}
   void HandleSuspendDone() override {}
   bool Start(base::FilePath stateful_dir,
-             int subnet_index,
              bool enable_vnet_hdr,
              VmBuilder vm_builder);
   bool CreateUsbListeningSocket();
@@ -134,7 +141,6 @@ class PluginVm final : public VmBaseImpl {
   // This VM ID. It is used to communicate with the dispatcher to request
   // VM state changes.
   const VmId id_;
-  std::size_t id_hash_;
 
   // Specifies directory holding ISO images that can be attached to the VM.
   base::FilePath iso_dir_;
@@ -142,9 +148,6 @@ class PluginVm final : public VmBaseImpl {
   // Allows to build skeleton of root file system for the plugin.
   // Individual directories, such as /etc, are mounted plugin jail.
   base::ScopedTempDir root_dir_;
-
-  // The subnet assigned to the VM.
-  std::unique_ptr<patchpanel::Subnet> subnet_;
 
   // Connection to the system bus.
   scoped_refptr<dbus::Bus> bus_;
@@ -164,7 +167,7 @@ class PluginVm final : public VmBaseImpl {
 
   // Monotonically increasing handle (port) number for USB devices passed
   // to the Plugin VM.
-  uint32_t usb_last_handle_;
+  uint32_t usb_last_handle_ = 0;
 
   // Outstanding control requests waiting to be transmitted to plugin.
   std::deque<std::pair<UsbCtrlRequest, base::ScopedFD>> usb_req_waiting_xmit_;
@@ -181,7 +184,6 @@ class PluginVm final : public VmBaseImpl {
       usb_vm_write_watcher_;
 };
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge
 
 #endif  // VM_TOOLS_CONCIERGE_PLUGIN_VM_H_

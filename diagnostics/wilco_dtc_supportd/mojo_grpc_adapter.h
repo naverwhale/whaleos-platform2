@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,11 @@
 
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/strings/string_piece_forward.h>
 
 namespace diagnostics {
+namespace wilco {
 
 class GrpcClientManager;
 
@@ -18,7 +19,7 @@ class GrpcClientManager;
 class MojoGrpcAdapter final {
  public:
   using SendGrpcUiMessageToWilcoDtcCallback =
-      base::Callback<void(std::string response_json_message)>;
+      base::RepeatingCallback<void(std::string response_json_message)>;
 
   explicit MojoGrpcAdapter(GrpcClientManager* grpc_client_manager);
   MojoGrpcAdapter(const MojoGrpcAdapter&) = delete;
@@ -49,6 +50,7 @@ class MojoGrpcAdapter final {
   const GrpcClientManager* const grpc_client_manager_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_MOJO_GRPC_ADAPTER_H_

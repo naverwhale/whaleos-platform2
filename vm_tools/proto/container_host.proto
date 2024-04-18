@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,8 @@ option cc_enable_arenas = true;
 // by the container.
 package vm_tools.container;
 
+option go_package = "chromiumos/vm_tools/container_proto";
+
 import "common.proto";
 
 // Request protobuf for notifying host that a container has started up.
@@ -19,6 +21,9 @@ message ContainerStartupInfo {
 
   // The vsock port on which garcon will be listening.
   uint32 garcon_port = 2;
+
+  // The vsock port on which sftp-server will be listening.
+  uint32 sftp_port = 3;
 }
 
 // Request protobuf for notifying host that a container is shutting down.
@@ -69,6 +74,7 @@ message Application {
   LocaleStrings keywords = 9;
   string executable_file_name = 10;
   string exec = 12;
+  bool terminal = 13;
 
   // If set, the package_id of the installed package that owns this .desktop
   // file. If not set, the .desktop file is not owned by an installed package.
@@ -192,6 +198,9 @@ message ApplyAnsiblePlaybookProgressInfo {
 
   // Details relating to the failure state.
   string failure_details = 3;
+
+  // Details on the current progress of the Ansible process.
+  repeated string status_string = 4;
 }
 
 // Request protobuf for opening a new terminal in the container.
@@ -289,52 +298,76 @@ message ForwardSecurityKeyMessageResponse {
   string message = 1;
 }
 
-// For getting information about the VM disk.
-message GetDiskInfoRequest {
-  // The security token the container was given.
-  string token = 1;
+// Guest metric, for example "borealis-swap-kb-written"
+message Metric {
+  // Metric name, for Cicerone to convert into a histogram key
+  string name = 1;
+  // Metric value
+  int64 value = 2;
 }
 
-// Response from a GetDiskInfoRequest
-message GetDiskInfoResponse {
+// For passing guest metrics to the host.
+message ReportMetricsRequest {
+  // The security token the container was given.
+  string token = 1;
+  // Metrics to report
+  repeated Metric metric = 2;
+}
+
+// Response from ReportMetrics.
+message ReportMetricsResponse {
   // 0 if the request was successful.
   int64 error = 1;
-  // Current space available in bytes.
-  uint64 available_space = 2;
-  // How much the disk can be expanded by in bytes.
-  uint64 expandable_space = 3;
 }
 
-// For requesting that the disk is expanded.
-message RequestSpaceRequest {
+// Request shader cache DLC installation and optionally mount in host-side VM
+// gpu cache.
+message InstallShaderCacheRequest {
   // The security token the container was given.
   string token = 1;
-  // The amount of space requested in bytes
-  uint64 space_requested = 2;
+  // Steam application id
+  uint64 steam_app_id = 2;
+  // If true, mount the DLC contents in host-side VM gpu cache
+  bool mount = 3;
+  // If true, wait for shader cache DLC installation (and mount) to complete.
+  bool wait = 4;
 }
 
-// Response from RequestSpaceRequest.
-message RequestSpaceResponse {
-  // The amount of space granted in bytes
-  uint64 space_granted = 1;
-  // 0 if the request was successful.
-  int64 error = 2;
-}
-
-// For notifying Chrome that the disk can be shrunk.
-message ReleaseSpaceRequest {
+message UninstallShaderCacheRequest {
   // The security token the container was given.
   string token = 1;
-  // Amount of space that can be released in bytes.
-  uint64 space_to_release = 2;
+  // Steam application id
+  uint64 steam_app_id = 2;
 }
 
-// Response from ReleaseSpaceRequest
-message ReleaseSpaceResponse {
-  // Amount of space that was released in bytes.
-  uint64 space_released = 1;
-  // 0 if the request was successful.
-  int64 error = 2;
+message UnmountShaderCacheRequest {
+  // The security token the container was given.
+  string token = 1;
+  // Steam application id
+  uint64 steam_app_id = 2;
+  // If true, wait for unmount to complete.
+  bool wait = 3;
+}
+
+// Response from ReportMetrics.
+// Notifying host that sleep should be inhibited
+message InhibitScreensaverInfo {
+  // The security token the container was given.
+  string token = 1;
+  // Identifier for the request, same cookie will be used to uninhibit
+  int32 cookie = 2;
+  // The client which sent this request
+  string client = 3;
+  // The reason for inhibiting
+  string reason = 4;
+}
+
+// Notifying host that sleep should be uninhibited
+message UninhibitScreensaverInfo {
+  // The security token the container was given.
+  string token = 1;
+  // Identifier for the request, corresponding inhibit should have been sent
+  int32 cookie = 2;
 }
 
 // Service that is notified of events from a container.
@@ -396,14 +429,22 @@ service ContainerListener {
   // Called by a container to request the host to launch a SelectFile dialog.
   rpc SelectFile(SelectFileRequest) returns (SelectFileResponse);
 
-  // Called by a container to get information about the disk it's on.
-  rpc GetDiskInfo(GetDiskInfoRequest) returns (GetDiskInfoResponse);
+  rpc ReportMetrics(ReportMetricsRequest) returns (ReportMetricsResponse);
 
-  // Called by a container when it needs the disk to be expanded.
-  rpc RequestSpace(RequestSpaceRequest) returns (RequestSpaceResponse);
+  // Called by the VM to trigger Shader DLC install.
+  rpc InstallShaderCache(InstallShaderCacheRequest) returns (EmptyMessage);
 
-  // Called by a container when it no longer needs as much space.
-  rpc ReleaseSpace(ReleaseSpaceRequest) returns (ReleaseSpaceResponse);
+  // Called by the VM to trigger Shader DLC uninstall.
+  rpc UninstallShaderCache(UninstallShaderCacheRequest) returns (EmptyMessage);
+
+  // Called by the VM to trigger Shader DLC uninstall.
+  rpc UnmountShaderCache(UnmountShaderCacheRequest) returns (EmptyMessage);
+
+  // Called by VM to inhibit sleep.
+  rpc InhibitScreensaver(InhibitScreensaverInfo) returns (EmptyMessage);
+
+  // Called by VM to uninhibit sleep.
+  rpc UninhibitScreensaver(UninhibitScreensaverInfo) returns (EmptyMessage);
 
   // If adding more rpc's, please update ContainerListenerFuzzerSingleAction as
   // well.

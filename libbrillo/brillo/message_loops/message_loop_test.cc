@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,8 +12,8 @@
 #include <memory>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/message_loop/message_pump_type.h>
 #include <base/posix/eintr_wrapper.h>
@@ -104,11 +104,10 @@ TYPED_TEST(MessageLoopTest, PostTaskCancelledTest) {
 
 TYPED_TEST(MessageLoopTest, PostDelayedTaskRunsEventuallyTest) {
   bool called = false;
-  TaskId task_id =
-      this->loop_->PostDelayedTask(FROM_HERE, BindOnce(&SetToTrue, &called),
-                                   TimeDelta::FromMilliseconds(50));
+  TaskId task_id = this->loop_->PostDelayedTask(
+      FROM_HERE, BindOnce(&SetToTrue, &called), base::Milliseconds(50));
   EXPECT_NE(MessageLoop::kTaskIdNull, task_id);
-  MessageLoopRunUntil(this->loop_.get(), TimeDelta::FromSeconds(10),
+  MessageLoopRunUntil(this->loop_.get(), base::Seconds(10),
                       BindRepeating(&ReturnBool, &called));
   // Check that the main loop finished before the 10 seconds timeout, so it
   // finished due to the callback being called and not due to the timeout.

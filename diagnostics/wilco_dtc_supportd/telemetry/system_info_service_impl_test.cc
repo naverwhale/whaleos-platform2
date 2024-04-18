@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include <string>
 
-#include "base/strings/stringprintf.h"
+#include <base/strings/stringprintf.h>
 #include <base/test/scoped_chromeos_version_info.h>
 #include <base/time/time.h>
 #include <gmock/gmock.h>
@@ -15,6 +15,8 @@
 #include "diagnostics/wilco_dtc_supportd/telemetry/system_info_service.h"
 
 namespace diagnostics {
+namespace wilco {
+namespace {
 
 class SystemInfoServiceImplTest : public testing::Test {
  public:
@@ -77,4 +79,6 @@ TEST_F(SystemInfoServiceImplTest, GetOsMilestoneNotInteger) {
   EXPECT_FALSE(service()->GetOsMilestone(&milestone));
 }
 
+}  // namespace
+}  // namespace wilco
 }  // namespace diagnostics

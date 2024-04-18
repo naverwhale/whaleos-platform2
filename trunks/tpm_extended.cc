@@ -1,14 +1,15 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "trunks/tpm_generated.h"
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <iterator>
+
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <crypto/secure_hash.h>
 
@@ -147,7 +148,7 @@ TPM_RC Tpm::SerializeCommand_PolicyFidoSigned(
   command_size += auth_bytes.size();
 
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
 
   // Construct the authorization section
   std::string authorization_section_bytes;
@@ -257,9 +258,10 @@ TPM_RC Tpm::ParseResponse_PolicyFidoSigned(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes))
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -268,26 +270,26 @@ TPM_RC Tpm::ParseResponse_PolicyFidoSigned(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyFidoSignedErrorCallback(
-    const Tpm::PolicyFidoSignedResponse& callback, TPM_RC response_code) {
+void PolicyFidoSignedErrorCallback(Tpm::PolicyFidoSignedResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PolicyFidoSignedResponseParser(
-    const Tpm::PolicyFidoSignedResponse& callback,
+    Tpm::PolicyFidoSignedResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyFidoSignedErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyFidoSigned(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyFidoSignedErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyFidoSigned(const TPMI_DH_OBJECT& auth_object,
@@ -298,22 +300,22 @@ void Tpm::PolicyFidoSigned(const TPMI_DH_OBJECT& auth_object,
                            const std::vector<FIDO_DATA_RANGE>& auth_data_descr,
                            const TPMT_SIGNATURE& auth,
                            AuthorizationDelegate* authorization_delegate,
-                           const PolicyFidoSignedResponse& callback) {
+                           PolicyFidoSignedResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyFidoSignedErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyFidoSignedResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyFidoSigned(
       auth_object, auth_object_name, policy_session, policy_session_name,
       auth_data, auth_data_descr, auth, &command, authorization_delegate);
-
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyFidoSignedErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyFidoSignedResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyFidoSignedSync(

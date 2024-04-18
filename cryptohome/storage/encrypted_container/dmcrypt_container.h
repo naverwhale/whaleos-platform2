@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,6 +18,7 @@
 #include "cryptohome/platform.h"
 #include "cryptohome/storage/encrypted_container/backing_device.h"
 #include "cryptohome/storage/encrypted_container/filesystem_key.h"
+#include "cryptohome/storage/keyring/keyring.h"
 
 namespace cryptohome {
 
@@ -30,12 +31,14 @@ class DmcryptContainer : public EncryptedContainer {
                    std::unique_ptr<BackingDevice> backing_device,
                    const FileSystemKeyReference& key_reference,
                    Platform* platform,
+                   Keyring* keyring,
                    std::unique_ptr<brillo::DeviceMapper> device_mapper);
 
   DmcryptContainer(const DmcryptConfig& config,
                    std::unique_ptr<BackingDevice> backing_device,
                    const FileSystemKeyReference& key_reference,
-                   Platform* platform);
+                   Platform* platform,
+                   Keyring* keyring);
 
   ~DmcryptContainer() {}
 
@@ -43,19 +46,33 @@ class DmcryptContainer : public EncryptedContainer {
 
   bool Purge() override;
 
-  bool Setup(const FileSystemKey& encryption_key, bool create) override;
+  bool Reset() override;
+
+  bool Setup(const FileSystemKey& encryption_key) override;
+
+  bool RestoreKey(const FileSystemKey& encryption_key) override;
 
   bool Teardown() override;
 
-  EncryptedContainerType GetType() override {
+  bool EvictKey() override;
+
+  EncryptedContainerType GetType() const override {
     return EncryptedContainerType::kDmcrypt;
   }
+
+  bool IsLazyTeardownSupported() const override { return true; }
+
+  bool SetLazyTeardownWhenUnused() override;
+
+  base::FilePath GetBackingLocation() const override;
 
  private:
   // Configuration for the encrypted container.
   const std::string dmcrypt_device_name_;
   const std::string dmcrypt_cipher_;
 
+  const bool is_raw_device_;
+  const uint32_t iv_offset_;
   const std::vector<std::string> mkfs_opts_;
   const std::vector<std::string> tune2fs_opts_;
 
@@ -63,9 +80,10 @@ class DmcryptContainer : public EncryptedContainer {
   std::unique_ptr<BackingDevice> backing_device_;
 
   // Key reference for filesystem key.
-  const FileSystemKeyReference key_reference_;
+  FileSystemKeyReference key_reference_;
 
   Platform* platform_;
+  Keyring* keyring_;
   std::unique_ptr<brillo::DeviceMapper> device_mapper_;
 };
 

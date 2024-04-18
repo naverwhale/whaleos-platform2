@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 
 #include <string>
 
-#include <base/macros.h>
-
 namespace trunks {
+
+inline constexpr uint8_t kContinueSession = 1;
 
 // AuthorizationDelegate is an interface passed to TPM commands. The delegate
 // takes care of providing the authorization data for commands and verifying

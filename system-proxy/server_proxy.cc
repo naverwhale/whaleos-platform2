@@ -1,8 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "system-proxy/server_proxy.h"
+
+#include <signal.h>
+#include <string.h>
 
 #include <iostream>
 #include <string>
@@ -11,15 +14,15 @@
 
 #include <curl/curl.h>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/thread.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <brillo/data_encoding.h>
 #include <brillo/http/http_transport.h>
 #include <chromeos/patchpanel/socket.h>
@@ -84,8 +87,8 @@ ServerProxy::~ServerProxy() = default;
 void ServerProxy::Init() {
   // Start listening for input.
   stdin_watcher_ = base::FileDescriptorWatcher::WatchReadable(
-      GetStdinPipe(), base::Bind(&ServerProxy::HandleStdinReadable,
-                                 weak_ptr_factory_.GetWeakPtr()));
+      GetStdinPipe(), base::BindRepeating(&ServerProxy::HandleStdinReadable,
+                                          weak_ptr_factory_.GetWeakPtr()));
 
   // Handle termination signals.
   signal_handler_.Init();
@@ -199,13 +202,18 @@ void ServerProxy::HandleStdinReadable() {
   }
 
   if (config.has_listening_address()) {
-    if (listening_addr_ != 0) {
+    if (listening_addr_) {
       LOG(ERROR)
           << "Failure to set configurations: listening port was already set."
           << std::endl;
       return;
     }
-    listening_addr_ = config.listening_address().addr();
+    const auto& addr = config.listening_address().addr();
+    listening_addr_ = net_base::IPv4Address::CreateFromBytes(addr);
+    if (!listening_addr_) {
+      LOG(ERROR) << "Invalid listening address: " << addr;
+      return;
+    }
     listening_port_ = config.listening_address().port();
     CreateListeningSocket();
   }
@@ -240,8 +248,8 @@ void ServerProxy::HandleStdinReadable() {
 }
 
 bool ServerProxy::HandleSignal(const struct signalfd_siginfo& siginfo) {
-  base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE,
-                                                std::move(quit_closure_));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, std::move(quit_closure_));
   return true;
 }
 
@@ -254,6 +262,11 @@ int ServerProxy::GetStdoutPipe() {
 }
 
 void ServerProxy::CreateListeningSocket() {
+  if (!listening_addr_) {
+    LOG(ERROR) << "Listening port hasn't been set" << std::endl;
+    return;
+  }
+
   listening_fd_ = std::make_unique<patchpanel::Socket>(
       AF_INET, SOCK_STREAM | SOCK_NONBLOCK);
   if (!listening_fd_->is_valid()) {
@@ -264,7 +277,7 @@ void ServerProxy::CreateListeningSocket() {
   struct sockaddr_in addr = {0};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(listening_port_);
-  addr.sin_addr.s_addr = listening_addr_;
+  addr.sin_addr = listening_addr_->ToInAddr();
   if (!listening_fd_->Bind((const struct sockaddr*)&addr, sizeof(addr))) {
     PLOG(ERROR) << "Cannot bind source socket" << std::endl;
     return;

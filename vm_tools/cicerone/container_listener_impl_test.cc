@@ -1,19 +1,23 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 
+#include <base/files/scoped_temp_dir.h>
 #include <base/strings/string_number_conversions.h>
+#include <dbus/message.h>
 #include <gmock/gmock.h>
 #include <grpcpp/impl/call.h>
 #include <grpcpp/grpcpp.h>
 #include <gtest/gtest.h>
 #include <chromeos/dbus/service_constants.h>
-#include <vm_applications/proto_bindings/apps.pb.h>
+#include <vm_applications/apps.pb.h>
 #include <vm_protos/proto_bindings/container_host.grpc.pb.h>
+#include <vm_protos/proto_bindings/container_host.pb.h>
 
 #include "vm_tools/cicerone/container_listener_impl.h"
 #include "vm_tools/cicerone/dbus_message_testing_helper.h"
@@ -34,30 +38,37 @@ using ::testing::Unused;
 
 constexpr char kDefaultPluginVmContainerName[] = "penguin";
 
+class SysinfoProviderMock : public GuestMetrics::SysinfoProvider {
+ public:
+  MOCK_METHOD(int64_t, AmountOfTotalDiskSpace, (base::FilePath), ());
+  MOCK_METHOD(int64_t, AmountOfFreeDiskSpace, (base::FilePath), ());
+};
+
 // Helper for testing proto-based MethodCalls sent to the dbus. Extracts the
 // proto in from the MethodCall to |protobuf| so that it can be tested further.
 // Returns an empty (but not NULL) dbus::Response.
 //
 // Does not confirm method name (a.k.a. GetMethod) or interface name; use
 // HasMethodName and HasInterfaceName for that.
-std::unique_ptr<dbus::Response> ProtoMethodCallHelper(
-    dbus::MethodCall* method_call, google::protobuf::MessageLite* protobuf) {
+base::expected<std::unique_ptr<dbus::Response>, dbus::Error>
+ProtoMethodCallHelper(dbus::MethodCall* method_call,
+                      google::protobuf::MessageLite* protobuf) {
   dbus::MessageReader reader(method_call);
   EXPECT_TRUE(reader.PopArrayOfBytesAsProto(protobuf));
   EXPECT_FALSE(reader.HasMoreData());
 
   // MockObjectProxy will take ownership of the created Response object. See
   // comments in MockObjectProxy.
-  return dbus::Response::CreateEmpty();
+  return base::ok(dbus::Response::CreateEmpty());
 }
 
 // Same, but for method calls that just have a string.
-std::unique_ptr<dbus::Response> StringMethodCallHelper(
-    dbus::MethodCall* method_call, std::string* s) {
+base::expected<std::unique_ptr<dbus::Response>, dbus::Error>
+StringMethodCallHelper(dbus::MethodCall* method_call, std::string* s) {
   dbus::MessageReader reader(method_call);
   EXPECT_TRUE(reader.PopString(s));
   EXPECT_FALSE(reader.HasMoreData());
-  return dbus::Response::CreateEmpty();
+  return base::ok(dbus::Response::CreateEmpty());
 }
 
 // Same but for signals
@@ -803,6 +814,298 @@ TEST(ContainerListenerImplTest,
   EXPECT_EQ(dbus_result.owner_id(), ServiceTestingHelper::kDefaultOwnerId);
   EXPECT_EQ(dbus_result.status(), ApplyAnsiblePlaybookProgressSignal::FAILED);
   EXPECT_EQ(dbus_result.failure_details(), kFailureDetails);
+}
+
+TEST(ContainerListenerImplTest,
+     InProgressApplyAnsiblePlaybookProgressCallShouldProduceDBusMessage) {
+  ServiceTestingHelper test_framework(ServiceTestingHelper::NORMAL_MOCKS);
+  test_framework.SetUpDefaultVmAndContainer();
+  test_framework.ExpectNoDBusMessages();
+
+  vm_tools::container::ApplyAnsiblePlaybookProgressInfo request;
+  vm_tools::EmptyMessage response;
+
+  const std::string kStatusString = "Yesh milord. More work?";
+  request.set_token(ServiceTestingHelper::kDefaultContainerToken);
+  request.set_status(
+      vm_tools::container::ApplyAnsiblePlaybookProgressInfo::IN_PROGRESS);
+  request.add_status_string(kStatusString);
+
+  ApplyAnsiblePlaybookProgressSignal dbus_result;
+  EXPECT_CALL(
+      test_framework.get_mock_exported_object(),
+      SendSignal(AllOf(HasInterfaceName(kVmCiceroneInterface),
+                       HasMethodName(kApplyAnsiblePlaybookProgressSignal))))
+      .WillOnce(Invoke([&dbus_result](dbus::Signal* signal) {
+        ProtoSignalHelper(signal, &dbus_result);
+      }));
+
+  grpc::ServerContext ctx;
+  grpc::Status status =
+      test_framework.get_service()
+          .GetContainerListenerImpl()
+          ->ApplyAnsiblePlaybookProgress(&ctx, &request, &response);
+  ASSERT_TRUE(status.ok()) << status.error_message();
+
+  EXPECT_EQ(dbus_result.vm_name(), ServiceTestingHelper::kDefaultVmName);
+  EXPECT_EQ(dbus_result.container_name(),
+            ServiceTestingHelper::kDefaultContainerName);
+  EXPECT_EQ(dbus_result.owner_id(), ServiceTestingHelper::kDefaultOwnerId);
+  EXPECT_EQ(dbus_result.status(),
+            ApplyAnsiblePlaybookProgressSignal::IN_PROGRESS);
+  EXPECT_EQ(dbus_result.status_string(0), kStatusString);
+}
+
+TEST(ContainerListenerImplTest, ValidReportMetricsCallShouldAccumulateMetrics) {
+  ServiceTestingHelper test_framework(ServiceTestingHelper::NORMAL_MOCKS);
+  test_framework.SetUpDefaultVmAndContainer();
+  test_framework.ExpectNoDBusMessages();
+
+  // Fake an RPC from the guest containing two metrics.
+  vm_tools::container::ReportMetricsRequest request;
+  vm_tools::container::ReportMetricsResponse response;
+
+  request.set_token(ServiceTestingHelper::kDefaultContainerToken);
+  vm_tools::container::Metric* m = request.add_metric();
+  m->set_name("borealis-swap-kb-written");
+  m->set_value(123456);
+  m = request.add_metric();
+  m->set_name("borealis-disk-kb-read");
+  m->set_value(654321);
+
+  grpc::ServerContext ctx;
+  grpc::Status status =
+      test_framework.get_service().GetContainerListenerImpl()->ReportMetrics(
+          &ctx, &request, &response);
+  ASSERT_TRUE(status.ok()) << status.error_message();
+
+  // Force a call to GuestMetrics::ReportDailyMetrics, which should report all
+  // eight disk metrics to UMA.  The two four which received data from the fake
+  // RPC above should contain the reported data, and the other six should be
+  // zero.
+  EXPECT_CALL(*test_framework.GetMetricsLibraryMock(), SendToUMA(_, _, _, _, _))
+      .Times(4)
+      .WillRepeatedly([](const std::string& name, int sample, int min, int max,
+                         int nbuckets) {
+        if (name == "Borealis.Disk.SwapWritesDaily") {
+          EXPECT_EQ(sample, 123456);
+        } else if (name == "Borealis.Disk.StatefulReadsDaily") {
+          EXPECT_EQ(sample, 654321);
+        } else {
+          // Borealis.Disk.{SwapReads,StatefulWrites}Daily
+          EXPECT_EQ(sample, 0);
+          EXPECT_EQ(name.find("Crostini"), std::string::npos);
+        }
+        return true;
+      });
+  test_framework.GetGuestMetrics()->ReportMetricsImmediatelyForTesting();
+}
+
+TEST(ContainerListenerImplTest,
+     ValidReportMetricsCallShouldAccumulateMetricsForCrostini) {
+  ServiceTestingHelper test_framework(ServiceTestingHelper::NORMAL_MOCKS,
+                                      "termina");
+  test_framework.SetUpDefaultVmAndContainer();
+  test_framework.ExpectNoDBusMessages();
+
+  // Fake an RPC from the guest containing two metrics.
+  vm_tools::container::ReportMetricsRequest request;
+  vm_tools::container::ReportMetricsResponse response;
+
+  request.set_token(ServiceTestingHelper::kDefaultContainerToken);
+  vm_tools::container::Metric* m = request.add_metric();
+  m->set_name("borealis-swap-kb-written");
+  m->set_value(123456);
+  m = request.add_metric();
+  m->set_name("borealis-disk-kb-read");
+  m->set_value(654321);
+  m = request.add_metric();
+  m->set_name("crostini-disk-kb-read");
+  m->set_value(123321);
+  m = request.add_metric();
+  m->set_name("crostini-disk-kb-written");
+  m->set_value(321123);
+
+  grpc::ServerContext ctx;
+  grpc::Status status =
+      test_framework.get_service().GetContainerListenerImpl()->ReportMetrics(
+          &ctx, &request, &response);
+  ASSERT_TRUE(status.ok()) << status.error_message();
+
+  // Force a call to GuestMetrics::ReportDailyMetrics, which should report all
+  // eight disk metrics to UMA.  The two four which received data from the fake
+  // RPC above should contain the reported data, and the other six should be
+  // zero.
+  EXPECT_CALL(*test_framework.GetMetricsLibraryMock(), SendToUMA(_, _, _, _, _))
+      .Times(4)
+      .WillRepeatedly([](const std::string& name, int sample, int min, int max,
+                         int nbuckets) {
+        if (name == "Crostini.Disk.StatefulWritesDaily") {
+          EXPECT_EQ(sample, 321123);
+        } else if (name == "Crostini.Disk.StatefulReadsDaily") {
+          EXPECT_EQ(sample, 123321);
+        } else {
+          // Crostini.Disk.Swap{Reads,Writes}Daily
+          EXPECT_EQ(sample, 0);
+        }
+        return true;
+      });
+  test_framework.GetGuestMetrics()->ReportMetricsImmediatelyForTesting();
+}
+
+TEST(ContainerListenerImplTest,
+     ReportingInodeCountShouldGenerateAndEmitSpaceMetrics) {
+  ServiceTestingHelper test_framework(ServiceTestingHelper::NORMAL_MOCKS);
+  test_framework.SetUpDefaultVmAndContainer();
+
+  // Setup a mock provider for sysinfo.
+  auto sysinfo_provider = std::make_unique<SysinfoProviderMock>();
+  SysinfoProviderMock* sysinfo_provider_reference = sysinfo_provider.get();
+  test_framework.GetGuestMetrics()->SetSysinfoProviderForTesting(
+      std::move(sysinfo_provider));
+
+  // Fake an RPC from the guest containing two metrics.
+  vm_tools::container::ReportMetricsRequest request;
+  vm_tools::container::ReportMetricsResponse response;
+
+  // Setup metrics request.
+  request.set_token(ServiceTestingHelper::kDefaultContainerToken);
+  vm_tools::container::Metric* m = request.add_metric();
+  m->set_name("borealis-inode-count");
+  m->set_value(100);
+
+  // Replace the concierge object proxy with our mock.
+  EXPECT_CALL(test_framework.get_mock_bus(),
+              GetObjectProxy(vm_tools::concierge::kVmConciergeServiceName, _))
+      .WillOnce(
+          testing::Return(&test_framework.get_mock_concierge_service_proxy()));
+
+  // Replace the ListVmDisks request to concierge.
+  EXPECT_CALL(
+      test_framework.get_mock_concierge_service_proxy(),
+      DoCallMethod(
+          AllOf(HasInterfaceName(vm_tools::concierge::kVmConciergeInterface),
+                HasMethodName(vm_tools::concierge::kListVmDisksMethod)),
+          _, _))
+      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout,
+                          base::OnceCallback<void(dbus::Response*)>* callback) {
+        method_call->SetSerial(123);
+        std::unique_ptr<dbus::Response> dbus_response(
+            dbus::Response::FromMethodCall(method_call));
+        dbus::MessageWriter writer(dbus_response.get());
+        vm_tools::concierge::ListVmDisksResponse response;
+
+        // Set the response.
+        vm_tools::concierge::VmDiskInfo* image = response.add_images();
+        image->set_name("borealis");
+        image->set_size(1000000);
+        image->set_path("/mnt/stateful/borealis.img");
+
+        writer.AppendProtoAsArrayOfBytes(response);
+        std::move(*callback).Run(std::move(dbus_response.get()));
+      }));
+
+  // Set the response to AmountOfTotalDiskSpace.
+  EXPECT_CALL(*sysinfo_provider_reference,
+              AmountOfTotalDiskSpace(base::FilePath("/mnt/stateful")))
+      .WillOnce(testing::Return(2000000));
+  // Set the response to AmountOfFreeDiskSpace.
+  EXPECT_CALL(*sysinfo_provider_reference,
+              AmountOfFreeDiskSpace(base::FilePath("/mnt/stateful")))
+      .WillOnce(testing::Return(500000));
+
+  // InodeRatioAtStartup [KiB] =
+  // (1000000[image_size]/100[inode_count])/1024 = 9
+  EXPECT_CALL(*test_framework.GetMetricsLibraryMock(),
+              SendToUMA("Borealis.Disk.InodeRatioAtStartup", 9, 0, 10240, 50));
+  // VMUsageToTotalSpacePercentageAtStartup [%] =
+  // (1000000[image_size]/2000000[total_size])/100 = 50%
+  EXPECT_CALL(*test_framework.GetMetricsLibraryMock(),
+              SendPercentageToUMA(
+                  "Borealis.Disk.VMUsageToTotalSpacePercentageAtStartup", 50));
+  // VMUsageToTotalUsagePercentageAtStartup [%] =
+  // (1000000[image_size]/(2000000[total_size] - 500000[free_space]))/100 = 66%
+  EXPECT_CALL(*test_framework.GetMetricsLibraryMock(),
+              SendPercentageToUMA(
+                  "Borealis.Disk.VMUsageToTotalUsagePercentageAtStartup", 66));
+
+  grpc::ServerContext ctx;
+  grpc::Status status =
+      test_framework.get_service().GetContainerListenerImpl()->ReportMetrics(
+          &ctx, &request, &response);
+  ASSERT_TRUE(status.ok()) << status.error_message();
+}
+
+TEST(ContainerListenerImplTest, ReportMetricsCallWithTooManyMetricsShouldFail) {
+  ServiceTestingHelper test_framework(ServiceTestingHelper::NORMAL_MOCKS);
+  test_framework.SetUpDefaultVmAndContainer();
+  test_framework.ExpectNoDBusMessages();
+
+  vm_tools::container::ReportMetricsRequest request;
+  vm_tools::container::ReportMetricsResponse response;
+
+  request.set_token(ServiceTestingHelper::kDefaultContainerToken);
+  for (int i = 0; i < 20; ++i) {
+    vm_tools::container::Metric* m = request.add_metric();
+    m->set_name("a-fake-metric-whose-name-will-be-ignored");
+    m->set_value(123456);
+  }
+
+  grpc::ServerContext ctx;
+  grpc::Status status =
+      test_framework.get_service().GetContainerListenerImpl()->ReportMetrics(
+          &ctx, &request, &response);
+  ASSERT_FALSE(status.ok()) << status.error_message();
+}
+
+TEST(ContainerListenerImplTest, ReportMetricsCallWithBadMetricNameShouldFail) {
+  ServiceTestingHelper test_framework(ServiceTestingHelper::NORMAL_MOCKS);
+  test_framework.SetUpDefaultVmAndContainer();
+  test_framework.ExpectNoDBusMessages();
+
+  vm_tools::container::ReportMetricsRequest request;
+  vm_tools::container::ReportMetricsResponse response;
+
+  request.set_token(ServiceTestingHelper::kDefaultContainerToken);
+  vm_tools::container::Metric* m = request.add_metric();
+  m->set_name("This name contains forbidden characters!");
+  m->set_value(123456);
+
+  grpc::ServerContext ctx;
+  grpc::Status status =
+      test_framework.get_service().GetContainerListenerImpl()->ReportMetrics(
+          &ctx, &request, &response);
+  ASSERT_FALSE(status.ok()) << status.error_message();
+}
+
+TEST(ContainerListenerImplTest, ReportMetricsCallsShouldBeRateLimited) {
+  ServiceTestingHelper test_framework(ServiceTestingHelper::NORMAL_MOCKS);
+  test_framework.SetUpDefaultVmAndContainer();
+  test_framework.ExpectNoDBusMessages();
+
+  vm_tools::container::ReportMetricsRequest request;
+  vm_tools::container::ReportMetricsResponse response;
+
+  request.set_token(ServiceTestingHelper::kDefaultContainerToken);
+  vm_tools::container::Metric* m = request.add_metric();
+  m->set_name("borealis-swap-kb-written");
+  m->set_value(123456);
+
+  grpc::ServerContext ctx;
+  // The first 6 calls should succeed.
+  for (int i = 0; i < 6; i++) {
+    grpc::Status status =
+        test_framework.get_service().GetContainerListenerImpl()->ReportMetrics(
+            &ctx, &request, &response);
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(response.error(), 0);
+  }
+  // Seventh call should hit the rate limit and fail.
+  grpc::Status status =
+      test_framework.get_service().GetContainerListenerImpl()->ReportMetrics(
+          &ctx, &request, &response);
+  EXPECT_TRUE(status.ok()) << status.error_message();
+  EXPECT_NE(response.error(), 0);
 }
 
 }  // namespace

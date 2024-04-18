@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,24 +6,25 @@
 
 #include <fcntl.h>
 #include <grp.h>
-#include <memory>
 #include <pwd.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/statvfs.h>
 #include <sys/types.h>
 
+#include <memory>
+#include <optional>
 #include <string>
 
-#include <base/compiler_specific.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
+#include <brillo/blkdev_utils/lvm.h>
 #include <brillo/process/process.h>
 #include <brillo/secure_blob.h>
+#include <libhwsec-foundation/crypto/secure_blob_util.h>
+#include <libhwsec-foundation/crypto/sha.h>
 
-#include "cryptohome/crypto/secure_blob_util.h"
-#include "cryptohome/crypto/sha.h"
 #include "cryptohome/mount_encrypted/mount_encrypted.h"
 #include "cryptohome/storage/encrypted_container/backing_device.h"
 #include "cryptohome/storage/encrypted_container/encrypted_container.h"
@@ -36,6 +37,7 @@ namespace {
 
 constexpr char kEncryptedFSType[] = "ext4";
 constexpr char kCryptDevName[] = "encstateful";
+constexpr char kBackingDevSnapshotName[] = "encstateful-rw";
 constexpr char kDevMapperPath[] = "/dev/mapper";
 constexpr char kDumpe2fsLogPath[] = "/run/mount_encrypted/dumpe2fs.log";
 constexpr char kProcDirtyExpirePath[] = "/proc/sys/vm/dirty_expire_centisecs";
@@ -46,13 +48,14 @@ constexpr unsigned int kResizeStepSeconds = 2;
 constexpr uint64_t kExt4ResizeBlocks = 32768 * 10;
 // Block size is 4k => Minimum free space available to try resizing is 400MB.
 constexpr int64_t kMinBlocksAvailForResize = 102400;
-constexpr char kExt4ExtendedOptions[] = "discard,lazy_itable_init";
+constexpr char kExt4ExtendedOptions[] = "discard";
 constexpr char kDmCryptDefaultCipher[] = "aes-cbc-essiv:sha256";
+constexpr uid_t kRootUid = 0;
+constexpr gid_t kRootGid = 0;
+constexpr uid_t kChronosUid = 1000;
+constexpr gid_t kChronosGid = 1000;
 
 bool CheckBind(cryptohome::Platform* platform, const BindMount& bind) {
-  uid_t user;
-  gid_t group;
-
   if (platform->Access(bind.src, R_OK) &&
       !platform->CreateDirectory(bind.src)) {
     PLOG(ERROR) << "mkdir " << bind.src;
@@ -66,18 +69,13 @@ bool CheckBind(cryptohome::Platform* platform, const BindMount& bind) {
     return false;
   }
 
-  if (!platform->GetUserId(bind.owner, &user, &group)) {
-    PLOG(ERROR) << "getpwnam" << bind.owner;
-    return false;
-  }
-
   // Destination may be on read-only filesystem, so skip tweaks.
   // Must do explicit chmod since mkdir()'s mode respects umask.
   if (!platform->SetPermissions(bind.src, bind.mode)) {
     PLOG(ERROR) << "chmod " << bind.src;
     return false;
   }
-  if (!platform->SetOwnership(bind.src, user, group, true)) {
+  if (!platform->SetOwnership(bind.src, bind.owner, bind.group, true)) {
     PLOG(ERROR) << "chown " << bind.src;
     return false;
   }
@@ -130,8 +128,11 @@ std::string GetMountOpts() {
   uint64_t commit_interval = 600;
 
   if (base::ReadFileToString(base::FilePath(kProcDirtyExpirePath),
-                             &dirty_expire) &&
-      base::StringToUint64(dirty_expire, &dirty_expire_centisecs)) {
+                             &dirty_expire)) {
+    base::TrimWhitespaceASCII(dirty_expire, base::TRIM_ALL, &dirty_expire);
+    if (!base::StringToUint64(dirty_expire, &dirty_expire_centisecs)) {
+      LOG(INFO) << "Failed to parse contents of " << dirty_expire;
+    }
     LOG(INFO) << "Using vm.dirty_expire_centisecs/100 as the commit interval";
 
     // Keep commit interval as 5 seconds (default for ext4) for smaller
@@ -168,7 +169,7 @@ void Dumpe2fs(const base::FilePath& device_path) {
   dumpe2fs.AddArg("/sbin/dumpe2fs");
   dumpe2fs.AddArg("-fh");
   dumpe2fs.AddArg(device_path.value());
-  dumpe2fs.RedirectOutput(kDumpe2fsLogPath);
+  dumpe2fs.RedirectOutput(base::FilePath(kDumpe2fsLogPath));
 
   dumpe2fs.Run();
 }
@@ -193,10 +194,10 @@ EncryptedFs::EncryptedFs(
       device_mapper_(device_mapper),
       container_(std::move(container)),
       bind_mounts_({{rootdir_.Append(ENCRYPTED_MNT "/var"),
-                     rootdir_.Append("var"), "root", "root",
+                     rootdir_.Append("var"), kRootUid, kRootGid,
                      S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH, false},
                     {rootdir_.Append(ENCRYPTED_MNT "/chronos"),
-                     rootdir_.Append("home/chronos"), "chronos", "chronos",
+                     rootdir_.Append("home/chronos"), kChronosUid, kChronosGid,
                      S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH, true}}) {}
 
 // static
@@ -204,6 +205,7 @@ std::unique_ptr<EncryptedFs> EncryptedFs::Generate(
     const base::FilePath& rootdir,
     cryptohome::Platform* platform,
     brillo::DeviceMapper* device_mapper,
+    brillo::LogicalVolumeManager* lvm,
     cryptohome::EncryptedContainerFactory* encrypted_container_factory) {
   // Calculate the maximum size of the encrypted stateful partition.
   // truncate()/ftruncate() use int64_t for file size.
@@ -220,18 +222,69 @@ std::unique_ptr<EncryptedFs> EncryptedFs::Generate(
   std::string dmcrypt_name = std::string(kCryptDevName);
   if (rootdir != base::FilePath("/")) {
     brillo::SecureBlob digest =
-        cryptohome::Sha256(brillo::SecureBlob(rootdir.value()));
-    std::string hex = cryptohome::SecureBlobToHex(digest);
+        hwsec_foundation::Sha256(brillo::SecureBlob(rootdir.value()));
+    std::string hex = hwsec_foundation::SecureBlobToHex(digest);
     dmcrypt_name += "_" + hex.substr(0, 16);
   }
 
   // Initialize the encrypted container.
-  cryptohome::BackingDeviceConfig backing_device_config(
-      {.type = cryptohome::BackingDeviceType::kLoopbackDevice,
-       .name = dmcrypt_name,
-       .size = fs_bytes_max,
-       .loopback = {.backing_file_path =
-                        rootdir.Append(STATEFUL_MNT "/encrypted.block")}});
+  cryptohome::BackingDeviceConfig backing_device_config;
+
+  base::FilePath sparse_backing_file =
+      rootdir.Append(STATEFUL_MNT "/encrypted.block");
+
+  base::FilePath stateful_device = platform->GetStatefulDevice();
+  base::FilePath stateful_snapshot =
+      base::FilePath(kDevMapperPath).Append(kBackingDevSnapshotName);
+
+  // Use the loopback sparse file in 2 cases:
+  // 1. If the device is set up using an ext4 stateful partition.
+  // 2. If the device already has an existing sparse loopback file: this
+  //    situation can occur during migration of a device to an LVM stateful
+  //    stateful partition.
+  // 3. During a hibernate resume boot, when encstateful is a dm-snapshot.
+  // TODO(sarthakkukreti@): Loopback backing devices use size in bytes whereas
+  // logical volume backing devices use size in megabytes. Fix this
+  // inconsistency.
+  if (!platform->IsStatefulLogicalVolumeSupported() ||
+      base::PathExists(sparse_backing_file) ||
+      base::PathExists(stateful_snapshot)) {
+    bool snapshot_exists = base::PathExists(stateful_snapshot);
+    base::FilePath backing_file =
+        snapshot_exists ? stateful_snapshot
+                        : rootdir.Append(STATEFUL_MNT "/encrypted.block");
+
+    backing_device_config = {
+        .type = cryptohome::BackingDeviceType::kLoopbackDevice,
+        .name = dmcrypt_name,
+        .size = fs_bytes_max,
+        .loopback = {.backing_file_path = backing_file,
+                     .fixed_backing = snapshot_exists}};
+
+  } else {
+    brillo::PhysicalVolume pv(stateful_device,
+                              std::make_shared<brillo::LvmCommandRunner>());
+    std::optional<brillo::VolumeGroup> vg = lvm->GetVolumeGroup(pv);
+    if (!vg || !vg->IsValid()) {
+      LOG(WARNING) << "Failed to get volume group.";
+      return nullptr;
+    }
+
+    std::optional<brillo::Thinpool> thinpool =
+        lvm->GetThinpool(*vg, "thinpool");
+    if (!thinpool || !thinpool->IsValid()) {
+      LOG(WARNING) << "Failed to get thinpool.";
+      return nullptr;
+    }
+
+    backing_device_config = {
+        .type = cryptohome::BackingDeviceType::kLogicalVolumeBackingDevice,
+        .name = dmcrypt_name,
+        .size = fs_bytes_max / (1024 * 1024),
+        .logical_volume = {
+            .vg = std::make_shared<brillo::VolumeGroup>(*vg),
+            .thinpool = std::make_shared<brillo::Thinpool>(*thinpool)}};
+  }
 
   cryptohome::EncryptedContainerConfig container_config(
       {.type = cryptohome::EncryptedContainerType::kDmcrypt,
@@ -243,8 +296,11 @@ std::unique_ptr<EncryptedFs> EncryptedFs::Generate(
                               fs_bytes_max / kExt4BlockSize),
                           .tune2fs_opts = {}}});
 
+  cryptohome::FileSystemKeyReference key_reference;
+  key_reference.fek_sig = brillo::SecureBlob("encstateful");
+
   std::unique_ptr<cryptohome::EncryptedContainer> container =
-      encrypted_container_factory->Generate(container_config, {});
+      encrypted_container_factory->Generate(container_config, key_reference);
 
   return std::make_unique<EncryptedFs>(rootdir, fs_bytes_max, dmcrypt_name,
                                        std::move(container), platform,
@@ -288,9 +344,13 @@ result_code EncryptedFs::Setup(const cryptohome::FileSystemKey& encryption_key,
 
     // Create new sparse file.
     LOG(INFO) << "Creating sparse backing file with size " << fs_size_;
+  } else if (!container_->Exists()) {
+    // If not rebuilding, we expect the container to be present.
+    LOG(ERROR) << "Encrypted container doesn't exist";
+    return rc;
   }
 
-  if (!container_->Setup(encryption_key, rebuild)) {
+  if (!container_->Setup(encryption_key)) {
     LOG(ERROR) << "Failed to set up encrypted container";
     TeardownByStage(TeardownStage::kTeardownContainer, true);
     return rc;
@@ -382,7 +442,7 @@ result_code EncryptedFs::TeardownByStage(TeardownStage stage,
       platform_->Sync();
 
       // Intentionally fall through here to teardown the lower dmcrypt device.
-      FALLTHROUGH;
+      [[fallthrough]];
     case TeardownStage::kTeardownContainer:
       LOG(INFO) << "Removing " << dmcrypt_dev_;
       if (!container_->Teardown() && !ignore_errors) {
@@ -453,17 +513,12 @@ result_code EncryptedFs::ReportInfo(void) const {
   for (auto& mnt : bind_mounts_) {
     printf("\tsrc:%s\n", mnt.src.value().c_str());
     printf("\tdst:%s\n", mnt.dst.value().c_str());
-    printf("\towner:%s\n", mnt.owner.c_str());
+    printf("\towner:%d\n", mnt.owner);
     printf("\tmode:%o\n", mnt.mode);
     printf("\tsubmount:%d\n", mnt.submount);
     printf("\n");
   }
   return RESULT_SUCCESS;
-}
-
-brillo::SecureBlob EncryptedFs::GetKey() const {
-  brillo::DevmapperTable dm_table = device_mapper_->GetTable(dmcrypt_name_);
-  return dm_table.CryptGetKey();
 }
 
 }  // namespace mount_encrypted

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -107,15 +107,15 @@ ErrorType TranslateErrorCode(errcode_t code) {
     case KRB5KDC_ERR_KEY_EXP:
       return ERROR_PASSWORD_EXPIRED;
 
-    // TODO(https://crbug.com/951741): Verify
+    // TODO(b/259178385): Verify this mapping.
     case KRB5_KPASSWD_SOFTERROR:
       return ERROR_PASSWORD_REJECTED;
 
-    // TODO(https://crbug.com/951741): Verify
+    // TODO(b/259178385): Verify this mapping.
     case KRB5_FCC_NOFILE:
       return ERROR_NO_CREDENTIALS_CACHE_FOUND;
 
-    // TODO(https://crbug.com/951741): Verify
+    // TODO(b/259178385): Verify this mapping.
     case KRB5KRB_AP_ERR_TKT_EXPIRED:
       return ERROR_KERBEROS_TICKET_EXPIRED;
 
@@ -123,6 +123,7 @@ ErrorType TranslateErrorCode(errcode_t code) {
       return ERROR_KDC_DOES_NOT_SUPPORT_ENCRYPTION_TYPE;
 
     case KRB5_REALM_UNKNOWN:
+    case KRB5KDC_ERR_WRONG_REALM:
       return ERROR_CONTACTING_KDC_FAILED;
 
     default:
@@ -226,7 +227,7 @@ class KinitContext {
     }
 
     ret = krb5_parse_name_flags(ctx.get(), options_.principal_name.c_str(),
-                                0 /* flags */, &k5_.me);
+                                /*flags=*/0, &k5_.me);
     if (ret) {
       LOG(ERROR) << ctx.GetErrorMessage(ret) << " when parsing name";
       return TranslateErrorCode(ret);
@@ -256,14 +257,16 @@ class KinitContext {
 
     ret = krb5_get_init_creds_opt_alloc(ctx.get(), &d.options);
     if (ret) {
-      LOG(ERROR) << ctx.GetErrorMessage(ret) << " while getting options";
+      LOG(ERROR) << ctx.GetErrorMessage(ret)
+                 << " while allocating credential options";
       return TranslateErrorCode(ret);
     }
 
     ret = krb5_get_init_creds_opt_set_out_ccache(ctx.get(), d.options,
                                                  out_cc.get());
     if (ret) {
-      LOG(ERROR) << ctx.GetErrorMessage(ret) << " while getting options";
+      LOG(ERROR) << ctx.GetErrorMessage(ret)
+                 << " while setting credential cache with initial options";
       return TranslateErrorCode(ret);
     }
 
@@ -285,7 +288,8 @@ class KinitContext {
     }
 
     if (ret) {
-      LOG(ERROR) << ctx.GetErrorMessage(ret);
+      LOG(ERROR) << ctx.GetErrorMessage(ret)
+                 << " when acquiring or renewing the TGT";
       return TranslateErrorCode(ret);
     }
 

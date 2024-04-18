@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,7 @@
 
 #include <tuple>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 bool DisplayInfo::operator<(const DisplayInfo& rhs) const {
   return std::tie(drm_path.value(), i2c_path.value(), sys_path.value(),
@@ -20,5 +19,4 @@ bool DisplayInfo::operator==(const DisplayInfo& o) const {
   return !(*this < o || o < *this);
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -77,6 +77,12 @@ class TRUNKS_EXPORT PolicySessionImpl : public PolicySession {
                           const std::vector<FIDO_DATA_RANGE>& auth_data_descr,
                           const TPMT_SIGNATURE& signature,
                           AuthorizationDelegate* delegate) override;
+  TPM_RC PolicyNV(uint32_t index,
+                  uint32_t offset,
+                  bool using_owner_authorization,
+                  TPM2B_OPERAND operand,
+                  TPM_EO operation,
+                  AuthorizationDelegate* delegate) override;
 
  private:
   // This factory is only set in the constructor and is used to instantiate

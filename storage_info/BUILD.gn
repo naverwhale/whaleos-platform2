@@ -1,7 +1,51 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Do nothing.
 group("all") {
+  deps = [ ":chromeos_disk_metrics" ]
+  if (use.test) {
+    deps += [ ":storage_capability_reporter_test" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libmetrics",
+  ]
+  libs = [ "rootdev" ]
+}
+
+executable("chromeos_disk_metrics") {
+  sources = [
+    "chromeos_disk_metrics.cc",
+    "storage_capability_reporter.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  install_path = "bin"
+}
+
+if (use.test) {
+  pkg_config("test_config") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+    ]
+  }
+  executable("storage_capability_reporter_test") {
+    sources = [
+      "storage_capability_reporter.cc",
+      "storage_capability_reporter_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":test_config",
+    ]
+    run_test = true
+    deps = [ "//common-mk/testrunner" ]
+  }
 }

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef SYSTEM_PROXY_PROXY_CONNECT_JOB_H_
@@ -12,9 +12,9 @@
 
 #include <curl/curl.h>
 
-#include <base/callback_forward.h>
 #include <base/cancelable_callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/callback_forward.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 namespace patchpanel {
@@ -175,11 +175,11 @@ class ProxyConnectJob {
   ResolveProxyCallback resolve_proxy_callback_;
   AuthenticationRequiredCallback auth_required_callback_;
   OnConnectionSetupFinishedCallback setup_finished_callback_;
-  base::CancelableClosure client_connect_timeout_callback_;
+  base::CancelableOnceClosure client_connect_timeout_callback_;
   // Started the first time credentials are requested and cancelled when the
   // proxy server sends any HTTP code other than 407 (proxy authentication
   // required).
-  base::CancelableClosure credentials_request_timeout_callback_;
+  base::CancelableOnceClosure credentials_request_timeout_callback_;
 
   bool store_headers_for_testing_ = false;
   std::string request_headers_for_testing_;

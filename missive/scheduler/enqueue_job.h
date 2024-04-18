@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include <base/memory/weak_ptr.h>
 #include <brillo/dbus/dbus_method_response.h>
 
+#include "missive/health/health_module.h"
 #include "missive/proto/interface.pb.h"
 #include "missive/scheduler/scheduler.h"
 #include "missive/storage/storage_module_interface.h"
@@ -22,13 +23,12 @@ class EnqueueJob : public Scheduler::Job {
   class EnqueueResponseDelegate : public Job::JobDelegate {
    public:
     EnqueueResponseDelegate(
+        scoped_refptr<HealthModule> health_module,
         std::unique_ptr<
             brillo::dbus_utils::DBusMethodResponse<EnqueueRecordResponse>>
             response);
 
    private:
-    friend Scheduler::Job;
-
     Status Complete() override;
     Status Cancel(Status status) override;
 
@@ -37,6 +37,8 @@ class EnqueueJob : public Scheduler::Job {
     // Task runner for final operations to take place on.
     // Matches the thread constructor was called on.
     scoped_refptr<base::SequencedTaskRunner> task_runner_;
+
+    scoped_refptr<HealthModule> health_module_;
 
     // response_ can only be used once - the logic in Scheduler::Job ensures
     // that only Complete or Cancel are every called once.
@@ -50,6 +52,7 @@ class EnqueueJob : public Scheduler::Job {
 
   static SmartPtr<EnqueueJob> Create(
       scoped_refptr<StorageModuleInterface> storage_module,
+      scoped_refptr<HealthModule> health_module,
       EnqueueRecordRequest request,
       std::unique_ptr<EnqueueResponseDelegate> delegate);
 
@@ -66,11 +69,13 @@ class EnqueueJob : public Scheduler::Job {
 
  private:
   EnqueueJob(scoped_refptr<StorageModuleInterface> storage_module,
+             scoped_refptr<HealthModule> health_module,
              scoped_refptr<base::SequencedTaskRunner> sequenced_task_runner,
              EnqueueRecordRequest request,
              std::unique_ptr<EnqueueResponseDelegate> delegate);
 
   scoped_refptr<StorageModuleInterface> storage_module_;
+  scoped_refptr<HealthModule> health_module_;
   const EnqueueRecordRequest request_;
   base::WeakPtrFactory<EnqueueJob> weak_ptr_factory_{this};
 };

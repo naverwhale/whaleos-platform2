@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/strings/stringprintf.h>
+#include <base/time/time.h>
 
 namespace power_manager {
 
@@ -14,14 +15,20 @@ namespace power_manager {
 const char kLowBatteryShutdownTimePref[] = "low_battery_shutdown_time_s";
 const char kLowBatteryShutdownPercentPref[] = "low_battery_shutdown_percent";
 const char kPluggedDimMsPref[] = "plugged_dim_ms";
+const char kPluggedQuickDimMsPref[] = "plugged_quick_dim_ms";
+const char kPluggedQuickLockMsPref[] = "plugged_quick_lock_ms";
 const char kPluggedOffMsPref[] = "plugged_off_ms";
 const char kPluggedSuspendMsPref[] = "plugged_suspend_ms";
 const char kUnpluggedDimMsPref[] = "unplugged_dim_ms";
+const char kUnpluggedQuickDimMsPref[] = "unplugged_quick_dim_ms";
+const char kUnpluggedQuickLockMsPref[] = "unplugged_quick_lock_ms";
 const char kUnpluggedOffMsPref[] = "unplugged_off_ms";
 const char kUnpluggedSuspendMsPref[] = "unplugged_suspend_ms";
+const char kSendFeedbackIfUndimmedPref[] = "send_feedback_if_undimmed";
 const char kDisableIdleSuspendPref[] = "disable_idle_suspend";
 const char kFactoryModePref[] = "factory_mode";
 const char kUseLidPref[] = "use_lid";
+const char kPreferredLidDevicePref[] = "preferred_lid_device";
 const char kDetectHoverPref[] = "detect_hover";
 const char kRetrySuspendMsPref[] = "retry_suspend_ms";
 const char kRetrySuspendAttemptsPref[] = "retry_suspend_attempts";
@@ -45,8 +52,6 @@ const char kKeyboardBacklightNoAlsBrightnessPref[] =
 const char kKeyboardBacklightKeepOnMsPref[] = "keyboard_backlight_keep_on_ms";
 const char kKeyboardBacklightKeepOnDuringVideoMsPref[] =
     "keyboard_backlight_keep_on_during_video_ms";
-const char kKeyboardBacklightTurnOnForUserActivityPref[] =
-    "keyboard_backlight_turn_on_for_user_activity";
 const char kAlsSmoothingConstantPref[] = "als_smoothing_constant";
 const char kRequireUsbInputDeviceToSuspendPref[] =
     "require_usb_input_device_to_suspend";
@@ -61,17 +66,28 @@ const char kBatteryStabilizedAfterLinePowerDisconnectedMsPref[] =
     "battery_stabilized_after_line_power_disconnected_ms";
 const char kBatteryStabilizedAfterResumeMsPref[] =
     "battery_stabilized_after_resume_ms";
+const char kBatteryStabilizedAfterBatterySaverMsPref[] =
+    "battery_stabilized_after_battery_saver_ms";
 const char kMultipleBatteriesPref[] = "multiple_batteries";
+const char kHasBarreljackPref[] = "has_barreljack";
 const char kMaxCurrentSamplesPref[] = "max_current_samples";
 const char kMaxChargeSamplesPref[] = "max_charge_samples";
 const char kUsbMinAcWattsPref[] = "usb_min_ac_watts";
 const char kChargingPortsPref[] = "charging_ports";
+const char kAdaptiveChargingAlarmSecPref[] = "adaptive_charging_alarm_sec";
+const char kAdaptiveChargingHoldPercentPref[] =
+    "adaptive_charging_hold_percent";
+const char kAdaptiveChargingHoldDeltaPercentPref[] =
+    "adaptive_charging_hold_delta_percent";
+const char kAdaptiveChargingMinProbabilityPref[] =
+    "adaptive_charging_min_probability";
+const char kAdaptiveChargingEnabledPref[] = "adaptive_charging_enabled";
+const char kSlowAdaptiveChargingEnabledPref[] =
+    "slow_adaptive_charging_enabled";
+const char kChargeLimitEnabledPref[] = "charge_limit_enabled";
 const char kTurnOffScreenTimeoutMsPref[] = "turn_off_screen_timeout_ms";
 const char kDisableDarkResumePref[] = "disable_dark_resume";
-const char kDisableHibernatePref[] = "disable_hibernate";
 const char kLowerPowerFromSuspendSecPref[] = "lower_power_from_suspend_sec";
-const char kDarkResumeDevicesPref[] = "dark_resume_devices";
-const char kDarkResumeSourcesPref[] = "dark_resume_sources";
 const char kIgnoreExternalPolicyPref[] = "ignore_external_policy";
 const char kNumSessionsOnCurrentChargePref[] = "num_sessions_on_current_charge";
 const char kHasAmbientLightSensorPref[] = "has_ambient_light_sensor";
@@ -80,11 +96,14 @@ const char kHasChargeControllerPref[] = "has_charge_controller";
 const char kHasKeyboardBacklightPref[] = "has_keyboard_backlight";
 const char kExternalDisplayOnlyPref[] = "external_display_only";
 const char kLegacyPowerButtonPref[] = "legacy_power_button";
-const char kMosysEventlogPref[] = "mosys_eventlog";
+const char kManualEventlogAddPref[] = "manual_eventlog_add";
 const char kUseCrasPref[] = "use_cras";
 const char kTpmCounterSuspendThresholdPref[] = "tpm_counter_suspend_threshold";
 const char kTpmStatusIntervalSecPref[] = "tpm_status_interval_sec";
 const char kSuspendToIdlePref[] = "suspend_to_idle";
+const char kHasMachineQuirksPref[] = "has_machine_quirks";
+const char kSuspendToIdleListPref[] = "suspend_to_idle_models";
+const char kSuspendPreventionListPref[] = "suspend_prevention_models";
 const char kSetTransmitPowerPreferFarForProximityPref[] =
     "set_transmit_power_prefer_far_for_proximity";
 const char kWifiTransmitPowerModeForStaticDevicePref[] =
@@ -109,6 +128,12 @@ const char kUseMultiPowerLevelDynamicSARPref[] =
     "use_multi_power_level_dynamic_sar";
 const char kSetCellularTransmitPowerLevelMappingPref[] =
     "set_cellular_transmit_power_level_mapping";
+const char kSetCellularRegulatoryDomainMappingPref[] =
+    "set_cellular_regulatory_domain_mapping";
+const char kSetDefaultProximityStateHighPref[] =
+    "set_default_proximity_state_high";
+const char kUseRegulatoryDomainForDynamicSARPref[] =
+    "use_regulatory_domain_for_dynamic_sar";
 const char kEnableConsoleDuringSuspendPref[] = "enable_console_during_suspend";
 const char kMaxDarkSuspendDelayTimeoutMsPref[] =
     "max_dark_suspend_delay_timeout_ms";
@@ -141,8 +166,8 @@ const char kBusInterface[] = "org.freedesktop.DBus";
 const char kBusNameOwnerChangedSignal[] = "NameOwnerChanged";
 const char kPowerWakeup[] = "power/wakeup";
 const double kEpsilon = 0.001;
-const int64_t kFastBacklightTransitionMs = 200;
-const int64_t kSlowBacklightTransitionMs = 2000;
+const base::TimeDelta kFastBacklightTransition = base::Milliseconds(200);
+const base::TimeDelta kSlowBacklightTransition = base::Seconds(2);
 const char kInputUdevSubsystem[] = "input";
 const char kCrosECLightName[] = "cros-ec-light";
 const char kAcpiAlsName[] = "acpi-als";
@@ -212,6 +237,25 @@ std::string RadioTransmitPowerToString(RadioTransmitPower power) {
   return base::StringPrintf("unknown (%d)", static_cast<int>(power));
 }
 
+std::string RegulatoryDomainToString(CellularRegulatoryDomain domain) {
+  switch (domain) {
+    case CellularRegulatoryDomain::FCC:
+      return "FCC";
+    case CellularRegulatoryDomain::ISED:
+      return "ISED";
+    case CellularRegulatoryDomain::CE:
+      return "CE";
+    case CellularRegulatoryDomain::MIC:
+      return "MIC";
+    case CellularRegulatoryDomain::KCC:
+      return "KCC";
+    case CellularRegulatoryDomain::UNKNOWN:
+      return "UNKNOWN";
+  }
+  NOTREACHED() << "Unhandled Regulatory Domain " << static_cast<int>(domain);
+  return base::StringPrintf("unknown (%d)", static_cast<int>(domain));
+}
+
 std::string SessionStateToString(SessionState state) {
   switch (state) {
     case SessionState::STOPPED:
@@ -266,6 +310,8 @@ std::string ShutdownReasonToString(ShutdownReason reason) {
       return "system-update";
     case ShutdownReason::OTHER_REQUEST_TO_POWERD:
       return "other-request-to-powerd";
+    case ShutdownReason::HIBERNATE_FAILED:
+      return "hibernate-failed";
   }
   NOTREACHED() << "Unhandled shutdown reason " << static_cast<int>(reason);
   return "unknown";

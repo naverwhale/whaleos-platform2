@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include <gmock/gmock.h>
 
 #include "shill/ethernet/ethernet_service.h"
+#include "shill/service.h"
 
 namespace shill {
 
@@ -33,15 +34,22 @@ class MockEthernetService : public EthernetService {
   MOCK_METHOD(void, SetState, (ConnectState), (override));
   MOCK_METHOD(void, OnVisibilityChanged, (), (override));
   MOCK_METHOD(Technology, technology, (), (const, override));
-
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   MOCK_METHOD(bool, Is8021xConnectable, (), (const, override));
   MOCK_METHOD(bool,
               AddEAPCertification,
               (const std::string&, size_t),
               (override));
   MOCK_METHOD(void, ClearEAPCertification, (), (override));
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
+  MOCK_METHOD(void,
+              SetUplinkSpeedKbps,
+              (uint32_t uplink_speed_kbps),
+              (override));
+  MOCK_METHOD(void,
+              SetDownlinkSpeedKbps,
+              (uint32_t downlink_speed_kbps),
+              (override));
+  MOCK_METHOD(ConnectState, state, (), (const, override));
+  MOCK_METHOD(bool, IsPortalDetectionDisabled, (), (const, override));
 };
 
 }  // namespace shill

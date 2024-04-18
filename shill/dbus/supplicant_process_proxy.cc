@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -40,8 +40,8 @@ SupplicantProcessProxy::PropertySet::PropertySet(
 SupplicantProcessProxy::SupplicantProcessProxy(
     EventDispatcher* dispatcher,
     const scoped_refptr<dbus::Bus>& bus,
-    const base::Closure& service_appeared_callback,
-    const base::Closure& service_vanished_callback)
+    const base::RepeatingClosure& service_appeared_callback,
+    const base::RepeatingClosure& service_vanished_callback)
     : supplicant_proxy_(new fi::w1::wpa_supplicant1Proxy(
           bus,
           WPASupplicant::kDBusAddr,
@@ -51,25 +51,25 @@ SupplicantProcessProxy::SupplicantProcessProxy(
       service_vanished_callback_(service_vanished_callback),
       service_available_(false) {
   // Register properties.
-  properties_.reset(
-      new PropertySet(supplicant_proxy_->GetObjectProxy(), kInterfaceName,
-                      base::Bind(&SupplicantProcessProxy::OnPropertyChanged,
-                                 weak_factory_.GetWeakPtr())));
+  properties_.reset(new PropertySet(
+      supplicant_proxy_->GetObjectProxy(), kInterfaceName,
+      base::BindRepeating(&SupplicantProcessProxy::OnPropertyChanged,
+                          weak_factory_.GetWeakPtr())));
 
   // Register signal handlers.
-  auto on_connected_callback = base::Bind(
+  auto on_connected_callback = base::BindRepeating(
       &SupplicantProcessProxy::OnSignalConnected, weak_factory_.GetWeakPtr());
   supplicant_proxy_->RegisterInterfaceAddedSignalHandler(
-      base::Bind(&SupplicantProcessProxy::InterfaceAdded,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantProcessProxy::InterfaceAdded,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   supplicant_proxy_->RegisterInterfaceRemovedSignalHandler(
-      base::Bind(&SupplicantProcessProxy::InterfaceRemoved,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantProcessProxy::InterfaceRemoved,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   supplicant_proxy_->RegisterPropertiesChangedSignalHandler(
-      base::Bind(&SupplicantProcessProxy::PropertiesChanged,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantProcessProxy::PropertiesChanged,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
 
   // Connect property signals and initialize cached values. Based on
@@ -80,12 +80,13 @@ SupplicantProcessProxy::SupplicantProcessProxy(
   // Monitor service owner changes. This callback lives for the lifetime of
   // the ObjectProxy.
   supplicant_proxy_->GetObjectProxy()->SetNameOwnerChangedCallback(
-      base::Bind(&SupplicantProcessProxy::OnServiceOwnerChanged,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&SupplicantProcessProxy::OnServiceOwnerChanged,
+                          weak_factory_.GetWeakPtr()));
 
   // One time callback when service becomes available.
-  supplicant_proxy_->GetObjectProxy()->WaitForServiceToBeAvailable(base::Bind(
-      &SupplicantProcessProxy::OnServiceAvailable, weak_factory_.GetWeakPtr()));
+  supplicant_proxy_->GetObjectProxy()->WaitForServiceToBeAvailable(
+      base::BindOnce(&SupplicantProcessProxy::OnServiceAvailable,
+                     weak_factory_.GetWeakPtr()));
 }
 
 SupplicantProcessProxy::~SupplicantProcessProxy() = default;
@@ -103,8 +104,8 @@ bool SupplicantProcessProxy::CreateInterface(const KeyValueStore& args,
   brillo::ErrorPtr error;
   if (!supplicant_proxy_->CreateInterface(dict, &path, &error)) {
     // Interface might already been created by wpasupplicant.
-    LOG(ERROR) << "Failed to create interface: " << error->GetCode() << " "
-               << error->GetMessage();
+    LOG(INFO) << "Failed to create interface: " << error->GetCode() << " "
+              << error->GetMessage();
     return false;
   }
   *rpc_identifier = path;
@@ -122,8 +123,9 @@ bool SupplicantProcessProxy::RemoveInterface(
 
   brillo::ErrorPtr error;
   if (!supplicant_proxy_->RemoveInterface(rpc_identifier, &error)) {
-    LOG(ERROR) << "Failed to remove interface " << rpc_identifier.value()
-               << ": " << error->GetCode() << " " << error->GetMessage();
+    // Interface may already be removed by wpa_supplicant.
+    LOG(INFO) << "Failed to remove interface " << rpc_identifier.value() << ": "
+              << error->GetCode() << " " << error->GetMessage();
     return false;
   }
   return true;
@@ -140,8 +142,9 @@ bool SupplicantProcessProxy::GetInterface(const std::string& ifname,
   dbus::ObjectPath path;
   brillo::ErrorPtr error;
   if (!supplicant_proxy_->GetInterface(ifname, &path, &error)) {
-    LOG(ERROR) << "Failed to get interface " << ifname << ": "
-               << error->GetCode() << " " << error->GetMessage();
+    // Interface may not yet be available at the wpa_supplicant layer.
+    LOG(INFO) << "Failed to get interface " << ifname << ": "
+              << error->GetCode() << " " << error->GetMessage();
     return false;
   }
   *rpc_identifier = path;

@@ -1,8 +1,8 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "sommelier.h"  // NOLINT(build/include_directory)
+#include "sommelier.h"          // NOLINT(build/include_directory)
 #include "sommelier-tracing.h"  // NOLINT(build/include_directory)
 
 #include <assert.h>
@@ -40,22 +40,16 @@ static void sl_gtk_surface_set_dbus_properties(
   struct sl_host_gtk_surface* host =
       static_cast<sl_host_gtk_surface*>(wl_resource_get_user_data(resource));
 
-  zaura_surface_set_application_id(host->proxy, application_id);
-}  // NOLINT(whitespace/indent)
+  char* application_id_str =
+      sl_xasprintf(NATIVE_WAYLAND_APPLICATION_ID_FORMAT,
+                   host->aura_shell->ctx->vm_id, application_id);
 
-static void sl_gtk_surface_set_modal(struct wl_client* client,
-                                     struct wl_resource* resource) {}
-
-static void sl_gtk_surface_unset_modal(struct wl_client* client,
-                                       struct wl_resource* resource) {}
-
-static void sl_gtk_surface_present(struct wl_client* client,
-                                   struct wl_resource* resource,
-                                   uint32_t time) {}
+  zaura_surface_set_application_id(host->proxy, application_id_str);
+}
 
 static const struct gtk_surface1_interface sl_gtk_surface_implementation = {
-    sl_gtk_surface_set_dbus_properties, sl_gtk_surface_set_modal,
-    sl_gtk_surface_unset_modal, sl_gtk_surface_present};
+    sl_gtk_surface_set_dbus_properties, /*set_modal=*/DoNothing,
+    /*unset_modal=*/DoNothing, /*present=*/DoNothing};
 
 static void sl_destroy_host_gtk_surface(struct wl_resource* resource) {
   struct sl_host_gtk_surface* host =
@@ -63,8 +57,8 @@ static void sl_destroy_host_gtk_surface(struct wl_resource* resource) {
 
   zaura_surface_destroy(host->proxy);
   wl_list_remove(&host->link);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_gtk_shell_get_gtk_surface(struct wl_client* client,
@@ -75,9 +69,7 @@ static void sl_gtk_shell_get_gtk_surface(struct wl_client* client,
       static_cast<sl_host_gtk_shell*>(wl_resource_get_user_data(resource));
   struct sl_host_surface* host_surface = static_cast<sl_host_surface*>(
       wl_resource_get_user_data(surface_resource));
-  struct sl_host_gtk_surface* host_gtk_surface =
-      static_cast<sl_host_gtk_surface*>(malloc(sizeof(*host_gtk_surface)));
-  assert(host_gtk_surface);
+  struct sl_host_gtk_surface* host_gtk_surface = new sl_host_gtk_surface();
 
   wl_list_insert(&host->surfaces, &host_gtk_surface->link);
   host_gtk_surface->aura_shell = host->aura_shell;
@@ -91,6 +83,8 @@ static void sl_gtk_shell_get_gtk_surface(struct wl_client* client,
   zaura_surface_set_startup_id(host_gtk_surface->proxy, host->startup_id);
 }
 
+// TODO(b/244651040): when adding changing the startup id format, also add vm_id
+// here.
 static void sl_gtk_shell_set_startup_id(struct wl_client* client,
                                         struct wl_resource* resource,
                                         const char* startup_id) {
@@ -99,19 +93,15 @@ static void sl_gtk_shell_set_startup_id(struct wl_client* client,
   struct sl_host_gtk_surface* surface;
 
   free(host->startup_id);
-  host->startup_id = startup_id ? strdup(startup_id) : NULL;
+  host->startup_id = startup_id ? strdup(startup_id) : nullptr;
 
   wl_list_for_each(surface, &host->surfaces, link)
       zaura_surface_set_startup_id(surface->proxy, host->startup_id);
 }
 
-static void sl_gtk_shell_system_bell(struct wl_client* client,
-                                     struct wl_resource* resource,
-                                     struct wl_resource* surface_resource) {}
-
 static const struct gtk_shell1_interface sl_gtk_shell_implementation = {
     sl_gtk_shell_get_gtk_surface, sl_gtk_shell_set_startup_id,
-    sl_gtk_shell_system_bell};
+    /*system_bell=*/DoNothing};
 
 static void sl_destroy_host_gtk_shell(struct wl_resource* resource) {
   struct sl_host_gtk_shell* host =
@@ -120,8 +110,8 @@ static void sl_destroy_host_gtk_shell(struct wl_resource* resource) {
   free(host->startup_id);
   wl_callback_destroy(host->callback);
   zaura_shell_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_gtk_shell_callback_done(void* data,
@@ -142,11 +132,9 @@ static void sl_bind_host_gtk_shell(struct wl_client* client,
                                    uint32_t version,
                                    uint32_t id) {
   struct sl_context* ctx = (struct sl_context*)data;
-  struct sl_host_gtk_shell* host =
-      static_cast<sl_host_gtk_shell*>(malloc(sizeof(*host)));
-  assert(host);
+  struct sl_host_gtk_shell* host = new sl_host_gtk_shell();
   host->aura_shell = ctx->aura_shell;
-  host->startup_id = NULL;
+  host->startup_id = nullptr;
   wl_list_init(&host->surfaces);
   host->resource = wl_resource_create(client, &gtk_shell1_interface, 1, id);
   wl_resource_set_implementation(host->resource, &sl_gtk_shell_implementation,
@@ -157,7 +145,6 @@ static void sl_bind_host_gtk_shell(struct wl_client* client,
   zaura_shell_set_user_data(host->proxy, host);
 
   host->callback = wl_display_sync(ctx->aura_shell->ctx->display);
-  wl_callback_set_user_data(host->callback, host);
   wl_callback_add_listener(host->callback, &sl_gtk_shell_callback_listener,
                            host);
 }

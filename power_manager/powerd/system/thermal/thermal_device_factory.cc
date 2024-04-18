@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,20 +9,18 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
-#include <base/macros.h>
 
 #include "power_manager/powerd/system/thermal/cooling_device.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -68,5 +66,4 @@ ThermalDeviceFactory::CreateThermalDevices(
   return ret;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

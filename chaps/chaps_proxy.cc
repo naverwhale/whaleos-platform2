@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,18 @@
 #include <utility>
 
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ptr_util.h>
 #include <base/memory/ref_counted.h>
 #include <brillo/dbus/dbus_method_invoker.h>
 #include <dbus/message.h>
 #include <dbus/object_path.h>
 
+#include "base/functional/callback_helpers.h"
 #include "chaps/chaps.h"
 #include "chaps/chaps_utility.h"
 #include "chaps/isolate.h"
 #include "pkcs11/cryptoki.h"
 
-using base::AutoLock;
 using brillo::Blob;
 using brillo::SecureBlob;
 using brillo::dbus_utils::ExtractMethodCallResults;
@@ -28,8 +27,8 @@ using std::vector;
 
 namespace {
 
-// 5 minutes, since some TPM operations can take a while.
-constexpr base::TimeDelta kDBusTimeout = base::TimeDelta::FromMinutes(5);
+// 5 minutes, since some security element operations can take a while.
+constexpr base::TimeDelta kDBusTimeout = base::Minutes(5);
 
 // TODO(yich): We should remove this after chromeos-dbus-binding support
 // SecureBlob.
@@ -59,7 +58,8 @@ ChapsProxyImpl::ChapsProxyImpl(std::unique_ptr<base::AtExitManager> at_exit)
 ChapsProxyImpl::~ChapsProxyImpl() {}
 
 // static
-std::unique_ptr<ChapsProxyImpl> ChapsProxyImpl::Create(bool shadow_at_exit) {
+std::unique_ptr<ChapsProxyImpl> ChapsProxyImpl::Create(bool shadow_at_exit,
+                                                       ThreadingMode mode) {
   std::unique_ptr<base::AtExitManager> at_exit;
   if (shadow_at_exit) {
     at_exit = std::make_unique<ProxyAtExitManager>();
@@ -68,21 +68,26 @@ std::unique_ptr<ChapsProxyImpl> ChapsProxyImpl::Create(bool shadow_at_exit) {
   auto chaps_proxy_impl =
       base::WrapUnique(new ChapsProxyImpl(std::move(at_exit)));
 
-  base::Thread::Options options(base::MessagePumpType::IO, 0);
-  chaps_proxy_impl->dbus_thread_ =
-      std::make_unique<ChapsProxyThread>(chaps_proxy_impl.get());
-  chaps_proxy_impl->dbus_thread_->StartWithOptions(options);
-
-  base::WaitableEvent event(base::WaitableEvent::ResetPolicy::MANUAL,
-                            base::WaitableEvent::InitialState::NOT_SIGNALED);
   bool connected = false;
 
-  chaps_proxy_impl->dbus_thread_->task_runner()->PostTask(
-      FROM_HERE, base::BindOnce(&ChapsProxyImpl::InitializationTask,
-                                base::Unretained(chaps_proxy_impl.get()),
-                                &event, &connected));
+  if (mode == ThreadingMode::kStandaloneWorkerThread) {
+    base::Thread::Options options(base::MessagePumpType::IO, 0);
+    chaps_proxy_impl->dbus_thread_ =
+        std::make_unique<ChapsProxyThread>(chaps_proxy_impl.get());
+    chaps_proxy_impl->dbus_thread_->StartWithOptions(std::move(options));
 
-  event.Wait();
+    base::WaitableEvent event(base::WaitableEvent::ResetPolicy::MANUAL,
+                              base::WaitableEvent::InitialState::NOT_SIGNALED);
+    chaps_proxy_impl->dbus_thread_->task_runner()->PostTask(
+        FROM_HERE, base::BindOnce(&ChapsProxyImpl::InitializationTask,
+                                  base::Unretained(chaps_proxy_impl.get()),
+                                  base::BindOnce(&base::WaitableEvent::Signal,
+                                                 base::Unretained(&event)),
+                                  &connected));
+    event.Wait();
+  } else {
+    chaps_proxy_impl->InitializationTask(base::DoNothing(), &connected);
+  }
 
   if (!connected) {
     // We should return nullptr when failed to connect to system D-Bus, and let
@@ -94,11 +99,8 @@ std::unique_ptr<ChapsProxyImpl> ChapsProxyImpl::Create(bool shadow_at_exit) {
   return chaps_proxy_impl;
 }
 
-void ChapsProxyImpl::InitializationTask(base::WaitableEvent* completion,
+void ChapsProxyImpl::InitializationTask(base::OnceClosure callback,
                                         bool* connected) {
-  CHECK(completion);
-  CHECK(dbus_thread_->task_runner()->BelongsToCurrentThread());
-
   dbus::Bus::Options options;
   options.bus_type = dbus::Bus::SYSTEM;
   bus_ = base::MakeRefCounted<dbus::Bus>(options);
@@ -109,7 +111,7 @@ void ChapsProxyImpl::InitializationTask(base::WaitableEvent* completion,
 
   proxy_ = default_proxy_.get();
 
-  completion->Signal();
+  std::move(callback).Run();
 }
 
 void ChapsProxyImpl::ShutdownTask() {
@@ -121,25 +123,33 @@ void ChapsProxyImpl::ShutdownTask() {
 template <typename MethodType, typename... Args>
 bool ChapsProxyImpl::SendRequestAndWait(const MethodType& method,
                                         Args... args) {
-  base::WaitableEvent event(base::WaitableEvent::ResetPolicy::MANUAL,
-                            base::WaitableEvent::InitialState::NOT_SIGNALED);
   bool success = true;
-  dbus_thread_->task_runner()->PostTask(
-      FROM_HERE, base::BindOnce(
-                     [](org::chromium::ChapsProxyInterface* proxy,
-                        base::WaitableEvent* completion, bool* success,
-                        const MethodType& method, Args... args) {
-                       brillo::ErrorPtr error = nullptr;
-                       if (!(proxy->*method)(args..., &error,
-                                             kDBusTimeout.InMilliseconds()) ||
-                           error) {
-                         *success = false;
-                       }
-                       completion->Signal();
-                     },
-                     proxy_, &event, &success, method, args...));
+  if (dbus_thread_) {
+    base::WaitableEvent event(base::WaitableEvent::ResetPolicy::MANUAL,
+                              base::WaitableEvent::InitialState::NOT_SIGNALED);
+    dbus_thread_->task_runner()->PostTask(
+        FROM_HERE, base::BindOnce(
+                       [](org::chromium::ChapsProxyInterface* proxy,
+                          base::WaitableEvent* completion, bool* success,
+                          const MethodType& method, Args... args) {
+                         brillo::ErrorPtr error = nullptr;
+                         if (!(proxy->*method)(args..., &error,
+                                               kDBusTimeout.InMilliseconds()) ||
+                             error) {
+                           *success = false;
+                         }
+                         completion->Signal();
+                       },
+                       proxy_, &event, &success, method, args...));
 
-  event.Wait();
+    event.Wait();
+  } else {
+    brillo::ErrorPtr error = nullptr;
+    if (!(proxy_->*method)(args..., &error, kDBusTimeout.InMilliseconds()) ||
+        error) {
+      success = false;
+    }
+  }
   return success;
 }
 
@@ -173,18 +183,13 @@ bool ChapsProxyImpl::LoadToken(const SecureBlob& isolate_credential,
   return success && result;
 }
 
-void ChapsProxyImpl::UnloadToken(const SecureBlob& isolate_credential,
+bool ChapsProxyImpl::UnloadToken(const SecureBlob& isolate_credential,
                                  const string& path) {
-  SendRequestAndWait(&org::chromium::ChapsProxyInterface::UnloadToken,
-                     ToBlob(isolate_credential), path);
-}
-
-void ChapsProxyImpl::ChangeTokenAuthData(
-    const string& path,
-    const brillo::SecureBlob& old_auth_data,
-    const brillo::SecureBlob& new_auth_data) {
-  SendRequestAndWait(&org::chromium::ChapsProxyInterface::ChangeTokenAuthData,
-                     path, ToBlob(old_auth_data), ToBlob(new_auth_data));
+  bool result = false;
+  bool success =
+      SendRequestAndWait(&org::chromium::ChapsProxyInterface::UnloadToken,
+                         ToBlob(isolate_credential), path, &result);
+  return success && result;
 }
 
 bool ChapsProxyImpl::GetTokenPath(const SecureBlob& isolate_credential,

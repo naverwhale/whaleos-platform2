@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,9 @@
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/version.h>
 
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 
 namespace shill {
 
@@ -37,10 +38,13 @@ class VPNUtil {
 
   static std::unique_ptr<VPNUtil> New();
 
+  // Returns whether the current kernel version >= |minimum_version|.
+  static bool CheckKernelVersion(const base::Version& minimum_version);
+
   // Constructs a MinijailOptions object which contains the common options used
   // by VPN clients:
   // - |user| and |group| are set to "vpn".
-  // - |inherit_supplementary_groups| and |close_nonstd_fds| are set to true.
+  // - |inherit_supplementary_groups| are set to true.
   static ProcessManager::MinijailOptions BuildMinijailOptions(uint64_t capmask);
 
   // Writes |contents| into file with path |filename|, changes the group of this
@@ -50,6 +54,11 @@ class VPNUtil {
   // group to "vpn" here since "shill" is a member of "vpn".
   virtual bool WriteConfigFile(const base::FilePath& filename,
                                const std::string& contents) const = 0;
+
+  // Creates a directory at |directory_path|, changes its group owner to "vpn",
+  // and makes it group-accessible (rwx).
+  virtual bool PrepareConfigDirectory(
+      const base::FilePath& directory_path) const = 0;
 
   // Writes |contents| into an anonymous file created by memfd_create(), and
   // returns its fd and the file path. Returns an invalid ScopedFD on failure.

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,11 @@
 
 #include "rmad/utils/cbi_utils.h"
 
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "rmad/utils/cmd_utils.h"
 
 namespace rmad {
 
@@ -16,19 +19,27 @@ namespace rmad {
 
 class CbiUtilsImpl : public CbiUtils {
  public:
-  CbiUtilsImpl() = default;
-  ~CbiUtilsImpl() = default;
+  CbiUtilsImpl();
+  explicit CbiUtilsImpl(std::unique_ptr<CmdUtils> cmd_utils);
+  ~CbiUtilsImpl() override = default;
 
-  bool GetSku(uint64_t* sku) const override;
+  bool GetSkuId(uint32_t* sku_id) const override;
   bool GetDramPartNum(std::string* dram_part_num) const override;
-  bool SetSku(uint64_t sku) override;
+  bool GetSsfc(uint32_t* ssfc) const override;
+  bool GetFirmwareConfig(uint32_t* firmware_config) const override;
+  bool SetSkuId(uint32_t sku_id) override;
   bool SetDramPartNum(const std::string& dram_part_num) override;
+  bool SetSsfc(uint32_t ssfc) override;
+  bool SetFirmwareConfig(uint32_t firmware_config) override;
 
  protected:
-  bool SetCbi(int tag, const std::string& value, int set_flag = 0) override;
-  bool GetCbi(int tag, std::string* value, int get_flag = 0) const override;
-  bool SetCbi(int tag, uint64_t value, int size, int set_flag = 0) override;
-  bool GetCbi(int tag, uint64_t* value, int get_flag = 0) const override;
+  bool SetCbi(int tag, const std::string& value, int set_flag = 0);
+  bool GetCbi(int tag, std::string* value, int get_flag = 0) const;
+  bool SetCbi(int tag, uint32_t value, int size, int set_flag = 0);
+  bool GetCbi(int tag, uint32_t* value, int get_flag = 0) const;
+
+ private:
+  std::unique_ptr<CmdUtils> cmd_utils_;
 };
 
 }  // namespace rmad

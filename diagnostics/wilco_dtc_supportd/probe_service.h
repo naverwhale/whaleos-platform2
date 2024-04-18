@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,20 @@
 
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 
-#include "mojo/cros_healthd.mojom.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
+namespace wilco {
 
 // The probe service is responsible for getting telemetry information.
 class ProbeService {
  public:
   using ProbeTelemetryInfoCallback =
-      base::OnceCallback<void(chromeos::cros_healthd::mojom::TelemetryInfoPtr)>;
+      base::OnceCallback<void(ash::cros_healthd::mojom::TelemetryInfoPtr)>;
 
   class Delegate {
    public:
@@ -29,8 +30,7 @@ class ProbeService {
     // production, the implementation is provided by cros_healthd. Returns
     // whether binding is successful.
     virtual bool BindCrosHealthdProbeService(
-        mojo::PendingReceiver<
-            chromeos::cros_healthd::mojom::CrosHealthdProbeService>
+        mojo::PendingReceiver<ash::cros_healthd::mojom::CrosHealthdProbeService>
             service) = 0;
   };
 
@@ -38,10 +38,11 @@ class ProbeService {
 
   // Requests telemetry info for categories.
   virtual void ProbeTelemetryInfo(
-      std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum> categories,
+      std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum> categories,
       ProbeTelemetryInfoCallback callback) = 0;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_PROBE_SERVICE_H_

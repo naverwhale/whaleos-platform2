@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,11 @@
 #include <base/logging.h>
 #include <base/values.h>
 #include <base/version.h>
+#include <brillo/files/file_util.h>
+#include <chromeos/constants/imageloader.h>
 #include <chromeos/dbus/service_constants.h>
+#include <dlcservice/metadata/metadata.h>
+#include <dlcservice/metadata/metadata_interface.h>
 
 #include "imageloader/component.h"
 #include "imageloader/dlc.h"
@@ -35,7 +39,9 @@ constexpr char kLatestVersionFile[] = "latest-version";
 // The maximum size of the latest-version file.
 constexpr int kMaximumLatestVersionSize = 4096;
 // Maximum ID length.
-constexpr size_t kMaxIdLength = 40;
+constexpr size_t kMaxIdLength = 80;
+// Default DLC package name.
+constexpr char kDefaultPackage[] = "package";
 
 // |mount_base_path| is the subfolder where all components are mounted.
 // For example "/mnt/imageloader."
@@ -70,6 +76,15 @@ bool ImageLoaderImpl::IsIdValid(const std::string& id) {
     }
   }
   return true;
+}
+
+void ImageLoaderImpl::Initialize() {
+  dlc_metadata_ = std::make_shared<dlcservice::metadata::Metadata>(
+      base::FilePath(kDlcManifestRootpath));
+  if (!dlc_metadata_->Initialize()) {
+    LOG(ERROR) << "Failed to initialize the DLC metadata.";
+    dlc_metadata_.reset();
+  }
 }
 
 bool ImageLoaderImpl::LoadComponent(const std::string& name,
@@ -117,8 +132,24 @@ std::string ImageLoaderImpl::LoadDlcImage(const std::string& id,
     return kBadResult;
   }
 
-  Dlc dlc(id, package, config_.mount_path);
+  Dlc dlc(id, package, config_.mount_path, dlc_metadata_);
   return dlc.Mount(proxy, a_or_b) ? dlc.GetMountPoint().value() : kBadResult;
+}
+
+std::string ImageLoaderImpl::LoadDlc(const LoadDlcRequest& request,
+                                     HelperProcessProxy* proxy) {
+  auto package = request.package();
+  if (package.empty())
+    package = kDefaultPackage;
+
+  if (!IsIdValid(request.id()) || !IsIdValid(request.package())) {
+    return kBadResult;
+  }
+
+  Dlc dlc(request.id(), request.package(), config_.mount_path, dlc_metadata_);
+  return dlc.Mount(proxy, base::FilePath(request.path()))
+             ? dlc.GetMountPoint().value()
+             : kBadResult;
 }
 
 std::string ImageLoaderImpl::LoadComponentAtPath(
@@ -200,7 +231,7 @@ bool ImageLoaderImpl::RemoveComponentAtPath(
   }
 
   // Remove the component (all versions) and latest-version file.
-  if (!base::DeletePathRecursively(component_root)) {
+  if (!brillo::DeletePathRecursively(component_root)) {
     LOG(ERROR) << "Failed to delete component.";
     return false;
   }
@@ -271,7 +302,7 @@ bool ImageLoaderImpl::RegisterComponent(
   // If |version_path| exists but was not the active version, ImageLoader
   // probably crashed previously and could not cleanup.
   if (base::PathExists(version_path)) {
-    base::DeletePathRecursively(version_path);
+    brillo::DeletePathRecursively(version_path);
   }
 
   if (mkdir(version_path.value().c_str(), kComponentDirPerms) != 0) {
@@ -280,20 +311,20 @@ bool ImageLoaderImpl::RegisterComponent(
   }
 
   if (!component->CopyTo(version_path)) {
-    base::DeletePathRecursively(version_path);
+    brillo::DeletePathRecursively(version_path);
     return false;
   }
 
   if (!base::ImportantFileWriter::WriteFileAtomically(version_hint_path,
                                                       version)) {
-    base::DeletePathRecursively(version_path);
+    brillo::DeletePathRecursively(version_path);
     LOG(ERROR) << "Failed to update current version hint file.";
     return false;
   }
 
   // Now delete the old component version, if there was one.
   if (have_old_version) {
-    base::DeletePathRecursively(GetVersionPath(name, old_version_hint));
+    brillo::DeletePathRecursively(GetVersionPath(name, old_version_hint));
   }
 
   return true;

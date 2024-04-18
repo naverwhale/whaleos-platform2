@@ -1,9 +1,10 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "cros-disks/sandboxed_process.h"
 
+#include <iostream>
 #include <utility>
 
 #include <stdlib.h>
@@ -12,23 +13,35 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/posix/safe_strerror.h>
 #include <chromeos/libminijail.h>
 
-#include "cros-disks/mount_options.h"
 #include "cros-disks/quote.h"
-#include "cros-disks/sandboxed_init.h"
 
 namespace cros_disks {
 namespace {
 
-int Exec(char* const args[], char* const env[]) {
+void SimulateProgressForTesting() {
+  PCHECK(signal(SIGTERM, SIG_IGN) != SIG_ERR);
+  for (int i = 0; i < 100; ++i) {
+    std::cerr << "Simulating progress " << i << "%" << std::endl;
+    usleep(100'000);
+  }
+  PCHECK(signal(SIGTERM, SIG_DFL) != SIG_ERR);
+}
+
+int Exec(char* const args[],
+         char* const env[],
+         const bool simulate_progress_for_testing) {
+  if (simulate_progress_for_testing)
+    SimulateProgressForTesting();
+
   const char* const path = args[0];
   execve(path, args, env);
   const int ret =
@@ -47,8 +60,8 @@ SandboxedProcess::~SandboxedProcess() {
   minijail_destroy(jail_);
 }
 
-void SandboxedProcess::LoadSeccompFilterPolicy(const std::string& policy_file) {
-  minijail_parse_seccomp_filters(jail_, policy_file.c_str());
+void SandboxedProcess::SetSeccompPolicy(const base::FilePath& file) {
+  minijail_parse_seccomp_filters(jail_, file.value().c_str());
   minijail_use_seccomp_filter(jail_);
 }
 
@@ -73,7 +86,8 @@ void SandboxedProcess::NewPidNamespace() {
   minijail_run_as_init(jail_);
   minijail_reset_signal_mask(jail_);
   minijail_reset_signal_handlers(jail_);
-  run_custom_init_ = true;
+  minijail_skip_remount_private(jail_);  // crbug.com/1008262
+  use_pid_namespace_ = true;
 }
 
 bool SandboxedProcess::SetUpMinimalMounts() {
@@ -125,10 +139,6 @@ void SandboxedProcess::NewNetworkNamespace() {
   minijail_namespace_net(jail_);
 }
 
-void SandboxedProcess::SkipRemountPrivate() {
-  minijail_skip_remount_private(jail_);
-}
-
 void SandboxedProcess::SetNoNewPrivileges() {
   minijail_no_new_privs(jail_);
 }
@@ -153,18 +163,14 @@ bool SandboxedProcess::AddToCgroup(const std::string& cgroup) {
   return minijail_add_to_cgroup(jail_, cgroup.c_str()) == 0;
 }
 
-void SandboxedProcess::CloseOpenFds() {
-  minijail_close_open_fds(jail_);
+void SandboxedProcess::PreserveFile(int fd) {
+  if (const int ret = minijail_preserve_fd(jail_, fd, fd)) {
+    LOG(FATAL) << "Cannot preserve file descriptor " << fd << ": "
+               << base::safe_strerror(-ret);
+  }
 }
 
-bool SandboxedProcess::PreserveFile(const base::File& file) {
-  return minijail_preserve_fd(jail_, file.GetPlatformFile(),
-                              file.GetPlatformFile()) == 0;
-}
-
-pid_t SandboxedProcess::StartImpl(base::ScopedFD in_fd,
-                                  base::ScopedFD out_fd,
-                                  base::ScopedFD err_fd) {
+pid_t SandboxedProcess::StartImpl(base::ScopedFD in_fd, base::ScopedFD out_fd) {
   char* const* const args = GetArguments();
   DCHECK(args && args[0]);
   char* const* const env = GetEnvironment();
@@ -172,38 +178,54 @@ pid_t SandboxedProcess::StartImpl(base::ScopedFD in_fd,
 
   pid_t child_pid = kInvalidProcessId;
 
-  if (!run_custom_init_) {
-    minijail_preserve_fd(jail_, in_fd.get(), STDIN_FILENO);
-    minijail_preserve_fd(jail_, out_fd.get(), STDOUT_FILENO);
-    minijail_preserve_fd(jail_, err_fd.get(), STDERR_FILENO);
+  minijail_close_open_fds(jail_);
 
-    const int ret = minijail_run_env_pid_pipes(
-        jail_, args[0], args, env, &child_pid, nullptr, nullptr, nullptr);
-    if (ret < 0) {
-      LOG(ERROR) << "Cannot start minijail process: "
-                 << base::safe_strerror(-ret);
+  // Set up stdin, stdout and stderr to be connected to the matching pipes in
+  // the jailed process.
+  CHECK_EQ(minijail_preserve_fd(jail_, in_fd.get(), STDIN_FILENO), 0);
+  CHECK_EQ(minijail_preserve_fd(jail_, out_fd.get(), STDOUT_FILENO), 0);
+  CHECK_EQ(minijail_preserve_fd(jail_, out_fd.get(), STDERR_FILENO), 0);
+
+  if (!use_pid_namespace_) {
+    if (const int ret = minijail_run_env_pid_pipes(
+            jail_, args[0], args, env, &child_pid, nullptr, nullptr, nullptr);
+        ret < 0) {
+      errno = -ret;
+      PLOG(ERROR) << "Cannot start minijail process";
       return kInvalidProcessId;
     }
   } else {
-    SandboxedInit init(std::move(in_fd), std::move(out_fd), std::move(err_fd),
-                       SubprocessPipe::Open(SubprocessPipe::kChildToParent,
-                                            &custom_init_control_fd_));
+    // The sandboxed process will run in a PID namespace.
+    PreserveFile(launcher_pipe_.child_fd.get());
 
-    // Create child process.
+    SubprocessPipe termination_pipe(SubprocessPipe::kParentToChild);
+    PreserveFile(termination_pipe.child_fd.get());
+
+    // Create child 'init' process in the PID namespace.
     child_pid = minijail_fork(jail_);
     if (child_pid < 0) {
-      LOG(ERROR) << "Cannot run minijail_fork: "
-                 << base::safe_strerror(-child_pid);
+      errno = -child_pid;
+      PLOG(ERROR) << "Cannot run minijail_fork";
       return kInvalidProcessId;
     }
 
     if (child_pid == 0) {
-      // In child process.
-      init.RunInsideSandboxNoReturn(base::BindOnce(Exec, args, env));
+      // In child 'init' process.
+      SandboxedInit(
+          base::BindOnce(Exec, args, env, simulate_progress_for_testing_),
+          std::move(launcher_pipe_.child_fd),
+          kill_pid_namespace_ ? std::move(termination_pipe.child_fd)
+                              : base::ScopedFD())
+          .Run();
       NOTREACHED();
     } else {
       // In parent process.
-      CHECK(base::SetNonBlocking(custom_init_control_fd_.get()));
+      PCHECK(base::SetNonBlocking(launcher_pipe_.parent_fd.get()));
+      launcher_pipe_.child_fd.reset();
+
+      DCHECK(!termination_fd_.is_valid());
+      termination_fd_ = std::move(termination_pipe.parent_fd);
+      DCHECK(termination_fd_.is_valid());
     }
   }
 
@@ -211,14 +233,17 @@ pid_t SandboxedProcess::StartImpl(base::ScopedFD in_fd,
 }
 
 int SandboxedProcess::WaitImpl() {
+  if (use_pid_namespace_) {
+    launcher_watch_.reset();
+    return SandboxedInit::WaitForLauncher(&launcher_pipe_.parent_fd);
+  }
+
   while (true) {
     const int status = minijail_wait(jail_);
-    if (status >= 0) {
+    if (status >= 0)
       return status;
-    }
 
-    const int err = -status;
-    if (err != EINTR) {
+    if (const int err = -status; err != EINTR) {
       LOG(ERROR) << "Cannot wait for process " << pid() << ": "
                  << base::safe_strerror(err);
       return MINIJAIL_ERR_INIT;
@@ -227,10 +252,11 @@ int SandboxedProcess::WaitImpl() {
 }
 
 int SandboxedProcess::WaitNonBlockingImpl() {
-  int exit_code;
-
-  if (run_custom_init_ &&
-      SandboxedInit::PollLauncherStatus(&custom_init_control_fd_, &exit_code)) {
+  if (use_pid_namespace_) {
+    const int exit_code =
+        SandboxedInit::PollLauncher(&launcher_pipe_.parent_fd);
+    if (exit_code >= 0)
+      launcher_watch_.reset();
     return exit_code;
   }
 
@@ -248,7 +274,20 @@ int SandboxedProcess::WaitNonBlockingImpl() {
     return -1;
   }
 
-  return SandboxedInit::WStatusToStatus(wstatus);
+  return SandboxedInit::WaitStatusToExitCode(wstatus);
+}
+
+bool SandboxedProcess::KillPidNamespace() {
+  if (!termination_fd_.is_valid())
+    return false;
+
+  DCHECK(kill_pid_namespace_);
+
+  // Closing termination_fd_ will eventually cause the termination of the 'init'
+  // process of the PID namespace.
+  termination_fd_.reset();
+  LOG(INFO) << "Requested termination of " << quote(GetProgramName());
+  return true;
 }
 
 int FakeSandboxedProcess::OnProcessLaunch(
@@ -256,9 +295,7 @@ int FakeSandboxedProcess::OnProcessLaunch(
   return 0;
 }
 
-pid_t FakeSandboxedProcess::StartImpl(base::ScopedFD,
-                                      base::ScopedFD,
-                                      base::ScopedFD) {
+pid_t FakeSandboxedProcess::StartImpl(base::ScopedFD, base::ScopedFD) {
   DCHECK(!ret_code_);
   ret_code_ = OnProcessLaunch(arguments());
   return 42;

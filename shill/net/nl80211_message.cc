@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -24,10 +24,9 @@
 
 #include "shill/net/nl80211_message.h"
 
-#include <iomanip>
 #include <limits>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 #include <endian.h>
@@ -70,20 +69,20 @@ bool Nl80211Message::InitFromPacket(NetlinkPacket* packet,
   }
 
   return packet->ConsumeAttributes(
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId, context),
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          context),
       attributes_);
 }
 
-Nl80211Frame::Nl80211Frame(const ByteString& raw_frame)
+Nl80211Frame::Nl80211Frame(base::span<const uint8_t> raw_frame)
     : frame_type_(kIllegalFrameType),
       reason_(std::numeric_limits<uint16_t>::max()),
       status_(std::numeric_limits<uint16_t>::max()),
-      frame_(raw_frame) {
+      frame_({std::begin(raw_frame), std::end(raw_frame)}) {
   const IEEE_80211::ieee80211_frame* frame =
-      reinterpret_cast<const IEEE_80211::ieee80211_frame*>(
-          frame_.GetConstData());
+      reinterpret_cast<const IEEE_80211::ieee80211_frame*>(frame_.data());
 
-  if (frame_.GetLength() < sizeof(frame->hdr))
+  if (frame_.size() < sizeof(frame->hdr))
     return;
 
   mac_from_ =
@@ -96,7 +95,7 @@ Nl80211Frame::Nl80211Frame(const ByteString& raw_frame)
   switch (frame_type_) {
     case kAssocResponseFrameType:
     case kReassocResponseFrameType:
-      if (frame_.GetLength() <
+      if (frame_.size() <
           sizeof(frame->hdr) + sizeof(frame->associate_response)) {
         frame_type_ = kIllegalFrameType;
         break;
@@ -105,7 +104,7 @@ Nl80211Frame::Nl80211Frame(const ByteString& raw_frame)
       break;
 
     case kAuthFrameType:
-      if (frame_.GetLength() <
+      if (frame_.size() <
           sizeof(frame->hdr) + sizeof(frame->authentiate_message)) {
         frame_type_ = kIllegalFrameType;
         break;
@@ -115,7 +114,7 @@ Nl80211Frame::Nl80211Frame(const ByteString& raw_frame)
 
     case kDisassocFrameType:
     case kDeauthFrameType:
-      if (frame_.GetLength() <
+      if (frame_.size() <
           sizeof(frame->hdr) + sizeof(frame->deauthentiate_message)) {
         frame_type_ = kIllegalFrameType;
         break;
@@ -129,12 +128,12 @@ Nl80211Frame::Nl80211Frame(const ByteString& raw_frame)
 }
 
 std::string Nl80211Frame::ToString() const {
-  if (frame_.IsEmpty()) {
+  if (frame_.empty()) {
     return "[no frame]";
   }
 
   std::string output;
-  if (frame_.GetLength() < sizeof(IEEE_80211::ieee80211_frame().hdr)) {
+  if (frame_.size() < sizeof(IEEE_80211::ieee80211_frame().hdr)) {
     output.append("[invalid frame: ");
   } else {
     base::StringAppendF(&output, "%s -> %s", mac_from_.c_str(),
@@ -184,8 +183,8 @@ std::string Nl80211Frame::ToString() const {
     output.append(" [frame: ");
   }
 
-  const unsigned char* frame = frame_.GetConstData();
-  for (size_t i = 0; i < frame_.GetLength(); ++i) {
+  const unsigned char* frame = frame_.data();
+  for (size_t i = 0; i < frame_.size(); ++i) {
     base::StringAppendF(&output, "%02x, ", frame[i]);
   }
   output.append("]");
@@ -194,7 +193,7 @@ std::string Nl80211Frame::ToString() const {
 }
 
 bool Nl80211Frame::IsEqual(const Nl80211Frame& other) const {
-  return frame_.Equals(other.frame_);
+  return frame_ == other.frame_;
 }
 
 //
@@ -225,6 +224,9 @@ const char DelInterfaceMessage::kCommandString[] = "NL80211_CMD_DEL_INTERFACE";
 const uint8_t DeleteStationMessage::kCommand = NL80211_CMD_DEL_STATION;
 const char DeleteStationMessage::kCommandString[] = "NL80211_CMD_DEL_STATION";
 
+const uint8_t DelWiphyMessage::kCommand = NL80211_CMD_DEL_WIPHY;
+const char DelWiphyMessage::kCommandString[] = "NL80211_CMD_DEL_WIPHY";
+
 const uint8_t DisassociateMessage::kCommand = NL80211_CMD_DISASSOCIATE;
 const char DisassociateMessage::kCommandString[] = "NL80211_CMD_DISASSOCIATE";
 
@@ -241,8 +243,21 @@ const char GetRegMessage::kCommandString[] = "NL80211_CMD_GET_REG";
 GetRegMessage::GetRegMessage() : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_WIPHY,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
+}
+
+const uint8_t ReqSetRegMessage::kCommand = NL80211_CMD_REQ_SET_REG;
+const char ReqSetRegMessage::kCommandString[] = "NL80211_CMD_REQ_SET_REG";
+
+ReqSetRegMessage::ReqSetRegMessage()
+    : Nl80211Message(kCommand, kCommandString) {
+  attributes()->CreateU32Attribute(NL80211_ATTR_USER_REG_HINT_TYPE,
+                                   "NL80211_ATTR_USER_REG_HINT_TYPE");
+  attributes()->CreateAttribute(
+      NL80211_ATTR_REG_ALPHA2,
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t GetStationMessage::kCommand = NL80211_CMD_GET_STATION;
@@ -252,11 +267,12 @@ GetStationMessage::GetStationMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
   attributes()->CreateAttribute(
-      NL80211_ATTR_MAC, base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                                   NetlinkMessage::MessageContext()));
+      NL80211_ATTR_MAC,
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t SetWakeOnWiFiMessage::kCommand = NL80211_CMD_SET_WOWLAN;
@@ -271,10 +287,14 @@ const char GetWiphyMessage::kCommandString[] = "NL80211_CMD_GET_WIPHY";
 GetWiphyMessage::GetWiphyMessage() : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
   attributes()->CreateFlagAttribute(NL80211_ATTR_SPLIT_WIPHY_DUMP,
                                     "Split wiphy dump");
+  attributes()->CreateAttribute(
+      NL80211_ATTR_WIPHY,
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t JoinIbssMessage::kCommand = NL80211_CMD_JOIN_IBSS;
@@ -313,15 +333,16 @@ ProbeMeshLinkMessage::ProbeMeshLinkMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
   attributes()->CreateAttribute(
-      NL80211_ATTR_MAC, base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                                   NetlinkMessage::MessageContext()));
+      NL80211_ATTR_MAC,
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
   attributes()->CreateAttribute(
       NL80211_ATTR_FRAME,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t RegBeaconHintMessage::kCommand = NL80211_CMD_REG_BEACON_HINT;
@@ -335,8 +356,8 @@ RegChangeMessage::RegChangeMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t RemainOnChannelMessage::kCommand = NL80211_CMD_REMAIN_ON_CHANNEL;
@@ -355,8 +376,8 @@ const char GetScanMessage::kCommandString[] = "NL80211_CMD_GET_SCAN";
 GetScanMessage::GetScanMessage() : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t TriggerScanMessage::kCommand = NL80211_CMD_TRIGGER_SCAN;
@@ -366,8 +387,8 @@ TriggerScanMessage::TriggerScanMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t UnprotDeauthenticateMessage::kCommand =
@@ -388,16 +409,16 @@ WiphyRegChangeMessage::WiphyRegChangeMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 GetInterfaceMessage::GetInterfaceMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t GetInterfaceMessage::kCommand = NL80211_CMD_GET_INTERFACE;
@@ -413,8 +434,8 @@ GetSurveyMessage::GetSurveyMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
   AddFlag(NLM_F_DUMP);
 }
 
@@ -429,11 +450,12 @@ GetMeshPathInfoMessage::GetMeshPathInfoMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
   attributes()->CreateAttribute(
-      NL80211_ATTR_MAC, base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                                   NetlinkMessage::MessageContext()));
+      NL80211_ATTR_MAC,
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
 
 const uint8_t GetMeshProxyPathMessage::kCommand = NL80211_CMD_GET_MPP;
@@ -443,12 +465,23 @@ GetMeshProxyPathMessage::GetMeshProxyPathMessage()
     : Nl80211Message(kCommand, kCommandString) {
   attributes()->CreateAttribute(
       NL80211_ATTR_IFINDEX,
-      base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                 NetlinkMessage::MessageContext()));
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
   attributes()->CreateAttribute(
-      NL80211_ATTR_MAC, base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId,
-                                   NetlinkMessage::MessageContext()));
+      NL80211_ATTR_MAC,
+      base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                          NetlinkMessage::MessageContext()));
 }
+
+const uint8_t NewPeerCandidateMessage::kCommand =
+    NL80211_CMD_NEW_PEER_CANDIDATE;
+const char NewPeerCandidateMessage::kCommandString[] =
+    "NL80211_CMD_NEW_PEER_CANDIDATE";
+
+const uint8_t ControlPortFrameTxStatusMessage::kCommand =
+    NL80211_CMD_CONTROL_PORT_FRAME_TX_STATUS;
+const char ControlPortFrameTxStatusMessage::kCommandString[] =
+    "NL80211_CMD_CONTROL_PORT_FRAME_TX_STATUS";
 
 // static
 std::unique_ptr<NetlinkMessage> Nl80211Message::CreateMessage(
@@ -472,6 +505,8 @@ std::unique_ptr<NetlinkMessage> Nl80211Message::CreateMessage(
       return std::make_unique<DeauthenticateMessage>();
     case DelInterfaceMessage::kCommand:
       return std::make_unique<DelInterfaceMessage>();
+    case DelWiphyMessage::kCommand:
+      return std::make_unique<DelWiphyMessage>();
     case DeleteStationMessage::kCommand:
       return std::make_unique<DeleteStationMessage>();
     case DisassociateMessage::kCommand:
@@ -538,6 +573,10 @@ std::unique_ptr<NetlinkMessage> Nl80211Message::CreateMessage(
       return std::make_unique<GetMeshPathInfoMessage>();
     case GetMeshProxyPathMessage::kCommand:
       return std::make_unique<GetMeshProxyPathMessage>();
+    case NewPeerCandidateMessage::kCommand:
+      return std::make_unique<NewPeerCandidateMessage>();
+    case ControlPortFrameTxStatusMessage::kCommand:
+      return std::make_unique<ControlPortFrameTxStatusMessage>();
     default:
       LOG(WARNING) << base::StringPrintf(
           "Unknown/unhandled netlink nl80211 message 0x%02x", header.cmd);

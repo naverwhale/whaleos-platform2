@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Chromium OS Authors. All rights reserved.
+ * Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -18,6 +18,7 @@
 #include <hardware/camera3.h>
 #include <time.h>
 
+#include <base/files/scoped_file.h>
 #include <base/synchronization/lock.h>
 #include <base/threading/thread.h>
 #include <camera/camera_metadata.h>
@@ -25,6 +26,7 @@
 
 #include "common/camera_hal3_helpers.h"
 #include "common/utils/common_types.h"
+#include "common/vendor_tag_manager.h"
 #include "cros-camera/camera_buffer_manager.h"
 
 namespace cros {
@@ -36,7 +38,14 @@ class ZslHelperTest;
 
 }  // namespace tests
 
-const int GRALLOC_USAGE_STILL_CAPTURE = GRALLOC_USAGE_PRIVATE_1;
+constexpr int GRALLOC_USAGE_STILL_CAPTURE = GRALLOC_USAGE_PRIVATE_1;
+
+// Vendor tag to indicate whether CrOS ZSL can be attempted. The tag is set in
+// each (camera_id, client_type) static camera metadata to communicate the ZSL
+// attemptable status to the corresponding ZslStreamManipulator instances
+constexpr char kCrosZslVendorTagSectionName[] = "com.google.cros_zsl";
+constexpr char kCrosZslVendorTagCanAttemptName[] = "crosZslCanAttempt";
+constexpr uint32_t kCrosZslVendorTagCanAttempt = kCrosZslVendorTagStart;
 
 struct ZslBuffer {
  public:
@@ -176,11 +185,8 @@ class ZslHelper {
   // delete_entry is true.
   bool IsZslRequested(const Camera3CaptureDescriptor* settings);
 
-  // Whether this buffer belongs to an attached ZSL request.
-  bool IsAttachedZslBuffer(const camera3_stream_buffer_t* buffer);
-
   // Whether this buffer belongs to a transformed ZSL request.
-  bool IsTransformedZslBuffer(const camera3_stream_buffer_t* buffer);
+  bool IsTransformedZslBuffer(const Camera3StreamBuffer& buffer);
 
   // See if the oldest buffers can be released back to buffer pool.
   void TryReleaseBuffer();
@@ -196,13 +202,13 @@ class ZslHelper {
   // is called after the attached buffer for |frame_number| is returned. After
   // |release_fence| is signalled, we'll mark the corresponding ZSL buffer as
   // ready.
-  void WaitAttachedFrame(uint32_t frame_number, int release_fence);
+  void WaitAttachedFrame(uint32_t frame_number, base::ScopedFD release_fence);
   void WaitAttachedFrameOnFenceSyncThread(uint32_t frame_number,
-                                          int release_fence);
+                                          base::ScopedFD release_fence);
 
   // Releases this stream buffer and the buffer handle underneath.
-  void ReleaseStreamBuffer(camera3_stream_buffer_t buffer);
-  void ReleaseStreamBufferOnFenceSyncThread(camera3_stream_buffer_t buffer);
+  void ReleaseStreamBuffer(std::optional<Camera3StreamBuffer> buffer);
+  void ReleaseStreamBufferOnFenceSyncThread(Camera3StreamBuffer buffer);
 
   // Whether capability is supported.
   bool IsCapabilitySupported(const camera_metadata_t* static_info,
@@ -250,7 +256,7 @@ class ZslHelper {
   // Lock to protect |ring_buffer_|.
   base::Lock ring_buffer_lock_;
 
-  // A thread that asynchornously waits for release fences and releases buffers
+  // A thread that asynchronously waits for release fences and releases buffers
   // to ZSL Buffer Manager.
   base::Thread fence_sync_thread_;
 
@@ -267,9 +273,12 @@ class ZslHelper {
   int64_t override_current_timestamp_for_testing_;
 };
 
+// Adds the CrOS ZSL vendor tags.
+bool AddVendorTags(VendorTagManager& vendor_tag_manager);
+
 // Updates the static metadata of the camera device if we can attempt to
 // enable our in-house ZSL solution for it.
-bool CROS_CAMERA_EXPORT TryAddEnableZslKey(android::CameraMetadata* metadata);
+bool TryAddEnableZslKey(android::CameraMetadata* metadata);
 
 }  // namespace cros
 

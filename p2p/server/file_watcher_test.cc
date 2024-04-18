@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,9 +19,9 @@
 #include <tuple>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/command_line.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 #include <base/threading/simple_thread.h>
@@ -32,7 +32,7 @@
 
 using std::vector;
 
-using base::Bind;
+using base::BindRepeating;
 using base::FilePath;
 using base::Unretained;
 
@@ -54,7 +54,7 @@ class FileWatcherListener {
  public:
   explicit FileWatcherListener(FileWatcher* file_watcher) {
     file_watcher->SetChangedCallback(
-        Bind(&FileWatcherListener::OnChanged, Unretained(this)));
+        BindRepeating(&FileWatcherListener::OnChanged, Unretained(this)));
   }
   FileWatcherListener(const FileWatcherListener&) = delete;
   FileWatcherListener& operator=(const FileWatcherListener&) = delete;
@@ -115,8 +115,8 @@ TEST(FileWatcher, TouchNonExisting) {
   // At this point, all the events should be generated, but the directory
   // watcher could be implemented using polling.
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 2 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 2 /* num_calls */));
 
   {
     vector<FilePath> expected_files;
@@ -148,8 +148,8 @@ TEST(FileWatcher, TouchExisting) {
   EXPECT_COMMAND(0, "touch %s", testdir.Append("existing.p2p").value().c_str());
 
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 1 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 1 /* num_calls */));
 
   {
     vector<FilePath> expected_files;
@@ -181,8 +181,8 @@ TEST(FileWatcher, CreateFile) {
                  testdir.Append("new-file.p2p").value().c_str());
 
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 2 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 2 /* num_calls */));
 
   {
     vector<FilePath> expected_files;
@@ -214,8 +214,8 @@ TEST(FileWatcher, AppendToFile) {
                  testdir.Append("existing.p2p").value().c_str());
 
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 1 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 1 /* num_calls */));
 
   {
     vector<FilePath> expected_files;
@@ -247,8 +247,8 @@ TEST(FileWatcher, RemoveFile) {
   EXPECT_COMMAND(0, "rm -f %s", testdir.Append("file.p2p").value().c_str());
 
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 1 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 1 /* num_calls */));
 
   {
     vector<FilePath> expected_files;
@@ -283,8 +283,8 @@ TEST(FileWatcher, RenameInto) {
   EXPECT_EQ(rc, 0);
 
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 1 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 1 /* num_calls */));
 
   {
     vector<FilePath> expected_files;
@@ -318,8 +318,8 @@ TEST(FileWatcher, RenameAway) {
                   testdir.Append("foo.p2p.tmp").value().c_str());
   EXPECT_EQ(rc, 0);
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 1 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 1 /* num_calls */));
 
   {
     vector<FilePath> expected_files;
@@ -355,8 +355,8 @@ TEST(FileWatcher, ExistingFiles) {
   EXPECT_COMMAND(0, "touch %s", testdir.Append("4.p2p").value().c_str());
 
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 2 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 2 /* num_calls */));
 
   {
     vector<FilePath> expected_files;
@@ -389,8 +389,8 @@ TEST(FileWatcher, ActivityOnNonMatchingFiles) {
   EXPECT_COMMAND(0, "touch %s", testdir.Append("match.p2p").value().c_str());
 
   RunGMainLoopUntil(kDefaultMainLoopTimeoutMs,
-                    Bind(&MockFileWatcherListener::NumCallsReached,
-                         Unretained(&listener), 2 /* num_calls */));
+                    BindRepeating(&MockFileWatcherListener::NumCallsReached,
+                                  Unretained(&listener), 2 /* num_calls */));
   delete watcher;
   TeardownTestDir(testdir);
 }

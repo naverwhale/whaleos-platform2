@@ -1,8 +1,8 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "sommelier.h"  // NOLINT(build/include_directory)
+#include "sommelier.h"          // NOLINT(build/include_directory)
 #include "sommelier-tracing.h"  // NOLINT(build/include_directory)
 
 #include <assert.h>
@@ -10,188 +10,56 @@
 #include <wayland-client.h>
 
 struct sl_host_shell_surface {
+  struct sl_context* ctx;
   struct wl_resource* resource;
   struct wl_shell_surface* proxy;
 };
+MAP_STRUCTS(wl_shell_surface, sl_host_shell_surface);
 
 struct sl_host_shell {
+  struct sl_context* ctx;
   struct sl_shell* shell;
   struct wl_resource* resource;
   struct wl_shell* proxy;
 };
 
-static void sl_shell_surface_pong(struct wl_client* client,
-                                  struct wl_resource* resource,
-                                  uint32_t serial) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-
-  wl_shell_surface_pong(host->proxy, serial);
-}
-
-static void sl_shell_surface_move(struct wl_client* client,
-                                  struct wl_resource* resource,
-                                  struct wl_resource* seat_resource,
-                                  uint32_t serial) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-  struct sl_host_seat* host_seat =
-      static_cast<sl_host_seat*>(wl_resource_get_user_data(seat_resource));
-
-  wl_shell_surface_move(host->proxy, host_seat->proxy, serial);
-}  // NOLINT(whitespace/indent)
-
-static void sl_shell_surface_resize(struct wl_client* client,
-                                    struct wl_resource* resource,
-                                    struct wl_resource* seat_resource,
-                                    uint32_t serial,
-                                    uint32_t edges) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-  struct sl_host_seat* host_seat =
-      static_cast<sl_host_seat*>(wl_resource_get_user_data(seat_resource));
-
-  wl_shell_surface_resize(host->proxy, host_seat->proxy, serial, edges);
-}  // NOLINT(whitespace/indent)
-
-static void sl_shell_surface_set_toplevel(struct wl_client* client,
-                                          struct wl_resource* resource) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-
-  wl_shell_surface_set_toplevel(host->proxy);
-}
-
-static void sl_shell_surface_set_transient(struct wl_client* client,
-                                           struct wl_resource* resource,
-                                           struct wl_resource* parent_resource,
-                                           int32_t x,
-                                           int32_t y,
-                                           uint32_t flags) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-  struct sl_host_surface* host_parent =
-      static_cast<sl_host_surface*>(wl_resource_get_user_data(parent_resource));
-
-  wl_shell_surface_set_transient(host->proxy, host_parent->proxy, x, y, flags);
-}  // NOLINT(whitespace/indent)
-
-static void sl_shell_surface_set_fullscreen(
-    struct wl_client* client,
-    struct wl_resource* resource,
-    uint32_t method,
-    uint32_t framerate,
-    struct wl_resource* output_resource) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-  struct sl_host_output* host_output =
-      output_resource ? static_cast<sl_host_output*>(
-                            wl_resource_get_user_data(output_resource))
-                      : NULL;
-
-  wl_shell_surface_set_fullscreen(host->proxy, method, framerate,
-                                  host_output ? host_output->proxy : NULL);
-}  // NOLINT(whitespace/indent)
-
-static void sl_shell_surface_set_popup(struct wl_client* client,
-                                       struct wl_resource* resource,
-                                       struct wl_resource* seat_resource,
-                                       uint32_t serial,
-                                       struct wl_resource* parent_resource,
-                                       int32_t x,
-                                       int32_t y,
-                                       uint32_t flags) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-  struct sl_host_seat* host_seat =
-      static_cast<sl_host_seat*>(wl_resource_get_user_data(seat_resource));
-  struct sl_host_surface* host_parent =
-      static_cast<sl_host_surface*>(wl_resource_get_user_data(parent_resource));
-
-  wl_shell_surface_set_popup(host->proxy, host_seat->proxy, serial,
-                             host_parent->proxy, x, y, flags);
-}  // NOLINT(whitespace/indent)
-
-static void sl_shell_surface_set_maximized(
-    struct wl_client* client,
-    struct wl_resource* resource,
-    struct wl_resource* output_resource) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-  struct sl_host_output* host_output =
-      output_resource ? static_cast<sl_host_output*>(
-                            wl_resource_get_user_data(output_resource))
-                      : NULL;
-
-  wl_shell_surface_set_maximized(host->proxy,
-                                 host_output ? host_output->proxy : NULL);
-}  // NOLINT(whitespace/indent)
-
-static void sl_shell_surface_set_title(struct wl_client* client,
-                                       struct wl_resource* resource,
-                                       const char* title) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-
-  wl_shell_surface_set_title(host->proxy, title);
-}
-
-static void sl_shell_surface_set_class(struct wl_client* client,
-                                       struct wl_resource* resource,
+static void sl_shell_surface_set_class(struct wl_client* wl_client,
+                                       struct wl_resource* wl_resource,
                                        const char* clazz) {
-  struct sl_host_shell_surface* host =
-      static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
-
-  wl_shell_surface_set_class(host->proxy, clazz);
+  struct sl_host_shell_surface* host = static_cast<sl_host_shell_surface*>(
+      wl_resource_get_user_data(wl_resource));
+  char* application_id_str = sl_xasprintf(NATIVE_WAYLAND_APPLICATION_ID_FORMAT,
+                                          host->ctx->vm_id, clazz);
+  wl_shell_surface_set_class(host->proxy, application_id_str);
 }
 
 static const struct wl_shell_surface_interface sl_shell_surface_implementation =
-    {sl_shell_surface_pong,          sl_shell_surface_move,
-     sl_shell_surface_resize,        sl_shell_surface_set_toplevel,
-     sl_shell_surface_set_transient, sl_shell_surface_set_fullscreen,
-     sl_shell_surface_set_popup,     sl_shell_surface_set_maximized,
-     sl_shell_surface_set_title,     sl_shell_surface_set_class};
-
-static void sl_shell_surface_ping(void* data,
-                                  struct wl_shell_surface* shell_surface,
-                                  uint32_t serial) {
-  struct sl_host_shell_surface* host = static_cast<sl_host_shell_surface*>(
-      wl_shell_surface_get_user_data(shell_surface));
-
-  wl_shell_surface_send_ping(host->resource, serial);
-}
-
-static void sl_shell_surface_configure(void* data,
-                                       struct wl_shell_surface* shell_surface,
-                                       uint32_t edges,
-                                       int32_t width,
-                                       int32_t height) {
-  TRACE_EVENT("shell", "sl_shell_surface_configure");
-  struct sl_host_shell_surface* host = static_cast<sl_host_shell_surface*>(
-      wl_shell_surface_get_user_data(shell_surface));
-
-  wl_shell_surface_send_configure(host->resource, edges, width, height);
-}
-
-static void sl_shell_surface_popup_done(
-    void* data, struct wl_shell_surface* shell_surface) {
-  struct sl_host_shell_surface* host = static_cast<sl_host_shell_surface*>(
-      wl_shell_surface_get_user_data(shell_surface));
-
-  wl_shell_surface_send_popup_done(host->resource);
-}
+    {
+        ForwardRequest<wl_shell_surface_pong>,
+        ForwardRequest<wl_shell_surface_move>,
+        ForwardRequest<wl_shell_surface_resize>,
+        ForwardRequest<wl_shell_surface_set_toplevel>,
+        ForwardRequest<wl_shell_surface_set_transient>,
+        ForwardRequest<wl_shell_surface_set_fullscreen,
+                       AllowNullResource::kYes>,
+        ForwardRequest<wl_shell_surface_set_popup>,
+        ForwardRequest<wl_shell_surface_set_maximized, AllowNullResource::kYes>,
+        ForwardRequest<wl_shell_surface_set_title>,
+        sl_shell_surface_set_class,
+};
 
 static const struct wl_shell_surface_listener sl_shell_surface_listener = {
-    sl_shell_surface_ping, sl_shell_surface_configure,
-    sl_shell_surface_popup_done};
+    ForwardEvent<wl_shell_surface_send_ping>,
+    ForwardEvent<wl_shell_surface_send_configure>,
+    ForwardEvent<wl_shell_surface_send_popup_done>};
 
 static void sl_destroy_host_shell_surface(struct wl_resource* resource) {
   struct sl_host_shell_surface* host =
       static_cast<sl_host_shell_surface*>(wl_resource_get_user_data(resource));
 
   wl_shell_surface_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_host_shell_get_shell_surface(
@@ -204,8 +72,9 @@ static void sl_host_shell_get_shell_surface(
   struct sl_host_surface* host_surface = static_cast<sl_host_surface*>(
       wl_resource_get_user_data(surface_resource));
   struct sl_host_shell_surface* host_shell_surface =
-      static_cast<sl_host_shell_surface*>(malloc(sizeof(*host_shell_surface)));
-  assert(host_shell_surface);
+      new sl_host_shell_surface();
+
+  host_shell_surface->ctx = host->ctx;
   host_shell_surface->resource =
       wl_resource_create(client, &wl_shell_surface_interface, 1, id);
   wl_resource_set_implementation(
@@ -213,11 +82,10 @@ static void sl_host_shell_get_shell_surface(
       host_shell_surface, sl_destroy_host_shell_surface);
   host_shell_surface->proxy =
       wl_shell_get_shell_surface(host->proxy, host_surface->proxy);
-  wl_shell_surface_set_user_data(host_shell_surface->proxy, host_shell_surface);
   wl_shell_surface_add_listener(host_shell_surface->proxy,
                                 &sl_shell_surface_listener, host_shell_surface);
   host_surface->has_role = 1;
-}  // NOLINT(whitespace/indent)
+}
 
 static const struct wl_shell_interface sl_shell_implementation = {
     sl_host_shell_get_shell_surface};
@@ -227,8 +95,8 @@ static void sl_destroy_host_shell(struct wl_resource* resource) {
       static_cast<sl_host_shell*>(wl_resource_get_user_data(resource));
 
   wl_shell_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_bind_host_shell(struct wl_client* client,
@@ -236,9 +104,9 @@ static void sl_bind_host_shell(struct wl_client* client,
                                uint32_t version,
                                uint32_t id) {
   struct sl_context* ctx = (struct sl_context*)data;
-  struct sl_host_shell* host =
-      static_cast<sl_host_shell*>(malloc(sizeof(*host)));
+  struct sl_host_shell* host = new sl_host_shell();
   assert(host);
+  host->ctx = ctx;
   host->shell = ctx->shell;
   host->resource = wl_resource_create(client, &wl_shell_interface, 1, id);
   wl_resource_set_implementation(host->resource, &sl_shell_implementation, host,

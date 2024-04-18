@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,13 +14,15 @@
 
 #include "rmad/state_handler/state_handler_test_common.h"
 #include "rmad/state_handler/write_protect_enable_physical_state_handler.h"
-#include "rmad/utils/mock_crossystem_utils.h"
+#include "rmad/utils/mock_write_protect_utils.h"
 
 using testing::_;
 using testing::Assign;
 using testing::DoAll;
+using testing::Eq;
 using testing::InSequence;
 using testing::IsTrue;
+using testing::NiceMock;
 using testing::Return;
 using testing::SetArgPointee;
 using testing::StrictMock;
@@ -32,29 +34,37 @@ class WriteProtectEnablePhysicalStateHandlerTest : public StateHandlerTest {
   // Helper class to mock the callback function to send signal.
   class SignalSender {
    public:
-    MOCK_METHOD(bool, SendHardwareWriteProtectSignal, (bool), (const));
+    MOCK_METHOD(void, SendHardwareWriteProtectSignal, (bool), (const));
+  };
+
+  struct StateHandlerArgs {
+    std::vector<bool> wp_status_list = {};
+    bool enable_swwp_succeeded = true;
   };
 
   scoped_refptr<WriteProtectEnablePhysicalStateHandler> CreateStateHandler(
-      const std::vector<int> wp_status_list) {
-    // Mock |CrosSystemUtils|.
-    auto mock_crossystem_utils =
-        std::make_unique<StrictMock<MockCrosSystemUtils>>();
+      const StateHandlerArgs& args) {
+    // Mock |WriteProtectUtils|.
+    auto mock_write_protect_utils =
+        std::make_unique<StrictMock<MockWriteProtectUtils>>();
     {
       InSequence seq;
-      for (int i = 0; i < wp_status_list.size(); ++i) {
-        EXPECT_CALL(*mock_crossystem_utils, GetInt(_, _))
-            .WillOnce(DoAll(SetArgPointee<1>(wp_status_list[i]), Return(true)));
+      for (bool enabled : args.wp_status_list) {
+        EXPECT_CALL(*mock_write_protect_utils,
+                    GetHardwareWriteProtectionStatus(_))
+            .WillOnce(DoAll(SetArgPointee<0, bool>(enabled), Return(true)));
       }
     }
+    EXPECT_CALL(*mock_write_protect_utils, EnableSoftwareWriteProtection())
+        .WillRepeatedly(Return(args.enable_swwp_succeeded));
 
-    auto handler = base::MakeRefCounted<WriteProtectEnablePhysicalStateHandler>(
-        json_store_, std::move(mock_crossystem_utils));
-    auto callback = std::make_unique<base::RepeatingCallback<bool(bool)>>(
+    // Register signal callback.
+    daemon_callback_->SetWriteProtectSignalCallback(
         base::BindRepeating(&SignalSender::SendHardwareWriteProtectSignal,
                             base::Unretained(&signal_sender_)));
-    handler->RegisterSignalSender(std::move(callback));
-    return handler;
+
+    return base::MakeRefCounted<WriteProtectEnablePhysicalStateHandler>(
+        json_store_, daemon_callback_, std::move(mock_write_protect_utils));
   }
 
  protected:
@@ -65,13 +75,19 @@ class WriteProtectEnablePhysicalStateHandlerTest : public StateHandlerTest {
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 };
 
-TEST_F(WriteProtectEnablePhysicalStateHandlerTest, InitializeState_Success) {
+TEST_F(WriteProtectEnablePhysicalStateHandlerTest, InitializeState_Succeeded) {
   auto handler = CreateStateHandler({});
   EXPECT_EQ(handler->InitializeState(), RMAD_ERROR_OK);
 }
 
-TEST_F(WriteProtectEnablePhysicalStateHandlerTest, GetNextStateCase_Success) {
-  auto handler = CreateStateHandler({1});
+TEST_F(WriteProtectEnablePhysicalStateHandlerTest, InitializeState_Fail) {
+  auto handler = CreateStateHandler({.enable_swwp_succeeded = false});
+  EXPECT_EQ(handler->InitializeState(),
+            RMAD_ERROR_STATE_HANDLER_INITIALIZATION_FAILED);
+}
+
+TEST_F(WriteProtectEnablePhysicalStateHandlerTest, GetNextStateCase_Succeeded) {
+  auto handler = CreateStateHandler({.wp_status_list = {true}});
   EXPECT_EQ(handler->InitializeState(), RMAD_ERROR_OK);
 
   RmadState state;
@@ -96,30 +112,32 @@ TEST_F(WriteProtectEnablePhysicalStateHandlerTest,
 }
 
 TEST_F(WriteProtectEnablePhysicalStateHandlerTest, GetNextStateCase_Wait) {
-  auto handler = CreateStateHandler({0, 0, 0, 1});
+  auto handler =
+      CreateStateHandler({.wp_status_list = {false, false, false, true}});
   EXPECT_EQ(handler->InitializeState(), RMAD_ERROR_OK);
+  handler->RunState();
 
   RmadState state;
   state.set_allocated_wp_enable_physical(new WriteProtectEnablePhysicalState);
 
-  // First call to |mock_crossystem_utils_|, get 0.
+  // First call to |mock_write_protect_utils_|, get 0.
   auto [error, state_case] = handler->GetNextStateCase(state);
   EXPECT_EQ(error, RMAD_ERROR_WAIT);
   EXPECT_EQ(state_case, RmadState::StateCase::kWpEnablePhysical);
 
   bool signal_sent = false;
   EXPECT_CALL(signal_sender_, SendHardwareWriteProtectSignal(IsTrue()))
-      .WillOnce(DoAll(Assign(&signal_sent, true), Return(true)));
+      .WillOnce(Assign(&signal_sent, true));
 
-  // Second call to |mock_crossystem_utils_| during polling, get 0.
+  // Second call to |mock_write_protect_utils_| during polling, get 0.
   task_environment_.FastForwardBy(
       WriteProtectEnablePhysicalStateHandler::kPollInterval);
   EXPECT_FALSE(signal_sent);
-  // Third call to |mock_crossystem_utils_| during polling, get 0.
+  // Third call to |mock_write_protect_utils_| during polling, get 0.
   task_environment_.FastForwardBy(
       WriteProtectEnablePhysicalStateHandler::kPollInterval);
   EXPECT_FALSE(signal_sent);
-  // Forth call to |mock_crossystem_utils_| during polling, get 1.
+  // Forth call to |mock_write_protect_utils_| during polling, get 1.
   task_environment_.FastForwardBy(
       WriteProtectEnablePhysicalStateHandler::kPollInterval);
   EXPECT_TRUE(signal_sent);

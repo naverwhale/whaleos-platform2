@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,13 +11,11 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Real implementation of EventDeviceInterface.
 class EventDevice : public EventDeviceInterface {
@@ -41,8 +39,8 @@ class EventDevice : public EventDeviceInterface {
   bool HasLeftButton() override;
   LidState GetInitialLidState() override;
   TabletMode GetInitialTabletMode() override;
-  bool ReadEvents(std::vector<input_event>* events_out) override;
-  void WatchForEvents(base::Closure new_events_cb) override;
+  ReadResult ReadEvents(std::vector<input_event>* events_out) override;
+  void WatchForEvents(const base::RepeatingClosure& new_events_cb) override;
 
  private:
   // Checks whether bit index |bit| is set in the bitmask returned by
@@ -60,18 +58,17 @@ class EventDevice : public EventDeviceInterface {
 
 class EventDeviceFactory : public EventDeviceFactoryInterface {
  public:
-  EventDeviceFactory();
+  EventDeviceFactory() = default;
   EventDeviceFactory(const EventDeviceFactory&) = delete;
   EventDeviceFactory& operator=(const EventDeviceFactory&) = delete;
 
-  ~EventDeviceFactory() override;
+  ~EventDeviceFactory() override = default;
 
   // Implementation of EventDeviceFactoryInterface.
   std::shared_ptr<EventDeviceInterface> Open(
       const base::FilePath& path) override;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_EVENT_DEVICE_H_

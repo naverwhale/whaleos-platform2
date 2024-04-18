@@ -12,6 +12,14 @@
             "build-path": "some/hardware_features.xml",
             "system-path": "/etc/some_hardware_features.xml"
           },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
           "media-profiles": {
             "build-path": "some/media_profiles.xml",
             "system-path": "/etc/some_media_profiles.xml"
@@ -66,6 +74,7 @@
             "u-boot": "some"
           },
           "ec-ro-image": "bcs://Some_EC.1111.11.1.tbz2",
+          "ec-rw-image": "bcs://Some_EC_RW.1111.11.1.tbz2",
           "main-ro-image": "bcs://Some.1111.11.1.tbz2",
           "main-rw-image": "bcs://Some_RW.1111.11.1.tbz2"
         },
@@ -80,12 +89,11 @@
           "is-lid-convertible": true
         },
         "identity": {
+          "frid": "Some",
           "platform-name": "Some",
-          "sku-id": 0,
-          "smbios-name-match": "Some"
+          "sku-id": 0
         },
         "modem": {
-          "attach-apn-required": true,
           "firmware-variant": "some",
           "wedge-reboot-delay-ms": "20000"
         },
@@ -160,6 +168,14 @@
             "build-path": "some/hardware_features.xml",
             "system-path": "/etc/some_hardware_features.xml"
           },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
           "media-profiles": {
             "build-path": "some/media_profiles.xml",
             "system-path": "/etc/some_media_profiles.xml"
@@ -214,6 +230,7 @@
             "u-boot": "some"
           },
           "ec-ro-image": "bcs://Some_EC.1111.11.1.tbz2",
+          "ec-rw-image": "bcs://Some_EC_RW.1111.11.1.tbz2",
           "main-ro-image": "bcs://Some.1111.11.1.tbz2",
           "main-rw-image": "bcs://Some_RW.1111.11.1.tbz2"
         },
@@ -222,16 +239,17 @@
           "signature-id": "some"
         },
         "hardware-properties": {
-          "is-lid-convertible": false
+          "has-base-accelerometer": true,
+          "has-base-gyroscope": true,
+          "has-lid-accelerometer": true,
+          "is-lid-convertible": true
         },
-        "hwid-override": "SOME-ZZCR A6B-C5D-A4E",
         "identity": {
+          "frid": "Some_Other",
           "platform-name": "Some",
-          "sku-id": 1,
-          "smbios-name-match": "Some"
+          "sku-id": 0
         },
         "modem": {
-          "attach-apn-required": true,
           "firmware-variant": "some",
           "wedge-reboot-delay-ms": "20000"
         },
@@ -249,6 +267,341 @@
           "smart-discharge-to-zero-hr": "-1",
           "suspend-to-idle": "0",
           "touchpad-wakeup": "1"
+        },
+        "thermal": {
+          "dptf-dv": "/etc/dptf/some_touch/dptf.dv",
+          "files": [
+            {
+              "destination": "/etc/dptf/some_touch/dptf.dv",
+              "source": "some_touch/dptf.dv"
+            }
+          ]
+        },
+        "touch": {
+          "files": [
+            {
+              "destination": "/opt/google/touch/firmware/some_stylus_vendor/some-version.hex",
+              "source": "some_stylus_vendor/some-version.hex",
+              "symlink": "/lib/firmware/some_stylus_vendor_firmware_SOME.bin"
+            },
+            {
+              "destination": "/opt/google/touch/firmware/some_touch_vendor/some-pid_some-version.bin",
+              "source": "some_touch_vendor/some-pid_some-version.bin",
+              "symlink": "/lib/firmware/some_touch_vendorts_i2c_some-pid.bin"
+            },
+            {
+              "destination": "/opt/google/touch/firmware/some_touch_vendor/some-other-pid_some-other-version.bin",
+              "source": "some_touch_vendor/some-other-pid_some-other-version.bin",
+              "symlink": "/lib/firmware/some_touch_vendorts_i2c_some-other-pid.bin"
+            }
+          ]
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "some"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        },
+        "wallpaper": "some",
+        "wifi": {
+          "sar-file": {
+            "build-path": "build-path/wifi_sar_2.hex",
+            "system-path": "/firmware/cbfs-rw-raw/proj/wifi_sar_2.hex"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "some_cheets",
+            "metrics-tag": "abc123",
+            "product": "some"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "audio": {
+          "main": {
+            "cras-config-dir": "some",
+            "files": [
+              {
+                "destination": "/etc/cras/some/a-card",
+                "source": "cras-config/some/a-card"
+              },
+              {
+                "destination": "/etc/cras/some/dsp.ini",
+                "source": "cras-config/some/dsp.ini"
+              },
+              {
+                "destination": "/usr/share/alsa/ucm/a-card.some/HiFi.conf",
+                "source": "ucm-config/a-card.some/HiFi.conf"
+              },
+              {
+                "destination": "/usr/share/alsa/ucm/a-card.some/a-card.some.conf",
+                "source": "ucm-config/a-card.some/a-card.some.conf"
+              },
+              {
+                "destination": "/lib/firmware/some-tplg.bin",
+                "source": "topology/some-tplg.bin"
+              }
+            ],
+            "ucm-suffix": "some"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "demo-mode": {
+          "highlights-extension-id": "iggildboghmjpbjcpmobahnkmoefkike",
+          "screensaver-extension-id": "gdobaoeekhiklaljmhladjfdfkigampc"
+        },
+        "efi": {
+          "bootvar-name-override": "Some OS"
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "bcs-overlay": "overlay-some-private",
+          "build-targets": {
+            "coreboot": "some",
+            "depthcharge": "some",
+            "ec": "some",
+            "libpayload": "some",
+            "u-boot": "some"
+          },
+          "ec-ro-image": "bcs://Some_EC.1111.11.1.tbz2",
+          "ec-rw-image": "bcs://Some_EC_RW.1111.11.1.tbz2",
+          "main-ro-image": "bcs://Some.1111.11.1.tbz2",
+          "main-rw-image": "bcs://Some_RW.1111.11.1.tbz2"
+        },
+        "firmware-signing": {
+          "key-id": "SOME",
+          "signature-id": "some"
+        },
+        "hardware-properties": {
+          "is-lid-convertible": false
+        },
+        "hwid-override": "SOME-ZZCR A6B-C5D-A4E",
+        "identity": {
+          "frid": "Some",
+          "platform-name": "Some",
+          "sku-id": 1
+        },
+        "modem": {
+          "firmware-variant": "some",
+          "wedge-reboot-delay-ms": "20000"
+        },
+        "name": "some",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "proximity-sensor": {
+          "semtech-config": [
+            {
+              "file": {
+                "build-path": "build_path/config_project_right.json",
+                "system-path": "/usr/share/chromeos-assets/proximity-sensor/wifi/config_project_right.json"
+              },
+              "location": "wifi_right"
+            }
+          ]
+        },
+        "thermal": {
+          "files": [
+            {
+              "destination": "/etc/dptf/some_notouch/dptf.dv",
+              "source": "some_notouch/dptf.dv"
+            }
+          ]
+        },
+        "touch": {
+          "files": [
+            {
+              "destination": "/opt/google/touch/firmware/some_stylus_vendor/some-version.hex",
+              "source": "some_stylus_vendor/some-version.hex",
+              "symlink": "/lib/firmware/some_stylus_vendor_firmware_SOME.bin"
+            },
+            {
+              "destination": "/opt/google/touch/firmware/some_touch_vendor/some-pid_some-version.bin",
+              "source": "some_touch_vendor/some-pid_some-version.bin",
+              "symlink": "/lib/firmware/some_touch_vendorts_i2c_some-pid.bin"
+            },
+            {
+              "destination": "/opt/google/touch/firmware/some_touch_vendor/some-other-pid_some-other-version.bin",
+              "source": "some_touch_vendor/some-other-pid_some-other-version.bin",
+              "symlink": "/lib/firmware/some_touch_vendorts_i2c_some-other-pid.bin"
+            }
+          ]
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "some"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        },
+        "wallpaper": "some",
+        "wifi": {
+          "sar-file": {
+            "build-path": "build-path/wifi_sar_2.hex",
+            "system-path": "/firmware/cbfs-rw-raw/proj/wifi_sar_2.hex"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "some_cheets",
+            "metrics-tag": "abc123",
+            "product": "some"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "audio": {
+          "main": {
+            "cras-config-dir": "some",
+            "files": [
+              {
+                "destination": "/etc/cras/some/a-card",
+                "source": "cras-config/some/a-card"
+              },
+              {
+                "destination": "/etc/cras/some/dsp.ini",
+                "source": "cras-config/some/dsp.ini"
+              },
+              {
+                "destination": "/usr/share/alsa/ucm/a-card.some/HiFi.conf",
+                "source": "ucm-config/a-card.some/HiFi.conf"
+              },
+              {
+                "destination": "/usr/share/alsa/ucm/a-card.some/a-card.some.conf",
+                "source": "ucm-config/a-card.some/a-card.some.conf"
+              },
+              {
+                "destination": "/lib/firmware/some-tplg.bin",
+                "source": "topology/some-tplg.bin"
+              }
+            ],
+            "ucm-suffix": "some"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "demo-mode": {
+          "highlights-extension-id": "iggildboghmjpbjcpmobahnkmoefkike",
+          "screensaver-extension-id": "gdobaoeekhiklaljmhladjfdfkigampc"
+        },
+        "efi": {
+          "bootvar-name-override": "Some OS"
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "bcs-overlay": "overlay-some-private",
+          "build-targets": {
+            "coreboot": "some",
+            "depthcharge": "some",
+            "ec": "some",
+            "libpayload": "some",
+            "u-boot": "some"
+          },
+          "ec-ro-image": "bcs://Some_EC.1111.11.1.tbz2",
+          "ec-rw-image": "bcs://Some_EC_RW.1111.11.1.tbz2",
+          "main-ro-image": "bcs://Some.1111.11.1.tbz2",
+          "main-rw-image": "bcs://Some_RW.1111.11.1.tbz2"
+        },
+        "firmware-signing": {
+          "key-id": "SOME",
+          "signature-id": "some"
+        },
+        "hardware-properties": {
+          "is-lid-convertible": false
+        },
+        "hwid-override": "SOME-ZZCR A6B-C5D-A4E",
+        "identity": {
+          "frid": "Some_Other",
+          "platform-name": "Some",
+          "sku-id": 1
+        },
+        "modem": {
+          "firmware-variant": "some",
+          "wedge-reboot-delay-ms": "20000"
+        },
+        "name": "some",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "proximity-sensor": {
+          "semtech-config": [
+            {
+              "file": {
+                "build-path": "build_path/config_project_right.json",
+                "system-path": "/usr/share/chromeos-assets/proximity-sensor/wifi/config_project_right.json"
+              },
+              "location": "wifi_right"
+            }
+          ]
         },
         "thermal": {
           "files": [
@@ -305,6 +658,14 @@
             "build-path": "some/hardware_features.xml",
             "system-path": "/etc/some_hardware_features.xml"
           },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
           "media-profiles": {
             "build-path": "some/media_profiles.xml",
             "system-path": "/etc/some_media_profiles.xml"
@@ -360,15 +721,129 @@
           "signature-id": "some2"
         },
         "hardware-properties": {
-          "is-lid-convertible": true
+          "form-factor": "CONVERTIBLE",
+          "is-lid-convertible": true,
+          "recovery-input": "POWER_BUTTON"
         },
         "identity": {
+          "frid": "Some",
           "platform-name": "Some",
-          "sku-id": 2,
-          "smbios-name-match": "Some"
+          "sku-id": 2
         },
         "modem": {
-          "attach-apn-required": true,
+          "firmware-variant": "some",
+          "wedge-reboot-delay-ms": "20000"
+        },
+        "name": "some2",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "some2"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        },
+        "wallpaper": "some"
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "some2_cheets",
+            "metrics-tag": "abc123",
+            "product": "some2"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "audio": {
+          "main": {
+            "cras-config-dir": "some2",
+            "files": [
+              {
+                "destination": "/etc/cras/some2/a-card",
+                "source": "cras-config/some2/a-card"
+              },
+              {
+                "destination": "/etc/cras/some2/dsp.ini",
+                "source": "cras-config/some2/dsp.ini"
+              },
+              {
+                "destination": "/usr/share/alsa/ucm/a-card.some2/HiFi.conf",
+                "source": "ucm-config/a-card.some2/HiFi.conf"
+              },
+              {
+                "destination": "/usr/share/alsa/ucm/a-card.some2/a-card.some2.conf",
+                "source": "ucm-config/a-card.some2/a-card.some2.conf"
+              },
+              {
+                "destination": "/lib/firmware/some-tplg.bin",
+                "source": "topology/some-tplg.bin"
+              }
+            ],
+            "ucm-suffix": "some2"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "demo-mode": {
+          "highlights-extension-id": "iggildboghmjpbjcpmobahnkmoefkike",
+          "screensaver-extension-id": "gdobaoeekhiklaljmhladjfdfkigampc"
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "zephyr-ec": "experimental/some2"
+          },
+          "image-name": "some2_custom"
+        },
+        "firmware-signing": {
+          "key-id": "SOME",
+          "signature-id": "some2"
+        },
+        "hardware-properties": {
+          "form-factor": "CONVERTIBLE",
+          "is-lid-convertible": true,
+          "recovery-input": "POWER_BUTTON"
+        },
+        "identity": {
+          "frid": "Some",
+          "platform-name": "Some",
+          "sku-id": 3
+        },
+        "modem": {
           "firmware-variant": "some",
           "wedge-reboot-delay-ms": "20000"
         },
@@ -427,6 +902,17 @@
             "ucm-suffix": "another"
           }
         },
+        "displays": [
+          {
+            "connector-type": 14,
+            "rounded-corners": {
+              "bottom-left": 15,
+              "bottom-right": 15,
+              "top-left": 15,
+              "top-right": 15
+            }
+          }
+        ],
         "fingerprint": {
           "board": "dartmonkey",
           "ro-version": "VERSION3"
@@ -438,7 +924,7 @@
             "coreboot": "another",
             "depthcharge": "another",
             "ec": "another",
-            "ec_extras": [
+            "ec-extras": [
               "extra1",
               "extra2"
             ],
@@ -446,6 +932,7 @@
             "libpayload": "another",
             "zephyr-ec": "some/another"
           },
+          "detachable-ui": true,
           "ec-ro-image": "bcs://Another_EC.1111.11.1.tbz2",
           "firmware-config": 4294967295,
           "main-ro-image": "bcs://Another.1111.11.1.tbz2",
@@ -456,13 +943,26 @@
           "signature-id": "another"
         },
         "hardware-properties": {
-          "is-lid-convertible": true
+          "form-factor": "CONVERTIBLE",
+          "is-lid-convertible": true,
+          "recovery-input": "KEYBOARD"
         },
         "identity": {
-          "platform-name": "Some",
-          "smbios-name-match": "Another"
+          "frid": "Google_Another",
+          "platform-name": "Some"
         },
         "name": "another",
+        "proximity-sensor": {
+          "semtech-config": [
+            {
+              "file": {
+                "build-path": "build_path/config_project_left.json",
+                "system-path": "/usr/share/chromeos-assets/proximity-sensor/wifi/config_project_left.json"
+              },
+              "location": "wifi_left"
+            }
+          ]
+        },
         "thermal": {
           "files": [
             {
@@ -521,8 +1021,8 @@
         },
         "identity": {
           "customization-id": "SomeCustomization",
-          "platform-name": "Some",
-          "smbios-name-match": "SomeCustomization"
+          "frid": "Google_SomeCustomization",
+          "platform-name": "Some"
         },
         "name": "some_customization"
       },
@@ -537,6 +1037,14 @@
             "build-path": "some/hardware_features.xml",
             "system-path": "/etc/some_hardware_features.xml"
           },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
           "media-profiles": {
             "build-path": "some/media_profiles.xml",
             "system-path": "/etc/some_media_profiles.xml"
@@ -560,6 +1068,7 @@
             "u-boot": "some"
           },
           "ec-ro-image": "bcs://Some_EC.1111.11.1.tbz2",
+          "ec-rw-image": "bcs://Some_EC_RW.1111.11.1.tbz2",
           "main-ro-image": "bcs://Some.1111.11.1.tbz2",
           "main-rw-image": "bcs://Some_RW.1111.11.1.tbz2"
         },
@@ -569,13 +1078,14 @@
           "signature-id": "whitelabel-whitelabel1"
         },
         "hardware-properties": {
+          "form-factor": "CHROMEBOX",
           "is-lid-convertible": false
         },
         "identity": {
+          "custom-label-tag": "whitelabel1",
+          "frid": "Google_Some",
           "platform-name": "Some",
-          "sku-id": 8,
-          "smbios-name-match": "Some",
-          "whitelabel-tag": "whitelabel1"
+          "sku-id": 8
         },
         "name": "whitelabel",
         "oem-id": "1",
@@ -633,6 +1143,14 @@
             "build-path": "some/hardware_features.xml",
             "system-path": "/etc/some_hardware_features.xml"
           },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
           "media-profiles": {
             "build-path": "some/media_profiles.xml",
             "system-path": "/etc/some_media_profiles.xml"
@@ -656,6 +1174,7 @@
             "u-boot": "some"
           },
           "ec-ro-image": "bcs://Some_EC.1111.11.1.tbz2",
+          "ec-rw-image": "bcs://Some_EC_RW.1111.11.1.tbz2",
           "main-ro-image": "bcs://Some.1111.11.1.tbz2",
           "main-rw-image": "bcs://Some_RW.1111.11.1.tbz2"
         },
@@ -665,13 +1184,14 @@
           "signature-id": "whitelabel-whitelabel1"
         },
         "hardware-properties": {
+          "form-factor": "CHROMEBOX",
           "is-lid-convertible": false
         },
         "identity": {
+          "custom-label-tag": "whitelabel1",
+          "frid": "Google_Some",
           "platform-name": "Some",
-          "sku-id": 9,
-          "smbios-name-match": "Some",
-          "whitelabel-tag": "whitelabel1"
+          "sku-id": 9
         },
         "name": "whitelabel",
         "oem-id": "1",
@@ -729,6 +1249,14 @@
             "build-path": "some/hardware_features.xml",
             "system-path": "/etc/some_hardware_features.xml"
           },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
           "media-profiles": {
             "build-path": "some/media_profiles.xml",
             "system-path": "/etc/some_media_profiles.xml"
@@ -752,6 +1280,7 @@
             "u-boot": "some"
           },
           "ec-ro-image": "bcs://Some_EC.1111.11.1.tbz2",
+          "ec-rw-image": "bcs://Some_EC_RW.1111.11.1.tbz2",
           "main-ro-image": "bcs://Some.1111.11.1.tbz2",
           "main-rw-image": "bcs://Some_RW.1111.11.1.tbz2"
         },
@@ -761,13 +1290,14 @@
           "signature-id": "whitelabel-whitelabel2"
         },
         "hardware-properties": {
+          "form-factor": "CHROMEBOX",
           "is-lid-convertible": false
         },
         "identity": {
+          "custom-label-tag": "whitelabel2",
+          "frid": "Google_Some",
           "platform-name": "Some",
-          "sku-id": 8,
-          "smbios-name-match": "Some",
-          "whitelabel-tag": "whitelabel2"
+          "sku-id": 8
         },
         "name": "whitelabel",
         "oem-id": "1",
@@ -825,6 +1355,14 @@
             "build-path": "some/hardware_features.xml",
             "system-path": "/etc/some_hardware_features.xml"
           },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
           "media-profiles": {
             "build-path": "some/media_profiles.xml",
             "system-path": "/etc/some_media_profiles.xml"
@@ -848,6 +1386,7 @@
             "u-boot": "some"
           },
           "ec-ro-image": "bcs://Some_EC.1111.11.1.tbz2",
+          "ec-rw-image": "bcs://Some_EC_RW.1111.11.1.tbz2",
           "main-ro-image": "bcs://Some.1111.11.1.tbz2",
           "main-rw-image": "bcs://Some_RW.1111.11.1.tbz2"
         },
@@ -857,13 +1396,14 @@
           "signature-id": "whitelabel-whitelabel2"
         },
         "hardware-properties": {
+          "form-factor": "CHROMEBOX",
           "is-lid-convertible": false
         },
         "identity": {
+          "custom-label-tag": "whitelabel2",
+          "frid": "Google_Some",
           "platform-name": "Some",
-          "sku-id": 9,
-          "smbios-name-match": "Some",
-          "whitelabel-tag": "whitelabel2"
+          "sku-id": 9
         },
         "name": "whitelabel",
         "oem-id": "1",
@@ -909,6 +1449,1186 @@
           }
         },
         "wallpaper": "wallpaper-wl2"
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "badrecovery1_cheets",
+            "metrics-tag": "abc123",
+            "product": "badrecovery1"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "coreboot": "badrecovery1",
+            "depthcharge": "badrecovery1",
+            "ec": "badrecovery1",
+            "libpayload": "badrecovery1",
+            "u-boot": "badrecovery1"
+          }
+        },
+        "hardware-properties": {
+          "form-factor": "CLAMSHELL",
+          "recovery-input": "KEYBOARD"
+        },
+        "identity": {
+          "custom-label-tag": "BAD1",
+          "sku-id": 10
+        },
+        "name": "badrecovery1",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "badrecovery1"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "badrecovery1_cheets",
+            "metrics-tag": "abc123",
+            "product": "badrecovery1"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "coreboot": "badrecovery1",
+            "depthcharge": "badrecovery1",
+            "ec": "badrecovery1",
+            "libpayload": "badrecovery1",
+            "u-boot": "badrecovery1"
+          }
+        },
+        "hardware-properties": {
+          "form-factor": "CLAMSHELL",
+          "recovery-input": "POWER_BUTTON"
+        },
+        "identity": {
+          "custom-label-tag": "BAD1",
+          "sku-id": 11
+        },
+        "name": "badrecovery1",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "badrecovery1"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "badrecovery1_cheets",
+            "metrics-tag": "abc123",
+            "product": "badrecovery1"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "coreboot": "badrecovery1",
+            "depthcharge": "badrecovery1",
+            "ec": "badrecovery1",
+            "libpayload": "badrecovery1",
+            "u-boot": "badrecovery1"
+          }
+        },
+        "hardware-properties": {
+          "form-factor": "CLAMSHELL",
+          "recovery-input": "KEYBOARD"
+        },
+        "identity": {
+          "custom-label-tag": "BAD2",
+          "sku-id": 10
+        },
+        "name": "badrecovery1",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "badrecovery1"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "badrecovery1_cheets",
+            "metrics-tag": "abc123",
+            "product": "badrecovery1"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "coreboot": "badrecovery1",
+            "depthcharge": "badrecovery1",
+            "ec": "badrecovery1",
+            "libpayload": "badrecovery1",
+            "u-boot": "badrecovery1"
+          }
+        },
+        "hardware-properties": {
+          "form-factor": "CLAMSHELL",
+          "recovery-input": "POWER_BUTTON"
+        },
+        "identity": {
+          "custom-label-tag": "BAD2",
+          "sku-id": 11
+        },
+        "name": "badrecovery1",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "badrecovery1"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "badrecovery2_cheets",
+            "metrics-tag": "abc123",
+            "product": "badrecovery2"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "coreboot": "badrecovery2",
+            "depthcharge": "badrecovery2",
+            "ec": "badrecovery2",
+            "libpayload": "badrecovery2",
+            "u-boot": "badrecovery2"
+          }
+        },
+        "hardware-properties": {
+          "form-factor": "CLAMSHELL"
+        },
+        "identity": {
+          "custom-label-tag": "BAD3",
+          "sku-id": 12
+        },
+        "name": "badrecovery2",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "badrecovery2"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "badrecovery2_cheets",
+            "metrics-tag": "abc123",
+            "product": "badrecovery2"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "coreboot": "badrecovery2",
+            "depthcharge": "badrecovery2",
+            "ec": "badrecovery2",
+            "libpayload": "badrecovery2",
+            "u-boot": "badrecovery2"
+          }
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX"
+        },
+        "identity": {
+          "custom-label-tag": "BAD3",
+          "sku-id": 13
+        },
+        "name": "badrecovery2",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "badrecovery2"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "badrecovery2_cheets",
+            "metrics-tag": "abc123",
+            "product": "badrecovery2"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "coreboot": "badrecovery2",
+            "depthcharge": "badrecovery2",
+            "ec": "badrecovery2",
+            "libpayload": "badrecovery2",
+            "u-boot": "badrecovery2"
+          }
+        },
+        "hardware-properties": {
+          "form-factor": "CLAMSHELL"
+        },
+        "identity": {
+          "custom-label-tag": "BAD4",
+          "sku-id": 12
+        },
+        "name": "badrecovery2",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "badrecovery2"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "badrecovery2_cheets",
+            "metrics-tag": "abc123",
+            "product": "badrecovery2"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "build-targets": {
+            "coreboot": "badrecovery2",
+            "depthcharge": "badrecovery2",
+            "ec": "badrecovery2",
+            "libpayload": "badrecovery2",
+            "u-boot": "badrecovery2"
+          }
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX"
+        },
+        "identity": {
+          "custom-label-tag": "BAD4",
+          "sku-id": 13
+        },
+        "name": "badrecovery2",
+        "oem-id": "0",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "badrecovery2"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "multi_cheets",
+            "metrics-tag": "abc123",
+            "product": "multi"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "brand-code": "WLBA",
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "image-name": "multi"
+        },
+        "firmware-signing": {
+          "key-id": "WHITELABEL1",
+          "sig-id-in-customization-id": true,
+          "signature-id": "multi-whitelabel1"
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX",
+          "is-lid-convertible": false
+        },
+        "identity": {
+          "custom-label-tag": "whitelabel1",
+          "frid": "Google_Multi",
+          "platform-name": "Multi",
+          "sku-id": 14
+        },
+        "name": "multi",
+        "oem-id": "1",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "multi"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "multi_cheets",
+            "metrics-tag": "abc123",
+            "product": "multi"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "brand-code": "WLBA",
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "image-name": "multi"
+        },
+        "firmware-signing": {
+          "key-id": "WHITELABEL1",
+          "sig-id-in-customization-id": true,
+          "signature-id": "multi-whitelabel1"
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX",
+          "is-lid-convertible": false
+        },
+        "identity": {
+          "custom-label-tag": "whitelabel1",
+          "frid": "Google_Multi_other",
+          "platform-name": "Multi",
+          "sku-id": 14
+        },
+        "name": "multi",
+        "oem-id": "1",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "multi"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "multi_cheets",
+            "metrics-tag": "abc123",
+            "product": "multi"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "brand-code": "WLBA",
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "image-name": "multi_other"
+        },
+        "firmware-signing": {
+          "key-id": "WHITELABEL1",
+          "sig-id-in-customization-id": true,
+          "signature-id": "multi_other-whitelabel1"
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX",
+          "is-lid-convertible": false
+        },
+        "identity": {
+          "custom-label-tag": "whitelabel1",
+          "frid": "Google_Multi",
+          "platform-name": "Multi",
+          "sku-id": 15
+        },
+        "name": "multi",
+        "oem-id": "1",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "multi"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "multi_cheets",
+            "metrics-tag": "abc123",
+            "product": "multi"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "brand-code": "WLBA",
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "image-name": "multi_other"
+        },
+        "firmware-signing": {
+          "key-id": "WHITELABEL1",
+          "sig-id-in-customization-id": true,
+          "signature-id": "multi_other-whitelabel1"
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX",
+          "is-lid-convertible": false
+        },
+        "identity": {
+          "custom-label-tag": "whitelabel1",
+          "frid": "Google_Multi_other",
+          "platform-name": "Multi",
+          "sku-id": 15
+        },
+        "name": "multi",
+        "oem-id": "1",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "multi"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "multi_cheets",
+            "metrics-tag": "abc123",
+            "product": "multi"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "brand-code": "WLBB",
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "image-name": "multi"
+        },
+        "firmware-signing": {
+          "key-id": "WHITELABEL2",
+          "sig-id-in-customization-id": true,
+          "signature-id": "multi-whitelabel2"
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX",
+          "is-lid-convertible": false
+        },
+        "identity": {
+          "custom-label-tag": "whitelabel2",
+          "frid": "Google_Multi",
+          "platform-name": "Multi",
+          "sku-id": 14
+        },
+        "name": "multi",
+        "oem-id": "1",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "multi"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "multi_cheets",
+            "metrics-tag": "abc123",
+            "product": "multi"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "brand-code": "WLBB",
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "image-name": "multi"
+        },
+        "firmware-signing": {
+          "key-id": "WHITELABEL2",
+          "sig-id-in-customization-id": true,
+          "signature-id": "multi-whitelabel2"
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX",
+          "is-lid-convertible": false
+        },
+        "identity": {
+          "custom-label-tag": "whitelabel2",
+          "frid": "Google_Multi_other",
+          "platform-name": "Multi",
+          "sku-id": 14
+        },
+        "name": "multi",
+        "oem-id": "1",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "multi"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "multi_cheets",
+            "metrics-tag": "abc123",
+            "product": "multi"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "brand-code": "WLBB",
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "image-name": "multi_other"
+        },
+        "firmware-signing": {
+          "key-id": "WHITELABEL2",
+          "sig-id-in-customization-id": true,
+          "signature-id": "multi_other-whitelabel2"
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX",
+          "is-lid-convertible": false
+        },
+        "identity": {
+          "custom-label-tag": "whitelabel2",
+          "frid": "Google_Multi",
+          "platform-name": "Multi",
+          "sku-id": 15
+        },
+        "name": "multi",
+        "oem-id": "1",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "multi"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
+      },
+      {
+        "arc": {
+          "build-properties": {
+            "device": "multi_cheets",
+            "metrics-tag": "abc123",
+            "product": "multi"
+          },
+          "hardware-features": {
+            "build-path": "some/hardware_features.xml",
+            "system-path": "/etc/some_hardware_features.xml"
+          },
+          "media-codecs": {
+            "build-path": "some/media_codecs_c2.xml",
+            "system-path": "/etc/some_media_codecs_c2.xml"
+          },
+          "media-codecs-performance": {
+            "build-path": "some/media_codecs_performance_c2.xml",
+            "system-path": "/etc/some_media_codecs_performance_c2.xml"
+          },
+          "media-profiles": {
+            "build-path": "some/media_profiles.xml",
+            "system-path": "/etc/some_media_profiles.xml"
+          }
+        },
+        "brand-code": "WLBB",
+        "camera": {
+          "count": 1
+        },
+        "fingerprint": {
+          "board": "bloonchipper",
+          "ro-version": "VERSION1"
+        },
+        "firmware": {
+          "image-name": "multi_other"
+        },
+        "firmware-signing": {
+          "key-id": "WHITELABEL2",
+          "sig-id-in-customization-id": true,
+          "signature-id": "multi_other-whitelabel2"
+        },
+        "hardware-properties": {
+          "form-factor": "CHROMEBOX",
+          "is-lid-convertible": false
+        },
+        "identity": {
+          "custom-label-tag": "whitelabel2",
+          "frid": "Google_Multi_other",
+          "platform-name": "Multi",
+          "sku-id": 15
+        },
+        "name": "multi",
+        "oem-id": "1",
+        "power": {
+          "allow-ambient-eq": "1",
+          "charging-ports": "CROS_USB_PD_CHARGER0 LEFT\nCROS_USB_PD_CHARGER1 RIGHT\n",
+          "cutoff-power-ua": "-1",
+          "hibernate-power-ua": "-1",
+          "keyboard-backlight-no-als-brightness": "98.7",
+          "low-battery-shutdown-percent": "100.0",
+          "power-supply-full-factor": "0.0",
+          "set-wifi-transmit-power-for-tablet-mode": "1",
+          "smart-discharge-to-zero-hr": "-1",
+          "suspend-to-idle": "0",
+          "touchpad-wakeup": "1"
+        },
+        "ui": {
+          "apps": {
+            "extra-web-apps-dir": "multi"
+          },
+          "power-button": {
+            "edge": "left",
+            "position": "0.3"
+          }
+        }
       }
     ]
   }

@@ -1,12 +1,14 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "policy/device_policy_impl.h"
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -15,9 +17,8 @@
 #include <base/files/file_util.h>
 #include <base/json/json_reader.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ptr_util.h>
-#include <base/stl_util.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/time/time.h>
 #include <base/values.h>
 #include <openssl/evp.h>
@@ -25,6 +26,7 @@
 
 #include "bindings/chrome_device_policy.pb.h"
 #include "bindings/device_management_backend.pb.h"
+#include "policy/device_local_account_policy_util.h"
 #include "policy/policy_util.h"
 #include "policy/resilient_policy_util.h"
 
@@ -102,14 +104,14 @@ std::string DecodeConnectionType(int type) {
       "ethernet", "wifi", "wimax", "bluetooth", "cellular",
   };
 
-  if (type < 0 || type >= static_cast<int>(base::size(kConnectionTypes)))
+  if (type < 0 || type >= static_cast<int>(std::size(kConnectionTypes)))
     return std::string();
 
   return kConnectionTypes[type];
 }
 
-// TODO(adokar): change type to base::Optional<int> when available.
-int ConvertDayOfWeekStringToInt(const std::string& day_of_week_str) {
+std::optional<int> ConvertDayOfWeekStringToInt(
+    const std::string& day_of_week_str) {
   if (day_of_week_str == "Sunday")
     return 0;
   if (day_of_week_str == "Monday")
@@ -124,86 +126,94 @@ int ConvertDayOfWeekStringToInt(const std::string& day_of_week_str) {
     return 5;
   if (day_of_week_str == "Saturday")
     return 6;
-  return -1;
+  return std::nullopt;
 }
 
-bool DecodeWeeklyTimeFromValue(const base::Value& dict_value,
+bool DecodeWeeklyTimeFromValue(const base::Value::Dict& dict_value,
                                int* day_of_week_out,
                                base::TimeDelta* time_out) {
-  const std::string* day_of_week_str = dict_value.FindStringKey("day_of_week");
+  const std::string* day_of_week_str = dict_value.FindString("day_of_week");
   if (!day_of_week_str) {
     LOG(ERROR) << "Day of the week is absent.";
     return false;
   }
-  *day_of_week_out = ConvertDayOfWeekStringToInt(*day_of_week_str);
-  if (*day_of_week_out == -1) {
+
+  std::optional<int> day_of_week =
+      ConvertDayOfWeekStringToInt(*day_of_week_str);
+  if (!day_of_week.has_value()) {
     LOG(ERROR) << "Undefined day of the week: " << *day_of_week_str;
     return false;
   }
+  *day_of_week_out = *day_of_week;
 
-  base::Optional<int> hours = dict_value.FindIntKey("hours");
+  const std::optional<int> hours = dict_value.FindInt("hours");
   if (!hours.has_value() || hours < 0 || hours > 23) {
     LOG(ERROR) << "Hours are absent or are outside of the range [0, 24).";
     return false;
   }
 
-  base::Optional<int> minutes = dict_value.FindIntKey("minutes");
+  const std::optional<int> minutes = dict_value.FindInt("minutes");
   if (!minutes.has_value() || minutes < 0 || minutes > 59) {
     LOG(ERROR) << "Minutes are absent or are outside the range [0, 60)";
     return false;
   }
 
-  *time_out = base::TimeDelta::FromMinutes(*minutes) +
-              base::TimeDelta::FromHours(*hours);
+  *time_out = base::Minutes(*minutes) + base::Hours(*hours);
   return true;
 }
 
-base::Optional<base::Value> DecodeListValueFromJSON(
+std::optional<base::Value> DecodeListValueFromJSON(
     const std::string& json_string) {
   auto decoded_json = base::JSONReader::ReadAndReturnValueWithError(
       json_string, base::JSON_ALLOW_TRAILING_COMMAS);
-  if (!decoded_json.value) {
-    LOG(ERROR) << "Invalid JSON string: " << decoded_json.error_message;
-    return base::nullopt;
+  if (!decoded_json.has_value()) {
+    LOG(ERROR) << "Invalid JSON string: " << decoded_json.error().message;
+    return std::nullopt;
   }
 
-  if (!decoded_json.value->is_list()) {
+  if (!decoded_json->is_list()) {
     LOG(ERROR) << "JSON string is not a list";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  return std::move(decoded_json.value);
+  return std::move(*decoded_json);
 }
 
-base::Optional<base::Value> DecodeDictValueFromJSON(
+std::optional<base::Value> DecodeDictValueFromJSON(
     const std::string& json_string, const std::string& entry_name) {
   auto decoded_json = base::JSONReader::ReadAndReturnValueWithError(
       json_string, base::JSON_ALLOW_TRAILING_COMMAS);
-  if (!decoded_json.value) {
+  if (!decoded_json.has_value()) {
     LOG(ERROR) << "Invalid JSON string in " << entry_name << ": "
-               << decoded_json.error_message;
-    return base::nullopt;
+               << decoded_json.error().message;
+    return std::nullopt;
   }
 
-  if (!decoded_json.value->is_dict()) {
+  if (!decoded_json->is_dict()) {
     LOG(ERROR) << "Invalid JSON string in " << entry_name << ": "
                << "JSON string is not a dictionary";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  return std::move(decoded_json.value);
+  return std::move(*decoded_json);
 }
-
 }  // namespace
 
 DevicePolicyImpl::DevicePolicyImpl()
-    : policy_path_(kPolicyPath), keyfile_path_(kPublicKeyPath) {}
+    : policy_path_(kPolicyPath),
+      keyfile_path_(kPublicKeyPath),
+      policy_(std::make_unique<enterprise_management::PolicyFetchResponse>()),
+      policy_data_(std::make_unique<enterprise_management::PolicyData>()),
+      device_policy_(std::make_unique<
+                     enterprise_management::ChromeDeviceSettingsProto>()) {}
 
 DevicePolicyImpl::~DevicePolicyImpl() {}
 
-bool DevicePolicyImpl::LoadPolicy() {
+bool DevicePolicyImpl::LoadPolicy(bool delete_invalid_files) {
   std::map<int, base::FilePath> sorted_policy_file_paths =
       policy::GetSortedResilientPolicyFilePaths(policy_path_);
+  number_of_policy_files_ = sorted_policy_file_paths.size();
+  number_of_invalid_files_ = 0;
   if (sorted_policy_file_paths.empty())
     return false;
 
@@ -218,6 +228,11 @@ bool DevicePolicyImpl::LoadPolicy() {
       policy_loaded = true;
       break;
     }
+    if (delete_invalid_files) {
+      LOG(ERROR) << "Invalid device policy file: " << policy_path.value();
+      base::DeleteFile(policy_path);
+    }
+    number_of_invalid_files_++;
   }
 
   return policy_loaded;
@@ -230,67 +245,142 @@ bool DevicePolicyImpl::IsEnterpriseEnrolled() const {
 
   const std::string& device_mode = install_attributes_reader_->GetAttribute(
       InstallAttributesReader::kAttrMode);
-  return device_mode == InstallAttributesReader::kDeviceModeEnterprise ||
-         device_mode == InstallAttributesReader::kDeviceModeEnterpriseAD;
+  return device_mode == InstallAttributesReader::kDeviceModeEnterprise;
 }
 
 bool DevicePolicyImpl::GetPolicyRefreshRate(int* rate) const {
-  if (!device_policy_.has_device_policy_refresh_rate())
+  if (!device_policy_->has_device_policy_refresh_rate())
     return false;
-  *rate = static_cast<int>(
-      device_policy_.device_policy_refresh_rate().device_policy_refresh_rate());
+  *rate = static_cast<int>(device_policy_->device_policy_refresh_rate()
+                               .device_policy_refresh_rate());
   return true;
 }
 
 bool DevicePolicyImpl::GetGuestModeEnabled(bool* guest_mode_enabled) const {
-  if (!device_policy_.has_guest_mode_enabled())
+  if (!device_policy_->has_guest_mode_enabled())
     return false;
   *guest_mode_enabled =
-      device_policy_.guest_mode_enabled().guest_mode_enabled();
+      device_policy_->guest_mode_enabled().guest_mode_enabled();
   return true;
 }
 
 bool DevicePolicyImpl::GetCameraEnabled(bool* camera_enabled) const {
-  if (!device_policy_.has_camera_enabled())
+  if (!device_policy_->has_camera_enabled())
     return false;
-  *camera_enabled = device_policy_.camera_enabled().camera_enabled();
+  *camera_enabled = device_policy_->camera_enabled().camera_enabled();
   return true;
 }
 
 bool DevicePolicyImpl::GetShowUserNames(bool* show_user_names) const {
-  if (!device_policy_.has_show_user_names())
+  if (!device_policy_->has_show_user_names())
     return false;
-  *show_user_names = device_policy_.show_user_names().show_user_names();
+  *show_user_names = device_policy_->show_user_names().show_user_names();
   return true;
 }
 
 bool DevicePolicyImpl::GetDataRoamingEnabled(bool* data_roaming_enabled) const {
-  if (!device_policy_.has_data_roaming_enabled())
+  if (!device_policy_->has_data_roaming_enabled())
     return false;
   *data_roaming_enabled =
-      device_policy_.data_roaming_enabled().data_roaming_enabled();
+      device_policy_->data_roaming_enabled().data_roaming_enabled();
   return true;
 }
 
 bool DevicePolicyImpl::GetAllowNewUsers(bool* allow_new_users) const {
-  if (!device_policy_.has_allow_new_users())
+  if (!device_policy_->has_allow_new_users())
     return false;
-  *allow_new_users = device_policy_.allow_new_users().allow_new_users();
+  *allow_new_users = device_policy_->allow_new_users().allow_new_users();
   return true;
 }
 
 bool DevicePolicyImpl::GetMetricsEnabled(bool* metrics_enabled) const {
-  if (!device_policy_.has_metrics_enabled())
+  if (!device_policy_->has_metrics_enabled())
     return false;
-  *metrics_enabled = device_policy_.metrics_enabled().metrics_enabled();
+  *metrics_enabled = device_policy_->metrics_enabled().metrics_enabled();
+  return true;
+}
+
+bool DevicePolicyImpl::GetHwDataUsageEnabled(
+    bool* hw_data_usage_enabled) const {
+  if (!device_policy_->has_hardware_data_usage_enabled())
+    return false;
+
+  const em::RevenDeviceHWDataUsageEnabledProto& proto =
+      device_policy_->hardware_data_usage_enabled();
+  if (!proto.has_hardware_data_usage_enabled())
+    return false;
+
+  *hw_data_usage_enabled = proto.hardware_data_usage_enabled();
+  return true;
+}
+
+bool DevicePolicyImpl::GetReportSystemInfo(bool* report_system_info) const {
+  if (!device_policy_->has_device_reporting())
+    return false;
+
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
+  if (!proto.has_report_system_info())
+    return false;
+
+  *report_system_info = proto.report_system_info();
+  return true;
+}
+
+bool DevicePolicyImpl::GetReportCpuInfo(bool* report_cpu_info) const {
+  if (!device_policy_->has_device_reporting())
+    return false;
+
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
+  if (!proto.has_report_cpu_info())
+    return false;
+
+  *report_cpu_info = proto.report_cpu_info();
+  return true;
+}
+
+bool DevicePolicyImpl::GetReportGraphicsStatus(
+    bool* report_graphics_status) const {
+  if (!device_policy_->has_device_reporting())
+    return false;
+
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
+  if (!proto.has_report_graphics_status())
+    return false;
+
+  *report_graphics_status = proto.report_graphics_status();
+  return true;
+}
+
+bool DevicePolicyImpl::GetReportMemoryInfo(bool* report_memory_info) const {
+  if (!device_policy_->has_device_reporting())
+    return false;
+
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
+  if (!proto.has_report_memory_info())
+    return false;
+
+  *report_memory_info = proto.report_memory_info();
+  return true;
+}
+
+bool DevicePolicyImpl::GetReportNetworkConfig(
+    bool* report_network_config) const {
+  if (!device_policy_->has_device_reporting())
+    return false;
+
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
+  if (!proto.has_report_network_configuration())
+    return false;
+
+  *report_network_config = proto.report_network_configuration();
   return true;
 }
 
 bool DevicePolicyImpl::GetReportVersionInfo(bool* report_version_info) const {
-  if (!device_policy_.has_device_reporting())
+  if (!device_policy_->has_device_reporting())
     return false;
 
-  const em::DeviceReportingProto& proto = device_policy_.device_reporting();
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
   if (!proto.has_report_version_info())
     return false;
 
@@ -300,10 +390,10 @@ bool DevicePolicyImpl::GetReportVersionInfo(bool* report_version_info) const {
 
 bool DevicePolicyImpl::GetReportActivityTimes(
     bool* report_activity_times) const {
-  if (!device_policy_.has_device_reporting())
+  if (!device_policy_->has_device_reporting())
     return false;
 
-  const em::DeviceReportingProto& proto = device_policy_.device_reporting();
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
   if (!proto.has_report_activity_times())
     return false;
 
@@ -312,10 +402,10 @@ bool DevicePolicyImpl::GetReportActivityTimes(
 }
 
 bool DevicePolicyImpl::GetReportBootMode(bool* report_boot_mode) const {
-  if (!device_policy_.has_device_reporting())
+  if (!device_policy_->has_device_reporting())
     return false;
 
-  const em::DeviceReportingProto& proto = device_policy_.device_reporting();
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
   if (!proto.has_report_boot_mode())
     return false;
 
@@ -323,20 +413,52 @@ bool DevicePolicyImpl::GetReportBootMode(bool* report_boot_mode) const {
   return true;
 }
 
-bool DevicePolicyImpl::GetEphemeralUsersEnabled(
-    bool* ephemeral_users_enabled) const {
-  if (!device_policy_.has_ephemeral_users_enabled())
+bool DevicePolicyImpl::GetEphemeralSettings(
+    EphemeralSettings* ephemeral_settings) const {
+  if (!device_policy_->has_ephemeral_users_enabled() &&
+      !device_policy_->has_device_local_accounts())
     return false;
-  *ephemeral_users_enabled =
-      device_policy_.ephemeral_users_enabled().ephemeral_users_enabled();
+
+  ephemeral_settings->global_ephemeral_users_enabled = false;
+  ephemeral_settings->specific_ephemeral_users.clear();
+  ephemeral_settings->specific_nonephemeral_users.clear();
+
+  if (device_policy_->has_device_local_accounts()) {
+    const em::DeviceLocalAccountsProto& local_accounts =
+        device_policy_->device_local_accounts();
+
+    for (const em::DeviceLocalAccountInfoProto& account :
+         local_accounts.account()) {
+      if (!account.has_ephemeral_mode()) {
+        continue;
+      }
+
+      if (account.ephemeral_mode() ==
+          em::DeviceLocalAccountInfoProto::EPHEMERAL_MODE_DISABLE) {
+        ephemeral_settings->specific_nonephemeral_users.push_back(
+            GenerateDeviceLocalAccountUserId(account.account_id(),
+                                             account.type()));
+      } else if (account.ephemeral_mode() ==
+                 em::DeviceLocalAccountInfoProto::EPHEMERAL_MODE_ENABLE) {
+        ephemeral_settings->specific_ephemeral_users.push_back(
+            GenerateDeviceLocalAccountUserId(account.account_id(),
+                                             account.type()));
+      }
+    }
+  }
+  if (device_policy_->has_ephemeral_users_enabled()) {
+    ephemeral_settings->global_ephemeral_users_enabled =
+        device_policy_->ephemeral_users_enabled().ephemeral_users_enabled();
+  }
+
   return true;
 }
 
 bool DevicePolicyImpl::GetReleaseChannel(std::string* release_channel) const {
-  if (!device_policy_.has_release_channel())
+  if (!device_policy_->has_release_channel())
     return false;
 
-  const em::ReleaseChannelProto& proto = device_policy_.release_channel();
+  const em::ReleaseChannelProto& proto = device_policy_->release_channel();
   if (!proto.has_release_channel())
     return false;
 
@@ -346,10 +468,10 @@ bool DevicePolicyImpl::GetReleaseChannel(std::string* release_channel) const {
 
 bool DevicePolicyImpl::GetReleaseChannelDelegated(
     bool* release_channel_delegated) const {
-  if (!device_policy_.has_release_channel())
+  if (!device_policy_->has_release_channel())
     return false;
 
-  const em::ReleaseChannelProto& proto = device_policy_.release_channel();
+  const em::ReleaseChannelProto& proto = device_policy_->release_channel();
   if (!proto.has_release_channel_delegated())
     return false;
 
@@ -358,10 +480,10 @@ bool DevicePolicyImpl::GetReleaseChannelDelegated(
 }
 
 bool DevicePolicyImpl::GetReleaseLtsTag(std::string* lts_tag) const {
-  if (!device_policy_.has_release_channel())
+  if (!device_policy_->has_release_channel())
     return false;
 
-  const em::ReleaseChannelProto& proto = device_policy_.release_channel();
+  const em::ReleaseChannelProto& proto = device_policy_->release_channel();
   if (!proto.has_release_lts_tag())
     return false;
 
@@ -373,11 +495,11 @@ bool DevicePolicyImpl::GetUpdateDisabled(bool* update_disabled) const {
   if (!IsEnterpriseEnrolled())
     return false;
 
-  if (!device_policy_.has_auto_update_settings())
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
   if (!proto.has_update_disabled())
     return false;
 
@@ -390,11 +512,11 @@ bool DevicePolicyImpl::GetTargetVersionPrefix(
   if (!IsEnterpriseEnrolled())
     return false;
 
-  if (!device_policy_.has_auto_update_settings())
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
   if (!proto.has_target_version_prefix())
     return false;
 
@@ -404,13 +526,23 @@ bool DevicePolicyImpl::GetTargetVersionPrefix(
 
 bool DevicePolicyImpl::GetRollbackToTargetVersion(
     int* rollback_to_target_version) const {
-  if (!device_policy_.has_auto_update_settings())
+  if (!IsEnterpriseEnrolled())
+    return false;
+
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
   if (!proto.has_rollback_to_target_version())
     return false;
+
+  // TODO(b:273305614): Allow to enable enterprise rollback on Flex with a flag.
+  if (USE_ENTERPRISE_ROLLBACK_REVEN) {
+    LOG(INFO) << "Enterprise Rollback disabled for Flex, setting policy to "
+                 "undefined.";
+    return false;
+  }
 
   *rollback_to_target_version = proto.rollback_to_target_version();
   return true;
@@ -422,9 +554,9 @@ bool DevicePolicyImpl::GetRollbackAllowedMilestones(
   if (!IsEnterpriseEnrolled())
     return false;
 
-  if (device_policy_.has_auto_update_settings()) {
+  if (device_policy_->has_auto_update_settings()) {
     const em::AutoUpdateSettingsProto& proto =
-        device_policy_.auto_update_settings();
+        device_policy_->auto_update_settings();
     if (proto.has_rollback_allowed_milestones()) {
       // Policy is set, enforce minimum and maximum constraints.
       *rollback_allowed_milestones = proto.rollback_allowed_milestones();
@@ -444,11 +576,11 @@ bool DevicePolicyImpl::GetRollbackAllowedMilestones(
 
 bool DevicePolicyImpl::GetScatterFactorInSeconds(
     int64_t* scatter_factor_in_seconds) const {
-  if (!device_policy_.has_auto_update_settings())
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
   if (!proto.has_scatter_factor_in_seconds())
     return false;
 
@@ -461,11 +593,11 @@ bool DevicePolicyImpl::GetAllowedConnectionTypesForUpdate(
   if (!IsEnterpriseEnrolled())
     return false;
 
-  if (!device_policy_.has_auto_update_settings())
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
   if (proto.allowed_connection_types_size() <= 0)
     return false;
 
@@ -479,11 +611,11 @@ bool DevicePolicyImpl::GetAllowedConnectionTypesForUpdate(
 
 bool DevicePolicyImpl::GetOpenNetworkConfiguration(
     std::string* open_network_configuration) const {
-  if (!device_policy_.has_open_network_configuration())
+  if (!device_policy_->has_open_network_configuration())
     return false;
 
   const em::DeviceOpenNetworkConfigurationProto& proto =
-      device_policy_.open_network_configuration();
+      device_policy_->open_network_configuration();
   if (!proto.has_open_network_configuration())
     return false;
 
@@ -497,19 +629,19 @@ bool DevicePolicyImpl::GetOwner(std::string* owner) const {
     return true;
   }
 
-  if (!policy_data_.has_username())
+  if (!policy_data_->has_username())
     return false;
-  *owner = policy_data_.username();
+  *owner = policy_data_->username();
   return true;
 }
 
 bool DevicePolicyImpl::GetHttpDownloadsEnabled(
     bool* http_downloads_enabled) const {
-  if (!device_policy_.has_auto_update_settings())
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
 
   if (!proto.has_http_downloads_enabled())
     return false;
@@ -519,11 +651,11 @@ bool DevicePolicyImpl::GetHttpDownloadsEnabled(
 }
 
 bool DevicePolicyImpl::GetAuP2PEnabled(bool* au_p2p_enabled) const {
-  if (!device_policy_.has_auto_update_settings())
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
 
   if (!proto.has_p2p_enabled())
     return false;
@@ -534,11 +666,11 @@ bool DevicePolicyImpl::GetAuP2PEnabled(bool* au_p2p_enabled) const {
 
 bool DevicePolicyImpl::GetAllowKioskAppControlChromeVersion(
     bool* allow_kiosk_app_control_chrome_version) const {
-  if (!device_policy_.has_allow_kiosk_app_control_chrome_version())
+  if (!device_policy_->has_allow_kiosk_app_control_chrome_version())
     return false;
 
   const em::AllowKioskAppControlChromeVersionProto& proto =
-      device_policy_.allow_kiosk_app_control_chrome_version();
+      device_policy_->allow_kiosk_app_control_chrome_version();
 
   if (!proto.has_allow_kiosk_app_control_chrome_version())
     return false;
@@ -551,11 +683,11 @@ bool DevicePolicyImpl::GetAllowKioskAppControlChromeVersion(
 bool DevicePolicyImpl::GetUsbDetachableWhitelist(
     std::vector<UsbDeviceId>* usb_whitelist) const {
   const bool has_allowlist =
-      device_policy_.has_usb_detachable_allowlist() &&
-      device_policy_.usb_detachable_allowlist().id_size() != 0;
+      device_policy_->has_usb_detachable_allowlist() &&
+      device_policy_->usb_detachable_allowlist().id_size() != 0;
   const bool has_whitelist =
-      device_policy_.has_usb_detachable_whitelist() &&
-      device_policy_.usb_detachable_whitelist().id_size() != 0;
+      device_policy_->has_usb_detachable_whitelist() &&
+      device_policy_->usb_detachable_whitelist().id_size() != 0;
 
   if (!has_allowlist && !has_whitelist)
     return false;
@@ -563,7 +695,7 @@ bool DevicePolicyImpl::GetUsbDetachableWhitelist(
   usb_whitelist->clear();
   if (has_allowlist) {
     const em::UsbDetachableAllowlistProto& proto =
-        device_policy_.usb_detachable_allowlist();
+        device_policy_->usb_detachable_allowlist();
     for (int i = 0; i < proto.id_size(); i++) {
       const em::UsbDeviceIdInclusiveProto& id = proto.id(i);
       UsbDeviceId dev_id;
@@ -573,7 +705,7 @@ bool DevicePolicyImpl::GetUsbDetachableWhitelist(
     }
   } else {
     const em::UsbDetachableWhitelistProto& proto =
-        device_policy_.usb_detachable_whitelist();
+        device_policy_->usb_detachable_whitelist();
     for (int i = 0; i < proto.id_size(); i++) {
       const em::UsbDeviceIdProto& id = proto.id(i);
       UsbDeviceId dev_id;
@@ -589,16 +721,16 @@ bool DevicePolicyImpl::GetDeviceUpdateStagingSchedule(
     std::vector<DayPercentagePair>* staging_schedule_out) const {
   staging_schedule_out->clear();
 
-  if (!device_policy_.has_auto_update_settings())
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
 
   if (!proto.has_staging_schedule())
     return false;
 
-  base::Optional<base::Value> list_val =
+  std::optional<base::Value> list_val =
       DecodeListValueFromJSON(proto.staging_schedule());
   if (!list_val)
     return false;
@@ -606,8 +738,9 @@ bool DevicePolicyImpl::GetDeviceUpdateStagingSchedule(
   for (const auto& pair_value : list_val->GetList()) {
     if (!pair_value.is_dict())
       return false;
-    base::Optional<int> days = pair_value.FindIntKey("days");
-    base::Optional<int> percentage = pair_value.FindIntKey("percentage");
+    auto& dict = pair_value.GetDict();
+    std::optional<int> days = dict.FindInt("days");
+    std::optional<int> percentage = dict.FindInt("percentage");
     if (!days.has_value() || !percentage.has_value())
       return false;
     // Limit the percentage to [0, 100] and days to [1, 28];
@@ -620,11 +753,11 @@ bool DevicePolicyImpl::GetDeviceUpdateStagingSchedule(
 
 bool DevicePolicyImpl::GetAutoLaunchedKioskAppId(
     std::string* app_id_out) const {
-  if (!device_policy_.has_device_local_accounts())
+  if (!device_policy_->has_device_local_accounts())
     return false;
 
   const em::DeviceLocalAccountsProto& local_accounts =
-      device_policy_.device_local_accounts();
+      device_policy_->device_local_accounts();
 
   // For auto-launched kiosk apps, the delay needs to be 0.
   if (local_accounts.has_auto_login_delay() &&
@@ -653,19 +786,20 @@ bool DevicePolicyImpl::GetAutoLaunchedKioskAppId(
 }
 
 bool DevicePolicyImpl::IsEnterpriseManaged() const {
-  if (policy_data_.has_management_mode())
-    return policy_data_.management_mode() == em::PolicyData::ENTERPRISE_MANAGED;
+  if (policy_data_->has_management_mode())
+    return policy_data_->management_mode() ==
+           em::PolicyData::ENTERPRISE_MANAGED;
   // Fall back to checking the request token, see management_mode documentation
   // in device_management_backend.proto.
-  return policy_data_.has_request_token();
+  return policy_data_->has_request_token();
 }
 
 bool DevicePolicyImpl::GetSecondFactorAuthenticationMode(int* mode_out) const {
-  if (!device_policy_.has_device_second_factor_authentication())
+  if (!device_policy_->has_device_second_factor_authentication())
     return false;
 
   const em::DeviceSecondFactorAuthenticationProto& proto =
-      device_policy_.device_second_factor_authentication();
+      device_policy_->device_second_factor_authentication();
 
   if (!proto.has_mode())
     return false;
@@ -674,24 +808,41 @@ bool DevicePolicyImpl::GetSecondFactorAuthenticationMode(int* mode_out) const {
   return true;
 }
 
+std::optional<bool> DevicePolicyImpl::GetRunAutomaticCleanupOnLogin() const {
+  // Only runs on enterprise devices.
+  if (!IsEnterpriseEnrolled())
+    return {};
+
+  if (!device_policy_->has_device_run_automatic_cleanup_on_login())
+    return {};
+
+  const em::BooleanPolicyProto& proto =
+      device_policy_->device_run_automatic_cleanup_on_login();
+
+  if (!proto.has_value())
+    return {};
+
+  return proto.value();
+}
+
 bool DevicePolicyImpl::GetDisallowedTimeIntervals(
     std::vector<WeeklyTimeInterval>* intervals_out) const {
   intervals_out->clear();
   if (!IsEnterpriseEnrolled())
     return false;
 
-  if (!device_policy_.has_auto_update_settings()) {
+  if (!device_policy_->has_auto_update_settings()) {
     return false;
   }
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
 
   if (!proto.has_disallowed_time_intervals()) {
     return false;
   }
 
-  base::Optional<base::Value> list_val =
+  std::optional<base::Value> list_val =
       DecodeListValueFromJSON(proto.disallowed_time_intervals());
   if (!list_val)
     return false;
@@ -701,8 +852,10 @@ bool DevicePolicyImpl::GetDisallowedTimeIntervals(
       LOG(ERROR) << "Invalid JSON string given. Interval is not a dict.";
       return false;
     }
-    const base::Value* start = interval_value.FindDictKey("start");
-    const base::Value* end = interval_value.FindDictKey("end");
+
+    const base::Value::Dict& interval_value_dict = interval_value.GetDict();
+    const base::Value::Dict* start = interval_value_dict.FindDict("start");
+    const base::Value::Dict* end = interval_value_dict.FindDict("end");
     if (!start || !end) {
       LOG(ERROR) << "Interval is missing start/end.";
       return false;
@@ -722,11 +875,11 @@ bool DevicePolicyImpl::GetDisallowedTimeIntervals(
 
 bool DevicePolicyImpl::GetDeviceQuickFixBuildToken(
     std::string* device_quick_fix_build_token) const {
-  if (!IsEnterpriseEnrolled() || !device_policy_.has_auto_update_settings())
+  if (!IsEnterpriseEnrolled() || !device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
   if (!proto.has_device_quick_fix_build_token())
     return false;
 
@@ -736,28 +889,28 @@ bool DevicePolicyImpl::GetDeviceQuickFixBuildToken(
 
 bool DevicePolicyImpl::GetDeviceDirectoryApiId(
     std::string* directory_api_id_out) const {
-  if (!policy_data_.has_directory_api_id())
+  if (!policy_data_->has_directory_api_id())
     return false;
 
-  *directory_api_id_out = policy_data_.directory_api_id();
+  *directory_api_id_out = policy_data_->directory_api_id();
   return true;
 }
 
 bool DevicePolicyImpl::GetCustomerId(std::string* customer_id_out) const {
-  if (!policy_data_.has_obfuscated_customer_id())
+  if (!policy_data_->has_obfuscated_customer_id())
     return false;
 
-  *customer_id_out = policy_data_.obfuscated_customer_id();
+  *customer_id_out = policy_data_->obfuscated_customer_id();
   return true;
 }
 
 bool DevicePolicyImpl::GetChannelDowngradeBehavior(
     int* channel_downgrade_behavior_out) const {
-  if (!device_policy_.has_auto_update_settings())
+  if (!device_policy_->has_auto_update_settings())
     return false;
 
   const em::AutoUpdateSettingsProto& proto =
-      device_policy_.auto_update_settings();
+      device_policy_->auto_update_settings();
   if (!proto.has_channel_downgrade_behavior())
     return false;
 
@@ -770,34 +923,35 @@ bool DevicePolicyImpl::GetHighestDeviceMinimumVersion(
   if (!IsEnterpriseEnrolled())
     return false;
 
-  if (!device_policy_.has_device_minimum_version())
+  if (!device_policy_->has_device_minimum_version())
     return false;
 
   const em::StringPolicyProto& policy_string(
-      device_policy_.device_minimum_version());
+      device_policy_->device_minimum_version());
   if (!policy_string.has_value())
     return false;
 
-  const base::Optional<base::Value> decoded_policy =
+  const std::optional<base::Value> decoded_policy =
       DecodeDictValueFromJSON(policy_string.value(), "device_minimum_version");
   if (!decoded_policy)
     return false;
 
-  const base::Value* requirements_entries =
-      decoded_policy->FindListKey("requirements");
-  if (!requirements_entries || requirements_entries->GetList().empty())
+  const base::Value::List* requirements_entries =
+      decoded_policy->GetDict().FindList("requirements");
+  if (!requirements_entries || requirements_entries->empty())
     return false;
 
   base::Version highest_version("0");
   bool valid_version_found = false;
-  for (const auto& version_value : requirements_entries->GetList()) {
+  for (const auto& version_value : *requirements_entries) {
     if (!version_value.is_dict()) {
       LOG(WARNING) << "Invalid JSON string given. Version is not a dictionary.";
       continue;
     }
+    const auto& version_value_dict = version_value.GetDict();
 
     const std::string* version_str =
-        version_value.FindStringKey("chromeos_version");
+        version_value_dict.FindString("chromeos_version");
     if (!version_str) {
       LOG(WARNING) << " Invalid JSON string given. Version is missing.";
       continue;
@@ -826,11 +980,11 @@ bool DevicePolicyImpl::GetHighestDeviceMinimumVersion(
 
 bool DevicePolicyImpl::GetDeviceMarketSegment(
     DeviceMarketSegment* device_market_segment) const {
-  if (!policy_data_.has_market_segment()) {
+  if (!policy_data_->has_market_segment()) {
     return false;
   }
 
-  em::PolicyData::MarketSegment market_segment = policy_data_.market_segment();
+  em::PolicyData::MarketSegment market_segment = policy_data_->market_segment();
   switch (market_segment) {
     case em::PolicyData::MARKET_SEGMENT_UNSPECIFIED:
       *device_market_segment = DeviceMarketSegment::kUnknown;
@@ -850,17 +1004,53 @@ bool DevicePolicyImpl::GetDeviceMarketSegment(
 }
 
 bool DevicePolicyImpl::GetDeviceDebugPacketCaptureAllowed(bool* allowed) const {
-  if (!device_policy_.has_device_debug_packet_capture_allowed())
+  if (!device_policy_->has_device_debug_packet_capture_allowed())
     return false;
 
   const em::DeviceDebugPacketCaptureAllowedProto& proto =
-      device_policy_.device_debug_packet_capture_allowed();
+      device_policy_->device_debug_packet_capture_allowed();
 
   if (!proto.has_allowed())
     return false;
 
   *allowed = proto.allowed();
   return true;
+}
+
+bool DevicePolicyImpl::GetDeviceKeylockerForStorageEncryptionEnabled(
+    bool* keylocker_enabled) const {
+  if (!device_policy_->has_keylocker_for_storage_encryption_enabled())
+    return false;
+
+  *keylocker_enabled =
+      device_policy_->keylocker_for_storage_encryption_enabled()
+          .has_enabled() &&
+      device_policy_->keylocker_for_storage_encryption_enabled().enabled();
+  return true;
+}
+
+std::optional<bool> DevicePolicyImpl::GetReportDeviceSecurityStatus() const {
+  if (!device_policy_->has_device_reporting())
+    return {};
+
+  const em::DeviceReportingProto& proto = device_policy_->device_reporting();
+  if (!proto.has_report_security_status())
+    return {};
+
+  return proto.report_security_status();
+}
+
+std::optional<bool> DevicePolicyImpl::GetDeviceReportXDREvents() const {
+  if (!device_policy_->has_device_report_xdr_events())
+    return {};
+
+  const em::DeviceReportXDREventsProto& proto =
+      device_policy_->device_report_xdr_events();
+
+  if (!proto.has_enabled()) {
+    return {};
+  }
+  return proto.enabled();
 }
 
 bool DevicePolicyImpl::VerifyPolicyFile(const base::FilePath& policy_path) {
@@ -889,9 +1079,9 @@ bool DevicePolicyImpl::VerifyPolicyFile(const base::FilePath& policy_path) {
 }
 
 bool DevicePolicyImpl::VerifyPolicySignature() {
-  if (policy_.has_policy_data_signature()) {
-    std::string policy_data = policy_.policy_data();
-    std::string policy_data_signature = policy_.policy_data_signature();
+  if (policy_->has_policy_data_signature()) {
+    std::string policy_data = policy_->policy_data();
+    std::string policy_data_signature = policy_->policy_data_signature();
     std::string public_key;
     if (!ReadPublicKeyFromFile(base::FilePath(keyfile_path_), &public_key)) {
       LOG(ERROR) << "Could not read owner key off disk";
@@ -909,44 +1099,71 @@ bool DevicePolicyImpl::VerifyPolicySignature() {
 
 bool DevicePolicyImpl::LoadPolicyFromFile(const base::FilePath& policy_path) {
   std::string policy_data_str;
-  if (policy::LoadPolicyFromPath(policy_path, &policy_data_str, &policy_) !=
-      LoadPolicyResult::kSuccess) {
+  if (policy::LoadPolicyFromPath(policy_path, &policy_data_str,
+                                 policy_.get()) != LoadPolicyResult::kSuccess) {
     return false;
   }
-  if (!policy_.has_policy_data()) {
+  if (!policy_->has_policy_data()) {
     LOG(ERROR) << "Policy on disk could not be parsed!";
     return false;
   }
-  if (!policy_data_.ParseFromString(policy_.policy_data()) ||
-      !policy_data_.has_policy_value()) {
-    LOG(ERROR) << "Policy on disk could not be parsed!";
+  if (!policy_data_->ParseFromString(policy_->policy_data()) ||
+      !policy_data_->has_policy_value()) {
+    LOG(ERROR) << "Policy data could not be parsed!";
     return false;
   }
 
-  bool verify_policy = verify_policy_;
   if (!install_attributes_reader_) {
     install_attributes_reader_ = std::make_unique<InstallAttributesReader>();
   }
-  const std::string& mode = install_attributes_reader_->GetAttribute(
-      InstallAttributesReader::kAttrMode);
-  if (mode == InstallAttributesReader::kDeviceModeEnterpriseAD) {
-    verify_policy = false;
-  }
-  if (verify_policy && !VerifyPolicyFile(policy_path)) {
+
+  if (verify_policy_ && !VerifyPolicyFile(policy_path)) {
     return false;
   }
 
   // Make sure the signature is still valid.
-  if (verify_policy && !VerifyPolicySignature()) {
+  if (verify_policy_ && !VerifyPolicySignature()) {
     LOG(ERROR) << "Policy signature verification failed!";
     return false;
   }
-  if (!device_policy_.ParseFromString(policy_data_.policy_value())) {
+  if (!device_policy_->ParseFromString(policy_data_->policy_value())) {
     LOG(ERROR) << "Policy on disk could not be parsed!";
     return false;
   }
 
   return true;
+}
+
+// Methods that can be used only for testing.
+void DevicePolicyImpl::set_policy_data_for_testing(
+    const enterprise_management::PolicyData& policy_data) {
+  policy_data_ =
+      std::make_unique<enterprise_management::PolicyData>(policy_data);
+}
+void DevicePolicyImpl::set_verify_root_ownership_for_testing(
+    bool verify_root_ownership) {
+  verify_root_ownership_ = verify_root_ownership;
+}
+void DevicePolicyImpl::set_install_attributes_for_testing(
+    std::unique_ptr<InstallAttributesReader> install_attributes_reader) {
+  install_attributes_reader_ = std::move(install_attributes_reader);
+}
+void DevicePolicyImpl::set_policy_for_testing(
+    const enterprise_management::ChromeDeviceSettingsProto& device_policy) {
+  device_policy_ =
+      std::make_unique<enterprise_management::ChromeDeviceSettingsProto>(
+          device_policy);
+}
+void DevicePolicyImpl::set_policy_path_for_testing(
+    const base::FilePath& policy_path) {
+  policy_path_ = policy_path;
+}
+void DevicePolicyImpl::set_key_file_path_for_testing(
+    const base::FilePath& keyfile_path) {
+  keyfile_path_ = keyfile_path;
+}
+void DevicePolicyImpl::set_verify_policy_for_testing(bool value) {
+  verify_policy_ = value;
 }
 
 }  // namespace policy

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/receiver.h>
@@ -26,6 +25,11 @@ class SmbFsImpl : public mojom::SmbFs {
   explicit SmbFsImpl(base::WeakPtr<SmbFilesystem> fs,
                      mojo::PendingReceiver<mojom::SmbFs> receiver,
                      const base::FilePath& password_file_path);
+
+  SmbFsImpl() = delete;
+  SmbFsImpl(const SmbFsImpl&) = delete;
+  SmbFsImpl& operator=(const SmbFsImpl&) = delete;
+
   ~SmbFsImpl() override;
 
  private:
@@ -37,8 +41,6 @@ class SmbFsImpl : public mojom::SmbFs {
   base::WeakPtr<SmbFilesystem> fs_;
   mojo::Receiver<mojom::SmbFs> receiver_;
   const base::FilePath password_file_path_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(SmbFsImpl);
 };
 
 }  // namespace smbfs

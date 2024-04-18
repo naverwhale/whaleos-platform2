@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,7 +25,7 @@ class PcaHttpUtils {
   // An interface that is related to |brillo::http::GetChromeProxyServersAsync|.
   virtual void GetChromeProxyServersAsync(
       const std::string& url,
-      const brillo::http::GetChromeProxyServersCallback& callback) = 0;
+      brillo::http::GetChromeProxyServersCallback callback) = 0;
 };
 
 }  // namespace pca_agent

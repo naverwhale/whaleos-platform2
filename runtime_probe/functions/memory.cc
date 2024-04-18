@@ -1,8 +1,9 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "runtime_probe/functions/memory.h"
+#include "runtime_probe/system/context.h"
 
 #include <algorithm>
 #include <memory>
@@ -20,7 +21,7 @@ namespace runtime_probe {
 
 namespace {
 
-constexpr char kSysfsDmiPath[] = "/sys/firmware/dmi/entries";
+constexpr char kSysfsDmiPath[] = "sys/firmware/dmi/entries";
 constexpr auto kMemoryType = 17;
 
 // Refer to SMBIOS specification.
@@ -64,6 +65,7 @@ uint16_t MemorySize(uint16_t size) {
 // SmbiosString gets the string associated with the given SMBIOS raw data.
 // If the arguments are valid, |id|-th string in the SMBIOS string table is
 // returned; otherwise, nullptr is returned.
+// See 6.1.3 Text strings in SMBIOS specification for more information.
 std::unique_ptr<std::string> SmbiosString(const std::vector<uint8_t>& blob,
                                           uint8_t skip_bytes,
                                           uint8_t id) {
@@ -116,14 +118,14 @@ std::unique_ptr<DmiMemory> GetDmiMemoryFromBlobData(
 MemoryFunction::DataType GetMemoryInfo() {
   MemoryFunction::DataType results{};
 
-  const base::FilePath dmi_dirname(kSysfsDmiPath);
+  const base::FilePath dmi_dirname(
+      Context::Get()->root_dir().Append(kSysfsDmiPath));
   for (int entry = 0;; ++entry) {
     const base::FilePath dmi_basename(
         base::StringPrintf("%d-%d", kMemoryType, entry));
     auto dmi_path = dmi_dirname.Append(dmi_basename);
     if (!base::DirectoryExists(dmi_path))
       break;
-    base::Value info(base::Value::Type::DICTIONARY);
     std::string raw_bytes;
     if (!base::ReadFileToString(dmi_path.Append("raw"), &raw_bytes)) {
       LOG(ERROR) << "Failed to read file in sysfs: " << dmi_path.value();
@@ -140,13 +142,14 @@ MemoryFunction::DataType GetMemoryInfo() {
     // The field "slot" denotes to the entry number instead of the physical slot
     // number, which refers to mosys' output. To be compatible with current
     // HWID, we still preserve this field.
-    info.SetIntKey("slot", entry);
-    info.SetStringKey("path", dmi_path.value());
-    info.SetIntKey("size", dmi_memory->size);
-    info.SetIntKey("speed", dmi_memory->speed);
-    info.SetStringKey("locator", dmi_memory->locator);
-    info.SetStringKey("part", dmi_memory->part_number);
-    results.push_back(std::move(info));
+    auto info = base::Value::Dict()
+                    .Set("slot", entry)
+                    .Set("path", dmi_path.value())
+                    .Set("size", dmi_memory->size)
+                    .Set("speed", dmi_memory->speed)
+                    .Set("locator", dmi_memory->locator)
+                    .Set("part", dmi_memory->part_number);
+    results.Append(std::move(info));
   }
 
   return results;

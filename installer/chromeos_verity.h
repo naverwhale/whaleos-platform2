@@ -1,4 +1,4 @@
-/* Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+/* Copyright 2012 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,6 +9,10 @@
 #include <stdint.h>
 
 #include <string>
+
+#include <base/files/file_path.h>
+
+#include <verity/dm-bht.h>
 
 /* chromeos_verity
  * This calculated the verity hash-trie for a filesystem and places it
@@ -21,12 +25,13 @@
  * @salt - ascii string with a salt value to add before calculating each hash
  * @expected - ascii string with the exptected final root hash value
  * @enforce_rootfs_verification - bool indicating whether we should complain if
- *   expected doesn't match
+ *   expected doesn't matchp
  * return - 0 for success, non-zero indicates failure
  *
  */
-int chromeos_verity(const std::string& alg,
-                    const std::string& device,
+int chromeos_verity(verity::DmBhtInterface* bht,
+                    const std::string& alg,
+                    const base::FilePath& device,
                     unsigned blocksize,
                     uint64_t fs_blocks,
                     const std::string& salt,

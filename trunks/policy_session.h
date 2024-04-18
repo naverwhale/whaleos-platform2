@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,6 @@
 #include <map>
 #include <string>
 #include <vector>
-
-#include <base/macros.h>
 
 #include "trunks/tpm_generated.h"
 
@@ -139,6 +137,15 @@ class PolicySession {
       const std::vector<FIDO_DATA_RANGE>& auth_data_descr,
       const TPMT_SIGNATURE& signature,
       AuthorizationDelegate* delegate) = 0;
+
+  // This method binds the PolicySession to a provided NV index based on the
+  // given |offset|, |operand| and |operation|.
+  virtual TPM_RC PolicyNV(uint32_t index,
+                          uint32_t offset,
+                          bool using_owner_authorization,
+                          TPM2B_OPERAND operand,
+                          TPM_EO operation,
+                          AuthorizationDelegate* delegate) = 0;
 };
 
 }  // namespace trunks

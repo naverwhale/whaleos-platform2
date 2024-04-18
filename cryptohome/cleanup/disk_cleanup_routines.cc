@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,7 +26,8 @@ DiskCleanupRoutines::DiskCleanupRoutines(HomeDirs* homedirs, Platform* platform)
 
 DiskCleanupRoutines::~DiskCleanupRoutines() = default;
 
-bool DiskCleanupRoutines::DeleteUserCache(const std::string& obfuscated) {
+bool DiskCleanupRoutines::DeleteUserCache(
+    const ObfuscatedUsername& obfuscated) {
   FilePath user_dir = GetShadowDir(obfuscated);
 
   FilePath cache;
@@ -45,7 +46,8 @@ bool DiskCleanupRoutines::DeleteUserCache(const std::string& obfuscated) {
   return true;
 }
 
-bool DiskCleanupRoutines::DeleteUserGCache(const std::string& obfuscated) {
+bool DiskCleanupRoutines::DeleteUserGCache(
+    const ObfuscatedUsername& obfuscated) {
   FilePath user_dir = GetShadowDir(obfuscated);
 
   bool ret = true;
@@ -96,8 +98,18 @@ bool DiskCleanupRoutines::DeleteUserGCache(const std::string& obfuscated) {
   return ret;
 }
 
+bool DiskCleanupRoutines::DeleteCacheVault(
+    const ObfuscatedUsername& obfuscated) {
+  if (!homedirs_->DmcryptCacheContainerExists(obfuscated))
+    return true;
+
+  VLOG(1) << "Deleting Cache Volume for " << obfuscated;
+
+  return homedirs_->RemoveDmcryptCacheContainer(obfuscated);
+}
+
 bool DiskCleanupRoutines::DeleteUserAndroidCache(
-    const std::string& obfuscated) {
+    const ObfuscatedUsername& obfuscated) {
   FilePath user_dir = GetShadowDir(obfuscated);
 
   bool ret = true;
@@ -119,9 +131,8 @@ bool DiskCleanupRoutines::DeleteUserAndroidCache(
   // as the inodes may have been re-used elsewhere if the cache directory was
   // deleted.
   std::set<std::pair<const FilePath, ino_t>> cache_inodes;
-  std::unique_ptr<cryptohome::FileEnumerator> file_enumerator(
-      platform_->GetFileEnumerator(root, true,
-                                   base::FileEnumerator::DIRECTORIES));
+  std::unique_ptr<FileEnumerator> file_enumerator(platform_->GetFileEnumerator(
+      root, true, base::FileEnumerator::DIRECTORIES));
   FilePath next_path;
   while (!(next_path = file_enumerator->Next()).empty()) {
     ino_t inode = file_enumerator->GetInfo().stat().st_ino;
@@ -154,7 +165,8 @@ bool DiskCleanupRoutines::DeleteUserAndroidCache(
   return ret;
 }
 
-bool DiskCleanupRoutines::DeleteUserProfile(const std::string& obfuscated) {
+bool DiskCleanupRoutines::DeleteUserProfile(
+    const ObfuscatedUsername& obfuscated) {
   FilePath shadow_dir = GetShadowDir(obfuscated);
 
   if (!homedirs_->Remove(obfuscated)) {
@@ -166,8 +178,8 @@ bool DiskCleanupRoutines::DeleteUserProfile(const std::string& obfuscated) {
 }
 
 base::FilePath DiskCleanupRoutines::GetShadowDir(
-    const std::string& obfuscated) const {
-  return ShadowRoot().Append(obfuscated);
+    const ObfuscatedUsername& obfuscated) const {
+  return ShadowRoot().Append(*obfuscated);
 }
 
 bool DiskCleanupRoutines::GetTrackedDirectory(const FilePath& user_dir,
@@ -193,8 +205,7 @@ bool DiskCleanupRoutines::GetTrackedDirectoryForDirCrypto(
 
   // Iterate over name components. This way, we don't have to inspect every
   // directory under |mount_dir|.
-  std::vector<std::string> name_components;
-  tracked_dir_name.GetComponents(&name_components);
+  std::vector<std::string> name_components = tracked_dir_name.GetComponents();
   for (const auto& name_component : name_components) {
     FilePath next_path;
     std::unique_ptr<FileEnumerator> enumerator(
@@ -259,6 +270,55 @@ bool DiskCleanupRoutines::RemoveAllRemovableFiles(const FilePath& dir) {
     }
   }
 
+  return ret;
+}
+
+bool DiskCleanupRoutines::DeleteDaemonStoreCache(
+    const ObfuscatedUsername& obfuscated) {
+  FilePath user_dir = GetShadowDir(obfuscated);
+
+  const FilePath root_home_dir = FilePath(kRootHomeSuffix);
+
+  FilePath daemon_store_cache;
+  if (!GetTrackedDirectory(
+          user_dir, FilePath(kRootHomeSuffix).Append(kDaemonStoreCacheDir),
+          &daemon_store_cache)) {
+    LOG(ERROR) << "Failed to locate Daemon Store Cache directory";
+    return false;
+  }
+
+  VLOG(1) << "Deleting Daemon Store Cache " << daemon_store_cache.value();
+  // Daemon store cache dirs that can be completely removed on low disk space.
+  if (!DeleteDirectoryContents(daemon_store_cache)) {
+    LOG(ERROR) << "Failed to remove Daemon Store Cache directory";
+    return false;
+  }
+
+  return true;
+}
+
+bool DiskCleanupRoutines::DeleteDaemonStoreCacheMountedUsers() {
+  bool ret = true;
+
+  // Daemon store cache dirs that can be completely removed on low disk space.
+  const FilePath cache_dir = FilePath(kRunDaemonStoreCacheBaseDir);
+
+  std::unique_ptr<FileEnumerator> daemon_fe(platform_->GetFileEnumerator(
+      cache_dir, false, base::FileEnumerator::DIRECTORIES));
+
+  for (FilePath daemon_dir = daemon_fe->Next(); !daemon_dir.empty();
+       daemon_dir = daemon_fe->Next()) {
+    std::unique_ptr<FileEnumerator> user_fe(platform_->GetFileEnumerator(
+        daemon_dir, false, base::FileEnumerator::DIRECTORIES));
+    for (FilePath user_dir = user_fe->Next(); !user_dir.empty();
+         user_dir = user_fe->Next()) {
+      VLOG(1) << "Deleting mounted daemon-store-cache:" << user_dir.value();
+      if (!DeleteDirectoryContents(user_dir)) {
+        LOG(ERROR) << "Failed to remove Daemon Store Cache directory";
+        ret = false;
+      }
+    }
+  }
   return ret;
 }
 

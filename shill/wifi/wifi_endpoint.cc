@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,9 +27,6 @@ namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kWiFi;
-static std::string ObjectID(const WiFiEndpoint* w) {
-  return "(wifi_endpoint)";
-}
 }  // namespace Logging
 
 namespace {
@@ -38,6 +35,9 @@ void PackSecurity(const WiFiEndpoint::SecurityFlags& flags,
                   KeyValueStore* args) {
   Strings wpa, rsn;
 
+  if (flags.rsn_8021x_wpa3)
+    rsn.push_back(std::string(WPASupplicant::kKeyManagementMethodPrefixEAP) +
+                  std::string(WPASupplicant::kKeyManagementMethodSuiteB));
   if (flags.rsn_sae)
     rsn.push_back(WPASupplicant::kKeyManagementMethodSAE);
   if (flags.rsn_8021x) {
@@ -94,19 +94,18 @@ WiFiEndpoint::WiFiEndpoint(ControlInterface* control_interface,
       rpc_id_(rpc_id) {
   signal_strength_ = properties.Get<int16_t>(WPASupplicant::kBSSPropertySignal);
   if (properties.Contains<uint32_t>(WPASupplicant::kBSSPropertyAge)) {
-    last_seen_ = base::TimeTicks::Now() -
-                 base::TimeDelta::FromSeconds(
-                     properties.Get<uint32_t>(WPASupplicant::kBSSPropertyAge));
+    last_seen_ =
+        base::Time::Now() -
+        base::Seconds(properties.Get<uint32_t>(WPASupplicant::kBSSPropertyAge));
   } else {
-    last_seen_ = base::TimeTicks();
+    last_seen_ = base::Time();
   }
   if (properties.Contains<uint16_t>(WPASupplicant::kBSSPropertyFrequency)) {
     frequency_ = properties.Get<uint16_t>(WPASupplicant::kBSSPropertyFrequency);
   }
 
   Metrics::WiFiNetworkPhyMode phy_mode = Metrics::kWiFiNetworkPhyModeUndef;
-  if (!ParseIEs(properties, &phy_mode, &vendor_information_, &country_code_,
-                &supported_features_)) {
+  if (!ParseIEs(properties, &phy_mode)) {
     phy_mode = DeterminePhyModeFromFrequency(properties, frequency_);
   }
   physical_mode_ = phy_mode;
@@ -133,7 +132,7 @@ void WiFiEndpoint::Start() {
 }
 
 void WiFiEndpoint::PropertiesChanged(const KeyValueStore& properties) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   bool should_notify = false;
   if (properties.Contains<int16_t>(WPASupplicant::kBSSPropertySignal)) {
     signal_strength_ =
@@ -142,9 +141,9 @@ void WiFiEndpoint::PropertiesChanged(const KeyValueStore& properties) {
   }
 
   if (properties.Contains<uint32_t>(WPASupplicant::kBSSPropertyAge)) {
-    last_seen_ = base::TimeTicks::Now() -
-                 base::TimeDelta::FromSeconds(
-                     properties.Get<uint32_t>(WPASupplicant::kBSSPropertyAge));
+    last_seen_ =
+        base::Time::Now() -
+        base::Seconds(properties.Get<uint32_t>(WPASupplicant::kBSSPropertyAge));
     should_notify = true;
   }
 
@@ -153,8 +152,8 @@ void WiFiEndpoint::PropertiesChanged(const KeyValueStore& properties) {
         ParseMode(properties.Get<std::string>(WPASupplicant::kBSSPropertyMode));
     if (!new_mode.empty() && new_mode != network_mode_) {
       network_mode_ = new_mode;
-      SLOG(this, 2) << "WiFiEndpoint " << bssid_string_ << " mode is now "
-                    << network_mode_;
+      SLOG(2) << "WiFiEndpoint " << bssid_string_ << " mode is now "
+              << network_mode_;
       should_notify = true;
     }
   }
@@ -167,19 +166,20 @@ void WiFiEndpoint::PropertiesChanged(const KeyValueStore& properties) {
         metrics_->NotifyApChannelSwitch(frequency_, new_frequency);
       }
       if (device_->GetCurrentEndpoint().get() == this) {
-        SLOG(this, 2) << "Current WiFiEndpoint " << bssid_string_
-                      << " frequency " << frequency_ << " -> " << new_frequency;
+        SLOG(2) << "Current WiFiEndpoint " << bssid_string_ << " frequency "
+                << frequency_ << " -> " << new_frequency;
       }
       frequency_ = new_frequency;
       should_notify = true;
     }
   }
 
-  const char* new_security_mode = ParseSecurity(properties, &security_flags_);
+  WiFiSecurity::Mode new_security_mode =
+      ParseSecurity(properties, &security_flags_);
   if (new_security_mode != security_mode()) {
     security_mode_ = new_security_mode;
-    SLOG(this, 2) << "WiFiEndpoint " << bssid_string_ << " security is now "
-                  << security_mode();
+    SLOG(2) << "WiFiEndpoint " << bssid_string_ << " security is now "
+            << security_mode();
     should_notify = true;
   }
 
@@ -193,8 +193,8 @@ void WiFiEndpoint::UpdateSignalStrength(int16_t strength) {
     return;
   }
 
-  SLOG(this, 2) << __func__ << ": signal strength " << signal_strength_
-                << " -> " << strength;
+  SLOG(2) << __func__ << ": signal strength " << signal_strength_ << " -> "
+          << strength;
   signal_strength_ = strength;
   device_->NotifyEndpointChanged(this);
 }
@@ -251,6 +251,10 @@ const std::string& WiFiEndpoint::ssid_hex() const {
   return ssid_hex_;
 }
 
+const std::vector<uint8_t>& WiFiEndpoint::bssid() const {
+  return bssid_;
+}
+
 const std::string& WiFiEndpoint::bssid_string() const {
   return bssid_string_;
 }
@@ -271,7 +275,7 @@ int16_t WiFiEndpoint::signal_strength() const {
   return signal_strength_;
 }
 
-base::TimeTicks WiFiEndpoint::last_seen() const {
+base::Time WiFiEndpoint::last_seen() const {
   return last_seen_;
 }
 
@@ -287,7 +291,7 @@ const std::string& WiFiEndpoint::network_mode() const {
   return network_mode_;
 }
 
-const std::string& WiFiEndpoint::security_mode() const {
+WiFiSecurity::Mode WiFiEndpoint::security_mode() const {
   return security_mode_;
 }
 
@@ -318,6 +322,10 @@ const WiFiEndpoint::HS20Information& WiFiEndpoint::hs20_information() const {
 
 bool WiFiEndpoint::mbo_support() const {
   return supported_features_.mbo_support;
+}
+
+const WiFiEndpoint::QosSupport& WiFiEndpoint::qos_support() const {
+  return supported_features_.qos_support;
 }
 
 // static
@@ -373,7 +381,7 @@ std::string WiFiEndpoint::ParseMode(const std::string& mode_string) {
              mode_string == WPASupplicant::kNetworkModeAccessPoint ||
              mode_string == WPASupplicant::kNetworkModeP2P ||
              mode_string == WPASupplicant::kNetworkModeMesh) {
-    SLOG(nullptr, 2) << "Shill does not support mode: " << mode_string;
+    SLOG(2) << "Shill does not support mode: " << mode_string;
     return "";
   } else {
     LOG(ERROR) << "Unknown WiFi endpoint mode: " << mode_string;
@@ -382,16 +390,19 @@ std::string WiFiEndpoint::ParseMode(const std::string& mode_string) {
 }
 
 // static
-const char* WiFiEndpoint::ParseSecurity(const KeyValueStore& properties,
-                                        SecurityFlags* flags) {
+WiFiSecurity::Mode WiFiEndpoint::ParseSecurity(const KeyValueStore& properties,
+                                               SecurityFlags* flags) {
   if (properties.Contains<KeyValueStore>(WPASupplicant::kPropertyRSN)) {
     KeyValueStore rsn_properties =
         properties.Get<KeyValueStore>(WPASupplicant::kPropertyRSN);
     std::set<KeyManagement> key_management;
     ParseKeyManagementMethods(rsn_properties, &key_management);
+    flags->rsn_8021x_wpa3 =
+        base::Contains(key_management, kKeyManagement802_1x_Wpa3);
     flags->rsn_8021x = base::Contains(key_management, kKeyManagement802_1x);
     flags->rsn_psk = base::Contains(key_management, kKeyManagementPSK);
     flags->rsn_sae = base::Contains(key_management, kKeyManagementSAE);
+    flags->rsn_owe = base::Contains(key_management, kKeyManagementOWE);
   }
 
   if (properties.Contains<KeyValueStore>(WPASupplicant::kPropertyWPA)) {
@@ -407,18 +418,26 @@ const char* WiFiEndpoint::ParseSecurity(const KeyValueStore& properties,
     flags->privacy = properties.Get<bool>(WPASupplicant::kPropertyPrivacy);
   }
 
-  if (flags->rsn_8021x || flags->wpa_8021x) {
-    return kSecurity8021x;
+  if (flags->rsn_8021x_wpa3) {
+    return flags->rsn_8021x ? WiFiSecurity::kWpa2Wpa3Enterprise
+                            : WiFiSecurity::kWpa3Enterprise;
+  } else if (flags->rsn_8021x) {
+    return flags->wpa_8021x ? WiFiSecurity::kWpaWpa2Enterprise
+                            : WiFiSecurity::kWpa2Enterprise;
+  } else if (flags->wpa_8021x) {
+    return WiFiSecurity::kWpaEnterprise;
   } else if (flags->rsn_sae) {
-    return kSecurityWpa3;
+    return flags->rsn_psk ? WiFiSecurity::kWpa2Wpa3 : WiFiSecurity::kWpa3;
   } else if (flags->rsn_psk) {
-    return kSecurityRsn;
+    return flags->wpa_psk ? WiFiSecurity::kWpaWpa2 : WiFiSecurity::kWpa2;
   } else if (flags->wpa_psk) {
-    return kSecurityWpa;
+    return WiFiSecurity::kWpa;
+  } else if (flags->rsn_owe) {
+    return WiFiSecurity::kOwe;
   } else if (flags->privacy) {
-    return kSecurityWep;
+    return WiFiSecurity::kWep;
   } else {
-    return kSecurityNone;
+    return WiFiSecurity::kNone;
   }
 }
 
@@ -438,6 +457,16 @@ void WiFiEndpoint::ParseKeyManagementMethods(
   for (const auto& method : key_management_vec) {
     if (method == WPASupplicant::kKeyManagementMethodSAE) {
       key_management_methods->insert(kKeyManagementSAE);
+    } else if (method == WPASupplicant::kKeyManagementMethodOWE) {
+      key_management_methods->insert(kKeyManagementOWE);
+    } else if (base::StartsWith(method,
+                                WPASupplicant::kKeyManagementMethodPrefixEAP) &&
+               (base::Contains(method,
+                               WPASupplicant::kKeyManagementMethodSuiteB) ||
+                base::EndsWith(
+                    method, WPASupplicant::kKeyManagementMethodSuffixEAPSHA256,
+                    base::CompareCase::SENSITIVE))) {
+      key_management_methods->insert(kKeyManagement802_1x_Wpa3);
     } else if (base::StartsWith(method,
                                 WPASupplicant::kKeyManagementMethodPrefixEAP) ||
                base::EndsWith(method,
@@ -446,7 +475,10 @@ void WiFiEndpoint::ParseKeyManagementMethods(
       key_management_methods->insert(kKeyManagement802_1x);
     } else if (base::EndsWith(method,
                               WPASupplicant::kKeyManagementMethodSuffixPSK,
-                              base::CompareCase::SENSITIVE)) {
+                              base::CompareCase::SENSITIVE) ||
+               base::EndsWith(
+                   method, WPASupplicant::kKeyManagementMethodSuffixPSKSHA256,
+                   base::CompareCase::SENSITIVE)) {
       key_management_methods->insert(kKeyManagementPSK);
     }
   }
@@ -480,15 +512,11 @@ Metrics::WiFiNetworkPhyMode WiFiEndpoint::DeterminePhyModeFromFrequency(
   return phy_mode;
 }
 
-// static
 bool WiFiEndpoint::ParseIEs(const KeyValueStore& properties,
-                            Metrics::WiFiNetworkPhyMode* phy_mode,
-                            VendorInformation* vendor_information,
-                            std::string* country_code,
-                            SupportedFeatures* supported_features) {
+                            Metrics::WiFiNetworkPhyMode* phy_mode) {
   if (!properties.Contains<std::vector<uint8_t>>(
           WPASupplicant::kBSSPropertyIEs)) {
-    SLOG(nullptr, 2) << __func__ << ": No IE property in BSS.";
+    SLOG(2) << __func__ << ": No IE property in BSS.";
     return false;
   }
   auto ies =
@@ -527,7 +555,7 @@ bool WiFiEndpoint::ParseIEs(const KeyValueStore& properties,
     }
     switch (*it) {
       case IEEE_80211::kElemIdBSSMaxIdlePeriod:
-        supported_features->krv_support.bss_max_idle_period_supported = true;
+        supported_features_.krv_support.bss_max_idle_period_supported = true;
         break;
       case IEEE_80211::kElemIdCountry:
         // Retrieve 2-character country code from the beginning of the element.
@@ -538,7 +566,7 @@ bool WiFiEndpoint::ParseIEs(const KeyValueStore& properties,
           // coherence check.
           if (base::IsStringASCII(country)) {
             found_country = true;
-            *country_code = country;
+            country_code_ = country;
           }
         }
         break;
@@ -546,8 +574,7 @@ bool WiFiEndpoint::ParseIEs(const KeyValueStore& properties,
         found_erp = true;
         break;
       case IEEE_80211::kElemIdExtendedCap:
-        ParseExtendedCapabilities(it + 2, it + ie_len,
-                                  &supported_features->krv_support);
+        ParseExtendedCapabilities(it + 2, it + ie_len, &supported_features_);
         break;
       case IEEE_80211::kElemIdHTCap:
       case IEEE_80211::kElemIdHTInfo:
@@ -556,7 +583,7 @@ bool WiFiEndpoint::ParseIEs(const KeyValueStore& properties,
       case IEEE_80211::kElemIdMDE:
         found_mde = true;
         ParseMobilityDomainElement(it + 2, it + ie_len,
-                                   &supported_features->krv_support);
+                                   &supported_features_.krv_support);
         break;
       case IEEE_80211::kElemIdPowerConstraint:
         found_power_constraint = true;
@@ -568,8 +595,7 @@ bool WiFiEndpoint::ParseIEs(const KeyValueStore& properties,
         ParseWPACapabilities(it + 2, it + ie_len, &found_ft_cipher);
         break;
       case IEEE_80211::kElemIdVendor:
-        ParseVendorIE(it + 2, it + ie_len, vendor_information,
-                      supported_features);
+        ParseVendorIE(it + 2, it + ie_len);
         break;
       case IEEE_80211::kElemIdVHTCap:
       case IEEE_80211::kElemIdVHTOperation:
@@ -583,25 +609,25 @@ bool WiFiEndpoint::ParseIEs(const KeyValueStore& properties,
               found_he = true;
               break;
             default:
-              SLOG(nullptr, 5) << __func__ << ": Element ID Extension "
-                               << *(it + 2) << " not supported.";
+              SLOG(5) << __func__ << ": Element ID Extension " << *(it + 2)
+                      << " not supported.";
               break;
           }
         }
 
         break;
       default:
-        SLOG(nullptr, 5) << __func__ << ": parsing of " << *it
-                         << " type IE not supported.";
+        SLOG(5) << __func__ << ": parsing of " << *it
+                << " type IE not supported.";
     }
   }
-  supported_features->krv_support.neighbor_list_supported =
+  supported_features_.krv_support.neighbor_list_supported =
       found_country && found_power_constraint && found_rm_enabled_cap;
-  supported_features->krv_support.ota_ft_supported =
+  supported_features_.krv_support.ota_ft_supported =
       found_mde && found_ft_cipher;
-  supported_features->krv_support.otds_ft_supported =
-      supported_features->krv_support.otds_ft_supported &&
-      supported_features->krv_support.ota_ft_supported;
+  supported_features_.krv_support.otds_ft_supported =
+      supported_features_.krv_support.otds_ft_supported &&
+      supported_features_.krv_support.ota_ft_supported;
   if (found_he) {
     *phy_mode = Metrics::kWiFiNetworkPhyMode11ax;
   } else if (found_vht) {
@@ -640,7 +666,7 @@ void WiFiEndpoint::ParseMobilityDomainElement(
 void WiFiEndpoint::ParseExtendedCapabilities(
     std::vector<uint8_t>::const_iterator ie,
     std::vector<uint8_t>::const_iterator end,
-    Ap80211krvSupport* krv_support) {
+    SupportedFeatures* supported_features) {
   // Format of an Extended Capabilities Element:
   //        n
   // +--------------+
@@ -650,14 +676,33 @@ void WiFiEndpoint::ParseExtendedCapabilities(
   // advertised by the STA transmitting the element. See section 8.4.2.29 of
   // the IEEE 802.11-2012 for a list of capabilities and their corresponding
   // bit positions.
-  if (std::distance(ie, end) < IEEE_80211::kExtendedCapOctetMax) {
-    return;
+  supported_features->krv_support.bss_transition_supported =
+      GetExtendedCapability(ie, end, IEEE_80211::kExtendedCapOctet2,
+                            IEEE_80211::kExtendedCapBit3);
+  supported_features->krv_support.dms_supported = GetExtendedCapability(
+      ie, end, IEEE_80211::kExtendedCapOctet3, IEEE_80211::kExtendedCapBit2);
+  supported_features->qos_support.scs_supported = GetExtendedCapability(
+      ie, end, IEEE_80211::kExtendedCapOctet6, IEEE_80211::kExtendedCapBit6);
+  supported_features->qos_support.alternate_edca_supported =
+      GetExtendedCapability(ie, end, IEEE_80211::kExtendedCapOctet7,
+                            IEEE_80211::kExtendedCapBit0);
+  supported_features->qos_support.mscs_supported = GetExtendedCapability(
+      ie, end, IEEE_80211::kExtendedCapOctet10, IEEE_80211::kExtendedCapBit5);
+}
+
+// static
+bool WiFiEndpoint::GetExtendedCapability(
+    std::vector<uint8_t>::const_iterator ie,
+    std::vector<uint8_t>::const_iterator end,
+    IEEE_80211::ExtendedCapOctet octet,
+    uint8_t bit) {
+  // According to IEEE802.11-2020 (section 9.4.2.26) if fewer bits are received
+  // in an Extended Capabilities field, the rest of the Extended Capabilities
+  // field bits are assumed to be zero.
+  if (std::distance(ie, end) < octet + 1) {
+    return false;
   }
-  krv_support->bss_transition_supported =
-      (*(ie + IEEE_80211::kExtendedCapOctet2) & IEEE_80211::kExtendedCapBit3) !=
-      0;
-  krv_support->dms_supported = (*(ie + IEEE_80211::kExtendedCapOctet3) &
-                                IEEE_80211::kExtendedCapBit2) != 0;
+  return (*(ie + octet) & bit) != 0;
 }
 
 // static
@@ -733,11 +778,8 @@ void WiFiEndpoint::ParseWPACapabilities(
   }
 }
 
-// static
 void WiFiEndpoint::ParseVendorIE(std::vector<uint8_t>::const_iterator ie,
-                                 std::vector<uint8_t>::const_iterator end,
-                                 VendorInformation* vendor_information,
-                                 SupportedFeatures* supported_features) {
+                                 std::vector<uint8_t>::const_iterator end) {
   // Format of an vendor-specific information element (with type
   // and length field for the IE removed by the caller):
   //        3           1       1 - 248
@@ -745,12 +787,17 @@ void WiFiEndpoint::ParseVendorIE(std::vector<uint8_t>::const_iterator ie,
   // | OUI        | OUI Type | Data           |
   // +------------+----------+----------------+
   if (std::distance(ie, end) < 4) {
-    LOG(ERROR) << __func__ << ": no room in IE for OUI and type field.";
+    LOG(WARNING) << __func__ << ": no room in IE for OUI and type field.";
     return;
   }
   uint32_t oui = (*ie << 16) | (*(ie + 1) << 8) | *(ie + 2);
   uint8_t oui_type = *(ie + 3);
   ie += 4;
+
+  if (oui != IEEE_80211::kOUIVendorEpigram &&
+      oui != IEEE_80211::kOUIVendorMicrosoft) {
+    vendor_information_.oui_set.insert(oui);
+  }
 
   if (oui == IEEE_80211::kOUIVendorMicrosoft &&
       oui_type == IEEE_80211::kOUIMicrosoftWPS) {
@@ -764,23 +811,24 @@ void WiFiEndpoint::ParseVendorIE(std::vector<uint8_t>::const_iterator ie,
       int element_length = (*(ie + 2) << 8) | *(ie + 3);
       ie += 4;
       if (std::distance(ie, end) < element_length) {
-        LOG(ERROR) << __func__ << ": WPS element extends past containing PDU.";
+        LOG(WARNING) << __func__
+                     << ": WPS element extends past containing PDU.";
         break;
       }
       std::string s(ie, ie + element_length);
       if (base::IsStringASCII(s)) {
         switch (element_type) {
           case IEEE_80211::kWPSElementManufacturer:
-            vendor_information->wps_manufacturer = s;
+            vendor_information_.wps_manufacturer = s;
             break;
           case IEEE_80211::kWPSElementModelName:
-            vendor_information->wps_model_name = s;
+            vendor_information_.wps_model_name = s;
             break;
           case IEEE_80211::kWPSElementModelNumber:
-            vendor_information->wps_model_number = s;
+            vendor_information_.wps_model_number = s;
             break;
           case IEEE_80211::kWPSElementDeviceName:
-            vendor_information->wps_device_name = s;
+            vendor_information_.wps_device_name = s;
             break;
         }
       }
@@ -805,19 +853,24 @@ void WiFiEndpoint::ParseVendorIE(std::vector<uint8_t>::const_iterator ie,
     // | PPS MO ID Present | DGAF Disabled |
     // +-------------------+---------------+
     if (std::distance(ie, end) < 1) {
-      LOG(ERROR) << __func__ << ": no room in Hotspot 2.0 indication element"
-                 << " for Hotspot Configuration field.";
+      LOG(WARNING) << __func__ << ": no room in Hotspot 2.0 indication element"
+                   << " for Hotspot Configuration field.";
       return;
     }
-    supported_features->hs20_information.supported = true;
+    supported_features_.hs20_information.supported = true;
     // Parse out the version number from the Hotspot Configuration field.
-    supported_features->hs20_information.version = (*ie & 0xf0) >> 4;
+    supported_features_.hs20_information.version = (*ie & 0xf0) >> 4;
   } else if (oui == IEEE_80211::kOUIVendorWiFiAlliance &&
              oui_type == IEEE_80211::kOUITypeWiFiAllianceMBO) {
-    supported_features->mbo_support = true;
-  } else if (oui != IEEE_80211::kOUIVendorEpigram &&
-             oui != IEEE_80211::kOUIVendorMicrosoft) {
-    vendor_information->oui_set.insert(oui);
+    supported_features_.mbo_support = true;
+  } else if (oui == IEEE_80211::kOUIVendorCiscoAironet &&
+             oui_type == IEEE_80211::kOUITypeCiscoExtendedCapabilitiesIE) {
+    if (std::distance(ie, end) < 1) {
+      LOG(WARNING) << __func__ << ": Cisco Extended Capabilities IE too short";
+      return;
+    }
+    supported_features_.krv_support.adaptive_ft_supported =
+        *ie & IEEE_80211::kCiscoExtendedCapabilitiesAdaptiveFT;
   }
 }
 
@@ -826,6 +879,24 @@ void WiFiEndpoint::CheckForTetheringSignature() {
       Tethering::IsAndroidBSSID(bssid_) ||
       (Tethering::IsLocallyAdministeredBSSID(bssid_) &&
        Tethering::HasIosOui(vendor_information_.oui_set));
+}
+
+Metrics::WiFiConnectionAttemptInfo::ApSupportedFeatures
+WiFiEndpoint::ToApSupportedFeatures() const {
+  Metrics::WiFiConnectionAttemptInfo::ApSupportedFeatures ap_features;
+  ap_features.krv_info.neighbor_list_supported =
+      krv_support().neighbor_list_supported;
+  ap_features.krv_info.ota_ft_supported = krv_support().ota_ft_supported;
+  ap_features.krv_info.otds_ft_supported = krv_support().otds_ft_supported;
+  ap_features.krv_info.dms_supported = krv_support().dms_supported;
+  ap_features.krv_info.bss_max_idle_period_supported =
+      krv_support().bss_max_idle_period_supported;
+  ap_features.krv_info.bss_transition_supported =
+      krv_support().bss_transition_supported;
+  ap_features.hs20_info.supported = hs20_information().supported;
+  ap_features.hs20_info.version = hs20_information().version;
+  ap_features.mbo_supported = mbo_support();
+  return ap_features;
 }
 
 }  // namespace shill

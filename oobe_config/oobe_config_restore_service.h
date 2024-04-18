@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,17 +22,15 @@ class OobeConfigRestoreService
       public org::chromium::OobeConfigRestoreInterface {
  public:
   explicit OobeConfigRestoreService(
-      std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object,
-      bool allow_unencrypted);
+      std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object);
   OobeConfigRestoreService(const OobeConfigRestoreService&) = delete;
   OobeConfigRestoreService& operator=(const OobeConfigRestoreService&) = delete;
 
   ~OobeConfigRestoreService() override;
 
   // Registers the D-Bus object and interfaces.
-  void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction&
-          completion_callback);
+  void RegisterAsync(brillo::dbus_utils::AsyncEventSequencer::CompletionAction
+                         completion_callback);
 
   // org::chromium::OobeConfigRestoreInterface
   //   - See org.chromium.OobeConfigRestoreInterface.xml
@@ -41,7 +39,6 @@ class OobeConfigRestoreService
 
  private:
   std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object_;
-  bool allow_unencrypted_;
 };
 
 }  // namespace oobe_config

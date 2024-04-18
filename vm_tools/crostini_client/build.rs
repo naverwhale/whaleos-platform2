@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -134,31 +134,53 @@ const APIS: &[SystemApiDbus] = &[
     SystemApiDbus::constants("dbus/permission_broker"),
     // service_constants.h is the only header file needed that isn't called dbus_constants.h.
     SystemApiDbus::constants("dbus/service_constants.h"),
+    SystemApiDbus::new("dbus/vm_applications", "apps.proto"),
     SystemApiDbus::new("dbus/vm_concierge", "concierge_service.proto"),
     SystemApiDbus::new("dbus/vm_cicerone", "cicerone_service.proto"),
     SystemApiDbus::new("dbus/dlcservice", "dlcservice.proto"),
     SystemApiDbus::new("dbus/seneschal", "seneschal_service.proto"),
     SystemApiDbus::new("dbus/vm_plugin_dispatcher", "vm_plugin_dispatcher.proto"),
+    SystemApiDbus::new("dbus/vm_launch", "launch.proto"),
 ];
 
+/// A list of proto files to generate Rust bindings for without dbus_constants.h.
+const PROTOS: &[SystemApiDbus] = &[SystemApiDbus::new("dbus", "arc/arc.proto")];
+
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
     let system_api_root = match env::var("SYSROOT") {
         Ok(path) => PathBuf::from(path).join("usr/include/chromeos"),
         // Make this work when typing "cargo build" in platform2/vm_tools/crostini_client
         Err(_) => PathBuf::from("../../system_api"),
     };
+    let system_api_dbus_source_root = system_api_root.join("dbus");
+    println!(
+        "cargo:rerun-if-changed={}",
+        system_api_dbus_source_root.display()
+    );
 
     let mut input_paths = Vec::new();
-    let mut generator = protoc_rust::Codegen::new();
+    let mut generator = protobuf_codegen::Codegen::new();
     let mut constants = Default::default();
     for api in APIS {
         // Some APIs have no .proto file that needs parsing.
         if let Some(input_path) = api.get_input_path(&system_api_root) {
             generator.input(&input_path);
-            generator.include(api.get_include_path(&system_api_root));
+            // dbus/vm_applications/apps.proto needs to be an input,
+            // but its parent directory can't be in the include paths.
+            if api.path != "dbus/vm_applications" {
+                generator.include(api.get_include_path(&system_api_root));
+            }
             input_paths.push(input_path);
         }
         api.parse_constants(&system_api_root, &mut constants);
+    }
+    for proto in PROTOS {
+        if let Some(input_path) = proto.get_input_path(&system_api_root) {
+            generator.input(&input_path);
+            generator.include(proto.get_include_path(&system_api_root));
+            input_paths.push(input_path);
+        }
     }
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());

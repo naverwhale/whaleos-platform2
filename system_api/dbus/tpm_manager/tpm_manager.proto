@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,6 +18,9 @@ enum TpmManagerStatus {
   // The error that is translated into by the client to indicate any kind of
   // D-Bus error.
   STATUS_DBUS_ERROR = 3;
+
+  // Note: TpmManagerStatus should not exceed 127, or it may cause problem with
+  // libhwsec's unified error code. See libhwsec/error/tpm_error.h.
 }
 
 // Result codes. For convenience, keep these in sync with Brillo NVRAM HAL
@@ -39,6 +42,9 @@ enum NvramResult {
   NVRAM_RESULT_INSUFFICIENT_SPACE = 7;
   // An error occurred sending the request to the system service.
   NVRAM_RESULT_IPC_ERROR = 100;
+
+  // Note: NvramResult should not exceed 127, or it may cause problem with
+  // libhwsec's unified error code. See libhwsec/error/tpm_error.h.
 }
 
 // More background on these attributes can be found by looking up the TPMA_NV_*
@@ -109,12 +115,38 @@ enum GscVersion {
 enum RoVerificationStatus {
   // Not triggered by RO verification.
   RO_STATUS_NOT_TRIGGERED = 0;
-  // Triggered by RO verification, and it passed.
-  RO_STATUS_PASS = 1;
+  // Triggered by RO verification, and it passed but didn't verify the GBB.
+  RO_STATUS_PASS_UNVERIFIED_GBB = 1;
   // Triggered by RO verification, and it failed.
   RO_STATUS_FAIL = 2;
-  // There is not data to tell the RO verification status.
+  // RO verification is not supported. (deprecated)
   RO_STATUS_UNSUPPORTED = 3;
+  // RO verification is not supported but triggered.
+  RO_STATUS_UNSUPPORTED_NOT_TRIGGERED = 4;
+  // RO verification is not supported and not triggered.
+  RO_STATUS_UNSUPPORTED_TRIGGERED = 5;
+  // Triggered by RO verification, and it passed.
+  RO_STATUS_PASS = 6;
+  // Triggered by RO verification, and it is still in progress.
+  RO_STATUS_IN_PROGRESS = 7;
+  // The following are RO verification V2 status.
+  RO_STATUS_V2_SUCCESS = 20;
+  RO_STATUS_V2_FAILED_VERIFICATION = 21;
+  RO_STATUS_V2_INCONSISTENT_GSCVD = 22;
+  RO_STATUS_V2_INCONSISTENT_KEYBLOCK = 23;
+  RO_STATUS_V2_INCONSISTENT_KEY = 24;
+  RO_STATUS_V2_SPI_READ = 25;
+  RO_STATUS_V2_UNSUPPORTED_CRYPTO_ALGORITHM = 26;
+  RO_STATUS_V2_VERSION_MISMATCH = 27;
+  RO_STATUS_V2_OUT_OF_MEMORY = 28;
+  RO_STATUS_V2_INTERNAL = 29;
+  RO_STATUS_V2_TOO_BIG = 30;
+  RO_STATUS_V2_MISSING_GSCVD = 31;
+  RO_STATUS_V2_BOARD_ID_MISMATCH = 32;
+  RO_STATUS_V2_SETTING_NOT_PROVISIONED = 33;
+  RO_STATUS_V2_NON_ZERO_GBB_FLAGS = 36;
+  RO_STATUS_V2_WRONG_ROOT_KEY = 37;
+  RO_STATUS_V2_UNKNOWN = 255;
 }
 
 // Tracks the expected policy for a particular NVRAM space.
@@ -162,10 +194,7 @@ message LocalData {
 }
 
 // The format of the ownership taken signal payload.
-message OwnershipTakenSignal {
-  // A copy of LocalData right before sending the signal.
-  optional LocalData local_data = 1;
-}
+message OwnershipTakenSignal {}
 
 ////////////////////////////////////////////////////////////////////////////////
 // A series of request and reply messages for the NVRAM interface methods.
@@ -260,7 +289,7 @@ message GetTpmStatusReply {
   optional TpmManagerStatus status = 1;
   // Whether a TPM is enabled on the system.
   optional bool enabled = 2;
-  // Whether the TPM has been owned.
+  // Whether the TPM has been owned by tpm_manager(ready to use).
   optional bool owned = 3;
   // Local TPM management data (including the owner password if available).
   // TODO(b/168852740): Refine the comments above.
@@ -281,7 +310,7 @@ message GetTpmNonsensitiveStatusReply {
   optional TpmManagerStatus status = 1;
   // Whether a TPM is enabled on the system.
   optional bool is_enabled = 2;
-  // Whether the TPM has been owned by tpm_manager or not.
+  // Whether the TPM has been owned by tpm_manager(ready to use).
   optional bool is_owned = 3;
   // Whether the owner password is still retained.
   optional bool is_owner_password_present = 4;
@@ -314,6 +343,8 @@ message GetVersionInfoReply {
   optional bytes vendor_specific = 7;
   // The GSC version.
   optional GscVersion gsc_version = 8;
+  // The RW firmware version.
+  optional string rw_version = 9;
 }
 
 message GetSupportedFeaturesRequest {}

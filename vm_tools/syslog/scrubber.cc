@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,11 @@
 
 #include <base/strings/stringprintf.h>
 #include <base/strings/utf_string_conversion_utils.h>
+#include <base/third_party/icu/icu_utf.h>
 
 using std::string;
 
-namespace vm_tools {
-namespace syslog {
+namespace vm_tools::syslog {
 namespace {
 
 // Everything is logged with the LOG_USER facility.
@@ -84,8 +84,8 @@ string ParseProtoTimestamp(const vm_tools::Timestamp& timestamp) {
 string ScrubProtoContent(const string& content) {
   string result;
 
-  for (int32_t idx = 0; idx < content.size(); ++idx) {
-    uint32_t code_point;
+  for (size_t idx = 0; idx < content.size(); ++idx) {
+    base_icu::UChar32 code_point;
     if (!base::ReadUnicodeCharacter(content.c_str(), content.size(), &idx,
                                     &code_point)) {
       // Not a valid code point.  Replace it.
@@ -103,5 +103,4 @@ string ScrubProtoContent(const string& content) {
   return result;
 }
 
-}  // namespace syslog
-}  // namespace vm_tools
+}  // namespace vm_tools::syslog

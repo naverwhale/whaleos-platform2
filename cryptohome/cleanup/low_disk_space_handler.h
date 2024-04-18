@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,9 @@
 #include <cstdint>
 #include <memory>
 
-#include <base/callback.h>
-#include <base/single_thread_task_runner.h>
+#include <base/functional/callback.h>
+#include <base/memory/weak_ptr.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/test/task_environment.h>
 #include <base/time/time.h>
 
@@ -22,14 +23,17 @@ class DiskCleanup;
 class HomeDirs;
 class KeysetManagement;
 class Platform;
-class UserOldestActivityTimestampCache;
+class UserOldestActivityTimestampManager;
+
+inline constexpr base::TimeDelta kAutoCleanupPeriod = base::Hours(1);
+inline constexpr base::TimeDelta kUpdateUserActivityPeriod = base::Days(1);
+inline constexpr base::TimeDelta kLowDiskNotificationPeriod = base::Minutes(1);
 
 class LowDiskSpaceHandler {
  public:
   LowDiskSpaceHandler(HomeDirs* homedirs,
-                      KeysetManagement* keyset_management,
                       Platform* platform,
-                      UserOldestActivityTimestampCache* timestamp_cache);
+                      UserOldestActivityTimestampManager* timestamp_manager);
   virtual ~LowDiskSpaceHandler();
 
   // Initialize disk cleanup and low disk space checking.
@@ -94,6 +98,8 @@ class LowDiskSpaceHandler {
   base::Time last_update_user_activity_timestamp_time_ = base::Time();
   bool low_disk_space_signal_was_emitted_ = false;
   bool stopped_ = true;
+
+  base::WeakPtrFactory<LowDiskSpaceHandler> weak_factory_{this};
 };
 
 }  // namespace cryptohome

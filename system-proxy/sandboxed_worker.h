@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef SYSTEM_PROXY_SANDBOXED_WORKER_H_
@@ -16,6 +16,7 @@
 #include <base/files/scoped_file.h>
 #include <base/memory/weak_ptr.h>
 #include <chromeos/scoped_minijail.h>
+#include <net-base/ipv4_address.h>
 
 #include "bindings/worker_common.pb.h"
 
@@ -30,7 +31,10 @@ class SandboxedWorker {
   SandboxedWorker& operator=(const SandboxedWorker&) = delete;
   virtual ~SandboxedWorker() = default;
 
-  // Starts a sandboxed worker with pipes.
+  // Starts a sandboxed worker with pipes. I/O on the pipes is blocking so the
+  // system may stall until the entire message is sent and received via the
+  // communication channel provided by the pipes.
+  // TODO(b/261827928): Make pipes non-blocking.
   virtual bool Start();
   // Sends the credentials which include username, password and protection
   // space (optional) to the worker via communication pipes.
@@ -43,7 +47,7 @@ class SandboxedWorker {
 
   // Sends the listening address and port to the worker via communication
   // pipes and sets |local_proxy_host_and_port_|.
-  bool SetListeningAddress(uint32_t addr, int port);
+  bool SetListeningAddress(const net_base::IPv4Address& addr, int port);
 
   // Sends a request to clear the user credentials to the worker via
   // communication pipes.

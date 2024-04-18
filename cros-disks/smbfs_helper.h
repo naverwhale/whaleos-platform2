@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,10 +36,10 @@ class SmbfsHelper : public FUSEMounterHelper {
                 base::FilePath* suggested_name) const override;
 
  protected:
-  MountErrorType ConfigureSandbox(const std::string& source,
-                                  const base::FilePath& target_path,
-                                  std::vector<std::string> params,
-                                  SandboxedProcess* sandbox) const override;
+  MountError ConfigureSandbox(const std::string& source,
+                              const base::FilePath& target_path,
+                              std::vector<std::string> params,
+                              SandboxedProcess* sandbox) const override;
 
  private:
   const FUSESandboxedProcessFactory sandbox_factory_;

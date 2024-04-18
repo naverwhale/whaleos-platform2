@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,19 @@
 #define CRYPTOHOME_TPM_LIVE_TEST_H_
 
 #include <map>
+#include <memory>
 #include <string>
-
-#include "cryptohome/tpm.h"
 
 #include <base/logging.h>
 #include <brillo/secure_blob.h>
+#include <libhwsec/factory/factory.h>
+
+#include "cryptohome/cryptohome_keys_manager.h"
+#include "cryptohome/fake_platform.h"
 
 namespace cryptohome {
+
+using TPMTestCallback = base::OnceCallback<void(bool status)>;
 
 class TpmLiveTest {
  public:
@@ -26,43 +31,37 @@ class TpmLiveTest {
 
   ~TpmLiveTest() = default;
 
-  // This method runs all of the tests.
-  bool RunLiveTests();
-
- private:
-  // Helper method to try to sign some data.
-  bool SignData(const brillo::SecureBlob& pcr_bound_key,
-                const brillo::SecureBlob& public_key_der,
-                int index);
-
-  // Helper method to try to encrypt and decrypt some data.
-  bool EncryptAndDecryptData(const brillo::SecureBlob& pcr_bound_key,
-                             const std::map<uint32_t, std::string>& pcr_map);
-
-  // This test checks if PCRs and PCR bound keys work correctly.
-  bool PCRKeyTest();
-
-  // This test checks if PCRs and keys bound to multiple PCR indexes work
-  // correctly.
-  bool MultiplePCRKeyTest();
+  // These tests check TPM-bound AuthBlocks work correctly.
+  void TpmEccAuthBlockTest(TPMTestCallback callback);
+  void TpmBoundToPcrAuthBlockTest(TPMTestCallback callback);
+  void TpmNotBoundToPcrAuthBlockTest(TPMTestCallback callback);
 
   // This test checks if we can create and load an RSA decryption key and use
   // it to encrypt and decrypt.
   bool DecryptionKeyTest();
 
-  // This test checks if we can seal and unseal a blob to a PCR state using
+  // This test checks if we can seal and unseal a blob to current state using
   // some authorization value.
-  bool SealToPcrWithAuthorizationTest();
-
-  // This test verifies that the Nvram subsystem of the TPM is working
-  // correctly.
-  bool NvramTest();
+  bool SealWithCurrentUserTest();
 
   // This test checks the signature-sealed secret creation and its unsealing. A
   // random RSA key is used.
   bool SignatureSealedSecretTest();
 
-  Tpm* tpm_;
+  // This test checks the recovery TPM backend's key import/sealing and
+  // load/unsealing.
+  bool RecoveryTpmBackendTest();
+
+ private:
+  // Helper method to try to encrypt and decrypt some data.
+  bool EncryptAndDecryptData(const brillo::SecureBlob& pcr_bound_key,
+                             const std::map<uint32_t, brillo::Blob>& pcr_map);
+
+  FakePlatform platform_;
+  std::unique_ptr<hwsec::Factory> hwsec_factory_;
+  std::unique_ptr<const hwsec::CryptohomeFrontend> hwsec_;
+  std::unique_ptr<const hwsec::RecoveryCryptoFrontend> recovery_crypto_;
+  CryptohomeKeysManager cryptohome_keys_manager_;
 };
 
 }  // namespace cryptohome

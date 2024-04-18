@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,7 @@
 #include <brillo/process/process_reaper.h>
 
 #include "cros-disks/drivefs_helper.h"
-#include "cros-disks/fuse_mounter.h"
+#include "cros-disks/fusebox_helper.h"
 #include "cros-disks/platform.h"
 #include "cros-disks/quote.h"
 #include "cros-disks/smbfs_helper.h"
@@ -39,19 +39,22 @@ bool FUSEMountManager::Initialize() {
   if (!MountManager::Initialize())
     return false;
 
-  if (!platform()->DirectoryExists(working_dirs_root_) &&
-      !platform()->CreateDirectory(working_dirs_root_)) {
-    LOG(ERROR) << "Can't create writable FUSE directory";
+  if (!platform()->CreateDirectory(working_dirs_root_)) {
+    PLOG(ERROR) << "Cannot create writable FUSE directory "
+                << quote(working_dirs_root_);
     return false;
   }
+
   if (!platform()->SetOwnership(working_dirs_root_, getuid(), getgid()) ||
       !platform()->SetPermissions(working_dirs_root_, 0755)) {
-    LOG(ERROR) << "Can't set up writable FUSE directory";
+    PLOG(ERROR) << "Cannot set up writable FUSE directory "
+                << quote(working_dirs_root_);
     return false;
   }
 
   // Register specific FUSE mount helpers here.
   RegisterHelper(std::make_unique<DrivefsHelper>(platform(), process_reaper()));
+  RegisterHelper(std::make_unique<FuseBoxHelper>(platform(), process_reaper()));
   RegisterHelper(std::make_unique<SshfsHelper>(
       platform(), process_reaper(), base::FilePath(working_dirs_root_)));
   RegisterHelper(std::make_unique<SmbfsHelper>(platform(), process_reaper()));
@@ -64,7 +67,7 @@ std::unique_ptr<MountPoint> FUSEMountManager::DoMount(
     const std::string& fuse_type,
     const std::vector<std::string>& options,
     const base::FilePath& mount_path,
-    MountErrorType* error) {
+    MountError* error) {
   CHECK(!mount_path.empty()) << "Invalid mount path argument";
 
   Uri uri = Uri::Parse(source);
@@ -80,16 +83,17 @@ std::unique_ptr<MountPoint> FUSEMountManager::DoMount(
   }
 
   if (!selected_helper) {
-    LOG(ERROR) << "Cannot find FUSE module for " << redact(source)
-               << " of type " << quote(fuse_type);
-    *error = MOUNT_ERROR_UNKNOWN_FILESYSTEM;
+    LOG(ERROR) << "Cannot find FUSE module for " << fuse_type << " "
+               << redact(source);
+    *error = MountError::kUnknownFilesystem;
     return nullptr;
   }
 
-  auto mountpoint = selected_helper->Mount(source, mount_path, options, error);
-  LOG_IF(ERROR, *error != MOUNT_ERROR_NONE)
-      << "Cannot mount " << redact(source) << " of type " << quote(fuse_type)
-      << ": " << *error;
+  std::unique_ptr<MountPoint> mountpoint =
+      selected_helper->Mount(source, mount_path, options, error);
+  LOG_IF(ERROR, *error != MountError::kSuccess)
+      << "Cannot mount " << fuse_type << " " << redact(source) << ": "
+      << *error;
 
   return mountpoint;
 }

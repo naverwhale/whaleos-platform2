@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,12 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <base/command_line.h>
 #include <base/process/process.h>
 #include <base/time/default_tick_clock.h>
+#include <base/time/time.h>
 
 #include "diagnostics/cros_healthd/routines/diag_process_adapter.h"
 #include "diagnostics/cros_healthd/routines/diag_routine.h"
@@ -42,28 +44,28 @@ extern const uint32_t kSubprocRoutineFakeProgressPercentUnknown;
 class SubprocRoutine final : public DiagnosticRoutine {
  public:
   // The state of the SubprocRoutine is modeled in the SubprocStatus enum.
-  enum SubprocStatus {
-    kSubprocStatusCancelled,
-    kSubprocStatusCancelling,
-    kSubprocStatusCompleteFailure,
-    kSubprocStatusCompleteSuccess,
-    kSubprocStatusError,
-    kSubprocStatusLaunchFailed,
-    kSubprocStatusReady,
-    kSubprocStatusRunning,
+  enum class SubprocStatus {
+    kCancelled,
+    kCancelling,
+    kCompleteFailure,
+    kCompleteSuccess,
+    kError,
+    kLaunchFailed,
+    kReady,
+    kRunning,
   };
 
   // Constructor to run a single executable.
   SubprocRoutine(const base::CommandLine& command_line,
-                 uint32_t predicted_duration_in_seconds);
+                 base::TimeDelta predicted_duration);
   // Constructor to run multiple executables.
   SubprocRoutine(const std::list<base::CommandLine>& command_lines,
-                 uint32_t total_predicted_duration_in_seconds);
+                 base::TimeDelta predicted_duration);
   // Constructor only for facilitating the unit test.
   SubprocRoutine(std::unique_ptr<DiagProcessAdapter> process_adapter,
                  std::unique_ptr<base::TickClock> tick_clock,
                  const std::list<base::CommandLine>& command_lines,
-                 uint32_t predicted_duration_in_seconds);
+                 base::TimeDelta predicted_duration);
   SubprocRoutine(const SubprocRoutine&) = delete;
   SubprocRoutine& operator=(const SubprocRoutine&) = delete;
   ~SubprocRoutine() override;
@@ -72,11 +74,10 @@ class SubprocRoutine final : public DiagnosticRoutine {
   void Start() override;
   void Resume() override;
   void Cancel() override;
-  void PopulateStatusUpdate(
-      chromeos::cros_healthd::mojom::RoutineUpdate* response,
-      bool include_output) override;
-  chromeos::cros_healthd::mojom::DiagnosticRoutineStatusEnum GetStatus()
-      override;
+  void PopulateStatusUpdate(ash::cros_healthd::mojom::RoutineUpdate* response,
+                            bool include_output) override;
+  ash::cros_healthd::mojom::DiagnosticRoutineStatusEnum GetStatus() override;
+  void RegisterStatusChangedCallback(StatusChangedCallback callback) override;
 
   // Registers a callback that will execute before processes start. The routine
   // will stop and set status to failure if this callback returns false.
@@ -91,6 +92,7 @@ class SubprocRoutine final : public DiagnosticRoutine {
   void StartProcess();
   void KillProcess(bool from_dtor);
   // Handle state transitions due to process state within this object.
+  void UpdateSubprocessStatus(SubprocStatus subproc_status);
   void CheckProcessStatus();
   void CheckActiveProcessStatus();
   uint32_t CalculateProgressPercent();
@@ -120,9 +122,9 @@ class SubprocRoutine final : public DiagnosticRoutine {
   // in question.
   std::list<base::CommandLine> command_lines_;
 
-  // |predicted_duration_in_seconds_| is used to calculate progress percentage
-  // when it is non-zero.
-  uint32_t predicted_duration_in_seconds_ = 0;
+  // |predicted_duration_| is used to calculate progress percentage when it is
+  // non-zero.
+  base::TimeDelta predicted_duration_{};
 
   // |last_reported_progress_percent_| is used to save the last reported
   // progress percentage for handling progress reported across status changes.
@@ -132,8 +134,11 @@ class SubprocRoutine final : public DiagnosticRoutine {
   base::ProcessHandle handle_ = base::kNullProcessHandle;
 
   // |start_ticks_| records the time when the routine began. This is used with
-  // |predicted_duration_in_seconds_| to report on progress percentate.
+  // |predicted_duration_| to report on progress percentate.
   base::TimeTicks start_ticks_;
+
+  // Callbacks to invoke when the routine status changes.
+  std::vector<StatusChangedCallback> status_changed_callbacks_;
 };
 
 }  // namespace diagnostics

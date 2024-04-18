@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,16 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include <dbus/cryptohome/dbus-constants.h>
 
 #include "cryptohome/platform.h"
 #include "cryptohome/storage/encrypted_container/encrypted_container.h"
 #include "cryptohome/storage/encrypted_container/filesystem_key.h"
+#include "cryptohome/storage/error.h"
 #include "cryptohome/storage/mount_constants.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
@@ -21,10 +24,6 @@ namespace cryptohome {
 // comprise the user's home directory and handles operations relating to setting
 // up the user's home directory for mount and tearing down the encrypted
 // containers after unmount.
-//
-// Note that the mount arguments passed to the vault define the setup/teardown
-// functions. This is intentional: it allows use of a deterministic teardown
-// function on restart from a crash.
 class CryptohomeVault {
  public:
   struct Options {
@@ -37,21 +36,36 @@ class CryptohomeVault {
     // migration.
     bool block_ecryptfs = false;
   };
-  CryptohomeVault(const std::string& obfuscated_username,
-                  std::unique_ptr<EncryptedContainer> container,
-                  std::unique_ptr<EncryptedContainer> migrating_container,
-                  std::unique_ptr<EncryptedContainer> cache_container,
-                  Platform* platform);
+  CryptohomeVault(
+      const ObfuscatedUsername& obfuscated_username,
+      std::unique_ptr<EncryptedContainer> container,
+      std::unique_ptr<EncryptedContainer> migrating_container,
+      std::unique_ptr<EncryptedContainer> cache_container,
+      std::unordered_map<std::string, std::unique_ptr<EncryptedContainer>>
+          application_containers,
+      Platform* platform);
   ~CryptohomeVault();
 
   // Sets up the cryptohome vault for mounting.
-  MountError Setup(const FileSystemKey& filesystem_key, bool create);
+  StorageStatus Setup(const FileSystemKey& filesystem_key);
+
+  // Evict the cryptohome filesystem key from memory. Currently only
+  // Dmcrypt container based vault supports this operation.
+  StorageStatus EvictKey();
+
+  // Restore the in-memory cryptohome filesystem key. Currently only
+  // dmcrypt container based vault supports this operation.
+  StorageStatus RestoreKey(const FileSystemKey& filesystem_key);
 
   // Removes the vault.
   bool Purge();
 
   // Tears down the vault post-unmount.
   bool Teardown();
+
+  // Marks the underlying containers for lazy teardown once the last reference
+  // to the containers has been dropped.
+  bool SetLazyTeardownWhenUnused();
 
   // Get mount type for mount to use.
   MountType GetMountType();
@@ -62,6 +76,9 @@ class CryptohomeVault {
     return container_ ? container_->GetType()
                       : EncryptedContainerType::kUnknown;
   }
+  base::FilePath GetContainerBackingLocation() {
+    return container_ ? container_->GetBackingLocation() : base::FilePath();
+  }
   EncryptedContainerType GetMigratingContainerType() {
     return migrating_container_ ? migrating_container_->GetType()
                                 : EncryptedContainerType::kUnknown;
@@ -71,10 +88,14 @@ class CryptohomeVault {
                             : EncryptedContainerType::kUnknown;
   }
 
+  bool ResetApplicationContainer(const std::string& app);
+
+  bool PurgeCacheContainer();
+
  private:
   friend class CryptohomeVaultTest;
 
-  const std::string obfuscated_username_;
+  const ObfuscatedUsername obfuscated_username_;
 
   // Represents the active encrypted container for the vault.
   std::unique_ptr<EncryptedContainer> container_;
@@ -84,6 +105,9 @@ class CryptohomeVault {
   // For dm-crypt based vaults, we set up an additional cache container that
   // serves as the backing store for temporary data.
   std::unique_ptr<EncryptedContainer> cache_container_;
+  // Containers that store application info.
+  std::unordered_map<std::string, std::unique_ptr<EncryptedContainer>>
+      application_containers_;
 
   Platform* platform_;
 };

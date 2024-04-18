@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 #include "diagnostics/wilco_dtc_supportd/telemetry/ec_service_test_utils.h"
 
 namespace diagnostics {
-
+namespace wilco {
 namespace {
 
 using EcEvent = EcService::EcEvent;
@@ -67,5 +67,5 @@ INSTANTIATE_TEST_SUITE_P(
                         kEcEventNonSysNotification)));
 
 }  // namespace
-
+}  // namespace wilco
 }  // namespace diagnostics

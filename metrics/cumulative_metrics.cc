@@ -1,12 +1,12 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "metrics/cumulative_metrics.h"
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/hash/hash.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
@@ -89,9 +89,8 @@ CumulativeMetrics::CumulativeMetrics(const FilePath& backing_dir,
 
 bool CumulativeMetrics::ProcessCycleEnd() {
   base::TimeDelta wall_time = Time::Now() - Time::UnixEpoch();
-  base::TimeDelta cycle_start =
-      base::TimeDelta::FromMicroseconds(cycle_start_->Get());
-  if (wall_time - cycle_start > accumulation_period_) {
+  base::TimeDelta cycle_start = base::Microseconds(cycle_start_->Get());
+  if (wall_time - cycle_start >= accumulation_period_) {
     cycle_start_->Set(wall_time.InMicroseconds());
     return true;
   }

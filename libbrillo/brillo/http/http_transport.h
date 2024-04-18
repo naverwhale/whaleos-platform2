@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,14 @@
 #define LIBBRILLO_BRILLO_HTTP_HTTP_TRANSPORT_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/callback_forward.h>
 #include <base/files/file_path.h>
+#include <base/functional/callback_forward.h>
 #include <base/location.h>
-#include <base/macros.h>
-#include <base/optional.h>
 #include <base/time/time.h>
 #include <brillo/brillo_export.h>
 #include <brillo/errors/error.h>
@@ -34,8 +33,8 @@ using RequestID = int;
 
 using HeaderList = std::vector<std::pair<std::string, std::string>>;
 using SuccessCallback =
-    base::Callback<void(RequestID, std::unique_ptr<Response>)>;
-using ErrorCallback = base::Callback<void(RequestID, const brillo::Error*)>;
+    base::OnceCallback<void(RequestID, std::unique_ptr<Response>)>;
+using ErrorCallback = base::OnceCallback<void(RequestID, const brillo::Error*)>;
 
 ///////////////////////////////////////////////////////////////////////////////
 // Transport is a base class for specific implementation of HTTP communication.
@@ -83,14 +82,14 @@ class BRILLO_EXPORT Transport : public std::enable_shared_from_this<Transport> {
   // transport. For transports that do not contain references to real message
   // loops (e.g. a fake transport), calls the callback immediately.
   virtual void RunCallbackAsync(const base::Location& from_here,
-                                const base::Closure& callback) = 0;
+                                base::OnceClosure callback) = 0;
 
   // Initiates an asynchronous transfer on the given |connection|.
   // The actual implementation of an async I/O is transport-specific.
   // Returns a request ID which can be used to cancel the request.
   virtual RequestID StartAsyncTransfer(Connection* connection,
-                                       const SuccessCallback& success_callback,
-                                       const ErrorCallback& error_callback) = 0;
+                                       SuccessCallback success_callback,
+                                       ErrorCallback error_callback) = 0;
 
   // Cancels a pending asynchronous request. This will cancel a pending request
   // scheduled by the transport while the I/O operations are still in progress.
@@ -104,8 +103,29 @@ class BRILLO_EXPORT Transport : public std::enable_shared_from_this<Transport> {
   // Set the default timeout of requests made.
   virtual void SetDefaultTimeout(base::TimeDelta timeout) = 0;
 
-  // Set the local IP address of requests
+  // Set the name of the outgoing network interface of requests. This option
+  // takes precedence over setting the source IP address.
+  // Note: this method needs CAP_NET_ADMIN permission or root because it
+  // eventually calls setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE).
+  virtual void SetInterface(const std::string& ifname) = 0;
+
+  // Set the local IP address of requests. This option is ignored if the
+  // outgoing network interface is also configured.
   virtual void SetLocalIpAddress(const std::string& ip_address) = 0;
+
+  // Set the list of DNS servers to be used instead of the system default.
+  virtual void SetDnsServers(const std::vector<std::string>& dns_servers) = 0;
+
+  // Set the name of the network interface that the DNS resolver should bind to.
+  // Note: this method needs CAP_NET_ADMIN permission or root because it
+  // eventually calls setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE).
+  virtual void SetDnsInterface(const std::string& dns_interface) = 0;
+
+  // Set the local IPv4 address that the DNS resolver should bind to.
+  virtual void SetDnsLocalIPv4Address(const std::string& dns_ipv4_addr) = 0;
+
+  // Set the local IPv6 address that the DNS resolver should bind to.
+  virtual void SetDnsLocalIPv6Address(const std::string& dns_ipv6_addr) = 0;
 
   // Use the default CA certificate for certificate verification. This
   // means that clients are only allowed to communicate with Google services.
@@ -130,10 +150,10 @@ class BRILLO_EXPORT Transport : public std::enable_shared_from_this<Transport> {
                                const std::string& ip_address) {}
 
   // Sets the receive buffer size.
-  virtual void SetBufferSize(base::Optional<int> buffer_size) {}
+  virtual void SetBufferSize(std::optional<int> buffer_size) {}
 
   // Sets the send buffer size.
-  virtual void SetUploadBufferSize(base::Optional<int> buffer_size) {}
+  virtual void SetUploadBufferSize(std::optional<int> buffer_size) {}
 
   // Creates a default http::Transport (currently, using http::curl::Transport).
   static std::shared_ptr<Transport> CreateDefault();

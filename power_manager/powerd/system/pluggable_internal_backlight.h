@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,12 @@
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/observer_list.h>
 
 #include "power_manager/powerd/system/backlight_interface.h"
 #include "power_manager/powerd/system/udev_subsystem_observer.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class BacklightObserver;
 class InternalBacklight;
@@ -28,7 +26,7 @@ class UdevInterface;
 class PluggableInternalBacklight : public BacklightInterface,
                                    public UdevSubsystemObserver {
  public:
-  PluggableInternalBacklight();
+  PluggableInternalBacklight() = default;
   PluggableInternalBacklight(const PluggableInternalBacklight&) = delete;
   PluggableInternalBacklight& operator=(const PluggableInternalBacklight&) =
       delete;
@@ -44,7 +42,7 @@ class PluggableInternalBacklight : public BacklightInterface,
   // BacklightInterface:
   void AddObserver(BacklightObserver* observer) override;
   void RemoveObserver(BacklightObserver* observer) override;
-  bool DeviceExists() override;
+  bool DeviceExists() const override;
   int64_t GetMaxBrightnessLevel() override;
   int64_t GetCurrentBrightnessLevel() override;
   bool SetBrightnessLevel(int64_t level, base::TimeDelta interval) override;
@@ -74,7 +72,6 @@ class PluggableInternalBacklight : public BacklightInterface,
   std::unique_ptr<InternalBacklight> device_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_PLUGGABLE_INTERNAL_BACKLIGHT_H_

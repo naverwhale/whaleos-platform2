@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,11 +29,11 @@ const char kPartitionProgramPath[] = "/sbin/sfdisk";
 const uint64_t kMBRMaxSize = 2199023255040ULL;
 
 // Initialises the process for partitionting and starts it.
-PartitionErrorType StartPartitionProcess(const base::FilePath& device_file,
-                                         const std::string& partition_program,
-                                         const std::string& label_type,
-                                         const std::string& partition_input,
-                                         SandboxedProcess* process) {
+PartitionError StartPartitionProcess(const base::FilePath& device_file,
+                                     const std::string& partition_program,
+                                     const std::string& label_type,
+                                     const std::string& partition_input,
+                                     SandboxedProcess* process) {
   process->SetNoNewPrivileges();
   process->NewMountNamespace();
   process->NewIpcNamespace();
@@ -42,11 +42,11 @@ PartitionErrorType StartPartitionProcess(const base::FilePath& device_file,
 
   if (!process->EnterPivotRoot()) {
     LOG(WARNING) << "Could not enter pivot root";
-    return PARTITION_ERROR_PROGRAM_FAILED;
+    return PartitionError::kProgramFailed;
   }
   if (!process->SetUpMinimalMounts()) {
     LOG(WARNING) << "Could not set up minimal mounts for jail";
-    return PARTITION_ERROR_PROGRAM_FAILED;
+    return PartitionError::kProgramFailed;
   }
 
   // Open device_file so we can pass only the fd path to the partition program.
@@ -54,17 +54,10 @@ PartitionErrorType StartPartitionProcess(const base::FilePath& device_file,
                                        base::File::FLAG_READ |
                                        base::File::FLAG_WRITE);
   if (!dev_file.IsValid()) {
-    LOG(WARNING) << "Could not open " << quote(device_file)
-                 << " for partitioning";
-    return PARTITION_ERROR_PROGRAM_FAILED;
+    PLOG(ERROR) << "Cannot open " << quote(device_file) << " for partitioning: "
+                << base::File::ErrorToString(dev_file.error_details());
+    return PartitionError::kProgramFailed;
   }
-
-  if (!process->PreserveFile(dev_file)) {
-    LOG(WARNING) << "Could not preserve device fd";
-    return PARTITION_ERROR_PROGRAM_FAILED;
-  }
-
-  process->CloseOpenFds();
 
   process->AddArgument(partition_program);
   process->AddArgument("--no-reread");
@@ -78,16 +71,17 @@ PartitionErrorType StartPartitionProcess(const base::FilePath& device_file,
 
   process->AddArgument(
       base::StringPrintf("/dev/fd/%d", dev_file.GetPlatformFile()));
+  process->PreserveFile(dev_file.GetPlatformFile());
 
   process->SetStdIn(partition_input);
 
   if (!process->Start()) {
     LOG(WARNING) << "Cannot start process " << quote(partition_program)
                  << " to partition " << quote(device_file);
-    return PARTITION_ERROR_PROGRAM_FAILED;
+    return PartitionError::kProgramFailed;
   }
 
-  return PARTITION_ERROR_NONE;
+  return PartitionError::kSuccess;
 }
 
 }  // namespace
@@ -98,13 +92,13 @@ void PartitionManager::StartSinglePartitionFormat(
   if (!base::PathExists(base::FilePath(kPartitionProgramPath))) {
     LOG(WARNING) << "Could not find a partition program "
                  << quote(kPartitionProgramPath);
-    std::move(callback).Run(device_path, PARTITION_ERROR_PROGRAM_NOT_FOUND);
+    std::move(callback).Run(device_path, PartitionError::kProgramNotFound);
     return;
   }
 
   if (device_path.empty()) {
     LOG(ERROR) << "Device path is empty";
-    std::move(callback).Run(device_path, PARTITION_ERROR_INVALID_DEVICE_PATH);
+    std::move(callback).Run(device_path, PartitionError::kInvalidDevicePath);
     return;
   }
 
@@ -112,15 +106,14 @@ void PartitionManager::StartSinglePartitionFormat(
     LOG(WARNING) << "Device " << quote(device_path)
                  << " is already being partitioned";
     std::move(callback).Run(device_path,
-                            PARTITION_ERROR_DEVICE_BEING_PARTITIONED);
+                            PartitionError::kDeviceBeingPartitioned);
     return;
   }
 
   Disk disk;
   if (!disk_monitor_->GetDiskByDevicePath(device_path, &disk)) {
-    LOG(ERROR) << "Could not get the properties of device " +
-                      device_path.value();
-    std::move(callback).Run(device_path, PARTITION_ERROR_UNKNOWN);
+    LOG(ERROR) << "Cannot get properties of " << quote(device_path);
+    std::move(callback).Run(device_path, PartitionError::kUnknownError);
     return;
   }
 
@@ -140,10 +133,10 @@ void PartitionManager::StartSinglePartitionFormat(
   std::unique_ptr<SandboxedProcess> process = CreateSandboxedProcess();
   partition_process_.insert(device_path);
 
-  PartitionErrorType error =
+  PartitionError error =
       StartPartitionProcess(device_path, kPartitionProgramPath, label_type,
                             partition_type, process.get());
-  if (error != PARTITION_ERROR_NONE) {
+  if (error != PartitionError::kSuccess) {
     partition_process_.erase(device_path);
     std::move(callback).Run(device_path, error);
     return;
@@ -161,15 +154,15 @@ void PartitionManager::OnPartitionProcessTerminated(
     cros_disks::PartitionCompleteCallback callback,
     const siginfo_t& info) {
   partition_process_.erase(device_path);
-  PartitionErrorType error_type = PARTITION_ERROR_UNKNOWN;
+  PartitionError error_type = PartitionError::kUnknownError;
   switch (info.si_code) {
     case CLD_EXITED:
       if (info.si_status == 0) {
-        error_type = PARTITION_ERROR_NONE;
+        error_type = PartitionError::kSuccess;
         LOG(INFO) << "Process " << info.si_pid << " for partitionting "
                   << quote(device_path) << " completed successfully";
       } else {
-        error_type = PARTITION_ERROR_PROGRAM_FAILED;
+        error_type = PartitionError::kProgramFailed;
         LOG(ERROR) << "Process " << info.si_pid << " for partitionting "
                    << quote(device_path) << " exited with a status "
                    << info.si_status;
@@ -178,7 +171,7 @@ void PartitionManager::OnPartitionProcessTerminated(
 
     case CLD_DUMPED:
     case CLD_KILLED:
-      error_type = PARTITION_ERROR_PROGRAM_FAILED;
+      error_type = PartitionError::kProgramFailed;
       LOG(ERROR) << "Process " << info.si_pid << " for partitionting "
                  << quote(device_path) << " killed by a signal "
                  << info.si_status;

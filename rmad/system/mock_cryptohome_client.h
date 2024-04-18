@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,7 @@ class MockCryptohomeClient : public CryptohomeClient {
   MockCryptohomeClient& operator=(const MockCryptohomeClient&) = delete;
   ~MockCryptohomeClient() override = default;
 
-  MOCK_METHOD(bool, HasFwmp, (), (override));
-  MOCK_METHOD(bool, IsEnrolled, (), (override));
+  MOCK_METHOD(bool, IsCcdBlocked, (), (override));
 };
 
 }  // namespace rmad

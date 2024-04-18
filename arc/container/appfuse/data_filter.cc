@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,12 +10,12 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_piece.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 namespace arc {
 namespace appfuse {
@@ -48,7 +48,7 @@ bool WriteData(int fd, const std::vector<char>& data, base::StringPiece name) {
 
 DataFilter::DataFilter()
     : watch_thread_("DataFilter"),
-      origin_task_runner_(base::ThreadTaskRunnerHandle::Get()) {}
+      origin_task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {}
 
 DataFilter::~DataFilter() {
   // File watching must be cleaned up on the |watch_thread_|.
@@ -73,8 +73,8 @@ base::ScopedFD DataFilter::Start(base::ScopedFD fd_dev) {
   base::ScopedFD socket_for_filter(raw_socks[0]);
   base::ScopedFD socket_for_app(raw_socks[1]);
 
-  base::Thread::Options options(base::MessagePumpType::IO, 0);
-  if (!watch_thread_.StartWithOptions(options)) {
+  if (!watch_thread_.StartWithOptions(
+          base::Thread::Options(base::MessagePumpType::IO, 0))) {
     LOG(ERROR) << "Failed to start a data filter thread.";
     return base::ScopedFD();
   }
@@ -83,7 +83,7 @@ base::ScopedFD DataFilter::Start(base::ScopedFD fd_dev) {
   // Unretained(this) here is safe because watch_thread_ is owned by |this|.
   watch_thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::Bind(&DataFilter::StartWatching, base::Unretained(this)));
+      base::BindOnce(&DataFilter::StartWatching, base::Unretained(this)));
   return socket_for_app;
 }
 

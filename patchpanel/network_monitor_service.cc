@@ -1,21 +1,25 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "patchpanel/network_monitor_service.h"
 
-#include <memory>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
+
+#include <memory>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
+#include <base/logging.h>
 #include <base/notreached.h>
 #include <base/strings/strcat.h>
-#include <base/threading/sequenced_task_runner_handle.h>
-#include <base/logging.h>
-#include <shill/net/rtnl_handler.h>
-#include <shill/net/rtnl_listener.h>
+#include <base/task/sequenced_task_runner.h>
+#include <net-base/byte_utils.h>
+#include <net-base/ipv4_address.h>
+#include <net-base/ipv6_address.h>
+#include <net-base/rtnl_handler.h>
+#include <net-base/rtnl_listener.h>
 
 namespace patchpanel {
 
@@ -50,10 +54,12 @@ std::string NUDStateToString(uint16_t state) {
   }
 }
 
-bool IsIPv6LinkLocalAddress(const shill::IPAddress& addr) {
-  if (addr.family() != shill::IPAddress::kFamilyIPv6)
-    return false;
-  return shill::IPAddress("fe80::", 64).CanReachAddress(addr);
+bool IsIPv6LinkLocalAddress(const net_base::IPAddress& addr) {
+  static const net_base::IPv6CIDR kIPv6LockLocalCIDR =
+      *net_base::IPv6CIDR::CreateFromStringAndPrefix("fe80::", 64);
+
+  const auto ipv6_addr = addr.ToIPv6Address();
+  return ipv6_addr && kIPv6LockLocalCIDR.InSameSubnetWith(*ipv6_addr);
 }
 
 // We cannot set the state of an address to NUD_PROBE when the kernel doesn't
@@ -72,16 +78,16 @@ bool NeedProbeForState(uint16_t current_state) {
 NeighborLinkMonitor::NeighborLinkMonitor(
     int ifindex,
     const std::string& ifname,
-    shill::RTNLHandler* rtnl_handler,
+    net_base::RTNLHandler* rtnl_handler,
     NeighborReachabilityEventHandler* neighbor_event_handler)
     : ifindex_(ifindex),
       ifname_(ifname),
       rtnl_handler_(rtnl_handler),
       neighbor_event_handler_(neighbor_event_handler) {}
 
-NeighborLinkMonitor::WatchingEntry::WatchingEntry(shill::IPAddress addr,
-                                                  NeighborRole role)
-    : addr(std::move(addr)), role(role) {}
+NeighborLinkMonitor::WatchingEntry::WatchingEntry(
+    const net_base::IPAddress& addr, NeighborRole role)
+    : addr(addr), role(role) {}
 
 std::string NeighborLinkMonitor::NeighborRoleToString(
     NeighborLinkMonitor::NeighborRole role) {
@@ -104,46 +110,33 @@ std::string NeighborLinkMonitor::WatchingEntry::ToString() const {
 }
 
 void NeighborLinkMonitor::AddWatchingEntries(
-    int prefix_length,
-    const std::string& addr,
-    const std::string& gateway,
+    const net_base::IPCIDR& local_cidr,
+    const net_base::IPAddress& gateway,
     const std::vector<std::string>& dns_addrs) {
-  shill::IPAddress gateway_addr(gateway);
-  if (!gateway_addr.IsValid()) {
-    LOG(ERROR) << "Gateway address " << gateway << " is not valid";
-    return;
-  }
-  UpdateWatchingEntry(gateway_addr, NeighborRole::kGateway);
-
-  shill::IPAddress local_addr(addr, prefix_length);
-  if (!local_addr.IsValid()) {
-    LOG(ERROR) << "Local address " << local_addr << " is not valid";
-    return;
-  }
+  UpdateWatchingEntry(gateway, NeighborRole::kGateway);
 
   int watching_dns_num = 0;
   int skipped_dns_num = 0;
   for (const auto& dns : dns_addrs) {
-    shill::IPAddress dns_addr(dns);
-    if (!dns_addr.IsValid()) {
+    const auto dns_addr = net_base::IPAddress::CreateFromString(dns);
+    if (!dns_addr) {
       LOG(ERROR) << "DNS server address is not valid";
       return;
     }
-    if (!local_addr.CanReachAddress(dns_addr) &&
-        !IsIPv6LinkLocalAddress(dns_addr)) {
+    if (!local_cidr.InSameSubnetWith(*dns_addr) &&
+        !IsIPv6LinkLocalAddress(*dns_addr)) {
       skipped_dns_num++;
       continue;
     }
     watching_dns_num++;
-    UpdateWatchingEntry(dns_addr, NeighborRole::kDNSServer);
+    UpdateWatchingEntry(*dns_addr, NeighborRole::kDNSServer);
   }
-  LOG(INFO) << shill::IPAddress::GetAddressFamilyName(local_addr.family())
-            << " watching entries added on " << ifname_
-            << ": skipped_dns_num=" << skipped_dns_num
+  LOG(INFO) << local_cidr.GetFamily() << " watching entries added on "
+            << ifname_ << ": skipped_dns_num=" << skipped_dns_num
             << " ,watching_dns_num=" << watching_dns_num;
 }
 
-void NeighborLinkMonitor::UpdateWatchingEntry(const shill::IPAddress& addr,
+void NeighborLinkMonitor::UpdateWatchingEntry(const net_base::IPAddress& addr,
                                               NeighborRole role) {
   const auto it = watching_entries_.find(addr);
   if (it == watching_entries_.end()) {
@@ -179,12 +172,16 @@ void NeighborLinkMonitor::OnIPConfigChanged(
   const auto old_watching_entries = std::move(watching_entries_);
   watching_entries_.clear();
 
-  if (!ipconfig.ipv4_address.empty())
-    AddWatchingEntries(ipconfig.ipv4_prefix_length, ipconfig.ipv4_address,
-                       ipconfig.ipv4_gateway, ipconfig.ipv4_dns_addresses);
-  if (!ipconfig.ipv6_address.empty())
-    AddWatchingEntries(ipconfig.ipv6_prefix_length, ipconfig.ipv6_address,
-                       ipconfig.ipv6_gateway, ipconfig.ipv6_dns_addresses);
+  if (ipconfig.ipv4_cidr && ipconfig.ipv4_gateway) {
+    AddWatchingEntries(net_base::IPCIDR(*ipconfig.ipv4_cidr),
+                       net_base::IPAddress(*ipconfig.ipv4_gateway),
+                       ipconfig.ipv4_dns_addresses);
+  }
+  if (ipconfig.ipv6_cidr && ipconfig.ipv6_gateway) {
+    AddWatchingEntries(net_base::IPCIDR(*ipconfig.ipv6_cidr),
+                       net_base::IPAddress(*ipconfig.ipv6_gateway),
+                       ipconfig.ipv6_dns_addresses);
+  }
 
   if (watching_entries_.empty()) {
     LOG(INFO) << "Stop due to empty watching list on " << ifname_;
@@ -214,8 +211,8 @@ void NeighborLinkMonitor::Start() {
   if (listener_ != nullptr)
     return;
 
-  listener_ = std::make_unique<shill::RTNLListener>(
-      shill::RTNLHandler::kRequestNeighbor,
+  listener_ = std::make_unique<net_base::RTNLListener>(
+      net_base::RTNLHandler::kRequestNeighbor,
       base::BindRepeating(&NeighborLinkMonitor::OnNeighborMessage,
                           base::Unretained(this)),
       rtnl_handler_);
@@ -250,56 +247,56 @@ void NeighborLinkMonitor::ProbeAll() {
 
 void NeighborLinkMonitor::SendNeighborDumpRTNLMessage() {
   // |seq| will be set by RTNLHandler.
-  // TODO(jiejiang): Specify the family instead of kFamilyUnknown. This
-  // optimization could reduce the amount of data received for each request.
-  auto msg = std::make_unique<shill::RTNLMessage>(
-      shill::RTNLMessage::kTypeNeighbor, shill::RTNLMessage::kModeGet,
-      NLM_F_REQUEST | NLM_F_DUMP, 0 /* seq */, 0 /* pid */, ifindex_,
-      shill::IPAddress::kFamilyUnknown);
+  // TODO(jiejiang): Specify the family instead of AF_UNSPEC. This optimization
+  // could reduce the amount of data received for each request.
+  auto msg = std::make_unique<net_base::RTNLMessage>(
+      net_base::RTNLMessage::kTypeNeighbor, net_base::RTNLMessage::kModeGet,
+      NLM_F_REQUEST | NLM_F_DUMP, /*seq=*/0, /*pid=*/0, ifindex_, AF_UNSPEC);
 
   // TODO(jiejiang): We may get an error of errno=16 (Device or resource busy)
   // from kernel here. We may need to serialize the DUMP requests.
-  if (!rtnl_handler_->SendMessage(std::move(msg), nullptr /* msg_seq */))
+  if (!rtnl_handler_->SendMessage(std::move(msg), /*msg_seq=*/nullptr))
     LOG(WARNING) << "Failed to send neighbor dump message for on " << ifname_;
 }
 
 void NeighborLinkMonitor::SendNeighborProbeRTNLMessage(
     const WatchingEntry& entry) {
   // |seq| will be set by RTNLHandler.
-  auto msg = std::make_unique<shill::RTNLMessage>(
-      shill::RTNLMessage::kTypeNeighbor, shill::RTNLMessage::kModeAdd,
-      NLM_F_REQUEST | NLM_F_REPLACE, 0 /* seq */, 0 /* pid */, ifindex_,
-      entry.addr.family());
+  auto msg = std::make_unique<net_base::RTNLMessage>(
+      net_base::RTNLMessage::kTypeNeighbor, net_base::RTNLMessage::kModeAdd,
+      NLM_F_REQUEST | NLM_F_REPLACE, /*seq=*/0, /*pid=*/0, ifindex_,
+      net_base::ToSAFamily(entry.addr.GetFamily()));
 
   // We don't need to set |ndm_flags| and |ndm_type| for this message.
-  msg->set_neighbor_status(shill::RTNLMessage::NeighborStatus(
-      NUD_PROBE, 0 /* ndm_flags */, 0 /* ndm_type */));
-  msg->SetAttribute(NDA_DST, entry.addr.address());
+  msg->set_neighbor_status(net_base::RTNLMessage::NeighborStatus(
+      NUD_PROBE, /*ndm_flags=*/0, /*ndm_type=*/0));
+  msg->SetAttribute(NDA_DST, entry.addr.ToBytes());
 
-  if (!rtnl_handler_->SendMessage(std::move(msg), nullptr /* msg_seq */))
+  if (!rtnl_handler_->SendMessage(std::move(msg), /*msg_seq=*/nullptr))
     LOG(WARNING) << "Failed to send neighbor probe message for "
                  << entry.ToString() << " on " << ifname_;
 }
 
-void NeighborLinkMonitor::OnNeighborMessage(const shill::RTNLMessage& msg) {
+void NeighborLinkMonitor::OnNeighborMessage(const net_base::RTNLMessage& msg) {
   if (msg.interface_index() != ifindex_)
     return;
 
-  auto family = msg.family();
-  shill::ByteString dst = msg.GetAttribute(NDA_DST);
-  shill::IPAddress addr(family, dst);
-  if (!addr.IsValid()) {
-    LOG(WARNING) << "Got neighbor message with invalid addr " << addr;
+  const auto family = msg.family();
+  const auto dst = msg.GetAttribute(NDA_DST);
+  const auto addr = net_base::IPAddress::CreateFromBytes(dst);
+  if (!addr || net_base::ToSAFamily(addr->GetFamily()) != family) {
+    LOG(ERROR) << "Got neighbor message with invalid addr which length is "
+               << dst.size();
     return;
   }
 
-  auto it = watching_entries_.find(addr);
+  auto it = watching_entries_.find(*addr);
   if (it == watching_entries_.end())
     return;
 
   uint16_t old_nud_state = it->second.nud_state;
   uint16_t new_nud_state;
-  if (msg.mode() == shill::RTNLMessage::kModeDelete)
+  if (msg.mode() == net_base::RTNLMessage::kModeDelete)
     new_nud_state = NUD_NONE;
   else
     new_nud_state = msg.neighbor_status().state;
@@ -359,7 +356,7 @@ NetworkMonitorService::NetworkMonitorService(
         neighbor_event_handler)
     : neighbor_event_handler_(neighbor_event_handler),
       shill_client_(shill_client),
-      rtnl_handler_(shill::RTNLHandler::GetInstance()) {}
+      rtnl_handler_(net_base::RTNLHandler::GetInstance()) {}
 
 void NetworkMonitorService::Start() {
   // Setups the RTNL socket and listens to neighbor events. This should be
@@ -371,7 +368,7 @@ void NetworkMonitorService::Start() {
   // registering DevicesChangedHandler to make sure we see each shill Device
   // exactly once.
   shill_client_->ScanDevices();
-  OnShillDevicesChanged(shill_client_->get_interfaces(), {} /* removed */);
+  OnShillDevicesChanged(shill_client_->GetDevices(), /*removed=*/{});
   shill_client_->RegisterDevicesChangedHandler(
       base::BindRepeating(&NetworkMonitorService::OnShillDevicesChanged,
                           weak_factory_.GetWeakPtr()));
@@ -381,46 +378,42 @@ void NetworkMonitorService::Start() {
 }
 
 void NetworkMonitorService::OnShillDevicesChanged(
-    const std::vector<std::string>& added,
-    const std::vector<std::string>& removed) {
-  for (const auto& ifname : added) {
-    ShillClient::Device device_props;
-    if (!shill_client_->GetDeviceProperties(ifname, &device_props)) {
-      LOG(ERROR)
-          << "Get device props failed. Skipped creating neighbor monitor on "
-          << ifname;
-      continue;
-    }
-
-    if (device_props.type != ShillClient::Device::Type::kWifi) {
-      LOG(INFO) << "Skipped creating neighbor monitor for interface " << ifname;
-      continue;
-    }
-
-    int ifindex = if_nametoindex(device_props.ifname.c_str());
-    if (ifindex == 0) {
-      PLOG(ERROR) << "Could not obtain interface index for "
-                  << device_props.ifname;
-      continue;
+    const std::vector<ShillClient::Device>& added,
+    const std::vector<ShillClient::Device>& removed) {
+  System system;
+  for (const auto& device : added) {
+    switch (device.type) {
+      // Link monitoring is possible for physical local area networks on which
+      // neighbor discovery is possible.
+      case ShillClient::Device::Type::kWifi:
+      case ShillClient::Device::Type::kEthernet:
+      case ShillClient::Device::Type::kEthernetEap:
+        break;
+      // Ignore VPN networks, Cellular networks, and other types of
+      // point-to-point networks and internal virtual networks.
+      default:
+        LOG(INFO) << "Skipped creating neighbor monitor for " << device;
+        continue;
     }
 
     auto link_monitor = std::make_unique<NeighborLinkMonitor>(
-        ifindex, device_props.ifname, rtnl_handler_, &neighbor_event_handler_);
-    link_monitor->OnIPConfigChanged(device_props.ipconfig);
-    neighbor_link_monitors_[ifname] = std::move(link_monitor);
+        device.ifindex, device.ifname, rtnl_handler_, &neighbor_event_handler_);
+    link_monitor->OnIPConfigChanged(device.ipconfig);
+    neighbor_link_monitors_[device.ifname] = std::move(link_monitor);
   }
 
-  for (const auto& ifname : removed)
-    neighbor_link_monitors_.erase(ifname);
+  for (const auto& device : removed) {
+    neighbor_link_monitors_.erase(device.ifname);
+  }
 }
 
 void NetworkMonitorService::OnIPConfigsChanged(
-    const std::string& ifname, const ShillClient::IPConfig& ipconfig) {
-  const auto it = neighbor_link_monitors_.find(ifname);
+    const ShillClient::Device& device) {
+  const auto it = neighbor_link_monitors_.find(device.ifname);
   if (it == neighbor_link_monitors_.end())
     return;
 
-  it->second->OnIPConfigChanged(ipconfig);
+  it->second->OnIPConfigChanged(device.ipconfig);
 }
 
 }  // namespace patchpanel

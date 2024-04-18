@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,10 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 
 #include "shill/data_types.h"
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 
@@ -70,7 +70,7 @@ class ManagerAdaptorInterface {
   virtual ~ManagerAdaptorInterface() = default;
 
   virtual void RegisterAsync(
-      const base::Callback<void(bool)>& completion_callback) = 0;
+      base::OnceCallback<void(bool)> completion_callback) = 0;
 
   // Getter for the opaque identifier that represents this object on the
   // RPC interface to which the implementation is adapting.
@@ -136,6 +136,7 @@ class ServiceAdaptorInterface {
   virtual void EmitUint16sChanged(const std::string& name,
                                   const Uint16s& value) = 0;
   virtual void EmitUintChanged(const std::string& name, uint32_t value) = 0;
+  virtual void EmitUint64Changed(const std::string& name, uint64_t value) = 0;
   virtual void EmitIntChanged(const std::string& name, int value) = 0;
   virtual void EmitRpcIdentifierChanged(const std::string& name,
                                         const RpcIdentifier& value) = 0;
@@ -143,6 +144,8 @@ class ServiceAdaptorInterface {
                                  const std::string& value) = 0;
   virtual void EmitStringmapChanged(const std::string& name,
                                     const Stringmap& value) = 0;
+  virtual void EmitStringmapsChanged(const std::string& name,
+                                     const Stringmaps& value) = 0;
 };
 
 class ThirdPartyVpnAdaptorInterface {

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
 #include <chromeos/dbus/service_constants.h>
@@ -25,8 +25,7 @@ namespace {
 
 bool IsValidObbMountPath(const base::FilePath& path) {
   // OBB mount path should look like /var/run/arc/obb/obb:1.
-  std::vector<std::string> components;
-  path.GetComponents(&components);
+  std::vector<std::string> components = path.GetComponents();
   return components.size() == 6 && components[0] == "/" &&
          components[1] == "var" && components[2] == "run" &&
          components[3] == "arc" && components[4] == "obb" &&
@@ -50,13 +49,15 @@ bool Service::Initialize(scoped_refptr<dbus::Bus> bus) {
       bus->GetExportedObject(dbus::ObjectPath(kArcObbMounterServicePath));
   if (!exported_object_->ExportMethodAndBlock(
           kArcObbMounterInterface, kMountObbMethod,
-          base::Bind(&Service::MountObb, weak_ptr_factory_.GetWeakPtr()))) {
+          base::BindRepeating(&Service::MountObb,
+                              weak_ptr_factory_.GetWeakPtr()))) {
     LOG(ERROR) << "Failed to export MountObb method.";
     return false;
   }
   if (!exported_object_->ExportMethodAndBlock(
           kArcObbMounterInterface, kUnmountObbMethod,
-          base::Bind(&Service::UnmountObb, weak_ptr_factory_.GetWeakPtr()))) {
+          base::BindRepeating(&Service::UnmountObb,
+                              weak_ptr_factory_.GetWeakPtr()))) {
     LOG(ERROR) << "Failed to export UnmountObb method.";
     return false;
   }

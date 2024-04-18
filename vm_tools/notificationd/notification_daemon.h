@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/message_loops/base_message_loop.h>
 
 #include "vm_tools/notificationd/dbus_interface.h"
@@ -32,7 +31,7 @@ class NotificationDaemon : public DBusInterface,
   static std::unique_ptr<NotificationDaemon> Create(
       const std::string& display_name,
       const std::string& virtwl_device,
-      base::Closure quit_closure);
+      base::OnceClosure quit_closure);
 
   ~NotificationDaemon() override = default;
 
@@ -62,7 +61,7 @@ class NotificationDaemon : public DBusInterface,
   // Initializes the notification daemon. Returns true on success.
   bool Init(const std::string& display_name,
             const std::string& virtwl_device,
-            base::Closure quit_closure);
+            base::OnceClosure quit_closure);
 
   std::unique_ptr<NotificationShellClient> notification_shell_client_;
   std::unique_ptr<DBusService> dbus_service_;

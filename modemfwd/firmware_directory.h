@@ -1,26 +1,29 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MODEMFWD_FIRMWARE_DIRECTORY_H_
 #define MODEMFWD_FIRMWARE_DIRECTORY_H_
 
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/optional.h>
 
 #include "modemfwd/firmware_file_info.h"
+#include "modemfwd/firmware_manifest.h"
 
 namespace modemfwd {
 
 class FirmwareDirectory {
  public:
   struct Files {
-    base::Optional<FirmwareFileInfo> main_firmware;
-    base::Optional<FirmwareFileInfo> oem_firmware;
-    base::Optional<FirmwareFileInfo> carrier_firmware;
+    std::optional<FirmwareFileInfo> main_firmware;
+    std::optional<FirmwareFileInfo> oem_firmware;
+    std::optional<FirmwareFileInfo> carrier_firmware;
+    std::map<std::string, FirmwareFileInfo> assoc_firmware;
   };
 
   static const char kGenericCarrierId[];
@@ -36,18 +39,25 @@ class FirmwareDirectory {
   virtual Files FindFirmware(const std::string& device_id,
                              std::string* carrier_id) = 0;
 
+  // Returns the path where the firmware files are stored. For DLCs, the path
+  // is retrieved from dlcservice during runtime.
+  virtual const base::FilePath& GetFirmwarePath() = 0;
+
   // Determine whether two potentially different carrier ID |carrier_a| and
   // |carrier_b| are using the same base and carrier firmwares.
   // e.g. a carrier and MVNO networks.
   virtual bool IsUsingSameFirmware(const std::string& device_id,
                                    const std::string& carrier_a,
                                    const std::string& carrier_b) = 0;
+
+  // Override the variant variable for testing.
+  virtual void OverrideVariantForTesting(const std::string& variant) = 0;
 };
 
 std::unique_ptr<FirmwareDirectory> CreateFirmwareDirectory(
-    const base::FilePath& directory);
-
-std::string GetModemFirmwareVariant();
+    std::unique_ptr<FirmwareIndex> index,
+    const base::FilePath& directory,
+    const std::string& variant);
 
 }  // namespace modemfwd
 

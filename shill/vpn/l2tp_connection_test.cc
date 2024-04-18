@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,9 +24,8 @@
 #include "shill/mock_device_info.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
-#include "shill/mock_process_manager.h"
+#include "shill/net/mock_process_manager.h"
 #include "shill/ppp_daemon.h"
-#include "shill/ppp_device.h"
 #include "shill/rpc_task.h"
 #include "shill/test_event_dispatcher.h"
 #include "shill/vpn/fake_vpn_util.h"
@@ -102,6 +101,7 @@ using testing::AllOf;
 using testing::DoAll;
 using testing::Return;
 using testing::SaveArg;
+using testing::WithArg;
 
 // Expected contents in WritePPPDConfig test, missing the last line for plugin.
 constexpr char kExpectedPPPDConf[] = R"(ipcp-accept-local
@@ -119,6 +119,7 @@ nosystemconfig
 usepeerdns
 lcp-echo-failure 4
 lcp-echo-interval 30
+logfd -1
 )";
 
 // The expected contents of l2tpd.conf excluding the line for "pppoptfile" which
@@ -143,15 +144,15 @@ class MockCallbacks {
               OnConnected,
               (const std::string& link_name,
                int interface_index,
-               const IPConfig::Properties& ip_properties));
+               std::unique_ptr<IPConfig::Properties> ipv4_properties,
+               std::unique_ptr<IPConfig::Properties> ipv6_properties));
   MOCK_METHOD(void, OnFailure, (Service::ConnectFailure));
   MOCK_METHOD(void, OnStopped, ());
 };
 
 class L2TPConnectionTest : public testing::Test {
  public:
-  L2TPConnectionTest()
-      : manager_(&control_, &dispatcher_, &metrics_), device_info_(&manager_) {
+  L2TPConnectionTest() : manager_(&control_, &dispatcher_, &metrics_) {
     auto callbacks = std::make_unique<VPNConnection::Callbacks>(
         base::BindRepeating(&MockCallbacks::OnConnected,
                             base::Unretained(&callbacks_)),
@@ -162,15 +163,16 @@ class L2TPConnectionTest : public testing::Test {
 
     l2tp_connection_ = std::make_unique<L2TPConnectionUnderTest>(
         std::make_unique<L2TPConnection::Config>(), std::move(callbacks),
-        &control_, &device_info_, &dispatcher_, &process_manager_);
+        &control_, device_info(), &dispatcher_, &process_manager_);
   }
+
+  MockDeviceInfo* device_info() { return manager_.mock_device_info(); }
 
  protected:
   MockControl control_;
   EventDispatcherForTest dispatcher_;
   MockMetrics metrics_;
   MockManager manager_;
-  MockDeviceInfo device_info_;
   MockProcessManager process_manager_;
 
   MockCallbacks callbacks_;
@@ -242,11 +244,13 @@ TEST_F(L2TPConnectionTest, StartXl2tpd) {
                   _, kExpectedProgramPath, _, _,
                   AllOf(MinijailOptionsMatchUserGroup("vpn", "vpn"),
                         MinijailOptionsMatchCapMask(kExpectedCapMask),
-                        MinijailOptionsMatchInheritSupplumentaryGroup(true),
-                        MinijailOptionsMatchCloseNonstdFDs(true)),
+                        MinijailOptionsMatchInheritSupplementaryGroup(true)),
                   _))
-      .WillOnce(DoAll(SaveArg<3>(&actual_env), Return(123)));
-
+      .WillOnce(WithArg<3>(
+          [&actual_env](const std::map<std::string, std::string>& environment) {
+            actual_env = environment;
+            return 123;
+          }));
   l2tp_connection_->InvokeStartXl2tpd();
 
   // Environment should contains variables needed by pppd.
@@ -261,13 +265,48 @@ TEST_F(L2TPConnectionTest, Xl2tpdExitedUnexpectedly) {
 
   base::OnceCallback<void(int)> exit_cb;
   EXPECT_CALL(process_manager_, StartProcessInMinijail(_, _, _, _, _, _))
-      .WillOnce(DoAll(SaveArg<5>(&exit_cb), Return(123)));
+      .WillOnce(
+          WithArg<5>([&exit_cb](base::OnceCallback<void(int)> exit_callback) {
+            exit_cb = std::move(exit_callback);
+            return 123;
+          }));
 
   l2tp_connection_->InvokeStartXl2tpd();
 
   std::move(exit_cb).Run(1);
 
   EXPECT_CALL(callbacks_, OnFailure(_));
+  dispatcher_.task_environment().RunUntilIdle();
+}
+
+TEST_F(L2TPConnectionTest, Disconnect) {
+  l2tp_connection_->SetTempDir();
+  l2tp_connection_->set_state(VPNConnection::State::kConnected);
+
+  // Just to make |external_task_| not empty.
+  l2tp_connection_->InvokeStartXl2tpd();
+
+  base::OnceCallback<void(int)> exit_cb;
+  const base::FilePath kExpectedProgramPath("/usr/sbin/xl2tpd-control");
+  constexpr uint64_t kExpectedCapMask = 0;
+  EXPECT_CALL(process_manager_,
+              StartProcessInMinijail(
+                  _, kExpectedProgramPath, _, _,
+                  AllOf(MinijailOptionsMatchUserGroup("vpn", "vpn"),
+                        MinijailOptionsMatchCapMask(kExpectedCapMask)),
+                  _))
+      .WillOnce(
+          WithArg<5>([&exit_cb](base::OnceCallback<void(int)> exit_callback) {
+            exit_cb = std::move(exit_callback);
+            return 123;
+          }));
+
+  l2tp_connection_->Disconnect();
+  dispatcher_.task_environment().RunUntilIdle();
+  ASSERT_TRUE(!exit_cb.is_null());
+  std::move(exit_cb).Run(0);
+
+  EXPECT_CALL(callbacks_, OnStopped());
   dispatcher_.task_environment().RunUntilIdle();
 }
 
@@ -297,7 +336,7 @@ TEST_F(L2TPConnectionTest, PPPNotifyConnected) {
       {kPPPInterfaceName, kIfName}, {kPPPInternalIP4Address, kLocalIPAddress}};
 
   // No callbacks should be invoked when authenticating.
-  EXPECT_CALL(callbacks_, OnConnected(_, _, _)).Times(0);
+  EXPECT_CALL(callbacks_, OnConnected(_, _, _, _)).Times(0);
   EXPECT_CALL(callbacks_, OnFailure(_)).Times(0);
   EXPECT_CALL(callbacks_, OnStopped()).Times(0);
   l2tp_connection_->InvokeNotify(kPPPReasonAuthenticating, config);
@@ -305,14 +344,11 @@ TEST_F(L2TPConnectionTest, PPPNotifyConnected) {
   dispatcher_.task_environment().RunUntilIdle();
 
   // Expects OnConnected() when kPPPReasonConnect event comes.
-  IPConfig::Properties actual_ip_properties;
-  EXPECT_CALL(callbacks_, OnConnected(kIfName, kIfIndex, _))
-      .WillOnce(SaveArg<2>(&actual_ip_properties));
-  EXPECT_CALL(device_info_, GetIndex(kIfName)).WillOnce(Return(kIfIndex));
+  auto actual_ip_properties = std::make_unique<IPConfig::Properties>();
+  EXPECT_CALL(callbacks_, OnConnected(kIfName, kIfIndex, _, _));
+  EXPECT_CALL(*device_info(), GetIndex(kIfName)).WillOnce(Return(kIfIndex));
   l2tp_connection_->InvokeNotify(kPPPReasonConnect, config);
   dispatcher_.task_environment().RunUntilIdle();
-
-  EXPECT_EQ(actual_ip_properties.address, kLocalIPAddress);
 }
 
 TEST_F(L2TPConnectionTest, PPPNotifyConnectedWithoutDeviceInfoReady) {
@@ -325,9 +361,9 @@ TEST_F(L2TPConnectionTest, PPPNotifyConnectedWithoutDeviceInfoReady) {
   // The object should register the callback with DeviceInfo if the interface is
   // not known by shill now.
   DeviceInfo::LinkReadyCallback link_ready_cb;
-  EXPECT_CALL(callbacks_, OnConnected(kIfName, kIfIndex, _)).Times(0);
-  EXPECT_CALL(device_info_, GetIndex(kIfName)).WillOnce(Return(-1));
-  EXPECT_CALL(device_info_, AddVirtualInterfaceReadyCallback(kIfName, _))
+  EXPECT_CALL(callbacks_, OnConnected(kIfName, kIfIndex, _, _)).Times(0);
+  EXPECT_CALL(*device_info(), GetIndex(kIfName)).WillOnce(Return(-1));
+  EXPECT_CALL(*device_info(), AddVirtualInterfaceReadyCallback(kIfName, _))
       .WillOnce([&](const std::string&, DeviceInfo::LinkReadyCallback cb) {
         link_ready_cb = std::move(cb);
       });
@@ -336,7 +372,7 @@ TEST_F(L2TPConnectionTest, PPPNotifyConnectedWithoutDeviceInfoReady) {
 
   // Expects OnConnected() when the link is ready.
   std::move(link_ready_cb).Run(kIfName, kIfIndex);
-  EXPECT_CALL(callbacks_, OnConnected(kIfName, kIfIndex, _));
+  EXPECT_CALL(callbacks_, OnConnected(kIfName, kIfIndex, _, _));
   dispatcher_.task_environment().RunUntilIdle();
 }
 

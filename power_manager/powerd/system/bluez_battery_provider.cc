@@ -1,12 +1,13 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
+#include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/containers/contains.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
 #include <chromeos/dbus/service_constants.h>
@@ -14,8 +15,7 @@
 
 #include "power_manager/powerd/system/bluez_battery_provider.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -56,16 +56,17 @@ BluezBattery::BluezBattery(
 }
 
 void BluezBattery::Export(
-    const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& callback) {
+    brillo::dbus_utils::AsyncEventSequencer::CompletionAction callback) {
   brillo::dbus_utils::DBusInterface* iface = dbus_object_.AddOrGetInterface(
       bluetooth_battery::kBluetoothBatteryProviderInterface);
   iface->AddProperty(bluetooth_battery::kDeviceProperty, &device_);
   iface->AddProperty(bluetooth_battery::kPercentageProperty, &percentage_);
-  dbus_object_.RegisterAsync(callback);
+  dbus_object_.RegisterAsync(std::move(callback));
 }
 
 void BluezBattery::Unexport() {
-  dbus_object_.UnregisterAsync();
+  // TODO(b/278483576): Replace it by UnregisterAsync.
+  dbus_object_.UnregisterAndBlock();
 }
 
 void BluezBattery::SetLevel(int level) {
@@ -90,7 +91,7 @@ void BluezBatteryProvider::Init(scoped_refptr<dbus::Bus> bus) {
           bus_, dbus::ObjectPath(kBluetoothBatteryProviderPath));
 
   battery_exported_object_manager_->RegisterAsync(
-      base::Bind(&NoopCompletionAction));
+      base::BindRepeating(&NoopCompletionAction));
 
   object_manager_ = bus_->GetObjectManager(
       bluetooth_battery::kBluetoothBatteryProviderManagerServiceName,
@@ -138,7 +139,7 @@ dbus::PropertySet* BluezBatteryProvider::CreateProperties(
     const dbus::ObjectPath& object_path,
     const std::string& interface_name) {
   return new dbus::PropertySet(object_proxy, interface_name,
-                               base::Bind(&OnPropertyChanged));
+                               base::BindRepeating(&OnPropertyChanged));
 }
 
 void BluezBatteryProvider::RegisterAsBatteryProvider(
@@ -157,8 +158,9 @@ void BluezBatteryProvider::RegisterAsBatteryProvider(
 
   manager_proxy->CallMethod(
       &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-      base::Bind(&BluezBatteryProvider::HandleRegisterBatteryProviderResponse,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindOnce(
+          &BluezBatteryProvider::HandleRegisterBatteryProviderResponse,
+          weak_ptr_factory_.GetWeakPtr()));
 }
 
 void BluezBatteryProvider::HandleRegisterBatteryProviderResponse(
@@ -189,7 +191,7 @@ BluezBattery* BluezBatteryProvider::CreateBattery(const std::string& address,
       battery_exported_object_manager_.get(), bus_, address, level,
       dbus::ObjectPath(object_path), dbus::ObjectPath(device_path));
 
-  batteries_[address]->Export(base::Bind(&NoopCompletionAction));
+  batteries_[address]->Export(base::BindRepeating(&NoopCompletionAction));
 
   return batteries_[address].get();
 }
@@ -201,5 +203,4 @@ BluezBattery* BluezBatteryProvider::GetBattery(const std::string& address) {
   return nullptr;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

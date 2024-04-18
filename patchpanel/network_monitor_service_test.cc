@@ -1,10 +1,12 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "patchpanel/network_monitor_service.h"
 
 #include <memory>
+#include <set>
+
 #include <linux/rtnetlink.h>
 
 #include <base/strings/strcat.h>
@@ -12,7 +14,8 @@
 #include <base/test/task_environment.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
-#include <shill/net/mock_rtnl_handler.h>
+#include <net-base/byte_utils.h>
+#include <net-base/mock_rtnl_handler.h>
 
 #include "patchpanel/fake_shill_client.h"
 
@@ -25,9 +28,9 @@ constexpr char kTestInterfaceName[] = "wlan0";
 using ::testing::Eq;
 
 MATCHER(IsNeighborDumpMessage, "") {
-  if (!(arg->type() == shill::RTNLMessage::kTypeNeighbor &&
+  if (!(arg->type() == net_base::RTNLMessage::kTypeNeighbor &&
         arg->flags() == NLM_F_REQUEST | NLM_F_DUMP &&
-        arg->mode() == shill::RTNLMessage::kModeGet &&
+        arg->mode() == net_base::RTNLMessage::kModeGet &&
         arg->interface_index() == kTestInterfaceIndex))
     return false;
 
@@ -35,16 +38,20 @@ MATCHER(IsNeighborDumpMessage, "") {
 }
 
 MATCHER_P(IsNeighborProbeMessage, address, "") {
-  if (!(arg->type() == shill::RTNLMessage::kTypeNeighbor &&
+  if (!(arg->type() == net_base::RTNLMessage::kTypeNeighbor &&
         arg->flags() == NLM_F_REQUEST | NLM_F_REPLACE &&
-        arg->mode() == shill::RTNLMessage::kModeAdd &&
+        arg->mode() == net_base::RTNLMessage::kModeAdd &&
         arg->neighbor_status().state == NUD_PROBE &&
         arg->interface_index() == kTestInterfaceIndex &&
         arg->HasAttribute(NDA_DST)))
     return false;
 
-  shill::IPAddress msg_address(arg->family(), arg->GetAttribute(NDA_DST));
-  return msg_address == shill::IPAddress(address);
+  const auto addr_bytes = arg->GetAttribute(NDA_DST);
+  const auto msg_address = net_base::IPAddress::CreateFromBytes(addr_bytes);
+  CHECK(msg_address.has_value());
+  const auto expected_address = net_base::IPAddress::CreateFromString(address);
+  CHECK(expected_address.has_value());
+  return msg_address == expected_address;
 }
 
 // Helper class for testing. Similar to mock class but only allowed one
@@ -83,7 +90,7 @@ class FakeNeighborReachabilityEventHandler {
   }
 
   void Run(int ifindex,
-           const shill::IPAddress& ip_addr,
+           const net_base::IPAddress& ip_addr,
            NeighborLinkMonitor::NeighborRole role,
            NeighborReachabilityEventSignal::EventType event_type) {
     if (!enabled_)
@@ -133,7 +140,7 @@ class FakeNeighborReachabilityEventHandler {
 class NeighborLinkMonitorTest : public testing::Test {
  protected:
   void SetUp() override {
-    mock_rtnl_handler_ = std::make_unique<shill::MockRTNLHandler>();
+    mock_rtnl_handler_ = std::make_unique<net_base::MockRTNLHandler>();
     callback_ =
         base::BindRepeating(&FakeNeighborReachabilityEventHandler::Run,
                             base::Unretained(&fake_neighbor_event_handler_));
@@ -157,31 +164,33 @@ class NeighborLinkMonitorTest : public testing::Test {
   }
 
   void NotifyNUDStateChanged(const std::string& addr, uint16_t nud_state) {
-    CreateAndSendIncomingRTNLMessage(shill::RTNLMessage::kModeAdd, addr,
+    CreateAndSendIncomingRTNLMessage(net_base::RTNLMessage::kModeAdd, addr,
                                      nud_state);
   }
 
   void NotifyNeighborRemoved(const std::string& addr) {
-    CreateAndSendIncomingRTNLMessage(shill::RTNLMessage::kModeDelete, addr, 0);
+    CreateAndSendIncomingRTNLMessage(net_base::RTNLMessage::kModeDelete, addr,
+                                     0);
   }
 
-  void CreateAndSendIncomingRTNLMessage(const shill::RTNLMessage::Mode mode,
+  void CreateAndSendIncomingRTNLMessage(const net_base::RTNLMessage::Mode mode,
                                         const std::string& address,
                                         uint16_t nud_state) {
     ASSERT_NE(registered_listener_, nullptr);
 
-    shill::IPAddress addr(address);
-    shill::RTNLMessage msg(shill::RTNLMessage::kTypeNeighbor, mode, 0, 0, 0,
-                           kTestInterfaceIndex, addr.family());
-    msg.SetAttribute(NDA_DST, addr.address());
-    if (mode == shill::RTNLMessage::kModeAdd) {
+    const auto addr = net_base::IPAddress::CreateFromString(address);
+    CHECK(addr);
+    net_base::RTNLMessage msg(net_base::RTNLMessage::kTypeNeighbor, mode, 0, 0,
+                              0, kTestInterfaceIndex,
+                              net_base::ToSAFamily(addr->GetFamily()));
+    msg.SetAttribute(NDA_DST, addr->ToBytes());
+    if (mode == net_base::RTNLMessage::kModeAdd) {
       msg.set_neighbor_status(
-          shill::RTNLMessage::NeighborStatus(nud_state, 0, 0));
-      msg.SetAttribute(NDA_LLADDR, shill::ByteString(
-                                       std::vector<uint8_t>{1, 2, 3, 4, 5, 6}));
+          net_base::RTNLMessage::NeighborStatus(nud_state, 0, 0));
+      msg.SetAttribute(NDA_LLADDR, std::vector<uint8_t>{1, 2, 3, 4, 5, 6});
     }
 
-    registered_listener_->NotifyEvent(shill::RTNLHandler::kRequestNeighbor,
+    registered_listener_->NotifyEvent(net_base::RTNLHandler::kRequestNeighbor,
                                       msg);
   }
 
@@ -191,16 +200,15 @@ class NeighborLinkMonitorTest : public testing::Test {
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
   FakeNeighborReachabilityEventHandler fake_neighbor_event_handler_;
   NeighborLinkMonitor::NeighborReachabilityEventHandler callback_;
-  std::unique_ptr<shill::MockRTNLHandler> mock_rtnl_handler_;
+  std::unique_ptr<net_base::MockRTNLHandler> mock_rtnl_handler_;
   std::unique_ptr<NeighborLinkMonitor> link_monitor_;
-  shill::RTNLListener* registered_listener_ = nullptr;
+  net_base::RTNLListener* registered_listener_ = nullptr;
 };
 
 TEST_F(NeighborLinkMonitorTest, SendNeighborDumpMessageOnIPConfigChanged) {
   ShillClient::IPConfig ipconfig;
-  ipconfig.ipv4_address = "1.2.3.4";
-  ipconfig.ipv4_gateway = "1.2.3.5";
-  ipconfig.ipv4_prefix_length = 24;
+  ipconfig.ipv4_cidr = *net_base::IPv4CIDR::CreateFromCIDRString("1.2.3.4/24");
+  ipconfig.ipv4_gateway = net_base::IPv4Address(1, 2, 3, 5);
   ipconfig.ipv4_dns_addresses = {"1.2.3.6"};
 
   // On ipconfig changed, the link monitor should send only one dump request, to
@@ -213,9 +221,8 @@ TEST_F(NeighborLinkMonitorTest, SendNeighborDumpMessageOnIPConfigChanged) {
 
 TEST_F(NeighborLinkMonitorTest, WatchLinkLocalIPv6DNSServerAddress) {
   ShillClient::IPConfig ipconfig;
-  ipconfig.ipv6_address = "2401::1";
-  ipconfig.ipv6_prefix_length = 64;
-  ipconfig.ipv6_gateway = "fe80::1";
+  ipconfig.ipv6_cidr = *net_base::IPv6CIDR::CreateFromCIDRString("2401::1/64");
+  ipconfig.ipv6_gateway = *net_base::IPv6Address::CreateFromString("fe80::1");
   ipconfig.ipv6_dns_addresses = {"fe80::2"};
 
   link_monitor_->OnIPConfigChanged(ipconfig);
@@ -234,9 +241,8 @@ TEST_F(NeighborLinkMonitorTest, WatchLinkLocalIPv6DNSServerAddress) {
 TEST_F(NeighborLinkMonitorTest, SendNeighborProbeMessage) {
   // Only the gateway should be in the watching list.
   ShillClient::IPConfig ipconfig;
-  ipconfig.ipv4_address = "1.2.3.4";
-  ipconfig.ipv4_gateway = "1.2.3.5";
-  ipconfig.ipv4_prefix_length = 24;
+  ipconfig.ipv4_cidr = *net_base::IPv4CIDR::CreateFromCIDRString("1.2.3.4/24");
+  ipconfig.ipv4_gateway = net_base::IPv4Address(1, 2, 3, 5);
   link_monitor_->OnIPConfigChanged(ipconfig);
 
   // Creates a RTNL message about the NUD state of the gateway is NUD_REACHABLE
@@ -267,10 +273,9 @@ TEST_F(NeighborLinkMonitorTest, SendNeighborProbeMessage) {
 
 TEST_F(NeighborLinkMonitorTest, UpdateWatchingEntries) {
   ShillClient::IPConfig ipconfig;
-  ipconfig.ipv4_address = "1.2.3.4";
-  ipconfig.ipv4_gateway = "1.2.3.5";
+  ipconfig.ipv4_cidr = *net_base::IPv4CIDR::CreateFromCIDRString("1.2.3.4/24");
+  ipconfig.ipv4_gateway = net_base::IPv4Address(1, 2, 3, 5);
   ipconfig.ipv4_dns_addresses = {"1.2.3.6"};
-  ipconfig.ipv4_prefix_length = 24;
   link_monitor_->OnIPConfigChanged(ipconfig);
 
   ipconfig.ipv4_dns_addresses = {"1.2.3.7"};
@@ -306,10 +311,9 @@ TEST_F(NeighborLinkMonitorTest, UpdateWatchingEntries) {
 
 TEST_F(NeighborLinkMonitorTest, UpdateWatchingEntriesWithSameAddress) {
   ShillClient::IPConfig ipconfig;
-  ipconfig.ipv4_address = "1.2.3.4";
-  ipconfig.ipv4_gateway = "1.2.3.5";
+  ipconfig.ipv4_cidr = *net_base::IPv4CIDR::CreateFromCIDRString("1.2.3.4/24");
+  ipconfig.ipv4_gateway = net_base::IPv4Address(1, 2, 3, 5);
   ipconfig.ipv4_dns_addresses = {"1.2.3.6"};
-  ipconfig.ipv4_prefix_length = 24;
   link_monitor_->OnIPConfigChanged(ipconfig);
 
   // No dump request is expected.
@@ -320,9 +324,8 @@ TEST_F(NeighborLinkMonitorTest, UpdateWatchingEntriesWithSameAddress) {
 
 TEST_F(NeighborLinkMonitorTest, NotifyNeighborReachabilityEvent) {
   ShillClient::IPConfig ipconfig;
-  ipconfig.ipv4_address = "1.2.3.4";
-  ipconfig.ipv4_gateway = "1.2.3.5";
-  ipconfig.ipv4_prefix_length = 24;
+  ipconfig.ipv4_cidr = *net_base::IPv4CIDR::CreateFromCIDRString("1.2.3.4/24");
+  ipconfig.ipv4_gateway = net_base::IPv4Address(1, 2, 3, 5);
 
   fake_neighbor_event_handler_.Enable();
 
@@ -353,13 +356,12 @@ TEST_F(NeighborLinkMonitorTest, NotifyNeighborReachabilityEvent) {
 
 TEST_F(NeighborLinkMonitorTest, NeighborRole) {
   ShillClient::IPConfig ipconfig;
-  ipconfig.ipv4_address = "1.2.3.4";
-  ipconfig.ipv4_prefix_length = 24;
+  ipconfig.ipv4_cidr = *net_base::IPv4CIDR::CreateFromCIDRString("1.2.3.4/24");
 
   fake_neighbor_event_handler_.Enable();
 
   SCOPED_TRACE("On neighbor as gateway or DNS server failed.");
-  ipconfig.ipv4_gateway = "1.2.3.5";
+  ipconfig.ipv4_gateway = net_base::IPv4Address(1, 2, 3, 5);
   ipconfig.ipv4_dns_addresses = {"1.2.3.6"};
   link_monitor_->OnIPConfigChanged(ipconfig);
   fake_neighbor_event_handler_.Expect(
@@ -380,7 +382,7 @@ TEST_F(NeighborLinkMonitorTest, NeighborRole) {
   fake_neighbor_event_handler_.Enable();
 
   SCOPED_TRACE("On neighbor as gateway and DNS server failed");
-  ipconfig.ipv4_gateway = "1.2.3.5";
+  ipconfig.ipv4_gateway = net_base::IPv4Address(1, 2, 3, 5);
   ipconfig.ipv4_dns_addresses = {"1.2.3.5"};
   link_monitor_->OnIPConfigChanged(ipconfig);
   fake_neighbor_event_handler_.Expect(
@@ -395,7 +397,7 @@ TEST_F(NeighborLinkMonitorTest, NeighborRole) {
   fake_neighbor_event_handler_.Enable();
 
   SCOPED_TRACE("Swaps the roles.");
-  ipconfig.ipv4_gateway = "1.2.3.6";
+  ipconfig.ipv4_gateway = net_base::IPv4Address(1, 2, 3, 6);
   ipconfig.ipv4_dns_addresses = {"1.2.3.5"};
   link_monitor_->OnIPConfigChanged(ipconfig);
   fake_neighbor_event_handler_.Expect(
@@ -418,13 +420,13 @@ class NetworkMonitorServiceTest : public testing::Test {
         fake_shill_client_.get(),
         base::BindRepeating(&FakeNeighborReachabilityEventHandler::Run,
                             base::Unretained(&fake_neighbor_event_handler_)));
-    mock_rtnl_handler_ = std::make_unique<shill::MockRTNLHandler>();
+    mock_rtnl_handler_ = std::make_unique<net_base::MockRTNLHandler>();
   }
 
   FakeShillClientHelper shill_helper_;
   FakeNeighborReachabilityEventHandler fake_neighbor_event_handler_;
   std::unique_ptr<FakeShillClient> fake_shill_client_;
-  std::unique_ptr<shill::MockRTNLHandler> mock_rtnl_handler_;
+  std::unique_ptr<net_base::MockRTNLHandler> mock_rtnl_handler_;
   std::unique_ptr<NetworkMonitorService> monitor_svc_;
 };
 
@@ -435,25 +437,40 @@ TEST_F(NetworkMonitorServiceTest, StartRTNLHanlderOnServiceStart) {
 }
 
 TEST_F(NetworkMonitorServiceTest, CallGetDevicePropertiesOnNewDevice) {
-  fake_shill_client_->SetIfname("/device/wlan0", "wlan0");
-  fake_shill_client_->SetIfname("/device/eth0", "eth0");
+  dbus::ObjectPath eth0_path = dbus::ObjectPath("/device/eth0");
+  ShillClient::Device eth_dev;
+  eth_dev.type = ShillClient::Device::Type::kEthernet;
+  eth_dev.ifindex = 1;
+  eth_dev.ifname = "eth0";
+  eth_dev.service_path = "/service/2";
+  fake_shill_client_->SetFakeDeviceProperties(eth0_path, eth_dev);
+
+  dbus::ObjectPath wlan0_path = dbus::ObjectPath("/device/wlan0");
+  ShillClient::Device wlan_dev;
+  wlan_dev.type = ShillClient::Device::Type::kWifi;
+  wlan_dev.ifindex = 2;
+  wlan_dev.ifname = "wlan0";
+  wlan_dev.service_path = "/service/2";
+  fake_shill_client_->SetFakeDeviceProperties(wlan0_path, wlan_dev);
 
   monitor_svc_->rtnl_handler_ = mock_rtnl_handler_.get();
+
   // Device added before service starts.
-  std::vector<dbus::ObjectPath> devices = {dbus::ObjectPath("/device/eth0")};
+  std::vector<dbus::ObjectPath> devices = {eth0_path};
   fake_shill_client_->NotifyManagerPropertyChange(shill::kDevicesProperty,
                                                   brillo::Any(devices));
   monitor_svc_->Start();
 
   // Device added after service starts.
-  devices.emplace_back(dbus::ObjectPath("/device/wlan0"));
+  devices.push_back(wlan0_path);
   fake_shill_client_->NotifyManagerPropertyChange(shill::kDevicesProperty,
                                                   brillo::Any(devices));
-  const std::set<std::string>& calls =
+
+  const std::set<dbus::ObjectPath>& calls =
       fake_shill_client_->get_device_properties_calls();
   EXPECT_EQ(calls.size(), 2);
-  EXPECT_NE(calls.find("eth0"), calls.end());
-  EXPECT_NE(calls.find("wlan0"), calls.end());
+  EXPECT_NE(calls.find(eth0_path), calls.end());
+  EXPECT_NE(calls.find(wlan0_path), calls.end());
 }
 
 }  // namespace patchpanel

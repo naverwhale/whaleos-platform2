@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,25 +7,34 @@ use std::convert::{TryFrom, TryInto};
 use std::error::Error;
 use std::fmt;
 use std::fs::{remove_file, OpenOptions};
+use std::iter::FromIterator;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::channel;
 use std::thread::sleep;
 use std::time::Duration;
 
 use dbus::{
     arg::OwnedFd,
-    ffidisp::{BusType, Connection, ConnectionItem},
+    blocking::{self, BlockingSender, Connection},
+    channel::MatchingReceiver,
+    message::MatchRule,
+    strings::{Interface, Member},
     Message,
 };
+use protobuf::EnumOrUnknown;
 use protobuf::Message as ProtoMessage;
 
+use system_api::client::OrgChromiumVmConcierge;
+use system_api::concierge_service::vm_info::VmType;
+use system_api::concierge_service::*;
+use system_api::dlcservice::*;
+
 use crate::disk::{DiskInfo, DiskOpType, VmDiskImageType};
-use crate::lsb_release::{LsbRelease, ReleaseChannel};
 use crate::proto::system_api::cicerone_service::*;
-use crate::proto::system_api::concierge_service::*;
-use crate::proto::system_api::dlcservice::*;
+use crate::proto::system_api::launch::*;
 use crate::proto::system_api::seneschal_service::*;
 use crate::proto::system_api::vm_plugin_dispatcher;
 use crate::proto::system_api::vm_plugin_dispatcher::VmErrorCode;
@@ -34,19 +43,22 @@ use crate::proto::system_api::*;
 const REMOVABLE_MEDIA_ROOT: &str = "/media/removable";
 const CRYPTOHOME_USER: &str = "/home/user";
 const DOWNLOADS_DIR: &str = "Downloads";
+const MY_FILES_DIR: &str = "MyFiles";
 const MNT_SHARED_ROOT: &str = "/mnt/shared";
 
 /// Round to disk block size.
-const DEFAULT_TIMEOUT_MS: i32 = 80 * 1000;
-const EXPORT_DISK_TIMEOUT_MS: i32 = 15 * 60 * 1000;
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(80 * 1000);
+const EXPORT_DISK_TIMEOUT: Duration = Duration::from_millis(15 * 60 * 1000);
 
 const DLCSERVICE_NO_IMAGE_FOUND_ERROR: &str = "org.chromium.DlcServiceInterface.NO_IMAGE_FOUND";
 
 enum ChromeOSError {
     BadChromeFeatureStatus,
-    BadDiskImageStatus(DiskImageStatus, String),
-    BadVmStatus(VmStatus, String),
+    BadDiskImageStatus(EnumOrUnknown<DiskImageStatus>, String),
+    BadVmStatus(EnumOrUnknown<VmStatus>, String),
     BadVmPluginDispatcherStatus,
+    BiosAlreadySpecified(String),
+    BiosDlcNotAllowed(String),
     CrostiniVmDisabled,
     CrostiniVmDisabledReason(String),
     DiskImageOutOfSpace,
@@ -54,28 +66,48 @@ enum ChromeOSError {
     ImportPathDoesNotExist,
     FailedAdjustVm(String),
     FailedAttachUsb(String),
-    FailedAllocateExtraDisk { path: String, reason: String },
-    FailedCreateContainer(CreateLxdContainerResponse_Status, String),
-    FailedCreateContainerSignal(LxdContainerCreatedSignal_Status, String),
+    FailedAllocateExtraDisk {
+        path: String,
+        reason: String,
+    },
+    FailedCreateContainer(EnumOrUnknown<create_lxd_container_response::Status>, String),
+    FailedCreateContainerSignal(EnumOrUnknown<lxd_container_created_signal::Status>, String),
     FailedDetachUsb(String),
     FailedDlcInstall(String, String),
     FailedGetOpenPath(PathBuf),
     FailedGetVmInfo,
     FailedListDiskImages(String),
     FailedListUsb,
-    FailedMetricsSend { exit_code: Option<i32> },
+    FailedMetricsSend {
+        exit_code: Option<i32>,
+    },
     FailedOpenPath(dbus::Error),
+    FailedAttachUsbToContainer(
+        EnumOrUnknown<attach_usb_to_container_response::Status>,
+        String,
+    ),
     FailedSendProblemReport(String, i32),
-    FailedSetupContainerUser(SetUpLxdContainerUserResponse_Status, String),
+    FailedSetupContainerUser(
+        EnumOrUnknown<set_up_lxd_container_user_response::Status>,
+        String,
+    ),
     FailedSharePath(String),
-    FailedStartContainerStatus(StartLxdContainerResponse_Status, String),
-    FailedStartLxdProgressSignal(StartLxdProgressSignal_Status, String),
-    FailedStartLxdStatus(StartLxdResponse_Status, String),
-    FailedStopVm { vm_name: String, reason: String },
+    FailedStartContainerStatus(EnumOrUnknown<start_lxd_container_response::Status>, String),
+    FailedLxdContainerStarting(EnumOrUnknown<lxd_container_starting_signal::Status>, String),
+    FailedStartLxdProgressSignal(EnumOrUnknown<start_lxd_progress_signal::Status>, String),
+    FailedStartLxdStatus(EnumOrUnknown<start_lxd_response::Status>, String),
+    FailedStopVm {
+        vm_name: String,
+        reason: String,
+    },
+    FailedUpdateContainerDevices(String),
+    InvalidEmail,
     InvalidExportPath,
     InvalidImportPath,
     InvalidSourcePath,
+    MissingActiveSession,
     NoSuchVm,
+    NoSuchVmType,
     NoVmTechnologyEnabled,
     NotAvailableForPluginVm,
     NotPluginVm,
@@ -88,7 +120,7 @@ enum ChromeOSError {
     PluginVmNoPortalAccess,
     RetrieveActiveSessions,
     SourcePathDoesNotExist,
-    TpmOnStable,
+    ToolsDlcNotAllowed(String),
 }
 
 use self::ChromeOSError::*;
@@ -102,6 +134,12 @@ impl fmt::Display for ChromeOSError {
             }
             BadVmStatus(s, reason) => write!(f, "bad VM status: `{:?}`: {}", s, reason),
             BadVmPluginDispatcherStatus => write!(f, "failed to start Parallels dispatcher"),
+            BiosAlreadySpecified(dlc) => write!(
+                f,
+                "bios path already specified bios dlc `{}` is not allowed",
+                dlc
+            ),
+            BiosDlcNotAllowed(dlc) => write!(f, "bios dlc `{}` is not allowed", dlc),
             CrostiniVmDisabled => write!(f, "Crostini VMs are not available"),
             CrostiniVmDisabledReason(reason) => {
                 write!(f, "Crostini VMs are not available: {}", reason)
@@ -130,6 +168,13 @@ impl fmt::Display for ChromeOSError {
             }
             FailedGetOpenPath(path) => write!(f, "failed to request OpenPath {}", path.display()),
             FailedGetVmInfo => write!(f, "failed to get vm info"),
+            FailedAttachUsbToContainer(s, reason) => {
+                write!(
+                    f,
+                    "failed to register shared USB device with container: `{:?}`: {}",
+                    s, reason
+                )
+            }
             FailedSendProblemReport(msg, error_code) => {
                 write!(f, "failed to send problem report: {} ({})", msg, error_code)
             }
@@ -138,6 +183,9 @@ impl fmt::Display for ChromeOSError {
             }
             FailedSharePath(reason) => write!(f, "failed to share path with vm: {}", reason),
             FailedStartContainerStatus(s, reason) => {
+                write!(f, "failed to start container: `{:?}`: {}", s, reason)
+            }
+            FailedLxdContainerStarting(s, reason) => {
                 write!(f, "failed to start container: `{:?}`: {}", s, reason)
             }
             FailedStartLxdProgressSignal(s, reason) => {
@@ -163,10 +211,19 @@ impl fmt::Display for ChromeOSError {
             FailedStopVm { vm_name, reason } => {
                 write!(f, "failed to stop vm `{}`: {}", vm_name, reason)
             }
+            FailedUpdateContainerDevices(reason) => {
+                write!(f, "Failed to update container devices: {}", reason)
+            }
+            InvalidEmail => write!(f, "the active session has an invalid email address"),
             InvalidExportPath => write!(f, "disk export path is invalid"),
             InvalidImportPath => write!(f, "disk import path is invalid"),
             InvalidSourcePath => write!(f, "source media path is invalid"),
+            MissingActiveSession => write!(
+                f,
+                "missing active session corresponding to $CROS_USER_ID_HASH"
+            ),
             NoSuchVm => write!(f, "VM with such name does not exist"),
+            NoSuchVmType => write!(f, "Invalid VM type"),
             NoVmTechnologyEnabled => write!(f, "neither Crostini nor Parallels VMs are enabled"),
             NotAvailableForPluginVm => write!(f, "this command is not available for Parallels VM"),
             NotPluginVm => write!(f, "this VM is not a Parallels VM"),
@@ -192,7 +249,7 @@ impl fmt::Display for ChromeOSError {
             PluginVmNoPortalAccess => write!(f, "unable to access Parallels licensing portal"),
             RetrieveActiveSessions => write!(f, "failed to retrieve active sessions"),
             SourcePathDoesNotExist => write!(f, "source media path does not exist"),
-            TpmOnStable => write!(f, "TPM device is not available on stable channel"),
+            ToolsDlcNotAllowed(dlc) => write!(f, "tools dlc `{}` is not allowed", dlc),
         }
     }
 }
@@ -215,15 +272,20 @@ fn dbus_message_to_proto<T: ProtoMessage>(message: &Message) -> Result<T, Box<dy
 #[derive(Default)]
 pub struct VmFeatures {
     pub gpu: bool,
+    pub dgpu_passthrough: bool,
     pub vulkan: bool,
     pub big_gl: bool,
-    pub software_tpm: bool,
+    pub virtgpu_native_context: bool,
+    pub vtpm_proxy: bool,
     pub audio_capture: bool,
     pub run_as_untrusted: bool,
     pub dlc: Option<String>,
     pub kernel_params: Vec<String>,
     pub tools_dlc_id: Option<String>,
     pub timeout: u32,
+    pub oem_strings: Vec<String>,
+    pub bios_dlc_id: Option<String>,
+    pub vm_type: Option<String>,
 }
 
 pub enum ContainerSource {
@@ -248,8 +310,8 @@ impl Default for ContainerSource {
 
 struct ProtobusSignalWatcher<'a> {
     connection: Option<&'a Connection>,
-    interface: String,
-    signal: String,
+    interface: Interface<'a>,
+    signal: Member<'a>,
 }
 
 impl<'a> ProtobusSignalWatcher<'a> {
@@ -260,53 +322,68 @@ impl<'a> ProtobusSignalWatcher<'a> {
     ) -> Result<ProtobusSignalWatcher<'a>, Box<dyn Error>> {
         let out = ProtobusSignalWatcher {
             connection,
-            interface: interface.to_owned(),
-            signal: signal.to_owned(),
+            interface: interface.to_owned().into(),
+            signal: signal.to_owned().into(),
         };
         if let Some(connection) = out.connection {
-            connection.add_match(&out.format_rule())?;
+            connection.add_match_no_cb(&out.match_rule().match_str())?;
         }
         Ok(out)
     }
 
-    fn format_rule(&self) -> String {
-        format!("interface='{}',member='{}'", self.interface, self.signal)
+    fn match_rule(&self) -> MatchRule {
+        MatchRule::new_signal(&self.interface, &self.signal)
     }
 
-    fn wait<O: ProtoMessage>(&self, timeout_millis: i32) -> Result<O, Box<dyn Error>> {
-        self.wait_with_filter(timeout_millis, |_| true)
+    fn wait<O: ProtoMessage>(&self, timeout: Duration) -> Result<O, Box<dyn Error>> {
+        self.wait_with_filter(timeout, |_| true)
     }
 
-    fn wait_with_filter<O, F>(&self, timeout_millis: i32, predicate: F) -> Result<O, Box<dyn Error>>
+    fn wait_with_filter<O, F>(&self, timeout: Duration, predicate: F) -> Result<O, Box<dyn Error>>
     where
         O: ProtoMessage,
         F: Fn(&O) -> bool,
     {
-        let connection = match self.connection.as_ref() {
+        let connection = match self.connection {
             Some(c) => c,
             None => return Err("waiting for items on mocked connections is not implemented".into()),
         };
-        for item in connection.iter(timeout_millis) {
-            match item {
-                ConnectionItem::Signal(message) => {
-                    if let (Some(msg_interface), Some(msg_signal)) =
-                        (message.interface(), message.member())
-                    {
-                        if msg_interface.as_cstr().to_string_lossy() == self.interface
-                            && msg_signal.as_cstr().to_string_lossy() == self.signal
-                        {
-                            let proto_message: O = dbus_message_to_proto(&message)?;
-                            if predicate(&proto_message) {
-                                return Ok(proto_message);
-                            }
-                        }
-                    }
-                }
-                ConnectionItem::Nothing => break,
-                _ => {}
+
+        // Need a channel to get a result out of the 'static life-time callback of start_receive
+        let (sender, receiver) = channel();
+
+        let callback_token = connection.start_receive(
+            self.match_rule().static_clone(),
+            Box::new(move |message: Message, _: &Connection| {
+                sender
+                    .send(
+                        dbus_message_to_proto(&message)
+                            .map_err(|e| format!("Failed to parse a protobuf: {e:#?}")),
+                    )
+                    .expect("Failed to pass a proto via a channel");
+                true
+            }),
+        );
+
+        let result = loop {
+            if !connection.process(timeout)? {
+                break Err("timeout while waiting for a signal".into());
+            }
+            let proto_message = match receiver.try_recv() {
+                Ok(proto_message) => proto_message?,
+                // There's no message when we received a non-matching dbus message
+                Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                Err(e) => break Err(format!("Failed to receive a message: {e:#?}").into()),
             };
-        }
-        Err("timeout while waiting for signal".into())
+            if predicate(&proto_message) {
+                break Ok(proto_message);
+            }
+        };
+        connection
+            .remove_match(callback_token)
+            .map_err(|_| "Failed to remove a signal callback")?;
+
+        result
     }
 }
 
@@ -314,7 +391,7 @@ impl Drop for ProtobusSignalWatcher<'_> {
     fn drop(&mut self) {
         if let Some(connection) = self.connection {
             connection
-                .remove_match(&self.format_rule())
+                .remove_match_no_cb(&self.match_rule().match_str())
                 .expect("unable to remove match rule on protobus");
         }
     }
@@ -354,7 +431,7 @@ impl ConnectionProxy {
     fn send_with_reply_and_block(
         &self,
         msg: Message,
-        timeout_millis: i32,
+        timeout: Duration,
     ) -> Result<Message, dbus::Error> {
         let mut filtered_msg = match &self.filter {
             Some(filter) => match filter(msg) {
@@ -364,7 +441,7 @@ impl ConnectionProxy {
             None => msg,
         };
         match &self.connection {
-            Some(connection) => connection.send_with_reply_and_block(filtered_msg, timeout_millis),
+            Some(connection) => connection.send_with_reply_and_block(filtered_msg, timeout),
             None => {
                 // A serial number is required to assign to the method return message.
                 filtered_msg.set_serial(1);
@@ -427,6 +504,7 @@ pub struct UserDisks {
     pub initrd: Option<String>,
     pub extra_disk: Option<String>,
     pub bios: Option<String>,
+    pub pflash: Option<String>,
 }
 
 #[derive(Clone)]
@@ -446,7 +524,7 @@ pub struct Methods {
 impl Methods {
     /// Initiates a D-Bus connection and returns an initialized `Methods`.
     pub fn new() -> Result<Methods, Box<dyn Error>> {
-        let connection = Connection::get_private(BusType::System)?;
+        let connection = Connection::new_system()?;
         Ok(Methods {
             connection: connection.into(),
             crostini_enabled: None,
@@ -473,7 +551,7 @@ impl Methods {
         message: Message,
         request: &I,
     ) -> Result<O, Box<dyn Error>> {
-        self.sync_protobus_timeout(message, request, &[], DEFAULT_TIMEOUT_MS)
+        self.sync_protobus_timeout(message, request, &[], DEFAULT_TIMEOUT)
     }
 
     /// Helper for doing protobuf over dbus requests and responses.
@@ -482,12 +560,10 @@ impl Methods {
         message: Message,
         request: &I,
         fds: &[OwnedFd],
-        timeout_millis: i32,
+        timeout: Duration,
     ) -> Result<O, Box<dyn Error>> {
         let method = message.append1(request.write_to_bytes()?).append_ref(fds);
-        let message = self
-            .connection
-            .send_with_reply_and_block(method, timeout_millis)?;
+        let message = self.connection.send_with_reply_and_block(method, timeout)?;
         dbus_message_to_proto(&message)
     }
 
@@ -495,10 +571,10 @@ impl Methods {
         &mut self,
         interface: &str,
         signal: &str,
-        timeout_millis: i32,
+        timeout: Duration,
     ) -> Result<O, Box<dyn Error>> {
         ProtobusSignalWatcher::new(self.connection.connection.as_ref(), interface, signal)?
-            .wait(timeout_millis)
+            .wait(timeout)
     }
 
     fn get_dlc_state(&mut self, name: &str) -> Result<DlcState, Box<dyn Error>> {
@@ -512,7 +588,7 @@ impl Methods {
 
         let message = self
             .connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)
             .map_err(|e| FailedDlcInstall(name.to_owned(), e.to_string()))?;
 
         let response: DlcState = dbus_message_to_proto(&message)
@@ -526,12 +602,12 @@ impl Methods {
             DLC_SERVICE_SERVICE_NAME,
             DLC_SERVICE_SERVICE_PATH,
             DLC_SERVICE_INTERFACE,
-            INSTALL_DLC_METHOD,
+            INSTALL_METHOD,
         )?
         .append1(name);
 
         self.connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)
             .map_err(|e| FailedDlcInstall(name.to_owned(), e.to_string()))?;
 
         Ok(())
@@ -542,30 +618,28 @@ impl Methods {
         // and, if package is already installed, OnInstallStatus signal might be issued before
         // replying to "Install" method call, which does not carry any indication whether the
         // operation in progress or not. So polling it is...
-        while self.get_dlc_state(name)?.get_state() == DlcState_State::INSTALLING {
+        while self.get_dlc_state(name)?.state.enum_value() == Ok(dlc_state::State::INSTALLING) {
             sleep(Duration::from_secs(5));
         }
         let dlc_state = self.get_dlc_state(name)?;
-        if dlc_state.get_state() != DlcState_State::INSTALLED {
-            if dlc_state.get_last_error_code() == DLCSERVICE_NO_IMAGE_FOUND_ERROR {
+        if dlc_state.state.enum_value() != Ok(dlc_state::State::INSTALLED) {
+            if dlc_state.last_error_code == DLCSERVICE_NO_IMAGE_FOUND_ERROR {
                 return Err(FailedDlcInstall(
                     name.to_owned(),
-                    "Parallels DLC not found for this build. Please try again after updating Chrome OS."
+                    "DLC not found for this build. Please try again after updating Chrome OS."
                         .to_string(),
                 )
                 .into());
             }
-            return Err(FailedDlcInstall(
-                name.to_owned(),
-                "Failed to install Parallels DLC".to_string(),
-            )
-            .into());
+            return Err(
+                FailedDlcInstall(name.to_owned(), "Failed to install DLC".to_string()).into(),
+            );
         }
         Ok(())
     }
 
     fn install_dlc(&mut self, name: &str) -> Result<(), Box<dyn Error>> {
-        if self.get_dlc_state(name)?.get_state() != DlcState_State::INSTALLED {
+        if self.get_dlc_state(name)?.state.enum_value() != Ok(dlc_state::State::INSTALLED) {
             self.init_dlc_install(name)?;
             self.poll_dlc_install(name)?;
         }
@@ -587,7 +661,7 @@ impl Methods {
 
         let message = self
             .connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)?;
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)?;
         let (enabled, reason): (Option<bool>, Option<String>) = message.get2();
         match enabled {
             Some(true) => Ok(VmTypeStatus::Enabled),
@@ -667,25 +741,6 @@ impl Methods {
         }
     }
 
-    fn is_chrome_feature_enabled(&mut self, feature_name: &str) -> Result<bool, Box<dyn Error>> {
-        let method = Message::new_method_call(
-            CHROME_FEATURES_SERVICE_NAME,
-            CHROME_FEATURES_SERVICE_PATH,
-            CHROME_FEATURES_SERVICE_INTERFACE,
-            CHROME_FEATURES_SERVICE_IS_FEATURE_ENABLED_METHOD,
-        )?
-        .append1(feature_name);
-
-        let message = self
-            .connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)?;
-        match message.get1() {
-            Some(true) => Ok(true),
-            Some(false) => Ok(false),
-            _ => Err(BadChromeFeatureStatus.into()),
-        }
-    }
-
     fn notify_vm_starting(&mut self) -> Result<(), Box<dyn Error>> {
         let method = Message::new_method_call(
             LOCK_TO_SINGLE_USER_SERVICE_NAME,
@@ -695,7 +750,7 @@ impl Methods {
         )?;
 
         self.connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)?;
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)?;
 
         Ok(())
     }
@@ -717,7 +772,7 @@ impl Methods {
 
         let message = self
             .connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)?;
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)?;
         match message.get1() {
             Some(true) => Ok(()),
             _ => Err(BadVmPluginDispatcherStatus.into()),
@@ -750,7 +805,7 @@ impl Methods {
         request.operation = operation.to_owned();
 
         for param in params {
-            request.mut_params().push(param.to_string());
+            request.params.push(param.to_string());
         }
 
         let response: AdjustVmResponse = self.sync_protobus(
@@ -779,8 +834,8 @@ impl Methods {
         let mut request = CreateDiskImageRequest::new();
         request.vm_name = vm_name.to_owned();
         request.cryptohome_id = user_id_hash.to_owned();
-        request.image_type = DiskImageType::DISK_IMAGE_AUTO;
-        request.storage_location = StorageLocation::STORAGE_CRYPTOHOME_ROOT;
+        request.image_type = DiskImageType::DISK_IMAGE_AUTO.into();
+        request.storage_location = StorageLocation::STORAGE_CRYPTOHOME_ROOT.into();
 
         let response: CreateDiskImageResponse = self.sync_protobus(
             Message::new_method_call(
@@ -792,34 +847,39 @@ impl Methods {
             &request,
         )?;
 
-        match response.status {
-            DiskImageStatus::DISK_STATUS_EXISTS | DiskImageStatus::DISK_STATUS_CREATED => {
+        match response.status.enum_value() {
+            Ok(DiskImageStatus::DISK_STATUS_EXISTS) | Ok(DiskImageStatus::DISK_STATUS_CREATED) => {
                 Ok(response.disk_path)
             }
-            DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE => Err(DiskImageOutOfSpace.into()),
+            Ok(DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE) => Err(DiskImageOutOfSpace.into()),
             _ => Err(BadDiskImageStatus(response.status, response.failure_reason).into()),
         }
     }
 
     /// Request that concierge create a new VM image.
-    fn create_vm_image(
+    fn create_vm_image<T: AsRef<str>>(
         &mut self,
         vm_name: &str,
         user_id_hash: &str,
         plugin_vm: bool,
+        size: Option<u64>,
         source_name: Option<&str>,
         removable_media: Option<&str>,
-        params: &[&str],
+        params: &[T],
     ) -> Result<Option<String>, Box<dyn Error>> {
         let mut request = CreateDiskImageRequest::new();
         request.vm_name = vm_name.to_owned();
         request.cryptohome_id = user_id_hash.to_owned();
-        request.image_type = DiskImageType::DISK_IMAGE_AUTO;
+        request.image_type = DiskImageType::DISK_IMAGE_AUTO.into();
         request.storage_location = if plugin_vm {
             StorageLocation::STORAGE_CRYPTOHOME_PLUGINVM
         } else {
             StorageLocation::STORAGE_CRYPTOHOME_ROOT
-        };
+        }
+        .into();
+        if let Some(s) = size {
+            request.disk_size = s;
+        }
 
         let source_fd = match source_name {
             Some(source) => {
@@ -829,6 +889,7 @@ impl Methods {
                         .join(source),
                     None => Path::new(CRYPTOHOME_USER)
                         .join(user_id_hash)
+                        .join(MY_FILES_DIR)
                         .join(DOWNLOADS_DIR)
                         .join(source),
                 };
@@ -850,7 +911,7 @@ impl Methods {
         };
 
         for param in params {
-            request.mut_params().push(param.to_string());
+            request.params.push(param.as_ref().to_string());
         }
 
         // We can't use sync_protobus because we need to append the file descriptor out of band from
@@ -868,13 +929,13 @@ impl Methods {
 
         let message = self
             .connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)?;
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)?;
 
         let response: CreateDiskImageResponse = dbus_message_to_proto(&message)?;
-        match response.status {
-            DiskImageStatus::DISK_STATUS_CREATED => Ok(None),
-            DiskImageStatus::DISK_STATUS_IN_PROGRESS => Ok(Some(response.command_uuid)),
-            DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE => Err(DiskImageOutOfSpace.into()),
+        match response.status.enum_value() {
+            Ok(DiskImageStatus::DISK_STATUS_CREATED) => Ok(None),
+            Ok(DiskImageStatus::DISK_STATUS_IN_PROGRESS) => Ok(Some(response.command_uuid)),
+            Ok(DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE) => Err(DiskImageOutOfSpace.into()),
             _ => Err(BadDiskImageStatus(response.status, response.failure_reason).into()),
         }
     }
@@ -899,9 +960,9 @@ impl Methods {
             &request,
         )?;
 
-        match response.status {
-            DiskImageStatus::DISK_STATUS_DESTROYED
-            | DiskImageStatus::DISK_STATUS_DOES_NOT_EXIST => Ok(()),
+        match response.status.enum_value() {
+            Ok(DiskImageStatus::DISK_STATUS_DESTROYED)
+            | Ok(DiskImageStatus::DISK_STATUS_DOES_NOT_EXIST) => Ok(()),
             _ => Err(BadDiskImageStatus(response.status, response.failure_reason).into()),
         }
     }
@@ -916,6 +977,7 @@ impl Methods {
             Some(media_path) => Path::new(REMOVABLE_MEDIA_ROOT).join(media_path).join(name),
             None => Path::new(CRYPTOHOME_USER)
                 .join(user_id_hash)
+                .join(MY_FILES_DIR)
                 .join(DOWNLOADS_DIR)
                 .join(name),
         };
@@ -972,22 +1034,23 @@ impl Methods {
 
         let message = self
             .connection
-            .send_with_reply_and_block(method, EXPORT_DISK_TIMEOUT_MS)?;
+            .send_with_reply_and_block(method, EXPORT_DISK_TIMEOUT)?;
 
         let response: ExportDiskImageResponse = dbus_message_to_proto(&message)?;
-        match response.status {
-            DiskImageStatus::DISK_STATUS_CREATED | DiskImageStatus::DISK_STATUS_IN_PROGRESS => {
+        match response.status.enum_value() {
+            Ok(DiskImageStatus::DISK_STATUS_CREATED)
+            | Ok(DiskImageStatus::DISK_STATUS_IN_PROGRESS) => {
                 export_file.commit();
                 if let Some(mut f) = digest_file {
                     f.commit();
                 }
-                if response.status == DiskImageStatus::DISK_STATUS_IN_PROGRESS {
+                if response.status.enum_value() == Ok(DiskImageStatus::DISK_STATUS_IN_PROGRESS) {
                     Ok(Some(response.command_uuid))
                 } else {
                     Ok(None)
                 }
             }
-            DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE => Err(DiskImageOutOfSpace.into()),
+            Ok(DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE) => Err(DiskImageOutOfSpace.into()),
             _ => Err(BadDiskImageStatus(response.status, response.failure_reason).into()),
         }
     }
@@ -1007,6 +1070,7 @@ impl Methods {
                 .join(import_name),
             None => Path::new(CRYPTOHOME_USER)
                 .join(user_id_hash)
+                .join(MY_FILES_DIR)
                 .join(DOWNLOADS_DIR)
                 .join(import_name),
         };
@@ -1031,7 +1095,8 @@ impl Methods {
             StorageLocation::STORAGE_CRYPTOHOME_PLUGINVM
         } else {
             StorageLocation::STORAGE_CRYPTOHOME_ROOT
-        };
+        }
+        .into();
         request.source_size = file_size;
 
         // We can't use sync_protobus because we need to append the file descriptor out of band from
@@ -1047,13 +1112,13 @@ impl Methods {
 
         let message = self
             .connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)?;
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)?;
 
         let response: ImportDiskImageResponse = dbus_message_to_proto(&message)?;
-        match response.status {
-            DiskImageStatus::DISK_STATUS_CREATED => Ok(None),
-            DiskImageStatus::DISK_STATUS_IN_PROGRESS => Ok(Some(response.command_uuid)),
-            DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE => Err(DiskImageOutOfSpace.into()),
+        match response.status.enum_value() {
+            Ok(DiskImageStatus::DISK_STATUS_CREATED) => Ok(None),
+            Ok(DiskImageStatus::DISK_STATUS_IN_PROGRESS) => Ok(Some(response.command_uuid)),
+            Ok(DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE) => Err(DiskImageOutOfSpace.into()),
             _ => Err(BadDiskImageStatus(response.status, response.failure_reason).into()),
         }
     }
@@ -1080,10 +1145,10 @@ impl Methods {
             &request,
         )?;
 
-        match response.status {
-            DiskImageStatus::DISK_STATUS_RESIZED => Ok(None),
-            DiskImageStatus::DISK_STATUS_IN_PROGRESS => Ok(Some(response.command_uuid)),
-            DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE => Err(DiskImageOutOfSpace.into()),
+        match response.status.enum_value() {
+            Ok(DiskImageStatus::DISK_STATUS_RESIZED) => Ok(None),
+            Ok(DiskImageStatus::DISK_STATUS_IN_PROGRESS) => Ok(Some(response.command_uuid)),
+            Ok(DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE) => Err(DiskImageOutOfSpace.into()),
             _ => Err(BadDiskImageStatus(response.status, response.failure_reason).into()),
         }
     }
@@ -1098,11 +1163,12 @@ impl Methods {
             DiskOpType::Resize => DiskImageStatus::DISK_STATUS_RESIZED,
         };
 
-        if response.status == expected_status {
+        if response.status.enum_value() == Ok(expected_status) {
             Ok((true, response.progress))
-        } else if response.status == DiskImageStatus::DISK_STATUS_IN_PROGRESS {
+        } else if response.status.enum_value() == Ok(DiskImageStatus::DISK_STATUS_IN_PROGRESS) {
             Ok((false, response.progress))
-        } else if response.status == DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE {
+        } else if response.status.enum_value() == Ok(DiskImageStatus::DISK_STATUS_NOT_ENOUGH_SPACE)
+        {
             Err(DiskImageOutOfSpace.into())
         } else {
             Err(BadDiskImageStatus(response.status, response.failure_reason).into())
@@ -1141,7 +1207,7 @@ impl Methods {
             let response: DiskImageStatusResponse = self.protobus_wait_for_signal_timeout(
                 VM_CONCIERGE_INTERFACE,
                 DISK_IMAGE_PROGRESS_SIGNAL,
-                DEFAULT_TIMEOUT_MS,
+                DEFAULT_TIMEOUT,
             )?;
 
             if response.command_uuid == uuid {
@@ -1160,7 +1226,7 @@ impl Methods {
         let mut request = ListVmDisksRequest::new();
         request.cryptohome_id = user_id_hash.to_owned();
         match target_location {
-            Some(location) => request.storage_location = location,
+            Some(location) => request.storage_location = location.into(),
             None => request.all_locations = true,
         };
         if let Some(vm_name) = target_name {
@@ -1178,7 +1244,7 @@ impl Methods {
         )?;
 
         if response.success {
-            Ok((response.images.into(), response.total_size))
+            Ok((response.images, response.total_size))
         } else {
             Err(FailedListDiskImages(response.failure_reason).into())
         }
@@ -1195,7 +1261,7 @@ impl Methods {
             Some(StorageLocation::STORAGE_CRYPTOHOME_PLUGINVM),
             Some(vm_name),
         )?;
-        Ok(images.len() != 0)
+        Ok(!images.is_empty())
     }
 
     /// Gets the id of the dlc to be used to boot a VM, or None if DLC should not be used.
@@ -1211,12 +1277,10 @@ impl Methods {
             } else {
                 Ok(Some(id))
             }
+        } else if is_termina {
+            Ok(Some("termina-dlc".to_owned()))
         } else {
-            if is_termina {
-                Ok(Some("termina-dlc".to_owned()))
-            } else {
-                Ok(None)
-            }
+            Ok(None)
         }
     }
 
@@ -1225,6 +1289,7 @@ impl Methods {
         &mut self,
         vm_name: &str,
         user_id_hash: &str,
+        username: &str,
         features: VmFeatures,
         stateful_disk_path: String,
         user_disks: UserDisks,
@@ -1232,28 +1297,65 @@ impl Methods {
     ) -> Result<(), Box<dyn Error>> {
         let mut request = StartVmRequest::new();
         if let Some(dlc_id) = self.get_dlc_id_or_none(features.dlc, start_termina)? {
-            request.mut_vm().dlc_id = dlc_id;
+            self.install_dlc(&dlc_id)?;
+            request.vm.mut_or_insert_default().dlc_id = dlc_id;
         }
+
         if let Some(tools_dlc_id) = features.tools_dlc_id {
-            request.mut_vm().tools_dlc_id = tools_dlc_id;
+            // TODO(crbug/1276157): add `termina-tools` to this list when `termina-dlc` is split.
+            match tools_dlc_id.as_ref() {
+                "termina-dlc" => (),
+                _ => return Err(ToolsDlcNotAllowed(tools_dlc_id.to_owned()).into()),
+            }
+            self.install_dlc(&tools_dlc_id)?;
+            request.vm.mut_or_insert_default().tools_dlc_id = tools_dlc_id;
         }
+
+        if let Some(bios_dlc_id) = features.bios_dlc_id {
+            if user_disks.bios.is_some() {
+                return Err(BiosAlreadySpecified(bios_dlc_id.to_owned()).into());
+            }
+
+            match bios_dlc_id.as_ref() {
+                "edk2-ovmf-dlc" => (),
+                _ => return Err(BiosDlcNotAllowed(bios_dlc_id.to_owned()).into()),
+            }
+            self.install_dlc(&bios_dlc_id)?;
+            request.vm.mut_or_insert_default().bios_dlc_id = bios_dlc_id;
+        }
+
+        if let Some(vm_type) = features.vm_type {
+            request.vm_type = match vm_type.to_uppercase().as_ref() {
+                "TERMINA" => VmType::TERMINA,
+                "PLUGIN_VM" => VmType::PLUGIN_VM,
+                "BOREALIS" => VmType::BOREALIS,
+                "BRUSCHETTA" => VmType::BRUSCHETTA,
+                _ => return Err(NoSuchVmType.into()),
+            }
+            .into();
+        }
+
         request.start_termina = start_termina;
         request.owner_id = user_id_hash.to_owned();
+        request.vm_username = username.to_owned();
         request.enable_gpu = features.gpu;
+        request.enable_dgpu_passthrough = features.dgpu_passthrough;
         request.enable_vulkan = features.vulkan;
         request.enable_big_gl = features.big_gl;
-        request.software_tpm = features.software_tpm;
+        request.enable_virtgpu_native_context = features.virtgpu_native_context;
+        request.vtpm_proxy = features.vtpm_proxy;
         request.enable_audio_capture = features.audio_capture;
         request.run_as_untrusted = features.run_as_untrusted;
         request.name = vm_name.to_owned();
-        request.kernel_params = protobuf::RepeatedField::from_vec(features.kernel_params);
+        request.kernel_params = features.kernel_params;
         request.timeout = features.timeout;
-        {
-            let disk_image = request.mut_disks().push_default();
-            disk_image.path = stateful_disk_path;
-            disk_image.writable = true;
-            disk_image.do_mount = false;
-        }
+        request.oem_strings = features.oem_strings;
+        request.disks.push(DiskImage {
+            path: stateful_disk_path,
+            writable: true,
+            do_mount: false,
+            ..Default::default()
+        });
         let tremplin_started = ProtobusSignalWatcher::new(
             self.connection.connection.as_ref(),
             VM_CICERONE_INTERFACE,
@@ -1270,59 +1372,71 @@ impl Methods {
         let mut disk_files = vec![];
         // User-specified kernel
         if let Some(path) = user_disks.kernel {
-            request.fds.push(StartVmRequest_FdType::KERNEL);
+            request.fds.push(start_vm_request::FdType::KERNEL.into());
             disk_files.push(
                 OpenOptions::new()
                     .read(true)
                     .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path)?,
+                    .open(path)?,
             );
         }
 
         // User-specified rootfs
         if let Some(path) = user_disks.rootfs {
-            request.fds.push(StartVmRequest_FdType::ROOTFS);
+            request.fds.push(start_vm_request::FdType::ROOTFS.into());
             request.writable_rootfs = user_disks.writable_rootfs;
             disk_files.push(
                 OpenOptions::new()
                     .read(true)
                     .write(user_disks.writable_rootfs)
                     .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path)?,
+                    .open(path)?,
             );
         }
 
         // User-specified extra disk
         if let Some(path) = user_disks.extra_disk {
-            request.fds.push(StartVmRequest_FdType::STORAGE);
+            request.fds.push(start_vm_request::FdType::STORAGE.into());
             disk_files.push(
                 OpenOptions::new()
                     .read(true)
                     .write(true) // extra disk is writable
                     .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path)?,
+                    .open(path)?,
             );
         }
 
         // User-specified initrd
         if let Some(path) = user_disks.initrd {
-            request.fds.push(StartVmRequest_FdType::INITRD);
+            request.fds.push(start_vm_request::FdType::INITRD.into());
             disk_files.push(
                 OpenOptions::new()
                     .read(true)
                     .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path)?,
+                    .open(path)?,
             );
         }
 
         // User-specified bios.
         if let Some(path) = user_disks.bios {
-            request.fds.push(StartVmRequest_FdType::BIOS);
+            request.fds.push(start_vm_request::FdType::BIOS.into());
             disk_files.push(
                 OpenOptions::new()
                     .read(true)
                     .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path)?,
+                    .open(path)?,
+            );
+        }
+
+        // User-specified pflash.
+        if let Some(path) = user_disks.pflash {
+            request.fds.push(start_vm_request::FdType::PFLASH.into());
+            disk_files.push(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(path)?,
             );
         }
 
@@ -1335,16 +1449,22 @@ impl Methods {
             })
             .collect();
 
+        let tremplin_timeout = if features.timeout == 0 {
+            DEFAULT_TIMEOUT
+        } else {
+            Duration::from_secs(features.timeout.into())
+        };
+
         // Send a protobuf request with the FDs.
         let response: StartVmResponse =
-            self.sync_protobus_timeout(message, &request, &owned_fds, DEFAULT_TIMEOUT_MS)?;
+            self.sync_protobus_timeout(message, &request, &owned_fds, tremplin_timeout)?;
 
-        match response.status {
-            VmStatus::VM_STATUS_STARTING => {
+        match response.status.enum_value() {
+            Ok(VmStatus::VM_STATUS_STARTING) => {
                 assert!(response.success);
                 if start_termina {
                     tremplin_started.wait_with_filter(
-                        DEFAULT_TIMEOUT_MS,
+                        tremplin_timeout,
                         |s: &TremplinStartedSignal| {
                             s.vm_name == vm_name && s.owner_id == user_id_hash
                         },
@@ -1352,7 +1472,7 @@ impl Methods {
                 }
                 Ok(())
             }
-            VmStatus::VM_STATUS_RUNNING => {
+            Ok(VmStatus::VM_STATUS_RUNNING) => {
                 assert!(response.success);
                 Ok(())
             }
@@ -1381,31 +1501,31 @@ impl Methods {
             &request,
         )?;
 
-        use self::StartLxdResponse_Status::*;
-        match response.status {
-            STARTING => {
-                use self::StartLxdProgressSignal_Status::*;
+        use self::start_lxd_response::Status::*;
+        match response.status.enum_value() {
+            Ok(STARTING) => {
+                use self::start_lxd_progress_signal::Status::*;
                 let signal = lxd_started.wait_with_filter(
-                    DEFAULT_TIMEOUT_MS,
+                    DEFAULT_TIMEOUT,
                     |s: &StartLxdProgressSignal| {
                         s.vm_name == vm_name
                             && s.owner_id == user_id_hash
-                            && s.status != STARTING
-                            && s.status != RECOVERING
+                            && s.status != STARTING.into()
+                            && s.status != RECOVERING.into()
                     },
                 )?;
-                match signal.status {
-                    STARTED => Ok(()),
-                    STARTING | RECOVERING => unreachable!(),
-                    UNKNOWN | FAILED => Err(FailedStartLxdProgressSignal(
+                match signal.status.enum_value() {
+                    Ok(STARTED) => Ok(()),
+                    Ok(STARTING) | Ok(RECOVERING) => unreachable!(),
+                    Ok(UNKNOWN) | Ok(FAILED) | Err(_) => Err(FailedStartLxdProgressSignal(
                         signal.status,
                         signal.failure_reason,
                     )
                     .into()),
                 }
             }
-            ALREADY_RUNNING => Ok(()),
-            UNKNOWN | FAILED => {
+            Ok(ALREADY_RUNNING) => Ok(()),
+            Ok(UNKNOWN) | Ok(FAILED) | Err(_) => {
                 Err(FailedStartLxdStatus(response.status, response.failure_reason).into())
             }
         }
@@ -1413,7 +1533,7 @@ impl Methods {
 
     fn parse_plugin_vm_response(
         &mut self,
-        error: VmErrorCode,
+        error: EnumOrUnknown<VmErrorCode>,
         result_code: i32,
     ) -> Result<(), Box<dyn Error>> {
         const PRL_ERR_SUCCESS: u32 = 0;
@@ -1430,9 +1550,9 @@ impl Methods {
         const PRL_ERR_JLIC_LICENSE_DISABLED: u32 = 0x80057010;
         const PRL_ERR_JLIC_WEB_PORTAL_ACCESS_REQUIRED: u32 = 0x80057012;
 
-        match error {
-            VmErrorCode::VM_SUCCESS => Ok(()),
-            VmErrorCode::VM_ERR_NATIVE_RESULT_CODE => match result_code as u32 {
+        match error.enum_value() {
+            Ok(VmErrorCode::VM_SUCCESS) => Ok(()),
+            Ok(VmErrorCode::VM_ERR_NATIVE_RESULT_CODE) | Err(_) => match result_code as u32 {
                 PRL_ERR_SUCCESS => Ok(()),
                 PRL_ERR_DISP_SHUTDOWN_IN_PROCESS => Err(PluginVmGenericError(result_code).into()),
                 PRL_ERR_NOT_ENOUGH_DISK_SPACE_TO_START_VM => Err(PluginVmNotEnoughDisk.into()),
@@ -1550,8 +1670,8 @@ impl Methods {
     ) -> Result<String, Box<dyn Error>> {
         let mut request = SharePathRequest::new();
         request.handle = seneschal_handle;
-        request.shared_path.set_default().path = path.to_owned();
-        request.storage_location = SharePathRequest_StorageLocation::MY_FILES;
+        request.shared_path.mut_or_insert_default().path = path.to_owned();
+        request.storage_location = share_path_request::StorageLocation::MY_FILES.into();
         request.owner_id = user_id_hash.to_owned();
 
         let response: SharePathResponse = self.sync_protobus(
@@ -1605,25 +1725,30 @@ impl Methods {
         user_id_hash: &str,
         container_name: &str,
         source: ContainerSource,
+        timeout: Option<i32>,
     ) -> Result<(), Box<dyn Error>> {
         let mut request = CreateLxdContainerRequest::new();
         request.vm_name = vm_name.to_owned();
         request.container_name = container_name.to_owned();
         request.owner_id = user_id_hash.to_owned();
+
+        let timeout = timeout
+            .map(|x| Duration::from_secs(x.try_into().expect("timeout should not be negative")))
+            .unwrap_or(DEFAULT_TIMEOUT);
         match source {
             ContainerSource::ImageServer {
                 image_alias,
                 image_server,
             } => {
-                request.image_server = image_server.to_owned();
-                request.image_alias = image_alias.to_owned();
+                request.image_server = image_server;
+                request.image_alias = image_alias;
             }
             ContainerSource::Tarballs {
                 rootfs_path,
                 metadata_path,
             } => {
-                request.rootfs_path = rootfs_path.to_owned();
-                request.metadata_path = metadata_path.to_owned();
+                request.rootfs_path = rootfs_path;
+                request.metadata_path = metadata_path;
             }
         }
 
@@ -1637,23 +1762,23 @@ impl Methods {
             &request,
         )?;
 
-        use self::CreateLxdContainerResponse_Status::*;
-        use self::LxdContainerCreatedSignal_Status::*;
-        match response.status {
-            CREATING => {
+        use self::create_lxd_container_response::Status::*;
+        use self::lxd_container_created_signal::Status::*;
+        match response.status.enum_value() {
+            Ok(CREATING) => {
                 let signal: LxdContainerCreatedSignal = self.protobus_wait_for_signal_timeout(
                     VM_CICERONE_INTERFACE,
                     LXD_CONTAINER_CREATED_SIGNAL,
-                    DEFAULT_TIMEOUT_MS,
+                    timeout,
                 )?;
-                match signal.status {
-                    CREATED => Ok(()),
+                match signal.status.enum_value() {
+                    Ok(CREATED) => Ok(()),
                     _ => Err(
                         FailedCreateContainerSignal(signal.status, signal.failure_reason).into(),
                     ),
                 }
             }
-            EXISTS => Ok(()),
+            Ok(EXISTS) => Ok(()),
             _ => Err(FailedCreateContainer(response.status, response.failure_reason).into()),
         }
     }
@@ -1663,13 +1788,18 @@ impl Methods {
         vm_name: &str,
         user_id_hash: &str,
         container_name: &str,
-        privilege_level: StartLxdContainerRequest_PrivilegeLevel,
+        privilege_level: start_lxd_container_request::PrivilegeLevel,
+        timeout: Option<i32>,
     ) -> Result<(), Box<dyn Error>> {
         let mut request = StartLxdContainerRequest::new();
         request.vm_name = vm_name.to_owned();
         request.container_name = container_name.to_owned();
         request.owner_id = user_id_hash.to_owned();
-        request.privilege_level = privilege_level;
+        request.privilege_level = privilege_level.into();
+
+        let timeout = timeout
+            .map(|x| Duration::from_secs(x.try_into().expect("timeout should not be negative")))
+            .unwrap_or(DEFAULT_TIMEOUT);
 
         let response: StartLxdContainerResponse = self.sync_protobus(
             Message::new_method_call(
@@ -1681,22 +1811,35 @@ impl Methods {
             &request,
         )?;
 
-        use self::StartLxdContainerResponse_Status::*;
-        match response.status {
+        use self::start_lxd_container_response::Status::*;
+        match response.status.enum_value() {
             // |REMAPPING| happens when the privilege level of a container was changed before this
             // boot. It's a long running operation and when it happens it's returned in lieu of
             // |STARTING|. It makes sense to treat them the same way.
-            STARTING | REMAPPING => {
-                // TODO: listen for signal before calling the D-Bus method.
-                let _signal: cicerone_service::ContainerStartedSignal = self
-                    .protobus_wait_for_signal_timeout(
-                        VM_CICERONE_INTERFACE,
-                        CONTAINER_STARTED_SIGNAL,
-                        DEFAULT_TIMEOUT_MS,
-                    )?;
-                Ok(())
+            Ok(STARTING) | Ok(REMAPPING) => {
+                use self::lxd_container_starting_signal::Status::*;
+                let container_started = ProtobusSignalWatcher::new(
+                    self.connection.connection.as_ref(),
+                    VM_CICERONE_INTERFACE,
+                    LXD_CONTAINER_STARTING_SIGNAL,
+                )?;
+                let signal = container_started.wait_with_filter(
+                    timeout,
+                    |s: &LxdContainerStartingSignal| {
+                        s.vm_name == vm_name
+                            && s.owner_id == user_id_hash
+                            && s.container_name == container_name
+                            && s.status != STARTING.into()
+                    },
+                )?;
+                match signal.status.enum_value() {
+                    Ok(STARTED) => Ok(()),
+                    _ => {
+                        Err(FailedLxdContainerStarting(signal.status, signal.failure_reason).into())
+                    }
+                }
             }
-            RUNNING => Ok(()),
+            Ok(RUNNING) => Ok(()),
             _ => Err(FailedStartContainerStatus(response.status, response.failure_reason).into()),
         }
     }
@@ -1724,10 +1867,43 @@ impl Methods {
             &request,
         )?;
 
-        use self::SetUpLxdContainerUserResponse_Status::*;
-        match response.status {
-            SUCCESS | EXISTS => Ok(()),
+        use self::set_up_lxd_container_user_response::Status::*;
+        match response.status.enum_value() {
+            Ok(SUCCESS) | Ok(EXISTS) => Ok(()),
             _ => Err(FailedSetupContainerUser(response.status, response.failure_reason).into()),
+        }
+    }
+
+    fn update_container_devices(
+        &mut self,
+        vm_name: &str,
+        user_id_hash: &str,
+        container_name: &str,
+        updates: &HashMap<String, VmDeviceAction>,
+    ) -> Result<String, Box<dyn Error>> {
+        let mut request = UpdateContainerDevicesRequest::new();
+        request.vm_name = vm_name.to_owned();
+        request.owner_id = user_id_hash.to_owned();
+        request.container_name = container_name.to_owned();
+        request.updates = HashMap::from_iter(updates.iter().map(|(k, v)| (k.clone(), (*v).into())));
+
+        let response: UpdateContainerDevicesResponse = self.sync_protobus(
+            Message::new_method_call(
+                VM_CICERONE_SERVICE_NAME,
+                VM_CICERONE_SERVICE_PATH,
+                VM_CICERONE_INTERFACE,
+                UPDATE_CONTAINER_DEVICES_METHOD,
+            )?,
+            &request,
+        )?;
+        use self::update_container_devices_response::Status::*;
+        match response.status.enum_value() {
+            Ok(OK) => Ok(format!("Results: {:?}", response.results)),
+            _ => Err(FailedUpdateContainerDevices(format!(
+                "{} . Results: {:?}",
+                response.failure_reason, response.results
+            ))
+            .into()),
         }
     }
 
@@ -1738,6 +1914,7 @@ impl Methods {
         bus: u8,
         device: u8,
         usb_fd: OwnedFd,
+        container_name: Option<&str>,
     ) -> Result<u8, Box<dyn Error>> {
         let mut request = AttachUsbDeviceRequest::new();
         request.owner_id = user_id_hash.to_owned();
@@ -1754,13 +1931,40 @@ impl Methods {
             )?,
             &request,
             &[usb_fd],
-            DEFAULT_TIMEOUT_MS,
+            DEFAULT_TIMEOUT,
         )?;
 
-        if response.success {
-            Ok(response.guest_port as u8)
+        if !response.success {
+            return Err(FailedAttachUsb(response.reason).into());
+        }
+
+        let guest_port: u8 = response.guest_port as u8;
+
+        if let Some(container) = container_name {
+            let mut request = AttachUsbToContainerRequest::new();
+            request.owner_id = user_id_hash.to_owned();
+            request.container_name = container.to_owned();
+            request.vm_name = vm_name.to_owned();
+            request.port_num = guest_port as i32;
+
+            let response: AttachUsbToContainerResponse = self.sync_protobus(
+                Message::new_method_call(
+                    VM_CICERONE_SERVICE_NAME,
+                    VM_CICERONE_SERVICE_PATH,
+                    VM_CICERONE_INTERFACE,
+                    ATTACH_USB_TO_CONTAINER_METHOD,
+                )?,
+                &request,
+            )?;
+
+            match response.status.enum_value() {
+                Ok(attach_usb_to_container_response::Status::OK) => Ok(guest_port),
+                _ => {
+                    Err(FailedAttachUsbToContainer(response.status, response.failure_reason).into())
+                }
+            }
         } else {
-            Err(FailedAttachUsb(response.reason).into())
+            Ok(guest_port)
         }
     }
 
@@ -1812,7 +2016,7 @@ impl Methods {
         )?;
 
         if response.success {
-            Ok(response.usb_devices.into())
+            Ok(response.usb_devices)
         } else {
             Err(FailedListUsb.into())
         }
@@ -1832,7 +2036,7 @@ impl Methods {
 
         let message = self
             .connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)
             .map_err(FailedOpenPath)?;
 
         message
@@ -1852,10 +2056,10 @@ impl Methods {
 
         if let Some(name) = vm_name {
             let (images, _) = self.list_disk_images(user_id_hash, None, Some(&name))?;
-            if images.len() == 0 {
+            if images.is_empty() {
                 return Err(NoSuchVm.into());
             }
-            if images[0].image_type != DiskImageType::DISK_IMAGE_PLUGINVM {
+            if images[0].image_type != DiskImageType::DISK_IMAGE_PLUGINVM.into() {
                 return Err(NotPluginVm.into());
             }
             request.vm_name_uuid = name;
@@ -1921,21 +2125,39 @@ impl Methods {
         )?;
         let message = self
             .connection
-            .send_with_reply_and_block(method, DEFAULT_TIMEOUT_MS)?;
+            .send_with_reply_and_block(method, DEFAULT_TIMEOUT)?;
         match message.get1::<HashMap<String, String>>() {
             Some(sessions) => Ok(sessions.into_iter().collect()),
             _ => Err(RetrieveActiveSessions.into()),
         }
     }
 
-    pub fn vm_create(
+    pub fn user_id_hash_to_username(
+        &mut self,
+        user_id_hash: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        let sessions = self.sessions_list()?;
+        let email = sessions
+            .iter()
+            .find(|(_, hash)| hash == &user_id_hash)
+            .map(|(email, _)| email)
+            .ok_or(MissingActiveSession)?;
+
+        match email.find('@') {
+            Some(0) | None => Err(InvalidEmail.into()),
+            Some(end) => Ok(email[..end].into()),
+        }
+    }
+
+    pub fn vm_create<T: AsRef<str>>(
         &mut self,
         name: &str,
         user_id_hash: &str,
         plugin_vm: bool,
+        size: Option<u64>,
         source_name: Option<&str>,
         removable_media: Option<&str>,
-        params: &[&str],
+        params: &[T],
     ) -> Result<Option<String>, Box<dyn Error>> {
         if plugin_vm {
             self.ensure_plugin_vm_available(user_id_hash)?;
@@ -1946,6 +2168,7 @@ impl Methods {
             name,
             user_id_hash,
             plugin_vm,
+            size,
             source_name,
             removable_media,
             params,
@@ -1967,6 +2190,7 @@ impl Methods {
         &mut self,
         name: &str,
         user_id_hash: &str,
+        username: &str,
         features: VmFeatures,
         user_disks: UserDisks,
         start_lxd: bool,
@@ -1978,16 +2202,12 @@ impl Methods {
         } else {
             self.ensure_crostini_available(user_id_hash)?;
 
-            let is_stable_channel = is_stable_channel();
-            if features.software_tpm && is_stable_channel {
-                return Err(TpmOnStable.into());
-            }
-
             let disk_image_path = self.create_disk_image(name, user_id_hash)?;
             self.notify_vm_starting()?;
             self.start_vm_with_disk(
                 name,
                 user_id_hash,
+                username,
                 features,
                 disk_image_path,
                 user_disks,
@@ -2003,6 +2223,46 @@ impl Methods {
     pub fn vm_stop(&mut self, name: &str, user_id_hash: &str) -> Result<(), Box<dyn Error>> {
         self.start_vm_infrastructure(user_id_hash)?;
         self.stop_vm(name, user_id_hash)
+    }
+
+    pub fn vm_launch(
+        &mut self,
+        user_id_hash: &str,
+        descriptors: &[&str],
+    ) -> Result<(), Box<dyn Error>> {
+        let mut request = EnsureVmLaunchedRequest::new();
+        request.owner_id = user_id_hash.to_owned();
+        // The below validation is intentionally conservative, no more than 5x 32-character
+        // descriptors matching [a-zA-Z0-9_-]*.
+        request.launch_descriptors = descriptors
+            .iter()
+            .map(|d| {
+                d.chars()
+                    .filter(|c| match c {
+                        '_' => true,
+                        '-' => true,
+                        other => other.is_ascii_alphanumeric(),
+                    })
+                    .take(32)
+                    .collect::<String>()
+            })
+            .take(5)
+            .collect::<Vec<_>>();
+
+        let response: EnsureVmLaunchedResponse = self.sync_protobus(
+            Message::new_method_call(
+                VM_LAUNCH_SERVICE_NAME,
+                VM_LAUNCH_SERVICE_PATH,
+                VM_LAUNCH_SERVICE_INTERFACE,
+                VM_LAUNCH_SERVICE_ENSURE_VM_LAUNCHED_METHOD,
+            )?,
+            &request,
+        )?;
+
+        match response.container_name.as_str() {
+            "" => self.vsh_exec(&response.vm_name, user_id_hash),
+            container => self.vsh_exec_container(&response.vm_name, user_id_hash, container),
+        }
     }
 
     pub fn vm_export(
@@ -2076,7 +2336,7 @@ impl Methods {
             Command::new("vsh")
                 .arg(format!("--vm_name={}", vm_name))
                 .arg(format!("--owner_id={}", user_id_hash))
-                .args(&[
+                .args([
                     "--",
                     "LXD_DIR=/mnt/stateful/lxd",
                     "LXD_CONF=/mnt/stateful/lxd_conf",
@@ -2096,7 +2356,7 @@ impl Methods {
             .arg(format!("--vm_name={}", vm_name))
             .arg(format!("--owner_id={}", user_id_hash))
             .arg(format!("--target_container={}", container_name))
-            .args(&[
+            .args([
                 "--",
                 "LXD_DIR=/mnt/stateful/lxd",
                 "LXD_CONF=/mnt/stateful/lxd_conf",
@@ -2131,7 +2391,7 @@ impl Methods {
                 } else {
                     None
                 },
-                image_type: match e.image_type {
+                image_type: match e.image_type.enum_value_or_default() {
                     DiskImageType::DISK_IMAGE_RAW => VmDiskImageType::Raw,
                     DiskImageType::DISK_IMAGE_QCOW2 => VmDiskImageType::Qcow2,
                     DiskImageType::DISK_IMAGE_AUTO => VmDiskImageType::Auto,
@@ -2213,13 +2473,14 @@ impl Methods {
         user_id_hash: &str,
         container_name: &str,
         source: ContainerSource,
+        timeout: Option<i32>,
     ) -> Result<(), Box<dyn Error>> {
         self.start_vm_infrastructure(user_id_hash)?;
         if self.is_plugin_vm(vm_name, user_id_hash)? {
             return Err(NotAvailableForPluginVm.into());
         }
 
-        self.create_container(vm_name, user_id_hash, container_name, source)
+        self.create_container(vm_name, user_id_hash, container_name, source, timeout)
     }
 
     pub fn container_start(
@@ -2227,14 +2488,21 @@ impl Methods {
         vm_name: &str,
         user_id_hash: &str,
         container_name: &str,
-        privilege_level: StartLxdContainerRequest_PrivilegeLevel,
+        privilege_level: start_lxd_container_request::PrivilegeLevel,
+        timeout: Option<i32>,
     ) -> Result<(), Box<dyn Error>> {
         self.start_vm_infrastructure(user_id_hash)?;
         if self.is_plugin_vm(vm_name, user_id_hash)? {
             return Err(NotAvailableForPluginVm.into());
         }
 
-        self.start_container(vm_name, user_id_hash, container_name, privilege_level)
+        self.start_container(
+            vm_name,
+            user_id_hash,
+            container_name,
+            privilege_level,
+            timeout,
+        )
     }
 
     pub fn container_setup_user(
@@ -2252,17 +2520,33 @@ impl Methods {
         self.setup_container_user(vm_name, user_id_hash, container_name, username)
     }
 
+    pub fn container_update_devices(
+        &mut self,
+        vm_name: &str,
+        user_id_hash: &str,
+        container_name: &str,
+        updates: &HashMap<String, VmDeviceAction>,
+    ) -> Result<String, Box<dyn Error>> {
+        self.start_vm_infrastructure(user_id_hash)?;
+        if self.is_plugin_vm(vm_name, user_id_hash)? {
+            return Err(NotAvailableForPluginVm.into());
+        }
+
+        self.update_container_devices(vm_name, user_id_hash, container_name, updates)
+    }
+
     pub fn usb_attach(
         &mut self,
         vm_name: &str,
         user_id_hash: &str,
         bus: u8,
         device: u8,
+        container_name: Option<&str>,
     ) -> Result<u8, Box<dyn Error>> {
         self.start_vm_infrastructure(user_id_hash)?;
         let usb_file_path = format!("/dev/bus/usb/{:03}/{:03}", bus, device);
         let usb_fd = self.permission_broker_open_path(Path::new(&usb_file_path))?;
-        self.attach_usb(vm_name, user_id_hash, bus, device, usb_fd)
+        self.attach_usb(vm_name, user_id_hash, bus, device, usb_fd, container_name)
     }
 
     pub fn usb_detach(
@@ -2284,12 +2568,12 @@ impl Methods {
         let device_list = self
             .list_usb(vm_name, user_id_hash)?
             .into_iter()
-            .map(|mut d| {
+            .map(|d| {
                 (
-                    d.get_guest_port() as u8,
-                    d.get_vendor_id() as u16,
-                    d.get_product_id() as u16,
-                    d.take_device_name(),
+                    d.guest_port as u8,
+                    d.vendor_id as u16,
+                    d.product_id as u16,
+                    d.device_name,
                 )
             })
             .collect();
@@ -2306,14 +2590,28 @@ impl Methods {
         self.start_vm_infrastructure(user_id_hash)?;
         self.send_problem_report_for_plugin_vm(vm_name, user_id_hash, email, text)
     }
-}
 
-fn is_stable_channel() -> bool {
-    match LsbRelease::gather() {
-        Ok(lsb) => lsb.release_channel() == Some(ReleaseChannel::Stable),
-        Err(_) => {
-            // Weird /etc/lsb-release, do not enforce stable restrictions.
-            false
-        }
+    pub fn get_vm_logs(
+        &mut self,
+        vm_name: &str,
+        user_id_hash: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        let mut request = GetVmLogsRequest::new();
+        request.owner_id = user_id_hash.to_owned();
+        request.name = vm_name.to_owned();
+
+        let conn = Connection::new_system()?;
+
+        let proxy: blocking::Proxy<'_, _> = Connection::with_proxy(
+            &conn,
+            VM_CONCIERGE_SERVICE_NAME,
+            VM_CONCIERGE_SERVICE_PATH,
+            DEFAULT_TIMEOUT,
+        );
+
+        let response: GetVmLogsResponse =
+            ProtoMessage::parse_from_bytes(&proxy.get_vm_logs(request.write_to_bytes()?)?)?;
+
+        Ok(response.log)
     }
 }

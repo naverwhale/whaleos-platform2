@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,81 +9,60 @@
 
 #include <algorithm>
 #include <cstring>
-#include <limits>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include <base/check.h>
+#include <base/check_op.h>
+#include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/no_destructor.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
-
-using base::FilePath;
 
 namespace brillo {
 namespace cryptohome {
 namespace home {
+namespace {
 
-const char kGuestUserName[] = "$guest";
-
-// Path to user homes mounted with the mount_hidden option. The user home mount
-// will be located at:
-// kHiddenUserHomeBaseDir/<sanitized_user_name>/kHiddenUserHomeMountSubdir
-const char kHiddenUserHomeBaseDir[] = "/home/.shadow";
-const char kHiddenUserHomeMountSubdir[] = "mount";
+using base::FilePath;
 
 // Daemon store main directory.
 constexpr char kDaemonStorePath[] = "/run/daemon-store";
 
-// Subdirectory of a user home mount where daemon-specific data is stored.
-// This is used to assemble daemon data storage paths for hidden user home
-// mounts.
-const char kHiddenUserHomeRootSubdir[] = "root";
+constexpr char kRootHomePrefix[] = "/home/root/";
+constexpr char kDefaultSystemSaltPath[] = "/home/.shadow/salt";
 
-static char g_user_home_prefix[PATH_MAX] = "/home/user/";
-static char g_root_home_prefix[PATH_MAX] = "/home/root/";
-static char g_system_salt_path[PATH_MAX] = "/home/.shadow/salt";
+char g_user_home_prefix[PATH_MAX] = "/home/user/";
 
-static std::string* salt = nullptr;
+SystemSaltLoader* g_system_salt_loader = nullptr;
+
+}  // namespace
+
+const Username& GetGuestUsername() {
+  static const base::NoDestructor<Username> kGuest("$guest");
+  return *kGuest;
+}
 
 bool EnsureSystemSaltIsLoaded() {
-  if (salt && !salt->empty())
-    return true;
-  FilePath salt_path(g_system_salt_path);
-  int64_t file_size;
-  if (!base::GetFileSize(salt_path, &file_size)) {
-    PLOG(ERROR) << "Could not get size of system salt: " << g_system_salt_path;
-    return false;
-  }
-  if (file_size > static_cast<int64_t>(std::numeric_limits<int>::max())) {
-    LOG(ERROR) << "System salt too large: " << file_size;
-    return false;
-  }
-  std::vector<char> buf;
-  buf.resize(file_size);
-  unsigned int data_read = base::ReadFile(salt_path, buf.data(), file_size);
-  if (data_read != file_size) {
-    PLOG(ERROR) << "Could not read entire file: " << data_read
-                << " != " << file_size;
-    return false;
-  }
-
-  if (!salt)
-    salt = new std::string();
-  salt->assign(buf.data(), file_size);
-  return true;
+  return SystemSaltLoader::GetInstance()->EnsureLoaded();
 }
 
-std::string SanitizeUserName(const std::string& username) {
+ObfuscatedUsername SanitizeUserName(const Username& username) {
   if (!EnsureSystemSaltIsLoaded())
-    return std::string();
+    return ObfuscatedUsername();
 
-  return SanitizeUserNameWithSalt(username, SecureBlob(*salt));
+  return SanitizeUserNameWithSalt(
+      username,
+      SecureBlob(*SystemSaltLoader::GetInstance()->value_or_override()));
 }
 
-std::string SanitizeUserNameWithSalt(const std::string& username,
-                                     const SecureBlob& salt) {
+ObfuscatedUsername SanitizeUserNameWithSalt(const Username& username,
+                                            const SecureBlob& salt) {
   unsigned char binmd[SHA_DIGEST_LENGTH];
-  std::string lowercase(username);
+  std::string lowercase(*username);
   std::transform(lowercase.begin(), lowercase.end(), lowercase.begin(),
                  ::tolower);
   SHA_CTX ctx;
@@ -94,7 +73,7 @@ std::string SanitizeUserNameWithSalt(const std::string& username,
   std::string final = base::HexEncode(binmd, sizeof(binmd));
   // Stay compatible with CryptoLib::HexEncodeToBuffer()
   std::transform(final.begin(), final.end(), final.begin(), ::tolower);
-  return final;
+  return ObfuscatedUsername(std::move(final));
 }
 
 FilePath GetUserPathPrefix() {
@@ -102,46 +81,34 @@ FilePath GetUserPathPrefix() {
 }
 
 FilePath GetRootPathPrefix() {
-  return FilePath(g_root_home_prefix);
+  return FilePath(kRootHomePrefix);
 }
 
-FilePath GetHashedUserPath(const std::string& hashed_username) {
+FilePath GetHashedUserPath(const ObfuscatedUsername& hashed_username) {
   return FilePath(
-      base::StringPrintf("%s%s", g_user_home_prefix, hashed_username.c_str()));
+      base::StringPrintf("%s%s", g_user_home_prefix, hashed_username->c_str()));
 }
 
-FilePath GetUserPath(const std::string& username) {
-  if (!EnsureSystemSaltIsLoaded())
+FilePath GetUserPath(const Username& username) {
+  if (!SystemSaltLoader::GetInstance()->EnsureLoaded())
     return FilePath();
   return GetHashedUserPath(SanitizeUserName(username));
 }
 
-FilePath GetRootPath(const std::string& username) {
-  if (!EnsureSystemSaltIsLoaded())
+FilePath GetRootPath(const Username& username) {
+  if (!SystemSaltLoader::GetInstance()->EnsureLoaded())
     return FilePath();
-  return FilePath(base::StringPrintf("%s%s", g_root_home_prefix,
-                                     SanitizeUserName(username).c_str()));
+  return FilePath(base::StringPrintf("%s%s", kRootHomePrefix,
+                                     SanitizeUserName(username)->c_str()));
 }
 
-FilePath GetDaemonStorePath(const std::string& username,
+FilePath GetDaemonStorePath(const Username& username,
                             const std::string& daemon) {
-  if (!EnsureSystemSaltIsLoaded())
+  if (!SystemSaltLoader::GetInstance()->EnsureLoaded())
     return FilePath();
   return FilePath(kDaemonStorePath)
       .Append(daemon)
-      .Append(SanitizeUserName(username));
-}
-
-FilePath GetDaemonPathForHiddenUserHome(const std::string& username,
-                                        const std::string& daemon) {
-  if (!EnsureSystemSaltIsLoaded())
-    return FilePath();
-
-  return FilePath(kHiddenUserHomeBaseDir)
-      .Append(SanitizeUserName(username))
-      .Append(kHiddenUserHomeMountSubdir)
-      .Append(kHiddenUserHomeRootSubdir)
-      .Append(daemon);
+      .Append(*SanitizeUserName(username));
 }
 
 bool IsSanitizedUserName(const std::string& sanitized) {
@@ -157,19 +124,65 @@ void SetUserHomePrefix(const std::string& prefix) {
   }
 }
 
-void SetRootHomePrefix(const std::string& prefix) {
-  if (prefix.length() < sizeof(g_root_home_prefix)) {
-    snprintf(g_root_home_prefix, sizeof(g_root_home_prefix), "%s",
-             prefix.c_str());
-  }
-}
-
 std::string* GetSystemSalt() {
-  return salt;
+  return SystemSaltLoader::GetInstance()->value_or_override();
 }
 
 void SetSystemSalt(std::string* value) {
-  salt = value;
+  SystemSaltLoader::GetInstance()->override_value_for_testing(value);
+}
+
+SystemSaltLoader* SystemSaltLoader::GetInstance() {
+  if (!g_system_salt_loader) {
+    static base::NoDestructor<SystemSaltLoader> default_instance;
+    return default_instance.get();
+  }
+  return g_system_salt_loader;
+}
+
+SystemSaltLoader::SystemSaltLoader()
+    : SystemSaltLoader(base::FilePath(kDefaultSystemSaltPath)) {}
+
+SystemSaltLoader::~SystemSaltLoader() {
+  DCHECK_EQ(g_system_salt_loader, this);
+  g_system_salt_loader = nullptr;
+}
+
+bool SystemSaltLoader::EnsureLoaded() {
+  if (!value_.empty() || value_override_for_testing_) {
+    return true;
+  }
+  if (!base::ReadFileToString(file_path_, &value_)) {
+    PLOG(ERROR) << "Could not load system salt from " << file_path_;
+    value_.clear();
+    return false;
+  }
+  return true;
+}
+
+const std::string& SystemSaltLoader::value() const {
+  return value_;
+}
+
+std::string* SystemSaltLoader::value_or_override() {
+  if (value_override_for_testing_) {
+    return value_override_for_testing_;
+  }
+  if (!value_.empty()) {
+    return &value_;
+  }
+  return nullptr;
+}
+
+void SystemSaltLoader::override_value_for_testing(std::string* new_value) {
+  value_override_for_testing_ = new_value;
+}
+
+SystemSaltLoader::SystemSaltLoader(base::FilePath file_path)
+    : file_path_(std::move(file_path)) {
+  DCHECK(!file_path_.empty());
+  DCHECK_EQ(g_system_salt_loader, nullptr);
+  g_system_salt_loader = this;
 }
 
 }  // namespace home

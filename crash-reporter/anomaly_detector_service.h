@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <base/timer/timer.h>
@@ -52,6 +51,8 @@ class Service {
   base::RepeatingTimer long_timer_;
 
   base::WeakPtrFactory<Service> weak_ptr_factory_;
+
+  const bool testonly_send_all_;
 };
 
 }  // namespace anomaly

@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/vpn/vpn_driver.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <base/check.h>
@@ -12,34 +13,30 @@
 #include <base/strings/string_util.h>
 #include <chromeos/dbus/service_constants.h>
 
-#include "shill/accessor_interface.h"
-#include "shill/connection.h"
 #include "shill/event_dispatcher.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/property_accessor.h"
-#include "shill/property_store.h"
-#include "shill/store_interface.h"
+#include "shill/metrics.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/property_store.h"
+#include "shill/store/store_interface.h"
+#include "shill/vpn/vpn_types.h"
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kVPN;
-static std::string ObjectID(const VPNDriver* v) {
-  return "(vpn_driver)";
-}
 }  // namespace Logging
-
-// TODO(crbug.com/1084279) Migrate back to storing property names after crypto
-// code is removed.
-const char VPNDriver::kCredentialPrefix[] = "Credential.";
 
 VPNDriver::VPNDriver(Manager* manager,
                      ProcessManager* process_manager,
+                     VPNType vpn_type,
                      const Property* properties,
-                     size_t property_count)
+                     size_t property_count,
+                     bool use_eap)
     : manager_(manager),
       process_manager_(process_manager),
+      vpn_type_(vpn_type),
       properties_(properties),
       property_count_(property_count) {
   for (size_t i = 0; i < property_count_; i++) {
@@ -48,13 +45,16 @@ VPNDriver::VPNDriver(Manager* manager,
     const bool isWriteOnly = flags & Property::kWriteOnly;
     CHECK(!(isReadOnly && isWriteOnly));
   }
+  if (use_eap) {
+    eap_credentials_.reset(new EapCredentials());
+  }
 }
 
 VPNDriver::~VPNDriver() = default;
 
 bool VPNDriver::Load(const StoreInterface* storage,
                      const std::string& storage_id) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   for (size_t i = 0; i < property_count_; i++) {
     if ((properties_[i].flags & Property::kEphemeral)) {
       continue;
@@ -83,12 +83,17 @@ bool VPNDriver::Load(const StoreInterface* storage,
       }
     }
   }
+
+  if (eap_credentials_) {
+    eap_credentials_->Load(storage, storage_id);
+  }
+
   return true;
 }
 
 void VPNDriver::MigrateDeprecatedStorage(StoreInterface* storage,
                                          const std::string& storage_id) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   // Migrate from ROT47 to plaintext.
   // TODO(crbug.com/1084279) Migrate back to not using kCredentialPrefix once
   // ROT47 migration is complete.
@@ -113,7 +118,7 @@ void VPNDriver::MigrateDeprecatedStorage(StoreInterface* storage,
 bool VPNDriver::Save(StoreInterface* storage,
                      const std::string& storage_id,
                      bool save_credentials) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   for (size_t i = 0; i < property_count_; i++) {
     if ((properties_[i].flags & Property::kEphemeral)) {
       continue;
@@ -143,21 +148,30 @@ bool VPNDriver::Save(StoreInterface* storage,
       storage->SetString(storage_id, storage_key, value);
     }
   }
+
+  if (eap_credentials_) {
+    eap_credentials_->Save(storage, storage_id, save_credentials);
+  }
+
   return true;
 }
 
 void VPNDriver::UnloadCredentials() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   for (size_t i = 0; i < property_count_; i++) {
     if ((properties_[i].flags &
          (Property::kEphemeral | Property::kCredential))) {
       args_.Remove(properties_[i].property);
     }
   }
+
+  if (eap_credentials_) {
+    eap_credentials_->Reset();
+  }
 }
 
 void VPNDriver::InitPropertyStore(PropertyStore* store) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   for (size_t i = 0; i < property_count_; i++) {
     if (properties_[i].flags & Property::kReadOnly) {
       continue;
@@ -184,6 +198,10 @@ void VPNDriver::InitPropertyStore(PropertyStore* store) {
       kProviderProperty,
       KeyValueStoreAccessor(new CustomAccessor<VPNDriver, KeyValueStore>(
           this, &VPNDriver::GetProvider, nullptr)));
+
+  if (eap_credentials_) {
+    eap_credentials_->InitPropertyStore(store);
+  }
 }
 
 void VPNDriver::ClearMappedStringProperty(const size_t& index, Error* error) {
@@ -252,7 +270,7 @@ bool VPNDriver::SetMappedStringsProperty(const size_t& index,
 }
 
 KeyValueStore VPNDriver::GetProvider(Error* error) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   const auto provider_prefix = std::string(kProviderProperty) + ".";
   KeyValueStore provider_properties;
 
@@ -289,9 +307,9 @@ KeyValueStore VPNDriver::GetProvider(Error* error) {
   return provider_properties;
 }
 
-void VPNDriver::OnBeforeSuspend(const ResultCallback& callback) {
+void VPNDriver::OnBeforeSuspend(ResultCallback callback) {
   // Nothing to be done in the general case, so immediately report success.
-  callback.Run(Error(Error::kSuccess));
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
 void VPNDriver::OnAfterResume() {}

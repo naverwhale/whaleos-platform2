@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,8 +12,8 @@
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/run_loop.h>
+#include <base/functional/callback.h>
+#include <base/test/test_future.h>
 #include <base/task/single_thread_task_executor.h>
 #include <brillo/message_loops/base_message_loop.h>
 #include <gmock/gmock.h>
@@ -24,22 +24,21 @@ using testing::Each;
 namespace patchpanel {
 namespace {
 // SocketForwarder reads blocks of 4096 bytes.
-constexpr int kDataSize = 5000;
+constexpr size_t kDataSize = 5000;
 
 // Does a blocking read on |socket| until it receives |expected_byte_count|
 // bytes which will be written into |buf|.
-bool Read(Socket* socket, char* buf, int expected_byte_count) {
-  int read_byte_count = 0;
-  int bytes = 0;
+bool Read(Socket* socket, char* buf, size_t expected_byte_count) {
+  size_t read_byte_count = 0;
+  ssize_t bytes = 0;
   while (read_byte_count < expected_byte_count) {
     bytes = socket->RecvFrom(buf + read_byte_count, kDataSize);
-    if (bytes <= 0)
+    if (bytes <= 0) {
       return false;
-    read_byte_count += bytes;
+    }
+    read_byte_count += static_cast<size_t>(bytes);
   }
-  if (read_byte_count != expected_byte_count)
-    return false;
-  return true;
+  return read_byte_count == expected_byte_count;
 }
 }  // namespace
 
@@ -66,8 +65,8 @@ class SocketForwarderTest : public ::testing::Test {
 };
 
 TEST_F(SocketForwarderTest, ForwardDataAndClose) {
-  base::RunLoop loop;
-  forwarder_->SetStopQuitClosureForTesting(loop.QuitClosure());
+  base::test::TestFuture<void> signal;
+  forwarder_->SetStopQuitClosureForTesting(signal.GetCallback());
   forwarder_->Start();
 
   std::vector<char> msg(kDataSize, 1);
@@ -78,7 +77,7 @@ TEST_F(SocketForwarderTest, ForwardDataAndClose) {
   EXPECT_NE(shutdown(peer0_->fd(), SHUT_WR), -1);
   EXPECT_NE(shutdown(peer1_->fd(), SHUT_WR), -1);
 
-  loop.Run();
+  EXPECT_TRUE(signal.Wait());
 
   EXPECT_FALSE(forwarder_->IsRunning());
 
@@ -93,14 +92,14 @@ TEST_F(SocketForwarderTest, ForwardDataAndClose) {
 }
 
 TEST_F(SocketForwarderTest, PeerSignalEPOLLHUP) {
-  base::RunLoop loop;
-  forwarder_->SetStopQuitClosureForTesting(loop.QuitClosure());
+  base::test::TestFuture<void> signal;
+  forwarder_->SetStopQuitClosureForTesting(signal.GetCallback());
   forwarder_->Start();
 
   // Close the destination peer.
   peer1_.reset();
 
-  loop.Run();
+  EXPECT_TRUE(signal.Wait());
 
   EXPECT_FALSE(forwarder_->IsRunning());
 }

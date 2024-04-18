@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,10 +8,19 @@ import("//common-mk/pkg_config.gni")
 group("all") {
   deps = [
     ":backlight_tool",
+    ":battery_saver_tool",
     ":check_powerd_config",
     ":cpufreq_config",
     ":dump_power_status",
+    ":fake_adaptive_charging_ml_service",
     ":inject_powerd_input_event",
+    ":install_dbus_conf",
+    ":install_init_scripts",
+    ":install_minijail_power_conf",
+    ":install_minijail_temp_logger_conf",
+    ":install_production_scripts",
+    ":install_testing_scripts",
+    ":install_tmpfiles_conf",
     ":libpolicy",
     ":libpolicy_stub",
     ":libpowerd",
@@ -21,6 +30,8 @@ group("all") {
     ":memory_suspend_test",
     ":power_supply_info",
     ":powerd",
+    ":powerd_dbus_reboot",
+    ":powerd_dbus_shutdown",
     ":powerd_dbus_suspend",
     ":powerd_setuid_helper",
     ":send_debug_power_status",
@@ -29,9 +40,6 @@ group("all") {
     ":set_wifi_transmit_power",
     ":suspend_delay_sample",
   ]
-  if (use.buffet) {
-    deps += [ ":buffet_command_handlers" ]
-  }
   if (use.cellular) {
     deps += [ ":generate_modemmanager_proxies" ]
   }
@@ -41,6 +49,7 @@ group("all") {
       ":power_manager_daemon_test",
       ":power_manager_policy_test",
       ":power_manager_system_test",
+      ":power_manager_tools_battery_saver_test",
       ":power_manager_util_test",
     ]
   }
@@ -51,22 +60,11 @@ group("all") {
     deps += [
       ":ambient_light_handler_fuzzer",
       ":internal_backlight_controller_fuzzer",
-      ":powerd_als_fuzzer",
+      ":powerd_acpi_wakeup_helper_fuzzer",
+      ":powerd_internal_backlight_fuzzer",
+      ":powerd_suspend_configurator_fuzzer",
+      ":thermal_device_fuzzer",
     ]
-  }
-
-  # TODO(b/188798246) Remove this once qc-netmgr is merged back into modemmanager
-  if (use.qrtr) {
-    deps += [ ":generate_upstart_proxies" ]
-  }
-}
-
-# TODO(b/188798246) Remove this once qc-netmgr is merged back into modemmanager
-if (use.qrtr) {
-  generate_dbus_proxies("generate_upstart_proxies") {
-    upstart_in_dir = "${sysroot}/usr/share/dbus-1/interfaces/"
-    proxy_output_file = "include/upstart/dbus-proxies.h"
-    sources = [ "${upstart_in_dir}/com.ubuntu.Upstart.xml" ]
   }
 }
 
@@ -83,22 +81,44 @@ if (use.cellular) {
   }
 }
 
+install_config("install_dbus_conf") {
+  sources = [ "dbus/org.chromium.PowerManager.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_minijail_power_conf") {
+  sources = [ "minijail/powerd.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_minijail_temp_logger_conf") {
+  sources = [ "minijail/temp_logger.conf" ]
+  install_path = "minijail_conf"
+}
+
 pkg_config("target_defaults") {
   defines = [
-    "USE_BUFFET=${use.buffet}",
     "USE_CELLULAR=${use.cellular}",
     "USE_IIOSERVICE=${use.iioservice}",
-    "USE_QRTR=${use.qrtr}",
+    "USE_IIOSERVICE_PROXIMITY=${use.iioservice_proximity}",
+    "USE_KEY_EVICTION=${use.key_eviction}",
   ]
 
   # NOSORT
   pkg_deps = [
+    "iioservice_ipc",
     "libbrillo",
     "libchrome",
     "libcros_config",
+    "libfeatures",
+    "libshill-client",
+    "libshill-dbus-client",
     "libec",
+    "libml-client",
     "libmojo",
+    "libsar",
     "libudev",
+    "mojo_service_manager",
     "re2",
 
     # system_api depends on protobuf (or protobuf-lite). It must appear
@@ -111,17 +131,6 @@ pkg_config("target_defaults") {
   } else {
     pkg_deps += [ "protobuf-lite" ]
   }
-
-  # TODO(b/188798246) Remove this once qc-netmgr is merged back into modemmanager.
-  if (use.qrtr) {
-    pkg_deps += [
-      "gio-2.0",
-      "gio-unix-2.0",
-      "glib-2.0",
-      "gthread-2.0",
-    ]
-    libs = [ "qrtr" ]
-  }
 }
 
 pkg_config("libchrome_test_config") {
@@ -132,20 +141,31 @@ pkg_config("libutil_dependent_config") {
   pkg_deps = [ "libmetrics" ]
 }
 
+pkg_config("libpower_manager_client_config") {
+  pkg_deps = [ "libpower_manager-client" ]
+}
+
+pkg_config("libpower_manager_client_test_config") {
+  pkg_deps = [ "libpower_manager-client-test" ]
+}
+
 static_library("libutil") {
   sources = [
     "common/activity_logger.cc",
     "common/battery_percentage_converter.cc",
     "common/clock.cc",
     "common/cros_config_prefs_source.cc",
+    "common/cros_ec_prefs_source.cc",
     "common/file_prefs_store.cc",
     "common/metrics_constants.cc",
     "common/metrics_sender.cc",
     "common/power_constants.cc",
     "common/prefs.cc",
+    "common/tracing.cc",
     "common/util.cc",
   ]
   configs += [ ":target_defaults" ]
+
   all_dependent_configs = [ ":libutil_dependent_config" ]
 }
 
@@ -154,12 +174,11 @@ static_library("libsystem") {
     "powerd/system/acpi_wakeup_helper.cc",
     "powerd/system/ambient_light_sensor.cc",
     "powerd/system/ambient_light_sensor_delegate.cc",
-    "powerd/system/ambient_light_sensor_delegate_file.cc",
     "powerd/system/ambient_light_sensor_delegate_mojo.cc",
     "powerd/system/ambient_light_sensor_info.cc",
-    "powerd/system/ambient_light_sensor_manager_file.cc",
     "powerd/system/ambient_light_sensor_manager_mojo.cc",
-    "powerd/system/ambient_light_sensor_watcher.cc",
+    "powerd/system/ambient_light_sensor_watcher_interface.cc",
+    "powerd/system/ambient_light_sensor_watcher_mojo.cc",
     "powerd/system/arc_timer_manager.cc",
     "powerd/system/async_file_reader.cc",
     "powerd/system/audio_client.cc",
@@ -173,14 +192,18 @@ static_library("libsystem") {
     "powerd/system/display/display_watcher.cc",
     "powerd/system/display/external_display.cc",
     "powerd/system/event_device.cc",
-    "powerd/system/external_ambient_light_sensor_factory_file.cc",
+    "powerd/system/external_ambient_light_sensor_factory_mojo.cc",
     "powerd/system/input_watcher.cc",
     "powerd/system/internal_backlight.cc",
     "powerd/system/lockfile_checker.cc",
+    "powerd/system/machine_quirks.cc",
     "powerd/system/peripheral_battery_watcher.cc",
     "powerd/system/pluggable_internal_backlight.cc",
     "powerd/system/power_supply.cc",
+    "powerd/system/proximity_events_observer.cc",
     "powerd/system/rolling_average.cc",
+    "powerd/system/sensor_service_handler.cc",
+    "powerd/system/sensor_service_handler_observer.cc",
     "powerd/system/smart_discharge_configurator.cc",
     "powerd/system/suspend_configurator.cc",
     "powerd/system/suspend_freezer.cc",
@@ -190,21 +213,20 @@ static_library("libsystem") {
     "powerd/system/thermal/thermal_device.cc",
     "powerd/system/thermal/thermal_device_factory.cc",
     "powerd/system/udev.cc",
-    "powerd/system/user_proximity_watcher.cc",
+    "powerd/system/usb_backlight.cc",
+    "powerd/system/user_proximity_watcher_mojo.cc",
+    "powerd/system/user_proximity_watcher_udev.cc",
     "powerd/system/wake_on_dp_configurator.cc",
     "powerd/system/wakeup_device.cc",
     "powerd/system/wakeup_source_identifier.cc",
+    "powerd/system/wakeup_timer.cc",
     "powerd/system/wilco_charge_controller_helper.cc",
   ]
   configs += [ ":target_defaults" ]
   libs = [ "rt" ]
-  deps = [
-    "//iioservice/libiioservice_ipc:libiioservice_ipc",
-    "//iioservice/libiioservice_ipc:libiioservice_ipc_mojom",
-  ]
   if (use.cellular) {
     sources += [ "powerd/system/dbus_objectmanager_wrapper.cc" ]
-    deps += [ ":generate_modemmanager_proxies" ]
+    deps = [ ":generate_modemmanager_proxies" ]
   }
 }
 
@@ -217,6 +239,7 @@ static_library("libsystem_stub") {
     "powerd/system/acpi_wakeup_helper_stub.cc",
     "powerd/system/ambient_light_sensor_manager_stub.cc",
     "powerd/system/ambient_light_sensor_stub.cc",
+    "powerd/system/ambient_light_sensor_watcher_observer_stub.cc",
     "powerd/system/ambient_light_sensor_watcher_stub.cc",
     "powerd/system/audio_client_stub.cc",
     "powerd/system/backlight_stub.cc",
@@ -230,7 +253,8 @@ static_library("libsystem_stub") {
     "powerd/system/external_ambient_light_sensor_factory_stub.cc",
     "powerd/system/input_watcher_stub.cc",
     "powerd/system/lockfile_checker_stub.cc",
-    "powerd/system/power_supply_stub.cc",
+    "powerd/system/machine_quirks_stub.cc",
+    "powerd/system/mock_power_supply.cc",
     "powerd/system/thermal/thermal_device_stub.cc",
     "powerd/system/udev_stub.cc",
     "powerd/system/user_proximity_watcher_stub.cc",
@@ -242,10 +266,14 @@ static_library("libsystem_stub") {
 
 static_library("libpolicy") {
   sources = [
+    "powerd/policy/adaptive_charging_controller.cc",
     "powerd/policy/ambient_light_handler.cc",
     "powerd/policy/backlight_controller.cc",
+    "powerd/policy/battery_saver_controller.cc",
+    "powerd/policy/bluetooth_controller.cc",
     "powerd/policy/cellular_controller.cc",
     "powerd/policy/charge_controller.cc",
+    "powerd/policy/dim_advisor.cc",
     "powerd/policy/external_ambient_light_handler.cc",
     "powerd/policy/external_backlight_controller.cc",
     "powerd/policy/input_device_controller.cc",
@@ -253,7 +281,6 @@ static_library("libpolicy") {
     "powerd/policy/internal_backlight_controller.cc",
     "powerd/policy/keyboard_backlight_controller.cc",
     "powerd/policy/shutdown_from_suspend.cc",
-    "powerd/policy/smart_dim_requestor.cc",
     "powerd/policy/state_controller.cc",
     "powerd/policy/suspend_delay_controller.cc",
     "powerd/policy/suspender.cc",
@@ -264,11 +291,9 @@ static_library("libpolicy") {
   ]
   configs += [ ":target_defaults" ]
   libs = [ "m" ]
+  deps = []
   if (use.cellular) {
-    deps = [ ":generate_modemmanager_proxies" ]
-  }
-  if (use.qrtr) {
-    deps += [ ":generate_upstart_proxies" ]
+    deps += [ ":generate_modemmanager_proxies" ]
   }
 }
 
@@ -305,26 +330,25 @@ static_library("libpowerd") {
     ":libsystem",
     ":libutil",
   ]
-
-  if (use.buffet) {
-    deps += [ ":buffet_command_handlers" ]
-  }
 }
 
 executable("powerd") {
   sources = [ "powerd/main.cc" ]
   configs += [ ":target_defaults" ]
   deps = [ ":libpowerd" ]
+  install_path = "bin"
 }
 
 executable("powerd_setuid_helper") {
   sources = [ "powerd/powerd_setuid_helper.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
 }
 
 executable("set_cellular_transmit_power") {
   sources = [ "powerd/set_cellular_transmit_power.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
 }
 
 pkg_config("set_wifi_transmit_power_config") {
@@ -337,8 +361,10 @@ executable("set_wifi_transmit_power") {
     ":set_wifi_transmit_power_config",
     ":target_defaults",
   ]
+  install_path = "bin"
 }
 
+# boot-splash, chromeos-boot-alert
 executable("backlight_tool") {
   sources = [ "tools/backlight_tool.cc" ]
   configs += [ ":target_defaults" ]
@@ -348,12 +374,38 @@ executable("backlight_tool") {
     ":libsystem_stub",
     ":libutil",
   ]
+  install_path = "bin"
+}
+
+source_set("libbattery_saver_tool") {
+  sources = [
+    "tools/battery_saver/battery_saver.cc",
+    "tools/battery_saver/battery_saver.h",
+    "tools/battery_saver/battery_saver_mode_watcher.cc",
+    "tools/battery_saver/battery_saver_mode_watcher.h",
+    "tools/battery_saver/proto_util.h",
+    "tools/battery_saver/task_util.h",
+  ]
+  configs += [
+    ":target_defaults",
+    ":libpower_manager_client_config",
+  ]
+  pkg_deps = [ "absl" ]
+}
+
+executable("battery_saver_tool") {
+  output_name = "battery_saver"
+  sources = [ "tools/battery_saver/main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libbattery_saver_tool" ]
+  install_path = "bin"
 }
 
 executable("check_powerd_config") {
   sources = [ "tools/check_powerd_config.cc" ]
   configs += [ ":target_defaults" ]
   deps = [ ":libutil" ]
+  install_path = "bin"
 }
 
 executable("cpufreq_config") {
@@ -364,24 +416,49 @@ executable("cpufreq_config") {
     ":libsystem_stub",
     ":libutil",
   ]
+  install_path = "bin"
+}
+
+executable("fake_adaptive_charging_ml_service") {
+  sources = [ "tools/fake_adaptive_charging_ml_service.cc" ]
+  configs += [ ":target_defaults" ]
+  install_path = "bin"
 }
 
 executable("inject_powerd_input_event") {
   sources = [ "tools/inject_powerd_input_event.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
 }
 
 executable("memory_suspend_test") {
   sources = [ "tools/memory_suspend_test.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
+}
+
+executable("powerd_dbus_reboot") {
+  sources = [ "tools/powerd_dbus_reboot.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libutil" ]
+  install_path = "bin"
+}
+
+executable("powerd_dbus_shutdown") {
+  sources = [ "tools/powerd_dbus_shutdown.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libutil" ]
+  install_path = "bin"
 }
 
 executable("powerd_dbus_suspend") {
   sources = [ "tools/powerd_dbus_suspend.cc" ]
   configs += [ ":target_defaults" ]
   deps = [ ":libutil" ]
+  install_path = "bin"
 }
 
+# feedback
 executable("power_supply_info") {
   sources = [ "tools/power_supply_info.cc" ]
   configs += [ ":target_defaults" ]
@@ -390,8 +467,10 @@ executable("power_supply_info") {
     ":libsystem_stub",
     ":libutil",
   ]
+  install_path = "bin"
 }
 
+# crosh's battery_test command
 executable("dump_power_status") {
   sources = [ "tools/dump_power_status.cc" ]
   configs += [ ":target_defaults" ]
@@ -400,34 +479,65 @@ executable("dump_power_status") {
     ":libsystem_stub",
     ":libutil",
   ]
+  install_path = "bin"
 }
 
 executable("send_debug_power_status") {
   sources = [ "tools/send_debug_power_status.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
 }
 
 executable("set_power_policy") {
   sources = [ "tools/set_power_policy.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
 }
 
 executable("suspend_delay_sample") {
   sources = [ "tools/suspend_delay_sample.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
 }
 
-if (use.buffet) {
-  generate_dbus_proxies("generate_buffet_proxies") {
-    dbus_service_config = "../buffet/dbus_bindings/dbus-service-config.json"
-    proxy_output_file = "include/buffet/dbus-proxies.h"
-    sources = [ "../buffet/dbus_bindings/org.chromium.Buffet.Command.xml" ]
-  }
-  static_library("buffet_command_handlers") {
-    sources = [ "powerd/buffet/command_handlers.cc" ]
-    configs += [ ":target_defaults" ]
-    deps = [ ":generate_buffet_proxies" ]
-  }
+# Scripts for production
+install_config("install_production_scripts") {
+  sources = [
+    "powerd/powerd_suspend",
+    "tools/print_sysfs_power_supply_data",  # feedback
+    "tools/send_metrics_on_resume",
+    "tools/thermal_zone_config",
+  ]
+  install_path = "bin"
+  options = "-m0755"
+}
+
+# Scripts for testing and debugging
+install_config("install_testing_scripts") {
+  sources = [
+    "tools/activate_short_dark_resume",
+    "tools/create_fake_charge_history",
+    "tools/debug_sleep_quickly",
+    "tools/set_short_powerd_timeouts",
+    "tools/suspend_stress_test",
+  ]
+  install_path = "bin"
+  options = "-m0755"
+}
+
+# Scripts called from init scripts
+install_config("install_init_scripts") {
+  sources = [
+    "init/shared/powerd-pre-start.sh",
+    "tools/temp_logger.sh",
+  ]
+  install_path = "/usr/share/cros/init"
+  options = "-m0755"
+}
+
+install_config("install_tmpfiles_conf") {
+  sources = [ "tmpfiles.d/powerd.conf" ]
+  install_path = "tmpfilesd"
 }
 
 if (use.fuzzer || use.test) {
@@ -440,6 +550,7 @@ if (use.fuzzer || use.test) {
       "common/test_main_loop_runner.cc",
     ]
     configs += [ ":target_defaults" ]
+    libs = [ "fake_platform_features" ]
   }
 }
 
@@ -449,7 +560,6 @@ if (use.test) {
       "common/activity_logger_test.cc",
       "common/battery_percentage_converter_test.cc",
       "common/prefs_test.cc",
-      "common/testrunner.cc",
       "common/util_test.cc",
     ]
     configs += [
@@ -457,10 +567,13 @@ if (use.test) {
       ":target_defaults",
       ":libchrome_test_config",
     ]
+    libs = [ "fake_platform_features" ]
     deps = [
       ":libutil",
       ":libutil_test",
+      "//common-mk/testrunner",
     ]
+    run_test = true
   }
 
   pkg_config("power_manager_system_test_config") {
@@ -470,39 +583,43 @@ if (use.test) {
 
   executable("power_manager_system_test") {
     sources = [
-      "common/testrunner.cc",
       "powerd/system/acpi_wakeup_helper_test.cc",
-      "powerd/system/ambient_light_sensor_delegate_file_test.cc",
       "powerd/system/ambient_light_sensor_delegate_mojo_test.cc",
       "powerd/system/ambient_light_sensor_delegate_test.cc",
-      "powerd/system/ambient_light_sensor_manager_file_test.cc",
       "powerd/system/ambient_light_sensor_manager_mojo_test.cc",
       "powerd/system/ambient_light_sensor_test.cc",
-      "powerd/system/ambient_light_sensor_watcher_test.cc",
+      "powerd/system/ambient_light_sensor_watcher_mojo_test.cc",
       "powerd/system/arc_timer_manager_test.cc",
       "powerd/system/async_file_reader_test.cc",
       "powerd/system/audio_client_test.cc",
       "powerd/system/bluez_battery_provider_test.cc",
-      "powerd/system/cros_ec_ioctl_test.cc",
+      "powerd/system/display/display_power_setter_test.cc",
       "powerd/system/display/display_watcher_test.cc",
       "powerd/system/display/external_display_test.cc",
+      "powerd/system/fake_light.cc",
+      "powerd/system/fake_proximity.cc",
       "powerd/system/fake_sensor_device.cc",
       "powerd/system/fake_sensor_service.cc",
       "powerd/system/input_watcher_test.cc",
       "powerd/system/internal_backlight_test.cc",
       "powerd/system/lockfile_checker_test.cc",
+      "powerd/system/machine_quirks_test.cc",
       "powerd/system/peripheral_battery_watcher_test.cc",
       "powerd/system/pluggable_internal_backlight_test.cc",
       "powerd/system/power_supply_test.cc",
+      "powerd/system/proximity_events_observer_test.cc",
       "powerd/system/rolling_average_test.cc",
+      "powerd/system/sensor_service_handler_test.cc",
       "powerd/system/suspend_configurator_test.cc",
       "powerd/system/suspend_freezer_test.cc",
       "powerd/system/tagged_device_test.cc",
       "powerd/system/thermal/cooling_device_test.cc",
       "powerd/system/thermal/thermal_device_factory_test.cc",
-      "powerd/system/user_proximity_watcher_test.cc",
+      "powerd/system/user_proximity_watcher_mojo_test.cc",
+      "powerd/system/user_proximity_watcher_udev_test.cc",
       "powerd/system/wakeup_device_test.cc",
       "powerd/system/wakeup_source_identifier_test.cc",
+      "powerd/testing/test_environment.cc",
     ]
     configs += [
       "//common-mk:test",
@@ -515,16 +632,22 @@ if (use.test) {
       ":libsystem_stub",
       ":libutil",
       ":libutil_test",
+      "//common-mk/testrunner",
     ]
+    pkg_deps = [ "libsar_test_support" ]
+    run_test = true
   }
 
   executable("power_manager_policy_test") {
     sources = [
-      "common/testrunner.cc",
+      "powerd/policy/adaptive_charging_controller_test.cc",
       "powerd/policy/ambient_light_handler_test.cc",
       "powerd/policy/backlight_controller_test_util.cc",
+      "powerd/policy/battery_saver_controller_test.cc",
+      "powerd/policy/bluetooth_controller_test.cc",
       "powerd/policy/cellular_controller_test.cc",
       "powerd/policy/charge_controller_test.cc",
+      "powerd/policy/dim_advisor_test.cc",
       "powerd/policy/external_backlight_controller_test.cc",
       "powerd/policy/input_device_controller_test.cc",
       "powerd/policy/input_event_handler_test.cc",
@@ -538,6 +661,7 @@ if (use.test) {
       "powerd/policy/user_proximity_handler_test.cc",
       "powerd/policy/user_proximity_voting_test.cc",
       "powerd/policy/wifi_controller_test.cc",
+      "powerd/testing/test_environment.cc",
     ]
     configs += [
       "//common-mk:test",
@@ -551,14 +675,16 @@ if (use.test) {
       ":libsystem_stub",
       ":libutil",
       ":libutil_test",
+      "//common-mk/testrunner",
     ]
+    run_test = true
   }
 
   executable("power_manager_daemon_test") {
     sources = [
-      "common/testrunner.cc",
       "powerd/daemon_test.cc",
       "powerd/metrics_collector_test.cc",
+      "powerd/testing/test_environment.cc",
     ]
     configs += [
       "//common-mk:test",
@@ -573,7 +699,29 @@ if (use.test) {
       ":libsystem_stub",
       ":libutil",
       ":libutil_test",
+      "//common-mk/testrunner",
+      "//metrics:metrics_test_support",
     ]
+    run_test = true
+  }
+
+  executable("power_manager_tools_battery_saver_test") {
+    sources = [
+      "tools/battery_saver/battery_saver_mode_watcher_test.cc",
+      "tools/battery_saver/battery_saver_test.cc",
+      "tools/battery_saver/proto_util_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":libchrome_test_config",
+      ":libpower_manager_client_test_config",
+      ":target_defaults",
+    ]
+    deps = [
+      ":libbattery_saver_tool",
+      "//common-mk/testrunner",
+    ]
+    run_test = true
   }
 }
 
@@ -582,10 +730,17 @@ if (use.amd64) {
     sources = [ "tools/dump_intel_rapl_consumption.cc" ]
     configs += [ ":target_defaults" ]
     deps = [ ":libutil" ]
+    install_path = "bin"
   }
 }
 
 if (use.fuzzer) {
+  pkg_config("fuzzer_config") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+    ]
+  }
   static_library("libpolicy_test") {
     sources = [ "powerd/policy/ambient_light_pref_fuzz_util.cc" ]
     configs += [ ":target_defaults" ]
@@ -615,27 +770,50 @@ if (use.fuzzer) {
       ":libutil_test",
     ]
   }
-}
-
-# Fuzzer target.
-if (use.fuzzer) {
-  pkg_config("fuzzer_config") {
-    pkg_deps = [
-      "libbrillo-test",
-      "libchrome-test",
+  executable("powerd_acpi_wakeup_helper_fuzzer") {
+    sources = [ "powerd/system/acpi_wakeup_helper_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      "//common-mk:test",
+      ":target_defaults",
+    ]
+    deps = [ ":libpowerd" ]
+  }
+  executable("powerd_internal_backlight_fuzzer") {
+    sources = [ "powerd/system/internal_backlight_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":target_defaults",
+    ]
+    deps = [ ":libpowerd" ]
+  }
+  executable("powerd_suspend_configurator_fuzzer") {
+    sources = [ "powerd/system/suspend_configurator_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      "//common-mk:test",
+      ":fuzzer_config",
+      ":target_defaults",
+    ]
+    libs = [ "fake_platform_features" ]
+    deps = [
+      ":libpowerd",
+      ":libsystem_stub",
+      ":libutil_test",
     ]
   }
-  executable("powerd_als_fuzzer") {
-    sources = [ "powerd/system/fuzzers/powerd_als_fuzzer.cc" ]
+  executable("thermal_device_fuzzer") {
+    sources = [ "powerd/system/thermal/thermal_device_fuzzer.cc" ]
     configs += [
-      "//common-mk/common_fuzzer:common_fuzzer",
+      "//common-mk/common_fuzzer",
       "//common-mk:test",
       ":fuzzer_config",
       ":target_defaults",
     ]
     deps = [
-      ":libsystem",
-      ":libutil",
+      ":libpowerd",
+      ":libsystem_stub",
+      ":libutil_test",
     ]
   }
 }

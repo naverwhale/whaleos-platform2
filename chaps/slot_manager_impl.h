@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,37 +13,37 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
-#include <base/synchronization/lock.h>
-#include <base/threading/platform_thread.h>
+#include <libhwsec/frontend/chaps/frontend.h>
 
 #include "chaps/chaps_factory.h"
+#include "chaps/chaps_metrics.h"
 #include "chaps/object_pool.h"
 
 namespace chaps {
 
 class SessionFactory;
-class TPMUtility;
 
 // Maintains a list of PKCS #11 slots and modifies the list according to login
 // events received. Sample usage:
-//    SlotManagerImpl slot_manager(&my_factory, &my_tpm);
+//    SlotManagerImpl slot_manager(...);
 //    if (!slot_manager.Init()) {
 //      ...
 //    }
-//    // Ready for use by SlotManager and LoginEventListener clients.
+//    // Ready for use by SlotManager clients.
 class SlotManagerImpl : public SlotManager,
                         public TokenManagerInterface,
                         public HandleGenerator {
  public:
   SlotManagerImpl(ChapsFactory* factory,
-                  TPMUtility* tpm_utility,
+                  const hwsec::ChapsFrontend* hwsec,
                   bool auto_load_system_token,
-                  SystemShutdownBlocker* system_shutdown_blocker);
+                  SystemShutdownBlocker* system_shutdown_blocker,
+                  ChapsMetrics* chaps_metrics);
   SlotManagerImpl(const SlotManagerImpl&) = delete;
   SlotManagerImpl& operator=(const SlotManagerImpl&) = delete;
 
@@ -86,11 +86,8 @@ class SlotManagerImpl : public SlotManager,
                  const brillo::SecureBlob& auth_data,
                  const std::string& label,
                  int* slot_id) override;
-  void UnloadToken(const brillo::SecureBlob& isolate_credential,
+  bool UnloadToken(const brillo::SecureBlob& isolate_credential,
                    const base::FilePath& path) override;
-  void ChangeTokenAuthData(const base::FilePath& path,
-                           const brillo::SecureBlob& old_auth_data,
-                           const brillo::SecureBlob& new_auth_data) override;
   bool GetTokenPath(const brillo::SecureBlob& isolate_credential,
                     int slot_id,
                     base::FilePath* path) override;
@@ -116,9 +113,13 @@ class SlotManagerImpl : public SlotManager,
     // Key: A session identifier.
     // Value: The associated session object.
     std::map<int, std::shared_ptr<Session>> sessions;
-    std::shared_ptr<base::PlatformThread::Delegate> worker_thread;
-    base::PlatformThreadHandle worker_thread_handle;
   };
+
+  // The HWSec object is enabled or not.
+  bool HwsecIsEnabled();
+
+  // The HWSec object is ready to use or not.
+  bool HwsecIsReady();
 
   // Internal token presence check without isolate_credential check.
   bool IsTokenPresent(int slot_id) const;
@@ -135,11 +136,11 @@ class SlotManagerImpl : public SlotManager,
   //                used to store internal blobs related to the key hierarchy.
   //  auth_data - Authorization data to be used for the key hierarchy. This same
   //              data will be required to use the key hierarchy in the future.
-  //  master_key - On success will be assigned the new master key for the token.
+  //  root_key - On success will be assigned the new root key for the token.
   bool InitializeKeyHierarchy(int slot_id,
                               ObjectPool* object_pool,
                               const std::string& auth_data,
-                              std::string* master_key);
+                              std::string* root_key);
 
   // Searches for slot that does not currently contain a token. If no such slot
   // exists a new slot is created. The slot identifier of the empty slot is
@@ -159,10 +160,16 @@ class SlotManagerImpl : public SlotManager,
   // Get the path of the token loaded in the given slot.
   bool PathFromSlotId(int slot_id, base::FilePath* path) const;
 
-  // Performs initialization tasks that depend on the TPM SRK.  If the TPM is
-  // not owned this cannot succeed.  These tasks include seeding the software
-  // prng and loading the system token.
+  // Performs initialization tasks that depend on the HWSec status.
+  // If the HWSec is not ready this cannot succeed.
+  // These tasks include seeding the software prng and loading the system token.
   bool InitStage2();
+
+  // Migrates software token to HWSec token if needed. Returns true when the
+  // migration is needed. Return false in the other case.
+  bool MigrateTokenIfNeeded(const base::FilePath& path,
+                            const brillo::SecureBlob& auth_data,
+                            std::shared_ptr<ObjectPool> object_pool);
 
   // LoadToken for internal callers.
   bool LoadTokenInternal(const brillo::SecureBlob& isolate_credential,
@@ -171,7 +178,59 @@ class SlotManagerImpl : public SlotManager,
                          const std::string& label,
                          int* slot_id);
 
-  // Loads the master key for a software-only token.
+  // Loads the root key for a HWSec token.
+  void LoadHwsecToken(base::OnceCallback<void(bool)> callback,
+                      int slot_id,
+                      const base::FilePath& path,
+                      const brillo::SecureBlob& auth_data,
+                      std::shared_ptr<ObjectPool> object_pool);
+
+  // Loads the root key for a HWSec token after the HWSec unseals data.
+  void LoadHwsecTokenAfterUnseal(
+      base::OnceCallback<void(bool)> callback,
+      const base::FilePath& path,
+      const brillo::SecureBlob& auth_data,
+      std::shared_ptr<ObjectPool> object_pool,
+      hwsec::StatusOr<brillo::SecureBlob> unsealed_data);
+
+  // The final operation of loading the root key for a HWSec token.
+  void LoadHwsecTokenFinal(base::OnceCallback<void(bool)> callback,
+                           const base::FilePath& path,
+                           const brillo::SecureBlob& auth_data,
+                           std::shared_ptr<ObjectPool> object_pool,
+                           brillo::SecureBlob root_key);
+
+  // Initializes a new HWSec token.
+  void InitializeHwsecToken(base::OnceCallback<void(bool)> callback,
+                            const base::FilePath& path,
+                            const brillo::SecureBlob& auth_data,
+                            std::shared_ptr<ObjectPool> object_pool);
+
+  // Initializes a new HWSec token after the secure element generated random.
+  void InitializeHwsecTokenAfterGenerateRandom(
+      base::OnceCallback<void(bool)> callback,
+      const base::FilePath& path,
+      const brillo::SecureBlob& auth_data,
+      std::shared_ptr<ObjectPool> object_pool,
+      hwsec::StatusOr<brillo::SecureBlob> random_data);
+
+  // Initializes a new HWSec token with the specific root key.
+  void InitializeHwsecTokenWithRootKey(base::OnceCallback<void(bool)> callback,
+                                       const base::FilePath& path,
+                                       const brillo::SecureBlob& auth_data,
+                                       std::shared_ptr<ObjectPool> object_pool,
+                                       brillo::SecureBlob root_key);
+
+  // Initializes a new HWSec token after the secure element sealed the data.
+  void InitializeHwsecTokenAfterSealData(
+      base::OnceCallback<void(bool)> callback,
+      const base::FilePath& path,
+      const brillo::SecureBlob& auth_data,
+      std::shared_ptr<ObjectPool> object_pool,
+      brillo::SecureBlob root_key,
+      hwsec::StatusOr<hwsec::ChapsSealedData> sealed_data);
+
+  // Loads the root key for a software-only token.
   bool LoadSoftwareToken(const brillo::SecureBlob& auth_data,
                          ObjectPool* object_pool);
 
@@ -192,11 +251,13 @@ class SlotManagerImpl : public SlotManager,
   // Value: The identifier of the associated slot.
   std::map<int, int> session_slot_map_;
   std::map<brillo::SecureBlob, Isolate> isolate_map_;
-  TPMUtility* tpm_utility_;
-  base::Lock handle_generator_lock_;
+  const hwsec::ChapsFrontend* hwsec_;
   bool auto_load_system_token_;
   bool is_initialized_;
+  std::optional<bool> hwsec_enabled_;
+  bool hwsec_ready_;
   SystemShutdownBlocker* system_shutdown_blocker_;
+  ChapsMetrics* chaps_metrics_;
 };
 
 }  // namespace chaps

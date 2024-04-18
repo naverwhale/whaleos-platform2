@@ -1,9 +1,10 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "modemfwd/firmware_manifest.h"
 
+#include <optional>
 #include <utility>
 
 #include <base/logging.h>
@@ -19,8 +20,10 @@ namespace modemfwd {
 namespace {
 
 bool ParseDevice(const Device& device,
-                 const base::FilePath& directory_path,
-                 DeviceFirmwareCache* out_cache) {
+                 DeviceFirmwareCache* out_cache,
+                 std::map<std::string, Dlc>* dlc_per_variant) {
+  if (!device.variant().empty() && device.has_dlc())
+    dlc_per_variant->emplace(device.variant(), device.dlc());
   // Sort main firmware entries by version. Ensure the versions are
   // all separate.
   std::map<std::string, std::unique_ptr<FirmwareFileInfo>> main_firmware_infos;
@@ -44,17 +47,48 @@ bool ParseDevice(const Device& device,
     if (!compression.has_value())
       return false;
 
+    // Use relative paths since DLCs have no predefined path
     if (base::FilePath(main_firmware.filename()).IsAbsolute()) {
       LOG(ERROR) << "Main firmware should use relative path ("
                  << main_firmware.filename() << ").";
       return false;
     }
 
-    main_firmware_infos.emplace(
-        main_firmware.version(),
-        std::make_unique<FirmwareFileInfo>(
-            directory_path.Append(main_firmware.filename()),
-            main_firmware.version(), compression.value()));
+    auto main_info = std::make_unique<FirmwareFileInfo>(
+        main_firmware.filename(), main_firmware.version(), compression.value());
+
+    // Add associated firmware for this main firmware, if it exists.
+    for (const AssociatedFirmware& assoc_firmware :
+         main_firmware.assoc_firmware()) {
+      if (assoc_firmware.filename().empty() || assoc_firmware.tag().empty() ||
+          assoc_firmware.version().empty() ||
+          !Compression_IsValid(assoc_firmware.compression())) {
+        LOG(ERROR) << "Found malformed associated firmware manifest entry";
+        return false;
+      }
+      auto assoc_compression =
+          ToFirmwareFileInfoCompression(assoc_firmware.compression());
+      if (!assoc_compression.has_value()) {
+        LOG(ERROR) << "Firmware entry " << assoc_firmware.tag()
+                   << " does not specify compression";
+        return false;
+      }
+
+      if (base::FilePath(assoc_firmware.filename()).IsAbsolute()) {
+        LOG(ERROR) << "Associated firmware should use relative path ("
+                   << assoc_firmware.filename() << ").";
+        return false;
+      }
+
+      auto assoc_info = std::make_unique<FirmwareFileInfo>(
+          assoc_firmware.filename(), assoc_firmware.version(),
+          assoc_compression.value());
+      out_cache->assoc_firmware[main_info.get()][assoc_firmware.tag()] =
+          assoc_info.get();
+      out_cache->all_files.push_back(std::move(assoc_info));
+    }
+
+    main_firmware_infos.emplace(main_firmware.version(), std::move(main_info));
   }
 
   // Main firmware is default for a device if:
@@ -95,8 +129,7 @@ bool ParseDevice(const Device& device,
     }
 
     auto oem_info = std::make_unique<FirmwareFileInfo>(
-        directory_path.Append(oem_firmware.filename()), oem_firmware.version(),
-        compression.value());
+        oem_firmware.filename(), oem_firmware.version(), compression.value());
     if (oem_firmware.main_firmware_version_size() > 0) {
       for (const std::string& version : oem_firmware.main_firmware_version())
         oem_firmware_infos.emplace(version, oem_info.get());
@@ -158,8 +191,8 @@ bool ParseDevice(const Device& device,
     }
 
     auto carrier_info = std::make_unique<FirmwareFileInfo>(
-        directory_path.Append(carrier_firmware.filename()),
-        carrier_firmware.version(), compression.value());
+        carrier_firmware.filename(), carrier_firmware.version(),
+        compression.value());
 
     // Add the firmware to the cache under the carrier ID for this entry.
     for (const std::string& supported_carrier : carrier_firmware.carrier_id()) {
@@ -208,34 +241,52 @@ bool ParseDevice(const Device& device,
 
 }  // namespace
 
-bool ParseFirmwareManifestV2(const base::FilePath& manifest,
-                             FirmwareIndex* index) {
+std::unique_ptr<FirmwareIndex> ParseFirmwareManifestV2(
+    const base::FilePath& manifest,
+    std::map<std::string, Dlc>& dlc_per_variant) {
   FirmwareManifestV2 manifest_proto;
-  if (!brillo::ReadTextProtobuf(manifest, &manifest_proto))
-    return false;
+  if (!brillo::ReadTextProtobuf(manifest, &manifest_proto)) {
+    PLOG(ERROR) << "Failed to read manifest file";
+    return nullptr;
+  }
 
-  base::FilePath directory = manifest.DirName();
-
+  FirmwareIndex index;
   for (const Device& device : manifest_proto.device()) {
     if (device.device_id().empty()) {
       LOG(ERROR) << "Empty device ID in device entry";
-      return false;
+      return nullptr;
     }
 
     DeviceType type{device.device_id(), device.variant()};
-    if (index->count(type) > 0) {
+    if (index.count(type) > 0) {
       LOG(ERROR) << "Duplicate device entry in manifest";
-      return false;
+      return nullptr;
     }
 
     DeviceFirmwareCache cache;
-    if (!ParseDevice(device, directory, &cache))
-      return false;
+    if (!ParseDevice(device, &cache, &dlc_per_variant))
+      return nullptr;
 
-    (*index)[type] = std::move(cache);
+    index[type] = std::move(cache);
   }
 
-  return true;
+  return std::make_unique<FirmwareIndex>(std::move(index));
+}
+
+std::optional<FirmwareFileInfo::Compression> ToFirmwareFileInfoCompression(
+    Compression compression) {
+  switch (compression) {
+    case Compression::NONE:
+      return FirmwareFileInfo::Compression::NONE;
+    case Compression::XZ:
+      return FirmwareFileInfo::Compression::XZ;
+    default:
+      std::string name = Compression_Name(compression);
+      if (name.empty())
+        name = base::NumberToString(compression);
+      LOG(ERROR) << "Unsupported compression: " << name;
+      return std::nullopt;
+  }
 }
 
 }  // namespace modemfwd

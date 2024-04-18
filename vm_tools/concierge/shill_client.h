@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,12 @@
 #include <string>
 #include <vector>
 
-#include <base/callback_forward.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <shill/dbus-proxies.h>
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 
 // Listens for shill signals over D-Bus in order to identify when DNS
 // nameservers or search domains change.
@@ -27,10 +25,12 @@ class ShillClient final {
   ShillClient& operator=(const ShillClient&) = delete;
 
   void RegisterResolvConfigChangedHandler(
-      base::Callback<void(std::vector<std::string> nameservers,
-                          std::vector<std::string> search_domains)> callback);
+      const base::RepeatingCallback<
+          void(std::vector<std::string> nameservers,
+               std::vector<std::string> search_domains)>& callback);
 
-  void RegisterDefaultServiceChangedHandler(base::Callback<void()> callback);
+  void RegisterDefaultServiceChangedHandler(
+      const base::RepeatingCallback<void()>& callback);
 
  private:
   void OnShillServiceOwnerChange(const std::string& old_owner,
@@ -54,10 +54,10 @@ class ShillClient final {
   std::vector<std::string> nameservers_;
   std::vector<std::string> search_domains_;
 
-  base::Callback<void(std::vector<std::string> nameservers,
-                      std::vector<std::string> search_domains)>
+  base::RepeatingCallback<void(std::vector<std::string> nameservers,
+                               std::vector<std::string> search_domains)>
       config_changed_callback_;
-  base::Callback<void()> default_service_changed_callback_;
+  base::RepeatingCallback<void()> default_service_changed_callback_;
 
   scoped_refptr<dbus::Bus> bus_;
   std::unique_ptr<org::chromium::flimflam::ManagerProxy> manager_proxy_;
@@ -68,7 +68,6 @@ class ShillClient final {
   base::WeakPtrFactory<ShillClient> weak_factory_{this};
 };
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge
 
 #endif  // VM_TOOLS_CONCIERGE_SHILL_CLIENT_H_

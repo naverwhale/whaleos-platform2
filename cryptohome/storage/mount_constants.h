@@ -1,18 +1,23 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CRYPTOHOME_STORAGE_MOUNT_CONSTANTS_H_
 #define CRYPTOHOME_STORAGE_MOUNT_CONSTANTS_H_
 
+#include <sys/types.h>
+
 namespace cryptohome {
 
 enum class MountType {
-  NONE,        // Not mounted.
-  ECRYPTFS,    // Encrypted with ecryptfs.
-  DIR_CRYPTO,  // Encrypted with dircrypto.
-  DMCRYPT,     // Encrypted with dmcrypt over a logical volume.
-  EPHEMERAL,   // Ephemeral mount.
+  NONE,                    // Not mounted.
+  ECRYPTFS,                // Encrypted with ecryptfs.
+  DIR_CRYPTO,              // Encrypted with dircrypto.
+  DMCRYPT,                 // Encrypted with dmcrypt over a logical volume.
+  EPHEMERAL,               // Ephemeral mount.
+  ECRYPTFS_TO_DIR_CRYPTO,  // Vault migration.
+  ECRYPTFS_TO_DMCRYPT,     // Vault migration.
+  DIR_CRYPTO_TO_DMCRYPT,   // Vault migration.
 };
 
 // Paths to sparse file for ephemeral mounts.
@@ -24,6 +29,7 @@ extern const char kDefaultSharedUser[];
 // Directories that we intend to track (make pass-through in cryptohome vault)
 extern const char kCacheDir[];
 extern const char kDownloadsDir[];
+extern const char kDownloadsBackupDir[];
 extern const char kMyFilesDir[];
 extern const char kGCacheDir[];
 
@@ -49,6 +55,16 @@ extern const char kEphemeralMountOptions[];
 // Daemon store directories.
 extern const char kEtcDaemonStoreBaseDir[];
 extern const char kRunDaemonStoreBaseDir[];
+extern const char kRunDaemonStoreCacheBaseDir[];
+
+// Directory within RootHome that is used for daemon store cache
+extern const char kDaemonStoreCacheDir[];
+
+// Extended attributes for tracked directory removal.
+extern const char kAndroidCacheInodeAttribute[];
+extern const char kAndroidCodeCacheInodeAttribute[];
+extern const char kTrackedDirectoryNameAttribute[];
+extern const char kRemovableFileAttribute[];
 
 }  // namespace cryptohome
 

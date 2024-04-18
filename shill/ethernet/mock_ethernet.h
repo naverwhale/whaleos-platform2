@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,17 +27,10 @@ class MockEthernet : public Ethernet {
 
   ~MockEthernet() override;
 
-  MOCK_METHOD(void,
-              Start,
-              (Error*, const EnabledStateChangedCallback&),
-              (override));
-  MOCK_METHOD(void,
-              Stop,
-              (Error*, const EnabledStateChangedCallback&),
-              (override));
+  MOCK_METHOD(void, Start, (EnabledStateChangedCallback), (override));
+  MOCK_METHOD(void, Stop, (EnabledStateChangedCallback), (override));
   MOCK_METHOD(void, ConnectTo, (EthernetService*), (override));
   MOCK_METHOD(void, DisconnectFrom, (EthernetService*), (override));
-  MOCK_METHOD(bool, IsConnectedViaTether, (), (const, override));
   MOCK_METHOD(bool, link_up, (), (const, override));
 };
 

@@ -1,22 +1,26 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <brillo/dbus/dbus_method_invoker.h>
 
+#include <stdio.h>
+#include <unistd.h>
+
 #include <string>
 
-#include <base/bind.h>
+#include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <dbus/error.h>
 #include <dbus/mock_bus.h>
 #include <dbus/mock_object_proxy.h>
-#include <dbus/scoped_dbus_error.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "brillo/dbus/test.pb.h"
 
-using testing::_;
+using testing::An;
 using testing::AnyNumber;
 using testing::InSequence;
 using testing::Invoke;
@@ -85,15 +89,14 @@ class DBusMethodInvokerTest : public testing::Test {
         .WillRepeatedly(Return(mock_object_proxy_.get()));
     int def_timeout_ms = dbus::ObjectProxy::TIMEOUT_USE_DEFAULT;
     EXPECT_CALL(*mock_object_proxy_,
-                CallMethodAndBlockWithErrorDetails(_, def_timeout_ms, _))
+                CallMethodAndBlock(An<dbus::MethodCall*>(), def_timeout_ms))
         .WillRepeatedly(Invoke(this, &DBusMethodInvokerTest::CreateResponse));
   }
 
   void TearDown() override { bus_ = nullptr; }
 
-  std::unique_ptr<Response> CreateResponse(dbus::MethodCall* method_call,
-                                           int /* timeout_ms */,
-                                           dbus::ScopedDBusError* dbus_error) {
+  base::expected<std::unique_ptr<Response>, dbus::Error> CreateResponse(
+      dbus::MethodCall* method_call, int /* timeout_ms */) {
     if (method_call->GetInterface() == kTestInterface) {
       if (method_call->GetMember() == kTestMethod1) {
         MessageReader reader(method_call);
@@ -104,12 +107,11 @@ class DBusMethodInvokerTest : public testing::Test {
           auto response = Response::CreateEmpty();
           MessageWriter writer(response.get());
           writer.AppendString(std::to_string(v1 + v2));
-          return response;
+          return base::ok(std::move(response));
         }
       } else if (method_call->GetMember() == kTestMethod2) {
         method_call->SetSerial(123);
-        dbus_set_error(dbus_error->get(), "org.MyError", "My error message");
-        return std::unique_ptr<dbus::Response>();
+        return base::unexpected(dbus::Error("org.MyError", "My error message"));
       } else if (method_call->GetMember() == kTestMethod3) {
         MessageReader reader(method_call);
         dbus_utils_test::TestMessage msg;
@@ -117,7 +119,7 @@ class DBusMethodInvokerTest : public testing::Test {
           auto response = Response::CreateEmpty();
           MessageWriter writer(response.get());
           AppendValueToWriter(&writer, msg);
-          return response;
+          return base::ok(std::move(response));
         }
       } else if (method_call->GetMember() == kTestMethod4) {
         method_call->SetSerial(123);
@@ -127,13 +129,13 @@ class DBusMethodInvokerTest : public testing::Test {
           auto response = Response::CreateEmpty();
           MessageWriter writer(response.get());
           writer.AppendFileDescriptor(fd.get());
-          return response;
+          return base::ok(std::move(response));
         }
       }
     }
 
     LOG(ERROR) << "Unexpected method call: " << method_call->ToString();
-    return std::unique_ptr<dbus::Response>();
+    return base::unexpected(dbus::Error());
   }
 
   std::string CallTestMethod(int v1, int v2) {
@@ -163,11 +165,11 @@ class DBusMethodInvokerTest : public testing::Test {
 
   // Sends a file descriptor received over D-Bus back to the caller using the
   // new types.
-  base::ScopedFD EchoFD(int fd_in) {
+  base::ScopedFD EchoFD(base::ScopedFD fd_in) {
     std::unique_ptr<dbus::Response> response =
-        brillo::dbus_utils::CallMethodAndBlock(
-            mock_object_proxy_.get(), kTestInterface, kTestMethod4, nullptr,
-            brillo::dbus_utils::FileDescriptor{fd_in});
+        brillo::dbus_utils::CallMethodAndBlock(mock_object_proxy_.get(),
+                                               kTestInterface, kTestMethod4,
+                                               nullptr, std::move(fd_in));
     EXPECT_NE(nullptr, response.get());
     base::ScopedFD fd_out;
     using brillo::dbus_utils::ExtractMethodCallResults;
@@ -192,7 +194,7 @@ TEST_F(DBusMethodInvokerTest, TestFailure) {
   EXPECT_EQ(nullptr, response.get());
   EXPECT_EQ(brillo::errors::dbus::kDomain, error->GetDomain());
   EXPECT_EQ("org.MyError", error->GetCode());
-  EXPECT_EQ("My error message", error->GetMessage());
+  EXPECT_NE(std::string::npos, error->GetMessage().find("My error message"));
 }
 
 TEST_F(DBusMethodInvokerTest, TestProtobuf) {
@@ -207,21 +209,14 @@ TEST_F(DBusMethodInvokerTest, TestProtobuf) {
 }
 
 TEST_F(DBusMethodInvokerTest, TestFileDescriptors) {
-  // Passing a file descriptor over D-Bus would effectively duplicate the fd.
-  // So the resulting file descriptor value would be different but it still
-  // should be valid.
-  int fd_stdin = 0;
-  base::ScopedFD out_fd = EchoFD(fd_stdin);
-  EXPECT_NE(fd_stdin, out_fd.get());
-  EXPECT_TRUE(out_fd.is_valid());
-  int fd_stdout = 1;
-  out_fd = EchoFD(fd_stdout);
-  EXPECT_NE(fd_stdout, out_fd.get());
-  EXPECT_TRUE(out_fd.is_valid());
-  int fd_stderr = 2;
-  out_fd = EchoFD(fd_stderr);
-  EXPECT_NE(fd_stderr, out_fd.get());
-  EXPECT_TRUE(out_fd.is_valid());
+  {
+    base::ScopedFD out_fd = EchoFD(base::ScopedFD(dup(STDIN_FILENO)));
+    ASSERT_TRUE(out_fd.is_valid());
+  }
+  {
+    base::ScopedFD out_fd = EchoFD(base::ScopedFD(dup(STDOUT_FILENO)));
+    ASSERT_TRUE(out_fd.is_valid());
+  }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -244,7 +239,10 @@ class AsyncDBusMethodInvokerTest : public testing::Test {
         .WillRepeatedly(Return(mock_object_proxy_.get()));
     int def_timeout_ms = dbus::ObjectProxy::TIMEOUT_USE_DEFAULT;
     EXPECT_CALL(*mock_object_proxy_,
-                DoCallMethodWithErrorCallback(_, def_timeout_ms, _, _))
+                DoCallMethodWithErrorCallback(
+                    An<dbus::MethodCall*>(), def_timeout_ms,
+                    An<dbus::ObjectProxy::ResponseCallback*>(),
+                    An<dbus::ObjectProxy::ErrorCallback*>()))
         .WillRepeatedly(Invoke(this, &AsyncDBusMethodInvokerTest::HandleCall));
   }
 

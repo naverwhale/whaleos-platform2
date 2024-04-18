@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -7,12 +7,18 @@
 #include "hal/usb/v4l2_camera_device.h"
 
 #include <fcntl.h>
+#include <linux/usb/video.h>
+#include <linux/uvcvideo.h>
 #include <linux/videodev2.h>
+
 #include <poll.h>
 #include <sys/ioctl.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <memory>
+#include <optional>
 
 #include <base/check.h>
 #include <base/containers/contains.h>
@@ -24,14 +30,18 @@
 #include <base/posix/safe_strerror.h>
 #include <base/strings/pattern.h>
 #include <base/strings/stringprintf.h>
+#include <base/time/time.h>
 #include <base/timer/elapsed_timer.h>
 #include <camera/camera_metadata.h>
 #include <re2/re2.h>
 
 #include "cros-camera/common.h"
+#include "cros-camera/jpeg_compressor.h"
 #include "cros-camera/utils/camera_config.h"
 #include "hal/usb/camera_characteristics.h"
 #include "hal/usb/quirks.h"
+#include "hal/usb/tracing.h"
+#include "hal/usb/v4l2_event_monitor.h"
 
 namespace cros {
 
@@ -77,8 +87,17 @@ const int ControlTypeToCid(ControlType type) {
     case kControlPan:
       return V4L2_CID_PAN_ABSOLUTE;
 
-    case kControlRegionOfInterestAuto:
+    case kControlRegionOfInterestAutoLegacy:
       return V4L2_CID_REGION_OF_INTEREST_AUTO;
+
+    case kControlRegionOfInterestAuto:
+      return V4L2_CID_UVC_REGION_OF_INTEREST_AUTO;
+
+    case kControlRegionOfInterestRect:
+      return V4L2_CID_UVC_REGION_OF_INTEREST_RECT;
+
+    case kControlRegionOfInterestRectRelative:
+      return V4L2_CID_UVC_REGION_OF_INTEREST_RECT_RELATIVE;
 
     case kControlSaturation:
       return V4L2_CID_SATURATION;
@@ -97,6 +116,9 @@ const int ControlTypeToCid(ControlType type) {
 
     case kControlPrivacy:
       return V4L2_CID_PRIVACY;
+
+    case kControlPowerLineFrequency:
+      return V4L2_CID_POWER_LINE_FREQUENCY;
 
     default:
       NOTREACHED() << "Unexpected control type " << type;
@@ -133,8 +155,17 @@ const std::string ControlTypeToString(ControlType type) {
     case kControlPan:
       return "pan";
 
+    case kControlRegionOfInterestAutoLegacy:
+      return "region of interest auto legacy";
+
     case kControlRegionOfInterestAuto:
       return "region of interest auto";
+
+    case kControlRegionOfInterestRect:
+      return "roi with a global coordinate";
+
+    case kControlRegionOfInterestRectRelative:
+      return "roi with a local coordinate";
 
     case kControlSaturation:
       return "saturation";
@@ -153,6 +184,9 @@ const std::string ControlTypeToString(ControlType type) {
 
     case kControlPrivacy:
       return "privacy";
+
+    case kControlPowerLineFrequency:
+      return "power line frequency";
 
     default:
       NOTREACHED() << "Unexpected control type " << type;
@@ -192,6 +226,15 @@ const std::string CidToString(int cid) {
     case V4L2_CID_REGION_OF_INTEREST_AUTO:
       return "V4L2_CID_REGION_OF_INTEREST_AUTO";
 
+    case V4L2_CID_UVC_REGION_OF_INTEREST_AUTO:
+      return "V4L2_CID_UVC_REGION_OF_INTEREST_AUTO";
+
+    case V4L2_CID_UVC_REGION_OF_INTEREST_RECT:
+      return "V4L2_CID_UVC_REGION_OF_INTEREST_RECT";
+
+    case V4L2_CID_UVC_REGION_OF_INTEREST_RECT_RELATIVE:
+      return "V4L2_CID_UVC_REGION_OF_INTEREST_RECT_RELATIVE";
+
     case V4L2_CID_SATURATION:
       return "V4L2_CID_SATURATION";
 
@@ -210,9 +253,23 @@ const std::string CidToString(int cid) {
     case V4L2_CID_PRIVACY:
       return "V4L2_CID_PRIVACY";
 
+    case V4L2_CID_POWER_LINE_FREQUENCY:
+      return "V4L2_CID_POWER_LINE_FREQUENCY";
+
     default:
       NOTREACHED() << "Unexpected cid " << cid;
       return "N/A";
+  }
+}
+
+const std::string RoiControlApiToString(RoiControlApi roi_control_api) {
+  switch (roi_control_api) {
+    case RoiControlApi::kSelection:
+      return "kSelection";
+    case RoiControlApi::kUvcRoiRect:
+      return "kUvcRoiRect";
+    case RoiControlApi::kUvcRoiRectRelative:
+      return "kUvcRoiRectRelative";
   }
 }
 
@@ -221,18 +278,19 @@ const std::string CidToString(int cid) {
 V4L2CameraDevice::V4L2CameraDevice()
     : stream_on_(false), device_info_(DeviceInfo()) {}
 
-V4L2CameraDevice::V4L2CameraDevice(
-    const DeviceInfo& device_info,
-    CameraPrivacySwitchMonitor* privacy_switch_monitor)
+V4L2CameraDevice::V4L2CameraDevice(const DeviceInfo& device_info,
+                                   V4L2EventMonitor* v4l2_event_monitor,
+                                   bool sw_privacy_switch_on)
     : stream_on_(false),
+      sw_privacy_switch_on_(sw_privacy_switch_on),
       device_info_(device_info),
-      privacy_switch_monitor_(privacy_switch_monitor) {}
+      v4l2_event_monitor_(v4l2_event_monitor) {}
 
 V4L2CameraDevice::~V4L2CameraDevice() {
   device_fd_.reset();
 }
 
-int V4L2CameraDevice::Connect(const std::string& device_path) {
+int V4L2CameraDevice::Connect(const base::FilePath& device_path) {
   VLOGF(1) << "Connecting device path: " << device_path;
   base::AutoLock l(lock_);
   if (device_fd_.is_valid()) {
@@ -245,8 +303,9 @@ int V4L2CameraDevice::Connect(const std::string& device_path) {
   // symbolic link to access device.
   device_fd_.reset(RetryDeviceOpen(device_path, O_RDWR));
   if (!device_fd_.is_valid()) {
+    const int ret = ERRNO_OR_RET(-EINVAL);
     PLOGF(ERROR) << "Failed to open " << device_path;
-    return -errno;
+    return ret;
   }
 
   if (!IsCameraDevice(device_path)) {
@@ -265,26 +324,21 @@ int V4L2CameraDevice::Connect(const std::string& device_path) {
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   ret = TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_G_FMT, &fmt));
   if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
     PLOGF(ERROR) << "Unable to G_FMT";
-    return -errno;
+    return ret;
   }
   ret = TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_S_FMT, &fmt));
   if (ret < 0) {
-    LOGF(WARNING) << "Unable to S_FMT: " << base::safe_strerror(errno)
-                  << ", maybe camera is being used by another app.";
-    return -errno;
+    ret = ERRNO_OR_RET(ret);
+    PLOGF(WARNING)
+        << "Unable to S_FMT: maybe camera is being used by another app.";
+    return ret;
   }
 
-  // Only set power line frequency when the value is correct.
-  if (device_info_.power_line_frequency != PowerLineFrequency::FREQ_ERROR) {
-    ret = SetPowerLineFrequency(device_info_.power_line_frequency);
-    if (ret < 0) {
-      if (IsExternalCamera()) {
-        VLOGF(2) << "Ignore SetPowerLineFrequency error for external camera";
-      } else {
-        return -EINVAL;
-      }
-    }
+  ret = SetPowerLineFrequency();
+  if (ret < 0 && !IsExternalCamera()) {
+    return -EINVAL;
   }
 
   // Initial autofocus state.
@@ -317,6 +371,19 @@ int V4L2CameraDevice::Connect(const std::string& device_path) {
         LOGF(INFO) << "Current white balance temperature is " << value;
       }
     }
+  }
+
+  // By default set V4L2_CID_EXPOSURE_AUTO_PRIORITY to 0 (constant frame rate),
+  // since changing it from 1 to 0 later in video mode can affect the frame
+  // rate.
+  if (IsControlSupported(kControlExposureAutoPriority) &&
+      GetControlValue(kControlExposureAutoPriority, &value) == 0 &&
+      value != 0) {
+    LOGF(WARNING)
+        << "Set V4L2_CID_EXPOSURE_AUTO_PRIORITY to 0 (constant frame rate), "
+        << "since changing it from 1 to 0 later in video mode can affect the "
+        << "frame rate.";
+    SetControlValue(kControlExposureAutoPriority, 0);
   }
 
   ControlInfo info;
@@ -393,8 +460,26 @@ int V4L2CameraDevice::Connect(const std::string& device_path) {
     }
   }
 
-  privacy_switch_monitor_->TrySubscribe(device_info_.camera_id,
-                                        device_info_.device_path);
+  LOGF(INFO) << "device_info_.enable_face_detection = "
+             << device_info_.enable_face_detection;
+  if (device_info_.enable_face_detection) {
+    IsRegionOfInterestSupported(device_fd_.get(),
+                                &control_region_of_interest_auto_,
+                                &roi_control_api_, &roi_flags_);
+    if (roi_flags_) {
+      GetRegionOfInterestInfo(device_fd_.get(), roi_control_api_,
+                              &roi_control_);
+      LOGF(INFO) << "ROI control flags:0x" << std::hex << roi_flags_ << std::dec
+                 << ", ROI auto control: "
+                 << CidToString(
+                        ControlTypeToCid(control_region_of_interest_auto_))
+                 << ", ROI api: " << RoiControlApiToString(roi_control_api_)
+                 << ", ROI bounds default:" << roi_control_.roi_bounds_default
+                 << ", ROI bounds:" << roi_control_.roi_bounds
+                 << ", ROI min:" << roi_control_.min_roi_size.ToString();
+      SetControlValue(control_region_of_interest_auto_, roi_flags_);
+    }
+  }
 
   // Initialize the capabilities.
   if (device_info_.quirks & kQuirkDisableFrameRateSetting) {
@@ -434,6 +519,7 @@ int V4L2CameraDevice::StreamOn(uint32_t width,
   }
 
   int ret;
+  LOGF(INFO) << "stream_size: " << width << " " << height;
 
   // Some drivers use rational time per frame instead of float frame rate, this
   // constant k is used to convert between both: A fps -> [k/k*A] seconds/frame.
@@ -444,8 +530,9 @@ int V4L2CameraDevice::StreamOn(uint32_t width,
   fmt.fmt.pix.pixelformat = pixel_format;
   ret = TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_S_FMT, &fmt));
   if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
     PLOGF(ERROR) << "Unable to S_FMT";
-    return -errno;
+    return ret;
   }
   VLOGF(1) << "Actual width: " << fmt.fmt.pix.width
            << ", height: " << fmt.fmt.pix.height
@@ -457,34 +544,6 @@ int V4L2CameraDevice::StreamOn(uint32_t width,
     LOGF(ERROR) << "Unsupported format: width " << width << ", height "
                 << height << ", pixelformat " << pixel_format;
     return -EINVAL;
-  }
-
-  if (device_info_.enable_face_detection) {
-    // The resolution may be changed after VIDIOC_S_FMT. We need to get correct
-    // ROI regions info after it.
-    IsRegionOfInterestSupported(device_fd_.get(), &roi_control_);
-    if (roi_control_.roi_flags) {
-      if (roi_control_.roi_bounds_max.width < width ||
-          roi_control_.roi_bounds_max.height < height) {
-        LOGF(WARNING) << "ROI bounds max is too small"
-                      << roi_control_.roi_bounds_max;
-      }
-      // Workaround some camera module didn't report correct min bounds.
-      if (roi_control_.roi_bounds_min.width >=
-              roi_control_.roi_bounds_max.width ||
-          roi_control_.roi_bounds_min.height >=
-              roi_control_.roi_bounds_max.height) {
-        LOGF(WARNING) << "ROI bounds min is too large"
-                      << roi_control_.roi_bounds_min
-                      << ", Set it to (0, 0, 0, 0)";
-        roi_control_.roi_bounds_min = Rect<int>();
-      }
-      VLOGF(1) << "ROI control flags:0x" << std::hex << roi_control_.roi_flags
-               << " " << std::dec << "ROI default:" << roi_control_.roi_default;
-      VLOGF(1) << "ROI bounds max:" << roi_control_.roi_bounds_max
-               << ", min:" << roi_control_.roi_bounds_min;
-      SetControlValue(kControlRegionOfInterestAuto, roi_control_.roi_flags);
-    }
   }
 
   if (CanUpdateFrameRate()) {
@@ -508,10 +567,12 @@ int V4L2CameraDevice::StreamOn(uint32_t width,
   req_buffers.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req_buffers.memory = V4L2_MEMORY_MMAP;
   req_buffers.count = kNumVideoBuffers;
-  if (TEMP_FAILURE_RETRY(
-          ioctl(device_fd_.get(), VIDIOC_REQBUFS, &req_buffers)) < 0) {
+  ret =
+      TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_REQBUFS, &req_buffers));
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
     PLOGF(ERROR) << "REQBUFS fails";
-    return -errno;
+    return ret;
   }
   VLOGF(1) << "Requested buffer number: " << req_buffers.count;
 
@@ -522,37 +583,44 @@ int V4L2CameraDevice::StreamOn(uint32_t width,
     memset(&expbuf, 0, sizeof(expbuf));
     expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     expbuf.index = i;
-    if (TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_EXPBUF, &expbuf)) <
-        0) {
+    ret = TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_EXPBUF, &expbuf));
+    if (ret < 0) {
+      ret = ERRNO_OR_RET(ret);
       PLOGF(ERROR) << "EXPBUF (" << i << ") fails";
-      return -errno;
+      return ret;
     }
     VLOGF(1) << "Exported frame buffer fd: " << expbuf.fd;
     temp_fds.push_back(base::ScopedFD(expbuf.fd));
-    buffers_at_client_[i] = false;
 
-    v4l2_buffer buffer = {};
-    buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buffer.index = i;
-    buffer.memory = V4L2_MEMORY_MMAP;
-
-    if (TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_QBUF, &buffer)) < 0) {
-      PLOGF(ERROR) << "QBUF (" << i << ") fails";
-      return -errno;
+    v4l2_buffer buffer = {.index = i,
+                          .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                          .memory = V4L2_MEMORY_MMAP};
+    ret = EnqueueBuffer(buffer);
+    if (ret < 0) {
+      return ret;
     }
 
     buffer_sizes->push_back(buffer.length);
   }
 
-  v4l2_buf_type capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (TEMP_FAILURE_RETRY(
-          ioctl(device_fd_.get(), VIDIOC_STREAMON, &capture_type)) < 0) {
-    PLOGF(ERROR) << "STREAMON fails";
-    return -errno;
+  if (!sw_privacy_switch_on_) {
+    ret = StartStreaming();
+    if (ret < 0) {
+      return ret;
+    }
   }
 
   for (size_t i = 0; i < temp_fds.size(); i++) {
     fds->push_back(std::move(temp_fds[i]));
+  }
+
+  v4l2_event_monitor_->TrySubscribe(device_info_.camera_id,
+                                    device_info_.device_path,
+                                    device_info_.has_privacy_switch);
+
+  if (device_info_.enable_face_detection && roi_flags_ &&
+      roi_control_api_ == RoiControlApi::kUvcRoiRectRelative) {
+    GetRegionOfInterestInfo(device_fd_.get(), roi_control_api_, &roi_control_);
   }
 
   stream_on_ = true;
@@ -571,21 +639,21 @@ int V4L2CameraDevice::StreamOff() {
     return 0;
   }
 
-  v4l2_buf_type capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (TEMP_FAILURE_RETRY(
-          ioctl(device_fd_.get(), VIDIOC_STREAMOFF, &capture_type)) < 0) {
-    PLOGF(ERROR) << "STREAMOFF fails";
-    return -errno;
+  int ret = StopStreaming();
+  if (ret < 0) {
+    return ret;
   }
   v4l2_requestbuffers req_buffers;
   memset(&req_buffers, 0, sizeof(req_buffers));
   req_buffers.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req_buffers.memory = V4L2_MEMORY_MMAP;
   req_buffers.count = 0;
-  if (TEMP_FAILURE_RETRY(
-          ioctl(device_fd_.get(), VIDIOC_REQBUFS, &req_buffers)) < 0) {
+  ret =
+      TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_REQBUFS, &req_buffers));
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
     PLOGF(ERROR) << "REQBUFS fails";
-    return -errno;
+    return ret;
   }
   buffers_at_client_.clear();
   stream_on_ = false;
@@ -595,7 +663,8 @@ int V4L2CameraDevice::StreamOff() {
 int V4L2CameraDevice::GetNextFrameBuffer(uint32_t* buffer_id,
                                          uint32_t* data_size,
                                          uint64_t* v4l2_ts,
-                                         uint64_t* user_ts) {
+                                         uint64_t* user_ts,
+                                         std::optional<int> frame_number) {
   base::AutoLock l(lock_);
   if (!device_fd_.is_valid()) {
     LOGF(ERROR) << "Device is not opened";
@@ -612,12 +681,12 @@ int V4L2CameraDevice::GetNextFrameBuffer(uint32_t* buffer_id,
     device_pfd.events = POLLIN;
 
     constexpr int kCaptureTimeoutMs = 1000;
-    const int result =
-        TEMP_FAILURE_RETRY(poll(&device_pfd, 1, kCaptureTimeoutMs));
+    int result = TEMP_FAILURE_RETRY(poll(&device_pfd, 1, kCaptureTimeoutMs));
 
     if (result < 0) {
+      result = ERRNO_OR_RET(result);
       PLOGF(ERROR) << "Polling fails";
-      return -errno;
+      return result;
     } else if (result == 0) {
       LOGF(ERROR) << "Timed out waiting for captured frame";
       return -ETIMEDOUT;
@@ -633,9 +702,16 @@ int V4L2CameraDevice::GetNextFrameBuffer(uint32_t* buffer_id,
   memset(&buffer, 0, sizeof(buffer));
   buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   buffer.memory = V4L2_MEMORY_MMAP;
-  if (TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_DQBUF, &buffer)) < 0) {
-    PLOGF(ERROR) << "DQBUF fails";
-    return -errno;
+  int ret = TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_DQBUF, &buffer));
+  if (frame_number.has_value()) {
+    TRACE_USB_HAL_EVENT("VIDOC_DQBUF", "frame_sequence", buffer.sequence,
+                        perfetto::Flow::ProcessScoped(buffer.sequence),
+                        "frame_number", *frame_number);
+  }
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
+    PLOGF_THROTTLED(ERROR, 60) << "DQBUF fails";
+    return ret;
   }
   VLOGF(1) << "DQBUF returns index " << buffer.index << " length "
            << buffer.length;
@@ -653,9 +729,9 @@ int V4L2CameraDevice::GetNextFrameBuffer(uint32_t* buffer_id,
   *v4l2_ts = tv.tv_sec * 1'000'000'000LL + tv.tv_usec * 1000;
 
   struct timespec ts;
-  if (clock_gettime(GetUvcClock(), &ts) < 0) {
-    LOGF(ERROR) << "Get clock time fails";
-    return -errno;
+  ret = GetUserSpaceTimestamp(ts);
+  if (ret < 0) {
+    return ret;
   }
 
   *user_ts = ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
@@ -682,17 +758,10 @@ int V4L2CameraDevice::ReuseFrameBuffer(uint32_t buffer_id) {
     LOGF(ERROR) << "Invalid buffer id: " << buffer_id;
     return -EINVAL;
   }
-  v4l2_buffer buffer;
-  memset(&buffer, 0, sizeof(buffer));
-  buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  buffer.memory = V4L2_MEMORY_MMAP;
-  buffer.index = buffer_id;
-  if (TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_QBUF, &buffer)) < 0) {
-    PLOGF(ERROR) << "QBUF fails";
-    return -errno;
-  }
-  buffers_at_client_[buffer.index] = false;
-  return 0;
+  v4l2_buffer buffer = {.index = buffer_id,
+                        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                        .memory = V4L2_MEMORY_MMAP};
+  return EnqueueBuffer(buffer);
 }
 
 bool V4L2CameraDevice::IsBufferFilled(uint32_t buffer_id) {
@@ -784,17 +853,19 @@ int V4L2CameraDevice::SetFrameRate(float frame_rate) {
     streamparm.parm.capture.timeperframe.denominator =
         (frame_rate * kFrameRatePrecision);
 
-    if (TEMP_FAILURE_RETRY(
-            ioctl(device_fd_.get(), VIDIOC_S_PARM, &streamparm)) < 0) {
+    int ret =
+        TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_S_PARM, &streamparm));
+    if (ret < 0) {
+      ret = ERRNO_OR_RET(ret);
       LOGF(ERROR) << "Failed to set camera framerate";
-      return -errno;
+      return ret;
     }
     VLOGF(1) << "Actual camera driver framerate: "
              << streamparm.parm.capture.timeperframe.denominator << "/"
              << streamparm.parm.capture.timeperframe.numerator;
     float fps =
         static_cast<float>(streamparm.parm.capture.timeperframe.denominator) /
-        streamparm.parm.capture.timeperframe.numerator;
+        static_cast<float>(streamparm.parm.capture.timeperframe.numerator);
     if (std::fabs(fps - frame_rate) > kFpsDifferenceThreshold) {
       LOGF(ERROR) << "Unsupported frame rate " << frame_rate;
       return -EINVAL;
@@ -885,42 +956,141 @@ int V4L2CameraDevice::QueryControl(ControlType type, ControlInfo* info) {
   return QueryControl(device_fd_.get(), type, info);
 }
 
-int V4L2CameraDevice::SetRegionOfInterest(const Rect<int>& rectangle) {
-  if (roi_control_.roi_flags == 0) {
+int V4L2CameraDevice::SetRegionOfInterest(const Rect<int>& roi,
+                                          const Rect<int>& active_array_rect) {
+  if (roi_flags_ == 0) {
     return -EINVAL;
   }
-  int width = rectangle.width;
-  int height = rectangle.height;
-  if (width < roi_control_.roi_bounds_min.width) {
-    width = roi_control_.roi_bounds_min.width;
-  }
-  if (height < roi_control_.roi_bounds_min.height) {
-    height = roi_control_.roi_bounds_min.height;
-  }
-  v4l2_selection current = {
-      .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-      .target = static_cast<__u32>(V4L2_SEL_TGT_ROI),
-      .r =
-          {
-              .left = static_cast<__s32>(rectangle.left),
-              .top = static_cast<__s32>(rectangle.top),
-              .width = static_cast<__u32>(width),
-              .height = static_cast<__u32>(height),
-          },
-  };
 
-  if (HANDLE_EINTR(ioctl(device_fd_.get(), VIDIOC_S_SELECTION, &current)) < 0) {
+  Rect<int> rectangle(roi.left, roi.top, roi.width, roi.height);
+  if (control_region_of_interest_auto_ == kControlRegionOfInterestAuto &&
+      roi_control_api_ == RoiControlApi::kUvcRoiRectRelative) {
+    // Transform from pixel array to active array
+    rectangle.left -= active_array_rect.left;
+    rectangle.top -= active_array_rect.top;
+
+    TransformFromActiveArrayToROICoordinate(
+        Size(active_array_rect.width, active_array_rect.height), rectangle);
+  }
+
+  int left = std::max(rectangle.left, roi_control_.roi_bounds.left);
+  int top = std::max(rectangle.top, roi_control_.roi_bounds.top);
+  int width = std::max(rectangle.width,
+                       static_cast<int>(roi_control_.min_roi_size.width));
+  int height = std::max(rectangle.height,
+                        static_cast<int>(roi_control_.min_roi_size.height));
+  // if the right and bottom size is excess the max range, we have 2
+  // adjustments, to shrink width/height and to adjust left/top.
+  int rightmost = roi_control_.roi_bounds.left + roi_control_.roi_bounds.width;
+  if (left + width > rightmost) {
+    int offset =
+        std::min(left + width - rightmost, left - roi_control_.roi_bounds.left);
+    left -= offset;
+    width = rightmost - left;
+  }
+  int bottommost = roi_control_.roi_bounds.top + roi_control_.roi_bounds.height;
+  if (top + height > bottommost) {
+    int offset =
+        std::min(top + height - bottommost, top - roi_control_.roi_bounds.top);
+    top -= offset;
+    height = bottommost - top;
+  }
+
+  VLOGF(2) << "ROI sent through V4L2 interface with max_width = "
+           << roi_control_.roi_bounds.width
+           << ", max_height = " << roi_control_.roi_bounds.height
+           << ", min_width = " << roi_control_.min_roi_size.width
+           << ", min_height = " << roi_control_.min_roi_size.height
+           << ", left = " << left << ", top = " << top << ". width = " << width
+           << ", height = " << height;
+
+  int ret;
+  if (control_region_of_interest_auto_ == kControlRegionOfInterestAutoLegacy) {
+    v4l2_selection current = {
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+        .target = static_cast<__u32>(V4L2_SEL_TGT_ROI),
+        .r =
+            {
+                .left = static_cast<__s32>(left),
+                .top = static_cast<__s32>(top),
+                .width = static_cast<__u32>(width),
+                .height = static_cast<__u32>(height),
+            },
+    };
+    ret = HANDLE_EINTR(ioctl(device_fd_.get(), VIDIOC_S_SELECTION, &current));
+  } else {
+    v4l2_rect rect = {
+        .left = static_cast<__s32>(left),
+        .top = static_cast<__s32>(top),
+        .width = static_cast<__u32>(width),
+        .height = static_cast<__u32>(height),
+    };
+    v4l2_ext_control control = {
+        .id = static_cast<__u32>(
+            (roi_control_api_ == RoiControlApi::kUvcRoiRect)
+                ? V4L2_CID_UVC_REGION_OF_INTEREST_RECT
+                : V4L2_CID_UVC_REGION_OF_INTEREST_RECT_RELATIVE),
+        .size = sizeof(rect),
+        .ptr = &rect,
+    };
+    v4l2_ext_controls controls = {
+        .which = V4L2_CTRL_WHICH_CUR_VAL,
+        .count = 1,
+        .controls = &control,
+    };
+    ret = HANDLE_EINTR(ioctl(device_fd_.get(), VIDIOC_S_EXT_CTRLS, &controls));
+  }
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
     PLOGF(WARNING) << "Failed to set selection(" << rectangle.left << ","
                    << rectangle.top << "," << width << "," << height << ")";
-    return -errno;
+    return ret;
+  }
+  return 0;
+}
+
+int V4L2CameraDevice::SetPrivacySwitchState(bool on) {
+  base::AutoLock l(lock_);
+  if (sw_privacy_switch_on_ == on) {
+    return 0;
   }
 
-  return 0;
+  sw_privacy_switch_on_ = on;
+
+  // If this method is called while not streaming, just update
+  // |sw_privacy_switch_on_|.
+  if (!stream_on_) {
+    return 0;
+  }
+
+  int ret = 0;
+  if (on) {
+    ret = StopStreaming();
+    if (ret < 0) {
+      return ret;
+    }
+    std::fill(buffers_at_client_.begin(), buffers_at_client_.end(), true);
+  } else {
+    for (uint32_t i = 0; i < buffers_at_client_.size(); ++i) {
+      if (!buffers_at_client_[i]) {
+        continue;
+      }
+      v4l2_buffer buffer = {.index = i,
+                            .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                            .memory = V4L2_MEMORY_MMAP};
+      ret = EnqueueBuffer(buffer);
+      if (ret < 0) {
+        return ret;
+      }
+    }
+    ret = StartStreaming();
+  }
+  return ret;
 }
 
 // static
 const SupportedFormats V4L2CameraDevice::GetDeviceSupportedFormats(
-    const std::string& device_path) {
+    const base::FilePath& device_path) {
   VLOGF(1) << "Query supported formats for " << device_path;
 
   base::ScopedFD fd(RetryDeviceOpen(device_path, O_RDONLY));
@@ -929,18 +1099,21 @@ const SupportedFormats V4L2CameraDevice::GetDeviceSupportedFormats(
     return {};
   }
 
-  std::vector<std::string> filter_out_resolution_strings =
-      CameraConfig::Create(constants::kCrosCameraConfigPathString)
-          ->GetStrings(constants::kCrosUsbFilteredOutResolutions,
-                       std::vector<std::string>());
+  std::unique_ptr<CameraConfig> camera_config =
+      CameraConfig::Create(constants::kCrosCameraConfigPathString);
 
   std::vector<Size> filter_out_resolutions;
-  for (const auto& filter_out_resolution_string :
-       filter_out_resolution_strings) {
-    int width, height;
-    CHECK(RE2::FullMatch(filter_out_resolution_string, R"((\d+)x(\d+))", &width,
-                         &height));
-    filter_out_resolutions.emplace_back(width, height);
+  if (camera_config != nullptr) {
+    std::vector<std::string> filter_out_resolution_strings =
+        camera_config->GetStrings(constants::kCrosUsbFilteredOutResolutions,
+                                  std::vector<std::string>());
+    for (const auto& filter_out_resolution_string :
+         filter_out_resolution_strings) {
+      int width, height;
+      CHECK(RE2::FullMatch(filter_out_resolution_string, R"((\d+)x(\d+))",
+                           &width, &height));
+      filter_out_resolutions.emplace_back(width, height);
+    }
   }
 
   SupportedFormats formats;
@@ -976,7 +1149,14 @@ const SupportedFormats V4L2CameraDevice::GetDeviceSupportedFormats(
 
     for (const Size& size : supported_frame_sizes) {
       if (base::Contains(filter_out_resolutions, size)) {
-        LOGF(INFO) << "Filter out " << size.ToString();
+        LOGF(INFO) << "Filter out " << size.ToString() << " by config";
+        continue;
+      }
+      if (!JpegCompressor::IsSizeSupported(
+              base::checked_cast<int>(size.width),
+              base::checked_cast<int>(size.height))) {
+        LOGF(INFO) << "Filter out " << size.ToString()
+                   << " by JPEG compression capability";
         continue;
       }
       formats.push_back(SupportedFormat{
@@ -1002,9 +1182,11 @@ int V4L2CameraDevice::QueryControl(int fd,
   int control_id = ControlTypeToCid(type);
   v4l2_queryctrl query_ctrl = {.id = static_cast<__u32>(control_id)};
 
-  if (HANDLE_EINTR(ioctl(fd, VIDIOC_QUERYCTRL, &query_ctrl)) < 0) {
+  int ret = HANDLE_EINTR(ioctl(fd, VIDIOC_QUERYCTRL, &query_ctrl));
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
     VLOGF(1) << "Unsupported control:" << CidToString(control_id);
-    return -errno;
+    return ret;
   }
 
   if (query_ctrl.flags & V4L2_CTRL_FLAG_DISABLED) {
@@ -1100,10 +1282,12 @@ int V4L2CameraDevice::SetControlValue(int fd, ControlType type, int32_t value) {
   VLOGF(1) << "Set " << CidToString(control_id) << ", value:" << value;
 
   v4l2_control current = {.id = static_cast<__u32>(control_id), .value = value};
-  if (HANDLE_EINTR(ioctl(fd, VIDIOC_S_CTRL, &current)) < 0) {
+  int ret = HANDLE_EINTR(ioctl(fd, VIDIOC_S_CTRL, &current));
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
     PLOGF(WARNING) << "Failed to set " << CidToString(control_id) << " to "
                    << value;
-    return -errno;
+    return ret;
   }
 
   return 0;
@@ -1118,9 +1302,11 @@ int V4L2CameraDevice::GetControlValue(int fd,
   int control_id = ControlTypeToCid(type);
   v4l2_control current = {.id = static_cast<__u32>(control_id)};
 
-  if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_CTRL, &current)) < 0) {
+  int ret = HANDLE_EINTR(ioctl(fd, VIDIOC_G_CTRL, &current));
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
     PLOGF(WARNING) << "Failed to get " << CidToString(control_id);
-    return -errno;
+    return ret;
   }
   *value = current.value;
 
@@ -1186,54 +1372,54 @@ std::vector<float> V4L2CameraDevice::GetFrameRateList(int fd,
 }
 
 // static
-bool V4L2CameraDevice::IsRegionOfInterestSupported(int fd,
-                                                   RoiControl* roi_control) {
-  DCHECK(roi_control);
+bool V4L2CameraDevice::IsRegionOfInterestSupported(
+    int fd,
+    ControlType* control_roi_auto,
+    RoiControlApi* api,
+    uint32_t* roi_flags) {
   ControlInfo info;
+  RoiControl roi_control;
+  *roi_flags = 0;
+  uint32_t max_roi_auto = 0;
 
-  roi_control->roi_flags = 0;
-
-  v4l2_selection current = {
-      .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-      .target = static_cast<__u32>(V4L2_SEL_TGT_ROI_DEFAULT),
-  };
-  if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_SELECTION, &current)) < 0) {
-    PLOGF(WARNING) << "Failed to get selection: " << base::safe_strerror(errno);
+  if (QueryControl(fd, kControlRegionOfInterestAutoLegacy, &info) == 0) {
+    *control_roi_auto = kControlRegionOfInterestAutoLegacy;
+    *api = RoiControlApi::kSelection;
+    max_roi_auto = info.range.maximum;
+  } else if (QueryControl(fd, kControlRegionOfInterestAuto, &info) == 0) {
+    *control_roi_auto = kControlRegionOfInterestAuto;
+    max_roi_auto = info.range.maximum;
+    if (QueryControl(fd, kControlRegionOfInterestRect, &info) == 0) {
+      *api = RoiControlApi::kUvcRoiRect;
+    } else if (QueryControl(fd, kControlRegionOfInterestRectRelative, &info) ==
+               0) {
+      *api = RoiControlApi::kUvcRoiRectRelative;
+    } else {
+      LOGF(WARNING) << "At least one of "
+                       "V4L2_CID_UVC_REGION_OF_INTEREST_RECT or "
+                       "V4L2_CID_UVC_REGION_OF_INTEREST_RECT_RELATIVE "
+                       "shoud be available";
+      return false;
+    }
+  } else {
     return false;
   }
-  roi_control->roi_default = Rect<int>(current.r.left, current.r.top,
-                                       current.r.width, current.r.height);
 
-  current.target = V4L2_SEL_TGT_ROI_BOUNDS_MIN;
-  if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_SELECTION, &current)) < 0) {
-    PLOGF(WARNING) << "Failed to get selection: " << base::safe_strerror(errno);
+  if (!GetRegionOfInterestInfo(fd, *api, &roi_control))
     return false;
-  }
-  roi_control->roi_bounds_min = Rect<int>(current.r.left, current.r.top,
-                                          current.r.width, current.r.height);
 
-  current.target = V4L2_SEL_TGT_ROI_BOUNDS_MAX;
-  if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_SELECTION, &current)) < 0) {
-    PLOGF(WARNING) << "Failed to get selection: " << base::safe_strerror(errno);
-    return false;
-  }
-  roi_control->roi_bounds_max = Rect<int>(current.r.left, current.r.top,
-                                          current.r.width, current.r.height);
-
-  if (QueryControl(fd, kControlRegionOfInterestAuto, &info) != 0) {
-    return false;
-  }
   // enable max auto controls.
-  roi_control->roi_flags = info.range.maximum;
+  *roi_flags = max_roi_auto;
 
   return true;
 }
 
 // static
-bool V4L2CameraDevice::IsCameraDevice(const std::string& device_path) {
+bool V4L2CameraDevice::IsCameraDevice(const base::FilePath& device_path) {
   // RetryDeviceOpen() assumes the device is a camera and waits until the camera
   // is ready, so we use open() instead of RetryDeviceOpen() here.
-  base::ScopedFD fd(TEMP_FAILURE_RETRY(open(device_path.c_str(), O_RDONLY)));
+  base::ScopedFD fd(
+      TEMP_FAILURE_RETRY(open(device_path.value().c_str(), O_RDONLY)));
   if (!fd.is_valid()) {
     PLOGF(ERROR) << "Failed to open " << device_path;
     return false;
@@ -1265,10 +1451,10 @@ bool V4L2CameraDevice::IsCameraDevice(const std::string& device_path) {
 }
 
 // static
-std::string V4L2CameraDevice::GetModelName(const std::string& device_path) {
+std::string V4L2CameraDevice::GetModelName(const base::FilePath& device_path) {
   auto get_by_interface = [&](std::string* name) {
     base::FilePath real_path;
-    if (!base::NormalizeFilePath(base::FilePath(device_path), &real_path)) {
+    if (!base::NormalizeFilePath(device_path, &real_path)) {
       return false;
     }
     if (!base::MatchPattern(real_path.value(), "/dev/video*")) {
@@ -1309,20 +1495,21 @@ std::string V4L2CameraDevice::GetModelName(const std::string& device_path) {
 }
 
 // static
-bool V4L2CameraDevice::IsControlSupported(const std::string& device_path,
+bool V4L2CameraDevice::IsControlSupported(const base::FilePath& device_path,
                                           ControlType type) {
   ControlInfo info;
   return QueryControl(device_path, type, &info) == 0;
 }
 
 // static
-int V4L2CameraDevice::QueryControl(const std::string& device_path,
+int V4L2CameraDevice::QueryControl(const base::FilePath& device_path,
                                    ControlType type,
                                    ControlInfo* info) {
   base::ScopedFD fd(RetryDeviceOpen(device_path, O_RDONLY));
   if (!fd.is_valid()) {
+    const int ret = ERRNO_OR_RET(-EINVAL);
     PLOGF(ERROR) << "Failed to open " << device_path;
-    return -errno;
+    return ret;
   }
 
   int ret = QueryControl(fd.get(), type, info);
@@ -1345,53 +1532,59 @@ int V4L2CameraDevice::QueryControl(const std::string& device_path,
 }
 
 // static
-int V4L2CameraDevice::GetControlValue(const std::string& device_path,
+int V4L2CameraDevice::GetControlValue(const base::FilePath& device_path,
                                       ControlType type,
                                       int32_t* value) {
   base::ScopedFD fd(RetryDeviceOpen(device_path, O_RDONLY));
   if (!fd.is_valid()) {
+    const int ret = ERRNO_OR_RET(-EINVAL);
     PLOGF(ERROR) << "Failed to open " << device_path;
-    return -errno;
+    return ret;
   }
 
   return GetControlValue(fd.get(), type, value);
 }
 
 // static
-int V4L2CameraDevice::SetControlValue(const std::string& device_path,
+int V4L2CameraDevice::SetControlValue(const base::FilePath& device_path,
                                       ControlType type,
                                       int32_t value) {
   base::ScopedFD fd(RetryDeviceOpen(device_path, O_RDONLY));
   if (!fd.is_valid()) {
+    const int ret = ERRNO_OR_RET(-EINVAL);
     PLOGF(ERROR) << "Failed to open " << device_path;
-    return -errno;
+    return ret;
   }
 
   return SetControlValue(fd.get(), type, value);
 }
 
 // static
-bool V4L2CameraDevice::IsRegionOfInterestSupported(std::string device_path,
-                                                   RoiControl* roi_control) {
+bool V4L2CameraDevice::IsRegionOfInterestSupported(
+    base::FilePath device_path,
+    ControlType* control_roi_auto,
+    RoiControlApi* api,
+    uint32_t* max_roi_auto) {
   base::ScopedFD fd(RetryDeviceOpen(device_path, O_RDONLY));
   if (!fd.is_valid()) {
     PLOGF(ERROR) << "Failed to open " << device_path;
     return false;
   }
 
-  return IsRegionOfInterestSupported(fd.get(), roi_control);
+  return IsRegionOfInterestSupported(fd.get(), control_roi_auto, api,
+                                     max_roi_auto);
 }
 
 // static
-int V4L2CameraDevice::RetryDeviceOpen(const std::string& device_path,
+int V4L2CameraDevice::RetryDeviceOpen(const base::FilePath& device_path,
                                       int flags) {
-  const int64_t kDeviceOpenTimeOutInMilliseconds = 2000;
-  const int64_t kSleepTimeInMilliseconds = 100;
+  constexpr base::TimeDelta kDeviceOpenTimeOut = base::Milliseconds(2000);
+  constexpr base::TimeDelta kSleepTime = base::Milliseconds(100);
   int fd;
   base::ElapsedTimer timer;
-  int64_t elapsed_time = timer.Elapsed().InMillisecondsRoundedUp();
-  while (elapsed_time < kDeviceOpenTimeOutInMilliseconds) {
-    fd = TEMP_FAILURE_RETRY(open(device_path.c_str(), flags));
+  base::TimeDelta elapsed_time = timer.Elapsed();
+  while (elapsed_time < kDeviceOpenTimeOut) {
+    fd = TEMP_FAILURE_RETRY(open(device_path.value().c_str(), flags));
     if (fd != -1) {
       // Make sure ioctl is ok. Once ioctl failed, we have to re-open the
       // device.
@@ -1407,7 +1600,7 @@ int V4L2CameraDevice::RetryDeviceOpen(const std::string& device_path,
         }
       } else {
         // Only return fd when ioctl is ready.
-        if (elapsed_time >= kSleepTimeInMilliseconds) {
+        if (elapsed_time >= kSleepTime) {
           LOGF(INFO) << "Opened the camera device after waiting for "
                      << elapsed_time << " ms";
         }
@@ -1416,9 +1609,8 @@ int V4L2CameraDevice::RetryDeviceOpen(const std::string& device_path,
     } else if (errno != EACCES && errno != EBUSY && errno != ENOENT) {
       break;
     }
-    base::PlatformThread::Sleep(
-        base::TimeDelta::FromMilliseconds(kSleepTimeInMilliseconds));
-    elapsed_time = timer.Elapsed().InMillisecondsRoundedUp();
+    base::PlatformThread::Sleep(kSleepTime);
+    elapsed_time = timer.Elapsed();
   }
   PLOGF(ERROR) << "Failed to open " << device_path;
   return -1;
@@ -1445,52 +1637,18 @@ clockid_t V4L2CameraDevice::GetUvcClock() {
 }
 
 // static
-PowerLineFrequency V4L2CameraDevice::GetPowerLineFrequency(
-    const std::string& device_path) {
-  base::ScopedFD fd(RetryDeviceOpen(device_path, O_RDONLY));
-  if (!fd.is_valid()) {
-    PLOGF(ERROR) << "Failed to open " << device_path;
-    return PowerLineFrequency::FREQ_ERROR;
+int V4L2CameraDevice::GetUserSpaceTimestamp(timespec& ts) {
+  int ret = clock_gettime(V4L2CameraDevice::GetUvcClock(), &ts);
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
+    LOGF(ERROR) << "Get clock time fails";
   }
-
-  struct v4l2_queryctrl query = {};
-  query.id = V4L2_CID_POWER_LINE_FREQUENCY;
-  if (TEMP_FAILURE_RETRY(ioctl(fd.get(), VIDIOC_QUERYCTRL, &query)) < 0) {
-    LOGF(ERROR) << "Power line frequency should support auto or 50/60Hz";
-    return PowerLineFrequency::FREQ_ERROR;
-  }
-
-  PowerLineFrequency frequency = GetPowerLineFrequencyForLocation();
-  if (frequency == PowerLineFrequency::FREQ_DEFAULT) {
-    switch (query.default_value) {
-      case V4L2_CID_POWER_LINE_FREQUENCY_50HZ:
-        frequency = PowerLineFrequency::FREQ_50HZ;
-        break;
-      case V4L2_CID_POWER_LINE_FREQUENCY_60HZ:
-        frequency = PowerLineFrequency::FREQ_60HZ;
-        break;
-      case V4L2_CID_POWER_LINE_FREQUENCY_AUTO:
-        frequency = PowerLineFrequency::FREQ_AUTO;
-        break;
-      default:
-        break;
-    }
-  }
-
-  // Prefer auto setting if camera module supports auto mode.
-  if (query.maximum == V4L2_CID_POWER_LINE_FREQUENCY_AUTO) {
-    frequency = PowerLineFrequency::FREQ_AUTO;
-  } else if (query.minimum >= V4L2_CID_POWER_LINE_FREQUENCY_60HZ) {
-    // TODO(shik): Handle this more gracefully for external camera
-    LOGF(ERROR) << "Camera module should at least support 50/60Hz";
-    return PowerLineFrequency::FREQ_ERROR;
-  }
-  return frequency;
+  return ret;
 }
 
 // static
 bool V4L2CameraDevice::IsFocusDistanceSupported(
-    const std::string& device_path, ControlRange* focus_distance_range) {
+    const base::FilePath& device_path, ControlRange* focus_distance_range) {
   DCHECK(focus_distance_range != nullptr);
 
   if (!IsControlSupported(device_path, kControlFocusAuto))
@@ -1508,7 +1666,7 @@ bool V4L2CameraDevice::IsFocusDistanceSupported(
 
 // static
 bool V4L2CameraDevice::IsManualExposureTimeSupported(
-    const std::string& device_path, ControlRange* exposure_time_range) {
+    const base::FilePath& device_path, ControlRange* exposure_time_range) {
   ControlInfo info;
 
   DCHECK(exposure_time_range);
@@ -1542,40 +1700,190 @@ bool V4L2CameraDevice::IsManualExposureTimeSupported(
   return true;
 }
 
-int V4L2CameraDevice::SetPowerLineFrequency(PowerLineFrequency setting) {
-  int v4l2_freq_setting = V4L2_CID_POWER_LINE_FREQUENCY_DISABLED;
-  switch (setting) {
-    case PowerLineFrequency::FREQ_50HZ:
-      v4l2_freq_setting = V4L2_CID_POWER_LINE_FREQUENCY_50HZ;
-      break;
-    case PowerLineFrequency::FREQ_60HZ:
-      v4l2_freq_setting = V4L2_CID_POWER_LINE_FREQUENCY_60HZ;
-      break;
-    case PowerLineFrequency::FREQ_AUTO:
-      v4l2_freq_setting = V4L2_CID_POWER_LINE_FREQUENCY_AUTO;
-      break;
-    default:
-      LOGF(ERROR) << "Invalid setting for power line frequency: "
-                  << static_cast<int>(setting);
-      return -EINVAL;
-  }
+// static
+bool V4L2CameraDevice::GetRegionOfInterestInfo(int fd,
+                                               RoiControlApi api,
+                                               RoiControl* roi_control) {
+  if (api == RoiControlApi::kSelection) {
+    v4l2_selection current = {
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+        .target = static_cast<__u32>(V4L2_SEL_TGT_ROI_DEFAULT),
+    };
+    if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_SELECTION, &current)) < 0) {
+      PLOGF(WARNING) << "Failed to get selection";
+      return false;
+    }
+    roi_control->roi_bounds_default = Rect<int>(
+        current.r.left, current.r.top, current.r.width, current.r.height);
 
-  struct v4l2_control control = {};
-  control.id = V4L2_CID_POWER_LINE_FREQUENCY;
-  control.value = v4l2_freq_setting;
-  if (TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_S_CTRL, &control)) <
-      0) {
-    LOGF(ERROR) << "Error setting power line frequency to "
-                << v4l2_freq_setting;
+    current.target = V4L2_SEL_TGT_ROI_BOUNDS_MIN;
+    if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_SELECTION, &current)) < 0) {
+      PLOGF(WARNING) << "Failed to get selection: ";
+      return false;
+    }
+    roi_control->min_roi_size = Size(current.r.width, current.r.height);
+
+    current.target = V4L2_SEL_TGT_ROI_BOUNDS_MAX;
+    if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_SELECTION, &current)) < 0) {
+      PLOGF(WARNING) << "Failed to get selection: ";
+      return false;
+    }
+    roi_control->roi_bounds = Rect<int>(current.r.left, current.r.top,
+                                        current.r.width, current.r.height);
+
+  } else {
+    v4l2_rect rect;
+    v4l2_ext_control control = {
+        .id = static_cast<uint32_t>(
+            (api == RoiControlApi::kUvcRoiRect)
+                ? V4L2_CID_UVC_REGION_OF_INTEREST_RECT
+                : V4L2_CID_UVC_REGION_OF_INTEREST_RECT_RELATIVE),
+        .size = sizeof(rect),
+        .ptr = &rect,
+    };
+    v4l2_ext_controls controls = {
+        .which = V4L2_CTRL_WHICH_DEF_VAL,
+        .count = 1,
+        .controls = &control,
+    };
+
+    if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_EXT_CTRLS, &controls)) < 0) {
+      PLOGF(WARNING) << "V4L2_CTRL_WHICH_DEF_VAL failed: ";
+      return false;
+    }
+    roi_control->roi_bounds_default =
+        Rect<int>(rect.left, rect.top, rect.width, rect.height);
+
+    // The GET_MIN of V4L2_CID_UVC_REGION_OF_INTREST_RECT or
+    // V4L2_CID_UVC_REGION_OF_INTEREST_RECT_RELATIVE in
+    // go/cros-uvc-xu-spec is undefined.
+    roi_control->min_roi_size = Size(1, 1);
+
+    controls.which = V4L2_CTRL_WHICH_MAX_VAL;
+    if (HANDLE_EINTR(ioctl(fd, VIDIOC_G_EXT_CTRLS, &controls)) < 0) {
+      PLOGF(WARNING) << "V4L2_CTRL_WHICH_MAX_VAL failed: ";
+      return false;
+    }
+    roi_control->roi_bounds =
+        Rect<int>(rect.left, rect.top, rect.width, rect.height);
+  }
+  return true;
+}
+
+int V4L2CameraDevice::SetPowerLineFrequency() {
+  ControlInfo info;
+  if (QueryControl(device_fd_.get(), kControlPowerLineFrequency, &info) < 0) {
+    LOGF(ERROR) << "Failed to query power line frequency";
     return -EINVAL;
   }
-  VLOGF(1) << "Set power line frequency(" << static_cast<int>(setting)
-           << ") successfully";
-  return 0;
+
+  // Prefer auto setting if camera module supports auto mode.
+  if (info.range.maximum == V4L2_CID_POWER_LINE_FREQUENCY_AUTO &&
+      SetControlValue(device_fd_.get(), kControlPowerLineFrequency,
+                      V4L2_CID_POWER_LINE_FREQUENCY_AUTO) == 0) {
+    LOGF(INFO) << "Set power line frequency("
+               << static_cast<int>(V4L2_CID_POWER_LINE_FREQUENCY_AUTO)
+               << ") successfully";
+    return 0;
+  }
+  if (info.range.minimum >= V4L2_CID_POWER_LINE_FREQUENCY_60HZ) {
+    // TODO(shik): Handle this more gracefully for external camera
+    LOGF(ERROR) << "Camera module should at least support 50/60Hz";
+    return -EINVAL;
+  }
+
+  // Set power line frequency for location.
+  std::optional<v4l2_power_line_frequency> location_frequency =
+      GetPowerLineFrequencyForLocation();
+  if (location_frequency.has_value() &&
+      SetControlValue(device_fd_.get(), kControlPowerLineFrequency,
+                      location_frequency.value()) == 0) {
+    LOGF(INFO) << "Set power line frequency(" << location_frequency.value()
+               << ") successfully";
+    return 0;
+  }
+
+  // Set device default power line frequency.
+  if ((!location_frequency.has_value() ||
+       info.range.default_value != location_frequency.value()) &&
+      SetControlValue(device_fd_.get(), kControlPowerLineFrequency,
+                      info.range.default_value) == 0) {
+    LOGF(INFO) << "Set power line frequency("
+               << static_cast<int>(info.range.default_value)
+               << ") successfully";
+    return 0;
+  }
+
+  LOGF(ERROR) << "Error setting power line frequency";
+  return -EINVAL;
 }
 
 bool V4L2CameraDevice::IsExternalCamera() {
   return device_info_.lens_facing == LensFacing::kExternal;
+}
+
+int V4L2CameraDevice::EnqueueBuffer(v4l2_buffer& buffer) {
+  int ret = TEMP_FAILURE_RETRY(ioctl(device_fd_.get(), VIDIOC_QBUF, &buffer));
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
+    PLOGF(ERROR) << "QBUF (" << buffer.index << ") fails";
+    return ret;
+  }
+  buffers_at_client_[buffer.index] = false;
+  return 0;
+}
+
+int V4L2CameraDevice::StartStreaming() {
+  v4l2_buf_type capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  int ret = ioctl(device_fd_.get(), VIDIOC_STREAMON, &capture_type);
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
+    PLOGF(ERROR) << "STREAMON fails";
+  }
+  return ret;
+}
+
+int V4L2CameraDevice::StopStreaming() {
+  v4l2_buf_type capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  int ret = TEMP_FAILURE_RETRY(
+      ioctl(device_fd_.get(), VIDIOC_STREAMOFF, &capture_type));
+  if (ret < 0) {
+    ret = ERRNO_OR_RET(ret);
+    PLOGF(ERROR) << "STREAMOFF fails";
+  }
+  return ret;
+}
+
+// Get coordination transform from active array coordinate to stream
+// coordinate
+void V4L2CameraDevice::TransformFromActiveArrayToROICoordinate(
+    const Size& active_array_size, Rect<int>& roi) {
+  float scale_x = static_cast<float>(roi_control_.roi_bounds.width) /
+                  static_cast<float>(active_array_size.width);
+  float scale_y = static_cast<float>(roi_control_.roi_bounds.height) /
+                  static_cast<float>(active_array_size.height);
+  float scale_ratio = std::max(scale_x, scale_y);
+
+  float offset_x = 0.0f, offset_y = 0.0f;
+  if (scale_x < scale_y) {
+    offset_x =
+        (static_cast<float>(active_array_size.width) -
+         static_cast<float>(roi_control_.roi_bounds.width) / scale_ratio) /
+        2.0f;
+  } else {
+    offset_y =
+        (static_cast<float>(active_array_size.height) -
+         static_cast<float>(roi_control_.roi_bounds.height) / scale_ratio) /
+        2.0f;
+  }
+
+  roi.left =
+      static_cast<int>((static_cast<float>(roi.left) - offset_x) * scale_ratio);
+  roi.top =
+      static_cast<int>((static_cast<float>(roi.top) - offset_y) * scale_ratio);
+  roi.width = static_cast<int>((static_cast<float>(roi.width) * scale_ratio));
+  roi.height = static_cast<int>((static_cast<float>(roi.height) * scale_ratio));
+  return;
 }
 
 }  // namespace cros

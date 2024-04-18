@@ -1,9 +1,11 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "biod/updater/cros_fp_updater.h"
 
+#include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -12,13 +14,18 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/stl_util.h>
+#include <base/types/cxx23_to_underlying.h>
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include <chromeos/ec/ec_commands.h>
 #include <cros_config/fake_cros_config.h>
 
+#include "base/command_line.h"
+#include "base/process/launch.h"
+#include "base/time/time.h"
+#include "biod/biod_config.h"
 #include "biod/cros_fp_firmware.h"
+#include "biod/mock_biod_system.h"
 #include "biod/updater/update_reason.h"
 #include "biod/updater/update_status.h"
 #include "biod/utils.h"
@@ -38,7 +45,7 @@ namespace {
 constexpr char kTestImageROVersion[] = "nocturne_fp_v2.2.64-58cf5974e";
 constexpr char kTestImageRWVersion[] = "nocturne_fp_v2.2.110-b936c0a3c";
 
-const std::vector<enum ec_current_image> kEcCurrentImageEnums = {
+const std::vector<enum ec_image> kEcCurrentImageEnums = {
     EC_IMAGE_UNKNOWN,
     EC_IMAGE_RO,
     EC_IMAGE_RW,
@@ -46,14 +53,14 @@ const std::vector<enum ec_current_image> kEcCurrentImageEnums = {
 
 class MockCrosFpDeviceUpdate : public biod::CrosFpDeviceUpdate {
  public:
-  MOCK_METHOD(base::Optional<biod::CrosFpDeviceInterface::EcVersion>,
+  MOCK_METHOD(std::optional<ec::CrosFpDeviceInterface::EcVersion>,
               GetVersion,
               (),
               (const, override));
   MOCK_METHOD(bool, IsFlashProtectEnabled, (bool*), (const, override));
   MOCK_METHOD(bool,
               Flash,
-              (const biod::CrosFpFirmware&, enum ec_current_image),
+              (const biod::CrosFpFirmware&, enum ec_image),
               (const, override));
 };
 
@@ -96,7 +103,7 @@ class CrosFpUpdaterTest : public ::testing::Test {
   void SetupEnvironment(bool flash_protect,
                         bool ro_mismatch,
                         bool rw_mismatch,
-                        enum ec_current_image ec_image = EC_IMAGE_RW) {
+                        enum ec_image ec_image = EC_IMAGE_RW) {
     CrosFpFirmware::ImageVersion img_ver = {kTestImageROVersion,
                                             kTestImageRWVersion};
 
@@ -109,16 +116,20 @@ class CrosFpUpdaterTest : public ::testing::Test {
     fw_.SetMockFwVersion(img_ver);
 
     EXPECT_CALL(dev_update_, GetVersion())
-        .WillOnce(Return(biod::CrosFpDeviceInterface::EcVersion{
+        .WillOnce(Return(ec::CrosFpDeviceInterface::EcVersion{
             .ro_version = kTestImageROVersion,
             .rw_version = kTestImageRWVersion,
             .current_image = ec_image,
         }));
     EXPECT_CALL(dev_update_, IsFlashProtectEnabled(NotNull()))
         .WillOnce(DoAll(SetArgPointee<0>(flash_protect), Return(true)));
+    EXPECT_CALL(system_, HardwareWriteProtectIsEnabled())
+        .WillRepeatedly(Return(flash_protect));
   }
 
-  UpdateResult RunUpdater() { return DoUpdate(dev_update_, boot_ctrl_, fw_); }
+  UpdateResult RunUpdater() {
+    return DoUpdate(dev_update_, boot_ctrl_, fw_, system_, &cros_config_);
+  }
 
   CrosFpUpdaterTest() = default;
   CrosFpUpdaterTest(const CrosFpUpdaterTest&) = delete;
@@ -129,6 +140,8 @@ class CrosFpUpdaterTest : public ::testing::Test {
   MockCrosFpDeviceUpdate dev_update_;
   MockCrosFpBootUpdateCtrl boot_ctrl_;
   MockCrosFpFirmware fw_;
+  MockBiodSystem system_;
+  brillo::FakeCrosConfig cros_config_;
 };
 
 // EcCurrentImageToString Tests
@@ -163,7 +176,7 @@ TEST(CrosFpDeviceUpdateTest, UniqueEcCurrentImageString) {
 
 TEST_F(CrosFpUpdaterTest, GetDeviceVersionFails) {
   // Given a device which fails to report its version,
-  EXPECT_CALL(dev_update_, GetVersion()).WillOnce(Return(base::nullopt));
+  EXPECT_CALL(dev_update_, GetVersion()).WillOnce(Return(std::nullopt));
 
   // expect the updater to report a get version failure with no update reason.
   auto result = RunUpdater();
@@ -175,7 +188,7 @@ TEST_F(CrosFpUpdaterTest, GetFlashProtectFails) {
   // Given a device which reports its version, but fails to
   // report its flash protect status,
   EXPECT_CALL(dev_update_, GetVersion())
-      .WillOnce(Return(biod::CrosFpDeviceInterface::EcVersion()));
+      .WillOnce(Return(ec::CrosFpDeviceInterface::EcVersion()));
   EXPECT_CALL(dev_update_, IsFlashProtectEnabled(NotNull()))
       .WillOnce(Return(false));
 
@@ -305,6 +318,58 @@ TEST_F(CrosFpUpdaterTest, CurrentROImage_RORWMatch_UpdateRW) {
   EXPECT_EQ(result.reason, UpdateReason::kActiveImageRO);
 }
 
+TEST_F(CrosFpUpdaterTest, CurrentROImage_RORWMatch_UpdateRW_ResetNeeded) {
+  // Given an environment where
+  SetupEnvironment(true, false, false,
+                   // the current boot is stuck in RO,
+                   EC_IMAGE_RO);
+
+  // hardware write protect is disabled,
+  EXPECT_CALL(system_, HardwareWriteProtectIsEnabled())
+      .WillRepeatedly(Return(false));
+
+  // board is dartmonkey
+  cros_config_.SetString(kCrosConfigFPPath, kCrosConfigFPBoard,
+                         kFpBoardDartmonkey);
+
+  // expect both boot controls to be triggered,
+  EXPECT_CALL(boot_ctrl_, TriggerBootUpdateSplash());
+  EXPECT_CALL(boot_ctrl_, ScheduleReboot());
+  // an attempted RW flash,
+  EXPECT_CALL(dev_update_, Flash(Ref(fw_), EC_IMAGE_RW));
+  // and the updater to report a success (but reset is needed) with an
+  // RO active image update reason.
+  auto result = RunUpdater();
+  EXPECT_EQ(result.status, UpdateStatus::kUpdateSucceededNeedPowerReset);
+  EXPECT_EQ(result.reason, UpdateReason::kActiveImageRO);
+}
+
+TEST_F(CrosFpUpdaterTest, CurrentROImage_RORWMatch_UpdateRW_ResetNotNeeded) {
+  // Given an environment where
+  SetupEnvironment(true, false, false,
+                   // the current boot is stuck in RO,
+                   EC_IMAGE_RO);
+
+  // hardware write protect is disabled,
+  EXPECT_CALL(system_, HardwareWriteProtectIsEnabled())
+      .WillRepeatedly(Return(false));
+
+  // board is bloonchipper
+  cros_config_.SetString(kCrosConfigFPPath, kCrosConfigFPBoard,
+                         kFpBoardBloonchipper);
+
+  // expect both boot controls to be triggered,
+  EXPECT_CALL(boot_ctrl_, TriggerBootUpdateSplash());
+  EXPECT_CALL(boot_ctrl_, ScheduleReboot());
+  // an attempted RW flash,
+  EXPECT_CALL(dev_update_, Flash(Ref(fw_), EC_IMAGE_RW));
+  // and the updater to report a success with an
+  // RO active image update reason.
+  auto result = RunUpdater();
+  EXPECT_EQ(result.status, UpdateStatus::kUpdateSucceeded);
+  EXPECT_EQ(result.reason, UpdateReason::kActiveImageRO);
+}
+
 // Normal code paths
 
 TEST_F(CrosFpUpdaterTest, FPDisabled_RORWMatch_NoUpdate) {
@@ -381,6 +446,58 @@ TEST_F(CrosFpUpdaterTest, RWMismatch_UpdateRW) {
   EXPECT_EQ(result.reason, UpdateReason::kMismatchRWVersion);
 }
 
+TEST_F(CrosFpUpdaterTest, RWMismatch_UpdateRW_ResetNeeded) {
+  // Given an environment where
+  SetupEnvironment(true, false,
+                   // RW needs to be updated,
+                   true);
+
+  // hardware write protect is disabled,
+  EXPECT_CALL(system_, HardwareWriteProtectIsEnabled())
+      .WillRepeatedly(Return(false));
+
+  // board is dartmonkey
+  cros_config_.SetString(kCrosConfigFPPath, kCrosConfigFPBoard,
+                         kFpBoardDartmonkey);
+
+  // expect both boot control functions to be triggered,
+  EXPECT_CALL(boot_ctrl_, TriggerBootUpdateSplash());
+  EXPECT_CALL(boot_ctrl_, ScheduleReboot());
+  // RW to be flashed,
+  EXPECT_CALL(dev_update_, Flash(Ref(fw_), EC_IMAGE_RW));
+  // and the updater to report a success (but reset is needed) with an
+  // RW version mismatch update reason.
+  auto result = RunUpdater();
+  EXPECT_EQ(result.status, UpdateStatus::kUpdateSucceededNeedPowerReset);
+  EXPECT_EQ(result.reason, UpdateReason::kMismatchRWVersion);
+}
+
+TEST_F(CrosFpUpdaterTest, RWMismatch_UpdateRW_ResetNotNeeded) {
+  // Given an environment where
+  SetupEnvironment(true, false,
+                   // RW needs to be updated,
+                   true);
+
+  // hardware write protect is disabled,
+  EXPECT_CALL(system_, HardwareWriteProtectIsEnabled())
+      .WillRepeatedly(Return(false));
+
+  // board is bloonchipper
+  cros_config_.SetString(kCrosConfigFPPath, kCrosConfigFPBoard,
+                         kFpBoardBloonchipper);
+
+  // expect both boot control functions to be triggered,
+  EXPECT_CALL(boot_ctrl_, TriggerBootUpdateSplash());
+  EXPECT_CALL(boot_ctrl_, ScheduleReboot());
+  // RW to be flashed,
+  EXPECT_CALL(dev_update_, Flash(Ref(fw_), EC_IMAGE_RW));
+  // and the updater to report a success with an
+  // RW version mismatch update reason.
+  auto result = RunUpdater();
+  EXPECT_EQ(result.status, UpdateStatus::kUpdateSucceeded);
+  EXPECT_EQ(result.reason, UpdateReason::kMismatchRWVersion);
+}
+
 TEST_F(CrosFpUpdaterTest, FPDisabled_ROMismatch_UpdateRO) {
   // Given an environment where
   SetupEnvironment(
@@ -423,6 +540,31 @@ TEST_F(CrosFpUpdaterTest, FPDisabled_RORWMismatch_UpdateRORW) {
   EXPECT_EQ(result.status, UpdateStatus::kUpdateSucceeded);
   EXPECT_EQ(result.reason, UpdateReason::kMismatchROVersion |
                                UpdateReason::kMismatchRWVersion);
+}
+
+TEST(GetAppOutputAndErrorWithTimeout, SleepFunctionStatusNotOk) {
+  base::CommandLine cmd_sleep{base::FilePath("sleep")};
+  cmd_sleep.AppendArg("2s");
+  std::string cmd_output;
+  base::TimeDelta delta = base::Milliseconds(100);
+  bool status = GetAppOutputAndErrorWithTimeout(cmd_sleep, delta, &cmd_output);
+  std::string expected_cmd_output = "timeout: sending signal QUIT to command";
+  EXPECT_EQ(
+      cmd_output.compare(0, expected_cmd_output.size(), expected_cmd_output),
+      0);
+  EXPECT_FALSE(status);
+  EXPECT_EQ(cmd_sleep.GetProgram().BaseName().value(), "sleep");
+}
+
+TEST(GetAppOutputAndErrorWithTimeout, SleepFunctionStatusOk) {
+  base::CommandLine cmd_sleep{base::FilePath("sleep")};
+  cmd_sleep.AppendArg("0.1s");
+  std::string cmd_output;
+  base::TimeDelta delta = base::Seconds(2);
+  bool status = GetAppOutputAndErrorWithTimeout(cmd_sleep, delta, &cmd_output);
+  EXPECT_TRUE(status);
+  EXPECT_TRUE(cmd_output.empty());
+  EXPECT_EQ(cmd_sleep.GetProgram().BaseName().value(), "sleep");
 }
 
 }  // namespace updater

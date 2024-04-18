@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -66,10 +66,29 @@ void EuiccDBusAdaptor::RequestPendingProfiles(
   euicc_->RequestPendingProfiles(std::move(dbus_result), in_root_smds);
 }
 
+void EuiccDBusAdaptor::RefreshSmdxProfiles(
+    std::unique_ptr<DBusResponse<std::vector<dbus::ObjectPath>, std::string>>
+        response,
+    const std::string& activation_code,
+    bool should_not_switch_slot) {
+  DbusResult<std::vector<dbus::ObjectPath>, std::string> dbus_result(
+      std::move(response));
+  euicc_->RefreshSmdxProfiles(std::move(dbus_result), activation_code,
+                              should_not_switch_slot);
+}
+
 void EuiccDBusAdaptor::RequestInstalledProfiles(
     std::unique_ptr<DBusResponse<>> response) {
   DbusResult<> dbus_result(std::move(response));
-  euicc_->RequestInstalledProfiles(std::move(dbus_result));
+  euicc_->RefreshInstalledProfiles(false /* should_not_switch_slot */,
+                                   std::move(dbus_result));
+}
+
+void EuiccDBusAdaptor::RefreshInstalledProfiles(
+    std::unique_ptr<DBusResponse<>> response, bool should_not_switch_slot) {
+  DbusResult<> dbus_result(std::move(response));
+  euicc_->RefreshInstalledProfiles(should_not_switch_slot,
+                                   std::move(dbus_result));
 }
 
 void EuiccDBusAdaptor::SetTestMode(std::unique_ptr<DBusResponse<>> response,
@@ -86,6 +105,12 @@ void EuiccDBusAdaptor::ResetMemory(std::unique_ptr<DBusResponse<>> response,
                                    int in_reset_options) {
   DbusResult<> dbus_result(std::move(response));
   euicc_->ResetMemoryHelper(std::move(dbus_result), in_reset_options);
+}
+
+void EuiccDBusAdaptor::IsTestEuicc(
+    std::unique_ptr<DBusResponse<bool>> response) {
+  DbusResult<bool> dbus_result(std::move(response));
+  euicc_->IsTestEuicc(std::move(dbus_result));
 }
 
 }  // namespace hermes

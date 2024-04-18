@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -14,25 +14,31 @@
 #include <unordered_map>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/contains.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
+#include <base/location.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/strings/string_number_conversions.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <brillo/files/file_util.h>
 #include <camera/camera_metadata.h>
 #include <system/camera_metadata_hidden.h>
 
 #include "common/stream_manipulator.h"
+#include "common/stream_manipulator_manager.h"
 #include "common/utils/cros_camera_mojo_utils.h"
 #include "cros-camera/camera_metrics.h"
 #include "cros-camera/common.h"
 #include "cros-camera/constants.h"
 #include "cros-camera/future.h"
+#include "cros-camera/tracing.h"
+#include "features/feature_profile.h"
+#include "gpu/gpu_resources.h"
 #include "hal_adapter/camera_device_adapter.h"
 #include "hal_adapter/camera_module_callbacks_associated_delegate.h"
 #include "hal_adapter/camera_module_delegate.h"
@@ -40,14 +46,6 @@
 #include "hal_adapter/vendor_tag_ops_delegate.h"
 
 namespace cros {
-
-// Defined in features/zsl/zsl_helper.cc. We use forward declaration instead
-// including the header file to avoid having direct dependency on files under
-// features/zsl/.
-//
-// TODO(jcliang): See if we can have a hook in StreamManipulator for the static
-// metadata configuration.
-bool TryAddEnableZslKey(android::CameraMetadata* metadata);
 
 namespace {
 
@@ -60,6 +58,20 @@ constexpr char kArcvmVendorTagSectionName[] = "com.google.arcvm";
 constexpr char kArcvmVendorTagHostTimeTagName[] = "hostSensorTimestamp";
 constexpr uint32_t kArcvmVendorTagHostTime = kArcvmVendorTagStart;
 
+// File format: the first line contains "on" or "off".
+const base::FilePath kSWPrivacySwitchFilePath("/run/camera/sw_privacy_switch");
+// Override the SW privacy switch state set by the OS.
+// Valid key and its values: "state" -> "on" or "off"
+// E.g. { "state" : "on" }
+const base::FilePath kSWPrivacySwitchOverrideFilePath(
+    "/run/camera/sw_privacy_switch_override.json");
+// File format: each line contains one public camera id.
+const base::FilePath kCameraIdsWithFallbackSolutionFilePath(
+    "/run/camera/camera_ids_with_sw_privacy_switch_fallback");
+constexpr char kSWPrivacySwitchOn[] = "on";
+constexpr char kSWPrivacySwitchOff[] = "off";
+
+const char kEffectsLibraryPath[] = "/usr/share/cros-camera/libfs";
 }  // namespace
 
 CameraHalAdapter::CameraHalAdapter(
@@ -68,7 +80,7 @@ CameraHalAdapter::CameraHalAdapter(
     CameraMojoChannelManagerToken* token,
     CameraActivityCallback activity_callback)
     : camera_interfaces_(camera_interfaces),
-      main_task_runner_(base::ThreadTaskRunnerHandle::Get()),
+      main_task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       camera_module_thread_("CameraModuleThread"),
       camera_module_callbacks_thread_("CameraModuleCallbacksThread"),
       module_id_(0),
@@ -76,30 +88,46 @@ CameraHalAdapter::CameraHalAdapter(
       vendor_tag_ops_id_(0),
       camera_metrics_(CameraMetrics::New()),
       mojo_manager_token_(token),
-      activity_callback_(activity_callback) {
-  VLOGF_ENTER();
-}
+      activity_callback_(activity_callback),
+      sw_privacy_switch_override_watcher_(ReloadableConfigFile::Options{
+          .override_config_file_path = kSWPrivacySwitchOverrideFilePath}) {}
 
 CameraHalAdapter::~CameraHalAdapter() {
-  VLOGF_ENTER();
   camera_module_thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&CameraHalAdapter::ResetModuleDelegateOnThread,
-                            base::Unretained(this), kIdAll));
+      FROM_HERE, base::BindOnce(&CameraHalAdapter::ResetModuleDelegateOnThread,
+                                base::Unretained(this), kIdAll));
   camera_module_callbacks_thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&CameraHalAdapter::ResetCallbacksDelegateOnThread,
-                            base::Unretained(this), kIdAll));
+      FROM_HERE,
+      base::BindOnce(&CameraHalAdapter::ResetCallbacksDelegateOnThread,
+                     base::Unretained(this), kIdAll));
   camera_module_thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::Bind(&CameraHalAdapter::ResetVendorTagOpsDelegateOnThread,
-                 base::Unretained(this), kIdAll));
+      base::BindOnce(&CameraHalAdapter::ResetVendorTagOpsDelegateOnThread,
+                     base::Unretained(this), kIdAll));
+  // We need to destroy the CameraDeviceAdapters on the same thread they were
+  // created on to avoid race condition.
+  camera_module_thread_.task_runner()->PostTask(
+      FROM_HERE,
+      base::BindOnce([](std::map<int32_t, std::unique_ptr<CameraDeviceAdapter>>
+                            device_adapters) {},
+                     std::move(device_adapters_)));
   camera_module_thread_.Stop();
   camera_module_callbacks_thread_.Stop();
   set_camera_metadata_vendor_ops(nullptr);
 }
 
 bool CameraHalAdapter::Start() {
-  VLOGF_ENTER();
-  TRACE_CAMERA_INSTANT();
+  TRACE_HAL_ADAPTER();
+
+  if (GpuResources::IsSupported()) {
+    root_gpu_resources_ = std::make_unique<GpuResources>(
+        GpuResourcesOptions{.name = "RootGpuResources"});
+    if (!root_gpu_resources_->Initialize()) {
+      LOGF(ERROR) << "Failed to initialize root GPU resources";
+      root_gpu_resources_ = nullptr;
+    }
+    DCHECK(root_gpu_resources_);
+  }
 
   if (!camera_module_thread_.Start()) {
     LOGF(ERROR) << "Failed to start CameraModuleThread";
@@ -110,26 +138,45 @@ bool CameraHalAdapter::Start() {
     return false;
   }
 
+  if (FeatureProfile().IsEnabled(FeatureProfile::FeatureType::kEffects)) {
+    LOGF(INFO) << "Effects are enabled. Setting DLC root path.";
+    effects_enabled_ = true;
+    stream_manipulator_runtime_options_.SetDlcRootPath(
+        base::FilePath(kEffectsLibraryPath));
+  } else {
+    LOGF(INFO) << "Effects are not enabled, skipping DLC.";
+  }
+
   auto future = cros::Future<bool>::Create(nullptr);
   camera_module_thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::Bind(&CameraHalAdapter::StartOnThread, base::Unretained(this),
-                 cros::GetFutureCallback(future)));
+      base::BindOnce(&CameraHalAdapter::StartOnThread, base::Unretained(this),
+                     cros::GetFutureCallback(future)));
+
+  std::optional<mojom::CameraPrivacySwitchState> state =
+      LoadCachedCameraSWPrivacySwitchState();
+  if (state.has_value()) {
+    SetCameraSWPrivacySwitchState(state.value());
+  }
+  sw_privacy_switch_override_watcher_.SetCallback(
+      base::BindRepeating(&CameraHalAdapter::SWPrivacySwitchOverrideChange,
+                          base::Unretained(this)));
+
   return future->Get();
 }
 
 void CameraHalAdapter::OpenCameraHal(
     mojo::PendingReceiver<mojom::CameraModule> camera_module_receiver,
     mojom::CameraClientType camera_client_type) {
-  VLOGF_ENTER();
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER("client_type", camera_client_type);
+
   auto module_delegate = std::make_unique<CameraModuleDelegate>(
       this, camera_module_thread_.task_runner(), camera_client_type);
   uint32_t module_id = module_id_++;
   module_delegate->Bind(
       std::move(camera_module_receiver),
-      base::Bind(&CameraHalAdapter::ResetModuleDelegateOnThread,
-                 base::Unretained(this), module_id));
+      base::BindOnce(&CameraHalAdapter::ResetModuleDelegateOnThread,
+                     base::Unretained(this), module_id));
   base::AutoLock l(module_delegates_lock_);
   module_delegates_[module_id] = std::move(module_delegate);
   VLOGF(1) << "CameraModule " << module_id << " connected";
@@ -141,9 +188,8 @@ int32_t CameraHalAdapter::OpenDevice(
     int32_t camera_id,
     mojo::PendingReceiver<mojom::Camera3DeviceOps> device_ops_receiver,
     mojom::CameraClientType camera_client_type) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED("camera_id", camera_id);
+  TRACE_HAL_ADAPTER("client_type", camera_client_type, "camera_id", camera_id);
 
   session_timer_map_.emplace(std::piecewise_construct,
                              std::forward_as_tuple(camera_id),
@@ -153,10 +199,6 @@ int32_t CameraHalAdapter::OpenDevice(
   int internal_camera_id;
   std::tie(camera_module, internal_camera_id) =
       GetInternalModuleAndId(camera_id);
-
-  LOGF(INFO) << camera_client_type << ", camera_id = " << camera_id
-             << ", camera_module = " << camera_module->common.name
-             << ", internal_camera_id = " << internal_camera_id;
 
   if (!camera_module) {
     return -EINVAL;
@@ -180,18 +222,35 @@ int32_t CameraHalAdapter::OpenDevice(
 
   int module_id = camera_id_map_[camera_id].first;
   cros_camera_hal_t* cros_camera_hal = camera_interfaces_[module_id].second;
+
+  // If HAL-level SW privacy switch is not available, force OpenDevice() to
+  // fail.
+  if (cros_camera_hal && !cros_camera_hal->set_privacy_switch_state &&
+      stream_manipulator_runtime_options_.sw_privacy_switch_state() ==
+          mojom::CameraPrivacySwitchState::ON) {
+    return -ENODEV;
+  }
+
+  LOGF(INFO) << camera_client_type << ", camera_id = " << camera_id
+             << ", camera_module = " << camera_module->common.name
+             << ", internal_camera_id = " << internal_camera_id;
+
   hw_module_t* common = &camera_module->common;
   camera3_device_t* camera_device;
   int ret;
-  if (cros_camera_hal && cros_camera_hal->camera_device_open_ext) {
-    ret = cros_camera_hal->camera_device_open_ext(
-        common, std::to_string(internal_camera_id).c_str(),
-        reinterpret_cast<hw_device_t**>(&camera_device),
-        static_cast<ClientType>(camera_client_type));
-  } else {
-    ret = common->methods->open(
-        common, std::to_string(internal_camera_id).c_str(),
-        reinterpret_cast<hw_device_t**>(&camera_device));
+  {
+    TRACE_HAL_ADAPTER_EVENT("HAL::OpenDevice", "camera_module_name",
+                            camera_module->common.name);
+    if (cros_camera_hal && cros_camera_hal->camera_device_open_ext) {
+      ret = cros_camera_hal->camera_device_open_ext(
+          common, std::to_string(internal_camera_id).c_str(),
+          reinterpret_cast<hw_device_t**>(&camera_device),
+          static_cast<ClientType>(camera_client_type));
+    } else {
+      ret = common->methods->open(
+          common, std::to_string(internal_camera_id).c_str(),
+          reinterpret_cast<hw_device_t**>(&camera_device));
+    }
   }
   if (ret != 0) {
     LOGF(ERROR) << "Failed to open camera device " << camera_id;
@@ -213,37 +272,56 @@ int32_t CameraHalAdapter::OpenDevice(
   const camera_metadata_t* metadata = GetUpdatedCameraMetadata(
       camera_id, camera_client_type, info.static_camera_characteristics);
   base::RepeatingCallback<int(int)> get_internal_camera_id_callback =
-      base::Bind(&CameraHalAdapter::GetInternalId, base::Unretained(this));
-  base::RepeatingCallback<int(int)> get_public_camera_id_callback = base::Bind(
-      &CameraHalAdapter::GetPublicId, base::Unretained(this), module_id);
+      base::BindRepeating(&CameraHalAdapter::GetInternalId,
+                          base::Unretained(this));
+  base::RepeatingCallback<int(int)> get_public_camera_id_callback =
+      base::BindRepeating(&CameraHalAdapter::GetPublicId,
+                          base::Unretained(this), module_id);
   // This method is called by |camera_module_delegate_| on its mojo IPC
   // handler thread.
   // The CameraHalAdapter (and hence |camera_module_delegate_|) must out-live
   // the CameraDeviceAdapters, so it's safe to keep a reference to the task
   // runner of the current thread in the callback functor.
-  base::Callback<void()> close_callback = base::Bind(
+  base::OnceCallback<void()> close_callback = base::BindOnce(
       &CameraHalAdapter::CloseDeviceCallback, base::Unretained(this),
-      base::ThreadTaskRunnerHandle::Get(), camera_id, camera_client_type);
-  StreamManipulator::Options options = {
-      .camera_module_name = camera_module->common.name,
-      .enable_cros_zsl = base::Contains(can_attempt_zsl_camera_ids_, camera_id),
-  };
+      base::SingleThreadTaskRunner::GetCurrentDefault(), camera_id,
+      camera_client_type);
+  base::OnceCallback<void(FaceDetectionResultCallback)>
+      set_face_detection_result_callback;
+  if (cros_camera_hal->set_face_detection_result_callback != nullptr) {
+    set_face_detection_result_callback = base::BindOnce(
+        [](cros_camera_hal_t* hal, int camera_id,
+           FaceDetectionResultCallback cb) {
+          hal->set_face_detection_result_callback(camera_id, cb);
+        },
+        // The |cros_camera_hal| outlives the stream manipulator.
+        base::Unretained(cros_camera_hal), internal_camera_id);
+  }
+
+  bool do_notify_invalid_capture_request = false;
+#if USE_ARCVM
+  // b/272432362 ARCVM client will be doing async process_capture_request.
+  do_notify_invalid_capture_request =
+      camera_client_type == mojom::CameraClientType::ANDROID;
+#endif
+
   device_adapters_[camera_id] = std::make_unique<CameraDeviceAdapter>(
       camera_device, info.device_version, metadata,
       std::move(get_internal_camera_id_callback),
-      std::move(get_public_camera_id_callback), close_callback,
-      StreamManipulator::GetEnabledStreamManipulators(std::move(options)));
+      std::move(get_public_camera_id_callback), std::move(close_callback),
+      std::make_unique<StreamManipulatorManager>(
+          StreamManipulatorManager::CreateOptions{
+              .camera_module_name = camera_module->common.name,
+              .camera_info = info,
+              .set_face_detection_result_callback =
+                  std::move(set_face_detection_result_callback),
+              .sw_privacy_switch_stream_manipulator_enabled = false,
+              .diagnostics_config = camera_diagnostics_config_},
+          &stream_manipulator_runtime_options_, root_gpu_resources_.get(),
+          mojo_manager_token_),
+      do_notify_invalid_capture_request);
 
-  CameraDeviceAdapter::HasReprocessEffectVendorTagCallback
-      has_reprocess_effect_vendor_tag_callback =
-          base::Bind(&ReprocessEffectManager::HasReprocessEffectVendorTag,
-                     base::Unretained(&reprocess_effect_manager_));
-  CameraDeviceAdapter::ReprocessEffectCallback reprocess_effect_callback =
-      base::Bind(&ReprocessEffectManager::ReprocessRequest,
-                 base::Unretained(&reprocess_effect_manager_));
-  if (!device_adapters_[camera_id]->Start(
-          std::move(has_reprocess_effect_vendor_tag_callback),
-          std::move(reprocess_effect_callback))) {
+  if (!device_adapters_[camera_id]->Start()) {
     device_adapters_.erase(camera_id);
     return -ENODEV;
   }
@@ -257,10 +335,78 @@ int32_t CameraHalAdapter::OpenDevice(
   return 0;
 }
 
+void CameraHalAdapter::SetAutoFramingState(
+    mojom::CameraAutoFramingState state) {
+  stream_manipulator_runtime_options_.SetAutoFramingState(state);
+}
+
+mojom::CameraPrivacySwitchState
+CameraHalAdapter::GetCameraSWPrivacySwitchState() {
+  base::AutoLock lock(sw_privacy_switch_state_lock_);
+  return sw_privacy_switch_state_;
+}
+
+void CameraHalAdapter::SetCameraSWPrivacySwitchState(
+    mojom::CameraPrivacySwitchState state) {
+  // TODO(okuji): Once we migrate to the HAL SW privacy switch, we should change
+  // the timing of calling SetSWPrivacySwitchState() since it can be delayed for
+  // switch state changes to take effect in HAL. For example, we want to avoid
+  // accidentally disabling stream manipulator effects before the SW state
+  // change from OFF to ON takes effect.
+  {
+    base::AutoLock lock(sw_privacy_switch_state_lock_);
+    sw_privacy_switch_state_ = state;
+  }
+  if (!sw_privacy_switch_state_override_.has_value()) {
+    stream_manipulator_runtime_options_.SetSWPrivacySwitchState(state);
+    camera_module_thread_.task_runner()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CameraHalAdapter::
+                           SetCameraSWPrivacySwitchStateOnCameraModuleThread,
+                       base::Unretained(this), state));
+  } else {
+    LOGF(INFO) << "The SW privacy switch state was set to " << state
+               << " by the client, but "
+               << std::quoted(kSWPrivacySwitchOverrideFilePath.value())
+               << " is overriding the state with "
+               << *sw_privacy_switch_state_override_;
+  }
+  CacheCameraSWPrivacySwitchState(state);
+}
+
+mojom::SetEffectResult CameraHalAdapter::SetCameraEffect(
+    mojom::EffectsConfigPtr config) {
+  bool dlc_available = stream_manipulator_runtime_options_.GetDlcRootPath() !=
+                       base::FilePath("");
+
+  LOG(INFO) << "CameraHalAdapter::SetCameraEffect:"
+            << " blur: " << config->blur_enabled
+            << " relight: " << config->relight_enabled
+            << " replace: " << config->replace_enabled
+            << " blur_level: " << config->blur_level
+            << " effects_enabled: " << effects_enabled_
+            << " dlc_available: " << dlc_available;
+
+  if (!effects_enabled_) {
+    return mojom::SetEffectResult::kFeatureDisabled;
+  }
+
+  if (!dlc_available) {
+    return mojom::SetEffectResult::kDlcUnavailable;
+  }
+
+  stream_manipulator_runtime_options_.SetEffectsConfig(std::move(config));
+  return mojom::SetEffectResult::kOk;
+}
+
+void CameraHalAdapter::SetCameraDiagnosticsConfig(
+    CameraDiagnosticsConfig* config) {
+  camera_diagnostics_config_ = config;
+}
+
 int32_t CameraHalAdapter::GetNumberOfCameras() {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER();
   return num_builtin_cameras_;
 }
 
@@ -268,9 +414,8 @@ int32_t CameraHalAdapter::GetCameraInfo(
     int32_t camera_id,
     mojom::CameraInfoPtr* camera_info,
     mojom::CameraClientType camera_client_type) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED("camera_id", camera_id);
+  TRACE_HAL_ADAPTER("client_type", camera_client_type, "camera_id", camera_id);
 
   camera_module_t* camera_module;
   int internal_camera_id;
@@ -330,9 +475,8 @@ int32_t CameraHalAdapter::GetCameraInfo(
 }
 
 int32_t CameraHalAdapter::SetTorchMode(int32_t camera_id, bool enabled) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER("camera_id", camera_id);
 
   camera_module_t* camera_module;
   int internal_camera_id;
@@ -351,24 +495,24 @@ int32_t CameraHalAdapter::SetTorchMode(int32_t camera_id, bool enabled) {
 }
 
 int32_t CameraHalAdapter::Init() {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER();
+
   return 0;
 }
 
 void CameraHalAdapter::GetVendorTagOps(
     mojo::PendingReceiver<mojom::VendorTagOps> vendor_tag_ops_receiver) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
+  TRACE_HAL_ADAPTER();
 
   auto vendor_tag_ops_delegate = std::make_unique<VendorTagOpsDelegate>(
       camera_module_thread_.task_runner(), &vendor_tag_manager_);
   uint32_t vendor_tag_ops_id = vendor_tag_ops_id_++;
   vendor_tag_ops_delegate->Bind(
       std::move(vendor_tag_ops_receiver),
-      base::Bind(&CameraHalAdapter::ResetVendorTagOpsDelegateOnThread,
-                 base::Unretained(this), vendor_tag_ops_id));
+      base::BindOnce(&CameraHalAdapter::ResetVendorTagOpsDelegateOnThread,
+                     base::Unretained(this), vendor_tag_ops_id));
   vendor_tag_ops_delegates_[vendor_tag_ops_id] =
       std::move(vendor_tag_ops_delegate);
   VLOGF(1) << "VendorTagOps " << vendor_tag_ops_id << " connected";
@@ -378,9 +522,19 @@ void CameraHalAdapter::CloseDeviceCallback(
     scoped_refptr<base::SingleThreadTaskRunner> task_runner,
     int32_t camera_id,
     mojom::CameraClientType camera_client_type) {
-  task_runner->PostTask(FROM_HERE, base::Bind(&CameraHalAdapter::CloseDevice,
-                                              base::Unretained(this), camera_id,
-                                              camera_client_type));
+  task_runner->PostTask(
+      FROM_HERE,
+      base::BindOnce(&CameraHalAdapter::CloseDevice, base::Unretained(this),
+                     camera_id, camera_client_type));
+  task_runner->PostTask(FROM_HERE, base::BindOnce([]() {
+                          // Inject an empty event to end the CloseDevice
+                          // event. The CameraHalAdapter::CloseDevice event
+                          // emitted by the callback above is usually the last
+                          // event from the cros-camera process, and there's a
+                          // known issue in Perfetto where the last event does
+                          // not end.
+                          PERFETTO_INTERNAL_ADD_EMPTY_EVENT();
+                        }));
 }
 
 // static
@@ -388,15 +542,13 @@ void CameraHalAdapter::camera_device_status_change(
     const camera_module_callbacks_t* callbacks,
     int internal_camera_id,
     int new_status) {
-  VLOGF_ENTER();
-  TRACE_CAMERA_SCOPED();
-
   auto* aux = static_cast<const CameraModuleCallbacksAux*>(callbacks);
   CameraHalAdapter* self = aux->adapter;
   self->camera_module_thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&CameraHalAdapter::CameraDeviceStatusChange,
-                            base::Unretained(self), aux, internal_camera_id,
-                            static_cast<camera_device_status_t>(new_status)));
+      FROM_HERE,
+      base::BindOnce(&CameraHalAdapter::CameraDeviceStatusChange,
+                     base::Unretained(self), aux, internal_camera_id,
+                     static_cast<camera_device_status_t>(new_status)));
 }
 
 // static
@@ -404,36 +556,120 @@ void CameraHalAdapter::torch_mode_status_change(
     const camera_module_callbacks_t* callbacks,
     const char* internal_camera_id,
     int new_status) {
-  VLOGF_ENTER();
-  TRACE_CAMERA_SCOPED();
-
   auto* aux = static_cast<const CameraModuleCallbacksAux*>(callbacks);
   CameraHalAdapter* self = aux->adapter;
   self->camera_module_thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::Bind(&CameraHalAdapter::TorchModeStatusChange,
-                 base::Unretained(self), aux, atoi(internal_camera_id),
-                 static_cast<torch_mode_status_t>(new_status)));
+      base::BindOnce(&CameraHalAdapter::TorchModeStatusChange,
+                     base::Unretained(self), aux, atoi(internal_camera_id),
+                     static_cast<torch_mode_status_t>(new_status)));
+}
+
+std::optional<mojom::CameraPrivacySwitchState>
+CameraHalAdapter::LoadCachedCameraSWPrivacySwitchState() {
+  if (base::PathExists(kSWPrivacySwitchFilePath)) {
+    std::string state;
+    if (base::ReadFileToString(kSWPrivacySwitchFilePath, &state)) {
+      LOGF(INFO) << "Read the SW privacy switch " << std::quoted(state)
+                 << " from " << std::quoted(kSWPrivacySwitchFilePath.value());
+      if (state == kSWPrivacySwitchOn) {
+        return mojom::CameraPrivacySwitchState::ON;
+      } else if (state == kSWPrivacySwitchOff) {
+        return mojom::CameraPrivacySwitchState::OFF;
+      }
+    } else {
+      LOGF(ERROR) << "Failed to read the SW privacy switch state from "
+                  << std::quoted(kSWPrivacySwitchFilePath.value());
+    }
+  }
+  return std::nullopt;
+}
+
+void CameraHalAdapter::CacheCameraSWPrivacySwitchState(
+    mojom::CameraPrivacySwitchState state) {
+  const char* str = state == mojom::CameraPrivacySwitchState::ON
+                        ? kSWPrivacySwitchOn
+                        : kSWPrivacySwitchOff;
+  if (!base::WriteFile(kSWPrivacySwitchFilePath, str)) {
+    LOGF(ERROR) << "Failed to write the SW privacy switch state to "
+                << std::quoted(kSWPrivacySwitchFilePath.value());
+  }
+}
+
+void CameraHalAdapter::SetCameraSWPrivacySwitchStateOnCameraModuleThread(
+    mojom::CameraPrivacySwitchState state) {
+  DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
+  for (int module_id = 0; module_id < camera_interfaces_.size(); ++module_id) {
+    cros_camera_hal_t* hal = camera_interfaces_[module_id].second;
+    if (hal->set_privacy_switch_state != nullptr) {
+      hal->set_privacy_switch_state(state ==
+                                    mojom::CameraPrivacySwitchState::ON);
+    } else if (state == mojom::CameraPrivacySwitchState::ON) {
+      for (const auto& [camera_id, device_adapter] : device_adapters_) {
+        if (camera_id_map_[camera_id].first == module_id) {
+          device_adapter->ForceClose();
+        }
+      }
+    }
+  }
+}
+
+void CameraHalAdapter::SWPrivacySwitchOverrideChange(
+    const base::Value::Dict& json_values) {
+  constexpr char kStateKey[] = "state";
+  const base::Value* value = json_values.Find(kStateKey);
+  if (value == nullptr) {
+    sw_privacy_switch_state_override_.reset();
+  } else {
+    if (value->GetString() == kSWPrivacySwitchOn) {
+      sw_privacy_switch_state_override_ = mojom::CameraPrivacySwitchState::ON;
+    } else if (value->GetString() == kSWPrivacySwitchOff) {
+      sw_privacy_switch_state_override_ = mojom::CameraPrivacySwitchState::OFF;
+    } else {
+      LOGF(ERROR) << "Invalid value for key " << std::quoted(kStateKey) << ": "
+                  << std::quoted(value->GetString());
+      sw_privacy_switch_state_override_.reset();
+    }
+  }
+  mojom::CameraPrivacySwitchState new_state;
+  if (sw_privacy_switch_state_override_.has_value()) {
+    new_state = *sw_privacy_switch_state_override_;
+    LOGF(INFO) << "Override the SW privacy switch value with " << new_state;
+  } else {
+    base::AutoLock lock(sw_privacy_switch_state_lock_);
+    new_state = sw_privacy_switch_state_;
+  }
+  if (new_state ==
+      stream_manipulator_runtime_options_.sw_privacy_switch_state()) {
+    return;
+  }
+  stream_manipulator_runtime_options_.SetSWPrivacySwitchState(new_state);
+  camera_module_thread_.task_runner()->PostTask(
+      FROM_HERE,
+      base::BindOnce(
+          &CameraHalAdapter::SetCameraSWPrivacySwitchStateOnCameraModuleThread,
+          base::Unretained(this), new_state));
 }
 
 const camera_metadata_t* CameraHalAdapter::GetUpdatedCameraMetadata(
     int camera_id,
     mojom::CameraClientType camera_client_type,
     const camera_metadata_t* static_metadata) {
-  auto& metadata_scoped =
-      static_metadata_map_[std::make_pair(camera_id, camera_client_type)];
-  if (metadata_scoped) {
-    return metadata_scoped.get()->getAndLock();
+  TRACE_HAL_ADAPTER("client_type", camera_client_type, "camera_id", camera_id);
+
+  auto& metadata = static_metadata_map_[camera_id][camera_client_type];
+  if (metadata) {
+    return metadata->getAndLock();
   }
 
-  metadata_scoped = std::make_unique<android::CameraMetadata>();
-  auto* metadata = metadata_scoped.get();
+  metadata = std::make_unique<android::CameraMetadata>();
   metadata->acquire(clone_camera_metadata(static_metadata));
-  reprocess_effect_manager_.UpdateStaticMetadata(metadata);
-  if (TryAddEnableZslKey(metadata)) {
-    LOGF(INFO) << "Will attempt to enable ZSL by private reprocessing";
-    can_attempt_zsl_camera_ids_.insert(camera_id);
+
+  if (!StreamManipulator::UpdateStaticMetadata(metadata.get())) {
+    LOGF(ERROR)
+        << "Failed to update the static metadata from StreamManipulators";
   }
+
   if (metadata->exists(ANDROID_LOGICAL_MULTI_CAMERA_PHYSICAL_IDS)) {
     auto it = physical_camera_id_map_.find(camera_id);
     if (it == physical_camera_id_map_.end()) {
@@ -454,9 +690,9 @@ void CameraHalAdapter::CameraDeviceStatusChange(
     const CameraModuleCallbacksAux* aux,
     int internal_camera_id,
     camera_device_status_t new_status) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER("camera_id", internal_camera_id, "device_status",
+                    new_status);
 
   int public_camera_id = GetPublicId(aux->module_id, internal_camera_id);
 
@@ -494,6 +730,7 @@ void CameraHalAdapter::CameraDeviceStatusChange(
         if (it != device_adapters_.end()) {
           device_adapters_.erase(it);
         }
+        static_metadata_map_.erase(public_camera_id);
         LOGF(INFO) << "External camera unplugged"
                    << ", public_camera_id = " << public_camera_id;
       } else {
@@ -517,9 +754,8 @@ void CameraHalAdapter::TorchModeStatusChange(
     const CameraModuleCallbacksAux* aux,
     int internal_camera_id,
     torch_mode_status_t new_status) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER("camera_id", internal_camera_id);
 
   int camera_id = GetPublicId(aux->module_id, internal_camera_id);
   if (camera_id == -1) {
@@ -537,28 +773,20 @@ void CameraHalAdapter::TorchModeStatusChange(
   }
 }
 
-void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
-  VLOGF_ENTER();
+void CameraHalAdapter::StartOnThread(base::OnceCallback<void(bool)> callback) {
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-
-  if (reprocess_effect_manager_.Initialize(mojo_manager_token_) != 0) {
-    LOGF(ERROR) << "Failed to initialize reprocess effect manager";
-    callback.Run(false);
-    return;
-  }
 
   if (!vendor_tag_manager_.Add(kArcvmVendorTagHostTime,
                                kArcvmVendorTagSectionName,
                                kArcvmVendorTagHostTimeTagName, TYPE_INT64)) {
     LOGF(ERROR)
         << "Failed to add the vendor tag for ARCVM timestamp synchronization";
-    callback.Run(false);
+    std::move(callback).Run(false);
     return;
   }
-
-  if (!vendor_tag_manager_.Add(&reprocess_effect_manager_)) {
-    LOGF(ERROR) << "Failed to add the vendor tags of reprocess effect manager";
-    callback.Run(false);
+  if (!StreamManipulator::UpdateVendorTags(vendor_tag_manager_)) {
+    LOGF(ERROR) << "Failed to add the vendor tags from StreamManipualtors";
+    std::move(callback).Run(false);
     return;
   }
 
@@ -589,8 +817,9 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
       }
       if (!vendor_tag_manager_.Add(&ops)) {
         LOGF(ERROR) << "Failed to add the vendor tags of camera module "
-                    << std::quoted(m->common.name);
-        callback.Run(false);
+                    << (m->common.name ? std::quoted(m->common.name)
+                                       : std::quoted("unknown"));
+        std::move(callback).Run(false);
         return;
       }
     }
@@ -617,7 +846,7 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
         }
         LOGF(ERROR) << "Failed to init camera module "
                     << std::quoted(m->common.name);
-        callback.Run(false);
+        std::move(callback).Run(false);
         return;
       }
     }
@@ -649,7 +878,7 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
     aux->adapter = this;
     if (m->set_callbacks(aux.get()) != 0) {
       LOGF(ERROR) << "Failed to set_callbacks on camera module " << module_id;
-      callback.Run(false);
+      std::move(callback).Run(false);
       return;
     }
     callbacks_auxs_.push_back(std::move(aux));
@@ -659,7 +888,7 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
       if (m->get_camera_info(camera_id, &info) != 0) {
         LOGF(ERROR) << "Failed to get info of camera " << camera_id
                     << " from module " << module_id;
-        callback.Run(false);
+        std::move(callback).Run(false);
         return;
       }
 
@@ -669,7 +898,7 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
                                         &entry) != 0) {
         LOGF(ERROR) << "Failed to get flash info in metadata of camera "
                     << camera_id << " from module " << module_id;
-        callback.Run(false);
+        std::move(callback).Run(false);
         return;
       }
 
@@ -685,7 +914,7 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
         LOGF(ERROR) << "Failed to find ANDROID_REQUEST_AVAILABLE_CAPABILITIES "
                        "from camera "
                     << camera_id << " from module " << module_id;
-        callback.Run(false);
+        std::move(callback).Run(false);
         return;
       }
       if (std::find(
@@ -702,7 +931,7 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
         LOGF(ERROR)
             << "Failed to get the list of physical camera IDs for camera "
             << camera_id;
-        callback.Run(false);
+        std::move(callback).Run(false);
         return;
       }
       auto& physical_camera_ids =
@@ -718,7 +947,7 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
                                    &physical_camera_id)) {
               LOGF(ERROR) << "Invalid physical camera ID: "
                           << physical_camera_id_str;
-              callback.Run(false);
+              std::move(callback).Run(false);
               return;
             }
             physical_camera_ids.push_back(physical_camera_id);
@@ -735,10 +964,11 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
 
   num_builtin_cameras_ = cameras.size();
   sort(cameras.begin(), cameras.end());
-  // Ordering is important here. Unexposed physical camera IDs should be >= |n|
-  // where |n| is the number of builtin cameras.
+  // Ordering is important here. Unexposed physical camera IDs should be >=
+  // |n| where |n| is the number of builtin cameras.
   cameras.insert(cameras.end(), unexposed_physical_cameras.begin(),
                  unexposed_physical_cameras.end());
+  std::stringstream file_content;
   for (size_t i = 0; i < cameras.size(); i++) {
     int module_id = std::get<1>(cameras[i]);
     int camera_id = std::get<2>(cameras[i]);
@@ -750,7 +980,15 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
                                     ? TORCH_MODE_STATUS_AVAILABLE_OFF
                                     : TORCH_MODE_STATUS_NOT_AVAILABLE;
     default_torch_mode_status_map_[i] = torch_mode_status_map_[i];
+
+    // Save public camera ids using the fallback solution for the SW privacy
+    // switch to a file to let Chrome know.
+    if (camera_interfaces_[module_id].second->set_privacy_switch_state ==
+        nullptr) {
+      file_content << i << "\n";
+    }
   }
+  base::WriteFile(kCameraIdsWithFallbackSolutionFilePath, file_content.str());
 
   // Now we map internal physical camera IDs to public and store the mappings
   // in |physical_camera_id_map_|.
@@ -780,7 +1018,7 @@ void CameraHalAdapter::StartOnThread(base::Callback<void(bool)> callback) {
              << " and " << unexposed_physical_cameras.size()
              << " unexposed physical cameras";
 
-  callback.Run(true);
+  std::move(callback).Run(true);
 }
 
 void CameraHalAdapter::NotifyCameraDeviceStatusChange(
@@ -828,9 +1066,9 @@ int CameraHalAdapter::GetPublicId(int module_id, int camera_id) {
 
 void CameraHalAdapter::CloseDevice(int32_t camera_id,
                                    mojom::CameraClientType camera_client_type) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED("camera_id", camera_id);
+  TRACE_HAL_ADAPTER("client_type", camera_client_type, "camera_id", camera_id);
+
   LOGF(INFO) << camera_client_type << ", camera_id = " << camera_id;
   if (device_adapters_.find(camera_id) == device_adapters_.end()) {
     LOGF(ERROR) << "Failed to close camera device " << camera_id
@@ -843,10 +1081,18 @@ void CameraHalAdapter::CloseDevice(int32_t camera_id,
 
   camera_metrics_->SendSessionDuration(session_timer_map_[camera_id].Elapsed());
   session_timer_map_.erase(camera_id);
+
+  if (root_gpu_resources_) {
+    root_gpu_resources_->gpu_task_runner()->PostTask(
+        FROM_HERE, base::BindOnce([]() {
+          // To end the last event posted by the camera device on the GPU thread
+          // properly.
+          PERFETTO_INTERNAL_ADD_EMPTY_EVENT();
+        }));
+  }
 }
 
 void CameraHalAdapter::ResetModuleDelegateOnThread(uint32_t module_id) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
   base::AutoLock l(module_delegates_lock_);
   if (module_id == kIdAll) {
@@ -857,7 +1103,6 @@ void CameraHalAdapter::ResetModuleDelegateOnThread(uint32_t module_id) {
 }
 
 void CameraHalAdapter::ResetCallbacksDelegateOnThread(uint32_t callbacks_id) {
-  VLOGF_ENTER();
   DCHECK(
       camera_module_callbacks_thread_.task_runner()->BelongsToCurrentThread());
   base::AutoLock l(callbacks_delegates_lock_);
@@ -870,7 +1115,6 @@ void CameraHalAdapter::ResetCallbacksDelegateOnThread(uint32_t callbacks_id) {
 
 void CameraHalAdapter::ResetVendorTagOpsDelegateOnThread(
     uint32_t vendor_tag_ops_id) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
   base::AutoLock l(module_delegates_lock_);
   if (vendor_tag_ops_id == kIdAll) {
@@ -882,9 +1126,8 @@ void CameraHalAdapter::ResetVendorTagOpsDelegateOnThread(
 
 int32_t CameraHalAdapter::SetCallbacks(
     mojo::PendingAssociatedRemote<mojom::CameraModuleCallbacks> callbacks) {
-  VLOGF_ENTER();
   DCHECK(camera_module_thread_.task_runner()->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER();
 
   auto callbacks_delegate =
       std::make_unique<CameraModuleCallbacksAssociatedDelegate>(
@@ -892,11 +1135,11 @@ int32_t CameraHalAdapter::SetCallbacks(
   uint32_t callbacks_id = callbacks_id_++;
   callbacks_delegate->Bind(
       std::move(callbacks),
-      base::Bind(&CameraHalAdapter::ResetCallbacksDelegateOnThread,
-                 base::Unretained(this), callbacks_id));
+      base::BindOnce(&CameraHalAdapter::ResetCallbacksDelegateOnThread,
+                     base::Unretained(this), callbacks_id));
 
-  // Send latest status to the new client, so all presented external cameras are
-  // available to the client after SetCallbacks() returns.
+  // Send latest status to the new client, so all presented external cameras
+  // are available to the client after SetCallbacks() returns.
   for (const auto& it : device_status_map_) {
     int camera_id = it.first;
     camera_device_status_t device_status = it.second;
@@ -916,4 +1159,5 @@ int32_t CameraHalAdapter::SetCallbacks(
 
   return 0;
 }
+
 }  // namespace cros

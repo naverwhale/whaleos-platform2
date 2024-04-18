@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 
 #include <gtest/gtest.h>
 #include <utility>
-#include "base/optional.h"
 #include "keymaster/authorization_set.h"
 #include "keymaster/operation.h"
 

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,13 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include <base/time/time.h>
 #include <brillo/minijail/minijail.h>
 
+#include "patchpanel/iptables.h"
 #include "patchpanel/system.h"
 
 namespace patchpanel {
@@ -35,26 +38,39 @@ class MinijailedProcessRunner {
 
   virtual ~MinijailedProcessRunner() = default;
 
-  // Runs ip.
+  // Runs ip. If |as_patchpanel_user|, runs as user 'patchpaneld' and under the
+  // group 'patchpaneld', as well as inherits supplemntary groups (i.e. group
+  // 'tun') of user 'patchpaneld'. If not, runs as 'nobody'.
   virtual int ip(const std::string& obj,
                  const std::string& cmd,
                  const std::vector<std::string>& args,
+                 bool as_patchpanel_user = false,
                  bool log_failures = true);
   virtual int ip6(const std::string& obj,
                   const std::string& cmd,
                   const std::vector<std::string>& args,
+                  bool as_patchpanel_user = false,
                   bool log_failures = true);
 
-  // Runs iptables. If |output| is not nullptr, it will be filled with the
-  // result from stdout of iptables command.
-  virtual int iptables(const std::string& table,
+  // Runs iptables.
+  // - If |timeout| is not nullopt, the command will be killed if the process
+  //   runs longer than |timeout|.
+  // - If |output| is not nullptr, it will be filled with the result from stdout
+  //   of iptables command.
+  virtual int iptables(Iptables::Table table,
+                       Iptables::Command command,
+                       std::string_view chain,
                        const std::vector<std::string>& argv,
                        bool log_failures = true,
+                       std::optional<base::TimeDelta> timeout = std::nullopt,
                        std::string* output = nullptr);
 
-  virtual int ip6tables(const std::string& table,
+  virtual int ip6tables(Iptables::Table table,
+                        Iptables::Command command,
+                        std::string_view chain,
                         const std::vector<std::string>& argv,
                         bool log_failures = true,
+                        std::optional<base::TimeDelta> timeout = std::nullopt,
                         std::string* output = nullptr);
 
   // Installs all |modules| via modprobe.
@@ -75,25 +91,49 @@ class MinijailedProcessRunner {
   virtual int ip_netns_delete(const std::string& netns_name,
                               bool log_failures = true);
 
- protected:
-  // Runs a process (argv[0]) with optional arguments (argv[1]...)
-  // in a minijail as an unprivileged user with CAP_NET_ADMIN and
-  // CAP_NET_RAW capabilities.
-  virtual int Run(const std::vector<std::string>& argv,
-                  bool log_failures = true);
+  // Run conntrack command with given command option and |argv|.
+  virtual int conntrack(std::string_view command,
+                        const std::vector<std::string>& argv,
+                        bool log_failures = true);
 
-  // Invokes RunSyncDestroy() with |mj_|. If |output| is not nullptr, it will be
-  // filled with the result from stdout of the execution.
-  virtual int RunSync(const std::vector<std::string>& argv,
-                      bool log_failures,
-                      std::string* output);
+ protected:
+  // Used by ip() and ip6().
+  // Runs a process (argv[0]) with optional arguments (argv[1]...)
+  // in a minijail as user |patchpaneld| and user the group |patchpaneld| with
+  // CAP_NET_ADMIN and CAP_NET_RAW capabilities. Inherits supplementary groups
+  // of |patchpaneld|.
+  virtual int RunIp(const std::vector<std::string>& argv,
+                    bool as_patchpanel_user,
+                    bool log_failures = true);
+
+  virtual int RunIptables(std::string_view iptables_path,
+                          Iptables::Table table,
+                          Iptables::Command command,
+                          std::string_view chain,
+                          const std::vector<std::string>& argv,
+                          bool log_failures,
+                          std::optional<base::TimeDelta> timeout,
+                          std::string* output);
+
+  virtual int RunIpNetns(const std::vector<std::string>& argv,
+                         bool log_failures);
 
  private:
   int RunSyncDestroy(const std::vector<std::string>& argv,
                      brillo::Minijail* mj,
                      minijail* jail,
                      bool log_failures,
-                     std::string* output);
+                     std::string* output) {
+    return RunSyncDestroyWithTimeout(argv, mj, jail, log_failures,
+                                     /*timeout=*/std::nullopt, output);
+  }
+
+  int RunSyncDestroyWithTimeout(const std::vector<std::string>& argv,
+                                brillo::Minijail* mj,
+                                minijail* jail,
+                                bool log_failures,
+                                std::optional<base::TimeDelta> timeout,
+                                std::string* output);
 
   brillo::Minijail* mj_;
   std::unique_ptr<System> system_;

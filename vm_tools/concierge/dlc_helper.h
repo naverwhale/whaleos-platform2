@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,23 +6,20 @@
 #define VM_TOOLS_CONCIERGE_DLC_HELPER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/memory/scoped_refptr.h"
-#include "base/optional.h"
 
 namespace dbus {
 class Bus;
 }  // namespace dbus
 
-namespace org {
-namespace chromium {
+namespace org::chromium {
 class DlcServiceInterfaceProxyInterface;
 }
-}  // namespace org
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 
 class DlcHelper {
  public:
@@ -43,15 +40,14 @@ class DlcHelper {
   // Determine the path where the |dlc_id| DLC is located. If it is not
   // installed, or some error occurs, returns nullopt and sets |out_error|.
   // Assumes that |out_error| is valid (non-null).
-  base::Optional<std::string> GetRootPath(const std::string& dlc_id,
-                                          std::string* out_error);
+  std::optional<std::string> GetRootPath(const std::string& dlc_id,
+                                         std::string* out_error);
 
  private:
   std::unique_ptr<org::chromium::DlcServiceInterfaceProxyInterface>
       dlcservice_handle_;
 };
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge
 
 #endif  // VM_TOOLS_CONCIERGE_DLC_HELPER_H_

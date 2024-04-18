@@ -1,10 +1,11 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef PERMISSION_BROKER_PORT_TRACKER_H_
 #define PERMISSION_BROKER_PORT_TRACKER_H_
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -13,21 +14,16 @@
 #include <vector>
 
 #include <base/files/file_descriptor_watcher_posix.h>
-#include <base/macros.h>
-#include <base/sequenced_task_runner.h>
-#include <patchpanel/proto_bindings/patchpanel_service.pb.h>
+#include <base/task/sequenced_task_runner.h>
+#include <base/types/cxx23_to_underlying.h>
+#include <chromeos/patchpanel/dbus/client.h>
 
 namespace permission_broker {
-
-using patchpanel::ModifyPortRuleRequest;
-using Operation = patchpanel::ModifyPortRuleRequest::Operation;
-using Protocol = patchpanel::ModifyPortRuleRequest::Protocol;
-using RuleType = patchpanel::ModifyPortRuleRequest::RuleType;
 
 class PortTracker {
  public:
   struct PortRuleKey {
-    Protocol proto;
+    patchpanel::Client::FirewallRequestProtocol proto;
     uint16_t input_dst_port;
     std::string input_ifname;
 
@@ -40,7 +36,7 @@ class PortTracker {
   // Helper for using PortRuleKey as key entries in std::unordered_maps.
   struct PortRuleKeyHasher {
     std::size_t operator()(const PortRuleKey& k) const {
-      return ((std::hash<int>()(k.proto) ^
+      return ((std::hash<int>()(base::to_underlying(k.proto)) ^
                (std::hash<uint16_t>()(k.input_dst_port) << 1)) >>
               1) ^
              (std::hash<std::string>()(k.input_ifname) << 1);
@@ -65,7 +61,7 @@ class PortTracker {
   struct PortRule {
     int lifeline_fd;
     PortRuleType type;
-    Protocol proto;
+    patchpanel::Client::FirewallRequestProtocol proto;
     std::string input_dst_ip;
     uint16_t input_dst_port;
     std::string input_ifname;
@@ -109,7 +105,8 @@ class PortTracker {
 
  private:
   // Call patchpanel's DBus API to create or remove firewall rule.
-  virtual bool ModifyPortRule(Operation op, const PortRule& rule);
+  virtual bool ModifyPortRule(patchpanel::Client::FirewallRequestOperation op,
+                              const PortRule& rule);
 
   // Callback to call when a lifeline file descriptor is triggered.
   virtual void OnFileDescriptorReadable(int fd);

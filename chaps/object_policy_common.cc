@@ -1,15 +1,14 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chaps/object_policy_common.h"
 
+#include <iterator>
 #include <map>
 
 #include <base/check.h>
 #include <base/logging.h>
-#include <base/macros.h>
-#include <base/stl_util.h>
 
 #include "chaps/chaps_utility.h"
 #include "chaps/object.h"
@@ -33,7 +32,7 @@ static const AttributePolicy kCommonPolicies[] = {
     {CKA_LABEL, false, {false, false, false}, false}};
 
 ObjectPolicyCommon::ObjectPolicyCommon() : object_(NULL) {
-  AddPolicies(kCommonPolicies, base::size(kCommonPolicies));
+  AddPolicies(kCommonPolicies, std::size(kCommonPolicies));
 }
 
 ObjectPolicyCommon::~ObjectPolicyCommon() {}

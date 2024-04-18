@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,11 +24,11 @@
 #include "power_manager/powerd/system/display/display_info.h"
 #include "power_manager/powerd/system/display/display_watcher_stub.h"
 #include "power_manager/powerd/system/input_watcher_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 #include "power_manager/proto_bindings/input_event.pb.h"
 #include "power_manager/proto_bindings/switch_states.pb.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 namespace {
 
 const char kNoActions[] = "";
@@ -79,12 +79,12 @@ std::string GetAcknowledgmentDelayAction(base::TimeDelta delay) {
 class TestInputEventHandlerDelegate : public InputEventHandler::Delegate,
                                       public ActionRecorder {
  public:
-  TestInputEventHandlerDelegate() {}
+  TestInputEventHandlerDelegate() = default;
   TestInputEventHandlerDelegate(const TestInputEventHandlerDelegate&) = delete;
   TestInputEventHandlerDelegate& operator=(
       const TestInputEventHandlerDelegate&) = delete;
 
-  ~TestInputEventHandlerDelegate() override {}
+  ~TestInputEventHandlerDelegate() override = default;
 
   // InputEventHandler::Delegate implementation:
   void HandleLidClosed() override { AppendAction(kLidClosed); }
@@ -112,13 +112,13 @@ class TestInputEventHandlerDelegate : public InputEventHandler::Delegate,
 
 }  // namespace
 
-class InputEventHandlerTest : public ::testing::Test {
+class InputEventHandlerTest : public TestEnvironment {
  public:
   InputEventHandlerTest() {
     handler_.clock_for_testing()->set_current_time_for_testing(
-        base::TimeTicks::FromInternalValue(1000));
+        base::TimeTicks() + base::Microseconds(1000));
   }
-  ~InputEventHandlerTest() override {}
+  ~InputEventHandlerTest() override = default;
 
  protected:
   // Initializes |handler_|.
@@ -139,12 +139,12 @@ class InputEventHandlerTest : public ::testing::Test {
 
   // Tests that one InputEvent D-Bus signal has been sent and returns the
   // signal's |timestamp| field.
-  int64_t GetInputEventSignalTimestamp() {
+  base::TimeTicks GetInputEventSignalTimestamp() {
     InputEvent proto;
     EXPECT_EQ(1, dbus_wrapper_.num_sent_signals());
     EXPECT_TRUE(
         dbus_wrapper_.GetSentSignal(0, kInputEventSignal, &proto, nullptr));
-    return proto.timestamp();
+    return base::TimeTicks() + base::Microseconds(proto.timestamp());
   }
 
   // Returns the current (fake) time.
@@ -162,7 +162,7 @@ class InputEventHandlerTest : public ::testing::Test {
   void CallIgnoreNextPowerButtonPress(const base::TimeDelta& timeout) {
     dbus::MethodCall method_call(kPowerManagerInterface,
                                  kIgnoreNextPowerButtonPressMethod);
-    dbus::MessageWriter(&method_call).AppendInt64(timeout.ToInternalValue());
+    dbus::MessageWriter(&method_call).AppendInt64(timeout.InMicroseconds());
     ASSERT_TRUE(dbus_wrapper_.CallExportedMethodSync(&method_call));
   }
 
@@ -170,7 +170,8 @@ class InputEventHandlerTest : public ::testing::Test {
   void CallHandlePowerButtonAcknowledgment(const base::TimeTicks& timestamp) {
     dbus::MethodCall method_call(kPowerManagerInterface,
                                  kHandlePowerButtonAcknowledgmentMethod);
-    dbus::MessageWriter(&method_call).AppendInt64(timestamp.ToInternalValue());
+    dbus::MessageWriter(&method_call)
+        .AppendInt64((timestamp - base::TimeTicks()).InMicroseconds());
     ASSERT_TRUE(dbus_wrapper_.CallExportedMethodSync(&method_call));
   }
 
@@ -192,20 +193,20 @@ TEST_F(InputEventHandlerTest, LidEvents) {
   EXPECT_EQ(0, dbus_wrapper_.num_sent_signals());
   dbus_wrapper_.ClearSentSignals();
 
-  AdvanceTime(base::TimeDelta::FromSeconds(1));
+  AdvanceTime(base::Seconds(1));
   input_watcher_.set_lid_state(LidState::CLOSED);
   input_watcher_.NotifyObserversAboutLidState();
   EXPECT_EQ(kLidClosed, delegate_.GetActions());
   EXPECT_EQ(InputEvent_Type_LID_CLOSED, GetInputEventSignalType());
-  EXPECT_EQ(Now().ToInternalValue(), GetInputEventSignalTimestamp());
+  EXPECT_EQ(Now(), GetInputEventSignalTimestamp());
   dbus_wrapper_.ClearSentSignals();
 
-  AdvanceTime(base::TimeDelta::FromSeconds(5));
+  AdvanceTime(base::Seconds(5));
   input_watcher_.set_lid_state(LidState::OPEN);
   input_watcher_.NotifyObserversAboutLidState();
   EXPECT_EQ(kLidOpened, delegate_.GetActions());
   EXPECT_EQ(InputEvent_Type_LID_OPEN, GetInputEventSignalType());
-  EXPECT_EQ(Now().ToInternalValue(), GetInputEventSignalTimestamp());
+  EXPECT_EQ(Now(), GetInputEventSignalTimestamp());
   dbus_wrapper_.ClearSentSignals();
 }
 
@@ -214,20 +215,20 @@ TEST_F(InputEventHandlerTest, TabletModeEvents) {
   EXPECT_EQ(0, dbus_wrapper_.num_sent_signals());
   dbus_wrapper_.ClearSentSignals();
 
-  AdvanceTime(base::TimeDelta::FromSeconds(1));
+  AdvanceTime(base::Seconds(1));
   input_watcher_.set_tablet_mode(TabletMode::ON);
   input_watcher_.NotifyObserversAboutTabletMode();
   EXPECT_EQ(kTabletOn, delegate_.GetActions());
   EXPECT_EQ(InputEvent_Type_TABLET_MODE_ON, GetInputEventSignalType());
-  EXPECT_EQ(Now().ToInternalValue(), GetInputEventSignalTimestamp());
+  EXPECT_EQ(Now(), GetInputEventSignalTimestamp());
   dbus_wrapper_.ClearSentSignals();
 
-  AdvanceTime(base::TimeDelta::FromSeconds(1));
+  AdvanceTime(base::Seconds(1));
   input_watcher_.set_tablet_mode(TabletMode::OFF);
   input_watcher_.NotifyObserversAboutTabletMode();
   EXPECT_EQ(kTabletOff, delegate_.GetActions());
   EXPECT_EQ(InputEvent_Type_TABLET_MODE_OFF, GetInputEventSignalType());
-  EXPECT_EQ(Now().ToInternalValue(), GetInputEventSignalTimestamp());
+  EXPECT_EQ(Now(), GetInputEventSignalTimestamp());
   dbus_wrapper_.ClearSentSignals();
 }
 
@@ -240,14 +241,14 @@ TEST_F(InputEventHandlerTest, PowerButtonEvents) {
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::DOWN);
   EXPECT_EQ(kPowerButtonDown, delegate_.GetActions());
   EXPECT_EQ(InputEvent_Type_POWER_BUTTON_DOWN, GetInputEventSignalType());
-  EXPECT_EQ(Now().ToInternalValue(), GetInputEventSignalTimestamp());
+  EXPECT_EQ(Now(), GetInputEventSignalTimestamp());
   dbus_wrapper_.ClearSentSignals();
 
-  AdvanceTime(base::TimeDelta::FromMilliseconds(100));
+  AdvanceTime(base::Milliseconds(100));
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::UP);
   EXPECT_EQ(kPowerButtonUp, delegate_.GetActions());
   EXPECT_EQ(InputEvent_Type_POWER_BUTTON_UP, GetInputEventSignalType());
-  EXPECT_EQ(Now().ToInternalValue(), GetInputEventSignalTimestamp());
+  EXPECT_EQ(Now(), GetInputEventSignalTimestamp());
   dbus_wrapper_.ClearSentSignals();
 
   // With no displays connected, the system should shut down immediately.
@@ -262,8 +263,8 @@ TEST_F(InputEventHandlerTest, IgnorePowerButtonPresses) {
   Init();
   dbus_wrapper_.ClearSentSignals();
 
-  const base::TimeDelta kShortDelay = base::TimeDelta::FromMilliseconds(100);
-  const base::TimeDelta kIgnoreTimeout = base::TimeDelta::FromSeconds(3);
+  const base::TimeDelta kShortDelay = base::Milliseconds(100);
+  const base::TimeDelta kIgnoreTimeout = base::Seconds(3);
 
   // Ignore the power button events.
   CallIgnoreNextPowerButtonPress(kIgnoreTimeout);
@@ -292,7 +293,7 @@ TEST_F(InputEventHandlerTest, IgnorePowerButtonPresses) {
   // Ignore again the power button events.
   CallIgnoreNextPowerButtonPress(kIgnoreTimeout);
   // Expire the timeout.
-  AdvanceTime(kIgnoreTimeout + base::TimeDelta::FromMilliseconds(500));
+  AdvanceTime(kIgnoreTimeout + base::Milliseconds(500));
   // The next press is going through.
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::DOWN);
   EXPECT_EQ(kPowerButtonDown, delegate_.GetActions());
@@ -328,7 +329,7 @@ TEST_F(InputEventHandlerTest, IgnorePowerButtonPresses) {
 TEST_F(InputEventHandlerTest, AcknowledgePowerButtonPresses) {
   Init();
 
-  const base::TimeDelta kShortDelay = base::TimeDelta::FromMilliseconds(100);
+  const base::TimeDelta kShortDelay = base::Milliseconds(100);
   const base::TimeDelta kTimeout =
       InputEventHandler::kPowerButtonAcknowledgmentTimeout;
 
@@ -337,8 +338,7 @@ TEST_F(InputEventHandlerTest, AcknowledgePowerButtonPresses) {
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::DOWN);
   EXPECT_EQ(kPowerButtonDown, delegate_.GetActions());
   AdvanceTime(kShortDelay);
-  CallHandlePowerButtonAcknowledgment(
-      base::TimeTicks::FromInternalValue(GetInputEventSignalTimestamp()));
+  CallHandlePowerButtonAcknowledgment(GetInputEventSignalTimestamp());
   EXPECT_EQ(GetAcknowledgmentDelayAction(kShortDelay), delegate_.GetActions());
   ASSERT_FALSE(handler_.TriggerPowerButtonAcknowledgmentTimeoutForTesting());
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::UP);
@@ -346,7 +346,7 @@ TEST_F(InputEventHandlerTest, AcknowledgePowerButtonPresses) {
 
   // Check that releasing the power button before it's been acknowledged also
   // stops the timeout.
-  AdvanceTime(base::TimeDelta::FromSeconds(1));
+  AdvanceTime(base::Seconds(1));
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::DOWN);
   EXPECT_EQ(kPowerButtonDown, delegate_.GetActions());
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::UP);
@@ -355,7 +355,7 @@ TEST_F(InputEventHandlerTest, AcknowledgePowerButtonPresses) {
   dbus_wrapper_.ClearSentSignals();
 
   // Let the timeout fire and check that the delegate is notified.
-  AdvanceTime(base::TimeDelta::FromSeconds(1));
+  AdvanceTime(base::Seconds(1));
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::DOWN);
   EXPECT_EQ(kPowerButtonDown, delegate_.GetActions());
   ASSERT_TRUE(handler_.TriggerPowerButtonAcknowledgmentTimeoutForTesting());
@@ -368,12 +368,12 @@ TEST_F(InputEventHandlerTest, AcknowledgePowerButtonPresses) {
 
   // Send an acknowledgment with a stale timestamp and check that it doesn't
   // stop the timeout.
-  AdvanceTime(base::TimeDelta::FromSeconds(1));
+  AdvanceTime(base::Seconds(1));
   dbus_wrapper_.ClearSentSignals();
   input_watcher_.NotifyObserversAboutPowerButtonEvent(ButtonState::DOWN);
   EXPECT_EQ(kPowerButtonDown, delegate_.GetActions());
-  CallHandlePowerButtonAcknowledgment(
-      base::TimeTicks::FromInternalValue(GetInputEventSignalTimestamp() - 100));
+  CallHandlePowerButtonAcknowledgment(GetInputEventSignalTimestamp() -
+                                      base::Microseconds(100));
   EXPECT_EQ(kNoActions, delegate_.GetActions());
   ASSERT_TRUE(handler_.TriggerPowerButtonAcknowledgmentTimeoutForTesting());
   EXPECT_EQ(JoinActions(GetAcknowledgmentDelayAction(kTimeout).c_str(),
@@ -450,5 +450,4 @@ TEST_F(InputEventHandlerTest, OnHoverStateChangeTest) {
   EXPECT_EQ(kHoverOff, delegate_.GetActions());
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

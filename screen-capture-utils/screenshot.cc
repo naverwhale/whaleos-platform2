@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,6 @@
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 
-#include "screen-capture-utils/bo_import_capture.h"
 #include "screen-capture-utils/capture.h"
 #include "screen-capture-utils/crtc.h"
 #include "screen-capture-utils/egl_capture.h"
@@ -27,7 +26,7 @@ constexpr const char kInternalSwitch[] = "internal";
 constexpr const char kExternalSwitch[] = "external";
 constexpr const char kCrtcIdSwitch[] = "crtc-id";
 constexpr const char kCropSwitch[] = "crop";
-constexpr const char kMethodSwitch[] = "method";
+constexpr const char kRotateSwitch[] = "rotate";
 
 constexpr const char kHelp[] =
     "Usage: screenshot [options...] path/to/output.png\n"
@@ -40,13 +39,7 @@ constexpr const char kHelp[] =
     "  --external: Capture from external display.\n"
     "  --crtc-id=ID: Capture from the specified display.\n"
     "  --crop=WxH+X+Y: Specify a subregion to capture.\n"
-    "  --method=[egl|bo]: Force capture method to EGL or bo.\n";
-
-enum class CaptureMethod {
-  AUTODETECT,
-  EGL,
-  BO,
-};
+    "  --rotate: Rotate captured screenshot 90 degrees clockwise.\n";
 
 void PrintHelp() {
   std::cerr << kHelp;
@@ -65,6 +58,7 @@ int Main() {
     return 1;
   }
 
+  const bool rotate = cmdline->HasSwitch(kRotateSwitch);
   int crtc_specs = (cmdline->HasSwitch(kInternalSwitch) ? 1 : 0) +
                    (cmdline->HasSwitch(kExternalSwitch) ? 1 : 0) +
                    (cmdline->HasSwitch(kCrtcIdSwitch) ? 1 : 0);
@@ -112,19 +106,6 @@ int Main() {
     return 1;
   }
 
-  CaptureMethod method = CaptureMethod::AUTODETECT;
-  if (cmdline->HasSwitch(kMethodSwitch)) {
-    std::string method_str = cmdline->GetSwitchValueASCII(kMethodSwitch);
-    if (method_str == "egl") {
-      method = CaptureMethod::EGL;
-    } else if (method_str == "bo") {
-      method = CaptureMethod::BO;
-    } else {
-      LOG(ERROR) << "Invalid --method specification";
-      return 1;
-    }
-  }
-
   uint32_t crtc_width;
   uint32_t crtc_height;
 
@@ -142,29 +123,12 @@ int Main() {
   CHECK_LE(x + width, crtc_width);
   CHECK_LE(y + height, crtc_height);
 
-  if (method == CaptureMethod::AUTODETECT) {
-    // TODO(andrescj): is it possible to still use the EGL path even if this
-    // is nullptr? e.g., if drmModeGetFB2() fails for the CRTC but not for
-    // individual planes.
-    //
-    // Also, it might be cleaner to move this logic to Crtc.
-    if (crtc->fb2())
-      method = CaptureMethod::EGL;
-    else
-      method = CaptureMethod::BO;
-  }
-
   std::unique_ptr<screenshot::DisplayBuffer> display_buffer;
 
-  if (method == CaptureMethod::EGL) {
-    display_buffer.reset(
-        new screenshot::EglDisplayBuffer(crtc.get(), x, y, width, height));
-  } else {
-    display_buffer.reset(
-        new screenshot::GbmBoDisplayBuffer(crtc.get(), x, y, width, height));
-  }
+  display_buffer.reset(
+      new screenshot::EglDisplayBuffer(crtc.get(), x, y, width, height));
 
-  screenshot::DisplayBuffer::Result result = display_buffer->Capture();
+  screenshot::DisplayBuffer::Result result = display_buffer->Capture(rotate);
   screenshot::SaveAsPng(cmdline->GetArgs()[0].c_str(), result.buffer,
                         result.width, result.height, result.stride);
   return 0;

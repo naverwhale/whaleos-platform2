@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -813,9 +813,12 @@ TEST(KernelUtilTest, WatchdogSignature) {
       "17:58:05 PST 2021\n"
       "";
 
+  const std::string kWatchdogRebootReason = "-(WATCHDOG)";
+
   EXPECT_EQ(
       "kernel-(WATCHDOG)-Linux version 4.4.252-19740-gcbe014496e3-082847C6",
-      kernel_util::WatchdogSignature(kConsoleRamoopsWithLongLastLine));
+      kernel_util::WatchdogSignature(kConsoleRamoopsWithLongLastLine,
+                                     kWatchdogRebootReason));
 
   const char kConsoleRamoopsWithShortLastLine[] =
       "<6>[    0.000000] microcode: microcode updated early to revision 0xde, "
@@ -827,9 +830,79 @@ TEST(KernelUtilTest, WatchdogSignature) {
       "";
 
   EXPECT_EQ("kernel-(WATCHDOG)-last line-3D7C5AEC",
-            kernel_util::WatchdogSignature(kConsoleRamoopsWithShortLastLine));
+            kernel_util::WatchdogSignature(kConsoleRamoopsWithShortLastLine,
+                                           kWatchdogRebootReason));
 
   const char kBrokenConsoleRamoops[] = "broken";
   EXPECT_EQ("kernel-(WATCHDOG)-broken-28348215",
-            kernel_util::WatchdogSignature(kBrokenConsoleRamoops));
+            kernel_util::WatchdogSignature(kBrokenConsoleRamoops,
+                                           kWatchdogRebootReason));
+}
+
+TEST(KernelUtilTest, IsHypervisor) {
+  const char kHypervisorLog[] =
+      "Panic#1 Part1\n"
+      "<6>[    0.000000] microcode: microcode updated early to revision 0xa4, "
+      "date = 2022-02-01\n"
+      "<5>[    0.000000] Linux version 5.10.117-manatee (<redacted email"
+      "address>) (Chromium OS 14.0_pre450784_p20220316-r22 clang version 14.0.0"
+      " (/var/tmp/portage/sys-devel/llvm-14.0_pre450784_p20220316-r22/work/"
+      "llvm-14.0_pre450784_p20220316/clang), LLD 14.0.0) #1 SMP Fri Jun 3 "
+      "16:57:19 PDT 2022\n"
+      "<6>[    0.000000] x86/split lock detection: warning about user-space "
+      "split_locks\n"
+      "<6>[    0.000000] x86/fpu: Supporting XSAVE feature 0x001: 'x87 "
+      "floating point registers'\n"
+      "";
+  EXPECT_TRUE(kernel_util::IsHypervisorCrash(kHypervisorLog));
+
+  const char kChromeOsLog[] =
+      "Panic#1 Part1\n"
+      "<5>[    0.000000] Linux version 5.10.119 (<redacted email address>) "
+      "(Chromium OS 14.0_pre450784_p20220316-r22 clang version 14.0.0 "
+      "(/var/tmp/portage/sys-devel/llvm-14.0_pre450784_p20220316-r22/work/"
+      "llvm-14.0_pre450784_p20220316/clang), LLD 14.0.0) #1 SMP PREEMPT "
+      "Fri Jun 10 12:46:22 PDT 2022\n"
+      "<6>[    0.000000] x86/fpu: Supporting XSAVE feature 0x001: 'x87 "
+      "floating point registers'\n"
+      "<6>[    0.000000] x86/fpu: Supporting XSAVE feature 0x002: 'SSE "
+      "registers'\n"
+      "";
+  EXPECT_FALSE(kernel_util::IsHypervisorCrash(kChromeOsLog));
+}
+
+TEST(KernelUtilTest, GetHypervisorLog) {
+  const char kConsoleLog[] =
+      "[15.468853] IPv6: ADDRCONF(NETDEV_CHANGE): arc_ns0: link becomes ready\n"
+      "[15.469310] IPv6: ADDRCONF(NETDEV_CHANGE): veth0: link becomes ready\n"
+      "[15.505797] IPv6: ADDRCONF(NETDEV_CHANGE): veth1: link becomes ready\n"
+      "";
+  const char kHypervisorLogHeader[] =
+      "\n"
+      "--------[ hypervisor log ]--------\n"
+      "";
+  const char kHypervisorLog[] =
+      "[3.553454] vfio-pci-pm 0000:00:15.3: attach allowed to drvr vfio-pci-pm "
+      "[internal device]\\n SUBSYSTEM=pci\\n DEVICE=+pci:0000:00:15.3\n"
+      "[3.562705] vfio-pci-pm 0000:00:16.0: attach allowed to drvr vfio-pci-pm "
+      "[internal device]\\n SUBSYSTEM=pci\\n DEVICE=+pci:0000:00:16.0\n"
+      "[3.571948] vfio-pci-pm 0000:00:19.0: attach allowed to drvr vfio-pci-pm "
+      "[internal device]\\n SUBSYSTEM=pci\\n DEVICE=+pci:0000:00:19.0\n"
+      "[3.581197] vfio-pci-pm 0000:00:19.1: attach allowed to drvr vfio-pci-pm "
+      "[internal device]\\n SUBSYSTEM=pci\\n DEVICE=+pci:0000:00:19.1\n"
+      "";
+
+  std::string extract;
+  std::string logWithoutHypervisor(kConsoleLog);
+  EXPECT_FALSE(
+      kernel_util::ExtractHypervisorLog(logWithoutHypervisor, extract));
+  EXPECT_EQ("", extract);
+  EXPECT_EQ(kConsoleLog, logWithoutHypervisor);
+
+  std::string logWithHypervisor(kConsoleLog);
+  logWithHypervisor += kHypervisorLogHeader;
+  logWithHypervisor += kHypervisorLog;
+  EXPECT_TRUE(kernel_util::ExtractHypervisorLog(logWithHypervisor, extract));
+  EXPECT_EQ(kHypervisorLog, extract);
+  EXPECT_EQ(kConsoleLog, logWithHypervisor);
 }

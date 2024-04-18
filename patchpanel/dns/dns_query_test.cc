@@ -1,12 +1,13 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "patchpanel/dns/dns_query.h"
 
+#include <iterator>
+#include <string_view>
 #include <tuple>
 
-#include "base/stl_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -56,7 +57,7 @@ TEST(DnsQueryParseTest, SingleQuestionForTypeARecord) {
   EXPECT_TRUE(ParseAndCreateDnsQueryFromRawPacket(query_data,
                                                   sizeof(query_data), &query));
   EXPECT_EQ(0x1234, query->id());
-  base::StringPiece qname(kQNameData, sizeof(kQNameData));
+  std::string_view qname(kQNameData, sizeof(kQNameData));
   EXPECT_EQ(qname, query->qname());
   EXPECT_EQ(dns_protocol::kTypeA, query->qtype());
 }
@@ -79,7 +80,7 @@ TEST(DnsQueryParseTest, SingleQuestionForTypeAAAARecord) {
   EXPECT_TRUE(ParseAndCreateDnsQueryFromRawPacket(query_data,
                                                   sizeof(query_data), &query));
   EXPECT_EQ(0x1234, query->id());
-  base::StringPiece qname(kQNameData, sizeof(kQNameData));
+  std::string_view qname(kQNameData, sizeof(kQNameData));
   EXPECT_EQ(qname, query->qname());
   EXPECT_EQ(dns_protocol::kTypeAAAA, query->qtype());
 }
@@ -147,10 +148,10 @@ TEST(DnsQueryParseTest, FailsInvalidQueries) {
     const uint8_t* data;
     size_t size;
   } testcases[] = {
-      {kQueryTruncatedQuestion, base::size(kQueryTruncatedQuestion)},
-      {kQueryTwoQuestions, base::size(kQueryTwoQuestions)},
-      {kQueryInvalidDNSDomainName1, base::size(kQueryInvalidDNSDomainName1)},
-      {kQueryInvalidDNSDomainName2, base::size(kQueryInvalidDNSDomainName2)}};
+      {kQueryTruncatedQuestion, std::size(kQueryTruncatedQuestion)},
+      {kQueryTwoQuestions, std::size(kQueryTwoQuestions)},
+      {kQueryInvalidDNSDomainName1, std::size(kQueryInvalidDNSDomainName1)},
+      {kQueryInvalidDNSDomainName2, std::size(kQueryInvalidDNSDomainName2)}};
   std::unique_ptr<DnsQuery> query;
   for (const auto& testcase : testcases) {
     EXPECT_FALSE(ParseAndCreateDnsQueryFromRawPacket(testcase.data,

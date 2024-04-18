@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,13 @@
 
 #include <brillo/whaleos_util.h>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/message_loop/message_pump_type.h>
 
 namespace {
-constexpr base::TimeDelta kDefaultTimeout = base::TimeDelta::FromMinutes(5);
+constexpr base::TimeDelta kDefaultTimeout = base::Minutes(5);
 }  // namespace
 
 namespace tpm_manager {
@@ -42,8 +42,8 @@ bool TpmManagerUtility::Initialize() {
     base::WaitableEvent event(base::WaitableEvent::ResetPolicy::MANUAL,
                               base::WaitableEvent::InitialState::NOT_SIGNALED);
     tpm_manager_thread_.task_runner()->PostTask(
-        FROM_HERE, base::Bind(&TpmManagerUtility::InitializationTask,
-                              base::Unretained(this), &event));
+        FROM_HERE, base::BindOnce(&TpmManagerUtility::InitializationTask,
+                                  base::Unretained(this), &event));
     event.Wait();
   }
   if (!tpm_owner_ || !tpm_nvram_) {
@@ -186,9 +186,10 @@ void TpmManagerUtility::InitializationTask(base::WaitableEvent* completion) {
   default_tpm_nvram_ = std::make_unique<org::chromium::TpmNvramProxy>(bus_);
 
   default_tpm_owner_->RegisterSignalOwnershipTakenSignalHandler(
-      base::Bind(&TpmManagerUtility::OnOwnershipTaken, base::Unretained(this)),
-      base::Bind(&TpmManagerUtility::OnSignalConnected,
-                 base::Unretained(this)));
+      base::BindRepeating(&TpmManagerUtility::OnOwnershipTaken,
+                          base::Unretained(this)),
+      base::BindOnce(&TpmManagerUtility::OnSignalConnected,
+                     base::Unretained(this)));
 
   tpm_owner_ = default_tpm_owner_.get();
   tpm_nvram_ = default_tpm_nvram_.get();
@@ -429,26 +430,6 @@ bool TpmManagerUtility::LockSpace(uint32_t index) {
   return true;
 }
 
-bool TpmManagerUtility::GetOwnershipTakenSignalStatus(bool* is_successful,
-                                                      bool* has_received,
-                                                      LocalData* local_data) {
-  base::AutoLock lock(ownership_signal_lock_);
-  if (!is_connected_) {
-    return false;
-  }
-  if (is_successful) {
-    *is_successful = is_connection_successful_;
-  }
-  if (has_received) {
-    *has_received = static_cast<bool>(ownership_taken_signal_);
-  }
-  // Copies |LocalData| when both the data source and destination is ready.
-  if (ownership_taken_signal_ && local_data) {
-    *local_data = ownership_taken_signal_->local_data();
-  }
-  return true;
-}
-
 void TpmManagerUtility::AddOwnershipCallback(
     OwnershipCallback ownership_callback) {
   base::AutoLock lock(ownership_callback_lock_);
@@ -457,10 +438,6 @@ void TpmManagerUtility::AddOwnershipCallback(
 
 void TpmManagerUtility::OnOwnershipTaken(const OwnershipTakenSignal& signal) {
   LOG(INFO) << __func__ << ": Received |OwnershipTakenSignal|.";
-  {
-    base::AutoLock lock(ownership_signal_lock_);
-    ownership_taken_signal_ = signal;
-  }
   base::AutoLock lock(ownership_callback_lock_);
   for (auto& callback : ownership_callbacks_) {
     callback.Run();

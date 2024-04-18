@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,40 +11,22 @@
 #include <vector>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <fuzzer/FuzzedDataProvider.h>
+#include <net-base/ipv4_address.h>
 
 #include "patchpanel/datapath.h"
+#include "patchpanel/fake_process_runner.h"
 #include "patchpanel/firewall.h"
-#include "patchpanel/minijailed_process_runner.h"
 #include "patchpanel/multicast_forwarder.h"
-#include "patchpanel/net_util.h"
+#include "patchpanel/shill_client.h"
 #include "patchpanel/subnet.h"
 #include "patchpanel/system.h"
 
 namespace patchpanel {
 namespace {
-
-// Always succeeds
-class FakeProcessRunner : public MinijailedProcessRunner {
- public:
-  FakeProcessRunner() = default;
-  FakeProcessRunner(const FakeProcessRunner&) = delete;
-  FakeProcessRunner& operator=(const FakeProcessRunner&) = delete;
-  ~FakeProcessRunner() = default;
-
-  int Run(const std::vector<std::string>& argv, bool log_failures) override {
-    return 0;
-  }
-
-  int RunSync(const std::vector<std::string>& argv,
-              bool log_failures,
-              std::string* output) override {
-    return 0;
-  }
-};
 
 // Always succeeds
 class NoopSystem : public System {
@@ -71,79 +53,95 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   static Environment env;
   FuzzedDataProvider provider(data, size);
 
-  uint32_t pid = provider.ConsumeIntegral<uint32_t>();
+  int32_t pid = provider.ConsumeIntegral<int32_t>();
   std::string netns_name = provider.ConsumeRandomLengthString(10);
   std::string ifname = provider.ConsumeRandomLengthString(IFNAMSIZ - 1);
   std::string ifname2 = provider.ConsumeRandomLengthString(IFNAMSIZ - 1);
   std::string ifname3 = provider.ConsumeRandomLengthString(IFNAMSIZ - 1);
   std::string bridge = provider.ConsumeRandomLengthString(IFNAMSIZ - 1);
   uint32_t addr = provider.ConsumeIntegral<uint32_t>();
-  std::string addr_str = IPv4AddressToString(addr);
-  uint32_t prefix_len = provider.ConsumeIntegralInRange<uint32_t>(0, 31);
-  SubnetAddress subnet_addr(provider.ConsumeIntegral<int32_t>(), prefix_len,
-                            base::DoNothing());
+  int prefix_len = provider.ConsumeIntegralInRange<int>(0, 31);
+  const auto ipv4_addr = net_base::IPv4Address(addr);
+  const auto cidr =
+      *net_base::IPv4CIDR::CreateFromAddressAndPrefix(ipv4_addr, prefix_len);
   MacAddress mac;
   std::vector<uint8_t> mac_addr_bytes =
       provider.ConsumeBytes<uint8_t>(mac.size());
   std::copy(mac_addr_bytes.begin(), mac_addr_bytes.end(), mac.begin());
 
-  struct in6_addr ipv6_addr;
-  memset(&ipv6_addr, 0, sizeof(ipv6_addr));
-  std::vector<uint8_t> ipv6_addr_bytes =
-      provider.ConsumeBytes<uint8_t>(sizeof(ipv6_addr.s6_addr));
-  std::copy(ipv6_addr_bytes.begin(), ipv6_addr_bytes.end(), ipv6_addr.s6_addr);
-  std::string ipv6_addr_str = IPv6AddressToString(ipv6_addr);
+  const std::vector<uint8_t> ipv6_addr_bytes =
+      provider.ConsumeBytes<uint8_t>(net_base::IPv6Address::kAddressLength);
+  const int ipv6_prefix_len = provider.ConsumeIntegralInRange<int>(0, 128);
+  const auto ipv6_addr = net_base::IPv6Address::CreateFromBytes(ipv6_addr_bytes)
+                             .value_or(net_base::IPv6Address());
+  const auto ipv6_cidr = *net_base::IPv6CIDR::CreateFromAddressAndPrefix(
+      ipv6_addr, ipv6_prefix_len);
+  const std::string ipv6_addr_str = ipv6_addr.ToString();
   bool route_on_vpn = provider.ConsumeBool();
 
   ConnectedNamespace nsinfo = {};
   nsinfo.pid = pid;
   nsinfo.netns_name = netns_name;
-  nsinfo.source = TrafficSource::USER;
+  nsinfo.source = TrafficSource::kUser;
   nsinfo.outbound_ifname = ifname;
   nsinfo.route_on_vpn = route_on_vpn;
   nsinfo.host_ifname = ifname2;
   nsinfo.peer_ifname = ifname3;
-  nsinfo.peer_subnet =
-      std::make_unique<Subnet>(addr, prefix_len, base::DoNothing());
+  nsinfo.peer_ipv4_subnet = std::make_unique<Subnet>(cidr, base::DoNothing());
   nsinfo.peer_mac_addr = mac;
+
+  ShillClient::Device shill_device;
+  shill_device.ifname = ifname;
+  shill_device.type = ShillClient::Device::Type::kWifi;
+  shill_device.service_path = provider.ConsumeRandomLengthString(10);
+  shill_device.ifindex = provider.ConsumeIntegral<int32_t>();
 
   auto runner = new FakeProcessRunner();
   auto firewall = new Firewall();
-  auto system = new NoopSystem();
-  Datapath datapath(runner, firewall, system);
+  NoopSystem system;
+  Datapath datapath(runner, firewall, &system);
   datapath.Start();
   datapath.Stop();
   datapath.NetnsAttachName(netns_name, pid);
   datapath.NetnsDeleteName(netns_name);
-  datapath.AddBridge(ifname, addr, prefix_len);
+  datapath.AddBridge(ifname, cidr);
   datapath.RemoveBridge(ifname);
   datapath.AddToBridge(ifname, ifname2);
-  datapath.StartRoutingDevice(ifname, ifname2, addr, TrafficSource::UNKNOWN,
-                              route_on_vpn);
-  datapath.StopRoutingDevice(ifname, ifname2, addr, TrafficSource::UNKNOWN,
-                             route_on_vpn);
+  datapath.StartRoutingDevice(shill_device, ifname2, TrafficSource::kUnknown);
+  datapath.StartRoutingDeviceAsSystem(ifname2, TrafficSource::kUnknown);
+  datapath.StartRoutingDeviceAsUser(ifname2, TrafficSource::kUnknown,
+                                    ipv4_addr);
+  datapath.StopRoutingDevice(ifname2);
   datapath.StartRoutingNamespace(nsinfo);
   datapath.StopRoutingNamespace(nsinfo);
-  datapath.ConnectVethPair(pid, netns_name, ifname, ifname2, mac, addr,
-                           prefix_len, provider.ConsumeBool());
+  datapath.ConnectVethPair(pid, netns_name, ifname, ifname2, mac, cidr,
+                           ipv6_cidr, provider.ConsumeBool());
   datapath.RemoveInterface(ifname);
-  datapath.AddTAP(ifname, &mac, &subnet_addr, "");
-  datapath.RemoveTAP(ifname);
-  datapath.AddIPv4Route(provider.ConsumeIntegral<uint32_t>(),
-                        provider.ConsumeIntegral<uint32_t>(),
-                        provider.ConsumeIntegral<uint32_t>());
-  datapath.StartConnectionPinning(ifname);
-  datapath.StopConnectionPinning(ifname);
-  datapath.StartVpnRouting(ifname);
-  datapath.StopVpnRouting(ifname);
+  datapath.AddTunTap(ifname, mac, cidr, "", DeviceMode::kTun);
+  datapath.RemoveTunTap(ifname, DeviceMode::kTun);
+  datapath.AddTunTap(ifname, mac, cidr, "", DeviceMode::kTap);
+  datapath.RemoveTunTap(ifname, DeviceMode::kTap);
+  datapath.AddIPv4Route(
+      net_base::IPv4Address(provider.ConsumeIntegral<uint32_t>()), cidr);
+  datapath.DeleteIPv4Route(
+      net_base::IPv4Address(provider.ConsumeIntegral<uint32_t>()), cidr);
+  datapath.StartConnectionPinning(shill_device);
+  datapath.StopConnectionPinning(shill_device);
+  datapath.StartVpnRouting(shill_device);
+  datapath.StopVpnRouting(shill_device);
   datapath.MaskInterfaceFlags(ifname, provider.ConsumeIntegral<uint16_t>(),
                               provider.ConsumeIntegral<uint16_t>());
-  datapath.AddIPv6Forwarding(ifname, ifname2);
-  datapath.RemoveIPv6Forwarding(ifname, ifname2);
-  datapath.AddIPv6HostRoute(ifname, ipv6_addr_str, prefix_len);
-  datapath.RemoveIPv6HostRoute(ifname, ipv6_addr_str, prefix_len);
+  datapath.AddIPv6HostRoute(ifname, ipv6_cidr);
+  datapath.RemoveIPv6HostRoute(ipv6_cidr);
   datapath.AddIPv6Address(ifname, ipv6_addr_str);
   datapath.RemoveIPv6Address(ifname, ipv6_addr_str);
+  datapath.StartSourceIPv6PrefixEnforcement(shill_device);
+  datapath.StopSourceIPv6PrefixEnforcement(shill_device);
+  datapath.UpdateSourceEnforcementIPv6Prefix(shill_device, ipv6_cidr);
+  datapath.AddInboundIPv4DNAT(AutoDNATTarget::kArc, shill_device, ipv4_addr);
+  datapath.RemoveInboundIPv4DNAT(AutoDNATTarget::kArc, shill_device, ipv4_addr);
+  datapath.AddRedirectDnsRule(shill_device, ipv4_addr.ToString());
+  datapath.RemoveRedirectDnsRule(shill_device);
 
   return 0;
 }

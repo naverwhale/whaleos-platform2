@@ -1,12 +1,14 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chaps/session_impl.h"
 
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -14,11 +16,15 @@
 
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <brillo/secure_blob.h>
 #include <crypto/libcrypto-compat.h>
 #include <crypto/scoped_openssl_types.h>
+#include <libhwsec/frontend/chaps/frontend.h>
+#include <libhwsec-foundation/status/status_chain_macros.h>
 #include <openssl/bio.h>
 #include <openssl/des.h>
 #include <openssl/err.h>
@@ -33,10 +39,11 @@
 #include "chaps/chaps_utility.h"
 #include "chaps/object.h"
 #include "chaps/object_pool.h"
-#include "chaps/tpm_utility.h"
 #include "pkcs11/cryptoki.h"
 
 using brillo::SecureBlob;
+using hwsec::TPMError;
+using hwsec_foundation::status::MakeStatus;
 using ScopedASN1_OCTET_STRING =
     crypto::ScopedOpenSSL<ASN1_OCTET_STRING, ASN1_OCTET_STRING_free>;
 using std::hex;
@@ -44,6 +51,10 @@ using std::map;
 using std::set;
 using std::string;
 using std::vector;
+
+using AllowSoftwareGen = hwsec::ChapsFrontend::AllowSoftwareGen;
+using AllowDecrypt = hwsec::ChapsFrontend::AllowDecrypt;
+using AllowSign = hwsec::ChapsFrontend::AllowSign;
 
 namespace chaps {
 
@@ -61,6 +72,22 @@ const int kMaxRSAOutputBytes = 2048;
 const int kMaxDigestOutputBytes = EVP_MAX_MD_SIZE;
 const int kMinRSAKeyBits = 512;
 const int kMaxRSAKeyBits = kMaxRSAOutputBytes * 8;
+// We are willing to generate random data up to 512MiB, this is a tradeoff
+// between servicing as much requests as possible and not causing out of memory
+// events.
+const size_t kMaxRandomBufferSize = 1024 * 1024 * 512;
+
+string GenerateRandomSoftware(size_t num_bytes) {
+  string random(num_bytes, 0);
+  RAND_bytes(ConvertStringToByteBuffer(random.data()), num_bytes);
+  return random;
+}
+
+brillo::SecureBlob GenerateRandomSecureBlobSoftware(int num_bytes) {
+  brillo::SecureBlob random(num_bytes);
+  RAND_bytes(random.data(), num_bytes);
+  return random;
+}
 
 CK_RV ResultToRV(chaps::ObjectPool::Result result, CK_RV fail_rv) {
   switch (result) {
@@ -70,6 +97,24 @@ CK_RV ResultToRV(chaps::ObjectPool::Result result, CK_RV fail_rv) {
       return fail_rv;
     case chaps::ObjectPool::Result::WaitForPrivateObjects:
       return CKR_WOULD_BLOCK_FOR_PRIVATE_OBJECTS;
+  }
+}
+
+const char* OperationToString(OperationType operation) {
+  switch (operation) {
+    case kEncrypt:
+      return "Encrypt";
+    case kDecrypt:
+      return "Decrypt";
+    case kDigest:
+      return "Digest";
+    case kSign:
+      return "Sign";
+    case kVerify:
+      return "Verify";
+    case kNumOperationTypes:
+    default:
+      return "Unknown";
   }
 }
 
@@ -155,6 +200,9 @@ MechanismInfo::MechanismInfoData MechanismInfo::GetSupportedMechanismInfo(
     // ECC
     case CKM_ECDSA:
     case CKM_ECDSA_SHA1:
+    case CKM_ECDSA_SHA256:
+    case CKM_ECDSA_SHA384:
+    case CKM_ECDSA_SHA512:
       return {true, {kSign, kVerify}, CKK_EC};
 
     // HMAC
@@ -530,17 +578,16 @@ class RSASignerVerifierImplPSS : public RSASignerVerifier {
     // Parse the RSA PSS Parameters.
     const CK_RSA_PKCS_PSS_PARAMS* pss_params = nullptr;
     const EVP_MD* mgf1_hash = nullptr;
-    if (!ParseRSAPSSParams(context->mechanism_, context->parameter_,
-                           &pss_params, &mgf1_hash, &digest_algorithm)) {
+    if (!ParseRSAPSSParams(context->parameter_, digest_algorithm, &pss_params,
+                           &mgf1_hash, &digest_algorithm)) {
       LOG(ERROR) << __func__ << ": Failed to parse RSA PSS parameters.";
       return false;
     }
 
     string padded_data(RSA_size(rsa.get()), 0);
     if (RSA_padding_add_PKCS1_PSS_mgf1(
-            rsa.get(),
-            reinterpret_cast<unsigned char*>(base::data(padded_data)),
-            reinterpret_cast<const unsigned char*>(base::data(context->data_)),
+            rsa.get(), reinterpret_cast<unsigned char*>(std::data(padded_data)),
+            reinterpret_cast<const unsigned char*>(std::data(context->data_)),
             GetOpenSSLDigest(digest_algorithm), mgf1_hash,
             pss_params->sLen) != 1) {
       LOG(ERROR) << __func__ << ": Failed to produce the PSA PSS paddings.";
@@ -574,8 +621,8 @@ class RSASignerVerifierImplPSS : public RSASignerVerifier {
     // Parse the RSA PSS Parameters.
     const CK_RSA_PKCS_PSS_PARAMS* pss_params = nullptr;
     const EVP_MD* mgf1_hash = nullptr;
-    if (!ParseRSAPSSParams(context->mechanism_, context->parameter_,
-                           &pss_params, &mgf1_hash, &digest_algorithm)) {
+    if (!ParseRSAPSSParams(context->parameter_, digest_algorithm, &pss_params,
+                           &mgf1_hash, &digest_algorithm)) {
       LOG(ERROR) << __func__ << ": Failed to parse RSA PSS parameters.";
       return CKR_SIGNATURE_INVALID;
     }
@@ -621,32 +668,132 @@ std::unique_ptr<RSASignerVerifier> RSASignerVerifier::GetForMechanism(
   }
 }
 
+hwsec::DigestAlgorithm ChapsToHwsecDigestAlg(DigestAlgorithm alg) {
+  switch (alg) {
+    case DigestAlgorithm::MD5:
+      return hwsec::DigestAlgorithm::kMd5;
+    case DigestAlgorithm::SHA1:
+      return hwsec::DigestAlgorithm::kSha1;
+    case DigestAlgorithm::SHA256:
+      return hwsec::DigestAlgorithm::kSha256;
+    case DigestAlgorithm::SHA384:
+      return hwsec::DigestAlgorithm::kSha384;
+    case DigestAlgorithm::SHA512:
+      return hwsec::DigestAlgorithm::kSha512;
+    default:
+      return hwsec::DigestAlgorithm::kNoDigest;
+  }
+}
+
+std::optional<hwsec::SigningOptions::RsaPaddingScheme>
+ChapsToHwsecRsaPaddingScheme(RsaPaddingScheme scheme) {
+  switch (scheme) {
+    case RsaPaddingScheme::RSASSA_PKCS1_V1_5:
+      return hwsec::SigningOptions::RsaPaddingScheme::kPkcs1v15;
+    case RsaPaddingScheme::RSASSA_PSS:
+      return hwsec::SigningOptions::RsaPaddingScheme::kRsassaPss;
+    default:
+      return std::nullopt;
+  }
+}
+
+hwsec::DigestAlgorithm GetHwsecDigestForMGF(const CK_RSA_PKCS_MGF_TYPE mgf) {
+  switch (mgf) {
+    case CKG_MGF1_SHA1:
+      return hwsec::DigestAlgorithm::kSha1;
+    case CKG_MGF1_SHA224:
+      return hwsec::DigestAlgorithm::kSha224;
+    case CKG_MGF1_SHA256:
+      return hwsec::DigestAlgorithm::kSha256;
+    case CKG_MGF1_SHA384:
+      return hwsec::DigestAlgorithm::kSha384;
+    case CKG_MGF1_SHA512:
+      return hwsec::DigestAlgorithm::kSha512;
+    default:
+      return hwsec::DigestAlgorithm::kNoDigest;
+  }
+}
+
+std::optional<hwsec::SigningOptions::PssParams> GetHwsecPssParams(
+    const std::string& mechanism_parameter, DigestAlgorithm& digest_algorithm) {
+  const CK_RSA_PKCS_PSS_PARAMS* pss_params = nullptr;
+  const EVP_MD* mgf1_hash = nullptr;
+  // Check the parameters
+  if (!ParseRSAPSSParams(mechanism_parameter, digest_algorithm, &pss_params,
+                         &mgf1_hash, &digest_algorithm)) {
+    LOG(ERROR) << "Failed to parse RSA PSS parameters.";
+    return std::nullopt;
+  }
+
+  return hwsec::SigningOptions::PssParams{
+      .mgf1_algorithm = GetHwsecDigestForMGF(pss_params->mgf),
+      .salt_length = pss_params->sLen,
+  };
+}
+
+hwsec::SigningOptions ToHwsecSigningOptions(
+    CK_MECHANISM_TYPE signing_mechanism,
+    const std::string& mechanism_parameter) {
+  // Parse the various parameters for this method.
+  DigestAlgorithm digest_algorithm = GetDigestAlgorithm(signing_mechanism);
+  // Parse RSA PSS Parameters if applicable.
+  const RsaPaddingScheme padding_scheme =
+      GetSigningSchemeForMechanism(signing_mechanism);
+  std::optional<hwsec::SigningOptions::PssParams> pss_params;
+
+  if (padding_scheme == RsaPaddingScheme::RSASSA_PSS) {
+    pss_params = GetHwsecPssParams(mechanism_parameter, digest_algorithm);
+  }
+
+  return hwsec::SigningOptions{
+      .digest_algorithm = ChapsToHwsecDigestAlg(digest_algorithm),
+      .rsa_padding_scheme = ChapsToHwsecRsaPaddingScheme(padding_scheme),
+      .pss_params = std::move(pss_params),
+  };
+}
+
 }  // namespace
 
 SessionImpl::SessionImpl(int slot_id,
                          ObjectPool* token_object_pool,
-                         TPMUtility* tpm_utility,
+                         const hwsec::ChapsFrontend* hwsec,
                          ChapsFactory* factory,
                          HandleGenerator* handle_generator,
-                         bool is_read_only)
+                         bool is_read_only,
+                         ChapsMetrics* chaps_metrics)
     : factory_(factory),
       find_results_valid_(false),
       is_read_only_(is_read_only),
       slot_id_(slot_id),
       token_object_pool_(token_object_pool),
-      tpm_utility_(tpm_utility),
-      is_legacy_loaded_(false),
-      private_root_key_(0),
-      public_root_key_(0) {
+      hwsec_(hwsec),
+      chaps_metrics_(chaps_metrics) {
   CHECK(token_object_pool_);
-  CHECK(tpm_utility_);
   CHECK(factory_);
+  CHECK(chaps_metrics_);
+  // If the hwsec is nullptr, means it's not ready to use.
+  if (hwsec_ == nullptr) {
+    LOG(WARNING) << "HWSec is not available";
+  }
   session_object_pool_.reset(
-      factory_->CreateObjectPool(handle_generator, nullptr, nullptr, nullptr));
+      factory_->CreateObjectPool(handle_generator, nullptr, nullptr));
   CHECK(session_object_pool_.get());
 }
 
-SessionImpl::~SessionImpl() {}
+SessionImpl::~SessionImpl() {
+  for (OperationContext& context : operation_context_) {
+    if (context.is_valid_) {
+      LOG(WARNING) << "Valid context exists when session is closing.";
+      if (context.cleanup_) {
+        context.cleanup_.RunAndReset();
+      }
+    }
+  }
+
+  if (!object_count_map_.empty()) {
+    LOG(WARNING) << "Remaining object exists.";
+  }
+}
 
 int SessionImpl::GetSlot() const {
   return slot_id_;
@@ -778,6 +925,19 @@ CK_RV SessionImpl::OperationInit(OperationType operation,
                                  const string& mechanism_parameter,
                                  const Object* key) {
   CHECK(operation < kNumOperationTypes);
+  CK_RV result =
+      OperationInitRaw(operation, mechanism, mechanism_parameter, key);
+  chaps_metrics_->ReportChapsSessionStatus(OperationToString(operation),
+                                           static_cast<int>(result));
+
+  return result;
+}
+
+CK_RV SessionImpl::OperationInitRaw(OperationType operation,
+                                    CK_MECHANISM_TYPE mechanism,
+                                    const string& mechanism_parameter,
+                                    const Object* key) {
+  CHECK(operation < kNumOperationTypes);
 
   OperationContext* context = &operation_context_[operation];
   if (context->is_valid_) {
@@ -858,6 +1018,9 @@ CK_RV SessionImpl::OperationInit(OperationType operation,
     NOTREACHED();
     return CKR_FUNCTION_FAILED;
   }
+
+  UpdateObjectCount(context);
+
   return CKR_OK;
 }
 
@@ -866,9 +1029,20 @@ CK_RV SessionImpl::OperationUpdate(OperationType operation,
                                    int* required_out_length,
                                    string* data_out) {
   CHECK(operation < kNumOperationTypes);
+  CK_RV result =
+      OperationUpdateRaw(operation, data_in, required_out_length, data_out);
+  chaps_metrics_->ReportChapsSessionStatus(OperationToString(operation),
+                                           static_cast<int>(result));
+  return result;
+}
+
+CK_RV SessionImpl::OperationUpdateRaw(OperationType operation,
+                                      const string& data_in,
+                                      int* required_out_length,
+                                      string* data_out) {
+  CHECK(operation < kNumOperationTypes);
   OperationContext* context = &operation_context_[operation];
   if (!context->is_valid_) {
-    LOG(ERROR) << "Operation is not initialized.";
     return CKR_OPERATION_NOT_INITIALIZED;
   }
   if (context->is_finished_) {
@@ -924,6 +1098,19 @@ CK_RV SessionImpl::OperationFinal(OperationType operation,
   CHECK(required_out_length);
   CHECK(data_out);
   CHECK(operation < kNumOperationTypes);
+  CK_RV result = OperationFinalRaw(operation, required_out_length, data_out);
+  chaps_metrics_->ReportChapsSessionStatus(OperationToString(operation),
+                                           static_cast<int>(result));
+  return result;
+}
+
+CK_RV SessionImpl::OperationFinalRaw(OperationType operation,
+                                     int* required_out_length,
+                                     string* data_out,
+                                     bool clear_context) {
+  CHECK(required_out_length);
+  CHECK(data_out);
+  CHECK(operation < kNumOperationTypes);
   OperationContext* context = &operation_context_[operation];
   if (!context->is_valid_) {
     LOG(ERROR) << "Operation is not initialized.";
@@ -935,16 +1122,23 @@ CK_RV SessionImpl::OperationFinal(OperationType operation,
     return CKR_OPERATION_ACTIVE;
   }
   context->is_incremental_ = true;
-  return OperationFinalInternal(operation, required_out_length, data_out);
+  return OperationFinalInternal(operation, required_out_length, data_out,
+                                clear_context);
 }
 
 CK_RV SessionImpl::OperationFinalInternal(OperationType operation,
                                           int* required_out_length,
-                                          string* data_out) {
+                                          string* data_out,
+                                          bool clear_context) {
   CHECK(operation < kNumOperationTypes);
 
   OperationContext* context = &operation_context_[operation];
-  context->is_valid_ = false;
+
+  base::ScopedClosureRunner context_clear_runner(base::DoNothing());
+  if (clear_context) {
+    context_clear_runner.ReplaceClosure(
+        base::BindOnce(&OperationContext::Clear, base::Unretained(context)));
+  }
 
   // Complete the operation if it has not already been done.
   if (!context->is_finished_) {
@@ -989,6 +1183,7 @@ CK_RV SessionImpl::OperationFinalInternal(OperationType operation,
   if (result == CKR_BUFFER_TOO_SMALL) {
     // We'll keep the context valid so a subsequent call can pick up the data.
     context->is_valid_ = true;
+    context_clear_runner.ReplaceClosure(base::DoNothing());
   }
   return result;
 }
@@ -999,9 +1194,15 @@ CK_RV SessionImpl::VerifyFinal(const string& signature) {
   // finalized.
   int max_out_length = std::numeric_limits<int>::max();
   string data_out;
-  CK_RV result = OperationFinal(kVerify, &max_out_length, &data_out);
+  CK_RV result = OperationFinalRaw(kVerify, &max_out_length, &data_out,
+                                   /*clear_context=*/false);
+  chaps_metrics_->ReportChapsSessionStatus(OperationToString(kVerify),
+                                           static_cast<int>(result));
   if (result != CKR_OK)
     return result;
+
+  base::ScopedClosureRunner context_clear_runner(
+      base::BindOnce(&OperationContext::Clear, base::Unretained(context)));
 
   // We only support 3 Verify mechanisms, HMAC, RSA and ECC.
   if (context->is_hmac_) {
@@ -1032,6 +1233,18 @@ CK_RV SessionImpl::OperationSinglePart(OperationType operation,
                                        int* required_out_length,
                                        string* data_out) {
   CHECK(operation < kNumOperationTypes);
+  CK_RV result =
+      OperationSinglePartRaw(operation, data_in, required_out_length, data_out);
+  chaps_metrics_->ReportChapsSessionStatus(OperationToString(operation),
+                                           static_cast<int>(result));
+  return result;
+}
+
+CK_RV SessionImpl::OperationSinglePartRaw(OperationType operation,
+                                          const string& data_in,
+                                          int* required_out_length,
+                                          string* data_out) {
+  CHECK(operation < kNumOperationTypes);
   OperationContext* context = &operation_context_[operation];
   if (!context->is_valid_) {
     LOG(ERROR) << "Operation is not initialized.";
@@ -1047,20 +1260,24 @@ CK_RV SessionImpl::OperationSinglePart(OperationType operation,
     string update, final;
     int max = std::numeric_limits<int>::max();
     result = OperationUpdateInternal(operation, data_in, &max, &update);
-    if (result != CKR_OK)
+    if (result != CKR_OK) {
       return result;
+    }
     max = std::numeric_limits<int>::max();
     result = OperationFinalInternal(operation, &max, &final);
-    if (result != CKR_OK)
+    if (result != CKR_OK) {
       return result;
+    }
     context->data_ = update + final;
     context->is_finished_ = true;
   }
-  context->is_valid_ = false;
+  base::ScopedClosureRunner context_clear_runner(
+      base::BindOnce(&OperationContext::Clear, base::Unretained(context)));
   result = GetOperationOutput(context, required_out_length, data_out);
   if (result == CKR_BUFFER_TOO_SMALL) {
     // We'll keep the context valid so a subsequent call can pick up the data.
     context->is_valid_ = true;
+    context_clear_runner.ReplaceClosure(base::DoNothing());
   }
   return result;
 }
@@ -1238,7 +1455,11 @@ CK_RV SessionImpl::SeedRandom(const string& seed) {
   return CKR_OK;
 }
 
-CK_RV SessionImpl::GenerateRandom(int num_bytes, string* random_data) {
+CK_RV SessionImpl::GenerateRandom(size_t num_bytes, string* random_data) {
+  if (num_bytes > kMaxRandomBufferSize) {
+    return CKR_HOST_MEMORY;
+  }
+
   *random_data = GenerateRandomSoftware(num_bytes);
   return CKR_OK;
 }
@@ -1308,7 +1529,7 @@ CK_RV SessionImpl::CipherUpdate(OperationContext* context,
             context->cipher_context_.get(),
             ConvertStringToByteBuffer(context->data_.c_str()), &out_length,
             ConvertStringToByteBuffer(data_in.c_str()), in_length)) {
-      context->is_valid_ = false;
+      context->Clear();
       LOG(ERROR) << "EVP_CipherUpdate failed: " << GetOpenSSLError();
       return CKR_FUNCTION_FAILED;
     }
@@ -1412,14 +1633,16 @@ CK_RV SessionImpl::GenerateRSAKeyPair(Object* public_object,
   public_object->SetAttributeInt(CKA_KEY_TYPE, CKK_RSA);
   private_object->SetAttributeInt(CKA_KEY_TYPE, CKK_RSA);
 
-  // Check if we are able to back this key with the TPM.
-  if (tpm_utility_->IsTPMAvailable() && private_object->IsTokenObject() &&
-      modulus_bits >= tpm_utility_->MinRSAKeyBits() &&
-      modulus_bits <= tpm_utility_->MaxRSAKeyBits() &&
-      !private_object->GetAttributeBool(kForceSoftwareAttribute, false)) {
-    // Use TPM to generate RSA key
-    if (!GenerateRSAKeyPairTPM(modulus_bits, public_exponent, public_object,
-                               private_object))
+  bool is_using_hwsec =
+      private_object->IsTokenObject() &&
+      !private_object->GetAttributeBool(kForceSoftwareAttribute, false) &&
+      hwsec_ && hwsec_->IsRSAModulusSupported(modulus_bits).ok();
+
+  // Check if we are able to back this key with the HWSec.
+  if (is_using_hwsec) {
+    // Use HWSec to generate RSA key
+    if (!GenerateRSAKeyPairHwsec(modulus_bits, public_exponent, public_object,
+                                 private_object))
       return CKR_FUNCTION_FAILED;
   } else {
     // Use software to generate RSA key
@@ -1479,29 +1702,57 @@ bool SessionImpl::GenerateRSAKeyPairSoftware(int modulus_bits,
   return true;
 }
 
-bool SessionImpl::GenerateRSAKeyPairTPM(int modulus_bits,
-                                        const string& public_exponent,
-                                        Object* public_object,
-                                        Object* private_object) {
-  string auth_data = GenerateRandomSoftware(kDefaultAuthDataBytes);
-  string key_blob;
-  int tpm_key_handle;
-  if (!tpm_utility_->GenerateRSAKey(
-          slot_id_, modulus_bits, public_exponent,
-          SecureBlob(auth_data.begin(), auth_data.end()), &key_blob,
-          &tpm_key_handle))
+bool SessionImpl::GenerateRSAKeyPairHwsec(int modulus_bits,
+                                          const string& public_exponent,
+                                          Object* public_object,
+                                          Object* private_object) {
+  if (!hwsec_) {
+    LOG(ERROR) << "No HWSec frontend available in GenerateRSAKeyPairHwsec.";
     return false;
+  }
 
-  // Get public key information from TPM
-  string modulus;
-  string exponent;
-  if (!tpm_utility_->GetRSAPublicKey(tpm_key_handle, &exponent, &modulus))
-    return false;
+  brillo::Blob exponent = brillo::BlobFromString(public_exponent);
+  brillo::SecureBlob auth_data =
+      GenerateRandomSecureBlobSoftware(kDefaultAuthDataBytes);
 
-  public_object->SetAttributeString(CKA_MODULUS, modulus);
-  private_object->SetAttributeString(CKA_MODULUS, modulus);
-  private_object->SetAttributeString(kAuthDataAttribute, auth_data);
-  private_object->SetAttributeString(kKeyBlobAttribute, key_blob);
+  AllowSoftwareGen allow_soft_gen =
+      private_object->GetAttributeBool(kAllowSoftwareGenAttribute, false)
+          ? AllowSoftwareGen::kAllow
+          : AllowSoftwareGen::kNotAllow;
+
+  AllowDecrypt allow_decrypt =
+      private_object->GetAttributeBool(CKA_DECRYPT, false)
+          ? AllowDecrypt::kAllow
+          : AllowDecrypt::kNotAllow;
+
+  AllowSign allow_sign = private_object->GetAttributeBool(CKA_SIGN, false)
+                             ? AllowSign::kAllow
+                             : AllowSign::kNotAllow;
+
+  ASSIGN_OR_RETURN(
+      const hwsec::ChapsFrontend::CreateKeyResult& result,
+      hwsec_->GenerateRSAKey(modulus_bits, exponent, auth_data, allow_soft_gen,
+                             allow_decrypt, allow_sign),
+      _.WithStatus<TPMError>(
+           "Failed to generate RSA key in GenerateRSAKeyPairHwsec")
+          .LogError()
+          .As(false));
+
+  // Get public key information from HWSec
+  ASSIGN_OR_RETURN(const hwsec::RSAPublicInfo& info,
+                   hwsec_->GetRSAPublicKey(result.key.GetKey()),
+                   _.WithStatus<TPMError>(
+                        "Failed to get RSA key info in GenerateRSAKeyPairHwsec")
+                       .LogError()
+                       .As(false));
+
+  public_object->SetAttributeString(CKA_MODULUS,
+                                    brillo::BlobToString(info.modulus));
+  private_object->SetAttributeString(CKA_MODULUS,
+                                     brillo::BlobToString(info.modulus));
+  private_object->SetAttributeString(kAuthDataAttribute, auth_data.to_string());
+  private_object->SetAttributeString(kKeyBlobAttribute,
+                                     brillo::BlobToString(result.key_blob));
   return true;
 }
 
@@ -1537,47 +1788,93 @@ CK_RV SessionImpl::GenerateECCKeyPair(Object* public_object,
     return CKR_FUNCTION_FAILED;
   int curve_nid = EC_GROUP_get_curve_name(group);
 
-  bool is_using_tpm =
-      tpm_utility_->IsTPMAvailable() && private_object->IsTokenObject() &&
-      tpm_utility_->IsECCurveSupported(curve_nid) &&
-      !private_object->GetAttributeBool(kForceSoftwareAttribute, false);
+  bool is_using_hwsec =
+      private_object->IsTokenObject() &&
+      !private_object->GetAttributeBool(kForceSoftwareAttribute, false) &&
+      hwsec_ && hwsec_->IsECCurveSupported(curve_nid).ok();
 
   bool result = false;
-  if (is_using_tpm) {
+  if (is_using_hwsec) {
     result =
-        GenerateECCKeyPairTPM(key, curve_nid, public_object, private_object);
+        GenerateECCKeyPairHwsec(key, curve_nid, public_object, private_object);
   } else {
     result = GenerateECCKeyPairSoftware(key, public_object, private_object);
   }
   return result ? CKR_OK : CKR_FUNCTION_FAILED;
 }
 
-bool SessionImpl::GenerateECCKeyPairTPM(const crypto::ScopedEC_KEY& key,
-                                        int curve_nid,
-                                        Object* public_object,
-                                        Object* private_object) {
-  string auth_data = GenerateRandomSoftware(kDefaultAuthDataBytes);
-  string key_blob;
-  int tpm_key_handle;
-  if (!tpm_utility_->GenerateECCKey(slot_id_, curve_nid, SecureBlob(auth_data),
-                                    &key_blob, &tpm_key_handle)) {
-    LOG(ERROR) << __func__ << ": Fail to generate ECC key in TPM.";
+bool SessionImpl::GenerateECCKeyPairHwsec(const crypto::ScopedEC_KEY& key,
+                                          int curve_nid,
+                                          Object* public_object,
+                                          Object* private_object) {
+  if (!hwsec_) {
+    LOG(ERROR) << "No HWSec frontend available in GenerateECCKeyPairHwsec.";
     return false;
   }
 
-  // Get public key information from TPM
-  string ec_point;
-  if (!tpm_utility_->GetECCPublicKey(tpm_key_handle, &ec_point)) {
-    LOG(ERROR) << __func__ << ": Fail to get ECC public key from TPM.";
+  brillo::SecureBlob auth_data =
+      GenerateRandomSecureBlobSoftware(kDefaultAuthDataBytes);
+
+  AllowDecrypt allow_decrypt =
+      private_object->GetAttributeBool(CKA_DECRYPT, false)
+          ? AllowDecrypt::kAllow
+          : AllowDecrypt::kNotAllow;
+
+  AllowSign allow_sign = private_object->GetAttributeBool(CKA_SIGN, false)
+                             ? AllowSign::kAllow
+                             : AllowSign::kNotAllow;
+
+  ASSIGN_OR_RETURN(
+      const hwsec::ChapsFrontend::CreateKeyResult& result,
+      hwsec_->GenerateECCKey(curve_nid, auth_data, allow_decrypt, allow_sign),
+      _.WithStatus<TPMError>(
+           "Failed to generate ECC key in GenerateECCKeyPairHwsec")
+          .LogError()
+          .As(false));
+
+  // Get public key information from HWSec
+  ASSIGN_OR_RETURN(const hwsec::ECCPublicInfo& info,
+                   hwsec_->GetECCPublicKey(result.key.GetKey()),
+                   _.WithStatus<TPMError>(
+                        "Failed to get ECC key info in GenerateECCKeyPairHwsec")
+                       .LogError()
+                       .As(false));
+
+  // Convert the ECC public into the DER-encoded format.
+
+  crypto::ScopedEC_Key ecc(EC_KEY_new_by_curve_name(info.nid));
+  if (!ecc) {
+    LOG(ERROR) << "Failed to create EC_KEY from curve name " << info.nid << ".";
     return false;
   }
+
+  crypto::ScopedBIGNUM x(BN_new()), y(BN_new());
+  if (!x || !y) {
+    LOG(ERROR) << "Failed to allocate BIGNUM.";
+    return false;
+  }
+
+  if (!chaps::ConvertBlobToBIGNUM(info.x_point, x.get()) ||
+      !chaps::ConvertBlobToBIGNUM(info.y_point, y.get())) {
+    LOG(ERROR) << "Failed to convert to BIGNUM.";
+    return false;
+  }
+
+  // EC_KEY_set_public_key_affine_coordinates will check the pointer is valid
+  if (!EC_KEY_set_public_key_affine_coordinates(ecc.get(), x.get(), y.get())) {
+    LOG(ERROR) << "Invalid point.";
+    return false;
+  }
+
+  std::string ec_point = GetECPointAsString(ecc.get());
 
   // Set CKA_EC_POINT for public key
   public_object->SetAttributeString(CKA_EC_POINT, ec_point);
 
-  // Set TPM information for private key
-  private_object->SetAttributeString(kAuthDataAttribute, auth_data);
-  private_object->SetAttributeString(kKeyBlobAttribute, key_blob);
+  // Set HWSec information for private key
+  private_object->SetAttributeString(kAuthDataAttribute, auth_data.to_string());
+  private_object->SetAttributeString(kKeyBlobAttribute,
+                                     brillo::BlobToString(result.key_blob));
 
   return true;
 }
@@ -1604,12 +1901,6 @@ bool SessionImpl::GenerateECCKeyPairSoftware(const crypto::ScopedEC_KEY& key,
   const BIGNUM* privkey = EC_KEY_get0_private_key(key.get());
   private_object->SetAttributeString(CKA_VALUE, ConvertFromBIGNUM(privkey));
   return true;
-}
-
-string SessionImpl::GenerateRandomSoftware(int num_bytes) {
-  string random(num_bytes, 0);
-  RAND_bytes(ConvertStringToByteBuffer(random.data()), num_bytes);
-  return random;
 }
 
 CK_RV SessionImpl::GetOperationOutput(OperationContext* context,
@@ -1641,84 +1932,92 @@ CK_ATTRIBUTE_TYPE SessionImpl::GetRequiredKeyUsage(OperationType operation) {
   return 0;
 }
 
-bool SessionImpl::GetTPMKeyHandle(const Object* key, int* key_handle) {
-  map<const Object*, int>::iterator it = object_tpm_handle_map_.find(key);
-  if (it == object_tpm_handle_map_.end()) {
-    // Only private keys are loaded into the TPM. All public key operations do
-    // not use the TPM (and use OpenSSL instead).
-    if (key->GetObjectClass() == CKO_PRIVATE_KEY) {
-      string auth_data = key->GetAttributeString(kAuthDataAttribute);
-      if (key->GetAttributeBool(kLegacyAttribute, false)) {
-        // This is a legacy key and it needs to be loaded with the legacy root
-        // key.
-        if (!LoadLegacyRootKeys())
-          return false;
-        bool is_private = key->GetAttributeBool(CKA_PRIVATE, true);
-        int root_key_handle = is_private ? private_root_key_ : public_root_key_;
-        if (!tpm_utility_->LoadKeyWithParent(
-                slot_id_, key->GetAttributeString(kKeyBlobAttribute),
-                SecureBlob(auth_data.begin(), auth_data.end()), root_key_handle,
-                key_handle))
-          return false;
-      } else {
-        if (!tpm_utility_->LoadKey(
-                slot_id_, key->GetAttributeString(kKeyBlobAttribute),
-                SecureBlob(auth_data.begin(), auth_data.end()), key_handle))
-          return false;
-      }
-    } else {
-      LOG(ERROR) << "Invalid object class for loading into TPM.";
-      return false;
-    }
-    object_tpm_handle_map_[key] = *key_handle;
-  } else {
-    *key_handle = it->second;
+hwsec::StatusOr<hwsec::Key> SessionImpl::GetHwsecKey(const Object* key) {
+  if (!hwsec_) {
+    return MakeStatus<TPMError>("No HWSec in GetHwsecKey",
+                                hwsec::TPMRetryAction::kNoRetry);
   }
-  return true;
+
+  map<const Object*, hwsec::ScopedKey>::iterator it = object_key_map_.find(key);
+  if (it != object_key_map_.end()) {
+    return it->second.GetKey();
+  }
+
+  // Only private keys are loaded into the HWSec. All public key operations do
+  // not use the HWSec (and use OpenSSL instead).
+  if (key->GetObjectClass() != CKO_PRIVATE_KEY) {
+    return MakeStatus<TPMError>("Invalid object class for loading into HWSec",
+                                hwsec::TPMRetryAction::kNoRetry);
+  }
+
+  brillo::Blob key_blob =
+      brillo::BlobFromString(key->GetAttributeString(kKeyBlobAttribute));
+
+  brillo::SecureBlob auth_value(key->GetAttributeString(kAuthDataAttribute));
+
+  ASSIGN_OR_RETURN(
+      hwsec::ScopedKey hwsec_key, hwsec_->LoadKey(key_blob, auth_value),
+      _.WithStatus<TPMError>("Failed to load the key in GetHwsecKey"));
+
+  hwsec::Key key_handle = hwsec_key.GetKey();
+  object_key_map_.emplace(key, std::move(hwsec_key));
+
+  return key_handle;
 }
 
-bool SessionImpl::LoadLegacyRootKeys() {
-  if (is_legacy_loaded_)
-    return true;
+void SessionImpl::UpdateObjectCount(OperationContext* context) {
+  if (context->key_ != nullptr) {
+    IncreaseObjectCount(context->key_);
+    // We stored the context inside the session, and there is no way to transfer
+    // the ownership of context outside of session. So base::Unretained(this) is
+    // safe here.
+    context->cleanup_ = base::ScopedClosureRunner(
+        base::BindOnce(&SessionImpl::DecreaseObjectCount,
+                       base::Unretained(this), context->key_));
+  }
+}
 
-  // Load the legacy root keys. See http://trousers.sourceforge.net/pkcs11.html
-  // for details on where these come from.
-  string private_blob;
-  if (!token_object_pool_->GetInternalBlob(kLegacyPrivateRootKey,
-                                           &private_blob)) {
-    LOG(ERROR) << "Failed to read legacy private root key blob.";
-    return false;
+void SessionImpl::IncreaseObjectCount(const Object* key) {
+  if (key == nullptr) {
+    return;
   }
-  if (!tpm_utility_->LoadKey(slot_id_, private_blob, SecureBlob(),
-                             &private_root_key_)) {
-    LOG(ERROR) << "Failed to load legacy private root key.";
-    return false;
+
+  object_count_map_[key]++;
+}
+
+void SessionImpl::DecreaseObjectCount(const Object* key) {
+  if (key == nullptr) {
+    return;
   }
-  string public_blob;
-  if (!token_object_pool_->GetInternalBlob(kLegacyPublicRootKey,
-                                           &public_blob)) {
-    LOG(ERROR) << "Failed to read legacy public root key blob.";
-    return false;
+
+  if ((--object_count_map_[key]) == 0) {
+    object_count_map_.erase(key);
+    object_key_map_.erase(key);
   }
-  if (!tpm_utility_->LoadKey(slot_id_, public_blob, SecureBlob(),
-                             &public_root_key_)) {
-    LOG(ERROR) << "Failed to load legacy public root key.";
-    return false;
-  }
-  is_legacy_loaded_ = true;
-  return true;
 }
 
 bool SessionImpl::RSADecrypt(OperationContext* context) {
   if (context->key_->IsTokenObject() &&
       context->key_->IsAttributePresent(kKeyBlobAttribute)) {
-    int tpm_key_handle = 0;
-    if (!GetTPMKeyHandle(context->key_, &tpm_key_handle))
+    if (!hwsec_) {
+      LOG(ERROR) << "No HWSec frontend available in RSADecrypt.";
       return false;
-    string encrypted_data = context->data_;
+    }
+
+    ASSIGN_OR_RETURN(hwsec::Key key, GetHwsecKey(context->key_),
+                     _.LogError().As(false));
+
+    brillo::Blob encrypted_data = brillo::BlobFromString(context->data_);
     context->data_.clear();
-    if (!tpm_utility_->Unbind(tpm_key_handle, encrypted_data, &context->data_))
-      return false;
+
+    ASSIGN_OR_RETURN(brillo::SecureBlob data,
+                     hwsec_->Unbind(key, encrypted_data),
+                     _.WithStatus<TPMError>(
+                          "Failed to unbind the encrypted data in RSADecrypt")
+                         .LogError()
+                         .As(false));
+
+    context->data_ = data.to_string();
   } else {
     crypto::ScopedRSA rsa = CreateRSAKeyFromObject(context->key_);
     if (!rsa) {
@@ -1761,30 +2060,43 @@ bool SessionImpl::RSAEncrypt(OperationContext* context) {
 }
 
 bool SessionImpl::RSASign(OperationContext* context) {
-  string signature;
   if (context->key_->IsTokenObject() &&
       context->key_->IsAttributePresent(kKeyBlobAttribute)) {
-    int tpm_key_handle = 0;
-    if (!GetTPMKeyHandle(context->key_, &tpm_key_handle))
-      return false;
-    if (!tpm_utility_->Sign(tpm_key_handle, context->mechanism_,
-                            context->parameter_, context->data_, &signature))
-      return false;
-  } else {
-    crypto::ScopedRSA rsa = CreateRSAKeyFromObject(context->key_);
-    if (!rsa) {
-      LOG(ERROR) << "Failed to create RSA key for signing.";
+    if (!hwsec_) {
+      LOG(ERROR) << "No HWSec frontend available in RSASign.";
       return false;
     }
-    std::unique_ptr<RSASignerVerifier> signer =
-        RSASignerVerifier::GetForMechanism(context->mechanism_);
-    if (!signer)
-      return false;
 
-    return signer->Sign(std::move(rsa), context);
+    ASSIGN_OR_RETURN(hwsec::Key key, GetHwsecKey(context->key_),
+                     _.LogError().As(false));
+
+    ASSIGN_OR_RETURN(
+        brillo::Blob data,
+        hwsec_->Sign(
+            key, brillo::BlobFromString(context->data_),
+            ToHwsecSigningOptions(context->mechanism_, context->parameter_)),
+        _.WithStatus<TPMError>("Failed to RSA sign the data in RASSign")
+            .LogError()
+            .As(false));
+
+    context->data_ = brillo::BlobToString(data);
+    return true;
   }
-  context->data_ = signature;
-  return true;
+
+  // Sign the data without HWSec.
+  crypto::ScopedRSA rsa = CreateRSAKeyFromObject(context->key_);
+  if (!rsa) {
+    LOG(ERROR) << "Failed to create RSA key for signing.";
+    return false;
+  }
+
+  std::unique_ptr<RSASignerVerifier> signer =
+      RSASignerVerifier::GetForMechanism(context->mechanism_);
+  if (!signer) {
+    return false;
+  }
+
+  return signer->Sign(std::move(rsa), context);
 }
 
 CK_RV SessionImpl::RSAVerify(OperationContext* context,
@@ -1810,8 +2122,8 @@ bool SessionImpl::ECCSign(OperationContext* context) {
   string signature;
   if (context->key_->IsTokenObject() &&
       context->key_->IsAttributePresent(kKeyBlobAttribute)) {
-    if (!ECCSignTPM(context->data_, context->mechanism_, context->key_,
-                    &signature))
+    if (!ECCSignHwsec(context->data_, context->mechanism_, context->key_,
+                      &signature))
       return false;
   } else {
     if (!ECCSignSoftware(context->data_, context->key_, &signature))
@@ -1821,25 +2133,38 @@ bool SessionImpl::ECCSign(OperationContext* context) {
   return true;
 }
 
-bool SessionImpl::ECCSignTPM(const std::string& input,
-                             CK_MECHANISM_TYPE signing_mechanism,
-                             const Object* key_object,
-                             std::string* signature) {
-  if (!(signing_mechanism == CKM_ECDSA ||
-        signing_mechanism == CKM_ECDSA_SHA1)) {
+bool SessionImpl::ECCSignHwsec(const std::string& input,
+                               CK_MECHANISM_TYPE signing_mechanism,
+                               const Object* key_object,
+                               std::string* signature) {
+  if (!hwsec_) {
+    LOG(ERROR) << "No HWSec frontend available in ECCSignHwsec.";
+    return false;
+  }
+
+  if (!(signing_mechanism == CKM_ECDSA || signing_mechanism == CKM_ECDSA_SHA1 ||
+        signing_mechanism == CKM_ECDSA_SHA256 ||
+        signing_mechanism == CKM_ECDSA_SHA384 ||
+        signing_mechanism == CKM_ECDSA_SHA512)) {
     LOG(ERROR)
-        << "Failed to sign with ECCSignTPM because mechanism is unsupported: "
+        << "Failed to sign with ECCSignHwsec because mechanism is unsupported: "
         << signing_mechanism;
     return false;
   }
 
-  int tpm_key_handle = 0;
-  if (!GetTPMKeyHandle(key_object, &tpm_key_handle))
-    return false;
-  // Note that ECC doesn't require any signing parameters.
-  if (!tpm_utility_->Sign(tpm_key_handle, signing_mechanism, "", input,
-                          signature))
-    return false;
+  ASSIGN_OR_RETURN(hwsec::Key key, GetHwsecKey(key_object),
+                   _.LogError().As(false));
+
+  ASSIGN_OR_RETURN(
+      brillo::Blob data,
+      hwsec_->Sign(key, brillo::BlobFromString(input),
+                   ToHwsecSigningOptions(signing_mechanism, "")),
+      _.WithStatus<TPMError>("Failed to ECC sign the data in ECCSignHwsec")
+          .LogError()
+          .As(false));
+
+  *signature = brillo::BlobToString(data);
+
   return true;
 }
 
@@ -1926,12 +2251,11 @@ CK_RV SessionImpl::WrapRSAPrivateKey(Object* object) {
         object->IsAttributePresent(CKA_PRIME_2)))
     return CKR_TEMPLATE_INCOMPLETE;
 
-  // If TPM doesn't support, fall back to software.
+  // If HWSec doesn't support, fall back to software.
   int key_size_bits = object->GetAttributeString(CKA_MODULUS).length() * 8;
-  if (key_size_bits > tpm_utility_->MaxRSAKeyBits() ||
-      key_size_bits < tpm_utility_->MinRSAKeyBits()) {
+  if (!hwsec_ || !hwsec_->IsRSAModulusSupported(key_size_bits).ok()) {
     LOG(WARNING) << "WARNING: " << key_size_bits
-                 << "-bit private key cannot be wrapped by the TPM.";
+                 << "-bit private key cannot be wrapped by the HWSec.";
     return CKR_OK;
   }
 
@@ -1940,19 +2264,35 @@ CK_RV SessionImpl::WrapRSAPrivateKey(Object* object) {
                      ? object->GetAttributeString(CKA_PRIME_1)
                      : object->GetAttributeString(CKA_PRIME_2);
 
-  string auth_data = GenerateRandomSoftware(kDefaultAuthDataBytes);
-  string key_blob;
-  int tpm_key_handle = 0;
+  brillo::Blob exponent =
+      brillo::BlobFromString(object->GetAttributeString(CKA_PUBLIC_EXPONENT));
+  brillo::Blob modulus =
+      brillo::BlobFromString(object->GetAttributeString(CKA_MODULUS));
+  brillo::SecureBlob prime_blob(prime);
+  brillo::SecureBlob auth_data =
+      GenerateRandomSecureBlobSoftware(kDefaultAuthDataBytes);
+
+  AllowDecrypt allow_decrypt = object->GetAttributeBool(CKA_DECRYPT, false)
+                                   ? AllowDecrypt::kAllow
+                                   : AllowDecrypt::kNotAllow;
+
+  AllowSign allow_sign = object->GetAttributeBool(CKA_SIGN, false)
+                             ? AllowSign::kAllow
+                             : AllowSign::kNotAllow;
+
   // TODO(menghuan): Use Software key but report and have an auto-rewrapping
   // when WrapRSAKey() fail
-  if (!tpm_utility_->WrapRSAKey(slot_id_,
-                                object->GetAttributeString(CKA_PUBLIC_EXPONENT),
-                                object->GetAttributeString(CKA_MODULUS), prime,
-                                SecureBlob(auth_data.begin(), auth_data.end()),
-                                &key_blob, &tpm_key_handle))
-    return CKR_FUNCTION_FAILED;
-  object->SetAttributeString(kAuthDataAttribute, auth_data);
-  object->SetAttributeString(kKeyBlobAttribute, key_blob);
+  ASSIGN_OR_RETURN(
+      const hwsec::ChapsFrontend::CreateKeyResult& result,
+      hwsec_->WrapRSAKey(exponent, modulus, prime_blob, auth_data,
+                         allow_decrypt, allow_sign),
+      _.WithStatus<TPMError>("Failed to wrap RSA key in WrapRSAPrivateKey")
+          .LogError()
+          .As(CKR_FUNCTION_FAILED));
+
+  object->SetAttributeString(kAuthDataAttribute, auth_data.to_string());
+  object->SetAttributeString(kKeyBlobAttribute,
+                             brillo::BlobToString(result.key_blob));
   object->RemoveAttribute(CKA_PRIVATE_EXPONENT);
   object->RemoveAttribute(CKA_PRIME_1);
   object->RemoveAttribute(CKA_PRIME_2);
@@ -1976,8 +2316,8 @@ CK_RV SessionImpl::WrapECCPrivateKey(Object* object) {
   }
   int curve_nid = EC_GROUP_get_curve_name(group);
 
-  // If TPM doesn't support, fall back to software.
-  if (!tpm_utility_->IsECCurveSupported(curve_nid)) {
+  // If HWSec doesn't support, fall back to software.
+  if (!hwsec_ || !hwsec_->IsECCurveSupported(curve_nid).ok()) {
     return CKR_OK;
   }
 
@@ -1996,26 +2336,38 @@ CK_RV SessionImpl::WrapECCPrivateKey(Object* object) {
     return CKR_FUNCTION_FAILED;
   }
 
-  string auth_data = GenerateRandomSoftware(kDefaultAuthDataBytes);
-  string key_blob;
-  int tpm_key_handle = 0;
-  if (!tpm_utility_->WrapECCKey(slot_id_, curve_nid, ConvertFromBIGNUM(x.get()),
-                                ConvertFromBIGNUM(y.get()),
-                                object->GetAttributeString(CKA_VALUE),
-                                SecureBlob(auth_data.begin(), auth_data.end()),
-                                &key_blob, &tpm_key_handle)) {
-    return CKR_FUNCTION_FAILED;
-  }
-  object->SetAttributeString(kAuthDataAttribute, auth_data);
-  object->SetAttributeString(kKeyBlobAttribute, key_blob);
+  brillo::Blob x_point = brillo::BlobFromString(ConvertFromBIGNUM(x.get()));
+  brillo::Blob y_point = brillo::BlobFromString(ConvertFromBIGNUM(y.get()));
+  brillo::SecureBlob private_value(object->GetAttributeString(CKA_VALUE));
+  brillo::SecureBlob auth_data =
+      GenerateRandomSecureBlobSoftware(kDefaultAuthDataBytes);
+
+  AllowDecrypt allow_decrypt = object->GetAttributeBool(CKA_DECRYPT, false)
+                                   ? AllowDecrypt::kAllow
+                                   : AllowDecrypt::kNotAllow;
+
+  AllowSign allow_sign = object->GetAttributeBool(CKA_SIGN, false)
+                             ? AllowSign::kAllow
+                             : AllowSign::kNotAllow;
+
+  ASSIGN_OR_RETURN(
+      const hwsec::ChapsFrontend::CreateKeyResult& result,
+      hwsec_->WrapECCKey(curve_nid, x_point, y_point, private_value, auth_data,
+                         allow_decrypt, allow_sign),
+      _.WithStatus<TPMError>("Failed to wrap ECC key in WrapECCPrivateKey")
+          .LogError()
+          .As(CKR_FUNCTION_FAILED));
+
+  object->SetAttributeString(kAuthDataAttribute, auth_data.to_string());
+  object->SetAttributeString(kKeyBlobAttribute,
+                             brillo::BlobToString(result.key_blob));
 
   object->RemoveAttribute(CKA_VALUE);
   return CKR_OK;
 }
 
 CK_RV SessionImpl::WrapPrivateKey(Object* object) {
-  if (!tpm_utility_->IsTPMAvailable() ||
-      object->GetAttributeBool(kForceSoftwareAttribute, false) ||
+  if (!hwsec_ || object->GetAttributeBool(kForceSoftwareAttribute, false) ||
       object->GetObjectClass() != CKO_PRIVATE_KEY ||
       object->IsAttributePresent(kKeyBlobAttribute)) {
     // This object does not need to be wrapped.
@@ -2027,9 +2379,9 @@ CK_RV SessionImpl::WrapPrivateKey(Object* object) {
   } else if (key_type == CKK_EC) {
     return WrapECCPrivateKey(object);
   } else {
-    // If TPM doesn't support, fall back to software.
+    // If HWSec doesn't support, fall back to software.
     LOG(WARNING) << __func__ << ": Key type " << key_type
-                 << " private key cannot be wrapped by the TPM.";
+                 << " private key cannot be wrapped by the HWSec.";
     return CKR_OK;
   }
 }
@@ -2059,6 +2411,7 @@ void SessionImpl::OperationContext::Clear() {
   key_ = nullptr;
   data_.clear();
   parameter_.clear();
+  cleanup_.RunAndReset();
 }
 
 }  // namespace chaps

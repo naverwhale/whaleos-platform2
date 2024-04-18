@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,15 +8,14 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/sequence_checker_impl.h>
 #include <brillo/grpc/async_grpc_server.h>
 
 #include "diagnostics/dpsl/public/dpsl_rpc_server.h"
 
-#include "wilco_dtc.grpc.pb.h"  // NOLINT(build/include)
-#include "wilco_dtc.pb.h"       // NOLINT(build/include)
+#include "wilco_dtc.grpc.pb.h"  // NOLINT(build/include_directory)
+#include "wilco_dtc.pb.h"       // NOLINT(build/include_directory)
 
 namespace diagnostics {
 
@@ -37,17 +36,17 @@ class DpslRpcServerImpl final : public DpslRpcServer {
   bool Init();
 
  private:
-  using HandleMessageFromUiCallback = base::Callback<void(
+  using HandleMessageFromUiCallback = base::OnceCallback<void(
       grpc::Status, std::unique_ptr<grpc_api::HandleMessageFromUiResponse>)>;
-  using HandleEcNotificationCallback = base::Callback<void(
+  using HandleEcNotificationCallback = base::OnceCallback<void(
       grpc::Status, std::unique_ptr<grpc_api::HandleEcNotificationResponse>)>;
-  using HandlePowerNotificationCallback = base::Callback<void(
+  using HandlePowerNotificationCallback = base::OnceCallback<void(
       grpc::Status,
       std::unique_ptr<grpc_api::HandlePowerNotificationResponse>)>;
-  using HandleConfigurationDataChangedCallback = base::Callback<void(
+  using HandleConfigurationDataChangedCallback = base::OnceCallback<void(
       grpc::Status,
       std::unique_ptr<grpc_api::HandleConfigurationDataChangedResponse>)>;
-  using HandleBluetoothDataChangedCallback = base::Callback<void(
+  using HandleBluetoothDataChangedCallback = base::OnceCallback<void(
       grpc::Status,
       std::unique_ptr<grpc_api::HandleBluetoothDataChangedResponse>)>;
 
@@ -55,25 +54,25 @@ class DpslRpcServerImpl final : public DpslRpcServer {
   // methods just calls the corresponding method of |rpc_handler_|):
   void HandleMessageFromUi(
       std::unique_ptr<grpc_api::HandleMessageFromUiRequest> request,
-      const HandleMessageFromUiCallback& callback);
+      HandleMessageFromUiCallback callback);
   void HandleEcNotification(
       std::unique_ptr<grpc_api::HandleEcNotificationRequest> request,
-      const HandleEcNotificationCallback& callback);
+      HandleEcNotificationCallback callback);
   void HandlePowerNotification(
       std::unique_ptr<grpc_api::HandlePowerNotificationRequest> request,
-      const HandlePowerNotificationCallback& callback);
+      HandlePowerNotificationCallback callback);
   void HandleConfigurationDataChanged(
       std::unique_ptr<grpc_api::HandleConfigurationDataChangedRequest> request,
-      const HandleConfigurationDataChangedCallback& callback);
+      HandleConfigurationDataChangedCallback callback);
   void HandleBluetoothDataChanged(
       std::unique_ptr<grpc_api::HandleBluetoothDataChangedRequest> request,
-      const HandleBluetoothDataChangedCallback& callback);
+      HandleBluetoothDataChangedCallback callback);
 
   // The method corresponding to the HandleMessageFromUi method of the
   // "WilcoDtc" gRPC interface and returning back a nullptr response.
   void HandleMessageFromUiStub(
       std::unique_ptr<grpc_api::HandleMessageFromUiRequest> request,
-      const HandleMessageFromUiCallback& callback);
+      HandleMessageFromUiCallback callback);
 
   // Unowned.
   DpslRpcHandler* const rpc_handler_;

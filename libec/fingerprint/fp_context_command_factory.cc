@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 namespace ec {
 
 std::unique_ptr<EcCommandInterface> FpContextCommandFactory::Create(
-    biod::CrosFpDeviceInterface* cros_fp, const std::string& user_id) {
+    CrosFpDeviceInterface* cros_fp, const std::string& user_id) {
   if (cros_fp->EcCmdVersionSupported(EC_CMD_FP_CONTEXT, 1) ==
       EcCmdVersionSupportStatus::SUPPORTED) {
     return FpContextCommand_v1::Create(user_id);

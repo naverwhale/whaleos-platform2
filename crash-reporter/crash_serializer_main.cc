@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
   DEFINE_int64(chunk_size, kDefaultChunkSizeBytes,
                "Approximate maximum size of an individual proto message to "
                "write to stdout.");
-  brillo::FlagHelper::Init(argc, argv, "Chromium OS Crash Sender");
+  brillo::FlagHelper::Init(argc, argv, "ChromeOS Crash Sender");
   if (FLAGS_chunk_size < 0 || FLAGS_chunk_size > kMaxChunkSizeBytes) {
     LOG(ERROR) << "Invalid value for max chunk size: " << FLAGS_chunk_size;
     return EXIT_FAILURE;

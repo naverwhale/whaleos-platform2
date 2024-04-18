@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/time/time.h>
 #include <chromeos/dbus/service_constants.h>
@@ -48,9 +48,10 @@ void PowerManager::Start(
     const DarkSuspendImminentCallback& dark_suspend_imminent_callback) {
   power_manager_proxy_ = control_interface_->CreatePowerManagerProxy(
       this,
-      base::Bind(&PowerManager::OnPowerManagerAppeared, base::Unretained(this)),
-      base::Bind(&PowerManager::OnPowerManagerVanished,
-                 base::Unretained(this)));
+      base::BindRepeating(&PowerManager::OnPowerManagerAppeared,
+                          base::Unretained(this)),
+      base::BindRepeating(&PowerManager::OnPowerManagerVanished,
+                          base::Unretained(this)));
   suspend_delay_ = suspend_delay;
   suspend_imminent_callback_ = suspend_imminent_callback;
   suspend_done_callback_ = suspend_done_callback;
@@ -102,7 +103,7 @@ bool PowerManager::RecordDarkResumeWakeReason(const std::string& wake_reason) {
   return power_manager_proxy_->RecordDarkResumeWakeReason(wake_reason);
 }
 
-bool PowerManager::ChangeRegDomain(nl80211_dfs_regions domain) {
+void PowerManager::ChangeRegDomain(nl80211_dfs_regions domain) {
   auto new_domain = power_manager::WIFI_REG_DOMAIN_NONE;
   switch (domain) {
     case NL80211_DFS_FCC:
@@ -120,15 +121,15 @@ bool PowerManager::ChangeRegDomain(nl80211_dfs_regions domain) {
     default:
       LOG(WARNING) << "Unrecognized WiFi reg domain: "
                    << std::to_string(domain);
-      return false;
+      return;
   }
   wifi_reg_domain_is_set = true;
 
-  if (new_domain != wifi_reg_domain_) {
-    wifi_reg_domain_ = new_domain;
-    return power_manager_proxy_->ChangeRegDomain(wifi_reg_domain_);
+  if (new_domain == wifi_reg_domain_) {
+    return;
   }
-  return false;
+  wifi_reg_domain_ = new_domain;
+  power_manager_proxy_->ChangeRegDomain(wifi_reg_domain_);
 }
 
 void PowerManager::OnSuspendImminent(int suspend_id) {

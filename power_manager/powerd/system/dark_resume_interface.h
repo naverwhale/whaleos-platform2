@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,15 +9,14 @@ namespace base {
 class TimeDelta;
 }  // namespace base
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Returns information related to "dark resume", a mode where the system wakes
 // without user interaction to display notifications, or to show alarms.
 class DarkResumeInterface {
  public:
-  DarkResumeInterface() {}
-  virtual ~DarkResumeInterface() {}
+  DarkResumeInterface() = default;
+  virtual ~DarkResumeInterface() = default;
 
   // Reads the system state to see if it's in a dark resume.
   virtual void HandleSuccessfulResume(bool from_hibernate) = 0;
@@ -32,7 +31,6 @@ class DarkResumeInterface {
   virtual void ExitDarkResume() = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_DARK_RESUME_INTERFACE_H_

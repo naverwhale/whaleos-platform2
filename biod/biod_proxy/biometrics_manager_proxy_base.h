@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,11 +13,14 @@
 #include <dbus/bus.h>
 #include <dbus/object_manager.h>
 
+#include "biod/biod_proxy/util.h"
 #include "biod/proto_bindings/constants.pb.h"
+#include "biod/proto_bindings/messages.pb.h"
 
 namespace biod {
 
-BRILLO_EXPORT const char* ScanResultToString(ScanResult result);
+BRILLO_EXPORT const char* BiometricsManagerStatusToString(
+    const BiometricsManagerStatus& status);
 
 class BRILLO_EXPORT BiometricsManagerProxyBase {
  public:

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,15 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <memory>
+#include <optional>
 
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/hash/sha1.h>
 #include <base/logging.h>
 #include <base/notreached.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/sys_byteorder.h>
 #include <crypto/libcrypto-compat.h>
@@ -30,13 +31,16 @@
 #include "trunks/authorization_delegate.h"
 #include "trunks/blob_parser.h"
 #include "trunks/command_transceiver.h"
+#include "trunks/cr50_headers/ap_ro_status.h"
 #include "trunks/error_codes.h"
 #include "trunks/hmac_authorization_delegate.h"
 #include "trunks/hmac_session.h"
 #include "trunks/policy_session.h"
 #include "trunks/tpm_constants.h"
+#include "trunks/tpm_generated.h"
 #include "trunks/tpm_pinweaver.h"
 #include "trunks/tpm_state.h"
+#include "trunks/tpm_u2f.h"
 #include "trunks/trunks_factory.h"
 
 #include "trunks/csme/mei_client_factory.h"
@@ -45,33 +49,43 @@
 
 namespace {
 
+enum class VendorVariant {
+  kUnknown,
+  kGsc,
+  kSimulator,
+  kOther,
+};
+
 const char kPlatformPassword[] = "cros-platform";
 const size_t kMaxPasswordLength = 32;
 // The below maximum is defined in TPM 2.0 Library Spec Part 2 Section 13.1
 const uint32_t kMaxNVSpaceIndex = (1 << 24) - 1;
-// Cr50 Vendor ID ("CROS").
-const uint32_t kVendorIdCr50 = 0x43524f53;
+// GSC Vendor ID ("CROS").
+const uint32_t kVendorIdGsc = 0x43524f53;
 // Simulator Vendor ID ("SIMU").
 const uint32_t kVendorIdSimulator = 0x53494d55;
-// Command code for Cr50 vendor-specific commands,
-const uint32_t kCr50VendorCC = 0x20000000 | 0; /* Vendor Bit Set + 0 */
+// Command code for GSC vendor-specific commands,
+const uint32_t kGscVendorCC = 0x20000000 | 0; /* Vendor Bit Set + 0 */
 // Vendor-specific subcommand codes.
-const uint16_t kCr50SubcmdInvalidateInactiveRW = 20;
-const uint16_t kCr50GetRmaChallenge = 30;
-const uint16_t kCr50SubcmdManageCCDPwd = 33;
-const uint16_t kCr50SubcmdGetAlertsData = 35;
-const uint16_t kCr50SubcmdPinWeaver = 37;
-const uint16_t kCr50SubcmdGetRoStatus = 57;
-
-// Auth policy used in RSA and ECC templates for EK keys generation.
-// From TCG Credential Profile EK 2.0. Section 2.1.5.
-const std::string kEKTemplateAuthPolicy(
-    "\x83\x71\x97\x67\x44\x84\xB3\xF8\x1A\x90\xCC\x8D\x46\xA5\xD7\x24"
-    "\xFD\x52\xD7\x6E\x06\x52\x0B\x64\xF2\xA1\xDA\x1B\x33\x14\x69\xAA");
+const uint16_t kGscSubcmdInvalidateInactiveRW = 20;
+const uint16_t kGscGetRmaChallenge = 30;
+const uint16_t kGscSubcmdManageCCDPwd = 33;
+const uint16_t kGscSubcmdGetAlertsData = 35;
+const uint16_t kGscSubcmdPinWeaver = 37;
+const uint16_t kGscSubcmdU2fGenerate = 44;
+const uint16_t kGscSubcmdU2fSign = 45;
+const uint16_t kGscSubcmdU2fAttest = 46;
+const uint16_t kGscSubcmdGetRoStatus = 57;
+const uint16_t kTi50GetMetrics = 65;
+const uint16_t kTi50GetConsoleLogs = 67;
 
 // Salt used exclusively for the Remote Server Unlock process due to the privacy
 // reasons.
 const char kRsuSalt[] = "Wu8oGt0uu0H8uSGxfo75uSDrGcRk2BXh";
+
+constexpr uint8_t kPwLeafTypeNormal = 0;
+constexpr uint8_t kPwLeafTypeBiometrics = 1;
+constexpr uint8_t kPwSecretSize = 32;
 
 // Returns a serialized representation of the unmodified handle. This is useful
 // for predefined handle values, like TPM_RH_OWNER. For details on what types of
@@ -95,16 +109,57 @@ std::string HashString(const std::string& plaintext,
   return std::string();
 }
 
+VendorVariant ToVendorVariant(std::optional<uint32_t> vendor_id) {
+  if (!vendor_id.has_value()) {
+    return VendorVariant::kUnknown;
+  }
+  switch (*vendor_id) {
+    case kVendorIdGsc:
+      return VendorVariant::kGsc;
+    case kVendorIdSimulator:
+      return VendorVariant::kSimulator;
+    default:
+      return VendorVariant::kOther;
+  }
+}
+
 }  // namespace
 
 namespace trunks {
 
 TpmUtilityImpl::TpmUtilityImpl(const TrunksFactory& factory)
-    : factory_(factory), vendor_id_(0) {
+    : factory_(factory) {
   crypto::EnsureOpenSSLInit();
 }
 
 TpmUtilityImpl::~TpmUtilityImpl() {}
+
+template <typename S, typename P>
+TPM_RC TpmUtilityImpl::U2fCommand(const std::string& tag,
+                                  uint16_t subcommand,
+                                  S serialize,
+                                  P parse) {
+  if (!IsGsc()) {
+    LOG(WARNING) << "U2F not supported on non-GSC vendor variants.";
+    return TPM_RC_FAILURE;
+  }
+
+  std::string in;
+  TPM_RC rc = serialize(&in);
+  if (rc) {
+    LOG(ERROR) << tag << ": Serialize failed: 0x" << std::hex << rc << " "
+               << GetErrorString(rc);
+    return rc;
+  }
+
+  std::string out;
+  rc = GscVendorCommand(subcommand, in, &out);
+
+  if (rc == TPM_RC_SUCCESS) {
+    rc = parse(out);
+  }
+  return rc;
+}
 
 TPM_RC TpmUtilityImpl::Startup() {
   TPM_RC result = TPM_RC_SUCCESS;
@@ -340,29 +395,29 @@ TPM_RC TpmUtilityImpl::PrepareForOwnership() {
 }
 
 TPM_RC TpmUtilityImpl::InitializeOwnerForCsme() {
-  // For cr50 case, we don't have to create salting key for CSME.
-  if (IsCr50()) {
-    return true;
+  // For GSC case, we don't have to create salting key for CSME.
+  if (IsGsc() || IsSimulator()) {
+    return TPM_RC_SUCCESS;
   }
   uint8_t protocol_version = 0;
   TPM_RC result = PinWeaverIsSupported(0, &protocol_version);
   // If pinweaver is not supported at all, skip the initialization.
   if (result) {
-    return true;
+    return TPM_RC_SUCCESS;
   }
   result = CreateCsmeSaltingKey();
   if (result) {
     LOG(WARNING) << __func__ << ": Failed to create CSME Salting Key:"
                  << GetErrorString(result);
-    return false;
+    return result;
   }
   csme::MeiClientFactory mei_client_factory;
   csme::PinWeaverProvisionClient client(&mei_client_factory);
   if (!client.InitOwner()) {
     LOG(WARNING) << "Failed to call `InitOwner()`";
-    return false;
+    return TPM_RC_FAILURE;
   }
-  return true;
+  return TPM_RC_SUCCESS;
 }
 
 TPM_RC TpmUtilityImpl::CreateStorageAndSaltingKeys() {
@@ -389,7 +444,7 @@ TPM_RC TpmUtilityImpl::CreateStorageAndSaltingKeys() {
     return result;
   }
 
-  result = CreateSaltingKey(kWellKnownPassword);
+  result = CreatePersistentSaltingKey(kWellKnownPassword);
   if (result) {
     LOG(ERROR) << __func__
                << ": Error creating salting key: " << GetErrorString(result);
@@ -459,6 +514,35 @@ TPM_RC TpmUtilityImpl::TakeOwnership(const std::string& owner_password,
   return TPM_RC_SUCCESS;
 }
 
+TPM_RC TpmUtilityImpl::ChangeOwnerPassword(const std::string& old_password,
+                                           const std::string& new_password) {
+  std::unique_ptr<TpmState> tpm_state(factory_.GetTpmState());
+  TPM_RC result = tpm_state->Initialize();
+  if (result != TPM_RC_SUCCESS) {
+    return result;
+  }
+
+  std::unique_ptr<HmacSession> session = factory_.GetHmacSession();
+  result = session->StartUnboundSession(true, true);
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << __func__ << ": Error initializing AuthorizationSession: "
+               << GetErrorString(result);
+    return result;
+  }
+
+  session->SetEntityAuthorizationValue(old_password);
+  session->SetFutureAuthorizationValue(new_password);
+  result = SetHierarchyAuthorization(TPM_RH_OWNER, new_password,
+                                     session->GetDelegate());
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << __func__ << ": Error changing owner authorization: "
+               << GetErrorString(result) << ", IsOwnerPasswordSet() : "
+               << tpm_state->IsOwnerPasswordSet();
+    return result;
+  }
+  return TPM_RC_SUCCESS;
+}
+
 TPM_RC TpmUtilityImpl::StirRandom(const std::string& entropy_data,
                                   AuthorizationDelegate* delegate) {
   std::string digest = crypto::SHA256HashString(entropy_data);
@@ -518,9 +602,10 @@ TPM_RC TpmUtilityImpl::ExtendPCRForCSME(int pcr_index,
   }
 
   csme::MeiClientFactory mei_client_factory;
-  csme::PinWeaverCoreClient client(&mei_client_factory);
+  std::unique_ptr<csme::PinWeaverCoreClient> client =
+      csme::PinWeaverCoreClient::Create(&mei_client_factory);
   const std::string digest = crypto::SHA256HashString(extend_data);
-  if (!client.ExtendPcr(pcr_index, TPM_ALG_SHA256, digest)) {
+  if (!client->ExtendPcr(pcr_index, TPM_ALG_SHA256, digest)) {
     LOG(ERROR) << __func__ << ": Failed to extend PCR " << pcr_index
                << " for CSME.";
     return TPM_RC_FAILURE;
@@ -569,10 +654,11 @@ TPM_RC TpmUtilityImpl::ReadPCR(int pcr_index, std::string* pcr_value) {
 
 TPM_RC TpmUtilityImpl::ReadPCRFromCSME(int pcr_index, std::string* pcr_value) {
   csme::MeiClientFactory mei_client_factory;
-  csme::PinWeaverCoreClient client(&mei_client_factory);
+  std::unique_ptr<csme::PinWeaverCoreClient> client =
+      csme::PinWeaverCoreClient::Create(&mei_client_factory);
   uint32_t pcr_index_out, hash_alg_out;
-  if (!client.ReadPcr(pcr_index, TPM_ALG_SHA256, &pcr_index_out, &hash_alg_out,
-                      pcr_value)) {
+  if (!client->ReadPcr(pcr_index, TPM_ALG_SHA256, &pcr_index_out, &hash_alg_out,
+                       pcr_value)) {
     LOG(ERROR) << __func__ << ": Failed to read PCR " << pcr_index
                << " from CSME.";
     return TPM_RC_FAILURE;
@@ -715,6 +801,54 @@ TPM_RC TpmUtilityImpl::AsymmetricDecrypt(TPM_HANDLE key_handle,
     return result;
   }
   plaintext->assign(StringFrom_TPM2B_PUBLIC_KEY_RSA(out_message));
+  return TPM_RC_SUCCESS;
+}
+
+TPM_RC TpmUtilityImpl::ECDHZGen(TPM_HANDLE key_handle,
+                                const TPM2B_ECC_POINT& in_point,
+                                AuthorizationDelegate* delegate,
+                                TPM2B_ECC_POINT* out_point) {
+  TPM_RC result;
+  if (delegate == nullptr) {
+    result = SAPI_RC_INVALID_SESSIONS;
+    LOG(ERROR) << __func__
+               << ": This method needs a valid authorization delegate: "
+               << GetErrorString(result);
+    return result;
+  }
+  TPMT_PUBLIC public_area;
+  result = GetKeyPublicArea(key_handle, &public_area);
+  if (result) {
+    LOG(ERROR) << __func__ << ": Error finding public area for: " << key_handle
+               << ", error: " << GetErrorString(result);
+    return result;
+  } else if (public_area.type != TPM_ALG_ECC) {
+    LOG(ERROR) << __func__ << ": Key handle given is not an ECC key";
+    return SAPI_RC_BAD_PARAMETER;
+  } else if ((public_area.object_attributes & kDecrypt) == 0) {
+    LOG(ERROR) << __func__ << ": Key handle given is not a decryption key";
+    return SAPI_RC_BAD_PARAMETER;
+  }
+  if ((public_area.object_attributes & kRestricted) != 0) {
+    LOG(ERROR) << __func__
+               << ": Cannot use ECDH for ZGen with a restricted key";
+    return SAPI_RC_BAD_PARAMETER;
+  }
+  std::string key_name;
+  result = ComputeKeyName(public_area, &key_name);
+  if (result) {
+    LOG(ERROR) << __func__ << ": Error computing key name for: " << key_handle
+               << ", error: " << GetErrorString(result);
+    return result;
+  }
+
+  result = factory_.GetTpm()->ECDH_ZGenSync(key_handle, key_name, in_point,
+                                            out_point, delegate);
+  if (result) {
+    LOG(ERROR) << __func__
+               << ": Error performing ECDH ZGen: " << GetErrorString(result);
+    return result;
+  }
   return TPM_RC_SUCCESS;
 }
 
@@ -954,6 +1088,7 @@ TPM_RC TpmUtilityImpl::ImportRSAKey(AsymmetricKeyUsage key_type,
   public_area.parameters.rsa_detail.key_bits = modulus.size() * 8;
   public_area.parameters.rsa_detail.exponent = public_exponent;
   public_area.unique.rsa = Make_TPM2B_PUBLIC_KEY_RSA(modulus);
+  public_area.object_attributes = kUserWithAuth;
 
   TPMT_SENSITIVE in_sensitive;
   in_sensitive.sensitive_type = TPM_ALG_RSA;
@@ -975,6 +1110,7 @@ TPM_RC TpmUtilityImpl::ImportECCKey(AsymmetricKeyUsage key_type,
   public_area.parameters.ecc_detail.curve_id = curve_id;
   public_area.unique.ecc.x = Make_TPM2B_ECC_PARAMETER(public_point_x);
   public_area.unique.ecc.y = Make_TPM2B_ECC_PARAMETER(public_point_y);
+  public_area.object_attributes = kUserWithAuth;
 
   TPMT_SENSITIVE in_sensitive;
   in_sensitive.sensitive_type = TPM_ALG_ECC;
@@ -982,6 +1118,38 @@ TPM_RC TpmUtilityImpl::ImportECCKey(AsymmetricKeyUsage key_type,
 
   return ImportKeyInner(key_type, public_area, in_sensitive, password, delegate,
                         key_blob);
+}
+
+TPM_RC TpmUtilityImpl::ImportECCKeyWithPolicyDigest(
+    AsymmetricKeyUsage key_type,
+    TPMI_ECC_CURVE curve_id,
+    const std::string& public_point_x,
+    const std::string& public_point_y,
+    const std::string& private_value,
+    const std::string& policy_digest,
+    AuthorizationDelegate* delegate,
+    std::string* key_blob) {
+  if (policy_digest.empty()) {
+    TPM_RC result = SAPI_RC_BAD_PARAMETER;
+    LOG(ERROR) << __func__ << ": This method needs a non-empty policy digest: "
+               << GetErrorString(result);
+    return result;
+  }
+
+  TPMT_PUBLIC public_area = CreateDefaultPublicArea(TPM_ALG_ECC);
+  public_area.parameters.ecc_detail.curve_id = curve_id;
+  public_area.unique.ecc.x = Make_TPM2B_ECC_PARAMETER(public_point_x);
+  public_area.unique.ecc.y = Make_TPM2B_ECC_PARAMETER(public_point_y);
+  // Set policy digest
+  public_area.auth_policy = Make_TPM2B_DIGEST(policy_digest);
+  public_area.object_attributes = kAdminWithPolicy;
+
+  TPMT_SENSITIVE in_sensitive;
+  in_sensitive.sensitive_type = TPM_ALG_ECC;
+  in_sensitive.sensitive.ecc = Make_TPM2B_ECC_PARAMETER(private_value);
+
+  return ImportKeyInner(key_type, public_area, in_sensitive, /*password=*/"",
+                        delegate, key_blob);
 }
 
 TPM_RC TpmUtilityImpl::ImportKeyInner(AsymmetricKeyUsage key_type,
@@ -1007,7 +1175,10 @@ TPM_RC TpmUtilityImpl::ImportKeyInner(AsymmetricKeyUsage key_type,
     return result;
   }
 
-  public_area.object_attributes = kUserWithAuth | kNoDA;
+  // Fill the rest part of public area of the key
+  // Notice that the |object_attributes| field may be prefilled, so just add
+  // new setting by OR, but don't overwrite it
+  public_area.object_attributes |= kNoDA;
   switch (key_type) {
     case AsymmetricKeyUsage::kDecryptKey:
       public_area.object_attributes |= kDecrypt;
@@ -1103,6 +1274,25 @@ TPM_RC TpmUtilityImpl::CreateECCKeyPair(
                             delegate, key_blob, creation_blob);
 }
 
+TPM_RC TpmUtilityImpl::CreateRestrictedECCKeyPair(
+    AsymmetricKeyUsage key_type,
+    TPMI_ECC_CURVE curve_id,
+    const std::string& password,
+    const std::string& policy_digest,
+    bool use_only_policy_authorization,
+    const std::vector<uint32_t>& creation_pcr_indexes,
+    AuthorizationDelegate* delegate,
+    std::string* key_blob,
+    std::string* creation_blob) {
+  TPMT_PUBLIC public_area = CreateDefaultPublicArea(TPM_ALG_ECC);
+  public_area.object_attributes |= kRestricted;
+  public_area.parameters.ecc_detail.curve_id = curve_id;
+
+  return CreateKeyPairInner(key_type, public_area, password, policy_digest,
+                            use_only_policy_authorization, creation_pcr_indexes,
+                            delegate, key_blob, creation_blob);
+}
+
 TPM_RC TpmUtilityImpl::CreateKeyPairInner(
     AsymmetricKeyUsage key_type,
     TPMT_PUBLIC public_area,
@@ -1156,6 +1346,14 @@ TPM_RC TpmUtilityImpl::CreateKeyPairInner(
   if (use_only_policy_authorization && !policy_digest.empty()) {
     public_area.object_attributes |= kAdminWithPolicy;
     public_area.object_attributes &= (~kUserWithAuth);
+  }
+
+  // Match the symmetric scheme of the SRK, which is the only possible parent
+  // key for now.
+  if (public_area.object_attributes & kRestricted) {
+    public_area.parameters.asym_detail.symmetric.algorithm = TPM_ALG_AES;
+    public_area.parameters.asym_detail.symmetric.key_bits.aes = 128;
+    public_area.parameters.asym_detail.symmetric.mode.aes = TPM_ALG_CFB;
   }
 
   TPML_PCR_SELECTION creation_pcrs = {};
@@ -1264,13 +1462,6 @@ TPM_RC TpmUtilityImpl::LoadRSAPublicKey(AsymmetricKeyUsage key_type,
                                         AuthorizationDelegate* delegate,
                                         TPM_HANDLE* key_handle) {
   TPM_RC result;
-  if (delegate == nullptr) {
-    result = SAPI_RC_INVALID_SESSIONS;
-    LOG(ERROR) << __func__
-               << ": This method needs a valid authorization delegate: "
-               << GetErrorString(result);
-    return result;
-  }
   TPMT_PUBLIC public_area = CreateDefaultPublicArea(TPM_ALG_RSA);
   switch (key_type) {
     case AsymmetricKeyUsage::kDecryptKey:
@@ -1342,14 +1533,6 @@ TPM_RC TpmUtilityImpl::LoadECPublicKey(AsymmetricKeyUsage key_type,
                                        AuthorizationDelegate* delegate,
                                        TPM_HANDLE* key_handle) {
   TPM_RC result;
-  if (delegate == nullptr) {
-    result = SAPI_RC_INVALID_SESSIONS;
-    LOG(ERROR) << __func__
-               << ": This method needs a valid authorization delegate: "
-               << GetErrorString(result);
-    return result;
-  }
-
   // Create public area.
   TPMT_PUBLIC public_area = CreateDefaultPublicArea(TPM_ALG_ECC);
   public_area.parameters.ecc_detail.curve_id = curve_id;
@@ -1421,6 +1604,7 @@ TPM_RC TpmUtilityImpl::GetKeyPublicArea(TPM_HANDLE handle,
 TPM_RC TpmUtilityImpl::SealData(const std::string& data_to_seal,
                                 const std::string& policy_digest,
                                 const std::string& auth_value,
+                                bool require_admin_with_policy,
                                 AuthorizationDelegate* delegate,
                                 std::string* sealed_data) {
   CHECK(sealed_data);
@@ -1429,6 +1613,14 @@ TPM_RC TpmUtilityImpl::SealData(const std::string& data_to_seal,
     result = SAPI_RC_INVALID_SESSIONS;
     LOG(ERROR) << __func__
                << ": This method needs a valid authorization delegate: "
+               << GetErrorString(result);
+    return result;
+  }
+  if (require_admin_with_policy && policy_digest.empty()) {
+    result = SAPI_RC_BAD_PARAMETER;
+    LOG(ERROR) << __func__
+               << ": This method needs a valid policy_digest when we only use "
+                  "policy session to do authorization: "
                << GetErrorString(result);
     return result;
   }
@@ -1443,7 +1635,12 @@ TPM_RC TpmUtilityImpl::SealData(const std::string& data_to_seal,
   // decrypt attributes disabled.
   TPMT_PUBLIC public_area = CreateDefaultPublicArea(TPM_ALG_KEYEDHASH);
   public_area.auth_policy = Make_TPM2B_DIGEST(policy_digest);
-  public_area.object_attributes = kAdminWithPolicy | kNoDA;
+  public_area.object_attributes = kNoDA;
+  if (require_admin_with_policy) {
+    public_area.object_attributes |= kAdminWithPolicy;
+  } else {
+    public_area.object_attributes |= kUserWithAuth;
+  }
   public_area.unique.keyed_hash.size = 0;
   TPML_PCR_SELECTION creation_pcrs = {};
   TPMS_SENSITIVE_CREATE sensitive;
@@ -1545,19 +1742,11 @@ TPM_RC TpmUtilityImpl::StartSession(HmacSession* session) {
   return TPM_RC_SUCCESS;
 }
 
-TPM_RC TpmUtilityImpl::GetPolicyDigestForPcrValues(
+TPM_RC TpmUtilityImpl::AddPcrValuesToPolicySession(
     const std::map<uint32_t, std::string>& pcr_map,
     bool use_auth_value,
-    std::string* policy_digest) {
-  CHECK(policy_digest);
-  std::unique_ptr<PolicySession> session = factory_.GetTrialSession();
-  TPM_RC result = session->StartUnboundSession(true, false);
-  if (result != TPM_RC_SUCCESS) {
-    LOG(ERROR) << __func__ << ": Error starting unbound trial session: "
-               << GetErrorString(result);
-    return result;
-  }
-
+    PolicySession* policy_session) {
+  CHECK(policy_session);
   // the construction of `pcr_map_with_values` can be in O(n)
   std::map<uint32_t, std::string> pcr_map_with_values = pcr_map;
   for (const auto& map_pair : pcr_map) {
@@ -1568,7 +1757,7 @@ TPM_RC TpmUtilityImpl::GetPolicyDigestForPcrValues(
     }
 
     std::string mutable_pcr_value;
-    result = ReadPCR(pcr_index, &mutable_pcr_value);
+    TPM_RC result = ReadPCR(pcr_index, &mutable_pcr_value);
     if (result != TPM_RC_SUCCESS) {
       LOG(ERROR) << __func__
                  << ": Error reading pcr_value: " << GetErrorString(result);
@@ -1577,20 +1766,42 @@ TPM_RC TpmUtilityImpl::GetPolicyDigestForPcrValues(
     pcr_map_with_values[pcr_index] = mutable_pcr_value;
   }
   if (use_auth_value) {
-    result = session->PolicyAuthValue();
+    TPM_RC result = policy_session->PolicyAuthValue();
     if (result != TPM_RC_SUCCESS) {
       LOG(ERROR) << __func__ << ": Error setting session to use auth_value: "
                  << GetErrorString(result);
       return result;
     }
   }
-  result = session->PolicyPCR(pcr_map_with_values);
+  TPM_RC result = policy_session->PolicyPCR(pcr_map_with_values);
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << __func__ << ": Error restricting policy to PCR value: "
                << GetErrorString(result);
     return result;
   }
-  result = session->GetDigest(policy_digest);
+  return TPM_RC_SUCCESS;
+}
+
+TPM_RC TpmUtilityImpl::GetPolicyDigestForPcrValues(
+    const std::map<uint32_t, std::string>& pcr_map,
+    bool use_auth_value,
+    std::string* policy_digest) {
+  CHECK(policy_digest);
+  std::unique_ptr<PolicySession> policy_session = factory_.GetTrialSession();
+  TPM_RC result = policy_session->StartUnboundSession(false, false);
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << __func__ << ": Error starting unbound trial session: "
+               << GetErrorString(result);
+    return result;
+  }
+  result = AddPcrValuesToPolicySession(pcr_map, use_auth_value,
+                                       policy_session.get());
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << __func__ << ": Error getting policy pcr session: "
+               << GetErrorString(result);
+    return result;
+  }
+  result = policy_session->GetDigest(policy_digest);
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << __func__
                << ": Error getting policy digest: " << GetErrorString(result);
@@ -1800,6 +2011,38 @@ TPM_RC TpmUtilityImpl::WriteNVSpace(uint32_t index,
   return TPM_RC_SUCCESS;
 }
 
+TPM_RC TpmUtilityImpl::IncrementNVCounter(uint32_t index,
+                                          bool using_owner_authorization,
+                                          AuthorizationDelegate* delegate) {
+  TPM_RC result;
+  std::string nv_name;
+  result = GetNVSpaceName(index, &nv_name);
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << __func__ << ": Could not find space at " << index << " "
+               << GetErrorString(result);
+    return result;
+  }
+  const uint32_t nv_index = NV_INDEX_FIRST + index;
+  TPMI_RH_NV_AUTH auth_target = nv_index;
+  std::string auth_target_name = nv_name;
+  if (using_owner_authorization) {
+    auth_target = TPM_RH_OWNER;
+    auth_target_name = NameFromHandle(TPM_RH_OWNER);
+  }
+  result = factory_.GetTpm()->NV_IncrementSync(auth_target, auth_target_name,
+                                               nv_index, nv_name, delegate);
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << __func__ << ": Error incrementing non-volatile space: "
+               << GetErrorString(result);
+    return result;
+  }
+  auto it = nvram_public_area_map_.find(index);
+  if (it != nvram_public_area_map_.end()) {
+    it->second.attributes |= TPMA_NV_WRITTEN;
+  }
+  return TPM_RC_SUCCESS;
+}
+
 TPM_RC TpmUtilityImpl::ReadNVSpace(uint32_t index,
                                    uint32_t offset,
                                    size_t num_bytes,
@@ -1956,14 +2199,79 @@ TPM_RC TpmUtilityImpl::ResetDictionaryAttackLock(
       TPM_RH_LOCKOUT, NameFromHandle(TPM_RH_LOCKOUT), delegate);
 }
 
+TPM_RC TpmUtilityImpl::GetAuthPolicyEndorsementKey(
+    TPM_ALG_ID key_type,
+    const std::string& auth_policy,
+    AuthorizationDelegate* endorsement_delegate,
+    TPM_HANDLE* key_handle,
+    TPM2B_NAME* key_name) {
+  if (key_type != TPM_ALG_RSA && key_type != TPM_ALG_ECC) {
+    return SAPI_RC_BAD_PARAMETER;
+  }
+
+  Tpm* tpm = factory_.GetTpm();
+  TPML_PCR_SELECTION creation_pcrs;
+  creation_pcrs.count = 0;
+  TPMS_SENSITIVE_CREATE sensitive;
+  sensitive.user_auth = Make_TPM2B_DIGEST("");
+  sensitive.data = Make_TPM2B_SENSITIVE_DATA("");
+  TPM_HANDLE object_handle;
+  TPM2B_CREATION_DATA creation_data;
+  TPM2B_DIGEST creation_digest;
+  TPMT_TK_CREATION creation_ticket;
+  TPMT_PUBLIC public_area = CreateDefaultPublicArea(key_type);
+  public_area.object_attributes = kFixedTPM | kFixedParent |
+                                  kSensitiveDataOrigin | kAdminWithPolicy |
+                                  kDecrypt | kNoDA;
+  public_area.auth_policy = Make_TPM2B_DIGEST(auth_policy);
+
+  // Fix the public area to match the template if we are using the default EK
+  // template.
+  if (auth_policy == std::string(GetEkTemplateAuthPolicy())) {
+    public_area.object_attributes = kFixedTPM | kFixedParent |
+                                    kSensitiveDataOrigin | kAdminWithPolicy |
+                                    kRestricted | kDecrypt;
+    if (key_type == TPM_ALG_RSA) {
+      public_area.parameters.rsa_detail.symmetric.algorithm = TPM_ALG_AES;
+      public_area.parameters.rsa_detail.symmetric.key_bits.aes = 128;
+      public_area.parameters.rsa_detail.symmetric.mode.aes = TPM_ALG_CFB;
+      public_area.parameters.rsa_detail.scheme.scheme = TPM_ALG_NULL;
+      public_area.parameters.rsa_detail.key_bits = 2048;
+      public_area.parameters.rsa_detail.exponent = 0;
+      public_area.unique.rsa = Make_TPM2B_PUBLIC_KEY_RSA(std::string(256, 0));
+    } else if (key_type == TPM_ALG_ECC) {
+      public_area.parameters.ecc_detail.symmetric.algorithm = TPM_ALG_AES;
+      public_area.parameters.ecc_detail.symmetric.key_bits.aes = 128;
+      public_area.parameters.ecc_detail.symmetric.mode.aes = TPM_ALG_CFB;
+      public_area.parameters.ecc_detail.scheme.scheme = TPM_ALG_NULL;
+      public_area.parameters.ecc_detail.curve_id = TPM_ECC_NIST_P256;
+      public_area.parameters.ecc_detail.kdf.scheme = TPM_ALG_NULL;
+      public_area.unique.ecc.x = Make_TPM2B_ECC_PARAMETER(std::string(32, 0));
+      public_area.unique.ecc.y = Make_TPM2B_ECC_PARAMETER(std::string(32, 0));
+    }
+  }
+
+  TPM2B_PUBLIC public_data = Make_TPM2B_PUBLIC(public_area);
+  TPM_RC result = tpm->CreatePrimarySync(
+      TPM_RH_ENDORSEMENT, NameFromHandle(TPM_RH_ENDORSEMENT),
+      Make_TPM2B_SENSITIVE_CREATE(sensitive), public_data, Make_TPM2B_DATA(""),
+      creation_pcrs, &object_handle, &public_data, &creation_data,
+      &creation_digest, &creation_ticket, key_name, endorsement_delegate);
+  if (result) {
+    LOG(ERROR) << __func__
+               << ": CreatePrimarySync failed: " << GetErrorString(result);
+    return result;
+  }
+
+  *key_handle = object_handle;
+  return TPM_RC_SUCCESS;
+}
+
 TPM_RC TpmUtilityImpl::GetEndorsementKey(
     TPM_ALG_ID key_type,
     AuthorizationDelegate* endorsement_delegate,
     AuthorizationDelegate* owner_delegate,
     TPM_HANDLE* key_handle) {
-  if (key_type != TPM_ALG_RSA && key_type != TPM_ALG_ECC) {
-    return SAPI_RC_BAD_PARAMETER;
-  }
   // The RSA EK may have already been generated and made persistent. The ECC EK
   // is always generated on demand.
   if (key_type == TPM_ALG_RSA) {
@@ -1980,58 +2288,22 @@ TPM_RC TpmUtilityImpl::GetEndorsementKey(
     }
   }
 
-  Tpm* tpm = factory_.GetTpm();
-  TPML_PCR_SELECTION creation_pcrs;
-  creation_pcrs.count = 0;
-  TPMS_SENSITIVE_CREATE sensitive;
-  sensitive.user_auth = Make_TPM2B_DIGEST("");
-  sensitive.data = Make_TPM2B_SENSITIVE_DATA("");
   TPM_HANDLE object_handle;
-  TPM2B_CREATION_DATA creation_data;
-  TPM2B_DIGEST creation_digest;
-  TPMT_TK_CREATION creation_ticket;
   TPM2B_NAME object_name;
-  object_name.size = 0;
-  TPMT_PUBLIC public_area = CreateDefaultPublicArea(key_type);
-  public_area.object_attributes = kFixedTPM | kFixedParent |
-                                  kSensitiveDataOrigin | kAdminWithPolicy |
-                                  kRestricted | kDecrypt;
-  public_area.auth_policy = Make_TPM2B_DIGEST(kEKTemplateAuthPolicy);
-  if (key_type == TPM_ALG_RSA) {
-    public_area.parameters.rsa_detail.symmetric.algorithm = TPM_ALG_AES;
-    public_area.parameters.rsa_detail.symmetric.key_bits.aes = 128;
-    public_area.parameters.rsa_detail.symmetric.mode.aes = TPM_ALG_CFB;
-    public_area.parameters.rsa_detail.scheme.scheme = TPM_ALG_NULL;
-    public_area.parameters.rsa_detail.key_bits = 2048;
-    public_area.parameters.rsa_detail.exponent = 0;
-    public_area.unique.rsa = Make_TPM2B_PUBLIC_KEY_RSA(std::string(256, 0));
-  } else {
-    public_area.parameters.ecc_detail.symmetric.algorithm = TPM_ALG_AES;
-    public_area.parameters.ecc_detail.symmetric.key_bits.aes = 128;
-    public_area.parameters.ecc_detail.symmetric.mode.aes = TPM_ALG_CFB;
-    public_area.parameters.ecc_detail.scheme.scheme = TPM_ALG_NULL;
-    public_area.parameters.ecc_detail.curve_id = TPM_ECC_NIST_P256;
-    public_area.parameters.ecc_detail.kdf.scheme = TPM_ALG_NULL;
-    public_area.unique.ecc.x = Make_TPM2B_ECC_PARAMETER(std::string(32, 0));
-    public_area.unique.ecc.y = Make_TPM2B_ECC_PARAMETER(std::string(32, 0));
-  }
-  TPM2B_PUBLIC rsa_public_area = Make_TPM2B_PUBLIC(public_area);
-  TPM_RC result = tpm->CreatePrimarySync(
-      TPM_RH_ENDORSEMENT, NameFromHandle(TPM_RH_ENDORSEMENT),
-      Make_TPM2B_SENSITIVE_CREATE(sensitive), rsa_public_area,
-      Make_TPM2B_DATA(""), creation_pcrs, &object_handle, &rsa_public_area,
-      &creation_data, &creation_digest, &creation_ticket, &object_name,
-      endorsement_delegate);
+
+  TPM_RC result = GetAuthPolicyEndorsementKey(
+      key_type, std::string(GetEkTemplateAuthPolicy()), endorsement_delegate,
+      &object_handle, &object_name);
   if (result) {
     LOG(ERROR) << __func__
-               << ": CreatePrimarySync failed: " << GetErrorString(result);
+               << ": Get auth policy EK failed: " << GetErrorString(result);
     return result;
   }
 
   // Only make RSA key persistent.
   if (key_type == TPM_ALG_RSA) {
     ScopedKeyHandle rsa_key(factory_, object_handle);
-    result = tpm->EvictControlSync(
+    result = factory_.GetTpm()->EvictControlSync(
         TPM_RH_OWNER, NameFromHandle(TPM_RH_OWNER), object_handle,
         StringFrom_TPM2B_NAME(object_name), kRSAEndorsementKey, owner_delegate);
     if (result != TPM_RC_SUCCESS) {
@@ -2165,17 +2437,16 @@ TPM_RC TpmUtilityImpl::CreateIdentityKey(TPM_ALG_ID key_type,
 }
 
 TPM_RC TpmUtilityImpl::DeclareTpmFirmwareStable() {
-  if (!IsCr50()) {
+  if (!IsGsc()) {
     return TPM_RC_SUCCESS;
   }
   std::string response_payload;
-  TPM_RC rc = Cr50VendorCommand(kCr50SubcmdInvalidateInactiveRW, std::string(),
-                                &response_payload);
+  TPM_RC rc = GscVendorCommand(kGscSubcmdInvalidateInactiveRW, std::string(),
+                               &response_payload);
   if (rc == TPM_RC_SUCCESS) {
-    LOG(INFO) << "Successfully invalidated inactive Cr50 RW";
+    LOG(INFO) << "Successfully invalidated inactive GSC RW";
   } else {
-    LOG(WARNING) << "Invalidating inactive Cr50 RW failed: 0x" << std::hex
-                 << rc;
+    LOG(WARNING) << "Invalidating inactive GSC RW failed: 0x" << std::hex << rc;
   }
   return rc;
 }
@@ -2240,13 +2511,13 @@ TPM_RC TpmUtilityImpl::GetPublicRSAEndorsementKeyModulus(std::string* ekm) {
 }
 
 TPM_RC TpmUtilityImpl::ManageCCDPwd(bool allow_pwd) {
-  if (!IsCr50()) {
+  if (!IsGsc()) {
     return TPM_RC_SUCCESS;
   }
   std::string command_payload(1, allow_pwd ? 1 : 0);
   std::string response_payload;
-  return Cr50VendorCommand(kCr50SubcmdManageCCDPwd, command_payload,
-                           &response_payload);
+  return GscVendorCommand(kGscSubcmdManageCCDPwd, command_payload,
+                          &response_payload);
 }
 
 TPM_RC TpmUtilityImpl::SetKnownOwnerPassword(
@@ -2346,18 +2617,9 @@ TPM_RC TpmUtilityImpl::CreateStorageRootKeys(
   return TPM_RC_SUCCESS;
 }
 
-TPM_RC TpmUtilityImpl::CreateSaltingKey(const std::string& owner_password) {
-  bool exists = false;
-  TPM_RC result = DoesPersistentKeyExist(kSaltingKey, &exists);
-  if (result != TPM_RC_SUCCESS) {
-    return result;
-  }
-  if (exists) {
-    LOG(INFO) << __func__ << ": Salting key already exists.";
-    return TPM_RC_SUCCESS;
-  }
+TPM_RC TpmUtilityImpl::CreateSaltingKey(TPM_HANDLE* key, TPM2B_NAME* key_name) {
   std::string parent_name;
-  result = GetKeyName(kStorageRootKey, &parent_name);
+  TPM_RC result = GetKeyName(kStorageRootKey, &parent_name);
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << __func__ << ": Error getting Key name for SRK: "
                << GetErrorString(result);
@@ -2408,23 +2670,46 @@ TPM_RC TpmUtilityImpl::CreateSaltingKey(const std::string& owner_password) {
   const std::string key_type_str = key_type == TPM_ALG_ECC ? "ECC" : "RSA";
   LOG(INFO) << __func__ << ": Created " << key_type_str << " salting key.";
 
-  TPM2B_NAME key_name;
-  key_name.size = 0;
+  key_name->size = 0;
   TPM_HANDLE key_handle;
   result = factory_.GetTpm()->LoadSync(kStorageRootKey, parent_name,
                                        out_private, out_public, &key_handle,
-                                       &key_name, delegate.get());
+                                       key_name, delegate.get());
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << __func__
                << ": Error loading salting key: " << GetErrorString(result);
     return result;
   }
 
+  *key = key_handle;
+  return TPM_RC_SUCCESS;
+}
+
+TPM_RC TpmUtilityImpl::CreatePersistentSaltingKey(
+    const std::string& owner_password) {
+  bool exists = false;
+  TPM_RC result = DoesPersistentKeyExist(kSaltingKey, &exists);
+  if (result != TPM_RC_SUCCESS) {
+    return result;
+  }
+  if (exists) {
+    LOG(INFO) << __func__ << ": Salting key already exists.";
+    return TPM_RC_SUCCESS;
+  }
+
+  TPM2B_NAME key_name;
+  TPM_HANDLE key_handle;
+  result = CreateSaltingKey(&key_handle, &key_name);
+  if (result != TPM_RC_SUCCESS) {
+    return result;
+  }
+
   ScopedKeyHandle key(factory_, key_handle);
+
   std::unique_ptr<AuthorizationDelegate> owner_delegate =
       factory_.GetPasswordAuthorization(owner_password);
   result = factory_.GetTpm()->EvictControlSync(
-      TPM_RH_OWNER, NameFromHandle(TPM_RH_OWNER), key_handle,
+      TPM_RH_OWNER, NameFromHandle(TPM_RH_OWNER), key.get(),
       StringFrom_TPM2B_NAME(key_name), kSaltingKey, owner_delegate.get());
   if (result != TPM_RC_SUCCESS) {
     LOG(ERROR) << __func__
@@ -2581,7 +2866,7 @@ TPM_RC TpmUtilityImpl::EncryptPrivateData(const TPMT_SENSITIVE& sensitive_area,
   unsigned char iv[MAX_AES_BLOCK_SIZE_BYTES] = {0};
   AES_cfb128_encrypt(
       reinterpret_cast<const unsigned char*>(unencrypted_private_data.data()),
-      reinterpret_cast<unsigned char*>(base::data(private_data_string)),
+      reinterpret_cast<unsigned char*>(std::data(private_data_string)),
       unencrypted_private_data.size(), &key, iv, &iv_in, AES_ENCRYPT);
   *encrypted_private_data = Make_TPM2B_PRIVATE(private_data_string);
   if (result != TPM_RC_SUCCESS) {
@@ -2613,12 +2898,12 @@ TPM_RC TpmUtilityImpl::DoesPersistentKeyExist(TPMI_DH_PERSISTENT key_handle,
 TPM_RC TpmUtilityImpl::GetAlertsData(TpmAlertsData* alerts) {
   memset(alerts, 0, sizeof(TpmAlertsData));
 
-  if (!IsCr50()) {
+  if (!IsGsc()) {
     alerts->chip_family = kFamilyUndefined;
     return TPM_RC_SUCCESS;
   }
   std::string out;
-  TPM_RC rc = Cr50VendorCommand(kCr50SubcmdGetAlertsData, std::string(), &out);
+  TPM_RC rc = GscVendorCommand(kGscSubcmdGetAlertsData, std::string(), &out);
   if (rc != TPM_RC_SUCCESS) {
     LOG(WARNING) << "Unable to read alerts data: 0x" << std::hex << rc;
     return rc;
@@ -2702,6 +2987,7 @@ TPM_RC TpmUtilityImpl::PinWeaverInsertLeaf(
     const brillo::SecureBlob& reset_secret,
     const std::map<uint32_t, uint32_t>& delay_schedule,
     const ValidPcrCriteria& valid_pcr_criteria,
+    std::optional<uint32_t> expiration_delay,
     uint32_t* result_code,
     std::string* root_hash,
     std::string* cred_metadata,
@@ -2709,10 +2995,12 @@ TPM_RC TpmUtilityImpl::PinWeaverInsertLeaf(
   return PinWeaverCommand(
       __func__,
       [protocol_version, label, h_aux, le_secret, he_secret, reset_secret,
-       delay_schedule, valid_pcr_criteria](std::string* in) -> TPM_RC {
+       delay_schedule, valid_pcr_criteria,
+       expiration_delay](std::string* in) -> TPM_RC {
         return Serialize_pw_insert_leaf_t(
             protocol_version, label, h_aux, le_secret, he_secret, reset_secret,
-            delay_schedule, valid_pcr_criteria, in);
+            delay_schedule, valid_pcr_criteria, expiration_delay,
+            kPwLeafTypeNormal, std::nullopt, in);
       },
       [result_code, root_hash, cred_metadata,
        mac](const std::string& out) -> TPM_RC {
@@ -2767,23 +3055,24 @@ TPM_RC TpmUtilityImpl::PinWeaverTryAuth(uint8_t protocol_version,
 TPM_RC TpmUtilityImpl::PinWeaverResetAuth(
     uint8_t protocol_version,
     const brillo::SecureBlob& reset_secret,
+    bool strong_reset,
     const std::string& h_aux,
     const std::string& cred_metadata,
     uint32_t* result_code,
     std::string* root_hash,
-    brillo::SecureBlob* he_secret,
     std::string* cred_metadata_out,
     std::string* mac_out) {
   return PinWeaverCommand(
       __func__,
-      [protocol_version, reset_secret, h_aux,
+      [protocol_version, reset_secret, strong_reset, h_aux,
        cred_metadata](std::string* in) -> TPM_RC {
-        return Serialize_pw_reset_auth_t(protocol_version, reset_secret, h_aux,
-                                         cred_metadata, in);
+        return Serialize_pw_reset_auth_t(protocol_version, reset_secret,
+                                         strong_reset, h_aux, cred_metadata,
+                                         in);
       },
-      [result_code, root_hash, he_secret, cred_metadata_out,
+      [result_code, root_hash, cred_metadata_out,
        mac_out](const std::string& out) -> TPM_RC {
-        return Parse_pw_reset_auth_t(out, result_code, root_hash, he_secret,
+        return Parse_pw_reset_auth_t(out, result_code, root_hash,
                                      cred_metadata_out, mac_out);
       });
 }
@@ -2826,39 +3115,215 @@ TPM_RC TpmUtilityImpl::PinWeaverLogReplay(uint8_t protocol_version,
       });
 }
 
-uint32_t TpmUtilityImpl::VendorId() {
-  if (!vendor_id_) {
-    std::unique_ptr<TpmState> tpm_state(factory_.GetTpmState());
-    TPM_RC result = tpm_state->Initialize();
-    if (result) {
-      LOG(ERROR) << __func__ << ": TpmState initialization failed: "
-                 << GetErrorString(result);
-      return 0;
-    }
-    if (!tpm_state->GetTpmProperty(TPM_PT_MANUFACTURER, &vendor_id_)) {
-      LOG(WARNING) << __func__
-                   << ": Error getting TPM_PT_MANUFACTURER property";
-      return 0;
-    }
-    VLOG(1) << __func__ << ": TPM_PT_MANUFACTURER = 0x" << std::hex
-            << vendor_id_;
-  }
-  return vendor_id_;
+TPM_RC TpmUtilityImpl::PinWeaverSysInfo(uint8_t protocol_version,
+                                        uint32_t* result_code,
+                                        std::string* root_hash,
+                                        uint32_t* boot_count,
+                                        uint64_t* seconds_since_boot) {
+  return PinWeaverCommand(
+      __func__,
+      [protocol_version](std::string* in) -> TPM_RC {
+        return Serialize_pw_sys_info_t(protocol_version, in);
+      },
+      [result_code, root_hash, boot_count,
+       seconds_since_boot](const std::string& out) -> TPM_RC {
+        return Parse_pw_sys_info_t(out, result_code, root_hash, boot_count,
+                                   seconds_since_boot);
+      });
 }
 
-bool TpmUtilityImpl::IsCr50() {
-  return VendorId() == kVendorIdCr50;
+TPM_RC TpmUtilityImpl::PinWeaverGenerateBiometricsAuthPk(
+    uint8_t protocol_version,
+    uint8_t auth_channel,
+    const PinWeaverEccPoint& client_public_key,
+    uint32_t* result_code,
+    std::string* root_hash,
+    PinWeaverEccPoint* server_public_key) {
+  return PinWeaverCommand(
+      __func__,
+      [protocol_version, auth_channel,
+       client_public_key](std::string* in) -> TPM_RC {
+        return Serialize_pw_generate_ba_pk_t(protocol_version, auth_channel,
+                                             client_public_key, in);
+      },
+      [result_code, root_hash,
+       server_public_key](const std::string& out) -> TPM_RC {
+        return Parse_pw_generate_ba_pk_t(out, result_code, root_hash,
+                                         server_public_key);
+      });
+}
+
+TPM_RC TpmUtilityImpl::PinWeaverCreateBiometricsAuthRateLimiter(
+    uint8_t protocol_version,
+    uint8_t auth_channel,
+    uint64_t label,
+    const std::string& h_aux,
+    const brillo::SecureBlob& reset_secret,
+    const std::map<uint32_t, uint32_t>& delay_schedule,
+    const ValidPcrCriteria& valid_pcr_criteria,
+    std::optional<uint32_t> expiration_delay,
+    uint32_t* result_code,
+    std::string* root_hash,
+    std::string* cred_metadata,
+    std::string* mac) {
+  return PinWeaverCommand(
+      __func__,
+      [protocol_version, auth_channel, label, h_aux, reset_secret,
+       delay_schedule, valid_pcr_criteria,
+       expiration_delay](std::string* in) -> TPM_RC {
+        brillo::SecureBlob zeroes(kPwSecretSize, 0);
+        return Serialize_pw_insert_leaf_t(
+            protocol_version, label, h_aux, zeroes, zeroes, reset_secret,
+            delay_schedule, valid_pcr_criteria, expiration_delay,
+            kPwLeafTypeBiometrics, auth_channel, in);
+      },
+      [result_code, root_hash, cred_metadata,
+       mac](const std::string& out) -> TPM_RC {
+        return Parse_pw_insert_leaf_t(out, result_code, root_hash,
+                                      cred_metadata, mac);
+      });
+}
+
+TPM_RC TpmUtilityImpl::PinWeaverStartBiometricsAuth(
+    uint8_t protocol_version,
+    uint8_t auth_channel,
+    const brillo::Blob& client_nonce,
+    const std::string& h_aux,
+    const std::string& cred_metadata,
+    uint32_t* result_code,
+    std::string* root_hash,
+    brillo::Blob* server_nonce,
+    brillo::Blob* encrypted_high_entropy_secret,
+    brillo::Blob* iv,
+    std::string* cred_metadata_out,
+    std::string* mac_out) {
+  return PinWeaverCommand(
+      __func__,
+      [protocol_version, auth_channel, client_nonce, h_aux,
+       cred_metadata](std::string* in) -> TPM_RC {
+        return Serialize_pw_start_bio_auth_t(protocol_version, auth_channel,
+                                             client_nonce, h_aux, cred_metadata,
+                                             in);
+      },
+      [result_code, root_hash, server_nonce, encrypted_high_entropy_secret, iv,
+       cred_metadata_out, mac_out](const std::string& out) -> TPM_RC {
+        return Parse_pw_start_bio_auth_t(
+            out, result_code, root_hash, server_nonce,
+            encrypted_high_entropy_secret, iv, cred_metadata_out, mac_out);
+      });
+}
+
+TPM_RC TpmUtilityImpl::PinWeaverBlockGenerateBiometricsAuthPk(
+    uint8_t protocol_version, uint32_t* result_code, std::string* root_hash) {
+  return PinWeaverCommand(
+      __func__,
+      [protocol_version](std::string* in) -> TPM_RC {
+        return Serialize_pw_block_generate_ba_pk_t(protocol_version, in);
+      },
+      [result_code, root_hash](const std::string& out) -> TPM_RC {
+        return Parse_pw_short_message(out, result_code, root_hash);
+      });
+}
+
+TPM_RC TpmUtilityImpl::U2fGenerate(
+    uint8_t version,
+    const brillo::Blob& app_id,
+    const brillo::SecureBlob& user_secret,
+    bool consume,
+    bool up_required,
+    const std::optional<brillo::Blob>& auth_time_secret_hash,
+    brillo::Blob* public_key,
+    brillo::Blob* key_handle) {
+  return U2fCommand(
+      __func__, kGscSubcmdU2fGenerate,
+      [version, app_id, user_secret, consume, up_required,
+       auth_time_secret_hash](std::string* in) -> TPM_RC {
+        return Serialize_u2f_generate_t(version, app_id, user_secret, consume,
+                                        up_required, auth_time_secret_hash, in);
+      },
+      [version, public_key, key_handle](const std::string& out) -> TPM_RC {
+        return Parse_u2f_generate_t(out, version, public_key, key_handle);
+      });
+}
+
+TPM_RC TpmUtilityImpl::U2fSign(
+    uint8_t version,
+    const brillo::Blob& app_id,
+    const brillo::SecureBlob& user_secret,
+    const std::optional<brillo::SecureBlob>& auth_time_secret,
+    const std::optional<brillo::Blob>& hash_to_sign,
+    bool check_only,
+    bool consume,
+    bool up_required,
+    const brillo::Blob& key_handle,
+    brillo::Blob* sig_r,
+    brillo::Blob* sig_s) {
+  return U2fCommand(
+      __func__, kGscSubcmdU2fSign,
+      [version, app_id, user_secret, auth_time_secret, hash_to_sign, check_only,
+       consume, up_required, key_handle](std::string* in) -> TPM_RC {
+        return Serialize_u2f_sign_t(version, app_id, user_secret,
+                                    auth_time_secret, hash_to_sign, check_only,
+                                    consume, up_required, key_handle, in);
+      },
+      [check_only, sig_r, sig_s](const std::string& out) -> TPM_RC {
+        if (check_only) {
+          return TPM_RC_SUCCESS;
+        }
+        return Parse_u2f_sign_t(out, sig_r, sig_s);
+      });
+}
+
+TPM_RC TpmUtilityImpl::U2fAttest(const brillo::SecureBlob& user_secret,
+                                 uint8_t format,
+                                 const brillo::Blob& data,
+                                 brillo::Blob* sig_r,
+                                 brillo::Blob* sig_s) {
+  return U2fCommand(
+      __func__, kGscSubcmdU2fAttest,
+      [user_secret, format, data](std::string* in) -> TPM_RC {
+        return Serialize_u2f_attest_t(user_secret, format, data, in);
+      },
+      [sig_r, sig_s](const std::string& out) -> TPM_RC {
+        return Parse_u2f_sign_t(out, sig_r, sig_s);
+      });
+}
+
+void TpmUtilityImpl::CacheVendorId() {
+  if (vendor_id_.has_value()) {
+    return;
+  }
+  std::unique_ptr<TpmState> tpm_state(factory_.GetTpmState());
+  TPM_RC result = tpm_state->Initialize();
+  if (result) {
+    LOG(ERROR) << __func__ << ": TpmState initialization failed: "
+               << GetErrorString(result);
+    return;
+  }
+  uint32_t vendor_id;
+  if (!tpm_state->GetTpmProperty(TPM_PT_MANUFACTURER, &vendor_id)) {
+    LOG(WARNING) << __func__ << ": Error getting TPM_PT_MANUFACTURER property";
+    return;
+  }
+  VLOG(1) << __func__ << ": TPM_PT_MANUFACTURER = 0x" << std::hex << vendor_id;
+  vendor_id_ = vendor_id;
+}
+
+bool TpmUtilityImpl::IsGsc() {
+  CacheVendorId();
+  return vendor_id_.has_value() && *vendor_id_ == kVendorIdGsc;
 }
 
 bool TpmUtilityImpl::IsSimulator() {
-  return VendorId() == kVendorIdSimulator;
+  CacheVendorId();
+  return vendor_id_.has_value() && *vendor_id_ == kVendorIdSimulator;
 }
 
 std::string TpmUtilityImpl::SendCommandAndWait(const std::string& command) {
   return factory_.GetTpm()->get_transceiver()->SendCommandAndWait(command);
 }
 
-TPM_RC TpmUtilityImpl::SerializeCommand_Cr50Vendor(
+TPM_RC TpmUtilityImpl::SerializeCommand_GscVendor(
     uint16_t subcommand,
     const std::string& command_payload,
     std::string* serialized_command) {
@@ -2867,7 +3332,7 @@ TPM_RC TpmUtilityImpl::SerializeCommand_Cr50Vendor(
   UINT32 command_size = 12 + command_payload.size();
   Serialize_TPMI_ST_COMMAND_TAG(TPM_ST_NO_SESSIONS, serialized_command);
   Serialize_UINT32(command_size, serialized_command);
-  Serialize_TPM_CC(kCr50VendorCC, serialized_command);
+  Serialize_TPM_CC(kGscVendorCC, serialized_command);
   Serialize_UINT16(subcommand, serialized_command);
   serialized_command->append(command_payload);
   VLOG(2) << "Command: "
@@ -2878,15 +3343,15 @@ TPM_RC TpmUtilityImpl::SerializeCommand_Cr50Vendor(
   // in practice always succeed. Let's at least check the resulting command
   // size to make sure all fields were indeed serialized in.
   if (serialized_command->size() != command_size) {
-    LOG(ERROR) << "Bad cr50 vendor command size: expected = " << command_size
+    LOG(ERROR) << "Bad GSC vendor command size: expected = " << command_size
                << ", actual = " << serialized_command->size();
     return TPM_RC_INSUFFICIENT;
   }
   return TPM_RC_SUCCESS;
 }
 
-TPM_RC TpmUtilityImpl::ParseResponse_Cr50Vendor(const std::string& response,
-                                                std::string* response_payload) {
+TPM_RC TpmUtilityImpl::ParseResponse_GscVendor(const std::string& response,
+                                               std::string* response_payload) {
   VLOG(3) << __func__;
   VLOG(2) << "Response: " << base::HexEncode(response.data(), response.size());
   response_payload->assign(response);
@@ -2897,7 +3362,7 @@ TPM_RC TpmUtilityImpl::ParseResponse_Cr50Vendor(const std::string& response,
     return rc;
   }
   if (tag != TPM_ST_NO_SESSIONS) {
-    LOG(ERROR) << "Bad cr50 vendor response tag: 0x" << std::hex << tag;
+    LOG(ERROR) << "Bad GSC vendor response tag: 0x" << std::hex << tag;
     return TPM_RC_AUTH_CONTEXT;
   }
 
@@ -2907,7 +3372,7 @@ TPM_RC TpmUtilityImpl::ParseResponse_Cr50Vendor(const std::string& response,
     return rc;
   }
   if (response_size != response.size()) {
-    LOG(ERROR) << "Bad cr50 vendor response size: expected = " << response_size
+    LOG(ERROR) << "Bad GSC vendor response size: expected = " << response_size
                << ", actual = " << response.size();
     return TPM_RC_SIZE;
   }
@@ -2927,18 +3392,17 @@ TPM_RC TpmUtilityImpl::ParseResponse_Cr50Vendor(const std::string& response,
   return response_code;
 }
 
-TPM_RC TpmUtilityImpl::Cr50VendorCommand(uint16_t subcommand,
-                                         const std::string& command_payload,
-                                         std::string* response_payload) {
+TPM_RC TpmUtilityImpl::GscVendorCommand(uint16_t subcommand,
+                                        const std::string& command_payload,
+                                        std::string* response_payload) {
   VLOG(1) << __func__ << "(subcommand: " << subcommand << ")";
   std::string command;
-  TPM_RC rc =
-      SerializeCommand_Cr50Vendor(subcommand, command_payload, &command);
+  TPM_RC rc = SerializeCommand_GscVendor(subcommand, command_payload, &command);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
   std::string response = SendCommandAndWait(command);
-  rc = ParseResponse_Cr50Vendor(response, response_payload);
+  rc = ParseResponse_GscVendor(response, response_payload);
   return rc;
 }
 
@@ -2955,10 +3419,20 @@ TPM_RC TpmUtilityImpl::PinWeaverCommand(const std::string& tag,
   }
 
   std::string out;
-  if (IsCr50()) {
-    rc = Cr50VendorCommand(kCr50SubcmdPinWeaver, in, &out);
-  } else {
-    rc = PinWeaverCsmeCommand(in, &out);
+  CacheVendorId();
+  const VendorVariant vendor_variant = ToVendorVariant(vendor_id_);
+  switch (vendor_variant) {
+    case VendorVariant::kGsc:
+    case VendorVariant::kSimulator:
+      rc = GscVendorCommand(kGscSubcmdPinWeaver, in, &out);
+      break;
+    case VendorVariant::kOther:
+      rc = PinWeaverCsmeCommand(in, &out);
+      break;
+    default:
+      LOG(WARNING) << "Pinweaver not supported with vendor variant: "
+                   << static_cast<int>(vendor_variant);
+      rc = TPM_RC_FAILURE;
   }
 
   if (rc != TPM_RC_SUCCESS) {
@@ -3045,13 +3519,13 @@ int base32_decode(uint8_t* dest,
       break;
 
     /* See how many bits we get to use from this symbol */
-    sbits = MIN(5, destlen_bits - out_bits);
+    sbits = std::min(5, destlen_bits - out_bits);
     if (sbits < 5)
       sym >>= (5 - sbits);
 
     /* Fill up the rest of the current byte */
     dbits = 8 - (out_bits & 7);
-    b = MIN(dbits, sbits);
+    b = std::min(dbits, sbits);
     if (dbits == 8)
       dest[out_bits / 8] = 0; /* Starting a new byte */
     dest[out_bits / 8] |= (sym << (dbits - b)) >> (sbits - b);
@@ -3073,7 +3547,7 @@ int base32_decode(uint8_t* dest,
 }
 
 TPM_RC TpmUtilityImpl::GetRsuDeviceIdInternal(std::string* device_id) {
-  if (!IsCr50()) {
+  if (!IsGsc()) {
     return TPM_RC_FAILURE;
   }
   struct __packed rma_challenge {
@@ -3085,7 +3559,7 @@ TPM_RC TpmUtilityImpl::GetRsuDeviceIdInternal(std::string* device_id) {
   uint8_t* cptr = reinterpret_cast<uint8_t*>(&c);
 
   std::string res;
-  TPM_RC result = Cr50VendorCommand(kCr50GetRmaChallenge, std::string(), &res);
+  TPM_RC result = GscVendorCommand(kGscGetRmaChallenge, std::string(), &res);
   if (result != TPM_RC_SUCCESS) {
     return result;
   }
@@ -3094,7 +3568,7 @@ TPM_RC TpmUtilityImpl::GetRsuDeviceIdInternal(std::string* device_id) {
   }
   *device_id = crypto::SHA256HashString(
       std::string(reinterpret_cast<const char*>(c.device_id),
-                  base::size(c.device_id)) +
+                  std::size(c.device_id)) +
       kRsuSalt);
   return result;
 }
@@ -3107,31 +3581,31 @@ TPM_RC TpmUtilityImpl::GetRsuDeviceId(std::string* device_id) {
   return result;
 }
 
-TPM_RC TpmUtilityImpl::GetRoVerificationStatus(ApRoStatus* status) {
-  if (!IsCr50()) {
-    *status = ApRoStatus::kApRoUnsupported;
+TPM_RC TpmUtilityImpl::GetRoVerificationStatus(ap_ro_status* status) {
+  if (!IsGsc()) {
+    *status = AP_RO_NOT_RUN;
     return TPM_RC_SUCCESS;
   }
   std::string res;
-  TPM_RC result =
-      Cr50VendorCommand(kCr50SubcmdGetRoStatus, std::string(), &res);
+  TPM_RC result = GscVendorCommand(kGscSubcmdGetRoStatus, std::string(), &res);
   if (result != TPM_RC_SUCCESS) {
-    LOG(ERROR) << __func__ << ": Cr50VendorCommand failed";
+    LOG(ERROR) << __func__ << ": GscVendorCommand failed";
     return result;
   }
   if (res.size() < 1) {
     LOG(ERROR) << __func__ << ": empty response";
     return TPM_RC_FAILURE;
   }
-  *status = static_cast<ApRoStatus>(res[0]);
+  *status = static_cast<ap_ro_status>(res[0]);
   return TPM_RC_SUCCESS;
 }
 
 TPM_RC TpmUtilityImpl::PinWeaverCsmeCommand(const std::string& in,
                                             std::string* out) {
   csme::MeiClientFactory mei_client_factory;
-  csme::PinWeaverCoreClient client(&mei_client_factory);
-  if (!client.PinWeaverCommand(in, out)) {
+  std::unique_ptr<csme::PinWeaverCoreClient> client =
+      csme::PinWeaverCoreClient::Create(&mei_client_factory);
+  if (!client->PinWeaverCommand(in, out)) {
     LOG(ERROR) << __func__ << ": Failed to call pinweaver-csme.";
     return TPM_RC_FAILURE;
   }
@@ -3147,8 +3621,9 @@ TpmUtilityImpl::GetPinwWeaverBackendType() {
   if (PinWeaverIsSupported(0, &protocol_version) != TPM_RC_SUCCESS) {
     pinweaver_backend_type_ = PinWeaverBackendType::kNotSupported;
   } else {
-    pinweaver_backend_type_ =
-        IsCr50() ? PinWeaverBackendType::kCr50 : PinWeaverBackendType::kCsme;
+    pinweaver_backend_type_ = (IsGsc() || IsSimulator())
+                                  ? PinWeaverBackendType::kGsc
+                                  : PinWeaverBackendType::kCsme;
   }
   return pinweaver_backend_type_;
 }
@@ -3170,4 +3645,100 @@ TPM_RC TpmUtilityImpl::GetMaxNVChunkSize(size_t* size) {
   return TPM_RC_SUCCESS;
 }
 
+TPM_RC TpmUtilityImpl::GetTi50Stats(uint32_t* fs_init_time,
+                                    uint32_t* fs_size,
+                                    uint32_t* aprov_time,
+                                    uint32_t* aprov_status) {
+  CHECK(fs_init_time);
+  CHECK(fs_size);
+  CHECK(aprov_time);
+  CHECK(aprov_status);
+  std::string res;
+  TPM_RC result = GscVendorCommand(kTi50GetMetrics, std::string(), &res);
+  if (result != TPM_RC_SUCCESS)
+    return result;
+
+  result = Parse_UINT32(&res, fs_init_time, nullptr);
+  if (result != TPM_RC_SUCCESS)
+    return result;
+
+  result = Parse_UINT32(&res, fs_size, nullptr);
+  if (result != TPM_RC_SUCCESS)
+    return result;
+
+  result = Parse_UINT32(&res, aprov_time, nullptr);
+  if (result != TPM_RC_SUCCESS)
+    return result;
+
+  result = Parse_UINT32(&res, aprov_status, nullptr);
+  return result;
+}
+
+TPM_RC TpmUtilityImpl::GetRwVersion(uint32_t* epoch,
+                                    uint32_t* major,
+                                    uint32_t* minor) {
+  CHECK(epoch);
+  CHECK(major);
+  CHECK(minor);
+  if (!IsGsc()) {
+    return TPM_RC_COMMAND_CODE;
+  }
+
+  // From src/platform/cr50/chip/g/upgrade_fw.h.
+  struct signed_header_version {
+    uint32_t minor;
+    uint32_t major;
+    uint32_t epoch;
+  } __attribute__((__packed__));
+
+  struct first_response_pdu {
+    uint32_t return_value;
+    uint32_t protocol_version;
+    uint32_t backup_ro_offset;
+    uint32_t backup_rw_offset;
+    struct signed_header_version shv[2];
+    uint32_t keyid[2];
+  } __attribute__((__packed__));
+
+  // GSC tool uses the FW upgrade command to retrieve the RO/RW versions. There
+  // are two phases of FW upgrade: connection establishment and actual image
+  // transfer. RO/RW versions are included in the response of the first PDU to
+  // establish connection, in new enough cr50 protocol versions. We can use this
+  // first PDU to retrieve the RW version info we want without side effects. It
+  // has all-zero digest and address.
+  constexpr std::array<uint8_t, 20> kExtensionFwUpgradeRequest{
+      0x80, 0x01,              // tag: TPM_ST_NO_SESSIONS
+      0x00, 0x00, 0x00, 0x14,  // length
+      0xba, 0xcc, 0xd0, 0x0a,  // ordinal: CONFIG_EXTENSION_COMMAND
+      0x00, 0x04,              // subcmd: EXTENSION_FW_UPGRADE
+      0x00, 0x00, 0x00, 0x00,  // digest : UINT32
+      0x00, 0x00, 0x00, 0x00,  // address : UINT32
+  };
+
+  constexpr int kExpectedResponseSize = sizeof(first_response_pdu);
+  constexpr int kRwVersionIndex = 1;
+
+  std::string response = SendCommandAndWait(std::string(
+      kExtensionFwUpgradeRequest.begin(), kExtensionFwUpgradeRequest.end()));
+  std::string out;
+  TPM_RC rc = ParseResponse_GscVendor(response, &out);
+  if (rc != TPM_RC_SUCCESS) {
+    return rc;
+  }
+  if (out.size() != kExpectedResponseSize) {
+    return TPM_RC_SIZE;
+  }
+
+  first_response_pdu pdu;
+  memcpy(&pdu, out.data(), sizeof(first_response_pdu));
+
+  *epoch = base::NetToHost32(pdu.shv[kRwVersionIndex].epoch);
+  *major = base::NetToHost32(pdu.shv[kRwVersionIndex].major);
+  *minor = base::NetToHost32(pdu.shv[kRwVersionIndex].minor);
+  return TPM_RC_SUCCESS;
+}
+
+TPM_RC TpmUtilityImpl::GetConsoleLogs(std::string* logs) {
+  return GscVendorCommand(kTi50GetConsoleLogs, std::string(), logs);
+}
 }  // namespace trunks

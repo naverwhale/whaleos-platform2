@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,10 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/optional.h>
 #include <crypto/nss_util.h>
 #include <crypto/rsa_private_key.h>
 #include <crypto/scoped_nss_types.h>
@@ -31,7 +31,7 @@ class NssUtilTest : public ::testing::Test {
     ASSERT_TRUE(tmpdir_.CreateUniqueTempDir());
     ASSERT_TRUE(base::CreateDirectory(
         tmpdir_.GetPath().Append(util_->GetNssdbSubpath())));
-    desc_ = util_->OpenUserDB(tmpdir_.GetPath(), base::nullopt);
+    desc_ = util_->OpenUserDB(tmpdir_.GetPath(), std::nullopt);
   }
 
  protected:

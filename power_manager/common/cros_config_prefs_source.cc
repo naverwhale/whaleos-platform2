@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,8 +17,6 @@ CrosConfigPrefsSource::CrosConfigPrefsSource(
     std::unique_ptr<brillo::CrosConfigInterface> config)
     : config_(std::move(config)) {}
 
-CrosConfigPrefsSource::~CrosConfigPrefsSource() {}
-
 std::string CrosConfigPrefsSource::GetDescription() const {
   return "<cros_config>";
 }
@@ -31,6 +29,17 @@ bool CrosConfigPrefsSource::ReadPrefString(const std::string& name,
     return false;
 
   // Trim trailing whitespace to match FilePrefsStore::ReadPrefString().
+  base::TrimWhitespaceASCII(*value_out, base::TRIM_TRAILING, value_out);
+  return true;
+}
+
+bool CrosConfigPrefsSource::ReadExternalString(const std::string& path,
+                                               const std::string& name,
+                                               std::string* value_out) {
+  if (!config_->GetString(path, name, value_out))
+    return false;
+
+  // Trim trailing whitespace to be consistent with ReadPrefString().
   base::TrimWhitespaceASCII(*value_out, base::TRIM_TRAILING, value_out);
   return true;
 }

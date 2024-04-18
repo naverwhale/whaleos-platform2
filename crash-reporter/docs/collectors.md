@@ -22,6 +22,25 @@ It probably should have used a different naming convention.
 Each collector is designed to generate and queue crash reports.
 They get uploaded periodically by [crash_sender].
 
+## Computing Crash Severity
+
+As part of the crash report, each collector computes the severity of the crash.
+
+Crash severity is organized into 4 categories:
+
+*   **Fatal:** Crashes that significantly disrupt user experience (e.g.
+    session termination, device reboot, Android system server crash).
+*   **Error:** Crashes that disrupt user flow in tangible ways where there
+    are mitigations or workarounds (e.g. tab crash, video blackout, Android
+    system app crash).
+*   **Warning:** Crashes with little to no user impact.
+*   **Info:** Not actual crashes, but disagnostic data uploaded through the
+    crash reporting pipeline from devices in the field.
+
+The logic to compute the severity is dependent on the product the crash occurred
+on: Platform, ARC, UI, and Lacros. The computed severity and product are logged
+to UMA to help correlate crashes with metrics like user satisfaction (from HaTS).
+
 # Boot Collectors
 
 These are the collectors that run once at boot.
@@ -44,7 +63,7 @@ The dump collected might be referred to as `bertdump`.
 
 ## ec_collector
 
-This collects [EC] (Chrome OS Embedded Controller) failures.
+This collects [EC] (ChromeOS Embedded Controller) failures.
 
 The program name is `embedded-controller` and might be referred to as `eccrash`.
 
@@ -61,6 +80,14 @@ The program name is `embedded-controller` and might be referred to as `eccrash`.
 This is a meta crash collector: it collects already collected ephemeral crashes
 into persistent storage. This is useful for handling crash reports in
 situations where we may not have access to persistent storage (eg. early boot).
+
+## gsc_collector
+
+This collects Google Security Chip (GSC) failures.
+
+* Uses `gsctool` to query the GSC Flash Logs for any crashes.
+* During boot, if `gsctool` Flash Log output contains a crash signature, we
+create a report.
 
 ## kernel_collector
 
@@ -92,8 +119,8 @@ The program name is `kernel` and might be referred to as `kcrash`.
     & `dmesg-efi-*`, and generate a report for each one.
 *   Stack traces created by the kernel are analyzed to create a stack for the
     server, as well as generate a hash/fingerprint to correlate other reports.
-*   For watchdog resets, we'll first query the eventlog (from [mosys]) to see if
-    the reset was actually due to that.
+*   For watchdog resets, we'll first query the eventlog (from [elogtool]) to see
+    if the reset was actually due to that.
     Normally we'd query the watchdog driver directly, but not all platforms are
     able to support that properly via the kernel driver.
     We'll create a simpler report using the last snippet of the kernel log from
@@ -168,7 +195,7 @@ Collects crashes of Linux kernel of Android in [ARCVM].
 
 When the ARCVM Linux kernel crashes, it dumps logs to
 `/sys/fs/pstore/dmesg-ramoops-0` in ARCVM.  It's a [pstore] file, so the
-backend exists on Chrome OS as `/home/root/<hash>/crosvm/*.pstore`.
+backend exists on ChromeOS as `/home/root/<hash>/crosvm/*.pstore`.
 [arcvm_kernel_collector] receives the content of this file from
 ArcCrashCollector and ARC bridge via Mojo (or possibly, directly reads the
 ring buffer in pstore file) and processes it.
@@ -206,7 +233,7 @@ Otherwise Chrome coredumps can easily consume 3GB+ of memory!
 This does mean the system may miss crashes if Chrome's handling itself is buggy.
 
 *** aside
-In much older versions of Chrome OS (sometime before R40), Chrome would not only
+In much older versions of ChromeOS (sometime before R40), Chrome would not only
 handle creating its own crash reports, it would also handle uploading them.
 We changed that behavior because Chrome's uploading is not as robust: it starts
 uploading immediately, lacks delays/rate limiting, it tries only once, and if it
@@ -362,12 +389,26 @@ information on why the suspend failure happened.
 
 TODO(dbasehore): Expand on this section
 
+### recovery failures
+
+When the cryptohome recovery process fails we generate a report with
+cryptohomed logs. This happens in these cases:
+*   Generation of the recovery request fails.
+*   Derivation of the recovery secret fails.
+
+The program name is `cryptohome`.
+
 ### auth failures
 
 When there are some auth failure on the previous life cycle of tcsd, we
 generate a report along with failed tpm commands.
 
 TODO(chingkang): Expand on this section
+
+### modem failures
+
+When the modem rejects a user request to perform an operation on the modem, we
+generate a report (For e.g. Failure to connect to a network)
 
 ## kernel_warning_collector
 
@@ -413,10 +454,10 @@ D-Bus signal on /org/chromium/AnomalyEventService.  This is currently used by
 [ARCVM]: ../../arc/vm/
 [BERT]: https://www.uefi.org/sites/default/files/resources/ACPI%206_2_A_Sept29.pdf
 [EC]: https://chromium.googlesource.com/chromiumos/platform/ec
+[elogtool]: https://review.coreboot.org/plugins/gitiles/coreboot/+/HEAD/util/cbfstool/
 [Google Breakpad]: https://chromium.googlesource.com/breakpad/breakpad
 [crashpad]: https://chromium.googlesource.com/crashpad/crashpad
 [memd]: ../../metrics/memd/
-[mosys]: https://chromium.googlesource.com/chromiumos/platform/mosys/
 [pstore]: https://chromium.googlesource.com/chromiumos/third_party/kernel/+/v4.17/Documentation/admin-guide/ramoops.rst
 [SELinux]: https://en.wikipedia.org/wiki/Security-Enhanced_Linux
 [udev]: https://en.wikipedia.org/wiki/Udev

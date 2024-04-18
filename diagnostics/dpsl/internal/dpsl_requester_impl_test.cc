@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,33 +9,41 @@
 #include <utility>
 
 #include <base/barrier_closure.h>
-#include <base/bind.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
+#include <base/sequence_checker.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/grpc/async_grpc_server.h>
 #include <gmock/gmock.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <gtest/gtest.h>
 
-#include "diagnostics/common/protobuf_test_utils.h"
 #include "diagnostics/constants/grpc_constants.h"
 #include "diagnostics/dpsl/internal/dpsl_global_context_impl.h"
 #include "diagnostics/dpsl/internal/dpsl_requester_impl.h"
 #include "diagnostics/dpsl/internal/dpsl_thread_context_impl.h"
+#include "diagnostics/dpsl/internal/protobuf_test_utils.h"
 #include "diagnostics/dpsl/internal/test_dpsl_background_thread.h"
 #include "diagnostics/dpsl/public/dpsl_global_context.h"
 #include "diagnostics/dpsl/public/dpsl_requester.h"
 #include "diagnostics/dpsl/public/dpsl_thread_context.h"
 
 namespace diagnostics {
+namespace {
 
 TEST(GetWilcoDtcSupportdGrpcUriTestDeathTest, InvalidValue) {
-  ASSERT_DEATH(DpslRequesterImpl::GetWilcoDtcSupportdGrpcUri(
-                   static_cast<DpslRequester::GrpcClientUri>(
-                       std::numeric_limits<std::underlying_type<
-                           DpslRequester::GrpcClientUri>::type>::max())),
+  constexpr auto kInvalidUri = static_cast<DpslRequester::GrpcClientUri>(
+      std::numeric_limits<
+          std::underlying_type<DpslRequester::GrpcClientUri>::type>::max());
+#ifdef NDEBUG
+  // In release builds the error is signaled by returning an empty URI.
+  EXPECT_EQ(DpslRequesterImpl::GetWilcoDtcSupportdGrpcUri(kInvalidUri), "");
+#else
+  // In debug builds an assertion crash is expected.
+  ASSERT_DEATH(DpslRequesterImpl::GetWilcoDtcSupportdGrpcUri(kInvalidUri),
                "Unexpected GrpcClientUri");
+#endif
 }
 
 TEST(GetWilcoDtcSupportdGrpcUriTest, Unix) {
@@ -103,15 +111,18 @@ TEST_F(DpslRequesterImplDeathTest, CreateWithInvalidThreadContext) {
 
 TEST_F(DpslRequesterImplDeathTest, CreateWithInvalidServerUri) {
   // Set the maximum possible value to make sure it isn't valid
-  ASSERT_DEATH(DpslRequester::Create(
-                   main_thread_context_.get(),
-                   static_cast<DpslRequester::GrpcClientUri>(
-                       std::numeric_limits<std::underlying_type<
-                           DpslRequester::GrpcClientUri>::type>::max())),
+  constexpr auto kInvalidUri = static_cast<DpslRequester::GrpcClientUri>(
+      std::numeric_limits<
+          std::underlying_type<DpslRequester::GrpcClientUri>::type>::max());
+#ifdef NDEBUG
+  // In release builds the error is signaled by returning null.
+  EXPECT_FALSE(DpslRequester::Create(main_thread_context_.get(), kInvalidUri));
+#else
+  // In debug builds an assertion crash is expected.
+  EXPECT_DEATH(DpslRequester::Create(main_thread_context_.get(), kInvalidUri),
                "Unexpected GrpcClientUri");
+#endif
 }
-
-namespace {
 
 // Generic template for the type of a member function of DpslRequesterImpl
 template <typename Request, typename Response>
@@ -211,8 +222,8 @@ using PerformWebRequestTestParam = DpslRequesterImplServerTestParam<
     grpc_api::PerformWebRequestParameter,
     grpc_api::PerformWebRequestResponse,
     &DpslRequesterImpl::PerformWebRequest,
-    decltype(
-        &grpc_api::WilcoDtcSupportd::AsyncService::RequestPerformWebRequest),
+    decltype(&grpc_api::WilcoDtcSupportd::AsyncService::
+                 RequestPerformWebRequest),
     &grpc_api::WilcoDtcSupportd::AsyncService::RequestPerformWebRequest>;
 
 void FillProtobufForTest(grpc_api::GetEcTelemetryRequest* req) {
@@ -244,8 +255,8 @@ using GetAvailableRoutinesTestParam = DpslRequesterImplServerTestParam<
     grpc_api::GetAvailableRoutinesRequest,
     grpc_api::GetAvailableRoutinesResponse,
     &DpslRequesterImpl::GetAvailableRoutines,
-    decltype(
-        &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetAvailableRoutines),
+    decltype(&grpc_api::WilcoDtcSupportd::AsyncService::
+                 RequestGetAvailableRoutines),
     &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetAvailableRoutines>;
 
 void FillProtobufForTest(grpc_api::RunRoutineRequest* req) {
@@ -281,8 +292,8 @@ using GetRoutineUpdateTestParam = DpslRequesterImplServerTestParam<
     grpc_api::GetRoutineUpdateRequest,
     grpc_api::GetRoutineUpdateResponse,
     &DpslRequesterImpl::GetRoutineUpdate,
-    decltype(
-        &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetRoutineUpdate),
+    decltype(&grpc_api::WilcoDtcSupportd::AsyncService::
+                 RequestGetRoutineUpdate),
     &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetRoutineUpdate>;
 
 void FillProtobufForTest(grpc_api::GetOsVersionRequest*) {
@@ -313,8 +324,8 @@ using GetConfigurationDataTestParam = DpslRequesterImplServerTestParam<
     grpc_api::GetConfigurationDataRequest,
     grpc_api::GetConfigurationDataResponse,
     &DpslRequesterImpl::GetConfigurationData,
-    decltype(
-        &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetConfigurationData),
+    decltype(&grpc_api::WilcoDtcSupportd::AsyncService::
+                 RequestGetConfigurationData),
     &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetConfigurationData>;
 
 void FillProtobufForTest(grpc_api::GetVpdFieldRequest* req) {
@@ -346,8 +357,8 @@ using GetDriveSystemDataTestParam = DpslRequesterImplServerTestParam<
     grpc_api::GetDriveSystemDataRequest,
     grpc_api::GetDriveSystemDataResponse,
     &DpslRequesterImpl::GetDriveSystemData,
-    decltype(
-        &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetDriveSystemData),
+    decltype(&grpc_api::WilcoDtcSupportd::AsyncService::
+                 RequestGetDriveSystemData),
     &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetDriveSystemData>;
 
 void FillProtobufForTest(
@@ -395,17 +406,19 @@ using GetStatefulPartitionAvailableCapacityTestParam =
 class TestDsplMultiRequesterServer {
  public:
   explicit TestDsplMultiRequesterServer(const std::string& uri)
-      : async_grpc_server_(base::ThreadTaskRunnerHandle::Get(), {uri}) {
+      : async_grpc_server_(base::SingleThreadTaskRunner::GetCurrentDefault(),
+                           {uri}) {
     async_grpc_server_.RegisterHandler(
         &grpc_api::WilcoDtcSupportd::AsyncService::RequestSendMessageToUi,
-        base::Bind(
+        base::BindRepeating(
             &TestDsplMultiRequesterServer::HandleSendMessageToUiCallbackCall,
             base::Unretained(this)));
 
     async_grpc_server_.RegisterHandler(
         &grpc_api::WilcoDtcSupportd::AsyncService::RequestPerformWebRequest,
-        base::Bind(&TestDsplMultiRequesterServer::HandlePerformWebRequest,
-                   base::Unretained(this)));
+        base::BindRepeating(
+            &TestDsplMultiRequesterServer::HandlePerformWebRequest,
+            base::Unretained(this)));
   }
   TestDsplMultiRequesterServer(const TestDsplMultiRequesterServer&) = delete;
   TestDsplMultiRequesterServer& operator=(const TestDsplMultiRequesterServer&) =
@@ -448,35 +461,35 @@ class TestDsplMultiRequesterServer {
   }
 
  private:
-  using HandleSendMessageToUiCallback = base::Callback<void(
+  using HandleSendMessageToUiCallback = base::OnceCallback<void(
       grpc::Status, std::unique_ptr<grpc_api::SendMessageToUiResponse>)>;
 
-  using HandlePerformWebRequestCallback = base::Callback<void(
+  using HandlePerformWebRequestCallback = base::OnceCallback<void(
       grpc::Status, std::unique_ptr<grpc_api::PerformWebRequestResponse>)>;
 
   void HandleSendMessageToUiCallbackCall(
       std::unique_ptr<grpc_api::SendMessageToUiRequest> request,
-      const HandleSendMessageToUiCallback& callback) {
+      HandleSendMessageToUiCallback callback) {
     EXPECT_THAT(*request, ProtobufEquals(send_message_to_ui_expected_request_));
 
     handle_send_message_to_ui_called_++;
 
-    callback.Run(grpc::Status::OK,
-                 std::make_unique<grpc_api::SendMessageToUiResponse>(
-                     send_message_to_ui_response_to_reply_with_));
+    std::move(callback).Run(grpc::Status::OK,
+                            std::make_unique<grpc_api::SendMessageToUiResponse>(
+                                send_message_to_ui_response_to_reply_with_));
   }
 
   void HandlePerformWebRequest(
       std::unique_ptr<grpc_api::PerformWebRequestParameter> request,
-      const HandlePerformWebRequestCallback& callback) {
+      HandlePerformWebRequestCallback callback) {
     EXPECT_THAT(*request,
                 ProtobufEquals(perform_web_request_expected_request_));
 
     handle_perform_web_request_called_++;
 
-    callback.Run(grpc::Status::OK,
-                 std::make_unique<grpc_api::PerformWebRequestResponse>(
-                     perform_web_request_response_to_reply_with_));
+    std::move(callback).Run(
+        grpc::Status::OK, std::make_unique<grpc_api::PerformWebRequestResponse>(
+                              perform_web_request_response_to_reply_with_));
   }
 
   grpc_api::SendMessageToUiRequest send_message_to_ui_expected_request_;
@@ -492,8 +505,6 @@ class TestDsplMultiRequesterServer {
   brillo::AsyncGrpcServer<grpc_api::WilcoDtcSupportd::AsyncService>
       async_grpc_server_;
 };
-
-}  // namespace
 
 class DpslRequesterImplWithRequesterTest : public DpslRequesterImplTest {
  public:
@@ -544,7 +555,7 @@ TEST_F(DpslRequesterImplWithRequesterTest, MultiRequest) {
   server.SetPerformWebRequestResponseToReplyWith(response2);
 
   auto quit_closure =
-      base::BarrierClosure(2, base::Bind(
+      base::BarrierClosure(2, base::BindOnce(
                                   [](DpslThreadContext* main_thread_context) {
                                     main_thread_context->QuitEventLoop();
                                   },
@@ -585,11 +596,12 @@ class TestDsplRequesterServer {
   using Response = typename TestParam::Response;
 
   explicit TestDsplRequesterServer(const std::string& uri)
-      : async_grpc_server_(base::ThreadTaskRunnerHandle::Get(), {uri}) {
+      : async_grpc_server_(base::SingleThreadTaskRunner::GetCurrentDefault(),
+                           {uri}) {
     async_grpc_server_.RegisterHandler(
         TestParam::RequestRpcFunctionValue,
-        base::Bind(&TestDsplRequesterServer::HandleCall,
-                   base::Unretained(this)));
+        base::BindRepeating(&TestDsplRequesterServer::HandleCall,
+                            base::Unretained(this)));
   }
   TestDsplRequesterServer(const TestDsplRequesterServer&) = delete;
   TestDsplRequesterServer& operator=(const TestDsplRequesterServer&) = delete;
@@ -614,16 +626,16 @@ class TestDsplRequesterServer {
 
  private:
   using HandleCallCallback =
-      base::Callback<void(grpc::Status, std::unique_ptr<Response>)>;
+      base::OnceCallback<void(grpc::Status, std::unique_ptr<Response>)>;
 
   void HandleCall(std::unique_ptr<Request> request,
-                  const HandleCallCallback& callback) {
+                  HandleCallCallback callback) {
     EXPECT_THAT(*request, ProtobufEquals(expected_request_));
 
     handle_call_called_++;
 
-    callback.Run(grpc::Status::OK,
-                 std::make_unique<Response>(response_to_reply_with_));
+    std::move(callback).Run(
+        grpc::Status::OK, std::make_unique<Response>(response_to_reply_with_));
   }
 
   Request expected_request_;
@@ -660,11 +672,19 @@ class DpslRequesterImplServerTest : public DpslRequesterImplWithRequesterTest {
 
   void PerformRequest(const Request& request, const Response& response) {
     auto handler = [&, response](auto response_ptr) {
+      // The handler should always run on the creation thread.
+      ASSERT_TRUE(main_sequence_checker_.CalledOnValidSequence());
+
       ASSERT_TRUE(response_ptr);
       ASSERT_TRUE(main_thread_context_->BelongsToCurrentThread());
       ASSERT_THAT(*response_ptr, ProtobufEquals(response));
 
+      // Note that this might be a no-op: in case we run before the test body
+      // calls RunEventLoop(). This is possible, because some tests spin
+      // additional run loops, like the one in
+      // TestDpslBackgroundThread::DoSync().
       main_thread_context_->QuitEventLoop();
+      ++responses_received_;
     };
 
     ((*requester_).*(TestParam::MethodValue))(
@@ -672,7 +692,9 @@ class DpslRequesterImplServerTest : public DpslRequesterImplWithRequesterTest {
   }
 
  protected:
+  base::SequenceChecker main_sequence_checker_;
   std::unique_ptr<TestDsplRequesterServer<TestParam>> server_;
+  int responses_received_ = 0;
 };
 
 using DpslRequesterImplServerTestTypes =
@@ -720,12 +742,19 @@ TYPED_TEST(DpslRequesterImplServerTest, CallGrpcMethodFromBackgroundThread) {
                                              this->global_context_.get(),
                                              this->main_thread_context_.get());
   background_thread.StartEventLoop();
-  background_thread.DoSync(base::Bind(
+  background_thread.DoSync(base::BindOnce(
       &TestFixture::PerformRequest, base::Unretained(this), request, response));
 
-  this->main_thread_context_->RunEventLoop();
+  // Only spin an event loop in case the response hasn't been handled yet, to
+  // avoid hanging here: the handler might've been executed by the run loop that
+  // DoSync() spins. The check of responses_received_ is not racy, because this
+  // counter is updated on the main thread.
+  if (!this->responses_received_)
+    this->main_thread_context_->RunEventLoop();
 
+  EXPECT_EQ(this->responses_received_, 1);
   EXPECT_EQ(this->server_->GetHandleCallCalled(), 1);
 }
 
+}  // namespace
 }  // namespace diagnostics

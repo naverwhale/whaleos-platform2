@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,6 @@
 #include <unordered_map>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 
 namespace smbfs {
 
@@ -22,6 +21,11 @@ namespace smbfs {
 class InodeMap {
  public:
   explicit InodeMap(ino_t root_inode);
+
+  InodeMap() = delete;
+  InodeMap(const InodeMap&) = delete;
+  InodeMap& operator=(const InodeMap&) = delete;
+
   ~InodeMap();
 
   // Return an inode for |path| without incrementing the refcount. If |path|
@@ -69,8 +73,6 @@ class InodeMap {
   ino_t seq_num_;
   std::unordered_map<ino_t, std::unique_ptr<Entry>> inodes_;
   std::unordered_map<std::string, Entry*> files_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(InodeMap);
 };
 
 }  // namespace smbfs

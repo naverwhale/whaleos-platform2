@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -11,7 +11,7 @@
 #include <memory>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include "cros-camera/camera_mojo_channel_manager_token.h"
 #include "cros-camera/export.h"
 #include "cros-camera/jpeg_compressor.h"
@@ -19,9 +19,9 @@
 namespace cros {
 
 using EncodeWithFDCallback =
-    base::Callback<void(uint32_t output_size, int error)>;
+    base::OnceCallback<void(uint32_t output_size, int error)>;
 using EncodeWithDmaBufCallback =
-    base::Callback<void(uint32_t output_size, int error)>;
+    base::OnceCallback<void(uint32_t output_size, int error)>;
 
 // Encapsulates a converter from YU12 to JPEG format. This class is not
 // thread-safe.
@@ -148,6 +148,7 @@ class CROS_CAMERA_EXPORT JpegEncodeAccelerator {
       int coded_size_width,
       int coded_size_height,
       int quality,
+      uint64_t input_modifier,
       uint32_t* output_data_size) = 0;
 };
 

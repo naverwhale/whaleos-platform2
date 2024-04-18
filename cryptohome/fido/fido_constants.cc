@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 namespace cryptohome {
 namespace fido_device {
 
-const base::TimeDelta kDeviceTimeout = base::TimeDelta::FromSeconds(20);
-const base::TimeDelta kU2fRetryDelay = base::TimeDelta::FromMilliseconds(200);
+const base::TimeDelta kDeviceTimeout = base::Seconds(20);
+const base::TimeDelta kU2fRetryDelay = base::Milliseconds(200);
 
 const char kFormatKey[] = "fmt";
 const char kAttestationStatementKey[] = "attStmt";

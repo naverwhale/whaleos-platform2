@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,6 @@
 
 #include <string>
 #include <vector>
-
-#include <base/macros.h>
 
 #include "dbus_bindings/org.chromium.flimflam.Device.h"
 #include "shill/adaptor_interfaces.h"
@@ -79,13 +77,7 @@ class DeviceDBusAdaptor : public org::chromium::flimflam::DeviceAdaptor,
   void ChangePin(DBusMethodResponsePtr<> response,
                  const std::string& old_pin,
                  const std::string& new_pin) override;
-  bool PerformTDLSOperation(brillo::ErrorPtr* error,
-                            const std::string& operation,
-                            const std::string& peer,
-                            std::string* out_state) override;
-  bool RenewDHCPLease(brillo::ErrorPtr* error) override;
   void Reset(DBusMethodResponsePtr<> response) override;
-  bool ResetByteCounters(brillo::ErrorPtr* error) override;
   bool RequestRoam(brillo::ErrorPtr* error, const std::string& addr) override;
 
   void SetUsbEthernetMacAddressSource(DBusMethodResponsePtr<> response,

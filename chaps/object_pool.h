@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,16 +18,18 @@ class SlotPolicy;
 // Enumerates internal blobs. These are used as 'blob_id' values when reading
 // or writing internal blobs.
 enum InternalBlobId {
-  // The token authorization key, encrypted by the TPM.
+  // The token authorization key, encrypted by the security element.
   kEncryptedAuthKey,
-  // The token master key, encrypted by the authorization key.
-  kEncryptedMasterKey,
+  // The token root key, encrypted by the authorization key.
+  kEncryptedRootKey,
   // Tracks whether legacy objects have been imported. This is not actually a
   // blob but its existence indicates that objects have been imported and we
   // don't need to attempt that work again.
   kImportedTracker,
+  // This filed had been deprecated.
   // The legacy private root key blob, as imported from opencryptoki.
   kLegacyPrivateRootKey,
+  // This filed had been deprecated.
   // The legacy public root key blob, as imported from opencryptoki.
   kLegacyPublicRootKey,
   // A hash of the authorization data.
@@ -87,6 +89,10 @@ class ObjectPool {
   // Returns true if private objects are loaded and the pool is ready for
   // operations with them without blocking.
   virtual bool IsPrivateLoaded() = 0;
+  // Returns true if the pool is valid.
+  virtual bool IsValid() = 0;
+  // Invalidates the pool.
+  virtual void Invalidate() = 0;
 };
 
 }  // namespace chaps

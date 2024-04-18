@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <memory>
 #include <string>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/cellular/mock_pending_activation_store.h"
@@ -28,8 +27,6 @@ class MockModemInfo : public ModemInfo {
     return mock_pending_activation_store_;
   }
 
-  MOCK_METHOD(void, Start, (), (override));
-  MOCK_METHOD(void, Stop, (), (override));
   MOCK_METHOD(void, OnDeviceInfoAvailable, (const std::string&), (override));
 
  private:

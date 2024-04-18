@@ -1,64 +1,66 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MISSIVE_DBUS_UPLOAD_CLIENT_H_
 #define MISSIVE_DBUS_UPLOAD_CLIENT_H_
 
-#include <atomic>
-#include <memory>
+#include <optional>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/memory/ref_counted.h>
+#include <base/functional/callback.h>
+#include <base/memory/ref_counted_delete_on_sequence.h>
 #include <base/memory/scoped_refptr.h>
+#include <base/task/sequenced_task_runner.h>
 #include <dbus/bus.h>
-#include <dbus/object_proxy.h>
 
+#include "missive/health/health_module.h"
 #include "missive/proto/interface.pb.h"
 #include "missive/proto/record.pb.h"
 #include "missive/util/statusor.h"
 
 namespace reporting {
 
-class UploadClient : public base::RefCountedThreadSafe<UploadClient> {
+// Abstract base class for upload client implementation and use.
+// Derived from RefCountedDeleteOnSequence in order to allow weak pointers usage
+// with it (weak pointer factory needs to be deleted on the same thread the weak
+// pointers are dereferenced).
+class UploadClient : public base::RefCountedDeleteOnSequence<UploadClient> {
  public:
   // The requestor will receive a response to their UploadEncryptedRequest via
   // the HandleUploadResponseCallback.
   using HandleUploadResponseCallback =
       base::OnceCallback<void(StatusOr<UploadEncryptedRecordResponse>)>;
 
-  // Factory method for creating a UploadClient.
-  static scoped_refptr<UploadClient> Create();
+  // Factory method for asynchronously creating a UploadClient on
+  // bus->OriginThread.
+  static void Create(
+      scoped_refptr<dbus::Bus> bus,
+      base::OnceCallback<void(StatusOr<scoped_refptr<UploadClient>>)> cb);
 
   // Utilizes DBus to send a list of encrypted records to Chrome. Caller can
-  // expect a response via the |response_callback|.
+  // expect a response via the `response_callback`.
+  // `records` may be an empty vector, `need_encryption_key` is true or false,
+  // regardless of `records`, `health_data` is only provided if health module is
+  // in debugging state (it is not counted towards
+  // `remaining_storage_capacity`).
   virtual void SendEncryptedRecords(
-      std::unique_ptr<std::vector<EncryptedRecord>> records,
+      std::vector<EncryptedRecord> records,
       bool need_encryption_keys,
-      HandleUploadResponseCallback response_callback);
+      scoped_refptr<HealthModule> health_module,
+      uint64_t remaining_storage_capacity,
+      std::optional<uint64_t> new_events_rate,
+      HandleUploadResponseCallback response_callback) = 0;
 
  protected:
-  // Factory method for creating a UploadClient with specified |bus| and
-  // |chrome_proxy|.
-  static scoped_refptr<UploadClient> Create(scoped_refptr<dbus::Bus> bus,
-                                            dbus::ObjectProxy* chrome_proxy);
-
-  UploadClient(scoped_refptr<dbus::Bus> bus, dbus::ObjectProxy* chrome_proxy);
-  virtual ~UploadClient();
-
-  void HandleUploadEncryptedRecordResponse(
-      const std::unique_ptr<dbus::MethodCall> call,  // owned thru response.
-      HandleUploadResponseCallback response_callback,
-      dbus::Response* response) const;
+  explicit UploadClient(scoped_refptr<base::SequencedTaskRunner> task_runner)
+      : base::RefCountedDeleteOnSequence<UploadClient>(task_runner) {}
+  virtual ~UploadClient() = default;
 
  private:
-  friend base::RefCountedThreadSafe<UploadClient>;
-
-  scoped_refptr<dbus::Bus> const bus_;
-  dbus::ObjectProxy* const chrome_proxy_;
+  friend class base::RefCountedDeleteOnSequence<UploadClient>;
+  friend class base::DeleteHelper<UploadClient>;
 };
-
 }  // namespace reporting
 
 #endif  // MISSIVE_DBUS_UPLOAD_CLIENT_H_

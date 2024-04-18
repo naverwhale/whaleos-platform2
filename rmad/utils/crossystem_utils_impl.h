@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,12 @@
 
 namespace rmad {
 
+// The implementation directly calls crossystem functions, so we don't have
+// unittest for the class.
 class CrosSystemUtilsImpl : public CrosSystemUtils {
  public:
   CrosSystemUtilsImpl() = default;
-  ~CrosSystemUtilsImpl() = default;
+  ~CrosSystemUtilsImpl() override = default;
 
   bool SetInt(const std::string& key, int value) override;
   bool GetInt(const std::string& key, int* value) const override;

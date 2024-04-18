@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
-
 namespace mtpd {
 
 class StorageInfo {
@@ -20,7 +18,8 @@ class StorageInfo {
               const LIBMTP_device_entry_t& device,
               const LIBMTP_devicestorage_t& storage,
               const std::string& fallback_vendor,
-              const std::string& fallback_product);
+              const std::string& fallback_product,
+              const std::string& serial_number);
   StorageInfo();
   ~StorageInfo();
 
@@ -46,6 +45,9 @@ class StorageInfo {
   uint64_t free_space_in_objects_;
   std::string storage_description_;
   std::string volume_identifier_;
+
+  // From LIBMTP_mtpdevice_t.
+  std::string serial_number_;
 };
 
 }  // namespace mtpd

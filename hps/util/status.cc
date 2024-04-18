@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,7 +22,7 @@
 
 namespace {
 
-// No arguments, registers 0 - 4 are dumped
+// No arguments, all registers are dumped
 // N - dump register N
 // N - M Dump registers between N and M inclusive
 int Status(std::unique_ptr<hps::HPS> hps,
@@ -31,7 +31,7 @@ int Status(std::unique_ptr<hps::HPS> hps,
   switch (args.size()) {
     case 1:
       start = 0;
-      end = 4;
+      end = static_cast<int>(hps::HpsReg::kMax);
       break;
 
     case 2:
@@ -70,24 +70,15 @@ int Status(std::unique_ptr<hps::HPS> hps,
     return 1;
   }
 
-  for (auto i = start; i <= end; i++) {
-    int result = hps->Device()->ReadReg(hps::HpsReg(i));
-    if (result < 0) {
-      std::cout << base::StringPrintf("Register %3d: error (%s)\n", i,
-                                      hps::HpsRegToString(hps::HpsReg(i)));
-    } else {
-      std::cout << base::StringPrintf(
-          "Register %3d: 0x%.4x (%s) %s\n", i, static_cast<uint16_t>(result),
-          hps::HpsRegToString(hps::HpsReg(i)),
-          hps::HpsRegValToString(hps::HpsReg(i), result).c_str());
-    }
-  }
-  return 0;
+  // return success only if there were 0 errors
+  return hps::DumpHpsRegisters(
+      *hps->Device(), [](const std::string& s) { std::cout << s << std::endl; },
+      start, end);
 }
 
 Command status("status",
                "status [ start [ end ] ] - "
-               "Dump status registers (default 0 5).",
+               "Dump status registers (default all).",
                Status);
 
 }  // namespace

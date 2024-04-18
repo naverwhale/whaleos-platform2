@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,12 +27,12 @@
 #include <vector>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
@@ -49,8 +49,7 @@
 
 using std::string;
 
-namespace vm_tools {
-namespace vsh {
+namespace vm_tools::vsh {
 
 // Pick a default exit status that will make it obvious if the remote end
 // exited abnormally.
@@ -87,7 +86,6 @@ VshClient::VshClient(base::ScopedFD sock_fd,
                      base::ScopedFD stdout_fd,
                      base::ScopedFD stderr_fd)
     : sock_fd_(std::move(sock_fd)),
-      container_shell_pid_(0),
       stdout_fd_(std::move(stdout_fd)),
       stderr_fd_(std::move(stderr_fd)),
       exit_code_(kDefaultExitCode) {}
@@ -180,8 +178,8 @@ bool VshClient::Init(const std::string& user,
   container_shell_pid_ = connection_response.pid();
 
   sock_watcher_ = base::FileDescriptorWatcher::WatchReadable(
-      sock_fd_.get(),
-      base::Bind(&VshClient::HandleVsockReadable, base::Unretained(this)));
+      sock_fd_.get(), base::BindRepeating(&VshClient::HandleVsockReadable,
+                                          base::Unretained(this)));
   // STDIN_FILENO may not be watchable if it's /dev/null, and WatchReadable will
   // CHECK in this case. So watch only if it's interactive tty.
   // Watch FIFO too to make `echo command | vsh` usable even it's not
@@ -197,19 +195,20 @@ bool VshClient::Init(const std::string& user,
   }
   if (is_stdin_watchable) {
     stdin_watcher_ = base::FileDescriptorWatcher::WatchReadable(
-        STDIN_FILENO,
-        base::Bind(&VshClient::HandleStdinReadable, base::Unretained(this)));
+        STDIN_FILENO, base::BindRepeating(&VshClient::HandleStdinReadable,
+                                          base::Unretained(this)));
   }
 
   // Handle termination signals and SIGWINCH.
   signal_handler_.Init();
   for (int signal : {SIGINT, SIGTERM, SIGHUP, SIGQUIT}) {
     signal_handler_.RegisterHandler(
-        signal, base::Bind(&VshClient::HandleSignal, base::Unretained(this)));
+        signal,
+        base::BindRepeating(&VshClient::HandleSignal, base::Unretained(this)));
   }
   signal_handler_.RegisterHandler(
-      SIGWINCH,
-      base::Bind(&VshClient::HandleWindowResizeSignal, base::Unretained(this)));
+      SIGWINCH, base::BindRepeating(&VshClient::HandleWindowResizeSignal,
+                                    base::Unretained(this)));
 
   return true;
 }
@@ -395,13 +394,12 @@ void VshClient::CancelStdinTask() {
   stdin_watcher_.reset();
 }
 
-int32_t VshClient::container_shell_pid() {
+int32_t VshClient::container_shell_pid() const {
   return container_shell_pid_;
 }
 
-int VshClient::exit_code() {
+int VshClient::exit_code() const {
   return exit_code_;
 }
 
-}  // namespace vsh
-}  // namespace vm_tools
+}  // namespace vm_tools::vsh

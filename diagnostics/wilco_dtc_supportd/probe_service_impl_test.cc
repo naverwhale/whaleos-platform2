@@ -1,12 +1,12 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/run_loop.h>
 #include <base/test/task_environment.h>
 #include <gmock/gmock.h>
@@ -14,19 +14,19 @@
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/receiver.h>
 
+#include "diagnostics/mojom/public/cros_healthd.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 #include "diagnostics/wilco_dtc_supportd/probe_service_impl.h"
-#include "mojo/cros_healthd.mojom.h"
-#include "mojo/cros_healthd_probe.mojom.h"
-
-using testing::_;
-using testing::Invoke;
-using testing::Return;
-using testing::StrictMock;
 
 namespace diagnostics {
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
-
+namespace wilco {
 namespace {
+
+namespace mojo_ipc = ::ash::cros_healthd::mojom;
+using ::testing::_;
+using ::testing::Invoke;
+using ::testing::Return;
+using ::testing::StrictMock;
 
 class MockCallback {
  public:
@@ -44,6 +44,12 @@ class MockProbeService : public mojo_ipc::CrosHealthdProbeService {
               (const std::vector<mojo_ipc::ProbeCategoryEnum>&,
                ProbeTelemetryInfoCallback),
               (override));
+  MOCK_METHOD(void,
+              ProbeMultipleProcessInfo,
+              (const std::optional<std::vector<uint32_t>>&,
+               bool,
+               ProbeMultipleProcessInfoCallback),
+              (override));
 };
 
 class MockProbeServiceDelegate : public ProbeService::Delegate {
@@ -53,8 +59,6 @@ class MockProbeServiceDelegate : public ProbeService::Delegate {
               (mojo::PendingReceiver<mojo_ipc::CrosHealthdProbeService>),
               (override));
 };
-
-}  // namespace
 
 // Tests for the ProbeServiceImpl class.
 class ProbeServiceImplTest : public testing::Test {
@@ -118,9 +122,9 @@ TEST_F(ProbeServiceImplTest, DroppedConnection) {
   base::RunLoop run_loop;
   service()->ProbeTelemetryInfo(
       {}, base::BindOnce(
-              [](base::Closure callback, mojo_ipc::TelemetryInfoPtr ptr) {
+              [](base::OnceClosure callback, mojo_ipc::TelemetryInfoPtr ptr) {
                 EXPECT_FALSE(ptr);
-                callback.Run();
+                std::move(callback).Run();
               },
               run_loop.QuitClosure()));
   run_loop.Run();
@@ -133,9 +137,9 @@ TEST_F(ProbeServiceImplTest, RecoverAfterDroppedConnection) {
   base::RunLoop run_loop1;
   service()->ProbeTelemetryInfo(
       {}, base::BindOnce(
-              [](base::Closure callback, mojo_ipc::TelemetryInfoPtr ptr) {
+              [](base::OnceClosure callback, mojo_ipc::TelemetryInfoPtr ptr) {
                 EXPECT_FALSE(ptr);
-                callback.Run();
+                std::move(callback).Run();
               },
               run_loop1.QuitClosure()));
   run_loop1.Run();
@@ -161,9 +165,9 @@ TEST_F(ProbeServiceImplTest, RecoverAfterDroppedConnection) {
   base::RunLoop run_loop2;
   service()->ProbeTelemetryInfo(
       {}, base::BindOnce(
-              [](base::Closure callback, mojo_ipc::TelemetryInfoPtr ptr) {
+              [](base::OnceClosure callback, mojo_ipc::TelemetryInfoPtr ptr) {
                 EXPECT_TRUE(ptr);
-                callback.Run();
+                std::move(callback).Run();
               },
               run_loop2.QuitClosure()));
   run_loop2.Run();
@@ -199,13 +203,15 @@ TEST_F(ProbeServiceImplTest, ProbeTelemetryInfo) {
   service()->ProbeTelemetryInfo(
       kCategories,
       base::BindOnce(
-          [](base::Closure callback, mojo_ipc::TelemetryInfoPtr ptr) {
+          [](base::OnceClosure callback, mojo_ipc::TelemetryInfoPtr ptr) {
             ASSERT_TRUE(ptr);
             EXPECT_TRUE(ptr->battery_result->is_battery_info());
-            callback.Run();
+            std::move(callback).Run();
           },
           run_loop.QuitClosure()));
   run_loop.Run();
 }
 
+}  // namespace
+}  // namespace wilco
 }  // namespace diagnostics

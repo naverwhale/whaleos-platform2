@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,23 +6,23 @@
 
 #include <string>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 
+#include "power_manager/common/tracing.h"
 #include "power_manager/powerd/system/thermal/device_thermal_state.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
 // Default interval for polling the thermal device.
-const int kDefaultPollIntervalMs = 5000;
+constexpr base::TimeDelta kDefaultPollInterval = base::Seconds(5);
 const int kNumErrorBeforeGivingUp = 5;
 
 }  // namespace
@@ -34,10 +34,8 @@ ThermalDevice::ThermalDevice(base::FilePath device_path)
       num_init_attempts_(0),
       num_read_errors_(0),
       type_(ThermalDeviceType::kUnknown),
-      poll_interval_ms_(kDefaultPollIntervalMs),
+      poll_interval_(kDefaultPollInterval),
       current_state_(DeviceThermalState::kUnknown) {}
-
-ThermalDevice::~ThermalDevice() {}
 
 void ThermalDevice::AddObserver(ThermalDeviceObserver* observer) {
   DCHECK(observer);
@@ -61,12 +59,12 @@ void ThermalDevice::Init(bool read_immediately) {
 }
 
 void ThermalDevice::StartTimer() {
-  poll_timer_.Start(FROM_HERE,
-                    base::TimeDelta::FromMilliseconds(poll_interval_ms_), this,
+  poll_timer_.Start(FROM_HERE, poll_interval_, this,
                     &ThermalDevice::ReadDeviceState);
 }
 
 void ThermalDevice::ReadDeviceState() {
+  TRACE_EVENT("power", "ThermalDevice::ReadDeviceState");
   if (!polling_file_.HasOpenedFile() && !InitSysfsFile()) {
     if (num_init_attempts_++ >= kNumErrorBeforeGivingUp) {
       LOG(ERROR) << "Giving up on thermal device: " << device_path_;
@@ -78,8 +76,8 @@ void ThermalDevice::ReadDeviceState() {
   // The timer will be restarted after the read finishes.
   poll_timer_.Stop();
   polling_file_.StartRead(
-      base::Bind(&ThermalDevice::ReadCallback, base::Unretained(this)),
-      base::Bind(&ThermalDevice::ErrorCallback, base::Unretained(this)));
+      base::BindOnce(&ThermalDevice::ReadCallback, base::Unretained(this)),
+      base::BindOnce(&ThermalDevice::ErrorCallback, base::Unretained(this)));
 }
 
 void ThermalDevice::ReadCallback(const std::string& data) {
@@ -112,6 +110,8 @@ void ThermalDevice::UpdateThermalState(DeviceThermalState new_state) {
   if (current_state_ == new_state)
     return;
   current_state_ = new_state;
+  TRACE_COUNTER("power", "ThermalDevice::DeviceThermalState",
+                static_cast<int>(new_state));
   LOG(INFO) << "UpdateThermalState device: " << device_path_
             << " new_state: " << DeviceThermalStateToString(new_state);
   for (auto& observer : observers_)
@@ -122,5 +122,4 @@ ThermalDeviceType ThermalDevice::GetType() const {
   return type_;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

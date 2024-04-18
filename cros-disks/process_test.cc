@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,6 +21,8 @@
 #include <base/logging.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/stringprintf.h>
+#include <base/time/time.h>
+#include <base/timer/elapsed_timer.h>
 #include <chromeos/libminijail.h>
 
 #include <gmock/gmock.h>
@@ -36,6 +38,7 @@ using testing::_;
 using testing::Contains;
 using testing::ElementsAre;
 using testing::IsEmpty;
+using testing::IsSupersetOf;
 using testing::Not;
 using testing::PrintToStringParamName;
 using testing::Return;
@@ -113,17 +116,14 @@ void Write(const int fd, base::StringPiece s) {
 // A mock Process class for testing the Process base class.
 class ProcessUnderTest : public Process {
  public:
-  MOCK_METHOD(pid_t,
-              StartImpl,
-              (base::ScopedFD, base::ScopedFD, base::ScopedFD),
-              (override));
+  MOCK_METHOD(pid_t, StartImpl, (base::ScopedFD, base::ScopedFD), (override));
   MOCK_METHOD(int, WaitImpl, (), (override));
   MOCK_METHOD(int, WaitNonBlockingImpl, (), (override));
 };
 
 struct ProcessFactory {
   base::StringPiece name;
-  std::unique_ptr<Process> (*make_process)();
+  std::unique_ptr<SandboxedProcess> (*make_process)();
 };
 
 std::ostream& operator<<(std::ostream& out, const ProcessFactory& x) {
@@ -162,22 +162,23 @@ TEST_F(ProcessTest, GetArgumentsWithNoArgumentsAdded) {
 
 TEST_F(ProcessTest, Run_Success) {
   process_.AddArgument("foo");
-  EXPECT_CALL(process_, StartImpl(_, _, _)).WillOnce(Return(123));
+  EXPECT_CALL(process_, StartImpl(_, _)).WillOnce(Return(123));
   EXPECT_CALL(process_, WaitImpl()).Times(0);
   EXPECT_CALL(process_, WaitNonBlockingImpl()).WillOnce(Return(42));
-  std::vector<std::string> output;
-  EXPECT_EQ(process_.Run(&output), 42);
-  EXPECT_THAT(output, IsEmpty());
+  EXPECT_EQ(process_.pid(), Process::kInvalidProcessId);
+  EXPECT_EQ(process_.Run(), 42);
+  EXPECT_NE(process_.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process_.GetCapturedOutput(), IsEmpty());
 }
 
 TEST_F(ProcessTest, Run_Fail) {
   process_.AddArgument("foo");
-  EXPECT_CALL(process_, StartImpl(_, _, _)).WillOnce(Return(-1));
+  EXPECT_CALL(process_, StartImpl(_, _)).WillOnce(Return(-1));
   EXPECT_CALL(process_, WaitImpl()).Times(0);
   EXPECT_CALL(process_, WaitNonBlockingImpl()).Times(0);
-  std::vector<std::string> output;
-  EXPECT_EQ(process_.Run(&output), -1);
-  EXPECT_THAT(output, IsEmpty());
+  EXPECT_EQ(process_.Run(), -1);
+  EXPECT_EQ(process_.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process_.GetCapturedOutput(), IsEmpty());
 }
 
 class ProcessRunTest : public ::testing::TestWithParam<ProcessFactory> {
@@ -189,7 +190,7 @@ class ProcessRunTest : public ::testing::TestWithParam<ProcessFactory> {
     minijail_log_to_fd(STDERR_FILENO, 0);
   }
 
-  const std::unique_ptr<Process> process_ = GetParam().make_process();
+  const std::unique_ptr<SandboxedProcess> process_ = GetParam().make_process();
 };
 
 TEST_P(ProcessRunTest, RunReturnsZero) {
@@ -197,9 +198,9 @@ TEST_P(ProcessRunTest, RunReturnsZero) {
   process.AddArgument("/bin/sh");
   process.AddArgument("-c");
   process.AddArgument("exit 0");
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, IsEmpty());
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), IsEmpty());
 }
 
 TEST_P(ProcessRunTest, WaitReturnsZero) {
@@ -208,7 +209,9 @@ TEST_P(ProcessRunTest, WaitReturnsZero) {
   process.AddArgument("-c");
   process.AddArgument("exit 0");
   EXPECT_TRUE(process.Start());
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
   EXPECT_EQ(process.Wait(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, RunReturnsNonZero) {
@@ -216,9 +219,9 @@ TEST_P(ProcessRunTest, RunReturnsNonZero) {
   process.AddArgument("/bin/sh");
   process.AddArgument("-c");
   process.AddArgument("exit 42");
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 42);
-  EXPECT_THAT(output, IsEmpty());
+  EXPECT_EQ(process.Run(), 42);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), IsEmpty());
 }
 
 TEST_P(ProcessRunTest, WaitReturnsNonZero) {
@@ -228,6 +231,7 @@ TEST_P(ProcessRunTest, WaitReturnsNonZero) {
   process.AddArgument("exit 42");
   EXPECT_TRUE(process.Start());
   EXPECT_EQ(process.Wait(), 42);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, RunKilledBySigKill) {
@@ -235,9 +239,9 @@ TEST_P(ProcessRunTest, RunKilledBySigKill) {
   process.AddArgument("/bin/sh");
   process.AddArgument("-c");
   process.AddArgument("kill -KILL $$; sleep 1000");
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), MINIJAIL_ERR_SIG_BASE + SIGKILL);
-  EXPECT_THAT(output, IsEmpty());
+  EXPECT_EQ(process.Run(), MINIJAIL_ERR_SIG_BASE + SIGKILL);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), IsEmpty());
 }
 
 TEST_P(ProcessRunTest, WaitKilledBySigKill) {
@@ -246,7 +250,9 @@ TEST_P(ProcessRunTest, WaitKilledBySigKill) {
   process.AddArgument("-c");
   process.AddArgument("kill -KILL $$; sleep 1000");
   EXPECT_TRUE(process.Start());
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
   EXPECT_EQ(process.Wait(), MINIJAIL_ERR_SIG_BASE + SIGKILL);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, RunKilledBySigSys) {
@@ -254,9 +260,9 @@ TEST_P(ProcessRunTest, RunKilledBySigSys) {
   process.AddArgument("/bin/sh");
   process.AddArgument("-c");
   process.AddArgument("kill -SYS $$; sleep 1000");
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), MINIJAIL_ERR_JAIL);
-  EXPECT_THAT(output, IsEmpty());
+  EXPECT_EQ(process.Run(), MINIJAIL_ERR_JAIL);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), IsEmpty());
 }
 
 TEST_P(ProcessRunTest, WaitKilledBySigSys) {
@@ -265,12 +271,14 @@ TEST_P(ProcessRunTest, WaitKilledBySigSys) {
   process.AddArgument("-c");
   process.AddArgument("kill -SYS $$; sleep 1000");
   EXPECT_TRUE(process.Start());
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
   EXPECT_EQ(process.Wait(), MINIJAIL_ERR_JAIL);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, ExternallyKilledBySigKill) {
-  Process& process = *process_;
-  process.AddArgument("/bin/sh");
+  SandboxedProcess& process = *process_;
+  process.AddArgument("/bin/bash");
   process.AddArgument("-c");
 
   // Pipe to block the child process.
@@ -287,6 +295,9 @@ TEST_P(ProcessRunTest, ExternallyKilledBySigKill) {
         exit 42;
     )",
       to_wait.child_fd.get(), to_block.child_fd.get(), to_wait.child_fd.get()));
+
+  process.PreserveFile(to_wait.child_fd.get());
+  process.PreserveFile(to_block.child_fd.get());
 
   EXPECT_TRUE(process.Start());
 
@@ -299,17 +310,21 @@ TEST_P(ProcessRunTest, ExternallyKilledBySigKill) {
 
   // Send SIGKILL to child process.
   const pid_t pid = process.pid();
-  LOG(INFO) << "Sending signal to PID " << pid;
+  EXPECT_NE(pid, Process::kInvalidProcessId);
+  LOG(INFO) << "Sending SIGKILL to PID " << pid;
   EXPECT_EQ(kill(pid, SIGKILL), 0);
 
   // Wait for child process to finish.
   EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
   EXPECT_EQ(process.Wait(), MINIJAIL_ERR_SIG_BASE + SIGKILL);
+  EXPECT_EQ(process.pid(), pid);
 }
 
 TEST_P(ProcessRunTest, ExternallyKilledBySigTerm) {
-  Process& process = *process_;
-  process.AddArgument("/bin/sh");
+  SandboxedProcess& process = *process_;
+  process.SetKillPidNamespace(true);
+
+  process.AddArgument("/bin/bash");
   process.AddArgument("-c");
 
   // Pipe to block the child process.
@@ -327,6 +342,9 @@ TEST_P(ProcessRunTest, ExternallyKilledBySigTerm) {
     )",
       to_wait.child_fd.get(), to_block.child_fd.get(), to_wait.child_fd.get()));
 
+  process.PreserveFile(to_wait.child_fd.get());
+  process.PreserveFile(to_block.child_fd.get());
+
   EXPECT_TRUE(process.Start());
 
   // Close unused pipe ends.
@@ -338,40 +356,46 @@ TEST_P(ProcessRunTest, ExternallyKilledBySigTerm) {
 
   // Send SIGTERM to child process.
   const pid_t pid = process.pid();
-  LOG(INFO) << "Sending signal to PID " << pid;
+  EXPECT_NE(pid, Process::kInvalidProcessId);
+  LOG(INFO) << "Sending SIGTERM to PID " << pid;
   EXPECT_EQ(kill(pid, SIGTERM), 0);
 
   // Wait for child process to finish.
   EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
   EXPECT_EQ(process.Wait(), MINIJAIL_ERR_SIG_BASE + SIGTERM);
+  EXPECT_EQ(process.pid(), pid);
 }
 
 TEST_P(ProcessRunTest, RunCannotFindCommand) {
   Process& process = *process_;
   process.AddArgument("non existing command");
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), MINIJAIL_ERR_NO_COMMAND);
+  EXPECT_EQ(process.Run(), MINIJAIL_ERR_NO_COMMAND);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, WaitCannotFindCommand) {
   Process& process = *process_;
   process.AddArgument("non existing command");
   EXPECT_TRUE(process.Start());
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
   EXPECT_EQ(process.Wait(), MINIJAIL_ERR_NO_COMMAND);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, RunCannotRunCommand) {
   Process& process = *process_;
   process.AddArgument("/dev/null");
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), MINIJAIL_ERR_NO_ACCESS);
+  EXPECT_EQ(process.Run(), MINIJAIL_ERR_NO_ACCESS);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, WaitCannotRunCommand) {
   Process& process = *process_;
   process.AddArgument("/dev/null");
   EXPECT_TRUE(process.Start());
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
   EXPECT_EQ(process.Wait(), MINIJAIL_ERR_NO_ACCESS);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, CapturesInterleavedOutputs) {
@@ -379,17 +403,36 @@ TEST_P(ProcessRunTest, CapturesInterleavedOutputs) {
   process.AddArgument("/bin/sh");
   process.AddArgument("-c");
   process.AddArgument(R"(
-      printf 'Line 1\nLine ' >&1;
-      printf 'Line 2\nLine' >&2;
-      printf '3\nLine 4\n' >&1;
-      printf ' 5\nLine 6' >&2;
+      printf 'Line 1\nLine 2\n' >&1;
+      printf 'Line 3\nLine 4\n' >&2;
+      printf 'Line 5\n' >&1;
+      printf 'Line 6' >&2;
     )");
 
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, UnorderedElementsAre("OUT: Line 1", "OUT: Line 3",
-                                           "OUT: Line 4", "ERR: Line 2",
-                                           "ERR: Line 5", "ERR: Line 6"));
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(),
+              UnorderedElementsAre("Line 1", "Line 2", "Line 3", "Line 4",
+                                   "Line 5", "Line 6"));
+}
+
+// Tests Process when the child process closes its stdout and stderr shortly
+// before exiting.
+TEST_P(ProcessRunTest, ClosesStdOutBeforeExiting) {
+  Process& process = *process_;
+  process.AddArgument("/bin/sh");
+  process.AddArgument("-c");
+  process.AddArgument(R"(
+      echo Hi
+      exec 1>&-;
+      exec 2>&-;
+      sleep 1;
+      exit 42;
+    )");
+
+  EXPECT_EQ(process.Run(), 42);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), ElementsAre("Hi"));
 }
 
 TEST_P(ProcessRunTest, CapturesLotsOfOutputData) {
@@ -403,13 +446,13 @@ TEST_P(ProcessRunTest, CapturesLotsOfOutputData) {
       done;
     )");
 
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, SizeIs(2000));
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), SizeIs(2000));
 }
 
 TEST_P(ProcessRunTest, DoesNotBlockWhenNotCapturingOutput) {
-  Process& process = *process_;
+  SandboxedProcess& process = *process_;
   process.AddArgument("/bin/sh");
   process.AddArgument("-c");
 
@@ -424,6 +467,8 @@ TEST_P(ProcessRunTest, DoesNotBlockWhenNotCapturingOutput) {
       exit 42;
     )",
                                          to_wait.child_fd.get()));
+
+  process.PreserveFile(to_wait.child_fd.get());
 
   // This process generates lots of output on stdout and stderr, ie more than
   // what a pipe can hold without blocking. If the pipes connected to stdout and
@@ -440,15 +485,16 @@ TEST_P(ProcessRunTest, DoesNotBlockWhenNotCapturingOutput) {
   EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
 
   EXPECT_EQ(process.Wait(), 42);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, RunDoesNotBlockWhenReadingFromStdIn) {
   Process& process = *process_;
   process.AddArgument("/bin/cat");
 
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, IsEmpty());
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), IsEmpty());
 }
 
 TEST_P(ProcessRunTest, ReadsFromStdIn) {
@@ -460,9 +506,10 @@ TEST_P(ProcessRunTest, ReadsFromStdIn) {
   process.SetStdIn(input);
   EXPECT_EQ(process.input(), input);
 
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, ElementsAre("OUT: Line 1", "OUT: Line 2", "OUT: Line 3"));
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(),
+              ElementsAre("Line 1", "Line 2", "Line 3"));
 }
 
 TEST_P(ProcessRunTest, ReadsLotsFromStdIn) {
@@ -474,9 +521,9 @@ TEST_P(ProcessRunTest, ReadsLotsFromStdIn) {
   process.SetStdIn(std::string(4096, 'x'));
   EXPECT_THAT(process.input(), SizeIs(4096));
 
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, ElementsAre("OUT: 4096"));
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), ElementsAre("4096"));
 }
 
 TEST_P(ProcessRunTest, TruncatesDataFromStdIn) {
@@ -487,9 +534,9 @@ TEST_P(ProcessRunTest, TruncatesDataFromStdIn) {
   // 100KB of data should be truncated.
   process.SetStdIn(std::string(100'000, 'x'));
 
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, ElementsAre(Not("OUT: 100000")));
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), ElementsAre(Not("100000")));
 }
 
 TEST_P(ProcessRunTest, WaitDoesNotBlockWhenReadingFromStdIn) {
@@ -501,11 +548,12 @@ TEST_P(ProcessRunTest, WaitDoesNotBlockWhenReadingFromStdIn) {
   // left open, the process would block indefinitely while reading from it.
   EXPECT_TRUE(process.Start());
   EXPECT_EQ(process.Wait(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, RunDoesNotWaitForBackgroundProcessToFinish) {
-  Process& process = *process_;
-  process.AddArgument("/bin/sh");
+  SandboxedProcess& process = *process_;
+  process.AddArgument("/bin/bash");
   process.AddArgument("-c");
 
   // Pipe to unblock the background process and allow it to finish.
@@ -531,11 +579,14 @@ TEST_P(ProcessRunTest, RunDoesNotWaitForBackgroundProcessToFinish) {
                                          to_continue.child_fd.get(),
                                          to_wait.child_fd.get()));
 
+  process.PreserveFile(to_wait.child_fd.get());
+  process.PreserveFile(to_continue.child_fd.get());
+
   LOG(INFO) << "Running launcher process";
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 5);
-  EXPECT_THAT(output,
-              ElementsAre(StartsWith("OUT: Started background process")));
+  EXPECT_EQ(process.Run(), 5);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(),
+              ElementsAre(StartsWith("Started background process")));
 
   LOG(INFO) << "Closing unused fds";
   to_continue.child_fd.reset();
@@ -554,10 +605,9 @@ TEST_P(ProcessRunTest, RunDoesNotWaitForBackgroundProcessToFinish) {
   LOG(INFO) << "Background process finished";
 }
 
-// TODO(crbug.com/1007613) Enable test once bug is fixed.
-TEST_P(ProcessRunTest, DISABLED_WaitDoesNotWaitForBackgroundProcessToFinish) {
-  Process& process = *process_;
-  process.AddArgument("/bin/sh");
+TEST_P(ProcessRunTest, WaitDoesNotWaitForBackgroundProcessToFinish) {
+  SandboxedProcess& process = *process_;
+  process.AddArgument("/bin/bash");
   process.AddArgument("-c");
 
   // Pipe to unblock the background process and allow it to finish.
@@ -582,6 +632,9 @@ TEST_P(ProcessRunTest, DISABLED_WaitDoesNotWaitForBackgroundProcessToFinish) {
                                          to_continue.child_fd.get(),
                                          to_wait.child_fd.get()));
 
+  process.PreserveFile(to_wait.child_fd.get());
+  process.PreserveFile(to_continue.child_fd.get());
+
   LOG(INFO) << "Starting launcher process";
   EXPECT_TRUE(process.Start());
 
@@ -603,6 +656,7 @@ TEST_P(ProcessRunTest, DISABLED_WaitDoesNotWaitForBackgroundProcessToFinish) {
   EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
 
   LOG(INFO) << "Background process finished";
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
 }
 
 TEST_P(ProcessRunTest, RunUndisturbedBySignals) {
@@ -617,14 +671,13 @@ TEST_P(ProcessRunTest, RunUndisturbedBySignals) {
       exit 42;
     )");
 
-  std::vector<std::string> output;
-
   // Activate an interval timer.
   const AlarmGuard guard(13 /* milliseconds */);
-  EXPECT_EQ(process.Run(&output), 42);
+  EXPECT_EQ(process.Run(), 42);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
   EXPECT_GT(AlarmGuard::count(), 0);
   // This checks that crbug.com/1005590 is fixed.
-  EXPECT_THAT(output, SizeIs(100));
+  EXPECT_THAT(process.GetCapturedOutput(), SizeIs(100));
 }
 
 TEST_P(ProcessRunTest, WaitUndisturbedBySignals) {
@@ -640,6 +693,7 @@ TEST_P(ProcessRunTest, WaitUndisturbedBySignals) {
   const AlarmGuard guard(13 /* milliseconds */);
   EXPECT_TRUE(process.Start());
   EXPECT_EQ(process.Wait(), 42);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
   EXPECT_GT(AlarmGuard::count(), 0);
 }
 
@@ -651,10 +705,10 @@ TEST_P(ProcessRunTest, PassCurrentEnvironment) {
   process.AddArgument("-c");
   process.AddArgument("set");
 
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, Contains("OUT: OLD_VAR_1='Old 1'"));
-  EXPECT_THAT(output, Contains("OUT: OLD_VAR_2='Old 2'"));
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), Contains("OLD_VAR_1='Old 1'"));
+  EXPECT_THAT(process.GetCapturedOutput(), Contains("OLD_VAR_2='Old 2'"));
   EXPECT_EQ(unsetenv("OLD_VAR_1"), 0);
   EXPECT_EQ(unsetenv("OLD_VAR_2"), 0);
 }
@@ -677,17 +731,16 @@ TEST_P(ProcessRunTest, AppendExtraEnvironment) {
   process.AddArgument("-c");
   process.AddArgument("set");
 
-  std::vector<std::string> output;
-  EXPECT_EQ(process.Run(&output), 0);
-  EXPECT_THAT(output, Contains("OUT: OLD_VAR_1='Old 1'"));
-  EXPECT_THAT(output, Contains("OUT: OLD_VAR_2='Old 2'"));
-  EXPECT_THAT(output, Contains("OUT: MY_VAR_1=''"));
-  EXPECT_THAT(output, Contains("OUT: MY_VAR_2=' '"));
-  EXPECT_THAT(output, Contains("OUT: MY_VAR_3='='"));
+  EXPECT_EQ(process.Run(), 0);
+  EXPECT_NE(process.pid(), Process::kInvalidProcessId);
+  EXPECT_THAT(process.GetCapturedOutput(), Contains("OLD_VAR_1='Old 1'"));
+  EXPECT_THAT(process.GetCapturedOutput(), Contains("OLD_VAR_2='Old 2'"));
+  EXPECT_THAT(process.GetCapturedOutput(), Contains("MY_VAR_1=''"));
+  EXPECT_THAT(process.GetCapturedOutput(), Contains("MY_VAR_2=' '"));
+  EXPECT_THAT(process.GetCapturedOutput(), Contains("MY_VAR_3='='"));
   EXPECT_THAT(
-      output,
-      Contains(
-          R"(OUT: MY_VAR_4='abc 123 ~`!@#$%^&*()_-+={[}]|\:;"'"'"'<,>.?/')"));
+      process.GetCapturedOutput(),
+      Contains(R"(MY_VAR_4='abc 123 ~`!@#$%^&*()_-+={[}]|\:;"'"'"'<,>.?/')"));
   EXPECT_EQ(unsetenv("OLD_VAR_1"), 0);
   EXPECT_EQ(unsetenv("OLD_VAR_2"), 0);
 }
@@ -696,26 +749,315 @@ INSTANTIATE_TEST_SUITE_P(ProcessRun,
                          ProcessRunTest,
                          Values(ProcessFactory{
                              "SandboxedProcess",
-                             []() -> std::unique_ptr<Process> {
+                             []() {
                                return std::make_unique<SandboxedProcess>();
                              }}),
                          PrintToStringParamName());
 
-// TODO(crbug.com/1023727) Make it work on ARM and ARM64.
+// TODO(crbug.com/1023727) Make PID namespace work on ARM and ARM64.
 #if defined(__x86_64__)
 INSTANTIATE_TEST_SUITE_P(ProcessRunAsRoot,
                          ProcessRunTest,
                          Values(ProcessFactory{
                              "WithPidNamespace",
-                             []() -> std::unique_ptr<Process> {
+                             []() {
                                auto process =
                                    std::make_unique<SandboxedProcess>();
                                process->NewPidNamespace();
-                               // TODO(crbug.com/1008262) Remove this line.
-                               process->SkipRemountPrivate();
                                return process;
                              }}),
                          PrintToStringParamName());
+
+// Tests that, when the 'launcher' process running in a PID namespace does not
+// terminate within the grace period when receiving a SIGTERM, then it is killed
+// by SIGKILL at the expiration of this grace period.
+TEST(PidNamespaceRunAsRootTest, LauncherDoesNotTerminateOnSigTerm) {
+  SandboxedProcess process;
+  process.NewPidNamespace();
+  process.SetKillPidNamespace(true);
+
+  process.AddArgument("/bin/bash");
+  process.AddArgument("-c");
+
+  // Pipe to block the 'launcher' process.
+  SubprocessPipe to_block(SubprocessPipe::kParentToChild);
+
+  // Pipe to monitor the 'launcher' process.
+  SubprocessPipe to_wait(SubprocessPipe::kChildToParent);
+
+  process.AddArgument(base::StringPrintf(
+      R"(
+        trap 'echo Launcher process ignored a SIGTERM' SIGTERM
+        printf 'Begin\n' >&%d;
+        read line <&%d;
+        printf '%%s and End\n' "$line" >&%d;
+        exit 42;
+    )",
+      to_wait.child_fd.get(), to_block.child_fd.get(), to_wait.child_fd.get()));
+
+  process.PreserveFile(to_wait.child_fd.get());
+  process.PreserveFile(to_block.child_fd.get());
+
+  EXPECT_TRUE(process.Start());
+
+  // Close unused pipe ends.
+  to_block.child_fd.reset();
+  to_wait.child_fd.reset();
+
+  // Wait for 'launcher' process to start.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "Begin\n");
+
+  // Send SIGTERM to 'init' process.
+  const pid_t pid = process.pid();
+  EXPECT_NE(pid, Process::kInvalidProcessId);
+  LOG(INFO) << "Sending SIGTERM to PID " << pid;
+  base::ElapsedTimer timer;
+  EXPECT_EQ(kill(pid, SIGTERM), 0);
+
+  // Wait for 'launcher' process to finish.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
+  EXPECT_EQ(process.Wait(), MINIJAIL_ERR_SIG_BASE + SIGKILL);
+  // It should have taken a bit more than 2 seconds (grace period) for the
+  // 'init' process to terminate, which would have killed the 'launcher' process
+  // too.
+  EXPECT_GT(timer.Elapsed(), base::Seconds(2));
+  EXPECT_EQ(process.pid(), pid);
+}
+
+// Tests that, when the 'launcher' process running in a PID namespace does not
+// terminate within the grace period when receiving a SIGTERM, then it is killed
+// by SIGKILL at the expiration of this grace period. Repeatedly sending SIGTERM
+// to the 'init' process does not speed up nor slow down the termination.
+TEST(PidNamespaceRunAsRootTest, RepeatedSigTerm) {
+  SandboxedProcess process;
+  process.NewPidNamespace();
+  process.SetKillPidNamespace(true);
+
+  process.AddArgument("/bin/bash");
+  process.AddArgument("-c");
+
+  // Pipe to block the 'launcher' process.
+  SubprocessPipe to_block(SubprocessPipe::kParentToChild);
+
+  // Pipe to monitor the 'launcher' process.
+  SubprocessPipe to_wait(SubprocessPipe::kChildToParent);
+
+  process.AddArgument(base::StringPrintf(
+      R"(
+        trap 'echo Launcher process ignored a SIGTERM' SIGTERM
+        printf 'Begin\n' >&%d;
+        read line <&%d;
+        printf '%%s and End\n' "$line" >&%d;
+        exit 42;
+    )",
+      to_wait.child_fd.get(), to_block.child_fd.get(), to_wait.child_fd.get()));
+
+  process.PreserveFile(to_wait.child_fd.get());
+  process.PreserveFile(to_block.child_fd.get());
+
+  EXPECT_TRUE(process.Start());
+
+  // Close unused pipe ends.
+  to_block.child_fd.reset();
+  to_wait.child_fd.reset();
+
+  // Wait for 'launcher' process to start.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "Begin\n");
+
+  // Repeatedly send SIGTERM to 'init' process.
+  const pid_t pid = process.pid();
+  EXPECT_NE(pid, Process::kInvalidProcessId);
+  base::ElapsedTimer timer;
+
+  while (!process.IsFinished()) {
+    LOG(INFO) << "Sending SIGTERM to PID " << pid;
+    EXPECT_EQ(kill(pid, SIGTERM), 0);
+    usleep(100'000);
+  }
+
+  // Wait for 'launcher' process to finish.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
+  EXPECT_EQ(process.Wait(), MINIJAIL_ERR_SIG_BASE + SIGKILL);
+  // It should have taken a bit more than 2 seconds (grace period) for the
+  // 'init' process to terminate, which would have killed the 'launcher' process
+  // too.
+  EXPECT_GT(timer.Elapsed(), base::Seconds(2));
+  EXPECT_EQ(process.pid(), pid);
+}
+
+TEST(PidNamespaceRunAsRootTest, SimulatesProgress) {
+  SandboxedProcess process;
+  process.NewPidNamespace();
+  process.SimulateProgressForTesting();
+
+  process.AddArgument("/bin/sh");
+  process.AddArgument("-c");
+  process.AddArgument(R"(
+      echo Finished;
+      exit 42;
+    )");
+
+  base::ElapsedTimer timer;
+  EXPECT_EQ(process.Run(), 42);
+  EXPECT_GT(timer.Elapsed(), base::Seconds(10));
+  EXPECT_THAT(process.GetCapturedOutput(), SizeIs(101));
+  EXPECT_THAT(process.GetCapturedOutput(),
+              IsSupersetOf({"Simulating progress 0%", "Simulating progress 73%",
+                            "Simulating progress 99%", "Finished"}));
+}
+
+// Tests that the PID namespace is killed when the SandboxedProcess object is
+// deleted and the SetKillPidNamespace(true) method has been called.
+TEST(PidNamespaceRunAsRootTest, DeletingProcessObjectKillsPidNamespace) {
+  std::unique_ptr<SandboxedProcess> process =
+      std::make_unique<SandboxedProcess>();
+  process->NewPidNamespace();
+  process->SetKillPidNamespace(true);
+
+  process->AddArgument("/bin/sh");
+  process->AddArgument("-c");
+
+  // Pipe to block the child process.
+  SubprocessPipe to_block(SubprocessPipe::kParentToChild);
+
+  // Pipe to monitor the child process.
+  SubprocessPipe to_wait(SubprocessPipe::kChildToParent);
+
+  process->AddArgument(base::StringPrintf(
+      R"(
+        printf 'Begin\n' >&%d;
+        read line <&%d;
+        printf '%%s and End\n' "$line" >&%d;
+        exit 42;
+    )",
+      to_wait.child_fd.get(), to_block.child_fd.get(), to_wait.child_fd.get()));
+
+  process->PreserveFile(to_wait.child_fd.get());
+  process->PreserveFile(to_block.child_fd.get());
+
+  EXPECT_TRUE(process->Start());
+
+  // Close unused pipe ends.
+  to_block.child_fd.reset();
+  to_wait.child_fd.reset();
+
+  // Wait for child process to start.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "Begin\n");
+
+  // Destroy the process object.
+  process.reset();
+
+  // Wait for child process to finish.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
+}
+
+// Tests that the PID namespace is not killed when the SandboxedProcess object
+// is deleted and the SetKillPidNamespace() method has not been called.
+TEST(PidNamespaceRunAsRootTest, DeletingProcessObjectDoesNotKillPidNamespace) {
+  std::unique_ptr<SandboxedProcess> process =
+      std::make_unique<SandboxedProcess>();
+  process->NewPidNamespace();
+
+  process->AddArgument("/bin/sh");
+  process->AddArgument("-c");
+
+  // Pipe to block the child process.
+  SubprocessPipe to_block(SubprocessPipe::kParentToChild);
+
+  // Pipe to monitor the child process.
+  SubprocessPipe to_wait(SubprocessPipe::kChildToParent);
+
+  process->AddArgument(base::StringPrintf(
+      R"(
+        printf 'Begin\n' >&%d;
+        read line <&%d;
+        printf '%%s and End\n' "$line" >&%d;
+        exit 42;
+    )",
+      to_wait.child_fd.get(), to_block.child_fd.get(), to_wait.child_fd.get()));
+
+  process->PreserveFile(to_wait.child_fd.get());
+  process->PreserveFile(to_block.child_fd.get());
+
+  EXPECT_TRUE(process->Start());
+
+  // Close unused pipe ends.
+  to_block.child_fd.reset();
+  to_wait.child_fd.reset();
+
+  // Wait for child process to start.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "Begin\n");
+
+  // Destroy the process object.
+  process.reset();
+
+  // Wait for longer than the 2-second grace period.
+  sleep(3);
+
+  // Unblock child process.
+  Write(to_block.parent_fd.get(), "Continue");
+  to_block.parent_fd.reset();
+
+  // Wait for child process to continue and finish.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "Continue and End\n");
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
+}
+
+// Tests that the PID namespace is not killed when its 'init' process receives a
+// SIGTERM and the SetKillPidNamespace() method has not been called.
+TEST(PidNamespaceRunAsRootTest, SigTermDoesNotKillPidNamespace) {
+  SandboxedProcess process;
+  process.NewPidNamespace();
+
+  process.AddArgument("/bin/sh");
+  process.AddArgument("-c");
+
+  // Pipe to block the child process.
+  SubprocessPipe to_block(SubprocessPipe::kParentToChild);
+
+  // Pipe to monitor the child process.
+  SubprocessPipe to_wait(SubprocessPipe::kChildToParent);
+
+  process.AddArgument(base::StringPrintf(
+      R"(
+        printf 'Begin\n' >&%d;
+        read line <&%d;
+        printf '%%s and End\n' "$line" >&%d;
+        exit 42;
+    )",
+      to_wait.child_fd.get(), to_block.child_fd.get(), to_wait.child_fd.get()));
+
+  process.PreserveFile(to_wait.child_fd.get());
+  process.PreserveFile(to_block.child_fd.get());
+
+  EXPECT_TRUE(process.Start());
+
+  // Close unused pipe ends.
+  to_block.child_fd.reset();
+  to_wait.child_fd.reset();
+
+  // Wait for child process to start.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "Begin\n");
+
+  // Send SIGTERM to PID 'init' process.
+  const pid_t pid = process.pid();
+  EXPECT_NE(pid, Process::kInvalidProcessId);
+  LOG(INFO) << "Sending SIGTERM to PID " << pid;
+  EXPECT_EQ(kill(pid, SIGTERM), 0);
+
+  // Wait for longer than the 2-second grace period.
+  sleep(3);
+
+  // Unblock child process.
+  Write(to_block.parent_fd.get(), "Continue");
+  to_block.parent_fd.reset();
+
+  // Wait for child process to continue and finish.
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "Continue and End\n");
+  EXPECT_EQ(Read(to_wait.parent_fd.get()), "");
+  EXPECT_EQ(process.Wait(), 42);
+}
+
 #endif
 
 }  // namespace cros_disks

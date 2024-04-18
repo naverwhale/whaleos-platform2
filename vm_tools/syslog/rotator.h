@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 
-namespace vm_tools {
-namespace syslog {
+namespace vm_tools::syslog {
 
 class Rotator {
  public:
@@ -23,7 +22,6 @@ class Rotator {
       std::vector<base::FileEnumerator::FileInfo>* info);
 };
 
-}  // namespace syslog
-}  // namespace vm_tools
+}  // namespace vm_tools::syslog
 
 #endif  // VM_TOOLS_SYSLOG_ROTATOR_H_

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,12 +9,12 @@
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/logging.h>
+#include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 
 #include "cros-disks/fuse_mounter.h"
 #include "cros-disks/mount_options.h"
-#include "cros-disks/mount_point.h"
 #include "cros-disks/platform.h"
 #include "cros-disks/quote.h"
 #include "cros-disks/sandboxed_process.h"
@@ -70,22 +70,21 @@ bool SmbfsHelper::CanMount(const std::string& source,
   return true;
 }
 
-MountErrorType SmbfsHelper::ConfigureSandbox(
-    const std::string& source,
-    const base::FilePath& /*target_path*/,
-    std::vector<std::string> /*params*/,
-    SandboxedProcess* sandbox) const {
+MountError SmbfsHelper::ConfigureSandbox(const std::string& source,
+                                         const base::FilePath& /*target_path*/,
+                                         std::vector<std::string> params,
+                                         SandboxedProcess* sandbox) const {
   const Uri uri = Uri::Parse(source);
   if (!uri.valid() || uri.scheme() != kType || uri.path().empty()) {
     LOG(ERROR) << "Invalid source " << quote(source);
-    return MOUNT_ERROR_INVALID_DEVICE_PATH;
+    return MountError::kInvalidDevicePath;
   }
 
   // Bind DBus communication socket and daemon-store into the sandbox.
   if (!sandbox->BindMount(kDbusSocketPath, kDbusSocketPath,
                           /* writable= */ true, /* recursive= */ false)) {
     LOG(ERROR) << "Cannot bind " << quote(kDbusSocketPath);
-    return MOUNT_ERROR_INTERNAL;
+    return MountError::kInternalError;
   }
   // Need to use recursive binding because the daemon-store directory in
   // their cryptohome is bind mounted inside |kDaemonStorePath|.
@@ -94,19 +93,24 @@ MountErrorType SmbfsHelper::ConfigureSandbox(
   if (!sandbox->BindMount(kDaemonStorePath, kDaemonStorePath,
                           /* writable= */ true, /* recursive= */ true)) {
     LOG(ERROR) << "Cannot bind " << quote(kDaemonStorePath);
-    return MOUNT_ERROR_INTERNAL;
+    return MountError::kInternalError;
   }
 
   std::string options;
   if (!JoinParamsIntoOptions(
           {"uid=1000", "gid=1001", kMojoIdOptionPrefix + uri.path()},
           &options)) {
-    return MOUNT_ERROR_INVALID_MOUNT_OPTIONS;
+    return MountError::kInvalidMountOptions;
   }
   sandbox->AddArgument("-o");
   sandbox->AddArgument(options);
 
-  return MOUNT_ERROR_NONE;
+  // Prepend "--" to the "log-level=value" param (if present) and pass it on.
+  if (std::string level; GetParamValue(params, "log-level", &level)) {
+    sandbox->AddArgument(base::StrCat({"--log-level=", level}));
+  }
+
+  return MountError::kSuccess;
 }
 
 }  // namespace cros_disks

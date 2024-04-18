@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <memory>
 
-#include <base/macros.h>
 #include <base/process/process_metrics.h>
 #include <metrics/cumulative_metrics.h>
 #include <metrics/metrics_library.h>

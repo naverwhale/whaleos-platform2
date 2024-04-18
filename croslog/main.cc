@@ -1,13 +1,15 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <string>
 #include <vector>
 
+#include <base/at_exit.h>
 #include <base/command_line.h>
 #include <base/logging.h>
 #include <base/task/single_thread_task_executor.h>
+#include <base/threading/platform_thread.h>
 
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
@@ -36,7 +38,7 @@ int main(int argc, char* argv[]) {
 
   // Configure the log destination. This should be placed before any code which
   // potentially write logs.
-  int log_flags = brillo::kLogToStderr;
+  int log_flags = config.quiet ? 0 : brillo::kLogToStderr;
   // if the stdin is not tty, send logs to syslog as well.
   if (!isatty(0) || command_line->HasSwitch("send-syslog"))
     log_flags |= brillo::kLogToSyslog;

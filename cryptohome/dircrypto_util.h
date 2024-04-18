@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define CRYPTOHOME_DIRCRYPTO_UTIL_H_
 
 #include <base/files/file_path.h>
+#include <brillo/brillo_export.h>
 #include <brillo/secure_blob.h>
 
 extern "C" {
@@ -21,6 +22,9 @@ enum class KeyState {
   NOT_SUPPORTED,  // The directory doesn't support dircrypto.
   NO_KEY,         // No key is set.
   ENCRYPTED,      // Key is set.
+
+  // Must be the last item.
+  kMaxValue = ENCRYPTED
 };
 
 // KeyReference describes an in-use fscrypt key.
@@ -32,7 +36,7 @@ struct KeyReference {
 };
 
 // keyutils functions use -1 as the invalid key serial value.
-constexpr key_serial_t kInvalidKeySerial = -1;
+inline constexpr key_serial_t kInvalidKeySerial = -1;
 
 // Checks if the device supports fscrypt key add/remove ioctls.
 bool CheckFscryptKeyIoctlSupport();
@@ -42,15 +46,15 @@ bool SetDirectoryKey(const base::FilePath& dir,
                      const KeyReference& key_reference);
 
 // Adds the directory key.
-bool AddDirectoryKey(const brillo::SecureBlob& key,
-                     KeyReference* key_reference);
+BRILLO_EXPORT bool AddDirectoryKey(const brillo::SecureBlob& key,
+                                   KeyReference* key_reference);
 
 // Removes the directory key.
-bool RemoveDirectoryKey(const KeyReference& key_reference,
-                        const base::FilePath& dir);
+BRILLO_EXPORT bool RemoveDirectoryKey(const KeyReference& key_reference,
+                                      const base::FilePath& dir);
 
 // Returns the directory's key state, or returns UNKNOWN on errors.
-KeyState GetDirectoryKeyState(const base::FilePath& dir);
+BRILLO_EXPORT KeyState GetDirectoryKeyState(const base::FilePath& dir);
 
 // Returns the directory's policy version or returns -1.
 int GetDirectoryPolicyVersion(const base::FilePath& dir);

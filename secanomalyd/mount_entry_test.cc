@@ -1,12 +1,15 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // Unit tests for MountEntry.
 
 #include "secanomalyd/mount_entry.h"
+#include "secanomalyd/system_context_mock.h"
 
 #include <gtest/gtest.h>
+
+namespace secanomalyd {
 
 TEST(MountEntryTest, RoRootFs) {
   MountEntry e("/dev/root / ext2 ro,seclabel,relatime 0 0");
@@ -84,3 +87,43 @@ TEST(MountEntryTest, OtherTypesAreNotNamespaceMounts) {
   MountEntry e("src /run/netns/connected_netns_0 msphs rw 0 0");
   ASSERT_FALSE(e.IsNamespaceBindMount());
 }
+
+TEST(MountEntryTest, HashReplacedSuccessfully) {
+  MountEntry e(
+      "/dev/mmcblk0p1 "
+      "/home/root/14894cd6a6ea7a741dd3b855cea5bf82c5a784f5/android-data/data "
+      "ext4 rw,seclabel,nodev,noatime 0 0");
+
+  ASSERT_EQ(e.dest().value(), "/home/root/<hash>/android-data/data");
+}
+
+TEST(MountEntryTest, IsKnownMountIncludesRunArcSharedMountsData) {
+  MountEntry e(
+      "/dev/mmcblk1p1 /run/arc/shared_mounts/data ext4 "
+      "rw,seclabel,nosuid,nodev");
+
+  SystemContextMock c_login_screen_persistent_mount(
+      /*logged_in=*/false, /*known_mounts=*/{e.dest()});
+  SystemContextMock c_logged_in_persistent_mount(
+      /*logged_in=*/true, /*known_mounts=*/{e.dest()});
+  SystemContextMock c_login_screen_temporary_mount(/*logged_in=*/false,
+                                                   /*known_mounts=*/{});
+  SystemContextMock c_logged_in_temporary_mount(/*logged_in=*/true,
+                                                /*known_mounts=*/{});
+
+  ASSERT_FALSE(e.IsKnownMount(c_login_screen_persistent_mount));
+  ASSERT_FALSE(e.IsKnownMount(c_logged_in_persistent_mount));
+  ASSERT_FALSE(e.IsKnownMount(c_login_screen_temporary_mount));
+  ASSERT_TRUE(e.IsKnownMount(c_logged_in_temporary_mount));
+}
+
+TEST(MountEntryTest, RandomMountIsNotKnown) {
+  MountEntry e(
+      "/dev/mmcblk1p1 /some/random/location ext4 "
+      "rw,seclabel,nosuid,nodev");
+
+  SystemContextMock c(/*logged_in=*/false, /*known_mounts=*/{});
+  ASSERT_FALSE(e.IsKnownMount(c));
+}
+
+}  // namespace secanomalyd

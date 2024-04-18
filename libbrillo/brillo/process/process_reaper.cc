@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <brillo/asynchronous_signal_handler.h>
@@ -28,8 +28,8 @@ void ProcessReaper::Register(
   CHECK(!async_signal_handler_);
   async_signal_handler_ = async_signal_handler;
   async_signal_handler->RegisterHandler(
-      SIGCHLD,
-      base::Bind(&ProcessReaper::HandleSIGCHLD, base::Unretained(this)));
+      SIGCHLD, base::BindRepeating(&ProcessReaper::HandleSIGCHLD,
+                                   base::Unretained(this)));
 }
 
 void ProcessReaper::Unregister() {

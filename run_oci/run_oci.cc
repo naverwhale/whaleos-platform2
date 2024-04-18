@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <ostream>
 #include <sstream>
@@ -16,20 +17,18 @@
 #include <vector>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
-#include <base/callback_forward.h>
-#include <base/callback_helpers.h>
 #include <base/check_op.h>
 #include <base/command_line.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_forward.h>
+#include <base/functional/callback_helpers.h>
 #include <base/json/json_writer.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/process/launch.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
@@ -380,18 +379,18 @@ std::string ContainerState(pid_t child_pid,
                            const base::FilePath& bundle_dir,
                            const base::FilePath& container_dir,
                            const std::string& status) {
-  base::Value state(base::Value::Type::DICTIONARY);
-  state.SetKey("ociVersion", base::Value("1.0"));
-  state.SetKey("id", base::Value(container_id));
-  state.SetKey("status", base::Value(status));
-  state.SetKey("bundle",
-               base::Value(base::MakeAbsoluteFilePath(bundle_dir).value()));
-  state.SetKey("pid", base::Value(child_pid));
-  base::Value annotations(base::Value::Type::DICTIONARY);
-  annotations.SetKey(
+  base::Value::Dict state;
+  state.Set("ociVersion", base::Value("1.0"));
+  state.Set("id", base::Value(container_id));
+  state.Set("status", base::Value(status));
+  state.Set("bundle",
+            base::Value(base::MakeAbsoluteFilePath(bundle_dir).value()));
+  state.Set("pid", base::Value(child_pid));
+  base::Value::Dict annotations;
+  annotations.Set(
       "org.chromium.run_oci.container_root",
       base::Value(base::MakeAbsoluteFilePath(container_dir).value()));
-  state.SetKey("annotations", std::move(annotations));
+  state.Set("annotations", std::move(annotations));
   std::string state_json;
   if (!base::JSONWriter::WriteWithOptions(
           state, base::JSONWriter::OPTIONS_PRETTY_PRINT, &state_json)) {
@@ -578,7 +577,7 @@ int RunOci(const base::FilePath& bundle_dir,
 
   container_dir = base::FilePath(kRunContainersPath).Append(container_id);
   base::ScopedClosureRunner cleanup(
-      base::Bind(CleanUpContainer, container_dir));
+      base::BindOnce(CleanUpContainer, container_dir));
   // Not using base::CreateDirectory() since we want to error out when the
   // directory exists a priori.
   if (mkdir(container_dir.value().c_str(), 0755) != 0) {
@@ -667,7 +666,7 @@ int RunOci(const base::FilePath& bundle_dir,
   // logs.
   const int inherited_fds[] = {STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO};
   if (container_config_inherit_fds(config.get(), inherited_fds,
-                                   base::size(inherited_fds))) {
+                                   std::size(inherited_fds))) {
     LOG(WARNING) << "Failed to inherit stdout/stderr.";
   }
 
@@ -745,7 +744,7 @@ int RunOci(const base::FilePath& bundle_dir,
   // container_pid() will populate the value, and RunHooks() will simply refuse
   // to run if |child_pid| is -1, so we will always do the right thing.
   // The callback is run in the same stack, so std::cref() is safe.
-  base::ScopedClosureRunner post_stop_hooks(base::Bind(
+  base::ScopedClosureRunner post_stop_hooks(base::BindOnce(
       base::IgnoreResult(&RunHooks), std::cref(oci_config->post_stop_hooks),
       base::Unretained(&child_pid), container_id, bundle_dir, container_dir,
       "poststop", "stopped"));
@@ -753,18 +752,18 @@ int RunOci(const base::FilePath& bundle_dir,
   if (!oci_config->pre_chroot_hooks.empty()) {
     config.AddHook(
         MINIJAIL_HOOK_EVENT_PRE_CHROOT,
-        base::Bind(&SaveChildPidAndRunHooks,
-                   std::cref(oci_config->pre_chroot_hooks),
-                   base::Unretained(&child_pid), container_id, bundle_dir,
-                   container_dir, "prechroot", "created"));
+        base::BindOnce(&SaveChildPidAndRunHooks,
+                       std::cref(oci_config->pre_chroot_hooks),
+                       base::Unretained(&child_pid), container_id, bundle_dir,
+                       container_dir, "prechroot", "created"));
   }
   if (!oci_config->pre_start_hooks.empty()) {
     config.AddHook(
         MINIJAIL_HOOK_EVENT_PRE_EXECVE,
-        base::Bind(&SaveChildPidAndRunHooks,
-                   std::cref(oci_config->pre_start_hooks),
-                   base::Unretained(&child_pid), container_id, bundle_dir,
-                   container_dir, "prestart", "created"));
+        base::BindOnce(&SaveChildPidAndRunHooks,
+                       std::cref(oci_config->pre_start_hooks),
+                       base::Unretained(&child_pid), container_id, bundle_dir,
+                       container_dir, "prestart", "created"));
   }
   // This needs to run in the context of the container process.
   container_config_set_pre_execve_hook(config.get(), &SetupProcessState,
@@ -813,8 +812,8 @@ int RunOci(const base::FilePath& bundle_dir,
     // The container has reached a steady state. We can now return and let the
     // container keep running. We don't want to run the post-stop hooks now, but
     // until the user actually deletes the container.
-    ignore_result(post_stop_hooks.Release());
-    ignore_result(cleanup.Release());
+    post_stop_hooks.ReplaceClosure(base::DoNothing());
+    cleanup.ReplaceClosure(base::DoNothing());
     return 0;
   }
 

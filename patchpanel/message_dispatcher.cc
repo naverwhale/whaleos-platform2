@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,88 +7,82 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/files/scoped_file.h>
+#include <sys/socket.h>
+
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/posix/unix_domain_socket.h>
+#include <google/protobuf/message_lite.h>
 
 namespace patchpanel {
 
-MessageDispatcher::MessageDispatcher(base::ScopedFD fd, bool start)
-    : fd_(std::move(fd)) {
-  if (start)
-    Start();
+MessageDispatcherInternal::MessageDispatcherInternal(base::ScopedFD fd)
+    : fd_(std::move(fd)) {}
+
+void MessageDispatcherInternal::RegisterFailureHandler(
+    base::RepeatingCallback<void()> handler) {
+  failure_handler_ = std::move(handler);
 }
 
-void MessageDispatcher::Start() {
-  watcher_ = base::FileDescriptorWatcher::WatchReadable(
-      fd_.get(),
-      base::BindRepeating(&MessageDispatcher::OnFileCanReadWithoutBlocking,
-                          base::Unretained(this)));
+void MessageDispatcherInternal::RegisterMessageHandler(
+    base::RepeatingCallback<void()> handler) {
+  watcher_ =
+      base::FileDescriptorWatcher::WatchReadable(fd_.get(), std::move(handler));
 }
 
-void MessageDispatcher::RegisterFailureHandler(
-    const base::Callback<void()>& handler) {
-  failure_handler_ = handler;
-}
-
-void MessageDispatcher::RegisterNDProxyMessageHandler(
-    const base::Callback<void(const NDProxyMessage&)>& handler) {
-  ndproxy_handler_ = handler;
-}
-
-void MessageDispatcher::RegisterGuestMessageHandler(
-    const base::Callback<void(const GuestMessage&)>& handler) {
-  guest_handler_ = handler;
-}
-
-void MessageDispatcher::RegisterDeviceMessageHandler(
-    const base::Callback<void(const DeviceMessage&)>& handler) {
-  device_handler_ = handler;
-}
-
-void MessageDispatcher::OnFileCanReadWithoutBlocking() {
+bool MessageDispatcherInternal::GetMessage(
+    google::protobuf::MessageLite* proto) {
   char buffer[1024];
-  std::vector<base::ScopedFD> fds{};
-  ssize_t len =
-      base::UnixDomainSocket::RecvMsg(fd_.get(), buffer, sizeof(buffer), &fds);
-
+  ssize_t len = recvfrom(fd_.get(), buffer, sizeof(buffer), MSG_DONTWAIT,
+                         nullptr, nullptr);
+  // Don't stop watchers on these errors.
+  if (len < 0 && (errno == EAGAIN || errno == EINTR)) {
+    return false;
+  }
+  // Handle errors (len < 0) and graceful shutdowns (len == 0). Explicit 0-byte
+  // messages are not supported and considered as graceful shutdown.
   if (len <= 0) {
-    PLOG(ERROR) << "Read failed: exiting";
+    if (len == 0) {
+      LOG(ERROR) << "Read failed: stopping watcher: socket closed";
+    } else {
+      PLOG(ERROR) << "Read failed: stopping watcher";
+    }
     watcher_.reset();
-    if (!failure_handler_.is_null())
+    if (!failure_handler_.is_null()) {
       failure_handler_.Run();
-    return;
+    }
+    return false;
   }
 
-  msg_.Clear();
-  if (!msg_.ParseFromArray(buffer, len)) {
-    LOG(ERROR) << "Error parsing protobuf";
-    return;
+  proto->Clear();
+  if (!proto->ParseFromArray(buffer, static_cast<int>(len))) {
+    LOG(ERROR) << "Error parsing protobuf " << proto->GetTypeName();
+    return false;
   }
 
-  if (msg_.has_ndproxy_message() && !ndproxy_handler_.is_null()) {
-    ndproxy_handler_.Run(msg_.ndproxy_message());
-  }
-
-  if (msg_.has_guest_message() && !guest_handler_.is_null()) {
-    guest_handler_.Run(msg_.guest_message());
-  }
-
-  if (msg_.has_device_message() && !device_handler_.is_null()) {
-    device_handler_.Run(msg_.device_message());
-  }
+  return true;
 }
-void MessageDispatcher::SendMessage(
-    const google::protobuf::MessageLite& proto) const {
+
+bool MessageDispatcherInternal::SendMessage(
+    const google::protobuf::MessageLite& proto) {
+  if (!proto.IsInitialized()) {
+    LOG(DFATAL) << "protobuf missing mandatory fields";
+    return false;
+  }
   std::string str;
   if (!proto.SerializeToString(&str)) {
     LOG(ERROR) << "error serializing protobuf";
+    return false;
   }
-  if (write(fd_.get(), str.data(), str.size()) !=
-      static_cast<ssize_t>(str.size())) {
+  ssize_t len = write(fd_.get(), str.data(), str.size());
+  if (len < 0) {
+    PLOG(ERROR) << "write failed";
+    return false;
+  }
+  if (len != static_cast<ssize_t>(str.size())) {
     LOG(ERROR) << "short write on protobuf";
+    return false;
   }
+  return true;
 }
 
 }  // namespace patchpanel

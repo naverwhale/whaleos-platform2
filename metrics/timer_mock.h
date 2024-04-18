@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,6 +31,7 @@ class TimerReporterMock : public TimerReporter {
   MOCK_METHOD(bool, HasStarted, (), (const, override));
   MOCK_METHOD(bool, GetElapsedTime, (base::TimeDelta*), (const, override));
   MOCK_METHOD(bool, ReportMilliseconds, (), (const, override));
+  MOCK_METHOD(bool, ReportSeconds, (), (const, override));
 };
 
 class ClockWrapperMock : public ClockWrapper {

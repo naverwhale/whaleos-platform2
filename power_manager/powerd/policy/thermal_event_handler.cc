@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,8 +22,7 @@
 #include "power_manager/powerd/system/thermal/thermal_device_observer.h"
 #include "power_manager/proto_bindings/thermal.pb.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -40,8 +39,6 @@ ThermalEventHandler::ThermalEventHandler(
     : dbus_wrapper_(dbus_wrapper),
       thermal_devices_(thermal_devices),
       clock_(std::make_unique<Clock>()),
-      last_state_(system::DeviceThermalState::kUnknown),
-      power_source_(PowerSource::AC),
       weak_ptr_factory_(this) {
   for (auto& device : thermal_devices) {
     DCHECK(device);
@@ -60,8 +57,8 @@ bool ThermalEventHandler::Init() {
   OnThermalChanged(nullptr);
   dbus_wrapper_->ExportMethod(
       kGetThermalStateMethod,
-      base::Bind(&ThermalEventHandler::OnGetThermalStateMethodCall,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(&ThermalEventHandler::OnGetThermalStateMethodCall,
+                          weak_ptr_factory_.GetWeakPtr()));
   return true;
 }
 
@@ -70,7 +67,8 @@ void ThermalEventHandler::OnGetThermalStateMethodCall(
     dbus::ExportedObject::ResponseSender response_sender) {
   ThermalEvent protobuf;
   protobuf.set_thermal_state(DeviceThermalStateToProto(last_state_));
-  protobuf.set_timestamp(clock_->GetCurrentTime().ToInternalValue());
+  protobuf.set_timestamp(
+      (clock_->GetCurrentTime() - base::TimeTicks()).InMicroseconds());
   std::unique_ptr<dbus::Response> response =
       dbus::Response::FromMethodCall(method_call);
   dbus::MessageWriter writer(response.get());
@@ -101,7 +99,8 @@ void ThermalEventHandler::OnThermalChanged(
 
   ThermalEvent proto;
   proto.set_thermal_state(DeviceThermalStateToProto(new_state));
-  proto.set_timestamp(clock_->GetCurrentTime().ToInternalValue());
+  proto.set_timestamp(
+      (clock_->GetCurrentTime() - base::TimeTicks()).InMicroseconds());
   dbus_wrapper_->EmitSignalWithProtocolBuffer(kThermalEventSignal, proto);
 
   last_state_ = new_state;
@@ -121,5 +120,4 @@ void ThermalEventHandler::HandlePowerSourceChange(PowerSource source) {
   OnThermalChanged(nullptr);
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

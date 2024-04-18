@@ -1,19 +1,20 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DIAGNOSTICS_CROS_HEALTHD_FETCHERS_FAN_FETCHER_H_
 #define DIAGNOSTICS_CROS_HEALTHD_FETCHERS_FAN_FETCHER_H_
 
+#include <string>
 #include <vector>
 
-#include <base/callback_forward.h>
 #include <base/files/file_path.h>
+#include <base/functional/callback_forward.h>
 #include <base/memory/weak_ptr.h>
 
 #include "diagnostics/cros_healthd/fetchers/base_fetcher.h"
-#include "mojo/cros_healthd_executor.mojom.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/cros_healthd/mojom/executor.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
 
@@ -25,7 +26,7 @@ constexpr char kRelativeCrosEcPath[] = "sys/class/chromeos/cros_ec";
 class FanFetcher final : public BaseFetcher {
  public:
   using FetchFanInfoCallback =
-      base::OnceCallback<void(chromeos::cros_healthd::mojom::FanResultPtr)>;
+      base::OnceCallback<void(ash::cros_healthd::mojom::FanResultPtr)>;
 
   using BaseFetcher::BaseFetcher;
 
@@ -34,10 +35,10 @@ class FanFetcher final : public BaseFetcher {
   void FetchFanInfo(FetchFanInfoCallback callback);
 
  private:
-  // Handles the executor's response to a GetFanSpeed IPC.
-  void HandleFanSpeedResponse(
-      FetchFanInfoCallback callback,
-      chromeos::cros_healthd_executor::mojom::ProcessResultPtr result);
+  // Handles the executor's response to a GetAllFanSpeed IPC.
+  void HandleFanSpeedResponse(FetchFanInfoCallback callback,
+                              const std::vector<uint16_t>& fan_rpms,
+                              const std::optional<std::string>& error);
 
   // Must be the last member of the class, so that it's destroyed first when an
   // instance of the class is destroyed. This will prevent any outstanding

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,6 +19,7 @@
 #include <base/logging.h>
 #include <base/time/time.h>
 #include <base/values.h>
+#include <brillo/files/file_util.h>
 
 #include "arc/apk-cache/apk_cache_utils.h"
 #include "arc/apk-cache/cache_cleaner_db.h"
@@ -58,19 +59,19 @@ bool IsMatch(const std::string& file_name, const std::string& pattern) {
 bool IsAccessTimeValid(const base::StringPiece& json_message) {
   auto root = base::JSONReader::ReadAndReturnValueWithError(
       json_message, base::JSON_PARSE_RFC);
-  if (!root.value) {
+  if (!root.has_value()) {
     LOG(ERROR) << "Reading attributes JSON failed (error message: "
-               << root.error_message << ").";
+               << root.error().message << ").";
     return false;
   }
 
-  if (!root.value->is_dict()) {
+  if (!root->is_dict()) {
     LOG(ERROR) << "Could not interpret the JSON as a dictionary.";
     return false;
   }
 
   const std::string* atime_str =
-      root.value->FindStringPath(kKeyAttributesAtime);
+      root->GetDict().FindStringByDottedPath(kKeyAttributesAtime);
   if (!atime_str) {
     LOG(ERROR) << "Could not read the value of the access time with the "
                << kKeyAttributesAtime << " key.";
@@ -190,7 +191,7 @@ bool Clean(const base::FilePath& cache_path) {
       continue;
 
     if (!IsPackageValid(package_path)) {
-      if (!base::DeletePathRecursively(package_path)) {
+      if (!brillo::DeletePathRecursively(package_path)) {
         LOG(ERROR) << "Error deletion path " << package_path.value();
         success = false;
       }

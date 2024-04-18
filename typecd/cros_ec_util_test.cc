@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-using testing::_;
+using testing::A;
 using testing::Invoke;
 
 namespace {
@@ -78,23 +78,19 @@ TEST_F(CrosECUtilTest, ModeEntrySupported) {
       .WillOnce(testing::Return(mock_object_proxy.get()));
 
   // Mock the method calls from the object proxy.
-  EXPECT_CALL(*mock_object_proxy, CallMethodAndBlockWithErrorDetails(
-                                      IsMethod("EcGetInventory"), _, _))
-      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout,
-                          dbus::ScopedDBusError* error) {
-        return RespondWithString(method_call, kSampleInventoryInput1);
+  EXPECT_CALL(*mock_object_proxy,
+              CallMethodAndBlock(IsMethod("EcGetInventory"), A<int>()))
+      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout) {
+        return base::ok(RespondWithString(method_call, kSampleInventoryInput1));
       }))
-      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout,
-                          dbus::ScopedDBusError* error) {
-        return RespondWithString(method_call, kSampleInventoryInput2);
+      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout) {
+        return base::ok(RespondWithString(method_call, kSampleInventoryInput2));
       }))
-      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout,
-                          dbus::ScopedDBusError* error) {
-        return RespondWithString(method_call, kSampleInventoryInput3);
+      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout) {
+        return base::ok(RespondWithString(method_call, kSampleInventoryInput3));
       }))
-      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout,
-                          dbus::ScopedDBusError* error) {
-        return RespondWithString(method_call, kSampleInventoryInput4);
+      .WillOnce(Invoke([](dbus::MethodCall* method_call, int timeout) {
+        return base::ok(RespondWithString(method_call, kSampleInventoryInput4));
       }));
   auto util = std::make_unique<CrosECUtil>(bus);
   EXPECT_FALSE(util->ModeEntrySupported());

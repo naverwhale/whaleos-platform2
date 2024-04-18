@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,6 +15,7 @@
 #include <base/strings/string_util.h>
 #include <base/time/time.h>
 #include <metrics/metrics_library.h>
+#include <re2/re2.h>
 
 #include "usb_bouncer/util.h"
 
@@ -24,9 +25,9 @@ namespace usb_bouncer {
 
 namespace {
 
-constexpr TimeDelta kModeSwitchThreshold = TimeDelta::FromMilliseconds(1000);
+constexpr TimeDelta kModeSwitchThreshold = base::Milliseconds(1000);
 
-constexpr TimeDelta kCleanupThreshold = TimeDelta::FromDays(365 / 4);
+constexpr TimeDelta kCleanupThreshold = base::Days(365 / 4);
 
 constexpr char kDevpathRoot[] = "sys/devices";
 
@@ -144,6 +145,7 @@ bool EntryManager::HandleUdev(UdevAction action, const std::string& devpath) {
 
   std::string global_key = Hash(devpath);
   EntryMap* global_map = global_db_.Get().mutable_entries();
+  auto global_devpaths = global_db_.Get().mutable_devpaths();
 
   switch (action) {
     case UdevAction::kAdd: {
@@ -181,18 +183,26 @@ bool EntryManager::HandleUdev(UdevAction action, const std::string& devpath) {
             user_entries.find(user_key) == user_entries.end()
                 ? UMADeviceRecognized::kUnrecognized
                 : UMADeviceRecognized::kRecognized;
-        if (user_db_read_only_) {
-          UMALogDeviceAttached(&metrics_, rule, new_entry,
-                               UMAEventTiming::kLocked);
-        } else {
-          UMALogDeviceAttached(&metrics_, rule, new_entry,
-                               UMAEventTiming::kLoggedIn);
+        const UMAEventTiming timing = user_db_read_only_
+                                          ? UMAEventTiming::kLocked
+                                          : UMAEventTiming::kLoggedIn;
+
+        ReportMetrics(devpath, rule, new_entry, timing);
+
+        if (!user_db_read_only_) {
           (*user_db_.Get().mutable_entries())[user_key] = entry;
         }
       }
+
+      (*global_devpaths)[global_key] = devpath;
       return PersistChanges();
     }
     case UdevAction::kRemove: {
+      auto itr_devpath = global_devpaths->find(global_key);
+      if (itr_devpath != global_devpaths->end()) {
+        global_devpaths->erase(itr_devpath);
+      }
+
       // We only remove entries from the global db here because it represents
       // allow-list rules for the current state of the system. These entries
       // cannot be generated on-the-fly because of mode switching devices, and
@@ -231,10 +241,18 @@ bool EntryManager::HandleUserLogin() {
           user_entries->find(user_key) == user_entries->end()
               ? UMADeviceRecognized::kUnrecognized
               : UMADeviceRecognized::kRecognized;
+
+      const auto& global_key = entry.first;
+      const auto& devpaths = global_db_.Get().devpaths();
+
+      const std::string devpath = devpaths.find(global_key) != devpaths.end()
+                                      ? devpaths.find(global_key)->second
+                                      : std::string();
+
       for (const auto& rule : entry.second.rules()) {
-        UMALogDeviceAttached(&metrics_, rule, new_entry,
-                             UMAEventTiming::kLoggedOut);
+        ReportMetrics(devpath, rule, new_entry, UMAEventTiming::kLoggedOut);
       }
+
       (*user_entries)[user_key] = entry.second;
     }
   }
@@ -290,6 +308,37 @@ bool EntryManager::PersistChanges() {
     success = false;
   }
   return success;
+}
+
+void EntryManager::ReportMetrics(const std::string& devpath,
+                                 const std::string& rule,
+                                 UMADeviceRecognized new_entry,
+                                 UMAEventTiming timing) {
+  LOG(INFO) << "Reporting metrics for " << devpath;
+
+  UMALogDeviceAttached(&metrics_, rule, new_entry, timing);
+
+  // Device metrics not supported for empty devpath
+  if (devpath.empty())
+    return;
+
+  base::FilePath normalized_devpath =
+      root_dir_.Append("sys").Append(StripLeadingPathSeparators(devpath));
+
+  // Report further metrics only for external USB devices. We cannot distinguish
+  // external devices on Flex, so exclude it from reporting further metrics.
+  if (IsFlexBoard() || !IsExternalDevice(normalized_devpath))
+    return;
+
+  UMALogExternalDeviceAttached(&metrics_, rule, new_entry, timing,
+                               GetPortType(normalized_devpath),
+                               GetDeviceSpeed(normalized_devpath));
+
+  StructuredMetricsExternalDeviceAttached(
+      GetVendorId(normalized_devpath), GetVendorName(normalized_devpath),
+      GetProductId(normalized_devpath), GetProductName(normalized_devpath),
+      GetDeviceClass(normalized_devpath),
+      GetInterfaceClass(normalized_devpath));
 }
 
 }  // namespace usb_bouncer

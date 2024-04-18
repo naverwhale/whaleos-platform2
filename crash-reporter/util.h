@@ -1,14 +1,19 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CRASH_REPORTER_UTIL_H_
 #define CRASH_REPORTER_UTIL_H_
 
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include <base/files/file.h>
 #include <base/files/file_path.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/time/clock.h>
 #include <base/time/time.h>
 #include <brillo/process/process.h>
@@ -39,12 +44,30 @@ bool IsOfficialImage();
 // Returns true if we are mocking metrics consent as granted.
 bool HasMockConsent();
 
+// Returns true if we are running ui.ChromeCrashEarly.loose and want to allow
+// larger core files in that mode.
+bool UseLooseCoreSizeForChromeCrashEarly();
+
 // Determines whether feedback is allowed, based on:
 // * The presence/absence of mock consent
 // * Whether this is a developer image
 // * Whether the metrics library indicates consent
-// Does not take ownership of |metrics_lib|
-bool IsFeedbackAllowed(MetricsLibraryInterface* metrics_lib);
+bool IsFeedbackAllowed(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib);
+
+// Determines whether feedback is allowed, for early boot collectors.
+// If the boot-collector-consent file is present, and contains anything other
+// than "1" (the opt-in value), skip collecting the crash. Otherwise, fall back
+// to IsFeedbackAllowed().
+// This mirrors metrics_lib's AreMetricsEnabled method, which checks the
+// per-user consent file and determines there's no consent if it's present and
+// contains anything but "1".
+bool IsBootFeedbackAllowed(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib);
 
 // Returns true if we should skip crash collection (based on the filter-in
 // and filter-out files).
@@ -132,6 +155,15 @@ bool ReadMemfdToString(int mem_fd, std::string* contents);
 // 1.0/GetSelinuxWeight() of the failures.
 int GetSelinuxWeight();
 
+// Return the weight to use for selinux failures when reporting to crash.
+// Historically, the SELinux weight was 1000, but we did not report this to
+// crash as weighted at all. So, the actual number of selinux reports has always
+// been 1000x too low.
+// For consistency, and to avoid a sudden change in the apparent number of
+// selinux violations, adjust the actual weight reported by GetSelinuxWeight
+// to be in line with historical levels.
+int GetSelinuxWeightForCrash();
+
 // Return the weight for service failures. We'll only collect
 // 1.0/GetServiceFailureWeight() of the failures.
 int GetServiceFailureWeight();
@@ -140,6 +172,10 @@ int GetServiceFailureWeight();
 // 1.0/GetSuspendFailureWeight() of the failures.
 int GetSuspendFailureWeight();
 
+// Return the weight for oom events. We'll only collect
+// 1.0/GetOomEventWeight() of the failures.
+int GetOomEventWeight();
+
 // Return the weight for kernel warnings with the specified command-line flag.
 // We'll only collect 1.0/GetKernelWarningWeight(flag) of the failures.
 int GetKernelWarningWeight(const std::string& flag);
@@ -147,8 +183,15 @@ int GetKernelWarningWeight(const std::string& flag);
 // Return the weight for stateful umount failures.
 int GetUmountStatefulFailureWeight();
 
+// Return the weight for cryptohome recovery failures. We'll only collect
+// 1.0/GetRecoveryFailureWeight() of the failures.
+int GetRecoveryFailureWeight();
+
 // Read the content binding to fd to stream.
 bool ReadFdToStream(unsigned int fd, std::stringstream* stream);
+
+// Read a line from a file to out_str and return size of the read line.
+int GetNextLine(base::File& file, std::string& out_str);
 
 #if USE_DIRENCRYPTION
 // Joins the session key if the kernel supports ext4 directory encryption.
@@ -167,6 +210,12 @@ base::FilePath GetPathToThisBinary(const char* const argv[]);
 // reports together whenever digests are present in the crash's unique
 // signature.
 bool RedactDigests(std::string* to_filter);
+
+// Given the path to a Chrome metadata.json file, parse out the Chrome version
+// in the file. Return std::nullopt and logs error message on error, otherwise
+// return the version as a string.
+std::optional<std::string> ExtractChromeVersionFromMetadata(
+    const base::FilePath& metadata_path);
 
 }  // namespace util
 

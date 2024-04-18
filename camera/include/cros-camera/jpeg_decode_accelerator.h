@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -10,7 +10,7 @@
 #include <stdint.h>
 #include <memory>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 
 #include <cutils/native_handle.h>
 
@@ -19,7 +19,7 @@
 
 namespace cros {
 
-using DecodeCallback = base::Callback<void(int buffer_id, int error)>;
+using DecodeCallback = base::OnceCallback<void(int buffer_id, int error)>;
 
 // Encapsulates a converter from JPEG to YU12 format. This class is not
 // thread-safe.

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include <base/memory/ref_counted.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <brillo/files/file_util.h>
 #include <brillo/variant_dictionary.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/object_path.h>
@@ -28,14 +29,22 @@ namespace {
 
 const char kDevCoredumpDBusErrorString[] =
     "org.chromium.debugd.error.DevCoreDump";
+const char kPrintscanDebugSetCategoriesErrorString[] =
+    "org.chromium.debugd.error.PrintscanDebugSetCategories";
+const char kSetCrashSenderTestModeErrorString[] =
+    "org.chromium.debugd.error.SetCrashSenderTestMode";
 
 const char kShouldSendRlzPingKey[] = "should_send_rlz_ping";
 
 const char kRlzEmbargoEndDateKey[] = "rlz_embargo_end_date";
 
+const char kLanguageAllowedChars[] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-@";
+
 }  // namespace
 
-DebugdDBusAdaptor::DebugdDBusAdaptor(scoped_refptr<dbus::Bus> bus)
+DebugdDBusAdaptor::DebugdDBusAdaptor(scoped_refptr<dbus::Bus> bus,
+                                     const bool perf_logging)
     : org::chromium::debugdAdaptor(this),
       dbus_object_(nullptr, bus, dbus::ObjectPath(kDebugdServicePath)) {
   battery_tool_ = std::make_unique<BatteryTool>();
@@ -53,7 +62,7 @@ DebugdDBusAdaptor::DebugdDBusAdaptor(scoped_refptr<dbus::Bus> bus)
   icmp_tool_ = std::make_unique<ICMPTool>();
   ipaddrs_tool_ = std::make_unique<IpAddrsTool>();
   kernel_feature_tool_ = std::make_unique<KernelFeatureTool>();
-  log_tool_ = std::make_unique<LogTool>(bus);
+  log_tool_ = std::make_unique<LogTool>(bus, perf_logging);
   memory_tool_ = std::make_unique<MemtesterTool>();
   netif_tool_ = std::make_unique<NetifTool>();
   network_status_tool_ = std::make_unique<NetworkStatusTool>();
@@ -61,11 +70,11 @@ DebugdDBusAdaptor::DebugdDBusAdaptor(scoped_refptr<dbus::Bus> bus)
   packet_capture_tool_ = std::make_unique<PacketCaptureTool>();
   perf_tool_ = std::make_unique<PerfTool>();
   ping_tool_ = std::make_unique<PingTool>();
+  printscan_tool_ = std::make_unique<PrintscanTool>(bus);
   probe_tool_ = std::make_unique<ProbeTool>();
   route_tool_ = std::make_unique<RouteTool>();
   shill_scripts_tool_ = std::make_unique<ShillScriptsTool>();
   storage_tool_ = std::make_unique<StorageTool>();
-  swap_tool_ = std::make_unique<SwapTool>();
   sysrq_tool_ = std::make_unique<SysrqTool>();
   systrace_tool_ = std::make_unique<SystraceTool>();
   tracepath_tool_ = std::make_unique<TracePathTool>();
@@ -85,21 +94,23 @@ DebugdDBusAdaptor::DebugdDBusAdaptor(scoped_refptr<dbus::Bus> bus)
           base::FilePath(debugd::kDevFeaturesChromeRemoteDebuggingFlagPath))) {
     session_manager_proxy_->EnableChromeRemoteDebugging();
   }
+  drm_trace_tool_ = std::make_unique<DRMTraceTool>(log_tool_.get());
+  session_manager_proxy_->AddObserver(drm_trace_tool_.get());
+}
+
+DebugdDBusAdaptor::~DebugdDBusAdaptor() {
+  session_manager_proxy_->RemoveObserver(drm_trace_tool_.get());
+  // Destroy drm_trace_tool_ here since it holds a pointer to log_tool_, so
+  // its lifetime should not exceed that of log_tool_.
+  drm_trace_tool_.reset();
 }
 
 void DebugdDBusAdaptor::RegisterAsync(
-    const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb) {
+    brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb) {
   auto* my_interface = dbus_object_.AddOrGetInterface(kDebugdInterface);
   DCHECK(my_interface);
-  my_interface->AddProperty(kCrashSenderTestMode, &crash_sender_test_mode_);
-  crash_sender_test_mode_.SetUpdateCallback(
-      base::BindRepeating(&CrashSenderTool::OnTestModeChanged,
-                          base::Unretained(crash_sender_tool_.get())));
-  crash_sender_test_mode_.SetValue(false);
-  crash_sender_test_mode_.SetAccessMode(
-      brillo::dbus_utils::ExportedPropertyBase::Access::kReadWrite);
   RegisterWithDBusObject(&dbus_object_);
-  dbus_object_.RegisterAsync(cb);
+  dbus_object_.RegisterAsync(std::move(cb));
 }
 
 std::string DebugdDBusAdaptor::SetOomScoreAdj(
@@ -182,6 +193,16 @@ bool DebugdDBusAdaptor::StopPerf(brillo::ErrorPtr* error, uint64_t session_id) {
   return perf_tool_->StopPerf(session_id, error);
 }
 
+bool DebugdDBusAdaptor::GetPerfOutputV2(
+    brillo::ErrorPtr* error,
+    const std::vector<std::string>& quipper_args,
+    bool disable_cpu_idle,
+    const base::ScopedFD& stdout_fd,
+    uint64_t* session_id) {
+  return perf_tool_->GetPerfOutputV2(quipper_args, disable_cpu_idle, stdout_fd,
+                                     session_id, error);
+}
+
 void DebugdDBusAdaptor::DumpDebugLogs(bool is_compressed,
                                       const base::ScopedFD& fd) {
   debug_logs_tool_->GetDebugLogs(is_compressed, fd);
@@ -192,16 +213,25 @@ void DebugdDBusAdaptor::SetDebugMode(const std::string& subsystem) {
 }
 
 std::string DebugdDBusAdaptor::GetLog(const std::string& name) {
-  return log_tool_->GetLog(name);
+  return log_tool_->GetLog(name).value_or("");
 }
 
 std::map<std::string, std::string> DebugdDBusAdaptor::GetAllLogs() {
   return log_tool_->GetAllLogs();
 }
 
-void DebugdDBusAdaptor::GetBigFeedbackLogs(const base::ScopedFD& fd,
-                                           const std::string& username) {
-  log_tool_->GetBigFeedbackLogs(fd, username);
+void DebugdDBusAdaptor::GetFeedbackLogsV2(
+    const base::ScopedFD& fd,
+    const std::string& username,
+    const std::vector<int32_t>& requested_logs) {
+  log_tool_->GetFeedbackLogsV2(fd, username, perf_tool_.get(), requested_logs);
+}
+
+void DebugdDBusAdaptor::GetFeedbackLogsV3(
+    const base::ScopedFD& fd,
+    const std::string& username,
+    const std::vector<int32_t>& requested_logs) {
+  log_tool_->GetFeedbackLogsV3(fd, username, perf_tool_.get(), requested_logs);
 }
 
 void DebugdDBusAdaptor::BackupArcBugReport(const std::string& username) {
@@ -212,28 +242,52 @@ void DebugdDBusAdaptor::DeleteArcBugReportBackup(const std::string& username) {
   log_tool_->DeleteArcBugReportBackup(username);
 }
 
-void DebugdDBusAdaptor::GetJournalLog(const base::ScopedFD& fd) {
-  log_tool_->GetJournalLog(fd);
-}
-
 std::string DebugdDBusAdaptor::GetExample() {
   return example_tool_->GetExample();
 }
 
 int32_t DebugdDBusAdaptor::CupsAddAutoConfiguredPrinter(
     const std::string& name, const std::string& uri) {
-  return cups_tool_->AddAutoConfiguredPrinter(name, uri);
+  return cups_tool_->AddAutoConfiguredPrinter(name, uri, "en");
+}
+
+int32_t DebugdDBusAdaptor::CupsAddAutoConfiguredPrinterV2(
+    const std::string& name,
+    const std::string& uri,
+    const std::string& language) {
+  return cups_tool_->AddAutoConfiguredPrinter(
+      name, uri,
+      base::ContainsOnlyChars(language, kLanguageAllowedChars) ? language
+                                                               : "en");
 }
 
 int32_t DebugdDBusAdaptor::CupsAddManuallyConfiguredPrinter(
     const std::string& name,
     const std::string& uri,
     const std::vector<uint8_t>& ppd_contents) {
-  return cups_tool_->AddManuallyConfiguredPrinter(name, uri, ppd_contents);
+  return cups_tool_->AddManuallyConfiguredPrinter(name, uri, "en",
+                                                  ppd_contents);
+}
+
+int32_t DebugdDBusAdaptor::CupsAddManuallyConfiguredPrinterV2(
+    const std::string& name,
+    const std::string& uri,
+    const std::string& language,
+    const std::vector<uint8_t>& ppd_contents) {
+  return cups_tool_->AddManuallyConfiguredPrinter(
+      name, uri,
+      base::ContainsOnlyChars(language, kLanguageAllowedChars) ? language
+                                                               : "en",
+      ppd_contents);
 }
 
 bool DebugdDBusAdaptor::CupsRemovePrinter(const std::string& name) {
   return cups_tool_->RemovePrinter(name);
+}
+
+std::vector<uint8_t> DebugdDBusAdaptor::CupsRetrievePpd(
+    const std::string& name) {
+  return cups_tool_->RetrievePpd(name);
 }
 
 std::string DebugdDBusAdaptor::GetInterfaces() {
@@ -260,6 +314,10 @@ std::string DebugdDBusAdaptor::Smartctl(const std::string& option) {
 
 std::string DebugdDBusAdaptor::Mmc(const std::string& option) {
   return storage_tool_->Mmc(option);
+}
+
+std::string DebugdDBusAdaptor::Ufs(const std::string& option) {
+  return storage_tool_->Ufs(option);
 }
 
 std::string DebugdDBusAdaptor::Nvme(const std::string& option) {
@@ -298,20 +356,31 @@ bool DebugdDBusAdaptor::PacketCaptureStart(
     const brillo::VariantDictionary& options,
     std::string* handle) {
   bool is_dev_mode = dev_features_tool_wrapper_->restriction().InDevMode();
+  // Use base::Unretained(this) as the packet_capture_tool_ is a member of
+  // `this` and if packet_capture_tool_ is alive to execute the bound function,
+  // it means DebugdDBusAdaptor should also be alive.
   bool packet_capture_started = packet_capture_tool_->Start(
-      is_dev_mode, statfd, outfd, options, handle, error);
+      is_dev_mode, statfd, outfd, options, handle,
+      base::BindOnce(&DebugdDBusAdaptor::OnPacketCaptureStopped,
+                     base::Unretained(this)),
+      error);
   if (packet_capture_started) {
     SendPacketCaptureStartSignal();
   }
   return packet_capture_started;
 }
 
+void DebugdDBusAdaptor::OnPacketCaptureStopped() {
+  // Send PacketCaptureStopSignal if there are no active packet capture
+  // processes running.
+  if (!packet_capture_tool_->HasActivePacketCaptureProcess()) {
+    SendPacketCaptureStopSignal();
+  }
+}
+
 bool DebugdDBusAdaptor::PacketCaptureStop(brillo::ErrorPtr* error,
                                           const std::string& handle) {
   bool packet_capture_stopped = packet_capture_tool_->Stop(handle, error);
-  if (packet_capture_stopped) {
-    SendPacketCaptureStopSignal();
-  }
   return packet_capture_stopped;
 }
 
@@ -325,8 +394,10 @@ void DebugdDBusAdaptor::UploadCrashes() {
 
 bool DebugdDBusAdaptor::UploadSingleCrash(
     brillo::ErrorPtr* error,
-    const std::vector<std::tuple<std::string, base::ScopedFD>>& in_files) {
-  return crash_sender_tool_->UploadSingleCrash(in_files, error);
+    const std::vector<std::tuple<std::string, base::ScopedFD>>& in_files,
+    bool consent_already_checked_by_crash_reporter) {
+  return crash_sender_tool_->UploadSingleCrash(
+      in_files, error, consent_already_checked_by_crash_reporter);
 }
 
 bool DebugdDBusAdaptor::RemoveRootfsVerification(brillo::ErrorPtr* error) {
@@ -397,7 +468,7 @@ bool DebugdDBusAdaptor::DisableDevCoredumpUpload(brillo::ErrorPtr* error) {
     VLOG(1) << "Device coredump upload already disabled";
     return true;
   }
-  if (!base::DeleteFile(
+  if (!brillo::DeleteFile(
           base::FilePath(debugd::kDeviceCoredumpUploadFlagPath))) {
     DEBUGD_ADD_ERROR(error, kDevCoredumpDBusErrorString,
                      "Failed to delete flag file.");
@@ -405,34 +476,6 @@ bool DebugdDBusAdaptor::DisableDevCoredumpUpload(brillo::ErrorPtr* error) {
     return false;
   }
   return true;
-}
-
-bool DebugdDBusAdaptor::KstaledSetRatio(brillo::ErrorPtr* error,
-                                        uint8_t kstaled_ratio,
-                                        bool* out_result) {
-  *out_result = swap_tool_->KstaledSetRatio(error, kstaled_ratio);
-  return *out_result;
-}
-
-std::string DebugdDBusAdaptor::SwapEnable(int32_t size, bool change_now) {
-  return swap_tool_->SwapEnable(size, change_now);
-}
-
-std::string DebugdDBusAdaptor::SwapDisable(bool change_now) {
-  return swap_tool_->SwapDisable(change_now);
-}
-
-std::string DebugdDBusAdaptor::SwapStartStop(bool on) {
-  return swap_tool_->SwapStartStop(on);
-}
-
-std::string DebugdDBusAdaptor::SwapStatus() {
-  return swap_tool_->SwapStatus();
-}
-
-std::string DebugdDBusAdaptor::SwapSetParameter(
-    const std::string& parameter_name, int32_t parameter_value) {
-  return swap_tool_->SwapSetParameter(parameter_name, parameter_value);
 }
 
 std::string DebugdDBusAdaptor::SetU2fFlags(const std::string& flags) {
@@ -607,8 +650,11 @@ bool DebugdDBusAdaptor::SetSchedulerConfigurationV2(
 bool DebugdDBusAdaptor::EvaluateProbeFunction(
     brillo::ErrorPtr* error,
     const std::string& probe_statement,
-    brillo::dbus_utils::FileDescriptor* outfd) {
-  return probe_tool_->EvaluateProbeFunction(error, probe_statement, outfd);
+    int log_level,
+    base::ScopedFD* outfd,
+    base::ScopedFD* errfd) {
+  return probe_tool_->EvaluateProbeFunction(error, probe_statement, log_level,
+                                            outfd, errfd);
 }
 
 bool DebugdDBusAdaptor::CollectSmartBatteryMetric(
@@ -642,6 +688,18 @@ bool DebugdDBusAdaptor::EcTypeCExitMode(brillo::ErrorPtr* error,
   return ec_typec_tool_->ExitMode(error, port_num, output);
 }
 
+bool DebugdDBusAdaptor::EcTypeCDpState(brillo::ErrorPtr* error,
+                                       uint32_t port_num,
+                                       bool* output) {
+  return ec_typec_tool_->DpState(error, port_num, output);
+}
+
+bool DebugdDBusAdaptor::EcTypeCHpdState(brillo::ErrorPtr* error,
+                                        uint32_t port_num,
+                                        bool* output) {
+  return ec_typec_tool_->HpdState(error, port_num, output);
+}
+
 bool DebugdDBusAdaptor::KernelFeatureEnable(brillo::ErrorPtr* error,
                                             const std::string& name,
                                             bool* result,
@@ -654,6 +712,67 @@ bool DebugdDBusAdaptor::KernelFeatureList(brillo::ErrorPtr* error,
                                           bool* result,
                                           std::string* csv) {
   return kernel_feature_tool_->KernelFeatureList(error, result, csv);
+}
+
+bool DebugdDBusAdaptor::DRMTraceSetCategories(brillo::ErrorPtr* error,
+                                              uint32_t categories) {
+  return drm_trace_tool_->SetCategories(error, categories);
+}
+
+bool DebugdDBusAdaptor::DRMTraceSetSize(brillo::ErrorPtr* error,
+                                        uint32_t size_enum) {
+  return drm_trace_tool_->SetSize(error, size_enum);
+}
+
+bool DebugdDBusAdaptor::DRMTraceAnnotateLog(brillo::ErrorPtr* error,
+                                            const std::string& log) {
+  return drm_trace_tool_->AnnotateLog(error, log);
+}
+
+bool DebugdDBusAdaptor::DRMTraceSnapshot(brillo::ErrorPtr* error,
+                                         uint32_t type_enum) {
+  return drm_trace_tool_->Snapshot(error, type_enum);
+}
+
+bool DebugdDBusAdaptor::SetCrashSenderTestMode(brillo::ErrorPtr* error,
+                                               bool mode) {
+  if (!dev_features_tool_wrapper_->restriction().InDevMode()) {
+    DEBUGD_ADD_ERROR(error, kSetCrashSenderTestModeErrorString,
+                     "Dev mode is required to use this API.");
+    return false;
+  }
+
+  crash_sender_tool_->SetTestMode(mode);
+  return true;
+}
+
+bool DebugdDBusAdaptor::PrintscanDebugSetCategories(brillo::ErrorPtr* error,
+                                                    uint32_t categories) {
+  PrintscanCategories categories_enum;
+  switch (categories) {
+    case 0x0: {
+      categories_enum = PrintscanCategories::PRINTSCAN_NO_CATEGORIES;
+      break;
+    }
+    case 0x1: {
+      categories_enum = PrintscanCategories::PRINTSCAN_PRINTING_CATEGORY;
+      break;
+    }
+    case 0x2: {
+      categories_enum = PrintscanCategories::PRINTSCAN_SCANNING_CATEGORY;
+      break;
+    }
+    case 0x3: {
+      categories_enum = PrintscanCategories::PRINTSCAN_ALL_CATEGORIES;
+      break;
+    }
+    default: {
+      DEBUGD_ADD_ERROR(error, kPrintscanDebugSetCategoriesErrorString,
+                       "Invalid categories for PrintscanDebugSetCategories.");
+      return false;
+    }
+  }
+  return printscan_tool_->DebugSetCategories(error, categories_enum);
 }
 
 }  // namespace debugd

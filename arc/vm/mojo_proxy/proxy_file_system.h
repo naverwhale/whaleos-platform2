@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,14 +13,13 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
-#include <base/optional.h>
 #include <base/synchronization/lock.h>
 
 #include "arc/vm/mojo_proxy/mojo_proxy.h"
@@ -44,6 +43,7 @@ class ProxyFileSystem {
     using PreadCallback = MojoProxy::PreadCallback;
     using PwriteCallback = MojoProxy::PwriteCallback;
     using FstatCallback = MojoProxy::FstatCallback;
+    using FtruncateCallback = MojoProxy::FtruncateCallback;
 
     // Implement these methods to handle file operation requests.
     virtual void Pread(int64_t handle,
@@ -56,6 +56,9 @@ class ProxyFileSystem {
                         PwriteCallback callback) = 0;
     virtual void Close(int64_t handle) = 0;
     virtual void Fstat(int64_t handle, FstatCallback callback) = 0;
+    virtual void Ftruncate(int64_t handle,
+                           int64_t length,
+                           FtruncateCallback callback) = 0;
   };
   // |mount_path| is the path to the mount point.
   ProxyFileSystem(Delegate* delegate,
@@ -72,6 +75,11 @@ class ProxyFileSystem {
   // Implementation of the fuse operation callbacks.
   void Lookup(fuse_req_t req, fuse_ino_t parent, const char* name);
   void GetAttr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi);
+  void SetAttr(fuse_req_t req,
+               fuse_ino_t ino,
+               struct stat* attr,
+               int to_set,
+               struct fuse_file_info* fi);
   void Open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi);
   void Read(fuse_req_t req,
             fuse_ino_t ino,
@@ -101,6 +109,9 @@ class ProxyFileSystem {
   // Helper to operate GetAttr(). Called on the |delegate_task_runner_|.
   void GetAttrInternal(fuse_req_t req, int64_t handle, struct stat stat);
 
+  // Helper to operate SetAttr(). Called on the |delegate_task_runner_|.
+  void SetAttrInternal(fuse_req_t req, int64_t handle, struct stat stat);
+
   // Helper to operate Read(). Called on the |delegate_task_runner_|.
   void ReadInternal(fuse_req_t req, int64_t handle, size_t size, off_t off);
 
@@ -111,12 +122,12 @@ class ProxyFileSystem {
                      off_t off);
 
   // Returns the state of the given inode.
-  // If not registered, base::nullopt is returned.
+  // If not registered, std::nullopt is returned.
   struct State {
     int64_t handle = 0;
     bool is_open = false;
   };
-  base::Optional<State> GetState(fuse_ino_t inode);
+  std::optional<State> GetState(fuse_ino_t inode);
 
   Delegate* const delegate_;
   scoped_refptr<base::TaskRunner> delegate_task_runner_;

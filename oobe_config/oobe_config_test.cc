@@ -1,24 +1,25 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "oobe_config/oobe_config.h"
+#include "oobe_config/oobe_config_test.h"
 
+#include <memory>
 #include <string>
-#include <utility>
-
 #include <unistd.h>
 
 #include <base/files/file_path.h>
 #include <base/files/scoped_temp_dir.h>
 #include <base/logging.h>
 #include <gtest/gtest.h>
+#include <libhwsec/frontend/oobe_config/frontend.h>
 
-#include "oobe_config/rollback_constants.h"
+#include "libhwsec/error/tpm_retry_action.h"
+#include "oobe_config/oobe_config.h"
 #include "oobe_config/rollback_data.pb.h"
 
 namespace {
-const char kNetworkConfig[] = R"({"NetworkConfigurations":[{
+constexpr char kNetworkConfig[] = R"({"NetworkConfigurations":[{
     "GUID":"wpa-psk-network-guid",
     "Type": "WiFi",
     "Name": "WiFi",
@@ -26,177 +27,247 @@ const char kNetworkConfig[] = R"({"NetworkConfigurations":[{
       "Security": "WPA-PSK",
       "Passphrase": "wpa-psk-network-passphrase"
   }}]})";
+
+constexpr uint32_t kRollbackSpaceIndex = 0x100e;
+constexpr uint32_t kRollbackSpaceSize = 32;
 }  // namespace
 
 namespace oobe_config {
 
-class OobeConfigTest : public ::testing::Test {
- protected:
-  void SetUp() override {
-    oobe_config_ = std::make_unique<OobeConfig>();
-    ASSERT_TRUE(fake_root_dir_.CreateUniqueTempDir());
-    oobe_config_->set_prefix_path_for_testing(fake_root_dir_.GetPath());
-    oobe_config_->set_network_config_for_testing(kNetworkConfig);
+void OobeConfigTest::SetUp() {
+  hwsec_oobe_config_ = hwsec_factory_.GetOobeConfigFrontend();
+  ASSERT_TRUE(file_handler_.CreateDefaultExistingPaths());
+
+  oobe_config_ =
+      std::make_unique<OobeConfig>(hwsec_oobe_config_.get(), file_handler_);
+  oobe_config_->set_network_config_for_testing(kNetworkConfig);
+
+  // Check that the TPM space does not exist for tests. All tests work under the
+  // assumption that they need to create the space if they want to use it.
+  ASSERT_TRUE(hwsec_oobe_config_->IsRollbackSpaceReady()->ToTPMRetryAction() ==
+              hwsec::TPMRetryAction::kSpaceNotFound);
+}
+
+void OobeConfigTest::SimulatePowerwash(bool preserve_openssl,
+                                       bool preserve_tpm) {
+  bool has_tpm_file = false;
+  std::string rollback_data_str_tpm = "";
+  if (preserve_tpm) {
+    // This file may not exist, failure to read is ok.
+    has_tpm_file =
+        file_handler_.ReadTpmEncryptedRollbackData(&rollback_data_str_tpm);
   }
 
-  void CheckSaveAndRestore(bool encrypted) {
-    oobe_config_->WriteFile(kSaveTempPath.Append(kOobeCompletedFileName), "");
+  std::string rollback_data_str = "";
+  std::string pstore_data = "";
+  if (preserve_openssl) {
+    ASSERT_TRUE(
+        file_handler_.ReadOpensslEncryptedRollbackData(&rollback_data_str));
 
-    // Saving rollback data.
-    LOG(INFO) << "Saving rollback data...";
-    if (encrypted) {
-      ASSERT_TRUE(oobe_config_->EncryptedRollbackSave());
-    } else {
-      ASSERT_TRUE(oobe_config_->UnencryptedRollbackSave());
-    }
-    ASSERT_TRUE(oobe_config_->FileExists(kDataSavedFile));
-
-    std::string rollback_data_str;
-    ASSERT_TRUE(oobe_config_->ReadFile(kUnencryptedStatefulRollbackDataPath,
-                                       &rollback_data_str));
-
-    std::string pstore_data;
-    EXPECT_FALSE(rollback_data_str.empty());
-    if (!encrypted) {
-      oobe_config::RollbackData rollback_data;
-      ASSERT_TRUE(rollback_data.ParseFromString(rollback_data_str));
-      ASSERT_TRUE(rollback_data.eula_auto_accept());
-      ASSERT_FALSE(rollback_data.eula_send_statistics());
-    } else {
-      ASSERT_TRUE(
-          oobe_config_->ReadFile(kRollbackDataForPmsgFile, &pstore_data));
-    }
-
-    // Simulate powerwash and only preserve rollback_data by creating new temp
-    // dir.
-    base::ScopedTempDir tempdir_after;
-    ASSERT_TRUE(tempdir_after.CreateUniqueTempDir());
-    oobe_config_->set_prefix_path_for_testing(tempdir_after.GetPath());
-
-    // Verify that we don't have any remaining files.
-    std::string tmp_data = "x";
-    ASSERT_FALSE(oobe_config_->ReadFile(kUnencryptedStatefulRollbackDataPath,
-                                        &tmp_data));
-    EXPECT_TRUE(tmp_data.empty());
-
-    // Rewrite the rollback data to simulate the preservation that happens
-    // during a rollback powerwash.
-    ASSERT_TRUE(oobe_config_->WriteFile(kUnencryptedStatefulRollbackDataPath,
-                                        rollback_data_str));
-    if (encrypted) {
-      oobe_config_->WriteFile(kPstorePath.Append("pmsg-ramoops-0"),
-                              pstore_data);
-    }
-
-    // Restore data.
-    LOG(INFO) << "Restoring rollback data...";
-    if (encrypted) {
-      EXPECT_TRUE(oobe_config_->EncryptedRollbackRestore());
-    } else {
-      EXPECT_TRUE(oobe_config_->UnencryptedRollbackRestore());
-    }
+    ASSERT_TRUE(file_handler_.ReadPstoreData(&pstore_data));
   }
 
-  base::ScopedTempDir fake_root_dir_;
-  std::unique_ptr<OobeConfig> oobe_config_;
-};
+  file_handler_ = FileHandlerForTesting();
+  ASSERT_TRUE(file_handler_.CreateDefaultExistingPaths());
+  oobe_config_ =
+      std::make_unique<OobeConfig>(hwsec_oobe_config_.get(), file_handler_);
 
-TEST_F(OobeConfigTest, UnencryptedSaveAndRestoreTest) {
-  CheckSaveAndRestore(false /* encrypted */);
+  if (preserve_openssl) {
+    ASSERT_TRUE(
+        file_handler_.WriteOpensslEncryptedRollbackData(rollback_data_str));
+    ASSERT_TRUE(file_handler_.WriteRamoopsData(pstore_data));
+  }
+
+  if (preserve_tpm && has_tpm_file) {
+    ASSERT_TRUE(
+        file_handler_.WriteTpmEncryptedRollbackData(rollback_data_str_tpm));
+  }
 }
 
-TEST_F(OobeConfigTest, EncryptedSaveAndRestoreTest) {
-  CheckSaveAndRestore(true /* encrypted */);
+void OobeConfigTest::CreateRollbackSpace() {
+  ASSERT_TRUE(hwsec_factory_.GetFakeTpmNvramForTest().DefinePlatformCreateSpace(
+      kRollbackSpaceIndex, kRollbackSpaceSize));
+  ASSERT_TRUE(hwsec_oobe_config_->IsRollbackSpaceReady().ok());
 }
 
-TEST_F(OobeConfigTest, ReadNonexistentFile) {
-  base::FilePath bogus_path("/DoesNotExist");
-  std::string result = "result";
-  EXPECT_FALSE(oobe_config_->ReadFile(bogus_path, &result));
-  EXPECT_TRUE(result.empty());
+// Test are grouped into three categories.
+
+// 1. Tests that fake rollback to and from this version of the code, TPM-based
+//     encryption is possible but not activated. TPM space may exist, but it's
+//     not used.
+
+// No TPM space and no TPM based encryption activated. Decryption with OpenSSL
+// works until we lose the key in pstore.
+TEST_F(OobeConfigTest, OpensslEncryptionWorksUntilKeyIsLost) {
+  ASSERT_TRUE(
+      oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/false));
+  SimulatePowerwash();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+  ASSERT_TRUE(file_handler_.RemoveRamoopsData());
+  ASSERT_FALSE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, WriteFileDisallowed) {
-  base::FilePath file_path("/test_file");
-  std::string content = "content";
-  EXPECT_TRUE(oobe_config_->WriteFile(file_path, content));
-  // Make the file unwriteable.
-  EXPECT_EQ(chmod(fake_root_dir_.GetPath()
-                      .Append(file_path.value().substr(1))
-                      .value()
-                      .c_str(),
-                  0400),
-            0);
-  EXPECT_FALSE(oobe_config_->WriteFile(file_path, content));
+// Decryption fails if no data is preserved.
+TEST_F(OobeConfigTest, DecryptionFailsIfNoDataIsPreserved) {
+  ASSERT_TRUE(
+      oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/false));
+  SimulatePowerwash(/*preserve_openssl=*/false, /*preserve_tpm=*/false);
+  ASSERT_FALSE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, ReadFileDisallowed) {
-  base::FilePath file_path("/test_file");
-  std::string content = "content";
-  EXPECT_TRUE(oobe_config_->WriteFile(file_path, content));
-  // Make the file unreadable.
-  EXPECT_EQ(chmod(fake_root_dir_.GetPath()
-                      .Append(file_path.value().substr(1))
-                      .value()
-                      .c_str(),
-                  0000),
-            0);
-  EXPECT_FALSE(oobe_config_->ReadFile(file_path, &content));
-  EXPECT_TRUE(content.empty());
+// Check that rollback data is assembled and preserved without TPM space.
+TEST_F(OobeConfigTest, RollbackDataWithoutTpmSpace) {
+  ASSERT_TRUE(
+      oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/false));
+  SimulatePowerwash();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+
+  std::string rollback_data_str;
+  ASSERT_TRUE(file_handler_.ReadDecryptedRollbackData(&rollback_data_str));
+  RollbackData rollback_data;
+  ASSERT_TRUE(rollback_data.ParseFromString(rollback_data_str));
+
+  ASSERT_FALSE(rollback_data.eula_auto_accept());
+  ASSERT_FALSE(rollback_data.eula_send_statistics());
+  ASSERT_EQ(rollback_data.network_config(), kNetworkConfig);
 }
 
-TEST_F(OobeConfigTest, WriteAndReadFile) {
-  base::FilePath file_path("/test_file");
-  std::string content = "content";
-  std::string result;
-  EXPECT_TRUE(oobe_config_->WriteFile(file_path, content));
-  EXPECT_TRUE(oobe_config_->ReadFile(file_path, &result));
-  EXPECT_EQ(result, content);
+// Tests that use rollback space only run with TPM2.
+#if USE_TPM2
+// As of right now, only OpenSSL encryption is used, even if rollback space
+// exists. This test does not ensure we do not run TPM encryption, it just
+// checks the encryption and decryption will work with how powerwash is
+// currently implemented.
+TEST_F(OobeConfigTest, TpmSpaceButDoNotUse) {
+  CreateRollbackSpace();
+  ASSERT_TRUE(
+      oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/false));
+  SimulatePowerwash();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, FileExistsYes) {
-  base::FilePath file_path("/test_file");
-  std::string content = "content";
-  EXPECT_TRUE(oobe_config_->WriteFile(file_path, content));
-  EXPECT_TRUE(oobe_config_->FileExists(file_path));
+// Make sure that even if TPM space exists, OpenSSL encryption is used if
+// TPM-based encryption is not requested.
+TEST_F(OobeConfigTest, OpensslWorksEvenIfTpmSpaceExists) {
+  CreateRollbackSpace();
+  ASSERT_TRUE(
+      oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/false));
+  SimulatePowerwash(/*preserve_openssl=*/true, /*preserve_tpm=*/false);
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+}
+#endif  // USE_TPM2
+
+// 2. Tests that fake rollback to a version that does not know about TPM-based
+//    encryption.
+
+// An older version of the code will only preserve OpenSSL decrypted file.
+TEST_F(OobeConfigTest, OpensslEncryptionToOldVersionWorks) {
+  ASSERT_TRUE(
+      oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/false));
+  SimulatePowerwash(/*preserve_openssl=*/true, /*preserve_tpm=*/false);
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+  // Openssl data can be decrypted multiple times. Until we delete pstore data.
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, FileExistsNo) {
-  base::FilePath file_path("/test_file");
-  EXPECT_FALSE(oobe_config_->FileExists(file_path));
+// Tests that use rollback space only run with TPM2.
+#if USE_TPM2
+// When rolling back to a version pre-dating this code, TPM space may exist but
+// is not used by the old code. Check that rollback from future code to old code
+// will work.
+TEST_F(OobeConfigTest, RollbackFromThisCodeToOldCode) {
+  CreateRollbackSpace();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/true));
+  SimulatePowerwash(/*preserve_openssl=*/true, /*preserve_tpm=*/false);
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+}
+#endif  // USE_TPM2
+
+// 3. Tests that fake rollback coming from a version of this code that runs
+//    TPM-based encryption if possible, and leaves out OpenSSL encryption if TPM
+//    based encryption can be used.
+
+TEST_F(OobeConfigTest, OpenSSLWorksInTheFutureIfNoTpmSpaceExists) {
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/true));
+  SimulatePowerwash();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, NoRestorePending) {
-  EXPECT_FALSE(oobe_config_->ShouldRestoreRollbackData());
+// Tests that use rollback space only run with TPM2.
+#if USE_TPM2
+// On device with TPM space, encryption and decryption works.
+TEST_F(OobeConfigTest, EncryptionWithTpmSpace) {
+  CreateRollbackSpace();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/true));
+  SimulatePowerwash();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, ShouldRestoreRollbackData) {
-  std::string content;
-  EXPECT_TRUE(
-      oobe_config_->WriteFile(kUnencryptedStatefulRollbackDataPath, content));
-  EXPECT_TRUE(oobe_config_->ShouldRestoreRollbackData());
+// The first decrypt uses TPM decryption, the second one will fall back to the
+// (still working) OpenSSL decryption.
+TEST_F(OobeConfigTest, DecryptTwiceWithTpmSpace) {
+  CreateRollbackSpace();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/true));
+  SimulatePowerwash();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, ShouldSaveRollbackData) {
-  std::string content;
-  EXPECT_TRUE(oobe_config_->WriteFile(kRollbackSaveMarkerFile, content));
-  EXPECT_TRUE(oobe_config_->ShouldSaveRollbackData());
+// On device with TPM space, we fall back to OpenSSL decryption if TPM-based
+// decryption fails. In this test, TPM space is zeroed before decryption can
+// take place.
+TEST_F(OobeConfigTest, FallBackToOpenSSLIfSpaceIsReset) {
+  CreateRollbackSpace();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/true));
+  SimulatePowerwash();
+  ASSERT_TRUE(hwsec_oobe_config_->ResetRollbackSpace().ok());
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, ShouldNotSaveRollbackData) {
-  EXPECT_FALSE(oobe_config_->ShouldSaveRollbackData());
+// Future version of this code will only create the file encrypted
+// with TPM (if rollback space exists). Make sure current code could handle
+// that.
+TEST_F(OobeConfigTest, TpmBasedEncryptionForcedSucceedsOnce) {
+  CreateRollbackSpace();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/true));
+  SimulatePowerwash(/*preserve_openssl=*/false, /*preserve_tpm=*/true);
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+  // TPM-based encryption only allows you to decrypt once. Then it resets the
+  // space.
+  ASSERT_FALSE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, DeleteRollbackSaveFlagFile) {
-  std::string content;
-  EXPECT_TRUE(oobe_config_->WriteFile(kRollbackSaveMarkerFile, content));
-  EXPECT_TRUE(oobe_config_->DeleteRollbackSaveFlagFile());
-  EXPECT_FALSE(oobe_config_->FileExists(kRollbackSaveMarkerFile));
+// If the TPM space is zeroed before data can be decrypted,
+// fallback to OpenSSL isn't possible, so restore will fail.
+TEST_F(OobeConfigTest, DecryptFailsIfSpaceIsZeroed) {
+  CreateRollbackSpace();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/true));
+  SimulatePowerwash(/*preserve_openssl=*/false, /*preserve_tpm=*/true);
+  ASSERT_TRUE(hwsec_oobe_config_->ResetRollbackSpace().ok());
+  ASSERT_FALSE(oobe_config_->EncryptedRollbackRestore());
 }
 
-TEST_F(OobeConfigTest, DeleteNonexistentRollbackSaveFlagFile) {
-  // It is considered successful to delete a file that does not exist.
-  EXPECT_TRUE(oobe_config_->DeleteRollbackSaveFlagFile());
+// Check that rollback data is assembled and preserved with TPM space.
+TEST_F(OobeConfigTest, RollbackDataWithTpmSpace) {
+  CreateRollbackSpace();
+
+  file_handler_.CreateOobeCompletedFlag();
+  file_handler_.CreateMetricsReportingEnabledFile();
+
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackSave(/*run_tpm_encryption=*/true));
+  SimulatePowerwash();
+  ASSERT_TRUE(oobe_config_->EncryptedRollbackRestore());
+
+  std::string rollback_data_str;
+  ASSERT_TRUE(file_handler_.ReadDecryptedRollbackData(&rollback_data_str));
+  RollbackData rollback_data;
+  ASSERT_TRUE(rollback_data.ParseFromString(rollback_data_str));
+
+  ASSERT_TRUE(rollback_data.eula_auto_accept());
+  ASSERT_TRUE(rollback_data.eula_send_statistics());
+  ASSERT_EQ(rollback_data.network_config(), kNetworkConfig);
 }
+#endif  // USE_TPM2
 
 }  // namespace oobe_config

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -42,7 +42,7 @@ class PartnerTest : public ::testing::Test {
 // correctly. Also check that trying to add the same alt mode twice fails. While
 // we are here, also check that calls to DiscoveryComplete return the right
 // responses at various times of the discovery process.
-TEST_F(PartnerTest, TestAltModeManualAddition) {
+TEST_F(PartnerTest, AltModeManualAddition) {
   auto partner_path = temp_dir_.Append(std::string("port0-partner"));
   ASSERT_TRUE(base::CreateDirectory(partner_path));
 
@@ -97,7 +97,7 @@ TEST_F(PartnerTest, TestAltModeManualAddition) {
 // Finally, for the case where the "number_of_alternate_modes" attribute gets
 // updated after the initial partner registration, ensure that the attribute
 // gets parsed and stored correctly.
-TEST_F(PartnerTest, TestPDIdentityScan) {
+TEST_F(PartnerTest, PDIdentityScan) {
   // Set up fake sysfs paths.
   auto partner_path = temp_dir_.Append(std::string("port0-partner"));
   ASSERT_TRUE(base::CreateDirectory(partner_path));
@@ -171,7 +171,7 @@ TEST_F(PartnerTest, TestPDIdentityScan) {
 
 // Test that a partner's "supports_usb_power_delivery" sysfs attribute gets
 // parsed correctly.
-TEST_F(PartnerTest, TestSupportsPD) {
+TEST_F(PartnerTest, SupportsPD) {
   // Set up fake sysfs paths.
   auto partner_path = temp_dir_.Append(std::string("port0-partner"));
   ASSERT_TRUE(base::CreateDirectory(partner_path));
@@ -192,6 +192,33 @@ TEST_F(PartnerTest, TestSupportsPD) {
   ASSERT_TRUE(base::WriteFile(pd_path, val.c_str(), val.length()));
   p.UpdateSupportsPD();
   EXPECT_FALSE(p.GetSupportsPD());
+}
+
+// Test that a PowerProfile gets successfully created, and then removed
+// for a partner.
+TEST_F(PartnerTest, PowerProfile) {
+  // Set up fake sysfs paths.
+  auto partner_path = temp_dir_.Append(std::string("port0-partner"));
+  ASSERT_TRUE(base::CreateDirectory(partner_path));
+
+  auto partner = std::make_unique<Partner>(partner_path);
+  // First check that we don't have a PowerProfile when the directory isn't
+  // present.
+  EXPECT_FALSE(partner->power_profile_);
+
+  auto pd_path = partner_path.Append(std::string("usb_power_delivery"));
+  ASSERT_TRUE(base::CreateDirectory(pd_path));
+
+  auto val = std::string("yes");
+  auto supports_path = partner_path.Append("supports_usb_power_delivery");
+  ASSERT_TRUE(base::WriteFile(supports_path, val.c_str(), val.length()));
+
+  partner = std::make_unique<Partner>(partner_path);
+  partner->AddPowerProfile();
+  EXPECT_TRUE(partner->power_profile_);
+
+  partner->RemovePowerProfile();
+  EXPECT_TRUE(!partner->power_profile_);
 }
 
 }  // namespace typecd

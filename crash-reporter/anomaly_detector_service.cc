@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/time/default_clock.h>
 #include <chromeos/dbus/service_constants.h>
 #include <metrics/metrics_library.h>
@@ -19,6 +19,7 @@
 #include <brillo/process/process.h>
 #include <vm_protos/proto_bindings/vm_host.pb.h>
 
+#include "crash-reporter/anomaly_detector.h"
 #include "crash-reporter/crash_reporter_parser.h"
 #include "crash-reporter/paths.h"
 #include "crash-reporter/util.h"
@@ -61,18 +62,18 @@ std::unique_ptr<dbus::Signal> MakeOomSignal(const int64_t oom_timestamp_ms) {
 }  // namespace
 
 // Time between calls to Parser::PeriodicUpdate.
-constexpr base::TimeDelta kUpdatePeriod = base::TimeDelta::FromSeconds(10);
+constexpr base::TimeDelta kUpdatePeriod = base::Seconds(10);
 
 const base::FilePath kAuditLogPath("/var/log/audit/audit.log");
 
 const base::FilePath kUpstartLogPath("/var/log/upstart.log");
 
-constexpr base::TimeDelta kTimeBetweenLogReads =
-    base::TimeDelta::FromMilliseconds(500);
+constexpr base::TimeDelta kTimeBetweenLogReads = base::Milliseconds(500);
 
 Service::Service(base::OnceClosure shutdown_callback, bool testonly_send_all)
     : shutdown_callback_(std::move(shutdown_callback)),
-      weak_ptr_factory_(this) {
+      weak_ptr_factory_(this),
+      testonly_send_all_(testonly_send_all) {
   parsers_["audit"] =
       std::make_unique<anomaly::SELinuxParser>(testonly_send_all);
   parsers_["init"] =
@@ -84,8 +85,14 @@ Service::Service(base::OnceClosure shutdown_callback, bool testonly_send_all)
   parsers_["crash_reporter"] = std::make_unique<anomaly::CrashReporterParser>(
       std::make_unique<base::DefaultClock>(),
       std::make_unique<MetricsLibrary>(), testonly_send_all);
-  parsers_["cryptohomed"] = std::make_unique<anomaly::CryptohomeParser>();
+  parsers_["cryptohomed"] =
+      std::make_unique<anomaly::CryptohomeParser>(testonly_send_all);
   parsers_["tcsd"] = std::make_unique<anomaly::TcsdParser>();
+  parsers_["shill"] = std::make_unique<anomaly::ShillParser>(testonly_send_all);
+  parsers_["hermes"] =
+      std::make_unique<anomaly::HermesParser>(testonly_send_all);
+  parsers_["modemfwd"] =
+      std::make_unique<anomaly::ModemfwdParser>(testonly_send_all);
 
   // If any log file is missing, the LogReader will try to reopen the file on
   // GetNextEntry method call. After multiple attempts however LogReader will
@@ -109,7 +116,8 @@ bool Service::Init() {
     LOG(ERROR) << "Failed to connect to D-Bus";
     return false;
   }
-  termina_parser_ = std::make_unique<anomaly::TerminaParser>(dbus_);
+  termina_parser_ = std::make_unique<anomaly::TerminaParser>(
+      dbus_, std::make_unique<MetricsLibrary>(), testonly_send_all_);
 
   // Export a bus object so that other processes can register signal handlers
   // and make method calls.
@@ -214,7 +222,13 @@ void Service::ProcessVmKernelLog(dbus::MethodCall* method_call,
   }
 
   for (const auto& message : request.records()) {
-    termina_parser_->ParseLogEntry(request.cid(), message.content());
+    termina_parser_->ParseLogEntryForBtrfs(request.cid(), message.content());
+    auto crash_report =
+        termina_parser_->ParseLogEntryForOom(request.cid(), message.content());
+
+    if (crash_report) {
+      RunCrashReporter(crash_report->flags, crash_report->text);
+    }
   }
 
   std::move(sender).Run(std::move(response));

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/ipconfig.h"
@@ -25,10 +24,6 @@ class MockIPConfig : public IPConfig {
   ~MockIPConfig() override;
 
   MOCK_METHOD(const Properties&, properties, (), (const, override));
-  MOCK_METHOD(bool, RequestIP, (), (override));
-  MOCK_METHOD(bool, RenewIP, (), (override));
-  MOCK_METHOD(bool, ReleaseIP, (ReleaseReason), (override));
-  MOCK_METHOD(void, Refresh, (), (override));
   MOCK_METHOD(void, ResetProperties, (), (override));
   MOCK_METHOD(void, EmitChanges, (), (override));
   MOCK_METHOD(void, UpdateDNSServers, (std::vector<std::string>), (override));

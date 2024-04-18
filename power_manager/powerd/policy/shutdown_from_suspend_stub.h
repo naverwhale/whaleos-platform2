@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,7 @@
 
 #include "power_manager/powerd/policy/shutdown_from_suspend_interface.h"
 
-#include <base/macros.h>
-
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 class ShutdownFromSuspendStub : public ShutdownFromSuspendInterface {
  public:
@@ -18,7 +15,7 @@ class ShutdownFromSuspendStub : public ShutdownFromSuspendInterface {
   ShutdownFromSuspendStub(const ShutdownFromSuspendStub&) = delete;
   ShutdownFromSuspendStub& operator=(const ShutdownFromSuspendStub&) = delete;
 
-  ~ShutdownFromSuspendStub() = default;
+  ~ShutdownFromSuspendStub() override = default;
 
   void set_action(Action action) { action_ = action; }
 
@@ -26,12 +23,12 @@ class ShutdownFromSuspendStub : public ShutdownFromSuspendInterface {
   Action PrepareForSuspendAttempt() override { return action_; };
   void HandleDarkResume() override{};
   void HandleFullResume() override{};
+  void HandlePolicyChange(const PowerManagementPolicy& policy) override{};
 
  private:
   Action action_ = Action::SUSPEND;
 };
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy
 
 #endif  // POWER_MANAGER_POWERD_POLICY_SHUTDOWN_FROM_SUSPEND_STUB_H_

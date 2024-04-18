@@ -1,17 +1,17 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "tpm_manager/server/tpm_status_impl.h"
 
 #include <algorithm>
+#include <optional>
 #include <vector>
 
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <brillo/file_utils.h>
 #include <tpm_manager/server/tpm_util.h>
 #include <trousers/trousers.h>
@@ -23,7 +23,7 @@ namespace {
 constexpr size_t kMinimumDaInfoSize = 21;
 
 // Minimum size of TPM_CAP_VERSION_INFO struct.
-constexpr size_t kMinimumVersionInfoSize = 17;
+constexpr size_t kMinimumVersionInfoSize = 15;
 
 // The TPM manufacturer code of Infineon.
 constexpr uint32_t kInfineonManufacturerCode = 0x49465800;
@@ -36,7 +36,7 @@ constexpr size_t kInfineonDACounterOffset = 9;
 
 // The flag that tells if the tpm is full initialized.
 constexpr char kTpmFullyInitializedPath[] =
-    "/mnt/stateful_partition/.tpm_owned";
+    "/mnt/stateful_partition/unencrypted/tpm_manager/tpm_owned";
 
 bool TouchTpmFullyInitializedPath() {
   return brillo::WriteBlobToFile<std::vector<char>>(
@@ -106,19 +106,21 @@ bool TpmStatusImpl::GetTpmOwned(TpmStatus::TpmOwnershipStatus* status) {
     return true;
   }
 
-  const base::Optional<bool> is_default_owner_password =
+  const std::optional<TpmStatus::TpmOwnershipStatus> owner_password_status =
       TestTpmWithDefaultOwnerPassword();
-  if (!is_default_owner_password.has_value()) {
+  if (!owner_password_status.has_value()) {
     LOG(ERROR) << __func__ << ": Failed to test default owner password.";
     return false;
   }
-  if (*is_default_owner_password) {
-    ownership_status_ = kTpmPreOwned;
+
+  if (*owner_password_status == TpmStatus::kTpmPreOwned ||
+      *owner_password_status == TpmStatus::kTpmDisabled) {
+    ownership_status_ = *owner_password_status;
     *status = ownership_status_;
     return true;
   }
 
-  const base::Optional<bool> is_default_srk_auth = TestTpmSrkWithDefaultAuth();
+  const std::optional<bool> is_default_srk_auth = TestTpmSrkWithDefaultAuth();
   if (!is_default_srk_auth.has_value()) {
     LOG(ERROR) << __func__ << ": Failed to test default SRK auth.";
     return false;
@@ -265,19 +267,20 @@ bool TpmStatusImpl::GetVersionInfo(uint32_t* family,
   return true;
 }
 
-base::Optional<bool> TpmStatusImpl::TestTpmWithDefaultOwnerPassword() {
+std::optional<TpmStatus::TpmOwnershipStatus>
+TpmStatusImpl::TestTpmWithDefaultOwnerPassword() {
   if (base::PathExists(base::FilePath(kTpmFullyInitializedPath))) {
-    is_owner_password_default_ = false;
+    owner_password_status_ = TpmStatus::kTpmOwned;
   }
 
-  if (is_owner_password_default_.has_value()) {
-    return is_owner_password_default_;
+  if (owner_password_status_.has_value()) {
+    return owner_password_status_;
   }
 
   TpmConnection connection(GetDefaultOwnerPassword());
   TSS_HTPM tpm_handle = connection.GetTpm();
   if (tpm_handle == 0) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   // Call Tspi_TPM_GetStatus to test the default owner password.
@@ -286,20 +289,25 @@ base::Optional<bool> TpmStatusImpl::TestTpmWithDefaultOwnerPassword() {
       Tspi_TPM_GetStatus(tpm_handle, TSS_TPMSTATUS_DISABLED, &current_status);
 
   if (result == TPM_SUCCESS) {
-    is_owner_password_default_ = true;
+    owner_password_status_ = TpmStatus::kTpmPreOwned;
   } else if (result == TPM_ERROR(TPM_E_AUTHFAIL)) {
-    is_owner_password_default_ = false;
+    owner_password_status_ = TpmStatus::kTpmOwned;
     if (!TouchTpmFullyInitializedPath()) {
       LOG(WARNING) << __func__ << ": Failed to touch "
                    << kTpmFullyInitializedPath;
     }
+  } else if (result == TPM_ERROR(TPM_E_DISABLED)) {
+    is_enable_initialized_ = true;
+    is_enabled_ = false;
+    owner_password_status_ = TpmStatus::kTpmDisabled;
+    LOG(WARNING) << __func__ << ": TPM is disabled.";
   } else {
     TPM_LOG(ERROR, result) << "Unexpected error calling |Tspi_TPM_GetStatus|.";
   }
-  return is_owner_password_default_;
+  return owner_password_status_;
 }
 
-base::Optional<bool> TpmStatusImpl::TestTpmSrkWithDefaultAuth() {
+std::optional<bool> TpmStatusImpl::TestTpmSrkWithDefaultAuth() {
   if (GetNoSrkAuth(local_data_store_)) {
     is_srk_auth_default_ = false;
   }
@@ -315,8 +323,12 @@ base::Optional<bool> TpmStatusImpl::TestTpmSrkWithDefaultAuth() {
   if (TPM_ERROR(result = Tspi_Context_LoadKeyByUUID(
                     connection.GetContext(), TSS_PS_TYPE_SYSTEM, SRK_UUID,
                     srk_handle.ptr()))) {
+    if (ERROR_CODE(result) == TSS_E_PS_KEY_NOTFOUND) {
+      LOG(WARNING) << "SRK not found. This is normal on a pre-owned device.";
+      return false;
+    }
     TPM_LOG(ERROR, result) << "Error calling Tspi_Context_LoadKeyByUUID";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   // Check if the SRK wants a password
@@ -325,7 +337,7 @@ base::Optional<bool> TpmStatusImpl::TestTpmSrkWithDefaultAuth() {
                     srk_handle, TSS_TSPATTRIB_KEY_INFO,
                     TSS_TSPATTRIB_KEYINFO_AUTHUSAGE, &srk_authusage))) {
     TPM_LOG(ERROR, result) << "Error calling Tspi_GetAttribUint32";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   if (!srk_authusage) {
@@ -338,7 +350,7 @@ base::Optional<bool> TpmStatusImpl::TestTpmSrkWithDefaultAuth() {
   if (TPM_ERROR(result = Tspi_GetPolicyObject(srk_handle, TSS_POLICY_USAGE,
                                               &srk_usage_policy))) {
     TPM_LOG(ERROR, result) << "Error calling Tspi_GetPolicyObject";
-    return base::nullopt;
+    return std::nullopt;
   }
   BYTE default_auth[0];
   result = Tspi_Policy_SetSecret(srk_usage_policy, TSS_SECRET_MODE_PLAIN, 0,
@@ -346,7 +358,7 @@ base::Optional<bool> TpmStatusImpl::TestTpmSrkWithDefaultAuth() {
   if (result != TPM_SUCCESS) {
     TPM_LOG(ERROR, result)
         << "Unexpected error calling |Tspi_Policy_SetSecret|.";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   unsigned public_srk_size;
@@ -355,14 +367,14 @@ base::Optional<bool> TpmStatusImpl::TestTpmSrkWithDefaultAuth() {
       Tspi_Key_GetPubKey(srk_handle, &public_srk_size, public_srk_bytes.ptr());
   if (result == TPM_SUCCESS) {
     is_srk_auth_default_ = true;
-  } else if (result == TPM_ERROR(TPM_E_AUTHFAIL)) {
+  } else if (ERROR_CODE(result) == TPM_E_AUTHFAIL) {
     is_srk_auth_default_ = false;
     if (!SetNoSrkAuth(local_data_store_, true)) {
       LOG(WARNING) << __func__ << ": Failed to set no_srk_auth";
     }
   } else {
     TPM_LOG(ERROR, result) << "Unexpected error calling |Tspi_Key_GetPubKey|.";
-    return base::nullopt;
+    return std::nullopt;
   }
   return is_srk_auth_default_;
 }
@@ -436,7 +448,7 @@ void TpmStatusImpl::MarkRandomOwnerPasswordSet() {
   // Also makes sure the state machine is consistent.
   is_enable_initialized_ = is_enabled_ = is_owned_ = true;
   ownership_status_ = kTpmOwned;
-  is_owner_password_default_ = false;
+  owner_password_status_ = TpmStatus::kTpmOwned;
   if (!TouchTpmFullyInitializedPath()) {
     LOG(WARNING) << __func__ << ": Failed to touch "
                  << kTpmFullyInitializedPath;
@@ -444,8 +456,7 @@ void TpmStatusImpl::MarkRandomOwnerPasswordSet() {
 }
 
 bool TpmStatusImpl::SupportU2f() {
-  // For TPM1.2, we doesn't support u2f.
-  return false;
+  return true;
 }
 
 bool TpmStatusImpl::SupportPinweaver() {
@@ -460,8 +471,26 @@ GscVersion TpmStatusImpl::GetGscVersion() {
 
 bool TpmStatusImpl::GetRoVerificationStatus(
     tpm_manager::RoVerificationStatus* status) {
-  *status = tpm_manager::RO_STATUS_UNSUPPORTED;
+  *status = tpm_manager::RO_STATUS_UNSUPPORTED_NOT_TRIGGERED;
   return true;
 }
 
+bool TpmStatusImpl::GetAlertsData(AlertsData* alerts) {
+  // TPM 1.2 doesn't support to get alerts data.
+  return false;
+}
+
+bool TpmStatusImpl::GetTi50Stats(uint32_t* fs_init_time,
+                                 uint32_t* fs_size,
+                                 uint32_t* aprov_time,
+                                 uint32_t* aprov_status) {
+  return false;
+}
+
+bool TpmStatusImpl::GetRwVersion(std::string* rw_version) {
+  CHECK(rw_version);
+  *rw_version = "0.0.0";
+  VLOG(1) << "Report all zeros rw firmware version for TPM1.2.";
+  return true;
+}
 }  // namespace tpm_manager

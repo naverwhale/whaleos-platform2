@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,22 +8,20 @@
 
 #include <base/containers/contains.h>
 #include <base/strings/string_split.h>
+#include <base/strings/string_util.h>
 
 namespace kerberos {
 namespace {
-
-// Maximum depth of nested '{' in the config.
-constexpr int kMaxGroupLevelDepth = 1000;
 
 // See
 // https://web.mit.edu/kerberos/krb5-1.12/doc/admin/conf_files/krb5_conf.html
 // for a description of the krb5.conf format.
 
-// Directives that are not relations (i.e. key=value). All blacklisted.
+// Directives that are not relations (i.e. key=value). All blocklisted.
 const char* const kDirectives[] = {"module", "include", "includedir"};
 
-// Whitelisted configuration keys in the [libdefaults] section.
-const char* const kLibDefaultsWhitelist[] = {
+// Allowlisted configuration keys in the [libdefaults] section.
+const char* const kLibDefaultsAllowlist[] = {
     "canonicalize",
     "clockskew",
     "default_tgs_enctypes",
@@ -45,18 +43,19 @@ const char* const kLibDefaultsWhitelist[] = {
     "udp_preference_limit",
 };
 
-// Whitelisted configuration keys in the [realms] section.
-const char* const kRealmsWhitelist[] = {
-    "admin_server", "auth_to_local", "kdc", "kpasswd_server", "master_kdc",
+// Allowlisted configuration keys in the [realms] section.
+const char* const kRealmsAllowlist[] = {
+    "admin_server",   "auth_to_local", "kdc",
+    "kpasswd_server", "master_kdc",  // nocheck
 };
 
-// Whitelisted sections. Any key in "domain_realm" and "capaths" is accepted.
+// Allowlisted sections. Any key in "domain_realm" and "capaths" is accepted.
 constexpr char kSectionLibdefaults[] = "libdefaults";
 constexpr char kSectionRealms[] = "realms";
 constexpr char kSectionDomainRealm[] = "domain_realm";
 constexpr char kSectionCapaths[] = "capaths";
 
-const char* const kSectionWhitelist[] = {kSectionLibdefaults, kSectionRealms,
+const char* const kSectionAllowlist[] = {kSectionLibdefaults, kSectionRealms,
                                          kSectionDomainRealm, kSectionCapaths};
 
 // List of encryption types fields allowed inside [libdefaults] section.
@@ -108,12 +107,12 @@ ConfigErrorInfo MakeErrorInfo(ConfigErrorCode code, int line_index) {
 }  // namespace
 
 ConfigParser::ConfigParser()
-    : libdefaults_whitelist_(std::begin(kLibDefaultsWhitelist),
-                             std::end(kLibDefaultsWhitelist)),
-      realms_whitelist_(std::begin(kRealmsWhitelist),
-                        std::end(kRealmsWhitelist)),
-      section_whitelist_(std::begin(kSectionWhitelist),
-                         std::end(kSectionWhitelist)),
+    : libdefaults_allowlist_(std::begin(kLibDefaultsAllowlist),
+                             std::end(kLibDefaultsAllowlist)),
+      realms_allowlist_(std::begin(kRealmsAllowlist),
+                        std::end(kRealmsAllowlist)),
+      section_allowlist_(std::begin(kSectionAllowlist),
+                         std::end(kSectionAllowlist)),
       enctypes_fields_(std::begin(kEnctypesFields), std::end(kEnctypesFields)),
       weak_enctypes_(std::begin(kWeakEnctypes), std::end(kWeakEnctypes)),
       strong_enctypes_(std::begin(kStrongEnctypes), std::end(kStrongEnctypes)) {
@@ -147,10 +146,11 @@ ConfigErrorInfo ConfigParser::ParseConfig(
   // will be replaced at the end of this method, if |krb5conf| is valid.
   *encryption_types = KerberosEncryptionTypes::kStrong;
 
-  // Keep empty lines, they're necessary to get the line numbers right.
-  // Note: The MIT krb5 parser does not count \r as newline.
+  // Keep whitespaces to preserve the original line size. Keep empty lines,
+  // they're necessary to get the line numbers right. Note: The MIT krb5
+  // parser does not count \r as newline.
   const std::vector<std::string> lines = base::SplitString(
-      krb5conf, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+      krb5conf, "\n", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
 
   // Level of nested curly braces {}.
   int group_level = 0;
@@ -165,6 +165,13 @@ ConfigErrorInfo ConfigParser::ParseConfig(
   for (size_t line_index = 0; line_index < lines.size(); ++line_index) {
     // Convert to c_str() and back to get rid of embedded \0's.
     std::string line = lines.at(line_index).c_str();
+
+    if (line.size() > kKrb5MaxLineLength) {
+      return MakeErrorInfo(CONFIG_ERROR_LINE_TOO_LONG, line_index);
+    }
+
+    // After validating the original line length, we want to trim whitespaces.
+    base::TrimWhitespaceASCII(line, base::TRIM_ALL, &line);
 
     // Are we expecting a '{' to open a { group }?
     if (expect_opening_curly_brace) {
@@ -223,7 +230,7 @@ ConfigErrorInfo ConfigParser::ParseConfig(
 
       // Bail if the section is not supported, e.g. [appdefaults].
       if (current_section.empty() ||
-          !base::Contains(section_whitelist_, current_section)) {
+          !base::Contains(section_allowlist_, current_section)) {
         return MakeErrorInfo(CONFIG_ERROR_SECTION_NOT_SUPPORTED, line_index);
       }
       continue;
@@ -312,17 +319,17 @@ bool ConfigParser::IsKeySupported(const std::string& key,
   if (section.empty())
     return false;
 
-  // Enforce only whitelisted libdefaults keys on the root and realm levels:
+  // Enforce only allowlisted libdefaults keys on the root and realm levels:
   // [libdefaults]
   //   clockskew = 300
   //   EXAMPLE.COM = {
   //     clockskew = 500
   //   }
   if (section == kSectionLibdefaults && group_level <= 1) {
-    return base::Contains(libdefaults_whitelist_, key);
+    return base::Contains(libdefaults_allowlist_, key);
   }
 
-  // Enforce only whitelisted realm keys on the root and realm levels:
+  // Enforce only allowlisted realm keys on the root and realm levels:
   // [realms]
   //   kdc = kerberos1.example.com
   //   EXAMPLE.COM = {
@@ -330,7 +337,7 @@ bool ConfigParser::IsKeySupported(const std::string& key,
   //   }
   // Not sure if they can actually be at the root level, but just in case...
   if (section == kSectionRealms && group_level <= 1)
-    return base::Contains(realms_whitelist_, key);
+    return base::Contains(realms_allowlist_, key);
 
   // Anything else is fine (all keys of other supported sections).
   return true;

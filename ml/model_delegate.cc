@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,6 +16,7 @@
 #include <tensorflow/lite/interpreter.h>
 #include <tensorflow/lite/kernels/register.h>
 
+#include "ml/custom_ops/transpose_conv_bias.h"
 #include "ml/request_metrics.h"
 
 namespace ml {
@@ -70,9 +71,25 @@ ModelDelegate::ModelDelegate(std::map<std::string, int> required_inputs,
                     nullptr /*model_data*/,
                     metrics_model_name) {}
 
+TfLiteGpuDelegateOptionsV2 MakeGpuDelegateOptions(
+    GpuDelegateApi gpu_delegate_api) {
+  TfLiteGpuDelegateOptionsV2 options(TfLiteGpuDelegateOptionsV2Default());
+
+  switch (gpu_delegate_api) {
+    case GpuDelegateApi::OPENCL:
+      options.experimental_flags |= TFLITE_GPU_EXPERIMENTAL_FLAGS_CL_ONLY;
+      break;
+    default:
+      options.experimental_flags |= TFLITE_GPU_EXPERIMENTAL_FLAGS_GL_ONLY;
+  }
+
+  return options;
+}
+
 CreateGraphExecutorResult ModelDelegate::CreateGraphExecutorDelegate(
     const bool use_nnapi,
     const bool use_gpu,
+    GpuDelegateApi gpu_delegate_api,
     GraphExecutorDelegate** graph_executor_delegate) {
   DCHECK(!metrics_model_name_.empty());
 
@@ -88,6 +105,8 @@ CreateGraphExecutorResult ModelDelegate::CreateGraphExecutorDelegate(
 
   // Instantiate interpreter.
   tflite::ops::builtin::BuiltinOpResolver resolver;
+  resolver.AddCustom("Convolution2DTransposeBias",
+                     custom_ops::RegisterConvolution2DTransposeBias());
   std::unique_ptr<tflite::Interpreter> interpreter;
   const TfLiteStatus resolve_status =
       tflite::InterpreterBuilder(*model_, resolver)(&interpreter);
@@ -125,7 +144,9 @@ CreateGraphExecutorResult ModelDelegate::CreateGraphExecutorDelegate(
 
   // If requested, load and apply GPU
   if (use_gpu) {
-    TfLiteDelegate* delegate = TfLiteGpuDelegateV2Create(/*options=*/nullptr);
+    TfLiteGpuDelegateOptionsV2 options(
+        MakeGpuDelegateOptions(gpu_delegate_api));
+    TfLiteDelegate* delegate = TfLiteGpuDelegateV2Create(&options);
     if (!delegate) {
       LOG(ERROR) << "GPU requested but not available.";
       request_metrics.RecordRequestEvent(

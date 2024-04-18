@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,8 +27,8 @@ int main(int argc, char** argv) {
   base::FileDescriptorWatcher watcher_{task_executor.task_runner()};
 
   base::Thread proxy_file_system_thread{"ProxyFileSystem"};
-  base::Thread::Options options(base::MessagePumpType::IO, 0);
-  if (!proxy_file_system_thread.StartWithOptions(options)) {
+  if (!proxy_file_system_thread.StartWithOptions(
+          base::Thread::Options(base::MessagePumpType::IO, 0))) {
     LOG(ERROR) << "Failed to start ProxyFileSystem thread.";
     return 1;
   }

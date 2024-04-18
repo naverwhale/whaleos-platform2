@@ -1,26 +1,31 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CRASH_REPORTER_MISSED_CRASH_COLLECTOR_H_
 #define CRASH_REPORTER_MISSED_CRASH_COLLECTOR_H_
 
-#include "crash-reporter/crash_collector.h"
-
-#include <string>
-
 #include <stdint.h>
 #include <stdio.h>
+
+#include <memory>
+#include <string>
+
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
+#include <metrics/metrics_library.h>
+
+#include "crash-reporter/crash_collector.h"
 
 // Handles reports from anomaly_detector that we failed to capture a Chrome
 // crash. The class is a bit of an oddity in that it doesn't collect its logs
 // itself; instead, it has the logs passed to it on a file descriptor.
 class MissedCrashCollector : public CrashCollector {
  public:
-  // Visible for testing only.
-  static constexpr int64_t kDefaultChunkSize = 1 << 16;
-
-  MissedCrashCollector();
+  explicit MissedCrashCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   ~MissedCrashCollector() override;
 
   bool Collect(int pid,
@@ -33,21 +38,25 @@ class MissedCrashCollector : public CrashCollector {
     input_file_ = input_file;
   }
 
-  static CollectorInfo GetHandlerInfo(bool missed_chrome_crash,
-                                      int32_t pid,
-                                      int32_t recent_miss_count,
-                                      int32_t recent_match_count,
-                                      int32_t pending_miss_count);
+  // Returns the severity level and product group of the crash.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
+
+  static CollectorInfo GetHandlerInfo(
+      bool missed_chrome_crash,
+      int32_t pid,
+      int32_t recent_miss_count,
+      int32_t recent_match_count,
+      int32_t pending_miss_count,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
 
  private:
   // FILE we can read from that contains the logs to attach to this crash
   // report. Default is stdin. Class does not own the FILE and will not close
   // it.
   FILE* input_file_;
-
-  // Read all the contents of the given FILE* to |contents| until either
-  // EOF or an error. Assumes |file| is at the start of the file.
-  static bool ReadFILEToString(FILE* file, std::string* contents);
 };
 
 #endif  // CRASH_REPORTER_MISSED_CRASH_COLLECTOR_H_

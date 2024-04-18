@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
-#include <base/macros.h>
 #include <base/strings/string_util.h>
 #include <gtest/gtest.h>
 #include <vm_protos/proto_bindings/vm_host.pb.h>
@@ -155,40 +154,39 @@ constexpr struct ContentTestCase {
     },
     {
         .input = "Contains only ASCII characters",
-        .output = u8"Contains only ASCII characters",
+        .output = "Contains only ASCII characters",
     },
     {
-        .input = u8"网页 图片 资讯更多 »",
-        .output = u8"网页 图片 资讯更多 »",
+        .input = "网页 图片 资讯更多 »",
+        .output = "网页 图片 资讯更多 »",
     },
     {
-        .input = u8"Παγκόσμιος Ιστός",
-        .output = u8"Παγκόσμιος Ιστός",
+        .input = "Παγκόσμιος Ιστός",
+        .output = "Παγκόσμιος Ιστός",
     },
     {
-        .input = u8"Поиск страниц на русском",
-        .output = u8"Поиск страниц на русском",
+        .input = "Поиск страниц на русском",
+        .output = "Поиск страниц на русском",
     },
     {
         // "Embedded (U+008c) control (U+0007) characters"
         .input = "Embedded \xC2\x8C control \x07 characters",
 
-        .output = u8"Embedded #214 control #007 characters",
+        .output = "Embedded #214 control #007 characters",
     },
     {
         // "Invalid(U+dead) code(U+12ffff) points"
         .input = "Invalid\xED\xBA\xAD code\xF4\xAF\xBF\xBF points",
 
         // "Invalid��� code��� points"  NOLINT(readability/utf8)
-        .output =
-            u8"Invalid\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD "
-            u8"code\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD points",
+        .output = "Invalid\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD "
+                  "code\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD points",
     },
     {
         // "Non-(U+fffe) character (U+fde1) code points"
         .input = "Non-\xEF\xBF\xBE character \xEF\xB7\xA1 code points",
 
-        .output = u8"Non-#177776 character #176741 code points",
+        .output = "Non-#177776 character #176741 code points",
     },
     {
         // "Mix of(U+0091) val(U+001c)id, invalid(U+daaa), 전체Παγκόσμιος网页на
@@ -198,11 +196,11 @@ constexpr struct ContentTestCase {
                  "전체Παγκόσμιος网页на русском, non\xF7\x9F\xBF\xBF-character, "
                  "and\xEF\xBF\xBE control \xEF\xB7\xAA code points",
         .output =
-            u8"Mix of#221 val#034id, "
-            u8"invalid\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD, "
-            u8"전체Παγκόσμιος网页на русском, "
-            u8"non\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD-character, "
-            u8"and#177776 control #176752 code points",
+            "Mix of#221 val#034id, "
+            "invalid\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD, "
+            "전체Παγκόσμιος网页на русском, "
+            "non\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD-character, "
+            "and#177776 control #176752 code points",
     },
 };
 
@@ -234,7 +232,7 @@ INSTANTIATE_TEST_SUITE_P(Scrubber,
 TEST_P(ContentTest, ScrubsCleanly) {
   struct ContentTestCase param = GetParam();
 
-  EXPECT_EQ(ScrubProtoContent(param.input), string(param.output));
+  EXPECT_EQ(ScrubProtoContent(param.input), std::string(param.output));
 }
 INSTANTIATE_TEST_SUITE_P(Scrubber,
                          ContentTest,
@@ -244,7 +242,7 @@ TEST(Content, StressTest) {
   base::FilePath src(getenv("PWD"));
   ASSERT_TRUE(base::PathExists(src));
 
-  base::FilePath stress_test = src.Append("syslog").Append("UTF8_test.txt");
+  base::FilePath stress_test = src.Append("syslog").Append("UTF8_test.dat");
   ASSERT_TRUE(base::PathExists(stress_test));
 
   string content;

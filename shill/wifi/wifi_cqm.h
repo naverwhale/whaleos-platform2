@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,11 @@
 #define SHILL_WIFI_WIFI_CQM_H_
 
 #include "shill/metrics.h"
-#include "shill/refptr_types.h"
 
 namespace shill {
+
+class Nl80211Message;
+class WiFi;
 
 // WiFiCQM class implements connection quality monitoring feature. Connection
 // Quality Monitor (CQM) is a feature provided by the kernel. It emits

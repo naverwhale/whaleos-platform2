@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include "cryptohome/storage/encrypted_container/backing_device.h"
 
 #include <memory>
+#include <optional>
 
 #include <gmock/gmock.h>
 
@@ -62,9 +63,9 @@ class FakeBackingDevice : public BackingDevice {
 
   BackingDeviceType GetType() override { return type_; }
 
-  base::Optional<base::FilePath> GetPath() override {
+  std::optional<base::FilePath> GetPath() override {
     if (!attached_) {
-      return base::nullopt;
+      return std::nullopt;
     }
     return backing_device_path_;
   }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,9 @@
 
 #include <memory>
 
-#include <base/macros.h>
+#include <base/run_loop.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
-
-namespace base {
-class RunLoop;
-}
 
 namespace power_manager {
 
@@ -27,11 +23,11 @@ namespace power_manager {
 // 4. Test that the asynchronous event included the expected data.
 class TestMainLoopRunner {
  public:
-  TestMainLoopRunner();
+  TestMainLoopRunner() = default;
   TestMainLoopRunner(const TestMainLoopRunner&) = delete;
   TestMainLoopRunner& operator=(const TestMainLoopRunner&) = delete;
 
-  ~TestMainLoopRunner();
+  ~TestMainLoopRunner() = default;
 
   // Runs the event loop until StopLoop() is called or |timeout_delay| has
   // elapsed. Returns true if the loop was stopped via StopLoop() or false if
@@ -57,7 +53,7 @@ class TestMainLoopRunner {
 
   // Was the loop stopped as a result of OnTimeout() being called rather than
   // StopLoop()?
-  bool timed_out_;
+  bool timed_out_ = false;
 };
 
 }  // namespace power_manager

@@ -1,13 +1,14 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/net/nl80211_attribute.h"
 
-#include <base/bind.h>
 #include <base/format_macros.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
+#include <net-base/byte_utils.h>
 
 #include "shill/net/ieee80211.h"
 
@@ -78,7 +79,8 @@ Nl80211AttributeBss::Nl80211AttributeBss()
   nested_template_.insert(AttrDataPair(
       NL80211_BSS_INFORMATION_ELEMENTS,
       NestedData(kTypeRaw, "NL80211_BSS_INFORMATION_ELEMENTS", false,
-                 base::Bind(&Nl80211AttributeBss::ParseInformationElements))));
+                 base::BindRepeating(
+                     &Nl80211AttributeBss::ParseInformationElements))));
   nested_template_.insert(
       AttrDataPair(NL80211_BSS_SIGNAL_MBM,
                    NestedData(kTypeU32, "NL80211_BSS_SIGNAL_MBM", false)));
@@ -96,7 +98,7 @@ bool Nl80211AttributeBss::ParseInformationElements(
     AttributeList* attribute_list,
     size_t id,
     const std::string& attribute_name,
-    ByteString data) {
+    base::span<const uint8_t> data) {
   if (!attribute_list) {
     LOG(ERROR) << "NULL |attribute_list| parameter";
     return false;
@@ -111,17 +113,21 @@ bool Nl80211AttributeBss::ParseInformationElements(
                << " which we just created.";
     return false;
   }
-  const uint8_t* sub_attribute = data.GetConstData();
-  const uint8_t* end = sub_attribute + data.GetLength();
+
+  base::span<const uint8_t> remain_data = data;
   const int kHeaderBytes = 2;
-  while (end - sub_attribute > kHeaderBytes) {
-    uint8_t type = sub_attribute[0];
-    uint8_t payload_bytes = sub_attribute[1];
-    const uint8_t* payload = &sub_attribute[kHeaderBytes];
-    if (payload + payload_bytes > end) {
+  while (remain_data.size() > kHeaderBytes) {
+    const uint8_t type = remain_data[0];
+    const uint8_t payload_bytes = remain_data[1];
+    remain_data = remain_data.subspan(kHeaderBytes);
+
+    if (remain_data.size() < payload_bytes) {
       LOG(ERROR) << "Found malformed IE data.";
       return false;
     }
+    const auto payload = remain_data.subspan(0, payload_bytes);
+    remain_data = remain_data.subspan(payload_bytes);
+
     // See http://dox.ipxe.org/ieee80211_8h_source.html for more info on types
     // and data inside information elements.
     switch (type) {
@@ -131,8 +137,7 @@ bool Nl80211AttributeBss::ParseInformationElements(
           ie_attribute->SetStringAttributeValue(type, "");
         } else {
           ie_attribute->SetStringAttributeValue(
-              type, std::string(reinterpret_cast<const char*>(payload),
-                                payload_bytes));
+              type, net_base::byte_utils::ByteStringFromBytes(payload));
         }
         break;
       }
@@ -157,30 +162,22 @@ bool Nl80211AttributeBss::ParseInformationElements(
       }
       case kHtCapAttributeId: {
         ie_attribute->CreateRawAttribute(type, kHtCapString);
-        ie_attribute->SetRawAttributeValue(
-            type,
-            ByteString(reinterpret_cast<const char*>(payload), payload_bytes));
+        ie_attribute->SetRawAttributeValue(type, payload);
         break;
       }
       case kHtInfoAttributeId: {
         ie_attribute->CreateRawAttribute(type, kHtOperString);
-        ie_attribute->SetRawAttributeValue(
-            type,
-            ByteString(reinterpret_cast<const char*>(payload), payload_bytes));
+        ie_attribute->SetRawAttributeValue(type, payload);
         break;
       }
       case kVhtCapAttributeId: {
         ie_attribute->CreateRawAttribute(type, kVhtCapString);
-        ie_attribute->SetRawAttributeValue(
-            type,
-            ByteString(reinterpret_cast<const char*>(payload), payload_bytes));
+        ie_attribute->SetRawAttributeValue(type, payload);
         break;
       }
       case kVhtInfoAttributeId: {
         ie_attribute->CreateRawAttribute(type, kVhtOperString);
-        ie_attribute->SetRawAttributeValue(
-            type,
-            ByteString(reinterpret_cast<const char*>(payload), payload_bytes));
+        ie_attribute->SetRawAttributeValue(type, payload);
         break;
       }
       case kMeshIdAttributeId: {
@@ -189,8 +186,7 @@ bool Nl80211AttributeBss::ParseInformationElements(
           ie_attribute->SetStringAttributeValue(type, "");
         } else {
           ie_attribute->SetStringAttributeValue(
-              type, std::string(reinterpret_cast<const char*>(payload),
-                                payload_bytes));
+              type, net_base::byte_utils::ByteStringFromBytes(payload));
         }
         break;
       }
@@ -208,7 +204,6 @@ bool Nl80211AttributeBss::ParseInformationElements(
       default:
         break;
     }
-    sub_attribute += kHeaderBytes + payload_bytes;
   }
   attribute_list->SetNestedAttributeHasAValue(id);
   return true;
@@ -283,6 +278,76 @@ Nl80211AttributeWiphyBands::Nl80211AttributeWiphyBands()
       NestedData(kTypeU8, "NL80211_BAND_ATTR_HT_AMPDU_DENSITY", false)));
 
   nested_template_.insert(AttrDataPair(kArrayAttrEnumVal, bands));
+}
+
+const int Nl80211AttributeInterfaceCombinations::kName =
+    NL80211_ATTR_INTERFACE_COMBINATIONS;
+const char Nl80211AttributeInterfaceCombinations::kNameString[] =
+    "NL80211_ATTR_INTERFACE_COMBINATIONS";
+
+Nl80211AttributeInterfaceCombinations::Nl80211AttributeInterfaceCombinations()
+    : NetlinkNestedAttribute(kName, kNameString) {
+  // Interface types
+  NestedData types(kTypeNested, "NL80211_IFACE_LIMIT_TYPES", false);
+  types.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFTYPE_ADHOC,
+                   NestedData(kTypeFlag, "NL80211_IFTYPE_ADHOC", false)));
+  types.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFTYPE_STATION,
+                   NestedData(kTypeFlag, "NL80211_IFTYPE_STATION", false)));
+  types.deeper_nesting.insert(AttrDataPair(
+      NL80211_IFTYPE_AP, NestedData(kTypeFlag, "NL80211_IFTYPE_AP", false)));
+  types.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFTYPE_AP_VLAN,
+                   NestedData(kTypeFlag, "NL80211_IFTYPE_AP_VLAN", false)));
+  types.deeper_nesting.insert(AttrDataPair(
+      NL80211_IFTYPE_WDS, NestedData(kTypeFlag, "NL80211_IFTYPE_WDS", false)));
+  types.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFTYPE_MONITOR,
+                   NestedData(kTypeFlag, "NL80211_IFTYPE_MONITOR", false)));
+  types.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFTYPE_MESH_POINT,
+                   NestedData(kTypeFlag, "NL80211_IFTYPE_MESH_POINT", false)));
+  types.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFTYPE_P2P_CLIENT,
+                   NestedData(kTypeFlag, "NL80211_IFTYPE_P2P_CLIENT", false)));
+  types.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFTYPE_P2P_GO,
+                   NestedData(kTypeFlag, "NL80211_IFTYPE_P2P_GO", false)));
+  types.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFTYPE_P2P_DEVICE,
+                   NestedData(kTypeFlag, "NL80211_IFTYPE_P2P_DEVICE", false)));
+  types.deeper_nesting.insert(AttrDataPair(
+      NL80211_IFTYPE_OCB, NestedData(kTypeFlag, "NL80211_IFTYPE_OCB", false)));
+  types.deeper_nesting.insert(AttrDataPair(
+      NL80211_IFTYPE_NAN, NestedData(kTypeFlag, "NL80211_IFTYPE_NAN", false)));
+
+  // A "Limit" contains a set of interface types and a cap on the concurrent
+  // number of those interface types.
+  NestedData limit(kTypeNested, "Limit", true);
+  limit.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFACE_LIMIT_MAX,
+                   NestedData(kTypeU32, "NL80211_IFACE_LIMIT_MAX", false)));
+  limit.deeper_nesting.insert(AttrDataPair(NL80211_IFACE_LIMIT_TYPES, types));
+
+  // An array of "Limit" values.
+  NestedData limits(kTypeNested, "NL80211_IFACE_COMB_LIMITS", false);
+  limits.deeper_nesting.insert(AttrDataPair(kArrayAttrEnumVal, limit));
+
+  // A "Combination" represents a valid combination of interfaces, along with
+  // some data about how they may behave such as the maximum number of total
+  // interfaces.
+  NestedData comb(kTypeNested, "Combination", true);
+  comb.deeper_nesting.insert(AttrDataPair(NL80211_IFACE_COMB_LIMITS, limits));
+  comb.deeper_nesting.insert(
+      AttrDataPair(NL80211_IFACE_COMB_MAXNUM,
+                   NestedData(kTypeU32, "NL80211_IFACE_COMB_MAXNUM", false)));
+  comb.deeper_nesting.insert(AttrDataPair(
+      NL80211_IFACE_COMB_NUM_CHANNELS,
+      NestedData(kTypeU32, "NL80211_IFACE_COMB_NUM_CHANNELS", false)));
+
+  // The main body of this attribute is an array of "Combination" values.
+  nested_template_.insert(AttrDataPair(kArrayAttrEnumVal, comb));
 }
 
 const int Nl80211AttributeWowlanTriggers::kName = NL80211_ATTR_WOWLAN_TRIGGERS;
@@ -482,7 +547,7 @@ bool Nl80211AttributeMac::ToString(std::string* value) const {
     LOG(ERROR) << "Null |value| parameter";
     return false;
   }
-  *value = StringFromMacAddress(data_.GetConstData());
+  *value = StringFromMacAddress(data_.data());
   return true;
 }
 
@@ -556,17 +621,14 @@ const char Nl80211AttributeRegInitiator::kNameString[] =
 // The RegInitiator type can be interpreted as either a U8 or U32 depending
 // on context.  Override the default InitFromValue implementation to be
 // flexible to either encoding.
-bool Nl80211AttributeRegInitiator::InitFromValue(const ByteString& input) {
-  uint8_t u8_data;
-  if (input.GetLength() != sizeof(u8_data))
+bool Nl80211AttributeRegInitiator::InitFromValue(
+    base::span<const uint8_t> input) {
+  const auto u8_data = net_base::byte_utils::FromBytes<uint8_t>(input);
+  if (!u8_data) {
     return NetlinkU32Attribute::InitFromValue(input);
-
-  if (!input.CopyData(sizeof(u8_data), &u8_data)) {
-    LOG(ERROR) << "Invalid |input| parameter.";
-    return false;
   }
 
-  SetU32Value(static_cast<uint32_t>(u8_data));
+  SetU32Value(static_cast<uint32_t>(*u8_data));
   return NetlinkAttribute::InitFromValue(input);
 }
 
@@ -858,7 +920,24 @@ Nl80211AttributeSupportedIftypes::Nl80211AttributeSupportedIftypes()
     : NetlinkNestedAttribute(kName, kNameString) {
   nested_template_.insert(AttrDataPair(
       kArrayAttrEnumVal,
-      NestedData(kTypeFlag, "NL80211_SUPPORTED_IFTYPES_IFTYPE", true)));
+      NestedData(kTypeU32, "NL80211_SUPPORTED_IFTYPES_IFTYPE", true,
+                 base::BindRepeating(
+                     &Nl80211AttributeSupportedIftypes::ParseIfaceTypes))));
+}
+
+bool Nl80211AttributeSupportedIftypes::ParseIfaceTypes(
+    AttributeList* attribute_list,
+    size_t id,
+    const std::string& attribute_name,
+    base::span<const uint8_t> data) {
+  if (!attribute_list) {
+    LOG(ERROR) << "NULL |attribute_list| parameter";
+    return false;
+  }
+  attribute_list->CreateU32Attribute(id, attribute_name.c_str());
+  // nl80211 attribute saves the iface types in |id| rather than payload.
+  return attribute_list->InitAttributeFromValue(
+      id, net_base::byte_utils::ToBytes<uint32_t>(id));
 }
 
 const int Nl80211AttributeStatusCode::kName = NL80211_ATTR_STATUS_CODE;
@@ -920,6 +999,11 @@ const char Nl80211AttributeWiphyFragThreshold::kNameString[] =
 
 const int Nl80211AttributeWiphyFreq::kName = NL80211_ATTR_WIPHY_FREQ;
 const char Nl80211AttributeWiphyFreq::kNameString[] = "NL80211_ATTR_WIPHY_FREQ";
+
+const int Nl80211AttributeWiphySelfManagedReg::kName =
+    NL80211_ATTR_WIPHY_SELF_MANAGED_REG;
+const char Nl80211AttributeWiphySelfManagedReg::kNameString[] =
+    "NL80211_ATTR_WIPHY_SELF_MANAGED_REG";
 
 const int Nl80211AttributeChannelType::kName = NL80211_ATTR_WIPHY_CHANNEL_TYPE;
 const char Nl80211AttributeChannelType::kNameString[] =

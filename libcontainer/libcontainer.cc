@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,13 +28,12 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <libminijail.h>
@@ -587,7 +586,7 @@ bool DoContainerMounts(struct container* c,
   UnmountExternalMounts(c);
 
   // This will run in all the error cases.
-  base::ScopedClosureRunner teardown(base::Bind(
+  base::ScopedClosureRunner teardown(base::BindOnce(
       base::IgnoreResult(&UnmountExternalMounts), base::Unretained(c)));
 
   for (const auto& mount : config->mounts) {
@@ -596,7 +595,7 @@ bool DoContainerMounts(struct container* c,
   }
 
   // The mounts have been done successfully, no need to tear them down anymore.
-  ignore_result(teardown.Release());
+  teardown.ReplaceClosure(base::DoNothing());
 
   return true;
 }
@@ -1298,8 +1297,7 @@ void container_destroy(struct container* c) {
   delete c;
 }
 
-int container_start(struct container* c,
-                    const struct container_config* config) {
+int container_start(struct container* c, struct container_config* config) {
   if (!c) {
     errno = EINVAL;
     return -1;
@@ -1315,7 +1313,7 @@ int container_start(struct container* c,
 
   // This will run in all the error cases.
   base::ScopedClosureRunner teardown(
-      base::Bind(&CancelContainerStart, base::Unretained(c)));
+      base::BindOnce(&CancelContainerStart, base::Unretained(c)));
 
   if (!config->config_root.empty())
     c->config_root = config->config_root;
@@ -1360,8 +1358,8 @@ int container_start(struct container* c,
                          std::vector<libcontainer::HookCallback>()));
       it.first->second.emplace_back(
           libcontainer::AdaptCallbackToRunInNamespaces(
-              base::Bind(&CreateDeviceNodes, base::Unretained(c),
-                         base::Unretained(config)),
+              base::BindOnce(&CreateDeviceNodes, base::Unretained(c),
+                             base::Unretained(config)),
               {CLONE_NEWNS}));
     }
     if (!DeviceSetup(c, config))
@@ -1492,11 +1490,12 @@ int container_start(struct container* c,
 
   // Now that all pre-requisite hooks are installed, copy the ones in the
   // container_config object in the correct order.
-  for (const auto& config_hook : config->hooks) {
+  for (auto& config_hook : config->hooks) {
     auto it = hook_callbacks.insert(std::make_pair(
         config_hook.first, std::vector<libcontainer::HookCallback>()));
-    it.first->second.insert(it.first->second.end(), config_hook.second.begin(),
-                            config_hook.second.end());
+    it.first->second.insert(it.first->second.end(),
+                            std::make_move_iterator(config_hook.second.begin()),
+                            std::make_move_iterator(config_hook.second.end()));
   }
 
   c->hook_states.clear();
@@ -1510,7 +1509,7 @@ int container_start(struct container* c,
     if (it == hook_callbacks.end())
       continue;
     c->hook_states.emplace_back(
-        std::make_pair(libcontainer::HookState(), it->second));
+        std::make_pair(libcontainer::HookState(), std::move(it->second)));
     if (!c->hook_states.back().first.InstallHook(c->jail.get(), event))
       return -1;
   }
@@ -1553,12 +1552,13 @@ int container_start(struct container* c,
 
   // |hook_states| is already sorted in the correct order.
   for (auto& hook_state : c->hook_states) {
-    if (!hook_state.first.WaitForHookAndRun(hook_state.second, c->init_pid))
+    if (!hook_state.first.WaitForHookAndRun(std::move(hook_state.second),
+                                            c->init_pid))
       return -1;
   }
 
   // The container has started successfully, no need to tear it down anymore.
-  ignore_result(teardown.Release());
+  teardown.ReplaceClosure(base::DoNothing());
   return 0;
 }
 

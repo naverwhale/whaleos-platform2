@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,11 @@
 #include <memory>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <dbus/exported_object.h>
 
 #include "power_manager/common/power_constants.h"
+#include "power_manager/powerd/system/thermal/device_thermal_state.h"
 #include "power_manager/powerd/system/thermal/thermal_device_observer.h"
 
 namespace dbus {
@@ -66,9 +66,9 @@ class ThermalEventHandler : public system::ThermalDeviceObserver {
   std::unique_ptr<Clock> clock_;
 
   // Last DeviceThermalState sent to Chrome.
-  system::DeviceThermalState last_state_;
+  system::DeviceThermalState last_state_ = system::DeviceThermalState::kUnknown;
 
-  PowerSource power_source_;
+  PowerSource power_source_ = PowerSource::AC;
 
   base::WeakPtrFactory<ThermalEventHandler> weak_ptr_factory_;
 };

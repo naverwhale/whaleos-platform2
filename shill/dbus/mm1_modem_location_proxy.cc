@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dbus/mm1_modem_location_proxy.h"
 
 #include <memory>
+#include <utility>
 
 #include "shill/cellular/cellular_error.h"
 #include "shill/logging.h"
@@ -33,55 +34,62 @@ ModemLocationProxy::~ModemLocationProxy() = default;
 void ModemLocationProxy::Setup(uint32_t sources,
                                bool signal_location,
                                Error* error,
-                               const ResultCallback& callback,
+                               ResultCallback callback,
                                int timeout) {
   SLOG(&proxy_->GetObjectPath(), 2)
       << __func__ << ": " << sources << ", " << signal_location;
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
   proxy_->SetupAsync(sources, signal_location,
-                     base::Bind(&ModemLocationProxy::OnSetupSuccess,
-                                weak_factory_.GetWeakPtr(), callback),
-                     base::Bind(&ModemLocationProxy::OnSetupFailure,
-                                weak_factory_.GetWeakPtr(), callback),
+                     base::BindOnce(&ModemLocationProxy::OnSetupSuccess,
+                                    weak_factory_.GetWeakPtr(),
+                                    std::move(split_callback.first)),
+                     base::BindOnce(&ModemLocationProxy::OnSetupFailure,
+                                    weak_factory_.GetWeakPtr(),
+                                    std::move(split_callback.second)),
                      timeout);
 }
 
 void ModemLocationProxy::GetLocation(Error* error,
-                                     const BrilloAnyCallback& callback,
+                                     BrilloAnyCallback callback,
                                      int timeout) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  proxy_->GetLocationAsync(base::Bind(&ModemLocationProxy::OnGetLocationSuccess,
-                                      weak_factory_.GetWeakPtr(), callback),
-                           base::Bind(&ModemLocationProxy::OnGetLocationFailure,
-                                      weak_factory_.GetWeakPtr(), callback),
-                           timeout);
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
+  proxy_->GetLocationAsync(
+      base::BindOnce(&ModemLocationProxy::OnGetLocationSuccess,
+                     weak_factory_.GetWeakPtr(),
+                     std::move(split_callback.first)),
+      base::BindOnce(&ModemLocationProxy::OnGetLocationFailure,
+                     weak_factory_.GetWeakPtr(),
+                     std::move(split_callback.second)),
+      timeout);
 }
 
-void ModemLocationProxy::OnSetupSuccess(const ResultCallback& callback) {
+void ModemLocationProxy::OnSetupSuccess(ResultCallback callback) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  callback.Run(Error());
+  std::move(callback).Run(Error());
 }
 
-void ModemLocationProxy::OnSetupFailure(const ResultCallback& callback,
+void ModemLocationProxy::OnSetupFailure(ResultCallback callback,
                                         brillo::Error* dbus_error) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   Error error;
   CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(error);
+  std::move(callback).Run(error);
 }
 
 void ModemLocationProxy::OnGetLocationSuccess(
-    const BrilloAnyCallback& callback,
+    BrilloAnyCallback callback,
     const std::map<uint32_t, brillo::Any>& results) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  callback.Run(results, Error());
+  std::move(callback).Run(results, Error());
 }
 
-void ModemLocationProxy::OnGetLocationFailure(const BrilloAnyCallback& callback,
+void ModemLocationProxy::OnGetLocationFailure(BrilloAnyCallback callback,
                                               brillo::Error* dbus_error) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   Error error;
   CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(std::map<uint32_t, brillo::Any>(), error);
+  std::move(callback).Run(std::map<uint32_t, brillo::Any>(), error);
 }
 
 }  // namespace mm1

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,11 +25,9 @@ enum class FrameEvent {
   PREVIEW_RESULT,
   STILL_CAPTURE_RESULT,
   VIDEO_RECORD_RESULT,
-  PORTRAIT_MODE_STARTED,
-  PORTRAIT_MODE_ENDED,
 };
 
-class Camera3PerfLog final {
+class Camera3PerfLog {
  public:
   Camera3PerfLog(const Camera3PerfLog&) = delete;
   Camera3PerfLog& operator=(const Camera3PerfLog&) = delete;
@@ -49,7 +47,7 @@ class Camera3PerfLog final {
                         base::TimeTicks time);
 
  private:
-  Camera3PerfLog() {}
+  Camera3PerfLog() = default;
 
   ~Camera3PerfLog();
 

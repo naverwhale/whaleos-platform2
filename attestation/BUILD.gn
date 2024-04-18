@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,6 +14,10 @@ group("all") {
   deps = [
     ":attestation_client",
     ":attestationd",
+    ":install_init",
+    ":install_minijail_conf",
+    ":install_policy",
+    ":install_systemd",
     ":libattestation",
     ":pca_agent_client",
     ":pca_agentd",
@@ -23,11 +27,9 @@ group("all") {
   }
 }
 
-config("local_proto_include") {
-  # This config is used when any build target used the local protobufs.
-  # The local protobuf used some other protos in system_api, so we'll need
-  # to fix the include path so that it builds correctly.
-  include_dirs = [ "${sysroot}/usr/include/attestation/proto_bindings/" ]
+config("local_print_proto_include") {
+  # This config is used when any build target used the print_proto.
+  include_dirs = [ "${target_gen_dir}/.." ]
 }
 
 pkg_config("target_defaults") {
@@ -44,35 +46,50 @@ pkg_config("target_defaults") {
   defines = [
     "USE_TPM1=${use.tpm}",
     "USE_TPM2=${use.tpm2}",
+    "USE_TPM2_SIMULATOR=${use.tpm2_simulator}",
     "USE_TPM_DYNAMIC=${use.tpm_dynamic}",
     "USE_GENERIC_TPM2=${use.generic_tpm2}",
+    "USE_CR50_ONBOARD=${use.cr50_onboard}",
+    "USE_TI50_ONBOARD=${use.ti50_onboard}",
+  ]
+  cflags = [
+    "-Wconsumed",
+    "-Wno-error=deprecated-declarations",
   ]
 }
 
-# A library for just the protobufs.
-proto_library("proto_library_proto") {
-  proto_in_dir = "common"
-  proto_out_dir = "include/attestation/common"
-  proto_lib_dirs = [ "${sysroot}/usr/include/chromeos/dbus/attestation/" ]
-  sources = [ "${proto_in_dir}/database.proto" ]
-  standalone = true
-
-  # Use -fPIC so this code can be linked into a shared library.
-  use_pic = true
-  configs = [ ":local_proto_include" ]
+action("print_proto_library") {
+  dbus_proto_path = "${sysroot}/usr/include/chromeos/dbus/attestation"
+  script = "../libhwsec-foundation/utility/proto_print.py"
+  inputs = [
+    "${dbus_proto_path}/attestation_ca.proto",
+    "${dbus_proto_path}/interface.proto",
+    "${dbus_proto_path}/keystore.proto",
+  ]
+  outputs = [
+    "${target_gen_dir}/common/print_attestation_ca_proto.cc",
+    "${target_gen_dir}/common/print_interface_proto.cc",
+    "${target_gen_dir}/common/print_keystore_proto.cc",
+  ]
+  args = [
+           "--subdir",
+           "common",
+           "--proto-include",
+           "attestation/proto_bindings",
+           "--output-dir",
+           "${target_gen_dir}/common",
+         ] + inputs
 }
 
 source_set("proto_library") {
+  sources = get_target_outputs(":print_proto_library")
   configs += [
     "//common-mk:nouse_thin_archive",
     "//common-mk:pic",
+    ":local_print_proto_include",
     ":target_defaults",
   ]
-  sources = [
-    "common/print_attestation_ca_proto.cc",
-    "common/print_interface_proto.cc",
-    "common/print_keystore_proto.cc",
-  ]
+  public_deps = [ ":print_proto_library" ]
 }
 
 # A library for common code.
@@ -82,6 +99,7 @@ pkg_config("common_library_config") {
     "vboot_host",
   ]
   libs = [
+    "hwsec",
     "hwsec-foundation",
     "tpm_manager",
   ]
@@ -98,6 +116,7 @@ config("common_library_without_tpm2_config") {
 source_set("common_library") {
   sources = [
     "common/crypto_utility_impl.cc",
+    "common/nvram_quoter_factory.cc",
     "common/tpm_utility_common.cc",
     "common/tpm_utility_factory.cc",
   ]
@@ -105,12 +124,8 @@ source_set("common_library") {
   configs += [
     "//common-mk:nouse_thin_archive",
     ":target_defaults",
-    ":local_proto_include",
   ]
-  deps = [
-    ":proto_library",
-    ":proto_library_proto",
-  ]
+  deps = [ ":proto_library" ]
   if (use.tpm2) {
     sources += [ "common/tpm_utility_v2.cc" ]
     all_dependent_configs += [ ":common_library_with_tpm2_config" ]
@@ -119,29 +134,32 @@ source_set("common_library") {
     sources += [ "common/tpm_utility_v1.cc" ]
     all_dependent_configs += [ ":common_library_without_tpm2_config" ]
   }
+  if (use.cr50_onboard || use.ti50_onboard) {
+    sources += [ "common/gsc_nvram_quoter.cc" ]
+  } else {
+    sources += [ "common/null_nvram_quoter.cc" ]
+  }
 }
 
 # A shared library for clients.
 shared_library("libattestation") {
+  install_path = "lib"
   configs += [
     "//common-mk:nouse_thin_archive",
-    ":local_proto_include",
     ":target_defaults",
   ]
   libs = [ "system_api" ]
-  deps = [
-    ":proto_library",
-    ":proto_library_proto",
-  ]
+  deps = [ ":proto_library" ]
 }
 
 # A client command line utility.
 executable("attestation_client") {
   sources = [ "client/main.cc" ]
   configs += [
+    ":local_print_proto_include",
     ":target_defaults",
-    ":local_proto_include",
   ]
+  install_path = "bin"
 
   # NOSORT
   pkg_deps = [
@@ -154,7 +172,6 @@ executable("attestation_client") {
   deps = [
     ":common_library",
     ":proto_library",
-    ":proto_library_proto",
   ]
 }
 
@@ -179,14 +196,10 @@ source_set("server_library") {
     "server/pkcs11_key_store.cc",
   ]
   all_dependent_configs = [ ":server_library_config" ]
-  configs += [
-    ":target_defaults",
-    ":local_proto_include",
-  ]
+  configs += [ ":target_defaults" ]
   deps = [
     ":pca-agent-proxies",
     ":proto_library",
-    ":proto_library_proto",
   ]
 }
 
@@ -202,10 +215,13 @@ executable("attestationd") {
   sources = [ "server/main.cc" ]
   configs += [
     ":attestationd_config",
-    ":local_proto_include",
     ":target_defaults",
   ]
-  libs = [ "policy" ]
+  install_path = "sbin"
+  libs = [
+    "hwsec-profiling",
+    "policy",
+  ]
 
   # NOSORT
   pkg_deps = [
@@ -218,7 +234,6 @@ executable("attestationd") {
   deps = [
     ":common_library",
     ":proto_library",
-    ":proto_library_proto",
     ":server_library",
   ]
 }
@@ -253,6 +268,7 @@ executable("pca_agentd") {
     ":attestationd_config",
     ":target_defaults",
   ]
+  install_path = "sbin"
 
   # NOSORT
   pkg_deps = [
@@ -262,6 +278,8 @@ executable("pca_agentd") {
     "system_api",
     "protobuf",
   ]
+  libs = [ "hwsec-profiling" ]
+
   deps = [
     ":pca-agent-adaptors",
     ":pca_agent_server_library",
@@ -270,7 +288,11 @@ executable("pca_agentd") {
 
 executable("pca_agent_client") {
   sources = [ "pca_agent/client/main.cc" ]
-  configs += [ ":target_defaults" ]
+  configs += [
+    ":local_print_proto_include",
+    ":target_defaults",
+  ]
+  install_path = "bin"
 
   # NOSORT
   pkg_deps = [
@@ -283,6 +305,42 @@ executable("pca_agent_client") {
   deps = [
     ":pca-agent-proxies",
     ":proto_library",
+  ]
+}
+
+install_config("install_systemd") {
+  sources = [
+    "pca_agent/server/org.chromium.PcaAgent.conf",
+    "server/org.chromium.Attestation.conf",
+  ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_init") {
+  sources = [
+    "pca_agent/server/pca_agentd.conf",
+    "server/attestationd.conf",
+  ]
+  install_path = "upstart"
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "pca_agent/server/minijail/pca_agentd.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_policy") {
+  _arch = getenv("ARCH")
+  sources = [
+    "pca_agent/server/pca_agentd-seccomp-${_arch}.policy",
+    "server/attestationd-seccomp-${_arch}.policy",
+  ]
+  install_path = "seccomp_policy"
+
+  # NOSORT
+  outputs = [
+    "pca_agentd-seccomp.policy",
+    "attestationd-seccomp.policy",
   ]
 }
 
@@ -320,6 +378,10 @@ if (use.test) {
       libs += [ "trunks_test" ]
     }
 
+    if (use.cr50_onboard || use.ti50_onboard) {
+      sources += [ "common/gsc_nvram_quoter_test.cc" ]
+    }
+
     if (use.tpm || use.tpm2) {
       sources += [
         "common/tpm_utility_common_test.cc",
@@ -330,9 +392,9 @@ if (use.test) {
     configs += [
       "//common-mk:test",
       ":attestation_testrunner_config",
-      ":local_proto_include",
       ":target_defaults",
     ]
+    run_test = true
 
     # NOSORT
     pkg_deps = [
@@ -346,7 +408,6 @@ if (use.test) {
       ":common_library",
       ":pca_agent_server_library",
       ":proto_library",
-      ":proto_library_proto",
       ":server_library",
     ]
   }

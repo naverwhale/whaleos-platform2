@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 
 namespace u2f {
 
@@ -30,7 +30,8 @@ class HidInterface {
 
   // Callback invoked when the HID device client sends an output report.
   // The raw report prefixed by the report ID is passed in |report|.
-  using OutputReportCallback = base::Callback<void(const std::string& report)>;
+  using OutputReportCallback =
+      base::RepeatingCallback<void(const std::string& report)>;
   virtual void SetOutputReportHandler(
       const OutputReportCallback& on_output_report) = 0;
 };

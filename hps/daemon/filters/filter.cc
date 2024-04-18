@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,14 @@
 
 namespace hps {
 
-Filter::Filter(bool initial_state) : current_result_(initial_state) {}
+Filter::Filter(HpsResult initial_state) : current_result_(initial_state) {}
 
-bool Filter::ProcessResult(int result) {
-  current_result_ = ProcessResultImpl(result);
+HpsResult Filter::ProcessResult(int result, bool valid) {
+  current_result_ = ProcessResultImpl(result, valid);
   return current_result_;
 }
 
-bool Filter::GetCurrentResult(void) const {
+HpsResult Filter::GetCurrentResult(void) const {
   return current_result_;
 }
 

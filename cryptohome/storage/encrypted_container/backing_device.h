@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,12 @@
 #define CRYPTOHOME_STORAGE_ENCRYPTED_CONTAINER_BACKING_DEVICE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/files/file_path.h>
 #include <base/values.h>
+#include <brillo/blkdev_utils/lvm.h>
 
 #include "cryptohome/platform.h"
 
@@ -20,6 +22,7 @@ namespace cryptohome {
 enum class BackingDeviceType {
   kUnknown = 0,
   kLoopbackDevice,
+  kRamdiskDevice,
   kLogicalVolumeBackingDevice,
 };
 
@@ -30,10 +33,14 @@ struct BackingDeviceConfig {
   int64_t size;
   struct {
     base::FilePath backing_file_path;
+    bool fixed_backing;
   } loopback;
   struct {
-    std::string thinpool_name;
-    base::FilePath physical_volume;
+    std::string backing_file_name;
+  } ramdisk;
+  struct {
+    std::shared_ptr<brillo::VolumeGroup> vg;
+    std::shared_ptr<brillo::Thinpool> thinpool;
   } logical_volume;
 };
 
@@ -49,7 +56,7 @@ class BackingDevice {
   virtual bool Teardown() = 0;
   virtual bool Exists() = 0;
   virtual BackingDeviceType GetType() = 0;
-  virtual base::Optional<base::FilePath> GetPath() = 0;
+  virtual std::optional<base::FilePath> GetPath() = 0;
 };
 
 }  // namespace cryptohome

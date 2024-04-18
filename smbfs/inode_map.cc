@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,15 +15,17 @@ namespace smbfs {
 
 struct InodeMap::Entry {
   Entry(ino_t inode, const base::FilePath& path) : inode(inode), path(path) {}
+
+  Entry() = delete;
+  Entry(const Entry&) = delete;
+  Entry& operator=(const Entry&) = delete;
+
   ~Entry() = default;
 
   uint64_t refcount = 0;
 
   const ino_t inode;
   base::FilePath path;
-
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(Entry);
 };
 
 InodeMap::InodeMap(ino_t root_inode)

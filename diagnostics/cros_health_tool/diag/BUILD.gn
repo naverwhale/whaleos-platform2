@@ -1,27 +1,20 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
 
-# Library that provides helpers for the diag tool.
-pkg_config("libdiag_pkg_deps") {
-  pkg_deps = [
-    "libbrillo",
-    "libchrome",
-  ]
-}
-
 source_set("libdiag") {
-  configs += [ ":libdiag_pkg_deps" ]
-  deps = [
-    "//diagnostics/common:libcommon",
-    "//diagnostics/cros_healthd/routines:libdiag_routine",
-    "//diagnostics/cros_healthd_mojo_adapter:libcros_healthd_mojo_adapter",
-    "//diagnostics/mojo:cros_healthd_mojo_bindings",
-  ]
   sources = [
     "diag.cc",
     "diag_actions.cc",
+    "repliers/led_lit_up_routine_replier.cc",
+    "routine_v2_client.cc",
+  ]
+  configs += [ "//diagnostics/cros_health_tool:cros_health_tool_pkg_deps" ]
+  deps = [
+    "//diagnostics/base",
+    "//diagnostics/mojom:libmojom_utils",
+    "//diagnostics/mojom/public:libcros_healthd_mojo_bindings",
   ]
 }

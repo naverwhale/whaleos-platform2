@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,9 @@
 
 #include <base/observer_list.h>
 #include <base/observer_list_types.h>
-#include <base/macros.h>
 
 namespace diagnostics {
+namespace wilco {
 
 // BluetoothEventService is used for monitoring objects representing Bluetooth
 // Adapters and Devices.
@@ -55,6 +55,7 @@ class BluetoothEventService {
   base::ObserverList<Observer> observers_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_TELEMETRY_BLUETOOTH_EVENT_SERVICE_H_

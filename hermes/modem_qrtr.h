@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -34,20 +35,22 @@ class ModemQrtr : public Modem<QmiCmdInterface> {
   static std::unique_ptr<ModemQrtr> Create(
       std::unique_ptr<SocketInterface> socket,
       Logger* logger,
-      Executor* executor);
+      Executor* executor,
+      std::unique_ptr<ModemManagerProxy> modem_manager_proxy);
   virtual ~ModemQrtr();
 
   // EuiccInterface overrides
   void Initialize(EuiccManagerInterface* euicc_manager,
                   ResultCallback cb) override;
 
+  void StoreAndSetActiveSlot(uint32_t physical_slot, ResultCallback cb);
   // ModemControlInterface overrides
-  void StoreAndSetActiveSlot(uint32_t physical_slot,
-                             ResultCallback cb) override;
   void RestoreActiveSlot(ResultCallback cb) override;
-  void StartProfileOp(uint32_t physical_slot, ResultCallback cb) override;
-  void FinishProfileOp(ResultCallback cb) override;
+  void ProcessEuiccEvent(EuiccEvent event, ResultCallback cb) override;
 
+  void OpenConnection(
+      const std::vector<uint8_t>& aid,
+      base::OnceCallback<void(std::vector<uint8_t>)> cb) override;
 
  private:
   struct SwitchSlotTxInfo : public TxInfo {
@@ -58,20 +61,17 @@ class ModemQrtr : public Modem<QmiCmdInterface> {
     const uint8_t logical_slot_;
   };
 
-  // Delay between SwitchSlot and the next QMI message. Allows the modem to
-  // power on the new slot, and for the eUICC to boot. If this delay is
-  // insufficient, we retry after kInitRetryDelay
-  static constexpr auto kSwitchSlotDelay = base::TimeDelta::FromSeconds(3);
   ModemQrtr(std::unique_ptr<SocketInterface> socket,
             Logger* logger,
-            Executor* executor);
+            Executor* executor,
+            std::unique_ptr<ModemManagerProxy> modem_manager_proxy);
   void InitializeUim();
-  void RetryInitialization(ResultCallback cb);
   void Shutdown() override;
 
   // Helper methods to create TxElements and add them to the queue.
   void SendReset(ResultCallback cb);
-  void SendOpenLogicalChannel(base::OnceCallback<void(int)> cb);
+  void SendOpenLogicalChannel(const std::vector<uint8_t>& aid,
+                              base::OnceCallback<void(int)> cb);
 
   // Top-level method to transmit an element from the tx queue. Dispatches to
   // the proper Transmit*CmdFromQueue method based on the service being
@@ -133,7 +133,9 @@ class ModemQrtr : public Modem<QmiCmdInterface> {
     DisableIntermediateBytes = 1
   };
   void SetProcedureBytes(ProcedureBytesMode procedure_bytes_mode);
-  void AcquireChannel(base::OnceCallback<void(int)> cb);
+  void AcquireChannelToIsdr(base::OnceCallback<void(int)> cb);
+  void AcquireChannel(const std::vector<uint8_t>& aid,
+                      base::OnceCallback<void(int)> cb);
 
   friend class ModemQrtrTest;
 
@@ -196,7 +198,7 @@ class ModemQrtr : public Modem<QmiCmdInterface> {
   // constructor, hardware specific.
   uint8_t logical_slot_;
   // Store the previous active slot before a switch slot
-  base::Optional<uint32_t> stored_active_slot_;
+  std::optional<uint32_t> stored_active_slot_;
 
   // Ask SendApdu commands to send final result and status words only.
   // If set, intermediate procedure bytes are not sent by the Euicc.
@@ -228,7 +230,7 @@ class ModemQrtr : public Modem<QmiCmdInterface> {
   std::vector<uint8_t> buffer_;
 
   std::map<std::pair<QmiCmdInterface::Service, uint16_t>,
-           base::Callback<int(const qrtr_packet&)>>
+           base::RepeatingCallback<int(const qrtr_packet&)>>
       qmi_rx_callbacks_;
 
   base::WeakPtrFactory<ModemQrtr> weak_factory_;

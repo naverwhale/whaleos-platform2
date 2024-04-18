@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <gmock/gmock.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -22,25 +23,26 @@ class MockBiodStorage : public BiodStorageInterface {
   MockBiodStorage() = default;
   ~MockBiodStorage() override = default;
 
-  MOCK_METHOD(void,
-              SetRootPathForTesting,
-              (const base::FilePath& root_path),
-              (override));
   MOCK_METHOD(base::FilePath,
               GetRecordFilename,
-              (const BiometricsManagerRecord& record),
+              (const BiodStorageInterface::RecordMetadata& record_metadata),
               (override));
   MOCK_METHOD(bool,
               WriteRecord,
-              (const BiometricsManagerRecord& record, base::Value data),
+              (const BiodStorageInterface::RecordMetadata& record_metadata,
+               base::Value data),
               (override));
-  MOCK_METHOD(ReadRecordResult,
+  MOCK_METHOD(std::vector<BiodStorageInterface::Record>,
               ReadRecords,
               (const std::unordered_set<std::string>& user_ids),
               (override));
-  MOCK_METHOD(ReadRecordResult,
+  MOCK_METHOD(std::vector<BiodStorageInterface::Record>,
               ReadRecordsForSingleUser,
               (const std::string& user_id),
+              (override));
+  MOCK_METHOD(std::optional<Record>,
+              ReadSingleRecord,
+              (const std::string& user_id, const std::string& record_id),
               (override));
   MOCK_METHOD(bool,
               DeleteRecord,

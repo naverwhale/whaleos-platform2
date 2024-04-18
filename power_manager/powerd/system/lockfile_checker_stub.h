@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 
 #include <base/files/file_path.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // LockfileCheckerStub is a stub implementation of LockfileCheckerInterface for
 // use by tests.
@@ -36,7 +35,6 @@ class LockfileCheckerStub : public LockfileCheckerInterface {
   std::vector<base::FilePath> files_to_return_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_LOCKFILE_CHECKER_STUB_H_

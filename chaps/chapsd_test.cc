@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,7 +25,8 @@ using std::vector;
 namespace chaps {
 
 static chaps::ChapsInterface* CreateChapsInstance() {
-  auto proxy = ChapsProxyImpl::Create(false /* shadow_at_exit */);
+  auto proxy = ChapsProxyImpl::Create(/*shadow_at_exit=*/false,
+                                      chaps::ThreadingMode::kCurrentThread);
   if (!proxy)
     return nullptr;
   return proxy.release();

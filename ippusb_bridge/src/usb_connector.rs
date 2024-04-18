@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::vec::Vec;
 
+use libchromeos::deprecated::{EventFd, PollContext};
+use log::{debug, error, info};
 use rusb::{Direction, GlobalContext, Registration, TransferType, UsbContext};
-use sync::{Condvar, Mutex};
-use sys_util::{debug, error, info, EventFd, PollContext};
+use std::sync::{Condvar, Mutex};
 
 const USB_TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
 const USB_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -22,7 +23,8 @@ const USB_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 pub enum Error {
     ClaimInterface(u8, rusb::Error),
     ReleaseInterface(u8, rusb::Error),
-    DetachDrivers(rusb::Error),
+    DetachDrivers(u8, rusb::Error),
+    AttachDrivers(u8, rusb::Error),
     DeviceList(rusb::Error),
     OpenDevice(rusb::Error),
     CleanupThread(io::Error),
@@ -34,7 +36,7 @@ pub enum Error {
     NoDevice,
     NoFreeInterface,
     NotIppUsb,
-    Poll(sys_util::Error),
+    Poll(nix::Error),
 }
 
 impl std::error::Error for Error {}
@@ -45,7 +47,16 @@ impl fmt::Display for Error {
         match self {
             ClaimInterface(i, err) => write!(f, "Failed to claim interface {}: {}", i, err),
             ReleaseInterface(i, err) => write!(f, "Failed to release interface {}: {}", i, err),
-            DetachDrivers(err) => write!(f, "Failed to detach kernel drivers: {}", err),
+            DetachDrivers(i, err) => write!(
+                f,
+                "Failed to detach kernel driver for interface {}: {}",
+                i, err
+            ),
+            AttachDrivers(i, err) => write!(
+                f,
+                "Failed to attach kernel driver for interface {}, {}",
+                i, err
+            ),
             DeviceList(err) => write!(f, "Failed to read device list: {}", err),
             OpenDevice(err) => write!(f, "Failed to open device: {}", err),
             CleanupThread(err) => write!(f, "Failed to start cleanup thread: {}", err),
@@ -72,6 +83,67 @@ fn is_ippusb_interface(descriptor: &rusb::InterfaceDescriptor) -> bool {
     descriptor.class_code() == 0x07
         && descriptor.sub_class_code() == 0x01
         && descriptor.protocol_code() == 0x04
+}
+
+fn interface_contains_ippusb(interface: &rusb::Interface) -> bool {
+    for descriptor in interface.descriptors() {
+        if is_ippusb_interface(&descriptor) {
+            return true;
+        }
+    }
+    false
+}
+
+fn set_device_config(handle: &mut rusb::DeviceHandle<GlobalContext>, new_config: u8) -> Result<()> {
+    let cur_config = handle
+        .device()
+        .active_config_descriptor()
+        .map_err(Error::ReadConfigDescriptor)?;
+
+    // While detaching any outstanding kernel drivers for the current config, keep
+    // track of non-printer drivers so we can restore them after setting the config.
+    let mut restore_interfaces = Vec::new();
+    for interface in cur_config.interfaces() {
+        if !interface_contains_ippusb(&interface) {
+            match handle.kernel_driver_active(interface.number()) {
+                Ok(false) => continue, // No active driver.
+                Err(e) => return Err(Error::DetachDrivers(interface.number(), e)),
+                _ => {}
+            }
+
+            info!(
+                "Temporarily detaching kernel driver for non-printer interface {}",
+                interface.number()
+            );
+            restore_interfaces.push(interface.number());
+        }
+
+        match handle.detach_kernel_driver(interface.number()) {
+            Err(e) if e != rusb::Error::NotFound => {
+                return Err(Error::DetachDrivers(interface.number(), e))
+            }
+            _ => {}
+        }
+    }
+
+    info!(
+        "Switching from configuration {} to {}",
+        cur_config.number(),
+        new_config
+    );
+    handle
+        .set_active_configuration(new_config)
+        .map_err(Error::SetActiveConfig)?;
+
+    // Try to put back the previously detached drivers.  We don't return an error if one
+    // of these fails because it won't prevent us from claiming the IPP-USB interfaces later.
+    for inum in restore_interfaces {
+        handle
+            .attach_kernel_driver(inum)
+            .unwrap_or_else(|e| error!("Failed to reattach driver for interface {}: {}", inum, e));
+    }
+
+    Ok(())
 }
 
 /// The information for an interface descriptor that supports IPPUSB.
@@ -222,16 +294,9 @@ impl InterfaceManagerState {
             .active_config_descriptor()
             .map_err(Error::ReadConfigDescriptor)?;
 
-        for interface in config.interfaces() {
-            match self.handle.detach_kernel_driver(interface.number()) {
-                Err(e) if e != rusb::Error::NotFound => return Err(Error::DetachDrivers(e)),
-                _ => {}
-            }
+        if config.number() != self.usb_config {
+            set_device_config(&mut self.handle, self.usb_config)?;
         }
-
-        self.handle
-            .set_active_configuration(self.usb_config)
-            .map_err(Error::SetActiveConfig)?;
 
         for interface in &mut self.interfaces {
             if let Err(e) = interface.claim() {
@@ -312,7 +377,7 @@ impl InterfaceManager {
             .name("interface cleanup".into())
             .spawn(move || {
                 debug!("Cleanup thread starting");
-                let mut state = manager.state.lock();
+                let mut state = manager.state.lock().unwrap();
 
                 // We wait in two phases:
                 // 1. As long as no cleanup is pending or there is an active interface, we need to
@@ -326,7 +391,8 @@ impl InterfaceManager {
                     // returned.
                     state = manager
                         .interface_available
-                        .wait_while(state, |t| t.active > 0 || !t.pending_cleanup);
+                        .wait_while(state, |t| t.active > 0 || !t.pending_cleanup)
+                        .unwrap();
 
                     // Phase 2: Wait for the cleanup time to arrive.
                     // 1. If an interface is claimed and returned during the timeout, we will
@@ -339,10 +405,10 @@ impl InterfaceManager {
                     //    exit the while loop and release all the interfaces.
                     while state.next_cleanup > Instant::now() {
                         let wait = state.next_cleanup - Instant::now();
-                        let result =
-                            manager
-                                .interface_available
-                                .wait_timeout_while(state, wait, |t| t.active == 0);
+                        let result = manager
+                            .interface_available
+                            .wait_timeout_while(state, wait, |t| t.active == 0)
+                            .unwrap();
                         state = result.0; // Throw away the timed out part of the result.
                         if state.active > 0 {
                             continue 'outer;
@@ -389,7 +455,7 @@ impl InterfaceManager {
     /// If interfaces are currently not claimed, will first set the active device
     /// configuration and re-claim USB interfaces.
     fn request_interface(&mut self) -> Result<ClaimedInterface> {
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
 
         if state.active == 0 && !state.pending_cleanup {
             debug!("Claiming all interfaces");
@@ -407,7 +473,7 @@ impl InterfaceManager {
                 return Ok(interface);
             }
 
-            state = self.interface_available.wait(state);
+            state = self.interface_available.wait(state).unwrap();
         }
     }
 
@@ -417,7 +483,7 @@ impl InterfaceManager {
             "* Returning interface {}",
             interface.descriptor.interface_number
         );
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         state.interfaces.push_back(interface);
         state.next_cleanup = Instant::now() + USB_CLEANUP_TIMEOUT;
         state.pending_cleanup = true;
@@ -430,10 +496,11 @@ impl InterfaceManager {
 }
 
 pub struct UnplugDetector {
-    registration: Registration,
     event_thread_run: Arc<AtomicBool>,
-    // This is always Some until the destructor runs.
+    // These are always Some until the destructor runs.
+    registration: Option<Registration<GlobalContext>>,
     event_thread: Option<std::thread::JoinHandle<()>>,
+    join_event_thread: bool,
 }
 
 impl UnplugDetector {
@@ -467,9 +534,10 @@ impl UnplugDetector {
         });
 
         Ok(Self {
-            registration,
             event_thread_run: run,
+            registration: Some(registration),
             event_thread: Some(event_thread),
+            join_event_thread: !delay_shutdown, // Only wait if we're not managed by upstart.
         })
     }
 }
@@ -477,12 +545,18 @@ impl UnplugDetector {
 impl Drop for UnplugDetector {
     fn drop(&mut self) {
         self.event_thread_run.store(false, Ordering::Relaxed);
-        let context = GlobalContext::default();
-        context.unregister_callback(self.registration);
 
-        // Calling unregister_callback wakes the event thread, so this should complete quickly.
+        // The callback is unregistered when the registration is dropped.
+        // Unwrap is safe because self.registration is always Some until we drop it here.
+        drop(self.registration.take().unwrap());
+
+        // Dropping the callback above wakes the event thread, so this should complete quickly.
         // Unwrap is safe because event_thread only becomes None at drop.
-        let _ = self.event_thread.take().unwrap().join();
+        let t = self.event_thread.take().unwrap();
+        if self.join_event_thread {
+            t.join()
+                .unwrap_or_else(|e| error!("Failed to join event thread: {:?}", e));
+        }
     }
 }
 
@@ -594,23 +668,9 @@ impl UsbConnector {
         let mut handle = device.open().map_err(Error::OpenDevice)?;
         handle
             .set_auto_detach_kernel_driver(true)
-            .map_err(Error::DetachDrivers)?;
+            .map_err(|e| Error::DetachDrivers(u8::MAX, e))?; // Use MAX to mean "no interface".
 
-        // Detach any outstanding kernel drivers for the current config.
-        let config = device
-            .active_config_descriptor()
-            .map_err(Error::ReadConfigDescriptor)?;
-
-        for interface in config.interfaces() {
-            match handle.detach_kernel_driver(interface.number()) {
-                Err(e) if e != rusb::Error::NotFound => return Err(Error::DetachDrivers(e)),
-                _ => {}
-            }
-        }
-
-        handle
-            .set_active_configuration(info.config)
-            .map_err(Error::SetActiveConfig)?;
+        set_device_config(&mut handle, info.config)?;
 
         // Open the IPPUSB interfaces.
         let mut connections = Vec::new();

@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -6,17 +6,40 @@ import("//common-mk/deps.gni")
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":libshill-net" ]
+  deps = [
+    ":install_headers",
+    ":libshill-net",
+  ]
   if (use.fuzzer) {
     deps += [
-      ":arp_client_fuzzer",
+      ":netlink_attribute_list_fuzzer",
       ":nl80211_message_fuzzer",
-      ":rtnl_handler_fuzzer",
     ]
   }
   if (use.test) {
     deps += [ ":shill_net_test" ]
   }
+}
+
+install_config("install_headers") {
+  sources = [
+    "attribute_list.h",
+    "control_netlink_attribute.h",
+    "generic_netlink_message.h",
+    "ieee80211.h",
+    "mock_netlink_manager.h",
+    "mock_process_manager.h",
+    "netlink_attribute.h",
+    "netlink_manager.h",
+    "netlink_message.h",
+    "netlink_message_matchers.h",
+    "netlink_packet.h",
+    "nl80211_attribute.h",
+    "nl80211_message.h",
+    "process_manager.h",
+    "shill_export.h",
+  ]
+  install_path = "/usr/include/shill/net"
 }
 
 pkg_config("target_defaults") {
@@ -30,7 +53,12 @@ pkg_config("target_defaults") {
     "-Werror",
     "-Wno-unused-parameter",
   ]
-  pkg_deps = [ "libchrome" ]
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libminijail",
+    "libnet-base",
+  ]
 }
 
 write_deps("libshill-net_deps") {
@@ -38,60 +66,33 @@ write_deps("libshill-net_deps") {
   target = "libshill-net"
 }
 
-net_sources = [
-  "../logging.cc",
-  "../scope_logger.cc",
-  "arp_client.cc",
-  "arp_packet.cc",
-  "attribute_list.cc",
-  "byte_string.cc",
-  "control_netlink_attribute.cc",
-  "event_history.cc",
-  "generic_netlink_message.cc",
-  "ieee80211.cc",
-  "io_handler_factory.cc",
-  "io_handler_factory_container.cc",
-  "io_input_handler.cc",
-  "io_ready_handler.cc",
-  "ip_address.cc",
-  "netlink_attribute.cc",
-  "netlink_fd.cc",
-  "netlink_manager.cc",
-  "netlink_message.cc",
-  "netlink_packet.cc",
-  "netlink_sock_diag.cc",
-  "netlink_socket.cc",
-  "nl80211_attribute.cc",
-  "nl80211_message.cc",
-  "rtnl_handler.cc",
-  "rtnl_listener.cc",
-  "rtnl_message.cc",
-  "shill_time.cc",
-  "sockets.cc",
-]
-
 shared_library("libshill-net") {
-  sources = net_sources
-  configs += [ ":target_defaults" ]
-  defines = [ "SLOG_MEANS_VLOG=1" ]
-  cflags_cc = [
-    # for shill::Logging declarations
-    "-Wno-unused-variable",
-    "-Wno-unused-function",
+  sources = [
+    "attribute_list.cc",
+    "control_netlink_attribute.cc",
+    "generic_netlink_message.cc",
+    "ieee80211.cc",
+    "netlink_attribute.cc",
+    "netlink_manager.cc",
+    "netlink_message.cc",
+    "netlink_packet.cc",
+    "nl80211_attribute.cc",
+    "nl80211_message.cc",
+    "process_manager.cc",
   ]
+  configs += [ ":target_defaults" ]
   deps = [ ":${target_name}_deps" ]
+  install_path = "lib"
 }
 
 if (use.fuzzer) {
   pkg_config("fuzzed_data_config") {
     pkg_deps = [ "libchrome-test" ]
   }
-  executable("arp_client_fuzzer") {
-    sources = [ "arp_client_fuzzer.cc" ]
+  executable("netlink_attribute_list_fuzzer") {
+    sources = [ "attribute_list_fuzzer.cc" ]
     configs += [
-      "//common-mk:test",
       "//common-mk/common_fuzzer",
-      ":fuzzed_data_config",
       ":target_defaults",
     ]
     deps = [ ":libshill-net" ]
@@ -104,53 +105,51 @@ if (use.fuzzer) {
     ]
     deps = [ ":libshill-net" ]
   }
-  executable("rtnl_handler_fuzzer") {
-    sources = [ "rtnl_handler_fuzzer.cc" ]
-    configs += [
-      "//common-mk/common_fuzzer",
-      ":target_defaults",
-    ]
-    deps = [ ":libshill-net" ]
-  }
 }
 
 if (use.test) {
+  source_set("net_test_support") {
+    sources = [
+      "mock_netlink_manager.cc",
+      "mock_process_manager.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+    ]
+    pkg_deps = [ "libshill-net" ]
+    deps = [ "//net-base:net_base_test_support" ]
+  }
+
   pkg_config("shill_net_test_config") {
-    pkg_deps = [ "libchrome-test" ]
+    pkg_deps = [
+      "libchrome-test",
+      "re2",
+    ]
   }
 
   executable("shill_net_test") {
+    run_test = true
     sources = [
-      "../mock_log.cc",
-      "arp_client_test.cc",
-      "arp_packet_test.cc",
       "attribute_list_test.cc",
-      "byte_string_test.cc",
-      "event_history_test.cc",
-      "ip_address_test.cc",
       "netlink_attribute_test.cc",
+      "netlink_manager_test.cc",
+      "netlink_message_test.cc",
+      "netlink_packet_test.cc",
+      "nl80211_attribute_test.cc",
       "nl80211_message_test.cc",
-      "rtnl_handler_test.cc",
-      "rtnl_listener_test.cc",
-      "rtnl_message_test.cc",
-      "shill_time_test.cc",
+      "process_manager_test.cc",
     ]
-    if (use.wifi) {
-      sources += [
-        "netlink_manager_test.cc",
-        "netlink_message_test.cc",
-        "netlink_packet_test.cc",
-        "netlink_socket_test.cc",
-        "nl80211_attribute_test.cc",
-      ]
-    }
     configs += [
       "//common-mk:test",
+      ":target_defaults",
       ":shill_net_test_config",
     ]
     deps = [
       ":libshill-net",
+      ":net_test_support",
       "//common-mk/testrunner",
+      "//net-base:net_base_test_support",
     ]
   }
 }

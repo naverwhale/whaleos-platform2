@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <brillo/dbus/dbus_object_test_helpers.h>
 #include <brillo/dbus/utils.h>
 #include <dbus/mock_bus.h>
@@ -116,7 +116,7 @@ class ExportedObjectManagerTest : public ::testing::Test {
     EXPECT_CALL(*mock_exported_object_, ExportMethod(_, _, _, _))
         .Times(AnyNumber());
     om_.reset(new ExportedObjectManager(bus_.get(), kTestPath));
-    property_writer_ = base::Bind(&WriteTestPropertyDict);
+    property_writer_ = base::BindRepeating(&WriteTestPropertyDict);
     om_->RegisterAsync(AsyncEventSequencer::GetDefaultCompletionAction());
   }
 

@@ -1,18 +1,26 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 access: 1
 arch_prctl: 1
 brk: 1
+clock_getres: 1
+clock_gettime: 1
 close: 1
 connect: 1
 exit: 1
 exit_group: 1
+faccessat: 1
+faccessat2: 1
 fstat: 1
 getdents: 1
 getdents64: 1
 gettid: 1
+gettimeofday: 1
 # ioctl: arg1 == VIDIOC_QUERYCAP
 # For brillo::kLogToStderrIfTty. isatty(0) calls ioctl(0, TCGETS, *).
 ioctl: arg1 == 0x80685600 || arg0 == 0 && arg1 == TCGETS
@@ -37,3 +45,5 @@ socket: arg0 == AF_UNIX
 stat: 1
 write: 1
 fstatfs: 1
+getpid: 1
+futex: 1

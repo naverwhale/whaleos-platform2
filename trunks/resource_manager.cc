@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,16 +12,23 @@
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 
 #include "trunks/error_codes.h"
+#include "trunks/tpm_generated.h"
 
 #define IS_TPM_CC_VENDOR_CMD(c)            \
   (((c) == TPM_CC_VENDOR_SPECIFIC_MASK) || \
-   ((c) == TPM_CC_CR50_EXTENSION_COMMAND))  // NOLINT(whitespace/indent)
+   ((c) == TPM_CC_CR50_EXTENSION_COMMAND))
+
+#define IS_TPM2_STD_CMD(x) \
+  ((x) >= trunks::TPM_CC_FIRST && (x) <= trunks::TPM_CC_LAST)
+#define IS_TPM2_EXT_CMD(x) \
+  ((x) >= trunks::TPM_CCE_FIRST && (x) <= trunks::TPM_CCE_LAST)
+#define IS_TPM2_CMD(x) (IS_TPM2_STD_CMD(x) || IS_TPM2_EXT_CMD(x))
 
 namespace {
 
@@ -57,8 +64,7 @@ ResourceManager::ResourceManager(const TrunksFactory& factory,
                                  CommandTransceiver* next_transceiver)
     : factory_(factory),
       next_transceiver_(next_transceiver),
-      max_suspend_duration_(
-          base::TimeDelta::FromSeconds(kMaxSuspendDurationSec)) {}
+      max_suspend_duration_(base::Seconds(kMaxSuspendDurationSec)) {}
 
 ResourceManager::~ResourceManager() {}
 
@@ -97,8 +103,8 @@ void ResourceManager::Initialize() {
 }
 
 void ResourceManager::SendCommand(const std::string& command,
-                                  const ResponseCallback& callback) {
-  callback.Run(SendCommandAndWait(command));
+                                  ResponseCallback callback) {
+  std::move(callback).Run(SendCommandAndWait(command));
 }
 
 std::string ResourceManager::SendCommandAndWait(const std::string& command) {
@@ -454,6 +460,10 @@ void ResourceManager::EvictSession(const MessageInfo& command_info) {
   TPM_RC result = SaveContext(command_info, &info);
   if (result != TPM_RC_SUCCESS) {
     LOG(WARNING) << "Failed to evict session: " << GetErrorString(result);
+
+    // If we failed to evict a session, we should try to flush the session.
+    // Otherwise there is no way to fix the TPM_RC_*_MEMORY issues.
+    FlushSession(command_info);
   }
   VLOG(1) << "EVICT_SESSION: " << std::hex << session_to_evict;
 }
@@ -569,7 +579,8 @@ void ResourceManager::FlushSession(const MessageInfo& command_info) {
   }
   TPM_RC result =
       factory_.GetTpm()->FlushContextSync(session_to_flush, nullptr);
-  if (result != TPM_RC_SUCCESS) {
+  // Ignore it case is the session already been flushed.
+  if (result != TPM_RC_SUCCESS && result != TPM_RC_HANDLE) {
     LOG(WARNING) << "Failed to flush session: " << GetErrorString(result);
     return;
   }

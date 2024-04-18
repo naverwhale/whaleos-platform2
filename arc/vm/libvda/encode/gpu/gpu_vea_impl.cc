@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <base/check.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/notreached.h>
 #include <mojo/public/cpp/bindings/receiver.h>
 #include <mojo/public/cpp/bindings/remote.h>
@@ -17,6 +16,7 @@
 
 #include "arc/vm/libvda/gbm_util.h"
 #include "arc/vm/libvda/gpu/format_util.h"
+#include "arc/vm/libvda/gpu/mojom/video_common.mojom.h"
 #include "arc/vm/libvda/gpu/mojom/video_encode_accelerator.mojom.h"
 
 namespace arc {
@@ -46,6 +46,32 @@ inline vea_error_t ConvertMojoError(
     default:
       NOTREACHED();
   }
+}
+
+inline arc::mojom::BitratePtr ConvertToMojoBitrate(
+    const vea_bitrate_t& vea_bitrate) {
+  arc::mojom::BitratePtr bitrate;
+  switch (vea_bitrate.mode) {
+    case VBR: {
+      arc::mojom::VariableBitratePtr variable_bitrate =
+          arc::mojom::VariableBitrate::New();
+      variable_bitrate->target = vea_bitrate.target;
+      variable_bitrate->peak = vea_bitrate.peak;
+      bitrate = arc::mojom::Bitrate::NewVariable(std::move(variable_bitrate));
+      break;
+    }
+    case CBR: {
+      arc::mojom::ConstantBitratePtr constant_bitrate =
+          arc::mojom::ConstantBitrate::New();
+      constant_bitrate->target = vea_bitrate.target;
+      bitrate = arc::mojom::Bitrate::NewConstant(std::move(constant_bitrate));
+      break;
+    }
+    default:
+      NOTREACHED();
+      break;
+  }
+  return bitrate;
 }
 
 class GpuVeaContext : public VeaContext, arc::mojom::VideoEncodeClient {
@@ -120,9 +146,7 @@ class GpuVeaContext : public VeaContext, arc::mojom::VideoEncodeClient {
   void FlushOnIpcThread();
 
   scoped_refptr<base::SingleThreadTaskRunner> ipc_task_runner_;
-  // TODO(alexlau): Use THREAD_CHECKER macro after libchrome uprev
-  // (crbug.com/909719).
-  base::ThreadChecker ipc_thread_checker_;
+  THREAD_CHECKER(ipc_thread_checker_);
   mojo::Remote<arc::mojom::VideoEncodeAccelerator> remote_vea_;
   mojo::Receiver<arc::mojom::VideoEncodeClient> receiver_;
 
@@ -137,7 +161,7 @@ GpuVeaContext::GpuVeaContext(
       receiver_(this) {
   // Since ipc_thread_checker_ binds to whichever thread it's created on, check
   // that we're on the correct thread first using BelongsToCurrentThread.
-  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
   remote_vea_.set_disconnect_with_reason_handler(
       base::BindRepeating(&GpuVeaContext::OnVeaError, base::Unretained(this)));
 
@@ -145,12 +169,12 @@ GpuVeaContext::GpuVeaContext(
 }
 
 GpuVeaContext::~GpuVeaContext() {
-  DCHECK(ipc_thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
 }
 
 void GpuVeaContext::Initialize(vea_config_t* config,
                                InitializeCallback callback) {
-  DCHECK(ipc_thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
   mojo::PendingRemote<arc::mojom::VideoEncodeClient> remote_client =
       receiver_.BindNewPipeAndPassRemote();
   receiver_.set_disconnect_with_reason_handler(base::BindRepeating(
@@ -167,16 +191,15 @@ void GpuVeaContext::Initialize(vea_config_t* config,
   mojo_config->input_visible_size->width = config->input_visible_width;
   mojo_config->input_visible_size->height = config->input_visible_height;
 
-  // TODO(b/190336806) Pass bitrate mode and peak bitrate once mojo bindings
-  // have been updated.
   mojo_config->output_profile =
       ConvertCodecProfileToMojoProfile(config->output_profile);
-  mojo_config->initial_bitrate = config->bitrate.target;
   mojo_config->initial_framerate = config->initial_framerate;
   mojo_config->has_initial_framerate = config->has_initial_framerate;
   mojo_config->h264_output_level = config->h264_output_level;
   mojo_config->has_h264_output_level = config->has_h264_output_level;
   mojo_config->storage_type = arc::mojom::VideoFrameStorageType::DMABUF;
+
+  mojo_config->bitrate = ConvertToMojoBitrate(config->bitrate);
 
   remote_vea_->Initialize(
       std::move(mojo_config), std::move(remote_client),
@@ -187,7 +210,7 @@ void GpuVeaContext::Initialize(vea_config_t* config,
 void GpuVeaContext::OnInitialized(
     InitializeCallback callback,
     arc::mojom::VideoEncodeAccelerator::Result result) {
-  DCHECK(ipc_thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
   // TODO(b/174967467): propagate result to client.
   bool success = (result == mojom::VideoEncodeAccelerator::Result::kSuccess);
   std::move(callback).Run(success);
@@ -195,14 +218,14 @@ void GpuVeaContext::OnInitialized(
 
 void GpuVeaContext::OnVeaError(uint32_t custom_reason,
                                const std::string& description) {
-  DCHECK(ipc_thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
   DLOG(ERROR) << "VideoEncodeAccelerator mojo connection error. custom_reason="
               << custom_reason << " description=" << description;
 }
 
 void GpuVeaContext::OnVeaClientError(uint32_t custom_reason,
                                      const std::string& description) {
-  DCHECK(ipc_thread_checker_.CalledOnValidThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
   DLOG(ERROR) << "VideoEncodeClient mojo connection error. custom_reason="
               << custom_reason << " description=" << description;
 }
@@ -301,7 +324,8 @@ int GpuVeaContext::RequestEncodingParamsChange(vea_bitrate_t bitrate,
 
 void GpuVeaContext::RequestEncodingParamsChangeOnIpcThread(
     vea_bitrate_t bitrate, uint32_t framerate) {
-  remote_vea_->RequestEncodingParametersChange(bitrate.target, framerate);
+  remote_vea_->RequestEncodingParametersChange(ConvertToMojoBitrate(bitrate),
+                                               framerate);
 }
 
 int GpuVeaContext::Flush() {
@@ -362,6 +386,9 @@ bool GpuVeaImpl::Initialize() {
     return false;
 
   ipc_task_runner_ = connection_->GetIpcTaskRunner();
+  // Make sure we are not running on |ipc_task_runner_| to avoid dead lock.
+  // A new task is going to be scheduled on |ipc_task_runner_|, that we want
+  // to block on and therefore this method can't be called on ipc thread.
   CHECK(!ipc_task_runner_->BelongsToCurrentThread());
 
   base::WaitableEvent init_complete_event(
@@ -386,7 +413,11 @@ bool GpuVeaImpl::Initialize() {
 
 void GpuVeaImpl::InitializeOnIpcThread(
     base::WaitableEvent* init_complete_event) {
+  // We detach the checker here, to immediately attach it to |ipc_task_runner_|
+  // thread.
+  DETACH_FROM_THREAD(ipc_thread_checker_);
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
 
   mojo::Remote<arc::mojom::VideoEncodeAccelerator> remote_vea =
       connection_->CreateEncodeAccelerator();
@@ -400,7 +431,7 @@ void GpuVeaImpl::OnGetSupportedProfiles(
     mojo::Remote<arc::mojom::VideoEncodeAccelerator> remote_vea,
     base::WaitableEvent* init_complete_event,
     std::vector<arc::mojom::VideoEncodeProfilePtr> profiles) {
-  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
   output_formats_.clear();
   for (const auto& profile : profiles) {
     vea_profile_t p;
@@ -416,7 +447,11 @@ void GpuVeaImpl::OnGetSupportedProfiles(
 }
 
 VeaContext* GpuVeaImpl::InitEncodeSession(vea_config_t* config) {
+  // Make sure we are not running on |ipc_task_runner_| to avoid dead lock.
+  // A new task is going to be scheduled on |ipc_task_runner_|, that we want
+  // to block on and therefore this method can't be called on ipc thread.
   DCHECK(!ipc_task_runner_->BelongsToCurrentThread());
+  output_formats_.clear();
 
   if (!connection_) {
     DLOG(FATAL) << "InitEncodeSession called before successful Initialize().";
@@ -441,7 +476,8 @@ void GpuVeaImpl::InitEncodeSessionOnIpcThread(
     vea_config_t* config,
     base::WaitableEvent* init_complete_event,
     VeaContext** out_context) {
-  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
+  output_formats_.clear();
 
   mojo::Remote<arc::mojom::VideoEncodeAccelerator> remote_vea =
       connection_->CreateEncodeAccelerator();
@@ -461,7 +497,8 @@ void GpuVeaImpl::InitEncodeSessionAfterContextInitializedOnIpcThread(
     VeaContext** out_context,
     std::unique_ptr<VeaContext> context,
     bool success) {
-  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
+  output_formats_.clear();
 
   if (success) {
     *out_context = context.release();
@@ -483,7 +520,8 @@ void GpuVeaImpl::CloseEncodeSession(VeaContext* context) {
 }
 
 void GpuVeaImpl::CloseEncodeSessionOnIpcThread(VeaContext* context) {
-  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+  DCHECK_CALLED_ON_VALID_THREAD(ipc_thread_checker_);
+  output_formats_.clear();
   delete context;
 }
 

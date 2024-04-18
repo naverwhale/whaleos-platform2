@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -53,7 +53,7 @@ int UdevMonitor::GetFileDescriptor() const {
 std::unique_ptr<UdevDevice> UdevMonitor::ReceiveDevice() {
   udev_device* received_device = udev_monitor_receive_device(monitor_);
   if (received_device) {
-    auto device = std::make_unique<UdevDevice>(received_device);
+    auto device = std::make_unique<UdevDeviceImpl>(received_device);
     // udev_monitor_receive_device increases the reference count of the returned
     // udev_device struct, while UdevDevice also holds a reference count of the
     // udev_device struct. Thus, decrease the reference count of the udev_device

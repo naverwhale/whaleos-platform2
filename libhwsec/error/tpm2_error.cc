@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,17 +23,12 @@ std::string FormatTrunksErrorCode(trunks::TPM_RC result) {
 }  // namespace
 
 namespace hwsec {
-namespace error {
 
-std::string TPM2ErrorObj::ToReadableString() const {
-  return FormatTrunksErrorCode(error_code_);
-}
+TPM2Error::TPM2Error(trunks::TPM_RC error_code)
+    : TPMErrorBase(FormatTrunksErrorCode(error_code)),
+      error_code_(error_code) {}
 
-hwsec_foundation::error::ErrorBase TPM2ErrorObj::SelfCopy() const {
-  return std::make_unique<TPM2ErrorObj>(error_code_);
-}
-
-TPMRetryAction TPM2ErrorObj::ToTPMRetryAction() const {
+TPMRetryAction TPM2Error::ToTPMRetryAction() const {
   trunks::TPM_RC error_code = error_code_;
   // For hardware TPM errors and TPM-equivalent response codes produced by
   // Resource Manager, use just the error number and strip everything else.
@@ -55,6 +50,19 @@ TPMRetryAction TPM2ErrorObj::ToTPMRetryAction() const {
     case trunks::SAPI_RC_MALFORMED_RESPONSE:
       status = TPMRetryAction::kCommunication;
       break;
+    // Invalid session to the TPM.
+    case trunks::TPM_RC_REFERENCE_S0:
+    case trunks::TPM_RC_REFERENCE_S1:
+    case trunks::TPM_RC_REFERENCE_S2:
+    case trunks::TPM_RC_REFERENCE_S3:
+    case trunks::TPM_RC_REFERENCE_S4:
+    case trunks::TPM_RC_REFERENCE_S5:
+    case trunks::TPM_RC_REFERENCE_S6:
+    // Might be caused by invalid session.
+    case trunks::TPM_RC_BAD_AUTH:
+    case trunks::TPM_RC_SYMMETRIC:
+      status = TPMRetryAction::kSession;
+      break;
     // Invalid handle to the TPM.
     case trunks::TPM_RC_HANDLE:
     case trunks::TPM_RC_REFERENCE_H0:
@@ -64,6 +72,9 @@ TPMRetryAction TPM2ErrorObj::ToTPMRetryAction() const {
     case trunks::TPM_RC_REFERENCE_H4:
     case trunks::TPM_RC_REFERENCE_H5:
     case trunks::TPM_RC_REFERENCE_H6:
+    // Might be caused by invalid handle or session.
+    case trunks::TPM_RC_INTEGRITY:
+    case trunks::SAPI_RC_BAD_PARAMETER:
       status = TPMRetryAction::kLater;
       break;
     // The TPM is defending itself against possible dictionary attacks.
@@ -88,5 +99,4 @@ TPMRetryAction TPM2ErrorObj::ToTPMRetryAction() const {
   return status;
 }
 
-}  // namespace error
 }  // namespace hwsec

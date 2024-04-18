@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,18 +12,24 @@
 #ifndef CRASH_REPORTER_GENERIC_FAILURE_COLLECTOR_H_
 #define CRASH_REPORTER_GENERIC_FAILURE_COLLECTOR_H_
 
+#include <memory>
+#include <optional>
 #include <string>
 
-#include <base/macros.h>
-#include <base/optional.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 
 // Generic failure collector.
 class GenericFailureCollector : public CrashCollector {
  public:
-  GenericFailureCollector();
+  explicit GenericFailureCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   GenericFailureCollector(const GenericFailureCollector&) = delete;
   GenericFailureCollector& operator=(const GenericFailureCollector&) = delete;
 
@@ -31,33 +37,55 @@ class GenericFailureCollector : public CrashCollector {
 
   // Collects generic failure.
   bool Collect(const std::string& exec_name) {
-    return CollectFull(exec_name, exec_name, base::nullopt);
+    return CollectFull(exec_name, exec_name, std::nullopt,
+                       /*use_log_conf_file=*/true);
   }
 
   // Collects generic failure with a weight specified.
   bool CollectWithWeight(const std::string& exec_name,
-                         base::Optional<int> weight) {
-    return CollectFull(exec_name, exec_name, weight);
+                         std::optional<int> weight) {
+    return CollectFull(exec_name, exec_name, weight,
+                       /*use_log_conf_file=*/true);
   }
 
   // All the bells and whistles.
   // exec_name is the string used for filenames on disk.
   // log_key_name is a key used for the exec_name as passed to GetLogContents
   // if weight is not nullopt, the "weight" key is set to that value.
+  // if use_collectors is false, log contents will be extracted from stdin.
   bool CollectFull(const std::string& exec_name,
                    const std::string& log_key_name,
-                   base::Optional<int> weight);
+                   std::optional<int> weight,
+                   bool use_log_conf_file);
 
-  static CollectorInfo GetHandlerInfo(bool suspend_failure,
-                                      bool auth_failure,
-                                      const std::string& arc_service_failure,
-                                      const std::string& service_failure);
+  struct HandlerInfoOptions {
+    bool suspend_failure = false;
+    bool auth_failure = false;
+    bool modem_failure = false;
+    bool modemfwd_failure = false;
+    bool recovery_failure = false;
+    bool hermes_failure = false;
+    std::string arc_service_failure;
+    std::string service_failure;
+    bool guest_oom_event = false;
+    int32_t weight;
+  };
+
+  // Returns the severity level and product group of the crash.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
+
+  static CollectorInfo GetHandlerInfo(
+      const HandlerInfoOptions& options,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
 
  protected:
   std::string failure_report_path_;
   std::string exec_name_;
   std::string log_key_name_;
-  base::Optional<int> weight_;
+  std::optional<int> weight_;
 
  private:
   friend class GenericFailureCollectorTest;
@@ -65,12 +93,18 @@ class GenericFailureCollector : public CrashCollector {
   FRIEND_TEST(GenericFailureCollectorTest, SuspendExecName);
   FRIEND_TEST(GenericFailureCollectorTest, CollectOKMainServiceFailure);
   FRIEND_TEST(GenericFailureCollectorTest, CollectOKPreStart);
+  FRIEND_TEST(GenericFailureCollectorTest, CollectOK_UploadWeightedUMA);
 
   static const char* const kGenericFailure;
   static const char* const kAuthFailure;
+  static const char* const kCryptohome;
   static const char* const kSuspendFailure;
   static const char* const kServiceFailure;
   static const char* const kArcServiceFailure;
+  static const char* const kModemFailure;
+  static const char* const kModemfwdFailure;
+  static const char* const kGuestOomEvent;
+  static const char* const kHermesFailure;
 
   // Generic failure dump consists only of the signature.
   bool LoadGenericFailure(std::string* content, std::string* signature);

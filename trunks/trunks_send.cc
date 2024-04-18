@@ -1,18 +1,20 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <stdio.h>
 
+#include <iterator>
+
 #include <base/command_line.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/sys_byteorder.h>
 #include <brillo/syslog_logging.h>
 #include <crypto/sha2.h>
+#include <libhwsec-foundation/tpm_error/tpm_error_uma_reporter.h>
 #include <openssl/sha.h>
 
 #include "trunks/trunks_dbus_proxy.h"
@@ -32,7 +34,7 @@ constexpr char kUpdate[] = "update";
 constexpr char kU2fCert[] = "u2f_cert";
 constexpr char kVerbose[] = "verbose";
 
-// Maximum image update block size expected by Cr50.
+// Maximum image update block size expected by GSC.
 // Equals to SIGNED_TRANSFER_SIZE in src/platform/ec/chip/g/update_fw.h
 static const uint32_t kTransferSize = 1024;
 
@@ -67,7 +69,7 @@ struct TpmCmdHeader {
 
 // TPMv2 Spec mandates that vendor-specific command codes have bit 29 set,
 // while bits 15-0 indicate the command. All other bits should be zero. We
-// define one of those 16-bit command values for Cr50 purposes, and use the
+// define one of those 16-bit command values for GSC purposes, and use the
 // subcommand_code in struct TpmCmdHeader to further distinguish the desired
 // operation.
 #define TPM_CC_VENDOR_BIT 0x20000000
@@ -79,7 +81,7 @@ struct TpmCmdHeader {
 #define CR50_EXTENSION_COMMAND 0xbaccd00a
 #define CR50_EXTENSION_FW_UPGRADE 4
 
-// Cr50 vendor-specific subcommand codes. 16 bits available.
+// GSC vendor-specific subcommand codes. 16 bits available.
 enum vendor_cmd_cc {
   VENDOR_CC_POST_RESET = 7,
   VENDOR_CC_GET_LOCK = 16,
@@ -239,7 +241,7 @@ struct UpdatePduHeader {
 };
 
 //
-// Cr50 image header.
+// GSC image header.
 //
 // Based on SignedHeader defined in src/platform/ec/chip/g/signed_header.h
 //
@@ -351,7 +353,7 @@ static bool SetupConnection(TrunksDBusProxy* proxy, FirstResponsePdu* rpdu) {
   rpdu->backup_ro_offset = base::NetToHost32(rpdu->backup_ro_offset);
   rpdu->backup_rw_offset = base::NetToHost32(rpdu->backup_rw_offset);
 
-  for (int i = 0; i < base::size(rpdu->shv); i++) {
+  for (int i = 0; i < std::size(rpdu->shv); i++) {
     rpdu->shv[i].minor = base::NetToHost32(rpdu->shv[i].minor);
     rpdu->shv[i].major = base::NetToHost32(rpdu->shv[i].major);
     rpdu->shv[i].epoch = base::NetToHost32(rpdu->shv[i].epoch);
@@ -376,7 +378,7 @@ static bool ImageIsNewer(const EssentialHeader& header,
 }
 
 //
-// Updates RO or RW section of the Cr50 image on the device.
+// Updates RO or RW section of the GSC image on the device.
 // A section is updated only if it's newer than the one currently on the
 // device, or if |force| is set to true.
 //
@@ -439,9 +441,9 @@ static bool TransferSection(TrunksDBusProxy* proxy,
 }
 
 //
-// Updates the Cr50 image on the device. |update_image| contains the entire
-// new Cr50 image.
-// Each of the Cr50 sections is updated only if it's newer than the one
+// Updates the GSC image on the device. |update_image| contains the entire
+// new GSC image.
+// Each of the GSC sections is updated only if it's newer than the one
 // currently on the device, or if |force| is set to true. Otherwise the
 // session is skipped. The information about the section offsets and current
 // versions is taken from the response to the connection request |rpdu| received
@@ -459,12 +461,12 @@ static int TransferImage(TrunksDBusProxy* proxy,
   int index;
 
   //
-  // The cr50 will not accept lower addresses after higher addresses for 60
+  // The GSC will not accept lower addresses after higher addresses for 60
   // seconds. Decide what section needs to be transferred first.
   //
 
   index = section_offsets[0] > section_offsets[1] ? 1 : 0;
-  for (int i = 0; i < base::size(section_offsets); i++) {
+  for (int i = 0; i < std::size(section_offsets); i++) {
     if (!TransferSection(proxy, update_image, section_offsets[index],
                          rpdu.shv[index], force)) {
       if (!force) {
@@ -473,7 +475,7 @@ static int TransferImage(TrunksDBusProxy* proxy,
     } else {
       num_txed_sections++;
     }
-    index = (index + 1) % base::size(section_offsets);
+    index = (index + 1) % std::size(section_offsets);
   }
 
   return num_txed_sections;
@@ -481,7 +483,7 @@ static int TransferImage(TrunksDBusProxy* proxy,
 
 enum UpdateStatus { UpdateSuccess = 0, UpdateError = 1, UpdateCancelled = 2 };
 
-// Updathe the Cr50 image on the device.
+// Update the GSC image on the device.
 static UpdateStatus HandleUpdate(TrunksDBusProxy* proxy,
                                  base::CommandLine* cl) {
   if (cl->GetArgs().size() != 1) {
@@ -502,7 +504,7 @@ static UpdateStatus HandleUpdate(TrunksDBusProxy* proxy,
     return UpdateError;
   }
 
-  // Cr50 images with RW versoin below 0.0.19 process updates differently,
+  // Cr50 images with RW version below 0.0.19 process updates differently,
   // and as such require special treatment.
   bool running_pre_19 = rpdu.shv[1].minor < 19 && rpdu.shv[1].major == 0 &&
                         rpdu.shv[1].epoch == 0;
@@ -519,7 +521,7 @@ static UpdateStatus HandleUpdate(TrunksDBusProxy* proxy,
     return UpdateError;
   }
 
-  // Positive rv indicates that some sections were transferred and a Cr50
+  // Positive rv indicates that some sections were transferred and a GSC
   // reboot is required. RW Cr50 versions below 0.0.19 require a posted reset
   // to switch to the new image.
   if (rv > 0 && running_pre_19) {
@@ -639,8 +641,7 @@ static int VcPopLogEntry(TrunksDBusProxy* proxy, base::CommandLine* cl) {
   logentry.timestamp = base::NetToHost32(logentry.timestamp);
   logentry.data = base::NetToHost16(logentry.data);
 
-  ts =
-      base::Time::Now() - base::TimeDelta::FromMilliseconds(logentry.timestamp);
+  ts = base::Time::Now() - base::Milliseconds(logentry.timestamp);
   ts.LocalExplode(&ts_exploded);
 
   printf("LogEntry %04i%02i%02i-%02i:%02i:%02i.%03i: Type: 0x%x Data: 0x%x\n",
@@ -833,6 +834,10 @@ int main(int argc, char** argv) {
   base::CommandLine::Init(argc, argv);
   brillo::InitLog(brillo::kLogToStderr);
   base::CommandLine* cl = base::CommandLine::ForCurrentProcess();
+
+  // Set TPM metrics client ID.
+  hwsec_foundation::SetTpmMetricsClientID(
+      hwsec_foundation::TpmMetricsClientID::kTrunksSend);
 
   if (cl->HasSwitch(kVerbose)) {
     verbose = 1;

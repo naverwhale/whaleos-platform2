@@ -1,14 +1,19 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "rmad/system/power_manager_client_impl.h"
+
+#include <base/files/file_path.h>
+#include <base/files/file_util.h>
+#include <base/files/scoped_temp_dir.h>
 #include <dbus/mock_bus.h>
 #include <dbus/mock_object_proxy.h>
 #include <dbus/power_manager/dbus-constants.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rmad/system/power_manager_client_impl.h"
+#include "rmad/constants.h"
 
 using testing::_;
 using testing::Return;
@@ -51,27 +56,33 @@ class PowerManagerClientTest : public testing::Test {
 
 TEST_F(PowerManagerClientTest, Restart_Success) {
   EXPECT_CALL(*mock_object_proxy(), CallMethodAndBlock(_, _))
-      .WillOnce(
-          [](dbus::MethodCall*, int) { return dbus::Response::CreateEmpty(); });
+      .WillOnce([](dbus::MethodCall*, int) {
+        return base::ok(dbus::Response::CreateEmpty());
+      });
   EXPECT_TRUE(power_manager_client()->Restart());
 }
 
 TEST_F(PowerManagerClientTest, Restart_Failed) {
   EXPECT_CALL(*mock_object_proxy(), CallMethodAndBlock(_, _))
-      .WillOnce([](dbus::MethodCall*, int) { return nullptr; });
+      .WillOnce([](dbus::MethodCall*, int) {
+        return base::unexpected(dbus::Error());
+      });
   EXPECT_FALSE(power_manager_client()->Restart());
 }
 
 TEST_F(PowerManagerClientTest, Shutdown_Success) {
   EXPECT_CALL(*mock_object_proxy(), CallMethodAndBlock(_, _))
-      .WillOnce(
-          [](dbus::MethodCall*, int) { return dbus::Response::CreateEmpty(); });
+      .WillOnce([](dbus::MethodCall*, int) {
+        return base::ok(dbus::Response::CreateEmpty());
+      });
   EXPECT_TRUE(power_manager_client()->Shutdown());
 }
 
 TEST_F(PowerManagerClientTest, Shutdown_Failed) {
   EXPECT_CALL(*mock_object_proxy(), CallMethodAndBlock(_, _))
-      .WillOnce([](dbus::MethodCall*, int) { return nullptr; });
+      .WillOnce([](dbus::MethodCall*, int) {
+        return base::unexpected(dbus::Error());
+      });
   EXPECT_FALSE(power_manager_client()->Shutdown());
 }
 

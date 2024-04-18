@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,23 +9,39 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
+extern "C" {
+// A struct member in pppd.h has the name 'class'.
+#define class class_num
+// pppd.h defines a bool type.
+#define bool pppd_bool_t
+#include <pppd/pppd.h>
+#undef bool
+#undef class
+}
+
+#include <base/containers/contains.h>
 #include <base/files/file_path.h>
 #include <base/memory/weak_ptr.h>
 #include <base/strings/string_number_conversions.h>
+#include <net-base/ip_address.h>
 
 #include "shill/control_interface.h"
 #include "shill/error.h"
 #include "shill/external_task.h"
-#include "shill/ppp_device.h"
+#include "shill/logging.h"
 
 namespace shill {
+
+namespace Logging {
+static auto kModuleLogScope = ScopeLogger::kPPP;
+}  // namespace Logging
 
 namespace {
 
 const char kDaemonPath[] = "/usr/sbin/pppd";
-const char kPPPoEPluginPath[] = "pppoe.so";
 const uint32_t kUnspecifiedValue = UINT32_MAX;
 
 }  // namespace
@@ -36,7 +52,6 @@ PPPDaemon::Options::Options()
       no_default_route(false),
       use_peer_dns(false),
       use_shim_plugin(true),
-      use_pppoe_plugin(false),
       lcp_echo_interval(kUnspecifiedValue),
       lcp_echo_failure(kUnspecifiedValue),
       max_fail(kUnspecifiedValue),
@@ -50,7 +65,7 @@ std::unique_ptr<ExternalTask> PPPDaemon::Start(
     const base::WeakPtr<RpcTaskDelegate>& task_delegate,
     const PPPDaemon::Options& options,
     const std::string& device,
-    const PPPDaemon::DeathCallback& death_callback,
+    PPPDaemon::DeathCallback death_callback,
     Error* error) {
   std::vector<std::string> arguments;
 
@@ -75,10 +90,6 @@ std::unique_ptr<ExternalTask> PPPDaemon::Start(
     arguments.push_back("plugin");
     arguments.push_back(kShimPluginPath);
   }
-  if (options.use_pppoe_plugin) {
-    arguments.push_back("plugin");
-    arguments.push_back(kPPPoEPluginPath);
-  }
   if (options.lcp_echo_interval != kUnspecifiedValue) {
     arguments.push_back("lcp-echo-interval");
     arguments.push_back(base::NumberToString(options.lcp_echo_interval));
@@ -98,8 +109,9 @@ std::unique_ptr<ExternalTask> PPPDaemon::Start(
 
   arguments.push_back(device);
 
-  auto task = std::make_unique<ExternalTask>(control_interface, process_manager,
-                                             task_delegate, death_callback);
+  auto task =
+      std::make_unique<ExternalTask>(control_interface, process_manager,
+                                     task_delegate, std::move(death_callback));
 
   std::map<std::string, std::string> environment;
   if (task->Start(base::FilePath(kDaemonPath), arguments, environment, true,
@@ -107,6 +119,91 @@ std::unique_ptr<ExternalTask> PPPDaemon::Start(
     return task;
   }
   return nullptr;
+}
+
+// static
+std::string PPPDaemon::GetInterfaceName(
+    const std::map<std::string, std::string>& configuration) {
+  if (base::Contains(configuration, kPPPInterfaceName)) {
+    return configuration.find(kPPPInterfaceName)->second;
+  }
+  return std::string();
+}
+
+// static
+IPConfig::Properties PPPDaemon::ParseIPConfiguration(
+    const std::map<std::string, std::string>& configuration) {
+  IPConfig::Properties properties;
+  properties.address_family = net_base::IPFamily::kIPv4;
+  properties.subnet_prefix = net_base::IPv4CIDR::kMaxPrefixLength;
+  for (const auto& it : configuration) {
+    const auto& key = it.first;
+    const auto& value = it.second;
+    SLOG(2) << "Processing: " << key << " -> " << value;
+    if (key == kPPPInternalIP4Address) {
+      properties.address = value;
+    } else if (key == kPPPExternalIP4Address) {
+      properties.peer_address = value;
+    } else if (key == kPPPGatewayAddress) {
+      properties.gateway = value;
+    } else if (key == kPPPDNS1) {
+      properties.dns_servers.insert(properties.dns_servers.begin(), value);
+    } else if (key == kPPPDNS2) {
+      properties.dns_servers.push_back(value);
+    } else if (key == kPPPLNSAddress) {
+      // This is really a L2TPIPsec property. But it's sent to us by
+      // our PPP plugin.
+      properties.exclusion_list.push_back(
+          value + "/" +
+          base::NumberToString(net_base::IPv4CIDR::kMaxPrefixLength));
+    } else if (key == kPPPMRU) {
+      int mru;
+      if (!base::StringToInt(value, &mru)) {
+        LOG(WARNING) << "Failed to parse MRU: " << value;
+        continue;
+      }
+      properties.mtu = mru;
+    } else {
+      SLOG(2) << "Key ignored.";
+    }
+  }
+  if (properties.gateway.empty()) {
+    // The gateway may be unspecified, since this is a point-to-point
+    // link. Set to the peer's address, so that Connection can set the
+    // routing table.
+    properties.gateway = properties.peer_address;
+  }
+  return properties;
+}
+
+// static
+Service::ConnectFailure PPPDaemon::ExitStatusToFailure(int exit) {
+  switch (exit) {
+    case EXIT_OK:
+      return Service::kFailureNone;
+    case EXIT_PEER_AUTH_FAILED:
+    case EXIT_AUTH_TOPEER_FAILED:
+      return Service::kFailurePPPAuth;
+    default:
+      return Service::kFailureUnknown;
+  }
+}
+
+// static
+Service::ConnectFailure PPPDaemon::ParseExitFailure(
+    const std::map<std::string, std::string>& dict) {
+  const auto it = dict.find(kPPPExitStatus);
+  if (it == dict.end()) {
+    LOG(ERROR) << "Failed to find the failure status in the dict";
+    return Service::kFailureInternal;
+  }
+  int exit = 0;
+  if (!base::StringToInt(it->second, &exit)) {
+    LOG(ERROR) << "Failed to parse the failure status from the dict, value: "
+               << it->second;
+    return Service::kFailureInternal;
+  }
+  return ExitStatusToFailure(exit);
 }
 
 }  // namespace shill

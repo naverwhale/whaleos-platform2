@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,7 +27,9 @@ ArchiveManager::ArchiveManager(const std::string& mount_root,
                                brillo::ProcessReaper* process_reaper)
     : MountManager(mount_root, platform, metrics, process_reaper) {}
 
-ArchiveManager::~ArchiveManager() = default;
+ArchiveManager::~ArchiveManager() {
+  UnmountAll();
+}
 
 bool ArchiveManager::Initialize() {
   if (!MountManager::Initialize())
@@ -35,19 +37,27 @@ bool ArchiveManager::Initialize() {
 
   {
     SandboxedExecutable executable = {
-        base::FilePath("/usr/bin/fuse-zip"),
-        base::FilePath("/usr/share/policy/fuse-zip-seccomp.policy")};
+        base::FilePath("/usr/bin/mount-zip"),
+        base::FilePath("/usr/share/policy/mount-zip-seccomp.policy")};
 
     auto sandbox_factory =
         CreateSandboxFactory(std::move(executable), "fuse-zip");
-    std::vector<int> password_needed_codes = {
+    std::vector<int> password_needed_exit_codes = {
         23,   // ZIP_ER_BASE + ZIP_ER_ZLIB
         36,   // ZIP_ER_BASE + ZIP_ER_NOPASSWD
         37};  // ZIP_ER_BASE + ZIP_ER_WRONGPASSWD
 
+    std::vector<std::string> opts = {"-o", "nosymlinks,nospecials"};
+    if (LOG_IS_ON(INFO)) {
+      opts.push_back("--verbose");
+    } else {
+      opts.push_back("--redact");
+    }
+
     mounters_.push_back(std::make_unique<ArchiveMounter>(
-        platform(), process_reaper(), "zip", metrics(), "FuseZip",
-        std::move(password_needed_codes), std::move(sandbox_factory)));
+        platform(), process_reaper(), "zip", "zip", metrics(), "FuseZip",
+        std::move(password_needed_exit_codes), std::move(sandbox_factory),
+        std::move(opts)));
   }
 
   {
@@ -71,16 +81,29 @@ bool ArchiveManager::Initialize() {
   // program, not the fuse-archive program. More recently, we use fuse-archive
   // which is a drop-in replacement, featurewise, but is faster.
   const char* const archivemount_extensions[] = {
-      // The empty // comments make clang-format place one entry per line.
-      "7z",    //
-      "bz2",   //
-      "crx",   //
-      "gz",    //
-      "iso",   //
-      "tar",   //
-      "tbz",   //
-      "tbz2",  //
-      "tgz",   //
+      "7z",     //
+      "bz",     //
+      "bz2",    //
+      "crx",    //
+      "gz",     //
+      "iso",    //
+      "lz",     //
+      "lzma",   //
+      "tar",    //
+      "taz",    // Short for .tar.gz or .tar.Z
+      "tb2",    // Short for .tar.bz2
+      "tbz",    // Short for .tar.bz2
+      "tbz2",   // Short for .tar.bz2
+      "tgz",    // Short for .tar.gz
+      "tlz",    // Short for .tar.lzma
+      "tlzma",  // Short for .tar.lzma
+      "txz",    // Short for .tar.xz
+      "tz",     // Short for .tar.Z
+      "tz2",    // Short for .tar.bz2
+      "tzst",   // Short for .tar.zst
+      "xz",     //
+      "z",      //
+      "zst",    //
   };
   for (const char* const ext : archivemount_extensions) {
     SandboxedExecutable executable = {
@@ -89,13 +112,27 @@ bool ArchiveManager::Initialize() {
 
     auto sandbox_factory =
         CreateSandboxFactory(std::move(executable), "fuse-archivemount");
-    // The archivemount program (or, at least, the way we use it) doesn't
-    // support passwords.
-    std::vector<int> password_needed_codes = {};
+
+    // These fuse-archive exit codes are defined at
+    // https://github.com/google/fuse-archive/blob/a9df9f76c99b4b127e217f91b220ffe96bd0052f/src/main.cc#L82-L84
+    std::vector<int> password_needed_exit_codes = {
+        20,  // EXIT_CODE_PASSPHRASE_REQUIRED
+        21,  // EXIT_CODE_PASSPHRASE_INCORRECT
+        // We don't add 22 (EXIT_CODE_PASSPHRASE_NOT_SUPPORTED) here. That exit
+        // code means that the archive file has a password, but libarchive (and
+        // thus the fuse-archive program) does not support decrypting that file
+        // format. There's no point prompting the user for the password. We
+        // couldn't use the password even if it's correct.
+    };
+
+    std::vector<std::string> opts = {"--passphrase"};
+    if (!LOG_IS_ON(INFO))
+      opts.push_back("--redact");
 
     mounters_.push_back(std::make_unique<ArchiveMounter>(
-        platform(), process_reaper(), ext, metrics(), "Archivemount",
-        std::move(password_needed_codes), std::move(sandbox_factory)));
+        platform(), process_reaper(), "archive", ext, metrics(), "FuseArchive",
+        std::move(password_needed_exit_codes), std::move(sandbox_factory),
+        std::move(opts)));
   }
 
   return true;
@@ -109,8 +146,7 @@ bool ArchiveManager::ResolvePath(const std::string& path,
     mount_ns = brillo::ScopedMountNamespace::CreateFromPath(
         base::FilePath(ArchiveMounter::kChromeNamespace));
     if (!mount_ns) {
-      PLOG(ERROR) << "Cannot find archive " << redact(path)
-                  << " in mount namespace "
+      PLOG(ERROR) << "Cannot enter mount namespace "
                   << quote(ArchiveMounter::kChromeNamespace);
       return false;
     }
@@ -119,8 +155,7 @@ bool ArchiveManager::ResolvePath(const std::string& path,
 }
 
 bool ArchiveManager::IsInAllowedFolder(const std::string& source_path) {
-  std::vector<std::string> parts;
-  base::FilePath(source_path).GetComponents(&parts);
+  std::vector<std::string> parts = base::FilePath(source_path).GetComponents();
 
   if (parts.size() < 2 || parts[0] != "/")
     return false;
@@ -177,12 +212,12 @@ std::unique_ptr<MountPoint> ArchiveManager::DoMount(
     const std::string& filesystem_type,
     const std::vector<std::string>& options,
     const base::FilePath& mount_path,
-    MountErrorType* error) {
+    MountError* error) {
   // Here source_path is already resolved and free from symlinks and '..' by
   // the base class.
   if (!IsInAllowedFolder(source_path)) {
     LOG(ERROR) << "Source path " << redact(source_path) << " is not allowed";
-    *error = MOUNT_ERROR_INVALID_DEVICE_PATH;
+    *error = MountError::kInvalidDevicePath;
     return nullptr;
   }
   base::FilePath name;
@@ -191,9 +226,9 @@ std::unique_ptr<MountPoint> ArchiveManager::DoMount(
       return m->Mount(source_path, mount_path, options, error);
     }
   }
-  LOG(ERROR) << "Cannot find mounter for archive " << redact(source_path)
-             << " of type " << quote(filesystem_type);
-  *error = MOUNT_ERROR_UNKNOWN_FILESYSTEM;
+  LOG(ERROR) << "Cannot find mounter for " << filesystem_type << " archive "
+             << redact(source_path);
+  *error = MountError::kUnknownFilesystem;
   return nullptr;
 }
 
@@ -217,7 +252,8 @@ ArchiveManager::CreateSandboxFactory(SandboxedExecutable executable,
 
   return std::make_unique<FUSESandboxedProcessFactory>(
       platform(), std::move(executable), std::move(run_as),
-      /* has_network_access= */ false, std::move(groups));
+      /* has_network_access= */ false, /* kill_pid_namespace= */ true,
+      std::move(groups));
 }
 
 }  // namespace cros_disks

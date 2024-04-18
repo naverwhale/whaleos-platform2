@@ -1,7 +1,8 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//common-mk/generate-dbus-proxies.gni")
 import("//common-mk/pkg_config.gni")
 import("//common-mk/proto_library.gni")
 
@@ -16,47 +17,47 @@ group("all") {
 }
 
 pkg_config("target_defaults") {
+  cflags = [ "-Wconversion" ]
   pkg_deps = [
     "libbrillo",
     "libchrome",
+    "libnet-base",
     "system_api",
   ]
-  if (use.fuzzer) {
-    pkg_deps += [ "protobuf" ]
-  } else {
-    pkg_deps += [ "protobuf-lite" ]
-  }
-  defines = [ "USE_ARCVM=${use.arcvm}" ]
 }
 
-proto_library("protos") {
-  proto_in_dir = ".."
-  proto_out_dir = "include/patchpanel"
-  sources = [ "${proto_in_dir}/ipc.proto" ]
-  configs = [ ":target_defaults" ]
-}
-
-libpatchpanel_client_sources = [
-  "../net_util.cc",
-  "client.cc",
-  "fake_client.cc",
-]
-
-static_library("libpatchpanel-client_test") {
-  sources = libpatchpanel_client_sources
-  configs += [ ":target_defaults" ]
-  all_dependent_pkg_deps = [
-    "protobuf",
-    "system_api",
-  ]
-  deps = [ ":protos" ]
+# Generate the D-Bus C++ binding.
+generate_dbus_proxies("patchpanel_dbus_proxies") {
+  sources = [ "../dbus_bindings/org.chromium.patchpanel.xml" ]
+  proxy_output_file = "include/patchpanel/dbus-proxies.h"
+  dbus_service_config = "../dbus_bindings/dbus-service-config.json"
 }
 
 shared_library("libpatchpanel-client") {
-  sources = libpatchpanel_client_sources
+  sources = [
+    "../net_util.cc",
+    "client.cc",
+    "fake_client.cc",
+  ]
   configs += [ ":target_defaults" ]
-  all_dependent_pkg_deps = [ "protobuf" ]
+  if (use.fuzzer) {
+    all_dependent_pkg_deps = [ "protobuf" ]
+  } else {
+    all_dependent_pkg_deps = [ "protobuf-lite" ]
+  }
   libs = [ "system_api" ]
+  deps = [ ":patchpanel_dbus_proxies" ]
+}
+
+if (use.fuzzer || use.test) {
+  source_set("patchpanel_client_test_support") {
+    sources = [ "mock_patchpanel_proxy.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+    ]
+    deps = [ ":libpatchpanel-client" ]
+  }
 }
 
 if (use.fuzzer) {
@@ -71,7 +72,10 @@ if (use.fuzzer) {
       ":target_defaults",
       ":fuzzing_config",
     ]
-    deps = [ ":libpatchpanel-client" ]
+    deps = [
+      ":libpatchpanel-client",
+      ":patchpanel_client_test_support",
+    ]
   }
 }
 
@@ -89,7 +93,8 @@ if (use.test) {
     ]
     defines = [ "UNIT_TEST" ]
     deps = [
-      ":libpatchpanel-client_test",
+      ":libpatchpanel-client",
+      ":patchpanel_client_test_support",
       "//common-mk/testrunner",
     ]
   }

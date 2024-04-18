@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 
 #include "diagnostics/cros_healthd/events/audio_events.h"
 #include "diagnostics/cros_healthd/system/context.h"
-#include "mojo/cros_healthd_events.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_events.mojom.h"
 
 namespace diagnostics {
 
@@ -22,21 +22,24 @@ class AudioEventsImpl final : public AudioEvents {
   AudioEventsImpl& operator=(const AudioEventsImpl&) = delete;
   ~AudioEventsImpl() = default;
 
-  void AddObserver(mojo::PendingRemote<
-                   chromeos::cros_healthd::mojom::CrosHealthdAudioObserver>
+  void AddObserver(mojo::PendingRemote<ash::cros_healthd::mojom::EventObserver>
                        observer) override;
+  void AddObserver(
+      mojo::PendingRemote<ash::cros_healthd::mojom::CrosHealthdAudioObserver>
+          observer) override;
 
  private:
   void OnUnderrunSignal();
   void OnSevereUnderrunSignal();
 
   // Each observer in |observers_| will be notified of any audio event in the
-  // chromeos::cros_healthd::mojom::CrosHealthdAudioObserver interface. The
+  // ash::cros_healthd::mojom::CrosHealthdAudioObserver interface. The
   // RemoteSet manages the lifetime of the endpoints, which are
   // automatically destroyed and removed when the pipe they are bound to is
   // destroyed.
-  mojo::RemoteSet<chromeos::cros_healthd::mojom::CrosHealthdAudioObserver>
-      observers_;
+  mojo::RemoteSet<ash::cros_healthd::mojom::EventObserver> observers_;
+  mojo::RemoteSet<ash::cros_healthd::mojom::CrosHealthdAudioObserver>
+      deprecated_observers_;
 
   // Unowned pointer. Should outlive this instance.
   Context* const context_ = nullptr;

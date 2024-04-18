@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Chromium OS Authors. All rights reserved.
+ * Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -52,9 +52,6 @@ bool CreatePipe(const base::FilePath& path);
 // Returns the USB product ID for the current device, or an empty string if the
 // device does not support ADB over USB.
 bool GetConfiguration(AdbdConfiguration* config);
-
-// TODO(hidehiko): Remove once libchrome rolls and provides this method.
-std::string GetStrippedReleaseBoard();
 
 // Returns the name of the UDC driver that is available in the system, or an
 // empty string if none are available.

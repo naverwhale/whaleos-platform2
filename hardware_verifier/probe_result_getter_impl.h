@@ -1,4 +1,4 @@
-/* Copyright 2019 The Chromium OS Authors. All rights reserved.
+/* Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -7,8 +7,7 @@
 #define HARDWARE_VERIFIER_PROBE_RESULT_GETTER_IMPL_H_
 
 #include <memory>
-
-#include <base/macros.h>
+#include <optional>
 
 #include "hardware_verifier/probe_result_getter.h"
 
@@ -35,9 +34,9 @@ class ProbeResultGetterImpl : public ProbeResultGetter {
  public:
   ProbeResultGetterImpl();
 
-  base::Optional<runtime_probe::ProbeResult> GetFromRuntimeProbe()
+  std::optional<runtime_probe::ProbeResult> GetFromRuntimeProbe()
       const override;
-  base::Optional<runtime_probe::ProbeResult> GetFromFile(
+  std::optional<runtime_probe::ProbeResult> GetFromFile(
       const base::FilePath& file_path) const override;
 
  private:

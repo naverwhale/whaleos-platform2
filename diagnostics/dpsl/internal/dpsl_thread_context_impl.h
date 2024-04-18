@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,11 @@
 
 #include <memory>
 
-#include <base/macros.h>
 #include <base/memory/scoped_refptr.h>
 #include <base/run_loop.h>
 #include <base/sequence_checker_impl.h>
-#include <base/single_thread_task_runner.h>
 #include <base/task/single_thread_task_executor.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/platform_thread.h>
 
 #include "diagnostics/dpsl/public/dpsl_thread_context.h"

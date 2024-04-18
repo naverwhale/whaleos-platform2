@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
 #include <gtest/gtest.h>
+
+#include "brillo/files/file_util.h"
 
 using std::string;
 
@@ -33,7 +35,7 @@ TEST_F(OsReleaseReaderTest, MissingOsReleaseTest) {
 }
 
 TEST_F(OsReleaseReaderTest, MissingOsReleaseDTest) {
-  base::DeletePathRecursively(osreleased_);
+  brillo::DeletePathRecursively(osreleased_);
   store_.LoadTestingOnly(temp_dir_.GetPath());
 }
 

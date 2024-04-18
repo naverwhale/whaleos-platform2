@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,20 +9,21 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/containers/span.h>
+#include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/callback.h>
 #include <gtest/gtest_prod.h>
 
 #include "shill/ipconfig.h"
-#include "shill/net/io_handler.h"
 #include "shill/vpn/vpn_driver.h"
 
 namespace shill {
 
 class Error;
 class FileIO;
-class IOHandlerFactory;
 class ThirdPartyVpnAdaptorInterface;
 
 class ThirdPartyVpnDriver : public VPNDriver {
@@ -65,8 +66,8 @@ class ThirdPartyVpnDriver : public VPNDriver {
   // Implementation of VPNDriver
   void InitPropertyStore(PropertyStore* store) override;
   base::TimeDelta ConnectAsync(EventHandler* handler) override;
-  IPConfig::Properties GetIPProperties() const override;
-  std::string GetProviderType() const override;
+  std::unique_ptr<IPConfig::Properties> GetIPv4Properties() const override;
+  std::unique_ptr<IPConfig::Properties> GetIPv6Properties() const override;
   void Disconnect() override;
   void OnConnectTimeout() override;
 
@@ -79,7 +80,7 @@ class ThirdPartyVpnDriver : public VPNDriver {
             const std::string& storage_id,
             bool save_credentials) override;
 
-  void OnBeforeSuspend(const ResultCallback& callback) override;
+  void OnBeforeSuspend(ResultCallback callback) override;
   void OnAfterResume() override;
 
   const std::string& object_path_suffix() const { return object_path_suffix_; }
@@ -104,7 +105,7 @@ class ThirdPartyVpnDriver : public VPNDriver {
   // the failure reason to |failure|, sets its ErrorDetails property to
   // |error_details|, and disassociates from the service.
   void FailService(Service::ConnectFailure failure,
-                   const std::string& error_details);
+                   std::string_view error_details);
 
   void OnLinkReady(const std::string& link_name, int interface_index);
 
@@ -200,8 +201,8 @@ class ThirdPartyVpnDriver : public VPNDriver {
 
   // These functions are called whe there is input and error in the tun
   // interface.
-  void OnInput(InputData* data);
-  void OnInputError(const std::string& error);
+  void OnTunReadable();
+  void OnInput(base::span<const uint8_t> data);
 
   static const Property kProperties[];
 
@@ -220,16 +221,13 @@ class ThirdPartyVpnDriver : public VPNDriver {
 
   // File descriptor for the tun device.
   int tun_fd_;
+  // Watcher to wait for |tun_fd_| ready to read. It should be destructed
+  // prior than |tun_fd_| is closed.
+  std::unique_ptr<base::FileDescriptorWatcher::Controller> tun_watcher_;
 
   // Configuration properties of the virtual VPN device set by the VPN client.
-  IPConfig::Properties ip_properties_;
+  std::unique_ptr<IPConfig::Properties> ipv4_properties_;
   bool ip_properties_set_;
-
-  IOHandlerFactory* io_handler_factory_;
-
-  // IO handler triggered when there is an error or data ready for read in the
-  // tun device.
-  std::unique_ptr<IOHandler> io_handler_;
 
   // The object is used to write to tun device.
   FileIO* file_io_;

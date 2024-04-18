@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,21 +8,27 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/rand_util.h>
 #include <base/strings/stringprintf.h>
+#include <metrics/metrics_library.h>
 
-#include "crash-reporter/paths.h"
+#include "crash-reporter/constants.h"
 #include "crash-reporter/util.h"
 
 namespace {
-const char kEncryptedStatefulDeviceLabel[] = "encstateful";
-const char kStatefulDeviceLabel[] = "stateful";
 const char kCryptohomeDeviceLabel[] = "cryptohome";
+const char kEncryptedStatefulDeviceLabel[] = "encstateful";
 const char kInvalidDeviceLabel[] = "invalid";
+const char kMountFailureEncstateful[] = "mount_failure_encstateful";
+const char kMountFailureStateful[] = "mount_failure_stateful";
+const char kStatefulDeviceLabel[] = "stateful";
+const char kUmountFailureStateful[] = "umount_failure_stateful";
 
 std::vector<std::string> ConstructLoggingCommands(StorageDeviceType device_type,
                                                   bool is_mount_failure) {
@@ -49,9 +55,13 @@ std::vector<std::string> ConstructLoggingCommands(StorageDeviceType device_type,
 
 }  // namespace
 
-MountFailureCollector::MountFailureCollector(StorageDeviceType device_type,
-                                             bool testonly_send_all)
-    : CrashCollector("mount_failure_collector"),
+MountFailureCollector::MountFailureCollector(
+    StorageDeviceType device_type,
+    bool testonly_send_all,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("mount_failure_collector", metrics_lib),
       device_type_(device_type),
       testonly_send_all_(testonly_send_all) {}
 
@@ -97,9 +107,7 @@ bool MountFailureCollector::Collect(bool is_mount_failure) {
       LOG(INFO) << "Skipping umount failure";
       return true;
     }
-    AddCrashMetaUploadData(
-        "weight",
-        base::StringPrintf("%d", util::GetUmountStatefulFailureWeight()));
+    AddCrashMetaWeight(util::GetUmountStatefulFailureWeight());
   }
 
   std::string device_label = StorageDeviceTypeToString(device_type_);
@@ -110,7 +118,8 @@ bool MountFailureCollector::Collect(bool is_mount_failure) {
   auto logging_cmds = ConstructLoggingCommands(device_type_, is_mount_failure);
 
   base::FilePath crash_directory;
-  if (!GetCreatedCrashDirectoryByEuid(kRootUid, &crash_directory, nullptr)) {
+  if (!GetCreatedCrashDirectoryByEuid(constants::kRootUid, &crash_directory,
+                                      nullptr)) {
     return true;
   }
 
@@ -130,14 +139,34 @@ bool MountFailureCollector::Collect(bool is_mount_failure) {
   return true;
 }
 
+CrashCollector::ComputedCrashSeverity MountFailureCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  ComputedCrashSeverity computed_severity{
+      .crash_severity = CrashSeverity::kUnspecified,
+      .product_group = Product::kPlatform,
+  };
+
+  if ((exec_name == kMountFailureEncstateful) ||
+      (exec_name == kMountFailureStateful)) {
+    computed_severity.crash_severity = CrashSeverity::kFatal;
+  } else if (exec_name == kUmountFailureStateful) {
+    computed_severity.crash_severity = CrashSeverity::kWarning;
+  }
+
+  return computed_severity;
+}
+
 // static
 CollectorInfo MountFailureCollector::GetHandlerInfo(
     const std::string& mount_device,
     bool testonly_send_all,
     bool mount_failure,
-    bool umount_failure) {
+    bool umount_failure,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
   auto mount_failure_collector = std::make_shared<MountFailureCollector>(
-      ValidateStorageDeviceType(mount_device), testonly_send_all);
+      ValidateStorageDeviceType(mount_device), testonly_send_all, metrics_lib);
   return {
       .collector = mount_failure_collector,
       .handlers = {{

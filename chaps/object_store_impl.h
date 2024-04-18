@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,12 @@
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <brillo/secure_blob.h>
 #include <gtest/gtest_prod.h>
 #include <leveldb/db.h>
 #include <leveldb/env.h>
+
+#include "chaps/chaps_metrics.h"
 
 namespace chaps {
 
@@ -29,10 +30,8 @@ class ObjectStoreImpl : public ObjectStore {
 
   ~ObjectStoreImpl() override;
 
-  // Initializes the object store with the given database path. The magic file
-  // name ":memory:" will cause the store to create a memory-only database which
-  // is suitable for testing.
-  bool Init(const base::FilePath& database_path);
+  // Initializes the object store with the given database path.
+  bool Init(const base::FilePath& database_path, ChapsMetrics* chaps_metrics);
 
   // ObjectStore methods.
   bool GetInternalBlob(int blob_id, std::string* blob) override;

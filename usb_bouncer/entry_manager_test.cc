@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -38,7 +38,7 @@ bool IsUserPresent(SessionState session_state) {
 class TimeOverride {
  public:
   static base::Time Now() {
-    now_time_ += base::TimeDelta::FromMilliseconds(1);
+    now_time_ += base::Milliseconds(1);
     return now_time_;
   }
 

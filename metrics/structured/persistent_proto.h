@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,7 @@
 
 #include <base/check.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/memory/scoped_refptr.h>
-#include <base/optional.h>
 #include <base/time/time.h>
 
 namespace metrics {

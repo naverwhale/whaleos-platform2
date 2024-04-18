@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,12 +18,11 @@
 #include <gtest/gtest.h>
 
 #include "power_manager/common/battery_percentage_converter.h"
-#include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/system/charge_controller_helper_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 #include "power_manager/proto_bindings/policy.pb.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -69,7 +68,7 @@ void MakeAdvancedBatteryChargeModeDayConfig(
 
 }  // namespace
 
-class ChargeControllerTest : public ::testing::Test {
+class ChargeControllerTest : public TestEnvironment {
  public:
   ChargeControllerTest() {
     controller_.Init(&helper_, &battery_percentage_converter_);
@@ -432,7 +431,7 @@ struct CustomChargeThresholdsTestData {
 };
 
 class CustomChargeThresholdsChargeControllerTest
-    : public ::testing::Test,
+    : public TestEnvironment,
       public testing::WithParamInterface<CustomChargeThresholdsTestData> {
  public:
   int input_start_threshold() const { return GetParam().input.first; }
@@ -546,7 +545,7 @@ INSTANTIATE_TEST_SUITE_P(
              ChargeController::kCustomChargeModeEndMax}}));
 
 class PeakShiftThresholdChargeControllerTest
-    : public ::testing::Test,
+    : public TestEnvironment,
       public testing::WithParamInterface<std::tuple<int, int>> {
  public:
   int input_threshold() const { return std::get<0>(GetParam()); }
@@ -582,5 +581,4 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(ChargeController::kPeakShiftBatteryThresholdMax + 1,
                         ChargeController::kPeakShiftBatteryThresholdMax)));
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

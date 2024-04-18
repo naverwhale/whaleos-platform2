@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -235,20 +235,14 @@ TEST_F(SecureBlobTest, HexStringToSecureBlob) {
 template <typename T>
 class TestSecureAllocator : public SecureAllocator<T> {
  public:
-  using typename SecureAllocator<T>::pointer;
-  using typename SecureAllocator<T>::size_type;
-  using typename SecureAllocator<T>::value_type;
-
-  TestSecureAllocator() {
-    erased_count = 0;
-  }
+  TestSecureAllocator() { erased_count = 0; }
 
   int GetErasedCount() { return erased_count; }
 
  protected:
   static int erased_count;
 
-  void clear_contents(pointer p, size_type n) override {
+  void clear_contents(T* p, std::size_t n) override {
     SecureAllocator<T>::clear_contents(p, n);
     unsigned char* v = reinterpret_cast<unsigned char*>(p);
     for (int i = 0; i < n; i++) {
@@ -265,11 +259,14 @@ TEST(SecureAllocator, ErasureOnDeallocation) {
   // Make sure that the contents are cleared on deallocation.
   TestSecureAllocator<char> e;
 
-  char* test_string_addr = e.allocate(15);
-  snprintf(test_string_addr, sizeof(test_string_addr), "Test String");
+  // N.B. cpplint incorrectly recommends the use of `sizeof(test_string_addr)`
+  // if `15` is inlined as the size of the allocation, so pull it into a var.
+  size_t test_string_size = 15;
+  char* test_string_addr = e.allocate(test_string_size);
+  snprintf(test_string_addr, test_string_size, "Test String");
 
   // Deallocate memory; the mock class should check for cleared data.
-  e.deallocate(test_string_addr, 15);
+  e.deallocate(test_string_addr, test_string_size);
   // The deallocation should have traversed the complete page.
   EXPECT_EQ(e.GetErasedCount(), 4096);
 }

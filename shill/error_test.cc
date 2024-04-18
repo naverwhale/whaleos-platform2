@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -50,14 +50,6 @@ TEST(ErrorTest, PopulateCustomMessage) {
   e.Populate(Error::kInvalidArguments, kMessage);
   EXPECT_EQ(Error::kInvalidArguments, e.type());
   EXPECT_EQ(kMessage, e.message());
-}
-
-TEST(ErrorTest, CopyFrom) {
-  Error e(Error::kInvalidArguments, "Some message");
-  Error copy;
-  copy.CopyFrom(e);
-  EXPECT_EQ(e.type(), copy.type());
-  EXPECT_EQ(e.message(), copy.message());
 }
 
 TEST(ErrorTest, ToChromeosError) {
@@ -116,8 +108,6 @@ TEST(ErrorTest, GetDBusResult) {
             Error::GetDBusResult(Error::kNotSupported));
   EXPECT_EQ(kErrorResultOperationAborted,
             Error::GetDBusResult(Error::kOperationAborted));
-  EXPECT_EQ(kErrorResultOperationInitiated,
-            Error::GetDBusResult(Error::kOperationInitiated));
   EXPECT_EQ(kErrorResultOperationTimeout,
             Error::GetDBusResult(Error::kOperationTimeout));
   EXPECT_EQ(kErrorResultPassphraseRequired,
@@ -126,13 +116,17 @@ TEST(ErrorTest, GetDBusResult) {
             Error::GetDBusResult(Error::kPermissionDenied));
   EXPECT_EQ(kErrorResultPinBlocked, Error::GetDBusResult(Error::kPinBlocked));
   EXPECT_EQ(kErrorResultPinRequired, Error::GetDBusResult(Error::kPinRequired));
+  EXPECT_EQ(kErrorResultWepNotSupported,
+            Error::GetDBusResult(Error::kWepNotSupported));
   EXPECT_EQ(kErrorResultWrongState, Error::GetDBusResult(Error::kWrongState));
+  EXPECT_EQ(kErrorResultInternalError,
+            Error::GetDBusResult(Error::kOperationNotAllowed));
 }
 
 TEST(ErrorTest, GetDefaultMessage) {
   // Check the last error code to try to prevent off-by-one bugs when adding or
   // removing error types.
-  ASSERT_EQ(Error::kWrongState, Error::kNumErrors - 1);
+  ASSERT_EQ(Error::kOperationNotAllowed, Error::kNumErrors - 1);
   EXPECT_EQ("Permission denied",
             Error::GetDefaultMessage(Error::kPermissionDenied));
 }

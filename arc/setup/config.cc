@@ -1,9 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "arc/setup/config.h"
 
+#include <optional>
 #include <utility>
 
 #include <base/check.h>
@@ -46,21 +47,38 @@ Config::~Config() = default;
 
 bool Config::GetString(base::StringPiece name, std::string* out) const {
   base::Value* config = FindConfig(name);
-  return config ? config->GetAsString(out) : env_->GetVar(name, out);
+  if (config) {
+    if (const std::string* val = config->GetIfString()) {
+      *out = *val;
+      return true;
+    }
+    return false;
+  }
+  return env_->GetVar(name, out);
 }
 
 bool Config::GetInt(base::StringPiece name, int* out) const {
   base::Value* config = FindConfig(name);
-  if (config)
-    return config->GetAsInteger(out);
+  if (config) {
+    if (std::optional<int> val = config->GetIfInt()) {
+      *out = *val;
+      return true;
+    }
+    return false;
+  }
   std::string env_str;
   return env_->GetVar(name, &env_str) && base::StringToInt(env_str, out);
 }
 
 bool Config::GetBool(base::StringPiece name, bool* out) const {
   base::Value* config = FindConfig(name);
-  if (config)
-    return config->GetAsBoolean(out);
+  if (config) {
+    if (std::optional<bool> val = config->GetIfBool()) {
+      *out = *val;
+      return true;
+    }
+    return false;
+  }
   std::string env_str;
   return env_->GetVar(name, &env_str) && StringToBool(env_str, out);
 }
@@ -92,17 +110,17 @@ bool Config::ParseJsonFile(const base::FilePath& config_json) {
 
   auto result = base::JSONReader::ReadAndReturnValueWithError(
       json_str, base::JSON_PARSE_RFC);
-  if (!result.value) {
-    LOG(ERROR) << "Failed to parse json: " << result.error_message;
+  if (!result.has_value()) {
+    LOG(ERROR) << "Failed to parse json: " << result.error().message;
     return false;
   }
 
-  if (!result.value->is_dict()) {
+  if (!result->is_dict()) {
     LOG(ERROR) << "Failed to read json as dictionary";
     return false;
   }
 
-  for (const auto& item : result.value->DictItems()) {
+  for (const auto& item : result->GetDict()) {
     if (!json_
              .emplace(item.first,
                       base::Value::ToUniquePtrValue(std::move(item.second)))

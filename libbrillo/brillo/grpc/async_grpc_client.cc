@@ -1,8 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "brillo/grpc/async_grpc_client.h"
+
+#include <utility>
 
 #include "brillo/grpc/async_grpc_constants.h"
 
@@ -17,8 +19,8 @@ AsyncGrpcClientBase::AsyncGrpcClientBase(
 
 AsyncGrpcClientBase::~AsyncGrpcClientBase() = default;
 
-void AsyncGrpcClientBase::ShutDown(const base::Closure& on_shutdown_callback) {
-  dispatcher_.Shutdown(on_shutdown_callback);
+void AsyncGrpcClientBase::ShutDown(base::OnceClosure on_shutdown_callback) {
+  dispatcher_.Shutdown(std::move(on_shutdown_callback));
 }
 
 // static

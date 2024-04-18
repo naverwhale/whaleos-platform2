@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,8 @@
 
 #include <base/files/file_util.h>
 #include <base/memory/ref_counted.h>
-#include <base/threading/thread.h>
+#include <base/task/single_thread_task_runner.h>
+#include <mojo/public/cpp/bindings/remote.h>
 #include <mojo/public/cpp/system/invitation.h>
 
 #include "cups_proxy/mhd_http_request.h"
@@ -33,8 +34,8 @@ class MojoHandler {
   MojoHandler();
   ~MojoHandler();
 
-  // Starts the mojo thread.
-  bool StartThread();
+  // Creates the mojo task runner. Returns true iff the creation succeeds.
+  bool CreateTaskRunner();
 
   // Setup the mojo pipe using the fd, and set error handler.
   void SetupMojoPipe(base::ScopedFD fd, base::OnceClosure error_handler);
@@ -64,13 +65,11 @@ class MojoHandler {
                             const IppBody& body,
                             mojom::CupsProxier::ProxyRequestCallback callback);
 
-  base::Thread mojo_thread_;
-
   scoped_refptr<base::SingleThreadTaskRunner> mojo_task_runner_;
 
   // The top-level interface. Empty until it is created & bound to a pipe by
   // BootstrapMojoConnection.
-  mojom::CupsProxierPtr chrome_proxy_;
+  mojo::Remote<mojom::CupsProxier> chrome_proxy_;
 
   // Queued requests that come before |chrome_proxy_| is ready.
   std::vector<base::OnceClosure> queued_requests_;

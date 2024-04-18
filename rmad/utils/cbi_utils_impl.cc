@@ -1,19 +1,21 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "rmad/utils/cbi_utils_impl.h"
 
+#include <limits>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <base/logging.h>
-#include <base/process/launch.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <re2/re2.h>
 
-namespace rmad {
+#include "rmad/utils/cmd_utils_impl.h"
 
 namespace {
 
@@ -22,36 +24,75 @@ constexpr char kEctoolIntValRegex[] = R"(As uint: (\d+))";
 
 constexpr int kCbiTagSkuId = 2;
 constexpr int kCbiTagDramPartNum = 3;
+constexpr int kCbiTagFirmwareConfig = 6;
+constexpr int kCbiTagSsfc = 8;
 
 }  // namespace
 
-bool CbiUtilsImpl::GetSku(uint64_t* sku) const {
-  DCHECK(sku);
+namespace rmad {
 
-  return GetCbi(kCbiTagSkuId, sku);
+CbiUtilsImpl::CbiUtilsImpl() {
+  cmd_utils_ = std::make_unique<CmdUtilsImpl>();
+}
+
+CbiUtilsImpl::CbiUtilsImpl(std::unique_ptr<CmdUtils> cmd_utils)
+    : cmd_utils_(std::move(cmd_utils)) {}
+
+bool CbiUtilsImpl::GetSkuId(uint32_t* sku_id) const {
+  CHECK(sku_id);
+
+  return GetCbi(kCbiTagSkuId, sku_id);
 }
 
 bool CbiUtilsImpl::GetDramPartNum(std::string* dram_part_num) const {
-  DCHECK(dram_part_num);
+  CHECK(dram_part_num);
 
   return GetCbi(kCbiTagDramPartNum, dram_part_num);
 }
 
-bool CbiUtilsImpl::SetSku(uint64_t sku) {
-  int byte_size = 0;
-  uint64_t tmp = sku;
+bool CbiUtilsImpl::GetSsfc(uint32_t* ssfc) const {
+  CHECK(ssfc);
 
-  // To tackle |sku| = 0, we use do-while to ensure that |byte_size| >= 1.
+  uint32_t buf;
+  if (!GetCbi(kCbiTagSsfc, &buf)) {
+    return false;
+  }
+
+  *ssfc = static_cast<uint32_t>(buf);
+  return true;
+}
+
+bool CbiUtilsImpl::GetFirmwareConfig(uint32_t* firmware_config) const {
+  CHECK(firmware_config);
+
+  return GetCbi(kCbiTagFirmwareConfig, firmware_config);
+}
+
+bool CbiUtilsImpl::SetSkuId(uint32_t sku_id) {
+  int byte_size = 0;
+  uint32_t tmp = sku_id;
+
+  // To tackle |sku_id| = 0, we use do-while to ensure that |byte_size| >= 1.
   do {
     tmp >>= 8;
     byte_size++;
   } while (tmp);
 
-  return SetCbi(kCbiTagSkuId, sku, byte_size);
+  return SetCbi(kCbiTagSkuId, sku_id, byte_size);
 }
 
 bool CbiUtilsImpl::SetDramPartNum(const std::string& dram_part_num) {
   return SetCbi(kCbiTagDramPartNum, dram_part_num);
+}
+
+bool CbiUtilsImpl::SetSsfc(uint32_t ssfc) {
+  // For SSFC, we always use 4 bytes.
+  return SetCbi(kCbiTagSsfc, ssfc, 4);
+}
+
+bool CbiUtilsImpl::SetFirmwareConfig(uint32_t firmware_config) {
+  // For firmware config, we always use 4 bytes.
+  return SetCbi(kCbiTagFirmwareConfig, firmware_config, 4);
 }
 
 bool CbiUtilsImpl::SetCbi(int tag, const std::string& value, int set_flag) {
@@ -63,7 +104,7 @@ bool CbiUtilsImpl::SetCbi(int tag, const std::string& value, int set_flag) {
                                 "0",
                                 base::NumberToString(set_flag)};
   static std::string unused_output;
-  return base::GetAppOutput(argv, &unused_output);
+  return cmd_utils_->GetOutput(argv, &unused_output);
 }
 
 bool CbiUtilsImpl::GetCbi(int tag, std::string* value, int get_flag) const {
@@ -72,7 +113,7 @@ bool CbiUtilsImpl::GetCbi(int tag, std::string* value, int get_flag) const {
   std::vector<std::string> argv{kEctoolCmdPath, "cbi", "get",
                                 base::NumberToString(tag),
                                 base::NumberToString(get_flag)};
-  if (!base::GetAppOutput(argv, value)) {
+  if (!cmd_utils_->GetOutput(argv, value)) {
     return false;
   }
 
@@ -80,7 +121,7 @@ bool CbiUtilsImpl::GetCbi(int tag, std::string* value, int get_flag) const {
   return true;
 }
 
-bool CbiUtilsImpl::SetCbi(int tag, uint64_t value, int size, int set_flag) {
+bool CbiUtilsImpl::SetCbi(int tag, uint32_t value, int size, int set_flag) {
   CHECK_GE(size, 1);
   CHECK_LE(size, 8);
   CHECK(size == 8 || 1ull << (size * 8) > value);
@@ -93,17 +134,17 @@ bool CbiUtilsImpl::SetCbi(int tag, uint64_t value, int size, int set_flag) {
                                 base::NumberToString(size),
                                 base::NumberToString(set_flag)};
   static std::string unused_output;
-  return base::GetAppOutput(argv, &unused_output);
+  return cmd_utils_->GetOutput(argv, &unused_output);
 }
 
-bool CbiUtilsImpl::GetCbi(int tag, uint64_t* value, int get_flag) const {
+bool CbiUtilsImpl::GetCbi(int tag, uint32_t* value, int get_flag) const {
   CHECK(value != nullptr);
 
   std::vector<std::string> argv{kEctoolCmdPath, "cbi", "get",
                                 base::NumberToString(tag),
                                 base::NumberToString(get_flag)};
   std::string output;
-  if (!base::GetAppOutput(argv, &output)) {
+  if (!cmd_utils_->GetOutput(argv, &output)) {
     return false;
   }
 

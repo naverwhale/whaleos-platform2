@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use std::error;
@@ -183,5 +183,39 @@ mod tests {
             .expect("Long verbose flag should parse correctly")
             .expect("Options struct should be returned");
         assert!(args.verbose_log);
+    }
+
+    #[test]
+    fn help() {
+        let args =
+            Args::parse(&["ippusb-bridge", "-h"]).expect("Short help flag should parse correctly");
+        assert!(args.is_none());
+
+        let args = Args::parse(&["ippusb-bridge", "--help"])
+            .expect("Long help flag should parse correctly");
+        assert!(args.is_none());
+    }
+
+    #[test]
+    fn error_messages() {
+        let err = Error::GetOpts(getopts::Fail::ArgumentMissing("test".to_string()));
+        assert!(err.to_string().contains("Getopts error"));
+
+        let err = Error::ParseArgument(
+            "name".to_string(),
+            "val".to_string(),
+            i8::from_str_radix("val", 16).unwrap_err(),
+        );
+        assert!(err.to_string().contains("Failed to parse"));
+
+        let err = Error::InvalidArgument(
+            "flag".to_string(),
+            "val".to_string(),
+            "error_msg".to_string(),
+        );
+        assert!(err.to_string().contains("Invalid"));
+
+        let err = Error::MissingArgument("subcommand".to_string());
+        assert!(err.to_string().contains("Missing argument"));
     }
 }

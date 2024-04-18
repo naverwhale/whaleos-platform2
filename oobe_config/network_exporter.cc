@@ -1,21 +1,21 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "oobe_config/network_exporter.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/scoped_refptr.h>
-#include <base/optional.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <brillo/dbus/dbus_connection.h>
 #include <brillo/message_loops/base_message_loop.h>
@@ -33,12 +33,12 @@
 #include <mojo/public/cpp/system/invitation.h>
 
 #include "mojom/rollback_network_config.mojom.h"
-#include "oobe_config/rollback_constants.h"
 
 namespace oobe_config {
+
 namespace {
 
-using chromeos::rollback_network_config::mojom::RollbackNetworkConfig;
+using ::ash::rollback_network_config::mojom::RollbackNetworkConfig;
 
 std::unique_ptr<brillo::BaseMessageLoop> InitMessageLoop() {
   DCHECK(!brillo::MessageLoop::ThreadHasCurrent());
@@ -54,7 +54,7 @@ scoped_refptr<dbus::Bus> InitDBus(brillo::DBusConnection* dbus_connection) {
 std::unique_ptr<mojo::core::ScopedIPCSupport> InitMojo() {
   mojo::core::Init();
   return std::make_unique<mojo::core::ScopedIPCSupport>(
-      base::ThreadTaskRunnerHandle::Get(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
       mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
 }
 
@@ -71,7 +71,10 @@ mojo::Remote<RollbackNetworkConfig> BootstrapMojoConnection(dbus::Bus* bus) {
   dbus::MessageWriter writer(&bootstrap_method_call);
 
   std::unique_ptr<dbus::Response> bootstrap_response =
-      proxy->CallMethodAndBlock(&bootstrap_method_call, /*timeout_ms=*/25000);
+      proxy
+          ->CallMethodAndBlock(&bootstrap_method_call,
+                               /*timeout_ms=*/25000)
+          .value_or(nullptr);
 
   if (!bootstrap_response) {
     LOG(ERROR) << "Failed to establish dbus connection to Chrome. No response.";
@@ -123,7 +126,7 @@ std::string FetchNetworkConfigs(
         DCHECK(brillo::MessageLoop::current());
         brillo::MessageLoop::current()->BreakLoop();
       }),
-      base::TimeDelta::FromSeconds(90));
+      base::Seconds(90));
 
   // Wait until the configuration was fetched.
   message_loop->Run();
@@ -132,7 +135,7 @@ std::string FetchNetworkConfigs(
 
 }  // namespace
 
-base::Optional<std::string> ExportNetworkConfig() {
+std::optional<std::string> ExportNetworkConfig() {
   brillo::DBusConnection dbus_connection;
   auto bus = InitDBus(&dbus_connection);
   // Initializing mojo requires that the current thread has an associated
@@ -145,7 +148,7 @@ base::Optional<std::string> ExportNetworkConfig() {
   if (network_config_remote.is_bound()) {
     return FetchNetworkConfigs(network_config_remote, message_loop.get());
   }
-  return base::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace oobe_config

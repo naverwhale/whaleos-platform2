@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "runtime_probe/probe_function.h"
+#include "runtime_probe/probe_function_argument.h"
 
 namespace runtime_probe {
 
@@ -34,17 +35,17 @@ class SequenceFunction : public ProbeFunction {
  public:
   NAME_PROBE_FUNCTION("sequence");
 
-  template <typename T>
-  static auto FromKwargsValue(const base::Value& dict_value) {
-    PARSE_BEGIN();
-    PARSE_ARGUMENT(functions);
-    PARSE_END();
-  }
-
  private:
-  DataType EvalImpl() const override;
+  void EvalAsyncImpl(
+      base::OnceCallback<void(DataType)> callback) const override;
 
-  std::vector<std::unique_ptr<ProbeFunction>> functions_;
+  void RunNext(base::OnceCallback<void(DataType)> callback,
+               int idx,
+               base::Value::Dict result_dict,
+               SequenceFunction::DataType probe_result) const;
+
+  PROBE_FUNCTION_ARG_DEF(std::vector<std::unique_ptr<ProbeFunction>>,
+                         functions);
 
   FRIEND_TEST(SequenceFunctionTest, TestEvalFailTooManyResults);
   FRIEND_TEST(SequenceFunctionTest, TestEvalSuccess);

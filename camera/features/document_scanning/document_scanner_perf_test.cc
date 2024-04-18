@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -8,16 +8,16 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/json/json_file_value_serializer.h>
 #include <base/logging.h>
 #include <base/native_library.h>
 #include <base/scoped_native_library.h>
-#include <base/strings/stringprintf.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/stringprintf.h>
 #include <base/test/bind.h>
 #include <base/time/time.h>
 #include <base/timer/elapsed_timer.h>
@@ -36,7 +36,7 @@ constexpr int kWarmUpIterationCount = 5;
 constexpr int kActualIterationCount = 20;
 
 constexpr char kLibDocumentScannerLibraryPath[] =
-    "/opt/google/chrome/ml_models/document_scanning/libdocumentscanner.so";
+    "/usr/share/cros-camera/libfs/libdocumentscanner.so";
 
 std::vector<uint8_t> ReadFile(const base::FilePath& path) {
   int64_t size;
@@ -64,7 +64,7 @@ class DocumentScannerPerfTestEnvironment : public ::testing::Environment {
   DocumentScannerPerfTestEnvironment(const std::string& output_path,
                                      const std::string& jpeg_image_path,
                                      const std::string& nv12_image_path)
-      : perf_values_(base::Value::Type::DICTIONARY), output_path_(output_path) {
+      : output_path_(output_path) {
     jpeg_image_ = ReadFile(base::FilePath(jpeg_image_path));
     nv12_image_ = ReadFile(base::FilePath(nv12_image_path));
   }
@@ -80,7 +80,8 @@ class DocumentScannerPerfTestEnvironment : public ::testing::Environment {
     base::FilePath library_path(kLibDocumentScannerLibraryPath);
     library_ = base::ScopedNativeLibrary(base::LoadNativeLibraryWithOptions(
         library_path, native_library_options, &error));
-    ASSERT_TRUE(library_.is_valid()) << "Library is inavlid";
+    ASSERT_TRUE(library_.is_valid())
+        << "Library is invalid: " << error.ToString();
 
     create_fn_ = reinterpret_cast<CreateDocumentScannerFn>(
         library_.GetFunctionPointer("CreateDocumentScanner"));
@@ -102,14 +103,13 @@ class DocumentScannerPerfTestEnvironment : public ::testing::Environment {
     for (int i = 0; i < kActualIterationCount; ++i) {
       target_ops.Run();
     }
-    auto avg_duration =
-        timer.Elapsed().InMilliseconds() / kActualIterationCount;
-    perf_values_.SetIntKey(metrics_name, avg_duration);
+    int avg_duration = timer.Elapsed().InMilliseconds() / kActualIterationCount;
+    perf_values_.Set(metrics_name, avg_duration);
 
     LOG(INFO) << "Perf: " << metrics_name << " => " << avg_duration << " ms";
   }
 
-  base::Value perf_values_;
+  base::Value::Dict perf_values_;
   base::FilePath output_path_;
   std::vector<uint8_t> jpeg_image_;
   std::vector<uint8_t> nv12_image_;
@@ -158,7 +158,10 @@ TEST_F(DocumentScannerPerfTest, DoPostProcessing) {
                      std::vector<uint8_t> processed_jpeg_image;
                      scanner_->DoPostProcessingFromJPEGImage(
                          g_env->jpeg_image_.data(), g_env->jpeg_image_.size(),
-                         corners, &processed_jpeg_image);
+                         corners,
+                         chromeos_camera::document_scanning::DocumentScanner::
+                             Rotation::ROTATION_0,
+                         &processed_jpeg_image);
                      ASSERT_GT(processed_jpeg_image.size(), 0);
                    }));
 }

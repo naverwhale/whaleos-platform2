@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,24 @@
 
 #include "rmad/state_handler/base_state_handler.h"
 
+#include <memory>
+
+#include <base/files/file_path.h>
+
+#include "rmad/utils/gsc_utils.h"
+
 namespace rmad {
 
 class WriteProtectDisableMethodStateHandler : public BaseStateHandler {
  public:
   explicit WriteProtectDisableMethodStateHandler(
-      scoped_refptr<JsonStore> json_store);
+      scoped_refptr<JsonStore> json_store,
+      scoped_refptr<DaemonCallback> daemon_callback);
+  // Used to inject mock |gsc_utils_| for testing.
+  explicit WriteProtectDisableMethodStateHandler(
+      scoped_refptr<JsonStore> json_store,
+      scoped_refptr<DaemonCallback> daemon_callback,
+      std::unique_ptr<GscUtils> gsc_utils);
 
   ASSIGN_STATE(RmadState::StateCase::kWpDisableMethod);
   SET_REPEATABLE;
@@ -22,6 +34,11 @@ class WriteProtectDisableMethodStateHandler : public BaseStateHandler {
 
  protected:
   ~WriteProtectDisableMethodStateHandler() override = default;
+
+ private:
+  bool CheckVarsInStateFile() const;
+
+  std::unique_ptr<GscUtils> gsc_utils_;
 };
 
 }  // namespace rmad

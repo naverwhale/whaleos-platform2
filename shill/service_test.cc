@@ -1,57 +1,62 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/service.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/containers/contains.h>
+#include <base/functional/bind.h>
 #include <base/memory/scoped_refptr.h>
-#include <base/run_loop.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/test/bind.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/test/test_future.h>
 #include <chromeos/dbus/service_constants.h>
 #include <chromeos/patchpanel/dbus/fake_client.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library_mock.h>
 
+#include "base/time/time.h"
 #include "shill/dbus/dbus_control.h"
-#include "shill/dhcp/mock_dhcp_properties.h"
 #include "shill/error.h"
 #include "shill/ethernet/ethernet_service.h"
 #include "shill/event_dispatcher.h"
-#include "shill/fake_store.h"
 #include "shill/ipconfig.h"
 #include "shill/manager.h"
+#include "shill/metrics.h"
 #include "shill/mock_adaptors.h"
-#include "shill/mock_connection.h"
 #include "shill/mock_device.h"
-#include "shill/mock_device_info.h"
+#include "shill/mock_eap_credentials.h"
 #include "shill/mock_event_dispatcher.h"
+#include "shill/mock_ipconfig.h"
 #include "shill/mock_log.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_power_manager.h"
 #include "shill/mock_profile.h"
 #include "shill/mock_service.h"
-#include "shill/net/mock_time.h"
-#include "shill/property_store_test.h"
+#include "shill/mock_time.h"
+#include "shill/network/mock_network.h"
 #include "shill/service_property_change_test.h"
 #include "shill/service_under_test.h"
+#include "shill/store/fake_store.h"
+#include "shill/store/property_store_test.h"
 #include "shill/testing.h"
-
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
-#include "shill/mock_eap_credentials.h"
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 using testing::_;
 using testing::AnyNumber;
 using testing::AtLeast;
 using testing::DefaultValue;
 using testing::DoAll;
+using testing::Eq;
+using testing::Ge;
 using testing::HasSubstr;
 using testing::Mock;
 using testing::NiceMock;
@@ -67,29 +72,7 @@ namespace {
 const char kConnectDisconnectReason[] = "RPC";
 const char kGUID[] = "guid";
 const char kDeviceName[] = "testdevice";
-
-bool TrafficCountersMatch(
-    const std::vector<brillo::VariantDictionary>& expected_traffic_counters,
-    const std::vector<brillo::VariantDictionary>& actual_traffic_counters) {
-  for (auto& expected_dict : expected_traffic_counters) {
-    bool found = false;
-    EXPECT_EQ(expected_dict.size(), 3);
-    for (auto& actual_dict : actual_traffic_counters) {
-      EXPECT_EQ(actual_dict.size(), 3);
-      if (expected_dict.at("source") != actual_dict.at("source")) {
-        continue;
-      }
-      EXPECT_EQ(expected_dict.at("rx_bytes"), actual_dict.at("rx_bytes"));
-      EXPECT_EQ(expected_dict.at("tx_bytes"), actual_dict.at("tx_bytes"));
-      found = true;
-    }
-    if (!found) {
-      return false;
-    }
-  }
-  return true;
-}
-
+const char kDeviceHwAddr[] = "01:02:03:0a:0b:0c";
 }  // namespace
 
 namespace shill {
@@ -108,9 +91,7 @@ class ServiceTest : public PropertyStoreTest {
     service_->disconnects_.time_ = &time_;
     service_->misconnects_.time_ = &time_;
     DefaultValue<Timestamp>::Set(Timestamp());
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
     service_->eap_.reset(new NiceMock<MockEapCredentials>());
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
     mock_manager_.running_ = true;
     mock_manager_.set_power_manager(power_manager_);  // Passes ownership.
   }
@@ -146,6 +127,10 @@ class ServiceTest : public PropertyStoreTest {
 
   Service::ConnectState GetPreviousState() const {
     return service_->previous_state_;
+  }
+
+  void SetTechnology(Technology technology) {
+    service_->technology_ = technology;
   }
 
   void NoteFailureEvent() { service_->NoteFailureEvent(); }
@@ -189,11 +174,15 @@ class ServiceTest : public PropertyStoreTest {
 
   void ClearAutoConnect(Error* error) { service_->ClearAutoConnect(error); }
 
+  bool IsAutoConnectable(const char** reason) {
+    return service_->IsAutoConnectable(reason);
+  }
+
   bool SetAutoConnectFull(bool connect, Error* error) {
     return service_->SetAutoConnectFull(connect, error);
   }
 
-  const base::CancelableClosure& GetPendingConnectTask() {
+  const base::CancelableOnceClosure& GetPendingConnectTask() {
     return service_->pending_connect_task_;
   }
 
@@ -214,31 +203,35 @@ class ServiceTest : public PropertyStoreTest {
     return SortingOrderIs(service0, service1, kShouldCompareConnectivityState);
   }
 
-  base::Optional<base::TimeDelta> GetTimeSinceFailed() {
+  std::optional<base::TimeDelta> GetTimeSinceFailed() {
     // Wait 1 MS before calling GetTimeSinceFailed.
-    base::RunLoop run_loop;
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-        FROM_HERE,
-        base::Bind([](base::Closure quit_closure) { quit_closure.Run(); },
-                   run_loop.QuitClosure()),
-        base::TimeDelta::FromMilliseconds(1));
-    run_loop.Run();
+    base::test::TestFuture<void> future;
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, future.GetCallback(), base::Milliseconds(1));
+    EXPECT_TRUE(future.Wait());
     return service_->GetTimeSinceFailed();
   }
 
-  patchpanel::TrafficCounter CreateCounter(
+  patchpanel::Client::TrafficCounter CreateCounter(
       const std::valarray<uint64_t>& vals,
-      patchpanel::TrafficCounter::Source source,
+      patchpanel::Client::TrafficSource source,
       const std::string& device_name) {
     EXPECT_EQ(4, vals.size());
-    patchpanel::TrafficCounter counter;
-    counter.set_rx_bytes(vals[0]);
-    counter.set_tx_bytes(vals[1]);
-    counter.set_rx_packets(vals[2]);
-    counter.set_tx_packets(vals[3]);
-    counter.set_source(source);
-    counter.set_device(device_name);
+    patchpanel::Client::TrafficCounter counter;
+    counter.rx_bytes = vals[0];
+    counter.tx_bytes = vals[1];
+    counter.rx_packets = vals[2];
+    counter.tx_packets = vals[3];
+    counter.source = source;
+    counter.ifname = device_name;
     return counter;
+  }
+
+  bool SetAnyPropertyAndEnsureSuccess(const std::string& name,
+                                      const brillo::Any& value) {
+    Error error;
+    service_->mutable_store()->SetAnyProperty(name, value, &error);
+    return error.IsSuccess();
   }
 
   NiceMock<MockManager> mock_manager_;
@@ -248,6 +241,18 @@ class ServiceTest : public PropertyStoreTest {
   std::string storage_id_;
   MockPowerManager* power_manager_;  // Owned by |mock_manager_|.
   std::vector<Technology> technology_order_for_sorting_;
+
+  void SetUplinkSpeedKbps(uint32_t uplink_speed_kbps) {
+    service_->SetUplinkSpeedKbps(uplink_speed_kbps);
+  }
+
+  void SetDownlinkSpeedKbps(uint32_t downlink_speed_kbps) {
+    service_->SetDownlinkSpeedKbps(downlink_speed_kbps);
+  }
+
+  uint32_t uplink_speed_kbps() { return service_->uplink_speed_kbps(); }
+
+  uint32_t downlink_speed_kbps() { return service_->downlink_speed_kbps(); }
 };
 
 class AllMockServiceTest : public testing::Test {
@@ -282,7 +287,7 @@ TEST_F(ServiceTest, CalculateState) {
 }
 
 TEST_F(ServiceTest, CalculateTechnology) {
-  service_->technology_ = Technology::kWifi;
+  service_->technology_ = Technology::kWiFi;
   Error error;
   EXPECT_EQ(kTypeWifi, service_->CalculateTechnology(&error));
   EXPECT_TRUE(error.IsSuccess());
@@ -343,66 +348,66 @@ TEST_F(ServiceTest, GetProperties) {
 
 TEST_F(ServiceTest, SetProperty) {
   {
-    Error error;
-    EXPECT_TRUE(service_->mutable_store()->SetAnyProperty(
-        kSaveCredentialsProperty, PropertyStoreTest::kBoolV, &error));
+    EXPECT_TRUE(SetAnyPropertyAndEnsureSuccess(kSaveCredentialsProperty,
+                                               PropertyStoreTest::kBoolV));
   }
   {
-    Error error;
     const int32_t priority = 1;
-    EXPECT_TRUE(service_->mutable_store()->SetAnyProperty(
-        kPriorityProperty, brillo::Any(priority), &error));
+    EXPECT_TRUE(SetAnyPropertyAndEnsureSuccess(kPriorityProperty,
+                                               brillo::Any(priority)));
   }
   {
-    Error error;
     const std::string guid("not default");
-    EXPECT_TRUE(service_->mutable_store()->SetAnyProperty(
-        kGuidProperty, brillo::Any(guid), &error));
+    EXPECT_TRUE(
+        SetAnyPropertyAndEnsureSuccess(kGuidProperty, brillo::Any(guid)));
   }
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   // Ensure that EAP properties cannot be set on services with no EAP
   // credentials.  Use service2_ here since we're have some code in
   // ServiceTest::SetUp() that fiddles with service_->eap_.
+  std::string eap("eap eep eip!");
   {
     Error error;
-    std::string eap("eap eep eip!");
-    EXPECT_FALSE(service2_->mutable_store()->SetAnyProperty(
-        kEapMethodProperty, brillo::Any(eap), &error));
+    service2_->mutable_store()->SetAnyProperty(kEapMethodProperty,
+                                               brillo::Any(eap), &error);
     ASSERT_TRUE(error.IsFailure());
     EXPECT_EQ(Error::kInvalidProperty, error.type());
-    // Now plumb in eap credentials, and try again.
-    service2_->SetEapCredentials(new EapCredentials());
-    EXPECT_TRUE(service2_->mutable_store()->SetAnyProperty(
-        kEapMethodProperty, brillo::Any(eap), &error));
   }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
+  {
+    // Now plumb in eap credentials, and try again.
+    Error error;
+    service2_->SetEapCredentials(new EapCredentials());
+    service2_->mutable_store()->SetAnyProperty(kEapMethodProperty,
+                                               brillo::Any(eap), &error);
+    EXPECT_TRUE(error.IsSuccess());
+  }
   // Ensure that an attempt to write a R/O property returns InvalidArgs error.
   {
     Error error;
-    EXPECT_FALSE(service_->mutable_store()->SetAnyProperty(
-        kConnectableProperty, PropertyStoreTest::kBoolV, &error));
+    service_->mutable_store()->SetAnyProperty(
+        kConnectableProperty, PropertyStoreTest::kBoolV, &error);
     ASSERT_TRUE(error.IsFailure());
     EXPECT_EQ(Error::kInvalidArguments, error.type());
   }
   {
     bool auto_connect = true;
     Error error;
-    EXPECT_TRUE(service_->mutable_store()->SetAnyProperty(
-        kAutoConnectProperty, brillo::Any(auto_connect), &error));
+    service_->mutable_store()->SetAnyProperty(
+        kAutoConnectProperty, brillo::Any(auto_connect), &error);
+    EXPECT_TRUE(error.IsSuccess());
   }
   // Ensure that we can perform a trivial set of the Name property (to its
   // current value) but an attempt to set the property to a different value
   // fails.
   {
     Error error;
-    EXPECT_FALSE(service_->mutable_store()->SetAnyProperty(
-        kNameProperty, brillo::Any(GetFriendlyName()), &error));
+    service_->mutable_store()->SetAnyProperty(
+        kNameProperty, brillo::Any(GetFriendlyName()), &error);
     EXPECT_FALSE(error.IsFailure());
   }
   {
     Error error;
-    EXPECT_FALSE(service_->mutable_store()->SetAnyProperty(
-        kNameProperty, PropertyStoreTest::kStringV, &error));
+    service_->mutable_store()->SetAnyProperty(
+        kNameProperty, PropertyStoreTest::kStringV, &error);
     ASSERT_TRUE(error.IsFailure());
     EXPECT_EQ(Error::kInvalidArguments, error.type());
   }
@@ -424,7 +429,6 @@ TEST_F(ServiceTest, IsLoadableFrom) {
   EXPECT_TRUE(service_->IsLoadableFrom(storage));
 }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 class ServiceWithOnEapCredentialsChangedOverride : public ServiceUnderTest {
  public:
   ServiceWithOnEapCredentialsChangedOverride(Manager* manager,
@@ -436,7 +440,6 @@ class ServiceWithOnEapCredentialsChangedOverride : public ServiceUnderTest {
     SetHasEverConnected(false);
   }
 };
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 TEST_F(ServiceTest, LoadTrafficCounters) {
   FakeStore storage;
@@ -446,25 +449,23 @@ TEST_F(ServiceTest, LoadTrafficCounters) {
   std::vector<uint64_t> kChromeCounters{0, 0, 0, kChromeTxPackets};
   storage.SetUint64(storage_id_,
                     Service::GetCurrentTrafficCounterKey(
-                        patchpanel::TrafficCounter::USER,
+                        patchpanel::Client::TrafficSource::kUser,
                         Service::kStorageTrafficCounterRxBytesSuffix),
                     kUserRxBytes);
   storage.SetUint64(storage_id_,
                     Service::GetCurrentTrafficCounterKey(
-                        patchpanel::TrafficCounter::CHROME,
+                        patchpanel::Client::TrafficSource::kChrome,
                         Service::kStorageTrafficCounterTxPacketsSuffix),
                     kChromeTxPackets);
   EXPECT_TRUE(service_->Load(&storage));
   EXPECT_EQ(service_->current_traffic_counters_.size(), 2);
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->current_traffic_counters_[patchpanel::TrafficCounter::USER][i],
-        kUserCounters[i]);
-    EXPECT_EQ(
-        service_
-            ->current_traffic_counters_[patchpanel::TrafficCounter::CHROME][i],
-        kChromeCounters[i]);
+    EXPECT_EQ(service_->current_traffic_counters_
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              kUserCounters[i]);
+    EXPECT_EQ(service_->current_traffic_counters_
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              kChromeCounters[i]);
   }
 }
 
@@ -480,9 +481,6 @@ TEST_F(ServiceTest, Load) {
   storage.SetInt(storage_id_, Service::kStoragePriority, kPriority);
   storage.SetString(storage_id_, Service::kStorageProxyConfig, kProxyConfig);
   storage.SetString(storage_id_, Service::kStorageUIData, kUIData);
-
-  auto* dhcp_props = new DhcpProperties(&mock_manager_);
-  service_->dhcp_properties_.reset(dhcp_props);
 
   EXPECT_TRUE(service_->Load(&storage));
   EXPECT_EQ(kCheckPortal, service_->check_portal_);
@@ -506,7 +504,6 @@ TEST_F(ServiceTest, Load) {
   EXPECT_EQ("", service_->ui_data_);
 }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 TEST_F(ServiceTest, LoadEap) {
   FakeStore storage;
 
@@ -549,7 +546,6 @@ TEST_F(ServiceTest, GetEapPassphraseNonEap) {
   EXPECT_TRUE(password.empty());
   EXPECT_FALSE(error.IsSuccess());
 }
-#endif
 
 TEST_F(ServiceTest, LoadFail) {
   FakeStore storage;
@@ -598,28 +594,28 @@ TEST_F(ServiceTest, SaveTrafficCounters) {
   FakeStore storage;
   std::valarray<uint64_t> kVPNCounters{0, 19, 28, 0};
   std::valarray<uint64_t> kUnknownCounters{333, 222, 555, 888};
-  service_->current_traffic_counters_[patchpanel::TrafficCounter::VPN] =
+  service_->current_traffic_counters_[patchpanel::Client::TrafficSource::kVpn] =
       kVPNCounters;
   EXPECT_TRUE(service_->Save(&storage));
   std::vector<uint64_t> kActualVPNCounters(Service::kTrafficCounterArraySize);
   storage.GetUint64(storage_id_,
                     Service::GetCurrentTrafficCounterKey(
-                        patchpanel::TrafficCounter::VPN,
+                        patchpanel::Client::TrafficSource::kVpn,
                         Service::kStorageTrafficCounterRxBytesSuffix),
                     &kActualVPNCounters[0]);
   storage.GetUint64(storage_id_,
                     Service::GetCurrentTrafficCounterKey(
-                        patchpanel::TrafficCounter::VPN,
+                        patchpanel::Client::TrafficSource::kVpn,
                         Service::kStorageTrafficCounterTxBytesSuffix),
                     &kActualVPNCounters[1]);
   storage.GetUint64(storage_id_,
                     Service::GetCurrentTrafficCounterKey(
-                        patchpanel::TrafficCounter::VPN,
+                        patchpanel::Client::TrafficSource::kVpn,
                         Service::kStorageTrafficCounterRxPacketsSuffix),
                     &kActualVPNCounters[2]);
   storage.GetUint64(storage_id_,
                     Service::GetCurrentTrafficCounterKey(
-                        patchpanel::TrafficCounter::VPN,
+                        patchpanel::Client::TrafficSource::kVpn,
                         Service::kStorageTrafficCounterTxPacketsSuffix),
                     &kActualVPNCounters[3]);
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
@@ -629,15 +625,14 @@ TEST_F(ServiceTest, SaveTrafficCounters) {
 
 TEST_F(ServiceTest, Save) {
   FakeStore storage;
-  service_->technology_ = Technology::kWifi;
+  service_->technology_ = Technology::kWiFi;
   EXPECT_TRUE(service_->Save(&storage));
 
   std::string type;
   EXPECT_TRUE(storage.GetString(storage_id_, Service::kStorageType, &type));
-  EXPECT_EQ(type, service_->GetTechnologyString());
+  EXPECT_EQ(type, service_->GetTechnologyName());
 }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 TEST_F(ServiceTest, SaveEap) {
   FakeStore storage;
   const char kIdentity[] = "identity";
@@ -652,23 +647,6 @@ TEST_F(ServiceTest, SaveEap) {
   EXPECT_TRUE(storage.GetString(
       storage_id_, EapCredentials::kStorageCredentialEapIdentity, &identity));
   EXPECT_EQ(identity, kIdentity);
-}
-#endif
-
-TEST_F(ServiceTest, SaveDhcpProperties) {
-  FakeStore storage;
-
-  const char kHostname[] = "hostname";
-  service_->dhcp_properties_for_testing()
-      ->properties_for_testing()
-      ->Set<std::string>(DhcpProperties::kHostnameProperty, kHostname);
-  EXPECT_TRUE(service_->Save(&storage));
-
-  std::string key = std::string(DhcpProperties::kPropertyPrefix) +
-                    DhcpProperties::kHostnameProperty;
-  std::string hostname;
-  EXPECT_TRUE(storage.GetString(storage_id_, key, &hostname));
-  EXPECT_EQ(hostname, kHostname);
 }
 
 TEST_F(ServiceTest, RetainAutoConnect) {
@@ -731,23 +709,80 @@ TEST_F(ServiceTest, Unload) {
   EXPECT_FALSE(service_->has_ever_connected_);
 }
 
-// Tests that static IP configs are set, stored and unloaded correctly.
-TEST_F(ServiceTest, StaticIPConfigs) {
-  const char kTestIpAddress[] = "1.2.3.4";
-  const int32_t kTestPrefixlen = 5;
-  EXPECT_FALSE(service_->HasStaticIPAddress());
-  KeyValueStore static_ip_configs;
-  static_ip_configs.Set(kAddressProperty, std::string(kTestIpAddress));
-  static_ip_configs.Set(kPrefixlenProperty, kTestPrefixlen);
-  service_->mutable_store()->SetKeyValueStoreProperty(
-      kStaticIPConfigProperty, static_ip_configs, /*error=*/nullptr);
-  EXPECT_TRUE(service_->HasStaticIPAddress());
+TEST_F(ServiceTest, SaveAndLoadConnectionTimestamps) {
   FakeStore storage;
+  base::Time time1, time2, time3;
+  ASSERT_TRUE(base::Time::FromString("01 Jan 2018 12:00:00", &time1));
+  ASSERT_TRUE(base::Time::FromString("02 Jan 2018 12:00:00", &time2));
+  ASSERT_TRUE(base::Time::FromString("03 Jan 2018 12:00:00", &time3));
+  service_->SetLastConnectedProperty(time1);
+  service_->SetLastManualConnectAttemptProperty(time2);
+  service_->SetLastOnlineProperty(time3);
+  EXPECT_TRUE(service_->Save(&storage));
+
+  // Verify the values in the storage
+  uint64_t time_ms;
+  EXPECT_TRUE(
+      storage.GetUint64(storage_id_, Service::kStorageLastConnected, &time_ms));
+  EXPECT_EQ(time_ms, time1.ToDeltaSinceWindowsEpoch().InMilliseconds());
+
+  EXPECT_TRUE(storage.GetUint64(
+      storage_id_, Service::kStorageLastManualConnectAttempt, &time_ms));
+  EXPECT_EQ(time_ms, time2.ToDeltaSinceWindowsEpoch().InMilliseconds());
+
+  EXPECT_TRUE(
+      storage.GetUint64(storage_id_, Service::kStorageLastOnline, &time_ms));
+  EXPECT_EQ(time_ms, time3.ToDeltaSinceWindowsEpoch().InMilliseconds());
+
+  // Load into a separate service
+  EXPECT_TRUE(service2_->Load(&storage));
+  EXPECT_EQ(time1, base::Time::FromDeltaSinceWindowsEpoch(base::Milliseconds(
+                       service2_->GetLastConnectedProperty(nullptr))));
+  EXPECT_EQ(time2,
+            base::Time::FromDeltaSinceWindowsEpoch(base::Milliseconds(
+                service2_->GetLastManualConnectAttemptProperty(nullptr))));
+  EXPECT_EQ(time3, base::Time::FromDeltaSinceWindowsEpoch(base::Milliseconds(
+                       service2_->GetLastOnlineProperty(nullptr))));
+}
+
+// Tests that callback is invoked properly when static IP configs changed.
+TEST_F(ServiceTest, StaticIPConfigsChanged) {
+  constexpr char kTestIpAddress1[] = "1.2.3.4";
+  constexpr char kTestIpAddress2[] = "1.2.3.5";
+  constexpr int kTestPrefix = 24;
+  KeyValueStore static_ip_configs;
+  FakeStore storage;
+
+  const auto update_address = [&](const std::string& ip_addr) {
+    static_ip_configs.Set(kAddressProperty, ip_addr);
+    static_ip_configs.Set(kPrefixlenProperty, kTestPrefix);
+    service_->mutable_store()->SetKeyValueStoreProperty(
+        kStaticIPConfigProperty, static_ip_configs, /*error=*/nullptr);
+  };
+  update_address(kTestIpAddress1);
   ASSERT_TRUE(service_->Save(&storage));
-  service_->Unload();
-  EXPECT_FALSE(service_->HasStaticIPAddress());
+
+  auto network =
+      std::make_unique<MockNetwork>(1, "test_ifname", Technology::kEthernet);
+  service_->SetAttachedNetwork(network->AsWeakPtr());
+  SetStateField(Service::kStateConnected);
+
+  // Changes the address, network should be notified.
+  EXPECT_CALL(*network, OnStaticIPConfigChanged(_));
+  update_address(kTestIpAddress2);
+  // Address is not changed, network should not be notified.
+  update_address(kTestIpAddress2);
+  // Reloads the service, network should be notified since address is changed.
+  EXPECT_CALL(*network, OnStaticIPConfigChanged(_));
   ASSERT_TRUE(service_->Load(&storage));
-  EXPECT_TRUE(service_->HasStaticIPAddress());
+
+  // Persists the service and reloads again, network should not be notified
+  // since address is not changed.
+  ASSERT_TRUE(service_->Save(&storage));
+  // Detaches the network, it should be notified once, but not any more.
+  EXPECT_CALL(*network, OnStaticIPConfigChanged(_));
+  service_->SetAttachedNetwork(nullptr);
+  update_address(kTestIpAddress2);
 }
 
 TEST_F(ServiceTest, State) {
@@ -773,7 +808,7 @@ TEST_F(ServiceTest, State) {
   EXPECT_CALL(mock_manager_, UpdateService(IsRefPtrTo(service_)));
   service_->SetFailure(Service::kFailureOutOfRange);
   EXPECT_TRUE(service_->IsFailed());
-  base::Optional<base::TimeDelta> time_failed = GetTimeSinceFailed();
+  std::optional<base::TimeDelta> time_failed = GetTimeSinceFailed();
   ASSERT_TRUE(time_failed);
   EXPECT_GT(*time_failed, base::TimeDelta());
   EXPECT_GT(service_->previous_error_serial_number_, 0);
@@ -869,16 +904,38 @@ TEST_F(ServiceTest, StateResetAfterFailure) {
   EXPECT_EQ(Service::kStateConnected, service_->state());
 }
 
+TEST_F(ServiceTest, UserInitiatedConnectionAttempt) {
+  {
+    // The initiation of connection attempt by user is successful.
+    Error error;
+    service_->SetState(Service::kStateIdle);
+    service_->UserInitiatedConnect(kConnectDisconnectReason, &error);
+    EXPECT_TRUE(service_->is_in_user_connect());
+  }
+  {
+    // The initiation of connection attempt by user fails, i.e. not attempted.
+    // |Service::UserInitiatedConnect| checks if |error| is set during the call
+    // stack through |Service::Connect| to know if the attempt is initiated
+    // successfully. Here write a failure type in |error| to mimic this case.
+    Error error(Error::kOperationFailed);
+    service_->SetState(Service::kStateIdle);
+    service_->UserInitiatedConnect(kConnectDisconnectReason, &error);
+    EXPECT_FALSE(service_->is_in_user_connect());
+  }
+}
+
 TEST_F(ServiceTest, UserInitiatedConnectionResult) {
-  service_->technology_ = Technology::kWifi;
+  service_->technology_ = Technology::kWiFi;
   Error error;
   // User-initiated connection attempt succeed.
   service_->SetState(Service::kStateIdle);
   service_->UserInitiatedConnect(kConnectDisconnectReason, &error);
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionResult(
-                              Metrics::kMetricWifiUserInitiatedConnectionResult,
-                              Metrics::kUserInitiatedConnectionResultSuccess));
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionFailureReason(_, _))
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(Metrics::kMetricWifiUserInitiatedConnectionResult,
+                            Metrics::kUserInitiatedConnectionResultSuccess));
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(
+                  Metrics::kMetricWifiUserInitiatedConnectionFailureReason, _))
       .Times(0);
   service_->SetState(Service::kStateConnected);
   Mock::VerifyAndClearExpectations(metrics());
@@ -886,13 +943,13 @@ TEST_F(ServiceTest, UserInitiatedConnectionResult) {
   // User-initiated connection attempt failed.
   service_->SetState(Service::kStateIdle);
   service_->UserInitiatedConnect(kConnectDisconnectReason, &error);
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionResult(
-                              Metrics::kMetricWifiUserInitiatedConnectionResult,
-                              Metrics::kUserInitiatedConnectionResultFailure));
   EXPECT_CALL(*metrics(),
-              NotifyUserInitiatedConnectionFailureReason(
-                  Metrics::kMetricWifiUserInitiatedConnectionFailureReason,
-                  Service::kFailureDHCP));
+              SendEnumToUMA(Metrics::kMetricWifiUserInitiatedConnectionResult,
+                            Metrics::kUserInitiatedConnectionResultFailure));
+  EXPECT_CALL(
+      *metrics(),
+      SendEnumToUMA(Metrics::kMetricWifiUserInitiatedConnectionFailureReason,
+                    Metrics::kUserInitiatedConnectionFailureReasonDHCP));
   service_->SetFailure(Service::kFailureDHCP);
   Mock::VerifyAndClearExpectations(metrics());
 
@@ -900,10 +957,12 @@ TEST_F(ServiceTest, UserInitiatedConnectionResult) {
   service_->SetState(Service::kStateIdle);
   service_->UserInitiatedConnect(kConnectDisconnectReason, &error);
   service_->SetState(Service::kStateAssociating);
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionResult(
-                              Metrics::kMetricWifiUserInitiatedConnectionResult,
-                              Metrics::kUserInitiatedConnectionResultAborted));
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionFailureReason(_, _))
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(Metrics::kMetricWifiUserInitiatedConnectionResult,
+                            Metrics::kUserInitiatedConnectionResultAborted));
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(
+                  Metrics::kMetricWifiUserInitiatedConnectionFailureReason, _))
       .Times(0);
   service_->SetState(Service::kStateIdle);
   Mock::VerifyAndClearExpectations(metrics());
@@ -911,8 +970,13 @@ TEST_F(ServiceTest, UserInitiatedConnectionResult) {
   // No metric reporting for other state transition.
   service_->SetState(Service::kStateIdle);
   service_->UserInitiatedConnect(kConnectDisconnectReason, &error);
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionResult(_, _)).Times(0);
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionFailureReason(_, _))
+  EXPECT_CALL(
+      *metrics(),
+      SendEnumToUMA(Metrics::kMetricWifiUserInitiatedConnectionResult, _))
+      .Times(0);
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(
+                  Metrics::kMetricWifiUserInitiatedConnectionFailureReason, _))
       .Times(0);
   service_->SetState(Service::kStateAssociating);
   service_->SetState(Service::kStateConfiguring);
@@ -921,8 +985,13 @@ TEST_F(ServiceTest, UserInitiatedConnectionResult) {
   // No metric reporting for non-user-initiated connection.
   service_->SetState(Service::kStateIdle);
   service_->Connect(&error, "in test");
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionResult(_, _)).Times(0);
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionFailureReason(_, _))
+  EXPECT_CALL(
+      *metrics(),
+      SendEnumToUMA(Metrics::kMetricWifiUserInitiatedConnectionResult, _))
+      .Times(0);
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(
+                  Metrics::kMetricWifiUserInitiatedConnectionFailureReason, _))
       .Times(0);
   service_->SetState(Service::kStateConnected);
   Mock::VerifyAndClearExpectations(metrics());
@@ -931,8 +1000,13 @@ TEST_F(ServiceTest, UserInitiatedConnectionResult) {
   service_->technology_ = Technology::kCellular;
   service_->SetState(Service::kStateIdle);
   service_->UserInitiatedConnect(kConnectDisconnectReason, &error);
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionResult(_, _)).Times(0);
-  EXPECT_CALL(*metrics(), NotifyUserInitiatedConnectionFailureReason(_, _))
+  EXPECT_CALL(
+      *metrics(),
+      SendEnumToUMA(Metrics::kMetricWifiUserInitiatedConnectionResult, _))
+      .Times(0);
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(
+                  Metrics::kMetricWifiUserInitiatedConnectionFailureReason, _))
       .Times(0);
   service_->SetFailure(Service::kFailureDHCP);
   Mock::VerifyAndClearExpectations(metrics());
@@ -941,7 +1015,7 @@ TEST_F(ServiceTest, UserInitiatedConnectionResult) {
 TEST_F(ServiceTest, CompleteCellularActivation) {
   Error error;
   service_->CompleteCellularActivation(&error);
-  EXPECT_EQ(Error::kNotSupported, error.type());
+  EXPECT_EQ(Error::kNotImplemented, error.type());
 }
 
 TEST_F(ServiceTest, EnableAndRetainAutoConnect) {
@@ -970,6 +1044,7 @@ TEST_F(ServiceTest, IsAutoConnectable) {
 
   // Services with non-primary connectivity technologies should not auto-connect
   // when the system is offline.
+  service_->technology_ = Technology::kUnknown;
   EXPECT_EQ(Technology::kUnknown, service_->technology());
   EXPECT_CALL(mock_manager_, IsConnected()).WillOnce(Return(false));
   EXPECT_FALSE(service_->IsAutoConnectable(&reason));
@@ -1037,9 +1112,8 @@ TEST_F(AllMockServiceTest, AutoConnectWithFailures) {
   EXPECT_TRUE(service_->IsAutoConnectable(&reason));
 
   // The second call does trigger some throttling.
-  EXPECT_CALL(
-      dispatcher_,
-      PostDelayedTask(_, _, Service::kMinAutoConnectCooldownTimeMilliseconds));
+  EXPECT_CALL(dispatcher_,
+              PostDelayedTask(_, _, service_->GetMinAutoConnectCooldownTime()));
   service_->AutoConnect();
   Mock::VerifyAndClearExpectations(&dispatcher_);
   EXPECT_FALSE(service_->IsAutoConnectable(&reason));
@@ -1058,12 +1132,10 @@ TEST_F(AllMockServiceTest, AutoConnectWithFailures) {
   EXPECT_TRUE(service_->IsAutoConnectable(&reason));
 
   // Timeouts increase exponentially.
-  uint64_t next_cooldown_time = service_->auto_connect_cooldown_milliseconds_;
-  EXPECT_EQ(next_cooldown_time,
-            Service::kAutoConnectCooldownBackoffFactor *
-                Service::kMinAutoConnectCooldownTimeMilliseconds);
-  while (next_cooldown_time <=
-         service_->GetMaxAutoConnectCooldownTimeMilliseconds()) {
+  base::TimeDelta next_cooldown_time = service_->auto_connect_cooldown_;
+  EXPECT_EQ(next_cooldown_time, Service::kAutoConnectCooldownBackoffFactor *
+                                    service_->GetMinAutoConnectCooldownTime());
+  while (next_cooldown_time <= service_->GetMaxAutoConnectCooldownTime()) {
     EXPECT_CALL(dispatcher_, PostDelayedTask(_, _, next_cooldown_time));
     service_->AutoConnect();
     Mock::VerifyAndClearExpectations(&dispatcher_);
@@ -1077,8 +1149,7 @@ TEST_F(AllMockServiceTest, AutoConnectWithFailures) {
   for (int32_t i = 0; i < 2; i++) {
     EXPECT_CALL(
         dispatcher_,
-        PostDelayedTask(_, _,
-                        service_->GetMaxAutoConnectCooldownTimeMilliseconds()));
+        PostDelayedTask(_, _, service_->GetMaxAutoConnectCooldownTime()));
     service_->AutoConnect();
     Mock::VerifyAndClearExpectations(&dispatcher_);
     EXPECT_FALSE(service_->IsAutoConnectable(&reason));
@@ -1092,12 +1163,11 @@ TEST_F(AllMockServiceTest, AutoConnectWithFailures) {
   reason = "";
   EXPECT_TRUE(service_->IsAutoConnectable(&reason));
   EXPECT_STREQ("", reason);
-  EXPECT_EQ(service_->auto_connect_cooldown_milliseconds_, 0);
+  EXPECT_TRUE(service_->auto_connect_cooldown_.is_zero());
 
   // But future AutoConnects behave as before
-  EXPECT_CALL(
-      dispatcher_,
-      PostDelayedTask(_, _, Service::kMinAutoConnectCooldownTimeMilliseconds))
+  EXPECT_CALL(dispatcher_,
+              PostDelayedTask(_, _, service_->GetMinAutoConnectCooldownTime()))
       .Times(1);
   service_->AutoConnect();
   service_->AutoConnect();
@@ -1110,6 +1180,18 @@ TEST_F(AllMockServiceTest, AutoConnectWithFailures) {
   reason = "";
   EXPECT_TRUE(service_->IsAutoConnectable(&reason));
   EXPECT_STREQ("", reason);
+}
+
+TEST_F(ServiceTest, SkipAutoConnectAfterRecentBadPassphraseFailure) {
+  const char* reason;
+  service_->SetConnectable(true);
+  SetTechnology(Technology::kWiFi);
+  EXPECT_TRUE(IsAutoConnectable(&reason));
+
+  service_->set_failed_time_for_testing(base::Time::Now());
+  service_->set_previous_error_for_testing(kErrorBadPassphrase);
+  service_->AutoConnect();
+  EXPECT_EQ(0, service_->connect_calls());
 }
 
 TEST_F(ServiceTest, ConfigureBadProperty) {
@@ -1158,7 +1240,6 @@ TEST_F(ServiceTest, ConfigureStringsProperty) {
   EXPECT_EQ(kStrings1, service_->strings());
 }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 TEST_F(ServiceTest, ConfigureEapStringProperty) {
   MockEapCredentials* eap = new NiceMock<MockEapCredentials>();
   service2_->SetEapCredentials(eap);  // Passes ownership.
@@ -1176,7 +1257,6 @@ TEST_F(ServiceTest, ConfigureEapStringProperty) {
   service2_->Configure(args, &error);
   EXPECT_TRUE(error.IsSuccess());
 }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 TEST_F(ServiceTest, ConfigureIntProperty) {
   const int kPriority0 = 100;
@@ -1342,56 +1422,173 @@ TEST_F(ServiceTest, OnPropertyChanged) {
   service_->OnPropertyChanged("");
 }
 
-TEST_F(ServiceTest, RecheckPortal) {
-  service_->state_ = Service::kStateIdle;
-  EXPECT_CALL(mock_manager_, RecheckPortalOnService(_)).Times(0);
-  service_->OnPropertyChanged(kCheckPortalProperty);
-
-  service_->state_ = Service::kStateNoConnectivity;
-  EXPECT_CALL(mock_manager_, RecheckPortalOnService(IsRefPtrTo(service_)))
-      .Times(1);
-  service_->OnPropertyChanged(kCheckPortalProperty);
-
-  service_->state_ = Service::kStateConnected;
-  EXPECT_CALL(mock_manager_, RecheckPortalOnService(IsRefPtrTo(service_)))
-      .Times(1);
-  service_->OnPropertyChanged(kProxyConfigProperty);
-
-  service_->state_ = Service::kStateOnline;
-  EXPECT_CALL(mock_manager_, RecheckPortalOnService(IsRefPtrTo(service_)))
-      .Times(1);
-  service_->OnPropertyChanged(kCheckPortalProperty);
-
-  service_->state_ = Service::kStateNoConnectivity;
-  EXPECT_CALL(mock_manager_, RecheckPortalOnService(_)).Times(0);
-  service_->OnPropertyChanged(kEapKeyIdProperty);
-}
-
 TEST_F(ServiceTest, SetCheckPortal) {
+  scoped_refptr<MockDevice> mock_device =
+      new MockDevice(&mock_manager_, kDeviceName, kDeviceHwAddr, 1);
+  ON_CALL(mock_manager_, FindDeviceFromService(_))
+      .WillByDefault(Return(mock_device));
+
+  // Ensure no other conditions for IsPortalDetectionDisabled is met.
+  EXPECT_CALL(mock_manager_, IsPortalDetectionEnabled(_))
+      .WillRepeatedly(Return(true));
   {
+    Error error;
+    service_->SetProxyConfig("", &error);
+  }
+  SetStateField(Service::kStateConnected);
+  EXPECT_FALSE(service_->IsPortalDetectionDisabled());
+
+  {
+    EXPECT_CALL(*mock_device,
+                UpdatePortalDetector(
+                    Network::ValidationReason::kServicePropertyUpdate));
     Error error;
     service_->SetCheckPortal("false", &error);
     EXPECT_TRUE(error.IsSuccess());
     EXPECT_EQ(Service::kCheckPortalFalse, service_->check_portal_);
+    EXPECT_TRUE(service_->IsPortalDetectionDisabled());
+    Mock::VerifyAndClearExpectations(mock_device.get());
   }
   {
+    EXPECT_CALL(*mock_device,
+                UpdatePortalDetector(
+                    Network::ValidationReason::kServicePropertyUpdate));
     Error error;
     service_->SetCheckPortal("true", &error);
     EXPECT_TRUE(error.IsSuccess());
     EXPECT_EQ(Service::kCheckPortalTrue, service_->check_portal_);
+    EXPECT_FALSE(service_->IsPortalDetectionDisabled());
+    Mock::VerifyAndClearExpectations(mock_device.get());
   }
   {
+    EXPECT_CALL(*mock_device,
+                UpdatePortalDetector(
+                    Network::ValidationReason::kServicePropertyUpdate));
     Error error;
     service_->SetCheckPortal("auto", &error);
     EXPECT_TRUE(error.IsSuccess());
     EXPECT_EQ(Service::kCheckPortalAuto, service_->check_portal_);
+    EXPECT_FALSE(service_->IsPortalDetectionDisabled());
+    Mock::VerifyAndClearExpectations(mock_device.get());
   }
   {
+    EXPECT_CALL(*mock_device, UpdatePortalDetector(_)).Times(0);
     Error error;
     service_->SetCheckPortal("xxx", &error);
     EXPECT_FALSE(error.IsSuccess());
     EXPECT_EQ(Error::kInvalidArguments, error.type());
     EXPECT_EQ(Service::kCheckPortalAuto, service_->check_portal_);
+    EXPECT_FALSE(service_->IsPortalDetectionDisabled());
+    Mock::VerifyAndClearExpectations(mock_device.get());
+  }
+}
+
+TEST_F(ServiceTest, SetProxyConfig) {
+  scoped_refptr<MockDevice> mock_device =
+      new MockDevice(&mock_manager_, kDeviceName, kDeviceHwAddr, 1);
+  ON_CALL(mock_manager_, FindDeviceFromService(_))
+      .WillByDefault(Return(mock_device));
+
+  // Ensure no other conditions for IsPortalDetectionDisabled is met.
+  EXPECT_CALL(mock_manager_, IsPortalDetectionEnabled(_))
+      .WillRepeatedly(Return(true));
+  {
+    Error error;
+    service_->SetCheckPortal("true", &error);
+  }
+  SetStateField(Service::kStateConnected);
+  EXPECT_FALSE(service_->IsPortalDetectionDisabled());
+
+  {
+    EXPECT_CALL(*mock_device,
+                UpdatePortalDetector(
+                    Network::ValidationReason::kServicePropertyUpdate));
+    Error error;
+    service_->SetProxyConfig("{\"mode\":\"auto_detect\"}", &error);
+    EXPECT_TRUE(error.IsSuccess());
+    EXPECT_TRUE(service_->HasProxyConfig());
+    EXPECT_TRUE(service_->IsPortalDetectionDisabled());
+    Mock::VerifyAndClearExpectations(mock_device.get());
+  }
+  {
+    EXPECT_CALL(*mock_device,
+                UpdatePortalDetector(
+                    Network::ValidationReason::kServicePropertyUpdate));
+    Error error;
+    service_->SetProxyConfig("{\"mode\":\"direct\"}", &error);
+    EXPECT_TRUE(error.IsSuccess());
+    EXPECT_FALSE(service_->HasProxyConfig());
+    EXPECT_FALSE(service_->IsPortalDetectionDisabled());
+    Mock::VerifyAndClearExpectations(mock_device.get());
+  }
+  {
+    EXPECT_CALL(*mock_device,
+                UpdatePortalDetector(
+                    Network::ValidationReason::kServicePropertyUpdate));
+    Error error;
+    service_->SetProxyConfig("", &error);
+    EXPECT_TRUE(error.IsSuccess());
+    EXPECT_FALSE(service_->HasProxyConfig());
+    EXPECT_FALSE(service_->IsPortalDetectionDisabled());
+    Mock::VerifyAndClearExpectations(mock_device.get());
+  }
+}
+
+TEST_F(ServiceTest, IsPortalDetectionDisabled) {
+  {
+    // The service has a proxy configuration == "direct"
+    Error error;
+    service_->SetCheckPortal("true", &error);
+    service_->SetProxyConfig("{\"mode\":\"direct\"}", &error);
+    EXPECT_CALL(mock_manager_, IsPortalDetectionEnabled(_))
+        .WillRepeatedly(Return(true));
+    EXPECT_FALSE(service_->IsPortalDetectionDisabled());
+  }
+  {
+    // The service has a proxy configuration != "direct"
+    Error error;
+    service_->SetCheckPortal("true", &error);
+    service_->SetProxyConfig("{\"mode\":\"auto_detect\"}", &error);
+    EXPECT_CALL(mock_manager_, IsPortalDetectionEnabled(_))
+        .WillRepeatedly(Return(true));
+    EXPECT_TRUE(service_->IsPortalDetectionDisabled());
+  }
+  {
+    // The service has is configured through ONC device policy.
+    Error error;
+    service_->SetCheckPortal("true", &error);
+    service_->SetONCSource("DevicePolicy", &error);
+    EXPECT_CALL(mock_manager_, IsPortalDetectionEnabled(_))
+        .WillRepeatedly(Return(true));
+    EXPECT_TRUE(service_->IsPortalDetectionDisabled());
+  }
+  {
+    // The service has is configured through ONC user policy.
+    Error error;
+    service_->SetCheckPortal("true", &error);
+    service_->SetONCSource("UserPolicy", &error);
+    EXPECT_CALL(mock_manager_, IsPortalDetectionEnabled(_))
+        .WillRepeatedly(Return(true));
+    EXPECT_TRUE(service_->IsPortalDetectionDisabled());
+  }
+  {
+    // The service's "CheckPortal" property is set to "false".
+    Error error;
+    service_->SetCheckPortal("false", &error);
+    service_->SetProxyConfig("", &error);
+    EXPECT_CALL(mock_manager_, IsPortalDetectionEnabled(_))
+        .WillRepeatedly(Return(true));
+    EXPECT_TRUE(service_->IsPortalDetectionDisabled());
+  }
+  {
+    // The service's "CheckPortal" property is set to "auto" and portal
+    // detection is disabled for this link technology.
+    Error error;
+    service_->SetCheckPortal("auto", &error);
+    service_->SetProxyConfig("", &error);
+    EXPECT_CALL(mock_manager_, IsPortalDetectionEnabled(_))
+        .WillRepeatedly(Return(false));
+    EXPECT_TRUE(service_->IsPortalDetectionDisabled());
   }
 }
 
@@ -1444,7 +1641,6 @@ TEST_F(ServiceTest, SetConnectableFull) {
   EXPECT_TRUE(service_->connectable());
 }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 class WriteOnlyServicePropertyTest : public ServiceTest {};
 TEST_P(WriteOnlyServicePropertyTest, PropertyWriteOnly) {
   // Use a real EapCredentials instance since the base Service class
@@ -1462,9 +1658,9 @@ INSTANTIATE_TEST_SUITE_P(
     WriteOnlyServicePropertyTestInstance,
     WriteOnlyServicePropertyTest,
     Values(brillo::Any(std::string(kEapPasswordProperty))));
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 TEST_F(ServiceTest, GetIPConfigRpcIdentifier) {
+  const std::string kIfName = "test_ifname";
   {
     Error error;
     EXPECT_EQ(DBusControl::NullRpcIdentifier(),
@@ -1472,39 +1668,31 @@ TEST_F(ServiceTest, GetIPConfigRpcIdentifier) {
     EXPECT_EQ(Error::kNotFound, error.type());
   }
 
-  auto mock_device_info =
-      std::make_unique<NiceMock<MockDeviceInfo>>(&mock_manager_);
-  scoped_refptr<MockConnection> mock_connection(
-      new NiceMock<MockConnection>(mock_device_info.get()));
-
-  service_->connection_ = mock_connection;
+  {
+    Error error;
+    auto network =
+        std::make_unique<MockNetwork>(1, kIfName, Technology::kEthernet);
+    service_->SetAttachedNetwork(network->AsWeakPtr());
+    auto ipconfig =
+        std::make_unique<MockIPConfig>(control_interface(), kIfName);
+    EXPECT_CALL(*network, GetCurrentIPConfig())
+        .WillOnce(Return(ipconfig.get()));
+    EXPECT_EQ(ipconfig->GetRpcIdentifier(),
+              service_->GetIPConfigRpcIdentifier(&error));
+    EXPECT_TRUE(error.IsSuccess());
+  }
 
   {
     Error error;
-    const RpcIdentifier empty_rpcid;
-    EXPECT_CALL(*mock_connection, ipconfig_rpc_identifier())
-        .WillOnce(ReturnRef(empty_rpcid));
+    auto network =
+        std::make_unique<MockNetwork>(1, kIfName, Technology::kEthernet);
+    service_->SetAttachedNetwork(network->AsWeakPtr());
     EXPECT_EQ(DBusControl::NullRpcIdentifier(),
               service_->GetIPConfigRpcIdentifier(&error));
     EXPECT_EQ(Error::kNotFound, error.type());
   }
-
-  {
-    Error error;
-    const RpcIdentifier nonempty_rpcid("/ipconfig/path");
-    EXPECT_CALL(*mock_connection, ipconfig_rpc_identifier())
-        .WillOnce(ReturnRef(nonempty_rpcid));
-    EXPECT_EQ(nonempty_rpcid, service_->GetIPConfigRpcIdentifier(&error));
-    EXPECT_EQ(Error::kSuccess, error.type());
-  }
-
-  // Assure orderly destruction of the Connection before DeviceInfo.
-  service_->connection_ = nullptr;
-  mock_connection = nullptr;
-  mock_device_info.reset();
 }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
 class ServiceWithMockOnEapCredentialsChanged : public ServiceUnderTest {
  public:
   explicit ServiceWithMockOnEapCredentialsChanged(Manager* manager)
@@ -1614,7 +1802,6 @@ TEST_F(ServiceTest, Certification) {
   service_->ClearEAPCertification();
   EXPECT_TRUE(service_->remote_certification_.empty());
 }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 TEST_F(ServiceTest, NoteFailureEventIdle) {
   Timestamp timestamp;
@@ -1976,9 +2163,7 @@ TEST_F(ServiceTest, CustomSetterNoopChange) {
 }
 
 TEST_F(ServiceTest, GetTethering) {
-  Error error;
-  EXPECT_EQ("", service_->GetTethering(&error));
-  EXPECT_EQ(Error::kNotSupported, error.type());
+  EXPECT_EQ(Service::TetheringState::kUnknown, service_->GetTethering());
 }
 
 TEST_F(ServiceTest, MeteredOverride) {
@@ -2017,7 +2202,7 @@ class ServiceWithMockOnPropertyChanged : public ServiceUnderTest {
  public:
   explicit ServiceWithMockOnPropertyChanged(Manager* manager)
       : ServiceUnderTest(manager) {}
-  MOCK_METHOD(void, OnPropertyChanged, (const std::string&), (override));
+  MOCK_METHOD(void, OnPropertyChanged, (std::string_view), (override));
 };
 
 TEST_F(ServiceTest, ConfigureServiceTriggersOnPropertyChanged) {
@@ -2029,8 +2214,9 @@ TEST_F(ServiceTest, ConfigureServiceTriggersOnPropertyChanged) {
 
   // Calling Configure with different values from before triggers a single
   // OnPropertyChanged call per property.
-  EXPECT_CALL(*service, OnPropertyChanged(kUIDataProperty)).Times(1);
-  EXPECT_CALL(*service, OnPropertyChanged(kSaveCredentialsProperty)).Times(1);
+  EXPECT_CALL(*service, OnPropertyChanged(Eq(kUIDataProperty))).Times(1);
+  EXPECT_CALL(*service, OnPropertyChanged(Eq(kSaveCredentialsProperty)))
+      .Times(1);
   {
     Error error;
     service->Configure(args, &error);
@@ -2131,9 +2317,9 @@ TEST_F(ServiceTest, Compare) {
   EXPECT_CALL(*service2, technology())
       .WillRepeatedly(Return(Technology::kEthernet));
   EXPECT_CALL(*service10, technology())
-      .WillRepeatedly(Return((Technology::kWifi)));
+      .WillRepeatedly(Return((Technology::kWiFi)));
 
-  technology_order_for_sorting_ = {Technology::kEthernet, Technology::kWifi};
+  technology_order_for_sorting_ = {Technology::kEthernet, Technology::kWiFi};
   EXPECT_TRUE(DefaultSortingOrderIs(service2, service10));
 
   // Connectable.
@@ -2189,10 +2375,10 @@ TEST_F(ServiceTest, ComparePreferEthernetOverWifi) {
   // Create mock wifi service.
   scoped_refptr<MockService> wifi_service(new NiceMock<MockService>(manager()));
   EXPECT_CALL(*wifi_service.get(), technology())
-      .WillRepeatedly(Return((Technology::kWifi)));
+      .WillRepeatedly(Return((Technology::kWiFi)));
 
   // Confirm that ethernet service is sorted above wifi service.
-  technology_order_for_sorting_ = {Technology::kEthernet, Technology::kWifi};
+  technology_order_for_sorting_ = {Technology::kEthernet, Technology::kWiFi};
   EXPECT_TRUE(DefaultSortingOrderIs(ethernet_service, wifi_service));
 
   // Even making the wifi service managed doesn't change the network sorting
@@ -2256,7 +2442,7 @@ TEST_F(ServiceTest, DisconnectSetsDisconnectState) {
   service_->SetState(Service::kStateAssociating);
   error.Reset();
   service_->Disconnect(&error, __func__);
-  EXPECT_EQ(error.type(), Error::kSuccess);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(service_->state(), Service::kStateDisconnecting);
 }
 
@@ -2267,13 +2453,13 @@ TEST_F(ServiceTest, DelayedDisconnect) {
   // Begin disconnect but do not finish.
   Error error;
   service_->Disconnect(&error, __func__);
-  EXPECT_EQ(error.type(), Error::kSuccess);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(service_->state(), Service::kStateDisconnecting);
 
   // Trigger connection.
   ASSERT_TRUE(service_->connectable());
   service_->Connect(&error, __func__);
-  EXPECT_EQ(error.type(), Error::kSuccess);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(service_->state(), Service::kStateDisconnecting);
   EXPECT_TRUE(HasPendingConnect());
 
@@ -2293,13 +2479,13 @@ TEST_F(ServiceTest, DelayedDisconnectWithAdditionalConnect) {
   // Begin disconnect but do not finish.
   Error error;
   service_->Disconnect(&error, __func__);
-  EXPECT_EQ(error.type(), Error::kSuccess);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(service_->state(), Service::kStateDisconnecting);
 
   // Trigger connection.
   ASSERT_TRUE(service_->connectable());
   service_->Connect(&error, __func__);
-  EXPECT_EQ(error.type(), Error::kSuccess);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(service_->state(), Service::kStateDisconnecting);
   EXPECT_TRUE(HasPendingConnect());
 
@@ -2311,98 +2497,109 @@ TEST_F(ServiceTest, DelayedDisconnectWithAdditionalConnect) {
   // ensure that the pending connect task will be cancelled.
   ASSERT_TRUE(service_->connectable());
   service_->Connect(&error, __func__);
-  EXPECT_EQ(error.type(), Error::kSuccess);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_FALSE(HasPendingConnect());
 }
 
+TEST_F(ServiceTest, RequestPortalDetection) {
+  scoped_refptr<MockDevice> mock_device =
+      new MockDevice(&mock_manager_, kDeviceName, kDeviceHwAddr, 1);
+  ON_CALL(mock_manager_, FindDeviceFromService(_))
+      .WillByDefault(Return(mock_device));
+
+  EXPECT_CALL(*mock_device,
+              UpdatePortalDetector(Network::ValidationReason::kDBusRequest))
+      .WillOnce(Return(true));
+
+  Error error;
+  service_->RequestPortalDetection(&error);
+  EXPECT_TRUE(error.IsSuccess());
+
+  Mock::VerifyAndClearExpectations(mock_device.get());
+}
+
 TEST_F(ServiceTest, TrafficCounters) {
-  patchpanel::TrafficCounter counter0, counter1;
-  counter0.set_source(patchpanel::TrafficCounter::CHROME);
-  counter0.set_rx_bytes(12);
-  counter0.set_tx_bytes(34);
-  counter0.set_rx_packets(56);
-  counter0.set_tx_packets(78);
-  counter1.set_source(patchpanel::TrafficCounter::USER);
-  counter1.set_rx_bytes(90);
-  counter1.set_tx_bytes(87);
-  counter1.set_rx_packets(65);
-  counter1.set_tx_packets(43);
+  patchpanel::Client::TrafficCounter counter0, counter1;
+  counter0.source = patchpanel::Client::TrafficSource::kChrome;
+  counter0.rx_bytes = 12;
+  counter0.tx_bytes = 34;
+  counter0.rx_packets = 56;
+  counter0.tx_packets = 78;
+  counter1.source = patchpanel::Client::TrafficSource::kUser;
+  counter1.rx_bytes = 90;
+  counter1.tx_bytes = 87;
+  counter1.rx_packets = 65;
+  counter1.tx_packets = 43;
 
   service_->InitializeTrafficCounterSnapshot({counter0, counter1});
   EXPECT_EQ(service_->traffic_counter_snapshot_.size(), 2);
   std::vector<uint64_t> chrome_counters{12, 34, 56, 78};
   std::vector<uint64_t> user_counters{90, 87, 65, 43};
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot_[patchpanel::TrafficCounter::CHROME][i],
-        chrome_counters[i]);
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot_[patchpanel::TrafficCounter::USER][i],
-        user_counters[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot_
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              chrome_counters[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot_
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              user_counters[i]);
   }
   EXPECT_EQ(service_->current_traffic_counters_.size(), 0);
 
-  counter0.set_rx_bytes(20);
-  counter0.set_tx_bytes(40);
-  counter0.set_rx_packets(60);
-  counter0.set_tx_packets(80);
-  counter1.set_rx_bytes(100);
-  counter1.set_tx_bytes(90);
-  counter1.set_rx_packets(80);
-  counter1.set_tx_packets(70);
+  counter0.rx_bytes = 20;
+  counter0.tx_bytes = 40;
+  counter0.rx_packets = 60;
+  counter0.tx_packets = 80;
+  counter1.rx_bytes = 100;
+  counter1.tx_bytes = 90;
+  counter1.rx_packets = 80;
+  counter1.tx_packets = 70;
 
   service_->RefreshTrafficCounters({counter0, counter1});
   EXPECT_EQ(service_->traffic_counter_snapshot_.size(), 2);
   chrome_counters = {20, 40, 60, 80};
   user_counters = {100, 90, 80, 70};
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot_[patchpanel::TrafficCounter::CHROME][i],
-        chrome_counters[i]);
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot_[patchpanel::TrafficCounter::USER][i],
-        user_counters[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot_
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              chrome_counters[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot_
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              user_counters[i]);
   }
   EXPECT_EQ(service_->current_traffic_counters_.size(), 2);
   std::vector<uint64_t> chrome_counters_diff{8, 6, 4, 2};
   std::vector<uint64_t> user_counters_diff{10, 3, 15, 27};
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->current_traffic_counters_[patchpanel::TrafficCounter::CHROME][i],
-        chrome_counters_diff[i]);
-    EXPECT_EQ(
-        service_
-            ->current_traffic_counters_[patchpanel::TrafficCounter::USER][i],
-        user_counters_diff[i]);
+    EXPECT_EQ(service_->current_traffic_counters_
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              chrome_counters_diff[i]);
+    EXPECT_EQ(service_->current_traffic_counters_
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              user_counters_diff[i]);
   }
 }
 
 TEST_F(ServiceTest, RequestTrafficCounters) {
-  auto source0 = patchpanel::TrafficCounter::CHROME;
-  auto source1 = patchpanel::TrafficCounter::USER;
+  auto source0 = patchpanel::Client::TrafficSource::kChrome;
+  auto source1 = patchpanel::Client::TrafficSource::kUser;
 
   std::valarray<uint64_t> init_counter_arr0{0, 0, 0, 0};
   std::valarray<uint64_t> init_counter_arr1{0, 0, 0, 0};
-  patchpanel::TrafficCounter init_counter0 =
+  patchpanel::Client::TrafficCounter init_counter0 =
       CreateCounter(init_counter_arr0, source0, kDeviceName);
-  patchpanel::TrafficCounter init_counter1 =
+  patchpanel::Client::TrafficCounter init_counter1 =
       CreateCounter(init_counter_arr1, source1, kDeviceName);
 
   service_->InitializeTrafficCounterSnapshot({init_counter0, init_counter1});
 
   std::valarray<uint64_t> counter_arr0{12, 34, 56, 78};
   std::valarray<uint64_t> counter_arr1{90, 87, 65, 43};
-  patchpanel::TrafficCounter counter0 =
+  patchpanel::Client::TrafficCounter counter0 =
       CreateCounter(counter_arr0, source0, kDeviceName);
-  patchpanel::TrafficCounter counter1 =
+  patchpanel::Client::TrafficCounter counter1 =
       CreateCounter(counter_arr1, source1, kDeviceName);
 
-  std::vector<patchpanel::TrafficCounter> counters{counter0, counter1};
+  std::vector<patchpanel::Client::TrafficCounter> counters{counter0, counter1};
 
   auto client = std::make_unique<patchpanel::FakeClient>();
   patchpanel::FakeClient* patchpanel_client = client.get();
@@ -2413,59 +2610,53 @@ TEST_F(ServiceTest, RequestTrafficCounters) {
   scoped_refptr<MockDevice> mock_device =
       new MockDevice(&mock_manager_, kDeviceName, "addr0", 0);
   mock_device->set_selected_service_for_testing(service_);
-
   ON_CALL(mock_manager_, FindDeviceFromService(_))
       .WillByDefault(Return(mock_device));
 
-  // Set up expected RequestTrafficCounters result.
-  std::vector<brillo::VariantDictionary> expected_traffic_counters;
-  brillo::VariantDictionary chrome_dict;
-  chrome_dict.emplace("source", patchpanel::TrafficCounter::Source_Name(
-                                    patchpanel::TrafficCounter::CHROME));
-  chrome_dict.emplace("rx_bytes", counter_arr0[0]);
-  chrome_dict.emplace("tx_bytes", counter_arr0[1]);
-  brillo::VariantDictionary user_dict;
-  user_dict.emplace("source", patchpanel::TrafficCounter::Source_Name(
-                                  patchpanel::TrafficCounter::USER));
-  user_dict.emplace("rx_bytes", counter_arr1[0]);
-  user_dict.emplace("tx_bytes", counter_arr1[1]);
-
-  expected_traffic_counters.push_back(chrome_dict);
-  expected_traffic_counters.push_back(user_dict);
-
-  Error error;
   bool successfully_requested_traffic_counters = false;
-  service_->RequestTrafficCounters(
-      &error,
-      base::Bind(
-          [](bool* success,
-             std::vector<brillo::VariantDictionary> expected_traffic_counters,
-             const Error& error,
-             const std::vector<brillo::VariantDictionary>&
-                 actual_traffic_counters) {
-            EXPECT_EQ(expected_traffic_counters.size(), 2);
-            EXPECT_EQ(actual_traffic_counters.size(), 2);
-            EXPECT_TRUE(TrafficCountersMatch(expected_traffic_counters,
-                                             actual_traffic_counters));
-            EXPECT_TRUE(error.IsSuccess());
-            *success = true;
-          },
-          &successfully_requested_traffic_counters,
-          std::move(expected_traffic_counters)));
+  std::vector<brillo::VariantDictionary> actual_traffic_counters;
+  service_->RequestTrafficCounters(base::BindOnce(
+      [](bool* success, std::vector<brillo::VariantDictionary>* output,
+         const Error& error,
+         const std::vector<brillo::VariantDictionary>& input) {
+        *success = error.IsSuccess();
+        output->assign(input.begin(), input.end());
+      },
+      &successfully_requested_traffic_counters, &actual_traffic_counters));
 
   EXPECT_TRUE(successfully_requested_traffic_counters);
+  for (const auto& dict : actual_traffic_counters) {
+    EXPECT_EQ(3, dict.size());
+    EXPECT_TRUE(base::Contains(dict, "source"));
+    EXPECT_TRUE(base::Contains(dict, "rx_bytes"));
+    EXPECT_TRUE(base::Contains(dict, "tx_bytes"));
+
+    if (dict.at("source").TryGet<std::string>() == "CHROME") {
+      EXPECT_EQ(12, dict.at("rx_bytes").TryGet<uint64_t>());
+      EXPECT_EQ(34, dict.at("tx_bytes").TryGet<uint64_t>());
+      continue;
+    }
+
+    if (dict.at("source").TryGet<std::string>() == "USER") {
+      EXPECT_EQ(90, dict.at("rx_bytes").TryGet<uint64_t>());
+      EXPECT_EQ(87, dict.at("tx_bytes").TryGet<uint64_t>());
+      continue;
+    }
+
+    FAIL() << "Unxpected source " << dict.at("source").TryGet<std::string>();
+  }
 }
 
 TEST_F(ServiceTest, ResetTrafficCounters) {
-  auto source0 = patchpanel::TrafficCounter::CHROME;
-  auto source1 = patchpanel::TrafficCounter::USER;
+  auto source0 = patchpanel::Client::TrafficSource::kChrome;
+  auto source1 = patchpanel::Client::TrafficSource::kUser;
 
   // Initialize the Service's traffic counter snapshot.
   std::valarray<uint64_t> init_counter_arr0{10, 20, 30, 40};
   std::valarray<uint64_t> init_counter_arr1{50, 60, 70, 80};
-  patchpanel::TrafficCounter init_counter0 =
+  patchpanel::Client::TrafficCounter init_counter0 =
       CreateCounter(init_counter_arr0, source0, kDeviceName);
-  patchpanel::TrafficCounter init_counter1 =
+  patchpanel::Client::TrafficCounter init_counter1 =
       CreateCounter(init_counter_arr1, source1, kDeviceName);
   service_->InitializeTrafficCounterSnapshot({init_counter0, init_counter1});
 
@@ -2473,34 +2664,30 @@ TEST_F(ServiceTest, ResetTrafficCounters) {
   // traffic counters.
   std::valarray<uint64_t> counter_arr0{100, 200, 300, 400};
   std::valarray<uint64_t> counter_arr1{500, 600, 700, 800};
-  patchpanel::TrafficCounter counter0 =
+  patchpanel::Client::TrafficCounter counter0 =
       CreateCounter(counter_arr0, source0, kDeviceName);
-  patchpanel::TrafficCounter counter1 =
+  patchpanel::Client::TrafficCounter counter1 =
       CreateCounter(counter_arr1, source1, kDeviceName);
   service_->RefreshTrafficCounters({counter0, counter1});
   EXPECT_EQ(service_->traffic_counter_snapshot().size(), 2);
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot()[patchpanel::TrafficCounter::CHROME][i],
-        counter_arr0[i]);
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot()[patchpanel::TrafficCounter::USER][i],
-        counter_arr1[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot()
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              counter_arr0[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot()
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              counter_arr1[i]);
   }
   EXPECT_EQ(service_->current_traffic_counters().size(), 2);
   std::vector<uint64_t> chrome_counters_diff{90, 180, 270, 360};
   std::vector<uint64_t> user_counters_diff{450, 540, 630, 720};
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->current_traffic_counters()[patchpanel::TrafficCounter::CHROME][i],
-        chrome_counters_diff[i]);
-    EXPECT_EQ(
-        service_
-            ->current_traffic_counters()[patchpanel::TrafficCounter::USER][i],
-        user_counters_diff[i]);
+    EXPECT_EQ(service_->current_traffic_counters()
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              chrome_counters_diff[i]);
+    EXPECT_EQ(service_->current_traffic_counters()
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              user_counters_diff[i]);
   }
 
   // Reset the traffic counters.
@@ -2508,14 +2695,12 @@ TEST_F(ServiceTest, ResetTrafficCounters) {
   EXPECT_EQ(service_->current_traffic_counters().size(), 0);
   EXPECT_EQ(service_->traffic_counter_snapshot().size(), 2);
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot()[patchpanel::TrafficCounter::CHROME][i],
-        counter_arr0[i]);
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot()[patchpanel::TrafficCounter::USER][i],
-        counter_arr1[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot()
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              counter_arr0[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot()
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              counter_arr1[i]);
   }
 
   // Refresh traffic counters, updating the traffic counter snapshot and current
@@ -2527,28 +2712,85 @@ TEST_F(ServiceTest, ResetTrafficCounters) {
   service_->RefreshTrafficCounters({counter0, counter1});
   EXPECT_EQ(service_->traffic_counter_snapshot().size(), 2);
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot()[patchpanel::TrafficCounter::CHROME][i],
-        counter_arr0[i]);
-    EXPECT_EQ(
-        service_
-            ->traffic_counter_snapshot()[patchpanel::TrafficCounter::USER][i],
-        counter_arr1[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot()
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              counter_arr0[i]);
+    EXPECT_EQ(service_->traffic_counter_snapshot()
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              counter_arr1[i]);
   }
   EXPECT_EQ(service_->current_traffic_counters().size(), 2);
   chrome_counters_diff = {900, 1800, 2700, 3600};
   user_counters_diff = {4500, 5400, 6300, 7200};
   for (size_t i = 0; i < Service::kTrafficCounterArraySize; i++) {
-    EXPECT_EQ(
-        service_
-            ->current_traffic_counters()[patchpanel::TrafficCounter::CHROME][i],
-        chrome_counters_diff[i]);
-    EXPECT_EQ(
-        service_
-            ->current_traffic_counters()[patchpanel::TrafficCounter::USER][i],
-        user_counters_diff[i]);
+    EXPECT_EQ(service_->current_traffic_counters()
+                  [patchpanel::Client::TrafficSource::kChrome][i],
+              chrome_counters_diff[i]);
+    EXPECT_EQ(service_->current_traffic_counters()
+                  [patchpanel::Client::TrafficSource::kUser][i],
+              user_counters_diff[i]);
   }
+}
+
+TEST_F(ServiceTest, UpdateLinkSpeed) {
+  EXPECT_CALL(*GetAdaptor(), EmitIntChanged(kUplinkSpeedPropertyKbps, 10))
+      .Times(1);
+  EXPECT_CALL(*GetAdaptor(), EmitIntChanged(kDownlinkSpeedPropertyKbps, 20))
+      .Times(1);
+
+  SetUplinkSpeedKbps(10);
+  SetDownlinkSpeedKbps(20);
+
+  EXPECT_EQ(uplink_speed_kbps(), 10);
+  EXPECT_EQ(downlink_speed_kbps(), 20);
+}
+
+TEST_F(ServiceTest, UpdateLinkSpeedTwice) {
+  // Check link speed is only set once when the setter is called twice on
+  // identical value.
+  EXPECT_CALL(*GetAdaptor(), EmitIntChanged(kUplinkSpeedPropertyKbps, _))
+      .Times(1);
+
+  SetUplinkSpeedKbps(30);
+  SetUplinkSpeedKbps(30);
+
+  EXPECT_EQ(uplink_speed_kbps(), 30);
+}
+
+TEST_F(ServiceTest, ServiceMetricsTimeToConfig) {
+  EXPECT_CALL(*metrics(), SendToUMA("Network.Shill.Wifi.TimeToConfig", Ge(0),
+                                    Metrics::kTimerHistogramMillisecondsMin,
+                                    Metrics::kTimerHistogramMillisecondsMax,
+                                    Metrics::kTimerHistogramNumBuckets));
+  service_->UpdateStateTransitionMetrics(Service::kStateConfiguring);
+  service_->UpdateStateTransitionMetrics(Service::kStateConnected);
+}
+
+TEST_F(ServiceTest, ServiceMetricsTimeToPortal) {
+  EXPECT_CALL(*metrics(), SendToUMA("Network.Shill.Wifi.TimeToPortal", Ge(0),
+                                    Metrics::kTimerHistogramMillisecondsMin,
+                                    Metrics::kTimerHistogramMillisecondsMax,
+                                    Metrics::kTimerHistogramNumBuckets));
+  service_->UpdateStateTransitionMetrics(Service::kStateConnected);
+  service_->UpdateStateTransitionMetrics(Service::kStateNoConnectivity);
+}
+
+TEST_F(ServiceTest, ServiceMetricsTimeToOnline) {
+  EXPECT_CALL(*metrics(), SendToUMA("Network.Shill.Wifi.TimeToOnline", Ge(0),
+                                    Metrics::kTimerHistogramMillisecondsMin,
+                                    Metrics::kTimerHistogramMillisecondsMax,
+                                    Metrics::kTimerHistogramNumBuckets));
+  service_->UpdateStateTransitionMetrics(Service::kStateConnected);
+  service_->UpdateStateTransitionMetrics(Service::kStateOnline);
+}
+
+TEST_F(ServiceTest, ServiceMetricsServiceFailure) {
+  service_->SetFailure(Service::kFailureBadPassphrase);
+  EXPECT_CALL(
+      *metrics(),
+      SendEnumToUMA(Metrics::kMetricNetworkServiceError, Technology::kWiFi,
+                    Metrics::kNetworkServiceErrorBadPassphrase));
+  service_->UpdateStateTransitionMetrics(Service::kStateFailure);
 }
 
 }  // namespace shill

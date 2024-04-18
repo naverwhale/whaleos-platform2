@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "dlcservice/boot/boot_slot.h"
-#include "dlcservice/dlc.h"
+#include "dlcservice/dlc_base.h"
 #include "dlcservice/prefs.h"
 #include "dlcservice/system_state.h"
 #include "dlcservice/test_utils.h"

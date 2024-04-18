@@ -1,18 +1,18 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ethernet/ethernet_eap_provider.h"
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "shill/ethernet/mock_ethernet.h"
-#include "shill/key_value_store.h"
 #include "shill/mock_control.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
+#include "shill/store/key_value_store.h"
 #include "shill/test_event_dispatcher.h"
 
 using testing::_;
@@ -71,8 +71,8 @@ TEST_F(EthernetEapProviderTest, CredentialChangeCallback) {
 
   scoped_refptr<MockEthernet> device0 =
       new MockEthernet(&manager_, "eth0", "addr0", 0);
-  EthernetEapProvider::CredentialChangeCallback callback0 =
-      base::Bind(&EthernetEapProviderTest::Callback0, base::Unretained(this));
+  EthernetEapProvider::CredentialChangeCallback callback0 = base::BindRepeating(
+      &EthernetEapProviderTest::Callback0, base::Unretained(this));
 
   provider_.SetCredentialChangeCallback(device0.get(), callback0);
   EXPECT_CALL(*this, Callback0());
@@ -81,8 +81,8 @@ TEST_F(EthernetEapProviderTest, CredentialChangeCallback) {
 
   scoped_refptr<MockEthernet> device1 =
       new MockEthernet(&manager_, "eth1", "addr1", 1);
-  EthernetEapProvider::CredentialChangeCallback callback1 =
-      base::Bind(&EthernetEapProviderTest::Callback1, base::Unretained(this));
+  EthernetEapProvider::CredentialChangeCallback callback1 = base::BindRepeating(
+      &EthernetEapProviderTest::Callback1, base::Unretained(this));
 
   provider_.SetCredentialChangeCallback(device1.get(), callback1);
   EXPECT_CALL(*this, Callback0());

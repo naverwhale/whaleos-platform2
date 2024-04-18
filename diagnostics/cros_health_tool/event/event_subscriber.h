@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,17 @@
 
 #include <memory>
 
-#include "diagnostics/cros_health_tool/event/audio_subscriber.h"
-#include "diagnostics/cros_health_tool/event/bluetooth_subscriber.h"
-#include "diagnostics/cros_health_tool/event/lid_subscriber.h"
+#include <mojo/public/cpp/bindings/receiver.h>
+#include <mojo/public/cpp/bindings/remote.h>
+
 #include "diagnostics/cros_health_tool/event/network_subscriber.h"
-#include "diagnostics/cros_health_tool/event/power_subscriber.h"
-#include "diagnostics/cros_healthd_mojo_adapter/cros_healthd_mojo_adapter.h"
+#include "diagnostics/mojom/public/cros_healthd.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_events.mojom.h"
 
 namespace diagnostics {
 
 // This class connects all category-specific event subscribers to cros_healthd.
-class EventSubscriber final {
+class EventSubscriber final : public ash::cros_healthd::mojom::EventObserver {
  public:
   // Creates an instance, initially not subscribed to any events.
   EventSubscriber();
@@ -25,40 +25,33 @@ class EventSubscriber final {
   EventSubscriber& operator=(const EventSubscriber&) = delete;
   ~EventSubscriber();
 
-  // Subscribes to cros_healthd's Bluetooth events. Returns true on success and
-  // false on failure.
-  bool SubscribeToBluetoothEvents();
+  // ash::cros_healthd::mojom::EventObserver overrides:
+  void OnEvent(const ash::cros_healthd::mojom::EventInfoPtr info) override;
 
-  // Subscribes to cros_healthd's lid events. Returns true on success and false
-  // on failure.
-  bool SubscribeToLidEvents();
+  // Subscribes to cros_healthd's network events.
+  void SubscribeToNetworkEvents();
 
-  // Subscribes to cros_healthd's network events. Returns true on success and
-  // false on failure.
-  bool SubscribeToNetworkEvents();
+  // Subscribes to cros_healthd's events.
+  //
+  // |on_subscription_disconnect| - This will be called when the mojo connection
+  //                                between cros-health-tool and healthd is
+  //                                disconnected.
+  void SubscribeToEvents(base::OnceClosure on_subscription_disconnect,
+                         ash::cros_healthd::mojom::EventCategoryEnum category);
 
-  // Subscribes to cros_healthd's power events. Returns true on success and
-  // false on failure.
-  bool SubscribeToPowerEvents();
-
-  // Subscribes to cros_healthd's audio events. Returns true on success and
-  // false on failure.
-  bool SubscribeToAudioEvents();
+  // Check if |category| is supported and then output the result.
+  void IsEventSupported(base::OnceClosure run_loop_closure,
+                        ash::cros_healthd::mojom::EventCategoryEnum category);
 
  private:
-  // Allows mojo communication with cros_healthd.
-  std::unique_ptr<CrosHealthdMojoAdapter> mojo_adapter_;
+  // Allows mojo communication with cros_healthd event service.
+  mojo::Remote<ash::cros_healthd::mojom::CrosHealthdEventService>
+      event_service_;
 
-  // Used to subscribe to Bluetooth events.
-  std::unique_ptr<BluetoothSubscriber> bluetooth_subscriber_;
-  // Used to subscribe to lid events.
-  std::unique_ptr<LidSubscriber> lid_subscriber_;
+  mojo::Receiver<ash::cros_healthd::mojom::EventObserver> receiver_{this};
+
   // Used to subscribe to network events.
   std::unique_ptr<NetworkSubscriber> network_subscriber_;
-  // Used to subscribe to power events.
-  std::unique_ptr<PowerSubscriber> power_subscriber_;
-  // Used to subscribe to audio events.
-  std::unique_ptr<AudioSubscriber> audio_subscriber_;
 };
 
 }  // namespace diagnostics

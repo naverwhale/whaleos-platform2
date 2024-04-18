@@ -21,7 +21,6 @@
 #include <sys/socket.h>
 
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/numerics/safe_conversions.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/scoped_generic.h>
@@ -35,8 +34,6 @@
 #include "crash-reporter/crashpad/string_number_conversion.h"
 #include "crash-reporter/crashpad/url.h"
 
-#include <openssl/ssl.h>
-
 namespace crashpad {
 
 namespace {
@@ -49,9 +46,6 @@ class HTTPTransportSocket final : public HTTPTransport {
   ~HTTPTransportSocket() override = default;
 
   bool ExecuteSynchronously(std::string* response_body) override;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(HTTPTransportSocket);
 };
 
 struct ScopedAddrinfoTraits {
@@ -87,129 +81,6 @@ class FdStream : public Stream {
 
  private:
   int fd_;
-
-  DISALLOW_COPY_AND_ASSIGN(FdStream);
-};
-
-class SSLStream : public Stream {
- public:
-  SSLStream() = default;
-
-  bool Initialize(const base::FilePath& root_cert_path,
-                  int sock,
-                  const std::string& hostname) {
-    SSL_library_init();
-
-    ctx_.reset(SSL_CTX_new(TLS_method()));
-    if (!ctx_.is_valid()) {
-      LOG(ERROR) << "SSL_CTX_new";
-      return false;
-    }
-
-    if (SSL_CTX_set_min_proto_version(ctx_.get(), TLS1_2_VERSION) <= 0) {
-      LOG(ERROR) << "SSL_CTX_set_min_proto_version";
-      return false;
-    }
-
-    SSL_CTX_set_verify(ctx_.get(), SSL_VERIFY_PEER, nullptr);
-    SSL_CTX_set_verify_depth(ctx_.get(), 5);
-
-    if (!root_cert_path.empty()) {
-      if (SSL_CTX_load_verify_locations(
-              ctx_.get(), root_cert_path.value().c_str(), nullptr) <= 0) {
-        LOG(ERROR) << "SSL_CTX_load_verify_locations";
-        return false;
-      }
-    } else {
-#if defined(OS_LINUX) || defined(OS_CHROMEOS)
-      if (SSL_CTX_load_verify_locations(
-              ctx_.get(), nullptr, "/etc/ssl/certs") <= 0) {
-        LOG(ERROR) << "SSL_CTX_load_verify_locations";
-        return false;
-      }
-#elif defined(OS_FUCHSIA)
-      if (SSL_CTX_load_verify_locations(
-              ctx_.get(), "/config/ssl/cert.pem", nullptr) <= 0) {
-        LOG(ERROR) << "SSL_CTX_load_verify_locations";
-        return false;
-      }
-#else
-#error cert store location
-#endif
-    }
-
-    ssl_.reset(SSL_new(ctx_.get()));
-    if (!ssl_.is_valid()) {
-      LOG(ERROR) << "SSL_new";
-      return false;
-    }
-
-    BIO* bio = BIO_new_socket(sock, BIO_NOCLOSE);
-    if (!bio) {
-      LOG(ERROR) << "BIO_new_socket";
-      return false;
-    }
-
-    // SSL_set_bio() takes ownership of |bio|.
-    SSL_set_bio(ssl_.get(), bio, bio);
-
-    if (SSL_set_tlsext_host_name(ssl_.get(), hostname.c_str()) == 0) {
-      LOG(ERROR) << "SSL_set_tlsext_host_name";
-      return false;
-    }
-
-    if (SSL_connect(ssl_.get()) <= 0) {
-      LOG(ERROR) << "SSL_connect";
-      return false;
-    }
-
-    return true;
-  }
-
-  bool LoggingWrite(const void* data, size_t size) override {
-    return SSL_write(ssl_.get(), data, size) != 0;
-  }
-
-  bool LoggingRead(void* data, size_t size) override {
-    return SSL_read(ssl_.get(), data, size) != 0;
-  }
-
-  bool LoggingReadToEOF(std::string* contents) override {
-    contents->clear();
-    char buffer[4096];
-    FileOperationResult rv;
-    while ((rv = SSL_read(ssl_.get(), buffer, sizeof(buffer))) > 0) {
-      DCHECK_LE(static_cast<size_t>(rv), sizeof(buffer));
-      contents->append(buffer, rv);
-    }
-    if (rv < 0) {
-      LOG(ERROR) << "SSL_read";
-      contents->clear();
-      return false;
-    }
-    return true;
-  }
-
- private:
-  struct ScopedSSLCTXTraits {
-    static SSL_CTX* InvalidValue() { return nullptr; }
-    static void Free(SSL_CTX* ctx) { SSL_CTX_free(ctx); }
-  };
-  using ScopedSSLCTX = base::ScopedGeneric<SSL_CTX*, ScopedSSLCTXTraits>;
-
-  struct ScopedSSLTraits {
-    static SSL* InvalidValue() { return nullptr; }
-    static void Free(SSL* ssl) {
-      SSL_shutdown(ssl);
-      SSL_free(ssl);
-    }
-  };
-  using ScopedSSL = base::ScopedGeneric<SSL*, ScopedSSLTraits>;
-
-  ScopedSSLCTX ctx_;
-  ScopedSSL ssl_;
-
-  DISALLOW_COPY_AND_ASSIGN(SSLStream);
 };
 
 bool WaitUntilSocketIsReady(int sock) {
@@ -275,8 +146,6 @@ class ScopedSetNonblocking {
 
  private:
   int sock_;
-
-  DISALLOW_COPY_AND_ASSIGN(ScopedSetNonblocking);
 };
 
 base::ScopedFD CreateSocket(const std::string& hostname,
@@ -364,7 +233,7 @@ bool WriteRequest(Stream* stream,
 
   FileOperationResult data_bytes;
   do {
-    constexpr size_t kCRLFSize = base::size(kCRLFTerminator) - 1;
+    constexpr size_t kCRLFSize = std::size(kCRLFTerminator) - 1;
     struct __attribute__((packed)) {
       char size[8];
       char crlf[2];
@@ -544,22 +413,15 @@ bool HTTPTransportSocket::ExecuteSynchronously(std::string* response_body) {
     return false;
   }
 
+  CHECK(scheme == "http") << "Got " << scheme << " for scheme in '" << url()
+                          << "'";
+
   base::ScopedFD sock(CreateSocket(hostname, port));
   if (!sock.is_valid()) {
     return false;
   }
 
-  std::unique_ptr<Stream> stream;
-  if (scheme == "https") {
-    auto ssl_stream = std::make_unique<SSLStream>();
-    if (!ssl_stream->Initialize(
-            root_ca_certificate_path(), sock.get(), hostname)) {
-      return false;
-    }
-    stream = std::move(ssl_stream);
-  } else {
-    stream = std::make_unique<FdStream>(sock.get());
-  }
+  std::unique_ptr<Stream> stream(std::make_unique<FdStream>(sock.get()));
 
   if (!WriteRequest(
           stream.get(), method(), resource, headers(), body_stream())) {

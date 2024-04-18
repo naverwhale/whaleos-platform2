@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,9 +36,9 @@ bool PrintProto(const google::protobuf::Message& message) {
   }
 
   // Embed the body and name of the proto in a base::Value.
-  base::Value value(base::Value::Type::DICTIONARY);
-  value.SetStringKey("name", message.GetDescriptor()->name());
-  value.SetKey("body", std::move(*body));
+  base::Value::Dict value;
+  value.Set("name", message.GetDescriptor()->name());
+  value.Set("body", std::move(*body));
 
   // Serialize the base::Value back to JSON.
   std::string message_json;

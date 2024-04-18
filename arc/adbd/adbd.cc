@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -18,17 +18,16 @@
 
 #include <memory>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check_op.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/json/json_reader.h>
 #include <base/logging.h>
-#include <base/macros.h>
-#include <base/process/launch.h>
 #include <base/posix/eintr_wrapper.h>
+#include <base/process/launch.h>
 #include <base/strings/string_util.h>
 #include <base/system/sys_info.h>
 #include <base/threading/platform_thread.h>
@@ -107,26 +106,6 @@ bool BindMountFile(const base::FilePath& source, const base::FilePath& target) {
   return true;
 }
 
-// Writes a string to a file. Returns false if the full string was not able to
-// be written.
-// TODO(crbug.com/1094927): Remove after r780000 uprev and replace usages by
-// base::WriteFile.
-bool WriteFile(const base::FilePath& filename, const std::string& contents) {
-  int bytes_written =
-      base::WriteFile(filename, contents.c_str(), contents.size());
-  if (bytes_written == -1) {
-    PLOG(ERROR) << "Failed to write '" << contents << "' to "
-                << filename.value();
-    return false;
-  }
-  if (bytes_written < contents.size()) {
-    LOG(ERROR) << "Truncated write '" << contents << "' to "
-               << filename.value();
-    return false;
-  }
-  return true;
-}
-
 }  // namespace
 
 bool CreatePipe(const base::FilePath& path) {
@@ -143,7 +122,7 @@ bool CreatePipe(const base::FilePath& path) {
   }
   // base::Unretained is safe since the closure will be run before |tmp_path|
   // goes out of scope.
-  base::ScopedClosureRunner unlink_fifo(base::Bind(
+  base::ScopedClosureRunner unlink_fifo(base::BindOnce(
       base::IgnoreResult(&unlink), base::Unretained(tmp_path.value().c_str())));
   if (chown(tmp_path.value().c_str(), kShellUgid, kShellUgid) == -1) {
     PLOG(ERROR) << "Failed to chown FIFO at " << tmp_path.value()
@@ -155,7 +134,7 @@ bool CreatePipe(const base::FilePath& path) {
                 << path.value();
     return false;
   }
-  ignore_result(unlink_fifo.Release());
+  unlink_fifo.ReplaceClosure(base::DoNothing());
   return true;
 }
 
@@ -168,43 +147,47 @@ bool GetConfiguration(AdbdConfiguration* config) {
 
   auto config_root = base::JSONReader::ReadAndReturnValueWithError(
       config_json_data, base::JSON_PARSE_RFC);
-  if (!config_root.value) {
-    LOG(ERROR) << "Failed to parse adb.json: " << config_root.error_message;
+  if (!config_root.has_value()) {
+    LOG(ERROR) << "Failed to parse adb.json: " << config_root.error().message;
     return false;
   }
-  if (!config_root.value->is_dict()) {
+  if (!config_root->is_dict()) {
     LOG(ERROR) << "Failed to parse root dictionary from adb.json";
     return false;
   }
+  const auto& config_root_dict = config_root->GetDict();
+
   const std::string* usb_product_id =
-      config_root.value->FindStringKey("usbProductId");
+      config_root_dict.FindString("usbProductId");
   if (!usb_product_id) {
     LOG(ERROR) << "Failed to parse usbProductId";
     return false;
   }
   config->usb_product_id = *usb_product_id;
   // kernelModules are optional.
-  const base::Value* kernel_module_list =
-      config_root.value->FindListKey("kernelModules");
+  const base::Value::List* kernel_module_list =
+      config_root_dict.FindList("kernelModules");
   if (kernel_module_list) {
-    for (const auto& kernel_module_value : kernel_module_list->GetList()) {
+    for (const auto& kernel_module_value : *kernel_module_list) {
       AdbdConfigurationKernelModule module;
       if (!kernel_module_value.is_dict()) {
         LOG(ERROR) << "kernelModules contains a non-dictionary";
         return false;
       }
+      const auto& kernel_module_value_dict = kernel_module_value.GetDict();
+
       const std::string* module_name =
-          kernel_module_value.FindStringKey("name");
+          kernel_module_value_dict.FindString("name");
       if (!module_name) {
         LOG(ERROR) << "Failed to parse kernelModules.name";
         return false;
       }
       module.name = *module_name;
-      const base::Value* module_parameters =
-          kernel_module_value.FindListKey("parameters");
+      const base::Value::List* module_parameters =
+          kernel_module_value_dict.FindList("parameters");
       if (module_parameters) {
         // Parameters are optional.
-        for (const auto& parameter_value : module_parameters->GetList()) {
+        for (const auto& parameter_value : *module_parameters) {
           if (!parameter_value.is_string()) {
             LOG(ERROR) << "kernelModules.parameters contains a non-string";
             return false;
@@ -217,15 +200,6 @@ bool GetConfiguration(AdbdConfiguration* config) {
   }
 
   return true;
-}
-
-std::string GetStrippedReleaseBoard() {
-  std::string board = base::SysInfo::GetLsbReleaseBoard();
-  const size_t index = board.find("-signed-");
-  if (index != std::string::npos)
-    board.resize(index);
-
-  return base::ToLowerASCII(board);
 }
 
 std::string GetUDCDriver() {
@@ -282,21 +256,21 @@ bool SetupConfigFS(const std::string& serialnumber,
   // In libchrome r780000, the variant
   // base::WriteFile(const FilePath& filename, StringPiece data) will be added
   // which causes ambiguity to calling adbd::WriteFile.
-  if (!adbd::WriteFile(gadget_path.Append("idVendor"), "0x18d1"))
+  if (!base::WriteFile(gadget_path.Append("idVendor"), "0x18d1"))
     return false;
-  if (!adbd::WriteFile(gadget_path.Append("idProduct"), usb_product_id))
+  if (!base::WriteFile(gadget_path.Append("idProduct"), usb_product_id))
     return false;
-  if (!adbd::WriteFile(gadget_path.Append("strings/0x409/serialnumber"),
+  if (!base::WriteFile(gadget_path.Append("strings/0x409/serialnumber"),
                        serialnumber)) {
     return false;
   }
-  if (!adbd::WriteFile(gadget_path.Append("strings/0x409/manufacturer"),
+  if (!base::WriteFile(gadget_path.Append("strings/0x409/manufacturer"),
                        "google"))
     return false;
-  if (!adbd::WriteFile(gadget_path.Append("strings/0x409/product"),
+  if (!base::WriteFile(gadget_path.Append("strings/0x409/product"),
                        usb_product_name))
     return false;
-  if (!adbd::WriteFile(gadget_path.Append("configs/b.1/MaxPower"), "500"))
+  if (!base::WriteFile(gadget_path.Append("configs/b.1/MaxPower"), "500"))
     return false;
 
   return true;
@@ -348,8 +322,8 @@ base::ScopedFD SetupFunctionFS(const std::string& udc_driver_name) {
     PLOG(ERROR) << "Failed to write the control strings";
     return base::ScopedFD();
   }
-  if (!WriteFile(base::FilePath("/dev/config/usb_gadget/g1/UDC"),
-                 udc_driver_name)) {
+  if (!base::WriteFile(base::FilePath("/dev/config/usb_gadget/g1/UDC"),
+                       udc_driver_name)) {
     return base::ScopedFD();
   }
 
@@ -407,7 +381,7 @@ base::ScopedFD InitializeVSockConnection(uint32_t cid) {
 }
 
 void StartArcVmAdbBridge(uint32_t cid) {
-  constexpr base::TimeDelta kConnectInterval = base::TimeDelta::FromSeconds(15);
+  constexpr base::TimeDelta kConnectInterval = base::Seconds(15);
   constexpr int kMaxRetries = 4;
 
   int retries = kMaxRetries;

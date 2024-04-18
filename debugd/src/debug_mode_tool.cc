@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,6 +20,7 @@ namespace debugd {
 namespace {
 
 const int kFlimflamLogLevelVerbose3 = -3;
+const int kFlimflamLogLevelWiFi = -2;
 const int kFlimflamLogLevelInfo = 0;
 
 const char kSupplicantServiceName[] = "fi.w1.wpa_supplicant1";
@@ -69,27 +70,28 @@ constexpr char kMwifiexDisable[] = "0x7";
 
 // Intel wifi.
 constexpr char kIwlwifiDebugFlag[] = "/sys/module/iwlwifi/parameters/debug";
-// Full debugging: see below file for details on each bit:
+// Enable INFO, MAC80211 and HCMD logs: see below file for details on each bit:
 // drivers/net/wireless-$(WIFIVERSION)/iwl7000/iwlwifi/iwl-debug.h
-constexpr char kIwlwifiEnable[] = "0xFFFFFFFF";
+constexpr char kIwlwifiEnable[] = "0x7";
 // Default debugging: none
 constexpr char kIwlwifiDisable[] = "0x0";
 
 // Qualcomm/Atheros wifi.
 constexpr char kAth10kDebugFlag[] =
     "/sys/module/ath10k_core/parameters/debug_mask";
-// Full debugging: see below file for details on each bit:
+// Enable all debug logs except PCI_PS, SDIO_DUMP, TESTMODE, PCI_DUMP, HTT_DUMP:
+// see below file for details on each bit:
 // drivers/net/wireless/ath/ath10k/debug.h
-constexpr char kAth10kEnable[] = "0xFFFFFFFF";
+constexpr char kAth10kEnable[] = "0xFFFDAF3F";
 // Default debugging: none
 constexpr char kAth10kDisable[] = "0x0";
 
 // Realtek wifi.
 constexpr char kRtw88DebugFlag[] =
     "/sys/module/rtw88_core/parameters/debug_mask";
-// Full debugging: see below file for details on each bit:
+// Enable all debug logs except COEX: see below file for details on each bit:
 // drivers/net/wireless/realtek/rtw88/debug.h
-constexpr char kRtw88Enable[] = "0xFFFFFFFF";
+constexpr char kRtw88Enable[] = "0xFFFFFFBF";
 // Default debugging: none
 constexpr char kRtw88Disable[] = "0x0";
 
@@ -138,10 +140,12 @@ void DebugModeTool::SetDebugMode(const std::string& subsystem) {
   auto shill = std::make_unique<org::chromium::flimflam::ManagerProxy>(bus_);
   if (shill) {
     shill->SetDebugTags(flimflam_tags, nullptr);
-    if (flimflam_tags.length()) {
-      shill->SetDebugLevel(kFlimflamLogLevelVerbose3, nullptr);
-    } else {
+    if (flimflam_tags.length() == 0) {
       shill->SetDebugLevel(kFlimflamLogLevelInfo, nullptr);
+    } else if (subsystem == "wifi") {
+      shill->SetDebugLevel(kFlimflamLogLevelWiFi, nullptr);
+    } else {
+      shill->SetDebugLevel(kFlimflamLogLevelVerbose3, nullptr);
     }
   }
 
@@ -164,8 +168,8 @@ void DebugModeTool::SetModemManagerLogging(const std::string& level) {
                                kSetLogging);
   dbus::MessageWriter writer(&method_call);
   writer.AppendString(level);
-  proxy->CallMethodAndBlock(&method_call,
-                            dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+  (void)proxy->CallMethodAndBlock(&method_call,
+                                  dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
 #endif  // USE_CELLULAR
 }
 

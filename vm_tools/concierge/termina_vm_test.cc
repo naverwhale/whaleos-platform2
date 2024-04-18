@@ -1,10 +1,9 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "vm_tools/concierge/termina_vm.h"
 
-#include <arpa/inet.h>
 #include <stdint.h>
 #include <sys/mount.h>
 
@@ -14,33 +13,29 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/guid.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/run_loop.h>
-#include <base/single_thread_task_runner.h>
 #include <base/strings/stringprintf.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/test/task_environment.h>
 #include <base/threading/thread.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <chromeos/patchpanel/dbus/fake_client.h>
 #include <google/protobuf/message.h>
 #include <google/protobuf/repeated_field.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <grpcpp/grpcpp.h>
 #include <gtest/gtest.h>
-#include <chromeos/patchpanel/address_manager.h>
-#include <chromeos/patchpanel/guest_type.h>
-#include <chromeos/patchpanel/mac_address_generator.h>
-#include <chromeos/patchpanel/subnet.h>
+#include <net-base/ipv4_address.h>
 #include <vm_protos/proto_bindings/vm_guest.grpc.pb.h>
 
+#include "vm_tools/concierge/network/guest_os_network.h"
 #include "vm_tools/concierge/vsock_cid_pool.h"
 
 using std::string;
@@ -50,23 +45,6 @@ namespace pb = google::protobuf;
 namespace vm_tools {
 namespace concierge {
 namespace {
-
-// Converts an IPv4 address in network byte order into a string.
-bool IPv4AddressToString(uint32_t addr, string* address) {
-  CHECK(address);
-
-  char buf[INET_ADDRSTRLEN];
-  struct in_addr in = {
-      .s_addr = addr,
-  };
-  if (inet_ntop(AF_INET, &in, buf, sizeof(buf)) == nullptr) {
-    PLOG(ERROR) << "Failed to convert " << addr << " into a string";
-    return false;
-  }
-
-  *address = buf;
-  return true;
-}
 
 // Name of the unix domain socket for the grpc server.
 constexpr char kServerSocket[] = "server";
@@ -110,7 +88,7 @@ class TerminaVmTest : public ::testing::Test {
  private:
   // Posted back to the main thread by the grpc thread after starting the
   // server.
-  void ServerStartCallback(base::Closure quit,
+  void ServerStartCallback(base::OnceClosure quit,
                            std::shared_ptr<grpc::Server> server);
 
   // The message loop for the current thread.  Declared here because it must be
@@ -143,8 +121,6 @@ class TerminaVmTest : public ::testing::Test {
   base::ScopedTempDir temp_dir_;
 
   // Resource allocators for the VM.
-  std::unique_ptr<patchpanel::AddressManager> network_address_manager_;
-  patchpanel::MacAddressGenerator mac_address_generator_;
   VsockCidPool vsock_cid_pool_;
 
   // Addresses assigned to the VM.
@@ -159,6 +135,31 @@ class TerminaVmTest : public ::testing::Test {
   std::shared_ptr<grpc::Server> server_;
 
   base::WeakPtrFactory<TerminaVmTest> weak_factory_{this};
+};
+
+class TestGuestOsNetwork final : public GuestOsNetwork {
+ public:
+  explicit TestGuestOsNetwork(uint32_t vsock_cid)
+      : GuestOsNetwork(std::make_unique<patchpanel::FakeClient>(), vsock_cid) {}
+
+  ~TestGuestOsNetwork() override = default;
+
+  std::string TapDevice() const override { return "vmtap1"; }
+  net_base::IPv4Address AddressV4() const override {
+    return *net_base::IPv4Address::CreateFromString("100.115.92.26");
+  }
+  net_base::IPv4Address GatewayV4() const override {
+    return *net_base::IPv4Address::CreateFromString("100.115.92.25");
+  }
+  net_base::IPv4CIDR SubnetV4() const override {
+    return *net_base::IPv4CIDR::CreateFromCIDRString("100.115.92.24/30");
+  }
+  net_base::IPv4Address ContainerAddressV4() const override {
+    return *net_base::IPv4Address::CreateFromString("100.115.92.193");
+  }
+  net_base::IPv4CIDR ContainerSubnetV4() const override {
+    return *net_base::IPv4CIDR::CreateFromCIDRString("100.115.92.192/28");
+  }
 };
 
 // Test server that verifies the RPCs it receives with the expected RPCs.
@@ -190,6 +191,10 @@ class FakeMaitredService final : public vm_tools::Maitred::Service {
   grpc::Status SetResolvConfig(grpc::ServerContext* ctx,
                                const vm_tools::SetResolvConfigRequest* request,
                                vm_tools::EmptyMessage* response) override;
+  grpc::Status UpdateStorageBalloon(
+      grpc::ServerContext* ctx,
+      const vm_tools::UpdateStorageBalloonRequest* request,
+      vm_tools::UpdateStorageBalloonResponse* response) override;
 
  private:
   // Populated the first time this class receives a LaunchProcess RPC.
@@ -247,13 +252,8 @@ grpc::Status FakeMaitredService::ConfigureNetwork(
     grpc::ServerContext* ctx,
     const vm_tools::NetworkConfigRequest* request,
     vm_tools::EmptyMessage* response) {
-  string address;
-  if (!IPv4AddressToString(request->ipv4_config().address(), &address)) {
-    vm_test_->TestFailed(
-        base::StringPrintf("Failed to parse address %u into a string",
-                           request->ipv4_config().address()));
-    return grpc::Status::OK;
-  }
+  const string address =
+      net_base::IPv4Address(request->ipv4_config().address()).ToString();
   if (address != vm_test_->address()) {
     vm_test_->TestFailed(
         base::StringPrintf("Mismatched addresses: expected %s got %s",
@@ -261,13 +261,8 @@ grpc::Status FakeMaitredService::ConfigureNetwork(
     return grpc::Status::OK;
   }
 
-  string netmask;
-  if (!IPv4AddressToString(request->ipv4_config().netmask(), &netmask)) {
-    vm_test_->TestFailed(
-        base::StringPrintf("Failed to parse netmask %u into a string",
-                           request->ipv4_config().netmask()));
-    return grpc::Status::OK;
-  }
+  const string netmask =
+      net_base::IPv4Address(request->ipv4_config().netmask()).ToString();
   if (netmask != vm_test_->netmask()) {
     vm_test_->TestFailed(
         base::StringPrintf("Mismatched netmasks: expected %s got %s",
@@ -275,13 +270,8 @@ grpc::Status FakeMaitredService::ConfigureNetwork(
     return grpc::Status::OK;
   }
 
-  string gateway;
-  if (!IPv4AddressToString(request->ipv4_config().gateway(), &gateway)) {
-    vm_test_->TestFailed(
-        base::StringPrintf("Failed to parse gateway %u into a string",
-                           request->ipv4_config().gateway()));
-    return grpc::Status::OK;
-  }
+  const string gateway =
+      net_base::IPv4Address(request->ipv4_config().gateway()).ToString();
   if (gateway != vm_test_->gateway()) {
     vm_test_->TestFailed(
         base::StringPrintf("Mismatched gateways: expected %s got %s",
@@ -337,12 +327,20 @@ grpc::Status FakeMaitredService::SetResolvConfig(
   return grpc::Status::OK;
 }
 
+grpc::Status FakeMaitredService::UpdateStorageBalloon(
+    grpc::ServerContext* ctx,
+    const vm_tools::UpdateStorageBalloonRequest* request,
+    vm_tools::UpdateStorageBalloonResponse* response) {
+  *response = {};
+  return grpc::Status::OK;
+}
+
 // Runs on the grpc thread and starts the grpc server.
 void StartFakeMaitredService(
     TerminaVmTest* vm_test,
     scoped_refptr<base::SingleThreadTaskRunner> main_task_runner,
     base::FilePath listen_path,
-    base::Callback<void(std::shared_ptr<grpc::Server>)> server_cb) {
+    base::OnceCallback<void(std::shared_ptr<grpc::Server>)> server_cb) {
   FakeMaitredService maitred(vm_test);
 
   grpc::ServerBuilder builder;
@@ -351,7 +349,8 @@ void StartFakeMaitredService(
   builder.RegisterService(&maitred);
 
   std::shared_ptr<grpc::Server> server(builder.BuildAndStart().release());
-  main_task_runner->PostTask(FROM_HERE, base::Bind(server_cb, server));
+  main_task_runner->PostTask(FROM_HERE,
+                             base::BindOnce(std::move(server_cb), server));
 
   if (server) {
     // This will not race with shutdown because the grpc server code includes a
@@ -371,11 +370,12 @@ void TerminaVmTest::SetUp() {
   ASSERT_TRUE(server_thread_.Start());
   server_thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::Bind(
-          &StartFakeMaitredService, this, base::ThreadTaskRunnerHandle::Get(),
+      base::BindOnce(
+          &StartFakeMaitredService, this,
+          base::SingleThreadTaskRunner::GetCurrentDefault(),
           temp_dir_.GetPath().Append(kServerSocket),
-          base::Bind(&TerminaVmTest::ServerStartCallback,
-                     weak_factory_.GetWeakPtr(), run_loop.QuitClosure())));
+          base::BindOnce(&TerminaVmTest::ServerStartCallback,
+                         weak_factory_.GetWeakPtr(), run_loop.QuitClosure())));
 
   run_loop.Run();
 
@@ -389,18 +389,11 @@ void TerminaVmTest::SetUp() {
   ASSERT_TRUE(stub);
 
   // Allocate resources for the VM.
-  network_address_manager_.reset(new patchpanel::AddressManager());
   uint32_t vsock_cid = vsock_cid_pool_.Allocate();
-  std::unique_ptr<patchpanel::Subnet> subnet =
-      network_address_manager_->AllocateIPv4Subnet(
-          patchpanel::GuestType::VM_TERMINA);
-
-  ASSERT_TRUE(subnet);
-
-  ASSERT_TRUE(IPv4AddressToString(subnet->AddressAtOffset(1), &address_));
-  ASSERT_TRUE(IPv4AddressToString(subnet->Netmask(), &netmask_));
-  ASSERT_TRUE(IPv4AddressToString(subnet->AddressAtOffset(0), &gateway_));
-
+  auto network = std::make_unique<TestGuestOsNetwork>(vsock_cid);
+  address_ = network->AddressV4().ToString();
+  netmask_ = network->SubnetV4().ToNetmask().ToString();
+  gateway_ = network->GatewayV4().ToString();
   std::string stateful_device = "/dev/vdb";
   uint64_t stateful_size = (uint64_t)20 * 1024 * 1024 * 1024;
 
@@ -408,25 +401,34 @@ void TerminaVmTest::SetUp() {
   VmBuilder vm_builder;
   vm_builder.SetRootfs({.device = "/dev/vda", .path = base::FilePath("dummy")});
   vm_ = TerminaVm::CreateForTesting(
-      std::move(subnet), vsock_cid, temp_dir_.GetPath(), base::FilePath(),
+      std::move(network), vsock_cid, temp_dir_.GetPath(), base::FilePath(),
       std::move(stateful_device), stateful_size, kKernelVersion,
-      std::move(stub), true /* is_termina */, std::move(vm_builder));
+      std::move(stub), std::move(vm_builder));
   ASSERT_TRUE(vm_);
 }
 
 void TerminaVmTest::TearDown() {
+  // Explicitly stop the grpc client.
+  //
+  // See b/305092746 for context.
+  base::RunLoop maitred_loop;
+  vm_->StopMaitredForTesting(maitred_loop.QuitClosure());
+  maitred_loop.Run();
+
   // Do the opposite of SetUp to make sure things get cleaned up in the right
   // order.
   vm_.reset();
   server_->Shutdown();
   server_.reset();
   server_thread_.Stop();
+  // Ensure asynchronous cleanup happens.
+  task_environment_.RunUntilIdle();
 }
 
-void TerminaVmTest::ServerStartCallback(base::Closure quit,
+void TerminaVmTest::ServerStartCallback(base::OnceClosure quit,
                                         std::shared_ptr<grpc::Server> server) {
   server_.swap(server);
-  quit.Run();
+  std::move(quit).Run();
 }
 
 void TerminaVmTest::TestFailed(string reason) {
@@ -500,6 +502,10 @@ TEST_F(TerminaVmTest, GetVmEnterpriseReportingInfo) {
   bool result = vm_->GetVmEnterpriseReportingInfo(&response);
   EXPECT_TRUE(result);
   EXPECT_EQ(kKernelVersion, response.vm_kernel_version());
+}
+
+TEST_F(TerminaVmTest, HandleStatefulUpdate) {
+  vm_->HandleStatefulUpdate({});
 }
 
 }  // namespace concierge

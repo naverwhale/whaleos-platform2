@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,32 +7,32 @@
 #include <algorithm>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/containers/contains.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 namespace dns_proxy {
+namespace {
+// Ares option to do a DNS lookup without trying to check hosts file.
+static char kLookupsOpt[] = "b";
+}  // namespace
 
 AresClient::State::State(AresClient* client,
                          ares_channel channel,
-                         const QueryCallback& callback,
-                         void* ctx)
-    : client(client), channel(channel), callback(callback), ctx(ctx) {}
+                         const QueryCallback& callback)
+    : client(client), channel(channel), callback(callback) {}
 
-AresClient::AresClient(base::TimeDelta timeout,
-                       int max_num_retries,
-                       int max_concurrent_queries)
-    : timeout_(timeout),
-      max_num_retries_(max_num_retries),
-      max_concurrent_queries_(max_concurrent_queries) {
+AresClient::AresClient(base::TimeDelta timeout) : timeout_(timeout) {
   if (ares_library_init(ARES_LIB_INIT_ALL) != ARES_SUCCESS) {
     LOG(DFATAL) << "Failed to initialize ares library";
   }
 }
 
 AresClient::~AresClient() {
+  read_watchers_.clear();
+  write_watchers_.clear();
   // Whenever ares_destroy is called, AresCallback will be called with status
   // equal to ARES_EDESTRUCTION. This callback ensures that the states of the
   // queries are cleared properly.
@@ -42,56 +42,56 @@ AresClient::~AresClient() {
   ares_library_cleanup();
 }
 
-void AresClient::OnFileCanReadWithoutBlocking(ares_channel channel,
-                                              ares_socket_t socket_fd) {
-  ares_process_fd(channel, socket_fd, ARES_SOCKET_BAD);
+void AresClient::ProcessFd(ares_channel channel,
+                           ares_socket_t read_fd,
+                           ares_socket_t write_fd) {
+  // Remove the watchers before ares potentially closing the watched fd in
+  // ares_process_fd. Watching a closed fd is discouraged.
+  ClearWatchers(channel);
+  ares_process_fd(channel, read_fd, write_fd);
   UpdateWatchers(channel);
 }
 
-void AresClient::OnFileCanWriteWithoutBlocking(ares_channel channel,
-                                               ares_socket_t socket_fd) {
-  ares_process_fd(channel, ARES_SOCKET_BAD, socket_fd);
-  UpdateWatchers(channel);
+void AresClient::ClearWatchers(ares_channel channel) {
+  read_watchers_.erase(channel);
+  write_watchers_.erase(channel);
 }
 
 void AresClient::UpdateWatchers(ares_channel channel) {
-  ares_socket_t sockets[ARES_GETSOCK_MAXNUM];
-  int action_bits = ares_getsock(channel, sockets, ARES_GETSOCK_MAXNUM);
-
-  auto read_watchers = read_watchers_.find(channel);
-  auto write_watchers = write_watchers_.find(channel);
-  if (read_watchers == read_watchers_.end() ||
-      write_watchers == write_watchers_.end()) {
+  // Only update watchers if the channel is still valid.
+  if (!base::Contains(channels_inflight_, channel)) {
     return;
   }
 
-  // Clear the watchers and rebuild it. This is necessary because ares does not
-  // provide a utility to notify unused sockets.
-  read_watchers->second.clear();
-  write_watchers->second.clear();
+  // Rebuild the watchers. This is necessary because ares does not provide a
+  // utility to notify for unused sockets.
+  const auto& [read_watchers, read_emplaced] = read_watchers_.emplace(
+      channel,
+      std::vector<std::unique_ptr<base::FileDescriptorWatcher::Controller>>());
+  const auto& [write_watchers, write_emplaced] = write_watchers_.emplace(
+      channel,
+      std::vector<std::unique_ptr<base::FileDescriptorWatcher::Controller>>());
+
+  ares_socket_t sockets[ARES_GETSOCK_MAXNUM];
+  int action_bits = ares_getsock(channel, sockets, ARES_GETSOCK_MAXNUM);
   for (int i = 0; i < ARES_GETSOCK_MAXNUM; i++) {
     if (ARES_GETSOCK_READABLE(action_bits, i)) {
       read_watchers->second.emplace_back(
           base::FileDescriptorWatcher::WatchReadable(
               sockets[i],
-              base::BindRepeating(&AresClient::OnFileCanReadWithoutBlocking,
+              base::BindRepeating(&AresClient::ProcessFd,
                                   weak_factory_.GetWeakPtr(), channel,
-                                  sockets[i])));
+                                  sockets[i], ARES_SOCKET_BAD)));
     }
     if (ARES_GETSOCK_WRITABLE(action_bits, i)) {
       write_watchers->second.emplace_back(
-          base::FileDescriptorWatcher::WatchReadable(
+          base::FileDescriptorWatcher::WatchWritable(
               sockets[i],
-              base::BindRepeating(&AresClient::OnFileCanWriteWithoutBlocking,
+              base::BindRepeating(&AresClient::ProcessFd,
                                   weak_factory_.GetWeakPtr(), channel,
-                                  sockets[i])));
+                                  ARES_SOCKET_BAD, sockets[i])));
     }
   }
-}
-
-void AresClient::SetNameServers(const std::vector<std::string>& name_servers) {
-  name_servers_ = base::JoinString(name_servers, ",");
-  num_name_servers_ = name_servers.size();
 }
 
 void AresClient::AresCallback(
@@ -106,7 +106,7 @@ void AresClient::AresCallback(
   auto buf = std::make_unique<unsigned char[]>(len);
   memcpy(buf.get(), msg, len);
   // Handle the result outside this function to avoid undefined behaviors.
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&AresClient::HandleResult,
                                 state->client->weak_factory_.GetWeakPtr(),
                                 state, status, std::move(buf), len));
@@ -123,27 +123,16 @@ void AresClient::HandleResult(State* state,
   // `HandleResult(...)` may be called even after ares channel is destroyed
   // This happens if a query is completed while queries are being cancelled.
   // On such case, do nothing, the state will be deleted through unique pointer.
-  if (!base::Contains(channels_inflight_, state->channel)) {
+  const auto& channel_inflight = channels_inflight_.find(state->channel);
+  if (channel_inflight == channels_inflight_.end()) {
     return;
   }
 
-  // Ares will return 0 if no queries are active on the channel.
-  // |read_fds| and |write_fds| are unused.
-  fd_set read_fds, write_fds;
-  int nfds = ares_fds(state->channel, &read_fds, &write_fds);
-
-  // Run the callback if the current request is the first successful request
-  // or the current request is the last request.
-  if (status != ARES_SUCCESS && nfds > 0) {
-    return;
-  }
-  state->callback.Run(state->ctx, status, msg.get(), len);
+  // Run the callback.
+  state->callback.Run(status, msg.get(), len);
   msg.reset();
 
-  // Cancel other queries and destroy the channel. Whenever ares_destroy is
-  // called, AresCallback will be called with status equal to ARES_EDESTRUCTION.
-  // This callback ensures that the states of the in-flight queries ares cleared
-  // properly.
+  // Cleanup the states.
   channels_inflight_.erase(state->channel);
   read_watchers_.erase(state->channel);
   write_watchers_.erase(state->channel);
@@ -155,7 +144,7 @@ void AresClient::ResetTimeout(ares_channel channel) {
   if (!base::Contains(channels_inflight_, channel)) {
     return;
   }
-  ares_process_fd(channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
+  ProcessFd(channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
 
   struct timeval max_tv, ret_tv;
   struct timeval* tv;
@@ -166,14 +155,14 @@ void AresClient::ResetTimeout(ares_channel channel) {
     return;
   }
   int timeout_ms = tv->tv_sec * 1000 + tv->tv_usec / 1000;
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
       base::BindRepeating(&AresClient::ResetTimeout, weak_factory_.GetWeakPtr(),
                           channel),
-      base::TimeDelta::FromMilliseconds(timeout_ms));
+      base::Milliseconds(timeout_ms));
 }
 
-ares_channel AresClient::InitChannel() {
+ares_channel AresClient::InitChannel(const std::string& name_server, int type) {
   struct ares_options options;
   memset(&options, 0, sizeof(options));
   int optmask = 0;
@@ -184,11 +173,46 @@ ares_channel AresClient::InitChannel() {
 
   // Set maximum number of retries.
   optmask |= ARES_OPT_TRIES;
-  options.tries = max_num_retries_;
+  options.tries = 1;
 
-  // Perform round-robin selection of name servers. This enables Resolve(...)
-  // to resolve using multiple servers concurrently.
-  optmask |= ARES_OPT_ROTATE;
+  // Explicitly supply ares option values below to avoid having ares read
+  // /etc/resolv.conf.
+  // The client is responsible for honoring the value inside /etc/resolv.conf.
+  // Number of servers to query. This will be overridden by the function
+  // ares_set_servers_csv below.
+  optmask |= ARES_OPT_SERVERS;
+  options.nservers = 0;
+  // Ares should not use any search domains as it is only proxying packets.
+  optmask |= ARES_OPT_DOMAINS;
+  options.ndomains = 0;
+  // Order of the result should not matter.
+  optmask |= ARES_OPT_SORTLIST;
+  options.nsort = 0;
+  // Only do DNS lookup without checking hosts file.
+  optmask |= ARES_OPT_LOOKUPS;
+  options.lookups = kLookupsOpt;
+  // Option to check number of dots before using search domains. This is not
+  // used as we don't use search domains.
+  optmask |= ARES_OPT_NDOTS;
+  options.ndots = 1;
+
+  // Allow c-ares to use flags.
+  optmask |= ARES_OPT_FLAGS;
+
+  // Send the query using the original protocol used.
+  if (type == SOCK_DGRAM) {
+    // Disable TCP fallback. Whenever a TCP fallback is necessary, instead of
+    // having ares redo the query through TCP, return the response to client
+    // as-is. The client is responsible to retry with TCP.
+    options.flags |= ARES_FLAG_IGNTC;
+  } else {
+    // Force to use TCP.
+    options.flags |= ARES_FLAG_USEVC;
+  }
+
+  // Return the result as-is without checking the response. This is done in
+  // order for the caller of ares client to get the failing query result.
+  options.flags |= ARES_FLAG_NOCHECKRESP;
 
   ares_channel channel;
   if (ares_init_options(&channel, &options, optmask) != ARES_SUCCESS) {
@@ -197,47 +221,32 @@ ares_channel AresClient::InitChannel() {
     return nullptr;
   }
 
-  if (ares_set_servers_csv(channel, name_servers_.c_str()) != ARES_SUCCESS) {
-    LOG(ERROR) << "Failed to set ares name servers";
+  if (ares_set_servers_csv(channel, name_server.c_str()) != ARES_SUCCESS) {
+    LOG(ERROR) << "Failed to set ares name server";
     ares_destroy(channel);
     return nullptr;
   }
 
-  // Start timeout handler.
-  channels_inflight_.emplace(channel);
-  ResetTimeout(channel);
   return channel;
 }
 
 bool AresClient::Resolve(const unsigned char* msg,
                          size_t len,
                          const QueryCallback& callback,
-                         void* ctx) {
-  if (name_servers_.empty()) {
-    LOG(ERROR) << "Name servers must not be empty";
+                         const std::string& name_server,
+                         int type) {
+  ares_channel channel = InitChannel(name_server, type);
+  if (!channel)
     return false;
-  }
-  ares_channel channel = InitChannel();
-  if (!channel) {
-    return false;
-  }
-  // Query multiple name servers concurrently. Selection of name servers is
-  // done implicitly through round robin selection. This is enabled by ares
-  // option ARES_OPT_ROTATE.
-  for (int i = 0; i < std::min(num_name_servers_, max_concurrent_queries_);
-       i++) {
-    State* state = new State(this, channel, callback, ctx);
-    ares_send(channel, msg, len, &AresClient::AresCallback, state);
-  }
 
-  // Set up file descriptor watchers.
-  read_watchers_.emplace(
-      channel,
-      std::vector<std::unique_ptr<base::FileDescriptorWatcher::Controller>>());
-  write_watchers_.emplace(
-      channel,
-      std::vector<std::unique_ptr<base::FileDescriptorWatcher::Controller>>());
+  State* state = new State(this, channel, callback);
+  ares_send(channel, msg, len, &AresClient::AresCallback, state);
+
+  // Start timeout handler.
+  channels_inflight_.emplace(channel);
   UpdateWatchers(channel);
+  ResetTimeout(channel);
+
   return true;
 }
 }  // namespace dns_proxy

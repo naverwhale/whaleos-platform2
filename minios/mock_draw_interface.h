@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -56,16 +56,21 @@ class MockDrawInterface : public DrawInterface {
                int inner_width,
                bool is_text));
   MOCK_METHOD(void, ShowStepper, (const std::vector<std::string>& steps));
+  MOCK_METHOD(void, ShowAdvancedOptionsButton, (bool focused));
+  MOCK_METHOD(void, ShowPowerButton, (bool focused));
   MOCK_METHOD(void, MessageBaseScreen, ());
   MOCK_METHOD(void, ShowLanguageDropdown, (int current_index));
   MOCK_METHOD(int, FindLocaleIndex, (int current_index));
   MOCK_METHOD(void, ShowLanguageMenu, (bool is_selected));
   MOCK_METHOD(void, LocaleChange, (int selected_locale));
+  MOCK_METHOD(void, ShowProgressBar, ());
   MOCK_METHOD(void, ShowProgressPercentage, (double progress));
+  MOCK_METHOD(void, ShowIndeterminateProgressBar, ());
+  MOCK_METHOD(void, HideIndeterminateProgressBar, ());
   MOCK_METHOD(int, GetSupportedLocalesSize, ());
   MOCK_METHOD(int, GetDefaultButtonWidth, ());
   MOCK_METHOD(int, GetFreconCanvasSize, ());
-  MOCK_METHOD(base::FilePath, GetScreenPath, ());
+  MOCK_METHOD(base::FilePath, GetScreensPath, ());
   MOCK_METHOD(bool, IsLocaleRightToLeft, ());
 };
 

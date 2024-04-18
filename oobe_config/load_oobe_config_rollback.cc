@@ -1,8 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "oobe_config/load_oobe_config_rollback.h"
+
+#include <utility>
 
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
@@ -10,8 +12,8 @@
 #include <base/logging.h>
 #include <base/values.h>
 
+#include "oobe_config/metrics/enterprise_rollback_metrics_tracking.h"
 #include "oobe_config/oobe_config.h"
-#include "oobe_config/rollback_constants.h"
 #include "oobe_config/rollback_data.pb.h"
 
 using base::FilePath;
@@ -20,9 +22,35 @@ using std::unique_ptr;
 
 namespace oobe_config {
 
-LoadOobeConfigRollback::LoadOobeConfigRollback(OobeConfig* oobe_config,
-                                               bool allow_unencrypted)
-    : oobe_config_(oobe_config), allow_unencrypted_(allow_unencrypted) {}
+namespace {
+
+base::Version DeviceVersion() {
+  auto device_version = GetDeviceVersion();
+  if (!device_version.has_value()) {
+    return base::Version("");
+  }
+  return device_version.value();
+}
+
+void ReportEnterpriseRollbackRestoreResult(
+    EnterpriseRollbackMetricsHandler& rollback_metrics,
+    const EnterpriseRollbackEvent& event) {
+  // OobeConfigRestore results are reported immediately because the powerwash
+  // already happened.
+  rollback_metrics.ReportEventNow(
+      EnterpriseRollbackMetricsHandler::CreateEventData(event,
+                                                        DeviceVersion()));
+}
+
+}  // namespace
+
+LoadOobeConfigRollback::LoadOobeConfigRollback(
+    OobeConfig* oobe_config,
+    EnterpriseRollbackMetricsHandler* rollback_metrics,
+    FileHandler file_handler)
+    : file_handler_(std::move(file_handler)),
+      oobe_config_(oobe_config),
+      rollback_metrics_(rollback_metrics) {}
 
 bool LoadOobeConfigRollback::GetOobeConfigJson(string* config,
                                                string* enrollment_domain) {
@@ -31,56 +59,66 @@ bool LoadOobeConfigRollback::GetOobeConfigJson(string* config,
   *config = "";
   *enrollment_domain = "";
 
-  // Precondition for running rollback.
-  if (!oobe_config_->FileExists(kRestoreTempPath)) {
-    LOG(ERROR) << "Restore destination path doesn't exist.";
-    return false;
-  }
+  // Restore path is created by tmpfiles config.
+  CHECK(file_handler_.HasRestorePath());
 
-  if (oobe_config_->ShouldRestoreRollbackData()) {
-    LOG(INFO) << "Starting rollback restore.";
+  if ((file_handler_.HasOpensslEncryptedRollbackData() ||
+       file_handler_.HasTpmEncryptedRollbackData()) &&
+      !file_handler_.HasDecryptedRollbackData()) {
+    LOG(INFO) << "Decrypting rollback data.";
 
-    // Decrypt the proto from kUnencryptedRollbackDataPath.
-    bool restore_result;
-    if (allow_unencrypted_) {
-      restore_result = oobe_config_->UnencryptedRollbackRestore();
-    } else {
-      restore_result = oobe_config_->EncryptedRollbackRestore();
-    }
+    bool restore_result = oobe_config_->EncryptedRollbackRestore();
 
     if (!restore_result) {
-      LOG(ERROR) << "Failed to restore rollback data";
-      metrics_.RecordRestoreResult(Metrics::OobeRestoreResult::kStage1Failure);
+      LOG(ERROR)
+          << "Failed to decrypt rollback data. This is expected in rare cases, "
+             "e.g. when the TPM was cleared again during rollback OOBE.";
+      ReportEnterpriseRollbackRestoreResult(
+          *rollback_metrics_, EnterpriseRollbackEvent::
+                                  ROLLBACK_OOBE_CONFIG_RESTORE_FAILURE_DECRYPT);
+      metrics_uma_.RecordRestoreResult(
+          MetricsUMA::OobeRestoreResult::kStage1Failure);
       return false;
     }
+  }
 
-    // We load the proto from kEncryptedStatefulRollbackDataPath.
+  if (file_handler_.HasDecryptedRollbackData()) {
     string rollback_data_str;
-    if (!oobe_config_->ReadFile(kEncryptedStatefulRollbackDataPath,
-                                &rollback_data_str)) {
-      metrics_.RecordRestoreResult(Metrics::OobeRestoreResult::kStage3Failure);
+    if (!file_handler_.ReadDecryptedRollbackData(&rollback_data_str)) {
+      LOG(ERROR) << "Could not read decrypted rollback data file.";
+      ReportEnterpriseRollbackRestoreResult(
+          *rollback_metrics_,
+          EnterpriseRollbackEvent::ROLLBACK_OOBE_CONFIG_RESTORE_FAILURE_READ);
+      metrics_uma_.RecordRestoreResult(
+          MetricsUMA::OobeRestoreResult::kStage3Failure);
       return false;
     }
     RollbackData rollback_data;
     if (!rollback_data.ParseFromString(rollback_data_str)) {
       LOG(ERROR) << "Couldn't parse proto.";
-      metrics_.RecordRestoreResult(Metrics::OobeRestoreResult::kStage3Failure);
+      ReportEnterpriseRollbackRestoreResult(
+          *rollback_metrics_,
+          EnterpriseRollbackEvent::ROLLBACK_OOBE_CONFIG_RESTORE_FAILURE_PARSE);
+      metrics_uma_.RecordRestoreResult(
+          MetricsUMA::OobeRestoreResult::kStage3Failure);
       return false;
     }
     // We get the data for Chrome and assemble the config.
     if (!AssembleConfig(rollback_data, config)) {
       LOG(ERROR) << "Failed to assemble config.";
-      metrics_.RecordRestoreResult(Metrics::OobeRestoreResult::kStage3Failure);
+      ReportEnterpriseRollbackRestoreResult(
+          *rollback_metrics_,
+          EnterpriseRollbackEvent::ROLLBACK_OOBE_CONFIG_RESTORE_FAILURE_CONFIG);
+      metrics_uma_.RecordRestoreResult(
+          MetricsUMA::OobeRestoreResult::kStage3Failure);
       return false;
     }
 
-    // If it succeeded, we remove all files from
-    // kEncryptedStatefulRollbackDataPath.
-    LOG(INFO) << "Cleaning up rollback data.";
-    oobe_config_->CleanupEncryptedStatefulDirectory();
-
     LOG(INFO) << "Rollback restore completed successfully.";
-    metrics_.RecordRestoreResult(Metrics::OobeRestoreResult::kSuccess);
+    ReportEnterpriseRollbackRestoreResult(
+        *rollback_metrics_,
+        EnterpriseRollbackEvent::ROLLBACK_OOBE_CONFIG_RESTORE_SUCCESS);
+    metrics_uma_.RecordRestoreResult(MetricsUMA::OobeRestoreResult::kSuccess);
     return true;
   }
 
@@ -92,25 +130,22 @@ bool LoadOobeConfigRollback::AssembleConfig(const RollbackData& rollback_data,
   // Possible values are defined in
   // chrome/browser/resources/chromeos/login/components/oobe_types.js.
   // TODO(zentaro): Export these strings as constants.
-  base::Value dictionary(base::Value::Type::DICTIONARY);
+  base::Value::Dict dictionary;
   // Always skip next screen.
-  dictionary.SetBoolKey("welcomeNext", true);
+  dictionary.Set("welcomeNext", true);
   // Always skip network selection screen if possible.
-  dictionary.SetBoolKey("networkUseConnected", true);
-  // We don't want updates after rolling back.
-  dictionary.SetBoolKey("updateSkipNonCritical", true);
+  dictionary.Set("networkUseConnected", true);
   // Set whether metrics should be enabled if it exists in |rollback_data|.
-  dictionary.SetBoolKey("eulaSendStatistics",
-                        rollback_data.eula_send_statistics());
+  dictionary.Set("eulaSendStatistics", rollback_data.eula_send_statistics());
   // Set whether the EULA as already accepted and can be skipped if the field is
   // present in |rollback_data|.
-  dictionary.SetBoolKey("eulaAutoAccept", rollback_data.eula_auto_accept());
+  dictionary.Set("eulaAutoAccept", rollback_data.eula_auto_accept());
   // Tell Chrome that it still has to create some robot accounts that were
   // destroyed during rollback.
-  dictionary.SetBoolKey("enrollmentRestoreAfterRollback", true);
+  dictionary.Set("enrollmentRestoreAfterRollback", true);
   // Send network config to Chrome. Chrome takes care of how to reconfigure the
   // networks.
-  dictionary.SetStringKey("networkConfig", rollback_data.network_config());
+  dictionary.Set("networkConfig", rollback_data.network_config());
 
   return base::JSONWriter::Write(dictionary, config);
 }

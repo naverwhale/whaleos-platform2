@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,12 @@ use std::fmt::{self, Display};
 use std::io::{stdout, Write};
 use std::process::Child;
 
+use metrics_rs::MetricsLibrary;
 use remain::sorted;
 
 const INDENT: &str = "  ";
 
+#[derive(Debug)]
 #[sorted]
 pub enum Error {
     CommandInvalidArguments(String),
@@ -139,6 +141,13 @@ impl Dispatcher {
         if command.command_callback.is_none() {
             return Err(Error::CommandNotImplemented(entry.get_command().join(" ")));
         }
+
+        let metrics_mutex = MetricsLibrary::get().expect("MetricsLibrary::get() failed");
+        let mut metrics = metrics_mutex
+            .lock()
+            .expect("Lock MetricsLibrary object failed");
+        let metrics_name: &str = &("Crosh_Run_{}".to_owned() + command.get_name());
+        let _ = metrics.send_user_action_to_uma(metrics_name);
 
         for cb in flag_callbacks {
             (cb)(command, entry)?;
@@ -303,12 +312,7 @@ impl Command {
     }
 
     fn find_flag(&self, flag: &str) -> Option<&Flag> {
-        for f in &self.flags {
-            if f.name == flag {
-                return Some(f);
-            }
-        }
-        None
+        self.flags.iter().find(|&f| f.name == flag)
     }
 
     fn find_subcommand(&self, name: &str) -> Option<&Command> {
@@ -526,12 +530,7 @@ trait HasName {
 
 // Fetch a reference to an entry in a list by matching against get_name().
 fn find_by_name<'a, T: HasName>(name: &str, list: &'a [T]) -> Option<&'a T> {
-    for c in list {
-        if *c.get_name() == *name {
-            return Some(c);
-        }
-    }
-    None
+    list.iter().find(|&c| *c.get_name() == *name)
 }
 
 // Provide a CompletionResult after prefix matching against get_name().
@@ -618,7 +617,7 @@ mod tests {
     fn test_handle_command_empty() {
         let dispatcher = default_dispatcher(default_parent_command(default_child_command()));
 
-        assert!(!dispatcher.handle_command(Vec::new()).is_ok());
+        assert!(dispatcher.handle_command(Vec::new()).is_err());
     }
 
     #[test]
@@ -665,7 +664,7 @@ mod tests {
             CHILD_COMMAND_NAME.to_string(),
         ];
 
-        assert!(!dispatcher.handle_command(tokens).is_ok());
+        assert!(dispatcher.handle_command(tokens).is_err());
     }
 
     #[test]

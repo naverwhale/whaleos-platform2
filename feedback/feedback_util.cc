@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -37,7 +37,7 @@ bool ZipString(const base::FilePath& filename,
   brillo::ProcessImpl zipprocess;
   zipprocess.AddArg(kZipProcess);
   zipprocess.AddArg(filename.value());
-  zipprocess.RedirectOutput(temp_path.value());
+  zipprocess.RedirectOutput(temp_path);
   bool succeeded = base::CreateTemporaryFile(&zip_file) && !zipprocess.Run() &&
                    base::ReadFileToString(zip_file, compressed_logs);
 

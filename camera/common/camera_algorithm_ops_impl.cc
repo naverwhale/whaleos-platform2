@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,15 +9,14 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/no_destructor.h>
 #include <mojo/public/cpp/system/platform_handle.h>
 
 #include "cros-camera/common.h"
-#include "cros-camera/future.h"
 
 namespace cros {
 
@@ -38,7 +37,7 @@ bool CameraAlgorithmOpsImpl::Bind(
     mojo::PendingReceiver<mojom::CameraAlgorithmOps> pending_receiver,
     camera_algorithm_ops_t* cam_algo,
     scoped_refptr<base::SingleThreadTaskRunner> ipc_task_runner,
-    const base::Closure& ipc_lost_handler) {
+    base::OnceClosure ipc_lost_handler) {
   DCHECK(ipc_task_runner->BelongsToCurrentThread());
   if (receiver_.is_bound()) {
     LOGF(ERROR) << "Algorithm Ops is already bound";
@@ -50,7 +49,7 @@ bool CameraAlgorithmOpsImpl::Bind(
   receiver_.Bind(std::move(pending_receiver));
   cam_algo_ = cam_algo;
   ipc_task_runner_ = std::move(ipc_task_runner);
-  receiver_.set_disconnect_handler(ipc_lost_handler);
+  receiver_.set_disconnect_handler(std::move(ipc_lost_handler));
   return true;
 }
 
@@ -73,7 +72,7 @@ void CameraAlgorithmOpsImpl::Initialize(
   DCHECK(cam_algo_);
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
   DCHECK(callback_ops.is_valid());
-  VLOGF_ENTER();
+
   int32_t result = 0;
   if (callback_ops_.is_bound()) {
     LOGF(ERROR) << "Return callback is already registered";
@@ -82,17 +81,17 @@ void CameraAlgorithmOpsImpl::Initialize(
   }
   CameraAlgorithmOpsImpl::return_callback =
       CameraAlgorithmOpsImpl::ReturnCallbackForwarder;
+  CameraAlgorithmOpsImpl::update = CameraAlgorithmOpsImpl::UpdateForwarder;
   result = cam_algo_->initialize(this);
   callback_ops_.Bind(std::move(callback_ops));
   std::move(callback).Run(result);
-  VLOGF_EXIT();
 }
 
 void CameraAlgorithmOpsImpl::RegisterBuffer(mojo::ScopedHandle buffer_fd,
                                             RegisterBufferCallback callback) {
   DCHECK(cam_algo_);
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   base::ScopedPlatformFile fd;
   MojoResult mojo_result = mojo::UnwrapPlatformFile(std::move(buffer_fd), &fd);
   if (mojo_result != MOJO_RESULT_OK) {
@@ -102,7 +101,6 @@ void CameraAlgorithmOpsImpl::RegisterBuffer(mojo::ScopedHandle buffer_fd,
   }
   int32_t result = cam_algo_->register_buffer(fd.release());
   std::move(callback).Run(result);
-  VLOGF_EXIT();
 }
 
 void CameraAlgorithmOpsImpl::Request(uint32_t req_id,
@@ -110,7 +108,7 @@ void CameraAlgorithmOpsImpl::Request(uint32_t req_id,
                                      int32_t buffer_handle) {
   DCHECK(cam_algo_);
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   if (!callback_ops_.is_bound()) {
     LOGF(ERROR) << "Return callback is not registered yet";
     return;
@@ -118,18 +116,40 @@ void CameraAlgorithmOpsImpl::Request(uint32_t req_id,
   // TODO(b/37434548): This can be removed after libchrome uprev.
   const std::vector<uint8_t>& header = req_header;
   cam_algo_->request(req_id, header.data(), header.size(), buffer_handle);
-  VLOGF_EXIT();
 }
 
 void CameraAlgorithmOpsImpl::DeregisterBuffers(
     const std::vector<int32_t>& buffer_handles) {
   DCHECK(cam_algo_);
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   // TODO(b/37434548): This can be removed after libchrome uprev.
   const std::vector<int32_t>& handles = buffer_handles;
   cam_algo_->deregister_buffers(handles.data(), handles.size());
-  VLOGF_EXIT();
+}
+
+void CameraAlgorithmOpsImpl::UpdateReturn(uint32_t upd_id,
+                                          uint32_t status,
+                                          mojo::ScopedHandle buffer_fd) {
+  DCHECK(cam_algo_);
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  base::ScopedPlatformFile fd;
+  MojoResult mojo_result = mojo::UnwrapPlatformFile(std::move(buffer_fd), &fd);
+  if (mojo_result != MOJO_RESULT_OK) {
+    LOGF(ERROR) << "Failed to unwrap handle: " << mojo_result;
+    return;
+  }
+  cam_algo_->update_return(upd_id, status, fd.release());
+}
+
+void CameraAlgorithmOpsImpl::Deinitialize() {
+  DCHECK(cam_algo_);
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  if (cam_algo_->deinitialize) {
+    cam_algo_->deinitialize();
+  }
 }
 
 // static
@@ -138,7 +158,6 @@ void CameraAlgorithmOpsImpl::ReturnCallbackForwarder(
     uint32_t req_id,
     uint32_t status,
     int32_t buffer_handle) {
-  VLOGF_ENTER();
   if (const_cast<CameraAlgorithmOpsImpl*>(
           static_cast<const CameraAlgorithmOpsImpl*>(callback_ops)) !=
       singleton_) {
@@ -147,21 +166,55 @@ void CameraAlgorithmOpsImpl::ReturnCallbackForwarder(
   }
   singleton_->ipc_task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&CameraAlgorithmOpsImpl::ReturnCallbackOnIPCThread,
-                 base::Unretained(singleton_), req_id, status, buffer_handle));
+      base::BindOnce(&CameraAlgorithmOpsImpl::ReturnCallbackOnIPCThread,
+                     base::Unretained(singleton_), req_id, status,
+                     buffer_handle));
 }
 
 void CameraAlgorithmOpsImpl::ReturnCallbackOnIPCThread(uint32_t req_id,
                                                        uint32_t status,
                                                        int32_t buffer_handle) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   if (!callback_ops_.is_bound()) {
     LOGF(WARNING) << "Callback is not bound. IPC broken?";
   } else {
     callback_ops_->Return(req_id, status, buffer_handle);
   }
-  VLOGF_EXIT();
+}
+
+// static
+void CameraAlgorithmOpsImpl::UpdateForwarder(
+    const camera_algorithm_callback_ops_t* callback_ops,
+    uint32_t upd_id,
+    const uint8_t upd_header[],
+    uint32_t size,
+    int buffer_fd) {
+  if (const_cast<CameraAlgorithmOpsImpl*>(
+          static_cast<const CameraAlgorithmOpsImpl*>(callback_ops)) !=
+      singleton_) {
+    LOGF(ERROR) << "Invalid callback ops provided";
+    return;
+  }
+  singleton_->ipc_task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&CameraAlgorithmOpsImpl::UpdateOnIPCThread,
+                     base::Unretained(singleton_), upd_id,
+                     std::vector<uint8_t>(upd_header, upd_header + size),
+                     buffer_fd));
+}
+
+void CameraAlgorithmOpsImpl::UpdateOnIPCThread(
+    uint32_t upd_id, const std::vector<uint8_t>& upd_header, int buffer_fd) {
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  if (!callback_ops_.is_bound()) {
+    LOGF(WARNING) << "Callback is not bound. IPC broken?";
+  } else {
+    callback_ops_->Update(
+        upd_id, upd_header,
+        mojo::WrapPlatformFile(base::ScopedPlatformFile(buffer_fd)));
+  }
 }
 
 }  // namespace cros

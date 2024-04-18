@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,7 +21,8 @@ static constexpr char str1[] = "abc";
 static constexpr char str2[] = "def";
 static constexpr char str3[] = "abc";
 
-static_assert(str1 != str3, "The strings should have different addresses");
+static_assert(static_cast<const char*>(str1) != static_cast<const char*>(str3),
+              "The strings should have different addresses");
 
 TEST(SecureClearBytes, SecureClearBytes) {
   std::vector<uint8_t> input = {0xFF, 0xFF, 0xFF};

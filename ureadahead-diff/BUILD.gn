@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -30,6 +30,7 @@ static_library("libureadahead_diff") {
 }
 
 executable("ureadahead-diff") {
+  install_path = "bin"
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
   deps = [ ":libureadahead_diff" ]
@@ -43,6 +44,7 @@ if (use.test) {
     ]
   }
   executable("ureadahead-diff_testrunner") {
+    run_test = true
     sources = [ "ureadahead_diff_test.cc" ]
     configs += [
       "//common-mk:test",
@@ -52,7 +54,7 @@ if (use.test) {
 
     deps = [
       ":libureadahead_diff",
-      "../../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 }

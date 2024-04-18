@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/brillo_export.h>
 #include <brillo/http/http_connection.h>
 #include <brillo/http/http_transport_curl.h>
@@ -38,8 +37,8 @@ class BRILLO_EXPORT Connection : public http::Connection {
   bool SetRequestData(StreamPtr stream, brillo::ErrorPtr* error) override;
   void SetResponseData(StreamPtr stream) override;
   bool FinishRequest(brillo::ErrorPtr* error) override;
-  RequestID FinishRequestAsync(const SuccessCallback& success_callback,
-                               const ErrorCallback& error_callback) override;
+  RequestID FinishRequestAsync(SuccessCallback success_callback,
+                               ErrorCallback error_callback) override;
 
   int GetResponseStatusCode() const override;
   std::string GetResponseStatusText() const override;

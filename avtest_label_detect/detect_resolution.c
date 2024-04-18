@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -14,9 +14,29 @@
 
 #include "label_detect.h"
 
+#if defined(USE_V4L2_CODEC)
+// TODO(b/255770680): Remove this once V4L2 header is updated.
+#ifndef V4L2_PIX_FMT_AV1
+#define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1') /* AV1 */
+#endif
+#ifndef V4L2_PIX_FMT_AV1_FRAME
+#define V4L2_PIX_FMT_AV1_FRAME \
+  v4l2_fourcc('A', 'V', '1', 'F') /* AV1 parsed frame */
+#endif
+// TODO(b/278157861): Remove this once ChromeOS V4L2 header is updated
+#ifndef V4L2_PIX_FMT_HEVC_SLICE
+#define V4L2_PIX_FMT_HEVC_SLICE \
+  v4l2_fourcc('S', '2', '6', '5') /* HEVC parsed slices */
+#endif
+#endif  // defined(USE_V4L2_CODEC)
+
 #if defined(USE_VAAPI) || defined(USE_V4L2_CODEC)
 static const int32_t width_4k = 3840;
 static const int32_t height_4k = 2160;
+#endif
+#if defined(USE_VAAPI)
+static const int32_t width_8k = 7680;
+static const int32_t height_8k = 4320;
 #endif
 
 #if defined(USE_VAAPI)
@@ -44,81 +64,110 @@ static const VAProfile va_profiles_hevc_10bpp[] = {VAProfileHEVCMain10,
 
 /* Determines if a VAAPI device associated with given |fd| supports
  * |va_profiles| for |va_entrypoint|, and its maximum resolution is larger
- * than 3840x2160.
+ * than or equal to |min_width|x|min_height|.
  */
-static bool is_vaapi_4k_device(int fd,
-                               const VAProfile* va_profiles,
-                               VAEntrypoint va_entrypoint,
-                               bool is_10bpp) {
+static bool query_support_for(int fd,
+                              const VAProfile* va_profiles,
+                              VAEntrypoint va_entrypoint,
+                              bool is_10bpp,
+                              int32_t min_width,
+                              int32_t min_height) {
   int32_t resolution_width = 0;
   int32_t resolution_height = 0;
   const unsigned int va_format =
       is_10bpp ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
 
-  if (is_vaapi_support_formats(fd, va_profiles, va_entrypoint, va_format)) {
-    if (get_vaapi_max_resolution(fd, va_profiles, va_entrypoint, va_format,
-                                 &resolution_width, &resolution_height)) {
-      return resolution_width >= width_4k && resolution_height >= height_4k;
-    }
-  }
-  return false;
+  return is_vaapi_support_formats(fd, va_profiles, va_entrypoint, va_format) &&
+         get_vaapi_max_resolution(fd, va_profiles, va_entrypoint, va_format,
+                                  &resolution_width, &resolution_height) &&
+         resolution_width >= min_width && resolution_height >= min_height;
 }
 
-// Determines if is_vaapi_4k_device() for H264 decoding.
-static bool is_vaapi_4k_device_dec_h264(int fd) {
-  return is_vaapi_4k_device(fd, va_profiles_h264, VAEntrypointVLD, false);
+static bool query_support_for_dec_h264(int fd,
+                                       int32_t min_width,
+                                       int32_t min_height) {
+  return query_support_for(fd, va_profiles_h264, VAEntrypointVLD, false,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for H264 encoding.
-static bool is_vaapi_4k_device_enc_h264(int fd) {
-  return (
-      is_vaapi_4k_device(fd, va_profiles_h264, VAEntrypointEncSlice, false) ||
-      is_vaapi_4k_device(fd, va_profiles_h264, VAEntrypointEncSliceLP, false));
+static bool query_support_for_enc_h264(int fd,
+                                       int32_t min_width,
+                                       int32_t min_height) {
+  return query_support_for(fd, va_profiles_h264, VAEntrypointEncSlice, false,
+                           min_width, min_height) ||
+         query_support_for(fd, va_profiles_h264, VAEntrypointEncSliceLP, false,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for VP8 decoding.
-static bool is_vaapi_4k_device_dec_vp8(int fd) {
-  return is_vaapi_4k_device(fd, va_profiles_vp8, VAEntrypointVLD, false);
+static bool query_support_for_dec_vp8(int fd,
+                                      int32_t min_width,
+                                      int32_t min_height) {
+  return query_support_for(fd, va_profiles_vp8, VAEntrypointVLD, false,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for VP8 encoding.
-static bool is_vaapi_4k_device_enc_vp8(int fd) {
-  return (
-      is_vaapi_4k_device(fd, va_profiles_vp8, VAEntrypointEncSlice, false) ||
-      is_vaapi_4k_device(fd, va_profiles_vp8, VAEntrypointEncSliceLP, false));
+static bool query_support_for_enc_vp8(int fd,
+                                      int32_t min_width,
+                                      int32_t min_height) {
+  return query_support_for(fd, va_profiles_vp8, VAEntrypointEncSlice, false,
+                           min_width, min_height) ||
+         query_support_for(fd, va_profiles_vp8, VAEntrypointEncSliceLP, false,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for VP9 decoding.
-static bool is_vaapi_4k_device_dec_vp9(int fd) {
-  return is_vaapi_4k_device(fd, va_profiles_vp9, VAEntrypointVLD, false);
+static bool query_support_for_dec_vp9(int fd,
+                                      int32_t min_width,
+                                      int32_t min_height) {
+  return query_support_for(fd, va_profiles_vp9, VAEntrypointVLD, false,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for VP9 encoding.
-static bool is_vaapi_4k_device_enc_vp9(int fd) {
-  return (
-      is_vaapi_4k_device(fd, va_profiles_vp9, VAEntrypointEncSlice, false) ||
-      is_vaapi_4k_device(fd, va_profiles_vp9, VAEntrypointEncSliceLP, false));
+static bool query_support_for_enc_vp9(int fd,
+                                      int32_t min_width,
+                                      int32_t min_height) {
+  return query_support_for(fd, va_profiles_vp9, VAEntrypointEncSlice, false,
+                           min_width, min_height) ||
+         query_support_for(fd, va_profiles_vp9, VAEntrypointEncSliceLP, false,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for AV1 decoding.
-static bool is_vaapi_4k_device_dec_av1(int fd) {
-  return is_vaapi_4k_device(fd, va_profiles_av1, VAEntrypointVLD, false);
+static bool query_support_for_enc_av1(int fd,
+                                      int32_t min_width,
+                                      int32_t min_height) {
+  return query_support_for(fd, va_profiles_av1, VAEntrypointEncSliceLP, false,
+                           min_width, min_height) ||
+         query_support_for(fd, va_profiles_av1, VAEntrypointEncSlice, false,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for AV1 decoding 10BPP.
-static bool is_vaapi_4k_device_dec_av1_10bpp(int fd) {
-  return is_vaapi_4k_device(fd, va_profiles_av1, VAEntrypointVLD, true);
+static bool query_support_for_dec_av1(int fd,
+                                      int32_t min_width,
+                                      int32_t min_height) {
+  return query_support_for(fd, va_profiles_av1, VAEntrypointVLD, false,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for HEVC decoding.
-static bool is_vaapi_4k_device_dec_hevc(int fd) {
-  return is_vaapi_4k_device(fd, va_profiles_hevc, VAEntrypointVLD, false);
+static bool query_support_for_dec_av1_10bpp(int fd,
+                                            int32_t min_width,
+                                            int32_t min_height) {
+  return query_support_for(fd, va_profiles_av1, VAEntrypointVLD, true,
+                           min_width, min_height);
 }
 
-// Determines if is_vaapi_4k_device() for HEVC decoding 10BPP.
-static bool is_vaapi_4k_device_dec_hevc_10bpp(int fd) {
-  return is_vaapi_4k_device(fd, va_profiles_hevc_10bpp, VAEntrypointVLD, true);
+static bool query_support_for_dec_hevc(int fd,
+                                       int32_t min_width,
+                                       int32_t min_height) {
+  return query_support_for(fd, va_profiles_hevc, VAEntrypointVLD, false,
+                           min_width, min_height);
 }
+
+static bool query_support_for_dec_hevc_10bpp(int fd,
+                                             int32_t min_width,
+                                             int32_t min_height) {
+  return query_support_for(fd, va_profiles_hevc_10bpp, VAEntrypointVLD, true,
+                           min_width, min_height);
+}
+
 #endif  // VA_CHECK_VERSION(0, 38, 1)
 #endif  // defined(USE_VAAPI)
 
@@ -187,6 +236,23 @@ static bool is_v4l2_4k_device_enc_vp9(int fd) {
   return is_v4l2_4k_device(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                            V4L2_PIX_FMT_VP9);
 }
+
+// Determines if is_v4l2_4k_device() for HEVC decoding.
+static bool is_v4l2_4k_device_dec_hevc(int fd) {
+  return is_v4l2_4k_device(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                           V4L2_PIX_FMT_HEVC) ||
+         is_v4l2_4k_device(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                           V4L2_PIX_FMT_HEVC_SLICE);
+}
+
+// Determines if is_v4l2_4k_device() for AV1 decoding.
+static bool is_v4l2_4k_device_dec_av1(int fd) {
+  return is_v4l2_4k_device(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                           V4L2_PIX_FMT_AV1) ||
+         is_v4l2_4k_device(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                           V4L2_PIX_FMT_AV1_FRAME);
+}
+
 #endif  // defined(USE_V4L2_CODEC)
 
 /* Determines "4k_video_h264". Return true, if either the VAAPI device
@@ -196,8 +262,8 @@ static bool is_v4l2_4k_device_enc_vp9(int fd) {
  */
 bool detect_4k_device_h264(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_dec_h264))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_h264, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
 
 #if defined(USE_V4L2_CODEC)
@@ -215,8 +281,8 @@ bool detect_4k_device_h264(void) {
  */
 bool detect_4k_device_vp8(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_dec_vp8))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_vp8, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
 
 #if defined(USE_V4L2_CODEC)
@@ -234,8 +300,8 @@ bool detect_4k_device_vp8(void) {
  */
 bool detect_4k_device_vp9(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_dec_vp9))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_vp9, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
 
 #if defined(USE_V4L2_CODEC)
@@ -252,9 +318,14 @@ bool detect_4k_device_vp9(void) {
  */
 bool detect_4k_device_av1(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_dec_av1))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_av1, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
+
+#if defined(USE_V4L2_CODEC)
+  if (is_any_device(kVideoDevicePattern, is_v4l2_4k_device_dec_av1))
+    return true;
+#endif  // defined(USE_V4L2_CODEC)
 
   return false;
 }
@@ -265,8 +336,8 @@ bool detect_4k_device_av1(void) {
  */
 bool detect_4k_device_av1_10bpp(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_dec_av1_10bpp))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_av1_10bpp, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
 
   return false;
@@ -278,9 +349,14 @@ bool detect_4k_device_av1_10bpp(void) {
  */
 bool detect_4k_device_hevc(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_dec_hevc))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_hevc, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
+
+#if defined(USE_V4L2_CODEC)
+  if (is_any_device(kVideoDevicePattern, is_v4l2_4k_device_dec_hevc))
+    return true;
+#endif  // defined(USE_V4L2_CODEC)
 
   return false;
 }
@@ -291,8 +367,62 @@ bool detect_4k_device_hevc(void) {
  */
 bool detect_4k_device_hevc_10bpp(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_dec_hevc_10bpp))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_hevc_10bpp, width_4k, height_4k);
+#endif  // defined(USE_VAAPI)
+
+  return false;
+}
+
+bool detect_8k_device_h264(void) {
+#if defined(USE_VAAPI)
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_h264, width_8k, height_8k);
+#endif  // defined(USE_VAAPI)
+
+  return false;
+}
+
+bool detect_8k_device_vp9(void) {
+#if defined(USE_VAAPI)
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_vp9, width_8k, height_8k);
+#endif  // defined(USE_VAAPI)
+
+  return false;
+}
+
+bool detect_8k_device_av1(void) {
+#if defined(USE_VAAPI)
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_av1, width_8k, height_8k);
+#endif  // defined(USE_VAAPI)
+
+  return false;
+}
+
+bool detect_8k_device_av1_10bpp(void) {
+#if defined(USE_VAAPI)
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_av1_10bpp, width_8k, height_8k);
+#endif  // defined(USE_VAAPI)
+
+  return false;
+}
+
+bool detect_8k_device_hevc(void) {
+#if defined(USE_VAAPI)
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_hevc, width_8k, height_8k);
+#endif  // defined(USE_VAAPI)
+
+  return false;
+}
+
+bool detect_8k_device_hevc_10bpp(void) {
+#if defined(USE_VAAPI)
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_dec_hevc_10bpp, width_8k, height_8k);
 #endif  // defined(USE_VAAPI)
 
   return false;
@@ -305,8 +435,8 @@ bool detect_4k_device_hevc_10bpp(void) {
  */
 bool detect_4k_device_enc_h264(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_enc_h264))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_enc_h264, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
 
 #if defined(USE_V4L2_CODEC)
@@ -324,8 +454,8 @@ bool detect_4k_device_enc_h264(void) {
  */
 bool detect_4k_device_enc_vp8(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_enc_vp8))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_enc_vp8, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
 
 #if defined(USE_V4L2_CODEC)
@@ -343,14 +473,27 @@ bool detect_4k_device_enc_vp8(void) {
  */
 bool detect_4k_device_enc_vp9(void) {
 #if defined(USE_VAAPI)
-  if (is_any_device(kDRMDevicePattern, is_vaapi_4k_device_enc_vp9))
-    return true;
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_enc_vp9, width_4k, height_4k);
 #endif  // defined(USE_VAAPI)
 
 #if defined(USE_V4L2_CODEC)
   if (is_any_device(kVideoDevicePattern, is_v4l2_4k_device_enc_vp9))
     return true;
 #endif  // defined(USE_V4L2_CODEC)
+
+  return false;
+}
+
+/* Determines "4k_video_enc_av1". Return true, if the VAAPI device
+ * supports 4k resolution AV1 encoding, has encoding entry point,
+ * and input YUV420 formats.
+ */
+bool detect_4k_device_enc_av1(void) {
+#if defined(USE_VAAPI)
+  return does_any_device_support_resolution(
+      kDRMDevicePattern, query_support_for_enc_av1, width_4k, height_4k);
+#endif  // defined(USE_VAAPI)
 
   return false;
 }

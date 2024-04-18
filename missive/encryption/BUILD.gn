@@ -1,5 +1,5 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
-# Use of this source code is governed by a BSD - style license that can be
+# Copyright 2021 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
@@ -23,7 +23,8 @@ static_library("encryption_module_interface") {
   sources = [ "encryption_module_interface.cc" ]
   configs += [ ":target_defaults" ]
   deps = [
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
+    "//missive/util:dynamic_flag",
     "//missive/util:status",
   ]
 }
@@ -46,7 +47,7 @@ static_library("encryption_module") {
   deps = [
     ":encryption",
     ":encryption_module_interface",
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
     "//missive/util:status",
   ]
 }
@@ -56,7 +57,7 @@ static_library("encryption") {
   configs += [ ":target_defaults" ]
   deps = [
     ":primitives",
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
     "//missive/util:status",
   ]
 }
@@ -68,7 +69,7 @@ static_library("decryption") {
     ":encryption",
     ":primitives",
     ":testing_primitives",
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
     "//missive/util:status",
   ]
 }
@@ -83,10 +84,7 @@ static_library("verification") {
 }
 
 static_library("encryption_test_support") {
-  sources = [
-    "scoped_encryption_feature.cc",
-    "test_encryption_module.cc",
-  ]
+  sources = [ "test_encryption_module.cc" ]
   configs += [ ":target_defaults" ]
   deps = [
     ":decryption",
@@ -96,7 +94,7 @@ static_library("encryption_test_support") {
     ":primitives",
     ":testing_primitives",
     ":verification",
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
     "//missive/util:status",
     "//missive/util:status_macros",
   ]
@@ -109,7 +107,6 @@ source_set("unit_tests") {
     "verification_test.cc",
   ]
   deps = [
-    ":decryption",
     ":encryption",
     ":encryption_module",
     ":encryption_module_interface",
@@ -117,7 +114,7 @@ source_set("unit_tests") {
     ":primitives",
     ":testing_primitives",
     ":verification",
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
     "//missive/util:status",
     "//missive/util:status_macros",
     "//missive/util:test_callbacks_support",

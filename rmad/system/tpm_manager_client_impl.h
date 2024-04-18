@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,12 @@
 #include <brillo/errors/error.h>
 #include <dbus/bus.h>
 #include <tpm_manager/proto_bindings/tpm_manager.pb.h>
-#include <tpm_manager-client/tpm_manager/dbus-proxies.h>
+
+namespace org {
+namespace chromium {
+class TpmManagerProxyInterface;
+}  // namespace chromium
+}  // namespace org
 
 namespace rmad {
 
@@ -26,10 +31,11 @@ class TpmManagerClientImpl : public TpmManagerClient {
   TpmManagerClientImpl(const TpmManagerClientImpl&) = delete;
   TpmManagerClientImpl& operator=(const TpmManagerClientImpl&) = delete;
 
-  ~TpmManagerClientImpl() override = default;
+  ~TpmManagerClientImpl() override;
 
   bool GetRoVerificationStatus(
       RoVerificationStatus* ro_verification_status) override;
+  bool GetGscVersion(GscVersion* gsc_version) override;
 
  private:
   std::unique_ptr<org::chromium::TpmManagerProxyInterface> tpm_manager_proxy_;

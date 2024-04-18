@@ -1,57 +1,164 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/static_ip_parameters.h"
 
-#include <string.h>
-
+#include <algorithm>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include <base/logging.h>
 #include <base/notreached.h>
+#include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <chromeos/dbus/service_constants.h>
+#include <net-base/ip_address.h>
+#include <net-base/ipv4_address.h>
 
 #include "shill/error.h"
-#include "shill/logging.h"
-#include "shill/net/ip_address.h"
-#include "shill/property_accessor.h"
-#include "shill/property_store.h"
-#include "shill/store_interface.h"
+#include "shill/network/network_config.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/property_store.h"
+#include "shill/store/store_interface.h"
 
 namespace shill {
 
-// static
-const char StaticIPParameters::kConfigKeyPrefix[] = "StaticIP.";
-// static
-const char StaticIPParameters::kSavedConfigKeyPrefix[] = "SavedIP.";
-// static
-const StaticIPParameters::Property StaticIPParameters::kProperties[] = {
-    {kAddressProperty, Property::kTypeString},
-    {kGatewayProperty, Property::kTypeString},
-    {kMtuProperty, Property::kTypeInt32},
-    {kNameServersProperty, Property::kTypeStrings},
-    {kSearchDomainsProperty, Property::kTypeStrings},
-    {kPeerAddressProperty, Property::kTypeString},
-    {kPrefixlenProperty, Property::kTypeInt32},
-    {kIncludedRoutesProperty, Property::kTypeStrings},
-    {kExcludedRoutesProperty, Property::kTypeStrings},
+namespace {
+
+constexpr char kConfigKeyPrefix[] = "StaticIP.";
+
+struct Property {
+  enum class Type {
+    kInt32,
+    kString,
+    // Properties of type "Strings" are stored as a comma-separated list in the
+    // control interface and in the profile, but are stored as a vector of
+    // strings in the IPConfig properties.
+    kStrings
+  };
+
+  const char* name;
+  Type type;
 };
+
+constexpr Property kProperties[] = {
+    {kAddressProperty, Property::Type::kString},
+    {kGatewayProperty, Property::Type::kString},
+    {kMtuProperty, Property::Type::kInt32},
+    {kNameServersProperty, Property::Type::kStrings},
+    {kSearchDomainsProperty, Property::Type::kStrings},
+    {kPrefixlenProperty, Property::Type::kInt32},
+    {kIncludedRoutesProperty, Property::Type::kStrings},
+    {kExcludedRoutesProperty, Property::Type::kStrings},
+};
+
+// Converts the StaticIPParameters from KeyValueStore to NetworkConfig.
+// Errors are ignored if any value is not valid.
+NetworkConfig KeyValuesToNetworkConfig(const KeyValueStore& kvs) {
+  NetworkConfig ret;
+  if (kvs.Contains<std::string>(kAddressProperty)) {
+    const int prefix = kvs.Lookup<int32_t>(kPrefixlenProperty, 0);
+    const std::string addr_str = kvs.Get<std::string>(kAddressProperty);
+    ret.ipv4_address =
+        net_base::IPv4CIDR::CreateFromStringAndPrefix(addr_str, prefix);
+  }
+  auto gateway_str = kvs.GetOptionalValue<std::string>(kGatewayProperty);
+  if (gateway_str) {
+    ret.ipv4_gateway = net_base::IPv4Address::CreateFromString(*gateway_str);
+  }
+  ret.included_route_prefixes = {};
+  if (kvs.Contains<Strings>(kIncludedRoutesProperty)) {
+    for (const auto& item : kvs.Get<Strings>(kIncludedRoutesProperty)) {
+      auto cidr = net_base::IPCIDR::CreateFromCIDRString(item);
+      if (cidr) {
+        ret.included_route_prefixes.push_back(*cidr);
+      }
+    }
+  }
+  ret.excluded_route_prefixes = {};
+  if (kvs.Contains<Strings>(kExcludedRoutesProperty)) {
+    for (const auto& item : kvs.Get<Strings>(kExcludedRoutesProperty)) {
+      auto cidr = net_base::IPCIDR::CreateFromCIDRString(item);
+      if (cidr) {
+        ret.excluded_route_prefixes.push_back(*cidr);
+      }
+    }
+  }
+  ret.mtu = kvs.GetOptionalValue<int32_t>(kMtuProperty);
+  ret.dns_servers = {};
+  if (kvs.Contains<Strings>(kNameServersProperty)) {
+    for (const auto& item : kvs.Get<Strings>(kNameServersProperty)) {
+      auto dns = net_base::IPAddress::CreateFromString(item);
+      if (dns) {
+        ret.dns_servers.push_back(*dns);
+      }
+    }
+  }
+  ret.dns_search_domains = kvs.GetOptionalValue<Strings>(kSearchDomainsProperty)
+                               .value_or(std::vector<std::string>{});
+
+  // TODO(b/269401899): Currently this is only used by VPN. Check that if the
+  // Network class can make this decision by itself after finishing the
+  // refactor.
+  if (!ret.included_route_prefixes.empty()) {
+    ret.ipv4_default_route = false;
+  }
+
+  return ret;
+}
+
+// Set a Strings property from a vector of objects, by calling ToString()
+// function on each of the elements and adding the result to the property string
+// vector. Remove the property if |input| is empty.
+template <class T>
+void SetStringsValueByObjectVector(KeyValueStore& kvs,
+                                   std::string_view key,
+                                   const std::vector<T>& input) {
+  if (!input.empty()) {
+    std::vector<std::string> strings;
+    std::transform(input.begin(), input.end(), std::back_inserter(strings),
+                   [](T item) { return item.ToString(); });
+    kvs.Set<Strings>(key, strings);
+  } else {
+    kvs.Remove(key);
+  }
+}
+
+}  // namespace
+
+KeyValueStore StaticIPParameters::NetworkConfigToKeyValues(
+    const NetworkConfig& props) {
+  KeyValueStore kvs;
+  if (props.ipv4_address.has_value()) {
+    kvs.Set<std::string>(kAddressProperty,
+                         props.ipv4_address->address().ToString());
+    kvs.Set<int32_t>(kPrefixlenProperty, props.ipv4_address->prefix_length());
+  }
+  if (props.ipv4_gateway.has_value()) {
+    kvs.Set<std::string>(kGatewayProperty, props.ipv4_gateway->ToString());
+  }
+  kvs.SetFromOptionalValue<int32_t>(kMtuProperty, props.mtu);
+  if (!props.dns_search_domains.empty()) {
+    kvs.Set<Strings>(kSearchDomainsProperty, props.dns_search_domains);
+  }
+  SetStringsValueByObjectVector(kvs, kNameServersProperty, props.dns_servers);
+  SetStringsValueByObjectVector(kvs, kIncludedRoutesProperty,
+                                props.included_route_prefixes);
+  SetStringsValueByObjectVector(kvs, kExcludedRoutesProperty,
+                                props.excluded_route_prefixes);
+  return kvs;
+}
 
 StaticIPParameters::StaticIPParameters() = default;
 
 StaticIPParameters::~StaticIPParameters() = default;
 
 void StaticIPParameters::PlumbPropertyStore(PropertyStore* store) {
-  // Register KeyValueStore for both static ip and saved ip parameters.
-  store->RegisterDerivedKeyValueStore(
-      kSavedIPConfigProperty,
-      KeyValueStoreAccessor(
-          new CustomAccessor<StaticIPParameters, KeyValueStore>(
-              this, &StaticIPParameters::GetSavedIPConfig, nullptr)));
+  // Register KeyValueStore for both static ip parameters.
   store->RegisterDerivedKeyValueStore(
       kStaticIPConfigProperty,
       KeyValueStoreAccessor(
@@ -60,13 +167,13 @@ void StaticIPParameters::PlumbPropertyStore(PropertyStore* store) {
               &StaticIPParameters::SetStaticIP)));
 }
 
-void StaticIPParameters::Load(const StoreInterface* storage,
+bool StaticIPParameters::Load(const StoreInterface* storage,
                               const std::string& storage_id) {
   KeyValueStore args;
   for (const auto& property : kProperties) {
     const std::string name(std::string(kConfigKeyPrefix) + property.name);
     switch (property.type) {
-      case Property::kTypeInt32: {
+      case Property::Type::kInt32: {
         int32_t value;
         if (storage->GetInt(storage_id, name, &value)) {
           args.Set<int32_t>(property.name, value);
@@ -74,7 +181,7 @@ void StaticIPParameters::Load(const StoreInterface* storage,
           args.Remove(property.name);
         }
       } break;
-      case Property::kTypeString: {
+      case Property::Type::kString: {
         std::string value;
         if (storage->GetString(storage_id, name, &value)) {
           args.Set<std::string>(property.name, value);
@@ -82,7 +189,7 @@ void StaticIPParameters::Load(const StoreInterface* storage,
           args.Remove(property.name);
         }
       } break;
-      case Property::kTypeStrings: {
+      case Property::Type::kStrings: {
         // Name servers field is stored in storage as comma separated string.
         // Keep it as is to be backward compatible.
         std::string value;
@@ -99,36 +206,37 @@ void StaticIPParameters::Load(const StoreInterface* storage,
         break;
     }
   }
-  SetStaticIP(args, nullptr);
+  return SetStaticIP(args, nullptr);
 }
 
 void StaticIPParameters::Save(StoreInterface* storage,
                               const std::string& storage_id) {
+  const auto args = NetworkConfigToKeyValues(config_);
   for (const auto& property : kProperties) {
     const std::string name(std::string(kConfigKeyPrefix) + property.name);
     bool property_exists = false;
     switch (property.type) {
-      case Property::kTypeInt32:
-        if (args_.Contains<int32_t>(property.name)) {
+      case Property::Type::kInt32:
+        if (args.Contains<int32_t>(property.name)) {
           property_exists = true;
-          storage->SetInt(storage_id, name, args_.Get<int32_t>(property.name));
+          storage->SetInt(storage_id, name, args.Get<int32_t>(property.name));
         }
         break;
-      case Property::kTypeString:
-        if (args_.Contains<std::string>(property.name)) {
+      case Property::Type::kString:
+        if (args.Contains<std::string>(property.name)) {
           property_exists = true;
           storage->SetString(storage_id, name,
-                             args_.Get<std::string>(property.name));
+                             args.Get<std::string>(property.name));
         }
         break;
-      case Property::kTypeStrings:
-        if (args_.Contains<Strings>(property.name)) {
+      case Property::Type::kStrings:
+        if (args.Contains<Strings>(property.name)) {
           property_exists = true;
           // Name servers field is stored in storage as comma separated string.
           // Keep it as is to be backward compatible.
           storage->SetString(
               storage_id, name,
-              base::JoinString(args_.Get<Strings>(property.name), ","));
+              base::JoinString(args.Get<Strings>(property.name), ","));
         }
         break;
       default:
@@ -141,166 +249,22 @@ void StaticIPParameters::Save(StoreInterface* storage,
   }
 }
 
-void StaticIPParameters::ApplyInt(const std::string& property,
-                                  int32_t* value_out) {
-  saved_args_.Set<int32_t>(property, *value_out);
-  if (args_.Contains<int32_t>(property)) {
-    *value_out = args_.Get<int32_t>(property);
-  }
-}
-
-void StaticIPParameters::ApplyString(const std::string& property,
-                                     std::string* value_out) {
-  saved_args_.Set<std::string>(property, *value_out);
-  if (args_.Contains<std::string>(property)) {
-    *value_out = args_.Get<std::string>(property);
-  }
-}
-
-void StaticIPParameters::ApplyStrings(const std::string& property,
-                                      std::vector<std::string>* value_out) {
-  saved_args_.Set<Strings>(property, *value_out);
-  if (args_.Contains<Strings>(property)) {
-    *value_out = args_.Get<Strings>(property);
-  }
-}
-
-void StaticIPParameters::RestoreStrings(const std::string& property,
-                                        std::vector<std::string>* value_out) {
-  if (saved_args_.Contains<Strings>(property)) {
-    *value_out = saved_args_.Get<Strings>(property);
-  } else {
-    value_out->clear();
-  }
-}
-
-void StaticIPParameters::ParseRoutes(const std::vector<std::string>& route_list,
-                                     const std::string& gateway,
-                                     std::vector<IPConfig::Route>* value_out) {
-  IPAddress gateway_ip(gateway);
-  if (gateway_ip.family() == IPAddress::kFamilyUnknown) {
-    return;
-  }
-
-  for (const auto& ip : route_list) {
-    IPAddress dst_ip(gateway_ip.family());
-    if (!dst_ip.SetAddressAndPrefixFromString(ip)) {
-      return;
-    }
-
-    IPConfig::Route route;
-    dst_ip.IntoString(&route.host);
-    route.prefix = dst_ip.prefix();
-    route.gateway = gateway;
-    value_out->push_back(route);
-  }
-}
-
-void StaticIPParameters::ApplyRoutes(IPConfig::Properties* props) {
-  std::vector<std::string> saved_routes;
-  for (const auto& route : props->routes) {
-    saved_routes.push_back(route.host + "/" +
-                           base::NumberToString(route.prefix));
-  }
-  saved_args_.Set<Strings>(kIncludedRoutesProperty, saved_routes);
-
-  if (!args_.Contains<Strings>(kIncludedRoutesProperty)) {
-    return;
-  }
-  props->routes.clear();
-  ParseRoutes(args_.Get<Strings>(kIncludedRoutesProperty), props->gateway,
-              &props->routes);
-  // Remove default route from the connection if kIncludedRoutesProperty is set.
-  props->default_route = false;
-}
-
-void StaticIPParameters::RestoreRoutes(IPConfig::Properties* props) {
-  props->routes.clear();
-  if (saved_args_.Contains<Strings>(kIncludedRoutesProperty)) {
-    ParseRoutes(saved_args_.Get<Strings>(kIncludedRoutesProperty),
-                props->gateway, &props->routes);
-  }
-  // TODO(b/184533440): original props->default_route could be lost after Apply
-  // -> Restore a StaticIPConfig with IncludedRoutes. This only has an impact
-  // when a IPConfig::Refresh is called after applying such a StaticIPConfig,
-  // and is temporary since StaticIPConfig is re-applied right after.
-}
-
-void StaticIPParameters::ApplyTo(IPConfig::Properties* props) {
-  if (props->address_family == IPAddress::kFamilyUnknown) {
-    // In situations where no address is supplied (bad or missing DHCP config)
-    // supply an address family ourselves.
-    // TODO(pstew): Guess from the address values.
-    props->address_family = IPAddress::kFamilyIPv4;
-  }
-  ClearSavedParameters();
-  ApplyString(kAddressProperty, &props->address);
-  ApplyString(kGatewayProperty, &props->gateway);
-  ApplyInt(kMtuProperty, &props->mtu);
-  ApplyStrings(kNameServersProperty, &props->dns_servers);
-  ApplyStrings(kSearchDomainsProperty, &props->domain_search);
-  ApplyString(kPeerAddressProperty, &props->peer_address);
-  ApplyInt(kPrefixlenProperty, &props->subnet_prefix);
-  ApplyStrings(kExcludedRoutesProperty, &props->exclusion_list);
-  ApplyRoutes(props);
-}
-
-void StaticIPParameters::RestoreTo(IPConfig::Properties* props) {
-  props->address = saved_args_.Lookup<std::string>(kAddressProperty, "");
-  props->gateway = saved_args_.Lookup<std::string>(kGatewayProperty, "");
-  props->mtu =
-      saved_args_.Lookup<int32_t>(kMtuProperty, IPConfig::kUndefinedMTU);
-  RestoreStrings(kNameServersProperty, &props->dns_servers);
-  RestoreStrings(kSearchDomainsProperty, &props->domain_search);
-  props->peer_address =
-      saved_args_.Lookup<std::string>(kPeerAddressProperty, "");
-  props->subnet_prefix = saved_args_.Lookup<int32_t>(kPrefixlenProperty, 0);
-  RestoreStrings(kExcludedRoutesProperty, &props->exclusion_list);
-  RestoreRoutes(props);
-  ClearSavedParameters();
-}
-
-void StaticIPParameters::ClearSavedParameters() {
-  saved_args_.Clear();
-}
-
-bool StaticIPParameters::ContainsAddress() const {
-  return args_.Contains<std::string>(kAddressProperty) &&
-         args_.Contains<int32_t>(kPrefixlenProperty);
-}
-
-bool StaticIPParameters::ContainsNameServers() const {
-  return args_.Contains<Strings>(kNameServersProperty);
-}
-
-KeyValueStore StaticIPParameters::GetSavedIPConfig(Error* /*error*/) {
-  return saved_args_;
-}
-
 KeyValueStore StaticIPParameters::GetStaticIPConfig(Error* /*error*/) {
-  return args_;
+  return NetworkConfigToKeyValues(config_);
 }
 
 bool StaticIPParameters::SetStaticIP(const KeyValueStore& value,
                                      Error* /*error*/) {
-  if (args_ == value) {
+  const auto current_args = NetworkConfigToKeyValues(config_);
+  if (current_args == value) {
     return false;
   }
-  args_ = value;
-  if (ipconfig_) {
-    ipconfig_->Refresh();
-  }
+  config_ = KeyValuesToNetworkConfig(value);
   return true;
 }
 
-void StaticIPParameters::SetIPConfig(base::WeakPtr<IPConfig> ipconfig) {
-  ipconfig_ = ipconfig;
-}
-
 void StaticIPParameters::Reset() {
-  ClearSavedParameters();
-  SetIPConfig(nullptr);
-  args_ = KeyValueStore();
+  config_ = NetworkConfig();
 }
 
 }  // namespace shill

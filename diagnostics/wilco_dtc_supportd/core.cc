@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,22 +9,22 @@
 #include <utility>
 
 #include <base/barrier_closure.h>
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 #include "diagnostics/wilco_dtc_supportd/grpc_client_manager.h"
 #include "diagnostics/wilco_dtc_supportd/mojo_service.h"
 #include "diagnostics/wilco_dtc_supportd/mojo_service_factory.h"
 #include "diagnostics/wilco_dtc_supportd/probe_service_impl.h"
 
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
+namespace wilco {
 
 namespace {
 
@@ -74,8 +74,9 @@ bool ConvertStatusFromMojom(MojomWilcoDtcSupportdWebRequestStatus mojo_status,
     case MojomWilcoDtcSupportdWebRequestStatus::kHttpError:
       *status_out = Core::WebRequestStatus::kHttpError;
       return true;
+    case MojomWilcoDtcSupportdWebRequestStatus::kUnmappedEnumField:
+      return false;
   }
-  return false;
 }
 
 bool ConvertPowerEventToGrpc(
@@ -108,7 +109,8 @@ Core::Core(Delegate* delegate,
     : delegate_(delegate),
       grpc_client_manager_(grpc_client_manager),
       grpc_service_uris_(grpc_service_uris),
-      grpc_server_(base::ThreadTaskRunnerHandle::Get(), grpc_service_uris_),
+      grpc_server_(base::SingleThreadTaskRunner::GetCurrentDefault(),
+                   grpc_service_uris_),
       mojo_service_factory_(mojo_service_factory) {
   DCHECK(delegate);
   DCHECK(grpc_client_manager_);
@@ -126,57 +128,62 @@ bool Core::Start() {
   // |grpc_service_|.
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestSendMessageToUi,
-      base::Bind(&GrpcService::SendMessageToUi,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::SendMessageToUi,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetProcData,
-      base::Bind(&GrpcService::GetProcData, base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetProcData,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetSysfsData,
-      base::Bind(&GrpcService::GetSysfsData, base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetSysfsData,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetEcTelemetry,
-      base::Bind(&GrpcService::GetEcTelemetry,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetEcTelemetry,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestPerformWebRequest,
-      base::Bind(&GrpcService::PerformWebRequest,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::PerformWebRequest,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetAvailableRoutines,
-      base::Bind(&GrpcService::GetAvailableRoutines,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetAvailableRoutines,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestRunRoutine,
-      base::Bind(&GrpcService::RunRoutine, base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::RunRoutine,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetRoutineUpdate,
-      base::Bind(&GrpcService::GetRoutineUpdate,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetRoutineUpdate,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetOsVersion,
-      base::Bind(&GrpcService::GetOsVersion, base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetOsVersion,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetVpdField,
-      base::Bind(&GrpcService::GetVpdField, base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetVpdField,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetConfigurationData,
-      base::Bind(&GrpcService::GetConfigurationData,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetConfigurationData,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::RequestGetDriveSystemData,
-      base::Bind(&GrpcService::GetDriveSystemData,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetDriveSystemData,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::
           RequestRequestBluetoothDataNotification,
-      base::Bind(&GrpcService::RequestBluetoothDataNotification,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::RequestBluetoothDataNotification,
+                          base::Unretained(&grpc_service_)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtcSupportd::AsyncService::
           RequestGetStatefulPartitionAvailableCapacity,
-      base::Bind(&GrpcService::GetStatefulPartitionAvailableCapacity,
-                 base::Unretained(&grpc_service_)));
+      base::BindRepeating(&GrpcService::GetStatefulPartitionAvailableCapacity,
+                          base::Unretained(&grpc_service_)));
 
   // Start the gRPC server that listens for incoming gRPC requests.
   VLOG(1) << "Starting gRPC server";
@@ -202,7 +209,7 @@ void Core::ShutDown(base::OnceClosure on_shutdown_callback) {
   VLOG(1) << "Tearing down gRPC server, gRPC wilco_dtc clients, "
              "EC event service and D-Bus server";
   UnsubscribeFromEventServices();
-  const base::Closure barrier_closure =
+  const base::RepeatingClosure barrier_closure =
       base::BarrierClosure(2, std::move(on_shutdown_callback));
   ec_service_->ShutDown(barrier_closure);
   grpc_server_.ShutDown(barrier_closure);
@@ -233,7 +240,7 @@ void Core::CreateDbusAdapters(const scoped_refptr<dbus::Bus>& bus) {
 
 bool Core::GetCrosHealthdDiagnosticsService(
     mojo::PendingReceiver<
-        chromeos::cros_healthd::mojom::CrosHealthdDiagnosticsService> service) {
+        ash::cros_healthd::mojom::CrosHealthdDiagnosticsService> service) {
   MojoService* mojo_service = mojo_service_factory_->Get();
   if (!mojo_service) {
     LOG(WARNING) << "GetCrosHealthdDiagnosticsService happens before Mojo "
@@ -246,8 +253,8 @@ bool Core::GetCrosHealthdDiagnosticsService(
 }
 
 bool Core::BindCrosHealthdProbeService(
-    mojo::PendingReceiver<
-        chromeos::cros_healthd::mojom::CrosHealthdProbeService> service) {
+    mojo::PendingReceiver<ash::cros_healthd::mojom::CrosHealthdProbeService>
+        service) {
   MojoService* mojo_service = mojo_service_factory_->Get();
   if (!mojo_service) {
     LOG(WARNING) << "BindCrosHealthdProbeService happens before Mojo "
@@ -260,7 +267,7 @@ bool Core::BindCrosHealthdProbeService(
 }
 
 void Core::SendWilcoDtcMessageToUi(const std::string& json_message,
-                                   const SendMessageToUiCallback& callback) {
+                                   SendMessageToUiCallback callback) {
   VLOG(1) << "SendWilcoDtcMessageToUi() json_message=" << json_message;
   MojoService* mojo_service = mojo_service_factory_->Get();
   if (!mojo_service) {
@@ -268,10 +275,11 @@ void Core::SendWilcoDtcMessageToUi(const std::string& json_message,
         "GetConfigurationDataFromBrowser happens before "
         "Mojo connection is established.";
     LOG(WARNING) << kErrMsg;
-    callback.Run(grpc::Status(grpc::StatusCode::UNKNOWN, kErrMsg), "");
+    std::move(callback).Run(grpc::Status(grpc::StatusCode::UNKNOWN, kErrMsg),
+                            "");
     return;
   }
-  mojo_service->SendWilcoDtcMessageToUi(json_message, callback);
+  mojo_service->SendWilcoDtcMessageToUi(json_message, std::move(callback));
 }
 
 void Core::PerformWebRequestToBrowser(
@@ -279,104 +287,106 @@ void Core::PerformWebRequestToBrowser(
     const std::string& url,
     const std::vector<std::string>& headers,
     const std::string& request_body,
-    const PerformWebRequestToBrowserCallback& callback) {
+    PerformWebRequestToBrowserCallback callback) {
   VLOG(1) << "Core::PerformWebRequestToBrowser";
 
   MojoService* mojo_service = mojo_service_factory_->Get();
   if (!mojo_service) {
     LOG(WARNING) << "PerformWebRequestToBrowser happens before Mojo connection "
                  << "is established.";
-    callback.Run(WebRequestStatus::kInternalError, 0 /* http_status */,
-                 "" /* response_body */);
+    std::move(callback).Run(WebRequestStatus::kInternalError,
+                            0 /* http_status */, "" /* response_body */);
     return;
   }
 
   MojomWilcoDtcSupportdWebRequestHttpMethod mojo_http_method;
   if (!ConvertWebRequestHttpMethodToMojom(http_method, &mojo_http_method)) {
     LOG(ERROR) << "Unknown gRPC http method: " << static_cast<int>(http_method);
-    callback.Run(WebRequestStatus::kInternalError, 0 /* http_status */,
-                 "" /* response_body */);
+    std::move(callback).Run(WebRequestStatus::kInternalError,
+                            0 /* http_status */, "" /* response_body */);
     return;
   }
 
   mojo_service->PerformWebRequest(
       mojo_http_method, url, headers, request_body,
-      base::Bind(
-          [](const PerformWebRequestToBrowserCallback& callback,
+      base::BindOnce(
+          [](PerformWebRequestToBrowserCallback callback,
              MojomWilcoDtcSupportdWebRequestStatus mojo_status, int http_status,
              base::StringPiece response_body) {
             WebRequestStatus status;
             if (!ConvertStatusFromMojom(mojo_status, &status)) {
               LOG(ERROR) << "Unknown mojo web request status: " << mojo_status;
-              callback.Run(WebRequestStatus::kInternalError,
-                           0 /* http_status */, "" /* response_body */);
+              std::move(callback).Run(WebRequestStatus::kInternalError,
+                                      0 /* http_status */,
+                                      "" /* response_body */);
               return;
             }
-            callback.Run(status, http_status, response_body);
+            std::move(callback).Run(status, http_status, response_body);
           },
-          callback));
+          std::move(callback)));
 }
 
 void Core::GetAvailableRoutinesToService(
-    const GetAvailableRoutinesToServiceCallback& callback) {
-  routine_service_.GetAvailableRoutines(callback);
+    GetAvailableRoutinesToServiceCallback callback) {
+  routine_service_.GetAvailableRoutines(std::move(callback));
 }
 
 void Core::RunRoutineToService(const grpc_api::RunRoutineRequest& request,
-                               const RunRoutineToServiceCallback& callback) {
-  routine_service_.RunRoutine(request, callback);
+                               RunRoutineToServiceCallback callback) {
+  routine_service_.RunRoutine(request, std::move(callback));
 }
 
 void Core::GetRoutineUpdateRequestToService(
     int uuid,
     grpc_api::GetRoutineUpdateRequest::Command command,
     bool include_output,
-    const GetRoutineUpdateRequestToServiceCallback& callback) {
-  routine_service_.GetRoutineUpdate(uuid, command, include_output, callback);
+    GetRoutineUpdateRequestToServiceCallback callback) {
+  routine_service_.GetRoutineUpdate(uuid, command, include_output,
+                                    std::move(callback));
 }
 
 void Core::GetConfigurationDataFromBrowser(
-    const GetConfigurationDataFromBrowserCallback& callback) {
+    GetConfigurationDataFromBrowserCallback callback) {
   VLOG(1) << "Core::GetConfigurationDataFromBrowser";
 
   MojoService* mojo_service = mojo_service_factory_->Get();
   if (!mojo_service) {
     LOG(WARNING) << "GetConfigurationDataFromBrowser happens before Mojo "
                  << "connection is established.";
-    callback.Run("" /* json_configuration_data */);
+    std::move(callback).Run("" /* json_configuration_data */);
     return;
   }
 
-  mojo_service->GetConfigurationData(callback);
+  mojo_service->GetConfigurationData(std::move(callback));
 }
 
 void Core::GetDriveSystemData(DriveSystemDataType data_type,
-                              const GetDriveSystemDataCallback& callback) {
+                              GetDriveSystemDataCallback callback) {
   if (!debugd_adapter_) {
     LOG(WARNING) << "DebugdAdapter is not yet ready for incoming requests";
-    callback.Run("", false /* success */);
+    std::move(callback).Run("", false /* success */);
     return;
   }
 
-  auto result_callback = base::Bind(
-      [](const GetDriveSystemDataCallback& callback, const std::string& result,
+  auto result_callback = base::BindOnce(
+      [](GetDriveSystemDataCallback callback, const std::string& result,
          brillo::Error* error) {
         if (error) {
           LOG(WARNING) << "Debugd smartctl failed with error: "
                        << error->GetMessage();
-          callback.Run("", false /* success */);
+          std::move(callback).Run("", false /* success */);
           return;
         }
-        callback.Run(result, true /* success */);
+        std::move(callback).Run(result, true /* success */);
       },
-      callback);
+      std::move(callback));
 
   switch (data_type) {
     case DriveSystemDataType::kSmartAttributes:
-      debugd_adapter_->GetSmartAttributes(result_callback);
+      debugd_adapter_->GetSmartAttributes(std::move(result_callback));
       break;
     case DriveSystemDataType::kIdentityAttributes:
-      debugd_adapter_->GetNvmeIdentity(result_callback);
+      debugd_adapter_->GetNvmeIdentity(std::move(result_callback));
       break;
   }
 }
@@ -394,7 +404,7 @@ void Core::RequestBluetoothDataNotification() {
 }
 
 void Core::ProbeTelemetryInfo(
-    std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum> categories,
+    std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum> categories,
     ProbeTelemetryInfoCallback callback) {
   VLOG(1) << "Core::ProbeTelemetryInfo";
   probe_service_->ProbeTelemetryInfo(std::move(categories),
@@ -429,19 +439,20 @@ void Core::OnPowerdEvent(PowerEventType type) {
   for (auto& client : grpc_client_manager_->GetClients()) {
     client->CallRpc(
         &grpc_api::WilcoDtc::Stub::AsyncHandlePowerNotification, request,
-        base::Bind([](grpc::Status status,
-                      std::unique_ptr<grpc_api::HandlePowerNotificationResponse>
-                          response) {
-          if (!status.ok()) {
-            VLOG(1) << "Failed to call HandlePowerNotification gRPC "
-                       "method on wilco_dtc. grpc error code: "
-                    << status.error_code()
-                    << ", error message: " << status.error_message();
-            return;
-          }
-          VLOG(1) << "gRPC method HandlePowerNotification was "
-                     "successfully called on wilco_dtc";
-        }));
+        base::BindOnce(
+            [](grpc::Status status,
+               std::unique_ptr<grpc_api::HandlePowerNotificationResponse>
+                   response) {
+              if (!status.ok()) {
+                VLOG(1) << "Failed to call HandlePowerNotification gRPC "
+                           "method on wilco_dtc. grpc error code: "
+                        << status.error_code()
+                        << ", error message: " << status.error_message();
+                return;
+              }
+              VLOG(1) << "gRPC method HandlePowerNotification was "
+                         "successfully called on wilco_dtc";
+            }));
   }
 }
 
@@ -500,9 +511,10 @@ void Core::SendGrpcEcEventToWilcoDtc(const EcEvent& ec_event) {
   for (auto& client : grpc_client_manager_->GetClients()) {
     client->CallRpc(
         &grpc_api::WilcoDtc::Stub::AsyncHandleEcNotification, request,
-        base::Bind([](grpc::Status status,
-                      std::unique_ptr<grpc_api::HandleEcNotificationResponse>
-                          response) {
+        base::BindOnce([](grpc::Status status,
+                          std::unique_ptr<
+                              grpc_api::HandleEcNotificationResponse>
+                              response) {
           if (!status.ok()) {
             VLOG(1)
                 << "Failed to call HandleEcNotificationRequest gRPC method on "
@@ -557,7 +569,7 @@ void Core::NotifyClientsBluetoothAdapterState(
   for (auto& client : grpc_client_manager_->GetClients()) {
     client->CallRpc(
         &grpc_api::WilcoDtc::Stub::AsyncHandleBluetoothDataChanged, request,
-        base::Bind(
+        base::BindOnce(
             [](grpc::Status status,
                std::unique_ptr<grpc_api::HandleBluetoothDataChangedResponse>
                    response) {
@@ -584,4 +596,5 @@ void Core::UnsubscribeFromEventServices() {
   ec_service_->RemoveObserver(this);
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

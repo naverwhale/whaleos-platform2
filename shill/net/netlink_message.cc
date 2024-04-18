@@ -1,10 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/net/netlink_message.h"
 
-#include <limits.h>
+#include <unistd.h>
 
 #include <algorithm>
 
@@ -12,34 +12,26 @@
 #include <base/format_macros.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
+#include <net-base/byte_utils.h>
 
-#include "shill/logging.h"
 #include "shill/net/netlink_packet.h"
 
 namespace shill {
-
-namespace Logging {
-static auto kModuleLogScope = ScopeLogger::kRTNL;
-static std::string ObjectID(const NetlinkMessage* obj) {
-  return "(netlink_message)";
-}
-}  // namespace Logging
 
 const uint32_t NetlinkMessage::kBroadcastSequenceNumber = 0;
 const uint16_t NetlinkMessage::kIllegalMessageType = UINT16_MAX;
 
 // NetlinkMessage
 
-ByteString NetlinkMessage::EncodeHeader(uint32_t sequence_number) {
-  ByteString result;
+std::vector<uint8_t> NetlinkMessage::EncodeHeader(uint32_t sequence_number) {
   if (message_type_ == kIllegalMessageType) {
     LOG(ERROR) << "Message type not set";
-    return result;
+    return {};
   }
   sequence_number_ = sequence_number;
   if (sequence_number_ == kBroadcastSequenceNumber) {
     LOG(ERROR) << "Couldn't get a legal sequence number";
-    return result;
+    return {};
   }
 
   // Build netlink header.
@@ -52,9 +44,8 @@ ByteString NetlinkMessage::EncodeHeader(uint32_t sequence_number) {
   header.nlmsg_pid = getpid();
 
   // Netlink header + pad.
-  result.Append(
-      ByteString(reinterpret_cast<unsigned char*>(&header), sizeof(header)));
-  result.Resize(nlmsghdr_with_pad);  // Zero-fill pad space (if any).
+  std::vector<uint8_t> result = net_base::byte_utils::ToBytes(header);
+  result.resize(nlmsghdr_with_pad, 0);  // Zero-fill pad space (if any).
   return result;
 }
 
@@ -79,13 +70,18 @@ bool NetlinkMessage::InitFromPacket(NetlinkPacket* packet,
   return true;
 }
 
+void NetlinkMessage::Print(int header_log_level,
+                           int /*detail_log_level*/) const {
+  VLOG(header_log_level) << ToString();
+}
+
 // static
 void NetlinkMessage::PrintBytes(int log_level,
                                 const unsigned char* buf,
                                 size_t num_bytes) {
-  SLOG(nullptr, log_level) << "Netlink Message -- Examining Bytes";
+  VLOG(log_level) << "Netlink Message -- Examining Bytes";
   if (!buf) {
-    SLOG(nullptr, log_level) << "<NULL Buffer>";
+    VLOG(log_level) << "<NULL Buffer>";
     return;
   }
 
@@ -94,9 +90,9 @@ void NetlinkMessage::PrintBytes(int log_level,
     buf += sizeof(nlmsghdr);
     num_bytes -= sizeof(nlmsghdr);
   } else {
-    SLOG(nullptr, log_level)
-        << "Not enough bytes (" << num_bytes
-        << ") for a complete nlmsghdr (requires " << sizeof(nlmsghdr) << ").";
+    VLOG(log_level) << "Not enough bytes (" << num_bytes
+                    << ") for a complete nlmsghdr (requires "
+                    << sizeof(nlmsghdr) << ").";
   }
 
   PrintPayload(log_level, buf, num_bytes);
@@ -104,25 +100,25 @@ void NetlinkMessage::PrintBytes(int log_level,
 
 // static
 void NetlinkMessage::PrintPacket(int log_level, const NetlinkPacket& packet) {
-  SLOG(nullptr, log_level) << "Netlink Message -- Examining Packet";
+  VLOG(log_level) << "Netlink Message -- Examining Packet";
   if (!packet.IsValid()) {
-    SLOG(nullptr, log_level) << "<Invalid Buffer>";
+    VLOG(log_level) << "<Invalid Buffer>";
     return;
   }
 
   PrintHeader(log_level, &packet.GetNlMsgHeader());
-  const ByteString& payload = packet.GetPayload();
-  PrintPayload(log_level, payload.GetConstData(), payload.GetLength());
+  base::span<const uint8_t> payload = packet.GetPayload();
+  PrintPayload(log_level, payload.data(), payload.size());
 }
 
 // static
 void NetlinkMessage::PrintHeader(int log_level, const nlmsghdr* header) {
   const unsigned char* buf = reinterpret_cast<const unsigned char*>(header);
-  SLOG(nullptr, log_level) << base::StringPrintf(
+  VLOG(log_level) << base::StringPrintf(
       "len:          %02x %02x %02x %02x = %u bytes", buf[0], buf[1], buf[2],
       buf[3], header->nlmsg_len);
 
-  SLOG(nullptr, log_level) << base::StringPrintf(
+  VLOG(log_level) << base::StringPrintf(
       "type | flags: %02x %02x %02x %02x - type:%u flags:%s%s%s%s%s", buf[4],
       buf[5], buf[6], buf[7], header->nlmsg_type,
       ((header->nlmsg_flags & NLM_F_REQUEST) ? " REQUEST" : ""),
@@ -131,10 +127,10 @@ void NetlinkMessage::PrintHeader(int log_level, const nlmsghdr* header) {
       ((header->nlmsg_flags & NLM_F_ECHO) ? " ECHO" : ""),
       ((header->nlmsg_flags & NLM_F_DUMP_INTR) ? " BAD-SEQ" : ""));
 
-  SLOG(nullptr, log_level) << base::StringPrintf(
+  VLOG(log_level) << base::StringPrintf(
       "sequence:     %02x %02x %02x %02x = %u", buf[8], buf[9], buf[10],
       buf[11], header->nlmsg_seq);
-  SLOG(nullptr, log_level) << base::StringPrintf(
+  VLOG(log_level) << base::StringPrintf(
       "pid:          %02x %02x %02x %02x = %u", buf[12], buf[13], buf[14],
       buf[15], header->nlmsg_pid);
 }
@@ -149,7 +145,7 @@ void NetlinkMessage::PrintPayload(int log_level,
     for (size_t i = 0; i < bytes_this_row; ++i) {
       base::StringAppendF(&output, " %02x", *buf++);
     }
-    SLOG(nullptr, log_level) << output;
+    VLOG(log_level) << output;
     num_bytes -= bytes_this_row;
   }
 }
@@ -172,9 +168,9 @@ bool ErrorAckMessage::InitFromPacket(NetlinkPacket* packet,
   return packet->ConsumeData(sizeof(error_), &error_);
 }
 
-ByteString ErrorAckMessage::Encode(uint32_t sequence_number) {
+std::vector<uint8_t> ErrorAckMessage::Encode(uint32_t sequence_number) {
   LOG(ERROR) << "We're not supposed to send errors or Acks to the kernel";
-  return ByteString();
+  return {};
 }
 
 std::string ErrorAckMessage::ToString() const {
@@ -188,67 +184,62 @@ std::string ErrorAckMessage::ToString() const {
   return output;
 }
 
-void ErrorAckMessage::Print(int header_log_level,
-                            int /*detail_log_level*/) const {
-  SLOG(this, header_log_level) << ToString();
-}
-
 // NoopMessage.
 
 const uint16_t NoopMessage::kMessageType = NLMSG_NOOP;
 
-ByteString NoopMessage::Encode(uint32_t sequence_number) {
+std::vector<uint8_t> NoopMessage::Encode(uint32_t sequence_number) {
   LOG(ERROR) << "We're not supposed to send NOOP to the kernel";
-  return ByteString();
+  return {};
 }
 
-void NoopMessage::Print(int header_log_level, int /*detail_log_level*/) const {
-  SLOG(this, header_log_level) << ToString();
+std::string NoopMessage::ToString() const {
+  return "<NOOP>";
 }
 
 // DoneMessage.
 
 const uint16_t DoneMessage::kMessageType = NLMSG_DONE;
 
-ByteString DoneMessage::Encode(uint32_t sequence_number) {
+std::vector<uint8_t> DoneMessage::Encode(uint32_t sequence_number) {
   return EncodeHeader(sequence_number);
 }
 
-void DoneMessage::Print(int header_log_level, int /*detail_log_level*/) const {
-  SLOG(this, header_log_level) << ToString();
+std::string DoneMessage::ToString() const {
+  return "<DONE with multipart message>";
 }
 
 // OverrunMessage.
 
 const uint16_t OverrunMessage::kMessageType = NLMSG_OVERRUN;
 
-ByteString OverrunMessage::Encode(uint32_t sequence_number) {
+std::vector<uint8_t> OverrunMessage::Encode(uint32_t sequence_number) {
   LOG(ERROR) << "We're not supposed to send Overruns to the kernel";
-  return ByteString();
+  return {};
 }
 
-void OverrunMessage::Print(int header_log_level,
-                           int /*detail_log_level*/) const {
-  SLOG(this, header_log_level) << ToString();
+std::string OverrunMessage::ToString() const {
+  return "<OVERRUN - data lost>";
 }
 
 // UnknownMessage.
 
-ByteString UnknownMessage::Encode(uint32_t sequence_number) {
+std::vector<uint8_t> UnknownMessage::Encode(uint32_t sequence_number) {
   LOG(ERROR) << "We're not supposed to send UNKNOWN messages to the kernel";
-  return ByteString();
+  return {};
+}
+
+std::string UnknownMessage::ToString() const {
+  std::string output = base::StringPrintf("%zu bytes:", message_body_.size());
+  for (auto byte : message_body_) {
+    base::StringAppendF(&output, " %02x", byte);
+  }
+  return output;
 }
 
 void UnknownMessage::Print(int header_log_level,
                            int /*detail_log_level*/) const {
-  int total_bytes = message_body_.GetLength();
-  const uint8_t* const_data = message_body_.GetConstData();
-
-  std::string output = base::StringPrintf("%d bytes:", total_bytes);
-  for (int i = 0; i < total_bytes; ++i) {
-    base::StringAppendF(&output, " %02x", const_data[i]);
-  }
-  SLOG(this, header_log_level) << output;
+  VLOG(header_log_level) << ToString();
 }
 
 //

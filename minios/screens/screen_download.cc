@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <utility>
 
 #include <base/logging.h>
+#include <minios/proto_bindings/minios.pb.h>
 
 #include "minios/draw_utils.h"
 
@@ -16,12 +17,18 @@ ScreenDownload::ScreenDownload(
     std::unique_ptr<RecoveryInstallerInterface> recovery_installer,
     std::shared_ptr<UpdateEngineProxy> update_engine_proxy,
     std::shared_ptr<DrawInterface> draw_utils,
+    std::unique_ptr<MetricsReporterInterface> metrics_reporter,
     ScreenControllerInterface* screen_controller)
     : ScreenBase(
-          /*button_count=*/3, /*index_=*/1, draw_utils, screen_controller),
+          /*button_count=*/3,
+          /*index_=*/1,
+          State::RECOVERING,
+          draw_utils,
+          screen_controller),
       recovery_installer_(std::move(recovery_installer)),
       update_engine_proxy_(update_engine_proxy),
-      display_update_engine_state_(false) {
+      display_update_engine_state_(false),
+      metrics_reporter_(std::move(metrics_reporter)) {
   update_engine_proxy_->SetDelegate(this);
 }
 
@@ -29,24 +36,26 @@ void ScreenDownload::Show() {
   draw_utils_->MessageBaseScreen();
   draw_utils_->ShowInstructionsWithTitle("MiniOS_downloading");
   draw_utils_->ShowStepper({"done", "done", "3-done"});
-  constexpr int kProgressHeight = 4;
-  draw_utils_->ShowBox(
-      0, -draw_utils_->GetFreconCanvasSize() / kProgressBarYScale,
-      draw_utils_->GetFreconCanvasSize(), kProgressHeight, kMenuGrey);
+  draw_utils_->ShowProgressBar();
   StartRecovery();
+  SetState(State::RECOVERING);
 }
 
 void ScreenDownload::Finalizing() {
   draw_utils_->MessageBaseScreen();
   draw_utils_->ShowInstructionsWithTitle("MiniOS_finalizing");
   draw_utils_->ShowStepper({"done", "done", "3-done"});
+  draw_utils_->ShowIndeterminateProgressBar();
+  SetState(State::FINALIZING);
 }
 
 void ScreenDownload::Completed() {
+  draw_utils_->HideIndeterminateProgressBar();
   draw_utils_->MessageBaseScreen();
   draw_utils_->ShowInstructions("title_MiniOS_complete");
   draw_utils_->ShowStepper({"done", "done", "done"});
-
+  metrics_reporter_->ReportNBRComplete();
+  SetState(State::COMPLETED);
   update_engine_proxy_->TriggerReboot();
 }
 
@@ -89,11 +98,9 @@ void ScreenDownload::OnProgressChanged(
       display_update_engine_state_ = false;
       break;
     default:
-      // Only `IDLE` and `CHECKING_FOR_UPDATE` can go back to `IDLE` without
-      // any error.
+      // Only `IDLE` can go back to `IDLE` without an error.
+      // Otherwise there will be an indefinite hang during screens.
       if (previous_update_state_ != update_engine::Operation::IDLE &&
-          previous_update_state_ !=
-              update_engine::Operation::CHECKING_FOR_UPDATE &&
           operation == update_engine::Operation::IDLE) {
         LOG(WARNING) << "Update engine went from " << previous_update_state_
                      << " back to IDLE.";
@@ -107,6 +114,7 @@ void ScreenDownload::OnProgressChanged(
 
 void ScreenDownload::Reset() {
   index_ = 1;
+  draw_utils_->HideIndeterminateProgressBar();
 }
 
 ScreenType ScreenDownload::GetType() {
@@ -118,6 +126,8 @@ std::string ScreenDownload::GetName() {
 }
 
 void ScreenDownload::StartRecovery() {
+  metrics_reporter_->RecordNBRStart();
+
   if (!recovery_installer_->RepartitionDisk()) {
     LOG(ERROR) << "Could not repartition disk. Unable to continue.";
     screen_controller_->OnError(ScreenType::kGeneralError);

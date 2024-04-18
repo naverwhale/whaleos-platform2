@@ -1,16 +1,22 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "rmad/system/cryptohome_client_impl.h"
 
 #include <cstdint>
 #include <memory>
 
+#include <base/files/file_path.h>
+#include <base/files/file_util.h>
+#include <base/files/scoped_temp_dir.h>
+#include <brillo/file_utils.h>
 #include <cryptohome/proto_bindings/UserDataAuth.pb.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <user_data_auth-client-test/user_data_auth/dbus-proxy-mocks.h>
 
-#include "rmad/system/cryptohome_client_impl.h"
+#include "rmad/constants.h"
 
 using testing::_;
 using testing::DoAll;
@@ -26,9 +32,9 @@ class CryptohomeClientTest : public testing::Test {
   ~CryptohomeClientTest() override = default;
 };
 
-TEST_F(CryptohomeClientTest, Fwmp_Exist_Enrolled) {
+TEST_F(CryptohomeClientTest, Fwmp_Exist_CcdBlocked) {
   user_data_auth::FirmwareManagementParameters fwmp;
-  fwmp.set_flags(0x1);
+  fwmp.set_flags(0x40);
   user_data_auth::GetFirmwareManagementParametersReply reply;
   reply.set_error(user_data_auth::CRYPTOHOME_ERROR_NOT_SET);
   *reply.mutable_fwmp() = fwmp;
@@ -38,15 +44,13 @@ TEST_F(CryptohomeClientTest, Fwmp_Exist_Enrolled) {
   EXPECT_CALL(*mock_cryptohome_proxy,
               GetFirmwareManagementParameters(_, _, _, _))
       .WillRepeatedly(DoAll(SetArgPointee<1>(reply), Return(true)));
-
   auto cryptohome_client =
       std::make_unique<CryptohomeClientImpl>(std::move(mock_cryptohome_proxy));
 
-  EXPECT_TRUE(cryptohome_client->HasFwmp());
-  EXPECT_TRUE(cryptohome_client->IsEnrolled());
+  EXPECT_TRUE(cryptohome_client->IsCcdBlocked());
 }
 
-TEST_F(CryptohomeClientTest, Fwmp_Exist_Unenrolled) {
+TEST_F(CryptohomeClientTest, Fwmp_Exist_CcdNotBlocked) {
   user_data_auth::FirmwareManagementParameters fwmp;
   fwmp.set_flags(0x0);
   user_data_auth::GetFirmwareManagementParametersReply reply;
@@ -58,12 +62,10 @@ TEST_F(CryptohomeClientTest, Fwmp_Exist_Unenrolled) {
   EXPECT_CALL(*mock_cryptohome_proxy,
               GetFirmwareManagementParameters(_, _, _, _))
       .WillRepeatedly(DoAll(SetArgPointee<1>(reply), Return(true)));
-
   auto cryptohome_client =
       std::make_unique<CryptohomeClientImpl>(std::move(mock_cryptohome_proxy));
 
-  EXPECT_TRUE(cryptohome_client->HasFwmp());
-  EXPECT_FALSE(cryptohome_client->IsEnrolled());
+  EXPECT_FALSE(cryptohome_client->IsCcdBlocked());
 }
 
 TEST_F(CryptohomeClientTest, Fwmp_Nonexist) {
@@ -80,8 +82,7 @@ TEST_F(CryptohomeClientTest, Fwmp_Nonexist) {
   auto cryptohome_client =
       std::make_unique<CryptohomeClientImpl>(std::move(mock_cryptohome_proxy));
 
-  EXPECT_FALSE(cryptohome_client->HasFwmp());
-  EXPECT_FALSE(cryptohome_client->IsEnrolled());
+  EXPECT_FALSE(cryptohome_client->IsCcdBlocked());
 }
 
 TEST_F(CryptohomeClientTest, Proxy_Failed) {
@@ -94,8 +95,7 @@ TEST_F(CryptohomeClientTest, Proxy_Failed) {
   auto cryptohome_client =
       std::make_unique<CryptohomeClientImpl>(std::move(mock_cryptohome_proxy));
 
-  EXPECT_FALSE(cryptohome_client->HasFwmp());
-  EXPECT_FALSE(cryptohome_client->IsEnrolled());
+  EXPECT_FALSE(cryptohome_client->IsCcdBlocked());
 }
 
 }  // namespace rmad

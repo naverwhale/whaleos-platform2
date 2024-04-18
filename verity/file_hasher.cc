@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by the GPL v2 license that can
 // be found in the LICENSE file.
 //
@@ -12,6 +12,7 @@
 #include <linux/fs.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 
 #include <string>
 #include <vector>
@@ -72,7 +73,7 @@ bool FileHasher::Initialize() {
       LOG(ERROR) << "The source file size must be divisible by the block size, "
                  << "Size: " << source_size;
       LOG(INFO) << "Suggested size: "
-                << base::bits::AlignUp(source_size, PAGE_SIZE);
+                << base::bits::AlignUp(source_size, int64_t{PAGE_SIZE});
       return false;
     }
   }
@@ -154,9 +155,8 @@ std::string FileHasher::GetTable(bool colocated) {
   dm_bht_root_hexdigest(&tree_, digest, sizeof(digest));
   have_salt = dm_bht_salt(&tree_, hexsalt) == 0;
 
-  // TODO(wad) later support sizes that need 64-bit sectors.
-  unsigned int hash_start = 0;
-  unsigned int root_end = to_sector(block_limit_ << PAGE_SHIFT);
+  uint64_t hash_start = 0;
+  uint64_t root_end = to_sector(block_limit_ << PAGE_SHIFT);
   if (colocated)
     hash_start = root_end;
 

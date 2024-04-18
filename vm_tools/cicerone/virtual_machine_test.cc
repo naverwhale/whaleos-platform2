@@ -1,15 +1,14 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <string>
 
-#include <base/guid.h>
 #include <base/logging.h>
-#include <base/macros.h>
+#include <base/uuid.h>
 #include <gtest/gtest.h>
 
-#include <vm_cicerone/proto_bindings/cicerone_service.pb.h>
+#include <vm_cicerone/cicerone_service.pb.h>
 #include "vm_tools/cicerone/virtual_machine.h"
 
 namespace vm_tools {
@@ -35,7 +34,11 @@ constexpr char kVmToken[] = "token";
 // Test fixture for actually testing the VirtualMachine functionality.
 class VirtualMachineTest : public ::testing::Test {
  public:
-  VirtualMachineTest() : termina_vm_(1, 2, ""), plugin_vm_(0, 3, kVmToken) {}
+  VirtualMachineTest() : termina_vm_(1, 2, ""), plugin_vm_(0, 3, kVmToken) {
+    // Disable wait time on the cicerone connection waiting for garcon which
+    // doesn't run in tests.
+    Container::DisableChannelWaitForTesting();
+  }
   VirtualMachineTest(const VirtualMachineTest&) = delete;
   VirtualMachineTest& operator=(const VirtualMachineTest&) = delete;
 
@@ -49,18 +52,22 @@ class VirtualMachineTest : public ::testing::Test {
 
 TEST_F(VirtualMachineTest, NoContainerToken) {
   // If the token was never generated, then [un]registration should fail.
-  EXPECT_FALSE(termina_vm_.RegisterContainer(base::GenerateGUID(),
-                                             kFakeGarconPort1, kFakeIp1));
-  EXPECT_FALSE(termina_vm_.UnregisterContainer(base::GenerateGUID()));
+  EXPECT_FALSE(termina_vm_.RegisterContainer(
+      base::Uuid::GenerateRandomV4().AsLowercaseString(), kFakeGarconPort1,
+      kFakeIp1));
+  EXPECT_FALSE(termina_vm_.UnregisterContainer(
+      base::Uuid::GenerateRandomV4().AsLowercaseString()));
 }
 
 TEST_F(VirtualMachineTest, InvalidContainerToken) {
   // If the wrong token is used, then registration should fail.
   std::string token = termina_vm_.GenerateContainerToken(kFakeContainerName1);
-  EXPECT_FALSE(termina_vm_.RegisterContainer(base::GenerateGUID(),
-                                             kFakeGarconPort1, kFakeIp1));
+  EXPECT_FALSE(termina_vm_.RegisterContainer(
+      base::Uuid::GenerateRandomV4().AsLowercaseString(), kFakeGarconPort1,
+      kFakeIp1));
   // Invalid token should fail unregister operation.
-  EXPECT_FALSE(termina_vm_.UnregisterContainer(base::GenerateGUID()));
+  EXPECT_FALSE(termina_vm_.UnregisterContainer(
+      base::Uuid::GenerateRandomV4().AsLowercaseString()));
 }
 
 TEST_F(VirtualMachineTest, ValidContainerToken) {
@@ -119,10 +126,8 @@ TEST_F(VirtualMachineTest, PluginVmRegisterContainer) {
 }
 
 TEST_F(VirtualMachineTest, VerifyVmTypes) {
-  EXPECT_EQ(termina_vm_.GetType(),
-            VirtualMachine::VmType::ApplicationList_VmType_TERMINA);
-  EXPECT_EQ(plugin_vm_.GetType(),
-            VirtualMachine::VmType::ApplicationList_VmType_PLUGIN_VM);
+  EXPECT_EQ(termina_vm_.GetType(), VirtualMachine::VmType::TERMINA);
+  EXPECT_EQ(plugin_vm_.GetType(), VirtualMachine::VmType::PLUGIN_VM);
 }
 
 class UpgradeContainerTest : public VirtualMachineTest {

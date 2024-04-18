@@ -1,16 +1,20 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "diagnostics/wilco_dtc_supportd/fake_diagnostics_service.h"
 
+#include <cstdint>
+#include <optional>
 #include <utility>
 
-#include "diagnostics/common/mojo_utils.h"
-#include "mojo/nullable_primitives.mojom.h"
+#include "diagnostics/mojom/public/nullable_primitives.mojom.h"
+#include "diagnostics/wilco_dtc_supportd/utils/mojo_utils.h"
 
 namespace diagnostics {
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
+namespace wilco {
+
+namespace mojo_ipc = ::ash::cros_healthd::mojom;
 
 FakeDiagnosticsService::FakeDiagnosticsService() = default;
 FakeDiagnosticsService::~FakeDiagnosticsService() = default;
@@ -50,7 +54,7 @@ void FakeDiagnosticsService::GetRoutineUpdate(
 }
 
 void FakeDiagnosticsService::RunUrandomRoutine(
-    chromeos::cros_healthd::mojom::NullableUint32Ptr length_seconds,
+    mojo_ipc::NullableUint32Ptr length_seconds,
     RunUrandomRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
@@ -66,42 +70,49 @@ void FakeDiagnosticsService::RunBatteryHealthRoutine(
 }
 
 void FakeDiagnosticsService::RunSmartctlCheckRoutine(
+    mojo_ipc::NullableUint32Ptr percentage_used_threshold,
     RunSmartctlCheckRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
 
 void FakeDiagnosticsService::RunAcPowerRoutine(
-    chromeos::cros_healthd::mojom::AcPowerStatusEnum expected_status,
-    const base::Optional<std::string>& expected_power_type,
+    mojo_ipc::AcPowerStatusEnum expected_status,
+    const std::optional<std::string>& expected_power_type,
     RunAcPowerRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
 
 void FakeDiagnosticsService::RunCpuCacheRoutine(
-    chromeos::cros_healthd::mojom::NullableUint32Ptr length_seconds,
+    mojo_ipc::NullableUint32Ptr length_seconds,
     RunCpuCacheRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
 
 void FakeDiagnosticsService::RunCpuStressRoutine(
-    chromeos::cros_healthd::mojom::NullableUint32Ptr length_seconds,
+    mojo_ipc::NullableUint32Ptr length_seconds,
     RunCpuStressRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
 
 void FakeDiagnosticsService::RunFloatingPointAccuracyRoutine(
-    chromeos::cros_healthd::mojom::NullableUint32Ptr length_seconds,
+    mojo_ipc::NullableUint32Ptr length_seconds,
     RunFloatingPointAccuracyRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
 
-void FakeDiagnosticsService::RunNvmeWearLevelRoutine(
+void FakeDiagnosticsService::DEPRECATED_RunNvmeWearLevelRoutine(
     uint32_t wear_level_threshold, RunNvmeWearLevelRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
 
+void FakeDiagnosticsService::RunNvmeWearLevelRoutine(
+    ash::cros_healthd::mojom::NullableUint32Ptr wear_level_threshold,
+    RunNvmeWearLevelRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
 void FakeDiagnosticsService::RunNvmeSelfTestRoutine(
-    chromeos::cros_healthd::mojom::NvmeSelfTestTypeEnum nvme_self_test_type,
+    mojo_ipc::NvmeSelfTestTypeEnum nvme_self_test_type,
     RunNvmeSelfTestRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
@@ -115,7 +126,7 @@ void FakeDiagnosticsService::RunDiskReadRoutine(
 }
 
 void FakeDiagnosticsService::RunPrimeSearchRoutine(
-    chromeos::cros_healthd::mojom::NullableUint32Ptr length_seconds,
+    mojo_ipc::NullableUint32Ptr length_seconds,
     RunPrimeSearchRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
@@ -135,6 +146,7 @@ void FakeDiagnosticsService::RunBatteryChargeRoutine(
 }
 
 void FakeDiagnosticsService::RunMemoryRoutine(
+    std::optional<uint32_t> max_testing_mem_kib,
     RunMemoryRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
@@ -195,7 +207,7 @@ void FakeDiagnosticsService::RunHttpsLatencyRoutine(
 }
 
 void FakeDiagnosticsService::RunVideoConferencingRoutine(
-    const base::Optional<std::string>& stun_server_hostname,
+    const std::optional<std::string>& stun_server_hostname,
     RunVideoConferencingRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
@@ -212,6 +224,96 @@ void FakeDiagnosticsService::RunArcPingRoutine(
 
 void FakeDiagnosticsService::RunArcDnsResolutionRoutine(
     RunArcDnsResolutionRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunSensitiveSensorRoutine(
+    RunSensitiveSensorRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunFingerprintRoutine(
+    RunFingerprintRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunFingerprintAliveRoutine(
+    RunFingerprintAliveRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunPrivacyScreenRoutine(
+    bool target_state, RunPrivacyScreenRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::DEPRECATED_RunLedLitUpRoutine(
+    mojo_ipc::DEPRECATED_LedName name,
+    mojo_ipc::DEPRECATED_LedColor color,
+    mojo::PendingRemote<mojo_ipc::DEPRECATED_LedLitUpRoutineReplier> replier,
+    DEPRECATED_RunLedLitUpRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunEmmcLifetimeRoutine(
+    RunEmmcLifetimeRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::DEPRECATED_RunAudioSetVolumeRoutine(
+    uint64_t node_id,
+    uint8_t volume,
+    bool mute_on,
+    DEPRECATED_RunAudioSetVolumeRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::DEPRECATED_RunAudioSetGainRoutine(
+    uint64_t node_id,
+    uint8_t gain,
+    bool deprecated_mute_on,
+    DEPRECATED_RunAudioSetGainRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunBluetoothPowerRoutine(
+    RunBluetoothPowerRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunBluetoothDiscoveryRoutine(
+    RunBluetoothDiscoveryRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunBluetoothScanningRoutine(
+    mojo_ipc::NullableUint32Ptr length_seconds,
+    RunBluetoothScanningRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunBluetoothPairingRoutine(
+    const std::string& peripheral_id,
+    RunBluetoothPairingRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunPowerButtonRoutine(
+    uint32_t timeout_seconds, RunPowerButtonRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunAudioDriverRoutine(
+    RunAudioDriverRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunUfsLifetimeRoutine(
+    RunUfsLifetimeRoutineCallback callback) {
+  std::move(callback).Run(run_routine_response_.Clone());
+}
+
+void FakeDiagnosticsService::RunFanRoutine(RunFanRoutineCallback callback) {
   std::move(callback).Run(run_routine_response_.Clone());
 }
 
@@ -239,10 +341,11 @@ void FakeDiagnosticsService::SetInteractiveUpdate(
   routine_update_response_.progress_percent = progress_percent;
   routine_update_response_.output =
       CreateReadOnlySharedMemoryRegionMojoHandle(output);
-  mojo_ipc::InteractiveRoutineUpdate interactive_update;
-  interactive_update.user_message = user_message;
-  routine_update_response_.routine_update_union->set_interactive_update(
-      interactive_update.Clone());
+  auto interactive_update = mojo_ipc::InteractiveRoutineUpdate::New();
+  interactive_update->user_message = user_message;
+  routine_update_response_.routine_update_union =
+      mojo_ipc::RoutineUpdateUnion::NewInteractiveUpdate(
+          std::move(interactive_update));
 }
 
 void FakeDiagnosticsService::SetNonInteractiveUpdate(
@@ -253,11 +356,12 @@ void FakeDiagnosticsService::SetNonInteractiveUpdate(
   routine_update_response_.progress_percent = progress_percent;
   routine_update_response_.output =
       CreateReadOnlySharedMemoryRegionMojoHandle(output);
-  mojo_ipc::NonInteractiveRoutineUpdate noninteractive_update;
-  noninteractive_update.status = status;
-  noninteractive_update.status_message = status_message;
-  routine_update_response_.routine_update_union->set_noninteractive_update(
-      noninteractive_update.Clone());
+  auto noninteractive_update = mojo_ipc::NonInteractiveRoutineUpdate::New();
+  noninteractive_update->status = status;
+  noninteractive_update->status_message = status_message;
+  routine_update_response_.routine_update_union =
+      mojo_ipc::RoutineUpdateUnion::NewNoninteractiveUpdate(
+          std::move(noninteractive_update));
 }
 
 void FakeDiagnosticsService::SetRunSomeRoutineResponse(
@@ -266,4 +370,5 @@ void FakeDiagnosticsService::SetRunSomeRoutineResponse(
   run_routine_response_.status = status;
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

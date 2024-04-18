@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <base/check.h>
 #include <base/command_line.h>
@@ -17,7 +19,6 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/notreached.h>
-#include <base/optional.h>
 #include <base/process/launch.h>
 #include <base/strings/string_split.h>
 #include <base/time/time.h>
@@ -36,16 +37,15 @@
 
 namespace {
 
-constexpr base::TimeDelta kBootSplashScreenLaunchTimeout =
-    base::TimeDelta::FromSeconds(10);
+constexpr base::TimeDelta kBootSplashScreenLaunchTimeout = base::Seconds(10);
 
-constexpr char kFlashromPath[] = "/usr/sbin/flashrom";
+constexpr char kCrOSECLegacyDrvPath[] = "/opt/sbin/crosec-legacy-drv";
 constexpr char kRebootFile[] = "/tmp/force_reboot_after_fw_update";
 
 bool UpdateImage(const biod::CrosFpDeviceUpdate& ec_dev,
                  const biod::CrosFpBootUpdateCtrl& boot_ctrl,
                  const biod::CrosFpFirmware& fw,
-                 enum ec_current_image image) {
+                 enum ec_image image) {
   if (boot_ctrl.TriggerBootUpdateSplash()) {
     DLOG(INFO) << "Successfully launched update splash screen.";
   } else {
@@ -73,8 +73,25 @@ bool UpdateImage(const biod::CrosFpDeviceUpdate& ec_dev,
 
 namespace biod {
 
-std::string CrosFpDeviceUpdate::EcCurrentImageToString(
-    enum ec_current_image image) {
+bool GetAppOutputAndErrorWithTimeout(const base::CommandLine& cmd_input,
+                                     const base::TimeDelta& delta,
+                                     std::string* output) {
+  std::string delta_str = std::to_string(delta.InSecondsF());
+  base::CommandLine cmd_timeout{base::FilePath("timeout")};
+  cmd_timeout.AppendSwitchASCII("kill-after", "1s");
+  cmd_timeout.AppendSwitchASCII("signal", "QUIT");
+  cmd_timeout.AppendSwitch("verbose");
+  cmd_timeout.AppendSwitch("preserve-status");
+  cmd_timeout.AppendArg(delta_str);
+  base::CommandLine cmd_input_copy = cmd_input;
+  cmd_input_copy.PrependWrapper(cmd_timeout.GetCommandLineString());
+  return base::GetAppOutputAndError(cmd_input_copy, output);
+}
+
+std::vector<std::string> kNeedResetBoards{kFpBoardDartmonkey, kFpBoardNami,
+                                          kFpBoardNocturne};
+
+std::string CrosFpDeviceUpdate::EcCurrentImageToString(enum ec_image image) {
   switch (image) {
     case EC_IMAGE_UNKNOWN:
       return "UNKNOWN";
@@ -88,18 +105,18 @@ std::string CrosFpDeviceUpdate::EcCurrentImageToString(
   NOTREACHED();
 }
 
-base::Optional<CrosFpDeviceInterface::EcVersion>
+std::optional<ec::CrosFpDeviceInterface::EcVersion>
 CrosFpDeviceUpdate::GetVersion() const {
   auto fd = base::ScopedFD(open(CrosFpDevice::kCrosFpPath, O_RDWR | O_CLOEXEC));
   if (!fd.is_valid()) {
     LOG(ERROR) << "Failed to open fingerprint device, while fetching version.";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   auto version = biod::CrosFpDevice::GetVersion(fd);
   if (!version) {
     LOG(ERROR) << "Failed to read fingerprint version.";
-    return base::nullopt;
+    return std::nullopt;
   }
   return version;
 }
@@ -128,14 +145,15 @@ bool CrosFpDeviceUpdate::IsFlashProtectEnabled(bool* status) const {
 }
 
 bool CrosFpDeviceUpdate::Flash(const CrosFpFirmware& fw,
-                               enum ec_current_image image) const {
+                               enum ec_image image) const {
   DCHECK(image == EC_IMAGE_RO || image == EC_IMAGE_RW);
 
   std::string image_str = EcCurrentImageToString(image);
 
   LOG(INFO) << "Flashing " << image_str << " of FPMCU.";
 
-  base::CommandLine cmd{base::FilePath(kFlashromPath)};
+  // TODO: b/138782393 - Replace subprocessing with libec ASAP!
+  base::CommandLine cmd{base::FilePath(kCrOSECLegacyDrvPath)};
   cmd.AppendSwitch("noverify-all");
   cmd.AppendSwitchASCII("programmer", "ec:type=fp");
   cmd.AppendSwitchASCII("image", "EC_" + image_str);
@@ -147,9 +165,9 @@ bool CrosFpDeviceUpdate::Flash(const CrosFpFirmware& fw,
 
   LOG(INFO) << "Launching '" << cmd.GetCommandLineString() << "'.";
 
-  // TODO(b/130026657): Impose timeout on flashrom.
   std::string cmd_output;
-  bool status = base::GetAppOutputAndError(cmd, &cmd_output);
+  base::TimeDelta timeout_time = base::Minutes(2);
+  bool status = GetAppOutputAndErrorWithTimeout(cmd, timeout_time, &cmd_output);
   const auto lines = base::SplitStringPiece(
       cmd_output, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
   for (const auto line : lines) {
@@ -167,26 +185,21 @@ bool CrosFpDeviceUpdate::Flash(const CrosFpFirmware& fw,
 bool CrosFpBootUpdateCtrl::TriggerBootUpdateSplash() const {
   LOG(INFO) << "Launching update splash screen.";
 
-  int exit_code;
   base::CommandLine cmd{base::FilePath("chromeos-boot-alert")};
   cmd.AppendArg("update_firmware");
 
   DLOG(INFO) << "Launching '" << cmd.GetCommandLineString() << "'.";
 
-  // libchrome does not include a wrapper for capturing a process output
-  // and having an active timeout.
-  // Since boot splash screen can hang forever, it is more important
-  // to have a dedicated timeout in this process launch than to log
-  // the launch process's output.
-  // TODO(b/130026657): Capture stdout/stderr and forward to logger.
-  base::LaunchOptions opt;
-  auto p = base::LaunchProcess(cmd, opt);
-  if (!p.WaitForExitWithTimeout(kBootSplashScreenLaunchTimeout, &exit_code)) {
-    LOG(ERROR) << "Update splash screen launcher timeout met.";
-    return false;
+  std::string cmd_output;
+  bool status = GetAppOutputAndErrorWithTimeout(
+      cmd, kBootSplashScreenLaunchTimeout, &cmd_output);
+  const auto lines = base::SplitStringPiece(
+      cmd_output, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+  for (const auto line : lines) {
+    LOG(INFO) << cmd.GetProgram().BaseName().value() << ": " << line;
   }
-  if (exit_code != EXIT_SUCCESS) {
-    LOG(ERROR) << "Update splash screen launcher exited with bad status.";
+  if (!status) {
+    LOG(ERROR) << "Update splash screen launcher failed.";
     return false;
   }
   return true;
@@ -210,7 +223,9 @@ namespace updater {
 
 UpdateResult DoUpdate(const CrosFpDeviceUpdate& ec_dev,
                       const CrosFpBootUpdateCtrl& boot_ctrl,
-                      const CrosFpFirmware& fw) {
+                      const CrosFpFirmware& fw,
+                      const BiodSystem& system,
+                      brillo::CrosConfigInterface* cros_config) {
   bool attempted = false;
   UpdateResult result = {UpdateStatus::kUpdateNotNecessary,
                          UpdateReason::kNone};
@@ -225,7 +240,6 @@ UpdateResult DoUpdate(const CrosFpDeviceUpdate& ec_dev,
     return result;
   }
 
-  BiodSystem system;
   LOG(INFO) << "Hardware write protect: "
             << (system.HardwareWriteProtectIsEnabled() ? "enabled"
                                                        : "disabled");
@@ -253,13 +267,6 @@ UpdateResult DoUpdate(const CrosFpDeviceUpdate& ec_dev,
     }
   } else {
     LOG(INFO) << "FPMCU RO firmware is protected: no update.";
-
-    // TODO(b/119131962): Remove when flashrom is fixed.
-    if (!system.HardwareWriteProtectIsEnabled()) {
-      LOG(ERROR) << "FPMCU software write protect enabled while system hardware"
-                    " write is protect disabled. Updating will fail due to "
-                    "http://go/flashrom-fpmcu-wp-bug.";
-    }
   }
 
   // The firmware should be updated if RO is active (i.e. RW is corrupted) or if
@@ -278,6 +285,19 @@ UpdateResult DoUpdate(const CrosFpDeviceUpdate& ec_dev,
         << "FPMCU RW firmware mismatch or failed RW boot detected, updating.";
     if (!UpdateImage(ec_dev, boot_ctrl, fw, EC_IMAGE_RW)) {
       result.status = UpdateStatus::kUpdateFailedRW;
+      return result;
+    }
+
+    // Dartmonkey FPMCU board won't boot after update when HW WP is off but
+    // SW WP is on until power reset. See http://go/flashrom-fpmcu-wp-bug
+    // for details.
+    std::string board_name = biod::FingerprintBoard(cros_config).value_or("");
+    bool board_need_reset =
+        std::find(kNeedResetBoards.begin(), kNeedResetBoards.end(),
+                  board_name) != kNeedResetBoards.end();
+    if (board_need_reset && flashprotect_enabled &&
+        !system.HardwareWriteProtectIsEnabled()) {
+      result.status = UpdateStatus::kUpdateSucceededNeedPowerReset;
       return result;
     }
   } else {

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,11 @@
 #include <base/notreached.h>
 
 namespace diagnostics {
+namespace wilco {
 
 namespace {
 
-using EcEvent = diagnostics::EcService::EcEvent;
+using EcEvent = diagnostics::wilco::EcService::EcEvent;
 
 // A meaningless and meaningful EcEvent::Type
 const auto kNonSystemNotifyType = static_cast<EcEvent::Type>(0xabcd);
@@ -110,4 +111,5 @@ EcEvent GetEcEventWithReason(EcEvent::Reason reason) {
   NOTREACHED() << "Invalid EcEvent::Reason: " << static_cast<int>(reason);
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

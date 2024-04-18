@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,6 +20,7 @@ namespace minios {
 Daemon::Daemon() : DBusServiceDaemon(kMiniOsServiceName) {}
 
 void Daemon::Start() {
+  mini_os_->SetStateReporter(dbus_adaptor_.get());
   mini_os_->Run();
 }
 

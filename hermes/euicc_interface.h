@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,11 +32,10 @@ class EuiccInterface : public lpa::card::EuiccCard,
   //
 
   // from ModemControlInterface
-  virtual void StoreAndSetActiveSlot(uint32_t physical_slot,
-                                     ResultCallback cb) = 0;
+  virtual void ProcessEuiccEvent(EuiccEvent event, ResultCallback cb) = 0;
   virtual void RestoreActiveSlot(ResultCallback cb) = 0;
-  virtual void StartProfileOp(uint32_t physical_slot, ResultCallback cb) = 0;
-  virtual void FinishProfileOp(ResultCallback cb) = 0;
+  virtual void SetCardVersion(
+      const lpa::proto::EuiccSpecVersion& spec_version) = 0;
 
   // from lpa::card::EuiccCard
   virtual void SendApdus(std::vector<lpa::card::Apdu> apdus,
@@ -47,6 +46,9 @@ class EuiccInterface : public lpa::card::EuiccCard,
   virtual lpa::util::EuiccLog* logger() = 0;
   virtual const lpa::proto::EuiccSpecVersion& GetCardVersion() = 0;
   virtual lpa::util::Executor* executor() = 0;
+
+  virtual std::vector<uint8_t> GetUtranSupportedRelease() = 0;
+  virtual std::vector<uint8_t> GetEutranSupportedRelease() = 0;
 };
 
 }  // namespace hermes

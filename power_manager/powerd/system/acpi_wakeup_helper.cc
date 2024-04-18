@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,20 +9,18 @@
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/string_tokenizer.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 const base::FilePath kAcpiWakeupPath("/proc/acpi/wakeup");
 
 class AcpiWakeupFile : public AcpiWakeupFileInterface {
  public:
-  AcpiWakeupFile() {}
-  ~AcpiWakeupFile() override {}
+  AcpiWakeupFile() = default;
+  ~AcpiWakeupFile() override = default;
 
   bool Exists() override { return base::PathExists(kAcpiWakeupPath); }
 
@@ -40,8 +38,6 @@ class AcpiWakeupFile : public AcpiWakeupFileInterface {
 }  // namespace
 
 AcpiWakeupHelper::AcpiWakeupHelper() : file_(new AcpiWakeupFile()) {}
-
-AcpiWakeupHelper::~AcpiWakeupHelper() {}
 
 void AcpiWakeupHelper::set_file_for_testing(
     std::unique_ptr<AcpiWakeupFileInterface> file) {
@@ -126,5 +122,4 @@ bool AcpiWakeupHelper::ToggleWakeupEnabled(const std::string& device_name) {
   return true;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

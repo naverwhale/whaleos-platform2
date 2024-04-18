@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -18,6 +18,7 @@
 #include <mojo/public/cpp/bindings/remote.h>
 
 #include "camera/mojo/cros_camera_service.mojom.h"
+#include "camera/mojo/gpu/jpeg_accelerator.mojom.h"
 #include "camera/mojo/gpu/jpeg_encode_accelerator.mojom.h"
 #include "cros-camera/camera_mojo_channel_manager.h"
 #include "cros-camera/future.h"
@@ -61,6 +62,7 @@ class JpegEncodeAcceleratorImpl : public JpegEncodeAccelerator {
                  int width,
                  int height,
                  int quality,
+                 uint64_t input_modifier,
                  uint32_t* output_data_size) override;
 
  private:
@@ -75,7 +77,7 @@ class JpegEncodeAcceleratorImpl : public JpegEncodeAccelerator {
     ~IPCBridge();
 
     // Initialize Mojo channel to GPU pcorss in chrome.
-    void Start(base::Callback<void(bool)> callback);
+    void Start(base::OnceCallback<void(bool)> callback);
 
     // Destroy the instance.
     void Destroy();
@@ -104,10 +106,11 @@ class JpegEncodeAcceleratorImpl : public JpegEncodeAccelerator {
                 int coded_size_width,
                 int coded_size_height,
                 int quality,
+                uint64_t input_modifier,
                 EncodeWithDmaBufCallback callback);
 
     // For synced Encode API.
-    void EncodeSyncCallback(base::Callback<void(int)> callback,
+    void EncodeSyncCallback(base::OnceCallback<void(int)> callback,
                             uint32_t* output_data_size,
                             int32_t task_id,
                             uint32_t output_size,
@@ -122,8 +125,11 @@ class JpegEncodeAcceleratorImpl : public JpegEncodeAccelerator {
     bool IsReady();
 
    private:
+    // Request the kCrosJpegAccelerator service from Mojo Service Manager.
+    void RequestAcceleratorFromServiceManager();
+
     // Initialize the JpegEncodeAccelerator.
-    void Initialize(base::Callback<void(bool)> callback);
+    void Initialize(base::OnceCallback<void(bool)> callback);
 
     // Error handler for JEA mojo channel.
     void OnJpegEncodeAcceleratorError();
@@ -153,6 +159,8 @@ class JpegEncodeAcceleratorImpl : public JpegEncodeAccelerator {
     // implementation.
     // All the Mojo communication to |jea_| happens on |ipc_task_runner_|.
     mojo::Remote<mojom::JpegEncodeAccelerator> jea_;
+
+    mojo::Remote<mojom::JpegAcceleratorProvider> accelerator_provider_;
 
     // A map from buffer id to input and exif shared memory.
     // |input_shm_map_| and |exif_shm_map_| should only be accessed on

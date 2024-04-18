@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,10 +16,11 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/environment.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/process/launch.h>
 #include <base/strings/string_split.h>
@@ -45,16 +46,50 @@ constexpr char kWaylandDisplayEnv[] = "WAYLAND_DISPLAY";
 constexpr char kWaylandLowDensityDisplayEnv[] = "WAYLAND_DISPLAY_LOW_DENSITY";
 constexpr char kXCursorSizeEnv[] = "XCURSOR_SIZE";
 constexpr char kLowDensityXCursorSizeEnv[] = "XCURSOR_SIZE_LOW_DENSITY";
+constexpr char kGtkImModuleEnv[] = "GTK_IM_MODULE";
+constexpr char kQtImModuleEnv[] = "QT_IM_MODULE";
+constexpr char kImModuleName[] = "cros";
+constexpr char kVirtualKeyboardEnv[] = "CROS_IM_VIRTUAL_KEYBOARD";
+constexpr char kVirtualKeyboardEnabled[] = "1";
 constexpr size_t kMaxIconSize = 1048576;  // 1MB, very large for an icon
+
+void SetEnvForContainerFeatures(std::map<std::string, std::string>& env,
+                                google::protobuf::RepeatedField<int> features) {
+  for (int feature : features) {
+    switch (feature) {
+      case vm_tools::container::ContainerFeature::ENABLE_GTK3_IME_SUPPORT:
+        if (!std::getenv(kGtkImModuleEnv)) {
+          // Users may have manually set this so they can use a Linux IME.
+          // Don't override that until our IME support is on par.
+          env[kGtkImModuleEnv] = kImModuleName;
+        }
+        break;
+      case vm_tools::container::ContainerFeature::ENABLE_QT_IME_SUPPORT:
+        if (!std::getenv(kQtImModuleEnv)) {
+          env[kQtImModuleEnv] = kImModuleName;
+        }
+        break;
+      case vm_tools::container::ContainerFeature::
+          ENABLE_VIRTUAL_KEYBOARD_SUPPORT:
+        env[kVirtualKeyboardEnv] = kVirtualKeyboardEnabled;
+        break;
+      default:
+        LOG(WARNING) << "Received unknown container feature: " << feature;
+        break;
+    }
+  }
+}
 
 }  // namespace
 
 ServiceImpl::ServiceImpl(PackageKitProxy* package_kit_proxy,
                          base::TaskRunner* task_runner,
-                         HostNotifier* host_notifier)
+                         HostNotifier* host_notifier,
+                         bool startup_notify_allowed)
     : package_kit_proxy_(package_kit_proxy),
       task_runner_(task_runner),
-      host_notifier_(host_notifier) {
+      host_notifier_(host_notifier),
+      startup_notify_allowed_(startup_notify_allowed) {
   CHECK(package_kit_proxy_);
 }
 
@@ -65,6 +100,7 @@ grpc::Status ServiceImpl::LaunchApplication(
   LOG(INFO) << "Received request to launch application in container";
 
   if (request->desktop_file_id().empty()) {
+    LOG(ERROR) << "Failed to launch application: missing desktop_file_id";
     return grpc::Status(grpc::INVALID_ARGUMENT, "missing desktop_file_id");
   }
 
@@ -72,6 +108,7 @@ grpc::Status ServiceImpl::LaunchApplication(
   base::FilePath file_path =
       DesktopFile::FindFileForDesktopId(request->desktop_file_id());
   if (file_path.empty()) {
+    LOG(ERROR) << "Failed to launch application: missing file_path";
     response->set_success(false);
     response->set_failure_reason("Desktop file does not exist");
     return grpc::Status::OK;
@@ -81,6 +118,8 @@ grpc::Status ServiceImpl::LaunchApplication(
   std::unique_ptr<DesktopFile> desktop_file =
       DesktopFile::ParseDesktopFile(file_path);
   if (!desktop_file) {
+    LOG(ERROR)
+        << "Failed to launch application: Desktop file contents are invalid";
     response->set_success(false);
     response->set_failure_reason("Desktop file contents are invalid");
     return grpc::Status::OK;
@@ -88,6 +127,7 @@ grpc::Status ServiceImpl::LaunchApplication(
 
   // Make sure this desktop file is for an application.
   if (!desktop_file->IsApplication()) {
+    LOG(ERROR) << "Failed to launch application: Isn't application";
     response->set_success(false);
     response->set_failure_reason("Desktop file is not for an application");
     return grpc::Status::OK;
@@ -101,6 +141,8 @@ grpc::Status ServiceImpl::LaunchApplication(
   // the program for multiple files.
   std::vector<std::string> argv = desktop_file->GenerateArgvWithFiles(files);
   if (argv.empty()) {
+    LOG(ERROR) << "Failed to launch application: Failed to generate argv list "
+                  "for application";
     response->set_success(false);
     response->set_failure_reason(
         "Failure in generating argv list for application");
@@ -108,7 +150,11 @@ grpc::Status ServiceImpl::LaunchApplication(
   }
 
   std::map<std::string, std::string> env;
-  if (desktop_file->startup_notify()) {
+  // TODO(b/286917197): Workaround for GTK+3 crash. The check for
+  // startup_notify_alowed_ can be removed once
+  // https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1043000 is fixed in
+  // bookworm.
+  if (desktop_file->startup_notify() && startup_notify_allowed_) {
     env[kStartupIDEnv] = request->desktop_file_id();
   }
 
@@ -119,10 +165,13 @@ grpc::Status ServiceImpl::LaunchApplication(
     env[kXCursorSizeEnv] = std::getenv(kLowDensityXCursorSizeEnv);
   }
 
+  SetEnvForContainerFeatures(env, request->container_features());
+
   // Discard child's process stdio,
   int stdio_fd[] = {-1, -1, -1};
 
   if (!Spawn(std::move(argv), std::move(env), desktop_file->path(), stdio_fd)) {
+    LOG(ERROR) << "Failed to launch application: Failed to execute application";
     response->set_success(false);
     response->set_failure_reason("Failure in execution of application");
   } else {
@@ -155,6 +204,11 @@ grpc::Status ServiceImpl::GetIcon(
     container::DesktopIcon* desktop_icon = response->add_desktop_icons();
     desktop_icon->set_desktop_file_id(desktop_file_id);
     desktop_icon->set_icon(icon_data);
+    if (icon_filepath.Extension() == ".svg") {
+      desktop_icon->set_format(container::DesktopIcon::SVG);
+    } else {
+      desktop_icon->set_format(container::DesktopIcon::PNG);
+    }
   }
 
   return grpc::Status::OK;
@@ -174,10 +228,13 @@ grpc::Status ServiceImpl::LaunchVshd(
       "/opt/google/cros-containers/bin/vshd", "--inherit_env",
       base::StringPrintf("--forward_to_host_port=%u", request->port())};
 
+  std::map<std::string, std::string> env;
+  SetEnvForContainerFeatures(env, request->container_features());
+
   // Discard child's process stdio,
   int stdio_fd[] = {-1, -1, -1};
 
-  if (!Spawn(std::move(argv), {}, "", stdio_fd)) {
+  if (!Spawn(std::move(argv), std::move(env), "", stdio_fd)) {
     response->set_success(false);
     response->set_failure_reason("Failed to spawn vshd");
   } else {
@@ -417,9 +474,9 @@ grpc::Status ServiceImpl::ApplyAnsiblePlaybook(
   // because Ansible playbook application task is using
   // base::FileDescriptorWatcher to watch ansible-playbook process stdio.
   bool ret = task_runner_->PostTask(
-      FROM_HERE, base::Bind(&HostNotifier::CreateAnsiblePlaybookApplication,
-                            base::Unretained(host_notifier_), &event,
-                            &ansible_playbook_application));
+      FROM_HERE, base::BindOnce(&HostNotifier::CreateAnsiblePlaybookApplication,
+                                base::Unretained(host_notifier_), &event,
+                                &ansible_playbook_application));
   if (!ret) {
     error_msg =
         "Failed to post AnsiblePlaybookApplication creation to garcon "
@@ -521,6 +578,32 @@ grpc::Status ServiceImpl::RemoveFileWatch(
     response->set_status(vm_tools::container::RemoveFileWatchResponse::FAILED);
     response->set_failure_reason(error_msg);
   }
+  return grpc::Status::OK;
+}
+
+grpc::Status ServiceImpl::GetGarconSessionInfo(
+    grpc::ServerContext* ctx,
+    const vm_tools::container::GetGarconSessionInfoRequest* request,
+    vm_tools::container::GetGarconSessionInfoResponse* response) {
+  LOG(INFO) << "Getting session info";
+  if (host_notifier_->sftp_vsock_port() == 0) {
+    response->set_failure_reason(
+        "sftp_vsock_port not set, container probably hasn't finished "
+        "booting so unable to get info");
+    LOG(ERROR) << response->failure_reason();
+    response->set_status(container::GetGarconSessionInfoResponse::FAILED);
+    return grpc::Status::OK;
+  }
+  response->set_sftp_vsock_port(host_notifier_->sftp_vsock_port());
+  auto env = base::Environment::Create();
+  if (!env->GetVar("USER", response->mutable_container_username())) {
+    LOG(ERROR) << "$USER not set";
+  }
+  if (!env->GetVar("HOME", response->mutable_container_homedir())) {
+    LOG(ERROR) << "$HOME not set";
+  }
+  response->set_status(
+      vm_tools::container::GetGarconSessionInfoResponse::SUCCEEDED);
   return grpc::Status::OK;
 }
 

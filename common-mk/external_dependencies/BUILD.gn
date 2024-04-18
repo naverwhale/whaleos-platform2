@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -50,14 +50,14 @@ action("cloud_policy_proto_generator") {
   script = "${policy_tools_dir}/generate_policy_source.py"
   sources = [
     "${policy_resources_dir}/VERSION",
-    "${policy_resources_dir}/policy_templates.json",
+    "${policy_resources_dir}/generated_policy_templates.json",
   ]
   outputs = [ "${proto_out_dir}/cloud_policy.proto" ]
   args = [
     "--cloud-policy-protobuf=${proto_out_dir}/cloud_policy.proto",
     "--chrome-version-file=${policy_resources_dir}/VERSION",
     "--target-platform=chromeos",
-    "--policy-templates-file=${policy_resources_dir}/policy_templates.json",
+    "--policy-templates-file=${policy_resources_dir}/generated_policy_templates.json",
   ]
 }
 
@@ -91,9 +91,6 @@ proto_library("policy-protos") {
 }
 
 group("policy-goprotos") {
-  # TODO(https://crbug.com/1164401) The protos compiled below are missing
-  # |option go_package| statements. We currently fix this by adding
-  # |import_mapping| to the build rules. The goproto libraries will need to be # updated once the packages are added.
   deps = [
     ":enterprise_management_goprotos",
     ":private_membership_goprotos",
@@ -105,29 +102,30 @@ group("policy-goprotos") {
 goproto_library("enterprise_management_goprotos") {
   proto_in_dir = "${sysroot}/usr/share/protofiles"
 
-  # Package name needs to match with the one declared in .proto files.
-  proto_out_dir = "go/src/chromiumos/policy/enterprise_management"
+  proto_out_dir = "go/src/chromiumos/policy/"
   import_mapping = [
-    "private_membership_rlwe.proto=chromiumos/policy/private_membership.rlwe",
+    "private_membership.proto=chromiumos/policy/github.com/google/private-membership",
+    "private_membership_rlwe.proto=chromiumos/policy/github.com/google/private-membership",
+    "serialization.proto=chromiumos/policy/github.com/google/shell-encryption",
   ]
-
+  gen_grpc = true
   sources = [
     "${proto_in_dir}/chrome_device_policy.proto",
     "${proto_in_dir}/chrome_extension_policy.proto",
+    "${proto_in_dir}/cloud_policy.proto",
     "${proto_in_dir}/device_management_backend.proto",
     "${proto_in_dir}/policy_common_definitions.proto",
+    "${proto_in_dir}/remote_commands_service.proto",
   ]
 }
 
 goproto_library("private_membership_rlwe_goprotos") {
   proto_in_dir = "${sysroot}/usr/share/protofiles"
 
-  # Package name needs to match with the one declared in .proto files.
-  proto_out_dir = "go/src/chromiumos/policy/private_membership.rlwe"
+  proto_out_dir = "go/src/chromiumos/policy/"
 
   import_mapping = [
-    "private_membership.proto=chromiumos/policy/private_membership",
-    "serialization.proto=chromiumos/policy/rlwe",
+    "serialization.proto=chromiumos/policy/github.com/google/shell-encryption",
   ]
 
   sources = [ "${proto_in_dir}/private_membership_rlwe.proto" ]
@@ -135,17 +133,13 @@ goproto_library("private_membership_rlwe_goprotos") {
 
 goproto_library("private_membership_goprotos") {
   proto_in_dir = "${sysroot}/usr/share/protofiles"
-
-  # Package name needs to match with the one declared in .proto files.
-  proto_out_dir = "go/src/chromiumos/policy/private_membership"
+  proto_out_dir = "go/src/chromiumos/policy/"
   sources = [ "${proto_in_dir}/private_membership.proto" ]
 }
 
 goproto_library("rlwe_goprotos") {
   proto_in_dir = "${sysroot}/usr/share/protofiles"
-
-  # Package name needs to match with the one declared in .proto files.
-  proto_out_dir = "go/src/chromiumos/policy/rlwe"
+  proto_out_dir = "go/src/chromiumos/policy/"
   sources = [ "${proto_in_dir}/serialization.proto" ]
 }
 

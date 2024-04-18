@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,23 @@
 #include <memory>
 
 #include "rmad/state_handler/base_state_handler.h"
-#include "rmad/utils/cr50_utils.h"
+#include "rmad/system/cryptohome_client.h"
+#include "rmad/utils/write_protect_utils.h"
 
 namespace rmad {
 
 class DeviceDestinationStateHandler : public BaseStateHandler {
  public:
-  explicit DeviceDestinationStateHandler(scoped_refptr<JsonStore> json_store);
-  // Used to inject mock |cr50_utils_| for testing.
-  DeviceDestinationStateHandler(scoped_refptr<JsonStore> json_store,
-                                std::unique_ptr<Cr50Utils> cr50_utils);
+  explicit DeviceDestinationStateHandler(
+      scoped_refptr<JsonStore> json_store,
+      scoped_refptr<DaemonCallback> daemon_callback);
+  // Used to inject mock |cryptohome_client_| and |write_protect_utils_| for
+  // testing.
+  explicit DeviceDestinationStateHandler(
+      scoped_refptr<JsonStore> json_store,
+      scoped_refptr<DaemonCallback> daemon_callback,
+      std::unique_ptr<CryptohomeClient> cryptohome_client,
+      std::unique_ptr<WriteProtectUtils> crossystem_utils);
 
   ASSIGN_STATE(RmadState::StateCase::kDeviceDestination);
   SET_REPEATABLE;
@@ -29,11 +36,10 @@ class DeviceDestinationStateHandler : public BaseStateHandler {
   ~DeviceDestinationStateHandler() override = default;
 
  private:
-  // Store variables that can be used by other state handlers to make decisions.
-  bool StoreVars() const;
-  bool CanSkipHwwp() const;
+  bool ReplacedComponentNeedHwwpDisabled() const;
 
-  std::unique_ptr<Cr50Utils> cr50_utils_;
+  std::unique_ptr<CryptohomeClient> cryptohome_client_;
+  std::unique_ptr<WriteProtectUtils> write_protect_utils_;
 };
 
 }  // namespace rmad

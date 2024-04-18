@@ -1,17 +1,21 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef LIBHWSEC_FOUNDATION_TPM_TPM_VERSION_H_
 #define LIBHWSEC_FOUNDATION_TPM_TPM_VERSION_H_
 
+#include <optional>
+
 #include <base/logging.h>
-#include <base/optional.h>
 
 #include "libhwsec-foundation/hwsec-foundation_export.h"
 
-namespace hwsec_foundation {
-namespace tpm {
+#if !defined(USE_TPM1) || !defined(USE_TPM2) || !defined(USE_TPM_DYNAMIC)
+#error "Don't include this file w/o defining the value of TPM types"
+#endif
+
+namespace hwsec_foundation::tpm {
 
 enum class TPMVer {
   kUnknown = 0,
@@ -23,11 +27,22 @@ enum class TPMVer {
 #if USE_TPM_DYNAMIC
 
 HWSEC_FOUNDATION_EXPORT TPMVer
-RuntimeTPMVer(base::Optional<TPMVer> set_cache_for_testing = base::nullopt);
+RuntimeTPMVer(std::optional<TPMVer> set_cache_for_testing = std::nullopt);
 
 #else
 
-constexpr TPMVer RuntimeTPMVer() {
+HWSEC_FOUNDATION_EXPORT TPMVer BuildTimeTPMVer();
+
+#if USE_TPM1 && USE_TPM2
+
+// Fallback to the build time TPM version in the shared library.
+inline TPMVer RuntimeTPMVer() {
+  return BuildTimeTPMVer();
+}
+
+#else
+
+inline constexpr TPMVer RuntimeTPMVer() {
 #if USE_TPM1
   return TPMVer::kTPM1;
 #elif USE_TPM2
@@ -39,8 +54,9 @@ constexpr TPMVer RuntimeTPMVer() {
 
 #endif
 
-}  // namespace tpm
-}  // namespace hwsec_foundation
+#endif
+
+}  // namespace hwsec_foundation::tpm
 
 /**
  * These macros could help the caller switching between

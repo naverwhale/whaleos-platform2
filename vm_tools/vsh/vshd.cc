@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,14 +25,13 @@
 #include <string>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/stl_util.h>
 #include <base/strings/string_split.h>
@@ -52,6 +51,35 @@ using vm_tools::vsh::RecvMessage;
 using vm_tools::vsh::SendMessage;
 using vm_tools::vsh::Shutdown;
 using vm_tools::vsh::VshForwarder;
+using vm_tools::vsh::WriteKernelLogToFd;
+
+namespace {
+
+// Path to logging file.
+constexpr char kDevKmsg[] = "/dev/kmsg";
+
+// Prefix inserted before every log message.
+std::string_view kLogPrefix = "vshd: ";
+
+// File descriptor that points to /dev/kmsg. Needs to be a global variable
+// because logging::LogMessageHandlerFunction is just a function pointer so we
+// can't bind any variables to it via base::Bind*.
+base::ScopedFD g_kmsg_fd;
+
+bool LogToKmsg(logging::LogSeverity severity,
+               const char* file,
+               int line,
+               size_t message_start,
+               const string& message) {
+  DCHECK(g_kmsg_fd.is_valid());
+
+  // Even if the write wasn't successful, we can't log anything here because
+  // this _is_ the logging function. Just return whether the write succeeded.
+  return WriteKernelLogToFd(g_kmsg_fd.get(), severity, kLogPrefix, message,
+                            message_start);
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
   base::AtExitManager exit_manager;
@@ -61,7 +89,10 @@ int main(int argc, char** argv) {
   DEFINE_bool(inherit_env, false, "Inherit the current environment variables");
   DEFINE_string(default_user, "chronos", "Default login user");
   DEFINE_bool(allow_to_switch_user, true,
-              "Allow to switch to another user on login");
+              "Allows logging in as a user (including root) other than the "
+              "default user");
+  // TODO(b/306282531): Set this to false once ARCVM sets this flag.
+  DEFINE_bool(log_kmsg, true, "Log to /dev/kmsg rather than syslog");
 
   brillo::FlagHelper::Init(argc, argv, "vsh daemon");
   base::CommandLine* cl = base::CommandLine::ForCurrentProcess();
@@ -69,6 +100,21 @@ int main(int argc, char** argv) {
     LOG(ERROR) << "Unknown extra command line arguments; exiting";
     return EXIT_FAILURE;
   }
+
+  if (FLAGS_log_kmsg) {
+    // Save vshd logs to kernel's printk buffer so that we can see what happened
+    // through pstore even when vsh doesn't work.
+    // If vshd is running without privileges, this is expected to fail.
+    int kmsg_fd = open(kDevKmsg, O_WRONLY | O_CLOEXEC);
+    if (kmsg_fd != -1) {
+      g_kmsg_fd.reset(kmsg_fd);
+      logging::SetLogMessageHandler(LogToKmsg);
+    } else {
+      PLOG(WARNING) << "Failed to open /dev/kmsg";
+    }
+  }
+
+  LOG(INFO) << "vshd started";
 
   if (FLAGS_forward_to_host_port != 0) {
     uint32_t port = static_cast<uint32_t>(FLAGS_forward_to_host_port);
@@ -161,7 +207,7 @@ int main(int argc, char** argv) {
       {signal_fd.get(), POLLIN, 0},
       {sock_fd.get(), POLLIN, 0},
   };
-  const int num_pollfds = base::size(pollfds);
+  const int num_pollfds = std::size(pollfds);
 
   while (true) {
     if (poll(pollfds, num_pollfds, -1) < 0) {
@@ -184,8 +230,11 @@ int main(int argc, char** argv) {
         DCHECK_EQ(siginfo.ssi_signo, SIGCHLD);
 
         // Reap any child exit statuses.
-        while (waitpid(-1, nullptr, WNOHANG) > 0)
+        int waitpid_exit;
+        while ((waitpid_exit = waitpid(-1, nullptr, WNOHANG)) > 0)
           continue;
+        if (waitpid_exit < 0 && errno != ECHILD)
+          PLOG(ERROR) << "Failed to clean up child process";
       } else if (i == 1) {
         // sock_fd.
         struct sockaddr_vm peer_addr;
@@ -223,6 +272,8 @@ int main(int argc, char** argv) {
 
           message_loop.Run();
           return EXIT_SUCCESS;
+        } else if (pid < 0) {
+          PLOG(ERROR) << "Failed to fork child";
         }
       }
     }

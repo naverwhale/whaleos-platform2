@@ -1,11 +1,13 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "debugd/src/icmp_tool.h"
 
+#include <linux/capability.h>
 #include <stdlib.h>
 
+#include <base/logging.h>
 #include <base/strings/stringprintf.h>
 
 #include "debugd/src/helper_utils.h"
@@ -15,6 +17,11 @@ using std::map;
 using std::string;
 
 namespace debugd {
+
+namespace {
+inline constexpr char kSeccompPolicy[] = "/usr/share/policy/icmp.policy";
+inline constexpr uint64_t kCapabilities = CAP_TO_MASK(CAP_NET_RAW);
+}  // namespace
 
 string ICMPTool::TestICMP(const string& host) {
   map<string, string> options;
@@ -28,7 +35,12 @@ string ICMPTool::TestICMPWithOptions(const string& host,
     return "<path too long>";
 
   ProcessWithOutput p;
-  if (!p.Init())
+  p.SetSeccompFilterPolicyFile(kSeccompPolicy);
+  p.SetCapabilities(kCapabilities);
+  p.set_separate_stderr(true);
+  // "--ambient" is required to allow the subprocess ("/bin/ping" in this case)
+  // to inherit capabilities.
+  if (!p.Init(/*minijail_extra_args=*/{"--ambient"}))
     return "<can't create process>";
   p.AddArg(path);
 
@@ -42,8 +54,15 @@ string ICMPTool::TestICMPWithOptions(const string& host,
 
   p.AddArg(host);
   p.Run();
-  string out;
+  string out, err;
   p.GetOutput(&out);
+  p.GetError(&err);
+  if (!err.empty()) {
+    LOG(ERROR) << "icmp failed: " << err << "; host: " << host;
+  }
+  if (out.empty()) {
+    return err;
+  }
   return out;
 }
 

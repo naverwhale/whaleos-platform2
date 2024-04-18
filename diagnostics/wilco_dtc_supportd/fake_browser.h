@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,18 +7,18 @@
 
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <dbus/mock_exported_object.h>
 #include <gmock/gmock.h>
 #include <mojo/public/cpp/bindings/receiver.h>
 #include <mojo/public/cpp/bindings/remote.h>
 
-#include "diagnostics/common/mojo_test_utils.h"
+#include "diagnostics/mojom/public/wilco_dtc_supportd.mojom.h"
 #include "diagnostics/wilco_dtc_supportd/mock_mojo_client.h"
-#include "mojo/wilco_dtc_supportd.mojom.h"
+#include "diagnostics/wilco_dtc_supportd/utils/mojo_test_utils.h"
 
 namespace diagnostics {
+namespace wilco {
 
 // Helper class that allows to test communication between the browser and the
 // tested code of the wilco_dtc_supportd daemon.
@@ -60,7 +60,7 @@ class FakeBrowser final {
   // It's not allowed to call this method again after a successful completion.
   bool BootstrapMojoConnection(
       FakeMojoFdGenerator* fake_mojo_fd_generator,
-      const base::Closure& bootstrap_mojo_connection_callback);
+      base::OnceClosure bootstrap_mojo_connection_callback);
 
   // Call the |SendUiMessageToWilcoDtc| Mojo method
   // on wilco_dtc_supportd daemon, which will call the |HandleMessageFromUi|
@@ -75,7 +75,7 @@ class FakeBrowser final {
   // BootstrapMojoConnection().
   bool SendUiMessageToWilcoDtc(
       const std::string& json_message,
-      const base::Callback<void(mojo::ScopedHandle)>& callback);
+      base::OnceCallback<void(mojo::ScopedHandle)> callback);
 
   // Call the |NotifyConfigurationDataChanged| Mojo method on wilco_dtc_supportd
   // daemon, which will call the corresponding gRPC method on wilco_dtc.
@@ -100,7 +100,7 @@ class FakeBrowser final {
   // |get_service_mojo_method_callback| is called when the full-duplex Mojo
   // communication with the tested Mojo service is established.
   void CallGetServiceMojoMethod(
-      const base::Closure& get_service_mojo_method_callback);
+      base::OnceClosure get_service_mojo_method_callback);
 
   // Unowned. Points to the tested WilcoDtcSupportdServiceFactory instance.
   mojo::Remote<MojomWilcoDtcSupportdServiceFactory>* const
@@ -122,6 +122,7 @@ class FakeBrowser final {
   mojo::Remote<MojomWilcoDtcSupportdService> wilco_dtc_supportd_service_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_FAKE_BROWSER_H_

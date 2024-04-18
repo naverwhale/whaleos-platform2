@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "ml/machine_learning_service_impl.h"
@@ -8,10 +8,10 @@
 #include <vector>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
 #include <base/check.h>
-#include <base/macros.h>
+#include <base/functional/bind.h>
 #include <base/run_loop.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/message_loops/base_message_loop.h>
 #include <fuzzer/FuzzedDataProvider.h>
 #include <mojo/public/cpp/bindings/remote.h>
@@ -51,7 +51,7 @@ class MLServiceFuzzer {
   ~MLServiceFuzzer() = default;
   void SetUp() {
     ipc_support_ = std::make_unique<mojo::core::ScopedIPCSupport>(
-        base::ThreadTaskRunnerHandle::Get(),
+        base::SingleThreadTaskRunner::GetCurrentDefault(),
         mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
     ml_service_impl_ = std::make_unique<MachineLearningServiceImpl>(
         ml_service_.BindNewPipeAndPassReceiver(), base::OnceClosure());

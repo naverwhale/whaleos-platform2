@@ -20,8 +20,6 @@
 
 #include <memory>
 
-#include <base/macros.h>
-
 #include "crash-reporter/crashpad/file_io.h"
 #include "crash-reporter/crashpad/http_body.h"
 
@@ -59,8 +57,6 @@ class GzipHTTPBodyStream : public HTTPBodyStream {
   std::unique_ptr<HTTPBodyStream> source_;
   std::unique_ptr<z_stream> z_stream_;
   State state_;
-
-  DISALLOW_COPY_AND_ASSIGN(GzipHTTPBodyStream);
 };
 
 }  // namespace crashpad

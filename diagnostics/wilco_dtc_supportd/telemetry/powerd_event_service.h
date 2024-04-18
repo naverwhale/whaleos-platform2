@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <base/observer_list_types.h>
 
 namespace diagnostics {
+namespace wilco {
 
 class PowerdEventService {
  public:
@@ -35,6 +36,7 @@ class PowerdEventService {
   virtual void RemoveObserver(Observer* observer) = 0;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_TELEMETRY_POWERD_EVENT_SERVICE_H_

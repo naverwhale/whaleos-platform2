@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 #define ML_BENCHMARK_SHARED_LIBRARY_BENCHMARK_FUNCTIONS_H_
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/scoped_native_library.h>
 
 #include "ml_benchmark/benchmark_functions.h"

@@ -1,3 +1,14 @@
+# For ChromeOS-only policy changes: Don't edit this file as
+# genfs_contexts changes made here may not be reflected (See b/285349121).
+# Instead update /policy/chromeos/genfs_contexts.
+# However, if a genfscon rule is common between both ChromeOS and Android,
+# add it to this file.
+# Note that these nodes are labeled at runtime, so 'cros deploy' is
+# sufficient when only changing this file, and a full image flash is
+# not needed just for testing.
+# Once changed, also run 'seinfo' to verify that the changes make it
+# into the filesystem's /etc/selinux/../policy.<N> file is recommended.
+
 # Label inodes with the fs label.
 genfscon rootfs / u:object_r:rootfs:s0
 

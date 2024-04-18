@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,11 +13,11 @@
 #include <utility>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
 #include <base/check_op.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
 #include <base/message_loop/message_pump_type.h>
@@ -29,16 +29,15 @@
 #include <base/strings/stringprintf.h>
 #include <base/system/sys_info.h>
 #include <base/task/single_thread_task_executor.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
 #include <chromeos/dbus/service_constants.h>
-#include <crosvm/qcow_utils.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
 #include <dbus/object_path.h>
 #include <dbus/object_proxy.h>
-#include <vm_cicerone/proto_bindings/cicerone_service.pb.h>
+#include <vm_cicerone/cicerone_service.pb.h>
 
 using std::string;
 
@@ -129,15 +128,16 @@ int CreateLxdContainer(dbus::ObjectProxy* proxy,
   vm_tools::cicerone::LxdContainerCreatedSignal::Status final_status =
       vm_tools::cicerone::LxdContainerCreatedSignal::UNKNOWN;
   std::string failure_reason = "Timed out waiting for reply";
-  proxy->ConnectToSignal(
-      vm_tools::cicerone::kVmCiceroneInterface,
-      vm_tools::cicerone::kLxdContainerCreatedSignal,
-      base::Bind(&OnContainerCreatedCallback, base::Unretained(&run_loop),
-                 &final_status, &failure_reason),
-      base::Bind(&OnSignalConnected));
+  proxy->ConnectToSignal(vm_tools::cicerone::kVmCiceroneInterface,
+                         vm_tools::cicerone::kLxdContainerCreatedSignal,
+                         base::BindRepeating(&OnContainerCreatedCallback,
+                                             base::Unretained(&run_loop),
+                                             &final_status, &failure_reason),
+                         base::BindOnce(&OnSignalConnected));
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -165,8 +165,8 @@ int CreateLxdContainer(dbus::ObjectProxy* proxy,
     // Start the RunLoop which'll get the D-Bus signal callbacks and set the
     // final result for us.
     LOG(INFO) << "Waiting for D-Bus signal for container creation status";
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-        FROM_HERE, run_loop.QuitClosure(), base::TimeDelta::FromMinutes(10));
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, run_loop.QuitClosure(), base::Minutes(10));
     run_loop.Run();
 
     if (final_status ==
@@ -206,15 +206,16 @@ int StartLxdContainer(dbus::ObjectProxy* proxy,
   vm_tools::cicerone::LxdContainerStartingSignal::Status final_status =
       vm_tools::cicerone::LxdContainerStartingSignal::UNKNOWN;
   std::string failure_reason = "Timed out waiting for reply";
-  proxy->ConnectToSignal(
-      vm_tools::cicerone::kVmCiceroneInterface,
-      vm_tools::cicerone::kLxdContainerStartingSignal,
-      base::Bind(&OnContainerStartingCallback, base::Unretained(&run_loop),
-                 &final_status, &failure_reason),
-      base::Bind(&OnSignalConnected));
+  proxy->ConnectToSignal(vm_tools::cicerone::kVmCiceroneInterface,
+                         vm_tools::cicerone::kLxdContainerStartingSignal,
+                         base::BindRepeating(&OnContainerStartingCallback,
+                                             base::Unretained(&run_loop),
+                                             &final_status, &failure_reason),
+                         base::BindOnce(&OnSignalConnected));
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -248,8 +249,8 @@ int StartLxdContainer(dbus::ObjectProxy* proxy,
     // Start the RunLoop which'll get the D-Bus signal callbacks and set the
     // final result for us.
     LOG(INFO) << "Waiting for D-Bus signal for container start status";
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-        FROM_HERE, run_loop.QuitClosure(), base::TimeDelta::FromMinutes(10));
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, run_loop.QuitClosure(), base::Minutes(10));
     run_loop.Run();
 
     if (final_status ==
@@ -282,7 +283,8 @@ int SetTimezone(dbus::ObjectProxy* proxy, const string& timezone_name) {
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -331,7 +333,8 @@ int GetLxdContainerUsername(dbus::ObjectProxy* proxy,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -379,7 +382,8 @@ int SetUpLxdContainerUser(dbus::ObjectProxy* proxy,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -438,7 +442,8 @@ int LaunchApplication(dbus::ObjectProxy* proxy,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -509,7 +514,8 @@ int GetIcon(dbus::ObjectProxy* proxy,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -548,7 +554,8 @@ int GetInfo(dbus::ObjectProxy* proxy) {
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -593,7 +600,8 @@ int GetLinuxPackageInfo(dbus::ObjectProxy* proxy,
   }
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -681,15 +689,16 @@ int InstallLinuxPackage(dbus::ObjectProxy* proxy,
   vm_tools::cicerone::InstallLinuxPackageProgressSignal::Status final_status =
       vm_tools::cicerone::InstallLinuxPackageProgressSignal::FAILED;
   std::string failure_details = "Timed out waiting for reply";
-  proxy->ConnectToSignal(
-      vm_tools::cicerone::kVmCiceroneInterface,
-      vm_tools::cicerone::kInstallLinuxPackageProgressSignal,
-      base::Bind(&OnApplicationInstalledCallback, base::Unretained(&run_loop),
-                 &final_status, &failure_details),
-      base::Bind(&OnSignalConnected));
+  proxy->ConnectToSignal(vm_tools::cicerone::kVmCiceroneInterface,
+                         vm_tools::cicerone::kInstallLinuxPackageProgressSignal,
+                         base::BindRepeating(&OnApplicationInstalledCallback,
+                                             base::Unretained(&run_loop),
+                                             &final_status, &failure_details),
+                         base::BindOnce(&OnSignalConnected));
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -707,8 +716,8 @@ int InstallLinuxPackage(dbus::ObjectProxy* proxy,
       // Start the RunLoop which'll get the D-Bus signal callbacks and set the
       // final result for us.
       LOG(INFO) << "Waiting for D-Bus signal for application install status";
-      base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-          FROM_HERE, run_loop.QuitClosure(), base::TimeDelta::FromMinutes(10));
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+          FROM_HERE, run_loop.QuitClosure(), base::Minutes(10));
       run_loop.Run();
 
       if (final_status ==
@@ -788,15 +797,16 @@ int UninstallApplication(dbus::ObjectProxy* proxy,
   vm_tools::cicerone::UninstallPackageProgressSignal::Status final_status =
       vm_tools::cicerone::UninstallPackageProgressSignal::FAILED;
   std::string failure_details = "Timed out waiting for reply";
-  proxy->ConnectToSignal(
-      vm_tools::cicerone::kVmCiceroneInterface,
-      vm_tools::cicerone::kUninstallPackageProgressSignal,
-      base::Bind(&OnApplicationUninstalledCallback, base::Unretained(&run_loop),
-                 &final_status, &failure_details),
-      base::Bind(&OnSignalConnected));
+  proxy->ConnectToSignal(vm_tools::cicerone::kVmCiceroneInterface,
+                         vm_tools::cicerone::kUninstallPackageProgressSignal,
+                         base::BindRepeating(&OnApplicationUninstalledCallback,
+                                             base::Unretained(&run_loop),
+                                             &final_status, &failure_details),
+                         base::BindOnce(&OnSignalConnected));
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -814,8 +824,8 @@ int UninstallApplication(dbus::ObjectProxy* proxy,
       // Start the RunLoop which'll get the D-Bus signal callbacks and set the
       // final result for us.
       LOG(INFO) << "Waiting for D-Bus signal for application uninstall status";
-      base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-          FROM_HERE, run_loop.QuitClosure(), base::TimeDelta::FromMinutes(10));
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+          FROM_HERE, run_loop.QuitClosure(), base::Minutes(10));
       run_loop.Run();
 
       if (final_status ==
@@ -897,12 +907,14 @@ int ApplyAnsiblePlaybook(dbus::ObjectProxy* proxy,
   proxy->ConnectToSignal(
       vm_tools::cicerone::kVmCiceroneInterface,
       vm_tools::cicerone::kApplyAnsiblePlaybookProgressSignal,
-      base::Bind(&OnPlaybookAppliedCallback, base::Unretained(&run_loop),
-                 &final_status, &failure_details),
-      base::Bind(&OnSignalConnected));
+      base::BindRepeating(&OnPlaybookAppliedCallback,
+                          base::Unretained(&run_loop), &final_status,
+                          &failure_details),
+      base::BindOnce(&OnSignalConnected));
 
   std::unique_ptr<dbus::Response> dbus_response =
-      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs);
+      proxy->CallMethodAndBlock(&method_call, kDefaultTimeoutMs)
+          .value_or(nullptr);
   if (!dbus_response) {
     LOG(ERROR) << "Failed to send dbus message to cicerone service";
     return -1;
@@ -920,8 +932,8 @@ int ApplyAnsiblePlaybook(dbus::ObjectProxy* proxy,
       // Start the RunLoop which'll get the D-Bus signal callbacks and set the
       // final result for us.
       LOG(INFO) << "Waiting for D-Bus signal for playbook application status";
-      base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-          FROM_HERE, run_loop.QuitClosure(), base::TimeDelta::FromMinutes(10));
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+          FROM_HERE, run_loop.QuitClosure(), base::Minutes(10));
       run_loop.Run();
 
       if (final_status ==

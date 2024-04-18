@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <memory>
 #include <vector>
 
-#include <base/macros.h>
 #include <gbm.h>
 
 #include <EGL/egl.h>
@@ -26,6 +25,10 @@ namespace screenshot {
 
 class Crtc;
 
+constexpr int kBytesPerPixel = 4;
+static_assert(kBytesPerPixel == sizeof(uint32_t),
+              "kBytesPerPixel must be 4 bytes");
+
 class EglDisplayBuffer : public DisplayBuffer {
  public:
   EglDisplayBuffer(const Crtc* crtc,
@@ -37,7 +40,12 @@ class EglDisplayBuffer : public DisplayBuffer {
   EglDisplayBuffer& operator=(const EglDisplayBuffer&) = delete;
   ~EglDisplayBuffer() override;
   // Captures a screenshot from the specified CRTC.
-  DisplayBuffer::Result Capture() override;
+  DisplayBuffer::Result Capture(bool rotate) override;
+
+  // Rotates the capture result by 90 degree clockwise, and updates
+  // the geometric parameters (width, height, and stride).
+  static void Rotate(DisplayBuffer::Result& result,
+                     std::vector<uint32_t>& buffer);
 
  private:
   // Sets the UV coordinates uniform for a crop rectangle with respect to
@@ -46,8 +54,8 @@ class EglDisplayBuffer : public DisplayBuffer {
                  float crop_y,
                  float crop_width,
                  float crop_height,
-                 uint32_t src_width,
-                 uint32_t src_height);
+                 float src_width,
+                 float src_height);
 
   const Crtc& crtc_;
   const uint32_t x_;
@@ -66,7 +74,10 @@ class EglDisplayBuffer : public DisplayBuffer {
   PFNEGLDESTROYIMAGEKHRPROC destroyImageKHR_;
   PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES_;
   bool import_modifiers_exist_;
-  std::vector<char> buffer_;
+  std::vector<uint32_t> buffer_;
+  // Capture() will be called repeatedly in kmsvnc, thus a reusable buffer
+  // is allocated for rotation.
+  std::vector<uint32_t> rotated_;
 };
 
 }  // namespace screenshot

@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,7 +70,7 @@ class FakeSensorServiceNewDevicesObserver
  private:
   mojo::Receiver<cros::mojom::SensorServiceNewDevicesObserver> receiver_;
 
-  base::Optional<int32_t> iio_device_id_;
+  std::optional<int32_t> iio_device_id_;
   std::vector<cros::mojom::DeviceType> types_;
 };
 
@@ -274,12 +275,16 @@ TEST_P(SensorServiceImplTestDeviceTypesWithParam, DeviceTypes) {
       [](base::OnceClosure closure,
          const base::flat_map<int32_t, std::vector<cros::mojom::DeviceType>>&
              iio_device_ids_types) {
-        EXPECT_EQ(iio_device_ids_types.size(), 1);
-        auto it = iio_device_ids_types.find(kFakeAccelId);
-        EXPECT_TRUE(it != iio_device_ids_types.end());
-        EXPECT_EQ(it->second.size(), GetParam().second.size());
-        for (size_t i = 0; i < it->second.size(); ++i)
-          EXPECT_EQ(it->second[i], GetParam().second[i]);
+        if (GetParam().second.empty()) {
+          EXPECT_TRUE(iio_device_ids_types.empty());
+        } else {
+          EXPECT_EQ(iio_device_ids_types.size(), 1);
+          auto it = iio_device_ids_types.find(kFakeAccelId);
+          EXPECT_TRUE(it != iio_device_ids_types.end());
+          EXPECT_EQ(it->second.size(), GetParam().second.size());
+          for (size_t i = 0; i < it->second.size(); ++i)
+            EXPECT_EQ(it->second[i], GetParam().second[i]);
+        }
 
         std::move(closure).Run();
       },
@@ -312,6 +317,9 @@ INSTANTIATE_TEST_SUITE_P(
                       std::pair<std::vector<std::string>,
                                 std::vector<cros::mojom::DeviceType>>(
                           {"pressure"}, {cros::mojom::DeviceType::BARO}),
+                      std::pair<std::vector<std::string>,
+                                std::vector<cros::mojom::DeviceType>>(
+                          {"proximity0"}, {cros::mojom::DeviceType::PROXIMITY}),
                       std::pair<std::vector<std::string>,
                                 std::vector<cros::mojom::DeviceType>>(
                           {"accel_x", "accel_y", "magn_z", "abc"},

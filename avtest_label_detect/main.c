@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include <getopt.h>
@@ -27,13 +27,13 @@ struct detector detectors[] = {
     {"hw_video_acc_hevc", detect_video_acc_hevc},
     {"hw_video_acc_hevc_10bpp", detect_video_acc_hevc_10bpp},
     {"hw_video_acc_enc_h264", detect_video_acc_enc_h264},
+    {"hw_video_acc_enc_h264_vbr", detect_video_acc_enc_h264_vbr},
     {"hw_video_acc_enc_vp8", detect_video_acc_enc_vp8},
+    {"hw_video_acc_enc_vp8_vbr", detect_video_acc_enc_vp8_vbr},
     {"hw_video_acc_enc_vp9", detect_video_acc_enc_vp9},
-    {"builtin_usb_camera", detect_builtin_usb_camera},
-    {"builtin_mipi_camera", detect_builtin_mipi_camera},
-    {"vivid_camera", detect_vivid_camera},
-    {"builtin_camera", detect_builtin_camera},
-    {"builtin_or_vivid_camera", detect_builtin_or_vivid_camera},
+    {"hw_video_acc_enc_vp9_vbr", detect_video_acc_enc_vp9_vbr},
+    {"hw_video_acc_enc_av1", detect_video_acc_enc_av1},
+    {"hw_video_acc_enc_av1_vbr", detect_video_acc_enc_av1_vbr},
     {"hw_video_acc_h264_4k", detect_4k_device_h264},
     {"hw_video_acc_vp8_4k", detect_4k_device_vp8},
     {"hw_video_acc_vp9_4k", detect_4k_device_vp9},
@@ -41,9 +41,16 @@ struct detector detectors[] = {
     {"hw_video_acc_av1_4k_10bpp", detect_4k_device_av1_10bpp},
     {"hw_video_acc_hevc_4k", detect_4k_device_hevc},
     {"hw_video_acc_hevc_4k_10bpp", detect_4k_device_hevc_10bpp},
+    {"hw_video_acc_h264_8k", detect_8k_device_h264},
+    {"hw_video_acc_vp9_8k", detect_8k_device_vp9},
+    {"hw_video_acc_av1_8k", detect_8k_device_av1},
+    {"hw_video_acc_av1_8k_10bpp", detect_8k_device_av1_10bpp},
+    {"hw_video_acc_hevc_8k", detect_8k_device_hevc},
+    {"hw_video_acc_hevc_8k_10bpp", detect_8k_device_hevc_10bpp},
     {"hw_video_acc_enc_h264_4k", detect_4k_device_enc_h264},
     {"hw_video_acc_enc_vp8_4k", detect_4k_device_enc_vp8},
     {"hw_video_acc_enc_vp9_4k", detect_4k_device_enc_vp9},
+    {"hw_video_acc_enc_av1_4k", detect_4k_device_enc_av1},
     {"hw_video_prot_cencv1_h264_cbc", detect_video_prot_cencv1_h264_cbc},
     {"hw_video_prot_cencv1_h264_ctr", detect_video_prot_cencv1_h264_ctr},
     {"hw_video_prot_cencv3_av1_cbc", detect_video_prot_cencv3_av1_cbc},

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,9 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
+#include <brillo/secure_blob.h>
 
-#include "brillo/secure_blob.h"
-#include "chaps/chaps.h"
+#include "chaps/threading_mode.h"
 #include "chaps/token_manager_interface.h"
 #include "pkcs11/cryptoki.h"
 
@@ -31,9 +30,13 @@ class ChapsProxyImpl;
 //                    &slot_id);
 // Users of this class must instantiate AtExitManager, as the class relies on
 // its presence.
+//
+// The default threading mode will create a standalone work thread, to prevent
+// the extra thread, please use ThreadingMode::kCurrentThread.
 class EXPORT_SPEC TokenManagerClient : public TokenManagerInterface {
  public:
-  TokenManagerClient();
+  explicit TokenManagerClient(
+      ThreadingMode mode = ThreadingMode::kStandaloneWorkerThread);
   TokenManagerClient(const TokenManagerClient&) = delete;
   TokenManagerClient& operator=(const TokenManagerClient&) = delete;
 
@@ -48,11 +51,8 @@ class EXPORT_SPEC TokenManagerClient : public TokenManagerInterface {
                  const brillo::SecureBlob& auth_data,
                  const std::string& label,
                  int* slot_id) override;
-  void UnloadToken(const brillo::SecureBlob& isolate_credential,
+  bool UnloadToken(const brillo::SecureBlob& isolate_credential,
                    const base::FilePath& path) override;
-  void ChangeTokenAuthData(const base::FilePath& path,
-                           const brillo::SecureBlob& old_auth_data,
-                           const brillo::SecureBlob& new_auth_data) override;
   bool GetTokenPath(const brillo::SecureBlob& isolate_credential,
                     int slot_id,
                     base::FilePath* path) override;
@@ -64,6 +64,7 @@ class EXPORT_SPEC TokenManagerClient : public TokenManagerInterface {
                             std::vector<std::string>* results);
 
  private:
+  ThreadingMode mode_;
   std::unique_ptr<ChapsProxyImpl> proxy_;
 
   // Attempts to connect to the Chaps daemon. Returns true on success.

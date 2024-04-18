@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "metrics/process_meter.h"
 
 #include <memory>
+#include <optional>
 
 #include <gtest/gtest.h>
 
@@ -14,8 +15,6 @@
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
 #include <base/logging.h>
-#include <base/optional.h>
-#include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 
@@ -32,7 +31,7 @@ void CreateFile(const base::FilePath& path, std::string content) {
 
 void CreateProcEntry(const base::FilePath& procfs_path,
                      int pid,
-                     base::Optional<int> ppid,
+                     std::optional<int> ppid,
                      const char* name,
                      const char* cmdline,
                      int total_mib,
@@ -150,7 +149,7 @@ TEST_F(ProcessMeterTest, ReportProcessStats) {
                   "/opt/google/chrome/chrome --type=renderer",
                   113, 33, 80, 0, 0);
   // Unparsable ppid
-  CreateProcEntry(procfs_path, 214, base::nullopt, "chrome",
+  CreateProcEntry(procfs_path, 214, std::nullopt, "chrome",
                   "/opt/google/chrome/chrome --type=renderer",
                   213, 133, 80, 0, 0);
   // Missing cmdline.
@@ -291,8 +290,8 @@ TEST_F(ProcessMeterTest, CheckUMANames) {
 
   // Extra consistency checks.
   ProcessMemoryStats stats;
-  CHECK_EQ(base::size(stats.rss_sizes), base::size(kProcessMemoryUMANames[0]));
-  CHECK_EQ(base::size(kProcessMemoryUMANames), PG_KINDS_COUNT);
+  CHECK_EQ(std::size(stats.rss_sizes), std::size(kProcessMemoryUMANames[0]));
+  CHECK_EQ(std::size(kProcessMemoryUMANames), PG_KINDS_COUNT);
 }
 
 }  // namespace chromeos_metrics

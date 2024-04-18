@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@
 #include <set>
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/process/process_reaper.h>
 #include <chromeos/dbus/service_constants.h>
@@ -21,7 +21,7 @@
 namespace cros_disks {
 
 using PartitionCompleteCallback =
-    base::OnceCallback<void(const base::FilePath&, PartitionErrorType)>;
+    base::OnceCallback<void(const base::FilePath&, PartitionError)>;
 
 class PartitionManager {
  public:

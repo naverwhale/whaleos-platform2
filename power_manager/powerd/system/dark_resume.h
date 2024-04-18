@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define POWER_MANAGER_POWERD_SYSTEM_DARK_RESUME_H_
 
 #include <string>
-
-#include <base/macros.h>
 
 #include "power_manager/common/prefs_observer.h"
 #include "power_manager/powerd/system/dark_resume_interface.h"
@@ -24,11 +22,11 @@ class WakeupSourceIdentifierInterface;
 // count to identify the wake source.
 class DarkResume : public DarkResumeInterface, public PrefsObserver {
  public:
-  DarkResume();
+  DarkResume() = default;
   DarkResume(const DarkResume&) = delete;
   DarkResume& operator=(const DarkResume&) = delete;
 
-  ~DarkResume() override;
+  ~DarkResume() override = default;
 
   // Reads preferences on whether dark resume is enabled.
   void Init(PrefsInterface* prefs,

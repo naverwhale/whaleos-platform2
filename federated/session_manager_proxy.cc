@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <dbus/login_manager/dbus-constants.h>
 
 #include "federated/utils.h"
@@ -33,7 +33,7 @@ SessionManagerProxy::SessionManagerProxy(
     : proxy_(std::move(proxy)), weak_ptr_factory_(this) {
   proxy_->RegisterSessionStateChangedSignalHandler(
       base::BindRepeating(&SessionManagerProxy::OnSessionStateChanged,
-                          weak_ptr_factory_.GetWeakPtr()),
+                          weak_ptr_factory_.GetMutableWeakPtr()),
       base::BindOnce(&OnSignalConnected));
 }
 
@@ -56,9 +56,6 @@ void SessionManagerProxy::OnSessionStateChanged(const std::string& state) {
 }
 
 std::string SessionManagerProxy::RetrieveSessionState() {
-  dbus::MethodCall method_call(
-      login_manager::kSessionManagerInterface,
-      login_manager::kSessionManagerRetrieveSessionState);
   std::string state;
   brillo::ErrorPtr error;
   if (!proxy_->RetrieveSessionState(&state, &error)) {

@@ -1,4 +1,4 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,6 +14,7 @@ pkg_config("target_defaults") {
 
 cc_embed_data("embedded_gpu_shaders") {
   sources = [
+    "//camera/gpu/shaders/crop.frag",
     "//camera/gpu/shaders/external_yuv_to_nv12.frag",
     "//camera/gpu/shaders/external_yuv_to_rgba.frag",
     "//camera/gpu/shaders/fullscreen_rect_highp_310_es.vert",
@@ -21,7 +22,9 @@ cc_embed_data("embedded_gpu_shaders") {
     "//camera/gpu/shaders/lut.frag",
     "//camera/gpu/shaders/nv12_to_rgba.frag",
     "//camera/gpu/shaders/rgba_to_nv12.frag",
+    "//camera/gpu/shaders/subsample_chroma.frag",
     "//camera/gpu/shaders/yuv_to_yuv.frag",
+    "//camera/gpu/shaders/yuyv_to_nv12.frag",
   ]
 }
 
@@ -35,6 +38,9 @@ source_set("gpu") {
     "//camera/gpu/egl",
     "//camera/gpu/gles",
   ]
+
+  # -fPIC needed by the libcros_camera.so shared library.
+  configs += [ "//common-mk:pic" ]
 }
 
 source_set("image_processor") {
@@ -43,6 +49,20 @@ source_set("image_processor") {
     ":embedded_gpu_shaders",
     ":gpu",
   ]
+
+  # -fPIC needed by the libcros_camera.so shared library.
+  configs += [ "//common-mk:pic" ]
+}
+
+source_set("gpu_resources") {
+  sources = [ "//camera/gpu/gpu_resources.cc" ]
+  public_deps = [
+    ":gpu",
+    ":image_processor",
+  ]
+
+  # -fPIC needed by the libcros_camera.so shared library.
+  configs += [ "//common-mk:pic" ]
 }
 
 source_set("gpu_test_support") {

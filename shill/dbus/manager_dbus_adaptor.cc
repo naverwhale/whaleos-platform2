@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,20 +6,20 @@
 
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 
 #include "shill/callbacks.h"
-#include "shill/dbus/dbus_service_watcher_factory.h"
 #include "shill/device.h"
 #include "shill/error.h"
 #include "shill/geolocation_info.h"
-#include "shill/key_value_store.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/property_store.h"
+#include "shill/store/key_value_store.h"
+#include "shill/store/property_store.h"
+#include "shill/tethering_manager.h"
 
 namespace shill {
 
@@ -39,18 +39,16 @@ ManagerDBusAdaptor::ManagerDBusAdaptor(
     Manager* manager)
     : org::chromium::flimflam::ManagerAdaptor(this),
       DBusAdaptor(adaptor_bus, kPath),
-      manager_(manager),
-      proxy_bus_(proxy_bus),
-      dbus_service_watcher_factory_(DBusServiceWatcherFactory::GetInstance()) {}
+      manager_(manager) {}
 
 ManagerDBusAdaptor::~ManagerDBusAdaptor() {
   manager_ = nullptr;
 }
 
 void ManagerDBusAdaptor::RegisterAsync(
-    const base::Callback<void(bool)>& completion_callback) {
+    base::OnceCallback<void(bool)> completion_callback) {
   RegisterWithDBusObject(dbus_object());
-  dbus_object()->RegisterAsync(completion_callback);
+  dbus_object()->RegisterAsync(std::move(completion_callback));
 }
 
 void ManagerDBusAdaptor::EmitBoolChanged(const std::string& name, bool value) {
@@ -210,36 +208,42 @@ bool ManagerDBusAdaptor::RequestScan(brillo::ErrorPtr* error,
   return !e.ToChromeosError(error);
 }
 
+bool ManagerDBusAdaptor::RequestWiFiRestart(
+    brillo::ErrorPtr* error) {  // NOLINT
+  SLOG(this, 2) << __func__;
+  Error e;
+  manager_->RequestWiFiRestart(&e);
+  return !e.ToChromeosError(error);
+}
+
 void ManagerDBusAdaptor::SetNetworkThrottlingStatus(
     DBusMethodResponsePtr<> response,
     bool enabled,
     uint32_t upload_rate_kbits,
     uint32_t download_rate_kbits) {
   SLOG(this, 2) << __func__ << ": " << enabled;
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
-  manager_->SetNetworkThrottlingStatus(callback, enabled, upload_rate_kbits,
-                                       download_rate_kbits);
+  manager_->SetNetworkThrottlingStatus(
+      GetMethodReplyCallback(std::move(response)), enabled, upload_rate_kbits,
+      download_rate_kbits);
   return;
 }
 
 void ManagerDBusAdaptor::EnableTechnology(DBusMethodResponsePtr<> response,
                                           const std::string& technology_name) {
   SLOG(this, 2) << __func__ << ": " << technology_name;
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
   const bool kPersistentSave = true;
-  manager_->SetEnabledStateForTechnology(technology_name, true, kPersistentSave,
-                                         callback);
+  manager_->SetEnabledStateForTechnology(
+      technology_name, true, kPersistentSave,
+      GetMethodReplyCallback(std::move(response)));
 }
 
 void ManagerDBusAdaptor::DisableTechnology(DBusMethodResponsePtr<> response,
                                            const std::string& technology_name) {
   SLOG(this, 2) << __func__ << ": " << technology_name;
-  Error e(Error::kOperationInitiated);
-  ResultCallback callback = GetMethodReplyCallback(std::move(response));
   const bool kPersistentSave = true;
-  manager_->SetEnabledStateForTechnology(technology_name, false,
-                                         kPersistentSave, callback);
+  manager_->SetEnabledStateForTechnology(
+      technology_name, false, kPersistentSave,
+      GetMethodReplyCallback(std::move(response)));
 }
 
 // Called, e.g., to get WiFiService handle for a hidden SSID.
@@ -302,7 +306,12 @@ bool ManagerDBusAdaptor::FindMatchingService(
   Error find_error;
   ServiceRefPtr service =
       manager_->FindMatchingService(args_store, &find_error);
-  if (find_error.ToChromeosError(error)) {
+  if (find_error.type() == Error::kNotFound) {
+    // FindMatchingService may be used to test whether a Service exists.
+    LOG(INFO) << "FindMatchingService failed: " << find_error;
+    find_error.ToChromeosErrorNoLog(error);
+    return false;
+  } else if (find_error.ToChromeosError(error)) {
     return false;
   }
 
@@ -375,10 +384,10 @@ bool ManagerDBusAdaptor::GetNetworksForGeolocation(
   return true;
 }
 
-bool ManagerDBusAdaptor::ConnectToBestServices(brillo::ErrorPtr* error) {
+bool ManagerDBusAdaptor::ScanAndConnectToBestServices(brillo::ErrorPtr* error) {
   SLOG(this, 2) << __func__;
   Error e;
-  manager_->ConnectToBestServices(&e);
+  manager_->ScanAndConnectToBestServices(&e);
   return !e.ToChromeosError(error);
 }
 
@@ -391,56 +400,36 @@ bool ManagerDBusAdaptor::CreateConnectivityReport(brillo::ErrorPtr* error) {
 
 bool ManagerDBusAdaptor::ClaimInterface(brillo::ErrorPtr* error,
                                         dbus::Message* message,
-                                        const std::string& claimer_name,
+                                        const std::string& /*claimer_name*/,
                                         const std::string& interface_name) {
   SLOG(this, 2) << __func__;
   Error e;
-  // Empty claimer name is used to indicate default claimer.
-  // TODO(samueltan): update this API or make a new API to use a flag to
-  // indicate default claimer instead (b/27924738).
-  std::string claimer = (claimer_name == "" ? "" : message->GetSender());
-  manager_->ClaimDevice(claimer, interface_name, &e);
-  if (e.IsSuccess() && claimer_name != "") {
-    // Only setup watcher for non-default claimer.
-    watcher_for_device_claimer_ =
-        dbus_service_watcher_factory_->CreateDBusServiceWatcher(
-            proxy_bus_, claimer,
-            base::Bind(&ManagerDBusAdaptor::OnDeviceClaimerVanished,
-                       base::Unretained(this)));
-  }
+  manager_->ClaimDevice(interface_name, &e);
   return !e.ToChromeosError(error);
 }
 
 bool ManagerDBusAdaptor::ReleaseInterface(brillo::ErrorPtr* error,
                                           dbus::Message* message,
-                                          const std::string& claimer_name,
+                                          const std::string& /*claimer_name*/,
                                           const std::string& interface_name) {
   SLOG(this, 2) << __func__;
   Error e;
-  bool claimer_removed;
-  // Empty claimer name is used to indicate default claimer.
-  // TODO(samueltan): update this API or make a new API to use a flag to
-  // indicate default claimer instead (b/27924738).
-  manager_->ReleaseDevice(claimer_name == "" ? "" : message->GetSender(),
-                          interface_name, &claimer_removed, &e);
-  if (claimer_removed) {
-    watcher_for_device_claimer_.reset();
-  }
+  manager_->ReleaseDevice(interface_name, &e);
   return !e.ToChromeosError(error);
 }
 
-void ManagerDBusAdaptor::OnDeviceClaimerVanished() {
-  SLOG(this, 3) << __func__;
-  manager_->OnDeviceClaimerVanished();
-  watcher_for_device_claimer_.reset();
-}
-
-bool ManagerDBusAdaptor::SetDNSProxyIPv4Address(
-    brillo::ErrorPtr* error, const std::string& ipv4_address) {
+bool ManagerDBusAdaptor::SetDNSProxyAddresses(
+    brillo::ErrorPtr* error, const std::vector<std::string>& addresses) {
   SLOG(this, 2) << __func__;
   Error e;
-  manager_->SetDNSProxyIPv4Address(ipv4_address, &e);
+  manager_->SetDNSProxyAddresses(addresses, &e);
   return !e.ToChromeosError(error);
+}
+
+bool ManagerDBusAdaptor::ClearDNSProxyAddresses(brillo::ErrorPtr* /* error */) {
+  SLOG(this, 2) << __func__;
+  manager_->ClearDNSProxyAddresses();
+  return true;
 }
 
 bool ManagerDBusAdaptor::SetDNSProxyDOHProviders(
@@ -450,6 +439,123 @@ bool ManagerDBusAdaptor::SetDNSProxyDOHProviders(
   manager_->SetDNSProxyDOHProviders(
       KeyValueStore::ConvertFromVariantDictionary(providers), &e);
   return !e.ToChromeosError(error);
+}
+
+bool ManagerDBusAdaptor::AddPasspointCredentials(
+    brillo::ErrorPtr* error,
+    const dbus::ObjectPath& profile_rpcid,
+    const brillo::VariantDictionary& args) {
+  SLOG(this, 2) << __func__;
+  Error e;
+  manager_->AddPasspointCredentials(
+      profile_rpcid.value(), KeyValueStore::ConvertFromVariantDictionary(args),
+      &e);
+  return !e.ToChromeosError(error);
+}
+
+bool ManagerDBusAdaptor::RemovePasspointCredentials(
+    brillo::ErrorPtr* error,
+    const dbus::ObjectPath& profile_rpcid,
+    const brillo::VariantDictionary& args) {
+  SLOG(this, 2) << __func__;
+  Error e;
+  manager_->RemovePasspointCredentials(
+      profile_rpcid.value(), KeyValueStore::ConvertFromVariantDictionary(args),
+      &e);
+  return !e.ToChromeosError(error);
+}
+
+void ManagerDBusAdaptor::SetTetheringEnabled(
+    DBusMethodResponsePtr<std::string> response, bool enabled) {
+  auto on_result_fn = [](shill::DBusMethodResponsePtr<std::string> response,
+                         TetheringManager::SetEnabledResult result) {
+    std::move(response)->Return(TetheringManager::SetEnabledResultName(result));
+  };
+
+  manager_->tethering_manager()->SetEnabled(
+      enabled, base::BindOnce(on_result_fn, std::move(response)));
+}
+
+void ManagerDBusAdaptor::CheckTetheringReadiness(
+    DBusMethodResponsePtr<std::string> response) {
+  auto on_result_fn = [](shill::DBusMethodResponsePtr<std::string> response,
+                         TetheringManager::EntitlementStatus status) {
+    std::move(response)->Return(
+        TetheringManager::EntitlementStatusName(status));
+  };
+  manager_->tethering_manager()->CheckReadiness(
+      base::BindOnce(on_result_fn, std::move(response)));
+}
+
+void ManagerDBusAdaptor::SetLOHSEnabled(
+    DBusMethodResponsePtr<std::string> response, bool enabled) {
+  SLOG(this, 2) << __func__ << ": " << enabled;
+  auto on_result_fn = [](shill::DBusMethodResponsePtr<std::string> response,
+                         std::string result) {
+    std::move(response)->Return(result);
+  };
+  manager_->SetLOHSEnabled(base::BindOnce(on_result_fn, std::move(response)),
+                           enabled);
+}
+
+void ManagerDBusAdaptor::CreateP2PGroup(
+    DBusMethodResponsePtr<brillo::VariantDictionary> response,
+    const brillo::VariantDictionary& args) {
+  SLOG(this, 2) << __func__;
+  auto on_result_fn =
+      [](shill::DBusMethodResponsePtr<brillo::VariantDictionary> response,
+         const KeyValueStore result) {
+        std::move(response)->Return(
+            KeyValueStore::ConvertToVariantDictionary(result));
+      };
+
+  manager_->wifi_provider()->p2p_manager()->CreateP2PGroup(
+      base::BindOnce(on_result_fn, std::move(response)),
+      KeyValueStore::ConvertFromVariantDictionary(args));
+}
+
+void ManagerDBusAdaptor::ConnectToP2PGroup(
+    DBusMethodResponsePtr<brillo::VariantDictionary> response,
+    const brillo::VariantDictionary& args) {
+  SLOG(this, 2) << __func__;
+  auto on_result_fn =
+      [](shill::DBusMethodResponsePtr<brillo::VariantDictionary> response,
+         const KeyValueStore result) {
+        std::move(response)->Return(
+            KeyValueStore::ConvertToVariantDictionary(result));
+      };
+
+  manager_->wifi_provider()->p2p_manager()->ConnectToP2PGroup(
+      base::BindOnce(on_result_fn, std::move(response)),
+      KeyValueStore::ConvertFromVariantDictionary(args));
+}
+
+void ManagerDBusAdaptor::DestroyP2PGroup(
+    DBusMethodResponsePtr<brillo::VariantDictionary> response, int shill_id) {
+  SLOG(this, 2) << __func__;
+  auto on_result_fn =
+      [](shill::DBusMethodResponsePtr<brillo::VariantDictionary> response,
+         const KeyValueStore result) {
+        std::move(response)->Return(
+            KeyValueStore::ConvertToVariantDictionary(result));
+      };
+
+  manager_->wifi_provider()->p2p_manager()->DestroyP2PGroup(
+      base::BindOnce(on_result_fn, std::move(response)), shill_id);
+}
+
+void ManagerDBusAdaptor::DisconnectFromP2PGroup(
+    DBusMethodResponsePtr<brillo::VariantDictionary> response, int shill_id) {
+  SLOG(this, 2) << __func__;
+  auto on_result_fn =
+      [](shill::DBusMethodResponsePtr<brillo::VariantDictionary> response,
+         const KeyValueStore result) {
+        std::move(response)->Return(
+            KeyValueStore::ConvertToVariantDictionary(result));
+      };
+
+  manager_->wifi_provider()->p2p_manager()->DisconnectFromP2PGroup(
+      base::BindOnce(on_result_fn, std::move(response)), shill_id);
 }
 
 }  // namespace shill

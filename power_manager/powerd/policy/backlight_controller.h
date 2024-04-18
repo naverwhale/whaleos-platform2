@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,14 @@
 
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/time/time.h>
 #include <chromeos/dbus/service_constants.h>
 
+#include "base/functional/callback_forward.h"
 #include "power_manager/common/power_constants.h"
-#include "power_manager/powerd/system/backlight_interface.h"
 #include "power_manager/proto_bindings/backlight.pb.h"
+#include "power_manager/proto_bindings/battery_saver.pb.h"
 
 namespace power_manager {
 
@@ -38,11 +38,11 @@ class BacklightController {
     SLOW,
   };
 
-  BacklightController() {}
+  BacklightController() = default;
   BacklightController(const BacklightController&) = delete;
   BacklightController& operator=(const BacklightController&) = delete;
 
-  virtual ~BacklightController() {}
+  virtual ~BacklightController() = default;
 
   // Adds or removes an observer.
   virtual void AddObserver(BacklightControllerObserver* observer) = 0;
@@ -89,6 +89,11 @@ class BacklightController {
   // changing).
   virtual void HandleDisplayServiceStart() = 0;
 
+  // Handles battery saver mode change. Triggers when transitioning between
+  // battery saver mode enabled/disabled.
+  virtual void HandleBatterySaverModeChange(
+      const BatterySaverModeState& state) = 0;
+
   // Sets whether the backlight should be immediately dimmed in response to
   // user inactivity.  Note that other states take precedence over this
   // one, e.g. the backlight will be turned off if SetOffForInactivity(true)
@@ -127,12 +132,21 @@ class BacklightController {
   virtual int64_t PercentToLevel(double percent) const = 0;
   virtual double LevelToPercent(int64_t level) const = 0;
 
-  using IncreaseBrightnessCallback = base::Closure;
-  using DecreaseBrightnessCallback = base::Callback<void(bool allow_off)>;
-  using SetBrightnessCallback = base::Callback<void(
+  using IncreaseBrightnessCallback = base::RepeatingClosure;
+  using DecreaseBrightnessCallback =
+      base::RepeatingCallback<void(bool allow_off)>;
+  using SetBrightnessCallback = base::RepeatingCallback<void(
       double percent, Transition, SetBacklightBrightnessRequest_Cause)>;
   using GetBrightnessCallback =
-      base::Callback<void(double* percent_out, bool* success_out)>;
+      base::RepeatingCallback<void(double* percent_out, bool* success_out)>;
+  using ToggleKeyboardBacklightCallback = base::RepeatingClosure;
+
+  using AmbientLightOnResumeMetricsCallback =
+      base::RepeatingCallback<void(int lux)>;
+  // Optionally register a handler for collecting ambient light on resume
+  // metrics.
+  virtual void RegisterAmbientLightResumeMetricsHandler(
+      AmbientLightOnResumeMetricsCallback callback) {}
 
  protected:
   // Helper methods that implementations can use to register D-Bus method call
@@ -153,6 +167,10 @@ class BacklightController {
       system::DBusWrapperInterface* dbus_wrapper,
       const std::string& method_name,
       const GetBrightnessCallback& callback);
+  static void RegisterToggleKeyboardBacklightHandler(
+      system::DBusWrapperInterface* dbus_wrapper,
+      const std::string& method_name,
+      const ToggleKeyboardBacklightCallback& callback);
 
   // Emits a D-Bus signal announcing a brightness change.
   static void EmitBrightnessChangedSignal(

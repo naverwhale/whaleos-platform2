@@ -1,8 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "croslog/boot_records.h"
+
+#include <optional>
 
 #include <base/check_op.h>
 #include <base/files/file_path.h>
@@ -32,13 +34,13 @@ std::vector<BootRecords::BootEntry> ReadBootLogs(base::FilePath file_path) {
   reader.OpenFile(std::move(file_path));
 
   while (true) {
-    base::Optional<std::string> log = reader.Forward();
-    if (!log.has_value()) {
+    auto [log, result] = reader.Forward();
+    if (result != LogLineReader::ReadResult::NO_ERROR) {
       // EOF: finishes the read.
       break;
     }
 
-    MaybeLogEntry e = parser.Parse(std::move(*log));
+    MaybeLogEntry e = parser.Parse(std::move(log));
     if (!e.has_value()) {
       // Parse error: continuing the next line.
       continue;
@@ -139,7 +141,7 @@ BootRecords::BootRecords(base::FilePath file_path)
 BootRecords::BootRecords(std::vector<BootRecords::BootEntry> entries)
     : boot_ranges_(ConvertBootEntriesToRanges(entries)) {}
 
-base::Optional<BootRecords::BootRange> BootRecords::GetBootRange(
+std::optional<BootRecords::BootRange> BootRecords::GetBootRange(
     const std::string& boot_str) const {
   int boot_offset = 0;
   if (boot_str.empty() || base::StringToInt(boot_str, &boot_offset)) {
@@ -154,12 +156,12 @@ base::Optional<BootRecords::BootRange> BootRecords::GetBootRange(
       boot_offset_nth = boot_ranges_.size() + boot_offset - 1;
       if (boot_offset_nth < 0) {
         // Invalid offset.
-        return base::nullopt;
+        return std::nullopt;
       }
     } else {
       // Positive offset is not supported.
       // TODO(yoshiki): support positive offset values.
-      return base::nullopt;
+      return std::nullopt;
     }
 
     return boot_ranges_[boot_offset_nth];
@@ -176,7 +178,7 @@ base::Optional<BootRecords::BootRange> BootRecords::GetBootRange(
   }
 
   // Invalid boot ID format, or no corresponding boot in the entries.
-  return base::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace croslog

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,11 +11,11 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/synchronization/waitable_event.h>
 #include <base/test/task_environment.h>
@@ -41,8 +41,8 @@ class ProxyFileSystemTest : public testing::Test,
 
     ASSERT_TRUE(delegate_thread_.Start());
 
-    base::Thread::Options options(base::MessagePumpType::IO, 0);
-    ASSERT_TRUE(file_system_thread_.StartWithOptions(options));
+    ASSERT_TRUE(file_system_thread_.StartWithOptions(
+        base::Thread::Options(base::MessagePumpType::IO, 0)));
 
     file_system_ = std::make_unique<ProxyFileSystem>(
         this, delegate_thread_.task_runner(), mount_dir_.GetPath());
@@ -62,10 +62,9 @@ class ProxyFileSystemTest : public testing::Test,
              uint64_t offset,
              PreadCallback callback) override {
     if (handle == kHandle) {
-      const std::string data(kTestData);
-      offset = std::min(static_cast<uint64_t>(data.size()), offset);
-      count = std::min(static_cast<uint64_t>(data.size()) - offset, count);
-      std::move(callback).Run(0, data.substr(offset, count));
+      offset = std::min(static_cast<uint64_t>(data_.size()), offset);
+      count = std::min(static_cast<uint64_t>(data_.size()) - offset, count);
+      std::move(callback).Run(0, data_.substr(offset, count));
     } else {
       std::move(callback).Run(EBADF, std::string());
     }
@@ -75,9 +74,9 @@ class ProxyFileSystemTest : public testing::Test,
               uint64_t offset,
               PwriteCallback callback) override {
     if (handle == kHandle) {
-      data_written_.resize(std::max(data_written_.size(),
-                                    static_cast<size_t>(offset + blob.size())));
-      data_written_.replace(offset, blob.size(), blob);
+      data_.resize(
+          std::max(data_.size(), static_cast<size_t>(offset + blob.size())));
+      data_.replace(offset, blob.size(), blob);
       std::move(callback).Run(0, blob.size());
     } else {
       std::move(callback).Run(EBADF, 0);
@@ -90,9 +89,19 @@ class ProxyFileSystemTest : public testing::Test,
   }
   void Fstat(int64_t handle, FstatCallback callback) override {
     if (handle == kHandle) {
-      std::move(callback).Run(0, sizeof(kTestData));
+      std::move(callback).Run(0, data_.size());
     } else {
       std::move(callback).Run(EBADF, 0);
+    }
+  }
+  void Ftruncate(int64_t handle,
+                 int64_t length,
+                 FtruncateCallback callback) override {
+    if (handle == kHandle) {
+      data_.resize(length);
+      std::move(callback).Run(0);
+    } else {
+      std::move(callback).Run(EBADF);
     }
   }
 
@@ -114,21 +123,14 @@ class ProxyFileSystemTest : public testing::Test,
       base::WaitableEvent::ResetPolicy::MANUAL,
       base::WaitableEvent::InitialState::NOT_SIGNALED};
 
-  std::string data_written_;
+  std::string data_;
 };
 
 // On ARM devices, unit tests run without necessary capabilities in QEMU.
-#if defined(ARCH_CPU_ARM_FAMILY)
-#define MAYBE_RegularFileReadTest DISABLED_RegularFileReadTest
-#define MAYBE_RegularFileWriteTest DISABLED_RegularFileWriteTest
-#define MAYBE_RegularFileReadWriteTest DISABLED_RegularFileReadWriteTest
-#else
-#define MAYBE_RegularFileReadTest RegularFileReadTest
-#define MAYBE_RegularFileWriteTest RegularFileWriteTest
-#define MAYBE_RegularFileReadWriteTest RegularFileReadWriteTest
-#endif
+// TODO(b/270608749): Migrate to VM tests.
+TEST_F(ProxyFileSystemTest, DISABLED_RegularFileReadTest) {
+  data_ = kTestData;
 
-TEST_F(ProxyFileSystemTest, MAYBE_RegularFileReadTest) {
   base::ScopedFD fd = file_system_->RegisterHandle(kHandle, O_RDONLY);
   char buf[10];
   ASSERT_EQ(sizeof(buf), HANDLE_EINTR(read(fd.get(), buf, sizeof(buf))));
@@ -145,26 +147,46 @@ TEST_F(ProxyFileSystemTest, MAYBE_RegularFileReadTest) {
   close_was_called_.Wait();
 }
 
-TEST_F(ProxyFileSystemTest, MAYBE_RegularFileWriteTest) {
+// On ARM devices, unit tests run without necessary capabilities in QEMU.
+// TODO(b/270608749): Migrate to VM tests.
+TEST_F(ProxyFileSystemTest, DISABLED_RegularFileWriteTest) {
   base::ScopedFD fd = file_system_->RegisterHandle(kHandle, O_WRONLY);
   ASSERT_EQ(10, HANDLE_EINTR(write(fd.get(), kTestData, 10)));
   ASSERT_EQ(10, HANDLE_EINTR(write(fd.get(), kTestData + 10, 10)));
   ASSERT_EQ(6, HANDLE_EINTR(write(fd.get(), kTestData + 20, 6)));
-  EXPECT_EQ(kTestData, data_written_);
+  EXPECT_EQ(kTestData, data_);
 
   // Close the file descriptor.
   fd.reset();
   close_was_called_.Wait();
 }
 
-TEST_F(ProxyFileSystemTest, MAYBE_RegularFileReadWriteTest) {
+// On ARM devices, unit tests run without necessary capabilities in QEMU.
+// TODO(b/270608749): Migrate to VM tests.
+TEST_F(ProxyFileSystemTest, DISABLED_RegularFileReadWriteTest) {
   base::ScopedFD fd = file_system_->RegisterHandle(kHandle, O_RDWR);
   ASSERT_EQ(26, HANDLE_EINTR(pwrite(fd.get(), kTestData, 26, 0)));
-  EXPECT_EQ(kTestData, data_written_);
+  EXPECT_EQ(kTestData, data_);
 
   char buf[26];
   ASSERT_EQ(sizeof(buf), HANDLE_EINTR(pread(fd.get(), buf, sizeof(buf), 0)));
   EXPECT_EQ(kTestData, std::string(buf, sizeof(buf)));
+
+  // Close the file descriptor.
+  fd.reset();
+  close_was_called_.Wait();
+}
+
+// On ARM devices, unit tests run without necessary capabilities in QEMU.
+// TODO(b/270608749): Migrate to VM tests.
+TEST_F(ProxyFileSystemTest, DISABLED_RegularFileTruncateAndStatTest) {
+  constexpr int64_t kLength = 5;
+  base::ScopedFD fd = file_system_->RegisterHandle(kHandle, O_RDWR);
+  EXPECT_EQ(0, HANDLE_EINTR(ftruncate(fd.get(), kLength)));
+
+  struct stat attr = {};
+  ASSERT_EQ(0, fstat(fd.get(), &attr));
+  EXPECT_EQ(kLength, attr.st_size);
 
   // Close the file descriptor.
   fd.reset();

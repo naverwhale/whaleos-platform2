@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,6 @@
 #include <base/files/scoped_temp_dir.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
-#include <brillo/dbus/exported_property_set.h>
 
 #include "debugd/src/error_utils.h"
 #include "debugd/src/process_with_id.h"
@@ -25,33 +24,31 @@
 namespace debugd {
 namespace {
 constexpr char kErrorIOError[] = "org.chromium.debugd.error.IOError";
+
 }  // namespace
 
 constexpr char CrashSenderTool::kErrorBadFileName[];
 
+CrashSenderTool::CrashSenderTool() = default;
+
 void CrashSenderTool::UploadCrashes() {
   RunCrashSender(false /* ignore_hold_off_time */,
-                 base::FilePath("") /* crash_directory */);
+                 base::FilePath("") /* crash_directory */,
+                 false /* consent_already_checked_by_crash_reporter */);
 }
 
 bool CrashSenderTool::UploadSingleCrash(
     const std::vector<std::tuple<std::string, base::ScopedFD>>& in_files,
-    brillo::ErrorPtr* error) {
+    brillo::ErrorPtr* error,
+    bool consent_already_checked_by_crash_reporter) {
+  base::ScopedTempDir temp_dir;
   // debugd runs in a non-root mount namespace and mounts a new tmpfs on /tmp
   // inside the namespace, so this should be invisible to all other processes
   // and not written to disk.
   //
   // *It is a privacy violation* if these files are visible to non-root
   // processes or are written unencrypted to disk!
-  base::FilePath crash_directory("/tmp/crash");
-  crash_directory = crash_directory.AddExtension(
-      base::NumberToString(next_crash_directory_id_));
-  next_crash_directory_id_++;
-
-  // We need to be sure to clean up the tmp directory to avoid leaking
-  // resources.
-  base::ScopedTempDir crash_directory_holder;
-  if (!crash_directory_holder.Set(crash_directory)) {
+  if (!temp_dir.CreateUniqueTempDir()) {
     DEBUGD_ADD_ERROR(error, kErrorIOError, "Create directory failed");
     return false;
   }
@@ -72,8 +69,8 @@ bool CrashSenderTool::UploadSingleCrash(
     }
 
     // Copy contents of file_descriptor to a new file named file_name inside
-    // crash_directory.
-    base::FilePath file_path = crash_directory.Append(file_name);
+    // the temporary directory.
+    base::FilePath file_path = temp_dir.GetPath().Append(file_name);
     base::File new_file(file_path,
                         base::File::FLAG_CREATE | base::File::FLAG_WRITE);
     if (!new_file.IsValid()) {
@@ -105,11 +102,11 @@ bool CrashSenderTool::UploadSingleCrash(
     new_file.Flush();
   }
 
-  // Since crash_sender jails itself, it won't actually see our /tmp/crash.###
+  // Since crash_sender jails itself, it won't actually see our /tmp/<files>
   // directory. Instead, open the directory and pass the /proc path to the
   // directory file descriptor as the crash directory.
   base::ScopedFD crash_directory_fd(
-      HANDLE_EINTR(open(crash_directory.value().c_str(), O_RDONLY)));
+      HANDLE_EINTR(open(temp_dir.GetPath().value().c_str(), O_RDONLY)));
   if (!crash_directory_fd.is_valid()) {
     DEBUGD_ADD_ERROR(error, kErrorIOError, "Open directory failed");
     return false;
@@ -120,13 +117,16 @@ bool CrashSenderTool::UploadSingleCrash(
       base::NumberToString(crash_directory_fd.get()));
 
   const bool ignore_hold_off_time = true;  // We already flushed all the files.
-  RunCrashSender(ignore_hold_off_time, munged_crash_directory);
+  RunCrashSender(ignore_hold_off_time, munged_crash_directory,
+                 consent_already_checked_by_crash_reporter);
 
   return true;
 }
 
-void CrashSenderTool::RunCrashSender(bool ignore_hold_off_time,
-                                     const base::FilePath& crash_directory) {
+void CrashSenderTool::RunCrashSender(
+    bool ignore_hold_off_time,
+    const base::FilePath& crash_directory,
+    bool consent_already_checked_by_crash_reporter) {
   // 'crash_sender' requires accessing user mounts to upload user crashes.
   ProcessWithId* p =
       CreateProcess(false /* sandboxed */, true /* access_root_mount_ns */);
@@ -148,16 +148,15 @@ void CrashSenderTool::RunCrashSender(bool ignore_hold_off_time,
     p->AddArg("--test_mode");
   }
 
+  if (consent_already_checked_by_crash_reporter) {
+    p->AddArg("--consent_already_checked_by_crash_reporter");
+  }
+
   p->Run();
 }
 
-void CrashSenderTool::OnTestModeChanged(
-    const brillo::dbus_utils::ExportedPropertyBase* test_mode_property) {
-  const auto* property =
-      dynamic_cast<const brillo::dbus_utils::ExportedProperty<bool>*>(
-          test_mode_property);
-  DCHECK(property);
-  test_mode_ = property->value();
+void CrashSenderTool::SetTestMode(bool mode) {
+  test_mode_ = mode;
   LOG(INFO) << "CrashSenderTestMode set to " << std::boolalpha << test_mode_;
 }
 

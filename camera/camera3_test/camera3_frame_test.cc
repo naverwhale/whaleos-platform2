@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <semaphore.h>
 #include <stdio.h>
 
+#include <iterator>
 #include <limits>
 #include <list>
 #include <unordered_map>
@@ -15,8 +16,7 @@
 
 #include <base/command_line.h>
 #include <base/files/file_util.h>
-#include <base/macros.h>
-#include <base/stl_util.h>
+#include <base/notreached.h>
 #include <base/strings/string_split.h>
 #include <jpeglib.h>
 #include <libyuv.h>
@@ -28,17 +28,17 @@ namespace camera3_test {
 
 int32_t Camera3FrameFixture::CreateCaptureRequest(
     const camera_metadata_t& metadata, uint32_t* frame_number) {
-  // Allocate output buffers
+  // Prepare output buffers.
   std::vector<camera3_stream_buffer_t> output_buffers;
-  if (cam_device_.AllocateOutputStreamBuffers(&output_buffers)) {
-    ADD_FAILURE() << "Failed to allocate buffers for capture request";
+  if (cam_device_.PrepareOutputStreamBuffers(&output_buffers)) {
+    ADD_FAILURE() << "Failed to prepare output buffers for capture request";
     return -EINVAL;
   }
 
   camera3_capture_request_t capture_request = {
       .frame_number = UINT32_MAX,
       .settings = &metadata,
-      .input_buffer = NULL,
+      .input_buffer = nullptr,
       .num_output_buffers = static_cast<uint32_t>(output_buffers.size()),
       .output_buffers = output_buffers.data(),
       .num_physcam_settings = 0};
@@ -612,13 +612,13 @@ TEST_P(Camera3MixedTemplateMultiFrameTest, GetFrame) {
   int32_t types[] = {CAMERA3_TEMPLATE_PREVIEW, CAMERA3_TEMPLATE_STILL_CAPTURE,
                      CAMERA3_TEMPLATE_VIDEO_RECORD,
                      CAMERA3_TEMPLATE_VIDEO_SNAPSHOT};
-  for (size_t i = 0; i < base::size(types); ++i) {
-    EXPECT_EQ(0, CreateCaptureRequestByTemplate(types[i], nullptr))
+  for (const auto& type : types) {
+    EXPECT_EQ(0, CreateCaptureRequestByTemplate(type, nullptr))
         << "Creating capture request fails";
   }
 
   struct timespec timeout;
-  for (size_t i = 0; i < base::size(types); ++i) {
+  for (size_t i = 0; i < std::size(types); ++i) {
     GetTimeOfTimeout(kDefaultTimeoutMs, &timeout);
     WaitShutterAndCaptureResult(timeout);
   }
@@ -671,10 +671,10 @@ const int32_t Camera3FlushRequestsTest::kNumberOfConfiguredStreams = 1;
 
 void Camera3FlushRequestsTest::SetUp() {
   Camera3FrameFixture::SetUp();
-  cam_device_.RegisterProcessCaptureResultCallback(base::Bind(
+  cam_device_.RegisterProcessCaptureResultCallback(base::BindRepeating(
       &Camera3FlushRequestsTest::ProcessCaptureResult, base::Unretained(this)));
-  cam_device_.RegisterNotifyCallback(
-      base::Bind(&Camera3FlushRequestsTest::Notify, base::Unretained(this)));
+  cam_device_.RegisterNotifyCallback(base::BindRepeating(
+      &Camera3FlushRequestsTest::Notify, base::Unretained(this)));
   sem_init(&flush_result_sem_, 0, 0);
 }
 
@@ -691,7 +691,6 @@ void Camera3FlushRequestsTest::CheckAllResultReceived(uint32_t frame_number) {
 
 void Camera3FlushRequestsTest::ProcessCaptureResult(
     const camera3_capture_result* result) {
-  VLOGF_ENTER();
   ASSERT_NE(nullptr, result) << "Capture result is null";
 
   EXPECT_EQ(result->result != nullptr, result->partial_result != 0)
@@ -712,7 +711,6 @@ void Camera3FlushRequestsTest::ProcessCaptureResult(
 void Camera3FlushRequestsTest::Notify(const camera3_notify_msg* msg) {
   // TODO(shik): support the partial failure cases
 
-  VLOGF_ENTER();
   if (msg->type == CAMERA3_MSG_ERROR) {
     const camera3_error_msg_t& error = msg->message.error;
     if (error.error_code == CAMERA3_MSG_ERROR_REQUEST ||
@@ -830,8 +828,8 @@ TEST_P(Camera3InvalidRequestTest, NullOrUnconfiguredRequest) {
   streams[0].height = static_cast<uint32_t>(default_height_);
   streams[0].format = default_format_;
   std::vector<const camera3_stream_t*> stream_ptrs(1, &streams[0]);
-  ASSERT_EQ(0, cam_device_.AllocateOutputBuffersByStreams(stream_ptrs,
-                                                          &output_buffers))
+  ASSERT_EQ(0, cam_device_.PrepareOutputBuffersByStreams(stream_ptrs,
+                                                         &output_buffers))
       << "Failed to allocate buffers for capture request";
   camera3_capture_request_t capture_request = {
       .frame_number = 0,
@@ -1243,12 +1241,11 @@ class Camera3ResultTimestampsTest
 
 void Camera3ResultTimestampsTest::SetUp() {
   Camera3FrameFixture::SetUp();
-  cam_device_.RegisterNotifyCallback(
-      base::Bind(&Camera3ResultTimestampsTest::Notify, base::Unretained(this)));
+  cam_device_.RegisterNotifyCallback(base::BindRepeating(
+      &Camera3ResultTimestampsTest::Notify, base::Unretained(this)));
 }
 
 void Camera3ResultTimestampsTest::Notify(const camera3_notify_msg* msg) {
-  VLOGF_ENTER();
   EXPECT_EQ(CAMERA3_MSG_SHUTTER, msg->type)
       << "Shutter error = " << msg->message.error.error_code;
 
@@ -1261,7 +1258,6 @@ void Camera3ResultTimestampsTest::ProcessResultMetadataOutputBuffers(
     uint32_t frame_number,
     ScopedCameraMetadata metadata,
     std::vector<cros::ScopedBufferHandle> buffers) {
-  VLOGF_ENTER();
   result_metadata_.push_back(std::move(metadata));
 }
 
@@ -1339,16 +1335,15 @@ const int32_t Camera3InvalidBufferTest::kNumberOfConfiguredStreams = 1;
 
 void Camera3InvalidBufferTest::SetUp() {
   Camera3FrameFixture::SetUp();
-  cam_device_.RegisterProcessCaptureResultCallback(base::Bind(
+  cam_device_.RegisterProcessCaptureResultCallback(base::BindRepeating(
       &Camera3InvalidBufferTest::ProcessCaptureResult, base::Unretained(this)));
-  cam_device_.RegisterNotifyCallback(
-      base::Bind(&Camera3InvalidBufferTest::Notify, base::Unretained(this)));
+  cam_device_.RegisterNotifyCallback(base::BindRepeating(
+      &Camera3InvalidBufferTest::Notify, base::Unretained(this)));
   sem_init(&capture_result_sem_, 0, 0);
 }
 
 void Camera3InvalidBufferTest::ProcessCaptureResult(
     const camera3_capture_result* result) {
-  VLOGF_ENTER();
   ASSERT_NE(nullptr, result) << "Capture result is null";
   for (uint32_t i = 0; i < result->num_output_buffers; i++) {
     EXPECT_EQ(CAMERA3_BUFFER_STATUS_ERROR, result->output_buffers[i].status)
@@ -1394,6 +1389,9 @@ void Camera3InvalidBufferTest::RunInvalidBufferTest(buffer_handle_t* handle) {
 }
 
 TEST_P(Camera3InvalidBufferTest, NullBufferHandle) {
+  if (cam_device_.IsBufferManagementSupported()) {
+    GTEST_SKIP();
+  }
   buffer_handle_t handle = nullptr;
   RunInvalidBufferTest(&handle);
 }
@@ -1412,6 +1410,13 @@ class Camera3FrameContentTest
         format_(std::get<1>(GetParam())),
         width_(std::get<2>(GetParam())),
         height_(std::get<3>(GetParam())) {}
+
+  ~Camera3FrameContentTest() override {
+    if (GetCrosCameraHal() != nullptr &&
+        GetCrosCameraHal()->set_privacy_switch_state != nullptr) {
+      GetCrosCameraHal()->set_privacy_switch_state(false);
+    }
+  }
 
  protected:
   void ProcessResultMetadataOutputBuffers(
@@ -1503,48 +1508,148 @@ TEST_P(Camera3FrameContentTest, DetectGreenLine) {
   GetTimeOfTimeout(kDefaultTimeoutMs, &timeout);
   WaitShutterAndCaptureResult(timeout);
   ASSERT_NE(nullptr, buffer_handle_) << "Failed to get frame buffer";
-  auto argb_image = ConvertToImage(std::move(buffer_handle_), width_, height_,
-                                   ImageFormat::IMAGE_FORMAT_ARGB);
-  ASSERT_NE(nullptr, argb_image);
+  auto i420_image = ConvertToImage(std::move(buffer_handle_), width_, height_,
+                                   ImageFormat::IMAGE_FORMAT_I420);
+  ASSERT_NE(nullptr, i420_image);
+  ASSERT_EQ(3, i420_image->planes.size());
 
-  auto IsGreenPixel = [](const uint8_t* pixel) {
-    const uint8_t kRedOrBlueUpperLimit = 50;
-    const uint8_t kGreenLowerLimit = 100;
-    const uint32_t kRedOffset = 0;
-    const uint32_t kGreenOffset = 1;
-    const uint32_t kBlueOffset = 2;
-    return *(pixel + kRedOffset)<kRedOrBlueUpperLimit&&*(pixel + kGreenOffset)>
-               kGreenLowerLimit &&
-           *(pixel + kBlueOffset) < kRedOrBlueUpperLimit;
-  };
-  auto IsBottomLineGreen = [&](const ScopedImage& argb_image) {
-    uint8_t* pixel_of_last_line =
-        argb_image->planes[0].addr +
-        argb_image->planes[0].stride * (argb_image->height - 1);
-    for (size_t i = 0; i < argb_image->planes[0].stride;
-         i += kARGBPixelWidth, pixel_of_last_line += kARGBPixelWidth) {
-      if (!IsGreenPixel(pixel_of_last_line)) {
-        return false;
+  auto IsBottomLineGreen = [](const ScopedImage& i420_image) {
+    uint32_t plane_width = i420_image->width / 2;
+    uint32_t plane_height = i420_image->height / 2;
+    for (int plane = 1; plane < i420_image->planes.size(); plane++) {
+      int offset = plane_width * (plane_height - 1);
+      for (size_t w = 0; w < plane_width; w++) {
+        if (i420_image->planes[plane].addr[offset + w] != 0) {
+          return false;
+        }
       }
     }
     return true;
   };
-  EXPECT_FALSE(IsBottomLineGreen(argb_image))
+  EXPECT_FALSE(IsBottomLineGreen(i420_image))
       << "Green line at the bottom of captured frame";
-  auto IsRightMostLineGreen = [&](const ScopedImage& argb_image) {
-    uint8_t* last_pixel_of_line = argb_image->planes[0].addr +
-                                  argb_image->planes[0].stride -
-                                  kARGBPixelWidth;
-    for (size_t i = 0; i < argb_image->height;
-         i++, last_pixel_of_line += argb_image->planes[0].stride) {
-      if (!IsGreenPixel(last_pixel_of_line)) {
-        return false;
+  auto IsRightMostLineGreen = [](const ScopedImage& i420_image) {
+    uint32_t plane_width = i420_image->width / 2;
+    uint32_t plane_height = i420_image->height / 2;
+    for (int plane = 1; plane < i420_image->planes.size(); plane++) {
+      for (size_t h = 1; h <= plane_height; h++) {
+        int offset = plane_width * h - 1;
+        if (i420_image->planes[plane].addr[offset] != 0) {
+          return false;
+        }
       }
     }
     return true;
   };
-  EXPECT_FALSE(IsRightMostLineGreen(argb_image))
+  EXPECT_FALSE(IsRightMostLineGreen(i420_image))
       << "Green line at the rightmost of captured frame";
+}
+
+TEST_P(Camera3FrameContentTest, SWPrivacySwitch) {
+  if (GetCrosCameraHal() == nullptr) {
+    GTEST_SKIP() << "--camera_hal_path is not specified";
+  }
+  if (GetCrosCameraHal()->set_privacy_switch_state == nullptr) {
+    GTEST_SKIP()
+        << "cros_camera_hal::set_privacy_switch_state is not implemented";
+  }
+
+  GetCrosCameraHal()->set_privacy_switch_state(true);
+
+  cam_device_.AddOutputStream(format_, width_, height_,
+                              CAMERA3_STREAM_ROTATION_0);
+  ASSERT_EQ(0, cam_device_.ConfigureStreams(nullptr))
+      << "Configuring stream fails";
+  ScopedCameraMetadata metadata(clone_camera_metadata(
+      cam_device_.ConstructDefaultRequestSettings(CAMERA3_TEMPLATE_PREVIEW)));
+  ASSERT_EQ(0, CreateCaptureRequestByMetadata(metadata, nullptr))
+      << "Creating capture request fails";
+
+  struct timespec timeout;
+  GetTimeOfTimeout(kDefaultTimeoutMs, &timeout);
+  WaitShutterAndCaptureResult(timeout);
+  ASSERT_NE(nullptr, buffer_handle_) << "Failed to get frame buffer";
+  auto i420_image = ConvertToImage(std::move(buffer_handle_), width_, height_,
+                                   ImageFormat::IMAGE_FORMAT_I420);
+  ASSERT_NE(nullptr, i420_image);
+  ASSERT_EQ(3, i420_image->planes.size());
+
+  auto IsBlack = [](const ScopedImage& i420_image) {
+    // Allow some margin of error when checking Y values.
+    uint8_t delta_y = 2;
+    for (size_t h = 0; h < i420_image->height; ++h) {
+      for (size_t w = 0; w < i420_image->width; ++w) {
+        uint8_t y = i420_image->planes[0].addr[h * i420_image->width + w];
+        if (!((0 <= y && y <= delta_y) ||
+              (16 - delta_y <= y && y <= 16 + delta_y))) {
+          LOGF(ERROR) << "Non black pixel detected: Y="
+                      << static_cast<int32_t>(y);
+          return false;
+        }
+      }
+    }
+    // Allow some margin of error when checking U/V values.
+    uint8_t delta_uv = 16;
+    for (size_t h = 0; h < i420_image->height / 2; ++h) {
+      for (size_t w = 0; w < i420_image->width / 2; ++w) {
+        uint8_t u = i420_image->planes[1].addr[h * i420_image->width / 2 + w];
+        uint8_t v = i420_image->planes[2].addr[h * i420_image->width / 2 + w];
+        if (!(128 - delta_uv <= u && u <= 128 + delta_uv &&
+              128 - delta_uv <= v && v <= 128 + delta_uv)) {
+          LOGF(ERROR) << "Non black pixel detected: U="
+                      << static_cast<int32_t>(u)
+                      << ", V=" << static_cast<int32_t>(v);
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+  EXPECT_TRUE(IsBlack(i420_image))
+      << "Non black frame when the SW privacy switch is ON";
+
+  GetCrosCameraHal()->set_privacy_switch_state(false);
+  auto test_pattern_modes = GetAvailableColorBarsTestPatternModes();
+
+  UpdateMetadata(ANDROID_SENSOR_TEST_PATTERN_MODE, test_pattern_modes.data(), 1,
+                 &metadata);
+  Camera3FrameFixture::ScopedImage capture_image;
+  const int MAX_RETRY_COUNT = 30;
+  uint32_t sensor_pixel_array_width;
+  uint32_t sensor_pixel_array_height;
+  ASSERT_EQ(0, cam_device_.GetStaticInfo()->GetSensorPixelArraySize(
+                   &sensor_pixel_array_width, &sensor_pixel_array_height));
+  for (int i = 0; i < MAX_RETRY_COUNT; ++i) {
+    ASSERT_EQ(0, CreateCaptureRequestByMetadata(metadata, nullptr))
+        << "Creating capture request fails";
+    WaitShutterAndCaptureResult(timeout);
+    ASSERT_NE(nullptr, buffer_handle_) << "Failed to get frame buffer";
+    capture_image = ConvertToImage(std::move(buffer_handle_), width_, height_,
+                                   ImageFormat::IMAGE_FORMAT_I420);
+    ASSERT_NE(nullptr, capture_image);
+
+    for (const auto& it : color_bars_test_patterns_) {
+      auto pattern_image = GenerateColorBarsPattern(
+          width_, height_, it, test_pattern_modes.front(),
+          sensor_pixel_array_width, sensor_pixel_array_height);
+      ASSERT_NE(nullptr, pattern_image);
+
+      if (ComputeSsim(*capture_image, *pattern_image) >
+          kContentTestSsimThreshold) {
+        return;
+      }
+    }
+    if (i != MAX_RETRY_COUNT - 1) {
+      LOGF(INFO) << "The frame content is corrupted, retry capture...";
+      usleep(kSWPrivacyRetryTimeIntervalMs * 1000);
+    }
+  }
+
+  std::stringstream ss;
+  ss << "/tmp/sw_privacy_switch_test_0x" << std::hex << format_ << "_"
+     << std::dec << width_ << "x" << height_;
+  capture_image->SaveToFile(ss.str());
+  ADD_FAILURE() << "The frame content is corrupted";
 }
 
 // Test parameters:
@@ -1553,7 +1658,9 @@ TEST_P(Camera3FrameContentTest, DetectGreenLine) {
 class Camera3PortraitRotationTest
     : public Camera3FrameFixture,
       public ::testing::WithParamInterface<
-          std::tuple<std::tuple<int32_t, int32_t, int32_t, int32_t>, int32_t>> {
+          std::tuple<std::tuple<int32_t, int32_t, int32_t, int32_t>,
+                     int32_t,
+                     bool>> {
  public:
   const double kPortraitTestSsimThreshold = 0.75;
 
@@ -1563,6 +1670,7 @@ class Camera3PortraitRotationTest
         width_(std::get<2>(std::get<0>(GetParam()))),
         height_(std::get<3>(std::get<0>(GetParam()))),
         rotation_degrees_(std::get<1>(GetParam())),
+        use_rotate_and_crop_api_(std::get<2>(GetParam())),
         save_images_(base::CommandLine::ForCurrentProcess()->HasSwitch(
             "save_portrait_test_images")) {}
 
@@ -1582,6 +1690,8 @@ class Camera3PortraitRotationTest
   int32_t height_;
 
   int32_t rotation_degrees_;
+
+  bool use_rotate_and_crop_api_;
 
   bool save_images_;
 
@@ -1619,15 +1729,42 @@ TEST_P(Camera3PortraitRotationTest, GetFrame) {
   ASSERT_FALSE(test_pattern_modes.empty())
       << "Failed to get sensor available test pattern modes";
 
+  uint8_t rotate_and_crop_mode = ANDROID_SCALER_ROTATE_AND_CROP_NONE;
+  if (use_rotate_and_crop_api_) {
+    switch (rotation_degrees_) {
+      case 90:
+        rotate_and_crop_mode = ANDROID_SCALER_ROTATE_AND_CROP_90;
+        break;
+      case 270:
+        rotate_and_crop_mode = ANDROID_SCALER_ROTATE_AND_CROP_270;
+        break;
+      default:
+        FAIL() << "Invalid rotation degree: " << rotation_degrees_;
+    }
+    auto modes = cam_device_.GetStaticInfo()->GetAvailableRotateAndCropModes();
+    if (modes.size() <= 1) {
+      EXPECT_EQ(modes.count(ANDROID_SCALER_ROTATE_AND_CROP_NONE), modes.size());
+      GTEST_SKIP() << "ANDROID_SCALER_ROTATE_AND_CROP is not supported";
+    }
+    EXPECT_EQ(modes.count(ANDROID_SCALER_ROTATE_AND_CROP_NONE), 1);
+    EXPECT_EQ(modes.count(ANDROID_SCALER_ROTATE_AND_CROP_AUTO), 1);
+    // Android only requires 90 to be supported. We additionally check every
+    // tested rotation degrees here.
+    EXPECT_EQ(modes.count(rotate_and_crop_mode), 1);
+  }
+
   if (cam_device_.GetStaticInfo()->IsFormatAvailable(format_)) {
     VLOGF(1) << "Device " << cam_id_;
     VLOGF(1) << "Format 0x" << std::hex << format_;
     VLOGF(1) << "Resolution " << width_ << "x" << height_;
     VLOGF(1) << "Rotation " << rotation_degrees_;
+    VLOGF(1) << "Use ANDROID_SCALER_ROTATE_AND_CROP: "
+             << use_rotate_and_crop_api_;
 
     cam_device_.AddOutputStream(format_, width_, height_,
                                 CAMERA3_STREAM_ROTATION_0);
-    ASSERT_EQ(0, cam_device_.ConfigureStreams(nullptr))
+    std::vector<const camera3_stream_t*> streams;
+    ASSERT_EQ(0, cam_device_.ConfigureStreams(&streams))
         << "Configuring stream fails";
 
     // Get original pattern
@@ -1659,20 +1796,27 @@ TEST_P(Camera3PortraitRotationTest, GetFrame) {
     // Re-configure streams with rotation
     camera3_stream_rotation_t crop_rotate_scale_degrees =
         CAMERA3_STREAM_ROTATION_0;
-    switch (rotation_degrees_) {
-      case 90:
-        crop_rotate_scale_degrees = CAMERA3_STREAM_ROTATION_90;
-        break;
-      case 270:
-        crop_rotate_scale_degrees = CAMERA3_STREAM_ROTATION_270;
-        break;
-      default:
-        FAIL() << "Invalid rotation degree: " << rotation_degrees_;
+    if (!use_rotate_and_crop_api_) {
+      switch (rotation_degrees_) {
+        case 90:
+          crop_rotate_scale_degrees = CAMERA3_STREAM_ROTATION_90;
+          break;
+        case 270:
+          crop_rotate_scale_degrees = CAMERA3_STREAM_ROTATION_270;
+          break;
+        default:
+          FAIL() << "Invalid rotation degree: " << rotation_degrees_;
+      }
     }
     cam_device_.AddOutputStream(format_, width_, height_,
                                 crop_rotate_scale_degrees);
     ASSERT_EQ(0, cam_device_.ConfigureStreams(nullptr))
         << "Configuring stream fails";
+
+    if (use_rotate_and_crop_api_) {
+      UpdateMetadata(ANDROID_SCALER_ROTATE_AND_CROP, &rotate_and_crop_mode, 1,
+                     &metadata);
+    }
     ASSERT_EQ(0, CreateCaptureRequestByMetadata(metadata, nullptr))
         << "Creating capture request fails";
 
@@ -1708,297 +1852,6 @@ TEST_P(Camera3PortraitRotationTest, GetFrame) {
               kPortraitTestSsimThreshold)
         << "SSIM value is lower than threshold";
   }
-}
-
-// Test parameters:
-// - Camera ID
-class Camera3PortraitModeTest : public Camera3FrameFixture,
-                                public ::testing::WithParamInterface<int32_t> {
- public:
-  const uint32_t kPortraitModeTimeoutMs = 10000;
-
-  Camera3PortraitModeTest() : Camera3FrameFixture(GetParam()) {}
-
- protected:
-  void ProcessResultMetadataOutputBuffers(
-      uint32_t frame_number,
-      ScopedCameraMetadata metadata,
-      std::vector<cros::ScopedBufferHandle> buffers) override;
-
-  // Get portrait mode vendor tags; return false if the tag  is not listed in
-  // available request keys.
-  bool GetPortraitModeVendorTags(uint32_t* portrait_mode_vendor_tag,
-                                 uint32_t* segmentation_result_vendor_tag);
-
-  bool LoadTestImage();
-  void TakePortraitModePictureTest(bool has_face);
-
-  ScopedCameraMetadata result_metadata_;
-  cros::ScopedBufferHandle yuv_buffer_handle_;
-  cros::ScopedBufferHandle blob_buffer_handle_;
-};
-
-void Camera3PortraitModeTest::ProcessResultMetadataOutputBuffers(
-    uint32_t frame_number,
-    ScopedCameraMetadata metadata,
-    std::vector<cros::ScopedBufferHandle> buffers) {
-  result_metadata_ = std::move(metadata);
-  for (auto& buffer : buffers) {
-    auto* native_handle = camera_buffer_handle_t::FromBufferHandle(*buffer);
-    if (native_handle->hal_pixel_format == HAL_PIXEL_FORMAT_BLOB) {
-      blob_buffer_handle_ = std::move(buffer);
-    } else {
-      yuv_buffer_handle_ = std::move(buffer);
-    }
-  }
-}
-
-bool Camera3PortraitModeTest::GetPortraitModeVendorTags(
-    uint32_t* portrait_mode_vendor_tag,
-    uint32_t* segmentation_result_vendor_tag) {
-  if (!cam_module_.GetVendorTagByName("com.google.effect.portraitMode",
-                                      portrait_mode_vendor_tag) ||
-      !cam_module_.GetVendorTagByName(
-          "com.google.effect.portraitModeSegmentationResult",
-          segmentation_result_vendor_tag)) {
-    return false;
-  }
-  auto available_request_keys =
-      cam_device_.GetStaticInfo()->GetAvailableRequestKeys();
-  if (available_request_keys.find(*portrait_mode_vendor_tag) ==
-      available_request_keys.end()) {
-    return false;
-  }
-  return true;
-}
-
-bool Camera3PortraitModeTest::LoadTestImage() {
-  auto* gralloc = Camera3TestGralloc::GetInstance();
-  uint32_t width = gralloc->GetWidth(*yuv_buffer_handle_);
-  uint32_t height = gralloc->GetHeight(*yuv_buffer_handle_);
-  base::CommandLine* cmd_line = base::CommandLine::ForCurrentProcess();
-  base::FilePath portrait_mode_test_data_path =
-      cmd_line->GetSwitchValuePath("portrait_mode_test_data");
-  if (portrait_mode_test_data_path.empty()) {
-    LOGF(ERROR) << "Failed to find test data. Did you specify "
-                   "'--portrait_mode_test_data='?";
-    return false;
-  }
-  int64_t file_size = 0;
-  if (!base::GetFileSize(portrait_mode_test_data_path, &file_size) ||
-      file_size <= 0) {
-    LOGF(ERROR) << "Failed get file size";
-    return false;
-  }
-  auto test_image = std::vector<char>(file_size);
-  int test_image_size = base::ReadFile(portrait_mode_test_data_path,
-                                       test_image.data(), file_size);
-  if (test_image_size < file_size) {
-    LOGF(ERROR) << "Failed to read test image "
-                << portrait_mode_test_data_path.value();
-    return false;
-  }
-  libyuv::MJpegDecoder decoder;
-  if (!decoder.LoadFrame(reinterpret_cast<uint8_t*>(test_image.data()),
-                         test_image_size)) {
-    LOGF(ERROR) << "Failed to parse test image";
-    return false;
-  }
-  ScopedImage i420_image(new Image(decoder.GetWidth(), decoder.GetHeight(),
-                                   ImageFormat::IMAGE_FORMAT_I420));
-  if (libyuv::MJPGToI420(
-          reinterpret_cast<uint8_t*>(test_image.data()), test_image_size,
-          i420_image->planes[0].addr, i420_image->planes[0].stride,
-          i420_image->planes[1].addr, i420_image->planes[1].stride,
-          i420_image->planes[2].addr, i420_image->planes[2].stride,
-          decoder.GetWidth(), decoder.GetHeight(), decoder.GetWidth(),
-          decoder.GetHeight()) != 0) {
-    LOGF(ERROR) << "Failed to convert test image to I420";
-    return false;
-  }
-  i420_image = CropRotateScale(std::move(i420_image), 0, width, height);
-  if (!i420_image) {
-    LOGF(ERROR) << "Failed to crop, rotate and scale test image";
-    return false;
-  }
-
-  struct android_ycbcr ycbcr_info;
-  if (gralloc->LockYCbCr(*yuv_buffer_handle_, 0, 0, 0, width, height,
-                         &ycbcr_info) != 0) {
-    LOGF(ERROR) << "Failed to lock YUV buffer";
-    return false;
-  }
-  uint32_t v4l2_format =
-      cros::CameraBufferManager::GetV4L2PixelFormat(*yuv_buffer_handle_);
-  bool res = false;
-  switch (v4l2_format) {
-    case V4L2_PIX_FMT_NV12:
-    case V4L2_PIX_FMT_NV12M:
-      if (libyuv::I420ToNV12(
-              i420_image->planes[0].addr, i420_image->planes[0].stride,
-              i420_image->planes[1].addr, i420_image->planes[1].stride,
-              i420_image->planes[2].addr, i420_image->planes[2].stride,
-              static_cast<uint8_t*>(ycbcr_info.y), ycbcr_info.ystride,
-              static_cast<uint8_t*>(ycbcr_info.cb), ycbcr_info.cstride, width,
-              height) == 0) {
-        res = true;
-      } else {
-        LOGF(ERROR) << "Failed to convert test image to NV12";
-      }
-      break;
-    default:
-      LOGF(ERROR) << "Unsupported format " << FormatToString(v4l2_format);
-  }
-  gralloc->Unlock(*yuv_buffer_handle_);
-  return res;
-}
-
-static bool FillImageWithBlackColor(buffer_handle_t buffer) {
-  auto* gralloc = Camera3TestGralloc::GetInstance();
-  uint32_t width = gralloc->GetWidth(buffer);
-  uint32_t height = gralloc->GetHeight(buffer);
-  struct android_ycbcr ycbcr_info;
-  if (gralloc->LockYCbCr(buffer, 0, 0, 0, width, height, &ycbcr_info) != 0) {
-    LOGF(ERROR) << "Failed to lock YUV buffer";
-    return false;
-  }
-  uint32_t v4l2_format = cros::CameraBufferManager::GetV4L2PixelFormat(buffer);
-  bool res = false;
-  switch (v4l2_format) {
-    case V4L2_PIX_FMT_NV12:
-    case V4L2_PIX_FMT_NV12M:
-      std::fill(
-          static_cast<uint8_t*>(ycbcr_info.y),
-          static_cast<uint8_t*>(ycbcr_info.y) + ycbcr_info.ystride * height, 0);
-      std::fill(static_cast<uint8_t*>(ycbcr_info.cb),
-                static_cast<uint8_t*>(ycbcr_info.cb) +
-                    ycbcr_info.cstride * height / 2,
-                0x80U);
-      res = true;
-      break;
-    default:
-      LOGF(ERROR) << "Unsupported format " << FormatToString(v4l2_format);
-  }
-  gralloc->Unlock(buffer);
-  return res;
-}
-
-void Camera3PortraitModeTest::TakePortraitModePictureTest(bool has_face) {
-  uint32_t portrait_mode_vendor_tag;
-  uint32_t segmentation_result_vendor_tag;
-  if (!GetPortraitModeVendorTags(&portrait_mode_vendor_tag,
-                                 &segmentation_result_vendor_tag)) {
-    GTEST_SKIP();
-  }
-  auto out_resolutions =
-      cam_device_.GetStaticInfo()->GetSortedOutputResolutions(
-          HAL_PIXEL_FORMAT_BLOB);
-  ASSERT_FALSE(out_resolutions.empty())
-      << "Failed to get JPEG format output resolutions";
-  ResolutionInfo resolution = out_resolutions.back();
-  auto in_resolutions = cam_device_.GetStaticInfo()->GetSortedOutputResolutions(
-      HAL_PIXEL_FORMAT_YCbCr_420_888);
-  ASSERT_TRUE(std::binary_search(in_resolutions.begin(), in_resolutions.end(),
-                                 resolution))
-      << "Failed to find " << resolution << " in input YUV resolutions";
-
-  cam_device_.AddInputStream(HAL_PIXEL_FORMAT_YCbCr_420_888, resolution.Width(),
-                             resolution.Height());
-  cam_device_.AddOutputStream(HAL_PIXEL_FORMAT_YCbCr_420_888,
-                              resolution.Width(), resolution.Height(),
-                              CAMERA3_STREAM_ROTATION_0);
-  cam_device_.AddOutputStream(HAL_PIXEL_FORMAT_BLOB, resolution.Width(),
-                              resolution.Height(), CAMERA3_STREAM_ROTATION_0);
-  std::vector<const camera3_stream_t*> streams;
-  ASSERT_EQ(0, cam_device_.ConfigureStreams(&streams))
-      << "Configuring stream fails";
-  ASSERT_EQ(0, CreateCaptureRequestByTemplate(CAMERA3_TEMPLATE_STILL_CAPTURE,
-                                              nullptr))
-      << "Creating capture request fails";
-
-  struct timespec timeout;
-  GetTimeOfTimeout(kDefaultTimeoutMs, &timeout);
-  WaitShutterAndCaptureResult(timeout);
-  ASSERT_NE(nullptr, yuv_buffer_handle_) << "Failed to get YUV output buffer";
-  ASSERT_NE(nullptr, blob_buffer_handle_) << "Failed to get BLOB output buffer";
-
-  std::vector<uint8_t> enable_portrait_mode(1, 1);
-  UpdateMetadata(portrait_mode_vendor_tag, enable_portrait_mode.data(), 1,
-                 &result_metadata_);
-
-  auto GetStream = [&streams](int32_t format, bool is_output) {
-    auto dir = is_output ? CAMERA3_STREAM_OUTPUT : CAMERA3_STREAM_INPUT;
-    auto it = std::find_if(
-        streams.begin(), streams.end(), [&](const camera3_stream_t* stream) {
-          return stream->format == format && stream->stream_type == dir;
-        });
-    return it == streams.end() ? nullptr : *it;
-  };
-  // prepare input_buffer
-  if (has_face) {
-    ASSERT_TRUE(LoadTestImage());
-  } else {
-    ASSERT_TRUE(FillImageWithBlackColor(*yuv_buffer_handle_));
-  }
-  auto in_buffer = std::move(yuv_buffer_handle_);
-  auto in_stream = GetStream(HAL_PIXEL_FORMAT_YCbCr_420_888, false);
-  ASSERT_NE(in_stream, nullptr);
-  camera3_stream_buffer_t input_buffer = {
-      .stream = const_cast<camera3_stream_t*>(in_stream),
-      .buffer = in_buffer.get(),
-      .status = CAMERA3_BUFFER_STATUS_OK,
-      .acquire_fence = -1,
-      .release_fence = -1};
-  // prepare output_buffer
-  std::vector<camera3_stream_buffer_t> output_buffers;
-  auto out_stream = GetStream(HAL_PIXEL_FORMAT_BLOB, true);
-  ASSERT_NE(out_stream, nullptr);
-  ASSERT_EQ(0, cam_device_.AllocateOutputBuffersByStreams({out_stream},
-                                                          &output_buffers))
-      << "Failed to allocate buffers for capture request";
-  camera3_capture_request_t capture_request = {
-      .frame_number = UINT32_MAX,
-      .settings = result_metadata_.get(),
-      .input_buffer = &input_buffer,
-      .num_output_buffers = static_cast<uint32_t>(output_buffers.size()),
-      .output_buffers = output_buffers.data(),
-      .num_physcam_settings = 0};
-
-  // Process capture request
-  ASSERT_EQ(0, cam_device_.ProcessCaptureRequest(&capture_request))
-      << "Creating capture request fails";
-  Camera3PerfLog::GetInstance()->UpdateFrameEvent(
-      cam_id_, capture_request.frame_number, FrameEvent::PORTRAIT_MODE_STARTED,
-      base::TimeTicks::Now());
-
-  GetTimeOfTimeout(kPortraitModeTimeoutMs, &timeout);
-  WaitShutterAndCaptureResult(timeout);
-  ASSERT_NE(nullptr, blob_buffer_handle_) << "Failed to get BLOB output buffer";
-  Camera3PerfLog::GetInstance()->UpdateFrameEvent(
-      cam_id_, capture_request.frame_number, FrameEvent::PORTRAIT_MODE_ENDED,
-      base::TimeTicks::Now());
-  camera_metadata_ro_entry_t entry = {};
-  ASSERT_EQ(
-      0, find_camera_metadata_ro_entry(result_metadata_.get(),
-                                       segmentation_result_vendor_tag, &entry))
-      << "Fail to find "
-      << get_camera_metadata_tag_name(segmentation_result_vendor_tag)
-      << " in result metadata";
-  ASSERT_EQ(1, entry.count);
-  if (has_face) {
-    ASSERT_EQ(0, entry.data.u8[0]) << "Portrait mode failed";
-  } else {
-    ASSERT_EQ(1, entry.data.u8[0])
-        << "Portrait mode should have failed with no face in the picture";
-  }
-}
-
-TEST_P(Camera3PortraitModeTest, BasicOperation) {
-  TakePortraitModePictureTest(true);
-}
-
-TEST_P(Camera3PortraitModeTest, NoFace) {
-  TakePortraitModePictureTest(false);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -2106,11 +1959,7 @@ INSTANTIATE_TEST_SUITE_P(
     Camera3FrameTest,
     Camera3PortraitRotationTest,
     ::testing::Combine(::testing::ValuesIn(IterateCameraIdFormatResolution()),
-                       ::testing::Values(90, 270)));
-
-INSTANTIATE_TEST_SUITE_P(
-    Camera3FrameTest,
-    Camera3PortraitModeTest,
-    ::testing::ValuesIn(Camera3Module().GetTestCameraIds()));
+                       ::testing::Values(90, 270),
+                       ::testing::Values(false, true)));
 
 }  // namespace camera3_test

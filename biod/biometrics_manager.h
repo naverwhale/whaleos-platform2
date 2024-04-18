@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,13 +12,15 @@
 #include <vector>
 
 #include <base/base64.h>
-#include <base/callback.h>
-#include <base/memory/weak_ptr.h>
+#include <base/functional/callback.h>
 #include <chromeos/dbus/service_constants.h>
 #include <base/strings/string_util.h>
 
-#include "biod/biometrics_manager_record.h"
+#include "base/time/time.h"
+#include "biod/biometrics_manager_record_interface.h"
 #include "biod/proto_bindings/constants.pb.h"
+#include "biod/proto_bindings/messages.pb.h"
+#include "biod/session.h"
 
 namespace biod {
 
@@ -48,48 +50,6 @@ class BiometricsManager {
     }
   };
 
-  // Invokes the function object F with a given BiometricsManager object when
-  // this session (EnrollSession or AuthSession) object goes out of scope. It's
-  // possible that this will do nothing in the case that the session has ended
-  // due to failure/finishing or the BiometricsManager object is no longer
-  // valid.
-  template <typename F>
-  class Session {
-   public:
-    Session() = default;
-
-    Session(Session<F>&& rhs) : biometrics_manager_(rhs.biometrics_manager_) {
-      rhs.biometrics_manager_.reset();
-    }
-
-    explicit Session(const base::WeakPtr<BiometricsManager>& biometrics_manager)
-        : biometrics_manager_(biometrics_manager) {}
-
-    ~Session() { End(); }
-
-    Session<F>& operator=(Session<F>&& rhs) {
-      End();
-      biometrics_manager_ = rhs.biometrics_manager_;
-      rhs.biometrics_manager_.reset();
-      return *this;
-    }
-
-    explicit operator bool() const { return biometrics_manager_.get(); }
-
-    // Has the same effect of letting this object go out of scope, but allows
-    // one to reuse the storage of this object.
-    void End() {
-      if (biometrics_manager_) {
-        F f;
-        f(biometrics_manager_.get());
-        biometrics_manager_.reset();
-      }
-    }
-
-   private:
-    base::WeakPtr<BiometricsManager> biometrics_manager_;
-  };
-
   // Returned by StartEnrollSession to ensure that EnrollSession eventually
   // ends.
   using EnrollSession = Session<EnrollSessionEnder>;
@@ -115,11 +75,12 @@ class BiometricsManager {
   // mode is active. Returns a false AuthSession on failure.
   virtual AuthSession StartAuthSession() = 0;
 
-  // Gets the records registered with this BiometricsManager. Some records will
-  // naturally be unaccessible because they are currently in an encrypted state,
-  // so those will silently be left out of the returned vector.
-  virtual std::vector<std::unique_ptr<BiometricsManagerRecord>>
-  GetRecords() = 0;
+  // Gets the records successfully loaded to the biometrics device (eg. FPMCU).
+  // Records that are invalid, with unsupported version, belongs to different
+  // user or not successfully loaded to the biometrics device, are not included
+  // in the returned vector.
+  virtual std::vector<std::unique_ptr<BiometricsManagerRecordInterface>>
+  GetLoadedRecords() = 0;
 
   // Irreversibly destroys records registered with this BiometricsManager,
   // including currently encrypted ones. Returns true if successful.
@@ -159,7 +120,7 @@ class BiometricsManager {
   using AttemptMatches =
       std::unordered_map<std::string, std::vector<std::string>>;
   using AuthScanDoneCallback =
-      base::RepeatingCallback<void(ScanResult, AttemptMatches)>;
+      base::RepeatingCallback<void(FingerprintMessage, AttemptMatches)>;
   virtual void SetAuthScanDoneHandler(
       const AuthScanDoneCallback& on_auth_scan_done) = 0;
 
@@ -179,12 +140,6 @@ class BiometricsManager {
   // Perform a reset on the underlying sensor h/w (as well as re-initialize any
   // software state associated with that sensor).
   virtual bool ResetSensor() { return true; }
-
-  // Perform the reset of any internal key/secret which is used for local
-  // encryption of data handled by the biometrics manager.
-  // If |factory_init| is true, we do not actually reset the secret, only
-  // initialise one if hadn't been initialised before.
-  virtual bool ResetEntropy(bool factory_init) = 0;
 
  protected:
   virtual void EndEnrollSession() = 0;

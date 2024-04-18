@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,23 +11,35 @@
 #include <utility>
 #include <vector>
 
+#include <base/strings/string_number_conversions.h>
+#include <base/task/single_thread_task_runner.h>
 #include <google-lpa/lpa/card/euicc_card.h>
 
 #include "hermes/apdu.h"
 #include "hermes/euicc_interface.h"
 #include "hermes/hermes_common.h"
+#include "hermes/modem_manager_proxy.h"
 
 namespace hermes {
 
 constexpr int kMaxRetries = 5;
 constexpr int kMaxApduLen = 260;
-constexpr auto kSimRefreshDelay = base::TimeDelta::FromSeconds(3);
-constexpr auto kInitRetryDelay = base::TimeDelta::FromSeconds(10);
-constexpr int kModemSuccess = 0;
-// This error will be returned when a received mbim/qmi message cannot be parsed
-// or when it is received in an unexpected state.
-constexpr int kModemMessageProcessingError = -1;
+
+// Delay between a sim change ( for e.g. slot switches or eSIM profile enable)
+// and the next message to the modem. If this delay is insufficient, we could
+// retry after kInitRetryDelay.
+constexpr auto kSimRefreshDelay = base::Seconds(6);
+constexpr auto kInitRetryDelay = base::Seconds(10);
 constexpr uint8_t kInvalidChannel = 0;
+
+// Schedule an uninhibit 4 seconds after an eSIM operation succeeds. If another
+// eSIM operation makes an inhibit call during these 4 seconds, the scheduled
+// uninhibit is cancelled.
+constexpr auto kUninhibitDelay = base::Seconds(4);
+
+constexpr int kModemSuccess = 0;
+
+constexpr int kDefault3GPPRelease = 11;
 
 // Modem houses code shared by ModemQrtr and ModemMbim
 // T is the type of message that the modem implementation uses. For
@@ -36,11 +48,14 @@ constexpr uint8_t kInvalidChannel = 0;
 template <typename T>
 class Modem : public EuiccInterface {
  public:
-  Modem(Logger* logger, Executor* executor)
+  Modem(Logger* logger,
+        Executor* executor,
+        std::unique_ptr<ModemManagerProxyInterface> modem_manager_proxy)
       : euicc_manager_(nullptr),
         logger_(logger),
         executor_(executor),
         retry_count_(0),
+        modem_manager_proxy_(std::move(modem_manager_proxy)),
         current_transaction_id_(static_cast<uint16_t>(-1)),
         weak_factory_(this) {
     // Set SGP.22 specification version supported by this implementation (this
@@ -62,8 +77,28 @@ class Modem : public EuiccInterface {
   const lpa::proto::EuiccSpecVersion& GetCardVersion() override {
     return spec_version_;
   }
+  void SetCardVersion(
+      const lpa::proto::EuiccSpecVersion& spec_version) override {
+    spec_version_ = spec_version;
+  };
+
   lpa::util::EuiccLog* logger() override { return logger_; }
   lpa::util::Executor* executor() override { return executor_; }
+
+  std::vector<uint8_t> GetUtranSupportedRelease() override {
+    return std::vector<uint8_t>{
+        kDefault3GPPRelease, 0,
+        0};  // Last two bytes are fixed to zero by SGP.22
+  }
+  std::vector<uint8_t> GetEutranSupportedRelease() override {
+    return std::vector<uint8_t>{
+        kDefault3GPPRelease, 0,
+        0};  // Last two bytes are fixed to zero by SGP.22
+  };
+
+  // Used by third party code to send APDU's
+  void TransmitApdu(const std::vector<uint8_t>& apduCommand,
+                    base::OnceCallback<void(std::vector<uint8_t>)> cb) override;
 
  protected:
   // Base class for the tx info specific to a certain type of message to the
@@ -78,7 +113,18 @@ class Modem : public EuiccInterface {
 
   struct ApduTxInfo : public TxInfo {
     explicit ApduTxInfo(CommandApdu apdu) : apdu_(std::move(apdu)) {}
+    ApduTxInfo(CommandApdu apdu, bool is_source_external)
+        : apdu_(std::move(apdu)), is_source_external_(is_source_external) {}
     CommandApdu apdu_;
+    // External apps may use TransmitApdu to send APDU's. Such
+    // APDU's may need to be treated differently since the header
+    // and apdu content are prepopulated by the external app
+    bool is_source_external_ = false;
+  };
+
+  struct OpenChannelTxInfo : public TxInfo {
+    explicit OpenChannelTxInfo(const std::vector<uint8_t>& aid) : aid_(aid) {}
+    std::vector<uint8_t> aid_;
   };
 
   struct TxElement {
@@ -101,6 +147,13 @@ class Modem : public EuiccInterface {
   virtual std::unique_ptr<T> GetTagForSendApdu() = 0;
   // Convenience function that runs the lpa callback if err==0
   virtual void SendApdusResponse(ResponseCallback callback, int err);
+  // OpenConnectionResponse calls cb with open_channel_raw_response_
+  void OpenConnectionResponse(base::OnceCallback<void(std::vector<uint8_t>)> cb,
+                              int err);
+  // TransmitApduResponse calls cb with responses_[0]
+  void TransmitApduResponse(base::OnceCallback<void(std::vector<uint8_t>)> cb,
+                            int err);
+
   // SendApdus will queue APDU's on tx_queue_ and call TransmitFromQueue()
   // In the QMI and MBIM implementations, TransmitFromQueue also processes
   // other messages like reset, close channel, open channel etc.
@@ -113,8 +166,9 @@ class Modem : public EuiccInterface {
       int err);
   // List of responses for the oldest SendApdus call that hasn't been completely
   // processed.
-  std::vector<std::vector<uint8_t>> responses_;
+  std::vector<ResponseApdu> responses_;
   std::deque<TxElement> tx_queue_;
+  std::vector<uint8_t> open_channel_raw_response_;
 
   // Used to send notifications about eSIM slot changes.
   EuiccManagerInterface* euicc_manager_;
@@ -125,12 +179,14 @@ class Modem : public EuiccInterface {
   std::string imei_;
   int retry_count_;
   base::OnceClosure retry_initialization_callback_;
+  std::unique_ptr<ModemManagerProxyInterface> modem_manager_proxy_;
 
  private:
   uint16_t current_transaction_id_;
   base::WeakPtrFactory<Modem<T>> weak_factory_;
 };
 
+// Used by google-lpa to queue APDU's
 template <typename T>
 void Modem<T>::SendApdus(std::vector<lpa::card::Apdu> apdus,
                          ResponseCallback cb) {
@@ -152,13 +208,66 @@ void Modem<T>::SendApdus(std::vector<lpa::card::Apdu> apdus,
   TransmitFromQueue();
 }
 
+// Used by external apps like gemalto eOS updater.
+template <typename T>
+void Modem<T>::TransmitApdu(const std::vector<uint8_t>& apduCommand,
+                            base::OnceCallback<void(std::vector<uint8_t>)> cb) {
+  DCHECK(tx_queue_.empty())
+      << __func__
+      << ": expected tx queue to be empty, size=" << tx_queue_.size();
+  LOG(INFO) << __func__ << ": APDU command="
+            << base::HexEncode(apduCommand.data(), apduCommand.size());
+  DCHECK(apduCommand.size() > 2) << "APDU does not have a header.";
+  CommandApdu apdu(apduCommand);
+  auto transmit_apdu_resp =
+      base::BindOnce(&Modem<T>::TransmitApduResponse,
+                     weak_factory_.GetWeakPtr(), std::move(cb));
+  tx_queue_.push_back({std::make_unique<ApduTxInfo>(
+                           std::move(apdu), true /*is_source_external_*/),
+                       AllocateId(), GetTagForSendApdu(),
+                       std::move(transmit_apdu_resp)});
+  TransmitFromQueue();
+}
+
 template <typename T>
 void Modem<T>::SendApdusResponse(EuiccInterface::ResponseCallback callback,
                                  int err) {
-  callback(responses_, err);
+  std::vector<std::vector<uint8_t>> responses_vec;
+  VLOG(2) << __func__;
+  for (auto& response : responses_) {
+    response.ReleaseStatusBytes();
+    responses_vec.push_back(response.Release());
+  }
+  responses_.clear();
+  callback(responses_vec, err);
   // ResponseCallback interface does not indicate a change in ownership of
   // |responses_|, but all callbacks should transfer ownership.
-  CHECK(responses_.empty());
+  CHECK(responses_vec.empty());
+}
+
+template <typename T>
+void Modem<T>::OpenConnectionResponse(
+    base::OnceCallback<void(std::vector<uint8_t>)> cb, int err) {
+  LOG(INFO) << __func__ << "Open Channel Response: "
+            << base::HexEncode(open_channel_raw_response_.data(),
+                               open_channel_raw_response_.size());
+  DCHECK(!open_channel_raw_response_.empty());
+  std::move(cb).Run(std::move(open_channel_raw_response_));
+}
+
+template <typename T>
+void Modem<T>::TransmitApduResponse(
+    base::OnceCallback<void(std::vector<uint8_t>)> cb, int err) {
+  if (responses_.size() != 1) {
+    LOG(ERROR) << "responses.size != 1";
+    std::move(cb).Run(std::vector<uint8_t>());
+    return;
+  }
+  std::vector<uint8_t> response = responses_[0].Release();
+  responses_.clear();
+  LOG(INFO) << __func__ << ": response="
+            << base::HexEncode(response.data(), response.size());
+  std::move(cb).Run(std::move(response));
 }
 
 template <typename T>
@@ -174,25 +283,30 @@ uint16_t Modem<T>::AllocateId() {
 
 template <typename T>
 void Modem<T>::RetryInitialization(ResultCallback cb) {
+  Shutdown();
   if (retry_count_ > kMaxRetries) {
     LOG(INFO) << __func__ << ": Max retry count(" << kMaxRetries
-              << ") exceeded, will not retry initialization.";
+              << ") exceeded. Waiting for a new modem object...";
     retry_count_ = 0;
     while (!tx_queue_.empty()) {
       std::move(tx_queue_[0].cb_).Run(kModemMessageProcessingError);
       tx_queue_.pop_front();
     }
-    std::move(cb).Run(kModemMessageProcessingError);
+    modem_manager_proxy_->RegisterModemAppearedCallback(
+        base::BindOnce(&Modem<T>::Initialize, weak_factory_.GetWeakPtr(),
+                       euicc_manager_, base::DoNothing()));
+
+    if (!cb.is_null())
+      std::move(cb).Run(kModemMessageProcessingError);
     return;
   }
   LOG(INFO) << "Reprobing for eSIM in " << kInitRetryDelay.InSeconds()
             << " seconds";
-  Shutdown();
   retry_initialization_callback_.Reset();
   retry_initialization_callback_ =
       base::BindOnce(&Modem<T>::Initialize, weak_factory_.GetWeakPtr(),
                      euicc_manager_, std::move(cb));
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, std::move(retry_initialization_callback_), kInitRetryDelay);
   retry_count_++;
 }

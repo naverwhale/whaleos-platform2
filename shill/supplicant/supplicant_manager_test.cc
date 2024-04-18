@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <memory>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -30,8 +30,9 @@ class SupplicantManagerTest : public Test {
   SupplicantManagerTest()
       : manager_(&control_interface_, &dispatcher_, &metrics_),
         supplicant_manager_(manager_.supplicant_manager()),
-        callback_(base::Bind(&SupplicantManagerTest::SupplicantPresence,
-                             base::Unretained(this))) {
+        callback_(
+            base::BindRepeating(&SupplicantManagerTest::SupplicantPresence,
+                                base::Unretained(this))) {
     supplicant_manager_->Start();
   }
 

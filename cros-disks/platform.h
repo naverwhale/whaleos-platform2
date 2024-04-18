@@ -1,24 +1,22 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CROS_DISKS_PLATFORM_H_
 #define CROS_DISKS_PLATFORM_H_
 
+#include <string>
+#include <unordered_set>
+
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#ifndef MS_NOSYMFOLLOW
-// Added locally in kernel 5.4, upstream TBD.
-#define MS_NOSYMFOLLOW 256
-#endif
-
-#include <string>
-#include <unordered_set>
-
 #include <base/files/file.h>
+#include <base/files/file_path.h>
 #include <chromeos/dbus/service_constants.h>
+
+#include "cros-disks/metrics.h"
 
 namespace cros_disks {
 
@@ -26,7 +24,7 @@ namespace cros_disks {
 // directories, and getting user ID and group ID for a username.
 class Platform {
  public:
-  Platform();
+  explicit Platform(Metrics* metrics = nullptr);
   Platform(const Platform&) = delete;
   Platform& operator=(const Platform&) = delete;
 
@@ -109,8 +107,8 @@ class Platform {
   // Returns true on success.
   virtual bool GetPermissions(const std::string& path, mode_t* mode) const;
 
-  // Removes a directory at |path| if it is empty and not in use.
-  // Returns true on success.
+  // Removes a directory at |path| if it is empty and not in use. Returns true
+  // on success, or if the directory does not exist in the first place.
   virtual bool RemoveEmptyDirectory(const std::string& path) const;
 
   // Makes |user_name| to perform mount operations, which changes the value of
@@ -129,16 +127,21 @@ class Platform {
   // Sets the permissions of |path| to |mode|. Returns true on success.
   virtual bool SetPermissions(const std::string& path, mode_t mode) const;
 
-  // Unmounts |path| with |flags|.
-  virtual MountErrorType Unmount(const std::string& path, int flags) const;
+  // Forcefully unmounts |mount_path|. The given |filesystem_type| is only used
+  // in logs.
+  virtual MountError Unmount(const base::FilePath& mount_path,
+                             const std::string& filesystem_type) const;
 
   // Mounts the |source| filesystem of type |filesystem_type| at mount point
   // |target| with |flags| and |options|.
-  virtual MountErrorType Mount(const std::string& source,
-                               const std::string& target,
-                               const std::string& filesystem_type,
-                               uint64_t flags,
-                               const std::string& options) const;
+  virtual MountError Mount(const std::string& source,
+                           const std::string& target,
+                           const std::string& filesystem_type,
+                           uint64_t flags,
+                           const std::string& options) const;
+
+  // Unmounts and removes all the subdirectories of |dir|.
+  virtual bool CleanUpStaleMountPoints(const std::string& dir) const;
 
   gid_t mount_group_id() const { return mount_group_id_; }
 
@@ -147,14 +150,17 @@ class Platform {
   const std::string& mount_user() const { return mount_user_; }
 
  private:
+  // Optional pointer to an object that can record UMA histograms.
+  Metrics* const metrics_;
+
   // Group ID to perform mount operations.
-  gid_t mount_group_id_;
+  gid_t mount_group_id_ = 0;
 
   // User ID to perform mount operations.
-  uid_t mount_user_id_;
+  uid_t mount_user_id_ = 0;
 
   // User ID to perform mount operations.
-  std::string mount_user_;
+  std::string mount_user_ = "root";
 };
 
 }  // namespace cros_disks

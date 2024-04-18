@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,7 @@
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 
-#include "power_manager/common/util.h"
-
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -58,8 +55,6 @@ CrosEcHelper::CrosEcHelper() {
   LOG(INFO) << "This device does not support EC wake angle control";
 }
 
-CrosEcHelper::~CrosEcHelper() {}
-
 bool CrosEcHelper::IsWakeAngleSupported() {
   return wake_angle_supported_;
 }
@@ -80,5 +75,4 @@ bool CrosEcHelper::AllowWakeupAsTablet(bool enabled) {
   return true;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

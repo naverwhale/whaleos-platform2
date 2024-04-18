@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,17 +10,18 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/no_destructor.h>
 #include <base/notreached.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/message_loops/message_loop.h>
 #include <brillo/daemons/dbus_daemon.h>
 #include <chromeos/dbus/service_constants.h>
 #include <mojo/core/embedder/embedder.h>
+#include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/platform/platform_channel.h>
 #include <mojo/public/cpp/system/invitation.h>
 
@@ -92,14 +93,14 @@ int SmbFsDaemon::OnInit() {
   }
 
   if (!share_path_.empty()) {
-    static base::NoDestructor<NopSmbFilesystemDelegate> dummy_delegate;
+    static NopSmbFilesystemDelegate dummy_delegate;
     SmbFilesystem::Options options;
     options.share_path = share_path_;
     options.uid = uid_;
     options.gid = gid_;
     options.allow_ntlm = true;
-    std::unique_ptr<SmbFilesystem> fs = std::make_unique<SmbFilesystem>(
-        dummy_delegate.get(), std::move(options));
+    std::unique_ptr<SmbFilesystem> fs =
+        std::make_unique<SmbFilesystem>(&dummy_delegate, std::move(options));
     SmbFilesystem::ConnectError error = fs->EnsureConnected();
     if (error != SmbFilesystem::ConnectError::kOk) {
       LOG(ERROR) << "Unable to connect to SMB filesystem: " << error;
@@ -166,7 +167,7 @@ bool SmbFsDaemon::InitMojo() {
 
   mojo::core::Init();
   ipc_support_ = std::make_unique<mojo::core::ScopedIPCSupport>(
-      base::ThreadTaskRunnerHandle::Get(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
       mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
 
   mojo::PlatformChannel channel;
@@ -186,7 +187,7 @@ bool SmbFsDaemon::InitMojo() {
       mojo::IncomingInvitation::Accept(channel.TakeLocalEndpoint());
   mojo_session_ = std::make_unique<MojoSession>(
       bus_, temp_dir_.GetPath(), chan_,
-      mojom::SmbFsBootstrapRequest(
+      mojo::PendingReceiver<mojom::SmbFsBootstrap>(
           invitation.ExtractMessagePipe(mojom::kBootstrapPipeName)),
       uid_, gid_,
       base::BindOnce(&SmbFsDaemon::OnSessionShutdown, base::Unretained(this)));

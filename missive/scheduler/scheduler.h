@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,12 @@
 #define MISSIVE_SCHEDULER_SCHEDULER_H_
 
 #include <memory>
+#include <queue>
 #include <vector>
 
 #include <base/sequence_checker.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 
-#include "missive/util/shared_queue.h"
 #include "missive/util/status.h"
 
 namespace reporting {
@@ -123,7 +123,7 @@ class Scheduler {
     base::OnceCallback<void(Status)> complete_cb_;
   };
 
-  // SchedulerObserver allows introspection into the goings on of the Scheudler.
+  // SchedulerObserver allows introspection into the goings on of the Scheduler.
   class SchedulerObserver {
    public:
     enum class Notification {
@@ -173,14 +173,12 @@ class Scheduler {
   class JobBlocker;
   class JobSemaphore;
 
-  void OnJobEnqueued();
-
   void StartJobs();
-  void OnJobPop(std::unique_ptr<JobBlocker> job_blocker,
-                StatusOr<Job::SmartPtr<Job>> job_result);
+  void MaybeStartNextJob(std::unique_ptr<JobBlocker> job_blocker);
+  void RunJob(std::unique_ptr<JobBlocker> job_blocker,
+              Job::SmartPtr<Job> job_result);
 
   void ClearQueue();
-  void OnJobQueueSwap(base::queue<Job::SmartPtr<Job>> job_queue) const;
 
   // TODO(1174889) Currently unused, once resourced implements
   // MemoryPressureLevels update. Also initialize JobSemaphorePool at
@@ -195,7 +193,7 @@ class Scheduler {
   SEQUENCE_CHECKER(sequence_checker_);
 
   std::unique_ptr<JobSemaphore> job_semaphore_;
-  scoped_refptr<SharedQueue<Job::SmartPtr<Job>>> jobs_queue_;
+  std::queue<Job::SmartPtr<Job>> jobs_queue_;
 
   std::vector<SchedulerObserver*> observers_;
 };

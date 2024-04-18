@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,24 +9,26 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <memory>
 #include <set>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/posix/unix_domain_socket.h>
 #include <brillo/daemons/daemon.h>
-#include <components/timers/alarm_timer_chromeos.h>
+#include <brillo/timers/alarm_timer.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
 
 #include "power_manager/common/clock.h"
+#include "power_manager/common/tracing.h"
+#include "power_manager/powerd/system/wakeup_timer.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -37,14 +39,11 @@ std::unique_ptr<dbus::Response> CreateInvalidArgsError(
       method_call, DBUS_ERROR_INVALID_ARGS, message));
 }
 
-// Only wake up alarms are supported.
-bool IsSupportedClock(clockid_t clock_id) {
-  return clock_id == CLOCK_BOOTTIME_ALARM || clock_id == CLOCK_REALTIME_ALARM;
-}
-
 // Expiration callback for timer of type |timer_id|. |expiration_fd| is the fd
 // to write to to indicate timer expiration to the instance.
 void OnExpiration(ArcTimerManager::TimerId timer_id, int expiration_fd) {
+  TRACE_EVENT("power", "ArcTimerManager::OnExpiration", "timer_id", timer_id,
+              "expiration_fd", expiration_fd);
   DVLOG(1) << "Expiration callback for timer id=" << timer_id;
   // Write to the |expiration_fd| to indicate to the instance that the timer has
   // expired. The instance expects 8 bytes on the read end similar to what
@@ -83,7 +82,7 @@ struct ArcTimerManager::ArcTimerInfo {
   ArcTimerInfo(ArcTimerInfo&&) = delete;
   ArcTimerInfo(clockid_t clock_id,
                base::ScopedFD expiration_fd,
-               std::unique_ptr<timers::SimpleAlarmTimer> timer)
+               std::unique_ptr<WakeupTimer> timer)
       : clock_id(clock_id),
         expiration_fd(std::move(expiration_fd)),
         timer(std::move(timer)) {}
@@ -96,24 +95,24 @@ struct ArcTimerManager::ArcTimerInfo {
   // The file descriptor which will be written to when |timer| expires.
   const base::ScopedFD expiration_fd;
 
-  // TODO(b/69759087): Make |SimpleAlarmTimer| take a clock id in its
-  // constructor to create timers of different clock types.
-  //
   // The timer that will be scheduled.
-  const std::unique_ptr<timers::SimpleAlarmTimer> timer;
+  const std::unique_ptr<WakeupTimer> timer;
 };
 
 void ArcTimerManager::Init(DBusWrapperInterface* dbus_wrapper) {
   DCHECK(dbus_wrapper);
-  dbus_wrapper->ExportMethod(kCreateArcTimersMethod,
-                             base::Bind(&ArcTimerManager::HandleCreateArcTimers,
-                                        weak_ptr_factory_.GetWeakPtr()));
-  dbus_wrapper->ExportMethod(kStartArcTimerMethod,
-                             base::Bind(&ArcTimerManager::HandleStartArcTimer,
-                                        weak_ptr_factory_.GetWeakPtr()));
-  dbus_wrapper->ExportMethod(kDeleteArcTimersMethod,
-                             base::Bind(&ArcTimerManager::HandleDeleteArcTimers,
-                                        weak_ptr_factory_.GetWeakPtr()));
+  dbus_wrapper->ExportMethod(
+      kCreateArcTimersMethod,
+      base::BindRepeating(&ArcTimerManager::HandleCreateArcTimers,
+                          weak_ptr_factory_.GetWeakPtr()));
+  dbus_wrapper->ExportMethod(
+      kStartArcTimerMethod,
+      base::BindRepeating(&ArcTimerManager::HandleStartArcTimer,
+                          weak_ptr_factory_.GetWeakPtr()));
+  dbus_wrapper->ExportMethod(
+      kDeleteArcTimersMethod,
+      base::BindRepeating(&ArcTimerManager::HandleDeleteArcTimers,
+                          weak_ptr_factory_.GetWeakPtr()));
 }
 
 std::vector<ArcTimerManager::TimerId> ArcTimerManager::GetTimerIdsForTesting(
@@ -216,17 +215,18 @@ std::unique_ptr<ArcTimerManager::ArcTimerInfo> ArcTimerManager::CreateArcTimer(
     return nullptr;
   }
 
-  int32_t clock_id;
+  clockid_t clock_id;
   if (!struct_reader.PopInt32(&clock_id)) {
     LOG(WARNING) << "Failed to pop clock id";
     return nullptr;
   }
 
-  // The instance opens clocks of type CLOCK_BOOTTIME_ALARM and
-  // CLOCK_REALTIME_ALARM. However, it uses only CLOCK_BOOTTIME_ALARM to set
-  // wake up alarms. At this point, it's okay to pretend the host supports
-  // CLOCK_REALTIME_ALARM instead of returning an error.
-  if (!IsSupportedClock(static_cast<clockid_t>(clock_id))) {
+  // Make sure we're only using a clock of a type we can support with wakeup
+  // alarms - either CLOCK_BOOTTIME_ALARM or CLOCK_REALTIME_ALARM.
+  //
+  // At present the instance uses only CLOCK_BOOTTIME_ALARM to set
+  // wake up alarms.
+  if (!brillo::timers::SimpleAlarmTimer::IsSupportedClock(clock_id)) {
     LOG(WARNING) << "Unsupported clock=" << clock_id;
     return nullptr;
   }
@@ -242,12 +242,18 @@ std::unique_ptr<ArcTimerManager::ArcTimerInfo> ArcTimerManager::CreateArcTimer(
   }
 
   if (create_for_testing) {
-    return std::make_unique<ArcTimerInfo>(
-        clock_id, std::move(expiration_fd),
-        timers::SimpleAlarmTimer::CreateForTesting());
+    return std::make_unique<ArcTimerInfo>(clock_id, std::move(expiration_fd),
+                                          std::make_unique<TestWakeupTimer>());
+  }
+
+  std::unique_ptr<WakeupTimer> simple_alarm_timer =
+      RealWakeupTimer::Create(clock_id);
+  if (simple_alarm_timer == nullptr) {
+    LOG(WARNING) << "Failed to create SimpleAlarmTimer for clock=" << clock_id;
+    return nullptr;
   }
   return std::make_unique<ArcTimerInfo>(clock_id, std::move(expiration_fd),
-                                        timers::SimpleAlarmTimer::Create());
+                                        std::move(simple_alarm_timer));
 }
 
 // static.
@@ -285,8 +291,7 @@ void ArcTimerManager::HandleStartArcTimer(
     return;
   }
   base::TimeTicks absolute_expiration_time =
-      base::TimeTicks() +
-      base::TimeDelta::FromMicroseconds(absolute_expiration_time_us);
+      base::TimeTicks() + base::Microseconds(absolute_expiration_time_us);
 
   // If a timer for the given clock is not created prior to this call then
   // return error. Else retrieve the timer associated with it.
@@ -315,11 +320,9 @@ void ArcTimerManager::HandleStartArcTimer(
   // because if the parent object goes away the timers are cleared and all
   // pending callbacks are cancelled. If the instance sets new timers after a
   // respawn, again, the old timers and pending callbacks are cancelled.
-  // TODO(abhishekbh): This needs to be base::BindRepeating but it's not
-  // available in the current version of libchrome.
-  arc_timer->timer->Start(
-      FROM_HERE, delay,
-      base::Bind(&OnExpiration, timer_id, arc_timer->expiration_fd.get()));
+  arc_timer->timer->Start(delay,
+                          base::BindRepeating(&OnExpiration, timer_id,
+                                              arc_timer->expiration_fd.get()));
   std::move(response_sender).Run(dbus::Response::FromMethodCall(method_call));
 }
 
@@ -364,5 +367,4 @@ ArcTimerManager::ArcTimerInfo* ArcTimerManager::FindArcTimerInfo(
   return (it == timers_.end()) ? nullptr : it->second.get();
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

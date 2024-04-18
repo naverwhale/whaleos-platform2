@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,25 +9,23 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
+#include <base/containers/span.h>
+#include <base/files/file_descriptor_watcher_posix.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <net-base/socket.h>
 
-#include "shill/data_types.h"
 #include "shill/mockable.h"
 
 namespace shill {
 
-struct InputData;
-class IOHandler;
-class IOHandlerFactory;
 class OpenVPNDriver;
-class Sockets;
 
 class OpenVPNManagementServer {
  public:
-  static const char kStateAuth[];
-  static const char kStateReconnecting[];
-  static const char kStateResolve[];
+  static constexpr char kStateAuth[] = "AUTH";
+  static constexpr char kStateConnected[] = "CONNECTED";
+  static constexpr char kStateReconnecting[] = "RECONNECTING";
+  static constexpr char kStateResolve[] = "RESOLVE";
 
   explicit OpenVPNManagementServer(OpenVPNDriver* driver);
   OpenVPNManagementServer(const OpenVPNManagementServer&) = delete;
@@ -37,8 +35,7 @@ class OpenVPNManagementServer {
 
   // Returns false on failure. On success, returns true and appends management
   // interface openvpn options to |options|.
-  virtual bool Start(Sockets* sockets,
-                     std::vector<std::vector<std::string>>* options);
+  virtual bool Start(std::vector<std::vector<std::string>>* options);
 
   virtual void Stop();
 
@@ -59,15 +56,16 @@ class OpenVPNManagementServer {
   const std::string& state() const { return state_; }
 
   // If Start() was called and no Stop() after that.
-  mockable bool IsStarted() const { return sockets_ != nullptr; }
+  mockable bool IsStarted() const { return socket_ != nullptr; }
 
  private:
   friend class OpenVPNDriverTest;
+  friend class OpenVPNManagementServerFuzzer;
   friend class OpenVPNManagementServerTest;
   FRIEND_TEST(OpenVPNManagementServerTest, EscapeToQuote);
   FRIEND_TEST(OpenVPNManagementServerTest, Hold);
   FRIEND_TEST(OpenVPNManagementServerTest, OnInputStop);
-  FRIEND_TEST(OpenVPNManagementServerTest, OnReady);
+  FRIEND_TEST(OpenVPNManagementServerTest, OnSocketConnected);
   FRIEND_TEST(OpenVPNManagementServerTest, OnReadyAcceptFail);
   FRIEND_TEST(OpenVPNManagementServerTest, PerformAuthentication);
   FRIEND_TEST(OpenVPNManagementServerTest, PerformAuthenticationNoCreds);
@@ -93,37 +91,41 @@ class OpenVPNManagementServer {
   FRIEND_TEST(OpenVPNManagementServerTest, SupplyTPMToken);
   FRIEND_TEST(OpenVPNManagementServerTest, SupplyTPMTokenNoPin);
 
-  // IO handler callbacks.
-  void OnReady(int fd);
-  void OnInput(InputData* data);
-  void OnInputError(const std::string& error_msg);
+  // Called when |socket_| is ready to accept a connection.
+  void OnAcceptReady();
 
-  void Send(const std::string& data);
-  void SendState(const std::string& state);
-  void SendUsername(const std::string& tag, const std::string& username);
-  void SendPassword(const std::string& tag, const std::string& password);
+  // Called when |connected_socket_| is ready to read.
+  void OnInputReady();
+  void OnInput(base::span<const uint8_t> data);
+
+  void Send(std::string_view data);
+  void SendState(std::string_view state);
+  void SendUsername(std::string_view tag, std::string_view username);
+  void SendPassword(std::string_view tag, std::string_view password);
   void SendHoldRelease();
-  void SendSignal(const std::string& signal);
+  void SendSignal(std::string_view signal);
+  void SendStatus();
 
-  void ProcessMessage(const std::string& message);
-  bool ProcessInfoMessage(const std::string& message);
-  bool ProcessNeedPasswordMessage(const std::string& message);
-  bool ProcessFailedPasswordMessage(const std::string& message);
-  bool ProcessAuthTokenMessage(const std::string& message);
-  bool ProcessStateMessage(const std::string& message);
-  bool ProcessHoldMessage(const std::string& message);
-  bool ProcessSuccessMessage(const std::string& message);
+  void ProcessMessage(std::string_view message);
+  bool ProcessInfoMessage(std::string_view message);
+  bool ProcessNeedPasswordMessage(std::string_view message);
+  bool ProcessFailedPasswordMessage(std::string_view message);
+  bool ProcessAuthTokenMessage(std::string_view message);
+  bool ProcessStateMessage(std::string_view message);
+  bool ProcessHoldMessage(std::string_view message);
+  bool ProcessSuccessMessage(std::string_view message);
+  bool ProcessStatusMessage(std::string_view message);
 
-  void PerformStaticChallenge(const std::string& tag);
-  void PerformAuthentication(const std::string& tag);
-  void SupplyTPMToken(const std::string& tag);
+  void PerformStaticChallenge(std::string_view tag);
+  void PerformAuthentication(std::string_view tag);
+  void SupplyTPMToken(std::string_view tag);
 
   // Returns the first substring in |message| enclosed by the |start| and |end|
   // substrings. Note that the first |end| substring after the position of
   // |start| is matched.
-  static std::string ParseSubstring(const std::string& message,
-                                    const std::string& start,
-                                    const std::string& end);
+  static std::string_view ParseSubstring(std::string_view message,
+                                         std::string_view start,
+                                         std::string_view end);
 
   // Password messages come in two forms:
   //
@@ -133,22 +135,28 @@ class OpenVPNManagementServer {
   // ParsePasswordTag parses AUTH_TYPE out of a password |message| and returns
   // it. ParsePasswordFailedReason parses REASON_STRING, if any, out of a
   // password |message| and returns it.
-  static std::string ParsePasswordTag(const std::string& message);
-  static std::string ParsePasswordFailedReason(const std::string& message);
+  static std::string_view ParsePasswordTag(std::string_view message);
+  static std::string_view ParsePasswordFailedReason(std::string_view message);
 
   // Escapes |str| per OpenVPN's command parsing rules assuming |str| will be
   // sent over the management interface quoted (i.e., whitespace is not
   // escaped).
-  static std::string EscapeToQuote(const std::string& str);
+  static std::string EscapeToQuote(std::string_view str);
 
   OpenVPNDriver* driver_;
 
-  Sockets* sockets_;
-  int socket_;
-  IOHandlerFactory* io_handler_factory_;
-  std::unique_ptr<IOHandler> ready_handler_;
-  int connected_socket_;
-  std::unique_ptr<IOHandler> input_handler_;
+  std::unique_ptr<net_base::SocketFactory> socket_factory_ =
+      std::make_unique<net_base::SocketFactory>();
+  std::unique_ptr<net_base::Socket> socket_;
+  // Watcher to wait for |socket_| ready to accept a connection. It should be
+  // destructed prior than |socket_|.
+  std::unique_ptr<base::FileDescriptorWatcher::Controller> socket_watcher_;
+
+  std::unique_ptr<net_base::Socket> connected_socket_;
+  // Watcher to wait for |connected_socket_| ready to read. It should be
+  // destructed prior than |connected_socket_|.
+  std::unique_ptr<base::FileDescriptorWatcher::Controller>
+      connected_socket_watcher_;
 
   std::string state_;
 

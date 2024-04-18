@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -7,12 +7,11 @@
 #ifndef CAMERA_HAL_ADAPTER_CAMERA_HAL_TEST_ADAPTER_H_
 #define CAMERA_HAL_ADAPTER_CAMERA_HAL_TEST_ADAPTER_H_
 
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include <hardware/camera3.h>
-
-#include <base/optional.h>
 
 #include "hal_adapter/camera_hal_adapter.h"
 
@@ -29,7 +28,10 @@ class CameraHalTestAdapter : public CameraHalAdapter {
       bool enable_back,
       bool enable_external);
 
-  ~CameraHalTestAdapter() override {}
+  CameraHalTestAdapter(const CameraHalTestAdapter&) = delete;
+  CameraHalTestAdapter& operator=(const CameraHalTestAdapter&) = delete;
+
+  ~CameraHalTestAdapter() override = default;
 
   int32_t OpenDevice(
       int32_t camera_id,
@@ -45,7 +47,7 @@ class CameraHalTestAdapter : public CameraHalAdapter {
   int32_t SetTorchMode(int32_t camera_id, bool enabled) override;
 
  protected:
-  void StartOnThread(base::Callback<void(bool)> callback) override;
+  void StartOnThread(base::OnceCallback<void(bool)> callback) override;
 
   void NotifyCameraDeviceStatusChange(
       CameraModuleCallbacksAssociatedDelegate* delegate,
@@ -64,11 +66,9 @@ class CameraHalTestAdapter : public CameraHalAdapter {
   // reassign new id exposed to framework based on its index in this vector.
   std::vector<int> enable_camera_ids_;
 
-  base::Optional<int32_t> GetRemappedCameraId(int camera_id);
+  std::optional<int32_t> GetRemappedCameraId(int camera_id);
 
-  base::Optional<int32_t> GetUnRemappedCameraId(int camera_id);
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(CameraHalTestAdapter);
+  std::optional<int32_t> GetUnRemappedCameraId(int camera_id);
 };
 
 }  // namespace cros

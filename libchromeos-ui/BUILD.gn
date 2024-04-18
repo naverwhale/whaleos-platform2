@@ -1,9 +1,6 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-
-# TODO(crbug.com/932128): Fix the visibility on the shared lib.
-# gnlint: disable=GnLintVisibilityFlags
 
 import("//common-mk/pkg_config.gni")
 
@@ -18,6 +15,7 @@ pkg_config("target_defaults") {
   pkg_deps = [
     "libbrillo",
     "libchrome",
+    "libcros_config",
   ]
   include_dirs = [ "." ]
 }
@@ -30,7 +28,6 @@ source_set("libchromeos-ui_source_set") {
   configs += [
     # Use -fPIC so this code can be linked into a shared library.
     "//common-mk:pic",
-    "//common-mk:visibility_default",
     ":target_defaults",
   ]
   sources = [

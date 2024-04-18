@@ -1,8 +1,9 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
+import("shim_gen.gni")
 import("wayland_protocol.gni")
 
 group("all") {
@@ -36,22 +37,37 @@ if (!defined(dark_frame_color)) {
   dark_frame_color = "\"#323639\""
 }
 
+wayland_protocols = [
+  "protocol/aura-shell.xml",
+  "protocol/drm.xml",
+  "protocol/fractional-scale-v1.xml",
+  "protocol/gaming-input-unstable-v2.xml",
+  "protocol/gtk-shell.xml",
+  "protocol/idle-inhibit-unstable-v1.xml",
+  "protocol/keyboard-extension-unstable-v1.xml",
+  "protocol/linux-dmabuf-unstable-v1.xml",
+  "protocol/linux-explicit-synchronization-unstable-v1.xml",
+  "protocol/pointer-constraints-unstable-v1.xml",
+  "protocol/relative-pointer-unstable-v1.xml",
+  "protocol/stylus-unstable-v2.xml",
+  "protocol/tablet-unstable-v2.xml",
+  "protocol/text-input-crostini-unstable-v1.xml",
+  "protocol/text-input-extension-unstable-v1.xml",
+  "protocol/text-input-unstable-v1.xml",
+  "protocol/text-input-x11-unstable-v1.xml",
+  "protocol/viewporter.xml",
+  "protocol/xdg-output-unstable-v1.xml",
+  "protocol/xdg-shell.xml",
+]
+
 wayland_protocol_library("sommelier-protocol") {
   out_dir = "include"
-  sources = [
-    "protocol/aura-shell.xml",
-    "protocol/drm.xml",
-    "protocol/gaming-input-unstable-v2.xml",
-    "protocol/gtk-shell.xml",
-    "protocol/keyboard-extension-unstable-v1.xml",
-    "protocol/linux-dmabuf-unstable-v1.xml",
-    "protocol/linux-explicit-synchronization-unstable-v1.xml",
-    "protocol/pointer-constraints-unstable-v1.xml",
-    "protocol/relative-pointer-unstable-v1.xml",
-    "protocol/text-input-unstable-v1.xml",
-    "protocol/viewporter.xml",
-    "protocol/xdg-shell-unstable-v6.xml",
-  ]
+  sources = wayland_protocols
+}
+
+gen_shim("sommelier-shims") {
+  out_dir = "include"
+  sources = wayland_protocols
 }
 
 gaming_defines = [ "GAMEPAD_SUPPORT" ]
@@ -71,55 +87,75 @@ sommelier_defines = [
                     ] + gaming_defines + tracing_defines
 
 static_library("libgaming") {
-  sources = [ "sommelier-gaming.cc" ]
+  sources = [
+    "libevdev/libevdev-shim.cc",
+    "sommelier-gaming.cc",
+  ]
   defines = gaming_defines
-  pkg_deps = [ "libevdev" ]
+  pkg_deps = [
+    "libevdev",
+    "pixman-1",
+  ]
   deps = [ ":sommelier-protocol" ]
 }
 
 static_library("libsommelier") {
   sources = [
-    "sommelier-compositor.cc",
+    "compositor/sommelier-compositor.cc",
+    "compositor/sommelier-dma-buf.cc",
+    "compositor/sommelier-drm.cc",
+    "compositor/sommelier-mmap.cc",
+    "compositor/sommelier-shm.cc",
     "sommelier-ctx.cc",
     "sommelier-data-device-manager.cc",
     "sommelier-display.cc",
-    "sommelier-drm.cc",
+    "sommelier-fractional-scale.cc",
     "sommelier-global.cc",
     "sommelier-gtk-shell.cc",
-    "sommelier-mmap.cc",
+    "sommelier-idle-inhibit-manager.cc",
+    "sommelier-inpututils.cc",
     "sommelier-output.cc",
     "sommelier-pointer-constraints.cc",
     "sommelier-relative-pointer-manager.cc",
+    "sommelier-scope-timer.cc",
     "sommelier-seat.cc",
     "sommelier-shell.cc",
-    "sommelier-shm.cc",
+    "sommelier-stylus-tablet.cc",
     "sommelier-subcompositor.cc",
     "sommelier-text-input.cc",
     "sommelier-timing.cc",
     "sommelier-tracing.cc",
+    "sommelier-transform.cc",
     "sommelier-util.cc",
     "sommelier-viewporter.cc",
     "sommelier-window.cc",
     "sommelier-xdg-shell.cc",
+    "sommelier-xshape.cc",
     "sommelier.cc",
     "virtualization/virtgpu_channel.cc",
     "virtualization/virtwl_channel.cc",
+    "xcb/xcb-shim.cc",
   ]
   include_dirs = []
   defines = sommelier_defines
   pkg_deps = [
                "gbm",
                "libdrm",
+               "libevdev",
                "pixman-1",
                "wayland-client",
                "wayland-server",
                "xcb",
                "xcb-composite",
+               "xcb-shape",
                "xcb-xfixes",
                "xkbcommon",
              ] + tracing_pkg_deps
   libs = [ "m" ] + tracing_libs
-  deps = [ ":sommelier-protocol" ] + gaming_deps
+  deps = [
+           ":sommelier-protocol",
+           ":sommelier-shims",
+         ] + gaming_deps
 }
 
 executable("sommelier") {
@@ -132,21 +168,48 @@ executable("sommelier") {
 
 if (use.test) {
   executable("sommelier_test") {
-    sources = [ "sommelier_test.cc" ]
+    sources = [
+      "sommelier-gaming-test.cc",
+      "sommelier-output-test.cc",
+      "sommelier-test-main.cc",
+      "sommelier-test.cc",
+      "sommelier-transform-test.cc",
+      "sommelier-window-test.cc",
+      "sommelier-x11event-test.cc",
+      "sommelier-xdg-shell-test.cc",
+      "testing/mock-wayland-channel.cc",
+      "testing/sommelier-test-util.cc",
+      "xcb/fake-xcb-shim.cc",
+    ]
+    include_dirs = [ "testing" ]
+
+    defines = sommelier_defines
+
+    pkg_deps = [
+                 "libevdev",
+                 "pixman-1",
+               ] + tracing_pkg_deps
 
     # gnlint: disable=GnLintCommonTesting
     libs = [
       "gmock",
       "gtest",
+      "pixman-1",
     ]
-    defines = sommelier_defines
-    deps = [ ":libsommelier" ]
+
+    deps = [
+             ":libsommelier",
+             ":sommelier-protocol",
+             ":sommelier-shims",
+           ] + gaming_deps
   }
 }
 
 if (use.fuzzer) {
   executable("sommelier_wayland_fuzzer") {
     sources = [ "sommelier-wayland-fuzzer.cc" ]
+    pkg_deps = [ "pixman-1" ]
+    libs = [ "pixman-1" ]
 
     configs += [ "//common-mk/common_fuzzer" ]
 

@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -30,6 +30,7 @@ group("guest") {
       ":garcon_icon_finder_test",
       ":garcon_icon_index_file_test",
       ":garcon_mime_types_parser_test",
+      ":maitred_init_test",
       ":maitred_service_test",
       ":maitred_syslog_test",
       ":notificationd_test",
@@ -55,7 +56,10 @@ static_library("libmaitred") {
     "../maitred/service_impl.cc",
   ]
   configs += [ ":target_defaults" ]
-  defines = [ "USE_VM_BOREALIS=${use.vm_borealis}" ]
+  defines = [
+    "USE_VM_BOREALIS=${use.vm_borealis}",
+    "USE_VM_SLUDGE=${use.vm_sludge}",
+  ]
   pkg_deps = [
     "grpc++",
     "libbrillo",
@@ -69,12 +73,14 @@ static_library("libgarcon") {
     "../garcon/ansible_playbook_application.cc",
     "../garcon/arc_sideload.cc",
     "../garcon/desktop_file.cc",
+    "../garcon/file_chooser_dbus_service.cc",
     "../garcon/host_notifier.cc",
     "../garcon/icon_finder.cc",
     "../garcon/icon_index_file.cc",
     "../garcon/ini_parse_util.cc",
     "../garcon/mime_types_parser.cc",
     "../garcon/package_kit_proxy.cc",
+    "../garcon/screensaver_dbus_service.cc",
     "../garcon/service_impl.cc",
     "../garcon/xdg_util.cc",
   ]
@@ -210,6 +216,19 @@ copy("upgrade_container") {
 }
 
 if (use.test) {
+  executable("maitred_init_test") {
+    sources = [ "../maitred/init_test.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+    ]
+    deps = [
+      ":libmaitred",
+      "//common-mk/testrunner:testrunner",
+      "//vm_tools:libvm_tools_common",
+    ]
+  }
+
   executable("maitred_service_test") {
     sources = [ "../maitred/service_impl_test.cc" ]
     configs += [
@@ -218,7 +237,7 @@ if (use.test) {
     ]
     deps = [
       ":libmaitred",
-      "../../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
       "//vm_tools:libvm_tools_common",
     ]
   }
@@ -234,7 +253,7 @@ if (use.test) {
     ]
     deps = [
       ":libsyslog",
-      "../../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 
@@ -246,7 +265,7 @@ if (use.test) {
     ]
     deps = [
       ":libgarcon",
-      "../../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 
@@ -258,7 +277,7 @@ if (use.test) {
     ]
     deps = [
       ":libgarcon",
-      "../../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 
@@ -270,7 +289,7 @@ if (use.test) {
     ]
     deps = [
       ":libgarcon",
-      "../../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 
@@ -282,7 +301,7 @@ if (use.test) {
     ]
     deps = [
       ":libgarcon",
-      "../../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 
@@ -304,7 +323,7 @@ if (use.test) {
     deps = [
       ":libnotificationd",
       ":notification-protocol",
-      "../../common-mk/testrunner:testrunner",
+      "//common-mk/testrunner:testrunner",
     ]
   }
 }

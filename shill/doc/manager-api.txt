@@ -5,8 +5,7 @@ Service		org.chromium.flimflam
 Interface	org.chromium.flimflam.Manager
 Object path	/
 
-Methods
-		dict GetProperties()
+Methods		dict GetProperties()
 
 			Return the global system properties specified
 			in the Properties section.
@@ -87,7 +86,7 @@ Methods
 			credentials are needed they are loaded from the
 			(new) active profile).
 
-			The name must match the identifer of the active
+			The name must match the identifier of the active
 			profile.  This is a safeguard against accidentally
 			removing the wrong profile.
 
@@ -97,6 +96,7 @@ Methods
 
 			Possible Errors: [service].Error.InvalidArguments
 					 [service].Error.NotFound
+					 [service].Error.WrongState
 
 		object PopAnyProfile()
 
@@ -138,6 +138,19 @@ Methods
 			each cellular device is set with the results.
 
 			Possible Errors: [service].Error.InvalidArguments
+
+		void RequestWiFiRestart()
+
+			Request the WiFi device to be restarted, if the
+			WiFi device exists.
+
+			This command is used to mitigate b/270746800 and
+			should only be invoked by the udev rule,
+			89-reset_wifi_on_driver.rules.
+
+			This command should not be called otherwise. This
+			command will be removed once the root cause for
+			b/270746800 is no longer being triggered.
 
 		void EnableTechnology(string type)
 
@@ -184,7 +197,7 @@ Methods
 			See also GetService.
 
 			Possible Errors: [service].Error.InvalidArguments
-					 [service].Error.NotSupported
+					 [service].Error.TechnologyNotAvailable
 
 		object ConfigureServiceForProfile(object profile,
 						  dict properties)
@@ -247,10 +260,11 @@ Methods
 			that although the operation succeeded, there is
 			no matching service that refers to this profile.
 
-			Possible Errors: [service].Error.InternalError
+			Possible Errors: [service].Error.IllegalOperation
+					 [service].Error.InternalError
 					 [service].Error.InvalidArguments
 					 [service].Error.NotFound
-					 [service].Error.NotSupported
+					 [service].Error.TechnologyNotAvailable
 
 		void FindMatchingService(dict properties)
 
@@ -288,11 +302,11 @@ Methods
 			See also ConfigureService.
 
 			Possible Errors: [service].Error.InvalidArguments
-					 [service].Error.NotSupported
 					 [service].Error.PermissionDenied
 					 [service].Error.InternalError
 					 [service].Error.InvalidNetworkName
 					 [service].Error.InvalidPassphrase
+					 [service].Error.TechnologyNotAvailable
 
 		void SetDebugTags(string taglist)
 
@@ -336,6 +350,7 @@ Methods
 
 		void RecheckPortal()
 
+			Deprecated: Use Service.RequestPortalDetection instead.
 			Retest the portal state of all connected services
 			if a check is not currently in progress.
 
@@ -365,16 +380,21 @@ Methods
 			rates are specified in kbits/s. If throttling already
 			exists, this will override current throttling settings.
 
-		void ConnectToBestServices()
+		void ScanAndConnectToBestServices()
 
-			For each technology present, connect to the "best"
-			service available, as determined by sorting all
-			services independent of their current connectivity
-			state.  As a general rule, shill does not disrupt
-			current connectivity even if "better" connectivity
-			options appear.  This method allows this rule to be
-			violated for a single instance for each technology
-			type.
+			Forces a WiFi scan if a WiFi device is available as a
+			way of ensuring that networks recently configured can be
+			found. Then connects to the highest priority service
+			available for each technology as determined by sorting
+			all services independent of their current connectivity
+			state. Shill does not normally disrupt an active
+			connection for a given technology, even when a higher
+			priority network becomes available for that technology.
+			Calling this method will trigger a switch to higher
+			priority services for each available technology.
+			Note: The scan applies only to a WiFi device, however
+			connecting to the highest priority service will happen
+			for all technologies.
 
 		void CreateConnectivityReport()
 
@@ -384,26 +404,40 @@ Methods
 
 		void ClaimInterface(string claimer_name, string interface_name)
 
-			Assign the ownership of a device |interface_name| to the
-			claimer |claimer_name|. The specified device will be
-			added to the block list. Any current connection on that device
-			will be terminated, and shill will stop managing that device.
+			Claim the ownership of a device |interface_name|. The
+			specified device will be added to the block list. Any
+			current connection on that device will be terminated,
+			and shill will stop managing that device. |claimer_name|
+			is deprecated and thus can be any value.
 
 		void ReleaseInterface(string claimer_name, string interface_name)
 
-			Take the ownership of a device |interface_name| from
-			claimer |claimer_name| back to shill. The specified device
-			will be removed from the block list and managed by shill.
+			Release the ownership of a device |interface_name| back
+			to shill. The specified device will be removed from the
+			block list and managed by shill. |claimer_name| is
+			deprecated and thus can be any value.
 
-		void SetDNSProxyIPv4Address(string ipv4_address)
+		void SetDNSProxyAddresses(array{string} addresses)
 
-			Assigns the IPv4 address of the dns-proxy service.
-			When set, shill will use this address as the
-			system name server rather than those specified by the
-			relevant service.
+			Assigns the IPv4 and IPv6 addresses of the dns-proxy
+			service. When set, shill will use these addresses as
+			the system name servers rather than those specified by
+			the relevant service.
 
-			This address is enforced to be within a predetermined
+			If the array is empty, DNS proxy address(es) will be
+			cleared and the name servers from the current default
+			network will be used. This is the same behavior as
+			ClearDNSProxyAddresses.
+
+			This IPv4 address is enforced to be within a predetermined
 			system local subnet.
+
+		void ClearDNSProxyAddresses()
+
+			Clear any DNS proxy address stored in shill. When this
+			is called, shill will use the name servers from the
+			current default network for /etc/resolv.conf instead of
+			the proxy address(es).
 
 		void DNSProxyDOHProviders(array{string, string} providers)
 
@@ -413,6 +447,71 @@ Methods
 			each value is a comma-separated list of the IP addresses
 			(both v4 and v6 are supported) of the standard DNS name
 			servers that map to the secure DNS service provider.
+
+		void AddPasspointCredentials(object profile, dict properties)
+
+			Adds a set of Passpoint credentials to |profile|. The credentials
+			will be used to match and connect to compatible Wi-Fi networks.
+			Credentials cannot be added to the default Profile.
+
+			Possible Errors: [service].Error.InvalidArguments
+					 [service].Error.NotFound
+					 [service].Error.OperationFailed
+
+		void RemovePasspointCredentials(object profile,
+	                                        dict properties)
+
+			Remove Passpoint credentials that matches the all
+			property of |properties|. This removes all services
+			associated with the removed credentials.
+
+			Possible Errors: [service].Error.InvalidArguments
+					 [service].Error.NotFound
+					 [service].Error.OperationFailed
+
+		void SetTetheringEnabled(boolean enabled)
+
+			Enables or disables tethering with the corresponding properties in
+			Manager.TetheringConfig. Only supports cellular and ethernet as the
+			upstream technologies. Only supports WiFi as the downstream technology.
+			Returns a string indicating the result. This could be any one of,
+			"success", "failure", "not_allowed", "invalid_properties",
+			"upstream_not_available", "downstream_wifi_failure", "wrong_state"
+			"network_setup_failure", "upstream_failure".
+
+
+		string CheckTetheringReadiness()
+
+			Checks whether the upstream technology is ready to tether. It checks,
+			1. If any upstream is connected.
+			2. For cellular upstream, performs an entitlement check with the
+			carrier, and check to see if there is a known tethering APN
+			that can be used.
+			Returns a status string indicating the readiness. Possible status:
+			"ready", "not_allowed", "upstream_network_not_available".
+
+		void SetLOHSEnabled(boolean enabled)
+
+			Enables or disables local only hotspot with the corresponding properties in
+			Manager.LOHSConfig. Returns a string through an asynchronous callback
+			indicating the result. This currently only returns "NotImplemented".
+
+		dict CreateP2PGroup(dict properties)
+
+			Non-operational stub function.
+
+		dict ConnectToP2PGroup(dict properties)
+
+			Non-operational stub function.
+
+		dict DestroyP2PGroup(uint32 shill_id)
+
+			Non-operational stub function.
+
+		dict DisconnectFromP2PGroup(uint32 shill_id)
+
+			Non-operational stub function.
+
 
 Signals		PropertyChanged(string name, variant value)
 
@@ -428,7 +527,7 @@ Signals		PropertyChanged(string name, variant value)
 			current state and so can avoid to be woken up when
 			other details changes.
 
-Properties 	object ActiveProfile [readonly]
+Properties	object ActiveProfile [readonly]
 
 			Object path of the top-most Profile in the Profile stack.
 
@@ -460,8 +559,8 @@ Properties 	object ActiveProfile [readonly]
 
 		array{string} ClaimedDevices [readonly]
 
-			The list of the names of devices that have been claimed by the
-			current DeviceClaimer (if it exists).
+			The list of the names of devices that have been claimed
+			by an external service for management by ClaimInterface method.
 
 		array{string} ConnectedTechnologies [readonly]
 
@@ -489,8 +588,7 @@ Properties 	object ActiveProfile [readonly]
 		array{object} Devices [readonly]
 
 			List of physical Device object paths. No virtual Devices are
-			contained in this list *except* for any PPPDevices being used by
-			active PPPoEServices. Order carries no meaning and is not guaranteed
+			contained in this list. Order carries no meaning and is not guaranteed
 			to be consistent.
 
 		string DHCPProperty.Hostname [readwrite]
@@ -504,17 +602,6 @@ Properties 	object ActiveProfile [readonly]
 			not report a hostname.  When this property is set it will be
 			persisted in the default profile.
 
-		string DHCPProperty.VendorClass [readwrite]
-
-			Optional setting to configure DHCP requests.  This setting can be
-			used to identify the vendor that manufactured the client hardware,
-			the software in use, or an industry consortium to which the vendor
-			belongs.
-
-			The default for this property is empty, which means the system will
-			not report a Vendor Class.  When set, this property will override
-			the default setting and be persisted in the default profile.
-
 		bool DisableVHT [readwrite]
 
 			Disables 802.11ac Very High Throughput (VHT) connections, reverting
@@ -526,6 +613,18 @@ Properties 	object ActiveProfile [readonly]
 			(see the caveat in Devices). Order carries no meaning and is not
 			guaranteed to be consistent.
 
+		boolean EnableDHCPQoS [readwrite]
+
+			If set, shill will instruct dhcpcd to apply proper DSCP value on all
+			egress DHCP packets. Currently this option only affects the DHCP packets
+			on the WiFi networks.
+
+		boolean EnableRFC8925 [readwrite]
+
+			Specify whether DHCPv4 client should follow RFC 8925 to request option
+			108, which will in result volunteer to drop IPv4 and prefer operating as
+			IPv6-only, if the network itself is also IPv6-only capable.
+
 		string IgnoredDNSSearchPaths [readwrite]
 
 			A comma-separated list of DNS domain suffixes which should be
@@ -534,24 +633,51 @@ Properties 	object ActiveProfile [readonly]
 			is updated (while connecting to a network, or when a DHCP lease is
 			renewed).
 
+		dict LOHSConfig [readwrite]
+
+			Dictionary that contains the following Local Only HotSpot (LOHS) related
+			properties. This intentionally mirrors the Manager.TetheringConfig and
+			reuses the same Manager.TetheringConfig property names.
+
+			string ssid
+				the hex-encoded tethering SSID name to be advertised
+			string band
+				the local only hotspot band preference. This should be either
+                                “2.4GHz” or “5GHz”. If absent, the band will be picked by Shill.
+			string security
+				the tethering security to be used. This should be "wpa2"
+			string passphrase
+				the password to be used to authenticate to the local only hotspot
+				network
+
 		string NoAutoConnectTechnologies [readwrite]
 
 			The list of technologies for which auto-connect is disabled. This is
 			a comma-separated string, e.g. "cellular,wifi".
 
-		string PortalFallbackUrlsString [readwrite]
+		string PortalFallbackHttpUrls [readwrite]
 
 			Comma-separated string of URLs used for HTTP connectivity
 			verification after the first connectivity verification trial. The
 			order of these URLs has no meaning.
 
-		string PortalHttpUrl [readonly]
+		string PortalFallbackHttpsUrls [readwrite]
 
-			The URL to use when doing connectivity verification over HTTP.
+			Comma-separated string of URLs used for HTTPS connectivity
+			verification after the first connectivity verification trial. The
+			order of these URLs has no meaning.
 
-		string PortalHttpsUrl [readonly]
+		string PortalHttpUrl [readwrite]
 
-			The URL to use when doing connectivity verification over HTTPS.
+			The first URL to use when doing connectivity verification over HTTP.
+			If portal detection fails with this URL, an entry in
+			PortalFallbackHTTPUrls will be used.
+
+		string PortalHttpsUrl [readwrite]
+
+			The first URL to use when doing connectivity verification over
+			HTTPS. If portal detection fails with this URL, an entry in
+			PortalFallbackHTTPSUrls will be used.
 
 		string ProhibitedTechnologies [readwrite]
 
@@ -644,6 +770,92 @@ Properties 	object ActiveProfile [readonly]
 			"online" if at least one connection exists and "offline" if no
 			device is connected.
 
+		boolean TetheringAllowed [readwrite]
+
+			Whether tethering feature is allowed. When false, SetTetheringEnabled
+			will return failure. The value is controlled by a feature flag in Chrome.
+			Should only be modified by Chrome feature flag or tests.
+
+		boolean ExperimentalTetheringFunctionality [readwrite]
+
+			Whether the tethering feature is allowed on untested carriers,
+			modems and modem FW versions. When false, tethering is only allowed
+			in tested carriers/modems/FWs; when true, the feature is allowed in
+			all of them, unless tethering is disallowed by the carrier.
+
+		dict TetheringCapabilities [readonly]
+
+			Dictionary containing the tethering hardware capabilities of the device.
+
+			array{string} downstream_technologies
+				array containing any/all of "wifi", "ethernet"
+			array{string} upstream_technologies
+				array containing any/all of "wifi", "cellular", "ethernet"
+			array{string} wifi_security_modes
+				array containing any/all of "wpa2", "wpa3" or "wpa2+wpa3"
+
+		dict TetheringConfig [readwrite]
+
+			Dictionary that contains the following Tethering related properties.
+
+			boolean auto_disable
+				automatically disable tethering if no devices have been
+				associated for 10 minutes. Default to true.
+			boolean MAR
+				a random MAC address is used when a mobile AP is started
+				(WiFi downstream only). Default to true.
+			string ssid
+				the hex-encoded tethering SSID name to be advertised (WiFi
+				downstream only)
+			string band
+				the tethering band preference (WiFi downstream only)
+				this should be either “2.4GHz” or “5GHz”. If absent, the band will
+                                be picked by Shill.
+			string security
+				the tethering security to be used (WiFi downstream only)
+				this should be one of "wpa2", "wpa3", "wpa2+wpa3"
+			string passphrase
+				the password to be used to authenticate to the tethering network
+				(WiFi downstream only)
+			string upstream_technology
+				Preferred upstream technology to use, one of "wifi", "cellular",
+				"ethernet". If absent, Shill will use cellular as the default
+				upstream technology.
+			string downstream_device_for_test
+				the assigned downstream device, only used for testing. This
+				property is never persisted.
+			uint32 downstream_phy_index_for_test
+				The phy index of the assigned downstream device, only used for
+				testing. This property is never persisted.
+
+		dict TetheringStatus [readonly]
+
+			Dictionary that contains the status of the active tethering connection,
+
+			string downstream_technology
+				one of "wifi", "ethernet"
+			string upstream_technology
+				one of "wifi", "cellular", "ethernet"
+			string state
+				state of the tethering instance. The state could be any one of
+				"idle", "starting", "active" or "stopping"
+			string idle_reason
+				the reason why tethering is in idle state. Could be any one of
+				"initial_state", "client_stop", "user_exit", "inactive", "error"
+				"upstream_disconnect" or "suspend"
+			array{dict} active_clients
+				string IPv4
+					IPv4 address of the associated client expressed in the
+					dotted-decimal format
+				array{string} IPv6
+					IPv6 addresses of the associated client in allowed format
+					as specified in RFC 2373
+				string MAC
+					EUI-64 or EUI-48 hardware address of the associated client
+				string hostname
+					hostname of the associated client. This value is present
+					only if the client advertises it in its DHCP request.
+
 		array{string} UninitializedTechnologies [readonly]
 
 			The list of uninitialized technologies. An uninitialized technology
@@ -666,6 +878,13 @@ Properties 	object ActiveProfile [readonly]
 			Specifies whether or not a WiFi scan could trigger a
 			roam if a better AP is found on the same network.
 
+		string WiFi.RequestScanType [readwrite]
+
+			Specifies WiFi RequestScan scan type. The possible values are
+			"active", "default", "passive". WiFi RequestScan performs active
+			scans if the value is "active" or "default", and passive scans
+			if the value is "passive".
+
 		array{string, string} DNSProxyDOHProviders [readonly]
 
 			The DNS-over-HTTPS service providers. URLs of the secure
@@ -673,3 +892,9 @@ Properties 	object ActiveProfile [readonly]
 			each value is a comma-separated list of the IP addresses
 			(both v4 and v6 are supported) of the standard DNS name
 			servers that map to the secure DNS service provider.
+
+		boolean P2PAllowed [readwrite]
+
+			Whether P2P feature is allowed. When false, all P2P-related calls
+			will return failure. Should only be modified by Chrome feature flag
+			or tests.

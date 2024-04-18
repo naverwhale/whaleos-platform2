@@ -1,28 +1,23 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <algorithm>
-#include <iterator>
-#include <utility>
-
 #include "runtime_probe/functions/generic_storage.h"
 
+#include "runtime_probe/functions/ata_storage.h"
+#include "runtime_probe/functions/mmc_storage.h"
+#include "runtime_probe/functions/nvme_storage.h"
+#include "runtime_probe/functions/ufs_storage.h"
+#include "runtime_probe/probe_function.h"
+
 namespace runtime_probe {
-namespace {
 
-void ConcatenateDataType(GenericStorageFunction::DataType* dest,
-                         GenericStorageFunction::DataType&& src) {
-  std::move(src.begin(), src.end(), std::back_inserter(*dest));
-}
-}  // namespace
-
-GenericStorageFunction::DataType GenericStorageFunction::EvalImpl() const {
-  DataType result{};
-  ConcatenateDataType(&result, ata_prober_->Eval());
-  ConcatenateDataType(&result, mmc_prober_->Eval());
-  ConcatenateDataType(&result, nvme_prober_->Eval());
-  return result;
+bool GenericStorageFunction::PostParseArguments() {
+  runner_.AddFunction(CreateProbeFunction<AtaStorageFunction>());
+  runner_.AddFunction(CreateProbeFunction<MmcStorageFunction>());
+  runner_.AddFunction(CreateProbeFunction<NvmeStorageFunction>());
+  runner_.AddFunction(CreateProbeFunction<UfsStorageFunction>());
+  return runner_.IsValid();
 }
 
 }  // namespace runtime_probe

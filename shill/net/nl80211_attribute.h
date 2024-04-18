@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <string>
 
-#include <base/macros.h>
+#include <base/containers/span.h>
 
 #include "shill/net/netlink_attribute.h"
 #include "shill/net/netlink_message.h"
@@ -267,7 +267,7 @@ class SHILL_EXPORT Nl80211AttributeRegInitiator : public NetlinkU32Attribute {
   Nl80211AttributeRegInitiator& operator=(const Nl80211AttributeRegInitiator&) =
       delete;
 
-  bool InitFromValue(const ByteString& data) override;
+  bool InitFromValue(base::span<const uint8_t> input) override;
 };
 
 class Nl80211AttributeWiphy : public NetlinkU32Attribute {
@@ -579,7 +579,7 @@ class Nl80211AttributeBss : public NetlinkNestedAttribute {
   static bool ParseInformationElements(AttributeList* attribute_list,
                                        size_t id,
                                        const std::string& attribute_name,
-                                       ByteString data);
+                                       base::span<const uint8_t> data);
 };
 
 class Nl80211AttributeCqm : public NetlinkNestedAttribute {
@@ -649,6 +649,12 @@ class Nl80211AttributeSupportedIftypes : public NetlinkNestedAttribute {
       delete;
   Nl80211AttributeSupportedIftypes& operator=(
       const Nl80211AttributeSupportedIftypes&) = delete;
+
+ private:
+  static bool ParseIfaceTypes(AttributeList* attribute_list,
+                              size_t id,
+                              const std::string& attribute_name,
+                              base::span<const uint8_t> data);
 };
 
 class Nl80211AttributeWiphyBands : public NetlinkNestedAttribute {
@@ -659,6 +665,17 @@ class Nl80211AttributeWiphyBands : public NetlinkNestedAttribute {
   Nl80211AttributeWiphyBands(const Nl80211AttributeWiphyBands&) = delete;
   Nl80211AttributeWiphyBands& operator=(const Nl80211AttributeWiphyBands&) =
       delete;
+};
+
+class Nl80211AttributeInterfaceCombinations : public NetlinkNestedAttribute {
+ public:
+  static const int kName;
+  static const char kNameString[];
+  Nl80211AttributeInterfaceCombinations();
+  Nl80211AttributeInterfaceCombinations(
+      const Nl80211AttributeInterfaceCombinations&) = delete;
+  Nl80211AttributeInterfaceCombinations& operator=(
+      const Nl80211AttributeInterfaceCombinations&) = delete;
 };
 
 class Nl80211AttributeWowlanTriggers : public NetlinkNestedAttribute {
@@ -769,6 +786,18 @@ class Nl80211AttributeSupportedCommands : public NetlinkNestedAttribute {
       delete;
   Nl80211AttributeSupportedCommands& operator=(
       const Nl80211AttributeSupportedCommands&) = delete;
+};
+
+class Nl80211AttributeWiphySelfManagedReg : public NetlinkFlagAttribute {
+ public:
+  static const int kName;
+  static const char kNameString[];
+  Nl80211AttributeWiphySelfManagedReg()
+      : NetlinkFlagAttribute(kName, kNameString) {}
+  Nl80211AttributeWiphySelfManagedReg(
+      const Nl80211AttributeWiphySelfManagedReg&) = delete;
+  Nl80211AttributeWiphySelfManagedReg& operator=(
+      const Nl80211AttributeWiphySelfManagedReg&) = delete;
 };
 
 }  // namespace shill

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include <base/check_op.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_tokenizer.h>
 #include <base/strings/string_util.h>
 
@@ -21,14 +20,14 @@ const int kDefaultVerboseLevel = 0;
 
 // Scope names corresponding to the scope defined by ScopeLogger::Scope.
 const char* const kScopeNames[] = {
-    "cellular", "connection", "crypto",   "daemon",   "dbus",  "device",
-    "dhcp",     "dns",        "ethernet", "http",     "inet",  "link",
-    "manager",  "metrics",    "modem",    "portal",   "power", "ppp",
-    "pppoe",    "profile",    "property", "resolver", "route", "rtnl",
-    "service",  "storage",    "task",     "tc",       "vpn",   "wifi",
+    "bluetooth", "cellular", "connection", "crypto",   "daemon", "dbus",
+    "device",    "dhcp",     "dns",        "ethernet", "http",   "inet",
+    "link",      "manager",  "metrics",    "modem",    "portal", "power",
+    "ppp",       "profile",  "property",   "resolver", "route",  "rtnl",
+    "service",   "storage",  "task",       "tc",       "vpn",    "wifi",
 };
 
-static_assert(base::size(kScopeNames) == ScopeLogger::kNumScopes,
+static_assert(std::size(kScopeNames) == ScopeLogger::kNumScopes,
               "Scope tags do not have expected number of strings");
 
 }  // namespace
@@ -43,13 +42,16 @@ ScopeLogger* ScopeLogger::GetInstance() {
   return instance.get();
 }
 
+// static
+bool ScopeLogger::IsLogEnabled(Scope scope, int verbose_level) {
+  auto* logger = GetInstance();
+  return logger->IsScopeEnabled(scope) &&
+         verbose_level <= logger->verbose_level_;
+}
+
 ScopeLogger::ScopeLogger() : verbose_level_(kDefaultVerboseLevel) {}
 
 ScopeLogger::~ScopeLogger() {}
-
-bool ScopeLogger::IsLogEnabled(Scope scope, int verbose_level) const {
-  return IsScopeEnabled(scope) && verbose_level <= verbose_level_;
-}
 
 bool ScopeLogger::IsScopeEnabled(Scope scope) const {
   CHECK_GE(scope, 0);
@@ -66,7 +68,7 @@ std::string ScopeLogger::GetAllScopeNames() const {
 
 std::string ScopeLogger::GetEnabledScopeNames() const {
   std::vector<std::string> names;
-  for (size_t i = 0; i < base::size(kScopeNames); ++i) {
+  for (size_t i = 0; i < std::size(kScopeNames); ++i) {
     if (scope_enabled_[i])
       names.push_back(kScopeNames[i]);
   }
@@ -99,19 +101,19 @@ void ScopeLogger::EnableScopesByName(const std::string& expression) {
       continue;
 
     size_t i;
-    for (i = 0; i < base::size(kScopeNames); ++i) {
+    for (i = 0; i < std::size(kScopeNames); ++i) {
       if (tokenizer.token() == kScopeNames[i]) {
         SetScopeEnabled(static_cast<Scope>(i), enable_scope);
         break;
       }
     }
-    LOG_IF(WARNING, i == base::size(kScopeNames))
+    LOG_IF(WARNING, i == std::size(kScopeNames))
         << "Unknown scope '" << tokenizer.token() << "'";
   }
 }
 
 void ScopeLogger::RegisterScopeEnableChangedCallback(
-    Scope scope, ScopeEnableChangedCallback callback) {
+    Scope scope, base::RepeatingCallback<void(bool)> callback) {
   CHECK_GE(scope, 0);
   CHECK_LT(scope, kNumScopes);
   log_scope_callbacks_[scope].push_back(callback);
@@ -119,7 +121,7 @@ void ScopeLogger::RegisterScopeEnableChangedCallback(
 
 void ScopeLogger::DisableAllScopes() {
   // Iterate over all scopes so the notification side-effect occurs.
-  for (size_t i = 0; i < base::size(kScopeNames); ++i) {
+  for (size_t i = 0; i < std::size(kScopeNames); ++i) {
     SetScopeEnabled(static_cast<Scope>(i), false);
   }
 }

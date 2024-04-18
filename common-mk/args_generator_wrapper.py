@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -22,7 +22,7 @@ import sys
 import common_utils
 
 
-output = subprocess.check_output(sys.argv[1:], encoding='utf-8').strip()
+output = subprocess.check_output(sys.argv[1:], encoding="utf-8").strip()
 unescaped = common_utils.parse_shell_args(output)
 
-print('\n'.join(unescaped))
+print("\n".join(unescaped))

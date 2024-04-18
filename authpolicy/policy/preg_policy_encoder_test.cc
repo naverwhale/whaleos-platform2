@@ -1,7 +1,8 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -9,7 +10,6 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/json/json_reader.h>
-#include <base/macros.h>
 #include <base/strings/stringprintf.h>
 #include <components/policy/core/common/registry_dict.h>
 #include <gmock/gmock.h>
@@ -48,16 +48,6 @@ constexpr char kExtensionPolicy1[] = "Policy1";
 constexpr char kExtensionPolicy2[] = "Policy2";
 constexpr char kExtensionPolicy3[] = "Policy3";
 constexpr char kExtensionPolicy4[] = "Policy4";
-
-// Converts a json string that contains a dict into a base::DictionaryValue.
-std::unique_ptr<base::DictionaryValue> JsonStringToDictionaryValue(
-    const std::string& json_string) {
-  auto root =
-      base::JSONReader::Read(json_string, base::JSON_ALLOW_TRAILING_COMMAS);
-  return root ? base::DictionaryValue::From(
-                    std::make_unique<base::Value>(std::move(*root)))
-              : nullptr;
-}
 
 }  // namespace
 
@@ -211,72 +201,6 @@ TEST_F(PregPolicyEncoderTest, UserPolicyMandatoryOverridesRecommended) {
                              SECOND_WINS);
 }
 
-// Encodes device policies of different types.
-TEST_F(PregPolicyEncoderTest, DevicePolicyEncodingWorks) {
-  // Create a preg file with some interesting data.
-  PRegUserDevicePolicyWriter writer;
-  writer.AppendBoolean(key::kDeviceGuestModeEnabled, kPolicyBool);
-  writer.AppendInteger(key::kDevicePolicyRefreshRate, kPolicyInt);
-  writer.AppendString(key::kSystemTimezone, kPolicyStr);
-  const std::vector<std::string> str_list = {"str1", "str2"};
-  writer.AppendStringList(key::kDeviceUserWhitelist, str_list);
-  writer.WriteToFile(preg_1_path_);
-
-  // Encode preg file into policy.
-  em::ChromeDeviceSettingsProto policy;
-  EXPECT_TRUE(ParsePRegFilesIntoDevicePolicy({preg_1_path_}, &policy,
-                                             false /* log_policy_values */));
-
-  // Check that policy has the same values as we wrote to the file.
-  EXPECT_EQ(kPolicyBool, policy.guest_mode_enabled().guest_mode_enabled());
-  EXPECT_EQ(kPolicyInt,
-            policy.device_policy_refresh_rate().device_policy_refresh_rate());
-  EXPECT_EQ(kPolicyStr, policy.system_timezone().timezone());
-  const em::UserWhitelistProto& str_list_proto = policy.user_whitelist();
-  EXPECT_EQ(str_list_proto.user_whitelist_size(),
-            static_cast<int>(str_list.size()));
-  for (int n = 0; n < str_list_proto.user_whitelist_size(); ++n)
-    EXPECT_EQ(str_list_proto.user_whitelist(n), str_list.at(n));
-}
-
-// Checks that a device GPO later in the list overrides prior GPOs.
-TEST_F(PregPolicyEncoderTest, DevicePolicyFileOverride) {
-  // Write file 1 with some interesting data. Note that device policy doesn't
-  // support mandatory/recommended policies.
-  PRegUserDevicePolicyWriter writer1;
-  writer1.AppendBoolean(key::kDeviceGuestModeEnabled, kOtherPolicyBool);
-  writer1.AppendInteger(key::kDevicePolicyRefreshRate, kPolicyInt);
-  writer1.AppendString(key::kSystemTimezone, kPolicyStr);
-  const std::vector<std::string> str_list1 = {"str1", "str2", "str3"};
-  writer1.AppendStringList(key::kDeviceUserWhitelist, str_list1);
-  writer1.WriteToFile(preg_1_path_);
-
-  // Write file 2 with the same policies, but different values.
-  PRegUserDevicePolicyWriter writer2;
-  writer2.AppendBoolean(key::kDeviceGuestModeEnabled, kPolicyBool);
-  writer2.AppendInteger(key::kDevicePolicyRefreshRate, kOtherPolicyInt);
-  writer2.AppendString(key::kSystemTimezone, kOtherPolicyStr);
-  const std::vector<std::string> str_list2 = {"str4", "str5"};
-  writer2.AppendStringList(key::kDeviceUserWhitelist, str_list2);
-  writer2.WriteToFile(preg_2_path_);
-
-  // Encode to policy.
-  em::ChromeDeviceSettingsProto policy;
-  EXPECT_TRUE(ParsePRegFilesIntoDevicePolicy(
-      {preg_1_path_, preg_2_path_}, &policy, false /* log_policy_values */));
-
-  // Check that the values from file 2 prevailed.
-  EXPECT_EQ(kPolicyBool, policy.guest_mode_enabled().guest_mode_enabled());
-  EXPECT_EQ(kOtherPolicyInt,
-            policy.device_policy_refresh_rate().device_policy_refresh_rate());
-  EXPECT_EQ(kOtherPolicyStr, policy.system_timezone().timezone());
-  const em::UserWhitelistProto& str_list_proto = policy.user_whitelist();
-  EXPECT_EQ(str_list_proto.user_whitelist_size(),
-            static_cast<int>(str_list2.size()));
-  for (int n = 0; n < str_list_proto.user_whitelist_size(); ++n)
-    EXPECT_EQ(str_list_proto.user_whitelist(n), str_list2.at(n));
-}
-
 // Encodes extension policies of different types.
 TEST_F(PregPolicyEncoderTest, ExtensionPolicyEncodingWorks) {
   // Create a preg file with some interesting data.
@@ -378,21 +302,22 @@ TEST_F(PregPolicyEncoderTest, TestJsonWithNewlinesRoundtrip) {
   RegistryDict dict;
   EXPECT_TRUE(LoadPRegFileIntoDict(preg_1_path_, kKeyUserDevice, &dict));
   const std::string& roundtripped_json = dict.GetValue("TestJson")->GetString();
-  std::unique_ptr<base::DictionaryValue> json_dict =
-      JsonStringToDictionaryValue(roundtripped_json);
-  ASSERT_TRUE(json_dict != nullptr);
+  std::optional<base::Value> json_dict = base::JSONReader::Read(
+      roundtripped_json, base::JSON_ALLOW_TRAILING_COMMAS);
+  ASSERT_TRUE(json_dict.has_value());
+  ASSERT_TRUE(json_dict->is_dict());
 
-  bool test_bool;
-  json_dict->GetBoolean("TestBool", &test_bool);
-  EXPECT_EQ(true, test_bool);
+  auto test_bool = json_dict->GetDict().FindBool("TestBool");
+  ASSERT_TRUE(test_bool.has_value());
+  EXPECT_TRUE(*test_bool);
 
-  int test_int;
-  json_dict->GetInteger("TestInt", &test_int);
-  EXPECT_EQ(123456, test_int);
+  auto test_int = json_dict->GetDict().FindInt("TestInt");
+  ASSERT_TRUE(test_int.has_value());
+  EXPECT_EQ(*test_int, 123456);
 
-  std::string test_string;
-  json_dict->GetString("TestString", &test_string);
-  EXPECT_EQ("elephant", test_string);
+  auto test_string = json_dict->GetDict().FindString("TestString");
+  ASSERT_NE(test_string, nullptr);
+  EXPECT_EQ(*test_string, "elephant");
 }
 
 // Roundtrips a JSON dict that contains unescaped newlines within a single
@@ -417,14 +342,16 @@ TEST_F(PregPolicyEncoderTest, TestJsonWithNewlinesInsideStringRoundtrip) {
   RegistryDict dict;
   EXPECT_TRUE(LoadPRegFileIntoDict(preg_1_path_, kKeyUserDevice, &dict));
   const std::string& roundtripped_json = dict.GetValue("TestJson")->GetString();
-  std::unique_ptr<base::DictionaryValue> json_dict =
-      JsonStringToDictionaryValue(roundtripped_json);
-  ASSERT_TRUE(json_dict != nullptr);
+  std::optional<base::Value> json_dict = base::JSONReader::Read(
+      roundtripped_json,
+      base::JSON_ALLOW_TRAILING_COMMAS | base::JSON_ALLOW_CONTROL_CHARS);
+  ASSERT_TRUE(json_dict.has_value());
+  ASSERT_TRUE(json_dict->is_dict());
 
-  std::string test_certificate;
-  json_dict->GetString("TestCertificate", &test_certificate);
-  EXPECT_EQ("A-B-C-D-E-F-G\nH-I-J-K-LMNOP\nQ-R-S...T-U-V\nW-X...Y-and-Z",
-            test_certificate);
+  auto test_certificate = json_dict->GetDict().FindString("TestCertificate");
+  ASSERT_NE(test_certificate, nullptr);
+  EXPECT_EQ(*test_certificate,
+            "A-B-C-D-E-F-G\nH-I-J-K-LMNOP\nQ-R-S...T-U-V\nW-X...Y-and-Z");
 }
 
 }  // namespace policy

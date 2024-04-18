@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,29 +7,29 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
-#include <base/optional.h>
 #include <base/time/time.h>
+#include <base/timer/timer.h>
 #include <brillo/asynchronous_signal_handler.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
 #include <install_attributes/libinstallattributes.h>
+#include <libcrossystem/crossystem.h>
 
 #include "login_manager/android_oci_wrapper.h"
 #include "login_manager/child_exit_handler.h"
-#include "login_manager/crossystem_impl.h"
+#include "login_manager/device_identifier_generator.h"
 #include "login_manager/key_generator.h"
 #include "login_manager/liveness_checker.h"
 #include "login_manager/policy_key.h"
 #include "login_manager/process_manager_service_interface.h"
-#include "login_manager/server_backed_state_key_generator.h"
 #include "login_manager/session_manager_impl.h"
 #include "login_manager/session_manager_interface.h"
 #include "login_manager/vpd_process_impl.h"
@@ -113,6 +113,11 @@ class SessionManagerService
     // Trigger and handle SessionManagerImpl initialization.
     bool InitializeImpl() { return session_manager_service_->InitializeImpl(); }
 
+    // Trigger initialization of the browser job.
+    void InitializeBrowser() {
+      return session_manager_service_->InitializeBrowser();
+    }
+
    private:
     friend class SessionManagerService;
     explicit TestApi(SessionManagerService* session_manager_service)
@@ -122,7 +127,7 @@ class SessionManagerService
 
   SessionManagerService(std::unique_ptr<BrowserJobInterface> child_job,
                         uid_t uid,
-                        base::Optional<base::FilePath> ns_path,
+                        std::optional<base::FilePath> ns_path,
                         base::TimeDelta kill_timeout,
                         bool enable_browser_abort_on_hang,
                         base::TimeDelta hang_detection_interval,
@@ -165,9 +170,14 @@ class SessionManagerService
       const std::string& account_id,
       const std::vector<std::string>& feature_flags,
       const std::map<std::string, std::string>& origin_list_flags) override;
-  void SetBrowserDataMigrationArgsForUser(const std::string& userhash) override;
+  void SetBrowserDataMigrationArgsForUser(const std::string& userhash,
+                                          const std::string& mode) override;
+  void SetBrowserDataBackwardMigrationArgsForUser(
+      const std::string& userhash) override;
   bool IsBrowser(pid_t pid) override;
+  std::optional<pid_t> GetBrowserPid() const override;
   base::TimeTicks GetLastBrowserRestartTime() override;
+  void SetMultiUserSessionStarted() override;
 
   // ChildExitHandler overrides:
   // Handles only browser exit (i.e. IsBrowser(pid) returns true).
@@ -207,6 +217,9 @@ class SessionManagerService
   // suspend and resume.
   void InitializeSuspendDelays();
 
+  // Initializes the browser job by setting the initial command line arguments.
+  void InitializeBrowser();
+
   // Tears down DBus connection. Failure is fatal.
   void ShutDownDBus();
 
@@ -239,14 +252,19 @@ class SessionManagerService
 
   // Invoked to update |use_long_kill_timeout_| after checking
   // 'SessionManagerUseLongKillTimeout' feature.
-  void OnLongKillTimeoutEnabled(base::Optional<bool> enabled);
+  void OnLongKillTimeoutEnabled(std::optional<bool> enabled);
 
   // Invoked to update |liveness_check_enabled_| after checking
   // the 'SessionManagerLivenessCheck' feature.
-  void OnLivenessCheckEnabled(base::Optional<bool> enabled);
+  void OnLivenessCheckEnabled(std::optional<bool> enabled);
+
+  // Called on timeout for the SIGABRT by AbortBrowserForHang().
+  void OnAbortTimedOut();
+  // Called on timeout for the SIGKILL by AbortBrowserForHang().
+  void OnSigkillTimedOut();
 
   std::unique_ptr<BrowserJobInterface> browser_;
-  base::Optional<base::FilePath> chrome_mount_ns_path_;
+  std::optional<base::FilePath> chrome_mount_ns_path_;
   base::TimeTicks last_browser_restart_time_;
   bool exit_on_child_done_ = false;
   const base::TimeDelta kill_timeout_;
@@ -261,6 +279,7 @@ class SessionManagerService
 #if USE_ARC_ADB_SIDELOADING
   dbus::ObjectProxy* boot_lockbox_dbus_proxy_ = nullptr;
 #endif
+  dbus::ObjectProxy* fwmp_dbus_proxy_ = nullptr;
 
   // True when the vm_concierge service is available.
   bool vm_concierge_available_ = false;
@@ -271,8 +290,8 @@ class SessionManagerService
   std::unique_ptr<NssUtil> nss_;
   PolicyKey owner_key_;
   KeyGenerator key_gen_;
-  ServerBackedStateKeyGenerator state_key_generator_;
-  CrossystemImpl crossystem_;
+  DeviceIdentifierGenerator device_identifier_generator_;
+  crossystem::Crossystem crossystem_;
   VpdProcessImpl vpd_process_;
   std::unique_ptr<ContainerManagerInterface> android_container_;
   InstallAttributesReader install_attributes_reader_;
@@ -285,6 +304,19 @@ class SessionManagerService
   // Holds pointers to nss_, key_gen_, this. Shares system_, login_metrics_.
   std::unique_ptr<SessionManagerInterface> impl_;
 
+  // Aborting flow triggered by AbortBrowserForHang is as follows:
+  // First, send SIGABRT to the browser process.
+  //   - If the browser is terminated expectedly, HandleExit is called.
+  //     The aborting is completed here.
+  // If the browser is not terminated on timeout, send SIGKILL to all chrome
+  // processes.
+  //   - If the browser is terminated expectedly, HandleExit is called.
+  //     The aborting is completed here.
+  // If it still timed out, unfortunately, there's nothing we can do. Leaving
+  // the log message.
+  // This |abort_timer_| is to handle the time out for HandleExit waiting.
+  base::OneShotTimer abort_timer_;
+
   brillo::AsynchronousSignalHandler signal_handler_;
   std::unique_ptr<ChildExitDispatcher> child_exit_dispatcher_;
   bool shutting_down_ = false;
@@ -296,12 +328,6 @@ class SessionManagerService
   // chrome starts and check the 'SessionManaagerLongKillTimeout' feature
   // enabled state via ChromeFeaturesService.
   bool use_long_kill_timeout_ = false;
-
-  // This is set to true when |SetBrowserDataMigrationArgsForUser()| is called.
-  // Inside |RunBrowser()| if the value is true,
-  // |BrowserJob::ClearBrowserDataMigrationArgs()| is called to ensure that
-  // ash-chrome is run with the data migration args only once.
-  bool run_data_migration_ = false;
 };
 }  // namespace login_manager
 

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,18 +9,18 @@
 
 #include <string>
 
+#include <base/files/file_path.h>
+
 namespace dlcservice {
 
 class MockBootDevice : public BootDeviceInterface {
  public:
   MockBootDevice() = default;
-
-  MOCK_METHOD(bool, IsRemovableDevice, (const std::string&), (override));
-  MOCK_METHOD(std::string, GetBootDevice, (), (override));
-
- private:
   MockBootDevice(const MockBootDevice&) = delete;
   MockBootDevice& operator=(const MockBootDevice&) = delete;
+
+  MOCK_METHOD(bool, IsRemovableDevice, (const std::string&), (override));
+  MOCK_METHOD(base::FilePath, GetBootDevice, (), (override));
 };
 
 }  // namespace dlcservice

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,6 @@
 #include <functional>
 #include <unordered_set>
 
-#include <base/macros.h>
 #include <brillo/brillo_export.h>
 
 namespace patchpanel {
@@ -22,6 +21,10 @@ using MacAddress = std::array<uint8_t, 6>;
 // with any previously generated addresses by this instance.
 class BRILLO_EXPORT MacAddressGenerator {
  public:
+  // Base address used for MacAddressGenerator::GetStable.
+  static constexpr MacAddress kStableBaseAddr = {0x42, 0x37, 0x05,
+                                                 0x13, 0x17, 0x00};
+
   MacAddressGenerator() = default;
   MacAddressGenerator(const MacAddressGenerator&) = delete;
   MacAddressGenerator& operator=(const MacAddressGenerator&) = delete;
@@ -33,11 +36,13 @@ class BRILLO_EXPORT MacAddressGenerator {
   // the generator.
   MacAddress Generate();
 
-  // Returns a stable MAC address whose first 5 octets are fixed and using |id|
+  // Returns a stable MAC address whose first 5 octets are fixed and using the
+  // least significant byte of |id|
   // as the sixth. The base address is itself random and was not generated from
   // any particular device, physical or virtual. Additionally, the |id| should
-  // associated with any specific device either, and should be set indepedently.
-  MacAddress GetStable(uint8_t id) const;
+  // associated with any specific device either, and should be set
+  // independently.
+  MacAddress GetStable(uint32_t id) const;
 
  private:
   // The standard library sadly does not provide a hash function for std::array.

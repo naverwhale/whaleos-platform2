@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -65,11 +65,14 @@ class BRILLO_EXPORT ExportedPropertyBase {
   ExportedPropertyBase() = default;
   virtual ~ExportedPropertyBase() = default;
 
-  using OnUpdateCallback = base::Callback<void(const ExportedPropertyBase*)>;
+  using OnUpdateCallback =
+      base::RepeatingCallback<void(const ExportedPropertyBase*)>;
 
   // Called by ExportedPropertySet to register a callback.  This callback
   // triggers ExportedPropertySet to send a signal from the properties
   // interface of the exported object.
+  // This API is NOT designed to be used other than ExportedPropertySet.
+  // If so, the signal propergation will be blocked.
   virtual void SetUpdateCallback(const OnUpdateCallback& cb);
 
   // Clears the update callback that was previously set with SetUpdateCallback.
@@ -95,7 +98,7 @@ class BRILLO_EXPORT ExportedPropertyBase {
 
 class BRILLO_EXPORT ExportedPropertySet {
  public:
-  using PropertyWriter = base::Callback<void(VariantDictionary* dict)>;
+  using PropertyWriter = base::RepeatingCallback<void(VariantDictionary* dict)>;
 
   explicit ExportedPropertySet(::dbus::Bus* bus);
   ExportedPropertySet(const ExportedPropertySet&) = delete;
@@ -191,8 +194,8 @@ class ExportedProperty : public ExportedPropertyBase {
 
   // Set the validator for value checking when setting the property by remote
   // application.
-  void SetValidator(
-      const base::Callback<bool(brillo::ErrorPtr*, const T&)>& validator) {
+  void SetValidator(const base::RepeatingCallback<bool(brillo::ErrorPtr*,
+                                                       const T&)>& validator) {
     validator_ = validator;
   }
 
@@ -225,7 +228,7 @@ class ExportedProperty : public ExportedPropertyBase {
 
  private:
   T value_{};
-  base::Callback<bool(brillo::ErrorPtr*, const T&)> validator_;
+  base::RepeatingCallback<bool(brillo::ErrorPtr*, const T&)> validator_;
 };
 
 }  // namespace dbus_utils

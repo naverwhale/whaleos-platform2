@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,28 @@
 #include <memory>
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/text_format.h>
+#include <metrics/metrics_library.h>
 #include <vm_protos/proto_bindings/vm_crash.grpc.pb.h>
 
 #include "crash-reporter/constants.h"
 
-VmCollector::VmCollector()
-    : CrashCollector(
-          "vm_collector", kAlwaysUseUserCrashDirectory, kNormalCrashSendMode) {}
+// Disallow fallback directory -- VM collector is run in a sandbox without
+// access to /home/chronos. (vm_collector is invoked via cicerone, with a
+// minijail configured in platform2/vm_tools/init/vm_cicerone.conf)
+VmCollector::VmCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("vm_collector",
+                     kAlwaysUseDaemonStore,
+                     kNormalCrashSendMode,
+                     metrics_lib) {}
 
 bool VmCollector::Collect(pid_t pid) {
   vm_tools::cicerone::CrashReport crash_report;
@@ -28,8 +39,7 @@ bool VmCollector::Collect(pid_t pid) {
   }
 
   base::FilePath crash_path;
-  if (!GetCreatedCrashDirectoryByEuid(geteuid(), &crash_path, nullptr,
-                                      /*use_non_chronos_cryptohome=*/true)) {
+  if (!GetCreatedCrashDirectoryByEuid(geteuid(), &crash_path, nullptr)) {
     LOG(ERROR) << "Failed to create or find crash directory";
     return false;
   }
@@ -65,9 +75,22 @@ bool VmCollector::Collect(pid_t pid) {
   return true;
 }
 
+CrashCollector::ComputedCrashSeverity VmCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  return ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kError,
+      .product_group = Product::kPlatform,
+  };
+}
+
 // static
-CollectorInfo VmCollector::GetHandlerInfo(bool vm_crash, int32_t vm_pid) {
-  auto vm_collector = std::make_shared<VmCollector>();
+CollectorInfo VmCollector::GetHandlerInfo(
+    bool vm_crash,
+    int32_t vm_pid,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
+  auto vm_collector = std::make_shared<VmCollector>(metrics_lib);
   return {.collector = vm_collector,
           .handlers = {{
               .should_handle = vm_crash,

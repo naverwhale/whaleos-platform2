@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,11 +21,12 @@ class BRILLO_EXPORT InstallAttributesReader {
   static const char kAttrMode[];
 
   // Constants for the possible device modes.
-  static const char kDeviceModeConsumer[];
-  static const char kDeviceModeEnterprise[];
-  static const char kDeviceModeEnterpriseAD[];
-  static const char kDeviceModeLegacyRetail[];
-  static const char kDeviceModeConsumerKiosk[];
+  // The consumer owned devices don't have the enterprise.mode attribute.
+  static constexpr char kDeviceModeEnterprise[] = "enterprise";
+  // TODO(igorcov): Remove AD constant after all of its usages are removed.
+  static constexpr char kDeviceModeEnterpriseAD[] = "enterprise_ad";
+  static constexpr char kDeviceModeLegacyRetail[] = "kiosk";
+  static constexpr char kDeviceModeConsumerKiosk[] = "consumer_kiosk";
 
   InstallAttributesReader();
   virtual ~InstallAttributesReader();

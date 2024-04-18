@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,14 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <cras/dbus-proxies.h>
 
 namespace {
+
+namespace mojom = ::ash::cros_healthd::mojom;
 
 void HandleSignalConnected(const std::string& interface,
                            const std::string& signal,
@@ -30,7 +32,7 @@ void HandleSignalConnected(const std::string& interface,
 namespace diagnostics {
 
 AudioEventsImpl::AudioEventsImpl(Context* context) : context_(context) {
-  DCHECK(context_);
+  CHECK(context_);
   context_->cras_proxy()->RegisterUnderrunSignalHandler(
       base::BindRepeating(&AudioEventsImpl::OnUnderrunSignal,
                           base::Unretained(this)),
@@ -43,18 +45,30 @@ AudioEventsImpl::AudioEventsImpl(Context* context) : context_(context) {
 }
 
 void AudioEventsImpl::AddObserver(
-    mojo::PendingRemote<chromeos::cros_healthd::mojom::CrosHealthdAudioObserver>
-        observer) {
+    mojo::PendingRemote<mojom::EventObserver> observer) {
   observers_.Add(std::move(observer));
 }
 
+void AudioEventsImpl::AddObserver(
+    mojo::PendingRemote<mojom::CrosHealthdAudioObserver> observer) {
+  deprecated_observers_.Add(std::move(observer));
+}
+
 void AudioEventsImpl::OnUnderrunSignal() {
+  mojom::AudioEventInfo info;
+  info.state = mojom::AudioEventInfo::State::kUnderrun;
   for (auto& observer : observers_)
+    observer->OnEvent(mojom::EventInfo::NewAudioEventInfo(info.Clone()));
+  for (auto& observer : deprecated_observers_)
     observer->OnUnderrun();
 }
 
 void AudioEventsImpl::OnSevereUnderrunSignal() {
+  mojom::AudioEventInfo info;
+  info.state = mojom::AudioEventInfo::State::kSevereUnderrun;
   for (auto& observer : observers_)
+    observer->OnEvent(mojom::EventInfo::NewAudioEventInfo(info.Clone()));
+  for (auto& observer : deprecated_observers_)
     observer->OnSevereUnderrun();
 }
 

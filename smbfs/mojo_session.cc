@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,17 +8,17 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
-#include <base/logging.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/logging.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/pending_remote.h>
 #include <mojo/public/cpp/bindings/receiver.h>
 
-#include "smbfs/authpolicy_client.h"
 #include "smbfs/fuse_session.h"
+#include "smbfs/kerberos_artifact_client_interface.h"
 #include "smbfs/kerberos_artifact_synchronizer.h"
 #include "smbfs/kerberos_client.h"
 #include "smbfs/smb_filesystem.h"
@@ -95,8 +95,11 @@ void MojoSession::SetupKerberos(
   std::unique_ptr<KerberosArtifactClientInterface> client;
   switch (kerberos_config->source) {
     case mojom::KerberosConfig::Source::kActiveDirectory:
-      client = std::make_unique<AuthPolicyClient>(bus_);
-      break;
+      // TODO(b/263367348): Remove this switch-case, after cleaning up the enum.
+      LOG(ERROR)
+          << "Invalid enum type KerberosConfig::Source::kActiveDirectory - "
+             "Chromebooks should no longer be AD managed.";
+      [[fallthrough]];
     case mojom::KerberosConfig::Source::kKerberos:
       client = std::make_unique<KerberosClient>(bus_);
       break;

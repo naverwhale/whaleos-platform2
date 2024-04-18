@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -13,7 +13,6 @@
 #include <memory>
 #include <vector>
 
-#include "cros-camera/camera_buffer_manager.h"
 #include "cros-camera/hdrnet_linear_rgb_pipeline_cros.h"
 #include "features/hdrnet/hdrnet_processor_device_adapter.h"
 
@@ -39,44 +38,28 @@ class HdrNetProcessorImpl : public HdrNetProcessor {
 
   // HdrNetProcessor implementations.
   ~HdrNetProcessorImpl() override = default;
-  bool Initialize(Size input_size,
+  bool Initialize(GpuResources* gpu_resources,
+                  Size input_size,
                   const std::vector<Size>& output_sizes) override;
   void TearDown() override;
   void SetOptions(const Options& options) override;
   bool WriteRequestParameters(Camera3CaptureDescriptor* request) override;
   void ProcessResultMetadata(Camera3CaptureDescriptor* result) override;
-  base::ScopedFD Run(
-      int frame_number,
-      const HdrNetConfig::Options& options,
-      const SharedImage& input_yuv,
-      base::ScopedFD input_release_fence,
-      const std::vector<buffer_handle_t>& output_nv12_buffers) override;
+  base::ScopedFD Run(int frame_number,
+                     const HdrNetConfig::Options& options,
+                     const SharedImage& input_yuv,
+                     base::ScopedFD input_release_fence,
+                     const std::vector<buffer_handle_t>& output_nv12_buffers,
+                     HdrnetMetrics* hdrnet_metrics) override;
 
  private:
-  void YUVToNV12(const SharedImage& input_yuv, const SharedImage& output_nv12);
-
-  bool RunLinearRgbPipeline(const HdrNetConfig::Options& options,
-                            const SharedImage& input_rgba,
-                            const SharedImage& output_rgba);
-
-  int GetTextureRefHandle(const SharedImage& image);
-
-  void DumpGpuTextureSharedImage(const SharedImage& image,
-                                 base::FilePath output_file_path);
+  bool YUVToNV12(const SharedImage& input_yuv, const SharedImage& output_nv12);
 
   scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
 
-  std::unique_ptr<GpuImageProcessor> image_processor_;
+  GpuResources* gpu_resources_;
   std::unique_ptr<HdrNetLinearRgbPipelineCrOS> hdrnet_pipeline_;
   std::unique_ptr<HdrNetProcessorDeviceAdapter> processor_device_adapter_;
-
-  // Intermediate buffers for storing pre-processing results.
-  SharedImage intermediates_[2];
-  std::map<GLuint, int> texture_ref_handle_map_;
-  // A buffer that's only allocated when we need to dump the intermediate images
-  // for debugging.
-  ScopedBufferHandle dump_buffer_ = nullptr;
-  SharedImage dump_image_;
 
   // Metadata logger for tests and debugging.
   MetadataLogger* metadata_logger_ = nullptr;

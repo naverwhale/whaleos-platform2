@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,16 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/callback_helpers.h>
+#include "base/time/time.h"
 #include <base/check.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
+#include <base/types/expected.h>
+#include <dbus/error.h>
 #include <dbus/message.h>
 #include <dbus/object_proxy.h>
 
@@ -22,6 +26,7 @@ constexpr char kStartUnitMode[] = "replace";
 constexpr char kStartUnitMethodName[] = "StartUnit";
 constexpr char kSetEnvironmentMethodName[] = "SetEnvironment";
 constexpr char kUnsetEnvironmentMethodName[] = "UnsetEnvironment";
+constexpr base::TimeDelta kDefaultTimeout = base::TimeDelta::Min();
 
 std::unique_ptr<dbus::Response> CallEnvironmentMethod(
     dbus::ObjectProxy* proxy,
@@ -32,8 +37,10 @@ std::unique_ptr<dbus::Response> CallEnvironmentMethod(
   dbus::MessageWriter writer(&method_call);
   writer.AppendArrayOfStrings(args_keyvals);
 
-  return proxy->CallMethodAndBlock(&method_call,
-                                   dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response(
+      proxy->CallMethodAndBlock(&method_call,
+                                dbus::ObjectProxy::TIMEOUT_USE_DEFAULT));
+  return std::move(response).value_or(nullptr);
 }
 
 std::unique_ptr<dbus::Response> SetEnvironment(
@@ -72,6 +79,18 @@ std::unique_ptr<dbus::Response> SystemdUnitStarter::TriggerImpulse(
     const std::string& unit_name,
     const std::vector<std::string>& args_keyvals,
     TriggerMode mode) {
+  dbus::Error dbus_error;
+  return this->TriggerImpulseWithTimeoutAndError(unit_name, args_keyvals, mode,
+                                                 kDefaultTimeout, &dbus_error);
+}
+
+std::unique_ptr<dbus::Response>
+SystemdUnitStarter::TriggerImpulseWithTimeoutAndError(
+    const std::string& unit_name,
+    const std::vector<std::string>& args_keyvals,
+    TriggerMode mode,
+    base::TimeDelta timeout,
+    dbus::Error* error) {
   DLOG(INFO) << "Starting " << unit_name << " unit";
 
   // If we are not able to properly set the environment for the
@@ -85,15 +104,23 @@ std::unique_ptr<dbus::Response> SystemdUnitStarter::TriggerImpulse(
   writer.AppendString(unit_name + ".target");
   writer.AppendString(kStartUnitMode);
 
+  int timeout_ms = timeout.is_min() ? dbus::ObjectProxy::TIMEOUT_USE_DEFAULT
+                                    : timeout.InMilliseconds();
   std::unique_ptr<dbus::Response> response;
   switch (mode) {
-    case TriggerMode::SYNC:
-      response = systemd_dbus_proxy_->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    case TriggerMode::SYNC: {
+      base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response(
+          systemd_dbus_proxy_->CallMethodAndBlock(&method_call, timeout_ms));
+      if (!response.has_value()) {
+        *error = std::move(response.error());
+        return nullptr;
+      }
+      response = std::move(response.value());
       break;
+    }
     case TriggerMode::ASYNC:
-      systemd_dbus_proxy_->CallMethod(&method_call,
-                                      dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
+      // TODO(vsomani): replace with CallMethodWithErrorResponse when needed.
+      systemd_dbus_proxy_->CallMethod(&method_call, timeout_ms,
                                       base::DoNothing());
       break;
   }

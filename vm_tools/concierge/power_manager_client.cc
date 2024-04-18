@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/time/time.h>
 #include <brillo/dbus/dbus_proxy_util.h>
@@ -14,12 +14,12 @@
 #include <dbus/object_path.h>
 #include <power_manager/proto_bindings/suspend.pb.h>
 
-namespace vm_tools {
-namespace concierge {
+#include "vm_tools/concierge/tracing.h"
+
+namespace vm_tools::concierge {
 namespace {
 // How long powerd should wait for us to report suspend readiness.
-constexpr base::TimeDelta kSuspendDelayTimeout =
-    base::TimeDelta::FromSeconds(5);
+constexpr base::TimeDelta kSuspendDelayTimeout = base::Seconds(5);
 
 // Used to mark that the device is not currently suspended or about to suspend.
 constexpr int32_t kNoSuspendId = -1;
@@ -28,8 +28,7 @@ constexpr int32_t kNoSuspendId = -1;
 
 PowerManagerClient::PowerManagerClient(scoped_refptr<dbus::Bus> bus)
     : bus_(bus),
-      power_manager_proxy_(nullptr),
-      delay_id_(-1),
+
       current_suspend_id_(kNoSuspendId) {
   power_manager_proxy_ = bus_->GetObjectProxy(
       power_manager::kPowerManagerServiceName,
@@ -60,8 +59,9 @@ PowerManagerClient::~PowerManagerClient() {
   }
 }
 
-void PowerManagerClient::RegisterSuspendDelay(base::Closure suspend_imminent_cb,
-                                              base::Closure suspend_done_cb) {
+void PowerManagerClient::RegisterSuspendDelay(
+    const base::RepeatingClosure& suspend_imminent_cb,
+    const base::RepeatingClosure& suspend_done_cb) {
   // We don't need to check whether powerd is running because it should start
   // automatically at boot while concierge is not started until the user
   // explicitly tries to start a VM.
@@ -103,23 +103,24 @@ void PowerManagerClient::RegisterSuspendDelay(base::Closure suspend_imminent_cb,
   power_manager_proxy_->ConnectToSignal(
       power_manager::kPowerManagerInterface,
       power_manager::kSuspendImminentSignal,
-      base::Bind(&PowerManagerClient::HandleSuspendImminent,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&PowerManagerClient::HandleSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&PowerManagerClient::HandleSuspendImminent,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&PowerManagerClient::HandleSignalConnected,
+                     weak_factory_.GetWeakPtr()));
 
   power_manager_proxy_->ConnectToSignal(
       power_manager::kPowerManagerInterface, power_manager::kSuspendDoneSignal,
-      base::Bind(&PowerManagerClient::HandleSuspendDone,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&PowerManagerClient::HandleSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&PowerManagerClient::HandleSuspendDone,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&PowerManagerClient::HandleSignalConnected,
+                     weak_factory_.GetWeakPtr()));
 
-  power_manager_proxy_->SetNameOwnerChangedCallback(base::Bind(
+  power_manager_proxy_->SetNameOwnerChangedCallback(base::BindRepeating(
       &PowerManagerClient::HandleNameOwnerChanged, weak_factory_.GetWeakPtr()));
 }
 
 void PowerManagerClient::HandleSuspendImminent(dbus::Signal* signal) {
+  VMT_TRACE(kCategory, "PowerManagerClient::HandleSuspendImminent");
   power_manager::SuspendImminent message;
   if (!dbus::MessageReader(signal).PopArrayOfBytesAsProto(&message)) {
     LOG(ERROR) << "Failed to decode SuspendImminent message";
@@ -135,6 +136,7 @@ void PowerManagerClient::HandleSuspendImminent(dbus::Signal* signal) {
 
   suspend_imminent_cb_.Run();
 
+  VMT_TRACE(kCategory, "PowerManagerClient::HandleSuspendImminent::Reply");
   dbus::MethodCall method_call(power_manager::kPowerManagerInterface,
                                power_manager::kHandleSuspendReadinessMethod);
 
@@ -157,6 +159,7 @@ void PowerManagerClient::HandleSuspendImminent(dbus::Signal* signal) {
 }
 
 void PowerManagerClient::HandleSuspendDone(dbus::Signal* signal) {
+  VMT_TRACE(kCategory, "PowerManagerClient::HandleSuspendDone");
   power_manager::SuspendDone message;
   if (!dbus::MessageReader(signal).PopArrayOfBytesAsProto(&message)) {
     LOG(ERROR) << "Failed to decode SuspendImminent message";
@@ -192,5 +195,4 @@ void PowerManagerClient::HandleSignalConnected(
                  << interface_name;
   }
 }
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,8 +12,8 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
 #include <base/cancelable_callback.h>
+#include <base/functional/callback.h>
 #include <base/time/time.h>
 #include <linux/nl80211.h>
 
@@ -27,7 +27,7 @@ class PowerManager : public PowerManagerProxyDelegate {
  public:
   // This callback is called prior to a suspend attempt.  When it is OK for the
   // system to suspend, this callback should call ReportSuspendReadiness().
-  using SuspendImminentCallback = base::Closure;
+  using SuspendImminentCallback = base::RepeatingClosure;
 
   // This callback is called after the completion of a suspend attempt.  The
   // receiver should undo any pre-suspend work that was done by the
@@ -36,13 +36,13 @@ class PowerManager : public PowerManagerProxyDelegate {
   // SuspendDoneCallback while processing a DarkSuspendImminentCallback. So,
   // SuspendDoneCallback should be ready to run concurrently with (and in a
   // sense override) the actions taken by DarkSuspendImminentCallback.
-  using SuspendDoneCallback = base::Closure;
+  using SuspendDoneCallback = base::RepeatingClosure;
 
   // This callback is called at the beginning of a dark resume.
   // The receiver should arrange for ReportDarkSuspendImminentReadiness() to be
   // called when shill is ready to resuspend. In most cases,
   // ReportDarkSuspendImminentReadiness will be called asynchronously.
-  using DarkSuspendImminentCallback = base::Closure;
+  using DarkSuspendImminentCallback = base::RepeatingClosure;
 
   // |control_itnerface| creates the PowerManagerProxy. Use a fake for testing.
   // Note: |Start| should be called to initialize this object before using it.
@@ -82,7 +82,7 @@ class PowerManager : public PowerManagerProxyDelegate {
   // Record the wake reason for the current dark resume.
   bool RecordDarkResumeWakeReason(const std::string& wake_reason);
 
-  virtual bool ChangeRegDomain(nl80211_dfs_regions domain);
+  virtual void ChangeRegDomain(nl80211_dfs_regions domain);
 
   // Methods inherited from PowerManagerProxyDelegate.
   void OnSuspendImminent(int suspend_id) override;

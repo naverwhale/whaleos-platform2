@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by the GPL v2 license that can
 // be found in the LICENSE file.
 //
@@ -26,7 +26,7 @@ class BRILLO_EXPORT FileHasher {
  public:
   FileHasher(std::unique_ptr<base::File> source,
              std::unique_ptr<base::File> destination,
-             unsigned int blocks,
+             uint64_t blocks,
              const char* alg)
       : source_(std::move(source)),
         destination_(std::move(destination)),
@@ -35,7 +35,6 @@ class BRILLO_EXPORT FileHasher {
         initialized_(false) {}
   virtual ~FileHasher();
 
-  // TODO(wad) add initialized_ variable to check.
   virtual bool Initialize();
   virtual bool Hash();
   virtual bool Store();
@@ -50,7 +49,7 @@ class BRILLO_EXPORT FileHasher {
  private:
   std::unique_ptr<base::File> source_;
   std::unique_ptr<base::File> destination_;
-  unsigned int block_limit_;
+  uint64_t block_limit_;
   const char* alg_;
   const char* salt_;
   char random_salt_[DM_BHT_SALT_SIZE * 2 + 1];

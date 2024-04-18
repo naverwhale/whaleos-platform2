@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,9 @@
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/contains.h>
+#include <base/strings/stringprintf.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/string_split.h>
 #include <base/time/time.h>
 #include <libmems/common_types.h>
 #include <libmems/iio_channel.h>
@@ -28,6 +30,8 @@ namespace iioservice {
 namespace {
 
 constexpr char kHWFifoFlushPath[] = "buffer/hwfifo_flush";
+
+constexpr char kAccelChannelNameFormat[] = "%s_%c";
 
 constexpr double kAcpiAlsMinFrequency = 0.1;
 constexpr double kAcpiAlsMaxFrequency = 2.0;
@@ -84,9 +88,10 @@ bool SamplesHandler::DisableBufferAndEnableChannels(
 SamplesHandler::ScopedSamplesHandler SamplesHandler::Create(
     scoped_refptr<base::SequencedTaskRunner> ipc_task_runner,
     scoped_refptr<base::SingleThreadTaskRunner> sample_task_runner,
-    libmems::IioDevice* iio_device) {
+    DeviceData* const device_data) {
   ScopedSamplesHandler handler(nullptr, SamplesHandlerDeleter);
 
+  auto* iio_device = device_data->iio_device;
   if (!iio_device->HasFifo() && !iio_device->GetTrigger() &&
       !iio_device->GetHrtimer()) {
     LOGF(ERROR) << "Device " << iio_device->GetId()
@@ -108,7 +113,7 @@ SamplesHandler::ScopedSamplesHandler SamplesHandler::Create(
   }
 
   handler.reset(new SamplesHandler(std::move(ipc_task_runner),
-                                   std::move(sample_task_runner), iio_device,
+                                   std::move(sample_task_runner), device_data,
                                    min_freq, max_freq));
   return handler;
 }
@@ -116,6 +121,7 @@ SamplesHandler::ScopedSamplesHandler SamplesHandler::Create(
 SamplesHandler::~SamplesHandler() {
   DCHECK(sample_task_runner_->BelongsToCurrentThread());
 
+  watcher_.reset();
   iio_device_->FreeBuffer();
   if (requested_frequency_ > 0.0 &&
       !iio_device_->WriteDoubleAttribute(libmems::kSamplingFrequencyAttr, 0.0))
@@ -124,26 +130,29 @@ SamplesHandler::~SamplesHandler() {
   SensorMetrics::GetInstance()->SendSensorUsage(iio_device_->GetId(), 0.0);
 
   for (ClientData* client : inactive_clients_) {
-    if (client->observer.is_bound()) {
+    if (client->samples_observer.is_bound()) {
       SensorMetrics::GetInstance()->SendSensorObserverClosed();
-      client->observer.reset();
+      client->samples_observer.reset();
     }
   }
 
   for (auto& [client, _] : clients_map_) {
-    if (client->observer.is_bound()) {
+    if (client->samples_observer.is_bound()) {
       SensorMetrics::GetInstance()->SendSensorObserverClosed();
-      client->observer.reset();
+      client->samples_observer.reset();
     }
   }
 }
 
 void SamplesHandler::ResetWithReason(
-    cros::mojom::SensorDeviceDisconnectReason reason, std::string description) {
-  sample_task_runner_->PostTask(
+    cros::mojom::SensorDeviceDisconnectReason reason,
+    std::string description,
+    base::OnceCallback<void()> callback) {
+  sample_task_runner_->PostTaskAndReply(
       FROM_HERE,
       base::BindOnce(&SamplesHandler::ResetWithReasonOnThread,
-                     weak_factory_.GetWeakPtr(), reason, description));
+                     weak_factory_.GetWeakPtr(), reason, description),
+      std::move(callback));
 }
 
 void SamplesHandler::AddClient(
@@ -210,13 +219,13 @@ void SamplesHandler::GetChannelsEnabled(
 SamplesHandler::SamplesHandler(
     scoped_refptr<base::SequencedTaskRunner> ipc_task_runner,
     scoped_refptr<base::SingleThreadTaskRunner> sample_task_runner,
-    libmems::IioDevice* iio_device,
+    DeviceData* const device_data,
     double min_freq,
     double max_freq)
     : SamplesHandlerBase(sample_task_runner),
       ipc_task_runner_(std::move(ipc_task_runner)),
       sample_task_runner_(std::move(sample_task_runner)),
-      iio_device_(iio_device),
+      iio_device_(device_data->iio_device),
       dev_min_frequency_(min_freq),
       dev_max_frequency_(max_freq) {
   DCHECK_GE(dev_max_frequency_, dev_min_frequency_);
@@ -226,6 +235,73 @@ SamplesHandler::SamplesHandler(
     channel_ids.push_back(channel->GetId());
 
   SetNoBatchChannels(channel_ids);
+
+  // Set |accel_matrix_|.
+  if (!base::Contains(device_data->types, cros::mojom::DeviceType::ACCEL))
+    return;
+
+  for (int i = 0; i < kNumberOfAxes; ++i) {
+    std::string channel_name =
+        base::StringPrintf(kAccelChannelNameFormat,
+                           cros::mojom::kAccelerometerChannel, kChannelAxes[i]);
+
+    std::vector<libmems::IioChannel*> channels = iio_device_->GetAllChannels();
+    for (int j = 0; j < channels.size(); ++j) {
+      if (channel_name.compare(channels[j]->GetId()) == 0) {
+        accel_axis_indices_[i] = j;
+        break;
+      }
+    }
+
+    if (accel_axis_indices_[i] == -1) {
+      for (int k = 0; k < kNumberOfAxes; ++k)
+        accel_axis_indices_[k] = -1;
+
+      return;
+    }
+  }
+
+  bool read_matrix_attribute = false;
+  auto accel_mount_matrix =
+      iio_device_->ReadStringAttribute(kAccelMatrixAttribute);
+
+  if (accel_mount_matrix.has_value()) {
+    std::vector<std::string> matrix =
+        base::SplitString(accel_mount_matrix.value(), ";",
+                          base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+    if (matrix.size() == kNumberOfAxes) {
+      read_matrix_attribute = true;
+      for (int i = 0; read_matrix_attribute && i < matrix.size(); ++i) {
+        std::vector<std::string> values = base::SplitString(
+            matrix[i], ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+
+        if (values.size() != kNumberOfAxes) {
+          read_matrix_attribute = false;
+          break;
+        }
+
+        for (int j = 0; j < values.size(); ++j) {
+          if (!base::StringToDouble(values[j], &accel_matrix_[i][j])) {
+            read_matrix_attribute = false;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!read_matrix_attribute) {
+    for (int i = 0; i < kNumberOfAxes; ++i) {
+      for (int j = 0; j < kNumberOfAxes; ++j) {
+        accel_matrix_[i][j] = (i == j)
+                                  ? (strncmp(iio_device_->GetName(), kAccel3d,
+                                             std::size(kAccel3d)) == 0
+                                         ? -1
+                                         : 1)
+                                  : 0;
+      }
+    }
+  }
 }
 
 void SamplesHandler::SetSampleWatcherOnThread() {
@@ -247,7 +323,7 @@ void SamplesHandler::SetSampleWatcherOnThread() {
   if (!iio_device_->CreateBuffer()) {
     LOGF(ERROR) << "Failed to create buffer";
     for (auto& [client_data, _] : clients_map_) {
-      client_data->observer->OnErrorOccurred(
+      client_data->samples_observer->OnErrorOccurred(
           cros::mojom::ObserverErrorType::GET_FD_FAILED);
     }
 
@@ -258,7 +334,7 @@ void SamplesHandler::SetSampleWatcherOnThread() {
   if (!fd.has_value()) {
     LOGF(ERROR) << "Failed to get fd";
     for (auto& [client_data, _] : clients_map_) {
-      client_data->observer->OnErrorOccurred(
+      client_data->samples_observer->OnErrorOccurred(
           cros::mojom::ObserverErrorType::GET_FD_FAILED);
     }
 
@@ -290,6 +366,21 @@ void SamplesHandler::AddActiveClientOnThread(ClientData* client_data) {
     libmems::IioDevice::IioSample sample;
     for (int32_t index : client_data->enabled_chn_indices) {
       auto channel = client_data->device_data->iio_device->GetChannel(index);
+
+      // Read the current time for the timestamp channel.
+      if (base::StringPiece(cros::mojom::kTimestampChannel) ==
+          channel->GetId()) {
+        struct timespec ts = {};
+        if (clock_gettime(CLOCK_BOOTTIME, &ts) < 0) {
+          PLOG(ERROR) << "clock_gettime(CLOCK_BOOTTIME) failed";
+        } else {
+          sample[index] =
+              static_cast<int64_t>(ts.tv_sec) * 1000 * 1000 * 1000 + ts.tv_nsec;
+        }
+
+        continue;
+      }
+
       // Read from the input attribute or the raw attribute.
       auto value_opt = channel->ReadNumberAttribute(kInputAttr);
       if (!value_opt.has_value())
@@ -300,7 +391,7 @@ void SamplesHandler::AddActiveClientOnThread(ClientData* client_data) {
     }
 
     if (!sample.empty())
-      client_data->observer->OnSampleUpdated(std::move(sample));
+      client_data->samples_observer->OnSampleUpdated(std::move(sample));
   }
 
   if (!watcher_.get())
@@ -359,7 +450,7 @@ void SamplesHandler::UpdateFrequencyOnThread(
 
   auto it = inactive_clients_.find(client_data);
   if (it != inactive_clients_.end()) {
-    if (client_data->IsActive()) {
+    if (client_data->IsSampleActive()) {
       // The client is now active.
       inactive_clients_.erase(it);
       AddActiveClientOnThread(client_data);
@@ -371,7 +462,7 @@ void SamplesHandler::UpdateFrequencyOnThread(
   if (clients_map_.find(client_data) == clients_map_.end())
     return;
 
-  if (!client_data->IsActive()) {
+  if (!client_data->IsSampleActive()) {
     // The client is now inactive
     RemoveActiveClientOnThread(client_data, orig_freq);
     inactive_clients_.emplace(client_data);
@@ -380,7 +471,7 @@ void SamplesHandler::UpdateFrequencyOnThread(
   }
 
   // The client remains active
-  DCHECK(client_data->observer.is_bound());
+  DCHECK(client_data->samples_observer.is_bound());
 
   if (AddFrequencyOnThread(client_data->frequency) &&
       RemoveFrequencyOnThread(orig_freq)) {
@@ -388,7 +479,7 @@ void SamplesHandler::UpdateFrequencyOnThread(
   }
 
   // Failed to set device frequency
-  client_data->observer->OnErrorOccurred(
+  client_data->samples_observer->OnErrorOccurred(
       cros::mojom::ObserverErrorType::SET_FREQUENCY_IO_FAILED);
 }
 
@@ -485,7 +576,7 @@ void SamplesHandler::UpdateChannelsEnabledOnThread(
     for (int32_t chn_index : iio_chn_indices) {
       client_data->enabled_chn_indices.erase(chn_index);
       // remove cached chn's moving average
-      clients_map_[client_data].chns.erase(chn_index);
+      clients_map_[client_data]->chns_.erase(chn_index);
     }
   }
 
@@ -495,7 +586,7 @@ void SamplesHandler::UpdateChannelsEnabledOnThread(
 
   auto it = inactive_clients_.find(client_data);
   if (it != inactive_clients_.end()) {
-    if (client_data->IsActive()) {
+    if (client_data->IsSampleActive()) {
       // The client is now active.
       inactive_clients_.erase(it);
       AddActiveClientOnThread(client_data);
@@ -507,7 +598,7 @@ void SamplesHandler::UpdateChannelsEnabledOnThread(
   if (clients_map_.find(client_data) == clients_map_.end())
     return;
 
-  if (client_data->IsActive()) {
+  if (client_data->IsSampleActive()) {
     // The client remains active
     return;
   }
@@ -542,11 +633,23 @@ void SamplesHandler::OnSampleAvailableWithoutBlocking() {
   if (!sample) {
     AddReadFailedLogOnThread();
     for (auto& [client_data, _] : clients_map_) {
-      client_data->observer->OnErrorOccurred(
+      client_data->samples_observer->OnErrorOccurred(
           cros::mojom::ObserverErrorType::READ_FAILED);
     }
 
     return;
+  }
+
+  if (accel_axis_indices_[0] != -1) {
+    DCHECK(accel_axis_indices_[1] != -1 && accel_axis_indices_[2] != -1);
+    auto sample_orig = sample.value();
+    for (int i = 0; i < kNumberOfAxes; ++i) {
+      sample.value()[i] = 0;
+      for (int j = 0; j < kNumberOfAxes; ++j) {
+        sample.value()[i] +=
+            sample_orig[accel_axis_indices_[j]] * accel_matrix_[i][j];
+      }
+    }
   }
 
   OnSampleAvailableOnThread(sample.value());

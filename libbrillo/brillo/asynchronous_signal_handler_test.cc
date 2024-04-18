@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,7 @@
 
 #include <vector>
 
-#include <base/bind.h>
-#include <base/macros.h>
+#include <base/functional/bind.h>
 #include <base/run_loop.h>
 #include <base/task/single_thread_task_executor.h>
 #include <brillo/message_loops/base_message_loop.h>
@@ -50,7 +49,8 @@ class AsynchronousSignalHandlerTest : public ::testing::Test {
 
 TEST_F(AsynchronousSignalHandlerTest, CheckTerm) {
   handler_.RegisterHandler(
-      SIGTERM, base::Bind(&AsynchronousSignalHandlerTest::RecordInfoAndQuit,
+      SIGTERM,
+      base::BindRepeating(&AsynchronousSignalHandlerTest::RecordInfoAndQuit,
                           base::Unretained(this), true));
   EXPECT_EQ(0, infos_.size());
   EXPECT_EQ(0, kill(getpid(), SIGTERM));
@@ -64,7 +64,8 @@ TEST_F(AsynchronousSignalHandlerTest, CheckTerm) {
 
 TEST_F(AsynchronousSignalHandlerTest, CheckSignalUnregistration) {
   handler_.RegisterHandler(
-      SIGCHLD, base::Bind(&AsynchronousSignalHandlerTest::RecordInfoAndQuit,
+      SIGCHLD,
+      base::BindRepeating(&AsynchronousSignalHandlerTest::RecordInfoAndQuit,
                           base::Unretained(this), true));
   EXPECT_EQ(0, infos_.size());
   EXPECT_EQ(0, kill(getpid(), SIGCHLD));
@@ -80,8 +81,8 @@ TEST_F(AsynchronousSignalHandlerTest, CheckSignalUnregistration) {
   // Run the loop with a timeout, as no message are expected.
   brillo_loop_.PostDelayedTask(
       FROM_HERE,
-      base::Bind(&MessageLoop::BreakLoop, base::Unretained(&brillo_loop_)),
-      base::TimeDelta::FromMilliseconds(10));
+      base::BindOnce(&MessageLoop::BreakLoop, base::Unretained(&brillo_loop_)),
+      base::Milliseconds(10));
   MessageLoop::current()->Run();
 
   // The signal handle should have been unregistered. No new message are
@@ -92,7 +93,8 @@ TEST_F(AsynchronousSignalHandlerTest, CheckSignalUnregistration) {
 TEST_F(AsynchronousSignalHandlerTest, CheckMultipleSignal) {
   const uint8_t NB_SIGNALS = 5;
   handler_.RegisterHandler(
-      SIGCHLD, base::Bind(&AsynchronousSignalHandlerTest::RecordInfoAndQuit,
+      SIGCHLD,
+      base::BindRepeating(&AsynchronousSignalHandlerTest::RecordInfoAndQuit,
                           base::Unretained(this), false));
   EXPECT_EQ(0, infos_.size());
   for (int i = 0; i < NB_SIGNALS; ++i) {
@@ -113,7 +115,7 @@ TEST_F(AsynchronousSignalHandlerTest, CheckMultipleSignal) {
 TEST_F(AsynchronousSignalHandlerTest, CheckChld) {
   handler_.RegisterHandler(
       SIGCHLD,
-      base::Bind(&AsynchronousSignalHandlerTest::RecordInfoAndQuit,
+      base::BindRepeating(&AsynchronousSignalHandlerTest::RecordInfoAndQuit,
                  base::Unretained(this),
                  false));
   pid_t child_pid = fork();

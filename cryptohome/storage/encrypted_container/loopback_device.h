@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include "cryptohome/storage/encrypted_container/backing_device.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/files/file_path.h>
@@ -27,11 +28,6 @@ class LoopbackDevice : public BackingDevice {
   //         by name.
   // - `size`: Size of the underlying sparse file.
   // - `backing_file_path`: Path of the backing sparse file.
-  LoopbackDevice(
-      const BackingDeviceConfig& config,
-      Platform* platform,
-      std::unique_ptr<brillo::LoopDeviceManager> loop_device_manager);
-
   LoopbackDevice(const BackingDeviceConfig& config, Platform* platform);
 
   ~LoopbackDevice() = default;
@@ -58,17 +54,19 @@ class LoopbackDevice : public BackingDevice {
   }
 
   // Gets the device path for the loop device.
-  base::Optional<base::FilePath> GetPath() override;
+  std::optional<base::FilePath> GetPath() override;
+
+ protected:
+  const base::FilePath backing_file_path_;
 
  private:
   friend class LoopbackDevicePeer;
 
   const std::string name_;
   const int64_t size_;
-  const base::FilePath backing_file_path_;
+  const bool fixed_backing_;
 
   Platform* platform_;
-  std::unique_ptr<brillo::LoopDeviceManager> loop_device_manager_;
 };
 
 }  // namespace cryptohome

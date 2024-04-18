@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,13 @@
 #ifndef CRASH_REPORTER_KERNEL_WARNING_COLLECTOR_H_
 #define CRASH_REPORTER_KERNEL_WARNING_COLLECTOR_H_
 
+#include <memory>
 #include <string>
 
-#include <base/macros.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 
@@ -30,9 +33,15 @@ class KernelWarningCollector : public CrashCollector {
     // Ath10k is the name of Qualcomm WiFi driver that we want to collect its
     // error dumps.
     kAth10k,
+    // Ath11k is the name of Qualcomm WiFi driver that we want to collect its
+    // error dumps.
+    kAth11k,
   };
 
-  KernelWarningCollector();
+  explicit KernelWarningCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   KernelWarningCollector(const KernelWarningCollector&) = delete;
   KernelWarningCollector& operator=(const KernelWarningCollector&) = delete;
 
@@ -41,13 +50,22 @@ class KernelWarningCollector : public CrashCollector {
   // Collects warning.
   bool Collect(int weight, WarningType type);
 
-  static CollectorInfo GetHandlerInfo(int32_t weight,
-                                      bool kernel_warning,
-                                      bool kernel_wifi_warning,
-                                      bool kernel_smmu_fault,
-                                      bool kernel_suspend_warning,
-                                      bool kernel_iwlwifi_error,
-                                      bool kernel_ath10k_error);
+  // Returns the severity level and product group of the crash.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
+
+  static CollectorInfo GetHandlerInfo(
+      int32_t weight,
+      bool kernel_warning,
+      bool kernel_wifi_warning,
+      bool kernel_smmu_fault,
+      bool kernel_suspend_warning,
+      bool kernel_iwlwifi_error,
+      bool kernel_ath10k_error,
+      bool kernel_ath11k_error,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
 
  protected:
   std::string warning_report_path_;
@@ -71,6 +89,9 @@ class KernelWarningCollector : public CrashCollector {
                                  std::string* signature,
                                  std::string* func_name);
   bool ExtractAth10kSignature(const std::string& content,
+                              std::string* signature,
+                              std::string* func_name);
+  bool ExtractAth11kSignature(const std::string& content,
                               std::string* signature,
                               std::string* func_name);
 };

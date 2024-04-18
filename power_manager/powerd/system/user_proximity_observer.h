@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,7 @@
 
 #include "power_manager/common/power_constants.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Interface for classes interested in observing events announced by any
 // kind of user proximity sensor (i.e. any piece of hardware, software or mix
@@ -26,7 +25,7 @@ class UserProximityObserver : public base::CheckedObserver {
   };
 
   UserProximityObserver() = default;
-  virtual ~UserProximityObserver() = default;
+  ~UserProximityObserver() override = default;
 
   // Called when a new proximity sensor is detected. |id| is a unique key
   // that will be used to identify this sensor in all future events; |roles|
@@ -37,7 +36,6 @@ class UserProximityObserver : public base::CheckedObserver {
   virtual void OnProximityEvent(int id, UserProximity value) = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_USER_PROXIMITY_OBSERVER_H_

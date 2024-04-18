@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,17 +6,17 @@
 #define DIAGNOSTICS_WILCO_DTC_SUPPORTD_TELEMETRY_SYSTEM_FILES_SERVICE_IMPL_H_
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
-#include <base/optional.h>
 
 #include "diagnostics/wilco_dtc_supportd/telemetry/system_files_service.h"
 
 namespace diagnostics {
+namespace wilco {
 
 class SystemFilesServiceImpl final : public SystemFilesService {
  public:
@@ -31,9 +31,9 @@ class SystemFilesServiceImpl final : public SystemFilesService {
   ~SystemFilesServiceImpl() override;
 
   // SystemFilesService overrides:
-  base::Optional<FileDump> GetFileDump(File location) override;
-  base::Optional<FileDumps> GetDirectoryDump(Directory location) override;
-  base::Optional<std::string> GetVpdField(VpdField vpd_field) override;
+  std::optional<FileDump> GetFileDump(File location) override;
+  std::optional<FileDumps> GetDirectoryDump(Directory location) override;
+  std::optional<std::string> GetVpdField(VpdField vpd_field) override;
 
   void set_root_dir_for_testing(const base::FilePath& dir);
 
@@ -59,6 +59,7 @@ class SystemFilesServiceImpl final : public SystemFilesService {
   base::FilePath root_dir_{"/"};
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_TELEMETRY_SYSTEM_FILES_SERVICE_IMPL_H_

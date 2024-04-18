@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,6 @@
 #include <vector>
 
 #include <base/location.h>
-#include <base/macros.h>
 #include <base/time/time.h>
 
 #include "trunks/tpm_generated.h"
@@ -54,7 +53,7 @@ class ResourceManager : public CommandTransceiver {
 
   // CommandTransceiver methods.
   void SendCommand(const std::string& command,
-                   const ResponseCallback& callback) override;
+                   ResponseCallback callback) override;
 
   std::string SendCommandAndWait(const std::string& command) override;
 

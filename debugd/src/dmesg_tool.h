@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -6,6 +6,8 @@
 
 #ifndef DEBUGD_SRC_DMESG_TOOL_H_
 #define DEBUGD_SRC_DMESG_TOOL_H_
+
+#include <stdint.h>
 
 #include <string>
 
@@ -25,6 +27,10 @@ class DmesgTool {
   bool CallDmesg(const brillo::VariantDictionary& options,
                  brillo::ErrorPtr* error,
                  std::string* output);
+
+  // If |output| has more than |lines| lines, trim output to only contain the
+  // last |lines| lines. Basically /usr/bin/tail.
+  static void Tail(uint32_t lines, std::string& output);
 };
 
 }  // namespace debugd

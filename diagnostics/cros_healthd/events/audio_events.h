@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <mojo/public/cpp/bindings/pending_remote.h>
 
-#include "mojo/cros_healthd_events.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_events.mojom.h"
 
 namespace diagnostics {
 
@@ -18,8 +18,12 @@ class AudioEvents {
 
   // Adds a new observer to be notified when audio-related events occur.
   virtual void AddObserver(
-      mojo::PendingRemote<
-          chromeos::cros_healthd::mojom::CrosHealthdAudioObserver>
+      mojo::PendingRemote<ash::cros_healthd::mojom::EventObserver>
+          observer) = 0;
+
+  // Deprecated interface. Only for backward compatibility.
+  virtual void AddObserver(
+      mojo::PendingRemote<ash::cros_healthd::mojom::CrosHealthdAudioObserver>
           observer) = 0;
 };
 

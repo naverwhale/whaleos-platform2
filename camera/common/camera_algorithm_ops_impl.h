@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -37,7 +37,7 @@ class CameraAlgorithmOpsImpl : public mojom::CameraAlgorithmOps,
   bool Bind(mojo::PendingReceiver<mojom::CameraAlgorithmOps> pending_receiver,
             camera_algorithm_ops_t* cam_algo,
             scoped_refptr<base::SingleThreadTaskRunner> ipc_task_runner,
-            const base::Closure& ipc_lost_handler);
+            base::OnceClosure ipc_lost_handler);
 
   // Unbinds the underlying pipe.
   void Unbind();
@@ -59,8 +59,16 @@ class CameraAlgorithmOpsImpl : public mojom::CameraAlgorithmOps,
   // Implementation of mojom::CameraAlgorithmOps::DeregisterBuffers interface
   void DeregisterBuffers(const std::vector<int32_t>& buffer_handles) override;
 
+  // Implementation of mojom::CameraAlgorithmOps::UpdateReturn interface
+  void UpdateReturn(uint32_t upd_id,
+                    uint32_t status,
+                    mojo::ScopedHandle buffer_fd) override;
+
+  // Implementation of mojom::CameraAlgorithmOps::Deinitialize interface
+  void Deinitialize() override;
+
  private:
-  ~CameraAlgorithmOpsImpl() override {}
+  ~CameraAlgorithmOpsImpl() override = default;
 
   static void ReturnCallbackForwarder(
       const camera_algorithm_callback_ops_t* callback_ops,
@@ -71,6 +79,17 @@ class CameraAlgorithmOpsImpl : public mojom::CameraAlgorithmOps,
   void ReturnCallbackOnIPCThread(uint32_t req_id,
                                  uint32_t status,
                                  int32_t buffer_handle);
+
+  static void UpdateForwarder(
+      const camera_algorithm_callback_ops_t* callback_ops,
+      uint32_t upd_id,
+      const uint8_t upd_header[],
+      uint32_t size,
+      int buffer_fd);
+
+  void UpdateOnIPCThread(uint32_t upd_id,
+                         const std::vector<uint8_t>& upd_header,
+                         int buffer_fd);
 
   // Receiver of CameraAlgorithmOps interface to message pipe
   mojo::Receiver<mojom::CameraAlgorithmOps> receiver_;

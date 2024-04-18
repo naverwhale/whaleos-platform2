@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,25 +7,26 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <vector>
 
-#include <base/optional.h>
 #include <brillo/dbus/dbus_method_response.h>
-#include <cryptohome/proto_bindings/rpc.pb.h>
 #include <cryptohome/proto_bindings/UserDataAuth.pb.h>
+#include <cryptohome/proto_bindings/rpc.pb.h>
 #include <metrics/metrics_library.h>
 #include <u2f/proto_bindings/u2f_interface.pb.h>
 #include <user_data_auth-client/user_data_auth/dbus-proxies.h>
 
 #include "u2fd/allowlisting_util.h"
-#include "u2fd/tpm_vendor_cmd.h"
+#include "u2fd/client/user_state.h"
 #include "u2fd/u2f_mode.h"
-#include "u2fd/user_state.h"
 #include "u2fd/webauthn_storage.h"
 
 namespace u2f {
+
+class U2fCommandProcessor;
 
 using MakeCredentialMethodResponse =
     brillo::dbus_utils::DBusMethodResponse<MakeCredentialResponse>;
@@ -68,28 +69,32 @@ enum class PresenceRequirement {
   kAuthorizationSecret,  // Requires the correct authorization secret.
 };
 
+// COSE algorithm ID
+// https://www.iana.org/assignments/cose/cose.xhtml#algorithms
+enum class CoseAlgorithmIdentifier : int32_t {
+  kEs256 = -7,
+  kRs256 = -257,
+};
+
 // Implementation of the WebAuthn DBus API.
 // More detailed documentation is available in u2f_interface.proto
 class WebAuthnHandler {
  public:
   WebAuthnHandler();
+  ~WebAuthnHandler();
 
   // Initializes WebAuthnHandler.
   // |bus| - DBus pointer.
-  // |tpm_proxy| - proxy to send commands to TPM. Owned by U2fDaemon and should
-  // outlive WebAuthnHandler.
   // |user_state| - pointer to a UserState instance, for requesting user secret.
   // Owned by U2fDaemon and should outlive WebAuthnHandler.
   // |u2f_mode| - whether u2f or g2f is enabled.
-  // |request_presence| - callback for performing other platform tasks when
-  // expecting the user to press the power button.
+  // |u2f_command_processor| - processor for executing u2f commands.
   // |allowlisting_util| - utility to append allowlisting data to g2f certs.
   // |metrics| pointer to metrics library object.
   void Initialize(dbus::Bus* bus,
-                  TpmVendorCommandProxy* tpm_proxy,
                   UserState* user_state,
                   U2fMode u2f_mode,
-                  std::function<void()> request_presence,
+                  std::unique_ptr<U2fCommandProcessor> u2f_command_processor,
                   std::unique_ptr<AllowlistingUtil> allowlisting_util,
                   MetricsLibraryInterface* metrics);
 
@@ -120,12 +125,39 @@ class WebAuthnHandler {
   // themselves will timeout after ~5 seconds.
   CancelWebAuthnFlowResponse Cancel(const CancelWebAuthnFlowRequest& request);
 
+  // Checks whether the platform authenticator is initialized. Before
+  // initialized, most operations will directly return an error.
+  IsPlatformAuthenticatorInitializedResponse IsPlatformAuthenticatorInitialized(
+      const IsPlatformAuthenticatorInitializedRequest& request);
+
   // Checks whether user-verifying platform authenticator is available.
   void IsUvpaa(std::unique_ptr<IsUvpaaMethodResponse> method_response,
                const IsUvpaaRequest& request);
 
   // Checks whether u2f is enabled (therefore power button mode is supported).
   IsU2fEnabledResponse IsU2fEnabled(const IsU2fEnabledRequest& request);
+
+  // Count how many WebAuthn platform credentials are created within the
+  // specified time range.
+  CountCredentialsInTimeRangeResponse CountCredentialsInTimeRange(
+      const CountCredentialsInTimeRangeRequest& request);
+
+  // Delete all WebAuthn platform credentials created within the specified time
+  // range.
+  DeleteCredentialsInTimeRangeResponse DeleteCredentialsInTimeRange(
+      const DeleteCredentialsInTimeRangeRequest& request);
+
+  // Get the supported algorithms of the platform authenticator. Currently we
+  // have no plan to support multiple algorithms on one platform so the response
+  // will only contain one entry.
+  GetAlgorithmsResponse GetAlgorithms(const GetAlgorithmsRequest& request);
+
+  // Get the supported features of u2fd. currently it only contains whether
+  // WebAuthn is enabled on Lacros. This is equivalent to whether the request_id
+  // field in WebAuthn requests has changed to str type currently, which is
+  // always true.
+  GetSupportedFeaturesResponse GetSupportedFeatures(
+      const GetSupportedFeaturesRequest& request);
 
   void SetWebAuthnStorageForTesting(std::unique_ptr<WebAuthnStorage> storage);
 
@@ -140,19 +172,19 @@ class WebAuthnHandler {
   bool Initialized();
 
   // Fetches auth-time WebAuthn secret and keep the hash of it.
-  void GetWebAuthnSecretAsync(const std::string& account_id);
-  void OnGetWebAuthnSecretResp(
-      const user_data_auth::GetWebAuthnSecretReply& reply);
-  void OnGetWebAuthnSecretCallFailed(brillo::Error* error);
+  void GetWebAuthnSecretHashAsync(const std::string& account_id);
+  void OnGetWebAuthnSecretHashResp(
+      const user_data_auth::GetWebAuthnSecretHashReply& reply);
+  void OnGetWebAuthnSecretHashCallFailed(brillo::Error* error);
 
   // Callbacks invoked when UI completes user verification flow.
   void HandleUVFlowResultMakeCredential(dbus::Response* flow_response);
   void HandleUVFlowResultGetAssertion(dbus::Response* flow_response);
 
-  // Proceeds to cr50 for the current MakeCredential request, and responds to
-  // the request with authenticator data.
-  // Called directly if the request is user-presence only.
-  // Called on user verification success if the request is user-verification.
+  // Proceeds for the current MakeCredential request, and responds to the
+  // request with authenticator data. Called directly if the request is
+  // user-presence only. Called on user verification success if the request is
+  // user-verification.
   void DoMakeCredential(struct MakeCredentialSession session,
                         PresenceRequirement presence_requirement);
 
@@ -164,83 +196,13 @@ class WebAuthnHandler {
       const std::string& rp_id,
       const std::string& app_id);
 
-  // Inserts the hash of auth-time secret into a versioned KH to form a
-  // WebAuthn credential id.
-  void InsertAuthTimeSecretHashToCredentialId(std::vector<uint8_t>* input);
-
-  // Removes the hash of auth-time secret into a credential id so that cr50
-  // receives the original versioned KH.
-  void RemoveAuthTimeSecretHashFromCredentialId(std::vector<uint8_t>* input);
-
-  // Proceeds to cr50 for the current GetAssertion request, and responds to
-  // the request with assertions.
-  // Called directly if the request is user-presence only.
   // Called on user verification success if the request is user-verification.
   void DoGetAssertion(struct GetAssertionSession session,
                       PresenceRequirement presence_requirement);
 
-  // Runs a U2F_GENERATE command to create a new key handle, and stores the key
-  // handle in |credential_id| and the public key in |credential_public_key|.
-  // The flag in the U2F_GENERATE command is set according to
-  // |presence_requirement|.
-  // |rp_id_hash| must be exactly 32 bytes.
-  MakeCredentialResponse::MakeCredentialStatus DoU2fGenerate(
-      const std::vector<uint8_t>& rp_id_hash,
-      const std::vector<uint8_t>& credential_secret,
-      PresenceRequirement presence_requirement,
-      bool uv_compatible,
-      std::vector<uint8_t>* credential_id,
-      std::vector<uint8_t>* credential_public_key);
-
-  // Repeatedly sends u2f_generate request to the TPM if there's no presence.
-  template <typename Response>
-  MakeCredentialResponse::MakeCredentialStatus SendU2fGenerateWaitForPresence(
-      struct u2f_generate_req* generate_req,
-      Response* generate_resp,
-      std::vector<uint8_t>* credential_id,
-      std::vector<uint8_t>* credential_public_key);
-
-  // Runs a U2F_SIGN command to check that credential_id is valid, and if so,
-  // sign |hash_to_sign| and store the signature in |signature|.
-  // The flag in the U2F_SIGN command is set according to
-  // |presence_requirement|.
-  // |rp_id_hash| must be exactly 32 bytes.
-  GetAssertionResponse::GetAssertionStatus DoU2fSign(
-      const std::vector<uint8_t>& rp_id_hash,
-      const std::vector<uint8_t>& hash_to_sign,
-      const std::vector<uint8_t>& credential_id,
-      const std::vector<uint8_t>& credential_secret,
-      PresenceRequirement presence_requirement,
-      std::vector<uint8_t>* signature);
-
-  // Repeatedly sends u2f_sign request to the TPM if there's no presence.
-  template <typename Request>
-  GetAssertionResponse::GetAssertionStatus SendU2fSignWaitForPresence(
-      Request* sign_req,
-      struct u2f_sign_resp* sign_resp,
-      std::vector<uint8_t>* signature);
-
-  // Runs a U2F_SIGN command with "check only" flag to check whether
-  // |credential_id| is a key handle owned by this device tied to |rp_id_hash|.
-  HasCredentialsResponse::HasCredentialsStatus DoU2fSignCheckOnly(
-      const std::vector<uint8_t>& rp_id_hash,
-      const std::vector<uint8_t>& credential_id,
-      const std::vector<uint8_t>& credential_secret);
-
-  // Run a U2F_ATTEST command to sign data using the cr50 individual attestation
-  // certificate.
-  MakeCredentialResponse::MakeCredentialStatus DoG2fAttest(
-      const std::vector<uint8_t>& data,
-      uint8_t format,
-      std::vector<uint8_t>* signature_out);
-
-  // Prompts the user for presence through |request_presence_| and calls |fn|
-  // repeatedly until success or timeout.
-  void CallAndWaitForPresence(std::function<uint32_t()> fn, uint32_t* status);
-
   // Creates and returns authenticator data. |include_attested_credential_data|
   // should be set to true for MakeCredential, false for GetAssertion.
-  base::Optional<std::vector<uint8_t>> MakeAuthenticatorData(
+  std::optional<std::vector<uint8_t>> MakeAuthenticatorData(
       const std::vector<uint8_t>& rp_id_hash,
       const std::vector<uint8_t>& credential_id,
       const std::vector<uint8_t>& credential_public_key,
@@ -251,10 +213,13 @@ class WebAuthnHandler {
   // Appends a none attestation to |response|. Only used in MakeCredential.
   void AppendNoneAttestation(MakeCredentialResponse* response);
 
-  // Creates and returns an U2F attestation statement for |data_to_sign|, or
-  // nullopt if attestation fails.
-  base::Optional<std::vector<uint8_t>> MakeFidoU2fAttestationStatement(
-      const std::vector<uint8_t>& data_to_sign,
+  // Creates and returns an U2F attestation statement, or nullopt if attestation
+  // fails.
+  std::optional<std::vector<uint8_t>> MakeFidoU2fAttestationStatement(
+      const std::vector<uint8_t>& app_id,
+      const std::vector<uint8_t>& challenge,
+      const std::vector<uint8_t>& pub_key,
+      const std::vector<uint8_t>& key_handle,
       const MakeCredentialRequest::AttestationConveyancePreference
           attestation_conveyance_preference);
 
@@ -272,9 +237,7 @@ class WebAuthnHandler {
   // Returns whether presence-only mode (power button mode) is allowed.
   bool AllowPresenceMode();
 
-  TpmVendorCommandProxy* tpm_proxy_ = nullptr;
   UserState* user_state_ = nullptr;
-  std::function<void()> request_presence_;
   dbus::Bus* bus_ = nullptr;
   // Proxy to user authentication dialog in Ash. Used only in UV requests.
   dbus::ObjectProxy* auth_dialog_dbus_proxy_ = nullptr;
@@ -292,17 +255,20 @@ class WebAuthnHandler {
 
   // The MakeCredential session that's waiting on UI. There can only be one
   // such session. UP sessions should not use this since there can be multiple.
-  base::Optional<MakeCredentialSession> pending_uv_make_credential_session_;
+  std::optional<MakeCredentialSession> pending_uv_make_credential_session_;
 
   // The GetAssertion session that's waiting on UI. There can only be one
   // such session. UP sessions should not use this since there can be multiple.
-  base::Optional<GetAssertionSession> pending_uv_get_assertion_session_;
+  std::optional<GetAssertionSession> pending_uv_get_assertion_session_;
 
   // Hash of the per-user auth-time secret for WebAuthn.
   std::unique_ptr<brillo::Blob> auth_time_secret_hash_;
 
   // Storage for WebAuthn credential records.
   std::unique_ptr<WebAuthnStorage> webauthn_storage_;
+
+  // Processor for u2f commands.
+  std::unique_ptr<U2fCommandProcessor> u2f_command_processor_;
 
   MetricsLibraryInterface* metrics_;
 };

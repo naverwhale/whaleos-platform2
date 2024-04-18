@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,21 +25,12 @@
 #include "cros-disks/platform.h"
 #include "cros-disks/quote.h"
 #include "cros-disks/sandboxed_process.h"
-#include "cros-disks/system_mounter.h"
 #include "cros-disks/uri.h"
 
 namespace cros_disks {
 namespace {
 
-const char kDataDirOptionPrefix[] = "datadir";
-const char kIdentityOptionPrefix[] = "identity";
-const char kMyFilesOptionPrefix[] = "myfiles";
-const char kPathPrefixOptionPrefix[] = "prefix";
-
-const char kHelperTool[] = "/opt/google/drive-file-stream/drivefs";
 const char kType[] = "drivefs";
-const char kDbusSocketPath[] = "/run/dbus";
-const char kHomeBaseDir[] = "/home";
 
 // UID of fuse-drivefs user.
 constexpr uid_t kOldDriveUID = 304;
@@ -202,10 +193,13 @@ DrivefsHelper::DrivefsHelper(const Platform* platform,
                         kType,
                         /* nosymfollow= */ false,
                         &sandbox_factory_),
-      sandbox_factory_(platform,
-                       SandboxedExecutable{base::FilePath(kHelperTool)},
-                       OwnerUser{kChronosUID, kChronosGID},
-                       /* has_network_access= */ true) {}
+      sandbox_factory_(
+          platform,
+          SandboxedExecutable{
+              base::FilePath("/opt/google/drive-file-stream/drivefs"),
+              base::FilePath("/usr/share/policy/drivefs-seccomp.policy")},
+          OwnerUser{kChronosUID, kChronosGID},
+          /* has_network_access= */ true) {}
 
 DrivefsHelper::~DrivefsHelper() = default;
 
@@ -223,65 +217,70 @@ bool DrivefsHelper::CanMount(const std::string& source,
   return true;
 }
 
-MountErrorType DrivefsHelper::ConfigureSandbox(
-    const std::string& source,
-    const base::FilePath& target_path,
-    std::vector<std::string> params,
-    SandboxedProcess* sandbox) const {
+MountError DrivefsHelper::ConfigureSandbox(const std::string& source,
+                                           const base::FilePath& target_path,
+                                           std::vector<std::string> params,
+                                           SandboxedProcess* sandbox) const {
   const Uri uri = Uri::Parse(source);
   if (!uri.valid() || uri.scheme() != kType) {
     LOG(ERROR) << "Invalid source format " << quote(source);
-    return MOUNT_ERROR_INVALID_DEVICE_PATH;
+    return MountError::kInvalidDevicePath;
   }
   if (uri.path().empty()) {
     LOG(ERROR) << "Invalid source " << quote(source);
-    return MOUNT_ERROR_INVALID_DEVICE_PATH;
+    return MountError::kInvalidDevicePath;
   }
 
+  const char kDataDirOptionPrefix[] = "datadir";
+  const char kIdentityOptionPrefix[] = "identity";
+  const char kMyFilesOptionPrefix[] = "myfiles";
+  const char kPathPrefixOptionPrefix[] = "prefix";
   base::FilePath data_dir;
   if (!FindPathOption(params, kDataDirOptionPrefix, &data_dir)) {
     LOG(ERROR) << "No data directory provided";
-    return MOUNT_ERROR_INVALID_MOUNT_OPTIONS;
+    return MountError::kInvalidMountOptions;
   }
   if (!ValidateDirectory(platform(), &data_dir, true)) {
-    return MOUNT_ERROR_INSUFFICIENT_PERMISSIONS;
+    return MountError::kInsufficientPermissions;
   }
 
-  const base::FilePath homedir(kHomeBaseDir);
+  const base::FilePath homedir("/home");
   if (!homedir.IsParent(data_dir)) {
     LOG(ERROR) << "Unexpected location of " << quote(data_dir);
-    return MOUNT_ERROR_INSUFFICIENT_PERMISSIONS;
+    return MountError::kInsufficientPermissions;
   }
 
   base::FilePath my_files;
   if (FindPathOption(params, kMyFilesOptionPrefix, &my_files)) {
     if (!ValidateDirectory(platform(), &my_files, false)) {
       LOG(ERROR) << "User files inaccessible";
-      return MOUNT_ERROR_INSUFFICIENT_PERMISSIONS;
+      return MountError::kInsufficientPermissions;
     }
     if (!homedir.IsParent(my_files)) {
       LOG(ERROR) << "Unexpected location of " << quote(my_files);
-      return MOUNT_ERROR_INSUFFICIENT_PERMISSIONS;
+      return MountError::kInsufficientPermissions;
     }
   }
 
   // Bind datadir, user files and DBus communication socket into the sandbox.
   if (!sandbox->Mount("tmpfs", "/home", "tmpfs", "mode=0755,size=1M")) {
     LOG(ERROR) << "Cannot mount /home";
-    return MOUNT_ERROR_INTERNAL;
+    return MountError::kInternalError;
   }
   if (!sandbox->BindMount(data_dir.value(), data_dir.value(), true, false)) {
     LOG(ERROR) << "Cannot bind " << quote(data_dir);
-    return MOUNT_ERROR_INTERNAL;
+    return MountError::kInternalError;
   }
+
+  const char kDbusSocketPath[] = "/run/dbus";
   if (!sandbox->BindMount(kDbusSocketPath, kDbusSocketPath, true, false)) {
     LOG(ERROR) << "Cannot bind " << quote(kDbusSocketPath);
-    return MOUNT_ERROR_INTERNAL;
+    return MountError::kInternalError;
   }
   if (!my_files.empty()) {
     if (!sandbox->BindMount(my_files.value(), my_files.value(), true, true)) {
       LOG(ERROR) << "Cannot bind " << quote(my_files);
-      return MOUNT_ERROR_INTERNAL;
+      return MountError::kInternalError;
     }
   }
 
@@ -301,12 +300,12 @@ MountErrorType DrivefsHelper::ConfigureSandbox(
   }
   std::string options;
   if (!JoinParamsIntoOptions(args, &options)) {
-    return MOUNT_ERROR_INVALID_MOUNT_OPTIONS;
+    return MountError::kInvalidMountOptions;
   }
   sandbox->AddArgument("-o");
   sandbox->AddArgument(options);
 
-  return MOUNT_ERROR_NONE;
+  return MountError::kSuccess;
 }
 
 }  // namespace cros_disks

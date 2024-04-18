@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <iterator>
 #include <utility>
 
 #include <base/check.h>
@@ -14,12 +15,12 @@
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <chromeos/dbus/service_constants.h>
+#include <net-base/ipv4_address.h>
 
-#include "shill/connection.h"
+#include "base/containers/span.h"
 #include "shill/control_interface.h"
 #include "shill/device_info.h"
 #include "shill/error.h"
@@ -27,40 +28,34 @@
 #include "shill/ipconfig.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/net/io_handler_factory.h"
-#include "shill/property_accessor.h"
-#include "shill/store_interface.h"
-#include "shill/virtual_device.h"
-#include "shill/vpn/vpn_service.h"
+#include "shill/metrics.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/store_interface.h"
+#include "shill/vpn/vpn_types.h"
 
 namespace shill {
 
 namespace Logging {
-
 static auto kModuleLogScope = ScopeLogger::kVPN;
-static std::string ObjectID(const ThirdPartyVpnDriver* v) {
-  return "(third_party_vpn_driver)";
-}
-
 }  // namespace Logging
 
 namespace {
 
 const int32_t kConstantMaxMtu = (1 << 16) - 1;
-constexpr base::TimeDelta kConnectTimeout = base::TimeDelta::FromMinutes(5);
+constexpr base::TimeDelta kConnectTimeout = base::Minutes(5);
 
-std::string IPAddressFingerprint(const IPAddress& address) {
+std::string IPAddressFingerprint(const net_base::IPv4CIDR& cidr) {
   static const char* const hex_to_bin[] = {
       "0000", "0001", "0010", "0011", "0100", "0101", "0110", "0111",
       "1000", "1001", "1010", "1011", "1100", "1101", "1110", "1111"};
   std::string fingerprint;
-  const size_t address_length = address.address().GetLength();
-  const uint8_t* raw_address = address.address().GetConstData();
+  const size_t address_length = cidr.address().kAddressLength;
+  const auto raw_address = cidr.address().data();
   for (size_t i = 0; i < address_length; ++i) {
     fingerprint += hex_to_bin[raw_address[i] >> 4];
     fingerprint += hex_to_bin[raw_address[i] & 0xf];
   }
-  return fingerprint.substr(0, address.prefix());
+  return fingerprint.substr(0, cidr.prefix_length());
 }
 
 }  // namespace
@@ -75,10 +70,13 @@ ThirdPartyVpnDriver* ThirdPartyVpnDriver::active_client_ = nullptr;
 
 ThirdPartyVpnDriver::ThirdPartyVpnDriver(Manager* manager,
                                          ProcessManager* process_manager)
-    : VPNDriver(manager, process_manager, kProperties, base::size(kProperties)),
+    : VPNDriver(manager,
+                process_manager,
+                VPNType::kThirdParty,
+                kProperties,
+                std::size(kProperties)),
       tun_fd_(-1),
       ip_properties_set_(false),
-      io_handler_factory_(IOHandlerFactory::GetInstance()),
       parameters_expected_(false),
       reconnect_supported_(false) {
   file_io_ = FileIO::GetInstance();
@@ -119,8 +117,8 @@ bool ThirdPartyVpnDriver::Save(StoreInterface* storage,
 }
 
 void ThirdPartyVpnDriver::ClearExtensionId(Error* error) {
-  error->Populate(Error::kNotSupported,
-                  "Clearing extension id is not supported.");
+  error->Populate(Error::kIllegalOperation,
+                  "Clearing extension id is not allowed.");
 }
 
 bool ThirdPartyVpnDriver::SetExtensionId(const std::string& value,
@@ -141,7 +139,7 @@ void ThirdPartyVpnDriver::UpdateConnectionState(
     return;
   }
   if (event_handler_ && connection_state == Service::kStateFailure) {
-    FailService(Service::kFailureInternal, Service::kErrorDetailsNone);
+    FailService(Service::kFailureConnect, "Failure state set by D-Bus caller");
     return;
   }
   if (!event_handler_ || connection_state != Service::kStateOnline) {
@@ -177,8 +175,9 @@ void ThirdPartyVpnDriver::ProcessIp(
   // TODO(kaliamoorthi): Add IPV6 support.
   auto it = parameters.find(key);
   if (it != parameters.end()) {
-    if (IPAddress(parameters.at(key)).family() == IPAddress::kFamilyIPv4) {
-      *target = parameters.at(key);
+    const std::string& ip = it->second;
+    if (net_base::IPv4Address::CreateFromString(ip).has_value()) {
+      *target = ip;
     } else {
       error_message->append(key).append(" is not a valid IP;");
     }
@@ -204,7 +203,8 @@ void ThirdPartyVpnDriver::ProcessIPArray(
 
     // Eliminate invalid IPs
     for (auto value = string_array.begin(); value != string_array.end();) {
-      if (IPAddress(*value).family() != IPAddress::kFamilyIPv4) {
+      const auto addr = net_base::IPv4Address::CreateFromString(*value);
+      if (!addr.has_value()) {
         warning_message->append(*value + " for " + key + " is invalid;");
         value = string_array.erase(value);
       } else {
@@ -231,7 +231,6 @@ void ThirdPartyVpnDriver::ProcessIPArrayCIDR(
     std::string* error_message,
     std::string* warning_message) {
   std::vector<std::string> string_array;
-  IPAddress address(IPAddress::kFamilyIPv4);
   auto it = parameters.find(key);
   if (it != parameters.end()) {
     string_array =
@@ -240,12 +239,13 @@ void ThirdPartyVpnDriver::ProcessIPArrayCIDR(
 
     // Eliminate invalid IPs
     for (auto value = string_array.begin(); value != string_array.end();) {
-      if (!address.SetAddressAndPrefixFromString(*value)) {
+      const auto cidr = net_base::IPv4CIDR::CreateFromCIDRString(*value);
+      if (!cidr.has_value()) {
         warning_message->append(*value + " for " + key + " is invalid;");
         value = string_array.erase(value);
         continue;
       }
-      const std::string cidr_key = IPAddressFingerprint(address);
+      const std::string cidr_key = IPAddressFingerprint(*cidr);
       if (known_cidrs_.find(cidr_key) != known_cidrs_.end()) {
         warning_message->append("Duplicate entry for " + *value + " in " + key +
                                 " found;");
@@ -343,48 +343,52 @@ void ThirdPartyVpnDriver::SetParameters(
     return;
   }
 
-  ip_properties_ = IPConfig::Properties();
-  ip_properties_.address_family = IPAddress::kFamilyIPv4;
+  ipv4_properties_ = std::make_unique<IPConfig::Properties>();
+  ipv4_properties_->address_family = net_base::IPFamily::kIPv4;
 
-  ProcessIp(parameters, kAddressParameterThirdPartyVpn, &ip_properties_.address,
-            true, error_message);
+  ProcessIp(parameters, kAddressParameterThirdPartyVpn,
+            &ipv4_properties_->address, true, error_message);
   ProcessIp(parameters, kBroadcastAddressParameterThirdPartyVpn,
-            &ip_properties_.broadcast_address, false, error_message);
+            &ipv4_properties_->broadcast_address, false, error_message);
 
-  ip_properties_.gateway = ip_properties_.address;
+  ipv4_properties_->gateway = ipv4_properties_->address;
 
   ProcessInt32(parameters, kSubnetPrefixParameterThirdPartyVpn,
-               &ip_properties_.subnet_prefix, 0, 32, true, error_message);
-  ProcessInt32(parameters, kMtuParameterThirdPartyVpn, &ip_properties_.mtu,
-               IPConfig::kMinIPv4MTU, kConstantMaxMtu, false, error_message);
+               &ipv4_properties_->subnet_prefix, 0, 32, true, error_message);
+  ProcessInt32(parameters, kMtuParameterThirdPartyVpn, &ipv4_properties_->mtu,
+               NetworkConfig::kMinIPv4MTU, kConstantMaxMtu, false,
+               error_message);
 
   ProcessSearchDomainArray(parameters, kDomainSearchParameterThirdPartyVpn,
-                           kNonIPDelimiter, &ip_properties_.domain_search,
+                           kNonIPDelimiter, &ipv4_properties_->domain_search,
                            false, error_message);
   ProcessIPArray(parameters, kDnsServersParameterThirdPartyVpn, kIPDelimiter,
-                 &ip_properties_.dns_servers, false, error_message,
+                 &ipv4_properties_->dns_servers, false, error_message,
                  warning_message);
 
   known_cidrs_.clear();
 
   ProcessIPArrayCIDR(parameters, kExclusionListParameterThirdPartyVpn,
-                     kIPDelimiter, &ip_properties_.exclusion_list, true,
+                     kIPDelimiter, &ipv4_properties_->exclusion_list, true,
                      error_message, warning_message);
-  if (!ip_properties_.exclusion_list.empty()) {
+  if (!ipv4_properties_->exclusion_list.empty()) {
     // The first excluded IP is used to find the default gateway. The logic that
     // finds the default gateway does not work for default route "0.0.0.0/0".
     // Hence, this code ensures that the first IP is not default.
-    IPAddress address(ip_properties_.address_family);
-    address.SetAddressAndPrefixFromString(ip_properties_.exclusion_list[0]);
-    if (address.IsDefault() && !address.prefix()) {
-      if (ip_properties_.exclusion_list.size() > 1) {
-        swap(ip_properties_.exclusion_list[0],
-             ip_properties_.exclusion_list[1]);
+    const auto cidr = net_base::IPv4CIDR::CreateFromCIDRString(
+        ipv4_properties_->exclusion_list[0]);
+    if (!cidr.has_value()) {
+      LOG(ERROR) << "Invalid prefix string: "
+                 << ipv4_properties_->exclusion_list[0];
+    } else if (cidr->IsDefault()) {
+      if (ipv4_properties_->exclusion_list.size() > 1) {
+        swap(ipv4_properties_->exclusion_list[0],
+             ipv4_properties_->exclusion_list[1]);
       } else {
         // When there is only a single entry which is a default address, it can
         // be cleared since the default behavior is to not route any traffic to
         // the tunnel interface.
-        ip_properties_.exclusion_list.clear();
+        ipv4_properties_->exclusion_list.clear();
       }
     }
   }
@@ -397,29 +401,19 @@ void ThirdPartyVpnDriver::SetParameters(
   ProcessIPArrayCIDR(parameters, kInclusionListParameterThirdPartyVpn,
                      kIPDelimiter, &inclusion_list, true, error_message,
                      warning_message);
-
-  IPAddress ip_address(ip_properties_.address_family);
-  IPConfig::Route route;
-  route.gateway = ip_properties_.gateway;
-  for (const auto& value : inclusion_list) {
-    ip_address.SetAddressAndPrefixFromString(value);
-    ip_address.IntoString(&route.host);
-    route.prefix = ip_address.prefix();
-    ip_properties_.routes.push_back(route);
-  }
+  ipv4_properties_->inclusion_list = inclusion_list;
 
   if (!error_message->empty()) {
     LOG(ERROR) << __func__ << ": " << error_message;
     return;
   }
-  ip_properties_.default_route = false;
-  ip_properties_.blackhole_ipv6 = true;
-  ip_properties_.method = kTypeVPN;
+  ipv4_properties_->default_route = false;
+  ipv4_properties_->blackhole_ipv6 = true;
+  ipv4_properties_->method = kTypeVPN;
   if (!ip_properties_set_) {
     ip_properties_set_ = true;
     metrics()->SendEnumToUMA(Metrics::kMetricVpnDriver,
-                             Metrics::kVpnDriverThirdParty,
-                             Metrics::kMetricVpnDriverMax);
+                             Metrics::kVpnDriverThirdParty);
   }
 
   if (event_handler_) {
@@ -429,11 +423,20 @@ void ThirdPartyVpnDriver::SetParameters(
   }
 }
 
-void ThirdPartyVpnDriver::OnInput(InputData* data) {
-  if (data->len <= 0) {
-    return;
+void ThirdPartyVpnDriver::OnTunReadable() {
+  uint8_t buf[4096];
+  const ssize_t len = file_io_->Read(tun_fd_, buf, sizeof(buf));
+  if (len < 0) {
+    PLOG(ERROR) << "Failed to read tun fd";
+    CHECK_EQ(active_client_, this);
+    adaptor_interface_->EmitPlatformMessage(
+        static_cast<uint32_t>(PlatformMessage::kError));
+  } else {
+    OnInput({buf, static_cast<size_t>(len)});
   }
+}
 
+void ThirdPartyVpnDriver::OnInput(base::span<const uint8_t> data) {
   // Not all Chrome apps can properly handle being passed IPv6 packets. This
   // usually should not be an issue because we prevent IPv6 traffic from being
   // routed to this VPN. However, the kernel itself can sometimes send IPv6
@@ -442,31 +445,24 @@ void ThirdPartyVpnDriver::OnInput(InputData* data) {
   //
   // See from RFC 791 Section 3.1 that the high nibble of the first byte in an
   // IP header represents the IP version (4 in this case).
-  if ((data->buf[0] & 0xf0) != 0x40) {
-    SLOG(this, 1) << "Dropping non-IPv4 packet";
+  if ((data[0] & 0xf0) != 0x40) {
+    SLOG(1) << "Dropping non-IPv4 packet";
     return;
   }
 
   // TODO(kaliamoorthi): This is not efficient, transfer the descriptor over to
   // chrome browser or use a pipe in between. Avoid using DBUS for packet
   // transfer.
-  std::vector<uint8_t> ip_packet(data->buf, data->buf + data->len);
+  std::vector<uint8_t> ip_packet(std::begin(data), std::end(data));
   adaptor_interface_->EmitPacketReceived(ip_packet);
 }
 
-void ThirdPartyVpnDriver::OnInputError(const std::string& error) {
-  LOG(ERROR) << error;
-  CHECK_EQ(active_client_, this);
-  adaptor_interface_->EmitPlatformMessage(
-      static_cast<uint32_t>(PlatformMessage::kError));
-}
-
 void ThirdPartyVpnDriver::Cleanup() {
+  tun_watcher_.reset();
   if (tun_fd_ > 0) {
     file_io_->Close(tun_fd_);
     tun_fd_ = -1;
   }
-  io_handler_.reset();
   if (active_client_ == this) {
     adaptor_interface_->EmitPlatformMessage(
         static_cast<uint32_t>(PlatformMessage::kDisconnected));
@@ -483,7 +479,7 @@ void ThirdPartyVpnDriver::Cleanup() {
 }
 
 base::TimeDelta ThirdPartyVpnDriver::ConnectAsync(EventHandler* handler) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   event_handler_ = handler;
   if (!manager()->device_info()->CreateTunnelInterface(base::BindOnce(
           &ThirdPartyVpnDriver::OnLinkReady, weak_factory_.GetWeakPtr()))) {
@@ -499,7 +495,7 @@ base::TimeDelta ThirdPartyVpnDriver::ConnectAsync(EventHandler* handler) {
 
 void ThirdPartyVpnDriver::OnLinkReady(const std::string& link_name,
                                       int interface_index) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   if (!event_handler_) {
     LOG(ERROR) << "event_handler_ is not set";
     return;
@@ -511,7 +507,7 @@ void ThirdPartyVpnDriver::OnLinkReady(const std::string& link_name,
   interface_name_ = link_name;
   interface_index_ = interface_index;
 
-  ip_properties_ = IPConfig::Properties();
+  ipv4_properties_ = std::make_unique<IPConfig::Properties>();
   ip_properties_set_ = false;
 
   tun_fd_ = manager()->device_info()->OpenTunnelInterface(interface_name_);
@@ -519,23 +515,38 @@ void ThirdPartyVpnDriver::OnLinkReady(const std::string& link_name,
     FailService(Service::kFailureInternal, "Unable to open tun interface");
     return;
   }
-  io_handler_.reset(io_handler_factory_->CreateIOInputHandler(
-      tun_fd_,
-      base::Bind(&ThirdPartyVpnDriver::OnInput, base::Unretained(this)),
-      base::Bind(&ThirdPartyVpnDriver::OnInputError, base::Unretained(this))));
+
+  tun_watcher_ = base::FileDescriptorWatcher::WatchReadable(
+      tun_fd_, base::BindRepeating(&ThirdPartyVpnDriver::OnTunReadable,
+                                   base::Unretained(this)));
+  if (tun_watcher_ == nullptr) {
+    LOG(ERROR) << "Failed on watching tun fd";
+    return;
+  }
+
   active_client_ = this;
   parameters_expected_ = true;
   adaptor_interface_->EmitPlatformMessage(
       static_cast<uint32_t>(PlatformMessage::kConnected));
 }
 
-IPConfig::Properties ThirdPartyVpnDriver::GetIPProperties() const {
-  return ip_properties_;
+std::unique_ptr<IPConfig::Properties> ThirdPartyVpnDriver::GetIPv4Properties()
+    const {
+  if (ipv4_properties_ == nullptr) {
+    LOG(DFATAL) << "ipv4_properties_ is invalid.";
+    return nullptr;
+  }
+  return std::make_unique<IPConfig::Properties>(*ipv4_properties_);
+}
+
+std::unique_ptr<IPConfig::Properties> ThirdPartyVpnDriver::GetIPv6Properties()
+    const {
+  return nullptr;
 }
 
 void ThirdPartyVpnDriver::FailService(Service::ConnectFailure failure,
-                                      const std::string& error_details) {
-  SLOG(this, 2) << __func__ << "(" << error_details << ")";
+                                      std::string_view error_details) {
+  SLOG(2) << __func__ << "(" << error_details << ")";
   Cleanup();
   if (event_handler_) {
     event_handler_->OnDriverFailure(failure, error_details);
@@ -544,16 +555,12 @@ void ThirdPartyVpnDriver::FailService(Service::ConnectFailure failure,
 }
 
 void ThirdPartyVpnDriver::Disconnect() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   CHECK(adaptor_interface_);
   if (active_client_ == this) {
     Cleanup();
   }
   event_handler_ = nullptr;
-}
-
-std::string ThirdPartyVpnDriver::GetProviderType() const {
-  return std::string(kProviderThirdPartyVpn);
 }
 
 void ThirdPartyVpnDriver::OnDefaultPhysicalServiceEvent(
@@ -591,7 +598,7 @@ void ThirdPartyVpnDriver::OnDefaultPhysicalServiceEvent(
   adaptor_interface_->EmitPlatformMessage(static_cast<uint32_t>(message));
 }
 
-void ThirdPartyVpnDriver::OnBeforeSuspend(const ResultCallback& callback) {
+void ThirdPartyVpnDriver::OnBeforeSuspend(ResultCallback callback) {
   if (event_handler_ && reconnect_supported_) {
     // FIXME: Currently the VPN app receives this message at the same time
     // as the resume message, even if shill adds a delay to hold off the
@@ -599,7 +606,7 @@ void ThirdPartyVpnDriver::OnBeforeSuspend(const ResultCallback& callback) {
     adaptor_interface_->EmitPlatformMessage(
         static_cast<uint32_t>(PlatformMessage::kSuspend));
   }
-  callback.Run(Error(Error::kSuccess));
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
 void ThirdPartyVpnDriver::OnAfterResume() {
@@ -613,7 +620,7 @@ void ThirdPartyVpnDriver::OnAfterResume() {
 }
 
 void ThirdPartyVpnDriver::OnConnectTimeout() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   if (!event_handler_) {
     LOG(DFATAL) << "event_handler_ is not set";
     return;

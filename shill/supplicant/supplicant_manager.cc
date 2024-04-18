@@ -1,11 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/supplicant/supplicant_manager.h"
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 
 #include "shill/control_interface.h"
 #include "shill/event_dispatcher.h"
@@ -29,14 +29,14 @@ SupplicantManager::SupplicantManager(Manager* manager)
     : control_interface_(manager->control_interface()),
       dispatcher_(manager->dispatcher()) {}
 
-SupplicantManager::~SupplicantManager() = default;
+SupplicantManager::~SupplicantManager() {}
 
 void SupplicantManager::Start() {
   proxy_ = control_interface_->CreateSupplicantProcessProxy(
-      base::Bind(&SupplicantManager::OnSupplicantPresence,
-                 base::Unretained(this), true),
-      base::Bind(&SupplicantManager::OnSupplicantPresence,
-                 base::Unretained(this), false));
+      base::BindRepeating(&SupplicantManager::OnSupplicantPresence, AsWeakPtr(),
+                          true),
+      base::BindRepeating(&SupplicantManager::OnSupplicantPresence, AsWeakPtr(),
+                          false));
 }
 
 void SupplicantManager::AddSupplicantListener(
@@ -44,7 +44,7 @@ void SupplicantManager::AddSupplicantListener(
   listeners_.push_back(present_callback);
   // Give an immediate notification.
   if (present_)
-    dispatcher_->PostTask(FROM_HERE, base::Bind(present_callback, true));
+    dispatcher_->PostTask(FROM_HERE, base::BindOnce(present_callback, true));
 }
 
 void SupplicantManager::RemoveSupplicantListener(

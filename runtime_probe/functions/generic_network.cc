@@ -1,13 +1,15 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "runtime_probe/functions/generic_network.h"
 
+#include <optional>
+
 namespace runtime_probe {
 
-base::Optional<std::string> GenericNetworkFunction::GetNetworkType() const {
-  return base::nullopt;
+std::optional<std::string> GenericNetworkFunction::GetNetworkType() const {
+  return std::nullopt;
 }
 
 }  // namespace runtime_probe

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,6 +34,8 @@ class TrunksMetrics {
 
   // This function reports the TPM command error code.
   void ReportTpmErrorCode(TPM_RC error_code);
+
+  void ReportWriteErrorNo(int prev, int next);
 
  private:
   MetricsLibrary metrics_library_;

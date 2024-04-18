@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,34 +6,42 @@
 
 #include <algorithm>
 #include <memory>
+#include <set>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/contains.h>
+#include <base/containers/cxx20_erase.h>
 #include <base/files/file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
+#include <base/strings/stringprintf.h>
 #include <chromeos/dbus/service_constants.h>
 #include <ModemManager/ModemManager.h>
 
 #include "shill/adaptor_interfaces.h"
+#include "shill/cellular/apn_list.h"
 #include "shill/cellular/cellular_bearer.h"
+#include "shill/cellular/cellular_consts.h"
+#include "shill/cellular/cellular_helpers.h"
 #include "shill/cellular/cellular_pco.h"
 #include "shill/cellular/cellular_service.h"
 #include "shill/cellular/mobile_operator_info.h"
 #include "shill/cellular/pending_activation_store.h"
+#include "shill/cellular/power_opt.h"
 #include "shill/cellular/verizon_subscription_state.h"
 #include "shill/control_interface.h"
+#include "shill/data_types.h"
 #include "shill/dbus/dbus_properties_proxy.h"
 #include "shill/device_id.h"
 #include "shill/error.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/property_accessor.h"
+#include "shill/store/property_accessor.h"
 
 namespace shill {
 
@@ -44,17 +52,37 @@ static std::string ObjectID(const CellularCapability3gpp* c) {
 }
 }  // namespace Logging
 
-// static
-const char CellularCapability3gpp::kConnectApn[] = "apn";
-const char CellularCapability3gpp::kConnectUser[] = "user";
-const char CellularCapability3gpp::kConnectPassword[] = "password";
-const char CellularCapability3gpp::kConnectAllowedAuth[] = "allowed-auth";
-const char CellularCapability3gpp::kConnectAllowRoaming[] = "allow-roaming";
-const char CellularCapability3gpp::kConnectIpType[] = "ip-type";
-const int64_t CellularCapability3gpp::kEnterPinTimeoutMilliseconds = 20000;
-const int64_t
-    CellularCapability3gpp::kRegistrationDroppedUpdateTimeoutMilliseconds =
-        15000;
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutConnect =
+    base::Seconds(90);
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutDefault =
+    base::Seconds(5);
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutDisconnect =
+    base::Seconds(90);
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutEnable =
+    base::Seconds(45);
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutGetLocation =
+    base::Seconds(45);
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutReset =
+    base::Seconds(90);
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutSetupLocation =
+    base::Seconds(45);
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutSetupSignal =
+    base::Seconds(45);
+constexpr base::TimeDelta
+    CellularCapability3gpp::kTimeoutSetupSignalThresholds = base::Seconds(45);
+constexpr base::TimeDelta
+    CellularCapability3gpp::kTimeoutRegistrationDroppedUpdate =
+        base::Seconds(15);
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutSetPowerState =
+    base::Seconds(20);
+
+// The modem sends a new attach request every 10 seconds(See 3gpp T3411).
+// The next value allows for 2 attach requests. If the modem sends 5
+// consecutive requests using the same invalid APN, the UE will be blocked for
+// 12 minutes(See 3gpp T3402).
+constexpr base::TimeDelta CellularCapability3gpp::kTimeoutSetNextAttachApn =
+    base::Milliseconds(12500);
+
 const RpcIdentifier CellularCapability3gpp::kRootPath = RpcIdentifier("/");
 const char CellularCapability3gpp::kStatusProperty[] = "status";
 const char CellularCapability3gpp::kOperatorLongProperty[] = "operator-long";
@@ -79,25 +107,29 @@ const CellularCapability3gpp::SignalQualityBounds
 const CellularCapability3gpp::SignalQualityBounds
     CellularCapability3gpp::kRscpBounds = {-115, -89};
 
-const int CellularCapability3gpp::kSetPowerStateTimeoutMilliseconds = 20000;
+const char CellularCapability3gpp::kUplinkSpeedBpsProperty[] = "uplink-speed";
+const char CellularCapability3gpp::kDownlinkSpeedBpsProperty[] =
+    "downlink-speed";
+
+const char CellularCapability3gpp::kRssiThresholdProperty[] = "rssi-threshold";
+const char CellularCapability3gpp::kErrorThresholdProperty[] =
+    "error-rate-threshold";
+const uint32_t CellularCapability3gpp::kRssiThreshold = 3;
+const bool CellularCapability3gpp::kErrorThreshold = false;
+
 const int CellularCapability3gpp::kUnknownLockRetriesLeft = 999;
 
 namespace {
 
-const int kSignalQualityUpdateRateSeconds = 5;
+const int kSignalQualityUpdateRateSeconds = 60;
 
 // Plugin strings via ModemManager.
 const char kTelitMMPlugin[] = "Telit";
+const char kQcomSocMMDevice[] = "qcom-soc";
 
-// This identifier is specified in the serviceproviders.prototxt file.
+// This identifier is specified in the serviceproviders.textproto file.
 const char kVzwIdentifier[] = "c83d6597-dc91-4d48-a3a7-d86b80123751";
 const size_t kVzwMdnLength = 10;
-
-// Keys for the entries of Profiles.
-const char kProfileApn[] = "apn";
-const char kProfileUsername[] = "username";
-const char kProfilePassword[] = "password";
-const char kProfileAuthType[] = "auth-type";
 
 std::string AccessTechnologyToString(uint32_t access_technologies) {
   // Order is important. Return the highest radio access technology.
@@ -138,10 +170,6 @@ std::string AccessTechnologyToTechnologyFamily(uint32_t access_technologies) {
        MM_MODEM_ACCESS_TECHNOLOGY_GSM_COMPACT | MM_MODEM_ACCESS_TECHNOLOGY_GSM |
        MM_MODEM_ACCESS_TECHNOLOGY_5GNR))
     return kTechnologyFamilyGsm;
-  if (access_technologies &
-      (MM_MODEM_ACCESS_TECHNOLOGY_EVDO0 | MM_MODEM_ACCESS_TECHNOLOGY_EVDOA |
-       MM_MODEM_ACCESS_TECHNOLOGY_EVDOB | MM_MODEM_ACCESS_TECHNOLOGY_1XRTT))
-    return kTechnologyFamilyCdma;
   return "";
 }
 
@@ -189,6 +217,35 @@ std::string MMBearerAllowedAuthToApnAuthentication(
   }
 }
 
+std::set<std::string> MMBearerApnTypeToApnTypes(MMBearerApnType apn_type) {
+  std::set<std::string> apn_types;
+  if (apn_type & MM_BEARER_APN_TYPE_INITIAL)
+    apn_types.insert(kApnTypeIA);
+  if (apn_type & MM_BEARER_APN_TYPE_DEFAULT)
+    apn_types.insert(kApnTypeDefault);
+  if (apn_type & MM_BEARER_APN_TYPE_TETHERING)
+    apn_types.insert(kApnTypeDun);
+
+  if (apn_types.empty())
+    LOG(WARNING) << "Unknown apn_type mask:" << apn_type;
+
+  return apn_types;
+}
+
+std::string MMBearerIpFamilyToIpType(MMBearerIpFamily ip_type) {
+  switch (ip_type) {
+    case MM_BEARER_IP_FAMILY_IPV4:
+      return kApnIpTypeV4;
+    case MM_BEARER_IP_FAMILY_IPV6:
+      return kApnIpTypeV6;
+    case MM_BEARER_IP_FAMILY_IPV4V6:
+    case MM_BEARER_IP_FAMILY_ANY:
+      return kApnIpTypeV4V6;
+    default:
+      return "";
+  }
+}
+
 bool IsRegisteredState(MMModem3gppRegistrationState state) {
   return (state == MM_MODEM_3GPP_REGISTRATION_STATE_HOME ||
           state == MM_MODEM_3GPP_REGISTRATION_STATE_ROAMING);
@@ -230,13 +287,15 @@ CellularCapability3gpp::CellularCapability3gpp(
     ControlInterface* control_interface,
     Metrics* metrics,
     PendingActivationStore* pending_activation_store)
-    : CellularCapability(
-          cellular, control_interface, metrics, pending_activation_store),
-      mobile_operator_info_(
+    : cellular_(cellular),
+      control_interface_(control_interface),
+      metrics_(metrics),
+      pending_activation_store_(pending_activation_store),
+      parsed_scan_result_operator_info_(
           new MobileOperatorInfo(cellular->dispatcher(), "ParseScanResult")),
       weak_ptr_factory_(this) {
   SLOG(this, 1) << "Cellular capability constructed: 3GPP";
-  mobile_operator_info_->Init();
+  parsed_scan_result_operator_info_->Init();
 }
 
 CellularCapability3gpp::~CellularCapability3gpp() {
@@ -254,8 +313,10 @@ KeyValueStore CellularCapability3gpp::SimLockStatusToProperty(
     case MM_MODEM_LOCK_SIM_PUK:
       lock_type = "sim-puk";
       break;
+    case MM_MODEM_LOCK_SIM_PIN2:
     case MM_MODEM_LOCK_SIM_PUK2:
-      lock_type = "sim-puk2";
+      // Ignore these locks. SIM card can be used.
+      lock_type = "";
       break;
     case MM_MODEM_LOCK_PH_SP_PIN:
       lock_type = "service-provider-pin";
@@ -309,7 +370,7 @@ bool CellularCapability3gpp::SetPrimarySimSlotForIccid(
     SetPrimarySimSlot(properties.slot);
     return true;
   }
-  LOG(ERROR) << "No slot found for ICCID.";
+  SLOG(this, 2) << "No slot found for ICCID.";
   return false;
 }
 
@@ -322,11 +383,19 @@ void CellularCapability3gpp::InitProxies() {
   modem_3gpp_proxy_ = control_interface()->CreateMM1ModemModem3gppProxy(
       cellular()->dbus_path(), cellular()->dbus_service());
 
+  modem_3gpp_profile_manager_proxy_ =
+      control_interface()->CreateMM1ModemModem3gppProfileManagerProxy(
+          cellular()->dbus_path(), cellular()->dbus_service());
+
+  modem_3gpp_profile_manager_proxy_->SetUpdatedCallback(base::BindRepeating(
+      &CellularCapability3gpp::OnModem3gppProfileManagerUpdatedSignal,
+      weak_ptr_factory_.GetWeakPtr()));
+
   modem_proxy_ = control_interface()->CreateMM1ModemProxy(
       cellular()->dbus_path(), cellular()->dbus_service());
   modem_proxy_->set_state_changed_callback(
-      base::Bind(&CellularCapability3gpp::OnModemStateChangedSignal,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(&CellularCapability3gpp::OnModemStateChangedSignal,
+                          weak_ptr_factory_.GetWeakPtr()));
 
   modem_signal_proxy_ = control_interface()->CreateMM1ModemSignalProxy(
       cellular()->dbus_path(), cellular()->dbus_service());
@@ -339,60 +408,90 @@ void CellularCapability3gpp::InitProxies() {
 
   dbus_properties_proxy_ = control_interface()->CreateDBusPropertiesProxy(
       cellular()->dbus_path(), cellular()->dbus_service());
-  dbus_properties_proxy_->SetPropertiesChangedCallback(base::Bind(
+  dbus_properties_proxy_->SetPropertiesChangedCallback(base::BindRepeating(
       &CellularCapability3gpp::OnPropertiesChanged, base::Unretained(this)));
 
   // |sim_proxy_| is created when |sim_path_| is known.
 }
 
-void CellularCapability3gpp::StartModem(Error* error,
-                                        const ResultCallback& callback) {
+void CellularCapability3gpp::StartModem(ResultCallback callback) {
   SLOG(this, 1) << __func__;
   InitProxies();
   CHECK(!callback.is_null());
+  Error error;
   if (!modem_proxy_) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kWrongState, "No proxy");
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kWrongState, "No proxy");
+    std::move(callback).Run(error);
     return;
   }
-  Error local_error(Error::kOperationInitiated);
   metrics()->NotifyDeviceEnableStarted(cellular()->interface_index());
-  modem_proxy_->Enable(true, &local_error,
-                       base::Bind(&CellularCapability3gpp::EnableModemCompleted,
-                                  weak_ptr_factory_.GetWeakPtr(), callback),
-                       kTimeoutEnable);
-  if (local_error.IsFailure()) {
-    SLOG(this, 2) << __func__ << ": Call to modem_proxy_->Enable() failed";
-  }
-  if (error) {
-    error->CopyFrom(local_error);
-  }
+  modem_proxy_->Enable(
+      true,
+      base::BindOnce(&CellularCapability3gpp::EnableModemCompleted,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
+      kTimeoutEnable.InMilliseconds());
 }
 
-void CellularCapability3gpp::EnableModemCompleted(
-    const ResultCallback& callback, const Error& error) {
+void CellularCapability3gpp::EnableModemCompleted(ResultCallback callback,
+                                                  const Error& error) {
   SLOG(this, 1) << __func__ << " error=" << error;
 
+  // Update all dbus properties from the modem even if the enable dbus call to
+  // MM fails. CellularCapability3gpp::EnableModem is responsible for setting up
+  // the modem to be usable. That involves updating all properties and
+  // triggering creation of services for all SIMs.
+  if (error.IsSuccess() || error.type() == Error::kWrongState) {
+    GetProperties();
+  }
+
   if (error.IsFailure()) {
-    callback.Run(error);
+    ResultCallback cb = base::BindOnce(
+        [](ResultCallback callback, const Error& error,
+           const Error& /*unused*/) { std::move(callback).Run(error); },
+        std::move(callback), error);
+
+    // TODO(b/256525852): Revert this once we land the proper fix in modem fw.
+    modem_proxy_->SetPowerState(
+        IsModemFM101() ? MM_MODEM_POWER_STATE_ON : MM_MODEM_POWER_STATE_LOW,
+        std::move(cb), kTimeoutSetPowerState.InMilliseconds());
     return;
   }
 
   if (IsLocationUpdateSupported()) {
     SetupLocation(MM_MODEM_LOCATION_SOURCE_3GPP_LAC_CI,
                   /*signal_location=*/false,
-                  base::Bind(&CellularCapability3gpp::OnSetupLocationReply,
-                             weak_ptr_factory_.GetWeakPtr()));
+                  base::BindOnce(&CellularCapability3gpp::OnSetupLocationReply,
+                                 weak_ptr_factory_.GetWeakPtr()));
   }
 
-  ResultCallback setup_signal_callback =
-      base::Bind(&CellularCapability3gpp::OnSetupSignalReply,
-                 weak_ptr_factory_.GetWeakPtr());
-  SetupSignal(kSignalQualityUpdateRateSeconds, setup_signal_callback);
+  // TODO(b/274882743): Revert after the proper fix lands in FM101 modem.
+  if (IsModemFM101()) {
+    ResultCallback setup_signal_callback =
+        base::BindOnce(&CellularCapability3gpp::OnSetupSignalReply,
+                       weak_ptr_factory_.GetWeakPtr());
+    SetupSignal(kSignalQualityUpdateRateSeconds,
+                std::move(setup_signal_callback));
+  } else {
+    ResultCallback setup_signal_thresholds_callback =
+        base::BindOnce(&CellularCapability3gpp::OnSetupSignalThresholdsReply,
+                       weak_ptr_factory_.GetWeakPtr());
+    KeyValueStore settings;
+    settings.Set<uint32_t>(kRssiThresholdProperty, kRssiThreshold);
+    settings.Set<bool>(kErrorThresholdProperty, kErrorThreshold);
+    SetupSignalThresholds(settings,
+                          std::move(setup_signal_thresholds_callback));
+  }
 
-  // After modem is enabled, it should be possible to get properties
-  // TODO(jglasgow): handle errors from GetProperties
-  GetProperties();
-  callback.Run(error);
+  // Try to get profiles list from the modem, and then call the callback
+  // to complete the enabling process.
+  ResultVariantDictionariesOnceCallback cb =
+      base::BindOnce(&CellularCapability3gpp::OnProfilesListReply,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback));
+  modem_3gpp_profile_manager_proxy_->List(std::move(cb),
+                                          kTimeoutDefault.InMilliseconds());
+  if (cellular()->service())
+    cellular()->power_opt()->UpdatePowerState(cellular()->service()->iccid(),
+                                              PowerOpt::PowerState::kOn);
 }
 
 void CellularCapability3gpp::SetModemToLowPowerModeOnModemStop(
@@ -401,74 +500,68 @@ void CellularCapability3gpp::SetModemToLowPowerModeOnModemStop(
   set_modem_to_low_power_mode_on_stop_ = set_low_power;
 }
 
-void CellularCapability3gpp::StopModem(Error* error,
-                                       const ResultCallback& callback) {
+void CellularCapability3gpp::StopModem(ResultCallback callback) {
   SLOG(this, 1) << __func__;
   CHECK(!callback.is_null());
-  CHECK(error);
   // If there is an outstanding registration change, simply ignore it since
   // the service will be destroyed anyway.
   if (!registration_dropped_update_callback_.IsCancelled()) {
     registration_dropped_update_callback_.Cancel();
     SLOG(this, 2) << __func__ << " Cancelled delayed deregister.";
   }
+  if (!try_next_attach_apn_callback_.IsCancelled()) {
+    try_next_attach_apn_callback_.Cancel();
+    SLOG(this, 2) << __func__ << " Cancelled next attach APN retry.";
+  }
 
   cellular()->dispatcher()->PostTask(
-      FROM_HERE, base::Bind(&CellularCapability3gpp::Stop_Disable,
-                            weak_ptr_factory_.GetWeakPtr(), callback));
+      FROM_HERE,
+      base::BindOnce(&CellularCapability3gpp::Stop_Disable,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
-void CellularCapability3gpp::Stop_Disable(const ResultCallback& callback) {
+void CellularCapability3gpp::Stop_Disable(ResultCallback callback) {
   SLOG(this, 3) << __func__;
-  Error error;
   if (!modem_proxy_) {
+    Error error;
     Error::PopulateAndLog(FROM_HERE, &error, Error::kWrongState, "No proxy");
-    callback.Run(error);
+    std::move(callback).Run(error);
     return;
   }
   metrics()->NotifyDeviceDisableStarted(cellular()->interface_index());
   modem_proxy_->Enable(
-      false, &error,
-      base::Bind(&CellularCapability3gpp::Stop_DisableCompleted,
-                 weak_ptr_factory_.GetWeakPtr(), callback),
-      kTimeoutEnable);
-  if (error.IsFailure())
-    callback.Run(error);
+      false,
+      base::BindOnce(&CellularCapability3gpp::Stop_DisableCompleted,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
+      kTimeoutEnable.InMilliseconds());
 }
 
-void CellularCapability3gpp::Stop_DisableCompleted(
-    const ResultCallback& callback, const Error& error) {
+void CellularCapability3gpp::Stop_DisableCompleted(ResultCallback callback,
+                                                   const Error& error) {
   SLOG(this, 3) << __func__;
 
   // Set the modem to low power state even when we fail to stop the modem,
   // since a modem without a SIM card is in failed state and might have its
   // radio on.
   if (set_modem_to_low_power_mode_on_stop_)
-    Stop_PowerDown(callback, error);
+    Stop_PowerDown(std::move(callback), error);
   else
-    Stop_Completed(callback, error);
+    Stop_Completed(std::move(callback), error);
 }
 
-void CellularCapability3gpp::Stop_PowerDown(const ResultCallback& callback,
+void CellularCapability3gpp::Stop_PowerDown(ResultCallback callback,
                                             const Error& stop_disabled_error) {
   SLOG(this, 3) << __func__;
-  Error error;
-  Error* error_to_propagate = new Error();
-  // Propagate |stop_disabled_error| since the final result of the operation is
-  // determined by this error.
-  error_to_propagate->CopyFrom(stop_disabled_error);
 
   modem_proxy_->SetPowerState(
-      MM_MODEM_POWER_STATE_LOW, &error,
-      base::Bind(&CellularCapability3gpp::Stop_PowerDownCompleted,
-                 weak_ptr_factory_.GetWeakPtr(), callback,
-                 base::Owned(error_to_propagate)),
-      kSetPowerStateTimeoutMilliseconds);
-
-  if (error.IsFailure())
-    // This really shouldn't happen, but if it does, ignore the error and
-    // continue to the next step propagating |stop_disabled_error|.
-    Stop_Completed(callback, stop_disabled_error);
+      MM_MODEM_POWER_STATE_LOW,
+      base::BindOnce(&CellularCapability3gpp::Stop_PowerDownCompleted,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback),
+                     stop_disabled_error),
+      kTimeoutSetPowerState.InMilliseconds());
+  if (cellular()->service())
+    cellular()->power_opt()->UpdatePowerState(cellular()->service()->iccid(),
+                                              PowerOpt::PowerState::kLow);
 }
 
 // Note: if we were in the middle of powering down the modem when the
@@ -476,45 +569,128 @@ void CellularCapability3gpp::Stop_PowerDown(const ResultCallback& callback,
 // ModemManager. And we might not even get a timeout from dbus-c++,
 // because StartModem re-initializes proxies.
 void CellularCapability3gpp::Stop_PowerDownCompleted(
-    const ResultCallback& callback,
-    const Error* stop_disabled_error,
+    ResultCallback callback,
+    const Error& stop_disabled_error,
     const Error& error) {
   SLOG(this, 3) << __func__;
-  DCHECK(stop_disabled_error);
 
   if (error.IsFailure())
     SLOG(this, 2) << "Ignoring error returned by SetPowerState: " << error;
 
-  Stop_Completed(callback, *stop_disabled_error);
+  Stop_Completed(std::move(callback), stop_disabled_error);
 }
 
-void CellularCapability3gpp::Stop_Completed(const ResultCallback& callback,
+void CellularCapability3gpp::Stop_Completed(ResultCallback callback,
                                             const Error& error) {
   SLOG(this, 3) << __func__;
 
   if (error.IsSuccess())
     metrics()->NotifyDeviceDisableFinished(cellular()->interface_index());
   ReleaseProxies();
-  callback.Run(error);
+  std::move(callback).Run(error);
 }
 
-void CellularCapability3gpp::Connect(const ResultCallback& callback) {
-  SLOG(this, 3) << __func__;
+void CellularCapability3gpp::ConnectionAttemptComplete(
+    ApnList::ApnType apn_type, const Error& error) {
+  if (connection_attempts_.count(apn_type) == 0) {
+    return;
+  }
+  ConnectionAttemptInfo* attempt = &connection_attempts_[apn_type];
+  if (!attempt->result_callback.is_null()) {
+    std::move(attempt->result_callback).Run(error);
+  }
+  connection_attempts_.erase(apn_type);
+}
+
+bool CellularCapability3gpp::ConnectionAttemptInitialize(
+    ApnList::ApnType apn_type,
+    const std::deque<Stringmap>& apn_try_list,
+    ResultCallback result_callback) {
+  Error error;
+  if (connection_attempts_.count(apn_type) != 0) {
+    Error::PopulateAndLog(
+        FROM_HERE, &error, Error::kOperationFailed,
+        base::StringPrintf(
+            "Connection initialization failed: attempt (%s) already ongoing",
+            ApnList::GetApnTypeString(apn_type).c_str()));
+    if (!result_callback.is_null()) {
+      std::move(result_callback).Run(error);
+    }
+    return false;
+  }
+  if (apn_try_list.size() == 0) {
+    Error::PopulateAndLog(
+        FROM_HERE, &error, Error::kOperationFailed,
+        base::StringPrintf("Connection initialization failed: attempt (%s) "
+                           "cannot run without a valid APN try list",
+                           ApnList::GetApnTypeString(apn_type).c_str()));
+    if (!result_callback.is_null()) {
+      std::move(result_callback).Run(error);
+    }
+    return false;
+  }
+  SLOG(this, 2) << "Connection attempt (" << ApnList::GetApnTypeString(apn_type)
+                << ") initialized with " << apn_try_list.size()
+                << " APNs to try";
+  connection_attempts_[apn_type] = {apn_try_list, false,
+                                    std::move(result_callback)};
+  return true;
+}
+
+void CellularCapability3gpp::Connect(ApnList::ApnType apn_type,
+                                     const std::deque<Stringmap>& apn_try_list,
+                                     ResultCallback callback) {
+  SLOG(this, 3) << "Connection attempt (" << ApnList::GetApnTypeString(apn_type)
+                << ") requested";
   DCHECK(callback);
 
-  KeyValueStore properties;
-  SetupConnectProperties(&properties);
-  CallConnect(properties, callback);
+  if (!ConnectionAttemptInitialize(apn_type, apn_try_list,
+                                   std::move(callback))) {
+    return;
+  }
+
+  ConnectionAttemptConnect(apn_type);
 }
 
-void CellularCapability3gpp::Disconnect(const ResultCallback& callback) {
+void CellularCapability3gpp::DisconnectAll(ResultCallback callback) {
   SLOG(this, 3) << __func__;
-  if (modem_simple_proxy_) {
-    SLOG(this, 2) << "Disconnect all bearers.";
-    // If "/" is passed as the bearer path, ModemManager will disconnect all
-    // bearers.
-    modem_simple_proxy_->Disconnect(kRootPath, callback, kTimeoutDisconnect);
+  if (!modem_simple_proxy_) {
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kWrongState, "No proxy");
+    std::move(callback).Run(error);
+    return;
   }
+
+  SLOG(this, 2) << "Disconnect all bearers.";
+  // If "/" is passed as the bearer path, ModemManager will disconnect all
+  // bearers.
+  modem_simple_proxy_->Disconnect(kRootPath, std::move(callback),
+                                  kTimeoutDisconnect.InMilliseconds());
+}
+
+void CellularCapability3gpp::Disconnect(ApnList::ApnType apn_type,
+                                        ResultCallback callback) {
+  SLOG(this, 3) << __func__;
+  if (!modem_simple_proxy_) {
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kWrongState, "No proxy");
+    std::move(callback).Run(error);
+    return;
+  }
+
+  CellularBearer* bearer = GetActiveBearer(apn_type);
+  if (!bearer) {
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kWrongState,
+                          "Not connected");
+    std::move(callback).Run(error);
+    return;
+  }
+
+  SLOG(this, 2) << "Disconnect bearer (" << ApnList::GetApnTypeString(apn_type)
+                << ").";
+  modem_simple_proxy_->Disconnect(bearer->dbus_path(), std::move(callback),
+                                  kTimeoutDisconnect.InMilliseconds());
 }
 
 void CellularCapability3gpp::CompleteActivation(Error* error) {
@@ -542,21 +718,15 @@ void CellularCapability3gpp::CompleteActivation(Error* error) {
 void CellularCapability3gpp::ResetAfterActivation() {
   SLOG(this, 3) << __func__;
 
-  // Here the initial call to Reset might fail in rare cases. Simply ignore.
-  Error error;
-  ResultCallback callback =
-      base::Bind(&CellularCapability3gpp::OnResetAfterActivationReply,
-                 weak_ptr_factory_.GetWeakPtr());
-  Reset(&error, callback);
-  if (error.IsFailure())
-    SLOG(this, 2) << "Failed to reset after activation.";
+  Reset(
+      base::BindRepeating(&CellularCapability3gpp::OnResetAfterActivationReply,
+                          weak_ptr_factory_.GetWeakPtr()));
 }
 
 void CellularCapability3gpp::OnResetAfterActivationReply(const Error& error) {
   SLOG(this, 3) << __func__;
   if (error.IsFailure()) {
     SLOG(this, 2) << "Failed to reset after activation. Try again later.";
-    // TODO(armansito): Maybe post a delayed reset task?
     return;
   }
   reset_done_ = true;
@@ -656,8 +826,14 @@ void CellularCapability3gpp::ReleaseProxies() {
   if (!proxies_initialized_)
     return;
   SLOG(this, 3) << __func__;
+
+  // Simple proxy is gone, so ensure all ongoing connection attempts
+  // are aborted and completed.
+  ConnectionAttemptAbortAll();
+
   proxies_initialized_ = false;
   modem_3gpp_proxy_.reset();
+  modem_3gpp_profile_manager_proxy_.reset();
   modem_proxy_.reset();
   modem_location_proxy_.reset();
   modem_signal_proxy_.reset();
@@ -715,152 +891,307 @@ void CellularCapability3gpp::OnServiceCreated() {
   cellular()->service()->SetNetworkTechnology(GetNetworkTechnologyString());
 }
 
-void CellularCapability3gpp::SetupConnectProperties(KeyValueStore* properties) {
-  SetRoamingProperties(properties);
-  apn_try_list_ = cellular()->BuildApnTryList();
-  for (const auto& apn_info : apn_try_list_) {
-    if (SetApnProperties(apn_info, properties))
-      break;
+KeyValueStore CellularCapability3gpp::ConnectionAttemptNextProperties(
+    ApnList::ApnType apn_type) {
+  CHECK_EQ(connection_attempts_.count(apn_type), 1UL);
+  ConnectionAttemptInfo* attempt = &connection_attempts_[apn_type];
+  CHECK(!attempt->apn_try_list.empty());
+
+  KeyValueStore properties;
+  // Initialize generic properties
+  properties.Set<bool>(CellularBearer::kMMAllowRoamingProperty,
+                       cellular()->IsRoamingAllowed());
+  properties.Set<uint32_t>(CellularBearer::kMMMultiplexProperty,
+                           MM_BEARER_MULTIPLEX_SUPPORT_REQUESTED);
+
+  // For now only DEFAULT and TETHERING expected
+  if (apn_type == ApnList::ApnType::kDefault) {
+    properties.Set<uint32_t>(CellularBearer::kMMApnTypeProperty,
+                             MM_BEARER_APN_TYPE_DEFAULT);
+  } else if (apn_type == ApnList::ApnType::kDun) {
+    properties.Set<uint32_t>(CellularBearer::kMMApnTypeProperty,
+                             MM_BEARER_APN_TYPE_TETHERING);
+  } else {
+    NOTREACHED_NORETURN();
   }
+
+  // Initialize APN related properties from the first entry in the try list.
+  const Stringmap& apn_info = attempt->apn_try_list.front();
+  DCHECK(base::Contains(apn_info, kApnProperty));
+  LOG(INFO) << "Next connection attempt ("
+            << ApnList::GetApnTypeString(apn_type) << ") will run using APN '"
+            << GetPrintableApnStringmap(apn_info) << "'";
+  SetApnProperties(apn_info, &properties);
+
+  return properties;
 }
 
-void CellularCapability3gpp::SetRoamingProperties(KeyValueStore* properties) {
-  properties->Set<bool>(kConnectAllowRoaming, cellular()->IsRoamingAllowed());
-}
+bool CellularCapability3gpp::IsDualStackSupported() {
+  SLOG(this, 2) << __func__;
+  if (!cellular()->device_id())
+    return true;
 
-bool CellularCapability3gpp::SetApnProperties(const Stringmap& apn_info,
-                                              KeyValueStore* properties) {
-  if (!base::Contains(apn_info, kApnProperty)) {
-    LOG(ERROR) << "Malformed APN entry";
-    return false;
-  }
-  const std::string& apn = apn_info.at(kApnProperty);
-  SLOG(this, 2) << __func__ << ": Using APN " << apn;
-  properties->Set<std::string>(kConnectApn, apn);
-  if (base::Contains(apn_info, kApnUsernameProperty)) {
-    properties->Set<std::string>(kConnectUser,
-                                 apn_info.at(kApnUsernameProperty));
-  }
-  if (base::Contains(apn_info, kApnPasswordProperty)) {
-    properties->Set<std::string>(kConnectPassword,
-                                 apn_info.at(kApnPasswordProperty));
-  }
-  if (base::Contains(apn_info, kApnAuthenticationProperty)) {
-    MMBearerAllowedAuth allowed_auth = ApnAuthenticationToMMBearerAllowedAuth(
-        apn_info.at(kApnAuthenticationProperty));
-    if (allowed_auth != MM_BEARER_ALLOWED_AUTH_UNKNOWN)
-      properties->Set<uint32_t>(kConnectAllowedAuth, allowed_auth);
-  }
-  if (base::Contains(apn_info, kApnIpTypeProperty)) {
-    properties->Set<uint32_t>(
-        kConnectIpType,
-        IpTypeToMMBearerIpFamily(apn_info.at(kApnIpTypeProperty)));
+  SLOG(this, 2) << "device_id: " << cellular()->device_id()->AsString()
+                << " MCCMNC: " << cellular()->mobile_operator_info()->mccmnc();
+  // Disable dual-stack on L850 + Verizon
+  const struct {
+    DeviceId device_id;
+    std::vector<std::string> operator_code;
+  } kAffectedDevices[] = {
+      {{DeviceId::BusType::kUsb, 0x2cb7, 0x0007},
+       {"310995", "311270", "311480"}},
+  };
+
+  for (const auto& affected_device : kAffectedDevices) {
+    if (cellular()->device_id()->Match(affected_device.device_id)) {
+      if (affected_device.operator_code.size() == 0 ||
+          std::find(affected_device.operator_code.begin(),
+                    affected_device.operator_code.end(),
+                    cellular()->mobile_operator_info()->mccmnc()) !=
+              affected_device.operator_code.end())
+        return false;
+    }
   }
 
   return true;
 }
 
-void CellularCapability3gpp::CallConnect(const KeyValueStore& properties,
-                                         const ResultCallback& callback) {
-  SLOG(this, 3) << __func__;
-  modem_simple_proxy_->Connect(
-      properties,
-      base::Bind(&CellularCapability3gpp::OnConnectReply,
-                 weak_ptr_factory_.GetWeakPtr(), callback),
-      kTimeoutConnect);
+bool CellularCapability3gpp::IsModemFM350() {
+  SLOG(this, 2) << __func__;
+  if (!cellular()->device_id())
+    return false;
+
+  SLOG(this, 2) << "device_id: " << cellular()->device_id()->AsString();
+  DeviceId fm350_device_id = {DeviceId::BusType::kPci, 0x14c3, 0x4d75};
+  return cellular()->device_id()->Match(fm350_device_id);
 }
 
-void CellularCapability3gpp::OnConnectReply(const ResultCallback& callback,
-                                            const RpcIdentifier& bearer,
-                                            const Error& error) {
-  SLOG(this, 3) << __func__ << "(" << error << ")";
-  DCHECK(callback);
+bool CellularCapability3gpp::IsModemFM101() {
+  SLOG(this, 2) << __func__;
+  if (!cellular()->device_id())
+    return false;
+
+  SLOG(this, 2) << "device_id: " << cellular()->device_id()->AsString();
+  DeviceId fm101_device_id = {DeviceId::BusType::kUsb, 0x2cb7, 0x01a2};
+  return cellular()->device_id()->Match(fm101_device_id);
+}
+
+bool CellularCapability3gpp::IsModemL850() {
+  SLOG(this, 2) << __func__;
+  if (!cellular()->device_id())
+    return false;
+
+  SLOG(this, 2) << "device_id: " << cellular()->device_id()->AsString();
+  DeviceId l850_device_id = {DeviceId::BusType::kUsb, 0x2cb7, 0x0007};
+  return cellular()->device_id()->Match(l850_device_id);
+}
+
+void CellularCapability3gpp::SetApnProperties(const Stringmap& apn_info,
+                                              KeyValueStore* properties) {
+  DCHECK(base::Contains(apn_info, kApnProperty));
+  properties->Set<std::string>(CellularBearer::kMMApnProperty,
+                               apn_info.at(kApnProperty));
+  if (base::Contains(apn_info, kApnUsernameProperty)) {
+    properties->Set<std::string>(CellularBearer::kMMUserProperty,
+                                 apn_info.at(kApnUsernameProperty));
+  }
+  if (base::Contains(apn_info, kApnPasswordProperty)) {
+    properties->Set<std::string>(CellularBearer::kMMPasswordProperty,
+                                 apn_info.at(kApnPasswordProperty));
+  }
+  MMBearerAllowedAuth allowed_auth = MM_BEARER_ALLOWED_AUTH_UNKNOWN;
+  if (base::Contains(apn_info, kApnAuthenticationProperty)) {
+    allowed_auth = ApnAuthenticationToMMBearerAllowedAuth(
+        apn_info.at(kApnAuthenticationProperty));
+  } else if (base::Contains(apn_info, kApnUsernameProperty) ||
+             base::Contains(apn_info, kApnPasswordProperty)) {
+    // Always fallback to CHAP if there is no authentication set.
+    allowed_auth = MM_BEARER_ALLOWED_AUTH_CHAP;
+  }
+  if (allowed_auth != MM_BEARER_ALLOWED_AUTH_UNKNOWN)
+    properties->Set<uint32_t>(CellularBearer::kMMAllowedAuthProperty,
+                              allowed_auth);
+
+  if (IsDualStackSupported() && base::Contains(apn_info, kApnIpTypeProperty)) {
+    properties->Set<uint32_t>(
+        CellularBearer::kMMIpTypeProperty,
+        IpTypeToMMBearerIpFamily(apn_info.at(kApnIpTypeProperty)));
+  }
+}
+
+void CellularCapability3gpp::ConnectionAttemptConnect(
+    ApnList::ApnType apn_type) {
+  SLOG(this, 3) << "Connection attempt (" << ApnList::GetApnTypeString(apn_type)
+                << ") launched";
+
+  CHECK_EQ(connection_attempts_.count(apn_type), 1UL);
+  ConnectionAttemptInfo* attempt = &connection_attempts_[apn_type];
+
+  if (!modem_simple_proxy_) {
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kWrongState, "No proxy");
+    ConnectionAttemptComplete(apn_type, error);
+    return;
+  }
+
+  attempt->simple_connect = true;
+  modem_simple_proxy_->Connect(
+      ConnectionAttemptNextProperties(apn_type),
+      base::BindOnce(&CellularCapability3gpp::ConnectionAttemptOnConnectReply,
+                     weak_ptr_factory_.GetWeakPtr(), apn_type),
+      kTimeoutConnect.InMilliseconds());
+}
+
+void CellularCapability3gpp::ConnectionAttemptOnConnectReply(
+    ApnList::ApnType apn_type,
+    const RpcIdentifier& bearer,
+    const Error& error) {
+  SLOG(this, 3) << "Connection attempt (" << ApnList::GetApnTypeString(apn_type)
+                << ") reply received (" << error << ")";
+
+  CHECK_EQ(connection_attempts_.count(apn_type), 1UL);
+  ConnectionAttemptInfo* attempt = &connection_attempts_[apn_type];
+  CHECK(!attempt->apn_try_list.empty());
+  CHECK(attempt->simple_connect);
+  attempt->simple_connect = false;
 
   CellularServiceRefPtr service = cellular()->service();
   if (!service) {
     // The service could have been deleted before our Connect() request
     // completes if the modem was enabled and then quickly disabled.
-    apn_try_list_.clear();
-    callback.Run(error);
+    ConnectionAttemptComplete(apn_type, error);
     return;
   }
 
+  cellular()->NotifyDetailedCellularConnectionResult(
+      error, apn_type, attempt->apn_try_list.front());
+
+  // Last good APN management and pending activation state logic only
+  // for the default APN
+  if (apn_type == ApnList::ApnType::kDefault) {
+    if (error.IsFailure()) {
+      service->ClearLastGoodApn();
+    } else {
+      service->SetLastGoodApn(attempt->apn_try_list.front());
+      UpdatePendingActivationState();
+    }
+  }
+
   if (error.IsFailure()) {
-    service->ClearLastGoodApn();
-    if (!RetriableConnectError(error) || !ConnectToNextApn(callback)) {
-      apn_try_list_.clear();
-      callback.Run(error);
+    if (!RetriableConnectError(error)) {
+      ConnectionAttemptComplete(apn_type, error);
+    } else {
+      ConnectionAttemptContinue(apn_type);
     }
     return;
   }
 
-  if (!apn_try_list_.empty()) {
-    service->SetLastGoodApn(apn_try_list_.front());
-    apn_try_list_.clear();
-  }
+  UpdateActiveBearers();
 
-  SLOG(this, 2) << "Connected bearer " << bearer.value();
-  callback.Run(error);
-  UpdatePendingActivationState();
+  SLOG(this, 2) << "Connection attempt (" << ApnList::GetApnTypeString(apn_type)
+                << ") successful: bearer " << bearer.value();
+  ConnectionAttemptComplete(apn_type, error);
 }
 
-bool CellularCapability3gpp::ConnectToNextApn(const ResultCallback& callback) {
-  // The last connect attempt did not use an APN, nothing more to try.
-  if (apn_try_list_.empty())
+bool CellularCapability3gpp::ConnectionAttemptContinue(
+    ApnList::ApnType apn_type) {
+  SLOG(this, 3) << "Connection attempt (" << ApnList::GetApnTypeString(apn_type)
+                << ") continued";
+
+  CHECK_EQ(connection_attempts_.count(apn_type), 1UL);
+  ConnectionAttemptInfo* attempt = &connection_attempts_[apn_type];
+  CHECK(!attempt->apn_try_list.empty());
+
+  // Remove the APN that was just tried and failed.
+  attempt->apn_try_list.pop_front();
+
+  // And stop if no more APNs to try
+  if (attempt->apn_try_list.empty()) {
+    // This path is only reached if |RetriableConnectError| was true fo all
+    // attempts.
+    Error error;
+    Error::PopulateAndLog(
+        FROM_HERE, &error, Error::kInvalidApn,
+        base::StringPrintf(
+            "Connection attempt (%s) failed, no remaining APNs to try",
+            ApnList::GetApnTypeString(apn_type).c_str()));
+    ConnectionAttemptComplete(apn_type, error);
+
+    if (cellular()->service()) {
+      cellular()->power_opt()->NotifyConnectionFailInvalidApn(
+          cellular()->service()->iccid());
+    }
     return false;
+  }
 
-  // Remove the APN that was just tried and failed. If the APN list is empty,
-  // we still try again without an APN. This may succeed with some modems in
-  // some cases.
-  apn_try_list_.pop_front();
-
-  SLOG(this, 2) << "Connect failed with invalid APN, " << apn_try_list_.size()
+  SLOG(this, 1) << "Connection attempt (" << ApnList::GetApnTypeString(apn_type)
+                << ") failed with invalid APN, " << attempt->apn_try_list.size()
                 << " remaining APNs to try";
-  KeyValueStore props;
-  SetRoamingProperties(&props);
-  if (!apn_try_list_.empty())
-    SetApnProperties(apn_try_list_.front(), &props);
-  CallConnect(props, callback);
+  ConnectionAttemptConnect(apn_type);
   return true;
+}
+
+void CellularCapability3gpp::ConnectionAttemptAbortAll() {
+  auto itr = connection_attempts_.begin();
+  while (itr != connection_attempts_.end()) {
+    ConnectionAttemptInfo* attempt = &itr->second;
+    if (attempt->simple_connect) {
+      Error error;
+      Error::PopulateAndLog(FROM_HERE, &error, Error::kWrongState, "No proxy");
+      std::move(attempt->result_callback).Run(error);
+    }
+    itr = connection_attempts_.erase(itr);
+  }
 }
 
 void CellularCapability3gpp::FillInitialEpsBearerPropertyMap(
     KeyValueStore* properties) {
-  std::deque<Stringmap> apn_list = cellular()->BuildApnTryList();
-  auto apn_info = apn_list.end();
-
-  // keep only 'attach APN'
-  for (apn_info = apn_list.begin(); apn_info != apn_list.end(); apn_info++) {
-    if (base::Contains(*apn_info, kApnAttachProperty))
-      break;
-  }
-
-  if (apn_info == apn_list.end()) {
+  if (attach_apn_try_list_.size() == 0) {
+    last_attach_apn_.clear();
     SLOG(this, 2) << __func__ << ": no Attach APN.";
     return;
   }
-  // Store the last Attach APN we tried.
-  last_attach_apn_ = *apn_info;
 
-  SLOG(this, 2) << __func__ << ": Using APN " << (*apn_info)[kApnProperty];
-  properties->Set<std::string>(kConnectApn, (*apn_info)[kApnProperty]);
-  if (base::Contains(*apn_info, kApnUsernameProperty))
-    properties->Set<std::string>(kConnectUser,
-                                 (*apn_info)[kApnUsernameProperty]);
-  if (base::Contains(*apn_info, kApnPasswordProperty)) {
-    properties->Set<std::string>(kConnectPassword,
-                                 (*apn_info)[kApnPasswordProperty]);
+  const auto& apn_info = attach_apn_try_list_.front();
+  // Store the last Attach APN we tried.
+  last_attach_apn_ = apn_info;
+  LOG(INFO) << __func__ << ": Using Attach APN '"
+            << GetPrintableApnStringmap(apn_info) << "' "
+            << "force: " << cellular()->GetForceInitEpsBearerSettings();
+  if (base::Contains(apn_info, kApnProperty))
+    properties->Set<std::string>(CellularBearer::kMMApnProperty,
+                                 apn_info.at(kApnProperty));
+  if (base::Contains(apn_info, kApnUsernameProperty))
+    properties->Set<std::string>(CellularBearer::kMMUserProperty,
+                                 apn_info.at(kApnUsernameProperty));
+  if (base::Contains(apn_info, kApnPasswordProperty)) {
+    properties->Set<std::string>(CellularBearer::kMMPasswordProperty,
+                                 apn_info.at(kApnPasswordProperty));
   }
-  if (base::Contains(*apn_info, kApnAuthenticationProperty)) {
-    MMBearerAllowedAuth allowed_auth = ApnAuthenticationToMMBearerAllowedAuth(
-        (*apn_info)[kApnAuthenticationProperty]);
-    if (allowed_auth != MM_BEARER_ALLOWED_AUTH_UNKNOWN)
-      properties->Set<uint32_t>(kConnectAllowedAuth, allowed_auth);
+  MMBearerAllowedAuth allowed_auth = MM_BEARER_ALLOWED_AUTH_UNKNOWN;
+  if (base::Contains(apn_info, kApnAuthenticationProperty)) {
+    allowed_auth = ApnAuthenticationToMMBearerAllowedAuth(
+        apn_info.at(kApnAuthenticationProperty));
+  } else if (base::Contains(apn_info, kApnUsernameProperty) ||
+             base::Contains(apn_info, kApnPasswordProperty)) {
+    // Always fallback to CHAP if there is no authentication set.
+    allowed_auth = MM_BEARER_ALLOWED_AUTH_CHAP;
   }
-  if (base::Contains(*apn_info, kApnIpTypeProperty)) {
+  if (allowed_auth != MM_BEARER_ALLOWED_AUTH_UNKNOWN)
+    properties->Set<uint32_t>(CellularBearer::kMMAllowedAuthProperty,
+                              allowed_auth);
+  if (IsDualStackSupported() && base::Contains(apn_info, kApnIpTypeProperty)) {
     properties->Set<uint32_t>(
-        kConnectIpType,
-        IpTypeToMMBearerIpFamily((*apn_info)[kApnIpTypeProperty]));
+        CellularBearer::kMMIpTypeProperty,
+        IpTypeToMMBearerIpFamily(apn_info.at(kApnIpTypeProperty)));
+  } else {
+    // If no IP type is provided, default it to IPv4, otherwise ModemManager
+    // will choose a default, or will fail to accept |none| on qmi modems.
+    properties->Set<uint32_t>(CellularBearer::kMMIpTypeProperty,
+                              IpTypeToMMBearerIpFamily(kApnIpTypeV4));
+  }
+  if (cellular()->GetForceInitEpsBearerSettings()) {
+    properties->Set<bool>(CellularBearer::kMMForceProperty, true);
   }
 }
 
@@ -887,13 +1218,13 @@ void CellularCapability3gpp::UpdateServiceOLP() {
   SLOG(this, 3) << __func__;
 
   // OLP is based off of the Home Provider.
-  if (!cellular()->home_provider_info()->IsMobileNetworkOperatorKnown()) {
+  if (!cellular()->mobile_operator_info()->IsMobileNetworkOperatorKnown()) {
     SLOG(this, 3) << "Mobile Network Operator Unknown";
     return;
   }
 
-  const std::vector<MobileOperatorInfo::OnlinePortal>& olp_list =
-      cellular()->home_provider_info()->olp_list();
+  const std::vector<MobileOperatorMapper::OnlinePortal>& olp_list =
+      cellular()->mobile_operator_info()->olp_list();
   if (olp_list.empty()) {
     SLOG(this, 3) << "Empty OLP list";
     return;
@@ -910,18 +1241,22 @@ void CellularCapability3gpp::UpdateServiceOLP() {
   base::ReplaceSubstringsAfterOffset(&post_data, 0, "${imsi}",
                                      cellular()->imsi());
   base::ReplaceSubstringsAfterOffset(
-      &post_data, 0, "${mdn}", GetMdnForOLP(cellular()->home_provider_info()));
+      &post_data, 0, "${mdn}",
+      GetMdnForOLP(cellular()->mobile_operator_info()));
   base::ReplaceSubstringsAfterOffset(&post_data, 0, "${min}",
                                      cellular()->min());
   cellular()->service()->SetOLP(olp_list[0].url, olp_list[0].method, post_data);
 }
 
-void CellularCapability3gpp::UpdateActiveBearer() {
+void CellularCapability3gpp::UpdateActiveBearers() {
   SLOG(this, 3) << __func__;
 
-  // Look for the first active bearer and use its path as the connected
-  // one. Right now, we don't allow more than one active bearer.
-  active_bearer_.reset();
+  active_bearers_.clear();
+  default_bearer_dbus_properties_proxy_.reset();
+
+  // Look for the first active bearer of each APN type and use their path as the
+  // connected ones. Right now, we don't allow more than one active bearer per
+  // APN type.
   for (const auto& path : bearer_paths_) {
     auto bearer = std::make_unique<CellularBearer>(control_interface(), path,
                                                    cellular()->dbus_service());
@@ -930,16 +1265,49 @@ void CellularCapability3gpp::UpdateActiveBearer() {
     if (!bearer->Init())
       continue;
 
+    // Ignore if not active
     if (!bearer->connected())
       continue;
 
-    SLOG(this, 2) << "Found active bearer \"" << path.value() << "\".";
-    CHECK(!active_bearer_) << "Found more than one active bearer.";
-    active_bearer_ = std::move(bearer);
-  }
+    // Ignore if no explicit APN type set; shill always sets one.
+    const auto apn_types = bearer->apn_types();
+    if (apn_types.empty()) {
+      LOG(WARNING) << "Found bearer without APN type: ignoring.";
+      continue;
+    }
 
-  if (!active_bearer_)
-    SLOG(this, 2) << "No active bearer found.";
+    // A bearer may have more than one APN type in reality, but the ones
+    // brought up by shill have exactly one; either DEFAULT or TETHERING.
+    if (apn_types.size() > 1) {
+      LOG(WARNING)
+          << "Found bearer with multiple APN types: choosing the first.";
+    }
+    auto apn_type = apn_types[0];
+
+    if (active_bearers_.count(apn_type) > 0) {
+      SLOG(this, 1) << "Found additional active bearer \"" << path.value()
+                    << "\" (" << ApnList::GetApnTypeString(apn_type)
+                    << "): ignoring";
+      continue;
+    }
+
+    SLOG(this, 1) << "Found active bearer \"" << path.value() << "\" ("
+                  << ApnList::GetApnTypeString(apn_type) << ")";
+    active_bearers_[apn_type] = std::move(bearer);
+
+    // Only monitor bearer properties in the default bearer, as it's the one
+    // always available and we want these properties to be notified of link
+    // speeds exclusively.
+    if (apn_type == ApnList::ApnType::kDefault) {
+      default_bearer_dbus_properties_proxy_ =
+          control_interface()->CreateDBusPropertiesProxy(
+              active_bearers_[apn_type]->dbus_path(),
+              active_bearers_[apn_type]->dbus_service());
+      default_bearer_dbus_properties_proxy_->SetPropertiesChangedCallback(
+          base::BindRepeating(&CellularCapability3gpp::OnPropertiesChanged,
+                              base::Unretained(this)));
+    }
+  }
 }
 
 bool CellularCapability3gpp::IsServiceActivationRequired() const {
@@ -963,8 +1331,8 @@ bool CellularCapability3gpp::IsServiceActivationRequired() const {
 
   // If there is no online payment portal information, it's safer to assume
   // the service does not require activation.
-  if (!cellular()->home_provider_info()->IsMobileNetworkOperatorKnown() ||
-      cellular()->home_provider_info()->olp_list().empty()) {
+  if (!cellular()->mobile_operator_info()->IsMobileNetworkOperatorKnown() ||
+      cellular()->mobile_operator_info()->olp_list().empty()) {
     return false;
   }
 
@@ -988,37 +1356,33 @@ bool CellularCapability3gpp::IsMdnValid() const {
 }
 
 // always called from an async context
-void CellularCapability3gpp::Register(const ResultCallback& callback) {
+void CellularCapability3gpp::Register(ResultCallback callback) {
   SLOG(this, 3) << __func__ << " \"" << cellular()->selected_network() << "\"";
   CHECK(!callback.is_null());
-  Error error;
-  ResultCallback cb = base::Bind(&CellularCapability3gpp::OnRegisterReply,
-                                 weak_ptr_factory_.GetWeakPtr(), callback);
-  modem_3gpp_proxy_->Register(cellular()->selected_network(), &error, cb,
-                              kTimeoutRegister);
-  if (error.IsFailure())
-    callback.Run(error);
+  modem_3gpp_proxy_->Register(
+      cellular()->selected_network(),
+      base::BindOnce(&CellularCapability3gpp::OnRegisterReply,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
 void CellularCapability3gpp::RegisterOnNetwork(const std::string& network_id,
-                                               Error* error,
-                                               const ResultCallback& callback) {
+                                               ResultCallback callback) {
   SLOG(this, 3) << __func__ << "(" << network_id << ")";
-  CHECK(error);
   desired_network_ = network_id;
-  ResultCallback cb = base::Bind(&CellularCapability3gpp::OnRegisterReply,
-                                 weak_ptr_factory_.GetWeakPtr(), callback);
-  modem_3gpp_proxy_->Register(network_id, error, cb, kTimeoutRegister);
+  modem_3gpp_proxy_->Register(
+      network_id,
+      base::BindOnce(&CellularCapability3gpp::OnRegisterReply,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
-void CellularCapability3gpp::OnRegisterReply(const ResultCallback& callback,
+void CellularCapability3gpp::OnRegisterReply(ResultCallback callback,
                                              const Error& error) {
   SLOG(this, 3) << __func__ << "(" << error << ")";
 
   if (error.IsSuccess()) {
     cellular()->SetSelectedNetwork(desired_network_);
     desired_network_.clear();
-    callback.Run(error);
+    std::move(callback).Run(error);
     return;
   }
   // If registration on the desired network failed,
@@ -1027,10 +1391,10 @@ void CellularCapability3gpp::OnRegisterReply(const ResultCallback& callback,
     desired_network_.clear();
     cellular()->SetSelectedNetwork(std::string());
     LOG(INFO) << "Couldn't register on selected network, trying home network";
-    Register(callback);
+    Register(std::move(callback));
     return;
   }
-  callback.Run(error);
+  std::move(callback).Run(error);
 }
 
 bool CellularCapability3gpp::IsRegistered() const {
@@ -1049,81 +1413,81 @@ void CellularCapability3gpp::SetUnregistered(bool searching) {
 
 void CellularCapability3gpp::RequirePin(const std::string& pin,
                                         bool require,
-                                        Error* error,
-                                        const ResultCallback& callback) {
-  CHECK(error);
-  sim_proxy_->EnablePin(pin, require, error, callback, kTimeoutDefault);
+                                        ResultCallback callback) {
+  sim_proxy_->EnablePin(pin, require, std::move(callback));
 }
 
 void CellularCapability3gpp::EnterPin(const std::string& pin,
-                                      Error* error,
-                                      const ResultCallback& callback) {
-  CHECK(error);
+                                      ResultCallback callback) {
   SLOG(this, 3) << __func__;
-  sim_proxy_->SendPin(pin, error, callback, kEnterPinTimeoutMilliseconds);
+  sim_proxy_->SendPin(pin, std::move(callback));
 }
 
 void CellularCapability3gpp::UnblockPin(const std::string& unblock_code,
                                         const std::string& pin,
-                                        Error* error,
-                                        const ResultCallback& callback) {
-  CHECK(error);
-  sim_proxy_->SendPuk(unblock_code, pin, error, callback, kTimeoutDefault);
+                                        ResultCallback callback) {
+  sim_proxy_->SendPuk(unblock_code, pin, std::move(callback));
 }
 
 void CellularCapability3gpp::ChangePin(const std::string& old_pin,
                                        const std::string& new_pin,
-                                       Error* error,
-                                       const ResultCallback& callback) {
-  CHECK(error);
-  sim_proxy_->ChangePin(old_pin, new_pin, error, callback, kTimeoutDefault);
+                                       ResultCallback callback) {
+  sim_proxy_->ChangePin(old_pin, new_pin, std::move(callback));
 }
 
-void CellularCapability3gpp::Reset(Error* error,
-                                   const ResultCallback& callback) {
+void CellularCapability3gpp::Reset(ResultCallback callback) {
   SLOG(this, 3) << __func__;
-  CHECK(error);
   if (resetting_) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kInProgress,
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kInProgress,
                           "Already resetting");
+    std::move(callback).Run(error);
     return;
   }
   if (!modem_proxy_) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kWrongState, "No proxy");
+    Error error;
+    Error::PopulateAndLog(FROM_HERE, &error, Error::kWrongState, "No proxy");
+    std::move(callback).Run(error);
     return;
   }
-  ResultCallback cb = base::Bind(&CellularCapability3gpp::OnResetReply,
-                                 weak_ptr_factory_.GetWeakPtr(), callback);
-  modem_proxy_->Reset(error, cb, kTimeoutReset);
-  if (!error->IsFailure()) {
-    resetting_ = true;
-  }
+  resetting_ = true;
+  ResultCallback cb =
+      base::BindOnce(&CellularCapability3gpp::OnResetReply,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback));
+  modem_proxy_->Reset(std::move(cb), kTimeoutReset.InMilliseconds());
 }
 
-void CellularCapability3gpp::OnResetReply(const ResultCallback& callback,
+void CellularCapability3gpp::OnResetReply(ResultCallback callback,
                                           const Error& error) {
   SLOG(this, 3) << __func__;
   resetting_ = false;
   if (!callback.is_null())
-    callback.Run(error);
+    std::move(callback).Run(error);
 }
 
-void CellularCapability3gpp::Scan(Error* error,
-                                  const ResultStringmapsCallback& callback) {
-  KeyValueStoresCallback cb =
-      base::Bind(&CellularCapability3gpp::OnScanReply,
-                 weak_ptr_factory_.GetWeakPtr(), callback);
-  modem_3gpp_proxy_->Scan(error, cb, kTimeoutScan);
+void CellularCapability3gpp::Scan(base::OnceClosure started_callback,
+                                  ResultStringmapsCallback finished_callback) {
+  KeyValueStoresCallback cb = base::BindOnce(
+      &CellularCapability3gpp::OnScanReply, weak_ptr_factory_.GetWeakPtr(),
+      std::move(finished_callback));
+
+  if (!modem_3gpp_proxy_) {
+    std::move(cb).Run(ScanResults(),
+                      Error(Error::kWrongState, "No 3gpp proxy", FROM_HERE));
+    return;
+  }
+
+  std::move(started_callback).Run();
+  modem_3gpp_proxy_->Scan(std::move(cb));
 }
 
-void CellularCapability3gpp::OnScanReply(
-    const ResultStringmapsCallback& callback,
-    const ScanResults& results,
-    const Error& error) {
+void CellularCapability3gpp::OnScanReply(ResultStringmapsCallback callback,
+                                         const ScanResults& results,
+                                         const Error& error) {
   Stringmaps found_networks;
   for (const auto& result : results)
     found_networks.push_back(ParseScanResult(result));
-  callback.Run(found_networks, error);
+  std::move(callback).Run(found_networks, error);
 }
 
 Stringmap CellularCapability3gpp::ParseScanResult(const ScanResult& result) {
@@ -1188,30 +1552,34 @@ Stringmap CellularCapability3gpp::ParseScanResult(const ScanResult& result) {
   if ((!base::Contains(parsed, kLongNameProperty) ||
        parsed[kLongNameProperty].empty()) &&
       base::Contains(parsed, kNetworkIdProperty)) {
-    mobile_operator_info_->Reset();
-    mobile_operator_info_->UpdateMCCMNC(parsed[kNetworkIdProperty]);
-    if (mobile_operator_info_->IsMobileNetworkOperatorKnown() &&
-        !mobile_operator_info_->operator_name().empty()) {
-      parsed[kLongNameProperty] = mobile_operator_info_->operator_name();
+    parsed_scan_result_operator_info_->Reset();
+    parsed_scan_result_operator_info_->UpdateMCCMNC(parsed[kNetworkIdProperty]);
+    if (parsed_scan_result_operator_info_->IsMobileNetworkOperatorKnown() &&
+        !parsed_scan_result_operator_info_->operator_name().empty()) {
+      parsed[kLongNameProperty] =
+          parsed_scan_result_operator_info_->operator_name();
     }
   }
   return parsed;
 }
 
 void CellularCapability3gpp::SetInitialEpsBearer(
-    const KeyValueStore& properties,
-    Error* error,
-    const ResultCallback& callback) {
+    const KeyValueStore& properties, ResultCallback callback) {
   SLOG(this, 3) << __func__;
-  if (modem_3gpp_proxy_) {
-    modem_3gpp_proxy_->SetInitialEpsBearerSettings(properties, error, callback,
-                                                   kTimeoutSetInitialEpsBearer);
-  } else {
+  if (!modem_3gpp_proxy_) {
     SLOG(this, 3) << __func__ << " skipping, no 3GPP proxy";
+    std::move(callback).Run(Error(Error::kWrongState));
+    return;
   }
+
+  modem_3gpp_proxy_->SetInitialEpsBearerSettings(
+      properties,
+      base::BindOnce(&CellularCapability3gpp::OnSetInitialEpsBearerReply,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
-void CellularCapability3gpp::OnSetInitialEpsBearerReply(const Error& error) {
+void CellularCapability3gpp::OnSetInitialEpsBearerReply(ResultCallback callback,
+                                                        const Error& error) {
   SLOG(this, 3) << __func__;
 
   CellularServiceRefPtr service = cellular()->service();
@@ -1221,6 +1589,7 @@ void CellularCapability3gpp::OnSetInitialEpsBearerReply(const Error& error) {
     last_attach_apn_.clear();
     if (service)
       service->ClearLastAttachApn();
+    std::move(callback).Run(error);
     return;
   }
 
@@ -1230,25 +1599,39 @@ void CellularCapability3gpp::OnSetInitialEpsBearerReply(const Error& error) {
     // and then quickly disabled.
     SLOG(this, 2) << __func__ << ": Cellular service does not exist.";
     last_attach_apn_.clear();
+    std::move(callback).Run(Error(Error::kNotFound));
     return;
   }
 
+  cellular()->SetForceInitEpsBearerSettings(false);
   service->SetLastAttachApn(last_attach_apn_);
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
 void CellularCapability3gpp::SetupLocation(uint32_t sources,
                                            bool signal_location,
-                                           const ResultCallback& callback) {
+                                           ResultCallback callback) {
   Error error;
-  modem_location_proxy_->Setup(sources, signal_location, &error, callback,
-                               kTimeoutSetupLocation);
+  modem_location_proxy_->Setup(sources, signal_location, &error,
+                               std::move(callback),
+                               kTimeoutSetupLocation.InMilliseconds());
 }
 
 void CellularCapability3gpp::SetupSignal(uint32_t rate,
-                                         const ResultCallback& callback) {
+                                         ResultCallback callback) {
   SLOG(this, 3) << __func__;
   Error error;
-  modem_signal_proxy_->Setup(rate, &error, callback, kTimeoutSetupSignal);
+  modem_signal_proxy_->Setup(rate, &error, std::move(callback),
+                             kTimeoutSetupSignal.InMilliseconds());
+}
+
+void CellularCapability3gpp::SetupSignalThresholds(
+    const KeyValueStore& settings, ResultCallback callback) {
+  SLOG(this, 3) << __func__;
+  Error error;
+  modem_signal_proxy_->SetupThresholds(
+      settings, &error, std::move(callback),
+      kTimeoutSetupSignalThresholds.InMilliseconds());
 }
 
 void CellularCapability3gpp::OnSetupLocationReply(const Error& error) {
@@ -1270,15 +1653,30 @@ void CellularCapability3gpp::OnSetupSignalReply(const Error& error) {
   }
 }
 
-void CellularCapability3gpp::GetLocation(const StringCallback& callback) {
-  BrilloAnyCallback cb = base::Bind(&CellularCapability3gpp::OnGetLocationReply,
-                                    weak_ptr_factory_.GetWeakPtr(), callback);
+void CellularCapability3gpp::OnSetupSignalThresholdsReply(const Error& error) {
+  SLOG(this, 3) << __func__;
+  if (error.IsFailure()) {
+    SLOG(this, 2) << "Failed to setup modem signal thresholds capability."
+                  << " Falling back to polling mechanism.";
+    ResultCallback setup_signal_callback =
+        base::BindOnce(&CellularCapability3gpp::OnSetupSignalReply,
+                       weak_ptr_factory_.GetWeakPtr());
+    SetupSignal(kSignalQualityUpdateRateSeconds,
+                std::move(setup_signal_callback));
+  }
+}
+
+void CellularCapability3gpp::GetLocation(StringCallback callback) {
+  BrilloAnyCallback cb =
+      base::BindOnce(&CellularCapability3gpp::OnGetLocationReply,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback));
   Error error;
-  modem_location_proxy_->GetLocation(&error, cb, kTimeoutGetLocation);
+  modem_location_proxy_->GetLocation(&error, std::move(cb),
+                                     kTimeoutGetLocation.InMilliseconds());
 }
 
 void CellularCapability3gpp::OnGetLocationReply(
-    const StringCallback& callback,
+    StringCallback callback,
     const std::map<uint32_t, brillo::Any>& results,
     const Error& error) {
   SLOG(this, 3) << __func__;
@@ -1291,9 +1689,9 @@ void CellularCapability3gpp::OnGetLocationReply(
   if (it != results.end()) {
     brillo::Any gpp_value = it->second;
     const std::string& location_string = gpp_value.Get<const std::string>();
-    callback.Run(location_string, Error());
+    std::move(callback).Run(location_string, Error());
   } else {
-    callback.Run(std::string(), Error());
+    std::move(callback).Run(std::string(), Error());
   }
 }
 
@@ -1302,17 +1700,24 @@ bool CellularCapability3gpp::IsLocationUpdateSupported() const {
   return cellular()->mm_plugin() == kTelitMMPlugin;
 }
 
-CellularBearer* CellularCapability3gpp::GetActiveBearer() const {
-  return active_bearer_.get();
+CellularBearer* CellularCapability3gpp::GetActiveBearer(
+    ApnList::ApnType apn_type) const {
+  return (active_bearers_.count(apn_type) > 0)
+             ? active_bearers_.at(apn_type).get()
+             : nullptr;
 }
 
-const std::vector<std::unique_ptr<MobileOperatorInfo::MobileAPN>>&
+const std::optional<std::vector<MobileOperatorMapper::MobileAPN>>&
 CellularCapability3gpp::GetProfiles() const {
   return profiles_;
 }
 
 std::string CellularCapability3gpp::GetNetworkTechnologyString() const {
   return AccessTechnologyToString(access_technologies_);
+}
+
+uint32_t CellularCapability3gpp::GetActiveAccessTechnologies() const {
+  return access_technologies_;
 }
 
 std::string CellularCapability3gpp::GetRoamingStateString() const {
@@ -1418,11 +1823,20 @@ void CellularCapability3gpp::OnModemPropertiesChanged(
   }
   if (properties.Contains<std::string>(MM_MODEM_PROPERTY_DEVICE)) {
     std::string path = properties.Get<std::string>(MM_MODEM_PROPERTY_DEVICE);
-    cellular()->SetDeviceId(DeviceId::CreateFromSysfs(base::FilePath(path)));
+    cellular()->SetDeviceId(
+        path == kQcomSocMMDevice
+            ? std::make_unique<DeviceId>(DeviceId::BusType::kSoc,
+                                         DeviceId::LocationType::kInternal)
+            : DeviceId::CreateFromSysfs(base::FilePath(path)));
   }
   if (properties.Contains<std::string>(MM_MODEM_PROPERTY_EQUIPMENTIDENTIFIER)) {
     cellular()->SetEquipmentId(
         properties.Get<std::string>(MM_MODEM_PROPERTY_EQUIPMENTIDENTIFIER));
+  }
+  if (properties.Contains<uint32_t>(
+          MM_MODEM_PROPERTY_MAXACTIVEMULTIPLEXEDBEARERS)) {
+    cellular()->SetMaxActiveMultiplexedBearers(properties.Get<uint32_t>(
+        MM_MODEM_PROPERTY_MAXACTIVEMULTIPLEXEDBEARERS));
   }
 
   // Unlock required and SimLock
@@ -1474,14 +1888,73 @@ void CellularCapability3gpp::OnPropertiesChanged(
     // of the locked state.
     UpdateSims();
   }
+  if (interface == MM_DBUS_INTERFACE_BEARER) {
+    OnBearerPropertiesChanged(changed_properties);
+  }
+}
+
+void CellularCapability3gpp::OnBearerPropertiesChanged(
+    const KeyValueStore& properties) {
+  if (properties.Contains<KeyValueStore>(MM_BEARER_PROPERTY_STATS)) {
+    KeyValueStore stats =
+        properties.Get<KeyValueStore>(MM_BEARER_PROPERTY_STATS);
+    UpdateLinkSpeed(stats);
+  }
+}
+// UpdateLinkSpeed will get called while initiation process of cellular and
+// When properties are updated during the connection.
+void CellularCapability3gpp::UpdateLinkSpeed(const KeyValueStore& properties) {
+  ServiceRefPtr service = cellular()->selected_service();
+  // Uplink and downlink retrieve from modemm manager is in bps unit, we need
+  // to convert it to Kbps to be consistent with other technology.
+  if (!service) {
+    return;
+  }
+
+  uint32_t link_speed_kbps;
+  if (properties.Contains<uint64_t>(kUplinkSpeedBpsProperty)) {
+    if (properties.Get<uint64_t>(kUplinkSpeedBpsProperty) / 1000 > UINT_MAX) {
+      LOG(ERROR) << __func__ << " Uplink speed is: "
+                 << properties.Get<uint64_t>(kUplinkSpeedBpsProperty) / 1000
+                 << " kb/s, exceeding uint max: " << UINT_MAX
+                 << ", not updated.";
+      return;
+    }
+    link_speed_kbps = properties.Get<uint64_t>(kUplinkSpeedBpsProperty) / 1000;
+    service->SetUplinkSpeedKbps(link_speed_kbps);
+  }
+  if (properties.Contains<uint64_t>(kDownlinkSpeedBpsProperty)) {
+    if (properties.Get<uint64_t>(kDownlinkSpeedBpsProperty) / 1000 > UINT_MAX) {
+      LOG(ERROR) << __func__ << " Downlink speed is: "
+                 << properties.Get<uint64_t>(kDownlinkSpeedBpsProperty) / 1000
+                 << " kb/s, exceeding uint max: " << UINT_MAX
+                 << ", not updated.";
+      return;
+    }
+    link_speed_kbps =
+        properties.Get<uint64_t>(kDownlinkSpeedBpsProperty) / 1000;
+    service->SetDownlinkSpeedKbps(link_speed_kbps);
+  }
 }
 
 bool CellularCapability3gpp::RetriableConnectError(const Error& error) const {
-  return error.type() == Error::kInvalidApn;
+  return error.type() == Error::kInvalidApn ||
+         error.type() == Error::kInternalError ||
+         // This is a workaround on the shill side for b/289540816, where modem
+         // starts returning OperationNotAllowed error after trying to connect
+         // using wrong APNs a few times. The workaround is to continue
+         // the connect attempt using the next APN if we receive
+         // OperationNotAllowed after we have already processed
+         // serviceOptionNotSubscribed error.
+         (error.type() == Error::kOperationNotAllowed &&
+          cellular()->IsSubscriptionErrorSeen());
 }
 
 std::string CellularCapability3gpp::NormalizeMdn(const std::string& mdn) const {
   std::string normalized_mdn;
+  if (mdn[0] == '+')
+    normalized_mdn += mdn[0];
+
   for (size_t i = 0; i < mdn.size(); ++i) {
     if (base::IsAsciiDigit(mdn[i]))
       normalized_mdn += mdn[i];
@@ -1578,14 +2051,14 @@ void CellularCapability3gpp::SetPrimarySimSlot(size_t slot) {
     return;
   }
   modem_proxy_->SetPrimarySimSlot(
-      slot_id, base::Bind([](const Error& error) {
+      slot_id, base::BindOnce([](const Error& error) {
         if (error.IsFailure()) {
           LOG(ERROR) << "Error Setting Primary SIM slot: " << error;
         } else {
           LOG(INFO) << "SetPrimarySimSlot Completed.";
         }
       }),
-      kTimeoutDefault);
+      kTimeoutDefault.InMilliseconds());
 }
 
 void CellularCapability3gpp::OnModemCurrentCapabilitiesChanged(
@@ -1618,14 +2091,6 @@ void CellularCapability3gpp::OnMdnChanged(const std::string& mdn) {
 
 void CellularCapability3gpp::OnModemStateChanged(Cellular::ModemState state) {
   SLOG(this, 1) << __func__ << ": " << Cellular::GetModemStateString(state);
-
-  if (state == Cellular::kModemStateConnected) {
-    // This assumes that ModemManager updates the Bearers list and the Bearer
-    // properties before changing Modem state to Connected.
-    SLOG(this, 2) << "Update active bearer.";
-    UpdateActiveBearer();
-  }
-
   cellular()->OnModemStateChanged(state);
 }
 
@@ -1662,10 +2127,11 @@ void CellularCapability3gpp::OnLockRetriesChanged(
   // UI uses lock_retries to indicate the number of attempts remaining
   // for enable pin/disable pin/change pin
   // By default, the UI operates on PIN1, thus lock_retries should return
-  // number of PIN1 retries when the PIN2 lock is active.
-  // For PUK, PUK2 and modem personalization locks, the UI should return
+  // number of PIN1 retries when the PIN2/PUK2 lock is active.
+  // For PUK1 and modem personalization locks, the UI should return
   // corresponding number of retries
-  auto retry_lock_type = (sim_lock_status_.lock_type <= MM_MODEM_LOCK_SIM_PIN2)
+  auto retry_lock_type = (sim_lock_status_.lock_type < MM_MODEM_LOCK_SIM_PUK ||
+                          sim_lock_status_.lock_type == MM_MODEM_LOCK_SIM_PUK2)
                              ? MM_MODEM_LOCK_SIM_PIN
                              : sim_lock_status_.lock_type;
   auto it = lock_retries.find(retry_lock_type);
@@ -1743,50 +2209,152 @@ void CellularCapability3gpp::OnModem3gppPropertiesChanged(
     OnPcoChanged(
         properties.GetVariant(MM_MODEM_MODEM3GPP_PROPERTY_PCO).Get<PcoList>());
   }
-
-  if (properties.ContainsVariant(MM_MODEM_MODEM3GPP_PROPERTY_PROFILES)) {
-    OnProfilesChanged(
-        properties.GetVariant(MM_MODEM_MODEM3GPP_PROPERTY_PROFILES)
-            .Get<Profiles>());
-  }
 }
 
 void CellularCapability3gpp::OnProfilesChanged(const Profiles& profiles) {
   SLOG(this, 3) << __func__;
-  profiles_.clear();
+  auto old_profiles = std::move(profiles_);
+
+  // Initialized to empty list. From now on |profiles_| will never be unset.
+  profiles_ =
+      std::make_optional<std::vector<MobileOperatorMapper::MobileAPN>>({});
+
   for (const auto& profile : profiles) {
-    auto apn_info = std::make_unique<MobileOperatorInfo::MobileAPN>();
-    apn_info->apn =
-        brillo::GetVariantValueOrDefault<std::string>(profile, kProfileApn);
-    apn_info->username = brillo::GetVariantValueOrDefault<std::string>(
-        profile, kProfileUsername);
-    apn_info->password = brillo::GetVariantValueOrDefault<std::string>(
-        profile, kProfilePassword);
-    apn_info->authentication =
+    MobileOperatorMapper::MobileAPN apn_info;
+    apn_info.apn = brillo::GetVariantValueOrDefault<std::string>(
+        profile, CellularBearer::kMMApnProperty);
+    apn_info.username = brillo::GetVariantValueOrDefault<std::string>(
+        profile, CellularBearer::kMMUserProperty);
+    apn_info.password = brillo::GetVariantValueOrDefault<std::string>(
+        profile, CellularBearer::kMMPasswordProperty);
+    apn_info.authentication =
         MMBearerAllowedAuthToApnAuthentication(static_cast<MMBearerAllowedAuth>(
-            brillo::GetVariantValueOrDefault<uint32_t>(profile,
-                                                       kProfileAuthType)));
-    profiles_.push_back(std::move(apn_info));
+            brillo::GetVariantValueOrDefault<uint32_t>(
+                profile, CellularBearer::kMMAllowedAuthProperty)));
+    if (base::Contains(profile, CellularBearer::kMMIpTypeProperty)) {
+      apn_info.ip_type = MMBearerIpFamilyToIpType(static_cast<MMBearerIpFamily>(
+          brillo::GetVariantValueOrDefault<uint32_t>(
+              profile, CellularBearer::kMMIpTypeProperty)));
+    }
+    if (base::Contains(profile, CellularBearer::kMMApnTypeProperty)) {
+      apn_info.apn_types =
+          MMBearerApnTypeToApnTypes(static_cast<MMBearerApnType>(
+              brillo::GetVariantValueOrDefault<uint32_t>(
+                  profile, CellularBearer::kMMApnTypeProperty)));
+    }
+    // If the APN doesn't have an APN type, assume it's a DEFAULT APN.
+    if (apn_info.apn_types.empty())
+      apn_info.apn_types = {kApnTypeDefault};
+
+    // In theory the modem should really never report duplicated entries, but it
+    // may happen when using the very-limited MBIM 1.0 profile management
+    // operations, e.g. if we have two profiles with same APN and APN type, but
+    // different IP type. Due to this, the logic deciding whether a profile list
+    // update should be processed or not is very limited. This check will become
+    // much stricter, and therefore likely obsolete, if we switch to MBIMEx 2.0
+    // profile management.
+    if (std::find(profiles_->begin(), profiles_->end(), apn_info) ==
+        profiles_->end()) {
+      profiles_->push_back(std::move(apn_info));
+    }
   }
+
+  // Ignore if the built profiles are the same as the ones we already had.
+  // The first time we receive a profile list (|old_profiles| would be unset)
+  // must never be ignored, because we rely on it to set the initial EPS bearer
+  // settings at least once.
+  // We don't care about the order of the list at this point.
+  if (old_profiles && *profiles_ == *old_profiles) {
+    LOG(INFO) << "No update in stored profiles";
+    return;
+  }
+
+  LOG(INFO) << "Stored profiles " << (old_profiles ? "updated" : "initialized");
 
   // The cellular object may need to update the APN list now.
   cellular()->OnProfilesChanged();
 
-  // Bail-out early if we don't want to setup the attach APN
-  // or the APN parameters are not ready yet.
-  if (!cellular()->use_attach_apn() || !cellular()->service() ||
-      !cellular()->home_provider_info()->IsMobileNetworkOperatorKnown())
-    return;
+  ConfigureAttachApn();
+}
 
+void CellularCapability3gpp::ConfigureAttachApn() {
+  SLOG(this, 3) << __func__;
   // Set the new parameters for the initial EPS bearer (e.g. LTE Attach APN)
+  // An empty list will result on clearing the Attach APN by |SetNextAttachApn|
+  attach_apn_try_list_ = cellular()->BuildAttachApnTryList();
+
+  // The modem could be already registered at this point, but shill needs to
+  // set the attach APN at least once to ensure the following:
+  // - The LastAttachAPN/LastConnectedAttachApn store the correct values
+  // - The UI APN is enforced, even when it's incorrect.
+  // When the attach APN sent by shill matches the the one in the modem,
+  // ModemManager will not unregister, so the operation will have no effect.
+
+  if (!cellular()->mobile_operator_info()->IsMobileNetworkOperatorKnown()) {
+    // If the carrier is not in shill's db, shill should use the custom APN or
+    // at least clear the attach APN, so the modem can clear any previous value
+    // and try to attach on its own.
+    SLOG(this, 2) << "Mobile operator not yet identified. Posted deferred "
+                     "Clear Attach APN";
+    try_next_attach_apn_callback_.Reset(
+        base::BindOnce(&CellularCapability3gpp::SetNextAttachApn,
+                       weak_ptr_factory_.GetWeakPtr()));
+    cellular()->dispatcher()->PostDelayedTask(
+        FROM_HERE, try_next_attach_apn_callback_.callback(),
+        kTimeoutSetNextAttachApn);
+    return;
+  }
+
+  SetNextAttachApn();
+}
+
+void CellularCapability3gpp::SetNextAttachApn() {
+  SLOG(this, 3) << __func__;
+  if (!modem_3gpp_proxy_) {
+    SLOG(this, 3) << __func__ << " skipping, no 3GPP proxy";
+    return;
+  }
+
   KeyValueStore properties;
-  Error error;
   FillInitialEpsBearerPropertyMap(&properties);
-  ResultCallback cb =
-      base::Bind(&CellularCapability3gpp::OnSetInitialEpsBearerReply,
-                 weak_ptr_factory_.GetWeakPtr());
   // If 'properties' is empty, this will clear the 'attach APN' on the modem.
-  SetInitialEpsBearer(properties, &error, cb);
+  SetInitialEpsBearer(
+      properties,
+      base::BindRepeating(&CellularCapability3gpp::ScheduleNextAttach,
+                          weak_ptr_factory_.GetWeakPtr()));
+}
+
+void CellularCapability3gpp::ScheduleNextAttach(const Error& error) {
+  SLOG(this, 3) << __func__;
+  // A finished callback does not qualify as a canceled callback.
+  // We test for a canceled callback to check for outstanding callbacks.
+  // So, explicitly cancel the callback here.
+  // Caution: If adding function arguments, do not use any function arguments
+  // post the call to Cancel(). The Cancel() call invalidates the arguments
+  // that were copied when creating the callback.
+  try_next_attach_apn_callback_.Cancel();
+
+  if (attach_apn_try_list_.size() > 0)
+    attach_apn_try_list_.pop_front();
+
+  // Check if the modem was already registered before shill called
+  // |SetInitialEpsBearerSettings|.
+  if (IsRegistered()) {
+    SLOG(this, 2)
+        << "Modem is already registered. Skipping next attach APN try.";
+    UpdateLastConnectedAttachApnOnRegistered();
+    return;
+  }
+
+  if (attach_apn_try_list_.size() > 0) {
+    SLOG(this, 2) << "Posted deferred Attach APN retry";
+    try_next_attach_apn_callback_.Reset(
+        base::BindOnce(&CellularCapability3gpp::SetNextAttachApn,
+                       weak_ptr_factory_.GetWeakPtr()));
+    cellular()->dispatcher()->PostDelayedTask(
+        FROM_HERE, try_next_attach_apn_callback_.callback(),
+        kTimeoutSetNextAttachApn);
+  }
 }
 
 void CellularCapability3gpp::On3gppRegistrationChanged(
@@ -1796,6 +2364,17 @@ void CellularCapability3gpp::On3gppRegistrationChanged(
   SLOG(this, 2) << __func__ << ": " << RegistrationStateToString(state);
   SLOG(this, 3) << "opercode=" << operator_code
                 << ", opername=" << operator_name;
+
+  if (IsRegisteredState(state) &&
+      !try_next_attach_apn_callback_.IsCancelled()) {
+    SLOG(this, 2) << "Modem is registered. Cancelling next attach APN try.";
+    try_next_attach_apn_callback_.Cancel();
+  }
+
+  if (IsRegisteredState(state) && cellular()->service()) {
+    cellular()->power_opt()->NotifyRegistrationSuccess(
+        cellular()->service()->iccid());
+  }
 
   // While the modem is connected, if the state changed from a registered state
   // to a non registered state, defer the state change by 15 seconds.
@@ -1808,22 +2387,26 @@ void CellularCapability3gpp::On3gppRegistrationChanged(
     } else {
       // This is not a repeated post. So, count this instance of delayed drop
       // posted.
-      metrics()->Notify3GPPRegistrationDelayedDropPosted();
+      metrics()->SendEnumToUMA(
+          Metrics::kMetricCellular3GPPRegistrationDelayedDrop,
+          Metrics::kCellular3GPPRegistrationDelayedDropPosted);
     }
     SLOG(this, 2) << "Posted deferred registration state update";
-    registration_dropped_update_callback_.Reset(base::Bind(
+    registration_dropped_update_callback_.Reset(base::BindOnce(
         &CellularCapability3gpp::Handle3gppRegistrationChange,
         weak_ptr_factory_.GetWeakPtr(), state, operator_code, operator_name));
     cellular()->dispatcher()->PostDelayedTask(
         FROM_HERE, registration_dropped_update_callback_.callback(),
-        registration_dropped_update_timeout_milliseconds_);
+        registration_dropped_update_timeout_);
   } else {
     if (!registration_dropped_update_callback_.IsCancelled()) {
       SLOG(this, 2) << "Cancelled a deferred registration state update";
       registration_dropped_update_callback_.Cancel();
       // If we cancelled the callback here, it means we had flaky network for a
       // small duration.
-      metrics()->Notify3GPPRegistrationDelayedDropCanceled();
+      metrics()->SendEnumToUMA(
+          Metrics::kMetricCellular3GPPRegistrationDelayedDrop,
+          Metrics::kCellular3GPPRegistrationDelayedDropCanceled);
     }
     Handle3gppRegistrationChange(state, operator_code, operator_name);
   }
@@ -1838,9 +2421,12 @@ void CellularCapability3gpp::Handle3gppRegistrationChange(
   registration_state_ = updated_state;
   serving_operator_[kOperatorCodeKey] = updated_operator_code;
   serving_operator_[kOperatorNameKey] = updated_operator_name;
-  cellular()->serving_operator_info()->UpdateMCCMNC(updated_operator_code);
-  cellular()->serving_operator_info()->UpdateOperatorName(
+  cellular()->mobile_operator_info()->UpdateServingMCCMNC(
+      updated_operator_code);
+  cellular()->mobile_operator_info()->UpdateServingOperatorName(
       updated_operator_name);
+
+  UpdateLastConnectedAttachApnOnRegistered();
 
   cellular()->HandleNewRegistrationState();
 
@@ -1855,6 +2441,18 @@ void CellularCapability3gpp::Handle3gppRegistrationChange(
   // If the modem registered with the network and the current ICCID is pending
   // activation, then reset the modem.
   UpdatePendingActivationState();
+}
+
+void CellularCapability3gpp::UpdateLastConnectedAttachApnOnRegistered() {
+  CellularServiceRefPtr service = cellular()->service();
+  if (service && IsRegistered()) {
+    if (last_attach_apn_.empty()) {
+      // The NULL APN was used to attach.
+      service->ClearLastConnectedAttachApn();
+    } else {
+      service->SetLastConnectedAttachApn(last_attach_apn_);
+    }
+  }
 }
 
 void CellularCapability3gpp::OnSubscriptionStateChanged(
@@ -1882,6 +2480,28 @@ void CellularCapability3gpp::OnModemStateChangedSignal(int32_t old_state,
                 << Cellular::GetModemStateString(old_modem_state) << ", "
                 << Cellular::GetModemStateString(new_modem_state) << ", "
                 << reason << ")";
+}
+
+void CellularCapability3gpp::OnModem3gppProfileManagerUpdatedSignal() {
+  SLOG(this, 3) << __func__;
+  ResultVariantDictionariesOnceCallback cb =
+      base::BindOnce(&CellularCapability3gpp::OnProfilesListReply,
+                     weak_ptr_factory_.GetWeakPtr(), base::DoNothing());
+  modem_3gpp_profile_manager_proxy_->List(std::move(cb),
+                                          kTimeoutDefault.InMilliseconds());
+}
+
+void CellularCapability3gpp::OnProfilesListReply(ResultCallback callback,
+                                                 const Profiles& profiles,
+                                                 const Error& error) {
+  SLOG(this, 3) << __func__;
+  if (error.IsFailure()) {
+    LOG(WARNING) << "Failed to fetch modem profiles list: " << error;
+    OnProfilesChanged(Profiles());
+  } else {
+    OnProfilesChanged(profiles);
+  }
+  std::move(callback).Run(error);
 }
 
 void CellularCapability3gpp::OnFacilityLocksChanged(uint32_t locks) {
@@ -1933,21 +2553,30 @@ void CellularCapability3gpp::OnModemSignalPropertiesChanged(
   uint32_t scaled_quality = 0;
   // Technologies whose signal strength will be probed, ordered by priority
   std::vector<std::string> signal_properties_list = {
-      MM_MODEM_SIGNAL_PROPERTY_LTE, MM_MODEM_SIGNAL_PROPERTY_UMTS,
-      MM_MODEM_SIGNAL_PROPERTY_GSM, MM_MODEM_SIGNAL_PROPERTY_CDMA,
-      MM_MODEM_SIGNAL_PROPERTY_EVDO};
+      MM_MODEM_SIGNAL_PROPERTY_NR5G, MM_MODEM_SIGNAL_PROPERTY_LTE,
+      MM_MODEM_SIGNAL_PROPERTY_UMTS, MM_MODEM_SIGNAL_PROPERTY_GSM};
   for (auto signal_property : signal_properties_list) {
     if (props.ContainsVariant(signal_property)) {
       auto tech_props = props.GetVariant(signal_property).Get<KeyValueStore>();
       double signal_quality = 0.0;
+      std::string signal_measurement = "";
 
-      if (tech_props.Contains<double>(kRsrpProperty)) {
+      if (tech_props.Contains<double>(kRsrpProperty) &&
+          (signal_property == MM_MODEM_SIGNAL_PROPERTY_NR5G ||
+           signal_property == MM_MODEM_SIGNAL_PROPERTY_LTE)) {
+        signal_measurement = kRsrpProperty;
         signal_quality = tech_props.Get<double>(kRsrpProperty);
         scaled_quality = kRsrpBounds.GetAsPercentage(signal_quality);
-      } else if (tech_props.Contains<double>(kRscpProperty)) {
+      } else if (tech_props.Contains<double>(kRscpProperty) &&
+                 (signal_property == MM_MODEM_SIGNAL_PROPERTY_UMTS)) {
+        signal_measurement = kRscpProperty;
         signal_quality = tech_props.Get<double>(kRscpProperty);
         scaled_quality = kRscpBounds.GetAsPercentage(signal_quality);
-      } else if (tech_props.Contains<double>(kRssiProperty)) {
+      } else if (tech_props.Contains<double>(kRssiProperty) &&
+                 (signal_property == MM_MODEM_SIGNAL_PROPERTY_UMTS ||
+                  signal_property == MM_MODEM_SIGNAL_PROPERTY_GSM ||
+                  IsModemFM101())) {  // TODO(b/274882743): Revert for FM101 MR2
+        signal_measurement = kRssiProperty;
         signal_quality = tech_props.Get<double>(kRssiProperty);
         scaled_quality = kRssiBounds.GetAsPercentage(signal_quality);
       } else {
@@ -1956,7 +2585,9 @@ void CellularCapability3gpp::OnModemSignalPropertiesChanged(
         continue;
       }
 
-      SLOG(this, 4) << "signal_quality:" << signal_quality
+      SLOG(this, 3) << " signal_property: " << signal_property
+                    << " signal_measurement: " << signal_measurement
+                    << " signal_quality:" << signal_quality
                     << " scaled_quality:" << scaled_quality;
       cellular()->HandleNewSignalQuality(scaled_quality);
       // we've found a signal quality indicator, no need to parse other
@@ -1977,10 +2608,10 @@ void CellularCapability3gpp::RequestSimProperties(size_t slot,
   DBusPropertiesProxy* sim_properties_proxy_ptr = sim_properties_proxy.get();
   sim_properties_proxy_ptr->GetAllAsync(
       MM_DBUS_INTERFACE_SIM,
-      base::Bind(&CellularCapability3gpp::OnGetSimProperties,
-                 weak_ptr_factory_.GetWeakPtr(), slot, sim_path,
-                 base::Passed(&sim_properties_proxy)),
-      base::Bind([](const Error& error) {
+      base::BindOnce(&CellularCapability3gpp::OnGetSimProperties,
+                     weak_ptr_factory_.GetWeakPtr(), slot, sim_path,
+                     std::move(sim_properties_proxy)),
+      base::BindOnce([](const Error& error) {
         LOG(ERROR) << "Error fetching SIM properties: " << error;
       }));
 }
@@ -2005,12 +2636,37 @@ void CellularCapability3gpp::OnGetSimProperties(
         properties.Get<std::string>(MM_SIM_PROPERTY_OPERATORIDENTIFIER);
   }
   if (properties.Contains<std::string>(MM_SIM_PROPERTY_OPERATORNAME)) {
-    sim_properties.spn =
-        (properties.Get<std::string>(MM_SIM_PROPERTY_OPERATORNAME));
+    base::TrimWhitespaceASCII(
+        properties.Get<std::string>(MM_SIM_PROPERTY_OPERATORNAME),
+        base::TRIM_ALL, &sim_properties.spn);
   }
   if (properties.Contains<std::string>(MM_SIM_PROPERTY_IMSI)) {
     sim_properties.imsi = properties.Get<std::string>(MM_SIM_PROPERTY_IMSI);
   }
+  if (properties.Contains<std::vector<uint8_t>>(MM_SIM_PROPERTY_GID1)) {
+    auto bin_gid1 = properties.Get<std::vector<uint8_t>>(MM_SIM_PROPERTY_GID1);
+    sim_properties.gid1 = base::HexEncode(bin_gid1.data(), bin_gid1.size());
+  }
+
+  MMSimType sim_type = MM_SIM_TYPE_UNKNOWN;
+  if (properties.Contains<uint32_t>(MM_SIM_PROPERTY_SIMTYPE)) {
+    sim_type = static_cast<MMSimType>(
+        properties.Get<uint32_t>(MM_SIM_PROPERTY_SIMTYPE));
+    VLOG(2) << __func__ << ": SimType: " << sim_type;
+  }
+  // SIM objects from MM have an empty iccid on MBIM modems if the SIM is on the
+  // inactive slot.
+  // If an eSIM has an empty iccid, Chrome will create stub services based on
+  // Hermes. Shill can skip creating services for an eSIM on the inactive slot.
+  // If a pSIM has an empty iccid, a service won't be created and
+  // thus UI won't display the SIM.
+  // pSIM's on the inactive slot need an iccid for a service to be created.
+  if (sim_properties.iccid.empty() && sim_properties.eid.empty() &&
+      sim_type != MM_SIM_TYPE_ESIM) {
+    sim_properties.iccid = kUnknownIccid;
+    LOG(INFO) << "Defaulting to unknown iccid on slot: " << slot;
+  }
+
   sim_properties_[sim_path] = sim_properties;
   pending_sim_requests_.erase(sim_path);
   if (pending_sim_requests_.empty())
@@ -2031,13 +2687,6 @@ double CellularCapability3gpp::SignalQualityBounds::GetAsPercentage(
 void CellularCapability3gpp::SetDBusPropertiesProxyForTesting(
     std::unique_ptr<DBusPropertiesProxy> dbus_properties_proxy) {
   dbus_properties_proxy_ = std::move(dbus_properties_proxy);
-}
-
-void CellularCapability3gpp::FillConnectPropertyMapForTesting(
-    KeyValueStore* properties) {
-  SetRoamingProperties(properties);
-  if (!apn_try_list_.empty())
-    SetApnProperties(apn_try_list_.front(), properties);
 }
 
 }  // namespace shill

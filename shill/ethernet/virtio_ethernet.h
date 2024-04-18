@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,8 +22,7 @@ class VirtioEthernet : public Ethernet {
 
   ~VirtioEthernet() override;
 
-  void Start(Error* error,
-             const EnabledStateChangedCallback& callback) override;
+  void Start(EnabledStateChangedCallback callback) override;
 };
 
 }  // namespace shill

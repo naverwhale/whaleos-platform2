@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,13 @@
 
 #include <tuple>
 
+#include "shill/device.h"
 #include "shill/error.h"
-#include "shill/key_value_store.h"
 #include "shill/logging.h"
+#include "shill/store/key_value_store.h"
 
 #include <base/logging.h>
+#include <base/test/test_future.h>
 
 namespace shill {
 
@@ -74,14 +76,41 @@ class SetErrorTypeInArgumentAction {
   bool warn_default_;
 };
 
+base::OnceCallback<void(const Error&)> GetResultCallback(
+    base::test::TestFuture<Error>* e);
+
+// Helper function to set the enabled state of devices synchronously.
+void SetEnabledSync(Device* device, bool enable, bool persist, Error* error);
+
+template <typename CallbackType>
+class CallbackValue {};
+
+template <typename F>
+class CallbackValue<base::OnceCallback<F>> {
+ public:
+  using Type = base::OnceCallback<F>;
+};
+
+template <typename F>
+class CallbackValue<base::RepeatingCallback<F>> {
+ public:
+  using Type = const base::RepeatingCallback<F>&;
+};
+
+template <typename CallbackType>
+void ReturnOperationFailed(typename CallbackValue<CallbackType>::Type callback);
+
 // Many functions in the the DBus proxy classes take a (shill::Error*) output
 // argument that is set to shill::Error::kOperationFailed to notify the caller
 // synchronously of error conditions.
 //
 // If an error is not returned synchronously, a callback (passed as another
 // argument to the function) must eventually be called with the result/error.
-// Mock classes for these proxies should by default return failure synchronously
-// so that callers do not expect the callback to be called.
+//
+// TODO(b/172215298): Remove these shill::Error* arguments and move everything
+// to calling the callback. The current situation often causes unit tests to be
+// testing code that is dead in production, and production pathways to be un-
+// tested. Instead, you should Invoke+WithArgs ReturnOperationFailed above.
 template <int error_argument_index>
 ::testing::PolymorphicAction<SetErrorTypeInArgumentAction<error_argument_index>>
 SetOperationFailedInArgumentAndWarn() {

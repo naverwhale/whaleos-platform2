@@ -1,11 +1,11 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <cstddef>
 #include <cstdint>
 
-#include "u2fd/u2f_apdu.h"
+#include "u2fd/client/u2f_apdu.h"
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   const char* begin = reinterpret_cast<const char*>(data);

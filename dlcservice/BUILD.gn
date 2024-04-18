@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,13 +8,16 @@ import("//common-mk/proto_library.gni")
 
 group("all") {
   deps = [
+    ":dlc_metadata_util",
     ":dlcservice",
     ":dlcservice_adaptors",
     ":dlcservice_util",
     ":dlcverify",
+    ":install_minijail_conf",
+    ":install_utils_header",
+    ":install_utils_pkgconfig",
     ":libdlcservice",
     ":libdlcservice_utils",
-    ":ref_count-proto",
   ]
   if (use.test) {
     deps += [ ":dlcservice_tests" ]
@@ -27,14 +30,21 @@ group("all") {
   }
 }
 
+install_config("install_minijail_conf") {
+  sources = [ "minijail/dlcservice.conf" ]
+  install_path = "minijail_conf"
+}
+
 pkg_config("target_defaults") {
+  defines = [ "USE_LVM_STATEFUL_PARTITION=${use.lvm_stateful_partition}" ]
+
   # NOSORT
   pkg_deps = [
     "libchrome",
     "libbrillo",
+    "libdlcservice-metadata",
     "libimageloader-client",
     "libmetrics",
-    "libsession_manager-client",
     "libimageloader-manifest",
     "libupdate_engine-client",
 
@@ -48,6 +58,9 @@ pkg_config("target_defaults") {
     pkg_deps += [ "protobuf" ]
   } else {
     pkg_deps += [ "protobuf-lite" ]
+  }
+  if (use.lvm_stateful_partition) {
+    pkg_deps += [ "liblvmd-client" ]
   }
 }
 
@@ -64,11 +77,24 @@ generate_dbus_adaptors("dlcservice_adaptors") {
   sources = [ "dbus_adaptors/org.chromium.DlcServiceInterface.xml" ]
 }
 
-# Protobufs.
-proto_library("ref_count-proto") {
-  proto_in_dir = "."
-  proto_out_dir = "include/dlcservice"
-  sources = [ "ref_count.proto" ]
+shared_library("libdlcservice-utils") {
+  sources = [ "utils/utils.cc" ]
+  configs += [ ":target_defaults" ]
+  install_path = "lib"
+}
+
+install_config("install_utils_pkgconfig") {
+  sources = [ "utils/libdlcservice-utils.pc" ]
+  install_path = "${libdir}/pkgconfig"
+}
+
+install_config("install_utils_header") {
+  sources = [
+    "utils/mock_utils.h",
+    "utils/utils.h",
+    "utils/utils_interface.h",
+  ]
+  install_path = "/usr/include/libdlcservice"
 }
 
 # DLC utils related files.
@@ -76,9 +102,15 @@ static_library("libdlcservice_utils") {
   sources = [
     "boot/boot_device.cc",
     "boot/boot_slot.cc",
+    "error.cc",
+    "metrics.cc",
+    "proto_utils.cc",
+    "system_properties.cc",
+    "system_state.cc",
     "utils.cc",
   ]
   configs += [ ":target_defaults" ]
+  deps = [ ":libdlcservice-utils" ]
 }
 
 # DLC verify related files.
@@ -92,23 +124,25 @@ static_library("libdlcservice") {
   sources = [
     "daemon.cc",
     "dbus_adaptors/dbus_adaptor.cc",
-    "dlc.cc",
-    "dlc_manager.cc",
+    "dlc_base.cc",
+    "dlc_base_creator.cc",
     "dlc_service.cc",
-    "error.cc",
-    "metrics.cc",
     "prefs.cc",
-    "ref_count.cc",
     "system_properties.cc",
-    "system_state.cc",
   ]
   configs += [ ":target_defaults" ]
   libs = [ "rootdev" ]
   deps = [
     ":dlcservice_adaptors",
     ":libdlcservice_utils",
-    ":ref_count-proto",
   ]
+  if (use.lvm_stateful_partition) {
+    sources += [
+      "lvm/dlc_lvm.cc",
+      "lvm/dlc_lvm_creator.cc",
+      "lvm/lvmd_proxy_wrapper.cc",
+    ]
+  }
 }
 
 # For dlcservice:
@@ -135,6 +169,12 @@ executable("dlcverify") {
   deps = [ ":libdlcverify" ]
 }
 
+# For dlc_metadata_util:
+executable("dlc_metadata_util") {
+  sources = [ "tools/dlc_metadata_util.cc" ]
+  configs += [ ":target_defaults" ]
+}
+
 # For test:
 if (use.test) {
   pkg_config("dlcservice_tests_config") {
@@ -142,9 +182,11 @@ if (use.test) {
       "libbrillo-test",
       "libchrome-test",
       "libimageloader-client-test",
-      "libsession_manager-client-test",
       "libupdate_engine-client-test",
     ]
+    if (use.lvm_stateful_partition) {
+      pkg_deps += [ "liblvmd-client-test" ]
+    }
   }
 
   executable("dlcservice_tests") {
@@ -152,18 +194,20 @@ if (use.test) {
       "boot/boot_device_test.cc",
       "boot/boot_slot_test.cc",
       "dbus_adaptors/dbus_adaptor_test.cc",
-      "dlc_manager_test.cc",
       "dlc_service_test.cc",
       "dlc_test.cc",
       "error_test.cc",
       "metrics_test.cc",
       "prefs_test.cc",
-      "ref_count_test.cc",
       "system_state_test.cc",
       "test_utils.cc",
       "unique_queue_test.cc",
+      "utils/utils_test.cc",
       "utils_test.cc",
     ]
+    if (use.lvm_stateful_partition) {
+      sources += [ "lvm/dlc_lvm_test.cc" ]
+    }
     configs += [
       "//common-mk:test",
       ":dlcservice_tests_config",

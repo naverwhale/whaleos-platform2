@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,13 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <dbus/object_path.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "diagnostics/common/system/bluetooth_client.h"
-#include "diagnostics/common/system/fake_bluetooth_client.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/bluetooth_event_service.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/bluetooth_client.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/fake_bluetooth_client.h"
 
 using ::testing::_;
 using ::testing::ElementsAreArray;
@@ -26,7 +25,7 @@ using ::testing::SaveArg;
 using ::testing::StrictMock;
 
 namespace diagnostics {
-
+namespace wilco {
 namespace {
 
 using AdapterData = BluetoothEventService::AdapterData;
@@ -47,7 +46,7 @@ void PropertyChanged(const std::string& property_name) {}
 std::unique_ptr<BluetoothClient::AdapterProperties> CreateAdapterProperties(
     const std::string& name, const std::string& address, bool powered) {
   auto properties = std::make_unique<BluetoothClient::AdapterProperties>(
-      nullptr, base::Bind(&PropertyChanged));
+      nullptr, base::BindRepeating(&PropertyChanged));
   properties->name.ReplaceValue(name);
   properties->address.ReplaceValue(address);
   properties->powered.ReplaceValue(powered);
@@ -57,7 +56,7 @@ std::unique_ptr<BluetoothClient::AdapterProperties> CreateAdapterProperties(
 std::unique_ptr<BluetoothClient::DeviceProperties> CreateDeviceProperties(
     bool connected, const dbus::ObjectPath& adapter_path) {
   auto properties = std::make_unique<BluetoothClient::DeviceProperties>(
-      nullptr, base::Bind(&PropertyChanged));
+      nullptr, base::BindRepeating(&PropertyChanged));
   properties->name.ReplaceValue("keyboard");
   properties->address.ReplaceValue("70:88:6B:92:34:70");
   properties->connected.ReplaceValue(connected);
@@ -85,15 +84,6 @@ class MockBluetoothEventServiceObserver
               (const std::vector<AdapterData>&),
               (override));
 };
-
-}  // namespace
-
-std::ostream& operator<<(std::ostream& out, const AdapterData& d) {
-  out << "name: " << d.name << " address: " << d.address
-      << " powered: " << d.powered
-      << " connected_devices: " << d.connected_devices_count;
-  return out;
-}
 
 class BluetoothEventServiceImplTest : public ::testing::Test {
  public:
@@ -452,4 +442,6 @@ TEST_F(BluetoothEventServiceImplTest, RemoveAdapterWithConnectedDevice) {
                                               true /* powered */));
 }
 
+}  // namespace
+}  // namespace wilco
 }  // namespace diagnostics

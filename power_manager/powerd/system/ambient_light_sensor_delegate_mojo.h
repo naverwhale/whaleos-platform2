@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,27 +7,26 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include <base/containers/flat_map.h>
+#include <base/files/file_path.h>
+#include <base/functional/callback.h>
 #include <base/gtest_prod_util.h>
 #include <base/memory/weak_ptr.h>
-#include <base/observer_list.h>
-#include <base/optional.h>
 #include <base/sequence_checker.h>
-#include <base/stl_util.h>
 #include <iioservice/mojo/sensor.mojom.h>
+#include <mojo/public/cpp/bindings/pending_receiver.h>
+#include <mojo/public/cpp/bindings/pending_remote.h>
+#include <mojo/public/cpp/bindings/receiver.h>
 #include <mojo/public/cpp/bindings/remote.h>
 
-#include "power_manager/common/power_constants.h"
-#include "power_manager/powerd/system/ambient_light_observer.h"
-#include "power_manager/powerd/system/ambient_light_sensor.h"
-#include "power_manager/powerd/system/async_file_reader.h"
+#include "power_manager/powerd/system/ambient_light_sensor_delegate.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class AmbientLightSensorDelegateMojo
     : public AmbientLightSensorDelegate,
@@ -81,11 +80,11 @@ class AmbientLightSensorDelegateMojo
 
   // Extracts the lux value of the specific color axis |index| from |sample|,
   // which is from OnSampleUpdated.
-  base::Optional<int> GetColorValue(
+  std::optional<int> GetColorValue(
       const base::flat_map<int32_t, int64_t>& sample, ChannelType type);
   // Gets the color temperature with |sample| by calling
   // AmbientLightSensorDelegate::CalculateColorTemperature.
-  base::Optional<int> GetColorTemperature(
+  std::optional<int> GetColorTemperature(
       const base::flat_map<int32_t, int64_t>& sample);
 
   void OnObserverDisconnect();
@@ -119,7 +118,7 @@ class AmbientLightSensorDelegateMojo
   // Ex: [1, 2, 3, 0].
   std::vector<int32_t> channel_indices_;
   // The channel index of channel: illuminance.
-  base::Optional<int32_t> illuminance_index_ = base::nullopt;
+  std::optional<int32_t> illuminance_index_ = std::nullopt;
   // The channel indices of red, green, and blue channels respectively.
   std::map<ChannelType, int32_t> color_indices_;
 
@@ -144,7 +143,6 @@ class AmbientLightSensorDelegateMojo
                            GiveUpAfterTooManyFailures);
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_AMBIENT_LIGHT_SENSOR_DELEGATE_MOJO_H_

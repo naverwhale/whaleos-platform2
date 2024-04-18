@@ -1,19 +1,21 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "smbprovider/kerberos_artifact_synchronizer.h"
 
+#include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/important_file_writer.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <dbus/authpolicy/dbus-constants.h>
 #include <dbus/message.h>
+
+#include "smbprovider/kerberos_artifact_client_interface.h"
 
 namespace smbprovider {
 
@@ -31,7 +33,7 @@ void KerberosArtifactSynchronizer::SetupKerberos(
     const std::string& account_identifier, SetupKerberosCallback callback) {
   if (!allow_credentials_update_) {
     if (account_identifier.empty()) {
-      LOG(ERROR) << "Kerberos user account identifier is empty";
+      LOG(ERROR) << "Kerberos account identifier is empty";
       std::move(callback).Run(false /* success */);
       return;
     }
@@ -67,7 +69,7 @@ void KerberosArtifactSynchronizer::SetupKerberos(
 }
 
 void KerberosArtifactSynchronizer::GetFiles(SetupKerberosCallback callback) {
-  client_->GetUserKerberosFiles(
+  client_->GetKerberosFiles(
       account_identifier_,
       base::BindOnce(&KerberosArtifactSynchronizer::OnGetFilesResponse,
                      base::Unretained(this), std::move(callback)));

@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -7,6 +7,7 @@
 #include "gpu/gles/shader.h"
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 
 #include <base/files/file_util.h>
@@ -16,11 +17,11 @@
 namespace cros {
 
 // static
-base::Optional<Shader> Shader::FromFile(GLenum type,
-                                        base::FilePath shader_file_path) {
+std::optional<Shader> Shader::FromFile(GLenum type,
+                                       base::FilePath shader_file_path) {
   if (!base::PathIsReadable(shader_file_path)) {
     LOGF(ERROR) << "Invalid shader file: " << shader_file_path;
-    return base::nullopt;
+    return std::nullopt;
   }
 
   std::string source_code;
@@ -28,15 +29,15 @@ base::Optional<Shader> Shader::FromFile(GLenum type,
   if (!ok) {
     LOGF(ERROR) << "Failed to load shader source code from file: "
                 << shader_file_path;
-    return base::nullopt;
+    return std::nullopt;
   }
 
   Shader shader(type, std::move(source_code));
   if (!shader.IsValid()) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  return base::Optional<Shader>(std::move(shader));
+  return std::optional<Shader>(std::move(shader));
 }
 
 Shader::Shader(GLenum type, const std::string source_code) {

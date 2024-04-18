@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -73,11 +73,11 @@ void SodaRecognizerImpl::MarkDone() {
 }
 
 void SodaRecognizerImpl::OnSodaEvent(const std::string& ignored_response) {
-  SpeechRecognizerEventPtr event = SpeechRecognizerEvent::New();
+  SpeechRecognizerEventPtr event;
   FinalResultPtr final_result = FinalResult::New();
   final_result->final_hypotheses.push_back(kOnDeviceSpeechNotSupportedMessage);
   final_result->endpoint_reason = EndpointReason::ENDPOINT_UNKNOWN;
-  event->set_final_result(std::move(final_result));
+  event = SpeechRecognizerEvent::NewFinalResult(std::move(final_result));
   client_remote_->OnSpeechRecognizerEvent(std::move(event));
 }
 

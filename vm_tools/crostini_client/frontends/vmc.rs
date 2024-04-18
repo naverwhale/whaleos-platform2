@@ -1,19 +1,22 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::path::Path;
 use std::{fmt, fs};
 
-use std::io::{stdout, Write};
+use std::io::{stdin, stdout, BufRead, Write};
 
 use getopts::Options;
 
 use super::Frontend;
 use crate::disk::DiskOpType;
 use crate::methods::{ContainerSource, Methods, UserDisks, VmFeatures};
-use crate::proto::system_api::cicerone_service::StartLxdContainerRequest_PrivilegeLevel;
+use crate::proto::system_api::cicerone_service::start_lxd_container_request::PrivilegeLevel;
+use crate::proto::system_api::cicerone_service::VmDeviceAction;
+
 use crate::EnvMap;
 
 enum VmcError {
@@ -25,7 +28,6 @@ enum VmcError {
     ExpectedName,
     ExpectedNoArgs,
     ExpectedPath,
-    ExpectedPluginVm,
     ExpectedSize,
     ExpectedU8Bus,
     ExpectedU8Device,
@@ -37,13 +39,15 @@ enum VmcError {
     ExpectedVmAndPath,
     ExpectedVmAndSize,
     ExpectedVmBusDevice,
+    ExpectedVmDeviceUpdates,
     ExpectedVmPort,
-    InvalidEmail,
+    UnexpectedSizeWithPluginVm,
     InvalidPath(std::ffi::OsString),
-    InvalidVmType,
-    MissingActiveSession,
+    InvalidVmDevice(String),
+    InvalidVmDeviceAction(String),
     ExpectedPrivilegedFlagValue,
     UnknownSubcommand(String),
+    UserCancelled,
 }
 
 use self::VmcError::*;
@@ -60,7 +64,7 @@ static VM_NAME_OPTION: &str = "vm-name";
 fn trim_routine(s: &str) -> String {
     // We are guaranteed to have at least one element after splitn()
     s.trim_start_matches("self.methods.")
-        .splitn(2, '(')
+        .split('(')
         .next()
         .unwrap()
         .to_string()
@@ -89,12 +93,23 @@ fn get_user_hash(environ: &EnvMap) -> Result<String, VmcError> {
     }
 }
 
+fn parse_disk_size(s: &str) -> Result<u64, VmcError> {
+    match s.chars().last() {
+        Some('M') => s[..s.len() - 1].parse::<u64>().map(|x| x * 1024 * 1024),
+        Some('G') => s[..s.len() - 1]
+            .parse::<u64>()
+            .map(|x| x * 1024 * 1024 * 1024),
+        _ => s.parse(),
+    }
+    .map_err(|_| ExpectedUIntSize)
+}
+
 impl fmt::Display for VmcError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             BadProblemReportArguments(e) => write!(f, "failed to parse arguments: {:?}", e),
             Command(routine, e) => {
-                write!(f, "operation `{}` failed: {}", trim_routine(&routine), e)
+                write!(f, "operation `{}` failed: {}", trim_routine(routine), e)
             }
             DiskOperation(op, e) => write!(f, "{} failed: {}", op, e),
             ExpectedCrosUserIdHash => write!(f, "expected CROS_USER_ID_HASH environment variable"),
@@ -104,10 +119,6 @@ impl fmt::Display for VmcError {
             ),
             ExpectedName => write!(f, "expected <name>"),
             ExpectedPath => write!(f, "expected <path>"),
-            ExpectedPluginVm => write!(
-                f,
-                "unable to launch pluginvm. Have you run `vmc create -p PvmDefault <source media>`?"
-            ),
             ExpectedSize => write!(f, "expected <size>"),
             ExpectedVmAndContainer => write!(
                 f,
@@ -122,24 +133,27 @@ impl fmt::Display for VmcError {
             ),
             ExpectedVmAndPath => write!(f, "expected <vm name> <path>"),
             ExpectedVmAndSize => write!(f, "expected <vm name> <size>"),
-            ExpectedVmBusDevice => write!(f, "expected <vm name> <bus>:<device>"),
+            ExpectedVmBusDevice => {
+                write!(f, "expected <vm name> <bus>:<device> [<container name>]")
+            }
             ExpectedNoArgs => write!(f, "expected no arguments"),
             ExpectedU8Bus => write!(f, "expected <bus> to fit into an 8-bit integer"),
             ExpectedU8Device => write!(f, "expected <device> to fit into an 8-bit integer"),
             ExpectedU8Port => write!(f, "expected <port> to fit into an 8-bit integer"),
             ExpectedUUID => write!(f, "expected <command UUID>"),
+            ExpectedVmDeviceUpdates => write!(f, "expected args `<device>:<enable|disable>`"),
             ExpectedVmPort => write!(f, "expected <vm name> <port>"),
-            InvalidEmail => write!(f, "the active session has an invalid email address"),
+            UnexpectedSizeWithPluginVm => {
+                write!(f, "unexpected --size parameter; -p doesn't support --size")
+            }
             InvalidPath(path) => write!(f, "invalid path: {:?}", path),
-            InvalidVmType => write!(f, "valid VM type not provided"),
-            MissingActiveSession => write!(
-                f,
-                "missing active session corresponding to $CROS_USER_ID_HASH"
-            ),
+            InvalidVmDevice(v) => write!(f, "invalid vm device {}", v),
+            InvalidVmDeviceAction(a) => write!(f, "invalid vm device action {}", a),
             ExpectedPrivilegedFlagValue => {
                 write!(f, "Expected <true/false> after the privileged flag")
             }
             UnknownSubcommand(s) => write!(f, "no such subcommand: `{}`", s),
+            UserCancelled => write!(f, "cancelled by user"),
         }
     }
 }
@@ -189,6 +203,11 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
         opts.optflag("", "enable-gpu", "when starting the vm, enable gpu support");
         opts.optflag(
             "",
+            "enable-dgpu-passthrough",
+            "when starting the VM, enable discrete GPU passthrough support",
+        );
+        opts.optflag(
+            "",
             "enable-vulkan",
             "when starting the vm, enable vulkan support (implies --enable-gpu)",
         );
@@ -199,9 +218,10 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
         );
         opts.optflag(
             "",
-            "software-tpm",
-            "provide software-based virtual Trusted Platform Module",
+            "enable-virtgpu-native-context",
+            "when starting the vm, enable virtgpu native context support (implies --enable-gpu)",
         );
+        opts.optflag("", "vtpm-proxy", "connect the virtio-tpm to vtpm daemon");
         opts.optflag(
             "",
             "enable-audio-capture",
@@ -248,6 +268,12 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
             "path to a custom rootfs image. Only valid on untrusted VMs.",
             "PATH",
         );
+        opts.optopt(
+            "",
+            "vm-type",
+            "type of VM (TERMINA / ARC_VM / PLUGIN_VM / BOREALIS / BRUSCHETTA)",
+            "TYPE",
+        );
         opts.optflag(
             "",
             "no-start-lxd",
@@ -260,11 +286,29 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
             "Additional kernel cmdline parameter for the host. Only valid on untrusted VMs.",
             "PARAM",
         );
+        opts.optmulti(
+            "",
+            "oem-string",
+            "Type 11 SMBIOS DMI OEM string to pass to the host.",
+            "STRING",
+        );
         opts.optopt(
             "",
             "bios",
             "path to a custom bios image. Only valid on untrusted VMs.",
             "PATH",
+        );
+        opts.optopt(
+            "",
+            "pflash",
+            "path to a r/w bios flash image. Only valid on untrusted VMs.",
+            "PATH",
+        );
+        opts.optopt(
+            "",
+            "bios-dlc",
+            "Identifier for the DLC from which the bios should be pulled.",
+            "ID",
         );
         opts.optopt("", "timeout", "seconds to wait until timeout.", "PARAM");
         opts.optflag("", "no-shell", "Don't start a shell in the started VM.");
@@ -277,26 +321,35 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
 
         let vm_name = &matches.free[0];
         let user_id_hash = get_user_hash(self.environ)?;
+        let username = self.methods.user_id_hash_to_username(&user_id_hash)?;
 
         let vulkan = matches.opt_present("enable-vulkan");
         let big_gl = matches.opt_present("enable-big-gl");
-        let gpu = big_gl || vulkan || matches.opt_present("enable-gpu");
+        let virtgpu_native_context = matches.opt_present("enable-virtgpu-native-context");
+        let gpu = virtgpu_native_context || big_gl || vulkan || matches.opt_present("enable-gpu");
+        let dgpu_passthrough = matches.opt_present("enable-dgpu-passthrough");
         let timeout = matches
             .opt_str("timeout")
             .map(|x| x.parse())
             .transpose()?
             .unwrap_or(0);
+
         let features = VmFeatures {
             gpu,
+            dgpu_passthrough,
             vulkan,
             big_gl,
-            software_tpm: matches.opt_present("software-tpm"),
+            virtgpu_native_context,
+            vtpm_proxy: matches.opt_present("vtpm-proxy"),
             audio_capture: matches.opt_present("enable-audio-capture"),
             run_as_untrusted: matches.opt_present("untrusted"),
             dlc: matches.opt_str("dlc-id"),
             kernel_params: matches.opt_strs("kernel-param"),
             tools_dlc_id: matches.opt_str("tools-dlc"),
             timeout,
+            oem_strings: matches.opt_strs("oem-string"),
+            bios_dlc_id: matches.opt_str("bios-dlc"),
+            vm_type: matches.opt_str("vm-type"),
         };
 
         let user_disks = UserDisks {
@@ -306,12 +359,14 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
             extra_disk: matches.opt_str("extra-disk"),
             initrd: matches.opt_str("initrd"),
             bios: matches.opt_str("bios"),
+            pflash: matches.opt_str("pflash"),
         };
 
         self.metrics_send_sample("Vm.VmcStart");
         try_command!(self.methods.vm_start(
             vm_name,
             &user_id_hash,
+            &username,
             features,
             user_disks,
             !matches.opt_present("no-start-lxd"),
@@ -339,76 +394,46 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
     }
 
     fn launch(&mut self) -> VmcResult {
-        if self.args.len() != 1 {
+        if self.args.is_empty() {
             return Err(ExpectedName.into());
         }
-        match self.args[0] {
-            "borealis" => Command {
-                methods: self.methods,
-                args: &[
-                    "--enable-gpu",
-                    "--no-start-lxd",
-                    "--enable-vulkan",
-                    "--dlc-id=borealis-dlc",
-                    "borealis",
-                ],
-                environ: self.environ,
-            }
-            .start(),
-            "crostini" => {
-                Command {
-                    methods: self.methods,
-                    args: &["--no-shell", "--enable-gpu", "termina"],
-                    environ: self.environ,
-                }
-                .start()?;
-                Command {
-                    methods: self.methods,
-                    args: &["termina", "penguin"],
-                    environ: self.environ,
-                }
-                .container()
-            }
-            "pluginvm" => {
-                if self
-                    .methods
-                    .is_plugin_vm("PvmDefault", &get_user_hash(self.environ)?)?
-                {
-                    Command {
-                        methods: self.methods,
-                        args: &["PvmDefault"],
-                        environ: self.environ,
-                    }
-                    .start()
-                } else {
-                    Err(ExpectedPluginVm.into())
-                }
-            }
-            "termina" => Command {
-                methods: self.methods,
-                args: &["--enable-gpu", "termina"],
-                environ: self.environ,
-            }
-            .start(),
-            _ => Err(InvalidVmType.into()),
-        }
+        let user_id_hash = get_user_hash(self.environ)?;
+        try_command!(self.methods.vm_launch(&user_id_hash, self.args));
+        Ok(())
     }
 
     fn create(&mut self) -> VmcResult {
-        let plugin_vm = self.args.len() > 0 && self.args[0] == "-p";
-        if plugin_vm {
-            // Discard the first argument (-p).
-            self.args = &self.args[1..];
+        let mut opts = Options::new();
+        // By using StopAtFirstFree we allow this command to continue using `--`
+        // as a separator for params which avoids breaking the existing
+        // interface.
+        opts.parsing_style(getopts::ParsingStyle::StopAtFirstFree);
+        opts.optflag("p", "pluginvm", "create a pluginvm vm");
+        opts.optopt("", "size", "size of the created vm's disk", "SIZE");
+
+        let matches = opts.parse(self.args)?;
+        let plugin_vm = matches.opt_present("p");
+        let size = match matches.opt_str("size") {
+            Some(s) => Some(parse_disk_size(&s)?),
+            None => None,
+        };
+
+        if plugin_vm && size.is_some() {
+            return Err(UnexpectedSizeWithPluginVm.into());
         }
 
-        let mut s = self.args.splitn(2, |arg| *arg == "--");
+        let mut s = matches.free.splitn(2, |arg| *arg == "--");
         let args = s.next().expect("failed to split argument list");
         let params = s.next().unwrap_or(&[]);
 
         let (vm_name, file_name, removable_media) = match args.len() {
-            1 => (args[0], None, None),
-            2 => (args[0], Some(args[1]), None),
-            3 => (args[0], Some(args[1]), Some(args[2])),
+            1 => (args[0].as_str(), None, None),
+            2 => (args[0].as_str(), Some(args[1].as_str()), None),
+            3 => (
+                args[0].as_str(),
+                Some(args[1].as_str()),
+                Some(args[2].as_str()),
+            ),
             _ => return Err(ExpectedVmAndMaybeFileName.into()),
         };
 
@@ -418,6 +443,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
             vm_name,
             &user_id_hash,
             plugin_vm,
+            size,
             file_name,
             removable_media,
             params,
@@ -445,12 +471,35 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
     }
 
     fn destroy(&mut self) -> VmcResult {
-        if self.args.len() != 1 {
+        let mut opts = Options::new();
+        opts.optflag("y", "yes", "destroy without prompting");
+
+        let matches = opts.parse(self.args)?;
+        if matches.free.len() != 1 {
             return Err(ExpectedName.into());
         }
 
-        let vm_name = self.args[0];
+        let vm_name = &matches.free[0];
         let user_id_hash = get_user_hash(self.environ)?;
+        let skip_prompt =
+            matches.opt_present("yes") || self.environ.get("VMC_NONINTERACTIVE").is_some();
+
+        if !skip_prompt {
+            println!(
+                "WARNING: this will delete all data stored in VM '{}'",
+                vm_name
+            );
+            print!("Continue? (y/N) ");
+            stdout().flush()?;
+
+            let mut line = String::new();
+            stdin().lock().read_line(&mut line).unwrap();
+            line = line.trim_end().to_string();
+
+            if !(line == "y" || line == "yes") {
+                return Err(UserCancelled.into());
+            }
+        }
 
         match self.methods.disk_destroy(vm_name, &user_id_hash) {
             Ok(()) => Ok(()),
@@ -470,7 +519,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
     ) -> VmcResult {
         let mut progress_reported = false;
         loop {
-            match self.methods.wait_disk_op(&uuid, &user_id_hash, op_type) {
+            match self.methods.wait_disk_op(uuid, user_id_hash, op_type) {
                 Ok((done, progress)) => {
                     if done {
                         println!("\rOperation completed successfully");
@@ -488,7 +537,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
                     }
 
                     if progress_reported {
-                        println!("");
+                        println!();
                     }
                     return Err(DiskOperation(op_name.to_string(), e).into());
                 }
@@ -570,7 +619,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
     }
 
     fn import(&mut self) -> VmcResult {
-        let plugin_vm = self.args.len() > 0 && self.args[0] == "-p";
+        let plugin_vm = !self.args.is_empty() && self.args[0] == "-p";
         if plugin_vm {
             // Discard the first argument (-p).
             self.args = &self.args[1..];
@@ -628,14 +677,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
         let matches = opts.parse(self.args)?;
 
         let s = matches.opt_str("size").ok_or_else(|| ExpectedSize)?;
-        let size: u64 = match s.chars().last() {
-            Some('M') => s[..s.len() - 1].parse::<u64>().map(|x| x * 1024 * 1024),
-            Some('G') => s[..s.len() - 1]
-                .parse::<u64>()
-                .map(|x| x * 1024 * 1024 * 1024),
-            _ => s.parse(),
-        }
-        .map_err(|_| ExpectedUIntSize)?;
+        let size = parse_disk_size(&s)?;
 
         if matches.free.len() != 1 {
             return Err(ExpectedPath.into());
@@ -647,7 +689,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
                 .join(path)
                 .into_os_string()
                 .into_string()
-                .map_err(|s| InvalidPath(s))?;
+                .map_err(InvalidPath)?;
         }
 
         try_command!(self.methods.extra_disk_create(&path, size));
@@ -675,6 +717,20 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
             println!("{} ({} bytes{})", disk.name, disk.size, extra_info);
         }
         println!("Total Size (bytes): {}", total_size);
+        Ok(())
+    }
+
+    fn logs(&mut self) -> VmcResult {
+        if self.args.len() != 1 {
+            return Err(ExpectedName.into());
+        }
+
+        let user_id_hash = get_user_hash(self.environ)?;
+        let vm_name = self.args[0];
+
+        let logs = try_command!(self.methods.get_vm_logs(vm_name, &user_id_hash));
+        print!("{}", logs);
+
         Ok(())
     }
 
@@ -713,6 +769,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
             "is the container privileged. only takes effect on boards that support privileged containers",
             "true / false",
         );
+        opts.optopt("", "timeout", "seconds to wait until timeout.", "PARAM");
         let matches = opts
             .parse(self.args)
             .map_err(|_| ExpectedPrivilegedFlagValue)?;
@@ -720,12 +777,14 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
         // The privileged flag is optional but when its given it must be followed by a valid value.
         let privilege_level = match matches.opt_str(PRIVILEGED_FLAG) {
             Some(s) => match s.as_str() {
-                "True" | "true" => StartLxdContainerRequest_PrivilegeLevel::PRIVILEGED,
-                "False" | "false" => StartLxdContainerRequest_PrivilegeLevel::UNPRIVILEGED,
+                "True" | "true" => PrivilegeLevel::PRIVILEGED,
+                "False" | "false" => PrivilegeLevel::UNPRIVILEGED,
                 _ => return Err(ExpectedPrivilegedFlagValue.into()),
             },
-            None => StartLxdContainerRequest_PrivilegeLevel::UNCHANGED,
+            None => PrivilegeLevel::UNCHANGED,
         };
+
+        let timeout = matches.opt_str("timeout").map(|x| x.parse()).transpose()?;
 
         let required_args = &matches.free;
         let (vm_name, container_name, source) = match required_args.len() {
@@ -743,7 +802,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
                 // If this argument looks like an absolute path, treat it and the following
                 // parameter as local paths to tarballs.  Otherwise, assume they are an
                 // image server URL and image alias.
-                if required_args[2].starts_with("/") {
+                if required_args[2].starts_with('/') {
                     ContainerSource::Tarballs {
                         rootfs_path: required_args[2].clone(),
                         metadata_path: required_args[3].clone(),
@@ -759,27 +818,20 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
         };
 
         let user_id_hash = get_user_hash(self.environ)?;
+        let username = self.methods.user_id_hash_to_username(&user_id_hash)?;
 
-        let sessions = try_command!(self.methods.sessions_list());
-        let email = sessions
-            .iter()
-            .find(|(_, hash)| hash == &user_id_hash)
-            .map(|(email, _)| email)
-            .ok_or(MissingActiveSession)?;
-
-        let username = match email.find('@') {
-            Some(0) | None => return Err(InvalidEmail.into()),
-            Some(end) => &email[..end],
-        };
-
-        try_command!(self
-            .methods
-            .container_create(vm_name, &user_id_hash, container_name, source));
+        try_command!(self.methods.container_create(
+            vm_name,
+            &user_id_hash,
+            container_name,
+            source,
+            timeout
+        ));
         try_command!(self.methods.container_setup_user(
             vm_name,
             &user_id_hash,
             container_name,
-            username
+            &username
         ));
 
         // If the container was already running then this will update the privilege level of the
@@ -789,7 +841,8 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
             vm_name,
             &user_id_hash,
             container_name,
-            privilege_level
+            privilege_level,
+            timeout
         ));
 
         try_command!(self
@@ -799,9 +852,46 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
         Ok(())
     }
 
+    fn update_container_devices(&mut self) -> VmcResult {
+        let (vm_name, container_name) = match self.args.len() {
+            0 | 1 => return Err(ExpectedVmAndPath.into()),
+            2 => return Err(ExpectedVmDeviceUpdates.into()),
+            _ => (self.args[0], self.args[1]),
+        };
+
+        let user_id_hash = get_user_hash(self.environ)?;
+        let mut updates = HashMap::<String, VmDeviceAction>::new();
+
+        for u in &self.args[2..] {
+            let update_parts: Vec<&str> = u.splitn(2, ':').collect();
+            match update_parts.len() {
+                2 => {
+                    println!("{:?}", update_parts);
+                    match (update_parts[0], update_parts[1]) {
+                        ("", &_) => return Err(InvalidVmDevice("<empty>".to_string()).into()),
+                        (d, "enable") => updates.insert(d.to_string(), VmDeviceAction::ENABLE),
+                        (d, "disable") => updates.insert(d.to_string(), VmDeviceAction::DISABLE),
+                        (_, a) => return Err(InvalidVmDeviceAction(a.to_string()).into()),
+                    }
+                }
+                _ => return Err(InvalidVmDeviceAction(u.to_string()).into()),
+            };
+        }
+
+        let res = try_command!(self.methods.container_update_devices(
+            vm_name,
+            &user_id_hash,
+            container_name,
+            &updates
+        ));
+        println!("{}", res);
+        Ok(())
+    }
+
     fn usb_attach(&mut self) -> VmcResult {
-        let (vm_name, bus_device) = match self.args.len() {
-            2 => (self.args[0], self.args[1]),
+        let (vm_name, bus_device, container_name) = match self.args.len() {
+            3 => (self.args[0], self.args[1], Some(self.args[2])),
+            2 => (self.args[0], self.args[1], None),
             _ => return Err(ExpectedVmBusDevice.into()),
         };
 
@@ -816,12 +906,25 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
 
         let user_id_hash = get_user_hash(self.environ)?;
 
-        let guest_port = try_command!(self.methods.usb_attach(vm_name, &user_id_hash, bus, device));
+        let guest_port = try_command!(self.methods.usb_attach(
+            vm_name,
+            &user_id_hash,
+            bus,
+            device,
+            container_name
+        ));
 
-        println!(
-            "usb device at bus={} device={} attached to vm {} at port={}",
-            bus, device, vm_name, guest_port
-        );
+        if let Some(container) = container_name {
+            println!(
+                "usb device at bus={} device={} attached to container {}:{} at port={}",
+                bus, device, vm_name, container, guest_port
+            );
+        } else {
+            println!(
+                "usb device at bus={} device={} attached to vm {} at port={}",
+                bus, device, vm_name, guest_port
+            );
+        }
 
         Ok(())
     }
@@ -877,9 +980,7 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
             "name of the VM for which problem report is generated",
             "NAME",
         );
-        let matches = opts
-            .parse(self.args)
-            .map_err(|e| BadProblemReportArguments(e))?;
+        let matches = opts.parse(self.args).map_err(BadProblemReportArguments)?;
 
         let vm_name = matches.opt_str(VM_NAME_OPTION);
         let user_id_hash = get_user_hash(self.environ)?;
@@ -901,22 +1002,24 @@ impl<'a, 'b, 'c> Command<'a, 'b, 'c> {
 }
 
 const USAGE: &str = r#"
-   [ start [--enable-gpu] [--enable-vulkan] [--enable-big-gl] [--enable-audio-capture] [--untrusted] [--extra-disk PATH] [--kernel PATH] [--initrd PATH] [--writable-rootfs] [--kernel-param PARAM] [--bios PATH] [--timeout PARAM] <name> |
+   [ start [--enable-gpu] [--enable-dgpu-passthrough] [--enable-vulkan] [--enable-big-gl] [--enable-virtgpu-native-context] [--enable-audio-capture] [--untrusted] [--extra-disk PATH] [--kernel PATH] [--initrd PATH] [--writable-rootfs] [--kernel-param PARAM] [--bios PATH] [--timeout PARAM] [--oem-string STRING] <name> |
      stop <name> |
      launch <name> |
-     create [-p] <name> [<source media> [<removable storage name>]] [-- additional parameters]
+     create [-p] [--size SIZE] <name> [<source media> [<removable storage name>]] [-- additional parameters] |
      create-extra-disk --size SIZE [--removable-media] <host disk path> |
      adjust <name> <operation> [additional parameters] |
-     destroy <name> |
+     destroy [-y] <name> |
      disk-op-status <command UUID> |
      export [-d] [-f] <vm name> <file name> [<removable storage name>] |
      import [-p] <vm name> <file name> [<removable storage name>] |
      resize <vm name> <size> |
      list |
+     logs <vm name> |
      share <vm name> <path> |
      unshare <vm name> <path> |
-     container <vm name> <container name> [ (<image server> <image alias>) | (<rootfs path> <metadata path>)] [ --privileged <true/false> ]
-     usb-attach <vm name> <bus>:<device> |
+     container <vm name> <container name> [ (<image server> <image alias>) | (<rootfs path> <metadata path>)] [--privileged <true/false>] [--timeout PARAM] |
+     update-container-devices <vm_name> <container_name> (<vm device>:<enable/disable>)... |
+     usb-attach <vm name> <bus>:<device> [<container name>] |
      usb-detach <vm name> <port> |
      usb-list <vm name> |
      pvm.send-problem-report [-n <vm name>] [-e <reporter's email>] <description of the problem> |
@@ -973,9 +1076,11 @@ impl Frontend for Vmc {
             "disk-op-status" => command.disk_op_status(),
             "resize" => command.resize(),
             "list" => command.list(),
+            "logs" => command.logs(),
             "share" => command.share(),
             "unshare" => command.unshare(),
             "container" => command.container(),
+            "update-container-devices" => command.update_container_devices(),
             "usb-attach" => command.usb_attach(),
             "usb-detach" => command.usb_detach(),
             "usb-list" => command.usb_list(),
@@ -988,20 +1093,20 @@ impl Frontend for Vmc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::system_api::concierge_service::*;
-    use crate::proto::system_api::dlcservice::*;
     use dbus::Message;
     use protobuf::Message as ProtoMessage;
     use std::collections::HashMap;
+    use system_api::concierge_service::*;
+    use system_api::dlcservice::*;
 
     fn mocked_connection_filter(mut msg: Message) -> Result<Message, Result<Message, dbus::Error>> {
         eprintln!("{:?}", msg);
         msg.set_serial(1);
         if let Some(member) = msg.member() {
-            match member.as_cstr().to_bytes() {
+            match member.into_cstring().to_bytes() {
                 b"GetDlcState" => {
                     let mut dlc_state = DlcState::new();
-                    dlc_state.state = DlcState_State::INSTALLED;
+                    dlc_state.state = dlc_state::State::INSTALLED.into();
                     let msg_return = msg
                         .method_return()
                         .append1(dlc_state.write_to_bytes().unwrap());
@@ -1013,7 +1118,7 @@ mod tests {
                 }
                 b"DestroyDiskImage" => {
                     let mut resp = DestroyDiskImageResponse::new();
-                    resp.status = DiskImageStatus::DISK_STATUS_DOES_NOT_EXIST;
+                    resp.status = DiskImageStatus::DISK_STATUS_DOES_NOT_EXIST.into();
                     let msg_return = msg.method_return().append1(resp.write_to_bytes().unwrap());
                     return Err(Ok(msg_return));
                 }
@@ -1028,10 +1133,11 @@ mod tests {
                 }
                 b"ListVmDisks" => {
                     let mut resp = ListVmDisksResponse::new();
-                    resp.mut_images()
-                        .push_default()
-                        .set_name("PvmDefault".to_owned());
-                    resp.set_success(true);
+                    resp.images.push(VmDiskInfo {
+                        name: "PvmDefault".to_owned(),
+                        ..Default::default()
+                    });
+                    resp.success = true;
                     let msg_return = msg.method_return().append1(resp.write_to_bytes().unwrap());
                     return Err(Ok(msg_return));
                 }
@@ -1059,6 +1165,14 @@ mod tests {
             &["vmc", "start", "termina", "--enable-gpu", "--enable-vulkan"],
             &["vmc", "start", "termina", "--enable-big-gl"],
             &["vmc", "start", "termina", "--enable-gpu", "--enable-big-gl"],
+            &["vmc", "start", "termina", "--enable-virtgpu-native-context"],
+            &[
+                "vmc",
+                "start",
+                "termina",
+                "--enable-gpu",
+                "--enable-virtgpu-native-context",
+            ],
             &[
                 "vmc",
                 "start",
@@ -1067,8 +1181,7 @@ mod tests {
                 "--enable-vulkan",
                 "--enable-big-gl",
             ],
-            &["vmc", "start", "termina", "--software-tpm"],
-            &["vmc", "start", "termina", "--enable-gpu", "--software-tpm"],
+            &["vmc", "start", "termina", "--vtpm-proxy"],
             &["vmc", "start", "termina", "--enable-audio-capture"],
             &["vmc", "start", "termina", "--untrusted"],
             &[
@@ -1137,17 +1250,34 @@ mod tests {
                 "quiet slub_debug",
             ],
             &["vmc", "start", "--kernel-param", "quiet", "termina"],
+            &["vmc", "start", "--oem-string=my-oem-string-1", "termina"],
+            &["vmc", "start", "--oem-string", "my-oem-string-1", "termina"],
+            &[
+                "vmc",
+                "start",
+                "--oem-string=my-oem-string-1",
+                "--oem-string=my-oem-string-2",
+                "termina",
+            ],
+            &[
+                "vmc",
+                "start",
+                "--oem-string",
+                "my-oem-string-1",
+                "--oem-string",
+                "my-oem-string-2",
+                "termina",
+            ],
             &["vmc", "start", "--bios", "mybios", "termina"],
             &["vmc", "start", "--bios=mybios", "termina"],
             &["vmc", "start", "--tools-dlc", "my-dlc", "termina"],
             &["vmc", "start", "--tools-dlc=my-dlc", "termina"],
             &["vmc", "stop", "termina"],
-            &["vmc", "launch", "borealis"],
-            &["vmc", "launch", "crostini"],
-            &["vmc", "launch", "pluginvm"],
-            &["vmc", "launch", "termina"],
+            &["vmc", "launch", "foo"],
+            &["vmc", "launch", "a", "b", "c", "d", "e", "f"],
             &["vmc", "create", "termina"],
             &["vmc", "create", "-p", "termina"],
+            &["vmc", "create", "--pluginvm", "termina"],
             &[
                 "vmc",
                 "create",
@@ -1158,6 +1288,10 @@ mod tests {
             ],
             &["vmc", "create", "-p", "termina", "--"],
             &["vmc", "create", "-p", "termina", "--", "param"],
+            &["vmc", "create", "-p", "termina", "--", "param1", "param2"],
+            &["vmc", "create", "--size", "1000000", "termina"],
+            &["vmc", "create", "--size", "256M", "termina"],
+            &["vmc", "create", "--size", "1G", "termina"],
             &["vmc", "create-extra-disk", "--size=1000000", "foo.img"],
             &["vmc", "create-extra-disk", "--size=256M", "foo.img"],
             &["vmc", "create-extra-disk", "--size=1G", "foo.img"],
@@ -1169,9 +1303,25 @@ mod tests {
                 "--removable-media",
                 "'USB Drive/foo.img'",
             ],
+            &[
+                "vmc",
+                "update-container-devices",
+                "termina",
+                "penguin",
+                "microphone:disable",
+            ],
+            &[
+                "vmc",
+                "update-container-devices",
+                "termina",
+                "penguin",
+                "microphone:enable",
+                "camera:disable",
+            ],
             &["vmc", "adjust", "termina", "op"],
             &["vmc", "adjust", "termina", "op", "param"],
             &["vmc", "destroy", "termina"],
+            &["vmc", "destroy", "-y", "termina"],
             &["vmc", "disk-op-status", "12345"],
             &["vmc", "export", "termina", "file name"],
             &["vmc", "export", "-d", "termina", "file name"],
@@ -1197,9 +1347,11 @@ mod tests {
                 "removable media",
             ],
             &["vmc", "list"],
+            &["vmc", "logs", "cowcat"],
             &["vmc", "share", "termina", "my-folder"],
             &["vmc", "unshare", "termina", "my-folder"],
             &["vmc", "usb-attach", "termina", "1:2"],
+            &["vmc", "usb-attach", "termina", "1:2", "penguin"],
             &["vmc", "usb-detach", "termina", "5"],
             &["vmc", "usb-detach", "termina", "5"],
             &["vmc", "usb-list", "termina"],
@@ -1246,14 +1398,15 @@ mod tests {
             &["vmc", "start", "termina", "--rootfs"],
             &["vmc", "start", "termina", "--writable-rootfs", "myrootfs"],
             &["vmc", "start", "termina", "--kernel-param"],
+            &["vmc", "start", "termina", "--oem-string"],
             &["vmc", "start", "termina", "--bios"],
             &["vmc", "start", "termina", "--tools-dlc"],
             &["vmc", "start", "termina", "--timeout"],
             &["vmc", "start", "termina", "--timeout", "xyz"],
+            &["vmc", "start", "termina", "--bios-dlc"],
             &["vmc", "stop"],
             &["vmc", "stop", "termina", "extra args"],
-            &["vmc", "launch", "borealis", "--enable-gpu"],
-            &["vmc", "launch", "notarealvm"],
+            &["vmc", "launch"],
             &["vmc", "create"],
             &["vmc", "create", "-p"],
             &[
@@ -1265,11 +1418,37 @@ mod tests {
                 "removable media",
                 "extra args",
             ],
+            &["vmc", "create", "--size", "termina"],
+            &["vmc", "create", "--size", "52J", "termina"],
+            &["vmc", "create", "--size", "foo", "termina"],
+            &["vmc", "create", "-p", "--size", "10G", "termina"],
             &["vmc", "create-extra-disk"],
             &["vmc", "create-extra-disk", "foo.img"],
             &["vmc", "create-extra-disk", "--size", "1G"],
             &["vmc", "create-extra-disk", "--size", "foo.img"],
             &["vmc", "create-extra-disk", "--size=1G", "--removable-media"],
+            &[
+                "vmc",
+                "update-container-devices",
+                "termina",
+                "penguin",
+                "microphone:eat",
+                "camera:enable",
+            ],
+            &[
+                "vmc",
+                "update-container-devices",
+                "termina",
+                "penguin",
+                ":enable",
+            ],
+            &[
+                "vmc",
+                "update-container-devices",
+                "termina",
+                "penguin",
+                "enable:",
+            ],
             &["vmc", "adjust"],
             &["vmc", "adjust", "termina"],
             &["vmc", "destroy"],
@@ -1288,6 +1467,8 @@ mod tests {
             &["vmc", "import", "-p", "termina"],
             &["vmc", "import", "-p", "termina", "too", "many", "args"],
             &["vmc", "list", "extra args"],
+            &["vmc", "logs"],
+            &["vmc", "logs", "too", "many args"],
             &["vmc", "share"],
             &["vmc", "share", "too", "many", "args"],
             &["vmc", "unshare"],
@@ -1296,6 +1477,8 @@ mod tests {
             &["vmc", "usb-attach", "termina"],
             &["vmc", "usb-attach", "termina", "whatever"],
             &["vmc", "usb-attach", "termina", "1:2:1dee:93d2"],
+            &["vmc", "usb-attach", "termina", "whatever", "whatever"],
+            &["vmc", "usb-attach", "termina", "1:2", "penguin", "whatever"],
             &["vmc", "usb-detach"],
             &["vmc", "usb-detach", "not-a-number"],
             &["vmc", "usb-list"],
@@ -1306,9 +1489,12 @@ mod tests {
 
         let mut methods = mocked_methods();
 
-        let environ = vec![("CROS_USER_ID_HASH", "fake_hash")]
-            .into_iter()
-            .collect();
+        let environ = vec![
+            ("CROS_USER_ID_HASH", "fake_hash"),
+            ("VMC_NONINTERACTIVE", "1"),
+        ]
+        .into_iter()
+        .collect();
         for args in DUMMY_SUCCESS_ARGS {
             if let Err(e) = Vmc.run(&mut methods, args, &environ) {
                 panic!("test args failed: {:?}: {}", args, e)
@@ -1400,6 +1586,11 @@ mod tests {
             if let Ok(()) = Vmc.run(&mut methods, args, &environ) {
                 panic!("test args should have failed: {:?}", args)
             }
+        }
+
+        let args = &["vmc", "container", "termina", "a", "--timeout", "600"];
+        if let Err(e) = Vmc.run(&mut methods, args, &environ) {
+            panic!("test args failed: {:?}: {}", args, e)
         }
     }
 }

@@ -1,28 +1,20 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/net/attribute_list.h"
 
-#include <ctype.h>
 #include <linux/nl80211.h>
 
-#include <iomanip>
+#include <vector>
 
 #include <base/containers/contains.h>
+#include <base/containers/span.h>
 #include <base/logging.h>
 
-#include "shill/logging.h"
 #include "shill/net/netlink_attribute.h"
 
 namespace shill {
-
-namespace Logging {
-static auto kModuleLogScope = ScopeLogger::kRTNL;
-static std::string ObjectID(const AttributeList* obj) {
-  return "(attribute_list)";
-}
-}  // namespace Logging
 
 AttributeList::AttributeList() = default;
 
@@ -31,7 +23,7 @@ AttributeList::~AttributeList() = default;
 bool AttributeList::CreateAttribute(int id,
                                     AttributeList::NewFromIdMethod factory) {
   if (base::Contains(attributes_, id)) {
-    SLOG(this, 7) << "Trying to re-add attribute " << id << ", not overwriting";
+    VLOG(7) << "Trying to re-add attribute " << id << ", not overwriting";
     return true;
   }
   attributes_[id] = factory.Run(id);
@@ -40,29 +32,32 @@ bool AttributeList::CreateAttribute(int id,
 
 bool AttributeList::CreateControlAttribute(int id) {
   return CreateAttribute(
-      id, base::Bind(&NetlinkAttribute::NewControlAttributeFromId));
+      id, base::BindRepeating(&NetlinkAttribute::NewControlAttributeFromId));
 }
 
 bool AttributeList::CreateNl80211Attribute(
     int id, NetlinkMessage::MessageContext context) {
   return CreateAttribute(
-      id, base::Bind(&NetlinkAttribute::NewNl80211AttributeFromId, context));
+      id, base::BindRepeating(&NetlinkAttribute::NewNl80211AttributeFromId,
+                              context));
 }
 
 bool AttributeList::CreateAndInitAttribute(
     const AttributeList::NewFromIdMethod& factory,
     int id,
-    const ByteString& value) {
+    base::span<const uint8_t> value) {
   if (!CreateAttribute(id, factory)) {
     return false;
   }
   return InitAttributeFromValue(id, value);
 }
 
-bool AttributeList::InitAttributeFromValue(int id, const ByteString& value) {
+bool AttributeList::InitAttributeFromValue(int id,
+                                           base::span<const uint8_t> value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->InitFromValue(value);
 }
 
@@ -74,53 +69,69 @@ void AttributeList::Print(int log_level, int indent) const {
 
 // static
 bool AttributeList::IterateAttributes(
-    const ByteString& payload,
+    base::span<const uint8_t> payload,
     size_t offset,
     const AttributeList::AttributeMethod& method) {
   // Nothing to iterate over.
-  if (payload.IsEmpty())
+  if (payload.empty()) {
     return true;
+  }
 
-  const unsigned char* ptr = payload.GetConstData() + NLA_ALIGN(offset);
-  const unsigned char* end = payload.GetConstData() + payload.GetLength();
-  while (ptr + sizeof(nlattr) <= end) {
-    const nlattr* attribute = reinterpret_cast<const nlattr*>(ptr);
+  // Invalid offset.
+  if (payload.size() < NLA_ALIGN(offset)) {
+    LOG(ERROR) << "Attribute offset " << offset
+               << " was larger than payload length " << payload.size();
+    return false;
+  }
+  auto remaining = payload.subspan(NLA_ALIGN(offset));
+
+  while (remaining.size() >= sizeof(nlattr)) {
+    const nlattr* attribute = reinterpret_cast<const nlattr*>(remaining.data());
     if (attribute->nla_len < sizeof(*attribute) ||
-        ptr + attribute->nla_len > end) {
+        attribute->nla_len > remaining.size()) {
       LOG(ERROR) << "Malformed nla attribute indicates length "
-                 << attribute->nla_len << ".  " << (end - ptr - NLA_HDRLEN)
+                 << attribute->nla_len << ".  "
+                 << (remaining.size() - NLA_HDRLEN)
                  << " bytes remain in buffer.  "
                  << "Error occurred at offset "
-                 << (ptr - payload.GetConstData()) << ".";
+                 << (remaining.data() - payload.data()) << ".";
       return false;
     }
-    ByteString value;
+
+    base::span<const uint8_t> value;
     if (attribute->nla_len > NLA_HDRLEN) {
-      value = ByteString(ptr + NLA_HDRLEN, attribute->nla_len - NLA_HDRLEN);
+      value = remaining.subspan(NLA_HDRLEN, attribute->nla_len - NLA_HDRLEN);
     }
     if (!method.Run(attribute->nla_type, value)) {
       return false;
     }
-    ptr += NLA_ALIGN(attribute->nla_len);
+
+    if (remaining.size() >= NLA_ALIGN(attribute->nla_len)) {
+      remaining = remaining.subspan(NLA_ALIGN(attribute->nla_len));
+    } else {
+      remaining = {};
+    }
   }
-  if (ptr < end) {
-    LOG(INFO) << "Decode left " << (end - ptr) << " unparsed bytes.";
+  if (!remaining.empty()) {
+    LOG(INFO) << "Decode left " << remaining.size() << " unparsed bytes.";
   }
   return true;
 }
 
-bool AttributeList::Decode(const ByteString& payload,
+bool AttributeList::Decode(base::span<const uint8_t> payload,
                            size_t offset,
                            const AttributeList::NewFromIdMethod& factory) {
-  return IterateAttributes(payload, offset,
-                           base::Bind(&AttributeList::CreateAndInitAttribute,
-                                      base::Unretained(this), factory));
+  return IterateAttributes(
+      payload, offset,
+      base::BindRepeating(&AttributeList::CreateAndInitAttribute,
+                          base::Unretained(this), factory));
 }
 
-ByteString AttributeList::Encode() const {
-  ByteString result;
+std::vector<uint8_t> AttributeList::Encode() const {
+  std::vector<uint8_t> result;
   for (const auto& id_attribute_pair : attributes_) {
-    result.Append(id_attribute_pair.second->Encode());
+    const auto bytes = id_attribute_pair.second->Encode();
+    result.insert(result.end(), bytes.begin(), bytes.end());
   }
   return result;
 }
@@ -129,8 +140,9 @@ ByteString AttributeList::Encode() const {
 
 bool AttributeList::GetU8AttributeValue(int id, uint8_t* value) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->GetU8Value(value);
 }
 
@@ -145,8 +157,9 @@ bool AttributeList::CreateU8Attribute(int id, const char* id_string) {
 
 bool AttributeList::SetU8AttributeValue(int id, uint8_t value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->SetU8Value(value);
 }
 
@@ -154,8 +167,9 @@ bool AttributeList::SetU8AttributeValue(int id, uint8_t value) {
 
 bool AttributeList::GetU16AttributeValue(int id, uint16_t* value) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->GetU16Value(value);
 }
 
@@ -170,8 +184,9 @@ bool AttributeList::CreateU16Attribute(int id, const char* id_string) {
 
 bool AttributeList::SetU16AttributeValue(int id, uint16_t value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->SetU16Value(value);
 }
 
@@ -179,8 +194,9 @@ bool AttributeList::SetU16AttributeValue(int id, uint16_t value) {
 
 bool AttributeList::GetU32AttributeValue(int id, uint32_t* value) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->GetU32Value(value);
 }
 
@@ -195,8 +211,9 @@ bool AttributeList::CreateU32Attribute(int id, const char* id_string) {
 
 bool AttributeList::SetU32AttributeValue(int id, uint32_t value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->SetU32Value(value);
 }
 
@@ -204,8 +221,9 @@ bool AttributeList::SetU32AttributeValue(int id, uint32_t value) {
 
 bool AttributeList::GetU64AttributeValue(int id, uint64_t* value) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->GetU64Value(value);
 }
 
@@ -220,8 +238,9 @@ bool AttributeList::CreateU64Attribute(int id, const char* id_string) {
 
 bool AttributeList::SetU64AttributeValue(int id, uint64_t value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->SetU64Value(value);
 }
 
@@ -229,8 +248,9 @@ bool AttributeList::SetU64AttributeValue(int id, uint64_t value) {
 
 bool AttributeList::GetFlagAttributeValue(int id, bool* value) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->GetFlagValue(value);
 }
 
@@ -245,8 +265,9 @@ bool AttributeList::CreateFlagAttribute(int id, const char* id_string) {
 
 bool AttributeList::SetFlagAttributeValue(int id, bool value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->SetFlagValue(value);
 }
 
@@ -262,8 +283,9 @@ bool AttributeList::IsFlagAttributeTrue(int id) const {
 
 bool AttributeList::GetStringAttributeValue(int id, std::string* value) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->GetStringValue(value);
 }
 
@@ -287,8 +309,9 @@ bool AttributeList::CreateSsidAttribute(int id, const char* id_string) {
 
 bool AttributeList::SetStringAttributeValue(int id, const std::string& value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->SetStringValue(value);
 }
 
@@ -296,23 +319,26 @@ bool AttributeList::SetStringAttributeValue(int id, const std::string& value) {
 
 bool AttributeList::GetNestedAttributeList(int id, AttributeListRefPtr* value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->GetNestedAttributeList(value);
 }
 
 bool AttributeList::ConstGetNestedAttributeList(
     int id, AttributeListConstRefPtr* value) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->ConstGetNestedAttributeList(value);
 }
 
 bool AttributeList::SetNestedAttributeHasAValue(int id) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->SetNestedHasAValue();
 }
 
@@ -327,15 +353,17 @@ bool AttributeList::CreateNestedAttribute(int id, const char* id_string) {
 
 // Raw Attribute.
 
-bool AttributeList::GetRawAttributeValue(int id, ByteString* output) const {
+bool AttributeList::GetRawAttributeValue(int id,
+                                         std::vector<uint8_t>* output) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
 
-  ByteString raw_value;
-
-  if (!attribute->GetRawValue(&raw_value))
+  std::vector<uint8_t> raw_value;
+  if (!attribute->GetRawValue(&raw_value)) {
     return false;
+  }
 
   if (output) {
     *output = raw_value;
@@ -343,10 +371,12 @@ bool AttributeList::GetRawAttributeValue(int id, ByteString* output) const {
   return true;
 }
 
-bool AttributeList::SetRawAttributeValue(int id, ByteString value) {
+bool AttributeList::SetRawAttributeValue(int id,
+                                         base::span<const uint8_t> value) {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
   return attribute->SetRawValue(value);
 }
 
@@ -361,8 +391,9 @@ bool AttributeList::CreateRawAttribute(int id, const char* id_string) {
 
 bool AttributeList::GetAttributeAsString(int id, std::string* value) const {
   NetlinkAttribute* attribute = GetAttribute(id);
-  if (!attribute)
+  if (!attribute) {
     return false;
+  }
 
   return attribute->ToString(value);
 }
@@ -373,6 +404,10 @@ NetlinkAttribute* AttributeList::GetAttribute(int id) const {
     return nullptr;
   }
   return i->second.get();
+}
+
+int AttributeIdIterator::GetType() const {
+  return iter_->second->datatype();
 }
 
 }  // namespace shill

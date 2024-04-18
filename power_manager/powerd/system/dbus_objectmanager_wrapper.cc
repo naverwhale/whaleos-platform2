@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <chromeos/dbus/service_constants.h>
@@ -16,10 +16,7 @@
 #include <dbus/message.h>
 #include <google/protobuf/message_lite.h>
 
-#include "power_manager/common/power_constants.h"
-
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 namespace {
 
 // Handles the result of an attempt to connect to a D-Bus signal, logging an
@@ -55,21 +52,20 @@ DBusObjectManagerWrapper::DBusObjectManagerWrapper(
 DBusObjectManagerWrapper::~DBusObjectManagerWrapper() = default;
 
 void DBusObjectManagerWrapper::GetManagedObjects(
-    const ManagedObjectsCallback& callback) {
-  proxy_->GetManagedObjectsAsync(callback, base::DoNothing());
+    ManagedObjectsCallback callback) {
+  proxy_->GetManagedObjectsAsync(std::move(callback), base::DoNothing());
 }
 
 void DBusObjectManagerWrapper::set_interfaces_added_callback(
     const InterfacesAddedCallback& callback) {
   proxy_->RegisterInterfacesAddedSignalHandler(
-      callback, base::Bind(&HandleSignalConnected));
+      callback, base::BindOnce(&HandleSignalConnected));
 }
 
 void DBusObjectManagerWrapper::set_interfaces_removed_callback(
     const InterfacesRemovedCallback& callback) {
   proxy_->RegisterInterfacesRemovedSignalHandler(
-      callback, base::Bind(&HandleSignalConnected));
+      callback, base::BindOnce(&HandleSignalConnected));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

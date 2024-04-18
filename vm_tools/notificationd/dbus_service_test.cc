@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/scoped_refptr.h>
 #include <base/run_loop.h>
@@ -140,12 +140,12 @@ TEST_F(DBusServiceTest, GetCapabilities) {
 
   // Parse resonse
   dbus::MessageReader reader(response.get());
-  std::unique_ptr<base::Value> value(PopDataAsValue(&reader));
-  ASSERT_TRUE(value.get() != nullptr);
+  base::Value value(PopDataAsValue(&reader));
+  ASSERT_FALSE(value.is_none());
   ASSERT_FALSE(reader.HasMoreData());
-  ASSERT_TRUE(value->is_list());
+  ASSERT_TRUE(value.is_list());
   std::vector<std::string> received_data;
-  for (const auto& element : value->GetList()) {
+  for (const auto& element : value.GetList()) {
     ASSERT_TRUE(element.is_string());
     received_data.push_back(element.GetString());
   }

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,10 +18,14 @@ class MockBiodMetrics : public BiodMetricsInterface {
   ~MockBiodMetrics() override = default;
 
   MOCK_METHOD(bool, SendEnrolledFingerCount, (int finger_count), (override));
+  MOCK_METHOD(bool,
+              SendEnrollmentCapturesCount,
+              (int captures_count),
+              (override));
   MOCK_METHOD(bool, SendFpUnlockEnabled, (bool enabled), (override));
   MOCK_METHOD(bool,
               SendFpLatencyStats,
-              (bool matched, const CrosFpDeviceInterface::FpStats& stats),
+              (bool matched, const ec::CrosFpDeviceInterface::FpStats& stats),
               (override));
   MOCK_METHOD(bool,
               SendFwUpdaterStatus,
@@ -44,6 +48,31 @@ class MockBiodMetrics : public BiodMetricsInterface {
   MOCK_METHOD(bool, SendRecordFormatVersion, (int version), (override));
   MOCK_METHOD(bool, SendDeadPixelCount, (int num_dead_pixels), (override));
   MOCK_METHOD(bool, SendUploadTemplateResult, (int ec_result), (override));
+  MOCK_METHOD(bool,
+              SendPartialAttemptsBeforeSuccess,
+              (int partial_attempts),
+              (override));
+  MOCK_METHOD(bool, SendFpSensorErrorNoIrq, (bool no_irq), (override));
+  MOCK_METHOD(bool,
+              SendFpSensorErrorSpiCommunication,
+              (bool spi_communication_error),
+              (override));
+  MOCK_METHOD(bool,
+              SendFpSensorErrorBadHardwareID,
+              (bool bad_hwid),
+              (override));
+  MOCK_METHOD(bool,
+              SendFpSensorErrorInitializationFailure,
+              (bool init_failure),
+              (override));
+  MOCK_METHOD(bool,
+              SendSessionRetrievePrimarySessionResult,
+              (RetrievePrimarySessionResult result),
+              (override));
+  MOCK_METHOD(bool,
+              SendSessionRetrievePrimarySessionDuration,
+              (int ms),
+              (override));
 };
 
 }  // namespace metrics

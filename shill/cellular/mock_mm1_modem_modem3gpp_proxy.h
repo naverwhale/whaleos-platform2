@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/cellular/mm1_modem_modem3gpp_proxy_interface.h"
@@ -23,20 +22,11 @@ class MockModemModem3gppProxy : public ModemModem3gppProxyInterface {
 
   ~MockModemModem3gppProxy() override;
 
-  MOCK_METHOD(void,
-              Register,
-              (const std::string&, Error*, const ResultCallback&, int),
-              (override));
-  MOCK_METHOD(void,
-              Scan,
-              (Error*, const KeyValueStoresCallback&, int),
-              (override));
+  MOCK_METHOD(void, Register, (const std::string&, ResultCallback), (override));
+  MOCK_METHOD(void, Scan, (KeyValueStoresCallback), (override));
   MOCK_METHOD(void,
               SetInitialEpsBearerSettings,
-              (const KeyValueStore& properties,
-               Error* error,
-               const ResultCallback& callback,
-               int timeout),
+              (const KeyValueStore&, ResultCallback),
               (override));
 };
 

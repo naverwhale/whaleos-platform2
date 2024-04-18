@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,23 +20,6 @@ class TransformString {
   explicit TransformString(std::string method) : method_(method) {}
   bool operator()(const std::string& in, std::string* out) {
     *out = attestation::MockTpmUtility::Transform(method_, in);
-    return true;
-  }
-
- private:
-  std::string method_;
-};
-
-class UntransformString {
- public:
-  explicit UntransformString(std::string method) : method_(method) {}
-  bool operator()(const std::string& in, std::string* out) {
-    std::string suffix = "_fake_transform_" + method_;
-    auto position = in.find(suffix);
-    if (position == std::string::npos) {
-      return false;
-    }
-    *out = in.substr(0, position);
     return true;
   }
 
@@ -80,26 +63,18 @@ MockTpmUtility::MockTpmUtility() {
   ON_CALL(*this, ActivateIdentity(_, _, _, _)).WillByDefault(Return(true));
   ON_CALL(*this, ActivateIdentityForTpm2(_, _, _, _, _, _))
       .WillByDefault(Return(true));
-  ON_CALL(*this, CreateCertifiedKey(_, _, _, _, _, _, _, _, _))
+  ON_CALL(*this, CreateCertifiedKey(_, _, _, _, _, _, _, _, _, _, _))
       .WillByDefault(Return(true));
-  ON_CALL(*this, SealToPCR0(_, _))
-      .WillByDefault(Invoke(TransformString("SealToPCR0")));
-  ON_CALL(*this, Unseal(_, _))
-      .WillByDefault(Invoke(UntransformString("SealToPCR0")));
   ON_CALL(*this, Unbind(_, _, _))
       .WillByDefault(WithArgs<1, 2>(Invoke(TransformString("Unbind"))));
   ON_CALL(*this, Sign(_, _, _))
       .WillByDefault(WithArgs<1, 2>(Invoke(TransformString("Sign"))));
   ON_CALL(*this, GetEndorsementPublicKey(_, _)).WillByDefault(Return(true));
   ON_CALL(*this, GetEndorsementCertificate(_, _)).WillByDefault(Return(true));
-  ON_CALL(*this, QuotePCR(_, _, _, _, _)).WillByDefault(Return(true));
-  ON_CALL(*this, GetNVDataSize(_, _)).WillByDefault(Return(true));
-  ON_CALL(*this, CertifyNV(_, _, _, _, _)).WillByDefault(Return(true));
   ON_CALL(*this, ReadPCR(_, _)).WillByDefault(Return(true));
   ON_CALL(*this, RemoveOwnerDependency()).WillByDefault(Return(true));
   ON_CALL(*this, CreateIdentity(_, _))
       .WillByDefault(WithArgs<1>(Invoke(SetFakeIdentity)));
-  ON_CALL(*this, GetRsuDeviceId(_)).WillByDefault(Return(true));
 }
 
 MockTpmUtility::~MockTpmUtility() {}

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,10 @@
 
 #include <vector>
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <mojo/cert_store.mojom.h>
+#include <mojo/public/cpp/bindings/pending_remote.h>
+#include <mojo/public/cpp/bindings/remote.h>
 
 #include "arc/keymaster/keymaster_server.h"
 
@@ -25,25 +26,10 @@ class CertStoreInstance : public mojom::CertStoreInstance {
 
   ~CertStoreInstance() override = default;
 
-  // mojom::CertStoreInstance overrides.
-  void Init(mojom::CertStoreHostPtr host_ptr, InitCallback callback) override;
-
   void UpdatePlaceholderKeys(std::vector<mojom::ChromeOsKeyPtr> keys,
                              UpdatePlaceholderKeysCallback callback) override;
 
  private:
-  // arc::mojom::CertStoreHost access methods.
-  void RequestSecurityTokenOperation();
-
-  void ResetSecurityTokenOperationProxy();
-  void OnSecurityTokenOperationProxyReady();
-
-  mojom::CertStoreHostPtr host_ptr_;
-  // Use as proxy only when initialized:
-  // |is_security_token_operation_proxy_ready_| is true.
-  mojom::SecurityTokenOperationPtr security_token_operation_proxy_;
-  bool is_security_token_operation_proxy_ready_ = false;
-
   base::WeakPtr<KeymasterServer> keymaster_server_;
 
   base::WeakPtrFactory<CertStoreInstance> weak_ptr_factory_{this};

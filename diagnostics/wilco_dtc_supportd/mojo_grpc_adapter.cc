@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,17 @@
 
 #include <memory>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_piece.h>
 
 #include "diagnostics/wilco_dtc_supportd/grpc_client_manager.h"
 #include "diagnostics/wilco_dtc_supportd/json_utils.h"
 
-#include "wilco_dtc.grpc.pb.h"  // NOLINT(build/include)
+#include "wilco_dtc.grpc.pb.h"  // NOLINT(build/include_directory)
 
 namespace diagnostics {
+namespace wilco {
 
 MojoGrpcAdapter::MojoGrpcAdapter(GrpcClientManager* grpc_client_manager)
     : grpc_client_manager_(grpc_client_manager) {}
@@ -40,7 +41,7 @@ void MojoGrpcAdapter::SendGrpcUiMessageToWilcoDtc(
 
   grpc_client_manager_->GetUiClient()->CallRpc(
       &grpc_api::WilcoDtc::Stub::AsyncHandleMessageFromUi, request,
-      base::Bind(
+      base::BindOnce(
           [](const SendGrpcUiMessageToWilcoDtcCallback& callback,
              grpc::Status status,
              std::unique_ptr<grpc_api::HandleMessageFromUiResponse> response) {
@@ -77,7 +78,7 @@ void MojoGrpcAdapter::NotifyConfigurationDataChangedToWilcoDtc() {
   for (auto& client : grpc_client_manager_->GetClients()) {
     client->CallRpc(
         &grpc_api::WilcoDtc::Stub::AsyncHandleConfigurationDataChanged, request,
-        base::Bind(
+        base::BindOnce(
             [](grpc::Status status,
                std::unique_ptr<grpc_api::HandleConfigurationDataChangedResponse>
                    response) {
@@ -94,4 +95,5 @@ void MojoGrpcAdapter::NotifyConfigurationDataChangedToWilcoDtc() {
   }
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

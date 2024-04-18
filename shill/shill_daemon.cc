@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <sysexits.h>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 
 namespace shill {
@@ -33,8 +33,8 @@ int ShillDaemon::OnInit() {
 void ShillDaemon::OnShutdown(int* return_code) {
   LOG(INFO) << "ShillDaemon received shutdown.";
 
-  if (!daemon_task_.Quit(base::Bind(&DaemonTask::BreakTerminationLoop,
-                                    base::Unretained(&daemon_task_)))) {
+  if (!daemon_task_.Quit(base::BindOnce(&DaemonTask::BreakTerminationLoop,
+                                        base::Unretained(&daemon_task_)))) {
     // Run a message loop to allow shill to complete its termination
     // procedures. This is different from the secondary loop in
     // brillo::Daemon. This loop will run until we explicitly

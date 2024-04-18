@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -18,9 +18,8 @@
 #include "common/jpeg/jpeg_decode_accelerator_impl.h"
 #include "cros-camera/future.h"
 
-namespace cros {
+namespace cros::tests {
 
-namespace tests {
 // Environment to create test data for all test cases.
 class JpegDecodeTestEnvironment;
 JpegDecodeTestEnvironment* g_env;
@@ -71,15 +70,15 @@ struct Frame {
 
 class JpegDecodeAcceleratorTest : public ::testing::Test {
  public:
-  JpegDecodeAcceleratorTest() {}
+  JpegDecodeAcceleratorTest() = default;
   JpegDecodeAcceleratorTest(const JpegDecodeAcceleratorTest&) = delete;
   JpegDecodeAcceleratorTest& operator=(const JpegDecodeAcceleratorTest&) =
       delete;
 
-  ~JpegDecodeAcceleratorTest() {}
-  void SetUp();
+  ~JpegDecodeAcceleratorTest() override = default;
+  void SetUp() override;
 
-  void TearDown() {}
+  void TearDown() override {}
 
   bool StartJda(int number_of_decoders);
 
@@ -89,7 +88,7 @@ class JpegDecodeAcceleratorTest : public ::testing::Test {
   double GetMeanAbsoluteDifference(Frame* frame);
   void DecodeTest(Frame* frame, size_t decoder_id);
   void DecodeTestAsync(Frame* frame, DecodeCallback callback);
-  void DecodeSyncCallback(base::Callback<void(int)> callback,
+  void DecodeSyncCallback(base::OnceCallback<void(int)> callback,
                           int32_t buffer_id,
                           int error);
   void ResetJDAChannel();
@@ -119,8 +118,8 @@ class JpegDecodeTestEnvironment : public ::testing::Environment {
 };
 
 void JpegDecodeAcceleratorTest::SetUp() {
-  for (size_t i = 0; i < kMaxDecoderNumber; i++) {
-    jpeg_decoder_[i] = std::make_unique<JpegDecodeAcceleratorImpl>(
+  for (auto& i : jpeg_decoder_) {
+    i = std::make_unique<JpegDecodeAcceleratorImpl>(
         g_env->mojo_manager_token_.get());
   }
 }
@@ -261,12 +260,13 @@ void JpegDecodeAcceleratorTest::DecodeTestAsync(Frame* frame,
 
   jpeg_decoder_[0]->Decode(input_fd, frame->in_shm_mapping.mapped_size(),
                            frame->width, frame->height, output_fd,
-                           frame->hw_out_shm_mapping.mapped_size(), callback);
+                           frame->hw_out_shm_mapping.mapped_size(),
+                           std::move(callback));
 }
 
 void JpegDecodeAcceleratorTest::DecodeSyncCallback(
-    base::Callback<void(int)> callback, int32_t buffer_id, int error) {
-  callback.Run(error);
+    base::OnceCallback<void(int)> callback, int32_t buffer_id, int error) {
+  std::move(callback).Run(error);
 }
 
 void JpegDecodeAcceleratorTest::ResetJDAChannel() {
@@ -352,8 +352,8 @@ TEST_F(JpegDecodeAcceleratorTest, DecodeAsync) {
 
   DecodeTestAsync(
       &jpeg_frame1_,
-      base::Bind(&JpegDecodeAcceleratorTest::DecodeSyncCallback,
-                 base::Unretained(this), cros::GetFutureCallback(future1)));
+      base::BindOnce(&JpegDecodeAcceleratorTest::DecodeSyncCallback,
+                     base::Unretained(this), cros::GetFutureCallback(future1)));
 
   ASSERT_TRUE(future1->Wait());
   EXPECT_EQ(future1->Get(),
@@ -379,13 +379,13 @@ TEST_F(JpegDecodeAcceleratorTest, DecodeAsync2) {
 
   DecodeTestAsync(
       &jpeg_frame1_,
-      base::Bind(&JpegDecodeAcceleratorTest::DecodeSyncCallback,
-                 base::Unretained(this), cros::GetFutureCallback(future1)));
+      base::BindOnce(&JpegDecodeAcceleratorTest::DecodeSyncCallback,
+                     base::Unretained(this), cros::GetFutureCallback(future1)));
 
   DecodeTestAsync(
       &jpeg_frame2_,
-      base::Bind(&JpegDecodeAcceleratorTest::DecodeSyncCallback,
-                 base::Unretained(this), cros::GetFutureCallback(future2)));
+      base::BindOnce(&JpegDecodeAcceleratorTest::DecodeSyncCallback,
+                     base::Unretained(this), cros::GetFutureCallback(future2)));
   ASSERT_TRUE(future2->Wait());
   EXPECT_EQ(future2->Get(),
             static_cast<int>(JpegDecodeAccelerator::Error::NO_ERRORS));
@@ -429,8 +429,7 @@ TEST_F(JpegDecodeAcceleratorTest, LostMojoChannel) {
   DecodeTest(&jpeg_frame1_, 0);
 }
 
-}  // namespace tests
-}  // namespace cros
+}  // namespace cros::tests
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);

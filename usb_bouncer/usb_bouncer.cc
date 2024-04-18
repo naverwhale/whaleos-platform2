@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,10 @@
 #include <cstdlib>
 
 #include <base/command_line.h>
+#include <base/files/file_path.h>
+#include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/strings/string_number_conversions.h>
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
 #include <libminijail.h>
@@ -17,6 +20,7 @@
 #include "usb_bouncer/entry_manager.h"
 #include "usb_bouncer/util.h"
 
+using usb_bouncer::CanChown;
 using usb_bouncer::Daemonize;
 using usb_bouncer::DevpathToRuleCallback;
 using usb_bouncer::EntryManager;
@@ -28,6 +32,7 @@ namespace {
 static constexpr char kUsageMessage[] = R"(Usage:
   cleanup - removes stale allow-list entries.
   genrules - writes the generated rules configuration and to stdout.
+  report_error - handles kernel errors reported with uevents.
   udev (add|remove) <devpath> - handles a udev device event.
   userlogin - add current entries to user allow-list.
 )";
@@ -42,6 +47,11 @@ enum class ForkConfig {
   kDisabled,
 };
 
+enum class PrivilegeLevel {
+  kDefault,
+  kMetricsOnly,
+};
+
 class Configuration {
  public:
   const SeccompEnforcement seccomp;
@@ -50,8 +60,16 @@ class Configuration {
 
 static constexpr char kLogPath[] = "/dev/log";
 static constexpr char kUMAEventsPath[] = "/var/lib/metrics/uma-events";
+static constexpr char kNoLoginPath[] = "/run/nologin";
+static constexpr char kStructuredMetricsPath[] = "/var/lib/metrics/structured";
+static constexpr char kStructuredMetricsEventsPath[] =
+    "/var/lib/metrics/structured/events";
 
-void DropPrivileges(const Configuration& config) {
+void DropPrivileges(const Configuration& config, PrivilegeLevel privileges) {
+  if (!CanChown()) {
+    LOG(FATAL) << "This process doesn't have permission to chown.";
+  }
+
   ScopedMinijail j(minijail_new());
   minijail_change_user(j.get(), usb_bouncer::kUsbBouncerUser);
   minijail_change_group(j.get(), usb_bouncer::kUsbBouncerGroup);
@@ -102,9 +120,13 @@ void DropPrivileges(const Configuration& config) {
     }
   }
   std::string global_db_path("/");
+  int global_db_path_writeable = 1;
+  if (privileges == PrivilegeLevel::kMetricsOnly)
+    global_db_path_writeable = 0;
+
   global_db_path.append(usb_bouncer::kDefaultGlobalDir);
   if (minijail_bind(j.get(), global_db_path.c_str(), global_db_path.c_str(),
-                    1 /*writable*/) != 0) {
+                    global_db_path_writeable /*writable*/) != 0) {
     PLOG(FATAL) << "minijail_bind('" << global_db_path << "') failed";
   }
 
@@ -119,6 +141,17 @@ void DropPrivileges(const Configuration& config) {
       minijail_bind(j.get(), kUMAEventsPath, kUMAEventsPath, 1 /*writable*/) !=
           0) {
     PLOG(FATAL) << "minijail_bind('" << kUMAEventsPath << "') failed";
+  }
+  if (base::PathExists(base::FilePath(kStructuredMetricsPath)) &&
+      minijail_bind(j.get(), kStructuredMetricsPath, kStructuredMetricsPath,
+                    1 /*writable*/) != 0) {
+    PLOG(FATAL) << "minijail_bind('" << kStructuredMetricsPath << "') failed";
+  }
+  if (base::PathExists(base::FilePath(kStructuredMetricsEventsPath)) &&
+      minijail_bind(j.get(), kStructuredMetricsEventsPath,
+                    kStructuredMetricsEventsPath, 1 /*writable*/) != 0) {
+    PLOG(FATAL) << "minijail_bind('" << kStructuredMetricsEventsPath
+                << "') failed";
   }
 
   minijail_remount_mode(j.get(), MS_SLAVE);
@@ -145,7 +178,7 @@ EntryManager* GetEntryManagerOrDie(const Configuration& config) {
   if (!EntryManager::CreateDefaultGlobalDB()) {
     LOG(FATAL) << "Unable to create default global DB!";
   }
-  DropPrivileges(config);
+  DropPrivileges(config, PrivilegeLevel::kDefault);
   EntryManager* entry_manager = EntryManager::GetInstance(GetRuleFromDevPath);
   if (!entry_manager) {
     LOG(FATAL) << "EntryManager::GetInstance() failed!";
@@ -200,11 +233,72 @@ int HandleGenRules(const Configuration& config,
   return EXIT_SUCCESS;
 }
 
+int HandleReportError(const Configuration& config,
+                      const std::vector<std::string>& argv) {
+  if (argv.size() != 3)
+    return EXIT_FAILURE;
+
+  int error_code;
+  std::string subsystem = argv[0];
+  std::string devpath = argv[1];
+  if (!base::StringToInt(argv[2], &error_code))
+    return EXIT_FAILURE;
+
+  // Drop privileges before reading from sysfs.
+  DropPrivileges(config, PrivilegeLevel::kMetricsOnly);
+
+  base::FilePath root_dir("/");
+  base::FilePath normalized_devpath = root_dir.Append("sys").Append(
+      usb_bouncer::StripLeadingPathSeparators(devpath));
+
+  if (!base::DirectoryExists(normalized_devpath)) {
+    // If the device sysfs path is no longer available, record the error code.
+    if (subsystem == "usb")
+      usb_bouncer::StructuredMetricsHubError(abs(error_code), 0, 0, 0, "", 0);
+    else if (subsystem == "pci")
+      usb_bouncer::StructuredMetricsXhciError(abs(error_code), 0);
+  } else {
+    if (subsystem == "usb") {
+      if (base::PathExists(normalized_devpath.Append("bInterfaceClass"))) {
+        normalized_devpath =
+            usb_bouncer::GetInterfaceDevice(normalized_devpath);
+      }
+
+      if (normalized_devpath.empty() ||
+          !base::PathExists(normalized_devpath.Append("bDeviceClass"))) {
+        return EXIT_FAILURE;
+      }
+
+      LOG(INFO) << "Reporting hub error (" << error_code << ") from "
+                << normalized_devpath;
+      usb_bouncer::StructuredMetricsHubError(
+          abs(error_code), usb_bouncer::GetVendorId(normalized_devpath),
+          usb_bouncer::GetProductId(normalized_devpath),
+          usb_bouncer::GetDeviceClass(normalized_devpath),
+          usb_bouncer::GetUsbTreePath(normalized_devpath),
+          usb_bouncer::GetConnectedDuration(normalized_devpath));
+    } else if (subsystem == "pci") {
+      LOG(INFO) << "Reporting xHCI error (" << error_code << ") from "
+                << normalized_devpath;
+      usb_bouncer::StructuredMetricsXhciError(
+          abs(error_code), usb_bouncer::GetPciDeviceClass(normalized_devpath));
+    }
+  }
+
+  return EXIT_SUCCESS;
+}
+
 int HandleUdev(const Configuration& config,
                const std::vector<std::string>& argv) {
-  if (argv.size() != 2) {
+  if (argv.size() < 2) {
     LOG(ERROR) << "Invalid options!";
     return EXIT_FAILURE;
+  }
+
+  // Ignore all events during shutdown.
+  if (base::PathExists(base::FilePath(kNoLoginPath))) {
+    LOG(INFO) << "Skipping udev event because of shutdown.";
+    return EXIT_SUCCESS;
   }
 
   EntryManager::UdevAction action;
@@ -223,7 +317,7 @@ int HandleUdev(const Configuration& config,
   if (!EntryManager::CreateDefaultGlobalDB()) {
     LOG(FATAL) << "Unable to create default global DB!";
   }
-  DropPrivileges(config);
+  DropPrivileges(config, PrivilegeLevel::kDefault);
 
   // Perform sysfs reads before daemonizing to avoid races.
   const std::string& devpath = argv[1];
@@ -236,12 +330,34 @@ int HandleUdev(const Configuration& config,
     }
   }
 
+  // Gather data used for device metrics before daemonizing.
+  bool session_metric_available = false;
+  usb_bouncer::UsbSessionMetric session_metric;
+  if (argv.size() == 5) {
+    base::FilePath root_dir("/");
+    base::FilePath normalized_devpath = root_dir.Append("sys").Append(
+        usb_bouncer::StripLeadingPathSeparators(devpath));
+    session_metric.boot_id = usb_bouncer::GetBootId();
+    session_metric.system_time = usb_bouncer::GetSystemTime();
+    session_metric.action = static_cast<int>(action);
+    session_metric.depth = usb_bouncer::GetUsbTreeDepth(normalized_devpath);
+    base::StringToInt(argv[2], &session_metric.busnum);
+    base::StringToInt(argv[3], &session_metric.devnum);
+    usb_bouncer::GetVidPidFromEnvVar(argv[4], &session_metric.vid,
+                                     &session_metric.pid);
+    session_metric_available = true;
+  }
+
   // All the information needed from udev and sysfs should be obtained prior to
   // this point. Daemonizing here allows usb_bouncer to wait on other system
   // services without blocking udev.
   if (config.fork_config == ForkConfig::kDoubleFork) {
     Daemonize();
   }
+
+  // Record session metric if it is available.
+  if (session_metric_available)
+    usb_bouncer::StructuredMetricsUsbSessionEvent(session_metric);
 
   // The DevpathToRuleCallback here to forwards the result of the sysfs read
   // performed before daemonizing.
@@ -353,6 +469,7 @@ int main(int argc, char** argv) {
       {"authorize-all", HandleAuthorizeAll},
       {"cleanup", HandleCleanup},
       {"genrules", HandleGenRules},
+      {"report_error", HandleReportError},
       {"udev", HandleUdev},
       {"userlogin", HandleUserLogin},
       // clang-format on

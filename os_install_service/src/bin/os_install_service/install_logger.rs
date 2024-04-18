@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Error};
 use chrono::{DateTime, Local};
 use lazy_static::lazy_static;
+use libchromeos::deprecated::syslog;
 use log::{error, Level, Log, Metadata, Record};
-use sys_util::syslog;
 
 const LOG_NAME: &str = "os_install_service.log";
 
@@ -197,13 +197,14 @@ pub fn reset_file_log() {
 mod tests {
     use std::fs;
 
-    use chrono::TimeZone;
+    use chrono::{Duration, TimeZone};
 
     use super::*;
 
     #[test]
     fn test_format() {
-        let when = Local.ymd(2020, 12, 11).and_hms_milli(13, 2, 27, 435);
+        let when =
+            Local.with_ymd_and_hms(2020, 12, 11, 13, 2, 27).unwrap() + Duration::milliseconds(435);
         let record = Record::builder()
             .args(format_args!("some message"))
             .level(Level::Error)

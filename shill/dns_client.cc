@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,25 +9,20 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#include <map>
 #include <memory>
-#include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/containers/contains.h>
+#include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 
 #include "shill/logging.h"
-#include "shill/net/io_handler.h"
-#include "shill/net/io_handler_factory.h"
-#include "shill/net/shill_time.h"
 #include "shill/shill_ares.h"
 
 namespace shill {
@@ -40,8 +35,6 @@ static std::string ObjectID(const DnsClient* d) {
 }  // namespace Logging
 
 namespace {
-
-using IOHandlerMap = std::map<ares_socket_t, std::unique_ptr<IOHandler>>;
 
 std::vector<std::string> FilterEmptyIPs(
     const std::vector<std::string>& dns_list) {
@@ -69,29 +62,27 @@ const char DnsClient::kErrorUnknown[] = "DNS Resolver unknown internal error";
 
 // Private to the implementation of resolver so callers don't include ares.h
 struct DnsClientState {
-  DnsClientState() : channel(nullptr), start_time{} {}
-
-  ares_channel channel;
-  IOHandlerMap read_handlers;
-  IOHandlerMap write_handlers;
-  struct timeval start_time;
+  ares_channel channel = nullptr;
+  std::vector<std::unique_ptr<base::FileDescriptorWatcher::Controller>>
+      read_handlers;
+  std::vector<std::unique_ptr<base::FileDescriptorWatcher::Controller>>
+      write_handlers;
+  base::TimeTicks start_time;
 };
 
-DnsClient::DnsClient(IPAddress::Family family,
+DnsClient::DnsClient(net_base::IPFamily family,
                      const std::string& interface_name,
-                     int timeout_ms,
+                     base::TimeDelta timeout,
                      EventDispatcher* dispatcher,
                      const ClientCallback& callback)
-    : address_(IPAddress(family)),
+    : address_(family),
       interface_name_(interface_name),
       dispatcher_(dispatcher),
-      io_handler_factory_(IOHandlerFactory::GetInstance()),
       callback_(callback),
-      timeout_ms_(timeout_ms),
+      timeout_(timeout),
       running_(false),
       weak_ptr_factory_(this),
-      ares_(Ares::GetInstance()),
-      time_(Time::GetInstance()) {}
+      ares_(Ares::GetInstance()) {}
 
 DnsClient::~DnsClient() {
   Stop();
@@ -109,6 +100,7 @@ bool DnsClient::Start(const std::vector<std::string>& dns_list,
   std::vector<std::string> filtered_dns_list = FilterEmptyIPs(dns_list);
 
   if (!resolver_state_) {
+    int options_mask = 0;
     struct ares_options options;
     memset(&options, 0, sizeof(options));
 
@@ -118,11 +110,22 @@ bool DnsClient::Start(const std::vector<std::string>& dns_list,
       return false;
     }
 
-    options.timeout = timeout_ms_ / filtered_dns_list.size();
+    // The per-query timeout is derived from the total timeout divided by the
+    // total number of queries that will be sent. The total number of queries is
+    // the number of name servers to query multiplied by the query tries.
+    int timeout_ms = timeout_.InMilliseconds();
+    timeout_ms = timeout_ms / (kDnsQueryTries * filtered_dns_list.size());
+    if (timeout_ms < kDnsQueryMinTimeout.InMilliseconds()) {
+      timeout_ms = kDnsQueryMinTimeout.InMilliseconds();
+    }
+    options.timeout = timeout_ms;
+    options_mask |= ARES_OPT_TIMEOUTMS;
+    options.tries = kDnsQueryTries;
+    options_mask |= ARES_OPT_TRIES;
 
     resolver_state_ = std::make_unique<DnsClientState>();
-    int status = ares_->InitOptions(&resolver_state_->channel, &options,
-                                    ARES_OPT_TIMEOUTMS);
+    int status =
+        ares_->InitOptions(&resolver_state_->channel, &options, options_mask);
     if (status != ARES_SUCCESS) {
       Error::PopulateAndLog(FROM_HERE, error, Error::kOperationFailed,
                             "ARES initialization returns error code: " +
@@ -151,13 +154,14 @@ bool DnsClient::Start(const std::vector<std::string>& dns_list,
   }
 
   running_ = true;
-  time_->GetTimeMonotonic(&resolver_state_->start_time);
+  resolver_state_->start_time = base::TimeTicks::Now();
   ares_->GetHostByName(resolver_state_->channel, hostname.c_str(),
-                       address_.family(), ReceiveDnsReplyCB, this);
+                       net_base::ToSAFamily(address_.GetFamily()),
+                       ReceiveDnsReplyCB, this);
 
   if (!RefreshHandles()) {
     LOG(ERROR) << interface_name_ << ": Impossibly short timeout.";
-    error->CopyFrom(error_);
+    *error = error_;
     Stop();
     return false;
   }
@@ -177,7 +181,7 @@ void DnsClient::Stop() {
   StopWriteHandlers();
   weak_ptr_factory_.InvalidateWeakPtrs();
   error_.Reset();
-  address_.SetAddressToDefault();
+  address_ = net_base::IPAddress(address_.GetFamily());
   ares_->Destroy(resolver_state_->channel);
   resolver_state_ = nullptr;
 }
@@ -186,15 +190,15 @@ bool DnsClient::IsActive() const {
   return running_;
 }
 
-// We delay our call to completion so that we exit all IOHandlers, and
-// can clean up all of our local state before calling the callback, or
-// during the process of the execution of the callee (which is free to
-// call our destructor safely).
+// We delay our call to completion so that we exit all
+// base::FileDescriptorWatchers, and can clean up all of our local state before
+// calling the callback, or during the process of the execution of the callee
+// (which is free to call our destructor safely).
 void DnsClient::HandleCompletion() {
   SLOG(this, 3) << "In " << __func__;
-  Error error;
-  error.CopyFrom(error_);
-  IPAddress address(address_);
+
+  const Error error(error_);
+  const net_base::IPAddress address(address_);
   if (!error.IsSuccess()) {
     // If the DNS request did not succeed, do not trust it for future
     // attempts.
@@ -203,23 +207,32 @@ void DnsClient::HandleCompletion() {
     // Prepare our state for the next request without destroying the
     // current ARES state.
     error_.Reset();
-    address_.SetAddressToDefault();
+    address_ = net_base::IPAddress(address_.GetFamily());
   }
-  callback_.Run(error, address);
+
+  if (!error.IsSuccess()) {
+    callback_.Run(base::unexpected(error));
+  } else {
+    callback_.Run(address);
+  }
 }
 
 void DnsClient::HandleDnsRead(int fd) {
-  ares_->ProcessFd(resolver_state_->channel, fd, ARES_SOCKET_BAD);
-  RefreshHandles();
+  ProcessFd(fd, /*write_fd=*/ARES_SOCKET_BAD);
 }
 
 void DnsClient::HandleDnsWrite(int fd) {
-  ares_->ProcessFd(resolver_state_->channel, ARES_SOCKET_BAD, fd);
-  RefreshHandles();
+  ProcessFd(/*read_fd=*/ARES_SOCKET_BAD, fd);
 }
 
 void DnsClient::HandleTimeout() {
-  ares_->ProcessFd(resolver_state_->channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
+  ProcessFd(/*read_fd=*/ARES_SOCKET_BAD, /*write_fd=*/ARES_SOCKET_BAD);
+}
+
+void DnsClient::ProcessFd(int read_fd, int write_fd) {
+  StopReadHandlers();
+  StopWriteHandlers();
+  ares_->ProcessFd(resolver_state_->channel, read_fd, write_fd);
   RefreshHandles();
 }
 
@@ -231,18 +244,17 @@ void DnsClient::ReceiveDnsReply(int status, struct hostent* hostent) {
   SLOG(this, 3) << "In " << __func__;
   running_ = false;
   timeout_closure_.Cancel();
-  dispatcher_->PostTask(FROM_HERE, base::Bind(&DnsClient::HandleCompletion,
-                                              weak_ptr_factory_.GetWeakPtr()));
+  dispatcher_->PostTask(FROM_HERE,
+                        base::BindOnce(&DnsClient::HandleCompletion,
+                                       weak_ptr_factory_.GetWeakPtr()));
 
   if (status == ARES_SUCCESS && hostent != nullptr &&
-      hostent->h_addrtype == address_.family() &&
-      static_cast<size_t>(hostent->h_length) ==
-          IPAddress::GetAddressLength(address_.family()) &&
+      hostent->h_addrtype == net_base::ToSAFamily(address_.GetFamily()) &&
+      static_cast<size_t>(hostent->h_length) == address_.GetAddressLength() &&
       hostent->h_addr_list != nullptr && hostent->h_addr_list[0] != nullptr) {
-    address_ = IPAddress(
-        address_.family(),
-        ByteString(reinterpret_cast<unsigned char*>(hostent->h_addr_list[0]),
-                   hostent->h_length));
+    address_ = *net_base::IPAddress::CreateFromBytes(
+        {reinterpret_cast<unsigned char*>(hostent->h_addr_list[0]),
+         address_.GetAddressLength()});
   } else {
     switch (status) {
       case ARES_ENODATA:
@@ -298,37 +310,24 @@ void DnsClient::ReceiveDnsReplyCB(void* arg,
 }
 
 bool DnsClient::RefreshHandles() {
-  IOHandlerMap old_read(std::move(resolver_state_->read_handlers));
-  IOHandlerMap old_write(std::move(resolver_state_->write_handlers));
-
   ares_socket_t sockets[ARES_GETSOCK_MAXNUM];
   int action_bits =
       ares_->GetSock(resolver_state_->channel, sockets, ARES_GETSOCK_MAXNUM);
 
-  base::Callback<void(int)> read_callback(
-      base::Bind(&DnsClient::HandleDnsRead, weak_ptr_factory_.GetWeakPtr()));
-  base::Callback<void(int)> write_callback(
-      base::Bind(&DnsClient::HandleDnsWrite, weak_ptr_factory_.GetWeakPtr()));
   for (int i = 0; i < ARES_GETSOCK_MAXNUM; i++) {
     if (ARES_GETSOCK_READABLE(action_bits, i)) {
-      if (base::Contains(old_read, sockets[i])) {
-        resolver_state_->read_handlers[sockets[i]] =
-            std::move(old_read[sockets[i]]);
-      } else {
-        resolver_state_->read_handlers[sockets[i]] =
-            base::WrapUnique(io_handler_factory_->CreateIOReadyHandler(
-                sockets[i], IOHandler::kModeInput, read_callback));
-      }
+      resolver_state_->read_handlers.push_back(
+          base::FileDescriptorWatcher::WatchReadable(
+              sockets[i],
+              base::BindRepeating(&DnsClient::HandleDnsRead,
+                                  base::Unretained(this), sockets[i])));
     }
     if (ARES_GETSOCK_WRITABLE(action_bits, i)) {
-      if (base::Contains(old_write, sockets[i])) {
-        resolver_state_->write_handlers[sockets[i]] =
-            std::move(old_write[sockets[i]]);
-      } else {
-        resolver_state_->write_handlers[sockets[i]] =
-            base::WrapUnique(io_handler_factory_->CreateIOReadyHandler(
-                sockets[i], IOHandler::kModeOutput, write_callback));
-      }
+      resolver_state_->write_handlers.push_back(
+          base::FileDescriptorWatcher::WatchWritable(
+              sockets[i],
+              base::BindRepeating(&DnsClient::HandleDnsWrite,
+                                  base::Unretained(this), sockets[i])));
     }
   }
 
@@ -340,53 +339,53 @@ bool DnsClient::RefreshHandles() {
 
   // Schedule timer event for the earlier of our timeout or one requested by
   // the resolver library.
-  struct timeval now, elapsed_time, timeout_tv;
-  time_->GetTimeMonotonic(&now);
-  timersub(&now, &resolver_state_->start_time, &elapsed_time);
-  timeout_tv.tv_sec = timeout_ms_ / 1000;
-  timeout_tv.tv_usec = (timeout_ms_ % 1000) * 1000;
+  const base::TimeDelta elapsed_time =
+      base::TimeTicks::Now() - resolver_state_->start_time;
   timeout_closure_.Cancel();
 
-  if (timercmp(&elapsed_time, &timeout_tv, >=)) {
+  if (elapsed_time >= timeout_) {
     // There are 3 cases of interest:
     //  - If we got here from Start(), when we return, Stop() will be
     //    called, so our cleanup task will not run, so we will not have the
     //    side-effect of both invoking the callback and returning False
     //    in Start().
     //  - If we got here from the tail of an IO event, we can't call
-    //    Stop() since that will blow away the IOHandler we are running
-    //    in.  We will perform the cleanup in the posted task below.
+    //    Stop() since that will blow away the base::FileDescriptorWatcher we
+    //    are running in.  We will perform the cleanup in the posted task below.
     //  - If we got here from a timeout handler, we will perform cleanup
     //    in the posted task.
     running_ = false;
     error_.Populate(Error::kOperationTimeout, kErrorTimedOut);
     dispatcher_->PostTask(FROM_HERE,
-                          base::Bind(&DnsClient::HandleCompletion,
-                                     weak_ptr_factory_.GetWeakPtr()));
+                          base::BindOnce(&DnsClient::HandleCompletion,
+                                         weak_ptr_factory_.GetWeakPtr()));
     return false;
   } else {
-    struct timeval max, ret_tv;
-    timersub(&timeout_tv, &elapsed_time, &max);
+    const base::TimeDelta max = timeout_ - elapsed_time;
+    struct timeval max_tv = {
+        .tv_sec = static_cast<time_t>(max.InSeconds()),
+        .tv_usec = static_cast<suseconds_t>(
+            (max - base::Seconds(max.InSeconds())).InMicroseconds()),
+    };
+
+    struct timeval ret_tv;
     struct timeval* tv =
-        ares_->Timeout(resolver_state_->channel, &max, &ret_tv);
-    timeout_closure_.Reset(
-        base::Bind(&DnsClient::HandleTimeout, weak_ptr_factory_.GetWeakPtr()));
-    dispatcher_->PostDelayedTask(FROM_HERE, timeout_closure_.callback(),
-                                 tv->tv_sec * 1000 + tv->tv_usec / 1000);
+        ares_->Timeout(resolver_state_->channel, &max_tv, &ret_tv);
+    timeout_closure_.Reset(base::BindOnce(&DnsClient::HandleTimeout,
+                                          weak_ptr_factory_.GetWeakPtr()));
+    dispatcher_->PostDelayedTask(
+        FROM_HERE, timeout_closure_.callback(),
+        base::Seconds(tv->tv_sec) + base::Microseconds(tv->tv_usec));
   }
 
   return true;
 }
 
 void DnsClient::StopReadHandlers() {
-  for (auto& iter : resolver_state_->read_handlers)
-    iter.second->Stop();
   resolver_state_->read_handlers.clear();
 }
 
 void DnsClient::StopWriteHandlers() {
-  for (auto& iter : resolver_state_->write_handlers)
-    iter.second->Stop();
   resolver_state_->write_handlers.clear();
 }
 

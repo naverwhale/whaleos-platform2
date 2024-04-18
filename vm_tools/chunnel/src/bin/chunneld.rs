@@ -1,10 +1,9 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 use std::collections::btree_map::Entry as BTreeMapEntry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::ffi::CStr;
 use std::fmt;
 use std::fs::File;
 use std::io;
@@ -16,18 +15,22 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use chunnel::forwarder::ForwarderSession;
 use dbus::arg::OwnedFd;
 use dbus::blocking::LocalConnection as DBusConnection;
 use dbus::{self, Error as DBusError};
+use libchromeos::deprecated::{EventFd, PollContext, PollToken};
+use libchromeos::panic_handler::install_memfd_handler;
+use libchromeos::pipe;
+use libchromeos::signal::block_signal;
 use libchromeos::syslog;
 use log::{error, warn};
-use protobuf::{self, Message as ProtoMessage, ProtobufError};
-use sys_util::vsock::{VsockCid, VsockListener, VMADDR_PORT_ANY};
-use sys_util::{self, block_signal, pipe, EventFd, PollContext, PollToken};
-
-use chunnel::forwarder::ForwarderSession;
+use nix::sys::signal::Signal;
+use protobuf::{self, Message as ProtoMessage};
 use system_api::chunneld_service::*;
 use system_api::cicerone_service;
+use vsock::VsockListener;
+use vsock::VMADDR_CID_ANY;
 
 // chunnel dbus-constants.h
 const CHUNNELD_INTERFACE: &str = "org.chromium.Chunneld";
@@ -54,35 +57,37 @@ const CHUNNEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DBUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Program name.
-const IDENT: &[u8] = b"chunneld\0";
+const IDENT: &str = "chunneld";
+
+const VMADDR_PORT_ANY: u32 = u32::max_value();
 
 #[remain::sorted]
 #[derive(Debug)]
 enum Error {
     BindVsock(io::Error),
-    BlockSigpipe(sys_util::signal::Error),
+    BlockSigpipe(nix::Error),
     ConnectChunnelFailure(String),
     CreateProtobusService(dbus::Error),
     DBusGetSystemBus(DBusError),
     DBusMessageSend(DBusError),
     DBusProcessMessage(DBusError),
-    EventFdClone(sys_util::Error),
-    EventFdNew(sys_util::Error),
-    IncorrectCid(VsockCid),
-    LifelinePipe(sys_util::Error),
+    EventFdClone(io::Error),
+    EventFdNew(nix::Error),
+    IncorrectCid(u32),
+    LifelinePipe(nix::Error),
     NoListenerForPort(u16),
     NoSessionForTag(SessionTag),
-    PollContextAdd(sys_util::Error),
-    PollContextDelete(sys_util::Error),
-    PollContextNew(sys_util::Error),
-    PollWait(sys_util::Error),
-    ProtobufDeserialize(ProtobufError),
-    ProtobufSerialize(ProtobufError),
+    PollContextAdd(nix::Error),
+    PollContextDelete(nix::Error),
+    PollContextNew(nix::Error),
+    PollWait(nix::Error),
+    ProtobufDeserialize(protobuf::Error),
+    ProtobufSerialize(protobuf::Error),
     SetVsockNonblocking(io::Error),
-    Syslog(log::SetLoggerError),
+    Syslog(syslog::Error),
     TcpAccept(io::Error),
     TcpListenerPort(io::Error),
-    UpdateEventRead(sys_util::Error),
+    UpdateEventRead(nix::Error),
     VsockAccept(io::Error),
     VsockAcceptTimeout,
     VsockListenerPort(io::Error),
@@ -136,7 +141,7 @@ struct TcpForwardTarget {
     pub vm_name: String,
     pub container_name: String,
     pub owner_id: String,
-    pub vsock_cid: VsockCid,
+    pub vsock_cid: u32,
 }
 
 /// A tag that uniquely identifies a particular forwarding session. This has arbitrarily been
@@ -445,8 +450,8 @@ fn launch_chunnel(
     let response: cicerone_service::ConnectChunnelResponse =
         ProtoMessage::parse_from_bytes(&raw_buffer).map_err(Error::ProtobufDeserialize)?;
 
-    match response.status {
-        cicerone_service::ConnectChunnelResponse_Status::SUCCESS => Ok(()),
+    match response.status.enum_value() {
+        Ok(cicerone_service::connect_chunnel_response::Status::SUCCESS) => Ok(()),
         _ => Err(Error::ConnectChunnelFailure(response.failure_reason)),
     }
 }
@@ -459,8 +464,8 @@ fn create_forwarder_session(
 ) -> Result<ForwarderSession> {
     let (tcp_stream, _) = listener.accept().map_err(Error::TcpAccept)?;
     // Bind a vsock port, tell the guest to connect, and accept the connection.
-    let mut vsock_listener =
-        VsockListener::bind((VsockCid::Any, VMADDR_PORT_ANY)).map_err(Error::BindVsock)?;
+    let vsock_listener = VsockListener::bind_with_cid_port(VMADDR_CID_ANY, VMADDR_PORT_ANY)
+        .map_err(Error::BindVsock)?;
     vsock_listener
         .set_nonblocking(true)
         .map_err(Error::SetVsockNonblocking)?;
@@ -473,8 +478,9 @@ fn create_forwarder_session(
     launch_chunnel(
         dbus_conn,
         vsock_listener
-            .local_port()
-            .map_err(Error::VsockListenerPort)?,
+            .local_addr()
+            .map_err(Error::VsockListenerPort)?
+            .port(),
         tcp4_port,
         target,
     )?;
@@ -497,8 +503,8 @@ fn create_forwarder_session(
         Some(_) => {
             let (vsock_stream, sockaddr) = vsock_listener.accept().map_err(Error::VsockAccept)?;
 
-            if sockaddr.cid != target.vsock_cid {
-                Err(Error::IncorrectCid(sockaddr.cid))
+            if sockaddr.cid() != target.vsock_cid {
+                Err(Error::IncorrectCid(sockaddr.cid()))
             } else {
                 Ok(ForwarderSession::new(
                     tcp_stream.into(),
@@ -512,7 +518,7 @@ fn create_forwarder_session(
 
 /// Enqueues the new listening ports received over D-Bus for the main worker thread to process.
 fn update_listening_ports(
-    req: &mut UpdateListeningPortsRequest,
+    req: UpdateListeningPortsRequest,
     update_queue: &Arc<Mutex<VecDeque<TcpForwardTarget>>>,
     update_evt: &EventFd,
 ) -> UpdateListeningPortsResponse {
@@ -521,22 +527,22 @@ fn update_listening_ports(
     // Unwrap of LockResult is customary.
     let mut update_queue = update_queue.lock().unwrap();
 
-    for (forward_port, forward_target) in req.mut_tcp4_forward_targets().iter_mut() {
+    for (forward_port, forward_target) in req.tcp4_forward_targets {
         update_queue.push_back(TcpForwardTarget {
-            port: *forward_port as u16,
-            vm_name: forward_target.take_vm_name(),
-            owner_id: forward_target.take_owner_id(),
-            container_name: forward_target.take_container_name(),
-            vsock_cid: forward_target.vsock_cid.into(),
+            port: forward_port as u16,
+            vm_name: forward_target.vm_name,
+            owner_id: forward_target.owner_id,
+            container_name: forward_target.container_name,
+            vsock_cid: forward_target.vsock_cid,
         });
     }
 
     match update_evt.write(1) {
         Ok(_) => {
-            response.set_status(UpdateListeningPortsResponse_Status::SUCCESS);
+            response.status = update_listening_ports_response::Status::SUCCESS.into();
         }
         Err(_) => {
-            response.set_status(UpdateListeningPortsResponse_Status::FAILED);
+            response.status = update_listening_ports_response::Status::FAILED.into();
         }
     }
 
@@ -560,11 +566,10 @@ fn dbus_thread(
         .method(UPDATE_LISTENING_PORTS_METHOD, (), move |m| {
             let reply = m.msg.method_return();
             let raw_buf: Vec<u8> = m.msg.read1().map_err(|_| dbus_tree::MethodErr::no_arg())?;
-            let mut proto: UpdateListeningPortsRequest =
-                ProtoMessage::parse_from_bytes(&raw_buf)
-                    .map_err(|e| dbus_tree::MethodErr::invalid_arg(&e))?;
+            let proto: UpdateListeningPortsRequest = ProtoMessage::parse_from_bytes(&raw_buf)
+                .map_err(|e| dbus_tree::MethodErr::invalid_arg(&e))?;
 
-            let response = update_listening_ports(&mut proto, &update_queue, &update_evt);
+            let response = update_listening_ports(proto, &update_queue, &update_evt);
             Ok(vec![reply.append1(
                 response
                     .write_to_bytes()
@@ -590,13 +595,11 @@ fn dbus_thread(
 }
 
 fn main() -> Result<()> {
-    // Safe because this string is defined above in this file and it contains exactly
-    // one nul byte, which appears at the end.
-    let ident = CStr::from_bytes_with_nul(IDENT).unwrap();
-    syslog::init(ident).map_err(Error::Syslog)?;
+    install_memfd_handler();
+    syslog::init(IDENT.to_string(), false /* log_to_stderr */).map_err(Error::Syslog)?;
 
     // Block SIGPIPE so the process doesn't exit when writing to a socket that's been shutdown.
-    block_signal(libc::SIGPIPE).map_err(Error::BlockSigpipe)?;
+    block_signal(Signal::SIGPIPE).map_err(Error::BlockSigpipe)?;
 
     let update_evt = EventFd::new().map_err(Error::EventFdNew)?;
     let update_queue = Arc::new(Mutex::new(VecDeque::new()));

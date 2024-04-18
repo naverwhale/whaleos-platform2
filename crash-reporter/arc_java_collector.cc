@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,14 +8,16 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/time/time.h>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/arc_util.h"
-#include "crash-reporter/util.h"
 
 using base::File;
 using base::FilePath;
@@ -26,10 +28,14 @@ constexpr char kArcJavaCollectorName[] = "ARC_java";
 
 }  // namespace
 
-ArcJavaCollector::ArcJavaCollector()
+ArcJavaCollector::ArcJavaCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
     : CrashCollector(kArcJavaCollectorName,
                      kAlwaysUseUserCrashDirectory,
                      kNormalCrashSendMode,
+                     metrics_lib,
                      kArcJavaCollectorName) {}
 
 bool ArcJavaCollector::HandleCrash(
@@ -38,6 +44,7 @@ bool ArcJavaCollector::HandleCrash(
     base::TimeDelta uptime) {
   std::ostringstream message;
   message << "Received " << crash_type << " notification";
+  received_crash_type_ = crash_type;
 
   std::string contents;
   if (!base::ReadStreamToString(stdin, &contents)) {
@@ -71,6 +78,38 @@ bool ArcJavaCollector::HandleCrash(
   }
 
   return true;
+}
+
+// The parameter |exec_name| is unused as we are computing the crash severity
+// based on the received_crash_type member variable.
+// Note: The logic to compute crash severity is taken from the source:
+// go/cros-stability-metrics#logic.
+CrashCollector::ComputedCrashSeverity ArcJavaCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  CrashCollector::ComputedCrashSeverity computed_severity =
+      ComputedCrashSeverity{
+          .crash_severity = CrashSeverity::kUnspecified,
+          // The crash product_group is always `kArc`.
+          .product_group = Product::kArc,
+      };
+
+  if ((received_crash_type_ == arc_util::kSystemServerCrash) ||
+      (received_crash_type_ == arc_util::kSystemServerWatchdog)) {
+    computed_severity.crash_severity = CrashSeverity::kFatal;
+  } else if ((received_crash_type_ == arc_util::kSystemAppCrash) ||
+             (received_crash_type_ == arc_util::kSystemAppAnr) ||
+             (received_crash_type_ == arc_util::kNativeCrash)) {
+    computed_severity.crash_severity = CrashSeverity::kError;
+  } else if ((received_crash_type_ == arc_util::kDataAppAnr) ||
+             (received_crash_type_ == arc_util::kDataAppCrash) ||
+             (received_crash_type_ == arc_util::kDataAppNativeCrash)) {
+    computed_severity.crash_severity = CrashSeverity::kWarning;
+  } else if ((received_crash_type_ == arc_util::kSystemAppWtf) ||
+             (received_crash_type_ == arc_util::kSystemServerWtf)) {
+    computed_severity.crash_severity = CrashSeverity::kInfo;
+  }
+
+  return computed_severity;
 }
 
 std::string ArcJavaCollector::GetProductVersion() const {
@@ -176,17 +215,20 @@ bool ArcJavaCollector::CreateReportForJavaCrash(
 CollectorInfo ArcJavaCollector::GetHandlerInfo(
     const std::string& arc_java_crash,
     const arc_util::BuildProperty& build_property,
-    int64_t uptime_millis) {
-  auto arc_java_collector = std::make_shared<ArcJavaCollector>();
+    int64_t uptime_millis,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
+  auto arc_java_collector = std::make_shared<ArcJavaCollector>(metrics_lib);
   return {
       .collector = arc_java_collector,
       .handlers = {{
           // This handles Java app crashes of ARC++ and ARCVM.
           .should_handle = !arc_java_crash.empty(),
-          .cb = base::BindRepeating(
-              &ArcJavaCollector::HandleCrash, arc_java_collector,
-              arc_java_crash, build_property,
-              base::TimeDelta::FromMilliseconds(uptime_millis)),
+          .cb = base::BindRepeating(&ArcJavaCollector::HandleCrash,
+                                    arc_java_collector, arc_java_crash,
+                                    build_property,
+                                    base::Milliseconds(uptime_millis)),
       }},
   };
 }

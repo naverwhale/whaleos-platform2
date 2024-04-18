@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -262,6 +262,20 @@ void Tpm2InitializerImpl::PruneStoredPasswords() {
   if (!local_data_store_->Write(local_data)) {
     LOG(ERROR) << __func__ << ": failed to write local data.";
   }
+}
+
+bool Tpm2InitializerImpl::ChangeOwnerPassword(const std::string& old_password,
+                                              const std::string& new_password) {
+  LOG(INFO) << __func__ << ": attempting to change old tpm2.0 owner password"
+            << " to a new owner password";
+  TPM_RC result = trunks_factory_.GetTpmUtility()->ChangeOwnerPassword(
+      old_password, new_password);
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << "Error changing owner password of TPM2.0";
+    return false;
+  }
+
+  return true;
 }
 
 bool Tpm2InitializerImpl::SeedTpmRng() {

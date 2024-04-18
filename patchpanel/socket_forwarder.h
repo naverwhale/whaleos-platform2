@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,8 +12,7 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <base/threading/simple_thread.h>
 #include <brillo/brillo_export.h>
@@ -52,8 +51,8 @@ class BRILLO_EXPORT SocketForwarder : public base::SimpleThread {
   std::unique_ptr<Socket> sock1_;
   char buf0_[kBufSize] = {0};
   char buf1_[kBufSize] = {0};
-  ssize_t len0_;
-  ssize_t len1_;
+  size_t len0_;
+  size_t len1_;
   // Indicates if an EOF has been sent (if it is greater than -1) and which
   // socket fd it was received on. This means that the socket file descriptor
   // indicated here should not be read from, only written to.

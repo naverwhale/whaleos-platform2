@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@
 #include <set>
 #include <string>
 
-#include <base/macros.h>
+#include <base/memory/weak_ptr.h>
 #include <base/observer_list.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
@@ -25,6 +25,21 @@ namespace policy {
 
 class SuspendDelayObserver;
 
+class SuspendInternalDelay {
+ public:
+  explicit SuspendInternalDelay(const std::string& description);
+  SuspendInternalDelay(const SuspendInternalDelay&) = delete;
+  SuspendInternalDelay& operator=(const SuspendInternalDelay&) = delete;
+  ~SuspendInternalDelay() = default;
+
+  std::string Description() const;
+
+ private:
+  std::string description_;
+
+  base::WeakPtrFactory<SuspendInternalDelay> weak_ptr_factory_;
+};
+
 // Handles D-Bus requests to delay suspending until other processes have had
 // time to do last-minute cleanup.
 class SuspendDelayController {
@@ -35,12 +50,12 @@ class SuspendDelayController {
   SuspendDelayController(const SuspendDelayController&) = delete;
   SuspendDelayController& operator=(const SuspendDelayController&) = delete;
 
-  ~SuspendDelayController();
+  ~SuspendDelayController() = default;
 
   // Default value corresponding to maximum suspend delay i.e. maximum time
   // spent waiting to suspend after it's initiated.
   static constexpr base::TimeDelta kDefaultMaxSuspendDelayTimeout =
-      base::TimeDelta::FromSeconds(20);
+      base::Seconds(20);
 
   bool ReadyForSuspend() const;
 
@@ -70,6 +85,19 @@ class SuspendDelayController {
   // Called when |client| has gone away (i.e. a NameOwnerChanged signal was
   // received with |client| in its |name| field and an empty |new_owner| field.
   void HandleDBusClientDisconnected(const std::string& client);
+
+  // Adds a one time delay to suspend from an internal power_manager class. The
+  // delay should be removed using |RemoveSuspendInternalDelay| before suspend
+  // is initiated. Should be used when classes need asynchronous work to finish
+  // before suspend.
+  // Returns true if the delay was successfully added and false otherwise. A
+  // delay may fail to be added if SuspendObservers have already started to be
+  // notified that suspend is ready to proceed.
+  bool AddSuspendInternalDelay(const SuspendInternalDelay* delay);
+
+  // Removed an internal suspend delay for when the asynchronous work that
+  // required the delay is completed.
+  void RemoveSuspendInternalDelay(const SuspendInternalDelay* delay);
 
   // Called when suspend is desired.  Updates |current_suspend_id_| and
   // |delays_being_waited_on_| and notifies clients that suspend is imminent. If
@@ -101,7 +129,7 @@ class SuspendDelayController {
   // resume. This delay helps for external monitor enumeration when the
   // device dark resumes on hot plug detect.
   static constexpr base::TimeDelta kDarkResumeMinDelayTimeout =
-      base::TimeDelta::FromSeconds(5);
+      base::Seconds(10);
 
   // Returns a substring to use in log messages to describe the types of
   // suspends controlled by this object. If |description_| is non-empty,
@@ -120,6 +148,9 @@ class SuspendDelayController {
   // cancels the max delay expiration timeout and notifies observers that it's
   // safe to to suspend.
   void RemoveDelayFromWaitList(int delay_id);
+
+  // Call the |PostNotifyObserversTask| function if suspend is ready.
+  void NotifyIfReadyForSuspend();
 
   // Called by |max_delay_expiration_timer_| after a PrepareForSuspend() call if
   // HandleSuspendReadiness() isn't invoked for all registered delays before the
@@ -153,11 +184,16 @@ class SuspendDelayController {
   int next_delay_id_;
 
   // ID corresponding to the current (or most-recent) suspend attempt.
-  int current_suspend_id_;
+  int current_suspend_id_ = 0;
 
   // IDs of delays registered by clients that haven't yet said they're ready to
   // suspend.
   std::set<int> delay_ids_being_waited_on_;
+
+  // Set of internal delays being waited on, which should be added by
+  // power_manager classes that need asynchronous work to be finished before
+  // suspend.
+  std::set<const SuspendInternalDelay*> internal_delays_;
 
   // Maximum time that the controller will wait for a suspend delay to become
   // ready.
@@ -171,6 +207,10 @@ class SuspendDelayController {
 
   // Used to invoke OnMinDelayExpiration().
   base::OneShotTimer min_delay_expiration_timer_;
+
+  // Used to ensure SuspendInternalDelays are not added after we notify
+  // observers of suspend readiness.
+  bool suspend_readiness_notified_ = false;
 
   // Defaulted to |kDarkResumeMinDelayTimeout|. Overridden for test
   // cases. Note that this timer is armed only on dark resume.

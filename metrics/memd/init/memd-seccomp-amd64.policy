@@ -1,7 +1,10 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
+
 # Use this to generate a starting list of syscalls:
 #
 # strace -f minijail0 -i /usr/bin/memd always-poll-fast >& /tmp/memd.strace & sleep 3; dbus-send --system --type=signal / org.chromium.EventLogger.ChromeEvent string:tab-discard
@@ -19,10 +22,12 @@ connect: 1
 exit_group: 1
 fcntl: 1
 fstat: 1
+fstatfs: 1
 ftruncate: 1
 futex: 1
 geteuid: 1
 getpid: 1
+getrandom: arg2 in ~GRND_RANDOM
 getresgid: 1
 getresuid: 1
 getrlimit: 1
@@ -31,9 +36,10 @@ gettid: 1
 # TCGETS gets tty settings, FIOCLEX is close on exec.
 ioctl: arg1 == TCGETS || arg1 == FIOCLEX
 lseek: 1
-# Make sure PROT_WRITE (bit 1) and PROT_EXEC (bit 2) are not both set.
-mmap: arg2 in 0xfffffffb || arg2 in 0xfffffffd
-mprotect: arg2 in 0xfffffffb || arg2 in 0xfffffffd
+memfd_create: 1
+# Prevent PROT_WRITE | PROT_EXEC.
+mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 munmap: 1
 nanosleep: 1
 newfstatat: 1

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,16 @@
 
 #include "power_manager/powerd/system/ambient_light_sensor_interface.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class AmbientLightSensorManagerInterface {
  public:
-  AmbientLightSensorManagerInterface() {}
+  AmbientLightSensorManagerInterface() = default;
   AmbientLightSensorManagerInterface(
       const AmbientLightSensorManagerInterface&) = delete;
   AmbientLightSensorManagerInterface& operator=(
       const AmbientLightSensorManagerInterface&) = delete;
-  virtual ~AmbientLightSensorManagerInterface() {}
+  virtual ~AmbientLightSensorManagerInterface() = default;
 
   virtual AmbientLightSensorInterface* GetSensorForInternalBacklight() = 0;
   virtual AmbientLightSensorInterface* GetSensorForKeyboardBacklight() = 0;
@@ -25,7 +24,6 @@ class AmbientLightSensorManagerInterface {
   virtual bool HasColorSensor() = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_AMBIENT_LIGHT_SENSOR_MANAGER_INTERFACE_H_

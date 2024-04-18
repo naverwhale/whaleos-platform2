@@ -1,16 +1,18 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
+#include <optional>
 
 #include "shill/eap_credentials.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/optional.h>
 #include <base/stl_util.h>
+#include <base/strings/stringprintf.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
 #include <libpasswordprovider/fake_password_provider.h>
@@ -18,11 +20,14 @@
 #include <libpasswordprovider/password_provider.h>
 #include <libpasswordprovider/password_provider_test_utils.h>
 
-#include "shill/fake_store.h"
-#include "shill/key_value_store.h"
 #include "shill/mock_certificate_file.h"
 #include "shill/mock_log.h"
 #include "shill/mock_metrics.h"
+#include "shill/store/fake_store.h"
+#include "shill/store/key_value_store.h"
+#include "shill/store/mock_pkcs11_slot_getter.h"
+#include "shill/store/pkcs11_util.h"
+#include "shill/store/property_store.h"
 #include "shill/supplicant/wpa_supplicant.h"
 #include "shill/technology.h"
 
@@ -32,6 +37,7 @@ using testing::DoAll;
 using testing::Mock;
 using testing::Return;
 using testing::SetArgPointee;
+using testing::WithArg;
 
 namespace shill {
 
@@ -114,6 +120,7 @@ class EapCredentialsTest : public testing::Test {
 
   EapCredentials eap_;
   MockCertificateFile certificate_file_;
+  MockPkcs11SlotGetter slot_getter_;
   KeyValueStore params_;
 };
 
@@ -122,7 +129,8 @@ TEST_F(EapCredentialsTest, PropertyStore) {
   eap_.InitPropertyStore(&store);
   const std::string kIdentity("Cross-Eyed Mary");
   Error error;
-  EXPECT_TRUE(store.SetStringProperty(kEapIdentityProperty, kIdentity, &error));
+  store.SetStringProperty(kEapIdentityProperty, kIdentity, &error);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(kIdentity, eap_.identity());
 }
 
@@ -271,19 +279,161 @@ TEST_F(EapCredentialsTest, LoadAndSave) {
   EXPECT_EQ(password, kPassword);
 }
 
+TEST_F(EapCredentialsTest, Load) {
+  const std::vector<std::string> kCaCertPem{"first line", "second line"};
+  const std::string kMethod("TTLS");
+  const std::string kInnerMethod("auth=AnotherMethod");
+  const std::string kIdentity("Red Fruit");
+  const std::string kPassword("One Time Password");
+  const std::string kSubjectNameMatch("domain1.com");
+  const std::vector<std::string> kAlternativeNameMatchList{"domain2.com",
+                                                           "domain3.com"};
+  const std::vector<std::string> kDomainSuffixMatchList{"domain4.com",
+                                                        "domain5.com"};
+
+  KeyValueStore store;
+  store.Set(kEapCaCertPemProperty, kCaCertPem);
+  store.Set(kEapMethodProperty, kMethod);
+  store.Set(kEapPhase2AuthProperty, kInnerMethod);
+  store.Set(kEapIdentityProperty, kIdentity);
+  store.Set(kEapPasswordProperty, kPassword);
+  store.Set(kEapSubjectMatchProperty, kSubjectNameMatch);
+  store.Set(kEapSubjectAlternativeNameMatchProperty, kAlternativeNameMatchList);
+  store.Set(kEapDomainSuffixMatchProperty, kDomainSuffixMatchList);
+  eap_.Load(store);
+
+  EXPECT_EQ(kMethod, eap_.method());
+  EXPECT_EQ(kInnerMethod, eap_.inner_method());
+  EXPECT_EQ(kIdentity, eap_.identity());
+  EXPECT_EQ(kPassword, eap_.password_);
+  EXPECT_EQ(kCaCertPem, eap_.ca_cert_pem());
+  EXPECT_EQ(kSubjectNameMatch, eap_.subject_match());
+  EXPECT_EQ(kAlternativeNameMatchList,
+            eap_.subject_alternative_name_match_list());
+  EXPECT_EQ(kDomainSuffixMatchList, eap_.domain_suffix_match_list());
+  // Other fields keep their default value.
+  EXPECT_TRUE(eap_.anonymous_identity_.empty());
+  EXPECT_TRUE(eap_.cert_id_.empty());
+  EXPECT_TRUE(eap_.key_id_.empty());
+  EXPECT_TRUE(eap_.pin_.empty());
+  EXPECT_TRUE(eap_.ca_cert_id_.empty());
+  EXPECT_TRUE(eap_.tls_version_max_.empty());
+  EXPECT_TRUE(eap_.use_system_cas());
+  EXPECT_FALSE(eap_.use_proactive_key_caching_);
+  EXPECT_FALSE(eap_.use_login_password_);
+
+  EapCredentials eap2;
+  eap2.Load(eap_);
+  EXPECT_EQ(eap_.method(), eap2.method());
+  EXPECT_EQ(eap_.inner_method(), eap2.inner_method());
+  EXPECT_EQ(eap_.identity(), eap2.identity());
+  EXPECT_EQ(eap_.password_, eap2.password_);
+  EXPECT_EQ(eap_.ca_cert_pem(), eap2.ca_cert_pem());
+  EXPECT_EQ(eap_.subject_match(), eap2.subject_match());
+  EXPECT_EQ(eap_.subject_alternative_name_match_list(),
+            eap2.subject_alternative_name_match_list());
+  EXPECT_EQ(eap_.domain_suffix_match_list(), eap2.domain_suffix_match_list());
+  EXPECT_EQ(eap_.anonymous_identity_, eap2.anonymous_identity_);
+  EXPECT_EQ(eap_.cert_id_, eap2.cert_id_);
+  EXPECT_EQ(eap_.key_id_, eap2.key_id_);
+  EXPECT_EQ(eap_.pin_, eap2.pin_);
+  EXPECT_EQ(eap_.ca_cert_id_, eap2.ca_cert_id_);
+  EXPECT_EQ(eap_.tls_version_max_, eap2.tls_version_max_);
+  EXPECT_EQ(eap_.use_system_cas(), eap2.use_system_cas());
+  EXPECT_EQ(eap_.use_proactive_key_caching_, eap2.use_proactive_key_caching_);
+  EXPECT_EQ(eap_.use_login_password_, eap2.use_login_password_);
+}
+
+TEST_F(EapCredentialsTest, Load_UserSlot) {
+  FakeStore store;
+  const std::string kId("storage-id");
+  const std::string kCertId("1:AAAAAAAA");
+  const std::string kOutdatedCertId("2:AAAAAAAA");
+
+  // CertID and KeyID are expected to be equal.
+  store.SetString(kId, EapCredentials::kStorageEapCertID, kOutdatedCertId);
+  store.SetString(kId, EapCredentials::kStorageEapKeyID, kOutdatedCertId);
+  store.SetInt(kId, EapCredentials::kStorageEapSlot, pkcs11::kUser);
+
+  // Expect invalid certificate and key ID to be corrected.
+  eap_.SetEapSlotGetter(&slot_getter_);
+  EXPECT_CALL(slot_getter_,
+              GetPkcs11SlotIdWithRetries(pkcs11::Slot::kUser, _, _))
+      .WillOnce(WithArg<1>([](base::OnceCallback<void(CK_SLOT_ID)> callback) {
+        std::move(callback).Run(1);
+      }));
+  eap_.Load(&store, kId);
+
+  EXPECT_EQ(eap_.cert_id_, kCertId);
+  EXPECT_EQ(eap_.key_id_, kCertId);
+}
+
+TEST_F(EapCredentialsTest, Load_SystemSlot) {
+  FakeStore store;
+  const std::string kId("storage-id");
+  const std::string kCertId("0:AAAAAAAA");
+  const std::string kOutdatedCertId("2:AAAAAAAA");
+
+  // CertID and KeyID are expected to be equal.
+  store.SetString(kId, EapCredentials::kStorageEapCertID, kOutdatedCertId);
+  store.SetString(kId, EapCredentials::kStorageEapKeyID, kOutdatedCertId);
+  store.SetInt(kId, EapCredentials::kStorageEapSlot, pkcs11::kSystem);
+
+  // Expect invalid certificate and key ID to be corrected.
+  eap_.SetEapSlotGetter(&slot_getter_);
+  EXPECT_CALL(slot_getter_,
+              GetPkcs11SlotIdWithRetries(pkcs11::Slot::kSystem, _, _))
+      .WillOnce(WithArg<1>([](base::OnceCallback<void(CK_SLOT_ID)> callback) {
+        std::move(callback).Run(0);
+      }));
+  eap_.Load(&store, kId);
+
+  EXPECT_EQ(eap_.cert_id_, kCertId);
+  EXPECT_EQ(eap_.key_id_, kCertId);
+}
+
+TEST_F(EapCredentialsTest, SaveAndLoad_Pkcs11Id) {
+  FakeStore store;
+  const std::string kCertId("1:AAAAAAAA");
+  eap_.cert_id_ = kCertId;
+  const std::string kKeyId("1:AAAAAAAA");
+  eap_.key_id_ = kKeyId;
+  const std::string kId("storage-id");
+
+  eap_.SetEapSlotGetter(&slot_getter_);
+  EXPECT_CALL(slot_getter_, GetPkcs11SlotId(pkcs11::Slot::kUser))
+      .WillOnce(Return(1));
+  eap_.Save(&store, kId, /*save_credentials=*/true);
+
+  // Clear the values.
+  eap_.cert_id_ = "";
+  eap_.key_id_ = "";
+
+  eap_.SetEapSlotGetter(&slot_getter_);
+  EXPECT_CALL(slot_getter_,
+              GetPkcs11SlotIdWithRetries(pkcs11::Slot::kUser, _, _))
+      .WillOnce(WithArg<1>([](base::OnceCallback<void(CK_SLOT_ID)> callback) {
+        std::move(callback).Run(1);
+      }));
+  eap_.Load(&store, kId);
+
+  EXPECT_EQ(eap_.cert_id_, kCertId);
+  EXPECT_EQ(eap_.key_id_, kKeyId);
+}
+
 TEST_F(EapCredentialsTest, OutputConnectionMetrics) {
   Error unused_error;
   SetEap(kEapMethodPEAP);
   SetInnerEap(kEapPhase2AuthPEAPMSCHAPV2);
 
   MockMetrics metrics;
-  EXPECT_CALL(metrics, SendEnumToUMA("Network.Shill.Wifi.EapOuterProtocol",
-                                     Metrics::kEapOuterProtocolPeap,
-                                     Metrics::kEapOuterProtocolMax));
-  EXPECT_CALL(metrics, SendEnumToUMA("Network.Shill.Wifi.EapInnerProtocol",
-                                     Metrics::kEapInnerProtocolPeapMschapv2,
-                                     Metrics::kEapInnerProtocolMax));
-  eap_.OutputConnectionMetrics(&metrics, Technology::kWifi);
+  EXPECT_CALL(metrics, SendEnumToUMA(Metrics::kMetricNetworkEapOuterProtocol,
+                                     Technology(Technology::kWiFi),
+                                     Metrics::kEapOuterProtocolPeap));
+  EXPECT_CALL(metrics, SendEnumToUMA(Metrics::kMetricNetworkEapInnerProtocol,
+                                     Technology(Technology::kWiFi),
+                                     Metrics::kEapInnerProtocolPeapMschapv2));
+  eap_.OutputConnectionMetrics(&metrics, Technology::kWiFi);
 }
 
 TEST_F(EapCredentialsTest, PopulateSupplicantProperties) {
@@ -645,7 +795,7 @@ TEST_F(EapCredentialsTest, TestSubjectAlternativeNameMatchTranslation) {
        "{\"Type\":\"URI\",\"Value\":\"my_uri\"}"});
   std::string expected_translated =
       "EMAIL:my_email_1;EMAIL:my_email_2;EMAIL:my;email;DNS:my_dns;URI:my_uri";
-  base::Optional<std::string> altsubject_match =
+  std::optional<std::string> altsubject_match =
       EapCredentials::TranslateSubjectAlternativeNameMatch(
           subject_alternative_name_match_list);
   EXPECT_TRUE(altsubject_match.has_value());
@@ -655,7 +805,7 @@ TEST_F(EapCredentialsTest, TestSubjectAlternativeNameMatchTranslation) {
 TEST_F(EapCredentialsTest, TestSubjectAlternativeNameMatchTranslationFailure) {
   const std::vector<std::string> subject_alternative_name_match_list(
       {"{\"TYPE\":\"EMAIL\",\"Value\":\"my;email\"}"});
-  base::Optional<std::string> altsubject_match =
+  std::optional<std::string> altsubject_match =
       EapCredentials::TranslateSubjectAlternativeNameMatch(
           subject_alternative_name_match_list);
   EXPECT_FALSE(altsubject_match.has_value());

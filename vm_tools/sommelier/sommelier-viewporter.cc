@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -62,9 +62,9 @@ static void sl_destroy_host_viewport(struct wl_resource* resource) {
   struct sl_host_viewport* host =
       static_cast<sl_host_viewport*>(wl_resource_get_user_data(resource));
 
-  wl_resource_set_user_data(resource, NULL);
+  wl_resource_set_user_data(resource, nullptr);
   wl_list_remove(&host->viewport.link);
-  free(host);
+  delete host;
 }
 
 static void sl_viewporter_destroy(struct wl_client* client,
@@ -78,9 +78,7 @@ static void sl_viewporter_get_viewport(struct wl_client* client,
                                        struct wl_resource* surface_resource) {
   struct sl_host_surface* host_surface = static_cast<sl_host_surface*>(
       wl_resource_get_user_data(surface_resource));
-  struct sl_host_viewport* host_viewport =
-      static_cast<sl_host_viewport*>(malloc(sizeof(*host_viewport)));
-  assert(host_viewport);
+  struct sl_host_viewport* host_viewport = new sl_host_viewport();
 
   host_viewport->viewport.src_x = -1;
   host_viewport->viewport.src_y = -1;
@@ -105,8 +103,8 @@ static void sl_destroy_host_viewporter(struct wl_resource* resource) {
       static_cast<sl_host_viewporter*>(wl_resource_get_user_data(resource));
 
   wp_viewporter_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_bind_host_viewporter(struct wl_client* client,
@@ -114,9 +112,7 @@ static void sl_bind_host_viewporter(struct wl_client* client,
                                     uint32_t version,
                                     uint32_t id) {
   struct sl_context* ctx = (struct sl_context*)data;
-  struct sl_host_viewporter* host =
-      static_cast<sl_host_viewporter*>(malloc(sizeof(*host)));
-  assert(host);
+  struct sl_host_viewporter* host = new sl_host_viewporter();
   host->viewporter = ctx->viewporter;
   host->resource = wl_resource_create(client, &wp_viewporter_interface, 1, id);
   wl_resource_set_implementation(host->resource, &sl_viewporter_implementation,

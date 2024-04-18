@@ -1,18 +1,17 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/optional.h>
-#include <base/run_loop.h>
-#include <base/stl_util.h>
+#include <base/functional/bind.h>
 #include <base/test/task_environment.h>
+#include <base/test/repeating_test_future.h>
 #include <libmems/common_types.h>
 #include <libmems/test_fakes.h>
 #include <mojo/core/embedder/scoped_ipc_support.h>
@@ -55,9 +54,9 @@ class SensorDeviceFusionGravityTest : public ::testing::Test {
     EXPECT_TRUE(
         device->WriteStringAttribute(libmems::kSamplingFrequencyAvailable,
                                      fakes::kFakeSamplingFrequencyAvailable));
-    for (int i = 0; i < base::size(libmems::fakes::kFakeAccelChns); ++i) {
-      auto chn = std::make_unique<libmems::fakes::FakeIioChannel>(
-          libmems::fakes::kFakeAccelChns[i], true);
+    for (const auto& channel : libmems::fakes::kFakeAccelChns) {
+      auto chn =
+          std::make_unique<libmems::fakes::FakeIioChannel>(channel, true);
       device->AddChannel(std::move(chn));
     }
     EXPECT_TRUE(
@@ -117,52 +116,47 @@ class SensorDeviceFusionGravityTest : public ::testing::Test {
 // Despite the lack of iio gyroscope, and |sensor_device_fusion_| will be
 // invalidated, attributes should be successfully retrieved.
 TEST_F(SensorDeviceFusionGravityTest, GetAttributes) {
-  base::RunLoop loop;
+  base::test::RepeatingTestFuture<
+      const std::vector<std::optional<std::string>>&>
+      future;
 
   remote_->GetAttributes(
       {kDeviceAttrName, cros::mojom::kSamplingFrequencyAvailable,
        cros::mojom::kDeviceName},
-      base::BindOnce(
-          [](base::RepeatingClosure closure,
-             const std::vector<base::Optional<std::string>>& values) {
-            EXPECT_EQ(values.size(), 3u);
-            EXPECT_TRUE(values[0].has_value());
-            EXPECT_EQ(values[0].value().compare(kParsedDeviceAttrValue), 0);
-            EXPECT_TRUE(values[1].has_value());
-            EXPECT_EQ(values[1].value(),
-                      GetSamplingFrequencyAvailable(
-                          SensorDeviceFusionGravity::kAccelMinFrequency,
-                          kMaxFrequency));
-            EXPECT_TRUE(values[2].has_value());
-            EXPECT_EQ(values[2].value(), SensorDeviceFusionGravity::kName);
-            closure.Run();
-          },
-          loop.QuitClosure()));
-  loop.Run();
+      future.GetCallback());
+
+  const std::vector<std::optional<std::string>>& values = future.Take();
+
+  EXPECT_EQ(values.size(), 3u);
+  EXPECT_TRUE(values[0].has_value());
+  EXPECT_EQ(values[0].value().compare(kParsedDeviceAttrValue), 0);
+  EXPECT_TRUE(values[1].has_value());
+  EXPECT_EQ(values[1].value(),
+            GetSamplingFrequencyAvailable(
+                SensorDeviceFusionGravity::kAccelMinFrequency, kMaxFrequency));
+  EXPECT_TRUE(values[2].has_value());
+  EXPECT_EQ(values[2].value(), SensorDeviceFusionGravity::kName);
 }
 
 TEST_F(SensorDeviceFusionGravityTest, GetChannelsAttributes) {
-  base::RunLoop loop;
+  base::test::RepeatingTestFuture<
+      const std::vector<std::optional<std::string>>&>
+      future;
 
   std::vector<int32_t> indices;
   size_t size = GetGravityChannels().size();
   for (size_t i = 0; i < size; ++i)
     indices.push_back(i);
 
-  remote_->GetChannelsAttributes(
-      indices, {cros::mojom::kScale},
-      base::BindOnce(
-          [](base::RepeatingClosure closure, size_t size,
-             const std::vector<base::Optional<std::string>>& values) {
-            EXPECT_EQ(values.size(), size);
-            // Gravity device channels' attributes are not provided for now.
-            for (size_t i = 0; i < size; ++i)
-              EXPECT_FALSE(values[i].has_value());
+  remote_->GetChannelsAttributes(indices, {cros::mojom::kScale},
+                                 future.GetCallback());
 
-            closure.Run();
-          },
-          loop.QuitClosure(), size));
-  loop.Run();
+  const std::vector<std::optional<std::string>>& values = future.Take();
+
+  EXPECT_EQ(values.size(), size);
+  // Gravity device channels' attributes are not provided for now.
+  for (size_t i = 0; i < size; ++i)
+    EXPECT_FALSE(values[i].has_value());
 }
 
 }  // namespace

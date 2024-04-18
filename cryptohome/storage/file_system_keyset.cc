@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,37 @@
 
 #include <brillo/cryptohome.h>
 
+#include <libhwsec-foundation/crypto/secure_blob_util.h>
+#include "cryptohome/cryptohome_common.h"
+
 using brillo::SecureBlob;
-using brillo::cryptohome::home::SanitizeUserNameWithSalt;
+using hwsec_foundation::CreateSecureRandomBlob;
 
 namespace cryptohome {
+
+FileSystemKeyset FileSystemKeyset::CreateRandom() {
+  const FileSystemKey key = {
+      .fek = CreateSecureRandomBlob(kCryptohomeDefaultKeySize),
+      .fnek = CreateSecureRandomBlob(kCryptohomeDefaultKeySize),
+      .fek_salt = CreateSecureRandomBlob(kCryptohomeDefaultKeySaltSize),
+      .fnek_salt = CreateSecureRandomBlob(kCryptohomeDefaultKeySaltSize),
+  };
+
+  const FileSystemKeyReference key_reference = {
+      .fek_sig = CreateSecureRandomBlob(kCryptohomeDefaultKeySignatureSize),
+      .fnek_sig = CreateSecureRandomBlob(kCryptohomeDefaultKeySignatureSize),
+  };
+
+  const brillo::SecureBlob chaps_key =
+      CreateSecureRandomBlob(kCryptohomeChapsKeyLength);
+
+  return FileSystemKeyset(key, key_reference, chaps_key);
+}
 
 FileSystemKeyset::FileSystemKeyset() = default;
 FileSystemKeyset::~FileSystemKeyset() = default;
 
-FileSystemKeyset::FileSystemKeyset(
-    const cryptohome::VaultKeyset& vault_keyset) {
+FileSystemKeyset::FileSystemKeyset(const VaultKeyset& vault_keyset) {
   key_.fek = vault_keyset.GetFek();
   key_.fek_salt = vault_keyset.GetFekSalt();
   key_.fnek = vault_keyset.GetFnek();
@@ -27,11 +48,16 @@ FileSystemKeyset::FileSystemKeyset(
   chaps_key_ = vault_keyset.GetChapsKey();
 }
 
-const FileSystemKey FileSystemKeyset::Key() const {
+FileSystemKeyset::FileSystemKeyset(FileSystemKey key,
+                                   FileSystemKeyReference key_reference,
+                                   brillo::SecureBlob chaps_key)
+    : key_(key), key_reference_(key_reference), chaps_key_(chaps_key) {}
+
+const FileSystemKey& FileSystemKeyset::Key() const {
   return key_;
 }
 
-const FileSystemKeyReference FileSystemKeyset::KeyReference() const {
+const FileSystemKeyReference& FileSystemKeyset::KeyReference() const {
   return key_reference_;
 }
 

@@ -1,17 +1,8 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "attestation/common/tpm_utility_common.h"
-
-#if USE_TPM2
-#include "attestation/common/tpm_utility_v2.h"
-#include "trunks/trunks_factory_for_test.h"
-#endif
-
-#if USE_TPM1
-#include "attestation/common/tpm_utility_v1.h"
-#endif
 
 #include <utility>
 #include <vector>
@@ -22,6 +13,16 @@
 #include <libhwsec-foundation/tpm/tpm_version.h>
 #include <tpm_manager-client/tpm_manager/dbus-constants.h>
 #include <tpm_manager/client/mock_tpm_manager_utility.h>
+
+#if USE_TPM2
+#include <trunks/trunks_factory_for_test.h>
+
+#include "attestation/common/tpm_utility_v2.h"
+#endif
+
+#if USE_TPM1
+#include "attestation/common/tpm_utility_v1.h"
+#endif
 
 namespace {
 
@@ -81,12 +82,22 @@ TEST_F(TpmUtilityCommonTest, IsTpmReadySuccess) {
   EXPECT_TRUE(this->tpm_utility_->IsTpmReady());
 }
 
+TEST_F(TpmUtilityCommonTest, IsTpmReadyNotOwned) {
+  EXPECT_CALL(this->mock_tpm_manager_utility_, GetTpmStatus(_, _, _))
+      .WillOnce(
+          DoAll(SetArgPointee<0>(true), SetArgPointee<1>(false), Return(true)));
+  EXPECT_FALSE(this->tpm_utility_->IsTpmReady());
+}
+
 TEST_F(TpmUtilityCommonTest, IsTpmReadyWithOwnershipTakenSignal) {
   EXPECT_CALL(this->mock_tpm_manager_utility_, GetTpmStatus(_, _, _))
       .WillOnce(Return(false));
   EXPECT_FALSE(this->tpm_utility_->IsTpmReady());
   EXPECT_FALSE(this->tpm_utility_->IsTpmReady());
 
+  EXPECT_CALL(this->mock_tpm_manager_utility_, GetTpmStatus(_, _, _))
+      .WillOnce(
+          DoAll(SetArgPointee<0>(true), SetArgPointee<1>(true), Return(true)));
   this->OnOwnershipTakenSignal();
   EXPECT_TRUE(this->tpm_utility_->IsTpmReady());
 }

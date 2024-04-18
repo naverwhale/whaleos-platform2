@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -9,27 +9,23 @@ pkg_config("libcros_healthd_executor_pkg_deps") {
   pkg_deps = [
     "libbrillo",
     "libchrome",
+    "libdlcservice-client",
+    "libec",
     "libmojo",
+    "re2",
   ]
 }
 
 source_set("libcros_healthd_executor") {
-  configs += [ ":libcros_healthd_executor_pkg_deps" ]
-  deps = [
-    "//diagnostics/cros_healthd/process:libcros_healthd_process",
-    "//diagnostics/cros_healthd/utils:libcros_healthd_utils",
-    "//diagnostics/mojo:cros_healthd_executor_mojo_bindings",
-  ]
   sources = [
     "executor.cc",
-    "executor_adapter_impl.cc",
-    "executor_mojo_service.cc",
+    "executor_daemon.cc",
   ]
-}
-
-if (use.test || use.fuzzer) {
-  source_set("libcros_healthd_executor_test_utils") {
-    deps = [ "//diagnostics/mojo:cros_healthd_executor_mojo_bindings" ]
-    sources = [ "mock_executor_adapter.cc" ]
-  }
+  configs += [ ":libcros_healthd_executor_pkg_deps" ]
+  deps = [
+    "//diagnostics/base",
+    "//diagnostics/cros_healthd/executor/utils",
+    "//diagnostics/cros_healthd/mojom:cros_healthd_executor_mojo_bindings",
+    "//diagnostics/cros_healthd/utils:libcros_healthd_utils",
+  ]
 }

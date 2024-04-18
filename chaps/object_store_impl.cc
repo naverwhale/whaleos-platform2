@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,15 +18,10 @@
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/secure_blob.h>
+#include <brillo/files/file_util.h>
 #include <leveldb/db.h>
-#include <leveldb/env.h>
-#ifndef NO_MEMENV
-#include <leveldb/helpers/memenv.h>
-#endif
-#ifndef NO_METRICS
-#include <metrics/metrics_library.h>
-#endif
 
+#include "chaps/chaps_metrics.h"
 #include "chaps/chaps_utility.h"
 #include "pkcs11/cryptoki.h"
 
@@ -37,25 +32,6 @@ using std::string;
 using std::vector;
 
 namespace {
-
-// Encapsulate UMA event generation.
-class MetricsWrapper {
- public:
-  MetricsWrapper() {}
-
-  bool SendUMAEvent(const std::string& event) {
-#ifndef NO_METRICS
-    return metrics_.SendCrosEventToUMA(event);
-#else
-    return false;
-#endif
-  }
-
- private:
-#ifndef NO_METRICS
-  MetricsLibrary metrics_;
-#endif
-};
 
 // Logs information about |db_dir| before opening the leveldb.
 // TODO(https://crbug.com/844537): Remove or decrease log level when root cause
@@ -133,24 +109,13 @@ ObjectStoreImpl::~ObjectStoreImpl() {
   }
 }
 
-bool ObjectStoreImpl::Init(const FilePath& database_path) {
-  MetricsWrapper metrics;
-
+bool ObjectStoreImpl::Init(const FilePath& database_path,
+                           ChapsMetrics* chaps_metrics) {
   LOG(INFO) << "Opening database in: " << database_path.value();
+  chaps_metrics->ReportCrosEvent(kDatabaseOpenAttempt);
   leveldb::Options options;
   options.create_if_missing = true;
   options.paranoid_checks = true;
-  if (database_path.value() == ":memory:") {
-#ifndef NO_MEMENV
-    // Memory only environment, useful for testing.
-    LOG(INFO) << "Using memory-only environment.";
-    env_.reset(leveldb::NewMemEnv(leveldb::Env::Default()));
-    options.env = env_.get();
-#else
-    LOG(ERROR) << "Compiled without memory-only environment support.";
-    return false;
-#endif
-  }
   FilePath database_name = database_path.Append(kDatabaseDirectory);
   database_name_ = database_name;
   // TODO(https://crbug.com/844537): Remove or decrease log level when root
@@ -161,7 +126,7 @@ bool ObjectStoreImpl::Init(const FilePath& database_path) {
       leveldb::DB::Open(options, database_name.value(), &db);
   if (!status.ok()) {
     LOG(ERROR) << "Failed to open database: " << status.ToString();
-    metrics.SendUMAEvent("Chaps.DatabaseCorrupted");
+    chaps_metrics->ReportCrosEvent(kDatabaseCorrupted);
     LOG(WARNING) << "Attempting to repair database.";
     status = leveldb::RepairDB(database_name.value(), leveldb::Options());
     if (status.ok())
@@ -170,14 +135,14 @@ bool ObjectStoreImpl::Init(const FilePath& database_path) {
 
   if (!status.ok()) {
     LOG(ERROR) << "Failed to repair database: " << status.ToString();
-    metrics.SendUMAEvent("Chaps.DatabaseRepairFailure");
+    chaps_metrics->ReportCrosEvent(kDatabaseRepairFailure);
     // We don't want to risk using a database that has been corrupted. Recreate
     // the database from scratch but save the corrupted database for diagnostic
     // purposes.
     LOG(WARNING) << "Recreating database from scratch. Moving current database "
                  << "to " << kCorruptDatabaseDirectory;
     FilePath corrupt_db_path = database_path.Append(kCorruptDatabaseDirectory);
-    base::DeletePathRecursively(corrupt_db_path);
+    brillo::DeletePathRecursively(corrupt_db_path);
     if (!base::Move(database_name, corrupt_db_path)) {
       LOG(ERROR) << "Failed to move database." << status.ToString();
       return false;
@@ -187,9 +152,11 @@ bool ObjectStoreImpl::Init(const FilePath& database_path) {
 
   if (!status.ok()) {
     LOG(ERROR) << "Failed to create new database: " << status.ToString();
-    metrics.SendUMAEvent("Chaps.DatabaseCreateFailure");
+    chaps_metrics->ReportCrosEvent(kDatabaseCreateFailure);
     return false;
   }
+
+  chaps_metrics->ReportCrosEvent(kDatabaseOpenedSuccessfully);
 
   // TODO(https://crbug.com/844537): Remove or decrease log level when root
   // cause of disappearing system token certificates is found.

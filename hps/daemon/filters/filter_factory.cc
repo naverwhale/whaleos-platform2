@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,9 @@
 #include <memory>
 #include <utility>
 
+#include <base/logging.h>
+
+#include "hps/daemon/filters/average_filter.h"
 #include "hps/daemon/filters/consecutive_results_filter.h"
 #include "hps/daemon/filters/filter_watcher.h"
 #include "hps/daemon/filters/threshold_filter.h"
@@ -14,7 +17,7 @@
 namespace hps {
 
 // TODO(slangley): This needs confirming from MI team.
-constexpr uint8_t kDefaultThreshold = 127;
+constexpr int kDefaultThreshold = 0;
 
 std::unique_ptr<Filter> CreateFilter(const hps::FeatureConfig& config,
                                      StatusCallback signal) {
@@ -27,14 +30,14 @@ std::unique_ptr<Filter> CreateFilter(const hps::FeatureConfig& config,
       break;
     case FeatureConfig::kConsecutiveResultsFilterConfig:
       filter = std::make_unique<ConsecutiveResultsFilter>(
-          config.consecutive_results_filter_config().threshold(),
-          config.consecutive_results_filter_config().count(),
-          config.consecutive_results_filter_config().initial_state());
+          config.consecutive_results_filter_config());
       break;
-    default:
-      LOG(FATAL) << "Unexpected config";
+    case FeatureConfig::kAverageFilterConfig:
+      filter = std::make_unique<AverageFilter>(config.average_filter_config());
+      break;
   }
-  return std::make_unique<FilterWatcher>(std::move(filter), std::move(signal));
+  return std::make_unique<FilterWatcher>(std::move(filter), std::move(signal),
+                                         config.report_raw_results());
 }
 
 }  // namespace hps

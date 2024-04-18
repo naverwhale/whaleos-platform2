@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,20 +8,17 @@
 #include <map>
 #include <string>
 
-#include <base/macros.h>
-
 #include "power_manager/powerd/system/cros_ec_helper_interface.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class CrosEcHelperStub : public CrosEcHelperInterface {
  public:
-  CrosEcHelperStub();
+  CrosEcHelperStub() = default;
   CrosEcHelperStub(const CrosEcHelperStub&) = delete;
   CrosEcHelperStub& operator=(const CrosEcHelperStub&) = delete;
 
-  ~CrosEcHelperStub() override;
+  ~CrosEcHelperStub() override = default;
 
   // Implementation of EcHelperInterface.
   bool IsWakeAngleSupported() override;
@@ -30,10 +27,9 @@ class CrosEcHelperStub : public CrosEcHelperInterface {
   bool IsWakeupAsTabletAllowed();
 
  private:
-  bool wakeup_as_tablet_allowed_;
+  bool wakeup_as_tablet_allowed_ = false;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_CROS_EC_HELPER_STUB_H_

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,11 +13,24 @@
 #include <memory>
 #include <string>
 
+#include <base/files/file_path.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/time/time.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/arc_util.h"
 #include "crash-reporter/user_collector_base.h"
+
+inline constexpr char kBoardProperty[] = "ro.product.board";
+inline constexpr char kCpuAbiProperty[] = "ro.product.cpu.abi";
+inline constexpr char kDevicePropertyP[] = "ro.product.device";
+inline constexpr char kDevicePropertyR[] = "ro.product.system.device";
+inline constexpr char kFingerprintProperty[] = "ro.build.fingerprint";
+
+bool GetArcProperties(const base::FilePath& build_prop_path,
+                      arc_util::BuildProperty* build_property);
 
 // Collector for system crashes in the ARC container.
 class ArcppCxxCollector : public UserCollectorBase {
@@ -27,19 +40,31 @@ class ArcppCxxCollector : public UserCollectorBase {
 
     virtual bool GetArcPid(pid_t* pid) const = 0;
     virtual bool GetPidNamespace(pid_t pid, std::string* ns) const = 0;
-    virtual bool GetExeBaseName(pid_t pid, std::string* exe) const = 0;
+    virtual bool GetExecBaseNameAndDirectory(
+        pid_t pid, std::string* exec, base::FilePath* exec_directory) const = 0;
     virtual bool GetCommand(pid_t pid, std::string* command) const = 0;
     virtual bool ReadAuxvForProcess(pid_t pid, std::string* contents) const = 0;
   };
 
   using ContextPtr = std::unique_ptr<Context>;
 
-  ArcppCxxCollector();
-  explicit ArcppCxxCollector(ContextPtr context);
+  explicit ArcppCxxCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
+  explicit ArcppCxxCollector(
+      ContextPtr context,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   ArcppCxxCollector(const ArcppCxxCollector&) = delete;
   ArcppCxxCollector& operator=(const ArcppCxxCollector&) = delete;
 
   ~ArcppCxxCollector() override = default;
+
+  // Returns the severity level and product group of the crash.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
 
   const Context& context() const { return *context_; }
 
@@ -54,8 +79,8 @@ class ArcppCxxCollector : public UserCollectorBase {
 
  private:
   FRIEND_TEST(ArcppCxxCollectorTest, CorrectlyDetectBitness);
-  FRIEND_TEST(ArcppCxxCollectorTest, GetExeBaseNameForUserCrash);
-  FRIEND_TEST(ArcppCxxCollectorTest, GetExeBaseNameForArcCrash);
+  FRIEND_TEST(ArcppCxxCollectorTest, GetExecBaseNameForUserCrash);
+  FRIEND_TEST(ArcppCxxCollectorTest, GetExecBaseNameForArcCrash);
   FRIEND_TEST(ArcppCxxCollectorTest, ShouldDump);
 
   // Shift for UID namespace in ARC.
@@ -70,7 +95,10 @@ class ArcppCxxCollector : public UserCollectorBase {
 
     bool GetArcPid(pid_t* pid) const override;
     bool GetPidNamespace(pid_t pid, std::string* ns) const override;
-    bool GetExeBaseName(pid_t pid, std::string* exe) const override;
+    bool GetExecBaseNameAndDirectory(
+        pid_t pid,
+        std::string* exec,
+        base::FilePath* exec_directory) const override;
     bool GetCommand(pid_t pid, std::string* command) const override;
     bool ReadAuxvForProcess(pid_t pid, std::string* contents) const override;
 
@@ -80,7 +108,10 @@ class ArcppCxxCollector : public UserCollectorBase {
 
   // CrashCollector overrides.
   std::string GetProductVersion() const override;
-  bool GetExecutableBaseNameFromPid(pid_t pid, std::string* base_name) override;
+  bool GetExecutableBaseNameAndDirectoryFromPid(
+      pid_t pid,
+      std::string* base_name,
+      base::FilePath* exec_directory) override;
 
   // UserCollectorBase overrides.
   bool ShouldDump(pid_t pid,

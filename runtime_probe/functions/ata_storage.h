@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef RUNTIME_PROBE_FUNCTIONS_ATA_STORAGE_H_
 #define RUNTIME_PROBE_FUNCTIONS_ATA_STORAGE_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -12,16 +13,16 @@
 
 namespace runtime_probe {
 
-class AtaStorageFunction final : public StorageFunction {
+class AtaStorageFunction : public StorageFunction {
   using StorageFunction::StorageFunction;
 
  public:
   NAME_PROBE_FUNCTION("ata_storage");
 
  protected:
-  base::Optional<base::Value> ProbeFromSysfs(
+  std::optional<base::Value> ProbeFromSysfs(
       const base::FilePath& node_path) const override;
-  base::Optional<base::Value> ProbeFromStorageTool(
+  std::optional<base::Value> ProbeFromStorageTool(
       const base::FilePath& node_path) const override;
 };
 

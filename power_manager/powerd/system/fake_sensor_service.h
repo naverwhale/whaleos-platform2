@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,7 @@
 
 #include "power_manager/powerd/system/fake_sensor_device.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class FakeSensorService : public cros::mojom::SensorService {
  public:
@@ -42,14 +41,19 @@ class FakeSensorService : public cros::mojom::SensorService {
       mojo::PendingRemote<cros::mojom::SensorServiceNewDevicesObserver>
           observer) override;
 
-  std::map<int32_t, std::unique_ptr<FakeSensorDevice>> sensor_devices_;
+ private:
+  struct DeviceInfo {
+    cros::mojom::DeviceType type;
+    std::unique_ptr<FakeSensorDevice> sensor_device;
+  };
+
+  std::map<int32_t, DeviceInfo> device_infos_;
 
   mojo::ReceiverSet<cros::mojom::SensorService> receiver_set_;
   std::vector<mojo::Remote<cros::mojom::SensorServiceNewDevicesObserver>>
       observers_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_FAKE_SENSOR_SERVICE_H_

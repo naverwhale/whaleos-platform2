@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,39 +17,28 @@ class Credentials;
 
 class MockMount : public Mount {
  public:
-  MockMount();
-  ~MockMount();
-  MOCK_METHOD(bool, Init, (), (override));
-  MOCK_METHOD(bool,
+  MockMount() = default;
+  ~MockMount() override = default;
+  MOCK_METHOD(StorageStatus,
               MountCryptohome,
-              (const std::string&,
+              (const Username&,
                const FileSystemKeyset&,
-               const Mount::MountArgs&,
-               bool,
-               MountError*),
+               const CryptohomeVault::Options&),
               (override));
-  MOCK_METHOD(MountError,
+  MOCK_METHOD(StorageStatus,
               MountEphemeralCryptohome,
-              (const std::string&),
+              (const Username&),
               (override));
   MOCK_METHOD(bool, UnmountCryptohome, (), (override));
   MOCK_METHOD(bool, IsMounted, (), (const, override));
+  MOCK_METHOD(bool, IsEphemeral, (), (const, override));
   MOCK_METHOD(bool, IsNonEphemeralMounted, (), (const, override));
-  MOCK_METHOD(bool, MountGuestCryptohome, (), (override));
-  MOCK_METHOD(const base::FilePath&, mount_point, (), (const, override));
   MOCK_METHOD(bool, OwnsMountPoint, (const base::FilePath&), (const, override));
-  MOCK_METHOD(bool, InsertPkcs11Token, (), (override));
-  MOCK_METHOD(void, RemovePkcs11Token, (), (override));
-  MOCK_METHOD(Pkcs11State, pkcs11_state, (), (override));
 
-  Pkcs11State Real_pkcs11_state() { return Mount::pkcs11_state(); }
-
-  MOCK_METHOD(
-      bool,
-      MigrateToDircrypto,
-      (const dircrypto_data_migrator::MigrationHelper::ProgressCallback&,
-       MigrationType),
-      (override));
+  MOCK_METHOD(bool,
+              MigrateEncryption,
+              (const MigrationCallback&, MigrationType),
+              (override));
 };
 }  // namespace cryptohome
 

@@ -1,19 +1,14 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
-
-// This file is copied and modified from,
-// https://chrome-internal.googlesource.com/chromeos/platform/drivefs/+/HEAD/mojom/type_mappings.json
-
 {
   "c++": {
     "mojo_base.mojom.Time": {
       "hashable": false,
       "typename": "base::Time",
+      "forward_declaration": null,
       "traits_headers": [
         "ml/mojom/time_mojom_traits.h"
       ],
       "copyable_pass_by_value": true,
+      "default_constructible": true,
       "force_serialize": false,
       "move_only": false,
       "nullable_is_same_type": false,
@@ -25,10 +20,12 @@
     "mojo_base.mojom.TimeDelta": {
       "hashable": false,
       "typename": "base::TimeDelta",
+      "forward_declaration": null,
       "traits_headers": [
         "ml/mojom/time_mojom_traits.h"
       ],
       "copyable_pass_by_value": true,
+      "default_constructible": true,
       "force_serialize": false,
       "move_only": false,
       "nullable_is_same_type": false,

@@ -1,30 +1,33 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "runtime_probe/function_templates/storage.h"
 
+#include <optional>
 #include <utility>
 
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/strings/string_number_conversions.h>
 #include <brillo/strings/string_utils.h>
 
+#include "runtime_probe/system/context.h"
 #include "runtime_probe/utils/file_utils.h"
 #include "runtime_probe/utils/type_utils.h"
 
 namespace runtime_probe {
 namespace {
-constexpr auto kStorageDirPath("/sys/class/block/*");
+constexpr auto kStorageDirPath("sys/class/block/*");
 constexpr auto kReadFileMaxSize = 1024;
 constexpr auto kDefaultBytesPerSector = 512;
 
 // Get paths of all non-removeable physical storage.
 std::vector<base::FilePath> GetFixedDevices() {
   std::vector<base::FilePath> res{};
-  for (const auto& storage_path : Glob(kStorageDirPath)) {
+  const auto rooted_storage_dir_pattern =
+      Context::Get()->root_dir().Append(kStorageDirPath);
+  for (const auto& storage_path : Glob(rooted_storage_dir_pattern)) {
     // Only return non-removable devices.
     const auto storage_removable_path = storage_path.Append("removable");
     std::string removable_res;
@@ -41,7 +44,7 @@ std::vector<base::FilePath> GetFixedDevices() {
       continue;
     }
 
-    // Skip loobpack or dm-verity device.
+    // Skip loopback or dm-verity device.
     if (base::StartsWith(storage_path.BaseName().value(), "loop",
                          base::CompareCase::SENSITIVE) ||
         base::StartsWith(storage_path.BaseName().value(), "dm-",
@@ -55,7 +58,7 @@ std::vector<base::FilePath> GetFixedDevices() {
 }
 
 // Get storage size based on |node_path|.
-base::Optional<int64_t> GetStorageSectorCount(const base::FilePath& node_path) {
+std::optional<int64_t> GetStorageSectorCount(const base::FilePath& node_path) {
   // The sysfs entry for size info.
   const auto size_path = node_path.Append("size");
   std::string size_content;
@@ -63,41 +66,17 @@ base::Optional<int64_t> GetStorageSectorCount(const base::FilePath& node_path) {
                                          kReadFileMaxSize)) {
     LOG(WARNING) << "Storage device " << node_path.value()
                  << " does not specify size.";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   int64_t sector_int;
   if (!StringToInt64(size_content, &sector_int)) {
     LOG(ERROR) << "Failed to parse recorded sector of" << node_path.value()
                << " to integer!";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   return sector_int;
-}
-
-// Get the logical block size of the storage given the |node_path|.
-int32_t GetStorageLogicalBlockSize(const base::FilePath& node_path) {
-  std::string block_size_str;
-  if (!base::ReadFileToString(
-          node_path.Append("queue").Append("logical_block_size"),
-          &block_size_str)) {
-    LOG(WARNING) << "The storage driver does not specify its logical block "
-                    "size in sysfs. Use default value instead.";
-    return kDefaultBytesPerSector;
-  }
-  int32_t logical_block_size;
-  if (!StringToInt(block_size_str, &logical_block_size)) {
-    LOG(WARNING) << "Failed to convert retrieved block size to integer. Use "
-                    "default value instead";
-    return kDefaultBytesPerSector;
-  }
-  if (logical_block_size <= 0) {
-    LOG(WARNING) << "The value of logical block size " << logical_block_size
-                 << " seems errorneous. Use default value instead.";
-    return kDefaultBytesPerSector;
-  }
-  return logical_block_size;
 }
 
 }  // namespace
@@ -107,30 +86,29 @@ StorageFunction::DataType StorageFunction::EvalImpl() const {
   StorageFunction::DataType result{};
 
   for (const auto& node_path : storage_nodes_path_list) {
-    VLOG(2) << "Processnig the node " << node_path.value();
+    VLOG(2) << "Processing the node " << node_path.value();
 
     // Get type specific fields and their values.
     auto node_res = ProbeFromSysfs(node_path);
-    if (!node_res)
+    if (!node_res || !node_res->is_dict())
       continue;
 
     // Report the absolute path we probe the reported info from.
-    node_res->SetStringKey("path", node_path.value());
+    auto& dict = node_res->GetDict();
+    dict.Set("path", node_path.value());
 
     // Get size of storage.
     const auto sector_count = GetStorageSectorCount(node_path);
-    const int32_t logical_block_size = GetStorageLogicalBlockSize(node_path);
     if (!sector_count) {
-      node_res->SetStringKey("sectors", "-1");
-      node_res->SetStringKey("size", "-1");
+      dict.Set("sectors", "-1");
+      dict.Set("size", "-1");
     } else {
-      node_res->SetStringKey("sectors",
-                             base::NumberToString(sector_count.value()));
-      node_res->SetStringKey("size", base::NumberToString(sector_count.value() *
-                                                          logical_block_size));
+      dict.Set("sectors", base::NumberToString(sector_count.value()));
+      dict.Set("size", base::NumberToString(sector_count.value() *
+                                            kDefaultBytesPerSector));
     }
 
-    result.push_back(std::move(*node_res));
+    result.Append(std::move(*node_res));
   }
 
   return result;
@@ -139,15 +117,15 @@ StorageFunction::DataType StorageFunction::EvalImpl() const {
 void StorageFunction::PostHelperEvalImpl(
     StorageFunction::DataType* result) const {
   for (auto& storage_res : *result) {
-    auto* node_path = storage_res.FindStringKey("path");
+    auto& dict = storage_res.GetDict();
+    auto* node_path = dict.FindString("path");
     if (!node_path) {
       LOG(ERROR) << "No path in storage probe result";
       continue;
     }
-    const auto storage_aux_res =
-        ProbeFromStorageTool(base::FilePath(*node_path));
+    auto storage_aux_res = ProbeFromStorageTool(base::FilePath(*node_path));
     if (storage_aux_res)
-      storage_res.MergeDictionary(&*storage_aux_res);
+      dict.Merge(std::move(storage_aux_res->GetDict()));
   }
 }
 

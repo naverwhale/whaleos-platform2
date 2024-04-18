@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,9 +22,8 @@ class MockKeyChallengeServiceFactory : public KeyChallengeServiceFactory {
   MockKeyChallengeServiceFactory() = default;
   ~MockKeyChallengeServiceFactory() override = default;
 
-  MOCK_METHOD(std::unique_ptr<KeyChallengeService>,
-              New,
-              (scoped_refptr<::dbus::Bus> bus, const std::string&));
+  MOCK_METHOD(void, SetMountThreadBus, (scoped_refptr<::dbus::Bus> bus));
+  MOCK_METHOD(std::unique_ptr<KeyChallengeService>, New, (const std::string&));
 };
 
 }  // namespace cryptohome

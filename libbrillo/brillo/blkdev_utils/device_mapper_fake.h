@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,8 +32,10 @@ struct DmTarget {
 
 struct DmTask {
   int type;
+  bool deferred;
   std::string name;
   std::vector<DmTarget> targets;
+  std::string message;
 };
 
 // Fake task factory: creates fake tasks that
@@ -54,6 +56,9 @@ class FakeDevmapperTask : public brillo::DevmapperTask {
                      std::string* target,
                      SecureBlob* parameters) override;
   bool Run(bool udev_sync = true) override;
+  DeviceMapperVersion GetVersion() override;
+  bool SetMessage(const std::string& msg) override;
+  bool SetDeferredRemove() override;
 
  private:
   std::unique_ptr<DmTask> task_;

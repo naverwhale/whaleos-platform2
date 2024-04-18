@@ -1,10 +1,12 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/vpn/openvpn_driver.h"
 
+#include <iterator>
 #include <memory>
+#include <utility>
 
 #include <base/check.h>
 #include <base/containers/contains.h>
@@ -16,6 +18,7 @@
 #include <base/strings/stringprintf.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
+#include <net-base/ipv6_address.h>
 
 #include "shill/error.h"
 #include "shill/ipconfig.h"
@@ -27,18 +30,19 @@
 #include "shill/mock_event_dispatcher.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
-#include "shill/mock_process_manager.h"
-#include "shill/mock_virtual_device.h"
+#include "shill/net/mock_process_manager.h"
 #include "shill/rpc_task.h"
 #include "shill/technology.h"
-#include "shill/virtual_device.h"
+#include "shill/vpn/fake_vpn_util.h"
 #include "shill/vpn/mock_openvpn_management_server.h"
 #include "shill/vpn/mock_vpn_driver.h"
 #include "shill/vpn/mock_vpn_provider.h"
 #include "shill/vpn/vpn_service.h"
+#include "shill/vpn/vpn_types.h"
 
 using testing::_;
 using testing::DoAll;
+using testing::Eq;
 using testing::Field;
 using testing::Mock;
 using testing::NiceMock;
@@ -46,6 +50,26 @@ using testing::Return;
 using testing::SetArgPointee;
 
 namespace shill {
+
+namespace {
+constexpr char kOption[] = "openvpn-option";
+constexpr char kProperty[] = "OpenVPN.SomeProperty";
+constexpr char kValue[] = "some-property-value";
+constexpr char kOption2[] = "openvpn-option2";
+constexpr char kProperty2[] = "OpenVPN.SomeProperty2";
+constexpr char kValue2[] = "some-property-value2";
+constexpr char kGateway1[] = "10.242.2.13";
+constexpr char kNetmask1[] = "255.255.255.255";
+constexpr int kPrefix1 = 32;
+constexpr char kNetwork1[] = "10.242.2.1";
+constexpr char kGateway2[] = "10.242.2.14";
+constexpr char kNetmask2[] = "255.255.0.0";
+constexpr int kPrefix2 = 16;
+constexpr char kNetwork2[] = "192.168.0.0";
+constexpr char kInterfaceName[] = "tun0";
+constexpr int kInterfaceIndex = 123;
+constexpr char kOpenVPNConfigDirectory[] = "openvpn";
+}  // namespace
 
 struct AuthenticationExpectations {
   AuthenticationExpectations()
@@ -81,12 +105,10 @@ class OpenVPNDriverTest
  public:
   OpenVPNDriverTest()
       : manager_(&control_, &dispatcher_, &metrics_),
-        device_info_(&manager_),
         driver_(new OpenVPNDriver(&manager_, &process_manager_)),
         certificate_file_(new MockCertificateFile()),
         extra_certificates_file_(new MockCertificateFile()),
         management_server_(new NiceMock<MockOpenVPNManagementServer>()) {
-    manager_.set_mock_device_info(&device_info_);
     driver_->management_server_.reset(management_server_);
     driver_->certificate_file_.reset(certificate_file_);  // Passes ownership.
     driver_->extra_certificates_file_.reset(
@@ -94,6 +116,7 @@ class OpenVPNDriverTest
     CHECK(temporary_directory_.CreateUniqueTempDir());
     driver_->openvpn_config_directory_ =
         temporary_directory_.GetPath().Append(kOpenVPNConfigDirectory);
+    driver_->vpn_util_ = std::make_unique<FakeVPNUtil>();
   }
 
   ~OpenVPNDriverTest() override = default;
@@ -101,7 +124,6 @@ class OpenVPNDriverTest
   void SetUp() override {
     manager_.vpn_provider_ = std::make_unique<MockVPNProvider>();
     manager_.vpn_provider_->manager_ = &manager_;
-    manager_.user_traffic_uids_.push_back(1000);
     manager_.UpdateProviderMapping();
   }
 
@@ -115,24 +137,6 @@ class OpenVPNDriverTest
   }
 
  protected:
-  static const char kOption[];
-  static const char kProperty[];
-  static const char kValue[];
-  static const char kOption2[];
-  static const char kProperty2[];
-  static const char kValue2[];
-  static const char kGateway1[];
-  static const char kNetmask1[];
-  static const int kPrefix1;
-  static const char kNetwork1[];
-  static const char kGateway2[];
-  static const char kNetmask2[];
-  static const int kPrefix2;
-  static const char kNetwork2[];
-  static const char kInterfaceName[];
-  static const int kInterfaceIndex;
-  static const char kOpenVPNConfigDirectory[];
-
   void SetArg(const std::string& arg, const std::string& value) {
     driver_->args()->Set<std::string>(arg, value);
   }
@@ -158,8 +162,6 @@ class OpenVPNDriverTest
       std::vector<std::vector<std::string>>* options, Error* error) {
     return driver_->InitManagementChannelOptions(options, error);
   }
-
-  Sockets* GetSockets() { return &driver_->sockets_; }
 
   void SetEventHandler(VPNDriver::EventHandler* handler) {
     driver_->event_handler_ = handler;
@@ -199,12 +201,13 @@ class OpenVPNDriverTest
   void Notify(const std::string& reason,
               const std::map<std::string, std::string>& dict) override;
 
+  MockDeviceInfo* device_info() { return manager_.mock_device_info(); }
+
   MockControl control_;
   MockEventDispatcher dispatcher_;
   MockMetrics metrics_;
   MockProcessManager process_manager_;
   MockManager manager_;
-  NiceMock<MockDeviceInfo> device_info_;
   MockVPNDriverEventHandler event_handler_;
   std::unique_ptr<OpenVPNDriver> driver_;
   MockCertificateFile* certificate_file_;         // Owned by |driver_|.
@@ -216,24 +219,6 @@ class OpenVPNDriverTest
 
   base::FilePath lsb_release_file_;
 };
-
-const char OpenVPNDriverTest::kOption[] = "openvpn-option";
-const char OpenVPNDriverTest::kProperty[] = "OpenVPN.SomeProperty";
-const char OpenVPNDriverTest::kValue[] = "some-property-value";
-const char OpenVPNDriverTest::kOption2[] = "openvpn-option2";
-const char OpenVPNDriverTest::kProperty2[] = "OpenVPN.SomeProperty2";
-const char OpenVPNDriverTest::kValue2[] = "some-property-value2";
-const char OpenVPNDriverTest::kGateway1[] = "10.242.2.13";
-const char OpenVPNDriverTest::kNetmask1[] = "255.255.255.255";
-const int OpenVPNDriverTest::kPrefix1 = 32;
-const char OpenVPNDriverTest::kNetwork1[] = "10.242.2.1";
-const char OpenVPNDriverTest::kGateway2[] = "10.242.2.14";
-const char OpenVPNDriverTest::kNetmask2[] = "255.255.0.0";
-const int OpenVPNDriverTest::kPrefix2 = 16;
-const char OpenVPNDriverTest::kNetwork2[] = "192.168.0.0";
-const char OpenVPNDriverTest::kInterfaceName[] = "tun0";
-const int OpenVPNDriverTest::kInterfaceIndex = 123;
-const char OpenVPNDriverTest::kOpenVPNConfigDirectory[] = "openvpn";
 
 void OpenVPNDriverTest::GetLogin(std::string* /*user*/,
                                  std::string* /*password*/) {}
@@ -257,7 +242,7 @@ void OpenVPNDriverTest::ExpectNotInFlags(
 }
 
 void OpenVPNDriverTest::SetupLSBRelease() {
-  static const char kLSBReleaseContents[] =
+  static constexpr char kLSBReleaseContents[] =
       "\n"
       "=\n"
       "foo=\n"
@@ -267,23 +252,24 @@ void OpenVPNDriverTest::SetupLSBRelease() {
       "CHROMEOS_RELEASE_NAME=Chromium OS\n"
       "CHROMEOS_RELEASE_VERSION=2202.0\n";
   EXPECT_TRUE(base::CreateTemporaryFile(&lsb_release_file_));
-  EXPECT_EQ(base::size(kLSBReleaseContents),
+  EXPECT_EQ(std::size(kLSBReleaseContents),
             base::WriteFile(lsb_release_file_, kLSBReleaseContents,
-                            base::size(kLSBReleaseContents)));
+                            std::size(kLSBReleaseContents)));
   EXPECT_EQ(OpenVPNDriver::kLSBReleaseFile, driver_->lsb_release_file_.value());
   driver_->lsb_release_file_ = lsb_release_file_;
 }
 
+TEST_F(OpenVPNDriverTest, VPNType) {
+  EXPECT_EQ(driver_->vpn_type(), VPNType::kOpenVPN);
+}
+
 TEST_F(OpenVPNDriverTest, ConnectAsync) {
-  static const char kHost[] = "192.168.2.254";
+  static constexpr char kHost[] = "192.168.2.254";
   SetArg(kProviderHostProperty, kHost);
-  EXPECT_CALL(*management_server_, Start(_, _)).WillOnce(Return(true));
+  EXPECT_CALL(*management_server_, Start).WillOnce(Return(true));
   EXPECT_CALL(manager_, IsConnected()).WillOnce(Return(false));
-  EXPECT_CALL(process_manager_,
-              StartProcessInMinijail(
-                  _, _, _, _, MinijailOptionsMatchCloseNonstdFDs(true), _))
-      .WillOnce(Return(10101));
-  EXPECT_CALL(device_info_, CreateTunnelInterface(_)).WillOnce(Return(true));
+  EXPECT_CALL(process_manager_, StartProcessInMinijail).WillOnce(Return(10101));
+  EXPECT_CALL(*device_info(), CreateTunnelInterface(_)).WillOnce(Return(true));
   base::TimeDelta timeout = driver_->ConnectAsync(&event_handler_);
   EXPECT_EQ(timeout, GetDefaultConnectTimeout());
 
@@ -291,42 +277,67 @@ TEST_F(OpenVPNDriverTest, ConnectAsync) {
 }
 
 TEST_F(OpenVPNDriverTest, Notify) {
-  std::map<std::string, std::string> config;
+  constexpr auto kIPv4Addr = "1.2.3.4";
+  constexpr auto kIPv6Addr = "fd01::1";
   SetEventHandler(&event_handler_);
   driver_->interface_name_ = kInterfaceName;
   driver_->interface_index_ = kInterfaceIndex;
-  EXPECT_CALL(event_handler_,
-              OnDriverConnected(kInterfaceName, kInterfaceIndex));
-  driver_->Notify("up", config);
-  IPConfig::Properties ip_properties = driver_->GetIPProperties();
-  EXPECT_EQ(ip_properties.address, "");
 
-  // Tests that existing properties are reused if no new ones provided.
+  // OpenVPN process does not give us a valid config.
+  EXPECT_CALL(event_handler_,
+              OnDriverConnected(kInterfaceName, kInterfaceIndex))
+      .Times(0);
+  driver_->Notify("up", {});
+  ASSERT_EQ(driver_->GetIPv4Properties(), nullptr);
+  ASSERT_EQ(driver_->GetIPv6Properties(), nullptr);
+
+  // Sets up the environment again.
+  SetEventHandler(&event_handler_);
+  driver_->interface_name_ = kInterfaceName;
+  driver_->interface_index_ = kInterfaceIndex;
+
+  // Gets IPv4 configurations.
   EXPECT_CALL(event_handler_,
               OnDriverConnected(kInterfaceName, kInterfaceIndex));
-  driver_->ip_properties_.address = "1.2.3.4";
-  driver_->Notify("up", config);
-  ip_properties = driver_->GetIPProperties();
-  EXPECT_EQ(ip_properties.address, "1.2.3.4");
+  driver_->Notify("up", {{"ifconfig_local", kIPv4Addr}});
+  ASSERT_NE(driver_->GetIPv4Properties(), nullptr);
+  EXPECT_EQ(driver_->GetIPv4Properties()->address, kIPv4Addr);
+  ASSERT_EQ(driver_->GetIPv6Properties(), nullptr);
+
+  // Gets IPv6 configurations. This also tests that existing properties are
+  // reused if no new ones provided. (Note that normally v4 and v6 configuration
+  // should come together.)
+  EXPECT_CALL(event_handler_,
+              OnDriverConnected(kInterfaceName, kInterfaceIndex));
+  driver_->Notify("up", {{"ifconfig_ipv6_local", kIPv6Addr}});
+  ASSERT_NE(driver_->GetIPv4Properties(), nullptr);
+  EXPECT_EQ(driver_->GetIPv4Properties()->address, kIPv4Addr);
+  ASSERT_NE(driver_->GetIPv6Properties(), nullptr);
+  EXPECT_EQ(driver_->GetIPv6Properties()->address, kIPv6Addr);
+
+  EXPECT_CALL(event_handler_,
+              OnDriverConnected(kInterfaceName, kInterfaceIndex));
+  driver_->Notify("up", {});
+  ASSERT_NE(driver_->GetIPv4Properties(), nullptr);
+  EXPECT_EQ(driver_->GetIPv4Properties()->address, kIPv4Addr);
+  ASSERT_NE(driver_->GetIPv6Properties(), nullptr);
+  EXPECT_EQ(driver_->GetIPv6Properties()->address, kIPv6Addr);
 }
 
 TEST_P(OpenVPNDriverTest, NotifyUMA) {
-  std::map<std::string, std::string> config;
+  std::map<std::string, std::string> config = {{"ifconfig_local", "1.2.3.4"}};
   SetEventHandler(&event_handler_);
 
   // Check that UMA metrics are emitted on Notify.
   EXPECT_CALL(metrics_, SendEnumToUMA(Metrics::kMetricVpnDriver,
-                                      Metrics::kVpnDriverOpenVpn,
-                                      Metrics::kMetricVpnDriverMax));
+                                      Metrics::kVpnDriverOpenVpn));
   EXPECT_CALL(metrics_,
               SendEnumToUMA(Metrics::kMetricVpnRemoteAuthenticationType,
-                            GetParam().remote_authentication_type,
-                            Metrics::kVpnRemoteAuthenticationTypeMax));
+                            GetParam().remote_authentication_type));
   for (const auto& authentication_type : GetParam().user_authentication_types) {
     EXPECT_CALL(metrics_,
                 SendEnumToUMA(Metrics::kMetricVpnUserAuthenticationType,
-                              authentication_type,
-                              Metrics::kVpnUserAuthenticationTypeMax));
+                              authentication_type));
   }
 
   Error unused_error;
@@ -443,17 +454,21 @@ TEST_F(OpenVPNDriverTest, GetRouteOptionEntry) {
   EXPECT_EQ(route, &routes[13]);
 }
 
-TEST_F(OpenVPNDriverTest, ParseRouteOption) {
+TEST_F(OpenVPNDriverTest, ParseIPv4RouteOption) {
   OpenVPNDriver::RouteOptions routes;
-  OpenVPNDriver::ParseRouteOption("foo", "bar", &routes);
+  const auto invoke = [&routes](const std::string& key,
+                                const std::string& value) {
+    return OpenVPNDriver::ParseIPv4RouteOption(key, value, &routes);
+  };
+  EXPECT_FALSE(invoke("foo", "bar"));
   EXPECT_TRUE(routes.empty());
-  OpenVPNDriver::ParseRouteOption("gateway_2", kGateway2, &routes);
-  OpenVPNDriver::ParseRouteOption("netmask_2", kNetmask2, &routes);
-  OpenVPNDriver::ParseRouteOption("network_2", kNetwork2, &routes);
+  EXPECT_TRUE(invoke("gateway_2", kGateway2));
+  EXPECT_TRUE(invoke("netmask_2", kNetmask2));
+  EXPECT_TRUE(invoke("network_2", kNetwork2));
   EXPECT_EQ(1, routes.size());
-  OpenVPNDriver::ParseRouteOption("gateway_1", kGateway1, &routes);
-  OpenVPNDriver::ParseRouteOption("netmask_1", kNetmask1, &routes);
-  OpenVPNDriver::ParseRouteOption("network_1", kNetwork1, &routes);
+  EXPECT_TRUE(invoke("gateway_1", kGateway1));
+  EXPECT_TRUE(invoke("netmask_1", kNetmask1));
+  EXPECT_TRUE(invoke("network_1", kNetwork1));
   EXPECT_EQ(2, routes.size());
   EXPECT_EQ(kGateway1, routes[1].gateway);
   EXPECT_EQ(kPrefix1, routes[1].prefix);
@@ -463,37 +478,50 @@ TEST_F(OpenVPNDriverTest, ParseRouteOption) {
   EXPECT_EQ(kNetwork2, routes[2].host);
 }
 
-TEST_F(OpenVPNDriverTest, SetRoutes) {
+TEST_F(OpenVPNDriverTest, ParseIPv6RouteOption) {
   OpenVPNDriver::RouteOptions routes;
-  routes[2].host = "2.3.4.5";
-  routes[2].prefix = 8;
+  const auto invoke = [&routes](const std::string& key,
+                                const std::string& value) {
+    return OpenVPNDriver::ParseIPv6RouteOption(key, value, &routes);
+  };
+  EXPECT_FALSE(invoke("foo", "bar"));
+  EXPECT_FALSE(invoke("network_1", "fd00::/64"));  // network_* is for IPv4
+  EXPECT_TRUE(routes.empty());
 
-  routes[3].prefix = 8;
-  routes[3].gateway = "1.2.3.5";
+  // Do not verify routes.empty() here, since a valid key with an invalid value
+  // will actually create an entry.
+  EXPECT_FALSE(invoke("ipv6_network_1", "fd00::/130"));
 
-  routes[4].host = kNetwork1;
-  routes[4].prefix = kPrefix1;
-  routes[4].gateway = kGateway1;
+  constexpr char kAddr1[] = "fd00::";
+  constexpr int kPrefix1 = 64;
+  constexpr char kGateway1[] = "fd00::1";
+  constexpr char kAddr2[] = "fd01::";
+  constexpr int kPrefix2 = 96;
+  constexpr char kGateway2[] = "fd01::1";
+  constexpr char kAddr3[] = "fd02::";
+  constexpr char kGateway3[] = "fd02::1";
+  const auto prefix_str = [](const char* addr, int prefix) {
+    return base::StringPrintf("%s/%d", addr, prefix);
+  };
 
-  routes[5].host = kNetwork2;
-  routes[5].prefix = kPrefix2;
-  routes[5].gateway = kGateway2;
-
-  IPConfig::Properties props;
-  props.address = kGateway1;
-  OpenVPNDriver::SetRoutes(routes, &props);
-  ASSERT_EQ(2, props.routes.size());
-
-  EXPECT_EQ(kGateway1, props.routes[0].gateway);
-  EXPECT_EQ(kPrefix1, props.routes[0].prefix);
-  EXPECT_EQ(kNetwork1, props.routes[0].host);
-  EXPECT_EQ(kGateway1, props.routes[1].gateway);
-  EXPECT_EQ(kPrefix2, props.routes[1].prefix);
-  EXPECT_EQ(kNetwork2, props.routes[1].host);
-
-  // Tests that the routes are not reset if no new routes are supplied.
-  OpenVPNDriver::SetRoutes(OpenVPNDriver::RouteOptions(), &props);
-  EXPECT_EQ(2, props.routes.size());
+  // The string without prefix length means the address with maximum prefix
+  // length.
+  EXPECT_TRUE(invoke("ipv6_network_3", kAddr3));
+  EXPECT_TRUE(invoke("ipv6_gateway_3", kGateway3));
+  EXPECT_TRUE(invoke("ipv6_network_2", prefix_str(kAddr2, kPrefix2)));
+  EXPECT_TRUE(invoke("ipv6_gateway_2", kGateway2));
+  EXPECT_TRUE(invoke("ipv6_network_1", prefix_str(kAddr1, kPrefix1)));
+  EXPECT_TRUE(invoke("ipv6_gateway_1", kGateway1));
+  EXPECT_EQ(3, routes.size());
+  EXPECT_EQ(kAddr1, routes[1].host);
+  EXPECT_EQ(kPrefix1, routes[1].prefix);
+  EXPECT_EQ(kGateway1, routes[1].gateway);
+  EXPECT_EQ(kAddr2, routes[2].host);
+  EXPECT_EQ(kPrefix2, routes[2].prefix);
+  EXPECT_EQ(kGateway2, routes[2].gateway);
+  EXPECT_EQ(kAddr3, routes[3].host);
+  EXPECT_EQ(net_base::IPv6CIDR::kMaxPrefixLength, routes[3].prefix);
+  EXPECT_EQ(kGateway3, routes[3].gateway);
 }
 
 TEST_F(OpenVPNDriverTest, SplitPortFromHost) {
@@ -519,25 +547,6 @@ TEST_F(OpenVPNDriverTest, SplitPortFromHost) {
   EXPECT_EQ("12345", port);
 }
 
-TEST_F(OpenVPNDriverTest, ParseForeignOption) {
-  std::vector<std::string> domain_search;
-  std::vector<std::string> dns_servers;
-  IPConfig::Properties props;
-  OpenVPNDriver::ParseForeignOption("", &domain_search, &dns_servers);
-  OpenVPNDriver::ParseForeignOption("dhcp-option DOMAIN", &domain_search,
-                                    &dns_servers);
-  OpenVPNDriver::ParseForeignOption("dhcp-option DOMAIN zzz.com foo",
-                                    &domain_search, &dns_servers);
-  OpenVPNDriver::ParseForeignOption("dhcp-Option DOmAIN xyz.com",
-                                    &domain_search, &dns_servers);
-  ASSERT_EQ(1, domain_search.size());
-  EXPECT_EQ("xyz.com", domain_search[0]);
-  OpenVPNDriver::ParseForeignOption("dhcp-option DnS 1.2.3.4", &domain_search,
-                                    &dns_servers);
-  ASSERT_EQ(1, dns_servers.size());
-  EXPECT_EQ("1.2.3.4", dns_servers[0]);
-}
-
 TEST_F(OpenVPNDriverTest, ParseForeignOptions) {
   // This also tests that std::map is a sorted container.
   std::map<int, std::string> options;
@@ -545,47 +554,50 @@ TEST_F(OpenVPNDriverTest, ParseForeignOptions) {
   options[2] = "dhcp-option DOMAIN two.com";
   options[8] = "dhcp-option DOMAIN eight.com";
   options[7] = "dhcp-option DOMAIN seven.com";
-  options[4] = "dhcp-option DOMAIN four.com";
+  options[4] = "dhcp-Option DOmAIN four.com";      // cases do not matter
+  options[9] = "dhcp-option dns 1.2.3.4 1.2.3.4";  // ignore invalid
   options[10] = "dhcp-option dns 1.2.3.4";
-  IPConfig::Properties props;
-  OpenVPNDriver::ParseForeignOptions(options, &props);
-  ASSERT_EQ(5, props.domain_search.size());
-  EXPECT_EQ("two.com", props.domain_search[0]);
-  EXPECT_EQ("four.com", props.domain_search[1]);
-  EXPECT_EQ("five.com", props.domain_search[2]);
-  EXPECT_EQ("seven.com", props.domain_search[3]);
-  EXPECT_EQ("eight.com", props.domain_search[4]);
-  ASSERT_EQ(1, props.dns_servers.size());
-  EXPECT_EQ("1.2.3.4", props.dns_servers[0]);
-
-  // Test that the DNS properties are not updated if no new DNS properties are
-  // supplied.
-  OpenVPNDriver::ParseForeignOptions(std::map<int, std::string>(), &props);
-  EXPECT_EQ(5, props.domain_search.size());
-  ASSERT_EQ(1, props.dns_servers.size());
+  std::vector<std::string> search_domains;
+  std::vector<std::string> name_servers;
+  OpenVPNDriver::ParseForeignOptions(options, &search_domains, &name_servers);
+  ASSERT_EQ(5, search_domains.size());
+  EXPECT_EQ("two.com", search_domains[0]);
+  EXPECT_EQ("four.com", search_domains[1]);
+  EXPECT_EQ("five.com", search_domains[2]);
+  EXPECT_EQ("seven.com", search_domains[3]);
+  EXPECT_EQ("eight.com", search_domains[4]);
+  ASSERT_EQ(1, name_servers.size());
+  EXPECT_EQ("1.2.3.4", name_servers[0]);
 }
 
 TEST_F(OpenVPNDriverTest, ParseIPConfiguration) {
   std::map<std::string, std::string> config;
-  IPConfig::Properties props;
+  std::unique_ptr<IPConfig::Properties> ipv4_props;
+  std::unique_ptr<IPConfig::Properties> ipv6_props;
 
-  driver_->ParseIPConfiguration(config, &props);
-  EXPECT_EQ(IPAddress::kFamilyIPv4, props.address_family);
-  EXPECT_EQ(32, props.subnet_prefix);
+  const auto invoke = [&](bool ignore_redirect_gateway) {
+    auto ret =
+        OpenVPNDriver::ParseIPConfiguration(config, ignore_redirect_gateway);
+    ipv4_props = std::move(ret.ipv4_props);
+    ipv6_props = std::move(ret.ipv6_props);
+  };
 
-  props.subnet_prefix = 18;
-  driver_->ParseIPConfiguration(config, &props);
-  EXPECT_EQ(18, props.subnet_prefix);
+  config["ifconfig_loCal"] = "4.5.6.7";
+  invoke(false);
+  ASSERT_NE(ipv4_props, nullptr);
+  ASSERT_EQ(ipv6_props, nullptr);
+  EXPECT_EQ(net_base::IPFamily::kIPv4, ipv4_props->address_family);
+  EXPECT_EQ(32, ipv4_props->subnet_prefix);
 
   // An "ifconfig_remote" parameter that looks like a netmask should be
   // applied to the subnet prefix instead of to the peer address.
   config["ifconfig_remotE"] = "255.255.0.0";
-  driver_->ParseIPConfiguration(config, &props);
-  EXPECT_EQ(16, props.subnet_prefix);
-  EXPECT_EQ("", props.peer_address);
+  invoke(false);
+  ASSERT_NE(ipv4_props, nullptr);
+  ASSERT_EQ(ipv6_props, nullptr);
+  EXPECT_EQ(16, ipv4_props->subnet_prefix);
+  EXPECT_EQ("", ipv4_props->peer_address);
 
-  config["ifconfig_loCal"] = "4.5.6.7";
-  config["ifconfiG_broadcast"] = "1.2.255.255";
   config["ifconFig_netmAsk"] = "255.255.255.0";
   config["ifconfig_remotE"] = "33.44.55.66";
   config["route_vpN_gateway"] = "192.168.1.1";
@@ -601,43 +613,73 @@ TEST_F(OpenVPNDriverTest, ParseIPConfiguration) {
   config["route_gateway_2"] = kGateway2;
   config["route_gateway_1"] = kGateway1;
   config["foo"] = "bar";
-  driver_->ParseIPConfiguration(config, &props);
-  EXPECT_EQ(IPAddress::kFamilyIPv4, props.address_family);
-  EXPECT_EQ("4.5.6.7", props.address);
-  EXPECT_EQ("4.5.6.7", props.gateway);
-  EXPECT_EQ("1.2.255.255", props.broadcast_address);
-  EXPECT_EQ(24, props.subnet_prefix);
-  EXPECT_EQ("", props.peer_address);
-  EXPECT_EQ("99.88.77.66/32", props.exclusion_list[0]);
-  EXPECT_EQ(1, props.exclusion_list.size());
-  EXPECT_EQ(1000, props.mtu);
-  ASSERT_EQ(3, props.dns_servers.size());
-  EXPECT_EQ("1.1.1.1", props.dns_servers[0]);
-  EXPECT_EQ("4.4.4.4", props.dns_servers[1]);
-  EXPECT_EQ("2.2.2.2", props.dns_servers[2]);
-  ASSERT_EQ(3, props.routes.size());
-  EXPECT_EQ("4.5.6.7", props.routes[0].gateway);
-  EXPECT_EQ(32, props.routes[0].prefix);
-  EXPECT_EQ("33.44.55.66", props.routes[0].host);
-  EXPECT_EQ("4.5.6.7", props.routes[1].gateway);
-  EXPECT_EQ(kPrefix1, props.routes[1].prefix);
-  EXPECT_EQ(kNetwork1, props.routes[1].host);
-  EXPECT_EQ("4.5.6.7", props.routes[2].gateway);
-  EXPECT_EQ(kPrefix2, props.routes[2].prefix);
-  EXPECT_EQ(kNetwork2, props.routes[2].host);
-  EXPECT_FALSE(props.default_route);
+  invoke(false);
+  ASSERT_NE(ipv4_props, nullptr);
+  ASSERT_EQ(ipv6_props, nullptr);
+  EXPECT_EQ(net_base::IPFamily::kIPv4, ipv4_props->address_family);
+  EXPECT_EQ("4.5.6.7", ipv4_props->address);
+  EXPECT_EQ("0.0.0.0", ipv4_props->gateway);
+  EXPECT_EQ(24, ipv4_props->subnet_prefix);
+  EXPECT_EQ("", ipv4_props->peer_address);
+  EXPECT_TRUE(ipv4_props->exclusion_list.empty());
+  EXPECT_EQ(1000, ipv4_props->mtu);
+  ASSERT_EQ(3, ipv4_props->dns_servers.size());
+  EXPECT_EQ("1.1.1.1", ipv4_props->dns_servers[0]);
+  EXPECT_EQ("4.4.4.4", ipv4_props->dns_servers[1]);
+  EXPECT_EQ("2.2.2.2", ipv4_props->dns_servers[2]);
+  ASSERT_EQ(3, ipv4_props->inclusion_list.size());
+  ASSERT_EQ("33.44.55.66/32", ipv4_props->inclusion_list[0]);
+  ASSERT_EQ(base::StringPrintf("%s/%d", kNetwork1, kPrefix1),
+            ipv4_props->inclusion_list[1]);
+  ASSERT_EQ(base::StringPrintf("%s/%d", kNetwork2, kPrefix2),
+            ipv4_props->inclusion_list[2]);
+  EXPECT_FALSE(ipv4_props->default_route);
 
   config["redirect_gateway"] = "def1";
-  IPConfig::Properties props_with_gateway;
-  driver_->ParseIPConfiguration(config, &props_with_gateway);
-  EXPECT_TRUE(props_with_gateway.default_route);
-  EXPECT_TRUE(props_with_gateway.blackhole_ipv6);
+  invoke(false);
+  ASSERT_NE(ipv4_props, nullptr);
+  ASSERT_EQ(ipv6_props, nullptr);
+  EXPECT_TRUE(ipv4_props->default_route);
+  EXPECT_TRUE(ipv4_props->blackhole_ipv6);
 
   // Don't set a default route if the user asked to ignore it.
-  SetArg(kOpenVPNIgnoreDefaultRouteProperty, "some value");
-  IPConfig::Properties props_without_gateway;
-  driver_->ParseIPConfiguration(config, &props_without_gateway);
-  EXPECT_FALSE(props_without_gateway.default_route);
+  invoke(true);
+  ASSERT_NE(ipv4_props, nullptr);
+  ASSERT_EQ(ipv6_props, nullptr);
+  EXPECT_FALSE(ipv4_props->default_route);
+
+  // Set IPv6 properties, both v4 and v6 properties should not be nullptr.
+  config["ifconfig_ipv6_local"] = "fd00::1";
+  config["ifconfig_ipv6_netbits"] = "64";
+  config["route_ipv6_network_1"] = "fd02::/96";
+  config["route_ipv6_gateway_1"] = "fd02::1";
+  invoke(false);
+  ASSERT_NE(ipv4_props, nullptr);
+  ASSERT_NE(ipv6_props, nullptr);
+  EXPECT_TRUE(ipv4_props->default_route);
+  EXPECT_FALSE(ipv4_props->blackhole_ipv6);
+  EXPECT_EQ(kTypeVPN, ipv6_props->method);
+  EXPECT_EQ(net_base::IPFamily::kIPv6, ipv6_props->address_family);
+  EXPECT_EQ("fd00::1", ipv6_props->address);
+  EXPECT_EQ(64, ipv6_props->subnet_prefix);
+  EXPECT_EQ(2, ipv6_props->inclusion_list.size());
+  EXPECT_EQ("fd00::/64", ipv6_props->inclusion_list[0]);
+  EXPECT_EQ("fd02::/96", ipv6_props->inclusion_list[1]);
+  EXPECT_FALSE(ipv6_props->default_route);
+  // Original MTU value is too small for IPv6, so should be reset.
+  EXPECT_EQ(0, ipv6_props->mtu);
+  ASSERT_EQ(3, ipv6_props->dns_servers.size());
+  EXPECT_EQ("1.1.1.1", ipv6_props->dns_servers[0]);
+  EXPECT_EQ("4.4.4.4", ipv6_props->dns_servers[1]);
+  EXPECT_EQ("2.2.2.2", ipv6_props->dns_servers[2]);
+
+  // Update MTU value.
+  config["tun_mtu"] = "1500";
+  invoke(false);
+  ASSERT_NE(ipv4_props, nullptr);
+  ASSERT_NE(ipv6_props, nullptr);
+  EXPECT_EQ(1500, ipv4_props->mtu);
+  EXPECT_EQ(1500, ipv6_props->mtu);
 }
 
 TEST_F(OpenVPNDriverTest, InitOptionsNoHost) {
@@ -659,12 +701,12 @@ TEST_F(OpenVPNDriverTest, InitOptionsNoPrimaryHost) {
 }
 
 TEST_F(OpenVPNDriverTest, InitOptions) {
-  static const char kHost[] = "192.168.2.254";
-  static const char kTLSAuthContents[] = "SOME-RANDOM-CONTENTS\n";
-  static const char kID[] = "TestPKCS11ID";
-  static const char kKU0[] = "00";
-  static const char kKU1[] = "01";
-  static const char kTLSVersionMin[] = "1.2";
+  static constexpr char kHost[] = "192.168.2.254";
+  static constexpr char kTLSAuthContents[] = "SOME-RANDOM-CONTENTS\n";
+  static constexpr char kID[] = "TestPKCS11ID";
+  static constexpr char kKU0[] = "00";
+  static constexpr char kKU1[] = "01";
+  static constexpr char kTLSVersionMin[] = "1.2";
   base::FilePath empty_cert;
   SetArg(kProviderHostProperty, kHost);
   SetArg(kOpenVPNTLSAuthContentsProperty, kTLSAuthContents);
@@ -674,7 +716,7 @@ TEST_F(OpenVPNDriverTest, InitOptions) {
   SetArg(kOpenVPNTLSVersionMinProperty, kTLSVersionMin);
   driver_->rpc_task_.reset(new RpcTask(&control_, this));
   driver_->interface_name_ = kInterfaceName;
-  EXPECT_CALL(*management_server_, Start(_, _)).WillOnce(Return(true));
+  EXPECT_CALL(*management_server_, Start).WillOnce(Return(true));
   EXPECT_CALL(manager_, IsConnected()).WillOnce(Return(false));
 
   Error error;
@@ -686,7 +728,6 @@ TEST_F(OpenVPNDriverTest, InitOptions) {
   ExpectInFlags(options, {"setenv", kRpcTaskPathVariable,
                           RpcTaskMockAdaptor::kRpcId.value()});
   ExpectInFlags(options, {"dev", kInterfaceName});
-  ExpectInFlags(options, {"group", "openvpn"});
   EXPECT_EQ(kInterfaceName, driver_->interface_name_);
   ASSERT_FALSE(driver_->tls_auth_file_.empty());
   ExpectInFlags(options, {"tls-auth", driver_->tls_auth_file_.value()});
@@ -705,7 +746,7 @@ TEST_F(OpenVPNDriverTest, InitOptionsHostWithPort) {
   SetArg(kProviderHostProperty, "v.com:1234");
   driver_->rpc_task_.reset(new RpcTask(&control_, this));
   driver_->interface_name_ = kInterfaceName;
-  EXPECT_CALL(*management_server_, Start(_, _)).WillOnce(Return(true));
+  EXPECT_CALL(*management_server_, Start).WillOnce(Return(true));
   EXPECT_CALL(manager_, IsConnected()).WillOnce(Return(false));
 
   Error error;
@@ -721,7 +762,7 @@ TEST_F(OpenVPNDriverTest, InitOptionsHostWithExtraHosts) {
               {"abc.com:123", "127.0.0.1", "v.com:8000"});
   driver_->rpc_task_.reset(new RpcTask(&control_, this));
   driver_->interface_name_ = kInterfaceName;
-  EXPECT_CALL(*management_server_, Start(_, _)).WillOnce(Return(true));
+  EXPECT_CALL(*management_server_, Start).WillOnce(Return(true));
   EXPECT_CALL(manager_, IsConnected()).WillOnce(Return(false));
 
   Error error;
@@ -737,6 +778,33 @@ TEST_F(OpenVPNDriverTest, InitOptionsHostWithExtraHosts) {
   ExpectInFlags(options, {"remote", "v.com", "8000"});
 }
 
+TEST_F(OpenVPNDriverTest, InitOptionsAdvanced) {
+  SetArg(kProviderHostProperty, "example.com");
+  SetArg(kOpenVPNAuthProperty, "MD5");
+  SetArg(kOpenVPNCipherProperty, "AES-192-CBC");
+  SetArg(kOpenVPNCompressProperty, "lzo");
+  SetArg(kOpenVPNKeyDirectionProperty, "1");
+  SetArg(kOpenVPNTLSAuthContentsProperty, "SOME-RANDOM-CONTENTS\n");
+
+  driver_->rpc_task_.reset(new RpcTask(&control_, this));
+  driver_->interface_name_ = kInterfaceName;
+  EXPECT_CALL(*management_server_, Start).WillOnce(Return(true));
+  EXPECT_CALL(manager_, IsConnected()).WillOnce(Return(false));
+
+  Error error;
+  std::vector<std::vector<std::string>> options;
+  driver_->InitOptions(&options, &error);
+  EXPECT_TRUE(error.IsSuccess());
+  ExpectInFlags(options, {"auth", "MD5"});
+  ExpectInFlags(options, {"cipher", "AES-192-CBC"});
+  ExpectInFlags(options, {"compress", "lzo"});
+  ExpectInFlags(options, {"key-direction", "1"});
+  ExpectInFlags(options, {"tls-auth", driver_->tls_auth_file_.value()});
+  std::string contents;
+  EXPECT_TRUE(base::ReadFileToString(driver_->tls_auth_file_, &contents));
+  EXPECT_EQ("SOME-RANDOM-CONTENTS\n", contents);
+}
+
 TEST_F(OpenVPNDriverTest, InitCAOptions) {
   Error error;
   std::vector<std::vector<std::string>> options;
@@ -749,7 +817,7 @@ TEST_F(OpenVPNDriverTest, InitCAOptions) {
   SetArg(kProviderHostProperty, "");
 
   const std::vector<std::string> kCaCertPEM{"---PEM CONTENTS---"};
-  static const char kPEMCertfile[] = "/tmp/pem-cert";
+  static constexpr char kPEMCertfile[] = "/tmp/pem-cert";
   base::FilePath pem_cert(kPEMCertfile);
   EXPECT_CALL(*certificate_file_, CreatePEMFromStrings(kCaCertPEM))
       .WillOnce(Return(empty_cert))
@@ -778,7 +846,7 @@ TEST_F(OpenVPNDriverTest, InitCertificateVerifyOptions) {
     driver_->InitCertificateVerifyOptions(&options);
     EXPECT_TRUE(options.empty());
   }
-  const char kName[] = "x509-name";
+  constexpr char kName[] = "x509-name";
   {
     Error error;
     std::vector<std::vector<std::string>> options;
@@ -788,7 +856,7 @@ TEST_F(OpenVPNDriverTest, InitCertificateVerifyOptions) {
     driver_->InitCertificateVerifyOptions(&options);
     ExpectInFlags(options, {"verify-x509-name", kName});
   }
-  const char kType[] = "x509-type";
+  constexpr char kType[] = "x509-type";
   {
     Error error;
     std::vector<std::vector<std::string>> options;
@@ -809,7 +877,7 @@ TEST_F(OpenVPNDriverTest, InitCertificateVerifyOptions) {
 }
 
 TEST_F(OpenVPNDriverTest, InitClientAuthOptions) {
-  static const char kTestValue[] = "foo";
+  static constexpr char kTestValue[] = "foo";
   std::vector<std::vector<std::string>> options;
 
   // Assume user/password authentication.
@@ -866,7 +934,7 @@ TEST_F(OpenVPNDriverTest, InitExtraCertOptions) {
   }
   const std::vector<std::string> kExtraCerts{"---PEM CONTENTS---"};
   SetArgArray(kOpenVPNExtraCertPemProperty, kExtraCerts);
-  static const char kPEMCertfile[] = "/tmp/pem-cert";
+  static constexpr char kPEMCertfile[] = "/tmp/pem-cert";
   base::FilePath pem_cert(kPEMCertfile);
   EXPECT_CALL(*extra_certificates_file_, CreatePEMFromStrings(kExtraCerts))
       .WillOnce(Return(base::FilePath()))
@@ -894,7 +962,7 @@ TEST_F(OpenVPNDriverTest, InitPKCS11Options) {
   driver_->InitPKCS11Options(&options);
   EXPECT_TRUE(options.empty());
 
-  static const char kID[] = "TestPKCS11ID";
+  static constexpr char kID[] = "TestPKCS11ID";
   SetArg(kOpenVPNClientCertIdProperty, kID);
   driver_->InitPKCS11Options(&options);
   ExpectInFlags(options, {"pkcs11-id", kID});
@@ -903,8 +971,7 @@ TEST_F(OpenVPNDriverTest, InitPKCS11Options) {
 
 TEST_F(OpenVPNDriverTest, InitManagementChannelOptionsServerFail) {
   std::vector<std::vector<std::string>> options;
-  EXPECT_CALL(*management_server_, Start(GetSockets(), &options))
-      .WillOnce(Return(false));
+  EXPECT_CALL(*management_server_, Start(&options)).WillOnce(Return(false));
   Error error;
   EXPECT_FALSE(InitManagementChannelOptions(&options, &error));
   EXPECT_EQ(Error::kInternalError, error.type());
@@ -913,8 +980,7 @@ TEST_F(OpenVPNDriverTest, InitManagementChannelOptionsServerFail) {
 
 TEST_F(OpenVPNDriverTest, InitManagementChannelOptionsOnline) {
   std::vector<std::vector<std::string>> options;
-  EXPECT_CALL(*management_server_, Start(GetSockets(), &options))
-      .WillOnce(Return(true));
+  EXPECT_CALL(*management_server_, Start(&options)).WillOnce(Return(true));
   EXPECT_CALL(manager_, IsConnected()).WillOnce(Return(true));
   EXPECT_CALL(*management_server_, ReleaseHold());
   Error error;
@@ -924,8 +990,7 @@ TEST_F(OpenVPNDriverTest, InitManagementChannelOptionsOnline) {
 
 TEST_F(OpenVPNDriverTest, InitManagementChannelOptionsOffline) {
   std::vector<std::vector<std::string>> options;
-  EXPECT_CALL(*management_server_, Start(GetSockets(), &options))
-      .WillOnce(Return(true));
+  EXPECT_CALL(*management_server_, Start(&options)).WillOnce(Return(true));
   EXPECT_CALL(manager_, IsConnected()).WillOnce(Return(false));
   EXPECT_CALL(*management_server_, ReleaseHold()).Times(0);
   Error error;
@@ -1041,10 +1106,10 @@ TEST_F(OpenVPNDriverTest, AppendFlag) {
 }
 
 TEST_F(OpenVPNDriverTest, FailService) {
-  static const char kErrorDetails[] = "Bad password.";
+  static constexpr char kErrorDetails[] = "Bad password.";
   SetEventHandler(&event_handler_);
   EXPECT_CALL(event_handler_,
-              OnDriverFailure(Service::kFailureConnect, kErrorDetails));
+              OnDriverFailure(Service::kFailureConnect, Eq(kErrorDetails)));
   driver_->FailService(Service::kFailureConnect, kErrorDetails);
 }
 
@@ -1052,11 +1117,12 @@ TEST_F(OpenVPNDriverTest, Cleanup) {
   // Ensure no crash.
   driver_->Cleanup();
 
+  driver_->ipv4_properties_ = std::make_unique<IPConfig::Properties>();
   const int kPID = 123456;
   driver_->pid_ = kPID;
   driver_->rpc_task_.reset(new RpcTask(&control_, this));
   driver_->interface_name_ = kInterfaceName;
-  driver_->ip_properties_.address = "1.2.3.4";
+  driver_->ipv4_properties_->address = "1.2.3.4";
   base::FilePath tls_auth_file;
   EXPECT_TRUE(base::CreateTemporaryFile(&tls_auth_file));
   EXPECT_FALSE(tls_auth_file.empty());
@@ -1072,7 +1138,7 @@ TEST_F(OpenVPNDriverTest, Cleanup) {
   EXPECT_TRUE(driver_->interface_name_.empty());
   EXPECT_FALSE(base::PathExists(tls_auth_file));
   EXPECT_TRUE(driver_->tls_auth_file_.empty());
-  EXPECT_TRUE(driver_->ip_properties_.address.empty());
+  EXPECT_EQ(nullptr, driver_->ipv4_properties_);
 }
 
 TEST_F(OpenVPNDriverTest, SpawnOpenVPN) {
@@ -1080,19 +1146,15 @@ TEST_F(OpenVPNDriverTest, SpawnOpenVPN) {
 
   EXPECT_FALSE(driver_->SpawnOpenVPN());
 
-  static const char kHost[] = "192.168.2.254";
+  static constexpr char kHost[] = "192.168.2.254";
   SetArg(kProviderHostProperty, kHost);
   driver_->interface_name_ = "tun0";
   driver_->rpc_task_.reset(new RpcTask(&control_, this));
-  EXPECT_CALL(*management_server_, Start(_, _))
-      .Times(2)
-      .WillRepeatedly(Return(true));
+  EXPECT_CALL(*management_server_, Start).Times(2).WillRepeatedly(Return(true));
   EXPECT_CALL(manager_, IsConnected()).Times(2).WillRepeatedly(Return(false));
 
   const int kPID = 234678;
-  EXPECT_CALL(process_manager_,
-              StartProcessInMinijail(
-                  _, _, _, _, MinijailOptionsMatchCloseNonstdFDs(true), _))
+  EXPECT_CALL(process_manager_, StartProcessInMinijail)
       .WillOnce(Return(-1))
       .WillOnce(Return(kPID));
   EXPECT_FALSE(driver_->SpawnOpenVPN());
@@ -1155,7 +1217,7 @@ TEST_F(OpenVPNDriverTest, InitPropertyStore) {
   driver_->InitPropertyStore(&store);
   const std::string kUser = "joe";
   Error error;
-  EXPECT_TRUE(store.SetStringProperty(kOpenVPNUserProperty, kUser, &error));
+  store.SetStringProperty(kOpenVPNUserProperty, kUser, &error);
   EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(kUser, GetArgs()->Lookup<std::string>(kOpenVPNUserProperty, ""));
 }
@@ -1243,13 +1305,14 @@ TEST_F(OpenVPNDriverTest, GetReconnectTimeout) {
 }
 
 TEST_F(OpenVPNDriverTest, WriteConfigFile) {
-  const char kOption0[] = "option0";
-  const char kOption1[] = "option1";
-  const char kOption1Argument0[] = "option1-argument0";
-  const char kOption2[] = "option2";
-  const char kOption2Argument0[] = "option2-argument0\n\t\"'\\";
-  const char kOption2Argument0Transformed[] = "option2-argument0 \t\\\"'\\\\";
-  const char kOption2Argument1[] = "option2-argument1 space";
+  constexpr char kOption0[] = "option0";
+  constexpr char kOption1[] = "option1";
+  constexpr char kOption1Argument0[] = "option1-argument0";
+  constexpr char kOption2[] = "option2";
+  constexpr char kOption2Argument0[] = "option2-argument0\n\t\"'\\";
+  constexpr char kOption2Argument0Transformed[] =
+      "option2-argument0 \t\\\"'\\\\";
+  constexpr char kOption2Argument1[] = "option2-argument1 space";
   std::vector<std::vector<std::string>> options{
       {kOption0},
       {kOption1, kOption1Argument0},

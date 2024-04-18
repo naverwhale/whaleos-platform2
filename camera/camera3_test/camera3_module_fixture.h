@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include <map>
 #include <memory>
-#include <string>
 #include <tuple>
 #include <vector>
 
@@ -20,6 +19,7 @@
 #include "camera3_test/camera3_device_connector.h"
 #include "camera3_test/camera3_module_connector.h"
 #include "camera3_test/common_types.h"
+#include "cros-camera/cros_camera_hal.h"
 
 namespace camera3_test {
 
@@ -33,6 +33,8 @@ enum {
   STREAM_CONFIG_STALL_DURATION_INDEX = STREAM_CONFIG_DIRECTION_INDEX,
   STREAM_CONFIG_MIN_DURATION_INDEX = STREAM_CONFIG_DIRECTION_INDEX
 };
+
+cros::cros_camera_hal_t* GetCrosCameraHal();
 
 // Returns true if the |actual_level| is equal to or beyond the
 // |required_level|.
@@ -103,9 +105,6 @@ class Camera3Module {
   // Open camera device
   std::unique_ptr<DeviceConnector> OpenDevice(int cam_id);
 
-  // Get vendor tag by the tag name; False is returned if not found.
-  bool GetVendorTagByName(const std::string name, uint32_t* tag);
-
   // Get the image output formats in this stream configuration
   std::vector<int32_t> GetOutputFormats(int cam_id);
 
@@ -143,7 +142,7 @@ class Camera3Module {
 
 class Camera3ModuleFixture : public testing::Test {
  public:
-  Camera3ModuleFixture() {}
+  Camera3ModuleFixture() = default;
   Camera3ModuleFixture(const Camera3ModuleFixture&) = delete;
   Camera3ModuleFixture& operator=(const Camera3ModuleFixture&) = delete;
 

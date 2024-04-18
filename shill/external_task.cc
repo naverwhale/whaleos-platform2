@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,27 +10,26 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 
 #include "shill/error.h"
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 
 namespace shill {
 
-ExternalTask::ExternalTask(
-    ControlInterface* control,
-    ProcessManager* process_manager,
-    const base::WeakPtr<RpcTaskDelegate>& task_delegate,
-    const base::Callback<void(pid_t, int)>& death_callback)
+ExternalTask::ExternalTask(ControlInterface* control,
+                           ProcessManager* process_manager,
+                           const base::WeakPtr<RpcTaskDelegate>& task_delegate,
+                           base::OnceCallback<void(pid_t, int)> death_callback)
     : control_(control),
       process_manager_(process_manager),
       task_delegate_(task_delegate),
-      death_callback_(death_callback),
+      death_callback_(std::move(death_callback)),
       pid_(0) {
   CHECK(task_delegate_);
 }
@@ -53,8 +52,9 @@ bool ExternalTask::Start(const base::FilePath& program,
   env.insert(environment.begin(), environment.end());
 
   pid_t pid = process_manager_->StartProcess(
-      FROM_HERE, program, arguments, env, terminate_with_parent,
-      base::Bind(&ExternalTask::OnTaskDied, base::Unretained(this)));
+      FROM_HERE, program, arguments, env, /*fds_to_bind=*/{},
+      terminate_with_parent,
+      base::BindOnce(&ExternalTask::OnTaskDied, base::Unretained(this)));
 
   if (pid < 0) {
     Error::PopulateAndLog(
@@ -85,7 +85,7 @@ bool ExternalTask::StartInMinijail(
 
   pid_t pid = process_manager_->StartProcessInMinijail(
       FROM_HERE, program, *arguments, env, minijail_options,
-      base::Bind(&ExternalTask::OnTaskDied, base::Unretained(this)));
+      base::BindOnce(&ExternalTask::OnTaskDied, base::Unretained(this)));
 
   if (pid < 0) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kInternalError,
@@ -124,7 +124,7 @@ void ExternalTask::OnTaskDied(int exit_status) {
   rpc_task_.reset();
   // Since this method has no more non-static member accesses below this call,
   // the death callback is free to destruct this instance.
-  death_callback_.Run(old_pid, exit_status);
+  std::move(death_callback_).Run(old_pid, exit_status);
 }
 
 }  // namespace shill

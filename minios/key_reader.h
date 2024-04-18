@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,21 +22,16 @@ namespace minios {
 
 constexpr int kMaxInputLength = 64;
 
-// Increasing `kBackspaceSensitivity` will slow backspace speed.
-constexpr int kBackspaceSensitivity = 2;
+// Increasing `kRepeatedSensitivity` will slow key repeating speed.
+constexpr int kRepeatedSensitivity = 3;
 
-// Key values.
-extern const int kKeyUp;
-extern const int kKeyDown;
-extern const int kKeyEnter;
-// Key values for detachable.
-extern const int kKeyVolUp;
-extern const int kKeyVolDown;
-extern const int kKeyPower;
-
-// Key state parameters.
+// Key state parameter.
 extern const int kFdsMax;
-extern const int kKeyMax;
+
+// Input event values.
+const int kKeyRelease = 0;
+const int kKeyPress = 1;
+const int kKeyHold = 2;
 
 class KeyReader {
  public:
@@ -49,13 +44,8 @@ class KeyReader {
 
   class Delegate {
    public:
-    // Keeps track of key states based on the file descriptor index and whether
-    // the key event is a key press or key release event as given by
-    // `key_released`. `key_changed` is the ev code for the key. Only records
-    // key state for valid keys.
-    virtual void OnKeyPress(int fd_index,
-                            int key_changed,
-                            bool key_released) = 0;
+    // Forward a key press to the currently displayed screen.
+    virtual void OnKeyPress(int key) = 0;
   };
 
   // Initializes the `epfd_` and sets the callback. Listens for input keys based
@@ -80,9 +70,13 @@ class KeyReader {
   bool GetUserInput(bool* enter, bool* tab_toggle, std::string* user_input);
 
   // Sets the watcher to the `epfd`, has a callback to `OnKeyEvent`.
+  // Note: Any input already present in `epfd` before watcher is enabled will be
+  // read out during the next event.
   bool StartWatcher();
 
   // Stops the watcher.
+  // Note: No file descriptors are closed here. Input that occurred after
+  // StopWather can be read either via `GetUserInput` or after `StartWatcher`.
   void StopWatcher();
 
   // Wrapper that does not take in tab toggle key. Used for testing.
@@ -92,6 +86,8 @@ class KeyReader {
   std::string GetUserInputForTest();
 
  private:
+  FRIEND_TEST(KeyReaderTest, OnKeyEventRepeat);
+
   // Checks whether all the keys in `keys_` are supported by the fd. Returns
   // false on failure.
   bool SupportsAllKeys(const int fd);
@@ -105,9 +101,9 @@ class KeyReader {
   // returns true on success.
   virtual bool EpollCreate(base::ScopedFD* epfd);
 
-  // Waits for a valid key event and reads it into the input event struct. Sets
-  // fd index and returns true on success.
-  virtual bool GetEpEvent(int epfd, struct input_event* ev, int* index);
+  // Waits for a valid key event and reads it into the input event struct.
+  // Returns true on success.
+  virtual bool GetEpEvent(int epfd, struct input_event* ev);
 
   // Get epoll event using `GetEpEvent`. If the event is a key event and is for
   // a valid key, it and calls the Delegate `OnKeyPress` function to modify the
@@ -120,8 +116,10 @@ class KeyReader {
   bool GetChar(const struct input_event& ev, bool* tab_toggle);
 
   std::string user_input_;
-  // Counts and aggregates repeated backspace key events.
-  int backspace_counter_;
+  // Records the most recent repeated key press
+  int repeated_key_;
+  // Counts and aggregates repeated key events.
+  unsigned int repeated_counter_;
   // Checks that enter key down was recorded before returning on key up.
   bool return_pressed_;
   // Whether or not to include USB connections when scanning for events.

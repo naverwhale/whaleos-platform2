@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,43 +11,79 @@
 namespace diagnostics {
 
 // The path used to check a device's master configuration hardware properties.
-extern const char kHardwarePropertiesPath[];
+inline constexpr char kHardwarePropertiesPath[] = "/hardware-properties";
 // The master configuration property that specifies a device's PSU type.
-extern const char kPsuTypeProperty[];
+inline constexpr char kPsuTypeProperty[] = "psu-type";
+// The master configuration property that indicates whether a device has a
+// built-in privacy screen.
+inline constexpr char kHasPrivacyScreenProperty[] = "has-privacy-screen";
 // The path used to check a device's master configuration cros_healthd battery
 // properties.
-extern const char kBatteryPropertiesPath[];
+inline constexpr char kBatteryPropertiesPath[] = "/cros-healthd/battery";
 // The master configuration property that indicates whether a device has Smart
 // Battery info.
-extern const char kHasSmartBatteryInfoProperty[];
+inline constexpr char kHasSmartBatteryInfoProperty[] = "has-smart-battery-info";
 // The master configuration property that indicates whether a device has a
 // backlight.
-extern const char kHasBacklightProperty[];
+inline constexpr char kHasBacklightProperty[] = "has-backlight";
 // The path used to check a device's master configuration cros_healthd vpd
 // properties.
-extern const char kCachedVpdPropertiesPath[];
+inline constexpr char kCachedVpdPropertiesPath[] = "/cros-healthd/cached-vpd";
 // The master configuration property that indicates whether a device has a
 // sku number in the VPD fields.
-extern const char kHasSkuNumberProperty[];
+inline constexpr char kHasSkuNumberProperty[] = "has-sku-number";
+// The master configuration property that indicates whether a device has a base
+// accelerometer.
+inline constexpr char kHasBaseAccelerometer[] = "has-base-accelerometer";
+// The master configuration property that indicates whether a device has a base
+// gyroscope.
+inline constexpr char kHasBaseGyroscope[] = "has-base-gyroscope";
+// The master configuration property that indicates whether a device has a base
+// magnetometer.
+inline constexpr char kHasBaseMagnetometer[] = "has-base-magnetometer";
+// The master configuration property that indicates whether a device has a lid
+// accelerometer.
+inline constexpr char kHasLidAccelerometer[] = "has-lid-accelerometer";
+// The master configuration property that indicates whether a device has a lid
+// gyroscope.
+inline constexpr char kHasLidGyroscope[] = "has-lid-gyroscope";
+// The master configuration property that indicates whether a device has a lid
+// magnetometer.
+inline constexpr char kHasLidMagnetometer[] = "has-lid-magnetometer";
 // NVME utility program path relative to the root directory.
-extern const char kNvmeToolPath[];
+inline constexpr char kNvmeToolPath[] = "usr/sbin/nvme";
 // Linux device path relative to the root directory.
-extern const char kDevicePath[];
+inline constexpr char kDevicePath[] = "dev";
 // Smartctl utility program path relative to the root directory.
-extern const char kSmartctlToolPath[];
+inline constexpr char kSmartctlToolPath[] = "usr/sbin/smartctl";
+// Mmc utility program path relative to the root directory.
+inline constexpr char kMmcToolPath[] = "usr/bin/mmc";
 // Fio utility program path relative to the root directory.
-extern const char kFioToolPath[];
-// The path to check a device's master configuration ARC build properties.
-extern const char kArcBuildPropertiesPath[];
+inline constexpr char kFioToolPath[] = "usr/bin/fio";
+// Chromium EC path relative to the root directory.
+inline constexpr char kChromiumECPath[] = "sys/class/chromeos/cros_ec";
+// The path to check a device's branding properties.
+inline constexpr char kBrandingPath[] = "/branding";
 // The master configuration property that specifies a device's marketing name.
-extern const char kMarketingNameProperty[];
+inline constexpr char kMarketingNameProperty[] = "marketing-name";
+// The master configuration property that specifies a device's oem name.
+inline constexpr char kOemNameProperty[] = "oem-name";
 // The root path of master configuration.
-extern const char kRootPath[];
+inline constexpr char kRootPath[] = "/";
 // The master configuration property that specifies a device's code name.
-extern const char kCodeNameProperty[];
+inline constexpr char kCodeNameProperty[] = "name";
 
 // Returns a list of wilco board names.
-const std::list<std::string> GetWilcoBoardNames();
+inline const std::list<std::string> GetWilcoBoardNames() {
+  return {"sarien", "drallion"};
+}
+
+// Fingerprint diagnostic related constants.
+// The path used to retrieve the fingerprint diagnostic parameters.
+inline constexpr char kFingerprintPropertiesPath[] =
+    "/cros-healthd/routines/fingerprint-diag";
+// The property indicates if the diagnostic is enabled or not.
+inline constexpr char kFingerprintRoutineEnable[] = "routine-enable";
 
 }  // namespace diagnostics
 

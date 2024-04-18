@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,6 +28,7 @@ class TRUNKS_EXPORT MeiClientCharDevice : public MeiClient {
                       const uuid_le& guid,
                       hwsec_foundation::Syscaller* syscaller);
   ~MeiClientCharDevice() override;
+  bool IsSupport() override;
   bool Initialize() override;
   // TODO(b/190621192): Avoid indefinite timeout for `Send()` and `Receive()`.
   bool Send(const std::string& data, bool wait_for_response_ready) override;

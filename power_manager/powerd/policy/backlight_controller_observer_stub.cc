@@ -1,15 +1,10 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/policy/backlight_controller_observer_stub.h"
 
-namespace power_manager {
-namespace policy {
-
-BacklightControllerObserverStub::BacklightControllerObserverStub() {}
-
-BacklightControllerObserverStub::~BacklightControllerObserverStub() {}
+namespace power_manager::policy {
 
 void BacklightControllerObserverStub::Clear() {
   changes_.clear();
@@ -26,5 +21,4 @@ void BacklightControllerObserverStub::OnBrightnessChange(
   changes_.push_back(change);
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

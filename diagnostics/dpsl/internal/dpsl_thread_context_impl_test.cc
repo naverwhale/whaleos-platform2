@@ -1,17 +1,17 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <base/barrier_closure.h>
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/run_loop.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -23,6 +23,7 @@
 #include "diagnostics/dpsl/public/dpsl_thread_context.h"
 
 namespace diagnostics {
+namespace {
 
 class DpslThreadContextImplBaseTest : public testing::Test {
  public:
@@ -229,20 +230,19 @@ class DpslThreadContextImplMultiThreadTest
   }
 
   std::function<void()> CreateAddToQueueTaskForBackground(
-      int task_id, const base::Closure& main_thread_callback) {
-    base::Closure main_thread_add_to_queue_task = base::Bind(
-        [](const base::Closure& task,
-           const base::Closure& main_thread_callback) {
-          task.Run();
-          main_thread_callback.Run();
+      int task_id, base::OnceClosure main_thread_callback) {
+    base::OnceClosure main_thread_add_to_queue_task = base::BindOnce(
+        [](base::OnceClosure task, base::OnceClosure main_thread_callback) {
+          std::move(task).Run();
+          std::move(main_thread_callback).Run();
         },
-        base::Bind(&DpslThreadContextImplMultiThreadTest::AddToQueueTask,
-                   base::Unretained(this), task_id),
-        main_thread_callback);
+        base::BindOnce(&DpslThreadContextImplMultiThreadTest::AddToQueueTask,
+                       base::Unretained(this), task_id),
+        std::move(main_thread_callback));
 
     return background_thread_->WrapTaskToReplyOnMainThread(
-        base::Closure(), main_thread_context_.get(),
-        main_thread_add_to_queue_task);
+        base::OnceClosure(), main_thread_context_.get(),
+        std::move(main_thread_add_to_queue_task));
   }
 
  protected:
@@ -250,8 +250,8 @@ class DpslThreadContextImplMultiThreadTest
 };
 
 TEST_F(DpslThreadContextImplMultiThreadTest, PostTask) {
-  base::Closure quit_closure =
-      base::BarrierClosure(3, base::Bind(
+  base::RepeatingClosure quit_closure =
+      base::BarrierClosure(3, base::BindOnce(
                                   [](DpslThreadContext* main_thread_context) {
                                     main_thread_context->QuitEventLoop();
                                   },
@@ -271,8 +271,8 @@ TEST_F(DpslThreadContextImplMultiThreadTest, PostTask) {
 }
 
 TEST_F(DpslThreadContextImplMultiThreadTest, PostDelayedTask) {
-  base::Closure quit_closure =
-      base::BarrierClosure(3, base::Bind(
+  base::RepeatingClosure quit_closure =
+      base::BarrierClosure(3, base::BindOnce(
                                   [](DpslThreadContext* main_thread_context) {
                                     main_thread_context->QuitEventLoop();
                                   },
@@ -317,4 +317,5 @@ TEST_F(DpslThreadContextImplMultiThreadDeathTest, DestructorCrash) {
   ASSERT_DEATH(delete background_thread_context(), "Called from wrong thread");
 }
 
+}  // namespace
 }  // namespace diagnostics

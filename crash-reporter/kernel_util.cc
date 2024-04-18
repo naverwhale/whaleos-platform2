@@ -1,13 +1,13 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/kernel_util.h"
 
 #include <algorithm>
+#include <iterator>
 
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
@@ -62,7 +62,7 @@ const char* const kPCFuncNameRegex[] = {
     R"(([^\+ ]+)\+0x.*)",  // X86_64 uses RIP
 };
 
-static_assert(base::size(kPCFuncNameRegex) == kernel_util::kArchCount,
+static_assert(std::size(kPCFuncNameRegex) == kernel_util::kArchCount,
               "Missing Arch PC func_name RegExp");
 
 void ProcessStackTrace(re2::StringPiece kernel_dump,
@@ -195,6 +195,12 @@ bool FindPanicMessage(re2::StringPiece kernel_dump,
 namespace kernel_util {
 
 const char kKernelExecName[] = "kernel";
+const char kHypervisorExecName[] = "hypervisor";
+
+bool IsHypervisorCrash(const std::string& kernel_dump) {
+  RE2 hypervisor_re("Linux version [0-9.]+-manatee");
+  return RE2::PartialMatch(kernel_dump, hypervisor_re);
+}
 
 ArchKind GetCompilerArch() {
 #if defined(COMPILER_GCC) && defined(ARCH_CPU_ARM_FAMILY)
@@ -294,7 +300,8 @@ std::string ComputeNoCErrorSignature(const std::string& dump) {
 
 // Watchdog reboots leave no stack trace. Generate a poor man's signature out
 // of the last log line instead (minus the timestamp ended by ']').
-std::string WatchdogSignature(const std::string& console_ramoops) {
+std::string WatchdogSignature(const std::string& console_ramoops,
+                              const std::string& watchdogRebootReason) {
   StringPiece line(console_ramoops);
   constexpr char kTimestampEnd[] = "] ";
   size_t timestamp_end_pos = line.rfind(kTimestampEnd);
@@ -305,9 +312,22 @@ std::string WatchdogSignature(const std::string& console_ramoops) {
   size_t end = (newline_pos == StringPiece::npos
                     ? StringPiece::npos
                     : std::min(newline_pos, kMaxHumanStringLength));
-  return StringPrintf("%s-(WATCHDOG)-%s-%08X", kKernelExecName,
-                      std::string(line.substr(0, end)).c_str(),
-                      util::HashString(line));
+  return StringPrintf(
+      "%s%s-%s-%08X", kKernelExecName, watchdogRebootReason.c_str(),
+      std::string(line.substr(0, end)).c_str(), util::HashString(line));
+}
+
+bool ExtractHypervisorLog(std::string& console_ramoops,
+                          std::string& hypervisor_log) {
+  RE2 hypervisor_log_re("(?s)(\\n-*\\[ hypervisor log \\]-*\\n)(.*)$");
+  re2::StringPiece header;
+  if (RE2::PartialMatch(console_ramoops, hypervisor_log_re, &header,
+                        &hypervisor_log)) {
+    console_ramoops.resize(console_ramoops.size() - hypervisor_log.size() -
+                           header.size());
+    return true;
+  }
+  return false;
 }
 
 }  // namespace kernel_util

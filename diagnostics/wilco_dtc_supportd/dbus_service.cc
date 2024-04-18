@@ -1,15 +1,15 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "diagnostics/wilco_dtc_supportd/dbus_service.h"
 
+#include <optional>
 #include <string>
 
 #include <base/check.h>
 #include <base/location.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <brillo/errors/error_codes.h>
 #include <dbus/dbus-protocol.h>
 #include <dbus/object_path.h>
@@ -18,6 +18,7 @@
 #include "diagnostics/wilco_dtc_supportd/mojo_service_factory.h"
 
 namespace diagnostics {
+namespace wilco {
 
 DBusService::DBusService(MojoServiceFactory* mojo_service_factory)
     : mojo_service_factory_(mojo_service_factory) {
@@ -29,7 +30,7 @@ DBusService::~DBusService() = default;
 bool DBusService::BootstrapMojoConnection(brillo::ErrorPtr* error,
                                           const base::ScopedFD& mojo_fd) {
   VLOG(0) << "Received BootstrapMojoConnection D-Bus request";
-  const base::Optional<std::string> bootstrap_error =
+  const std::optional<std::string> bootstrap_error =
       mojo_service_factory_->BootstrapMojoConnection(mojo_fd);
   if (bootstrap_error.has_value()) {
     *error = brillo::Error::Create(FROM_HERE, brillo::errors::dbus::kDomain,
@@ -62,4 +63,5 @@ void DBusService::ShutDown() {
   dbus_object_.reset();
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 #define DIAGNOSTICS_CROS_HEALTHD_FETCHERS_TIMEZONE_FETCHER_H_
 
 #include "diagnostics/cros_healthd/fetchers/base_fetcher.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
 
@@ -17,7 +17,7 @@ class TimezoneFetcher final : public BaseFetcher {
 
   // Returns a structure with either the device's timezone data or the error
   // that occurred fetching the information.
-  chromeos::cros_healthd::mojom::TimezoneResultPtr FetchTimezoneInfo();
+  ash::cros_healthd::mojom::TimezoneResultPtr FetchTimezoneInfo();
 };
 
 }  // namespace diagnostics

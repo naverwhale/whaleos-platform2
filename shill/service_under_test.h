@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,9 @@
 #include <string>
 #include <vector>
 
-#include "shill/key_value_store.h"
+#include "shill/ipconfig.h"
 #include "shill/service.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 
@@ -48,9 +49,11 @@ class ServiceUnderTest : public Service {
     disconnectable_ = disconnectable;
   }
 
+  int connect_calls() const { return connect_calls_; }
+
  protected:
   // Inherited from Service.
-  void OnConnect(Error* error) override {}
+  void OnConnect(Error* error) override;
   void OnDisconnect(Error* /*error*/, const char* /*reason*/) override {}
   bool IsDisconnectable(Error* error) const override;
 
@@ -60,7 +63,8 @@ class ServiceUnderTest : public Service {
   std::vector<std::string> strings_;
   KeyValueStore key_value_store_;
 
-  bool disconnectable_;
+  bool disconnectable_ = true;
+  int connect_calls_ = 0;
 };
 
 }  // namespace shill

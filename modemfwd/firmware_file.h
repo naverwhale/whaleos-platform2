@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <base/files/file_path.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/macros.h>
 
 #include "modemfwd/firmware_file_info.h"
 
@@ -27,7 +26,8 @@ class FirmwareFile {
   // If the firmware file is compressed, it decompresses the firmware file into
   // a temporary directory, which will be cleaned up upon destruction of this
   // object.
-  bool PrepareFrom(const FirmwareFileInfo& file_info);
+  bool PrepareFrom(const base::FilePath& firmware_dir,
+                   const FirmwareFileInfo& file_info);
 
   // Returns the firmware file path to be referenced in the log and journal
   // file.

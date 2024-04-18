@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,17 +6,17 @@
 #define LORGNETTE_IMAGE_READERS_IMAGE_READER_H_
 
 #include <cstdint>
+#include <cstdio>
+#include <optional>
 
-#include <base/files/file.h>
-#include <base/optional.h>
 #include <brillo/errors/error.h>
 
-#include "lorgnette/sane_client.h"
+#include "lorgnette/scan_parameters.h"
 
 namespace lorgnette {
 
-// This class is responsible for reading data from a bitmap and producing an
-// image.
+// This class is responsible for reading data from a bitmap and writing an
+// encoded image to a file.
 class ImageReader {
  public:
   ImageReader(const ImageReader&) = delete;
@@ -32,7 +32,7 @@ class ImageReader {
 
  protected:
   // Concrete ImageReaders' Create() methods should be used instead.
-  ImageReader(const ScanParameters& params, base::ScopedFILE out_file);
+  ImageReader(const ScanParameters& params, FILE* out_file);
 
   // Performs some sanity checks on |params|. Additional format-specific
   // validation should be performed by each concrete image reader. If this
@@ -43,10 +43,10 @@ class ImageReader {
   // Sets up objects needed by the image reader. Must be called before
   // ReadData().
   virtual bool Initialize(brillo::ErrorPtr* error,
-                          const base::Optional<int>& resolution) = 0;
+                          const std::optional<int>& resolution) = 0;
 
   const ScanParameters params_;
-  base::ScopedFILE out_file_;
+  FILE* out_file_;  // Not owned.
 };
 
 }  // namespace lorgnette

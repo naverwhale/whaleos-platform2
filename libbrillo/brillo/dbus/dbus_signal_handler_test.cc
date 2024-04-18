@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <string>
 
-#include <base/bind.h>
-#include <brillo/dbus/dbus_param_writer.h>
+#include <base/functional/bind.h>
+#include <brillo/dbus/data_serialization.h>
 #include <dbus/mock_bus.h>
 #include <dbus/mock_object_proxy.h>
 #include <gmock/gmock.h>
@@ -55,11 +55,13 @@ class DBusSignalHandlerTest : public testing::Test {
 
     brillo::dbus_utils::ConnectToSignal(
         mock_object_proxy_.get(), kInterface, kSignal,
-        base::Bind(&SignalHandlerSink::Handler, base::Unretained(sink)), {});
+        base::BindRepeating(&SignalHandlerSink::Handler,
+                            base::Unretained(sink)),
+        {});
 
     dbus::Signal signal(kInterface, kSignal);
     dbus::MessageWriter writer(&signal);
-    DBusParamWriter::Append(&writer, args...);
+    WriteDBusArgs(&writer, args...);
     signal_callback.Run(&signal);
   }
 
@@ -72,7 +74,7 @@ TEST_F(DBusSignalHandlerTest, ConnectToSignal) {
       .Times(1);
 
   brillo::dbus_utils::ConnectToSignal(mock_object_proxy_.get(), kInterface,
-                                      kSignal, base::Closure{}, {});
+                                      kSignal, base::RepeatingClosure{}, {});
 }
 
 TEST_F(DBusSignalHandlerTest, CallSignal_3Args) {

@@ -1,11 +1,10 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef P2P_HTTP_SERVER_MOCK_SERVER_H_
 #define P2P_HTTP_SERVER_MOCK_SERVER_H_
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "p2p/http_server/server_interface.h"

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,18 +7,17 @@
 
 #include <memory>
 
-#include <base/macros.h>
-
-#include "diagnostics/common/system/bluetooth_client.h"
-#include "diagnostics/common/system/debugd_adapter.h"
-#include "diagnostics/common/system/powerd_adapter.h"
 #include "diagnostics/wilco_dtc_supportd/core.h"
 #include "diagnostics/wilco_dtc_supportd/probe_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/bluetooth_event_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/ec_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/powerd_event_service.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/bluetooth_client.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/debugd_adapter.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/powerd_adapter.h"
 
 namespace diagnostics {
+namespace wilco {
 
 // Production implementation of Core's delegate.
 class CoreDelegateImpl final : public Core::Delegate {
@@ -45,6 +44,7 @@ class CoreDelegateImpl final : public Core::Delegate {
       ProbeService::Delegate* delegate) override;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_CORE_DELEGATE_IMPL_H_

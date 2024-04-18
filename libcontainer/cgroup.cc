@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,11 +15,11 @@
 #include <unistd.h>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
@@ -121,7 +121,7 @@ bool CreateCgroupAsOwner(const base::FilePath& cgroup_path,
     // Ensure that we reset the euid and egid no matter what.
     // TODO(ejcaruso, hidehiko): change to OnceClosure when libchrome is
     // upreved again.
-    runner.ReplaceClosure(base::Bind(
+    runner.ReplaceClosure(base::BindOnce(
         [](uid_t euid, gid_t egid) {
           if (seteuid(euid) != 0)
             PLOG(ERROR) << "Failed to reset euid";

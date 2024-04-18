@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -47,6 +47,9 @@
 // A ring based on this particular context's channel.
 #define CROSS_DOMAIN_CHANNEL_RING 1
 
+// Read pipe IDs start at this value.
+#define CROSS_DOMAIN_PIPE_READ_START 0x80000000
+
 struct CrossDomainCapabilities {
   uint32_t version;
   uint32_t supported_channels;
@@ -74,7 +77,8 @@ struct CrossDomainHeader {
 
 struct CrossDomainInit {
   struct CrossDomainHeader hdr;
-  uint32_t ring_id;
+  uint32_t query_ring_id;
+  uint32_t channel_ring_id;
   uint32_t channel_type;
 };
 
@@ -108,4 +112,4 @@ struct CrossDomainReadWrite {
   uint32_t pad;
 };
 
-#endif
+#endif  // VM_TOOLS_SOMMELIER_VIRTUALIZATION_VIRTGPU_CROSS_DOMAIN_PROTOCOL_H_

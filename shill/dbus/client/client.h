@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,9 @@
 #include <utility>
 #include <vector>
 
-#include <base/callback_forward.h>
-#include <base/callback_helpers.h>
+#include <base/functional/callback_forward.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <base/time/time.h>
@@ -25,7 +24,7 @@
 namespace shill {
 
 constexpr base::TimeDelta kDefaultDBusTimeout =
-    base::TimeDelta::FromMilliseconds(dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    base::Milliseconds(dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
 
 // Shill D-Bus client for listening to common manager, service and device
 // properties. This class is the result of an effort to consolidate a lot of
@@ -36,8 +35,6 @@ class BRILLO_EXPORT Client {
   // IPConfig for a device. If the device does not have a valid ipv4/ipv6
   // config, the corresponding fields will be empty or 0.
   // TODO(jiejiang): add the following fields into this struct:
-  // - IPv4 search domains
-  // - IPv6 search domains
   // - MTU (one only per network)
   struct IPConfig {
     bool operator==(const IPConfig& that) const {
@@ -45,18 +42,21 @@ class BRILLO_EXPORT Client {
              this->ipv4_address == that.ipv4_address &&
              this->ipv4_gateway == that.ipv4_gateway &&
              this->ipv4_dns_addresses == that.ipv4_dns_addresses &&
+             this->ipv4_search_domains == that.ipv4_search_domains &&
              this->ipv6_prefix_length == that.ipv6_prefix_length &&
              this->ipv6_address == that.ipv6_address &&
              this->ipv6_gateway == that.ipv6_gateway &&
-             this->ipv6_dns_addresses == that.ipv6_dns_addresses;
+             this->ipv6_dns_addresses == that.ipv6_dns_addresses &&
+             this->ipv6_search_domains == that.ipv6_search_domains;
     }
 
-    int ipv4_prefix_length;
+    int ipv4_prefix_length{0};
     std::string ipv4_address;
     std::string ipv4_gateway;
     std::vector<std::string> ipv4_dns_addresses;
+    std::vector<std::string> ipv4_search_domains;
 
-    int ipv6_prefix_length;
+    int ipv6_prefix_length{0};
     // Note due to the limitation of shill, we will only get one IPv6 address
     // from it. This address should be the privacy address for device with type
     // of ethernet or wifi.
@@ -64,6 +64,7 @@ class BRILLO_EXPORT Client {
     std::string ipv6_address;
     std::string ipv6_gateway;
     std::vector<std::string> ipv6_dns_addresses;
+    std::vector<std::string> ipv6_search_domains;
   };
 
   // Represents a subset of properties from org.chromium.flimflam.Device.
@@ -72,7 +73,7 @@ class BRILLO_EXPORT Client {
   // - the connection state of the Service, if possible by translating back to
   //   the enum shill::Service::ConnectState
   struct Device {
-    // A subset of shill::Technology::Type.
+    // A subset of shill::Technology.
     enum class Type {
       kUnknown,
       kCellular,
@@ -81,7 +82,6 @@ class BRILLO_EXPORT Client {
       kGuestInterface,
       kLoopback,
       kPPP,
-      kPPPoE,
       kTunnel,
       kVPN,
       kWifi,
@@ -91,7 +91,6 @@ class BRILLO_EXPORT Client {
     enum class ConnectionState {
       kUnknown,
       kIdle,
-      kCarrier,
       kAssociation,
       kConfiguration,
       kReady,
@@ -102,18 +101,21 @@ class BRILLO_EXPORT Client {
       kOffline,
       kFailure,
       kDisconnect,
-      kActivationFailure,
     };
 
     bool operator==(const Device& that) const {
       return this->type == that.type && this->ifname == that.ifname &&
-             this->ipconfig == that.ipconfig;
+             this->ipconfig == that.ipconfig &&
+             this->cellular_country_code == that.cellular_country_code;
     }
 
     Type type;
     ConnectionState state;
     std::string ifname;
+    std::string cellular_primary_ifname;  // empty if cell device has no primary
+                                          // interface property.
     IPConfig ipconfig;
+    std::string cellular_country_code;
   };
 
   template <class Proxy>
@@ -143,9 +145,10 @@ class BRILLO_EXPORT Client {
     // Asynchronous setter.
     virtual void Set(const std::string& name,
                      const brillo::Any& value,
-                     const base::Callback<void()>& success,
-                     const base::Callback<void(brillo::Error*)>& error) {
-      proxy_->SetPropertyAsync(name, value, success, error, timeout_);
+                     base::OnceCallback<void()> success,
+                     base::OnceCallback<void(brillo::Error*)> error) {
+      proxy_->SetPropertyAsync(name, value, std::move(success),
+                               std::move(error), timeout_);
     }
 
     // Get all properties.
@@ -209,11 +212,12 @@ class BRILLO_EXPORT Client {
       PropertyAccessor<org::chromium::flimflam::ServiceProxyInterface>;
 
   using DefaultServiceChangedHandler =
-      base::Callback<void(const std::string& type)>;
-  using DeviceChangedHandler = base::Callback<void(const Device* const)>;
+      base::RepeatingCallback<void(const std::string& type)>;
+  using DeviceChangedHandler =
+      base::RepeatingCallback<void(const Device* const)>;
 
   explicit Client(scoped_refptr<dbus::Bus> bus);
-  virtual ~Client();
+  virtual ~Client() = default;
   Client(const Client&) = delete;
   Client& operator=(const Client&) = delete;
 
@@ -243,11 +247,11 @@ class BRILLO_EXPORT Client {
   // |handler| will be invoked whenever the device associated with the default
   // service changes. The following changes will triggers this handler:
   // * The default service itself changes,
-  // * The default service is connected or disconnected,
+  // * The default service device connection state changes,
   // * The device connected to the default service changes,
   // * The IP configuration of the default device changes.
   //
-  // If the default service is disconnected, the device will be null.
+  // If the default service is empty, the device will be null.
   // Multiple handlers may be registered.
   virtual void RegisterDefaultDeviceChangedHandler(
       const DeviceChangedHandler& handler);
@@ -271,6 +275,17 @@ class BRILLO_EXPORT Client {
 
   // Returns a manipulator interface for Manager properties.
   virtual std::unique_ptr<ManagerPropertyAccessor> ManagerProperties(
+      const base::TimeDelta& timeout = kDefaultDBusTimeout) const;
+
+  // Returns a manipulator interface for Default service properties.
+  virtual std::unique_ptr<ServicePropertyAccessor>
+  DefaultServicePropertyAccessor(
+      const base::TimeDelta& timeout = kDefaultDBusTimeout) const;
+
+  // Returns a snapshot of all the default service properties. It may return
+  // a nullptr.
+  virtual std::unique_ptr<brillo::VariantDictionary>
+  GetDefaultServiceProperties(
       const base::TimeDelta& timeout = kDefaultDBusTimeout) const;
 
   // Returns the default device.
@@ -402,19 +417,25 @@ class BRILLO_EXPORT Client {
         scoped_refptr<dbus::Bus> bus,
         std::unique_ptr<org::chromium::flimflam::DeviceProxyInterface> proxy)
         : bus_(bus), proxy_(std::move(proxy)) {}
-    ~DeviceWrapper() {
-      bus_->RemoveObjectProxy(kFlimflamServiceName, proxy_->GetObjectPath(),
-                              base::DoNothing());
-      if (svc_proxy_)
-        bus_->RemoveObjectProxy(kFlimflamServiceName,
-                                svc_proxy_->GetObjectPath(), base::DoNothing());
-    }
+    ~DeviceWrapper() = default;
     DeviceWrapper(const DeviceWrapper&) = delete;
     DeviceWrapper& operator=(const DeviceWrapper&) = delete;
 
     Device* device() { return &device_; }
     org::chromium::flimflam::DeviceProxyInterface* proxy() {
       return proxy_.get();
+    }
+
+    // Object proxy needs to be released whenever a DeviceWrapper is deleted.
+    // However, it is not possible to do it in its destructor as the method
+    // `RemoveObjectProxy(...)` is asynchronous and might race with the D-Bus
+    // destructor.
+    void release_object_proxy() {
+      bus_->RemoveObjectProxy(kFlimflamServiceName, proxy_->GetObjectPath(),
+                              base::DoNothing());
+      if (svc_proxy_)
+        bus_->RemoveObjectProxy(kFlimflamServiceName,
+                                svc_proxy_->GetObjectPath(), base::DoNothing());
     }
     void set_service_proxy(
         std::unique_ptr<org::chromium::flimflam::ServiceProxyInterface> proxy) {
@@ -437,8 +458,9 @@ class BRILLO_EXPORT Client {
 
   // Reads the list of IPConfigs for a device and composes them into an IPConfig
   // data structure.
-  IPConfig ParseIPConfigsProperty(const std::string& device_path,
-                                  const brillo::Any& property_value) const;
+  IPConfig ParseIPConfigsProperty(
+      const std::string& device_path,
+      const std::vector<dbus::ObjectPath>& ipconfig_paths) const;
 
   scoped_refptr<dbus::Bus> bus_;
 
@@ -449,7 +471,6 @@ class BRILLO_EXPORT Client {
   std::vector<DeviceChangedHandler> device_added_handlers_;
   std::vector<DeviceChangedHandler> device_removed_handlers_;
 
-  bool default_service_connected_ = false;
   std::string default_device_path_;
 
   // Tracked devices keyed by path.

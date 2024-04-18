@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -68,6 +68,7 @@ static std::function<uint32_t(struct gbm_bo* bo, size_t plane)>
     _gbm_bo_get_offset;
 static std::function<uint32_t(struct gbm_bo* bo, size_t plane)>
     _gbm_bo_get_stride_for_plane;
+static std::function<uint64_t(struct gbm_bo* bo)> _gbm_bo_get_modifier;
 static std::function<void(struct gbm_bo* bo)> _gbm_bo_destroy;
 static std::function<void*(
     void* addr, size_t length, int prot, int flags, int fd, off_t offset)>
@@ -146,6 +147,11 @@ struct MockGbm {
       return GbmBoGetPlaneStride(bo, plane);
     };
 
+    EXPECT_EQ(_gbm_bo_get_modifier, nullptr);
+    _gbm_bo_get_modifier = [this](struct gbm_bo* bo) {
+      return GbmBoGetModifier(bo);
+    };
+
     EXPECT_EQ(_gbm_bo_destroy, nullptr);
     _gbm_bo_destroy = [this](struct gbm_bo* bo) { GbmBoDestroy(bo); };
 
@@ -180,6 +186,7 @@ struct MockGbm {
     _gbm_bo_get_plane_fd = nullptr;
     _gbm_bo_get_offset = nullptr;
     _gbm_bo_get_stride_for_plane = nullptr;
+    _gbm_bo_get_modifier = nullptr;
     _gbm_bo_destroy = nullptr;
     _mmap = nullptr;
     _munmap = nullptr;
@@ -215,11 +222,16 @@ struct MockGbm {
   MOCK_METHOD(int, GbmBoGetPlaneFd, (struct gbm_bo*, size_t));
   MOCK_METHOD(uint32_t, GbmBoGetPlaneOffset, (struct gbm_bo*, size_t));
   MOCK_METHOD(uint32_t, GbmBoGetPlaneStride, (struct gbm_bo*, size_t));
+  MOCK_METHOD(uint64_t, GbmBoGetModifier, (struct gbm_bo*));
   MOCK_METHOD(void, GbmBoDestroy, (struct gbm_bo*));
   MOCK_METHOD(void*, Mmap, (void*, size_t, int, int, int, off_t));
   MOCK_METHOD(int, Munmap, (void*, size_t));
   MOCK_METHOD(off_t, Lseek, (int, off_t, int));
 };
+
+// Use one global static scope MockGbm to avoid crash in coverage tests
+// (b/307588634).
+MockGbm g_mock_gbm;
 
 // global scope mock functions. These functions indirectly invoke the mock
 // function implementations through the stubs.
@@ -303,6 +315,10 @@ uint32_t gbm_bo_get_offset(struct gbm_bo* bo, size_t plane) {
 
 uint32_t gbm_bo_get_stride_for_plane(struct gbm_bo* bo, size_t plane) {
   return _gbm_bo_get_stride_for_plane(bo, plane);
+}
+
+uint64_t gbm_bo_get_modifier(struct gbm_bo* bo) {
+  return _gbm_bo_get_modifier(bo);
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
@@ -390,22 +406,22 @@ class CameraBufferManagerImplTest : public ::testing::Test {
   CameraBufferManagerImplTest& operator=(const CameraBufferManagerImplTest&) =
       delete;
 
-  void SetUp() {
-    EXPECT_CALL(gbm_, CreateGbmDevice())
+  void SetUp() override {
+    EXPECT_CALL(g_mock_gbm, CreateGbmDevice())
         .Times(1)
         .WillOnce(Return(&dummy_device));
     cbm_ = new CameraBufferManagerImpl();
   }
 
-  void TearDown() {
+  void TearDown() override {
     // Verify that gbm_device is properly tear down.
-    EXPECT_CALL(gbm_, GbmDeviceGetFd(&dummy_device))
+    EXPECT_CALL(g_mock_gbm, GbmDeviceGetFd(&dummy_device))
         .Times(1)
         .WillOnce(Return(dummy_fd));
-    EXPECT_CALL(gbm_, Close(dummy_fd)).Times(1);
-    EXPECT_CALL(gbm_, GbmDeviceDestroy(&dummy_device)).Times(1);
+    EXPECT_CALL(g_mock_gbm, Close(dummy_fd)).Times(1);
+    EXPECT_CALL(g_mock_gbm, GbmDeviceDestroy(&dummy_device)).Times(1);
     delete cbm_;
-    EXPECT_EQ(::testing::Mock::VerifyAndClear(&gbm_), true);
+    EXPECT_EQ(::testing::Mock::VerifyAndClear(&g_mock_gbm), true);
   }
 
   std::unique_ptr<camera_buffer_handle_t> CreateBuffer(
@@ -452,8 +468,6 @@ class CameraBufferManagerImplTest : public ::testing::Test {
 
  protected:
   CameraBufferManagerImpl* cbm_;
-
-  MockGbm gbm_;
 };
 
 TEST_F(CameraBufferManagerImplTest, AllocateTest) {
@@ -464,23 +478,29 @@ TEST_F(CameraBufferManagerImplTest, AllocateTest) {
 
   // Allocate the buffer.
   EXPECT_CALL(
-      gbm_,
+      g_mock_gbm,
       GbmBoCreate(&dummy_device, kBufferWidth, kBufferHeight, DRM_FORMAT_YUV420,
                   GBM_BO_USE_SW_READ_OFTEN | GBM_BO_USE_SW_WRITE_OFTEN))
       .Times(1)
       .WillOnce(Return(&dummy_bo));
-  EXPECT_CALL(gbm_, GbmBoGetNumPlanes(&dummy_bo)).Times(1).WillOnce(Return(3));
+  EXPECT_CALL(g_mock_gbm, GbmBoGetNumPlanes(&dummy_bo))
+      .Times(1)
+      .WillOnce(Return(3));
   for (size_t plane = 0; plane < 3; ++plane) {
-    EXPECT_CALL(gbm_, GbmBoGetPlaneFd(&dummy_bo, plane))
+    EXPECT_CALL(g_mock_gbm, GbmBoGetPlaneFd(&dummy_bo, plane))
         .Times(1)
         .WillOnce(Return(dummy_fd));
-    EXPECT_CALL(gbm_, GbmBoGetPlaneOffset(&dummy_bo, plane))
+    EXPECT_CALL(g_mock_gbm, GbmBoGetPlaneOffset(&dummy_bo, plane))
         .Times(1)
         .WillOnce(Return(0));
-    EXPECT_CALL(gbm_, GbmBoGetPlaneStride(&dummy_bo, plane))
+    EXPECT_CALL(g_mock_gbm, GbmBoGetPlaneStride(&dummy_bo, plane))
         .Times(1)
         .WillOnce(Return(0));
   }
+  // Return DRM_FORMAT_MOD_INVALID by default for the mock.
+  EXPECT_CALL(g_mock_gbm, GbmBoGetModifier(&dummy_bo))
+      .Times(1)
+      .WillOnce(Return(DRM_FORMAT_MOD_INVALID));
   EXPECT_EQ(cbm_->Allocate(kBufferWidth, kBufferHeight,
                            HAL_PIXEL_FORMAT_YCbCr_420_888, usage,
                            &buffer_handle, &stride),
@@ -488,9 +508,9 @@ TEST_F(CameraBufferManagerImplTest, AllocateTest) {
 
   // Lock the buffer.  All the planes should be mapped.
   for (size_t plane = 0; plane < 3; ++plane) {
-    EXPECT_CALL(gbm_, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
-                                GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(),
-                                A<void**>(), plane))
+    EXPECT_CALL(g_mock_gbm, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth,
+                                      kBufferHeight, GBM_BO_TRANSFER_READ_WRITE,
+                                      A<uint32_t*>(), A<void**>(), plane))
         .Times(1)
         .WillOnce(Return(dummy_addr));
   }
@@ -500,13 +520,13 @@ TEST_F(CameraBufferManagerImplTest, AllocateTest) {
             0);
 
   // Unlock the buffer.  All the planes should be unmapped.
-  EXPECT_CALL(gbm_, GbmBoUnmap(&dummy_bo, A<void*>())).Times(3);
+  EXPECT_CALL(g_mock_gbm, GbmBoUnmap(&dummy_bo, A<void*>())).Times(3);
   EXPECT_EQ(cbm_->Unlock(buffer_handle), 0);
 
   // Free the buffer.  The GBM bo should be destroyed and All the FDs should be
   // closed.
-  EXPECT_CALL(gbm_, GbmBoDestroy(&dummy_bo)).Times(1);
-  EXPECT_CALL(gbm_, Close(dummy_fd)).Times(3);
+  EXPECT_CALL(g_mock_gbm, GbmBoDestroy(&dummy_bo)).Times(1);
+  EXPECT_CALL(g_mock_gbm, Close(dummy_fd)).Times(3);
   EXPECT_EQ(cbm_->Free(buffer_handle), 0);
 }
 
@@ -519,16 +539,16 @@ TEST_F(CameraBufferManagerImplTest, LockTest) {
   buffer_handle_t handle = reinterpret_cast<buffer_handle_t>(buffer.get());
 
   // Register the buffer.
-  EXPECT_CALL(gbm_, GbmBoImport(&dummy_device, A<uint32_t>(), A<void*>(),
-                                A<uint32_t>()))
+  EXPECT_CALL(g_mock_gbm, GbmBoImport(&dummy_device, A<uint32_t>(), A<void*>(),
+                                      A<uint32_t>()))
       .Times(1)
       .WillOnce(Return(&dummy_bo));
   EXPECT_EQ(cbm_->Register(handle), 0);
 
   // The call to Lock |handle| should succeed with valid width and height.
-  EXPECT_CALL(gbm_, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
-                              GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(),
-                              A<void**>(), 0))
+  EXPECT_CALL(g_mock_gbm, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth,
+                                    kBufferHeight, GBM_BO_TRANSFER_READ_WRITE,
+                                    A<uint32_t*>(), A<void**>(), 0))
       .Times(1)
       .WillOnce(Return(dummy_addr));
   void* addr;
@@ -536,13 +556,13 @@ TEST_F(CameraBufferManagerImplTest, LockTest) {
   EXPECT_EQ(addr, dummy_addr);
 
   // And the call to Unlock on |handle| should also succeed.
-  EXPECT_CALL(gbm_, GbmBoUnmap(&dummy_bo, A<void*>())).Times(1);
+  EXPECT_CALL(g_mock_gbm, GbmBoUnmap(&dummy_bo, A<void*>())).Times(1);
   EXPECT_EQ(cbm_->Unlock(handle), 0);
 
   // Now let's Lock |handle| twice.
-  EXPECT_CALL(gbm_, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
-                              GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(),
-                              A<void**>(), 0))
+  EXPECT_CALL(g_mock_gbm, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth,
+                                    kBufferHeight, GBM_BO_TRANSFER_READ_WRITE,
+                                    A<uint32_t*>(), A<void**>(), 0))
       .Times(1)
       .WillOnce(Return(dummy_addr));
   EXPECT_EQ(cbm_->Lock(handle, 0, 0, 0, kBufferWidth, kBufferHeight, &addr), 0);
@@ -557,12 +577,12 @@ TEST_F(CameraBufferManagerImplTest, LockTest) {
 
   // Finally the bo for |handle| should be unmapped and destroyed when we
   // deregister the buffer.
-  EXPECT_CALL(gbm_, GbmBoUnmap(&dummy_bo, A<void*>())).Times(1);
-  EXPECT_CALL(gbm_, GbmBoDestroy(&dummy_bo)).Times(1);
+  EXPECT_CALL(g_mock_gbm, GbmBoUnmap(&dummy_bo, A<void*>())).Times(1);
+  EXPECT_CALL(g_mock_gbm, GbmBoDestroy(&dummy_bo)).Times(1);
   EXPECT_EQ(cbm_->Deregister(handle), 0);
 
   // The fd of the buffer plane should be closed.
-  EXPECT_CALL(gbm_, Close(dummy_fd)).Times(1);
+  EXPECT_CALL(g_mock_gbm, Close(dummy_fd)).Times(1);
 }
 
 TEST_F(CameraBufferManagerImplTest, LockYCbCrTest) {
@@ -575,17 +595,18 @@ TEST_F(CameraBufferManagerImplTest, LockYCbCrTest) {
     buffer_handle_t handle = reinterpret_cast<buffer_handle_t>(buffer.get());
 
     // Register the buffer.
-    EXPECT_CALL(gbm_, GbmBoImport(&dummy_device, A<uint32_t>(), A<void*>(),
-                                  A<uint32_t>()))
+    EXPECT_CALL(g_mock_gbm, GbmBoImport(&dummy_device, A<uint32_t>(),
+                                        A<void*>(), A<uint32_t>()))
         .Times(1)
         .WillOnce(Return(&dummy_bo));
     EXPECT_EQ(cbm_->Register(handle), 0);
 
     // The call to Lock |handle| should succeed with valid width and height.
     for (size_t i = 0; i < 3; ++i) {
-      EXPECT_CALL(gbm_, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
-                                  GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(),
-                                  A<void**>(), i))
+      EXPECT_CALL(
+          g_mock_gbm,
+          GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
+                    GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(), A<void**>(), i))
           .Times(1)
           .WillOnce(Return(reinterpret_cast<uint8_t*>(dummy_addr) +
                            buffer->offsets[i]));
@@ -604,14 +625,15 @@ TEST_F(CameraBufferManagerImplTest, LockYCbCrTest) {
     EXPECT_EQ(ycbcr.chroma_step, 1);
 
     // And the call to Unlock on |handle| should also succeed.
-    EXPECT_CALL(gbm_, GbmBoUnmap(&dummy_bo, A<void*>())).Times(3);
+    EXPECT_CALL(g_mock_gbm, GbmBoUnmap(&dummy_bo, A<void*>())).Times(3);
     EXPECT_EQ(cbm_->Unlock(handle), 0);
 
     // Now let's Lock |handle| twice.
     for (size_t i = 0; i < 3; ++i) {
-      EXPECT_CALL(gbm_, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
-                                  GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(),
-                                  A<void**>(), i))
+      EXPECT_CALL(
+          g_mock_gbm,
+          GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
+                    GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(), A<void**>(), i))
           .Times(1)
           .WillOnce(Return(reinterpret_cast<uint8_t*>(dummy_addr) +
                            buffer->offsets[i]));
@@ -647,13 +669,13 @@ TEST_F(CameraBufferManagerImplTest, LockYCbCrTest) {
 
     // Finally the bo for |handle| should be unmapped and destroyed when we
     // deregister the buffer.
-    EXPECT_CALL(gbm_, GbmBoUnmap(&dummy_bo, A<void*>())).Times(3);
-    EXPECT_CALL(gbm_, GbmBoDestroy(&dummy_bo)).Times(1);
+    EXPECT_CALL(g_mock_gbm, GbmBoUnmap(&dummy_bo, A<void*>())).Times(3);
+    EXPECT_CALL(g_mock_gbm, GbmBoDestroy(&dummy_bo)).Times(1);
     EXPECT_EQ(cbm_->Deregister(handle), 0);
 
     // The fd of the buffer plane should be closed when |buffer| goes out of
     // scope.
-    EXPECT_CALL(gbm_, Close(dummy_fd)).Times(1);
+    EXPECT_CALL(g_mock_gbm, Close(dummy_fd)).Times(1);
   }
 
   // Test semi-planar buffers with a list of (DRM_format, chroma_step).
@@ -665,16 +687,17 @@ TEST_F(CameraBufferManagerImplTest, LockYCbCrTest) {
                      kBufferWidth, kBufferHeight);
     buffer_handle_t handle = reinterpret_cast<buffer_handle_t>(buffer.get());
 
-    EXPECT_CALL(gbm_, GbmBoImport(&dummy_device, A<uint32_t>(), A<void*>(),
-                                  A<uint32_t>()))
+    EXPECT_CALL(g_mock_gbm, GbmBoImport(&dummy_device, A<uint32_t>(),
+                                        A<void*>(), A<uint32_t>()))
         .Times(1)
         .WillOnce(Return(&dummy_bo));
     EXPECT_EQ(cbm_->Register(handle), 0);
 
     for (size_t i = 0; i < 2; ++i) {
-      EXPECT_CALL(gbm_, GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
-                                  GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(),
-                                  A<void**>(), i))
+      EXPECT_CALL(
+          g_mock_gbm,
+          GbmBoMap2(&dummy_bo, 0, 0, kBufferWidth, kBufferHeight,
+                    GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(), A<void**>(), i))
           .Times(1)
           .WillOnce(Return(reinterpret_cast<uint8_t*>(dummy_addr) +
                            buffer->offsets[i]));
@@ -692,15 +715,15 @@ TEST_F(CameraBufferManagerImplTest, LockYCbCrTest) {
     EXPECT_EQ(ycbcr.cstride, buffer->strides[1]);
     EXPECT_EQ(ycbcr.chroma_step, std::get<1>(f));
 
-    EXPECT_CALL(gbm_, GbmBoUnmap(&dummy_bo, A<void*>())).Times(2);
+    EXPECT_CALL(g_mock_gbm, GbmBoUnmap(&dummy_bo, A<void*>())).Times(2);
     EXPECT_EQ(cbm_->Unlock(handle), 0);
 
-    EXPECT_CALL(gbm_, GbmBoDestroy(&dummy_bo)).Times(1);
+    EXPECT_CALL(g_mock_gbm, GbmBoDestroy(&dummy_bo)).Times(1);
     EXPECT_EQ(cbm_->Deregister(handle), 0);
 
     // The fd of the buffer plane should be closed when |buffer| goes out of
     // scope.
-    EXPECT_CALL(gbm_, Close(dummy_fd)).Times(1);
+    EXPECT_CALL(g_mock_gbm, Close(dummy_fd)).Times(1);
   }
 }
 
@@ -777,13 +800,13 @@ TEST_F(CameraBufferManagerImplTest, DeregisterTest) {
 
   // Register the buffers.
   struct gbm_bo dummy_bo1, dummy_bo2;
-  EXPECT_CALL(gbm_, GbmBoImport(&dummy_device, A<uint32_t>(), A<void*>(),
-                                A<uint32_t>()))
+  EXPECT_CALL(g_mock_gbm, GbmBoImport(&dummy_device, A<uint32_t>(), A<void*>(),
+                                      A<uint32_t>()))
       .Times(1)
       .WillOnce(Return(&dummy_bo1));
   EXPECT_EQ(cbm_->Register(handle1), 0);
-  EXPECT_CALL(gbm_, GbmBoImport(&dummy_device, A<uint32_t>(), A<void*>(),
-                                A<uint32_t>()))
+  EXPECT_CALL(g_mock_gbm, GbmBoImport(&dummy_device, A<uint32_t>(), A<void*>(),
+                                      A<uint32_t>()))
       .Times(1)
       .WillOnce(Return(&dummy_bo2));
   EXPECT_EQ(cbm_->Register(handle2), 0);
@@ -791,18 +814,18 @@ TEST_F(CameraBufferManagerImplTest, DeregisterTest) {
   // Lock both buffers
   struct android_ycbcr ycbcr;
   for (size_t i = 0; i < 3; ++i) {
-    EXPECT_CALL(gbm_, GbmBoMap2(&dummy_bo1, 0, 0, kBufferWidth, kBufferHeight,
-                                GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(),
-                                A<void**>(), i))
+    EXPECT_CALL(g_mock_gbm, GbmBoMap2(&dummy_bo1, 0, 0, kBufferWidth,
+                                      kBufferHeight, GBM_BO_TRANSFER_READ_WRITE,
+                                      A<uint32_t*>(), A<void**>(), i))
         .Times(1);
   }
   EXPECT_EQ(
       cbm_->LockYCbCr(handle1, 0, 0, 0, kBufferWidth, kBufferHeight, &ycbcr),
       0);
   for (size_t i = 0; i < 3; ++i) {
-    EXPECT_CALL(gbm_, GbmBoMap2(&dummy_bo2, 0, 0, kBufferWidth, kBufferHeight,
-                                GBM_BO_TRANSFER_READ_WRITE, A<uint32_t*>(),
-                                A<void**>(), i))
+    EXPECT_CALL(g_mock_gbm, GbmBoMap2(&dummy_bo2, 0, 0, kBufferWidth,
+                                      kBufferHeight, GBM_BO_TRANSFER_READ_WRITE,
+                                      A<uint32_t*>(), A<void**>(), i))
         .Times(1);
   }
   EXPECT_EQ(
@@ -813,13 +836,13 @@ TEST_F(CameraBufferManagerImplTest, DeregisterTest) {
   EXPECT_EQ(GetMappedBufferInfo().size(), 6);
 
   // Deregister one buffer should only delete three mapped planes.
-  EXPECT_CALL(gbm_, GbmBoUnmap(&dummy_bo1, A<void*>())).Times(3);
-  EXPECT_CALL(gbm_, GbmBoDestroy(&dummy_bo1)).Times(1);
+  EXPECT_CALL(g_mock_gbm, GbmBoUnmap(&dummy_bo1, A<void*>())).Times(3);
+  EXPECT_CALL(g_mock_gbm, GbmBoDestroy(&dummy_bo1)).Times(1);
   EXPECT_EQ(cbm_->Deregister(handle1), 0);
   EXPECT_EQ(GetMappedBufferInfo().size(), 3);
 
-  EXPECT_CALL(gbm_, GbmBoUnmap(&dummy_bo2, A<void*>())).Times(3);
-  EXPECT_CALL(gbm_, GbmBoDestroy(&dummy_bo2)).Times(1);
+  EXPECT_CALL(g_mock_gbm, GbmBoUnmap(&dummy_bo2, A<void*>())).Times(3);
+  EXPECT_CALL(g_mock_gbm, GbmBoDestroy(&dummy_bo2)).Times(1);
   EXPECT_EQ(cbm_->Deregister(handle2), 0);
   EXPECT_EQ(GetMappedBufferInfo().size(), 0);
 }

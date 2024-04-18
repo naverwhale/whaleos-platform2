@@ -18,7 +18,6 @@
 #include <sys/types.h>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 
 #include "crash-reporter/crashpad/file_io.h"
 #include "crash-reporter/crashpad/file_seeker.h"
@@ -90,8 +89,6 @@ class WeakFileHandleFileReader : public FileReaderInterface {
   // construction because no file descriptor will be available until
   // FileReader::Open() is called.
   friend class FileReader;
-
-  DISALLOW_COPY_AND_ASSIGN(WeakFileHandleFileReader);
 };
 
 //! \brief A file reader implementation that wraps traditional system file
@@ -138,8 +135,6 @@ class FileReader : public FileReaderInterface {
  private:
   ScopedFileHandle file_;
   WeakFileHandleFileReader weak_file_handle_file_reader_;
-
-  DISALLOW_COPY_AND_ASSIGN(FileReader);
 };
 
 }  // namespace crashpad

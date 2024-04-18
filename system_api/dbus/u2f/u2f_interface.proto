@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@ syntax = "proto3";
 option optimize_for = LITE_RUNTIME;
 
 package u2f;
+option go_package = "chromiumos/system_api/u2f_proto";
 
 // UserNotification signal payload.
 message UserNotification {
@@ -43,8 +44,7 @@ message MakeCredentialRequest {
   // MakeCredential should fail if any excluded credential belongs to this
   // device.
   repeated bytes excluded_credential_id = 5;
-  // Id used to idenfity the window that initiated the request.
-  uint64 request_id = 6;
+  reserved 6;  // uint64 request_id = 6 [deprecated = true];
   // User display name for listing credentials to the user.
   string user_display_name = 7;
   // The appIdExclude extension. If set, values in |excluded_credential_id|
@@ -59,6 +59,8 @@ message MakeCredentialRequest {
   // Whether the credential should be a resident key, a.k.a. discoverable
   // credential.
   bool resident_key_required = 12;
+  // Id used to idenfity the window that initiated the request.
+  string request_id_str = 13;
 }
 
 message MakeCredentialResponse {
@@ -103,11 +105,12 @@ message GetAssertionRequest {
   bytes client_data_hash = 3;
   // Currently must not be empty; resident credentials not implemented yet.
   repeated bytes allowed_credential_id = 4;
-  // Id used to identify the window that initiated the request.
-  uint64 request_id = 5;
+  reserved 5;  // uint64 request_id = 5 [deprecated = true];
   // App id extension. Used in place of rp id for legacy u2f credentials.
   string app_id = 6;
-  // Next ID: 7
+  // Id used to idenfity the window that initiated the request.
+  string request_id_str = 7;
+  // Next ID: 8
 }
 
 message Assertion {
@@ -171,19 +174,33 @@ message HasCredentialsResponse {
 
 // Dismiss user verification UI and abort the operation.
 message CancelWebAuthnFlowRequest {
-  // Id used to identify the window that initiated the request.
-  uint64 request_id = 1;
+  reserved 1;  // uint64 request_id = 1 [deprecated = true];
+  // Id used to idenfity the window that initiated the request.
+  string request_id_str = 2;
 }
 
 message CancelWebAuthnFlowResponse {
   bool canceled = 1;
 }
 
+// Check whether the platform authenticator is initialized. Before initialized,
+// most operations will directly return an error.
+message IsPlatformAuthenticatorInitializedRequest {}
+
+message IsPlatformAuthenticatorInitializedResponse {
+  bool initialized = 1;
+}
+
 // Check whether user-verifying platform authenticator is available.
 message IsUvpaaRequest {}
 
 message IsUvpaaResponse {
-  bool available = 1;
+  bool available = 1 [deprecated = true];
+  // Before this field was introduced, IsUvpaa is always assumed to be true in
+  // Chrome. To preserve backward compatibility, the simplest way is to
+  // introduce this response field which default value (not_available = false)
+  // matches the old behavior.
+  bool not_available = 2;
 }
 
 // Check whether u2f is enabled (by policy or by force flag). If u2f is
@@ -194,4 +211,65 @@ message IsU2fEnabledRequest {}
 
 message IsU2fEnabledResponse {
   bool enabled = 1;
+}
+
+message CountCredentialsInTimeRangeRequest {
+  // Timestamp that indicates start of the specified time range.
+  int64 created_not_before_seconds = 1;
+  // Timestamp that indicates end of the specified time range.
+  int64 created_not_after_seconds = 2;
+}
+
+message CountCredentialsInTimeRangeResponse {
+  enum CountCredentialsInTimeRangeStatus {
+    UNKNOWN = 0;
+    SUCCESS = 1;
+    INVALID_REQUEST = 2;
+    INTERNAL_ERROR = 3;
+  }
+
+  CountCredentialsInTimeRangeStatus status = 1;
+  // Number of platform credentials in the specified time range.
+  uint64 num_credentials = 2;
+}
+
+message DeleteCredentialsInTimeRangeRequest {
+  // Timestamp that indicates start of the specified time range.
+  int64 created_not_before_seconds = 1;
+  // Timestamp that indicates end of the specified time range.
+  int64 created_not_after_seconds = 2;
+}
+
+message DeleteCredentialsInTimeRangeResponse {
+  enum DeleteCredentialsInTimeRangeStatus {
+    UNKNOWN = 0;
+    SUCCESS = 1;
+    INVALID_REQUEST = 2;
+    INTERNAL_ERROR = 3;
+  }
+
+  DeleteCredentialsInTimeRangeStatus status = 1;
+  // Number of platform credentials deleted in the specified time range.
+  uint64 num_credentials_deleted = 2;
+}
+
+// Check what public key algorithms are supported in the platform authenticator.
+message GetAlgorithmsRequest {}
+
+message GetAlgorithmsResponse {
+  enum GetAlgorithmsStatus {
+    UNKNOWN = 0;
+    SUCCESS = 1;
+    INTERNAL_ERROR = 2;
+  }
+
+  GetAlgorithmsStatus status = 1;
+  repeated int32 algorithm = 2;
+}
+
+message GetSupportedFeaturesRequest {}
+
+message GetSupportedFeaturesResponse {
+  // Whether the WebAuthn APIs are supported on lacros.
+  bool support_lacros = 1;
 }

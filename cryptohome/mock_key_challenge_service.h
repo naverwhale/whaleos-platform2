@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,14 @@
 #include <queue>
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <brillo/secure_blob.h>
+#include <cryptohome/proto_bindings/rpc.pb.h>
 #include <gmock/gmock.h>
 
-#include "cryptohome/key.pb.h"
+#include "cryptohome/flatbuffer_schemas/structures.h"
 #include "cryptohome/key_challenge_service.h"
-#include "cryptohome/rpc.pb.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
@@ -79,10 +80,10 @@ class KeyChallengeServiceMockController final {
   // |intercepted_response_callback_|, allowing the later call of a Simulate*()
   // method.
   void ExpectSignatureChallenge(
-      const std::string& expected_username,
+      const Username& expected_username,
       const brillo::Blob& expected_public_key_spki_der,
       const brillo::Blob& expected_challenge_value,
-      ChallengeSignatureAlgorithm expected_signature_algorithm);
+      SerializedChallengeSignatureAlgorithm expected_signature_algorithm);
 
   // Whether the mocked ChallengeKey() has been called.
   //

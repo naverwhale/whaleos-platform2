@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <string>
 #include <utility>
 
-#include <base/macros.h>
 #include <cryptohome/proto_bindings/UserDataAuth.pb.h>
 #include <user_data_auth-client/user_data_auth/dbus-proxies.h>
 

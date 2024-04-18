@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -200,11 +200,11 @@ get_start_resume_time() {
     "Back to C!" \
     "Low-level resume complete" \
     "Suspended for" \
-    "Resume caused by" \
+    "PM: resume from suspend-to-idle" \
     "TSC at resume" \
     "post sleep, preparing to return" \
     "Enabling non-boot CPUs ..." \
-    "PM: resume from suspend-to-idle"
+    "Resume caused by"
 }
 
 # Find a message related to the end of resume and parse out its timestamp. It

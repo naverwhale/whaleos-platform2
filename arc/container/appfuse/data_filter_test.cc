@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 #include <linux/fuse.h>
 #include <sys/socket.h>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/run_loop.h>
 #include <base/test/task_environment.h>
@@ -26,7 +26,7 @@ class DataFilterTest : public testing::Test {
 
   void SetUp() override {
     data_filter_.set_on_stopped_callback(
-        base::Bind(&DataFilterTest::OnStopped, base::Unretained(this)));
+        base::BindOnce(&DataFilterTest::OnStopped, base::Unretained(this)));
     int raw_socks[2];
     ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_SEQPACKET, 0, raw_socks));
     fd_dev_ = base::ScopedFD(raw_socks[0]);

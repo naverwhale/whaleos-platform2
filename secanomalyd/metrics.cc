@@ -1,11 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "secanomalyd/metrics.h"
 
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/numerics/safe_conversions.h>
 
 #include <metrics/metrics_library.h>
@@ -28,7 +27,40 @@ constexpr int kWXMountCountHistogramMinBucket = 0;
 constexpr int kWXMountCountHistogramMaxBucket = 20;
 constexpr int kWXMountCountHistogramNumBuckets = 20;
 
-MetricsLibraryInterface* metrics_library = NULL;
+// The `AnomalousProcCount` prefix is used for histograms that show the count of
+// anomalous processes on the system.
+// `AttemptedMemfdExec` shows the number of processes on the system that have
+// attempted to execute a memory file descriptor.
+constexpr char kAttemptedMemfdExecHistogramName[] =
+    "ChromeOS.AnomalousProcCount.AttemptedMemfdExec";
+// `ForbiddenIntersection` shows the number of processes on the system that are
+// not sandboxed to avoid the forbidden intersection:
+// https://chromium.googlesource.com/chromiumos/docs/+/HEAD/sandboxing.md#The-forbidden-intersection.
+constexpr char kForbiddenIntersectionHistogramName[] =
+    "ChromeOS.AnomalousProcCount.ForbiddenIntersection";
+constexpr int kAnomalousProcCountMinBucket = 0;
+constexpr int kAnomalousProcCountMaxBucket = 100;
+constexpr int kAnomalousProcCountNumBuckets = 100;
+
+// The `Sandboxing` prefix is used for metrics regarding the sandboxing state of
+// the system.
+constexpr char kLandlockEnabledHistogramName[] =
+    "ChromeOS.Sandboxing.LandlockEnabled";
+constexpr char kSecCompCoverageHistogramName[] =
+    "ChromeOS.Sandboxing.SecCompCoverage";
+constexpr char kNnpProcPercentageHistogramName[] =
+    "ChromeOS.Sandboxing.NoNewPrivsProcPercentage";
+constexpr char kNonRootProcPercentageHistogramName[] =
+    "ChromeOS.Sandboxing.NonRootProcPercentage";
+constexpr char kUnprivProcPercentageHistogramName[] =
+    "ChromeOS.Sandboxing.UnprivProcPercentage";
+constexpr char kNonInitNsProcPercentageHistogramName[] =
+    "ChromeOS.Sandboxing.NonInitNsProcPercentage";
+
+constexpr char kAnomalyUploadSuccess[] =
+    "ChromeOS.SecurityAnomalyUploadSuccess";
+
+MetricsLibraryInterface* metrics_library = nullptr;
 
 void InitializeMetricsIfNecessary() {
   if (!metrics_library) {
@@ -51,4 +83,60 @@ bool SendWXMountCountToUMA(size_t wx_mount_count) {
       kWXMountCountHistogramName, base::checked_cast<int>(wx_mount_count),
       kWXMountCountHistogramMinBucket, kWXMountCountHistogramMaxBucket,
       kWXMountCountHistogramNumBuckets);
+}
+
+bool SendForbiddenIntersectionProcCountToUMA(size_t proc_count) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendToUMA(
+      kForbiddenIntersectionHistogramName, base::checked_cast<int>(proc_count),
+      kAnomalousProcCountMinBucket, kAnomalousProcCountMaxBucket,
+      kAnomalousProcCountNumBuckets);
+}
+
+bool SendAttemptedMemfdExecProcCountToUMA(size_t proc_count) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendToUMA(
+      kAttemptedMemfdExecHistogramName, base::checked_cast<int>(proc_count),
+      kAnomalousProcCountMinBucket, kAnomalousProcCountMaxBucket,
+      kAnomalousProcCountNumBuckets);
+}
+
+bool SendLandlockStatusToUMA(bool enabled) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendBoolToUMA(kLandlockEnabledHistogramName, enabled);
+}
+
+bool SendSecCompCoverageToUMA(unsigned int coverage_percentage) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendPercentageToUMA(
+      kSecCompCoverageHistogramName, static_cast<int>(coverage_percentage));
+}
+
+bool SendNnpProcPercentageToUMA(unsigned int proc_percentage) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendPercentageToUMA(
+      kNnpProcPercentageHistogramName, static_cast<int>(proc_percentage));
+}
+
+bool SendNonRootProcPercentageToUMA(unsigned int proc_percentage) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendPercentageToUMA(
+      kNonRootProcPercentageHistogramName, static_cast<int>(proc_percentage));
+}
+
+bool SendUnprivProcPercentageToUMA(unsigned int proc_percentage) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendPercentageToUMA(
+      kUnprivProcPercentageHistogramName, static_cast<int>(proc_percentage));
+}
+
+bool SendNonInitNsProcPercentageToUMA(unsigned int proc_percentage) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendPercentageToUMA(
+      kNonInitNsProcPercentageHistogramName, static_cast<int>(proc_percentage));
+}
+
+bool SendAnomalyUploadResultToUMA(bool success) {
+  InitializeMetricsIfNecessary();
+  return metrics_library->SendBoolToUMA(kAnomalyUploadSuccess, success);
 }

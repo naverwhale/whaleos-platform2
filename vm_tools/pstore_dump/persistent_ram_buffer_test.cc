@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,8 +26,9 @@ class PersistentRamBufferTest : public ::testing::Test {
  public:
   std::string GetRandomString(size_t length) {
     std::string s;
+    std::uniform_int_distribution<uint16_t> dist('A', 'Z');
     while (s.length() < length) {
-      s.push_back(std::uniform_int_distribution<char>('A', 'Z')(gen));
+      s.push_back(static_cast<char>(dist(gen)));
     }
     return s;
   }

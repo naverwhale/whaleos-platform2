@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,21 +6,7 @@
 
 #include <base/logging.h>
 
-namespace power_manager {
-namespace system {
-
-EventDeviceStub::EventDeviceStub()
-    : is_cros_fp_(false),
-      is_lid_switch_(false),
-      is_tablet_mode_switch_(false),
-      is_power_button_(false),
-      is_sleep_button_(false),
-      hover_supported_(false),
-      has_left_button_(false),
-      initial_lid_state_(LidState::OPEN),
-      initial_tablet_mode_(TabletMode::OFF) {}
-
-EventDeviceStub::~EventDeviceStub() {}
+namespace power_manager::system {
 
 void EventDeviceStub::AppendEvent(uint16_t type, uint16_t code, int32_t value) {
   input_event event;
@@ -84,22 +70,22 @@ TabletMode EventDeviceStub::GetInitialTabletMode() {
   return initial_tablet_mode_;
 }
 
-bool EventDeviceStub::ReadEvents(std::vector<input_event>* events_out) {
+EventDeviceStub::ReadResult EventDeviceStub::ReadEvents(
+    std::vector<input_event>* events_out) {
+  if (device_disconnected_)
+    return ReadResult::kNoDevice;
   if (events_.empty())
-    return false;
+    return ReadResult::kFailure;
 
   events_out->swap(events_);
   events_.clear();
-  return true;
+  return ReadResult::kSuccess;
 }
 
-void EventDeviceStub::WatchForEvents(base::Closure new_events_cb) {
+void EventDeviceStub::WatchForEvents(
+    const base::RepeatingClosure& new_events_cb) {
   new_events_cb_ = new_events_cb;
 }
-
-EventDeviceFactoryStub::EventDeviceFactoryStub() {}
-
-EventDeviceFactoryStub::~EventDeviceFactoryStub() {}
 
 void EventDeviceFactoryStub::RegisterDevice(
     const base::FilePath& path, std::shared_ptr<EventDeviceInterface> device) {
@@ -113,5 +99,4 @@ std::shared_ptr<EventDeviceInterface> EventDeviceFactoryStub::Open(
                               : std::shared_ptr<EventDeviceInterface>();
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

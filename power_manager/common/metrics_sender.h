@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <string>
 
 #include <base/compiler_specific.h>
-#include <base/macros.h>
 
 class MetricsLibraryInterface;
 
@@ -26,7 +25,7 @@ class MetricsSenderInterface {
   // already be registered. Ownership of |instance| remains with the caller.
   static void SetInstance(MetricsSenderInterface* instance);
 
-  virtual ~MetricsSenderInterface() {}
+  virtual ~MetricsSenderInterface() = default;
 
   // See MetricsLibrary::SendToUMA in metrics/metrics_library.h for a
   // description of the arguments in the below methods.
@@ -41,7 +40,7 @@ class MetricsSenderInterface {
   // * |num_buckets| <= |max| - |min| + 2
   //
   // Violating these constraints may result in Chrome silently discarding the
-  // simple rather than reporting.
+  // sample rather than reporting.
   virtual bool SendMetric(const std::string& name,
                           int sample,
                           int min,
@@ -56,9 +55,14 @@ class MetricsSenderInterface {
 // actually forwards metrics to Chrome.
 class MetricsSender : public MetricsSenderInterface {
  public:
+  // Create an new MetricsSender, using the given MetricsLibrary object.
+  //
   // The c'tor and d'tor call SetInstance() to register and unregister this
   // instance.
-  explicit MetricsSender(std::unique_ptr<MetricsLibraryInterface> metrics_lib);
+  //
+  // Caller retains ownership of `metrics_lib`, which must outlive this
+  // instance.
+  explicit MetricsSender(MetricsLibraryInterface& metrics_lib);
   MetricsSender(const MetricsSender&) = delete;
   MetricsSender& operator=(const MetricsSender&) = delete;
 
@@ -73,7 +77,7 @@ class MetricsSender : public MetricsSenderInterface {
   bool SendEnumMetric(const std::string& name, int sample, int max) override;
 
  private:
-  std::unique_ptr<MetricsLibraryInterface> metrics_lib_;
+  MetricsLibraryInterface* metrics_lib_;  // Owned elsewhere.
 };
 
 // Convenience wrapper for calling SendMetric() on the currently-registered

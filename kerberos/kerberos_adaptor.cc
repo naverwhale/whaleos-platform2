@@ -1,19 +1,18 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "kerberos/kerberos_adaptor.h"
 
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
 
 #include <base/check.h>
-#include <base/compiler_specific.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/optional.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <brillo/dbus/dbus_object.h>
 #include <brillo/errors/error.h>
@@ -33,8 +32,7 @@ namespace kerberos {
 
 namespace {
 
-constexpr base::TimeDelta kTicketExpiryCheckDelay =
-    base::TimeDelta::FromSeconds(3);
+constexpr base::TimeDelta kTicketExpiryCheckDelay = base::Seconds(3);
 
 using ByteArray = KerberosAdaptor::ByteArray;
 
@@ -48,8 +46,8 @@ ByteArray SerializeProto(const google::protobuf::MessageLite& proto) {
 
 // Parses a proto from an array of bytes |proto_blob|. Returns
 // ERROR_PARSE_REQUEST_FAILED on error.
-WARN_UNUSED_RESULT ErrorType ParseProto(google::protobuf::MessageLite* proto,
-                                        const ByteArray& proto_blob) {
+[[nodiscard]] ErrorType ParseProto(google::protobuf::MessageLite* proto,
+                                   const ByteArray& proto_blob) {
   if (!proto->ParseFromArray(proto_blob.data(), proto_blob.size())) {
     LOG(ERROR) << "Failed to parse proto";
     return ERROR_PARSE_REQUEST_FAILED;
@@ -94,10 +92,10 @@ KerberosAdaptor::KerberosAdaptor(
 KerberosAdaptor::~KerberosAdaptor() = default;
 
 void KerberosAdaptor::RegisterAsync(
-    const brillo::dbus_utils::AsyncEventSequencer::CompletionAction&
+    brillo::dbus_utils::AsyncEventSequencer::CompletionAction
         completion_callback) {
   RegisterWithDBusObject(dbus_object_.get());
-  dbus_object_->RegisterAsync(completion_callback);
+  dbus_object_->RegisterAsync(std::move(completion_callback));
 
   // Get the sanitized username (aka user hash). It's needded to determine the
   // daemon store directory where account data is stored.
@@ -143,7 +141,7 @@ void KerberosAdaptor::RegisterAsync(
   // are not quite wired up properly at this point. If signals are emitted here,
   // they never reach Chrome, even if Chrome made sure it connected to the
   // signal.
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
       base::BindRepeating(&KerberosAdaptor::StartObservingTickets,
                           weak_ptr_factory_.GetWeakPtr()),
@@ -263,7 +261,7 @@ ByteArray KerberosAdaptor::AcquireKerberosTgt(
   AcquireKerberosTgtRequest request;
   ErrorType error = ParseProto(&request, request_blob);
 
-  base::Optional<std::string> password;
+  std::optional<std::string> password;
   if (error == ERROR_NONE) {
     password = ReadPipeToString(password_fd.get());
     if (!password.has_value()) {

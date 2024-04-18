@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include <base/system/sys_info.h>
 
 namespace diagnostics {
+namespace wilco {
 
 SystemInfoServiceImpl::SystemInfoServiceImpl() = default;
 
@@ -47,4 +48,5 @@ bool SystemInfoServiceImpl::GetOsMilestone(int* milestone_out) {
   return true;
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

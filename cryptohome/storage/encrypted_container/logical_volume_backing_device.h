@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include "cryptohome/storage/encrypted_container/backing_device.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/files/file_path.h>
@@ -21,13 +22,11 @@ class LogicalVolumeBackingDevice : public BackingDevice {
  public:
   // `LogicalVolumeBackingDevice` are defined by the following config values:
   // - `name`: Name of the logical volume.
-  // - `thinpool_name`: Name of thinpool on which the logical volume resides.
-  // - `physical_volume`: Name of device on which the logical volume should be
-  //                      set up.
+  // - `vg`: Object of volume group on which the logical volume resides.
+  // - `thinpool`: Object of thinpool which backs the logical volume.
   // - `size`: Size of thin logical volume.
   LogicalVolumeBackingDevice(const BackingDeviceConfig& config,
-                             std::unique_ptr<brillo::LogicalVolumeManager> lvm);
-  explicit LogicalVolumeBackingDevice(const BackingDeviceConfig& config);
+                             brillo::LogicalVolumeManager* lvm);
   ~LogicalVolumeBackingDevice() = default;
 
   // Creates the thin logical volume.
@@ -52,17 +51,20 @@ class LogicalVolumeBackingDevice : public BackingDevice {
   }
 
   // Gets path to the logical volume's block device.
-  base::Optional<base::FilePath> GetPath() override;
+  std::optional<base::FilePath> GetPath() override;
 
  private:
-  base::Optional<brillo::LogicalVolume> GetLogicalVolume();
+  std::optional<brillo::LogicalVolume> GetLogicalVolume();
 
   const std::string name_;
   const int64_t size_;
-  const base::FilePath physical_volume_;
-  const std::string thinpool_name_;
 
-  std::unique_ptr<brillo::LogicalVolumeManager> lvm_;
+  const std::shared_ptr<brillo::VolumeGroup> vg_;
+  const std::shared_ptr<brillo::Thinpool> thinpool_;
+
+  std::optional<brillo::LogicalVolume> lv_;
+
+  brillo::LogicalVolumeManager* lvm_;
 };
 
 }  // namespace cryptohome

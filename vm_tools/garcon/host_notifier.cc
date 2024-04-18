@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,36 +10,37 @@
 #include <linux/vm_sockets.h>  // Needs to come after sys/socket.h
 
 #include <algorithm>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
-#include <base/strings/stringprintf.h>
 #include <base/strings/string_util.h>
+#include <base/strings/stringprintf.h>
 #include <base/system/sys_info.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <chromeos/constants/vm_tools.h>
+#include <vm_protos/proto_bindings/common.pb.h>
+#include <vm_protos/proto_bindings/container_host.pb.h>
 
-#include "vm_tools/common/paths.h"
 #include "vm_tools/garcon/desktop_file.h"
 #include "vm_tools/garcon/host_notifier.h"
 #include "vm_tools/garcon/mime_types_parser.h"
 
 namespace {
 
-constexpr int kSecurityTokenLength = 36;
 // File extension for desktop files.
 constexpr char kDesktopFileExtension[] = ".desktop";
 // Directory where the MIME types file is stored for watching with inotify.
@@ -51,40 +52,12 @@ constexpr char kMimeTypesFilePath[] = "/usr/share/mime/mime.cache";
 // Filename for the user's MIME types file in their home dir.
 constexpr char kUserMimeTypesFile[] = ".local/share/mime/mime.cache";
 // Duration over which we coalesce changes to the desktop file system.
-constexpr base::TimeDelta kFilesystemChangeCoalesceTime =
-    base::TimeDelta::FromSeconds(3);
+constexpr base::TimeDelta kFilesystemChangeCoalesceTime = base::Seconds(3);
 // Delimiter for the end of a URL scheme.
 constexpr char kUrlSchemeDelimiter[] = "://";
 // Periodic interval for checking free disk space.
-constexpr base::TimeDelta kDiskSpaceCheckInterval =
-    base::TimeDelta::FromMinutes(2);
+constexpr base::TimeDelta kDiskSpaceCheckInterval = base::Minutes(2);
 constexpr int64_t kDiskSpaceCheckThreshold = 1 * 1024 * 1024 * 1024;  // 1GiB
-
-std::string GetHostIp() {
-  char host_addr[INET_ADDRSTRLEN + 1];
-  base::FilePath host_ip_path(vm_tools::kGarconHostIpFile);
-  int num_read = base::ReadFile(host_ip_path, host_addr, sizeof(host_addr) - 1);
-  if (num_read <= 0) {
-    LOG(ERROR) << "Failed reading the host IP from: "
-               << host_ip_path.MaybeAsASCII();
-    return "";
-  }
-  host_addr[num_read] = '\0';
-  return std::string(host_addr);
-}
-
-std::string GetSecurityToken() {
-  char token[kSecurityTokenLength + 1];
-  base::FilePath security_token_path(vm_tools::kGarconContainerTokenFile);
-  int num_read = base::ReadFile(security_token_path, token, sizeof(token) - 1);
-  if (num_read <= 0) {
-    LOG(ERROR) << "Failed reading the container token from: "
-               << security_token_path.MaybeAsASCII();
-    return "";
-  }
-  token[num_read] = '\0';
-  return std::string(token);
-}
 
 void SendInstallStatusToHost(
     vm_tools::container::ContainerListener::Stub* stub,
@@ -132,26 +105,15 @@ namespace vm_tools {
 namespace garcon {
 
 // static
-std::unique_ptr<HostNotifier> HostNotifier::Create(
-    base::Closure shutdown_closure) {
-  return base::WrapUnique(new HostNotifier(std::move(shutdown_closure)));
+std::unique_ptr<HostNotifier> HostNotifier::Create(const std::string& token) {
+  return base::WrapUnique(new HostNotifier(token));
 }
 
 // static
 bool HostNotifier::OpenUrlInHost(const std::string& url) {
-  std::string host_ip = GetHostIp();
-  std::string token = GetSecurityToken();
-  if (token.empty() || host_ip.empty()) {
-    return false;
-  }
-  std::unique_ptr<vm_tools::container::ContainerListener::Stub> stub;
-  stub = std::make_unique<vm_tools::container::ContainerListener::Stub>(
-      grpc::CreateChannel(base::StringPrintf("vsock:%d:%u", VMADDR_CID_HOST,
-                                             vm_tools::kGarconPort),
-                          grpc::InsecureChannelCredentials()));
   grpc::ClientContext ctx;
   vm_tools::container::OpenUrlRequest url_request;
-  url_request.set_token(token);
+  url_request.set_token(token_);
   url_request.set_url(url);
   // If url has no scheme, but matches a local file, then convert to file://.
   auto front = url.find(kUrlSchemeDelimiter);
@@ -163,7 +125,7 @@ bool HostNotifier::OpenUrlInHost(const std::string& url) {
     }
   }
   vm_tools::EmptyMessage empty;
-  grpc::Status status = stub->OpenUrl(&ctx, url_request, &empty);
+  grpc::Status status = stub_->OpenUrl(&ctx, url_request, &empty);
   if (!status.ok()) {
     LOG(WARNING) << "Failed to request host system to open url \"" << url
                  << "\" error: " << status.error_message();
@@ -173,26 +135,16 @@ bool HostNotifier::OpenUrlInHost(const std::string& url) {
 }
 
 bool HostNotifier::OpenTerminal(std::vector<std::string> args) {
-  std::string host_ip = GetHostIp();
-  std::string token = GetSecurityToken();
-  if (token.empty() || host_ip.empty()) {
-    return false;
-  }
-  std::unique_ptr<vm_tools::container::ContainerListener::Stub> stub;
-  stub = std::make_unique<vm_tools::container::ContainerListener::Stub>(
-      grpc::CreateChannel(base::StringPrintf("vsock:%d:%u", VMADDR_CID_HOST,
-                                             vm_tools::kGarconPort),
-                          grpc::InsecureChannelCredentials()));
   grpc::ClientContext ctx;
   vm_tools::container::OpenTerminalRequest terminal_request;
   std::copy(std::make_move_iterator(args.begin()),
             std::make_move_iterator(args.end()),
             google::protobuf::RepeatedFieldBackInserter(
                 terminal_request.mutable_params()));
-  terminal_request.set_token(token);
+  terminal_request.set_token(token_);
 
   vm_tools::EmptyMessage empty;
-  grpc::Status status = stub->OpenTerminal(&ctx, terminal_request, &empty);
+  grpc::Status status = stub_->OpenTerminal(&ctx, terminal_request, &empty);
   if (!status.ok()) {
     LOG(WARNING) << "Failed request to open terminal, error: "
                  << status.error_message();
@@ -206,19 +158,9 @@ bool HostNotifier::SelectFile(const std::string& type,
                               const std::string& default_path,
                               const std::string& allowed_extensions,
                               std::vector<std::string>* files) {
-  std::string host_ip = GetHostIp();
-  std::string token = GetSecurityToken();
-  if (token.empty() || host_ip.empty()) {
-    return false;
-  }
-  std::unique_ptr<vm_tools::container::ContainerListener::Stub> stub;
-  stub = std::make_unique<vm_tools::container::ContainerListener::Stub>(
-      grpc::CreateChannel(base::StringPrintf("vsock:%d:%u", VMADDR_CID_HOST,
-                                             vm_tools::kGarconPort),
-                          grpc::InsecureChannelCredentials()));
   grpc::ClientContext ctx;
   vm_tools::container::SelectFileRequest select_file_request;
-  select_file_request.set_token(token);
+  select_file_request.set_token(token_);
   select_file_request.set_type(type);
   select_file_request.set_title(title);
   select_file_request.set_default_path(default_path);
@@ -226,7 +168,7 @@ bool HostNotifier::SelectFile(const std::string& type,
 
   vm_tools::container::SelectFileResponse select_file_response;
   grpc::Status status =
-      stub->SelectFile(&ctx, select_file_request, &select_file_response);
+      stub_->SelectFile(&ctx, select_file_request, &select_file_response);
   if (!status.ok()) {
     LOG(WARNING) << "Failed request to select file, error: "
                  << status.error_message();
@@ -240,87 +182,122 @@ bool HostNotifier::SelectFile(const std::string& type,
   return true;
 }
 
-bool HostNotifier::GetDiskInfo(
-    vm_tools::container::GetDiskInfoResponse* response) {
-  std::string host_ip = GetHostIp();
-  std::string token = GetSecurityToken();
-  if (token.empty() || host_ip.empty()) {
+bool HostNotifier::InstallShaderCache(uint64_t steam_app_id,
+                                      bool mount,
+                                      bool wait) {
+  grpc::ClientContext ctx;
+
+  vm_tools::container::InstallShaderCacheRequest request;
+  EmptyMessage response;
+  request.set_token(token_);
+  request.set_steam_app_id(steam_app_id);
+  request.set_mount(mount);
+  request.set_wait(wait);
+
+  // Request Cicerone to download and install shader cache
+  grpc::Status status = stub_->InstallShaderCache(&ctx, request, &response);
+
+  if (!status.ok()) {
+    if (mount && wait) {
+      LOG(ERROR) << "Failed to install and mount shader cache: "
+                 << status.error_message();
+    } else {
+      LOG(ERROR) << "Failed to trigger shader cache installation: "
+                 << status.error_message();
+    }
     return false;
   }
-  std::unique_ptr<vm_tools::container::ContainerListener::Stub> stub;
-  stub = std::make_unique<vm_tools::container::ContainerListener::Stub>(
-      grpc::CreateChannel(base::StringPrintf("vsock:%d:%u", VMADDR_CID_HOST,
-                                             vm_tools::kGarconPort),
-                          grpc::InsecureChannelCredentials()));
+  if (mount && wait) {
+    // The requested mount op was waited on and returned with no errors.
+    LOG(INFO) << "Successfully installed and mounted shader cache DLC";
+  } else {
+    LOG(INFO) << "Successfully scheduled shader cache DLC for installation";
+  }
+  return true;
+}
 
+bool HostNotifier::UninstallShaderCache(uint64_t steam_app_id) {
   grpc::ClientContext ctx;
-  vm_tools::container::GetDiskInfoRequest request;
-  request.set_token(token);
-  grpc::Status status = stub->GetDiskInfo(&ctx, request, response);
+
+  vm_tools::container::UninstallShaderCacheRequest request;
+  EmptyMessage response;
+  request.set_token(token_);
+  request.set_steam_app_id(steam_app_id);
+
+  grpc::Status status = stub_->UninstallShaderCache(&ctx, request, &response);
   if (!status.ok()) {
-    LOG(WARNING) << "Failed to get disk info: " << status.error_message();
+    LOG(ERROR) << "Failed to unmount and uninstall shader cache: "
+               << status.error_message();
     return false;
   }
   return true;
 }
 
-bool HostNotifier::RequestSpace(
-    uint64_t space_requested,
-    vm_tools::container::RequestSpaceResponse* response) {
-  std::string host_ip = GetHostIp();
-  std::string token = GetSecurityToken();
-  if (token.empty() || host_ip.empty()) {
-    return false;
-  }
-  std::unique_ptr<vm_tools::container::ContainerListener::Stub> stub;
-  stub = std::make_unique<vm_tools::container::ContainerListener::Stub>(
-      grpc::CreateChannel(base::StringPrintf("vsock:%d:%u", VMADDR_CID_HOST,
-                                             vm_tools::kGarconPort),
-                          grpc::InsecureChannelCredentials()));
-
+bool HostNotifier::UnmountShaderCache(uint64_t steam_app_id, bool wait) {
   grpc::ClientContext ctx;
-  vm_tools::container::RequestSpaceRequest request;
-  request.set_token(token);
-  request.set_space_requested(space_requested);
-  grpc::Status status = stub->RequestSpace(&ctx, request, response);
+
+  vm_tools::container::UnmountShaderCacheRequest request;
+  EmptyMessage response;
+  request.set_token(token_);
+  request.set_steam_app_id(steam_app_id);
+  request.set_wait(wait);
+
+  grpc::Status status = stub_->UnmountShaderCache(&ctx, request, &response);
   if (!status.ok()) {
-    LOG(WARNING) << "Failed to expand the disk: " << status.error_message();
+    LOG(ERROR) << "Failed to queue unmount shader cache: "
+               << status.error_message();
     return false;
   }
   return true;
 }
 
-bool HostNotifier::ReleaseSpace(
-    uint64_t space_to_release,
-    vm_tools::container::ReleaseSpaceResponse* response) {
-  std::string host_ip = GetHostIp();
-  std::string token = GetSecurityToken();
-  if (token.empty() || host_ip.empty()) {
-    return false;
-  }
-  std::unique_ptr<vm_tools::container::ContainerListener::Stub> stub;
-  stub = std::make_unique<vm_tools::container::ContainerListener::Stub>(
-      grpc::CreateChannel(base::StringPrintf("vsock:%d:%u", VMADDR_CID_HOST,
-                                             vm_tools::kGarconPort),
-                          grpc::InsecureChannelCredentials()));
-
+bool HostNotifier::ReportMetrics(
+    vm_tools::container::ReportMetricsRequest request,
+    vm_tools::container::ReportMetricsResponse* response) {
   grpc::ClientContext ctx;
-  vm_tools::container::ReleaseSpaceRequest request;
-  request.set_token(token);
-  request.set_space_to_release(space_to_release);
-  grpc::Status status = stub->ReleaseSpace(&ctx, request, response);
+  request.set_token(token_);
+  grpc::Status status = stub_->ReportMetrics(&ctx, request, response);
   if (!status.ok()) {
-    LOG(WARNING) << "Failed to shrink the disk: " << status.error_message();
+    LOG(WARNING) << "Failed to report metrics: " << status.error_message();
     return false;
   }
   return true;
 }
 
-HostNotifier::HostNotifier(base::Closure shutdown_closure)
-    : update_app_list_posted_(false),
+bool HostNotifier::InhibitScreensaver(
+    vm_tools::container::InhibitScreensaverInfo info) {
+  grpc::ClientContext ctx;
+  info.set_token(token_);
+  vm_tools::EmptyMessage empty;
+  grpc::Status status = stub_->InhibitScreensaver(&ctx, info, &empty);
+  if (!status.ok()) {
+    LOG(WARNING) << "Failed to inhibit screensaver: " << status.error_message();
+    return false;
+  }
+  return true;
+}
+
+bool HostNotifier::UninhibitScreensaver(
+    vm_tools::container::UninhibitScreensaverInfo info) {
+  vm_tools::EmptyMessage empty;
+  grpc::ClientContext ctx;
+  info.set_token(token_);
+  grpc::Status status = stub_->UninhibitScreensaver(&ctx, info, &empty);
+  if (!status.ok()) {
+    LOG(WARNING) << "Failed to uninhibit screensaver: "
+                 << status.error_message();
+    return false;
+  }
+  return true;
+}
+
+HostNotifier::HostNotifier(const std::string& token)
+    : token_(token),
+      update_app_list_posted_(false),
       send_app_list_to_host_in_progress_(false),
-      update_mime_types_posted_(false),
-      shutdown_closure_(std::move(shutdown_closure)) {}
+      update_mime_types_posted_(false) {
+  SetUpContainerListenerStub();
+}
 
 HostNotifier::~HostNotifier() = default;
 
@@ -334,7 +311,9 @@ void HostNotifier::OnSignalReadable() {
   // which should then shut us down, deallocate us and then also terminate the
   // gRPC thread.
   NotifyHostOfContainerShutdown();
-  task_runner_->PostTask(FROM_HERE, shutdown_closure_);
+  if (shutdown_closure_) {
+    task_runner_->PostTask(FROM_HERE, std::move(shutdown_closure_));
+  }
 }
 
 void HostNotifier::OnInstallCompletion(const std::string& command_uuid,
@@ -347,9 +326,10 @@ void HostNotifier::OnInstallCompletion(const std::string& command_uuid,
               : vm_tools::container::InstallLinuxPackageProgressInfo::FAILED);
   progress_info.set_failure_details(failure_reason);
   progress_info.set_command_uuid(command_uuid);
-  task_runner_->PostTask(FROM_HERE, base::Bind(&SendInstallStatusToHost,
-                                               base::Unretained(stub_.get()),
-                                               std::move(progress_info)));
+  task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&SendInstallStatusToHost, base::Unretained(stub_.get()),
+                     std::move(progress_info)));
 }
 
 void HostNotifier::OnInstallProgress(
@@ -361,9 +341,10 @@ void HostNotifier::OnInstallProgress(
   progress_info.set_status(status);
   progress_info.set_progress_percent(percent_progress);
   progress_info.set_command_uuid(command_uuid);
-  task_runner_->PostTask(FROM_HERE, base::Bind(&SendInstallStatusToHost,
-                                               base::Unretained(stub_.get()),
-                                               std::move(progress_info)));
+  task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&SendInstallStatusToHost, base::Unretained(stub_.get()),
+                     std::move(progress_info)));
 }
 
 void HostNotifier::OnUninstallCompletion(bool success,
@@ -380,8 +361,9 @@ void HostNotifier::OnUninstallCompletion(bool success,
     info.set_failure_details(failure_reason);
   }
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&SendUninstallStatusToHost,
-                            base::Unretained(stub_.get()), std::move(info)));
+      FROM_HERE,
+      base::BindOnce(&SendUninstallStatusToHost, base::Unretained(stub_.get()),
+                     std::move(info)));
 }
 
 void HostNotifier::OnUninstallProgress(uint32_t percent_progress) {
@@ -393,8 +375,9 @@ void HostNotifier::OnUninstallProgress(uint32_t percent_progress) {
       vm_tools::container::UninstallPackageProgressInfo::UNINSTALLING);
   info.set_progress_percent(percent_progress);
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&SendUninstallStatusToHost,
-                            base::Unretained(stub_.get()), std::move(info)));
+      FROM_HERE,
+      base::BindOnce(&SendUninstallStatusToHost, base::Unretained(stub_.get()),
+                     std::move(info)));
 }
 
 void HostNotifier::OnApplyAnsiblePlaybookCompletion(
@@ -414,8 +397,27 @@ void HostNotifier::OnApplyAnsiblePlaybookCompletion(
     info.set_failure_details(failure_reason);
   }
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&SendApplyAnsiblePlaybookStatusToHost,
-                            base::Unretained(stub_.get()), std::move(info)));
+      FROM_HERE,
+      base::BindOnce(&SendApplyAnsiblePlaybookStatusToHost,
+                     base::Unretained(stub_.get()), std::move(info)));
+}
+
+void HostNotifier::OnApplyAnsiblePlaybookProgress(
+    const std::vector<std::string>& status_lines) {
+  LOG(INFO) << "Got HostNotifier::OnApplyAnsaiblePlaybookProgress: "
+            << status_lines[0];
+
+  vm_tools::container::ApplyAnsiblePlaybookProgressInfo info;
+  info.set_token(token_);
+  info.set_status(
+      vm_tools::container::ApplyAnsiblePlaybookProgressInfo::IN_PROGRESS);
+  for (auto line : status_lines)
+    info.add_status_string(line);
+
+  task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&SendApplyAnsiblePlaybookStatusToHost,
+                     base::Unretained(stub_.get()), std::move(info)));
 }
 
 void HostNotifier::CreateAnsiblePlaybookApplication(
@@ -433,18 +435,16 @@ void HostNotifier::RemoveAnsiblePlaybookApplication() {
   ansible_playbook_application_.reset();
 }
 
-bool HostNotifier::Init(uint32_t vsock_port,
-                        PackageKitProxy* package_kit_proxy) {
+bool HostNotifier::InitServer(base::OnceClosure shutdown_closure,
+                              uint32_t garcon_port,
+                              uint32_t sftp_port,
+                              PackageKitProxy* package_kit_proxy) {
   CHECK(package_kit_proxy);
   package_kit_proxy_ = package_kit_proxy;
-  task_runner_ = base::ThreadTaskRunnerHandle::Get();
-  std::string host_ip = GetHostIp();
-  token_ = GetSecurityToken();
-  if (token_.empty() || host_ip.empty()) {
-    return false;
-  }
-  SetUpContainerListenerStub(std::move(host_ip));
-  if (!NotifyHostGarconIsReady(vsock_port)) {
+  shutdown_closure_ = std::move(shutdown_closure);
+  task_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
+  sftp_vsock_port_ = sftp_port;
+  if (!NotifyHostGarconIsReady(garcon_port, sftp_port)) {
     return false;
   }
 
@@ -483,8 +483,8 @@ bool HostNotifier::Init(uint32_t vsock_port,
     std::unique_ptr<base::FilePathWatcher> watcher =
         std::make_unique<base::FilePathWatcher>();
     if (!watcher->Watch(path, base::FilePathWatcher::Type::kRecursive,
-                        base::Bind(&HostNotifier::DesktopPathsChanged,
-                                   base::Unretained(this)))) {
+                        base::BindRepeating(&HostNotifier::DesktopPathsChanged,
+                                            base::Unretained(this)))) {
       LOG(ERROR) << "Failed setting up filesystem path watcher for dir: "
                  << path.value();
       // Probably better to just watch the dirs we can rather than terminate
@@ -501,10 +501,10 @@ bool HostNotifier::Init(uint32_t vsock_port,
   std::unique_ptr<base::FilePathWatcher> mime_type_watcher =
       std::make_unique<base::FilePathWatcher>();
   base::FilePath mime_type_path(kMimeTypesDir);
-  if (!mime_type_watcher->Watch(mime_type_path,
-                                base::FilePathWatcher::Type::kNonRecursive,
-                                base::Bind(&HostNotifier::MimeTypesChanged,
-                                           base::Unretained(this)))) {
+  if (!mime_type_watcher->Watch(
+          mime_type_path, base::FilePathWatcher::Type::kNonRecursive,
+          base::BindRepeating(&HostNotifier::MimeTypesChanged,
+                              base::Unretained(this)))) {
     LOG(ERROR) << "Failed setting up filesystem path watcher for: "
                << kMimeTypesDir;
   }
@@ -516,8 +516,8 @@ bool HostNotifier::Init(uint32_t vsock_port,
   if (!home_mime_type_watcher->Watch(
           base::GetHomeDir().Append(kUserMimeTypesDir),
           base::FilePathWatcher::Type::kNonRecursive,
-          base::Bind(&HostNotifier::MimeTypesChanged,
-                     base::Unretained(this)))) {
+          base::BindRepeating(&HostNotifier::MimeTypesChanged,
+                              base::Unretained(this)))) {
     LOG(ERROR) << "Failed setting up filesystem path watcher for: "
                << base::GetHomeDir().value();
   }
@@ -555,12 +555,14 @@ void HostNotifier::CheckDiskSpace() {
   }
 }
 
-bool HostNotifier::NotifyHostGarconIsReady(uint32_t vsock_port) {
+bool HostNotifier::NotifyHostGarconIsReady(uint32_t garcon_port,
+                                           uint32_t sftp_port) {
   // Notify the host system that we are ready.
   grpc::ClientContext ctx;
   vm_tools::container::ContainerStartupInfo startup_info;
   startup_info.set_token(token_);
-  startup_info.set_garcon_port(vsock_port);
+  startup_info.set_garcon_port(garcon_port);
+  startup_info.set_sftp_port(sftp_port);
   vm_tools::EmptyMessage empty;
   grpc::Status status = stub_->ContainerReady(&ctx, startup_info, &empty);
   if (!status.ok()) {
@@ -598,6 +600,25 @@ void HostNotifier::NotifyHostOfPendingAppListUpdates() {
   }
 }
 
+void HostNotifier::HandleSteamApp(
+    std::unordered_set<uint64_t> found_steam_apps) {
+  for (auto app_id : found_steam_apps) {
+    if (installed_steam_apps_.find(app_id) == installed_steam_apps_.end()) {
+      LOG(INFO) << "Attempting to install shader cache for newly installed "
+                << "steam app";
+      InstallShaderCache(app_id, false, false);
+    }
+  }
+  for (auto app_id : installed_steam_apps_) {
+    if (found_steam_apps.find(app_id) == found_steam_apps.end()) {
+      LOG(INFO) << "Attempting to uninstall shader cache for removed steam app";
+      UninstallShaderCache(app_id);
+    }
+  }
+
+  installed_steam_apps_ = found_steam_apps;
+}
+
 void HostNotifier::SendAppListToHost() {
   if (send_app_list_to_host_in_progress_) {
     // Don't have multiple SendAppListToHost callback chains happening at the
@@ -607,7 +628,8 @@ void HostNotifier::SendAppListToHost() {
     // on the same thread.
     task_runner_->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&HostNotifier::SendAppListToHost, base::Unretained(this)),
+        base::BindOnce(&HostNotifier::SendAppListToHost,
+                       base::Unretained(this)),
         kFilesystemChangeCoalesceTime);
     return;
   }
@@ -617,6 +639,8 @@ void HostNotifier::SendAppListToHost() {
 
   // If we hit duplicate IDs, then we are supposed to use the first one only.
   std::set<std::string> unique_app_ids;
+
+  std::unordered_set<uint64_t> found_steam_apps;
 
   // Get the list of directories that we should search for .desktop files
   // recursively and then perform the search.
@@ -639,6 +663,12 @@ void HostNotifier::SendAppListToHost() {
                      << enum_path.value();
         continue;
       }
+
+      // Found steam apps
+      if (desktop_file->steam_app_id()) {
+        found_steam_apps.emplace(desktop_file->steam_app_id());
+      }
+
       // If we have already seen this desktop file ID then don't analyze this
       // one. We want to check this before we do the filtering to allow users
       // to put .desktop files in local locations to hide applications in
@@ -698,6 +728,7 @@ void HostNotifier::SendAppListToHost() {
       app->set_startup_notify(desktop_file->startup_notify());
       app->set_exec(desktop_file->exec());
       app->set_executable_file_name(desktop_file->GenerateExecutableFileName());
+      app->set_terminal(desktop_file->terminal());
 
       callback_state->desktop_files_for_application.push_back(enum_path);
     }
@@ -726,6 +757,7 @@ void HostNotifier::SendAppListToHost() {
   // round.
   send_app_list_to_host_in_progress_ = true;
 
+  HandleSteamApp(found_steam_apps);
   RequestNextPackageIdOrCompleteUpdateApplicationList(
       std::move(callback_state));
 }
@@ -753,8 +785,8 @@ void HostNotifier::RequestNextPackageIdOrCompleteUpdateApplicationList(
   package_kit_proxy_->SearchLinuxPackagesForFile(
       state->desktop_files_for_application
           [state->num_package_id_queries_completed],
-      base::Bind(&HostNotifier::PackageIdCallback, base::Unretained(this),
-                 base::Passed(&state)));
+      base::BindOnce(&HostNotifier::PackageIdCallback, base::Unretained(this),
+                     std::move(state)));
 }
 
 void HostNotifier::PackageIdCallback(
@@ -779,9 +811,9 @@ void HostNotifier::PackageIdCallback(
   state->num_package_id_queries_completed++;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &HostNotifier::RequestNextPackageIdOrCompleteUpdateApplicationList,
-          base::Unretained(this), base::Passed(&state)));
+          base::Unretained(this), std::move(state)));
 }
 
 void HostNotifier::SendMimeTypesToHost() {
@@ -835,7 +867,7 @@ void HostNotifier::DesktopPathsChanged(const base::FilePath& path, bool error) {
   }
   task_runner_->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&HostNotifier::SendAppListToHost, base::Unretained(this)),
+      base::BindOnce(&HostNotifier::SendAppListToHost, base::Unretained(this)),
       kFilesystemChangeCoalesceTime);
   update_app_list_posted_ = true;
   NotifyHostOfPendingAppListUpdates();
@@ -856,12 +888,13 @@ void HostNotifier::MimeTypesChanged(const base::FilePath& path, bool error) {
   }
   task_runner_->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&HostNotifier::SendMimeTypesToHost, base::Unretained(this)),
+      base::BindOnce(&HostNotifier::SendMimeTypesToHost,
+                     base::Unretained(this)),
       kFilesystemChangeCoalesceTime);
   update_mime_types_posted_ = true;
 }
 
-void HostNotifier::SetUpContainerListenerStub(const std::string& host_ip) {
+void HostNotifier::SetUpContainerListenerStub() {
   stub_ = std::make_unique<vm_tools::container::ContainerListener::Stub>(
       grpc::CreateChannel(base::StringPrintf("vsock:%d:%u", VMADDR_CID_HOST,
                                              vm_tools::kGarconPort),
@@ -889,7 +922,8 @@ bool HostNotifier::AddFileWatch(const base::FilePath& path,
       // TODO(crbug.com/1179608): after libchrome is upreved to r860220,
       // base::FilePathWatcher will not be overloaded and could be simplified to
       // base::IgnoreResult(&base::FilePathWatcher::Watch).
-      base::BindOnce(base::IgnoreResult<bool (base::FilePathWatcher::*)(
+      base::BindOnce(base::IgnoreResult<bool (  // NOLINT(whitespace/parens)
+                         base::FilePathWatcher::*)(
                          const base::FilePath&, base::FilePathWatcher::Type,
                          const base::FilePathWatcher::Callback&)>(
                          &base::FilePathWatcher::Watch),
@@ -969,8 +1003,8 @@ void HostNotifier::FileWatchTriggered(const base::FilePath& absolute_path,
   } else {
     task_runner_->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&HostNotifier::SendFileWatchTriggeredToHost,
-                   base::Unretained(this), path),
+        base::BindOnce(&HostNotifier::SendFileWatchTriggeredToHost,
+                       base::Unretained(this), path),
         kFilesystemChangeCoalesceTime - time_since_last);
     file_watch_change_posted_.insert(path);
   }

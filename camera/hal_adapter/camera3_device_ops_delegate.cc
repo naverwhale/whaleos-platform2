@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -7,11 +7,14 @@
 #include "hal_adapter/camera3_device_ops_delegate.h"
 
 #include <inttypes.h>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include <base/check.h>
-#include <base/strings/stringprintf.h>
+#include <base/json/json_writer.h>
+#include <base/strings/string_number_conversions.h>
+#include <base/task/bind_post_task.h>
 
 #include "cros-camera/common.h"
 #include "hal_adapter/camera_device_adapter.h"
@@ -19,20 +22,46 @@
 
 namespace cros {
 
+namespace {
+
+std::string ConvertToJsonString(
+    const mojom::Camera3StreamConfigurationPtr& stream_config) {
+  base::Value::List val;
+  for (const auto& stream : stream_config->streams) {
+    base::Value::Dict s;
+    s.Set("stream_id", base::NumberToString(stream->id));
+    s.Set("width", base::checked_cast<int>(stream->width));
+    s.Set("height", base::checked_cast<int>(stream->height));
+    s.Set("format", base::checked_cast<int>(stream->format));
+    val.Append(std::move(s));
+  }
+  std::string json_string;
+  if (!base::JSONWriter::WriteWithOptions(
+          val, base::JSONWriter::OPTIONS_PRETTY_PRINT, &json_string)) {
+    LOGF(ERROR) << "Cannot convert Mojo stream configurations to JSON string";
+    return std::string();
+  }
+  return json_string;
+}
+
+}  // namespace
+
 Camera3DeviceOpsDelegate::Camera3DeviceOpsDelegate(
     CameraDeviceAdapter* camera_device_adapter,
-    scoped_refptr<base::SingleThreadTaskRunner> task_runner)
+    scoped_refptr<base::SingleThreadTaskRunner> task_runner,
+    scoped_refptr<base::SingleThreadTaskRunner> callback_ops_task_runner)
     : internal::MojoReceiver<Camera3DeviceOps>(task_runner),
+      callback_ops_task_runner_(callback_ops_task_runner),
       camera_device_adapter_(camera_device_adapter) {}
 
-Camera3DeviceOpsDelegate::~Camera3DeviceOpsDelegate() {}
+Camera3DeviceOpsDelegate::~Camera3DeviceOpsDelegate() = default;
 
 void Camera3DeviceOpsDelegate::Initialize(
     mojo::PendingRemote<mojom::Camera3CallbackOps> callback_ops,
     InitializeCallback callback) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER();
+
   std::move(callback).Run(
       camera_device_adapter_->Initialize(std::move(callback_ops)));
 }
@@ -40,12 +69,9 @@ void Camera3DeviceOpsDelegate::Initialize(
 void Camera3DeviceOpsDelegate::ConfigureStreams(
     mojom::Camera3StreamConfigurationPtr config,
     ConfigureStreamsCallback callback) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  for (const auto& stream : config->streams) {
-    TRACE_CAMERA_SCOPED("stream_id", stream->id, "width", stream->width,
-                        "height", stream->height, "format", stream->format);
-  }
+  TRACE_HAL_ADAPTER("stream_configurations", ConvertToJsonString(config));
+
   mojom::Camera3StreamConfigurationPtr updated_config;
   int32_t result = camera_device_adapter_->ConfigureStreams(std::move(config),
                                                             &updated_config);
@@ -55,9 +81,9 @@ void Camera3DeviceOpsDelegate::ConfigureStreams(
 void Camera3DeviceOpsDelegate::ConstructDefaultRequestSettings(
     mojom::Camera3RequestTemplate type,
     ConstructDefaultRequestSettingsCallback callback) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER();
+
   std::move(callback).Run(
       camera_device_adapter_->ConstructDefaultRequestSettings(type));
 }
@@ -65,32 +91,32 @@ void Camera3DeviceOpsDelegate::ConstructDefaultRequestSettings(
 void Camera3DeviceOpsDelegate::ProcessCaptureRequest(
     mojom::Camera3CaptureRequestPtr request,
     ProcessCaptureRequestCallback callback) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  for (const auto& output_buffer : request->output_buffers) {
-    TRACE_CAMERA_ASYNC_BEGIN(base::StringPrintf("frame capture stream %" PRIu64,
-                                                output_buffer->stream_id),
-                             request->frame_number, "frame_number",
-                             request->frame_number, "stream_id",
-                             output_buffer->stream_id, "buffer_id",
-                             output_buffer->buffer_id);
-  }
+  TRACE_HAL_ADAPTER();
+
   std::move(callback).Run(
       camera_device_adapter_->ProcessCaptureRequest(std::move(request)));
 }
 
 void Camera3DeviceOpsDelegate::Dump(mojo::ScopedHandle fd) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER();
+
   camera_device_adapter_->Dump(std::move(fd));
 }
 
 void Camera3DeviceOpsDelegate::Flush(FlushCallback callback) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
-  std::move(callback).Run(camera_device_adapter_->Flush());
+  TRACE_HAL_ADAPTER();
+
+  int32_t ret = camera_device_adapter_->Flush();
+
+  // Make sure that |callback| is run after pending tasks such as
+  // ProcessCaptureResult() on |callback_ops_task_runner_| finish.
+  base::OnceCallback<void()> run_callback_on_thread = base::BindPostTask(
+      task_runner_, base::BindOnce(std::move(callback), ret));
+  callback_ops_task_runner_->PostTask(FROM_HERE,
+                                      std::move(run_callback_on_thread));
 }
 
 void Camera3DeviceOpsDelegate::RegisterBuffer(
@@ -104,30 +130,27 @@ void Camera3DeviceOpsDelegate::RegisterBuffer(
     const std::vector<uint32_t>& strides,
     const std::vector<uint32_t>& offsets,
     RegisterBufferCallback callback) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED("buffer_id", buffer_id);
+  TRACE_HAL_ADAPTER("buffer_id", buffer_id);
+
   std::move(callback).Run(camera_device_adapter_->RegisterBuffer(
       buffer_id, type, std::move(fds), drm_format, hal_pixel_format, width,
-      height, strides, offsets));
+      height, strides, offsets, DRM_FORMAT_MOD_LINEAR));
 }
 
 void Camera3DeviceOpsDelegate::Close(CloseCallback callback) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER();
+
   std::move(callback).Run(camera_device_adapter_->Close());
 }
 
 void Camera3DeviceOpsDelegate::ConfigureStreamsAndGetAllocatedBuffers(
     mojom::Camera3StreamConfigurationPtr config,
     ConfigureStreamsAndGetAllocatedBuffersCallback callback) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  for (const auto& stream : config->streams) {
-    TRACE_CAMERA_SCOPED("stream_id", stream->id, "width", stream->width,
-                        "height", stream->height, "format", stream->format);
-  }
+  TRACE_HAL_ADAPTER("stream_configurations", ConvertToJsonString(config));
+
   mojom::Camera3StreamConfigurationPtr updated_config;
   CameraDeviceAdapter::AllocatedBuffers allocated_buffers;
   int32_t result =
@@ -135,6 +158,14 @@ void Camera3DeviceOpsDelegate::ConfigureStreamsAndGetAllocatedBuffers(
           std::move(config), &updated_config, &allocated_buffers);
   std::move(callback).Run(result, std::move(updated_config),
                           std::move(allocated_buffers));
+}
+
+void Camera3DeviceOpsDelegate::SignalStreamFlush(
+    const std::vector<uint64_t>& stream_ids) {
+  DCHECK(task_runner_->BelongsToCurrentThread());
+  TRACE_HAL_ADAPTER();
+
+  camera_device_adapter_->SignalStreamFlush(stream_ids);
 }
 
 }  // namespace cros

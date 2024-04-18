@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,12 @@
 
 #include <string>
 
+#include <cryptohome/proto_bindings/UserDataAuth.pb.h>
 #include <dbus/cryptohome/dbus-constants.h>
 #include <google/protobuf/message_lite.h>
 
+#include "cryptohome/crypto_error.h"
 #include "cryptohome/platform.h"
-#include "cryptohome/UserDataAuth.pb.h"
 
 namespace cryptohome {
 
@@ -34,7 +35,15 @@ bool WriteProtobuf(int fd, const google::protobuf::MessageLite& message);
 // normally.
 void ForkAndCrash(const std::string& message);
 
-// Convert MountError used by mount.cc to CryptohomeErrorCode defined in the
+// Converts CryptoError to CryptohomeErrorCode defined in the protos.
+user_data_auth::CryptohomeErrorCode CryptoErrorToCryptohomeError(
+    const CryptoError code);
+
+// Converts a CryptoError returned from AuthBlocks or VaultKeysets to
+// MountError.
+MountError CryptoErrorToMountError(const CryptoError crypto_error);
+
+// Converts MountError used by mount.cc to CryptohomeErrorCode defined in the
 // protos.
 user_data_auth::CryptohomeErrorCode MountErrorToCryptohomeError(
     const MountError code);

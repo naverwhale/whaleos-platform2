@@ -1,21 +1,20 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "crash-reporter/crash_serializer.h"
 
 #include <stdio.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 
 #include <base/big_endian.h>
 #include <base/check_op.h>
-#include <base/compiler_specific.h>  // FALLTHROUGH
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/notreached.h>
-#include <base/optional.h>
 #include <base/strings/string_util.h>
 #include <base/threading/platform_thread.h>
 #include <base/time/default_clock.h>
@@ -45,15 +44,15 @@ void AddMetaField(crash::CrashInfo* info,
   meta->set_text(value);
 }
 
-base::Optional<crash::CrashBlob> MakeBlob(const std::string& name,
-                                          const base::FilePath& file) {
+std::optional<crash::CrashBlob> MakeBlob(const std::string& name,
+                                         const base::FilePath& file) {
   if (!base::IsStringUTF8(name)) {
     LOG(ERROR) << "key was not UTF8: " << name;
-    return base::nullopt;
+    return std::nullopt;
   }
   std::string contents;
   if (!base::ReadFileToString(file, &contents)) {
-    return base::nullopt;
+    return std::nullopt;
   }
   crash::CrashBlob b;
   b.set_key(name);
@@ -87,7 +86,7 @@ void Serializer::PickCrashFiles(const base::FilePath& crash_dir,
                                     &reason, &info,
                                     /*processing_file=*/nullptr)) {
       case kRemove:
-        FALLTHROUGH;  // Don't remove; rather, ignore the report.
+        [[fallthrough]];  // Don't remove; rather, ignore the report.
       case kIgnore:
         LOG(INFO) << "Ignoring: " << reason;
         break;
@@ -217,7 +216,7 @@ bool Serializer::SerializeCrash(const util::CrashDetails& details,
   }
 
   // Add payload file
-  base::Optional<crash::CrashBlob> payload =
+  std::optional<crash::CrashBlob> payload =
       MakeBlob(crash.payload.first, crash.payload.second);
   if (!payload) {
     return false;
@@ -226,7 +225,7 @@ bool Serializer::SerializeCrash(const util::CrashDetails& details,
 
   // Add files
   for (const auto& kv : crash.files) {
-    base::Optional<crash::CrashBlob> blob = MakeBlob(kv.first, kv.second);
+    std::optional<crash::CrashBlob> blob = MakeBlob(kv.first, kv.second);
     if (blob) {
       blobs->push_back(*blob);
     }
@@ -358,4 +357,8 @@ bool Serializer::WriteCoredump(int64_t crash_id, base::FilePath core_path) {
   return true;
 }
 
+std::unique_ptr<util::ScopedProcessingFileBase>
+Serializer::MakeScopedProcessingFile(const base::FilePath& meta_file) {
+  return std::make_unique<util::ScopedProcessingFile>(meta_file);
+}
 }  // namespace crash_serializer

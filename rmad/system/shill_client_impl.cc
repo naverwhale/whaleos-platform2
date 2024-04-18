@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,6 +23,8 @@ ShillClientImpl::ShillClientImpl(
     std::unique_ptr<org::chromium::flimflam::ManagerProxyInterface>
         flimflam_manager_proxy)
     : flimflam_manager_proxy_(std::move(flimflam_manager_proxy)) {}
+
+ShillClientImpl::~ShillClientImpl() = default;
 
 bool ShillClientImpl::DisableCellular() const {
   brillo::ErrorPtr error;

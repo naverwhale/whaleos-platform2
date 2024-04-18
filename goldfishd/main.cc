@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -9,10 +9,10 @@
 #include <stdlib.h>
 #include <sysexits.h>
 
-#include <base/bind.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/process/launch.h>
 #include <base/time/time.h>
@@ -30,7 +30,7 @@ const char kCrosPipe[] = "pipe:qemud:cros";
 // Character device provided by Android Emulator.
 const char kGoldfishDev[] = "/dev/goldfish_pipe";
 // Timeout to wait auto login script to finish.
-constexpr base::TimeDelta kLoginTimeout = base::TimeDelta::FromSeconds(50);
+constexpr base::TimeDelta kLoginTimeout = base::Seconds(50);
 
 class GoldfishDaemon : public brillo::Daemon {
  public:

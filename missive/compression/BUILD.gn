@@ -1,5 +1,5 @@
-# Copyright 2021 The Chromium Authors.All rights reserved.
-# Use of this source code is governed by a BSD - style license that can be
+# Copyright 2021 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
@@ -21,8 +21,10 @@ static_library("compression_module") {
   configs += [ ":target_defaults" ]
   public_deps = [ "//missive/storage:storage_configuration" ]
   deps = [
-    "//missive/proto:record_constants",
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
+    "//missive/proto:libmissiveprotorecordconstants",
+    "//missive/resources:resource_manager",
+    "//missive/util:dynamic_flag",
     "//missive/util:status",
   ]
 }
@@ -30,13 +32,12 @@ static_library("compression_module") {
 static_library("compression_test_support") {
   sources = [
     "decompression.cc",
-    "scoped_compression_feature.cc",
     "test_compression_module.cc",
   ]
   configs += [ ":target_defaults" ]
   deps = [
     ":compression_module",
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
     "//missive/util:status",
     "//missive/util:status_macros",
   ]
@@ -46,7 +47,7 @@ source_set("unit_tests") {
   sources = [ "compression_module_test.cc" ]
   deps = [
     ":compression_test_support",
-    "//missive/proto:record_proto",
+    "//missive/proto:libmissiveprotorecord",
     "//missive/util:status",
     "//missive/util:status_macros",
     "//missive/util:test_callbacks_support",

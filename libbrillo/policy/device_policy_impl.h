@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,18 +6,23 @@
 #define LIBBRILLO_POLICY_DEVICE_POLICY_IMPL_H_
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 
-#include "bindings/chrome_device_policy.pb.h"
-#include "bindings/device_management_backend.pb.h"
 #include "install_attributes/libinstallattributes.h"
 #include "policy/device_policy.h"
+
+// Avoid transitive includes of protofile headers. See b:294577904.
+namespace enterprise_management {
+class PolicyFetchResponse;
+class PolicyData;
+class ChromeDeviceSettingsProto;
+}  // namespace enterprise_management
 
 #pragma GCC visibility push(default)
 
@@ -36,13 +41,21 @@ class DevicePolicyImpl : public DevicePolicy {
 
   ~DevicePolicyImpl() override;
 
-  const enterprise_management::ChromeDeviceSettingsProto& get_device_policy()
+  const enterprise_management::PolicyFetchResponse& get_policy_fetch_response()
       const {
-    return device_policy_;
+    return *policy_;
   }
 
+  int get_number_of_policy_files() const { return number_of_policy_files_; }
+
+  int get_number_of_invalid_files() const { return number_of_invalid_files_; }
+
+  // Loads the device policy. The |delete| argument specifies whether to delete
+  // the device policy files that failed to load or pass validation.
+  bool LoadPolicyDeleteInvalid(bool delete_invalid_files);
+
   // DevicePolicy overrides:
-  bool LoadPolicy() override;
+  bool LoadPolicy(bool delete_invalid_files) override;
   bool IsEnterpriseEnrolled() const override;
   bool GetPolicyRefreshRate(int* rate) const override;
   bool GetGuestModeEnabled(bool* guest_mode_enabled) const override;
@@ -51,10 +64,17 @@ class DevicePolicyImpl : public DevicePolicy {
   bool GetDataRoamingEnabled(bool* data_roaming_enabled) const override;
   bool GetAllowNewUsers(bool* allow_new_users) const override;
   bool GetMetricsEnabled(bool* metrics_enabled) const override;
+  bool GetHwDataUsageEnabled(bool* hw_data_usage_enabled) const override;
+  bool GetReportSystemInfo(bool* report_system_info) const override;
+  bool GetReportCpuInfo(bool* report_cpu_info) const override;
+  bool GetReportGraphicsStatus(bool* report_graphics_status) const override;
+  bool GetReportMemoryInfo(bool* report_memory_info) const override;
+  bool GetReportNetworkConfig(bool* report_network_config) const override;
   bool GetReportVersionInfo(bool* report_version_info) const override;
   bool GetReportActivityTimes(bool* report_activity_times) const override;
   bool GetReportBootMode(bool* report_boot_mode) const override;
-  bool GetEphemeralUsersEnabled(bool* ephemeral_users_enabled) const override;
+  bool GetEphemeralSettings(
+      EphemeralSettings* ephemeral_settings) const override;
   bool GetReleaseChannel(std::string* release_channel) const override;
   bool GetReleaseChannelDelegated(
       bool* release_channel_delegated) const override;
@@ -82,6 +102,7 @@ class DevicePolicyImpl : public DevicePolicy {
   bool GetAutoLaunchedKioskAppId(std::string* app_id_out) const override;
   bool IsEnterpriseManaged() const override;
   bool GetSecondFactorAuthenticationMode(int* mode_out) const override;
+  std::optional<bool> GetRunAutomaticCleanupOnLogin() const override;
   bool GetDisallowedTimeIntervals(
       std::vector<WeeklyTimeInterval>* intervals_out) const override;
   bool GetDeviceUpdateStagingSchedule(
@@ -98,30 +119,26 @@ class DevicePolicyImpl : public DevicePolicy {
   bool GetDeviceMarketSegment(
       DeviceMarketSegment* device_market_segment) const override;
   bool GetDeviceDebugPacketCaptureAllowed(bool* allowed) const override;
+  bool GetDeviceKeylockerForStorageEncryptionEnabled(
+      bool* keylocker_enabled) const override;
+  std::optional<bool> GetReportDeviceSecurityStatus() const override;
+  std::optional<bool> GetDeviceReportXDREvents() const override;
 
   // Methods that can be used only for testing.
+  const enterprise_management::ChromeDeviceSettingsProto&
+  get_device_policy_for_testing() const {
+    return *device_policy_;
+  }
   void set_policy_data_for_testing(
-      const enterprise_management::PolicyData& policy_data) {
-    policy_data_ = policy_data;
-  }
-  void set_verify_root_ownership_for_testing(bool verify_root_ownership) {
-    verify_root_ownership_ = verify_root_ownership;
-  }
+      const enterprise_management::PolicyData& policy_data);
+  void set_verify_root_ownership_for_testing(bool verify_root_ownership);
   void set_install_attributes_for_testing(
-      std::unique_ptr<InstallAttributesReader> install_attributes_reader) {
-    install_attributes_reader_ = std::move(install_attributes_reader);
-  }
+      std::unique_ptr<InstallAttributesReader> install_attributes_reader);
   void set_policy_for_testing(
-      const enterprise_management::ChromeDeviceSettingsProto& device_policy) {
-    device_policy_ = device_policy;
-  }
-  void set_policy_path_for_testing(const base::FilePath& policy_path) {
-    policy_path_ = policy_path;
-  }
-  void set_key_file_path_for_testing(const base::FilePath& keyfile_path) {
-    keyfile_path_ = keyfile_path;
-  }
-  void set_verify_policy_for_testing(bool value) { verify_policy_ = value; }
+      const enterprise_management::ChromeDeviceSettingsProto& device_policy);
+  void set_policy_path_for_testing(const base::FilePath& policy_path);
+  void set_key_file_path_for_testing(const base::FilePath& keyfile_path);
+  void set_verify_policy_for_testing(bool value);
 
  private:
   // Verifies that both the policy file and the signature file exist and are
@@ -143,9 +160,16 @@ class DevicePolicyImpl : public DevicePolicy {
   base::FilePath policy_path_;
   base::FilePath keyfile_path_;
   std::unique_ptr<InstallAttributesReader> install_attributes_reader_;
-  enterprise_management::PolicyFetchResponse policy_;
-  enterprise_management::PolicyData policy_data_;
-  enterprise_management::ChromeDeviceSettingsProto device_policy_;
+  std::unique_ptr<enterprise_management::PolicyFetchResponse> policy_;
+  std::unique_ptr<enterprise_management::PolicyData> policy_data_;
+  std::unique_ptr<enterprise_management::ChromeDeviceSettingsProto>
+      device_policy_;
+
+  // Total number of device policy files identified.
+  int number_of_policy_files_ = 0;
+
+  // Number of device policy files that have been detected as invalid.
+  int number_of_invalid_files_ = 0;
 
   // If true, verify that policy files are owned by root. True in production
   // but can be set to false by tests.

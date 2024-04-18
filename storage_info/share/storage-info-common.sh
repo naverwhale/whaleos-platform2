@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright 2017 The Chromium OS Authors. All rights reserved.
+# Copyright 2017 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
@@ -8,24 +8,31 @@
 # chrome://system page. It will run once on startup to dump output to the file
 # /var/log/storage_info.txt which will be read later by debugd when the user
 # opens the chrome://system page.
-. /usr/share/misc/chromeos-common.sh
 
-SSD_CMD_0="hdparm -I"
-SSD_CMD_1_NORMAL="smartctl -x"
-SSD_CMD_1_ALTERNATE="smartctl -a -f brief"
-SSD_CMD_MAX=1
+# Dash does not support arrays, so this script uses name composition instead.
+# This would cause false positives from cros lint for unused names, so the
+# warning is disabled here:
+# shellcheck disable=SC2034
+
+. /usr/share/misc/chromeos-common.sh
 
 # This match SanDisk SSD U100/i100 with any size with version *.xx.* when x < 54
 # Seen Error with U100 10.52.01 / i100 CS.51.00 / U100 10.01.04.
-MODEL_BLACKLIST_0="SanDisk_SSD_[iU]100.*"
-VERSION_BLACKLIST_0="(CS|10)\.([01234].|5[0123])\..*"
-MODEL_BLACKLIST_1="SanDisk_SDSA5GK-.*"
-VERSION_BLACKLIST_1="CS.54.06"
-MODEL_BLACKLIST_2="LITEON_LST-.*"
-VERSION_BLACKLIST_2=".*"
-MODEL_BLACKLIST_3="LITEON_CS1-SP.*"
-VERSION_BLACKLIST_3=".*"
-BLACKLIST_MAX=3
+MODEL_IGNORELIST_0="SanDisk_SSD_[iU]100.*"
+VERSION_IGNORELIST_0="(CS|10)\.([01234].|5[0123])\..*"
+MODEL_IGNORELIST_1="SanDisk_SDSA5GK-.*"
+VERSION_IGNORELIST_1="CS.54.06"
+MODEL_IGNORELIST_2="LITEON_LST-.*"
+VERSION_IGNORELIST_2=".*"
+MODEL_IGNORELIST_3="LITEON_CS1-SP.*"
+VERSION_IGNORELIST_3=".*"
+MODEL_IGNORELIST_4="LITEON_L8H-.*"
+VERSION_IGNORELIST_4=".*"
+MODEL_IGNORELIST_5="LITEON_LMH-.*"
+VERSION_IGNORELIST_5=".*"
+MODEL_IGNORELIST_6="LITEON_LCH-.*"
+VERSION_IGNORELIST_6=".*"
+IGNORELIST_MAX=6
 
 MMC_NAME_0="cid"
 MMC_NAME_1="csd"
@@ -45,19 +52,31 @@ MMC_NAME_14="rel_sectors"
 MMC_NAME_15="serial"
 MMC_NAME_MAX=15
 
-NVME_CMD_0="smartctl -x"
-NVME_CMD_MAX=0
+# exapnd_var - evaluates a variable represented by a string
+#
+# inputs:
+#   variable name
+#
+# outputs:
+#   output of variable's evaluation
+expand_var() {
+  eval "echo \"\${$1}\""
+}
 
-UFS_DIR_NAME_0="string_descriptors"
-UFS_DIR_NAME_1="health_descriptor"
-UFS_DIR_NAME_2="device_descriptor"
-UFS_DIR_NAME_3="flags"
-UFS_DIR_NAME_4="geometry_descriptor"
-UFS_DIR_NAME_5="interconnect_descriptor"
-UFS_DIR_NAME_6="attributes"
-UFS_DIR_NAME_7="power"
-UFS_DIR_NAME_8=""
-UFS_DIR_NAME_MAX=8
+# echo_run - print command, and then execute it
+#
+# inputs:
+#   command to run
+#
+# outputs:
+#   result of the command execution
+echo_run() {
+  local ret=0
+  echo "$ $*"
+  "$@" || ret=$?
+  echo ""
+  return "${ret}"
+}
 
 # get_ssd_model - Return the model name of an ATA device.
 #
@@ -81,37 +100,37 @@ get_ssd_version() {
   echo "$1" | sed -e "s/^.*FwRev=//g" -e "s/,.*//g" -e "s/ /_/g"
 }
 
-# is_blacklist - helper function for is_ssd_blacklist.
+# is_ignorelist - helper function for is_ssd_ignorelist.
 #
 # inputs:
 #   the information from the device.
-#   the blacklist element to match against.
-is_blacklist() {
+#   the ignorelist element to match against.
+is_ignorelist() {
   echo "$1" | grep -Eq "$2"
 }
 
-# is_ssd_blacklist - Return true is the device is blacklisted.
+# is_ssd_ignorelist - Return true is the device is ignorelisted.
 #
 # inputs:
 #   model : model of the ATA device.
 #   version : ATA device firmware version.
 #
 # outputs:
-#   True if the device belongs into the script blacklist.
-#   When an ATA device is in the blacklist, only a subset of the ATA SMART
+#   True if the device belongs into the script ignorelist.
+#   When an ATA device is in the ignorelist, only a subset of the ATA SMART
 #   output is displayed.
-is_ssd_blacklist() {
+is_ssd_ignorelist() {
   local model="$1"
   local version="$2"
-  local model_blacklist
-  local version_blacklist
+  local model_ignorelist
+  local version_ignorelist
   local i
 
-  for i in $(seq 0 ${BLACKLIST_MAX}); do
-    eval model_blacklist=\${MODEL_BLACKLIST_${i}}
-    if is_blacklist "${model}" "${model_blacklist}"; then
-      eval version_blacklist=\${VERSION_BLACKLIST_${i}}
-      if is_blacklist "${version}" "${version_blacklist}"; then
+  for i in $(seq 0 "${IGNORELIST_MAX}"); do
+    model_ignorelist=$(expand_var "MODEL_IGNORELIST_${i}")
+    if is_ignorelist "${model}" "${model_ignorelist}"; then
+      version_ignorelist=$(expand_var "VERSION_IGNORELIST_${i}")
+      if is_ignorelist "${version}" "${version_ignorelist}"; then
         return 0
       fi
     fi
@@ -126,27 +145,22 @@ is_ssd_blacklist() {
 print_ssd_info() {
   # BUG: On some machines, smartctl -x causes SSD error (crbug.com/328587).
   # We need to check model and firmware version of the SSD to avoid this bug.
+  local hdparm_result
+  local model
+  local version
 
   # SSD model and firmware version is on the same line in hdparm result.
-  local hdparm_result="$(hdparm -i "/dev/$1" | grep "Model=")"
-  local model="$(get_ssd_model "${hdparm_result}")"
-  local version="$(get_ssd_version "${hdparm_result}")"
-  local ssd_cmd
-  local i
+  hdparm_result="$(hdparm -i "/dev/$1" | grep "Model=")"
+  model="$(get_ssd_model "${hdparm_result}")"
+  version="$(get_ssd_version "${hdparm_result}")"
 
-  if is_ssd_blacklist "${model}" "${version}"; then
-    SSD_CMD_1=${SSD_CMD_1_ALTERNATE}
+  echo_run hdparm -I "/dev/$1"
+
+  if is_ssd_ignorelist "${model}" "${version}"; then
+    echo_run smartctl -a -f brief "/dev/$1"
   else
-    SSD_CMD_1=${SSD_CMD_1_NORMAL}
+    echo_run smartctl -x "/dev/$1"
   fi
-
-  for i in $(seq 0 ${SSD_CMD_MAX}); do
-    # Use eval for variable indirection.
-    eval ssd_cmd=\${SSD_CMD_${i}}
-    echo "$ ${ssd_cmd} /dev/$1"
-    ${ssd_cmd} "/dev/$1"
-    echo ""
-  done
 }
 
 # print_mmc_info - Print eMMC device information
@@ -159,8 +173,8 @@ print_mmc_info() {
   local mmc_result
   local i
 
-  for i in $(seq 0 ${MMC_NAME_MAX}); do
-    eval mmc_name=\${MMC_NAME_${i}}
+  for i in $(seq 0 "${MMC_NAME_MAX}"); do
+    mmc_name=$(expand_var "MMC_NAME_${i}")
     mmc_path="/sys/block/$1/device/${mmc_name}"
     mmc_result="$(cat "${mmc_path}" 2>/dev/null)"
     printf "%-20s | %s\n" "${mmc_name}" "${mmc_result}"
@@ -174,55 +188,34 @@ print_mmc_info() {
 # inputs:
 #   device name for instance nvme0n1.
 print_nvme_info() {
-  local nvme_cmd
-  local mvme_dev="/dev/$1"
-  local i
-
-  for i in $(seq 0 ${NVME_CMD_MAX}); do
-    # Use eval for variable indirection.
-    eval nvme_cmd=\${NVME_CMD_${i}}
-    echo "$ ${nvme_cmd} ${mvme_dev}"
-    ${nvme_cmd} "${mvme_dev}"
-    echo ""
-  done
+  echo_run smartctl -x "/dev/$1"
 }
 
 # print_ufs_info - Print UFS device information
-#
 # inputs:
 #   device name for instance sdb.
 print_ufs_info() {
-  local dev="$1"
-  local ufs_dir
-  local ufs_name
-  local ufs_path
-  local ufs_result
-  local i
-  local file
+  # TODO(dlunev, b:219839139): deduce it instead of hardcoding.
+  local bsg_dev="/dev/bsg/ufs-bsg0"
+  local dev_node="/sys/block/${dev}/device"
 
-  ufs_dir="$(readlink -f "/sys/block/${dev}")"
+  echo "Device: /dev/$1"
+  echo "Vendor:" "$(cat "${dev_node}"/vendor)"
+  echo "Model:" "$(cat "${dev_node}"/model)"
+  echo "Firmware:" "$(cat "${dev_node}"/rev)"
+  echo ""
 
-  while true; do
-    case "$(basename "${ufs_dir}")" in
-      *ufs*)
-        break
-        ;;
-      *)
-        ufs_dir="$(dirname "${ufs_dir}")"
-        ;;
-    esac
-  done
-
-  echo "/sys/block/$1"
-  for i in $(seq 0 ${UFS_DIR_NAME_MAX}); do
-    eval ufs_name=\${UFS_DIR_NAME_${i}}
-    ufs_path="${ufs_dir}/${ufs_name}"
-    echo "${ufs_path}"
-    find "${ufs_path}" -maxdepth 1 -type f -not -name uevent \
-      -exec grep ^ {} + | cut -b"${#ufs_path}-" | \
-      cut -f2 -d"/"
-    echo ""
-  done
+  echo_run ufs-utils desc -a -p "${bsg_dev}"
+  echo_run ufs-utils attr -a -p "${bsg_dev}"
+  echo_run ufs-utils fl -a -p "${bsg_dev}"
+  echo_run ufs-utils uic -t 0 -a -p "${bsg_dev}"
+  echo_run ufs-utils uic -t 1 -a -p "${bsg_dev}"
+  echo_run ufs-utils uic -t 2 -a -p "${bsg_dev}"
+  # BUG: the commands above set error code if any field it expects is missing.
+  # Given that the tool is generic for UFS3.1 and UFS2.1, it may attempt to
+  # query UFS3 a attributes on UFS2 device. We want to ignore those partial
+  # failures.
+  echo ""
 }
 
 # get_storage_info - Print device information.

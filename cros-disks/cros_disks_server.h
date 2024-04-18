@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,7 +21,7 @@
 #include "cros-disks/device_event_queue.h"
 #include "cros-disks/disk.h"
 #include "cros-disks/format_manager_observer_interface.h"
-#include "cros-disks/mount_entry.h"
+#include "cros-disks/mount_point.h"
 #include "cros-disks/rename_manager_observer_interface.h"
 #include "cros-disks/session_manager_observer_interface.h"
 
@@ -53,7 +53,7 @@ class CrosDisksServer : public org::chromium::CrosDisksAdaptor,
 
   // Registers the D-Bus object and interfaces.
   void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb);
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb);
 
   // Registers a mount manager.
   void RegisterMountManager(MountManager* mount_manager);
@@ -97,10 +97,11 @@ class CrosDisksServer : public org::chromium::CrosDisksAdaptor,
   std::vector<std::string> EnumerateDevices() override;
 
   // Returns a list of mount entries (<error type, source path, source type,
-  // mount path>) that are currently managed by cros-disks.
-  using DBusMountEntry =
-      std::tuple<uint32_t, std::string, uint32_t, std::string>;
-  std::vector<DBusMountEntry> EnumerateMountEntries() override;
+  // mount path, read only>) that are currently managed by cros-disks.
+  using MountEntry =
+      std::tuple<uint32_t, std::string, uint32_t, std::string, bool>;
+  using MountEntries = std::vector<MountEntry>;
+  MountEntries EnumerateMountEntries() override;
 
   // Returns properties of a disk device attached to the system.
   bool GetDeviceProperties(brillo::ErrorPtr* error,
@@ -115,19 +116,28 @@ class CrosDisksServer : public org::chromium::CrosDisksAdaptor,
   // Implements the FormatManagerObserverInterface interface to handle
   // the event when a formatting operation has completed.
   void OnFormatCompleted(const std::string& device_path,
-                         FormatErrorType error_type) override;
+                         FormatError error_type) override;
+
+  void OnMountProgress(const MountPoint* mount_point);
+
+  void OnMountCompleted(const std::string& source,
+                        MountSourceType source_type,
+                        const std::string& filesystem_type,
+                        const std::string& mount_path,
+                        MountError error,
+                        bool read_only);
 
   // The callback called when a partitioning operation has completed.
   void OnPartitionCompleted(
       std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<uint32_t>>
           response,
       const base::FilePath& device_path,
-      PartitionErrorType error_type);
+      PartitionError error_type);
 
   // Implements the RenameManagerObserverInterface interface to handle
   // the event when a renaming operation has completed.
   void OnRenameCompleted(const std::string& device_path,
-                         RenameErrorType error_type) override;
+                         RenameError error_type) override;
 
   // Implements the SessionManagerObserverInterface interface to handle
   // the event when the screen is locked.

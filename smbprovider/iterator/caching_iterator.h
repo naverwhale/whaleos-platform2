@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,6 @@
 
 #include <string>
 #include <utility>
-
-#include <base/compiler_specific.h>
-#include <base/macros.h>
 
 #include "smbprovider/iterator/directory_iterator.h"
 #include "smbprovider/metadata_cache.h"
@@ -36,11 +33,11 @@ class CachingIterator {
 
   // Initializes the iterator, setting the first value of current. Returns 0 on
   // success, error on failure. Must be called before any other operation.
-  int32_t Init() WARN_UNUSED_RESULT { return inner_it_.Init(); }
+  [[nodiscard]] int32_t Init() { return inner_it_.Init(); }
 
   // Advances current to the next entry. Returns 0 on success,
   // error on failure.
-  int32_t Next() WARN_UNUSED_RESULT { return inner_it_.Next(); }
+  [[nodiscard]] int32_t Next() { return inner_it_.Next(); }
 
   // Returns the current DirectoryEntry.
   const DirectoryEntry& Get() {
@@ -50,7 +47,7 @@ class CachingIterator {
   }
 
   // Returns true if there is nothing left to iterate over.
-  bool IsDone() WARN_UNUSED_RESULT { return inner_it_.IsDone(); }
+  [[nodiscard]] bool IsDone() { return inner_it_.IsDone(); }
 
  private:
   DirectoryIterator inner_it_;

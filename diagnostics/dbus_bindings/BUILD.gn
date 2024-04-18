@@ -1,0 +1,91 @@
+# Copyright 2023 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/generate-dbus-adaptors.gni")
+import("//common-mk/generate-dbus-proxies.gni")
+
+group("dbus_bindings") {
+  deps = [
+    ":dbus-adaptors",
+    ":dbus-proxies",
+  ]
+}
+
+group("dbus-adaptors") {
+  deps = [ ":floss-callback-adaptors" ]
+}
+
+generate_dbus_adaptors("floss-callback-adaptors") {
+  dbus_adaptors_out_dir = "include/diagnostics/dbus_bindings/floss_callback"
+  sources = [
+    "bluetooth_manager/org.chromium.bluetooth.ManagerCallback.xml",
+    "floss/org.chromium.bluetooth.BluetoothCallback.xml",
+    "floss/org.chromium.bluetooth.BluetoothConnectionCallback.xml",
+    "floss/org.chromium.bluetooth.ScannerCallback.xml",
+  ]
+}
+
+group("dbus-proxies") {
+  deps = [
+    ":bluetooth-manager-proxies",
+    ":bluez-proxies",
+    ":cras-proxies",
+    ":floss-proxies",
+    ":fwupd-proxies",
+  ]
+}
+
+generate_dbus_proxies("bluetooth-manager-proxies") {
+  dbus_service_config = "bluetooth_manager/dbus-service-config.json"
+  proxy_output_file =
+      "include/diagnostics/dbus_bindings/bluetooth_manager/dbus-proxies.h"
+  mock_output_file =
+      "include/diagnostics/dbus_bindings/bluetooth_manager/dbus-proxy-mocks.h"
+  proxy_path_in_mocks =
+      "diagnostics/dbus_bindings/bluetooth_manager/dbus-proxies.h"
+  sources = [ "bluetooth_manager/org.chromium.bluetooth.Manager.xml" ]
+}
+
+generate_dbus_proxies("bluez-proxies") {
+  dbus_service_config = "bluez/dbus-service-config.json"
+  proxy_output_file = "include/diagnostics/dbus_bindings/bluez/dbus-proxies.h"
+  mock_output_file =
+      "include/diagnostics/dbus_bindings/bluez/dbus-proxy-mocks.h"
+  proxy_path_in_mocks = "diagnostics/dbus_bindings/bluez/dbus-proxies.h"
+  sources = [
+    "bluez/org.bluez.Adapter1.xml",
+    "bluez/org.bluez.AdminPolicyStatus1.xml",
+    "bluez/org.bluez.Battery1.xml",
+    "bluez/org.bluez.Device1.xml",
+  ]
+}
+
+generate_dbus_proxies("cras-proxies") {
+  sources =
+      [ "${sysroot}/usr/share/dbus-1/interfaces/org.chromium.cras.Control.xml" ]
+  proxy_output_file = "include/cras/dbus-proxies.h"
+  mock_output_file = "include/cras/dbus-proxy-mocks.h"
+}
+
+generate_dbus_proxies("floss-proxies") {
+  dbus_service_config = "floss/dbus-service-config.json"
+  proxy_output_file = "include/diagnostics/dbus_bindings/floss/dbus-proxies.h"
+  mock_output_file =
+      "include/diagnostics/dbus_bindings/floss/dbus-proxy-mocks.h"
+  proxy_path_in_mocks = "diagnostics/dbus_bindings/floss/dbus-proxies.h"
+  sources = [
+    "floss/org.chromium.bluetooth.BatteryManager.xml",
+    "floss/org.chromium.bluetooth.Bluetooth.xml",
+    "floss/org.chromium.bluetooth.BluetoothAdmin.xml",
+    "floss/org.chromium.bluetooth.BluetoothGatt.xml",
+    "floss/org.chromium.bluetooth.BluetoothQA.xml",
+  ]
+}
+
+generate_dbus_proxies("fwupd-proxies") {
+  sources =
+      [ "${sysroot}/usr/share/dbus-1/interfaces/org.freedesktop.fwupd.xml" ]
+  proxy_output_file = "include/fwupd/dbus-proxies.h"
+  mock_output_file = "include/fwupd/dbus-proxy-mocks.h"
+}

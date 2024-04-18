@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,7 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/synchronization/waitable_event.h>
 #include <base/threading/simple_thread.h>
 
@@ -28,9 +27,9 @@ class TestDpslBackgroundThread final
   // Wraps |background_callback| to post |main_thread_callback| to
   // |main_thread_context| after |background_callback| was invoked.
   static std::function<void()> WrapTaskToReplyOnMainThread(
-      const base::Closure& background_callback,
+      base::OnceClosure background_callback,
       DpslThreadContext* main_thread_context,
-      const base::Closure& main_thread_callback);
+      base::OnceClosure main_thread_callback);
 
   TestDpslBackgroundThread(const std::string& name,
                            DpslGlobalContext* global_context,
@@ -45,7 +44,7 @@ class TestDpslBackgroundThread final
 
   // Posts |background_callback| as a background task and waits until it will be
   // processed. |StartEventLoop()| must be called before.
-  void DoSync(const base::Closure& background_callback);
+  void DoSync(base::OnceClosure background_callback);
 
   DpslThreadContext* thread_context();
 

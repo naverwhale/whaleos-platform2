@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -77,10 +77,6 @@ class TensorView {
   // Allocate memory for the members of the tensor object (including values).
   void Allocate() {
     tensor_->shape = chromeos::machine_learning::mojom::Int64List::New();
-    // TODO(hidehiko): assigning std::vector<>() to `value` is unneeded
-    // on libmojo uprev. Remove them after the uprev.
-    tensor_->shape->value = std::vector<int64_t>();
-    tensor_->data = chromeos::machine_learning::mojom::ValueList::New();
     AllocateValues();
   }
 

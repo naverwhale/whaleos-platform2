@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,14 +6,16 @@
 #define TRUNKS_TPM_UTILITY_H_
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/secure_blob.h>
 
+#include "trunks/cr50_headers/ap_ro_status.h"
 #include "trunks/hmac_session.h"
 #include "trunks/pinweaver.pb.h"
+#include "trunks/policy_session.h"
 #include "trunks/tpm_alerts.h"
 #include "trunks/tpm_generated.h"
 #include "trunks/trunks_export.h"
@@ -53,18 +55,17 @@ constexpr uint32_t kRsaEndorsementCertificateNonRealIndex =
 constexpr uint32_t kEccEndorsementCertificateNonRealIndex =
     kEccEndorsementCertificateIndex & 0xFFFFFF;
 
+constexpr int PinWeaverEccPointSize = 32;
+
+struct PinWeaverEccPoint {
+  uint8_t x[PinWeaverEccPointSize];
+  uint8_t y[PinWeaverEccPointSize];
+};
+
 // An interface which provides convenient methods for common TPM operations.
 class TRUNKS_EXPORT TpmUtility {
  public:
   enum AsymmetricKeyUsage { kDecryptKey, kSignKey, kDecryptAndSignKey };
-  // Note that when this enum is updated, corresponding enum in
-  // cr50/include/ap_ro_integrity_check.h, ap_ro_status, should be also updated.
-  enum class ApRoStatus : uint8_t {
-    kApRoNotRun = 0,
-    kApRoPass = 1,
-    kApRoFail = 2,
-    kApRoUnsupported = 3,
-  };
 
   TpmUtility() {}
   TpmUtility(const TpmUtility&) = delete;
@@ -118,6 +119,10 @@ class TRUNKS_EXPORT TpmUtility {
                                const std::string& endorsement_password,
                                const std::string& lockout_password) = 0;
 
+  // Changes the owner password from `old_password` to `new_password`.
+  virtual TPM_RC ChangeOwnerPassword(const std::string& old_password,
+                                     const std::string& new_password) = 0;
+
   // Stir the tpm random generation module with some random entropy data.
   // |delegate| specifies an optional authorization delegate to be used.
   virtual TPM_RC StirRandom(const std::string& entropy_data,
@@ -169,6 +174,15 @@ class TRUNKS_EXPORT TpmUtility {
                                    const std::string& ciphertext,
                                    AuthorizationDelegate* delegate,
                                    std::string* plaintext) = 0;
+
+  // This method performs the ECDH ZGen operation with an unrestricted
+  // decryption key referenced by |key_handle|. |in_point| is the input point,
+  // |out_point| is the output point. |delegate| is an AuthorizationDelegate
+  // used to authorize this command.
+  virtual TPM_RC ECDHZGen(TPM_HANDLE key_handle,
+                          const TPM2B_ECC_POINT& in_point,
+                          AuthorizationDelegate* delegate,
+                          TPM2B_ECC_POINT* out_point) = 0;
 
   // This method takes an unrestricted signing key referenced by |key_handle|
   // and uses it to sign a hash: if |generate_hash| is true then get the hash
@@ -263,6 +277,22 @@ class TRUNKS_EXPORT TpmUtility {
                               AuthorizationDelegate* delegate,
                               std::string* key_blob) = 0;
 
+  // This method imports an external ECC key of |key_type| into the TPM with
+  // policy digest. |public_point_x| and |public_point_y| are the coordinates of
+  // the public key point on the curve |curve_id|. |private_value| is the
+  // private key. |public_point_x|, |public_point_y|, and |private_value| are
+  // interpreted as raw bytes in big-endian. If the out argument |key_blob| is
+  // not null, it is populated with the imported key, which can then be loaded
+  // into the TPM.
+  virtual TPM_RC ImportECCKeyWithPolicyDigest(AsymmetricKeyUsage key_type,
+                                              TPMI_ECC_CURVE curve_id,
+                                              const std::string& public_point_x,
+                                              const std::string& public_point_y,
+                                              const std::string& private_value,
+                                              const std::string& policy_digest,
+                                              AuthorizationDelegate* delegate,
+                                              std::string* key_blob) = 0;
+
   // This method uses the TPM to generates an RSA key of type |key_type|.
   // |modulus_bits| is used to specify the size of the modulus, and
   // |public_exponent| specifies the exponent of the key. After this function
@@ -319,6 +349,19 @@ class TRUNKS_EXPORT TpmUtility {
       std::string* key_blob,
       std::string* creation_blob) = 0;
 
+  // This method is performs as the same as `CreateECCKeyPair`, except that the
+  // generated key is restricted.
+  virtual TPM_RC CreateRestrictedECCKeyPair(
+      AsymmetricKeyUsage key_type,
+      TPMI_ECC_CURVE curve_id,
+      const std::string& password,
+      const std::string& policy_digest,
+      bool use_only_policy_authorization,
+      const std::vector<uint32_t>& creation_pcr_indexes,
+      AuthorizationDelegate* delegate,
+      std::string* key_blob,
+      std::string* creation_blob) = 0;
+
   // This method loads a pregenerated TPM key into the TPM. |key_blob| contains
   // the blob returned by a key creation function. The loaded key's handle is
   // returned using |key_handle|.
@@ -363,9 +406,14 @@ class TRUNKS_EXPORT TpmUtility {
   // retrieved by fulfilling the policy represented by |policy_digest|. The
   // session used to unseal the data will need to have the
   // EntityAuthorizationValue set to |auth_value| if non-empty.
+  // |require_admin_with_policy| specifies if we can use HmacSession in
+  // addition to PolicySession to authorize use of this data.
+  // NOTE: if |require_admin_with_policy| is set to true,
+  // parameter_encryption must be disabled when unsealing the data.
   virtual TPM_RC SealData(const std::string& data_to_seal,
                           const std::string& policy_digest,
                           const std::string& auth_value,
+                          bool require_admin_with_policy,
                           AuthorizationDelegate* delegate,
                           std::string* sealed_data) = 0;
 
@@ -383,14 +431,21 @@ class TRUNKS_EXPORT TpmUtility {
   // true. Returns an TPM_RC_SUCCESS on success.
   virtual TPM_RC StartSession(HmacSession* session) = 0;
 
-  // This method uses a trial session to compute the |policy_digest| when
-  // the policy is bound to a given map of pcr_index -> pcr_value in |pcr_map|.
+  // Adds pcr values to the given |policy_session|.
+  // The policy is bound to a given map of pcr_index -> pcr_value in |pcr_map|.
   // If some values in the map are empty, the method uses the current value of
   // the pcr for the corresponding indexes. If |use_auth_value| is set to true
   // then a authorization value will be required when using the digest. In this
   // case PolicyAuthValue is called on session first, and PolicyPCR is called
   // after this. Those two calls must be made in the same order when we need to
   // reveal the secret guarded by the authorization value.
+  virtual TPM_RC AddPcrValuesToPolicySession(
+      const std::map<uint32_t, std::string>& pcr_map,
+      bool use_auth_value,
+      PolicySession* policy_session) = 0;
+
+  // Calculates the policy digest for a given pcr_map. Uses current value of
+  // the pcr for empty values.
   virtual TPM_RC GetPolicyDigestForPcrValues(
       const std::map<uint32_t, std::string>& pcr_map,
       bool use_auth_value,
@@ -434,6 +489,11 @@ class TRUNKS_EXPORT TpmUtility {
                               bool extend,
                               AuthorizationDelegate* delegate) = 0;
 
+  // Increments non-volatile counter at |index|.
+  virtual TPM_RC IncrementNVCounter(uint32_t index,
+                                    bool using_owner_authorization,
+                                    AuthorizationDelegate* delegate) = 0;
+
   // This method reads |num_bytes| of data from the |offset| located at the
   // non-volatile space defined by |index|. This method returns an error if
   // |length| + |offset| is larger than the size of the defined non-volatile
@@ -469,12 +529,23 @@ class TRUNKS_EXPORT TpmUtility {
   // Reset dictionary attack lockout. Requires lockout authorization.
   virtual TPM_RC ResetDictionaryAttackLock(AuthorizationDelegate* delegate) = 0;
 
-  // Gets the endorsement key of a given |key_type|, creating the key as needed
-  // If the |key_type| is RSA, the key will be made persistent. On success
-  // returns TPM_RC_SUCCESS and populates |key_handle|. Requires endorsement
-  // authorization to create the key and owner authorization to make the key
-  // persistent (RSA only). The |owner_delegate| is ignored if |key_type| is not
-  // RSA or if the key is already persistent.
+  // Gets the endorsement key of a given |key_type| and |auth_policy|. On
+  // success returns TPM_RC_SUCCESS and populates |key_handle|. Requires
+  // endorsement authorization to create the key.
+  virtual TPM_RC GetAuthPolicyEndorsementKey(
+      TPM_ALG_ID key_type,
+      const std::string& auth_policy,
+      AuthorizationDelegate* endorsement_delegate,
+      TPM_HANDLE* key_handle,
+      TPM2B_NAME* key_name) = 0;
+
+  // Gets the endorsement key  of a given |key_type| and use the default EK
+  // template, creating the key as needed If the |key_type| is RSA, the key will
+  // be made persistent. On success returns TPM_RC_SUCCESS and populates
+  // |key_handle|. Requires endorsement authorization to create the key and
+  // owner authorization to make the key persistent (RSA only). The
+  // |owner_delegate| is ignored if |key_type| is not RSA or if the key is
+  // already persistent.
   virtual TPM_RC GetEndorsementKey(TPM_ALG_ID key_type,
                                    AuthorizationDelegate* endorsement_delegate,
                                    AuthorizationDelegate* owner_delegate,
@@ -539,14 +610,14 @@ class TRUNKS_EXPORT TpmUtility {
                                     std::string* root_hash) = 0;
 
   // Insert a leaf to the Merkle tree where:
-  //   |protocol_version| is the protocol version used to comunicate with
+  //   |protocol_version| is the protocol version used to communicate with
   //       pinweaver.
   //   |label| is the location of the leaf in the tree.
   //   |h_aux| is the auxiliary hashes started from the bottom of the tree
   //       working toward the root in index order.
   //   |le_secret| is the low entropy secret that is limited by the delay
   //       schedule.
-  //   |he_secret| is the high entropy secret that is protected by Cr50 and
+  //   |he_secret| is the high entropy secret that is protected by GSC and
   //       returned on successful authentication.
   //   |reset_secret| is the high entropy secret used to reset the attempt
   //       counters and authenticate without following the delay schedule.
@@ -555,6 +626,8 @@ class TRUNKS_EXPORT TpmUtility {
   //   |valid_pcr_criteria| is list of at most PW_MAX_PCR_CRITERIA_COUNT entries
   //       where each entry represents a bitmask of PCR indexes and the expected
   //       digest corresponding to those PCR.
+  //   |expiration_delay| is the expiration window of the leaf, in seconds.
+  //   Nullopt means the leaf doesn't expire.
   // On success:
   //   returns VENDOR_RC_SUCCESS
   //   |result_code| is set to EC_SUCCESS (0).
@@ -575,13 +648,14 @@ class TRUNKS_EXPORT TpmUtility {
       const brillo::SecureBlob& reset_secret,
       const std::map<uint32_t, uint32_t>& delay_schedule,
       const ValidPcrCriteria& valid_pcr_criteria,
+      std::optional<uint32_t> expiration_delay,
       uint32_t* result_code,
       std::string* root_hash,
       std::string* cred_metadata,
       std::string* mac) = 0;
 
   // Remove a leaf from the Merkle tree where:
-  //   |protocol_version| is the protocol version used to comunicate with
+  //   |protocol_version| is the protocol version used to communicate with
   //       pinweaver.
   //   |label| is the location of the leaf in the tree.
   //   |h_aux| is the auxiliary hashes started from the bottom of the tree
@@ -603,7 +677,7 @@ class TRUNKS_EXPORT TpmUtility {
                                      std::string* root_hash) = 0;
 
   // Attempts to authenticate a leaf from the Merkle tree where:
-  //   |protocol_version| is the protocol version used to comunicate with
+  //   |protocol_version| is the protocol version used to communicate with
   //       pinweaver.
   //   |le_secret| is the low entropy secret that is limited by the delay
   //       schedule.
@@ -614,9 +688,9 @@ class TRUNKS_EXPORT TpmUtility {
   //   returns VENDOR_RC_SUCCESS
   //   |result_code| is set to EC_SUCCESS (0).
   //   |root_hash| is set to the updated root hash of the tree.
-  //   |he_secret| is the high entropy secret that is protected by Cr50 and
+  //   |he_secret| is the high entropy secret that is protected by GSC and
   //       returned on successful authentication.
-  //   |reset_secret| is the reset secret that is protected by Cr50 and
+  //   |reset_secret| is the reset secret that is protected by GSC and
   //       returned on successful authentication.
   //   |cred_metadata_out| is set to the updated wrapped leaf data.
   //   |mac_out| is set to the updated HMAC used in the Merkle tree
@@ -663,10 +737,13 @@ class TRUNKS_EXPORT TpmUtility {
                                   std::string* mac_out) = 0;
 
   // Attempts to reset a leaf from the Merkle tree where:
-  //   |protocol_version| is the protocol version used to comunicate with
+  //   |protocol_version| is the protocol version used to communicate with
   //       pinweaver.
   //   |reset_secret| is the high entropy secret used to reset the attempt
   //       counters and authenticate without following the delay schedule.
+  //   |strong_reset| is whether the expiration timestamp should be extended
+  //       to |expiration_delay| seconds from now too, in addition to resetting
+  //       the attempt counter.
   //   |h_aux| is the auxiliary hashes started from the bottom of the tree
   //       working toward the root in index order.
   //   |cred_metadata| is set to the wrapped leaf data.
@@ -674,8 +751,6 @@ class TRUNKS_EXPORT TpmUtility {
   //   returns VENDOR_RC_SUCCESS
   //   |result_code| is set to EC_SUCCESS (0).
   //   |root_hash| is set to the updated root hash of the tree.
-  //   |he_secret| is the high entropy secret that is protected by Cr50 and
-  //       returned on successful authentication.
   //   |cred_metadata_out| is set to the updated wrapped leaf data.
   //   |mac_out| is set to the updated HMAC used in the Merkle tree
   //       calculations.
@@ -686,16 +761,16 @@ class TRUNKS_EXPORT TpmUtility {
   //   |he_secret|, |cred_metadata_out|, and |mac| are all empty.
   virtual TPM_RC PinWeaverResetAuth(uint8_t protocol_version,
                                     const brillo::SecureBlob& reset_secret,
+                                    bool strong_reset,
                                     const std::string& h_aux,
                                     const std::string& cred_metadata,
                                     uint32_t* result_code,
                                     std::string* root_hash,
-                                    brillo::SecureBlob* he_secret,
                                     std::string* cred_metadata_out,
                                     std::string* mac_out) = 0;
 
   // Retrieves the log of recent operations where:
-  //   |protocol_version| is the protocol version used to comunicate with
+  //   |protocol_version| is the protocol version used to communicate with
   //       pinweaver.
   //   |root| is the last known root hash.
   // On success:
@@ -741,13 +816,260 @@ class TRUNKS_EXPORT TpmUtility {
                                     std::string* cred_metadata_out,
                                     std::string* mac_out) = 0;
 
+  // Retrieves the current PinWeaver server system info.
+  // On success:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to EC_SUCCESS (0).
+  //   |root_hash| is set to the unchanged root hash of the tree.
+  //   |boot_count| is set to the current boot count of the PinWeaver server.
+  //   |seconds_since_boot| is set to the current PinWeaver server timer value,
+  //       which is equivalent to how many seconds had passed since last boot.
+  // On error:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to one of pw_error_codes_enum.
+  //   |root_hash| is set to the unchanged root hash of the tree.
+  virtual TPM_RC PinWeaverSysInfo(uint8_t protocol_version,
+                                  uint32_t* result_code,
+                                  std::string* root_hash,
+                                  uint32_t* boot_count,
+                                  uint64_t* seconds_since_boot) = 0;
+
+  // Establishes the Pk of the specified auth channel with the server.
+  //   |protocol_version| is the protocol version used to communicate with
+  //       pinweaver.
+  //   |auth_channel| is the auth channel to establish the Pk.
+  //   |client_public_key| is the ECDH public key of the client, which is
+  //       a point on the P256 curve.
+  // On success:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to EC_SUCCESS (0).
+  //   |root_hash| is set to the unchanged root hash of the tree.
+  //   |server_public_key| is set to the ECDH public key of the server, which is
+  //       a point on the P256 curve.
+  // On error:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to one of pw_error_codes_enum.
+  //   |root_hash| is set to the unchanged root hash of the tree.
+  //   |server_public_key| is empty.
+  virtual TPM_RC PinWeaverGenerateBiometricsAuthPk(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      const PinWeaverEccPoint& client_public_key,
+      uint32_t* result_code,
+      std::string* root_hash,
+      PinWeaverEccPoint* server_public_key) = 0;
+
+  // Inserts a biometrics rate-limiter to the Merkle tree where:
+  //   |protocol_version| is the protocol version used to communicate with
+  //       pinweaver.
+  //   |auth_channel| is the auth channel of the rate-limiter.
+  //   |label| is the location of the leaf in the tree.
+  //   |h_aux| is the auxiliary hashes started from the bottom of the tree
+  //       working toward the root in index order.
+  //   |reset_secret| is the high entropy secret used to reset the attempt
+  //       counters and authenticate without following the delay schedule.
+  //   |delay_schedule| is constructed of (attempt_count, time_delay) with at
+  //       most PW_SCHED_COUNT entries.
+  //   |valid_pcr_criteria| is list of at most PW_MAX_PCR_CRITERIA_COUNT entries
+  //       where each entry represents a bitmask of PCR indexes and the expected
+  //       digest corresponding to those PCR.
+  //   |expiration_delay| is the expiration window of the leaf, in seconds.
+  //       Nullopt means the leaf doesn't expire.
+  // On success:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to EC_SUCCESS (0).
+  //   |root_hash| is set to the updated root hash of the tree.
+  //   |cred_metadata| is set to the wrapped leaf data.
+  //   |mac| is set to the HMAC used in the Merkle tree calculations.
+  // On failure:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to one of pw_error_codes_enum.
+  //   |root_hash| is set to the unchanged root hash of the tree.
+  //   |cred_metadata| and |mac| are both empty.
+  virtual TPM_RC PinWeaverCreateBiometricsAuthRateLimiter(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      uint64_t label,
+      const std::string& h_aux,
+      const brillo::SecureBlob& reset_secret,
+      const std::map<uint32_t, uint32_t>& delay_schedule,
+      const ValidPcrCriteria& valid_pcr_criteria,
+      std::optional<uint32_t> expiration_delay,
+      uint32_t* result_code,
+      std::string* root_hash,
+      std::string* cred_metadata,
+      std::string* mac) = 0;
+
+  // Tries to start an authentication attempt with a rate-limiter
+  // from the Merkle tree where:
+  //   |protocol_version| is the protocol version used to communicate with
+  //       pinweaver.
+  //   |auth_channel| is the auth channel of the rate-limiter.
+  //   |client_nonce| is the nonce used for establish the session key used for
+  //       encrypting the returned HEC.
+  //   |h_aux| is the auxiliary hashes started from the bottom of the tree
+  //       working toward the root in index order.
+  //   |cred_metadata| is set to the wrapped leaf data.
+  // On auth success:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to EC_SUCCESS (0).
+  //   |root_hash| is set to the updated root hash of the tree.
+  //   |server_nonce| is the nonce used for establish the session key used for
+  //       encrypting the returned HEC.
+  //   |encrypted_high_entropy_secret| is the high entropy secret that is
+  //       protected by GSC and returned on successful authentication. It
+  //       is encrypted with the session key derived from the client nonce,
+  //       server nonce, and Pk of that auth channel.
+  //   |iv| is the IV used for the AES-CTR encryption of the HEC.
+  //   |cred_metadata_out| is set to the updated wrapped leaf data.
+  //   |mac_out| is set to the updated HMAC used in the Merkle tree
+  //       calculations.
+  // On auth fail:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to PW_ERR_LOWENT_AUTH_FAILED.
+  //   |root_hash| is set to the updated root hash of the tree.
+  //   |cred_metadata_out| is set to the updated wrapped leaf data.
+  //   |mac_out| is set to the updated HMAC used in the Merkle tree
+  //        calculations.
+  //   other output fields are empty.
+  // On error:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to one of pw_error_codes_enum.
+  //   |root_hash| is set to the unchanged root hash of the tree.
+  //   other output fields are empty.
+  virtual TPM_RC PinWeaverStartBiometricsAuth(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      const brillo::Blob& client_nonce,
+      const std::string& h_aux,
+      const std::string& cred_metadata,
+      uint32_t* result_code,
+      std::string* root_hash,
+      brillo::Blob* server_nonce,
+      brillo::Blob* encrypted_high_entropy_secret,
+      brillo::Blob* iv,
+      std::string* cred_metadata_out,
+      std::string* mac_out) = 0;
+
+  // Blocks future PinWeaverGenerateBiometricsAuthPk commands at server side
+  // until the server restarts (normally a GSC reboot).
+  // On success:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to EC_SUCCESS (0).
+  //   |root_hash| is set to the unchanged root hash of the tree.
+  // On error:
+  //   returns VENDOR_RC_SUCCESS
+  //   |result_code| is set to one of pw_error_codes_enum.
+  //   |root_hash| is set to the unchanged root hash of the tree.
+  virtual TPM_RC PinWeaverBlockGenerateBiometricsAuthPk(
+      uint8_t protocol_version,
+      uint32_t* result_code,
+      std::string* root_hash) = 0;
+
+  // Generates a U2F credential, where:
+  //   |version| is the version of the generated |key_handle|.
+  //   |app_id| is the identifier of the relying party requesting the credential
+  //       generation, which is often the domain name or its hash.
+  //   |user_secret| is a secret provided from userland to the TPM, to separate
+  //       access to credentials of different users on the same device.
+  //   |consume| is whether user presence should be consumed (usually meaning
+  //       the power button touch state is reset) after processing this command.
+  //   |up_required| is whether user presence is required (usually meaning the
+  //       the power button is touched recently) to process this command.
+  //   |auth_time_secret_hash| is a hash used for checking user verification
+  //       during signing time, and should be non-null iff |version| > 0.
+  // On success:
+  //   returns VENDOR_RC_SUCCESS
+  //   |public_key| is set to the public key of the generated credential.
+  //   |key_handle| is set to the key handle of the generated credential. This
+  //       contains no sensitive data.
+  virtual TPM_RC U2fGenerate(
+      uint8_t version,
+      const brillo::Blob& app_id,
+      const brillo::SecureBlob& user_secret,
+      bool consume,
+      bool up_required,
+      const std::optional<brillo::Blob>& auth_time_secret_hash,
+      brillo::Blob* public_key,
+      brillo::Blob* key_handle) = 0;
+
+  // Signs a hash using a U2F credential, where:
+  //   |version| is the version of |key_handle|.
+  //   |app_id| is the identifier of the relying party requesting the signature,
+  //       which is often the domain name or its hash.
+  //   |user_secret| is a secret provided from userland to the TPM, to separate
+  //       access to credentials of different users on the same device.
+  //   |auth_time_secret| is a secret used for checking user verification, and
+  //       shouldn't be provided if |version| = 0.
+  //   |hash_to_sign| is the hash to sign, and should be provided iff
+  //       |check_only| is false.
+  //   |check_only| is whether the caller only wants to check for validity of
+  //       the key handle, instead of signing anything.
+  //   |consume| is whether user presence should be consumed (usually
+  //       meaning the power button touch state is reset) after processing this
+  //       command.
+  //   |up_required| is whether user presence is required (usually meaning the
+  //       the power button is touched recently) to process this command.
+  //   |key_handle| is the key handle of the credential to sign the hash with.
+  // On success:
+  //   returns VENDOR_RC_SUCCESS
+  //   |sig_r| and |sig_s| are set to the the r/s fields of the ECDSA signature.
+  virtual TPM_RC U2fSign(
+      uint8_t version,
+      const brillo::Blob& app_id,
+      const brillo::SecureBlob& user_secret,
+      const std::optional<brillo::SecureBlob>& auth_time_secret,
+      const std::optional<brillo::Blob>& hash_to_sign,
+      bool check_only,
+      bool consume,
+      bool up_required,
+      const brillo::Blob& key_handle,
+      brillo::Blob* sig_r,
+      brillo::Blob* sig_s) = 0;
+
+  // Attests a U2F credential using the TPM's G2F key, where:
+  //   |user_secret| is a secret provided from userland to the TPM, to separate
+  //       access to credentials of different users on the same device.
+  //   |format| is the format of |data|, the attestation message.
+  // On success:
+  //   returns VENDOR_RC_SUCCESS
+  //   |sig_r| and |sig_s| are set to the the r/s fields of the ECDSA signature.
+  virtual TPM_RC U2fAttest(const brillo::SecureBlob& user_secret,
+                           uint8_t format,
+                           const brillo::Blob& data,
+                           brillo::Blob* sig_r,
+                           brillo::Blob* sig_s) = 0;
+
   // Retrieves cached RSU device id.
   virtual TPM_RC GetRsuDeviceId(std::string* device_id) = 0;
 
-  virtual TPM_RC GetRoVerificationStatus(ApRoStatus* status) = 0;
+  virtual TPM_RC GetRoVerificationStatus(ap_ro_status* status) = 0;
 
-  // Returns true for TPMs running Cr50.
-  virtual bool IsCr50() = 0;
+  // Returns true for TPMs running GSC.
+  virtual bool IsGsc() = 0;
+
+  // Send an arbitrary command to the TPM and wait for the response.
+  // Returns the response packet.
+  virtual std::string SendCommandAndWait(const std::string& command) = 0;
+
+  // This method creates an RSA/ECC decryption key to be used for salting
+  // sessions.
+  virtual TPM_RC CreateSaltingKey(TPM_HANDLE* key, TPM2B_NAME* key_name) = 0;
+
+  // Get Ti50 metrics: filesystem init time, filesystem size, AP RO verification
+  // time, and AP RO verifiction status.
+  virtual TPM_RC GetTi50Stats(uint32_t* fs_init_time,
+                              uint32_t* fs_size,
+                              uint32_t* aprov_time,
+                              uint32_t* aprov_status) = 0;
+
+  // Get the RW firmware version number.
+  virtual TPM_RC GetRwVersion(uint32_t* epoch,
+                              uint32_t* major,
+                              uint32_t* minor) = 0;
+
+  // Get TPM console logs.
+  virtual TPM_RC GetConsoleLogs(std::string* logs) = 0;
 };
 
 }  // namespace trunks

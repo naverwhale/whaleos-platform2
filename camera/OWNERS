@@ -1,8 +1,1 @@
-henryhsu@chromium.org
-hywu@chromium.org
-jcliang@chromium.org
-shik@chromium.org
-wtlee@chromium.org
-kamesan@chromium.org
-inker@chromium.org
-hanlinchen@google.com
+include chromiumos/owners:v1:/camera/OWNERS.camera_service_code

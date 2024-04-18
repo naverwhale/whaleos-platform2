@@ -1,8 +1,9 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "sommelier.h"  // NOLINT(build/include_directory)
+#include "sommelier.h"            // NOLINT(build/include_directory)
+#include "sommelier-transform.h"  // NOLINT(build/include_directory)
 
 #include <assert.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@ struct sl_host_subsurface {
   struct wl_resource* resource;
   struct wl_subsurface* proxy;
 };
+MAP_STRUCTS(wl_subsurface, sl_host_subsurface);
 
 static void sl_subsurface_destroy(struct wl_client* client,
                                   struct wl_resource* resource) {
@@ -31,61 +33,29 @@ static void sl_subsurface_set_position(struct wl_client* client,
                                        int32_t y) {
   struct sl_host_subsurface* host =
       static_cast<sl_host_subsurface*>(wl_resource_get_user_data(resource));
-  double scale = host->ctx->scale;
+  int32_t ix = x;
+  int32_t iy = y;
 
-  wl_subsurface_set_position(host->proxy, x / scale, y / scale);
-}
-
-static void sl_subsurface_place_above(struct wl_client* client,
-                                      struct wl_resource* resource,
-                                      struct wl_resource* sibling_resource) {
-  struct sl_host_subsurface* host =
-      static_cast<sl_host_subsurface*>(wl_resource_get_user_data(resource));
-  struct sl_host_surface* host_sibling = static_cast<sl_host_surface*>(
-      wl_resource_get_user_data(sibling_resource));
-
-  wl_subsurface_place_above(host->proxy, host_sibling->proxy);
-}
-
-static void sl_subsurface_place_below(struct wl_client* client,
-                                      struct wl_resource* resource,
-                                      struct wl_resource* sibling_resource) {
-  struct sl_host_subsurface* host =
-      static_cast<sl_host_subsurface*>(wl_resource_get_user_data(resource));
-  struct sl_host_surface* host_sibling = static_cast<sl_host_surface*>(
-      wl_resource_get_user_data(sibling_resource));
-
-  wl_subsurface_place_below(host->proxy, host_sibling->proxy);
-}
-
-static void sl_subsurface_set_sync(struct wl_client* client,
-                                   struct wl_resource* resource) {
-  struct sl_host_subsurface* host =
-      static_cast<sl_host_subsurface*>(wl_resource_get_user_data(resource));
-
-  wl_subsurface_set_sync(host->proxy);
-}
-
-static void sl_subsurface_set_desync(struct wl_client* client,
-                                     struct wl_resource* resource) {
-  struct sl_host_subsurface* host =
-      static_cast<sl_host_subsurface*>(wl_resource_get_user_data(resource));
-
-  wl_subsurface_set_desync(host->proxy);
+  sl_transform_guest_to_host(host->ctx, nullptr, &ix, &iy);
+  wl_subsurface_set_position(host->proxy, ix, iy);
 }
 
 static const struct wl_subsurface_interface sl_subsurface_implementation = {
-    sl_subsurface_destroy,     sl_subsurface_set_position,
-    sl_subsurface_place_above, sl_subsurface_place_below,
-    sl_subsurface_set_sync,    sl_subsurface_set_desync};
+    sl_subsurface_destroy,
+    sl_subsurface_set_position,
+    ForwardRequest<wl_subsurface_place_above>,
+    ForwardRequest<wl_subsurface_place_below>,
+    ForwardRequest<wl_subsurface_set_sync>,
+    ForwardRequest<wl_subsurface_set_desync>,
+};
 
 static void sl_destroy_host_subsurface(struct wl_resource* resource) {
   struct sl_host_subsurface* host =
       static_cast<sl_host_subsurface*>(wl_resource_get_user_data(resource));
 
   wl_subsurface_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_subcompositor_destroy(struct wl_client* client,
@@ -105,9 +75,7 @@ static void sl_subcompositor_get_subsurface(
       wl_resource_get_user_data(surface_resource));
   struct sl_host_surface* host_parent =
       static_cast<sl_host_surface*>(wl_resource_get_user_data(parent_resource));
-  struct sl_host_subsurface* host_subsurface =
-      static_cast<sl_host_subsurface*>(malloc(sizeof(*host_subsurface)));
-  assert(host_subsurface);
+  struct sl_host_subsurface* host_subsurface = new sl_host_subsurface();
 
   host_subsurface->ctx = host->ctx;
   host_subsurface->resource =
@@ -119,7 +87,7 @@ static void sl_subcompositor_get_subsurface(
       host->proxy, host_surface->proxy, host_parent->proxy);
   wl_subsurface_set_user_data(host_subsurface->proxy, host_subsurface);
   host_surface->has_role = 1;
-}  // NOLINT(whitespace/indent)
+}
 
 static const struct wl_subcompositor_interface sl_subcompositor_implementation =
     {sl_subcompositor_destroy, sl_subcompositor_get_subsurface};
@@ -129,8 +97,8 @@ static void sl_destroy_host_subcompositor(struct wl_resource* resource) {
       static_cast<sl_host_subcompositor*>(wl_resource_get_user_data(resource));
 
   wl_subcompositor_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_bind_host_subcompositor(struct wl_client* client,
@@ -138,9 +106,7 @@ static void sl_bind_host_subcompositor(struct wl_client* client,
                                        uint32_t version,
                                        uint32_t id) {
   struct sl_context* ctx = (struct sl_context*)data;
-  struct sl_host_subcompositor* host =
-      static_cast<sl_host_subcompositor*>(malloc(sizeof(*host)));
-  assert(host);
+  struct sl_host_subcompositor* host = new sl_host_subcompositor();
   host->ctx = ctx;
   host->resource =
       wl_resource_create(client, &wl_subcompositor_interface, 1, id);

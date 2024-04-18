@@ -1,36 +1,26 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
-  Copyright 2018 The Chromium Authors. All rights reserved.
+  Copyright 2018 The Chromium Authors
   Use of this source code is governed by a BSD-style license that can be
   found in the LICENSE file.
 -->
 <node name="/org/chromium/DlcService"
   xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
 <interface name="org.chromium.DlcServiceInterface">
-  <method name="InstallDlc">
+  <method name="Install">
     <tp:docstring>
       Install a Downloadable Content (DLC).
     </tp:docstring>
-    <arg name="id" type="s" direction="in">
+    <arg name="install_request" type="ay" direction="in">
       <tp:docstring>
-        The ID of the DLC.
+        A serialized protobuf (InstallRequest,
+        platform2/system_api/dbus/dlcservice/dlcservice.proto) of
+        arguments that can toggle how DLC are installed.
       </tp:docstring>
+      <annotation name="org.chromium.DBus.Argument.ProtobufClass"
+                  value="dlcservice::InstallRequest"/>
     </arg>
-  </method>
-  <method name="InstallWithOmahaUrl">
-    <tp:docstring>
-      Install a DLC with a given Omaha URL.
-    </tp:docstring>
-    <arg name="id" type="s" direction="in">
-      <tp:docstring>
-        The ID of the DLC.
-      </tp:docstring>
-    </arg>
-    <arg name="omaha_url" type="s" direction="in">
-      <tp:docstring>
-        The Omaha URL to install the DLC from.
-      </tp:docstring>
-    </arg>
+    <annotation name="org.chromium.DBus.Method.Kind" value="async"/>
   </method>
   <method name="Uninstall">
     <tp:docstring>
@@ -45,6 +35,16 @@
   <method name="Purge">
     <tp:docstring>
       Removes a DLC and all files related to it.
+    </tp:docstring>
+    <arg name="id" type="s" direction="in">
+      <tp:docstring>
+        ID of the DLC.
+      </tp:docstring>
+    </arg>
+  </method>
+  <method name="Deploy">
+    <tp:docstring>
+      Create DLC slots and load deployed DLC image into the slots.
     </tp:docstring>
     <arg name="id" type="s" direction="in">
       <tp:docstring>

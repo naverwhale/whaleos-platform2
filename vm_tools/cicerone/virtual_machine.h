@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,20 +9,19 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
-#include <base/optional.h>
-#include <vm_applications/proto_bindings/apps.pb.h>
-#include <vm_cicerone/proto_bindings/cicerone_service.pb.h>
+#include <vm_applications/apps.pb.h>
+#include <vm_cicerone/cicerone_service.pb.h>
 #include <vm_protos/proto_bindings/container_guest.grpc.pb.h>
 #include <vm_protos/proto_bindings/tremplin.grpc.pb.h>
+#include <net-base/ipv4_address.h>
 
 #include "vm_tools/cicerone/container.h"
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 
 class OsRelease;
 
@@ -30,7 +29,7 @@ class OsRelease;
 class VirtualMachine {
  public:
   // Convenience for the enumeration over vm types defined in vm_applications.
-  using VmType = vm_tools::apps::ApplicationList_VmType;
+  using VmType = vm_tools::apps::VmType;
 
   enum class CreateLxdContainerStatus {
     UNKNOWN,
@@ -52,6 +51,14 @@ class VirtualMachine {
     STARTED,
     REMAPPING,
     RUNNING,
+    FAILED,
+  };
+
+  enum class StopLxdContainerStatus {
+    UNKNOWN,
+    STOPPING,
+    STOPPED,
+    DOES_NOT_EXIST,
     FAILED,
   };
 
@@ -128,11 +135,31 @@ class VirtualMachine {
     FAILED,
   };
 
+  enum class AttachUsbToContainerStatus {
+    UNKNOWN,
+    OK,
+    NO_SUCH_CONTAINER,
+    FAILED,
+  };
+
+  enum class DetachUsbFromContainerStatus {
+    UNKNOWN,
+    OK,
+    FAILED,
+  };
+
+  enum class UpdateContainerDevicesStatus {
+    UNKNOWN,
+    OK,
+    NO_SUCH_CONTAINER,
+    FAILED,
+  };
+
   // Info about the LXD container.
   struct LxdContainerInfo {
-    // The IPv4 address of the container in network byte order.
+    // The IPv4 address of the container.
     // This field is only valid if the container status is RUNNING.
-    uint32_t ipv4_address;
+    std::optional<net_base::IPv4Address> ipv4_address;
   };
 
   // Results of a set timezone request
@@ -261,18 +288,21 @@ class VirtualMachine {
                                               const std::string& metadata_path,
                                               std::string* out_error);
 
-  // Deletes and LXD container.
+  // Deletes an LXD container.
   DeleteLxdContainerStatus DeleteLxdContainer(const std::string& container_name,
                                               std::string* out_error);
 
   // Starts an LXD container.
   StartLxdContainerStatus StartLxdContainer(
       const std::string& container_name,
-      const std::string& container_private_key,
-      const std::string& host_public_key,
       const std::string& token,
       tremplin::StartContainerRequest::PrivilegeLevel privilege_level,
+      bool disable_audio_capture,
       std::string* out_error);
+
+  // Stop an LXD container.
+  StopLxdContainerStatus StopLxdContainer(const std::string& container_name,
+                                          std::string* out_error);
 
   // Gets the primary user of an LXD container.
   GetLxdContainerUsernameStatus GetLxdContainerUsername(
@@ -321,6 +351,23 @@ class VirtualMachine {
   CancelUpgradeContainerStatus CancelUpgradeContainer(Container* container,
                                                       std::string* out_error);
 
+  // Attaches a USB device on a given port to a container.
+  AttachUsbToContainerStatus AttachUsbToContainer(const Container* container,
+                                                  uint32_t port_num,
+                                                  std::string* out_error);
+
+  // Detaches a USB device on a given port from a container.
+  DetachUsbFromContainerStatus DetachUsbFromContainer(uint32_t port_num,
+                                                      std::string* out_error);
+
+  UpdateContainerDevicesStatus UpdateContainerDevices(
+      Container* container,
+      const google::protobuf::Map<std::string, VmDeviceAction>& updates,
+      google::protobuf::Map<std::string,
+                            UpdateContainerDevicesResponse::UpdateResult>*
+          results,
+      std::string* out_error);
+
   // Tells Tremplin to start LXD.
   StartLxdStatus StartLxd(bool reset_lxd_db, std::string* out_error);
 
@@ -329,6 +376,9 @@ class VirtualMachine {
 
   // Gets a list of all the active container names in this VM.
   std::vector<std::string> GetContainerNames();
+
+  // Gets a reference to the mapping of tokens to active containers in this VM.
+  const std::map<std::string, std::unique_ptr<Container>>& GetContainers();
 
   bool GetTremplinDebugInfo(std::string* out);
 
@@ -368,7 +418,7 @@ class VirtualMachine {
   // Set if |tremplin_stub_| is actually a mock object set for testing. In this
   // case, we don't try to connect to tremplin even if ConnectTremplin is called
   // for some reason.
-  bool using_mock_tremplin_stub_;
+  bool using_mock_tremplin_stub_ = false;
 
   // True if the VM is expected to shutdown soon.
   bool is_stopping_ = false;
@@ -376,7 +426,6 @@ class VirtualMachine {
   base::WeakPtrFactory<VirtualMachine> weak_ptr_factory_;
 };
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone
 
 #endif  // VM_TOOLS_CICERONE_VIRTUAL_MACHINE_H_

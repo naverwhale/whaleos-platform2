@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,36 +10,58 @@
 #include <attestation-client-test/attestation/dbus-proxy-mocks.h>
 #include <cras/dbus-proxy-mocks.h>
 #include <debugd/dbus-proxy-mocks.h>
+#include <fwupd/dbus-proxy-mocks.h>
+#include <power_manager/dbus-proxy-mocks.h>
 #include <tpm_manager/proto_bindings/tpm_manager.pb.h>
 #include <tpm_manager-client-test/tpm_manager/dbus-proxy-mocks.h>
+#include <spaced/proto_bindings/spaced.pb.h>
+// NOLINTNEXTLINE(build/include_alpha) dbus-proxy-mocks.h needs spaced.pb.h
+#include <spaced/dbus-proxy-mocks.h>
 #include <gmock/gmock.h>
+
+#include "diagnostics/cros_healthd/system/fake_mojo_service.h"
+#include "diagnostics/cros_healthd/utils/resource_queue.h"
 
 namespace diagnostics {
 
 MockContext::MockContext() {
   attestation_proxy_ = std::make_unique<
       testing::StrictMock<org::chromium::AttestationProxyMock>>();
-  bluetooth_client_ = std::make_unique<FakeBluetoothClient>();
   cros_config_ = std::make_unique<brillo::FakeCrosConfig>();
   cras_proxy_ = std::make_unique<
       testing::StrictMock<org::chromium::cras::ControlProxyMock>>();
   debugd_proxy_ =
       std::make_unique<testing::StrictMock<org::chromium::debugdProxyMock>>();
-  debugd_adapter_ = std::make_unique<testing::StrictMock<MockDebugdAdapter>>();
+  fwupd_proxy_ =
+      std::make_unique<testing::StrictMock<org::freedesktop::fwupdProxyMock>>();
+  mojo_service_ = std::make_unique<FakeMojoService>();
   network_health_adapter_ = std::make_unique<FakeNetworkHealthAdapter>();
   network_diagnostics_adapter_ =
       std::make_unique<MockNetworkDiagnosticsAdapter>();
+  power_manager_proxy_ = std::make_unique<
+      testing::StrictMock<org::chromium::PowerManagerProxyMock>>();
   powerd_adapter_ = std::make_unique<FakePowerdAdapter>();
   system_config_ = std::make_unique<FakeSystemConfig>();
   system_utils_ = std::make_unique<FakeSystemUtilities>();
-  executor_ = std::make_unique<MockExecutorAdapter>();
+  bluez_controller_ = std::make_unique<MockBluezController>();
+  bluez_event_hub_ = std::make_unique<FakeBluezEventHub>();
+  floss_controller_ = std::make_unique<MockFlossController>();
+  floss_event_hub_ = std::make_unique<FakeFlossEventHub>();
   tick_clock_ = std::make_unique<base::SimpleTestTickClock>();
   tpm_manager_proxy_ = std::make_unique<
       testing::StrictMock<org::chromium::TpmManagerProxyMock>>();
-  udev_ = std::make_unique<FakeUdev>();
+  udev_ = std::make_unique<brillo::MockUdev>();
+  udev_monitor_ = std::make_unique<brillo::MockUdevMonitor>();
+  spaced_proxy_ = std::make_unique<org::chromium::SpacedProxyMock>();
 
   CHECK(temp_dir_.CreateUniqueTempDir());
   root_dir_ = temp_dir_.GetPath();
+
+  memory_cpu_resource_queue_ = std::make_unique<ResourceQueue>();
+}
+
+std::unique_ptr<PciUtil> MockContext::CreatePciUtil() {
+  return std::make_unique<FakePciUtil>(fake_pci_util_);
 }
 
 org::chromium::AttestationProxyMock* MockContext::mock_attestation_proxy()
@@ -48,8 +70,8 @@ org::chromium::AttestationProxyMock* MockContext::mock_attestation_proxy()
       attestation_proxy_.get());
 }
 
-FakeBluetoothClient* MockContext::fake_bluetooth_client() const {
-  return static_cast<FakeBluetoothClient*>(bluetooth_client_.get());
+ash::cros_healthd::mojom::Executor* MockContext::executor() {
+  return &mock_executor_;
 }
 
 brillo::FakeCrosConfig* MockContext::fake_cros_config() const {
@@ -61,15 +83,26 @@ org::chromium::debugdProxyMock* MockContext::mock_debugd_proxy() const {
       debugd_proxy_.get());
 }
 
+org::chromium::PowerManagerProxyMock* MockContext::mock_power_manager_proxy()
+    const {
+  return static_cast<
+      testing::StrictMock<org::chromium::PowerManagerProxyMock>*>(
+      power_manager_proxy_.get());
+}
+
 org::chromium::cras::ControlProxyMock* MockContext::mock_cras_proxy() const {
   return static_cast<
       testing::StrictMock<org::chromium::cras::ControlProxyMock>*>(
       cras_proxy_.get());
 }
 
-MockDebugdAdapter* MockContext::mock_debugd_adapter() const {
-  return static_cast<testing::StrictMock<MockDebugdAdapter>*>(
-      debugd_adapter_.get());
+org::freedesktop::fwupdProxyMock* MockContext::mock_fwupd_proxy() const {
+  return static_cast<testing::StrictMock<org::freedesktop::fwupdProxyMock>*>(
+      fwupd_proxy_.get());
+}
+
+FakeMojoService* MockContext::fake_mojo_service() const {
+  return static_cast<FakeMojoService*>(mojo_service_.get());
 }
 
 FakeNetworkHealthAdapter* MockContext::fake_network_health_adapter() const {
@@ -94,8 +127,24 @@ FakeSystemUtilities* MockContext::fake_system_utils() const {
   return static_cast<FakeSystemUtilities*>(system_utils_.get());
 }
 
-MockExecutorAdapter* MockContext::mock_executor() const {
-  return static_cast<MockExecutorAdapter*>(executor_.get());
+MockBluezController* MockContext::mock_bluez_controller() const {
+  return static_cast<MockBluezController*>(bluez_controller_.get());
+}
+
+FakeBluezEventHub* MockContext::fake_bluez_event_hub() const {
+  return static_cast<FakeBluezEventHub*>(bluez_event_hub_.get());
+}
+
+MockFlossController* MockContext::mock_floss_controller() const {
+  return static_cast<MockFlossController*>(floss_controller_.get());
+}
+
+FakeFlossEventHub* MockContext::fake_floss_event_hub() const {
+  return static_cast<FakeFlossEventHub*>(floss_event_hub_.get());
+}
+
+MockExecutor* MockContext::mock_executor() {
+  return &mock_executor_;
 }
 
 base::SimpleTestTickClock* MockContext::mock_tick_clock() const {
@@ -108,8 +157,16 @@ org::chromium::TpmManagerProxyMock* MockContext::mock_tpm_manager_proxy()
       tpm_manager_proxy_.get());
 }
 
-FakeUdev* MockContext::fake_udev() const {
-  return static_cast<FakeUdev*>(udev_.get());
+brillo::MockUdev* MockContext::mock_udev() const {
+  return static_cast<brillo::MockUdev*>(udev_.get());
+}
+
+brillo::MockUdevMonitor* MockContext::mock_udev_monitor() const {
+  return static_cast<brillo::MockUdevMonitor*>(udev_monitor_.get());
+}
+
+org::chromium::SpacedProxyMock* MockContext::mock_spaced_proxy() const {
+  return static_cast<org::chromium::SpacedProxyMock*>(spaced_proxy_.get());
 }
 
 }  // namespace diagnostics

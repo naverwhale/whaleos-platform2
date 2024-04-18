@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 #include <brillo/flag_helper.h>
 
 #include "iioservice/iioservice_simpleclient/common.h"
-#include "iioservice/iioservice_simpleclient/daemon_observer.h"
+#include "iioservice/iioservice_simpleclient/daemon_samples_observer.h"
 #include "iioservice/include/common.h"
 #include "iioservice/mojo/sensor.mojom.h"
 
@@ -21,19 +21,19 @@ namespace {
 static const int kNumSuccessReads = 100;
 
 std::atomic<bool> daemon_running(false);
-std::unique_ptr<iioservice::DaemonObserver> exec_daemon;
+std::unique_ptr<iioservice::DaemonSamplesObserver> exec_daemon;
 
 void quit_daemon() {
   if (!daemon_running)
     return;
 
   daemon_running = false;
-  LOG(INFO) << "Quiting daemon";
+  LOGF(INFO) << "Quiting daemon";
   exec_daemon->Quit();
 }
 
 void signal_handler_stop(int signal) {
-  LOG(INFO) << "Signal: " << signal;
+  LOGF(INFO) << "Signal: " << signal;
 
   quit_daemon();
 }
@@ -63,21 +63,21 @@ int main(int argc, char** argv) {
       FLAGS_channels, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
   if (FLAGS_device_id == -1 && FLAGS_device_type == 0) {
-    LOG(ERROR)
+    LOGF(ERROR)
         << "iioservice_simpleclient must be called with a sensor specified.";
     exit(1);
   }
   if (FLAGS_frequency < 0.0) {
-    LOG(ERROR) << "iioservice_simpleclient must be called with frequency set.";
+    LOGF(ERROR) << "iioservice_simpleclient must be called with frequency set.";
     exit(1);
   }
   if (channel_ids.empty()) {
-    LOG(ERROR) << "iioservice_simpleclient must be called with at least one "
-                  "channel enabled.";
+    LOGF(ERROR) << "iioservice_simpleclient must be called with at least one "
+                   "channel enabled.";
     exit(1);
   }
 
-  exec_daemon = std::make_unique<iioservice::DaemonObserver>(
+  exec_daemon = std::make_unique<iioservice::DaemonSamplesObserver>(
       FLAGS_device_id, static_cast<cros::mojom::DeviceType>(FLAGS_device_type),
       std::move(channel_ids), FLAGS_frequency, FLAGS_timeout, FLAGS_samples);
   signal(SIGTERM, signal_handler_stop);

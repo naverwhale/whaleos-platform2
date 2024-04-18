@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,7 +31,7 @@ bool CrosSystemUtilsImpl::SetString(const std::string& key,
 bool CrosSystemUtilsImpl::GetString(const std::string& key,
                                     std::string* value) const {
   char buf[VB_MAX_STRING_PROPERTY];
-  if (::VbGetSystemPropertyString(key.c_str(), buf, sizeof(buf)) == nullptr) {
+  if (::VbGetSystemPropertyString(key.c_str(), buf, sizeof(buf)) != 0) {
     return false;
   }
   *value = std::string(buf);

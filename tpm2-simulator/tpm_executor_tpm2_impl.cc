@@ -1,35 +1,30 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "tpm2-simulator/tpm_executor_tpm2_impl.h"
+
+#include <memory>
 #include <string>
 
 #include <base/logging.h>
 #include <linux/vtpm_proxy.h>
 #include <tpm2/tpm_simulator.hpp>
 
-#include "tpm2-simulator/tpm_executor_tpm2_impl.h"
-
-namespace {
-
-std::string CommandWithCode(uint32_t code) {
-  std::string response;
-  response.resize(10);
-  unsigned char* buffer = reinterpret_cast<unsigned char*>(response.data());
-  tpm2::TPM_ST tag = TPM_ST_NO_SESSIONS;
-  tpm2::INT32 size = 10;
-  tpm2::UINT32 len = size;
-  tpm2::TPMI_ST_COMMAND_TAG_Marshal(&tag, &buffer, &size);
-  tpm2::UINT32_Marshal(&len, &buffer, &size);
-  tpm2::TPM_CC_Marshal(&code, &buffer, &size);
-  return response;
-}
-
-}  // namespace
+#include "tpm2-simulator/constants.h"
+#include "tpm2-simulator/tpm_command_utils.h"
+#include "tpm2-simulator/tpm_vendor_cmd_locality.h"
+#include "tpm2-simulator/tpm_vendor_cmd_pinweaver.h"
 
 namespace tpm2_simulator {
 
+TpmExecutorTpm2Impl::TpmExecutorTpm2Impl() {
+  vendor_commands_.emplace_back(std::make_unique<TpmVendorCommandLocality>());
+  vendor_commands_.emplace_back(std::make_unique<TpmVendorCommandPinweaver>());
+}
+
 void TpmExecutorTpm2Impl::InitializeVTPM() {
+  tpm2::GlobalStateCleanup();
   // Initialize TPM.
   tpm2::_plat__Signal_PowerOn();
   /*
@@ -48,27 +43,23 @@ void TpmExecutorTpm2Impl::InitializeVTPM() {
     if (!tpm2::tpm_endorse())
       LOG(ERROR) << __func__ << " Failed to endorse TPM with a fixed key.";
   }
+
+  for (const auto& vendor_cmd : vendor_commands_) {
+    if (!vendor_cmd->Init()) {
+      LOG(ERROR) << "Failed to initialize vendor command.";
+    }
+  }
+
   LOG(INFO) << "vTPM Initialize.";
 }
 
 size_t TpmExecutorTpm2Impl::GetCommandSize(const std::string& command) {
-  unsigned char* header =
-      reinterpret_cast<unsigned char*>(const_cast<char*>(command.data()));
-  int32_t header_size = command.size();
-  tpm2::TPMI_ST_COMMAND_TAG tag;
-  uint32_t command_size;
-  tpm2::TPM_RC rc =
-      tpm2::TPMI_ST_COMMAND_TAG_Unmarshal(&tag, &header, &header_size);
-  if (rc != TPM_RC_SUCCESS) {
-    LOG(ERROR) << "Failed to parse tag";
+  uint32_t size;
+  if (!ExtractCommandSize(command, &size)) {
+    LOG(ERROR) << "Command too small.";
     return command.size();
   }
-  rc = tpm2::UINT32_Unmarshal(&command_size, &header, &header_size);
-  if (rc != TPM_RC_SUCCESS) {
-    LOG(ERROR) << "Failed to parse size";
-    return command.size();
-  }
-  return command_size;
+  return size;
 }
 
 std::string TpmExecutorTpm2Impl::RunCommand(const std::string& command) {
@@ -77,24 +68,11 @@ std::string TpmExecutorTpm2Impl::RunCommand(const std::string& command) {
   std::string command_copy = command;
   unsigned char* command_ptr =
       reinterpret_cast<unsigned char*>(command_copy.data());
-  unsigned char* header = command_ptr;
-  int32_t header_size = command.size();
-  tpm2::TPMI_ST_COMMAND_TAG tag;
-  uint32_t command_size;
-  tpm2::TPM_CC command_code = 0;
-  tpm2::TPM_RC rc =
-      tpm2::TPMI_ST_COMMAND_TAG_Unmarshal(&tag, &header, &header_size);
-  if (rc != TPM_RC_SUCCESS) {
-    return CommandWithCode(rc);
-  }
-  rc = tpm2::UINT32_Unmarshal(&command_size, &header, &header_size);
-  if (rc != TPM_RC_SUCCESS) {
-    return CommandWithCode(rc);
-  }
-  rc = tpm2::TPM_CC_Unmarshal(&command_code, &header, &header_size);
-  if (command_code == TPM2_CC_SET_LOCALITY) {
-    // Ignoring TPM2_CC_SET_LOCALITY command.
-    return CommandWithCode(TPM_RC_SUCCESS);
+
+  for (const auto& vendor_cmd : vendor_commands_) {
+    if (vendor_cmd->IsVendorCommand(command)) {
+      return vendor_cmd->RunCommand(command);
+    }
   }
 
   unsigned int response_size;

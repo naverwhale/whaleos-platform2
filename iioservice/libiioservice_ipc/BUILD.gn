@@ -1,11 +1,15 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/mojom_bindings_generator.gni")
+import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":libiioservice_ipc" ]
+  deps = [
+    ":iioservice_ipc",
+    ":libiioservice_ipc_mojom",
+  ]
 }
 
 generate_mojom_bindings("libiioservice_ipc_mojom") {
@@ -15,24 +19,20 @@ generate_mojom_bindings("libiioservice_ipc_mojom") {
   ]
   mojo_root = "${platform2_root}"
   use_pic = true
-  standalone = true
+  install_package = "iioservice_ipc"
 }
 
-shared_library("libiioservice_ipc") {
-  output_name = "libiioservice_ipc"
-  sources = [
-    "//iioservice/libiioservice_ipc/sensor_client_dbus.cc",
-    "//iioservice/libiioservice_ipc/sensor_dbus.cc",
-    "//iioservice/libiioservice_ipc/sensor_server_dbus.cc",
-  ]
-  include_dirs = [
-    "//iioservice",
-    "//iioservice/include",
-    "//iioservice/libiioservice_ipc",
-  ]
-  pkg_deps = [
+generate_pkg_config("iioservice_ipc") {
+  description = "Iioservice library"
+  version = "1.0"
+  requires_private = [
     "libchrome",
     "libmojo",
   ]
-  deps = [ ":libiioservice_ipc_mojom" ]
+  libs = [ "-liioservice_ipc_mojom" ]
+
+  # This flag will faltten the include space. If need to install files directly,
+  # install path should be `/usr/include/iioservice_ipc/iioservice`.
+  cflags = [ "-I/usr/include/iioservice_ipc" ]
+  install = true
 }

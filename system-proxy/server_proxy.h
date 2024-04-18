@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef SYSTEM_PROXY_SERVER_PROXY_H_
@@ -10,12 +10,13 @@
 #include <string>
 #include <vector>
 
-#include <base/callback_forward.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/callback_forward.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/asynchronous_signal_handler.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <net-base/ipv4_address.h>
 
 namespace patchpanel {
 class Socket;
@@ -115,8 +116,8 @@ class ServerProxy {
   void AuthCredentialsProvided(const std::string& auth_credentials_key,
                                const std::string& credentials);
 
-  // The proxy listening address in network-byte order.
-  uint32_t listening_addr_ = 0;
+  // The proxy listening address.
+  std::optional<net_base::IPv4Address> listening_addr_;
   int listening_port_;
 
   // The user name and password to use for proxy authentication in the format

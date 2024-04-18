@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,6 +10,12 @@ group("all") {
   deps = [
     ":imageloader",
     ":imageloader-adaptors",
+    ":install_dbus_config",
+    ":install_dbus_service",
+    ":install_header",
+    ":install_init",
+    ":install_pkgconfig",
+    ":install_seccomp_policy",
     ":libimageloader_static",
     ":protos",
   ]
@@ -30,7 +36,9 @@ pkg_config("target_defaults") {
     "libbrillo",
     "libchrome",
     "libcrypto",
+    "libdlcservice-metadata",
     "libminijail",
+    "system_api",
     "vboot_host",
   ]
 
@@ -54,13 +62,24 @@ proto_library("protos") {
 
 generate_dbus_adaptors("imageloader-adaptors") {
   dbus_adaptors_out_dir = "include/imageloader/dbus_adaptors"
-  dbus_service_config = "dbus_adaptors/dbus-service-config.json"
-  sources = [ "dbus_adaptors/org.chromium.ImageLoaderInterface.xml" ]
+  dbus_service_config = "dbus/dbus-service-config.json"
+  sources = [ "dbus/org.chromium.ImageLoaderInterface.xml" ]
 }
 
 shared_library("libimageloader-manifest") {
   sources = [ "manifest.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "lib"
+}
+
+install_config("install_pkgconfig") {
+  sources = [ "libimageloader-manifest.pc" ]
+  install_path = "${libdir}/pkgconfig"
+}
+
+install_config("install_header") {
+  sources = [ "manifest.h" ]
+  install_path = "/usr/include/libimageloader"
 }
 
 static_library("libimageloader_static") {
@@ -93,10 +112,48 @@ executable("imageloader") {
     ":target_defaults",
     ":imageloader_config",
   ]
+  install_path = "sbin"
   deps = [
     ":imageloader-adaptors",
     ":libimageloader_static",
   ]
+}
+
+install_config("install_seccomp_policy") {
+  _arch = getenv("ARCH")
+
+  # NOSORT
+  sources = [
+    "seccomp/imageloader-seccomp-${_arch}.policy",
+    "seccomp/imageloader-helper-seccomp-${_arch}.policy",
+  ]
+  install_path = "seccomp_policy"
+
+  # NOSORT
+  outputs = [
+    "imageloader-seccomp.policy",
+    "imageloader-helper-seccomp.policy",
+  ]
+}
+
+install_config("install_dbus_config") {
+  sources = [ "dbus/org.chromium.ImageLoader.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_dbus_service") {
+  sources = [ "dbus/org.chromium.ImageLoader.service" ]
+  install_path = "dbus_system_services"
+}
+
+install_config("install_init") {
+  sources = [
+    "init/imageloader-init.conf",
+    "init/imageloader-shutdown.conf",
+    "init/imageloader.conf",
+    "init/widevine-cdm.conf",
+  ]
+  install_path = "upstart"
 }
 
 if (use.test) {
@@ -123,6 +180,7 @@ if (use.test) {
       ":run_tests_config",
       ":target_defaults",
     ]
+    run_test = true
     deps = [
       ":libimageloader_static",
       "//common-mk/testrunner:testrunner",

@@ -1,12 +1,13 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "iioservice/iioservice_simpleclient/query_impl.h"
 
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 
 #include "iioservice/include/common.h"
 
@@ -66,6 +67,12 @@ void QueryImpl::GetAllDeviceIdsCallback(
         iio_device_ids_types) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
 
+  if (iio_device_ids_types.empty()) {
+    LOGF(ERROR) << "No device found";
+    Reset();
+    return;
+  }
+
   for (const auto& [id, types] : iio_device_ids_types) {
     mojo::Remote<cros::mojom::SensorDevice> remote;
     sensor_service_remote_->GetDevice(id, remote.BindNewPipeAndPassReceiver());
@@ -81,6 +88,12 @@ void QueryImpl::GetAllDeviceIdsCallback(
 void QueryImpl::GetDeviceIdsCallback(
     const std::vector<int32_t>& iio_device_ids) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
+
+  if (iio_device_ids.empty()) {
+    LOGF(ERROR) << "No device found given DeviceType: " << device_type_;
+    Reset();
+    return;
+  }
 
   for (const int32_t& id : iio_device_ids) {
     mojo::Remote<cros::mojom::SensorDevice> remote;
@@ -99,7 +112,7 @@ void QueryImpl::GetDeviceIdsCallback(
 void QueryImpl::GetAttributesCallback(
     int32_t iio_device_id,
     std::vector<cros::mojom::DeviceType> types,
-    const std::vector<base::Optional<std::string>>& values) {
+    const std::vector<std::optional<std::string>>& values) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
   DCHECK(device_ids_.find(iio_device_id) != device_ids_.end());
   DCHECK_EQ(attributes_.size(), values.size());

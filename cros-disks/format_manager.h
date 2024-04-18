@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,21 +18,24 @@
 
 namespace cros_disks {
 
+class Platform;
+
 class FormatManagerObserverInterface;
 
 class FormatManager {
  public:
-  explicit FormatManager(brillo::ProcessReaper* process_reaper);
+  explicit FormatManager(Platform* platform,
+                         brillo::ProcessReaper* process_reaper);
   FormatManager(const FormatManager&) = delete;
   FormatManager& operator=(const FormatManager&) = delete;
 
   ~FormatManager();
 
   // Starts a formatting process of a given device.
-  FormatErrorType StartFormatting(const std::string& device_path,
-                                  const std::string& device_file,
-                                  const std::string& filesystem,
-                                  const std::vector<std::string>& options);
+  FormatError StartFormatting(const std::string& device_path,
+                              const std::string& device_file,
+                              const std::string& filesystem,
+                              const std::vector<std::string>& options);
 
   void set_observer(FormatManagerObserverInterface* observer) {
     observer_ = observer;
@@ -52,6 +55,9 @@ class FormatManager {
 
   // Returns true if formatting a given file system is supported.
   bool IsFilesystemSupported(const std::string& filesystem) const;
+
+  // Platform service.
+  Platform* const platform_;
 
   brillo::ProcessReaper* process_reaper_;
 

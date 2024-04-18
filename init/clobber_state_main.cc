@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,8 +12,7 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <brillo/blkdev_utils/lvm.h>
-
-#include "init/crossystem_impl.h"
+#include <libcrossystem/crossystem.h>
 
 namespace {
 
@@ -50,12 +49,12 @@ int main(int argc, char* argv[]) {
   logging::InitLogging(settings);
 
   if (getuid() != 0) {
-    LOG(ERROR) << "clobber-state must be run as root";
+    LOG(ERROR) << argv[0] << " must be run as root";
     return 1;
   }
 
   ClobberState::Arguments args = ClobberState::ParseArgv(argc, argv);
-  ClobberState clobber(args, std::make_unique<CrosSystemImpl>(),
+  ClobberState clobber(args, std::make_unique<crossystem::Crossystem>(),
                        std::make_unique<ClobberUi>(OpenTerminal()),
                        std::make_unique<brillo::LogicalVolumeManager>());
 

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,18 +6,23 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/task/single_thread_task_runner.h>
 #include <chromeos/constants/vm_tools.h>
 #include <chromeos/dbus/service_constants.h>
+#include <dbus/error.h>
 #include <dbus/message.h>
 #include <gmock/gmock.h>
 #include <vm_protos/proto_bindings/container_host.grpc.pb.h>
 #include <vm_protos/proto_bindings/tremplin.grpc.pb.h>
 
 #include "base/strings/string_number_conversions.h"
+#include "dbus/shadercached/dbus-constants.h"
+#include "dbus/vm_cicerone/dbus-constants.h"
+#include "vm_tools/cicerone/container.h"
 #include "vm_tools/cicerone/container_listener_impl.h"
 #include "vm_tools/cicerone/dbus_message_testing_helper.h"
 #include "vm_tools/cicerone/mock_tremplin_stub.h"
@@ -38,6 +43,7 @@ constexpr char ServiceTestingHelper::kDefaultContainerToken[];
 namespace {
 
 using ::testing::_;
+using ::testing::A;
 using ::testing::AnyNumber;
 using ::testing::DoAll;
 using ::testing::Invoke;
@@ -93,8 +99,8 @@ void CheckContainerStartedSignalForPluginVm(dbus::Signal* signal) {
   CheckContainerStartedSignal(signal, "penguin");
 }
 
-std::unique_ptr<dbus::Response> CheckSetHostnameIpMappingMethod(
-    dbus::MethodCall* method_call, int timeout_ms) {
+base::expected<std::unique_ptr<dbus::Response>, dbus::Error>
+CheckSetHostnameIpMappingMethod(dbus::MethodCall* method_call, int timeout_ms) {
   CHECK_EQ(method_call->GetMessageType(), dbus::Message::MESSAGE_METHOD_CALL);
   CHECK_EQ(method_call->GetInterface(), crosdns::kCrosDnsInterfaceName);
   CHECK_EQ(method_call->GetMember(), crosdns::kSetHostnameIpMappingMethod);
@@ -113,7 +119,7 @@ std::unique_ptr<dbus::Response> CheckSetHostnameIpMappingMethod(
 
   // MockObjectProxy will take ownership of the created Response object. See
   // comments in MockObjectProxy.
-  return dbus::Response::CreateEmpty();
+  return base::ok(dbus::Response::CreateEmpty());
 }
 
 }  // namespace
@@ -121,7 +127,11 @@ std::unique_ptr<dbus::Response> CheckSetHostnameIpMappingMethod(
 ServiceTestingHelper::DbusCallback::DbusCallback() = default;
 ServiceTestingHelper::DbusCallback::~DbusCallback() = default;
 
-ServiceTestingHelper::ServiceTestingHelper(MockType mock_type) {
+ServiceTestingHelper::ServiceTestingHelper(MockType mock_type)
+    : ServiceTestingHelper(mock_type, "borealis") {}
+
+ServiceTestingHelper::ServiceTestingHelper(MockType mock_type,
+                                           const std::string& vm_name) {
   CHECK(socket_temp_dir_.CreateUniqueTempDir());
   quit_closure_called_count_ = 0;
 
@@ -129,8 +139,8 @@ ServiceTestingHelper::ServiceTestingHelper(MockType mock_type) {
   base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   CHECK(dbus_thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&ServiceTestingHelper::CreateService,
-                            base::Unretained(this), &event)));
+      FROM_HERE, base::BindOnce(&ServiceTestingHelper::CreateService,
+                                base::Unretained(this), &event, vm_name)));
 
   // Wait for service_ to be created.
   event.Wait();
@@ -146,8 +156,8 @@ ServiceTestingHelper::~ServiceTestingHelper() {
   base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   CHECK(dbus_thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&ServiceTestingHelper::DestroyService,
-                            base::Unretained(this), &event)));
+      FROM_HERE, base::BindOnce(&ServiceTestingHelper::DestroyService,
+                                base::Unretained(this), &event)));
 
   event.Wait();
 }
@@ -164,8 +174,6 @@ void ServiceTestingHelper::VerifyAndClearMockExpectations() {
   ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(
       mock_vm_applications_service_proxy_.get()));
   ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(
-      mock_vm_disk_management_service_proxy_.get()));
-  ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(
       mock_vm_sk_forwarding_service_proxy_.get()));
   ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(
       mock_url_handler_service_proxy_.get()));
@@ -178,20 +186,28 @@ void ServiceTestingHelper::VerifyAndClearMockExpectations() {
 }
 
 void ServiceTestingHelper::ExpectNoDBusMessages() {
-  EXPECT_CALL(*mock_bus_, SendWithReplyAndBlock(_, _, _)).Times(0);
-  EXPECT_CALL(*mock_bus_, SendWithReply(_, _, _)).Times(0);
-  EXPECT_CALL(*mock_bus_, Send(_, _)).Times(0);
+  EXPECT_CALL(*mock_bus_, SendWithReplyAndBlock(A<DBusMessage*>(), A<int>()))
+      .Times(0);
+  EXPECT_CALL(*mock_bus_, SendWithReply(A<DBusMessage*>(),
+                                        A<DBusPendingCall**>(), A<int>()))
+      .Times(0);
+  EXPECT_CALL(*mock_bus_, Send(A<DBusMessage*>(), A<uint32_t*>())).Times(0);
   EXPECT_CALL(*mock_exported_object_, SendSignal(_)).Times(0);
   for (const auto& object_proxy :
        {mock_vm_applications_service_proxy_, mock_url_handler_service_proxy_,
         mock_chunneld_service_proxy_, mock_crosdns_service_proxy_,
-        mock_concierge_service_proxy_, mock_vm_sk_forwarding_service_proxy_,
-        mock_vm_disk_management_service_proxy_}) {
-    EXPECT_CALL(*object_proxy, CallMethodAndBlockWithErrorDetails(_, _, _))
+        mock_concierge_service_proxy_, mock_vm_sk_forwarding_service_proxy_}) {
+    EXPECT_CALL(*object_proxy,
+                CallMethodAndBlock(A<dbus::MethodCall*>(), A<int>()))
         .Times(0);
-    EXPECT_CALL(*object_proxy, CallMethodAndBlock(_, _)).Times(0);
-    EXPECT_CALL(*object_proxy, DoCallMethod(_, _, _)).Times(0);
-    EXPECT_CALL(*object_proxy, DoCallMethodWithErrorCallback(_, _, _, _))
+    EXPECT_CALL(*object_proxy,
+                DoCallMethod(A<dbus::MethodCall*>(), A<int>(),
+                             A<dbus::ObjectProxy::ResponseCallback*>()))
+        .Times(0);
+    EXPECT_CALL(*object_proxy, DoCallMethodWithErrorCallback(
+                                   A<dbus::MethodCall*>(), A<int>(),
+                                   A<dbus::ObjectProxy::ResponseCallback*>(),
+                                   A<dbus::ObjectProxy::ErrorCallback*>()))
         .Times(0);
   }
 }
@@ -211,9 +227,9 @@ void ServiceTestingHelper::CallDBus(
     base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                               base::WaitableEvent::InitialState::NOT_SIGNALED);
     CHECK(dbus_task_runner_->PostTask(
-        FROM_HERE,
-        base::Bind(&ServiceTestingHelper::CallDBusOnDBusThread,
-                   base::Unretained(this), call, &request, response, &event)));
+        FROM_HERE, base::BindOnce(&ServiceTestingHelper::CallDBusOnDBusThread,
+                                  base::Unretained(this), call, &request,
+                                  response, &event)));
     event.Wait();
   }
 }
@@ -230,7 +246,7 @@ void ServiceTestingHelper::CallDBusOnDBusThread(
   dbus::MessageWriter writer(&method_call);
   writer.AppendProtoAsArrayOfBytes(*request);
   dbus::ExportedObject::ResponseSender response_callback =
-      base::Bind(&ExtractProtoFromCall, response);
+      base::BindRepeating(&ExtractProtoFromCall, response);
 
   dbus_callbacks_[call].callback.Run(&method_call,
                                      std::move(response_callback));
@@ -362,7 +378,7 @@ void ServiceTestingHelper::CreateContainerWithTokenForTesting(
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   CHECK(dbus_task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &ServiceTestingHelper::CreateContainerWithTokenForTestingOnDBusThread,
           base::Unretained(this), owner_id, vm_name, container_name,
           container_token, &event)));
@@ -436,8 +452,9 @@ void ServiceTestingHelper::SetUpPluginVm() {
   VerifyAndClearMockExpectations();
 }
 
-void ServiceTestingHelper::CreateService(base::WaitableEvent* event) {
-  dbus_task_runner_ = base::ThreadTaskRunnerHandle::Get();
+void ServiceTestingHelper::CreateService(base::WaitableEvent* event,
+                                         const std::string& vm_name) {
+  dbus_task_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
   EXPECT_CALL(*mock_bus_, GetDBusTaskRunner())
       .WillRepeatedly(Return(dbus_task_runner_.get()));
 
@@ -455,12 +472,23 @@ void ServiceTestingHelper::CreateService(base::WaitableEvent* event) {
   ON_CALL(*mock_bus_, AssertOnDBusThread())
       .WillByDefault(Invoke(this, &ServiceTestingHelper::AssertOnDBusThread));
 
-  base::Closure quit_closure = base::Bind(
+  base::OnceClosure quit_closure = base::BindOnce(
       &ServiceTestingHelper::IncrementQuitClosure, base::Unretained(this));
   Service::DisableGrpcForTesting();
-  service_ =
-      Service::Create(quit_closure, socket_temp_dir_.GetPath(), mock_bus_);
+  Container::DisableChannelWaitForTesting();
+  Service::DisableGuestMetricsCreation();
+  service_ = Service::Create(std::move(quit_closure),
+                             socket_temp_dir_.GetPath(), mock_bus_);
   CHECK(service_);
+
+  // Set up guest metrics testing
+  CHECK(metrics_temp_dir_.CreateUniqueTempDir());
+  auto guest_metrics = std::make_unique<TestGuestMetrics>(
+      mock_bus_, metrics_temp_dir_.GetPath(),
+      ServiceTestingHelper::kDefaultOwnerId, vm_name, "penguin");
+  guest_metrics->SetMetricsLibraryForTesting(
+      std::make_unique<MetricsLibraryMock>());
+  service_->SetGuestMetricsForTesting(std::move(guest_metrics));
 
   event->Signal();
 }
@@ -496,6 +524,7 @@ void ServiceTestingHelper::SetDbusCallbackNames() {
   dbus_callbacks_[kCreateLxdContainer].method_name = kCreateLxdContainerMethod;
   dbus_callbacks_[kDeleteLxdContainer].method_name = kDeleteLxdContainerMethod;
   dbus_callbacks_[kStartLxdContainer].method_name = kStartLxdContainerMethod;
+  dbus_callbacks_[kStopLxdContainer].method_name = kStopLxdContainerMethod;
   dbus_callbacks_[kGetLxdContainerUsername].method_name =
       kGetLxdContainerUsernameMethod;
   dbus_callbacks_[kSetTimezone].method_name = kSetTimezoneMethod;
@@ -523,6 +552,16 @@ void ServiceTestingHelper::SetDbusCallbackNames() {
   dbus_callbacks_[kRegisterVshSession].method_name = kRegisterVshSessionMethod;
   dbus_callbacks_[kGetVshSession].method_name = kGetVshSessionMethod;
   dbus_callbacks_[kFileSelected].method_name = kFileSelectedMethod;
+  dbus_callbacks_[kAttachUsbToContainer].method_name =
+      kAttachUsbToContainerMethod;
+  dbus_callbacks_[kDetachUsbFromContainer].method_name =
+      kDetachUsbFromContainerMethod;
+  dbus_callbacks_[kListRunningContainers].method_name =
+      kListRunningContainersMethod;
+  dbus_callbacks_[kGetGarconSessionInfo].method_name =
+      kGetGarconSessionInfoMethod;
+  dbus_callbacks_[kUpdateContainerDevices].method_name =
+      kUpdateContainerDevicesMethod;
 
   // Check we didn't forget any.
   for (const auto& callback_info : dbus_callbacks_) {
@@ -563,12 +602,11 @@ void ServiceTestingHelper::SetupDBus(MockType mock_type) {
 
   SetDbusCallbackNames();
 
-  base::Thread::Options dbus_thread_options;
-  dbus_thread_options.message_pump_type = base::MessagePumpType::IO;
-  CHECK(dbus_thread_.StartWithOptions(dbus_thread_options));
+  CHECK(dbus_thread_.StartWithOptions(
+      base::Thread::Options(base::MessagePumpType::IO, 0)));
 
   dbus::Bus::Options opts;
-  constexpr char kFakeServicePath[] = "/fake/path";
+  static constexpr char kFakeServicePath[] = "/fake/path";
   if (mock_type == NORMAL_MOCKS) {
     mock_bus_ = new dbus::MockBus(opts);
 
@@ -576,9 +614,6 @@ void ServiceTestingHelper::SetupDBus(MockType mock_type) {
         mock_bus_.get(), dbus::ObjectPath(kFakeServicePath));
 
     mock_vm_applications_service_proxy_ = new dbus::MockObjectProxy(
-        mock_bus_.get(), "", dbus::ObjectPath(kFakeServicePath));
-
-    mock_vm_disk_management_service_proxy_ = new dbus::MockObjectProxy(
         mock_bus_.get(), "", dbus::ObjectPath(kFakeServicePath));
 
     mock_vm_sk_forwarding_service_proxy_ = new dbus::MockObjectProxy(
@@ -598,6 +633,9 @@ void ServiceTestingHelper::SetupDBus(MockType mock_type) {
 
     mock_shill_manager_proxy_ = new dbus::MockObjectProxy(
         mock_bus_.get(), "", dbus::ObjectPath(kFakeServicePath));
+
+    mock_shadercached_proxy_ = new dbus::MockObjectProxy(
+        mock_bus_.get(), "", dbus::ObjectPath(kFakeServicePath));
   } else {
     DCHECK_EQ(mock_type, NICE_MOCKS);
     mock_bus_ = new NiceMock<dbus::MockBus>(opts);
@@ -607,10 +645,6 @@ void ServiceTestingHelper::SetupDBus(MockType mock_type) {
 
     mock_vm_applications_service_proxy_ = new NiceMock<dbus::MockObjectProxy>(
         mock_bus_.get(), "", dbus::ObjectPath(kFakeServicePath));
-
-    mock_vm_disk_management_service_proxy_ =
-        new NiceMock<dbus::MockObjectProxy>(mock_bus_.get(), "",
-                                            dbus::ObjectPath(kFakeServicePath));
 
     mock_vm_sk_forwarding_service_proxy_ = new NiceMock<dbus::MockObjectProxy>(
         mock_bus_.get(), "", dbus::ObjectPath(kFakeServicePath));
@@ -629,45 +663,56 @@ void ServiceTestingHelper::SetupDBus(MockType mock_type) {
 
     mock_shill_manager_proxy_ = new NiceMock<dbus::MockObjectProxy>(
         mock_bus_.get(), "", dbus::ObjectPath(kFakeServicePath));
+
+    mock_shadercached_proxy_ = new NiceMock<dbus::MockObjectProxy>(
+        mock_bus_.get(), "", dbus::ObjectPath(kFakeServicePath));
   }
 
   // Set up enough expectations so that Service::Init will succeed.
-  EXPECT_CALL(*mock_bus_, GetExportedObject(_))
+  EXPECT_CALL(*mock_bus_, GetExportedObject(A<const dbus::ObjectPath&>()))
       .WillOnce(Return(mock_exported_object_.get()));
 
-  EXPECT_CALL(*mock_bus_, RequestOwnershipAndBlock(_, _))
+  EXPECT_CALL(*mock_bus_,
+              RequestOwnershipAndBlock(A<const std::string&>(),
+                                       A<dbus::Bus::ServiceOwnershipOptions>()))
       .WillOnce(Return(true));
 
   EXPECT_CALL(*mock_bus_, Connect()).WillOnce(Return(true));
 
   EXPECT_CALL(*mock_bus_,
-              GetObjectProxy(vm_tools::apps::kVmApplicationsServiceName, _))
+              GetObjectProxy(vm_tools::apps::kVmApplicationsServiceName,
+                             A<const dbus::ObjectPath&>()))
       .WillOnce(Return(mock_vm_applications_service_proxy_.get()));
-
-  EXPECT_CALL(*mock_bus_,
-              GetObjectProxy(
-                  vm_tools::disk_management::kVmDiskManagementServiceName, _))
-      .WillOnce(Return(mock_vm_disk_management_service_proxy_.get()));
 
   EXPECT_CALL(
       *mock_bus_,
-      GetObjectProxy(vm_tools::sk_forwarding::kVmSKForwardingServiceName, _))
+      GetObjectProxy(vm_tools::sk_forwarding::kVmSKForwardingServiceName,
+                     A<const dbus::ObjectPath&>()))
       .WillOnce(Return(mock_vm_sk_forwarding_service_proxy_.get()));
 
-  EXPECT_CALL(*mock_bus_, GetObjectProxy(chromeos::kUrlHandlerServiceName, _))
+  EXPECT_CALL(*mock_bus_, GetObjectProxy(chromeos::kUrlHandlerServiceName,
+                                         A<const dbus::ObjectPath&>()))
       .WillOnce(Return(mock_url_handler_service_proxy_.get()));
 
-  EXPECT_CALL(*mock_bus_, GetObjectProxy(chunneld::kChunneldServiceName, _))
+  EXPECT_CALL(*mock_bus_, GetObjectProxy(chunneld::kChunneldServiceName,
+                                         A<const dbus::ObjectPath&>()))
       .WillOnce(Return(mock_chunneld_service_proxy_.get()));
 
-  EXPECT_CALL(*mock_bus_, GetObjectProxy(crosdns::kCrosDnsServiceName, _))
+  EXPECT_CALL(*mock_bus_, GetObjectProxy(crosdns::kCrosDnsServiceName,
+                                         A<const dbus::ObjectPath&>()))
       .WillOnce(Return(mock_crosdns_service_proxy_.get()));
 
   EXPECT_CALL(*mock_bus_,
-              GetObjectProxy(vm_tools::concierge::kVmConciergeServiceName, _))
+              GetObjectProxy(vm_tools::concierge::kVmConciergeServiceName,
+                             A<const dbus::ObjectPath&>()))
       .WillOnce(Return(mock_concierge_service_proxy_.get()));
 
-  EXPECT_CALL(*mock_bus_, GetObjectProxy(shill::kFlimflamServiceName, _))
+  EXPECT_CALL(*mock_bus_, GetObjectProxy(shadercached::kShaderCacheServiceName,
+                                         A<const dbus::ObjectPath&>()))
+      .WillOnce(Return(mock_shadercached_proxy_.get()));
+
+  EXPECT_CALL(*mock_bus_, GetObjectProxy(shill::kFlimflamServiceName,
+                                         A<const dbus::ObjectPath&>()))
       .WillRepeatedly(Return(mock_shill_manager_proxy_.get()));
 
   EXPECT_CALL(*mock_crosdns_service_proxy_, DoWaitForServiceToBeAvailable(_))

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,18 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <optional>
 
-#include <base/optional.h>
 #include <brillo/flag_helper.h>
 #include <brillo/http/http_request.h>
 #include <brillo/http/http_transport.h>
-#include <chromeos/libipp/ipp.h>
+#include <chromeos/libipp/attribute.h>
+#include <chromeos/libipp/builder.h>
+#include <chromeos/libipp/frame.h>
+#include <chromeos/libipp/parser.h>
 
-#include "print_tools/ipp_in_json.h"
+#include "helpers.h"
+#include "ipp_in_json.h"
 
 namespace {
 
@@ -24,47 +28,6 @@ constexpr char app_info[] =
     "Get-Printer-Attributes request to given URL and parse obtained "
     "response. If no output files are specified, the obtained response "
     "is printed to stdout as formatted JSON";
-
-// Validates the protocol of `url` and modifies it if necessary. The protocols
-// ipp and ipps are converted to http and https, respectively. If the
-// conversion occurs, adds a port number if one is not specified.
-// Prints an error message to stderr and returns false in the following cases:
-// * `url` does not contain "://" substring
-// * the protocol is not one of http, https, ipp or ipps.
-// Does not verify the correctness of the given URL.
-bool ConvertIppToHttp(std::string* url) {
-  DCHECK(url);
-  auto pos = url->find("://");
-  if (pos == std::string::npos) {
-    std::cerr << "Incorrect URL: " << *url << ".\n";
-    std::cerr << "You have to set url parameter, e.g.:";
-    std::cerr << " --url=ipp://10.11.12.13/ipp/print." << std::endl;
-    return false;
-  }
-  const auto protocol = url->substr(0, pos);
-  if (protocol == "http" || protocol == "https") {
-    return true;
-  }
-  std::string default_port;
-  if (protocol == "ipp") {
-    default_port = "631";
-  } else if (protocol == "ipps") {
-    default_port = "443";
-  } else {
-    std::cerr << "Incorrect URL protocol: " << protocol << ".\n";
-    std::cerr << "Supported protocols: http, https, ipp, ipps." << std::endl;
-    return false;
-  }
-  *url = "htt" + url->substr(2);
-  pos += 4;
-  pos = url->find_first_of(":/?#", pos);
-  if (pos == std::string::npos) {
-    *url += ":" + default_port;
-  } else if ((*url)[pos] != ':') {
-    *url = url->substr(0, pos) + ":" + default_port + url->substr(pos);
-  }
-  return true;
-}
 
 // Prints information about HTTP error to stderr.
 void PrintHttpError(const std::string& msg, const brillo::ErrorPtr* err_ptr) {
@@ -87,7 +50,7 @@ void PrintHttpError(const std::string& msg, const brillo::ErrorPtr* err_ptr) {
 // Sends IPP frame (in |data| parameter) to given URL. In case of error, it
 // prints out error message to stderr and returns nullopt. Otherwise, it returns
 // the body from the response.
-base::Optional<std::vector<uint8_t>> SendIppFrameAndGetResponse(
+std::optional<std::vector<uint8_t>> SendIppFrameAndGetResponse(
     std::string url, const std::vector<uint8_t>& data) {
   using Transport = brillo::http::Transport;
   using Request = brillo::http::Request;
@@ -101,20 +64,20 @@ base::Optional<std::vector<uint8_t>> SendIppFrameAndGetResponse(
   if (!data.empty()) {
     if (!request.AddRequestBody(data.data(), data.size(), &error)) {
       PrintHttpError("cannot set request body", &error);
-      return base::nullopt;
+      return std::nullopt;
     }
   }
   // Send the request and interpret obtained response.
   std::unique_ptr<Response> response = request.GetResponseAndBlock(&error);
   if (response == nullptr) {
     PrintHttpError("exchange failed", &error);
-    return base::nullopt;
+    return std::nullopt;
   }
   if (!response->IsSuccessful()) {
     const std::string msg = "unexpected response code: " +
                             std::to_string(response->GetStatusCode());
     PrintHttpError(msg, &error);
-    return base::nullopt;
+    return std::nullopt;
   }
   return (response->ExtractData());
 }
@@ -183,7 +146,7 @@ int main(int argc, char** argv) {
     return EX_USAGE;
   }
   // Replace ipp/ipps protocol in the given URL to http/https (if needed).
-  if (!ConvertIppToHttp(&FLAGS_url)) {
+  if (!ConvertIppToHttp(FLAGS_url)) {
     return EX_USAGE;
   }
   std::cerr << "URL: " << FLAGS_url << std::endl;
@@ -200,15 +163,10 @@ int main(int argc, char** argv) {
     FLAGS_jsonf = "-";
 
   // Send IPP request and get a response.
-  ipp::Request_Get_Printer_Attributes request;
-  request.operation_attributes->printer_uri.Set(FLAGS_url);
-  ipp::Client client(version);
-  client.BuildRequestFrom(&request);
-  std::vector<uint8_t> data;
-  if (!client.WriteRequestFrameTo(&data)) {
-    std::cerr << "Error when preparing frame with IPP request." << std::endl;
-    return -1;
-  }
+  ipp::Frame request(ipp::Operation::Get_Printer_Attributes, version);
+  ipp::Collection& grp = request.Groups(ipp::GroupTag::operation_attributes)[0];
+  grp.AddAttr("printer-uri", ipp::ValueTag::uri, FLAGS_url);
+  std::vector<uint8_t> data = ipp::BuildBinaryFrame(request);
   auto data_optional = SendIppFrameAndGetResponse(FLAGS_url, data);
   if (!data_optional)
     return -2;
@@ -223,9 +181,9 @@ int main(int argc, char** argv) {
 
   // Parse the IPP response and save results.
   int return_code = 0;
-  ipp::Response_Get_Printer_Attributes response;
-  if (client.ReadResponseFrameFrom(data) &&
-      client.ParseResponseAndSaveTo(&response)) {
+  ipp::SimpleParserLog log;
+  ipp::Frame response = ipp::Parse(data.data(), data.size(), log);
+  if (!log.CriticalErrors().empty()) {
     std::cerr << "Parsing of an obtained response was not completed."
               << std::endl;
     return_code = -5;
@@ -233,7 +191,7 @@ int main(int argc, char** argv) {
   }
   if (!FLAGS_jsonc.empty()) {
     std::string json;
-    if (!ConvertToJson(response, client.GetErrorLog(), true, &json)) {
+    if (!ConvertToJson(response, log, true, &json)) {
       std::cerr << "Error when preparing a report in JSON (compressed)."
                 << std::endl;
       return -4;
@@ -244,7 +202,7 @@ int main(int argc, char** argv) {
   }
   if (!FLAGS_jsonf.empty()) {
     std::string json;
-    if (!ConvertToJson(response, client.GetErrorLog(), false, &json)) {
+    if (!ConvertToJson(response, log, false, &json)) {
       std::cerr << "Error when preparing a report in JSON (formatted)."
                 << std::endl;
       return -4;

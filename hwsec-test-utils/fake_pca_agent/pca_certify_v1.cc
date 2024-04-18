@@ -1,9 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "hwsec-test-utils/fake_pca_agent/pca_certify_v1.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -49,7 +50,7 @@ bool PcaCertifyV1::Preprocess() {
 
 bool PcaCertifyV1::Verify() {
   // Verify digest.
-  base::Optional<std::string> digest =
+  std::optional<std::string> digest =
       ParseDigestFromTpmCertifyInfo(request_.certified_key_info());
   if (!digest) {
     LOG(ERROR) << __func__ << ": Failed to parse digest from the key info.";

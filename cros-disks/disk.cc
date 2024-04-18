@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,15 +26,15 @@ std::string Disk::GetPresentationName() const {
   }
 
   switch (media_type) {
-    case DEVICE_MEDIA_USB:
+    case DeviceType::kUSB:
       return kUSBDriveName;
-    case DEVICE_MEDIA_SD:
+    case DeviceType::kSD:
       return kSDCardName;
-    case DEVICE_MEDIA_OPTICAL_DISC:
+    case DeviceType::kOpticalDisc:
       return kOpticalDiscName;
-    case DEVICE_MEDIA_MOBILE:
+    case DeviceType::kMobile:
       return kMobileDeviceName;
-    case DEVICE_MEDIA_DVD:
+    case DeviceType::kDVD:
       return kDVDName;
     default:
       return kFallbackPresentationName;

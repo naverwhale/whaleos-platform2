@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,6 @@
 
 #include <base/cancelable_callback.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/observer_list.h>
 
@@ -51,9 +50,6 @@ class InputWatcher : public InputWatcherInterface,
   // physically have one. Skipping will reduce the wasteful waking of powerd due
   // to keyboard events.
   static const char kPowerButtonToSkipForLegacy[];
-
-  // Hardware ID for ACPI lid device.
-  static const char kAcpiLidDevice[];
 
   InputWatcher();
   InputWatcher(const InputWatcher&) = delete;
@@ -102,8 +98,11 @@ class InputWatcher : public InputWatcherInterface,
   // Returns a bitfield of DeviceType values describing |device|.
   uint32_t GetDeviceTypes(const EventDeviceInterface* device) const;
 
+  // Get the input number corresponding to |device|.
+  int GetDeviceInputNumber(const EventDeviceInterface* device) const;
+
   // Flushes queued events and reads new events from |device|.
-  void OnNewEvents(EventDeviceInterface* device);
+  void OnNewEvents(int input_num, EventDeviceInterface* device);
 
   // Updates internal state and notifies observers in response to |event|.
   // |device_types| is a DeviceType bitfield describing the device from which
@@ -130,38 +129,38 @@ class InputWatcher : public InputWatcherInterface,
   // clears the vector.
   void SendQueuedEvents();
 
-  // Notifies observers about |event| if came from a lid switch or power button.
-  void NotifyObserversAboutEvent(const input_event& event);
-
   base::FilePath dev_input_path_;
   base::FilePath sys_class_input_path_;
 
   // Factories for creating EventDevice and WakeupDevice objects.
   std::unique_ptr<EventDeviceFactoryInterface> event_device_factory_;
 
-  // Event devices reporting power button events. Weak pointers to elements in
-  // |event_devices_|.
+  // Event devices reporting power button events. Unowned pointers to elements
+  // in |event_devices_|.
   std::set<const EventDeviceInterface*> power_button_devices_;
 
-  // Event devices reporting sleep button events. Weak pointers to elements in
+  // Event devices reporting sleep button events. Unowned pointers to elements in
   // |event_devices_|.
   EventDeviceInterface* sleep_button_device_ = nullptr;
 
-  // The event device exposing the lid switch. Weak pointer to an element in
+  // The event device exposing the lid switch. Unowned pointer to an element in
   // |event_devices_|, or null if no lid device was found.
   EventDeviceInterface* lid_device_ = nullptr;
 
-  // The event device exposing the tablet mode switch. Weak pointer to an
+  // The event device exposing the tablet mode switch. Unowned pointer to an
   // element in |event_devices_|, or null if no tablet mode switch device was
   // found.
   EventDeviceInterface* tablet_mode_device_ = nullptr;
 
-  // The event device reporting hover events. Weak pointer to an element in
+  // The event device reporting hover events. Unowned pointer to an element in
   // |event_devices_|, or null if no hover device was found.
   EventDeviceInterface* hover_device_ = nullptr;
 
   // Should the lid be watched for events if present?
   bool use_lid_ = true;
+
+  // If non-empty, which device name should be preferred for lid switch events.
+  std::string preferred_lid_device_;
 
   // Most-recently-seen lid state.
   LidState lid_state_ = LidState::OPEN;
@@ -198,13 +197,10 @@ class InputWatcher : public InputWatcherInterface,
 
   // Posted by QueryLidState() to run SendQueuedEvents() to notify observers
   // about |queued_events_|.
-  base::CancelableClosure send_queued_events_task_;
+  base::CancelableOnceClosure send_queued_events_task_;
 
   // Name of the power button interface to skip monitoring for input events.
   std::string power_button_to_skip_;
-
-  // ACPI lid device name.
-  std::string acpi_lid_device_;
 
   UdevInterface* udev_ = nullptr;  // non-owned
 

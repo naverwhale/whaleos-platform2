@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/resolver.h"
@@ -28,7 +27,10 @@ class MockResolver : public Resolver {
               (const std::vector<std::string>&,
                const std::vector<std::string>&),
               (override));
-  MOCK_METHOD(bool, SetDNSProxy, (const std::string&), (override));
+  MOCK_METHOD(bool,
+              SetDNSProxyAddresses,
+              (const std::vector<std::string>&),
+              (override));
   MOCK_METHOD(bool, ClearDNS, (), (override));
   MOCK_METHOD(void,
               set_ignored_search_list,

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,19 +11,11 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
-#include <base/strings/string_tokenizer.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/blkdev_utils/device_mapper_task.h>
 #include <brillo/secure_blob.h>
 
 namespace brillo {
-
-// Use a tokenizer to parse string data stored in SecureBlob.
-// The tokenizer does not store internal state so it should be
-// okay to use with SecureBlobs.
-// DO NOT USE .toker() as that leaks contents of the SecureBlob.
-using SecureBlobTokenizer =
-    base::StringTokenizerT<std::string, SecureBlob::const_iterator>;
 
 DevmapperTable::DevmapperTable(uint64_t start,
                                uint64_t size,
@@ -85,14 +77,7 @@ SecureBlob DevmapperTable::CryptGetKey() {
   if (!tokenizer.GetNext())
     return SecureBlob();
 
-  SecureBlob hex_key(tokenizer.token_begin(), tokenizer.token_end());
-
-  SecureBlob key = SecureHexToSecureBlob(hex_key);
-
-  if (key.empty()) {
-    LOG(ERROR) << "CryptExtractKey: HexStringToBytes failed";
-    return SecureBlob();
-  }
+  SecureBlob key(tokenizer.token_begin(), tokenizer.token_end());
 
   return key;
 }
@@ -110,7 +95,7 @@ SecureBlob DevmapperTable::CryptCreateParameters(
   SecureBlob parameter_parts[3];
 
   parameter_parts[0] = SecureBlob(cipher + " ");
-  parameter_parts[1] = SecureBlobToSecureHex(encryption_key);
+  parameter_parts[1] = encryption_key;
   parameter_parts[2] = SecureBlob(base::StringPrintf(
       " %d %s %d%s", iv_offset, device.value().c_str(), device_offset,
       (allow_discard ? " 1 allow_discards" : "")));
@@ -154,11 +139,16 @@ bool DeviceMapper::Setup(const std::string& name, const DevmapperTable& table) {
   return true;
 }
 
-bool DeviceMapper::Remove(const std::string& name) {
+bool DeviceMapper::Remove(const std::string& name, bool deferred) {
   auto task = dm_task_factory_.Run(DM_DEVICE_REMOVE);
 
   if (!task->SetName(name)) {
     LOG(ERROR) << "Remove: SetName failed.";
+    return false;
+  }
+
+  if (deferred && !task->SetDeferredRemove()) {
+    LOG(ERROR) << "Remove: SetDeferredRemoval failed.";
     return false;
   }
 
@@ -206,31 +196,99 @@ bool DeviceMapper::WipeTable(const std::string& name) {
 
   // Arguments for fetching dm target.
   bool ret = false;
-  uint64_t start = 0, size = 0, total_size = 0;
+  uint64_t start = 0, size = 0;
   std::string type;
   SecureBlob parameters;
 
   // Get maximum size of the device to be wiped.
   do {
     ret = size_task->GetNextTarget(&start, &size, &type, &parameters);
-    total_size = std::max(start + size, total_size);
+    // Setup wipe task.
+    auto wipe_task = dm_task_factory_.Run(DM_DEVICE_RELOAD);
+
+    if (!wipe_task->SetName(name)) {
+      LOG(ERROR) << "WipeTable: SetName failed.";
+      return false;
+    }
+
+    if (!wipe_task->AddTarget(0, size, type, parameters)) {
+      LOG(ERROR) << "WipeTable: AddTarget failed.";
+      return false;
+    }
+
+    if (!wipe_task->Run()) {
+      LOG(ERROR) << "WipeTable: RunTask failed.";
+      return false;
+    }
   } while (ret);
 
-  // Setup wipe task.
-  auto wipe_task = dm_task_factory_.Run(DM_DEVICE_RELOAD);
+  return true;
+}
 
-  if (!wipe_task->SetName(name)) {
-    LOG(ERROR) << "WipeTable: SetName failed.";
+DeviceMapperVersion DeviceMapper::GetTargetVersion(const std::string& target) {
+  auto version_task = dm_task_factory_.Run(DM_DEVICE_GET_TARGET_VERSION);
+
+  if (!version_task->SetName(target)) {
+    LOG(ERROR) << "GetTargetVersion: SetName failed.";
+    return {0, 0, 0};
+  }
+
+  if (!version_task->Run()) {
+    LOG(ERROR) << "GetTargetVersion: RunTask failed.";
+    return {0, 0, 0};
+  }
+
+  return version_task->GetVersion();
+}
+
+bool DeviceMapper::Message(const std::string& name,
+                           const std::string& message) {
+  auto task = dm_task_factory_.Run(DM_DEVICE_TARGET_MSG);
+
+  if (!task->SetName(name)) {
+    LOG(ERROR) << "Message: SetName failed.";
     return false;
   }
 
-  if (!wipe_task->AddTarget(0, total_size, "error", SecureBlob())) {
-    LOG(ERROR) << "WipeTable: AddTarget failed.";
+  if (!task->SetMessage(message)) {
+    LOG(ERROR) << "Message: SetMessage failed.";
     return false;
   }
 
-  if (!wipe_task->Run()) {
-    LOG(ERROR) << "WipeTable: RunTask failed.";
+  if (!task->Run()) {
+    LOG(ERROR) << "Message: RunTask failed.";
+    return false;
+  }
+
+  return true;
+}
+
+bool DeviceMapper::Suspend(const std::string& name) {
+  auto task = dm_task_factory_.Run(DM_DEVICE_SUSPEND);
+
+  if (!task->SetName(name)) {
+    LOG(ERROR) << "Suspend: SetName failed.";
+    return false;
+  }
+
+  if (!task->Run()) {
+    LOG(ERROR) << "Suspend: Run failed.";
+    return false;
+  }
+
+  return true;
+}
+
+bool DeviceMapper::Resume(const std::string& name) {
+  auto task = dm_task_factory_.Run(DM_DEVICE_RESUME);
+
+  if (!task->SetName(name)) {
+    LOG(ERROR) << "Resume: SetName failed.";
+    return false;
+  }
+
+  if (!task->Run()) {
+    LOG(ERROR) << "Resume: Run failed.";
     return false;
   }
 

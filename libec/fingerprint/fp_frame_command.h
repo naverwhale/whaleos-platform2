@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <base/memory/ptr_util.h>
+#include <base/time/time.h>
 #include <brillo/brillo_export.h>
 #include <brillo/secure_blob.h>
 #include "libec/ec_command.h"
@@ -53,6 +54,8 @@ class BRILLO_EXPORT FpFrameCommand
         max_read_size_(max_read_size),
         frame_data_(std::make_unique<std::vector<uint8_t>>(frame_size)) {}
   virtual bool EcCommandRun(int fd);
+  // Sleep is needed during retry. Tests might want to override this method.
+  virtual void Sleep(base::TimeDelta duration);
 
  private:
   constexpr static int kMaxRetries = 50;

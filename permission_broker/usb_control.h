@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,6 @@
 
 #include <libusb-1.0/libusb.h>
 
-#include <base/macros.h>
 #include <base/time/time.h>
 #include <brillo/dbus/dbus_object.h>
 

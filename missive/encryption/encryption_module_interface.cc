@@ -1,51 +1,34 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/encryption/encryption_module_interface.h"
 
 #include <atomic>
+#include <string_view>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
-#include <base/feature_list.h>
-#include <base/strings/string_piece.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/time/time.h>
 
 #include "missive/proto/record.pb.h"
+#include "missive/util/dynamic_flag.h"
 #include "missive/util/status.h"
 #include "missive/util/statusor.h"
 
 namespace reporting {
 
-namespace {
-
-// Temporary: enable/disable encryption.
-const base::Feature kEncryptedReportingFeature{
-    EncryptionModuleInterface::kEncryptedReporting,
-    base::FEATURE_ENABLED_BY_DEFAULT};
-
-}  // namespace
-
-// static
-const char EncryptionModuleInterface::kEncryptedReporting[] =
-    "EncryptedReporting";
-
-// static
-bool EncryptionModuleInterface::is_enabled() {
-  return base::FeatureList::IsEnabled(kEncryptedReportingFeature);
-}
-
 EncryptionModuleInterface::EncryptionModuleInterface(
-    base::TimeDelta renew_encryption_key_period)
-    : renew_encryption_key_period_(renew_encryption_key_period) {}
+    bool is_enabled, base::TimeDelta renew_encryption_key_period)
+    : DynamicFlag("encryption", is_enabled),
+      renew_encryption_key_period_(renew_encryption_key_period) {}
 
 EncryptionModuleInterface::~EncryptionModuleInterface() = default;
 
 void EncryptionModuleInterface::EncryptRecord(
-    base::StringPiece record,
+    std::string_view record,
     base::OnceCallback<void(StatusOr<EncryptedRecord>)> cb) const {
   if (!is_enabled()) {
     // Encryptor disabled.
@@ -69,7 +52,7 @@ void EncryptionModuleInterface::EncryptRecord(
 }
 
 void EncryptionModuleInterface::UpdateAsymmetricKey(
-    base::StringPiece new_public_key,
+    std::string_view new_public_key,
     PublicKeyId new_public_key_id,
     base::OnceCallback<void(Status)> response_cb) {
   UpdateAsymmetricKeyImpl(

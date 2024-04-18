@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -40,7 +40,7 @@ IPConfigDBusAdaptor::IPConfigDBusAdaptor(const scoped_refptr<dbus::Bus>& bus,
 }
 
 IPConfigDBusAdaptor::~IPConfigDBusAdaptor() {
-  dbus_object()->UnregisterAsync();
+  dbus_object()->UnregisterAndBlock();
   ipconfig_ = nullptr;
 }
 
@@ -94,7 +94,7 @@ bool IPConfigDBusAdaptor::ClearProperty(brillo::ErrorPtr* error,
 
 bool IPConfigDBusAdaptor::Remove(brillo::ErrorPtr* error) {
   SLOG(this, 2) << __func__;
-  return !Error(Error::kNotSupported).ToChromeosError(error);
+  return !Error(Error::kNotImplemented).ToChromeosError(error);
 }
 
 }  // namespace shill

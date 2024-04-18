@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 
 #include <base/containers/flat_map.h>
 #include <base/memory/weak_ptr.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 
 #include "iioservice/daemon/common_types.h"
 #include "iioservice/daemon/samples_handler_base.h"

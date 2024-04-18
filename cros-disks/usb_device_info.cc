@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,14 +18,14 @@ namespace cros_disks {
 
 // A data structure for holding information of a USB device.
 struct USBDeviceEntry {
-  DeviceMediaType media_type;
+  DeviceType media_type;
 };
 
 USBDeviceInfo::USBDeviceInfo() = default;
 
 USBDeviceInfo::~USBDeviceInfo() = default;
 
-DeviceMediaType USBDeviceInfo::GetDeviceMediaType(
+DeviceType USBDeviceInfo::GetDeviceMediaType(
     const std::string& vendor_id, const std::string& product_id) const {
   CHECK(!vendor_id.empty()) << "Invalid vendor ID";
   CHECK(!product_id.empty()) << "Invalid product ID";
@@ -35,7 +35,7 @@ DeviceMediaType USBDeviceInfo::GetDeviceMediaType(
       entries_.find(id);
   if (map_iterator != entries_.end())
     return map_iterator->second.media_type;
-  return DEVICE_MEDIA_USB;
+  return DeviceType::kUSB;
 }
 
 bool USBDeviceInfo::RetrieveFromFile(const std::string& path) {
@@ -43,7 +43,7 @@ bool USBDeviceInfo::RetrieveFromFile(const std::string& path) {
 
   FileReader reader;
   if (!reader.Open(base::FilePath(path))) {
-    LOG(ERROR) << "Cannot retrieve USB device info from " << quote(path) << "";
+    VLOG(1) << "Cannot open USB database " << quote(path);
     return false;
   }
 
@@ -72,8 +72,7 @@ bool USBDeviceInfo::GetVendorAndProductName(const std::string& ids_file,
 
   FileReader reader;
   if (!reader.Open(base::FilePath(ids_file))) {
-    LOG(ERROR) << "Cannot retrieve USB identifier database at "
-               << quote(ids_file);
+    VLOG(1) << "Cannot open USB database " << quote(ids_file);
     return false;
   }
 
@@ -112,14 +111,14 @@ bool USBDeviceInfo::GetVendorAndProductName(const std::string& ids_file,
   return found_vendor;
 }
 
-DeviceMediaType USBDeviceInfo::ConvertToDeviceMediaType(
+DeviceType USBDeviceInfo::ConvertToDeviceMediaType(
     const std::string& str) const {
   if (str == "sd") {
-    return DEVICE_MEDIA_SD;
+    return DeviceType::kSD;
   } else if (str == "mobile") {
-    return DEVICE_MEDIA_MOBILE;
+    return DeviceType::kMobile;
   } else {
-    return DEVICE_MEDIA_USB;
+    return DeviceType::kUSB;
   }
 }
 

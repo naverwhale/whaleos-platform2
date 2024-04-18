@@ -1,11 +1,14 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/vpn/vpn_service.h"
 
 #include <algorithm>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include <base/check.h>
 #include <base/check_op.h>
@@ -13,19 +16,21 @@
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
 #include <chromeos/dbus/service_constants.h>
+#include <net-base/ipv4_address.h>
 
-#include "shill/connection.h"
 #include "shill/dbus/dbus_control.h"
-#include "shill/key_value_store.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/ppp_device.h"
+#include "shill/network/network_config.h"
 #include "shill/profile.h"
-#include "shill/property_accessor.h"
-#include "shill/store_interface.h"
+#include "shill/static_ip_parameters.h"
+#include "shill/store/key_value_store.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/store_interface.h"
 #include "shill/technology.h"
 #include "shill/vpn/vpn_driver.h"
 #include "shill/vpn/vpn_provider.h"
+#include "shill/vpn/vpn_types.h"
 
 namespace shill {
 
@@ -36,15 +41,52 @@ static std::string ObjectID(const VPNService* s) {
 }
 }  // namespace Logging
 
-const char VPNService::kAutoConnNeverConnected[] = "never connected";
-const char VPNService::kAutoConnVPNAlreadyActive[] = "vpn already active";
+namespace {
+
+// WireGuardDriver used to use StaticIPConfig to store the local IP address but
+// is using a specific property now. This function is for migrating the profile
+// data, by the following two actions:
+// - Apply the IPv4 address in |static_config| to the WireGuard.IPAddress
+//   property in |driver|, if |static_config| has an IPv4 address and the
+//   WireGuard.IPAddress property is empty.
+// - Reset IPv4 address (with prefix length) in |static_config|.
+//
+// Returns whether |static_config| is updated.
+bool UpdateWireGuardDriverIPv4Address(NetworkConfig* static_config,
+                                      VPNDriver* driver) {
+  if (driver->vpn_type() != VPNType::kWireGuard) {
+    return false;
+  }
+
+  auto static_config_address = static_config->ipv4_address;
+  if (!static_config_address) {
+    return false;
+  }
+  // No matter whether the parsing result is valid or not, reset the property.
+  static_config->ipv4_address = std::nullopt;
+
+  const auto& current_addrs =
+      driver->const_args()->Lookup<std::vector<std::string>>(
+          kWireGuardIPAddress, {});
+  if (!current_addrs.empty()) {
+    return true;
+  }
+
+  const std::vector<std::string> addrs_to_set{
+      static_config_address->address().ToString()};
+  driver->args()->Set<std::vector<std::string>>(kWireGuardIPAddress,
+                                                addrs_to_set);
+  return true;
+}
+
+}  // namespace
 
 VPNService::VPNService(Manager* manager, std::unique_ptr<VPNDriver> driver)
     : Service(manager, Technology::kVPN),
       driver_(std::move(driver)),
       last_default_physical_service_online_(manager->IsOnline()) {
   if (driver_) {
-    log_name_ = "vpn_" + driver_->GetProviderType() + "_" +
+    log_name_ = "vpn_" + VPNTypeEnumToString(driver_->vpn_type()) + "_" +
                 base::NumberToString(serial_number());
   } else {
     // |driver| may be null in tests.
@@ -100,18 +142,31 @@ void VPNService::OnDriverConnected(const std::string& if_name, int if_index) {
     SetErrorDetails(Service::kErrorDetailsNone);
     return;
   }
-  if (driver_->GetProviderType() == std::string(kProviderArcVpn)) {
-    device_->SetFixedIpParams(true);
+
+  auto ipv4_props = driver_->GetIPv4Properties();
+  auto ipv6_props = driver_->GetIPv6Properties();
+
+  // Report IP type metrics. All a VPN connection, we have all IP configuration
+  // when it becomes connected, so we can report the metrics here, but this is
+  // not the case for other technologies (v4 and v6 configurations can come at
+  // different time).
+  Metrics::IPType ip_type = Metrics::kIPTypeUnknown;
+  if (ipv4_props && ipv6_props) {
+    ip_type = Metrics::kIPTypeDualStack;
+  } else if (ipv4_props) {
+    ip_type = Metrics::kIPTypeIPv4Only;
+  } else if (ipv6_props) {
+    ip_type = Metrics::kIPTypeIPv6Only;
   }
+  metrics()->SendEnumToUMA(Metrics::kMetricVpnIPType, driver_->vpn_type(),
+                           ip_type);
 
   SetState(ConnectState::kStateConfiguring);
-  ConfigureDevice();
-  SetState(ConnectState::kStateConnected);
-  SetState(ConnectState::kStateOnline);
+  ConfigureDevice(std::move(ipv4_props), std::move(ipv6_props));
 }
 
 void VPNService::OnDriverFailure(ConnectFailure failure,
-                                 const std::string& error_details) {
+                                 std::string_view error_details) {
   StopDriverConnectTimeout();
   CleanupDevice();
   SetErrorDetails(error_details);
@@ -137,7 +192,9 @@ bool VPNService::CreateDevice(const std::string& if_name, int if_index) {
   // Resets af first to avoid crashing shill in some cases. See
   // b/172228079#comment6.
   device_ = nullptr;
-  device_ = new VirtualDevice(manager(), if_name, if_index, Technology::kVPN);
+  const bool fixed_ip_params = driver_->vpn_type() == VPNType::kARC;
+  device_ = new VirtualDevice(manager(), if_name, if_index, Technology::kVPN,
+                              fixed_ip_params);
   return device_ != nullptr;
 }
 
@@ -149,7 +206,9 @@ void VPNService::CleanupDevice() {
   device_ = nullptr;
 }
 
-void VPNService::ConfigureDevice() {
+void VPNService::ConfigureDevice(
+    std::unique_ptr<IPConfig::Properties> ipv4_props,
+    std::unique_ptr<IPConfig::Properties> ipv6_props) {
   if (!device_) {
     LOG(DFATAL) << "Device not created yet.";
     return;
@@ -157,18 +216,11 @@ void VPNService::ConfigureDevice() {
 
   device_->SetEnabled(true);
   device_->SelectService(this);
-  device_->UpdateIPConfig(driver_->GetIPProperties());
+  device_->UpdateIPConfig(std::move(ipv4_props), std::move(ipv6_props));
 }
 
 std::string VPNService::GetStorageIdentifier() const {
   return storage_id_;
-}
-
-bool VPNService::IsAlwaysOnVpn(const std::string& package) const {
-  // For ArcVPN connections, the driver host is set to the package name of the
-  // Android app that is creating the VPN connection.
-  return driver_->GetProviderType() == std::string(kProviderArcVpn) &&
-         driver_->GetHost() == package;
 }
 
 // static
@@ -182,7 +234,7 @@ std::string VPNService::CreateStorageIdentifier(const KeyValueStore& args,
   }
   const auto name = args.Lookup<std::string>(kNameProperty, "");
   if (name.empty()) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidProperty,
                           "Missing VPN name.");
     return "";
   }
@@ -191,13 +243,13 @@ std::string VPNService::CreateStorageIdentifier(const KeyValueStore& args,
 }
 
 std::string VPNService::GetPhysicalTechnologyProperty(Error* error) {
-  ConnectionConstRefPtr underlying_connection = GetUnderlyingConnection();
-  if (!underlying_connection) {
+  ServiceRefPtr underlying_service = manager()->GetPrimaryPhysicalService();
+  if (!underlying_service) {
     error->Populate(Error::kOperationFailed);
     return "";
   }
 
-  return underlying_connection->technology().GetName();
+  return underlying_service->GetTechnologyName();
 }
 
 RpcIdentifier VPNService::GetDeviceRpcId(Error* error) const {
@@ -206,17 +258,6 @@ RpcIdentifier VPNService::GetDeviceRpcId(Error* error) const {
     return DBusControl::NullRpcIdentifier();
   }
   return device_->GetRpcIdentifier();
-}
-
-ConnectionConstRefPtr VPNService::GetUnderlyingConnection() const {
-  // TODO(crbug.com/941597) Policy routing should be used to enforce that VPN
-  // traffic can only exit the interface it is supposed to. The VPN driver
-  // should also be informed of changes in underlying connection.
-  ServiceRefPtr underlying_service = manager()->GetPrimaryPhysicalService();
-  if (!underlying_service) {
-    return nullptr;
-  }
-  return underlying_service->connection();
 }
 
 bool VPNService::Load(const StoreInterface* storage) {
@@ -230,6 +271,14 @@ void VPNService::MigrateDeprecatedStorage(StoreInterface* storage) {
   const std::string id = GetStorageIdentifier();
   CHECK(storage->ContainsGroup(id));
   driver_->MigrateDeprecatedStorage(storage, id);
+
+  // Can be removed after the next stepping stone version after M114. Note that
+  // a VPN service will not be saved automatically if there is no change on
+  // values, so we need to trigger a Save() on StaticIPParameters here manually.
+  if (UpdateWireGuardDriverIPv4Address(
+          mutable_static_ip_parameters()->mutable_config(), driver_.get())) {
+    mutable_static_ip_parameters()->Save(storage, id);
+  }
 }
 
 bool VPNService::Save(StoreInterface* storage) {
@@ -256,7 +305,7 @@ void VPNService::InitDriverPropertyStore() {
 
 bool VPNService::SupportsAlwaysOnVpn() {
   // ARC VPNs are not supporting always-on VPN through Shill.
-  return driver()->GetProviderType() != kProviderArcVpn;
+  return driver()->vpn_type() != VPNType::kARC;
 }
 
 void VPNService::EnableAndRetainAutoConnect() {
@@ -283,23 +332,15 @@ bool VPNService::IsAutoConnectable(const char** reason) const {
   return true;
 }
 
-std::string VPNService::GetTethering(Error* error) const {
-  ConnectionConstRefPtr underlying_connection = GetUnderlyingConnection();
-  std::string tethering;
-  if (underlying_connection) {
-    tethering = underlying_connection->tethering();
-    if (!tethering.empty()) {
-      return tethering;
-    }
-    // The underlying service may not have a Tethering property.  This is
-    // not strictly an error, so we don't print an error message.  Populating
-    // an error here just serves to propagate the lack of a property in
-    // GetProperties().
-    error->Populate(Error::kNotSupported);
-  } else {
-    error->Populate(Error::kOperationFailed);
+Service::TetheringState VPNService::GetTethering() const {
+  if (!IsConnected()) {
+    return TetheringState::kUnknown;
   }
-  return "";
+  ServiceRefPtr underlying_service = manager()->GetPrimaryPhysicalService();
+  if (!underlying_service) {
+    return TetheringState::kUnknown;
+  }
+  return underlying_service->GetTethering();
 }
 
 bool VPNService::SetNameProperty(const std::string& name, Error* error) {
@@ -327,8 +368,12 @@ bool VPNService::SetNameProperty(const std::string& name, Error* error) {
   return true;
 }
 
-void VPNService::OnBeforeSuspend(const ResultCallback& callback) {
-  driver_->OnBeforeSuspend(callback);
+VirtualDeviceRefPtr VPNService::GetVirtualDevice() const {
+  return device_;
+}
+
+void VPNService::OnBeforeSuspend(ResultCallback callback) {
+  driver_->OnBeforeSuspend(std::move(callback));
 }
 
 void VPNService::OnAfterResume() {
@@ -347,7 +392,7 @@ void VPNService::OnDefaultPhysicalServiceChanged(
   bool default_physical_service_online =
       physical_service && physical_service->IsOnline();
   const std::string physical_service_path =
-      physical_service ? physical_service->GetDBusObjectPathIdentifer() : "";
+      physical_service ? physical_service->GetDBusObjectPathIdentifier() : "";
 
   if (!last_default_physical_service_online_ &&
       default_physical_service_online) {
@@ -380,11 +425,10 @@ void VPNService::StartDriverConnectTimeout(base::TimeDelta timeout) {
   }
   LOG(INFO) << "Schedule VPN connect timeout: " << timeout.InSeconds()
             << " seconds.";
-  driver_connect_timeout_callback_.Reset(
-      Bind(&VPNService::OnDriverConnectTimeout, weak_factory_.GetWeakPtr()));
-  dispatcher()->PostDelayedTask(FROM_HERE,
-                                driver_connect_timeout_callback_.callback(),
-                                timeout.InMilliseconds());
+  driver_connect_timeout_callback_.Reset(BindOnce(
+      &VPNService::OnDriverConnectTimeout, weak_factory_.GetWeakPtr()));
+  dispatcher()->PostDelayedTask(
+      FROM_HERE, driver_connect_timeout_callback_.callback(), timeout);
 }
 
 void VPNService::StopDriverConnectTimeout() {

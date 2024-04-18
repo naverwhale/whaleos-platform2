@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include "cryptohome/cryptohome_keys_manager.h"
 
 #include <gmock/gmock.h>
+#include <libhwsec/frontend/cryptohome/mock_frontend.h>
 
 #include "cryptohome/mock_cryptohome_key_loader.h"
 
@@ -20,7 +21,6 @@ class MockCryptohomeKeysManager : public CryptohomeKeysManager {
   ~MockCryptohomeKeysManager() = default;
 
   MOCK_METHOD(void, Init, (), (override));
-  MOCK_METHOD(bool, ReloadAllCryptohomeKeys, (), (override));
   MOCK_METHOD(bool, HasAnyCryptohomeKey, (), (override));
   MOCK_METHOD(CryptohomeKeyLoader*,
               GetKeyLoader,
@@ -33,6 +33,7 @@ class MockCryptohomeKeysManager : public CryptohomeKeysManager {
   }
 
  private:
+  ::testing::NiceMock<hwsec::MockCryptohomeFrontend> hwsec_;
   ::testing::NiceMock<MockCryptohomeKeyLoader> mock_cryptohome_key_loader_;
 };
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -37,7 +37,7 @@ void DebugLogsTool::GetDebugLogs(bool is_compressed, const base::ScopedFD& fd) {
     return;
   }
 
-  LogTool log_tool(bus_);
+  LogTool log_tool(bus_, perf_logging_);
   LogTool::LogMap logs = log_tool.GetAllDebugLogs();
   for (const auto& l : logs) {
     const std::string& name = l.first;

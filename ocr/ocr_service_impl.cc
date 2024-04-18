@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,12 @@
 #include <sys/fcntl.h>
 #include <unistd.h>
 
+#include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/stringprintf.h>
@@ -50,7 +51,8 @@ void OcrServiceImpl::GenerateSearchablePdfFromImage(
     GenerateSearchablePdfFromImageCallback callback) {
   mojo_ipc::OpticalCharacterRecognitionServiceResponse response;
 
-  tesseract::TessBaseAPI* api = new tesseract::TessBaseAPI();
+  std::unique_ptr<tesseract::TessBaseAPI> api =
+      std::make_unique<tesseract::TessBaseAPI>();
   if (api->Init(kTessdataPath, ocr_config->language.c_str())) {
     LOG(ERROR) << "Could not initialize tesseract.";
     response.result = mojo_ipc::OcrResultEnum::LANGUAGE_NOT_SUPPORTED_ERROR;
@@ -106,10 +108,11 @@ void OcrServiceImpl::GenerateSearchablePdfFromImage(
   }
 
   // Perform OCR.
-  tesseract::TessPDFRenderer* renderer = new tesseract::TessPDFRenderer(
-      "stdout", api->GetDatapath(), pdf_renderer_config->textonly);
-  bool success =
-      api->ProcessPages("stdin", nullptr, ocr_config->timeout_ms, renderer);
+  std::unique_ptr<tesseract::TessPDFRenderer> renderer =
+      std::make_unique<tesseract::TessPDFRenderer>(
+          "stdout", api->GetDatapath(), pdf_renderer_config->textonly);
+  bool success = api->ProcessPages("stdin", nullptr, ocr_config->timeout_ms,
+                                   renderer.get());
   api->End();
 
   // Restore stdout.

@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -6,7 +6,13 @@ import("//common-mk/generate-dbus-adaptors.gni")
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":smbproviderd" ]
+  deps = [
+    ":install_dbus_config",
+    ":install_dbus_service",
+    ":install_init",
+    ":install_policy",
+    ":smbproviderd",
+  ]
   if (use.test) {
     deps += [ ":smbprovider_test" ]
   }
@@ -43,8 +49,6 @@ generate_dbus_adaptors("smbproviderd_adaptors") {
 
 static_library("libsmbprovider") {
   sources = [
-    "authpolicy_kerberos_artifact_client.cc",
-    "authpolicy_kerberos_artifact_client.h",
     "constants.cc",
     "constants.h",
     "copy_progress_interface.h",
@@ -61,11 +65,11 @@ static_library("libsmbprovider") {
     "iterator/pre_depth_first_iterator.cc",
     "iterator/pre_depth_first_iterator.h",
     "iterator/share_iterator.h",
+    "kerberos_artifact_client.cc",
+    "kerberos_artifact_client.h",
     "kerberos_artifact_client_interface.h",
     "kerberos_artifact_synchronizer.cc",
     "kerberos_artifact_synchronizer.h",
-    "kerberos_kerberos_artifact_client.cc",
-    "kerberos_kerberos_artifact_client.h",
     "metadata_cache.cc",
     "metadata_cache.h",
     "mount_manager.cc",
@@ -97,8 +101,31 @@ static_library("libsmbprovider") {
 executable("smbproviderd") {
   sources = [ "smbprovider_main.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "sbin"
   libs = [ "installattributes" ]
   deps = [ ":libsmbprovider" ]
+}
+
+install_config("install_dbus_config") {
+  sources = [ "etc/dbus-1/org.chromium.SmbProvider.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_dbus_service") {
+  sources = [ "org.chromium.SmbProvider.service" ]
+  install_path = "dbus_system_services"
+}
+
+install_config("install_init") {
+  sources = [ "etc/init/smbproviderd.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_policy") {
+  install_path = "seccomp_policy"
+  sources =
+      [ "seccomp_filters/smbprovider-seccomp-" + getenv("ARCH") + ".policy" ]
+  outputs = [ "smbprovider-seccomp.policy" ]
 }
 
 # Unit tests.
@@ -141,6 +168,7 @@ if (use.test) {
       "//common-mk:test",
       ":target_defaults",
     ]
+    run_test = true
     deps = [
       ":libsmbprovider",
       "//common-mk/testrunner:testrunner",

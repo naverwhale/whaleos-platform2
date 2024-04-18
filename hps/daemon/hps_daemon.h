@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,18 +9,25 @@
 #include <string>
 
 #include <brillo/daemons/dbus_daemon.h>
+
 #include <hps/daemon/dbus_adaptor.h>
+#include <hps/hps_impl.h>
 #include <hps/hps.h>
 
 namespace hps {
 
 class HpsDaemon : public brillo::DBusServiceDaemon {
  public:
-  explicit HpsDaemon(std::unique_ptr<HPS>, uint32_t poll_time_ms);
-
+  HpsDaemon(std::unique_ptr<DevInterface> dev,
+            uint32_t poll_time_ms,
+            bool skip_boot,
+            uint32_t version,
+            const base::FilePath& mcu_fw_image,
+            const base::FilePath& fpga_bitstream,
+            const base::FilePath& fpga_app_image);
   HpsDaemon(const HpsDaemon&) = delete;
   HpsDaemon& operator=(const HpsDaemon&) = delete;
-  virtual ~HpsDaemon();
+  ~HpsDaemon() override;
 
  private:
   friend class HpsDaemonTest;

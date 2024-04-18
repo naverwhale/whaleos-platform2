@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/logging.h>
 #include <base/message_loop/message_pump_type.h>
-#include <base/run_loop.h>
 #include <base/task/single_thread_task_executor.h>
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
@@ -27,12 +26,9 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  base::RunLoop run_loop;
-
-  auto service = vm_tools::concierge::Service::Create(run_loop.QuitClosure());
-  CHECK(service);
-
-  run_loop.Run();
+  vm_tools::concierge::Service service;
+  // Run the service on the main thread.
+  CHECK(service.HostBlocking());
 
   return 0;
 }

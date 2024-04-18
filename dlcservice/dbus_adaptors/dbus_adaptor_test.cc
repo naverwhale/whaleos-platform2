@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include "dlcservice/dbus_adaptors/dbus_adaptor.h"
 #include "dlcservice/dlc_service.h"
 #include "dlcservice/mock_dlc_service.h"
+#include "dlcservice/proto_utils.h"
 #include "dlcservice/test_utils.h"
 
 using base::FilePath;
@@ -37,21 +38,6 @@ class DBusServiceTest : public BaseTest {
   DBusServiceTest(const DBusServiceTest&) = delete;
   DBusServiceTest& operator=(const DBusServiceTest&) = delete;
 };
-
-TEST_F(DBusServiceTest, InstallDlc) {
-  EXPECT_CALL(*dlc_service_, Install(kFirstDlc, "", &err_))
-      .WillOnce(Return(true));
-
-  EXPECT_TRUE(dbus_service_->InstallDlc(&err_, kFirstDlc));
-}
-
-TEST_F(DBusServiceTest, InstallWithOmahaUrl) {
-  EXPECT_CALL(*dlc_service_, Install(kFirstDlc, kDefaultOmahaUrl, &err_))
-      .WillOnce(Return(true));
-
-  EXPECT_TRUE(
-      dbus_service_->InstallWithOmahaUrl(&err_, kFirstDlc, kDefaultOmahaUrl));
-}
 
 TEST_F(DBusServiceTest, GetInstalled) {
   EXPECT_CALL(*dlc_service_, GetInstalled())

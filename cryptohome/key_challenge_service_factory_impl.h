@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,9 +27,13 @@ class KeyChallengeServiceFactoryImpl final : public KeyChallengeServiceFactory {
       const KeyChallengeServiceFactoryImpl&) = delete;
   ~KeyChallengeServiceFactoryImpl() override;
 
+  void SetMountThreadBus(scoped_refptr<::dbus::Bus> bus) override;
+
   std::unique_ptr<KeyChallengeService> New(
-      scoped_refptr<::dbus::Bus> bus,
       const std::string& key_delegate_dbus_service_name) override;
+
+ private:
+  scoped_refptr<::dbus::Bus> mount_thread_bus_;
 };
 
 }  // namespace cryptohome

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,11 @@
 
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/values.h>
 
-#include "diagnostics/cros_healthd/routines/diag_routine.h"
-#include "mojo/cros_healthd_diagnostics.mojom.h"
+#include "diagnostics/cros_healthd/routines/diag_routine_with_status.h"
+#include "diagnostics/mojom/public/cros_healthd_diagnostics.mojom.h"
 
 namespace diagnostics {
 
@@ -30,22 +30,24 @@ namespace diagnostics {
 // (Implementation file)
 // void DoRoutineWork(
 //   Params params,
-//   chromeos::cros_healthd::mojom::DiagnosticRoutineStatusEnum* status,
-//   std::string* status_message,
-//   base::Value* output_dict) {
+//   SimpleRoutine::RoutineResultCallback callback) {
 //     // Routine-specific logic goes here.
+//     // Invoke |callback| with the result of routine once the work is done.
 // }
 //
 // std::unique_ptr<DiagnosticRoutine> CreateNewSimpleRoutine(Params params) {
 //   return std::make_unique<SimpleRoutine>(
 //       base::BindOnce(&DoRoutineWork, Params));
 // }
-class SimpleRoutine final : public DiagnosticRoutine {
+class SimpleRoutine final : public DiagnosticRoutineWithStatus {
  public:
-  using Task = base::OnceCallback<void(
-      chromeos::cros_healthd::mojom::DiagnosticRoutineStatusEnum* status,
-      std::string* status_message,
-      base::Value* output_dict)>;
+  struct RoutineResult {
+    ash::cros_healthd::mojom::DiagnosticRoutineStatusEnum status;
+    std::string status_message;
+    base::Value::Dict output_dict;
+  };
+  using RoutineResultCallback = base::OnceCallback<void(RoutineResult)>;
+  using Task = base::OnceCallback<void(RoutineResultCallback)>;
 
   explicit SimpleRoutine(Task task);
   SimpleRoutine(const SimpleRoutine&) = delete;
@@ -56,19 +58,19 @@ class SimpleRoutine final : public DiagnosticRoutine {
   void Start() override;
   void Resume() override;
   void Cancel() override;
-  void PopulateStatusUpdate(
-      chromeos::cros_healthd::mojom::RoutineUpdate* response,
-      bool include_output) override;
-  chromeos::cros_healthd::mojom::DiagnosticRoutineStatusEnum GetStatus()
-      override;
+  void PopulateStatusUpdate(ash::cros_healthd::mojom::RoutineUpdate* response,
+                            bool include_output) override;
 
  private:
+  void StoreRoutineResult(RoutineResult result);
+
   // Task encapsulating the logic of the routine to run.
   Task task_;
 
-  chromeos::cros_healthd::mojom::DiagnosticRoutineStatusEnum status_;
-  std::string status_message_;
-  base::Value output_dict_{base::Value::Type::DICTIONARY};
+  base::Value::Dict output_dict_;
+
+  // Must be the last class member.
+  base::WeakPtrFactory<SimpleRoutine> weak_ptr_factory_{this};
 };
 
 }  // namespace diagnostics

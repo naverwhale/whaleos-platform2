@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/cellular/mm1_modem_proxy_interface.h"
@@ -25,49 +24,41 @@ class MockModemProxy : public ModemProxyInterface {
   ~MockModemProxy() override;
 
   // Inherited methods from ModemProxyInterface.
-  MOCK_METHOD(void,
-              Enable,
-              (bool, Error*, const ResultCallback&, int),
-              (override));
+  MOCK_METHOD(void, Enable, (bool, ResultCallback, int), (override));
   MOCK_METHOD(void,
               CreateBearer,
-              (const KeyValueStore&, Error*, const RpcIdentifierCallback&, int),
+              (const KeyValueStore&, RpcIdentifierCallback, int),
               (override));
   MOCK_METHOD(void,
               DeleteBearer,
-              (const RpcIdentifier&, Error*, const ResultCallback&, int),
+              (const RpcIdentifier&, ResultCallback, int),
               (override));
-  MOCK_METHOD(void, Reset, (Error*, const ResultCallback&, int), (override));
+  MOCK_METHOD(void, Reset, (ResultCallback, int), (override));
   MOCK_METHOD(void,
               FactoryReset,
-              (const std::string&, Error*, const ResultCallback&, int),
+              (const std::string&, ResultCallback, int),
               (override));
   MOCK_METHOD(void,
               SetCurrentCapabilities,
-              (uint32_t, Error*, const ResultCallback&, int),
+              (uint32_t, ResultCallback, int),
               (override));
   MOCK_METHOD(void,
               SetCurrentModes,
-              (uint32_t, uint32_t, Error*, const ResultCallback&, int),
+              (uint32_t, uint32_t, ResultCallback, int),
               (override));
-  MOCK_METHOD(
-      void,
-      SetCurrentBands,
-      (const std::vector<uint32_t>&, Error*, const ResultCallback&, int),
-      (override));
+  MOCK_METHOD(void,
+              SetCurrentBands,
+              (const std::vector<uint32_t>&, ResultCallback, int),
+              (override));
   MOCK_METHOD(void,
               SetPrimarySimSlot,
-              (uint32_t, const ResultCallback&, int),
+              (uint32_t, ResultCallback, int),
               (override));
-  MOCK_METHOD(
-      void,
-      Command,
-      (const std::string&, uint32_t, Error*, const StringCallback&, int),
-      (override));
   MOCK_METHOD(void,
-              SetPowerState,
-              (uint32_t, Error*, const ResultCallback&, int),
+              Command,
+              (const std::string&, uint32_t, StringCallback, int),
               (override));
+  MOCK_METHOD(void, SetPowerState, (uint32_t, ResultCallback, int), (override));
   MOCK_METHOD(void,
               set_state_changed_callback,
               (const ModemStateChangedSignalCallback&),

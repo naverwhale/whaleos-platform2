@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DLCSERVICE_MOCK_DLC_SERVICE_H_
 #define DLCSERVICE_MOCK_DLC_SERVICE_H_
 
+#include <memory>
 #include <string>
 
 #include "dlcservice/dlc_service.h"
@@ -16,22 +17,23 @@ class MockDlcService : public DlcServiceInterface {
   MockDlcService() = default;
 
   MOCK_METHOD(void, Initialize, (), (override));
-  MOCK_METHOD(bool,
+  MOCK_METHOD(void,
               Install,
-              (const DlcId&, const std::string&, brillo::ErrorPtr*),
+              (const InstallRequest&,
+               std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<>>),
               (override));
   MOCK_METHOD(bool,
               Uninstall,
               (const std::string& id, brillo::ErrorPtr* err),
               (override));
   MOCK_METHOD(bool,
-              Purge,
+              Deploy,
               (const std::string& id, brillo::ErrorPtr* err),
               (override));
   MOCK_METHOD(DlcIdList, GetInstalled, (), (override));
   MOCK_METHOD(DlcIdList, GetExistingDlcs, (), (override));
   MOCK_METHOD(DlcIdList, GetDlcsToUpdate, (), (override));
-  MOCK_METHOD((const DlcBase*),
+  MOCK_METHOD((DlcBase*),
               GetDlc,
               (const DlcId& id, brillo::ErrorPtr* err),
               (override));

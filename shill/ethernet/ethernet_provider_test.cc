@@ -1,20 +1,20 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ethernet/ethernet_provider.h"
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/memory/ref_counted.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "shill/ethernet/mock_ethernet.h"
-#include "shill/key_value_store.h"
 #include "shill/mock_control.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
 #include "shill/mock_profile.h"
+#include "shill/store/key_value_store.h"
 #include "shill/test_event_dispatcher.h"
 
 using testing::_;

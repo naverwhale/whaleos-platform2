@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,15 @@ option cc_enable_arenas = true;
 // This file defines services that will be running in the guest container that
 // will be used by the host.
 package vm_tools.container;
+
+option go_package = "chromiumos/vm_tools/container_proto";
+
+enum ContainerFeature {
+  UNKNOWN = 0;
+  ENABLE_GTK3_IME_SUPPORT = 1;
+  ENABLE_VIRTUAL_KEYBOARD_SUPPORT = 2;
+  ENABLE_QT_IME_SUPPORT = 3;
+}
 
 // Request protobuf for launching an application in the container.
 message LaunchApplicationRequest {
@@ -31,6 +40,9 @@ message LaunchApplicationRequest {
 
   // Display scaling requested.
   DisplayScaling display_scaling = 3;
+
+  // Features to enable in the container.
+  repeated ContainerFeature container_features = 4;
 }
 
 // Response protobuf for launching an application.
@@ -58,10 +70,18 @@ message IconRequest {
 
 // One desktop file ID and the icon found for it.
 message DesktopIcon {
+  enum Format {
+    PNG = 0;
+    SVG = 1;
+  }
+
   string desktop_file_id = 1;
 
-  // Icon data in png format.
+  // Icon data as uninterpreted bytes.
   bytes icon = 2;
+
+  // Interpretation hint for icon bytes
+  Format format = 3;
 }
 
 // Response proto for getting an application icon.
@@ -73,6 +93,9 @@ message IconResponse {
 message LaunchVshdRequest {
   // The host port for vshd to connect to.
   uint32 port = 1;
+
+  // Features to enable in the container.
+  repeated ContainerFeature container_features = 2;
 }
 
 // Response protobuf for launching a vshd instance.
@@ -319,6 +342,32 @@ message RemoveFileWatchResponse {
   string failure_reason = 2;
 }
 
+// Request to get session info from Garcon.
+message GetGarconSessionInfoRequest {}
+
+message GetGarconSessionInfoResponse {
+  enum Status {
+    UNKNOWN = 0;
+    FAILED = 1;
+    SUCCEEDED = 2;
+  }
+
+  // Status.
+  Status status = 1;
+
+  // Failure reason if gathering info failed.
+  string failure_reason = 2;
+
+  // The username of garcon is running as.
+  string container_username = 3;
+
+  // The home directory of the user garcon is running as.
+  string container_homedir = 4;
+
+  // The vsock port that sftp-server runs on.
+  uint32 sftp_vsock_port = 5;
+}
+
 // Implemented by garcon inside of the container.
 service Garcon {
   // Called to launch an application in a container.
@@ -365,4 +414,8 @@ service Garcon {
 
   // Stop watching files in the specified directory.
   rpc RemoveFileWatch(RemoveFileWatchRequest) returns (RemoveFileWatchResponse);
+
+  // Requests Garcon to send information about the current session
+  rpc GetGarconSessionInfo(GetGarconSessionInfoRequest)
+      returns (GetGarconSessionInfoResponse);
 }

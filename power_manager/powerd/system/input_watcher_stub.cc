@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,15 +8,7 @@
 
 #include <base/check.h>
 
-namespace power_manager {
-namespace system {
-
-InputWatcherStub::InputWatcherStub()
-    : lid_state_(LidState::OPEN),
-      tablet_mode_(TabletMode::UNSUPPORTED),
-      usb_input_device_connected_(true) {}
-
-InputWatcherStub::~InputWatcherStub() {}
+namespace power_manager::system {
 
 void InputWatcherStub::NotifyObserversAboutLidState() {
   for (InputObserver& observer : observers_)
@@ -60,5 +52,4 @@ bool InputWatcherStub::IsUSBInputDeviceConnected() const {
   return usb_input_device_connected_;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

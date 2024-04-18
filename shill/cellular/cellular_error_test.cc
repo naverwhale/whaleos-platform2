@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,10 +19,37 @@ const char kErrorSimPinMM1[] =
 const char kErrorSimPukMM1[] =
     "org.freedesktop.ModemManager1.Error.MobileEquipment.SimPuk";
 
-const char kErrorGprsNotSubscribedMM1[] =
+const char kErrorNotSubscribedMM1[] =
     "org.freedesktop.ModemManager1.Error.MobileEquipment."
-    "GprsServiceOptionNotSubscribed";
+    "ServiceOptionNotSubscribed";
 
+const char kErrorMissingOrUnknownApnMM1[] =
+    "org.freedesktop.ModemManager1.Error.MobileEquipment."
+    "MissingOrUnknownApn";
+
+const char kErrorUserAuthenticationFailedMM1[] =
+    "org.freedesktop.ModemManager1.Error.MobileEquipment."
+    "UserAuthenticationFailed";
+
+const char kErrorIpv4OnlyAllowedMM1[] =
+    "org.freedesktop.ModemManager1.Error.MobileEquipment."
+    "Ipv4OnlyAllowed";
+
+const char kErrorIpv6OnlyAllowedMM1[] =
+    "org.freedesktop.ModemManager1.Error.MobileEquipment."
+    "Ipv6OnlyAllowed";
+
+const char kErrorIpv4v6OnlyAllowedMM1[] =
+    "org.freedesktop.ModemManager1.Error.MobileEquipment."
+    "Ipv4v6OnlyAllowed";
+
+const char kErrorNoCellsInArea[] =
+    "org.freedesktop.ModemManager1.Error.MobileEquipment."
+    "NoCellsInArea";
+
+const char kErrorUnknownMM1[] =
+    "org.freedesktop.ModemManager1.Error.MobileEquipment."
+    "Unknown";
 const char kErrorWrongStateMM1[] =
     "org.freedesktop.ModemManager1.Error.Core.WrongState";
 
@@ -41,24 +68,38 @@ class CellularErrorMM1Test : public testing::TestWithParam<TestParam> {};
 TEST_P(CellularErrorMM1Test, FromDBusError) {
   TestParam param = GetParam();
 
+  brillo::ErrorPtr detailed_dbus_error;
+
   brillo::ErrorPtr dbus_error =
       brillo::Error::Create(FROM_HERE, brillo::errors::dbus::kDomain,
                             param.dbus_error, kErrorMessage);
   Error shill_error;
   CellularError::FromMM1ChromeosDBusError(dbus_error.get(), &shill_error);
+
   EXPECT_EQ(param.error_type, shill_error.type());
+
+  shill_error.ToDetailedError(&detailed_dbus_error);
+
+  EXPECT_EQ(param.dbus_error, detailed_dbus_error->GetCode());
 }
 
 INSTANTIATE_TEST_SUITE_P(
     CellularErrorMM1Test,
     CellularErrorMM1Test,
-    testing::Values(TestParam(kErrorIncorrectPasswordMM1, Error::kIncorrectPin),
-                    TestParam(kErrorSimPinMM1, Error::kPinRequired),
-                    TestParam(kErrorSimPukMM1, Error::kPinBlocked),
-                    TestParam(kErrorGprsNotSubscribedMM1, Error::kInvalidApn),
-                    TestParam(kErrorWrongStateMM1, Error::kWrongState),
-                    TestParam("Some random error name.",
-                              Error::kOperationFailed)));
+    testing::Values(
+        TestParam(kErrorIncorrectPasswordMM1, Error::kIncorrectPin),
+        TestParam(kErrorSimPinMM1, Error::kPinRequired),
+        TestParam(kErrorSimPukMM1, Error::kPinBlocked),
+        TestParam(kErrorIpv4OnlyAllowedMM1, Error::kInvalidApn),
+        TestParam(kErrorIpv6OnlyAllowedMM1, Error::kInvalidApn),
+        TestParam(kErrorIpv4v6OnlyAllowedMM1, Error::kInvalidApn),
+        TestParam(kErrorNotSubscribedMM1, Error::kInvalidApn),
+        TestParam(kErrorMissingOrUnknownApnMM1, Error::kInvalidApn),
+        TestParam(kErrorUserAuthenticationFailedMM1, Error::kInvalidApn),
+        TestParam(kErrorNoCellsInArea, Error::kNoCarrier),
+        TestParam(kErrorUnknownMM1, Error::kInternalError),
+        TestParam(kErrorWrongStateMM1, Error::kWrongState),
+        TestParam("Some random error name.", Error::kOperationFailed)));
 
 }  // namespace
 }  // namespace shill

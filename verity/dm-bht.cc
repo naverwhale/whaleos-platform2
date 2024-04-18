@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010 The Chromium OS Authors <chromium-os-dev@chromium.org>
+ * Copyright 2010 The ChromiumOS Authors <chromium-os-dev@chromium.org>
  *
  * Device-Mapper block hash tree interface.
  * See Documentation/device-mapper/dm-bht.txt for details.
@@ -7,6 +7,7 @@
  * This file is released under the GPL.
  */
 
+#include <inttypes.h>
 #include <limits.h>
 #include <string.h>
 
@@ -27,14 +28,6 @@
 #include "verity/dm-bht.h"
 
 #define DM_MSG_PREFIX "dm bht"
-
-/* For sector formatting. */
-#if defined(_LP64) || defined(__LP64__) || __BITS_PER_LONG == 64
-#define __PRIS_PREFIX "z"
-#else
-#define __PRIS_PREFIX "ll"
-#endif
-#define PRIu64 __PRIS_PREFIX "u"
 
 #define DIV_ROUND_UP(n, d) (((n) + (d)-1) / (d))
 
@@ -159,6 +152,8 @@ int dm_bht_create(struct dm_bht* bht,
 
   if (std::string(alg_name) != kSha256HashName) {
     status = -EINVAL;
+    LOG(ERROR) << "Unsupported hashing algorithm: " << alg_name << "; only "
+               << kSha256HashName << " is supported";
     goto bad_hash_alg;
   }
 
@@ -205,7 +200,9 @@ int dm_bht_create(struct dm_bht* bht,
     goto bad_node_count;
   }
 
-  bht->depth = DIV_ROUND_UP(fls(block_count - 1), bht->node_count_shift);
+  // Special handle only for single block_count.
+  bht->depth =
+      DIV_ROUND_UP(fls(std::max(block_count, 2U) - 1), bht->node_count_shift);
   DLOG(INFO) << "Setting depth to " << bht->depth;
 
   /* Ensure that we can safely shift by this value. */
@@ -232,8 +229,9 @@ int dm_bht_create(struct dm_bht* bht,
   bht->read_cb = &dm_bht_read_callback_stub;
 
   status = dm_bht_initialize_entries(bht);
-  if (status)
+  if (status) {
     goto bad_entries_alloc;
+  }
 
   /* We compute depth such that there is only be 1 block at level 0. */
   CHECK_EQ(bht->levels[0].count, 1);
@@ -268,9 +266,8 @@ int dm_bht_initialize_entries(struct dm_bht* bht) {
    * independently from the bht data structures.  Logically, the root is
    * depth=-1 and the block layer level is depth=bht->depth
    */
-  unsigned int last_index =
+  uint64_t last_index =
       base::bits::AlignUp(bht->block_count, bht->node_count) - 1;
-  unsigned int total_entries = 0;
   struct dm_bht_level* level = NULL;
   int depth;
 
@@ -278,8 +275,8 @@ int dm_bht_initialize_entries(struct dm_bht* bht) {
    * on allocation or sector calculation.
    */
   if (((last_index >> bht->node_count_shift) + 1) >
-      UINT_MAX / std::max((unsigned int)sizeof(struct dm_bht_entry),
-                          (unsigned int)to_sector(PAGE_SIZE))) {
+      UINT_MAX / std::max((uint64_t)sizeof(struct dm_bht_entry),
+                          (uint64_t)to_sector(PAGE_SIZE))) {
     LOG(ERROR) << "required entries " << last_index + 1 << " is too large.";
     return -EINVAL;
   }
@@ -305,7 +302,6 @@ int dm_bht_initialize_entries(struct dm_bht* bht) {
       /* let the caller clean up the mess */
       return -ENOMEM;
     }
-    total_entries += level->count;
     level->sector = bht->sectors;
     /* number of sectors per entry * entries at this level */
     bht->sectors += level->count * to_sector(PAGE_SIZE);
@@ -756,6 +752,49 @@ int dm_bht_salt(struct dm_bht* bht, char* hexsalt) {
   dm_bht_bin_to_hex(bht->salt, reinterpret_cast<uint8_t*>(hexsalt),
                     sizeof(bht->salt));
   return 0;
+}
+
+DmBht::~DmBht() {
+  if (dm_bht_ptr_) {
+    dm_bht_destroy(dm_bht_ptr_.get());
+  }
+}
+
+int DmBht::Create(unsigned int blocksize, std::string alg) {
+  dm_bht_ptr_ = std::make_unique<struct dm_bht>();
+  return dm_bht_create(dm_bht_ptr_.get(), blocksize, alg.c_str());
+}
+
+void DmBht::SetReadCallback(dm_bht_callback callback) {
+  dm_bht_set_read_cb(dm_bht_ptr_.get(), callback);
+}
+
+void DmBht::SetSalt(std::string hexsalt) {
+  dm_bht_set_salt(dm_bht_ptr_.get(), hexsalt.c_str());
+}
+
+void DmBht::SetBuffer(void* buffer) {
+  dm_bht_set_buffer(dm_bht_ptr_.get(), buffer);
+}
+
+sector_t DmBht::Sectors() {
+  return dm_bht_sectors(dm_bht_ptr_.get());
+}
+
+unsigned int DmBht::DigestSize() {
+  return dm_bht_ptr_->digest_size;
+}
+
+int DmBht::StoreBlock(unsigned int block, uint8_t* block_data) {
+  return dm_bht_store_block(dm_bht_ptr_.get(), block, block_data);
+}
+
+int DmBht::Compute() {
+  return dm_bht_compute(dm_bht_ptr_.get());
+}
+
+void DmBht::HexDigest(uint8_t* hexdigest, int available) {
+  dm_bht_root_hexdigest(dm_bht_ptr_.get(), hexdigest, available);
 }
 
 }  // namespace verity

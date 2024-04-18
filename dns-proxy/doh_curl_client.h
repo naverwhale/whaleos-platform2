@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/callback.h>
 #include <base/time/time.h>
 
 namespace dns_proxy {
@@ -34,35 +35,25 @@ class DoHCurlClientInterface {
   };
 
   // Callback to be invoked back to the client upon request completion.
-  // |ctx| is an argument passed by the caller of `Resolve(...)` and passed
-  // back to the caller as-is through this callback. |ctx| is owned by the
-  // caller of `Resolve(...)` and the caller is responsible of its lifecycle.
-  // DoHCurlClient does not own |ctx| and must not interact with |ctx|.
-  // back to the caller as-is through this callback.
   // |res| stores the CURL result code, HTTP code, retry delay of the CURL
   // query.
   // |msg| and |len| respectively stores the response and length of the
   // response of the CURL query.
   using QueryCallback = base::RepeatingCallback<void(
-      void* ctx, const CurlResult& res, unsigned char* msg, size_t len)>;
+      const CurlResult& res, unsigned char* msg, size_t len)>;
 
   virtual ~DoHCurlClientInterface() = default;
 
   // Resolve DNS address through DNS-over-HTTPS using DNS query |msg| of size
-  // |len|. |callback| will be called with |ctx| as its parameter upon query
-  // completion. `SetNameServers(...)` and SetDoHProviders(...)` must be called
-  // before calling this function.
-  // |msg| and |ctx| is owned by the caller of this function. The caller is
-  // responsible for their lifecycle.
+  // |len| using |name_servers| and |doh_providers|.
+  // |callback| will be called upon query completion.
+  // |msg| is owned by the caller of this function. The caller is responsible
+  // for their lifecycle.
   virtual bool Resolve(const char* msg,
                        int len,
                        const QueryCallback& callback,
-                       void* ctx) = 0;
-
-  // Set standard DNS and DoH servers for running `Resolve(...)`.
-  virtual void SetNameServers(const std::vector<std::string>& name_servers) = 0;
-  virtual void SetDoHProviders(
-      const std::vector<std::string>& doh_providers) = 0;
+                       const std::vector<std::string>& name_servers,
+                       const std::string& doh_provider) = 0;
 };
 
 // DoHCurlClient receives a wire-format DNS query and re-send it using secure
@@ -72,26 +63,25 @@ class DoHCurlClientInterface {
 // response OR the last failing response.
 class DoHCurlClient : public DoHCurlClientInterface {
  public:
-  DoHCurlClient(base::TimeDelta timeout, int max_concurrent_queries);
   explicit DoHCurlClient(base::TimeDelta timeout);
   DoHCurlClient(const DoHCurlClient&) = delete;
   DoHCurlClient& operator=(const DoHCurlClient&) = delete;
   virtual ~DoHCurlClient();
 
   // Resolve DNS address through DNS-over-HTTPS using DNS query |msg| of size
-  // |len|. |callback| will be called with |ctx| as its parameter upon query
-  // completion. `SetNameServers(...)` and SetDoHProviders(...)` must be called
-  // before calling this function.
-  // |msg| and |ctx| is owned by the caller of this function. The caller is
-  // responsible for their lifecycle.
+  // |len| using |name_servers| and |doh_providers|.
+  // |callback| will be called upon query completion.
+  // |msg| is owned by the caller of this function. The caller is responsible
+  // for their lifecycle.
+  // |name_servers| must contain one or more valid IPv4 or IPv6 addresses string
+  // such as "8.8.8.8" or "2001:4860:4860::8888".
+  // |doh_providers| must contain one or more valid DoH providers string (HTTPS
+  // endpoint) such as "https://dns.google/dns-query".
   bool Resolve(const char* msg,
                int len,
                const DoHCurlClientInterface::QueryCallback& callback,
-               void* ctx) override;
-
-  // Set standard DNS and DoH servers for running `Resolve(...)`.
-  void SetNameServers(const std::vector<std::string>& name_servers) override;
-  void SetDoHProviders(const std::vector<std::string>& doh_providers) override;
+               const std::vector<std::string>& name_servers,
+               const std::string& doh_provider) override;
 
   // Returns a weak pointer to ensure that callbacks don't run after this class
   // is destroyed.
@@ -102,7 +92,7 @@ class DoHCurlClient : public DoHCurlClientInterface {
  private:
   // State of an individual query.
   struct State {
-    State(CURL* curl, const QueryCallback& callback, void* ctx, int request_id);
+    State(CURL* curl, const QueryCallback& callback);
     ~State();
 
     // Fetch the necessary response and run |callback|.
@@ -120,22 +110,12 @@ class DoHCurlClient : public DoHCurlClientInterface {
     // Stores the header response.
     std::vector<std::string> header;
 
-    // |callback| given from the client will be called with |ctx| as its
-    // parameter. |ctx| is owned by the caller of `Resolve(...)` and will
-    // be returned to the caller as-is through the parameter of |callback|.
-    // |ctx| is owned by the caller of `Resolve(...)` and must not be changed
-    // here.
+    // |callback| to be invoked back to the client upon request completion.
     QueryCallback callback;
-    void* ctx;
 
     // |header_list| is owned by this struct. It is stored here in order to
     // free it when the request is done.
     curl_slist* header_list;
-
-    // Upon calling resolve, all available DoH providers will be queried
-    // concurrently. |request_id| is an identifier shared by the queries made
-    // for a single `Resolve(...)` call.
-    int request_id;
   };
 
   // Initialize CURL handle to resolve wire-format data |data| of length |len|.
@@ -147,7 +127,7 @@ class DoHCurlClient : public DoHCurlClientInterface {
                                   const char* msg,
                                   int len,
                                   const QueryCallback& callback,
-                                  void* ctx);
+                                  const std::vector<std::string>& name_servers);
 
   // Callback informed about what to wait for. When called, register or remove
   // the socket given from watchers.
@@ -199,7 +179,12 @@ class DoHCurlClient : public DoHCurlClientInterface {
   //
   // |userp| is owned by DoHCurlClient and should be cleaned properly upon
   // query completion.
-  static int TimerCallback(CURLM* multi, long timeout_ms, void* userp);
+  //
+  // This method is directly passed to CURL as a pointer / void data with long
+  // as the expected parameter. Don't change the data type (b/278499652).
+  static int TimerCallback(CURLM* multi,
+                           long timeout_ms,  // NOLINT(runtime/int)
+                           void* userp);
 
   // Methods to update CURL socket watchers for asynchronous CURL events.
   // When an action is observed, `CheckMultiInfo()` will be called.
@@ -236,26 +221,8 @@ class DoHCurlClient : public DoHCurlClientInterface {
            std::unique_ptr<base::FileDescriptorWatcher::Controller>>
       write_watchers_;
 
-  // |name_servers_| to resolve |doh_providers_| address.
-  std::string name_servers_;
-
-  // |doh_providers_| to resolve domain name using DoH.
-  std::vector<std::string> doh_providers_;
-
-  // Maximum number of DoH providers to be queried concurrently.
-  int max_concurrent_queries_;
-
   // Current query's states keyed by it's CURL handle.
   std::map<CURL*, std::unique_ptr<State>> states_;
-
-  // Upon calling resolve, all available DoH providers will be queried
-  // concurrently. |requests_| stores these queries together keyed by their
-  // unique identifier.
-  std::map<int, std::set<State*>> requests_;
-
-  // Stores ID of a request. |next_request_id| will be incremented for each
-  // resolve call to keep the unique value.
-  int next_request_id_;
 
   // CURL multi handle to do asynchronous requests.
   CURLM* curlm_;

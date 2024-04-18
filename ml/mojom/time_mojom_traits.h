@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,8 +24,7 @@ struct StructTraits<mojo_base::mojom::TimeDataView, base::Time> {
   }
 
   static bool Read(mojo_base::mojom::TimeDataView data, base::Time* time) {
-    *time =
-        base::Time() + base::TimeDelta::FromMicroseconds(data.internal_value());
+    *time = base::Time() + base::Microseconds(data.internal_value());
     return true;
   }
 };
@@ -38,7 +37,7 @@ struct StructTraits<mojo_base::mojom::TimeDeltaDataView, base::TimeDelta> {
 
   static bool Read(mojo_base::mojom::TimeDeltaDataView data,
                    base::TimeDelta* delta) {
-    *delta = base::TimeDelta::FromMicroseconds(data.microseconds());
+    *delta = base::Microseconds(data.microseconds());
     return true;
   }
 };

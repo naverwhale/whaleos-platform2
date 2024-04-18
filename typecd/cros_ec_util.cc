@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,7 @@ namespace {
 
 constexpr char kECInventoryFeatureRegex[] = R"((\d+)\ +:\ +[\S\ ]+)";
 constexpr int kAPModeEntryFeatureNumber = 42;
-constexpr uint32_t kTypeCControlWaitMs = 20;
+constexpr uint32_t kTypeCControlWaitMs = 200;
 
 bool CheckInventoryForModeEntry(const std::string& inventory) {
   for (const auto& line : base::SplitString(
@@ -43,15 +43,14 @@ CrosECUtil::CrosECUtil(scoped_refptr<dbus::Bus> bus)
 bool CrosECUtil::ModeEntrySupported() {
   std::string inventory;
   brillo::ErrorPtr error;
-  int retries = 20;
+  int retries = 40;
 
   while (retries--) {
     if (debugd_proxy_->EcGetInventory(&inventory, &error))
       return CheckInventoryForModeEntry(inventory);
 
     LOG(INFO) << "Inventory attempts remaining: " << retries;
-    base::PlatformThread::Sleep(
-        base::TimeDelta::FromMilliseconds(kTypeCControlWaitMs));
+    base::PlatformThread::Sleep(base::Milliseconds(kTypeCControlWaitMs));
   }
 
   LOG(ERROR) << "Failed to call D-Bus GetInventory: " << error->GetMessage();
@@ -69,8 +68,7 @@ bool CrosECUtil::EnterMode(int port, TypeCMode mode) {
       return true;
 
     LOG(INFO) << "Enter mode attempts remaining: " << retries;
-    base::PlatformThread::Sleep(
-        base::TimeDelta::FromMilliseconds(kTypeCControlWaitMs));
+    base::PlatformThread::Sleep(base::Milliseconds(kTypeCControlWaitMs));
   }
 
   LOG(ERROR) << "Failed to call D-Bus TypeCEnterMode: " << error->GetMessage();
@@ -88,13 +86,32 @@ bool CrosECUtil::ExitMode(int port) {
       return true;
 
     LOG(INFO) << "Exit mode attempts remaining: " << retries;
-    base::PlatformThread::Sleep(
-        base::TimeDelta::FromMilliseconds(kTypeCControlWaitMs));
+    base::PlatformThread::Sleep(base::Milliseconds(kTypeCControlWaitMs));
   }
 
   LOG(ERROR) << "Failed to call D-Bus TypeCExitMode: " << error->GetMessage();
 
   return false;
+}
+
+bool CrosECUtil::DpState(int port, bool* entered) {
+  if (!entered) {
+    LOG(ERROR) << "Invalid pointer provided for DpState.";
+    return false;
+  }
+
+  brillo::ErrorPtr error;
+  return debugd_proxy_->EcTypeCDpState(port, entered, &error);
+}
+
+bool CrosECUtil::HpdState(int port, bool* hpd) {
+  if (!hpd) {
+    LOG(ERROR) << "Invalid pointer provided for HpdState.";
+    return false;
+  }
+
+  brillo::ErrorPtr error;
+  return debugd_proxy_->EcTypeCHpdState(port, hpd, &error);
 }
 
 }  // namespace typecd

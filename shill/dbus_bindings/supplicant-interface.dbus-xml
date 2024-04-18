@@ -36,6 +36,9 @@
       <arg name="name" type="s" direction="in"/>
       <arg name="data" type="ay" direction="out"/>
     </method>
+    <method name="SignalPoll">
+      <arg name="properties" type="a{sv}" direction="out"/>
+    </method>
     <method name="FlushBSS">
       <arg name="age" type="u" direction="in"/>
     </method>
@@ -49,6 +52,15 @@
     <method name="Roam">
       <arg name="addr" type="s" direction="in"/>
     </method>
+    <method name="AddCred">
+      <arg name="args" type="a{sv}" direction="in"/>
+      <arg name="path" type="o" direction="out"/>
+    </method>
+    <method name="RemoveCred">
+      <arg name="path" type="o" direction="in"/>
+    </method>
+    <method name="RemoveAllCreds"/>
+    <method name="InterworkingSelect"/>
     <property name="Capabilities" type="a{sv}" access="read"/>
     <property name="State" type="s" access="read"/>
     <property name="Scanning" type="b" access="read"/>
@@ -101,6 +113,22 @@
     </signal>
     <signal name="PropertiesChanged">
       <arg name="properties" type="a{sv}"/>
+    </signal>
+    <signal name="InterworkingAPAdded">
+      <arg name="BSS" type="o"/>
+      <arg name="cred" type="o"/>
+      <arg name="properties" type="a{sv}"/>
+    </signal>
+    <signal name="InterworkingSelectDone">
+    </signal>
+    <signal name="StationAdded">
+      <arg name="Station" type="o"/>
+      <arg name="properties" type="a{sv}"/>
+    </signal>
+    <signal name="StationRemoved">
+      <arg name="Station" type="o"/>
+    </signal>
+    <signal name="PskMismatch">
     </signal>
   </interface>
 </node>

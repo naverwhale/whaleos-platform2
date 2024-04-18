@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,15 +7,16 @@
 #include <utility>
 
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/strings/strcat.h>
 #include <chromeos/dbus/service_constants.h>
 
 #include "cros-disks/device_event.h"
 #include "cros-disks/disk.h"
-#include "cros-disks/disk_manager.h"
 #include "cros-disks/disk_monitor.h"
-#include "cros-disks/error_logger.h"
 #include "cros-disks/format_manager.h"
+#include "cros-disks/mount_point.h"
 #include "cros-disks/partition_manager.h"
 #include "cros-disks/platform.h"
 #include "cros-disks/quote.h"
@@ -36,20 +37,20 @@ CrosDisksServer::CrosDisksServer(scoped_refptr<dbus::Bus> bus,
       format_manager_(format_manager),
       partition_manager_(partition_manager),
       rename_manager_(rename_manager) {
-  CHECK(platform_) << "Invalid platform object";
-  CHECK(disk_monitor_) << "Invalid disk monitor object";
-  CHECK(format_manager_) << "Invalid format manager object";
-  CHECK(partition_manager_) << "Invalid partition manager object";
-  CHECK(rename_manager_) << "Invalid rename manager object";
+  DCHECK(platform_);
+  DCHECK(disk_monitor_);
+  DCHECK(format_manager_);
+  DCHECK(partition_manager_);
+  DCHECK(rename_manager_);
 
   format_manager_->set_observer(this);
   rename_manager_->set_observer(this);
 }
 
 void CrosDisksServer::RegisterAsync(
-    const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb) {
+    brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb) {
   RegisterWithDBusObject(&dbus_object_);
-  dbus_object_.RegisterAsync(cb);
+  dbus_object_.RegisterAsync(std::move(cb));
 }
 
 void CrosDisksServer::RegisterMountManager(MountManager* mount_manager) {
@@ -60,19 +61,19 @@ void CrosDisksServer::RegisterMountManager(MountManager* mount_manager) {
 void CrosDisksServer::Format(const std::string& path,
                              const std::string& filesystem_type,
                              const std::vector<std::string>& options) {
-  FormatErrorType error_type = FORMAT_ERROR_NONE;
+  FormatError error = FormatError::kSuccess;
   Disk disk;
   if (!disk_monitor_->GetDiskByDevicePath(base::FilePath(path), &disk)) {
-    error_type = FORMAT_ERROR_INVALID_DEVICE_PATH;
+    error = FormatError::kInvalidDevicePath;
   } else {
-    error_type = format_manager_->StartFormatting(path, disk.device_file,
-                                                  filesystem_type, options);
+    error = format_manager_->StartFormatting(path, disk.device_file,
+                                             filesystem_type, options);
   }
 
-  if (error_type != FORMAT_ERROR_NONE) {
-    LOG(ERROR) << "Could not format device " << quote(path) << " as filesystem "
-               << quote(filesystem_type) << ": " << error_type;
-    SendFormatCompletedSignal(error_type, path);
+  if (error != FormatError::kSuccess) {
+    LOG(ERROR) << "Cannot format device " << quote(path) << " as filesystem "
+               << quote(filesystem_type) << ": " << error;
+    SendFormatCompletedSignal(static_cast<uint32_t>(error), path);
   }
 }
 
@@ -82,13 +83,13 @@ void CrosDisksServer::SinglePartitionFormat(
   Disk disk;
 
   if (!disk_monitor_->GetDiskByDevicePath(base::FilePath(path), &disk)) {
-    LOG(ERROR) << "Invalid device path: " << quote(path)
-               << " error code: " << PARTITION_ERROR_INVALID_DEVICE_PATH;
-    response->Return(PARTITION_ERROR_INVALID_DEVICE_PATH);
+    LOG(ERROR) << "Invalid device path " << quote(path) << ": "
+               << PartitionError::kInvalidDevicePath;
+    response->Return(static_cast<uint32_t>(PartitionError::kInvalidDevicePath));
   } else if (disk.is_on_boot_device || !disk.is_drive || disk.is_read_only) {
-    LOG(ERROR) << "Device not allowed: " << quote(path)
-               << " error code: " << PARTITION_ERROR_DEVICE_NOT_ALLOWED;
-    response->Return(PARTITION_ERROR_DEVICE_NOT_ALLOWED);
+    LOG(ERROR) << "Device not allowed " << quote(path) << ": "
+               << PartitionError::kDeviceNotAllowed;
+    response->Return(static_cast<uint32_t>(PartitionError::kDeviceNotAllowed));
   } else {
     partition_manager_->StartSinglePartitionFormat(
         base::FilePath(disk.device_file),
@@ -99,19 +100,19 @@ void CrosDisksServer::SinglePartitionFormat(
 
 void CrosDisksServer::Rename(const std::string& path,
                              const std::string& volume_name) {
-  RenameErrorType error_type = RENAME_ERROR_NONE;
+  RenameError error = RenameError::kSuccess;
   Disk disk;
   if (!disk_monitor_->GetDiskByDevicePath(base::FilePath(path), &disk)) {
-    error_type = RENAME_ERROR_INVALID_DEVICE_PATH;
+    error = RenameError::kInvalidDevicePath;
   } else {
-    error_type = rename_manager_->StartRenaming(
-        path, disk.device_file, volume_name, disk.filesystem_type);
+    error = rename_manager_->StartRenaming(path, disk.device_file, volume_name,
+                                           disk.filesystem_type);
   }
 
-  if (error_type != RENAME_ERROR_NONE) {
-    LOG(ERROR) << "Could not rename device " << quote(path) << " as "
-               << quote(volume_name) << ": " << error_type;
-    SendRenameCompletedSignal(error_type, path);
+  if (error != RenameError::kSuccess) {
+    LOG(ERROR) << "Cannot rename device " << quote(path) << " as "
+               << redact(volume_name) << ": " << error;
+    SendRenameCompletedSignal(static_cast<uint32_t>(error), path);
   }
 }
 
@@ -125,47 +126,84 @@ MountManager* CrosDisksServer::FindMounter(
   return nullptr;
 }
 
+void CrosDisksServer::OnMountProgress(const MountPoint* const mount_point) {
+  DCHECK(mount_point);
+  LOG(INFO) << "Progress for " << quote(mount_point->path()) << ": "
+            << mount_point->progress_percent() << "%";
+  SendMountProgressSignal(mount_point->progress_percent(),
+                          mount_point->source(), mount_point->source_type(),
+                          mount_point->path().value(),
+                          mount_point->is_read_only());
+}
+
+void CrosDisksServer::OnMountCompleted(const std::string& source,
+                                       MountSourceType source_type,
+                                       const std::string& filesystem_type,
+                                       const std::string& mount_path,
+                                       MountError error,
+                                       bool read_only) {
+  if (error != MountError::kSuccess) {
+    LOG(ERROR) << "Cannot mount " << filesystem_type << " " << redact(source)
+               << ": " << error;
+  } else {
+    LOG(INFO) << "Mounted " << redact(source) << " as " << filesystem_type
+              << " " << redact(mount_path);
+  }
+
+  SendMountCompletedSignal(static_cast<uint32_t>(error), source, source_type,
+                           mount_path, read_only);
+}
+
 void CrosDisksServer::Mount(const std::string& source,
                             const std::string& filesystem_type,
                             const std::vector<std::string>& options) {
-  MountErrorType error_type = MOUNT_ERROR_INVALID_PATH;
-  MountSourceType source_type = MOUNT_SOURCE_INVALID;
-  std::string mount_path;
-
-  MountManager* mounter = FindMounter(source);
-  if (mounter) {
-    source_type = mounter->GetMountSourceType();
-    error_type = mounter->Mount(source, filesystem_type, options, &mount_path);
+  MountManager* const mounter = FindMounter(source);
+  if (!mounter) {
+    LOG(ERROR) << "Cannot find mounter for " << filesystem_type << " "
+               << redact(source);
+    SendMountCompletedSignal(static_cast<uint32_t>(MountError::kInvalidPath),
+                             source, MOUNT_SOURCE_INVALID, "", false);
+    return;
   }
 
-  if (error_type != MOUNT_ERROR_NONE) {
-    LOG(ERROR) << "Cannot mount " << redact(source) << " of type "
-               << quote(filesystem_type) << ": " << error_type;
-  }
-  SendMountCompletedSignal(error_type, source, source_type, mount_path);
+  const MountSourceType source_type = mounter->GetMountSourceType();
+  VLOG(1) << "Mounting " << filesystem_type << " " << redact(source)
+          << " using mounter " << source_type;
+
+  MountManager::MountCallback mount_callback =
+      base::BindOnce(&CrosDisksServer::OnMountCompleted, base::Unretained(this),
+                     source, source_type);
+
+  MountManager::ProgressCallback progress_callback = base::BindRepeating(
+      &CrosDisksServer::OnMountProgress, base::Unretained(this));
+
+  mounter->Mount(source, filesystem_type, options, std::move(mount_callback),
+                 std::move(progress_callback));
 }
 
 uint32_t CrosDisksServer::Unmount(const std::string& path,
                                   const std::vector<std::string>& options) {
   if (path.empty()) {
     LOG(ERROR) << "Cannot unmount an empty path";
-    return MOUNT_ERROR_INVALID_ARGUMENT;
+    return static_cast<uint32_t>(MountError::kInvalidArgument);
   }
 
+  LOG(INFO) << "Unmounting " << redact(path) << "...";
   LOG_IF(WARNING, !options.empty())
-      << "Ignoring non-empty unmount options " << quote(options);
+      << "Ignored unmount options " << quote(options) << " for "
+      << redact(path);
 
-  MountErrorType error_type = MOUNT_ERROR_INVALID_PATH;
+  MountError error = MountError::kPathNotMounted;
   for (const auto& manager : mount_managers_) {
-    error_type = manager->Unmount(path);
-    if (error_type != MOUNT_ERROR_PATH_NOT_MOUNTED)
+    error = manager->Unmount(path);
+    if (error != MountError::kPathNotMounted)
       break;
   }
 
-  LOG_IF(ERROR, error_type != MOUNT_ERROR_NONE)
-      << "Cannot unmount " << quote(path) << ": " << error_type;
+  LOG_IF(ERROR, error != MountError::kSuccess)
+      << "Cannot unmount " << redact(path) << ": " << error;
 
-  return error_type;
+  return static_cast<uint32_t>(error);
 }
 
 void CrosDisksServer::UnmountAll() {
@@ -184,19 +222,25 @@ std::vector<std::string> CrosDisksServer::EnumerateDevices() {
   return devices;
 }
 
-std::vector<CrosDisksServer::DBusMountEntry>
-CrosDisksServer::EnumerateMountEntries() {
-  std::vector<DBusMountEntry> dbus_mount_entries;
-  for (const auto& manager : mount_managers_) {
-    for (const auto& mount_entry : manager->GetMountEntries()) {
-      dbus_mount_entries.push_back(
-          std::make_tuple(static_cast<uint32_t>(mount_entry.error_type),
-                          mount_entry.source_path,
-                          static_cast<uint32_t>(mount_entry.source_type),
-                          mount_entry.mount_path));
+CrosDisksServer::MountEntries CrosDisksServer::EnumerateMountEntries() {
+  MountEntries entries;
+  for (const MountManager* const manager : mount_managers_) {
+    DCHECK(manager);
+    for (const MountPoint* const mount_point : manager->GetMountPoints()) {
+      DCHECK(mount_point);
+
+      // Skip the in-progress mount points.
+      if (mount_point->error() == MountError::kInProgress)
+        continue;
+
+      entries.emplace_back(static_cast<uint32_t>(mount_point->error()),
+                           mount_point->source(), mount_point->source_type(),
+                           mount_point->path().value(),
+                           mount_point->is_read_only());
     }
   }
-  return dbus_mount_entries;
+
+  return entries;
 }
 
 bool CrosDisksServer::GetDeviceProperties(
@@ -205,11 +249,10 @@ bool CrosDisksServer::GetDeviceProperties(
     brillo::VariantDictionary* properties) {
   Disk disk;
   if (!disk_monitor_->GetDiskByDevicePath(base::FilePath(device_path), &disk)) {
-    std::string message =
-        "Could not get the properties of device " + device_path;
-    LOG(ERROR) << message;
-    brillo::Error::AddTo(error, FROM_HERE, brillo::errors::dbus::kDomain,
-                         kCrosDisksServiceError, message);
+    LOG(ERROR) << "Cannot get properties of " << quote(device_path);
+    brillo::Error::AddTo(
+        error, FROM_HERE, brillo::errors::dbus::kDomain, kCrosDisksServiceError,
+        base::StrCat({"Cannot get properties of '", device_path, "'"}));
     return false;
   }
 
@@ -252,46 +295,51 @@ void CrosDisksServer::RemoveDeviceFromAllowlist(
 }
 
 void CrosDisksServer::OnFormatCompleted(const std::string& device_path,
-                                        FormatErrorType error_type) {
-  SendFormatCompletedSignal(error_type, device_path);
+                                        FormatError error) {
+  SendFormatCompletedSignal(static_cast<uint32_t>(error), device_path);
 }
 
 void CrosDisksServer::OnPartitionCompleted(
     std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<uint32_t>> response,
     const base::FilePath& device_path,
-    PartitionErrorType error_type) {
-  LOG(ERROR) << "Partitioning for device " << quote(device_path)
-             << " completed, result code: " << std::to_string(error_type);
-  response->Return(error_type);
+    PartitionError error) {
+  if (error == PartitionError::kSuccess) {
+    LOG(INFO) << "Partitioned device " << quote(device_path);
+  } else {
+    LOG(ERROR) << "Cannot partition device " << quote(device_path) << ": "
+               << error;
+  }
+  response->Return(static_cast<uint32_t>(error));
 }
 
 void CrosDisksServer::OnRenameCompleted(const std::string& device_path,
-                                        RenameErrorType error_type) {
-  SendRenameCompletedSignal(error_type, device_path);
+                                        RenameError error) {
+  SendRenameCompletedSignal(static_cast<uint32_t>(error), device_path);
 }
 
-void CrosDisksServer::OnScreenIsLocked() {
-  // no-op
-}
+void CrosDisksServer::OnScreenIsLocked() {}
 
-void CrosDisksServer::OnScreenIsUnlocked() {
-  // no-op
-}
+void CrosDisksServer::OnScreenIsUnlocked() {}
 
 void CrosDisksServer::OnSessionStarted() {
+  LOG(INFO) << "Starting session...";
   for (const auto& manager : mount_managers_) {
     manager->StartSession();
   }
 }
 
 void CrosDisksServer::OnSessionStopped() {
+  LOG(INFO) << "Stopping session...";
   for (const auto& manager : mount_managers_) {
     manager->StopSession();
   }
 }
 
 void CrosDisksServer::DispatchDeviceEvent(const DeviceEvent& event) {
+  LOG(INFO) << "Dispatching device event " << event;
   switch (event.event_type) {
+    case DeviceEvent::kIgnored:
+      break;
     case DeviceEvent::kDeviceAdded:
       SendDeviceAddedSignal(event.device_path);
       break;
@@ -309,8 +357,6 @@ void CrosDisksServer::DispatchDeviceEvent(const DeviceEvent& event) {
       break;
     case DeviceEvent::kDiskRemoved:
       SendDiskRemovedSignal(event.device_path);
-      break;
-    default:
       break;
   }
 }

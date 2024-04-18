@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,8 +31,8 @@ class ExternalAmbientLightHandler : public AmbientLightHandler::Delegate {
   // ExternalAmbientLightHandler.
   class Delegate {
    public:
-    Delegate() {}
-    virtual ~Delegate() {}
+    Delegate() = default;
+    virtual ~Delegate() = default;
 
     // Invoked when the backlight brightness should be adjusted in response
     // to a change in ambient light.

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@
 syntax = "proto3";
 
 package diagnostics.grpc_api;
+
+option go_package = "chromiumos/wilco_dtc";
 
 service WilcoDtcSupportd {
   // Sends a message to the diagnostics UI extension (hosted by the browser).
@@ -329,14 +331,14 @@ enum DiagnosticRoutineStatus {
   ROUTINE_STATUS_FAILED_TO_START = 7;  // Routine could not be created.
   ROUTINE_STATUS_REMOVED =
       8;  // Routine has been removed and is no longer valid.
-  ROUTINE_STATUS_CANCELLING = 9;  // Routine is being cancelled.
+  ROUTINE_STATUS_CANCELLING = 9;      // Routine is being cancelled.
   ROUTINE_STATUS_INVALID_FIELD = 10;  // Invalid field in request.
 }
 
 // Enumeration of each of the messages a diagnostics routine can pass back.
 // These messages prompt interaction from the user of the routine.
 enum DiagnosticRoutineUserMessage {
-  ROUTINE_USER_MESSAGE_UNSET = 0;  // No user interaction needed.
+  ROUTINE_USER_MESSAGE_UNSET = 0;            // No user interaction needed.
   ROUTINE_USER_MESSAGE_UNPLUG_AC_POWER = 1;  // User needs to unplug AC power.
 }
 
@@ -401,7 +403,10 @@ message UrandomRoutineParameters {
 }
 
 // Parameters for the smartctl_check diagnostics routine.
-message SmartctlCheckRoutineParameters {}
+message SmartctlCheckRoutineParameters {
+  // Threshold for percentage_used to determine if passed.
+  optional uint32 percentage_used_threshold = 1;
+}
 
 // Parameters for the cpu cache/stress diagnostics routine.
 message CpuRoutineParameters {
@@ -536,7 +541,7 @@ message GetOsVersionResponse {
   // - for a dev/test build: 11932.0.2019_03_20_1100
   // - for an official build: 11932.0.0
   string version = 1;
-  // The milestone is the Chrome OS branch number, 0 in case of any error.
+  // The milestone is the ChromeOS branch number, 0 in case of any error.
   int32 milestone = 2;
 }
 

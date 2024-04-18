@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,6 +35,7 @@ static constexpr std::array kLogsToRotate{
     std::string_view("/var/log/secure"),
     std::string_view("/var/log/net.log"),
     std::string_view("/var/log/faillog"),
+    std::string_view("/var/log/fwupd.log"),
     std::string_view("/var/log/session_manager"),
     std::string_view("/var/log/atrus.log"),
     std::string_view("/var/log/tlsdate.log"),
@@ -46,6 +47,9 @@ static constexpr std::array kLogsToRotate{
     std::string_view("/var/log/upstart.log"),
     std::string_view("/var/log/typecd.log"),
     std::string_view("/var/log/bluetooth.log"),
+    std::string_view("/var/log/hypervisor.log"),
+    std::string_view("/var/log/secagentd.log"),
+    std::string_view("/var/log/extensions.log"),
     // Log file for testing. On production, this file should not exist and
     // should just be ignored.
     std::string_view("/var/log/temporary_log_file_for_testing.log"),

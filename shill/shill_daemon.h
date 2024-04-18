@@ -1,11 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_SHILL_DAEMON_H_
 #define SHILL_SHILL_DAEMON_H_
 
-#include <base/macros.h>
 #include <brillo/daemons/daemon.h>
 
 #include "shill/daemon_task.h"

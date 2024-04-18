@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define CRYPTOHOME_FIDO_ATTESTED_CREDENTIAL_DATA_H_
 
 #include <memory>
+#include <optional>
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
@@ -14,8 +15,6 @@
 
 #include "base/component_export.h"
 #include "base/containers/span.h"
-#include "base/macros.h"
-#include "base/optional.h"
 #include "cryptohome/fido/fido_constants.h"
 
 namespace cryptohome {
@@ -29,11 +28,11 @@ class AttestedCredentialData {
   // Parses an |AttestedCredentialData| from a prefix of |*buffer|. Returns
   // nullopt on error, or else the parse return and a (possibly empty) suffix of
   // |buffer| that was not parsed.
-  static base::Optional<
+  static std::optional<
       std::pair<AttestedCredentialData, base::span<const uint8_t>>>
   ConsumeFromCtapResponse(base::span<const uint8_t> buffer);
 
-  static base::Optional<AttestedCredentialData> CreateFromU2fRegisterResponse(
+  static std::optional<AttestedCredentialData> CreateFromU2fRegisterResponse(
       base::span<const uint8_t> u2f_data,
       std::unique_ptr<PublicKey> public_key);
 

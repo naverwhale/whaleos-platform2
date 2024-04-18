@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,17 @@
 #define SHILL_EAP_CREDENTIALS_H_
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include <base/macros.h>
-#include <base/optional.h>
+#include <base/memory/weak_ptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 #include <libpasswordprovider/password_provider.h>
 
-#include "shill/data_types.h"
+#include "shill/metrics.h"
+#include "shill/store/pkcs11_slot_getter.h"
 #include "shill/technology.h"
 
 namespace shill {
@@ -22,7 +24,6 @@ namespace shill {
 class CertificateFile;
 class Error;
 class KeyValueStore;
-class Metrics;
 class PropertyStore;
 class StoreInterface;
 
@@ -39,7 +40,7 @@ class EapCredentials {
   void InitPropertyStore(PropertyStore* store);
 
   // Returns true if |property| is used for authentication in EapCredentials.
-  static bool IsEapAuthenticationProperty(const std::string property);
+  static bool IsEapAuthenticationProperty(std::string_view property);
 
   // Returns true if a connection can be made with |this| credentials using
   // either passphrase or certificates.
@@ -52,8 +53,18 @@ class EapCredentials {
   // Loads EAP properties from |storage| in group |id|.
   virtual void Load(const StoreInterface* store, const std::string& id);
 
+  // Load EAP properties from key/value store |store|.
+  virtual void Load(const KeyValueStore& store);
+
+  // Load EAP properties from another EapCredentials set |eap|.
+  virtual void Load(const EapCredentials& eap);
+
   void MigrateDeprecatedStorage(StoreInterface* storage,
                                 const std::string& id) const;
+
+  // Set PKCS#11 slot type by comparing slot ID value from |cert_id_| with the
+  // slot ID value taken from chaps through |slot_getter|.
+  void SetEapSlotGetter(Pkcs11SlotGetter* slot_getter);
 
   // Output metrics about this EAP connection to |metrics| with technology
   // |technology|.
@@ -101,28 +112,52 @@ class EapCredentials {
   // wpa_supplicant by translating |domain_suffix_match_list| and filtering out
   // entries that are not valid domain names according to
   // `ValidDomainSuffixMatch`.
-  static base::Optional<std::string> TranslateDomainSuffixMatch(
+  static std::optional<std::string> TranslateDomainSuffixMatch(
       const std::vector<std::string>& domain_suffix_match_list);
 
   // Returns subject alternative name match in the format used by
   // wpa_supplicant by translating |subject_alternative_name_match_list|.
-  static base::Optional<std::string> TranslateSubjectAlternativeNameMatch(
+  static std::optional<std::string> TranslateSubjectAlternativeNameMatch(
       const std::vector<std::string>& subject_alternative_name_match_list);
 
   std::string GetEapPassword(Error* error) const;
 
   // Getters and setters.
+  virtual const std::string& cert_id() const { return cert_id_; }
   virtual const std::string& identity() const { return identity_; }
   void set_identity(const std::string& identity) { identity_ = identity; }
+  virtual const std::string& key_id() const { return key_id_; }
   virtual const std::string& key_management() const { return key_management_; }
+  virtual const std::string& password() const { return password_; }
   virtual void set_password(const std::string& password) {
     password_ = password;
   }
+  virtual bool use_system_cas() const { return use_system_cas_; }
+  virtual void set_use_system_cas(bool use_system_cas) {
+    use_system_cas_ = use_system_cas;
+  }
   virtual const std::string& pin() const { return pin_; }
+  virtual const std::string& method() const { return eap_; }
+  virtual const std::string& inner_method() const { return inner_eap_; }
+  virtual const std::vector<std::string>& ca_cert_pem() const {
+    return ca_cert_pem_;
+  }
+  virtual const std::string& subject_match() const { return subject_match_; }
+  virtual const std::vector<std::string>& subject_alternative_name_match_list()
+      const {
+    return subject_alternative_name_match_list_;
+  }
+  virtual const std::vector<std::string>& domain_suffix_match_list() const {
+    return domain_suffix_match_list_;
+  }
 
  private:
   friend class EapCredentialsTest;
   FRIEND_TEST(EapCredentialsTest, LoadAndSave);
+  FRIEND_TEST(EapCredentialsTest, Load);
+  FRIEND_TEST(EapCredentialsTest, Load_UserSlot);
+  FRIEND_TEST(EapCredentialsTest, Load_SystemSlot);
+  FRIEND_TEST(EapCredentialsTest, SaveAndLoad_Pkcs11Id);
   FRIEND_TEST(ServiceTest, LoadEap);
   FRIEND_TEST(ServiceTest, SaveEap);
 
@@ -139,10 +174,16 @@ class EapCredentials {
   static const char kStorageEapKeyID[];
   static const char kStorageEapKeyManagement[];
   static const char kStorageEapPin[];
+  static const char kStorageEapSlot[];
   static const char kStorageEapSubjectMatch[];
   static const char kStorageEapUseProactiveKeyCaching[];
   static const char kStorageEapUseSystemCAs[];
   static const char kStorageEapUseLoginPassword[];
+
+  // Replace the slot ID part of |cert_id_| and |key_id_| with slot ID value of
+  // |slot_id|. Do nothing if |slot_id| is invalid. This method assumes that
+  // |cert_id_| and |key_id_| are equal.
+  void ReplacePkcs11SlotIds(CK_SLOT_ID slot_id);
 
   // Returns true if the current EAP authentication type requires certificate
   // authentication and any of the client credentials are provided via
@@ -155,7 +196,7 @@ class EapCredentials {
   // Writes to the property will be handled by invoking |set|.
   void HelpRegisterDerivedString(
       PropertyStore* store,
-      const std::string& name,
+      std::string_view name,
       std::string (EapCredentials::*get)(Error* error),
       bool (EapCredentials::*set)(const std::string& value, Error* error));
 
@@ -169,7 +210,7 @@ class EapCredentials {
   // |default_value| non-NULL.
   void HelpRegisterWriteOnlyDerivedString(
       PropertyStore* store,
-      const std::string& name,
+      std::string_view name,
       bool (EapCredentials::*set)(const std::string& value, Error* error),
       void (EapCredentials::*clear)(Error* error),
       const std::string* default_value);
@@ -225,8 +266,14 @@ class EapCredentials {
   // If true, use the user's stored login password as the password.
   bool use_login_password_;
 
+  // PKCS#11 slot getter to replace possible unstable slot ID of |cert_id_| and
+  // |key_id_|.
+  Pkcs11SlotGetter* slot_getter_;
+
   std::unique_ptr<password_provider::PasswordProviderInterface>
       password_provider_;
+
+  base::WeakPtrFactory<EapCredentials> weak_factory_{this};
 };
 
 }  // namespace shill

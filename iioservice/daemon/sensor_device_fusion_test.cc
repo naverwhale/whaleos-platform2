@@ -1,18 +1,19 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <gtest/gtest.h>
 
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/notreached.h>
 #include <base/rand_util.h>
 #include <base/run_loop.h>
-#include <base/sequenced_task_runner.h>
-#include <base/stl_util.h>
+#include <base/task/sequenced_task_runner.h>
 #include <base/test/task_environment.h>
 #include <libmems/common_types.h>
 #include <libmems/test_fakes.h>
@@ -65,14 +66,14 @@ class FakeSensorDeviceFusion final : public SensorDeviceFusion {
   // SensorDeviceFusion overrides:
   void GetAttributes(const std::vector<std::string>& attr_names,
                      GetAttributesCallback callback) override {
-    std::move(callback).Run(std::vector<base::Optional<std::string>>(
-        attr_names.size(), base::nullopt));
+    std::move(callback).Run(std::vector<std::optional<std::string>>(
+        attr_names.size(), std::nullopt));
   }
   void GetChannelsAttributes(const std::vector<int32_t>& iio_chn_indices,
                              const std::string& attr_name,
                              GetChannelsAttributesCallback callback) override {
-    std::move(callback).Run(std::vector<base::Optional<std::string>>(
-        iio_chn_indices.size(), base::nullopt));
+    std::move(callback).Run(std::vector<std::optional<std::string>>(
+        iio_chn_indices.size(), std::nullopt));
   }
 
  protected:
@@ -180,9 +181,9 @@ class IioDeviceHandlerTest : public ::testing::Test,
     EXPECT_TRUE(
         device->WriteStringAttribute(libmems::kSamplingFrequencyAvailable,
                                      fakes::kFakeSamplingFrequencyAvailable));
-    for (int i = 0; i < base::size(libmems::fakes::kFakeAccelChns); ++i) {
-      auto chn = std::make_unique<libmems::fakes::FakeIioChannel>(
-          libmems::fakes::kFakeAccelChns[i], true);
+    for (const auto& channel : libmems::fakes::kFakeAccelChns) {
+      auto chn =
+          std::make_unique<libmems::fakes::FakeIioChannel>(channel, true);
       device->AddChannel(std::move(chn));
     }
 
@@ -192,12 +193,12 @@ class IioDeviceHandlerTest : public ::testing::Test,
   void TearDown() override { TearDownBase(); }
 
   void HandleAccelSample(std::vector<int64_t> accel_sample) override {
-    EXPECT_EQ(accel_sample.size(), base::size(libmems::fakes::kFakeAccelChns));
+    EXPECT_EQ(accel_sample.size(), std::size(libmems::fakes::kFakeAccelChns));
     if (!observer_)
       return;
 
     libmems::IioDevice::IioSample sample;
-    for (int i = 0; i < base::size(libmems::fakes::kFakeAccelChns); ++i)
+    for (int i = 0; i < std::size(libmems::fakes::kFakeAccelChns); ++i)
       sample.emplace(i, accel_sample[i]);
 
     observer_->OnSampleUpdated(sample);
@@ -238,7 +239,7 @@ TEST_F(IioDeviceHandlerTest, GetAttributes) {
       {kDeviceAttrName, libmems::kSamplingFrequencyAvailable},
       base::BindOnce(
           [](base::RepeatingClosure closure,
-             const std::vector<base::Optional<std::string>>& values) {
+             const std::vector<std::optional<std::string>>& values) {
             EXPECT_EQ(values.size(), 2u);
             EXPECT_TRUE(values[0].has_value());
             EXPECT_EQ(values[0].value().compare(kParsedDeviceAttrValue), 0);
@@ -254,7 +255,7 @@ TEST_F(IioDeviceHandlerTest, GetAttributes) {
 TEST_F(IioDeviceHandlerTest, SetFrequencyAndReadSamples) {
   std::multiset<std::pair<int, cros::mojom::ObserverErrorType>> failures;
   for (int i = 0; i < kNumFailures; ++i) {
-    int k = base::RandInt(0, base::size(libmems::fakes::kFakeAccelSamples) - 1);
+    int k = base::RandInt(0, std::size(libmems::fakes::kFakeAccelSamples) - 1);
 
     device_->AddFailedReadAtKthSample(k);
     failures.insert(
@@ -310,7 +311,7 @@ TEST_F(IioDeviceHandlerInvalidTest, MissingChannel) {
       device->WriteStringAttribute(libmems::kSamplingFrequencyAvailable,
                                    fakes::kFakeSamplingFrequencyAvailable));
   // Missing channel timestamp
-  for (int i = 0; i < base::size(libmems::fakes::kFakeAccelChns) - 1; ++i) {
+  for (int i = 0; i < std::size(libmems::fakes::kFakeAccelChns) - 1; ++i) {
     auto chn = std::make_unique<libmems::fakes::FakeIioChannel>(
         libmems::fakes::kFakeAccelChns[i], true);
     device->AddChannel(std::move(chn));
@@ -342,7 +343,7 @@ TEST_F(IioDeviceHandlerInvalidTest, MissingChannel) {
       {kDeviceAttrName, libmems::kSamplingFrequencyAvailable},
       base::BindOnce(
           [](base::RepeatingClosure closure,
-             const std::vector<base::Optional<std::string>>& values) {
+             const std::vector<std::optional<std::string>>& values) {
             EXPECT_EQ(values.size(), 2u);
             // Mojo pipe SensorDevice should be reset, so attributes should not
             // be available.

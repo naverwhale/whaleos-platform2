@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,7 @@
 #include <map>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <brillo/process/process.h>
 
@@ -49,8 +49,8 @@ bool PreExecSettings(const std::map<std::string, std::string>& vars) {
     }
   }
 
-  // Set soft/hard limit for CPU usage (300 sec / 330 sec).
-  const rlimit cpu_limit = {300, 330};
+  // Set soft/hard limit for CPU usage (900 sec / 950 sec).
+  const rlimit cpu_limit = {900, 950};
   if (setrlimit(RLIMIT_CPU, &cpu_limit)) {
     perror("setrlimit(RLIMIT_CPU,...) failed");
     return false;
@@ -137,7 +137,11 @@ pid_t ProcessLauncher::StartSubshell(const Script& script,
     // Close all unused file descriptors.
     for (int fd = 3; fd < file_desc_limit.rlim_cur; ++fd) {
       if (fd != input_fd && fd != output_fd) {
-        if (close(fd) != 0)
+        // Since this code calls close() on every integer that could
+        // possibly be a file descriptor, we expect most of the calls
+        // to fail with EBADF, which indicates that the parameter to
+        // close() wasn't an open file descriptor to begin with.
+        if (close(fd) != 0 && errno != EBADF)
           perror("close(fd) failed");
       }
     }
@@ -241,6 +245,11 @@ int ProcessLauncher::RunPipeline(const Pipeline& pipeline,
         PrintMessage(source_, sp.position, "Process failed");
         return kShellError;
       }
+      // The process reached the CPU time limit.
+      if (exit_code == kProcTimeLimitError) {
+        PrintMessage(source_, sp.position, "CPU time limit was reached");
+        return kProcTimeLimitError;
+      }
     } else {
       if (waitpid(sp.script_pid, &exit_code, 0) == (pid_t)-1) {
         PrintMessage(source_, sp.position, "waitpid(...) failed",
@@ -250,10 +259,14 @@ int ProcessLauncher::RunPipeline(const Pipeline& pipeline,
       // (|exit_code| == kShellError) means that the subshell failed.
       if (exit_code == kShellError)
         return kShellError;
+      // One of children processes reached the CPU time limit.
+      if (exit_code == kProcTimeLimitError)
+        return kProcTimeLimitError;
     }
-    // We ignore the exit_code different than kShellError, because the Linux
-    // shell behaves this way. The exit code from the last pipeline segment is
-    // reported as the exit code for the whole pipeline.
+    // We ignore the exit_code different than kShellError and
+    // kProcTimeLimitError, because the Linux shell behaves this way. The exit
+    // code from the last pipeline segment is reported as the exit code for the
+    // whole pipeline.
   }
 
   if (verbose_)

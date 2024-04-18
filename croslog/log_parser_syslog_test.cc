@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,10 +27,10 @@ TEST_F(LogParserSyslogTest, Parse) {
   LogParserSyslog parser;
 
   {
-    std::string maybe_line =
+    std::string line =
         "2020-05-25T14:15:22.402258+09:00 ERROR tag[0123]: MESSAGE";
 
-    MaybeLogEntry e = parser.Parse(std::move(maybe_line));
+    MaybeLogEntry e = parser.Parse(std::move(line));
     EXPECT_TRUE(e.has_value());
     const std::string& s = e->entire_line();
     EXPECT_GT(s.size(), 32);
@@ -47,10 +47,28 @@ TEST_F(LogParserSyslogTest, Parse) {
   }
 
   {
-    std::string maybe_line =
-        "2020-05-25T14:15:22.402258+09:00 INFO kernel: MESSAGE";
+    std::string line = "2020-05-25T14:15:22.402258Z ERROR tag[0123]: MESSAGE";
 
-    MaybeLogEntry e = parser.Parse(std::move(maybe_line));
+    MaybeLogEntry e = parser.Parse(std::move(line));
+    EXPECT_TRUE(e.has_value());
+    const std::string& s = e->entire_line();
+    EXPECT_GT(s.size(), 27);
+
+    EXPECT_EQ("ERROR", s.substr(28, 5));
+    EXPECT_EQ(Severity::ERROR, e->severity());
+
+    EXPECT_EQ("tag", e->tag());
+    EXPECT_EQ(123, e->pid());
+    EXPECT_EQ("MESSAGE", e->message());
+
+    EXPECT_EQ("2020-05-25T14:15:22.402258Z", s.substr(0, 27));
+    EXPECT_EQ(TimeFromExploded(2020, 5, 25, 14, 15, 22, 402258, 0), e->time());
+  }
+
+  {
+    std::string line = "2020-05-25T14:15:22.402258+09:00 INFO kernel: MESSAGE";
+
+    MaybeLogEntry e = parser.Parse(std::move(line));
     EXPECT_TRUE(e.has_value());
     const std::string& s = e->entire_line();
     EXPECT_GT(s.size(), 32);
@@ -71,9 +89,9 @@ TEST_F(LogParserSyslogTest, ParseFromFile) {
   LogLineReader reader(LogLineReader::Backend::FILE);
   reader.OpenFile(base::FilePath("./testdata/TEST_NORMAL_LOG1"));
   {
-    base::Optional<std::string> maybe_line = reader.Forward();
-    EXPECT_TRUE(maybe_line.has_value());
-    MaybeLogEntry e = parser.Parse(std::move(maybe_line.value()));
+    auto [line, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    MaybeLogEntry e = parser.Parse(std::move(line));
     EXPECT_TRUE(e.has_value());
     const std::string& s = e->entire_line();
     EXPECT_GT(s.size(), 32);
@@ -93,9 +111,9 @@ TEST_F(LogParserSyslogTest, ParseFromFile) {
   }
 
   {
-    base::Optional<std::string> maybe_line = reader.Forward();
-    EXPECT_TRUE(maybe_line.has_value());
-    MaybeLogEntry e = parser.Parse(std::move(maybe_line.value()));
+    auto [line, result] = reader.Forward();
+    EXPECT_EQ(LogLineReader::ReadResult::NO_ERROR, result);
+    MaybeLogEntry e = parser.Parse(std::move(line));
     EXPECT_TRUE(e.has_value());
     const std::string& s = e->entire_line();
     EXPECT_GT(s.size(), 32);
@@ -191,6 +209,65 @@ TEST_F(LogParserSyslogTest, ParseInvalid) {
     EXPECT_EQ(Severity::UNSPECIFIED, e->severity());
     EXPECT_TRUE(e->tag().empty());
     EXPECT_EQ("MESSAGE", e->message());
+
+    EXPECT_EQ("2020-05-25T14:15:22.402258+09:00", s.substr(0, 32));
+    EXPECT_EQ(TimeFromExploded(2020, 5, 25, 14, 15, 22, 402258, +9), e->time());
+  }
+
+  {
+    // Only UTC time present.
+    std::string maybe_line = "2020-05-25T14:15:22.402258Z";
+    EXPECT_FALSE(parser.Parse(std::move(maybe_line)).has_value());
+  }
+
+  {
+    // Only time with time zone present.
+    std::string maybe_line = "2020-05-25T14:15:22.402258+09:00";
+    EXPECT_FALSE(parser.Parse(std::move(maybe_line)).has_value());
+  }
+
+  {
+    // Only incomplete time present: missing suffix 'Z' for UTC.
+    std::string maybe_line = "2020-05-25T14:15:22.402258";
+    EXPECT_FALSE(parser.Parse(std::move(maybe_line)).has_value());
+  }
+
+  {
+    // Incomplete time present with log: missing suffix 'Z' for UTC.
+    std::string maybe_line =
+        "2020-05-25T14:15:22.402258 ERROR tag[0123]: MESSAGE";
+    EXPECT_FALSE(parser.Parse(std::move(maybe_line)).has_value());
+  }
+
+  {
+    // Only incomplete time with time zone present: incomplete tz offset.
+    std::string maybe_line = "2020-05-25T14:15:22.402258+09:0";
+    EXPECT_FALSE(parser.Parse(std::move(maybe_line)).has_value());
+  }
+
+  {
+    // Incomplete time with time zone with log.
+    std::string maybe_line =
+        "2020-05-25T14:15:22.402258+09:0 ERROR tag[0123]: MESSAGE";
+    EXPECT_FALSE(parser.Parse(std::move(maybe_line)).has_value());
+  }
+
+  {
+    // Unended pid part.
+    std::string maybe_line =
+        "2020-05-25T14:15:22.402258+09:00 ERROR tag[0123 MESSAGE";
+
+    MaybeLogEntry e = parser.Parse(std::move(maybe_line));
+    EXPECT_TRUE(e.has_value());
+    const std::string& s = e->entire_line();
+    EXPECT_GT(s.size(), 32);
+
+    EXPECT_EQ("ERROR", s.substr(33, 5));
+    EXPECT_EQ(Severity::ERROR, e->severity());
+
+    EXPECT_EQ("tag", e->tag());
+    EXPECT_EQ(-1, e->pid());
+    EXPECT_EQ("[0123 MESSAGE", e->message());
 
     EXPECT_EQ("2020-05-25T14:15:22.402258+09:00", s.substr(0, 32));
     EXPECT_EQ(TimeFromExploded(2020, 5, 25, 14, 15, 22, 402258, +9), e->time());

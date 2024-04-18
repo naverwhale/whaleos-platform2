@@ -1,6 +1,9 @@
-# Copyright 2016 The Chromium OS Authors. All rights reserved.
+# Copyright 2016 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 access: 1
 alarm: 1
@@ -35,7 +38,7 @@ getegid: 1
 geteuid: 1
 getpeername: 1
 getpid: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 getrlimit: 1
 getsockname: 1
 getsockopt: 1
@@ -49,16 +52,18 @@ lseek: 1
 lstat: 1
 kill: 1
 mkdir: 1
-# Make sure PROT_WRITE (bit 1) and PROT_EXEC (bit 2) are not both set.
-mmap: arg2 in 0xfffffffb || arg2 in 0xfffffffd
-mprotect: arg2 in 0xfffffffb || arg2 in 0xfffffffd
+# Prevent PROT_WRITE | PROT_EXEC.
+mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 msync: 1
 munmap: 1
 newfstatat: 1
 openat: 1
 open: 1
 pipe: 1
+pipe2: 1
 poll: 1
+prctl: arg0 == PR_SET_NAME || arg0 == PR_SET_PTRACER
 pread64: 1
 preadv: 1
 prlimit64: arg2 == 0 && arg3 != 0

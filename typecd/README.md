@@ -5,7 +5,8 @@
 typecd is a system daemon for tracking the state of various USB Type C ports and connected
 peripherals on a Chromebook. It interfaces with the Linux Type C connector class framework
 to obtain notifications about Type C events, and to pull updated information about ports and
-port-partners state.
+port-partners state. It also listens to USB events for handling USB device
+add/remove.
 
 ## CLASS ORGANIZATION
 
@@ -16,24 +17,28 @@ The general structure of the classes is best illustrated by a few diagrams:
                            |
                            |
                            |
-        -----------------------------------------------------------------------------------------
-        |                                         |                       |                      |
-        |                                         |                       |                      |
-        |                                         |                       |                      |
-        |                                         |                       |                      |
-   UdevMonitor    ---typec- udev- events--->   PortManager    ------>   ECUtil         SessionManagerProxy
-                                                  /|\                                            |
-                                                   |                                             |
-                                                   ----------------------------------------------
-                                                                 session_manager events
+        ------------------------------------------------------------------------------------------------
+        |                                     |              |                  |                      |
+        |                                     |              |                  |                      |
+        |                                     |              |                  |                      |
+        |                                     |              |                  |                      |
+   UdevMonitor ---typec- udev- events---> PortManager ---> ECUtil  ------> DBusManager    SessionManagerProxy
+                                                   /|\      |                |                               |
+                                                    |       ------------------                               |
+                                                    |                                                        |
+                                                    ----------------------------------------------------------
+                                                                     session_manager events
 ```
 
 ### UdevMonitor
 
 All communication and event notification between the Linux Kernel Type C connector class framework
 and typecd occurs through the udev mechanism. This class watches for any events of the `typec` subsystem.
-Other classes (in this case, `PortManager`) can register `Observer`s with `UdevMonitor`. When any notification
-occurs, `UdevMonitor` calls the relevant function callback from the registered `Observer`s.
+Other classes (in this case, `PortManager`) can register `TypecObserver`s with `UdevMonitor`. When any notification
+occurs, `UdevMonitor` calls the relevant function callback from the registered `TypecObserver`s.
+
+This class also watches for events of the `usb` subsystem. Similar to
+`TypecObserver`, there is `UsbObserver` with callbacks for `usb` add/remove events.
 
 This class has basic parsing to determine which `Observer` should be called (is this a port/partner/cable notification?
 is it add/remove/change?)
@@ -44,7 +49,7 @@ This class maintains a representation of all the state of a typec port exposed b
 The primary entity for `PortManager` is a Port.
 
 ```
-           PortManager(UdevMonitor::Observer)
+         PortManager(UdevMonitor::TypecObserver)
                            |
                            |
                            |
@@ -55,7 +60,7 @@ The primary entity for `PortManager` is a Port.
       Port0    Port1     ....               PortN
 ```
 
-`PortManager` sub-classes `UdevMonitor::Observer`, and registers itself to receive typec event notifications. In turn, it
+`PortManager` sub-classes `UdevMonitor::TypecObserver`, and registers itself to receive typec event notifications. In turn, it
 routes the notifications to the relevant object (Port, Partner, Cable) that the notification affects.
 
 #### Port
@@ -74,6 +79,9 @@ A `Port` can be detailed as follows:
         |                                 |                        |
   (sysfs path info)                    Partner                   Cable
 ```
+
+NOTE: In order to retrieve DisplayPort status (Hotplug Detect, Mux state) from the EC to synthesize a metric, `Port` also holds
+a pointer to the `ECUtil` class (it is set by `PortManager` immediately after `Port` creation).
 
 ##### Partner
 
@@ -190,6 +198,35 @@ session event, performs an alternate mode switch (by exiting the current mode an
 
 For unit tests, where it's difficult to emulate the asynchronous `session_manager` events, we emulate the same behaviour by calling
 the `PortManager`'s `SessionManagerObserverInterface` functions.
+
+
+### DBusManager
+
+The `PortManager` contains a pointer to a `DBusManager` instance which signals notification requests to Chromium over D-bus. In
+Chromium, Aura Shell (Ash) includes instances of the `PciePeripheralNotificationController` and `UsbPeripheralNotificationController`
+classes which inherit from the `TypecdClient` class. The `DBusManager` supports two types of D-bus message. (1) `DeviceConnectedType`
+which signals the capabilities of the connected device and (2) `CableWarningType` which signals a scenario where the connected partner may
+be limited in some way by the cable. On receiving D-bus signals sent by the typec `DBusManager`, the USB and PCIe notification
+controller classes in Ash will process the type of signal received to determine which notification, if any, to show the user.
+
+```
+
+                 PortManager -----------> DBusManager
+                                               |
+                                               |
+                                            (D-Bus)
+                                               |
+                                              \|/
+                                              Ash
+                                               |
+                                               |
+                  -----------------------------------------------------------
+                  |                                                         |
+                  |                                                         |
+  PciePeripheralNotificationController                      UsbPeripheralNotificationController
+       (implements TypecdClient)                                 (implements TypecdClient)
+
+```
 
 ## Alternate Mode Entry examples
 

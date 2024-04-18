@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include <base/at_exit.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/time/time.h>
 #include <brillo/asynchronous_signal_handler.h>
 #include <brillo/brillo_export.h>
@@ -93,7 +92,9 @@ class BRILLO_EXPORT Daemon : public AsynchronousSignalHandlerInterface {
   virtual bool OnRestart();
 
   // Returns a delegate to Quit() method in the base::RunLoop instance.
-  base::Closure QuitClosure() const { return message_loop_.QuitClosure(); }
+  base::RepeatingClosure QuitClosure() const {
+    return message_loop_.QuitClosure();
+  }
 
  private:
   // Called when SIGTERM/SIGINT signals are received.

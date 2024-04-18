@@ -1,14 +1,17 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_SERVICE_H_
 #define SHILL_SERVICE_H_
 
+#include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <valarray>
 #include <vector>
@@ -16,39 +19,36 @@
 #include <base/cancelable_callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
 #include <base/time/time.h>
+#include <chromeos/patchpanel/dbus/client.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
-#include <patchpanel/proto_bindings/patchpanel_service.pb.h>
+#include <metrics/timer.h>
 
 #include "shill/adaptor_interfaces.h"
 #include "shill/callbacks.h"
 #include "shill/data_types.h"
+#include "shill/event_history.h"
+#include "shill/metrics.h"
 #include "shill/mockable.h"
-#include "shill/net/event_history.h"
-#include "shill/net/shill_time.h"
-#include "shill/property_store.h"
 #include "shill/refptr_types.h"
 #include "shill/static_ip_parameters.h"
+#include "shill/store/pkcs11_slot_getter.h"
+#include "shill/store/property_store.h"
 #include "shill/technology.h"
 
 namespace shill {
 
 class ControlInterface;
-class DhcpProperties;
+class EapCredentials;
 class Error;
 class EventDispatcher;
 class KeyValueStore;
 class Manager;
-class Metrics;
+class Network;
 class MockManager;
 class ServiceAdaptorInterface;
 class ServiceMockAdaptor;
 class StoreInterface;
-
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
-class EapCredentials;
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
 // A Service is a uniquely named entity, which the system can
 // connect in order to begin sending and receiving network traffic.
@@ -61,7 +61,7 @@ class Service : public base::RefCounted<Service> {
   // Map from traffic source to a valarray containing {rx_bytes, tx_bytes,
   // rx_packets, tx_packets} in that order.
   using TrafficCounterMap =
-      std::map<patchpanel::TrafficCounter::Source, std::valarray<uint64_t>>;
+      std::map<patchpanel::Client::TrafficSource, std::valarray<uint64_t>>;
 
   // Enum values representing values retrieved from patchpanel.
   enum TrafficCounterVals {
@@ -75,7 +75,7 @@ class Service : public base::RefCounted<Service> {
   static const char kCheckPortalFalse[];
   static const char kCheckPortalTrue[];
 
-  static const char kErrorDetailsNone[];
+  static constexpr std::string_view kErrorDetailsNone = "";
 
   // TODO(pstew): Storage constants shouldn't need to be public
   // crbug.com/208736
@@ -109,6 +109,10 @@ class Service : public base::RefCounted<Service> {
   // expect them to be read from patchpanel and stored in the profile.
   static const char* const kStorageTrafficCounterSuffixes[];
   static const char kStorageTrafficCounterResetTime[];
+  // The datetime of the last connection attempt.
+  static const char kStorageLastManualConnectAttempt[];
+  static const char kStorageLastConnected[];
+  static const char kStorageLastOnline[];
 
   static const uint8_t kStrengthMax;
   static const uint8_t kStrengthMin;
@@ -126,6 +130,7 @@ class Service : public base::RefCounted<Service> {
     kFailureEAPLocalTLS,
     kFailureEAPRemoteTLS,
     kFailureHTTPGet,
+    kFailureInvalidAPN,
     kFailureIPsecCertAuth,
     kFailureIPsecPSKAuth,
     kFailureInternal,
@@ -147,6 +152,11 @@ class Service : public base::RefCounted<Service> {
     // switches to a different network. These errors are generally ignored by
     // the client (i.e. Chrome).
     kFailureDisconnect,
+    kFailureSimCarrierLocked,
+    // The service had to delay handling the connect request, but upon retrying
+    // the connect itself ran into a synchronous failure setting up the
+    // connection (i.e. as if the D-Bus call itself would have failed).
+    kFailureDelayedConnectSetup,
     kFailureMax
   };
   enum ConnectState {
@@ -189,7 +199,8 @@ class Service : public base::RefCounted<Service> {
 
   enum UpdateCredentialsReason {
     kReasonCredentialsLoaded,
-    kReasonPropertyUpdate
+    kReasonPropertyUpdate,
+    kReasonPasspointMatch
   };
 
   // Enumeration of possible ONC sources.
@@ -202,12 +213,36 @@ class Service : public base::RefCounted<Service> {
     kONCSourcesNum,  // Number of enum values above. Keep it last.
   };
 
+  enum class TetheringState {
+    kUnknown,
+    kNotDetected,
+    kSuspected,
+    kConfirmed,
+  };
+
   static const int kPriorityNone;
+
+  // Helper types and struct used for recording transition times between certain
+  // Connection states of a Service.
+  using TimerReporters =
+      std::vector<std::unique_ptr<chromeos_metrics::TimerReporter>>;
+  using TimerReportersList = std::list<chromeos_metrics::TimerReporter*>;
+  using TimerReportersByState = std::map<ConnectState, TimerReportersList>;
+  struct ServiceMetrics {
+    // All TimerReporter objects are stored in |timers| which owns the objects.
+    // |start_on_state| and |stop_on_state| contain pointers to the
+    // TimerReporter objects and control when to start and stop the timers.
+    TimerReporters timers;
+    TimerReportersByState start_on_state;
+    TimerReportersByState stop_on_state;
+  };
 
   // A constructor for the Service object
   Service(Manager* manager, Technology technology);
   Service(const Service&) = delete;
   Service& operator=(const Service&) = delete;
+
+  ServiceMetrics* service_metrics() const { return service_metrics_.get(); }
 
   // AutoConnect MAY choose to ignore the connection request in some
   // cases. For example, if the corresponding Device only supports one
@@ -278,7 +313,7 @@ class Service : public base::RefCounted<Service> {
 
   mockable bool IsConnected(Error* error = nullptr) const;
   mockable bool IsConnecting() const;
-  bool IsDisconnecting() const;
+  mockable bool IsDisconnecting() const;
   mockable bool IsPortalled() const;
   mockable bool IsFailed() const;
   mockable bool IsInFailState() const;
@@ -297,7 +332,20 @@ class Service : public base::RefCounted<Service> {
   mockable void SetFailureSilent(ConnectFailure failure);
 
   // Returns a TimeDelta from |failed_time_| or nullopt if unset (no failure).
-  base::Optional<base::TimeDelta> GetTimeSinceFailed() const;
+  std::optional<base::TimeDelta> GetTimeSinceFailed() const;
+
+  void set_failed_time_for_testing(base::Time failed_time) {
+    failed_time_ = failed_time;
+  }
+
+  void set_previous_error_for_testing(const std::string& error) {
+    previous_error_ = error;
+  }
+
+  void set_time_resume_to_ready_timer_for_testing(
+      std::unique_ptr<chromeos_metrics::Timer> timer) {
+    time_resume_to_ready_timer_ = std::move(timer);
+  }
 
   unsigned int serial_number() const { return serial_number_; }
   const std::string& log_name() const { return log_name_; }
@@ -306,18 +354,13 @@ class Service : public base::RefCounted<Service> {
   int SourcePriority();
 
   // Returns |serial_number_| as a string for constructing a dbus object path.
-  std::string GetDBusObjectPathIdentifer() const;
+  std::string GetDBusObjectPathIdentifier() const;
 
   // Returns the RpcIdentifier for the ServiceAdaptorInterface.
   mockable const RpcIdentifier& GetRpcIdentifier() const;
 
   // Returns the unique persistent storage identifier for the service.
   virtual std::string GetStorageIdentifier() const = 0;
-
-  // Returns whether this service is the Always-On VPN connection indicated by
-  // the package name. Here, "package" refers to an Android package running
-  // inside an ARC++ container.
-  virtual bool IsAlwaysOnVpn(const std::string& package) const { return false; }
 
   // Returns the identifier within |storage| from which configuration for
   // this service can be loaded.  Returns an empty string if no entry in
@@ -337,11 +380,6 @@ class Service : public base::RefCounted<Service> {
   // Invoked after Load for migrating storage properties. Ensures migration for
   // services loaded from a Profile. Services not loaded will not get migrated,
   // thus it is best to maintain migration for several releases.
-  //
-  // NOTE: In order to support rollbacks (go/rollback-data-restore) profiles
-  // also need to maintain backwards compatibility for four release cycles
-  // before important deprecated properties should be deleted (see notes in
-  // WiFiService::Save).
   virtual void MigrateDeprecatedStorage(StoreInterface* storage);
 
   // Indicate to service that it is no longer persisted to storage.  It
@@ -367,13 +405,13 @@ class Service : public base::RefCounted<Service> {
   // keys in |args| do not exist or have different values, true otherwise.
   mockable bool DoPropertiesMatch(const KeyValueStore& args) const;
 
-  // Returns whether portal detection is explicitly disabled on this service
-  // via a property set on it.
+  // Returns whether portal detection is disabled by configuration on this
+  // service. This is the case if any of the following conditions is met:
+  //   - Property "CheckPortal" is set to "false".
+  //   - Property "CheckPortal" is set to "auto" and portal detection is
+  //     disabled for the link technology of this Service.
+  //   - The Service has a proxy configuration defined.
   mockable bool IsPortalDetectionDisabled() const;
-
-  // Returns whether portal detection is set to follow the default setting
-  // of this service's technology via a property set on it.
-  mockable bool IsPortalDetectionAuto() const;
 
   // Returns true if the service is persisted to a non-ephemeral profile.
   mockable bool IsRemembered() const;
@@ -382,8 +420,9 @@ class Service : public base::RefCounted<Service> {
   // manager's advertised services list, false otherwise.
   virtual bool IsVisible() const { return true; }
 
-  // Returns true if there is a proxy configuration set on this service.
-  mockable bool HasProxyConfig() const { return !proxy_config_.empty(); }
+  // Returns true if there is a proxy configuration (excluding proxy setting
+  // "direct") set on this service.
+  mockable bool HasProxyConfig() const;
 
   // Returns whether this service has had recent connection issues.
   mockable bool HasRecentConnectionIssues();
@@ -392,16 +431,24 @@ class Service : public base::RefCounted<Service> {
   // its value to true and mark it saved.
   virtual void EnableAndRetainAutoConnect();
 
-  // Set the connection for this service.  If the connection is non-NULL, create
-  // an HTTP Proxy that will utilize this service's connection to serve
-  // requests.
-  virtual void SetConnection(const ConnectionRefPtr& connection);
-  mockable const ConnectionRefPtr& connection() const { return connection_; }
+  // Reset |auto_connect_cooldown_| and cancel |reenable_auto_connect_task_|,
+  // but don't notify manager on the service update.
+  mockable void ResetAutoConnectCooldownTime();
 
-  // Emit service's IP config change event to chrome.
-  mockable void NotifyIPConfigChanges();
+  // Returns the Network attached to this Service, or nullptr if the Service is
+  // not connected and has no associated Network.
+  Network* attached_network() const { return attached_network_.get(); }
+  // Notifies Service that a connecting or connected Network is attached to this
+  // Service.
+  mockable void SetAttachedNetwork(base::WeakPtr<Network> network);
+  // Notifies D-Bus listeners of a IPConfig change event if the new IPConfig is
+  // not empty.
+  void EmitIPConfigPropertyChange();
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
+  // Returns the virtual device associated with this service. Currently this
+  // will return a Device pointer only for a connected VPN service.
+  virtual VirtualDeviceRefPtr GetVirtualDevice() const;
+
   // Examines the EAP credentials for the service and returns true if a
   // connection attempt can be made.
   mockable bool Is8021xConnectable() const;
@@ -411,24 +458,25 @@ class Service : public base::RefCounted<Service> {
   mockable bool AddEAPCertification(const std::string& name, size_t depth);
   // Clear all EAP certification elements.
   mockable void ClearEAPCertification();
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
-  // Returns true if this service contains a IP address in its static IP
-  // parameters, false otherwise.
-  mockable bool HasStaticIPAddress() const;
-
-  // Returns true if this service contains nameservers in its static IP
-  // parameters, false otherwise.
-  mockable bool HasStaticNameServers() const;
+  // Set PKCS#11 slot getter for |eap_|.
+  void SetEapSlotGetter(Pkcs11SlotGetter* slot_getter);
 
   // The inherited class that needs to send metrics after the service has
   // transitioned to the ready state should override this method.
-  // |time_resume_to_ready_milliseconds| holds the elapsed time from when
+  // |time_resume_to_ready| holds the elapsed time from when
   // the system was resumed until when the service transitioned to the
   // connected state.  This value is non-zero for the first service transition
   // to the connected state after a resume.
   virtual void SendPostReadyStateMetrics(
-      int64_t /*time_resume_to_ready_milliseconds*/) const {}
+      base::TimeDelta /*time_resume_to_ready*/) const {}
+
+  // Setter and getter for uplink and downlink speeds for the service.
+  // The unit of both link speeds are Kbps.
+  mockable void SetUplinkSpeedKbps(uint32_t uplink_speed_kbps);
+  uint32_t uplink_speed_kbps() const { return uplink_speed_kbps_; }
+  mockable void SetDownlinkSpeedKbps(uint32_t downlink_speed_kbps);
+  uint32_t downlink_speed_kbps() const { return downlink_speed_kbps_; }
 
   bool auto_connect() const { return auto_connect_; }
   void SetAutoConnect(bool connect);
@@ -444,13 +492,6 @@ class Service : public base::RefCounted<Service> {
 
   mockable bool explicitly_disconnected() const {
     return explicitly_disconnected_;
-  }
-
-  // Return RPC identifier for device that's internal to this service, which is
-  // not registered with the manager.
-  virtual const RpcIdentifier& GetInnerDeviceRpcIdentifier() const {
-    static RpcIdentifier null_identifier;
-    return null_identifier;
   }
 
   bool retain_auto_connect() const { return retain_auto_connect_; }
@@ -470,6 +511,8 @@ class Service : public base::RefCounted<Service> {
 
   bool is_in_user_connect() const { return is_in_user_connect_; }
 
+  bool is_in_auto_connect() const { return is_in_auto_connect_; }
+
   int32_t priority() const { return priority_; }
   bool SetPriority(const int32_t& priority, Error* error);
 
@@ -484,13 +527,14 @@ class Service : public base::RefCounted<Service> {
   uint16_t strength() const { return strength_; }
 
   mockable Technology technology() const { return technology_; }
-  std::string GetTechnologyString() const;
+  std::string GetTechnologyName() const;
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   mockable const EapCredentials* eap() const { return eap_.get(); }
   void SetEapCredentials(EapCredentials* eap);
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
   std::string GetEapPassphrase(Error* error);
+
+  //  Implements Service.RequestPortalDetection.
+  void RequestPortalDetection(Error* error);
 
   bool save_credentials() const { return save_credentials_; }
   void set_save_credentials(bool save) { save_credentials_ = save; }
@@ -499,10 +543,14 @@ class Service : public base::RefCounted<Service> {
   void set_error(const std::string& error) { error_ = error; }
 
   const std::string& error_details() const { return error_details_; }
-  void SetErrorDetails(const std::string& details);
+  void SetErrorDetails(std::string_view details);
 
-  static const char* ConnectFailureToString(const ConnectFailure& state);
-  static const char* ConnectStateToString(const ConnectState& state);
+  static const char* ConnectFailureToString(ConnectFailure failure);
+  static const char* ConnectStateToString(ConnectState state);
+  static Metrics::NetworkServiceError ConnectFailureToMetricsEnum(
+      ConnectFailure failure);
+  static Metrics::UserInitiatedConnectionFailureReason
+  ConnectFailureToFailureReason(ConnectFailure failure);
 
   // Compare two services.  The first element of the result pair is true if
   // Service |a| should be displayed above |b|.  If |compare_connectivity_state|
@@ -546,7 +594,7 @@ class Service : public base::RefCounted<Service> {
 
   // Notification that occurs when a single property has been changed via
   // the RPC adaptor.
-  mockable void OnPropertyChanged(const std::string& property);
+  mockable void OnPropertyChanged(std::string_view property);
 
   // Notification that occurs when an EAP credential property has been
   // changed.  Some service subclasses can choose to respond to this
@@ -563,7 +611,7 @@ class Service : public base::RefCounted<Service> {
   //
   // The default implementation invokes the |callback| immediately, since
   // there is nothing to be done in the general case.
-  virtual void OnBeforeSuspend(const ResultCallback& callback);
+  virtual void OnBeforeSuspend(ResultCallback callback);
 
   // Called by the manager once after a resume.
   virtual void OnAfterResume();
@@ -579,23 +627,10 @@ class Service : public base::RefCounted<Service> {
   // disconnected.
   mockable void ClearExplicitlyDisconnected();
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   EapCredentials* mutable_eap() { return eap_.get(); }
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
-
-  const DhcpProperties& dhcp_properties() const { return *dhcp_properties_; }
-  DhcpProperties* dhcp_properties_for_testing() {
-    return dhcp_properties_.get();
-  }
 
   PropertyStore* mutable_store() { return &store_; }
   const PropertyStore& store() const { return store_; }
-  StaticIPParameters* mutable_static_ip_parameters() {
-    return &static_ip_parameters_;
-  }
-  const StaticIPParameters& static_ip_parameters() const {
-    return static_ip_parameters_;
-  }
 
   // Retrieves |key| from |id| in |storage| to |value|.  If this key does
   // not exist, assign |default_value| to |value|.
@@ -623,24 +658,29 @@ class Service : public base::RefCounted<Service> {
 
   std::string CalculateTechnology(Error* error);
 
-  // Return whether this service is suspected or confirmed to be
-  // provided by a mobile device, which is likely to be using a
-  // metered backhaul for internet connectivity.
-  virtual std::string GetTethering(Error* error) const;
+  // Return whether this service is suspected or confirmed to be provided by a
+  // mobile device, which is likely to be using a metered backhaul for internet
+  // connectivity.
+  virtual TetheringState GetTethering() const;
+
+  // If the user has explicitly designated this connection to be metered
+  // or unmetered, returns that value. Otherwise, returns whether or not the
+  // connection is confirmed or inferred to be metered.
+  bool IsMetered() const;
 
   // Initializes the traffic_counter_snapshot_ map to the counter values. The
   // snapshots should never be updated without also refreshing the counters.
   mockable void InitializeTrafficCounterSnapshot(
-      const std::vector<patchpanel::TrafficCounter>& counters);
+      const std::vector<patchpanel::Client::TrafficCounter>& counters);
   // Increment the current_traffic_counters_ map by the difference between the
   // counter values and the traffic_counter_snapshot_ values, and then update
   // the snapshots as well in one atomic step.
   mockable void RefreshTrafficCounters(
-      const std::vector<patchpanel::TrafficCounter>& counters);
+      const std::vector<patchpanel::Client::TrafficCounter>& counters);
   // Requests traffic counters from patchpanel and returns the result in
   // |callback|.
   mockable void RequestTrafficCounters(
-      Error* error, const ResultVariantDictionariesCallback& callback);
+      ResultVariantDictionariesCallback callback);
   // Resets traffic counters for |this|.
   mockable void ResetTrafficCounters(Error* error);
 
@@ -653,6 +693,21 @@ class Service : public base::RefCounted<Service> {
   TrafficCounterMap& traffic_counter_snapshot() {
     return traffic_counter_snapshot_;
   }
+
+  void increment_portal_detection_count() { portal_detection_count_++; }
+  int portal_detection_count() const { return portal_detection_count_; }
+
+  // Read only access to previous error number.  This can f.e. be used to check
+  // if SetFailure*() has been called for a service without any additional flags
+  // - just check if it has been changed.
+  int32_t previous_error_number() const {
+    return previous_error_serial_number_;
+  }
+
+  // Update ServiceMetrics state and notifies UMA this object that |service|
+  // state has changed if the new state is an error state. Visible for unit
+  // tests.
+  void UpdateStateTransitionMetrics(Service::ConnectState new_state);
 
   // The components of this array are rx_bytes, tx_bytes, rx_packets, tx_packets
   // in that order.
@@ -679,9 +734,13 @@ class Service : public base::RefCounted<Service> {
   // point to C-string explaining why the service is not auto-connectable.
   virtual bool IsAutoConnectable(const char** reason) const;
 
+  // Returns minimum auto connect cooldown time for ThrottleFutureAutoConnects.
+  // May be overridden for types that require a longer cooldown period.
+  virtual base::TimeDelta GetMinAutoConnectCooldownTime() const;
+
   // Returns maximum auto connect cooldown time for ThrottleFutureAutoConnects.
   // May be overridden for types that require a longer cooldown period.
-  virtual uint64_t GetMaxAutoConnectCooldownTimeMilliseconds() const;
+  virtual base::TimeDelta GetMaxAutoConnectCooldownTime() const;
 
   // Returns true if a Service can be disconnected, otherwise returns false and
   // sets |error|. By default tests whether the Service is active.
@@ -694,40 +753,34 @@ class Service : public base::RefCounted<Service> {
   // Reads of the property will be handled by invoking |get|.
   // Writes to the property will be handled by invoking |set|.
   // Clearing the property will be handled by PropertyStore.
-  void HelpRegisterDerivedBool(const std::string& name,
+  void HelpRegisterDerivedBool(std::string_view name,
                                bool (Service::*get)(Error* error),
                                bool (Service::*set)(const bool& value,
                                                     Error* error),
                                void (Service::*clear)(Error* error));
-  void HelpRegisterDerivedInt32(const std::string& name,
+  void HelpRegisterDerivedInt32(std::string_view name,
                                 int32_t (Service::*get)(Error* error),
                                 bool (Service::*set)(const int32_t& value,
                                                      Error* error));
-  void HelpRegisterDerivedUint64(const std::string& name,
-                                 uint64_t (Service::*get)(Error* error),
-                                 bool (Service::*set)(const uint64_t& value,
-                                                      Error* error));
-  void HelpRegisterDerivedString(const std::string& name,
+  void HelpRegisterDerivedString(std::string_view name,
                                  std::string (Service::*get)(Error* error),
                                  bool (Service::*set)(const std::string& value,
                                                       Error* error));
   void HelpRegisterConstDerivedRpcIdentifier(
-      const std::string& name, RpcIdentifier (Service::*get)(Error*) const);
-  void HelpRegisterConstDerivedStrings(const std::string& name,
+      std::string_view name, RpcIdentifier (Service::*get)(Error*) const);
+  void HelpRegisterConstDerivedStrings(std::string_view name,
                                        Strings (Service::*get)(Error* error)
                                            const);
-  void HelpRegisterConstDerivedString(const std::string& name,
+  void HelpRegisterConstDerivedString(std::string_view name,
                                       std::string (Service::*get)(Error* error)
                                           const);
-  void HelpRegisterConstDerivedUint64(const std::string& name,
+  void HelpRegisterConstDerivedUint64(std::string_view name,
                                       uint64_t (Service::*get)(Error* error)
                                           const);
 
   ServiceAdaptorInterface* adaptor() const { return adaptor_.get(); }
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   void UnloadEapCredentials();
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
   // Ignore |parameter| when performing a Configure() operation.
   void IgnoreParameterForConfigure(const std::string& parameter);
@@ -746,10 +799,8 @@ class Service : public base::RefCounted<Service> {
   void ClearAutoConnect(Error* error);
 
   // Property accessors reserved for subclasses
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   const std::string& GetEAPKeyManagement() const;
   virtual void SetEAPKeyManagement(const std::string& key_management);
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
 
   EventDispatcher* dispatcher() const;
   Metrics* metrics() const;
@@ -758,6 +809,10 @@ class Service : public base::RefCounted<Service> {
   // Save the service's auto_connect value, without affecting its auto_connect
   // property itself. (cf. EnableAndRetainAutoConnect)
   void RetainAutoConnect();
+
+  // Disables autoconnect and posts a task to re-enable it after a cooldown.
+  // Note that autoconnect could be disabled for other reasons as well.
+  void ThrottleFutureAutoConnects();
 
   // Inform base class of the security properties for the service.
   //
@@ -771,6 +826,32 @@ class Service : public base::RefCounted<Service> {
   // True if the properties of this network connection (e.g. user contract)
   // imply it is metered.
   virtual bool IsMeteredByServiceProperties() const;
+
+  // Read only access to previous state for derived classes.  This is e.g. used
+  // by WiFiService to keep track of disconnect time.
+  ConnectState previous_state() const { return previous_state_; }
+
+  // Compare two services with the same technology. Each technology can override
+  // it with its own implementation to sort services with its own criteria.
+  // It returns true if |service| is different from |this|. When they are,
+  // "decision" is populated with the boolean value of "this > service".
+  virtual bool CompareWithSameTechnology(const ServiceRefPtr& service,
+                                         bool* decision);
+
+  // Utility function that returns true if a is different from b.  When they
+  // are, "decision" is populated with the boolean value of "a > b".
+  static bool DecideBetween(int a, int b, bool* decision);
+
+  // Used by VPNService.
+  StaticIPParameters* mutable_static_ip_parameters() {
+    return &static_ip_parameters_;
+  }
+
+  // Tracks the time it takes |service| to go from |start_state| to
+  // |stop_state|.  When |stop_state| is reached, the time is sent to UMA.
+  void AddServiceStateTransitionTimer(const std::string& histogram_name,
+                                      ConnectState start_state,
+                                      ConnectState stop_state);
 
   // Service's user friendly name, mapped to the Service Object kNameProperty.
   // Use |log_name_| for logging to avoid logging PII.
@@ -790,14 +871,17 @@ class Service : public base::RefCounted<Service> {
   static const char kAutoConnTechnologyNotAutoConnectable[];
   static const char kAutoConnThrottled[];
   static const char kAutoConnMediumUnavailable[];
+  static const char kAutoConnRecentBadPassphraseFailure[];
 
  private:
+  friend class DevicePortalDetectorTest;
   friend class EthernetEapServiceTest;
   friend class EthernetServiceTest;
   friend class MetricsTest;
   friend class ManagerTest;
   friend class ServiceAdaptorInterface;
   friend class ServiceTest;
+  friend class StaticIPParametersTest;
   friend class VPNProviderTest;
   friend class VPNServiceTest;
   friend class WiFiServiceTest;
@@ -807,13 +891,9 @@ class Service : public base::RefCounted<Service> {
   FRIEND_TEST(AllMockServiceTest, AutoConnectWithFailures);
   FRIEND_TEST(CellularServiceTest, IsAutoConnectable);
   FRIEND_TEST(CellularServiceTest, IsMeteredByDefault);
-  FRIEND_TEST(DeviceTest, AcquireIPConfigWithoutSelectedService);
-  FRIEND_TEST(DeviceTest, AcquireIPConfigWithSelectedService);
-  FRIEND_TEST(DeviceTest, IPConfigUpdatedFailureWithStatic);
   FRIEND_TEST(DeviceTest, FetchTrafficCounters);
   FRIEND_TEST(ManagerTest, ConnectToBestServices);
   FRIEND_TEST(ManagerTest, RefreshAllTrafficCountersTask);
-  FRIEND_TEST(ServiceTest, AutoConnectLogging);
   FRIEND_TEST(ServiceTest, CalculateState);
   FRIEND_TEST(ServiceTest, CalculateTechnology);
   FRIEND_TEST(ServiceTest, Certification);
@@ -827,18 +907,20 @@ class Service : public base::RefCounted<Service> {
   FRIEND_TEST(ServiceTest, GetProperties);
   FRIEND_TEST(ServiceTest, IsAutoConnectable);
   FRIEND_TEST(ServiceTest, IsNotMeteredByDefault);
+  FRIEND_TEST(ServiceTest, IsPortalDetectionDisabled);
   FRIEND_TEST(ServiceTest, Load);
   FRIEND_TEST(ServiceTest, LoadTrafficCounters);
   FRIEND_TEST(ServiceTest, MeteredOverride);
   FRIEND_TEST(ServiceTest, PortalDetectionFailure);
-  FRIEND_TEST(ServiceTest, RecheckPortal);
   FRIEND_TEST(ServiceTest, Save);
+  FRIEND_TEST(ServiceTest, SaveAndLoadConnectionTimestamps);
   FRIEND_TEST(ServiceTest, SaveMeteredOverride);
   FRIEND_TEST(ServiceTest, SaveTrafficCounters);
   FRIEND_TEST(ServiceTest, SecurityLevel);
   FRIEND_TEST(ServiceTest, SetCheckPortal);
   FRIEND_TEST(ServiceTest, SetConnectableFull);
   FRIEND_TEST(ServiceTest, SetFriendlyName);
+  FRIEND_TEST(ServiceTest, SetProxyConfig);
   FRIEND_TEST(ServiceTest, SetProperty);
   FRIEND_TEST(ServiceTest, State);
   FRIEND_TEST(ServiceTest, StateResetAfterFailure);
@@ -855,11 +937,9 @@ class Service : public base::RefCounted<Service> {
   FRIEND_TEST(WiFiMainTest, EAPEvent);  // For eap_.
   FRIEND_TEST(EthernetEapServiceTest, OnEapCredentialsChanged);
 
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   static const size_t kEAPMaxCertificationElements;
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
-
-  static const uint64_t kMinAutoConnectCooldownTimeMilliseconds;
+  static const base::TimeDelta kMinAutoConnectCooldownTime;
+  static const base::TimeDelta kMaxAutoConnectCooldownTime;
   static const uint64_t kAutoConnectCooldownBackoffFactor;
 
   static const int kDisconnectsMonitorSeconds;
@@ -898,6 +978,14 @@ class Service : public base::RefCounted<Service> {
 
   uint64_t GetTrafficCounterResetTimeProperty(Error* error) const;
 
+  uint64_t GetLastManualConnectAttemptProperty(Error* error) const;
+  uint64_t GetLastConnectedProperty(Error* error) const;
+  uint64_t GetLastOnlineProperty(Error* error) const;
+
+  void SetLastManualConnectAttemptProperty(const base::Time& value);
+  void SetLastConnectedProperty(const base::Time& value);
+  void SetLastOnlineProperty(const base::Time& value);
+
   bool GetMeteredProperty(Error* error);
   bool SetMeteredProperty(const bool& metered, Error* error);
   void ClearMeteredProperty(Error* error);
@@ -909,10 +997,6 @@ class Service : public base::RefCounted<Service> {
   ONCSource ParseONCSourceFromUIData();
 
   void ReEnableAutoConnectTask();
-  // Disables autoconnect and posts a task to re-enable it after a cooldown.
-  // Note that autoconnect could be disabled for other reasons as well.
-  void ThrottleFutureAutoConnects();
-
   // Saves settings to current Profile, if we have one. Unlike
   // Manager::PersistService, SaveToProfile never assigns this Service to a
   // Profile.
@@ -923,10 +1007,6 @@ class Service : public base::RefCounted<Service> {
   // action.
   void NoteFailureEvent();
 
-  // Utility function that returns true if a is different from b.  When they
-  // are, "decision" is populated with the boolean value of "a > b".
-  static bool DecideBetween(int a, int b, bool* decision);
-
   // Report the result of user-initiated connection attempt to UMA stats.
   // Currently only report stats for wifi service.
   void ReportUserInitiatedConnectionResult(ConnectState state);
@@ -935,22 +1015,32 @@ class Service : public base::RefCounted<Service> {
   // authentication) for comparison.
   uint16_t SecurityLevel();
 
-  // If the user has explicitly designated this connection to be metered
-  // or unmetered, returns that value. Otherwise, returns whether or not the
-  // connection is confirmed or inferred to be metered.
-  bool IsMetered() const;
-
   // Get the storage key for current traffic counters corresponding
   // to |source| and |suffix| (one of kStorageTrafficCounterSuffixes).
   static std::string GetCurrentTrafficCounterKey(
-      patchpanel::TrafficCounter::Source source, std::string suffix);
+      patchpanel::Client::TrafficSource source, std::string suffix);
 
   // Refreshes and processes the traffic counters using |counters| and returns
   // the result through |callback|.
   void RequestTrafficCountersCallback(
-      Error* error,
-      const ResultVariantDictionariesCallback& callback,
-      const std::vector<patchpanel::TrafficCounter>& counters);
+      ResultVariantDictionariesCallback callback,
+      const std::vector<patchpanel::Client::TrafficCounter>& counters);
+
+  // Invokes |static_ipconfig_changed_callback_| to notify the listener of the
+  // change of static IP config.
+  void NotifyStaticIPConfigChanged();
+
+  // Getter for the SavedIPConfig property in D-Bus API.
+  KeyValueStore GetSavedIPConfig(Error* /*error*/);
+
+  // Requests to start portal detection if the Service is connected and
+  // portal detection became enabled. Otherwise request to stop portal
+  // detection if the Service is connected and portal detection became
+  // disabled.
+  void OnPortalDetectionConfigurationChange();
+
+  void InitializeServiceStateTransitionMetrics();
+  void UpdateServiceStateTransitionMetrics(Service::ConnectState new_state);
 
   // WeakPtrFactory comes first, so that other fields can use it.
   base::WeakPtrFactory<Service> weak_ptr_factory_;
@@ -973,7 +1063,7 @@ class Service : public base::RefCounted<Service> {
   // attempted while disconnecting. In the case that a distinct Connect
   // invocation occurs between disconnect completion and the invocation of this
   // task, this will be canceled to avoid spurious Connect errors.
-  base::CancelableClosure pending_connect_task_;
+  base::CancelableOnceClosure pending_connect_task_;
 
   std::string check_portal_;
   bool connectable_;
@@ -983,7 +1073,9 @@ class Service : public base::RefCounted<Service> {
   int32_t previous_error_serial_number_;
   bool explicitly_disconnected_;
   bool is_in_user_connect_;
+  bool is_in_auto_connect_;
   int32_t priority_;
+  int32_t ephemeral_priority_ = 0;
   uint8_t crypto_algorithm_;
   bool key_rotation_;
   bool endpoint_auth_;
@@ -999,12 +1091,8 @@ class Service : public base::RefCounted<Service> {
   bool save_credentials_;
   // If this is nullopt, try to infer whether or not this service is metered
   // by e.g. technology type.
-  base::Optional<bool> metered_override_;
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
+  std::optional<bool> metered_override_;
   std::unique_ptr<EapCredentials> eap_;
-#endif  // DISABLE_WIFI || DISABLE_WIRED_8021X
-  // Per-service DHCPProperties are supported for go/jetstream.
-  std::unique_ptr<DhcpProperties> dhcp_properties_;
   Technology technology_;
   // The time of the most recent failure. Value is null if the service is not
   // currently failed.
@@ -1015,8 +1103,8 @@ class Service : public base::RefCounted<Service> {
   EventHistory disconnects_;  // Connection drops.
   EventHistory misconnects_;  // Failures to connect.
 
-  base::CancelableClosure reenable_auto_connect_task_;
-  uint64_t auto_connect_cooldown_milliseconds_;
+  base::CancelableOnceClosure reenable_auto_connect_task_;
+  base::TimeDelta auto_connect_cooldown_;
 
   ProfileRefPtr profile_;
   PropertyStore store_;
@@ -1028,8 +1116,11 @@ class Service : public base::RefCounted<Service> {
   // List of subject names reported by remote entity during TLS setup.
   std::vector<std::string> remote_certification_;
 
+  // The Network which is attached to this Service now, if there is any. Service
+  // will push static IP configs to the attached network.
+  base::WeakPtr<Network> attached_network_;
+
   std::unique_ptr<ServiceAdaptorInterface> adaptor_;
-  ConnectionRefPtr connection_;
   StaticIPParameters static_ip_parameters_;
   Manager* manager_;
 
@@ -1055,6 +1146,22 @@ class Service : public base::RefCounted<Service> {
   TrafficCounterMap traffic_counter_snapshot_;
   // Represents when traffic counters were last reset.
   base::Time traffic_counter_reset_time_;
+
+  // Counts the total number of portal detection attempts for the current active
+  // connection.
+  int portal_detection_count_ = 0;
+
+  // Uplink and downlink speed for the service in Kbps.
+  uint32_t uplink_speed_kbps_ = 0;
+  uint32_t downlink_speed_kbps_ = 0;
+
+  std::unique_ptr<chromeos_metrics::Timer> time_resume_to_ready_timer_;
+  std::unique_ptr<ServiceMetrics> service_metrics_;
+  // Timestamps of last manual connect attempt, last successful connection and
+  // last time online.
+  base::Time last_manual_connect_attempt_;
+  base::Time last_connected_;
+  base::Time last_online_;
 };
 
 }  // namespace shill

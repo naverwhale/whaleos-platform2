@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,13 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/scoped_refptr.h>
 #include <base/synchronization/waitable_event.h>
 #include <brillo/dbus/dbus_method_invoker.h>
-#include <brillo/dbus/file_descriptor.h>
 #include <brillo/errors/error.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
@@ -39,7 +39,7 @@ constexpr int kOcrServiceDBusTimeout = 5 * 1000;
 
 // Sends |raw_fd| to OCR Daemon via D-Bus. Sets |token_out| to a unique token
 // which can be used to create a message pipe to the OCR service.
-void DoDBusBootstrap(int raw_fd,
+void DoDBusBootstrap(base::ScopedFD fd,
                      base::WaitableEvent* event,
                      std::string* token_out,
                      bool* success) {
@@ -53,11 +53,10 @@ void DoDBusBootstrap(int raw_fd,
   dbus::ObjectProxy* ocr_service_proxy =
       bus->GetObjectProxy(kOcrServiceName, dbus::ObjectPath(kOcrServicePath));
 
-  brillo::dbus_utils::FileDescriptor fd(raw_fd);
   brillo::ErrorPtr error;
   auto response = brillo::dbus_utils::CallMethodAndBlockWithTimeout(
       kOcrServiceDBusTimeout, ocr_service_proxy, kOcrServiceInterface,
-      kBootstrapMojoConnectionMethod, &error, fd,
+      kBootstrapMojoConnectionMethod, &error, std::move(fd),
       false /* should_accept_invitation */);
 
   if (!response) {
@@ -110,10 +109,9 @@ OcrServiceMojoAdapterDelegateImpl::GetOcrService() {
   bool success;
   dbus_thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::BindOnce(
-          &DoDBusBootstrap,
-          channel.TakeRemoteEndpoint().TakePlatformHandle().TakeFD().release(),
-          &event, &token, &success));
+      base::BindOnce(&DoDBusBootstrap,
+                     channel.TakeRemoteEndpoint().TakePlatformHandle().TakeFD(),
+                     &event, &token, &success));
   event.Wait();
 
   if (!success)

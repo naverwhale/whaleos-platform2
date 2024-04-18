@@ -1,13 +1,14 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "trunks/hmac_authorization_delegate.h"
 
+#include <iterator>
+
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <crypto/secure_util.h>
 #include <openssl/aes.h>
 #include <openssl/hmac.h>
@@ -304,7 +305,7 @@ void HmacAuthorizationDelegate::AesOperation(std::string* parameter,
   AES_cfb128_encrypt(reinterpret_cast<const unsigned char*>(parameter->data()),
                      decrypted, parameter->size(), &key, aes_iv, &iv_offset,
                      operation_type);
-  memcpy(base::data(*parameter), decrypted, parameter->size());
+  memcpy(std::data(*parameter), decrypted, parameter->size());
 }
 
 void HmacAuthorizationDelegate::RegenerateCallerNonce() {

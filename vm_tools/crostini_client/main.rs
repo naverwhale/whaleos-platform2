@@ -1,10 +1,9 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 pub mod disk;
 pub mod frontends;
-pub mod lsb_release;
 pub mod methods;
 pub mod proto;
 pub mod unsafe_misc;
@@ -16,6 +15,7 @@ use std::error::Error;
 use getopts::Options;
 
 use frontends::{EnvMap, FRONTENDS};
+use libchromeos::panic_handler::install_memfd_handler;
 use methods::Methods;
 
 fn make_options() -> Options {
@@ -48,6 +48,7 @@ fn print_usage(program_name: &str, opts: &Options) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    install_memfd_handler();
     let args_string: Vec<String> = env::args().collect();
     let args: Vec<&str> = args_string.iter().map(|s| s.as_str()).collect();
     let vars_string: BTreeMap<String, String> = env::vars().collect();
@@ -69,7 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if args.len() == 1 {
-        print_usage(&args[0], &make_options());
+        print_usage(args[0], &make_options());
         return Ok(());
     }
 

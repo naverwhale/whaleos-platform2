@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,9 @@
 #include <base/command_line.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
-#include <metrics/metrics_library.h>
 
 #include <rfb/rfb.h>
 
-#include "screen-capture-utils/bo_import_capture.h"
 #include "screen-capture-utils/capture.h"
 #include "screen-capture-utils/crtc.h"
 #include "screen-capture-utils/egl_capture.h"
@@ -29,7 +27,7 @@ namespace {
 constexpr const char kInternalSwitch[] = "internal";
 constexpr const char kExternalSwitch[] = "external";
 constexpr const char kCrtcIdSwitch[] = "crtc-id";
-constexpr const char kMethodSwitch[] = "method";
+constexpr const char kRotateSwitch[] = "rotate";
 
 constexpr const int kFindCrtcMaxRetries = 5;
 const timespec kFindCrtcRetryInterval{0, 100000000};  // 100ms
@@ -83,11 +81,15 @@ class FpsTimer {
   double Elapsed() const {
     struct timeval end_time;
     PCHECK(gettimeofday(&end_time, NULL) != -1);
-    double seconds = (end_time.tv_sec - start_time_.tv_sec) +
-                     (end_time.tv_usec - start_time_.tv_usec) / 1000.0 / 1000.0;
+    double seconds =
+        static_cast<double>(end_time.tv_sec - start_time_.tv_sec) +
+        static_cast<double>(end_time.tv_usec - start_time_.tv_usec) / 1000.0 /
+            1000.0;
     return seconds;
   }
-  double Get(size_t frames) const { return frames / Elapsed(); }
+  double Get(size_t frames) const {
+    return static_cast<double>(frames) / Elapsed();
+  }
 };
 
 class ScopedSigaction {
@@ -118,17 +120,6 @@ void SignalHandler(int signum) {
   g_shutdown_requested = signum;
 }
 
-
-constexpr char kKmsvncMethod[] = "Platform.KmsVncMethod";
-
-// This needs to match tools/metrics/histograms/enums.xml
-enum class CaptureMethod : int {
-  AUTODETECT = 0,
-  EGL,
-  BO,
-  MAX  // Highest number, for UMA.
-};
-
 int VncMain() {
   ScopedPowerLock power_lock;
   auto* cmdline = base::CommandLine::ForCurrentProcess();
@@ -145,6 +136,7 @@ int VncMain() {
     LOG(ERROR) << "--internal, --external and --crtc-id are exclusive";
     return 1;
   }
+  const bool rotate = cmdline->HasSwitch(kRotateSwitch);
 
   CrtcFinder finder;
   if (cmdline->HasSwitch(kInternalSwitch)) {
@@ -173,77 +165,44 @@ int VncMain() {
     return 1;
   }
 
-  CaptureMethod method = CaptureMethod::AUTODETECT;
-  if (cmdline->HasSwitch(kMethodSwitch)) {
-    std::string method_str = cmdline->GetSwitchValueASCII(kMethodSwitch);
-    if (method_str == "egl") {
-      method = CaptureMethod::EGL;
-    } else if (method_str == "bo") {
-      method = CaptureMethod::BO;
-    } else {
-      LOG(ERROR) << "Invalid --method specification";
-      return 1;
-    }
-  }
-
   uint32_t crtc_width = crtc->width();
   uint32_t crtc_height = crtc->height();
 
-  // vncViewer requires a width with multiple of 4
-  // Pad the width
-  uint32_t vnc_width = getVncWidth(crtc_width);
-  uint32_t vnc_height = crtc_height;
+  // vncViewer requires a width (but not height) with multiple of 4
+  // Pad the width. Swap width and height if rotatation is requested.
+  uint32_t vnc_width = GetVncWidth(rotate ? crtc_height : crtc_width);
+  uint32_t vnc_height = rotate ? crtc_width : crtc_height;
 
   LOG(INFO) << "Starting with CRTC size of: " << crtc_width << " "
             << crtc_height;
   LOG(INFO) << "with VNC view-port size of: " << vnc_width << " " << vnc_height;
 
-  if (vnc_width != crtc_width) {
+  if (vnc_width % 4 > 0) {
     LOG(INFO) << "Vnc viewport width has been right-padded to be "
               << "vnc lib compatible multiple of 4.";
   }
-
-  CHECK_LT(vnc_width - crtc_width, 4);
-  CHECK_GE(vnc_width, crtc_width);
-
-  if (method == CaptureMethod::AUTODETECT) {
-    // TODO(andrescj): is it possible to still use the EGL path even if this
-    // is nullptr? e.g., if drmModeGetFB2() fails for the CRTC but not for
-    // individual planes.
-    //
-    // Also, it might be cleaner to move this logic to Crtc.
-    if (crtc->fb2())
-      method = CaptureMethod::EGL;
-    else
-      method = CaptureMethod::BO;
-  }
-
-  MetricsLibrary metrics;
-  metrics.SendEnumToUMA(kKmsvncMethod, static_cast<int>(method),
-                        static_cast<int>(CaptureMethod::MAX));
 
   const rfbScreenInfoPtr server =
       rfbGetScreen(0 /*argc*/, nullptr /*argv*/, vnc_width, vnc_height,
                    8 /*bitsPerSample*/, 3 /*samplesPerPixel*/, kBytesPerPixel);
   CHECK(server);
 
+  // Without setting this flag, rfbProcessEvents() consumes only one event per
+  // call.
+  server->handleEventsEagerly = true;
+
   std::unique_ptr<screenshot::DisplayBuffer> display_buffer;
 
-  if (method == CaptureMethod::EGL) {
-    display_buffer.reset(new screenshot::EglDisplayBuffer(
-        crtc.get(), 0, 0, crtc_width, crtc_height));
-  } else {
-    display_buffer.reset(new screenshot::GbmBoDisplayBuffer(
-        crtc.get(), 0, 0, crtc_width, crtc_height));
-  }
+  display_buffer.reset(new screenshot::EglDisplayBuffer(
+      crtc.get(), 0, 0, crtc_width, crtc_height));
 
-  std::vector<char> buffer(vnc_width * vnc_height * kBytesPerPixel);
+  std::vector<uint32_t> buffer(vnc_width * vnc_height);
 
   // This is ARGB buffer.
   {
-    auto capture_result = display_buffer->Capture();
+    auto capture_result = display_buffer->Capture(rotate);
     ConvertBuffer(capture_result, buffer.data(), vnc_width);
-    server->frameBuffer = buffer.data();
+    server->frameBuffer = reinterpret_cast<char*>(buffer.data());
   }
   // http://libvncserver.sourceforge.net/doc/html/rfbproto_8h_source.html#l00150
   server->serverFormat.redMax = 255;
@@ -254,11 +213,11 @@ int VncMain() {
   server->serverFormat.blueShift = 0;
 
   // Create uinput devices and hook up input events.
-  const std::unique_ptr<Uinput> uinput = Uinput::Create(server);
+  const std::unique_ptr<Uinput> uinput = Uinput::Create(server, rotate);
 
   rfbInitServer(server);
 
-  std::vector<char> prev(vnc_width * vnc_height * kBytesPerPixel);
+  std::vector<uint32_t> prev(vnc_width * vnc_height);
 
   ScopedSigaction sa1(SIGINT, SignalHandler);
   ScopedSigaction sa2(SIGTERM, SignalHandler);
@@ -268,26 +227,23 @@ int VncMain() {
     timer.Frame();
     timer.MaybePrint();
 
-    auto capture_result = display_buffer->Capture();
+    auto capture_result = display_buffer->Capture(rotate);
     // Keep the previous framebuffer around for comparison.
     prev.swap(buffer);
     // Copy the current data to the buffer.
     ConvertBuffer(capture_result, buffer.data(), vnc_width);
     // Update VNC server's view to the swapped current buffer.
-    server->frameBuffer = buffer.data();
+    server->frameBuffer = reinterpret_cast<char*>(buffer.data());
 
     // Find rectangle of modification.
     int min_x = vnc_width;
     int min_y = vnc_height;
     int max_x = 0;
     int max_y = 0;
-    const char* current = buffer.data();
+
     for (int y = 0; y < vnc_height; y++) {
       for (int x = 0; x < vnc_width; x++) {
-        if (*reinterpret_cast<const uint32_t*>(
-                &current[(x + y * vnc_width) * kBytesPerPixel]) ==
-            *reinterpret_cast<uint32_t*>(
-                &prev[(x + y * vnc_width) * kBytesPerPixel])) {
+        if (buffer[x + y * vnc_width] == prev[x + y * vnc_width]) {
           continue;
         }
         max_x = std::max(x, max_x);

@@ -2,7 +2,7 @@
 <protocol name="notification_shell_unstable_v1">
 
   <copyright>
-    Copyright 2018 The Chromium Authors.
+    Copyright 2018 The Chromium Authors
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -118,7 +118,7 @@
       <description summary="Notification is clicked">
 	Notifies the notification object that the notification or its button is clicked.
       </description>
-      <arg name="button_index" type="int" summary="-1 if the body of the notification is cliked as opposed to a button"/>
+      <arg name="button_index" type="int" summary="-1 if the body of the notification is clicked as opposed to a button"/>
     </event>
   </interface>
 </protocol>

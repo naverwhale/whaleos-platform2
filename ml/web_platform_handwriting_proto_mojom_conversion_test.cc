@@ -1,9 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ml/web_platform_handwriting_proto_mojom_conversion.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -26,13 +27,13 @@ TEST(WebPlatformHandwritingProtoMojoConversionTest,
   // Generate some strokes.
   std::vector<HandwritingStrokePtr> strokes;
   auto stroke1 = HandwritingStroke::New();
-  stroke1->points.push_back(HandwritingPoint::New(
-      PointF::New(1., 2.), base::TimeDelta::FromMilliseconds(3)));
-  stroke1->points.push_back(HandwritingPoint::New(
-      PointF::New(4., 5.), base::TimeDelta::FromMilliseconds(6)));
+  stroke1->points.push_back(
+      HandwritingPoint::New(PointF::New(1., 2.), base::Milliseconds(3)));
+  stroke1->points.push_back(
+      HandwritingPoint::New(PointF::New(4., 5.), base::Milliseconds(6)));
   auto stroke2 = HandwritingStroke::New();
-  stroke2->points.push_back(HandwritingPoint::New(
-      PointF::New(7., 8.), base::TimeDelta::FromMilliseconds(9)));
+  stroke2->points.push_back(
+      HandwritingPoint::New(PointF::New(7., 8.), base::Milliseconds(9)));
   strokes.push_back(std::move(stroke1));
   strokes.push_back(std::move(stroke2));
 
@@ -85,13 +86,13 @@ TEST(WebPlatformHandwritingProtoMojoConversionTest,
   // Generates some strokes.
   std::vector<HandwritingStrokePtr> strokes;
   auto stroke1 = HandwritingStroke::New();
-  stroke1->points.push_back(HandwritingPoint::New(
-      PointF::New(11., 12.), base::TimeDelta::FromMilliseconds(13)));
-  stroke1->points.push_back(HandwritingPoint::New(
-      PointF::New(14., 15.), base::TimeDelta::FromMilliseconds(16)));
+  stroke1->points.push_back(
+      HandwritingPoint::New(PointF::New(11., 12.), base::Milliseconds(13)));
+  stroke1->points.push_back(
+      HandwritingPoint::New(PointF::New(14., 15.), base::Milliseconds(16)));
   auto stroke2 = HandwritingStroke::New();
-  stroke2->points.push_back(HandwritingPoint::New(
-      PointF::New(17., 18.), base::TimeDelta::FromMilliseconds(19)));
+  stroke2->points.push_back(
+      HandwritingPoint::New(PointF::New(17., 18.), base::Milliseconds(19)));
   strokes.push_back(std::move(stroke1));
   strokes.push_back(std::move(stroke2));
 
@@ -109,7 +110,7 @@ TEST(WebPlatformHandwritingProtoMojoConversionTest,
   chrome_knowledge::HandwritingRecognizerResult proto;
   *proto.add_candidates() = candidate;
 
-  // First tries an empty input strokes and it should return base::nullopt.
+  // First tries an empty input strokes and it should return std::nullopt.
   const auto predictions_empty_input_stroke =
       WebPlatformHandwritingPredictionsFromProto({}, proto);
   EXPECT_FALSE(predictions_empty_input_stroke.has_value());

@@ -1,26 +1,32 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <algorithm>
 #include <iostream>
+#include <optional>
 
 #include <base/at_exit.h>
 #include <base/command_line.h>
+#include <base/functional/callback_forward.h>
 #include <base/json/json_reader.h>
 #include <base/logging.h>
+#include <base/message_loop/message_pump_type.h>
+#include <base/run_loop.h>
+#include <base/task/single_thread_task_executor.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
+#include <mojo/core/embedder/embedder.h>
+#include <mojo/core/embedder/scoped_ipc_support.h>
 
+#include "runtime_probe/avl_probe_config_loader.h"
 #include "runtime_probe/daemon.h"
+#include "runtime_probe/generic_probe_config_loader.h"
 #include "runtime_probe/probe_config.h"
-#include "runtime_probe/probe_config_loader_impl.h"
+#include "runtime_probe/probe_config_loader.h"
 #include "runtime_probe/probe_function.h"
-#include "runtime_probe/system/context_factory_impl.h"
 #include "runtime_probe/system/context_helper_impl.h"
-#include "runtime_probe/system/context_instance.h"
 #include "runtime_probe/system/context_runtime_impl.h"
-#include "runtime_probe/system_property_impl.h"
 
 namespace {
 enum ExitStatus {
@@ -32,13 +38,11 @@ enum ExitStatus {
   kFailToParseProbeArgFromConfig = 12,
 };
 
-void SetVerbosityLevel(uint32_t verbosity_level) {
-  verbosity_level = std::min(verbosity_level, 3u);
-  // VLOG uses negative log level.
-  logging::SetMinLogLevel(-(static_cast<int32_t>(verbosity_level)));
-}
-
 int RunAsHelper() {
+  // This can help to verify the logging is working while generating seccomp
+  // policy.
+  DLOG(INFO) << "Starting Runtime Probe helper.";
+
   const auto* command_line = base::CommandLine::ForCurrentProcess();
   const auto args = command_line->GetArgs();
 
@@ -57,7 +61,7 @@ int RunAsHelper() {
     return kFailedToParseProbeStatementFromArg;
   }
 
-  runtime_probe::ContextInstance::Init<runtime_probe::ContextHelperImpl>();
+  runtime_probe::ContextHelperImpl context;
 
   auto probe_function = runtime_probe::ProbeFunction::FromValue(*val);
   if (probe_function == nullptr) {
@@ -75,14 +79,8 @@ int RunAsHelper() {
 }
 
 int RunAsDaemon() {
-  if constexpr (USE_FACTORY_RUNTIME_PROBE) {
-    LOG(FATAL) << "Unexpected error.  Daemon mode should never be reachable "
-                  "in factory_runtime_probe.";
-    return ExitStatus::kUnknownError;
-  }
-
   LOG(INFO) << "Starting Runtime Probe. Running in daemon mode";
-  runtime_probe::ContextInstance::Init<runtime_probe::ContextRuntimeImpl>();
+  runtime_probe::ContextRuntimeImpl context;
   runtime_probe::Daemon daemon;
   return daemon.Run();
 }
@@ -92,44 +90,48 @@ int RunAsDaemon() {
 int RunningInCli(const std::string& config_file_path, bool to_stdout) {
   LOG(INFO) << "Starting Runtime Probe. Running in CLI mode";
 
-#if USE_FACTORY_RUNTIME_PROBE
-  runtime_probe::ContextInstance::Init<runtime_probe::ContextFactoryImpl>();
-#else
-  runtime_probe::ContextInstance::Init<runtime_probe::ContextRuntimeImpl>();
-#endif
+  // Required by dbus in libchrome.
+  base::AtExitManager at_exit_manager;
+  runtime_probe::ContextRuntimeImpl context;
 
-  const auto probe_config_loader =
-      std::make_unique<runtime_probe::ProbeConfigLoaderImpl>();
+  // Required by mojo
+  base::SingleThreadTaskExecutor task_executor{base::MessagePumpType::IO};
+  mojo::core::Init();
+  mojo::core::ScopedIPCSupport ipc_support(
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
+      mojo::core::ScopedIPCSupport::ShutdownPolicy::CLEAN);
 
-  base::Optional<runtime_probe::ProbeConfigData> probe_config_data;
-  if (config_file_path == "") {
-    probe_config_data = probe_config_loader->LoadDefault();
+  std::unique_ptr<runtime_probe::ProbeConfigLoader> config_loader;
+  if (config_file_path.empty()) {
+    config_loader = std::make_unique<runtime_probe::AvlProbeConfigLoader>();
   } else {
-    probe_config_data =
-        probe_config_loader->LoadFromFile(base::FilePath{config_file_path});
+    config_loader = std::make_unique<runtime_probe::GenericProbeConfigLoader>(
+        base::FilePath{config_file_path});
   }
-  if (!probe_config_data) {
+
+  auto probe_config = config_loader->Load();
+  if (!probe_config) {
     LOG(ERROR) << "Failed to load probe config";
     return ExitStatus::kFailedToLoadProbeConfig;
   }
 
-  LOG(INFO) << "Load probe config from: " << probe_config_data->path
-            << " (checksum: " << probe_config_data->sha1_hash << ")";
+  LOG(INFO) << "Load probe config from: " << probe_config->path()
+            << " (checksum: " << probe_config->checksum() << ")";
 
-  auto probe_config =
-      runtime_probe::ProbeConfig::FromValue(probe_config_data->config);
-  if (!probe_config) {
-    LOG(ERROR) << "Failed to parse from argument from ProbeConfig";
-    return ExitStatus::kFailToParseProbeArgFromConfig;
-  }
-
-  const auto probe_result = probe_config->Eval();
-  if (to_stdout) {
-    LOG(INFO) << "Dumping probe results to stdout";
-    std::cout << probe_result;
-  } else {
-    LOG(INFO) << probe_result;
-  }
+  base::RunLoop run_loop;
+  probe_config->Eval(base::BindOnce(
+      [](base::OnceClosure quit_closure, bool to_stdout,
+         base::Value::Dict probe_result) {
+        if (to_stdout) {
+          LOG(INFO) << "Dumping probe results to stdout";
+          std::cout << probe_result;
+        } else {
+          LOG(INFO) << probe_result;
+        }
+        std::move(quit_closure).Run();
+      },
+      run_loop.QuitClosure(), to_stdout));
+  run_loop.Run();
 
   return ExitStatus::kSuccess;
 }
@@ -137,36 +139,27 @@ int RunningInCli(const std::string& config_file_path, bool to_stdout) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
-  if constexpr (USE_FACTORY_RUNTIME_PROBE) {
-    int cros_debug;
-    if (!runtime_probe::SystemPropertyImpl().GetInt("cros_debug",
-                                                    &cros_debug) ||
-        cros_debug != 1) {
-      LOG(FATAL) << "factory_runtime_probe should never run in normal mode.";
-      return ExitStatus::kUnknownError;
-    }
-  }
+  // Don't output any log until we know in which mode we are.
+  brillo::InitLog(0);
 
-  brillo::InitLog(brillo::kLogToSyslog | brillo::kLogToStderrIfTty);
-
-  // Flags are subject to change
   DEFINE_string(config_file_path, "",
                 "File path to probe config, empty to use default one");
-
-#if !USE_FACTORY_RUNTIME_PROBE
   DEFINE_bool(dbus, false, "Run in the mode to respond D-Bus call");
-#else
-  constexpr bool FLAGS_dbus = false;  // DBus daemon mode is not available in
-                                      // factory_runtime_probe.
-#endif
-
   DEFINE_bool(helper, false, "Run in the mode to execute probe function");
   DEFINE_bool(to_stdout, false, "Output probe result to stdout");
-  DEFINE_uint32(verbosity_level, 0,
-                "Set verbosity level. Allowed value: 0 to 3");
+  DEFINE_int32(log_level, 0,
+               "Logging level - 0: LOG(INFO), 1: LOG(WARNING), 2: LOG(ERROR), "
+               "-1: VLOG(1), -2: VLOG(2), ...");
   brillo::FlagHelper::Init(argc, argv, "ChromeOS runtime probe tool");
 
-  SetVerbosityLevel(FLAGS_verbosity_level);
+  logging::SetMinLogLevel(FLAGS_log_level);
+  if (FLAGS_helper) {
+    // Don't log to syslog in helper. Notes that log to syslog request
+    // additional syscall.
+    brillo::SetLogFlags(brillo::kLogToStderr);
+  } else {
+    brillo::SetLogFlags(brillo::kLogToSyslog | brillo::kLogToStderr);
+  }
 
   if (FLAGS_helper && FLAGS_dbus) {
     LOG(ERROR) << "--helper conflicts with --dbus";
@@ -182,8 +175,5 @@ int main(int argc, char* argv[]) {
     return RunAsHelper();
   if (FLAGS_dbus)
     return RunAsDaemon();
-
-  // Required by dbus in libchrome.
-  base::AtExitManager at_exit_manager;
   return RunningInCli(FLAGS_config_file_path, FLAGS_to_stdout);
 }

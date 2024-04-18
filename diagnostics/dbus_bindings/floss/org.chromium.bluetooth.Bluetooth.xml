@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Copyright 2023 The ChromiumOS Authors
+  Use of this source code is governed by a BSD-style license that can be
+  found in the LICENSE file.
+-->
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+                      "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
+  <interface name="org.chromium.bluetooth.Bluetooth">
+    <!-- Methods -->
+    <method name="GetAddress">
+      <arg name="address" direction="out" type="s"/>
+    </method>
+    <method name="GetName">
+      <arg name="name" direction="out" type="s"/>
+    </method>
+    <method name="GetDiscoverable">
+      <arg name="discoverable" direction="out" type="b"/>
+    </method>
+    <method name="IsDiscovering">
+      <arg name="discovering" direction="out" type="b"/>
+    </method>
+    <method name="GetUuids">
+      <arg name="uuids" direction="out" type="aay"/>
+    </method>
+    <method name="GetRemoteType">
+      <arg name="device" direction="in" type="a{sv}"/>
+      <arg name="type" direction="out" type="u"/>
+    </method>
+    <method name="GetRemoteAppearance">
+      <arg name="device" direction="in" type="a{sv}"/>
+      <arg name="appearance" direction="out" type="q"/>
+    </method>
+    <method name="GetRemoteVendorProductInfo">
+      <arg name="device" direction="in" type="a{sv}"/>
+      <arg name="info" direction="out" type="a{sv}"/>
+    </method>
+    <method name="GetRemoteRSSI">
+      <arg name="device" direction="in" type="a{sv}"/>
+      <arg name="rssi" direction="out" type="n"/>
+    </method>
+    <method name="GetRemoteUuids">
+      <arg name="device" direction="in" type="a{sv}"/>
+      <arg name="uuids" direction="out" type="aay"/>
+    </method>
+    <method name="GetRemoteClass">
+      <arg name="device" direction="in" type="a{sv}"/>
+      <arg name="bluetooth_class" direction="out" type="u"/>
+    </method>
+    <method name="StartDiscovery">
+      <arg name="is_success" direction="out" type="b"/>
+    </method>
+    <method name="CancelDiscovery">
+      <arg name="is_success" direction="out" type="b"/>
+    </method>
+    <method name="GetConnectedDevices">
+      <arg name="devices" direction="out" type="aa{sv}"/>
+    </method>
+    <method name="RegisterCallback">
+      <arg name="callback_path" direction="in" type="o" />
+      <arg name="callback_id" direction="out" type="u"/>
+    </method>
+    <method name="RegisterConnectionCallback">
+      <arg name="callback_path" direction="in" type="o" />
+      <arg name="callback_id" direction="out" type="u"/>
+    </method>
+  </interface>
+</node>

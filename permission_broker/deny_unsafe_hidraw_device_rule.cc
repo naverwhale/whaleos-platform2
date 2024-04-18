@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,8 @@
 #include <libudev.h>
 
 #include <vector>
+
+#include "permission_broker/rule_utils.h"
 
 namespace permission_broker {
 
@@ -57,6 +59,14 @@ Rule::Result DenyUnsafeHidrawDeviceRule::ProcessHidrawDevice(
   if (!GetHidToplevelUsages(device, &usages)) {
     return IGNORE;
   }
+
+  // Ignore devices which are known to be safe and should work with WebHID.
+  struct udev_device* usb_device =
+      udev_device_get_parent_with_subsystem_devtype(device, "usb",
+                                                    "usb_device");
+  if (usb_device && IsDeviceAllowedWebHID(usb_device))
+    return IGNORE;
+
   for (std::vector<HidUsage>::const_iterator iter = usages.begin();
        iter != usages.end(); ++iter) {
     if (IsUnsafeUsage(*iter)) {

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,24 +11,32 @@ const char kRmadServicePath[] = "/org/chromium/Rmad";
 const char kRmadServiceName[] = "org.chromium.Rmad";
 
 // Methods
+const char kIsRmaRequiredMethod[] = "IsRmaRequired";
 const char kGetCurrentStateMethod[] = "GetCurrentState";
 const char kTransitionNextStateMethod[] = "TransitionNextState";
 const char kTransitionPreviousStateMethod[] = "TransitionPreviousState";
 const char kAbortRmaMethod[] = "AbortRma";
-// Legacy method. Keep it to be compatible with Chrome.
-// TODO(chenghan): Remove it in the future.
-const char kGetLogPathMethod[] = "GetLogPath";
 const char kGetLogMethod[] = "GetLog";
+const char kSaveLogMethod[] = "SaveLog";
+const char kRecordBrowserActionMetricMethod[] = "RecordBrowserActionMetric";
+const char kExtractExternalDiagnosticsAppMethod[] =
+    "ExtractExternalDiagnosticsApp";
+const char kInstallExtractedDiagnosticsAppMethod[] =
+    "InstallExtractedDiagnosticsApp";
+const char kGetInstalledDiagnosticsAppMethod[] = "GetInstalledDiagnosticsApp";
 
 // Signals.
 const char kErrorSignal[] = "Error";
 const char kHardwareVerificationResultSignal[] = "HardwareVerificationResult";
+const char kUpdateRoFirmwareStatusSignal[] = "UpdateRoFirmwareStatus";
 const char kCalibrationOverallSignal[] = "CalibrationOverall";
 const char kCalibrationProgressSignal[] = "CalibrationProgress";
 const char kProvisioningProgressSignal[] = "ProvisioningProgress";
+const char kFinalizeProgressSignal[] = "FinalizeProgress";
 const char kHardwareWriteProtectionStateSignal[] =
     "HardwareWriteProtectionState";
 const char kPowerCableStateSignal[] = "PowerCableState";
+const char kExternalDiskDetectedSignal[] = "ExternalDiskDetected";
 
 }  // namespace rmad
 

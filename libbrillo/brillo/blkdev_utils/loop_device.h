@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,9 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <brillo/secure_blob.h>
 
 namespace brillo {
@@ -21,7 +21,7 @@ namespace brillo {
 class LoopDeviceManager;
 
 using LoopIoctl =
-    base::Callback<int(const base::FilePath&, int, uint64_t, int)>;
+    base::RepeatingCallback<int(const base::FilePath&, int, uint64_t, int)>;
 
 // LoopDevice provides an interface to attached loop devices.
 // In order to simplify handling of loop devices, there
@@ -77,8 +77,8 @@ class BRILLO_EXPORT LoopDeviceManager {
   LoopDeviceManager();
   // Create a loop device manager with a non-default ioctl runner.
   // Parameters
-  //   ioctl_runner - base::Callback to run ioctls.
-  explicit LoopDeviceManager(LoopIoctl ioctl_runner);
+  //   ioctl_runner - base::RepeatingCallback to run ioctls.
+  explicit LoopDeviceManager(const LoopIoctl& ioctl_runner);
   LoopDeviceManager(const LoopDeviceManager&) = delete;
   LoopDeviceManager& operator=(const LoopDeviceManager&) = delete;
 

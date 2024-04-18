@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,14 +17,8 @@ namespace dbus {
 class ObjectProxy;
 };  // namespace dbus
 
-namespace vm_tools {
-namespace concierge {
-namespace pvm {
-namespace helper {
+namespace vm_tools::concierge::pvm::helper {
 
-// TODO(kimjae): Once fully transitioned to DLC based PluginVM, this check needs
-// to be a precondition that's required.
-bool IsDlcVm();
 bool CreateVm(const VmId& vm_id, std::vector<std::string> params);
 bool DeleteVm(const VmId& vm_id);
 bool AttachIso(const VmId& vm_id,
@@ -46,9 +40,6 @@ bool ToggleSharedProfile(scoped_refptr<dbus::Bus> bus,
                          std::vector<std::string> params,
                          std::string* failure_message);
 
-}  // namespace helper
-}  // namespace pvm
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge::pvm::helper
 
 #endif  // VM_TOOLS_CONCIERGE_PLUGIN_VM_HELPER_H_

@@ -1,0 +1,53 @@
+// Copyright 2023 The ChromiumOS Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+syntax = "proto3";
+option optimize_for = LITE_RUNTIME;
+
+// List of events triggered during the Rollback Process.
+// TODO(b/261850979): Add Enterprise Rollback events.
+enum EnterpriseRollbackEvent {
+  EVENT_UNSPECIFIED = 0;
+  ROLLBACK_POLICY_ACTIVATED = 1;
+  ROLLBACK_OOBE_CONFIG_SAVE_SUCCESS = 2;
+  ROLLBACK_OOBE_CONFIG_SAVE_FAILURE = 3;
+  ROLLBACK_OOBE_CONFIG_RESTORE_SUCCESS = 4;
+  ROLLBACK_OOBE_CONFIG_RESTORE_FAILURE_DECRYPT = 5;
+  ROLLBACK_OOBE_CONFIG_RESTORE_FAILURE_READ = 6;
+  ROLLBACK_OOBE_CONFIG_RESTORE_FAILURE_PARSE = 7;
+  ROLLBACK_OOBE_CONFIG_RESTORE_FAILURE_CONFIG = 8;
+  ROLLBACK_UPDATE_FAILURE = 9;
+}
+
+// ChromeOS version is a string with format "15270.0.0". As strings are not
+// fully supported in structured metrics, we encode each version as three
+// integers: [major, minor, patch].
+message ChromeOSVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+  uint32 patch = 3;
+}
+
+// Information about the triggered Rollback event required to log the metric.
+message EventData {
+  EnterpriseRollbackEvent event = 1;
+  // Optional event details.
+  ChromeOSVersion event_chromeos_version = 2;
+}
+
+// EnterpriseRollbackMetricsData keeps track of the events related to the most
+// recent Enterprise Rollback process. The header contains the information
+// relevant to the duration of the whole process.
+message EnterpriseRollbackMetricsData {
+  // Header. This field is only set once per Enterprise Rollback.
+  RollbackMetadata rollback_metadata = 1;
+  // Events triggered during the rollback process.
+  repeated EventData event_data = 2;
+}
+
+// Information that applies to the whole duration of Enterprise Rollback.
+message RollbackMetadata {
+  ChromeOSVersion origin_chromeos_version = 1;
+  ChromeOSVersion target_chromeos_version = 2;
+}

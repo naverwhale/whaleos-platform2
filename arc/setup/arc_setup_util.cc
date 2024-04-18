@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,49 +28,43 @@
 #include <sys/statfs.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
-#include <sys/xattr.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <fstream>
 #include <list>
+#include <optional>
 #include <set>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/environment.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/json/json_reader.h>
 #include <base/logging.h>
 #include <base/process/launch.h>
+#include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#include <base/threading/platform_thread.h>
 #include <base/time/time.h>
 #include <base/timer/elapsed_timer.h>
 #include <base/values.h>
 #include <brillo/file_utils.h>
 #include <brillo/files/safe_fd.h>
 #include <crypto/sha2.h>
+#include <libsegmentation/feature_management.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
 
-using base::StringPiece;
+#include "arc/setup/xml/android_xml_util.h"
 
 namespace arc {
 
 namespace {
-
-// Version element prefix in packages.xml and packages_cache.xml files.
-// Note: This constant has to be in sync with Android's arc-boot-type-detector.
-constexpr char kElementVersion[] = "<version ";
-
-// Fingerprint attribute prefix in packages.xml and packages_cache.xml files.
-// Note: This constant has to be in sync with Android's arc-boot-type-detector.
-constexpr char kAttributeFingerprint[] = " fingerprint=\"";
 
 // Name of json field in camera test config specifying whether the front camera
 // is enable.
@@ -168,20 +162,6 @@ bool FindProperty(const std::string& line_prefix_to_find,
   return false;
 }
 
-// Helper function for extracting an attribute value from an XML line.
-// Expects |key| to be suffixed with '=\"' (e.g. ' sdkVersion=\"').
-// Note: This function has to be in sync with Android's arc-boot-type-detector.
-StringPiece GetAttributeValue(const StringPiece& line, const StringPiece& key) {
-  StringPiece::size_type key_begin_pos = line.find(key);
-  if (key_begin_pos == StringPiece::npos)
-    return StringPiece();
-  StringPiece::size_type value_begin_pos = key_begin_pos + key.length();
-  StringPiece::size_type value_end_pos = line.find('"', value_begin_pos);
-  if (value_end_pos == StringPiece::npos)
-    return StringPiece();
-  return line.substr(value_begin_pos, value_end_pos - value_begin_pos);
-}
-
 // Sets the permission of the given |fd|.
 bool SetPermissions(base::PlatformFile fd, mode_t mode) {
   struct stat st;
@@ -211,14 +191,11 @@ class ArcMounterImpl : public ArcMounter {
              const char* filesystem_type,
              unsigned long mount_flags,  // NOLINT(runtime/int)
              const char* data) override {
-    std::string source_resolved;
-    if (!source.empty() && source[0] == '/')
-      source_resolved = Realpath(base::FilePath(source)).value();
-    else
-      source_resolved = source;  // not a path (e.g. "tmpfs")
-
-    if (mount(source_resolved.c_str(), Realpath(target).value().c_str(),
-              filesystem_type, mount_flags, data) != 0) {
+    // The mount call would fail when the |target| is a symlink
+    // as we are not calling Realpath() on |target| to prevent
+    // mounting to unintended locations.
+    if (mount(source.c_str(), target.value().c_str(), filesystem_type,
+              mount_flags, data) != 0) {
       PLOG(ERROR) << "Failed to mount " << source << " to " << target.value();
       return false;
     }
@@ -236,27 +213,19 @@ class ArcMounterImpl : public ArcMounter {
 
   bool LoopMount(const std::string& source,
                  const base::FilePath& target,
+                 LoopMountFilesystemType filesystem_type,
                  unsigned long mount_flags) override {  // NOLINT(runtime/int)
     constexpr size_t kRetryMax = 10;
     for (size_t i = 0; i < kRetryMax; ++i) {
       bool retry = false;
-      if (LoopMountInternal(source, target, mount_flags, &retry))
+      if (LoopMountInternal(source, target, filesystem_type, mount_flags,
+                            &retry))
         return true;
       if (!retry)
         break;
       LOG(INFO) << "LoopMountInternal failed with EBUSY. Retrying...";
     }
     return false;
-  }
-
-  bool BindMountWithNoPathResolution(const base::FilePath& old_path,
-                                     const base::FilePath& new_path) override {
-    if (mount(old_path.value().c_str(), new_path.value().c_str(), nullptr,
-              MS_BIND, nullptr) != 0) {
-      PLOG(ERROR) << "Failed to mount " << old_path << " to " << new_path;
-      return false;
-    }
-    return true;
   }
 
   bool BindMount(const base::FilePath& old_path,
@@ -365,9 +334,10 @@ class ArcMounterImpl : public ArcMounter {
 
   bool LoopMountInternal(const std::string& source,
                          const base::FilePath& target,
+                         LoopMountFilesystemType filesystem_type,
                          unsigned long mount_flags,  // NOLINT(runtime/int)
                          bool* out_retry) {
-    constexpr char kLoopControl[] = "/dev/loop-control";
+    static constexpr char kLoopControl[] = "/dev/loop-control";
 
     *out_retry = false;
     base::ScopedFD scoped_control_fd(open(kLoopControl, O_RDONLY));
@@ -385,7 +355,7 @@ class ArcMounterImpl : public ArcMounter {
 
     // Cleanup in case mount fails. This frees |device_num| altogether.
     base::ScopedClosureRunner loop_device_cleanup(
-        base::Bind(&RemoveLoopDevice, scoped_control_fd.get(), device_num));
+        base::BindOnce(&RemoveLoopDevice, scoped_control_fd.get(), device_num));
 
     const base::FilePath device_path = GetLoopDevicePath(device_num);
     base::ScopedFD scoped_loop_fd(open(device_path.value().c_str(), O_RDWR));
@@ -442,21 +412,34 @@ class ArcMounterImpl : public ArcMounter {
     // Substitute the removal of the device number by disassociating |source|
     // from the loop device, such that the autoclear flag on |device_num| can
     // automatically remove the loop device.
-    loop_device_cleanup.ReplaceClosure(base::Bind(
+    loop_device_cleanup.ReplaceClosure(base::BindOnce(
         &DisassociateLoopDevice, scoped_loop_fd.get(), source, device_path));
 
-    if (Mount(device_path.value(), target, "squashfs", mount_flags, nullptr)) {
-      // Expected case, all good.
-    } else if (Mount(device_path.value(), target, "ext4", mount_flags,
-                     nullptr)) {
-      // For development ext4 is allowed.
-      LOG(INFO) << "Mounted " << source << " as ext4";
-    } else {
-      PLOG(ERROR) << "Failed to mount " << source;
-      return false;
+    switch (filesystem_type) {
+      case LoopMountFilesystemType::kUnspecified:
+        if (!Mount(device_path.value(), target, "squashfs", mount_flags,
+                   nullptr) &&
+            !Mount(device_path.value(), target, "ext4", mount_flags, nullptr)) {
+          PLOG(ERROR) << "Failed to mount " << source << " as squashfs or ext4";
+          return false;
+        }
+        break;
+      case LoopMountFilesystemType::kSquashFS:
+        if (!Mount(device_path.value(), target, "squashfs", mount_flags,
+                   nullptr)) {
+          PLOG(ERROR) << "Failed to mount " << source << " as squashfs";
+          return false;
+        }
+        break;
+      case LoopMountFilesystemType::kExt4:
+        if (!Mount(device_path.value(), target, "ext4", mount_flags, nullptr)) {
+          PLOG(ERROR) << "Failed to mount " << source << " as ext4";
+          return false;
+        }
+        break;
     }
 
-    ignore_result(loop_device_cleanup.Release());
+    loop_device_cleanup.ReplaceClosure(base::DoNothing());
 
     // Verify that the loop device did not get redirected.
     if (ioctl(scoped_loop_fd.get(), LOOP_GET_STATUS64, &loop_info) == 0) {
@@ -512,8 +495,9 @@ std::unique_ptr<ScopedMount> ScopedMount::CreateScopedLoopMount(
     ArcMounter* mounter,
     const std::string& source,
     const base::FilePath& target,
+    LoopMountFilesystemType filesystem_type,
     unsigned long flags) {  // NOLINT(runtime/int)
-  if (!mounter->LoopMount(source, target, flags))
+  if (!mounter->LoopMount(source, target, filesystem_type, flags))
     return nullptr;
   return std::make_unique<ScopedMount>(target, mounter, true /*is_loop*/);
 }
@@ -599,8 +583,9 @@ bool GetPropertyFromFile(const base::FilePath& prop_file_path,
                          const std::string& prop_name,
                          std::string* out_prop) {
   const std::string line_prefix_to_find = prop_name + '=';
-  if (FindLine(prop_file_path,
-               base::Bind(&FindProperty, line_prefix_to_find, out_prop))) {
+  if (FindLine(
+          prop_file_path,
+          base::BindRepeating(&FindProperty, line_prefix_to_find, out_prop))) {
     return true;  // found the line.
   }
   LOG(WARNING) << prop_name << " is not in " << prop_file_path.value();
@@ -610,27 +595,13 @@ bool GetPropertyFromFile(const base::FilePath& prop_file_path,
 bool GetPropertiesFromFile(const base::FilePath& prop_file_path,
                            std::map<std::string, std::string>* out_properties) {
   if (FindLine(prop_file_path,
-               base::Bind(&FindAllProperties, out_properties))) {
+               base::BindRepeating(&FindAllProperties, out_properties))) {
     // Failed to parse the file.
     out_properties->clear();
     return false;
   }
 
   return true;
-}
-
-// Note: This function has to be in sync with Android's arc-boot-type-detector.
-bool GetFingerprintAndSdkVersionFromPackagesXml(
-    const base::FilePath& packages_xml_path,
-    std::string* out_fingerprint,
-    std::string* out_sdk_version) {
-  if (FindLine(packages_xml_path,
-               base::Bind(&FindFingerprintAndSdkVersion, out_fingerprint,
-                          out_sdk_version))) {
-    return true;  // found it.
-  }
-  LOG(WARNING) << "No fingerprint found in " << packages_xml_path.value();
-  return false;
 }
 
 bool CreateOrTruncate(const base::FilePath& file_path, mode_t mode) {
@@ -666,6 +637,18 @@ bool LaunchAndWait(const std::vector<std::string>& argv) {
     return false;
   int exit_code = -1;
   return process.WaitForExit(&exit_code) && (exit_code == 0);
+}
+
+bool LaunchAndWait(const std::vector<std::string>& argv, int* exit_code) {
+  base::Process process(base::LaunchProcess(argv, base::LaunchOptions()));
+  if (!process.IsValid())
+    return false;
+  return process.WaitForExit(exit_code);
+}
+
+bool LaunchAndDoNotWait(const std::vector<std::string>& argv) {
+  base::Process process(base::LaunchProcess(argv, base::LaunchOptions()));
+  return process.IsValid();
 }
 
 bool RestoreconRecursively(const std::vector<base::FilePath>& directories) {
@@ -797,46 +780,9 @@ std::unique_ptr<ArcMounter> GetDefaultMounter() {
   return std::make_unique<ArcMounterImpl>();
 }
 
-// Note: This function has to be in sync with Android's arc-boot-type-detector.
-bool FindLine(const base::FilePath& file_path,
-              const base::Callback<bool(const std::string&)>& callback) {
-  // Do exactly the same stream handling as TextContentsEqual() in
-  // base/files/file_util.cc which is known to work.
-  std::ifstream file(file_path.value().c_str(), std::ios::in);
-  if (!file.is_open()) {
-    PLOG(WARNING) << "Cannot open " << file_path.value();
-    return false;
-  }
-
-  do {
-    std::string line;
-    std::getline(file, line);
-
-    // Check for any error state.
-    if (file.bad()) {
-      PLOG(WARNING) << "Failed to read " << file_path.value();
-      return false;
-    }
-
-    // Trim all '\r' and '\n' characters from the end of the line.
-    std::string::size_type end = line.find_last_not_of("\r\n");
-    if (end == std::string::npos)
-      line.clear();
-    else if (end + 1 < line.length())
-      line.erase(end + 1);
-
-    // Stop reading the file if |callback| returns true.
-    if (callback.Run(line))
-      return true;
-  } while (!file.eof());
-
-  // |callback| didn't find anything in the file.
-  return false;
-}
-
 std::string GetChromeOsChannelFromFile(
     const base::FilePath& lsb_release_file_path) {
-  constexpr char kChromeOsReleaseTrackProp[] = "CHROMEOS_RELEASE_TRACK";
+  static constexpr char kChromeOsReleaseTrackProp[] = "CHROMEOS_RELEASE_TRACK";
   const std::set<std::string> kChannels = {
       "beta-channel",    "canary-channel", "dev-channel",
       "dogfood-channel", "stable-channel", "testimage-channel"};
@@ -872,31 +818,31 @@ bool GetOciContainerState(const base::FilePath& path,
   }
   auto container_state = base::JSONReader::ReadAndReturnValueWithError(
       json_str, base::JSON_PARSE_RFC);
-  if (!container_state.value) {
-    LOG(ERROR) << "Failed to parse json: " << container_state.error_message;
+  if (!container_state.has_value()) {
+    LOG(ERROR) << "Failed to parse json: " << container_state.error().message;
     return false;
   }
-  if (!container_state.value->is_dict()) {
+  if (!container_state->is_dict()) {
     LOG(ERROR) << "Failed to read container state as dictionary";
     return false;
   }
 
   // Get the container PID and the rootfs path.
-  base::Optional<int> pid = container_state.value->FindIntKey("pid");
+  std::optional<int> pid = container_state->GetDict().FindInt("pid");
   if (!pid) {
     LOG(ERROR) << "Failed to get PID from container state";
     return false;
   }
   *out_container_pid = pid.value();
 
-  const base::Value* annotations =
-      container_state.value->FindDictKey("annotations");
+  const base::Value::Dict* annotations =
+      container_state->GetDict().FindDict("annotations");
   if (!annotations) {
     LOG(ERROR) << "Failed to get annotations from container state";
     return false;
   }
   const std::string* container_root_path =
-      annotations->FindStringKey("org.chromium.run_oci.container_root");
+      annotations->FindString("org.chromium.run_oci.container_root");
   if (!container_root_path) {
     LOG(ERROR)
         << "Failed to get org.chromium.run_oci.container_root annotation";
@@ -932,21 +878,6 @@ bool GetSha1HashOfFiles(const std::vector<base::FilePath>& files,
   return true;
 }
 
-bool SetXattr(const base::FilePath& path,
-              const char* name,
-              const std::string& value) {
-  base::ScopedFD fd(brillo::OpenSafely(path, O_RDONLY, 0));
-  if (!fd.is_valid())
-    return false;
-
-  if (fsetxattr(fd.get(), name, value.data(), value.size(), 0 /* flags */) !=
-      0) {
-    PLOG(ERROR) << "Failed to change xattr " << name << " of " << path.value();
-    return false;
-  }
-  return true;
-}
-
 bool ShouldDeleteAndroidData(AndroidSdkVersion system_sdk_version,
                              AndroidSdkVersion data_sdk_version) {
   // Initial launch with clean data.
@@ -972,6 +903,14 @@ bool ShouldDeleteAndroidData(AndroidSdkVersion system_sdk_version,
       system_sdk_version >= AndroidSdkVersion::ANDROID_R) {
     LOG(INFO) << "Clearing /data dir because ARC was skip-upgraded from N("
               << static_cast<int>(data_sdk_version) << ") to post-R("
+              << static_cast<int>(system_sdk_version) << ").";
+    return true;
+  }
+  // Skip-upgraded from P to post-S. (b/187453032)
+  if (data_sdk_version == AndroidSdkVersion::ANDROID_P &&
+      system_sdk_version >= AndroidSdkVersion::ANDROID_S) {
+    LOG(INFO) << "Clearing /data dir because ARC was skip-upgraded from P("
+              << static_cast<int>(data_sdk_version) << ") to post-S("
               << static_cast<int>(system_sdk_version) << ").";
     return true;
   }
@@ -1004,47 +943,6 @@ bool FindAllProperties(std::map<std::string, std::string>* out_properties,
   (*out_properties)[line.substr(0, separator)] = line.substr(separator + 1);
   // Continue reading next lines.
   return false;
-}
-
-// Note: This function has to be in sync with Android's arc-boot-type-detector.
-bool FindFingerprintAndSdkVersion(std::string* out_fingerprint,
-                                  std::string* out_sdk_version,
-                                  const std::string& line) {
-  constexpr char kAttributeVolumeUuid[] = " volumeUuid=\"";
-  constexpr char kAttributeSdkVersion[] = " sdkVersion=\"";
-  constexpr char kAttributeDatabaseVersion[] = " databaseVersion=\"";
-
-  // Parsing an XML this way is not very clean but in this case, it works (and
-  // fast.) Android's packages.xml is written in com.android.server.pm.Settings'
-  // writeLPr(), and the write function always uses Android's FastXmlSerializer.
-  // The serializer does not try to pretty-print the XML, and inserts '\n' only
-  // to certain places like endTag.
-  StringPiece trimmed = base::TrimWhitespaceASCII(line, base::TRIM_ALL);
-  if (!base::StartsWith(trimmed, kElementVersion, base::CompareCase::SENSITIVE))
-    return false;  // Not a <version> element. Ignoring.
-
-  if (trimmed.find(kAttributeVolumeUuid) != std::string::npos)
-    return false;  // This is for an external storage. Ignoring.
-
-  StringPiece fingerprint = GetAttributeValue(trimmed, kAttributeFingerprint);
-  if (fingerprint.empty()) {
-    LOG(WARNING) << "<version> doesn't have a valid fingerprint: " << trimmed;
-    return false;
-  }
-  StringPiece sdk_version = GetAttributeValue(trimmed, kAttributeSdkVersion);
-  if (sdk_version.empty()) {
-    LOG(WARNING) << "<version> doesn't have a valid sdkVersion: " << trimmed;
-    return false;
-  }
-  // Also checks existence of databaseVersion.
-  if (GetAttributeValue(trimmed, kAttributeDatabaseVersion).empty()) {
-    LOG(WARNING) << "<version> doesn't have a databaseVersion: " << trimmed;
-    return false;
-  }
-
-  out_fingerprint->assign(fingerprint.data(), fingerprint.size());
-  out_sdk_version->assign(sdk_version.data(), sdk_version.size());
-  return true;
 }
 
 bool GetUserId(const std::string& user, uid_t* user_id, gid_t* group_id) {
@@ -1107,10 +1005,9 @@ bool SafeCopyFile(const base::FilePath& src_path,
   len = st.st_size;
 
   do {
-    ret = sendfile(dest_fd.get(), src_fd.get(), NULL, len);
+    ret = sendfile(dest_fd.get(), src_fd.get(), nullptr, len);
     if (ret == -1) {
-      PLOG(ERROR) << "Fail to copy file " << src_path << " to " << dest_path
-                  << errno;
+      PLOG(ERROR) << "Fail to copy file " << src_path << " to " << dest_path;
       return false;
     }
     len -= ret;
@@ -1119,9 +1016,40 @@ bool SafeCopyFile(const base::FilePath& src_path,
   return true;
 }
 
+bool IsErofsImage(const base::FilePath& image_path) {
+  // Check the magic number of erofs placed at the 1024 byte.
+  // https://elixir.bootlin.com/linux/latest/source/fs/erofs/erofs_fs.h#L53
+  const off_t kErofsMagicOffset = 1024;
+  const uint32_t kErofsMagicNumber = 0xe0f5e1e2;
+  base::ScopedFD fd(open(image_path.value().c_str(), O_RDONLY));
+  if (!fd.is_valid()) {
+    PLOG(ERROR) << "Failed to open " << image_path.value();
+    return false;
+  }
+  off_t cur_pos = lseek(fd.get(), kErofsMagicOffset, SEEK_SET);
+  if (cur_pos != kErofsMagicOffset) {
+    PLOG(ERROR) << "Failed to seek " << image_path.value() << " lseek returned "
+                << cur_pos;
+    return false;
+  }
+  uint32_t data;
+  if (!base::ReadFromFD(fd.get(), reinterpret_cast<char*>(&data),
+                        sizeof(data))) {
+    PLOG(ERROR) << "Can't read the magic number of " << image_path.value();
+    return false;
+  }
+  return data == kErofsMagicNumber;
+}
+
 bool GenerateFirstStageFstab(const base::FilePath& combined_property_file_name,
                              const base::FilePath& fstab_path,
+                             const base::FilePath& vendor_image_path,
                              const std::string& cache_partition) {
+  // TODO(b/269555375): Exit with error if an IO error occurs inside
+  //                    IsErofsImage.
+  const std::string vendor_fs_type =
+      IsErofsImage(vendor_image_path) ? "erofs" : "squashfs";
+
   // The file is exposed to the guest by crosvm via /sys/firmware/devicetree,
   // which in turn allows the guest's init process to mount /vendor very early,
   // in its first stage (device) initialization step. crosvm also special-cases
@@ -1131,9 +1059,10 @@ bool GenerateFirstStageFstab(const base::FilePath& combined_property_file_name,
   //
   // The device name for /vendor has to match what arc_vm_client_adapter.cc
   // configures.
-  std::string firstStageFstabTemplate =
-      "/dev/block/vdb /vendor squashfs ro,noatime,nodev "
-      "wait,check,formattable,reservedsize=128M\n";
+  std::string firstStageFstabTemplate = base::StringPrintf(
+      "/dev/block/vdb /vendor %s ro,noatime,nodev "
+      "wait,check,formattable,reservedsize=128M\n",
+      vendor_fs_type.c_str());
 
   // A dedicated cache partition needs to be mounted in the first stage init
   // process. This is required for the adb remount / sync feature to work on
@@ -1159,14 +1088,14 @@ bool GenerateFirstStageFstab(const base::FilePath& combined_property_file_name,
   return WriteToFile(fstab_path, 0644, firstStageFstabTemplate);
 }
 
-base::Optional<std::string> FilterMediaProfile(
+std::optional<std::string> FilterMediaProfile(
     const base::FilePath& media_profile_xml,
     const base::FilePath& camera_test_config) {
   std::string content;
   if (!base::ReadFileToString(media_profile_xml, &content)) {
     LOG(ERROR) << "Failed to read media profile from "
                << media_profile_xml.value();
-    return base::nullopt;
+    return std::nullopt;
   }
 
   if (!base::PathExists(camera_test_config)) {
@@ -1180,14 +1109,16 @@ base::Optional<std::string> FilterMediaProfile(
     return content;
   }
   auto config = base::JSONReader::ReadAndReturnValueWithError(json_str);
-  if (!config.value) {
+  if (!config.has_value() || !config->is_dict()) {
     LOG(ERROR) << "Failed to parse camera test config content: " << json_str;
     return content;
   }
+  const auto& config_dict = config->GetDict();
+
   bool enable_front_camera =
-      config.value->FindBoolPath(kEnableFrontCamera).value_or(true);
+      config_dict.FindBool(kEnableFrontCamera).value_or(true);
   bool enable_back_camera =
-      config.value->FindBoolPath(kEnableBackCamera).value_or(true);
+      config_dict.FindBool(kEnableBackCamera).value_or(true);
   if (enable_front_camera && enable_back_camera) {
     return content;
   }
@@ -1200,30 +1131,30 @@ base::Optional<std::string> FilterMediaProfile(
   xmlDocPtr doc;
 
   auto result = [&doc, &content, enable_front_camera,
-                 enable_back_camera]() -> base::Optional<std::string> {
-    doc = xmlReadMemory(content.c_str(), content.size(), NULL, NULL, 0);
-    if (doc == NULL) {
+                 enable_back_camera]() -> std::optional<std::string> {
+    doc = xmlReadMemory(content.c_str(), content.size(), nullptr, nullptr, 0);
+    if (doc == nullptr) {
       LOG(ERROR) << "Failed to parse media profile content:\n" << content;
-      return base::nullopt;
+      return std::nullopt;
     }
     // For keeping indent.
     xmlKeepBlanksDefault(0);
 
     xmlNodePtr settings = xmlDocGetRootElement(doc);
-    if (settings == NULL) {
+    if (settings == nullptr) {
       LOG(ERROR) << "No root element node found in media profile content:\n"
                  << content;
-      return base::nullopt;
+      return std::nullopt;
     }
     if (std::string(reinterpret_cast<const char*>(settings->name)) !=
         "MediaSettings") {
       LOG(ERROR) << "Failed to find media settings in media profile content:\n"
                  << content;
-      return base::nullopt;
+      return std::nullopt;
     }
 
     std::vector<xmlNodePtr> camera_profiles;
-    for (xmlNodePtr cur = xmlFirstElementChild(settings); cur != NULL;
+    for (xmlNodePtr cur = xmlFirstElementChild(settings); cur != nullptr;
          cur = xmlNextElementSibling(cur)) {
       if (std::string("CamcorderProfiles") !=
           reinterpret_cast<const char*>(cur->name)) {
@@ -1236,7 +1167,7 @@ base::Optional<std::string> FilterMediaProfile(
       case 0:
         LOG(ERROR) << "No camera profile found in media profile content:\n"
                    << content;
-        return base::nullopt;
+        return std::nullopt;
       case 1:
         // The original content of media profile may already be filtered by test
         // code[1]. Here we ensure there's always have at least one camera to be
@@ -1249,26 +1180,35 @@ base::Optional<std::string> FilterMediaProfile(
         break;
       default:
         NOTREACHED() << "Found more than 2 camera profiles";
-        return base::nullopt;
+        return std::nullopt;
     }
 
-    xmlNodePtr front_camera_profile = NULL;
-    xmlNodePtr back_camera_profile = NULL;
+    xmlNodePtr front_camera_profile = nullptr;
+    xmlNodePtr back_camera_profile = nullptr;
     for (xmlNodePtr profile : camera_profiles) {
-      auto* cameraId = reinterpret_cast<const char*>(
-          xmlGetProp(profile, reinterpret_cast<const xmlChar*>("cameraId")));
+      auto* xml_camera_prop =
+          xmlGetProp(profile, reinterpret_cast<const xmlChar*>("cameraId"));
+      if (!xml_camera_prop) {
+        LOG(ERROR) << "Unable to get camera property.";
+        return std::nullopt;
+      }
+      auto* cameraId = reinterpret_cast<const char*>(xml_camera_prop);
       if (std::string("0") == cameraId) {
-        CHECK(back_camera_profile == NULL) << "Duplicate back facing profile";
+        CHECK(back_camera_profile == nullptr)
+            << "Duplicate back facing profile";
         back_camera_profile = profile;
       } else if (std::string("1") == cameraId) {
-        CHECK(front_camera_profile == NULL) << "Duplicate front facing profile";
+        CHECK(front_camera_profile == nullptr)
+            << "Duplicate front facing profile";
         front_camera_profile = profile;
       } else {
         LOG(ERROR) << "Unknown cameraId \"" << cameraId
                    << "\" in media profile content:\n"
                    << content;
-        return base::nullopt;
+        xmlFree(xml_camera_prop);
+        return std::nullopt;
       }
+      xmlFree(xml_camera_prop);
     }
 
     if (enable_front_camera) {
@@ -1294,11 +1234,11 @@ base::Optional<std::string> FilterMediaProfile(
     }
 
     // Dump results.
-    xmlChar* buf;
-    int size;
+    xmlChar* buf = nullptr;
+    int size = 0;
     xmlDocDumpFormatMemory(doc, &buf, &size, /* format */ 1);
-    CHECK(buf != NULL) << "Failed to dump filtered xml result";
-    std::string xml_result(reinterpret_cast<const char*>(buf));
+    CHECK(buf != nullptr) << "Failed to dump filtered xml result";
+    std::string xml_result(reinterpret_cast<const char*>(buf), size);
     xmlFree(buf);
     return xml_result;
   }();
@@ -1308,4 +1248,90 @@ base::Optional<std::string> FilterMediaProfile(
   return result;
 }
 
+std::optional<std::string> AppendFeatureManagement(
+    const base::FilePath& hardware_profile_xml,
+    segmentation::FeatureManagement& feature_management) {
+  // Open the file
+  std::string content;
+  if (!base::ReadFileToString(hardware_profile_xml, &content)) {
+    LOG(ERROR) << "Failed to read media profile from "
+               << hardware_profile_xml.value();
+    return std::nullopt;
+  }
+
+  // Get the list of features to enable.
+  std::set<std::string> features =
+      feature_management.ListFeatures(segmentation::USAGE_ANDROID);
+  if (features.size() == 0) {
+    // Nothing to add.
+    return content;
+  }
+
+  // Interpret the XML file
+  LIBXML_TEST_VERSION
+  xmlDocPtr doc;
+
+  auto result = [&doc, &content, &features]() -> std::optional<std::string> {
+    doc = xmlReadMemory(content.c_str(), content.size(), nullptr, nullptr, 0);
+    if (doc == nullptr) {
+      LOG(ERROR) << "Failed to parse hardware profile content:\n" << content;
+      return std::nullopt;
+    }
+    // For keeping indent.
+    xmlKeepBlanksDefault(0);
+
+    xmlNodePtr permissions = xmlDocGetRootElement(doc);
+    if (permissions == nullptr) {
+      LOG(ERROR) << "No root element node found in hardware profile content:\n"
+                 << content;
+      return std::nullopt;
+    }
+    if (std::string(reinterpret_cast<const char*>(permissions->name)) !=
+        "permissions") {
+      LOG(ERROR) << "Failed to find permissions settings in hardware profile "
+                    "content:\n"
+                 << content;
+      return std::nullopt;
+    }
+
+    for (auto feature : features) {
+      xmlNodePtr feature_node = xmlNewDocNode(
+          doc, nullptr, reinterpret_cast<const xmlChar*>("feature"), nullptr);
+      if (!feature_node) {
+        LOG(ERROR) << "Unable to allocate a node to hardware profile content:\n"
+                   << content;
+        return std::nullopt;
+      }
+      if (xmlAddChild(permissions, feature_node) == nullptr) {
+        LOG(ERROR) << "Unable to add a node to hardware profile content:\n"
+                   << content;
+        xmlFreeNode(feature_node);
+        return std::nullopt;
+      }
+      if (xmlNewProp(feature_node, reinterpret_cast<const xmlChar*>("name"),
+                     reinterpret_cast<const xmlChar*>(
+                         base::StrCat(
+                             {"org.chromium.arc.feature_management.", feature})
+                             .c_str())) == nullptr) {
+        LOG(ERROR) << "Unable to add feature " << feature
+                   << "hardware profile content:\n"
+                   << content;
+        return std::nullopt;
+      }
+    }
+
+    // Dump results.
+    xmlChar* buf = nullptr;
+    int size = 0;
+    xmlDocDumpFormatMemory(doc, &buf, &size, /* format */ 1);
+    CHECK(buf != nullptr) << "Failed to dump filtered xml result";
+    std::string xml_result(reinterpret_cast<const char*>(buf), size);
+    xmlFree(buf);
+    return xml_result;
+  }();
+  xmlFreeDoc(doc);
+  xmlCleanupParser();
+
+  return result;
+}
 }  // namespace arc

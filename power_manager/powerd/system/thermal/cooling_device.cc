@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,21 +8,19 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
-#include <base/macros.h>
 
 #include "power_manager/common/util.h"
 #include "power_manager/powerd/system/thermal/device_thermal_state.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -111,9 +109,12 @@ bool CoolingDevice::InitSysfsFile() {
               << ") cooling device: " << device_path_;
     type_ = ThermalDeviceType::kOtherCooling;
   }
-  threshold_fair_ = ceil(max_state * kScale.at(type_).fair);
-  threshold_serious_ = ceil(max_state * kScale.at(type_).serious);
-  threshold_critical_ = ceil(max_state * kScale.at(type_).critical);
+  threshold_fair_ =
+      ceil(static_cast<double>(max_state) * kScale.at(type_).fair);
+  threshold_serious_ =
+      ceil(static_cast<double>(max_state) * kScale.at(type_).serious);
+  threshold_critical_ =
+      ceil(static_cast<double>(max_state) * kScale.at(type_).critical);
 
   polling_file_.Init(polling_path_);
   return true;
@@ -136,5 +137,4 @@ DeviceThermalState CoolingDevice::CalculateThermalState(int sysfs_data) {
   return DeviceThermalState::kNominal;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

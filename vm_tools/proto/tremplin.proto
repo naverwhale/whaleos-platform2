@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,8 @@ option cc_enable_arenas = true;
 
 // This file defines services for tremplin, the container springboard service.
 package vm_tools.tremplin;
-option go_package = "tremplin_proto";
+
+option go_package = "chromiumos/vm_tools/tremplin_proto";
 
 // This needs to be duplicated because the gyp rule for building
 // go code makes it difficult to have imports.
@@ -138,11 +139,11 @@ message StartContainerRequest {
   // Name of the container to start within the VM.
   string container_name = 1;
 
-  // SSH public key.
-  string host_public_key = 2;
+  // Deprecated: SSH public key is not used.
+  string host_public_key = 2 [deprecated = true];
 
-  // SSH private key.
-  string container_private_key = 3;
+  // Deprecated: SSH private key is not used.
+  string container_private_key = 3 [deprecated = true];
 
   // Container token.
   string token = 4;
@@ -164,6 +165,10 @@ message StartContainerRequest {
   }
 
   PrivilegeLevel privilege_level = 6;
+
+  // Audio capture should not be allowed in the container even if the host VM
+  // supports it.
+  bool disable_audio_capture = 7;
 }
 
 // OsRelease encapsulates a subset of the os-release info as documented
@@ -221,6 +226,35 @@ message StartContainerResponse {
 
   // OS strings found in the container's /etc/os-release, e.g. "stretch".
   OsRelease os_release = 3;
+}
+
+message StopContainerRequest {
+  // Name of the container to stop within the VM.
+  string container_name = 1;
+}
+
+message StopContainerResponse {
+  enum Status {
+    // The status of stopping the container is unknown
+    UNKNOWN = 0;
+
+    // The container is already stopped.
+    STOPPED = 1;
+
+    // The container is being stopped.
+    STOPPING = 2;
+
+    // The named container doesn't exist.
+    DOES_NOT_EXIST = 3;
+
+    // The container could not be stopped.
+    FAILED = 4;
+  }
+  // Container stopping status.
+  Status status = 1;
+
+  // The failure reason if the container could not be stopped.
+  string failure_reason = 2;
 }
 
 message GetContainerUsernameRequest {
@@ -386,6 +420,35 @@ message ContainerStartProgress {
   string container_name = 2;
 
   // The failure_reason if the container could not be started.
+  string failure_reason = 3;
+}
+
+// Sent by tremplin to update the host on the stopping of a container.
+message ContainerStopProgress {
+  enum Status {
+    // Stopping status is unknown.
+    UNKNOWN = 0;
+
+    // The container has been stopped.
+    STOPPED = 1;
+
+    // The container is stopping.
+    STOPPING = 2;
+
+    // The container stop was cancelled.
+    CANCELLED = 3;
+
+    // One or more steps failed and the container could not be stopped.
+    FAILED = 4;
+  }
+
+  // The current status of the container.
+  Status status = 1;
+
+  // Name of the container to stop.
+  string container_name = 2;
+
+  // The failure_reason if the container could not be stopped.
   string failure_reason = 3;
 }
 
@@ -833,12 +896,128 @@ message GetDebugInfoResponse {
   string debug_information = 1;
 }
 
+// Request Tremplin to attach a USB device on a given port to a container.
+message AttachUsbToContainerRequest {
+  // Attach USB devices on this port.
+  int32 port_num = 1;
+
+  // Name of the container to attach to.
+  string container_name = 2;
+}
+
+message AttachUsbToContainerResponse {
+  enum Status {
+    // The status is unknown.
+    UNKNOWN = 0;
+
+    // The USB port will be attached.
+    OK = 1;
+
+    // The container doesn't exist.
+    NO_SUCH_CONTAINER = 2;
+
+    // Failed to attach.
+    FAILED = 3;
+  }
+
+  // The status.
+  Status status = 1;
+
+  // Human-readable failure reason.
+  string failure_reason = 2;
+}
+
+// Request Tremplin to detach a USB device on a given port from its container.
+message DetachUsbFromContainerRequest {
+  // Detach USB devices on this port.
+  int32 port_num = 1;
+}
+
+message DetachUsbFromContainerResponse {
+  enum Status {
+    // The status is unknown.
+    UNKNOWN = 0;
+
+    // The USB port will be detached.
+    OK = 1;
+
+    // Failed to detach.
+    FAILED = 2;
+  }
+
+  // The status.
+  Status status = 1;
+
+  // Human-readable failure reason.
+  string failure_reason = 2;
+}
+
+enum VmDevice {
+  MICROPHONE = 0;
+  CAMERA = 1;
+}
+
+enum VmDeviceAction {
+  // VmDevice should be enabled.
+  ENABLE = 0;
+  // VmDevice should be disabled.
+  DISABLE = 1;
+}
+
+message UpdateContainerDevicesRequest {
+  // Name of the container of the VmDevices.
+  string container_name = 1;
+
+  // Actions to take per VmDevice.
+  // The keys are really VmDevice, but proto doesn't allow enum keys.
+  map<string, VmDeviceAction> updates = 2;
+}
+
+message UpdateContainerDevicesResponse {
+  enum Status {
+    // The status is unknown.
+    UNKNOWN = 0;
+
+    // The actions were applied to the container where possible.
+    OK = 1;
+
+    // The requested container wasn't found.
+    NO_SUCH_CONTAINER = 2;
+
+    // The actions could not be applied.
+    FAILED = 3;
+  }
+
+  enum UpdateResult {
+    // The VmDevice action was successful.
+    SUCCESS = 0;
+
+    // The VM had no such device so the action didn't apply.
+    NO_SUCH_VM_DEVICE = 1;
+
+    // The action could not be applied to the VmDevice.
+    UPDATE_FAILED = 2;
+  }
+
+  // Status of the entire operation. Individual results should be checked even
+  // if status is OK.
+  Status status = 1;
+
+  // Human readable failure reason.
+  string failure_reason = 2;
+
+  // Results of actions per VmDevice.
+  // The keys are really VmDevice, but proto doesn't allow enum keys.
+  map<string, UpdateResult> results = 3;
+}
+
 // Tremplin service methods.
 service Tremplin {
   rpc StartLxd(StartLxdRequest) returns (StartLxdResponse);
   rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse);
   rpc DeleteContainer(DeleteContainerRequest) returns (DeleteContainerResponse);
   rpc StartContainer(StartContainerRequest) returns (StartContainerResponse);
+  rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
   rpc GetContainerUsername(GetContainerUsernameRequest)
       returns (GetContainerUsernameResponse);
   rpc SetUpUser(SetUpUserRequest) returns (SetUpUserResponse);
@@ -858,6 +1037,12 @@ service Tremplin {
   rpc HostNetworkChanged(HostNetworkChangedRequest)
       returns (HostNetworkChangedResponse);
   rpc GetDebugInfo(GetDebugInfoRequest) returns (GetDebugInfoResponse);
+  rpc AttachUsbToContainer(AttachUsbToContainerRequest)
+      returns (AttachUsbToContainerResponse);
+  rpc DetachUsbFromContainer(DetachUsbFromContainerRequest)
+      returns (DetachUsbFromContainerResponse);
+  rpc UpdateContainerDevices(UpdateContainerDevicesRequest)
+      returns (UpdateContainerDevicesResponse);
 
   // If adding more rpc's, please update ContainerListenerFuzzerSingleAction as
   // well.
@@ -870,6 +1055,7 @@ service TremplinListener {
   rpc UpdateCreateStatus(ContainerCreationProgress) returns (EmptyMessage);
   rpc UpdateDeletionStatus(ContainerDeletionProgress) returns (EmptyMessage);
   rpc UpdateStartStatus(ContainerStartProgress) returns (EmptyMessage);
+  rpc UpdateStopStatus(ContainerStopProgress) returns (EmptyMessage);
   rpc UpdateExportStatus(ContainerExportProgress) returns (EmptyMessage);
   rpc UpdateImportStatus(ContainerImportProgress) returns (EmptyMessage);
   rpc ContainerShutdown(ContainerShutdownInfo) returns (EmptyMessage);

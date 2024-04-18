@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,14 +15,17 @@
 #include <gtest/gtest.h>
 
 #include "bindings/chrome_device_policy.pb.h"
+#include "bindings/device_management_backend.pb.h"
 #include "install_attributes/mock_install_attributes_reader.h"
 #include "policy/device_policy_impl.h"
 
 namespace policy {
 
-static const char kPolicyFileAllSet[] = "policy/tests/whitelist/policy_all";
-static const char kPolicyFileNoneSet[] = "policy/tests/whitelist/policy_none";
-static const char kKeyFile[] = "policy/tests/whitelist/owner.key";
+static const char kPolicyFileAllSet[] =
+    "policy/tests/devicesettings/policy_all.bin";
+static const char kPolicyFileNoneSet[] =
+    "policy/tests/devicesettings/policy_none.bin";
+static const char kKeyFile[] = "policy/tests/devicesettings/owner.key";
 static const char kNonExistingFile[] = "file-does-not-exist";
 
 // Creates the DevicePolicyImpl with given parameters for test.
@@ -92,6 +95,30 @@ TEST(PolicyTest, DevicePolicyAllSetTest) {
   EXPECT_FALSE(bool_value);
 
   bool_value = true;
+  ASSERT_TRUE(policy.GetHwDataUsageEnabled(&bool_value));
+  EXPECT_FALSE(bool_value);
+
+  bool_value = true;
+  ASSERT_TRUE(policy.GetReportSystemInfo(&bool_value));
+  EXPECT_FALSE(bool_value);
+
+  bool_value = true;
+  ASSERT_TRUE(policy.GetReportCpuInfo(&bool_value));
+  EXPECT_FALSE(bool_value);
+
+  bool_value = true;
+  ASSERT_TRUE(policy.GetReportGraphicsStatus(&bool_value));
+  EXPECT_FALSE(bool_value);
+
+  bool_value = true;
+  ASSERT_TRUE(policy.GetReportMemoryInfo(&bool_value));
+  EXPECT_FALSE(bool_value);
+
+  bool_value = true;
+  ASSERT_TRUE(policy.GetReportNetworkConfig(&bool_value));
+  EXPECT_FALSE(bool_value);
+
+  bool_value = true;
   ASSERT_TRUE(policy.GetReportActivityTimes(&bool_value));
   EXPECT_FALSE(bool_value);
 
@@ -99,9 +126,9 @@ TEST(PolicyTest, DevicePolicyAllSetTest) {
   ASSERT_TRUE(policy.GetReportBootMode(&bool_value));
   EXPECT_FALSE(bool_value);
 
-  bool_value = true;
-  ASSERT_TRUE(policy.GetEphemeralUsersEnabled(&bool_value));
-  EXPECT_FALSE(bool_value);
+  DevicePolicy::EphemeralSettings ephemeral_settings;
+  ASSERT_TRUE(policy.GetEphemeralSettings(&ephemeral_settings));
+  EXPECT_FALSE(ephemeral_settings.global_ephemeral_users_enabled);
 
   std::string string_value;
   ASSERT_TRUE(policy.GetReleaseChannel(&string_value));
@@ -123,10 +150,14 @@ TEST(PolicyTest, DevicePolicyAllSetTest) {
   EXPECT_EQ("42.0.", string_value);
 
   int_value = -1;
-  ASSERT_TRUE(policy.GetRollbackToTargetVersion(&int_value));
-  EXPECT_EQ(
-      enterprise_management::AutoUpdateSettingsProto::ROLLBACK_AND_POWERWASH,
-      int_value);
+  if (USE_ENTERPRISE_ROLLBACK_REVEN) {
+    ASSERT_FALSE(policy.GetRollbackToTargetVersion(&int_value));
+  } else {
+    ASSERT_TRUE(policy.GetRollbackToTargetVersion(&int_value));
+    EXPECT_EQ(
+        enterprise_management::AutoUpdateSettingsProto::ROLLBACK_AND_POWERWASH,
+        int_value);
+  }
 
   int_value = -1;
   ASSERT_TRUE(policy.GetRollbackAllowedMilestones(&int_value));
@@ -180,16 +211,13 @@ TEST(PolicyTest, DevicePolicyAllSetTest) {
   ASSERT_TRUE(policy.GetDisallowedTimeIntervals(&intervals));
   ASSERT_EQ(2, intervals.size());
   EXPECT_EQ(4, intervals[0].start_day_of_week);
-  EXPECT_EQ(base::TimeDelta::FromMinutes(30) + base::TimeDelta::FromHours(12),
-            intervals[0].start_time);
+  EXPECT_EQ(base::Minutes(30) + base::Hours(12), intervals[0].start_time);
   EXPECT_EQ(6, intervals[0].end_day_of_week);
-  EXPECT_EQ(base::TimeDelta::FromMinutes(15) + base::TimeDelta::FromHours(3),
-            intervals[0].end_time);
+  EXPECT_EQ(base::Minutes(15) + base::Hours(3), intervals[0].end_time);
   EXPECT_EQ(1, intervals[1].start_day_of_week);
-  EXPECT_EQ(base::TimeDelta::FromMinutes(10) + base::TimeDelta::FromHours(20),
-            intervals[1].start_time);
+  EXPECT_EQ(base::Minutes(10) + base::Hours(20), intervals[1].start_time);
   EXPECT_EQ(3, intervals[1].end_day_of_week);
-  EXPECT_EQ(base::TimeDelta::FromMinutes(20), intervals[1].end_time);
+  EXPECT_EQ(base::Minutes(20), intervals[1].end_time);
 
   base::Version device_minimum_version;
   const base::Version expected_minimum_version("13315.60.12");
@@ -217,7 +245,7 @@ TEST(PolicyTest, DevicePolicyWhitelistTest) {
 
   enterprise_management::ChromeDeviceSettingsProto proto =
       static_cast<const DevicePolicyImpl&>(provider.GetDevicePolicy())
-          .get_device_policy();
+          .get_device_policy_for_testing();
   proto.clear_usb_detachable_allowlist();
   ASSERT_FALSE(proto.has_usb_detachable_allowlist());
   ASSERT_TRUE(proto.has_usb_detachable_whitelist());
@@ -258,6 +286,7 @@ TEST(PolicyTest, DevicePolicyNoneSetTest) {
   std::vector<DevicePolicy::UsbDeviceId> list_device;
   std::vector<DevicePolicy::WeeklyTimeInterval> intervals;
   base::Version device_minimum_version;
+  DevicePolicy::EphemeralSettings ephemeral_settings;
 
   EXPECT_FALSE(policy.GetPolicyRefreshRate(&int_value));
   EXPECT_FALSE(policy.GetGuestModeEnabled(&bool_value));
@@ -267,9 +296,15 @@ TEST(PolicyTest, DevicePolicyNoneSetTest) {
   EXPECT_FALSE(policy.GetAllowNewUsers(&bool_value));
   EXPECT_FALSE(policy.GetMetricsEnabled(&bool_value));
   EXPECT_FALSE(policy.GetReportVersionInfo(&bool_value));
+  EXPECT_FALSE(policy.GetHwDataUsageEnabled(&bool_value));
+  EXPECT_FALSE(policy.GetReportSystemInfo(&bool_value));
+  EXPECT_FALSE(policy.GetReportCpuInfo(&bool_value));
+  EXPECT_FALSE(policy.GetReportGraphicsStatus(&bool_value));
+  EXPECT_FALSE(policy.GetReportMemoryInfo(&bool_value));
+  EXPECT_FALSE(policy.GetReportNetworkConfig(&bool_value));
   EXPECT_FALSE(policy.GetReportActivityTimes(&bool_value));
   EXPECT_FALSE(policy.GetReportBootMode(&bool_value));
-  EXPECT_FALSE(policy.GetEphemeralUsersEnabled(&bool_value));
+  EXPECT_FALSE(policy.GetEphemeralSettings(&ephemeral_settings));
   EXPECT_FALSE(policy.GetReleaseChannel(&string_value));
   EXPECT_FALSE(policy.GetUpdateDisabled(&bool_value));
   EXPECT_FALSE(policy.GetTargetVersionPrefix(&string_value));
@@ -306,22 +341,6 @@ TEST(PolicyTest, DevicePolicyFailure) {
   EXPECT_FALSE(provider.device_policy_is_loaded());
 }
 
-// Verify that signature verification is waived for a device in enterprise_ad
-// mode.
-TEST(PolicyTest, SkipSignatureForEnterpriseAD) {
-  base::FilePath policy_file(kPolicyFileAllSet);
-  base::FilePath key_file(kNonExistingFile);
-  PolicyProvider provider;
-  provider.SetDevicePolicyForTesting(CreateDevicePolicyImpl(
-      std::make_unique<MockInstallAttributesReader>(
-          InstallAttributesReader::kDeviceModeEnterpriseAD, true),
-      policy_file, key_file, false));
-  provider.Reload();
-
-  // Ensure we successfully loaded the device policy file.
-  EXPECT_TRUE(provider.device_policy_is_loaded());
-}
-
 // Ensure that signature verification is enforced for a device in vanilla
 // enterprise mode.
 TEST(PolicyTest, DontSkipSignatureForEnterprise) {
@@ -356,7 +375,7 @@ TEST(PolicyTest, DontSkipSignatureForConsumer) {
 }
 
 // Checks return value of IsConsumerDevice when it's a still in OOBE.
-TEST(PolicyTest, IsConsumerDeviceOobe) {
+TEST(PolicyTest, DeviceInOobeIsNotConsumerOwned) {
   PolicyProvider provider;
   provider.SetInstallAttributesReaderForTesting(
       std::make_unique<MockInstallAttributesReader>("", false));
@@ -364,7 +383,7 @@ TEST(PolicyTest, IsConsumerDeviceOobe) {
 }
 
 // Checks return value of IsConsumerDevice when it's a consumer device.
-TEST(PolicyTest, IsConsumerDeviceConsumer) {
+TEST(PolicyTest, ConsumerDeviceIsConsumerOwned) {
   PolicyProvider provider;
   provider.SetInstallAttributesReaderForTesting(
       std::make_unique<MockInstallAttributesReader>("", true));
@@ -372,7 +391,7 @@ TEST(PolicyTest, IsConsumerDeviceConsumer) {
 }
 
 // Checks return value of IsConsumerDevice when it's an enterprise device.
-TEST(PolicyTest, IsConsumerDeviceEnterprise) {
+TEST(PolicyTest, EnterpriseDeviceIsNotConsumerOwned) {
   PolicyProvider provider;
   provider.SetInstallAttributesReaderForTesting(
       std::make_unique<MockInstallAttributesReader>(
@@ -380,13 +399,20 @@ TEST(PolicyTest, IsConsumerDeviceEnterprise) {
   EXPECT_FALSE(provider.IsConsumerDevice());
 }
 
-// Checks return value of IsConsumerDevice when it's an enterprise AD device.
-TEST(PolicyTest, IsConsumerDeviceEnterpriseAd) {
+TEST(PolicyTest, LegacyKioskDeviceIsNotConsumerOwned) {
   PolicyProvider provider;
   provider.SetInstallAttributesReaderForTesting(
       std::make_unique<MockInstallAttributesReader>(
-          InstallAttributesReader::kDeviceModeEnterpriseAD, true));
+          InstallAttributesReader::kDeviceModeLegacyRetail, true));
   EXPECT_FALSE(provider.IsConsumerDevice());
+}
+
+TEST(PolicyTest, ConsumerKioskDeviceIsConsumerOwned) {
+  PolicyProvider provider;
+  provider.SetInstallAttributesReaderForTesting(
+      std::make_unique<MockInstallAttributesReader>(
+          InstallAttributesReader::kDeviceModeConsumerKiosk, true));
+  EXPECT_TRUE(provider.IsConsumerDevice());
 }
 
 }  // namespace policy

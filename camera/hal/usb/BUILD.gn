@@ -1,13 +1,16 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":libcamera_hal" ]
+  deps = [
+    ":install_usb_so",
+    ":libcamera_hal",
+  ]
 
-  if (use.test) {
+  if (use.test && !use.asan) {
     deps += [ ":image_processor_test" ]
   }
 }
@@ -16,7 +19,7 @@ pkg_config("target_defaults") {
   pkg_deps = [
     "libcros_camera",
     "libcros_camera_android_deps",
-    "libcros_config",
+    "libcros_camera_device_config",
     "libsync",
     "libyuv",
     "re2",
@@ -32,9 +35,7 @@ shared_library("libcamera_hal") {
     "camera_client.cc",
     "camera_hal.cc",
     "camera_hal_device_ops.cc",
-    "camera_privacy_switch_monitor.cc",
     "capture_request.cc",
-    "cros_device_config.cc",
     "frame_buffer.cc",
     "image_processor.cc",
     "metadata_handler.cc",
@@ -42,12 +43,15 @@ shared_library("libcamera_hal") {
     "stream_format.cc",
     "test_pattern.cc",
     "v4l2_camera_device.cc",
+    "v4l2_event_monitor.cc",
     "vendor_tag.cc",
   ]
   configs += [ ":target_defaults" ]
 }
 
-if (use.test) {
+# TODO(b/193747946): Remove the condition once we solve the camera
+# libraries missing when running with asan enabled issue.
+if (use.test && !use.asan) {
   executable("image_processor_test") {
     sources = [
       "frame_buffer.cc",
@@ -58,5 +62,13 @@ if (use.test) {
       "//common-mk:test",
       ":target_defaults",
     ]
+    run_test = true
   }
+}
+
+install_config("install_usb_so") {
+  sources = [ "${root_out_dir}/lib/libcamera_hal.so" ]
+  outputs = [ "usb.so" ]
+  install_path = "${libdir}/camera_hal"
+  deps = [ ":libcamera_hal" ]
 }

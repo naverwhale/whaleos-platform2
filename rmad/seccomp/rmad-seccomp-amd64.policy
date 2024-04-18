@@ -1,6 +1,9 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 munmap: 1
@@ -23,11 +26,13 @@ dup2: 1
 getpid: 1
 lseek: 1
 fcntl: 1
+ioperm: 1
 iopl: 1
 stat: 1
-prctl: arg0 == PR_CAPBSET_DROP || arg0 == PR_SET_NO_NEW_PRIVS || \
-       arg0 == PR_SET_SECUREBITS || arg0 == PR_CAP_AMBIENT || \
-       arg0 == PR_GET_SECUREBITS || arg0 == PR_SET_NAME
+
+# PR_SET_NAME     for base::ThreadPoolInstance::CreateAndStartWithDefaultParams.
+# PR_SET_KEEPCAPS for 'futility gbb --set --flash --flags=val'.
+prctl: arg0 == PR_SET_NAME || arg0 == PR_SET_KEEPCAPS
 execve: 1
 arch_prctl: 1
 unlink: 1
@@ -47,16 +52,26 @@ sendto: 1
 mount: 1
 geteuid: 1
 sendmsg: 1
+vfork: 1
+sched_getaffinity: 1
 
-# CROS_EC_DEV_IOCRDMEM    = 0xc0103a01
-# CROS_EC_DEV_IOCXCMD     = 0xc0283a00
-# CROS_EC_DEV_IOCRDMEM_V2 = 0xc108ec01
-# CROS_EC_DEV_IOCXCMD_V2  = 0xc014ec00
+# CROS_EC_DEV_IOCRDMEM                      = 0xc0103a01
+# CROS_EC_DEV_IOCXCMD                       = 0xc0283a00
+# CROS_EC_DEV_IOCRDMEM_V2                   = 0xc108ec01
+# CROS_EC_DEV_IOCXCMD_V2                    = 0xc014ec00
+# _IOC(_IOC_READ|_IOC_WRITE, 0x3a, 0, 0x28) = 0xc0283a00
+# IIO_GET_EVENT_FD_IOCTL                    = 0x80046990
+# FIONBIO                                   = 0x5421
+#
+# Driver type 0x3a (":") = CROS_EC_DEV_IOC
+# (Old iotcl format, used by ChromeOS 3.18 and older)
+#
 # Please refer to src/platform/ec/util/cros_ec_dev.h for more info
 ioctl: arg1 == TCGETS || arg1 == SIOCGIFFLAGS || \
        arg1 == SIOCSIFFLAGS || arg1 == 0xc0103a01 || \
        arg1 == 0xc0283a00 || arg1 == 0xc108ec01 || \
-       arg1 == 0xc014ec00
+       arg1 == 0xc014ec00 || arg1 == 0xc0283a00 || \
+       arg1 == 0x80046990 || arg1 == 0x5421
 set_tid_address: 1
 poll: 1
 pipe: 1
@@ -101,5 +116,24 @@ tgkill: 1
 fchmod: 1
 setpriority: 1
 mremap: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 madvise: arg2 == MADV_DONTNEED
+newfstatat: 1
+lchown: 1
+rmdir: 1
+sched_yield: 1
+readlink: 1
+clock_nanosleep: 1
+eventfd2: 1
+memfd_create: 1
+fdatasync: 1
+sysinfo: 1
+getgroups: 1
+getpgrp: 1
+sigaltstack: 1
+fadvise64: 1
+unlinkat: 1
+readlinkat: 1
+socketpair: 1
+gettimeofday: 1
+sendfile: 1

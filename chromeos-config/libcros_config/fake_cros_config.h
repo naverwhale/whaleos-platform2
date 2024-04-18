@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <string>
 #include <utility>
 
-#include <base/macros.h>
 #include <brillo/brillo_export.h>
 #include "chromeos-config/libcros_config/cros_config_interface.h"
 
@@ -38,8 +37,6 @@ class BRILLO_EXPORT FakeCrosConfig : public CrosConfigInterface {
   bool GetString(const std::string& path,
                  const std::string& property,
                  std::string* val_out) override;
-
-  bool GetDeviceIndex(int* device_index_out) override;
 
  private:
   using PathProp = std::pair<std::string, std::string>;

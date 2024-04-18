@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,6 @@
 
 #include <memory>
 #include <string>
-
-#include <base/macros.h>
 
 #include "install_attributes/libinstallattributes.h"
 
@@ -20,7 +18,7 @@ class DevicePolicy;
 
 // This class holds device settings that are to be enforced across all users.
 //
-// If there is a policy on disk at creation time, we will load it at verify
+// If there is a policy on disk at creation time, we will load it and verify
 // its signature.
 class PolicyProvider {
  public:

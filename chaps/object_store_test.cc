@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,18 @@
 #include <map>
 #include <string>
 
+#include <base/files/scoped_temp_dir.h>
 #include <gtest/gtest.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+
+#include <metrics/metrics_library_mock.h>
 
 using base::FilePath;
 using brillo::SecureBlob;
 using std::map;
 using std::string;
+using ::testing::StrictMock;
 
 namespace chaps {
 
@@ -114,11 +118,33 @@ TEST_F(TestObjectStoreEncryption, CBCMode) {
   EXPECT_FALSE(encrypted_block1 == encrypted_block2);
 }
 
-#ifndef NO_MEMENV
+TEST(TestObjectStore, DBInitFail) {
+  // Note that we're unable to test kDatabaseCreateFailure reliably so it's
+  // not tested.
+
+  ObjectStoreImpl store;
+  const char database[] = "/dev/null";
+  StrictMock<MetricsLibraryMock> mock_metrics_library;
+  ChapsMetrics chaps_metrics;
+  chaps_metrics.set_metrics_library_for_testing(&mock_metrics_library);
+
+  EXPECT_CALL(mock_metrics_library, SendCrosEventToUMA(kDatabaseOpenAttempt));
+  EXPECT_CALL(mock_metrics_library, SendCrosEventToUMA(kDatabaseCorrupted));
+  EXPECT_CALL(mock_metrics_library, SendCrosEventToUMA(kDatabaseRepairFailure));
+  ASSERT_FALSE(store.Init(FilePath(database), &chaps_metrics));
+}
+
 TEST(TestObjectStore, InsertLoad) {
   ObjectStoreImpl store;
-  const char database[] = ":memory:";
-  ASSERT_TRUE(store.Init(FilePath(database)));
+  base::ScopedTempDir tmp_dir;
+  ASSERT_TRUE(tmp_dir.CreateUniqueTempDir());
+  StrictMock<MetricsLibraryMock> mock_metrics_library;
+  ChapsMetrics chaps_metrics;
+  chaps_metrics.set_metrics_library_for_testing(&mock_metrics_library);
+  EXPECT_CALL(mock_metrics_library, SendCrosEventToUMA(kDatabaseOpenAttempt));
+  EXPECT_CALL(mock_metrics_library,
+              SendCrosEventToUMA(kDatabaseOpenedSuccessfully));
+  ASSERT_TRUE(store.Init(tmp_dir.GetPath(), &chaps_metrics));
   string tmp(32, 'A');
   SecureBlob key(tmp.begin(), tmp.end());
   EXPECT_TRUE(store.SetEncryptionKey(key));
@@ -159,8 +185,15 @@ TEST(TestObjectStore, InsertLoad) {
 
 TEST(TestObjectStore, UpdateDelete) {
   ObjectStoreImpl store;
-  const char database[] = ":memory:";
-  ASSERT_TRUE(store.Init(FilePath(database)));
+  base::ScopedTempDir tmp_dir;
+  ASSERT_TRUE(tmp_dir.CreateUniqueTempDir());
+  StrictMock<MetricsLibraryMock> mock_metrics_library;
+  ChapsMetrics chaps_metrics;
+  chaps_metrics.set_metrics_library_for_testing(&mock_metrics_library);
+  EXPECT_CALL(mock_metrics_library, SendCrosEventToUMA(kDatabaseOpenAttempt));
+  EXPECT_CALL(mock_metrics_library,
+              SendCrosEventToUMA(kDatabaseOpenedSuccessfully));
+  ASSERT_TRUE(store.Init(tmp_dir.GetPath(), &chaps_metrics));
   string tmp(32, 'A');
   SecureBlob key(tmp.begin(), tmp.end());
   EXPECT_TRUE(store.SetEncryptionKey(key));
@@ -185,8 +218,15 @@ TEST(TestObjectStore, UpdateDelete) {
 
 TEST(TestObjectStore, InternalBlobs) {
   ObjectStoreImpl store;
-  const char database[] = ":memory:";
-  ASSERT_TRUE(store.Init(FilePath(database)));
+  base::ScopedTempDir tmp_dir;
+  ASSERT_TRUE(tmp_dir.CreateUniqueTempDir());
+  StrictMock<MetricsLibraryMock> mock_metrics_library;
+  ChapsMetrics chaps_metrics;
+  chaps_metrics.set_metrics_library_for_testing(&mock_metrics_library);
+  EXPECT_CALL(mock_metrics_library, SendCrosEventToUMA(kDatabaseOpenAttempt));
+  EXPECT_CALL(mock_metrics_library,
+              SendCrosEventToUMA(kDatabaseOpenedSuccessfully));
+  ASSERT_TRUE(store.Init(tmp_dir.GetPath(), &chaps_metrics));
   string blob;
   EXPECT_FALSE(store.GetInternalBlob(1, &blob));
   EXPECT_TRUE(store.SetInternalBlob(1, "blob"));
@@ -196,8 +236,15 @@ TEST(TestObjectStore, InternalBlobs) {
 
 TEST(TestObjectStore, DeleteAll) {
   ObjectStoreImpl store;
-  const char database[] = ":memory:";
-  ASSERT_TRUE(store.Init(FilePath(database)));
+  base::ScopedTempDir tmp_dir;
+  ASSERT_TRUE(tmp_dir.CreateUniqueTempDir());
+  StrictMock<MetricsLibraryMock> mock_metrics_library;
+  ChapsMetrics chaps_metrics;
+  chaps_metrics.set_metrics_library_for_testing(&mock_metrics_library);
+  EXPECT_CALL(mock_metrics_library, SendCrosEventToUMA(kDatabaseOpenAttempt));
+  EXPECT_CALL(mock_metrics_library,
+              SendCrosEventToUMA(kDatabaseOpenedSuccessfully));
+  ASSERT_TRUE(store.Init(tmp_dir.GetPath(), &chaps_metrics));
   string tmp(32, 'A');
   SecureBlob key(tmp.begin(), tmp.end());
   EXPECT_TRUE(store.SetEncryptionKey(key));
@@ -219,7 +266,6 @@ TEST(TestObjectStore, DeleteAll) {
   EXPECT_TRUE(store.GetInternalBlob(1, &internal));
   EXPECT_EQ("internal", internal);
 }
-#endif
 
 }  // namespace chaps
 

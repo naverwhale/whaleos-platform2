@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 
 #include "trunks/tpm_generated.h"
 #include "trunks/trunks_export.h"
@@ -65,7 +64,8 @@ class TRUNKS_EXPORT TpmStateImpl : public TpmState {
   // capabilities of the given type are sent to the |callback|. The callback
   // returns the next property value to query if there is more data available or
   // 0 if the capability data was empty.
-  using CapabilityCallback = base::Callback<uint32_t(const TPMU_CAPABILITIES&)>;
+  using CapabilityCallback =
+      base::RepeatingCallback<uint32_t(const TPMU_CAPABILITIES&)>;
   TPM_RC GetCapability(const CapabilityCallback& callback,
                        TPM_CAP capability,
                        uint32_t property,

@@ -1,4 +1,4 @@
-/* Copyright 2016 The Chromium OS Authors. All rights reserved.
+/* Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -11,8 +11,7 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/macros.h>
+#include <base/functional/bind.h>
 #include <base/synchronization/lock.h>
 #include <base/threading/thread.h>
 #include <base/threading/thread_checker.h>
@@ -20,18 +19,19 @@
 #include <hardware/camera3.h>
 #include <hardware/hardware.h>
 
+#include "base/types/expected.h"
 #include "cros-camera/camera_buffer_manager.h"
 #include "cros-camera/camera_metrics.h"
 #include "cros-camera/face_detector_client_cros_wrapper.h"
 #include "cros-camera/future.h"
 #include "hal/usb/cached_frame.h"
-#include "hal/usb/camera_privacy_switch_monitor.h"
 #include "hal/usb/capture_request.h"
 #include "hal/usb/common_types.h"
 #include "hal/usb/frame_buffer.h"
 #include "hal/usb/metadata_handler.h"
 #include "hal/usb/test_pattern.h"
 #include "hal/usb/v4l2_camera_device.h"
+#include "hal/usb/v4l2_event_monitor.h"
 
 namespace cros {
 
@@ -65,8 +65,9 @@ class CameraClient {
                const camera_metadata_t& request_template,
                const hw_module_t* module,
                hw_device_t** hw_device,
-               CameraPrivacySwitchMonitor* privacy_switch_monitor,
-               ClientType client_type);
+               V4L2EventMonitor* v4l2_event_monitor,
+               ClientType client_type,
+               bool sw_privacy_switch_on);
   CameraClient(const CameraClient&) = delete;
   CameraClient& operator=(const CameraClient&) = delete;
   ~CameraClient();
@@ -74,6 +75,7 @@ class CameraClient {
   // Camera Device Operations from CameraHal.
   int OpenDevice();
   int CloseDevice();
+  void SetPrivacySwitchState(bool on);
 
   int GetId() const { return id_; }
 
@@ -87,29 +89,46 @@ class CameraClient {
   int Flush(const camera3_device_t* dev);
 
  private:
+  // StreamOnParameters is a wrapper for the parameters of StreamOn().
+  struct StreamOnParameters {
+    Size resolution = {0, 0};
+    int crop_rotate_scale_degrees = 0;
+    bool use_native_sensor_ratio = false;
+    int frame_rate = 0;
+  };
+
+  using Error = int;
+  // Returns Error value or a StreamOnParameters object resolving
+  // |stream_config|. Parses |frame_rate| from
+  // |stream_config->session_parameters| if it's available, otherwise
+  // chooses device's max frame rate for the selected resolution.
+  base::expected<StreamOnParameters, Error> BuildStreamOnParameters(
+      const camera3_stream_configuration_t* stream_config,
+      std::vector<camera3_stream_t*>& streams);
+
   // Verify a set of streams in aggregate.
   bool IsValidStreamSet(const std::vector<camera3_stream_t*>& streams);
 
   // Calculate usage and maximum number of buffers of each stream.
   void SetUpStreams(int num_buffers, std::vector<camera3_stream_t*>* streams);
 
-  // Start |request_thread_| and streaming.
-  int StreamOn(Size stream_on_resolution,
-               int crop_rotate_scale_degrees,
-               int* num_buffers,
-               bool use_native_sensor_ratio);
+  // Start |request_thread_| and streaming. Returns the
+  // number of buffers or Error value.
+  base::expected<int, Error> StreamOn(
+      const CameraClient::StreamOnParameters& streamon_params);
 
   // Stop streaming and |request_thread_|.
   void StreamOff();
 
   // Callback function for RequestHandler::StreamOn.
-  void StreamOnCallback(scoped_refptr<cros::Future<int>> future,
-                        int* out_num_buffers,
-                        int num_buffers,
-                        int result);
+  void StreamOnCallback(
+      scoped_refptr<cros::Future<base::expected<int, Error>>> future,
+      int num_buffers,
+      Error error);
 
   // Callback function for RequestHandler::StreamOff.
-  void StreamOffCallback(scoped_refptr<cros::Future<int>> future, int result);
+  void StreamOffCallback(scoped_refptr<cros::Future<Error>> future,
+                         Error error);
 
   // Check if we need and can use native sensor ratio.
   // Return true means we need to use native sensor ratio. The resolution will
@@ -139,8 +158,7 @@ class CameraClient {
   // Camera device handle returned to framework for use.
   camera3_device_t camera3_device_;
 
-  // Use to check the constructor, OpenDevice, and CloseDevice are called on the
-  // same thread.
+  // Use to check the constructor and OpenDevice are called on the same thread.
   base::ThreadChecker thread_checker_;
 
   // Use to check camera v3 device operations are called on the same thread.
@@ -165,6 +183,9 @@ class CameraClient {
   // max resolution used for JDA
   Size jda_resolution_cap_;
 
+  // SW privacy switch state.
+  bool sw_privacy_switch_on_;
+
   // RequestHandler is used to handle in-flight requests. All functions in the
   // class run on |request_thread_|. The class will be created in StreamOn and
   // destroyed in StreamOff.
@@ -177,32 +198,32 @@ class CameraClient {
         V4L2CameraDevice* device,
         const camera3_callback_ops_t* callback_ops,
         const scoped_refptr<base::SingleThreadTaskRunner>& task_runner,
-        MetadataHandler* metadata_handler);
+        MetadataHandler* metadata_handler,
+        bool sw_privacy_switch_on_);
     ~RequestHandler();
 
     // Synchronous call to start streaming.
-    void StreamOn(Size stream_on_resolution,
-                  int crop_rotate_scale_degrees,
-                  bool use_native_sensor_ratio,
-                  const base::Callback<void(int, int)>& callback);
+    void StreamOn(const CameraClient::StreamOnParameters& streamon_params,
+                  base::OnceCallback<void(int, int)> callback);
 
     // Synchronous call to stop streaming.
-    void StreamOff(const base::Callback<void(int)>& callback);
+    void StreamOff(base::OnceCallback<void(int)> callback);
 
     // Handle one request.
     void HandleRequest(std::unique_ptr<CaptureRequest> request);
 
     // Handle flush request. This function can be called on any thread.
-    void HandleFlush(const base::Callback<void(int)>& callback);
+    void HandleFlush(base::OnceCallback<void(int)> callback);
 
     // Get the maximum number of detected faces.
     int GetMaxNumDetectedFaces();
 
+    // Set SW privacy switch state.
+    void SetPrivacySwitchState(bool on);
+
    private:
     // Start streaming implementation.
-    int StreamOnImpl(Size stream_on_resolution,
-                     bool use_native_sensor_ratio,
-                     float target_frame_rate);
+    int StreamOnImpl(const CameraClient::StreamOnParameters& streamon_params);
 
     // Stop streaming implementation.
     int StreamOffImpl();
@@ -249,7 +270,7 @@ class CameraClient {
     void NotifyRequestError(uint32_t frame_number);
 
     // Dequeue V4L2 frame buffer.
-    int DequeueV4L2Buffer(int32_t pattern_mode);
+    int DequeueV4L2Buffer(int32_t pattern_modei, int frame_number);
 
     // Enqueue V4L2 frame buffer.
     int EnqueueV4L2Buffer();
@@ -258,13 +279,11 @@ class CameraClient {
     void DiscardOutdatedBuffers();
 
     // Used to notify caller that all requests are handled.
-    void FlushDone(const base::Callback<void(int)>& callback);
+    void FlushDone(base::OnceCallback<void(int)> callback);
 
-    // Resolved to a supported frame rate within the given target fps range in
-    // |metadata|. If it fails, try the one that is closest to the target range.
-    // If there are two candidates, choose the larger one.
-    int ResolvedFrameRateFromMetadata(const android::CameraMetadata& metadata,
-                                      Size resolution);
+    // Initialize |black_frame_| and fills |black_frame_| with black.
+    // |stream_on_resolution_| must be set before calling this method.
+    void InitializeBlackFrame();
 
     // Variables from CameraClient:
 
@@ -338,6 +357,27 @@ class CameraClient {
 
     // The maximum number of detected faces in the camera opening session.
     size_t max_num_detected_faces_;
+
+    // SW privacy switch state.
+    bool sw_privacy_switch_on_;
+
+    // Set true if SW privacy switch fails to STREAMON/OFF according to the
+    // switch state. When true, need to restart streaming to sync the streaming
+    // state with the SW privacy switch state.
+    bool sw_privacy_switch_error_occurred_ = false;
+
+    // After the SW privacy switch is disabled, skip frames produced by
+    // V4L2CameraDevice |device_| and instead send black frames until
+    // |frames_to_skip_after_privacy_switch_disabled_| becomes 0.
+    // |frames_to_skip_after_privacy_switch_disabled_| will be initialized by
+    // |device_info_.frames_to_skip_after_streamon| after the SW privacy switch
+    // changes ON from OFF. |frames_to_skip_after_privacy_switch_disabled_| will
+    // be decremented every time a frame is produced.
+    uint32_t frames_to_skip_after_privacy_switch_disabled_ = 0;
+
+    // Used to fill in output frames with black pixels when the SW privacy
+    // switch is ON.
+    std::unique_ptr<SharedFrameBuffer> black_frame_;
   };
 
   std::unique_ptr<RequestHandler> request_handler_;

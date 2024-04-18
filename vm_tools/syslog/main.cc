@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,6 @@
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/message_loop/message_pump_type.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/run_loop.h>
@@ -35,7 +34,7 @@ constexpr char kLogPrefix[] = "vm_syslog: ";
 
 // File descriptor that points to /dev/kmsg.  Needs to be a global variable
 // because logging::LogMessageHandlerFunction is just a function pointer so we
-// can't bind any variables to it via base::Bind.
+// can't bind any variables to it via base::Bind*.
 int g_kmsg_fd = -1;
 
 bool LogToKmsg(logging::LogSeverity severity,
@@ -88,7 +87,7 @@ bool LogToKmsg(logging::LogSeverity severity,
     count += iov.iov_len;
   }
 
-  ssize_t ret = HANDLE_EINTR(writev(g_kmsg_fd, iovs, base::size(iovs)));
+  ssize_t ret = HANDLE_EINTR(writev(g_kmsg_fd, iovs, std::size(iovs)));
 
   // Even if the write wasn't successful, we can't log anything here because
   // this _is_ the logging function.  Just return whether the write succeeded.

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,33 +30,32 @@
 #if defined(SLOG_MEANS_VLOG)
 
 // For libshill-net, because library users do not implement SLOG.
-#define SLOG(object, verbose_level) VLOG(verbose_level)
+#define SLOG(verbose_level) VLOG(verbose_level)
 
 #else
 
-#define GET_MACRO_OVERLOAD2(arg1, arg2, arg3, macro_name, ...) macro_name
+#define GET_MACRO_OVERLOAD2(arg1, arg2, macro_name, ...) macro_name
 
-#define SLOG_IS_ON(scope, verbose_level)             \
-  ::shill::ScopeLogger::GetInstance()->IsLogEnabled( \
-      ::shill::ScopeLogger::k##scope, verbose_level)
+#define SLOG_IS_ON(scope, verbose_level)                             \
+  ::shill::ScopeLogger::IsLogEnabled(::shill::ScopeLogger::k##scope, \
+                                     verbose_level)
 
 #define SLOG_STREAM(verbose_level) \
   ::logging::LogMessage(__FILE__, __LINE__, -verbose_level).stream()
 
+#define SLOG_1ARG(verbose_level)                  \
+  LAZY_STREAM(SLOG_STREAM(verbose_level),         \
+              ::shill::ScopeLogger::IsLogEnabled( \
+                  ::shill::Logging::kModuleLogScope, verbose_level))
+
 #define SLOG_2ARG(object, verbose_level)                             \
   LAZY_STREAM(SLOG_STREAM(verbose_level),                            \
-              ::shill::ScopeLogger::GetInstance()->IsLogEnabled(     \
+              ::shill::ScopeLogger::IsLogEnabled(                    \
                   ::shill::Logging::kModuleLogScope, verbose_level)) \
       << (object ? ::shill::Logging::ObjectID(object) : "(anon)") << " "
 
-#define SLOG_3ARG(scope, object, verbose_level)                   \
-  LAZY_STREAM(SLOG_STREAM(verbose_level),                         \
-              ::shill::ScopeLogger::GetInstance()->IsLogEnabled(  \
-                  ::shill::ScopeLogger::k##scope, verbose_level)) \
-      << (object ? ::shill::Logging::ObjectID(object) : "(anon)") << " "
-
 #define SLOG(...) \
-  GET_MACRO_OVERLOAD2(__VA_ARGS__, SLOG_3ARG, SLOG_2ARG)(__VA_ARGS__)
+  GET_MACRO_OVERLOAD2(__VA_ARGS__, SLOG_2ARG, SLOG_1ARG)(__VA_ARGS__)
 
 #define SLOG_IF(scope, verbose_level, condition) \
   LAZY_STREAM(SLOG_STREAM(verbose_level),        \

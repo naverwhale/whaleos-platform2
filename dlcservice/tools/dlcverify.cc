@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,11 @@
 #include <base/files/file_util.h>
 #include <brillo/flag_helper.h>
 #include <chromeos/constants/imageloader.h>
+#include <dlcservice/metadata/metadata.h>
 #include <libimageloader/manifest.h>
 
 #include "dlcservice/utils.h"
+#include "dlcservice/utils/utils.h"
 
 namespace dlcservice {
 
@@ -68,14 +70,22 @@ class DlcVerify {
   }
 
   bool ParseManifest() {
-    manifest_ = GetDlcManifest(
-        rootfs_mount_.Append(imageloader::kDlcManifestRootpath), id_, package_);
-    // Let `GetDlcManifest()` log the error.
-    return manifest_ != nullptr;
+    metadata::Metadata metadata(
+        rootfs_mount_.Append(imageloader::kRelativeDlcManifestRootpath));
+    if (!metadata.Initialize()) {
+      LOG(ERROR) << "Unable to initialize DLC metadata.";
+      return false;
+    }
+    auto entry = metadata.Get(id_);
+    // Let `Metadata::Get` log the error.
+    if (!entry)
+      return false;
+
+    manifest_ = std::make_unique<imageloader::Manifest>();
+    return manifest_->ParseManifest(entry->manifest);
   }
 
   bool VerifyImage() {
-    CHECK(manifest_ != nullptr);
     std::vector<uint8_t> hash;
     if (!HashFile(image_, manifest_->size(), &hash)) {
       // Let `HashFile()` log the error.
@@ -96,7 +106,7 @@ class DlcVerify {
   std::string id_;
   std::string package_;
 
-  std::shared_ptr<imageloader::Manifest> manifest_;
+  std::unique_ptr<imageloader::Manifest> manifest_;
 };
 
 }  // namespace dlcservice

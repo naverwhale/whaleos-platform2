@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,7 +30,7 @@ bool ReadProtobuf(int in_fd, google::protobuf::MessageLite* message) {
 
 bool WriteProtobuf(int out_fd, const google::protobuf::MessageLite& message) {
   size_t size = message.ByteSizeLong();
-  constexpr int kSpanSize = 1;
+  constexpr size_t kSpanSize = 1;
   if (!base::WriteFileDescriptor(
           out_fd, base::as_bytes(base::make_span(&size, kSpanSize)))) {
     return false;

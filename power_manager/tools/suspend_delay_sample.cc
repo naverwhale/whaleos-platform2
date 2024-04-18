@@ -1,20 +1,20 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
+#include <optional>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/command_line.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/scoped_refptr.h>
 #include <base/message_loop/message_pump_type.h>
-#include <base/optional.h>
 #include <base/run_loop.h>
 #include <base/task/single_thread_task_executor.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <brillo/flag_helper.h>
 #include <chromeos/dbus/service_constants.h>
@@ -39,14 +39,15 @@ bool CallMethod(dbus::ObjectProxy* powerd_proxy,
   dbus::MessageWriter writer(&method_call);
   writer.AppendProtoAsArrayOfBytes(request);
 
-  std::unique_ptr<dbus::Response> response(powerd_proxy->CallMethodAndBlock(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT));
-  if (!response)
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response(
+      powerd_proxy->CallMethodAndBlock(&method_call,
+                                       dbus::ObjectProxy::TIMEOUT_USE_DEFAULT));
+  if (!response.has_value() || !response.value())
     return false;
   if (!reply_out)
     return true;
 
-  dbus::MessageReader reader(response.get());
+  dbus::MessageReader reader(response.value().get());
   CHECK(reader.PopArrayOfBytesAsProto(reply_out))
       << "Unable to parse response from call to " << method_name;
   return true;
@@ -73,8 +74,8 @@ class SuspendDelayRegisterer {
         dbus::ObjectPath(power_manager::kPowerManagerServicePath));
     RegisterSuspendDelay();
     powerd_proxy_->SetNameOwnerChangedCallback(
-        base::Bind(&SuspendDelayRegisterer::NameOwnerChangedReceived,
-                   weak_ptr_factory_.GetWeakPtr()));
+        base::BindRepeating(&SuspendDelayRegisterer::NameOwnerChangedReceived,
+                            weak_ptr_factory_.GetWeakPtr()));
   }
   SuspendDelayRegisterer(const SuspendDelayRegisterer&) = delete;
   SuspendDelayRegisterer& operator=(const SuspendDelayRegisterer&) = delete;
@@ -102,11 +103,11 @@ class SuspendDelayRegisterer {
 
     LOG(INFO) << "Got notification about suspend attempt " << suspend_id;
     LOG(INFO) << "Sleeping " << delay_ms_ << " ms before responding";
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&SuspendDelayRegisterer::SendSuspendReady,
-                   weak_ptr_factory_.GetWeakPtr(), suspend_id),
-        base::TimeDelta::FromMilliseconds(delay_ms_));
+        base::BindOnce(&SuspendDelayRegisterer::SendSuspendReady,
+                       weak_ptr_factory_.GetWeakPtr(), suspend_id),
+        base::Milliseconds(delay_ms_));
   }
 
   // Handles the completion of a suspend attempt.
@@ -115,7 +116,7 @@ class SuspendDelayRegisterer {
     dbus::MessageReader reader(signal);
     CHECK(reader.PopArrayOfBytesAsProto(&info));
     const base::TimeDelta duration =
-        base::TimeDelta::FromInternalValue(info.suspend_duration());
+        base::Microseconds(info.suspend_duration());
     LOG(INFO) << "Suspend attempt " << info.suspend_id() << " is complete; "
               << "system was suspended for " << duration.InMilliseconds()
               << " ms";
@@ -131,8 +132,7 @@ class SuspendDelayRegisterer {
   // Registers a suspend delay and returns the corresponding ID.
   void RegisterSuspendDelay() {
     power_manager::RegisterSuspendDelayRequest request;
-    request.set_timeout(
-        base::TimeDelta::FromMilliseconds(timeout_ms_).ToInternalValue());
+    request.set_timeout(base::Milliseconds(timeout_ms_).InMicroseconds());
     request.set_description(kSuspendDelayDescription);
     std::string method_name =
         dark_suspend_delay_ ? power_manager::kRegisterDarkSuspendDelayMethod
@@ -146,17 +146,17 @@ class SuspendDelayRegisterer {
     powerd_proxy_->ConnectToSignal(
         power_manager::kPowerManagerInterface,
         power_manager::kSuspendImminentSignal,
-        base::Bind(&SuspendDelayRegisterer::HandleSuspendImminent,
-                   weak_ptr_factory_.GetWeakPtr()),
-        base::Bind(&SuspendDelayRegisterer::DBusSignalConnected,
-                   weak_ptr_factory_.GetWeakPtr()));
+        base::BindRepeating(&SuspendDelayRegisterer::HandleSuspendImminent,
+                            weak_ptr_factory_.GetWeakPtr()),
+        base::BindOnce(&SuspendDelayRegisterer::DBusSignalConnected,
+                       weak_ptr_factory_.GetWeakPtr()));
     powerd_proxy_->ConnectToSignal(
         power_manager::kPowerManagerInterface,
         power_manager::kSuspendDoneSignal,
-        base::Bind(&SuspendDelayRegisterer::HandleSuspendDone,
-                   weak_ptr_factory_.GetWeakPtr()),
-        base::Bind(&SuspendDelayRegisterer::DBusSignalConnected,
-                   weak_ptr_factory_.GetWeakPtr()));
+        base::BindRepeating(&SuspendDelayRegisterer::HandleSuspendDone,
+                            weak_ptr_factory_.GetWeakPtr()),
+        base::BindOnce(&SuspendDelayRegisterer::DBusSignalConnected,
+                       weak_ptr_factory_.GetWeakPtr()));
   }
 
   void NameOwnerChangedReceived(const std::string& old_owner,
@@ -171,7 +171,7 @@ class SuspendDelayRegisterer {
   int delay_ms_;
   int timeout_ms_;
   // Id assigned by powerd to a suspend delay client.
-  base::Optional<int> delay_id_;
+  std::optional<int> delay_id_;
   // Whether to register dark/full suspend delay.
   bool dark_suspend_delay_ = false;
   scoped_refptr<dbus::Bus> bus_;

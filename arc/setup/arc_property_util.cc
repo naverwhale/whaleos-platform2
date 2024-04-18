@@ -1,25 +1,55 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "arc/setup/arc_property_util.h"
 
 #include <algorithm>
+#include <array>
+#include <memory>
 #include <tuple>
 #include <vector>
 
 #include <base/command_line.h>
+#include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/json/json_reader.h>
 #include <base/logging.h>
 #include <base/process/launch.h>
+#include <base/strings/strcat.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#include <base/time/time.h>
+#include <brillo/cpuinfo.h>
+#include <brillo/dbus/dbus_method_invoker.h>
+#include <brillo/files/file_util.h>
+#include <brillo/files/safe_fd.h>
+#include <cdm_oemcrypto/proto_bindings/client_information.pb.h>
+#include <chromeos/dbus/service_constants.h>
 #include <chromeos-config/libcros_config/cros_config.h>
+#include <dbus/message.h>
+#include <re2/re2.h>
+
+constexpr char kCdmManufacturerProp[] = "ro.vendor.cdm.manufacturer";
+constexpr char kCdmDeviceProp[] = "ro.vendor.cdm.device";
+constexpr char kCdmModelProp[] = "ro.vendor.cdm.model";
 
 namespace arc {
 namespace {
+
+enum class ExtraProps {
+  kNone,
+
+  // Add CDM properties for HW DRM.
+  kCdm,
+
+  // ro.soc.manufacturer and .model, parsed from /proc/cpuinfo.
+  kX86Soc,
+
+  // ro.soc.manufacturer and .model, parsed from /sys/bus/soc/devices.
+  kArmSoc,
+};
 
 // The path in the chromeos-config database where Android properties will be
 // looked up.
@@ -34,19 +64,6 @@ constexpr char kOEMKey1PropertyPrefix[] = "ro.oem.key1=";
 // Configuration property name of an optional string that contains a comma-
 // separated list of regions to include in the OEM key property.
 constexpr char kPAIRegionsPropertyName[] = "pai-regions";
-
-// Properties related to dynamically adding native bridge 64 bit support.
-// Note that "%s" is lated replaced with a partition name which is either an
-// empty string or a string that ends with '.' e.g. "system_ext.".
-constexpr char kAbilistPropertyPrefixTemplate[] = "ro.%sproduct.cpu.abilist=";
-constexpr char kAbilistPropertyExpected[] = "x86_64,x86,armeabi-v7a,armeabi";
-constexpr char kAbilistPropertyReplacement[] =
-    "x86_64,x86,arm64-v8a,armeabi-v7a,armeabi";
-constexpr char kAbilist64PropertyPrefixTemplate[] =
-    "ro.%sproduct.cpu.abilist64=";
-constexpr char kAbilist64PropertyExpected[] = "x86_64";
-constexpr char kAbilist64PropertyReplacement[] = "x86_64,arm64-v8a";
-constexpr char kDalvikVmIsaArm64[] = "ro.dalvik.vm.isa.arm64=x86_64";
 
 // Prefix of Android property to enable debugging features.
 constexpr char kDebuggablePropertyPrefix[] = "ro.debuggable=";
@@ -67,10 +84,14 @@ bool FindProperty(const std::string& line_prefix_to_find,
 
 bool TruncateAndroidProperty(const std::string& line, std::string* truncated) {
   // If line looks like key=value, cut value down to the max length of an
-  // Android property.  Build fingerprint needs special handling to preserve the
-  // trailing dev-keys indicator, but other properties can just be truncated.
+  // Android property.  Since Android P or above, only non ro.* properties
+  // have the explicit limit.
   size_t eq_pos = line.find('=');
   if (eq_pos == std::string::npos) {
+    *truncated = line;
+    return true;
+  }
+  if (base::StartsWith(line, "ro.")) {
     *truncated = line;
     return true;
   }
@@ -84,32 +105,8 @@ bool TruncateAndroidProperty(const std::string& line, std::string* truncated) {
 
   const std::string key = line.substr(0, eq_pos);
   LOG(WARNING) << "Truncating property " << key << " value: " << val;
-  if (key == "ro.bootimage.build.fingerprint" &&
-      base::EndsWith(val, "/dev-keys", base::CompareCase::SENSITIVE)) {
-    // Typical format is brand/product/device/.../dev-keys.  We want to remove
-    // characters from product and device to get below the length limit.
-    // Assume device has the format {product}_cheets.
-    std::vector<std::string> fields =
-        base::SplitString(val, "/", base::WhitespaceHandling::KEEP_WHITESPACE,
-                          base::SplitResult::SPLIT_WANT_ALL);
-    if (fields.size() < 5) {
-      LOG(ERROR) << "Invalid build fingerprint: " << val;
-      return false;
-    }
 
-    size_t remove_chars = (val.length() - kAndroidMaxPropertyLength + 1) / 2;
-    if (fields[1].length() <= remove_chars) {
-      LOG(ERROR) << "Unable to remove " << remove_chars << " characters from "
-                 << fields[1];
-      return false;
-    }
-    fields[1] = fields[1].substr(0, fields[1].length() - remove_chars);
-    fields[2] = fields[1] + "_cheets";
-    val = base::JoinString(fields, "/");
-  } else {
-    val = val.substr(0, kAndroidMaxPropertyLength);
-  }
-
+  val = val.substr(0, kAndroidMaxPropertyLength);
   *truncated = key + "=" + val;
   return true;
 }
@@ -159,14 +156,25 @@ bool IsComment(const std::string& line) {
       base::CompareCase::SENSITIVE);
 }
 
+bool IsForwardDeclaration(const std::string& term) {
+  static constexpr std::array<const char*, 5> kFwdDecSrcTags{
+      "crosbuild:", "crosconfig:", "envvar:", "lsb:", "placeholder:"};
+
+  for (const char* tag : kFwdDecSrcTags) {
+    if (base::StartsWith(term, tag, base::CompareCase::SENSITIVE)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool ExpandPropertyContents(const std::string& content,
                             brillo::CrosConfigInterface* config,
+                            scoped_refptr<::dbus::Bus> bus,
                             std::string* expanded_content,
                             bool filter_non_ro_props,
-                            bool add_native_bridge_64bit_support,
-                            bool append_dalvik_isa,
-                            bool debuggable,
-                            const std::string& partition_name) {
+                            ExtraProps extra_props,
+                            bool debuggable) {
   const std::vector<std::string> lines = base::SplitString(
       content, "\n", base::WhitespaceHandling::KEEP_WHITESPACE,
       base::SplitResult::SPLIT_WANT_ALL);
@@ -213,6 +221,8 @@ bool ExpandPropertyContents(const std::string& content,
                               &replacement)) {
           expanded += replacement;
           inserted = true;
+        } else if (IsForwardDeclaration(keyword)) {
+          expanded += line.substr(match_start, match_end - match_start + 1);
         } else {
           LOG(ERROR) << "Did not find a value for " << keyword
                      << " while expanding " << line;
@@ -226,36 +236,6 @@ bool ExpandPropertyContents(const std::string& content,
         expanded += line.substr(prev_match);
       line = expanded;
     } while (inserted);
-
-    if (add_native_bridge_64bit_support) {
-      // Special-case ro.<partition>product.cpu.abilist and
-      // ro.<partition>product.cpu.abilist64 to add ARM64.
-      // Note that <partition> is either an empty string or a string that ends
-      // with '.' e.g. "system_ext.".
-      std::string prefix = base::StringPrintf(kAbilistPropertyPrefixTemplate,
-                                              partition_name.c_str());
-      std::string value;
-      if (FindProperty(prefix, &value, line)) {
-        if (value == kAbilistPropertyExpected) {
-          line = prefix + std::string(kAbilistPropertyReplacement);
-        } else {
-          LOG(ERROR) << "Found unexpected value for " << prefix << ", value "
-                     << value;
-          return false;
-        }
-      }
-      prefix = base::StringPrintf(kAbilist64PropertyPrefixTemplate,
-                                  partition_name.c_str());
-      if (FindProperty(prefix, &value, line)) {
-        if (value == kAbilist64PropertyExpected) {
-          line = prefix + std::string(kAbilist64PropertyReplacement);
-        } else {
-          LOG(ERROR) << "Found unexpected value for " << prefix << ", value "
-                     << value;
-          return false;
-        }
-      }
-    }
 
     {
       // Replace ro.debuggable value with |debuggable| flag.
@@ -284,9 +264,58 @@ bool ExpandPropertyContents(const std::string& content,
     }
   }
 
-  if (append_dalvik_isa) {
-    // Special-case to add ro.dalvik.vm.isa.arm64.
-    new_properties += std::string(kDalvikVmIsaArm64) + "\n";
+  switch (extra_props) {
+    case ExtraProps::kNone:
+      break;
+
+    case ExtraProps::kCdm: {
+      // We need to make a D-Bus call to the cdm-oemcrypto daemon to get these
+      // properties and then append them to the contents on success. The daemon
+      // we are talking to has already had it's D-Bus service advertisement
+      // waited on by Chrome (or a timeout occurred waiting for it). The 10
+      // second timeout is more than enough to cover the amount of time it
+      // would take the daemon to process this request (it should be very
+      // fast). This timeout also should be shorter than the default D-Bus
+      // timeout used by upstart to launch the script which is 30 seconds. In
+      // the event the daemon did not startup correctly, then the D-Bus call
+      // should return immediately.
+      auto proxy = bus->GetObjectProxy(
+          cdm_oemcrypto::kCdmFactoryDaemonServiceName,
+          dbus::ObjectPath(cdm_oemcrypto::kCdmFactoryDaemonServicePath));
+      constexpr int kDbusTimeoutMsec = 10000;
+      brillo::ErrorPtr error;
+      std::unique_ptr<::dbus::Response> response =
+          brillo::dbus_utils::CallMethodAndBlockWithTimeout(
+              kDbusTimeoutMsec, proxy,
+              cdm_oemcrypto::kCdmFactoryDaemonServiceInterface,
+              cdm_oemcrypto::kGetClientInformation, &error);
+      if (response) {
+        dbus::MessageReader reader(response.get());
+        chromeos::cdm::ClientInformation client_info;
+        if (reader.PopArrayOfBytesAsProto(&client_info)) {
+          new_properties += std::string(kCdmManufacturerProp) + "=" +
+                            client_info.manufacturer() + "\n";
+          new_properties +=
+              std::string(kCdmModelProp) + "=" + client_info.model() + "\n";
+          new_properties +=
+              std::string(kCdmDeviceProp) + "=" + client_info.make() + "\n";
+        } else {
+          DLOG(WARNING) << "Failed reading proto response";
+        }
+      } else {
+        LOG(WARNING) << "Failed getting client information from cdm-oemcrypto";
+      }
+      break;
+    }
+
+    case ExtraProps::kArmSoc:
+      AppendArmSocProperties(base::FilePath("/sys/bus/soc/devices"), config,
+                             &new_properties);
+      break;
+
+    case ExtraProps::kX86Soc:
+      AppendX86SocProperties(brillo::CpuInfo::DefaultPath(), &new_properties);
+      break;
   }
 
   *expanded_content = new_properties;
@@ -296,21 +325,19 @@ bool ExpandPropertyContents(const std::string& content,
 bool ExpandPropertyFile(const base::FilePath& input,
                         const base::FilePath& output,
                         brillo::CrosConfigInterface* config,
+                        scoped_refptr<::dbus::Bus> bus,
                         bool append,
-                        bool add_native_bridge_64bit_support,
-                        bool append_dalvik_isa,
-                        bool debuggable,
-                        const std::string& partition_name) {
+                        ExtraProps extra_props,
+                        bool debuggable) {
   std::string content;
   std::string expanded;
   if (!base::ReadFileToString(input, &content)) {
     PLOG(ERROR) << "Failed to read " << input;
     return false;
   }
-  if (!ExpandPropertyContents(content, config, &expanded,
-                              /*filter_non_ro_props=*/append,
-                              add_native_bridge_64bit_support,
-                              append_dalvik_isa, debuggable, partition_name)) {
+  if (!ExpandPropertyContents(content, config, bus, &expanded,
+                              /*filter_non_ro_props=*/append, extra_props,
+                              debuggable)) {
     return false;
   }
   if (append && base::PathExists(output)) {
@@ -327,16 +354,237 @@ bool ExpandPropertyFile(const base::FilePath& input,
   return true;
 }
 
+// Reads the contents of a file with SafeFD and returns the results, or an empty
+// string if an error occurs.
+template <class StringPieceType>
+StringPieceType SafelyReadFile(const base::FilePath& path,
+                               std::vector<char>* buffer) {
+  auto [fd, err] =
+      brillo::SafeFD::Root().first.OpenExistingFile(path, O_RDONLY);
+  if (brillo::SafeFD::IsError(err)) {
+    LOG(ERROR) << "Cannot open file for reading: " << path << ": "
+               << static_cast<int>(err);
+    return "";
+  }
+
+  std::tie(*buffer, err) = fd.ReadContents();
+  if (brillo::SafeFD::IsError(err)) {
+    LOG(ERROR) << "Error reading contents of: " << path << ": "
+               << static_cast<int>(err);
+    return "";
+  }
+
+  return {&buffer->front(), buffer->size()};
+}
+
 }  // namespace
+
+static bool ParseOneSocinfo(const base::FilePath& soc_dir_path,
+                            std::string* dest) {
+  auto machine_path = soc_dir_path.Append("machine");
+  auto family_path = soc_dir_path.Append("family");
+  auto soc_id_path = soc_dir_path.Append("soc_id");
+  std::string machine = "";
+  std::string family = "";
+  std::string soc_id = "";
+
+  // Different socinfo drivers expose different attributes.
+  // For simplicity we'll just end up with a empty string for any
+  // ones not present.
+  //
+  // NOTE: Use base::ReadFileToString() instead of SafelyReadFile() below
+  // on purpose because Linux sysfs expects symlink traversal.
+  if (base::PathExists(machine_path)) {
+    if (!base::ReadFileToString(machine_path, &machine))
+      PLOG(ERROR) << "Failed to read " << machine_path;
+  }
+  if (base::PathExists(family_path)) {
+    if (!base::ReadFileToString(family_path, &family))
+      PLOG(ERROR) << "Failed to read " << family_path;
+  }
+  if (base::PathExists(soc_id_path)) {
+    if (!base::ReadFileToString(soc_id_path, &soc_id))
+      PLOG(ERROR) << "Failed to read " << soc_id_path;
+  }
+
+  // There can be SoC-specif socinfo drivers in the kernel that have a
+  // table mapping IDs to nice names and avoids us having to have our own
+  // table here. For instance, Qualcomm SoCs have a driver for this. See
+  // "drivers/soc/qcom/socinfo.c" in the Linux kernel sources.
+  // That's how we get family = "Snapdragon" and machine = "SC7180".
+  //
+  // If we're running on an ARM SoC without a nice driver then we can fall
+  // back to something that just exposes what the firmware tells us. There
+  // we'll see something like family = "jep106:0070" and
+  // soc_id = "jep106:0070:7180". If we're running on an ARM SoC that only
+  // has what the firmware exposes then we'll need a table here for each
+  // SoC.
+  //
+  // NOTES:
+  // - On ARM devices /proc/cpuinfo _doesn't_ have details about the CPU model.
+  // - The "socinfo" drivers in the Linux kernel are somewhat recent but is
+  //   the official suggested way to get this info. A technique that used to
+  //   be used was to assume that "/proc/device-tree/compatible" had an entry
+  //   describing the SoC, but though we usually include the SoC there by
+  //   convention there is actually no requirement for it and future boards
+  //   might not include this info.
+  std::string manufacturer;
+  if (family == "Snapdragon\n" && machine != "") {
+    manufacturer = "Qualcomm";
+  } else if (family == "jep106:0426\n") {
+    manufacturer = "Mediatek";
+    machine = soc_id;
+    constexpr base::StringPiece mtk_prefix("jep106:0426:");
+    machine.replace(0, mtk_prefix.length(), "MT");
+  } else {
+    return false;
+  }
+
+  *dest += "ro.soc.manufacturer=" + manufacturer + "\n";
+
+  // machine already has a trailing newline.
+  *dest += base::StrCat({"ro.soc.model=", machine});
+
+  return true;
+}
+
+void AppendArmSocProperties(const base::FilePath& sysfs_socinfo_devices_path,
+                            brillo::CrosConfigInterface* config,
+                            std::string* dest) {
+  const std::string soc_pattern("*");
+
+  base::FileEnumerator soc_dir_it(sysfs_socinfo_devices_path, false,
+                                  base::FileEnumerator::FileType::DIRECTORIES,
+                                  soc_pattern);
+
+  for (auto soc_dir_path = soc_dir_it.Next(); !soc_dir_path.empty();
+       soc_dir_path = soc_dir_it.Next()) {
+    if (ParseOneSocinfo(soc_dir_path, dest))
+      return;
+  }
+
+  std::string platform;
+
+  if (!config->GetString("/identity", "platform-name", &platform)) {
+    LOG(ERROR) << "Cannot get platform name";
+  } else {
+    LOG(INFO) << "Cannot find SoC info from " << sysfs_socinfo_devices_path
+              << "; attempting to use platform->CPU mapping for: " << platform;
+
+    // Platform names:
+    //   Trogdor: also matches Strongbad and Homestar.
+    //   Kukui: also matches Jacuzzi.
+    // These devices do not have recent-enough firmware and/or kernels to have
+    // a populated /sys/bus/soc/devices.
+    if (platform == "Kukui") {
+      *dest += "ro.soc.manufacturer=Mediatek\n";
+      *dest += "ro.soc.model=MT8183\n";
+    } else if (platform == "Trogdor") {
+      *dest += "ro.soc.manufacturer=Qualcomm\n";
+      *dest += "ro.soc.model=SC7180\n";
+    } else {
+      LOG(ERROR) << "Unexpected platform: " << platform;
+    }
+  }
+}
+
+void AppendX86SocProperties(const base::FilePath& cpuinfo_path,
+                            std::string* dest) {
+  std::optional<brillo::CpuInfo> c = brillo::CpuInfo::Create(cpuinfo_path);
+  if (!c.has_value()) {
+    LOG(ERROR) << "couldn't read or parse cpuinfo";
+    return;
+  }
+  std::optional<std::string_view> model_field = c->LookUp(0, "model name");
+  if (!model_field.has_value()) {
+    LOG(ERROR) << "cannot find model name in cpuinfo";
+    return;
+  }
+
+  std::string model;
+  base::StringPiece manufacturer;
+  if (re2::RE2::PartialMatch(
+          model_field.value(),
+          R"(Intel\(R\) (?:Celeron\(R\)|Core\(TM\)) ([^ ]+) CPU)", &model) ||
+
+      re2::RE2::PartialMatch(
+          model_field.value(),
+          R"(Intel\(R\) Celeron\(R\)(?: CPU)? +([^ ]+)(?: +@|$))", &model) ||
+
+      // This one is tricky because the trailing "@ <clock frequency>" is
+      // optional.
+      re2::RE2::PartialMatch(
+          model_field.value(),
+          R"(Intel\(R\) Pentium\(R\) (?:Gold|Silver|CPU) ([^ ]+)(?: @|$))",
+          &model) ||
+
+      re2::RE2::PartialMatch(model_field.value(),
+                             R"(Intel\(R\) Pentium\(R\) Silver ([^ ]+) CPU @)",
+                             &model) ||
+
+      // 11th Gen starts calling out the generation no. explicitly.
+      re2::RE2::PartialMatch(model_field.value(),
+                             R"(11th Gen Intel\(R\) Core\(TM\) ([^ ]+) @)",
+                             &model) ||
+
+      // 12th+13th Gens don't have trailing clock freq in field.
+      // For i5-1245U, the "C" in Core is missing.
+      // 13th Gen may have CoreT rather than Core(TM).
+      re2::RE2::PartialMatch(model_field.value(),
+                             R"(1[23]th Gen Intel\(R\) C?ore[()TM]+ ([^ ]+)$)",
+                             &model) ||
+
+      // Alderlake-N series.
+      re2::RE2::PartialMatch(model_field.value(), R"(Intel\(R\) (N[0-9]+)$)",
+                             &model) ||
+      re2::RE2::PartialMatch(model_field.value(),
+                             R"(Intel\(R\) Core\(TM\) (i3-N[0-9]+)$)",
+                             &model)) {
+    manufacturer = "Intel";
+  } else if (base::EndsWith(model_field.value(), "Genuine Intel(R) 0000")) {
+    model = "0000-FixMe";
+    manufacturer = "Intel";
+  } else if (re2::RE2::PartialMatch(model_field.value(),
+                                    R"(Intel\(R\).*Xeon\(R\))")) {
+    // Xeon CPUs should only occur when ChromeOS is running in a VM, not on a
+    // physical device.
+    model = "Unknown-Xeon";
+    manufacturer = "Intel";
+  } else if (
+      // Some Ryzen CPU models have a watt value, some do not.
+      // The "Ryzen # " portion is part of the ro.soc.model value.
+      // There are various kinds of GPUs, so don't match past "Radeon".
+      re2::RE2::PartialMatch(
+          model_field.value(),
+          R"(AMD (Ryzen [3-9] [0-9A-Za-z]+) [0-9a-zA-Z\/ ]+ Radeon[ 0-9A-Za-z]*)",
+          &model) ||
+
+      // Simpler AMD model names missing Ryzen name and a watt value.
+      re2::RE2::PartialMatch(model_field.value(),
+                             R"(AMD(?: Athlon Gold| Athlon Silver)?)"
+                             R"( ([0-9A-Za-z]+) with Radeon Graphics)",
+                             &model) ||
+
+      re2::RE2::PartialMatch(model_field.value(),
+                             R"(AMD ([-0-9A-Za-z]+) RADEON R[45],)", &model)) {
+    manufacturer = "AMD";
+  } else {
+    LOG(ERROR) << "Unknown CPU in '" << model_field.value()
+               << "'; won't set ro.soc.*";
+    return;
+  }
+
+  *dest += base::StrCat({"ro.soc.manufacturer=", manufacturer, "\n",
+                         "ro.soc.model=", model, "\n"});
+}
 
 bool ExpandPropertyContentsForTesting(const std::string& content,
                                       brillo::CrosConfigInterface* config,
                                       bool debuggable,
                                       std::string* expanded_content) {
-  return ExpandPropertyContents(content, config, expanded_content,
-                                /*filter_non_ro_props=*/true,
-                                /*add_native_bridge_64bit_support=*/false,
-                                false, debuggable, std::string());
+  return ExpandPropertyContents(content, config, nullptr, expanded_content,
+                                /*filter_non_ro_props=*/true, ExtraProps::kNone,
+                                debuggable);
 }
 
 bool TruncateAndroidPropertyForTesting(const std::string& line,
@@ -347,19 +595,29 @@ bool TruncateAndroidPropertyForTesting(const std::string& line,
 bool ExpandPropertyFileForTesting(const base::FilePath& input,
                                   const base::FilePath& output,
                                   brillo::CrosConfigInterface* config) {
-  return ExpandPropertyFile(input, output, config, /*append=*/false,
-                            /*add_native_bridge_64bit_support=*/false, false,
-                            /*debuggable=*/false, std::string());
+  return ExpandPropertyFile(input, output, config, nullptr, /*append=*/false,
+                            ExtraProps::kNone, /*debuggable=*/false);
 }
 
 bool ExpandPropertyFiles(const base::FilePath& source_path,
                          const base::FilePath& dest_path,
                          bool single_file,
-                         bool add_native_bridge_64bit_support,
-                         bool debuggable) {
+                         bool hw_oemcrypto_support,
+                         bool include_soc_props,
+                         bool debuggable,
+                         scoped_refptr<::dbus::Bus> bus) {
   brillo::CrosConfig config;
   if (single_file)
-    base::DeleteFile(dest_path);
+    brillo::DeleteFile(dest_path);
+
+  ExtraProps soc_props_type = ExtraProps::kNone;
+  if (include_soc_props) {
+#if defined(ARCH_CPU_ARM_FAMILY)
+    soc_props_type = ExtraProps::kArmSoc;
+#else
+    soc_props_type = ExtraProps::kX86Soc;
+#endif
+  }
 
   // default.prop may not exist. Silently skip it if not found.
   for (const auto& tuple :
@@ -367,30 +625,26 @@ bool ExpandPropertyFiles(const base::FilePath& source_path,
        // system/core/init/property_service.cpp.
        // Note: Our vendor image doesn't have /vendor/default.prop although
        // PropertyLoadBootDefaults() tries to open it.
-       {std::tuple<const char*, bool, bool, const char*>{"default.prop", true,
-                                                         false, ""},
-        {"build.prop", false, true, ""},
-        {"system_ext_build.prop", true, false, "system_ext."},
-        {"vendor_build.prop", false, false, "vendor."},
-        {"odm_build.prop", true, false, "odm."},
-        {"product_build.prop", true, false, "product."}}) {
+       {std::tuple<const char*, bool, ExtraProps>{"default.prop", true,
+                                                  ExtraProps::kNone},
+        {"build.prop", false, ExtraProps::kNone},
+        {"system_ext_build.prop", true, ExtraProps::kNone},
+        {"vendor_build.prop", false, soc_props_type},
+        {"odm_build.prop", true, ExtraProps::kNone},
+        {"product_build.prop", true,
+         hw_oemcrypto_support ? ExtraProps::kCdm : ExtraProps::kNone}}) {
     const char* file = std::get<0>(tuple);
     const bool is_optional = std::get<1>(tuple);
-    // When true, unconditionally add |kDalvikVmIsaArm64| property.
-    const bool append_dalvik_isa =
-        std::get<2>(tuple) && add_native_bridge_64bit_support;
-    // Search for ro.<partition_name>product.cpu.abilist* properties.
-    const char* partition_name = std::get<3>(tuple);
+    const ExtraProps extra_props = std::get<2>(tuple);
 
     const base::FilePath source_file = source_path.Append(file);
     if (is_optional && !base::PathExists(source_file))
       continue;
 
-    if (!ExpandPropertyFile(
-            source_file, single_file ? dest_path : dest_path.Append(file),
-            &config,
-            /*append=*/single_file, add_native_bridge_64bit_support,
-            append_dalvik_isa, debuggable, partition_name)) {
+    if (!ExpandPropertyFile(source_file,
+                            single_file ? dest_path : dest_path.Append(file),
+                            &config, bus,
+                            /*append=*/single_file, extra_props, debuggable)) {
       LOG(ERROR) << "Failed to expand " << source_file;
       return false;
     }

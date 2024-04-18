@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 #include <base/files/file_path.h>
 #include <base/time/time.h>
 
-namespace power_manager {
-namespace util {
+namespace power_manager::util {
 
 // Clamps |percent| in the range [0.0, 100.0].
 double ClampPercent(double percent);
@@ -52,7 +51,6 @@ bool ReadHexUint32File(const base::FilePath& path, uint32_t* value_out);
 std::string JoinPaths(const std::vector<base::FilePath>& paths,
                       const std::string& separator);
 
-}  // namespace util
-}  // namespace power_manager
+}  // namespace power_manager::util
 
 #endif  // POWER_MANAGER_COMMON_UTIL_H_

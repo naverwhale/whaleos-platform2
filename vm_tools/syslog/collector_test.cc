@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,22 +10,20 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
-#include <base/test/task_environment.h>
 #include <base/run_loop.h>
-#include <base/single_thread_task_runner.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/test/task_environment.h>
 #include <base/threading/thread.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <base/time/time.h>
 #include <google/protobuf/text_format.h>
 #include <google/protobuf/util/message_differencer.h>
@@ -44,7 +42,8 @@ namespace vm_tools {
 namespace syslog {
 namespace {
 
-using HandleLogsCallback = base::Callback<void(std::unique_ptr<LogRequest>)>;
+using HandleLogsCallback =
+    base::RepeatingCallback<void(std::unique_ptr<LogRequest>)>;
 
 // Test server that just forwards the protobufs it receives to the main thread.
 class FakeLogCollectorService final : public vm_tools::LogCollector::Service {
@@ -85,7 +84,7 @@ grpc::Status FakeLogCollectorService::CollectUserLogs(
   auto request_copy = std::make_unique<vm_tools::LogRequest>(*request);
   main_task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(handle_user_logs_cb_, base::Passed(std::move(request_copy))));
+      base::BindOnce(handle_user_logs_cb_, std::move(std::move(request_copy))));
 
   return grpc::Status::OK;
 }
@@ -93,7 +92,7 @@ grpc::Status FakeLogCollectorService::CollectUserLogs(
 void StartFakeLogCollectorService(
     scoped_refptr<base::SingleThreadTaskRunner> main_task_runner,
     base::FilePath listen_path,
-    base::Callback<void(std::shared_ptr<grpc::Server>)> server_cb,
+    base::OnceCallback<void(std::shared_ptr<grpc::Server>)> server_cb,
     HandleLogsCallback handle_user_logs_cb) {
   FakeLogCollectorService log_collector(main_task_runner, handle_user_logs_cb);
 
@@ -103,7 +102,8 @@ void StartFakeLogCollectorService(
   builder.RegisterService(&log_collector);
 
   std::shared_ptr<grpc::Server> server(builder.BuildAndStart().release());
-  main_task_runner->PostTask(FROM_HERE, base::Bind(server_cb, server));
+  main_task_runner->PostTask(FROM_HERE,
+                             base::BindOnce(std::move(server_cb), server));
 
   if (server) {
     // This will not race with shutdown because the grpc server code includes a
@@ -132,7 +132,7 @@ class CollectorTest : public ::testing::Test {
  private:
   // Posted back to the main thread by the grpc thread after starting the
   // server.
-  void ServerStartCallback(base::Closure quit,
+  void ServerStartCallback(base::OnceClosure quit,
                            std::shared_ptr<grpc::Server> server);
 
   // Posted back to the main thread by the grpc thread when it receives user
@@ -159,7 +159,7 @@ class CollectorTest : public ::testing::Test {
 
   // Closure that should be called once all expected LogRequests have been
   // received or on failure.
-  base::Closure quit_;
+  base::OnceClosure quit_;
 
   // Set to true to indicate failure.
   bool failed_;
@@ -196,13 +196,14 @@ void CollectorTest::SetUp() {
   ASSERT_TRUE(server_thread_.Start());
   server_thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::Bind(&StartFakeLogCollectorService,
-                 base::ThreadTaskRunnerHandle::Get(),
-                 temp_dir_.GetPath().Append(kServerSocket),
-                 base::Bind(&CollectorTest::ServerStartCallback,
-                            weak_factory_.GetWeakPtr(), run_loop.QuitClosure()),
-                 base::Bind(&CollectorTest::HandleUserLogs,
-                            weak_factory_.GetWeakPtr())));
+      base::BindOnce(
+          &StartFakeLogCollectorService,
+          base::SingleThreadTaskRunner::GetCurrentDefault(),
+          temp_dir_.GetPath().Append(kServerSocket),
+          base::BindOnce(&CollectorTest::ServerStartCallback,
+                         weak_factory_.GetWeakPtr(), run_loop.QuitClosure()),
+          base::BindRepeating(&CollectorTest::HandleUserLogs,
+                              weak_factory_.GetWeakPtr())));
 
   run_loop.Run();
 
@@ -238,10 +239,10 @@ void CollectorTest::TearDown() {
   server_thread_.Stop();
 }
 
-void CollectorTest::ServerStartCallback(base::Closure quit,
+void CollectorTest::ServerStartCallback(base::OnceClosure quit,
                                         std::shared_ptr<grpc::Server> server) {
   server_.swap(server);
-  quit.Run();
+  std::move(quit).Run();
 }
 
 void CollectorTest::HandleUserLogs(
@@ -250,7 +251,7 @@ void CollectorTest::HandleUserLogs(
   if (expected_user_requests_.size() == 0) {
     failed_ = true;
     failure_reason_ = "unexpected user logs";
-    quit_.Run();
+    std::move(quit_).Run();
     return;
   }
 
@@ -260,12 +261,12 @@ void CollectorTest::HandleUserLogs(
   if (!message_differencer_->Compare(*expected_request, *request)) {
     failed_ = true;
     failure_reason_ = "mismatched user logs";
-    quit_.Run();
+    std::move(quit_).Run();
     return;
   }
 
   if (expected_user_requests_.size() == 0) {
-    quit_.Run();
+    std::move(quit_).Run();
   }
 }
 

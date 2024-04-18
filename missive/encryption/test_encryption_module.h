@@ -1,35 +1,34 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MISSIVE_ENCRYPTION_TEST_ENCRYPTION_MODULE_H_
 #define MISSIVE_ENCRYPTION_TEST_ENCRYPTION_MODULE_H_
 
-#include <base/callback.h>
-#include <base/strings/string_piece.h>
+#include <string_view>
+
+#include <base/functional/callback.h>
+#include <gmock/gmock.h>
 
 #include "missive/encryption/encryption_module_interface.h"
 #include "missive/proto/record.pb.h"
 #include "missive/util/statusor.h"
-#include "testing/gmock/include/gmock/gmock.h"
-#include "testing/gtest/include/gtest/gtest.h"
 
-namespace reporting {
-namespace test {
+namespace reporting::test {
 
 // An |EncryptionModuleInterface| that does no encryption.
 class TestEncryptionModuleStrict : public EncryptionModuleInterface {
  public:
-  TestEncryptionModuleStrict();
+  explicit TestEncryptionModuleStrict(bool is_enabled);
 
   MOCK_METHOD(void,
               EncryptRecordImpl,
-              (base::StringPiece record,
+              (std::string_view record,
                base::OnceCallback<void(StatusOr<EncryptedRecord>)> cb),
               (const override));
 
   void UpdateAsymmetricKeyImpl(
-      base::StringPiece new_public_key,
+      std::string_view new_public_key,
       PublicKeyId new_public_key_id,
       base::OnceCallback<void(Status)> response_cb) override;
 
@@ -40,7 +39,6 @@ class TestEncryptionModuleStrict : public EncryptionModuleInterface {
 // Most of the time no need to log uninterested calls to |EncryptRecord|.
 typedef ::testing::NiceMock<TestEncryptionModuleStrict> TestEncryptionModule;
 
-}  // namespace test
-}  // namespace reporting
+}  // namespace reporting::test
 
 #endif  // MISSIVE_ENCRYPTION_TEST_ENCRYPTION_MODULE_H_

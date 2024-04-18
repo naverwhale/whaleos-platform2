@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,12 +13,12 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <metrics/metrics_library.h>
 
 #include "usb_bouncer/rule_db_storage.h"
 #include "usb_bouncer/usb_bouncer.pb.h"
+#include "usb_bouncer/util.h"
 
 namespace usb_bouncer {
 
@@ -91,6 +91,11 @@ class EntryManager {
   bool ValidateDevPath(const std::string& devpath);
 
   bool PersistChanges();
+
+  void ReportMetrics(const std::string& devpath,
+                     const std::string& rule,
+                     UMADeviceRecognized recognized,
+                     UMAEventTiming timing);
 
   // Represents whether the lock screen is being shown.
   bool user_db_read_only_;

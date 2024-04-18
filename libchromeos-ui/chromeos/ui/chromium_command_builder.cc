@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,6 +22,8 @@
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <brillo/userdb_utils.h>
+#include <chromeos-config/libcros_config/cros_config.h>
+#include <cros_config/cros_config.h>
 
 #include "chromeos/ui/util.h"
 
@@ -119,6 +121,11 @@ const char ChromiumCommandBuilder::kEnableBlinkFeaturesFlag[] =
     "enable-blink-features";
 const char ChromiumCommandBuilder::kDisableBlinkFeaturesFlag[] =
     "disable-blink-features";
+
+const char ChromiumCommandBuilder::kCrosConfigBluetoothFlagsPath[] =
+    "/bluetooth/flags";
+const char ChromiumCommandBuilder::kCrosConfigBlockFlossAvailability[] =
+    "block-floss-availability";
 
 ChromiumCommandBuilder::ChromiumCommandBuilder() = default;
 
@@ -248,6 +255,8 @@ bool ChromiumCommandBuilder::ApplyUserConfig(
     return false;
   }
 
+  bool has_vmodule_flag = false;
+
   std::vector<std::string> lines = base::SplitString(
       data, "\n", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
 
@@ -278,6 +287,7 @@ bool ChromiumCommandBuilder::ApplyUserConfig(
     // November 2017; we continue supporting them for backwards compatibility
     // with existing configs and developer behavior.
     if (name == kVmoduleFlag || name == std::string("--") + kVmoduleFlag) {
+      has_vmodule_flag = true;
       for (const auto& pattern : SplitFlagValues(value))
         AddVmodulePattern(pattern);
     } else if (name == kEnableFeaturesFlag ||
@@ -298,6 +308,13 @@ bool ChromiumCommandBuilder::ApplyUserConfig(
     } else if (!HasPrefix(line, disallowed_prefixes)) {
       AddArg(line);
     }
+  }
+
+  if (has_vmodule_flag) {
+    LOG(WARNING) << "--vmodule detected. Note that Ash Chrome on ChromeOS "
+                    "defaults to use build-time VLOG so --vmodule is ignored. "
+                    "To use --vmodule, Please make sure your chrome is built "
+                    "with `use_runtime_vlog = true` gn arg.";
   }
 
   return true;
@@ -505,9 +522,6 @@ void ChromiumCommandBuilder::SetUpPepperPlugins() {
 }
 
 void ChromiumCommandBuilder::AddUiFlags() {
-  if (UseFlagIsSet("opengles"))
-    AddArg("--use-gl=egl");
-
   // On boards with ARM NEON support, force libvpx to use the NEON-optimized
   // code paths. Remove once http://crbug.com/161834 is fixed.
   // This is needed because libvpx cannot check cpuinfo within the sandbox.
@@ -523,8 +537,8 @@ void ChromiumCommandBuilder::AddUiFlags() {
   if (UseFlagIsSet("disable_cros_video_decoder"))
     AddArg("--platform-disallows-chromeos-direct-video-decoder");
 
-  if (UseFlagIsSet("arc_uses_cros_video_decoder"))
-    AddFeatureEnableOverride("ArcVideoDecoder");
+  if (UseFlagIsSet("arc_disable_cros_video_decoder"))
+    AddFeatureDisableOverride("ArcVideoDecoder");
 
   // TODO(dcastagna): Get rid of the following code once the proper
   // configuration will be chosen at runtime on DRM atomic boards.
@@ -553,6 +567,21 @@ void ChromiumCommandBuilder::AddUiFlags() {
 
   if (UseFlagIsSet("disable_spectre_variant2_mitigation"))
     AddFeatureDisableOverride("SpectreVariant2Mitigation");
+
+  brillo::CrosConfig cros_config;
+
+  // Disable Floss if the Floss USE flag was not set or the cros config
+  // was specified.
+  // TODO(b/292020117): Remove the USE flag check once we replace it with cros
+  // config.
+  std::string block_floss_availability;
+  if (!UseFlagIsSet("floss") ||
+      (cros_config.GetString(kCrosConfigBluetoothFlagsPath,
+                             kCrosConfigBlockFlossAvailability,
+                             &block_floss_availability) &&
+       block_floss_availability == "true")) {
+    AddFeatureDisableOverride("FlossIsAvailable");
+  }
 
   // Allow Chrome to access GPU memory information despite /sys/kernel/debug
   // being owned by debugd. This limits the security attack surface versus

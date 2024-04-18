@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <dbus/bus.h>
 #include <dbus/property.h>  // For kPropertyInterface
@@ -31,8 +31,8 @@ void ExportedPropertySet::OnPropertiesInterfaceExported(
 
 ExportedPropertySet::PropertyWriter ExportedPropertySet::GetPropertyWriter(
     const std::string& interface_name) {
-  return base::Bind(&ExportedPropertySet::WritePropertiesToDict,
-                    weak_ptr_factory_.GetWeakPtr(), interface_name);
+  return base::BindRepeating(&ExportedPropertySet::WritePropertiesToDict,
+                             weak_ptr_factory_.GetWeakPtr(), interface_name);
 }
 
 void ExportedPropertySet::RegisterProperty(
@@ -45,9 +45,9 @@ void ExportedPropertySet::RegisterProperty(
   CHECK(res.second) << "Property '" << property_name << "' already exists";
   // Technically, the property set exists longer than the properties themselves,
   // so we could use Unretained here rather than a weak pointer.
-  ExportedPropertyBase::OnUpdateCallback cb =
-      base::Bind(&ExportedPropertySet::HandlePropertyUpdated,
-                 weak_ptr_factory_.GetWeakPtr(), interface_name, property_name);
+  ExportedPropertyBase::OnUpdateCallback cb = base::BindRepeating(
+      &ExportedPropertySet::HandlePropertyUpdated,
+      weak_ptr_factory_.GetWeakPtr(), interface_name, property_name);
   exported_property->SetUpdateCallback(cb);
 }
 

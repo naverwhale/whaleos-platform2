@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,12 +9,15 @@
 #ifndef CRASH_REPORTER_KERNEL_COLLECTOR_H_
 #define CRASH_REPORTER_KERNEL_COLLECTOR_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 #include "crash-reporter/kernel_util.h"
@@ -22,7 +25,10 @@
 // Kernel crash collector.
 class KernelCollector : public CrashCollector {
  public:
-  KernelCollector();
+  explicit KernelCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   KernelCollector(const KernelCollector&) = delete;
   KernelCollector& operator=(const KernelCollector&) = delete;
 
@@ -31,6 +37,7 @@ class KernelCollector : public CrashCollector {
   void OverrideEventLogPath(const base::FilePath& file_path);
   void OverrideBiosLogPath(const base::FilePath& file_path);
   void OverridePreservedDumpPath(const base::FilePath& file_path);
+  void OverrideWatchdogSysPath(const base::FilePath& file_path);
 
   // Enable collection.
   bool Enable();
@@ -40,13 +47,17 @@ class KernelCollector : public CrashCollector {
 
   // Collect any preserved kernel crash dump. Returns true if there was
   // a dump (even if there were problems storing the dump), false otherwise.
-  bool Collect();
+  bool Collect(bool use_saved_lsb);
 
   // Set the architecture of the crash dumps we are looking at.
   void set_arch(kernel_util::ArchKind arch) { arch_ = arch; }
   kernel_util::ArchKind arch() const { return arch_; }
 
- private:
+  // Returns the severity level and product group of the crash.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
+
+ protected:
   // This class represents single EFI crash.
   class EfiCrash {
    public:
@@ -108,9 +119,10 @@ class KernelCollector : public CrashCollector {
       return (timestamp * kMaxPart + part) * kMaxDumpRecord + crash_count;
     }
 
-   private:
     static constexpr size_t kMaxDumpRecord = 1000;
     static constexpr size_t kMaxPart = 100;
+
+   private:
     uint64_t id_;
     uint64_t timestamp_;
     uint32_t max_part_;
@@ -119,6 +131,7 @@ class KernelCollector : public CrashCollector {
     base::FilePath GetFilePath(uint32_t part) const;
   };
 
+ private:
   friend class KernelCollectorTest;
   FRIEND_TEST(KernelCollectorTest, LoadPreservedDump);
   FRIEND_TEST(KernelCollectorTest, LoadBiosLog);
@@ -135,7 +148,7 @@ class KernelCollector : public CrashCollector {
 
   bool LastRebootWasBiosCrash(const std::string& dump);
   bool LastRebootWasNoCError(const std::string& dump);
-  bool LastRebootWasWatchdog();
+  bool LastRebootWasWatchdog(std::string& signature);
   bool LoadConsoleRamoops(std::string* contents);
 
   base::FilePath GetDumpRecordPath(const char* type,
@@ -157,8 +170,13 @@ class KernelCollector : public CrashCollector {
                           size_t current_record,
                           bool* record_found);
 
+  void AddLogFile(const char* log_name,
+                  const std::string& log_data,
+                  const base::FilePath& log_path);
+
   bool HandleCrash(const std::string& kernel_dump,
                    const std::string& bios_dump,
+                   const std::string& hypervisor_dump,
                    const std::string& signature);
 
   // Collects ramoops crash.
@@ -173,6 +191,7 @@ class KernelCollector : public CrashCollector {
   base::FilePath eventlog_path_;
   base::FilePath dump_path_;
   base::FilePath bios_log_path_;
+  base::FilePath watchdogsys_path_;
   size_t records_;
 
   // The architecture of kernel dump strings we are working with.

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,17 +9,20 @@
 
 #include "cryptohome/platform.h"
 #include "cryptohome/storage/encrypted_container/filesystem_key.h"
+#include "cryptohome/storage/keyring/keyring.h"
 
 namespace cryptohome {
 
 FscryptContainer::FscryptContainer(const base::FilePath& backing_dir,
                                    const FileSystemKeyReference& key_reference,
                                    bool allow_v2,
-                                   Platform* platform)
+                                   Platform* platform,
+                                   Keyring* keyring)
     : backing_dir_(backing_dir),
-      key_reference_({.reference = key_reference.fek_sig}),
+      key_reference_(key_reference),
       allow_v2_(allow_v2),
-      platform_(platform) {}
+      platform_(platform),
+      keyring_(keyring) {}
 
 bool FscryptContainer::Purge() {
   return platform_->DeletePathRecursively(backing_dir_);
@@ -31,33 +34,28 @@ bool FscryptContainer::Exists() {
              dircrypto::KeyState::ENCRYPTED;
 }
 
-bool FscryptContainer::Setup(const FileSystemKey& encryption_key, bool create) {
-  if (create) {
+bool FscryptContainer::Setup(const FileSystemKey& encryption_key) {
+  if (!platform_->DirectoryExists(backing_dir_)) {
     if (!platform_->CreateDirectory(backing_dir_)) {
       LOG(ERROR) << "Failed to create directory " << backing_dir_;
       return false;
     }
   }
 
-  key_reference_.policy_version =
-      dircrypto::GetDirectoryPolicyVersion(backing_dir_);
-
-  if (key_reference_.policy_version < 0) {
-    key_reference_.policy_version =
-        (allow_v2_ && dircrypto::CheckFscryptKeyIoctlSupport())
-            ? FSCRYPT_POLICY_V2
-            : FSCRYPT_POLICY_V1;
-  }
-
-  if (!platform_->AddDirCryptoKeyToKeyring(encryption_key.fek,
-                                           &key_reference_)) {
+  auto key_type = UseV2() ? Keyring::KeyType::kFscryptV2Key
+                          : Keyring::KeyType::kFscryptV1Key;
+  if (!keyring_->AddKey(key_type, encryption_key, &key_reference_)) {
     LOG(ERROR) << "Failed to add fscrypt key to kernel";
     return false;
   }
 
   // `SetDirectoryKey` is a set-or-verify function: for directories with the
   // encryption policy already set, this function call acts as a verifier.
-  if (!platform_->SetDirCryptoKey(backing_dir_, key_reference_)) {
+  dircrypto::KeyReference ref = {
+      .policy_version = UseV2() ? FSCRYPT_POLICY_V2 : FSCRYPT_POLICY_V1,
+      .reference = key_reference_.fek_sig,
+  };
+  if (!platform_->SetDirCryptoKey(backing_dir_, ref)) {
     LOG(ERROR) << "Failed to set fscrypt key for backing directory";
     return false;
   }
@@ -65,8 +63,31 @@ bool FscryptContainer::Setup(const FileSystemKey& encryption_key, bool create) {
   return true;
 }
 
+bool FscryptContainer::Reset() {
+  // Reset should never be called for fscrypt containers.
+  LOG(ERROR) << "Reset not supported on fscrypt containers";
+  return false;
+}
+
 bool FscryptContainer::Teardown() {
-  return platform_->InvalidateDirCryptoKey(key_reference_, backing_dir_);
+  auto key_type = UseV2() ? Keyring::KeyType::kFscryptV2Key
+                          : Keyring::KeyType::kFscryptV1Key;
+  return keyring_->RemoveKey(key_type, key_reference_);
+}
+
+base::FilePath FscryptContainer::GetBackingLocation() const {
+  return backing_dir_;
+}
+
+bool FscryptContainer::UseV2() {
+  auto existing_policy = platform_->GetDirectoryPolicyVersion(backing_dir_);
+  if (existing_policy == FSCRYPT_POLICY_V1) {
+    return false;
+  }
+  if (existing_policy == FSCRYPT_POLICY_V2) {
+    return true;
+  }
+  return (allow_v2_ && platform_->CheckFscryptKeyIoctlSupport());
 }
 
 }  // namespace cryptohome

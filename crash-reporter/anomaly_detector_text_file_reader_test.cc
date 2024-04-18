@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,7 +21,8 @@ using FileReaderRun = std::vector<std::string>;
 
 std::unique_ptr<TextFileReader> InitializeFileReaderForTest(
     const std::string& input_file_name) {
-  base::FilePath input_file_path = test_util::GetTestDataPath(input_file_name);
+  base::FilePath input_file_path =
+      test_util::GetTestDataPath(input_file_name, /*use_testdata=*/true);
 
   return std::make_unique<TextFileReader>(input_file_path);
 }

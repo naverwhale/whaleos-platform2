@@ -1,35 +1,53 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "cryptohome/cleanup/low_disk_space_handler.h"
 
+#include <type_traits>
+
 #include <base/check.h>
 #include <base/logging.h>
 
 #include "cryptohome/cleanup/disk_cleanup.h"
-#include "cryptohome/cleanup/user_oldest_activity_timestamp_cache.h"
+#include "cryptohome/cleanup/user_oldest_activity_timestamp_manager.h"
 #include "cryptohome/platform.h"
 #include "cryptohome/storage/homedirs.h"
 
 namespace cryptohome {
 
+namespace {
+
+bool IsDiskSpaceLow(DiskCleanup::FreeSpaceState state) {
+  switch (state) {
+    case DiskCleanup::FreeSpaceState::kNeedNormalCleanup:
+    case DiskCleanup::FreeSpaceState::kNeedAggressiveCleanup:
+    case DiskCleanup::FreeSpaceState::kNeedCriticalCleanup:
+      return true;
+    case DiskCleanup::FreeSpaceState::kError:
+    case DiskCleanup::FreeSpaceState::kAboveTarget:
+    case DiskCleanup::FreeSpaceState::kAboveThreshold:
+      return false;
+  }
+}
+
+}  // namespace
+
 LowDiskSpaceHandler::LowDiskSpaceHandler(
     HomeDirs* homedirs,
-    KeysetManagement* keyset_management,
     Platform* platform,
-    UserOldestActivityTimestampCache* timestamp_cache)
+    UserOldestActivityTimestampManager* timestamp_manager)
     : platform_(platform),
-      default_cleanup_(new DiskCleanup(
-          platform, homedirs, keyset_management, timestamp_cache)),
+      default_cleanup_(new DiskCleanup(platform, homedirs, timestamp_manager)),
       cleanup_(default_cleanup_.get()),
-      low_disk_notification_period_(
-          base::TimeDelta::FromMilliseconds(kLowDiskNotificationPeriodMS)),
-      update_user_activity_timestamp_period_(
-          base::TimeDelta::FromHours(kUpdateUserActivityPeriodHours)) {}
+      low_disk_notification_period_(kLowDiskNotificationPeriod),
+      update_user_activity_timestamp_period_(kUpdateUserActivityPeriod) {}
 
 LowDiskSpaceHandler::~LowDiskSpaceHandler() {
-  DCHECK(stopped_);
+  if (!stopped_) {
+    LOG(WARNING)
+        << "Low disk space handler was destroyed without being stopped";
+  }
 }
 
 void LowDiskSpaceHandler::Stop() {
@@ -44,21 +62,25 @@ bool LowDiskSpaceHandler::Init(
 
   last_update_user_activity_timestamp_time_ = platform_->GetCurrentTime();
 
+  // We need to mark "stopped_" as false BEFORE calling any of the following
+  // methods, for the callbacks to work correctly; i.e. especially since the
+  // default "base::TimeDelta()" is zero and the "post_delayed_task" could
+  // call the callbacks from a different thread.
+  stopped_ = false;
+
   if (!post_delayed_task_.Run(
           FROM_HERE,
           base::BindOnce(&LowDiskSpaceHandler::FreeDiskSpace,
-                         base::Unretained(this)),
+                         weak_factory_.GetWeakPtr()),
           base::TimeDelta()))
     return false;
 
   if (!post_delayed_task_.Run(
           FROM_HERE,
           base::BindOnce(&LowDiskSpaceHandler::LowDiskSpaceCheck,
-                         base::Unretained(this)),
+                         weak_factory_.GetWeakPtr()),
           base::TimeDelta()))
     return false;
-
-  stopped_ = false;
 
   return true;
 }
@@ -83,21 +105,24 @@ void LowDiskSpaceHandler::LowDiskSpaceCheck() {
   auto free_space_state = cleanup_->GetFreeDiskSpaceState(free_disk_space);
   if (free_space_state == DiskCleanup::FreeSpaceState::kError) {
     LOG(ERROR) << "Error getting free disk space";
-  } else if (free_space_state ==
-                 DiskCleanup::FreeSpaceState::kNeedNormalCleanup ||
-             free_space_state ==
-                 DiskCleanup::FreeSpaceState::kNeedAggressiveCleanup) {
-    LOG(INFO) << "Available disk space: |" << free_disk_space.value()
-              << "| bytes.  Emitting low disk space signal.";
-    low_disk_space_callback_.Run(free_disk_space.value());
-    low_disk_space_signal_emitted = true;
+  } else {
+    VLOG(1) << "Available free disk space " << *free_disk_space
+            << "; FreeSpaceState="
+            << static_cast<std::underlying_type_t<DiskCleanup::FreeSpaceState>>(
+                   free_space_state);
+
+    if (IsDiskSpaceLow(free_space_state)) {
+      LOG(INFO) << "Available disk space: |" << free_disk_space.value()
+                << "| bytes.  Emitting low disk space signal.";
+      low_disk_space_callback_.Run(free_disk_space.value());
+      low_disk_space_signal_emitted = true;
+    }
   }
 
   const base::Time current_time = platform_->GetCurrentTime();
 
   const bool time_for_auto_cleanup =
-      current_time - last_auto_cleanup_time_ >
-      base::TimeDelta::FromMilliseconds(kAutoCleanupPeriodMS);
+      current_time - last_auto_cleanup_time_ > kAutoCleanupPeriod;
 
   // We shouldn't repeat cleanups on every minute if the disk space
   // stays below the threshold. Trigger it only if there was no notification
@@ -115,6 +140,9 @@ void LowDiskSpaceHandler::LowDiskSpaceCheck() {
 
   if (time_for_update_user_activity_timestamp) {
     last_update_user_activity_timestamp_time_ = current_time;
+
+    cleanup_->CheckNumUserHomeDirectories();
+
     update_user_activity_timestamp_callback_.Run();
   }
 
@@ -122,7 +150,7 @@ void LowDiskSpaceHandler::LowDiskSpaceCheck() {
 
   post_delayed_task_.Run(FROM_HERE,
                          base::BindOnce(&LowDiskSpaceHandler::LowDiskSpaceCheck,
-                                        base::Unretained(this)),
+                                        weak_factory_.GetWeakPtr()),
                          low_disk_notification_period_);
 }
 

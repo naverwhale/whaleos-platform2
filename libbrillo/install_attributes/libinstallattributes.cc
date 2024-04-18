@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 
-#include "bindings/install_attributes.pb.h"  // NOLINT(build/include_directory)
+#include "brillo/proto_bindings/install_attributes.pb.h"  // NOLINT(build/include_directory)
 
 namespace {
 
@@ -20,12 +20,6 @@ const char kInstallAttributesPath[] = "/run/lockbox/install_attributes.pb";
 // The source of truth for these constants is Chromium
 // //chromeos/tpm/install_attributes.cc.
 const char InstallAttributesReader::kAttrMode[] = "enterprise.mode";
-const char InstallAttributesReader::kDeviceModeConsumer[] = "consumer";
-const char InstallAttributesReader::kDeviceModeEnterprise[] = "enterprise";
-const char InstallAttributesReader::kDeviceModeEnterpriseAD[] = "enterprise_ad";
-const char InstallAttributesReader::kDeviceModeLegacyRetail[] = "kiosk";
-const char InstallAttributesReader::kDeviceModeConsumerKiosk[] =
-    "consumer_kiosk";
 
 InstallAttributesReader::InstallAttributesReader()
     : install_attributes_path_(kInstallAttributesPath) {}

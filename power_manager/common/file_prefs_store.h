@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,6 +28,9 @@ class FilePrefsStore : public PrefsStoreInterface {
   // PrefsStoreInterface:
   std::string GetDescription() const override;
   bool ReadPrefString(const std::string& name, std::string* value_out) override;
+  bool ReadExternalString(const std::string& path,
+                          const std::string& name,
+                          std::string* value_out) override;
   bool WritePrefString(const std::string& name,
                        const std::string& value) override;
   bool Watch(const PrefsStoreInterface::ChangeCallback& callback) override;

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 
 <!--
-  Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+  Copyright 2012 The ChromiumOS Authors
   Use of this source code is governed by a BSD-style license that can be
   found in the LICENSE file.
 -->
@@ -56,12 +56,9 @@
     <method name="UnloadToken">
       <arg type="ay" name="isolate_credential" direction="in"/>
       <arg type="s" name="path" direction="in"/>
-    </method>
-
-    <method name="ChangeTokenAuthData">
-      <arg type="s" name="path" direction="in"/>
-      <arg type="ay" name="old_auth_data" direction="in"/>
-      <arg type="ay" name="new_auth_data" direction="in"/>
+      <arg type="b" name="result" direction="out">
+        <annotation name="org.freedesktop.DBus.GLib.ReturnVal" value=""/>
+      </arg>
     </method>
 
     <method name="GetTokenPath">

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <vector>
 
-#include <base/callback_forward.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <brillo/brillo_export.h>
 #include <libminijail.h>
 
@@ -19,7 +18,7 @@ namespace libcontainer {
 // A hook that can be run at different stages of the container startup. The PID
 // parameter is the pid of the container's init process in the outer namespace.
 // The hook should return true on success.
-using HookCallback = base::Callback<bool(pid_t)>;
+using HookCallback = base::OnceCallback<bool(pid_t)>;
 
 class BRILLO_EXPORT Config {
  public:

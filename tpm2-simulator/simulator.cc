@@ -1,15 +1,15 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <string>
 #include <utility>
 
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/check_op.h>
-#include <base/files/file_util.h>
 #include <base/files/file.h>
+#include <base/files/file_util.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <brillo/userdb_utils.h>
@@ -17,6 +17,7 @@
 #include <libminijail.h>
 #include <linux/vtpm_proxy.h>
 #include <scoped_minijail.h>
+#include <selinux/restorecon.h>
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -24,22 +25,23 @@
 #include <sysexits.h>
 #include <unistd.h>
 
+#include "tpm2-simulator/constants.h"
 #include "tpm2-simulator/simulator.h"
+#include "tpm2-simulator/tpm_nvchip_utils.h"
 
 namespace {
-constexpr char kSimulatorUser[] = "tpm2-simulator";
-constexpr char kSimulatorGroup[] = "tpm2-simulator";
 constexpr char kSimulatorSeccompPath[] =
     "/usr/share/policy/tpm2-simulator.policy";
 constexpr char kVtpmxPath[] = "/dev/vtpmx";
 constexpr char kDevTpmPathPrefix[] = "/dev/tpm";
-constexpr char kNVChipPath[] = "NVChip";
 constexpr size_t kMaxCommandSize = 4096;
 constexpr size_t kHeaderSize = 10;
 
-base::ScopedFD RegisterVTPM(base::FilePath* tpm_path) {
+base::ScopedFD RegisterVTPM(base::FilePath* tpm_path, bool is_tpm2) {
   struct vtpm_proxy_new_dev new_dev = {};
-  new_dev.flags = VTPM_PROXY_FLAG_TPM2;
+  if (is_tpm2) {
+    new_dev.flags = VTPM_PROXY_FLAG_TPM2;
+  }
   base::ScopedFD vtpmx_fd(HANDLE_EINTR(open(kVtpmxPath, O_RDWR | O_CLOEXEC)));
   if (!vtpmx_fd.is_valid()) {
     return vtpmx_fd;
@@ -61,8 +63,8 @@ void InitMinijailSandbox() {
   minijail_set_seccomp_filter_tsync(j.get());
   minijail_parse_seccomp_filters(j.get(), kSimulatorSeccompPath);
   minijail_use_seccomp_filter(j.get());
-  minijail_change_user(j.get(), kSimulatorUser);
-  minijail_change_group(j.get(), kSimulatorGroup);
+  minijail_change_user(j.get(), tpm2_simulator::kSimulatorUser);
+  minijail_change_group(j.get(), tpm2_simulator::kSimulatorGroup);
   minijail_inherit_usergroups(j.get());
   minijail_enter(j.get());
 }
@@ -79,19 +81,17 @@ int SimulatorDaemon::OnInit() {
   int exit_code = Daemon::OnInit();
   if (exit_code != EX_OK)
     return exit_code;
-  tpm_executor_->InitializeVTPM();
-  uid_t uid;
-  gid_t gid;
-  if (!brillo::userdb::GetUserInfo(kSimulatorUser, &uid, &gid)) {
-    LOG(ERROR) << "Failed to lookup the user name.";
+  if (!MountAndEnterNVChip()) {
+    LOG(ERROR) << "Failed to mount and enter the NVChip.";
     return EX_OSERR;
   }
-  if (HANDLE_EINTR(chown(kNVChipPath, uid, gid)) < 0) {
-    PLOG(ERROR) << "Failed to chown the NVChip.";
+  tpm_executor_->InitializeVTPM();
+  if (!CorrectWorkingDirectoryFilesOwner()) {
+    LOG(ERROR) << "Failed to correct working directory owner.";
     return EX_OSERR;
   }
   base::FilePath tpm_path;
-  command_fd_ = RegisterVTPM(&tpm_path);
+  command_fd_ = RegisterVTPM(&tpm_path, tpm_executor_->IsTPM2());
   if (!command_fd_.is_valid()) {
     LOG(ERROR) << "Failed to register vTPM.";
     return EX_OSERR;
@@ -153,6 +153,10 @@ void SimulatorDaemon::OnTpmPathChange(const base::FilePath& path, bool error) {
     return;
   }
   if (!initialized_ && base::PathExists(path)) {
+    if (HANDLE_EINTR(selinux_restorecon(path.value().c_str(), 0)) < 0) {
+      PLOG(ERROR) << "restorecon(" << path.value() << ") failed";
+    }
+
     LOG(INFO) << "vTPM initialized: " << path.value();
     tpm_watcher_.reset();
     initialized_ = true;

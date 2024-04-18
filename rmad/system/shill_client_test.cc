@@ -1,6 +1,8 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "rmad/system/shill_client_impl.h"
 
 #include <memory>
 
@@ -9,8 +11,6 @@
 #include <gtest/gtest.h>
 #include <shill/dbus-proxy-mocks.h>
 
-#include "rmad/system/shill_client_impl.h"
-
 using testing::_;
 using testing::Eq;
 using testing::Return;
@@ -18,6 +18,7 @@ using testing::StrictMock;
 
 namespace rmad {
 
+// Tests for |ShillClientImpl|.
 class ShillClientTest : public testing::Test {
  public:
   ShillClientTest() = default;

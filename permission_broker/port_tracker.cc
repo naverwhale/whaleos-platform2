@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,15 +14,16 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <chromeos/patchpanel/dbus/client.h>
+#include <net-base/ipv4_address.h>
 
 namespace permission_broker {
 
@@ -35,28 +36,12 @@ constexpr std::array<const char*, 4> kAllowedInterfacePrefixes{
     {"eth", "usb", "wlan", "mlan"}};
 constexpr const char kLocalhost[] = "lo";
 
-// Returns the network-byte order int32 representation of the IPv4 address given
-// byte per byte, most significant bytes first.
-constexpr uint32_t Ipv4Addr(uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
-  return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
-}
-
 // TODO(hugobenichi): eventually import these values from
 // platform2/arc/network/address_manager.cc
 // Port forwarding can only forward to IPv4 addresses within the IPv4 prefix
 // used for static IPv4 subnet assignment to guest OSs and App platforms.
-constexpr const char* kGuestSubnetCidr = "100.115.92.0/23";
-constexpr const struct in_addr kGuestBaseAddr = {.s_addr =
-                                                     Ipv4Addr(100, 115, 92, 0)};
-constexpr const struct in_addr kGuestNetmask = {.s_addr =
-                                                    Ipv4Addr(255, 255, 254, 0)};
-
-const std::string ProtocolName(Protocol proto) {
-  if (proto == ModifyPortRuleRequest::INVALID_PROTOCOL) {
-    NOTREACHED() << "Unexpected L4 protocol value";
-  }
-  return base::ToLowerASCII(ModifyPortRuleRequest::Protocol_Name(proto));
-}
+const net_base::IPv4CIDR kGuestCidr =
+    *net_base::IPv4CIDR::CreateFromCIDRString("100.115.92.0/23");
 
 std::string RuleTypeName(PortTracker::PortRuleType type) {
   switch (type) {
@@ -76,7 +61,7 @@ std::string RuleTypeName(PortTracker::PortRuleType type) {
 
 std::ostream& operator<<(std::ostream& stream,
                          const PortTracker::PortRuleKey key) {
-  stream << "{ " << ProtocolName(key.proto) << " :"
+  stream << "{ " << patchpanel::Client::ProtocolName(key.proto) << " :"
          << std::to_string(key.input_dst_port) << "/" << key.input_ifname
          << " }";
   return stream;
@@ -84,16 +69,16 @@ std::ostream& operator<<(std::ostream& stream,
 
 std::ostream& operator<<(std::ostream& stream,
                          const PortTracker::PortRule rule) {
-  stream << "{ " << RuleTypeName(rule.type) << " " << ProtocolName(rule.proto)
-         << " :" << std::to_string(rule.input_dst_port) << "/"
-         << rule.input_ifname << " -> " << rule.dst_ip << ":" << rule.dst_port
-         << " }";
+  stream << "{ " << RuleTypeName(rule.type) << " "
+         << patchpanel::Client::ProtocolName(rule.proto) << " :"
+         << std::to_string(rule.input_dst_port) << "/" << rule.input_ifname
+         << " -> " << rule.dst_ip << ":" << rule.dst_port << " }";
   return stream;
 }
 }  // namespace
 
 PortTracker::PortTracker()
-    : task_runner_{base::ThreadTaskRunnerHandle::Get()} {}
+    : task_runner_{base::SingleThreadTaskRunner::GetCurrentDefault()} {}
 
 // Test-only.
 PortTracker::PortTracker(scoped_refptr<base::SequencedTaskRunner> task_runner)
@@ -103,7 +88,8 @@ PortTracker::~PortTracker() {
   RevokeAllPortRules();
 }
 
-bool PortTracker::ModifyPortRule(Operation op, const PortRule& rule) {
+bool PortTracker::ModifyPortRule(
+    patchpanel::Client::FirewallRequestOperation op, const PortRule& rule) {
   std::unique_ptr<patchpanel::Client> patchpanel_client =
       patchpanel::Client::New();
   if (!patchpanel_client) {
@@ -111,20 +97,20 @@ bool PortTracker::ModifyPortRule(Operation op, const PortRule& rule) {
     return false;
   }
 
-  RuleType type;
+  patchpanel::Client::FirewallRequestType type;
   switch (rule.type) {
     case kAccessRule:
-      type = ModifyPortRuleRequest::ACCESS;
+      type = patchpanel::Client::FirewallRequestType::kAccess;
       break;
     case kLockdownRule:
-      type = ModifyPortRuleRequest::LOCKDOWN;
+      type = patchpanel::Client::FirewallRequestType::kLockdown;
       break;
     case kForwardingRule:
-      type = ModifyPortRuleRequest::FORWARDING;
+      type = patchpanel::Client::FirewallRequestType::kForwarding;
       break;
     default:
-      type = ModifyPortRuleRequest::INVALID_RULE_TYPE;
-      break;
+      LOG(ERROR) << "Invalid Port Rule type " << rule.type;
+      return false;
   }
 
   return patchpanel_client->ModifyPortRule(
@@ -136,7 +122,7 @@ bool PortTracker::AllowTcpPortAccess(uint16_t port,
                                      int dbus_fd) {
   PortRule rule = {
       .type = kAccessRule,
-      .proto = ModifyPortRuleRequest::TCP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kTcp,
       .input_dst_port = port,
       .input_ifname = iface,
   };
@@ -148,7 +134,7 @@ bool PortTracker::AllowUdpPortAccess(uint16_t port,
                                      int dbus_fd) {
   PortRule rule = {
       .type = kAccessRule,
-      .proto = ModifyPortRuleRequest::UDP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kUdp,
       .input_dst_port = port,
       .input_ifname = iface,
   };
@@ -157,7 +143,7 @@ bool PortTracker::AllowUdpPortAccess(uint16_t port,
 
 bool PortTracker::RevokeTcpPortAccess(uint16_t port, const std::string& iface) {
   PortRuleKey key = {
-      .proto = ModifyPortRuleRequest::TCP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kTcp,
       .input_dst_port = port,
       .input_ifname = iface,
   };
@@ -166,7 +152,7 @@ bool PortTracker::RevokeTcpPortAccess(uint16_t port, const std::string& iface) {
 
 bool PortTracker::RevokeUdpPortAccess(uint16_t port, const std::string& iface) {
   PortRuleKey key = {
-      .proto = ModifyPortRuleRequest::UDP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kUdp,
       .input_dst_port = port,
       .input_ifname = iface,
   };
@@ -210,7 +196,8 @@ bool PortTracker::AddPortRule(const PortRule& rule, int dbus_fd) {
   port_rules_[key].lifeline_fd = lifeline_fd;
   lifeline_fds_[lifeline_fd] = key;
 
-  if (!ModifyPortRule(ModifyPortRuleRequest::CREATE, rule)) {
+  if (!ModifyPortRule(patchpanel::Client::FirewallRequestOperation::kCreate,
+                      rule)) {
     // If we fail to punch the hole in the firewall, stop tracking the lifetime
     // of the process.
     LOG(ERROR) << "Failed to create rule " << rule;
@@ -241,7 +228,7 @@ void PortTracker::RevokeAllPortRules() {
 bool PortTracker::LockDownLoopbackTcpPort(uint16_t port, int dbus_fd) {
   PortRule rule = {
       .type = kLockdownRule,
-      .proto = ModifyPortRuleRequest::TCP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kTcp,
       .input_dst_port = port,
       .input_ifname = kLocalhost,
   };
@@ -250,7 +237,7 @@ bool PortTracker::LockDownLoopbackTcpPort(uint16_t port, int dbus_fd) {
 
 bool PortTracker::ReleaseLoopbackTcpPort(uint16_t port) {
   PortRuleKey key = {
-      .proto = ModifyPortRuleRequest::TCP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kTcp,
       .input_dst_port = port,
       .input_ifname = kLocalhost,
   };
@@ -264,7 +251,7 @@ bool PortTracker::StartTcpPortForwarding(uint16_t input_dst_port,
                                          int dbus_fd) {
   PortRule rule = {
       .type = kForwardingRule,
-      .proto = ModifyPortRuleRequest::TCP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kTcp,
       .input_dst_port = input_dst_port,
       .input_ifname = input_ifname,
       .dst_ip = dst_ip,
@@ -280,7 +267,7 @@ bool PortTracker::StartUdpPortForwarding(uint16_t input_dst_port,
                                          int dbus_fd) {
   PortRule rule = {
       .type = kForwardingRule,
-      .proto = ModifyPortRuleRequest::UDP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kUdp,
       .input_dst_port = input_dst_port,
       .input_ifname = input_ifname,
       .dst_ip = dst_ip,
@@ -292,7 +279,7 @@ bool PortTracker::StartUdpPortForwarding(uint16_t input_dst_port,
 bool PortTracker::StopTcpPortForwarding(uint16_t input_dst_port,
                                         const std::string& input_ifname) {
   PortRuleKey key = {
-      .proto = ModifyPortRuleRequest::TCP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kTcp,
       .input_dst_port = input_dst_port,
       .input_ifname = input_ifname,
   };
@@ -302,7 +289,7 @@ bool PortTracker::StopTcpPortForwarding(uint16_t input_dst_port,
 bool PortTracker::StopUdpPortForwarding(uint16_t input_dst_port,
                                         const std::string& input_ifname) {
   PortRuleKey key = {
-      .proto = ModifyPortRuleRequest::UDP,
+      .proto = patchpanel::Client::FirewallRequestProtocol::kUdp,
       .input_dst_port = input_dst_port,
       .input_ifname = input_ifname,
   };
@@ -321,11 +308,12 @@ bool PortTracker::ValidatePortRule(const PortRule& rule) {
   }
 
   switch (rule.proto) {
-    case ModifyPortRuleRequest::TCP:
-    case ModifyPortRuleRequest::UDP:
+    case patchpanel::Client::FirewallRequestProtocol::kTcp:
+    case patchpanel::Client::FirewallRequestProtocol::kUdp:
       break;
     default:
-      CHECK(false) << "Unknown L4 protocol value " << rule.proto;
+      CHECK(false) << "Unknown L4 protocol value "
+                   << patchpanel::Client::ProtocolName(rule.proto);
       return false;
   }
 
@@ -340,15 +328,14 @@ bool PortTracker::ValidatePortRule(const PortRule& rule) {
         return false;
       }
 
-      struct in_addr addr;
-      if (inet_pton(AF_INET, rule.dst_ip.c_str(), &addr) != 1) {
+      const auto addr = net_base::IPv4Address::CreateFromString(rule.dst_ip);
+      if (!addr) {
         LOG(ERROR) << "Cannot forward to invalid IPv4 address " << rule.dst_ip;
         return false;
       }
-
-      if ((addr.s_addr & kGuestNetmask.s_addr) != kGuestBaseAddr.s_addr) {
+      if (!kGuestCidr.InSameSubnetWith(*addr)) {
         LOG(ERROR) << "Cannot forward to IPv4 address " << rule.dst_ip
-                   << " outside of " << kGuestSubnetCidr;
+                   << " outside of " << kGuestCidr;
         return false;
       }
 
@@ -444,7 +431,9 @@ bool PortTracker::RevokePortRule(const PortRuleKey key) {
   }
   port_rules_.erase(key);
   lifeline_fds_.erase(rule.lifeline_fd);
-  return deleted && ModifyPortRule(ModifyPortRuleRequest::DELETE, rule);
+  return deleted &&
+         ModifyPortRule(patchpanel::Client::FirewallRequestOperation::kDelete,
+                        rule);
 }
 
 }  // namespace permission_broker

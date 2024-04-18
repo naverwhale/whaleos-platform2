@@ -1,28 +1,25 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/vpn/vpn_provider.h"
 
+#include <iterator>
 #include <memory>
 #include <set>
-#include <utility>
+#include <string>
+#include <string_view>
 
-#include <base/stl_util.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
 
 #include "shill/error.h"
-#include "shill/fake_store.h"
 #include "shill/ipconfig.h"
-#include "shill/mock_adaptors.h"
 #include "shill/mock_control.h"
-#include "shill/mock_device_info.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
 #include "shill/mock_profile.h"
-#include "shill/routing_policy_entry.h"
-#include "shill/vpn/mock_vpn_driver.h"
+#include "shill/store/fake_store.h"
 #include "shill/vpn/mock_vpn_service.h"
 
 using testing::_;
@@ -32,21 +29,19 @@ using testing::StartsWith;
 
 namespace shill {
 
+namespace {
+constexpr char kHost[] = "10.8.0.1";
+constexpr char kName[] = "vpn-name";
+}  // namespace
+
 class VPNProviderTest : public testing::Test {
  public:
   VPNProviderTest()
-      : manager_(&control_, nullptr, &metrics_),
-        device_info_(&manager_),
-        provider_(&manager_) {
-    manager_.set_mock_device_info(&device_info_);
-  }
+      : manager_(&control_, nullptr, &metrics_), provider_(&manager_) {}
 
   ~VPNProviderTest() override = default;
 
  protected:
-  static const char kHost[];
-  static const char kName[];
-
   std::string GetServiceFriendlyName(const ServiceRefPtr& service) {
     return service->friendly_name();
   }
@@ -67,19 +62,15 @@ class VPNProviderTest : public testing::Test {
   MockControl control_;
   MockMetrics metrics_;
   MockManager manager_;
-  MockDeviceInfo device_info_;
   VPNProvider provider_;
 };
-
-const char VPNProviderTest::kHost[] = "10.8.0.1";
-const char VPNProviderTest::kName[] = "vpn-name";
 
 TEST_F(VPNProviderTest, GetServiceNoType) {
   KeyValueStore args;
   Error e;
   args.Set<std::string>(kTypeProperty, kTypeVPN);
   ServiceRefPtr service = provider_.GetService(args, &e);
-  EXPECT_EQ(Error::kNotSupported, e.type());
+  EXPECT_EQ(Error::kInvalidProperty, e.type());
   EXPECT_FALSE(service);
 }
 
@@ -91,7 +82,7 @@ TEST_F(VPNProviderTest, GetServiceUnsupportedType) {
   args.Set<std::string>(kProviderHostProperty, kHost);
   args.Set<std::string>(kNameProperty, kName);
   ServiceRefPtr service = provider_.GetService(args, &e);
-  EXPECT_EQ(Error::kNotSupported, e.type());
+  EXPECT_EQ(Error::kInvalidArguments, e.type());
   EXPECT_FALSE(service);
 }
 
@@ -233,37 +224,34 @@ TEST_F(VPNProviderTest, CreateServicesFromProfile) {
 }
 
 TEST_F(VPNProviderTest, CreateService) {
-  static const char kName[] = "test-vpn-service";
-  static const char kStorageID[] = "test_vpn_storage_id";
-  static const char kHost[] = "test-vpn-host";
-  static const char* const kTypes[] = {kProviderOpenVpn, kProviderL2tpIpsec,
-                                       kProviderThirdPartyVpn,
-                                       kProviderWireGuard};
-  const size_t kTypesCount = base::size(kTypes);
+  static constexpr char kName[] = "test-vpn-service";
+  static constexpr char kStorageID[] = "test_vpn_storage_id";
+  static constexpr std::string_view kTypes[] = {
+      kProviderOpenVpn, kProviderL2tpIpsec, kProviderThirdPartyVpn,
+      kProviderWireGuard};
+  const size_t kTypesCount = std::size(kTypes);
   EXPECT_CALL(manager_, RegisterService(_)).Times(kTypesCount);
   for (auto type : kTypes) {
     Error error;
     VPNServiceRefPtr service =
-        provider_.CreateService(type, kName, kStorageID, &error);
+        provider_.CreateService(std::string(type), kName, kStorageID, &error);
     ASSERT_NE(nullptr, service) << type;
     ASSERT_TRUE(service->driver()) << type;
-    EXPECT_EQ(type, service->driver()->GetProviderType());
     EXPECT_EQ(kName, GetServiceFriendlyName(service)) << type;
     EXPECT_EQ(kStorageID, service->GetStorageIdentifier()) << type;
-    EXPECT_FALSE(service->IsAlwaysOnVpn(kHost)) << type;
     EXPECT_TRUE(error.IsSuccess()) << type;
   }
   Error error;
   VPNServiceRefPtr unknown_service =
       provider_.CreateService("unknown-vpn-type", kName, kStorageID, &error);
   EXPECT_FALSE(unknown_service);
-  EXPECT_EQ(Error::kNotSupported, error.type());
+  EXPECT_EQ(Error::kInvalidArguments, error.type());
 }
 
 TEST_F(VPNProviderTest, CreateArcService) {
-  static const char kName[] = "test-vpn-service";
-  static const char kStorageID[] = "test_vpn_storage_id";
-  static const char kHost[] = "com.example.test.vpn";
+  static constexpr char kName[] = "test-vpn-service";
+  static constexpr char kStorageID[] = "test_vpn_storage_id";
+  static constexpr char kHost[] = "com.example.test.vpn";
   EXPECT_CALL(manager_, RegisterService(_));
   Error error;
   VPNServiceRefPtr service =
@@ -272,10 +260,8 @@ TEST_F(VPNProviderTest, CreateArcService) {
   ASSERT_TRUE(service->driver());
   service->driver()->args()->Set<std::string>(kProviderHostProperty, kHost);
 
-  EXPECT_EQ(kProviderArcVpn, service->driver()->GetProviderType());
   EXPECT_EQ(kName, GetServiceFriendlyName(service));
   EXPECT_EQ(kStorageID, service->GetStorageIdentifier());
-  EXPECT_TRUE(service->IsAlwaysOnVpn(kHost));
   EXPECT_TRUE(error.IsSuccess());
 }
 

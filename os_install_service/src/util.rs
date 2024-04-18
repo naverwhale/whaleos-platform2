@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn test_command_to_string() {
         let mut cmd = Command::new("myCmd");
-        cmd.args(&["arg1", "arg2"]);
+        cmd.args(["arg1", "arg2"]);
         assert_eq!(command_to_string(&cmd), "myCmd arg1 arg2");
     }
 

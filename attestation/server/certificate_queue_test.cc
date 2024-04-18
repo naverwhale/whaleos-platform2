@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include <base/functional/callback_helpers.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -24,15 +25,14 @@ constexpr char kUsername2[] = "user2";
 constexpr char kKeyLabel1[] = "label1";
 constexpr char kKeyLabel2[] = "label2";
 
-// Makes an |AttestationFlowData| with |request| and a dummy callback.
+// Makes an |AttestationFlowData| with |request| and a callback.
 std::shared_ptr<AttestationFlowData> MakeAttestationFlowData(
     const GetCertificateRequest& request) {
-  AttestationInterface::GetCertificateCallback callback;
-  return std::make_shared<AttestationFlowData>(request, callback);
+  return std::make_shared<AttestationFlowData>(request, base::DoNothing());
 }
 
 // Makes a |GetCertificateRequest| with |username| and |key_label|, and makes an
-// |AttestationFlowData| with it and a dummy callback.
+// |AttestationFlowData| with it and a callback.
 std::shared_ptr<AttestationFlowData> MakeAttestationFlowData(
     ACAType aca_type,
     const std::string& username,
@@ -41,11 +41,10 @@ std::shared_ptr<AttestationFlowData> MakeAttestationFlowData(
   request.set_aca_type(aca_type);
   request.set_username(username);
   request.set_key_label(key_label);
-  AttestationInterface::GetCertificateCallback callback;
-  return std::make_shared<AttestationFlowData>(request, callback);
+  return std::make_shared<AttestationFlowData>(request, base::DoNothing());
 }
 
-std::shared_ptr<AttestationFlowData> MakeDummyAttestationFlowData() {
+std::shared_ptr<AttestationFlowData> MakeAttestationFlowDataForTesting() {
   return MakeAttestationFlowData(DEFAULT_ACA, "", "");
 }
 
@@ -79,26 +78,30 @@ TEST(CertificateQueueTest, ConsistentInputOutput) {
   CertificateQueue certificate_queue(kAliasLimit);
   std::vector<std::shared_ptr<AttestationFlowData>> entries;
   for (int i = 0; i < kAliasLimit; ++i) {
-    entries.push_back(MakeDummyAttestationFlowData());
+    entries.push_back(MakeAttestationFlowDataForTesting());
     EXPECT_EQ(certificate_queue.Push(entries.back()),
               CertificateQueue::PushResult::kSuccess);
   }
   // This should be |true| if the queue is not empty.
-  EXPECT_TRUE(certificate_queue.HasAnyAlias(MakeDummyAttestationFlowData()));
+  EXPECT_TRUE(
+      certificate_queue.HasAnyAlias(MakeAttestationFlowDataForTesting()));
 
   // Popped items should match the entries we push into the queue.
-  EXPECT_THAT(certificate_queue.PopAllAliases(MakeDummyAttestationFlowData()),
-              ElementsAreArray(entries));
+  EXPECT_THAT(
+      certificate_queue.PopAllAliases(MakeAttestationFlowDataForTesting()),
+      ElementsAreArray(entries));
   // Makes sure after popping the entries, the queue is empty.
   EXPECT_TRUE(
-      certificate_queue.PopAllAliases(MakeDummyAttestationFlowData()).empty());
+      certificate_queue.PopAllAliases(MakeAttestationFlowDataForTesting())
+          .empty());
   // And this should be |false| if the queue is empty.
-  EXPECT_FALSE(certificate_queue.HasAnyAlias(MakeDummyAttestationFlowData()));
+  EXPECT_FALSE(
+      certificate_queue.HasAnyAlias(MakeAttestationFlowDataForTesting()));
 }
 
 TEST(CertificateQueueTest, InconsistentConfig) {
   CertificateQueue certificate_queue(kAliasLimit);
-  auto first_entry = MakeDummyAttestationFlowData();
+  auto first_entry = MakeAttestationFlowDataForTesting();
   EXPECT_EQ(certificate_queue.Push(first_entry),
             CertificateQueue::PushResult::kSuccess);
   GetCertificateRequest inconsistent_request;

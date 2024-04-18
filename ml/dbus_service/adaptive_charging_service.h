@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,9 +26,8 @@ class AdaptiveChargingService
   ~AdaptiveChargingService();
 
   // Register DBus object and interfaces.
-  void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction&
-          completion_callback);
+  void RegisterAsync(brillo::dbus_utils::AsyncEventSequencer::CompletionAction
+                         completion_callback);
 
   // org::chromium::MachineLearning::AdaptiveCharging: (see
   // dbus_bindings/org.chromium.MachineLearning.AdaptiveCharging.xml).
@@ -36,7 +35,7 @@ class AdaptiveChargingService
       std::unique_ptr<
           brillo::dbus_utils::DBusMethodResponse<bool, std::vector<double>>>
           response,
-      const std::string& serialized_example_proto) override;
+      const std::vector<uint8_t>& serialized_example_proto) override;
 
  private:
   const std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object_;

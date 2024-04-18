@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,10 +36,8 @@ constexpr char kNumBits[] = "16";
 constexpr char kBatteryI2cAddress[] = "0x16";
 // The only i2cread argument different across models is the port.
 const std::map<std::string, std::string> kModelToPort = {
-    {"sona", "2"},
-    {"careena", "0"},
-    {"dratini", "5"},
-    {"dorp", "0"},
+    {"sona", "2"}, {"careena", "0"},   {"dratini", "5"}, {"drobit", "5"},
+    {"dorp", "0"}, {"frostflow", "2"}, {"marasov", "5"}, {"starmie", "1"},
 };
 const std::map<std::string, std::string> kMetricNameToOffset = {
     {"temperature_smart", "0x08"},
@@ -95,7 +93,7 @@ bool CrosHealthdTool::CollectSmartBatteryMetric(brillo::ErrorPtr* error,
           .Append(GetEctoolPolicyFile(kI2cReadCommand));
   if (!RunEctoolWithArgs(error, seccomp_policy_path, ectool_args, kRunAs,
                          output))
-    return false;
+    return false;  // DEBUGD_ADD_ERROR is already called.
 
   return true;
 }

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,6 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/notreached.h>
-#include <base/optional.h>
 #include <brillo/vcsid.h>
 #include <cros_config/cros_config_interface.h>
 
@@ -22,37 +21,48 @@
 namespace {
 
 constexpr char kFirmwareGlobSuffix[] = "_*.bin";
-constexpr char kFirmwareLegacyBoardPattern[] = "*_fp";
-constexpr char kUpdateDisableFile[] = "/opt/google/biod/fw/.disable_fp_updater";
+constexpr char kUpdateDisableFile[] =
+    "/mnt/stateful_partition/.disable_fp_updater";
 
 }  // namespace
 
 namespace biod {
 namespace updater {
 
-constexpr char kFirmwareDir[] = "/opt/google/biod/fw";
-
 std::string UpdaterVersion() {
-  CHECK(brillo::kVCSID) << "The updater requires VCSID to function properly.";
+  static_assert(brillo::kVCSID,
+                "The updater requires VCSID to function properly.");
   return std::string(*brillo::kVCSID);
 }
 
-bool UpdateDisallowed() {
-  return base::PathExists(base::FilePath(kUpdateDisableFile));
+bool UpdateDisallowed(const BiodSystem& system) {
+  // Disable updates when /mnt/stateful_partition/.disable_fp_updater exists
+  // and Developer Mode can boot from unsigned kernel (it's a bit stronger check
+  // than developer mode only).
+  if (!system.OnlyBootSignedKernel() &&
+      base::PathExists(base::FilePath(kUpdateDisableFile))) {
+    return true;
+  }
+
+  return false;
 }
 
-// FindFirmwareFile searches |directory| for a single firmware file
-// that matches the |board_name|+|kFirmwareGlobSuffix| file pattern.
-// If a single matching firmware file is found is found,
-// its path is written to |file|. Otherwise, |file| will be untouched.
-static FindFirmwareFileStatus FindFirmwareFile(const base::FilePath& directory,
-                                               const std::string& board_name,
-                                               base::FilePath* file) {
+FindFirmwareFileStatus FindFirmwareFile(
+    const base::FilePath& directory,
+    brillo::CrosConfigInterface* cros_config,
+    base::FilePath* file) {
+  std::optional<std::string> board_name = biod::FingerprintBoard(cros_config);
+  if (!board_name.has_value() || board_name->empty()) {
+    LOG(ERROR) << "Fingerprint board name is unavailable";
+    return FindFirmwareFileStatus::kBoardUnavailable;
+  }
+  LOG(INFO) << "Identified fingerprint board name as '" << *board_name << "'.";
+
   if (!base::DirectoryExists(directory)) {
     return FindFirmwareFileStatus::kNoDirectory;
   }
 
-  std::string glob(board_name + std::string(kFirmwareGlobSuffix));
+  std::string glob(*board_name + std::string(kFirmwareGlobSuffix));
   base::FileEnumerator fw_bin_list(directory, false,
                                    base::FileEnumerator::FileType::FILES, glob);
 
@@ -78,23 +88,6 @@ static FindFirmwareFileStatus FindFirmwareFile(const base::FilePath& directory,
   return FindFirmwareFileStatus::kFoundFile;
 }
 
-FindFirmwareFileStatus FindFirmwareFile(
-    const base::FilePath& directory,
-    brillo::CrosConfigInterface* cros_config,
-    base::FilePath* file) {
-  base::Optional<std::string> board_name = biod::FingerprintBoard(cros_config);
-  if (board_name) {
-    LOG(INFO) << "Identified fingerprint board name as '" << *board_name
-              << "'.";
-  } else {
-    LOG(WARNING) << "Fingerprint board name is unavailable, continuing with "
-                    "legacy update.";
-    board_name = kFirmwareLegacyBoardPattern;
-  }
-
-  return FindFirmwareFile(directory, *board_name, file);
-}
-
 std::string FindFirmwareFileStatusToString(FindFirmwareFileStatus status) {
   switch (status) {
     case FindFirmwareFileStatus::kFoundFile:
@@ -105,6 +98,8 @@ std::string FindFirmwareFileStatusToString(FindFirmwareFileStatus status) {
       return "Firmware file not found.";
     case FindFirmwareFileStatus::kMultipleFiles:
       return "More than one firmware file was found.";
+    case FindFirmwareFileStatus::kBoardUnavailable:
+      return "Fingerprint board name is not available.";
   }
 
   NOTREACHED();

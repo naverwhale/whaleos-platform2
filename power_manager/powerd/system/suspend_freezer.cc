@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,27 +7,25 @@
 #include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/system/suspend_freezer.h"
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <base/threading/platform_thread.h>
 #include <base/time/time.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 const base::FilePath kBasePath("/sys/fs/cgroup/freezer");
 const base::FilePath kWakeupCountPath("/sys/power/wakeup_count");
 
 namespace {
-static constexpr base::TimeDelta kFreezerTimeout =
-    base::TimeDelta::FromSeconds(10);
-static constexpr base::TimeDelta kFreezerSampleTime =
-    base::TimeDelta::FromMilliseconds(10);
+static constexpr base::TimeDelta kFreezerTimeout = base::Seconds(10);
+static constexpr base::TimeDelta kFreezerSampleTime = base::Milliseconds(10);
 }  // namespace
 
 SuspendFreezer::SuspendFreezer()
@@ -330,5 +328,4 @@ void SuspendFreezer::SystemUtilsInterface::GetSubDirs(
   }
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

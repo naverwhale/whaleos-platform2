@@ -1,11 +1,10 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DEBUGD_SRC_DEV_MODE_NO_OWNER_RESTRICTION_H_
 #define DEBUGD_SRC_DEV_MODE_NO_OWNER_RESTRICTION_H_
 
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <brillo/errors/error.h>
 #include <dbus/bus.h>
@@ -36,7 +35,9 @@ class DevModeNoOwnerRestriction {
   bool AllowToolUse(brillo::ErrorPtr* error);
 
   // Virtual member functions to allow overrides for testing.
-  virtual bool InDevMode() const;
+  // Returns true if the system is in dev mode. If not, and if |error| is
+  // given, the error message is populated.
+  virtual bool InDevMode(brillo::ErrorPtr* error = nullptr) const;
   virtual bool GetOwnerAndLockboxStatus(bool* owner_user_exists,
                                         bool* boot_lockbox_finalized);
 

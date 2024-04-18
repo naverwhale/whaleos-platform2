@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,13 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <base/location.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
 #include <brillo/brillo_export.h>
 #include <brillo/http/curl_api.h>
 #include <brillo/http/http_transport.h>
@@ -55,17 +56,27 @@ class BRILLO_EXPORT Transport : public http::Transport {
       brillo::ErrorPtr* error) override;
 
   void RunCallbackAsync(const base::Location& from_here,
-                        const base::Closure& callback) override;
+                        base::OnceClosure callback) override;
 
   RequestID StartAsyncTransfer(http::Connection* connection,
-                               const SuccessCallback& success_callback,
-                               const ErrorCallback& error_callback) override;
+                               SuccessCallback success_callback,
+                               ErrorCallback error_callback) override;
 
   bool CancelRequest(RequestID request_id) override;
 
   void SetDefaultTimeout(base::TimeDelta timeout) override;
 
+  void SetInterface(const std::string& ifname) override;
+
   void SetLocalIpAddress(const std::string& ip_address) override;
+
+  void SetDnsServers(const std::vector<std::string>& dns_servers) override;
+
+  void SetDnsInterface(const std::string& dns_interface) override;
+
+  void SetDnsLocalIPv4Address(const std::string& dns_ipv4_addr) override;
+
+  void SetDnsLocalIPv6Address(const std::string& dns_ipv6_addr) override;
 
   void UseDefaultCertificate() override;
 
@@ -75,8 +86,8 @@ class BRILLO_EXPORT Transport : public http::Transport {
                        uint16_t port,
                        const std::string& ip_address) override;
 
-  void SetBufferSize(base::Optional<int> buffer_size) override;
-  void SetUploadBufferSize(base::Optional<int> buffer_size) override;
+  void SetBufferSize(std::optional<int> buffer_size) override;
+  void SetUploadBufferSize(std::optional<int> buffer_size) override;
 
   // Helper methods to convert CURL error codes (CURLcode and CURLMcode)
   // into brillo::Error object.
@@ -145,11 +156,16 @@ class BRILLO_EXPORT Transport : public http::Transport {
   RequestID last_request_id_{0};
   // The connection timeout for the requests made.
   base::TimeDelta connection_timeout_;
+  std::string interface_;
   std::string ip_address_;
+  std::vector<std::string> dns_servers_;
+  std::string dns_interface_;
+  std::string dns_ipv4_addr_;
+  std::string dns_ipv6_addr_;
   base::FilePath certificate_path_;
   curl_slist* host_list_{nullptr};
-  base::Optional<int> buffer_size_;
-  base::Optional<int> upload_buffer_size_;
+  std::optional<int> buffer_size_;
+  std::optional<int> upload_buffer_size_;
 
   base::WeakPtrFactory<Transport> weak_ptr_factory_for_timer_{this};
   base::WeakPtrFactory<Transport> weak_ptr_factory_{this};

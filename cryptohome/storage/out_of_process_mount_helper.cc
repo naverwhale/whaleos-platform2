@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "cryptohome/storage/out_of_process_mount_helper.h"
 
 #include <poll.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sysexits.h>
 
@@ -14,25 +15,29 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <absl/cleanup/cleanup.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
+#include <base/location.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/cryptohome.h>
 #include <brillo/process/process.h>
 #include <brillo/secure_blob.h>
+#include <chromeos/constants/cryptohome.h>
 
 #include "cryptohome/cryptohome_common.h"
 #include "cryptohome/cryptohome_metrics.h"
+#include "cryptohome/namespace_mounter_ipc.pb.h"
 #include "cryptohome/storage/mount_constants.h"
 #include "cryptohome/storage/mount_utils.h"
 
-#include "cryptohome/namespace_mounter_ipc.pb.h"
-
 using base::FilePath;
 using base::StringPrintf;
+
+namespace cryptohome {
 
 namespace {
 
@@ -41,12 +46,12 @@ namespace {
 // Wait up to three seconds for the ephemeral mount to be performed.
 //
 // Normally, setting up a full ephemeral mount takes about 300 ms, so
-// give ourselves a healthy 10x margin.
+// give ourselves a healthy 40x margin.
 //
 // Certain boards can be very slow on mount operations. Extend the timeout in
 // this case to 120s.
 constexpr base::TimeDelta kOutOfProcessHelperMountTimeout =
-    base::TimeDelta::FromSeconds(USE_SLOW_MOUNT ? 120 : 3);
+    base::Seconds(USE_SLOW_MOUNT ? 120 : 12);
 
 // How long to wait for the out-of-process helper to exit and be reaped.
 //
@@ -60,9 +65,14 @@ constexpr base::TimeDelta kOutOfProcessHelperMountTimeout =
 // Certain boards can be very slow on mount operations. Extend the timeout in
 // this case to 120s.
 constexpr base::TimeDelta kOutOfProcessHelperReapTimeout =
-    base::TimeDelta::FromSeconds(USE_SLOW_MOUNT ? 120 : 1);
+    base::Seconds(USE_SLOW_MOUNT ? 120 : 1);
 
 bool WaitForHelper(int read_from_helper, const base::TimeDelta& timeout) {
+  if (read_from_helper < 0) {
+    LOG(ERROR) << "WaitForHelper called with an invalid descriptor";
+    return false;
+  }
+
   struct pollfd poll_fd = {};
   poll_fd.fd = read_from_helper;
   poll_fd.events = POLLIN;
@@ -84,28 +94,50 @@ bool WaitForHelper(int read_from_helper, const base::TimeDelta& timeout) {
   return (poll_fd.revents & POLLIN) == POLLIN;
 }
 
-std::map<cryptohome::MountType, cryptohome::OutOfProcessMountRequest_MountType>
-    mount_type = {
-        // Not mounted.
-        {cryptohome::MountType::NONE,
-         cryptohome::OutOfProcessMountRequest_MountType_NONE},
-        // Encrypted with ecryptfs.
-        {cryptohome::MountType::ECRYPTFS,
-         cryptohome::OutOfProcessMountRequest_MountType_ECRYPTFS},
-        // Encrypted with dircrypto.
-        {cryptohome::MountType::DIR_CRYPTO,
-         cryptohome::OutOfProcessMountRequest_MountType_DIR_CRYPTO},
-        // Ephemeral mount.
-        {cryptohome::MountType::EPHEMERAL,
-         cryptohome::OutOfProcessMountRequest_MountType_EPHEMERAL},
-        // Encrypted with dmcrpyt.
-        {cryptohome::MountType::DMCRYPT,
-         cryptohome::OutOfProcessMountRequest_MountType_DMCRYPT},
+std::map<MountType, OutOfProcessMountRequest_MountType> kProtobufMountType = {
+    // Not mounted.
+    {MountType::NONE, OutOfProcessMountRequest_MountType_NONE},
+    // Encrypted with ecryptfs.
+    {MountType::ECRYPTFS, OutOfProcessMountRequest_MountType_ECRYPTFS},
+    // Encrypted with dircrypto.
+    {MountType::DIR_CRYPTO, OutOfProcessMountRequest_MountType_DIR_CRYPTO},
+    // Encrypted with dmcrpyt.
+    {MountType::DMCRYPT, OutOfProcessMountRequest_MountType_DMCRYPT},
+    // Ephemeral mount.
+    {MountType::EPHEMERAL, OutOfProcessMountRequest_MountType_EPHEMERAL},
+    // Vault Migration.
+    {MountType::ECRYPTFS_TO_DIR_CRYPTO,
+     OutOfProcessMountRequest_MountType_ECRYPTFS_TO_DIR_CRYPTO},
+    {MountType::ECRYPTFS_TO_DMCRYPT,
+     OutOfProcessMountRequest_MountType_ECRYPTFS_TO_DMCRYPT},
+    {MountType::DIR_CRYPTO_TO_DMCRYPT,
+     OutOfProcessMountRequest_MountType_DIR_CRYPTO_TO_DMCRYPT},
 };
+
+StorageStatus OopErrorCodeToStatus(MountError error) {
+  if (error == MOUNT_ERROR_NONE) {
+    return StorageStatus::Ok();
+  }
+  // The error is already reported from OOP, so no need to report it here.
+  return StorageStatus::Make(FROM_HERE, "OOP mount failed", error,
+                             /*report=*/false);
+}
 
 }  // namespace
 
-namespace cryptohome {
+//  namespace_mounter enters the Chrome mount namespace and mounts
+//  the user cryptohome in that mount namespace if the flags are enabled.
+//  Chrome mount namespace is created by session_manager. cryptohome knows
+//  the path at which this mount namespace is created and uses that path to
+//  enter it.
+OutOfProcessMountHelper::OutOfProcessMountHelper(bool legacy_home,
+                                                 bool bind_mount_downloads,
+                                                 Platform* platform)
+    : legacy_home_(legacy_home),
+      bind_mount_downloads_(bind_mount_downloads),
+      platform_(platform),
+      username_(),
+      write_to_helper_(-1) {}
 
 bool OutOfProcessMountHelper::CanPerformEphemeralMount() const {
   return !helper_process_ || helper_process_->pid() == 0;
@@ -124,11 +156,8 @@ void OutOfProcessMountHelper::KillOutOfProcessHelperIfNecessary() {
     return;
   }
 
-  ReportTimerStart(kOOPMountCleanupTimer);
-
   if (helper_process_->Kill(SIGTERM,
                             kOutOfProcessHelperReapTimeout.InSeconds())) {
-    ReportTimerStop(kOOPMountCleanupTimer);
     ReportOOPMountCleanupResult(OOPMountCleanupResult::kSuccess);
   } else {
     LOG(ERROR) << "Failed to send SIGTERM to OOP mount helper";
@@ -148,22 +177,23 @@ void OutOfProcessMountHelper::KillOutOfProcessHelperIfNecessary() {
   helper_process_->Reset(0);
 }
 
-bool OutOfProcessMountHelper::PerformEphemeralMount(
-    const std::string& username) {
+StorageStatus OutOfProcessMountHelper::PerformEphemeralMount(
+    const Username& username, const base::FilePath& ephemeral_loop_device) {
   OutOfProcessMountRequest request;
-  request.set_username(username);
-  request.set_system_salt(SecureBlobToSecureHex(system_salt_).to_string());
+  request.set_username(*username);
   request.set_legacy_home(legacy_home_);
   request.set_bind_mount_downloads(bind_mount_downloads_);
   request.set_mount_namespace_path(
-      chrome_mnt_ns_ && username == brillo::cryptohome::home::kGuestUserName
-          ? chrome_mnt_ns_->path().value()
+      username == brillo::cryptohome::home::GetGuestUsername()
+          ? kUserSessionMountNamespacePath
           : "");
-  request.set_type(cryptohome::OutOfProcessMountRequest_MountType_EPHEMERAL);
+  request.set_type(OutOfProcessMountRequest_MountType_EPHEMERAL);
+  request.set_ephemeral_loop_device(ephemeral_loop_device.value());
 
   OutOfProcessMountResponse response;
   if (!LaunchOutOfProcessHelper(request, &response)) {
-    return false;
+    return StorageStatus::Make(FROM_HERE, "Failed to launch OOP-mounter",
+                               MOUNT_ERROR_FATAL);
   }
 
   username_ = request.username();
@@ -173,7 +203,7 @@ bool OutOfProcessMountHelper::PerformEphemeralMount(
     }
   }
 
-  return true;
+  return OopErrorCodeToStatus(static_cast<MountError>(response.mount_error()));
 }
 
 bool OutOfProcessMountHelper::LaunchOutOfProcessHelper(
@@ -189,8 +219,6 @@ bool OutOfProcessMountHelper::LaunchOutOfProcessHelper(
   mount_helper->RedirectUsingPipe(
       STDOUT_FILENO, false /* is_input, from child's perspective */);
 
-  ReportTimerStart(kOOPMountOperationTimer);
-
   if (!mount_helper->Start()) {
     LOG(ERROR) << "Failed to start OOP mount helper";
     ReportOOPMountOperationResult(OOPMountOperationResult::kFailedToStart);
@@ -201,9 +229,9 @@ bool OutOfProcessMountHelper::LaunchOutOfProcessHelper(
   write_to_helper_ = helper_process_->GetPipe(STDIN_FILENO);
   int read_from_helper = helper_process_->GetPipe(STDOUT_FILENO);
 
-  base::ScopedClosureRunner kill_runner(base::BindOnce(
-      &OutOfProcessMountHelper::KillOutOfProcessHelperIfNecessary,
-      base::Unretained(this)));
+  absl::Cleanup kill_runner_on_exit = [this]() {
+    KillOutOfProcessHelperIfNecessary();
+  };
 
   if (!WriteProtobuf(write_to_helper_, request)) {
     LOG(ERROR) << "Failed to write request protobuf";
@@ -228,23 +256,15 @@ bool OutOfProcessMountHelper::LaunchOutOfProcessHelper(
     return false;
   }
 
-  // OOP mount helper started successfully, report elapsed time since process
-  // was started.
-  ReportTimerStop(kOOPMountOperationTimer);
-
   // OOP mount helper started successfully, release the clean-up closure.
-  ignore_result(kill_runner.Release());
+  std::move(kill_runner_on_exit).Cancel();
 
   LOG(INFO) << "OOP mount helper started successfully";
   ReportOOPMountOperationResult(OOPMountOperationResult::kSuccess);
   return true;
 }
 
-bool OutOfProcessMountHelper::TearDownEphemeralMount() {
-  return TearDownExistingMount();
-}
-
-void OutOfProcessMountHelper::TearDownNonEphemeralMount() {
+void OutOfProcessMountHelper::UnmountAll() {
   TearDownExistingMount();
 }
 
@@ -264,29 +284,25 @@ bool OutOfProcessMountHelper::TearDownExistingMount() {
   return true;
 }
 
-bool OutOfProcessMountHelper::PerformMount(const Options& mount_opts,
-                                           const std::string& username,
-                                           const std::string& fek_signature,
-                                           const std::string& fnek_signature,
-                                           bool is_pristine,
-                                           MountError* error) {
+StorageStatus OutOfProcessMountHelper::PerformMount(
+    MountType mount_type,
+    const Username& username,
+    const std::string& fek_signature,
+    const std::string& fnek_signature) {
   OutOfProcessMountRequest request;
-  request.set_username(username);
-  request.set_system_salt(SecureBlobToSecureHex(system_salt_).to_string());
+  request.set_username(*username);
   request.set_bind_mount_downloads(bind_mount_downloads_);
   request.set_legacy_home(legacy_home_);
-  request.set_mount_namespace_path(chrome_mnt_ns_ && IsolateUserSession()
-                                       ? chrome_mnt_ns_->path().value()
-                                       : "");
-  request.set_type(mount_type[mount_opts.type]);
-  request.set_to_migrate_from_ecryptfs(mount_opts.to_migrate_from_ecryptfs);
+  request.set_mount_namespace_path(
+      IsolateUserSession() ? kUserSessionMountNamespacePath : "");
+  request.set_type(kProtobufMountType[mount_type]);
   request.set_fek_signature(fek_signature);
   request.set_fnek_signature(fnek_signature);
-  request.set_is_pristine(is_pristine);
 
   OutOfProcessMountResponse response;
   if (!LaunchOutOfProcessHelper(request, &response)) {
-    return false;
+    return StorageStatus::Make(FROM_HERE, "Failed to launch OOP-mounter",
+                               MOUNT_ERROR_FATAL);
   }
 
   username_ = request.username();
@@ -296,8 +312,7 @@ bool OutOfProcessMountHelper::PerformMount(const Options& mount_opts,
     }
   }
 
-  *error = static_cast<MountError>(response.mount_error());
-  return true;
+  return OopErrorCodeToStatus(static_cast<MountError>(response.mount_error()));
 }
 
 }  // namespace cryptohome

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -66,7 +66,7 @@ class ArchiveManager : public MountManager {
                                       const std::string& filesystem_type,
                                       const std::vector<std::string>& options,
                                       const base::FilePath& mount_path,
-                                      MountErrorType* error) override;
+                                      MountError* error) override;
 
  private:
   friend class ArchiveManagerUnderTest;

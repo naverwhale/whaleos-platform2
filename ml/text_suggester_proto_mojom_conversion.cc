@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -63,7 +63,7 @@ TextSuggesterResultPtr TextSuggesterResultFromProto(
 
   // For candidates.
   for (const auto& candidate_proto : result_proto.candidates()) {
-    TextSuggestionCandidatePtr candidate = TextSuggestionCandidate::New();
+    TextSuggestionCandidatePtr candidate;
     if (candidate_proto.has_multi_word()) {
       MultiWordSuggestionCandidatePtr multi_word_candidate =
           MultiWordSuggestionCandidate::New();
@@ -71,8 +71,8 @@ TextSuggesterResultPtr TextSuggesterResultFromProto(
       multi_word_candidate->normalized_score =
           candidate_proto.multi_word().normalized_score();
 
-      TextSuggestionCandidatePtr candidate = TextSuggestionCandidate::New();
-      candidate->set_multi_word(std::move(multi_word_candidate));
+      candidate = TextSuggestionCandidate::NewMultiWord(
+          std::move(multi_word_candidate));
 
       result->candidates.push_back(std::move(candidate));
     }
@@ -96,6 +96,15 @@ chrome_knowledge::MultiWordExperiment MultiWordExperimentGroupToProto(
     case MultiWordExperimentGroup::kGboardRelaxedC:
       return chrome_knowledge::MultiWordExperiment::
           MULTI_WORD_EXPERIMENT_GBOARD_RELAXED_C;
+    case MultiWordExperimentGroup::kGboardD:
+      return chrome_knowledge::MultiWordExperiment::
+          MULTI_WORD_EXPERIMENT_GBOARD_D;
+    case MultiWordExperimentGroup::kGboardE:
+      return chrome_knowledge::MultiWordExperiment::
+          MULTI_WORD_EXPERIMENT_GBOARD_E;
+    case MultiWordExperimentGroup::kGboardF:
+      return chrome_knowledge::MultiWordExperiment::
+          MULTI_WORD_EXPERIMENT_GBOARD_F;
     case MultiWordExperimentGroup::kDefault:
     default:
       return chrome_knowledge::MultiWordExperiment::

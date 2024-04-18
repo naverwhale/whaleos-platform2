@@ -1,4 +1,4 @@
-/* Copyright 2019 The Chromium OS Authors. All rights reserved.
+/* Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -153,7 +153,7 @@ int CameraDevice::Init(mojo::PendingRemote<mojom::IpCameraDevice> ip_device,
   switch (format) {
     case mojom::PixelFormat::JPEG:
       jpeg_ = true;
-      FALLTHROUGH;
+      [[fallthrough]];
     case mojom::PixelFormat::YUV_420:
       break;
     default:
@@ -179,9 +179,9 @@ int CameraDevice::Init(mojo::PendingRemote<mojom::IpCameraDevice> ip_device,
       receiver_.BindNewPipeAndPassRemote();
 
   receiver_.set_disconnect_handler(
-      base::Bind(&CameraDevice::OnConnectionError, base::Unretained(this)));
+      base::BindOnce(&CameraDevice::OnConnectionError, base::Unretained(this)));
   ip_device_.set_disconnect_handler(
-      base::Bind(&CameraDevice::OnConnectionError, base::Unretained(this)));
+      base::BindOnce(&CameraDevice::OnConnectionError, base::Unretained(this)));
 
   if (ip_device_) {
     ip_device_->RegisterFrameListener(std::move(remote));

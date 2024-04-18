@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,9 +31,8 @@ constexpr size_t kMaximiumImageHeight = 65535;
 
 }  // namespace
 
-ImageReader::ImageReader(const ScanParameters& params,
-                         base::ScopedFILE out_file)
-    : params_(params), out_file_(std::move(out_file)) {}
+ImageReader::ImageReader(const ScanParameters& params, FILE* out_file)
+    : params_(params), out_file_(out_file) {}
 
 bool ImageReader::ValidateParams(brillo::ErrorPtr* error) {
   if (params_.depth == 1 && params_.format != kGrayscale) {

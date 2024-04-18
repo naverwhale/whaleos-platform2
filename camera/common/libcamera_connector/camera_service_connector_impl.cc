@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -10,6 +10,7 @@
 #include <utility>
 
 #include <base/check.h>
+#include <base/files/file_path.h>
 #include <base/no_destructor.h>
 #include <base/sequence_checker.h>
 #include <mojo/core/embedder/embedder.h>
@@ -33,7 +34,6 @@ CameraServiceConnector* CameraServiceConnector::GetInstance() {
 }
 
 int CameraServiceConnector::Init(const cros_cam_init_option_t* option) {
-  VLOGF_ENTER();
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   if (initialized_.IsSet()) {
@@ -44,11 +44,12 @@ int CameraServiceConnector::Init(const cros_cam_init_option_t* option) {
   // TODO(b/170075468): Remove support for api_version 0 when Parallels migrates
   // to api_version 1.
   if (option->api_version >= 1) {
-    token_ = TokenFromString(option->token);
-    if (token_.is_empty()) {
+    auto token = TokenFromString(option->token);
+    if (!token.has_value()) {
       LOGF(ERROR) << "Failed to parse token string";
       return -EPERM;
     }
+    token_ = *token;
   }
 
   mojo::core::Init();
@@ -75,7 +76,6 @@ int CameraServiceConnector::Init(const cros_cam_init_option_t* option) {
 }
 
 int CameraServiceConnector::Exit() {
-  VLOGF_ENTER();
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   if (!initialized_.IsSet()) {
@@ -126,7 +126,6 @@ int CameraServiceConnector::StopCapture(int id) {
 void CameraServiceConnector::RegisterClient(
     mojo::PendingRemote<mojom::CameraHalClient> camera_hal_client,
     IntOnceCallback on_registered_callback) {
-  VLOGF_ENTER();
   // This may be called from a different thread than the main thread,
   // (for example here it is called from CameraClient thread),
   // but mojo operations have to run on the same thread that bound
@@ -141,7 +140,6 @@ void CameraServiceConnector::RegisterClient(
 void CameraServiceConnector::RegisterClientOnThread(
     mojo::PendingRemote<mojom::CameraHalClient> camera_hal_client,
     IntOnceCallback on_registered_callback) {
-  VLOGF_ENTER();
   DCHECK(ipc_thread_.task_runner()->BelongsToCurrentThread());
   DCHECK(!token_.is_empty());
 
@@ -158,7 +156,6 @@ void CameraServiceConnector::RegisterClientOnThread(
 
 void CameraServiceConnector::OnRegisteredClient(
     IntOnceCallback on_registered_callback, int32_t result) {
-  VLOGF_ENTER();
   DCHECK(ipc_thread_.task_runner()->BelongsToCurrentThread());
 
   if (result != 0) {
@@ -168,7 +165,6 @@ void CameraServiceConnector::OnRegisteredClient(
 }
 
 void CameraServiceConnector::InitOnThread(IntOnceCallback init_callback) {
-  VLOGF_ENTER();
   DCHECK(ipc_thread_.task_runner()->BelongsToCurrentThread());
 
   mojo::ScopedMessagePipeHandle child_pipe;
@@ -201,7 +197,6 @@ void CameraServiceConnector::InitOnThread(IntOnceCallback init_callback) {
 }
 
 void CameraServiceConnector::OnDispatcherError() {
-  VLOGF_ENTER();
   // TODO(b/151047930): Attempt to reconnect on dispatcher error.
   LOGF(FATAL) << "Connection to camera dispatcher lost";
   dispatcher_.reset();

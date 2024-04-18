@@ -1,6 +1,9 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 # Generated using "instructions for generating a seccomp policy" at:
 # https://chromium.googlesource.com/chromiumos/docs/+/HEAD/sandboxing.md
@@ -10,7 +13,9 @@ faccessat: 1
 faccessat2: 1
 bind: 1
 brk: 1
+clock_gettime: 1
 clock_getres: 1
+clock_nanosleep: 1
 clone: 1
 close: 1
 connect: 1
@@ -49,6 +54,7 @@ read: 1
 readlink: 1
 recvmsg: 1
 restart_syscall: 1
+rt_sigaction: 1
 rt_sigprocmask: 1
 rt_sigreturn: 1
 sendmsg: 1

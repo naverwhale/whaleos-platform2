@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,30 +13,30 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
-#include <vm_applications/proto_bindings/apps.pb.h>
-#include <vm_cicerone/proto_bindings/cicerone_service.pb.h>
+#include <base/task/single_thread_task_runner.h>
+#include <vm_applications/apps.pb.h>
+#include <vm_cicerone/cicerone_service.pb.h>
+#include <vm_protos/proto_bindings/container_host.pb.h>
+#include <re2/re2.h>
 
 #include "vm_tools/cicerone/service.h"
 
 namespace {
 // These rate limit settings ensure that calls that open a new window/tab can't
 // be made more than 10 times in a 15 second interval approximately.
-constexpr base::TimeDelta kOpenRateWindow = base::TimeDelta::FromSeconds(15);
+constexpr base::TimeDelta kOpenRateWindow = base::Seconds(15);
 constexpr uint32_t kOpenRateLimit = 10;
 }  // namespace
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 
 ContainerListenerImpl::ContainerListenerImpl(
     base::WeakPtr<vm_tools::cicerone::Service> service)
     : service_(service),
-      task_runner_(base::ThreadTaskRunnerHandle::Get()),
-      open_count_(0),
+      task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       open_rate_window_start_(base::TimeTicks::Now()) {}
 
 void ContainerListenerImpl::OverridePeerAddressForTesting(
@@ -56,9 +56,9 @@ grpc::Status ContainerListenerImpl::ContainerReady(
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::ContainerStartupCompleted,
-                 service_, request->token(), cid, request->garcon_port(),
-                 &result, &event));
+      base::BindOnce(&vm_tools::cicerone::Service::ContainerStartupCompleted,
+                     service_, request->token(), cid, request->garcon_port(),
+                     request->sftp_port(), &result, &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Received ContainerReady but could not find matching VM: "
@@ -92,12 +92,13 @@ grpc::Status ContainerListenerImpl::ContainerShutdown(
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::ContainerShutdown, service_,
-                 container_name, request->token(), cid, &result, &event));
+      base::BindOnce(&vm_tools::cicerone::Service::ContainerShutdown, service_,
+                     container_name, request->token(), cid, &result, &event));
   event.Wait();
   if (!result) {
-    LOG(ERROR) << "Received ContainerShutdown but could not find matching VM: "
-               << ctx->peer();
+    LOG(WARNING)
+        << "Received ContainerShutdown but could not find matching VM: "
+        << ctx->peer();
     return grpc::Status(grpc::FAILED_PRECONDITION,
                         "Cannot find VM for ContainerListener");
   }
@@ -124,7 +125,7 @@ grpc::Status ContainerListenerImpl::PendingUpdateApplicationListCalls(
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &vm_tools::cicerone::Service::PendingUpdateApplicationListCalls,
           service_, request->token(), cid, request->count(), &result, &event));
   event.Wait();
@@ -157,6 +158,7 @@ grpc::Status ContainerListenerImpl::UpdateApplicationList(
     app_out->set_package_id(app_in.package_id());
     app_out->set_exec(app_in.exec());
     app_out->set_executable_file_name(app_in.executable_file_name());
+    app_out->set_terminal(app_in.terminal());
     // Set the mime types.
     for (const auto& mime_type : app_in.mime_types()) {
       app_out->add_mime_types(mime_type);
@@ -198,8 +200,9 @@ grpc::Status ContainerListenerImpl::UpdateApplicationList(
   bool result = false;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::UpdateApplicationList, service_,
-                 request->token(), cid, &app_list, &result, &event));
+      base::BindOnce(&vm_tools::cicerone::Service::UpdateApplicationList,
+                     service_, request->token(), cid, &app_list, &result,
+                     &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Failure updating application list from ContainerListener";
@@ -228,8 +231,8 @@ grpc::Status ContainerListenerImpl::OpenUrl(
   bool result = false;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::OpenUrl, service_,
-                 request->token(), request->url(), cid, &result, &event));
+      base::BindOnce(&vm_tools::cicerone::Service::OpenUrl, service_,
+                     request->token(), request->url(), cid, &result, &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Failure opening URL from ContainerListener";
@@ -264,9 +267,9 @@ grpc::Status ContainerListenerImpl::InstallLinuxPackageProgress(
   bool result = false;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::InstallLinuxPackageProgress,
-                 service_, request->token(), cid, &progress_signal, &result,
-                 &event));
+      base::BindOnce(&vm_tools::cicerone::Service::InstallLinuxPackageProgress,
+                     service_, request->token(), cid, &progress_signal, &result,
+                     &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Failure updating Linux package install progress from "
@@ -309,9 +312,9 @@ grpc::Status ContainerListenerImpl::UninstallPackageProgress(
   bool result = false;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::UninstallPackageProgress,
-                 service_, request->token(), cid, &progress_signal, &result,
-                 &event));
+      base::BindOnce(&vm_tools::cicerone::Service::UninstallPackageProgress,
+                     service_, request->token(), cid, &progress_signal, &result,
+                     &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Failure updating Linux package uninstall progress from "
@@ -342,14 +345,16 @@ grpc::Status ContainerListenerImpl::ApplyAnsiblePlaybookProgress(
       static_cast<ApplyAnsiblePlaybookProgressSignal::Status>(
           request->status()));
   progress_signal.set_failure_details(request->failure_details());
+  for (auto line : request->status_string())
+    progress_signal.add_status_string(line);
   base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   bool result = false;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::ApplyAnsiblePlaybookProgress,
-                 service_, request->token(), cid, &progress_signal, &result,
-                 &event));
+      base::BindOnce(&vm_tools::cicerone::Service::ApplyAnsiblePlaybookProgress,
+                     service_, request->token(), cid, &progress_signal, &result,
+                     &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Failure updating Ansible playbook application progress from "
@@ -381,9 +386,10 @@ grpc::Status ContainerListenerImpl::OpenTerminal(
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   bool result = false;
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&vm_tools::cicerone::Service::OpenTerminal,
-                            service_, request->token(),
-                            std::move(terminal_params), cid, &result, &event));
+      FROM_HERE,
+      base::BindOnce(&vm_tools::cicerone::Service::OpenTerminal, service_,
+                     request->token(), std::move(terminal_params), cid, &result,
+                     &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Failure opening terminal from ContainerListener";
@@ -409,9 +415,9 @@ grpc::Status ContainerListenerImpl::UpdateMimeTypes(
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
   bool result = false;
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&vm_tools::cicerone::Service::UpdateMimeTypes,
-                            service_, request->token(), std::move(mime_types),
-                            cid, &result, &event));
+      FROM_HERE, base::BindOnce(&vm_tools::cicerone::Service::UpdateMimeTypes,
+                                service_, request->token(),
+                                std::move(mime_types), cid, &result, &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Failure updating MIME types from ContainerListener";
@@ -437,8 +443,9 @@ grpc::Status ContainerListenerImpl::FileWatchTriggered(
   bool result = false;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::FileWatchTriggered, service_,
-                 request->token(), cid, &triggered_signal, &result, &event));
+      base::BindOnce(&vm_tools::cicerone::Service::FileWatchTriggered, service_,
+                     request->token(), cid, &triggered_signal, &result,
+                     &event));
   event.Wait();
   if (!result) {
     LOG(ERROR) << "Failure notifying FileWatchTriggered from ContainerListener";
@@ -464,8 +471,9 @@ grpc::Status ContainerListenerImpl::LowDiskSpaceTriggered(
   bool result = false;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::LowDiskSpaceTriggered, service_,
-                 request->token(), cid, &triggered_signal, &result, &event));
+      base::BindOnce(&vm_tools::cicerone::Service::LowDiskSpaceTriggered,
+                     service_, request->token(), cid, &triggered_signal,
+                     &result, &event));
   event.Wait();
   if (!result) {
     LOG(ERROR)
@@ -496,9 +504,9 @@ grpc::Status ContainerListenerImpl::ForwardSecurityKeyMessage(
 
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::ForwardSecurityKeyMessage,
-                 service_, cid, std::move(security_key_message),
-                 &security_key_response, &event));
+      base::BindOnce(&vm_tools::cicerone::Service::ForwardSecurityKeyMessage,
+                     service_, cid, std::move(security_key_message),
+                     &security_key_response, &event));
   event.Wait();
   if (security_key_response.message().empty()) {
     LOG(ERROR)
@@ -530,8 +538,8 @@ grpc::Status ContainerListenerImpl::SelectFile(
   std::vector<std::string> files;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&vm_tools::cicerone::Service::SelectFile, service_,
-                 request->token(), cid, &select_file, &files, &event));
+      base::BindOnce(&vm_tools::cicerone::Service::SelectFile, service_,
+                     request->token(), cid, &select_file, &files, &event));
   // Waits for dialog to be shown, and user to select file(s), then chrome sends
   // back the FileSelectedSignal.
   event.Wait();
@@ -542,69 +550,100 @@ grpc::Status ContainerListenerImpl::SelectFile(
   return grpc::Status::OK;
 }
 
-grpc::Status ContainerListenerImpl::GetDiskInfo(
+grpc::Status ContainerListenerImpl::ReportMetrics(
     grpc::ServerContext* ctx,
-    const vm_tools::container::GetDiskInfoRequest* request,
-    vm_tools::container::GetDiskInfoResponse* response) {
+    const vm_tools::container::ReportMetricsRequest* request,
+    vm_tools::container::ReportMetricsResponse* response) {
   uint32_t cid = ExtractCidFromPeerAddress(ctx);
   if (cid == 0) {
     return grpc::Status(grpc::FAILED_PRECONDITION,
                         "Failed parsing cid for ContainerListener");
   }
+
+  // Validate ReportMetricsRequest
+  if (request->metric_size() > 15) {
+    return grpc::Status(grpc::FAILED_PRECONDITION, "Too many metrics");
+  }
+  for (const auto& metric : request->metric()) {
+    // Check that metric name is valid
+    const RE2 re("[A-Za-z.-]{1,64}");
+    if (!RE2::FullMatch(metric.name(), re)) {
+      return grpc::Status(grpc::FAILED_PRECONDITION, "Invalid metric name");
+    }
+  }
+
   base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
-  vm_tools::disk_management::GetDiskInfoResponse result;
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&vm_tools::cicerone::Service::GetDiskInfo, service_,
-                            request->token(), cid, &result, &event));
+      FROM_HERE,
+      base::BindOnce(&vm_tools::cicerone::Service::ReportMetrics, service_,
+                     request->token(), cid, *request, response, &event));
   event.Wait();
-  response->set_error(result.error());
-  response->set_available_space(result.available_space());
-  response->set_expandable_space(result.expandable_space());
+
   return grpc::Status::OK;
 }
 
-grpc::Status ContainerListenerImpl::RequestSpace(
+grpc::Status ContainerListenerImpl::InhibitScreensaver(
     grpc::ServerContext* ctx,
-    const vm_tools::container::RequestSpaceRequest* request,
-    vm_tools::container::RequestSpaceResponse* response) {
+    const vm_tools::container::InhibitScreensaverInfo* request,
+    vm_tools::EmptyMessage* response) {
   uint32_t cid = ExtractCidFromPeerAddress(ctx);
   if (cid == 0) {
     return grpc::Status(grpc::FAILED_PRECONDITION,
                         "Failed parsing cid for ContainerListener");
   }
+
+  InhibitScreensaverSignal signal;
+  signal.set_cookie(request->cookie());
+  signal.set_client(request->client());
+  signal.set_reason(request->reason());
+
   base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
-  vm_tools::disk_management::RequestSpaceResponse result;
+  bool result = false;
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&vm_tools::cicerone::Service::RequestSpace,
-                            service_, request->token(), cid,
-                            request->space_requested(), &result, &event));
+      FROM_HERE,
+      base::BindOnce(&vm_tools::cicerone::Service::InhibitScreensaver, service_,
+                     request->token(), cid, &signal, &result, &event));
   event.Wait();
-  response->set_error(result.error());
-  response->set_space_granted(result.space_granted());
+  if (!result) {
+    LOG(ERROR) << "Failure notifying InhibitScreensaver from ContainerListener";
+    return grpc::Status(grpc::FAILED_PRECONDITION,
+                        "Failure in InhibitScreensaver");
+  }
+
   return grpc::Status::OK;
 }
 
-grpc::Status ContainerListenerImpl::ReleaseSpace(
+grpc::Status ContainerListenerImpl::UninhibitScreensaver(
     grpc::ServerContext* ctx,
-    const vm_tools::container::ReleaseSpaceRequest* request,
-    vm_tools::container::ReleaseSpaceResponse* response) {
+    const vm_tools::container::UninhibitScreensaverInfo* request,
+    vm_tools::EmptyMessage* response) {
   uint32_t cid = ExtractCidFromPeerAddress(ctx);
   if (cid == 0) {
     return grpc::Status(grpc::FAILED_PRECONDITION,
                         "Failed parsing cid for ContainerListener");
   }
+
+  UninhibitScreensaverSignal signal;
+  signal.set_cookie(request->cookie());
+
   base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                             base::WaitableEvent::InitialState::NOT_SIGNALED);
-  vm_tools::disk_management::ReleaseSpaceResponse result;
+  bool result = false;
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&vm_tools::cicerone::Service::ReleaseSpace,
-                            service_, request->token(), cid,
-                            request->space_to_release(), &result, &event));
+      FROM_HERE,
+      base::BindOnce(&vm_tools::cicerone::Service::UninhibitScreensaver,
+                     service_, request->token(), cid, &signal, &result,
+                     &event));
   event.Wait();
-  response->set_error(result.error());
-  response->set_space_released(result.space_released());
+  if (!result) {
+    LOG(ERROR)
+        << "Failure notifying UninhibitScreensaver from ContainerListener";
+    return grpc::Status(grpc::FAILED_PRECONDITION,
+                        "Failure in UninhibitScreensaver");
+  }
+
   return grpc::Status::OK;
 }
 
@@ -643,5 +682,67 @@ bool ContainerListenerImpl::CheckOpenRateLimit() {
   return false;
 }
 
-}  // namespace cicerone
-}  // namespace vm_tools
+grpc::Status ContainerListenerImpl::InstallShaderCache(
+    grpc::ServerContext* ctx,
+    const vm_tools::container::InstallShaderCacheRequest* request,
+    vm_tools::EmptyMessage* response) {
+  uint32_t cid = ExtractCidFromPeerAddress(ctx);
+  base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
+                            base::WaitableEvent::InitialState::NOT_SIGNALED);
+  std::string error = "";
+
+  task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&vm_tools::cicerone::Service::InstallVmShaderCache,
+                     service_, cid, request, &error, &event));
+  event.Wait();
+
+  if (error.empty()) {
+    return grpc::Status::OK;
+  }
+  return grpc::Status(grpc::INTERNAL, error);
+}
+
+grpc::Status ContainerListenerImpl::UninstallShaderCache(
+    grpc::ServerContext* ctx,
+    const vm_tools::container::UninstallShaderCacheRequest* request,
+    vm_tools::EmptyMessage* response) {
+  uint32_t cid = ExtractCidFromPeerAddress(ctx);
+  base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
+                            base::WaitableEvent::InitialState::NOT_SIGNALED);
+  std::string error = "";
+
+  task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&vm_tools::cicerone::Service::UninstallVmShaderCache,
+                     service_, cid, request, &error, &event));
+  event.Wait();
+
+  if (error.empty()) {
+    return grpc::Status::OK;
+  }
+  return grpc::Status(grpc::INTERNAL, error);
+}
+
+grpc::Status ContainerListenerImpl::UnmountShaderCache(
+    grpc::ServerContext* ctx,
+    const vm_tools::container::UnmountShaderCacheRequest* request,
+    vm_tools::EmptyMessage* response) {
+  uint32_t cid = ExtractCidFromPeerAddress(ctx);
+  base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
+                            base::WaitableEvent::InitialState::NOT_SIGNALED);
+  std::string error = "";
+
+  task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&vm_tools::cicerone::Service::UnmountVmShaderCache,
+                     service_, cid, request, &error, &event));
+  event.Wait();
+
+  if (error.empty()) {
+    return grpc::Status::OK;
+  }
+  return grpc::Status(grpc::INTERNAL, error);
+}
+
+}  // namespace vm_tools::cicerone

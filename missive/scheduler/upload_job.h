@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,18 @@
 #define MISSIVE_SCHEDULER_UPLOAD_JOB_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/sequenced_task_runner.h>
+#include <base/functional/callback.h>
 #include <base/memory/scoped_refptr.h>
 #include <base/memory/weak_ptr.h>
+#include <base/task/sequenced_task_runner.h>
 
 #include "missive/dbus/upload_client.h"
+#include "missive/health/health_module.h"
 #include "missive/proto/record.pb.h"
-#include "missive/proto/record_constants.pb.h"
+#include "missive/resources/resource_manager.h"
 #include "missive/scheduler/scheduler.h"
 #include "missive/storage/storage_uploader_interface.h"
 #include "missive/util/status.h"
@@ -25,14 +27,19 @@ namespace reporting {
 
 class UploadJob : public Scheduler::Job {
  public:
-  using Records = std::unique_ptr<std::vector<EncryptedRecord>>;
-  using SetRecordsCb = base::OnceCallback<void(Records)>;
-  using DoneCb = base::OnceCallback<void(StatusOr<Records>)>;
+  using EncryptedRecords = std::vector<EncryptedRecord>;
+  using SetRecordsCb = base::OnceCallback<void(EncryptedRecords)>;
+  using DoneCb =
+      base::OnceCallback<void(StatusOr<EncryptedRecords>, ScopedReservation)>;
 
   class UploadDelegate : public Job::JobDelegate {
    public:
     UploadDelegate(scoped_refptr<UploadClient> upload_client,
-                   bool need_encryption_key);
+                   bool need_encryption_key,
+                   scoped_refptr<HealthModule> health_module,
+                   uint64_t remaining_storage_capacity,
+                   std::optional<uint64_t> new_events_rate,
+                   UploadClient::HandleUploadResponseCallback response_cb);
     UploadDelegate(const UploadDelegate& other) = delete;
     UploadDelegate& operator=(const UploadDelegate& other) = delete;
     ~UploadDelegate() override;
@@ -40,16 +47,22 @@ class UploadJob : public Scheduler::Job {
     SetRecordsCb GetSetRecordsCb();
 
    private:
-    friend Scheduler::Job;
-
     Status Complete() override;
     Status Cancel(Status status) override;
 
-    void SetRecords(Records records);
+    void SetRecords(EncryptedRecords records);
 
     const scoped_refptr<UploadClient> upload_client_;
     const bool need_encryption_key_;
-    Records records_;
+    scoped_refptr<HealthModule> health_module_;
+
+    EncryptedRecords encrypted_records_;
+    ScopedReservation encrypted_records_reservation_;
+
+    uint64_t remaining_storage_capacity_;
+    std::optional<uint64_t> new_events_rate_;
+
+    UploadClient::HandleUploadResponseCallback response_cb_;
   };
 
   class RecordProcessor : public UploaderInterface {
@@ -60,9 +73,10 @@ class UploadJob : public Scheduler::Job {
     ~RecordProcessor() override;
 
     void ProcessRecord(EncryptedRecord record,
+                       ScopedReservation scoped_reservation,
                        base::OnceCallback<void(bool)> processed_cb) override;
 
-    void ProcessGap(SequencingInformation start,
+    void ProcessGap(SequenceInformation start,
                     uint64_t count,
                     base::OnceCallback<void(bool)> processed_cb) override;
 
@@ -71,7 +85,8 @@ class UploadJob : public Scheduler::Job {
    private:
     DoneCb done_cb_;
 
-    Records records_;
+    EncryptedRecords encrypted_records_;
+    ScopedReservation encrypted_records_reservation_;
 
     size_t current_size_{0};
 
@@ -84,11 +99,16 @@ class UploadJob : public Scheduler::Job {
   static StatusOr<SmartPtr<UploadJob>> Create(
       scoped_refptr<UploadClient> upload_client,
       bool need_encryption_key,
-      UploaderInterface::UploaderInterfaceResultCb start_cb);
+      scoped_refptr<HealthModule> health_module,
+      uint64_t remaining_storage_capacity,
+      std::optional<uint64_t> new_events_rate,
+      UploaderInterface::UploaderInterfaceResultCb start_cb,
+      UploadClient::HandleUploadResponseCallback response_cb);
 
  protected:
   void StartImpl() override;
-  void Done(StatusOr<Records> record_result);
+  void Done(StatusOr<EncryptedRecords> records_result,
+            ScopedReservation records_reservation);
 
  private:
   UploadJob(std::unique_ptr<UploadDelegate> upload_delegate,

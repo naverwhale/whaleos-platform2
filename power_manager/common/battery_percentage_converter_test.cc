@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,7 @@
 
 #include <cmath>
 
-#include <base/macros.h>
 #include <gtest/gtest.h>
-
-#include "power_manager/common/power_constants.h"
 
 namespace power_manager {
 

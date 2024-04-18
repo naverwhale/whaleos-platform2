@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -53,6 +53,11 @@ bool Camera3Device::IsTemplateSupported(int32_t type) {
   return impl_->IsTemplateSupported(type);
 }
 
+bool Camera3Device::IsBufferManagementSupported() const {
+  DCHECK(impl_);
+  return impl_->IsBufferManagementSupported();
+}
+
 const camera_metadata_t* Camera3Device::ConstructDefaultRequestSettings(
     int type) {
   DCHECK(impl_);
@@ -93,17 +98,24 @@ int Camera3Device::ConfigureStreams(
   return impl_->ConfigureStreams(streams);
 }
 
-int Camera3Device::AllocateOutputStreamBuffers(
-    std::vector<camera3_stream_buffer_t>* output_buffers) {
+void Camera3Device::SignalStreamFlush(
+    const std::vector<const camera3_stream_t*>& streams) {
   DCHECK(impl_);
-  return impl_->AllocateOutputStreamBuffers(output_buffers);
+
+  return impl_->SignalStreamFlush(streams);
 }
 
-int Camera3Device::AllocateOutputBuffersByStreams(
+int Camera3Device::PrepareOutputStreamBuffers(
+    std::vector<camera3_stream_buffer_t>* output_buffers) {
+  DCHECK(impl_);
+  return impl_->PrepareOutputStreamBuffers(output_buffers);
+}
+
+int Camera3Device::PrepareOutputBuffersByStreams(
     const std::vector<const camera3_stream_t*>& streams,
     std::vector<camera3_stream_buffer_t>* output_buffers) {
   DCHECK(impl_);
-  return impl_->AllocateOutputBuffersByStreams(streams, output_buffers);
+  return impl_->PrepareOutputBuffersByStreams(streams, output_buffers);
 }
 
 int Camera3Device::RegisterOutputBuffer(
@@ -472,6 +484,18 @@ bool Camera3Device::StaticInfo::IsAWBLockSupported() const {
   return entry.data.u8[0] == ANDROID_CONTROL_AWB_LOCK_AVAILABLE_TRUE;
 }
 
+bool Camera3Device::StaticInfo::IsBufferManagementSupported() const {
+  camera_metadata_ro_entry_t entry = {};
+  if (find_camera_metadata_ro_entry(
+          characteristics_, ANDROID_INFO_SUPPORTED_BUFFER_MANAGEMENT_VERSION,
+          &entry) != 0 ||
+      entry.count != 1) {
+    return false;
+  }
+  return entry.data.u8[0] ==
+         ANDROID_INFO_SUPPORTED_BUFFER_MANAGEMENT_VERSION_HIDL_DEVICE_3_5;
+}
+
 int32_t Camera3Device::StaticInfo::GetPartialResultCount() const {
   camera_metadata_ro_entry_t entry;
   if (find_camera_metadata_ro_entry(characteristics_,
@@ -675,17 +699,16 @@ int32_t Camera3Device::StaticInfo::GetSensorPixelArraySize(
   return result;
 }
 
-std::set<int32_t> Camera3Device::StaticInfo::GetAvailableRequestKeys() const {
+std::set<uint8_t> Camera3Device::StaticInfo::GetAvailableRotateAndCropModes()
+    const {
   camera_metadata_ro_entry_t entry = {};
-  if (find_camera_metadata_ro_entry(characteristics_,
-                                    ANDROID_REQUEST_AVAILABLE_REQUEST_KEYS,
-                                    &entry) != 0 ||
+  if (find_camera_metadata_ro_entry(
+          characteristics_, ANDROID_SCALER_AVAILABLE_ROTATE_AND_CROP_MODES,
+          &entry) != 0 ||
       entry.count == 0) {
-    ADD_FAILURE() << "Fail to find metadata key "
-                     "ANDROID_REQUEST_AVAILABLE_REQUEST_KEYS";
-    return std::set<int32_t>();
+    return {};
   }
-  return std::set<int32_t>(entry.data.i32, entry.data.i32 + entry.count);
+  return std::set<uint8_t>(entry.data.u8, entry.data.u8 + entry.count);
 }
 
 // Test fixture
@@ -693,10 +716,10 @@ std::set<int32_t> Camera3Device::StaticInfo::GetAvailableRequestKeys() const {
 void Camera3DeviceFixture::SetUp() {
   ASSERT_EQ(0, cam_device_.Initialize(&cam_module_))
       << "Camera device initialization fails";
-  cam_device_.RegisterResultMetadataOutputBufferCallback(
-      base::Bind(&Camera3DeviceFixture::ProcessResultMetadataOutputBuffers,
-                 base::Unretained(this)));
-  cam_device_.RegisterPartialMetadataCallback(base::Bind(
+  cam_device_.RegisterResultMetadataOutputBufferCallback(base::BindRepeating(
+      &Camera3DeviceFixture::ProcessResultMetadataOutputBuffers,
+      base::Unretained(this)));
+  cam_device_.RegisterPartialMetadataCallback(base::BindRepeating(
       &Camera3DeviceFixture::ProcessPartialMetadata, base::Unretained(this)));
 }
 
@@ -1116,13 +1139,12 @@ class Camera3AlgoSandboxIPCErrorTest
 
 void Camera3AlgoSandboxIPCErrorTest::SetUp() {
   Camera3DeviceFixture::SetUp();
-  cam_device_.RegisterNotifyCallback(base::Bind(
+  cam_device_.RegisterNotifyCallback(base::BindRepeating(
       &Camera3AlgoSandboxIPCErrorTest::Notify, base::Unretained(this)));
   sem_init(&ipc_error_sem_, 0, 0);
 }
 
 void Camera3AlgoSandboxIPCErrorTest::Notify(const camera3_notify_msg* msg) {
-  VLOGF_ENTER();
   EXPECT_EQ(CAMERA3_MSG_ERROR, msg->type)
       << "Unexpected message type " << msg->type << " is notified";
   EXPECT_EQ(CAMERA3_MSG_ERROR_DEVICE, msg->message.error.error_code)

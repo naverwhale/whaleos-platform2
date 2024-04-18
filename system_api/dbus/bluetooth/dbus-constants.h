@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -627,17 +627,23 @@ namespace bluetooth_debug {
 constexpr char kBluetoothDebugInterface[] = "org.chromium.Bluetooth.Debug";
 
 // Methods.
+constexpr char kSetBluetoothQualityReport[] = "SetQuality";
 constexpr char kSetLevels[] = "SetLevels";
 }  // namespace bluetooth_debug
 
 namespace bluetooth_admin_policy {
 constexpr char kBluetoothAdminPolicyInterface[] = "org.bluez.AdminPolicy1";
+constexpr char kBluetoothAdminPolicyStatusInterface[] =
+    "org.bluez.AdminPolicyStatus1";
+constexpr char kBluetoothAdminPolicySetInterface[] =
+    "org.bluez.AdminPolicySet1";
 
 // Methods.
 constexpr char kSetServiceAllowList[] = "SetServiceAllowList";
 
 // Properties
 constexpr char kServiceAllowListProperty[] = "ServiceAllowList";
+constexpr char kIsBlockedByPolicyProperty[] = "AffectedByPolicy";
 }  // namespace bluetooth_admin_policy
 
 #endif  // SYSTEM_API_DBUS_BLUETOOTH_DBUS_CONSTANTS_H_

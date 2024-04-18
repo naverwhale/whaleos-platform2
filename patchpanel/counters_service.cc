@@ -1,9 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "patchpanel/counters_service.h"
 
+#include <compare>
 #include <set>
 #include <string>
 #include <utility>
@@ -15,6 +16,9 @@
 #include <base/strings/string_split.h>
 #include <re2/re2.h>
 
+#include "patchpanel/datapath.h"
+#include "patchpanel/iptables.h"
+
 namespace patchpanel {
 
 namespace {
@@ -22,8 +26,8 @@ namespace {
 using Counter = CountersService::Counter;
 using CounterKey = CountersService::CounterKey;
 
-constexpr char kMangleTable[] = "mangle";
-constexpr char kVpnChainTag[] = "vpn";
+constexpr char kVpnRxChainName[] = "rx_vpn";
+constexpr char kVpnTxChainName[] = "tx_vpn";
 constexpr char kRxTag[] = "rx_";
 constexpr char kTxTag[] = "tx_";
 
@@ -62,7 +66,7 @@ bool MatchCounterLine(const std::string& line,
   }
 
   if (RE2::FullMatch(line, *kFinalCounterLine, pkts, bytes)) {
-    *source = TrafficSource::UNKNOWN;
+    *source = TrafficSource::kUnknown;
     return true;
   }
 
@@ -103,6 +107,12 @@ bool ParseOutput(const std::string& output,
     // Skips this group if this ifname is not requested.
     if (!devices.empty() && devices.find(ifname) == devices.end())
       continue;
+
+    // Skips if this chain is for multicast traffic counting.
+    if (ifname.find("mdns") != std::string::npos ||
+        ifname.find("ssdp") != std::string::npos) {
+      continue;
+    }
 
     // Skips the chain name line and the header line.
     if (lines.cend() - it <= 2) {
@@ -163,7 +173,7 @@ std::map<CounterKey, Counter> CountersService::GetCounters(
   // Handles counters for IPv4 and IPv6 separately and returns failure if either
   // of the procession fails, since counters for only IPv4 or IPv6 are biased.
   std::string iptables_result =
-      datapath_->DumpIptables(IpFamily::IPv4, kMangleTable);
+      datapath_->DumpIptables(IpFamily::kIPv4, Iptables::Table::kMangle);
   if (iptables_result.empty()) {
     LOG(ERROR) << "Failed to query IPv4 counters";
     return {};
@@ -174,7 +184,7 @@ std::map<CounterKey, Counter> CountersService::GetCounters(
   }
 
   std::string ip6tables_result =
-      datapath_->DumpIptables(IpFamily::IPv6, kMangleTable);
+      datapath_->DumpIptables(IpFamily::kIPv6, Iptables::Table::kMangle);
   if (ip6tables_result.empty()) {
     LOG(ERROR) << "Failed to query IPv6 counters";
     return {};
@@ -189,33 +199,34 @@ std::map<CounterKey, Counter> CountersService::GetCounters(
 }
 
 void CountersService::OnPhysicalDeviceAdded(const std::string& ifname) {
-  SetupAccountingRules(ifname);
-  SetupJumpRules("-A", ifname, ifname);
+  std::string rx_chain = kRxTag + ifname;
+  std::string tx_chain = kTxTag + ifname;
+  SetupAccountingRules(rx_chain);
+  SetupAccountingRules(tx_chain);
+  SetupJumpRules(Iptables::Command::kA, ifname, rx_chain, tx_chain);
 }
 
 void CountersService::OnPhysicalDeviceRemoved(const std::string& ifname) {
-  SetupJumpRules("-D", ifname, ifname);
+  std::string rx_chain = kRxTag + ifname;
+  std::string tx_chain = kTxTag + ifname;
+  SetupJumpRules(Iptables::Command::kD, ifname, rx_chain, tx_chain);
 }
 
 void CountersService::OnVpnDeviceAdded(const std::string& ifname) {
-  SetupAccountingRules(kVpnChainTag);
-  SetupJumpRules("-A", ifname, kVpnChainTag);
+  SetupAccountingRules(kVpnRxChainName);
+  SetupAccountingRules(kVpnTxChainName);
+  SetupJumpRules(Iptables::Command::kA, ifname, kVpnRxChainName,
+                 kVpnTxChainName);
 }
 
 void CountersService::OnVpnDeviceRemoved(const std::string& ifname) {
-  SetupJumpRules("-D", ifname, kVpnChainTag);
-}
-
-bool CountersService::MakeAccountingChain(const std::string& chain_name) {
-  return datapath_->ModifyChain(IpFamily::Dual, kMangleTable, "-N", chain_name,
-                                false /*log_failures*/);
+  SetupJumpRules(Iptables::Command::kD, ifname, kVpnRxChainName,
+                 kVpnTxChainName);
 }
 
 bool CountersService::AddAccountingRule(const std::string& chain_name,
                                         TrafficSource source) {
-  std::vector<std::string> args = {"-A",
-                                   chain_name,
-                                   "-m",
+  std::vector<std::string> args = {"-m",
                                    "mark",
                                    "--mark",
                                    Fwmark::FromSource(source).ToString() + "/" +
@@ -223,77 +234,67 @@ bool CountersService::AddAccountingRule(const std::string& chain_name,
                                    "-j",
                                    "RETURN",
                                    "-w"};
-  return datapath_->ModifyIptables(IpFamily::Dual, kMangleTable, args);
+  return datapath_->ModifyIptables(IpFamily::kDual, Iptables::Table::kMangle,
+                                   Iptables::Command::kA, chain_name, args);
 }
 
-void CountersService::SetupAccountingRules(const std::string& chain_tag) {
-  // For a new target accounting chain, create
-  //  1) an accounting chain to jump to,
-  //  2) source accounting rules in the chain.
-  // Note that the length of a chain name must less than 29 chars and IFNAMSIZ
-  // is 16 so we can only use at most 12 chars for the prefix.
-  const std::string ingress_chain = kRxTag + chain_tag;
-  const std::string egress_chain = kTxTag + chain_tag;
-
-  // Creates egress and ingress traffic chains, or stops if they already exist.
-  if (!MakeAccountingChain(egress_chain) ||
-      !MakeAccountingChain(ingress_chain)) {
-    LOG(INFO) << "Traffic accounting chains already exist for " << chain_tag;
+void CountersService::SetupAccountingRules(const std::string& chain) {
+  // Stops if |chain| already exist.
+  if (datapath_->CheckChain(IpFamily::kDual, Iptables::Table::kMangle, chain)) {
     return;
   }
-
+  // Creates |chain|.
+  if (!datapath_->AddChain(IpFamily::kDual, Iptables::Table::kMangle, chain)) {
+    return;
+  }
   // Add source accounting rules.
   for (TrafficSource source : kAllSources) {
-    AddAccountingRule(ingress_chain, source);
-    AddAccountingRule(egress_chain, source);
+    AddAccountingRule(chain, source);
   }
   // Add catch-all accounting rule for any remaining and untagged traffic.
-  datapath_->ModifyIptables(IpFamily::Dual, kMangleTable,
-                            {"-A", ingress_chain, "-w"});
-  datapath_->ModifyIptables(IpFamily::Dual, kMangleTable,
-                            {"-A", egress_chain, "-w"});
+  datapath_->ModifyIptables(IpFamily::kDual, Iptables::Table::kMangle,
+                            Iptables::Command::kA, chain, {"-w"});
 }
 
-void CountersService::SetupJumpRules(const std::string& op,
+void CountersService::SetupJumpRules(Iptables::Command command,
                                      const std::string& ifname,
-                                     const std::string& chain_tag) {
+                                     const std::string& rx_chain,
+                                     const std::string& tx_chain) {
   // For each device create a jumping rule in mangle POSTROUTING for egress
   // traffic, and two jumping rules in mangle INPUT and FORWARD for ingress
   // traffic.
-  datapath_->ModifyIptables(
-      IpFamily::Dual, kMangleTable,
-      {op, "FORWARD", "-i", ifname, "-j", kRxTag + chain_tag, "-w"});
-  datapath_->ModifyIptables(
-      IpFamily::Dual, kMangleTable,
-      {op, "INPUT", "-i", ifname, "-j", kRxTag + chain_tag, "-w"});
-  datapath_->ModifyIptables(
-      IpFamily::Dual, kMangleTable,
-      {op, "POSTROUTING", "-o", ifname, "-j", kTxTag + chain_tag, "-w"});
+  datapath_->ModifyIptables(IpFamily::kDual, Iptables::Table::kMangle, command,
+                            "FORWARD", {"-i", ifname, "-j", rx_chain, "-w"});
+  datapath_->ModifyIptables(IpFamily::kDual, Iptables::Table::kMangle, command,
+                            "INPUT", {"-i", ifname, "-j", rx_chain, "-w"});
+  datapath_->ModifyIptables(IpFamily::kDual, Iptables::Table::kMangle, command,
+                            "POSTROUTING",
+                            {"-o", ifname, "-j", tx_chain, "-w"});
 }
 
 TrafficCounter::Source TrafficSourceToProto(TrafficSource source) {
   switch (source) {
-    case CHROME:
+    case TrafficSource::kChrome:
       return TrafficCounter::CHROME;
-    case USER:
+    case TrafficSource::kUser:
       return TrafficCounter::USER;
-    case UPDATE_ENGINE:
+    case TrafficSource::kUpdateEngine:
       return TrafficCounter::UPDATE_ENGINE;
-    case SYSTEM:
+    case TrafficSource::kSystem:
       return TrafficCounter::SYSTEM;
-    case HOST_VPN:
+    case TrafficSource::kHostVpn:
       return TrafficCounter::VPN;
-    case ARC:
+    case TrafficSource::kArc:
       return TrafficCounter::ARC;
-    case CROSVM:
+    case TrafficSource::kCrosVM:
       return TrafficCounter::CROSVM;
-    case PLUGINVM:
-      return TrafficCounter::PLUGINVM;
-    case TETHER_DOWNSTREAM:
+    case TrafficSource::kParallelsVM:
+      return TrafficCounter::PARALLELS_VM;
+    case TrafficSource::kTetherDownstream:
       return TrafficCounter::SYSTEM;
-    case ARC_VPN:
+    case TrafficSource::kArcVpn:
       return TrafficCounter::VPN;
-    case UNKNOWN:
+    case TrafficSource::kUnknown:
     default:
       return TrafficCounter::UNKNOWN;
   }
@@ -302,41 +303,31 @@ TrafficCounter::Source TrafficSourceToProto(TrafficSource source) {
 TrafficSource ProtoToTrafficSource(TrafficCounter::Source source) {
   switch (source) {
     case TrafficCounter::CHROME:
-      return CHROME;
+      return TrafficSource::kChrome;
     case TrafficCounter::USER:
-      return USER;
+      return TrafficSource::kUser;
     case TrafficCounter::UPDATE_ENGINE:
-      return UPDATE_ENGINE;
+      return TrafficSource::kUpdateEngine;
     case TrafficCounter::SYSTEM:
-      return SYSTEM;
+      return TrafficSource::kSystem;
     case TrafficCounter::VPN:
-      return HOST_VPN;
+      return TrafficSource::kHostVpn;
     case TrafficCounter::ARC:
-      return ARC;
+      return TrafficSource::kArc;
     case TrafficCounter::CROSVM:
-      return CROSVM;
-    case TrafficCounter::PLUGINVM:
-      return PLUGINVM;
+      return TrafficSource::kCrosVM;
+    case TrafficCounter::PARALLELS_VM:
+      return TrafficSource::kParallelsVM;
     default:
     case TrafficCounter::UNKNOWN:
-      return UNKNOWN;
+      return TrafficSource::kUnknown;
   }
 }
 
-bool CountersService::CounterKey::operator<(const CounterKey& rhs) const {
-  if (ifname < rhs.ifname) {
-    return true;
-  }
-  if (ifname > rhs.ifname) {
-    return false;
-  }
-  if (source < rhs.source) {
-    return true;
-  }
-  if (source > rhs.source) {
-    return false;
-  }
-  return ip_family < rhs.ip_family;
-}
+std::strong_ordering operator<=>(const CountersService::CounterKey&,
+                                 const CountersService::CounterKey&) = default;
+
+bool operator==(const CountersService::Counter&,
+                const CountersService::Counter&) = default;
 
 }  // namespace patchpanel

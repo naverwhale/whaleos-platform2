@@ -1,17 +1,17 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/system/ambient_light_sensor.h"
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 void AmbientLightSensor::SetDelegate(
     std::unique_ptr<AmbientLightSensorDelegate> delegate) {
@@ -24,7 +24,7 @@ void AmbientLightSensor::SetDelegate(
 }
 
 void AmbientLightSensor::SetLuxAndColorTemperature(
-    base::Optional<int> lux, base::Optional<int> color_temperature) {
+    std::optional<int> lux, std::optional<int> color_temperature) {
   if (lux.has_value())
     lux_value_ = lux.value();
 
@@ -72,5 +72,4 @@ int AmbientLightSensor::GetColorTemperature() {
   return color_temperature_;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,14 +14,15 @@
 #include <base/check.h>
 #include <base/files/file.h>
 #include <base/files/file_util.h>
-#include <base/guid.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
+#include <base/uuid.h>
 
 #include "vm_tools/concierge/disk_image.h"
+#include "vm_tools/concierge/plugin_vm_config.h"
 #include "vm_tools/concierge/plugin_vm_helper.h"
 #include "vm_tools/concierge/service.h"
 #include "vm_tools/concierge/vmplugin_dispatcher_interface.h"
@@ -32,16 +33,12 @@ constexpr gid_t kPluginVmGid = 20128;
 
 }  // namespace
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 
 DiskImageOperation::DiskImageOperation(const VmId vm_id)
-    : uuid_(base::GenerateGUID()),
-      vm_id_(std::move(vm_id)),
-      status_(DISK_STATUS_FAILED),
-      source_size_(0),
-      processed_size_(0) {
-  CHECK(base::IsValidGUID(uuid_));
+    : uuid_(base::Uuid::GenerateRandomV4().AsLowercaseString()),
+      vm_id_(std::move(vm_id)) {
+  CHECK(base::Uuid::ParseCaseInsensitive(uuid_).is_valid());
 }
 
 void DiskImageOperation::Run(uint64_t io_limit) {
@@ -171,14 +168,14 @@ void PluginVmCreateOperation::Finalize() {
     return;
   }
 
-  if (!pvm::helper::AttachIso(vm_id(), "cdrom0", "/iso/install.iso")) {
+  if (!pvm::helper::AttachIso(vm_id(), "cdrom0",
+                              pvm::plugin::kInstallIsoPath)) {
     MarkFailed("Failed to attach install ISO to Plugin VM", 0);
     pvm::helper::DeleteVm(vm_id());
     return;
   }
 
-  if (!pvm::helper::CreateCdromDevice(vm_id(),
-                                      "/opt/pita/tools/prl-tools-win.iso")) {
+  if (!pvm::helper::CreateCdromDevice(vm_id(), pvm::plugin::kToolsIsoPath)) {
     MarkFailed("Failed to attach tools ISO to Plugin VM", 0);
     pvm::helper::DeleteVm(vm_id());
     return;
@@ -217,7 +214,7 @@ VmExportOperation::VmExportOperation(const VmId vm_id,
       src_image_path_(std::move(disk_path)),
       out_fd_(std::move(out_fd)),
       out_digest_fd_(std::move(out_digest_fd)),
-      copying_data_(false),
+
       out_fmt_(std::move(out_fmt)),
       sha256_(crypto::SecureHash::Create(crypto::SecureHash::SHA256)) {
   base::File::Info info;
@@ -382,7 +379,7 @@ bool VmExportOperation::ExecuteIo(uint64_t io_limit) {
 
       const char* c_path = archive_entry_pathname(entry);
       if (!c_path || c_path[0] == '\0') {
-        MarkFailed("archive entry read from disk has empty file name", NULL);
+        MarkFailed("archive entry read from disk has empty file name", nullptr);
         break;
       }
 
@@ -398,7 +395,7 @@ bool VmExportOperation::ExecuteIo(uint64_t io_limit) {
         // and replace it with <vm_name>.pvm prefix.
         base::FilePath dest_path(vm_id().name() + ".pvm");
         if (!src_image_path_.AppendRelativePath(path, &dest_path)) {
-          MarkFailed("failed to transform archive entry name", NULL);
+          MarkFailed("failed to transform archive entry name", nullptr);
           break;
         }
         archive_entry_set_pathname(entry, dest_path.value().c_str());
@@ -481,9 +478,9 @@ void VmExportOperation::Finalize() {
   // Calculate and store the image hash.
   if (out_digest_fd_.is_valid()) {
     std::vector<uint8_t> digest(sha256_->GetHashLength());
-    sha256_->Finish(base::data(digest), digest.size());
+    sha256_->Finish(std::data(digest), digest.size());
     std::string str = base::StringPrintf(
-        "%s\n", base::HexEncode(base::data(digest), digest.size()).c_str());
+        "%s\n", base::HexEncode(std::data(digest), digest.size()).c_str());
     bool written = base::WriteFileDescriptor(out_digest_fd_.get(), str);
     out_digest_fd_.reset();
     if (!written) {
@@ -525,8 +522,7 @@ PluginVmImportOperation::PluginVmImportOperation(
       dest_image_path_(std::move(disk_path)),
       bus_(std::move(bus)),
       vmplugin_service_proxy_(vmplugin_service_proxy),
-      in_fd_(std::move(in_fd)),
-      copying_data_(false) {
+      in_fd_(std::move(in_fd)) {
   set_source_size(source_size);
 }
 
@@ -642,7 +638,7 @@ bool PluginVmImportOperation::ExecuteIo(uint64_t io_limit) {
 
       const char* c_path = archive_entry_pathname(entry);
       if (!c_path || c_path[0] == '\0') {
-        MarkFailed("archive entry has empty file name", NULL);
+        MarkFailed("archive entry has empty file name", nullptr);
         break;
       }
 
@@ -650,13 +646,12 @@ bool PluginVmImportOperation::ExecuteIo(uint64_t io_limit) {
       if (path.empty() || path.IsAbsolute() || path.ReferencesParent()) {
         MarkFailed(
             "archive entry has invalid/absolute/referencing parent file name",
-            NULL);
+            nullptr);
         break;
       }
 
       // Drop the top level <directory>.pvm prefix, if it is present.
-      std::vector<std::string> path_parts;
-      path.GetComponents(&path_parts);
+      std::vector<std::string> path_parts = path.GetComponents();
       DCHECK(!path_parts.empty());
 
       auto dest_path = output_dir_.GetPath();
@@ -761,20 +756,20 @@ void PluginVmImportOperation::Finalize() {
   out_.reset();
   // Make sure resulting image is accessible by the dispatcher process.
   if (chown(output_dir_.GetPath().value().c_str(), -1, kPluginVmGid) < 0) {
-    MarkFailed("failed to change group of the destination directory", NULL);
+    MarkFailed("failed to change group of the destination directory", nullptr);
     return;
   }
   // We are setting setgid bit on the directory to make sure any new files
   // created by the plugin will be created with "pluginvm" group ownership.
   if (chmod(output_dir_.GetPath().value().c_str(), 02770) < 0) {
     MarkFailed("failed to change permissions of the destination directory",
-               NULL);
+               nullptr);
     return;
   }
   // Drop the ".tmp" suffix from the directory so that we recognize
   // it as a valid Plugin VM image.
   if (!base::Move(output_dir_.GetPath(), dest_image_path_)) {
-    MarkFailed("Unable to rename resulting image directory", NULL);
+    MarkFailed("Unable to rename resulting image directory", nullptr);
     return;
   }
   // Tell it not to try cleaning up as we are committed to using the
@@ -783,7 +778,7 @@ void PluginVmImportOperation::Finalize() {
 
   if (!pvm::dispatcher::RegisterVm(bus_, vmplugin_service_proxy_, vm_id(),
                                    dest_image_path_)) {
-    MarkFailed("Unable to register imported VM image", NULL);
+    MarkFailed("Unable to register imported VM image", nullptr);
     DeletePathRecursively(dest_image_path_);
     return;
   }
@@ -796,12 +791,12 @@ std::unique_ptr<VmResizeOperation> VmResizeOperation::Create(
     StorageLocation location,
     const base::FilePath disk_path,
     uint64_t disk_size,
-    ResizeCallback start_resize_cb,
-    ResizeCallback process_resize_cb) {
+    StartResizeCallback start_resize_cb,
+    ProcessResizeCallback process_resize_cb) {
   DiskImageStatus status = DiskImageStatus::DISK_STATUS_UNKNOWN;
   std::string failure_reason;
-  start_resize_cb.Run(vm_id.owner_id(), vm_id.name(), location, disk_size,
-                      &status, &failure_reason);
+  std::move(start_resize_cb)
+      .Run(vm_id, location, disk_size, &status, &failure_reason);
 
   auto op = base::WrapUnique(new VmResizeOperation(
       std::move(vm_id), std::move(location), std::move(disk_path),
@@ -817,7 +812,7 @@ VmResizeOperation::VmResizeOperation(const VmId vm_id,
                                      StorageLocation location,
                                      const base::FilePath disk_path,
                                      uint64_t disk_size,
-                                     ResizeCallback process_resize_cb)
+                                     ProcessResizeCallback process_resize_cb)
     : DiskImageOperation(std::move(vm_id)),
       process_resize_cb_(std::move(process_resize_cb)),
       location_(std::move(location)),
@@ -827,8 +822,8 @@ VmResizeOperation::VmResizeOperation(const VmId vm_id,
 bool VmResizeOperation::ExecuteIo(uint64_t io_limit) {
   DiskImageStatus status = DiskImageStatus::DISK_STATUS_UNKNOWN;
   std::string failure_reason;
-  process_resize_cb_.Run(vm_id().owner_id(), vm_id().name(), location_,
-                         target_size_, &status, &failure_reason);
+  process_resize_cb_.Run(vm_id(), location_, target_size_, &status,
+                         &failure_reason);
 
   set_status(status);
   set_failure_reason(failure_reason);
@@ -842,5 +837,4 @@ bool VmResizeOperation::ExecuteIo(uint64_t io_limit) {
 
 void VmResizeOperation::Finalize() {}
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge

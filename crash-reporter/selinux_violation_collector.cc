@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,18 @@
 
 #include <map>
 #include <memory>
+#include <string>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
+#include <metrics/metrics_library.h>
 
+#include "crash-reporter/constants.h"
 #include "crash-reporter/util.h"
 
 namespace {
@@ -25,8 +30,12 @@ constexpr size_t kMaxValueLen = 128;
 using base::FilePath;
 using base::StringPrintf;
 
-SELinuxViolationCollector::SELinuxViolationCollector()
-    : CrashCollector("selinux"), violation_report_path_("/dev/stdin") {}
+SELinuxViolationCollector::SELinuxViolationCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("selinux", metrics_lib),
+      violation_report_path_("/dev/stdin") {}
 
 SELinuxViolationCollector::~SELinuxViolationCollector() {}
 
@@ -94,8 +103,12 @@ bool GetValueFromLog(const std::string& log,
   return false;
 }
 
-bool SELinuxViolationCollector::Collect() {
+bool SELinuxViolationCollector::Collect(int32_t weight) {
   LOG(INFO) << "Processing selinux violation";
+
+  if (weight != 1) {
+    AddCrashMetaWeight(weight);
+  }
 
   std::string violation_signature;
   std::string content;
@@ -104,7 +117,8 @@ bool SELinuxViolationCollector::Collect() {
     return true;
 
   FilePath crash_directory;
-  if (!GetCreatedCrashDirectoryByEuid(kRootUid, &crash_directory, nullptr))
+  if (!GetCreatedCrashDirectoryByEuid(constants::kRootUid, &crash_directory,
+                                      nullptr))
     return true;
 
   // Give crash files more unique names by taking the "comm" identifier
@@ -145,15 +159,27 @@ bool SELinuxViolationCollector::Collect() {
   return true;
 }
 
+CrashCollector::ComputedCrashSeverity
+SELinuxViolationCollector::ComputeSeverity(const std::string& exec_name) {
+  return ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kInfo,
+      .product_group = Product::kPlatform,
+  };
+}
+
 // static
 CollectorInfo SELinuxViolationCollector::GetHandlerInfo(
-    bool selinux_violation) {
+    bool selinux_violation,
+    int32_t weight,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
   auto selinux_violation_collector =
-      std::make_shared<SELinuxViolationCollector>();
+      std::make_shared<SELinuxViolationCollector>(metrics_lib);
   return {.collector = selinux_violation_collector,
           .handlers = {{
               .should_handle = selinux_violation,
               .cb = base::BindRepeating(&SELinuxViolationCollector::Collect,
-                                        selinux_violation_collector),
+                                        selinux_violation_collector, weight),
           }}};
 }

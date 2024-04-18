@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,11 +24,11 @@ class MockThrottler : public Throttler {
 
   MOCK_METHOD(bool,
               DisableThrottlingOnAllInterfaces,
-              (const ResultCallback&),
+              (ResultCallback),
               (override));
   MOCK_METHOD(bool,
               ThrottleInterfaces,
-              (const ResultCallback&, uint32_t, uint32_t),
+              (ResultCallback, uint32_t, uint32_t),
               (override));
   MOCK_METHOD(bool,
               ApplyThrottleToNewInterface,
@@ -40,13 +40,13 @@ class MockThrottler : public Throttler {
               (override));
   MOCK_METHOD(bool,
               Throttle,
-              (const ResultCallback&, const std::string&, uint32_t, uint32_t),
+              (ResultCallback, const std::string&, uint32_t, uint32_t),
               (override));
-  MOCK_METHOD(void, WriteTCCommands, (int), (override));
+  MOCK_METHOD(void, WriteTCCommands, (), (override));
   MOCK_METHOD(void, OnProcessExited, (int), (override));
   MOCK_METHOD(void,
               Done,
-              (const ResultCallback&, Error::Type, const std::string&),
+              (ResultCallback, Error::Type, const std::string&),
               (override));
   MOCK_METHOD(std::string, GetNextInterface, (), (override));
   MOCK_METHOD(void, ClearTCState, (), (override));

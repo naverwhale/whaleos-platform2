@@ -1,12 +1,19 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# TODO(b/): Migrate to re2.
+# gnlint: disable=GnLintLibraries
 
 import("//common-mk/pkg_config.gni")
 
 group("all") {
   deps = [
     ":hammerd",
+    ":install_dbus_config",
+    ":install_rsyslog_conf",
+    ":install_upstart_configs",
+    ":install_upstart_scripts",
     ":libhammerd",
   ]
   if (use.hammerd_api) {
@@ -61,6 +68,7 @@ static_library("libhammerd") {
 executable("hammerd") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
   deps = [ ":libhammerd" ]
 }
 
@@ -70,6 +78,30 @@ if (use.hammerd_api) {
     configs += [ ":target_defaults" ]
     deps = [ ":libhammerd" ]
   }
+}
+
+install_config("install_upstart_configs") {
+  sources = [ "init/hammerd.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_upstart_scripts") {
+  sources = [
+    "init/hammerd-at-boot.sh",
+    "init/hammerd-base-detector.sh",
+  ]
+  install_path = "/usr/share/cros/init"
+  type = "executable"
+}
+
+install_config("install_dbus_config") {
+  sources = [ "dbus/org.chromium.hammerd.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_rsyslog_conf") {
+  sources = [ "rsyslog/rsyslog.hammerd.conf" ]
+  install_path = "/etc/rsyslog.d"
 }
 
 if (use.test) {
@@ -86,6 +118,7 @@ if (use.test) {
       "//common-mk:test",
       ":target_defaults",
     ]
+    run_test = true
     deps = [
       ":libhammerd",
       "//common-mk/testrunner",
@@ -95,7 +128,10 @@ if (use.test) {
 
 if (use.fuzzer) {
   executable("hammerd_load_ec_image_fuzzer") {
-    sources = [ "update_fw_load_ec_image_fuzzer.cc" ]
+    sources = [
+      "fuzzed_ec_image.cc",
+      "update_fw_load_ec_image_fuzzer.cc",
+    ]
     configs += [
       "//common-mk/common_fuzzer",
       ":target_defaults",
@@ -103,7 +139,10 @@ if (use.fuzzer) {
     deps = [ ":libhammerd" ]
   }
   executable("hammerd_update_fw_fuzzer") {
-    sources = [ "update_fw_fuzzer.cc" ]
+    sources = [
+      "fuzzed_ec_image.cc",
+      "update_fw_fuzzer.cc",
+    ]
     configs += [
       "//common-mk/common_fuzzer",
       ":target_defaults",

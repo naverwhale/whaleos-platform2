@@ -1,0 +1,75 @@
+# Copyright 2022 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [
+    ":bootsplash",
+    ":install_upstart_config",
+  ]
+  if (use.test) {
+    deps += [ ":bootsplash_testrunner" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "re2",
+  ]
+}
+
+static_library("libbootsplash") {
+  sources = [
+    "bootsplash_daemon.cc",
+    "frecon.cc",
+    "paths.cc",
+    "session_manager_client.cc",
+    "utils.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  libs = [ "bootstat" ]
+}
+
+executable("bootsplash") {
+  sources = [ "main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libbootsplash" ]
+}
+
+# Install upstart configs and scripts.
+install_config("install_upstart_config") {
+  sources = [ "init/upstart/bootsplash.conf" ]
+  install_path = "upstart"
+}
+
+if (use.test) {
+  pkg_config("libchrome_test_config") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+    ]
+  }
+  executable("bootsplash_testrunner") {
+    sources = [
+      "bootsplash_daemon_test.cc",
+      "frecon_test.cc",
+      "paths_test.cc",
+      "session_manager_client_test.cc",
+      "utils_test.cc",
+    ]
+    run_test = true
+    configs += [
+      "//common-mk:test",
+      ":libchrome_test_config",
+      ":target_defaults",
+    ]
+    deps = [
+      ":libbootsplash",
+      "//common-mk/testrunner",
+    ]
+  }
+}

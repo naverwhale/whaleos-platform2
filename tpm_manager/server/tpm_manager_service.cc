@@ -1,54 +1,65 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "tpm_manager/server/tpm_manager_service.h"
+
+#include <fcntl.h>
 
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
+#include <brillo/whaleos_util.h>
+
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/command_line.h>
+#include <base/files/file_path.h>
+#include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/message_loop/message_pump_type.h>
+#include <base/process/launch.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
 #include <base/synchronization/lock.h>
+#include <brillo/secure_blob.h>
 #include <crypto/sha2.h>
 #include <inttypes.h>
 #include <libhwsec-foundation/tpm/tpm_version.h>
 
+#include "tpm_manager/server/openssl_crypto_util_impl.h"
+#include "tpm_manager/server/pinweaver_provision.h"
 #include "tpm_manager/server/tpm_allowlist_impl.h"
+#include "tpm_manager/server/tpm_manager_metrics.h"
 
 namespace {
 
 constexpr int kDictionaryAttackResetPeriodInHours = 1;
+constexpr base::TimeDelta kUploadAlertsPeriod = base::Hours(6);
+
+constexpr char kPowerWashCompletedFile[] =
+    "/mnt/stateful_partition/unencrypted/.powerwash_completed";
+constexpr char kPowerWashReportedFile[] =
+    "/var/lib/tpm_manager/.powerwash_reported";
+constexpr char kAllowedStateFile[] = "/var/lib/tpm_manager/.allowed";
+constexpr mode_t kAllowedStateFilePermissions = 0600;
+
+// Produce 20 random human unreadable bytes.
+constexpr size_t kRandomOwnerPasswordLength = 20;
 
 #if USE_TPM2
 // Timeout waiting for Trunks daemon readiness.
-constexpr base::TimeDelta kTrunksDaemonTimeout =
-    base::TimeDelta::FromSeconds(30);
+constexpr base::TimeDelta kTrunksDaemonTimeout = base::Seconds(30);
 // Delay between subsequent attempts to initialize connection to Trunks daemon.
 constexpr base::TimeDelta kTrunksDaemonInitAttemptDelay =
-    base::TimeDelta::FromMicroseconds(300);
+    base::Microseconds(300);
 #endif
-
-// Clears owner password in |local_data| if all dependencies have been removed
-// and it has not yet been cleared.
-// Returns true if |local_data| has been modified, false otherwise.
-bool ClearOwnerPasswordIfPossible(tpm_manager::LocalData* local_data) {
-  if (local_data->has_owner_password() &&
-      local_data->owner_dependency().empty()) {
-    local_data->clear_owner_password();
-    return true;
-  }
-  return false;
-}
 
 int GetFingerprint(uint32_t family,
                    uint64_t spec_level,
@@ -73,11 +84,41 @@ int GetFingerprint(uint32_t family,
   return result & 0x7fffffff;
 }
 
+void StoreTpmAllowState(bool allowed) {
+  base::FilePath allowed_file = base::FilePath(kAllowedStateFile);
+  std::string data = base::NumberToString(static_cast<int>(allowed));
+  if (base::WriteFile(allowed_file, data.c_str(), data.length()) < 0) {
+    LOG(WARNING) << __func__ << ": Unable to create " << allowed_file.value();
+  }
+  if (!base::SetPosixFilePermissions(allowed_file,
+                                     kAllowedStateFilePermissions)) {
+    LOG(WARNING) << __func__ << ": Unable to set permission for "
+                 << allowed_file.value();
+  }
+}
+
 }  // namespace
 
 namespace tpm_manager {
 
 namespace {
+
+const std::string ToString(
+    TpmManagerService::ReplaceOwnerPasswordResult enum_param) {
+  switch (enum_param) {
+    case TpmManagerService::ReplaceOwnerPasswordResult::kSuccess:
+      return "kSuccess";
+    case TpmManagerService::ReplaceOwnerPasswordResult::
+        kClearSuccessButWriteFail:
+      return "kClearSuccessButWriteFail";
+    case TpmManagerService::ReplaceOwnerPasswordResult::kPasswordGenerationFail:
+      return "kPasswordGenerationFail";
+    case TpmManagerService::ReplaceOwnerPasswordResult::kFail:
+      return "kFail";
+    default:
+      LOG(ERROR) << __func__ << "Unimplemented enum!";
+  }
+}
 
 GetTpmNonsensitiveStatusReply ToGetTpmNonSensitiveStatusReply(
     const GetTpmStatusReply& from) {
@@ -102,14 +143,30 @@ GetTpmStatusRequest ToGetTpmStatusRequest(
   return to;
 }
 
+const char* TpmOwnershipStatusToString(TpmStatus::TpmOwnershipStatus status) {
+  switch (status) {
+    case TpmStatus::kTpmUnowned:
+      return "Unowned";
+    case TpmStatus::kTpmPreOwned:
+      return "PreOwned";
+    case TpmStatus::kTpmOwned:
+      return "Owned";
+    case TpmStatus::kTpmSrkNoAuth:
+      return "SrkNoAuth";
+    case TpmStatus::kTpmDisabled:
+      return "Disabled";
+    default:
+      return "Unknown";
+  }
+}
+
 }  // namespace
 
-TpmManagerService::TpmManagerService(bool wait_for_ownership,
-                                     bool perform_preinit,
+TpmManagerService::TpmManagerService(bool perform_preinit,
                                      LocalDataStore* local_data_store)
-    : TpmManagerService(wait_for_ownership,
-                        perform_preinit,
+    : TpmManagerService(perform_preinit,
                         local_data_store,
+                        nullptr,
                         nullptr,
                         nullptr,
                         nullptr,
@@ -117,23 +174,24 @@ TpmManagerService::TpmManagerService(bool wait_for_ownership,
   CHECK(local_data_store_);
 }
 
-TpmManagerService::TpmManagerService(bool wait_for_ownership,
-                                     bool perform_preinit,
-                                     LocalDataStore* local_data_store,
-                                     TpmStatus* tpm_status,
-                                     TpmInitializer* tpm_initializer,
-                                     TpmNvram* tpm_nvram,
-                                     TpmManagerMetrics* tpm_manager_metrics)
+TpmManagerService::TpmManagerService(
+    bool perform_preinit,
+    LocalDataStore* local_data_store,
+    std::unique_ptr<PinWeaverProvision> pinweaver_provision,
+    TpmStatus* tpm_status,
+    TpmInitializer* tpm_initializer,
+    TpmNvram* tpm_nvram,
+    TpmManagerMetrics* tpm_manager_metrics)
     : dictionary_attack_timer_(
-          base::TimeDelta::FromHours(kDictionaryAttackResetPeriodInHours)),
+          base::Hours(kDictionaryAttackResetPeriodInHours)),
       local_data_store_(local_data_store),
+      pinweaver_provision_(std::move(pinweaver_provision)),
       tpm_status_(tpm_status),
       tpm_initializer_(tpm_initializer),
       tpm_nvram_(tpm_nvram),
       tpm_manager_metrics_(tpm_manager_metrics),
       update_tpm_status_pending_(false),
       update_tpm_status_cache_dirty_(true),
-      wait_for_ownership_(wait_for_ownership),
       perform_preinit_(perform_preinit) {}
 
 TpmManagerService::~TpmManagerService() {
@@ -141,7 +199,7 @@ TpmManagerService::~TpmManagerService() {
 }
 
 bool TpmManagerService::Initialize() {
-  origin_task_runner_ = base::ThreadTaskRunnerHandle::Get();
+  origin_task_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
   worker_thread_.reset(
       new ServiceWorkerThread("TpmManager Service Worker", this));
   worker_thread_->StartWithOptions(
@@ -155,6 +213,11 @@ bool TpmManagerService::Initialize() {
       &TpmManagerService::InitializeTask);
 
   ReportVersionFingerprint();
+
+  worker_thread_->task_runner()->PostTask(
+      FROM_HERE, base::BindOnce(&TpmManagerService::UploadAlertsDataTask,
+                                base::Unretained(this)));
+
   VLOG(1) << "Worker thread started.";
   return true;
 }
@@ -179,11 +242,34 @@ void TpmManagerService::ReportVersionFingerprint() {
   GetVersionInfo(tpm_manager::GetVersionInfoRequest(), std::move(callback));
 }
 
-void TpmManagerService::InitializeTask(
-    const std::shared_ptr<GetTpmStatusReply>& reply) {
+void TpmManagerService::UploadAlertsDataTask() {
+  TpmStatus::AlertsData alerts;
+
+  if (!tpm_allowed_ || !tpm_status_) {
+    LOG(INFO) << "No need to upload alerts.";
+    return;
+  }
+
+  if (!tpm_status_->GetAlertsData(&alerts)) {
+    LOG(INFO) << "The TPM chip does not support GetAlertsData. Stop "
+                 "UploadAlertsData task.";
+    return;
+  }
+
+  tpm_manager_metrics_->ReportAlertsData(alerts);
+  worker_thread_->task_runner()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&TpmManagerService::UploadAlertsDataTask,
+                     base::Unretained(this)),
+      kUploadAlertsPeriod);
+}
+
+std::unique_ptr<GetTpmStatusReply> TpmManagerService::InitializeTask() {
   VLOG(1) << "Initializing service...";
 
-  if (!tpm_status_ || !tpm_initializer_ || !tpm_nvram_) {
+  auto reply = std::make_unique<GetTpmStatusReply>();
+  if (!tpm_status_ || !tpm_initializer_ || !tpm_nvram_ ||
+      !pinweaver_provision_) {
     // Setup default objects.
     TPM_SELECT_BEGIN;
     TPM2_SECTION({
@@ -199,6 +285,7 @@ void TpmManagerService::InitializeTask(
         }
         trunks_factory_ = std::move(trunks_factory);
       }
+      pinweaver_provision_ = PinWeaverProvision::Create(*trunks_factory_);
       default_tpm_status_ = std::make_unique<Tpm2StatusImpl>(*trunks_factory_);
       tpm_status_ = default_tpm_status_.get();
       default_tpm_initializer_ = std::make_unique<Tpm2InitializerImpl>(
@@ -209,6 +296,7 @@ void TpmManagerService::InitializeTask(
       tpm_nvram_ = default_tpm_nvram_.get();
     });
     TPM1_SECTION({
+      pinweaver_provision_ = PinWeaverProvision::CreateNoop();
       default_tpm_status_ = std::make_unique<TpmStatusImpl>(local_data_store_);
       tpm_status_ = default_tpm_status_.get();
       default_tpm_initializer_ =
@@ -219,10 +307,12 @@ void TpmManagerService::InitializeTask(
     });
     OTHER_TPM_SECTION({
       LOG(WARNING) << __func__ << ": No TPM on the device.";
+      pinweaver_provision_ = PinWeaverProvision::CreateNoop();
       tpm_allowed_ = false;
+      auto reply = std::make_unique<GetTpmStatusReply>();
       reply->set_enabled(false);
       reply->set_status(STATUS_SUCCESS);
-      return;
+      return reply;
     });
     TPM_SELECT_END;
   }
@@ -234,21 +324,39 @@ void TpmManagerService::InitializeTask(
 
   tpm_allowed_ = tpm_allowlist_->IsAllowed();
 
+  if (USE_TPM_DYNAMIC) {
+    StoreTpmAllowState(tpm_allowed_);
+  }
+
   if (!tpm_allowed_) {
     LOG(WARNING) << __func__ << ": The TPM is not allowed on the device.";
     reply->set_enabled(false);
     reply->set_status(STATUS_SUCCESS);
-    return;
+    return reply;
   }
 
   if (!tpm_status_->IsTpmEnabled()) {
     LOG(WARNING) << __func__ << ": TPM is disabled.";
     reply->set_enabled(false);
     reply->set_status(STATUS_SUCCESS);
-    return;
+    return reply;
   }
   reply->set_enabled(true);
   tpm_initializer_->VerifiedBootHelper();
+
+  if (tpm_status_->GetGscVersion() == GscVersion::GSC_VERSION_TI50) {
+    uint32_t fs_time = 0;
+    uint32_t fs_size = 0;
+    uint32_t aprov_time = 0;
+    uint32_t aprov_status = 0;
+    if (tpm_status_->GetTi50Stats(&fs_time, &fs_size, &aprov_time,
+                                  &aprov_status)) {
+      tpm_manager_metrics_->ReportFilesystemInitTime(fs_time);
+      tpm_manager_metrics_->ReportFilesystemUtilization(fs_size);
+      tpm_manager_metrics_->ReportApRoVerificationTime(aprov_time);
+      tpm_manager_metrics_->ReportExpApRoVerificationStatus(aprov_status);
+    }
+  }
 
   TpmStatus::TpmOwnershipStatus ownership_status;
   if (!tpm_status_->GetTpmOwned(&ownership_status)) {
@@ -262,16 +370,26 @@ void TpmManagerService::InitializeTask(
       LOG(ERROR) << __func__
                  << ": get tpm ownership status still failed. Giving up.";
       reply->set_status(STATUS_DEVICE_ERROR);
-      return;
+      return reply;
     }
     LOG(INFO) << __func__
               << ": get tpm ownership status suceeded after dictionary attack "
                  "lockout reset.";
   }
 
+  if (ownership_status == TpmStatus::kTpmDisabled) {
+    LOG(WARNING) << __func__
+                 << ": TPM is disabled when we testing the ownership.";
+    reply->set_enabled(false);
+    reply->set_status(STATUS_SUCCESS);
+    return reply;
+  }
+
+  CheckPowerWashResult(ownership_status);
+
   // The precondition of DA reset is not satisfied; resets the timer so it
   // doesn't get triggered immediately.
-  if (ownership_status != TpmStatus::kTpmOwned && wait_for_ownership_) {
+  if (ownership_status != TpmStatus::kTpmOwned && !perform_preinit_) {
     dictionary_attack_timer_.Reset();
   }
   worker_thread_->task_runner()->PostTask(
@@ -298,7 +416,8 @@ void TpmManagerService::InitializeTask(
     DisableDictionaryAttackMitigationIfNeeded();
     reply->set_status(STATUS_SUCCESS);
     NotifyTpmIsOwned();
-    return;
+
+    return reply;
   }
 
   // TPM is not fully owned yet. There might be stale data in the local data
@@ -306,26 +425,40 @@ void TpmManagerService::InitializeTask(
   tpm_initializer_->PruneStoredPasswords();
   tpm_nvram_->PrunePolicies();
 
-  if (!wait_for_ownership_) {
+  if (perform_preinit_) {
     VLOG(1) << "Initializing TPM.";
-
     const base::TimeTicks take_ownerhip_start_time = base::TimeTicks::Now();
     bool already_owned;
     if (!tpm_initializer_->InitializeTpm(&already_owned)) {
       LOG(WARNING) << __func__ << ": TPM initialization failed.";
+      tpm_manager_metrics_->ReportTakeOwnershipResult(
+          TPMTakeOwnershipResult::kFailed);
       dictionary_attack_timer_.Reset();
       reply->set_status(STATUS_NOT_AVAILABLE);
-      return;
+
+      if (!brillo::IsWhalebook2Model()) {
+        // Don't allow the TPM to be used when we failed to take the ownership
+        // of it, because most of the security features would not work under
+        // this case. And set the take ownership device error to make sure the
+        // enrollment screen would know the device failed to take the ownership.
+        take_ownership_device_error_ = true;
+        tpm_allowed_ = false;
+        reply->set_enabled(false);
+        reply->set_status(STATUS_SUCCESS);
+      }
+
+      return reply;
     }
     if (!already_owned) {
+      tpm_manager_metrics_->ReportTakeOwnershipResult(
+          TPMTakeOwnershipResult::kSuccess);
       tpm_manager_metrics_->ReportTimeToTakeOwnership(base::TimeTicks::Now() -
                                                       take_ownerhip_start_time);
     }
+    DisableDictionaryAttackMitigationIfNeeded();
     reply->set_owned(true);
-  } else if (perform_preinit_) {
-    VLOG(1) << "Pre-initializing TPM.";
-    tpm_initializer_->PreInitializeTpm();
   }
+
   LocalData local_data;
   if (local_data_store_ && local_data_store_->Read(&local_data)) {
     *(reply->mutable_local_data()) = std::move(local_data);
@@ -334,6 +467,7 @@ void TpmManagerService::InitializeTask(
   if (reply->owned()) {
     NotifyTpmIsOwned();
   }
+  return reply;
 }
 
 void TpmManagerService::ReportSecretStatus(const LocalData& local_data) {
@@ -421,39 +555,52 @@ void TpmManagerService::UpdateTpmStatusCallback(
   }
 }
 
-void TpmManagerService::GetTpmStatusTask(
-    const GetTpmStatusRequest& request,
-    const std::shared_ptr<GetTpmStatusReply>& reply) {
+std::unique_ptr<GetTpmStatusReply> TpmManagerService::GetTpmStatusTask(
+    const GetTpmStatusRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<GetTpmStatusReply>();
 
   if (!tpm_allowed_) {
     reply->set_enabled(false);
     reply->set_status(STATUS_SUCCESS);
-    return;
+    return reply;
   }
 
   if (!tpm_status_) {
     LOG(ERROR) << __func__ << ": tpm status is uninitialized.";
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
-  reply->set_enabled(tpm_status_->IsTpmEnabled());
+  bool is_enabled = tpm_status_->IsTpmEnabled();
+  reply->set_enabled(is_enabled);
 
-  TpmStatus::TpmOwnershipStatus ownership_status;
-  if (!tpm_status_->GetTpmOwned(&ownership_status)) {
-    LOG(ERROR) << __func__ << ": failed to get tpm ownership status";
-    reply->set_status(STATUS_DEVICE_ERROR);
-    return;
-  }
-  reply->set_owned(TpmStatus::kTpmOwned == ownership_status);
+  if (is_enabled) {
+    TpmStatus::TpmOwnershipStatus ownership_status;
+    if (!tpm_status_->GetTpmOwned(&ownership_status)) {
+      LOG(ERROR) << __func__ << ": failed to get tpm ownership status";
+      reply->set_status(STATUS_DEVICE_ERROR);
+      return reply;
+    }
 
-  LocalData local_data;
-  if (local_data_store_ && local_data_store_->Read(&local_data)) {
-    *reply->mutable_local_data() = local_data;
+    if (ownership_status == TpmStatus::kTpmDisabled) {
+      LOG(WARNING) << __func__
+                   << ": TPM is disabled when we testing the ownership.";
+      reply->set_enabled(false);
+      reply->set_status(STATUS_SUCCESS);
+      return reply;
+    }
+
+    reply->set_owned(TpmStatus::kTpmOwned == ownership_status);
+    LocalData local_data;
+    if (local_data_store_ && local_data_store_->Read(&local_data)) {
+      *reply->mutable_local_data() = local_data;
+    }
   }
 
   reply->set_status(STATUS_SUCCESS);
+  return reply;
 }
 
 void TpmManagerService::GetVersionInfo(const GetVersionInfoRequest& request,
@@ -470,23 +617,24 @@ void TpmManagerService::GetVersionInfo(const GetVersionInfoRequest& request,
       request, std::move(callback), &TpmManagerService::GetVersionInfoTask);
 }
 
-void TpmManagerService::GetVersionInfoTask(
-    const GetVersionInfoRequest& request,
-    const std::shared_ptr<GetVersionInfoReply>& reply) {
+std::unique_ptr<GetVersionInfoReply> TpmManagerService::GetVersionInfoTask(
+    const GetVersionInfoRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<GetVersionInfoReply>();
 
   // It's possible that cache was not available when the request came to the
   // main thread but became available when the task is being processed here.
   // Checks the cache again to save one TPM call.
   if (version_info_cache_) {
     *reply = *version_info_cache_;
-    return;
+    return reply;
   }
 
   if (!tpm_status_) {
     LOG(ERROR) << __func__ << ": tpm status is uninitialized.";
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
   uint32_t family;
@@ -500,9 +648,15 @@ void TpmManagerService::GetVersionInfoTask(
                                    &vendor_specific)) {
     LOG(ERROR) << __func__ << ": failed to get version info from tpm status.";
     reply->set_status(STATUS_DEVICE_ERROR);
-    return;
+    return reply;
   }
 
+  std::string rw_version;
+  if (!tpm_status_->GetRwVersion(&rw_version)) {
+    LOG(ERROR) << __func__ << ": failed to get rw version from tpm status.";
+    reply->set_status(STATUS_DEVICE_ERROR);
+    return reply;
+  }
   reply->set_family(family);
   reply->set_spec_level(spec_level);
   reply->set_manufacturer(manufacturer);
@@ -511,12 +665,14 @@ void TpmManagerService::GetVersionInfoTask(
   reply->set_vendor_specific(reinterpret_cast<char*>(vendor_specific.data()),
                              vendor_specific.size());
   reply->set_gsc_version(tpm_status_->GetGscVersion());
+  reply->set_rw_version(rw_version);
   reply->set_status(STATUS_SUCCESS);
 
   {
     base::AutoLock lock(version_info_cache_lock_);
     version_info_cache_ = *reply;
   }
+  return reply;
 }
 
 void TpmManagerService::GetSupportedFeatures(
@@ -534,21 +690,23 @@ void TpmManagerService::GetSupportedFeatures(
       &TpmManagerService::GetSupportedFeaturesTask);
 }
 
-void TpmManagerService::GetSupportedFeaturesTask(
-    const GetSupportedFeaturesRequest& request,
-    const std::shared_ptr<GetSupportedFeaturesReply>& reply) {
+std::unique_ptr<GetSupportedFeaturesReply>
+TpmManagerService::GetSupportedFeaturesTask(
+    const GetSupportedFeaturesRequest& request) {
+  auto reply = std::make_unique<GetSupportedFeaturesReply>();
+
   // It's possible that cache was not available when the request came to the
   // main thread but became available when the task is being processed here.
   // Checks the cache again to save one TPM call.
   if (supported_features_cache_) {
     *reply = *supported_features_cache_;
-    return;
+    return reply;
   }
 
   if (!tpm_status_) {
     LOG(ERROR) << __func__ << ": tpm status is uninitialized.";
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
   reply->set_support_u2f(tpm_status_->SupportU2f());
@@ -561,6 +719,7 @@ void TpmManagerService::GetSupportedFeaturesTask(
     base::AutoLock lock(supported_features_cache_lock_);
     supported_features_cache_ = *reply;
   }
+  return reply;
 }
 
 void TpmManagerService::GetDictionaryAttackInfo(
@@ -571,15 +730,22 @@ void TpmManagerService::GetDictionaryAttackInfo(
       &TpmManagerService::GetDictionaryAttackInfoTask);
 }
 
-void TpmManagerService::GetDictionaryAttackInfoTask(
-    const GetDictionaryAttackInfoRequest& request,
-    const std::shared_ptr<GetDictionaryAttackInfoReply>& reply) {
+std::unique_ptr<GetDictionaryAttackInfoReply>
+TpmManagerService::GetDictionaryAttackInfoTask(
+    const GetDictionaryAttackInfoRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<GetDictionaryAttackInfoReply>();
+
+  if (!tpm_allowed_) {
+    reply->set_status(STATUS_NOT_AVAILABLE);
+    return reply;
+  }
 
   if (!tpm_status_) {
     LOG(ERROR) << __func__ << ": tpm status is uninitialized.";
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
   uint32_t counter;
@@ -590,7 +756,31 @@ void TpmManagerService::GetDictionaryAttackInfoTask(
                                             &lockout_time_remaining)) {
     LOG(ERROR) << __func__ << ": failed to get DA info";
     reply->set_status(STATUS_DEVICE_ERROR);
-    return;
+    return reply;
+  }
+
+  if (lockout) {
+    LOG(ERROR) << __func__ << " " << __LINE__
+        << " Try resetting DA Lock";
+    auto status = tpm_initializer_->ResetDictionaryAttackLock();
+    tpm_manager_metrics_->ReportDictionaryAttackResetStatus(status);
+    if (status == DictionaryAttackResetStatus::kResetAttemptSucceeded) {
+      if (!tpm_status_->GetDictionaryAttackInfo(&counter, &threshold, &lockout,
+                                                &lockout_time_remaining)) {
+        LOG(ERROR) << __func__ << " " << __LINE__ << ": failed to get DA info ";
+        reply->set_status(STATUS_DEVICE_ERROR);
+        return reply;
+      }
+      if (lockout) {
+        LOG(ERROR) << __func__ << " " << __LINE__
+            << " Resetting DA status and getting info are succeeded, "
+            << " but TPM has locked out still.";
+      }
+    } else {
+      LOG(ERROR) << __func__ << " " << __LINE__ << ": failed to reset DA";
+      reply->set_status(STATUS_DEVICE_ERROR);
+      return reply;
+    }
   }
 
   reply->set_dictionary_attack_counter(counter);
@@ -599,6 +789,7 @@ void TpmManagerService::GetDictionaryAttackInfoTask(
   reply->set_dictionary_attack_lockout_seconds_remaining(
       lockout_time_remaining);
   reply->set_status(STATUS_SUCCESS);
+  return reply;
 }
 
 void TpmManagerService::GetRoVerificationStatus(
@@ -609,18 +800,22 @@ void TpmManagerService::GetRoVerificationStatus(
       &TpmManagerService::GetRoVerificationStatusTask);
 }
 
-void TpmManagerService::GetRoVerificationStatusTask(
-    const GetRoVerificationStatusRequest& request,
-    const std::shared_ptr<GetRoVerificationStatusReply>& reply) {
+std::unique_ptr<GetRoVerificationStatusReply>
+TpmManagerService::GetRoVerificationStatusTask(
+    const GetRoVerificationStatusRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<GetRoVerificationStatusReply>();
 
   tpm_manager::RoVerificationStatus ro_status;
   if (!tpm_status_->GetRoVerificationStatus(&ro_status)) {
     LOG(ERROR) << __func__ << ": failed to get RO verification status.";
     reply->set_status(STATUS_DEVICE_ERROR);
+    return reply;
   }
   reply->set_ro_verification_status(ro_status);
   reply->set_status(STATUS_SUCCESS);
+  return reply;
 }
 
 void TpmManagerService::ResetDictionaryAttackLock(
@@ -640,21 +835,23 @@ void TpmManagerService::ResetDictionaryAttackLock(
       &TpmManagerService::ResetDictionaryAttackLockTask);
 }
 
-void TpmManagerService::ResetDictionaryAttackLockTask(
-    const ResetDictionaryAttackLockRequest& request,
-    const std::shared_ptr<ResetDictionaryAttackLockReply>& reply) {
+std::unique_ptr<ResetDictionaryAttackLockReply>
+TpmManagerService::ResetDictionaryAttackLockTask(
+    const ResetDictionaryAttackLockRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<ResetDictionaryAttackLockReply>();
 
   if (!tpm_allowed_) {
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
   if (!tpm_initializer_) {
     LOG(ERROR) << __func__ << ": request received before tpm manager service "
                << "is initialized.";
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
   if (!ResetDictionaryAttackCounterIfNeeded()) {
     LOG(ERROR) << __func__ << ": failed to reset DA lock.";
@@ -663,6 +860,7 @@ void TpmManagerService::ResetDictionaryAttackLockTask(
     reply->set_status(STATUS_SUCCESS);
   }
   dictionary_attack_timer_.Reset();
+  return reply;
 }
 
 void TpmManagerService::TakeOwnership(const TakeOwnershipRequest& request,
@@ -679,29 +877,39 @@ void TpmManagerService::TakeOwnership(const TakeOwnershipRequest& request,
       request, std::move(callback), &TpmManagerService::TakeOwnershipTask);
 }
 
-void TpmManagerService::TakeOwnershipTask(
-    const TakeOwnershipRequest& request,
-    const std::shared_ptr<TakeOwnershipReply>& reply) {
+std::unique_ptr<TakeOwnershipReply> TpmManagerService::TakeOwnershipTask(
+    const TakeOwnershipRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<TakeOwnershipReply>();
+
+  if (take_ownership_device_error_) {
+    reply->set_status(STATUS_DEVICE_ERROR);
+    return reply;
+  }
 
   if (!tpm_allowed_) {
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
   if (!tpm_status_ || !tpm_status_->IsTpmEnabled()) {
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
   const base::TimeTicks take_ownerhip_start_time = base::TimeTicks::Now();
   bool already_owned;
   if (!tpm_initializer_->InitializeTpm(&already_owned)) {
+    tpm_manager_metrics_->ReportTakeOwnershipResult(
+        TPMTakeOwnershipResult::kFailed);
     LOG(ERROR) << __func__ << ": failed to initialize TPM";
     reply->set_status(STATUS_DEVICE_ERROR);
-    return;
+    return reply;
   }
   if (!already_owned) {
+    tpm_manager_metrics_->ReportTakeOwnershipResult(
+        TPMTakeOwnershipResult::kSuccess);
     tpm_manager_metrics_->ReportTimeToTakeOwnership(base::TimeTicks::Now() -
                                                     take_ownerhip_start_time);
   }
@@ -716,6 +924,7 @@ void TpmManagerService::TakeOwnershipTask(
   // disabled for a device through OOBE.
   DisableDictionaryAttackMitigationIfNeeded();
   reply->set_status(STATUS_SUCCESS);
+  return reply;
 }
 
 void TpmManagerService::RemoveOwnerDependency(
@@ -726,31 +935,31 @@ void TpmManagerService::RemoveOwnerDependency(
       &TpmManagerService::RemoveOwnerDependencyTask);
 }
 
-void TpmManagerService::RemoveOwnerDependencyTask(
-    const RemoveOwnerDependencyRequest& request,
-    const std::shared_ptr<RemoveOwnerDependencyReply>& reply) {
+std::unique_ptr<RemoveOwnerDependencyReply>
+TpmManagerService::RemoveOwnerDependencyTask(
+    const RemoveOwnerDependencyRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<RemoveOwnerDependencyReply>();
 
   if (!tpm_allowed_) {
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
   LocalData local_data;
   if (!local_data_store_->Read(&local_data)) {
     reply->set_status(STATUS_DEVICE_ERROR);
-    return;
+    return reply;
   }
   RemoveOwnerDependencyFromLocalData(request.owner_dependency(), &local_data);
-  if (auto_clear_stored_owner_password_) {
-    ClearOwnerPasswordIfPossible(&local_data);
-  }
   if (!local_data_store_->Write(local_data)) {
     reply->set_status(STATUS_DEVICE_ERROR);
-    return;
+    return reply;
   }
   reply->set_status(STATUS_SUCCESS);
   MarkTpmStatusCacheDirty();
+  return reply;
 }
 
 void TpmManagerService::RemoveOwnerDependencyFromLocalData(
@@ -774,29 +983,37 @@ void TpmManagerService::ClearStoredOwnerPassword(
       &TpmManagerService::ClearStoredOwnerPasswordTask);
 }
 
-void TpmManagerService::ClearStoredOwnerPasswordTask(
-    const ClearStoredOwnerPasswordRequest& request,
-    const std::shared_ptr<ClearStoredOwnerPasswordReply>& reply) {
+std::unique_ptr<ClearStoredOwnerPasswordReply>
+TpmManagerService::ClearStoredOwnerPasswordTask(
+    const ClearStoredOwnerPasswordRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<ClearStoredOwnerPasswordReply>();
 
   if (!tpm_allowed_) {
     reply->set_status(STATUS_NOT_AVAILABLE);
-    return;
+    return reply;
   }
 
   LocalData local_data;
   if (!local_data_store_->Read(&local_data)) {
     reply->set_status(STATUS_DEVICE_ERROR);
-    return;
+    return reply;
   }
-  if (ClearOwnerPasswordIfPossible(&local_data)) {
-    if (!local_data_store_->Write(local_data)) {
-      reply->set_status(STATUS_DEVICE_ERROR);
-      return;
-    }
+
+  auto ReplaceOwnerPasswordResult =
+      ClearOwnerPasswordAndReplaceWithRandomPasswordIfPossible(local_data);
+
+  LOG(INFO) << __func__ << "ReplaceOwnerPasswordResult: "
+            << ToString(ReplaceOwnerPasswordResult);
+  if (ReplaceOwnerPasswordResult ==
+      ReplaceOwnerPasswordResult::kClearSuccessButWriteFail) {
+    reply->set_status(STATUS_DEVICE_ERROR);
+    return reply;
   }
   reply->set_status(STATUS_SUCCESS);
   MarkTpmStatusCacheDirty();
+  return reply;
 }
 
 void TpmManagerService::DefineSpace(const DefineSpaceRequest& request,
@@ -805,14 +1022,15 @@ void TpmManagerService::DefineSpace(const DefineSpaceRequest& request,
                                            &TpmManagerService::DefineSpaceTask);
 }
 
-void TpmManagerService::DefineSpaceTask(
-    const DefineSpaceRequest& request,
-    const std::shared_ptr<DefineSpaceReply>& reply) {
+std::unique_ptr<DefineSpaceReply> TpmManagerService::DefineSpaceTask(
+    const DefineSpaceRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<DefineSpaceReply>();
 
   if (!tpm_allowed_) {
     reply->set_result(NVRAM_RESULT_OPERATION_DISABLED);
-    return;
+    return reply;
   }
 
   std::vector<NvramSpaceAttribute> attributes;
@@ -823,6 +1041,7 @@ void TpmManagerService::DefineSpaceTask(
       tpm_nvram_->DefineSpace(request.index(), request.size(), attributes,
                               request.authorization_value(), request.policy()));
   MarkTpmStatusCacheDirty();
+  return reply;
 }
 
 void TpmManagerService::DestroySpace(const DestroySpaceRequest& request,
@@ -831,18 +1050,20 @@ void TpmManagerService::DestroySpace(const DestroySpaceRequest& request,
       request, std::move(callback), &TpmManagerService::DestroySpaceTask);
 }
 
-void TpmManagerService::DestroySpaceTask(
-    const DestroySpaceRequest& request,
-    const std::shared_ptr<DestroySpaceReply>& reply) {
+std::unique_ptr<DestroySpaceReply> TpmManagerService::DestroySpaceTask(
+    const DestroySpaceRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<DestroySpaceReply>();
 
   if (!tpm_allowed_) {
     reply->set_result(NVRAM_RESULT_OPERATION_DISABLED);
-    return;
+    return reply;
   }
 
   reply->set_result(tpm_nvram_->DestroySpace(request.index()));
   MarkTpmStatusCacheDirty();
+  return reply;
 }
 
 void TpmManagerService::WriteSpace(const WriteSpaceRequest& request,
@@ -851,14 +1072,15 @@ void TpmManagerService::WriteSpace(const WriteSpaceRequest& request,
                                           &TpmManagerService::WriteSpaceTask);
 }
 
-void TpmManagerService::WriteSpaceTask(
-    const WriteSpaceRequest& request,
-    const std::shared_ptr<WriteSpaceReply>& reply) {
+std::unique_ptr<WriteSpaceReply> TpmManagerService::WriteSpaceTask(
+    const WriteSpaceRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<WriteSpaceReply>();
 
   if (!tpm_allowed_) {
     reply->set_result(NVRAM_RESULT_OPERATION_DISABLED);
-    return;
+    return reply;
   }
 
   std::string authorization_value = request.authorization_value();
@@ -867,11 +1089,12 @@ void TpmManagerService::WriteSpaceTask(
     if (authorization_value.empty()) {
       LOG(ERROR) << __func__ << ": Owner auth missing while requested.";
       reply->set_result(NVRAM_RESULT_ACCESS_DENIED);
-      return;
+      return reply;
     }
   }
   reply->set_result(tpm_nvram_->WriteSpace(request.index(), request.data(),
                                            authorization_value));
+  return reply;
 }
 
 void TpmManagerService::ReadSpace(const ReadSpaceRequest& request,
@@ -880,14 +1103,15 @@ void TpmManagerService::ReadSpace(const ReadSpaceRequest& request,
                                          &TpmManagerService::ReadSpaceTask);
 }
 
-void TpmManagerService::ReadSpaceTask(
-    const ReadSpaceRequest& request,
-    const std::shared_ptr<ReadSpaceReply>& reply) {
+std::unique_ptr<ReadSpaceReply> TpmManagerService::ReadSpaceTask(
+    const ReadSpaceRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<ReadSpaceReply>();
 
   if (!tpm_allowed_) {
     reply->set_result(NVRAM_RESULT_OPERATION_DISABLED);
-    return;
+    return reply;
   }
 
   std::string authorization_value = request.authorization_value();
@@ -895,11 +1119,12 @@ void TpmManagerService::ReadSpaceTask(
     authorization_value = GetOwnerPassword();
     if (authorization_value.empty()) {
       reply->set_result(NVRAM_RESULT_ACCESS_DENIED);
-      return;
+      return reply;
     }
   }
   reply->set_result(tpm_nvram_->ReadSpace(
       request.index(), reply->mutable_data(), authorization_value));
+  return reply;
 }
 
 void TpmManagerService::LockSpace(const LockSpaceRequest& request,
@@ -908,14 +1133,15 @@ void TpmManagerService::LockSpace(const LockSpaceRequest& request,
                                          &TpmManagerService::LockSpaceTask);
 }
 
-void TpmManagerService::LockSpaceTask(
-    const LockSpaceRequest& request,
-    const std::shared_ptr<LockSpaceReply>& reply) {
+std::unique_ptr<LockSpaceReply> TpmManagerService::LockSpaceTask(
+    const LockSpaceRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<LockSpaceReply>();
 
   if (!tpm_allowed_) {
     reply->set_result(NVRAM_RESULT_OPERATION_DISABLED);
-    return;
+    return reply;
   }
 
   std::string authorization_value = request.authorization_value();
@@ -923,12 +1149,13 @@ void TpmManagerService::LockSpaceTask(
     authorization_value = GetOwnerPassword();
     if (authorization_value.empty()) {
       reply->set_result(NVRAM_RESULT_ACCESS_DENIED);
-      return;
+      return reply;
     }
   }
   reply->set_result(tpm_nvram_->LockSpace(request.index(), request.lock_read(),
                                           request.lock_write(),
                                           authorization_value));
+  return reply;
 }
 
 void TpmManagerService::ListSpaces(const ListSpacesRequest& request,
@@ -937,14 +1164,15 @@ void TpmManagerService::ListSpaces(const ListSpacesRequest& request,
                                           &TpmManagerService::ListSpacesTask);
 }
 
-void TpmManagerService::ListSpacesTask(
-    const ListSpacesRequest& request,
-    const std::shared_ptr<ListSpacesReply>& reply) {
+std::unique_ptr<ListSpacesReply> TpmManagerService::ListSpacesTask(
+    const ListSpacesRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<ListSpacesReply>();
 
   if (!tpm_allowed_) {
     reply->set_result(NVRAM_RESULT_OPERATION_DISABLED);
-    return;
+    return reply;
   }
 
   std::vector<uint32_t> index_list;
@@ -954,6 +1182,7 @@ void TpmManagerService::ListSpacesTask(
       reply->add_index_list(index);
     }
   }
+  return reply;
 }
 
 void TpmManagerService::GetSpaceInfo(const GetSpaceInfoRequest& request,
@@ -962,14 +1191,15 @@ void TpmManagerService::GetSpaceInfo(const GetSpaceInfoRequest& request,
       request, std::move(callback), &TpmManagerService::GetSpaceInfoTask);
 }
 
-void TpmManagerService::GetSpaceInfoTask(
-    const GetSpaceInfoRequest& request,
-    const std::shared_ptr<GetSpaceInfoReply>& reply) {
+std::unique_ptr<GetSpaceInfoReply> TpmManagerService::GetSpaceInfoTask(
+    const GetSpaceInfoRequest& request) {
   VLOG(1) << __func__;
+
+  auto reply = std::make_unique<GetSpaceInfoReply>();
 
   if (!tpm_allowed_) {
     reply->set_result(NVRAM_RESULT_OPERATION_DISABLED);
-    return;
+    return reply;
   }
 
   std::vector<NvramSpaceAttribute> attributes;
@@ -989,6 +1219,43 @@ void TpmManagerService::GetSpaceInfoTask(
     }
     reply->set_policy(policy);
   }
+  return reply;
+}
+
+TpmManagerService::ReplaceOwnerPasswordResult
+TpmManagerService::ClearOwnerPasswordAndReplaceWithRandomPasswordIfPossible(
+    LocalData& local_data) {
+  if (!local_data.has_owner_password()) {
+    LOG(ERROR) << __func__ << ": missing owner password.";
+    return ReplaceOwnerPasswordResult::kFail;
+  }
+
+  if (!local_data.owner_dependency().empty()) {
+    LOG(ERROR) << __func__ << ": owner dependency exists.";
+    return ReplaceOwnerPasswordResult::kFail;
+  }
+
+  const std::string old_password = local_data.owner_password();
+  local_data.clear_owner_password();
+
+  if (!local_data_store_->Write(local_data)) {
+    LOG(ERROR) << __func__ << ": error while writing to local_data_store_";
+    return ReplaceOwnerPasswordResult::kClearSuccessButWriteFail;
+  }
+
+  std::string new_password;
+  if (!openssl_util_.GetRandomBytes(kRandomOwnerPasswordLength,
+                                    &new_password)) {
+    LOG(ERROR) << __func__ << ": error while generating new random password.";
+    return ReplaceOwnerPasswordResult::kPasswordGenerationFail;
+  }
+
+  bool status =
+      tpm_initializer_->ChangeOwnerPassword(old_password, new_password);
+  brillo::SecureClearContainer(new_password);
+
+  return status ? ReplaceOwnerPasswordResult::kSuccess
+                : ReplaceOwnerPasswordResult::kFail;
 }
 
 std::string TpmManagerService::GetOwnerPassword() {
@@ -1100,11 +1367,60 @@ void TpmManagerService::ShutdownTask() {
   TPM_SELECT_END;
 }
 
-template <typename ReplyProtobufType>
-void TpmManagerService::TaskRelayCallback(
-    base::OnceCallback<void(const ReplyProtobufType&)> callback,
-    const std::shared_ptr<ReplyProtobufType>& reply) {
-  std::move(callback).Run(*reply);
+// Report power wash result if this is the first boot after power wash.
+void TpmManagerService::CheckPowerWashResult(
+    const TpmStatus::TpmOwnershipStatus status) {
+  // .powerwash_completed is created by clobber-state no matter power wash
+  // success or not.
+  base::FilePath complete_file = base::FilePath(kPowerWashCompletedFile);
+  base::FilePath report_file = base::FilePath(kPowerWashReportedFile);
+  bool complete_file_exist = base::PathExists(complete_file);
+  bool report_file_exist = base::PathExists(report_file);
+
+  if (complete_file_exist && !report_file_exist) {
+    if (base::WriteFile(report_file, "", 0) < 0) {
+      LOG(WARNING) << __func__ << ": Unable to create " << report_file.value();
+    }
+    TPM_SELECT_BEGIN;
+    TPM2_SECTION({
+      if (TpmStatus::kTpmUnowned == status) {
+        LOG(INFO) << __func__
+                  << ": Power wash success. TPM is in not owned state.";
+        tpm_manager_metrics_->ReportPowerWashResult(
+            TPMPowerWashResult::kTPMClearSuccess);
+      } else {
+        // Pre M103 (TPM ownership not automatically taken by tpm_manager)
+        // upgrade to a version execute following code can trigger this error
+        // report. We expect the number should gradually decrease.
+        LOG(ERROR) << __func__ << ": Power wash failed. TPM state is "
+                   << TpmOwnershipStatusToString(status);
+        tpm_manager_metrics_->ReportPowerWashResult(
+            TPMPowerWashResult::kTPMClearFailed);
+      }
+    });
+    TPM1_SECTION({
+      if (TpmStatus::kTpmPreOwned == status) {
+        LOG(INFO) << __func__
+                  << ": Power wash success. TPM is in pre owned state.";
+        tpm_manager_metrics_->ReportPowerWashResult(
+            TPMPowerWashResult::kTPMClearSuccess);
+      } else {
+        LOG(ERROR) << __func__ << ": Power wash failed. TPM state is "
+                   << TpmOwnershipStatusToString(status);
+        tpm_manager_metrics_->ReportPowerWashResult(
+            TPMPowerWashResult::kTPMClearFailed);
+      }
+    });
+    OTHER_TPM_SECTION({
+      LOG(INFO) << __func__ << ": TPM state is "
+                << TpmOwnershipStatusToString(status) << " after power wash";
+    });
+    TPM_SELECT_END;
+  } else if (!complete_file_exist && report_file_exist) {
+    if (!base::DeleteFile(report_file)) {
+      LOG(WARNING) << __func__ << ": Unable to delete " << report_file.value();
+    }
+  }
 }
 
 template <typename ReplyProtobufType,
@@ -1115,14 +1431,15 @@ void TpmManagerService::PostTaskToWorkerThread(
     const RequestProtobufType& request,
     ReplyCallbackType callback,
     TaskType task) {
-  auto result = std::make_shared<ReplyProtobufType>();
-  base::OnceClosure background_task =
-      base::BindOnce(task, base::Unretained(this), request, result);
-  base::OnceClosure reply =
-      base::BindOnce(&TpmManagerService::TaskRelayCallback<ReplyProtobufType>,
-                     weak_factory_.GetWeakPtr(), std::move(callback), result);
-  worker_thread_->task_runner()->PostTaskAndReply(
-      FROM_HERE, std::move(background_task), std::move(reply));
+  using UniqueReplyPointer = std::unique_ptr<ReplyProtobufType>;
+  base::OnceCallback<UniqueReplyPointer()> background_task =
+      base::BindOnce(task, base::Unretained(this), request);
+  base::OnceCallback<void(UniqueReplyPointer)> reply_callback = base::BindOnce(
+      [](base::OnceCallback<void(const ReplyProtobufType&)> callback,
+         UniqueReplyPointer reply) { std::move(callback).Run(*reply); },
+      std::move(callback));
+  worker_thread_->task_runner()->PostTaskAndReplyWithResult(
+      FROM_HERE, std::move(background_task), std::move(reply_callback));
 }
 
 template <typename ReplyProtobufType,
@@ -1130,14 +1447,15 @@ template <typename ReplyProtobufType,
           typename TaskType>
 void TpmManagerService::PostTaskToWorkerThreadWithoutRequest(
     ReplyCallbackType callback, TaskType task) {
-  auto result = std::make_shared<ReplyProtobufType>();
-  base::OnceClosure background_task =
-      base::BindOnce(task, base::Unretained(this), result);
-  base::OnceClosure reply =
-      base::BindOnce(&TpmManagerService::TaskRelayCallback<ReplyProtobufType>,
-                     weak_factory_.GetWeakPtr(), std::move(callback), result);
-  worker_thread_->task_runner()->PostTaskAndReply(
-      FROM_HERE, std::move(background_task), std::move(reply));
+  using UniqueReplyPointer = std::unique_ptr<ReplyProtobufType>;
+  base::OnceCallback<UniqueReplyPointer()> background_task =
+      base::BindOnce(task, base::Unretained(this));
+  base::OnceCallback<void(UniqueReplyPointer)> reply_callback = base::BindOnce(
+      [](base::OnceCallback<void(const ReplyProtobufType&)> callback,
+         UniqueReplyPointer reply) { std::move(callback).Run(*reply); },
+      std::move(callback));
+  worker_thread_->task_runner()->PostTaskAndReplyWithResult(
+      FROM_HERE, std::move(background_task), std::move(reply_callback));
 }
 
 }  // namespace tpm_manager

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,29 +9,29 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/cancelable_callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
+#include <base/time/time.h>
+#include <base/types/expected.h>
+#include <net-base/ip_address.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 #include "shill/error.h"
 #include "shill/event_dispatcher.h"
-#include "shill/net/ip_address.h"
-#include "shill/refptr_types.h"
 
 struct hostent;
 
 namespace shill {
 
 class Ares;
-class IOHandlerFactory;
-class Time;
 struct DnsClientState;
 
 // Implements a DNS resolution client that can run asynchronously.
 class DnsClient {
  public:
-  using ClientCallback = base::Callback<void(const Error&, const IPAddress&)>;
+  using ClientCallback = base::RepeatingCallback<void(
+      const base::expected<net_base::IPAddress, Error>&)>;
 
   static const char kErrorNoData[];
   static const char kErrorFormErr[];
@@ -44,11 +44,17 @@ class DnsClient {
   static const char kErrorTimedOut[];
   static const char kErrorUnknown[];
 
-  static const int kDnsTimeoutMilliseconds = 8000;
+  // Total default timeout for the query over all tries and all name servers.
+  static constexpr base::TimeDelta kDnsTimeout = base::Milliseconds(8000);
+  // Minimum timeout per query to a name server.
+  static constexpr base::TimeDelta kDnsQueryMinTimeout =
+      base::Milliseconds(1000);
+  // Total number of tries per name server.
+  static constexpr int kDnsQueryTries = 2;
 
-  DnsClient(IPAddress::Family family,
+  DnsClient(net_base::IPFamily family,
             const std::string& interface_name,
-            int timeout_ms,
+            base::TimeDelta timeout,
             EventDispatcher* dispatcher,
             const ClientCallback& callback);
   DnsClient(const DnsClient&) = delete;
@@ -80,6 +86,7 @@ class DnsClient {
   void HandleDnsRead(int fd);
   void HandleDnsWrite(int fd);
   void HandleTimeout();
+  void ProcessFd(int read_fd, int write_fd);
   void ReceiveDnsReply(int status, struct hostent* hostent);
   static void ReceiveDnsReplyCB(void* arg,
                                 int status,
@@ -90,18 +97,16 @@ class DnsClient {
   void StopWriteHandlers();
 
   Error error_;
-  IPAddress address_;
+  net_base::IPAddress address_;
   std::string interface_name_;
   EventDispatcher* dispatcher_;
-  IOHandlerFactory* io_handler_factory_;
   ClientCallback callback_;
-  int timeout_ms_;
+  base::TimeDelta timeout_;
   bool running_;
   std::unique_ptr<DnsClientState> resolver_state_;
-  base::CancelableClosure timeout_closure_;
+  base::CancelableOnceClosure timeout_closure_;
   base::WeakPtrFactory<DnsClient> weak_ptr_factory_;
   Ares* ares_;
-  Time* time_;
 };
 
 }  // namespace shill

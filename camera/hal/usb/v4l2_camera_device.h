@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -10,6 +10,7 @@
 #include <time.h>
 
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,11 +18,12 @@
 #include <base/files/scoped_file.h>
 #include <base/synchronization/lock.h>
 #include <base/threading/thread.h>
+#include <linux/videodev2.h>
 
 #include "cros-camera/cros_camera_hal.h"
 #include "cros-camera/timezone.h"
-#include "hal/usb/camera_privacy_switch_monitor.h"
 #include "hal/usb/common_types.h"
+#include "hal/usb/v4l2_event_monitor.h"
 
 namespace cros {
 
@@ -39,13 +41,13 @@ struct ControlInfo {
   std::vector<std::string> menu_items;
 };
 
-struct RoiControl {
-  // ROI auto-controls flags. It is a bitwise flag for
-  // V4L2_CID_REGION_OF_INTEREST_AUTO which are defined in v4l2-control.h
-  uint32_t roi_flags;
-  Rect<int> roi_default;
-  Rect<int> roi_bounds_min;
-  Rect<int> roi_bounds_max;
+enum class RoiControlApi {
+  // Use VIDIOC_S_SELECTION to set ROI.
+  kSelection,
+  // Use V4L2_CID_UVC_REGION_OF_INTEREST_RECT to set ROI.
+  kUvcRoiRect,
+  // Use V4L2_CID_UVC_REGION_OF_INTEREST_RECT_RELATIVE to set ROI.
+  kUvcRoiRectRelative,
 };
 
 enum ControlType {
@@ -58,13 +60,26 @@ enum ControlType {
   kControlExposureAutoPriority,  // 0 for constant frame rate
   kControlExposureTime,
   kControlPan,
+
+  // If kernel is not updated to use control selector defined in
+  // go/cros-uvc-xu-spec, use the legacy control selector.
+  kControlRegionOfInterestAutoLegacy,
+
   kControlRegionOfInterestAuto,
+  kControlRegionOfInterestRect,
+  kControlRegionOfInterestRectRelative,
   kControlSaturation,
   kControlSharpness,
   kControlTilt,
   kControlZoom,
   kControlWhiteBalanceTemperature,
   kControlPrivacy,
+  kControlPowerLineFrequency
+};
+struct RoiControl {
+  Rect<int> roi_bounds_default;
+  Rect<int> roi_bounds;
+  Size min_roi_size;
 };
 
 constexpr uint32_t kColorTemperatureAuto = 0;
@@ -75,7 +90,8 @@ class V4L2CameraDevice {
  public:
   V4L2CameraDevice();
   V4L2CameraDevice(const DeviceInfo& device_info,
-                   CameraPrivacySwitchMonitor* privacy_switch_monitor);
+                   V4L2EventMonitor* v4l2_event_monitor,
+                   bool sw_privacy_switch_on);
   V4L2CameraDevice(const V4L2CameraDevice&) = delete;
   V4L2CameraDevice& operator=(const V4L2CameraDevice&) = delete;
 
@@ -83,7 +99,7 @@ class V4L2CameraDevice {
 
   // Connect camera device with |device_path|. Return 0 if device is opened
   // successfully. Otherwise, return -|errno|.
-  int Connect(const std::string& device_path);
+  int Connect(const base::FilePath& device_path);
 
   // Disconnect camera device. This function is a no-op if the camera device
   // is not connected. If the stream is on, this function will also stop the
@@ -119,7 +135,8 @@ class V4L2CameraDevice {
   int GetNextFrameBuffer(uint32_t* buffer_id,
                          uint32_t* data_size,
                          uint64_t* v4l2_ts,
-                         uint64_t* user_ts);
+                         uint64_t* user_ts,
+                         std::optional<int> frame_number);
 
   // Return |buffer_id| buffer to device. Return 0 if the buffer is returned
   // successfully. Otherwise, return -|errno|. This function should be called
@@ -147,8 +164,6 @@ class V4L2CameraDevice {
   // time. The unit of v4l2 is 100 microseconds.
   int SetExposureTimeHundredUs(uint32_t exposure_time);
 
-  // TODO(shik): Change the type of |device_path| to base::FilePath.
-
   // Whether the device supports updating frame rate.
   bool CanUpdateFrameRate();
 
@@ -172,60 +187,67 @@ class V4L2CameraDevice {
   int GetControlValue(ControlType type, int32_t* value);
 
   // Sets the region of interest.
-  int SetRegionOfInterest(const Rect<int>& rectangle);
+  int SetRegionOfInterest(const Rect<int>& roi,
+                          const Rect<int>& active_array_rect);
+
+  // Sets SW privacy switch state. If |on| is false, starts streaming. If |on|
+  // is true, stops streaming. Note that this function does not change the value
+  // of |stream_on_|.
+  int SetPrivacySwitchState(bool on);
 
   // Get all supported formats of device by |device_path|. This function can be
   // called without calling Connect().
   static const SupportedFormats GetDeviceSupportedFormats(
-      const std::string& device_path);
-
-  // Get power frequency supported from device.
-  static PowerLineFrequency GetPowerLineFrequency(
-      const std::string& device_path);
+      const base::FilePath& device_path);
 
   // If the device supports manual focus distance, returns the focus distance
   // range to |focus_distance_range|.
-  static bool IsFocusDistanceSupported(const std::string& device_path,
+  static bool IsFocusDistanceSupported(const base::FilePath& device_path,
                                        ControlRange* focus_distance_range);
 
   // If the device supports manual exposure time, returns the exposure time
   // range to |exposure_time_range|.
-  static bool IsManualExposureTimeSupported(const std::string& device_path,
+  static bool IsManualExposureTimeSupported(const base::FilePath& device_path,
                                             ControlRange* exposure_time_range);
 
-  static bool IsCameraDevice(const std::string& device_path);
+  static bool IsCameraDevice(const base::FilePath& device_path);
 
   // Get clock type in UVC driver to report the same time base in user space.
   static clockid_t GetUvcClock();
 
+  // Get timestamp in user space.
+  static int GetUserSpaceTimestamp(timespec& ts);
+
   // Get the model name from |device_path|.
-  static std::string GetModelName(const std::string& device_path);
+  static std::string GetModelName(const base::FilePath& device_path);
 
   // Return true if control |type| is supported otherwise return false.
-  static bool IsControlSupported(const std::string& device_path,
+  static bool IsControlSupported(const base::FilePath& device_path,
                                  ControlType type);
 
   // Query control.
   // Return 0 if operation successfully. Otherwise, return |-errno|.
   // The control info is stored in |info|.
-  static int QueryControl(const std::string& device_path,
+  static int QueryControl(const base::FilePath& device_path,
                           ControlType type,
                           ControlInfo* info);
 
   // Return 0 if operation successfully. Otherwise, return |-errno|.
   // The returned value is stored in |value|.
-  static int GetControlValue(const std::string& device_path,
+  static int GetControlValue(const base::FilePath& device_path,
                              ControlType type,
                              int32_t* value);
 
   // Return 0 if operation successfully. Otherwise, return |-errno|.
-  static int SetControlValue(const std::string& device_path,
+  static int SetControlValue(const base::FilePath& device_path,
                              ControlType type,
                              int32_t value);
 
   // Return false if device doesn't support ROI controls.
-  static bool IsRegionOfInterestSupported(std::string device_path,
-                                          RoiControl* roi_control);
+  static bool IsRegionOfInterestSupported(base::FilePath device_path,
+                                          ControlType* control_roi_auto,
+                                          RoiControlApi* api,
+                                          uint32_t* roi_flags);
 
  private:
   static std::vector<float> GetFrameRateList(int fd,
@@ -246,19 +268,40 @@ class V4L2CameraDevice {
   static int GetControlValue(int fd, ControlType type, int32_t* value);
 
   // Return false if device doesn't support ROI controls.
-  static bool IsRegionOfInterestSupported(int fd, RoiControl* roi_control);
+  static bool IsRegionOfInterestSupported(int fd,
+                                          ControlType* control_roi_auto,
+                                          RoiControlApi* api,
+                                          uint32_t* roi_flags);
 
   // This is for suspend/resume feature. USB camera will be enumerated after
   // device resumed. But camera device may not be ready immediately.
-  static int RetryDeviceOpen(const std::string& device_path, int flags);
+  static int RetryDeviceOpen(const base::FilePath& device_path, int flags);
+
+  // Get ROI information from camera;
+  static bool GetRegionOfInterestInfo(int fd,
+                                      RoiControlApi api,
+                                      RoiControl* roi_control);
 
   int QueryControl(ControlType type, ControlInfo* info);
 
   // Set power frequency supported from device.
-  int SetPowerLineFrequency(PowerLineFrequency setting);
+  int SetPowerLineFrequency();
 
   // Returns true if the current connected device is an external camera.
   bool IsExternalCamera();
+
+  // Call the VIDIOC_QBUF ioctl.
+  int EnqueueBuffer(v4l2_buffer& buffer);
+
+  // Call the VIDIOC_STREAMON ioctl.
+  int StartStreaming();
+
+  // Call the VIDIOC_STREAMOFF ioctl.
+  int StopStreaming();
+
+  // Get coordination transform from active array coordinate to ROI coordinate
+  void TransformFromActiveArrayToROICoordinate(const Size& active_array_size,
+                                               Rect<int>& roi);
 
   // The number of video buffers we want to request in kernel.
   const int kNumVideoBuffers = 4;
@@ -268,6 +311,9 @@ class V4L2CameraDevice {
 
   // StreamOn state
   bool stream_on_;
+
+  // SW privacy switch state.
+  bool sw_privacy_switch_on_ = false;
 
   // AF state
   bool focus_auto_supported_;
@@ -292,12 +338,25 @@ class V4L2CameraDevice {
 
   RoiControl roi_control_;
 
-  // Monitor for the status change of camera privacy switch.
-  CameraPrivacySwitchMonitor* privacy_switch_monitor_;
+  // Monitor for the status change of HW camera privacy switch and shutter
+  // event.
+  V4L2EventMonitor* v4l2_event_monitor_;
 
   // Since V4L2CameraDevice may be called on different threads, this is used to
   // guard all variables.
   base::Lock lock_;
+
+  // The control we should use to set ROI flags on this device.
+  // Either kControlRegionOfInterestAuto or kControlRegionOfInterestAutoLegacy.
+  ControlType control_region_of_interest_auto_ =
+      kControlRegionOfInterestAutoLegacy;
+
+  // The API we should use to set ROI on this device.
+  RoiControlApi roi_control_api_ = RoiControlApi::kSelection;
+
+  // ROI auto-controls flags. It is a bitwise flag for
+  // V4L2_CID_REGION_OF_INTEREST_AUTO which are defined in v4l2-control.h
+  uint32_t roi_flags_ = 0;
 };
 
 }  // namespace cros

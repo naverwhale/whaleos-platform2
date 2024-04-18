@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 
 #include "debugd/src/subprocess_tool.h"
 
@@ -26,16 +25,18 @@ class StorageTool : public SubprocessTool {
 
   std::string Smartctl(const std::string& option);
   std::string Start(const base::ScopedFD& outfd);
-  const base::FilePath GetDevice(const base::FilePath& filesystem,
-                                 const base::FilePath& mountsFile);
   bool IsSupported(const base::FilePath typeFile,
                    const base::FilePath vendFile,
                    std::string* errorMsg);
   std::string Mmc(const std::string& option);
+  std::string Ufs(const std::string& option);
   std::string Nvme(const std::string& option);
   std::string NvmeLog(const uint32_t& page_id,
                       const uint32_t& length,
                       bool raw_binary);
+
+ protected:
+  virtual const base::FilePath GetRootDevice();
 
  private:
   // Returns the partition of |dst| as a string. |dst| is expected

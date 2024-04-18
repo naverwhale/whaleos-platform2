@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,6 +28,11 @@ const char kFeatureFlags[] = "feature-flags";
 // take an optional string argument which is supposed to specify a list of web
 // origins). Example: {"isolate-origins":"http://example.com"}
 const char kFeatureFlagsOriginList[] = "feature-flags-origin-list";
+
+// Disables GPU accelerated video decoding when passed to Chrome as a
+// command-line argument.
+const char kDisableAcceleratedVideoDecode[] =
+    "--disable-accelerated-video-decode";
 
 }  // namespace switches
 }  // namespace chromeos

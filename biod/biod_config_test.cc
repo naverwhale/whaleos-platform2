@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,24 +9,38 @@
 
 namespace biod {
 
-TEST(FingerprintUnsupportedTest, FingerprintLocationUnset) {
+TEST(FingerprintSupportedTest, FingerprintLocationUnset) {
   // Given a device that does not indicate fingerprint sensor location
   brillo::FakeCrosConfig cros_config;
-  // expect FingerprintUnsupported to report false.
-  EXPECT_FALSE(FingerprintUnsupported(&cros_config));
+  // expect FingerprintSupported to report false.
+  EXPECT_FALSE(FingerprintSupported(&cros_config));
 }
 
-TEST(FingerprintUnsupportedTest, FingerprintLocationSet) {
+TEST(FingerprintSupportedTest, FingerprintLocationSet) {
   brillo::FakeCrosConfig cros_config;
   cros_config.SetString(kCrosConfigFPPath, kCrosConfigFPLocation,
                         "power-button-top-left");
-  EXPECT_FALSE(FingerprintUnsupported(&cros_config));
+  EXPECT_TRUE(FingerprintSupported(&cros_config));
 }
 
-TEST(FingerprintUnsupportedTest, FingerprintLocationSetNone) {
+TEST(FingerprintSupportedTest, FingerprintLocationSetNone) {
   brillo::FakeCrosConfig cros_config;
   cros_config.SetString(kCrosConfigFPPath, kCrosConfigFPLocation, "none");
-  EXPECT_TRUE(FingerprintUnsupported(&cros_config));
+  EXPECT_FALSE(FingerprintSupported(&cros_config));
+}
+
+TEST(FingerprintBoardTest, FingerprintBoardUnset) {
+  // Given a device that does not indicate fingerprint board
+  brillo::FakeCrosConfig cros_config;
+  // expect FingerprintBoard to report false.
+  EXPECT_FALSE(FingerprintBoard(&cros_config));
+}
+
+TEST(FingerprintBoardTest, FingerprintBoardSet) {
+  brillo::FakeCrosConfig cros_config;
+  cros_config.SetString(kCrosConfigFPPath, kCrosConfigFPBoard,
+                        kFpBoardDartmonkey);
+  EXPECT_EQ(FingerprintBoard(&cros_config), kFpBoardDartmonkey);
 }
 
 }  // namespace biod

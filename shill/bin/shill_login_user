@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -88,10 +88,6 @@ fi
 ln -s "${profile_dir}" "${profile_link_dir}" ||
   logger -t "${script_name}" \
     "Failed to create shill user cryptohome link ${profile_link_dir}"
-
-# We don't log here any more.
-# TODO(crbug.com/1076094): remove this after M-86.
-rm -rf "${profile_base}/shill_logs"
 
 # wait_for_shill_dbus_services polls for the org.chromium.flimflam
 # in the org.freedesktop.DBus.ListNames list that has all connected

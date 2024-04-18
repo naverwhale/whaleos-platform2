@@ -1,10 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/util/status.h"
 
-#include <stdio.h>
+#include <algorithm>
 #include <utility>
 
 #include <base/logging.h>
@@ -41,6 +41,8 @@ TEST(Status, CheckOK) {
   Status status;
   CHECK_OK(status);
   CHECK_OK(status) << "Failed";
+  // DCHECK is ok to use here since we're just verifying functionality of Status
+  // to work with all types of checks.
   DCHECK_OK(status) << "Failed";
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 
@@ -41,6 +41,11 @@ class SupplicantInterfaceProxyInterface {
       const std::vector<unsigned char>& mask, bool sched_scan) = 0;
   virtual bool DisableMacAddressRandomization() = 0;
   virtual bool GetCapabilities(KeyValueStore* capabilities) = 0;
+  virtual bool AddCred(const KeyValueStore& args, RpcIdentifier* cred) = 0;
+  virtual bool RemoveCred(const RpcIdentifier& cred) = 0;
+  virtual bool RemoveAllCreds() = 0;
+  virtual bool InterworkingSelect() = 0;
+  virtual bool SignalPoll(KeyValueStore* signalInfo) = 0;
 };
 
 }  // namespace shill

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,13 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 #include "shill/callbacks.h"
 #include "shill/default_service_observer.h"
+#include "shill/ipconfig.h"
 #include "shill/service.h"
 #include "shill/vpn/vpn_driver.h"
 
@@ -30,16 +32,17 @@ class VPNService : public Service,
 
   // Inherited from Service.
   std::string GetStorageIdentifier() const override;
-  bool IsAlwaysOnVpn(const std::string& package) const override;
   bool Load(const StoreInterface* storage) override;
   void MigrateDeprecatedStorage(StoreInterface* storage) override;
   bool Save(StoreInterface* storage) override;
   bool Unload() override;
   void EnableAndRetainAutoConnect() override;
+  TetheringState GetTethering() const override;
   bool SetNameProperty(const std::string& name, Error* error) override;
+  VirtualDeviceRefPtr GetVirtualDevice() const override;
 
   // Power management events.
-  void OnBeforeSuspend(const ResultCallback& callback) override;
+  void OnBeforeSuspend(ResultCallback callback) override;
   void OnAfterResume() override;
 
   // Inherited from DefaultServiceObserver.
@@ -56,8 +59,7 @@ class VPNService : public Service,
                                              Error* error);
   void set_storage_id(const std::string& id) { storage_id_ = id; }
 
-  // Returns the Type name of the lowest connection (presumably the "physical"
-  // connection) that this service depends on.
+  // Returns the type name of the underlying physical service.
   std::string GetPhysicalTechnologyProperty(Error* error);
 
   // Returns true if the service supports always-on VPN.
@@ -66,35 +68,40 @@ class VPNService : public Service,
   // Inherited from VPNDriver::EventHandler. Callbacks from VPNDriver.
   void OnDriverConnected(const std::string& if_name, int if_index) override;
   void OnDriverFailure(ConnectFailure failure,
-                       const std::string& error_details) override;
+                       std::string_view error_details) override;
   void OnDriverReconnecting(base::TimeDelta timeout) override;
+
+  const NetworkConfig& static_network_config_for_testing() {
+    return mutable_static_ip_parameters()->config();
+  }
 
  protected:
   // Inherited from Service.
   void OnConnect(Error* error) override;
   void OnDisconnect(Error* error, const char* reason) override;
   bool IsAutoConnectable(const char** reason) const override;
-  std::string GetTethering(Error* error) const override;
+
+  // Create a VPN VirtualDevice as device_. virtual for overriding in unit test.
+  mockable bool CreateDevice(const std::string& if_name, int if_index);
+
+  VirtualDeviceRefPtr device_;
 
  private:
   friend class VPNServiceTest;
-  FRIEND_TEST(VPNServiceTest, GetDeviceRpcId);
+  FRIEND_TEST(ManagerTest, FindDeviceFromService);
   FRIEND_TEST(VPNServiceTest, GetPhysicalTechnologyPropertyFailsIfNoCarrier);
   FRIEND_TEST(VPNServiceTest, GetPhysicalTechnologyPropertyOverWifi);
-  FRIEND_TEST(VPNServiceTest, GetTethering);
   FRIEND_TEST(VPNServiceTest, ConfigureDeviceAndCleanupDevice);
+  FRIEND_TEST(VPNServiceTest, ReportIPTypeMetrics);
   FRIEND_TEST(VPNServiceTest, ConnectFlow);
 
-  static const char kAutoConnNeverConnected[];
-  static const char kAutoConnVPNAlreadyActive[];
+  static constexpr char kAutoConnNeverConnected[] = "never connected";
+  static constexpr char kAutoConnVPNAlreadyActive[] = "vpn already active";
 
   RpcIdentifier GetDeviceRpcId(Error* error) const override;
 
-  ConnectionConstRefPtr GetUnderlyingConnection() const;
-
-  // Create a VPN VirtualDevice as device_.
-  bool CreateDevice(const std::string& if_name, int if_index);
-  void ConfigureDevice();
+  void ConfigureDevice(std::unique_ptr<IPConfig::Properties> ipv4_props,
+                       std::unique_ptr<IPConfig::Properties> ipv6_props);
   void CleanupDevice();
 
   // Initializes a callback that will invoke OnDriverConnectTimeout() after
@@ -110,7 +117,6 @@ class VPNService : public Service,
 
   std::string storage_id_;
   std::unique_ptr<VPNDriver> driver_;
-  VirtualDeviceRefPtr device_;
 
   // Indicates whether the default physical service state, which is known from
   // Manager, is online. Helps distinguish between a network->network transition
@@ -123,7 +129,7 @@ class VPNService : public Service,
   // The current default physical service known from Manager.
   std::string last_default_physical_service_path_;
 
-  base::CancelableClosure driver_connect_timeout_callback_;
+  base::CancelableOnceClosure driver_connect_timeout_callback_;
 
   base::WeakPtrFactory<VPNService> weak_factory_{this};
 };

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -41,9 +41,7 @@ class FUSEMountManager : public MountManager {
   // identifying FUSE module and what instance to mount.
   bool CanMount(const std::string& source) const override;
 
-  // Returns the type of mount sources supported by the manager.
-  MountSourceType GetMountSourceType() const override {
-    // TODO(crbug.com/831491): Introduce generic "FUSE" storage.
+  MountSourceType GetMountSourceType() const final {
     return MOUNT_SOURCE_NETWORK_STORAGE;
   }
 
@@ -57,7 +55,7 @@ class FUSEMountManager : public MountManager {
                                       const std::string& fuse_type,
                                       const std::vector<std::string>& options,
                                       const base::FilePath& mount_path,
-                                      MountErrorType* error) override;
+                                      MountError* error) override;
 
   // Returns a suggested mount path for a source.
   std::string SuggestMountPath(const std::string& source) const override;

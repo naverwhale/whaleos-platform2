@@ -1,36 +1,39 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include <memory>
 #include <string>
 
 #include <base/check.h>
 #include <base/files/file_util.h>
-#include <base/guid.h>
 #include <base/logging.h>
+#include <base/uuid.h>
 
+#include "vm_tools/concierge/metrics/duration_recorder.h"
+#include "vm_tools/concierge/network/plugin_vm_network.h"
 #include "vm_tools/concierge/plugin_vm.h"
 #include "vm_tools/concierge/plugin_vm_helper.h"
 #include "vm_tools/concierge/service.h"
-#include "vm_tools/concierge/shared_data.h"
+#include "vm_tools/concierge/service_common.h"
+#include "vm_tools/concierge/service_start_vm_helper.h"
+#include "vm_tools/concierge/vm_base_impl.h"
 #include "vm_tools/concierge/vmplugin_dispatcher_interface.h"
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 
 namespace {
 
-bool GetPluginStatefulDirectory(const std::string& vm_id,
-                                const std::string& cryptohome_id,
+bool GetPluginStatefulDirectory(const VmId& vm_id,
                                 bool create,
                                 base::FilePath* path_out) {
   return GetPluginDirectory(base::FilePath(kCryptohomeRoot)
                                 .Append(kPluginVmDir)
-                                .Append(cryptohome_id),
-                            "pvm", vm_id, create, path_out);
+                                .Append(vm_id.owner_id()),
+                            "pvm", vm_id.name(), create, path_out);
 }
 
 bool GetPluginRuntimeDirectory(const std::string& vm_id,
@@ -95,45 +98,57 @@ bool GetPlugin9PSocketPath(const std::string& vm_id, base::FilePath* path_out) {
 
 }  // namespace
 
-std::unique_ptr<dbus::Response> Service::StartPluginVm(
-    dbus::MethodCall* method_call) {
+void Service::StartPluginVm(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        vm_tools::concierge::StartVmResponse>> response_sender,
+    const vm_tools::concierge::StartPluginVmRequest& request) {
   LOG(INFO) << "Received StartPluginVm request";
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  std::unique_ptr<dbus::Response> dbus_response(
-      dbus::Response::FromMethodCall(method_call));
-  dbus::MessageReader reader(method_call);
-  dbus::MessageWriter writer(dbus_response.get());
-  StartPluginVmRequest request;
   StartVmResponse response;
-  auto helper_result = StartVmHelper<StartPluginVmRequest>(
-      method_call, &reader, &writer, true /* allow_zero_cpus */);
-  if (!helper_result) {
-    return dbus_response;
+  // We change to a success status later if necessary.
+  response.set_status(VM_STATUS_FAILURE);
+
+  if (!CheckStartVmPreconditions(request, &response)) {
+    response_sender->Return(response);
+    return;
   }
-  std::tie(request, response) = *helper_result;
+
+  StartPluginVmInternal(request, response);
+  response_sender->Return(response);
+}
+
+StartVmResponse Service::StartPluginVmInternal(StartPluginVmRequest request,
+                                               StartVmResponse& response) {
+  LOG(INFO) << "Received StartPluginVm request";
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  VmId vm_id(request.owner_id(), request.name());
+
   VmInfo* vm_info = response.mutable_vm_info();
   vm_info->set_vm_type(VmInfo::PLUGIN_VM);
 
+  // Log how long it takes to start the VM.
+  metrics::DurationRecorder duration_recorder(
+      raw_ref<MetricsLibraryInterface>::from_ptr(metrics_.get()),
+      apps::VmType::PLUGIN_VM, metrics::DurationRecorder::Event::kVmStart);
+
   // Get the stateful directory.
   base::FilePath stateful_dir;
-  if (!GetPluginStatefulDirectory(request.name(), request.owner_id(),
-                                  true /* create */, &stateful_dir)) {
+  if (!GetPluginStatefulDirectory(vm_id, true /* create */, &stateful_dir)) {
     LOG(ERROR) << "Unable to create stateful directory for VM";
 
     response.set_failure_reason("Unable to create stateful directory");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   // Get the directory for ISO images.
   base::FilePath iso_dir;
-  if (!GetPluginIsoDirectory(request.name(), request.owner_id(),
-                             true /* create */, &iso_dir)) {
+  if (!GetPluginIsoDirectory(vm_id, true /* create */, &iso_dir)) {
     LOG(ERROR) << "Unable to create directory holding ISOs for VM";
 
     response.set_failure_reason("Unable to create ISO directory");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   // Create the runtime directory.
@@ -142,8 +157,7 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
     LOG(ERROR) << "Unable to create runtime directory for VM";
 
     response.set_failure_reason("Unable to create runtime directory");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   // Create the root directory.
@@ -152,14 +166,12 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
     LOG(ERROR) << "Unable to create runtime directory for VM";
 
     response.set_failure_reason("Unable to create runtime directory");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   if (!CreatePluginRootHierarchy(root_dir.GetPath())) {
     response.set_failure_reason("Unable to create plugin root hierarchy");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   if (!PluginVm::WriteResolvConf(root_dir.GetPath().Append("etc"), nameservers_,
@@ -167,28 +179,25 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
     LOG(ERROR) << "Unable to seed resolv.conf for the Plugin VM";
 
     response.set_failure_reason("Unable to seed resolv.conf");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   // Generate the token used by cicerone to identify the VM and write it to
   // a VM specific directory that gets mounted into the VM.
-  std::string vm_token = base::GenerateGUID();
+  std::string vm_token = base::Uuid::GenerateRandomV4().AsLowercaseString();
   if (base::WriteFile(runtime_dir.GetPath().Append("cicerone.token"),
                       vm_token.c_str(),
                       vm_token.length()) != vm_token.length()) {
     PLOG(ERROR) << "Failure writing out cicerone token to file";
 
     response.set_failure_reason("Unable to set cicerone token");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   base::FilePath p9_socket_path;
   if (!GetPlugin9PSocketPath(request.name(), &p9_socket_path)) {
     response.set_failure_reason("Internal error: unable to get 9P directory");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   base::ScopedFD p9_socket =
@@ -197,18 +206,17 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
     LOG(ERROR) << "Failed creating 9P socket for file sharing";
 
     response.set_failure_reason("Internal error: unable to create 9P socket");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
-  std::unique_ptr<patchpanel::Client> network_client =
-      patchpanel::Client::New(bus_);
-  if (!network_client) {
-    LOG(ERROR) << "Unable to open networking service client";
+  std::unique_ptr<PluginVmNetwork> network = PluginVmNetwork::Create(
+      bus_, vm_id, static_cast<int>(request.subnet_index()));
+  if (!network) {
+    LOG(ERROR) << "Failed to allocate network resources for pluginvm";
 
-    response.set_failure_reason("Unable to open network service client");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    response.set_failure_reason(
+        "Failed to allocate network resources for pluginvm");
+    return response;
   }
 
   std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy =
@@ -218,8 +226,7 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
     LOG(ERROR) << "Unable to start shared directory server";
 
     response.set_failure_reason("Unable to start shared directory server");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   // Build the plugin params.
@@ -228,11 +235,12 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
       std::make_move_iterator(request.mutable_params()->end()));
 
   // Now start the VM.
-  VmId vm_id(request.owner_id(), request.name());
   SendVmStartingUpSignal(vm_id, *vm_info);
 
   VmBuilder vm_builder;
   vm_builder.SetCpus(request.cpus());
+  vm_builder.AppendCustomParam("--vcpu-cgroup-path",
+                               base::FilePath(kPluginVmVcpuCpuCgroup).value());
   for (auto& param : params) {
     // Because additional parameters may start with a '--', we should use
     // --params=<Param> instead of --params <Param> to make explicit <Param>
@@ -241,20 +249,26 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
     vm_builder.AppendCustomParam(std::string("--params=") + param, "");
   }
 
-  auto vm = PluginVm::Create(
-      vm_id, std::move(stateful_dir), std::move(iso_dir), root_dir.Take(),
-      runtime_dir.Take(), std::move(network_client), request.subnet_index(),
-      request.net_options().enable_vnet_hdr(), bus_,
-      std::move(seneschal_server_proxy), vm_permission_service_proxy_,
-      vmplugin_service_proxy_, std::move(vm_builder));
+  auto vm = PluginVm::Create(PluginVm::Config{
+      .id = vm_id,
+      .stateful_dir = std::move(stateful_dir),
+      .iso_dir = std::move(iso_dir),
+      .root_dir = root_dir.Take(),
+      .runtime_dir = runtime_dir.Take(),
+      .enable_vnet_hdr = request.net_options().enable_vnet_hdr(),
+      .bus = bus_,
+      .network = std::move(network),
+      .seneschal_server_proxy = std::move(seneschal_server_proxy),
+      .vm_permission_service_proxy = vm_permission_service_proxy_,
+      .vmplugin_service_proxy = vmplugin_service_proxy_,
+      .vm_builder = std::move(vm_builder)});
   if (!vm) {
     LOG(ERROR) << "Unable to start VM";
     response.set_failure_reason("Unable to start VM");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
-  VmInterface::Info info = vm->GetInfo();
+  VmBaseImpl::Info info = vm->GetInfo();
 
   vm_info->set_ipv4_address(info.ipv4_address);
   vm_info->set_pid(info.pid);
@@ -262,11 +276,11 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
   vm_info->set_seneschal_server_handle(info.seneschal_server_handle);
   vm_info->set_permission_token(info.permission_token);
   switch (info.status) {
-    case VmInterface::Status::STARTING: {
+    case VmBaseImpl::Status::STARTING: {
       response.set_status(VM_STATUS_STARTING);
       break;
     }
-    case VmInterface::Status::RUNNING: {
+    case VmBaseImpl::Status::RUNNING: {
       response.set_status(VM_STATUS_RUNNING);
       break;
     }
@@ -276,48 +290,45 @@ std::unique_ptr<dbus::Response> Service::StartPluginVm(
     }
   }
   response.set_success(true);
-  writer.AppendProtoAsArrayOfBytes(response);
 
-  NotifyCiceroneOfVmStarted(vm_id, 0 /* cid */, info.pid, std::move(vm_token));
-  SendVmStartedSignal(vm_id, *vm_info, response.status());
+  NotifyCiceroneOfVmStarted(vm_id, 0 /* cid */, info.pid, std::move(vm_token),
+                            apps::VmType::PLUGIN_VM);
 
   vms_[vm_id] = std::move(vm);
-  return dbus_response;
+
+  HandleVmStarted(vm_id, apps::VmType::PLUGIN_VM, *vm_info,
+                  vms_[vm_id]->GetVmSocketPath(), response.status());
+
+  return response;
 }
 
-bool Service::RenamePluginVm(const std::string& owner_id,
-                             const std::string& old_name,
-                             const std::string& new_name,
+bool Service::RenamePluginVm(const VmId& old_id,
+                             const VmId& new_id,
                              std::string* failure_reason) {
   base::FilePath old_dir;
-  if (!GetPluginStatefulDirectory(old_name, owner_id, false /* create */,
-                                  &old_dir)) {
+  if (!GetPluginStatefulDirectory(old_id, false /* create */, &old_dir)) {
     *failure_reason = "unable to determine current VM directory";
     return false;
   }
 
   base::FilePath old_iso_dir;
-  if (!GetPluginIsoDirectory(old_name, owner_id, false /* create */,
-                             &old_iso_dir)) {
+  if (!GetPluginIsoDirectory(old_id, false /* create */, &old_iso_dir)) {
     *failure_reason = "unable to determine current VM ISO directory";
     return false;
   }
 
   base::FilePath new_dir;
-  if (!GetPluginStatefulDirectory(new_name, owner_id, false /* create */,
-                                  &new_dir)) {
+  if (!GetPluginStatefulDirectory(new_id, false /* create */, &new_dir)) {
     *failure_reason = "unable to determine new VM directory";
     return false;
   }
 
   base::FilePath new_iso_dir;
-  if (!GetPluginIsoDirectory(new_name, owner_id, false /* create */,
-                             &new_iso_dir)) {
+  if (!GetPluginIsoDirectory(new_id, false /* create */, &new_iso_dir)) {
     *failure_reason = "unable to determine new VM ISO directory";
     return false;
   }
 
-  VmId old_id(owner_id, old_name);
   bool registered;
   if (!pvm::dispatcher::IsVmRegistered(bus_, vmplugin_service_proxy_, old_id,
                                        &registered)) {
@@ -362,8 +373,8 @@ bool Service::RenamePluginVm(const std::string& owner_id,
     return false;
   }
 
-  if (!pvm::dispatcher::RegisterVm(bus_, vmplugin_service_proxy_,
-                                   VmId(owner_id, new_name), new_dir)) {
+  if (!pvm::dispatcher::RegisterVm(bus_, vmplugin_service_proxy_, new_id,
+                                   new_dir)) {
     *failure_reason = "Failed to re-register renamed VM";
     return false;
   }
@@ -371,5 +382,4 @@ bool Service::RenamePluginVm(const std::string& owner_id,
   return true;
 }
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge

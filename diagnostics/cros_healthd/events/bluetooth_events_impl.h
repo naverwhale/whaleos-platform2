@@ -1,23 +1,31 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DIAGNOSTICS_CROS_HEALTHD_EVENTS_BLUETOOTH_EVENTS_IMPL_H_
 #define DIAGNOSTICS_CROS_HEALTHD_EVENTS_BLUETOOTH_EVENTS_IMPL_H_
 
+#include <string>
+#include <vector>
+
+#include <base/callback_list.h>
 #include <dbus/object_path.h>
 #include <mojo/public/cpp/bindings/pending_remote.h>
 #include <mojo/public/cpp/bindings/remote_set.h>
 
 #include "diagnostics/cros_healthd/events/bluetooth_events.h"
 #include "diagnostics/cros_healthd/system/context.h"
-#include "mojo/cros_healthd_events.mojom.h"
+#include "diagnostics/dbus_bindings/bluez/dbus-proxies.h"
+#include "diagnostics/dbus_bindings/floss/dbus-proxies.h"
+#include "diagnostics/mojom/public/cros_healthd_events.mojom.h"
 
 namespace diagnostics {
 
+enum class BtPropertyType : uint32_t;
+enum class BondState : uint32_t;
+
 // Production implementation of the BluetoothEvents interface.
-class BluetoothEventsImpl final : public BluetoothEvents,
-                                  public BluetoothClient::Observer {
+class BluetoothEventsImpl final : public BluetoothEvents {
  public:
   explicit BluetoothEventsImpl(Context* context);
   BluetoothEventsImpl(const BluetoothEventsImpl&) = delete;
@@ -25,45 +33,47 @@ class BluetoothEventsImpl final : public BluetoothEvents,
   ~BluetoothEventsImpl() override;
 
   // BluetoothEvents overrides:
-  void AddObserver(mojo::PendingRemote<
-                   chromeos::cros_healthd::mojom::CrosHealthdBluetoothObserver>
+  void AddObserver(mojo::PendingRemote<ash::cros_healthd::mojom::EventObserver>
                        observer) override;
 
  private:
-  // BluetoothClient::Observer overrides:
-  void AdapterAdded(
-      const dbus::ObjectPath& adapter_path,
-      const BluetoothClient::AdapterProperties& properties) override;
-  void AdapterRemoved(const dbus::ObjectPath& adapter_path) override;
-  void AdapterPropertyChanged(
-      const dbus::ObjectPath& adapter_path,
-      const BluetoothClient::AdapterProperties& properties) override;
-  void DeviceAdded(
-      const dbus::ObjectPath& device_path,
-      const BluetoothClient::DeviceProperties& properties) override;
-  void DeviceRemoved(const dbus::ObjectPath& device_path) override;
-  void DevicePropertyChanged(
-      const dbus::ObjectPath& device_path,
-      const BluetoothClient::DeviceProperties& properties) override;
+  void OnBluezAdapterAdded(org::bluez::Adapter1ProxyInterface* adapter);
+  void OnBluezAdapterRemoved(const dbus::ObjectPath& adapter_path);
+  void OnBluezAdapterPropertyChanged(
+      org::bluez::Adapter1ProxyInterface* adapter,
+      const std::string& property_name);
+  void OnBluezDeviceAdded(org::bluez::Device1ProxyInterface* device);
+  void OnBluezDeviceRemoved(const dbus::ObjectPath& device_path);
+  void OnBluezDevicePropertyChanged(org::bluez::Device1ProxyInterface* device,
+                                    const std::string& property_name);
 
-  // Checks to see if any observers are left. If not, removes this object from
-  // the BluetoothClient's observers.
-  void StopObservingBluetoothClientIfNecessary();
-
-  // Tracks whether or not this instance has added itself as an observer of
-  // the BluetoothClient.
-  bool is_observing_bluetooth_client_ = false;
+  void OnFlossAdapterAdded(
+      org::chromium::bluetooth::BluetoothProxyInterface* adapter);
+  void OnFlossAdapterRemoved(const dbus::ObjectPath& adapter_path);
+  void OnFlossAdapterPropertyChanged(const dbus::ObjectPath& adapter_path,
+                                     BtPropertyType property);
+  void OnFlossAdapterDiscoveringChanged(const dbus::ObjectPath& adapter_path,
+                                        bool discovering);
+  void OnFlossDeviceAdded(const brillo::VariantDictionary& device);
+  void OnFlossDeviceRemoved(const brillo::VariantDictionary& device);
+  void OnFlossDevicePropertyChanged(const brillo::VariantDictionary& device,
+                                    BtPropertyType property);
+  void OnFlossDeviceConnectedChanged(const brillo::VariantDictionary& device,
+                                     bool connected);
+  void OnFlossDeviceBondChanged(uint32_t bt_status,
+                                const std::string& address,
+                                BondState bond_state);
 
   // Each observer in |observers_| will be notified of any Bluetooth event in
-  // the chromeos::cros_healthd::mojom::CrosHealthdBluetoothObserver interface.
+  // the ash::cros_healthd::mojom::CrosHealthdBluetoothObserver interface.
   // The InterfacePtrSet manages the lifetime of the endpoints, which are
   // automatically destroyed and removed when the pipe they are bound to is
   // destroyed.
-  mojo::RemoteSet<chromeos::cros_healthd::mojom::CrosHealthdBluetoothObserver>
-      observers_;
-
-  // Unowned pointer. Should outlive this instance.
-  Context* const context_ = nullptr;
+  mojo::RemoteSet<ash::cros_healthd::mojom::EventObserver> observers_;
+  // The callback will be unregistered when the subscription is destructured.
+  std::vector<base::CallbackListSubscription> event_subscriptions_;
+  // Must be the last member of the class.
+  base::WeakPtrFactory<BluetoothEventsImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace diagnostics

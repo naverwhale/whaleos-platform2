@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,12 +12,11 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
+#include <net-base/ipv4_address.h>
 #include <vm_protos/proto_bindings/container_guest.grpc.pb.h>
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 
 class VirtualMachine;
 
@@ -28,6 +27,7 @@ class Container {
   struct Icon {
     std::string desktop_file_id;
     std::string content;
+    vm_tools::container::DesktopIcon::Format format;
   };
   // Information about a Linux package file.
   struct LinuxPackageInfo {
@@ -46,10 +46,10 @@ class Container {
   std::string token() const { return token_; }
 
   // The container's IPv4 address.
-  uint32_t ipv4_address() const { return ipv4_address_; }
+  net_base::IPv4Address ipv4_address() const { return ipv4_address_; }
 
   // Sets the container's IPv4 address.
-  void set_ipv4_address(uint32_t ipv4_address);
+  void set_ipv4_address(const net_base::IPv4Address& ipv4_address);
 
   // The container's DriveFS mount path.
   std::string drivefs_mount_path() const { return drivefs_mount_path_; }
@@ -86,9 +86,13 @@ class Container {
       std::vector<std::string> files,
       vm_tools::container::LaunchApplicationRequest::DisplayScaling
           display_scaling,
+      std::vector<vm_tools::container::ContainerFeature> container_features,
       std::string* out_error);
 
-  bool LaunchVshd(uint32_t port, std::string* out_error);
+  bool LaunchVshd(
+      uint32_t port,
+      std::vector<vm_tools::container::ContainerFeature> container_features,
+      std::string* out_error);
 
   bool GetDebugInformation(std::string* out);
 
@@ -130,10 +134,17 @@ class Container {
 
   int32_t GetVshSession(int32_t host_vsh_pid);
 
+  bool GetGarconSessionInfo(std::string* out_failure_reason,
+                            std::string* out_container_username,
+                            std::string* out_container_homedir,
+                            uint32_t* out_sftp_vsock_port);
+
+  static void DisableChannelWaitForTesting();
+
  private:
   std::string name_;
   std::string token_;
-  uint32_t ipv4_address_;
+  net_base::IPv4Address ipv4_address_;
   std::string drivefs_mount_path_;
   std::string homedir_;
   std::vector<uint16_t> listening_tcp4_ports_;
@@ -144,9 +155,10 @@ class Container {
 
   // Stub for making RPC requests to the garcon process inside the container.
   std::unique_ptr<vm_tools::container::Garcon::Stub> garcon_stub_;
+
+  static bool wait_for_channel_;
 };
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone
 
 #endif  // VM_TOOLS_CICERONE_CONTAINER_H_

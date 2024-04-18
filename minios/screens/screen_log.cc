@@ -1,8 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "minios/screens/screen_log.h"
+
+#include <linux/input.h>
 
 #include <utility>
 
@@ -26,14 +28,17 @@ const int kSmallLogLinesPerPage = 13;
 // y-coord of the upper edge of the log area, 16px below title.
 const int kLogAreaY = 196;
 
-const char kLogPath[] = "/var/log/messages";
 }  // namespace
 
 ScreenLog::ScreenLog(std::shared_ptr<DrawInterface> draw_utils,
                      ScreenControllerInterface* screen_controller)
     : ScreenBase(
-          /*button_count=*/4, /*index_=*/1, draw_utils, screen_controller),
-      log_path_(base::FilePath(kLogPath)),
+          /*button_count=*/4,
+          /*index_=*/1,
+          State::DEBUG_LOGS,
+          draw_utils,
+          screen_controller),
+      log_path_(base::FilePath(kLogFilePath)),
       log_offset_idx_(0),
       log_offsets_({0}) {}
 
@@ -45,6 +50,7 @@ void ScreenLog::Show() {
                            -frecon_size / 2 + 162);
   ShowButtons();
   UpdateLogArea();
+  SetState(State::DEBUG_LOGS);
 }
 
 void ScreenLog::ShowButtons() {
@@ -72,7 +78,7 @@ void ScreenLog::UpdateLogArea() {
   int lines_per_page =
       is_small_canvas ? kSmallLogLinesPerPage : kLogLinesPerPage;
   int char_per_line = is_small_canvas ? kSmallLogCharPerLine : kLogCharPerLine;
-  auto screen_path = draw_utils_->GetScreenPath();
+  auto screen_path = draw_utils_->GetScreensPath();
   auto image_path = is_small_canvas
                         ? screen_path.Append("log_area_border.png")
                         : screen_path.Append("log_area_border_large.png");
@@ -148,7 +154,22 @@ void ScreenLog::OnKeyPress(int key_changed) {
   }
 }
 
-void ScreenLog::Reset() {}
+void ScreenLog::Reset() {
+  int frecon_size = draw_utils_->GetFreconCanvasSize();
+  bool is_small_canvas = (frecon_size < kSmallCanvasSize);
+  int lines_per_page =
+	  is_small_canvas ? kSmallLogLinesPerPage : kLogLinesPerPage;
+  int char_per_line = is_small_canvas ? kSmallLogCharPerLine : kLogCharPerLine;
+  /* This size is log_area_border image size */
+  int w = is_small_canvas ? 800 : 1220;
+  int h = is_small_canvas ? 268 : 410;
+
+  draw_utils_->ShowBox(
+		  -frecon_size / 2 + ((kMonospaceGlyphWidth * char_per_line) + 10) / 2,
+		  -frecon_size / 2 + kLogAreaY +
+		  (kMonospaceGlyphHeight * lines_per_page) / 2,
+		  w + 100, h, kMenuBlack);
+}
 
 ScreenType ScreenLog::GetType() {
   return ScreenType::kLogScreen;
@@ -156,6 +177,12 @@ ScreenType ScreenLog::GetType() {
 
 std::string ScreenLog::GetName() {
   return "ScreenLog";
+}
+
+bool ScreenLog::MoveBackward(brillo::ErrorPtr* error) {
+  index_ = 3;
+  OnKeyPress(KEY_ENTER);
+  return true;
 }
 
 }  // namespace minios

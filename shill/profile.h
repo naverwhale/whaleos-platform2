@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,22 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <base/files/file_path.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
-#include "shill/property_store.h"
+#include "shill/metrics.h"
 #include "shill/refptr_types.h"
+#include "shill/store/pkcs11_slot_getter.h"
+#include "shill/store/property_store.h"
+#include "shill/store/store_interface.h"
 
 namespace shill {
 
 class Error;
 class Manager;
-class Metrics;
 class ProfileAdaptorInterface;
 class StoreInterface;
 
@@ -139,6 +142,11 @@ class Profile : public base::RefCounted<Profile> {
   // DefaultProfile.
   virtual bool UpdateDevice(const DeviceRefPtr& device);
 
+  // Start managing the persistence of a set of Passpoint credentials.
+  // Returns |true| if the set of credentials has been accepted by the
+  // Profile, |false| otherwise (ie if the Profile already own it).
+  virtual bool AdoptCredentials(const PasspointCredentialsRefPtr& credentials);
+
   // Write all in-memory state to disk via |storage_|.
   virtual bool Save();
 
@@ -182,6 +190,8 @@ class Profile : public base::RefCounted<Profile> {
 
   virtual StoreInterface* GetStorage() { return storage_.get(); }
 
+  Pkcs11SlotGetter* GetSlotGetter() { return slot_getter_.get(); }
+
   // Returns a read-only copy of the backing storage of the profile.
   virtual const StoreInterface* GetConstStorage() const {
     return storage_.get();
@@ -213,6 +223,7 @@ class Profile : public base::RefCounted<Profile> {
  private:
   friend class ManagerTest;
   friend class ProfileAdaptorInterface;
+  friend class ShillProfileFuzz;
   FRIEND_TEST(ManagerTest, CreateDuplicateProfileWithMissingKeyfile);
   FRIEND_TEST(ManagerTest, RemoveProfile);
   FRIEND_TEST(ProfileTest, DeleteEntry);
@@ -225,18 +236,18 @@ class Profile : public base::RefCounted<Profile> {
   static bool IsValidIdentifierToken(const std::string& token);
 
   void HelpRegisterConstDerivedRpcIdentifiers(
-      const std::string& name, RpcIdentifiers (Profile::*get)(Error* error));
-  void HelpRegisterConstDerivedStrings(const std::string& name,
+      std::string_view name, RpcIdentifiers (Profile::*get)(Error* error));
+  void HelpRegisterConstDerivedStrings(std::string_view name,
                                        Strings (Profile::*get)(Error* error));
   void HelpRegisterDerivedRpcIdentifier(
-      const std::string& name,
+      std::string_view name,
       RpcIdentifier (Profile::*get)(Error* error),
       bool (Profile::*set)(const RpcIdentifier&, Error*));
-  void HelpRegisterDerivedString(const std::string& name,
+  void HelpRegisterDerivedString(std::string_view name,
                                  std::string (Profile::*get)(Error* error),
                                  bool (Profile::*set)(const std::string&,
                                                       Error*));
-  void OnPropertyChanged(const std::string& name);
+  void OnPropertyChanged(std::string_view name);
   std::string DBusGetAlwaysOnVpnMode(Error* error);
   bool DBusSetAlwaysOnVpnMode(const std::string& mode, Error* error);
   RpcIdentifier DBusGetAlwaysOnVpnService(Error* error);
@@ -255,6 +266,9 @@ class Profile : public base::RefCounted<Profile> {
 
   // Properties to be gotten via PropertyStore calls.
   Identifier name_;
+
+  // Allows to get PKCS#11 slot ID related to the profile.
+  std::unique_ptr<Pkcs11SlotGetter> slot_getter_;
 
   // Allows this profile to be backed with on-disk storage.
   std::unique_ptr<StoreInterface> storage_;

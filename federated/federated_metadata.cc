@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,12 +11,23 @@
 namespace federated {
 namespace {
 
-// TODO(alanlxl): just for testing.
-constexpr std::array<const char* [3], 1> kClientMetadata = {{
+// All registered client configs. Users of federated service need to add their
+// client configs here. Each client has its own table in example database.
+constexpr std::array<const char* [3], 3> kClientMetadata = {{
     {
-        "analytics_test_population",
-        "/tmp/",
+        /*name=*/"analytics_test_population",
+        /*retry_token=*/"",
+        /*launch_stage=*/"",  // empty launch_stage means disabled.
+    },
+    {
+        "timezone_code_phh",
         "",
+        "dev",
+    },
+    {
+        "launcher_query_analytics_v1",
+        "",
+        "dev",
     },
 }};
 

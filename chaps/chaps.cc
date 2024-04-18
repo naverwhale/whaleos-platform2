@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,9 @@
 
 #include "chaps/chaps.h"
 
+#include <atomic>
+#include <iterator>
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -16,10 +19,10 @@
 #include <base/at_exit.h>
 #include <base/check.h>
 #include <base/logging.h>
-#include <base/macros.h>
-#include <base/stl_util.h>
+#include <base/no_destructor.h>
 #include <base/threading/platform_thread.h>
 #include <base/time/time.h>
+#include <libhwsec-foundation/utility/synchronized.h>
 
 #include "chaps/attributes.h"
 #include "chaps/chaps_proxy.h"
@@ -31,50 +34,103 @@
 using std::string;
 using std::vector;
 
+template <typename T>
+using MaybeSynchronized = hwsec_foundation::utility::MaybeSynchronized<T>;
+
+template <typename T>
+using SynchronizedHandle = hwsec_foundation::utility::SynchronizedHandle<T>;
+
+namespace {
+
 static const CK_BYTE kChapsLibraryVersionMajor = 0;
 static const CK_BYTE kChapsLibraryVersionMinor = 1;
 
-// The global proxy instance. This is valid only when g_is_initialized is true.
-static chaps::ChapsInterface* g_proxy = NULL;
+struct GlobalData {
+  chaps::ThreadingMode mode = chaps::ThreadingMode::kCurrentThread;
 
-// Set to true when using a mock proxy.
-static bool g_is_using_mock = false;
+  // Set to true when using a mock proxy.
+  bool is_using_mock = false;
 
-// Set to true when C_Initialize has been called successfully.
-// When not using a mock proxy this is synonymous with (g_proxy != NULL).
-static bool g_is_initialized = false;
+  // Set to true when C_Initialize has been called successfully.
+  // When not using a mock proxy this is synonymous with (proxy != NULL).
+  bool is_initialized = false;
 
-// Set to the user's isolate credential (if it exists) in C_Initialize in order
-// to provide access to the user's private slots.
-static brillo::SecureBlob* g_user_isolate = NULL;
+  // The global proxy instance. This is valid only when is_initialized is true.
+  std::unique_ptr<chaps::ChapsInterface> default_proxy = nullptr;
+  chaps::ChapsInterface* proxy = nullptr;
 
-// Keeps track of all open sessions for C_CloseAllSessions(). Maps session ID to
-// slot ID.
-std::unordered_multimap<CK_SESSION_HANDLE, CK_SLOT_ID> g_open_sessions;
+  // Set to the user's isolate credential (if it exists) in C_Initialize in
+  // order to provide access to the user's private slots.
+  std::unique_ptr<brillo::SecureBlob> default_user_isolate = nullptr;
+  brillo::SecureBlob* user_isolate = nullptr;
+
+  // Keeps track of all open sessions for C_CloseAllSessions(). Maps session ID
+  // to slot ID.
+  std::unordered_multimap<CK_SESSION_HANDLE, CK_SLOT_ID> open_sessions;
+};
 
 // Timeout and retry delay used for repeating non-blocking calls.
-static uint32_t g_retry_timeout_ms = 5 * 60 * 1000;
-static uint32_t g_retry_delay_ms = 100;
+base::TimeDelta g_retry_timeout = base::Minutes(5);
+base::TimeDelta g_retry_delay = base::Milliseconds(100);
+
+// The destructor of non-trivial global data should not called.
+// The MaybeSynchronized supports upgrade the object to synchronized mode, it
+// would prevent the overhead in the single thread environment.
+base::NoDestructor<MaybeSynchronized<GlobalData>> g_global_data;
+
+// Perform an operation, repeat in case of "would block" errors.
+// Parameters:
+//     op - operation to perform.
+using ChapsOperation = std::function<CK_RV(void)>;
+static CK_RV PerformNonBlocking(ChapsOperation op) {
+  CK_RV result;
+  base::TimeTicks deadline = base::TimeTicks::Now() + g_retry_timeout;
+  do {
+    result = op();
+    if (result != CKR_WOULD_BLOCK_FOR_PRIVATE_OBJECTS)
+      break;
+    base::PlatformThread::Sleep(g_retry_delay);
+  } while (base::TimeTicks::Now() < deadline);
+  return result;
+}
+
+// Close the session.
+static CK_RV CloseSessionInternal(SynchronizedHandle<GlobalData>& g,
+                                  CK_SESSION_HANDLE hSession) {
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  CK_RV result = PerformNonBlocking(
+      [&] { return g->proxy->CloseSession(*g->user_isolate, hSession); });
+  LOG_CK_RV_AND_RETURN_IF_ERR(result);
+  VLOG(1) << __func__ << " - CKR_OK";
+
+  // Update the records.
+  g->open_sessions.erase(hSession);
+
+  return CKR_OK;
+}
 
 // Tear down helper.
 static void TearDown() {
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
   std::set<CK_SESSION_HANDLE> open_session_handles;
-  for (const auto& itr : g_open_sessions) {
+  for (const auto& itr : g->open_sessions) {
     open_session_handles.insert(itr.first);
   }
   for (const auto& handle : open_session_handles) {
     LOG(WARNING) << "Orphan session " << handle << " left open, closing it.";
-    CK_RV rv = C_CloseSession(handle);
+    CK_RV rv = CloseSessionInternal(g, handle);
     if (rv != CKR_OK) {
       LOG(WARNING) << "Failed to close orphan session " << handle << ", error "
                    << rv;
     }
   }
-  if (g_is_initialized && !g_is_using_mock && g_proxy) {
-    delete g_proxy;
-    delete g_user_isolate;
+  if (!g->is_using_mock) {
+    g->default_proxy.reset();
+    g->proxy = nullptr;
+    g->default_user_isolate.reset();
+    g->user_isolate = nullptr;
   }
-  g_is_initialized = false;
+  g->is_initialized = false;
 }
 
 // This function implements the output handling convention described in
@@ -110,24 +166,7 @@ static CK_RV HandlePKCS11Output(CK_RV result,
   return result;
 }
 
-// Perform an operation, repeat in case of "would block" errors.
-// Parameters:
-//     op - operation to perform.
-using ChapsOperation = std::function<CK_RV(void)>;
-static CK_RV PerformNonBlocking(ChapsOperation op) {
-  CK_RV result;
-  base::TimeTicks deadline =
-      base::TimeTicks::Now() +
-      base::TimeDelta::FromMilliseconds(g_retry_timeout_ms);
-  do {
-    result = op();
-    if (result != CKR_WOULD_BLOCK_FOR_PRIVATE_OBJECTS)
-      break;
-    base::PlatformThread::Sleep(
-        base::TimeDelta::FromMilliseconds(g_retry_delay_ms));
-  } while (base::TimeTicks::Now() < deadline);
-  return result;
-}
+}  // namespace
 
 namespace chaps {
 
@@ -135,25 +174,28 @@ namespace chaps {
 EXPORT_SPEC void EnableMockProxy(ChapsInterface* proxy,
                                  brillo::SecureBlob* isolate_credential,
                                  bool is_initialized) {
-  g_proxy = proxy;
-  g_user_isolate = isolate_credential;
-  g_is_using_mock = true;
-  g_is_initialized = is_initialized;
-  g_open_sessions.clear();
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  g->is_using_mock = true;
+  g->proxy = proxy;
+  g->user_isolate = isolate_credential;
+  g->is_initialized = is_initialized;
+  g->open_sessions.clear();
 }
 
 EXPORT_SPEC void DisableMockProxy() {
   // We don't own the mock proxy.
-  g_proxy = NULL;
-  g_user_isolate = NULL;
-  g_is_using_mock = false;
-  g_is_initialized = false;
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  g->is_using_mock = false;
+  g->proxy = nullptr;
+  g->user_isolate = nullptr;
+  g->is_initialized = false;
+  g->open_sessions.clear();
 }
 
 EXPORT_SPEC void SetRetryTimeParameters(uint32_t timeout_ms,
                                         uint32_t delay_ms) {
-  g_retry_timeout_ms = timeout_ms;
-  g_retry_delay_ms = delay_ms;
+  g_retry_timeout = base::Milliseconds(timeout_ms);
+  g_retry_delay = base::Milliseconds(delay_ms);
 }
 
 }  // namespace chaps
@@ -164,8 +206,16 @@ EXPORT_SPEC void SetRetryTimeParameters(uint32_t timeout_ms,
 // PKCS #11 v2.20 section 11.4 page 102.
 // Connects to the D-Bus service.
 EXPORT_SPEC CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
-  if (g_is_initialized)
-    return CKR_CRYPTOKI_ALREADY_INITIALIZED;
+  // According to the PKCS #11 spec, the default means that the application
+  // won’t be accessing the Cryptoki library from multiple threads
+  // simultaneously.
+  // But some applications in ChromeOS didn't follow this spec.
+  // For backward compatibility, we use the standalone worker thread mode by
+  // default.
+  // We only switch to the single thread mode when the application specified
+  // CKF_LIBRARY_CANT_CREATE_OS_THREADS.
+  chaps::ThreadingMode mode = chaps::ThreadingMode::kStandaloneWorkerThread;
+
   // Validate args (if any).
   if (pInitArgs) {
     CK_C_INITIALIZE_ARGS_PTR args =
@@ -180,27 +230,65 @@ EXPORT_SPEC CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
          args->UnlockMutex)) {
       LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
     }
+
     // We require OS locking.
-    if (((args->flags & CKF_OS_LOCKING_OK) == 0) && args->CreateMutex) {
+    if (args->flags & CKF_OS_LOCKING_OK) {
+      if (args->flags & CKF_LIBRARY_CANT_CREATE_OS_THREADS) {
+        // We cannot do lock without extra OS threads.
+        LOG_CK_RV_AND_RETURN(CKR_CANT_LOCK);
+      }
+
+      mode = chaps::ThreadingMode::kStandaloneWorkerThread;
+    } else if (args->CreateMutex) {
+      // We cannot do custom lock.
       LOG_CK_RV_AND_RETURN(CKR_CANT_LOCK);
+    } else {
+      // Only use single thread mode if the client specify it.
+      if (args->flags & CKF_LIBRARY_CANT_CREATE_OS_THREADS) {
+        mode = chaps::ThreadingMode::kCurrentThread;
+      }
     }
   }
-  // If we're not using a mock proxy instance we need to create one.
-  if (!g_is_using_mock) {
-    auto proxy = chaps::ChapsProxyImpl::Create(true /* shadow_at_exit */);
-    if (!proxy)
-      LOG_CK_RV_AND_RETURN(CKR_GENERAL_ERROR);
-    g_proxy = proxy.release();
 
-    g_user_isolate = new brillo::SecureBlob();
-    chaps::IsolateCredentialManager isolate_manager;
-    if (!isolate_manager.GetCurrentUserIsolateCredential(g_user_isolate))
-      *g_user_isolate = isolate_manager.GetDefaultIsolateCredential();
+  if (mode == chaps::ThreadingMode::kStandaloneWorkerThread) {
+    g_global_data->synchronize();
   }
-  CHECK(g_proxy);
-  CHECK(g_user_isolate);
 
-  g_is_initialized = true;
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+
+  if (g->is_initialized) {
+    if (g->mode != mode) {
+      LOG(WARNING) << "Initialize threading mode mismatch.";
+    }
+    return CKR_CRYPTOKI_ALREADY_INITIALIZED;
+  }
+
+  g->mode = mode;
+
+  // If we're not using a mock proxy instance we need to create one.
+  if (!g->is_using_mock) {
+    g->default_proxy =
+        chaps::ChapsProxyImpl::Create(/*shadow_at_exit=*/true, mode);
+    if (!g->default_proxy) {
+      LOG_CK_RV_AND_RETURN(CKR_GENERAL_ERROR);
+    }
+    g->proxy = g->default_proxy.get();
+
+    g->default_user_isolate = std::make_unique<brillo::SecureBlob>();
+    if (!g->default_user_isolate) {
+      LOG_CK_RV_AND_RETURN(CKR_GENERAL_ERROR);
+    }
+    g->user_isolate = g->default_user_isolate.get();
+
+    chaps::IsolateCredentialManager isolate_manager;
+    if (!isolate_manager.GetCurrentUserIsolateCredential(g->user_isolate))
+      *g->user_isolate = isolate_manager.GetDefaultIsolateCredential();
+  }
+
+  CHECK(g->proxy);
+  CHECK(g->user_isolate);
+
+  g->is_initialized = true;
   VLOG(1) << __func__ << " - CKR_OK";
   return CKR_OK;
 }
@@ -209,7 +297,8 @@ EXPORT_SPEC CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
 // Closes the D-Bus service connection.
 EXPORT_SPEC CK_RV C_Finalize(CK_VOID_PTR pReserved) {
   LOG_CK_RV_AND_RETURN_IF(pReserved, CKR_ARGUMENTS_BAD);
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  LOG_CK_RV_AND_RETURN_IF(!g_global_data->Lock()->is_initialized,
+                          CKR_CRYPTOKI_NOT_INITIALIZED);
   TearDown();
   VLOG(1) << __func__ << " - CKR_OK";
   return CKR_OK;
@@ -219,16 +308,17 @@ EXPORT_SPEC CK_RV C_Finalize(CK_VOID_PTR pReserved) {
 // Provide library info locally.
 // TODO(dkrahn): i18n of strings - crosbug.com/20637
 EXPORT_SPEC CK_RV C_GetInfo(CK_INFO_PTR pInfo) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  LOG_CK_RV_AND_RETURN_IF(!g_global_data->Lock()->is_initialized,
+                          CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pInfo, CKR_ARGUMENTS_BAD);
   pInfo->cryptokiVersion.major = CRYPTOKI_VERSION_MAJOR;
   pInfo->cryptokiVersion.minor = CRYPTOKI_VERSION_MINOR;
   chaps::CopyStringToCharBuffer("Chromium OS", pInfo->manufacturerID,
-                                base::size(pInfo->manufacturerID));
+                                std::size(pInfo->manufacturerID));
   pInfo->flags = 0;
   chaps::CopyStringToCharBuffer("Chaps Client Library",
                                 pInfo->libraryDescription,
-                                base::size(pInfo->libraryDescription));
+                                std::size(pInfo->libraryDescription));
   pInfo->libraryVersion.major = kChapsLibraryVersionMajor;
   pInfo->libraryVersion.minor = kChapsLibraryVersionMinor;
   VLOG(1) << __func__ << " - CKR_OK";
@@ -265,12 +355,13 @@ EXPORT_SPEC CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR ppFunctionList) {
 EXPORT_SPEC CK_RV C_GetSlotList(CK_BBOOL tokenPresent,
                                 CK_SLOT_ID_PTR pSlotList,
                                 CK_ULONG_PTR pulCount) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pulCount, CKR_ARGUMENTS_BAD);
   vector<uint64_t> slot_list;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetSlotList(*g_user_isolate, (tokenPresent != CK_FALSE),
-                                &slot_list);
+    return g->proxy->GetSlotList(*g->user_isolate, (tokenPresent != CK_FALSE),
+                                 &slot_list);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   size_t max_copy = static_cast<size_t>(*pulCount);
@@ -287,11 +378,12 @@ EXPORT_SPEC CK_RV C_GetSlotList(CK_BBOOL tokenPresent,
 
 // PKCS #11 v2.20 section 11.5 page 108.
 EXPORT_SPEC CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pInfo, CKR_ARGUMENTS_BAD);
   chaps::SlotInfo slot_info;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetSlotInfo(*g_user_isolate, slotID, &slot_info);
+    return g->proxy->GetSlotInfo(*g->user_isolate, slotID, &slot_info);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   LOG_CK_RV_AND_RETURN_IF(!chaps::ProtoToSlotInfo(slot_info, pInfo),
@@ -302,11 +394,12 @@ EXPORT_SPEC CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo) {
 
 // PKCS #11 v2.20 section 11.5 page 109.
 EXPORT_SPEC CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pInfo, CKR_ARGUMENTS_BAD);
   chaps::TokenInfo token_info;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetTokenInfo(*g_user_isolate, slotID, &token_info);
+    return g->proxy->GetTokenInfo(*g->user_isolate, slotID, &token_info);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   LOG_CK_RV_AND_RETURN_IF(!chaps::ProtoToTokenInfo(token_info, pInfo),
@@ -317,12 +410,14 @@ EXPORT_SPEC CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo) {
 
 // PKCS #11 v2.20 section 11.5 page 110.
 // Currently, slot events via D-Bus are not supported because no slot events
-// occur with TPM-based tokens.  We want this call to behave properly so we'll
-// block the calling thread (if not CKF_DONT_BLOCK) until C_Finalize is called.
+// occur with HWSec-based tokens. We want this call to behave properly so
+// we'll block the calling thread (if not CKF_DONT_BLOCK) until C_Finalize is
+// called.
 EXPORT_SPEC CK_RV C_WaitForSlotEvent(CK_FLAGS flags,
                                      CK_SLOT_ID_PTR pSlot,
                                      CK_VOID_PTR pReserved) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  LOG_CK_RV_AND_RETURN_IF(!g_global_data->Lock()->is_initialized,
+                          CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pSlot, CKR_ARGUMENTS_BAD);
   // Currently, all supported tokens are not removable - i.e. no slot events.
   if (CKF_DONT_BLOCK & flags)
@@ -330,7 +425,7 @@ EXPORT_SPEC CK_RV C_WaitForSlotEvent(CK_FLAGS flags,
   // Block until C_Finalize.  A simple mechanism is used here because any
   // synchronization primitive will be a problem if C_Finalize is called in a
   // signal handler.
-  while (g_is_initialized) {
+  while (g_global_data->Lock()->is_initialized) {
     const useconds_t kPollInterval = 3000000;  // 3 seconds
     usleep(kPollInterval);
   }
@@ -341,11 +436,13 @@ EXPORT_SPEC CK_RV C_WaitForSlotEvent(CK_FLAGS flags,
 EXPORT_SPEC CK_RV C_GetMechanismList(CK_SLOT_ID slotID,
                                      CK_MECHANISM_TYPE_PTR pMechanismList,
                                      CK_ULONG_PTR pulCount) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pulCount, CKR_ARGUMENTS_BAD);
   vector<uint64_t> mechanism_list;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetMechanismList(*g_user_isolate, slotID, &mechanism_list);
+    return g->proxy->GetMechanismList(*g->user_isolate, slotID,
+                                      &mechanism_list);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   // Copy the mechanism list to caller-supplied memory.
@@ -366,12 +463,13 @@ EXPORT_SPEC CK_RV C_GetMechanismList(CK_SLOT_ID slotID,
 EXPORT_SPEC CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID,
                                      CK_MECHANISM_TYPE type,
                                      CK_MECHANISM_INFO_PTR pInfo) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pInfo, CKR_ARGUMENTS_BAD);
   chaps::MechanismInfo mechanism_info;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetMechanismInfo(*g_user_isolate, slotID, type,
-                                     &mechanism_info);
+    return g->proxy->GetMechanismInfo(*g->user_isolate, slotID, type,
+                                      &mechanism_info);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   LOG_CK_RV_AND_RETURN_IF(!chaps::ProtoToMechanismInfo(mechanism_info, pInfo),
@@ -385,14 +483,15 @@ EXPORT_SPEC CK_RV C_InitToken(CK_SLOT_ID slotID,
                               CK_UTF8CHAR_PTR pPin,
                               CK_ULONG ulPinLen,
                               CK_UTF8CHAR_PTR pLabel) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pLabel, CKR_ARGUMENTS_BAD);
   string pin = chaps::ConvertCharBufferToString(pPin, ulPinLen);
   vector<uint8_t> label =
       chaps::ConvertByteBufferToVector(pLabel, chaps::kTokenLabelSize);
   string* pin_ptr = (!pPin) ? NULL : &pin;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->InitToken(*g_user_isolate, slotID, pin_ptr, label);
+    return g->proxy->InitToken(*g->user_isolate, slotID, pin_ptr, label);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -403,11 +502,12 @@ EXPORT_SPEC CK_RV C_InitToken(CK_SLOT_ID slotID,
 EXPORT_SPEC CK_RV C_InitPIN(CK_SESSION_HANDLE hSession,
                             CK_UTF8CHAR_PTR pPin,
                             CK_ULONG ulPinLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   string pin = chaps::ConvertCharBufferToString(pPin, ulPinLen);
   string* pin_ptr = (!pPin) ? NULL : &pin;
   CK_RV result = PerformNonBlocking(
-      [&] { return g_proxy->InitPIN(*g_user_isolate, hSession, pin_ptr); });
+      [&] { return g->proxy->InitPIN(*g->user_isolate, hSession, pin_ptr); });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
   return CKR_OK;
@@ -419,13 +519,15 @@ EXPORT_SPEC CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
                            CK_ULONG ulOldLen,
                            CK_UTF8CHAR_PTR pNewPin,
                            CK_ULONG ulNewLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   string old_pin = chaps::ConvertCharBufferToString(pOldPin, ulOldLen);
   string* old_pin_ptr = (!pOldPin) ? NULL : &old_pin;
   string new_pin = chaps::ConvertCharBufferToString(pNewPin, ulNewLen);
   string* new_pin_ptr = (!pNewPin) ? NULL : &new_pin;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SetPIN(*g_user_isolate, hSession, old_pin_ptr, new_pin_ptr);
+    return g->proxy->SetPIN(*g->user_isolate, hSession, old_pin_ptr,
+                            new_pin_ptr);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -438,19 +540,20 @@ EXPORT_SPEC CK_RV C_OpenSession(CK_SLOT_ID slotID,
                                 CK_VOID_PTR pApplication,
                                 CK_NOTIFY Notify,
                                 CK_SESSION_HANDLE_PTR phSession) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!phSession, CKR_ARGUMENTS_BAD);
   // pApplication and Notify are intentionally ignored.  We don't support
   // notification callbacks and the PKCS #11 specification does not require us
   // to.  See PKCS #11 v2.20 section 11.17 for details.
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->OpenSession(*g_user_isolate, slotID, flags,
-                                chaps::PreservedCK_ULONG(phSession));
+    return g->proxy->OpenSession(*g->user_isolate, slotID, flags,
+                                 chaps::PreservedCK_ULONG(phSession));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
 
   // Keep track of the pair because the session is now open.
-  g_open_sessions.insert(
+  g->open_sessions.insert(
       std::pair<CK_SESSION_HANDLE, CK_SLOT_ID>(*phSession, slotID));
 
   VLOG(1) << __func__ << " - CKR_OK";
@@ -459,34 +562,27 @@ EXPORT_SPEC CK_RV C_OpenSession(CK_SLOT_ID slotID,
 
 // PKCS #11 v2.20 section 11.6 page 118.
 EXPORT_SPEC CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
-  CK_RV result = PerformNonBlocking(
-      [&] { return g_proxy->CloseSession(*g_user_isolate, hSession); });
-  LOG_CK_RV_AND_RETURN_IF_ERR(result);
-  VLOG(1) << __func__ << " - CKR_OK";
-
-  // Update the records.
-  g_open_sessions.erase(hSession);
-
-  return CKR_OK;
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  return CloseSessionInternal(g, hSession);
 }
 
 // PKCS #11 v2.20 section 11.6 page 120.
 EXPORT_SPEC CK_RV C_CloseAllSessions(CK_SLOT_ID slotID) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
 
   CK_RV result = CKR_OK;
   // Note that this O(n) algorithm is chosen, instead of having another reverse
   // lookup table is because usually the number of open slots and open session
   // is low, so lower memory usage is worth the extra run time.
-  for (const auto& itr : g_open_sessions) {
+  for (const auto& itr : g->open_sessions) {
     if (itr.second != slotID) {
       continue;
     }
     // We've a match.
     const auto& session = itr.first;
     CK_RV rv = PerformNonBlocking(
-        [&] { return g_proxy->CloseSession(*g_user_isolate, session); });
+        [&] { return g->proxy->CloseSession(*g->user_isolate, session); });
     if (rv != CKR_OK) {
       // Note: We only return the last error, but we logs the rest, so that when
       // things go wrong, we could find out what happened.
@@ -503,11 +599,12 @@ EXPORT_SPEC CK_RV C_CloseAllSessions(CK_SLOT_ID slotID) {
 // PKCS #11 v2.20 section 11.6 page 120.
 EXPORT_SPEC CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession,
                                    CK_SESSION_INFO_PTR pInfo) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pInfo, CKR_ARGUMENTS_BAD);
   chaps::SessionInfo session_info;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetSessionInfo(*g_user_isolate, hSession, &session_info);
+    return g->proxy->GetSessionInfo(*g->user_isolate, hSession, &session_info);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   LOG_CK_RV_AND_RETURN_IF(!chaps::ProtoToSessionInfo(session_info, pInfo),
@@ -520,13 +617,14 @@ EXPORT_SPEC CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_GetOperationState(CK_SESSION_HANDLE hSession,
                                       CK_BYTE_PTR pOperationState,
                                       CK_ULONG_PTR pulOperationStateLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pulOperationStateLen, CKR_ARGUMENTS_BAD);
 
   vector<uint8_t> operation_state;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetOperationState(*g_user_isolate, hSession,
-                                      &operation_state);
+    return g->proxy->GetOperationState(*g->user_isolate, hSession,
+                                       &operation_state);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   // Copy the data and length to caller-supplied memory.
@@ -547,15 +645,16 @@ EXPORT_SPEC CK_RV C_SetOperationState(CK_SESSION_HANDLE hSession,
                                       CK_ULONG ulOperationStateLen,
                                       CK_OBJECT_HANDLE hEncryptionKey,
                                       CK_OBJECT_HANDLE hAuthenticationKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pOperationState, CKR_ARGUMENTS_BAD);
 
   vector<uint8_t> operation_state =
       chaps::ConvertByteBufferToVector(pOperationState, ulOperationStateLen);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SetOperationState(*g_user_isolate, hSession,
-                                      operation_state, hEncryptionKey,
-                                      hAuthenticationKey);
+    return g->proxy->SetOperationState(*g->user_isolate, hSession,
+                                       operation_state, hEncryptionKey,
+                                       hAuthenticationKey);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -567,11 +666,12 @@ EXPORT_SPEC CK_RV C_Login(CK_SESSION_HANDLE hSession,
                           CK_USER_TYPE userType,
                           CK_UTF8CHAR_PTR pPin,
                           CK_ULONG ulPinLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   string pin = chaps::ConvertCharBufferToString(pPin, ulPinLen);
   string* pin_ptr = (!pPin) ? NULL : &pin;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->Login(*g_user_isolate, hSession, userType, pin_ptr);
+    return g->proxy->Login(*g->user_isolate, hSession, userType, pin_ptr);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -580,9 +680,10 @@ EXPORT_SPEC CK_RV C_Login(CK_SESSION_HANDLE hSession,
 
 // PKCS #11 v2.20 section 11.6 page 127.
 EXPORT_SPEC CK_RV C_Logout(CK_SESSION_HANDLE hSession) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   CK_RV result = PerformNonBlocking(
-      [&] { return g_proxy->Logout(*g_user_isolate, hSession); });
+      [&] { return g->proxy->Logout(*g->user_isolate, hSession); });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
   return CKR_OK;
@@ -593,7 +694,8 @@ EXPORT_SPEC CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                                  CK_ATTRIBUTE_PTR pTemplate,
                                  CK_ULONG ulCount,
                                  CK_OBJECT_HANDLE_PTR phObject) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (pTemplate == NULL_PTR || phObject == NULL_PTR)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   chaps::Attributes attributes(pTemplate, ulCount);
@@ -601,9 +703,9 @@ EXPORT_SPEC CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
   if (!attributes.Serialize(&serialized_attributes))
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->CreateObject(*g_user_isolate, hSession,
-                                 serialized_attributes,
-                                 chaps::PreservedCK_ULONG(phObject));
+    return g->proxy->CreateObject(*g->user_isolate, hSession,
+                                  serialized_attributes,
+                                  chaps::PreservedCK_ULONG(phObject));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -616,7 +718,8 @@ EXPORT_SPEC CK_RV C_CopyObject(CK_SESSION_HANDLE hSession,
                                CK_ATTRIBUTE_PTR pTemplate,
                                CK_ULONG ulCount,
                                CK_OBJECT_HANDLE_PTR phNewObject) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (pTemplate == NULL_PTR || phNewObject == NULL_PTR)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   chaps::Attributes attributes(pTemplate, ulCount);
@@ -624,9 +727,9 @@ EXPORT_SPEC CK_RV C_CopyObject(CK_SESSION_HANDLE hSession,
   if (!attributes.Serialize(&serialized_attributes))
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->CopyObject(*g_user_isolate, hSession, hObject,
-                               serialized_attributes,
-                               chaps::PreservedCK_ULONG(phNewObject));
+    return g->proxy->CopyObject(*g->user_isolate, hSession, hObject,
+                                serialized_attributes,
+                                chaps::PreservedCK_ULONG(phNewObject));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -636,9 +739,10 @@ EXPORT_SPEC CK_RV C_CopyObject(CK_SESSION_HANDLE hSession,
 // PKCS #11 v2.20 section 11.7 page 131.
 EXPORT_SPEC CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession,
                                   CK_OBJECT_HANDLE hObject) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DestroyObject(*g_user_isolate, hSession, hObject);
+    return g->proxy->DestroyObject(*g->user_isolate, hSession, hObject);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -649,11 +753,12 @@ EXPORT_SPEC CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession,
                                   CK_OBJECT_HANDLE hObject,
                                   CK_ULONG_PTR pulSize) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pulSize, CKR_ARGUMENTS_BAD);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetObjectSize(*g_user_isolate, hSession, hObject,
-                                  chaps::PreservedCK_ULONG(pulSize));
+    return g->proxy->GetObjectSize(*g->user_isolate, hSession, hObject,
+                                   chaps::PreservedCK_ULONG(pulSize));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -665,7 +770,8 @@ EXPORT_SPEC CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession,
                                       CK_OBJECT_HANDLE hObject,
                                       CK_ATTRIBUTE_PTR pTemplate,
                                       CK_ULONG ulCount) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pTemplate, CKR_ARGUMENTS_BAD);
   chaps::Attributes attributes(pTemplate, ulCount);
   vector<uint8_t> serialized_attributes_in;
@@ -673,9 +779,9 @@ EXPORT_SPEC CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession,
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   vector<uint8_t> serialized_attributes_out;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GetAttributeValue(*g_user_isolate, hSession, hObject,
-                                      serialized_attributes_in,
-                                      &serialized_attributes_out);
+    return g->proxy->GetAttributeValue(*g->user_isolate, hSession, hObject,
+                                       serialized_attributes_in,
+                                       &serialized_attributes_out);
   });
   // There are a few errors that can be returned while information about one or
   // more attributes has been provided.  We need to continue in these cases.
@@ -693,15 +799,16 @@ EXPORT_SPEC CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                                       CK_OBJECT_HANDLE hObject,
                                       CK_ATTRIBUTE_PTR pTemplate,
                                       CK_ULONG ulCount) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pTemplate, CKR_ARGUMENTS_BAD);
   chaps::Attributes attributes(pTemplate, ulCount);
   vector<uint8_t> serialized_attributes;
   if (!attributes.Serialize(&serialized_attributes))
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SetAttributeValue(*g_user_isolate, hSession, hObject,
-                                      serialized_attributes);
+    return g->proxy->SetAttributeValue(*g->user_isolate, hSession, hObject,
+                                       serialized_attributes);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -712,15 +819,16 @@ EXPORT_SPEC CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession,
                                     CK_ATTRIBUTE_PTR pTemplate,
                                     CK_ULONG ulCount) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pTemplate && ulCount > 0, CKR_ARGUMENTS_BAD);
   chaps::Attributes attributes(pTemplate, ulCount);
   vector<uint8_t> serialized_attributes;
   if (!attributes.Serialize(&serialized_attributes))
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->FindObjectsInit(*g_user_isolate, hSession,
-                                    serialized_attributes);
+    return g->proxy->FindObjectsInit(*g->user_isolate, hSession,
+                                     serialized_attributes);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -732,12 +840,13 @@ EXPORT_SPEC CK_RV C_FindObjects(CK_SESSION_HANDLE hSession,
                                 CK_OBJECT_HANDLE_PTR phObject,
                                 CK_ULONG ulMaxObjectCount,
                                 CK_ULONG_PTR pulObjectCount) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!phObject || !pulObjectCount, CKR_ARGUMENTS_BAD);
   vector<uint64_t> object_list;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->FindObjects(*g_user_isolate, hSession, ulMaxObjectCount,
-                                &object_list);
+    return g->proxy->FindObjects(*g->user_isolate, hSession, ulMaxObjectCount,
+                                 &object_list);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   LOG_CK_RV_AND_RETURN_IF(object_list.size() > ulMaxObjectCount,
@@ -752,9 +861,10 @@ EXPORT_SPEC CK_RV C_FindObjects(CK_SESSION_HANDLE hSession,
 
 // PKCS #11 v2.20 section 11.7 page 138.
 EXPORT_SPEC CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   CK_RV result = PerformNonBlocking(
-      [&] { return g_proxy->FindObjectsFinal(*g_user_isolate, hSession); });
+      [&] { return g->proxy->FindObjectsFinal(*g->user_isolate, hSession); });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
   return CKR_OK;
@@ -764,11 +874,12 @@ EXPORT_SPEC CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 EXPORT_SPEC CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession,
                                 CK_MECHANISM_PTR pMechanism,
                                 CK_OBJECT_HANDLE hKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pMechanism, CKR_ARGUMENTS_BAD);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->EncryptInit(
-        *g_user_isolate, hSession, pMechanism->mechanism,
+    return g->proxy->EncryptInit(
+        *g->user_isolate, hSession, pMechanism->mechanism,
         chaps::ConvertByteBufferToVector(
             reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
             pMechanism->ulParameterLen),
@@ -785,9 +896,10 @@ EXPORT_SPEC CK_RV C_Encrypt(CK_SESSION_HANDLE hSession,
                             CK_ULONG ulDataLen,
                             CK_BYTE_PTR pEncryptedData,
                             CK_ULONG_PTR pulEncryptedDataLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if ((!pData && ulDataLen > 0) || !pulEncryptedDataLen) {
-    g_proxy->EncryptCancel(*g_user_isolate, hSession);
+    g->proxy->EncryptCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
@@ -795,9 +907,9 @@ EXPORT_SPEC CK_RV C_Encrypt(CK_SESSION_HANDLE hSession,
   uint64_t max_out_length =
       pEncryptedData ? static_cast<uint64_t>(*pulEncryptedDataLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->Encrypt(*g_user_isolate, hSession,
-                            chaps::ConvertByteBufferToVector(pData, ulDataLen),
-                            max_out_length, &data_out_length, &data_out);
+    return g->proxy->Encrypt(*g->user_isolate, hSession,
+                             chaps::ConvertByteBufferToVector(pData, ulDataLen),
+                             max_out_length, &data_out_length, &data_out);
   });
   result = HandlePKCS11Output(result, data_out, data_out_length, pEncryptedData,
                               pulEncryptedDataLen);
@@ -812,9 +924,10 @@ EXPORT_SPEC CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession,
                                   CK_ULONG ulPartLen,
                                   CK_BYTE_PTR pEncryptedPart,
                                   CK_ULONG_PTR pulEncryptedPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pPart || !pulEncryptedPartLen) {
-    g_proxy->EncryptCancel(*g_user_isolate, hSession);
+    g->proxy->EncryptCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
@@ -822,8 +935,8 @@ EXPORT_SPEC CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession,
   uint64_t max_out_length =
       pEncryptedPart ? static_cast<uint64_t>(*pulEncryptedPartLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->EncryptUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->EncryptUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pPart, ulPartLen), max_out_length,
         &data_out_length, &data_out);
   });
@@ -838,9 +951,10 @@ EXPORT_SPEC CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession,
                                  CK_BYTE_PTR pLastEncryptedPart,
                                  CK_ULONG_PTR pulLastEncryptedPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pulLastEncryptedPartLen) {
-    g_proxy->EncryptCancel(*g_user_isolate, hSession);
+    g->proxy->EncryptCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
@@ -848,8 +962,8 @@ EXPORT_SPEC CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession,
   uint64_t max_out_length =
       pLastEncryptedPart ? static_cast<uint64_t>(*pulLastEncryptedPartLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->EncryptFinal(*g_user_isolate, hSession, max_out_length,
-                                 &data_out_length, &data_out);
+    return g->proxy->EncryptFinal(*g->user_isolate, hSession, max_out_length,
+                                  &data_out_length, &data_out);
   });
   result = HandlePKCS11Output(result, data_out, data_out_length,
                               pLastEncryptedPart, pulLastEncryptedPartLen);
@@ -862,11 +976,12 @@ EXPORT_SPEC CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession,
                                 CK_MECHANISM_PTR pMechanism,
                                 CK_OBJECT_HANDLE hKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pMechanism, CKR_ARGUMENTS_BAD);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DecryptInit(
-        *g_user_isolate, hSession, pMechanism->mechanism,
+    return g->proxy->DecryptInit(
+        *g->user_isolate, hSession, pMechanism->mechanism,
         chaps::ConvertByteBufferToVector(
             reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
             pMechanism->ulParameterLen),
@@ -883,17 +998,18 @@ EXPORT_SPEC CK_RV C_Decrypt(CK_SESSION_HANDLE hSession,
                             CK_ULONG ulEncryptedDataLen,
                             CK_BYTE_PTR pData,
                             CK_ULONG_PTR pulDataLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if ((!pEncryptedData && ulEncryptedDataLen > 0) || !pulDataLen) {
-    g_proxy->DecryptCancel(*g_user_isolate, hSession);
+    g->proxy->DecryptCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length = pData ? static_cast<uint64_t>(*pulDataLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->Decrypt(
-        *g_user_isolate, hSession,
+    return g->proxy->Decrypt(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pEncryptedData, ulEncryptedDataLen),
         max_out_length, &data_out_length, &data_out);
   });
@@ -910,17 +1026,18 @@ EXPORT_SPEC CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession,
                                   CK_ULONG ulEncryptedPartLen,
                                   CK_BYTE_PTR pPart,
                                   CK_ULONG_PTR pulPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pEncryptedPart || !pulPartLen) {
-    g_proxy->DecryptCancel(*g_user_isolate, hSession);
+    g->proxy->DecryptCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length = pPart ? static_cast<uint64_t>(*pulPartLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DecryptUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->DecryptUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pEncryptedPart, ulEncryptedPartLen),
         max_out_length, &data_out_length, &data_out);
   });
@@ -935,9 +1052,10 @@ EXPORT_SPEC CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession,
                                  CK_BYTE_PTR pLastPart,
                                  CK_ULONG_PTR pulLastPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pulLastPartLen) {
-    g_proxy->DecryptCancel(*g_user_isolate, hSession);
+    g->proxy->DecryptCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
@@ -945,8 +1063,8 @@ EXPORT_SPEC CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession,
   uint64_t max_out_length =
       pLastPart ? static_cast<uint64_t>(*pulLastPartLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DecryptFinal(*g_user_isolate, hSession, max_out_length,
-                                 &data_out_length, &data_out);
+    return g->proxy->DecryptFinal(*g->user_isolate, hSession, max_out_length,
+                                  &data_out_length, &data_out);
   });
   result = HandlePKCS11Output(result, data_out, data_out_length, pLastPart,
                               pulLastPartLen);
@@ -958,14 +1076,15 @@ EXPORT_SPEC CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession,
 // PKCS #11 v2.20 section 11.10 page 148.
 EXPORT_SPEC CK_RV C_DigestInit(CK_SESSION_HANDLE hSession,
                                CK_MECHANISM_PTR pMechanism) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pMechanism, CKR_ARGUMENTS_BAD);
   vector<uint8_t> parameter = chaps::ConvertByteBufferToVector(
       reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
       pMechanism->ulParameterLen);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DigestInit(*g_user_isolate, hSession, pMechanism->mechanism,
-                               parameter);
+    return g->proxy->DigestInit(*g->user_isolate, hSession,
+                                pMechanism->mechanism, parameter);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -978,18 +1097,19 @@ EXPORT_SPEC CK_RV C_Digest(CK_SESSION_HANDLE hSession,
                            CK_ULONG ulDataLen,
                            CK_BYTE_PTR pDigest,
                            CK_ULONG_PTR pulDigestLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if ((!pData && ulDataLen > 0) || !pulDigestLen) {
-    g_proxy->DigestCancel(*g_user_isolate, hSession);
+    g->proxy->DigestCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length = pDigest ? static_cast<uint64_t>(*pulDigestLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->Digest(*g_user_isolate, hSession,
-                           chaps::ConvertByteBufferToVector(pData, ulDataLen),
-                           max_out_length, &data_out_length, &data_out);
+    return g->proxy->Digest(*g->user_isolate, hSession,
+                            chaps::ConvertByteBufferToVector(pData, ulDataLen),
+                            max_out_length, &data_out_length, &data_out);
   });
   result = HandlePKCS11Output(result, data_out, data_out_length, pDigest,
                               pulDigestLen);
@@ -1002,14 +1122,15 @@ EXPORT_SPEC CK_RV C_Digest(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession,
                                  CK_BYTE_PTR pPart,
                                  CK_ULONG ulPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pPart) {
-    g_proxy->DigestCancel(*g_user_isolate, hSession);
+    g->proxy->DigestCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DigestUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->DigestUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pPart, ulPartLen));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
@@ -1020,9 +1141,10 @@ EXPORT_SPEC CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession,
 // PKCS #11 v2.20 section 11.10 page 150.
 EXPORT_SPEC CK_RV C_DigestKey(CK_SESSION_HANDLE hSession,
                               CK_OBJECT_HANDLE hKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   CK_RV result = PerformNonBlocking(
-      [&] { return g_proxy->DigestKey(*g_user_isolate, hSession, hKey); });
+      [&] { return g->proxy->DigestKey(*g->user_isolate, hSession, hKey); });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
   return CKR_OK;
@@ -1032,17 +1154,18 @@ EXPORT_SPEC CK_RV C_DigestKey(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_DigestFinal(CK_SESSION_HANDLE hSession,
                                 CK_BYTE_PTR pDigest,
                                 CK_ULONG_PTR pulDigestLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pulDigestLen) {
-    g_proxy->DigestCancel(*g_user_isolate, hSession);
+    g->proxy->DigestCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length = pDigest ? static_cast<uint64_t>(*pulDigestLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DigestFinal(*g_user_isolate, hSession, max_out_length,
-                                &data_out_length, &data_out);
+    return g->proxy->DigestFinal(*g->user_isolate, hSession, max_out_length,
+                                 &data_out_length, &data_out);
   });
   result = HandlePKCS11Output(result, data_out, data_out_length, pDigest,
                               pulDigestLen);
@@ -1055,14 +1178,15 @@ EXPORT_SPEC CK_RV C_DigestFinal(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_SignInit(CK_SESSION_HANDLE hSession,
                              CK_MECHANISM_PTR pMechanism,
                              CK_OBJECT_HANDLE hKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pMechanism, CKR_ARGUMENTS_BAD);
   vector<uint8_t> parameter = chaps::ConvertByteBufferToVector(
       reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
       pMechanism->ulParameterLen);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SignInit(*g_user_isolate, hSession, pMechanism->mechanism,
-                             parameter, hKey);
+    return g->proxy->SignInit(*g->user_isolate, hSession, pMechanism->mechanism,
+                              parameter, hKey);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -1075,9 +1199,10 @@ EXPORT_SPEC CK_RV C_Sign(CK_SESSION_HANDLE hSession,
                          CK_ULONG ulDataLen,
                          CK_BYTE_PTR pSignature,
                          CK_ULONG_PTR pulSignatureLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if ((!pData && ulDataLen > 0) || !pulSignatureLen) {
-    g_proxy->SignCancel(*g_user_isolate, hSession);
+    g->proxy->SignCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
@@ -1085,9 +1210,9 @@ EXPORT_SPEC CK_RV C_Sign(CK_SESSION_HANDLE hSession,
   uint64_t max_out_length =
       pSignature ? static_cast<uint64_t>(*pulSignatureLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->Sign(*g_user_isolate, hSession,
-                         chaps::ConvertByteBufferToVector(pData, ulDataLen),
-                         max_out_length, &data_out_length, &data_out);
+    return g->proxy->Sign(*g->user_isolate, hSession,
+                          chaps::ConvertByteBufferToVector(pData, ulDataLen),
+                          max_out_length, &data_out_length, &data_out);
   });
   result = HandlePKCS11Output(result, data_out, data_out_length, pSignature,
                               pulSignatureLen);
@@ -1100,14 +1225,15 @@ EXPORT_SPEC CK_RV C_Sign(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession,
                                CK_BYTE_PTR pPart,
                                CK_ULONG ulPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pPart) {
-    g_proxy->SignCancel(*g_user_isolate, hSession);
+    g->proxy->SignCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SignUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->SignUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pPart, ulPartLen));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
@@ -1119,9 +1245,10 @@ EXPORT_SPEC CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_SignFinal(CK_SESSION_HANDLE hSession,
                               CK_BYTE_PTR pSignature,
                               CK_ULONG_PTR pulSignatureLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pulSignatureLen) {
-    g_proxy->SignCancel(*g_user_isolate, hSession);
+    g->proxy->SignCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   vector<uint8_t> data_out;
@@ -1129,8 +1256,8 @@ EXPORT_SPEC CK_RV C_SignFinal(CK_SESSION_HANDLE hSession,
   uint64_t max_out_length =
       pSignature ? static_cast<uint64_t>(*pulSignatureLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SignFinal(*g_user_isolate, hSession, max_out_length,
-                              &data_out_length, &data_out);
+    return g->proxy->SignFinal(*g->user_isolate, hSession, max_out_length,
+                               &data_out_length, &data_out);
   });
   result = HandlePKCS11Output(result, data_out, data_out_length, pSignature,
                               pulSignatureLen);
@@ -1143,14 +1270,15 @@ EXPORT_SPEC CK_RV C_SignFinal(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_SignRecoverInit(CK_SESSION_HANDLE hSession,
                                     CK_MECHANISM_PTR pMechanism,
                                     CK_OBJECT_HANDLE hKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pMechanism, CKR_ARGUMENTS_BAD);
   vector<uint8_t> parameter = chaps::ConvertByteBufferToVector(
       reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
       pMechanism->ulParameterLen);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SignRecoverInit(*g_user_isolate, hSession,
-                                    pMechanism->mechanism, parameter, hKey);
+    return g->proxy->SignRecoverInit(*g->user_isolate, hSession,
+                                     pMechanism->mechanism, parameter, hKey);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -1163,7 +1291,8 @@ EXPORT_SPEC CK_RV C_SignRecover(CK_SESSION_HANDLE hSession,
                                 CK_ULONG ulDataLen,
                                 CK_BYTE_PTR pSignature,
                                 CK_ULONG_PTR pulSignatureLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if ((!pData && ulDataLen > 0) || !pulSignatureLen)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   vector<uint8_t> data_out;
@@ -1171,8 +1300,8 @@ EXPORT_SPEC CK_RV C_SignRecover(CK_SESSION_HANDLE hSession,
   uint64_t max_out_length =
       pSignature ? static_cast<uint64_t>(*pulSignatureLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SignRecover(
-        *g_user_isolate, hSession,
+    return g->proxy->SignRecover(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pData, ulDataLen), max_out_length,
         &data_out_length, &data_out);
   });
@@ -1187,14 +1316,15 @@ EXPORT_SPEC CK_RV C_SignRecover(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession,
                                CK_MECHANISM_PTR pMechanism,
                                CK_OBJECT_HANDLE hKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pMechanism, CKR_ARGUMENTS_BAD);
   vector<uint8_t> parameter = chaps::ConvertByteBufferToVector(
       reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
       pMechanism->ulParameterLen);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->VerifyInit(*g_user_isolate, hSession, pMechanism->mechanism,
-                               parameter, hKey);
+    return g->proxy->VerifyInit(*g->user_isolate, hSession,
+                                pMechanism->mechanism, parameter, hKey);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -1207,14 +1337,15 @@ EXPORT_SPEC CK_RV C_Verify(CK_SESSION_HANDLE hSession,
                            CK_ULONG ulDataLen,
                            CK_BYTE_PTR pSignature,
                            CK_ULONG ulSignatureLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pSignature || (!pData && ulDataLen > 0)) {
-    g_proxy->VerifyCancel(*g_user_isolate, hSession);
+    g->proxy->VerifyCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->Verify(
-        *g_user_isolate, hSession,
+    return g->proxy->Verify(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pData, ulDataLen),
         chaps::ConvertByteBufferToVector(pSignature, ulSignatureLen));
   });
@@ -1227,14 +1358,15 @@ EXPORT_SPEC CK_RV C_Verify(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession,
                                  CK_BYTE_PTR pPart,
                                  CK_ULONG ulPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pPart) {
-    g_proxy->VerifyCancel(*g_user_isolate, hSession);
+    g->proxy->VerifyCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->VerifyUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->VerifyUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pPart, ulPartLen));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
@@ -1246,14 +1378,15 @@ EXPORT_SPEC CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession,
                                 CK_BYTE_PTR pSignature,
                                 CK_ULONG ulSignatureLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pSignature) {
-    g_proxy->VerifyCancel(*g_user_isolate, hSession);
+    g->proxy->VerifyCancel(*g->user_isolate, hSession);
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   }
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->VerifyFinal(
-        *g_user_isolate, hSession,
+    return g->proxy->VerifyFinal(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pSignature, ulSignatureLen));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
@@ -1265,14 +1398,15 @@ EXPORT_SPEC CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_VerifyRecoverInit(CK_SESSION_HANDLE hSession,
                                       CK_MECHANISM_PTR pMechanism,
                                       CK_OBJECT_HANDLE hKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pMechanism, CKR_ARGUMENTS_BAD);
   vector<uint8_t> parameter = chaps::ConvertByteBufferToVector(
       reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
       pMechanism->ulParameterLen);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->VerifyRecoverInit(*g_user_isolate, hSession,
-                                      pMechanism->mechanism, parameter, hKey);
+    return g->proxy->VerifyRecoverInit(*g->user_isolate, hSession,
+                                       pMechanism->mechanism, parameter, hKey);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   VLOG(1) << __func__ << " - CKR_OK";
@@ -1285,15 +1419,16 @@ EXPORT_SPEC CK_RV C_VerifyRecover(CK_SESSION_HANDLE hSession,
                                   CK_ULONG ulSignatureLen,
                                   CK_BYTE_PTR pData,
                                   CK_ULONG_PTR pulDataLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pSignature || !pulDataLen)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length = pData ? static_cast<uint64_t>(*pulDataLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->VerifyRecover(
-        *g_user_isolate, hSession,
+    return g->proxy->VerifyRecover(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pSignature, ulSignatureLen),
         max_out_length, &data_out_length, &data_out);
   });
@@ -1310,15 +1445,16 @@ EXPORT_SPEC CK_RV C_DigestEncryptUpdate(CK_SESSION_HANDLE hSession,
                                         CK_ULONG ulPartLen,
                                         CK_BYTE_PTR pEncryptedPart,
                                         CK_ULONG_PTR pulEncryptedPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pPart || !pulEncryptedPartLen, CKR_ARGUMENTS_BAD);
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length =
       pEncryptedPart ? static_cast<uint64_t>(*pulEncryptedPartLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DigestEncryptUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->DigestEncryptUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pPart, ulPartLen), max_out_length,
         &data_out_length, &data_out);
   });
@@ -1335,14 +1471,15 @@ EXPORT_SPEC CK_RV C_DecryptDigestUpdate(CK_SESSION_HANDLE hSession,
                                         CK_ULONG ulEncryptedPartLen,
                                         CK_BYTE_PTR pPart,
                                         CK_ULONG_PTR pulPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pEncryptedPart || !pulPartLen, CKR_ARGUMENTS_BAD);
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length = pPart ? static_cast<uint64_t>(*pulPartLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DecryptDigestUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->DecryptDigestUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pEncryptedPart, ulEncryptedPartLen),
         max_out_length, &data_out_length, &data_out);
   });
@@ -1359,15 +1496,16 @@ EXPORT_SPEC CK_RV C_SignEncryptUpdate(CK_SESSION_HANDLE hSession,
                                       CK_ULONG ulPartLen,
                                       CK_BYTE_PTR pEncryptedPart,
                                       CK_ULONG_PTR pulEncryptedPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pPart || !pulEncryptedPartLen, CKR_ARGUMENTS_BAD);
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length =
       pEncryptedPart ? static_cast<uint64_t>(*pulEncryptedPartLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SignEncryptUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->SignEncryptUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pPart, ulPartLen), max_out_length,
         &data_out_length, &data_out);
   });
@@ -1384,14 +1522,15 @@ EXPORT_SPEC CK_RV C_DecryptVerifyUpdate(CK_SESSION_HANDLE hSession,
                                         CK_ULONG ulEncryptedPartLen,
                                         CK_BYTE_PTR pPart,
                                         CK_ULONG_PTR pulPartLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   LOG_CK_RV_AND_RETURN_IF(!pEncryptedPart || !pulPartLen, CKR_ARGUMENTS_BAD);
   vector<uint8_t> data_out;
   uint64_t data_out_length;
   uint64_t max_out_length = pPart ? static_cast<uint64_t>(*pulPartLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DecryptVerifyUpdate(
-        *g_user_isolate, hSession,
+    return g->proxy->DecryptVerifyUpdate(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pEncryptedPart, ulEncryptedPartLen),
         max_out_length, &data_out_length, &data_out);
   });
@@ -1408,7 +1547,8 @@ EXPORT_SPEC CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession,
                                 CK_ATTRIBUTE_PTR pTemplate,
                                 CK_ULONG ulCount,
                                 CK_OBJECT_HANDLE_PTR phKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pMechanism || (!pTemplate && ulCount > 0) || !phKey)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   chaps::Attributes attributes(pTemplate, ulCount);
@@ -1416,8 +1556,8 @@ EXPORT_SPEC CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession,
   if (!attributes.Serialize(&serialized))
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GenerateKey(
-        *g_user_isolate, hSession, pMechanism->mechanism,
+    return g->proxy->GenerateKey(
+        *g->user_isolate, hSession, pMechanism->mechanism,
         chaps::ConvertByteBufferToVector(
             reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
             pMechanism->ulParameterLen),
@@ -1437,7 +1577,8 @@ EXPORT_SPEC CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession,
                                     CK_ULONG ulPrivateKeyAttributeCount,
                                     CK_OBJECT_HANDLE_PTR phPublicKey,
                                     CK_OBJECT_HANDLE_PTR phPrivateKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pMechanism || (!pPublicKeyTemplate && ulPublicKeyAttributeCount > 0) ||
       (!pPrivateKeyTemplate && ulPrivateKeyAttributeCount > 0) ||
       !phPublicKey || !phPrivateKey)
@@ -1451,8 +1592,8 @@ EXPORT_SPEC CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession,
       !private_attributes.Serialize(&private_serialized))
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GenerateKeyPair(
-        *g_user_isolate, hSession, pMechanism->mechanism,
+    return g->proxy->GenerateKeyPair(
+        *g->user_isolate, hSession, pMechanism->mechanism,
         chaps::ConvertByteBufferToVector(
             reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
             pMechanism->ulParameterLen),
@@ -1472,7 +1613,8 @@ EXPORT_SPEC CK_RV C_WrapKey(CK_SESSION_HANDLE hSession,
                             CK_OBJECT_HANDLE hKey,
                             CK_BYTE_PTR pWrappedKey,
                             CK_ULONG_PTR pulWrappedKeyLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pMechanism || !pulWrappedKeyLen)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   vector<uint8_t> data_out;
@@ -1480,8 +1622,8 @@ EXPORT_SPEC CK_RV C_WrapKey(CK_SESSION_HANDLE hSession,
   uint64_t max_out_length =
       pWrappedKey ? static_cast<uint64_t>(*pulWrappedKeyLen) : 0;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->WrapKey(
-        *g_user_isolate, hSession, pMechanism->mechanism,
+    return g->proxy->WrapKey(
+        *g->user_isolate, hSession, pMechanism->mechanism,
         chaps::ConvertByteBufferToVector(
             reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
             pMechanism->ulParameterLen),
@@ -1503,7 +1645,8 @@ EXPORT_SPEC CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession,
                               CK_ATTRIBUTE_PTR pTemplate,
                               CK_ULONG ulAttributeCount,
                               CK_OBJECT_HANDLE_PTR phKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pMechanism || !pWrappedKey || !phKey)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   chaps::Attributes attributes(pTemplate, ulAttributeCount);
@@ -1511,8 +1654,8 @@ EXPORT_SPEC CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession,
   if (!attributes.Serialize(&serialized))
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->UnwrapKey(
-        *g_user_isolate, hSession, pMechanism->mechanism,
+    return g->proxy->UnwrapKey(
+        *g->user_isolate, hSession, pMechanism->mechanism,
         chaps::ConvertByteBufferToVector(
             reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
             pMechanism->ulParameterLen),
@@ -1532,7 +1675,8 @@ EXPORT_SPEC CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession,
                               CK_ATTRIBUTE_PTR pTemplate,
                               CK_ULONG ulAttributeCount,
                               CK_OBJECT_HANDLE_PTR phKey) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pMechanism || !phKey)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   chaps::Attributes attributes(pTemplate, ulAttributeCount);
@@ -1540,8 +1684,8 @@ EXPORT_SPEC CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession,
   if (!attributes.Serialize(&serialized))
     LOG_CK_RV_AND_RETURN(CKR_TEMPLATE_INCONSISTENT);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->DeriveKey(
-        *g_user_isolate, hSession, pMechanism->mechanism,
+    return g->proxy->DeriveKey(
+        *g->user_isolate, hSession, pMechanism->mechanism,
         chaps::ConvertByteBufferToVector(
             reinterpret_cast<CK_BYTE_PTR>(pMechanism->pParameter),
             pMechanism->ulParameterLen),
@@ -1556,12 +1700,13 @@ EXPORT_SPEC CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_SeedRandom(CK_SESSION_HANDLE hSession,
                                CK_BYTE_PTR pSeed,
                                CK_ULONG ulSeedLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!pSeed || ulSeedLen == 0)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->SeedRandom(
-        *g_user_isolate, hSession,
+    return g->proxy->SeedRandom(
+        *g->user_isolate, hSession,
         chaps::ConvertByteBufferToVector(pSeed, ulSeedLen));
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
@@ -1573,13 +1718,14 @@ EXPORT_SPEC CK_RV C_SeedRandom(CK_SESSION_HANDLE hSession,
 EXPORT_SPEC CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession,
                                    CK_BYTE_PTR RandomData,
                                    CK_ULONG ulRandomLen) {
-  LOG_CK_RV_AND_RETURN_IF(!g_is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
+  SynchronizedHandle<GlobalData> g = g_global_data->Lock();
+  LOG_CK_RV_AND_RETURN_IF(!g->is_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
   if (!RandomData || ulRandomLen == 0)
     LOG_CK_RV_AND_RETURN(CKR_ARGUMENTS_BAD);
   vector<uint8_t> data_out;
   CK_RV result = PerformNonBlocking([&] {
-    return g_proxy->GenerateRandom(*g_user_isolate, hSession, ulRandomLen,
-                                   &data_out);
+    return g->proxy->GenerateRandom(*g->user_isolate, hSession, ulRandomLen,
+                                    &data_out);
   });
   LOG_CK_RV_AND_RETURN_IF_ERR(result);
   LOG_CK_RV_AND_RETURN_IF(data_out.size() != ulRandomLen, CKR_GENERAL_ERROR);

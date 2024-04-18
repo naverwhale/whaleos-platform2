@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,14 +11,15 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <brillo/files/safe_fd.h>
+#include <libsegmentation/feature_management.h>
 
 #include "arc/setup/android_sdk_version.h"
 
@@ -34,6 +35,14 @@ namespace arc {
 constexpr bool kUseHoudini64 = USE_HOUDINI64;
 constexpr bool kUseHoudini = USE_HOUDINI;
 constexpr bool kUseNdkTranslation = USE_NDK_TRANSLATION;
+
+// TODO(youkichihosoi): b/293906766 - Replace all occurrences of `kUnspecified`
+// with specific filesystem types and remove the enum value.
+enum class LoopMountFilesystemType {
+  kUnspecified,
+  kSquashFS,
+  kExt4,
+};
 
 // A class that provides mount(2) and umount(2) wrappers. They return true on
 // success.
@@ -53,10 +62,8 @@ class ArcMounter {
 
   virtual bool LoopMount(const std::string& source,
                          const base::FilePath& target,
+                         LoopMountFilesystemType filesystem_type,
                          unsigned long mount_flags) = 0;  // NOLINT(runtime/int)
-
-  virtual bool BindMountWithNoPathResolution(
-      const base::FilePath& old_path, const base::FilePath& new_path) = 0;
 
   virtual bool BindMount(const base::FilePath& old_path,
                          const base::FilePath& new_path) = 0;
@@ -98,6 +105,7 @@ class ScopedMount {
       ArcMounter* mounter,
       const std::string& source,
       const base::FilePath& target,
+      LoopMountFilesystemType filesystem_type,
       unsigned long flags);  // NOLINT(runtime/int)
 
   // Bindmounts |old_path| to |new_path| and returns a unique_ptr that umounts
@@ -152,16 +160,6 @@ bool GetPropertyFromFile(const base::FilePath& prop_file_path,
 bool GetPropertiesFromFile(const base::FilePath& prop_file_path,
                            std::map<std::string, std::string>* out_properties);
 
-// Reads Android's packages.xml at |packages_xml_path|, fills
-// |out_fingerprint| and |out_sdk_version| with the OS fingerprint and the SDK
-// version for the internal storage found in the XML.
-// If the file does not exist or no fingerprint is found in the file, returns
-// false.
-bool GetFingerprintAndSdkVersionFromPackagesXml(
-    const base::FilePath& packages_xml_path,
-    std::string* out_fingerprint,
-    std::string* out_sdk_version);
-
 // Creates |file_path| with |mode|. If the file already exists, this function
 // sets the file size to 0 and mode to |mode|. Returns true on success.
 bool CreateOrTruncate(const base::FilePath& file_path, mode_t mode);
@@ -183,6 +181,24 @@ bool WaitForPaths(std::initializer_list<base::FilePath> paths,
 // WARNING: *Never* execute /bin/[u]mount with LaunchAndWait which may take
 // ~200ms or more. Instead, use one of the mount/umount syscall wrappers above.
 bool LaunchAndWait(const std::vector<std::string>& argv);
+
+// Launches the command specified by |argv| and waits for the command to finish.
+// Returns true if the command finishes successfully. The exit code from the
+// command is stored in the exit_code pointer.
+//
+// WARNING: LaunchAndWait is *very* slow. Use this only when it's
+// unavoidable. One LaunchAndWait call will take at least ~40ms on
+// ARM Chromebooks because arc_setup is executed when the CPU is very busy and
+// fork/exec takes time.
+//
+// WARNING: *Never* execute /bin/[u]mount with LaunchAndWait which may
+// take ~200ms or more. Instead, use one of the mount/umount syscall wrappers
+// above.
+bool LaunchAndWait(const std::vector<std::string>& argv, int* exit_code);
+
+// Launches the command specified by |argv| and does not wait for the command
+// to finish. Returns true if the process is valid.
+bool LaunchAndDoNotWait(const std::vector<std::string>& argv);
 
 // Restores contexts of the |directories| and their contents recursively.
 // Returns true on success.
@@ -215,12 +231,6 @@ bool DeleteFilesInDir(const base::FilePath& directory);
 // Returns a mounter for production.
 std::unique_ptr<ArcMounter> GetDefaultMounter();
 
-// Reads |file_path| line by line and pass each line to the |callback| after
-// trimming it. If |callback| returns true, stops reading the file and returns
-// true.
-bool FindLine(const base::FilePath& file_path,
-              const base::Callback<bool(const std::string&)>& callback);
-
 // See OpenSafely() in arc_setup_util.cc.
 base::ScopedFD OpenSafelyForTesting(const base::FilePath& path,
                                     int flags,
@@ -245,11 +255,6 @@ bool IsProcessAlive(pid_t pid);
 bool GetSha1HashOfFiles(const std::vector<base::FilePath>& files,
                         std::string* out_hash);
 
-// Sets an extended attribute of the |path| to |value|.
-bool SetXattr(const base::FilePath& path,
-              const char* name,
-              const std::string& value);
-
 // Checks whether to clear entire android data directory before starting the
 // container by comparing |system_sdk_version| from the current boot against
 // |data_sdk_version| from the previous boot.
@@ -261,17 +266,6 @@ bool ShouldDeleteAndroidData(AndroidSdkVersion system_sdk_version,
 // processing next lines.
 bool FindAllProperties(std::map<std::string, std::string>* out_properties,
                        const std::string& line);
-
-// A callback function for GetFingerprintAndSdkVersionFromPackagesXml.
-// This checks if the |line| is like
-//    <version sdkVersion="25" databaseVersion="3" fingerprint="..." />
-// and store the fingerprint part in |out_fingerprint| and the sdkVersion part
-// in |out_sdk_version| if it is. Ignore a line with a volumeUuid attribute
-// which means that the line is for an external storage.
-// What we need is a fingerprint and a sdk version for an internal storage.
-bool FindFingerprintAndSdkVersion(std::string* out_fingerprint,
-                                  std::string* out_sdk_version,
-                                  const std::string& line);
 
 // Returns the user and group ids for a user.
 bool GetUserId(const std::string& user, uid_t* user_id, gid_t* group_id);
@@ -286,22 +280,34 @@ bool SafeCopyFile(const base::FilePath& src_path,
                   uid_t uid = getuid(),
                   gid_t gid = getgid());
 
+// Returns whether |image_path| points to an EROFS image file.
+// Returns false if |image_path| is not an EROFS image file, or an error
+// occurred while accessing it.
+bool IsErofsImage(const base::FilePath& image_path);
+
 // Generates a file called first stage fstab at |fstab_path| which is exported
 // by crosvm to the guest via the device tree so the guest can read certain
 // files in its init's first stage.
+// |vendor_image_path| is used to check file system type of the vendor image.
 // |cache_partition| indicates the device number of the disk for the cache
 // partition to reside on. An empty string indicates that no disk is specified
 // for cache partition (i.e. cache does not have a dedicated partition).
 bool GenerateFirstStageFstab(const base::FilePath& combined_property_file_name,
                              const base::FilePath& fstab_path,
+                             const base::FilePath& vendor_image_path,
                              const std::string& cache_partition);
 
 // Filters camera profiles in |media_profile_xml| with the settings in
 // |camera_test_config| and returns the filtered content.
-base::Optional<std::string> FilterMediaProfile(
+std::optional<std::string> FilterMediaProfile(
     const base::FilePath& media_profile_xml,
     const base::FilePath& camera_test_config);
 
+// Append Features coming from the libsegmentation library that Android must be
+// aware of.
+std::optional<std::string> AppendFeatureManagement(
+    const base::FilePath& hardware_profile_xml,
+    segmentation::FeatureManagement& feature_management);
 }  // namespace arc
 
 #endif  // ARC_SETUP_ARC_SETUP_UTIL_H_

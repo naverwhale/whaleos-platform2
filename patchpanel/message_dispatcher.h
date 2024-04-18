@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,50 +7,82 @@
 
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include <sys/socket.h>
 
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
-
-#include "patchpanel/ipc.pb.h"
+#include <brillo/brillo_export.h>
+#include <google/protobuf/message_lite.h>
 
 namespace patchpanel {
 
-// Helper message processor
-class MessageDispatcher {
+class BRILLO_EXPORT MessageDispatcherInternal {
  public:
-  explicit MessageDispatcher(base::ScopedFD fd, bool start = true);
+  explicit MessageDispatcherInternal(base::ScopedFD fd);
+  MessageDispatcherInternal(const MessageDispatcherInternal&) = delete;
+  MessageDispatcherInternal& operator=(const MessageDispatcherInternal&) =
+      delete;
+
+  ~MessageDispatcherInternal() = default;
+
+  void RegisterFailureHandler(base::RepeatingCallback<void()> handler);
+  void RegisterMessageHandler(base::RepeatingCallback<void()> handler);
+
+  bool GetMessage(google::protobuf::MessageLite* proto);
+  bool SendMessage(const google::protobuf::MessageLite& proto);
+
+ private:
+  base::ScopedFD fd_;
+  std::unique_ptr<base::FileDescriptorWatcher::Controller> watcher_;
+  base::RepeatingCallback<void()> failure_handler_;
+};
+
+// Helper message processor
+template <typename ProtoMessage>
+class BRILLO_EXPORT MessageDispatcher {
+ public:
+  explicit MessageDispatcher(base::ScopedFD fd)
+      : msg_dispatcher_internal_(new MessageDispatcherInternal(std::move(fd))) {
+  }
   MessageDispatcher(const MessageDispatcher&) = delete;
   MessageDispatcher& operator=(const MessageDispatcher&) = delete;
 
-  void Start();
+  virtual ~MessageDispatcher() = default;
 
-  void RegisterFailureHandler(const base::Callback<void()>& handler);
+  virtual void RegisterFailureHandler(base::RepeatingCallback<void()> handler) {
+    msg_dispatcher_internal_->RegisterFailureHandler(std::move(handler));
+  }
 
-  void RegisterNDProxyMessageHandler(
-      const base::Callback<void(const NDProxyMessage&)>& handler);
+  virtual void RegisterMessageHandler(
+      base::RepeatingCallback<void(const ProtoMessage&)> handler) {
+    message_handler_ = std::move(handler);
+    msg_dispatcher_internal_->RegisterMessageHandler(
+        base::BindRepeating(&MessageDispatcher::OnFileCanReadWithoutBlocking,
+                            weak_factory_.GetWeakPtr()));
+  }
 
-  void RegisterGuestMessageHandler(
-      const base::Callback<void(const GuestMessage&)>& handler);
-
-  void RegisterDeviceMessageHandler(
-      const base::Callback<void(const DeviceMessage&)>& handler);
-
-  void SendMessage(const google::protobuf::MessageLite& proto) const;
+  virtual bool SendMessage(const ProtoMessage& proto) const {
+    return msg_dispatcher_internal_->SendMessage(proto);
+  }
 
  private:
-  // Overrides MessageLoopForIO callbacks for new data on |control_fd_|.
-  void OnFileCanReadWithoutBlocking();
+  void OnFileCanReadWithoutBlocking() {
+    if (!msg_dispatcher_internal_->GetMessage(&msg_)) {
+      return;
+    }
+    if (!message_handler_.is_null()) {
+      message_handler_.Run(msg_);
+    }
+  }
 
-  base::ScopedFD fd_;
-  std::unique_ptr<base::FileDescriptorWatcher::Controller> watcher_;
-  base::Callback<void()> failure_handler_;
-  base::Callback<void(const NDProxyMessage&)> ndproxy_handler_;
-  base::Callback<void(const GuestMessage&)> guest_handler_;
-  base::Callback<void(const DeviceMessage&)> device_handler_;
+  std::unique_ptr<MessageDispatcherInternal> msg_dispatcher_internal_;
+  base::RepeatingCallback<void(const ProtoMessage&)> message_handler_;
 
-  IpHelperMessage msg_;
+  ProtoMessage msg_;
 
   base::WeakPtrFactory<MessageDispatcher> weak_factory_{this};
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include <brillo/whaleos_util.h>
-
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_path.h>
@@ -26,156 +24,51 @@
 #include <base/threading/platform_thread.h>
 #include <base/time/time.h>
 #include <brillo/secure_blob.h>
+#include <libhwsec/status.h>
+#include <libhwsec-foundation/crypto/secure_blob_util.h>
+#include <libhwsec-foundation/crypto/sha.h>
 
-#include "cryptohome/crypto/secure_blob_util.h"
-#include "cryptohome/crypto/sha.h"
 #include "cryptohome/platform.h"
 
 using base::FilePath;
 using brillo::SecureBlob;
-using hwsec::error::TPMErrorBase;
+using hwsec::TPMErrorBase;
+using hwsec_foundation::CreateSecureRandomBlob;
+using hwsec_foundation::SecureBlobToHex;
+using hwsec_foundation::Sha256;
 
 namespace cryptohome {
-namespace {
-
-// Literals for running mount-encrypted helper.
-constexpr char kMountEncrypted[] = "/usr/sbin/mount-encrypted";
-constexpr char kMountEncryptedFinalize[] = "finalize";
-
-}  // namespace
 
 std::ostream& operator<<(std::ostream& out, LockboxError error) {
   return out << static_cast<int>(error);
 }
 
-int GetNvramVersionNumber(NvramVersion version) {
-  switch (version) {
-    case NvramVersion::kVersion1:
-      return 1;
-    case NvramVersion::kVersion2:
-      return 2;
-  }
-  NOTREACHED();
-  return 0;
+Lockbox::Lockbox(const hwsec::CryptohomeFrontend* hwsec, hwsec::Space space)
+    : hwsec_(hwsec), space_(space) {
+  CHECK(hwsec_);
 }
-
-Lockbox::Lockbox(Tpm* tpm, uint32_t nvram_index)
-    : tpm_(tpm),
-      nvram_index_(nvram_index),
-      default_process_(new brillo::ProcessImpl()),
-      process_(default_process_.get()),
-      default_platform_(new Platform()),
-      platform_(default_platform_.get()) {}
 
 Lockbox::~Lockbox() {}
 
 bool Lockbox::Reset(LockboxError* error) {
-  if (!tpm_ || !tpm_->IsEnabled() || !tpm_->IsOwned()) {
-    *error = LockboxError::kTpmUnavailable;
-    LOG(ERROR) << "TPM unavailable";
+  uint32_t nvram_bytes = LockboxContents::kNvramSize;
+  if (hwsec::Status status = hwsec_->PrepareSpace(space_, nvram_bytes);
+      !status.ok()) {
+    LOG(ERROR) << "Failed to prepare lockbox space: " << status;
+    *error = LockboxError::kTpmError;
     return false;
   }
 
-  // If we have authorization, recreate the lockbox space.
-  brillo::SecureBlob owner_password;
-  if (tpm_->IsOwnerPasswordPresent()) {
-    if (tpm_->IsNvramDefined(nvram_index_) &&
-        !tpm_->DestroyNvram(nvram_index_)) {
-      LOG(ERROR) << "Failed to destroy lockbox data before creation.";
-      *error = LockboxError::kTpmError;
-      return false;
-    }
-
-    // If we store the encryption salt in lockbox, protect it from reading
-    // in non-verified boot mode.
-    uint32_t nvram_perm =
-        Tpm::kTpmNvramWriteDefine |
-        (IsKeyMaterialInLockbox() ? Tpm::kTpmNvramBindToPCR0 : 0);
-    uint32_t nvram_bytes = LockboxContents::GetNvramSize(nvram_version_);
-    if (!tpm_->DefineNvram(nvram_index_, nvram_bytes, nvram_perm)) {
-      *error = LockboxError::kTpmError;
-      LOG(ERROR) << "Failed to define NVRAM space.";
-      if (!brillo::IsWhalebook2Model()) {
-        return false;
-      }
-      LOG(ERROR) << __func__ << " failed at " << __LINE__ << " line."
-          << " But ignore this error and go through fallback.";
-    }
-    LOG(INFO) << "Lockbox created.";
-    return true;
-  } else {
-    LOG(WARNING) << "No owner password when trying to reset LockBox.";
-  }
-
-  // Check if the space is already set up correctly.
-  if (!tpm_->IsNvramDefined(nvram_index_)) {
-    LOG(ERROR) << "NVRAM space absent when resetting LockBox.";
-    *error = LockboxError::kNvramSpaceAbsent;
-    if (!brillo::IsWhalebook2Model()) {
-      return false;
-    }
-    LOG(ERROR) << __func__ << " failed at " << __LINE__ << " line."
-        << " But ignore this error and go through fallback.";
-  }
-
-  if (tpm_->IsNvramLocked(nvram_index_)) {
-    LOG(ERROR) << "NVRAM space locked after resetting LockBox.";
-    *error = LockboxError::kNvramInvalid;
-    if (!brillo::IsWhalebook2Model()) {
-      return false;
-    }
-    LOG(ERROR) << __func__ << " failed at " << __LINE__ << " line."
-        << " But ignore this error and go through fallback.";
-  }
-
-  // The NVRAM space that we are looking at is not created by us, and it is too
-  // expensive to extensively inspect it. Given the above, we aren't sure about
-  // all its attributes, all we know is that:
-  // 1. It's not locked.
-  // 2. It exists (is defined).
-  // Therefore, it is highly likely that the NVRAM space is writable, and
-  // suitable for our use case. The most probable scenario is that this NVRAM
-  // index is created by previous installations of Chromium OS, so we'll just
-  // continue to use it.
-  LOG(INFO) << "Existing Lockbox seems writable.";
   return true;
 }
 
 bool Lockbox::Store(const brillo::Blob& blob, LockboxError* error) {
-  if (!tpm_ || !tpm_->IsEnabled()) {
-    *error = LockboxError::kTpmUnavailable;
-    LOG(ERROR) << "TPM unavailable";
-    return false;
-  }
+  // Construct a LockboxContents instance.
+  std::unique_ptr<LockboxContents> contents = LockboxContents::New();
 
-  if (!tpm_->IsNvramDefined(nvram_index_) ||
-      tpm_->IsNvramLocked(nvram_index_)) {
-    *error = LockboxError::kNvramInvalid;
-    return false;
-  }
-
-  // Check defined NVRAM size and construct a suitable LockboxContents instance.
-  unsigned int nvram_size = tpm_->GetNvramSize(nvram_index_);
-  std::unique_ptr<LockboxContents> contents = LockboxContents::New(nvram_size);
-  if (!contents) {
-    LOG(ERROR) << "Unsupported NVRAM space size " << nvram_size << ".";
-    *error = LockboxError::kNvramInvalid;
-    return false;
-  }
-
-  // Grab key material from the TPM.
-  brillo::SecureBlob key_material(contents->key_material_size());
-  if (IsKeyMaterialInLockbox()) {
-    if (TPMErrorBase err =
-            tpm_->GetRandomDataSecureBlob(key_material.size(), &key_material)) {
-      LOG(ERROR) << "Failed to get key material from the TPM: " << *err;
-      *error = LockboxError::kTpmError;
-      return false;
-    }
-  } else {
-    // Save a TPM command, and just fill the salt field with zeroes.
-    LOG(INFO) << "Skipping random salt generation.";
-  }
+  // Create the random key material.
+  brillo::SecureBlob key_material =
+      CreateSecureRandomBlob(contents->key_material_size());
 
   brillo::SecureBlob nvram_blob;
   if (!contents->SetKeyMaterial(key_material) || !contents->Protect(blob) ||
@@ -186,101 +79,27 @@ bool Lockbox::Store(const brillo::Blob& blob, LockboxError* error) {
   }
 
   // Write the hash to nvram
-  if (!tpm_->WriteNvram(nvram_index_,
-                        SecureBlob(nvram_blob.begin(), nvram_blob.end()))) {
-    LOG(ERROR) << "Store() failed to write the attribute hash to NVRAM";
+  if (hwsec::Status status = hwsec_->StoreSpace(
+          space_, brillo::Blob(nvram_blob.begin(), nvram_blob.end()));
+      !status.ok()) {
+    LOG(ERROR) << "Failed to write lockbox space: " << status;
     *error = LockboxError::kTpmError;
     return false;
   }
-  // Lock nvram index for writing.
-  if (!tpm_->WriteLockNvram(nvram_index_)) {
-    LOG(ERROR) << "Store() failed to lock the NVRAM space";
-    *error = LockboxError::kTpmError;
-    return false;
-  }
-  // Ensure the space is now locked.
-  if (!tpm_->IsNvramLocked(nvram_index_)) {
-    LOG(ERROR) << "NVRAM space did not lock as expected.";
-    *error = LockboxError::kTpmError;
-    return false;
-  }
-
-  // Call out to mount-encrypted now that salt has been written.
-  FinalizeMountEncrypted(contents->version() == NvramVersion::kVersion1
-                             ? nvram_blob
-                             : key_material);
 
   return true;
 }
 
-// TODO(keescook) Write unittests for this.
-void Lockbox::FinalizeMountEncrypted(const brillo::SecureBlob& entropy) const {
-  std::string hex;
-  FilePath outfile_path;
-  FILE* outfile;
-  int rc;
-
-  // Take hash of entropy and convert to hex string for cmdline.
-  SecureBlob hash = Sha256(entropy);
-  hex = SecureBlobToHex(hash);
-
-  process_->Reset(0);
-  process_->AddArg(kMountEncrypted);
-  process_->AddArg(kMountEncryptedFinalize);
-  process_->AddArg(hex);
-
-  // Redirect stdout/stderr somewhere useful for error reporting.
-  outfile = platform_->CreateAndOpenTemporaryFile(&outfile_path);
-  if (outfile) {
-    process_->BindFd(fileno(outfile), STDOUT_FILENO);
-    process_->BindFd(fileno(outfile), STDERR_FILENO);
-  }
-
-  rc = process_->Run();
-
-  if (rc) {
-    LOG(ERROR) << "Request to finalize encrypted mount failed ('"
-               << kMountEncrypted << " " << kMountEncryptedFinalize << " "
-               << hex << "', rc:" << rc << ")";
-    if (outfile) {
-      std::vector<std::string> output;
-      std::vector<std::string>::iterator it;
-      std::string contents;
-
-      if (platform_->ReadFileToString(outfile_path, &contents)) {
-        output = base::SplitString(contents, "\n", base::KEEP_WHITESPACE,
-                                   base::SPLIT_WANT_ALL);
-        for (it = output.begin(); it < output.end(); it++) {
-          LOG(ERROR) << *it;
-        }
-      }
-    }
-  } else {
-    LOG(INFO) << "Encrypted partition finalized.";
-  }
-
-  if (outfile)
-    platform_->CloseFile(outfile);
-
-  return;
-}
-
 // static
-std::unique_ptr<LockboxContents> LockboxContents::New(size_t nvram_size) {
-  // Make sure |nvram_size| corresponds to one of the encoding versions.
-  if (GetNvramSize(NvramVersion::kVersion1) != nvram_size &&
-      GetNvramSize(NvramVersion::kVersion2) != nvram_size) {
-    return nullptr;
-  }
-
+std::unique_ptr<LockboxContents> LockboxContents::New() {
   std::unique_ptr<LockboxContents> result(new LockboxContents());
-  result->key_material_.resize(nvram_size - kFixedPartSize);
+  result->key_material_.resize(kKeyMaterialSize);
   return result;
 }
 
 bool LockboxContents::Decode(const brillo::SecureBlob& nvram_data) {
   // Reject data of incorrect size.
-  if (nvram_data.size() != GetNvramSize(version())) {
+  if (nvram_data.size() != kNvramSize) {
     return false;
   }
 

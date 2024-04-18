@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <iterator>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -18,17 +19,18 @@
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/rand_util.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
+
+#include "brillo/files/file_util.h"
 
 namespace brillo {
 
 namespace {
 
 // Log sync(), fsync(), etc. calls that take this many seconds or longer.
-constexpr const base::TimeDelta kLongSync = base::TimeDelta::FromSeconds(10);
+constexpr const base::TimeDelta kLongSync = base::Seconds(10);
 
 enum {
   kPermissions600 = S_IRUSR | S_IWUSR,
@@ -90,7 +92,7 @@ RegularFileOrDeleteResult RegularFileOrDelete(const base::FilePath& path,
   // If we get here and anything was at |path|, try to delete it so we can put
   // our file there.
   if (path_not_empty) {
-    if (!base::DeletePathRecursively(path)) {
+    if (!brillo::DeletePathRecursively(path)) {
       PLOG(WARNING) << "Failed to delete entity at \"" << path.value() << '"';
       return kFailure;
     }
@@ -135,7 +137,7 @@ bool TouchFileInternal(const base::FilePath& path,
   }
 
   if (fd_out) {
-    fd_out->swap(scoped_fd);
+    *fd_out = std::move(scoped_fd);
   }
   return true;
 }
@@ -143,7 +145,7 @@ bool TouchFileInternal(const base::FilePath& path,
 std::string GetRandomSuffix() {
   const int kBufferSize = 6;
   unsigned char buffer[kBufferSize];
-  base::RandBytes(buffer, base::size(buffer));
+  base::RandBytes(buffer, std::size(buffer));
   std::string suffix;
   for (int i = 0; i < kBufferSize; ++i) {
     int random_value = buffer[i] % (2 * 26 + 10);
@@ -210,8 +212,7 @@ base::ScopedFD OpenSafelyInternal(int parent_fd,
                                   const base::FilePath& path,
                                   int flags,
                                   mode_t mode) {
-  std::vector<std::string> components;
-  path.GetComponents(&components);
+  std::vector<std::string> components = path.GetComponents();
 
   auto itr = components.begin();
   if (itr == components.end()) {
@@ -253,7 +254,7 @@ bool TouchFile(const base::FilePath& path,
   if (scoped_fd != -1 &&
       HANDLE_EINTR(fchmod(scoped_fd.get(), new_file_permissions)) == -1) {
     PLOG(WARNING) << "Failed to set permissions for \"" << path.value() << '"';
-    base::DeleteFile(path);
+    brillo::DeleteFile(path);
     return false;
   }
 
@@ -355,8 +356,7 @@ base::ScopedFD OpenFifoSafely(const base::FilePath& path,
 }
 
 base::ScopedFD MkdirRecursively(const base::FilePath& full_path, mode_t mode) {
-  std::vector<std::string> components;
-  full_path.GetComponents(&components);
+  std::vector<std::string> components = full_path.GetComponents();
 
   auto itr = components.begin();
   if (!full_path.IsAbsolute() || itr == components.end()) {

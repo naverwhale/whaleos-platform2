@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -33,7 +33,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <gtest/gtest_prod.h>
 #include <openssl/sha.h>
 
@@ -79,7 +78,7 @@ enum class UpdateExtraCommand : uint16_t {
   kTouchpadDebug = 8,
   kConsoleReadInit = 9,
   kConsoleReadNext = 10,
-  kMaxValue = kTouchpadInfo
+  kMaxValue = kConsoleReadNext
 };
 const char* ToString(UpdateExtraCommand subcommand);
 
@@ -171,11 +170,7 @@ struct FirstResponsePdu {
   uint32_t key_version;       // RO public key version
 };
 
-enum class SectionName {
-  RO,
-  RW,
-  Invalid,
-};
+enum class SectionName { RO, RW, Invalid, kMaxValue = Invalid };
 const char* ToString(SectionName name);
 SectionName OtherSection(SectionName name);
 

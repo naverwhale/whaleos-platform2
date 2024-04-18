@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,7 +20,7 @@ class MockExternalTask : public ExternalTask {
   MockExternalTask(ControlInterface* control,
                    ProcessManager* process_manager,
                    const base::WeakPtr<RpcTaskDelegate>& task_delegate,
-                   const base::Callback<void(pid_t, int)>& death_callback);
+                   base::OnceCallback<void(pid_t, int)> death_callback);
   MockExternalTask(const MockExternalTask&) = delete;
   MockExternalTask& operator=(const MockExternalTask&) = delete;
 

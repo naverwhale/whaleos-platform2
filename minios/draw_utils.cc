@@ -1,10 +1,11 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "minios/draw_utils.h"
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 
 #include <base/logging.h>
@@ -12,15 +13,19 @@
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 
+#include "minios/utils.h"
+
 namespace minios {
 
 // Dropdown Menu Colors.
 const char kMenuBlack[] = "0x202124";
-const char kMenuBlue[] = "0x8AB4F8";
+const char kMenuBlue[] = "0x386AFF";
 const char kMenuGrey[] = "0x3F4042";
-const char kMenuDropdownFrameNavy[] = "0x435066";
+const char kMenuDropdownFrameNavy[] = "0x182D6B";
+const char kMenuDropdownHighlightNavy[] = "0x7A9BFF";
 const char kMenuDropdownBackgroundBlack[] = "0x2D2E30";
 const char kMenuButtonFrameGrey[] = "0x9AA0A6";
+const char kAdvancedBtnBackground[] = "0x2B2F37";
 
 // Dimension Constants
 const int kButtonHeight = 32;
@@ -30,23 +35,39 @@ const int kMonospaceGlyphHeight = 20;
 const int kMonospaceGlyphWidth = 10;
 const int kDefaultButtonWidth = 80;
 const int kProgressBarYScale = 12;
+constexpr int kProgressBarHeight = 4;
 
 // Frecon constants
 constexpr char kScreens[] = "etc/screens";
 constexpr int kFreconScalingFactor = 1;
 constexpr int kCanvasSize = 1080;
 constexpr int kSmallCanvasSize = 900;
+constexpr int kFreconNoOffset = 0;
 
 namespace {
-constexpr char kConsole0[] = "dev/pts/0";
+constexpr char kConsole0[] = "run/frecon/vt0";
 
 // Dimensions and spacing.
 constexpr int kNewLineChar = 10;
 
 constexpr char kButtonWidthToken[] = "DEBUG_OPTIONS_BTN_WIDTH";
 
+constexpr char kPngExtension[] = ".png";
+constexpr char kFocusedSuffix[] = "_focused";
+
 // The index for en-US in `supported_locales`.
 constexpr int kEnglishIndex = 9;
+
+// The resolution at which we draw segments of the indeterminate progress bar.
+// Tail is slightly slower than head in an attempt to approximate the material
+// design guidelines for indeterminate progress bars.
+constexpr float kProgressBarHeadSegments = 50.0f;
+constexpr float kProgressBarTailSegments = 57.0f;
+
+// Convert a floating point value to the nearest even integer.
+int nearbyeven(const float value) {
+  return static_cast<int>(std::nearbyint(value * 0.5f) * 2.0f);
+}
 }  // namespace
 
 bool DrawUtils::Init() {
@@ -57,6 +78,8 @@ bool DrawUtils::Init() {
     return false;
   }
   GetFreconConstants();
+  InitIndeterminateProgressBar();
+  minios_version_ = GetMiniOSVersion();
   return true;
 }
 
@@ -64,7 +87,7 @@ bool DrawUtils::ShowText(const std::string& text,
                          int glyph_offset_h,
                          int glyph_offset_v,
                          const std::string& color) {
-  base::FilePath glyph_dir = screens_path_.Append("glyphs").Append(color);
+  base::FilePath glyph_dir = GetScreensPath().Append("glyphs").Append(color);
   const int kTextStart = glyph_offset_h;
 
   for (const auto& chr : text) {
@@ -131,7 +154,7 @@ bool DrawUtils::ShowMessage(const std::string& message_token,
   // Determine the filename of the message resource. Fall back to en-US if
   // the localized version of the message is not available.
   base::FilePath message_file_path =
-      screens_path_.Append(locale_).Append(message_token + ".png");
+      GetScreensPath().Append(locale_).Append(message_token + ".png");
   if (!base::PathExists(message_file_path)) {
     if (locale_ == "en-US") {
       LOG(ERROR) << "Message " << message_token
@@ -141,7 +164,7 @@ bool DrawUtils::ShowMessage(const std::string& message_token,
     LOG(WARNING) << "Could not find " << message_token << " in " << locale_
                  << " trying default locale en-US.";
     message_file_path =
-        screens_path_.Append("en-US").Append(message_token + ".png");
+        GetScreensPath().Append("en-US").Append(message_token + ".png");
     if (!base::PathExists(message_file_path)) {
       LOG(ERROR) << "Message " << message_token << " not found in path "
                  << message_file_path;
@@ -195,6 +218,33 @@ int DrawUtils::FindLocaleIndex(int current_index) {
   return std::distance(supported_locales_.begin(), locale);
 }
 
+void DrawUtils::ShowProgressBar(int offset_x,
+                                int size_x,
+                                const std::string& color) {
+  // No-op if offset is outside the bounds of the canvas.
+  if (offset_x > frecon_offset_limit_ || offset_x < -frecon_offset_limit_)
+    return;
+
+  const int offset_y = -frecon_canvas_size_ / kProgressBarYScale;
+  // Clamp to the right boundary of the canvas.
+  const int max_x = offset_x + (size_x / 2);
+  if (max_x > frecon_offset_limit_) {
+    size_x = nearbyeven(frecon_offset_limit_ - (offset_x - (size_x / 2)));
+    offset_x = frecon_offset_limit_ - (size_x / 2);
+  }
+  // Clamp to the left boundary of the canvas.
+  const int min_x = offset_x - (size_x / 2);
+  if (min_x < -frecon_offset_limit_) {
+    size_x = nearbyeven((offset_x + (size_x / 2)) - (-frecon_offset_limit_));
+    offset_x = -frecon_offset_limit_ + (size_x / 2);
+  }
+  ShowBox(offset_x, offset_y, size_x, kProgressBarHeight, color);
+}
+
+void DrawUtils::ShowProgressBar() {
+  ShowProgressBar(kFreconNoOffset, frecon_canvas_size_, kMenuGrey);
+}
+
 void DrawUtils::ShowProgressPercentage(double progress) {
   if (progress < 0 || progress > 1) {
     LOG(WARNING) << "Invalid value of progress: " << progress;
@@ -202,12 +252,59 @@ void DrawUtils::ShowProgressPercentage(double progress) {
   }
   // Should be at canvas width at 100%.
   const double kProgressIncrement = frecon_canvas_size_ / 100.0;
-  constexpr int kProgressHeight = 4;
   const int kLeftIncrement = -frecon_canvas_size_ / 2;
   int progress_length = kProgressIncrement * progress * 100;
-  ShowBox(kLeftIncrement + progress_length / 2,
-          frecon_canvas_size_ / kProgressBarYScale, progress_length,
-          kProgressHeight, kMenuBlue);
+  ShowProgressBar(kLeftIncrement + progress_length / 2, progress_length,
+                  kMenuBlue);
+}
+
+void DrawUtils::ShowIndeterminateProgressBar() {
+  InitIndeterminateProgressBar();
+  // Show background for progress bar.
+  ShowProgressBar();
+  timer_.Start(FROM_HERE, kAnimationPeriod, this,
+               &DrawUtils::DrawIndeterminateProgressBar);
+}
+
+void DrawUtils::HideIndeterminateProgressBar() {
+  timer_.AbandonAndStop();
+  // Clear progress bar.
+  ShowProgressBar(kFreconNoOffset, frecon_canvas_size_, kMenuBlack);
+}
+
+void DrawUtils::InitIndeterminateProgressBar() {
+  // Calculate segment sizes as even numbers.
+  segment_size_head_ =
+      nearbyeven(frecon_canvas_size_ / kProgressBarHeadSegments);
+  segment_size_tail_ =
+      nearbyeven(frecon_canvas_size_ / kProgressBarTailSegments);
+  ResetIndeterminateProgressBar();
+}
+
+void DrawUtils::ResetIndeterminateProgressBar() {
+  constexpr int tail_delay = 20;
+  indeterminate_progress_bar_head_ = -frecon_offset_limit_;
+  indeterminate_progress_bar_tail_ =
+      -frecon_offset_limit_ - (tail_delay * segment_size_tail_);
+}
+
+void DrawUtils::DrawIndeterminateProgressBar() {
+  indeterminate_progress_bar_head_ += (segment_size_head_ / 2);
+  ShowProgressBar(indeterminate_progress_bar_head_, segment_size_head_,
+                  kMenuBlue);
+  indeterminate_progress_bar_tail_ += (segment_size_tail_ / 2);
+  ShowProgressBar(indeterminate_progress_bar_tail_, segment_size_tail_,
+                  kMenuGrey);
+
+  // Move offset to 5/6 of box just drawn so that there is 1/6 overlap instead
+  // of 1/2 overlap with the next box to be drawn.
+  indeterminate_progress_bar_head_ +=
+      std::nearbyint((segment_size_head_ / 6.0) * 2.0f);
+  indeterminate_progress_bar_tail_ +=
+      std::nearbyint((segment_size_tail_ / 6.0) * 2.0f);
+  if (indeterminate_progress_bar_tail_ > frecon_offset_limit_) {
+    ResetIndeterminateProgressBar();
+  }
 }
 
 void DrawUtils::ClearMainArea() {
@@ -243,11 +340,10 @@ void DrawUtils::ShowButton(const std::string& message_token,
   }
 
   if (is_selected) {
-    ShowImage(screens_path_.Append("btn_bg_left_focused.png"), left_padding_x,
-              offset_y);
-    ShowImage(screens_path_.Append("btn_bg_right_focused.png"), right_padding_x,
-              offset_y);
-
+    ShowImage(screens_path_.Append("btn_bg_left_focused_whale.png"),
+              left_padding_x, offset_y);
+    ShowImage(screens_path_.Append("btn_bg_right_focused_whale.png"),
+              right_padding_x, offset_y);
     ShowBox(kOffsetX, offset_y, inner_width, kButtonHeight, kMenuBlue);
     if (is_text) {
       ShowText(message_token, left_padding_x, offset_y, "black");
@@ -255,9 +351,9 @@ void DrawUtils::ShowButton(const std::string& message_token,
       ShowMessage(message_token + "_focused", kOffsetX, offset_y);
     }
   } else {
-    ShowImage(screens_path_.Append("btn_bg_left.png"), left_padding_x,
+    ShowImage(GetScreensPath().Append("btn_bg_left.png"), left_padding_x,
               offset_y);
-    ShowImage(screens_path_.Append("btn_bg_right.png"), right_padding_x,
+    ShowImage(GetScreensPath().Append("btn_bg_right.png"), right_padding_x,
               offset_y);
     ShowBox(kOffsetX, offset_y - (kButtonHeight / 2) + 1, inner_width, 1,
             kMenuButtonFrameGrey);
@@ -285,12 +381,13 @@ void DrawUtils::ShowStepper(const std::vector<std::string>& steps) {
                     (kSeparatorLength / 2);
 
   for (const auto& step : steps) {
-    base::FilePath stepper_image = screens_path_.Append("ic_" + step + ".png");
+    base::FilePath stepper_image =
+        GetScreensPath().Append("ic_" + step + "_whale.png");
     if (!base::PathExists(stepper_image)) {
       // TODO(vyshu): Create a new generic icon to be used instead of done.
       LOG(WARNING) << "Stepper icon " << stepper_image
                    << " not found. Defaulting to the done icon.";
-      stepper_image = screens_path_.Append("ic_done.png");
+      stepper_image = GetScreensPath().Append("ic_done_whale.png");
       if (!base::PathExists(stepper_image)) {
         LOG(ERROR) << "Could not find stepper icon done. Cannot show stepper.";
         return;
@@ -331,15 +428,17 @@ void DrawUtils::ShowLanguageDropdown(int current_index) {
 
     // This is the currently selected language. Show in blue.
     if (current_index == i) {
-      ShowBox(kBackgroundX, offset_y, 720, 40, kMenuBlue);
-      ShowImage(screens_path_.Append(supported_locales_[i])
+      ShowBox(kBackgroundX, offset_y, 720, 40, kMenuDropdownFrameNavy);
+      ShowBox(kBackgroundX, offset_y, 718, 38, kMenuDropdownHighlightNavy);
+      ShowImage(GetScreensPath()
+                    .Append(supported_locales_[i])
                     .Append("language_focused.png"),
                 lang_x, offset_y);
     } else {
       ShowBox(kBackgroundX, offset_y, 720, 40, kMenuDropdownFrameNavy);
       ShowBox(kBackgroundX, offset_y, 718, 38, kMenuDropdownBackgroundBlack);
       ShowImage(
-          screens_path_.Append(supported_locales_[i]).Append("language.png"),
+          GetScreensPath().Append(supported_locales_[i]).Append("language.png"),
           lang_x, offset_y);
     }
     offset_y += kItemHeight;
@@ -360,15 +459,85 @@ void DrawUtils::ShowLanguageMenu(bool is_selected) {
   const int kTextX = -frecon_canvas_size_ / 2 + 40 + language_width / 2;
 
   base::FilePath menu_background =
-      is_selected ? screens_path_.Append("language_menu_bg_focused.png")
-                  : screens_path_.Append("language_menu_bg.png");
+      is_selected ? GetScreensPath().Append("language_menu_bg_focused_whale.png")
+                  : GetScreensPath().Append("language_menu_bg.png");
 
   ShowImage(menu_background, kBgX, kOffsetY);
-  ShowImage(screens_path_.Append("ic_language_filled-bg.png"), kGlobeX,
+  ShowImage(GetScreensPath().Append("ic_language_filled-bg.png"), kGlobeX,
             kOffsetY);
 
-  ShowImage(screens_path_.Append("ic_dropdown.png"), kArrowX, kOffsetY);
+  ShowImage(GetScreensPath().Append("ic_dropdown.png"), kArrowX, kOffsetY);
   ShowMessage("language_folded", kTextX, kOffsetY);
+}
+
+void DrawUtils::ShowControlButton(const std::optional<std::string>& icon,
+                                  const std::string& token,
+                                  int x_offset,
+                                  int y_offset,
+                                  int button_width,
+                                  bool show_arrow,
+                                  bool focused) {
+  const int kInnerWidth = button_width + 60;
+  const int kBtnCenter = (-frecon_canvas_size_ + kInnerWidth) / 2;
+  // Clear previous state.
+  ShowBox(kBtnCenter, y_offset, kInnerWidth + 40, kButtonHeight, kMenuBlack);
+
+  int left_padding_x = (-frecon_canvas_size_ - 12) / 2;
+  int right_padding_x = (-frecon_canvas_size_ + 8) / 2 + kInnerWidth;
+  if (IsLocaleRightToLeft())
+    std::swap(left_padding_x, right_padding_x);
+
+  if (focused) {
+    ShowImage(screens_path_.Append("adv_btn_bg_left_whale.png"),
+              left_padding_x, y_offset);
+    ShowImage(screens_path_.Append("adv_btn_bg_right_whale.png"),
+              right_padding_x, y_offset);
+    // Box outline created when button is focused.
+    ShowBox(kBtnCenter - 4, y_offset, kInnerWidth + 2, kButtonHeight,
+            kMenuBlue);
+    ShowBox(kBtnCenter - 4, y_offset, kInnerWidth + 2, kButtonHeight - 4,
+            kAdvancedBtnBackground);
+  }
+  if (icon) {
+    // Draw an icon on the button.
+    const auto& icon_file =
+        icon.value() + (focused ? kFocusedSuffix : "") + kPngExtension;
+    ShowImage(GetScreensPath().Append(icon_file), x_offset + 10, y_offset);
+    x_offset += 10;
+  }
+
+  const auto& token_with_focus = token + (focused ? kFocusedSuffix : "") + "_whale";
+  ShowMessage(token_with_focus, x_offset + 26 + button_width / 2, y_offset);
+
+  if (show_arrow) {
+    // Show arrow on the rightmost (or leftmost) edge of the button to imply
+    // additional details in the next page.
+    const std::string& arrow =
+        (IsLocaleRightToLeft() ? "ic_dropleft-blue" : "ic_dropright-blue") +
+        std::string{focused ? kFocusedSuffix : ""} + "_whale"+ std::string{kPngExtension};
+
+    ShowImage(GetScreensPath().Append(arrow), x_offset + 48 + button_width,
+              y_offset);
+  }
+}
+
+void DrawUtils::ShowAdvancedOptionsButton(bool focused) {
+  const int kOffsetY = frecon_canvas_size_ / 2 - 272;
+  int button_width;
+  GetDimension("BUTTON_btn_MiniOS_advanced_options_WIDTH", &button_width);
+
+  ShowControlButton("settings", "btn_debug_options", -frecon_canvas_size_ / 2,
+                    kOffsetY, button_width, /*show_arrow=*/true, focused);
+}
+
+void DrawUtils::ShowPowerButton(bool focused) {
+  const int kOffsetY = frecon_canvas_size_ / 2 - 222;
+
+  int power_btn_width;
+  GetDimension("BUTTON_btn_power_off_WIDTH", &power_btn_width);
+
+  ShowControlButton("power", "btn_power_off", -frecon_canvas_size_ / 2,
+                    kOffsetY, power_btn_width, /*show_arrow=*/false, focused);
 }
 
 void DrawUtils::ShowFooter() {
@@ -412,16 +581,16 @@ void DrawUtils::ShowFooter() {
               kFooterY + kFooterLineHeight + 8);
 
   nav_btn_x += kEnterIconWidth / 2;
-  ShowImage(screens_path_.Append("nav-" + kNavKeyEnter + ".png"), nav_btn_x,
+  ShowImage(GetScreensPath().Append("nav-" + kNavKeyEnter + ".png"), nav_btn_x,
             kNavButtonY);
   nav_btn_x += kEnterIconWidth / 2 + kIconPadding + kUpDownIconWidth / 2;
-  ShowImage(screens_path_.Append("nav-" + kNavKeyUp + ".png"), nav_btn_x,
+  ShowImage(GetScreensPath().Append("nav-" + kNavKeyUp + ".png"), nav_btn_x,
             kNavButtonY);
   nav_btn_x += kIconPadding + kUpDownIconWidth;
-  ShowImage(screens_path_.Append("nav-" + kNavKeyDown + ".png"), nav_btn_x,
+  ShowImage(GetScreensPath().Append("nav-" + kNavKeyDown + ".png"), nav_btn_x,
             kNavButtonY);
 
-  ShowImage(screens_path_.Append("qr_code.png"), kQrCodeX, kQrCodeY);
+  ShowImage(GetScreensPath().Append("whale.png"), kQrCodeX, kQrCodeY);
   int hwid_len = hwid_.size();
   int hwid_x = kQrCodeX + (kQrCodeSize / 2) + 16 + 5;
   const int kHwidY = kFooterY + kFooterLineHeight;
@@ -440,17 +609,19 @@ void DrawUtils::LocaleChange(int selected_locale) {
   ReadDimensionConstants();
   ClearScreen();
   ShowFooter();
+  ShowVersion();
 }
 
 void DrawUtils::MessageBaseScreen() {
   ClearMainArea();
   ShowLanguageMenu(false);
   ShowFooter();
+  ShowVersion();
 }
 
 void DrawUtils::ReadDimensionConstants() {
   image_dimensions_.clear();
-  base::FilePath path = screens_path_.Append(locale_).Append("constants.sh");
+  base::FilePath path = GetScreensPath().Append(locale_).Append("constants.sh");
   std::string dimension_consts;
   if (!ReadFileToString(path, &dimension_consts)) {
     LOG(ERROR) << "Could not read constants.sh file for language " << locale_;
@@ -524,13 +695,14 @@ void DrawUtils::GetFreconConstants() {
                    << " to int. Defaulting to canvas size " << kCanvasSize;
     }
   }
+  frecon_offset_limit_ = frecon_canvas_size_ / 2;
 }
 
 bool DrawUtils::ReadLangConstants() {
   lang_constants_.clear();
   supported_locales_.clear();
   // Read language widths from lang_constants.sh into memory.
-  auto lang_constants_path = screens_path_.Append("lang_constants.sh");
+  auto lang_constants_path = GetScreensPath().Append("lang_constants.sh");
   if (!base::PathExists(lang_constants_path)) {
     LOG(ERROR) << "Language constants path: " << lang_constants_path
                << " not found.";
@@ -608,7 +780,7 @@ void DrawUtils::ReadHardwareId() {
   if (!process_manager_->RunCommandWithOutput({"/bin/crossystem", "hwid"},
                                               &exit_code, &output, &error) ||
       exit_code) {
-    hwid_ = "CHROMEBOOK";
+    hwid_ = "WHALEBOOK";
     PLOG(WARNING)
         << "Could not get hwid from crossystem. Exited with exit code "
         << exit_code << " and error " << error
@@ -621,6 +793,18 @@ void DrawUtils::ReadHardwareId() {
       output, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
   hwid_ = hwid_parts[0];
   return;
+}
+
+void DrawUtils::ShowVersion() {
+  if (!minios_version_ || minios_version_->empty()) {
+    return;
+  }
+  // Same Y offset as the language select drop down.
+  const int kVersionInfoY = -frecon_canvas_size_ / 2 + 40;
+  // As far to the right (or left if `IsLocaleRightToLeft`) as possible.
+  int kVersionInfoX = IsLocaleRightToLeft() ? -(frecon_canvas_size_ / 2)
+                                            : (frecon_canvas_size_ / 2);
+  ShowText(minios_version_.value(), kVersionInfoX, kVersionInfoY, "grey");
 }
 
 }  // namespace minios

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,9 @@
 
 #include "power_manager/common/power_constants.h"
 #include "power_manager/common/prefs.h"
-#include "power_manager/powerd/policy/wifi_controller.h"
 #include "power_manager/powerd/system/user_proximity_watcher_interface.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 UserProximityHandler::UserProximityHandler() = default;
 
@@ -117,5 +115,4 @@ void UserProximityHandler::OnProximityEvent(int id, UserProximity value) {
   }
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

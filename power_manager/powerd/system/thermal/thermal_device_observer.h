@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <base/observer_list_types.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class ThermalDeviceInterface;
 
@@ -16,13 +15,12 @@ class ThermalDeviceInterface;
 // from thermal devices.
 class ThermalDeviceObserver : public base::CheckedObserver {
  public:
-  virtual ~ThermalDeviceObserver() {}
+  ~ThermalDeviceObserver() override = default;
 
   // Called when the thermal state changed.
   virtual void OnThermalChanged(ThermalDeviceInterface* sensor) = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_THERMAL_THERMAL_DEVICE_OBSERVER_H_

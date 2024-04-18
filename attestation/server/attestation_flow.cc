@@ -1,8 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "attestation/server/attestation_flow.h"
+
+#include <utility>
 
 #include <base/check.h>
 #include <base/check_op.h>
@@ -10,11 +12,12 @@
 namespace attestation {
 
 AttestationFlowData::AttestationFlowData(const EnrollRequest& request,
-                                         const EnrollCallback& callback)
-    : enroll_request_(request), enroll_callback_(callback) {}
+                                         EnrollCallback callback)
+    : enroll_request_(request), enroll_callback_(std::move(callback)) {}
 AttestationFlowData::AttestationFlowData(const GetCertificateRequest& request,
-                                         const GetCertificateCallback& callback)
-    : get_certificate_request_(request), get_certificate_callback_(callback) {}
+                                         GetCertificateCallback callback)
+    : get_certificate_request_(request),
+      get_certificate_callback_(std::move(callback)) {}
 
 ACAType AttestationFlowData::aca_type() const {
   if (enroll_request_) {
@@ -59,12 +62,12 @@ void AttestationFlowData::ReturnStatus() {
   if (enroll_callback_) {
     EnrollReply reply;
     reply.set_status(status_);
-    enroll_callback_->Run(reply);
+    std::move(enroll_callback_).Run(reply);
   } else {
     DCHECK(get_certificate_callback_);
     GetCertificateReply reply;
     reply.set_status(status_);
-    get_certificate_callback_->Run(reply);
+    std::move(get_certificate_callback_).Run(reply);
   }
 }
 
@@ -75,7 +78,9 @@ void AttestationFlowData::ReturnCertificate() {
   reply.set_status(STATUS_SUCCESS);
   reply.set_public_key(public_key_);
   reply.set_certificate(certificate_);
-  get_certificate_callback_->Run(reply);
+  reply.set_certified_key_credential(certified_key_credential_);
+  reply.set_key_blob(key_blob_);
+  std::move(get_certificate_callback_).Run(reply);
 }
 
 }  // namespace attestation

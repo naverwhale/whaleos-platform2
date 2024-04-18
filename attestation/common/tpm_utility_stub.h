@@ -1,11 +1,13 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ATTESTATION_COMMON_TPM_UTILITY_STUB_H_
 #define ATTESTATION_COMMON_TPM_UTILITY_STUB_H_
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "attestation/common/tpm_utility.h"
 
@@ -22,9 +24,9 @@ class TpmUtilityStub : public TpmUtility {
 
   // TpmUtility methods.
   bool Initialize() override { return true; }
+  std::vector<KeyType> GetSupportedKeyTypes() override { return {}; }
   bool IsTpmReady() override { return false; }
   bool RemoveOwnerDependency() override { return false; }
-  bool IsPCR0Valid() override { return false; }
   TpmVersion GetVersion() override { return TPM_1_2; }
   bool ActivateIdentity(const std::string& identity_key_blob,
                         const std::string& asym_ca_contents,
@@ -42,6 +44,8 @@ class TpmUtilityStub : public TpmUtility {
   }
   bool CreateCertifiedKey(KeyType key_type,
                           KeyUsage key_usage,
+                          hwsec::KeyRestriction key_restriction,
+                          std::optional<CertificateProfile> profile_hint,
                           const std::string& identity_key_blob,
                           const std::string& external_data,
                           std::string* key_blob,
@@ -49,12 +53,6 @@ class TpmUtilityStub : public TpmUtility {
                           std::string* public_key_tpm_format,
                           std::string* key_info,
                           std::string* proof) override {
-    return false;
-  }
-  bool SealToPCR0(const std::string& data, std::string* sealed_data) override {
-    return false;
-  }
-  bool Unseal(const std::string& sealed_data, std::string* data) override {
     return false;
   }
   bool GetEndorsementPublicKey(KeyType key_type,
@@ -75,29 +73,6 @@ class TpmUtilityStub : public TpmUtility {
             std::string* signature) override {
     return false;
   }
-  bool QuotePCR(uint32_t pcr_index,
-                const std::string& key_blob,
-                std::string* quoted_pcr_value,
-                std::string* quoted_data,
-                std::string* quote) override {
-    return false;
-  }
-  bool IsQuoteForPCR(const std::string& quoted_pcr_value,
-                     const std::string& quoted_data,
-                     const std::string& quote,
-                     uint32_t pcr_index) const override {
-    return false;
-  }
-  bool GetNVDataSize(uint32_t nv_index, uint16_t* nv_size) const override {
-    return false;
-  }
-  bool CertifyNV(uint32_t nv_index,
-                 int nv_size,
-                 const std::string& key_blob,
-                 std::string* quoted_data,
-                 std::string* quote) override {
-    return false;
-  }
   bool ReadPCR(uint32_t pcr_index, std::string* pcr_value) override {
     return false;
   }
@@ -114,8 +89,6 @@ class TpmUtilityStub : public TpmUtility {
                       AttestationDatabase::Identity* identity) override {
     return false;
   }
-
-  bool GetRsuDeviceId(std::string* device_id) override { return false; }
 };
 
 }  // namespace attestation

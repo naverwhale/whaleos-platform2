@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,6 +15,7 @@
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/vfs.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -22,9 +23,9 @@
 #include <array>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/command_line.h>
@@ -32,30 +33,34 @@
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ptr_util.h>
 #include <base/notreached.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
-#include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/system/sys_info.h>
 #include <base/threading/platform_thread.h>
 #include <base/time/time.h>
 #include <base/timer/elapsed_timer.h>
 #include <brillo/cryptohome.h>
+#include <brillo/dbus/dbus_connection.h>
 #include <brillo/file_utils.h>
+#include <brillo/files/file_util.h>
 #include <brillo/files/safe_fd.h>
 #include <brillo/scoped_mount_namespace.h>
 #include <chromeos-config/libcros_config/cros_config.h>
 #include <chromeos/patchpanel/dbus/client.h>
 #include <crypto/random.h>
+#include <cryptohome/proto_bindings/UserDataAuth.pb.h>
 #include <metrics/bootstat.h>
 #include <metrics/metrics_library.h>
+#include <user_data_auth-client/user_data_auth/dbus-proxies.h>
 
 #include "arc/setup/arc_property_util.h"
 #include "arc/setup/art_container.h"
+#include "arc/setup/xml/android_xml_util.h"
 
 #define EXIT_IF(f)                            \
   do {                                        \
@@ -96,10 +101,13 @@ constexpr char kAndroidMutableSource[] =
 constexpr char kAndroidRootfsDirectory[] =
     "/opt/google/containers/android/rootfs/root";
 constexpr char kArcVmPerBoardConfigPath[] = "/run/arcvm/host_generated/oem";
+constexpr char kArcVmVendorImagePath[] =
+    "/opt/google/vms/android/vendor.raw.img";
 constexpr char kApkCacheDir[] = "/mnt/stateful_partition/unencrypted/apkcache";
 constexpr char kArcBridgeSocketContext[] = "u:object_r:arc_bridge_socket:s0";
 constexpr char kArcBridgeSocketPath[] = "/run/chrome/arc_bridge.sock";
 constexpr char kBinFmtMiscDirectory[] = "/proc/sys/fs/binfmt_misc";
+constexpr char kBootIdFile[] = "/proc/sys/kernel/random/boot_id";
 constexpr char kBuildPropFile[] = "/usr/share/arc/properties/build.prop";
 constexpr char kBuildPropFileVm[] = "/usr/share/arcvm/properties/build.prop";
 constexpr char kCameraProfileDir[] =
@@ -108,19 +116,24 @@ constexpr char kCameraTestConfig[] = "/var/cache/camera/test_config.json";
 constexpr char kCrasSocketDirectory[] = "/run/cras";
 constexpr char kCombinedPropFileVm[] =
     "/run/arcvm/host_generated/combined.prop";
+constexpr char kDalvikCacheSELinuxContext[] =
+    "u:object_r:dalvikcache_data_file:s0";
 constexpr char kDebugfsDirectory[] = "/run/arc/debugfs";
 constexpr char kFakeKptrRestrict[] = "/run/arc/fake_kptr_restrict";
 constexpr char kFakeMmapRndBits[] = "/run/arc/fake_mmap_rnd_bits";
 constexpr char kFakeMmapRndCompatBits[] = "/run/arc/fake_mmap_rnd_compat_bits";
 constexpr char kHostSideDalvikCacheDirectoryInContainer[] =
     "/var/run/arc/dalvik-cache";
-constexpr char kHostDownloadsDirectory[] = "/home/chronos/user/Downloads";
+constexpr char kMediaCodecsRelative[] = "etc/media_codecs_c2.xml";
+constexpr char kMediaCodecsPerformanceRelative[] =
+    "etc/media_codecs_performance_c2.xml";
 constexpr char kMediaMountDirectory[] = "/run/arc/media";
 constexpr char kMediaMyFilesDirectory[] = "/run/arc/media/MyFiles";
 constexpr char kMediaMyFilesDefaultDirectory[] =
     "/run/arc/media/MyFiles-default";
 constexpr char kMediaMyFilesReadDirectory[] = "/run/arc/media/MyFiles-read";
 constexpr char kMediaMyFilesWriteDirectory[] = "/run/arc/media/MyFiles-write";
+constexpr char kMediaMyFilesFullDirectory[] = "/run/arc/media/MyFiles-full";
 constexpr char kMediaProfileFile[] = "media_profiles.xml";
 constexpr char kMediaRemovableDirectory[] = "/run/arc/media/removable";
 constexpr char kMediaRemovableDefaultDirectory[] =
@@ -128,6 +141,7 @@ constexpr char kMediaRemovableDefaultDirectory[] =
 constexpr char kMediaRemovableReadDirectory[] = "/run/arc/media/removable-read";
 constexpr char kMediaRemovableWriteDirectory[] =
     "/run/arc/media/removable-write";
+constexpr char kMediaRemovableFullDirectory[] = "/run/arc/media/removable-full";
 constexpr char kObbMountDirectory[] = "/run/arc/obb";
 constexpr char kObbRootfsDirectory[] =
     "/opt/google/containers/arc-obb-mounter/mountpoints/container-root";
@@ -144,10 +158,10 @@ constexpr char kSdcardRootfsImage[] =
     "/opt/google/containers/arc-sdcard/rootfs.squashfs";
 constexpr char kSharedMountDirectory[] = "/run/arc/shared_mounts";
 constexpr char kSysfsCpu[] = "/sys/devices/system/cpu";
-constexpr char kSysfsTracing[] = "/sys/kernel/debug/tracing";
+constexpr char kSysfsTracing[] = "/sys/kernel/tracing";
 constexpr char kSystemLibArmDirectoryRelative[] = "system/lib/arm";
 constexpr char kSystemLibArm64DirectoryRelative[] = "system/lib64/arm64";
-constexpr char kSystemImage[] = "/opt/google/containers/android/system.raw.img";
+constexpr char kTestharnessDirectory[] = "/run/arc/testharness";
 constexpr char kUsbDevicesDirectory[] = "/dev/bus/usb";
 constexpr char kZygotePreloadDoneFile[] = ".preload_done";
 
@@ -173,6 +187,9 @@ constexpr const char* kBinFmtMiscEntryNames[] = {"arm_dyn", "arm_exe",
 // https://chromium.googlesource.com/chromiumos/config/+/HEAD/test/project/fake/fake/sw_build_config/platform/chromeos-config/generated/arc/
 constexpr char kHardwareFeaturesSetting[] = "/arc/hardware-features";
 constexpr char kMediaProfilesSetting[] = "/arc/media-profiles";
+constexpr char kMediaCodecsSetting[] = "/arc/media-codecs";
+constexpr char kMediaCodecsPerformanceSetting[] =
+    "/arc/media-codecs-performance";
 constexpr char kSystemPath[] = "system-path";
 
 constexpr uid_t kHostRootUid = 0;
@@ -197,8 +214,12 @@ constexpr uid_t kShellGid = AID_SHELL + kShiftGid;
 constexpr gid_t kSdcardRwGid = AID_SDCARD_RW + kShiftGid;
 constexpr gid_t kEverybodyGid = AID_EVERYBODY + kShiftGid;
 
+// Time to wait for a ResetApplicationContainerReply from DBus.
+// The value is taken from kDefaultTimeoutMs in cryptohome/cryptohome.cc.
+constexpr int kResetLvmDbusTimeoutMs = 300000;
+
 // The maximum time to wait for /data/media setup.
-constexpr base::TimeDelta kInstalldTimeout = base::TimeDelta::FromSeconds(60);
+constexpr base::TimeDelta kInstalldTimeout = base::Seconds(60);
 
 // Property name for fingerprint.
 constexpr char kFingerprintProp[] = "ro.build.fingerprint";
@@ -248,7 +269,7 @@ void UnregisterBinFmtMiscEntry(const base::FilePath& entry_path) {
     PLOG(INFO) << "Ignoring failure: Failed to open " << entry_path.value();
     return;
   }
-  constexpr char kBinfmtMiscUnregister[] = "-1";
+  static constexpr char kBinfmtMiscUnregister[] = "-1";
   IGNORE_ERRORS(
       entry.Write(0, kBinfmtMiscUnregister, sizeof(kBinfmtMiscUnregister) - 1));
 }
@@ -289,6 +310,14 @@ ArcSdkVersionUpgradeType GetUpgradeType(AndroidSdkVersion system_sdk_version,
   if (data_sdk_version == AndroidSdkVersion::ANDROID_P &&
       system_sdk_version == AndroidSdkVersion::ANDROID_R) {
     return ArcSdkVersionUpgradeType::P_TO_R;
+  }
+  if (data_sdk_version == AndroidSdkVersion::ANDROID_P &&
+      system_sdk_version == AndroidSdkVersion::ANDROID_TIRAMISU) {
+    return ArcSdkVersionUpgradeType::P_TO_T;
+  }
+  if (data_sdk_version == AndroidSdkVersion::ANDROID_R &&
+      system_sdk_version == AndroidSdkVersion::ANDROID_TIRAMISU) {
+    return ArcSdkVersionUpgradeType::R_TO_T;
   }
   if (data_sdk_version < system_sdk_version) {
     LOG(ERROR) << "Unexpected Upgrade: data_sdk_version="
@@ -371,11 +400,18 @@ struct EsdfsMount {
 };
 
 const std::vector<EsdfsMount> GetEsdfsMounts(AndroidSdkVersion version) {
-  std::vector<EsdfsMount> mounts{
+  static constexpr std::array<EsdfsMount, 3> kEsdfsMounts{{
       {"default/emulated", 0006, kSdcardRwGid},
       {"read/emulated", 0027, kEverybodyGid},
       {"write/emulated", 0007, kEverybodyGid},
-  };
+  }};
+  std::vector<EsdfsMount> mounts;
+  for (const auto& mount : kEsdfsMounts)
+    mounts.push_back(mount);
+  if (version > AndroidSdkVersion::ANDROID_P) {
+    // For container R.
+    mounts.push_back({"full/emulated", 0007, kEverybodyGid});
+  }
   return mounts;
 }
 
@@ -407,19 +443,15 @@ std::string CreateEsdfsMountOpts(uid_t fsuid,
                                  mode_t mask,
                                  uid_t userid,
                                  gid_t gid,
+                                 const base::FilePath& host_downloads_directory,
                                  int container_userns_fd) {
   std::string opts = base::StringPrintf(
       "fsuid=%d,fsgid=%d,derive_gid,default_normal,mask=%d,multiuser,"
       "gid=%d,dl_loc=%s,dl_uid=%d,dl_gid=%d,ns_fd=%d",
-      fsuid, fsgid, mask, gid, kHostDownloadsDirectory, kHostChronosUid,
-      kHostChronosGid, container_userns_fd);
+      fsuid, fsgid, mask, gid, host_downloads_directory.value().c_str(),
+      kHostChronosUid, kHostChronosGid, container_userns_fd);
   LOG(INFO) << "Esdfs mount options: " << opts;
   return opts;
-}
-
-// Return path of layout_version based on |sdk_version|.
-std::string GetInstalldLayoutRelativePath(AndroidSdkVersion sdk_version) {
-  return "data/.layout_version";
 }
 
 // Wait upto kInstalldTimeout for the sdcard source directory to be setup.
@@ -430,7 +462,11 @@ bool WaitForSdcardSource(const base::FilePath& android_root,
   base::TimeDelta elapsed;
   // <android_root>/data path to synchronize with installd
   const base::FilePath fs_version =
-      android_root.Append(GetInstalldLayoutRelativePath(sdk_version));
+      sdk_version > AndroidSdkVersion::ANDROID_P
+          ?
+          // For container R.
+          android_root.Append("data/misc/installd/layout_version")
+          : android_root.Append("data/.layout_version");
 
   LOG(INFO) << "Waiting upto " << kInstalldTimeout
             << " for installd to complete setting up /data.";
@@ -447,7 +483,7 @@ bool WaitForSdcardSource(const base::FilePath& android_root,
 // the file does not exist, generates a new one. This file will be cleared
 // and regenerated after powerwash.
 std::string GetOrCreateArcSalt() {
-  constexpr char kArcSaltFile[] = "/var/lib/misc/arc_salt";
+  static constexpr char kArcSaltFile[] = "/var/lib/misc/arc_salt";
   constexpr mode_t kArcSaltFilePermissions = 0400;
 
   std::string arc_salt;
@@ -472,6 +508,7 @@ bool IsChromeOSUserAvailable(Mode mode) {
     case Mode::CREATE_DATA:
     case Mode::REMOVE_DATA:
     case Mode::REMOVE_STALE_DATA:
+    case Mode::MOUNT_SDCARD:
     case Mode::HANDLE_UPGRADE:
       return true;
     case Mode::PREPARE_HOST_GENERATED_DIR:
@@ -481,7 +518,6 @@ bool IsChromeOSUserAvailable(Mode mode) {
     case Mode::ONETIME_SETUP:
     case Mode::ONETIME_STOP:
     case Mode::PRE_CHROOT:
-    case Mode::MOUNT_SDCARD:
     case Mode::UNMOUNT_SDCARD:
     case Mode::UPDATE_RESTORECON_LAST:
     case Mode::UNKNOWN:
@@ -519,27 +555,129 @@ std::string GetGeneratePaiParam(bool arc_generate_pai) {
   return arc_generate_pai ? "androidboot.arc_generate_pai=1 " : std::string();
 }
 
-// Allows the container to write the sensor attribute.
-bool AllowContainerToWriteSensorAttribute(const base::FilePath& path) {
-  // If the attribute doesn't exist, do nothing.
-  if (!base::PathExists(path))
-    return true;
+// Converts use dev caches bool to androidboot property if applicable.
+std::string GetUseDevCaches(bool use_dev_caches) {
+  return use_dev_caches ? "androidboot.use_dev_caches=true " : std::string();
+}
 
-  // Change the owner gid to arc-sensor.
-  constexpr gid_t kArcSensorGid = 604;
-  if (chown(path.value().c_str(), -1, kArcSensorGid) < 0) {
-    PLOG(ERROR) << "chown failed " << path.value();
+std::string GetSELinuxContext(const base::FilePath& path) {
+  char* con = nullptr;
+  if (lgetfilecon(path.value().c_str(), &con) < 0) {
+    if (errno != ENOENT)
+      PLOG(ERROR) << "lgetfilecon failed for " << path.value();
+    return std::string();
+  }
+  std::string result = con;
+  freecon(con);
+  return result;
+}
+
+std::optional<base::FilePath> GetConfigPath(brillo::CrosConfigInterface& config,
+                                            const std::string& path) {
+  std::string value;
+  if (!config.GetString(path, kSystemPath, &value)) {
+    return std::nullopt;
+  }
+  return base::FilePath(value);
+}
+
+void RemoveStaleDataDirectory(brillo::SafeFD& root_fd,
+                              const base::FilePath& path) {
+  // To protect itself, base::SafeFD::RmDir() uses a default maximum
+  // recursion depth of 256. In this case, we are deleting the user's
+  // arbitrary filesystem and want to be more generous. However, RmDir()
+  // uses one fd per path level when recursing so we will have the max
+  // number of fds per process as an upper bound (default 1024). Leave a
+  // 25% buffer below this default 1024 limit to give lots of room for
+  // incidental usage elsewhere in the process. Use this everywhere here
+  // for consistency.
+  constexpr int kRmdirMaxDepth = 768;
+
+  brillo::SafeFD::SafeFDResult parent_dir =
+      root_fd.OpenExistingDir(path.DirName());
+  if (brillo::SafeFD::IsError(parent_dir.second)) {
+    if (parent_dir.second != brillo::SafeFD::Error::kDoesNotExist) {
+      LOG(ERROR) << "Errors while claeaning old data from " << path
+                 << ": failed to open the parent directory";
+    }
+    return;
+  }
+
+  brillo::SafeFD::Error err =
+      parent_dir.first.Rmdir(path.BaseName().value(), true /*recursive*/,
+                             kRmdirMaxDepth, true /*keep_going*/);
+  if (brillo::SafeFD::IsError(err) &&
+      err != brillo::SafeFD::Error::kDoesNotExist) {
+    LOG(ERROR) << "Errors while cleaning old data from " << path
+               << ": failed to remove the directory";
+  }
+}
+
+// Returns the device path for virtio-blk /data on ARCVM. It first looks for an
+// LVM application container, and then falls back to a Concierge disk image.
+// An empty path is returned if neither device is found, in which case virtio-fs
+// /data is expected to be used. For simplicity it just checks the existence of
+// a file without looking up USE flags, assuming that a device for virtio-blk
+// /data is created only when it is actually used.
+base::FilePath GetArcVmDataDevicePath(const std::string& chromeos_user,
+                                      const base::FilePath& home_root_dir) {
+  // Check if an LVM application container exists.
+  // See cryptohome::DmcryptVolumePrefix() for how the volume's path is
+  // constructed.
+  const brillo::cryptohome::home::Username username(chromeos_user);
+  const std::string user_hash =
+      *brillo::cryptohome::home::SanitizeUserName(username);
+  const base::FilePath lvm_application_container_path(base::StringPrintf(
+      "/dev/mapper/vm/dmcrypt-%s-arcvm", user_hash.substr(0, 8).c_str()));
+  if (base::PathExists(lvm_application_container_path)) {
+    return lvm_application_container_path;
+  }
+
+  // Check if a Concierge disk image exists. The disk image's name is a constant
+  // defined by vm_tools::GetEncodedName("arcvm").
+  const base::FilePath concierge_disk_path =
+      home_root_dir.Append("crosvm/YXJjdm0=.img");
+  if (base::PathExists(concierge_disk_path)) {
+    return concierge_disk_path;
+  }
+
+  return base::FilePath();
+}
+
+bool SetRestoreconLastXattr(const base::FilePath& mutable_data_dir,
+                            const std::string& hash) {
+  // On Android, /init writes the security.restorecon_last attribute to /data
+  // (and /cache on N) after it finishes updating labels of the files in the
+  // directories, but on ARC, writing the attribute fails silently because
+  // processes in user namespace are not allowed to write arbitrary entries
+  // under security.* even with CAP_SYS_ADMIN. (b/33084415, b/33402785)
+  // As a workaround, let this command outside the container set the
+  // attribute for ARC.
+  static constexpr char kRestoreconLastXattr[] = "security.restorecon_last";
+
+  brillo::SafeFD fd;
+  brillo::SafeFD::Error err;
+  std::tie(fd, err) =
+      brillo::SafeFD::Root().first.OpenExistingDir(mutable_data_dir);
+  if (brillo::SafeFD::IsError(err)) {
+    if (err == brillo::SafeFD::Error::kDoesNotExist) {
+      // `arc_paths_->android_mutable_source` might not be mounted at this point
+      // (b/292031836). We can/should skip errors in such cases.
+      LOG(WARNING) << "Skipping updating " << kRestoreconLastXattr
+                   << " because " << mutable_data_dir << " does not exist";
+      return true;
+    }
     return false;
   }
-  // Allow group to write.
-  if (chmod(path.value().c_str(), 0664) < 0) {
-    PLOG(ERROR) << "chmod failed " << path.value();
+  CHECK(fd.is_valid());
+
+  if (fsetxattr(fd.get(), kRestoreconLastXattr, hash.data(), hash.size(),
+                0 /* flags */) != 0) {
+    PLOG(ERROR) << "Failed to change xattr " << kRestoreconLastXattr << " of "
+                << mutable_data_dir;
     return false;
   }
-  // Change the SELinux context.
-  constexpr char kCrosSensorHalSysfsContext[] =
-      "u:object_r:cros_sensor_hal_sysfs:s0";
-  return Chcon(kCrosSensorHalSysfsContext, path);
+  return true;
 }
 
 }  // namespace
@@ -547,21 +685,26 @@ bool AllowContainerToWriteSensorAttribute(const base::FilePath& path) {
 // A struct that holds all the FilePaths ArcSetup uses.
 struct ArcPaths {
   static std::unique_ptr<ArcPaths> Create(Mode mode, const Config& config) {
+    base::FilePath root_path;
+    base::FilePath user_path;
     base::FilePath android_data;
     base::FilePath android_data_old;
 
     if (IsChromeOSUserAvailable(mode)) {
-      std::string chromeos_user = config.GetStringOrDie("CHROMEOS_USER");
-      const base::FilePath root_path =
-          brillo::cryptohome::home::GetRootPath(chromeos_user);
+      brillo::cryptohome::home::Username chromeos_user(
+          config.GetStringOrDie("CHROMEOS_USER"));
+      root_path = brillo::cryptohome::home::GetRootPath(chromeos_user);
+      user_path = brillo::cryptohome::home::GetUserPath(chromeos_user);
 
-      // Ensure the user directory exists.
+      // Ensure the root directory and the user directory exist.
       EXIT_IF(root_path.empty() || !base::DirectoryExists(root_path));
+      EXIT_IF(user_path.empty() || !base::DirectoryExists(user_path));
 
       android_data = root_path.Append("android-data");
       android_data_old = root_path.Append("android-data-old");
     }
-    return base::WrapUnique(new ArcPaths(android_data, android_data_old));
+    return base::WrapUnique(
+        new ArcPaths(root_path, user_path, android_data, android_data_old));
   }
 
   // Lexicographically sorted.
@@ -587,6 +730,9 @@ struct ArcPaths {
   const base::FilePath fake_mmap_rnd_compat_bits{kFakeMmapRndCompatBits};
   const base::FilePath host_side_dalvik_cache_directory_in_container{
       kHostSideDalvikCacheDirectoryInContainer};
+  const base::FilePath media_codecs_relative{kMediaCodecsRelative};
+  const base::FilePath media_codecs_performance_relative{
+      kMediaCodecsPerformanceRelative};
   const base::FilePath media_mount_directory{kMediaMountDirectory};
   const base::FilePath media_myfiles_directory{kMediaMyFilesDirectory};
   const base::FilePath media_myfiles_default_directory{
@@ -594,6 +740,7 @@ struct ArcPaths {
   const base::FilePath media_myfiles_read_directory{kMediaMyFilesReadDirectory};
   const base::FilePath media_myfiles_write_directory{
       kMediaMyFilesWriteDirectory};
+  const base::FilePath media_myfiles_full_directory{kMediaMyFilesFullDirectory};
   const base::FilePath media_profile_file{kMediaProfileFile};
   const base::FilePath media_removable_directory{kMediaRemovableDirectory};
   const base::FilePath media_removable_default_directory{
@@ -602,6 +749,8 @@ struct ArcPaths {
       kMediaRemovableReadDirectory};
   const base::FilePath media_removable_write_directory{
       kMediaRemovableWriteDirectory};
+  const base::FilePath media_removable_full_directory{
+      kMediaRemovableFullDirectory};
   const base::FilePath obb_mount_directory{kObbMountDirectory};
   const base::FilePath obb_rootfs_directory{kObbRootfsDirectory};
   const base::FilePath oem_mount_directory{kOemMountDirectory};
@@ -616,17 +765,24 @@ struct ArcPaths {
       kSystemLibArmDirectoryRelative};
   const base::FilePath system_lib64_arm64_directory_relative{
       kSystemLibArm64DirectoryRelative};
+  const base::FilePath testharness_directory{kTestharnessDirectory};
   const base::FilePath usb_devices_directory{kUsbDevicesDirectory};
 
   const base::FilePath restorecon_allowlist_sync{kRestoreconAllowlistSync};
 
+  const base::FilePath root_directory;
+  const base::FilePath user_directory;
   const base::FilePath android_data_directory;
   const base::FilePath android_data_old_directory;
 
  private:
-  ArcPaths(const base::FilePath& android_data_directory,
+  ArcPaths(const base::FilePath& root_directory,
+           const base::FilePath& user_directory,
+           const base::FilePath& android_data_directory,
            const base::FilePath& android_data_old_directory)
-      : android_data_directory(android_data_directory),
+      : root_directory(root_directory),
+        user_directory(user_directory),
+        android_data_directory(android_data_directory),
         android_data_old_directory(android_data_old_directory) {}
   ArcPaths(const ArcPaths&) = delete;
   ArcPaths& operator=(const ArcPaths&) = delete;
@@ -693,36 +849,6 @@ void ArcSetup::DeleteExecutableFilesInData(
     LOG(INFO) << "Moving data/app/<package_name>/oat took "
               << timer.Elapsed().InMillisecondsRoundedUp() << "ms";
   }
-}
-
-void ArcSetup::WaitForRtLimitsJob() {
-  constexpr base::TimeDelta kWaitForRtLimitsJobTimeOut =
-      base::TimeDelta::FromSeconds(10);
-  constexpr base::TimeDelta kSleepInterval =
-      base::TimeDelta::FromMilliseconds(100);
-  constexpr char kCgroupFilePath[] =
-      "/sys/fs/cgroup/cpu/session_manager_containers/cpu.rt_runtime_us";
-
-  base::ElapsedTimer timer;
-  const base::FilePath cgroup_file(kCgroupFilePath);
-  while (true) {
-    if (base::PathExists(cgroup_file)) {
-      std::string rt_runtime_us_str;
-      EXIT_IF(!base::ReadFileToString(cgroup_file, &rt_runtime_us_str));
-      int rt_runtime_us = 0;
-      base::StringToInt(rt_runtime_us_str, &rt_runtime_us);
-      if (rt_runtime_us > 0) {
-        LOG(INFO) << cgroup_file.value() << " is set to " << rt_runtime_us;
-        break;
-      }
-    }
-    base::PlatformThread::Sleep(kSleepInterval);
-    CHECK_GE(kWaitForRtLimitsJobTimeOut, timer.Elapsed())
-        << ": rt-limits job didn't start in " << kWaitForRtLimitsJobTimeOut;
-  }
-
-  LOG(INFO) << "rt-limits job is ready in "
-            << timer.Elapsed().InMillisecondsRoundedUp() << " ms";
 }
 
 ArcBinaryTranslationType ArcSetup::IdentifyBinaryTranslationType() {
@@ -796,21 +922,36 @@ void ArcSetup::SetUpAndroidData(const base::FilePath& bind_target) {
   if (USE_ARCVM) {
     // For ARCVM, create /data/media too since crosvm exports the directory via
     // virtio-fs.
-    EXIT_IF(!InstallDirectory(
-        0770, kMediaUid, kMediaGid,
-        arc_paths_->android_data_directory.Append("data").Append("media")));
+    const base::FilePath android_data_media_directory =
+        arc_paths_->android_data_directory.Append("data").Append("media");
+    EXIT_IF(!InstallDirectory(0770, kMediaUid, kMediaGid,
+                              android_data_media_directory));
+
+    // Set up /data/media/0/Download with a strict permission so that users
+    // cannot modify the directory before it is covered by Chrome OS Downloads.
+    const base::FilePath android_data_media_root_for_user =
+        android_data_media_directory.Append("0");
+    const base::FilePath android_download_directory =
+        android_data_media_root_for_user.Append("Download");
+    EXIT_IF(!InstallDirectory(0770, kMediaUid, kMediaGid,
+                              android_data_media_root_for_user));
+    EXIT_IF(!InstallDirectory(0700, kRootUid, kRootGid,
+                              android_download_directory));
+
+    // Restore the contexts of /data/media directories. This is needed to ensure
+    // Android's vold can mount Chrome OS Downloads on /data/media/0/Download.
+    constexpr char kDataMediaSELinuxContext[] =
+        "u:object_r:media_rw_data_file:s0";
+    EXIT_IF(!Chcon(kDataMediaSELinuxContext, android_data_media_directory));
+    EXIT_IF(!Chcon(kDataMediaSELinuxContext, android_data_media_root_for_user));
+    EXIT_IF(!Chcon(kDataMediaSELinuxContext, android_download_directory));
   }
 
   // To make our bind-mount business easier, we first bind-mount the real
   // android-data directory to bind_target (usually $ANDROID_MUTABLE_SOURCE).
   // Then we do not need to pass the android-data path to other processes.
-  // Check that bind_target is a fixed point of Realpath() in order to make sure
-  // that it is not a symlink and it does not contain components like /../. Then
-  // pass it directly to mount(2) without path resolution so that Chromium OS
-  // LSM can detect cases where it is replaced with a symlink after the check.
-  EXIT_IF(Realpath(bind_target) != bind_target);
-  EXIT_IF(!arc_mounter_->BindMountWithNoPathResolution(
-      arc_paths_->android_data_directory, bind_target));
+  EXIT_IF(!arc_mounter_->BindMount(arc_paths_->android_data_directory,
+                                   bind_target));
 }
 
 void ArcSetup::UnmountSdcard() {
@@ -820,7 +961,7 @@ void ArcSetup::UnmountSdcard() {
   for (const auto& mount : GetEsdfsMounts(GetSdkVersion())) {
     base::FilePath kDestDirectory =
         arc_paths_->sdcard_mount_directory.Append(mount.relative_path);
-    IGNORE_ERRORS(arc_mounter_->Umount(kDestDirectory));
+    IGNORE_ERRORS(arc_mounter_->UmountIfExists(kDestDirectory));
   }
 
   LOG(INFO) << "Unmount sdcard complete.";
@@ -858,16 +999,15 @@ void ArcSetup::ApplyPerBoardConfigurations() {
 void ArcSetup::ApplyPerBoardConfigurationsInternal(
     const base::FilePath& oem_mount_directory) {
   auto config = std::make_unique<brillo::CrosConfig>();
-  config->Init();
 
   base::FilePath media_profile_xml =
       base::FilePath(arc_paths_->camera_profile_dir)
           .Append(arc_paths_->media_profile_file);
 
   std::string media_profile_setting;
-  if (config->GetString(kMediaProfilesSetting, kSystemPath,
-                        &media_profile_setting)) {
-    media_profile_xml = base::FilePath(media_profile_setting);
+  if (auto media_profile_setting =
+          GetConfigPath(*config, kMediaProfilesSetting)) {
+    media_profile_xml = *media_profile_setting;
   } else {
     // TODO(chromium:1083652) Remove dynamic shell scripts once all overlays
     // are migrated to static XML config.
@@ -878,7 +1018,7 @@ void ArcSetup::ApplyPerBoardConfigurationsInternal(
   }
 
   if (base::PathExists(media_profile_xml)) {
-    base::Optional<std::string> content =
+    std::optional<std::string> content =
         FilterMediaProfile(media_profile_xml, arc_paths_->camera_test_config);
     EXIT_IF(!content);
 
@@ -900,30 +1040,31 @@ void ArcSetup::ApplyPerBoardConfigurationsInternal(
       EXIT_IF(!base::WriteFileDescriptor(dest_fd.get(), *content));
     }
   }
-
-  base::FilePath hardware_features_xml("/etc/hardware_features.xml");
-
-  std::string hw_feature_setting;
-  if (config->GetString(kHardwareFeaturesSetting, kSystemPath,
-                        &hw_feature_setting)) {
-    hardware_features_xml = base::FilePath(hw_feature_setting);
-  }
-
+  base::FilePath hardware_features_xml =
+      GetConfigPath(*config, kHardwareFeaturesSetting)
+          .value_or(base::FilePath("/etc/hardware_features.xml"));
   if (!base::PathExists(hardware_features_xml))
     return;
 
   const base::FilePath platform_xml_file =
       base::FilePath(oem_mount_directory)
           .Append(arc_paths_->platform_xml_file_relative);
+
+  segmentation::FeatureManagement feature_management;
+  std::optional<std::string> content =
+      AppendFeatureManagement(hardware_features_xml, feature_management);
+  EXIT_IF(!content);
+
   brillo::SafeFD dest_parent(
       brillo::SafeFD::Root()
           .first.OpenExistingDir(platform_xml_file.DirName())
           .first);
   (void)dest_parent.Unlink(platform_xml_file.BaseName().value());
-  EXIT_IF(!SafeCopyFile(hardware_features_xml,
-                        brillo::SafeFD::Root().first /*src_parent*/,
-                        platform_xml_file.BaseName(), std::move(dest_parent),
-                        0644 /*permissions*/));
+  brillo::SafeFD dest_fd(dest_parent
+                             .MakeFile(platform_xml_file.BaseName(),
+                                       0644 /*permissions*/, kRootUid, kRootGid)
+                             .first);
+  EXIT_IF(!base::WriteFileDescriptor(dest_fd.get(), *content));
 
   // TODO(chromium:1083652) Remove dynamic shell scripts once all overlays
   // are migrated to static XML config.
@@ -944,8 +1085,8 @@ void ArcSetup::SetUpSdcard() {
       MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME;
   const base::FilePath source_directory =
       arc_paths_->android_mutable_source.Append("data/media");
-
-  const bool is_esdfs_supported = config_.GetBoolOrDie("USE_ESDFS");
+  const base::FilePath host_downloads_directory =
+      arc_paths_->user_directory.Append("MyFiles").Append("Downloads");
 
   // Get the container's user namespace file descriptor.
   const int container_pid = config_.GetIntOrDie("CONTAINER_PID");
@@ -953,21 +1094,29 @@ void ArcSetup::SetUpSdcard() {
       open(base::StringPrintf("/proc/%d/ns/user", container_pid).c_str(),
            O_RDONLY)));
 
-  // SetUpSdcard can only be called from arc-sdcard is USE_ESDFS is enabled.
-  CHECK(is_esdfs_supported);
-
+  const AndroidSdkVersion sdk_version = GetSdkVersion();
   // Installd setups up the user data directory skeleton on first-time boot.
   // Wait for setup
-  EXIT_IF(!WaitForSdcardSource(arc_paths_->android_mutable_source,
-                               GetSdkVersion()));
+  EXIT_IF(
+      !WaitForSdcardSource(arc_paths_->android_mutable_source, sdk_version));
 
-  for (const auto& mount : GetEsdfsMounts(GetSdkVersion())) {
+  // Ensure the Downloads directory exists.
+  EXIT_IF(!base::DirectoryExists(host_downloads_directory));
+
+  for (const auto& mount : GetEsdfsMounts(sdk_version)) {
     base::FilePath dest_directory =
         arc_paths_->sdcard_mount_directory.Append(mount.relative_path);
+
+    // Don't mount if the final destination path doesn't fall under
+    // "/run/arc/sdcard" directory
+    EXIT_IF(
+        !base::FilePath("/run/arc/sdcard").IsParent(Realpath(dest_directory)));
+
     EXIT_IF(!arc_mounter_->Mount(
         source_directory.value(), dest_directory, "esdfs", mount_flags,
         CreateEsdfsMountOpts(kMediaUid, kMediaGid, mount.mode, kRootUid,
-                             mount.gid, container_userns_fd.get())
+                             mount.gid, host_downloads_directory,
+                             container_userns_fd.get())
             .c_str()));
   }
 
@@ -990,6 +1139,13 @@ void ArcSetup::SetUpSharedTmpfsForExternalStorage() {
       !InstallDirectory(0755, kRootUid, kRootGid,
                         arc_paths_->sdcard_mount_directory.Append("write")));
 
+  if (GetSdkVersion() > AndroidSdkVersion::ANDROID_P) {
+    // For container R.
+    EXIT_IF(
+        !InstallDirectory(0755, kRootUid, kRootGid,
+                          arc_paths_->sdcard_mount_directory.Append("full")));
+  }
+
   // Create the mount directories. In original Android, these are created in
   // EmulatedVolume.cpp just before /system/bin/sdcard is fork()/exec()'ed.
   // Following code just emulates it. The directories are owned by Android's
@@ -1005,6 +1161,13 @@ void ArcSetup::SetUpSharedTmpfsForExternalStorage() {
   EXIT_IF(!InstallDirectory(
       0755, kRootUid, kRootGid,
       arc_paths_->sdcard_mount_directory.Append("write/emulated")));
+
+  if (GetSdkVersion() > AndroidSdkVersion::ANDROID_P) {
+    // For container R.
+    EXIT_IF(!InstallDirectory(
+        0755, kRootUid, kRootGid,
+        arc_paths_->sdcard_mount_directory.Append("full/emulated")));
+  }
 }
 
 void ArcSetup::SetUpFilesystemForObbMounter() {
@@ -1021,7 +1184,6 @@ bool ArcSetup::GenerateHostSideCodeInternal(
     const base::FilePath& host_dalvik_cache_directory,
     ArcCodeRelocationResult* result) {
   *result = ArcCodeRelocationResult::ERROR_UNABLE_TO_RELOCATE;
-  base::ElapsedTimer timer;
   std::unique_ptr<ArtContainer> art_container =
       ArtContainer::CreateContainer(arc_mounter_.get(), GetSdkVersion());
   if (!art_container) {
@@ -1041,7 +1203,6 @@ bool ArcSetup::GenerateHostSideCodeInternal(
     return false;
   }
   *result = ArcCodeRelocationResult::SUCCESS;
-  arc_setup_metrics_->SendCodeRelocationTime(timer.Elapsed());
   return true;
 }
 
@@ -1058,7 +1219,6 @@ bool ArcSetup::GenerateHostSideCode(
   base::TimeDelta time_delta = timer.Elapsed();
   LOG(INFO) << "GenerateHostSideCode took "
             << time_delta.InMillisecondsRoundedUp() << "ms";
-  arc_setup_metrics_->SendCodeRelocationResult(result);
 
   return result == ArcCodeRelocationResult::SUCCESS;
 }
@@ -1067,8 +1227,6 @@ bool ArcSetup::InstallLinksToHostSideCodeInternal(
     const base::FilePath& src_isa_directory,
     const base::FilePath& dest_isa_directory,
     const std::string& isa) {
-  constexpr char kDalvikCacheSELinuxContext[] =
-      "u:object_r:dalvikcache_data_file:s0";
   bool src_file_exists = false;
   LOG(INFO) << "Adding symlinks to " << dest_isa_directory.value();
 
@@ -1100,7 +1258,7 @@ bool ArcSetup::InstallLinksToHostSideCodeInternal(
     const base::FilePath dest_file = dest_isa_directory.Append(base_name);
     // Remove |dest_file| first when it exists. When |dest_file| is a symlink,
     // this deletes the link itself.
-    IGNORE_ERRORS(base::DeleteFile(dest_file));
+    IGNORE_ERRORS(brillo::DeleteFile(dest_file));
     EXIT_IF(!base::CreateSymbolicLink(link_target, dest_file));
     EXIT_IF(lchown(dest_file.value().c_str(), kRootUid, kRootGid) != 0);
     EXIT_IF(!Chcon(kDalvikCacheSELinuxContext, dest_file));
@@ -1112,14 +1270,15 @@ bool ArcSetup::InstallLinksToHostSideCodeInternal(
   return src_file_exists;
 }
 
-bool ArcSetup::InstallLinksToHostSideCode() {
-  bool result = true;
+void ArcSetup::InstallLinksToHostSideCode() {
   base::ElapsedTimer timer;
   const base::FilePath& src_directory = arc_paths_->art_dalvik_cache_directory;
   const base::FilePath dest_directory =
       arc_paths_->android_data_directory.Append("data/dalvik-cache");
 
   EXIT_IF(!InstallDirectory(0771, kRootUid, kRootGid, dest_directory));
+  EXIT_IF(!Chcon(kDalvikCacheSELinuxContext, dest_directory));
+
   // Iterate through each isa sub directory. For example, dalvik-cache/x86 and
   // dalvik-cache/x86_64
   base::FileEnumerator src_directory_iter(src_directory, false,
@@ -1132,7 +1291,6 @@ bool ArcSetup::InstallLinksToHostSideCode() {
     const std::string isa = src_isa_directory.BaseName().value();
     if (!InstallLinksToHostSideCodeInternal(src_isa_directory,
                                             dest_directory.Append(isa), isa)) {
-      result = false;
       LOG(ERROR) << "InstallLinksToHostSideCodeInternal() for " << isa
                  << " failed. "
                  << "Deleting container's /data/dalvik-cache...";
@@ -1144,13 +1302,10 @@ bool ArcSetup::InstallLinksToHostSideCode() {
 
   LOG(INFO) << "InstallLinksToHostSideCode() took "
             << timer.Elapsed().InMillisecondsRoundedUp() << "ms";
-  return result;
 }
 
 void ArcSetup::CreateAndroidCmdlineFile(bool is_dev_mode) {
   const bool is_inside_vm = config_.GetBoolOrDie("CHROMEOS_INSIDE_VM");
-  const bool disable_system_default_app =
-      config_.GetBoolOrDie("DISABLE_SYSTEM_DEFAULT_APP");
 
   const bool disable_media_store_maintenance =
       config_.GetBoolOrDie("DISABLE_MEDIA_STORE_MAINTENANCE");
@@ -1167,20 +1322,16 @@ void ArcSetup::CreateAndroidCmdlineFile(bool is_dev_mode) {
   // will see these files, but other than that, the /data and /cache
   // directories are empty and read-only which is the best for security.
 
-  // Unconditionally generate host-side code here.
-  {
-    base::ElapsedTimer timer;
+  if (GetSdkVersion() == AndroidSdkVersion::ANDROID_P) {
+    // Unconditionally generate host-side code here for P.
     EXIT_IF(!GenerateHostSideCode(arc_paths_->art_dalvik_cache_directory));
-    EXIT_IF(!Chown(kRootUid, kRootGid, arc_paths_->art_dalvik_cache_directory));
-    // Remove the file zygote may have created.
-    IGNORE_ERRORS(base::DeleteFile(
-        arc_paths_->art_dalvik_cache_directory.Append(kZygotePreloadDoneFile)));
-
-    // For now, integrity checking time is the time needed to relocate
-    // boot*.art files because of b/67912719. Once TPM is enabled, this will
-    // report the total time spend on code verification + [relocation + sign]
-    arc_setup_metrics_->SendCodeIntegrityCheckingTotalTime(timer.Elapsed());
+  } else {
+    LOG(INFO) << "Skip generation of host-side code for versions higher than P";
   }
+  EXIT_IF(!Chown(kRootUid, kRootGid, arc_paths_->art_dalvik_cache_directory));
+  // Remove the file zygote may have created.
+  IGNORE_ERRORS(brillo::DeleteFile(
+      arc_paths_->art_dalvik_cache_directory.Append(kZygotePreloadDoneFile)));
 
   // Make sure directories for all ISA are there just to make config.json happy.
   for (const auto* isa : {"arm", "arm64", "x86", "x86_64"}) {
@@ -1217,13 +1368,39 @@ void ArcSetup::CreateAndroidCmdlineFile(bool is_dev_mode) {
   LOG(INFO) << "arc_file_picker is " << arc_file_picker;
   const int arc_custom_tabs = config_.GetIntOrDie("ARC_CUSTOM_TABS_EXPERIMENT");
   LOG(INFO) << "arc_custom_tabs is " << arc_custom_tabs;
-  LOG(INFO) << "System default app is " << !disable_system_default_app;
   LOG(INFO) << "MediaStore maintenance is " << !disable_media_store_maintenance;
 
   bool arc_generate_pai;
   if (!config_.GetBool("ARC_GENERATE_PAI", &arc_generate_pai))
     arc_generate_pai = false;
   LOG(INFO) << "arc_generate_pai is " << arc_generate_pai;
+
+  const int enable_notifications_refresh =
+      config_.GetIntOrDie("ENABLE_NOTIFICATIONS_REFRESH");
+  LOG(INFO) << "enable_notifications_refresh is "
+            << enable_notifications_refresh;
+
+  const int enable_tts_caching = config_.GetIntOrDie("ENABLE_TTS_CACHING");
+  LOG(INFO) << "enable_tts_caching is " << enable_tts_caching;
+
+  const int enable_consumer_auto_update_toggle =
+      config_.GetIntOrDie("ENABLE_CONSUMER_AUTO_UPDATE_TOGGLE");
+  LOG(INFO) << "consumer_auto_update_toggle is "
+            << enable_consumer_auto_update_toggle;
+
+  const int host_ureadahead_generation =
+      config_.GetBoolOrDie("HOST_UREADAHEAD_GENERATION");
+  if (host_ureadahead_generation)
+    LOG(INFO) << "host_ureadahead_generation is enabled";
+
+  const bool use_dev_caches = config_.GetBoolOrDie("USE_DEV_CACHES");
+  if (use_dev_caches)
+    LOG(INFO) << "use_dev_caches is set";
+
+  const int enable_privacy_hub_for_chrome =
+      config_.GetIntOrDie("ENABLE_PRIVACY_HUB_FOR_CHROME");
+  LOG(INFO) << "enable_privacy_hub_for_chrome is "
+            << enable_privacy_hub_for_chrome;
 
   std::string native_bridge;
   switch (IdentifyBinaryTranslationType()) {
@@ -1277,11 +1454,15 @@ void ArcSetup::CreateAndroidCmdlineFile(bool is_dev_mode) {
       "%s" /* Dalvik memory profile */
       "%s" /* Disable MediaStore maintenance */
       "%s" /* Disable download provider */
-      "androidboot.disable_system_default_app=%d "
       "%s" /* PAI Generation */
       "androidboot.boottime_offset=%" PRId64
       " " /* in nanoseconds */
-      "androidboot.iioservice_present=%d\n",
+      "androidboot.enable_notifications_refresh=%d "
+      "androidboot.arc.tts.caching=%d "
+      "androidboot.enable_consumer_auto_update_toggle=%d "
+      "androidboot.arc.ureadahead_generation=%d "
+      "%s" /* Use dev caches */
+      "androidboot.enable_privacy_hub_for_chrome=%d\n",
       is_dev_mode, !is_dev_mode, is_inside_vm, arc_lcd_density,
       native_bridge.c_str(), arc_file_picker, arc_custom_tabs,
       chromeos_channel.c_str(),
@@ -1289,9 +1470,11 @@ void ArcSetup::CreateAndroidCmdlineFile(bool is_dev_mode) {
       GetDalvikMemoryProfileParam(dalvik_memory_profile).c_str(),
       GetDisableMediaStoreMaintenance(disable_media_store_maintenance).c_str(),
       GetDisableDownloadProvider(disable_download_provider).c_str(),
-      disable_system_default_app, GetGeneratePaiParam(arc_generate_pai).c_str(),
+      GetGeneratePaiParam(arc_generate_pai).c_str(),
       ts.tv_sec * base::Time::kNanosecondsPerSecond + ts.tv_nsec,
-      USE_IIOSERVICE);
+      enable_notifications_refresh, enable_tts_caching,
+      enable_consumer_auto_update_toggle, host_ureadahead_generation,
+      GetUseDevCaches(use_dev_caches).c_str(), enable_privacy_hub_for_chrome);
 
   EXIT_IF(!WriteToFile(arc_paths_->android_cmdline, 0644, content));
 }
@@ -1300,7 +1483,7 @@ void ArcSetup::CreateFakeProcfsFiles() {
   // Android attempts to modify these files in procfs during init
   // Since these files on the host side require root permissions to modify (real
   // root, not android-root), we need to present fake versions to Android.
-  constexpr char kProcSecurityContext[] = "u:object_r:proc_security:s0";
+  static constexpr char kProcSecurityContext[] = "u:object_r:proc_security:s0";
 
   EXIT_IF(!WriteToFile(arc_paths_->fake_kptr_restrict, 0644, "2\n"));
   EXIT_IF(!Chown(kRootUid, kRootGid, arc_paths_->fake_kptr_restrict));
@@ -1350,7 +1533,7 @@ void ArcSetup::SetUpMountPointForDebugFilesystem(bool is_dev_mode) {
   if (!is_dev_mode)
     return;
 
-  const base::FilePath tracing_directory("/sys/kernel/debug/tracing");
+  const base::FilePath tracing_directory("/sys/kernel/tracing");
   EXIT_IF(!arc_mounter_->BindMount(tracing_directory, tracing_mount_directory));
 }
 
@@ -1366,9 +1549,9 @@ void ArcSetup::MountDemoApps(const base::FilePath& demo_apps_image,
 
   // imageloader securely verifies images before mounting them, so we can trust
   // the provided image and can mount it without MS_NOEXEC.
-  EXIT_IF(!arc_mounter_->LoopMount(demo_apps_image.value(),
-                                   demo_apps_mount_directory,
-                                   MS_RDONLY | MS_NODEV));
+  EXIT_IF(!arc_mounter_->LoopMount(
+      demo_apps_image.value(), demo_apps_mount_directory,
+      LoopMountFilesystemType::kUnspecified, MS_RDONLY | MS_NODEV));
 }
 
 void ArcSetup::SetUpMountPointsForMedia() {
@@ -1388,6 +1571,13 @@ void ArcSetup::SetUpMountPointsForMedia() {
     EXIT_IF(
         !InstallDirectory(0755, kMediaUid, kMediaGid,
                           arc_paths_->media_mount_directory.Append(directory)));
+  }
+  if (GetSdkVersion() > AndroidSdkVersion::ANDROID_P) {
+    for (auto* directory : {"removable-full", "MyFiles-full"}) {
+      EXIT_IF(!InstallDirectory(
+          0755, kMediaUid, kMediaGid,
+          arc_paths_->media_mount_directory.Append(directory)));
+    }
   }
 }
 
@@ -1437,6 +1627,13 @@ void ArcSetup::CleanUpStaleMountPoints() {
       arc_paths_->media_removable_read_directory));
   EXIT_IF(!arc_mounter_->UmountIfExists(
       arc_paths_->media_removable_write_directory));
+  if (GetSdkVersion() > AndroidSdkVersion::ANDROID_P) {
+    EXIT_IF(!arc_mounter_->UmountIfExists(
+        arc_paths_->media_myfiles_full_directory));
+    EXIT_IF(!arc_mounter_->UmountIfExists(
+        arc_paths_->media_removable_full_directory));
+  }
+
   // If the android_mutable_source path cannot be unmounted below continue
   // anyway. This allows the mini-container to start and allows tests to
   // exercise the mini-container (b/148185982).
@@ -1547,7 +1744,7 @@ void ArcSetup::MakeMountPointsReadOnly() {
   // NOLINTNEXTLINE(runtime/int)
   constexpr unsigned long remount_flags =
       MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC;
-  constexpr char kMountOptions[] = "seclabel,mode=0755";
+  static constexpr char kMountOptions[] = "seclabel,mode=0755";
 
   const std::string media_mount_options =
       base::StringPrintf("mode=0755,uid=%u,gid=%u", kRootUid, kSystemGid);
@@ -1652,6 +1849,12 @@ AndroidSdkVersion ArcSetup::SdkVersionFromString(
         return AndroidSdkVersion::ANDROID_P;
       case 30:
         return AndroidSdkVersion::ANDROID_R;
+      case 31:
+        return AndroidSdkVersion::ANDROID_S;
+      case 32:
+        return AndroidSdkVersion::ANDROID_S_V2;
+      case 33:
+        return AndroidSdkVersion::ANDROID_TIRAMISU;
     }
   }
 
@@ -1696,6 +1899,12 @@ void ArcSetup::UnmountOnStop() {
       arc_mounter_->UmountIfExists(arc_paths_->media_removable_read_directory));
   IGNORE_ERRORS(arc_mounter_->UmountIfExists(
       arc_paths_->media_removable_write_directory));
+  if (GetSdkVersion() > AndroidSdkVersion::ANDROID_P) {
+    IGNORE_ERRORS(
+        arc_mounter_->UmountIfExists(arc_paths_->media_myfiles_full_directory));
+    IGNORE_ERRORS(arc_mounter_->UmountIfExists(
+        arc_paths_->media_removable_full_directory));
+  }
   IGNORE_ERRORS(
       arc_mounter_->UmountIfExists(arc_paths_->media_mount_directory));
   IGNORE_ERRORS(arc_mounter_->Umount(arc_paths_->sdcard_mount_directory));
@@ -1723,7 +1932,7 @@ void ArcSetup::UnmountOnStop() {
 void ArcSetup::RemoveAndroidKmsgFifo() {
   // This function is for Mode::STOP. Use IGNORE_ERRORS to make sure to run all
   // clean up code.
-  IGNORE_ERRORS(base::DeleteFile(arc_paths_->android_kmsg_fifo));
+  IGNORE_ERRORS(brillo::DeleteFile(arc_paths_->android_kmsg_fifo));
 }
 
 // Note: This function has to be in sync with Android's arc-boot-type-detector.
@@ -1822,12 +2031,22 @@ void ArcSetup::MountSharedAndroidDirectories() {
   // the shared mount point because the new flags won't be propagated if the
   // mount point has already been shared with the MS_SLAVE one.
   EXIT_IF(!arc_mounter_->BindMount(data_directory, data_directory));
+
+  // TODO(b/213625515): Investigate if this mount can be made
+  // NO_EXEC, and if we can mount /data directory from inside the
+  // container as EXEC.
   EXIT_IF(
       !arc_mounter_->Remount(data_directory, MS_NOSUID | MS_NODEV, "seclabel"));
 
   // Finally, bind-mount /data to the shared mount point.
   EXIT_IF(!arc_mounter_->Mount(data_directory.value(), shared_data_directory,
                                nullptr, MS_BIND, nullptr));
+  // Remount the mount point of original data directory as non-executable.
+  EXIT_IF(!arc_mounter_->Remount(data_directory,
+                                 MS_NOSUID | MS_NODEV | MS_NOEXEC, "seclabel"));
+  // Remount the mount point of shared data directory as non-executable.
+  EXIT_IF(!arc_mounter_->Remount(shared_data_directory,
+                                 MS_NOSUID | MS_NODEV | MS_NOEXEC, "seclabel"));
 
   const std::string demo_session_apps =
       config_.GetStringOrDie("DEMO_SESSION_APPS_PATH");
@@ -1882,7 +2101,8 @@ void ArcSetup::MaybeStartAdbdProxy(bool is_dev_mode,
 
 void ArcSetup::ContinueContainerBoot(ArcBootType boot_type,
                                      const std::string& serialnumber) {
-  constexpr char kCommand[] = "/system/bin/arcbootcontinue";
+  static constexpr char kCommand[] = "/system/bin/arcbootcontinue";
+  static const int need_restore_exit_code = 100;
 
   const bool mount_demo_apps =
       !config_.GetStringOrDie("DEMO_SESSION_APPS_PATH").empty();
@@ -1907,8 +2127,10 @@ void ArcSetup::ContinueContainerBoot(ArcBootType boot_type,
   // remove or reduce [u]mount operations from the container, especially from
   // its /init, and then to enforce it with SELinux.
   const std::string pid_str = config_.GetStringOrDie("CONTAINER_PID");
-  const std::vector<std::string> command_line = {
-      "/usr/bin/nsenter", "-t", pid_str,
+  const std::vector<std::string> command_line_base = {
+      "/usr/bin/nsenter",
+      "-t",
+      pid_str,
       "-m",  // enter mount namespace
       "-U",  // enter user namespace
       "-i",  // enter System V IPC namespace
@@ -1916,7 +2138,11 @@ void ArcSetup::ContinueContainerBoot(ArcBootType boot_type,
       "-p",  // enter pid namespace
       "-r",  // set the root directory
       "-w",  // set the working directory
-      "--", kCommand, "--serialno", serialnumber, "--disable-boot-completed",
+      "--",
+      kCommand};
+
+  std::vector<std::string> initial_command = {
+      "--serialno", serialnumber, "--disable-boot-completed",
       config_.GetStringOrDie("DISABLE_BOOT_COMPLETED_BROADCAST"),
       "--container-boot-type", std::to_string(static_cast<int>(boot_type)),
       // When copy_packages_cache is set to "0" or "1", arccachesetup copies
@@ -1943,10 +2169,15 @@ void ArcSetup::ContinueContainerBoot(ArcBootType boot_type,
       config_.GetStringOrDie("MANAGEMENT_TRANSITION"),
       "--enable-adb-sideloading", config_.GetStringOrDie("ENABLE_ADB_SIDELOAD"),
       "--enable-arc-nearby-share",
-      config_.GetStringOrDie("ENABLE_ARC_NEARBY_SHARE")};
+      config_.GetStringOrDie("ENABLE_ARC_NEARBY_SHARE"),
+      "--skip-tts-cache-setup", config_.GetStringOrDie("SKIP_TTS_CACHE_SETUP")};
+  initial_command.insert(initial_command.begin(), command_line_base.begin(),
+                         command_line_base.end());
 
   base::ElapsedTimer timer;
-  if (!LaunchAndWait(command_line)) {
+  int exit_code = -1;
+  const bool launch_result = LaunchAndWait(initial_command, &exit_code);
+  if (!launch_result) {
     auto elapsed = timer.Elapsed().InMillisecondsRoundedUp();
     // ContinueContainerBoot() failed. Try to find out why it failed and log
     // messages accordingly. If one of these functions calls exit(), it means
@@ -1963,6 +2194,29 @@ void ArcSetup::ContinueContainerBoot(ArcBootType boot_type,
                << "ms";
     exit(EXIT_FAILURE);
   }
+  if (exit_code == need_restore_exit_code) {
+    // arcbootcontinue found that SELinux context needs to be restored
+    LOG(INFO) << "Running " << kCommand << " --restore_selinux_data_context";
+    std::vector<std::string> restorecon_command = {
+        "--restore_selinux_data_context"};
+    restorecon_command.insert(restorecon_command.begin(),
+                              command_line_base.begin(),
+                              command_line_base.end());
+
+    const bool valid_process = LaunchAndDoNotWait(restorecon_command);
+    if (!valid_process) {
+      LOG(ERROR)
+          << "Launching " << kCommand
+          << " --restore_selinux_data_context resulted in an invalid process";
+      exit(EXIT_FAILURE);
+    }
+  } else if (exit_code) {
+    LOG(ERROR) << kCommand << " returned with nonzero exit_code <" << exit_code
+               << "> after " << timer.Elapsed().InMillisecondsRoundedUp()
+               << "ms";
+    exit(EXIT_FAILURE);
+  }
+
   LOG(INFO) << "Running " << kCommand << " took "
             << timer.Elapsed().InMillisecondsRoundedUp() << "ms";
 
@@ -1983,6 +2237,27 @@ void ArcSetup::EnsureContainerDirectories() {
                             base::FilePath("/run/arc")));
   EXIT_IF(!InstallDirectory(0775, kHostRootUid, kHostRootGid,
                             base::FilePath("/run/arc/host_generated")));
+}
+
+void ArcSetup::SetUpTestharness(bool is_dev_mode) {
+  if (base::DirectoryExists(arc_paths_->testharness_directory))
+    return;
+
+  if (is_dev_mode) {
+    EXIT_IF(!InstallDirectory(07770, kSystemUid, kSystemGid,
+                              arc_paths_->testharness_directory));
+    const base::FilePath key_file =
+        arc_paths_->testharness_directory.Append("keys");
+    EXIT_IF(!WriteToFile(key_file, 0777, ""));
+    EXIT_IF(!Chown(kSystemUid, kSystemGid, key_file));
+  } else {
+    // Even in non-Developer mode, we still need the directory so
+    // config.json bind-mounting can happen correctly.
+    // We will just restrict access to it and make sure no key file
+    // is generated.
+    EXIT_IF(!InstallDirectory(0000, kHostRootUid, kHostRootGid,
+                              arc_paths_->testharness_directory));
+  }
 }
 
 void ArcSetup::StartNetworking() {
@@ -2011,6 +2286,7 @@ void ArcSetup::MountOnOnetimeSetup() {
   // appropriate flags.
   EXIT_IF(!arc_mounter_->LoopMount(
       kSystemImage, arc_paths_->android_rootfs_directory,
+      LoopMountFilesystemType::kUnspecified,
       MS_NOEXEC | MS_NOSUID | MS_NODEV | writable_flag));
 
   unsigned long kBaseFlags =  // NOLINT(runtime/int)
@@ -2022,107 +2298,17 @@ void ArcSetup::MountOnOnetimeSetup() {
   // Unlike system.raw.img, we don't remount them as exec either. The images do
   // not contain any executables.
   EXIT_IF(!arc_mounter_->LoopMount(
-      kSdcardRootfsImage, arc_paths_->sdcard_rootfs_directory, kBaseFlags));
+      kSdcardRootfsImage, arc_paths_->sdcard_rootfs_directory,
+      LoopMountFilesystemType::kUnspecified, kBaseFlags));
   EXIT_IF(!arc_mounter_->LoopMount(
-      kObbRootfsImage, arc_paths_->obb_rootfs_directory, kBaseFlags));
+      kObbRootfsImage, arc_paths_->obb_rootfs_directory,
+      LoopMountFilesystemType::kUnspecified, kBaseFlags));
 }
 
 void ArcSetup::UnmountOnOnetimeStop() {
   IGNORE_ERRORS(arc_mounter_->LoopUmount(arc_paths_->obb_rootfs_directory));
   IGNORE_ERRORS(arc_mounter_->LoopUmount(arc_paths_->sdcard_rootfs_directory));
   IGNORE_ERRORS(arc_mounter_->LoopUmount(arc_paths_->android_rootfs_directory));
-}
-
-void ArcSetup::SetupSensorOnPreChroot(const base::FilePath& rootfs) {
-  if (USE_IIOSERVICE) {
-    // If iioservice is used, the container needs no access to the device.
-    return;
-  }
-
-  // Wait for the cros-ec-ring device.
-  EXIT_IF(!LaunchAndWait({"/bin/udevadm", "trigger", "--action=add",
-                          "--property-match=DRIVER-cros-ec-ring", "--settle"}));
-
-  // Find the cros-ec-ring device directory.
-  base::FileEnumerator enumerator(base::FilePath("/sys/bus/iio/devices"),
-                                  false /* recursive */,
-                                  base::FileEnumerator::DIRECTORIES);
-  base::FilePath cros_ec_ring_dir;
-  for (base::FilePath path = enumerator.Next(); !path.empty();
-       path = enumerator.Next()) {
-    const base::FilePath name_path = path.Append("name");
-    if (!base::PathExists(name_path))
-      continue;
-
-    std::string name;
-    EXIT_IF(!base::ReadFileToString(name_path, &name));
-    base::TrimString(name, "\n", &name);
-    if (base::StartsWith(name, "cros-ec-")) {
-      // Make sensor attributes writable.
-      EXIT_IF(!AllowContainerToWriteSensorAttribute(
-          path.Append("buffer/hwfifo_flush")));
-      EXIT_IF(!AllowContainerToWriteSensorAttribute(
-          path.Append("buffer/hwfifo_timeout")));
-      EXIT_IF(!AllowContainerToWriteSensorAttribute(
-          path.Append("sampling_frequency")));
-      if (name == "cros-ec-ring")
-        cros_ec_ring_dir = path;
-    }
-  }
-
-  if (cros_ec_ring_dir.empty())
-    return;
-  const base::FilePath device_name = cros_ec_ring_dir.BaseName();
-
-  // Get the device number of cros-ec-ring.
-  struct stat st = {};
-  EXIT_IF(stat(base::FilePath("/dev").Append(device_name).value().c_str(),
-               &st) < 0);
-
-  // cros-ec-ring specific attributes.
-  EXIT_IF(!AllowContainerToWriteSensorAttribute(
-      cros_ec_ring_dir.Append("trigger/current_trigger")));
-  EXIT_IF(!AllowContainerToWriteSensorAttribute(
-      cros_ec_ring_dir.Append("buffer/enable")));
-  EXIT_IF(!AllowContainerToWriteSensorAttribute(
-      cros_ec_ring_dir.Append("buffer/length")));
-
-  // Disable cros-ec-ring buffer.
-  EXIT_IF(!base::WriteFile(cros_ec_ring_dir.Append("buffer/enable"), "0"));
-
-  // Turn on all cros-ec-ring channels.
-  base::FileEnumerator channel_enumerator(
-      cros_ec_ring_dir.Append("scan_elements"), false /* recursive */,
-      base::FileEnumerator::FILES);
-  for (base::FilePath path = channel_enumerator.Next(); !path.empty();
-       path = channel_enumerator.Next()) {
-    if (base::EndsWith(path.value(), "_en"))
-      EXIT_IF(!base::WriteFile(path, "1"));
-  }
-
-  // Allow the container to use cros-ec-ring.
-  // TODO(gwendal): This is fragile, needs to find a better way.
-  const std::string allow_str =
-      base::StringPrintf("c %d:%d r", major(st.st_rdev), minor(st.st_rdev));
-  EXIT_IF(!base::AppendToFile(
-      base::FilePath("/sys/fs/cgroup/devices/session_manager_containers/"
-                     "android/devices.allow"),
-      allow_str));
-
-  // Create the device file for the container.
-  base::ScopedFD container_dev_dir_fd(
-      brillo::OpenSafely(rootfs.Append("dev"), O_DIRECTORY | O_RDONLY, 0));
-  EXIT_IF(!container_dev_dir_fd.is_valid());
-  EXIT_IF(mknodat(container_dev_dir_fd.get(), device_name.value().c_str(),
-                  S_IFCHR | S_IRWXU, st.st_rdev) < 0);
-
-  // Set the owner.
-  // NOTE: Here openat() and fchown() are used instead of Chown() or
-  // brillo::OpenAtSafely() because they reject device files.
-  base::ScopedFD device_fd(HANDLE_EINTR(openat(
-      container_dev_dir_fd.get(), device_name.value().c_str(), O_RDONLY)));
-  EXIT_IF(!device_fd.is_valid());
-  EXIT_IF(fchown(device_fd.get(), kSystemUid, kSystemGid) < 0);
 }
 
 void ArcSetup::BindMountInContainerNamespaceOnPreChroot(
@@ -2177,7 +2363,7 @@ void ArcSetup::RestoreContextOnPreChroot(const base::FilePath& rootfs) {
   {
     // Do the same as above for files and directories but in a non-recursive
     // way.
-    constexpr std::array<const char*, 5> kPaths{
+    static constexpr std::array<const char*, 5> kPaths{
         "default.prop", "sys/kernel/debug", "system/build.prop", "var/run/arc",
         "vendor/build.prop"};
     EXIT_IF(!Restorecon(PrependPath(kPaths.cbegin(), kPaths.cend(), rootfs)));
@@ -2219,6 +2405,30 @@ void ArcSetup::DeleteAndroidMediaProviderDataOnUpgrade(
                                  arc_paths_->android_data_old_directory));
 }
 
+// TODO(b/230408800): Remove this and GetSELinuxContext after M110.
+void ArcSetup::DeleteAndroidDataIfDataHasIncorrectSELinuxContexts() {
+  if (GetSdkVersion() != AndroidSdkVersion::ANDROID_R)
+    return;
+
+  const auto downloads_provider_dir_path =
+      arc_paths_->android_data_directory.Append(
+          "data/data/com.android.providers.downloads");
+  const auto downloads_provider_db_path =
+      downloads_provider_dir_path.Append("databases/downloads.db");
+
+  // This inconsistency is highly likely a result of b/228881316.
+  // (Files are incorrectly labeled as system_data_file while dirs are fine.)
+  if (GetSELinuxContext(downloads_provider_dir_path) ==
+          "u:object_r:privapp_data_file:s0:c512,c768" &&
+      GetSELinuxContext(downloads_provider_db_path) ==
+          "u:object_r:system_data_file:s0:c512,c768") {
+    LOG(WARNING) << "Data has invalid SELinux contexts "
+                 << "(likely caused by b/228881316). Deleting /data";
+    EXIT_IF(!MoveDirIntoDataOldDir(arc_paths_->android_data_directory,
+                                   arc_paths_->android_data_old_directory));
+  }
+}
+
 void ArcSetup::OnSetup() {
   const bool is_dev_mode = config_.GetBoolOrDie("CHROMEOS_DEV_MODE");
 
@@ -2236,15 +2446,23 @@ void ArcSetup::OnSetup() {
   CleanUpStaleMountPoints();
   RestoreContext();
   SetUpGraphicsSysfsContext();
+  if (GetSdkVersion() > AndroidSdkVersion::ANDROID_P) {
+    // For container R.
+    SetUpTestharness(is_dev_mode);
+
+    if (!USE_ARCVM) {
+      // In case the udev rules for creating and populating this directory fail,
+      // create the directory so that the bind mount succeeds and allows ARC to
+      // boot, as this is a non-essential feature.
+      // This is intended for CTS compliance on R container: b/277541769
+      EXIT_IF(!brillo::MkdirRecursively(base::FilePath("/dev/arc_input"), 0755)
+                   .is_valid());
+    }
+  }
   SetUpPowerSysfsContext();
   MakeMountPointsReadOnly();
   SetUpCameraProperty(base::FilePath(kBuildPropFile));
   SetUpSharedApkDirectory();
-
-  // These should be the last thing OnSetup() does because the job and
-  // directories are not needed for arc-setup. Only the container's startup code
-  // (in session_manager side) requires the job and directories.
-  WaitForRtLimitsJob();
 }
 
 void ArcSetup::OnBootContinue() {
@@ -2278,13 +2496,7 @@ void ArcSetup::OnBootContinue() {
   // don't exist, this has to be done before calling ShareAndroidData().
   SetUpAndroidData(arc_paths_->android_mutable_source);
 
-  if (!InstallLinksToHostSideCode()) {
-    arc_setup_metrics_->SendBootContinueCodeInstallationResult(
-        ArcBootContinueCodeInstallationResult::ERROR_CANNOT_INSTALL_HOST_CODE);
-  } else {
-    arc_setup_metrics_->SendBootContinueCodeInstallationResult(
-        ArcBootContinueCodeInstallationResult::SUCCESS);
-  }
+  InstallLinksToHostSideCode();
 
   // Set up /run/arc/shared_mounts/{cache,data,demo_apps} to expose the user's
   // data to the container. Demo apps are setup only for demo sessions.
@@ -2299,15 +2511,26 @@ void ArcSetup::OnBootContinue() {
   // this point.
   UnmountSharedAndroidDirectories();
 
-  const std::string env_to_pass = base::StringPrintf(
+  const std::string env_chromeos_user = base::StringPrintf(
+      "CHROMEOS_USER=%s", config_.GetStringOrDie("CHROMEOS_USER").c_str());
+  const std::string env_container_pid = base::StringPrintf(
       "CONTAINER_PID=%d", config_.GetIntOrDie("CONTAINER_PID"));
-  EXIT_IF(!LaunchAndWait(
-      {"/sbin/initctl", "start", "--no-wait", "arc-sdcard", env_to_pass}));
+  EXIT_IF(!LaunchAndWait({"/sbin/initctl", "start", "--no-wait", "arc-sdcard",
+                          env_chromeos_user, env_container_pid}));
+
+  if (GetSdkVersion() == AndroidSdkVersion::ANDROID_P) {
+    EXIT_IF(!LaunchAndWait({"/sbin/initctl", "start", "--no-wait",
+                            "arcpp-media-sharing-services",
+                            "IS_ANDROID_CONTAINER_RVC=false"}));
+  }
 }
 
 void ArcSetup::OnStop() {
   StopNetworking();
   CleanUpBinFmtMiscSetUp();
+  // Call UnmountSdcard() before UnmountOnStop() to ensure that the esdfs mount
+  // points are unmounted before unmounting `sdcard_mount_directory`.
+  UnmountSdcard();
   UnmountOnStop();
   RemoveAndroidKmsgFifo();
 }
@@ -2347,65 +2570,144 @@ void ArcSetup::OnPreChroot() {
   PLOG_IF(FATAL, !container_mount_ns)
       << "Failed to enter the container mount namespace";
 
-  SetupSensorOnPreChroot(rootfs);
   BindMountInContainerNamespaceOnPreChroot(rootfs, binary_translation_type);
+  if (create_tagged_ashmem_)
+    CreateTaggedAshmem(rootfs);
   RestoreContextOnPreChroot(rootfs);
   CreateDevColdbootDoneOnPreChroot(rootfs);
 }
 
+void ArcSetup::CreateTaggedAshmem(const base::FilePath& rootfs) {
+  std::string boot_id;
+  EXIT_IF(!base::ReadFileToString(base::FilePath(kBootIdFile), &boot_id));
+
+  CHECK(!boot_id.empty());
+  if (boot_id.back() == '\n')
+    boot_id.pop_back();
+
+  // Inherit device type from host's ashmem file.
+  struct stat st_buf;
+  if (stat("/dev/ashmem", &st_buf) != 0)
+    PLOG(FATAL) << "Failed to stat ashmem on host";
+
+  const base::FilePath guest_ashmem = rootfs.Append("dev/ashmem" + boot_id);
+  // Don't bother specifying G and O bits since umask will just clobber them.
+  if (mknod(guest_ashmem.value().c_str(), S_IFCHR | 0600, st_buf.st_rdev) != 0)
+    PLOG(FATAL) << "Failed to mknod " << guest_ashmem;
+
+  // Since the file is world-rw-able, this is an optional adjustment.
+  if (chown(guest_ashmem.value().c_str(), kRootUid, kRootGid) != 0)
+    PLOG(WARNING) << "Failed to chown to android root: " << guest_ashmem;
+
+  if (chmod(guest_ashmem.value().c_str(), 0666) != 0)
+    PLOG(FATAL) << "Failed to chmod " << guest_ashmem;
+}
+
 void ArcSetup::OnRemoveData() {
+  // Since deleting files in android-data may take long, just move the directory
+  // for now and let arc-stale-directory-remover delete files in the background.
   EXIT_IF(!MoveDirIntoDataOldDir(arc_paths_->android_data_directory,
                                  arc_paths_->android_data_old_directory));
+
+  // Delete virtio-blk disk image if exists.
+  if (USE_ARCVM) {
+    // Disk path /home/root/<hash>/crosvm/YXJjdm0=.img is constructed in
+    // concierge's CreateDiskImage method. Image name "YXJjdm0=" is static
+    // because it is generated by vm_tools::GetEncodedName("arcvm").
+    static constexpr const char kImageFileName[] = "YXJjdm0=.img";
+    const base::FilePath image_dir =
+        arc_paths_->root_directory.Append("crosvm");
+
+    brillo::SafeFD fd;
+    brillo::SafeFD::Error err;
+    std::tie(fd, err) = brillo::SafeFD::Root().first.OpenExistingDir(image_dir);
+
+    if (!brillo::SafeFD::IsError(err)) {
+      base::ElapsedTimer timer;
+      // No need to delete the image in the background because deleting a single
+      // image file won't take more than 1 second.
+      err = fd.Unlink(kImageFileName);
+      PCHECK(!brillo::SafeFD::IsError(err) ||
+             // Abort if the |err| is not ENOENT.
+             (err == brillo::SafeFD::Error::kIOError && errno == ENOENT))
+          << "err=" << static_cast<int>(err);
+      LOG_IF(INFO, !brillo::SafeFD::IsError(err))
+          << "Deleting disk image (crosvm/YXJjdm0=.img) took "
+          << timer.Elapsed().InMillisecondsRoundedUp() << "ms";
+    } else {
+      PLOG(ERROR) << "Failed to open the image directory: " << image_dir
+                  << ", err=" << static_cast<int>(err);
+    }
+  }
+
+  // Ensure to remove ARC /data in LVM stateful partition.
+  if (USE_ARCVM && USE_LVM_STATEFUL_PARTITION)
+    RemoveDataInLvm();
+}
+
+void ArcSetup::RemoveDataInLvm() {
+  brillo::DBusConnection connection;
+  scoped_refptr<dbus::Bus> bus = connection.Connect();
+  if (!bus) {
+    LOG(ERROR) << "Failed to connect to system D-Bus service";
+    return;
+  }
+
+  auto userdataauth_proxy = org::chromium::UserDataAuthInterfaceProxy(bus);
+  user_data_auth::ResetApplicationContainerRequest request;
+  user_data_auth::ResetApplicationContainerReply reply;
+  brillo::ErrorPtr err;
+
+  request.set_application_name("arcvm");
+  const std::string chromeos_user = config_.GetStringOrDie("CHROMEOS_USER");
+  request.mutable_account_id()->set_account_id(chromeos_user);
+
+  LOG(INFO) << "Attempting to remove ARC /data in LVM";
+  if (!userdataauth_proxy.ResetApplicationContainer(request, &reply, &err,
+                                                    kResetLvmDbusTimeoutMs) ||
+      err) {
+    std::string msg;
+    if (err.get())
+      msg = err->GetDomain() + "," + err->GetCode() + "," + err->GetMessage();
+    LOG(ERROR) << "ResetApplicationContainer call failed: " << msg;
+    return;
+  }
+  if (reply.error() !=
+      user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_NOT_SET) {
+    LOG(ERROR) << "Failed to reset application container: " << reply.error();
+    return;
+  }
+  LOG(INFO) << "Successfully removed ARC /data in LVM";
 }
 
 void ArcSetup::OnRemoveStaleData() {
-  // To protect itself, base::SafeFD::RmDir() uses a default maximum
-  // recursion depth of 256. In this case, we are deleting the user's
-  // arbitrary filesystem and want to be more generous. However, RmDir()
-  // uses one fd per path level when recursing so we will have the max
-  // number of fds per process as an upper bound (default 1024). Leave a
-  // 25% buffer below this default 1024 limit to give lots of room for
-  // incidental usage elsewhere in the process. Use this everywhere here
-  // for consistency.
-  constexpr int kRmdirMaxDepth = 768;
-
   brillo::SafeFD root = brillo::SafeFD::Root().first;
+  if (!root.is_valid()) {
+    LOG(ERROR) << "Errors while cleaning old data: failed to open the root "
+                  "directory";
+    return;
+  }
 
   if (USE_ARCVM) {
     // On ARCVM, stale *.odex files are kept in /data/vendor/arc.
-    base::FilePath arcvm_stale_odex = arc_paths_->android_data_directory.Append(
-        "data/vendor/arc/old_arc_executables_pre_ota");
-    brillo::SafeFD parent_dir =
-        root.OpenExistingDir(arcvm_stale_odex.DirName()).first;
-    brillo::SafeFD::Error err = parent_dir.Rmdir(
-        arcvm_stale_odex.BaseName().value(), true /*recursive*/, kRmdirMaxDepth,
-        true /*keep_going*/);
-    if (brillo::SafeFD::IsError(err) &&
-        err != brillo::SafeFD::Error::kDoesNotExist) {
-      LOG(ERROR) << "Errors while cleaning old data from "
-                 << arcvm_stale_odex.value();
-    }
+    const base::FilePath arcvm_stale_odex_path =
+        arc_paths_->android_data_directory.Append(
+            "data/vendor/arc/old_arc_executables_pre_ota");
+    RemoveStaleDataDirectory(root, arcvm_stale_odex_path);
   }
 
   // Moving data to android_data_old no longer has race conditions so it is safe
   // to delete the entire directory.
-  brillo::SafeFD parent_dir =
-      root.OpenExistingDir(arc_paths_->android_data_old_directory.DirName())
-          .first;
-  brillo::SafeFD::Error err = parent_dir.Rmdir(
-      arc_paths_->android_data_old_directory.BaseName().value(),
-      true /*recursive*/, kRmdirMaxDepth, true /*keep_going*/);
-  if (brillo::SafeFD::IsError(err) &&
-      err != brillo::SafeFD::Error::kDoesNotExist) {
-    LOG(ERROR) << "Errors while cleaning old data from "
-               << arc_paths_->android_data_old_directory.value();
-  }
+  RemoveStaleDataDirectory(root, arc_paths_->android_data_old_directory);
 }
 
 void ArcSetup::OnPrepareHostGeneratedDir() {
-  const bool add_native_bridge_64bit_support =
-      config_.GetBoolOrDie("ADD_NATIVE_BRIDGE_64BIT_SUPPORT");
   const bool is_arcvm = config_.GetBoolOrDie("IS_ARCVM");
+#if USE_ARC_HW_OEMCRYPTO
+  const bool hw_oemcrypto_support = true;
+#else
+  const bool hw_oemcrypto_support = false;
+#endif  // USE_ARC_HW_OEMCRYPTO
   const bool debuggable = config_.GetBoolOrDie("ANDROID_DEBUGGABLE");
   LOG(INFO) << "Debuggable is " << debuggable;
 
@@ -2416,9 +2718,17 @@ void ArcSetup::OnPrepareHostGeneratedDir() {
                      .Append("combined.prop")
                : base::FilePath(kGeneratedPropertyFilesPath));
 
-  EXIT_IF(!ExpandPropertyFiles(
-      property_files_source_dir, property_files_dest_path,
-      /*single_file=*/is_arcvm, add_native_bridge_64bit_support, debuggable));
+  brillo::DBusConnection dbus_connection;
+  scoped_refptr<::dbus::Bus> bus = nullptr;
+  if (hw_oemcrypto_support) {
+    bus = dbus_connection.Connect();
+    CHECK(bus);
+  }
+
+  EXIT_IF(!ExpandPropertyFiles(property_files_source_dir,
+                               property_files_dest_path,
+                               /*single_file=*/is_arcvm, hw_oemcrypto_support,
+                               /*include_soc_props=*/true, debuggable, bus));
 
   if (!is_arcvm)
     return;
@@ -2432,11 +2742,12 @@ void ArcSetup::OnPrepareHostGeneratedDir() {
   EXIT_IF(!GenerateFirstStageFstab(
       property_files_dest_path,
       base::FilePath(kGeneratedPropertyFilesPathVm).Append("fstab"),
-      cache_partition));
+      base::FilePath(kArcVmVendorImagePath), cache_partition));
 }
 
 void ArcSetup::OnApplyPerBoardConfig() {
-  ApplyPerBoardConfigurationsInternal(base::FilePath(kArcVmPerBoardConfigPath));
+  base::FilePath per_board_config_path(kArcVmPerBoardConfigPath);
+  ApplyPerBoardConfigurationsInternal(per_board_config_path);
   SetUpCameraProperty(base::FilePath(kBuildPropFileVm));
 
   // ARCVM's platform.xml has to be owned by crosvm for proper ugid mapping by
@@ -2444,8 +2755,7 @@ void ArcSetup::OnApplyPerBoardConfig() {
   brillo::SafeFD fd;
   brillo::SafeFD::Error err;
   std::tie(fd, err) = brillo::SafeFD::Root().first.OpenExistingFile(
-      base::FilePath(kArcVmPerBoardConfigPath)
-          .Append(kPlatformXmlFileRelative));
+      per_board_config_path.Append(kPlatformXmlFileRelative));
   if (err == brillo::SafeFD::Error::kDoesNotExist)
     return;  // the board does not have the file.
   EXIT_IF(!fd.is_valid());
@@ -2454,6 +2764,30 @@ void ArcSetup::OnApplyPerBoardConfig() {
   gid_t crosvm_gid;
   EXIT_IF(!GetUserId("crosvm", &crosvm_uid, &crosvm_gid));
   EXIT_IF(fchown(fd.get(), crosvm_uid, crosvm_gid));
+
+  auto config = std::make_unique<brillo::CrosConfig>();
+  if (auto media_codecs_c2_xml = GetConfigPath(*config, kMediaCodecsSetting);
+      media_codecs_c2_xml && base::PathExists(*media_codecs_c2_xml)) {
+    EXIT_IF(!SafeCopyFile(*media_codecs_c2_xml, brillo::SafeFD::Root().first,
+                          arc_paths_->media_codecs_relative,
+                          brillo::SafeFD::Root()
+                              .first.OpenExistingDir(per_board_config_path)
+                              .first,
+                          0644, crosvm_uid, crosvm_gid));
+  }
+
+  if (auto media_codecs_performance_c2_xml =
+          GetConfigPath(*config, kMediaCodecsPerformanceSetting);
+      media_codecs_performance_c2_xml &&
+      base::PathExists(*media_codecs_performance_c2_xml)) {
+    EXIT_IF(!SafeCopyFile(*media_codecs_performance_c2_xml,
+                          brillo::SafeFD::Root().first,
+                          arc_paths_->media_codecs_performance_relative,
+                          brillo::SafeFD::Root()
+                              .first.OpenExistingDir(per_board_config_path)
+                              .first,
+                          0644, crosvm_uid, crosvm_gid));
+  }
 }
 
 void ArcSetup::OnCreateData() {
@@ -2480,17 +2814,15 @@ void ArcSetup::OnUnmountSdcard() {
 }
 
 void ArcSetup::OnUpdateRestoreconLast() {
-  // On Android, /init writes the security.restorecon_last attribute to /data
-  // (and /cache on N) after it finishes updating labels of the files in the
-  // directories, but on ARC, writing the attribute fails silently because
-  // processes in user namespace are not allowed to write arbitrary entries
-  // under security.* even with CAP_SYS_ADMIN. (b/33084415, b/33402785)
-  // As a workaround, let this command outside the container set the
-  // attribute for ARC.
-  constexpr char kRestoreconLastXattr[] = "security.restorecon_last";
+  if (GetSdkVersion() > AndroidSdkVersion::ANDROID_P) {
+    // Currently R container does not support setting security.sehash.
+    // TODO: b/292031836 - Support setting security.sehash on R container.
+    return;
+  }
+
+  const base::FilePath mutable_data_dir =
+      arc_paths_->android_mutable_source.Append("data");
   std::vector<base::FilePath> context_files;
-  std::vector<base::FilePath> target_directories = {
-      arc_paths_->android_mutable_source.Append("data")};
 
   // The order of files to read is important. Do not reorder.
   context_files.push_back(
@@ -2500,12 +2832,26 @@ void ArcSetup::OnUpdateRestoreconLast() {
 
   std::string hash;
   EXIT_IF(!GetSha1HashOfFiles(context_files, &hash));
-  for (const auto& target : target_directories) {
-    EXIT_IF(!SetXattr(target, kRestoreconLastXattr, hash));
-  }
+  EXIT_IF(!SetRestoreconLastXattr(mutable_data_dir, hash));
 }
 
 void ArcSetup::OnHandleUpgrade() {
+  // Mount virtio-blk /data on /home/root/<hash>/android-data/data when needed.
+  // Here, we mount an ext4 image as read-only but without the "noload" option,
+  // which should be safe since arc-handle-upgrade blocks the guest side /data
+  // mount on ARCVM.
+  const base::FilePath data_device_path = GetArcVmDataDevicePath(
+      config_.GetStringOrDie("CHROMEOS_USER"), arc_paths_->root_directory);
+  std::unique_ptr<ScopedMount> android_data_mount =
+      data_device_path.empty()
+          ? nullptr
+          : ScopedMount::CreateScopedLoopMount(
+                arc_mounter_.get(), data_device_path.value(),
+                arc_paths_->android_data_directory.Append("data"),
+                LoopMountFilesystemType::kExt4,
+                MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY);
+  LOG_IF(INFO, android_data_mount) << "Mounted " << data_device_path;
+
   ArcBootType boot_type;
   AndroidSdkVersion data_sdk_version;
   GetBootTypeAndDataSdkVersion(&boot_type, &data_sdk_version);
@@ -2513,6 +2859,7 @@ void ArcSetup::OnHandleUpgrade() {
   SendUpgradeMetrics(data_sdk_version);
   DeleteAndroidMediaProviderDataOnUpgrade(data_sdk_version);
   DeleteAndroidDataOnUpgrade(data_sdk_version);
+  DeleteAndroidDataIfDataHasIncorrectSELinuxContexts();
 }
 
 std::string ArcSetup::GetSystemBuildPropertyOrDie(const std::string& name) {

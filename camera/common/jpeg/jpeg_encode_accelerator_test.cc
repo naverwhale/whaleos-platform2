@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -27,9 +27,8 @@
 #include "cros-camera/jpeg_encode_accelerator.h"
 #include "hardware/gralloc.h"
 
-namespace cros {
+namespace cros::tests {
 
-namespace tests {
 // Environment to create test data for all test cases.
 class JpegEncodeTestEnvironment;
 JpegEncodeTestEnvironment* g_env;
@@ -81,15 +80,15 @@ struct Frame {
 
 class JpegEncodeAcceleratorTest : public ::testing::Test {
  public:
-  JpegEncodeAcceleratorTest() {}
+  JpegEncodeAcceleratorTest() = default;
   JpegEncodeAcceleratorTest(const JpegEncodeAcceleratorTest&) = delete;
   JpegEncodeAcceleratorTest& operator=(const JpegEncodeAcceleratorTest&) =
       delete;
 
-  ~JpegEncodeAcceleratorTest() {}
+  ~JpegEncodeAcceleratorTest() override = default;
 
-  void SetUp();
-  void TearDown() {}
+  void SetUp() override;
+  void TearDown() override {}
 
   bool StartJea();
 
@@ -105,7 +104,7 @@ class JpegEncodeAcceleratorTest : public ::testing::Test {
                                    uint8_t* sw_yuv_result,
                                    size_t yuv_size);
   void EncodeTest(Frame* frame);
-  void EncodeSyncCallback(base::Callback<void(int)> callback,
+  void EncodeSyncCallback(base::OnceCallback<void(int)> callback,
                           int32_t buffer_id,
                           int error);
 
@@ -327,7 +326,7 @@ void JpegEncodeAcceleratorTest::EncodeTest(Frame* frame) {
   ASSERT_TRUE(utils.SetImageLength(frame->height));
   std::vector<uint8_t> thumbnail;
   thumbnail.resize(0);
-  utils.GenerateApp1(thumbnail.data(), 0);
+  utils.GenerateApp1(thumbnail.data(), 0, ExifUtils::Compression::kJpeg);
 
   auto GetDmaBufPlanes = [&](buffer_handle_t handle) {
     std::vector<JpegCompressor::DmaBufPlane> planes;
@@ -355,6 +354,7 @@ void JpegEncodeAcceleratorTest::EncodeTest(Frame* frame) {
       cros::CameraBufferManager::GetV4L2PixelFormat(frame->input_handle),
       std::move(input_planes), std::move(output_planes), utils.GetApp1Buffer(),
       utils.GetApp1Length(), frame->width, frame->height, kJpegDefaultQuality,
+      cros::CameraBufferManager::GetModifier(frame->input_handle),
       &frame->hw_out_size);
   EXPECT_EQ(status, JpegEncodeAccelerator::ENCODE_OK);
   if (status == static_cast<int>(JpegEncodeAccelerator::ENCODE_OK)) {
@@ -411,8 +411,7 @@ TEST_F(JpegEncodeAcceleratorTest, Encode1000Images) {
   }
 }
 
-}  // namespace tests
-}  // namespace cros
+}  // namespace cros::tests
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);

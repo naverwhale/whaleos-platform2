@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -6,7 +6,7 @@
 
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 
 #include "midis/device.h"
@@ -47,14 +47,16 @@ class SeqHandlerFuzzer {
  public:
   void SetUpSeqHandler() {
     seq_handler_ = std::make_unique<SeqHandler>(
-        base::Bind(&FakeCallbacks::AddDevice, base::Unretained(&callbacks_)),
-        base::Bind(&FakeCallbacks::RemoveDevice, base::Unretained(&callbacks_)),
-        base::Bind(&FakeCallbacks::HandleReceiveData,
-                   base::Unretained(&callbacks_)),
-        base::Bind(&FakeCallbacks::IsDevicePresent,
-                   base::Unretained(&callbacks_)),
-        base::Bind(&FakeCallbacks::IsPortPresent,
-                   base::Unretained(&callbacks_)));
+        base::BindRepeating(&FakeCallbacks::AddDevice,
+                            base::Unretained(&callbacks_)),
+        base::BindRepeating(&FakeCallbacks::RemoveDevice,
+                            base::Unretained(&callbacks_)),
+        base::BindRepeating(&FakeCallbacks::HandleReceiveData,
+                            base::Unretained(&callbacks_)),
+        base::BindRepeating(&FakeCallbacks::IsDevicePresent,
+                            base::Unretained(&callbacks_)),
+        base::BindRepeating(&FakeCallbacks::IsPortPresent,
+                            base::Unretained(&callbacks_)));
 
     seq_handler_->decoder_ = midis::SeqHandler::CreateMidiEvent(0);
   }

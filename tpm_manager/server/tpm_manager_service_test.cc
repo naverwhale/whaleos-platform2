@@ -1,13 +1,14 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/run_loop.h>
 #include <base/synchronization/lock.h>
 #include <base/synchronization/waitable_event.h>
@@ -19,6 +20,7 @@
 #include <libhwsec-foundation/tpm/tpm_version.h>
 
 #include "tpm_manager/server/mock_local_data_store.h"
+#include "tpm_manager/server/mock_pinweaver_provision.h"
 #include "tpm_manager/server/mock_tpm_allowlist.h"
 #include "tpm_manager/server/mock_tpm_initializer.h"
 #include "tpm_manager/server/mock_tpm_manager_metrics.h"
@@ -31,6 +33,7 @@ using testing::_;
 using testing::AtLeast;
 using testing::AtMost;
 using testing::DoAll;
+using testing::Expectation;
 using testing::Ge;
 using testing::Invoke;
 using testing::Le;
@@ -52,28 +55,32 @@ namespace tpm_manager {
 
 // A test fixture that takes care of message loop management and configuring a
 // TpmManagerService instance with mock dependencies. Template variables
-// |wait_for_ownership| and |perform_preinit| are passed to the constructor of
+// |perform_preinit| are passed to the constructor of
 // TpmManagerService, and |shall_setup_service| indicates if, during dixture
 // setup, TpmManagerService is also set up as well.
-template <bool wait_for_ownership,
-          bool perform_preinit,
-          bool shall_setup_service>
+template <bool perform_preinit, bool shall_setup_service>
 class TpmManagerServiceTestBase : public testing::Test {
  public:
   ~TpmManagerServiceTestBase() override = default;
   void SetUp() override {
     EXPECT_CALL(mock_tpm_manager_metrics_, ReportVersionFingerprint(_))
         .Times(AtMost(1));
+    auto mock_pinweaver_provision =
+        std::make_unique<NiceMock<MockPinWeaverProvision>>();
+    mock_pinweaver_provision_ = mock_pinweaver_provision.get();
     service_.reset(new TpmManagerService(
-        wait_for_ownership, perform_preinit, &mock_local_data_store_,
-        &mock_tpm_status_, &mock_tpm_initializer_, &mock_tpm_nvram_,
-        &mock_tpm_manager_metrics_));
+        perform_preinit, &mock_local_data_store_,
+        std::move(mock_pinweaver_provision), &mock_tpm_status_,
+        &mock_tpm_initializer_, &mock_tpm_nvram_, &mock_tpm_manager_metrics_));
     service_->set_tpm_allowlist_for_testing(&mock_tpm_allowlist_);
     ON_CALL(mock_tpm_allowlist_, IsAllowed()).WillByDefault(Return(true));
     DisablePeriodicDictionaryAttackReset();
     if (shall_setup_service) {
       SetupService();
     }
+    // We remove the pinweaver provision from `TpmManagerService`. None should
+    // be all at any time.
+    EXPECT_CALL(*mock_pinweaver_provision_, Provision()).Times(0);
   }
 
   // This should be a protected method, but it was moved to public to avoid
@@ -98,7 +105,7 @@ class TpmManagerServiceTestBase : public testing::Test {
 
   void DisablePeriodicDictionaryAttackReset() {
     // Virtually disables the DA reset timer to reduce noises of expectations.
-    PassiveTimer timer(base::TimeDelta::FromHours(5));
+    PassiveTimer timer(base::Hours(5));
     timer.Reset();
     service_->set_dictionary_attack_reset_timer_for_testing(timer);
   }
@@ -109,6 +116,8 @@ class TpmManagerServiceTestBase : public testing::Test {
   NiceMock<MockTpmStatus> mock_tpm_status_;
   NiceMock<MockTpmAllowlist> mock_tpm_allowlist_;
   NiceMock<MockTpmManagerMetrics> mock_tpm_manager_metrics_;
+  // Owned by `service_` after `SetUp()`.
+  NiceMock<MockPinWeaverProvision>* mock_pinweaver_provision_;
   std::unique_ptr<TpmManagerService> service_;
 
  private:
@@ -117,18 +126,20 @@ class TpmManagerServiceTestBase : public testing::Test {
   base::RunLoop run_loop_;
 };
 
-class TpmManagerServiceTest
-    : public TpmManagerServiceTestBase<true, true, true> {};
+class TpmManagerServiceTest : public TpmManagerServiceTestBase<true, true> {};
 // Tests must call SetupService() for the following test fixtures where
 // |shall_setup_service| is set to false.
-class TpmManagerServiceTest_NoWaitForOwnership
-    : public TpmManagerServiceTestBase<false, false, false> {};
 class TpmManagerServiceTest_NoPreinit
-    : public TpmManagerServiceTestBase<true, false, false> {};
+    : public TpmManagerServiceTestBase<false, false> {};
 class TpmManagerServiceTest_Preinit
-    : public TpmManagerServiceTestBase<true, true, false> {};
+    : public TpmManagerServiceTestBase<true, false> {};
 
-TEST_F(TpmManagerServiceTest_NoWaitForOwnership, AutoInitialize) {
+class TpmManagerServiceTest_NoSetup : public TpmManagerServiceTest {
+ public:
+  void SetUp() override {}
+};
+
+TEST_F(TpmManagerServiceTest_Preinit, AutoInitialize) {
   // Called in InitializeTask()
   EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))
       .Times(1)
@@ -136,14 +147,47 @@ TEST_F(TpmManagerServiceTest_NoWaitForOwnership, AutoInitialize) {
           DoAll(SetArgPointee<0>(TpmStatus::kTpmUnowned), Return(true)));
 
   // Make sure InitializeTpm doesn't get multiple calls.
-  EXPECT_CALL(mock_tpm_initializer_, InitializeTpm(_)).Times(1);
+  EXPECT_CALL(mock_tpm_initializer_, InitializeTpm(_));
   EXPECT_CALL(mock_tpm_initializer_, PreInitializeTpm()).Times(0);
   EXPECT_CALL(mock_tpm_manager_metrics_, ReportTimeToTakeOwnership(_)).Times(1);
   SetupService();
   RunServiceWorkerAndQuit();
 }
 
-TEST_F(TpmManagerServiceTest_NoWaitForOwnership, NoNeedToInitialize) {
+TEST_F(TpmManagerServiceTest_Preinit, InitializeMetrics) {
+  // Called in InitializeTask()
+  EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))
+      .Times(1)
+      .WillRepeatedly(
+          DoAll(SetArgPointee<0>(TpmStatus::kTpmUnowned), Return(true)));
+
+  EXPECT_CALL(mock_tpm_status_, GetVersionInfo(_, _, _, _, _, _))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(mock_tpm_status_, GetAlertsData(_)).WillOnce(Return(true));
+
+  EXPECT_CALL(mock_tpm_status_, GetGscVersion())
+      .WillRepeatedly(Return(GscVersion::GSC_VERSION_TI50));
+
+  EXPECT_CALL(mock_tpm_status_, GetTi50Stats(_, _, _, _))
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(mock_tpm_manager_metrics_, ReportTimeToTakeOwnership(_)).Times(1);
+  EXPECT_CALL(mock_tpm_manager_metrics_, ReportVersionFingerprint(_)).Times(1);
+  EXPECT_CALL(mock_tpm_manager_metrics_, ReportAlertsData(_))
+      .WillOnce([this](auto&&) { Quit(); });
+  EXPECT_CALL(mock_tpm_manager_metrics_, ReportFilesystemInitTime(_)).Times(1);
+  EXPECT_CALL(mock_tpm_manager_metrics_, ReportFilesystemUtilization(_))
+      .Times(1);
+  EXPECT_CALL(mock_tpm_manager_metrics_, ReportApRoVerificationTime(_))
+      .Times(1);
+  EXPECT_CALL(mock_tpm_manager_metrics_, ReportExpApRoVerificationStatus(_))
+      .Times(1);
+  SetupService();
+  Run();
+}
+
+TEST_F(TpmManagerServiceTest_Preinit, NoNeedToInitialize) {
   // Called in InitializeTask()
   EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))
       .Times(1)
@@ -155,7 +199,7 @@ TEST_F(TpmManagerServiceTest_NoWaitForOwnership, NoNeedToInitialize) {
   RunServiceWorkerAndQuit();
 }
 
-TEST_F(TpmManagerServiceTest_NoWaitForOwnership, AutoInitializeNoTpm) {
+TEST_F(TpmManagerServiceTest_Preinit, AutoInitializeNoTpm) {
   EXPECT_CALL(mock_tpm_status_, IsTpmEnabled()).WillRepeatedly(Return(false));
   EXPECT_CALL(mock_tpm_initializer_, InitializeTpm(_)).Times(0);
   EXPECT_CALL(mock_tpm_initializer_, PreInitializeTpm()).Times(0);
@@ -163,7 +207,7 @@ TEST_F(TpmManagerServiceTest_NoWaitForOwnership, AutoInitializeNoTpm) {
   RunServiceWorkerAndQuit();
 }
 
-TEST_F(TpmManagerServiceTest_NoWaitForOwnership, AutoInitializeFailure) {
+TEST_F(TpmManagerServiceTest_Preinit, AutoInitializeFailure) {
   // Called in InitializeTask()
   EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))
       .Times(1)
@@ -176,8 +220,7 @@ TEST_F(TpmManagerServiceTest_NoWaitForOwnership, AutoInitializeFailure) {
   RunServiceWorkerAndQuit();
 }
 
-TEST_F(TpmManagerServiceTest_NoWaitForOwnership,
-       TakeOwnershipAfterAutoInitialize) {
+TEST_F(TpmManagerServiceTest_Preinit, TakeOwnershipAfterAutoInitialize) {
   // Called in InitializeTask()
   EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))
       .WillOnce(DoAll(SetArgPointee<0>(TpmStatus::kTpmUnowned), Return(true)));
@@ -200,12 +243,11 @@ TEST_F(TpmManagerServiceTest_NoWaitForOwnership,
   Run();
 }
 
-TEST_F(TpmManagerServiceTest_Preinit, NoAutoInitialize) {
+TEST_F(TpmManagerServiceTest_NoPreinit, NoAutoInitialize) {
   EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))
       .WillRepeatedly(
           DoAll(SetArgPointee<0>(TpmStatus::kTpmUnowned), Return(true)));
   EXPECT_CALL(mock_tpm_initializer_, InitializeTpm(_)).Times(0);
-  EXPECT_CALL(mock_tpm_initializer_, PreInitializeTpm()).Times(1);
   SetupService();
   RunServiceWorkerAndQuit();
 }
@@ -318,7 +360,7 @@ TEST_F(TpmManagerServiceTest_Preinit,
 
   // Sets the period to 50 ms.
   service_->set_dictionary_attack_reset_timer_for_testing(
-      PassiveTimer(base::TimeDelta::FromMilliseconds(50)));
+      PassiveTimer(base::Milliseconds(50)));
   base::WaitableEvent first_periodic_event(
       base::WaitableEvent::ResetPolicy::MANUAL,
       base::WaitableEvent::InitialState::NOT_SIGNALED);
@@ -354,7 +396,7 @@ TEST_F(TpmManagerServiceTest_Preinit,
     self->Quit();
   };
   base::TimeTicks start_time = base::TimeTicks::Now();
-  base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(25));
+  base::PlatformThread::Sleep(base::Milliseconds(25));
   first_periodic_event.Wait();
   TakeOwnershipRequest request;
   // The DA reset is triggered for the second time here once the TPM is owned.
@@ -367,12 +409,10 @@ TEST_F(TpmManagerServiceTest_Preinit,
   // is accurate, 20 ms window should be generous enough.
   // 2. In case |TakeOwnership| doesn't even trigger DA reset, the duration
   // would be larger than 100ms and fails the test.
-  EXPECT_THAT(finish_time - start_time,
-              Le(base::TimeDelta::FromMilliseconds(95)));
+  EXPECT_THAT(finish_time - start_time, Le(base::Milliseconds(95)));
   // If the timer doesn't get reset, it could be triggered @ ~50ms and fails the
   // test.
-  EXPECT_THAT(finish_time - start_time,
-              Ge(base::TimeDelta::FromMilliseconds(55)));
+  EXPECT_THAT(finish_time - start_time, Ge(base::Milliseconds(55)));
 }
 
 TEST_F(TpmManagerServiceTest_Preinit, GetTpmStatusSuccess) {
@@ -754,7 +794,8 @@ TEST_F(TpmManagerServiceTest_Preinit, TakeOwnershipNoTpm) {
   Run();
 }
 
-TEST_F(TpmManagerServiceTest_Preinit, TakeOwnershipFollowedByDisableDA) {
+#if !USE_OS_INSTALL_SERVICE
+TEST_F(TpmManagerServiceTest_NoPreinit, TakeOwnershipFollowedByDisableDA) {
   // Called in `InitializeTask()`.
   EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))
       .WillOnce(DoAll(SetArgPointee<0>(TpmStatus::kTpmUnowned), Return(true)));
@@ -775,6 +816,7 @@ TEST_F(TpmManagerServiceTest_Preinit, TakeOwnershipFollowedByDisableDA) {
   service_->TakeOwnership(request, base::BindOnce(callback, this));
   Run();
 }
+#endif
 
 TEST_F(TpmManagerServiceTest_Preinit, RemoveOwnerDependencyReadFailure) {
   EXPECT_CALL(mock_local_data_store_, Read(_)).WillRepeatedly(Return(false));
@@ -1178,11 +1220,11 @@ TEST_F(TpmManagerServiceTest, ReadWriteSpaceSuccess) {
 }
 
 #if USE_TPM_DYNAMIC || (!USE_TPM1 && !USE_TPM2)
-TEST_F(TpmManagerServiceTest, TpmManagerNoCrash) {
+TEST_F(TpmManagerServiceTest_NoSetup, TpmManagerNoCrash) {
   SET_NO_TPM_FOR_TESTING;
   EXPECT_CALL(mock_tpm_manager_metrics_, ReportVersionFingerprint(_))
       .Times(AtMost(1));
-  service_.reset(new TpmManagerService(true, true, &mock_local_data_store_));
+  service_.reset(new TpmManagerService(true, &mock_local_data_store_));
   DisablePeriodicDictionaryAttackReset();
   SetupService();
   service_->GetVersionInfo(GetVersionInfoRequest(), base::DoNothing());
@@ -1237,7 +1279,8 @@ TEST_F(TpmManagerServiceTest_Preinit, TpmManagerTpmNotAllowedNoCrash) {
   RunServiceWorkerAndQuit();
 }
 
-TEST_F(TpmManagerServiceTest_Preinit, UpdateTpmStatusAfterTakeOwnership) {
+#if !USE_OS_INSTALL_SERVICE
+TEST_F(TpmManagerServiceTest_NoPreinit, UpdateTpmStatusAfterTakeOwnership) {
   EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))
       .WillOnce(DoAll(SetArgPointee<0>(TpmStatus::kTpmUnowned), Return(true)))
       .WillOnce(DoAll(SetArgPointee<0>(TpmStatus::kTpmOwned), Return(true)));
@@ -1290,6 +1333,7 @@ TEST_F(TpmManagerServiceTest_Preinit, UpdateTpmStatusAfterTakeOwnership) {
                           base::BindLambdaForTesting(callback_taken));
   Run();
 }
+#endif
 
 TEST_F(TpmManagerServiceTest_Preinit, RetryGetTpmStatusUntilSuccess) {
   EXPECT_CALL(mock_tpm_status_, GetTpmOwned(_))

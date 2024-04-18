@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/dbus/dbus_object.h>
 #include <brillo/dbus/async_event_sequencer.h>
 
@@ -38,7 +37,7 @@ class DBusAdaptor {
   ~DBusAdaptor();
 
   // Registers handlers for EasyUnlock service method calls.
-  void Register(const CompletionAction& callback);
+  void Register(CompletionAction callback);
 
  private:
   // Handlers for DBus method calls exported in |ExportDBusMethods|.

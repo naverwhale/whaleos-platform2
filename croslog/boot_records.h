@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CROSLOG_BOOT_RECORDS_H_
 #define CROSLOG_BOOT_RECORDS_H_
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -64,7 +65,7 @@ class BootRecords {
   //   - Zero or negative offset number from the last. Zero represents the last
   //     boot. (positive offset value is not supported yet)
   //   - Full boot ID
-  base::Optional<BootRange> GetBootRange(const std::string& boot_str) const;
+  std::optional<BootRange> GetBootRange(const std::string& boot_str) const;
 
  private:
   FRIEND_TEST(BootRecordsTest, Load);

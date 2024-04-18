@@ -1,9 +1,12 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef RUNTIME_PROBE_FUNCTIONS_GENERIC_BATTERY_H_
 #define RUNTIME_PROBE_FUNCTIONS_GENERIC_BATTERY_H_
+
+#include <string>
+#include <vector>
 
 #include "runtime_probe/probe_function.h"
 
@@ -15,6 +18,8 @@ class GenericBattery final : public PrivilegedProbeFunction {
 
  public:
   NAME_PROBE_FUNCTION("generic_battery");
+
+  void PostHelperEvalImpl(DataType* result) const final;
 
  private:
   DataType EvalImpl() const override;

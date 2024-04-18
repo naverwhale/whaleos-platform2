@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define LORGNETTE_IMAGE_READERS_PNG_READER_H_
 
 #include <memory>
+#include <optional>
 
 #include <png.h>
 
@@ -20,18 +21,18 @@ class PngReader final : public ImageReader {
   static std::unique_ptr<ImageReader> Create(
       brillo::ErrorPtr* error,
       const ScanParameters& params,
-      const base::Optional<int>& resolution,
-      base::ScopedFILE out_file);
+      const std::optional<int>& resolution,
+      FILE* out_file);
   ~PngReader();
 
   bool ReadRow(brillo::ErrorPtr* error, uint8_t* data) override;
   bool Finalize(brillo::ErrorPtr* error) override;
 
  private:
-  PngReader(const ScanParameters& params, base::ScopedFILE out_file);
+  PngReader(const ScanParameters& params, FILE* out_file);
   bool ValidateParams(brillo::ErrorPtr* error) override;
   bool Initialize(brillo::ErrorPtr* error,
-                  const base::Optional<int>& resolution) override;
+                  const std::optional<int>& resolution) override;
 
   // Whether or not the PngReader is in a valid state.
   bool valid_ = false;

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,10 @@
 #include <memory>
 #include <utility>
 
-#include </usr/include/linux/magic.h>
 #include <fcntl.h>
 #include <libdevmapper.h>
 #include <linux/loop.h>
+#include <linux/magic.h>
 #include <mntent.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
@@ -32,6 +32,7 @@
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
+#include <brillo/files/file_util.h>
 
 #include "imageloader/component.h"
 #include "imageloader/verity_mounter_impl.h"
@@ -96,8 +97,10 @@ bool MapperGetEntry(const std::string& name,
   return true;
 }
 
-// Fetches the length of the device mapper table entries for the specified name.
-bool MapperTableLength(const std::string& name, uint64_t* length) {
+// TODO(b/172220337): Consolidate with libbrillo/blkdevutils.
+// Executes the equivalent of: dmsetup wipe_table <name>
+// Returns true on success.
+bool MapperWipeTable(const std::string& name) {
   auto task = dm_task_ptr(dm_task_create(DM_DEVICE_TABLE), &dm_task_destroy);
   struct dm_info info;
 
@@ -121,55 +124,43 @@ bool MapperTableLength(const std::string& name, uint64_t* length) {
     return false;
   }
 
-  *length = 0;
   void* next = nullptr;
   uint64_t start;
-  uint64_t length_part;
+  uint64_t length;
   char* type;
   char* parameters;
   do {
-    next = dm_get_next_target(task.get(), next, &start, &length_part, &type,
+    next = dm_get_next_target(task.get(), next, &start, &length, &type,
                               &parameters);
-    *length += length_part;
+    auto task = dm_task_ptr(dm_task_create(DM_DEVICE_RELOAD), &dm_task_destroy);
+
+    if (!task) {
+      LOG(ERROR) << "dm_task_create failed!";
+      return false;
+    }
+
+    if (!dm_task_set_name(task.get(), name.c_str())) {
+      LOG(ERROR) << "dm_task_set_name failed!";
+      return false;
+    }
+
+    if (!dm_task_add_target(task.get(), 0, length, type, parameters)) {
+      LOG(ERROR) << "dm_task_add_target failed!";
+      return false;
+    }
+
+    if (!dm_task_run(task.get())) {
+      LOG(ERROR) << "dm_task_run failed!";
+      return false;
+    }
   } while (next);
-  return true;
-}
 
-// Executes the equivalent of: dmsetup wipe_table <name>
-// Returns true on success.
-bool MapperWipeTable(const std::string& name) {
-  uint64_t length;
-  if (!MapperTableLength(name, &length)) {
-    return false;
-  }
-
-  auto task = dm_task_ptr(dm_task_create(DM_DEVICE_RELOAD), &dm_task_destroy);
-
-  if (!task) {
-    LOG(ERROR) << "dm_task_create failed!";
-    return false;
-  }
-
-  if (!dm_task_set_name(task.get(), name.c_str())) {
-    LOG(ERROR) << "dm_task_set_name failed!";
-    return false;
-  }
-
-  if (!dm_task_add_target(task.get(), 0, length, "error", "")) {
-    LOG(ERROR) << "dm_task_add_target failed!";
-    return false;
-  }
-
-  if (!dm_task_run(task.get())) {
-    LOG(ERROR) << "dm_task_run failed!";
-    return false;
-  }
   return true;
 }
 
 // Executes the equivalent of: dmsetup remove <name>
 // Returns true on success.
-bool MapperRemove(const std::string& name) {
+bool MapperRemove(const std::string& name, bool deferred = false) {
   auto task = dm_task_ptr(dm_task_create(DM_DEVICE_REMOVE), &dm_task_destroy);
 
   if (!task) {
@@ -179,6 +170,11 @@ bool MapperRemove(const std::string& name) {
 
   if (!dm_task_set_name(task.get(), name.c_str())) {
     LOG(ERROR) << "dm_task_set_name failed!";
+    return false;
+  }
+
+  if (deferred && !dm_task_deferred_remove(task.get())) {
+    LOG(ERROR) << "dm_task_deferred_remove failed!";
     return false;
   }
 
@@ -206,8 +202,8 @@ bool RunDMSetup(const std::vector<std::string>& argv) {
   }
 
   int exit_code;
-  if (!process.WaitForExitWithTimeout(
-          base::TimeDelta::FromSeconds(kDMSetupTimeoutSeconds), &exit_code)) {
+  if (!process.WaitForExitWithTimeout(base::Seconds(kDMSetupTimeoutSeconds),
+                                      &exit_code)) {
     LOG(ERROR) << "Failed to wait for dmsetup process.";
     return false;
   }
@@ -229,8 +225,11 @@ void ClearVerityDevice(const std::string& name) {
   // successful, this should release any devices held open by the device's
   // table(s).
   MapperWipeTable(name);
-  // Now remove the actual device.
-  MapperRemove(name);
+  // Now remove the actual device. Fall back to deferred remove if the device
+  // is (unlikely) busy: there is a possibility this can happen if udev is still
+  // processing rules associated with the device.
+  if (!MapperRemove(name))
+    MapperRemove(name, /*deferred=*/true);
 }
 
 // Clear the file descriptor behind a loop device.
@@ -490,6 +489,12 @@ bool Unmount(const base::FilePath& mount_point) {
   return umount(mount_point.value().c_str()) == 0;
 }
 
+bool LazyUnmount(const base::FilePath& mount_point) {
+  return umount2(mount_point.value().c_str(), MNT_DETACH | UMOUNT_NOFOLLOW) ==
+             0 ||
+         errno == EBUSY;
+}
+
 // Returns (mount point, source path) pairs visible to this process. The order
 // can be reversed to help with unmounting.
 std::vector<std::pair<std::string, std::string>> GetAllMountPaths(
@@ -534,20 +539,28 @@ bool CleanupImpl(const base::FilePath& mount_point,
 
   // Unmount the image.
   if (!Unmount(mount_point)) {
-    PLOG(ERROR) << "Unmount failed";
-    return false;
+    PLOG(ERROR) << "Unmount failed; attempting a lazy unmount";
+
+    if (!LazyUnmount(mount_point)) {
+      PLOG(ERROR) << "Lazy unmount failed";
+      return false;
+    }
   }
   // Delete mount target folder
-  base::DeletePathRecursively(mount_point);
+  brillo::DeletePathRecursively(mount_point);
 
   // Clear Verity device.
   if (!MapperWipeTable(source_path.value())) {
-    PLOG(ERROR) << "Device mapper wipe table failed";
-    return false;
+    PLOG(ERROR) << "Device mapper wipe table failed, "
+                   "still continuing to remove the device mapper";
+    // Do not return here, proceed to remove.
   }
   if (!MapperRemove(source_path.value())) {
-    PLOG(ERROR) << "Device mapper remove failed";
-    return false;
+    PLOG(ERROR) << "Device mapper remove failed; attempting a deferred removal";
+    if (!MapperRemove(source_path.value(), /*deferred=*/true)) {
+      PLOG(ERROR) << "Device mapper deferred remove failed.";
+      return false;
+    }
   }
 
   // Clear loop device.

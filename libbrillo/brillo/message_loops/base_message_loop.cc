@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,17 +19,17 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
+#include <base/message_loop/message_pump_type.h>
 #include <base/run_loop.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
-#include <base/message_loop/message_pump_type.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 #include <brillo/location_logging.h>
 #include <brillo/strings/string_utils.h>
@@ -47,7 +47,7 @@ const int BaseMessageLoop::kInvalidMinor = -1;
 const int BaseMessageLoop::kUninitializedMinor = -2;
 
 BaseMessageLoop::BaseMessageLoop() {
-  CHECK(!base::ThreadTaskRunnerHandle::IsSet())
+  CHECK(!base::SingleThreadTaskRunner::HasCurrentDefault())
       << "You can't create a base::SingleThreadTaskExecutor when another "
          "base::SingleThreadTaskExecutor is already created for this thread.";
   owned_task_executor_.reset(

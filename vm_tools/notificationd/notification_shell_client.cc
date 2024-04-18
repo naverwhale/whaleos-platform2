@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,14 +11,14 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <linux/virtwl.h>
 #include <wayland-client.h>
 #include <wayland-util.h>
@@ -102,13 +102,16 @@ void NotificationShellClient::NotificationClient::
 }
 
 NotificationShellClient::NotificationShellClient(
-    NotificationShellInterface* interface, base::Closure quit_closure)
+    NotificationShellInterface* interface, base::OnceClosure quit_closure)
     : interface_(interface), quit_closure_(std::move(quit_closure)) {}
 
 void NotificationShellClient::OnEventReadable() {
   if (wl_event_loop_dispatch(event_loop_.get(), 0) < 0) {
     PLOG(ERROR) << "Failed to dispatch event loop for wayland";
-    base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, quit_closure_);
+    if (quit_closure_) {
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, std::move(quit_closure_));
+    }
   }
 }
 
@@ -117,7 +120,7 @@ std::unique_ptr<NotificationShellClient> NotificationShellClient::Create(
     const std::string& display_name,
     const std::string& virtwl_device,
     NotificationShellInterface* interface,
-    base::Closure quit_closure) {
+    base::OnceClosure quit_closure) {
   auto client = base::WrapUnique(
       new NotificationShellClient(interface, std::move(quit_closure)));
 
@@ -302,12 +305,18 @@ void NotificationShellClient::HandleRegistry(wl_registry* registry,
 int NotificationShellClient::HandleEvent(uint32_t mask) {
   if (mask & WL_EVENT_HANGUP) {
     LOG(ERROR) << "Wayland connection hung up";
-    base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, quit_closure_);
+    if (quit_closure_) {
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, std::move(quit_closure_));
+    }
     return -1;
   }
   if (mask & WL_EVENT_ERROR) {
     LOG(ERROR) << "Wayland connection error occurred";
-    base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, quit_closure_);
+    if (quit_closure_) {
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, std::move(quit_closure_));
+    }
     return -1;
   }
 
@@ -339,7 +348,10 @@ void NotificationShellClient::HandleVirtwlCtxEvent() {
 
   if (ioctl(virtwl_ctx_fd_.get(), VIRTWL_IOCTL_RECV, ioctl_recv)) {
     LOG(ERROR) << "Failed to receive data from virtwl context";
-    base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, quit_closure_);
+    if (quit_closure_) {
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, std::move(quit_closure_));
+    }
   }
 
   iovec buffer_iov = {.iov_base = &ioctl_recv->data,

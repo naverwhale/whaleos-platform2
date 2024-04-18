@@ -1,20 +1,24 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/eap_credentials.h"
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include <base/functional/bind.h>
 #include <base/json/json_reader.h>
 #include <base/logging.h>
-#include <base/strings/string_piece.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_tokenizer.h>
 #include <base/strings/string_util.h>
+#include <base/strings/stringprintf.h>
 #include <base/values.h>
 
 #include <chromeos/dbus/service_constants.h>
@@ -23,13 +27,15 @@
 
 #include "shill/certificate_file.h"
 #include "shill/error.h"
-#include "shill/key_value_store.h"
 #include "shill/logging.h"
 #include "shill/metrics.h"
-#include "shill/property_accessor.h"
-#include "shill/property_store.h"
 #include "shill/service.h"
-#include "shill/store_interface.h"
+#include "shill/store/key_value_store.h"
+#include "shill/store/pkcs11_slot_getter.h"
+#include "shill/store/pkcs11_util.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/property_store.h"
+#include "shill/store/store_interface.h"
 #include "shill/supplicant/wpa_supplicant.h"
 
 namespace shill {
@@ -45,7 +51,7 @@ namespace {
 std::string AddAdditionalInnerEapParams(const std::string& inner_eap) {
   if (inner_eap.empty())
     return std::string();
-  std::vector<base::StringPiece> params = base::SplitStringPiece(
+  std::vector<std::string_view> params = base::SplitStringPiece(
       inner_eap, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
   bool has_mschapv2_auth = false;
   for (const auto& param : params) {
@@ -61,6 +67,20 @@ std::string AddAdditionalInnerEapParams(const std::string& inner_eap) {
   return inner_eap + " " + WPASupplicant::kFlagInnerEapNoMSCHAPV2Retry;
 }
 
+// Gets the PKCS#11 slot type of |pkcs11_id|. This is done by comparing the
+// slot ID part of |pkcs11_id| with the slot IDs taken from chaps through
+// |slot_getter|.
+pkcs11::Slot GetPkcs11Slot(const std::string& pkcs11_id,
+                           Pkcs11SlotGetter* slot_getter) {
+  std::optional<pkcs11::Pkcs11Id> parsed =
+      pkcs11::Pkcs11Id::ParseFromColonSeparated(pkcs11_id);
+  if (!parsed) {
+    LOG(ERROR) << "Invalid PKCS#11 ID " << pkcs11_id;
+    return pkcs11::Slot::kUnknown;
+  }
+  return slot_getter->GetSlotType(parsed->slot_id);
+}
+
 // Deprecated to migrate from ROT47 to plaintext.
 // TODO(crbug.com/1084279) Remove after migration is complete.
 const char kStorageDeprecatedEapAnonymousIdentity[] = "EAP.AnonymousIdentity";
@@ -71,9 +91,6 @@ const char kStorageDeprecatedEapPassword[] = "EAP.Password";
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kService;
-static std::string ObjectID(const EapCredentials* e) {
-  return "(eap_credentials)";
-}
 }  // namespace Logging
 
 const char EapCredentials::kStorageCredentialEapAnonymousIdentity[] =
@@ -92,6 +109,7 @@ const char EapCredentials::kStorageEapTLSVersionMax[] = "EAP.TLSVersionMax";
 const char EapCredentials::kStorageEapKeyID[] = "EAP.KeyID";
 const char EapCredentials::kStorageEapKeyManagement[] = "EAP.KeyMgmt";
 const char EapCredentials::kStorageEapPin[] = "EAP.PIN";
+const char EapCredentials::kStorageEapSlot[] = "EAP.Slot";
 const char EapCredentials::kStorageEapSubjectMatch[] = "EAP.SubjectMatch";
 const char EapCredentials::kStorageEapUseProactiveKeyCaching[] =
     "EAP.UseProactiveKeyCaching";
@@ -106,6 +124,7 @@ EapCredentials::EapCredentials()
     : use_system_cas_(true),
       use_proactive_key_caching_(false),
       use_login_password_(false),
+      slot_getter_(nullptr),
       password_provider_(
           std::make_unique<password_provider::PasswordProvider>()) {}
 
@@ -114,6 +133,13 @@ EapCredentials::~EapCredentials() = default;
 // static
 void EapCredentials::PopulateSupplicantProperties(
     CertificateFile* certificate_file, KeyValueStore* params) const {
+  if (eap_ == kEapMethodMSCHAPV2) {
+    // Plain MSCHAPv2 should only be used by IKEv2 VPN, and this path will not
+    // be called in that case.
+    LOG(ERROR) << "Plain MSCHAPv2 is not supported outside of IKEv2 VPN.";
+    return;
+  }
+
   std::string ca_cert;
   if (!ca_cert_pem_.empty()) {
     base::FilePath certfile =
@@ -142,7 +168,7 @@ void EapCredentials::PopulateSupplicantProperties(
       KeyVal(WPASupplicant::kNetworkPropertyEapSubjectMatch,
              subject_match_.c_str()),
   };
-  base::Optional<std::string> altsubject_match =
+  std::optional<std::string> altsubject_match =
       TranslateSubjectAlternativeNameMatch(
           subject_alternative_name_match_list_);
   if (altsubject_match.has_value()) {
@@ -150,7 +176,7 @@ void EapCredentials::PopulateSupplicantProperties(
         KeyVal(WPASupplicant::kNetworkPropertyEapSubjectAlternativeNameMatch,
                altsubject_match.value().c_str()));
   }
-  base::Optional<std::string> domain_suffix_match =
+  std::optional<std::string> domain_suffix_match =
       TranslateDomainSuffixMatch(domain_suffix_match_list_);
   if (domain_suffix_match.has_value()) {
     propertyvals.push_back(
@@ -258,7 +284,7 @@ void EapCredentials::InitPropertyStore(PropertyStore* store) {
 }
 
 // static
-bool EapCredentials::IsEapAuthenticationProperty(const std::string property) {
+bool EapCredentials::IsEapAuthenticationProperty(std::string_view property) {
   return property == kEapAnonymousIdentityProperty ||
          property == kEapCertIdProperty || property == kEapIdentityProperty ||
          property == kEapKeyIdProperty || property == kEapKeyMgmtProperty ||
@@ -269,22 +295,21 @@ bool EapCredentials::IsEapAuthenticationProperty(const std::string property) {
 bool EapCredentials::IsConnectable() const {
   // Identity is required.
   if (identity_.empty()) {
-    SLOG(this, 2) << "Not connectable: Identity is empty.";
+    SLOG(2) << "Not connectable: Identity is empty.";
     return false;
   }
 
   if (!cert_id_.empty()) {
     // If a client certificate is being used, we must have a private key.
     if (key_id_.empty()) {
-      SLOG(this, 2)
-          << "Not connectable: Client certificate but no private key.";
+      SLOG(2) << "Not connectable: Client certificate but no private key.";
       return false;
     }
   }
   if (!cert_id_.empty() || !key_id_.empty() || !ca_cert_id_.empty()) {
     // If PKCS#11 data is needed, a PIN is required.
     if (pin_.empty()) {
-      SLOG(this, 2) << "Not connectable: PKCS#11 data but no PIN.";
+      SLOG(2) << "Not connectable: PKCS#11 data but no PIN.";
       return false;
     }
   }
@@ -292,7 +317,7 @@ bool EapCredentials::IsConnectable() const {
   // For EAP-TLS, a client certificate is required.
   if (eap_.empty() || eap_ == kEapMethodTLS) {
     if (!cert_id_.empty() && !key_id_.empty()) {
-      SLOG(this, 2) << "Connectable: EAP-TLS with a client cert and key.";
+      SLOG(2) << "Connectable: EAP-TLS with a client cert and key.";
       return true;
     }
   }
@@ -301,12 +326,12 @@ bool EapCredentials::IsConnectable() const {
   // minimum requirement), at least an identity + password is required.
   if (eap_.empty() || eap_ != kEapMethodTLS) {
     if (!password_.empty()) {
-      SLOG(this, 2) << "Connectable. !EAP-TLS and has a password.";
+      SLOG(2) << "Connectable. !EAP-TLS and has a password.";
       return true;
     }
   }
 
-  SLOG(this, 2) << "Not connectable: No suitable EAP configuration was found.";
+  SLOG(2) << "Not connectable: No suitable EAP configuration was found.";
   return false;
 }
 
@@ -346,6 +371,88 @@ void EapCredentials::Load(const StoreInterface* storage,
   storage->GetBool(id, kStorageEapUseProactiveKeyCaching,
                    &use_proactive_key_caching_);
   storage->GetBool(id, kStorageEapUseSystemCAs, &use_system_cas_);
+
+  // Fix possible slot ID instability. If the slot type is unknown, no need to
+  // replace the slot ID.
+  pkcs11::Slot slot;
+  storage->GetInt(id, kStorageEapSlot, reinterpret_cast<int*>(&slot));
+  if (slot == pkcs11::kUnknown || slot_getter_ == nullptr) {
+    return;
+  }
+  slot_getter_->GetPkcs11SlotIdWithRetries(
+      slot, base::BindOnce(&EapCredentials::ReplacePkcs11SlotIds,
+                           weak_factory_.GetWeakPtr()));
+}
+
+void EapCredentials::Load(const KeyValueStore& store) {
+  ca_cert_id_ = store.Lookup<std::string>(kEapCaCertIdProperty, std::string());
+  ca_cert_pem_ = store.Lookup<Strings>(kEapCaCertPemProperty, Strings());
+  eap_ = store.Lookup<std::string>(kEapMethodProperty, std::string());
+  inner_eap_ = store.Lookup<std::string>(kEapPhase2AuthProperty, std::string());
+  tls_version_max_ =
+      store.Lookup<std::string>(kEapTLSVersionMaxProperty, std::string());
+  subject_match_ =
+      store.Lookup<std::string>(kEapSubjectMatchProperty, std::string());
+  subject_alternative_name_match_list_ =
+      store.Lookup<Strings>(kEapSubjectAlternativeNameMatchProperty, Strings());
+  domain_suffix_match_list_ =
+      store.Lookup<Strings>(kEapDomainSuffixMatchProperty, Strings());
+  use_proactive_key_caching_ =
+      store.Lookup<bool>(kEapUseProactiveKeyCachingProperty, false);
+  use_system_cas_ = store.Lookup<bool>(kEapUseSystemCasProperty, true);
+  anonymous_identity_ =
+      store.Lookup<std::string>(kEapAnonymousIdentityProperty, std::string());
+  identity_ = store.Lookup<std::string>(kEapIdentityProperty, std::string());
+  password_ = store.Lookup<std::string>(kEapPasswordProperty, std::string());
+  use_login_password_ = store.Lookup<bool>(kEapUseLoginPasswordProperty, false);
+  cert_id_ = store.Lookup<std::string>(kEapCertIdProperty, std::string());
+  key_id_ = store.Lookup<std::string>(kEapKeyIdProperty, std::string());
+  SetKeyManagement(
+      store.Lookup<std::string>(kEapKeyMgmtProperty, std::string()), nullptr);
+  pin_ = store.Lookup<std::string>(kEapPinProperty, std::string());
+}
+
+void EapCredentials::Load(const EapCredentials& eap) {
+  ca_cert_id_ = eap.ca_cert_id_;
+  ca_cert_pem_ = eap.ca_cert_pem_;
+  eap_ = eap.eap_;
+  inner_eap_ = eap.inner_eap_;
+  tls_version_max_ = eap.tls_version_max_;
+  subject_match_ = eap.subject_match_;
+  subject_alternative_name_match_list_ =
+      eap.subject_alternative_name_match_list_;
+  domain_suffix_match_list_ = eap.domain_suffix_match_list_;
+  use_proactive_key_caching_ = eap.use_proactive_key_caching_;
+  use_system_cas_ = eap.use_system_cas_;
+  anonymous_identity_ = eap.anonymous_identity_;
+  identity_ = eap.identity_;
+  password_ = eap.password_;
+  use_login_password_ = eap.use_login_password_;
+  cert_id_ = eap.cert_id_;
+  key_id_ = eap.key_id_;
+  SetKeyManagement(eap.key_management_, nullptr);
+  pin_ = eap.pin_;
+}
+
+void EapCredentials::ReplacePkcs11SlotIds(CK_SLOT_ID slot_id) {
+  if (slot_id == pkcs11::kInvalidSlot) {
+    return;
+  }
+  if (cert_id_ != key_id_) {
+    LOG(ERROR) << "PKCS#11 IDs of the certificate and key are not equal";
+    return;
+  }
+
+  std::optional<pkcs11::Pkcs11Id> pkcs11_id =
+      pkcs11::Pkcs11Id::ParseFromColonSeparated(cert_id_);
+  if (!pkcs11_id) {
+    LOG(ERROR) << "Invalid PKCS#11 ID " << cert_id_;
+    return;
+  }
+  pkcs11_id->slot_id = slot_id;
+
+  cert_id_ = pkcs11_id->ToColonSeparated();
+  key_id_ = cert_id_;
 }
 
 void EapCredentials::MigrateDeprecatedStorage(StoreInterface* storage,
@@ -367,26 +474,34 @@ void EapCredentials::MigrateDeprecatedStorage(StoreInterface* storage,
   }
 }
 
+void EapCredentials::SetEapSlotGetter(Pkcs11SlotGetter* slot_getter) {
+  slot_getter_ = slot_getter;
+}
+
 void EapCredentials::OutputConnectionMetrics(Metrics* metrics,
                                              Technology technology) const {
   Metrics::EapOuterProtocol outer_protocol =
       Metrics::EapOuterProtocolStringToEnum(eap_);
-  metrics->SendEnumToUMA(
-      metrics->GetFullMetricName(Metrics::kMetricNetworkEapOuterProtocolSuffix,
-                                 technology),
-      outer_protocol, Metrics::kMetricNetworkEapOuterProtocolMax);
+  metrics->SendEnumToUMA(Metrics::kMetricNetworkEapOuterProtocol, technology,
+                         outer_protocol);
 
   Metrics::EapInnerProtocol inner_protocol =
       Metrics::EapInnerProtocolStringToEnum(inner_eap_);
-  metrics->SendEnumToUMA(
-      metrics->GetFullMetricName(Metrics::kMetricNetworkEapInnerProtocolSuffix,
-                                 technology),
-      inner_protocol, Metrics::kMetricNetworkEapInnerProtocolMax);
+  metrics->SendEnumToUMA(Metrics::kMetricNetworkEapInnerProtocol, technology,
+                         inner_protocol);
 }
 
 void EapCredentials::Save(StoreInterface* storage,
                           const std::string& id,
                           bool save_credentials) const {
+  // Fix possible slot ID instability. Only try to get the PKCS#11 slot ID
+  // synchronously as the profile might be removed soon after this call.
+  if (!cert_id_.empty() && slot_getter_ != nullptr && save_credentials) {
+    storage->SetInt(id, kStorageEapSlot, GetPkcs11Slot(cert_id_, slot_getter_));
+  } else {
+    storage->DeleteKey(id, kStorageEapSlot);
+  }
+
   // Authentication properties.
   Service::SaveStringOrClear(storage, id,
                              kStorageCredentialEapAnonymousIdentity,
@@ -448,6 +563,8 @@ void EapCredentials::Reset() {
   subject_alternative_name_match_list_.clear();
   use_system_cas_ = true;
   use_proactive_key_caching_ = false;
+
+  slot_getter_ = nullptr;
 }
 
 bool EapCredentials::SetEapPassword(const std::string& password,
@@ -489,7 +606,7 @@ bool EapCredentials::ClientAuthenticationUsesCryptoToken() const {
 
 void EapCredentials::HelpRegisterDerivedString(
     PropertyStore* store,
-    const std::string& name,
+    std::string_view name,
     std::string (EapCredentials::*get)(Error* error),
     bool (EapCredentials::*set)(const std::string&, Error*)) {
   store->RegisterDerivedString(
@@ -499,7 +616,7 @@ void EapCredentials::HelpRegisterDerivedString(
 
 void EapCredentials::HelpRegisterWriteOnlyDerivedString(
     PropertyStore* store,
-    const std::string& name,
+    std::string_view name,
     bool (EapCredentials::*set)(const std::string&, Error*),
     void (EapCredentials::*clear)(Error* error),
     const std::string* default_value) {
@@ -523,12 +640,12 @@ bool EapCredentials::ValidDomainSuffixMatch(
   if (domain_suffix_match.empty() || domain_suffix_match.size() > 255)
     return false;
 
-  std::vector<base::StringPiece> labels = base::SplitStringPiece(
+  std::vector<std::string_view> labels = base::SplitStringPiece(
       domain_suffix_match, ".", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
 
   DCHECK(!labels.empty());
 
-  for (const base::StringPiece& label : labels) {
+  for (std::string_view label : labels) {
     if (label.size() == 0 || label.size() > 63)
       return false;
     // Labels can't start and end with hyphens.
@@ -553,10 +670,10 @@ bool EapCredentials::ValidDomainSuffixMatch(
 }
 
 // static
-base::Optional<std::string> EapCredentials::TranslateDomainSuffixMatch(
+std::optional<std::string> EapCredentials::TranslateDomainSuffixMatch(
     const std::vector<std::string>& domain_suffix_match_list) {
   if (domain_suffix_match_list.empty())
-    return base::nullopt;
+    return std::nullopt;
   std::vector<std::string> filtered_domains;
   for (const std::string& domain : domain_suffix_match_list) {
     if (ValidDomainSuffixMatch(domain)) {
@@ -568,14 +685,13 @@ base::Optional<std::string> EapCredentials::TranslateDomainSuffixMatch(
     }
   }
   if (filtered_domains.empty())
-    return base::nullopt;
+    return std::nullopt;
 
   return base::JoinString(filtered_domains, ";");
 }
 
 // static
-base::Optional<std::string>
-EapCredentials::TranslateSubjectAlternativeNameMatch(
+std::optional<std::string> EapCredentials::TranslateSubjectAlternativeNameMatch(
     const std::vector<std::string>& subject_alternative_name_match_list) {
   std::vector<std::string> entries;
   for (const auto& subject_alternative_name_match :
@@ -583,34 +699,34 @@ EapCredentials::TranslateSubjectAlternativeNameMatch(
     auto json_value = base::JSONReader::ReadAndReturnValueWithError(
         subject_alternative_name_match, base::JSON_PARSE_RFC);
 
-    if (!json_value.value || !json_value.value->is_dict()) {
+    if (!json_value.has_value() || !json_value->is_dict()) {
       LOG(ERROR)
           << "Could not deserialize a subject alternative name match. Error: "
-          << json_value.error_message;
-      return base::nullopt;
+          << json_value.error().message;
+      return std::nullopt;
     }
-    base::Value deserialized_value = std::move(*json_value.value);
+    base::Value::Dict deserialized_value = std::move(json_value->GetDict());
 
-    const std::string* type = deserialized_value.FindStringKey(
+    const std::string* type = deserialized_value.FindString(
         kEapSubjectAlternativeNameMatchTypeProperty);
     if (!type) {
       LOG(ERROR) << "Could not find "
                  << kEapSubjectAlternativeNameMatchTypeProperty
                  << " of a subject alternative name match.";
-      return base::nullopt;
+      return std::nullopt;
     }
     if (!ValidSubjectAlternativeNameMatchType(*type)) {
       LOG(ERROR) << "Subject alternative name match type: \"" << *type
                  << "\" is not supported.";
-      return base::nullopt;
+      return std::nullopt;
     }
-    const std::string* value = deserialized_value.FindStringKey(
+    const std::string* value = deserialized_value.FindString(
         kEapSubjectAlternativeNameMatchValueProperty);
     if (!value) {
       LOG(ERROR) << "Could not find "
                  << kEapSubjectAlternativeNameMatchValueProperty
                  << " of a subject alternative name match.";
-      return base::nullopt;
+      return std::nullopt;
     }
     std::string translated_entry = *type + ":" + *value;
     entries.push_back(translated_entry);

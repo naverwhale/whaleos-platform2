@@ -1,9 +1,8 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/notreached.h>
 
 #include <libmems/common_types.h>
@@ -24,6 +23,10 @@ constexpr char kMagnDeviceName[] = "cros-ec-mag";
 constexpr char kLidAngleDeviceName[] = "cros-ec-lid-angle";
 constexpr char kBaroDeviceName[] = "cros-ec-baro";
 
+constexpr char kProxDeviceNames[][23] = {
+    "cros-ec-activity", "cros-ec-prox", "sx9310", "sx9311",
+    "sx9324",           "sx932x",       "sx9360", "cros-ec-mkbp-proximity"};
+
 constexpr char kHidDeviceNames[][13] = {
     "accel_3d",    "gyro_3d",  "magn_3d",     "als",
     "temperature", "incli_3d", "dev_rotation"};
@@ -43,6 +46,8 @@ std::string SensorKindToString(SensorKind kind) {
       return libmems::kMagnName;
     case SensorKind::LID_ANGLE:
       return libmems::kLidAngleName;
+    case SensorKind::PROXIMITY:
+      return libmems::kProxName;
     case SensorKind::BAROMETER:
       return libmems::kBaroName;
     case SensorKind::HID_OTHERS:
@@ -68,6 +73,11 @@ SensorKind SensorKindFromString(const std::string& name) {
     return SensorKind::LID_ANGLE;
   if (name == kBaroDeviceName)
     return SensorKind::BAROMETER;
+
+  for (const auto& prox_device_name : kProxDeviceNames) {
+    if (name.compare(prox_device_name) == 0)
+      return SensorKind::PROXIMITY;
+  }
 
   for (const auto& hid_device_name : kHidDeviceNames) {
     if (name.compare(hid_device_name) == 0)

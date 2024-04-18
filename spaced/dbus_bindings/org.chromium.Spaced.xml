@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
-  Copyright 2020 The Chromium OS Authors. All rights reserved.
+  Copyright 2020 The ChromiumOS Authors
   Use of this source code is governed by a BSD-style license that can be
   found in the LICENSE file.
 -->
-<node name="/org/chromium/Spaced">
+<node name="/org/chromium/Spaced"
+  xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
   <interface name="org.chromium.Spaced">
     <method name="GetFreeDiskSpace">
       <tp:docstring>
@@ -27,6 +28,76 @@
         Get the size of the root storage device.
       </tp:docstring>
       <arg name="reply" type="x" direction="out"/>
+      <annotation name="org.chromium.DBus.Method.Kind" value="simple"/>
+    </method>
+    <signal name="StatefulDiskSpaceUpdate">
+      <arg name="status" type="ay" direction="out">
+      <tp:docstring>
+        A serialized protobuf (StatefulDiskSpaceUpdate,
+        platform2/system_api/dbus/spaced/spaced.proto).
+      </tp:docstring>
+      <annotation name="org.chromium.DBus.Argument.ProtobufClass"
+                  value="spaced::StatefulDiskSpaceUpdate"/>
+      </arg>
+    </signal>
+
+    <method name="IsQuotaSupported">
+      <tp:docstring>
+        Returns whether the given path is mounted with quota option enabled.
+      </tp:docstring>
+      <arg name="path" type="s" direction="in"/>
+      <arg name="reply" type="b" direction="out"/>
+      <annotation name="org.chromium.DBus.Method.Kind" value="simple"/>
+    </method>
+    <method name="GetQuotaCurrentSpaceForUid">
+      <tp:docstring>
+        Returns the disk space currently used by the given UID.
+      </tp:docstring>
+      <arg name="path" type="s" direction="in"/>
+      <arg name="uid" type="u" direction="in"/>
+      <arg name="reply" type="x" direction="out"/>
+      <annotation name="org.chromium.DBus.Method.Kind" value="simple"/>
+    </method>
+    <method name="GetQuotaCurrentSpaceForGid">
+      <tp:docstring>
+        Returns the disk space currently used by the given GID.
+      </tp:docstring>
+      <arg name="path" type="s" direction="in"/>
+      <arg name="gid" type="u" direction="in"/>
+      <arg name="reply" type="x" direction="out"/>
+      <annotation name="org.chromium.DBus.Method.Kind" value="simple"/>
+    </method>
+    <method name="GetQuotaCurrentSpaceForProjectId">
+      <tp:docstring>
+        Returns the disk space currently used by the given project ID.
+      </tp:docstring>
+      <arg name="path" type="s" direction="in"/>
+      <arg name="project_id" type="u" direction="in"/>
+      <arg name="reply" type="x" direction="out"/>
+      <annotation name="org.chromium.DBus.Method.Kind" value="simple"/>
+    </method>
+    <method name="SetProjectId">
+      <tp:docstring>
+        Sets the project ID to the given file.
+      </tp:docstring>
+      <arg name="fd" type="h" direction="in"/>
+      <arg name="project_id" type="u" direction="in"/>
+      <arg name="reply" type="ay" direction="out">
+        <annotation name="org.chromium.DBus.Argument.ProtobufClass"
+                    value="spaced::SetProjectIdReply" />
+      </arg>
+      <annotation name="org.chromium.DBus.Method.Kind" value="simple"/>
+    </method>
+    <method name="SetProjectInheritanceFlag">
+      <tp:docstring>
+        Sets the project inheritance flag to the given file.
+      </tp:docstring>
+      <arg name="fd" type="h" direction="in"/>
+      <arg name="enable" type="b" direction="in"/>
+      <arg name="reply" type="ay" direction="out">
+        <annotation name="org.chromium.DBus.Argument.ProtobufClass"
+                    value="spaced::SetProjectInheritanceFlagReply" />
+      </arg>
       <annotation name="org.chromium.DBus.Method.Kind" value="simple"/>
     </method>
   </interface>

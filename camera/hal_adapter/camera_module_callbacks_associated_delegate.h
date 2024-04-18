@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -16,8 +16,13 @@ namespace cros {
 class CameraModuleCallbacksAssociatedDelegate
     : public internal::MojoAssociatedRemote<mojom::CameraModuleCallbacks> {
  public:
-  CameraModuleCallbacksAssociatedDelegate(
+  explicit CameraModuleCallbacksAssociatedDelegate(
       scoped_refptr<base::SingleThreadTaskRunner> task_runner);
+
+  CameraModuleCallbacksAssociatedDelegate(
+      const CameraModuleCallbacksAssociatedDelegate&) = delete;
+  CameraModuleCallbacksAssociatedDelegate& operator=(
+      const CameraModuleCallbacksAssociatedDelegate&) = delete;
 
   ~CameraModuleCallbacksAssociatedDelegate() = default;
 
@@ -28,15 +33,13 @@ class CameraModuleCallbacksAssociatedDelegate
  private:
   void CameraDeviceStatusChangeOnThread(int camera_id,
                                         int new_status,
-                                        base::Closure callback);
+                                        base::OnceClosure callback);
 
   void TorchModeStatusChangeOnThread(int camera_id,
                                      int new_status,
-                                     base::Closure callback);
+                                     base::OnceClosure callback);
 
   cros::CancellationRelay relay_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(CameraModuleCallbacksAssociatedDelegate);
 };
 
 }  // namespace cros

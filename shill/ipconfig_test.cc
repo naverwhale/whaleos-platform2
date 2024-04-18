@@ -1,64 +1,34 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ipconfig.h"
 
-#include <sys/time.h>
 #include <vector>
 
-#include <base/bind.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <net-base/ip_address.h>
+#include <net-base/ipv4_address.h>
 
-#include "shill/logging.h"
 #include "shill/mock_adaptors.h"
 #include "shill/mock_control.h"
-#include "shill/mock_log.h"
-#include "shill/net/mock_time.h"
-#include "shill/static_ip_parameters.h"
 
 using testing::_;
-using testing::DoAll;
-using testing::EndsWith;
 using testing::Mock;
 using testing::Return;
-using testing::SetArgPointee;
 using testing::Test;
 
 namespace shill {
 
 namespace {
 const char kDeviceName[] = "testdevice";
-const uint32_t kTimeNow = 10;
 }  // namespace
 
 class IPConfigTest : public Test {
  public:
-  IPConfigTest() : ipconfig_(new IPConfig(&control_, kDeviceName)) {
-    ipconfig_->time_ = &time_;
-  }
-
-  void SetUp() override {
-    ScopeLogger::GetInstance()->EnableScopesByName("inet");
-    ScopeLogger::GetInstance()->set_verbose_level(3);
-  }
-
-  void TearDown() override {
-    ScopeLogger::GetInstance()->EnableScopesByName("-inet");
-    ScopeLogger::GetInstance()->set_verbose_level(0);
-  }
-
-  void DropRef(const IPConfigRefPtr& /*ipconfig*/,
-               bool /*new_lease_acquired*/) {
-    ipconfig_ = nullptr;
-  }
-
-  MOCK_METHOD(void, OnIPConfigUpdated, (const IPConfigRefPtr&, bool));
-  MOCK_METHOD(void, OnIPConfigFailed, (const IPConfigRefPtr&));
-  MOCK_METHOD(void, OnIPConfigRefreshed, (const IPConfigRefPtr&));
-  MOCK_METHOD(void, OnIPConfigExpired, (const IPConfigRefPtr&));
+  IPConfigTest() : ipconfig_(new IPConfig(&control_, kDeviceName)) {}
 
  protected:
   IPConfigMockAdaptor* GetAdaptor() {
@@ -66,12 +36,8 @@ class IPConfigTest : public Test {
   }
 
   void UpdateProperties(const IPConfig::Properties& properties) {
-    ipconfig_->UpdateProperties(properties, true);
+    ipconfig_->UpdateProperties(properties);
   }
-
-  void NotifyFailure() { ipconfig_->NotifyFailure(); }
-
-  void NotifyExpiry() { ipconfig_->NotifyExpiry(); }
 
   void ExpectPropertiesEqual(const IPConfig::Properties& properties) {
     EXPECT_EQ(properties.address, ipconfig_->properties().address);
@@ -103,42 +69,11 @@ class IPConfigTest : public Test {
   }
 
   MockControl control_;
-  MockTime time_;
-  IPConfigRefPtr ipconfig_;
+  std::unique_ptr<IPConfig> ipconfig_;
 };
 
 TEST_F(IPConfigTest, DeviceName) {
   EXPECT_EQ(kDeviceName, ipconfig_->device_name());
-}
-
-TEST_F(IPConfigTest, RequestIP) {
-  EXPECT_FALSE(ipconfig_->RequestIP());
-}
-
-TEST_F(IPConfigTest, RenewIP) {
-  EXPECT_FALSE(ipconfig_->RenewIP());
-}
-
-TEST_F(IPConfigTest, ReleaseIP) {
-  EXPECT_FALSE(ipconfig_->ReleaseIP(IPConfig::kReleaseReasonDisconnect));
-}
-
-TEST_F(IPConfigTest, SetBlackholedUids) {
-  std::vector<uint32_t> uids = {1000, 216};
-  std::vector<uint32_t> empty_uids = {};
-  // SetBlackholedUids returns true if the value changes
-  EXPECT_TRUE(ipconfig_->SetBlackholedUids(uids));
-  EXPECT_EQ(uids, ipconfig_->properties().blackholed_uids);
-
-  // SetBlackholeBrowserTraffic returns false if the value does not change
-  EXPECT_FALSE(ipconfig_->SetBlackholedUids(uids));
-  EXPECT_EQ(uids, ipconfig_->properties().blackholed_uids);
-
-  EXPECT_TRUE(ipconfig_->ClearBlackholedUids());
-  EXPECT_EQ(empty_uids, ipconfig_->properties().blackholed_uids);
-
-  EXPECT_FALSE(ipconfig_->ClearBlackholedUids());
-  EXPECT_EQ(empty_uids, ipconfig_->properties().blackholed_uids);
 }
 
 TEST_F(IPConfigTest, UpdateProperties) {
@@ -155,78 +90,17 @@ TEST_F(IPConfigTest, UpdateProperties) {
   UpdateProperties(properties);
   ExpectPropertiesEqual(properties);
 
-  // We should not reset on NotifyFailure.
-  NotifyFailure();
-  ExpectPropertiesEqual(properties);
-
-  // We should not reset on NotifyExpiry.
-  NotifyExpiry();
-  ExpectPropertiesEqual(properties);
-
   // We should reset if ResetProperties is called.
   ipconfig_->ResetProperties();
   ExpectPropertiesEqual(IPConfig::Properties());
 }
 
-TEST_F(IPConfigTest, Callbacks) {
-  ipconfig_->RegisterUpdateCallback(
-      base::Bind(&IPConfigTest::OnIPConfigUpdated, base::Unretained(this)));
-  ipconfig_->RegisterFailureCallback(
-      base::Bind(&IPConfigTest::OnIPConfigFailed, base::Unretained(this)));
-  ipconfig_->RegisterRefreshCallback(
-      base::Bind(&IPConfigTest::OnIPConfigRefreshed, base::Unretained(this)));
-  ipconfig_->RegisterExpireCallback(
-      base::Bind(&IPConfigTest::OnIPConfigExpired, base::Unretained(this)));
-
-  EXPECT_CALL(*this, OnIPConfigUpdated(ipconfig_, true));
-  EXPECT_CALL(*this, OnIPConfigFailed(ipconfig_)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigRefreshed(ipconfig_)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigExpired(ipconfig_)).Times(0);
-  UpdateProperties(IPConfig::Properties());
-  Mock::VerifyAndClearExpectations(this);
-
-  EXPECT_CALL(*this, OnIPConfigUpdated(ipconfig_, true)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigFailed(ipconfig_));
-  EXPECT_CALL(*this, OnIPConfigRefreshed(ipconfig_)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigExpired(ipconfig_)).Times(0);
-  NotifyFailure();
-  Mock::VerifyAndClearExpectations(this);
-
-  EXPECT_CALL(*this, OnIPConfigUpdated(ipconfig_, true)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigFailed(ipconfig_)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigRefreshed(ipconfig_));
-  EXPECT_CALL(*this, OnIPConfigExpired(ipconfig_)).Times(0);
-  ipconfig_->Refresh();
-  Mock::VerifyAndClearExpectations(this);
-
-  EXPECT_CALL(*this, OnIPConfigUpdated(ipconfig_, true)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigFailed(ipconfig_)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigRefreshed(ipconfig_)).Times(0);
-  EXPECT_CALL(*this, OnIPConfigExpired(ipconfig_));
-  NotifyExpiry();
-  Mock::VerifyAndClearExpectations(this);
-}
-
-TEST_F(IPConfigTest, UpdatePropertiesWithDropRef) {
-  // The UpdateCallback should be able to drop a reference to the
-  // IPConfig object without crashing.
-  ipconfig_->RegisterUpdateCallback(
-      base::Bind(&IPConfigTest::DropRef, base::Unretained(this)));
-  UpdateProperties(IPConfig::Properties());
-}
-
 TEST_F(IPConfigTest, PropertyChanges) {
   IPConfigMockAdaptor* adaptor = GetAdaptor();
 
-  StaticIPParameters static_ip_params;
   EXPECT_CALL(*adaptor, EmitStringChanged(kAddressProperty, _));
   EXPECT_CALL(*adaptor, EmitStringsChanged(kNameServersProperty, _));
-  ipconfig_->ApplyStaticIPParameters(&static_ip_params);
-  Mock::VerifyAndClearExpectations(adaptor);
-
-  EXPECT_CALL(*adaptor, EmitStringChanged(kAddressProperty, _));
-  EXPECT_CALL(*adaptor, EmitStringsChanged(kNameServersProperty, _));
-  ipconfig_->RestoreSavedIPParameters(&static_ip_params);
+  ipconfig_->ApplyNetworkConfig({});
   Mock::VerifyAndClearExpectations(adaptor);
 
   IPConfig::Properties ip_properties;
@@ -235,73 +109,149 @@ TEST_F(IPConfigTest, PropertyChanges) {
   UpdateProperties(ip_properties);
   Mock::VerifyAndClearExpectations(adaptor);
 
-  // It is the callback's responsibility for resetting the IPConfig
-  // properties (via IPConfig::ResetProperties()).  Since NotifyFailure
-  // by itself doesn't change any properties, it should not emit any
-  // property change events either.
-  EXPECT_CALL(*adaptor, EmitStringChanged(_, _)).Times(0);
-  EXPECT_CALL(*adaptor, EmitStringsChanged(_, _)).Times(0);
-  NotifyFailure();
-  Mock::VerifyAndClearExpectations(adaptor);
-
-  // Similarly, NotifyExpiry() should have no property change side effects.
-  EXPECT_CALL(*adaptor, EmitStringChanged(_, _)).Times(0);
-  EXPECT_CALL(*adaptor, EmitStringsChanged(_, _)).Times(0);
-  NotifyExpiry();
-  Mock::VerifyAndClearExpectations(adaptor);
-
   EXPECT_CALL(*adaptor, EmitStringChanged(kAddressProperty, _));
   EXPECT_CALL(*adaptor, EmitStringsChanged(kNameServersProperty, _));
   ipconfig_->ResetProperties();
   Mock::VerifyAndClearExpectations(adaptor);
 }
 
-TEST_F(IPConfigTest, UpdateLeaseExpirationTime) {
-  const struct timeval expected_time_now = {kTimeNow, 0};
-  uint32_t lease_duration = 1;
-  EXPECT_CALL(time_, GetTimeBoottime(_))
-      .WillOnce(DoAll(SetArgPointee<0>(expected_time_now), Return(0)));
-  ipconfig_->UpdateLeaseExpirationTime(lease_duration);
-  EXPECT_EQ(kTimeNow + lease_duration,
-            ipconfig_->current_lease_expiration_time_.tv_sec);
+TEST(IPPropertiesTest, ToNetworkConfigDNS) {
+  IPConfig::Properties ipv4_properties;
+  ipv4_properties.dns_servers = {"8.8.8.8"};
+  ipv4_properties.domain_search = {"domain1"};
+
+  auto network_config =
+      IPConfig::Properties::ToNetworkConfig(&ipv4_properties, nullptr);
+  EXPECT_EQ(
+      std::vector<net_base::IPAddress>{
+          *net_base::IPAddress::CreateFromString("8.8.8.8")},
+      network_config.dns_servers);
+  EXPECT_EQ(std::vector<std::string>{"domain1"},
+            network_config.dns_search_domains);
 }
 
-TEST_F(IPConfigTest, TimeToLeaseExpiry_NoDHCPLease) {
-  ScopedMockLog log;
-  uint32_t time_left = 0;
-  // |current_lease_expiration_time_| has not been set, so expect an error.
-  EXPECT_CALL(log, Log(_, _, EndsWith("No current DHCP lease")));
-  EXPECT_FALSE(ipconfig_->TimeToLeaseExpiry(&time_left));
-  EXPECT_EQ(0, time_left);
+TEST(IPPropertiesTest, ToNetworkConfigDNSWithDomain) {
+  IPConfig::Properties ipv4_properties;
+  ipv4_properties.dns_servers = {"8.8.8.8"};
+  const std::string kDomainName("chromium.org");
+  ipv4_properties.domain_name = kDomainName;
+
+  std::vector<std::string> expected_domain_search_list = {kDomainName + "."};
+  auto network_config =
+      IPConfig::Properties::ToNetworkConfig(&ipv4_properties, nullptr);
+  EXPECT_EQ(expected_domain_search_list, network_config.dns_search_domains);
 }
 
-TEST_F(IPConfigTest, TimeToLeaseExpiry_CurrentLeaseExpired) {
-  ScopedMockLog log;
-  const struct timeval time_now = {kTimeNow, 0};
-  uint32_t time_left = 0;
-  // Set |current_lease_expiration_time_| so it is expired (i.e. earlier than
-  // current time).
-  ipconfig_->current_lease_expiration_time_ = {kTimeNow - 1, 0};
-  EXPECT_CALL(time_, GetTimeBoottime(_))
-      .WillOnce(DoAll(SetArgPointee<0>(time_now), Return(0)));
-  EXPECT_CALL(log,
-              Log(_, _, EndsWith("Current DHCP lease has already expired")));
-  EXPECT_FALSE(ipconfig_->TimeToLeaseExpiry(&time_left));
-  EXPECT_EQ(0, time_left);
+TEST(IPPropertiesTest, ToNetworkConfigDNSDualStack) {
+  IPConfig::Properties ipv4_properties;
+  ipv4_properties.dns_servers = {"8.8.8.8"};
+  ipv4_properties.domain_search = {"domain1", "domain2"};
+  IPConfig::Properties ipv6_properties;
+  ipv6_properties.dns_servers = {"2001:4860:4860:0:0:0:0:8888"};
+  ipv6_properties.domain_search = {"domain3", "domain4"};
+
+  std::vector<net_base::IPAddress> expected_dns = {
+      *net_base::IPAddress::CreateFromString("2001:4860:4860:0:0:0:0:8888"),
+      *net_base::IPAddress::CreateFromString("8.8.8.8")};
+  std::vector<std::string> expected_dnssl = {"domain3", "domain4", "domain1",
+                                             "domain2"};
+  auto network_config =
+      IPConfig::Properties::ToNetworkConfig(&ipv4_properties, &ipv6_properties);
+  EXPECT_EQ(expected_dns, network_config.dns_servers);
+  EXPECT_EQ(expected_dnssl, network_config.dns_search_domains);
 }
 
-TEST_F(IPConfigTest, TimeToLeaseExpiry_Success) {
-  const uint32_t expected_time_to_expiry = 10;
-  const struct timeval time_now = {kTimeNow, 0};
-  uint32_t time_left;
-  // Set |current_lease_expiration_time_| so it appears like we already
-  // have obtained a DHCP lease before.
-  ipconfig_->current_lease_expiration_time_ = {
-      kTimeNow + expected_time_to_expiry, 0};
-  EXPECT_CALL(time_, GetTimeBoottime(_))
-      .WillOnce(DoAll(SetArgPointee<0>(time_now), Return(0)));
-  EXPECT_TRUE(ipconfig_->TimeToLeaseExpiry(&time_left));
-  EXPECT_EQ(expected_time_to_expiry, time_left);
+TEST(IPPropertiesTest, ToNetworkConfigDNSDualStackSearchListDedup) {
+  IPConfig::Properties ipv4_properties;
+  ipv4_properties.dns_servers = {"8.8.8.8"};
+  ipv4_properties.domain_search = {"domain1", "domain2"};
+  IPConfig::Properties ipv6_properties;
+  ipv6_properties.dns_servers = {"2001:4860:4860:0:0:0:0:8888"};
+  ipv6_properties.domain_search = {"domain1", "domain2"};
+
+  std::vector<std::string> expected_dnssl = {"domain1", "domain2"};
+  auto network_config =
+      IPConfig::Properties::ToNetworkConfig(&ipv4_properties, &ipv6_properties);
+  EXPECT_EQ(expected_dnssl, network_config.dns_search_domains);
+}
+
+TEST(IPPropertiesTest, ToNetworkConfigMTU) {
+  // Empty value
+  IPConfig::Properties properties;
+  auto network_config =
+      IPConfig::Properties::ToNetworkConfig(&properties, nullptr);
+  EXPECT_FALSE(network_config.mtu.has_value());
+
+  // IPv4
+  properties.mtu = 1480;
+  network_config = IPConfig::Properties::ToNetworkConfig(&properties, nullptr);
+  EXPECT_EQ(1480, network_config.mtu);
+
+  properties.mtu = 400;  // less than NetworkConfig::kMinIPv4MTU
+  network_config = IPConfig::Properties::ToNetworkConfig(&properties, nullptr);
+  EXPECT_EQ(NetworkConfig::kMinIPv4MTU, network_config.mtu);
+
+  // IPv6
+  properties.mtu = 1480;
+  network_config = IPConfig::Properties::ToNetworkConfig(nullptr, &properties);
+  EXPECT_EQ(1480, network_config.mtu);
+
+  properties.mtu = 800;  // less than NetworkConfig::kMinIPv6MTU
+  network_config = IPConfig::Properties::ToNetworkConfig(nullptr, &properties);
+  EXPECT_EQ(NetworkConfig::kMinIPv6MTU, network_config.mtu);
+
+  // Dual Stack
+  IPConfig::Properties properties2;
+  properties.mtu = 1480;
+  properties2.mtu = 1400;
+  network_config =
+      IPConfig::Properties::ToNetworkConfig(&properties, &properties2);
+  EXPECT_EQ(1400, network_config.mtu);  // the smaller of two
+
+  properties.mtu = 800;  // less than NetworkConfig::kMinIPv6MTU
+  network_config =
+      IPConfig::Properties::ToNetworkConfig(&properties, &properties2);
+  EXPECT_EQ(NetworkConfig::kMinIPv6MTU, network_config.mtu);
+}
+
+TEST(IPPropertiesTest, ToNetworkGateway) {
+  IPConfig::Properties properties;
+  properties.gateway = "192.0.2.1";
+  auto network_config =
+      IPConfig::Properties::ToNetworkConfig(&properties, nullptr);
+  EXPECT_EQ(*net_base::IPv4Address::CreateFromString("192.0.2.1"),
+            network_config.ipv4_gateway);
+
+  // Empty gateway string means no gateway.
+  properties.gateway = "";
+  network_config = IPConfig::Properties::ToNetworkConfig(&properties, nullptr);
+  EXPECT_EQ(std::nullopt, network_config.ipv4_gateway);
+
+  // 0.0.0.0 also means no gateway.
+  properties.gateway = "0.0.0.0";
+  network_config = IPConfig::Properties::ToNetworkConfig(&properties, nullptr);
+  EXPECT_EQ(std::nullopt, network_config.ipv4_gateway);
+
+  // If peer address is set then we consider the link point-to-point and ignore
+  // the gateway.
+  properties.gateway = "192.0.2.1";
+  properties.peer_address = "192.0.2.1";
+  network_config = IPConfig::Properties::ToNetworkConfig(&properties, nullptr);
+  EXPECT_EQ(std::nullopt, network_config.ipv4_gateway);
+
+  properties.gateway = "2001:db8:100::2";
+  properties.peer_address = "";
+  network_config = IPConfig::Properties::ToNetworkConfig(nullptr, &properties);
+  EXPECT_EQ(*net_base::IPv6Address::CreateFromString("2001:db8:100::2"),
+            network_config.ipv6_gateway);
+
+  properties.gateway = "";
+  network_config = IPConfig::Properties::ToNetworkConfig(nullptr, &properties);
+  EXPECT_EQ(std::nullopt, network_config.ipv6_gateway);
+
+  properties.gateway = "::";
+  network_config = IPConfig::Properties::ToNetworkConfig(nullptr, &properties);
+  EXPECT_EQ(std::nullopt, network_config.ipv6_gateway);
 }
 
 }  // namespace shill

@@ -5,12 +5,16 @@
 #ifndef LIBBRILLO_BRILLO_WHALEOS_UTIL_H_
 #define LIBBRILLO_BRILLO_WHALEOS_UTIL_H_
 
+#include <string>
+
 #include <brillo/brillo_export.h>
 
 namespace brillo {
 
 constexpr static char kTpmOwnedFallbackPath[] = "/var/.tpm_owned";
 
+BRILLO_EXPORT std::string GetBiosVersion();
+BRILLO_EXPORT std::string GetProductName();
 BRILLO_EXPORT bool IsWhalebook2Model();
 
 }  // namespace brillo

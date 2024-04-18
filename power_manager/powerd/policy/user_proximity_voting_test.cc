@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,7 @@
 
 #include <gtest/gtest.h>
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 TEST(UserProximityVotingTest, DefaultStates) {
   bool prefer_far = false;
@@ -91,5 +90,4 @@ TEST(UserProximityVotingTest, ConsensusChangePreferFar) {
   EXPECT_EQ(voting.GetVote(), UserProximity::FAR);
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

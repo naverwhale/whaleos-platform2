@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,6 @@
 #include <base/rand_util.h>
 
 namespace patchpanel {
-namespace {
-constexpr MacAddress kStableBaseAddr = {0x42, 0x37, 0x05, 0x13, 0x17, 0x00};
-}  // namespace
 
 MacAddress MacAddressGenerator::Generate() {
   MacAddress addr;
@@ -31,9 +28,9 @@ MacAddress MacAddressGenerator::Generate() {
   return addr;
 }
 
-MacAddress MacAddressGenerator::GetStable(uint8_t id) const {
+MacAddress MacAddressGenerator::GetStable(uint32_t id) const {
   MacAddress addr = kStableBaseAddr;
-  addr[5] = id;
+  addr[5] = static_cast<uint8_t>(id);
   return addr;
 }
 

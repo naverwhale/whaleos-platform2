@@ -1,5 +1,7 @@
 powerd_prefs_default: &powerd_prefs_default
-  description: For details, see https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/
+  description: >-
+    For details, see
+    https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/
   type: string
 
 powerd_prefs: &powerd_prefs
@@ -10,6 +12,12 @@ powerd_prefs: &powerd_prefs
   plugged-dim-ms:
     <<: *powerd_prefs_default
     default: "420000"
+  plugged-quick-dim-ms:
+    <<: *powerd_prefs_default
+    default: "120000"
+  plugged-quick-lock-ms:
+    <<: *powerd_prefs_default
+    default: "510000"
   plugged-off-ms:
     <<: *powerd_prefs_default
     default: "450000"
@@ -19,17 +27,27 @@ powerd_prefs: &powerd_prefs
   unplugged-dim-ms:
     <<: *powerd_prefs_default
     default: "300000"
+  unplugged-quick-dim-ms:
+    <<: *powerd_prefs_default
+    default: "60000"
+  unplugged-quick-lock-ms:
+    <<: *powerd_prefs_default
+    default: "390000"
   unplugged-off-ms:
     <<: *powerd_prefs_default
     default: "330000"
   unplugged-suspend-ms:
     <<: *powerd_prefs_default
     default: "390000"
+  send-feedback-if-undimmed:
+    <<: *powerd_prefs_default
+    default: "1"
   disable-idle-suspend: *powerd_prefs_default
   factory-mode: *powerd_prefs_default
   use-lid:
     <<: *powerd_prefs_default
     default: "1"
+  preferred-lid-device: *powerd_prefs_default
   detect-hover: *powerd_prefs_default
   retry-suspend-ms:
     <<: *powerd_prefs_default
@@ -73,9 +91,6 @@ powerd_prefs: &powerd_prefs
   keyboard-backlight-keep-on-during-video-ms:
     <<: *powerd_prefs_default
     default: "3000"
-  keyboard-backlight-turn-on-for-user-activity:
-    <<: *powerd_prefs_default
-    default: "1"
   als-smoothing-constant:
     <<: *powerd_prefs_default
     default: "1.0"
@@ -100,9 +115,13 @@ powerd_prefs: &powerd_prefs
   battery-stabilized-after-resume-ms:
     <<: *powerd_prefs_default
     default: "5000"
+  battery-stabilized-after-battery-saver-ms:
+    <<: *powerd_prefs_default
+    default: "5000"
   multiple-batteries:
     <<: *powerd_prefs_default
     default: "1"
+  has-barreljack: *powerd_prefs_default
   max-current-samples:
     <<: *powerd_prefs_default
     default: "5"
@@ -113,20 +132,22 @@ powerd_prefs: &powerd_prefs
     <<: *powerd_prefs_default
     default: "20.0"
   charging-ports: *powerd_prefs_default
+  adaptive-charging-alarm-sec: *powerd_prefs_default
+  adaptive-charging-hold-percent: *powerd_prefs_default
+  adaptive-charging-hold-delta-percent: *powerd_prefs_default
+  adaptive-charging-min-probability: *powerd_prefs_default
+  adaptive-charging-enabled: *powerd_prefs_default
+  slow-adaptive-charging-enabled: *powerd_prefs_default
+  charge-limit-enabled: *powerd_prefs_default
   turn-off-screen-timeout-ms:
     <<: *powerd_prefs_default
     default: "3000"
   disable-dark-resume:
     <<: *powerd_prefs_default
     default: "1"
-  disable-hibernate:
-    <<: *powerd_prefs_default
-    default: "1"
   lower-power-from-suspend-sec:
     <<: *powerd_prefs_default
     default: "259200"
-  dark-resume-devices: *powerd_prefs_default
-  dark-resume-sources: *powerd_prefs_default
   ignore-external-policy:
     <<: *powerd_prefs_default
     default: "0"
@@ -136,7 +157,7 @@ powerd_prefs: &powerd_prefs
   has-keyboard-backlight: *powerd_prefs_default
   external-display-only: *powerd_prefs_default
   legacy-power-button: *powerd_prefs_default
-  mosys-eventlog: *powerd_prefs_default
+  manual-eventlog-add: *powerd_prefs_default
   use-cras: *powerd_prefs_default
   tpm-counter-suspend-threshold:
     <<: *powerd_prefs_default
@@ -145,6 +166,9 @@ powerd_prefs: &powerd_prefs
     <<: *powerd_prefs_default
     default: "3600"
   suspend-to-idle: *powerd_prefs_default
+  has-machine-quirks: *powerd_prefs_default
+  suspend-to-idle-models: *powerd_prefs_default
+  suspend-prevention-models: *powerd_prefs_default
   set-transmit-power-prefer-far-for-proximity: *powerd_prefs_default
   wifi-transmit-power-mode-for-static-device: *powerd_prefs_default
   set-wifi-transmit-power-for-tablet-mode: *powerd_prefs_default
@@ -157,6 +181,9 @@ powerd_prefs: &powerd_prefs
   use-modemmanager-for-dynamic-sar: *powerd_prefs_default
   use-multi-power-level-dynamic-sar: *powerd_prefs_default
   set-cellular-transmit-power-level-mapping: *powerd_prefs_default
+  set-cellular-regulatory-domain-mapping: *powerd_prefs_default
+  set-default-proximity-state-high: *powerd_prefs_default
+  use-regulatory-domain-for-dynamic-sar: *powerd_prefs_default
   enable-console-during-suspend: *powerd_prefs_default
   max-dark-suspend-delay-timeout-ms: *powerd_prefs_default
   suspend-mode:

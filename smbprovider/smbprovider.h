@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -69,8 +69,7 @@ class SmbProvider : public org::chromium::SmbProviderAdaptor,
                                uint16_t transaction_id) override;
 
   // Register DBus object and interfaces.
-  void RegisterAsync(
-      const AsyncEventSequencer::CompletionAction& completion_callback);
+  void RegisterAsync(AsyncEventSequencer::CompletionAction completion_callback);
 
  private:
   // Returns a pointer to the SambaInterface corresponding to |mount_id|.

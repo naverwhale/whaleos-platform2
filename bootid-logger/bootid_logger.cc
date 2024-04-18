@@ -1,9 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <deque>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -48,12 +49,12 @@ std::string GenerateBootEntryString(const std::string current_boot_id,
       "%04d-%02d-%02dT%02d:%02d:%02d.%03d000Z", exploded.year, exploded.month,
       exploded.day_of_month, exploded.hour, exploded.minute, exploded.second,
       exploded.millisecond));
-  CHECK_EQ(kTimestampLength, boot_time_str.size());
+  CHECK_LE(kTimestampLength, boot_time_str.size());
 
   const std::string boot_id_entry = boot_time_str + " " + kBootEntrySeverity +
                                     " " + kBootEntryPrefix +
                                     base::ToLowerASCII(current_boot_id);
-  CHECK_EQ(kBootEntryLength, boot_id_entry.length());
+  CHECK_LE(kBootEntryLength, boot_id_entry.length());
   return boot_id_entry;
 }
 
@@ -84,10 +85,10 @@ bool ValidateBootEntryWithTimezone(const std::string& boot_id_entry) {
 }
 
 // Read previous entries from the log file (FD).
-base::Optional<std::deque<std::string>> ReadPreviousBootEntries(
+std::optional<std::deque<std::string>> ReadPreviousBootEntries(
     const int fd,
     const base::Time first_timestamp_to_keep,
-    int boot_log_max_entries) {
+    size_t boot_log_max_entries) {
   std::deque<std::string> previous_boot_entries;
 
   struct stat st;
@@ -102,7 +103,7 @@ base::Optional<std::deque<std::string>> ReadPreviousBootEntries(
         static_cast<char*>(mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, 0));
     if (buffer == NULL) {
       PLOG(FATAL) << "mmap failed";
-      return base::nullopt;
+      return std::nullopt;
     }
 
     // Set the buffer to the stream.
@@ -135,7 +136,8 @@ base::Optional<std::deque<std::string>> ReadPreviousBootEntries(
     munmap(buffer, length);
 
     // Truncate if the logs are overflown.
-    while (previous_boot_entries.size() > (boot_log_max_entries - 1)) {
+    while (boot_log_max_entries &&
+           previous_boot_entries.size() > (boot_log_max_entries - 1)) {
       previous_boot_entries.pop_front();
     }
   }
@@ -185,7 +187,7 @@ std::string GetCurrentBootId() {
 
 bool WriteCurrentBootEntry(const base::FilePath& bootid_log_path,
                            const base::Time first_timestamp_to_keep,
-                           const int max_entries) {
+                           const size_t max_entries) {
   std::string boot_id = GetCurrentBootId();
   base::Time boot_time = GetCurrentBootTime();
 
@@ -197,7 +199,7 @@ bool WriteBootEntry(const base::FilePath& bootid_log_path,
                     const std::string& current_boot_id,
                     const base::Time boot_time,
                     const base::Time first_timestamp_to_keep,
-                    const int max_entries) {
+                    const size_t max_entries) {
   // Open the log file.
   base::ScopedFD fd(HANDLE_EINTR(
       open(bootid_log_path.value().c_str(), O_RDWR | O_CREAT | O_CLOEXEC,

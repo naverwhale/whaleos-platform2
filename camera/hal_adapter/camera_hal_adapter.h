@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -17,7 +17,7 @@
 #include <hardware/camera3.h>
 
 #include <base/containers/flat_set.h>
-#include <base/single_thread_task_runner.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/thread.h>
 #include <base/timer/elapsed_timer.h>
 #include <mojo/public/cpp/bindings/pending_associated_remote.h>
@@ -27,14 +27,14 @@
 
 #include "camera/mojo/camera3.mojom.h"
 #include "camera/mojo/camera_common.mojom.h"
-#include "camera/mojo/cros_camera_service.mojom.h"
-#include "common/utils/common_types.h"
+#include "common/camera_diagnostics_config.h"
+#include "common/reloadable_config_file.h"
+#include "common/stream_manipulator.h"
 #include "common/vendor_tag_manager.h"
 #include "cros-camera/camera_metrics.h"
 #include "cros-camera/camera_mojo_channel_manager_token.h"
 #include "cros-camera/cros_camera_hal.h"
-#include "cros-camera/future.h"
-#include "hal_adapter/reprocess_effect/reprocess_effect_manager.h"
+#include "ml_core/dlc/dlc_client.h"
 
 namespace cros {
 
@@ -62,6 +62,9 @@ class CameraHalAdapter {
                        camera_interfaces,
                    CameraMojoChannelManagerToken* token,
                    CameraActivityCallback activity_callback);
+
+  CameraHalAdapter(const CameraHalAdapter&) = delete;
+  CameraHalAdapter& operator=(const CameraHalAdapter&) = delete;
 
   virtual ~CameraHalAdapter();
 
@@ -108,6 +111,16 @@ class CameraHalAdapter {
   int32_t SetCallbacks(
       mojo::PendingAssociatedRemote<mojom::CameraModuleCallbacks> callbacks);
 
+  void SetAutoFramingState(mojom::CameraAutoFramingState enabled);
+
+  mojom::CameraPrivacySwitchState GetCameraSWPrivacySwitchState();
+
+  void SetCameraSWPrivacySwitchState(mojom::CameraPrivacySwitchState state);
+
+  mojom::SetEffectResult SetCameraEffect(mojom::EffectsConfigPtr config);
+
+  void SetCameraDiagnosticsConfig(CameraDiagnosticsConfig* config);
+
  protected:
   // Convert the unified public |camera_id| into the corresponding camera
   // module and its internal id. Returns (nullptr, 0) if not found.
@@ -115,7 +128,7 @@ class CameraHalAdapter {
 
   // Initialize all underlying camera HALs on |camera_module_thread_| and
   // build the mapping table for camera id.
-  virtual void StartOnThread(base::Callback<void(bool)> callback);
+  virtual void StartOnThread(base::OnceCallback<void(bool)> callback);
 
   virtual void NotifyCameraDeviceStatusChange(
       CameraModuleCallbacksAssociatedDelegate* delegate,
@@ -139,6 +152,13 @@ class CameraHalAdapter {
       const camera_module_callbacks_t* callbacks,
       const char* camera_id,
       int new_status);
+
+  std::optional<mojom::CameraPrivacySwitchState>
+  LoadCachedCameraSWPrivacySwitchState();
+  void CacheCameraSWPrivacySwitchState(mojom::CameraPrivacySwitchState state);
+  void SetCameraSWPrivacySwitchStateOnCameraModuleThread(
+      mojom::CameraPrivacySwitchState state);
+  void SWPrivacySwitchOverrideChange(const base::Value::Dict& json_values);
 
   // Gets the static metadata of a camera given the original static metadata
   // with updated metadata modifications from the camera service such as vendor
@@ -211,13 +231,12 @@ class CameraHalAdapter {
   // '2', '\0', '3', '\0', '1', '0', '\0'.
   std::map<int, std::string> physical_camera_id_map_;
 
-  // A mapping from (camera ID, camera client type) to their static metadata.
-  base::flat_map<std::pair<int, mojom::CameraClientType>,
-                 std::unique_ptr<android::CameraMetadata>>
+  // A mapping from camera ID to mapping from camera client type to their
+  // static metadata.
+  base::flat_map<int,
+                 base::flat_map<mojom::CameraClientType,
+                                std::unique_ptr<android::CameraMetadata>>>
       static_metadata_map_;
-
-  // A set of camera IDs on which ZSL can be attempted.
-  base::flat_set<int> can_attempt_zsl_camera_ids_;
 
   // We need to keep the status for each camera to send up-to-date information
   // for newly connected client so everyone is in sync.
@@ -267,9 +286,6 @@ class CameraHalAdapter {
   // The vendor tag manager.
   VendorTagManager vendor_tag_manager_;
 
-  // The reprocess effect manager.
-  ReprocessEffectManager reprocess_effect_manager_;
-
   // The map of session start time.
   std::map<int, base::ElapsedTimer> session_timer_map_;
 
@@ -281,7 +297,27 @@ class CameraHalAdapter {
 
   CameraActivityCallback activity_callback_;
 
-  DISALLOW_IMPLICIT_CONSTRUCTORS(CameraHalAdapter);
+  // TODO(pihsun): Should this be per CameraDeviceAdapter?
+  StreamManipulator::RuntimeOptions stream_manipulator_runtime_options_;
+
+  // SW privacy switch state.
+  base::Lock sw_privacy_switch_state_lock_;
+  mojom::CameraPrivacySwitchState sw_privacy_switch_state_ GUARDED_BY(
+      sw_privacy_switch_state_lock_) = mojom::CameraPrivacySwitchState::UNKNOWN;
+
+  // SW privacy switch state overriding |sw_privacy_switch_state_|.
+  std::optional<mojom::CameraPrivacySwitchState>
+      sw_privacy_switch_state_override_;
+
+  // Watch changes in |kSWPrivacySwitchOverrideFilePath|.
+  ReloadableConfigFile sw_privacy_switch_override_watcher_;
+
+  std::unique_ptr<GpuResources> root_gpu_resources_;
+
+  bool effects_enabled_ = false;
+  std::unique_ptr<DlcClient> dlc_client_;
+
+  CameraDiagnosticsConfig* camera_diagnostics_config_;
 };
 
 }  // namespace cros

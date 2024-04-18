@@ -1,48 +1,55 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ethernet/ethernet.h"
 
-#include <netinet/ether.h>
+#include <linux/ethtool.h>
 #include <linux/if.h>  // NOLINT - Needs definitions from netinet/ether.h
 #include <linux/sockios.h>
+#include <netinet/ether.h>
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
-#include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
+#include <base/run_loop.h>
+#include <base/task/single_thread_task_executor.h>
+#include <base/strings/string_number_conversions.h>
+#include <base/time/time.h>
+#include <chromeos/patchpanel/dbus/client.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <net-base/ip_address.h>
+#include <net-base/mac_address.h>
+#include <net-base/mock_rtnl_handler.h>
+#include <net-base/mock_socket.h>
 
-#include "shill/dhcp/mock_dhcp_config.h"
-#include "shill/dhcp/mock_dhcp_provider.h"
+#include "shill/ethernet/mock_eap_listener.h"
+#include "shill/ethernet/mock_ethernet_eap_provider.h"
 #include "shill/ethernet/mock_ethernet_provider.h"
 #include "shill/ethernet/mock_ethernet_service.h"
+#include "shill/manager.h"
 #include "shill/mock_control.h"
-#include "shill/mock_device_info.h"
-#include "shill/mock_event_dispatcher.h"
+#include "shill/mock_eap_credentials.h"
 #include "shill/mock_log.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
 #include "shill/mock_profile.h"
 #include "shill/mock_service.h"
-#include "shill/net/mock_rtnl_handler.h"
-#include "shill/net/mock_sockets.h"
-#include "shill/testing.h"
-
-#if !defined(DISABLE_WIRED_8021X)
-#include "shill/ethernet/mock_ethernet_eap_provider.h"
-#include "shill/mock_eap_credentials.h"
-#include "shill/mock_eap_listener.h"
+#include "shill/network/mock_dhcp_controller.h"
+#include "shill/network/mock_dhcp_provider.h"
+#include "shill/network/mock_network.h"
+#include "shill/network/network.h"
 #include "shill/supplicant/mock_supplicant_interface_proxy.h"
 #include "shill/supplicant/mock_supplicant_process_proxy.h"
 #include "shill/supplicant/supplicant_manager.h"
-#include "shill/supplicant/wpa_supplicant.h"
-#endif  // DISABLE_WIRED_8021X
+#include "shill/test_event_dispatcher.h"
+#include "shill/testing.h"
 
 using testing::_;
 using testing::AnyNumber;
@@ -55,12 +62,19 @@ using testing::Invoke;
 using testing::Mock;
 using testing::NiceMock;
 using testing::Return;
+using testing::ReturnRef;
 using testing::SaveArg;
 using testing::SetArgPointee;
 using testing::StrictMock;
 using testing::WithArg;
 
 namespace shill {
+namespace {
+const net_base::IPAddress kIPv4Addr =
+    *net_base::IPAddress::CreateFromString("192.168.1.1");
+const net_base::IPAddress kIPv6Addr =
+    *net_base::IPAddress::CreateFromString("fe80::1aa9:5ff:abcd:1234");
+}  // namespace
 
 class TestEthernet : public Ethernet {
  public:
@@ -82,64 +96,64 @@ class EthernetTest : public testing::Test {
  public:
   EthernetTest()
       : manager_(&control_interface_, &dispatcher_, &metrics_),
-        device_info_(&manager_),
-        ethernet_(new TestEthernet(
-            &manager_, kDeviceName, kDeviceAddress, kInterfaceIndex)),
-        dhcp_config_(new MockDHCPConfig(&control_interface_, kDeviceName)),
-#if !defined(DISABLE_WIRED_8021X)
+        ethernet_(new TestEthernet(&manager_, ifname_, hwaddr_, ifindex_)),
         eap_listener_(new MockEapListener()),
         mock_eap_service_(new MockService(&manager_)),
         supplicant_interface_proxy_(
             new NiceMock<MockSupplicantInterfaceProxy>()),
         supplicant_process_proxy_(new NiceMock<MockSupplicantProcessProxy>()),
-#endif  // DISABLE_WIRED_8021X
-        mock_sockets_(new StrictMock<MockSockets>()),
         mock_service_(new MockEthernetService(
-            &manager_, ethernet_->weak_ptr_factory_.GetWeakPtr())) {
-  }
-  ~EthernetTest() override {}
+            &manager_, ethernet_->weak_ptr_factory_.GetWeakPtr())) {}
+  ~EthernetTest() override = default;
 
   void SetUp() override {
     ethernet_->rtnl_handler_ = &rtnl_handler_;
-    ethernet_->sockets_.reset(mock_sockets_);  // Transfers ownership.
 
-    ethernet_->set_dhcp_provider(&dhcp_provider_);
-    ON_CALL(manager_, device_info()).WillByDefault(Return(&device_info_));
+    ethernet_->GetPrimaryNetwork()->set_dhcp_provider_for_testing(
+        &dhcp_provider_);
     EXPECT_CALL(manager_, UpdateEnabledTechnologies()).Times(AnyNumber());
 
-#if !defined(DISABLE_WIRED_8021X)
     ethernet_->eap_listener_.reset(eap_listener_);  // Transfers ownership.
     EXPECT_CALL(manager_, ethernet_eap_provider())
         .WillRepeatedly(Return(&ethernet_eap_provider_));
     ethernet_eap_provider_.set_service(mock_eap_service_);
     // Transfers ownership.
     manager_.supplicant_manager()->set_proxy(supplicant_process_proxy_);
-#endif  // DISABLE_WIRED_8021X
 
     EXPECT_CALL(manager_, ethernet_provider())
         .WillRepeatedly(Return(&ethernet_provider_));
 
     ON_CALL(*mock_service_, technology())
         .WillByDefault(Return(Technology::kEthernet));
+
+    auto socket_factory = std::make_unique<net_base::MockSocketFactory>();
+    socket_factory_ = socket_factory.get();
+    ethernet_->socket_factory_ = std::move(socket_factory);
+
+    // We do not care about Sockets at most of test cases.
+    // In order to let RunEthtoolCmd() succeed we need to return a positive
+    // number for Ioctl
+    ON_CALL(*socket_factory_, Create).WillByDefault([&]() {
+      auto socket = std::make_unique<net_base::MockSocket>();
+      ON_CALL(*socket, Ioctl(SIOCETHTOOL, _)).WillByDefault(Return(1));
+      return socket;
+    });
   }
 
   void TearDown() override {
-#if !defined(DISABLE_WIRED_8021X)
     ethernet_eap_provider_.set_service(nullptr);
     ethernet_->eap_listener_.reset();
-#endif  // DISABLE_WIRED_8021X
-    ethernet_->set_dhcp_provider(nullptr);
-    ethernet_->sockets_.reset();
+    ethernet_->GetPrimaryNetwork()->set_dhcp_provider_for_testing(nullptr);
     Mock::VerifyAndClearExpectations(&manager_);
   }
 
   MOCK_METHOD(void, ErrorCallback, (const Error& error));
 
  protected:
-  static const char kDeviceName[];
-  static const char kDeviceAddress[];
-  static const RpcIdentifier kInterfacePath;
-  static const int kInterfaceIndex;
+  int ifindex_ = 123;
+  std::string ifname_ = "eth0";
+  std::string hwaddr_ = "000102030405";
+  RpcIdentifier dbus_path_ = RpcIdentifier("/interface/path");
 
   bool GetLinkUp() { return ethernet_->link_up_; }
   void SetLinkUp(bool link_up) { ethernet_->link_up_ = link_up; }
@@ -150,23 +164,36 @@ class EthernetTest : public testing::Test {
   void SetService(const EthernetServiceRefPtr& service) {
     ethernet_->service_ = service;
   }
+  void SelectService(const EthernetServiceRefPtr& service) {
+    ethernet_->SelectService(service);
+  }
+
+  void UpdateLinkSpeed() { ethernet_->UpdateLinkSpeed(); }
+
   const PropertyStore& GetStore() { return ethernet_->store(); }
   void StartEthernet() {
     EXPECT_CALL(ethernet_provider_, CreateService(_))
         .WillOnce(Return(mock_service_));
     EXPECT_CALL(ethernet_provider_, RegisterService(Eq(mock_service_)));
-    EXPECT_CALL(rtnl_handler_,
-                SetInterfaceFlags(kInterfaceIndex, IFF_UP, IFF_UP));
-    ethernet_->Start(nullptr, EnabledStateChangedCallback());
+    EXPECT_CALL(rtnl_handler_, SetInterfaceFlags(ifindex_, IFF_UP, IFF_UP));
+    base::RunLoop run_loop;
+    ethernet_->Start(base::BindOnce(&EthernetTest::OnEnabledStateChanged,
+                                    run_loop.QuitClosure()));
+    run_loop.Run();
   }
   void StopEthernet() {
     EXPECT_CALL(ethernet_provider_, DeregisterService(Eq(mock_service_)));
-    ethernet_->Stop(nullptr, EnabledStateChangedCallback());
+    base::RunLoop run_loop;
+    ethernet_->Stop(base::BindOnce(&EthernetTest::OnEnabledStateChanged,
+                                   run_loop.QuitClosure()));
+    run_loop.Run();
   }
   void SetUsbEthernetMacAddressSource(const std::string& source,
-                                      Error* error,
-                                      const ResultCallback& callback) {
-    ethernet_->SetUsbEthernetMacAddressSource(source, error, callback);
+                                      ResultCallback callback) {
+    base::RunLoop run_loop;
+    ethernet_->SetUsbEthernetMacAddressSource(
+        source, std::move(callback).Then(run_loop.QuitClosure()));
+    run_loop.Run();
   }
   std::string GetUsbEthernetMacAddressSource(Error* error) {
     return ethernet_->GetUsbEthernetMacAddressSource(error);
@@ -180,7 +207,6 @@ class EthernetTest : public testing::Test {
     ethernet_->bus_type_ = bus_type;
   }
 
-#if !defined(DISABLE_WIRED_8021X)
   bool GetIsEapAuthenticated() { return ethernet_->is_eap_authenticated_; }
   void SetIsEapAuthenticated(bool is_eap_authenticated) {
     ethernet_->is_eap_authenticated_ = is_eap_authenticated;
@@ -210,10 +236,10 @@ class EthernetTest : public testing::Test {
     MockSupplicantInterfaceProxy* interface_proxy =
         ExpectCreateSupplicantInterfaceProxy();
     EXPECT_CALL(*supplicant_process_proxy_, CreateInterface(_, _))
-        .WillOnce(DoAll(SetArgPointee<1>(kInterfacePath), Return(true)));
+        .WillOnce(DoAll(SetArgPointee<1>(dbus_path_), Return(true)));
     EXPECT_TRUE(InvokeStartSupplicant());
     EXPECT_EQ(interface_proxy, GetSupplicantInterfaceProxy());
-    EXPECT_EQ(kInterfacePath, GetSupplicantInterfacePath());
+    EXPECT_EQ(dbus_path_, GetSupplicantInterfacePath());
   }
   void TriggerOnEapDetected() { ethernet_->OnEapDetected(); }
   void TriggerCertification(const std::string& subject, uint32_t depth) {
@@ -224,54 +250,45 @@ class EthernetTest : public testing::Test {
   MockSupplicantInterfaceProxy* ExpectCreateSupplicantInterfaceProxy() {
     MockSupplicantInterfaceProxy* proxy = supplicant_interface_proxy_.get();
     EXPECT_CALL(control_interface_,
-                CreateSupplicantInterfaceProxy(_, kInterfacePath))
+                CreateSupplicantInterfaceProxy(_, dbus_path_))
         .WillOnce(Return(ByMove(std::move(supplicant_interface_proxy_))));
     return proxy;
   }
-#endif  // DISABLE_WIRED_8021X
 
-  StrictMock<MockEventDispatcher> dispatcher_;
+  EventDispatcherForTest dispatcher_;
   MockControl control_interface_;
   NiceMock<MockMetrics> metrics_;
   MockManager manager_;
-  MockDeviceInfo device_info_;
   scoped_refptr<TestEthernet> ethernet_;
   MockDHCPProvider dhcp_provider_;
-  scoped_refptr<MockDHCPConfig> dhcp_config_;
 
-#if !defined(DISABLE_WIRED_8021X)
   MockEthernetEapProvider ethernet_eap_provider_;
 
   // Owned by Ethernet instance, but tracked here for expectations.
   MockEapListener* eap_listener_;
+  net_base::MockSocketFactory* socket_factory_;
 
   scoped_refptr<MockService> mock_eap_service_;
   std::unique_ptr<MockSupplicantInterfaceProxy> supplicant_interface_proxy_;
   MockSupplicantProcessProxy* supplicant_process_proxy_;
-#endif  // DISABLE_WIRED_8021X
 
-  // Owned by Ethernet instance, but tracked here for expectations.
-  MockSockets* mock_sockets_;
-
-  MockRTNLHandler rtnl_handler_;
+  net_base::MockRTNLHandler rtnl_handler_;
   scoped_refptr<MockEthernetService> mock_service_;
   MockEthernetProvider ethernet_provider_;
-};
 
-// static
-const char EthernetTest::kDeviceName[] = "eth0";
-const char EthernetTest::kDeviceAddress[] = "000102030405";
-const RpcIdentifier EthernetTest::kInterfacePath("/interface/path");
-const int EthernetTest::kInterfaceIndex = 123;
+ private:
+  static void OnEnabledStateChanged(base::OnceClosure quit_closure,
+                                    const Error& error) {
+    std::move(quit_closure).Run();
+  }
+};
 
 TEST_F(EthernetTest, Construct) {
   EXPECT_FALSE(GetLinkUp());
-#if !defined(DISABLE_WIRED_8021X)
   EXPECT_FALSE(GetIsEapAuthenticated());
   EXPECT_FALSE(GetIsEapDetected());
   EXPECT_TRUE(GetStore().Contains(kEapAuthenticationCompletedProperty));
   EXPECT_TRUE(GetStore().Contains(kEapAuthenticatorDetectedProperty));
-#endif  // DISABLE_WIRED_8021X
   EXPECT_EQ(nullptr, GetService());
 }
 
@@ -287,50 +304,34 @@ TEST_F(EthernetTest, LinkEvent) {
 
   // Link-down event while already down.
   EXPECT_CALL(manager_, DeregisterService(_)).Times(0);
-#if !defined(DISABLE_WIRED_8021X)
   EXPECT_CALL(*eap_listener_, Start()).Times(0);
-#endif  // DISABLE_WIRED_8021X
   ethernet_->LinkEvent(0, IFF_LOWER_UP);
   EXPECT_FALSE(GetLinkUp());
-#if !defined(DISABLE_WIRED_8021X)
   EXPECT_FALSE(GetIsEapDetected());
-#endif  // DISABLE_WIRED_8021X
   Mock::VerifyAndClearExpectations(&manager_);
 
   // Link-up event while down.
-  int kFakeFd = 789;
   EXPECT_CALL(manager_, UpdateService(IsRefPtrTo(mock_service_)));
   EXPECT_CALL(*mock_service_, OnVisibilityChanged());
-#if !defined(DISABLE_WIRED_8021X)
   EXPECT_CALL(*eap_listener_, Start());
-#endif  // DISABLE_WIRED_8021X
-  EXPECT_CALL(*mock_sockets_, Socket(_, _, _)).WillOnce(Return(kFakeFd));
-  EXPECT_CALL(*mock_sockets_, Ioctl(kFakeFd, SIOCETHTOOL, _));
-  EXPECT_CALL(*mock_sockets_, Close(kFakeFd));
+
   ethernet_->LinkEvent(IFF_LOWER_UP, 0);
   EXPECT_TRUE(GetLinkUp());
-#if !defined(DISABLE_WIRED_8021X)
   EXPECT_FALSE(GetIsEapDetected());
-#endif  // DISABLE_WIRED_8021X
   Mock::VerifyAndClearExpectations(&manager_);
   Mock::VerifyAndClearExpectations(mock_service_.get());
 
   // Link-up event while already up.
   EXPECT_CALL(manager_, UpdateService(_)).Times(0);
   EXPECT_CALL(*mock_service_, OnVisibilityChanged()).Times(0);
-#if !defined(DISABLE_WIRED_8021X)
   EXPECT_CALL(*eap_listener_, Start()).Times(0);
-#endif  // DISABLE_WIRED_8021X
   ethernet_->LinkEvent(IFF_LOWER_UP, 0);
   EXPECT_TRUE(GetLinkUp());
-#if !defined(DISABLE_WIRED_8021X)
   EXPECT_FALSE(GetIsEapDetected());
-#endif  // DISABLE_WIRED_8021X
   Mock::VerifyAndClearExpectations(&manager_);
   Mock::VerifyAndClearExpectations(mock_service_.get());
 
   // Link-down event while up.
-#if !defined(DISABLE_WIRED_8021X)
   SetIsEapDetected(true);
   // This is done in SetUp, but we have to reestablish this after calling
   // VerifyAndClearExpectations() above.
@@ -339,14 +340,11 @@ TEST_F(EthernetTest, LinkEvent) {
   EXPECT_CALL(ethernet_eap_provider_,
               ClearCredentialChangeCallback(ethernet_.get()));
   EXPECT_CALL(*eap_listener_, Stop());
-#endif  // DISABLE_WIRED_8021X
   EXPECT_CALL(manager_, UpdateService(IsRefPtrTo(GetService().get())));
   EXPECT_CALL(*mock_service_, OnVisibilityChanged());
   ethernet_->LinkEvent(0, IFF_LOWER_UP);
   EXPECT_FALSE(GetLinkUp());
-#if !defined(DISABLE_WIRED_8021X)
   EXPECT_FALSE(GetIsEapDetected());
-#endif  // DISABLE_WIRED_8021X
 
   // Restore this expectation during shutdown.
   EXPECT_CALL(manager_, UpdateEnabledTechnologies()).Times(AnyNumber());
@@ -360,41 +358,25 @@ TEST_F(EthernetTest, ConnectToLinkDown) {
   StartEthernet();
   SetLinkUp(false);
   EXPECT_EQ(nullptr, GetSelectedService());
-  EXPECT_CALL(dhcp_provider_, CreateIPv4Config(_, _, _, _)).Times(0);
-  EXPECT_CALL(*dhcp_config_, RequestIP()).Times(0);
-  EXPECT_CALL(dispatcher_, PostDelayedTask(_, _, 0)).Times(0);
+  EXPECT_CALL(dhcp_provider_, CreateController(_, _, _)).Times(0);
   EXPECT_CALL(*mock_service_, SetState(_)).Times(0);
   ethernet_->ConnectTo(mock_service_.get());
   EXPECT_EQ(nullptr, GetSelectedService());
   StopEthernet();
 }
 
-TEST_F(EthernetTest, ConnectToFailure) {
-  StartEthernet();
-  SetLinkUp(true);
-  EXPECT_EQ(nullptr, GetSelectedService());
-  EXPECT_CALL(dhcp_provider_, CreateIPv4Config(_, _, _, _))
-      .WillOnce(Return(dhcp_config_));
-  EXPECT_CALL(*dhcp_config_, RequestIP()).WillOnce(Return(false));
-  EXPECT_CALL(dispatcher_,
-              PostDelayedTask(_, _, 0));  // Posts ConfigureStaticIPTask.
-  EXPECT_CALL(*mock_service_, SetState(Service::kStateFailure));
-  ethernet_->ConnectTo(mock_service_.get());
-  EXPECT_EQ(mock_service_, GetSelectedService());
-  StopEthernet();
-}
-
 TEST_F(EthernetTest, ConnectToSuccess) {
+  auto dhcp_controller = new MockDHCPController(&control_interface_, ifname_);
   StartEthernet();
   SetLinkUp(true);
   EXPECT_EQ(nullptr, GetSelectedService());
-  EXPECT_CALL(dhcp_provider_, CreateIPv4Config(_, _, _, _))
-      .WillOnce(Return(dhcp_config_));
-  EXPECT_CALL(*dhcp_config_, RequestIP()).WillOnce(Return(true));
-  EXPECT_CALL(dispatcher_,
-              PostDelayedTask(_, _, 0));  // Posts ConfigureStaticIPTask.
+  EXPECT_CALL(dhcp_provider_, CreateController(_, _, _))
+      .WillOnce(
+          Return(ByMove(std::unique_ptr<DHCPController>(dhcp_controller))));
+  EXPECT_CALL(*dhcp_controller, RequestIP()).WillOnce(Return(true));
   EXPECT_CALL(*mock_service_, SetState(Service::kStateConfiguring));
   ethernet_->ConnectTo(mock_service_.get());
+  dispatcher_.task_environment().RunUntilIdle();
   EXPECT_EQ(GetService(), GetSelectedService());
   Mock::VerifyAndClearExpectations(mock_service_.get());
 
@@ -404,14 +386,11 @@ TEST_F(EthernetTest, ConnectToSuccess) {
   StopEthernet();
 }
 
-#if !defined(DISABLE_WIRED_8021X)
 TEST_F(EthernetTest, OnEapDetected) {
   EXPECT_FALSE(GetIsEapDetected());
   EXPECT_CALL(*eap_listener_, Stop());
   EXPECT_CALL(ethernet_eap_provider_,
               SetCredentialChangeCallback(ethernet_.get(), _));
-  EXPECT_CALL(dispatcher_,
-              PostDelayedTask(_, _, 0));  // Posts TryEapAuthenticationTask.
   TriggerOnEapDetected();
   EXPECT_TRUE(GetIsEapDetected());
 }
@@ -466,7 +445,7 @@ TEST_F(EthernetTest, StartSupplicant) {
   // Also, the mock pointers should remain; if the MockProxyFactory was
   // invoked again, they would be nullptr.
   EXPECT_EQ(interface_proxy, GetSupplicantInterfaceProxy());
-  EXPECT_EQ(kInterfacePath, GetSupplicantInterfacePath());
+  EXPECT_EQ(dbus_path_, GetSupplicantInterfacePath());
 }
 
 TEST_F(EthernetTest, StartSupplicantWithInterfaceExistsException) {
@@ -474,18 +453,17 @@ TEST_F(EthernetTest, StartSupplicantWithInterfaceExistsException) {
   MockSupplicantInterfaceProxy* interface_proxy =
       ExpectCreateSupplicantInterfaceProxy();
   EXPECT_CALL(*process_proxy, CreateInterface(_, _)).WillOnce(Return(false));
-  EXPECT_CALL(*process_proxy, GetInterface(kDeviceName, _))
-      .WillOnce(DoAll(SetArgPointee<1>(kInterfacePath), Return(true)));
+  EXPECT_CALL(*process_proxy, GetInterface(ifname_, _))
+      .WillOnce(DoAll(SetArgPointee<1>(dbus_path_), Return(true)));
   EXPECT_TRUE(InvokeStartSupplicant());
   EXPECT_EQ(interface_proxy, GetSupplicantInterfaceProxy());
-  EXPECT_EQ(kInterfacePath, GetSupplicantInterfacePath());
+  EXPECT_EQ(dbus_path_, GetSupplicantInterfacePath());
 }
 
 TEST_F(EthernetTest, StartSupplicantWithUnknownException) {
   MockSupplicantProcessProxy* process_proxy = supplicant_process_proxy_;
   EXPECT_CALL(*process_proxy, CreateInterface(_, _)).WillOnce(Return(false));
-  EXPECT_CALL(*process_proxy, GetInterface(kDeviceName, _))
-      .WillOnce(Return(false));
+  EXPECT_CALL(*process_proxy, GetInterface(ifname_, _)).WillOnce(Return(false));
   EXPECT_FALSE(InvokeStartSupplicant());
   EXPECT_EQ(nullptr, GetSupplicantInterfaceProxy());
   EXPECT_EQ(RpcIdentifier(""), GetSupplicantInterfacePath());
@@ -553,7 +531,7 @@ TEST_F(EthernetTest, StopSupplicant) {
   SetIsEapAuthenticated(true);
   SetSupplicantNetworkPath(RpcIdentifier("/network/1"));
   EXPECT_CALL(*interface_proxy, EAPLogoff()).WillOnce(Return(true));
-  EXPECT_CALL(*process_proxy, RemoveInterface(Eq(kInterfacePath)))
+  EXPECT_CALL(*process_proxy, RemoveInterface(Eq(dbus_path_)))
       .WillOnce(Return(true));
   InvokeStopSupplicant();
   EXPECT_EQ(nullptr, GetSupplicantInterfaceProxy());
@@ -573,125 +551,75 @@ TEST_F(EthernetTest, Certification) {
   TriggerCertification(kSubjectName, kDepth);
   StopEthernet();
 }
-#endif  // DISABLE_WIRED_8021X
-
-#if !defined(DISABLE_PPPOE)
-
-MATCHER_P(TechnologyEq, technology, "") {
-  return arg->technology() == technology;
-}
-
-TEST_F(EthernetTest, TogglePPPoE) {
-  SetService(mock_service_);
-
-  EXPECT_CALL(*mock_service_, technology())
-      .WillRepeatedly(Return(Technology::kEthernet));
-  EXPECT_CALL(ethernet_provider_, CreateService(_))
-      .WillRepeatedly(Return(mock_service_));
-  EXPECT_CALL(*mock_service_, Disconnect(_, _));
-  EXPECT_CALL(manager_, HasService(_)).WillRepeatedly(Return(true));
-
-  InSequence sequence;
-  EXPECT_CALL(ethernet_provider_, DeregisterService(Eq(mock_service_)));
-  EXPECT_CALL(manager_, RegisterService(TechnologyEq(Technology::kPPPoE)));
-  EXPECT_CALL(manager_, DeregisterService(TechnologyEq(Technology::kPPPoE)));
-  EXPECT_CALL(ethernet_provider_, RegisterService(_));
-
-  const std::vector<std::pair<bool, Technology>> transitions = {
-      {false, Technology::kEthernet},
-      {true, Technology::kPPPoE},
-      {false, Technology::kEthernet},
-  };
-  for (const auto& transition : transitions) {
-    Error error;
-    ethernet_->mutable_store()->SetBoolProperty(kPPPoEProperty,
-                                                transition.first, &error);
-    EXPECT_TRUE(error.IsSuccess());
-    EXPECT_EQ(GetService()->technology(), transition.second);
-  }
-}
-
-#else
-
-TEST_F(EthernetTest, PPPoEDisabled) {
-  Error error;
-  ethernet_->mutable_store()->SetBoolProperty(kPPPoEProperty, true, &error);
-  EXPECT_FALSE(error.IsSuccess());
-}
-
-#endif  // DISABLE_PPPOE
-
-TEST_F(EthernetTest, SetUsbEthernetMacAddressSourceInvalidArguments) {
-  SetBusType(kDeviceBusTypeUsb);
-  Error error(Error::kOperationInitiated);
-  SetUsbEthernetMacAddressSource(
-      "invalid_value", &error,
-      base::Bind(&EthernetTest::ErrorCallback, base::Unretained(this)));
-  EXPECT_EQ(error.type(), Error::kInvalidArguments);
-}
-
-TEST_F(EthernetTest, SetUsbEthernetMacAddressSourceNotSupportedForNonUsb) {
-  SetBusType(kDeviceBusTypePci);
-  Error error(Error::kOperationInitiated);
-  EXPECT_CALL(*this, ErrorCallback(_)).Times(0);
-  SetUsbEthernetMacAddressSource(
-      kUsbEthernetMacAddressSourceUsbAdapterMac, &error,
-      base::Bind(&EthernetTest::ErrorCallback, base::Unretained(this)));
-  EXPECT_EQ(error.type(), Error::kNotSupported);
-}
-
-TEST_F(EthernetTest,
-       SetUsbEthernetMacAddressSourceNotSupportedEmptyFileWithMac) {
-  SetBusType(kDeviceBusTypeUsb);
-  Error error(Error::kOperationInitiated);
-  EXPECT_CALL(*this, ErrorCallback(_)).Times(0);
-  SetUsbEthernetMacAddressSource(
-      kUsbEthernetMacAddressSourceDesignatedDockMac, &error,
-      base::Bind(&EthernetTest::ErrorCallback, base::Unretained(this)));
-  EXPECT_EQ(error.type(), Error::kNotSupported);
-}
 
 MATCHER_P(ErrorEquals, expected_error_type, "") {
   return arg.type() == expected_error_type;
 }
 
+TEST_F(EthernetTest, SetUsbEthernetMacAddressSourceInvalidArguments) {
+  SetBusType(kDeviceBusTypeUsb);
+
+  EXPECT_CALL(*this, ErrorCallback(ErrorEquals(Error::kInvalidArguments)));
+  SetUsbEthernetMacAddressSource(
+      "invalid_value",
+      base::BindOnce(&EthernetTest::ErrorCallback, base::Unretained(this)));
+}
+
+TEST_F(EthernetTest, SetUsbEthernetMacAddressSourceNotSupportedForNonUsb) {
+  SetBusType(kDeviceBusTypePci);
+
+  EXPECT_CALL(*this, ErrorCallback(ErrorEquals(Error::kIllegalOperation)));
+  SetUsbEthernetMacAddressSource(
+      kUsbEthernetMacAddressSourceUsbAdapterMac,
+      base::BindOnce(&EthernetTest::ErrorCallback, base::Unretained(this)));
+}
+
+TEST_F(EthernetTest,
+       SetUsbEthernetMacAddressSourceNotSupportedEmptyFileWithMac) {
+  SetBusType(kDeviceBusTypeUsb);
+  EXPECT_CALL(*this, ErrorCallback(ErrorEquals(Error::kNotFound)));
+  SetUsbEthernetMacAddressSource(
+      kUsbEthernetMacAddressSourceDesignatedDockMac,
+      base::BindOnce(&EthernetTest::ErrorCallback, base::Unretained(this)));
+}
+
 TEST_F(EthernetTest, SetUsbEthernetMacAddressSourceNetlinkError) {
   SetBusType(kDeviceBusTypeUsb);
 
-  constexpr char kBuiltinAdapterMacAddress[] = "abcdef123456";
+  constexpr net_base::MacAddress kBuiltinAdapterMacAddress(0xab, 0xcd, 0xef,
+                                                           0x12, 0x34, 0x56);
+  constexpr char kBuiltinAdapterMacAddressHexString[] = "abcdef123456";
+
   EXPECT_CALL(*ethernet_.get(), ReadMacAddressFromFile(_))
-      .WillOnce(Return(kBuiltinAdapterMacAddress));
+      .WillOnce(Return(kBuiltinAdapterMacAddressHexString));
 
   EXPECT_CALL(rtnl_handler_, SetInterfaceMac(ethernet_->interface_index(),
-                                             ByteString::CreateFromHexString(
-                                                 kBuiltinAdapterMacAddress),
-                                             _))
+                                             kBuiltinAdapterMacAddress, _))
       .WillOnce(WithArg<2>(
           Invoke([](base::OnceCallback<void(int32_t)> response_callback) {
             ASSERT_TRUE(!response_callback.is_null());
             std::move(response_callback).Run(1 /* error */);
           })));
 
-  EXPECT_CALL(*this, ErrorCallback(ErrorEquals(Error::kNotSupported)));
-
-  Error error(Error::kOperationInitiated);
+  EXPECT_CALL(*this, ErrorCallback(ErrorEquals(Error::kOperationFailed)));
   SetUsbEthernetMacAddressSource(
-      kUsbEthernetMacAddressSourceBuiltinAdapterMac, &error,
-      base::Bind(&EthernetTest::ErrorCallback, base::Unretained(this)));
+      kUsbEthernetMacAddressSourceBuiltinAdapterMac,
+      base::BindOnce(&EthernetTest::ErrorCallback, base::Unretained(this)));
 
-  EXPECT_EQ(kDeviceAddress, ethernet_->mac_address());
+  EXPECT_EQ(hwaddr_, ethernet_->mac_address());
 }
 
 TEST_F(EthernetTest, SetUsbEthernetMacAddressSource) {
   SetBusType(kDeviceBusTypeUsb);
 
-  constexpr char kBuiltinAdapterMacAddress[] = "abcdef123456";
+  constexpr net_base::MacAddress kBuiltinAdapterMacAddress(0xab, 0xcd, 0xef,
+                                                           0x12, 0x34, 0x56);
+  constexpr char kBuiltinAdapterMacAddressHexString[] = "abcdef123456";
+
   EXPECT_CALL(*ethernet_.get(), ReadMacAddressFromFile(_))
-      .WillOnce(Return(kBuiltinAdapterMacAddress));
+      .WillOnce(Return(kBuiltinAdapterMacAddressHexString));
   EXPECT_CALL(rtnl_handler_, SetInterfaceMac(ethernet_->interface_index(),
-                                             ByteString::CreateFromHexString(
-                                                 kBuiltinAdapterMacAddress),
-                                             _))
+                                             kBuiltinAdapterMacAddress, _))
       .WillOnce(WithArg<2>(
           Invoke([](base::OnceCallback<void(int32_t)> response_callback) {
             ASSERT_FALSE(response_callback.is_null());
@@ -699,13 +627,11 @@ TEST_F(EthernetTest, SetUsbEthernetMacAddressSource) {
           })));
 
   EXPECT_CALL(*this, ErrorCallback(ErrorEquals(Error::kSuccess)));
-
-  Error error(Error::kOperationInitiated);
   SetUsbEthernetMacAddressSource(
-      kUsbEthernetMacAddressSourceBuiltinAdapterMac, &error,
-      base::Bind(&EthernetTest::ErrorCallback, base::Unretained(this)));
+      kUsbEthernetMacAddressSourceBuiltinAdapterMac,
+      base::BindOnce(&EthernetTest::ErrorCallback, base::Unretained(this)));
 
-  EXPECT_EQ(kBuiltinAdapterMacAddress, ethernet_->mac_address());
+  EXPECT_EQ(kBuiltinAdapterMacAddressHexString, ethernet_->mac_address());
   EXPECT_EQ(GetUsbEthernetMacAddressSource(nullptr),
             kUsbEthernetMacAddressSourceBuiltinAdapterMac);
 }
@@ -743,6 +669,207 @@ TEST_F(EthernetTest, SetMacAddressServiceStorageIdentifierChange) {
   // Must set nullptr to avoid mock objects leakage.
   mock_service_->set_profile(nullptr);
   StopEthernet();
+}
+
+TEST_F(EthernetTest, UpdateLinkSpeed) {
+  EXPECT_CALL(*mock_service_, SetUplinkSpeedKbps(_));
+
+  SelectService(mock_service_);
+  UpdateLinkSpeed();
+}
+
+TEST_F(EthernetTest, UpdateLinkSpeedNoSelectedService) {
+  EXPECT_CALL(*mock_service_, SetUplinkSpeedKbps(_)).Times(0);
+
+  SelectService(nullptr);
+  UpdateLinkSpeed();
+}
+
+TEST_F(EthernetTest, RunEthtoolCmdSuccess) {
+  struct ethtool_cmd ecmd;
+  struct ifreq ifr;
+
+  memset(&ecmd, 0, sizeof(ecmd));
+  ecmd.cmd = ETHTOOL_GSET;
+  ifr.ifr_data = &ecmd;
+
+  EXPECT_CALL(*socket_factory_,
+              Create(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_IP))
+      .WillOnce([]() {
+        auto socket = std::make_unique<net_base::MockSocket>();
+        EXPECT_CALL(*socket, Ioctl(SIOCETHTOOL, _)).WillOnce(Return(1));
+        return socket;
+      });
+  EXPECT_TRUE(ethernet_->RunEthtoolCmd(&ifr));
+}
+
+TEST_F(EthernetTest, RunEthtoolCmdFail) {
+  struct ethtool_cmd ecmd;
+  struct ifreq ifr;
+
+  memset(&ecmd, 0, sizeof(ecmd));
+  ecmd.cmd = ETHTOOL_GSET;
+  ifr.ifr_data = &ecmd;
+
+  EXPECT_CALL(*socket_factory_,
+              Create(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_IP))
+      .WillOnce([]() {
+        auto socket = std::make_unique<net_base::MockSocket>();
+        EXPECT_CALL(*socket, Ioctl(SIOCETHTOOL, _))
+            .WillOnce(Return(std::nullopt));
+        return socket;
+      });
+  EXPECT_FALSE(ethernet_->RunEthtoolCmd(&ifr));
+}
+
+TEST_F(EthernetTest, ReachabilityEvent_Online) {
+  using Role = patchpanel::Client::NeighborRole;
+  using Status = patchpanel::Client::NeighborStatus;
+
+  auto network =
+      std::make_unique<MockNetwork>(1, "eth0", Technology::kEthernet);
+  auto network_p = network.get();
+
+  ethernet_->set_network_for_testing(std::move(network));
+  ethernet_->set_selected_service_for_testing(mock_service_);
+  SetService(mock_service_);
+  ON_CALL(*mock_service_, IsConnected(_)).WillByDefault(Return(true));
+  ON_CALL(*mock_service_, state()).WillByDefault(Return(Service::kStateOnline));
+  ON_CALL(*mock_service_, IsPortalDetectionDisabled())
+      .WillByDefault(Return(false));
+  ON_CALL(*network_p, IsPortalDetectionInProgress())
+      .WillByDefault(Return(false));
+  ON_CALL(*network_p, IsConnected()).WillByDefault(Return(true));
+
+  // Service state is 'online', REACHABLE neighbor events are ignored.
+  EXPECT_CALL(*network_p, StartPortalDetection).Times(0);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv4Addr, Role::kGateway,
+                                         Status::kReachable);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv6Addr, Role::kGatewayAndDnsServer,
+                                         Status::kReachable);
+  Mock::VerifyAndClearExpectations(network_p);
+
+  // Service state is 'online', FAILED gateway neighbor events triggers network
+  // validation.
+  EXPECT_CALL(*network_p,
+              StartPortalDetection(
+                  Network::ValidationReason::kEthernetGatewayUnreachable))
+      .WillOnce(Return(true));
+  ethernet_->OnNeighborReachabilityEvent(
+      ethernet_->interface_index(), kIPv4Addr, Role::kGateway, Status::kFailed);
+  Mock::VerifyAndClearExpectations(network_p);
+
+  EXPECT_CALL(*network_p,
+              StartPortalDetection(
+                  Network::ValidationReason::kEthernetGatewayUnreachable));
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv6Addr, Role::kGatewayAndDnsServer,
+                                         Status::kFailed);
+  Mock::VerifyAndClearExpectations(network_p);
+}
+
+TEST_F(EthernetTest, ReachabilityEvent_NotOnline) {
+  using Role = patchpanel::Client::NeighborRole;
+  using Status = patchpanel::Client::NeighborStatus;
+
+  auto network =
+      std::make_unique<MockNetwork>(1, "eth0", Technology::kEthernet);
+  auto network_p = network.get();
+
+  ethernet_->set_network_for_testing(std::move(network));
+  ethernet_->set_selected_service_for_testing(mock_service_);
+  SetService(mock_service_);
+  ON_CALL(*mock_service_, IsConnected(_)).WillByDefault(Return(true));
+  ON_CALL(*mock_service_, state()).WillByDefault(Return(Service::kStateOnline));
+  ON_CALL(*mock_service_, IsPortalDetectionDisabled())
+      .WillByDefault(Return(false));
+  ON_CALL(*network_p, IsPortalDetectionInProgress())
+      .WillByDefault(Return(false));
+  ON_CALL(*network_p, IsConnected()).WillByDefault(Return(true));
+
+  // Service state is connected but not 'online', FAILED neighbor events are
+  // ignored.
+  ON_CALL(*mock_service_, state())
+      .WillByDefault(Return(Service::kStateNoConnectivity));
+  EXPECT_CALL(*network_p, StartPortalDetection).Times(0);
+  ethernet_->OnNeighborReachabilityEvent(
+      ethernet_->interface_index(), kIPv4Addr, Role::kGateway, Status::kFailed);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv6Addr, Role::kGatewayAndDnsServer,
+                                         Status::kFailed);
+  Mock::VerifyAndClearExpectations(network_p);
+
+  // Service state is connected but not 'online', REACHABLE neighbor events
+  // triggers network validation.
+  EXPECT_CALL(*network_p,
+              StartPortalDetection(
+                  Network::ValidationReason::kEthernetGatewayReachable));
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv4Addr, Role::kGateway,
+                                         Status::kReachable);
+  Mock::VerifyAndClearExpectations(network_p);
+
+  EXPECT_CALL(*network_p,
+              StartPortalDetection(
+                  Network::ValidationReason::kEthernetGatewayReachable));
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv6Addr, Role::kGatewayAndDnsServer,
+                                         Status::kReachable);
+  Mock::VerifyAndClearExpectations(network_p);
+}
+
+TEST_F(EthernetTest, ReachabilityEvent_DNSServers) {
+  using Role = patchpanel::Client::NeighborRole;
+  using Status = patchpanel::Client::NeighborStatus;
+
+  auto network =
+      std::make_unique<MockNetwork>(1, "eth0", Technology::kEthernet);
+  auto network_p = network.get();
+
+  ethernet_->set_network_for_testing(std::move(network));
+  ethernet_->set_selected_service_for_testing(mock_service_);
+  SetService(mock_service_);
+  ON_CALL(*mock_service_, IsConnected(_)).WillByDefault(Return(true));
+  ON_CALL(*mock_service_, state()).WillByDefault(Return(Service::kStateOnline));
+  ON_CALL(*mock_service_, IsPortalDetectionDisabled())
+      .WillByDefault(Return(false));
+  ON_CALL(*network_p, IsPortalDetectionInProgress())
+      .WillByDefault(Return(false));
+  ON_CALL(*network_p, IsConnected()).WillByDefault(Return(true));
+
+  // DNS neighbor events are always ignored.
+  EXPECT_CALL(*network_p, StartPortalDetection).Times(0);
+  ON_CALL(*mock_service_, state())
+      .WillByDefault(Return(Service::kStateConnected));
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv4Addr, Role::kDnsServer,
+                                         Status::kFailed);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv6Addr, Role::kDnsServer,
+                                         Status::kFailed);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv4Addr, Role::kDnsServer,
+                                         Status::kReachable);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv6Addr, Role::kDnsServer,
+                                         Status::kReachable);
+  ON_CALL(*mock_service_, state())
+      .WillByDefault(Return(Service::kStateConnected));
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv4Addr, Role::kDnsServer,
+                                         Status::kFailed);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv6Addr, Role::kDnsServer,
+                                         Status::kFailed);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv4Addr, Role::kDnsServer,
+                                         Status::kReachable);
+  ethernet_->OnNeighborReachabilityEvent(ethernet_->interface_index(),
+                                         kIPv6Addr, Role::kDnsServer,
+                                         Status::kReachable);
+  Mock::VerifyAndClearExpectations(network_p);
 }
 
 }  // namespace shill

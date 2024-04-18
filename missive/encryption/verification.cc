@@ -1,13 +1,16 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/encryption/verification.h"
 
-#include <memory>
-#include <type_traits>
+#include <string>
+#include <string_view>
+
+#include <base/memory/scoped_refptr.h>
 
 #include "missive/encryption/primitives.h"
+#include "missive/util/dynamic_flag.h"
 #include "missive/util/status.h"
 
 namespace reporting {
@@ -27,31 +30,41 @@ constexpr uint8_t kDevVerificationKey[kKeySize] = {
 
 }  // namespace
 
+SignatureVerificationDevFlag::SignatureVerificationDevFlag(bool is_enabled)
+    : DynamicFlag("signature_verification_dev", is_enabled) {}
+
 // static
-base::StringPiece SignatureVerifier::VerificationKey() {
-  return base::StringPiece(reinterpret_cast<const char*>(kProdVerificationKey),
-                           kKeySize);
+std::string_view SignatureVerifier::VerificationKey() {
+  return std::string_view(reinterpret_cast<const char*>(kProdVerificationKey),
+                          kKeySize);
 }
 
 // static
-base::StringPiece SignatureVerifier::VerificationKeyDev() {
-  return base::StringPiece(reinterpret_cast<const char*>(kDevVerificationKey),
-                           kKeySize);
+std::string_view SignatureVerifier::VerificationKeyDev() {
+  return std::string_view(reinterpret_cast<const char*>(kDevVerificationKey),
+                          kKeySize);
 }
 
-SignatureVerifier::SignatureVerifier(base::StringPiece verification_public_key)
-    : verification_public_key_(verification_public_key) {}
+SignatureVerifier::SignatureVerifier(
+    std::string_view verification_public_key,
+    scoped_refptr<SignatureVerificationDevFlag> signature_verification_dev_flag)
+    : verification_public_key_(verification_public_key),
+      signature_verification_dev_flag_(signature_verification_dev_flag) {}
 
-Status SignatureVerifier::Verify(base::StringPiece message,
-                                 base::StringPiece signature) {
+Status SignatureVerifier::Verify(std::string_view message,
+                                 std::string_view signature) const {
+  std::string verification_key_dev = std::string(VerificationKeyDev());
+  const std::string& verification_public_key =
+      signature_verification_dev_flag_->is_enabled() ? verification_key_dev
+                                                     : verification_public_key_;
   if (signature.size() != kSignatureSize) {
     return Status{error::FAILED_PRECONDITION, "Wrong signature size"};
   }
-  if (verification_public_key_.size() != kKeySize) {
+  if (verification_public_key.size() != kKeySize) {
     return Status{error::FAILED_PRECONDITION, "Wrong public key size"};
   }
   if (!VerifySignature(
-          reinterpret_cast<const uint8_t*>(verification_public_key_.data()),
+          reinterpret_cast<const uint8_t*>(verification_public_key.data()),
           message, reinterpret_cast<const uint8_t*>(signature.data()))) {
     return Status{error::INVALID_ARGUMENT, "Verification failed"};
   }

@@ -1,19 +1,20 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "rmad/state_handler/check_calibration_state_handler.h"
 
 #include <memory>
-#include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <base/logging.h>
 
 #include "rmad/constants.h"
+#include "rmad/logs/logs_constants.h"
+#include "rmad/logs/logs_utils.h"
 #include "rmad/utils/calibration_utils.h"
-#include "rmad/utils/iio_sensor_probe_utils_impl.h"
 
 namespace rmad {
 
@@ -26,8 +27,9 @@ RmadState ConvertDictionaryToState(
   auto check_calibration = std::make_unique<CheckCalibrationState>();
   for (const auto& [unused_instruction, components] : calibration_map) {
     for (const auto& [component, status] : components) {
-      if (component == RMAD_COMPONENT_UNKNOWN) {
-        LOG(WARNING) << "Dictionary contains UNKNOWN component";
+      if (!IsValidCalibrationComponent(component)) {
+        LOG(WARNING) << "Dictionary contains unsupported component "
+                     << RmadComponent_Name(component);
         continue;
       }
       CalibrationComponentStatus* calibration_component_status =
@@ -53,42 +55,52 @@ RmadState ConvertDictionaryToState(
 }  // namespace
 
 CheckCalibrationStateHandler::CheckCalibrationStateHandler(
-    scoped_refptr<JsonStore> json_store)
-    : BaseStateHandler(json_store) {
-  iio_sensor_probe_utils_ = std::make_unique<IioSensorProbeUtilsImpl>();
-}
-
-CheckCalibrationStateHandler::CheckCalibrationStateHandler(
     scoped_refptr<JsonStore> json_store,
-    std::unique_ptr<IioSensorProbeUtils> iio_sensor_probe_utils)
-    : BaseStateHandler(json_store),
-      iio_sensor_probe_utils_(std::move(iio_sensor_probe_utils)) {}
+    scoped_refptr<DaemonCallback> daemon_callback)
+    : BaseStateHandler(json_store, daemon_callback) {}
 
 RmadErrorCode CheckCalibrationStateHandler::InitializeState() {
-  // It may return false if calibration map is uninitialized, which can be
-  // ignored. We can initialize state handler from an empty or fulfilled
-  // dictionary.
-  GetCalibrationMap(json_store_, &calibration_map_);
+  // The calibration map should be initialized in the provisioning state.
+  if (!GetCalibrationMap(json_store_, &calibration_map_)) {
+    LOG(ERROR) << "Failed to get calibration status.";
+    return RMAD_ERROR_STATE_HANDLER_INITIALIZATION_FAILED;
+  }
 
-  // Always probe again and use the probe results to update |state_|.
-  std::set<RmadComponent> probed_components = iio_sensor_probe_utils_->Probe();
-
-  // Update probeable components using runtime_probe results.
-  for (RmadComponent component : kComponentsNeedManualCalibration) {
-    if (probed_components.count(component) > 0) {
-      auto& components =
-          calibration_map_[GetCalibrationSetupInstruction(component)];
-      // If the component is not found in the dictionary, it should be a new
-      // sensor and we should calibrate it.
-      if (components.find(component) == components.end()) {
-        components[component] =
-            CalibrationComponentStatus::RMAD_CALIBRATION_WAITING;
+  // We mark all components with an unexpected status as failed because it may
+  // have some errors.
+  for (auto& [instruction, components] : calibration_map_) {
+    for (auto& [component, status] : components) {
+      if (IsInProgressStatus(status) || IsUnknownStatus(status)) {
+        status = CalibrationComponentStatus::RMAD_CALIBRATION_FAILED;
       }
     }
   }
 
+  if (!SetCalibrationMap(json_store_, calibration_map_)) {
+    LOG(ERROR) << "Failed to set calibration status.";
+    return RMAD_ERROR_STATE_HANDLER_INITIALIZATION_FAILED;
+  }
+
   state_ = ConvertDictionaryToState(calibration_map_);
   return RMAD_ERROR_OK;
+}
+
+void CheckCalibrationStateHandler::RunState() {
+  // Log failed components.
+  std::vector<std::pair<std::string, LogCalibrationStatus>>
+      log_component_statuses;
+  for (const auto& [instruction, components] : calibration_map_) {
+    for (const auto& [component, status] : components) {
+      if (status == CalibrationComponentStatus::RMAD_CALIBRATION_FAILED) {
+        log_component_statuses.emplace_back(RmadComponent_Name(component),
+                                            LogCalibrationStatus::kFailed);
+      }
+    }
+  }
+
+  if (!log_component_statuses.empty()) {
+    RecordComponentCalibrationStatusToLogs(json_store_, log_component_statuses);
+  }
 }
 
 BaseStateHandler::GetNextStateCaseReply
@@ -96,19 +108,28 @@ CheckCalibrationStateHandler::GetNextStateCase(const RmadState& state) {
   bool need_calibration;
   RmadErrorCode error_code;
   if (!CheckIsCalibrationRequired(state, &need_calibration, &error_code)) {
-    return {.error = error_code, .state_case = GetStateCase()};
+    return NextStateCaseWrapper(error_code);
+  }
+
+  // kWipeDevice should be set by previous states.
+  bool wipe_device;
+  if (!json_store_->GetValue(kWipeDevice, &wipe_device)) {
+    LOG(ERROR) << "Variable " << kWipeDevice << " not found";
+    return NextStateCaseWrapper(RMAD_ERROR_TRANSITION_FAILED);
   }
 
   state_ = state;
   SetCalibrationMap(json_store_, calibration_map_);
 
   if (need_calibration) {
-    return {.error = RMAD_ERROR_OK,
-            .state_case = RmadState::StateCase::kSetupCalibration};
+    return NextStateCaseWrapper(RmadState::StateCase::kSetupCalibration);
   }
 
-  return {.error = RMAD_ERROR_OK,
-          .state_case = RmadState::StateCase::kProvisionDevice};
+  if (wipe_device) {
+    return NextStateCaseWrapper(RmadState::StateCase::kFinalize);
+  } else {
+    return NextStateCaseWrapper(RmadState::StateCase::kWpEnablePhysical);
+  }
 }
 
 bool CheckCalibrationStateHandler::CheckIsUserSelectionValid(
@@ -119,7 +140,7 @@ bool CheckCalibrationStateHandler::CheckIsUserSelectionValid(
   if (user_selection.components_size() !=
       state_.check_calibration().components_size()) {
     LOG(ERROR) << "Size of components has been changed!";
-    *error_code = RMAD_ERROR_REQUEST_INVALID;
+    *error_code = RMAD_ERROR_CALIBRATION_COMPONENT_MISSING;
     return false;
   }
 
@@ -132,18 +153,13 @@ bool CheckCalibrationStateHandler::CheckIsUserSelectionValid(
     if (!calibration_map_[instruction].count(component)) {
       LOG(ERROR) << RmadComponent_Name(component)
                  << " has not been probed, it should not be selected!";
-      *error_code = RMAD_ERROR_REQUEST_INVALID;
+      *error_code = RMAD_ERROR_CALIBRATION_COMPONENT_INVALID;
       return false;
-    } else if (calibration_map_[instruction][component] != status &&
-               status != CalibrationComponentStatus::RMAD_CALIBRATION_SKIP) {
-      LOG(ERROR) << RmadComponent_Name(component)
-                 << "'s status has been changed from "
-                 << CalibrationComponentStatus::CalibrationStatus_Name(
-                        calibration_map_[instruction][component])
-                 << " to "
+    } else if (!IsWaitingForCalibration(status) && !IsCompleteStatus(status)) {
+      LOG(ERROR) << RmadComponent_Name(component) << "'s status is "
                  << CalibrationComponentStatus::CalibrationStatus_Name(status)
-                 << ", it should not be changed manually!";
-      *error_code = RMAD_ERROR_REQUEST_INVALID;
+                 << ", but it should be chosen to skip or waiting to retry.";
+      *error_code = RMAD_ERROR_CALIBRATION_STATUS_MISSING;
       return false;
     }
   }
@@ -166,49 +182,57 @@ bool CheckCalibrationStateHandler::CheckIsCalibrationRequired(
     return false;
   }
 
+  // Capture the calibration statuses for logs.
+  std::vector<std::pair<std::string, LogCalibrationStatus>>
+      log_component_statuses;
+
+  // All components here are valid.
   for (int i = 0; i < user_selection.components_size(); ++i) {
     const CalibrationComponentStatus& component_status =
         user_selection.components(i);
-    if (component_status.component() == RMAD_COMPONENT_UNKNOWN) {
-      *error_code = RMAD_ERROR_REQUEST_ARGS_MISSING;
-      LOG(ERROR) << "RmadState missing |component| argument.";
-      return false;
-    }
+    RmadComponent component = component_status.component();
+    CalibrationComponentStatus::CalibrationStatus status =
+        component_status.status();
 
-    CalibrationSetupInstruction instruction =
-        GetCalibrationSetupInstruction(component_status.component());
-    if (instruction == RMAD_CALIBRATION_INSTRUCTION_UNKNOWN) {
-      *error_code = RMAD_ERROR_CALIBRATION_COMPONENT_INVALID;
-      LOG_STREAM(ERROR) << RmadComponent_Name(component_status.component())
-                        << " cannot be calibrated.";
-      return false;
-    }
-
-    // Since the entire calibration process is check -> setup -> calibrate ->
-    // complete or return to check, the status may be waiting, in progress
-    // (timeout), failed, complete or skip here.
-    switch (component_status.status()) {
-      // For in progress and failed cases, we also need to calibrate it.
+    switch (status) {
       case CalibrationComponentStatus::RMAD_CALIBRATION_WAITING:
-      case CalibrationComponentStatus::RMAD_CALIBRATION_IN_PROGRESS:
       case CalibrationComponentStatus::RMAD_CALIBRATION_FAILED:
         *need_calibration = true;
         break;
-      // For those already calibrated and skipped component, we don't need to
-      // calibrate it.
+      // For those already calibrated and skipped components, we don't need to
+      // calibrate them.
       case CalibrationComponentStatus::RMAD_CALIBRATION_COMPLETE:
       case CalibrationComponentStatus::RMAD_CALIBRATION_SKIP:
         break;
       case CalibrationComponentStatus::RMAD_CALIBRATION_UNKNOWN:
       default:
+        NOTREACHED();
         *error_code = RMAD_ERROR_REQUEST_ARGS_MISSING;
         LOG(ERROR)
             << "RmadState component missing |calibration_status| argument.";
         return false;
     }
 
-    calibration_map_[instruction][component_status.component()] =
-        component_status.status();
+    // For sensors that failed to calibrate, we need to retry, so we set them to
+    // wait for calibration.
+    if (status == CalibrationComponentStatus::RMAD_CALIBRATION_FAILED) {
+      status = CalibrationComponentStatus::RMAD_CALIBRATION_WAITING;
+    }
+    calibration_map_[GetCalibrationSetupInstruction(component)][component] =
+        status;
+
+    if (status == CalibrationComponentStatus::RMAD_CALIBRATION_WAITING ||
+        status == CalibrationComponentStatus::RMAD_CALIBRATION_SKIP) {
+      log_component_statuses.emplace_back(
+          RmadComponent_Name(component),
+          status == CalibrationComponentStatus::RMAD_CALIBRATION_WAITING
+              ? LogCalibrationStatus::kRetry
+              : LogCalibrationStatus::kSkip);
+    }
+  }
+
+  if (!log_component_statuses.empty()) {
+    RecordComponentCalibrationStatusToLogs(json_store_, log_component_statuses);
   }
 
   *error_code = RMAD_ERROR_OK;

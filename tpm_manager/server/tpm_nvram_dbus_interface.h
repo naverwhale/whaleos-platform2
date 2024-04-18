@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,16 +7,16 @@
 
 namespace tpm_manager {
 
-constexpr char kTpmNvramInterface[] = "org.chromium.TpmNvram";
+inline constexpr char kTpmNvramInterface[] = "org.chromium.TpmNvram";
 
 // Methods exported by tpm_manager nvram D-Bus interface.
-constexpr char kDefineSpace[] = "DefineSpace";
-constexpr char kDestroySpace[] = "DestroySpace";
-constexpr char kWriteSpace[] = "WriteSpace";
-constexpr char kReadSpace[] = "ReadSpace";
-constexpr char kLockSpace[] = "LockSpace";
-constexpr char kListSpaces[] = "ListSpaces";
-constexpr char kGetSpaceInfo[] = "GetSpaceInfo";
+inline constexpr char kDefineSpace[] = "DefineSpace";
+inline constexpr char kDestroySpace[] = "DestroySpace";
+inline constexpr char kWriteSpace[] = "WriteSpace";
+inline constexpr char kReadSpace[] = "ReadSpace";
+inline constexpr char kLockSpace[] = "LockSpace";
+inline constexpr char kListSpaces[] = "ListSpaces";
+inline constexpr char kGetSpaceInfo[] = "GetSpaceInfo";
 
 }  // namespace tpm_manager
 

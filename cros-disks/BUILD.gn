@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,14 +8,30 @@ import("//common-mk/pkg_config.gni")
 group("all") {
   deps = [
     ":cros-disks",
+    ":install_cros_disks_config",
+    ":install_dbus_config",
+    ":install_minijail_config",
+    ":install_powerd_prefs",
+    ":install_setuid_restriction",
+    ":install_tmpfilesd",
+    ":install_usb_device_info",
     ":libdisks",
     ":libdisks-adaptors",
   ]
+  if (use.seccomp) {
+    deps += [ ":install_seccomp_policies" ]
+  }
   if (use.fuzzer) {
-    deps += [ ":cros-disks_filesystem_label_fuzzer" ]
+    deps += [
+      ":cros-disks_filesystem_label_fuzzer",
+      ":cros-disks_mount_info_fuzzer",
+    ]
   }
   if (use.test) {
-    deps += [ ":disks_testrunner" ]
+    deps += [
+      ":disks_testrunner",
+      ":disks_testrunner_root",
+    ]
   }
 }
 
@@ -52,12 +68,13 @@ static_library("libdisks") {
     "disk_monitor.cc",
     "drivefs_helper.cc",
     "drivefs_helper.h",
-    "error_logger.cc",
     "file_reader.cc",
     "filesystem_label.cc",
     "format_manager.cc",
     "fuse_mount_manager.cc",
     "fuse_mounter.cc",
+    "fusebox_helper.cc",
+    "fusebox_helper.h",
     "metrics.cc",
     "mount_info.cc",
     "mount_manager.cc",
@@ -87,6 +104,95 @@ executable("cros-disks") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
   deps = [ ":libdisks" ]
+  install_path = "bin"
+}
+
+install_config("install_usb_device_info") {
+  sources = [ "usb-device-info" ]
+  install_path = "/usr/share/cros-disks"
+}
+
+# We invoke systemd-tmpfiles explicitly from the upstart config
+# since it needs to run when /sys/fs/cgroup is available.
+install_config("install_tmpfilesd") {
+  sources = [ "tmpfiles.d/cros-disks.conf" ]
+  install_path = "tmpfiled_ondemand"
+}
+
+install_config("install_dbus_config") {
+  sources = [ "org.chromium.CrosDisks.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_minijail_config") {
+  sources = [ "minijail/cros-disks.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_setuid_restriction") {
+  sources = [ "setuid_restrictions/cros_disks_uid_allowlist.txt" ]
+  install_path = "/usr/share/cros/startup/process_management_policies"
+}
+
+install_config("install_powerd_prefs") {
+  sources = [
+    "powerd_prefs/suspend_freezer_deps_fuse-archive",
+    "powerd_prefs/suspend_freezer_deps_mount-zip",
+    "powerd_prefs/suspend_freezer_deps_rar2fs",
+  ]
+  install_path = "/usr/share/power_manager"
+}
+
+if (use.chromeless_tty) {
+  # Insert the --no-session-manager flag.
+  action("install_cros_disks_config") {
+    sources = [ "cros-disks.conf" ]
+    script = "//common-mk/file_generator_wrapper.py"
+    outputs = [ "${target_gen_dir}/cros-disks.conf" ]
+    args = [
+      rebase_path("rewrite_disks_conf.sh"),
+      rebase_path("cros-disks.conf"),
+      "${target_gen_dir}/cros-disks.conf",
+    ]
+    install_configs = [
+      {
+        path = "upstart"
+      },
+    ]
+  }
+} else {
+  install_config("install_cros_disks_config") {
+    sources = [ "cros-disks.conf" ]
+    install_path = "upstart"
+  }
+}
+
+if (use.seccomp) {
+  install_config("install_seccomp_policies") {
+    arch = getenv("ARCH")
+    sources = [
+      "seccomp_policy/archivemount-seccomp-$arch.policy",
+      "seccomp_policy/drivefs-seccomp-$arch.policy",
+      "seccomp_policy/fusebox-seccomp-$arch.policy",
+      "seccomp_policy/mkfs-seccomp-$arch.policy",
+      "seccomp_policy/mount-zip-seccomp-$arch.policy",
+      "seccomp_policy/rar2fs-seccomp-$arch.policy",
+      "seccomp_policy/smbfs-seccomp-$arch.policy",
+    ]
+
+    # NOSORT
+    outputs = [
+      "archivemount-seccomp.policy",
+      "drivefs-seccomp.policy",
+      "fusebox-seccomp.policy",
+      "mkfs-seccomp.policy",
+      "mount-zip-seccomp.policy",
+      "rar2fs-seccomp.policy",
+      "smbfs-seccomp.policy",
+    ]
+
+    install_path = "seccomp_policy"
+  }
 }
 
 if (use.fuzzer) {
@@ -101,13 +207,18 @@ if (use.fuzzer) {
     ]
     deps = [ ":libdisks" ]
   }
+  executable("cros-disks_mount_info_fuzzer") {
+    sources = [ "fuzzers/mount_info_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer:common_fuzzer",
+      ":target_defaults",
+    ]
+    deps = [ ":libdisks" ]
+  }
 }
 
 if (use.test) {
-  pkg_config("disks_test_config") {
-    pkg_deps = [ "libchrome-test" ]
-  }
-  executable("disks_testrunner") {
+  source_set("common_test_sources") {
     sources = [
       "archive_manager_test.cc",
       "archive_mounter_test.cc",
@@ -123,6 +234,7 @@ if (use.test) {
       "format_manager_test.cc",
       "fuse_mount_manager_test.cc",
       "fuse_mounter_test.cc",
+      "fusebox_helper_test.cc",
       "metrics_test.cc",
       "mock_platform.h",
       "mount_info_test.cc",
@@ -147,7 +259,51 @@ if (use.test) {
       ":disks_test_config",
       ":target_defaults",
     ]
+  }
+
+  COMMON_TEST_FILTER = ":DiskManagerTest.*"
+  COMMON_TEST_FILTER += ":ExternalMounterTest.*"
+  COMMON_TEST_FILTER += ":UdevDeviceTest.*"
+  COMMON_TEST_FILTER += ":MountInfoTest.RetrieveFromCurrentProcess"
+  COMMON_TEST_FILTER += ":GlibProcessTest.*"
+
+  pkg_config("disks_test_config") {
+    pkg_deps = [ "libchrome-test" ]
+  }
+
+  executable("disks_testrunner_root") {
+    run_test = true
+    gtest_filter_qemu = "*RunAsRoot*"
+    if (!use.x86 && !use.amd64) {
+      gtest_filter_qemu += COMMON_TEST_FILTER
+    }
+
+    test_config = {
+      run_as_root = true
+      gtest_filter = gtest_filter_qemu
+    }
+
     deps = [
+      ":common_test_sources",
+      ":libdisks",
+      "//common-mk/testrunner",
+    ]
+  }
+
+  executable("disks_testrunner") {
+    run_test = true
+    gtest_filter_qemu = "-*RunAsRoot*"
+    if (!use.x86 && !use.amd64) {
+      gtest_filter_qemu += COMMON_TEST_FILTER
+    }
+
+    test_config = {
+      run_as_root = false
+      gtest_filter = gtest_filter_qemu
+    }
+
+    deps = [
+      ":common_test_sources",
       ":libdisks",
       "//common-mk/testrunner",
     ]

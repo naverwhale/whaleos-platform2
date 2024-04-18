@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,10 +12,10 @@
 
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
+#include <base/memory/ptr_util.h>
 #include <base/posix/eintr_wrapper.h>
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 namespace {
 // The path to the file where we store the next cid to be used.
 const char kNextCidPath[] = "/run/vm/next_cid";
@@ -32,7 +32,7 @@ class FileLock final {
       return nullptr;
     }
 
-    return std::unique_ptr<FileLock>(new FileLock(std::move(file)));
+    return base::WrapUnique(new FileLock(std::move(file)));
   }
 
   ~FileLock() {
@@ -114,5 +114,4 @@ uint32_t VsockCidPool::Allocate() {
   return cid;
 }
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge

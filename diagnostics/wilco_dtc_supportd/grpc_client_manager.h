@@ -1,20 +1,21 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DIAGNOSTICS_WILCO_DTC_SUPPORTD_GRPC_CLIENT_MANAGER_H_
 #define DIAGNOSTICS_WILCO_DTC_SUPPORTD_GRPC_CLIENT_MANAGER_H_
 
-#include <base/callback_forward.h>
+#include <base/functional/callback_forward.h>
 #include <brillo/grpc/async_grpc_client.h>
 
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "wilco_dtc.grpc.pb.h"  // NOLINT(build/include)
+#include "wilco_dtc.grpc.pb.h"  // NOLINT(build/include_directory)
 
 namespace diagnostics {
+namespace wilco {
 
 class GrpcClientManager final {
  public:
@@ -60,6 +61,7 @@ class GrpcClientManager final {
       ui_message_receiver_wilco_dtc_grpc_client_ = nullptr;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_GRPC_CLIENT_MANAGER_H_

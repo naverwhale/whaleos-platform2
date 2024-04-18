@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,46 +10,39 @@
 #include <memory>
 #include <utility>
 
-#include <base/sequenced_task_runner.h>
+#include <base/files/file_path.h>
 
-#include "rmad/utils/hardware_verifier_utils.h"
+#include "rmad/system/hardware_verifier_client.h"
 
 namespace rmad {
 
 class WelcomeScreenStateHandler : public BaseStateHandler {
  public:
-  explicit WelcomeScreenStateHandler(scoped_refptr<JsonStore> json_store);
-  // Used to inject mock |hardware_verifier_utils_| for testing.
-  WelcomeScreenStateHandler(
+  explicit WelcomeScreenStateHandler(
       scoped_refptr<JsonStore> json_store,
-      std::unique_ptr<HardwareVerifierUtils> hardware_verifier_utils);
+      scoped_refptr<DaemonCallback> daemon_callback);
+  // Used to inject mock |hardware_verifier_client_| for testing.
+  explicit WelcomeScreenStateHandler(
+      scoped_refptr<JsonStore> json_store,
+      scoped_refptr<DaemonCallback> daemon_callback,
+      std::unique_ptr<HardwareVerifierClient> hardware_verifier_client);
 
   ASSIGN_STATE(RmadState::StateCase::kWelcome);
   SET_REPEATABLE;
 
-  void RegisterSignalSender(
-      std::unique_ptr<HardwareVerificationResultSignalCallback> callback)
-      override {
-    hardware_verification_result_signal_sender_ = std::move(callback);
-  }
-
   RmadErrorCode InitializeState() override;
   GetNextStateCaseReply GetNextStateCase(const RmadState& state) override;
-
-  scoped_refptr<base::SequencedTaskRunner> GetTaskRunner() {
-    return task_runner_;
-  }
 
   void RunHardwareVerifier() const;
 
  protected:
   ~WelcomeScreenStateHandler() override = default;
 
+  void OnGetStateTask() const override;
+
  private:
-  std::unique_ptr<HardwareVerifierUtils> hardware_verifier_utils_;
-  std::unique_ptr<HardwareVerificationResultSignalCallback>
-      hardware_verification_result_signal_sender_;
-  scoped_refptr<base::SequencedTaskRunner> task_runner_;
+  // Helper utilities.
+  std::unique_ptr<HardwareVerifierClient> hardware_verifier_client_;
 };
 
 }  // namespace rmad

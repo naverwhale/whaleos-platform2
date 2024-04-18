@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -153,7 +153,7 @@ bool UdevEnumerate::ScanSubsystems() {
 
 std::unique_ptr<UdevListEntry> UdevEnumerate::GetListEntry() const {
   udev_list_entry* list_entry = udev_enumerate_get_list_entry(enumerate_);
-  return list_entry ? std::make_unique<UdevListEntry>(list_entry) : nullptr;
+  return list_entry ? std::make_unique<UdevListEntryImpl>(list_entry) : nullptr;
 }
 
 }  // namespace brillo

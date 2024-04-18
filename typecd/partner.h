@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,6 +15,7 @@
 #include "typecd/alt_mode.h"
 #include "typecd/metrics.h"
 #include "typecd/peripheral.h"
+#include "typecd/power_profile.h"
 
 namespace typecd {
 
@@ -42,6 +43,13 @@ class Partner : public Peripheral {
   // later get added, a udev event occurs. When this event occurs, read sysfs to
   // get this data if it is available.
   void UpdatePDInfoFromSysfs();
+
+  // Parse the registered PDOs from sysfs and create an object to hold them,
+  // if one doesn't already exist.
+  void AddPowerProfile();
+
+  // Delete a PowerProfile if one was created for this partner.
+  void RemovePowerProfile();
 
   // Return the total number of AltModes supported by the partner. If this value
   // hasn't been populated yet, the default value is -1, signifying that
@@ -75,6 +83,18 @@ class Partner : public Peripheral {
   // |metrics_reported_| is true, we return immediately.
   void ReportMetrics(Metrics* metrics);
 
+  // Checks whether the partner supports DP alt mode.
+  bool SupportsDp();
+
+  // Checks whether the partner supports TBT alt mode.
+  bool SupportsTbt();
+
+  // Checks whether the partner supports USB4 mode.
+  bool SupportsUsb4();
+
+  // Checks whether the partner supports USB. (not USB4)
+  bool SupportsUsb();
+
  private:
   friend class MetricsTest;
   FRIEND_TEST(MetricsTest, CheckPartnerTypeUSB4Hub);
@@ -82,17 +102,36 @@ class Partner : public Peripheral {
   FRIEND_TEST(MetricsTest, CheckPartnerTypeTBTDPAltPeripheral);
   FRIEND_TEST(MetricsTest, CheckPartnerTypeTBTPeripheral);
   FRIEND_TEST(MetricsTest, CheckPartnerTypeDPAltHub);
+  FRIEND_TEST(MetricsTest, CheckPartnerTypePowerBrick);
+  FRIEND_TEST(MetricsTest, CheckNoPartnerType);
   FRIEND_TEST(MetricsTest, CheckPartnerTypeOther);
-  FRIEND_TEST(PartnerTest, TestSupportsPD);
+  FRIEND_TEST(PartnerTest, SupportsPD);
+  FRIEND_TEST(PartnerTest, PowerProfile);
 
   // Convenience function used by ReportMetrics to get the right enum for
   // PartnerTypeMetric.
   PartnerTypeMetric GetPartnerTypeMetric();
 
+  // Convenience function used by ReportMetrics to get the right enum for
+  // DataRoleMetric.
+  DataRoleMetric GetDataRoleMetric();
+
+  // Convenience function used by ReportMetrics to get the right enum for
+  // PowerRoleMetric.
+  PowerRoleMetric GetPowerRoleMetric();
+
+  // Extract ID values from VDOs.
+  int GetVendorId();
+  int GetProductId();
+  int GetXid();
+
   // Parse and store the value of the "supports_usb_power_delivery" file from
   // sysfs. If there is an error parsing the file contents, the value is assumed
   // to be false.
   void UpdateSupportsPD();
+
+  // Explicitly set supports_pd for unit testing purpose.
+  void SetSupportsPD(bool supports_pd) { supports_pd_ = supports_pd; }
 
   // A map representing all the alternate modes supported by the partner.
   // The key is the index of the alternate mode as determined by the connector
@@ -110,6 +149,7 @@ class Partner : public Peripheral {
   // Pointer to the parent Port for this partner. The port lifecycle exceeds
   // that of the Partner, so it's fine to have this as a raw pointer.
   Port* port_;
+  std::unique_ptr<PowerProfile> power_profile_;
 };
 
 }  // namespace typecd

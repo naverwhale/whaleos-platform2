@@ -1,15 +1,14 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/util/status_macros.h"
 
 #include <memory>
-#include <stdio.h>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 

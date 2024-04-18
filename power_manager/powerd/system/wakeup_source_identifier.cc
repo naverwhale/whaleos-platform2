@@ -1,13 +1,15 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/system/wakeup_source_identifier.h"
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/system/udev.h"
 #include "power_manager/powerd/system/wakeup_device.h"
 
@@ -15,8 +17,7 @@
 #include <base/check_op.h>
 #include <base/logging.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 WakeupSourceIdentifier::WakeupSourceIdentifier(UdevInterface* udev) {
   DCHECK(udev);
@@ -109,10 +110,11 @@ void WakeupSourceIdentifier::HandleAddedInput(
 void WakeupSourceIdentifier::HandleRemovedInput(const std::string& input_name) {
   base::FilePath input_device_wakeup_path;
 
-  for (auto it = wakeup_devices_.begin(); it != wakeup_devices_.end(); it++) {
-    if (it->second.count(input_name)) {
-      it->second.erase(input_name);
-      input_device_wakeup_path = it->first;
+  for (std::pair<const base::FilePath, std::set<std::string>>& wakeup_device :
+       wakeup_devices_) {
+    if (wakeup_device.second.count(input_name)) {
+      wakeup_device.second.erase(input_name);
+      input_device_wakeup_path = wakeup_device.first;
     }
   }
 
@@ -136,5 +138,4 @@ void WakeupSourceIdentifier::HandleRemovedInput(const std::string& input_name) {
             << input_device_wakeup_path.value() << " for wake events";
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

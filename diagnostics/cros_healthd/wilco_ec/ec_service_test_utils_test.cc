@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include "diagnostics/cros_healthd/wilco_ec/ec_service_test_utils.h"
 
 namespace diagnostics {
-
 namespace {
 
 using EcEvent = EcService::EcEvent;
@@ -67,5 +66,4 @@ INSTANTIATE_TEST_SUITE_P(
                         kEcEventNonSysNotification)));
 
 }  // namespace
-
 }  // namespace diagnostics

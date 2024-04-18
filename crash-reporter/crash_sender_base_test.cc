@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
 #include <base/strings/strcat.h>
-#include <base/guid.h>
 #include <brillo/key_value_store.h>
 #include <gtest/gtest.h>
 
@@ -19,6 +18,7 @@
 
 namespace util {
 namespace {
+using ::testing::_;
 using ::testing::Not;
 using ::testing::StartsWith;
 
@@ -37,7 +37,8 @@ bool CreateClientIdFile() {
 bool SetMockCrashSending(bool success) {
   util::g_force_is_mock = true;
   util::g_force_is_mock_successful = success;
-  return base::CreateDirectory(paths::Get(paths::kChromeCrashLog).DirName());
+  return base::CreateDirectory(
+      paths::Get(paths::ChromeCrashLog::Get()).DirName());
 }
 
 // Reset "force" flags to clear out IsMock flags
@@ -52,17 +53,30 @@ bool SetIntegrationTesting(bool success) {
   return test_util::CreateFile(paths::GetAt(paths::kSystemRunStateDirectory,
                                             paths::kMockCrashSending),
                                success ? "" : "0") &&
-         base::CreateDirectory(paths::Get(paths::kChromeCrashLog).DirName());
+         base::CreateDirectory(
+             paths::Get(paths::ChromeCrashLog::Get()).DirName());
 }
 
 class CrashSenderBaseForTesting : public util::SenderBase {
  public:
   CrashSenderBaseForTesting(std::unique_ptr<base::Clock> clock,
                             const Options& options)
-      : util::SenderBase(std::move(clock), options) {}
+      : util::SenderBase(std::move(clock), options) {
+    // These methods are not implemented in this test and should not
+    // be called.
+    EXPECT_CALL(*this, MakeScopedProcessingFile(_)).Times(0);
+    EXPECT_CALL(*this, RecordCrashRemoveReason(_)).Times(0);
+  }
 
-  // We don't need this implementation
-  void RecordCrashRemoveReason(CrashRemoveReason reason) {}
+ private:
+  MOCK_METHOD(std::unique_ptr<ScopedProcessingFileBase>,
+              MakeScopedProcessingFile,
+              (const base::FilePath& meta_file),
+              (override));
+  MOCK_METHOD(void,
+              RecordCrashRemoveReason,
+              (CrashRemoveReason reason),
+              (override));
 };
 
 class CrashSenderBaseTest : public testing::Test {
@@ -99,6 +113,7 @@ TEST_F(CrashSenderBaseTest, GetKindFromPayloadPath) {
   EXPECT_EQ("", GetKindFromPayloadPath(base::FilePath()));
   EXPECT_EQ("", GetKindFromPayloadPath(base::FilePath("foo")));
   EXPECT_EQ("log", GetKindFromPayloadPath(base::FilePath("foo.log")));
+  EXPECT_EQ("txt", GetKindFromPayloadPath(base::FilePath("foo.txt")));
   // "dmp" is a special case.
   EXPECT_EQ("minidump", GetKindFromPayloadPath(base::FilePath("foo.dmp")));
 
@@ -220,7 +235,7 @@ TEST_F(CrashSenderBaseTest, RetrieveClientId) {
 
 TEST_F(CrashSenderBaseTest, GetSleepTime) {
   const base::FilePath meta_file = test_dir_.Append("test.meta");
-  base::TimeDelta max_spread_time = base::TimeDelta::FromSeconds(0);
+  base::TimeDelta max_spread_time = base::Seconds(0);
 
   // This should fail since meta_file does not exist.
   base::TimeDelta sleep_time;
@@ -238,18 +253,16 @@ TEST_F(CrashSenderBaseTest, GetSleepTime) {
 
   // Zero hold-off time and zero sleep time should always give zero sleep time.
   EXPECT_TRUE(GetSleepTime(meta_file, max_spread_time,
-                           base::TimeDelta::FromSeconds(0) /*hold_off_time*/,
-                           &sleep_time));
-  EXPECT_EQ(base::TimeDelta::FromSeconds(0), sleep_time);
+                           base::Seconds(0) /*hold_off_time*/, &sleep_time));
+  EXPECT_EQ(base::Seconds(0), sleep_time);
 
   // Even if file is new, a zero hold-off time means we choose a time between
   // 0 and max_spread_time.
   ASSERT_TRUE(test_util::TouchFileHelper(meta_file, base::Time::Now()));
-  EXPECT_TRUE(GetSleepTime(
-      meta_file, base::TimeDelta::FromSeconds(60) /*max_spread_time*/,
-      base::TimeDelta::FromSeconds(0) /*hold_off_time*/, &sleep_time));
-  EXPECT_LE(base::TimeDelta::FromSeconds(0), sleep_time);
-  EXPECT_GE(base::TimeDelta::FromSeconds(60), sleep_time);
+  EXPECT_TRUE(GetSleepTime(meta_file, base::Seconds(60) /*max_spread_time*/,
+                           base::Seconds(0) /*hold_off_time*/, &sleep_time));
+  EXPECT_LE(base::Seconds(0), sleep_time);
+  EXPECT_GE(base::Seconds(60), sleep_time);
 
   // Make the meta file old enough so hold-off time is not necessary.
   const base::Time now = base::Time::Now();
@@ -258,25 +271,25 @@ TEST_F(CrashSenderBaseTest, GetSleepTime) {
   // sleep_time should always be 0, since max_spread_time is set to 0.
   EXPECT_TRUE(
       GetSleepTime(meta_file, max_spread_time, kMaxHoldOffTime, &sleep_time));
-  EXPECT_EQ(base::TimeDelta::FromSeconds(0), sleep_time);
+  EXPECT_EQ(base::Seconds(0), sleep_time);
 
   // sleep_time should be in range [0, 10].
-  max_spread_time = base::TimeDelta::FromSeconds(10);
+  max_spread_time = base::Seconds(10);
   EXPECT_TRUE(
       GetSleepTime(meta_file, max_spread_time, kMaxHoldOffTime, &sleep_time));
-  EXPECT_LE(base::TimeDelta::FromSeconds(0), sleep_time);
-  EXPECT_GE(base::TimeDelta::FromSeconds(10), sleep_time);
+  EXPECT_LE(base::Seconds(0), sleep_time);
+  EXPECT_GE(base::Seconds(10), sleep_time);
 
   // If the meta file is current, the minimum sleep time should be
   // kMaxHoldOffTime but the maximum is still max_spread_time.
-  max_spread_time = base::TimeDelta::FromSeconds(60);
+  max_spread_time = base::Seconds(60);
   ASSERT_TRUE(test_util::TouchFileHelper(meta_file, base::Time::Now()));
   EXPECT_TRUE(
       GetSleepTime(meta_file, max_spread_time, kMaxHoldOffTime, &sleep_time));
   // 0.9 in case we got preempted for 3 seconds between the file touch and the
   // GetSleepTime().
   EXPECT_LE(kMaxHoldOffTime * 0.9, sleep_time);
-  EXPECT_GE(base::TimeDelta::FromSeconds(60), sleep_time);
+  EXPECT_GE(base::Seconds(60), sleep_time);
 }
 
 TEST_F(CrashSenderBaseTest, IsMock) {
@@ -324,6 +337,34 @@ TEST_F(CrashSenderBaseTest, GetImageType) {
       paths::GetAt(paths::kEtcDirectory, paths::kLsbRelease),
       "CHROMEOS_RELEASE_TRACK=testimage-channel"));
   EXPECT_EQ("test", GetImageType());
+}
+
+TEST_F(CrashSenderBaseTest, ScopedProcessingFile) {
+  const base::FilePath meta_file = test_dir_.Append("meta_file.meta");
+  const base::FilePath processing_file =
+      test_dir_.Append("meta_file.processing");
+  ASSERT_TRUE(test_util::CreateFile(meta_file, ""));
+
+  ASSERT_FALSE(base::PathExists(processing_file));
+  {
+    ScopedProcessingFile processing(meta_file);
+    EXPECT_TRUE(base::PathExists(processing_file));
+  }
+  EXPECT_FALSE(base::PathExists(processing_file));
+}
+
+TEST_F(CrashSenderBaseTest, DummyScopedProcessingFile) {
+  const base::FilePath meta_file = test_dir_.Append("meta_file.meta");
+  const base::FilePath processing_file =
+      test_dir_.Append("meta_file.processing");
+  ASSERT_TRUE(test_util::CreateFile(meta_file, ""));
+
+  ASSERT_FALSE(base::PathExists(processing_file));
+  {
+    DummyScopedProcessingFile processing(meta_file);
+    EXPECT_FALSE(base::PathExists(processing_file));
+  }
+  EXPECT_FALSE(base::PathExists(processing_file));
 }
 
 }  // namespace

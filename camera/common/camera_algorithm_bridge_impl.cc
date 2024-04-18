@@ -1,11 +1,12 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
 
 #include "common/camera_algorithm_bridge_impl.h"
 
+#include <asm-generic/errno.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -17,10 +18,10 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <mojo/public/cpp/system/platform_handle.h>
 
 #include "cros-camera/common.h"
@@ -38,7 +39,6 @@ std::unique_ptr<CameraAlgorithmBridge> CameraAlgorithmBridge::CreateInstance(
 // static
 std::unique_ptr<CameraAlgorithmBridge> CameraAlgorithmBridge::CreateInstance(
     CameraAlgorithmBackend backend, CameraMojoChannelManagerToken* token) {
-  VLOGF_ENTER();
   return std::make_unique<CameraAlgorithmBridgeImpl>(
       backend, CameraMojoChannelManager::FromToken(token));
 }
@@ -49,19 +49,13 @@ CameraAlgorithmBridgeImpl::CameraAlgorithmBridgeImpl(
       ipc_bridge_(new IPCBridge(backend, mojo_manager)) {}
 
 CameraAlgorithmBridgeImpl::~CameraAlgorithmBridgeImpl() {
-  VLOGF_ENTER();
-
   bool result = mojo_manager_->GetIpcTaskRunner()->DeleteSoon(
       FROM_HERE, std::move(ipc_bridge_));
   DCHECK(result);
-
-  VLOGF_EXIT();
 }
 
 int32_t CameraAlgorithmBridgeImpl::Initialize(
     const camera_algorithm_callback_ops_t* callback_ops) {
-  VLOGF_ENTER();
-
   const int32_t kInitializationRetryTimeoutMs = 3000;
   const int32_t kInitializationWaitConnectionMs = 500;
   const int32_t kInitializationRetrySleepUs = 100000;
@@ -88,9 +82,10 @@ int32_t CameraAlgorithmBridgeImpl::Initialize(
     auto future = cros::Future<int32_t>::Create(&relay_);
 
     mojo_manager_->GetIpcTaskRunner()->PostTask(
-        FROM_HERE, base::Bind(&CameraAlgorithmBridgeImpl::IPCBridge::Initialize,
-                              ipc_bridge_->GetWeakPtr(), callback_ops,
-                              cros::GetFutureCallback(future)));
+        FROM_HERE,
+        base::BindOnce(&CameraAlgorithmBridgeImpl::IPCBridge::Initialize,
+                       ipc_bridge_->GetWeakPtr(), callback_ops,
+                       cros::GetFutureCallback(future)));
 
     if (future->Wait(std::min(kInitializationWaitConnectionMs,
                               kInitializationRetryTimeoutMs - elapsed_ms))) {
@@ -101,48 +96,49 @@ int32_t CameraAlgorithmBridgeImpl::Initialize(
     }
     usleep(kInitializationRetrySleepUs);
   } while (1);
-  VLOGF_EXIT();
+
   return ret;
 }
 
 int32_t CameraAlgorithmBridgeImpl::RegisterBuffer(int buffer_fd) {
-  VLOGF_ENTER();
   auto future = cros::Future<int32_t>::Create(&relay_);
 
   mojo_manager_->GetIpcTaskRunner()->PostTask(
       FROM_HERE,
-      base::Bind(&CameraAlgorithmBridgeImpl::IPCBridge::RegisterBuffer,
-                 ipc_bridge_->GetWeakPtr(), buffer_fd,
-                 cros::GetFutureCallback(future)));
+      base::BindOnce(&CameraAlgorithmBridgeImpl::IPCBridge::RegisterBuffer,
+                     ipc_bridge_->GetWeakPtr(), buffer_fd,
+                     cros::GetFutureCallback(future)));
 
-  future->Wait();
-  VLOGF_EXIT();
+  if (!future->Wait()) {
+    return -ETIMEDOUT;
+  }
   return future->Get();
 }
 
 void CameraAlgorithmBridgeImpl::Request(uint32_t req_id,
                                         const std::vector<uint8_t>& req_header,
                                         int32_t buffer_handle) {
-  VLOGF_ENTER();
-
   mojo_manager_->GetIpcTaskRunner()->PostTask(
-      FROM_HERE,
-      base::Bind(&CameraAlgorithmBridgeImpl::IPCBridge::Request,
-                 ipc_bridge_->GetWeakPtr(), req_id, req_header, buffer_handle));
-
-  VLOGF_EXIT();
+      FROM_HERE, base::BindOnce(&CameraAlgorithmBridgeImpl::IPCBridge::Request,
+                                ipc_bridge_->GetWeakPtr(), req_id, req_header,
+                                buffer_handle));
 }
 
 void CameraAlgorithmBridgeImpl::DeregisterBuffers(
     const std::vector<int32_t>& buffer_handles) {
-  VLOGF_ENTER();
-
   mojo_manager_->GetIpcTaskRunner()->PostTask(
       FROM_HERE,
-      base::Bind(&CameraAlgorithmBridgeImpl::IPCBridge::DeregisterBuffers,
-                 ipc_bridge_->GetWeakPtr(), buffer_handles));
+      base::BindOnce(&CameraAlgorithmBridgeImpl::IPCBridge::DeregisterBuffers,
+                     ipc_bridge_->GetWeakPtr(), buffer_handles));
+}
 
-  VLOGF_EXIT();
+void CameraAlgorithmBridgeImpl::UpdateReturn(uint32_t upd_id,
+                                             uint32_t status,
+                                             int buffer_fd) {
+  mojo_manager_->GetIpcTaskRunner()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&CameraAlgorithmBridgeImpl::IPCBridge::UpdateReturn,
+                     ipc_bridge_->GetWeakPtr(), upd_id, status, buffer_fd));
 }
 
 CameraAlgorithmBridgeImpl::IPCBridge::IPCBridge(
@@ -154,18 +150,17 @@ CameraAlgorithmBridgeImpl::IPCBridge::IPCBridge(
 
 CameraAlgorithmBridgeImpl::IPCBridge::~IPCBridge() {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
 
   Destroy();
 }
 
 void CameraAlgorithmBridgeImpl::IPCBridge::Initialize(
     const camera_algorithm_callback_ops_t* callback_ops,
-    base::Callback<void(int32_t)> cb) {
+    base::OnceCallback<void(int32_t)> cb) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   if (!callback_ops || !callback_ops->return_callback) {
-    cb.Run(-EINVAL);
+    std::move(cb).Run(-EINVAL);
     return;
   }
   if (cb_impl_) {
@@ -182,7 +177,7 @@ void CameraAlgorithmBridgeImpl::IPCBridge::Initialize(
       break;
     case CameraAlgorithmBackend::kVendorGpu:
       if (!base::PathExists(base::FilePath(kGpuAlgoJobFilePath))) {
-        cb.Run(-EINVAL);
+        std::move(cb).Run(-EINVAL);
         return;
       }
       remote_ = mojo_manager_->CreateCameraAlgorithmOpsRemote(
@@ -190,7 +185,7 @@ void CameraAlgorithmBridgeImpl::IPCBridge::Initialize(
       break;
     case CameraAlgorithmBackend::kGoogleGpu:
       if (!base::PathExists(base::FilePath(kGpuAlgoJobFilePath))) {
-        cb.Run(-EINVAL);
+        std::move(cb).Run(-EINVAL);
         return;
       }
       remote_ = mojo_manager_->CreateCameraAlgorithmOpsRemote(
@@ -203,53 +198,51 @@ void CameraAlgorithmBridgeImpl::IPCBridge::Initialize(
   }
   if (!remote_) {
     LOGF(ERROR) << "Failed to connect to the server";
-    cb.Run(-EAGAIN);
+    std::move(cb).Run(-EAGAIN);
     return;
   }
   remote_.set_disconnect_handler(base::BindOnce(
       &CameraAlgorithmBridgeImpl::IPCBridge::OnConnectionError, GetWeakPtr()));
   cb_impl_.reset(
       new CameraAlgorithmCallbackOpsImpl(ipc_task_runner_, callback_ops));
-  remote_->Initialize(cb_impl_->CreatePendingRemote(), cb);
+  remote_->Initialize(cb_impl_->CreatePendingRemote(), std::move(cb));
   callback_ops_ = callback_ops;
-  VLOGF_EXIT();
 }
 
 void CameraAlgorithmBridgeImpl::IPCBridge::RegisterBuffer(
-    int buffer_fd, base::Callback<void(int32_t)> cb) {
+    int buffer_fd, base::OnceCallback<void(int32_t)> cb) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   if (!remote_.is_bound()) {
     LOGF(ERROR) << "Interface is not bound probably because IPC is broken";
-    cb.Run(-ECONNRESET);
+    std::move(cb).Run(-ECONNRESET);
     return;
   }
   int dup_fd = dup(buffer_fd);
   if (dup_fd < 0) {
     PLOGF(ERROR) << "Failed to dup fd: ";
-    cb.Run(-errno);
+    std::move(cb).Run(-errno);
     return;
   }
   remote_->RegisterBuffer(
-      mojo::WrapPlatformFile(base::ScopedPlatformFile(dup_fd)), cb);
+      mojo::WrapPlatformFile(base::ScopedPlatformFile(dup_fd)), std::move(cb));
 }
 
 void CameraAlgorithmBridgeImpl::IPCBridge::Request(
     uint32_t req_id, std::vector<uint8_t> req_header, int32_t buffer_handle) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   if (!remote_.is_bound()) {
     LOGF(ERROR) << "Interface is not bound probably because IPC is broken";
     return;
   }
   remote_->Request(req_id, std::move(req_header), buffer_handle);
-  VLOGF_EXIT();
 }
 
 void CameraAlgorithmBridgeImpl::IPCBridge::DeregisterBuffers(
     std::vector<int32_t> buffer_handles) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   if (!remote_.is_bound()) {
     LOGF(ERROR) << "Interface is not bound probably because IPC is broken";
     return;
@@ -257,25 +250,37 @@ void CameraAlgorithmBridgeImpl::IPCBridge::DeregisterBuffers(
   remote_->DeregisterBuffers(std::move(buffer_handles));
 }
 
+void CameraAlgorithmBridgeImpl::IPCBridge::UpdateReturn(uint32_t upd_id,
+                                                        uint32_t status,
+                                                        int buffer_fd) {
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  if (!remote_.is_bound()) {
+    LOGF(ERROR) << "Interface is not bound probably because IPC is broken";
+    return;
+  }
+  remote_->UpdateReturn(
+      upd_id, status,
+      mojo::WrapPlatformFile(base::ScopedPlatformFile(buffer_fd)));
+}
+
 void CameraAlgorithmBridgeImpl::IPCBridge::OnConnectionError() {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
   DCHECK(callback_ops_);
-  VLOGF_ENTER();
+
   Destroy();
   if (callback_ops_->notify) {
     callback_ops_->notify(callback_ops_, CAMERA_ALGORITHM_MSG_IPC_ERROR);
   }
-  VLOGF_EXIT();
 }
 
 void CameraAlgorithmBridgeImpl::IPCBridge::Destroy() {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  VLOGF_ENTER();
+
   if (remote_.is_bound()) {
     cb_impl_.reset();
     remote_.reset();
   }
-  VLOGF_EXIT();
 }
 
 base::WeakPtr<CameraAlgorithmBridgeImpl::IPCBridge>

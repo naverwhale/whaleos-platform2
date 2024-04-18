@@ -1,6 +1,9 @@
-# Copyright 2017 The Chromium OS Authors. All rights reserved.
+# Copyright 2017 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
+
 _llseek: 1
 ARM_set_tls: 1
 access:1
@@ -17,6 +20,7 @@ clock_nanosleep_time64: 1
 clone: 1
 close: 1
 connect: 1
+dup: 1
 dup2: 1
 execve: 1
 epoll_ctl: 1
@@ -34,7 +38,7 @@ futex_time64: 1
 getdents64: 1
 geteuid32: 1
 getpid: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 getresgid32: 1
 getresuid32: 1
 getsockname: 1
@@ -42,10 +46,13 @@ gettimeofday: 1
 gettid: 1
 ioctl: 1
 lstat64: 1
+madvise: arg2 == MADV_DONTNEED
 mkdir: 1
-mmap2: 1
+# Don't allow mmap2 with both PROT_WRITE and PROT_EXEC.
+mmap2: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 mount: 1
-mprotect: 1
+# Don't allow mprotect with PROT_EXEC.
+mprotect: arg2 in ~PROT_EXEC
 munmap: 1
 nanosleep: 1
 open: 1
@@ -55,6 +62,7 @@ poll: 1
 prctl: 1
 pread64: 1
 prlimit64: 1
+process_vm_readv: 1
 pwrite64: 1
 read: 1
 recvmsg: 1
@@ -87,5 +95,6 @@ tgkill: 1
 ugetrlimit: 1
 umount2: 1
 uname: 1
+unlinkat: 1
 wait4: 1
 write: 1

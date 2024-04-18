@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,6 +26,7 @@
 
 #include "trunks/error_codes.h"
 #include "trunks/hmac_session.h"
+#include "trunks/multiple_authorization_delegate.h"
 #include "trunks/password_authorization_delegate.h"
 #include "trunks/policy_session.h"
 #include "trunks/scoped_key_handle.h"
@@ -34,10 +35,16 @@
 #include "trunks/tpm_utility.h"
 #include "trunks/trunks_client_test.h"
 #include "trunks/trunks_factory_impl.h"
+#include "trunks/vtpm_client_support/create_dbus_proxy.h"
 
 namespace {
 
+using trunks::AuthorizationDelegate;
 using trunks::CommandTransceiver;
+using trunks::CreateTrunksDBusProxyToTrunks;
+using trunks::CreateTrunksDBusProxyToVtpm;
+using trunks::MultipleAuthorizations;
+using trunks::TrunksDBusProxy;
 using trunks::TrunksFactory;
 using trunks::TrunksFactoryImpl;
 
@@ -69,10 +76,11 @@ constexpr unsigned char kPcr0ValueRecDev[SHA256_DIGEST_SIZE] = {
 };
 
 void PrintUsage() {
-  puts("Options:");
+  puts("TPM command options:");
   puts("  --allocate_pcr - Configures PCR 0-15 under the SHA256 bank.");
   puts("  --clear - Clears the TPM. Use before initializing the TPM.");
   puts("  --csme_test_pcr --index=<INDEX>.");
+  puts("  --csme_read_pcr --index=<INDEX>.");
   puts("  --help - Prints this message.");
   puts("  --init_tpm - Initializes a TPM as CrOS firmware does.");
   puts("  --own - Takes ownership of the TPM with the provided password.");
@@ -87,6 +95,7 @@ void PrintUsage() {
   puts("  --read_pcr --index=<N> - Reads a PCR and prints the value.");
   puts("  --extend_pcr --index=<N> --value=<value> - Extends a PCR.");
   puts("  --tpm_version - Prints TPM versions and IDs similar to tpm_version.");
+  puts("  --rw_version - Prints RW Firmware version.");
   puts("  --endorsement_public_key - Prints the public endorsement key.");
   puts("  --key_create (--rsa=<bits>|--ecc) --usage=sign|decrypt|all");
   puts("               --key_blob=<file> [--print_time] [--sess_*]");
@@ -99,11 +108,16 @@ void PrintUsage() {
   puts("             [--ecc] [--print_time] [--sess_*]");
   puts("                    - Signs the hash of data using the loaded key.");
   puts("  --key_info --handle=<H> - Prints information about the loaded key.");
+  puts("  --persistent_keys - Prints all persistent key handles (Up to 128).");
+  puts("  --transient_keys - Prints all transient key handles (Up to 128).");
   puts("  --key_test_short_ecc --handle=<H>.");
   puts("  --sess_* - group of options providing parameters for auth session:");
   puts("      --sess_salted");
   puts("      --sess_encrypted");
+  puts("      --sess_empty_auth (supports --key_create  and --key_load)");
   puts("  --index_name --index=<N> - print the name of NV index N in hex");
+  puts("                             format.");
+  puts("  --index_data --index=<N> - print the data of NV index N in hex");
   puts("                             format.");
   puts("  --ext_command_test - Runs regression tests on extended commands.");
   puts("  --uds_calc [(--zero|--rec|--recdev)]");
@@ -117,6 +131,18 @@ void PrintUsage() {
   puts("               [--or=<val1>,<val2>,<val3>]");
   puts("      - Delete test nvmem space with UDS digest and");
   puts("        optional PolicyOR using current PCR0 value.");
+  puts("  --ecc_ek_handle --password=<endorsement passwword");
+  puts("      - Get the ECC EK handle.");
+  puts("  --test_credential_command --password=<hex endorsement password>");
+  puts("                             -handle=<endorsement key handle>");
+  puts("      - Perform a closed-loop testing: Create AIK-> Make credential");
+  puts("        -> Activate credential with EK.");
+  puts("  --test_sign_verify - Perform a closed-loop sign and verify test");
+  puts("  --test_certify_simple");
+  puts("     - Perform certifying key and partially verify the output-");
+  puts("D-Bus options:");
+  puts("  --vtpm");
+  puts("      - Send the TPM command to vtpm instead of trunks.");
 }
 
 std::string HexEncode(const std::string& bytes) {
@@ -176,83 +202,6 @@ trunks::TPM_RC CallTpmUtility(bool print_time,
                     << trunks::GetErrorString(rc);
   return rc;
 }
-
-// An authorization delegate to manage multiple authorization sessions for a
-// single command.
-// Copied from attestaion/common/tpm_utility_v2.cc
-class MultipleAuthorizations : public trunks::AuthorizationDelegate {
- public:
-  MultipleAuthorizations() = default;
-  ~MultipleAuthorizations() override = default;
-
-  void AddAuthorizationDelegate(trunks::AuthorizationDelegate* delegate) {
-    delegates_.push_back(delegate);
-  }
-
-  bool GetCommandAuthorization(const std::string& command_hash,
-                               bool is_command_parameter_encryption_possible,
-                               bool is_response_parameter_encryption_possible,
-                               std::string* authorization) override {
-    std::string combined_authorization;
-    for (auto delegate : delegates_) {
-      std::string authorization;
-      if (!delegate->GetCommandAuthorization(
-              command_hash, is_command_parameter_encryption_possible,
-              is_response_parameter_encryption_possible, &authorization)) {
-        return false;
-      }
-      combined_authorization += authorization;
-    }
-    *authorization = combined_authorization;
-    return true;
-  }
-
-  bool CheckResponseAuthorization(const std::string& response_hash,
-                                  const std::string& authorization) override {
-    std::string mutable_authorization = authorization;
-    for (auto delegate : delegates_) {
-      if (!delegate->CheckResponseAuthorization(
-              response_hash,
-              ExtractSingleAuthorizationResponse(&mutable_authorization))) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  bool EncryptCommandParameter(std::string* parameter) override {
-    for (auto delegate : delegates_) {
-      if (!delegate->EncryptCommandParameter(parameter)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  bool DecryptResponseParameter(std::string* parameter) override {
-    for (auto delegate : delegates_) {
-      if (!delegate->DecryptResponseParameter(parameter)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  bool GetTpmNonce(std::string* nonce) override { return false; }
-
- private:
-  std::string ExtractSingleAuthorizationResponse(std::string* all_responses) {
-    std::string response;
-    trunks::TPMS_AUTH_RESPONSE not_used;
-    if (trunks::TPM_RC_SUCCESS !=
-        trunks::Parse_TPMS_AUTH_RESPONSE(all_responses, &not_used, &response)) {
-      return std::string();
-    }
-    return response;
-  }
-
-  std::vector<trunks::AuthorizationDelegate*> delegates_;
-};
 
 int Startup(const TrunksFactory& factory) {
   factory.GetTpmUtility()->Shutdown();
@@ -393,6 +342,23 @@ int TpmVersion(const TrunksFactory& factory) {
   return 0;
 }
 
+int GetRwVersion(const TrunksFactory& factory) {
+  trunks::TPM_RC rc;
+  uint32_t epoch;
+  uint32_t major;
+  uint32_t minor;
+  rc = factory.GetTpmUtility()->GetRwVersion(&epoch, &major, &minor);
+  if (rc) {
+    LOG(ERROR) << "Error getting RW version: " << trunks::GetErrorString(rc);
+    return rc;
+  }
+  printf("  RW Version Info:\n");
+  printf("  Epoch:         %08" PRIx32 "\n", epoch);
+  printf("  Major:         %08" PRIx32 "\n", major);
+  printf("  Minor:         %08" PRIx32 "\n", minor);
+  return 0;
+}
+
 int EndorsementPublicKey(const TrunksFactory& factory) {
   std::string ekm;
   factory.GetTpmUtility()->GetPublicRSAEndorsementKeyModulus(&ekm);
@@ -462,6 +428,50 @@ int KeyInfo(bool print_time, const TrunksFactory& factory, uint32_t handle) {
   }
   printf("Key name: %s\n", HexEncode(key_name).c_str());
 
+  return 0;
+}
+
+int PersistentKeys(const TrunksFactory& factory) {
+  trunks::TPMI_YES_NO more_data = YES;
+  trunks::TPMS_CAPABILITY_DATA capability_data;
+  trunks::TPM_RC rc = factory.GetTpm()->GetCapabilitySync(
+      trunks::TPM_CAP_HANDLES, trunks::PERSISTENT_FIRST, 128 /*property_count*/,
+      &more_data, &capability_data, nullptr /*authorization_delegate*/);
+  if (rc != trunks::TPM_RC_SUCCESS) {
+    LOG(ERROR) << ": Error querying handles: " << trunks::GetErrorString(rc);
+    return -1;
+  }
+  const trunks::TPML_HANDLE& handles = capability_data.data.handles;
+  if (handles.count == 0) {
+    puts("No persistent key found.");
+    return 0;
+  }
+  puts("Persistent keys:");
+  for (int i = 0; i < handles.count; ++i) {
+    printf("  %#x\n", handles.handle[i]);
+  }
+  return 0;
+}
+
+int TransientKeys(const TrunksFactory& factory) {
+  trunks::TPMI_YES_NO more_data = YES;
+  trunks::TPMS_CAPABILITY_DATA capability_data;
+  trunks::TPM_RC rc = factory.GetTpm()->GetCapabilitySync(
+      trunks::TPM_CAP_HANDLES, trunks::TRANSIENT_FIRST, 128 /*property_count*/,
+      &more_data, &capability_data, nullptr /*authorization_delegate*/);
+  if (rc != trunks::TPM_RC_SUCCESS) {
+    LOG(ERROR) << ": Error querying handles: " << trunks::GetErrorString(rc);
+    return -1;
+  }
+  const trunks::TPML_HANDLE& handles = capability_data.data.handles;
+  if (handles.count == 0) {
+    puts("No transient key found.");
+    return 0;
+  }
+  puts("Transient keys:");
+  for (int i = 0; i < handles.count; ++i) {
+    printf("  %#x\n", handles.handle[i]);
+  }
   return 0;
 }
 
@@ -609,6 +619,18 @@ int CsmeTestPcr(const TrunksFactory& factory, int index) {
   return 0;
 }
 
+int CsmeReadPcr(const TrunksFactory& factory, int index) {
+  std::unique_ptr<trunks::TpmUtility> tpm_utility = factory.GetTpmUtility();
+  std::string csme_pcr_value;
+  trunks::TPM_RC rc = tpm_utility->ReadPCRFromCSME(index, &csme_pcr_value);
+  if (rc != trunks::TPM_RC_SUCCESS) {
+    LOG(ERROR) << "Failed to read CSME PCR: " << trunks::GetErrorString(rc);
+    return -1;
+  }
+  printf("CSME PCR value: %s\n", HexEncode(csme_pcr_value).c_str());
+  return 0;
+}
+
 int PrintIndexNameInHex(const TrunksFactory& factory, int index) {
   // Mask out the nv index handle so the user can either add or not add it
   // themselves.
@@ -620,7 +642,43 @@ int PrintIndexNameInHex(const TrunksFactory& factory, int index) {
     LOG(ERROR) << "Error getting NV index name: " << trunks::GetErrorString(rc);
     return -1;
   }
-  printf("NV Index name: %s\n", HexEncode(name).c_str());
+  // Also, print the name returned by TPM directly..
+  trunks::TPM2B_NAME nvram_name;
+  trunks::TPM2B_NV_PUBLIC public_area;
+  public_area.nv_public.nv_index = 0;
+  const trunks::UINT32 nv_index = trunks::NV_INDEX_FIRST + index;
+  rc = factory.GetTpm()->NV_ReadPublicSync(nv_index, "", &public_area,
+                                           &nvram_name, nullptr);
+  std::string name_from_tpm(nvram_name.name, nvram_name.name + nvram_name.size);
+  printf("NV Index name:          %s\n", HexEncode(name).c_str());
+  printf("NV Index name from tpm: %s\n", HexEncode(name_from_tpm).c_str());
+  return 0;
+}
+
+int PrintIndexDataInHex(const TrunksFactory& factory, int index) {
+  // Mask out the nv index handle so the user can either add or not add it
+  // themselves.
+  index &= trunks::HR_HANDLE_MASK;
+  std::unique_ptr<trunks::TpmUtility> tpm_utility = factory.GetTpmUtility();
+  trunks::TPMS_NV_PUBLIC nvram_public;
+  trunks::TPM_RC rc = tpm_utility->GetNVSpacePublicArea(index, &nvram_public);
+  if (rc != trunks::TPM_RC_SUCCESS) {
+    LOG(ERROR) << "Error reading NV space public area: "
+               << trunks::GetErrorString(rc);
+    return -1;
+  }
+  std::unique_ptr<AuthorizationDelegate> empty_password_authorization =
+      factory.GetPasswordAuthorization("");
+  std::string nvram_data;
+  rc =
+      tpm_utility->ReadNVSpace(index, /*offset=*/0, nvram_public.data_size,
+                               /*using_owner_authorization=*/false, &nvram_data,
+                               empty_password_authorization.get());
+  if (rc != trunks::TPM_RC_SUCCESS) {
+    LOG(ERROR) << "Error reading NV space: " << trunks::GetErrorString(rc);
+    return -1;
+  }
+  printf("NV Index data: %s\n", HexEncode(nvram_data).c_str());
   return 0;
 }
 
@@ -683,6 +741,292 @@ std::unique_ptr<trunks::PolicySession> GetUDSSession(
   return session;
 }
 
+int PrintEccEndorsementKeyHandle(const trunks::TrunksFactory& factory,
+                                 const std::string& endorsement_password) {
+  std::unique_ptr<AuthorizationDelegate> endorsement_password_authorization =
+      factory.GetPasswordAuthorization(endorsement_password);
+  // Won't be used because we don't persist ECC EK.
+  std::unique_ptr<AuthorizationDelegate> owner_password_authorization =
+      factory.GetPasswordAuthorization("");
+  trunks::TPM_HANDLE endorsement_key_handle = 0;
+  trunks::TPM_RC rc = factory.GetTpmUtility()->GetEndorsementKey(
+      trunks::TPM_ALG_ECC, endorsement_password_authorization.get(),
+      owner_password_authorization.get(), &endorsement_key_handle);
+  if (rc) {
+    LOG(ERROR) << "Error getting ECC EK handle: " << trunks::GetErrorString(rc);
+    return -1;
+  }
+  printf("Loaded key handle: %#x\n", endorsement_key_handle);
+  return 0;
+}
+
+bool TestCredentialCommand(const trunks::TrunksFactory& factory,
+                           const std::string& endorsement_password,
+                           trunks::TPM_HANDLE endorsement_key_handle) {
+  std::unique_ptr<AuthorizationDelegate> empty_password_authorization =
+      factory.GetPasswordAuthorization("");
+  std::string aik_blob;
+  trunks::TPM_RC rc = factory.GetTpmUtility()->CreateIdentityKey(
+      trunks::TPM_ALG_ECC, empty_password_authorization.get(), &aik_blob);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `TpmUtility::CreateIdentityKey()`: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+  // load aik.
+  trunks::TPM_HANDLE aik_handle = 0;
+  rc = factory.GetTpmUtility()->LoadKey(
+      aik_blob, empty_password_authorization.get(), &aik_handle);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `TpmUtility::LoadKey()`: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  // Make sure the object is flushed.
+  trunks::ScopedKeyHandle scoped_aik(factory, aik_handle);
+  scoped_aik.set_synchronized(true);
+
+  const std::string fake_credential = "fake credential";
+  std::string endorsement_key_name;
+  rc = factory.GetTpmUtility()->GetKeyName(endorsement_key_handle,
+                                           &endorsement_key_name);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `TpmUtility::GetKeyName()` for ek: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+  std::string aik_name;
+  rc = factory.GetTpmUtility()->GetKeyName(aik_handle, &aik_name);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `TpmUtility::GetKeyName()` for aik: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+  trunks::TPM2B_ID_OBJECT credential_blob = {};
+  trunks::TPM2B_ENCRYPTED_SECRET secret = {};
+  rc = factory.GetTpm()->MakeCredentialSync(
+      endorsement_key_handle, endorsement_key_name,
+      trunks::Make_TPM2B_DIGEST(fake_credential),
+      trunks::Make_TPM2B_NAME(aik_name), &credential_blob, &secret, nullptr);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `Tpm::MakeCredentialSync()`: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  // Prepare the auth session.
+  std::unique_ptr<AuthorizationDelegate> endorsement_password_authorization =
+      factory.GetPasswordAuthorization(endorsement_password);
+
+  std::unique_ptr<trunks::PolicySession> session = factory.GetPolicySession();
+  rc = session->StartUnboundSession(false /* salted */,
+                                    false /* enable_encryption */);
+  if (rc) {
+    LOG(ERROR) << "Failed to start policy session: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  trunks::TPMI_DH_ENTITY auth_entity = trunks::TPM_RH_ENDORSEMENT;
+  std::string auth_entity_name;
+  trunks::Serialize_TPM_HANDLE(auth_entity, &auth_entity_name);
+
+  rc = session->PolicySecret(auth_entity, auth_entity_name, std::string(),
+                             std::string(), std::string(), 0,
+                             endorsement_password_authorization.get());
+  if (rc) {
+    LOG(ERROR) << __func__
+               << ": Failed to set the secret: " << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  // Activate the credential.
+  MultipleAuthorizations authorization;
+  authorization.AddAuthorizationDelegate(empty_password_authorization.get());
+  authorization.AddAuthorizationDelegate(session->GetDelegate());
+
+  trunks::TPM2B_DIGEST blob_out;
+  LOG(WARNING) << secret.size;
+
+  rc = factory.GetTpm()->ActivateCredentialSync(
+      aik_handle, aik_name, endorsement_key_handle, endorsement_key_name,
+      credential_blob, secret, &blob_out, &authorization);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `Tpm::ActivateCredentialSync()`: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+  std::string activated_credential = trunks::StringFrom_TPM2B_DIGEST(blob_out);
+  printf("fake credential in:  %s\n", fake_credential.c_str());
+  printf("fake credential out: %s\n", activated_credential.c_str());
+  return fake_credential == activated_credential;
+}
+
+bool TestSignVerify(const trunks::TrunksFactory& factory) {
+  std::unique_ptr<AuthorizationDelegate> empty_password_authorization =
+      factory.GetPasswordAuthorization("");
+  std::string blob, creation_blob;
+  trunks::TPM_RC rc = factory.GetTpmUtility()->CreateECCKeyPair(
+      trunks::TpmUtility::AsymmetricKeyUsage::kSignKey,
+      trunks::TPM_ECC_NIST_P256,
+      /*password=*/"",
+      /*policy_digest=*/"",
+      /*use_only_policy_authorization=*/false,
+      /*creation_pcr_indexes=*/{}, empty_password_authorization.get(), &blob,
+      &creation_blob);
+  if (rc) {
+    LOG(ERROR) << "Failed to create key: " << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  trunks::TPM_HANDLE handle;
+  rc = factory.GetTpmUtility()->LoadKey(
+      blob, empty_password_authorization.get(), &handle);
+  if (rc) {
+    LOG(ERROR) << "Failed to load key: " << trunks::GetErrorString(rc);
+    return false;
+  }
+  trunks::ScopedKeyHandle scoped_key(factory, handle);
+  scoped_key.set_synchronized(true);
+
+  const std::string data = "At the end it doesn't even matter.";
+  trunks::TPM2B_DIGEST digest = {};
+  trunks::TPMT_TK_HASHCHECK validation = {};
+  rc = factory.GetTpm()->HashSync(trunks::Make_TPM2B_MAX_BUFFER(data),
+                                  trunks::TPM_ALG_SHA256, trunks::TPM_RH_OWNER,
+                                  &digest, &validation,
+                                  /*authorization_delegate=*/nullptr);
+  if (rc) {
+    LOG(ERROR) << "Failed to hash: " << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  trunks::TPMT_SIG_SCHEME scheme = {
+      .scheme = trunks::TPM_ALG_ECDSA,
+      .details.any.hash_alg = trunks::TPM_ALG_SHA256,
+  };
+  trunks::TPMT_SIGNATURE signature = {};
+  rc = factory.GetTpm()->SignSync(
+      handle, /*key_handle_name=*/"not used w/o auth session", digest, scheme,
+      validation, &signature, empty_password_authorization.get());
+  if (rc) {
+    LOG(ERROR) << "Failed to sign: " << trunks::GetErrorString(rc);
+    return false;
+  }
+  trunks::TPMT_TK_VERIFIED verified = {};
+  rc = factory.GetTpm()->VerifySignatureSync(
+      handle, /*key_handle_name=*/"not used w/o auth session", digest,
+      signature, &verified, /*authorization_delegate=*/nullptr);
+  if (rc) {
+    LOG(ERROR) << "Failed to verify signature: " << trunks::GetErrorString(rc);
+    return false;
+  }
+  return true;
+}
+
+bool TestCertify(const trunks::TrunksFactory& factory) {
+  std::unique_ptr<AuthorizationDelegate> empty_password_authorization =
+      factory.GetPasswordAuthorization("");
+  std::string aik_blob;
+  trunks::TPM_RC rc = factory.GetTpmUtility()->CreateIdentityKey(
+      trunks::TPM_ALG_ECC, empty_password_authorization.get(), &aik_blob);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `TpmUtility::CreateIdentityKey()`: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  std::string blob, creation_blob;
+  rc = factory.GetTpmUtility()->CreateECCKeyPair(
+      trunks::TpmUtility::AsymmetricKeyUsage::kSignKey,
+      trunks::TPM_ECC_NIST_P256,
+      /*password=*/"",
+      /*policy_digest=*/"",
+      /*use_only_policy_authorization=*/false,
+      /*creation_pcr_indexes=*/{}, empty_password_authorization.get(), &blob,
+      &creation_blob);
+  if (rc) {
+    LOG(ERROR) << "Failed to create key: " << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  // Load aik.
+  trunks::TPM_HANDLE aik_handle = 0;
+  rc = factory.GetTpmUtility()->LoadKey(
+      aik_blob, empty_password_authorization.get(), &aik_handle);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `TpmUtility::LoadKey()`: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  // Load key to be certified.
+  trunks::TPM_HANDLE handle = 0;
+  rc = factory.GetTpmUtility()->LoadKey(
+      blob, empty_password_authorization.get(), &handle);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `TpmUtility::LoadKey()`: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  // Make sure the object is flushed.
+  trunks::ScopedKeyHandle scoped_aik(factory, aik_handle);
+  scoped_aik.set_synchronized(true);
+  trunks::ScopedKeyHandle scoped_key(factory, handle);
+  scoped_key.set_synchronized(true);
+
+  // Certify.
+  MultipleAuthorizations authorization;
+  authorization.AddAuthorizationDelegate(empty_password_authorization.get());
+  authorization.AddAuthorizationDelegate(empty_password_authorization.get());
+
+  trunks::TPMT_SIG_SCHEME scheme = {
+      .scheme = trunks::TPM_ALG_ECDSA,
+      .details.any.hash_alg = trunks::TPM_ALG_SHA256,
+  };
+
+  trunks::TPM2B_ATTEST certify_info = {};
+  trunks::TPMT_SIGNATURE signature = {};
+
+  rc = factory.GetTpm()->CertifySync(
+      handle,
+      /*object_handle_name=*/"not used w/o auth session", aik_handle,
+      /*sign_handle_name=*/"not used w/o auth session",
+      trunks::Make_TPM2B_DATA("qualifying data"), scheme, &certify_info,
+      &signature, &authorization);
+
+  if (rc) {
+    LOG(ERROR) << "Failed to certify: " << trunks::GetErrorString(rc);
+    return false;
+  }
+
+  // Only perform a simple verification against the output `TPMS_ATTEST`.
+  trunks::TPMS_ATTEST attest = {};
+  std::string buffer = StringFrom_TPM2B_ATTEST(certify_info);
+  rc = trunks::Parse_TPMS_ATTEST(&buffer, &attest, nullptr);
+  if (rc) {
+    LOG(ERROR) << "Failed to call `Parse_TPMS_ATTEST()`: "
+               << trunks::GetErrorString(rc);
+    return false;
+  }
+  if (!buffer.empty()) {
+    LOG(ERROR) << "wrong size of `TPMS_ATTEST` buffer.";
+    return false;
+  }
+  if (attest.magic != trunks::TPM_GENERATED_VALUE) {
+    LOG(ERROR) << "Unexpected magic number: " << attest.magic;
+    return false;
+  }
+  if (attest.type != trunks::TPM_ST_ATTEST_CERTIFY) {
+    LOG(ERROR) << "Unexpected attest type: " << attest.type;
+    return false;
+  }
+
+  return true;
+}
+
 std::vector<std::string> BreakByDelim(const std::string& value,
                                       const std::string& delim) {
   std::vector<std::string> result;
@@ -709,8 +1053,17 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  TrunksFactoryImpl factory;
+  std::unique_ptr<TrunksDBusProxy> dbus_proxy =
+      cl->HasSwitch("vtpm") ? CreateTrunksDBusProxyToVtpm()
+                            : CreateTrunksDBusProxyToTrunks();
+
+  CHECK(dbus_proxy->Init()) << "Failed to initialize D-Bus proxy.";
+
+  TrunksFactoryImpl factory(dbus_proxy.get());
   CHECK(factory.Initialize()) << "Failed to initialize trunks factory.";
+
+  std::unique_ptr<AuthorizationDelegate> empty_password_authorization =
+      factory.GetPasswordAuthorization("");
 
   bool print_time = cl->HasSwitch("print_time");
   if (cl->HasSwitch("status")) {
@@ -851,6 +1204,9 @@ int main(int argc, char** argv) {
   if (cl->HasSwitch("tpm_version")) {
     return TpmVersion(factory);
   }
+  if (cl->HasSwitch("rw_version")) {
+    return GetRwVersion(factory);
+  }
   if (cl->HasSwitch("endorsement_public_key")) {
     return EndorsementPublicKey(factory);
   }
@@ -862,12 +1218,18 @@ int main(int argc, char** argv) {
     if (GetKeyUsage(cl->GetSwitchValueASCII("usage"), &key_usage)) {
       return -1;
     }
-    trunks::HmacAuthorizationDelegate delegate;
+    trunks::HmacAuthorizationDelegate hmac_delegate;
+    trunks::AuthorizationDelegate* delegate = nullptr;
     std::unique_ptr<trunks::SessionManager> session_manager =
         factory.GetSessionManager();
-    if (KeyStartSession(session_manager.get(), cl, &delegate)) {
+    if (cl->HasSwitch("sess_empty_auth")) {
+      delegate = empty_password_authorization.get();
+    } else if (KeyStartSession(session_manager.get(), cl, &hmac_delegate)) {
       return -1;
+    } else {
+      delegate = &hmac_delegate;
     }
+
     std::string key_blob;
 
     if (cl->HasSwitch("rsa")) {
@@ -877,7 +1239,7 @@ int main(int argc, char** argv) {
                          modulus_bits, 0x10001 /* exponent */,
                          "" /* password */, "" /* policy_digest */,
                          false /* use_only_policy_digest */,
-                         std::vector<uint32_t>() /* pcrs */, &delegate,
+                         std::vector<uint32_t>() /* pcrs */, delegate,
                          &key_blob, nullptr /* creation_blob */)) {
         return -1;
       }
@@ -887,7 +1249,7 @@ int main(int argc, char** argv) {
                          trunks::TPM_ECC_NIST_P256 /* curve_id */,
                          "" /* password */, "" /* policy_digest */,
                          false /* use_only_policy_digest */,
-                         std::vector<uint32_t>() /* pcrs */, &delegate,
+                         std::vector<uint32_t>() /* pcrs */, delegate,
                          &key_blob, nullptr /* creation_blob */)) {
         return -1;
       }
@@ -899,15 +1261,21 @@ int main(int argc, char** argv) {
     if (InputFromFile(cl->GetSwitchValueASCII("key_blob"), &key_blob)) {
       return -1;
     }
-    trunks::HmacAuthorizationDelegate delegate;
+    trunks::HmacAuthorizationDelegate hmac_delegate;
+    trunks::AuthorizationDelegate* delegate = nullptr;
     std::unique_ptr<trunks::SessionManager> session_manager =
         factory.GetSessionManager();
-    if (KeyStartSession(session_manager.get(), cl, &delegate)) {
+    if (cl->HasSwitch("sess_empty_auth")) {
+      delegate = empty_password_authorization.get();
+    } else if (KeyStartSession(session_manager.get(), cl, &hmac_delegate)) {
       return -1;
+    } else {
+      delegate = &hmac_delegate;
     }
+
     trunks::TPM_HANDLE handle;
     if (CallTpmUtility(print_time, factory, "Load",
-                       &trunks::TpmUtility::LoadKey, key_blob, &delegate,
+                       &trunks::TpmUtility::LoadKey, key_blob, delegate,
                        &handle)) {
       return -1;
     }
@@ -987,6 +1355,12 @@ int main(int argc, char** argv) {
     uint32_t handle = std::stoul(cl->GetSwitchValueASCII("handle"), nullptr, 0);
     return KeyInfo(print_time, factory, handle);
   }
+  if (cl->HasSwitch("persistent_keys")) {
+    return PersistentKeys(factory);
+  }
+  if (cl->HasSwitch("transient_keys")) {
+    return TransientKeys(factory);
+  }
   if (cl->HasSwitch("key_test_short_ecc") && cl->HasSwitch("handle")) {
     uint32_t handle = std::stoul(cl->GetSwitchValueASCII("handle"), nullptr, 0);
     return KeyTestShortEcc(factory, handle);
@@ -995,10 +1369,19 @@ int main(int argc, char** argv) {
     uint32_t index = std::stoul(cl->GetSwitchValueASCII("index"), nullptr, 0);
     return CsmeTestPcr(factory, index);
   }
+  if (cl->HasSwitch("csme_read_pcr") && cl->HasSwitch("index")) {
+    uint32_t index = std::stoul(cl->GetSwitchValueASCII("index"), nullptr, 0);
+    return CsmeReadPcr(factory, index);
+  }
   if (cl->HasSwitch("index_name") && cl->HasSwitch("index")) {
     uint32_t nv_index =
         std::stoul(cl->GetSwitchValueASCII("index"), nullptr, 16);
     return PrintIndexNameInHex(factory, nv_index);
+  }
+  if (cl->HasSwitch("index_data") && cl->HasSwitch("index")) {
+    uint32_t nv_index =
+        std::stoul(cl->GetSwitchValueASCII("index"), nullptr, 16);
+    return PrintIndexDataInHex(factory, nv_index);
   }
 
   if (cl->HasSwitch("uds_calc")) {
@@ -1194,6 +1577,51 @@ int main(int argc, char** argv) {
       return -1;
     }
     return 0;
+  }
+  if (cl->HasSwitch("ecc_ek_handle") && cl->HasSwitch("password")) {
+    const std::string hex_password = cl->GetSwitchValueASCII("password");
+    std::string endorsement_password;
+    if (!hex_password.empty() &&
+        !base::HexStringToString(hex_password, &endorsement_password)) {
+      puts("Error hex-decoding endorsement password.");
+      return -1;
+    }
+    return PrintEccEndorsementKeyHandle(factory, endorsement_password);
+  }
+  if (cl->HasSwitch("test_credential_command") && cl->HasSwitch("password") &&
+      cl->HasSwitch("handle")) {
+    uint32_t endorsement_key_handle =
+        std::stoul(cl->GetSwitchValueASCII("handle"), nullptr, 0);
+    const std::string hex_password = cl->GetSwitchValueASCII("password");
+    std::string endorsement_password;
+    if (!hex_password.empty() &&
+        !base::HexStringToString(hex_password, &endorsement_password)) {
+      puts("Error hex-decoding endorsement password.");
+      return -1;
+    }
+    if (TestCredentialCommand(factory, endorsement_password,
+                              endorsement_key_handle)) {
+      puts("pass");
+      return 0;
+    }
+    puts("fail");
+    return -1;
+  }
+  if (cl->HasSwitch("test_sign_verify")) {
+    if (TestSignVerify(factory)) {
+      puts("pass");
+      return 0;
+    }
+    puts("fail");
+    return -1;
+  }
+  if (cl->HasSwitch("test_certify_simple")) {
+    if (TestCertify(factory)) {
+      puts("pass");
+      return 0;
+    }
+    puts("fail");
+    return -1;
   }
 
   puts("Invalid options!");

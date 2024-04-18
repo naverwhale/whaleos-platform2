@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef VM_TOOLS_SYSLOG_LOG_PIPE_H_
@@ -10,7 +10,6 @@
 #include <string>
 
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/synchronization/lock.h>
 #include <base/thread_annotations.h>
@@ -77,7 +76,7 @@ class LogPipeManager final : public LogCollector::Service {
   LogPipeManager(const LogPipeManager&) = delete;
   LogPipeManager& operator=(const LogPipeManager&) = delete;
 
-  ~LogPipeManager();
+  ~LogPipeManager() override;
 
   bool Init(base::ScopedFD syslog_fd, bool only_forward_to_syslog);
 

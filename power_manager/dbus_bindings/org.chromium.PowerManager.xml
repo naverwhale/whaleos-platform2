@@ -48,6 +48,8 @@
       </tp:docstring>
       <arg name="suspend_flavor" direction="in" type="u" />
     </method>
+
+    <!-- Screen brightness control -->
     <method name="SetScreenBrightness">
       <tp:docstring>
         The |serialized_proto| arg is a serialized
@@ -62,8 +64,41 @@
     <method name="GetScreenBrightnessPercent">
       <arg name="percent" direction="out" type="d" />
     </method>
+
+    <!-- Keyboard backlight control -->
     <method name="DecreaseKeyboardBrightness" />
     <method name="IncreaseKeyboardBrightness" />
+    <method name="ToggleKeyboardBacklight">
+      <tp:docstring>
+        Toggle the on/off state of the keyboard backlight.
+
+        If the keyboard's backlight is currently turned on, it will be
+        disabled, and vice versa.
+      </tp:docstring>
+    </method>
+    <method name="SetKeyboardBrightness">
+      <tp:docstring>
+        Set the brightness of the keyboard backlight.
+
+        The |serialized_proto| arg is a serialized
+        power_manager::SetBacklightBrightnessRequest protobuf.
+      </tp:docstring>
+      <arg name="serialized_proto" direction="in" type="ay" />
+    </method>
+    <method name="GetKeyboardBrightnessPercent">
+      <tp:docstring>
+        Get the current brightness of the keyboard backlight as
+        a percentage.
+
+        If |success| is true, the returned value |percent| will be
+        a value between 0.0 and 100.0 inclusive, representing the
+        brightness. The value 0.0 represents "off", while 100.0
+        represents "full brightness".
+      </tp:docstring>
+      <arg name="percent" direction="out" type="d" />
+      <arg name="success" direction="out" type="b" />
+    </method>
+
     <method name="GetPowerSupplyProperties">
       <tp:docstring>
         The |serialized_proto| arg is a serialized
@@ -108,14 +143,14 @@
     <method name="HandlePowerButtonAcknowledgment">
       <tp:docstring>
         The |timestamp_internal| arg is represented as the return value of
-        base::TimeTicks::ToInternalValue().
+        (|timestamp| - base::TimeTicks()).InMicroseconds().
       </tp:docstring>
       <arg name="timestamp_internal" direction="in" type="x" />
     </method>
     <method name="IgnoreNextPowerButtonPress">
       <tp:docstring>
         The |timeout_internal| arg is represented as the return value of
-        base::TimeDelta::ToInternalValue(). Setting it to 0 cancels a
+        base::TimeDelta::InMicroseconds(). Setting it to 0 cancels a
         previously set period.
       </tp:docstring>
       <arg name="timeout_internal" direction="in" type="x" />
@@ -205,6 +240,45 @@
       <arg name="enabled" direction="out" type="b" />
     </method>
 
+    <method name="ChargeNowForAdaptiveCharging">
+      <tp:docstring>
+        Stop delaying charging for Adaptive Charging for this charge session.
+      </tp:docstring>
+    </method>
+
+    <method name="GetChargeHistory">
+      <tp:docstring>
+        Fetches the charge history for up to the last 30 days.
+        |serialized_proto| is a serialized power_manager::ChargeHistory
+        protobuf.
+      </tp:docstring>
+      <arg name="serialized_proto" direction="out" type="ay" />
+    </method>
+
+    <!-- Battery Saver Mode -->
+    <method name="GetBatterySaverModeState">
+      <tp:docstring>
+        Get the current state of Battery Saver Mode. The |serialized_proto| arg
+        is a serialized |power_manager::BatterySaverModeState| protobuf.
+      </tp:docstring>
+      <arg name="serialized_proto" direction="out" type="ay" />
+    </method>
+    <method name="SetBatterySaverModeState">
+      <tp:docstring>
+        Update the state of Battery Saver Mode. The |serialized_proto| is a
+        serialized |power_manager::SetBatterySaverModeStateRequest| protobuf.
+      </tp:docstring>
+      <arg name="serialized_proto" direction="in" type="ay" />
+    </method>
+    <signal name="BatterySaverModeStateChanged">
+      <tp:docstring>
+        Called when the state of Battery Saver Mode has changed, and on
+        powerd startup. The |serialized_proto| is a serialized
+        |power_manager::BatterySaverModeState| protobuf.
+      </tp:docstring>
+      <arg name="serialized_proto" direction="out" type="ay" />
+    </signal>
+
     <!-- Signals -->
     <signal name="ScreenBrightnessChanged">
       <tp:docstring>
@@ -248,6 +322,16 @@
       <arg name="display_battery_percentage" direction="out" type="d" />
     </method>
 
+    <signal name="LidOpened">
+      <tp:docstring>
+        Lid open signal.
+      </tp:docstring>
+    </signal>
+    <signal name="LidClosed">
+      <tp:docstring>
+        Lid close signal.
+      </tp:docstring>
+    </signal>
 
     <signal name="SuspendImminent">
       <tp:docstring>
@@ -267,6 +351,13 @@
       <tp:docstring>
         The |serialized_proto| arg is a serialized
         power_manager::SuspendImminent protobuf.
+      </tp:docstring>
+      <arg name="serialized_proto" type="ay" />
+    </signal>
+    <signal name="HibernateResumeReady">
+      <tp:docstring>
+        The |serialized_proto| arg is a serialized
+        power_manager::HibernateResumeReady protobuf.
       </tp:docstring>
       <arg name="serialized_proto" type="ay" />
     </signal>

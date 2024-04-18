@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,11 @@
 
 #include <memory>
 
-#include <base/macros.h>
-
 namespace brillo {
 
 class Udev;
+class UsbDeviceEventNotifier;
+class UsbManager;
 
 }  // namespace brillo
 
@@ -20,8 +20,6 @@ namespace mist {
 class ConfigLoader;
 class EventDispatcher;
 class Metrics;
-class UsbDeviceEventNotifier;
-class UsbManager;
 
 // A context class for holding the key helper objects used in mist, which
 // simplifies the passing of the helper objects to other objects. For instance,
@@ -42,10 +40,10 @@ class Context {
   ConfigLoader* config_loader() const { return config_loader_.get(); }
   EventDispatcher* event_dispatcher() const { return event_dispatcher_.get(); }
   brillo::Udev* udev() const { return udev_.get(); }
-  UsbDeviceEventNotifier* usb_device_event_notifier() const {
+  brillo::UsbDeviceEventNotifier* usb_device_event_notifier() const {
     return usb_device_event_notifier_.get();
   }
-  UsbManager* usb_manager() const { return usb_manager_.get(); }
+  brillo::UsbManager* usb_manager() const { return usb_manager_.get(); }
 
  private:
   friend class MockContext;
@@ -54,8 +52,8 @@ class Context {
   std::unique_ptr<ConfigLoader> config_loader_;
   std::unique_ptr<EventDispatcher> event_dispatcher_;
   std::unique_ptr<brillo::Udev> udev_;
-  std::unique_ptr<UsbDeviceEventNotifier> usb_device_event_notifier_;
-  std::unique_ptr<UsbManager> usb_manager_;
+  std::unique_ptr<brillo::UsbDeviceEventNotifier> usb_device_event_notifier_;
+  std::unique_ptr<brillo::UsbManager> usb_manager_;
 };
 
 }  // namespace mist

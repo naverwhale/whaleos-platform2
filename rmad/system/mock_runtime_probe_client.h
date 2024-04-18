@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,9 @@
 
 #include "rmad/system/runtime_probe_client.h"
 
-#include <set>
 #include <vector>
 
 #include <gmock/gmock.h>
-#include <runtime_probe/proto_bindings/runtime_probe.pb.h>
 
 namespace rmad {
 
@@ -24,7 +22,13 @@ class MockRuntimeProbeClient : public RuntimeProbeClient {
 
   MOCK_METHOD(bool,
               ProbeCategories,
-              (const std::vector<RmadComponent>&, std::set<RmadComponent>*),
+              (const std::vector<RmadComponent>&,
+               bool,
+               ComponentsWithIdentifier*),
+              (override));
+  MOCK_METHOD(bool,
+              ProbeSsfcComponents,
+              (bool, ComponentsWithIdentifier*),
               (override));
 };
 

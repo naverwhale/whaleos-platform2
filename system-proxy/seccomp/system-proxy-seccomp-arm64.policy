@@ -1,6 +1,9 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 gettid: 1
 mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
@@ -13,7 +16,6 @@ fstat: 1
 newfstatat: 1
 ppoll: 1
 rt_sigprocmask: 1
-send: 1
 recvmsg: 1
 gettimeofday: 1
 geteuid: 1
@@ -79,7 +81,7 @@ sendmmsg: 1
 getpeername: 1
 setpriority: 1
 madvise: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 shutdown: 1
 pread64: 1
 # Required for System-proxy to read the Chrome OS login password as part of a
@@ -91,3 +93,6 @@ mlock: 1
 munlock: 1
 sysinfo: 1
 fstatfs: 1
+prlimit64: 1
+sched_getattr: 1
+sched_setattr: 1

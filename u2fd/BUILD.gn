@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -7,15 +7,12 @@ import("//common-mk/proto_library.gni")
 
 group("all") {
   deps = [
-    ":g2ftool",
+    ":install_minijail_conf",
+    ":install_tmpfiles_config",
     ":u2fd",
-    ":webauthntool",
   ]
   if (use.test) {
-    deps += [
-      ":g2f_client_test",
-      ":u2fd_test_runner",
-    ]
+    deps += [ ":u2fd_test_runner" ]
   }
   if (use.fuzzer) {
     deps += [
@@ -27,28 +24,28 @@ group("all") {
   }
 }
 
+install_config("install_minijail_conf") {
+  sources = [ "minijail/u2fd.conf" ]
+  install_path = "minijail_conf"
+}
+
 pkg_config("target_defaults") {
   pkg_deps = [
     "libbrillo",
     "libchrome",
     "libsession_manager-client",
   ]
+  cflags = [ "-Wconsumed" ]
 }
 
 pkg_config("u2fd_config") {
-  # NOSORT
   pkg_deps = [
     "libattestation-client",
-    "libcryptohome-client",
     "libmetrics",
     "libpower_manager-client",
-    "libtrunks",
+    "libu2fd-client",
     "libuser_data_auth-client",
     "openssl",
-
-    # system_api depends on protobuf (or protobuf-lite). It must appear
-    # before protobuf here or the linker flags won't be in the right
-    # order.
     "system_api",
   ]
   if (use.fuzzer) {
@@ -61,14 +58,14 @@ pkg_config("u2fd_config") {
 static_library("libu2fd") {
   sources = [
     "allowlisting_util.cc",
-    "tpm_vendor_cmd.cc",
-    "u2f_apdu.cc",
+    "u2f_command_processor_generic.cc",
+    "u2f_command_processor_vendor.cc",
+    "u2f_corp_processor_interface.cc",
     "u2f_daemon.cc",
     "u2f_msg_handler.cc",
     "u2fhid.cc",
+    "u2fhid_service_impl.cc",
     "uhid_device.cc",
-    "user_state.cc",
-    "util.cc",
     "webauthn_handler.cc",
     "webauthn_storage.cc",
   ]
@@ -77,81 +74,26 @@ static_library("libu2fd") {
     ":u2fd_config",
   ]
   libs = [
+    "dl",
+    "hwsec",
     "policy",
     "cbor",
   ]
-  deps = [
-    ":user_state_proto",
-    "//common-mk/external_dependencies:policy-protos",
-  ]
+  deps = [ "//common-mk/external_dependencies:policy-protos" ]
 }
 
 executable("u2fd") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
-  libs = [ "policy" ]
+  libs = [
+    "hwsec-foundation",
+    "hwsec-profiling",
+    "policy",
+  ]
   deps = [ ":libu2fd" ]
 }
 
-proto_library("user_state_proto") {
-  proto_in_dir = "."
-  proto_out_dir = "include/u2fd"
-  sources = [ "user_state.proto" ]
-}
-
-executable("g2ftool") {
-  sources = [ "g2f_tools/g2ftool.cc" ]
-  configs += [ ":target_defaults" ]
-  deps = [ ":libg2fclient" ]
-}
-
-pkg_config("webauthntool_config") {
-  # NOSORT
-  pkg_deps = [
-    # system_api depends on protobuf (or protobuf-lite). It must appear
-    # before protobuf here or the linker flags won't be in the right
-    # order.
-    "system_api",
-  ]
-  if (use.fuzzer) {
-    pkg_deps += [ "protobuf" ]
-  } else {
-    pkg_deps += [ "protobuf-lite" ]
-  }
-}
-
-executable("webauthntool") {
-  sources = [ "g2f_tools/webauthntool.cc" ]
-  configs += [
-    ":target_defaults",
-    ":webauthntool_config",
-  ]
-}
-
-static_library("libg2fclient") {
-  sources = [ "g2f_tools/g2f_client.cc" ]
-  configs += [ ":target_defaults" ]
-  libs = [ "hidapi-hidraw" ]
-}
-
 if (use.test) {
-  pkg_config("g2f_client_test_config") {
-    pkg_deps = [ "libchrome-test" ]
-  }
-
-  executable("g2f_client_test") {
-    sources = [
-      "g2f_tools/g2f_client.cc",
-      "g2f_tools/g2f_client_test.cc",
-    ]
-    configs += [
-      "//common-mk:test",
-      ":target_defaults",
-      ":g2f_client_test_config",
-    ]
-    deps = [ "//common-mk/testrunner" ]
-  }
-
   pkg_config("u2fd_test_config") {
     pkg_deps = [
       "libbrillo-test",
@@ -163,7 +105,8 @@ if (use.test) {
   executable("u2fd_test_runner") {
     sources = [
       "allowlisting_util_test.cc",
-      "u2f_msg_handler_test.cc",
+      "u2f_command_processor_generic_test.cc",
+      "u2f_command_processor_vendor_test.cc",
       "webauthn_handler_test.cc",
       "webauthn_storage_test.cc",
     ]
@@ -173,27 +116,26 @@ if (use.test) {
       ":u2fd_config",
       ":u2fd_test_config",
     ]
+    libs = [ "hwsec_test" ]
     deps = [
       ":libu2fd",
       "//common-mk/testrunner",
     ]
+    if (use.cr50_onboard || use.ti50_onboard) {
+      sources += [ "u2f_msg_handler_test.cc" ]
+    }
   }
 }
 
 if (use.fuzzer) {
   executable("u2f_apdu_fuzzer") {
-    sources = [
-      "fuzzers/u2f_apdu_fuzzer.cc",
-      "tpm_vendor_cmd.cc",
-      "u2f_apdu.cc",
-      "util.cc",
-    ]
+    sources = [ "fuzzers/u2f_apdu_fuzzer.cc" ]
     configs += [
       "//common-mk/common_fuzzer:common_fuzzer",
       ":target_defaults",
     ]
     pkg_deps = [
-      "libtrunks",
+      "libu2fd-client",
       "openssl",
     ]
   }
@@ -203,17 +145,15 @@ if (use.fuzzer) {
       "fuzzers/fake_u2f_msg_handler.cc",
       "fuzzers/fake_uhid_device.cc",
       "fuzzers/u2fhid_fuzzer.cc",
-      "tpm_vendor_cmd.cc",
-      "u2f_apdu.cc",
+      "u2f_corp_processor_interface.cc",
       "u2fhid.cc",
-      "util.cc",
     ]
     configs += [
       "//common-mk/common_fuzzer:common_fuzzer",
       ":target_defaults",
     ]
     pkg_deps = [
-      "libtrunks",
+      "libu2fd-client",
       "openssl",
     ]
   }
@@ -229,7 +169,6 @@ if (use.fuzzer) {
       "//common-mk:test",
       ":target_defaults",
     ]
-    libs = [ "trunks_test" ]
     deps = [ ":libu2fd" ]
   }
 
@@ -246,7 +185,6 @@ if (use.fuzzer) {
       ":u2fd_config",
       ":local_proto_include",
     ]
-    libs = [ "trunks_test" ]
     deps = [
       ":libu2fd",
       ":webauthn_fuzzer_data_proto",
@@ -267,4 +205,9 @@ if (use.fuzzer) {
     configs = [ ":local_proto_include" ]
     sources = [ "${proto_in_dir}/webauthn_fuzzer_data.proto" ]
   }
+}
+
+install_config("install_tmpfiles_config") {
+  sources = [ "tmpfiles.d/u2fd.conf" ]
+  install_path = "tmpfilesd"
 }

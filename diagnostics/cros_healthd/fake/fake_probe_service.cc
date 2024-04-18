@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,6 +20,13 @@ void FakeProbeService::ProbeProcessInfo(uint32_t process_id,
 void FakeProbeService::ProbeTelemetryInfo(
     const std::vector<ProbeCategoryEnum>& categories,
     ProbeTelemetryInfoCallback callback) {
+  NOTIMPLEMENTED();
+}
+
+void FakeProbeService::ProbeMultipleProcessInfo(
+    const std::optional<std::vector<uint32_t>>& process_ids,
+    bool ignore_single_process_info,
+    ProbeMultipleProcessInfoCallback callback) {
   NOTIMPLEMENTED();
 }
 

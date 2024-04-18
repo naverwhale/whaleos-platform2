@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,39 +11,40 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/callback.h>
 #include <base/time/time.h>
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
 #include <brillo/blkdev_utils/lvm.h>
-#endif  // USE_LVM_STATEFUL_PARTITION
 #include <brillo/secure_blob.h>
 #include <chaps/token_manager_client.h>
+#include <cryptohome/proto_bindings/rpc.pb.h>
 #include <dbus/cryptohome/dbus-constants.h>
 #include <gtest/gtest_prod.h>
 #include <policy/device_policy.h>
 #include <policy/libpolicy.h>
 
 #include "cryptohome/crypto.h"
+#include "cryptohome/device_management_client_proxy.h"
 #include "cryptohome/platform.h"
-#include "cryptohome/rpc.pb.h"
 #include "cryptohome/storage/cryptohome_vault.h"
 #include "cryptohome/storage/cryptohome_vault_factory.h"
 #include "cryptohome/storage/encrypted_container/encrypted_container.h"
 #include "cryptohome/storage/encrypted_container/encrypted_container_factory.h"
+#include "cryptohome/storage/error.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
 // The uid shift of ARC++ container.
-const uid_t kArcContainerShiftUid = 655360;
+inline constexpr uid_t kArcContainerShiftUid = 655360;
 // The gid shift of ARC++ container.
-const gid_t kArcContainerShiftGid = 655360;
+inline constexpr gid_t kArcContainerShiftGid = 655360;
 extern const char kAndroidCacheInodeAttribute[];
 extern const char kAndroidCodeCacheInodeAttribute[];
 extern const char kTrackedDirectoryNameAttribute[];
@@ -53,106 +54,117 @@ class HomeDirs {
  public:
   // HomeDir contains lists the current user profiles.
   struct HomeDir {
-    std::string obfuscated;
+    ObfuscatedUsername obfuscated;
     bool is_mounted = false;
   };
 
-  using RemoveCallback =
-      base::RepeatingCallback<void(const std::string& obfuscated_username)>;
+  // Returned by RemoveCryptohomesBasedOnPolicy.
+  enum class CryptohomesRemovedStatus {
+    // RemoveCryptohomesBasedOnPolicy returns an error.
+    kError = 0,
+    // RemoveCryptohomesBasedOnPolicy hasn't removed any cryptohomes.
+    kNone = 1,
+    // RemoveCryptohomesBasedOnPolicy has removed some cryptohomes.
+    kSome = 2,
+    // RemoveCryptohomesBasedOnPolicy has removed all cryptohomes.
+    kAll = 3,
+  };
+
+  using RemoveCallback = base::RepeatingCallback<void(
+      const ObfuscatedUsername& obfuscated_username)>;
 
   HomeDirs() = default;
   // |remove_callback| is executed in Remove() to make sure LE Credentials of
   // the corresponding |obfuscated_username| is also removed when user's
   // cryptohome is removed from the device.
   HomeDirs(Platform* platform,
-           const brillo::SecureBlob& system_salt,
-           std::unique_ptr<policy::PolicyProvider> policy_provider,
-           const RemoveCallback& remove_callback);
-  HomeDirs(Platform* platform,
-           const brillo::SecureBlob& system_salt,
            std::unique_ptr<policy::PolicyProvider> policy_provider,
            const RemoveCallback& remove_callback,
-           std::unique_ptr<CryptohomeVaultFactory> vault_factory);
+           CryptohomeVaultFactory* vault_factory);
   HomeDirs(const HomeDirs&) = delete;
   HomeDirs& operator=(const HomeDirs&) = delete;
 
   virtual ~HomeDirs();
 
-  // Removes all cryptohomes owned by anyone other than the owner user (if set),
-  // regardless of free disk space.
-  virtual void RemoveNonOwnerCryptohomes();
+  // Removes all ephemeral cryptohomes except mounted owned by anyone other than
+  // the owner user (if set) and non ephemeral users, regardless of free disk
+  // space. Returns the Status of removal.
+  virtual CryptohomesRemovedStatus RemoveCryptohomesBasedOnPolicy();
 
-  // Returns the system salt.
-  virtual bool GetSystemSalt(brillo::SecureBlob* blob);
-
-  // Returns the owner's obfuscated username.
-  virtual bool GetOwner(std::string* owner);
-  virtual bool GetPlainOwner(std::string* owner);
+  // Returns the owner's username.
+  virtual bool GetOwner(ObfuscatedUsername* owner);
+  virtual bool GetPlainOwner(Username* owner);
 
   // Returns whether the given user is a non-enterprise owner, or if it will
   // become such in case it signs in now.
-  bool IsOrWillBeOwner(const std::string& account_id);
+  bool IsOrWillBeOwner(const Username& account_id);
 
-  // Returns whether the ephemeral users policy is enabled.
-  virtual bool AreEphemeralUsersEnabled();
+  // Get the Ephemeral related policies.
+  virtual bool GetEphemeralSettings(
+      policy::DevicePolicy::EphemeralSettings* settings);
+
+  // Returns whether Keylocker should be used for per-user encrypted storage.
+  virtual bool KeylockerForStorageEncryptionEnabled();
+
+  // Returns whether the automatic cleanup during login policy is enabled.
+  virtual bool MustRunAutomaticCleanupOnLogin();
+
   // Creates the cryptohome for the named user.
-  virtual bool Create(const std::string& username);
+  virtual bool Create(const Username& username);
 
   // Removes the cryptohome for the given obfuscated username.
-  virtual bool Remove(const std::string& obfuscated);
+  virtual bool Remove(const ObfuscatedUsername& obfuscated);
 
-  // Renames account identified by |account_id_from| to |account_id_to|.
-  // This is called when user e-mail is replaced with GaiaId as account
-  // identifier.
-  virtual bool Rename(const std::string& account_id_from,
-                      const std::string& account_id_to);
+  // Removes the Dmcrypt cache container for the named user.
+  virtual bool RemoveDmcryptCacheContainer(
+      const ObfuscatedUsername& obfuscated);
 
   // Computes the size of cryptohome for the named user.
   // Return 0 if the given user is invalid of non-existent.
   // Negative values are reserved for future cases whereby we need to do some
   // form of error reporting.
   // Note that this method calculates the disk usage instead of apparent size.
-  virtual int64_t ComputeDiskUsage(const std::string& account_id);
+  virtual int64_t ComputeDiskUsage(const Username& account_id);
 
   // Returns true if a path exists for the given obfuscated username.
-  virtual bool Exists(const std::string& obfuscated_username) const;
+  virtual bool Exists(const ObfuscatedUsername& obfuscated_username) const;
 
   // Checks if a cryptohome vault exists for the given obfuscated username.
-  virtual bool CryptohomeExists(const std::string& obfuscated_username,
-                                MountError* error) const;
+  virtual StorageStatusOr<bool> CryptohomeExists(
+      const ObfuscatedUsername& obfuscated_username) const;
 
   // Checks if a eCryptfs cryptohome vault exists for the given obfuscated
   // username.
   virtual bool EcryptfsCryptohomeExists(
-      const std::string& obfuscated_username) const;
+      const ObfuscatedUsername& obfuscated_username) const;
 
   // Checks if a dircrypto cryptohome vault exists for the given obfuscated
   // username.
-  virtual bool DircryptoCryptohomeExists(const std::string& obfuscated_username,
-                                         MountError* error) const;
+  virtual StorageStatusOr<bool> DircryptoCryptohomeExists(
+      const ObfuscatedUsername& obfuscated_username) const;
 
   // Check if a dm-crypt container exists for the given obfuscated username.
   virtual bool DmcryptContainerExists(
-      const std::string& obfuscated_username,
+      const ObfuscatedUsername& obfuscated_username,
       const std::string& container_suffix) const;
 
   // Checks if a dm-crypt cryptohome vault exists for the given obfuscated
   // username.
   virtual bool DmcryptCryptohomeExists(
-      const std::string& obfuscated_username) const;
+      const ObfuscatedUsername& obfuscated_username) const;
 
   // Checks if the dm-crypt cryptohome's cache container exists for the given
   // obfuscated username.
   virtual bool DmcryptCacheContainerExists(
-      const std::string& obfuscated_username) const;
+      const ObfuscatedUsername& obfuscated_username) const;
 
   // Returns the path to the user's chaps token directory.
-  virtual base::FilePath GetChapsTokenDir(const std::string& username) const;
+  virtual base::FilePath GetChapsTokenDir(const Username& username) const;
 
   // Returns true if the cryptohome for the given obfuscated username should
   // migrate to dircrypto.
   virtual bool NeedsDircryptoMigration(
-      const std::string& obfuscated_username) const;
+      const ObfuscatedUsername& obfuscated_username) const;
 
   // Get the number of unmounted android-data directory. Each android users
   // that is not currently logged in should have exactly one android-data
@@ -167,54 +179,37 @@ class HomeDirs {
   // Get the list of cryptohomes on the system.
   virtual std::vector<HomeDir> GetHomeDirs();
 
-  // Accessors. Mostly used for unit testing. These do not take ownership of
-  // passed-in pointers.
-  virtual void set_enterprise_owned(bool value) { enterprise_owned_ = value; }
-  virtual bool enterprise_owned() const { return enterprise_owned_; }
+  // Fetch the status of whether the device is enterprise owned or not.
+  virtual bool enterprise_owned() const;
 
-  // Choose the vault type for new vaults.
-  virtual EncryptedContainerType ChooseVaultType();
-
-  // Generates the cryptohome vault for a newly created home directory.
-  virtual std::unique_ptr<CryptohomeVault> CreatePristineVault(
-      const std::string& obfuscated_username,
-      const FileSystemKeyReference& key_reference,
-      CryptohomeVault::Options options,
-      MountError* mount_error);
-
-  // Generates the cryptohome vault for an existing home directory that needs
-  // to be migrated.
-  virtual std::unique_ptr<CryptohomeVault> CreateMigratingVault(
-      const std::string& obfuscated_username,
-      const FileSystemKeyReference& key_reference,
-      CryptohomeVault::Options options,
-      MountError* mount_error);
-
-  // Generates the cryptohome vault for an existing home directory that will
-  // not be migrated in the current mount.
-  virtual std::unique_ptr<CryptohomeVault> CreateNonMigratingVault(
-      const std::string& obfuscated_username,
-      const FileSystemKeyReference& key_reference,
-      CryptohomeVault::Options options,
-      MountError* mount_error);
-
-  // Generate the cryptohome vault depending on the on-disk state.
-  virtual std::unique_ptr<CryptohomeVault> GenerateCryptohomeVault(
-      const std::string& obfuscated_username,
-      const FileSystemKeyReference& key_reference,
-      CryptohomeVault::Options options,
-      bool is_pristine,
-      MountError* mount_error);
-
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
-  void SetLogicalVolumeManagerForTesting(
-      std::unique_ptr<brillo::LogicalVolumeManager> lvm) {
-    lvm_ = std::move(lvm);
+  virtual void set_lvm_migration_enabled(bool value) {
+    lvm_migration_enabled_ = value;
   }
-#endif  // USE_LVM_STATEFUL_PARTITION
+
+  // Pick the most appropriate vault type for the user.
+  virtual StorageStatusOr<EncryptedContainerType> PickVaultType(
+      const ObfuscatedUsername& obfuscated_username,
+      const CryptohomeVault::Options& options);
+
+  virtual CryptohomeVaultFactory* GetVaultFactory() { return vault_factory_; }
+
+  // Set the device_management_client proxy to homedirs.
+  virtual void SetDeviceManagementClientProxy(
+      DeviceManagementClientProxy* device_management_client) {
+    device_management_client_ = device_management_client;
+  }
+
+  virtual void CreateAndSetDeviceManagementClientProxy(
+      scoped_refptr<dbus::Bus> bus);
 
  private:
+  // Choose the vault type for new vaults.
+  EncryptedContainerType ChooseVaultType();
+
+  // Get the type of an existing vault.
+  StorageStatusOr<EncryptedContainerType> GetVaultType(
+      const ObfuscatedUsername& obfuscated_username);
+
   base::TimeDelta GetUserInactivityThresholdForRemoval();
   // Loads the device policy, either by initializing it or reloading the
   // existing one.
@@ -256,23 +251,35 @@ class HomeDirs {
   // UID.
   bool IsOwnedByAndroidSystem(const base::FilePath& directory) const;
 
+  // Checks the keylocker availability in the system. Non-const in order to be
+  // able to cache its result.
+  bool IsAesKeylockerSupported();
+
   Platform* platform_;
-  brillo::SecureBlob system_salt_;
   std::unique_ptr<policy::PolicyProvider> policy_provider_;
   bool enterprise_owned_;
+  // lvm migration flag is temporary, it will be removed when defaulted to
+  // |true|.
+  bool lvm_migration_enabled_;
   chaps::TokenManagerClient chaps_client_;
-  std::unique_ptr<CryptohomeVaultFactory> vault_factory_;
+  CryptohomeVaultFactory* const vault_factory_ = nullptr;
   std::vector<HomeDir> unmounted_homedirs_;
   // This callback will be run in Remove() to remove LE Credentials when the
   // home directory of the corresponding user is removed.
   RemoveCallback remove_callback_;
 
+  // These will be used to fetch enterprise_owned status from device_management
+  // client.
+  std::unique_ptr<DeviceManagementClientProxy>
+      default_device_management_client_;
+  DeviceManagementClientProxy* device_management_client_ = nullptr;
+
+  // Caches the result of the AES keylocker check, so that we don't add the
+  // latency of reading /proc/crypto for every cryptohome::Mount call.
+  std::optional<bool> is_aes_keylocker_supported_;
+
   // The container a not-shifted system UID in ARC++ container (AID_SYSTEM).
   static constexpr uid_t kAndroidSystemUid = 1000;
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
-  std::unique_ptr<brillo::LogicalVolumeManager> lvm_;
-#endif  // USE_LVM_STATEFUL_PARTITION
 
   friend class HomeDirsTest;
   FRIEND_TEST(HomeDirsTest, GetTrackedDirectoryForDirCrypto);

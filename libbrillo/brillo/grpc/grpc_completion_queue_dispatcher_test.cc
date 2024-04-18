@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,16 @@
 
 #include <list>
 #include <memory>
+#include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/location.h>
-#include <base/macros.h>
 #include <base/run_loop.h>
 #include <base/task/single_thread_task_executor.h>
-#include <base/task_runner.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/task/task_runner.h>
 #include <base/time/time.h>
 #include <gmock/gmock.h>
 #include <grpcpp/alarm.h>
@@ -40,8 +40,8 @@ class TagAvailableCalledTester {
 
   GrpcCompletionQueueDispatcher::TagAvailableCallback
   GetTagAvailableCallback() {
-    return base::Bind(&TagAvailableCalledTester::Callback,
-                      base::Unretained(this));
+    return base::BindOnce(&TagAvailableCalledTester::Callback,
+                          base::Unretained(this));
   }
 
   // Bind this to a RegisterTag call of the
@@ -53,15 +53,15 @@ class TagAvailableCalledTester {
     has_been_called_ = true;
     value_of_ok_ = ok;
 
-    std::list<base::Closure> callbacks_temp;
+    std::list<base::OnceClosure> callbacks_temp;
     callbacks_temp.swap(call_when_invoked_);
     for (auto& callback : callbacks_temp)
-      callback.Run();
+      std::move(callback).Run();
   }
 
   // Register |call_when_invoked| to be called when |Callback| is called.
-  void CallWhenInvoked(base::Closure call_when_invoked) {
-    call_when_invoked_.push_back(call_when_invoked);
+  void CallWhenInvoked(base::OnceClosure call_when_invoked) {
+    call_when_invoked_.push_back(std::move(call_when_invoked));
   }
 
   // Returns true if |Callback| has been called.
@@ -77,7 +77,7 @@ class TagAvailableCalledTester {
  private:
   bool has_been_called_ = false;
   bool value_of_ok_ = false;
-  std::list<base::Closure> call_when_invoked_;
+  std::list<base::OnceClosure> call_when_invoked_;
 };
 
 // Allows testing if an object (owned by callback) has been destroyed. Also
@@ -88,7 +88,8 @@ class ObjectDestroyedTester {
   // Will set |*has_been_destroyed| to true when this instance is being
   // destroyed.
   explicit ObjectDestroyedTester(bool* has_been_destroyed)
-      : expected_task_runner_(base::ThreadTaskRunnerHandle::Get()),
+      : expected_task_runner_(
+            base::SingleThreadTaskRunner::GetCurrentDefault()),
         has_been_destroyed_(has_been_destroyed) {
     *has_been_destroyed_ = false;
   }
@@ -120,7 +121,8 @@ void ObjectDestroyedTesterAdapter(
 class GrpcCompletionQueueDispatcherTest : public ::testing::Test {
  public:
   GrpcCompletionQueueDispatcherTest()
-      : dispatcher_(&completion_queue_, base::ThreadTaskRunnerHandle::Get()) {
+      : dispatcher_(&completion_queue_,
+                    base::SingleThreadTaskRunner::GetCurrentDefault()) {
     dispatcher_.Start();
   }
   GrpcCompletionQueueDispatcherTest(const GrpcCompletionQueueDispatcherTest&) =
@@ -163,10 +165,10 @@ TEST_F(GrpcCompletionQueueDispatcherTest, TagNeverAvailable) {
       std::make_unique<ObjectDestroyedTester>(&object_has_been_destroyed);
 
   TagAvailableCalledTester tag_available_called_tester;
-  dispatcher_.RegisterTag(
-      nullptr,
-      base::Bind(&ObjectDestroyedTesterAdapter, &tag_available_called_tester,
-                 base::Passed(&object_destroyed_tester)));
+  dispatcher_.RegisterTag(nullptr,
+                          base::BindOnce(&ObjectDestroyedTesterAdapter,
+                                         &tag_available_called_tester,
+                                         std::move(object_destroyed_tester)));
 
   ShutdownDispatcher();
 
@@ -185,9 +187,8 @@ TEST_F(GrpcCompletionQueueDispatcherTest,
   dispatcher_.RegisterTag(
       kTag, tag_available_called_tester.GetTagAvailableCallback());
 
-  grpc::Alarm alarm(
-      &completion_queue_,
-      GprTimespecWithDeltaFromNow(base::TimeDelta::FromMilliseconds(1)), kTag);
+  grpc::Alarm alarm(&completion_queue_,
+                    GprTimespecWithDeltaFromNow(base::Milliseconds(1)), kTag);
   run_loop.Run();
 
   EXPECT_TRUE(tag_available_called_tester.has_been_called());
@@ -208,8 +209,7 @@ TEST_F(GrpcCompletionQueueDispatcherTest,
       kTag, tag_available_called_tester.GetTagAvailableCallback());
 
   grpc::Alarm alarm(&completion_queue_,
-                    GprTimespecWithDeltaFromNow(base::TimeDelta::FromHours(24)),
-                    kTag);
+                    GprTimespecWithDeltaFromNow(base::Hours(24)), kTag);
   alarm.Cancel();
   run_loop.Run();
 
@@ -230,22 +230,21 @@ TEST_F(GrpcCompletionQueueDispatcherTest, ReregisterTag) {
   dispatcher_.RegisterTag(
       kTag, tag_available_called_tester_1.GetTagAvailableCallback());
   auto reregister_tag_callback =
-      base::Bind(&GrpcCompletionQueueDispatcher::RegisterTag,
-                 base::Unretained(&dispatcher_), kTag,
-                 tag_available_called_tester_2.GetTagAvailableCallback());
-  tag_available_called_tester_1.CallWhenInvoked(reregister_tag_callback);
+      base::BindOnce(&GrpcCompletionQueueDispatcher::RegisterTag,
+                     base::Unretained(&dispatcher_), kTag,
+                     tag_available_called_tester_2.GetTagAvailableCallback());
+  tag_available_called_tester_1.CallWhenInvoked(
+      std::move(reregister_tag_callback));
   tag_available_called_tester_1.CallWhenInvoked(run_loop_1.QuitClosure());
 
   tag_available_called_tester_2.CallWhenInvoked(run_loop_2.QuitClosure());
 
-  grpc::Alarm alarm_1(
-      &completion_queue_,
-      GprTimespecWithDeltaFromNow(base::TimeDelta::FromMilliseconds(1)), kTag);
+  grpc::Alarm alarm_1(&completion_queue_,
+                      GprTimespecWithDeltaFromNow(base::Milliseconds(1)), kTag);
   run_loop_1.Run();
 
-  grpc::Alarm alarm_2(
-      &completion_queue_,
-      GprTimespecWithDeltaFromNow(base::TimeDelta::FromMilliseconds(1)), kTag);
+  grpc::Alarm alarm_2(&completion_queue_,
+                      GprTimespecWithDeltaFromNow(base::Milliseconds(1)), kTag);
   run_loop_2.Run();
 
   EXPECT_TRUE(tag_available_called_tester_1.has_been_called());

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,7 @@
 #include <base/logging.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <verity/dm-bht.h>
 
 #include "installer/chromeos_install_config.h"
 #include "installer/chromeos_verity.h"
@@ -62,12 +63,12 @@ bool SetImage(const InstallConfig& install_config) {
 
   string kernel_config = DumpKernelConfig(install_config.kernel.device());
 
-  LOG(INFO) << "KERNEL_CONFIG: " << kernel_config;
+  LOG(INFO) << "KERNEL_CONFIG: " << kernel_config.c_str();
 
   // An example value: <root_hexdigest and salt values shortened>
   //
-  // quiet loglevel=1 console=tty2 init=/sbin/init add_efi_memmap boot=local
-  // noresume noswap i915.modeset=1 cros_secure tpm_tis.force=1
+  // quiet loglevel=1 console=tty2 init=/sbin/init add_efi_memmap
+  // noresume i915.modeset=1 cros_secure tpm_tis.force=1
   // tpm_tis.interrupts=0 nmi_watchdog=panic,lapic root=/dev/dm-0 rootwait
   // ro dm_verity.error_behavior=3 dm_verity.max_bios=-1 dm_verity.dev_wait=1
   // dm="vroot none ro,0 1740800 verity payload=%U+1 hashtree=%U+1
@@ -75,7 +76,8 @@ bool SetImage(const InstallConfig& install_config) {
   // 66fc48dffef" noinitrd cros_debug vt.global_cursor_default=0 kern_guid=%U
   //
 
-  string kernel_config_root = ExtractKernelArg(kernel_config, "root");
+  base::FilePath kernel_config_root =
+      base::FilePath(ExtractKernelArg(kernel_config, "root"));
   string dm_config = ExtractKernelArg(kernel_config, "dm");
   std::vector<string> dm_parts = base::SplitString(
       dm_config, ",", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
@@ -107,8 +109,9 @@ bool SetImage(const InstallConfig& install_config) {
 
   LOG(INFO) << "Setting up verity.";
   LoggingTimerStart();
-  int result = chromeos_verity(verity_algorithm, install_config.root.device(),
-                               getpagesize(),
+  verity::DmBht bht;
+  int result = chromeos_verity(&bht, verity_algorithm,
+                               install_config.root.device(), getpagesize(),
                                (uint64_t)(atoi(rootfs_sectors.c_str()) / 8),
                                salt, expected_hash, enable_rootfs_verification);
   LoggingTimerFinish();

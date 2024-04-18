@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,8 +32,8 @@ class PowerManagerProxy : public PowerManagerProxyInterface {
   PowerManagerProxy(EventDispatcher* dispatcher,
                     const scoped_refptr<dbus::Bus>& bus,
                     PowerManagerProxyDelegate* delegate,
-                    const base::Closure& service_appeared_callback,
-                    const base::Closure& service_vanished_callback);
+                    const base::RepeatingClosure& service_appeared_callback,
+                    const base::RepeatingClosure& service_vanished_callback);
   PowerManagerProxy(const PowerManagerProxy&) = delete;
   PowerManagerProxy& operator=(const PowerManagerProxy&) = delete;
 
@@ -51,7 +51,7 @@ class PowerManagerProxy : public PowerManagerProxyInterface {
   bool UnregisterDarkSuspendDelay(int delay_id) override;
   bool ReportDarkSuspendReadiness(int delay_id, int suspend_id) override;
   bool RecordDarkResumeWakeReason(const std::string& wake_reason) override;
-  bool ChangeRegDomain(power_manager::WifiRegDomainDbus domain) override;
+  void ChangeRegDomain(power_manager::WifiRegDomainDbus domain) override;
 
  private:
   // Signal handlers.
@@ -89,8 +89,8 @@ class PowerManagerProxy : public PowerManagerProxyInterface {
   std::unique_ptr<org::chromium::PowerManagerProxy> proxy_;
   EventDispatcher* dispatcher_;
   PowerManagerProxyDelegate* delegate_;
-  base::Closure service_appeared_callback_;
-  base::Closure service_vanished_callback_;
+  base::RepeatingClosure service_appeared_callback_;
+  base::RepeatingClosure service_vanished_callback_;
   bool service_available_;
 
   base::WeakPtrFactory<PowerManagerProxy> weak_factory_{this};

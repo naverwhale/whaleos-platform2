@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -55,7 +55,7 @@ std::vector<std::string> IpAddrsTool::GetIpAddresses(
   if (brillo::GetVariantValueOrDefault<bool>(options, "v6"))
     ip_version = "-6";
 
-  RunOneIPCommand(&full_result, {ip_version, "addr", "show"});
+  RunOneIPCommand(&full_result, {ip_version, "-s", "-s", "addr", "show"});
 
   return full_result;
 }

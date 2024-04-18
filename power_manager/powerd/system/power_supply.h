@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,17 +8,19 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/cancelable_callback.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/files/scoped_file.h>
 #include <base/memory/weak_ptr.h>
 #include <base/observer_list.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
 #include <dbus/exported_object.h>
+#include <libec/ec_command_factory.h>
 
 #include "power_manager/powerd/system/power_supply_observer.h"
 #include "power_manager/powerd/system/rolling_average.h"
@@ -130,6 +132,10 @@ struct PowerStatus {
   double battery_charge_full = 0.0;
   double battery_charge_full_design = 0.0;
 
+  // Battery full charge and design-charge levels in watt-hours.
+  double battery_energy_full = 0.0;
+  double battery_energy_full_design = 0.0;
+
   // Observed rate at which the battery's charge has been changing, in amperes
   // (i.e. change in the charge per hour). Positive if the battery's charge has
   // increased, negative if it's decreased, and zero if the charge hasn't
@@ -211,14 +217,27 @@ struct PowerStatus {
   // requesting the user use a higher-power external power source, this value
   // can be displayed.
   double preferred_minimum_external_power = 0.0;
+
+  // Indicates if Adaptive Charging is supported for this system.
+  bool adaptive_charging_supported = false;
+
+  // Indicates if the Adaptive Charging Heuristic has the feature enabled.
+  bool adaptive_charging_heuristic_enabled = false;
+
+  // Indicates if Adaptive Charging is currently delaying charge to the battery.
+  bool adaptive_delaying_charge = false;
+
+  // Indicates if Charge Limit is currently holding the charge at or discharging
+  // down to |adaptive_charging_hold_percent_|.
+  bool charge_limited = false;
 };
 
 // Fetches the system's power status, e.g. whether on AC or battery, charge and
 // voltage level, current, etc.
 class PowerSupplyInterface {
  public:
-  PowerSupplyInterface() {}
-  virtual ~PowerSupplyInterface() {}
+  PowerSupplyInterface() = default;
+  virtual ~PowerSupplyInterface() = default;
 
   // Adds or removes an observer.
   virtual void AddObserver(PowerSupplyObserver* observer) = 0;
@@ -235,6 +254,46 @@ class PowerSupplyInterface {
   // notifies observers asynchronously, and schedules a poll for the near
   // future.
   virtual void SetSuspended(bool suspended) = 0;
+
+  // Sets if Adaptive Charging is supported or not.
+  virtual void SetAdaptiveChargingSupported(bool supported) = 0;
+
+  // Sets if the Adaptive Charging heuristic currently has the feature enabled.
+  virtual void SetAdaptiveChargingHeuristicEnabled(bool enabled) = 0;
+
+  // Starts Adaptive Charging logic. |target_time_to_full| is the current
+  // estimate for how long until Adaptive Charging will allow the battery to
+  // finish charging to full.
+  // |hold_percent| is the what to set
+  // |power_status_.display_battery_percentage| to while Adaptive Charging is
+  // delaying the charge. This will only be done while
+  // display_battery_percentage is within the range [|hold_percent| -
+  // |hold_delta_percent| - 1, |hold_percent|].
+  virtual void SetAdaptiveCharging(const base::TimeDelta& target_time_to_full,
+                                   double hold_percent,
+                                   double hold_delta_percent) = 0;
+
+  // Clears |adaptive_charging_hold_percent_|.
+  // |power_status_.display_battery_percentage| is no longer held at
+  // |adaptive_charging_hold_percent_|.
+  virtual void ClearAdaptiveChargingChargeDelay() = 0;
+
+  // Sets if Charge Limit is currently maintaining |hold_percent| charge. This
+  // indicates that |hold_percent| should be shown as the current display
+  // battery percentage. This will only be done when the display battery
+  // percentage is within the range [|hold_percent| - |hold_delta_percent| - 1,
+  // |hold_percent|].
+  virtual void SetChargeLimited(double hold_percent,
+                                double hold_delta_percent) = 0;
+
+  // Clears the charge limit, meaning that the display battery percentage should
+  // no longer be locked to the |hold_percent| set via |SetChargeLimited|.
+  virtual void ClearChargeLimited() = 0;
+
+  // On any Battery Saver state change updates the status immediately,
+  // notifies observers asynchronously, and schedules a poll for the near
+  // future.
+  virtual void OnBatterySaverStateChanged() = 0;
 };
 
 // Real implementation of PowerSupplyInterface that reads from sysfs.
@@ -247,7 +306,7 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
     TestApi(const TestApi&) = delete;
     TestApi& operator=(const TestApi&) = delete;
 
-    ~TestApi() {}
+    ~TestApi() = default;
 
     base::TimeDelta current_poll_delay() const {
       return power_supply_->current_poll_delay_for_testing_;
@@ -264,7 +323,7 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
 
     // If |poll_timer_| was running, calls OnPollTimeout() and returns true.
     // Returns false otherwise.
-    bool TriggerPollTimeout() WARN_UNUSED_RESULT;
+    [[nodiscard]] bool TriggerPollTimeout();
 
    private:
     PowerSupply* power_supply_;  // weak
@@ -304,12 +363,14 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
 
   // Minimum duration of samples that need to be present in |charge_samples_|
   // for the observed battery charge rate to be calculated.
-  static const int kObservedBatteryChargeRateMinMs;
+  static constexpr base::TimeDelta kObservedBatteryChargeRateMin =
+      base::Seconds(30);
 
   // Additional time beyond |battery_stabilized_after_*_delay_| to wait before
   // updating the status, in milliseconds. This just ensures that the timer
   // doesn't fire before it's safe to calculate the battery time.
-  static const int kBatteryStabilizedSlackMs;
+  static constexpr base::TimeDelta kBatteryStabilizedSlack =
+      base::Milliseconds(50);
 
   // To reduce the risk of shutting down prematurely due to a bad battery
   // time-to-empty estimate, avoid shutting down when
@@ -335,6 +396,8 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   // Initializes the object and begins polling. Ownership of raw pointers
   // remains with the caller.
   void Init(const base::FilePath& power_supply_path,
+            const base::FilePath& cros_ec_path,
+            ec::EcCommandFactoryInterface* ec_command_factory,
             PrefsInterface* prefs,
             UdevInterface* udev,
             DBusWrapperInterface* dbus_wrapper,
@@ -346,9 +409,22 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   PowerStatus GetPowerStatus() const override;
   bool RefreshImmediately() override;
   void SetSuspended(bool suspended) override;
+  void SetAdaptiveChargingSupported(bool supported) override;
+  void SetAdaptiveChargingHeuristicEnabled(bool enabled) override;
+  void SetAdaptiveCharging(const base::TimeDelta& target_time_to_full,
+                           double hold_percent,
+                           double hold_delta_percent) override;
+  void ClearAdaptiveChargingChargeDelay() override;
+  void SetChargeLimited(double hold_percent,
+                        double hold_delta_percent) override;
+  void ClearChargeLimited() override;
+  void OnBatterySaverStateChanged() override;
 
   // UdevSubsystemObserver implementation:
   void OnUdevEvent(const UdevEvent& event) override;
+
+  // Blocking method to retry RefreshImmediately() when it failed.
+  bool RefreshImmediatelyWithRetry();
 
  private:
   // Specifies when UpdatePowerStatus() should update |power_status_|.
@@ -378,10 +454,8 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   base::FilePath GetPathForId(const std::string& id) const;
 
   // Returns the value of |pref_name|, an int64_t pref containing a
-  // millisecond-based duration. |default_duration_ms| is returned if the pref
-  // is unset.
-  base::TimeDelta GetMsPref(const std::string& pref_name,
-                            int64_t default_duration_ms) const;
+  // millisecond-based duration. std::nullopt is returned if the pref is unset.
+  std::optional<base::TimeDelta> GetMsPref(const std::string& pref_name) const;
 
   // Sets |battery_stabilized_timestamp_| so that the current and charge won't
   // be sampled again until at least |stabilized_delay| in the future.
@@ -409,7 +483,9 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   // Helper method for ReadBatteryDirectory() that updates |status|'s
   // |battery_percentage|, |display_battery_percentage|, and |battery_state|
   // members based on existing battery information in |status|.
-  void UpdateBatteryPercentagesAndState(PowerStatus* status);
+  // Returns false if an error is encountered when reading the display battery
+  // percentage.
+  bool UpdateBatteryPercentagesAndState(PowerStatus* status);
 
   // Helper method for UpdatePowerStatus() that reads multiple battery
   // directories from sysfs using ReadBatteryDirectory() and merges the results
@@ -435,6 +511,13 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   // should be shut down.  |status|'s |battery_percentage|,
   // |battery_time_to_*|, and |line_power_on| fields must already be set.
   bool IsBatteryBelowShutdownThreshold(const PowerStatus& status) const;
+
+  // Returns true if |sysname| indicates that a power supply is AC when the
+  // system does not have a barrel jack configured, indicating that the power
+  // supply should be ignored.
+  // TODO(b/247037119) evaluate whether this can be handled in firmware. If so,
+  // remove this method.
+  bool IsSupplyIgnored(const std::string& sysname) const;
 
   // Calls UpdatePowerStatus() and SchedulePoll() and notifies observers
   // according to |notify_policy| on success.
@@ -465,15 +548,19 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   // returning true on success.
   bool SetPowerSource(const std::string& id);
 
-  PrefsInterface* prefs_ = nullptr;               // non-owned
-  UdevInterface* udev_ = nullptr;                 // non-owned
-  DBusWrapperInterface* dbus_wrapper_ = nullptr;  // non-owned
+  ec::EcCommandFactoryInterface* ec_command_factory_ = nullptr;  // non-owned
+  PrefsInterface* prefs_ = nullptr;                              // non-owned
+  UdevInterface* udev_ = nullptr;                                // non-owned
+  DBusWrapperInterface* dbus_wrapper_ = nullptr;                 // non-owned
   BatteryPercentageConverter* battery_percentage_converter_ =
       nullptr;  // non-owned
 
   std::unique_ptr<Clock> clock_;
 
   base::ObserverList<PowerSupplyObserver> observers_;
+
+  // TODO(b/207716926): Temporary change to find FD leaks in powerd.
+  std::array<base::ScopedFILE, 2> spare_files_;
 
   // Most-recently-computed status.
   PowerStatus power_status_;
@@ -485,8 +572,18 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   // supplies.
   base::FilePath power_supply_path_;
 
+  // File for communicating with the Embedded Controller (EC).
+  base::FilePath cros_ec_path_;
+
+  // True if the kFactoryModePref pref indicates that the system is running in
+  // the factory
+  bool factory_mode_ = false;
+
   // Should multiple battery directories in sysfs be read and combined?
   bool allow_multiple_batteries_ = false;
+
+  // Should the ACPI AC power supply directory in sysfs be enumerated?
+  bool has_barreljack_ = false;
 
   // Remaining battery time at which the system will shut down automatically.
   // Empty if unset.
@@ -514,6 +611,7 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   base::TimeDelta battery_stabilized_after_line_power_connected_delay_;
   base::TimeDelta battery_stabilized_after_line_power_disconnected_delay_;
   base::TimeDelta battery_stabilized_after_resume_delay_;
+  base::TimeDelta battery_stabilized_after_battery_saver_delay_;
 
   // Time at which the reported current and charge are expected to have
   // stabilized to the point where they can be recorded in
@@ -554,6 +652,30 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   // The number of samples of zero current we got in a row.
   int64_t num_zero_samples_ = 0;
 
+  // The value to use for |power_status_.display_battery_percentage| while
+  // Adaptive Charging is delaying charge.
+  double adaptive_charging_hold_percent_ = 100.0;
+
+  // The value for determining the lower bound of the range for which Adaptive
+  // Charging and Charge Limit overwrite the display battery percentage.
+  double adaptive_charging_hold_delta_percent_ = 0.0;
+
+  // The expected delay until the battery will be full, for when Adaptive
+  // Charging is delaying charge.
+  base::TimeDelta adaptive_charging_target_time_to_full_;
+
+  // Indicates if the system supports Adaptive Charging.
+  bool adaptive_charging_supported_ = false;
+
+  // Indicates if Adaptive Charging is enabled by its heuristic.
+  bool adaptive_charging_heuristic_enabled_ = false;
+
+  // Set to true when charge is delayed by Adaptive Charging.
+  bool adaptive_delaying_charge_ = false;
+
+  // Set to true when charging is stopped by Charge Limit.
+  bool charge_limited_ = false;
+
   // Calls HandlePollTimeout().
   base::OneShotTimer poll_timer_;
 
@@ -561,7 +683,7 @@ class PowerSupply : public PowerSupplyInterface, public UdevSubsystemObserver {
   base::TimeDelta current_poll_delay_for_testing_;
 
   // Calls NotifyObservers().
-  base::CancelableClosure notify_observers_task_;
+  base::CancelableOnceClosure notify_observers_task_;
 
   // Maps from sysfs line power subdirectory basenames (e.g.
   // "CROS_USB_PD_CHARGER0") to enum values describing the corresponding

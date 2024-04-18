@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -11,9 +11,8 @@
 #include <queue>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/synchronization/lock.h>
 #include <base/threading/thread.h>
 
@@ -31,6 +30,10 @@ namespace cros {
 class StreamBufferManager {
  public:
   StreamBufferManager();
+
+  StreamBufferManager(const StreamBufferManager&) = delete;
+  StreamBufferManager& operator=(const StreamBufferManager&) = delete;
+
   ~StreamBufferManager();
 
   // Initializes StreamBufferManager with a set of pre-allocated buffers.
@@ -70,10 +73,6 @@ class StreamBufferManager {
 
   base::Thread callback_thread_;
   base::OnceClosure notify_callback_;
-
-  // NotCopyableOrMovable.
-  StreamBufferManager(const StreamBufferManager&) = delete;
-  StreamBufferManager& operator=(const StreamBufferManager&) = delete;
 };
 
 }  // namespace cros

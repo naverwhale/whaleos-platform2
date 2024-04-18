@@ -1,23 +1,22 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/encryption/encryption.h"
 
-#include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/containers/span.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/hash/hash.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
-#include <base/task/post_task.h>
+#include <base/task/task_runner.h>
 #include <base/task/thread_pool.h>
-#include <base/task_runner.h>
 
 #include "missive/encryption/primitives.h"
 #include "missive/util/status.h"
@@ -30,7 +29,7 @@ Encryptor::Handle::Handle(scoped_refptr<Encryptor> encryptor)
 
 Encryptor::Handle::~Handle() = default;
 
-void Encryptor::Handle::AddToRecord(base::StringPiece data,
+void Encryptor::Handle::AddToRecord(std::string_view data,
                                     base::OnceCallback<void(Status)> cb) {
   // Append new data to the record.
   record_.append(data.data(), data.size());
@@ -117,7 +116,7 @@ Encryptor::Encryptor()
 Encryptor::~Encryptor() = default;
 
 void Encryptor::UpdateAsymmetricKey(
-    base::StringPiece new_public_key,
+    std::string_view new_public_key,
     PublicKeyId new_public_key_id,
     base::OnceCallback<void(Status)> response_cb) {
   if (new_public_key.empty()) {
@@ -130,7 +129,7 @@ void Encryptor::UpdateAsymmetricKey(
   asymmetric_key_sequenced_task_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(
-          [](base::StringPiece new_public_key, PublicKeyId new_public_key_id,
+          [](std::string_view new_public_key, PublicKeyId new_public_key_id,
              scoped_refptr<Encryptor> encryptor) {
             encryptor->asymmetric_key_ =
                 std::make_pair(std::string(new_public_key), new_public_key_id);

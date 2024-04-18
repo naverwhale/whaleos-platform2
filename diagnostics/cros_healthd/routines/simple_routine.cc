@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,74 +11,67 @@
 #include <base/check_op.h>
 #include <base/json/json_writer.h>
 #include <base/logging.h>
-#include <base/strings/string_piece.h>
 #include <base/strings/stringprintf.h>
 
-#include "diagnostics/common/mojo_utils.h"
-#include "mojo/cros_healthd_diagnostics.mojom.h"
+#include "diagnostics/base/mojo_utils.h"
+#include "diagnostics/mojom/public/cros_healthd_diagnostics.mojom.h"
 
 namespace diagnostics {
 
 namespace {
 
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
+namespace mojom = ::ash::cros_healthd::mojom;
 
-uint32_t CalculateProgressPercent(
-    mojo_ipc::DiagnosticRoutineStatusEnum status) {
+uint32_t CalculateProgressPercent(mojom::DiagnosticRoutineStatusEnum status) {
   // Since simple routines cannot be cancelled, the progress percent can only be
   // 0 or 100.
-  if (status == mojo_ipc::DiagnosticRoutineStatusEnum::kPassed ||
-      status == mojo_ipc::DiagnosticRoutineStatusEnum::kFailed ||
-      status == mojo_ipc::DiagnosticRoutineStatusEnum::kError)
+  if (status == mojom::DiagnosticRoutineStatusEnum::kPassed ||
+      status == mojom::DiagnosticRoutineStatusEnum::kFailed ||
+      status == mojom::DiagnosticRoutineStatusEnum::kError)
     return 100;
   return 0;
 }
 
 }  // namespace
 
-SimpleRoutine::SimpleRoutine(Task task)
-    : task_(std::move(task)),
-      status_(mojo_ipc::DiagnosticRoutineStatusEnum::kReady) {}
+SimpleRoutine::SimpleRoutine(Task task) : task_(std::move(task)) {}
 
 SimpleRoutine::~SimpleRoutine() = default;
 
 void SimpleRoutine::Start() {
-  DCHECK_EQ(status_, mojo_ipc::DiagnosticRoutineStatusEnum::kReady);
-  std::move(task_).Run(&status_, &status_message_, &output_dict_);
-  if (status_ != mojo_ipc::DiagnosticRoutineStatusEnum::kPassed &&
-      status_ != mojo_ipc::DiagnosticRoutineStatusEnum::kRunning) {
-    LOG(ERROR) << base::StringPrintf(
-        "Routine unsuccessful with status: %d and message: %s.", status_,
-        status_message_.c_str());
-  }
+  DCHECK_EQ(GetStatus(), mojom::DiagnosticRoutineStatusEnum::kReady);
+  UpdateStatus(mojom::DiagnosticRoutineStatusEnum::kRunning, "");
+  std::move(task_).Run(base::BindOnce(&SimpleRoutine::StoreRoutineResult,
+                                      weak_ptr_factory_.GetWeakPtr()));
 }
 
 // Simple routines can only be started.
 void SimpleRoutine::Resume() {}
 void SimpleRoutine::Cancel() {}
 
-void SimpleRoutine::PopulateStatusUpdate(mojo_ipc::RoutineUpdate* response,
+void SimpleRoutine::PopulateStatusUpdate(mojom::RoutineUpdate* response,
                                          bool include_output) {
+  auto status = GetStatus();
   // Because simple routines are non-interactive, we will never include a user
   // message.
-  mojo_ipc::NonInteractiveRoutineUpdate update;
-  update.status = status_;
-  update.status_message = status_message_;
+  auto update = mojom::NonInteractiveRoutineUpdate::New();
+  update->status = status;
+  update->status_message = GetStatusMessage();
 
-  response->routine_update_union->set_noninteractive_update(update.Clone());
-  response->progress_percent = CalculateProgressPercent(status_);
+  response->routine_update_union =
+      mojom::RoutineUpdateUnion::NewNoninteractiveUpdate(std::move(update));
+  response->progress_percent = CalculateProgressPercent(status);
 
-  if (include_output && !output_dict_.DictEmpty()) {
+  if (include_output && !output_dict_.empty()) {
     std::string json;
-    base::JSONWriter::WriteWithOptions(
-        output_dict_, base::JSONWriter::Options::OPTIONS_PRETTY_PRINT, &json);
-    response->output =
-        CreateReadOnlySharedMemoryRegionMojoHandle(base::StringPiece(json));
+    base::JSONWriter::Write(output_dict_, &json);
+    response->output = CreateReadOnlySharedMemoryRegionMojoHandle(json);
   }
 }
 
-mojo_ipc::DiagnosticRoutineStatusEnum SimpleRoutine::GetStatus() {
-  return status_;
+void SimpleRoutine::StoreRoutineResult(RoutineResult result) {
+  UpdateStatus(result.status, std::move(result.status_message));
+  output_dict_ = std::move(result.output_dict);
 }
 
 }  // namespace diagnostics

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,17 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/strcat.h>
 #include <base/strings/stringprintf.h>
+#include <metrics/metrics_library.h>
 #include <re2/re2.h>
 
+#include "crash-reporter/constants.h"
 #include "crash-reporter/util.h"
 
 namespace {
@@ -23,6 +27,7 @@ const char kSMMUFaultExecName[] = "kernel-smmu-fault";
 const char kSuspendWarningExecName[] = "kernel-suspend-warning";
 const char kKernelIwlwifiErrorExecName[] = "kernel-iwlwifi-error";
 const char kKernelAth10kErrorExecName[] = "kernel-ath10k-error";
+const char kKernelAth11kErrorExecName[] = "kernel-ath11k-error";
 const char kKernelWarningSignatureKey[] = "sig";
 const pid_t kKernelPid = 0;
 }  // namespace
@@ -30,8 +35,12 @@ const pid_t kKernelPid = 0;
 using base::FilePath;
 using base::StringPrintf;
 
-KernelWarningCollector::KernelWarningCollector()
-    : CrashCollector("kernel_warning"), warning_report_path_("/dev/stdin") {}
+KernelWarningCollector::KernelWarningCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("kernel_warning", metrics_lib),
+      warning_report_path_("/dev/stdin") {}
 
 KernelWarningCollector::~KernelWarningCollector() {}
 
@@ -59,6 +68,12 @@ bool KernelWarningCollector::LoadKernelWarning(std::string* content,
     }
   } else if (type == kAth10k) {
     if (!ExtractAth10kSignature(*content, signature, func_name)) {
+      return false;
+    } else if (signature->length() > 0) {
+      return true;
+    }
+  } else if (type == kAth11k) {
+    if (!ExtractAth11kSignature(*content, signature, func_name)) {
       return false;
     } else if (signature->length() > 0) {
       return true;
@@ -123,7 +138,7 @@ constexpr LazyRE2 before_iwlwifi_assert_lmac = {
     R"(iwlwifi (?:.+): Loaded firmware version:)"};
 constexpr LazyRE2 before_iwlwifi_assert_umac = {R"(iwlwifi (?:.+): Status:)"};
 constexpr LazyRE2 iwlwifi_sig_re = {
-    R"((iwlwifi (?:.+): \b(\w+)\b \| \b(\w+)\b))"};
+    R"(((iwlwifi) (?:.+): \b(\w+)\b \| \b(\w+)\b))"};
 
 enum class LineType {
   Umac,
@@ -152,6 +167,7 @@ bool KernelWarningCollector::ExtractIwlwifiSignature(const std::string& content,
   // The signature is reported as unknown in the case of parsing error.
   const std::string unknown_iwlwifi_signature = "iwlwifi unknown signature";
   std::string assert_number;
+  std::string driver_name;
   std::string iwlwifi_signature;
   std::string::size_type end_position = content.find('\n');
   if (end_position == std::string::npos) {
@@ -175,9 +191,10 @@ bool KernelWarningCollector::ExtractIwlwifiSignature(const std::string& content,
     } else if (last_line == LineType::Lmac) {
       // Check the signature of the lmac.
       if (RE2::PartialMatch(*signature, *iwlwifi_sig_re, &iwlwifi_signature,
-                            &assert_number, func_name)) {
+                            &driver_name, &assert_number, func_name)) {
         if (default_lmac_assert != assert_number) {
-          *signature = iwlwifi_signature;
+          *signature =
+              base::StrCat({driver_name, " ", assert_number, " ", *func_name});
           return true;
         } else {
           // Check umac if the lmac assertion number == default_lmac_assert.
@@ -200,9 +217,10 @@ bool KernelWarningCollector::ExtractIwlwifiSignature(const std::string& content,
     } else if (last_line == LineType::Umac) {
       // Check the signature of the umac.
       if (RE2::PartialMatch(*signature, *iwlwifi_sig_re, &iwlwifi_signature,
-                            &assert_number, func_name)) {
+                            &driver_name, &assert_number, func_name)) {
         if (default_umac_assert != assert_number) {
-          *signature = iwlwifi_signature;
+          *signature =
+              base::StrCat({driver_name, " ", assert_number, " ", *func_name});
           return true;
         } else {
           // Break if the umac assertion number == default_umac_assert.
@@ -276,11 +294,34 @@ bool KernelWarningCollector::ExtractAth10kSignature(const std::string& content,
   return false;
 }
 
+constexpr LazyRE2 ath11k_sig_re = {R"((ath11k_.*firmware crashed))"};
+
+bool KernelWarningCollector::ExtractAth11kSignature(const std::string& content,
+                                                    std::string* signature,
+                                                    std::string* func_name) {
+  std::string line;
+  std::string::size_type end_position = content.find('\n');
+  if (end_position == std::string::npos) {
+    LOG(ERROR) << "unexpected ath11k crash format";
+    return false;
+  }
+
+  line = content.substr(0, end_position);
+  if (RE2::PartialMatch(line, *ath11k_sig_re, signature)) {
+    *func_name = "firmware crashed";
+    return true;
+  }
+  LOG(INFO) << line << " does not match regex";
+  signature->clear();
+  func_name->clear();
+  return false;
+}
+
 bool KernelWarningCollector::Collect(int weight, WarningType type) {
   LOG(INFO) << "Processing kernel warning";
 
   if (weight != 1) {
-    AddCrashMetaUploadData("weight", StringPrintf("%d", weight));
+    AddCrashMetaWeight(weight);
   }
 
   std::string kernel_warning;
@@ -292,8 +333,8 @@ bool KernelWarningCollector::Collect(int weight, WarningType type) {
   }
 
   FilePath root_crash_directory;
-  if (!GetCreatedCrashDirectoryByEuid(kRootUid, &root_crash_directory,
-                                      nullptr)) {
+  if (!GetCreatedCrashDirectoryByEuid(constants::kRootUid,
+                                      &root_crash_directory, nullptr)) {
     return false;
   }
 
@@ -308,6 +349,8 @@ bool KernelWarningCollector::Collect(int weight, WarningType type) {
     exec_name = kGenericWarningExecName;
   else if (type == kAth10k)
     exec_name = kKernelAth10kErrorExecName;
+  else if (type == kAth11k)
+    exec_name = kKernelAth11kErrorExecName;
   else
     exec_name = kKernelIwlwifiErrorExecName;
 
@@ -351,6 +394,28 @@ bool KernelWarningCollector::Collect(int weight, WarningType type) {
   return true;
 }
 
+CrashCollector::ComputedCrashSeverity KernelWarningCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  ComputedCrashSeverity computed_severity{
+      .crash_severity = CrashSeverity::kUnspecified,
+      .product_group = Product::kPlatform,
+  };
+
+  // Note that kKernelAth10kErrorExecName is not covered yet.
+  // TODO(b/288895335): Add logic to set crash severity of
+  // kKernelAth10kErrorExecName to kWarning.
+  if (exec_name == kSMMUFaultExecName) {
+    computed_severity.crash_severity = CrashSeverity::kError;
+  } else if ((exec_name == kKernelIwlwifiErrorExecName) ||
+             (exec_name == kWifiWarningExecName) ||
+             (exec_name == kGenericWarningExecName) ||
+             (exec_name == kSuspendWarningExecName)) {
+    computed_severity.crash_severity = CrashSeverity::kWarning;
+  }
+
+  return computed_severity;
+}
+
 // static
 CollectorInfo KernelWarningCollector::GetHandlerInfo(
     int32_t weight,
@@ -359,8 +424,12 @@ CollectorInfo KernelWarningCollector::GetHandlerInfo(
     bool kernel_smmu_fault,
     bool kernel_suspend_warning,
     bool kernel_iwlwifi_error,
-    bool kernel_ath10k_error) {
-  auto collector = std::make_shared<KernelWarningCollector>();
+    bool kernel_ath10k_error,
+    bool kernel_ath11k_error,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
+  auto collector = std::make_shared<KernelWarningCollector>(metrics_lib);
   base::RepeatingCallback<bool(KernelWarningCollector::WarningType)>
       kernel_warn_cb = base::BindRepeating(&KernelWarningCollector::Collect,
                                            collector, weight);
@@ -391,6 +460,10 @@ CollectorInfo KernelWarningCollector::GetHandlerInfo(
            {
                .should_handle = kernel_ath10k_error,
                .cb = base::BindRepeating(kernel_warn_cb, WarningType::kAth10k),
+           },
+           {
+               .should_handle = kernel_ath11k_error,
+               .cb = base::BindRepeating(kernel_warn_cb, WarningType::kAth11k),
            }},
   };
 }

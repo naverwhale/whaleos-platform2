@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/power_manager_proxy_interface.h"
@@ -38,7 +37,7 @@ class MockPowerManagerProxy : public PowerManagerProxyInterface {
               RecordDarkResumeWakeReason,
               (const std::string&),
               (override));
-  MOCK_METHOD(bool,
+  MOCK_METHOD(void,
               ChangeRegDomain,
               (power_manager::WifiRegDomainDbus),
               (override));

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,6 +18,16 @@
 #include <sqlite3.h>
 
 namespace federated {
+
+// MetaRecord objects stored in the metatable. It records the last used example
+// in the latest successful round of a task (identifier composed of
+// population_name and task_name).
+struct MetaRecord {
+  std::string identifier;
+  int64_t last_used_example_id;
+  base::Time last_used_example_timestamp;
+  base::Time timestamp;
+};
 
 // Example objects stored in corresponding `client_name` tables.
 // An example represents a training example of federated computation.
@@ -40,7 +50,8 @@ struct ExampleRecord {
 // Example usage:
 // Construct and initialize:
 //    ExampleDatabase db(db_path);
-//    if(!db.Init(kTestClients) || !db.IsOpen() || !db.CheckIntegrity()) {
+//    if(!db.Init(kTestClients) || !db.IsOpen() || !db.CheckIntegrity() ||
+//       !db.DeleteOutdatedExamples(example_ttl)) {
 //      // Error handling.
 //    }
 //
@@ -51,7 +62,8 @@ struct ExampleRecord {
 //    db.InsertExample(client_name, example_record);
 //
 // Query examples:
-//    ExampleDatabase::Iterator it = db.GetIterator("client_1");
+//    ExampleDatabase::Iterator it =
+//        db.GetIterator("client_1", start_timestamp, end_timestamp);
 //    while (true) {
 //      const absl::StatusOr<ExampleRecord> result = it.Next();
 //      if (result.ok()) {
@@ -74,10 +86,19 @@ class ExampleDatabase {
   // Handles one read-only iteration through a table.
   struct Iterator final {
    public:
+    Iterator();
+    // Iterator through example within time range (start_time, end_time].
+    Iterator(sqlite3* db,
+             const std::string& client_name,
+             const base::Time& start_time,
+             const base::Time& end_time,
+             bool descending,
+             size_t limit);
     Iterator(sqlite3* db, const std::string& client_name);
-    Iterator(Iterator&& other);
     Iterator(const Iterator& other) = delete;
     Iterator& operator=(const Iterator& other) = delete;
+    Iterator(Iterator&& other);
+    Iterator& operator=(Iterator&& other);
     ~Iterator();
 
     // Returns the next example, an "out of range" error if the end of the
@@ -120,13 +141,36 @@ class ExampleDatabase {
   // Runs sqlite built-in integrity check. Returns true if no error is found.
   virtual bool CheckIntegrity() const;
 
-  // Returns an iterator through the examples for the given client.
+  // Deletes expired examples from all client tables in the db. They all have a
+  // timestamp column. Returns true if no error occurred.
+  virtual bool DeleteOutdatedExamples(const base::TimeDelta& example_ttl) const;
+
+  // Returns identifier's meta record if meta table has its record, otherwise
+  // returns nullopt;
+  virtual std::optional<MetaRecord> GetMetaRecord(
+      const std::string& identifier) const;
+
+  // Updates the identifier's last_used_example_id to meta table.
+  virtual bool UpdateMetaRecord(const std::string& identifier,
+                                const MetaRecord& new_meta_record) const;
+
+  // Returns an iterator through the examples for the given client within the
+  // time range. Limits examples if `limit` > 0, otherwise iterates through all
+  // examples in the range.
   //
   // WARNING: client names are used to construct SQL statements but are not
   //          sanitized in any way. Therefore this method is susceptible to
-  //          code injection unless the provided names are carefully vetted or
-  //          sanitized.
-  virtual Iterator GetIterator(const std::string& client_name) const;
+  //          code injection unless the provided names are carefully vetted
+  //          or sanitized.
+  virtual Iterator GetIterator(const std::string& client_name,
+                               const base::Time& start_time,
+                               const base::Time& end_time,
+                               bool descending = false,
+                               size_t limit = 0) const;
+
+  // Similar to GetIterator but without time range, returns an iterator through
+  // all examples for the given client.
+  virtual Iterator GetIteratorForTesting(const std::string& client_name) const;
 
   // Inserts example into the table matching its client_name. Returns true
   // if no error occurred.
@@ -138,13 +182,20 @@ class ExampleDatabase {
   virtual bool InsertExample(const std::string& client_name,
                              const ExampleRecord& example_record);
 
-  // Returns the count of examples in the client's table.
+  // Returns the count of examples in the client's table within the time range.
   //
   // WARNING: client names are used to construct SQL statements but are not
   //          sanitized in any way. Therefore this method is susceptible to
   //          code injection unless the provided names are carefully vetted or
   //          sanitized.
-  virtual int ExampleCount(const std::string& client_name) const;
+
+  virtual int ExampleCount(const std::string& client_name,
+                           const base::Time& start_time,
+                           const base::Time& end_time) const;
+
+  // Similar to ExampleCount but without time range, returns the count of all
+  // examples in the client's table.
+  virtual int ExampleCountForTesting(const std::string& client_name) const;
 
   // Deletes all examples in the specified client table. We expose only this
   // rudimentary functionality since small federated clients typically delete
@@ -173,11 +224,23 @@ class ExampleDatabase {
     std::string error_msg;
   };
 
-  // Returns true if the client's table exists.
-  bool ClientTableExists(const std::string& client_name) const;
+  // Counts the examples in the client's table that match the `where_clause` if
+  // it's a valid SQL WHERE clause, or counts all the examples if `where_clause`
+  // is an empty string. Returns 0 if database is closed or `where_clause` is
+  // invalid.
+  int ExampleCountInternal(const std::string& client_name,
+                           const std::string& where_clause) const;
+
+  // Returns true if the given table_name exists.
+  bool TableExists(const std::string& table_name) const;
 
   // Returns true if the client's table is created without error.
   bool CreateClientTable(const std::string& client_name);
+
+  // Returns true if the metatable exists.
+  bool MetaTableExists() const;
+  // Returns true if metatable is created without error.
+  bool CreateMetaTable();
 
   // Executes sql.
   ExecResult ExecSql(const std::string& sql) const;

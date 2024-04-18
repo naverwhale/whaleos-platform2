@@ -1,33 +1,39 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/kernel_collector.h"
 
-#include <sys/stat.h>
 #include <algorithm>
 #include <cinttypes>
+#include <memory>
 #include <utility>
 
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#include <metrics/metrics_library.h>
+#include <linux/watchdog.h>
 #include <re2/re2.h>
+
+#include "crash-reporter/constants.h"
+#include "crash-reporter/paths.h"
 
 using base::FilePath;
 using base::StringPiece;
 using base::StringPrintf;
 
-#include "crash-reporter/util.h"
-
 namespace {
 
 // Name for extra BIOS dump attached to report. Also used as metadata key.
 constexpr char kBiosDumpName[] = "bios_log";
+constexpr char kHypervisorDumpName[] = "hypervisor_log";
 const FilePath kBiosLogPath("/sys/firmware/log");
 // Names of the four BIOS stages in which the BIOS log can start.
 const char* const kBiosStageNames[] = {
@@ -63,16 +69,24 @@ constexpr size_t kMaxRecordSize = 1024 * 1024;
 constexpr pid_t kKernelPid = 0;
 constexpr char kKernelSignatureKey[] = "sig";
 
+// Used to build up the path to a watchdog's boot status:
+// For example: /sys/class/watchdog/watchdog0/bootstatus
+constexpr char kWatchdogSysBootstatusFile[] = "bootstatus";
+
 static LazyRE2 kBasicCheckRe = {"\n(<\\d+>)?\\[\\s*(\\d+\\.\\d+)\\]"};
 
 }  // namespace
 
-KernelCollector::KernelCollector()
-    : CrashCollector("kernel"),
+KernelCollector::KernelCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("kernel", metrics_lib),
       is_enabled_(false),
       eventlog_path_(kEventLogPath),
       dump_path_(kDumpPath),
       bios_log_path_(kBiosLogPath),
+      watchdogsys_path_(paths::Get(paths::kWatchdogSysPath)),
       records_(0),
       // We expect crash dumps in the format of architecture we are built for.
       arch_(kernel_util::GetCompilerArch()) {}
@@ -89,6 +103,10 @@ void KernelCollector::OverrideBiosLogPath(const FilePath& file_path) {
 
 void KernelCollector::OverridePreservedDumpPath(const FilePath& file_path) {
   dump_path_ = file_path;
+}
+
+void KernelCollector::OverrideWatchdogSysPath(const FilePath& file_path) {
+  watchdogsys_path_ = file_path;
 }
 
 bool KernelCollector::ReadRecordToString(std::string* contents,
@@ -219,8 +237,8 @@ bool KernelCollector::LoadLastBootBiosLog(std::string* contents) {
     // use the "^" to anchor to the start of the string
     RE2 banner_re(StringPrintf("(^.*?)(?:"
                                "\n\\*\\*\\* Pre-CBMEM %s console overflow"
-                               "|"
-                               "\n\ncoreboot-[^\n]* %s starting.*\\.\\.\\.\n"
+                               "|\n\n[^\n]*"
+                               "coreboot-[^\n]* %s starting.*\\.\\.\\.\n"
                                ")",
                                stage, stage),
                   opt);
@@ -271,11 +289,90 @@ bool KernelCollector::LastRebootWasNoCError(const std::string& dump) {
   return RE2::PartialMatch(dump, RE2("QTISECLIB.*NOC ERROR: ERRLOG"));
 }
 
+// Return true if the HW watchdog caused a reboot, so a crash report
+// can be collected. Fills out `watchdog_reboot_reason` with the decoded
+// reboot reason.
+static bool GetWatchdogRebootReasonFromPath(
+    const base::FilePath& watchdog_path, std::string& watchdog_reboot_reason) {
+  std::string bootstatus_string;
+  if (!base::ReadFileToString(watchdog_path, &bootstatus_string)) {
+    PLOG(ERROR) << "Unable to read " << watchdog_path.value();
+    return false;
+  }
+
+  int bootstatus = 0;
+  if (!base::StringToInt(base::CollapseWhitespaceASCII(bootstatus_string, true),
+                         &bootstatus)) {
+    LOG(ERROR) << "Invalid bootstatus string '" << bootstatus_string << "'";
+    return false;
+  }
+
+  // Ignore normal/unknown bootstatus.
+  if (bootstatus <= 0) {
+    return false;
+  }
+
+  watchdog_reboot_reason = std::string();
+  uint32_t known_bootstatus_values =
+      WDIOF_OVERHEAT | WDIOF_FANFAULT | WDIOF_EXTERN1 | WDIOF_EXTERN2 |
+      WDIOF_POWERUNDER | WDIOF_CARDRESET | WDIOF_POWEROVER;
+  if (bootstatus & ~known_bootstatus_values) {
+    watchdog_reboot_reason += "-(UNKNOWN)";
+    LOG(ERROR) << watchdog_path
+               << ": unknown boot status value: " << std::showbase << std::hex
+               << (bootstatus & ~known_bootstatus_values);
+  }
+
+  // bootstatus is a bitmap, so build up the reboot reason string.
+  if (bootstatus & WDIOF_OVERHEAT)
+    watchdog_reboot_reason += "-(OVERHEAT)";
+  if (bootstatus & WDIOF_FANFAULT)
+    watchdog_reboot_reason += "-(FANFAULT)";
+  if (bootstatus & WDIOF_EXTERN1)
+    watchdog_reboot_reason += "-(EXTERN1)";
+  if (bootstatus & WDIOF_EXTERN2)
+    watchdog_reboot_reason += "-(EXTERN2)";
+  if (bootstatus & WDIOF_POWERUNDER)
+    watchdog_reboot_reason += "-(POWERUNDER)";
+  if (bootstatus & WDIOF_CARDRESET)
+    watchdog_reboot_reason += "-(WATCHDOG)";
+  if (bootstatus & WDIOF_POWEROVER)
+    watchdog_reboot_reason += "-(POWEROVER)";
+
+  // Watchdog recorded some kind of reset, so collect a crash dump.
+  return true;
+}
+
 // We can't always trust kernel watchdog drivers to correctly report the boot
 // reason, since on some platforms our BIOS has to reinitialize the hardware
-// registers in a way that clears this information. Instead read the BIOS
-// eventlog to figure out if a watchdog reset was detected during the last boot.
-bool KernelCollector::LastRebootWasWatchdog() {
+// registers in a way that clears this information. If /sys/class/watchdog is
+// unavailable, read the BIOS eventlog to figure out if a watchdog reset was
+// detected during the last boot.
+bool KernelCollector::LastRebootWasWatchdog(
+    std::string& watchdog_reboot_reason) {
+  if (base::PathExists(watchdogsys_path_)) {
+    base::FilePath watchdog_sys_dir(watchdogsys_path_);
+    base::FileEnumerator watchdog_sys_dir_enumerator(
+        watchdog_sys_dir, false, base::FileEnumerator::DIRECTORIES);
+
+    // Iterate through the watchdogN devices and look for a reboot.
+    for (base::FilePath watchdog_path =
+             watchdog_sys_dir_enumerator.Next().StripTrailingSeparators();
+         !watchdog_path.empty();
+         watchdog_path =
+             watchdog_sys_dir_enumerator.Next().StripTrailingSeparators()) {
+      // Build up the path to the watchdog's boot status:
+      // For example: /sys/class/watchdog/watchdog0/bootstatus
+      base::FilePath watchdog_sys_path =
+          watchdog_path.Append(kWatchdogSysBootstatusFile);
+
+      if (GetWatchdogRebootReasonFromPath(watchdog_sys_path,
+                                          watchdog_reboot_reason)) {
+        return true;
+      }
+    }
+  }
+
   if (!base::PathExists(eventlog_path_)) {
     LOG(INFO) << "Cannot find " << eventlog_path_.value()
               << ", skipping hardware watchdog check.";
@@ -293,6 +390,7 @@ bool KernelCollector::LastRebootWasWatchdog() {
   if (last_boot == StringPiece::npos)
     return false;
 
+  watchdog_reboot_reason = "-(WATCHDOG)";
   return piece.find(kEventNameWatchdog, last_boot) != StringPiece::npos;
 }
 
@@ -367,9 +465,18 @@ bool KernelCollector::Enable() {
   return true;
 }
 
-bool KernelCollector::Collect() {
+bool KernelCollector::Collect(bool use_saved_lsb) {
+  SetUseSavedLsb(use_saved_lsb);
   bool found_efi_crash = CollectEfiCrash();
   return (CollectRamoopsCrash() || found_efi_crash);
+}
+
+CrashCollector::ComputedCrashSeverity KernelCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  return ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kFatal,
+      .product_group = Product::kPlatform,
+  };
 }
 
 // Returns file path for corresponding efi crash part.
@@ -473,18 +580,35 @@ std::vector<KernelCollector::EfiCrash> KernelCollector::FindEfiCrashes() const {
   return efi_crashes;
 }
 
+// Safely writes the string to the named log file.
+void KernelCollector::AddLogFile(const char* log_name,
+                                 const std::string& log_data,
+                                 const FilePath& log_path) {
+  if (!log_data.empty()) {
+    if (WriteNewFile(log_path, log_data) !=
+        static_cast<int>(log_data.length())) {
+      PLOG(WARNING) << "Failed to write " << log_name << " to "
+                    << log_path.value() << " (ignoring)";
+    } else {
+      AddCrashMetaUploadFile(log_name, log_path.BaseName().value());
+      LOG(INFO) << "Stored " << log_name << " to " << log_path.value();
+    }
+  }
+}
+
 // Stores crash pointed by kernel_dump to crash directory. This will be later
 // sent to backend from crash directory by crash_sender.
 bool KernelCollector::HandleCrash(const std::string& kernel_dump,
                                   const std::string& bios_dump,
+                                  const std::string& hypervisor_dump,
                                   const std::string& signature) {
   FilePath root_crash_directory;
 
   LOG(INFO) << "Received prior crash notification from "
             << "kernel (signature " << signature << ") (handling)";
 
-  if (!GetCreatedCrashDirectoryByEuid(kRootUid, &root_crash_directory,
-                                      nullptr)) {
+  if (!GetCreatedCrashDirectoryByEuid(constants::kRootUid,
+                                      &root_crash_directory, nullptr)) {
     return true;
   }
 
@@ -494,6 +618,8 @@ bool KernelCollector::HandleCrash(const std::string& kernel_dump,
       StringPrintf("%s.kcrash", dump_basename.c_str()));
   FilePath bios_dump_path = root_crash_directory.Append(
       StringPrintf("%s.%s", dump_basename.c_str(), kBiosDumpName));
+  FilePath hypervisor_dump_path = root_crash_directory.Append(
+      StringPrintf("%s.%s", dump_basename.c_str(), kHypervisorDumpName));
   FilePath log_path = root_crash_directory.Append(
       StringPrintf("%s.log", dump_basename.c_str()));
 
@@ -506,16 +632,8 @@ bool KernelCollector::HandleCrash(const std::string& kernel_dump,
               << kernel_crash_path.value().c_str();
     return true;
   }
-  if (!bios_dump.empty()) {
-    if (WriteNewFile(bios_dump_path, bios_dump) !=
-        static_cast<int>(bios_dump.length())) {
-      PLOG(WARNING) << "Failed to write BIOS log to " << bios_dump_path.value()
-                    << " (ignoring)";
-    } else {
-      AddCrashMetaUploadFile(kBiosDumpName, bios_dump_path.BaseName().value());
-      LOG(INFO) << "Stored BIOS log to " << bios_dump_path.value();
-    }
-  }
+  AddLogFile(kBiosDumpName, bios_dump, bios_dump_path);
+  AddLogFile(kHypervisorDumpName, hypervisor_dump, hypervisor_dump_path);
 
   AddCrashMetaData(kKernelSignatureKey, signature);
 
@@ -525,10 +643,13 @@ bool KernelCollector::HandleCrash(const std::string& kernel_dump,
     AddCrashMetaUploadFile("log", log_path.BaseName().value());
   }
 
+  const char* exec_name = kernel_util::IsHypervisorCrash(kernel_dump)
+                              ? kernel_util::kHypervisorExecName
+                              : kernel_util::kKernelExecName;
+
   FinishCrash(root_crash_directory.Append(
                   StringPrintf("%s.meta", dump_basename.c_str())),
-              kernel_util::kKernelExecName,
-              kernel_crash_path.BaseName().value());
+              exec_name, kernel_crash_path.BaseName().value());
 
   LOG(INFO) << "Stored kcrash to " << kernel_crash_path.value();
 
@@ -557,7 +678,7 @@ bool KernelCollector::CollectEfiCrash() {
         StripSensitiveData(&crash);
         if (!crash.empty()) {
           if (!HandleCrash(
-                  crash, std::string(),
+                  crash, std::string(), "",
                   kernel_util::ComputeKernelStackSignature(crash, arch_))) {
             LOG(ERROR) << "Failed to handle kernel efi crash id:"
                        << efi_crash->GetId();
@@ -577,26 +698,34 @@ bool KernelCollector::CollectEfiCrash() {
 bool KernelCollector::CollectRamoopsCrash() {
   std::string bios_dump;
   std::string kernel_dump;
+  std::string console_dump;
+  std::string hypervisor_dump;
   std::string signature;
+  std::string watchdog_reboot_reason;
 
   LoadLastBootBiosLog(&bios_dump);
+  LoadConsoleRamoops(&console_dump);
+  kernel_util::ExtractHypervisorLog(console_dump, hypervisor_dump);
   if (LoadParameters() && LoadPreservedDump(&kernel_dump)) {
     signature = kernel_util::ComputeKernelStackSignature(kernel_dump, arch_);
   } else {
-    LoadConsoleRamoops(&kernel_dump);
-    if (LastRebootWasBiosCrash(bios_dump))
+    kernel_dump = std::move(console_dump);
+    if (LastRebootWasBiosCrash(bios_dump)) {
       signature = kernel_util::BiosCrashSignature(bios_dump);
-    else if (LastRebootWasNoCError(bios_dump))
+    } else if (LastRebootWasNoCError(bios_dump)) {
       signature = kernel_util::ComputeNoCErrorSignature(bios_dump);
-    else if (LastRebootWasWatchdog())
-      signature = kernel_util::WatchdogSignature(kernel_dump);
-    else
+    } else if (LastRebootWasWatchdog(watchdog_reboot_reason)) {
+      signature =
+          kernel_util::WatchdogSignature(kernel_dump, watchdog_reboot_reason);
+    } else {
       return false;
+    }
   }
   StripSensitiveData(&bios_dump);
+  StripSensitiveData(&hypervisor_dump);
   StripSensitiveData(&kernel_dump);
-  if (kernel_dump.empty() && bios_dump.empty()) {
+  if (kernel_dump.empty() && bios_dump.empty() && hypervisor_dump.empty()) {
     return false;
   }
-  return HandleCrash(kernel_dump, bios_dump, signature);
+  return HandleCrash(kernel_dump, bios_dump, hypervisor_dump, signature);
 }

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::install_logger;
 use log::{error, info};
 use os_install_service::disk::{self, Disk};
+use os_install_service::mount::Mount;
 use os_install_service::util;
 
 #[derive(Debug, thiserror::Error)]
@@ -46,7 +48,7 @@ fn gibibytes_to_bytes(num_gibibytes: u64) -> u64 {
 fn choose_destination_device_path(mut disks: Vec<Disk>) -> Option<PathBuf> {
     // Estimate of the minimum required disk size. This doesn't need
     // to be especially precise.
-    let minimum_size_in_bytes = gibibytes_to_bytes(8);
+    let minimum_size_in_bytes = gibibytes_to_bytes(14);
 
     // Start by getting all disks and then progressively filter and
     // sort (clarity favored over efficiency here since the list
@@ -86,7 +88,7 @@ fn choose_destination_device_path(mut disks: Vec<Disk>) -> Option<PathBuf> {
 /// Set up the disk with an empty GPT table.
 fn reformat(dest: &Path) {
     let mut cmd = Command::new("/usr/sbin/parted");
-    cmd.arg("--script").arg(dest).args(&["mklabel", "gpt"]);
+    cmd.arg("--script").arg(dest).args(["mklabel", "gpt"]);
 
     if let Err(err) = util::get_command_output(cmd) {
         // Log the error but otherwise ignore it.
@@ -126,13 +128,42 @@ fn run_chromeos_install(dest: &Path, boot_mode: BootMode) -> Result {
     cmd.arg("--dst").arg(dest);
     // Don't ask questions.
     cmd.arg("--yes");
+    // Don't check if the destination drive is removable.
+    // `os_install_service` has already taken the
+    // "removableness" of devices into account when choosing the
+    // destination drive, and we don't want `chromeos-install` to
+    // contest that decision and fail with an error.
+    cmd.arg("--skip_dst_removable");
 
     if boot_mode == BootMode::Uefi {
-        cmd.args(&["--target_bios", "efi"]);
+        cmd.args(["--target_bios", "efi"]);
     }
 
     util::run_command_log_output(cmd).map_err(Error::Process)?;
 
+    Ok(())
+}
+
+/// Copy the install log onto the target system.
+///
+/// This makes it persistent and available for future QA on the
+/// installed system.
+///
+/// This only should occur if the target's stateful partition was
+/// created properly.
+fn save_install_log(dest: &Path) -> anyhow::Result<()> {
+    // Mount the installed stateful partition.
+    let stateful_partition_num = 1;
+    let dest_stateful_partition = disk::get_partition_device(dest, stateful_partition_num);
+    let stateful_partition_mount = Mount::mount_ext4(&dest_stateful_partition)?;
+    // Get the instance log and write it to the stateful partition.
+    let instance_log = install_logger::read_file_log();
+    let log_dst = stateful_partition_mount
+        .mount_point
+        .path()
+        .join("flex-install.log");
+    info!("writing install log to {}", log_dst.display());
+    fs::write(log_dst, instance_log)?;
     Ok(())
 }
 
@@ -174,6 +205,11 @@ pub fn install() -> Result {
         reformat(&dest);
 
         return Err(err);
+    }
+
+    // Save off the log on a successful install.
+    if let Err(err) = save_install_log(&dest) {
+        error!("failed to save install log: {:?}", err);
     }
 
     Ok(())

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,9 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/callback.h>
+#include <dbus/bus.h>
 
 namespace modemfwd {
 
@@ -30,7 +31,9 @@ class ModemHelperDirectory {
 };
 
 std::unique_ptr<ModemHelperDirectory> CreateModemHelperDirectory(
-    const base::FilePath& directory);
+    const base::FilePath& directory,
+    const std::string& variant,
+    scoped_refptr<dbus::Bus> bus);
 
 }  // namespace modemfwd
 

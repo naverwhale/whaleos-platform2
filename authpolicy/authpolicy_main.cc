@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -53,17 +53,16 @@ class Daemon : public brillo::DBusServiceDaemon {
         sequencer->GetHandler("AuthPolicy.RegisterAsync() failed.", true);
     authpolicy_.RegisterAsync(
         AuthPolicy::GetDBusObject(object_manager_.get()),
-        base::Bind(&Daemon::OnAuthPolicyRegistered,
-                   weak_ptr_factory_.GetWeakPtr(), handler));
+        base::BindOnce(&Daemon::OnAuthPolicyRegistered,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(handler)));
   }
 
  private:
   void OnAuthPolicyRegistered(
-      const brillo::dbus_utils::AsyncEventSequencer::Handler& handler,
-      bool success) {
+      brillo::dbus_utils::AsyncEventSequencer::Handler handler, bool success) {
     // If it wasn't successful, the sequencer handler should print an error and
     // exit.
-    handler.Run(success);
+    std::move(handler).Run(success);
     CHECK(success);
     LOG(INFO) << "authpolicyd started";
 

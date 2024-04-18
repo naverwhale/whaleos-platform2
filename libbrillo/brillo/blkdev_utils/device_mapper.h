@@ -1,6 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+// brillo::DeviceMapper acts as the interface for any userspace application that
+// needs to create/remove/perform operations on device-mapper targets. The
+// interface uses the device-mapper target's name as an identifier to denote
+// the device the operation will be performed on.
 
 #ifndef LIBBRILLO_BRILLO_BLKDEV_UTILS_DEVICE_MAPPER_H_
 #define LIBBRILLO_BRILLO_BLKDEV_UTILS_DEVICE_MAPPER_H_
@@ -9,12 +14,20 @@
 #include <memory>
 #include <string>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/strings/string_tokenizer.h>
 #include <brillo/blkdev_utils/device_mapper_task.h>
 
 namespace brillo {
+
+// Use a tokenizer to parse string data stored in SecureBlob.
+// The tokenizer does not store internal state so it should be
+// okay to use with SecureBlobs.
+// DO NOT USE .toker() as that leaks contents of the SecureBlob.
+using SecureBlobTokenizer =
+    base::StringTokenizerT<std::string, SecureBlob::const_iterator>;
 
 // DevmapperTable manages device parameters. Contains helper
 // functions to parse results from dmsetup. Since the table parameters
@@ -72,7 +85,8 @@ class BRILLO_EXPORT DevmapperTable {
 using DevmapperTaskFactory =
     base::RepeatingCallback<std::unique_ptr<DevmapperTask>(int)>;
 
-// DeviceMapper handles the creation and removal of dm devices.
+// DeviceMapper handles the creation and removal of dm devices as well as
+// general functions associated with device-mapper targets.
 class BRILLO_EXPORT DeviceMapper {
  public:
   // Default constructor: sets up real devmapper devices.
@@ -95,7 +109,8 @@ class BRILLO_EXPORT DeviceMapper {
   // Removes device.
   // Parameters
   //   name - Name of the devmapper device.
-  bool Remove(const std::string& device);
+  //   deferred - Whether device removal should be deferred.
+  bool Remove(const std::string& name, bool deferred = false);
 
   // Returns table for device.
   // Parameters
@@ -106,6 +121,23 @@ class BRILLO_EXPORT DeviceMapper {
   // Parameters
   //   name - Name of the devmapper device.
   bool WipeTable(const std::string& name);
+
+  // Gets the version for a device-mapper target type. On failure, the function
+  // returns {0, 0, 0}. The target version is intended to be used to check
+  // feature support for device-mapper targets in the kernel driver.
+  //
+  // Parameters
+  //   target - Name of the device mapper target.
+  DeviceMapperVersion GetTargetVersion(const std::string& target);
+
+  // Send a message to the device.
+  bool Message(const std::string& name, const std::string& message);
+
+  // Suspends the device.
+  bool Suspend(const std::string& name);
+
+  // Resumes the device.
+  bool Resume(const std::string& name);
 
  private:
   // Devmapper task factory.

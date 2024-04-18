@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,10 +13,7 @@
 #include "power_manager/powerd/system/internal_backlight.h"
 #include "power_manager/powerd/system/udev.h"
 
-namespace power_manager {
-namespace system {
-
-PluggableInternalBacklight::PluggableInternalBacklight() {}
+namespace power_manager::system {
 
 PluggableInternalBacklight::~PluggableInternalBacklight() {
   if (udev_)
@@ -47,7 +44,7 @@ void PluggableInternalBacklight::RemoveObserver(BacklightObserver* observer) {
   observers_.RemoveObserver(observer);
 }
 
-bool PluggableInternalBacklight::DeviceExists() {
+bool PluggableInternalBacklight::DeviceExists() const {
   return device_ != nullptr;
 }
 
@@ -99,5 +96,4 @@ void PluggableInternalBacklight::OnUdevEvent(const UdevEvent& event) {
   }
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

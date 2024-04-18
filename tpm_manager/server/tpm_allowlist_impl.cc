@@ -1,17 +1,17 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "tpm_manager/server/tpm_allowlist_impl.h"
 
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
-#include <base/optional.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <libhwsec-foundation/tpm/tpm_version.h>
@@ -20,12 +20,19 @@ namespace {
 
 #if USE_TPM_DYNAMIC
 
-const char kTpmForceAllowTpmFile[] = "/var/lib/tpm_manager/force_allow_tpm";
+constexpr char kTpmForceAllowTpmFile[] = "/var/lib/tpm_manager/force_allow_tpm";
+constexpr char kAllowedStateFile[] = "/var/lib/tpm_manager/.allowed";
+constexpr char kNoPreinitFlagFile[] = "/run/tpm_manager/no_preinit";
+
+// The path to check the TPM is enabled or not.
+constexpr char kTpmEnabledFile[] = "/sys/class/tpm/tpm0/enabled";
 
 // Simulator Vendor ID ("SIMU").
 constexpr uint32_t kVendorIdSimulator = 0x53494d55;
 // STMicroelectronics Vendor ID ("STM ").
 constexpr uint32_t kVendorIdStm = 0x53544D20;
+// Nuvoton Vendor ID ("NTC ").
+constexpr uint32_t kVendorIdNtc = 0x4e544300;
 
 // The location of TPM DID & VID information.
 constexpr char kTpmDidVidPath[] = "/sys/class/tpm/tpm0/did_vid";
@@ -78,6 +85,12 @@ struct DeviceFamily {
   uint32_t tpm_vendor_id;
 };
 
+struct DeviceName {
+  const char* sys_vendor;
+  const char* product_name;
+  uint32_t tpm_vendor_id;
+};
+
 constexpr DeviceModel kTpm2ModelsAllowlist[] = {
     DeviceModel{"Dell Inc.", "Latitude 7490", TpmVidDid{kTpmVidWinbond, 0xFC}},
 };
@@ -86,6 +99,32 @@ constexpr DeviceFamily kTpm2FamiliesAllowlist[] = {
     DeviceFamily{"LENOVO", "ThinkPad X1 Carbon Gen 8", kVendorIdStm},
     DeviceFamily{"LENOVO", "ThinkPad X1 Carbon Gen 9", kVendorIdStm},
 };
+
+constexpr DeviceName kTpm2DeviceNameAllowlist[] = {
+    DeviceName{"HP", "HP Elite x360 830 13 inch G10 2-in-1 Notebook PC",
+               kVendorIdNtc},
+    DeviceName{"HP", "HP EliteBook 640 14 inch G10 Notebook PC", kVendorIdNtc},
+    DeviceName{"HP", "HP EliteBook 645 14 inch G10 Notebook PC", kVendorIdNtc},
+};
+
+std::optional<bool> IsTpmFileEnabled() {
+  base::FilePath file_path(kTpmEnabledFile);
+  std::string file_content;
+
+  if (!base::ReadFileToString(file_path, &file_content)) {
+    return {};
+  }
+
+  std::string enabled_str;
+  base::TrimWhitespaceASCII(file_content, base::TRIM_ALL, &enabled_str);
+
+  int enabled = 0;
+  if (!base::StringToInt(enabled_str, &enabled)) {
+    LOG(ERROR) << "enabled is not a number";
+    return {};
+  }
+  return static_cast<bool>(enabled);
+}
 
 bool GetDidVid(uint16_t* did, uint16_t* vid) {
   base::FilePath file_path(kTpmDidVidPath);
@@ -143,7 +182,7 @@ bool GetProductFamily(std::string* product_family) {
   return true;
 }
 
-base::Optional<bool> IsForceAllow() {
+std::optional<bool> IsForceAllow() {
   base::FilePath file_path(kTpmForceAllowTpmFile);
   std::string file_content;
 
@@ -160,6 +199,25 @@ base::Optional<bool> IsForceAllow() {
     return {};
   }
   return static_cast<bool>(force_allow);
+}
+
+std::optional<bool> GetPreviousAllowedState() {
+  base::FilePath file_path(kAllowedStateFile);
+  std::string file_content;
+
+  if (!base::ReadFileToString(file_path, &file_content)) {
+    return {};
+  }
+
+  std::string allow_state_str;
+  base::TrimWhitespaceASCII(file_content, base::TRIM_ALL, &allow_state_str);
+
+  int allow_state = 0;
+  if (!base::StringToInt(allow_state_str, &allow_state)) {
+    LOG(ERROR) << "allow_state is not a number";
+    return {};
+  }
+  return static_cast<bool>(allow_state);
 }
 
 #endif
@@ -179,9 +237,32 @@ bool TpmAllowlistImpl::IsAllowed() {
   return true;
 #else
 
-  base::Optional<bool> force_allow = IsForceAllow();
+  std::optional<bool> force_allow = IsForceAllow();
   if (force_allow.has_value()) {
     return force_allow.value();
+  }
+
+  if (USE_OS_INSTALL_SERVICE) {
+    if (base::PathExists(base::FilePath(kNoPreinitFlagFile))) {
+      // If USE_OS_INSTALL_SERVICE, kNoPreinitFlagFile will be touched in the
+      // pre-start phase of tpm_managerd if the OS is running from installer
+      // (see check_tpm_preinit_condition.cc). Note that under current scope
+      // USE_OS_INSTALL_SERVICE and USE_TPM_DYNAMIC will always have the same
+      // value (and only in reven case both flags are true).
+      LOG(WARNING) << __func__
+                   << ": Disallow TPM when OS running from installer.";
+      return false;
+    }
+  }
+
+  std::optional<bool> previous_allow_state = GetPreviousAllowedState();
+  if (previous_allow_state.has_value()) {
+    return previous_allow_state.value();
+  }
+
+  if (!tpm_status_->IsTpmEnabled()) {
+    LOG(WARNING) << __func__ << ": Disallow the disabled TPM.";
+    return false;
   }
 
   TPM_SELECT_BEGIN;
@@ -230,6 +311,14 @@ bool TpmAllowlistImpl::IsAllowed() {
       }
     }
 
+    for (const DeviceName& match : kTpm2DeviceNameAllowlist) {
+      if (sys_vendor == match.sys_vendor &&
+          product_name == match.product_name &&
+          manufacturer == match.tpm_vendor_id) {
+        return true;
+      }
+    }
+
     uint16_t device_id;
     uint16_t vendor_id;
 
@@ -258,6 +347,7 @@ bool TpmAllowlistImpl::IsAllowed() {
     LOG(INFO) << "  System Vendor: " << sys_vendor;
     LOG(INFO) << "  Product Name: " << product_name;
     LOG(INFO) << "  Product Family: " << product_family;
+    LOG(INFO) << "  TPM Manufacturer: " << std::hex << manufacturer;
     LOG(INFO) << "  TPM Vendor ID: " << std::hex << vendor_id;
     LOG(INFO) << "  TPM Device ID: " << std::hex << device_id;
 
@@ -265,6 +355,12 @@ bool TpmAllowlistImpl::IsAllowed() {
   });
 
   TPM1_SECTION({
+    std::optional<bool> is_enabled = IsTpmFileEnabled();
+    if (is_enabled.has_value() && !is_enabled.value()) {
+      LOG(WARNING) << __func__ << ": Disallow the disabled TPM.";
+      return false;
+    }
+
     uint16_t device_id;
     uint16_t vendor_id;
 

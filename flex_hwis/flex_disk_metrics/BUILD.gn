@@ -1,0 +1,53 @@
+# Copyright 2023 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [ ":flex_disk_metrics" ]
+  if (use.test) {
+    deps += [ ":flex_disk_metrics_test" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libmetrics",
+  ]
+}
+
+source_set("flex_disk_metrics_source_set") {
+  sources = [ "flex_disk_metrics.cc" ]
+  configs += [ ":target_defaults" ]
+}
+
+executable("flex_disk_metrics") {
+  sources = [ "flex_disk_metrics_main.cc" ]
+  install_path = "bin"
+  configs += [ ":target_defaults" ]
+  libs = [ "rootdev" ]
+  deps = [ ":flex_disk_metrics_source_set" ]
+}
+
+if (use.test) {
+  pkg_config("test_pkg_deps") {
+    pkg_deps = [ "libchrome-test" ]
+  }
+
+  executable("flex_disk_metrics_test") {
+    sources = [ "flex_disk_metrics_test.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":test_pkg_deps",
+      ":target_defaults",
+    ]
+    deps = [
+      ":flex_disk_metrics_source_set",
+      "//common-mk/testrunner",
+    ]
+    run_test = true
+  }
+}

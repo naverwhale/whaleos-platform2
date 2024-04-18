@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -107,19 +107,17 @@ int main(int argc, char* argv[]) {
 
   biod::LogVersion();
 
+  biod::BiodSystem system;
+
   // Check for firmware disable mechanism
-  if (biod::updater::UpdateDisallowed()) {
+  if (biod::updater::UpdateDisallowed(system)) {
     LOG(INFO) << "FPMCU update disabled, exiting.";
     return EXIT_SUCCESS;
   }
 
   // Check if model supports fingerprint
   brillo::CrosConfig cros_config;
-  if (!cros_config.Init()) {
-    LOG(WARNING) << "Cros config is not supported on this model, continuing "
-                    "with legacy update.";
-  }
-  if (biod::FingerprintUnsupported(&cros_config)) {
+  if (!biod::FingerprintSupported(&cros_config)) {
     LOG(INFO) << "Fingerprint is not supported on this model, exiting.";
     return EXIT_SUCCESS;
   }
@@ -128,6 +126,11 @@ int main(int argc, char* argv[]) {
   base::FilePath file;
   auto status = biod::updater::FindFirmwareFile(
       base::FilePath(biod::updater::kFirmwareDir), &cros_config, &file);
+
+  if (status == FindFirmwareFileStatus::kBoardUnavailable) {
+    LOG(ERROR) << "Fingerprint board name unavailable.";
+    return EXIT_FAILURE;
+  }
 
   if (status == FindFirmwareFileStatus::kNoDirectory ||
       status == FindFirmwareFileStatus::kFileNotFound) {
@@ -179,7 +182,8 @@ int main(int argc, char* argv[]) {
   }
   LogFPMCUVersion(*ecver);
 
-  auto result = biod::updater::DoUpdate(ec_device, boot_ctrl, fw);
+  auto result =
+      biod::updater::DoUpdate(ec_device, boot_ctrl, fw, system, &cros_config);
   metrics.SetUpdateReason(result.reason);
   switch (result.status) {
     case UpdateStatus::kUpdateFailedGetVersion:
@@ -199,13 +203,23 @@ int main(int argc, char* argv[]) {
       metrics.Finished(FwUpdaterStatus::kFailureUpdateRW);
       return EXIT_FAILURE;
     case UpdateStatus::kUpdateSucceeded:
-      ecver = ec_device.GetVersion();
-      if (!ecver) {
-        LOG(ERROR) << "Failed to fetch final EC version, update failed.";
-        metrics.Finished(FwUpdaterStatus::kFailurePostUpdateVersionCheck);
-        return EXIT_FAILURE;
+    case UpdateStatus::kUpdateSucceededNeedPowerReset:
+      if (result.status == UpdateStatus::kUpdateSucceededNeedPowerReset) {
+        LOG(WARNING) << "FPMCU software write protect enabled while system"
+                        " hardware write protect is disabled. FPMCU won't"
+                        " respond after flashing until DUT reboot due to"
+                        " http://go/flashrom-fpmcu-wp-bug. Skip version"
+                        " check.";
+      } else {
+        ecver = ec_device.GetVersion();
+        if (!ecver) {
+          LOG(ERROR) << "Failed to fetch final EC version, update failed.";
+          metrics.Finished(FwUpdaterStatus::kFailurePostUpdateVersionCheck);
+          return EXIT_FAILURE;
+        }
+        LogFPMCUVersion(*ecver);
       }
-      LogFPMCUVersion(*ecver);
+
       LOG(INFO) << "The update was successful.";
       metrics.Finished(FwUpdaterStatus::kSuccessful);
       return EXIT_SUCCESS;

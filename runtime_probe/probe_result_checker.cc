@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,7 +35,7 @@ std::unique_ptr<ProbeResultChecker> ProbeResultChecker::FromValue(
 std::unique_ptr<ProbeResultCheckerDict> ProbeResultCheckerDict::FromValue(
     const base::Value& dict_value) {
   auto instance = std::make_unique<ProbeResultCheckerDict>();
-  for (const auto& entry : dict_value.DictItems()) {
+  for (const auto& entry : dict_value.GetDict()) {
     const auto& key = entry.first;
     const auto& val = entry.second;
     auto print_error_and_return = [&val]() {
@@ -94,13 +94,14 @@ bool ProbeResultCheckerDict::Apply(base::Value* probe_result) const {
   bool success = true;
 
   CHECK(probe_result != nullptr);
+  const auto& probe_result_dict = probe_result->GetDict();
 
   // Try to convert and validate each required fields.
   // Any failures will cause the final result be |false|.
   for (const auto& entry : required_fields_) {
     const auto& key = entry.first;
     const auto& converter = entry.second;
-    if (!probe_result->FindKey(key)) {
+    if (!probe_result_dict.Find(key)) {
       DVLOG(2) << "Missing key: " << key;
       success = false;
       break;
@@ -108,7 +109,7 @@ bool ProbeResultCheckerDict::Apply(base::Value* probe_result) const {
 
     auto return_code = converter->Convert(key, probe_result);
     if (return_code != ReturnCode::OK) {
-      auto* value = probe_result->FindKey(key);
+      auto* value = probe_result_dict.Find(key);
       LOG(ERROR) << "Failed to apply " << converter->ToString() << " on "
                  << *value << "(ReturnCode = " << static_cast<int>(return_code)
                  << ")";
@@ -130,14 +131,14 @@ bool ProbeResultCheckerDict::Apply(base::Value* probe_result) const {
   for (const auto& entry : optional_fields_) {
     const auto& key = entry.first;
     const auto& converter = entry.second;
-    if (!probe_result->FindKey(key))
+    if (!probe_result_dict.Find(key))
       continue;
 
     auto return_code = converter->Convert(key, probe_result);
     if (return_code != ReturnCode::OK) {
       VLOG(1) << "Optional field '" << key << "' has unexpected value, "
               << "remove it from probe result.";
-      probe_result->RemoveKey(key);
+      probe_result->GetDict().Remove(key);
     }
   }
 
@@ -171,11 +172,19 @@ std::unique_ptr<ProbeResultCheckerList> ProbeResultCheckerList::FromValue(
 }
 
 bool ProbeResultCheckerList::Apply(base::Value* probe_result) const {
+  CHECK(probe_result != nullptr);
+
   if (checkers.size() == 0)
     return true;
   for (const auto& checker : checkers) {
-    if (checker->Apply(probe_result))
+    // Pass the copy of |probe_result| in as the checker may modify it.
+    auto probe_result_copy = probe_result->Clone();
+    if (checker->Apply(&probe_result_copy)) {
+      // We need the values in |probe_result| to be converted, so update
+      // |probe_result| if it passes the validation.
+      *probe_result = std::move(probe_result_copy);
       return true;
+    }
   }
   return false;
 }

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,9 +15,9 @@
 #include <base/containers/contains.h>
 #include <base/files/file_util.h>
 #include <gtest/gtest.h>
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -68,16 +68,17 @@ class MockSystemUtils : public SuspendFreezer::SystemUtilsInterface {
 
 }  // namespace
 
-class SuspendFreezerTest : public ::testing::Test {
+class SuspendFreezerTest : public TestEnvironment {
  public:
   SuspendFreezerTest()
       : mock_sys_utils_(new MockSystemUtils),
-        suspend_freezer_(),
         test_state_(kTestPath.Append(kStateFile)) {
     mock_sys_utils_->set_write_ = true;
     mock_sys_utils_->permission_fail_ = false;
     mock_sys_utils_->file_contents_[test_state_] = kFreezerStateThawed;
     suspend_freezer_.set_sys_utils_for_testing(mock_sys_utils_);
+    suspend_freezer_.clock()->set_current_time_for_testing(
+        base::TimeTicks() + base::Microseconds(1000));
     suspend_freezer_.Init(&prefs_);
   }
 
@@ -94,8 +95,7 @@ class SuspendFreezerTest : public ::testing::Test {
 // change.
 TEST_F(SuspendFreezerTest, TestFreezeTimeout) {
   mock_sys_utils_->set_write_ = false;
-  suspend_freezer_.clock()->set_time_step_for_testing(
-      base::TimeDelta::FromSeconds(5));
+  suspend_freezer_.clock()->set_time_step_for_testing(base::Seconds(5));
   EXPECT_EQ(FreezeResult::FAILURE, suspend_freezer_.FreezeUserspace(1, true));
 }
 
@@ -261,5 +261,4 @@ TEST_F(SuspendFreezerTest, TestCircularDeps) {
   EXPECT_EQ(mock_sys_utils_->file_contents_[test2], kFreezerStateThawed);
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

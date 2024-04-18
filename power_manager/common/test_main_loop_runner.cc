@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,20 +9,16 @@
 #include <base/logging.h>
 #include <base/run_loop.h>
 
-#include "power_manager/common/util.h"
+#include <memory>
 
 namespace power_manager {
-
-TestMainLoopRunner::TestMainLoopRunner() : timed_out_(false) {}
-
-TestMainLoopRunner::~TestMainLoopRunner() {}
 
 bool TestMainLoopRunner::StartLoop(base::TimeDelta timeout_delay) {
   CHECK(!runner_.get()) << "Loop is already running";
   timed_out_ = false;
   timeout_timer_.Start(FROM_HERE, timeout_delay, this,
                        &TestMainLoopRunner::OnTimeout);
-  runner_.reset(new base::RunLoop);
+  runner_ = std::make_unique<base::RunLoop>();
   runner_->Run();
   runner_.reset();
   return !timed_out_;

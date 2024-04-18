@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <base/files/file_util.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <brillo/files/file_util.h>
 
 #include "debugd/src/error_utils.h"
 #include "debugd/src/helper_utils.h"
@@ -33,9 +34,9 @@ ProcessWithOutput::~ProcessWithOutput() {
   errfile_.reset();
 
   if (!outfile_path_.empty())
-    base::DeleteFile(outfile_path_);  // not recursive
+    brillo::DeleteFile(outfile_path_);  // not recursive
   if (!errfile_path_.empty())
-    base::DeleteFile(errfile_path_);
+    brillo::DeleteFile(errfile_path_);
 }
 
 bool ProcessWithOutput::Init() {

@@ -1,13 +1,17 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CRYPTOHOME_MOCK_KEYSET_MANAGEMENT_H_
 #define CRYPTOHOME_MOCK_KEYSET_MANAGEMENT_H_
 
+#include "base/files/file_path.h"
+#include "cryptohome/error/cryptohome_error.h"
 #include "cryptohome/keyset_management.h"
 
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,69 +19,107 @@
 #include <dbus/cryptohome/dbus-constants.h>
 #include <gmock/gmock.h>
 
-#include "cryptohome/credentials.h"
-#include "cryptohome/storage/mount.h"
+#include "cryptohome/flatbuffer_schemas/auth_block_state.h"
+#include "cryptohome/key_objects.h"
+#include "cryptohome/storage/file_system_keyset.h"
 
 namespace cryptohome {
 class VaultKeyset;
 class HomeDirs;
 
+typedef std::map<std::string, KeyData> KeyLabelMap;
+
 class MockKeysetManagement : public KeysetManagement {
  public:
   MockKeysetManagement() = default;
-  virtual ~MockKeysetManagement() = default;
 
-  MOCK_METHOD(bool, AreCredentialsValid, (const Credentials&), (override));
-  MOCK_METHOD(bool,
-              Migrate,
-              (const Credentials&, const brillo::SecureBlob&, int*),
-              (override));
-  MOCK_METHOD(std::unique_ptr<VaultKeyset>,
-              LoadUnwrappedKeyset,
-              (const Credentials&, MountError*),
-              (override));
   MOCK_METHOD(std::unique_ptr<VaultKeyset>,
               GetVaultKeyset,
-              (const std::string&, const std::string&),
+              (const ObfuscatedUsername&, const std::string&),
               (const, override));
   MOCK_METHOD(bool,
               GetVaultKeysets,
-              (const std::string&, std::vector<int>*),
+              (const ObfuscatedUsername&, std::vector<int>*),
               (const, override));
-  MOCK_METHOD(bool,
-              GetVaultKeysetLabels,
-              (const std::string&, std::vector<std::string>*),
-              (const, override));
-  MOCK_METHOD(bool, AddInitialKeyset, (const Credentials&), (override));
-  MOCK_METHOD(CryptohomeErrorCode,
-              AddKeyset,
-              (const Credentials&,
-               const brillo::SecureBlob&,
-               const KeyData*,
-               bool,
-               int*),
+  MOCK_METHOD(CryptohomeStatus,
+              ForceRemoveKeyset,
+              (const ObfuscatedUsername&, int),
               (override));
-  MOCK_METHOD(CryptohomeErrorCode,
-              RemoveKeyset,
-              (const Credentials&, const KeyData&),
+  MOCK_METHOD(CryptohomeStatus,
+              RemoveKeysetFile,
+              (const VaultKeyset&),
               (override));
-  MOCK_METHOD(bool, ForceRemoveKeyset, (const std::string&, int), (override));
-  MOCK_METHOD(bool, MoveKeyset, (const std::string&, int, int), (override));
-  MOCK_METHOD(void, RemoveLECredentials, (const std::string&), (override));
   MOCK_METHOD(void,
-              AddUserTimestampToCache,
-              (const std::string& obfuscated),
+              RemoveLECredentials,
+              (const ObfuscatedUsername&),
+              (override));
+  MOCK_METHOD(std::unique_ptr<VaultKeyset>,
+              LoadVaultKeysetForUser,
+              (const ObfuscatedUsername&, int),
+              (const, override));
+  MOCK_METHOD(base::Time,
+              GetKeysetBoundTimestamp,
+              (const ObfuscatedUsername&),
+              (override));
+  MOCK_METHOD(void,
+              CleanupPerIndexTimestampFiles,
+              (const ObfuscatedUsername&),
               (override));
   MOCK_METHOD(bool,
-              UpdateActivityTimestamp,
-              (const std::string& obfuscated, int index, int time_shift_sec),
+              ShouldReSaveKeyset,
+              (VaultKeyset * vault_keyset),
+              (const, override));
+  MOCK_METHOD(CryptohomeStatus,
+              ReSaveKeyset,
+              (VaultKeyset&, KeyBlobs, std::unique_ptr<AuthBlockState>),
+              (const, override));
+  MOCK_METHOD(MountStatusOr<std::unique_ptr<VaultKeyset>>,
+              GetValidKeyset,
+              (const ObfuscatedUsername&,
+               KeyBlobs,
+               const std::optional<std::string>&),
               (override));
-  MOCK_METHOD(void, set_enterprise_owned, (bool), (override));
-  MOCK_METHOD(bool, enterprise_owned, (), (const, override));
-  MOCK_METHOD(bool, UserExists, (const std::string&), (override));
-  MOCK_METHOD(brillo::SecureBlob,
-              GetPublicMountPassKey,
-              (const std::string&),
+  MOCK_METHOD(CryptohomeStatus,
+              AddKeyset,
+              (const VaultKeysetIntent&,
+               const ObfuscatedUsername&,
+               const std::string&,
+               const KeyData&,
+               const VaultKeyset&,
+               KeyBlobs,
+               std::unique_ptr<AuthBlockState>,
+               bool clobber),
+              (override));
+  MOCK_METHOD(
+      CryptohomeStatusOr<std::unique_ptr<VaultKeyset>>,
+      AddInitialKeyset,
+      (const VaultKeysetIntent& vk_intent,
+       const ObfuscatedUsername&,
+       const KeyData&,
+       const std::optional<SerializedVaultKeyset_SignatureChallengeInfo>&,
+       const FileSystemKeyset&,
+       KeyBlobs,
+       std::unique_ptr<AuthBlockState>),
+      (override));
+  MOCK_METHOD(bool,
+              AddResetSeedIfMissing,
+              (VaultKeyset & vault_keyset),
+              (override));
+  MOCK_METHOD(CryptohomeStatus,
+              EncryptAndSaveKeyset,
+              (VaultKeyset & vault_keyset,
+               const KeyBlobs& key_blobs,
+               const AuthBlockState& auth_state,
+               const base::FilePath& save_path),
+              (const, override));
+  MOCK_METHOD(CryptohomeStatus,
+              UpdateKeysetWithKeyBlobs,
+              (const VaultKeysetIntent&,
+               const ObfuscatedUsername&,
+               const KeyData&,
+               const VaultKeyset&,
+               KeyBlobs,
+               std::unique_ptr<AuthBlockState>),
               (override));
 };
 

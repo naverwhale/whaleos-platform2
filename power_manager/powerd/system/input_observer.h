@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,13 @@
 
 #include "power_manager/common/power_constants.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Interface for classes interested in observing input events announced by the
 // InputWatcher class.
 class InputObserver : public base::CheckedObserver {
  public:
-  virtual ~InputObserver() {}
+  ~InputObserver() override = default;
 
   // Called when the lid is opened or closed. LidState::NOT_PRESENT will never
   // be passed.
@@ -36,7 +35,6 @@ class InputObserver : public base::CheckedObserver {
   virtual void OnHoverStateChange(bool hovering) = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_INPUT_OBSERVER_H_

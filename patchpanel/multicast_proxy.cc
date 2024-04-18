@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,17 +10,18 @@
 
 #include <base/logging.h>
 
+#include "patchpanel/ipc.h"
 #include "patchpanel/minijailed_process_runner.h"
 
 namespace patchpanel {
 
 MulticastProxy::MulticastProxy(base::ScopedFD control_fd)
     : msg_dispatcher_(std::move(control_fd)) {
-  msg_dispatcher_.RegisterFailureHandler(base::Bind(
+  msg_dispatcher_.RegisterFailureHandler(base::BindRepeating(
       &MulticastProxy::OnParentProcessExit, weak_factory_.GetWeakPtr()));
 
-  msg_dispatcher_.RegisterDeviceMessageHandler(
-      base::Bind(&MulticastProxy::OnDeviceMessage, weak_factory_.GetWeakPtr()));
+  msg_dispatcher_.RegisterMessageHandler(base::BindRepeating(
+      &MulticastProxy::OnDeviceMessage, weak_factory_.GetWeakPtr()));
 }
 
 int MulticastProxy::OnInit() {
@@ -46,7 +47,15 @@ void MulticastProxy::OnParentProcessExit() {
   Quit();
 }
 
-void MulticastProxy::OnDeviceMessage(const DeviceMessage& msg) {
+void MulticastProxy::OnDeviceMessage(const SubprocessMessage& root_msg) {
+  if (!root_msg.has_control_message()) {
+    LOG(ERROR) << "Unexpected message type";
+    return;
+  }
+  if (!root_msg.control_message().has_device_message()) {
+    return;
+  }
+  const DeviceMessage& msg = root_msg.control_message().device_message();
   const std::string& dev_ifname = msg.dev_ifname();
   if (dev_ifname.empty()) {
     LOG(DFATAL) << "Received DeviceMessage w/ empty dev_ifname";
@@ -63,6 +72,7 @@ void MulticastProxy::OnDeviceMessage(const DeviceMessage& msg) {
       LOG(INFO) << "Enabling mDNS forwarding for device " << dev_ifname;
       auto fwd = std::make_unique<MulticastForwarder>(
           dev_ifname, kMdnsMcastAddress, kMdnsMcastAddress6, kMdnsPort);
+      fwd->Init();
       mdns_fwd = mdns_fwds_.emplace(dev_ifname, std::move(fwd)).first;
     }
 
@@ -77,6 +87,7 @@ void MulticastProxy::OnDeviceMessage(const DeviceMessage& msg) {
       LOG(INFO) << "Enabling SSDP forwarding for device " << dev_ifname;
       auto fwd = std::make_unique<MulticastForwarder>(
           dev_ifname, kSsdpMcastAddress, kSsdpMcastAddress6, kSsdpPort);
+      fwd->Init();
       ssdp_fwd = ssdp_fwds_.emplace(dev_ifname, std::move(fwd)).first;
     }
 
@@ -90,6 +101,7 @@ void MulticastProxy::OnDeviceMessage(const DeviceMessage& msg) {
     if (bcast_fwd == bcast_fwds_.end()) {
       LOG(INFO) << "Enabling broadcast forwarding for device " << dev_ifname;
       auto fwd = std::make_unique<BroadcastForwarder>(dev_ifname);
+      fwd->Init();
       bcast_fwd = bcast_fwds_.emplace(dev_ifname, std::move(fwd)).first;
     }
 

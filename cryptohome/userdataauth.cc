@@ -1,135 +1,371 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "cryptohome/userdataauth.h"
+
+#include <algorithm>
+#include <limits>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/files/file_path.h>
+#include <base/functional/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_forward.h>
 #include <base/json/json_writer.h>
+#include <base/location.h>
 #include <base/logging.h>
 #include <base/message_loop/message_pump_type.h>
 #include <base/notreached.h>
+#include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
-#include <base/system/sys_info.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/time/time.h>
+#include <biod/biod_proxy/auth_stack_manager_proxy_base.h>
+#include <bootlockbox/boot_lockbox_client.h>
 #include <brillo/cryptohome.h>
+#include <brillo/secure_blob.h>
 #include <chaps/isolate.h>
 #include <chaps/token_manager_client.h>
+#include <chromeos/constants/cryptohome.h>
+#include <cryptohome/proto_bindings/auth_factor.pb.h>
+#include <cryptohome/proto_bindings/UserDataAuth.pb.h>
 #include <dbus/cryptohome/dbus-constants.h>
-#include <libhwsec-foundation/tpm/tpm_version.h>
+#include <dbus_adaptors/org.chromium.UserDataAuth.h>
+#include <device_management/proto_bindings/device_management_interface.pb.h>
+#include <device_management-client/device_management/dbus-proxies.h>
+#include <featured/feature_library.h>
+#include <libhwsec/factory/factory_impl.h>
+#include <libhwsec/status.h>
+#include <libhwsec-foundation/crypto/secure_blob_util.h>
+#include <libhwsec-foundation/crypto/sha.h>
+#include <libhwsec-foundation/utility/task_dispatching_framework.h>
+#include <metrics/timer.h>
 
-#include "cryptohome/bootlockbox/boot_lockbox_client.h"
+#include "cryptohome/auth_blocks/auth_block_utility_impl.h"
+#include "cryptohome/auth_blocks/biometrics_command_processor_impl.h"
+#include "cryptohome/auth_blocks/fp_service.h"
+#include "cryptohome/auth_factor/auth_factor.h"
+#include "cryptohome/auth_factor/auth_factor_manager.h"
+#include "cryptohome/auth_factor/auth_factor_storage_type.h"
+#include "cryptohome/auth_factor/auth_factor_type.h"
+#include "cryptohome/auth_factor/flatbuffer.h"
+#include "cryptohome/auth_factor/protobuf.h"
+#include "cryptohome/auth_factor/types/manager.h"
+#include "cryptohome/auth_factor/with_driver.h"
+#include "cryptohome/auth_input_utils.h"
+#include "cryptohome/auth_intent.h"
+#include "cryptohome/auth_session.h"
+#include "cryptohome/auth_session_flatbuffer.h"
+#include "cryptohome/auth_session_manager.h"
+#include "cryptohome/auth_session_protobuf.h"
 #include "cryptohome/challenge_credentials/challenge_credentials_helper_impl.h"
 #include "cryptohome/cleanup/disk_cleanup.h"
 #include "cryptohome/cleanup/low_disk_space_handler.h"
-#include "cryptohome/cleanup/user_oldest_activity_timestamp_cache.h"
-#include "cryptohome/crypto/secure_blob_util.h"
-#include "cryptohome/crypto/sha.h"
-#include "cryptohome/cryptohome_common.h"
+#include "cryptohome/cleanup/user_oldest_activity_timestamp_manager.h"
+#include "cryptohome/credential_verifier.h"
 #include "cryptohome/cryptohome_metrics.h"
-#include "cryptohome/cryptohome_rsa_key_loader.h"
+#include "cryptohome/cryptorecovery/recovery_crypto_impl.h"
+#include "cryptohome/error/converter.h"
+#include "cryptohome/error/cryptohome_crypto_error.h"
+#include "cryptohome/error/location_utils.h"
+#include "cryptohome/error/locations.h"
+#include "cryptohome/features.h"
 #include "cryptohome/filesystem_layout.h"
-#include "cryptohome/key_challenge_service.h"
 #include "cryptohome/key_challenge_service_factory.h"
-#include "cryptohome/key_challenge_service_factory_impl.h"
-#include "cryptohome/stateful_recovery.h"
-#include "cryptohome/storage/mount_utils.h"
-#include "cryptohome/tpm.h"
-#include "cryptohome/user_session.h"
-#include "cryptohome/userdataauth.h"
+#include "cryptohome/keyset_management.h"
+#include "cryptohome/pkcs11/real_pkcs11_token_factory.h"
+#include "cryptohome/storage/cryptohome_vault.h"
+#include "cryptohome/user_secret_stash/storage.h"
+#include "cryptohome/user_secret_stash/user_secret_stash.h"
+#include "cryptohome/user_session/real_user_session_factory.h"
+#include "cryptohome/user_session/user_session.h"
+#include "cryptohome/util/proto_enum.h"
+#include "cryptohome/vault_keyset.h"
 
 using base::FilePath;
 using brillo::Blob;
 using brillo::SecureBlob;
-using brillo::cryptohome::home::SanitizeUserNameWithSalt;
-using hwsec::error::TPMErrorBase;
+using brillo::cryptohome::home::SanitizeUserName;
+using cryptohome::error::CryptohomeCryptoError;
+using cryptohome::error::CryptohomeError;
+using cryptohome::error::CryptohomeMountError;
+using cryptohome::error::CryptohomeTPMError;
+using cryptohome::error::ErrorActionSet;
+using cryptohome::error::PossibleAction;
+using cryptohome::error::PrimaryAction;
+using hwsec::TPMErrorBase;
+using hwsec::TPMRetryAction;
+using hwsec_foundation::Sha1;
+using hwsec_foundation::status::MakeStatus;
+using hwsec_foundation::status::OkStatus;
+using hwsec_foundation::status::StatusChain;
 
 namespace cryptohome {
 
+namespace {
+
 constexpr char kMountThreadName[] = "MountThread";
 constexpr char kNotFirstBootFilePath[] = "/run/cryptohome/not_first_boot";
-
-namespace {
+constexpr char kDeviceMapperDevicePrefix[] = "/dev/mapper/dmcrypt";
+constexpr base::TimeDelta kDefaultExtensionTime = base::Seconds(60);
 // Some utility functions used by UserDataAuth.
 
+// Wrapper function for the ReplyWithError. |unused_auth_session| parameter is
+// used for keeping the InUseAuthSession alive until the operation has
+// completed.
+template <typename ReplyType>
+void ReplyWithStatus(InUseAuthSession unused_auth_session,
+                     base::OnceCallback<void(const ReplyType&)> on_done,
+                     CryptohomeStatus status) {
+  ReplyType reply;
+  ReplyWithError(std::move(on_done), std::move(reply), std::move(status));
+}
+
+// This function returns the AuthFactorPolicy from the UserPolicy. It will
+// return an empty policy if the user policy doesn't exist, or if the
+// auth_factor_type doesn't exist in the user policy.
+SerializedUserAuthFactorTypePolicy GetAuthFactorPolicyFromUserPolicy(
+    const std::optional<SerializedUserPolicy>& user_policy,
+    AuthFactorType auth_factor_type) {
+  if (!user_policy.has_value()) {
+    return SerializedUserAuthFactorTypePolicy(
+        {.type = *SerializeAuthFactorType(auth_factor_type),
+         .enabled_intents = {},
+         .disabled_intents = {}});
+  }
+  for (auto policy : user_policy->auth_factor_type_policy) {
+    if (policy.type != std::nullopt &&
+        policy.type == SerializeAuthFactorType(auth_factor_type)) {
+      return policy;
+    }
+  }
+  return SerializedUserAuthFactorTypePolicy(
+      {.type = *SerializeAuthFactorType(auth_factor_type),
+       .enabled_intents = {},
+       .disabled_intents = {}});
+}
+
+// This function sets the auth intents for auth factor type. As long as an
+// intent is supported it should be included in the maximal set. The minimal set
+// only includes supported non-configurable intents. If a policy has been set
+// for the auth factor type, the set policy should be used as the "current" set,
+// otherwise supported intents that are enabled are considered the "current"
+// set.
+void SetAuthIntentsForAuthFactorType(
+    const AuthFactorType& type,
+    const AuthFactorDriver& factor_driver,
+    std::optional<SerializedUserAuthFactorTypePolicy> type_policy,
+    bool is_persistent_user,
+    bool is_ephemeral_user,
+    user_data_auth::AuthIntentsForAuthFactorType* intents_for_type) {
+  intents_for_type->set_type(AuthFactorTypeToProto(type));
+
+  for (AuthIntent intent : kAllAuthIntents) {
+    // Determine if this intent can be used with this factor type for this
+    // user. The check depends on the user type as full auth is only available
+    // for persistent users.
+    bool intent_is_supported;
+    if (is_persistent_user) {
+      intent_is_supported = factor_driver.IsFullAuthSupported(intent) ||
+                            factor_driver.IsLightAuthSupported(intent);
+    } else if (is_ephemeral_user) {
+      intent_is_supported = factor_driver.IsLightAuthSupported(intent);
+    } else {
+      intent_is_supported = false;
+    }
+    // If the intent is supported, determine which of the "current, min, max"
+    // sets it belongs in based on the configuration.
+    if (intent_is_supported) {
+      user_data_auth::AuthIntent proto_intent = AuthIntentToProto(intent);
+      // The maximum contains all supported intents, always add to it.
+      intents_for_type->add_maximum(proto_intent);
+      // The minimum contains only the non-configurable supported intents.
+      AuthFactorDriver::IntentConfigurability intent_configurability =
+          factor_driver.GetIntentConfigurability(intent);
+      if (intent_configurability ==
+          AuthFactorDriver::IntentConfigurability::kNotConfigurable) {
+        intents_for_type->add_minimum(proto_intent);
+        // If an intent is not configurable and is supported it should be
+        // included in the current set of intents regardless of a new type
+        // policy being applied or not.
+        intents_for_type->add_current(proto_intent);
+      }
+      // Unless there is a policy set for the user, the current set contains
+      // supported intents which are enabled by default as well as
+      // notconfigurable ones.
+      if (!type_policy.has_value() &&
+          intent_configurability ==
+              AuthFactorDriver::IntentConfigurability::kEnabledByDefault) {
+        intents_for_type->add_current(proto_intent);
+      }
+    }
+  }
+  // if there is a policy in place for this auth factor type, use the policy as
+  // the "current" intent.
+  if (type_policy.has_value()) {
+    for (auto intent : type_policy->enabled_intents) {
+      intents_for_type->add_current(
+          AuthIntentToProto(DeserializeAuthIntent(intent)));
+    }
+  }
+}
+
+// Builder function for AuthFactorWithStatus. This function takes into account
+// type and calls various library functions needed to convert AuthFactor to a
+// proto for a persistent user.
+std::optional<user_data_auth::AuthFactorWithStatus> GetAuthFactorWithStatus(
+    const ObfuscatedUsername& username,
+    UserPolicyFile* user_policy_file,
+    AuthFactorDriverManager* auth_factor_driver_manager,
+    const AuthFactor& auth_factor) {
+  const AuthFactorDriver& factor_driver =
+      auth_factor_driver_manager->GetDriver(auth_factor.type());
+  auto auth_factor_proto =
+      factor_driver.ConvertToProto(auth_factor.label(), auth_factor.metadata());
+  if (!auth_factor_proto) {
+    return std::nullopt;
+  }
+  user_data_auth::AuthFactorWithStatus auth_factor_with_status;
+  *auth_factor_with_status.mutable_auth_factor() =
+      std::move(*auth_factor_proto);
+  auto supported_intents = GetFullAuthAvailableIntents(
+      username, auth_factor, *auth_factor_driver_manager,
+      GetAuthFactorPolicyFromUserPolicy(user_policy_file->GetUserPolicy(),
+                                        auth_factor.type()));
+  for (const auto& auth_intent : supported_intents) {
+    auth_factor_with_status.add_available_for_intents(
+        AuthIntentToProto(auth_intent));
+  }
+  auto delay = factor_driver.GetFactorDelay(username, auth_factor);
+  if (delay.ok()) {
+    auth_factor_with_status.mutable_status_info()->set_time_available_in(
+        delay->is_max() ? std::numeric_limits<uint64_t>::max()
+                        : delay->InMilliseconds());
+  }
+  return auth_factor_with_status;
+}
+
+// Builder function for AuthFactorWithStatus for epehermal users. This function
+// takes into account type and calls various library functions needed to convert
+// AuthFactor to a proto.
+std::optional<user_data_auth::AuthFactorWithStatus> GetAuthFactorWithStatus(
+    const ObfuscatedUsername& username,
+    UserPolicyFile* user_policy_file,
+    AuthFactorDriverManager* auth_factor_driver_manager,
+    const CredentialVerifier* verifier) {
+  const AuthFactorDriver& factor_driver =
+      auth_factor_driver_manager->GetDriver(verifier->auth_factor_type());
+  auto proto_factor = factor_driver.ConvertToProto(
+      verifier->auth_factor_label(), verifier->auth_factor_metadata());
+  if (!proto_factor) {
+    LOG(INFO) << "Could not convert";
+    return std::nullopt;
+  }
+  user_data_auth::AuthFactorWithStatus auth_factor_with_status;
+  *auth_factor_with_status.mutable_auth_factor() = std::move(*proto_factor);
+  auto supported_intents = GetSupportedIntents(
+      username, verifier->auth_factor_type(), *auth_factor_driver_manager,
+      GetAuthFactorPolicyFromUserPolicy(user_policy_file->GetUserPolicy(),
+                                        verifier->auth_factor_type()),
+      /*only_light_auth=*/true);
+  for (const auto& auth_intent : supported_intents) {
+    auth_factor_with_status.add_available_for_intents(
+        AuthIntentToProto(auth_intent));
+  }
+  return auth_factor_with_status;
+}
+
+// Overload that takes a reply type and returns the mutable AuthFactor message
+// from it. Basically just calls mutable_X for whatever field "X" is the
+// AuthFactorWithStatus from the reply. There must be an overload for a type to
+// work with ReplyWithAuthFactorStatus.
+user_data_auth::AuthFactorWithStatus* MutableAuthFactorForReplyType(
+    user_data_auth::AddAuthFactorReply& reply) {
+  return reply.mutable_added_auth_factor();
+}
+user_data_auth::AuthFactorWithStatus* MutableAuthFactorForReplyType(
+    user_data_auth::UpdateAuthFactorReply& reply) {
+  return reply.mutable_updated_auth_factor();
+}
+user_data_auth::AuthFactorWithStatus* MutableAuthFactorForReplyType(
+    user_data_auth::UpdateAuthFactorMetadataReply& reply) {
+  return reply.mutable_updated_auth_factor();
+}
+user_data_auth::AuthFactorWithStatus* MutableAuthFactorForReplyType(
+    user_data_auth::RelabelAuthFactorReply& reply) {
+  return reply.mutable_relabelled_auth_factor();
+}
+user_data_auth::AuthFactorWithStatus* MutableAuthFactorForReplyType(
+    user_data_auth::ReplaceAuthFactorReply& reply) {
+  return reply.mutable_replacement_auth_factor();
+}
+
+// Wrapper function for the ReplyWithError for AddAuthFactorReply,
+// UpdateAuthFactorMetadata and UpdateAuthFactorWithReply.
+template <typename ReplyType>
+void ReplyWithAuthFactorStatus(
+    InUseAuthSession auth_session,
+    UserPolicyFile* user_policy_file,
+    AuthFactorDriverManager* auth_factor_driver_manager,
+    UserSession* user_session,
+    std::string auth_factor_label,
+    base::OnceCallback<void(const ReplyType&)> on_done,
+    CryptohomeStatus status) {
+  ReplyType reply;
+  if (!status.ok()) {
+    ReplyWithError(std::move(on_done), std::move(reply), std::move(status));
+    return;
+  }
+
+  // These should be active and we expect these to be set always.
+  CHECK(auth_session.AuthSessionStatus().ok());
+  CHECK(auth_factor_driver_manager);
+
+  std::optional<user_data_auth::AuthFactorWithStatus> auth_factor_with_status;
+  // Select which AuthFactorWithStatus to build based on user type.
+  if (auth_session->ephemeral_user()) {
+    CHECK(user_session);
+    auth_factor_with_status = GetAuthFactorWithStatus(
+        auth_session->obfuscated_username(), user_policy_file,
+        auth_factor_driver_manager,
+        user_session->FindCredentialVerifier(auth_factor_label));
+  } else {
+    auth_factor_with_status = GetAuthFactorWithStatus(
+        auth_session->obfuscated_username(), user_policy_file,
+        auth_factor_driver_manager,
+        auth_session->auth_factor_map().Find(auth_factor_label)->auth_factor());
+  }
+
+  if (!auth_factor_with_status.has_value()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthProtoFailureInReplyWithAuthFactorStatus),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT));
+    return;
+  }
+  *MutableAuthFactorForReplyType(reply) = std::move(*auth_factor_with_status);
+  ReplyWithError(std::move(on_done), std::move(reply), std::move(status));
+}
+
 // Get the Account ID for an AccountIdentifier proto.
-const std::string& GetAccountId(const AccountIdentifier& id) {
+Username GetAccountId(const AccountIdentifier& id) {
   if (id.has_account_id()) {
-    return id.account_id();
+    return Username(id.account_id());
   }
-  return id.email();
-}
-
-// Returns whether the Chrome OS image is a test one.
-bool IsOsTestImage() {
-  std::string chromeos_release_track;
-  if (!base::SysInfo::GetLsbReleaseValue("CHROMEOS_RELEASE_TRACK",
-                                         &chromeos_release_track)) {
-    // Fall back to the safer assumption that we're not in a test image.
-    return false;
-  }
-  return base::StartsWith(chromeos_release_track, "test",
-                          base::CompareCase::SENSITIVE);
-}
-
-// Whether the key can be used for lightweight challenge-response authentication
-// check against the given user session.
-bool KeyMatchesForLightweightChallengeResponseCheck(
-    const KeyData& key_data, const UserSession& session) {
-  DCHECK_EQ(key_data.type(), KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-  DCHECK_EQ(key_data.challenge_response_key_size(), 1);
-  if (session.key_data().type() != KeyData::KEY_TYPE_CHALLENGE_RESPONSE ||
-      session.key_data().label().empty() ||
-      session.key_data().label() != key_data.label())
-    return false;
-  if (session.key_data().challenge_response_key_size() != 1) {
-    // Using multiple challenge-response keys at once is currently unsupported.
-    return false;
-  }
-  if (session.key_data().challenge_response_key(0).public_key_spki_der() !=
-      key_data.challenge_response_key(0).public_key_spki_der()) {
-    LOG(WARNING) << "Public key mismatch for lightweight challenge-response "
-                    "authentication check";
-    return false;
-  }
-  return true;
-}
-
-// Performs a single attempt to Mount a non-annonimous user.
-MountError AttemptUserMount(const Credentials& credentials,
-                            const Mount::MountArgs& mount_args,
-                            scoped_refptr<UserSession> user_session) {
-  if (user_session->GetMount()->IsMounted()) {
-    return MOUNT_ERROR_MOUNT_POINT_BUSY;
-  }
-
-  if (mount_args.is_ephemeral) {
-    return user_session->MountEphemeral(credentials);
-  }
-
-  return user_session->MountVault(credentials, mount_args);
-}
-
-// Performs a single attempt to Mount a non-annonimous user with AuthSession
-MountError AttemptUserMount(AuthSession* auth_session,
-                            const Mount::MountArgs& mount_args,
-                            scoped_refptr<UserSession> user_session) {
-  if (user_session->GetMount()->IsMounted()) {
-    return MOUNT_ERROR_MOUNT_POINT_BUSY;
-  }
-  // Mount ephemerally using authsession
-  if (mount_args.is_ephemeral) {
-    return user_session->MountEphemeral(auth_session);
-  }
-
-  return user_session->MountVault(auth_session, mount_args);
+  return Username(id.email());
 }
 
 // Returns true if any of the path in |prefixes| starts with |path|
@@ -143,54 +379,153 @@ bool PrefixPresent(const std::vector<FilePath>& prefixes,
       });
 }
 
+// Groups dm-crypt mounts for each user. Mounts for a user may have a source
+// in either dmcrypt-<>-data or dmcrypt-<>-cache. Strip the application
+// specific suffix for the device and use <> as the group key.
+void GroupDmcryptDeviceMounts(
+    std::multimap<const FilePath, const FilePath>* mounts,
+    std::multimap<const FilePath, const FilePath>* grouped_mounts) {
+  for (auto match = mounts->begin(); match != mounts->end(); ++match) {
+    // Group dmcrypt-<>-data and dmcrypt-<>-cache mounts. Strip out last
+    // '-' from the path.
+    size_t last_component_index = match->first.value().find_last_of("-");
+
+    if (last_component_index == std::string::npos) {
+      continue;
+    }
+
+    base::FilePath device_group(
+        match->first.value().substr(0, last_component_index));
+    if (device_group.ReferencesParent()) {
+      // This should probably never occur in practice, but seems useful from
+      // the security hygiene perspective to explicitly prevent transforming
+      // stuff like "/foo/..-" into "/foo/..".
+      LOG(WARNING) << "Skipping malformed dm-crypt mount point: "
+                   << match->first;
+      continue;
+    }
+    grouped_mounts->insert({device_group, match->second});
+  }
+}
+
+// Fill AuthSessionProperties in auth_session_props.
+void PopulateAuthSessionProperties(
+    InUseAuthSession& auth_session,
+    user_data_auth::AuthSessionProperties* auth_session_props) {
+  for (const AuthIntent auth_intent : auth_session->authorized_intents()) {
+    auth_session_props->add_authorized_for(AuthIntentToProto(auth_intent));
+  }
+
+  if (auth_session->authorized_intents().contains(AuthIntent::kDecrypt)) {
+    auth_session_props->set_seconds_left(
+        auth_session.GetRemainingTime().InSeconds());
+  }
+}
+
+void HandleAuthenticationResult(
+    InUseAuthSession auth_session,
+    const SerializedUserAuthFactorTypePolicy& user_policy,
+    base::OnceCallback<void(const user_data_auth::AuthenticateAuthFactorReply&)>
+        on_done,
+    const AuthSession::PostAuthAction& post_auth_action,
+    CryptohomeStatus status) {
+  user_data_auth::AuthenticateAuthFactorReply reply;
+  PopulateAuthSessionProperties(auth_session, reply.mutable_auth_properties());
+  // TODO(b/301078137): Remove the following after ash adopts new APIs.
+  *reply.mutable_authorized_for() = {
+      reply.auth_properties().authorized_for().begin(),
+      reply.auth_properties().authorized_for().end()};
+  // TODO(b/301078137): Remove the following after ash adopts new APIs.
+  if (reply.auth_properties().has_seconds_left()) {
+    reply.set_seconds_left(reply.auth_properties().seconds_left());
+  }
+  ReplyWithError(std::move(on_done), std::move(reply), std::move(status));
+
+  switch (post_auth_action.action_type) {
+    case AuthSession::PostAuthActionType::kNone:
+      return;
+    case AuthSession::PostAuthActionType::kRepeat: {
+      if (!post_auth_action.repeat_request.has_value()) {
+        LOG(DFATAL)
+            << "PostAuthActionType::kRepeat with null repeat_request field.";
+        return;
+      }
+      AuthSession* auth_session_ptr = auth_session.Get();
+      auth_session_ptr->AuthenticateAuthFactor(
+          post_auth_action.repeat_request.value(), user_policy,
+          // Currently there are no scenarios where a repeated auth will specify
+          // a non-null action. Keep the logic simple here instead of recursing.
+          base::BindOnce(
+              [](InUseAuthSession unused_auth_session,
+                 const AuthSession::PostAuthAction& unused_action,
+                 CryptohomeStatus status) {
+                if (!status.ok()) {
+                  LOG(ERROR) << "Repeated full auth failed while light auth "
+                                "succeeded: "
+                             << std::move(status);
+                  // TODO(b/287305183): Send UMA here.
+                }
+              },
+              std::move(auth_session)));
+      break;
+    }
+  }
+}
+
 }  // namespace
 
 UserDataAuth::UserDataAuth()
     : origin_thread_id_(base::PlatformThread::CurrentId()),
       mount_thread_(nullptr),
-      system_salt_(),
-      tpm_(nullptr),
+      hwsec_factory_(nullptr),
+      hwsec_(nullptr),
+      pinweaver_(nullptr),
+      hwsec_pw_manager_(nullptr),
+      recovery_crypto_(nullptr),
       default_cryptohome_keys_manager_(nullptr),
       cryptohome_keys_manager_(nullptr),
-      tpm_manager_util_(nullptr),
       default_platform_(new Platform()),
       platform_(default_platform_.get()),
-      default_crypto_(new Crypto(platform_)),
-      crypto_(default_crypto_.get()),
+      default_crypto_(nullptr),
+      crypto_(nullptr),
       default_chaps_client_(new chaps::TokenManagerClient()),
       chaps_client_(default_chaps_client_.get()),
       default_pkcs11_init_(new Pkcs11Init()),
       pkcs11_init_(default_pkcs11_init_.get()),
+      default_pkcs11_token_factory_(new RealPkcs11TokenFactory()),
+      pkcs11_token_factory_(default_pkcs11_token_factory_.get()),
       firmware_management_parameters_(nullptr),
-      default_fingerprint_manager_(),
       fingerprint_manager_(nullptr),
-      upload_alerts_period_ms_(kUploadAlertsPeriodMS),
-      ownership_callback_has_run_(false),
-      default_install_attrs_(new cryptohome::InstallAttributes(NULL)),
-      install_attrs_(default_install_attrs_.get()),
+      biometrics_service_(nullptr),
+      default_install_attrs_(nullptr),
+      install_attrs_(nullptr),
       enterprise_owned_(false),
-      reported_pkcs11_init_fail_(false),
-      user_timestamp_cache_(new UserOldestActivityTimestampCache()),
       default_homedirs_(nullptr),
       homedirs_(nullptr),
       default_keyset_management_(nullptr),
       keyset_management_(nullptr),
+      auth_block_utility_(nullptr),
+      default_auth_session_manager_(nullptr),
+      auth_session_manager_(nullptr),
       default_low_disk_space_handler_(nullptr),
       low_disk_space_handler_(nullptr),
       disk_cleanup_threshold_(kFreeSpaceThresholdToTriggerCleanup),
       disk_cleanup_aggressive_threshold_(
           kFreeSpaceThresholdToTriggerAggressiveCleanup),
+      disk_cleanup_critical_threshold_(
+          kFreeSpaceThresholdToTriggerCriticalCleanup),
       disk_cleanup_target_free_space_(kTargetFreeSpaceAfterCleanup),
-      default_mount_factory_(new cryptohome::MountFactory()),
-      mount_factory_(default_mount_factory_.get()),
-      public_mount_salt_(),
-      guest_user_(brillo::cryptohome::home::kGuestUserName),
+      default_user_session_factory_(nullptr),
+      user_session_factory_(nullptr),
+      guest_user_(brillo::cryptohome::home::GetGuestUsername()),
       force_ecryptfs_(true),
       fscrypt_v2_(false),
       legacy_mount_(true),
       bind_mount_downloads_(true),
-      default_arc_disk_quota_(nullptr),
-      arc_disk_quota_(nullptr) {}
+      default_features_(nullptr),
+      features_(nullptr),
+      async_init_features_(base::BindRepeating(&UserDataAuth::GetFeatures,
+                                               base::Unretained(this))) {}
 
 UserDataAuth::~UserDataAuth() {
   if (low_disk_space_handler_) {
@@ -201,64 +536,192 @@ UserDataAuth::~UserDataAuth() {
   }
 }
 
-bool UserDataAuth::Initialize() {
+bool UserDataAuth::Initialize(scoped_refptr<::dbus::Bus> mount_thread_bus) {
   AssertOnOriginThread();
+
+  // Save the bus object. Note that this doesn't mean that mount_thread_bus_ is
+  // not null because the passed in Bus can be (and usually is) null.
+  mount_thread_bus_ = std::move(mount_thread_bus);
 
   // Note that we check to see if |origin_task_runner_| and |mount_task_runner_|
   // are available here because they may have been set to an overridden value
   // during unit testing before Initialize() is called.
   if (!origin_task_runner_) {
-    origin_task_runner_ = base::ThreadTaskRunnerHandle::Get();
+    origin_task_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
   }
   if (!mount_task_runner_) {
     mount_thread_ = std::make_unique<MountThread>(kMountThreadName, this);
   }
 
-  // Note that we check to see if |tpm_| is available here because it may have
-  // been set to an overridden value during unit testing before Initialize() is
-  // called.
-  if (!tpm_) {
-    tpm_ = Tpm::GetSingleton();
+  if (!hwsec_factory_) {
+    default_hwsec_factory_ = std::make_unique<hwsec::FactoryImpl>();
+    hwsec_factory_ = default_hwsec_factory_.get();
+  }
+
+  if (!hwsec_) {
+    default_hwsec_ = hwsec_factory_->GetCryptohomeFrontend();
+    hwsec_ = default_hwsec_.get();
+  }
+
+  if (!pinweaver_) {
+    default_pinweaver_ = hwsec_factory_->GetPinWeaverFrontend();
+    pinweaver_ = default_pinweaver_.get();
+  }
+
+  if (!hwsec_pw_manager_) {
+    default_hwsec_pw_manager_ = hwsec_factory_->GetPinWeaverManagerFrontend();
+    hwsec_pw_manager_ = default_hwsec_pw_manager_.get();
+  }
+
+  if (!recovery_crypto_) {
+    default_recovery_crypto_ = hwsec_factory_->GetRecoveryCryptoFrontend();
+    recovery_crypto_ = default_recovery_crypto_.get();
   }
 
   // Note that we check to see if |cryptohome_keys_manager_| is available here
   // because it may have been set to an overridden value during unit testing
   // before Initialize() is called.
   if (!cryptohome_keys_manager_) {
-    default_cryptohome_keys_manager_.reset(
-        new CryptohomeKeysManager(tpm_, platform_));
+    default_cryptohome_keys_manager_ =
+        std::make_unique<CryptohomeKeysManager>(hwsec_, platform_);
     cryptohome_keys_manager_ = default_cryptohome_keys_manager_.get();
   }
 
   // Initialize Firmware Management Parameters
   if (!firmware_management_parameters_) {
     default_firmware_management_params_ =
-        FirmwareManagementParameters::CreateInstance(tpm_);
+        std::make_unique<FirmwareManagementParametersProxy>();
     firmware_management_parameters_ = default_firmware_management_params_.get();
   }
 
-  if (!crypto_->Init(tpm_, cryptohome_keys_manager_)) {
-    return false;
+  if (!install_attrs_) {
+    default_install_attrs_ = std::make_unique<InstallAttributesProxy>();
+    install_attrs_ = default_install_attrs_.get();
   }
 
-  if (!InitializeFilesystemLayout(platform_, crypto_, &system_salt_)) {
+  if (!user_activity_timestamp_manager_) {
+    default_user_activity_timestamp_manager_ =
+        std::make_unique<UserOldestActivityTimestampManager>(platform_);
+    user_activity_timestamp_manager_ =
+        default_user_activity_timestamp_manager_.get();
+  }
+
+  if (!crypto_) {
+    default_crypto_ =
+        std::make_unique<Crypto>(hwsec_, pinweaver_, hwsec_pw_manager_,
+                                 cryptohome_keys_manager_, recovery_crypto_);
+    crypto_ = default_crypto_.get();
+  }
+  crypto_->Init();
+
+  if (!InitializeFilesystemLayout(platform_, &system_salt_)) {
     LOG(ERROR) << "Failed to initialize filesystem layout.";
     return false;
   }
 
   if (!keyset_management_) {
     default_keyset_management_ = std::make_unique<KeysetManagement>(
-        platform_, crypto_, system_salt_, user_timestamp_cache_.get(),
-        std::make_unique<VaultKeysetFactory>());
+        platform_, crypto_, std::make_unique<VaultKeysetFactory>());
     keyset_management_ = default_keyset_management_.get();
   }
 
-  if (!homedirs_) {
+  fingerprint_service_ = std::make_unique<FingerprintAuthBlockService>(
+      AsyncInitPtr<FingerprintManager>(base::BindRepeating(
+          [](UserDataAuth* uda) {
+            uda->AssertOnMountThread();
+            return uda->fingerprint_manager_;
+          },
+          base::Unretained(this))),
+      base::BindRepeating(&UserDataAuth::OnFingerprintScanResult,
+                          base::Unretained(this)));
+
+  AsyncInitPtr<ChallengeCredentialsHelper> async_cc_helper(base::BindRepeating(
+      [](UserDataAuth* uda) -> ChallengeCredentialsHelper* {
+        uda->AssertOnMountThread();
+        if (uda->challenge_credentials_helper_initialized_) {
+          return uda->challenge_credentials_helper_;
+        }
+        return nullptr;
+      },
+      base::Unretained(this)));
+  AsyncInitPtr<BiometricsAuthBlockService> async_biometrics_service(
+      base::BindRepeating(
+          [](UserDataAuth* uda) {
+            uda->AssertOnMountThread();
+            return uda->biometrics_service_;
+          },
+          base::Unretained(this)));
+  if (!auth_block_utility_) {
+    default_auth_block_utility_ = std::make_unique<AuthBlockUtilityImpl>(
+        keyset_management_, crypto_, platform_, &async_init_features_,
+        async_cc_helper, key_challenge_service_factory_,
+        async_biometrics_service);
+    auth_block_utility_ = default_auth_block_utility_.get();
+  }
+
+  if (!auth_factor_manager_) {
+    default_auth_factor_manager_ =
+        std::make_unique<AuthFactorManager>(platform_);
+    auth_factor_manager_ = default_auth_factor_manager_.get();
+  }
+
+  if (!uss_storage_) {
+    default_uss_storage_ = std::make_unique<UssStorage>(platform_);
+    uss_storage_ = default_uss_storage_.get();
+  }
+
+  if (!auth_factor_driver_manager_) {
+    default_auth_factor_driver_manager_ =
+        std::make_unique<AuthFactorDriverManager>(
+            platform_, crypto_, uss_storage_, async_cc_helper,
+            key_challenge_service_factory_, fingerprint_service_.get(),
+            async_biometrics_service);
+    auth_factor_driver_manager_ = default_auth_factor_driver_manager_.get();
+  }
+
+  if (!auth_session_manager_) {
+    default_auth_session_manager_ =
+        std::make_unique<AuthSessionManager>(AuthSession::BackingApis{
+            crypto_, platform_, sessions_, keyset_management_,
+            auth_block_utility_, auth_factor_driver_manager_,
+            auth_factor_manager_, uss_storage_, &async_init_features_});
+    auth_session_manager_ = default_auth_session_manager_.get();
+  }
+
+  create_vault_keyset_impl_ = std::make_unique<CreateVaultKeysetRpcImpl>(
+      keyset_management_, auth_block_utility_, auth_factor_driver_manager_);
+
+  if (!vault_factory_) {
     auto container_factory =
         std::make_unique<EncryptedContainerFactory>(platform_);
     container_factory->set_allow_fscrypt_v2(fscrypt_v2_);
-    auto vault_factory = std::make_unique<CryptohomeVaultFactory>(
+    default_vault_factory_ = std::make_unique<CryptohomeVaultFactory>(
         platform_, std::move(container_factory));
+    default_vault_factory_->set_enable_application_containers(
+        enable_application_containers_);
+    vault_factory_ = default_vault_factory_.get();
+
+    if (platform_->IsStatefulLogicalVolumeSupported()) {
+      base::FilePath stateful_device = platform_->GetStatefulDevice();
+      brillo::LogicalVolumeManager* lvm = platform_->GetLogicalVolumeManager();
+      brillo::PhysicalVolume pv(stateful_device,
+                                std::make_shared<brillo::LvmCommandRunner>());
+
+      std::optional<brillo::VolumeGroup> vg;
+      std::optional<brillo::Thinpool> thinpool;
+
+      vg = lvm->GetVolumeGroup(pv);
+      if (vg && vg->IsValid()) {
+        thinpool = lvm->GetThinpool(*vg, "thinpool");
+      }
+
+      if (thinpool && vg) {
+        default_vault_factory_->CacheLogicalVolumeObjects(vg, thinpool);
+      }
+    }
+  }
+
+  if (!homedirs_) {
     // This callback runs in HomeDirs::Remove on |this.homedirs_|. Since
     // |this.keyset_management_| won't be destroyed upon call of Remove(),
     // base::Unretained(keyset_management_) will be valid when the callback
@@ -267,35 +730,52 @@ bool UserDataAuth::Initialize() {
         base::BindRepeating(&KeysetManagement::RemoveLECredentials,
                             base::Unretained(keyset_management_));
     default_homedirs_ = std::make_unique<HomeDirs>(
-        platform_, system_salt_, std::make_unique<policy::PolicyProvider>(),
-        remove_callback, std::move(vault_factory));
+        platform_, std::make_unique<policy::PolicyProvider>(), remove_callback,
+        vault_factory_);
     homedirs_ = default_homedirs_.get();
+  }
+
+  auto homedirs = homedirs_->GetHomeDirs();
+  for (const auto& dir : homedirs) {
+    // TODO(b/205759690, dlunev): can be changed after a stepping stone release
+    //  to `user_activity_timestamp_manager_->LoadTimestamp(dir.obfuscated);`
+    base::Time legacy_timestamp =
+        keyset_management_->GetKeysetBoundTimestamp(dir.obfuscated);
+    user_activity_timestamp_manager_->LoadTimestampWithLegacy(dir.obfuscated,
+                                                              legacy_timestamp);
+    keyset_management_->CleanupPerIndexTimestampFiles(dir.obfuscated);
+  }
+
+  if (!mount_factory_) {
+    default_mount_factory_ = std::make_unique<MountFactory>();
+    mount_factory_ = default_mount_factory_.get();
+  }
+
+  if (!user_session_factory_) {
+    default_user_session_factory_ = std::make_unique<RealUserSessionFactory>(
+        mount_factory_, platform_, homedirs_, keyset_management_,
+        user_activity_timestamp_manager_, pkcs11_token_factory_);
+    user_session_factory_ = default_user_session_factory_.get();
   }
 
   if (!low_disk_space_handler_) {
     default_low_disk_space_handler_ = std::make_unique<LowDiskSpaceHandler>(
-        homedirs_, keyset_management_, platform_, user_timestamp_cache_.get());
+        homedirs_, platform_, user_activity_timestamp_manager_);
     low_disk_space_handler_ = default_low_disk_space_handler_.get();
   }
   low_disk_space_handler_->disk_cleanup()->set_cleanup_threshold(
       disk_cleanup_threshold_);
   low_disk_space_handler_->disk_cleanup()->set_aggressive_cleanup_threshold(
       disk_cleanup_aggressive_threshold_);
+  low_disk_space_handler_->disk_cleanup()->set_critical_cleanup_threshold(
+      disk_cleanup_critical_threshold_);
   low_disk_space_handler_->disk_cleanup()->set_target_free_space(
       disk_cleanup_target_free_space_);
-
-  if (!arc_disk_quota_) {
-    default_arc_disk_quota_ = std::make_unique<ArcDiskQuota>(
-        homedirs_, platform_, base::FilePath(kArcDiskHome));
-    arc_disk_quota_ = default_arc_disk_quota_.get();
-  }
-  // Initialize ARC Disk Quota Service.
-  arc_disk_quota_->Initialize();
 
   if (!mount_task_runner_) {
     base::Thread::Options options;
     options.message_pump_type = base::MessagePumpType::IO;
-    mount_thread_->StartWithOptions(options);
+    mount_thread_->StartWithOptions(std::move(options));
     mount_task_runner_ = mount_thread_->task_runner();
   }
 
@@ -311,13 +791,6 @@ bool UserDataAuth::Initialize() {
     platform_->TouchFileDurable(base::FilePath(kNotFirstBootFilePath));
   }
 
-  // We expect |tpm_| and |cryptohome_keys_manager_| to be available by this
-  // point.
-  DCHECK(tpm_ && cryptohome_keys_manager_);
-
-  // Seed /dev/urandom
-  SeedUrandom();
-
   low_disk_space_handler_->SetUpdateUserActivityTimestampCallback(
       base::BindRepeating(
           base::IgnoreResult(&UserDataAuth::UpdateCurrentUserActivityTimestamp),
@@ -326,125 +799,50 @@ bool UserDataAuth::Initialize() {
   low_disk_space_handler_->SetLowDiskSpaceCallback(
       base::BindRepeating([](uint64_t) {}));
 
+  hwsec_->RegisterOnReadyCallback(base::BindOnce(
+      &UserDataAuth::HwsecReadyCallback, base::Unretained(this)));
+
+  // Create a dbus connection on mount thread.
+  PostTaskToMountThread(FROM_HERE,
+                        base::BindOnce(&UserDataAuth::CreateMountThreadDBus,
+                                       base::Unretained(this)));
+
+  PostTaskToMountThread(FROM_HERE,
+                        base::BindOnce(&UserDataAuth::SetDeviceManagementProxy,
+                                       base::Unretained(this)));
+
+  // SetDeviceManagementProxy() should be invoked before the following
+  // initialization, as low_disk_space_handler_ uses homedirs to check the
+  // enterprise_owned status.
   if (!low_disk_space_handler_->Init(base::BindRepeating(
           &UserDataAuth::PostTaskToMountThread, base::Unretained(this))))
     return false;
 
-  // Start scheduling periodic TPM alerts upload to UMA. Subsequent events are
-  // scheduled by the callback itself.
+  // If the TPM is unowned or doesn't exist, it's safe for
+  // this function to be called again. However, it shouldn't
+  // be called across multiple threads in parallel.
+
+  PostTaskToMountThread(
+      FROM_HERE, base::BindOnce(&UserDataAuth::InitializeInstallAttributes,
+                                base::Unretained(this)));
+
   PostTaskToMountThread(FROM_HERE,
-                        base::BindOnce(&UserDataAuth::UploadAlertsDataCallback,
+                        base::BindOnce(&UserDataAuth::CreateFingerprintManager,
                                        base::Unretained(this)));
 
-  // Do Stateful Recovery if requested.
-  auto mountfn =
-      base::Bind(&UserDataAuth::StatefulRecoveryMount, base::Unretained(this));
-  auto unmountfn = base::Bind(&UserDataAuth::StatefulRecoveryUnmount,
-                              base::Unretained(this));
-  auto isownerfn = base::Bind(&UserDataAuth::StatefulRecoveryIsOwner,
-                              base::Unretained(this));
-  StatefulRecovery recovery(platform_, mountfn, unmountfn, isownerfn);
-  if (recovery.Requested()) {
-    if (recovery.Recover()) {
-      LOG(INFO) << "Stateful recovery was performed successfully.";
-    } else {
-      LOG(ERROR) << "Stateful recovery failed.";
-    }
-    recovery.PerformReboot();
-  }
-  return true;
-}
-
-bool UserDataAuth::StatefulRecoveryMount(const std::string& username,
-                                         const std::string& passkey,
-                                         FilePath* out_home_path) {
-  AssertOnOriginThread();
-
-  user_data_auth::MountRequest mount_req;
-  mount_req.mutable_account()->set_account_id(username);
-  mount_req.mutable_authorization()->mutable_key()->set_secret(passkey);
-
-  bool mount_path_retrieved = false;
-  // This will store the mount_reply when it finished.
-  user_data_auth::MountReply mount_reply;
-  // This will be used to let code outside of the callback know that we're
-  // done.
-  base::WaitableEvent done_event(
-      base::WaitableEvent::ResetPolicy::MANUAL,
-      base::WaitableEvent::InitialState::NOT_SIGNALED);
-  auto on_done = base::BindOnce(
-      [](UserDataAuth* uda, std::string username, FilePath* out_home_path,
-         bool* mount_path_retrieved,
-         user_data_auth::MountReply* mount_reply_ptr,
-         base::WaitableEvent* done_event_ptr,
-         const user_data_auth::MountReply& reply) {
-        *mount_reply_ptr = reply;
-        // After the mount is successful, we need to obtain the user
-        // mount.
-        scoped_refptr<UserSession> user_session = uda->GetUserSession(username);
-        if (!user_session || !user_session->GetMount()->IsMounted()) {
-          LOG(ERROR) << "Failed to get mount in stateful recovery.";
-          *mount_path_retrieved = false;
-          return;
-        }
-        *out_home_path = user_session->GetMount()->mount_point();
-        *mount_path_retrieved = true;
-        done_event_ptr->Signal();
-      },
-      base::Unretained(this), username, base::Unretained(out_home_path),
-      base::Unretained(&mount_path_retrieved), base::Unretained(&mount_reply),
-      base::Unretained(&done_event));
+  PostTaskToMountThread(FROM_HERE,
+                        base::BindOnce(&UserDataAuth::CreateBiometricsService,
+                                       base::Unretained(this)));
 
   PostTaskToMountThread(
-      FROM_HERE, base::BindOnce(&UserDataAuth::DoMount, base::Unretained(this),
-                                mount_req, std::move(on_done)));
+      FROM_HERE, base::BindOnce(&UserDataAuth::InitForChallengeResponseAuth,
+                                base::Unretained(this)));
 
-  done_event.Wait();
+  PostTaskToMountThread(FROM_HERE,
+                        base::BindOnce(&UserDataAuth::InitializeFeatureLibrary,
+                                       base::Unretained(this)));
 
-  if (mount_reply.error()) {
-    LOG(ERROR) << "Mount during stateful recovery failed: "
-               << mount_reply.error();
-    return false;
-  }
-  if (!mount_path_retrieved) {
-    LOG(ERROR) << "Failed to get user home path in stateful recovery.";
-    return false;
-  }
-  LOG(INFO) << "Mount succeeded during stateful recovery.";
   return true;
-}
-
-bool UserDataAuth::StatefulRecoveryUnmount() {
-  AssertOnOriginThread();
-
-  bool result;
-  base::WaitableEvent done_event(
-      base::WaitableEvent::ResetPolicy::MANUAL,
-      base::WaitableEvent::InitialState::NOT_SIGNALED);
-
-  PostTaskToMountThread(
-      FROM_HERE, base::BindOnce(
-                     [](UserDataAuth* uda, base::WaitableEvent* done_event_ptr,
-                        bool* result_ptr) {
-                       *result_ptr = uda->Unmount();
-                       done_event_ptr->Signal();
-                     },
-                     base::Unretained(this), base::Unretained(&done_event),
-                     base::Unretained(&result)));
-
-  done_event.Wait();
-  return result;
-}
-
-bool UserDataAuth::StatefulRecoveryIsOwner(const std::string& username) {
-  AssertOnOriginThread();
-
-  std::string owner;
-  if (homedirs_->GetPlainOwner(&owner) && username.length() &&
-      username == owner) {
-    return true;
-  }
-  return false;
 }
 
 void UserDataAuth::CreateMountThreadDBus() {
@@ -459,46 +857,63 @@ void UserDataAuth::CreateMountThreadDBus() {
   }
 }
 
+CryptohomeStatusOr<UserPolicyFile*> UserDataAuth::LoadUserPolicyFile(
+    const ObfuscatedUsername& obfuscated_username) {
+  auto [iter, is_new] = user_policy_files_.try_emplace(
+      obfuscated_username, platform_, GetUserPolicyPath(obfuscated_username));
+  if (is_new && !iter->second.LoadFromFile().ok()) {
+    // The file could not be found, so either the policy file doesn't exist, or
+    // the file is corrupted and thus could not be read. Regardless, we need to
+    // revert to the default settings (which is an empty file).
+    iter->second.UpdateUserPolicy(
+        SerializedUserPolicy({.auth_factor_type_policy = {}}));
+  }
+  return &iter->second;
+}
+
 void UserDataAuth::ShutdownTask() {
+  default_auth_session_manager_.reset();
+  default_fingerprint_manager_.reset();
+  default_challenge_credentials_helper_.reset();
   if (mount_thread_bus_) {
     mount_thread_bus_->ShutdownAndBlock();
     mount_thread_bus_.reset();
   }
 }
 
-bool UserDataAuth::PostDBusInitialize() {
-  AssertOnOriginThread();
-  CHECK(bus_);
-
-  if (!tpm_manager_util_) {
-    tpm_manager_util_ = tpm_manager::TpmManagerUtility::GetSingleton();
+void UserDataAuth::InitializeFeatureLibrary() {
+  AssertOnMountThread();
+  if (!features_) {
+    CHECK(feature::PlatformFeatures::Initialize(mount_thread_bus_));
+    default_features_ = std::make_unique<Features>(
+        mount_thread_bus_, feature::PlatformFeatures::Get());
+    features_ = default_features_.get();
+    if (!features_) {
+      LOG(WARNING) << "Failed to determine USS migration experiment flag";
+      return;
+    }
   }
+}
 
-  if (tpm_manager_util_) {
-    tpm_manager_util_->AddOwnershipCallback(base::BindRepeating(
-        &UserDataAuth::OnOwnershipTakenSignal, base::Unretained(this)));
-  } else {
-    LOG(ERROR) << __func__ << ": Failed to get TpmManagerUtility singleton!";
+void UserDataAuth::SetDeviceManagementProxy() {
+  AssertOnMountThread();
+  if (firmware_management_parameters_) {
+    firmware_management_parameters_->SetDeviceManagementProxy(
+        std::make_unique<org::chromium::DeviceManagementProxy>(
+            mount_thread_bus_));
   }
+  if (install_attrs_) {
+    install_attrs_->SetDeviceManagementProxy(
+        std::make_unique<org::chromium::DeviceManagementProxy>(
+            mount_thread_bus_));
+  }
+  if (homedirs_) {
+    homedirs_->CreateAndSetDeviceManagementClientProxy(mount_thread_bus_);
+  }
+}
 
-  // Create a dbus connection on mount thread.
-  PostTaskToMountThread(FROM_HERE,
-                        base::BindOnce(&UserDataAuth::CreateMountThreadDBus,
-                                       base::Unretained(this)));
-
-  // If the TPM is unowned or doesn't exist, it's safe for
-  // this function to be called again. However, it shouldn't
-  // be called across multiple threads in parallel.
-
-  PostTaskToMountThread(
-      FROM_HERE, base::BindOnce(&UserDataAuth::InitializeInstallAttributes,
-                                base::Unretained(this)));
-
-  PostTaskToMountThread(FROM_HERE,
-                        base::BindOnce(&UserDataAuth::CreateFingerprintManager,
-                                       base::Unretained(this)));
-
-  return true;
+Features* UserDataAuth::GetFeatures() {
+  return features_;
 }
 
 void UserDataAuth::CreateFingerprintManager() {
@@ -514,10 +929,71 @@ void UserDataAuth::CreateFingerprintManager() {
   }
 }
 
-void UserDataAuth::OnOwnershipTakenSignal() {
-  PostTaskToMountThread(FROM_HERE,
-                        base::BindOnce(&UserDataAuth::OwnershipCallback,
-                                       base::Unretained(this), true, true));
+void UserDataAuth::OnFingerprintScanResult(
+    user_data_auth::FingerprintScanResult result) {
+  AssertOnMountThread();
+  if (fingerprint_scan_result_callback_) {
+    fingerprint_scan_result_callback_.Run(result);
+  }
+}
+
+void UserDataAuth::CreateBiometricsService() {
+  AssertOnMountThread();
+  if (!biometrics_service_) {
+    if (!default_biometrics_service_) {
+      // This will return nullptr if connection to the biod service failed.
+      auto bio_proxy = biod::AuthStackManagerProxyBase::Create(
+          mount_thread_bus_,
+          dbus::ObjectPath(std::string(biod::kBiodServicePath)
+                               .append(CrosFpAuthStackManagerRelativePath)));
+      if (bio_proxy) {
+        auto bio_processor = std::make_unique<BiometricsCommandProcessorImpl>(
+            std::move(bio_proxy));
+        default_biometrics_service_ =
+            std::make_unique<BiometricsAuthBlockService>(
+                std::move(bio_processor),
+                base::BindRepeating(&UserDataAuth::OnFingerprintEnrollProgress,
+                                    base::Unretained(this)),
+                base::BindRepeating(&UserDataAuth::OnFingerprintAuthProgress,
+                                    base::Unretained(this)));
+      }
+    }
+    biometrics_service_ = default_biometrics_service_.get();
+  }
+}
+
+void UserDataAuth::OnFingerprintEnrollProgress(
+    user_data_auth::AuthEnrollmentProgress result) {
+  AssertOnMountThread();
+  if (!prepare_auth_factor_progress_callback_) {
+    return;
+  }
+  ReportFingerprintEnrollSignal(result.scan_result().fingerprint_result());
+  user_data_auth::PrepareAuthFactorProgress progress;
+  user_data_auth::PrepareAuthFactorForAddProgress add_progress;
+  add_progress.set_auth_factor_type(
+      user_data_auth::AUTH_FACTOR_TYPE_FINGERPRINT);
+  *add_progress.mutable_biometrics_progress() = result;
+  progress.set_purpose(user_data_auth::PURPOSE_ADD_AUTH_FACTOR);
+  *progress.mutable_add_progress() = add_progress;
+  prepare_auth_factor_progress_callback_.Run(progress);
+}
+
+void UserDataAuth::OnFingerprintAuthProgress(
+    user_data_auth::AuthScanDone result) {
+  AssertOnMountThread();
+  if (!prepare_auth_factor_progress_callback_) {
+    return;
+  }
+  ReportFingerprintAuthSignal(result.scan_result().fingerprint_result());
+  user_data_auth::PrepareAuthFactorProgress progress;
+  user_data_auth::PrepareAuthFactorForAuthProgress auth_progress;
+  auth_progress.set_auth_factor_type(
+      user_data_auth::AUTH_FACTOR_TYPE_FINGERPRINT);
+  *auth_progress.mutable_biometrics_progress() = result;
+  progress.set_purpose(user_data_auth::PURPOSE_AUTHENTICATE_AUTH_FACTOR);
+  *progress.mutable_auth_progress() = auth_progress;
+  prepare_auth_factor_progress_callback_.Run(progress);
 }
 
 bool UserDataAuth::PostTaskToOriginThread(const base::Location& from_here,
@@ -537,9 +1013,6 @@ bool UserDataAuth::PostTaskToMountThread(const base::Location& from_here,
   if (delay.is_zero()) {
     // Increase and report the parallel task count.
     parallel_task_count_ += 1;
-    if (parallel_task_count_ > 1) {
-      ReportParallelTasks(parallel_task_count_);
-    }
 
     // Reduce the parallel task count after finished the task.
     auto full_task = base::BindOnce(
@@ -554,31 +1027,28 @@ bool UserDataAuth::PostTaskToMountThread(const base::Location& from_here,
   return mount_task_runner_->PostDelayedTask(from_here, std::move(task), delay);
 }
 
-bool UserDataAuth::IsMounted(const std::string& username,
-                             bool* is_ephemeral_out) {
+bool UserDataAuth::IsMounted(const Username& username, bool* is_ephemeral_out) {
   // Note: This can only run in mount_thread_
   AssertOnMountThread();
 
   bool is_mounted = false;
   bool is_ephemeral = false;
-  if (username.empty()) {
+  if (username->empty()) {
     // No username is specified, so we consider "the cryptohome" to be mounted
     // if any existing cryptohome is mounted.
-    for (const auto& session_pair : sessions_) {
-      if (session_pair.second->GetMount()->IsMounted()) {
+    for (const auto& [unused, session] : *sessions_) {
+      if (session.IsActive()) {
         is_mounted = true;
-        is_ephemeral |=
-            !session_pair.second->GetMount()->IsNonEphemeralMounted();
+        is_ephemeral |= session.IsEphemeral();
       }
     }
   } else {
     // A username is specified, check the associated mount object.
-    scoped_refptr<UserSession> session = GetUserSession(username);
+    const UserSession* session = sessions_->Find(username);
 
-    if (session.get()) {
-      is_mounted = session->GetMount()->IsMounted();
-      is_ephemeral =
-          is_mounted && !session->GetMount()->IsNonEphemeralMounted();
+    if (session) {
+      is_mounted = session->IsActive();
+      is_ephemeral = is_mounted && session->IsEphemeral();
     }
   }
 
@@ -589,36 +1059,18 @@ bool UserDataAuth::IsMounted(const std::string& username,
   return is_mounted;
 }
 
-scoped_refptr<UserSession> UserDataAuth::GetUserSession(
-    const std::string& username) {
-  // Note: This can only run in mount_thread_
-  AssertOnMountThread();
-
-  scoped_refptr<UserSession> session = nullptr;
-  if (sessions_.count(username) == 1) {
-    session = sessions_[username];
-  }
-  return session;
-}
-
-bool UserDataAuth::RemoveAllMounts(bool unmount) {
+bool UserDataAuth::RemoveAllMounts() {
   AssertOnMountThread();
 
   bool success = true;
-  for (auto it = sessions_.begin(); it != sessions_.end();) {
-    scoped_refptr<UserSession> session = it->second;
-    if (unmount && session->GetMount()->IsMounted()) {
-      if (session->GetMount()->pkcs11_state() ==
-          cryptohome::Mount::kIsBeingInitialized) {
-        // Reset the state.
-        session->GetMount()->set_pkcs11_state(
-            cryptohome::Mount::kUninitialized);
-        // And also reset the global failure reported state.
-        reported_pkcs11_init_fail_ = false;
-      }
-      success = success && session->Unmount();
+  while (!sessions_->empty()) {
+    const auto& [username, session] = *sessions_->begin();
+    if (session.IsActive() && !session.Unmount()) {
+      success = false;
     }
-    sessions_.erase(it++);
+    if (!sessions_->Remove(username)) {
+      NOTREACHED() << "Failed to remove user session on unmount";
+    }
   }
   return success;
 }
@@ -653,8 +1105,8 @@ bool UserDataAuth::FilterActiveMounts(
     // Walk each set of sources as one group since multimaps are key ordered.
     for (; match != mounts->end() && match->first == curr->first; ++match) {
       // Ignore known mounts.
-      for (const auto& session_pair : sessions_) {
-        if (session_pair.second->GetMount()->OwnsMountPoint(match->second)) {
+      for (const auto& [unused, session] : *sessions_) {
+        if (session.OwnsMountPoint(match->second)) {
           keep = true;
           // If !include_busy_mount, other mount points not owned scanned after
           // should be preserved as well.
@@ -770,9 +1222,14 @@ bool UserDataAuth::CleanUpStaleMounts(bool force) {
   //
   // (*) Relies on the expectation that all processes have been killed off.
 
+  // TODO(b:225769250, dlunev): figure out cleanup for non-mounted application
+  // containers.
+
   // Stale shadow and ephemeral mounts.
   std::multimap<const FilePath, const FilePath> shadow_mounts;
   std::multimap<const FilePath, const FilePath> ephemeral_mounts;
+  std::multimap<const FilePath, const FilePath> dmcrypt_mounts,
+      grouped_dmcrypt_mounts;
 
   // Active mounts that we don't intend to unmount.
   std::multimap<const FilePath, const FilePath> active_mounts;
@@ -780,11 +1237,16 @@ bool UserDataAuth::CleanUpStaleMounts(bool force) {
   // Retrieve all the mounts that's currently mounted by the kernel and concerns
   // us
   platform_->GetMountsBySourcePrefix(ShadowRoot(), &shadow_mounts);
+  platform_->GetMountsByDevicePrefix(kDeviceMapperDevicePrefix,
+                                     &dmcrypt_mounts);
+  GroupDmcryptDeviceMounts(&dmcrypt_mounts, &grouped_dmcrypt_mounts);
   GetEphemeralLoopDevicesMounts(&ephemeral_mounts);
 
   // Remove mounts that we've a record of or have open files on them
-  bool skipped = FilterActiveMounts(&shadow_mounts, &active_mounts, force) ||
-                 FilterActiveMounts(&ephemeral_mounts, &active_mounts, force);
+  bool skipped =
+      FilterActiveMounts(&shadow_mounts, &active_mounts, force) ||
+      FilterActiveMounts(&ephemeral_mounts, &active_mounts, force) ||
+      FilterActiveMounts(&grouped_dmcrypt_mounts, &active_mounts, force);
 
   // Unload PKCS#11 tokens on any mount that we're going to unmount.
   std::vector<FilePath> excluded_mount_points;
@@ -794,6 +1256,14 @@ bool UserDataAuth::CleanUpStaleMounts(bool force) {
   UnloadPkcs11Tokens(excluded_mount_points);
 
   // Unmount anything left.
+  for (const auto& match : grouped_dmcrypt_mounts) {
+    LOG(WARNING) << "Lazily unmounting stale dmcrypt mount: "
+                 << match.second.value() << " for " << match.first.value();
+    // true for lazy unmount, nullptr for us not needing to know if it's really
+    // unmounted.
+    platform_->Unmount(match.second, true, nullptr);
+  }
+
   for (const auto& match : shadow_mounts) {
     LOG(WARNING) << "Lazily unmounting stale shadow mount: "
                  << match.second.value() << " from " << match.first.value();
@@ -890,18 +1360,13 @@ bool UserDataAuth::CleanUpStaleMounts(bool force) {
     }
   }
 
-  // |force| and |skipped| cannot be true at the same time. If |force| is true,
-  // then we'll not skip over any stale mount because there are open files, so
-  // |skipped| must be false.
-  DCHECK(!(force && skipped));
-
   return skipped;
 }
 
-bool UserDataAuth::Unmount() {
+user_data_auth::UnmountReply UserDataAuth::Unmount() {
   AssertOnMountThread();
 
-  bool unmount_ok = RemoveAllMounts(true);
+  bool unmount_ok = RemoveAllMounts();
 
   // If there are any unexpected mounts lingering from a crash/restart,
   // clean them up now.
@@ -911,32 +1376,30 @@ bool UserDataAuth::Unmount() {
   // with open files.
   CleanUpStaleMounts(true);
 
-  return unmount_ok;
+  // Removes all ephemeral cryptohomes owned by anyone other than the owner
+  // user (if set) and non ephemeral users, regardless of free disk space.
+  homedirs_->RemoveCryptohomesBasedOnPolicy();
+
+  // Since all the user mounts are now gone, there should not be any active
+  // authsessions left.
+  auth_session_manager_->RemoveAllAuthSessions();
+  CryptohomeStatus result;
+  if (!unmount_ok) {
+    result = MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocUserDataAuthRemoveAllMountsFailedInUnmount),
+        ErrorActionSet({PossibleAction::kReboot}),
+        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL);
+  }
+  user_data_auth::UnmountReply reply;
+  PopulateReplyWithError(result, &reply);
+  return reply;
 }
 
 void UserDataAuth::InitializePkcs11(UserSession* session) {
-  // We should not pass nullptr to this method.
-  DCHECK(session);
-
-  if (!IsOnMountThread()) {
-    // We are not on mount thread, but to be safe, we'll only access Mount
-    // objects on mount thread, so let's post ourself there.
-    PostTaskToMountThread(
-        FROM_HERE,
-        base::BindOnce(&UserDataAuth::InitializePkcs11, base::Unretained(this),
-                       base::Unretained(session)));
-    return;
-  }
-
   AssertOnMountThread();
 
-  // Wait for ownership if there is a working TPM.
-  if (tpm_ && tpm_->IsEnabled() && !tpm_->IsOwned()) {
-    LOG(WARNING) << "TPM was not owned. TPM initialization call back will"
-                 << " handle PKCS#11 initialization.";
-    session->GetMount()->set_pkcs11_state(cryptohome::Mount::kIsWaitingOnTPM);
-    return;
-  }
+  // We should not pass nullptr to this method.
+  CHECK(session);
 
   bool still_mounted = false;
 
@@ -944,9 +1407,8 @@ void UserDataAuth::InitializePkcs11(UserSession* session) {
   // Otherwise there's no point in initializing PKCS#11 for it. The reason for
   // this check is because it might be possible for Unmount() to be called after
   // mounting and before getting here.
-  for (const auto& session_pair : sessions_) {
-    if (session_pair.second.get() == session &&
-        session->GetMount()->IsMounted()) {
+  for (const auto& [unused, user_session] : *sessions_) {
+    if (&user_session == session && session->IsActive()) {
       still_mounted = true;
       break;
     }
@@ -958,76 +1420,43 @@ void UserDataAuth::InitializePkcs11(UserSession* session) {
     return;
   }
 
-  session->GetMount()->set_pkcs11_state(cryptohome::Mount::kIsBeingInitialized);
-
   // Note that the timer stops in the Mount class' method.
   ReportTimerStart(kPkcs11InitTimer);
 
-  session->GetMount()->InsertPkcs11Token();
+  if (session->GetPkcs11Token()) {
+    session->GetPkcs11Token()->Insert();
+  }
+
+  ReportTimerStop(kPkcs11InitTimer);
 
   LOG(INFO) << "PKCS#11 initialization succeeded.";
-
-  session->GetMount()->set_pkcs11_state(cryptohome::Mount::kIsInitialized);
-}
-
-void UserDataAuth::ResumeAllPkcs11Initialization() {
-  if (!IsOnMountThread()) {
-    // We are not on mount thread, but to be safe, we'll only access Mount
-    // objects on mount thread, so let's post ourself there.
-    PostTaskToMountThread(
-        FROM_HERE, base::BindOnce(&UserDataAuth::ResumeAllPkcs11Initialization,
-                                  base::Unretained(this)));
-    return;
-  }
-
-  AssertOnMountThread();
-
-  for (auto& session_pair : sessions_) {
-    scoped_refptr<UserSession> session = session_pair.second;
-    if (session->GetMount()->pkcs11_state() == Mount::kIsWaitingOnTPM) {
-      InitializePkcs11(session.get());
-    }
-  }
 }
 
 void UserDataAuth::Pkcs11RestoreTpmTokens() {
   AssertOnMountThread();
 
-  // There is no token needs to resume if TPM isn't ready.
-  if (tpm_ && tpm_->IsEnabled() && !tpm_->IsOwned()) {
-    return;
-  }
-
-  for (auto& session_pair : sessions_) {
-    scoped_refptr<UserSession> session = session_pair.second;
-    switch (session->GetMount()->pkcs11_state()) {
-      case Mount::kIsWaitingOnTPM:
-        InitializePkcs11(session.get());
-        break;
-      case Mount::kIsInitialized:
-        // Chaps would ignore this token if it's already managing this token.
-        session->GetMount()->InsertPkcs11Token();
-        break;
-      default:
-        // Do nothing.
-        break;
+  for (const auto& [unused, session] : *sessions_) {
+    if (session.IsActive()) {
+      session.GetPkcs11Token()->TryRestoring();
     }
   }
 }
 
-void UserDataAuth::ResetAllTPMContext() {
+void UserDataAuth::EnsureCryptohomeKeys() {
   if (!IsOnMountThread()) {
     // We are not on mount thread, but to be safe, we'll only access Mount
     // objects on mount thread, so let's post ourself there.
     PostTaskToMountThread(FROM_HERE,
-                          base::BindOnce(&UserDataAuth::ResetAllTPMContext,
+                          base::BindOnce(&UserDataAuth::EnsureCryptohomeKeys,
                                          base::Unretained(this)));
     return;
   }
 
   AssertOnMountThread();
 
-  crypto_->EnsureTpm(true);
+  if (!cryptohome_keys_manager_->HasAnyCryptohomeKey()) {
+    cryptohome_keys_manager_->Init();
+  }
 }
 
 void UserDataAuth::set_cleanup_threshold(uint64_t cleanup_threshold) {
@@ -1039,6 +1468,11 @@ void UserDataAuth::set_aggressive_cleanup_threshold(
   disk_cleanup_aggressive_threshold_ = aggressive_cleanup_threshold;
 }
 
+void UserDataAuth::set_critical_cleanup_threshold(
+    uint64_t critical_cleanup_threshold) {
+  disk_cleanup_critical_threshold_ = critical_cleanup_threshold;
+}
+
 void UserDataAuth::set_target_free_space(uint64_t target_free_space) {
   disk_cleanup_target_free_space_ = target_free_space;
 }
@@ -1048,43 +1482,57 @@ void UserDataAuth::SetLowDiskSpaceCallback(
   low_disk_space_handler_->SetLowDiskSpaceCallback(callback);
 }
 
-void UserDataAuth::OwnershipCallback(bool status, bool took_ownership) {
-  AssertOnMountThread();
+void UserDataAuth::SetFingerprintScanResultCallback(
+    const base::RepeatingCallback<void(user_data_auth::FingerprintScanResult)>&
+        callback) {
+  fingerprint_scan_result_callback_ = callback;
+}
 
-  // Note that this function should only be called once during the lifetime of
-  // this process, extra calls will be dropped.
-  if (ownership_callback_has_run_) {
-    LOG(WARNING) << "Duplicated call to OwnershipCallback.";
+void UserDataAuth::SetPrepareAuthFactorProgressCallback(
+    const base::RepeatingCallback<
+        void(user_data_auth::PrepareAuthFactorProgress)>& callback) {
+  prepare_auth_factor_progress_callback_ = callback;
+}
+
+void UserDataAuth::SetAuthenticateAuthFactorCompletedCallback(
+    const base::RepeatingCallback<
+        void(user_data_auth::AuthenticateAuthFactorCompleted)>& callback) {
+  authenticate_auth_factor_completed_callback_ = callback;
+}
+
+void UserDataAuth::SetAuthFactorStatusUpdateCallback(
+    const AuthFactorStatusUpdateCallback& callback) {
+  auth_session_manager_->SetAuthFactorStatusUpdateCallback(callback);
+}
+
+void UserDataAuth::HwsecReadyCallback(hwsec::Status status) {
+  if (!IsOnMountThread()) {
+    // We are not on mount thread, so let's post ourself there.
+    PostTaskToMountThread(
+        FROM_HERE, base::BindOnce(&UserDataAuth::HwsecReadyCallback,
+                                  base::Unretained(this), std::move(status)));
     return;
   }
-  ownership_callback_has_run_ = true;
 
-  if (took_ownership) {
-    // Reset the TPM context of all mounts, that is, force a reload of
-    // cryptohome keys, and make sure it is loaded and ready for every mount.
-    ResetAllTPMContext();
+  AssertOnMountThread();
 
-    // There might be some mounts that is half way through the PKCS#11
-    // initialization, let's resume them.
-    ResumeAllPkcs11Initialization();
-
-    // Initialize the install-time locked attributes since we can't do it prior
-    // to ownership.
-    InitializeInstallAttributes();
-
-    // If we mounted before the TPM finished initialization, we must finalize
-    // the install attributes now too, otherwise it takes a full re-login cycle
-    // to finalize.
-    FinalizeInstallAttributesIfMounted();
+  if (!status.ok()) {
+    LOG(ERROR) << "HwsecReadyCallback failed: " << status;
+    return;
   }
+
+  // Make sure cryptohome keys are loaded and ready for every mount.
+  EnsureCryptohomeKeys();
+
+  // Initialize the install-time locked attributes since we can't do it prior
+  // to ownership.
+  InitializeInstallAttributes();
 }
 
 void UserDataAuth::SetEnterpriseOwned(bool enterprise_owned) {
   AssertOnMountThread();
 
   enterprise_owned_ = enterprise_owned;
-  homedirs_->set_enterprise_owned(enterprise_owned);
-  keyset_management_->set_enterprise_owned(enterprise_owned);
 }
 
 void UserDataAuth::DetectEnterpriseOwnership() {
@@ -1107,1486 +1555,263 @@ void UserDataAuth::DetectEnterpriseOwnership() {
 void UserDataAuth::InitializeInstallAttributes() {
   AssertOnMountThread();
 
-  // Don't reinitialize when install attributes are valid.
-  if (install_attrs_->status() == InstallAttributes::Status::kValid) {
+  // Don't reinitialize when install attributes are valid or first install.
+  if (install_attrs_->status() == InstallAttributesInterface::Status::kValid ||
+      install_attrs_->status() ==
+          InstallAttributesInterface::Status::kFirstInstall) {
     return;
   }
 
   // The TPM owning instance may have changed since initialization.
   // InstallAttributes can handle a NULL or !IsEnabled Tpm object.
-  install_attrs_->SetTpm(tpm_);
-  install_attrs_->Init(tpm_);
+  std::ignore = install_attrs_->Init();
 
   // Check if the machine is enterprise owned and report to mount_ then.
   DetectEnterpriseOwnership();
 }
 
-void UserDataAuth::FinalizeInstallAttributesIfMounted() {
-  AssertOnMountThread();
-
-  bool is_mounted = IsMounted();
-  if (is_mounted &&
-      install_attrs_->status() == InstallAttributes::Status::kFirstInstall) {
-    scoped_refptr<UserSession> guest_session = GetUserSession(guest_user_);
-    bool guest_mounted =
-        guest_session.get() && guest_session->GetMount()->IsMounted();
-    if (!guest_mounted) {
-      install_attrs_->Finalize();
-    }
-  }
-}
-
-bool UserDataAuth::GetShouldMountAsEphemeral(
-    const std::string& account_id,
-    bool is_ephemeral_mount_requested,
-    bool has_create_request,
-    bool* is_ephemeral,
-    user_data_auth::CryptohomeErrorCode* error) const {
-  AssertOnMountThread();
-  const bool is_or_will_be_owner = homedirs_->IsOrWillBeOwner(account_id);
-  if (is_ephemeral_mount_requested && is_or_will_be_owner) {
-    LOG(ERROR) << "An ephemeral cryptohome can only be mounted when the user "
-                  "is not the owner.";
-    *error = user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL;
-    return false;
-  }
-  *is_ephemeral =
-      !is_or_will_be_owner &&
-      (homedirs_->AreEphemeralUsersEnabled() || is_ephemeral_mount_requested);
-  if (*is_ephemeral && !has_create_request) {
-    LOG(ERROR) << "An ephemeral cryptohome can only be mounted when its "
-                  "creation on-the-fly is allowed.";
-    *error =
-        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND;
-    return false;
-  }
-  return true;
-}
-
-scoped_refptr<Mount> UserDataAuth::CreateMount(const std::string& username) {
-  AssertOnMountThread();
-  scoped_refptr<Mount> m;
-  // TODO(dlunev): Decide if finalization should be moved to MountFactory.
-  EnsureBootLockboxFinalized();
-  m = mount_factory_->New(platform_, homedirs_);
-  m->set_legacy_mount(legacy_mount_);
-  m->set_bind_mount_downloads(bind_mount_downloads_);
-  if (!m->Init()) {
-    return nullptr;
-  }
-  return m;
-}
-
 void UserDataAuth::EnsureBootLockboxFinalized() {
   AssertOnMountThread();
 
-  TPM_SELECT_BEGIN;
-  TPM2_SECTION({
-    // Lock NVRamBootLockbox
-    auto nvram_boot_lockbox_client =
-        BootLockboxClient::CreateBootLockboxClient();
-    if (!nvram_boot_lockbox_client) {
-      LOG(WARNING) << "Failed to create nvram_boot_lockbox_client";
-      return;
-    }
+  // Lock NVRamBootLockbox
+  auto nvram_boot_lockbox_client =
+      bootlockbox::BootLockboxClient::CreateBootLockboxClient();
+  if (!nvram_boot_lockbox_client) {
+    LOG(WARNING) << "Failed to create nvram_boot_lockbox_client";
+    return;
+  }
 
-    if (!nvram_boot_lockbox_client->Finalize()) {
-      LOG(WARNING) << "Failed to finalize nvram lockbox.";
-    }
-  });
-  OTHER_TPM_SECTION();
-  TPM_SELECT_END;
+  if (!nvram_boot_lockbox_client->Finalize()) {
+    LOG(WARNING) << "Failed to finalize nvram lockbox.";
+  }
 }
 
-scoped_refptr<UserSession> UserDataAuth::GetOrCreateUserSession(
-    const std::string& username) {
+void UserDataAuth::BlockPkEstablishment() {
+  AssertOnMountThread();
+
+  if (pk_establishment_blocked_) {
+    return;
+  }
+
+  hwsec::StatusOr<bool> enabled = pinweaver_->IsEnabled();
+  if (!enabled.ok() || !*enabled) {
+    return;
+  }
+
+  // Pk related mechanisms are only added in PW version 2.
+  hwsec::StatusOr<uint8_t> version = pinweaver_->GetVersion();
+  if (!version.ok() || *version <= 1) {
+    return;
+  }
+
+  hwsec::Status status = pinweaver_->BlockGeneratePk();
+  if (!status.ok()) {
+    LOG(WARNING) << "Block biometrics Pk establishment failed: "
+                 << status.status();
+  } else {
+    pk_establishment_blocked_ = true;
+  }
+}
+
+UserSession* UserDataAuth::GetOrCreateUserSession(const Username& username) {
   // This method touches the |sessions_| object so it needs to run on
   // |mount_thread_|
   AssertOnMountThread();
-  if (sessions_.count(username) == 0U) {
+  UserSession* session = sessions_->Find(username);
+  if (!session) {
     // We don't have a mount associated with |username|, let's create one.
-    scoped_refptr<cryptohome::Mount> m = CreateMount(username);
-    if (!m) {
+    EnsureBootLockboxFinalized();
+    // Block biometrics Pk establishment afterwards as we considered the device
+    // becoming more vulnerable to attackers.
+    BlockPkEstablishment();
+    std::unique_ptr<UserSession> owned_session = user_session_factory_->New(
+        username, legacy_mount_, bind_mount_downloads_);
+    session = owned_session.get();
+    if (!sessions_->Add(username, std::move(owned_session))) {
+      NOTREACHED() << "Failed to add created user session";
       return nullptr;
     }
-    sessions_[username] =
-        new UserSession(homedirs_, keyset_management_, system_salt_, m);
   }
-  return sessions_[username];
+  return session;
 }
 
-void UserDataAuth::GetChallengeCredentialsPcrRestrictions(
-    const std::string& obfuscated_username,
-    std::vector<std::map<uint32_t, brillo::Blob>>* pcr_restrictions) {
+void UserDataAuth::RemoveInactiveUserSession(const Username& username) {
   AssertOnMountThread();
-  {
-    std::map<uint32_t, brillo::Blob> pcrs_1;
-    for (const auto& pcr :
-         tpm_->GetPcrMap(obfuscated_username, false /* use_extended_pcr */)) {
-      pcrs_1[pcr.first] = brillo::BlobFromString(pcr.second);
-    }
-    pcr_restrictions->push_back(pcrs_1);
+
+  UserSession* session = sessions_->Find(username);
+  if (!session || session->IsActive()) {
+    return;
   }
 
-  {
-    std::map<uint32_t, brillo::Blob> pcrs_2;
-    for (const auto& pcr :
-         tpm_->GetPcrMap(obfuscated_username, true /* use_extended_pcr */)) {
-      pcrs_2[pcr.first] = brillo::BlobFromString(pcr.second);
-    }
-    pcr_restrictions->push_back(pcrs_2);
+  if (!sessions_->Remove(username)) {
+    NOTREACHED() << "Failed to remove inactive user session.";
   }
 }
 
-bool UserDataAuth::RemoveUserSession(const std::string& username) {
+void UserDataAuth::InitForChallengeResponseAuth() {
   AssertOnMountThread();
-
-  if (sessions_.count(username) != 0) {
-    return (1U == sessions_.erase(username));
-  }
-  return true;
-}
-
-void UserDataAuth::MountGuest(
-    base::OnceCallback<void(const user_data_auth::MountReply&)> on_done) {
-  AssertOnMountThread();
-
-  if (sessions_.size() != 0) {
-    LOG(WARNING) << "Guest mount requested with other sessions active.";
-  }
-  // Rather than make it safe to check the size, then clean up, just always
-  // clean up.
-  bool ok = RemoveAllMounts(true);
-  user_data_auth::MountReply reply;
-  // Provide an authoritative filesystem-sanitized username.
-  reply.set_sanitized_username(
-      SanitizeUserNameWithSalt(guest_user_, system_salt_));
-  if (!ok) {
-    LOG(ERROR) << "Could not unmount cryptohomes for Guest use";
-    reply.set_error(user_data_auth::CryptohomeErrorCode::
-                        CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
-    std::move(on_done).Run(reply);
-    return;
-  }
-  ReportTimerStart(kMountGuestExTimer);
-
-  // Create a ref-counted guest mount for async use and then throw it away.
-  scoped_refptr<UserSession> guest_session =
-      GetOrCreateUserSession(guest_user_);
-  if (!guest_session || guest_session->MountGuest() != MOUNT_ERROR_NONE) {
-    LOG(ERROR) << "Could not initialize guest session.";
-    reply.set_error(
-        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL);
-  }
-
-  if (reply.error() ==
-      user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_NOT_SET) {
-    // We only report the guest mount time for successful cases.
-    ReportTimerStop(kMountGuestExTimer);
-  }
-
-  // TODO(b/137073669): Cleanup guest_mount if mount failed.
-  std::move(on_done).Run(reply);
-}
-
-void UserDataAuth::DoMount(
-    user_data_auth::MountRequest request,
-    base::OnceCallback<void(const user_data_auth::MountReply&)> on_done) {
-  AssertOnMountThread();
-
-  LOG(INFO) << "Received a mount request.";
-
-  // DoMount current supports guest login/mount, normal plaintext password login
-  // and challenge response login. For guest mount, a special process
-  // (MountGuest()) is used. Meanwhile, for normal plaintext password login and
-  // challenge response login, both will flow through this method. This method
-  // generally does some parameter validity checking, then pass the request onto
-  // ContinueMountWithCredentials() for plaintext password login and
-  // DoChallengeResponseMount() for challenge response login.
-  // DoChallengeResponseMount() will contact a dbus service and transmit the
-  // challenge, and once the response is received and checked with the TPM,
-  // it'll pass the request to ContinueMountWithCredentials(), which is the same
-  // as password login case, and in ContinueMountWithCredentials(), the mount is
-  // actually mounted through system call.
-
-  // Check for guest mount case.
-  if (request.guest_mount()) {
-    MountGuest(std::move(on_done));
-    return;
-  }
-
-  user_data_auth::MountReply reply;
-
-  // At present, we only enforce non-empty email addresses.
-  // In the future, we may wish to canonicalize if we don't move
-  // to requiring a IdP-unique identifier.
-  const std::string& account_id = GetAccountId(request.account());
-
-  base::Optional<base::UnguessableToken> token;
-  // Create a bool for better documentation for what token.has_value() means.
-  bool has_valid_auth_session = false;
-  if (!request.auth_session_id().empty()) {
-    token =
-        AuthSession::GetTokenFromSerializedString(request.auth_session_id());
-    has_valid_auth_session = token.has_value();
-    if (has_valid_auth_session) {
-      if (auth_sessions_.find(token.value()) == auth_sessions_.end()) {
-        reply.set_error(user_data_auth::CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN);
-        LOG(ERROR) << "Invalid AuthSession token provided.";
-        std::move(on_done).Run(reply);
-        return;
-      } else if (auth_sessions_[token.value()]->GetStatus() !=
-                 AuthStatus::kAuthStatusAuthenticated) {
-        reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-        LOG(ERROR) << "AuthSession is not authenticated";
-        std::move(on_done).Run(reply);
-        return;
-      }
-    }
-  }
-
-  // Check for empty account ID
-  if (account_id.empty() && !has_valid_auth_session) {
-    LOG(ERROR) << "No email supplied";
-    reply.set_error(
-        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  if (request.public_mount()) {
-    // Public mount have a set of passkey/password that is generated directly
-    // from the username (and a local system salt.)
-    brillo::SecureBlob public_mount_passkey =
-        keyset_management_->GetPublicMountPassKey(account_id);
-    if (public_mount_passkey.empty()) {
-      LOG(ERROR) << "Could not get public mount passkey.";
-      reply.set_error(user_data_auth::CryptohomeErrorCode::
-                          CRYPTOHOME_ERROR_AUTHORIZATION_KEY_FAILED);
-      std::move(on_done).Run(reply);
-      return;
-    }
-
-    // Set the secret as the key for cryptohome authorization/creation.
-    request.mutable_authorization()->mutable_key()->set_secret(
-        public_mount_passkey.to_string());
-    if (request.has_create()) {
-      request.mutable_create()->mutable_keys(0)->set_secret(
-          public_mount_passkey.to_string());
-    }
-  }
-
-  // We do not allow empty password, except for challenge response type login.
-  if (request.authorization().key().secret().empty() &&
-      request.authorization().key().data().type() !=
-          KeyData::KEY_TYPE_CHALLENGE_RESPONSE &&
-      !has_valid_auth_session) {
-    LOG(ERROR) << "No key secret supplied";
-    reply.set_error(
-        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  if (request.has_create() && !has_valid_auth_session) {
-    // copy_authorization_key in CreateRequest means that we'll copy the
-    // authorization request's key and use it as if it's the key specified in
-    // CreateRequest.
-    if (request.create().copy_authorization_key()) {
-      Key* auth_key = request.mutable_create()->add_keys();
-      *auth_key = request.authorization().key();
-    }
-
-    // Validity check for |request.create.keys|.
-    int keys_size = request.create().keys_size();
-    if (keys_size == 0) {
-      LOG(ERROR) << "CreateRequest supplied with no keys";
-      reply.set_error(user_data_auth::CryptohomeErrorCode::
-                          CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-      std::move(on_done).Run(reply);
-      return;
-    } else if (keys_size > 1) {
-      LOG(ERROR) << "MountEx: unimplemented CreateRequest with multiple keys";
-      reply.set_error(user_data_auth::CRYPTOHOME_ERROR_NOT_IMPLEMENTED);
-      std::move(on_done).Run(reply);
-      return;
-    } else {
-      const Key key = request.create().keys(0);
-      // TODO(wad) Ensure the labels are all unique.
-      if (!key.has_data() || key.data().label().empty() ||
-          (key.secret().empty() &&
-           key.data().type() != KeyData::KEY_TYPE_CHALLENGE_RESPONSE)) {
-        LOG(ERROR) << "CreateRequest Keys are not fully specified";
-        reply.set_error(user_data_auth::CryptohomeErrorCode::
-                            CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-        std::move(on_done).Run(reply);
-        return;
-      }
-    }
-  }
-
-  // Determine whether the mount should be ephemeral.
-  bool is_ephemeral = false;
-  bool require_ephemeral =
-      request.require_ephemeral() ||
-      (has_valid_auth_session ? auth_sessions_[token.value()]->ephemeral_user()
-                              : false);
-  user_data_auth::CryptohomeErrorCode mount_error =
-      user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
-
-  if (!GetShouldMountAsEphemeral(
-          account_id, require_ephemeral,
-          (request.has_create() || has_valid_auth_session), &is_ephemeral,
-          &mount_error)) {
-    reply.set_error(mount_error);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  // MountArgs is a set of parameters that we'll be passing around to
-  // ContinueMountWithCredentials() and DoChallengeResponseMount().
-  Mount::MountArgs mount_args;
-
-  // request.has_create() represents a CreateRequest, telling the API to
-  // create a user with the credentials in CreateRequest. create_if_missing
-  // creates a user mount should one not exist. In the legacy use case,
-  // CreateRequest needs to requested in the Mount call API for user creation.
-  // When AuthSessions are fully functional with mount call, we would not be
-  // creating user directories in mount call, instead we'd use
-  // CreateEphemeral. But for now, code paths such as ephemeral mounts
-  // require create_if_missing to be set to true to continue mounting as
-  // Ephemeral user directories are created here.
-  // Therefore, if a valid and an authenticated AuthSession is passed we
-  // can temporarily bypass create_if_missing as a first step to prevent
-  // credentials from flowing to mount call. Later, this would be replaced by
-  // CreateEphemeral, CreatePersistent calls.
-  mount_args.create_if_missing =
-      (request.has_create() || has_valid_auth_session);
-  mount_args.is_ephemeral = is_ephemeral;
-  mount_args.create_as_ecryptfs =
-      force_ecryptfs_ ||
-      (request.has_create() && request.create().force_ecryptfs());
-  mount_args.to_migrate_from_ecryptfs = request.to_migrate_from_ecryptfs();
-  // Force_ecryptfs_ wins.
-  mount_args.force_dircrypto =
-      !force_ecryptfs_ && request.force_dircrypto_if_available();
-
-  // Process challenge-response credentials asynchronously.
-  if (request.authorization().key().data().type() ==
-      KeyData::KEY_TYPE_CHALLENGE_RESPONSE) {
-    DoChallengeResponseMount(request, mount_args, std::move(on_done));
-    return;
-  }
-
-  auto credentials = std::make_unique<Credentials>(
-      account_id, SecureBlob(request.authorization().key().secret()));
-  // Everything else can be the default.
-  credentials->set_key_data(request.authorization().key().data());
-
-  ContinueMountWithCredentials(request, std::move(credentials),
-                               std::move(token), mount_args,
-                               std::move(on_done));
-  LOG(INFO) << "Finished mount request process";
-}
-
-bool UserDataAuth::InitForChallengeResponseAuth(
-    user_data_auth::CryptohomeErrorCode* error_code) {
-  AssertOnMountThread();
-  if (challenge_credentials_helper_) {
+  if (challenge_credentials_helper_initialized_) {
     // Already successfully initialized.
-    return true;
+    return;
   }
 
-  if (!tpm_) {
-    LOG(ERROR) << "Cannot do challenge-response authentication without TPM";
-    *error_code = user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL;
-    return false;
-  }
-
-  if (!tpm_->IsEnabled() || !tpm_->IsOwned()) {
-    LOG(ERROR) << "TPM must be initialized in order to do challenge-response "
-                  "authentication";
-    *error_code = user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL;
-    return false;
-  }
-
-  // Fail if the TPM is known to be vulnerable and we're not in a test image.
-  bool is_srk_roca_vulnerable;
-  if (TPMErrorBase err = tpm_->IsSrkRocaVulnerable(&is_srk_roca_vulnerable)) {
-    LOG(ERROR) << "Cannot do challenge-response mount: Failed to check for "
-                  "ROCA vulnerability: "
-               << *err;
-    *error_code = user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL;
-    return false;
-  }
-  if (is_srk_roca_vulnerable) {
-    if (!IsOsTestImage()) {
-      LOG(ERROR)
-          << "Cannot do challenge-response mount: TPM is ROCA vulnerable";
-      *error_code = user_data_auth::CRYPTOHOME_ERROR_TPM_UPDATE_REQUIRED;
-      return false;
-    }
-    LOG(WARNING) << "TPM is ROCA vulnerable; ignoring this for "
-                    "challenge-response mount due to running in test image";
+  if (!challenge_credentials_helper_) {
+    // Lazily create the helper object that manages generation/decryption of
+    // credentials for challenge-protected vaults.
+    default_challenge_credentials_helper_ =
+        std::make_unique<ChallengeCredentialsHelperImpl>(hwsec_);
+    challenge_credentials_helper_ = default_challenge_credentials_helper_.get();
   }
 
   if (!mount_thread_bus_) {
     LOG(ERROR) << "Cannot do challenge-response mount without system D-Bus bus";
-    *error_code = user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL;
-    return false;
+    return;
   }
+  key_challenge_service_factory_->SetMountThreadBus(mount_thread_bus_);
 
-  // Lazily create the helper object that manages generation/decryption of
-  // credentials for challenge-protected vaults.
-
-  Blob delegate_blob, delegate_secret;
-
-  bool has_reset_lock_permissions = false;
-  // TPM Delegate is required for TPM1.2. For TPM2.0, this is a no-op.
-  if (!tpm_->GetDelegate(&delegate_blob, &delegate_secret,
-                         &has_reset_lock_permissions)) {
-    LOG(ERROR)
-        << "Cannot do challenge-response authentication without TPM delegate";
-    *error_code = user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL;
-    return false;
-  }
-
-  default_challenge_credentials_helper_ =
-      std::make_unique<ChallengeCredentialsHelperImpl>(tpm_, delegate_blob,
-                                                       delegate_secret);
-  challenge_credentials_helper_ = default_challenge_credentials_helper_.get();
-
-  return true;
+  challenge_credentials_helper_initialized_ = true;
 }
 
-void UserDataAuth::DoChallengeResponseMount(
-    const user_data_auth::MountRequest& request,
-    const Mount::MountArgs& mount_args,
-    base::OnceCallback<void(const user_data_auth::MountReply&)> on_done) {
-  AssertOnMountThread();
-  DCHECK_EQ(request.authorization().key().data().type(),
-            KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-
-  // Setup a reply for use during error handling.
-  user_data_auth::MountReply reply;
-
-  user_data_auth::CryptohomeErrorCode error_code =
-      user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
-  if (!InitForChallengeResponseAuth(&error_code)) {
-    reply.set_error(error_code);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  const std::string& account_id = GetAccountId(request.account());
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(account_id, system_salt_);
-  const KeyData key_data = request.authorization().key().data();
-
-  if (!request.authorization().has_key_delegate() ||
-      !request.authorization().key_delegate().has_dbus_service_name()) {
-    LOG(ERROR) << "Cannot do challenge-response mount without key delegate "
-                  "information";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  // KeyChallengeService is tasked with contacting the challenge response D-Bus
-  // service that'll provide the response once we send the challenge.
-  std::unique_ptr<KeyChallengeService> key_challenge_service =
-      key_challenge_service_factory_->New(
-          mount_thread_bus_,
-          request.authorization().key_delegate().dbus_service_name());
-  if (!key_challenge_service) {
-    LOG(ERROR) << "Failed to create key challenge service";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  if (!homedirs_->Exists(obfuscated_username) &&
-      !mount_args.create_if_missing) {
-    LOG(ERROR) << "Cannot do challenge-response mount. Account not found.";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  std::unique_ptr<VaultKeyset> vault_keyset(keyset_management_->GetVaultKeyset(
-      obfuscated_username, request.authorization().key().data().label()));
-  const bool use_existing_credentials =
-      vault_keyset && !mount_args.is_ephemeral;
-  // If the home directory already exist (and thus the corresponding encrypted
-  // VaultKeyset exists) and the mount is not ephemeral, then we'll use the
-  // ChallengeCredentialsHelper (which handles challenge response
-  // authentication) to decrypt the VaultKeyset.
-  if (use_existing_credentials && vault_keyset->HasSignatureChallengeInfo()) {
-    // Home directory already exist and we are not doing ephemeral mount, so
-    // we'll decrypt existing VaultKeyset.
-    challenge_credentials_helper_->Decrypt(
-        account_id, key_data, vault_keyset->GetSignatureChallengeInfo(),
-        std::move(key_challenge_service),
-        base::BindOnce(
-            &UserDataAuth::OnChallengeResponseMountCredentialsObtained,
-            base::Unretained(this), request, mount_args, std::move(on_done)));
-  } else {
-    // We'll create a new VaultKeyset that accepts challenge response
-    // authentication.
-    if (!mount_args.create_if_missing) {
-      LOG(ERROR) << "No existing challenge-response vault keyset found";
-      reply.set_error(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-      std::move(on_done).Run(reply);
-      return;
-    }
-
-    std::vector<std::map<uint32_t, brillo::Blob>> pcr_restrictions;
-    GetChallengeCredentialsPcrRestrictions(obfuscated_username,
-                                           &pcr_restrictions);
-    challenge_credentials_helper_->GenerateNew(
-        account_id, key_data, pcr_restrictions,
-        std::move(key_challenge_service),
-        base::BindOnce(
-            &UserDataAuth::OnChallengeResponseMountCredentialsObtained,
-            base::Unretained(this), request, mount_args, std::move(on_done)));
-  }
-}
-
-void UserDataAuth::OnChallengeResponseMountCredentialsObtained(
-    const user_data_auth::MountRequest& request,
-    const Mount::MountArgs mount_args,
-    base::OnceCallback<void(const user_data_auth::MountReply&)> on_done,
-    std::unique_ptr<Credentials> credentials) {
-  AssertOnMountThread();
-  // If we get here, that means the ChallengeCredentialsHelper have finished the
-  // process of doing challenge response authentication, either successful or
-  // otherwise.
-
-  // Setup a reply for use during error handling.
-  user_data_auth::MountReply reply;
-
-  DCHECK_EQ(request.authorization().key().data().type(),
-            KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-
-  if (!credentials) {
-    // Challenge response authentication have failed.
-    LOG(ERROR) << "Could not mount due to failure to obtain challenge-response "
-                  "credentials";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  DCHECK_EQ(credentials->key_data().type(),
-            KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-
-  ContinueMountWithCredentials(request, std::move(credentials), base::nullopt,
-                               mount_args, std::move(on_done));
-}
-
-void UserDataAuth::ContinueMountWithCredentials(
-    const user_data_auth::MountRequest& request,
-    std::unique_ptr<Credentials> credentials,
-    base::Optional<base::UnguessableToken> token,
-    const Mount::MountArgs& mount_args,
-    base::OnceCallback<void(const user_data_auth::MountReply&)> on_done) {
-  AssertOnMountThread();
-  // Setup a reply for use during error handling.
-  user_data_auth::MountReply reply;
-
-  // This is safe even if cryptohomed restarts during a multi-mount
-  // session and a new mount is added because cleanup is not forced.
-  // An existing process will keep the mount alive.  On the next
-  // Unmount() it'll be forcibly cleaned up.  In the case that
-  // cryptohomed crashes and misses the Unmount call, the stale
-  // mountpoints should still be cleaned up on the next daemon
-  // interaction.
-  //
-  // As we introduce multiple mounts, we can consider API changes to
-  // make it clearer what the UI expectations are (AddMount, etc).
-  bool other_sessions_active = true;
-  if (sessions_.size() == 0) {
-    other_sessions_active = CleanUpStaleMounts(false);
-    // This could run on every interaction to catch any unused mounts.
-  }
-
-  // If the home directory for our user doesn't exist and we aren't instructed
-  // to create the home directory, and reply with the error.
-  if (!request.has_create() &&
-      !homedirs_->Exists(credentials->GetObfuscatedUsername(system_salt_)) &&
-      !token.has_value()) {
-    LOG(ERROR) << "Account not found when mounting with credentials.";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  std::string account_id = token.has_value()
-                               ? auth_sessions_[token.value()]->username()
-                               : GetAccountId(request.account());
-  // Provide an authoritative filesystem-sanitized username.
-  reply.set_sanitized_username(
-      brillo::cryptohome::home::SanitizeUserName(account_id));
-
-  // While it would be cleaner to implement the privilege enforcement
-  // here, that can only be done if a label was supplied.  If a wildcard
-  // was supplied, then we can only perform the enforcement after the
-  // matching key is identified.
-  //
-  // See Mount::MountCryptohome for privilege checking.
-
-  // Check if the guest user is mounted, if it is, we can't proceed.
-  scoped_refptr<UserSession> guest_session = GetUserSession(guest_user_);
-  bool guest_mounted =
-      guest_session.get() && guest_session->GetMount()->IsMounted();
-  // TODO(wad,ellyjones) Change this behavior to return failure even
-  // on a succesful unmount to tell chrome MOUNT_ERROR_NEEDS_RESTART.
-  if (guest_mounted && !guest_session->Unmount()) {
-    LOG(ERROR) << "Could not unmount cryptohome from Guest session";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  scoped_refptr<UserSession> user_session = GetOrCreateUserSession(account_id);
-
-  if (!user_session) {
-    LOG(ERROR) << "Could not initialize user session.";
-    reply.set_error(
-        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  // For public mount, don't proceed if there is any existing mount or stale
-  // mount. Exceptionally, it is normal and ok to have a failed previous mount
-  // attempt for the same user.
-  const bool only_self_unmounted_attempt =
-      sessions_.size() == 1 && !user_session->GetMount()->IsMounted();
-  if (request.public_mount() && other_sessions_active &&
-      !only_self_unmounted_attempt) {
-    LOG(ERROR) << "Public mount requested with other sessions active.";
-    if (!request.auth_session_id().empty()) {
-      std::string obfuscated =
-          SanitizeUserNameWithSalt(account_id, system_salt_);
-      if (!homedirs_->Remove(obfuscated)) {
-        LOG(ERROR) << "Failed to remove vault for kiosk user.";
-      }
-    }
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  // Don't overlay an ephemeral mount over a file-backed one.
-  if (mount_args.is_ephemeral &&
-      user_session->GetMount()->IsNonEphemeralMounted()) {
-    // TODO(wad,ellyjones) Change this behavior to return failure even
-    // on a succesful unmount to tell chrome MOUNT_ERROR_NEEDS_RESTART.
-    if (!user_session->Unmount()) {
-      LOG(ERROR) << "Could not unmount vault before an ephemeral mount.";
-      reply.set_error(user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
-      std::move(on_done).Run(reply);
-      return;
-    }
-  }
-
-  if (mount_args.is_ephemeral && !mount_args.create_if_missing) {
-    LOG(ERROR) << "An ephemeral cryptohome can only be mounted when its "
-                  "creation on-the-fly is allowed.";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  // If a user's home directory is already mounted, then we'll just recheck its
-  // credential with what's cached in memory. This is much faster than going to
-  // the TPM.
-  if (user_session->GetMount()->IsMounted()) {
-    // Attempt a short-circuited credential test.
-    if (user_session->VerifyCredentials(*credentials)) {
-      std::move(on_done).Run(reply);
-      keyset_management_->ResetLECredentials(*credentials);
-      return;
-    }
-    // If the Mount has invalid credentials (repopulated from system state)
-    // this will ensure a user can still sign-in with the right ones.
-    // TODO(wad) Should we unmount on a failed re-mount attempt?
-    if (!user_session->VerifyCredentials(*credentials) &&
-        !keyset_management_->AreCredentialsValid(*credentials)) {
-      LOG(ERROR) << "Credentials are invalid";
-      reply.set_error(
-          user_data_auth::CRYPTOHOME_ERROR_AUTHORIZATION_KEY_FAILED);
-    } else {
-      keyset_management_->ResetLECredentials(*credentials);
-    }
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  // Any non-guest mount attempt triggers InstallAttributes finalization.
-  // The return value is ignored as it is possible we're pre-ownership.
-  // The next login will assure finalization if possible.
-  if (install_attrs_->status() == InstallAttributes::Status::kFirstInstall) {
-    install_attrs_->Finalize();
-  }
-
-  // As per the other timers, this really only tracks time spent in
-  // MountCryptohome() not in the other areas prior.
-  ReportTimerStart(kMountExTimer);
-
-  // Remove all existing cryptohomes, except for the owner's one, if the
-  // ephemeral users policy is on.
-  // Note that a fresh policy value is read here, which in theory can conflict
-  // with the one used for calculation of |mount_args.is_ephemeral|. However,
-  // this inconsistency (whose probability is anyway pretty low in practice)
-  // should only lead to insignificant transient glitches, like an attempt to
-  // mount a non existing anymore cryptohome.
-  if (homedirs_->AreEphemeralUsersEnabled())
-    homedirs_->RemoveNonOwnerCryptohomes();
-
-  MountError code;
-  if (token.has_value()) {
-    code = AttemptUserMount(auth_sessions_[token.value()].get(), mount_args,
-                            user_session);
-  } else {
-    code = AttemptUserMount(*credentials, mount_args, user_session);
-  }
-  // Does actual mounting here.
-  if (code == MOUNT_ERROR_TPM_COMM_ERROR) {
-    LOG(WARNING) << "TPM communication error. Retrying.";
-    if (token.has_value()) {
-      code = AttemptUserMount(auth_sessions_[token.value()].get(), mount_args,
-                              user_session);
-    } else {
-      code = AttemptUserMount(*credentials, mount_args, user_session);
-    }
-  }
-
-  if (code == MOUNT_ERROR_VAULT_UNRECOVERABLE) {
-    LOG(ERROR) << "Unrecoverable vault, removing.";
-    std::string obfuscated = credentials->GetObfuscatedUsername(system_salt_);
-    if (!homedirs_->Remove(obfuscated)) {
-      LOG(ERROR) << "Failed to remove unrecoverable vault.";
-      code = MOUNT_ERROR_REMOVE_INVALID_USER_FAILED;
-    }
-  }
-
-  // PKCS#11 always starts out uninitialized right after a fresh mount.
-  user_session->GetMount()->set_pkcs11_state(cryptohome::Mount::kUninitialized);
-
-  // Mark the timer as done.
-  ReportTimerStop(kMountExTimer);
-
-  if (code != MOUNT_ERROR_NONE) {
-    // Mount returned a non-OK status.
-    LOG(ERROR) << "Failed to mount cryptohome, error = " << code;
-    reply.set_error(MountErrorToCryptohomeError(code));
-    ResetDictionaryAttackMitigation();
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  keyset_management_->ResetLECredentials(*credentials);
-  std::move(on_done).Run(reply);
-
-  // Update user timestamp and kick off PKCS#11 initialization.
-  // Time to push the task for PKCS#11 initialization.
-  // TODO(wad) This call will PostTask back to the same thread. It is safe,
-  //           but it seems pointless.
-  InitializePkcs11(user_session.get());
-}
-
-user_data_auth::CryptohomeErrorCode UserDataAuth::AddKey(
-    const user_data_auth::AddKeyRequest request) {
-  AssertOnMountThread();
-
-  if (!request.has_account_id() || !request.has_authorization_request()) {
-    LOG(ERROR)
-        << "AddKeyRequest must have account_id and authorization_request.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR) << "AddKeyRequest must have vaid account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  // Note that there's no check for empty AuthorizationRequest key label because
-  // such a key will test against all VaultKeysets of a compatible
-  // key().data().type(), and thus is valid.
-
-  if (request.authorization_request().key().secret().empty()) {
-    LOG(ERROR) << "No key secret in AddKeyRequest.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  if (request.key().secret().empty()) {
-    LOG(ERROR) << "No new key in AddKeyRequest.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  if (request.key().data().label().empty()) {
-    LOG(ERROR) << "No new key label in AddKeyRequest.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  const std::string& auth_key_secret =
-      request.authorization_request().key().secret();
-  Credentials credentials(account_id, SecureBlob(auth_key_secret));
-
-  credentials.set_key_data(request.authorization_request().key().data());
-
-  if (!homedirs_->Exists(credentials.GetObfuscatedUsername(system_salt_))) {
-    return user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND;
-  }
-
-  // An integer for AddKeyset to write the resulting index. This is discarded in
-  // the end.
-  int unused_keyset_index;
-
-  const std::string& new_key_secret = request.key().secret();
-  SecureBlob new_secret(new_key_secret);
-  CryptohomeErrorCode result;
-  result = keyset_management_->AddKeyset(
-      credentials, new_secret, &request.key().data(),
-      request.clobber_if_exists(), &unused_keyset_index);
-
-  // Note that cryptohome::CryptohomeErrorCode and
-  // user_data_auth::CryptohomeErrorCode are same in content, and it'll remain
-  // so until the end of the refactor, so we can safely cast from one to
-  // another. This is enforced in our unit test.
-  return static_cast<user_data_auth::CryptohomeErrorCode>(result);
-}
-
-user_data_auth::CryptohomeErrorCode UserDataAuth::AddDataRestoreKey(
-    const user_data_auth::AddDataRestoreKeyRequest request,
-    brillo::SecureBlob* key_out) {
-  AssertOnMountThread();
-
-  if (!request.has_account_id() || !request.has_authorization_request()) {
-    LOG(ERROR) << "AddDataRestoreKeyRequest must have account_id and "
-                  "authorization_request.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR) << "AddDataRestoreKeyRequest must have valid account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  if (!request.authorization_request().has_key() ||
-      !request.authorization_request().key().has_secret()) {
-    LOG(ERROR) << "No key secret in AddDataRestoreKeyRequest.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  // Generate the data restore key and its associated data.
-  const auto data_restore_key =
-      CreateSecureRandomBlob(kDefaultDataRestoreKeyLength);
-  KeyData new_key_data;
-  new_key_data.set_label(kDataRestoreKeyLabel);
-
-  const std::string& auth_key_secret =
-      request.authorization_request().key().secret();
-  Credentials credentials(account_id, SecureBlob(auth_key_secret));
-  credentials.set_key_data(request.authorization_request().key().data());
-  if (!homedirs_->Exists(credentials.GetObfuscatedUsername(system_salt_))) {
-    return user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND;
-  }
-
-  // An integer for AddKeyset to write the resulting index. This is discarded in
-  // the end.
-  int unused_keyset_index;
-
-  CryptohomeErrorCode result;
-  result = keyset_management_->AddKeyset(
-      credentials, data_restore_key, &new_key_data, true, &unused_keyset_index);
-
-  // We need to respond with the data restore key if the operation is
-  // successful.
-  if (result == CRYPTOHOME_ERROR_NOT_SET) {
-    *key_out = data_restore_key;
-  }
-
-  // Note that cryptohome::CryptohomeErrorCode and
-  // user_data_auth::CryptohomeErrorCode are same in content, and it'll remain
-  // so until the end of the refactor, so we can safely cast from one to
-  // another. This is enforced in our unit test.
-  return static_cast<user_data_auth::CryptohomeErrorCode>(result);
-}
-
-void UserDataAuth::CheckKey(
-    const user_data_auth::CheckKeyRequest& request,
-    base::OnceCallback<void(user_data_auth::CryptohomeErrorCode)> on_done) {
-  AssertOnMountThread();
-
-  if (!request.has_account_id() || !request.has_authorization_request()) {
-    LOG(ERROR)
-        << "CheckKeyRequest must have account_id and authorization_request.";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-    return;
-  }
-
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR) << "CheckKeyRequest must have valid account_id.";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-    return;
-  }
-
-  // Process challenge-response credentials asynchronously.
-  if (request.authorization_request().key().data().type() ==
-      KeyData::KEY_TYPE_CHALLENGE_RESPONSE) {
-    DoChallengeResponseCheckKey(request, std::move(on_done));
-    return;
-  }
-
-  // Process fingerprint credentials asynchronously.
-  if (request.authorization_request().key().data().type() ==
-      KeyData::KEY_TYPE_FINGERPRINT) {
-    if (!fingerprint_manager_) {
-      // Fingerprint manager failed to initialize, or the device may not
-      // support fingerprint auth at all.
-      std::move(on_done).Run(user_data_auth::CryptohomeErrorCode::
-                                 CRYPTOHOME_ERROR_FINGERPRINT_ERROR_INTERNAL);
-      return;
-    }
-    if (!fingerprint_manager_->HasAuthSessionForUser(
-            SanitizeUserNameWithSalt(account_id, system_salt_))) {
-      std::move(on_done).Run(user_data_auth::CryptohomeErrorCode::
-                                 CRYPTOHOME_ERROR_FINGERPRINT_DENIED);
-      return;
-    }
-    fingerprint_manager_->SetAuthScanDoneCallback(base::BindRepeating(
-        &UserDataAuth::CompleteFingerprintCheckKey, base::Unretained(this),
-        base::Passed(std::move(on_done))));
-    return;
-  }
-
-  // Note that there's no check for empty AuthorizationRequest key label because
-  // such a key will test against all VaultKeysets of a compatible
-  // key().data().type(), and thus is valid.
-
-  const std::string& auth_secret =
-      request.authorization_request().key().secret();
-  if (auth_secret.empty()) {
-    LOG(ERROR) << "No key secret in CheckKeyRequest.";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-    return;
-  }
-
-  Credentials credentials(account_id, SecureBlob(auth_secret));
-  credentials.set_key_data(request.authorization_request().key().data());
-
-  const std::string obfuscated_username =
-      credentials.GetObfuscatedUsername(system_salt_);
-
-  bool found_valid_credentials = false;
-  for (const auto& session_pair : sessions_) {
-    if (session_pair.second->VerifyCredentials(credentials)) {
-      found_valid_credentials = true;
-      break;
-    }
-  }
-
-  if (found_valid_credentials) {
-    // Entered the right creds, so reset LE credentials.
-    keyset_management_->ResetLECredentials(credentials);
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_NOT_SET);
-    return;
-  }
-
-  // Cover different keys for the same user with homedirs.
-  if (!homedirs_->Exists(obfuscated_username)) {
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND);
-    return;
-  }
-
-  if (!keyset_management_->AreCredentialsValid(credentials)) {
-    // TODO(wad) Should this pass along KEY_NOT_FOUND too?
-    std::move(on_done).Run(
-        user_data_auth::CRYPTOHOME_ERROR_AUTHORIZATION_KEY_FAILED);
-    ResetDictionaryAttackMitigation();
-    return;
-  }
-
-  keyset_management_->ResetLECredentials(credentials);
-  std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_NOT_SET);
-  return;
-}
-
-void UserDataAuth::CompleteFingerprintCheckKey(
-    base::OnceCallback<void(user_data_auth::CryptohomeErrorCode)> on_done,
-    FingerprintScanStatus status) {
-  AssertOnMountThread();
-  if (status == FingerprintScanStatus::FAILED_RETRY_ALLOWED) {
-    std::move(on_done).Run(user_data_auth::CryptohomeErrorCode::
-                               CRYPTOHOME_ERROR_FINGERPRINT_RETRY_REQUIRED);
-    return;
-  } else if (status == FingerprintScanStatus::FAILED_RETRY_NOT_ALLOWED) {
-    std::move(on_done).Run(user_data_auth::CryptohomeErrorCode::
-                               CRYPTOHOME_ERROR_FINGERPRINT_DENIED);
-    return;
-  }
-
-  std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_NOT_SET);
-}
-
-void UserDataAuth::DoChallengeResponseCheckKey(
-    const user_data_auth::CheckKeyRequest& request,
-    base::OnceCallback<void(user_data_auth::CryptohomeErrorCode)> on_done) {
-  AssertOnMountThread();
-
-  const auto& authorization = request.authorization_request();
-  DCHECK_EQ(authorization.key().data().type(),
-            KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-
-  user_data_auth::CryptohomeErrorCode error_code =
-      user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
-  if (!InitForChallengeResponseAuth(&error_code)) {
-    std::move(on_done).Run(error_code);
-    return;
-  }
-
-  if (!authorization.has_key_delegate() ||
-      !authorization.key_delegate().has_dbus_service_name()) {
-    LOG(ERROR) << "Cannot do challenge-response authentication without key "
-                  "delegate information";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    return;
-  }
-  if (!authorization.key().data().challenge_response_key_size()) {
-    LOG(ERROR) << "Missing challenge-response key information";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    return;
-  }
-  if (authorization.key().data().challenge_response_key_size() > 1) {
-    LOG(ERROR)
-        << "Using multiple challenge-response keys at once is unsupported";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    return;
-  }
-
-  // Begin from attempting a lightweight check that doesn't use the vault keyset
-  // or heavy TPM operations, and therefore is faster than the full check and
-  // also works in case the mount is ephemeral.
-  TryLightweightChallengeResponseCheckKey(request, std::move(on_done));
-}
-
-void UserDataAuth::TryLightweightChallengeResponseCheckKey(
-    const user_data_auth::CheckKeyRequest& request,
-    base::OnceCallback<void(user_data_auth::CryptohomeErrorCode)> on_done) {
-  AssertOnMountThread();
-
-  const auto& authorization = request.authorization_request();
-  const auto& identifier = request.account_id();
-
-  DCHECK_EQ(authorization.key().data().type(),
-            KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-  DCHECK(challenge_credentials_helper_);
-
-  const std::string& account_id = GetAccountId(identifier);
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(account_id, system_salt_);
-
-  base::Optional<KeyData> found_session_key_data;
-  for (const auto& session_pair : sessions_) {
-    const scoped_refptr<UserSession>& session = session_pair.second;
-    if (session->VerifyUser(obfuscated_username) &&
-        KeyMatchesForLightweightChallengeResponseCheck(
-            authorization.key().data(), *session)) {
-      found_session_key_data = session->key_data();
-      break;
-    }
-  }
-  if (!found_session_key_data) {
-    // No matching user session found, so fall back to the full check.
-    OnLightweightChallengeResponseCheckKeyDone(request, std::move(on_done),
-                                               /*success=*/false);
-    return;
-  }
-
-  // KeyChallengeService is tasked with contacting the challenge response D-Bus
-  // service that'll provide the response once we send the challenge.
-  std::unique_ptr<KeyChallengeService> key_challenge_service =
-      key_challenge_service_factory_->New(
-          mount_thread_bus_, authorization.key_delegate().dbus_service_name());
-  if (!key_challenge_service) {
-    LOG(ERROR) << "Failed to create key challenge service";
-    OnLightweightChallengeResponseCheckKeyDone(request, std::move(on_done),
-                                               /*success=*/false);
-    return;
-  }
-
-  // Attempt the lightweight check against the found user session.
-  challenge_credentials_helper_->VerifyKey(
-      account_id, *found_session_key_data, std::move(key_challenge_service),
-      base::BindOnce(&UserDataAuth::OnLightweightChallengeResponseCheckKeyDone,
-                     base::Unretained(this), request, std::move(on_done)));
-}
-
-void UserDataAuth::OnLightweightChallengeResponseCheckKeyDone(
-    const user_data_auth::CheckKeyRequest& request,
-    base::OnceCallback<void(user_data_auth::CryptohomeErrorCode)> on_done,
-    bool is_key_valid) {
-  AssertOnMountThread();
-  if (!is_key_valid) {
-    DoFullChallengeResponseCheckKey(request, std::move(on_done));
-    return;
-  }
-
-  // Note that the LE credentials are not reset here, since we don't have the
-  // full credentials after the lightweight check.
-  std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_NOT_SET);
-}
-
-void UserDataAuth::DoFullChallengeResponseCheckKey(
-    const user_data_auth::CheckKeyRequest& request,
-    base::OnceCallback<void(user_data_auth::CryptohomeErrorCode)> on_done) {
-  AssertOnMountThread();
-
-  const auto& authorization = request.authorization_request();
-  const auto& identifier = request.account_id();
-
-  DCHECK_EQ(authorization.key().data().type(),
-            KeyData::KEY_TYPE_CHALLENGE_RESPONSE);
-  DCHECK(challenge_credentials_helper_);
-
-  const std::string& account_id = GetAccountId(identifier);
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(account_id, system_salt_);
-
-  // KeyChallengeService is tasked with contacting the challenge response D-Bus
-  // service that'll provide the response once we send the challenge.
-  std::unique_ptr<KeyChallengeService> key_challenge_service =
-      key_challenge_service_factory_->New(
-          mount_thread_bus_, authorization.key_delegate().dbus_service_name());
-  if (!key_challenge_service) {
-    LOG(ERROR) << "Failed to create key challenge service";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    return;
-  }
-
-  if (!homedirs_->Exists(obfuscated_username)) {
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND);
-    return;
-  }
-
-  std::unique_ptr<VaultKeyset> vault_keyset(keyset_management_->GetVaultKeyset(
-      obfuscated_username, authorization.key().data().label()));
-  if (!vault_keyset) {
-    LOG(ERROR) << "No existing challenge-response vault keyset found";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    return;
-  }
-  challenge_credentials_helper_->Decrypt(
-      account_id, authorization.key().data(),
-      vault_keyset->GetSignatureChallengeInfo(),
-      std::move(key_challenge_service),
-      base::BindOnce(&UserDataAuth::OnFullChallengeResponseCheckKeyDone,
-                     base::Unretained(this), std::move(on_done)));
-}
-
-void UserDataAuth::OnFullChallengeResponseCheckKeyDone(
-    base::OnceCallback<void(user_data_auth::CryptohomeErrorCode)> on_done,
-    std::unique_ptr<Credentials> credentials) {
-  AssertOnMountThread();
-  if (!credentials) {
-    LOG(ERROR) << "Key checking failed due to failure to obtain "
-                  "challenge-response credentials";
-    std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL);
-    return;
-  }
-
-  // Entered the right creds, so reset LE credentials.
-  keyset_management_->ResetLECredentials(*credentials);
-
-  std::move(on_done).Run(user_data_auth::CRYPTOHOME_ERROR_NOT_SET);
-}
-
-user_data_auth::CryptohomeErrorCode UserDataAuth::RemoveKey(
-    const user_data_auth::RemoveKeyRequest request) {
-  AssertOnMountThread();
-
-  if (!request.has_account_id() || !request.has_authorization_request()) {
-    LOG(ERROR)
-        << "RemoveKeyRequest must have account_id and authorization_request.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR) << "RemoveKeyRequest must have vaid account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  // Note that there's no check for empty AuthorizationRequest key label because
-  // such a key will test against all VaultKeysets of a compatible
-  // key().data().type(), and thus is valid.
-
-  const std::string& auth_secret =
-      request.authorization_request().key().secret();
-  if (auth_secret.empty()) {
-    LOG(ERROR) << "No key secret in RemoveKeyRequest.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  if (request.key().data().label().empty()) {
-    LOG(ERROR) << "No new key label in RemoveKeyRequest.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  Credentials credentials(account_id, SecureBlob(auth_secret));
-
-  credentials.set_key_data(request.authorization_request().key().data());
-
-  if (!homedirs_->Exists(credentials.GetObfuscatedUsername(system_salt_))) {
-    return user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND;
-  }
-
-  CryptohomeErrorCode result;
-  result = keyset_management_->RemoveKeyset(credentials, request.key().data());
-
-  // Note that cryptohome::CryptohomeErrorCode and
-  // user_data_auth::CryptohomeErrorCode are same in content, and it'll remain
-  // so until the end of the refactor, so we can safely cast from one to
-  // another.
-  return static_cast<user_data_auth::CryptohomeErrorCode>(result);
-}
-
-user_data_auth::CryptohomeErrorCode UserDataAuth::MassRemoveKeys(
-    const user_data_auth::MassRemoveKeysRequest request) {
-  AssertOnMountThread();
-
-  if (!request.has_account_id() || !request.has_authorization_request()) {
-    LOG(ERROR) << "MassRemoveKeysRequest must have account_id and "
-                  "authorization_request.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR) << "MassRemoveKeysRequest must have vaid account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  // Note that there's no check for empty AuthorizationRequest key label because
-  // such a key will test against all VaultKeysets of a compatible
-  // key().data().type(), and thus is valid.
-
-  const std::string& auth_secret =
-      request.authorization_request().key().secret();
-  if (auth_secret.empty()) {
-    LOG(ERROR) << "No key secret in MassRemoveKeysRequest.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  Credentials credentials(account_id, SecureBlob(auth_secret));
-
-  credentials.set_key_data(request.authorization_request().key().data());
-
-  const std::string obfuscated_username =
-      credentials.GetObfuscatedUsername(system_salt_);
-  if (!homedirs_->Exists(obfuscated_username)) {
-    return user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND;
-  }
-
-  if (!keyset_management_->AreCredentialsValid(credentials)) {
-    return user_data_auth::CRYPTOHOME_ERROR_AUTHORIZATION_KEY_FAILED;
-  }
-
-  // get all labels under the username
-  std::vector<std::string> labels;
-  if (!keyset_management_->GetVaultKeysetLabels(obfuscated_username, &labels)) {
-    return user_data_auth::CRYPTOHOME_ERROR_KEY_NOT_FOUND;
-  }
-
-  // get all exempt labels from |request|
-  std::unordered_set<std::string> exempt_labels;
-  for (int i = 0; i < request.exempt_key_data_size(); i++) {
-    exempt_labels.insert(request.exempt_key_data(i).label());
-  }
-  for (std::string label : labels) {
-    if (exempt_labels.find(label) == exempt_labels.end()) {
-      // non-exempt label, should be removed
-      std::unique_ptr<VaultKeyset> remove_vk(
-          keyset_management_->GetVaultKeyset(obfuscated_username, label));
-      if (!keyset_management_->ForceRemoveKeyset(obfuscated_username,
-                                                 remove_vk->GetLegacyIndex())) {
-        LOG(ERROR) << "MassRemoveKeys: failed to remove keyset " << label;
-        return user_data_auth::CRYPTOHOME_ERROR_BACKING_STORE_FAILURE;
-      }
-    }
-  }
-
-  return user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
-}
-
-user_data_auth::CryptohomeErrorCode UserDataAuth::ListKeys(
-    const user_data_auth::ListKeysRequest& request,
-    std::vector<std::string>* labels_out) {
-  AssertOnMountThread();
-  DCHECK(labels_out);
-
-  if (!request.has_account_id()) {
-    LOG(ERROR) << "ListKeysRequest must have account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  const std::string& account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR) << "ListKeysRequest must have valid account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(account_id, system_salt_);
-  if (!homedirs_->Exists(obfuscated_username)) {
-    return user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND;
-  }
-
-  if (!keyset_management_->GetVaultKeysetLabels(obfuscated_username,
-                                                labels_out)) {
-    return user_data_auth::CRYPTOHOME_ERROR_KEY_NOT_FOUND;
-  }
-  return user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
-}
-
-user_data_auth::CryptohomeErrorCode UserDataAuth::GetKeyData(
-    const user_data_auth::GetKeyDataRequest& request,
-    cryptohome::KeyData* data_out,
-    bool* found) {
-  AssertOnMountThread();
-
-  if (!request.has_account_id()) {
-    // Note that authorization request is currently not required.
-    LOG(ERROR) << "GetKeyDataRequest must have account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR) << "GetKeyDataRequest must have vaid account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  if (!request.has_key()) {
-    LOG(ERROR) << "No key attributes provided in GetKeyDataRequest.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(account_id, system_salt_);
-  if (!homedirs_->Exists(obfuscated_username)) {
-    return user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND;
-  }
-
-  // Requests only support using the key label at present.
-  std::unique_ptr<VaultKeyset> vk(keyset_management_->GetVaultKeyset(
-      obfuscated_username, request.key().data().label()));
-  *found = (vk != nullptr);
-  if (*found) {
-    *data_out = vk->GetKeyData();
-  }
-
-  return user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
-}
-
-user_data_auth::CryptohomeErrorCode UserDataAuth::MigrateKey(
-    const user_data_auth::MigrateKeyRequest& request) {
-  AssertOnMountThread();
-
-  if (!request.has_account_id() || !request.has_authorization_request()) {
-    LOG(ERROR)
-        << "MigrateKeyRequest must have account_id and authorization_request.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR) << "MigrateKeyRequest must have valid account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
-  }
-
-  Credentials credentials(account_id, SecureBlob(request.secret()));
-
-  int key_index = -1;
-  if (!keyset_management_->Migrate(
-          credentials,
-          SecureBlob(request.authorization_request().key().secret()),
-          &key_index)) {
-    ResetDictionaryAttackMitigation();
-    return user_data_auth::CRYPTOHOME_ERROR_MIGRATE_KEY_FAILED;
-  }
-  scoped_refptr<UserSession> session = GetUserSession(account_id);
-  if (session.get()) {
-    if (!session->SetCredentials(credentials, key_index)) {
-      LOG(WARNING) << "Failed to set new creds";
-    }
-  }
-
-  return user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
-}
-
-user_data_auth::CryptohomeErrorCode UserDataAuth::Remove(
+user_data_auth::RemoveReply UserDataAuth::Remove(
     const user_data_auth::RemoveRequest& request) {
   AssertOnMountThread();
 
-  if (!request.has_identifier()) {
-    LOG(ERROR) << "RemoveRequest must have identifier.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
+  user_data_auth::RemoveReply reply;
+  if (!request.has_identifier() && request.auth_session_id().empty()) {
+    // RemoveRequest must have identifier or an AuthSession Id
+    PopulateReplyWithError(
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthNoIDInRemove),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT),
+        &reply);
+    return reply;
   }
 
-  std::string account_id = GetAccountId(request.identifier());
-  if (account_id.empty()) {
-    LOG(ERROR) << "RemoveRequest must have valid account_id.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
+  InUseAuthSession auth_session;
+  if (!request.auth_session_id().empty()) {
+    auth_session =
+        auth_session_manager_->FindAuthSession(request.auth_session_id());
+    CryptohomeStatus auth_session_status = auth_session.AuthSessionStatus();
+    if (!auth_session_status.ok()) {
+      PopulateReplyWithError(auth_session_status.status(), &reply);
+      return reply;
+    }
+  } else {
+    // Start an auth session internally because we need an auth session to
+    // cleanup the auth factors.
+    CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+        auth_session_manager_->CreateAuthSession(
+            GetAccountId(request.identifier()), /*flags=*/0,
+            AuthIntent::kDecrypt);
+    if (!auth_session_status.ok()) {
+      PopulateReplyWithError(auth_session_status.status(), &reply);
+      return reply;
+    }
+    auth_session = std::move(auth_session_status).value();
   }
 
-  std::string obfuscated = SanitizeUserNameWithSalt(account_id, system_salt_);
+  Username account_id = auth_session->username();
+  if (account_id->empty()) {
+    // RemoveRequest must have valid account_id.
+    PopulateReplyWithError(
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthNoAccountIdWithAuthSessionInRemove),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot}),
+            user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT),
+        &reply);
+    return reply;
+  }
+
+  ObfuscatedUsername obfuscated = SanitizeUserName(account_id);
+
+  const UserSession* const session = sessions_->Find(account_id);
+  if (session && session->IsActive()) {
+    // Can't remove active user
+    PopulateReplyWithError(
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthUserActiveInRemove),
+            ErrorActionSet({PossibleAction::kReboot}),
+            user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY),
+        &reply);
+    return reply;
+  }
+
+  auth_session->PrepareUserForRemoval();
+
   if (!homedirs_->Remove(obfuscated)) {
-    return user_data_auth::CRYPTOHOME_ERROR_REMOVE_FAILED;
+    // User vault removal failed.
+    PopulateReplyWithError(
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthRemoveFailedInRemove),
+            ErrorActionSet(
+                {PossibleAction::kPowerwash, PossibleAction::kReboot}),
+            user_data_auth::CRYPTOHOME_ERROR_REMOVE_FAILED),
+        &reply);
+    return reply;
   }
-  return user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
+
+  // Since the user is now removed, any further operations require a fresh
+  // AuthSession.
+  if (auth_session.AuthSessionStatus().ok()) {
+    if (!auth_session_manager_->RemoveAuthSession(auth_session->token())) {
+      NOTREACHED() << "Failed to remove AuthSession when removing user.";
+    }
+  }
+
+  PopulateReplyWithError(OkStatus<CryptohomeError>(), &reply);
+  return reply;
 }
 
-user_data_auth::CryptohomeErrorCode UserDataAuth::Rename(
-    const user_data_auth::RenameRequest& request) {
+user_data_auth::ResetApplicationContainerReply
+UserDataAuth::ResetApplicationContainer(
+    const user_data_auth::ResetApplicationContainerRequest& request) {
   AssertOnMountThread();
+  user_data_auth::ResetApplicationContainerReply reply;
+  Username account_id = GetAccountId(request.account_id());
 
-  if (!request.has_id_from() || !request.has_id_to()) {
-    LOG(ERROR) << "RenameRequest must have id_from and id_to.";
-    return user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT;
+  if (account_id->empty() || request.application_name().empty()) {
+    // RemoveRequest must have identifier or an AuthSession Id
+    PopulateReplyWithError(
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthNoIDInResetAppContainer),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT),
+        &reply);
+    return reply;
   }
 
-  std::string username_from = GetAccountId(request.id_from());
-  std::string username_to = GetAccountId(request.id_to());
-
-  scoped_refptr<UserSession> session = GetUserSession(username_from);
-  const bool is_mounted = session.get() && session->GetMount()->IsMounted();
-
-  if (is_mounted) {
-    LOG(ERROR) << "RenameCryptohome('" << username_from << "','" << username_to
-               << "'): Unable to rename mounted cryptohome.";
-    return user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY;
-  } else if (!homedirs_) {
-    LOG(ERROR) << "RenameCryptohome('" << username_from << "','" << username_to
-               << "'): Homedirs not initialized.";
-    return user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY;
-  } else if (!homedirs_->Rename(username_from, username_to)) {
-    return user_data_auth::CRYPTOHOME_ERROR_MOUNT_FATAL;
+  UserSession* session = sessions_->Find(account_id);
+  if (!session || !session->IsActive()) {
+    // Can't reset container of inactive user.
+    PopulateReplyWithError(
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthUserInactiveInResetAppContainer),
+            ErrorActionSet({PossibleAction::kReboot}),
+            user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY),
+        &reply);
+    return reply;
   }
 
-  return user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
+  if (!session->ResetApplicationContainer(request.application_name())) {
+    PopulateReplyWithError(
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthUserFailedResetAppContainer),
+            ErrorActionSet({PossibleAction::kReboot}),
+            user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY),
+        &reply);
+    return reply;
+  }
+
+  PopulateReplyWithError(OkStatus<CryptohomeError>(), &reply);
+  return reply;
 }
 
 void UserDataAuth::StartMigrateToDircrypto(
     const user_data_auth::StartMigrateToDircryptoRequest& request,
-    base::RepeatingCallback<void(
-        const user_data_auth::DircryptoMigrationProgress&)> progress_callback) {
+    Mount::MigrationCallback progress_callback) {
   AssertOnMountThread();
 
   MigrationType migration_type = request.minimal_migration()
@@ -2595,21 +1820,34 @@ void UserDataAuth::StartMigrateToDircrypto(
 
   // Note that total_bytes and current_bytes field in |progress| is discarded by
   // client whenever |progress.status| is not DIRCRYPTO_MIGRATION_IN_PROGRESS,
-  // this is why they are left with the default value of 0 here. Please see
-  // MigrationHelper::ProgressCallback for more details.
+  // this is why they are left with the default value of 0 here.
   user_data_auth::DircryptoMigrationProgress progress;
+  AuthSession* auth_session = nullptr;
+  InUseAuthSession in_use_auth_session;
+  if (!request.auth_session_id().empty()) {
+    CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+        GetAuthenticatedAuthSession(request.auth_session_id());
+    if (!auth_session_status.ok()) {
+      LOG(ERROR) << "StartMigrateToDircrypto: Invalid auth_session_id.";
+      progress.set_status(user_data_auth::DIRCRYPTO_MIGRATION_FAILED);
+      progress_callback.Run(progress);
+      return;
+    }
+    in_use_auth_session = std::move(auth_session_status.value());
+    auth_session = in_use_auth_session.Get();
+  }
 
-  scoped_refptr<UserSession> session =
-      GetUserSession(GetAccountId(request.account_id()));
-  if (!session.get()) {
+  Username account_id = auth_session ? auth_session->username()
+                                     : GetAccountId(request.account_id());
+  UserSession* const session = sessions_->Find(account_id);
+  if (!session) {
     LOG(ERROR) << "StartMigrateToDircrypto: Failed to get session.";
     progress.set_status(user_data_auth::DIRCRYPTO_MIGRATION_FAILED);
     progress_callback.Run(progress);
     return;
   }
   LOG(INFO) << "StartMigrateToDircrypto: Migrating to dircrypto.";
-  if (!session->GetMount()->MigrateToDircrypto(progress_callback,
-                                               migration_type)) {
+  if (!session->MigrateVault(progress_callback, migration_type)) {
     LOG(ERROR) << "StartMigrateToDircrypto: Failed to migrate.";
     progress.set_status(user_data_auth::DIRCRYPTO_MIGRATION_FAILED);
     progress_callback.Run(progress);
@@ -2621,10 +1859,10 @@ void UserDataAuth::StartMigrateToDircrypto(
 }
 
 user_data_auth::CryptohomeErrorCode UserDataAuth::NeedsDircryptoMigration(
-    const cryptohome::AccountIdentifier& account, bool* result) {
+    const AccountIdentifier& account, bool* result) {
   AssertOnMountThread();
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(GetAccountId(account), system_salt_);
+  ObfuscatedUsername obfuscated_username =
+      SanitizeUserName(GetAccountId(account));
   if (!homedirs_->Exists(obfuscated_username)) {
     LOG(ERROR) << "Unknown user in NeedsDircryptoMigration.";
     return user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND;
@@ -2637,84 +1875,42 @@ user_data_auth::CryptohomeErrorCode UserDataAuth::NeedsDircryptoMigration(
 
 bool UserDataAuth::IsLowEntropyCredentialSupported() {
   AssertOnOriginThread();
-  return tpm_->GetLECredentialBackend() &&
-         tpm_->GetLECredentialBackend()->IsSupported();
+  hwsec::StatusOr<bool> is_enabled = hwsec_->IsPinWeaverEnabled();
+  if (!is_enabled.ok()) {
+    LOG(ERROR) << "Failed to get pinweaver status";
+    return false;
+  }
+  return is_enabled.value();
 }
 
-int64_t UserDataAuth::GetAccountDiskUsage(
-    const cryptohome::AccountIdentifier& account) {
+int64_t UserDataAuth::GetAccountDiskUsage(const AccountIdentifier& account) {
   AssertOnMountThread();
   // Note that if the given |account| is invalid or non-existent, then HomeDirs'
   // implementation of ComputeDiskUsage is specified to return 0.
   return homedirs_->ComputeDiskUsage(GetAccountId(account));
 }
 
-bool UserDataAuth::IsArcQuotaSupported() {
-  AssertOnOriginThread();
-  return arc_disk_quota_->IsQuotaSupported();
-}
-
-int64_t UserDataAuth::GetCurrentSpaceForArcUid(uid_t android_uid) {
-  AssertOnOriginThread();
-  return arc_disk_quota_->GetCurrentSpaceForUid(android_uid);
-}
-
-int64_t UserDataAuth::GetCurrentSpaceForArcGid(uid_t android_gid) {
-  AssertOnOriginThread();
-  return arc_disk_quota_->GetCurrentSpaceForGid(android_gid);
-}
-
-int64_t UserDataAuth::GetCurrentSpaceForArcProjectId(int project_id) {
-  AssertOnOriginThread();
-  return arc_disk_quota_->GetCurrentSpaceForProjectId(project_id);
-}
-
-bool UserDataAuth::SetProjectId(
-    int project_id,
-    user_data_auth::SetProjectIdAllowedPathType parent_path,
-    const FilePath& child_path,
-    const cryptohome::AccountIdentifier& account) {
-  AssertOnOriginThread();
-  const std::string& account_id = GetAccountId(account);
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(account_id, system_salt_);
-  return arc_disk_quota_->SetProjectId(
-      project_id, static_cast<SetProjectIdAllowedPathType>(parent_path),
-      child_path, obfuscated_username);
-}
-
-bool UserDataAuth::SetMediaRWDataFileProjectId(int project_id,
-                                               int fd,
-                                               int* out_error) {
-  AssertOnOriginThread();
-  return arc_disk_quota_->SetMediaRWDataFileProjectId(project_id, fd,
-                                                      out_error);
-}
-
 bool UserDataAuth::Pkcs11IsTpmTokenReady() {
   AssertOnMountThread();
   // We touched the sessions_ object, so we need to be on mount thread.
 
-  bool ready = true;
-  for (const auto& session_pair : sessions_) {
-    UserSession* session = session_pair.second.get();
-    bool ok = (session->GetMount()->pkcs11_state() ==
-               cryptohome::Mount::kIsInitialized);
-
-    ready = ready && ok;
+  for (const auto& [unused, session] : *sessions_) {
+    if (!session.GetPkcs11Token() || !session.GetPkcs11Token()->IsReady()) {
+      return false;
+    }
   }
 
-  return ready;
+  return true;
 }
 
 user_data_auth::TpmTokenInfo UserDataAuth::Pkcs11GetTpmTokenInfo(
-    const std::string& username) {
+    const Username& username) {
   AssertOnOriginThread();
   user_data_auth::TpmTokenInfo result;
   std::string label, pin;
   CK_SLOT_ID slot;
   FilePath token_path;
-  if (username.empty()) {
+  if (username->empty()) {
     // We want to get the system token.
 
     // Get the label and pin for system token.
@@ -2746,8 +1942,10 @@ void UserDataAuth::Pkcs11Terminate() {
   AssertOnMountThread();
   // We are touching the |sessions_| object so we need to be on mount thread.
 
-  for (const auto& session_pair : sessions_) {
-    session_pair.second->GetMount()->RemovePkcs11Token();
+  for (const auto& [unused, session] : *sessions_) {
+    if (session.GetPkcs11Token()) {
+      session.GetPkcs11Token()->Remove();
+    }
   }
 }
 
@@ -2777,10 +1975,10 @@ int UserDataAuth::InstallAttributesCount() {
 
 bool UserDataAuth::InstallAttributesIsSecure() {
   AssertOnMountThread();
-  return install_attrs_->is_secure();
+  return install_attrs_->IsSecure();
 }
 
-InstallAttributes::Status UserDataAuth::InstallAttributesGetStatus() {
+InstallAttributesInterface::Status UserDataAuth::InstallAttributesGetStatus() {
   AssertOnMountThread();
   return install_attrs_->status();
 }
@@ -2788,18 +1986,18 @@ InstallAttributes::Status UserDataAuth::InstallAttributesGetStatus() {
 // static
 user_data_auth::InstallAttributesState
 UserDataAuth::InstallAttributesStatusToProtoEnum(
-    InstallAttributes::Status status) {
-  static const std::unordered_map<InstallAttributes::Status,
+    InstallAttributesInterface::Status status) {
+  static const std::unordered_map<InstallAttributesInterface::Status,
                                   user_data_auth::InstallAttributesState>
-      state_map = {{InstallAttributes::Status::kUnknown,
+      state_map = {{InstallAttributesInterface::Status::kUnknown,
                     user_data_auth::InstallAttributesState::UNKNOWN},
-                   {InstallAttributes::Status::kTpmNotOwned,
+                   {InstallAttributesInterface::Status::kTpmNotOwned,
                     user_data_auth::InstallAttributesState::TPM_NOT_OWNED},
-                   {InstallAttributes::Status::kFirstInstall,
+                   {InstallAttributesInterface::Status::kFirstInstall,
                     user_data_auth::InstallAttributesState::FIRST_INSTALL},
-                   {InstallAttributes::Status::kValid,
+                   {InstallAttributesInterface::Status::kValid,
                     user_data_auth::InstallAttributesState::VALID},
-                   {InstallAttributes::Status::kInvalid,
+                   {InstallAttributesInterface::Status::kInvalid,
                     user_data_auth::InstallAttributesState::INVALID}};
   if (state_map.count(status) != 0) {
     return state_map.at(status);
@@ -2808,62 +2006,6 @@ UserDataAuth::InstallAttributesStatusToProtoEnum(
   NOTREACHED();
   // Return is added so compiler doesn't complain.
   return user_data_auth::InstallAttributesState::INVALID;
-}
-
-void UserDataAuth::OnFingerprintStartAuthSessionResp(
-    base::OnceCallback<
-        void(const user_data_auth::StartFingerprintAuthSessionReply&)> on_done,
-    bool success) {
-  AssertOnMountThread();
-  VLOG(1) << "Start fingerprint auth session result: " << success;
-  user_data_auth::StartFingerprintAuthSessionReply reply;
-  if (!success) {
-    reply.set_error(user_data_auth::CryptohomeErrorCode::
-                        CRYPTOHOME_ERROR_FINGERPRINT_ERROR_INTERNAL);
-  }
-  std::move(on_done).Run(reply);
-}
-
-void UserDataAuth::StartFingerprintAuthSession(
-    const user_data_auth::StartFingerprintAuthSessionRequest& request,
-    base::OnceCallback<void(
-        const user_data_auth::StartFingerprintAuthSessionReply&)> on_done) {
-  AssertOnMountThread();
-  user_data_auth::StartFingerprintAuthSessionReply reply;
-
-  if (!request.has_account_id()) {
-    LOG(ERROR) << "StartFingerprintAuthSessionRequest must have account_id";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
-    LOG(ERROR)
-        << "StartFingerprintAuthSessionRequest must have vaid account_id.";
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(account_id, system_salt_);
-  if (!homedirs_->Exists(obfuscated_username)) {
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND);
-    std::move(on_done).Run(reply);
-    return;
-  }
-
-  fingerprint_manager_->StartAuthSessionAsyncForUser(
-      obfuscated_username,
-      base::BindOnce(&UserDataAuth::OnFingerprintStartAuthSessionResp,
-                     base::Unretained(this), std::move(on_done)));
-}
-
-void UserDataAuth::EndFingerprintAuthSession() {
-  AssertOnMountThread();
-  fingerprint_manager_->EndAuthSession();
 }
 
 user_data_auth::GetWebAuthnSecretReply UserDataAuth::GetWebAuthnSecret(
@@ -2877,14 +2019,14 @@ user_data_auth::GetWebAuthnSecretReply UserDataAuth::GetWebAuthnSecret(
     return reply;
   }
 
-  std::string account_id = GetAccountId(request.account_id());
-  if (account_id.empty()) {
+  Username account_id = GetAccountId(request.account_id());
+  if (account_id->empty()) {
     LOG(ERROR) << "GetWebAuthnSecretRequest must have valid account_id.";
     reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
     return reply;
   }
 
-  scoped_refptr<UserSession> session = GetUserSession(account_id);
+  UserSession* const session = sessions_->Find(account_id);
   std::unique_ptr<brillo::SecureBlob> secret;
   if (session) {
     secret = session->GetWebAuthnSecret();
@@ -2899,72 +2041,132 @@ user_data_auth::GetWebAuthnSecretReply UserDataAuth::GetWebAuthnSecret(
   return reply;
 }
 
+user_data_auth::GetWebAuthnSecretHashReply UserDataAuth::GetWebAuthnSecretHash(
+    const user_data_auth::GetWebAuthnSecretHashRequest& request) {
+  AssertOnMountThread();
+  user_data_auth::GetWebAuthnSecretHashReply reply;
+
+  if (!request.has_account_id()) {
+    LOG(ERROR) << "GetWebAuthnSecretHashRequest must have account_id.";
+    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+    return reply;
+  }
+
+  Username account_id = GetAccountId(request.account_id());
+  if (account_id->empty()) {
+    LOG(ERROR) << "GetWebAuthnSecretHashRequest must have valid account_id.";
+    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+    return reply;
+  }
+
+  const UserSession* const session = sessions_->Find(account_id);
+  brillo::SecureBlob secret_hash;
+  if (session) {
+    secret_hash = session->GetWebAuthnSecretHash();
+  }
+  if (secret_hash.empty()) {
+    LOG(ERROR) << "Failed to get WebAuthn secret hash.";
+    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_KEY_NOT_FOUND);
+    return reply;
+  }
+
+  reply.set_webauthn_secret_hash(secret_hash.to_string());
+  return reply;
+}
+
+user_data_auth::GetHibernateSecretReply UserDataAuth::GetHibernateSecret(
+    const user_data_auth::GetHibernateSecretRequest& request) {
+  AssertOnMountThread();
+  user_data_auth::GetHibernateSecretReply reply;
+
+  // If there's an auth_session_id, use that to create the hibernate
+  // secret on demand (otherwise it's not available until later).
+  if (!request.auth_session_id().empty()) {
+    CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+        GetAuthenticatedAuthSession(request.auth_session_id());
+    if (!auth_session_status.ok()) {
+      LOG(ERROR) << "Invalid AuthSession for HibernateSecret.";
+      reply.set_error(user_data_auth::CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN);
+      return reply;
+    }
+
+    std::unique_ptr<brillo::SecureBlob> secret =
+        auth_session_status.value()->GetHibernateSecret();
+
+    reply.set_hibernate_secret(secret->to_string());
+    return reply;
+  }
+
+  LOG(INFO) << "Getting the hibernate secret via legacy account_id";
+  if (!request.has_account_id()) {
+    LOG(ERROR) << "GetHibernateSecretRequest must have account_id.";
+    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+    return reply;
+  }
+
+  Username account_id = GetAccountId(request.account_id());
+  if (account_id->empty()) {
+    LOG(ERROR) << "GetHibernateSecretRequest must have valid account_id.";
+    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+    return reply;
+  }
+
+  UserSession* const session = sessions_->Find(account_id);
+  std::unique_ptr<brillo::SecureBlob> secret;
+  if (session) {
+    secret = session->GetHibernateSecret();
+  }
+  if (!secret) {
+    LOG(ERROR) << "Failed to get hibernate secret hash.";
+    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_KEY_NOT_FOUND);
+    return reply;
+  }
+
+  reply.set_hibernate_secret(secret->to_string());
+  return reply;
+}
+
+user_data_auth::GetEncryptionInfoReply UserDataAuth::GetEncryptionInfo(
+    const user_data_auth::GetEncryptionInfoRequest& request) {
+  AssertOnMountThread();
+  user_data_auth::GetEncryptionInfoReply reply;
+
+  const bool state = homedirs_->KeylockerForStorageEncryptionEnabled();
+  reply.set_error(user_data_auth::CRYPTOHOME_ERROR_NOT_SET);
+  reply.set_keylocker_supported(state);
+  return reply;
+}
+
 user_data_auth::CryptohomeErrorCode
 UserDataAuth::GetFirmwareManagementParameters(
     user_data_auth::FirmwareManagementParameters* fwmp) {
-  AssertOnOriginThread();
-  if (!firmware_management_parameters_->Load()) {
+  AssertOnMountThread();
+  if (!firmware_management_parameters_->GetFWMP(fwmp)) {
     return user_data_auth::
         CRYPTOHOME_ERROR_FIRMWARE_MANAGEMENT_PARAMETERS_INVALID;
   }
-
-  uint32_t flags;
-  if (firmware_management_parameters_->GetFlags(&flags)) {
-    fwmp->set_flags(flags);
-  } else {
-    LOG(WARNING)
-        << "Failed to GetFlags() for GetFirmwareManagementParameters().";
-    return user_data_auth::
-        CRYPTOHOME_ERROR_FIRMWARE_MANAGEMENT_PARAMETERS_INVALID;
-  }
-
-  std::vector<uint8_t> hash;
-  if (firmware_management_parameters_->GetDeveloperKeyHash(&hash)) {
-    *fwmp->mutable_developer_key_hash() = {hash.begin(), hash.end()};
-  } else {
-    LOG(WARNING) << "Failed to GetDeveloperKeyHash() for "
-                    "GetFirmwareManagementParameters().";
-    return user_data_auth::
-        CRYPTOHOME_ERROR_FIRMWARE_MANAGEMENT_PARAMETERS_INVALID;
-  }
-
   return user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
 }
 
 user_data_auth::CryptohomeErrorCode
 UserDataAuth::SetFirmwareManagementParameters(
     const user_data_auth::FirmwareManagementParameters& fwmp) {
-  AssertOnOriginThread();
-
-  if (!firmware_management_parameters_->Create()) {
+  AssertOnMountThread();
+  if (!firmware_management_parameters_->SetFWMP(fwmp)) {
     return user_data_auth::
         CRYPTOHOME_ERROR_FIRMWARE_MANAGEMENT_PARAMETERS_CANNOT_STORE;
   }
-
-  uint32_t flags = fwmp.flags();
-  std::unique_ptr<std::vector<uint8_t>> hash;
-
-  if (!fwmp.developer_key_hash().empty()) {
-    hash.reset(new std::vector<uint8_t>(fwmp.developer_key_hash().begin(),
-                                        fwmp.developer_key_hash().end()));
-  }
-
-  if (!firmware_management_parameters_->Store(flags, hash.get())) {
-    return user_data_auth::
-        CRYPTOHOME_ERROR_FIRMWARE_MANAGEMENT_PARAMETERS_CANNOT_STORE;
-  }
-
   return user_data_auth::CRYPTOHOME_ERROR_NOT_SET;
 }
 
 bool UserDataAuth::RemoveFirmwareManagementParameters() {
-  AssertOnOriginThread();
+  AssertOnMountThread();
   return firmware_management_parameters_->Destroy();
 }
 
 const brillo::SecureBlob& UserDataAuth::GetSystemSalt() {
   AssertOnOriginThread();
-  DCHECK_NE(system_salt_.size(), 0)
+  CHECK_NE(system_salt_.size(), 0)
       << "Cannot call GetSystemSalt before initialization";
   return system_salt_;
 }
@@ -2974,8 +2176,16 @@ bool UserDataAuth::UpdateCurrentUserActivityTimestamp(int time_shift_sec) {
   // We are touching the sessions object, so we'll need to be on mount thread.
 
   bool success = true;
-  for (const auto& session_pair : sessions_) {
-    success &= session_pair.second->UpdateActivityTimestamp(time_shift_sec);
+  for (const auto& [username, session] : *sessions_) {
+    const ObfuscatedUsername obfuscated_username = SanitizeUserName(username);
+    // Inactive session is not current and ephemerals should not have ts since
+    // they do not affect disk space use and do not participate in disk
+    // cleaning.
+    if (!session.IsActive() || session.IsEphemeral()) {
+      continue;
+    }
+    success &= user_activity_timestamp_manager_->UpdateTimestamp(
+        obfuscated_username, base::Seconds(time_shift_sec));
   }
 
   return success;
@@ -2983,7 +2193,15 @@ bool UserDataAuth::UpdateCurrentUserActivityTimestamp(int time_shift_sec) {
 
 bool UserDataAuth::GetRsuDeviceId(std::string* rsu_device_id) {
   AssertOnOriginThread();
-  return tpm_->GetRsuDeviceId(rsu_device_id);
+
+  hwsec::StatusOr<brillo::Blob> rsu = hwsec_->GetRsuDeviceId();
+  if (!rsu.ok()) {
+    LOG(INFO) << "Failed to get RSU device ID: " << rsu.status();
+    return false;
+  }
+
+  *rsu_device_id = brillo::BlobToString(rsu.value());
+  return true;
 }
 
 bool UserDataAuth::RequiresPowerwash() {
@@ -2994,31 +2212,31 @@ bool UserDataAuth::RequiresPowerwash() {
 
 user_data_auth::CryptohomeErrorCode
 UserDataAuth::LockToSingleUserMountUntilReboot(
-    const cryptohome::AccountIdentifier& account_id) {
+    const AccountIdentifier& account_id) {
   AssertOnOriginThread();
-  const std::string obfuscated_username =
-      SanitizeUserNameWithSalt(GetAccountId(account_id), system_salt_);
+  const ObfuscatedUsername obfuscated_username =
+      SanitizeUserName(GetAccountId(account_id));
 
   homedirs_->SetLockedToSingleUser();
   brillo::Blob pcr_value;
 
-  if (!tpm_->ReadPCR(kTpmSingleUserPCR, &pcr_value)) {
-    LOG(ERROR) << "Failed to read PCR for LockToSingleUserMountUntilReboot()";
+  hwsec::StatusOr<bool> is_current_user_set = hwsec_->IsCurrentUserSet();
+  if (!is_current_user_set.ok()) {
+    LOG(ERROR) << "Failed to get current user status for "
+                  "LockToSingleUserMountUntilReboot(): "
+               << is_current_user_set.status();
     return user_data_auth::CRYPTOHOME_ERROR_FAILED_TO_READ_PCR;
   }
 
-  if (pcr_value != brillo::Blob(pcr_value.size(), 0)) {
+  if (is_current_user_set.value()) {
     return user_data_auth::CRYPTOHOME_ERROR_PCR_ALREADY_EXTENDED;
   }
 
-  brillo::Blob extention_blob(obfuscated_username.begin(),
-                              obfuscated_username.end());
-
-  if (tpm_->GetVersion() == cryptohome::Tpm::TPM_1_2) {
-    extention_blob = Sha1(extention_blob);
-  }
-
-  if (!tpm_->ExtendPCR(kTpmSingleUserPCR, extention_blob)) {
+  if (hwsec::Status status = hwsec_->SetCurrentUser(*obfuscated_username);
+      !status.ok()) {
+    LOG(ERROR)
+        << "Failed to set current user for LockToSingleUserMountUntilReboot(): "
+        << status;
     return user_data_auth::CRYPTOHOME_ERROR_FAILED_TO_EXTEND_PCR;
   }
 
@@ -3027,198 +2245,1865 @@ UserDataAuth::LockToSingleUserMountUntilReboot(
 
 bool UserDataAuth::OwnerUserExists() {
   AssertOnOriginThread();
-  std::string owner;
+  Username owner;
   return homedirs_->GetPlainOwner(&owner);
 }
 
-std::string UserDataAuth::GetStatusString() {
-  AssertOnMountThread();
-
-  base::Value mounts(base::Value::Type::LIST);
-  for (const auto& session_pair : sessions_) {
-    mounts.Append(session_pair.second->GetStatus());
-  }
-  auto attrs = install_attrs_->GetStatus();
-
-  Tpm::TpmStatusInfo tpm_status_info;
-  CryptohomeKeyLoader* rsa_key_loader =
-      cryptohome_keys_manager_->GetKeyLoader(CryptohomeKeyType::kRSA);
-  if (rsa_key_loader && rsa_key_loader->HasCryptohomeKey()) {
-    tpm_->GetStatus(rsa_key_loader->GetCryptohomeKey(), &tpm_status_info);
-  } else {
-    tpm_->GetStatus(base::nullopt, &tpm_status_info);
-  }
-
-  base::Value tpm(base::Value::Type::DICTIONARY);
-  tpm.SetBoolKey("can_connect", tpm_status_info.can_connect);
-  tpm.SetBoolKey("can_load_srk", tpm_status_info.can_load_srk);
-  tpm.SetBoolKey("can_load_srk_pubkey",
-                 tpm_status_info.can_load_srk_public_key);
-  tpm.SetBoolKey("srk_vulnerable_roca", tpm_status_info.srk_vulnerable_roca);
-  tpm.SetBoolKey("has_cryptohome_key", tpm_status_info.has_cryptohome_key);
-  tpm.SetBoolKey("can_encrypt", tpm_status_info.can_encrypt);
-  tpm.SetBoolKey("can_decrypt", tpm_status_info.can_decrypt);
-  tpm.SetBoolKey("has_context", tpm_status_info.this_instance_has_context);
-  tpm.SetBoolKey("has_key_handle",
-                 tpm_status_info.this_instance_has_key_handle);
-  tpm.SetIntKey("last_error", tpm_status_info.last_tpm_error);
-
-  tpm.SetBoolKey("enabled", tpm_->IsEnabled());
-  tpm.SetBoolKey("owned", tpm_->IsOwned());
-
-  base::Value dv(base::Value::Type::DICTIONARY);
-  dv.SetKey("mounts", std::move(mounts));
-  dv.SetKey("installattrs", std::move(attrs));
-  dv.SetKey("tpm", std::move(tpm));
-  std::string json;
-  base::JSONWriter::WriteWithOptions(dv, base::JSONWriter::OPTIONS_PRETTY_PRINT,
-                                     &json);
-  return json;
-}
-
-void UserDataAuth::ResetDictionaryAttackMitigation() {
-  AssertOnMountThread();
-
-  // The delegate information is not used.
-  brillo::Blob unused_blob;
-  if (!tpm_->ResetDictionaryAttackMitigation(unused_blob, unused_blob)) {
-    LOG(WARNING) << "Failed to reset DA";
-  }
-}
-
-void UserDataAuth::UploadAlertsDataCallback() {
-  AssertOnMountThread();
-
-  Tpm::AlertsData alerts;
-
-  CHECK(tpm_);
-  if (TPMErrorBase err = tpm_->GetAlertsData(&alerts)) {
-    // TODO(b/141294469): Change the code to retry even when it fails.
-    LOG(INFO) << "The TPM chip does not support GetAlertsData. Stop "
-                 "UploadAlertsData task: "
-              << *err;
-  } else {
-    ReportAlertsData(alerts);
-
-    PostTaskToMountThread(
-        FROM_HERE,
-        base::BindOnce(&UserDataAuth::UploadAlertsDataCallback,
-                       base::Unretained(this)),
-        base::TimeDelta::FromMilliseconds(upload_alerts_period_ms_));
-  }
-}
-
-void UserDataAuth::SeedUrandom() {
+bool UserDataAuth::IsArcQuotaSupported() {
   AssertOnOriginThread();
-
-  brillo::Blob random;
-  if (TPMErrorBase err =
-          tpm_->GetRandomDataBlob(kDefaultRandomSeedLength, &random)) {
-    LOG(ERROR) << "Could not get random data from the TPM " << *err;
-  }
-  if (!platform_->WriteFile(FilePath(kDefaultEntropySourcePath), random)) {
-    LOG(ERROR) << "Error writing data to " << kDefaultEntropySourcePath;
-  }
+  // Quota is not supported if there are one or more unmounted Android users.
+  // (b/181159107)
+  return homedirs_->GetUnmountedAndroidDataCount() == 0;
 }
 
-bool UserDataAuth::StartAuthSession(
+void UserDataAuth::StartAuthSession(
     user_data_auth::StartAuthSessionRequest request,
     base::OnceCallback<void(const user_data_auth::StartAuthSessionReply&)>
         on_done) {
   AssertOnMountThread();
-  // The lifetime of UserDataAuth instance will outlast AuthSession which is why
-  // usage of |Unretained| is safe.
-  auto on_timeout = base::BindOnce(&UserDataAuth::RemoveAuthSessionWithToken,
-                                   base::Unretained(this));
-  // Assumption here is that keyset_management_ will outlive this AuthSession.
-  std::unique_ptr<AuthSession> auth_session = std::make_unique<AuthSession>(
-      request.account_id().account_id(), request.flags(), std::move(on_timeout),
-      keyset_management_);
   user_data_auth::StartAuthSessionReply reply;
-  base::Optional<std::string> serialized_string =
-      AuthSession::GetSerializedStringFromToken(auth_session->token());
-  if (!serialized_string.has_value()) {
-    reply.set_error(user_data_auth::CRYPTOHOME_TOKEN_SERIALIZATION_FAILED);
-    LOG(ERROR) << "Error converting token to string";
-    std::move(on_done).Run(reply);
-    return false;
+
+  if (request.intent() == user_data_auth::AUTH_INTENT_UNSPECIFIED) {
+    // TODO(b/240596931): Stop allowing the UNSPECIFIED value after Chrome's
+    // change to populate this field lives for some time.
+    request.set_intent(user_data_auth::AUTH_INTENT_DECRYPT);
   }
-  reply.set_auth_session_id(serialized_string.value());
+  std::optional<AuthIntent> auth_intent = AuthIntentFromProto(request.intent());
+  if (!auth_intent.has_value()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthNoIntentInStartAuthSession),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot}),
+            user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL));
+    return;
+  }
+
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      auth_session_manager_->CreateAuthSession(
+          GetAccountId(request.account_id()), request.flags(), *auth_intent);
+  if (!auth_session_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthCreateFailedInStartAuthSession),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot}))
+            .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+  AuthSession* auth_session = auth_session_status.value().Get();
+
+  reply.set_auth_session_id(auth_session->serialized_token());
+  reply.set_broadcast_id(auth_session->serialized_public_token());
   reply.set_user_exists(auth_session->user_exists());
-  google::protobuf::Map<std::string, cryptohome::KeyData> proto_key_map(
-      auth_session->key_label_data().begin(),
-      auth_session->key_label_data().end());
-  *(reply.mutable_key_label_data()) = proto_key_map;
-  auth_sessions_[auth_session->token()] = std::move(auth_session);
-  std::move(on_done).Run(reply);
 
-  return true;
+  if (auth_session->auth_factor_map().empty() &&
+      (auth_session->user_exists() && !auth_session->ephemeral_user())) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthNotConfiguredInStartAuthSession),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kDeleteVault,
+                            PossibleAction::kAuth}),
+            user_data_auth::CryptohomeErrorCode::
+                CRYPTOHOME_ERROR_UNUSABLE_VAULT));
+    return;
+  }
+
+  // Discover any available auth factors from the AuthSession.
+  std::set<std::string> listed_auth_factor_labels;
+  for (AuthFactorMap::ValueView stored_auth_factor :
+       auth_session->auth_factor_map()) {
+    const AuthFactor& auth_factor = stored_auth_factor.auth_factor();
+    AuthFactorDriver& factor_driver =
+        auth_factor_driver_manager_->GetDriver(auth_factor.type());
+
+    std::optional<user_data_auth::AuthFactor> proto_factor =
+        factor_driver.ConvertToProto(auth_factor.label(),
+                                     auth_factor.metadata());
+    if (proto_factor.has_value()) {
+      // Only output one factor per label.
+      auto [unused, was_inserted] =
+          listed_auth_factor_labels.insert(auth_factor.label());
+      if (!was_inserted) {
+        continue;
+      }
+
+      // Only populate reply with AuthFactors that support the intended form of
+      // authentication.
+      // AuthFactorWithStatus is populated irresptive of what is available or
+      // not.
+      auto user_policy_file_status =
+          LoadUserPolicyFile(auth_session->obfuscated_username());
+      if (!user_policy_file_status.ok()) {
+        ReplyWithError(
+            std::move(on_done), reply,
+            MakeStatus<CryptohomeError>(
+                CRYPTOHOME_ERR_LOC(
+                    kLocCouldntLoadUserPolicyFileInStartAuthSession),
+                ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                                PossibleAction::kReboot})));
+        return;
+      }
+      auto user_policy = (*user_policy_file_status)->GetUserPolicy();
+      if (!user_policy.has_value()) {
+        ReplyWithError(
+            std::move(on_done), reply,
+            MakeStatus<CryptohomeError>(
+                CRYPTOHOME_ERR_LOC(kLocCouldntGetUserPolicyInStartAuthSession),
+                ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                                PossibleAction::kReboot})));
+        return;
+      }
+      auto supported_intents = GetFullAuthAvailableIntents(
+          auth_session->obfuscated_username(), auth_factor,
+          *auth_factor_driver_manager_,
+          GetAuthFactorPolicyFromUserPolicy(user_policy, auth_factor.type()));
+      std::optional<AuthIntent> requested_intent =
+          AuthIntentFromProto(request.intent());
+      user_data_auth::AuthFactorWithStatus auth_factor_with_status;
+      auth_factor_with_status.mutable_auth_factor()->CopyFrom(
+          proto_factor.value());
+
+      for (const auto& auth_intent : supported_intents) {
+        auth_factor_with_status.add_available_for_intents(
+            AuthIntentToProto(auth_intent));
+        if (requested_intent && auth_intent == requested_intent) {
+          *reply.add_auth_factors() = std::move(*proto_factor);
+        }
+      }
+      auto delay = factor_driver.GetFactorDelay(
+          auth_session->obfuscated_username(), auth_factor);
+      if (delay.ok()) {
+        auth_factor_with_status.mutable_status_info()->set_time_available_in(
+            delay->is_max() ? std::numeric_limits<uint64_t>::max()
+                            : delay->InMilliseconds());
+      }
+      *reply.add_configured_auth_factors_with_status() =
+          std::move(auth_factor_with_status);
+    }
+  }
+
+  // The associated UserSession (if there is one) may also have some factors of
+  // its own, via verifiers. However, these are only available if the request is
+  // for a verify-only session.
+  //
+  // This is done after the persistent factors are looked up because if a
+  // persistent factor also has a verifier then we only want output from the
+  // persistent factor data.
+  if (request.intent() == user_data_auth::AUTH_INTENT_VERIFY_ONLY) {
+    if (UserSession* user_session =
+            sessions_->Find(GetAccountId(request.account_id()))) {
+      for (const CredentialVerifier* verifier :
+           user_session->GetCredentialVerifiers()) {
+        const AuthFactorDriver& factor_driver =
+            auth_factor_driver_manager_->GetDriver(
+                verifier->auth_factor_type());
+        if (auto proto_factor = factor_driver.ConvertToProto(
+                verifier->auth_factor_label(),
+                verifier->auth_factor_metadata())) {
+          auto [unused, was_inserted] =
+              listed_auth_factor_labels.insert(verifier->auth_factor_label());
+          if (was_inserted) {
+            user_data_auth::AuthFactorWithStatus auth_factor_with_status;
+            auth_factor_with_status.mutable_auth_factor()->CopyFrom(
+                *proto_factor);
+            auth_factor_with_status.add_available_for_intents(
+                AuthIntentToProto(AuthIntent::kVerifyOnly));
+            *reply.add_auth_factors() = std::move(*proto_factor);
+            *reply.add_configured_auth_factors_with_status() =
+                std::move(auth_factor_with_status);
+          }
+        }
+      }
+    }
+  }
+
+  ReplyWithError(std::move(on_done), reply, OkStatus<CryptohomeError>());
 }
 
-void UserDataAuth::RemoveAuthSessionWithToken(
-    const base::UnguessableToken& token) {
-  AssertOnMountThread();
-  auth_sessions_.erase(token);
-}
-
-bool UserDataAuth::AddCredentials(
-    user_data_auth::AddCredentialsRequest request,
-    base::OnceCallback<void(const user_data_auth::AddCredentialsReply&)>
+void UserDataAuth::InvalidateAuthSession(
+    user_data_auth::InvalidateAuthSessionRequest request,
+    base::OnceCallback<void(const user_data_auth::InvalidateAuthSessionReply&)>
         on_done) {
   AssertOnMountThread();
-  base::Optional<base::UnguessableToken> token =
-      AuthSession::GetTokenFromSerializedString(request.auth_session_id());
-  user_data_auth::AddCredentialsReply reply;
-  if (!token.has_value() ||
-      auth_sessions_.find(token.value()) == auth_sessions_.end()) {
-    reply.set_error(user_data_auth::CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN);
-    std::move(on_done).Run(reply);
-    return false;
+
+  user_data_auth::InvalidateAuthSessionReply reply;
+  if (auth_session_manager_->RemoveAuthSession(request.auth_session_id())) {
+    LOG(INFO) << "AuthSession: invalidated.";
   }
 
-  // Additional check if the user wants to add new credentials for an existing
-  // user.
-  if (request.add_more_credentials() &&
-      !auth_sessions_[token.value()]->user_exists()) {
-    reply.set_error(user_data_auth::CRYPTOHOME_ERROR_AUTHORIZATION_KEY_DENIED);
-    std::move(on_done).Run(reply);
-    return false;
-  }
-
-  // Add credentials using data in AuthorizationRequest and
-  // auth_session_token.
-  user_data_auth::CryptohomeErrorCode error =
-      auth_sessions_[token.value()]->AddCredentials(request);
-  reply.set_error(error);
-  std::move(on_done).Run(reply);
-  return true;
+  ReplyWithError(std::move(on_done), reply, OkStatus<CryptohomeError>());
 }
 
-bool UserDataAuth::AuthenticateAuthSession(
-    user_data_auth::AuthenticateAuthSessionRequest request,
-    base::OnceCallback<
-        void(const user_data_auth::AuthenticateAuthSessionReply&)> on_done) {
+void UserDataAuth::ExtendAuthSession(
+    user_data_auth::ExtendAuthSessionRequest request,
+    base::OnceCallback<void(const user_data_auth::ExtendAuthSessionReply&)>
+        on_done) {
   AssertOnMountThread();
-  base::Optional<base::UnguessableToken> token =
-      AuthSession::GetTokenFromSerializedString(request.auth_session_id());
-  user_data_auth::AuthenticateAuthSessionReply reply;
-  if (!token.has_value() ||
-      auth_sessions_.find(token.value()) == auth_sessions_.end()) {
-    reply.set_error(user_data_auth::CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN);
-    std::move(on_done).Run(reply);
-    return false;
+
+  user_data_auth::ExtendAuthSessionReply reply;
+  // Fetch only authenticated authsession. This is because the timer only runs
+  // AuthSession is authenticated. If the timer is not running, then there is
+  // nothing to extend.
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    ReplyWithError(std::move(on_done), reply,
+                   MakeStatus<CryptohomeError>(
+                       CRYPTOHOME_ERR_LOC(
+                           kLocUserDataAuthSessionNotFoundInExtendAuthSession))
+                       .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+  InUseAuthSession& auth_session = *auth_session_status;
+
+  // Extend specified AuthSession.
+  auto timer_extension = request.extension_duration() != 0
+                             ? base::Seconds(request.extension_duration())
+                             : kDefaultExtensionTime;
+  CryptohomeStatus ret = auth_session.ExtendTimeout(timer_extension);
+
+  CryptohomeStatus err = OkStatus<CryptohomeError>();
+  if (!ret.ok()) {
+    // TODO(b/229688435): Wrap the error after AuthSession is migrated to use
+    // CryptohomeError.
+    err =
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthExtendFailedInExtendAuthSession))
+            .Wrap(std::move(ret));
+  }
+  reply.set_seconds_left(auth_session.GetRemainingTime().InSeconds());
+  ReplyWithError(std::move(on_done), reply, std::move(err));
+}
+
+CryptohomeStatusOr<InUseAuthSession> UserDataAuth::GetAuthenticatedAuthSession(
+    const std::string& auth_session_id) {
+  AssertOnMountThread();
+
+  // Check if the token refers to a valid AuthSession.
+  InUseAuthSession auth_session =
+      auth_session_manager_->FindAuthSession(auth_session_id);
+  CryptohomeStatus auth_session_status = auth_session.AuthSessionStatus();
+  if (!auth_session_status.ok()) {
+    LOG(ERROR) << "AuthSession not found.";
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(kLocUserDataAuthSessionNotFoundInGetAuthedAS),
+               ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                               PossibleAction::kReboot}),
+               user_data_auth::CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN)
+        .Wrap(std::move(auth_session_status));
   }
 
-  // Perform authentication using data in AuthorizationRequest and
-  // auth_session_token.
-  user_data_auth::CryptohomeErrorCode error =
-      auth_sessions_[token.value()]->Authenticate(request.authorization());
-  // TODO(crbug.com/1157622) : Complete the API with actual authentication.
-  reply.set_error(error);
-  reply.set_authenticated(auth_sessions_[token.value()]->GetStatus() ==
-                          AuthStatus::kAuthStatusAuthenticated);
-  std::move(on_done).Run(reply);
-  return false;
+  // Check if the AuthSession is properly authenticated.
+  if (!auth_session->authorized_intents().contains(AuthIntent::kDecrypt)) {
+    LOG(ERROR) << "AuthSession is not authenticated.";
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocUserDataAuthSessionNotAuthedInGetAuthedAS),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot}),
+        user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+  }
+
+  return auth_session;
+}
+
+ObfuscatedUsername UserDataAuth::SanitizedUserNameForSession(
+    const std::string& auth_session_id) {
+  InUseAuthSession auth_session =
+      auth_session_manager_->FindAuthSession(auth_session_id);
+  if (!auth_session.AuthSessionStatus().ok()) {
+    return ObfuscatedUsername();
+  }
+  return auth_session->obfuscated_username();
+}
+
+CryptohomeStatusOr<UserSession*> UserDataAuth::GetMountableUserSession(
+    AuthSession* auth_session) {
+  AssertOnMountThread();
+
+  const ObfuscatedUsername& obfuscated_username =
+      auth_session->obfuscated_username();
+
+  // Check no guest is mounted.
+  UserSession* const guest_session = sessions_->Find(guest_user_);
+  if (guest_session && guest_session->IsActive()) {
+    LOG(ERROR) << "Can not mount non-anonymous while guest session is active.";
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocUserDataAuthGuestAlreadyMountedInGetMountableUS),
+        ErrorActionSet({PossibleAction::kReboot}),
+        user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
+  }
+
+  // Check the user is not already mounted.
+  UserSession* const session = GetOrCreateUserSession(auth_session->username());
+  if (session->IsActive()) {
+    LOG(ERROR) << "User is already mounted: " << obfuscated_username;
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthSessionAlreadyMountedInGetMountableUS),
+        ErrorActionSet({PossibleAction::kReboot}),
+        user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
+  }
+
+  return session;
+}
+
+void UserDataAuth::PreMountHook(const ObfuscatedUsername& obfuscated_username) {
+  AssertOnMountThread();
+
+  LOG(INFO) << "Started mounting for: " << obfuscated_username;
+
+  // Any non-guest mount attempt triggers InstallAttributes finalization.
+  // The return value is ignored as it is possible we're pre-ownership.
+  // The next login will assure finalization if possible.
+  if (install_attrs_->status() ==
+      InstallAttributesInterface::Status::kFirstInstall) {
+    std::ignore = install_attrs_->Finalize();
+  }
+  // Removes all ephemeral cryptohomes owned by anyone other than the owner
+  // user (if set) and non ephemeral users, regardless of free disk space.
+  // Note that a fresh policy value is read here, which in theory can conflict
+  // with the one used for calculation of |mount_args.is_ephemeral|. However,
+  // this inconsistency (whose probability is anyway pretty low in practice)
+  // should only lead to insignificant transient glitches, like an attempt to
+  // mount a non existing anymore cryptohome.
+  homedirs_->RemoveCryptohomesBasedOnPolicy();
+}
+
+void UserDataAuth::PostMountHook(UserSession* user_session,
+                                 const MountStatus& status) {
+  AssertOnMountThread();
+
+  if (!status.ok()) {
+    LOG(ERROR) << "Finished mounting with status code: " << status;
+    return;
+  }
+  LOG(INFO) << "Mount succeeded.";
+  InitializePkcs11(user_session);
+}
+
+EncryptedContainerType UserDataAuth::DbusEncryptionTypeToContainerType(
+    user_data_auth::VaultEncryptionType type) {
+  switch (type) {
+    case user_data_auth::VaultEncryptionType::CRYPTOHOME_VAULT_ENCRYPTION_ANY:
+      return EncryptedContainerType::kUnknown;
+    case user_data_auth::VaultEncryptionType::
+        CRYPTOHOME_VAULT_ENCRYPTION_ECRYPTFS:
+      return EncryptedContainerType::kEcryptfs;
+    case user_data_auth::VaultEncryptionType::
+        CRYPTOHOME_VAULT_ENCRYPTION_FSCRYPT:
+      return EncryptedContainerType::kFscrypt;
+    case user_data_auth::VaultEncryptionType::
+        CRYPTOHOME_VAULT_ENCRYPTION_DMCRYPT:
+      return EncryptedContainerType::kDmcrypt;
+    default:
+      // Default cuz proto3 enum sentinels, that's why -_-
+      return EncryptedContainerType::kUnknown;
+  }
+}
+
+void UserDataAuth::PrepareGuestVault(
+    user_data_auth::PrepareGuestVaultRequest request,
+    base::OnceCallback<void(const user_data_auth::PrepareGuestVaultReply&)>
+        on_done) {
+  AssertOnMountThread();
+
+  LOG(INFO) << "Preparing guest vault";
+  user_data_auth::PrepareGuestVaultReply reply;
+  CryptohomeStatus status = PrepareGuestVaultImpl();
+  reply.set_sanitized_username(*SanitizeUserName(guest_user_));
+  ReplyWithError(std::move(on_done), reply, status);
+  return;
+}
+
+void UserDataAuth::PrepareEphemeralVault(
+    user_data_auth::PrepareEphemeralVaultRequest request,
+    base::OnceCallback<void(const user_data_auth::PrepareEphemeralVaultReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::PrepareEphemeralVaultReply reply;
+
+  LOG(INFO) << "Preparing ephemeral vault";
+  CryptohomeStatus status =
+      PrepareEphemeralVaultImpl(request.auth_session_id());
+
+  if (status.ok()) {
+    InUseAuthSession auth_session =
+        auth_session_manager_->FindAuthSession(request.auth_session_id());
+    PopulateAuthSessionProperties(auth_session,
+                                  reply.mutable_auth_properties());
+    reply.set_sanitized_username(*auth_session->obfuscated_username());
+  }
+
+  ReplyWithError(std::move(on_done), std::move(reply), std::move(status));
+}
+
+void UserDataAuth::PreparePersistentVault(
+    user_data_auth::PreparePersistentVaultRequest request,
+    base::OnceCallback<void(const user_data_auth::PreparePersistentVaultReply&)>
+        on_done) {
+  AssertOnMountThread();
+
+  LOG(INFO) << "Preparing persistent vault";
+  CryptohomeVault::Options options = {
+      .force_type =
+          DbusEncryptionTypeToContainerType(request.encryption_type()),
+      .block_ecryptfs = request.block_ecryptfs(),
+  };
+  CryptohomeStatus status =
+      PreparePersistentVaultImpl(request.auth_session_id(), options);
+
+  const ObfuscatedUsername obfuscated_username =
+      SanitizedUserNameForSession(request.auth_session_id());
+  if (status.ok() && !obfuscated_username->empty()) {
+    // Send UMA with VK stats once per successful mount operation.
+    keyset_management_->RecordAllVaultKeysetMetrics(obfuscated_username);
+  }
+  user_data_auth::PreparePersistentVaultReply reply;
+  reply.set_sanitized_username(*obfuscated_username);
+  ReplyWithError(std::move(on_done), reply, status);
+}
+
+void UserDataAuth::PrepareVaultForMigration(
+    user_data_auth::PrepareVaultForMigrationRequest request,
+    base::OnceCallback<
+        void(const user_data_auth::PrepareVaultForMigrationReply&)> on_done) {
+  AssertOnMountThread();
+
+  LOG(INFO) << "Preparing vault for migration";
+  CryptohomeVault::Options options = {
+      .migrate = true,
+  };
+  user_data_auth::PrepareVaultForMigrationReply reply;
+  CryptohomeStatus status =
+      PreparePersistentVaultImpl(request.auth_session_id(), options);
+  reply.set_sanitized_username(
+      *SanitizedUserNameForSession(request.auth_session_id()));
+  ReplyWithError(std::move(on_done), reply, status);
+}
+
+void UserDataAuth::CreatePersistentUser(
+    user_data_auth::CreatePersistentUserRequest request,
+    base::OnceCallback<void(const user_data_auth::CreatePersistentUserReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::CreatePersistentUserReply reply;
+
+  LOG(INFO) << "Creating persistent user";
+  // Record current time for timing how long CreatePersistentUserImpl will
+  // take.
+  auto start_time = base::TimeTicks::Now();
+
+  StatusChain<CryptohomeError> ret =
+      CreatePersistentUserImpl(request.auth_session_id());
+
+  ReportTimerDuration(kCreatePersistentUserTimer, start_time, "");
+
+  if (ret.ok()) {
+    InUseAuthSession auth_session =
+        auth_session_manager_->FindAuthSession(request.auth_session_id());
+    PopulateAuthSessionProperties(auth_session,
+                                  reply.mutable_auth_properties());
+    reply.set_sanitized_username(*auth_session->obfuscated_username());
+  }
+  ReplyWithError(std::move(on_done), std::move(reply), std::move(ret));
+}
+
+CryptohomeStatus UserDataAuth::PrepareGuestVaultImpl() {
+  AssertOnMountThread();
+
+  // If there are no active sessions, attempt to account for cryptohome restarts
+  // after crashing.
+  if (sessions_->size() != 0 || CleanUpStaleMounts(false)) {
+    LOG(ERROR) << "Can not mount guest while other sessions are active.";
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthOtherSessionActiveInPrepareGuestVault),
+        ErrorActionSet({PossibleAction::kReboot}),
+        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL);
+  }
+
+  UserSession* const session = GetOrCreateUserSession(guest_user_);
+
+  LOG(INFO) << "Started mounting for guest";
+  ReportTimerStart(kMountGuestExTimer);
+  MountStatus status = session->MountGuest();
+  ReportTimerStop(kMountGuestExTimer);
+  if (!status.ok()) {
+    CHECK(status->mount_error() != MOUNT_ERROR_NONE);
+    LOG(ERROR) << "Finished mounting with status code: "
+               << status->mount_error();
+    RemoveInactiveUserSession(guest_user_);
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthMountFailedInPrepareGuestVault))
+        .Wrap(std::move(status));
+  }
+  LOG(INFO) << "Mount succeeded.";
+  return OkStatus<CryptohomeError>();
+}
+
+CryptohomeStatus UserDataAuth::PrepareEphemeralVaultImpl(
+    const std::string& auth_session_id) {
+  AssertOnMountThread();
+
+  // If there are no active sessions, attempt to account for cryptohome restarts
+  // after crashing.
+  if (sessions_->size() != 0 || CleanUpStaleMounts(false)) {
+    LOG(ERROR) << "Can not mount ephemeral while other sessions are active.";
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthOtherSessionActiveInPrepareEphemeralVault),
+        ErrorActionSet({PossibleAction::kReboot}),
+        user_data_auth::CryptohomeErrorCode::
+            CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
+  }
+
+  InUseAuthSession auth_session =
+      auth_session_manager_->FindAuthSession(auth_session_id);
+  CryptohomeStatus auth_session_status = auth_session.AuthSessionStatus();
+  if (!auth_session_status.ok()) {
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthNoAuthSessionInPrepareEphemeralVault),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot}),
+        user_data_auth::CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN);
+  }
+
+  if (!auth_session->ephemeral_user()) {
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthNonEphemeralAuthSessionInPrepareEphemeralVault),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot, PossibleAction::kPowerwash}),
+        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+  }
+
+  CryptohomeStatusOr<UserSession*> session_status =
+      GetMountableUserSession(auth_session.Get());
+  if (!session_status.ok()) {
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthGetSessionFailedInPrepareEphemeralVault))
+        .Wrap(std::move(session_status).err_status());
+  }
+
+  PreMountHook(auth_session->obfuscated_username());
+  ReportTimerStart(kMountExTimer);
+  MountStatus mount_status =
+      session_status.value()->MountEphemeral(auth_session->username());
+  ReportTimerStop(kMountExTimer);
+  PostMountHook(session_status.value(), mount_status);
+  if (!mount_status.ok()) {
+    RemoveInactiveUserSession(auth_session->username());
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthMountFailedInPrepareEphemeralVault))
+        .Wrap(std::move(mount_status).err_status());
+  }
+
+  // Let the auth session perform any finalization operations for a newly
+  // created user.
+  CryptohomeStatus ret = auth_session->OnUserCreated();
+  if (!ret.ok()) {
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthFinalizeFailedInPrepareEphemeralVault))
+        .Wrap(std::move(ret));
+  }
+  return OkStatus<CryptohomeError>();
+}
+
+CryptohomeStatus UserDataAuth::PreparePersistentVaultImpl(
+    const std::string& auth_session_id,
+    const CryptohomeVault::Options& vault_options) {
+  AssertOnMountThread();
+
+  // If there are no active sessions, attempt to account for cryptohome restarts
+  // after crashing.
+  if (sessions_->empty()) {
+    CleanUpStaleMounts(false);
+  }
+
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(auth_session_id);
+  if (!auth_session_status.ok()) {
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthNoAuthSessionInPreparePersistentVault))
+        .Wrap(std::move(auth_session_status).err_status());
+  }
+
+  if (auth_session_status.value()->ephemeral_user()) {
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthEphemeralAuthSessionAttemptPreparePersistentVault),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kDeleteVault, PossibleAction::kReboot,
+                        PossibleAction::kPowerwash}),
+        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+  }
+
+  const ObfuscatedUsername& obfuscated_username =
+      auth_session_status.value()->obfuscated_username();
+  if (!homedirs_->Exists(obfuscated_username)) {
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocUserDataAuthNonExistentInPreparePersistentVault),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kDeleteVault, PossibleAction::kReboot,
+                        PossibleAction::kPowerwash}),
+        user_data_auth::CryptohomeErrorCode::
+            CRYPTOHOME_ERROR_ACCOUNT_NOT_FOUND);
+  }
+
+  CryptohomeStatusOr<UserSession*> session_status =
+      GetMountableUserSession(auth_session_status.value().Get());
+  if (!session_status.ok()) {
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthGetSessionFailedInPreparePersistentVault))
+        .Wrap(std::move(session_status).err_status());
+  }
+
+  PreMountHook(obfuscated_username);
+  if (low_disk_space_handler_) {
+    low_disk_space_handler_->disk_cleanup()->FreeDiskSpaceDuringLogin(
+        obfuscated_username);
+  }
+  ReportTimerStart(kMountExTimer);
+  MountStatus mount_status = session_status.value()->MountVault(
+      auth_session_status.value()->username(),
+      auth_session_status.value()->file_system_keyset(), vault_options);
+  ReportTimerStop(kMountExTimer);
+  PostMountHook(session_status.value(), mount_status);
+  if (!mount_status.ok()) {
+    RemoveInactiveUserSession(auth_session_status.value()->username());
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthMountFailedInPreparePersistentVault))
+        .Wrap(std::move(mount_status).err_status());
+  }
+  return OkStatus<CryptohomeError>();
+}
+
+CryptohomeStatus UserDataAuth::CreatePersistentUserImpl(
+    const std::string& auth_session_id) {
+  AssertOnMountThread();
+
+  InUseAuthSession auth_session =
+      auth_session_manager_->FindAuthSession(auth_session_id);
+  CryptohomeStatus auth_session_status = auth_session.AuthSessionStatus();
+  if (!auth_session_status.ok()) {
+    LOG(ERROR) << "AuthSession not found.";
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthSessionNotFoundInCreatePersistentUser),
+               ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                               PossibleAction::kReboot}),
+               user_data_auth::CryptohomeErrorCode::
+                   CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN)
+        .Wrap(std::move(auth_session_status));
+  }
+
+  if (auth_session->ephemeral_user()) {
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthEphemeralAuthSessionAttemptCreatePersistentUser),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot, PossibleAction::kPowerwash}),
+        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+  }
+
+  const ObfuscatedUsername& obfuscated_username =
+      auth_session->obfuscated_username();
+
+  // This checks presence of the actual encrypted vault. We fail if Create is
+  // called while actual persistent vault is present.
+  auto exists_or = homedirs_->CryptohomeExists(obfuscated_username);
+  if (exists_or.ok() && exists_or.value()) {
+    LOG(ERROR) << "User already exists: " << obfuscated_username;
+    // TODO(b/208898186, dlunev): replace with a more appropriate error
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocUserDataAuthUserExistsInCreatePersistentUser),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kDeleteVault}),
+        user_data_auth::CryptohomeErrorCode::
+            CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
+  }
+
+  if (!exists_or.ok()) {
+    MountError mount_error = exists_or.err_status()->error();
+    LOG(ERROR) << "Failed to query vault existance for: " << obfuscated_username
+               << ", code: " << mount_error;
+    return MakeStatus<CryptohomeMountError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthCheckExistsFailedInCreatePersistentUser),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot}),
+        mount_error, MountErrorToCryptohomeError(mount_error));
+  }
+
+  // This check seems superfluous after the `HomeDirs::CryptohomeExists()` check
+  // above, but it can happen that the user directory exists without any vault
+  // in it. We perform both checks for completeness and also to distinguish
+  // between these two error cases in metrics and logs.
+  if (auth_session->user_exists()) {
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocUserDataAuthUserDirExistsInCreatePersistentUser),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kDeleteVault,
+                        PossibleAction::kPowerwash}),
+        user_data_auth::CRYPTOHOME_ERROR_MOUNT_MOUNT_POINT_BUSY);
+  }
+
+  // This checks and creates if missing the user's directory in shadow root.
+  // We need to disambiguate with vault presence, because it is possible that
+  // we have an empty shadow root directory for the user left behind after
+  // removing a profile (due to a bug or for some other reasons). To avoid weird
+  // failures in the case, just let the creation succeed, since the user is
+  // effectively not there. Eventually |Exists| will check for the presence of
+  // the USS/auth factors to determine if the user is intended to be there.
+  // This call will not create the actual volume (for efficiency, idempotency,
+  // and because that would require going the full sequence of mount and unmount
+  // because of ecryptfs possibility).
+  if (!homedirs_->Exists(obfuscated_username) &&
+      !homedirs_->Create(auth_session->username())) {
+    LOG(ERROR) << "Failed to create shadow directory for: "
+               << obfuscated_username;
+    return MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocUserDataAuthCreateFailedInCreatePersistentUser),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot, PossibleAction::kPowerwash}),
+        user_data_auth::CryptohomeErrorCode::
+            CRYPTOHOME_ERROR_BACKING_STORE_FAILURE);
+  }
+
+  // Let the auth session perform any finalization operations for a newly
+  // created user.
+  CryptohomeStatus ret = auth_session->OnUserCreated();
+  if (!ret.ok()) {
+    return MakeStatus<CryptohomeError>(
+               CRYPTOHOME_ERR_LOC(
+                   kLocUserDataAuthFinalizeFailedInCreatePersistentUser))
+        .Wrap(std::move(ret));
+  }
+  return OkStatus<CryptohomeError>();
+}
+
+void UserDataAuth::EvictDeviceKey(
+    user_data_auth::EvictDeviceKeyRequest request,
+    base::OnceCallback<void(const user_data_auth::EvictDeviceKeyReply&)>
+        on_done) {
+  // This method touches the |sessions_| object so it needs to run on
+  // |mount_thread_|
+  AssertOnMountThread();
+  user_data_auth::EvictDeviceKeyReply reply;
+  // This loops through all active and mounted user sessions and evicts the
+  // device key for each one. In practice having multiple mounts is not an
+  // expected use case, but as a user_id is not specified, it should iterate
+  // through all the active sessions. We consider "cryptohome" to be mounted if
+  // any existing session is mounted.
+  std::optional<CryptohomeStatus> eviction_result = std::nullopt;
+  for (const auto& [unused, session] : *sessions_) {
+    // Check if the session is actively mounted.
+    const ObfuscatedUsername obfuscated_username =
+        SanitizeUserName(session.GetUsername());
+    if (!session.IsActive()) {
+      LOG(ERROR) << "Session is not mounted: " << obfuscated_username;
+      continue;
+    }
+
+    if (!homedirs_->Exists(obfuscated_username)) {
+      LOG(ERROR) << "Home directory of " << obfuscated_username
+                 << "does not exist.";
+      continue;
+    }
+
+    // An active and mounted session was found.
+    MountStatus mount_status = session.EvictDeviceKey();
+    if (!mount_status.ok()) {
+      LOG(ERROR) << "Couldn't evict key of " << obfuscated_username;
+      // Only record an error for the first element/session in |sessions_|.
+      if (!eviction_result)
+        eviction_result = std::move(mount_status);
+      continue;
+    }
+    // If any session succeeded the operation as a whole is considered
+    // successful
+    eviction_result = OkStatus<CryptohomeError>();
+  }
+
+  // Did not find any mounted session, eviction_result was never initialized.
+  if (!eviction_result) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthNoActiveMountInEvictDeviceKey),
+            ErrorActionSet({PossibleAction::kAuth}),
+            user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL));
+    return;
+  }
+
+  // Return results of EvictDeviceKey(), either OK or error of the first mounted
+  // session.
+  // Unwrap status into result to satisfy StatusChain move semantics.
+  auto result = std::move(eviction_result.value());
+  if (!result.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthKeyEvictionFailedInEvictDeviceKey),
+            ErrorActionSet({PossibleAction::kReboot}),
+            user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_MOUNT_FATAL)
+            .Wrap(std::move(result)));
+    return;
+  }
+
+  ReplyWithError(std::move(on_done), reply, OkStatus<CryptohomeError>());
+}
+
+void UserDataAuth::AddAuthFactor(
+    user_data_auth::AddAuthFactorRequest request,
+    base::OnceCallback<void(const user_data_auth::AddAuthFactorReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::AddAuthFactorReply reply;
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthNoAuthSessionInAddAuthFactor))
+            .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+
+  // Populate the request auth factor with accurate sysinfo.
+  PopulateAuthFactorProtoWithSysinfo(*request.mutable_auth_factor());
+  auto user_policy_file_status =
+      LoadUserPolicyFile(auth_session_status.value()->obfuscated_username());
+  if (!user_policy_file_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocCouldntLoadUserPolicyFileInAddAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot})));
+    return;
+  }
+  auto* session_decrypt = auth_session_status.value()->GetAuthForDecrypt();
+  if (!session_decrypt) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthUnauthedInAddAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_UNAUTHENTICATED_AUTH_SESSION));
+    return;
+  }
+  const Username& username = auth_session_status.value()->username();
+  session_decrypt->AddAuthFactor(
+      request,
+      base::BindOnce(
+          &ReplyWithAuthFactorStatus<user_data_auth::AddAuthFactorReply>,
+          std::move(auth_session_status.value()),
+          user_policy_file_status.value(), auth_factor_driver_manager_,
+          sessions_->Find(username), request.auth_factor().label(),
+          std::move(on_done)));
+}
+
+void UserDataAuth::AuthenticateAuthFactor(
+    user_data_auth::AuthenticateAuthFactorRequest request,
+    base::OnceCallback<void(const user_data_auth::AuthenticateAuthFactorReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::AuthenticateAuthFactorReply reply;
+
+  // Wrap callback to signal AuthenticateAuthFactorCompleted.
+  base::OnceCallback<void(const user_data_auth::AuthenticateAuthFactorReply&)>
+      on_done_wrapped_with_signal_cb = base::BindOnce(
+          [](base::RepeatingCallback<void(
+                 user_data_auth::AuthenticateAuthFactorCompleted)>
+                 authenticate_auth_factor_result_callback,
+             base::OnceCallback<void(
+                 const user_data_auth::AuthenticateAuthFactorReply&)> cb,
+             user_data_auth::AuthFactorType auth_factor_type,
+             const user_data_auth::AuthenticateAuthFactorReply& reply) {
+            user_data_auth::AuthenticateAuthFactorCompleted completed_proto;
+
+            if (reply.has_error_info()) {
+              completed_proto.set_error(reply.error());
+              auto* error_info = completed_proto.mutable_error_info();
+              *error_info = reply.error_info();
+            }
+            completed_proto.set_auth_factor_type(auth_factor_type);
+
+            if (!authenticate_auth_factor_result_callback.is_null()) {
+              authenticate_auth_factor_result_callback.Run(completed_proto);
+            }
+            std::move(cb).Run(reply);
+          },
+          authenticate_auth_factor_completed_callback_, std::move(on_done),
+          AuthFactorTypeToProto(
+              DetermineFactorTypeFromAuthInput(request.auth_input())
+                  .value_or(AuthFactorType::kUnspecified)));
+
+  InUseAuthSession auth_session =
+      auth_session_manager_->FindAuthSession(request.auth_session_id());
+  CryptohomeStatus auth_session_status = auth_session.AuthSessionStatus();
+  if (!auth_session_status.ok()) {
+    LOG(ERROR) << "Invalid AuthSession token provided.";
+    ReplyWithError(
+        std::move(on_done_wrapped_with_signal_cb), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthSessionNotFoundInAuthAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot}),
+            user_data_auth::CryptohomeErrorCode::
+                CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN)
+            .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+
+  // |auth_factor_labels| is intended to replace |auth_factor_label|, reject
+  // requests specifying both fields.
+  // TODO(b/265151254): Deprecate |auth_factor_label| and remove this check.
+  if (!request.auth_factor_label().empty() &&
+      request.auth_factor_labels_size() > 0) {
+    LOG(ERROR) << "Cannot accept request with both auth_factor_label and "
+                  "auth_factor_labels.";
+    ReplyWithError(
+        std::move(on_done_wrapped_with_signal_cb), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataMalformedRequestInAuthAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CryptohomeErrorCode::
+                CRYPTOHOME_ERROR_INVALID_ARGUMENT));
+    return;
+  }
+  auto user_policy_file_status =
+      LoadUserPolicyFile(auth_session->obfuscated_username());
+  if (!user_policy_file_status.ok()) {
+    ReplyWithError(
+        std::move(on_done_wrapped_with_signal_cb), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocCouldntLoadUserPolicyFileInAuthenticateAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot})));
+    return;
+  }
+  std::optional<AuthFactorType> auth_factor_type =
+      DetermineFactorTypeFromAuthInput(request.auth_input());
+  SerializedUserAuthFactorTypePolicy auth_factor_type_policy;
+  if (!auth_factor_type.has_value()) {
+    ReplyWithError(
+        std::move(on_done_wrapped_with_signal_cb), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthAuthFactorNotFoundInAuthenticateAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CryptohomeErrorCode::
+                CRYPTOHOME_ERROR_INVALID_ARGUMENT));
+    return;
+  } else {
+    auth_factor_type_policy = GetAuthFactorPolicyFromUserPolicy(
+        (*user_policy_file_status)->GetUserPolicy(), *auth_factor_type);
+  }
+
+  std::vector<std::string> auth_factor_labels;
+  if (!request.auth_factor_label().empty()) {
+    auth_factor_labels.push_back(request.auth_factor_label());
+  } else {
+    for (auto label : request.auth_factor_labels()) {
+      auth_factor_labels.push_back(label);
+    }
+  }
+
+  AuthSession::AuthenticateAuthFactorRequest authenticate_auth_factor_request{
+      .auth_factor_labels = std::move(auth_factor_labels),
+      .auth_input_proto = std::move(request.auth_input()),
+      .flags =
+          AuthSession::AuthenticateAuthFactorFlags{
+              .force_full_auth = AuthSession::ForceFullAuthFlag::kNone},
+  };
+
+  AuthSession* auth_session_ptr = auth_session.Get();
+  auth_session_ptr->AuthenticateAuthFactor(
+      authenticate_auth_factor_request, auth_factor_type_policy,
+      base::BindOnce(&HandleAuthenticationResult, std::move(auth_session),
+                     std::move(auth_factor_type_policy),
+                     std::move(on_done_wrapped_with_signal_cb)));
+}
+
+void UserDataAuth::UpdateAuthFactor(
+    user_data_auth::UpdateAuthFactorRequest request,
+    base::OnceCallback<void(const user_data_auth::UpdateAuthFactorReply&)>
+        on_done) {
+  AssertOnMountThread();
+
+  user_data_auth::UpdateAuthFactorReply reply;
+
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthNoAuthSessionInUpdateAuthFactor))
+            .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+
+  // Populate the request auth factor with accurate sysinfo.
+  PopulateAuthFactorProtoWithSysinfo(*request.mutable_auth_factor());
+
+  auto user_policy_file_status =
+      LoadUserPolicyFile(auth_session_status.value()->obfuscated_username());
+  if (!user_policy_file_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocCouldntLoadUserPolicyFileInUpdateAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot})));
+    return;
+  }
+  auto* session_decrypt = auth_session_status.value()->GetAuthForDecrypt();
+  if (!session_decrypt) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthUnauthedInUpdateAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_UNAUTHENTICATED_AUTH_SESSION));
+    return;
+  }
+  const Username& username = auth_session_status.value()->username();
+  session_decrypt->UpdateAuthFactor(
+      request,
+      base::BindOnce(
+          &ReplyWithAuthFactorStatus<user_data_auth::UpdateAuthFactorReply>,
+          std::move(auth_session_status.value()),
+          user_policy_file_status.value(), auth_factor_driver_manager_,
+          sessions_->Find(username), request.auth_factor().label(),
+          std::move(on_done)));
+}
+
+void UserDataAuth::UpdateAuthFactorMetadata(
+    user_data_auth::UpdateAuthFactorMetadataRequest request,
+    base::OnceCallback<
+        void(const user_data_auth::UpdateAuthFactorMetadataReply&)> on_done) {
+  AssertOnMountThread();
+  user_data_auth::UpdateAuthFactorMetadataReply reply;
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthNoAuthSessionInUpdateAuthFactorMetadata))
+            .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+
+  // Populate the request auth factor with accurate sysinfo.
+  auto user_policy_file_status =
+      LoadUserPolicyFile(auth_session_status.value()->obfuscated_username());
+  if (!user_policy_file_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocCouldntLoadUserPolicyFileInUpdateAuthFactorMetadata),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot})));
+    return;
+  }
+  AuthSession* auth_session_ptr = auth_session_status->Get();
+  auth_session_ptr->UpdateAuthFactorMetadata(
+      request, base::BindOnce(
+                   &ReplyWithAuthFactorStatus<
+                       user_data_auth::UpdateAuthFactorMetadataReply>,
+                   std::move(auth_session_status.value()),
+                   user_policy_file_status.value(), auth_factor_driver_manager_,
+                   sessions_->Find(auth_session_ptr->username()),
+                   request.auth_factor().label(), std::move(on_done)));
+}
+
+void UserDataAuth::RelabelAuthFactor(
+    user_data_auth::RelabelAuthFactorRequest request,
+    base::OnceCallback<void(const user_data_auth::RelabelAuthFactorReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::RelabelAuthFactorReply reply;
+
+  // Find the auth session.
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    ReplyWithError(std::move(on_done), reply,
+                   MakeStatus<CryptohomeError>(
+                       CRYPTOHOME_ERR_LOC(
+                           kLocUserDataAuthNoAuthSessionInRelabelAuthFactor))
+                       .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+  AuthSession& auth_session = **auth_session_status;
+  auto* session_decrypt = auth_session.GetAuthForDecrypt();
+  if (!session_decrypt) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthUnauthedInRelabelAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_UNAUTHENTICATED_AUTH_SESSION));
+    return;
+  }
+
+  // Load the user policy, also needed for the final result.
+  auto user_policy_file =
+      LoadUserPolicyFile(auth_session.obfuscated_username());
+  if (!user_policy_file.ok()) {
+    ReplyWithError(std::move(on_done), reply,
+                   MakeStatus<CryptohomeError>(
+                       CRYPTOHOME_ERR_LOC(
+                           kLocCouldntLoadUserPolicyFileInRelabelAuthFactor))
+                       .Wrap(std::move(user_policy_file).err_status()));
+    return;
+  }
+
+  // Execute the actual relabel.
+  session_decrypt->RelabelAuthFactor(
+      request,
+      base::BindOnce(
+          &ReplyWithAuthFactorStatus<user_data_auth::RelabelAuthFactorReply>,
+          std::move(auth_session_status.value()), *user_policy_file,
+          auth_factor_driver_manager_, sessions_->Find(auth_session.username()),
+          request.new_auth_factor_label(), std::move(on_done)));
+}
+
+void UserDataAuth::ReplaceAuthFactor(
+    user_data_auth::ReplaceAuthFactorRequest request,
+    base::OnceCallback<void(const user_data_auth::ReplaceAuthFactorReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::ReplaceAuthFactorReply reply;
+
+  // Find the auth session.
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    ReplyWithError(std::move(on_done), reply,
+                   MakeStatus<CryptohomeError>(
+                       CRYPTOHOME_ERR_LOC(
+                           kLocUserDataAuthNoAuthSessionInReplaceAuthFactor))
+                       .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+  AuthSession& auth_session = **auth_session_status;
+  auto* session_decrypt = auth_session.GetAuthForDecrypt();
+  if (!session_decrypt) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthUnauthedInReplaceAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_UNAUTHENTICATED_AUTH_SESSION));
+    return;
+  }
+
+  // Load the user policy, also needed for the final result.
+  auto user_policy_file =
+      LoadUserPolicyFile(auth_session.obfuscated_username());
+  if (!user_policy_file.ok()) {
+    ReplyWithError(std::move(on_done), reply,
+                   MakeStatus<CryptohomeError>(
+                       CRYPTOHOME_ERR_LOC(
+                           kLocCouldntLoadUserPolicyFileInReplaceAuthFactor))
+                       .Wrap(std::move(user_policy_file).err_status()));
+    return;
+  }
+
+  // Execute the actual relabel.
+  session_decrypt->ReplaceAuthFactor(
+      request,
+      base::BindOnce(
+          &ReplyWithAuthFactorStatus<user_data_auth::ReplaceAuthFactorReply>,
+          std::move(auth_session_status.value()), *user_policy_file,
+          auth_factor_driver_manager_, sessions_->Find(auth_session.username()),
+          request.auth_factor().label(), std::move(on_done)));
+}
+
+void UserDataAuth::RemoveAuthFactor(
+    user_data_auth::RemoveAuthFactorRequest request,
+    base::OnceCallback<void(const user_data_auth::RemoveAuthFactorReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::RemoveAuthFactorReply reply;
+
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    ReplyWithError(std::move(on_done), reply,
+                   MakeStatus<CryptohomeError>(
+                       CRYPTOHOME_ERR_LOC(
+                           kLocUserDataAuthSessionNotFoundInRemoveAuthFactor))
+                       .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+
+  auto* session_decrypt = auth_session_status.value()->GetAuthForDecrypt();
+  if (!session_decrypt) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthUnauthedInRemoveAuthFactor),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_UNAUTHENTICATED_AUTH_SESSION));
+    return;
+  }
+
+  StatusCallback on_remove_auth_factor_finished = base::BindOnce(
+      &ReplyWithStatus<user_data_auth::RemoveAuthFactorReply>,
+      std::move(auth_session_status.value()), std::move(on_done));
+
+  session_decrypt->RemoveAuthFactor(request,
+                                    std::move(on_remove_auth_factor_finished));
+}
+
+void UserDataAuth::ListAuthFactors(
+    user_data_auth::ListAuthFactorsRequest request,
+    base::OnceCallback<void(const user_data_auth::ListAuthFactorsReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::ListAuthFactorsReply reply;
+
+  // Check whether user exists.
+  // Compute the raw and sanitized user name from the request.
+  Username username = GetAccountId(request.account_id());
+  ObfuscatedUsername obfuscated_username = SanitizeUserName(username);
+  UserSession* user_session = sessions_->Find(username);  // May be null!
+  // If the user does not exist, we cannot return auth factors for it.
+  bool is_persistent_user =
+      (user_session && !user_session->IsEphemeral()) ||
+      platform_->DirectoryExists(UserPath(obfuscated_username));
+  bool is_ephemeral_user = user_session && user_session->IsEphemeral();
+  if (!is_persistent_user && !is_ephemeral_user) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthUserNonexistentInListAuthFactors),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CryptohomeErrorCode::
+                CRYPTOHOME_ERROR_INVALID_ARGUMENT));
+    return;
+  }
+  auto user_policy_file_status = LoadUserPolicyFile(obfuscated_username);
+  if (!user_policy_file_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocCouldntLoadUserPolicyFileInListAuthFactors),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                            PossibleAction::kReboot})));
+    return;
+  }
+
+  // Helper function to filter out types of auth factor that are supported
+  // internally but which should not be reported as supported in the public API.
+  auto IsPublicType = [](AuthFactorType type) {
+    switch (type) {
+      case AuthFactorType::kPassword:
+      case AuthFactorType::kPin:
+      case AuthFactorType::kCryptohomeRecovery:
+      case AuthFactorType::kKiosk:
+      case AuthFactorType::kSmartCard:
+      case AuthFactorType::kFingerprint:
+        return true;
+      case AuthFactorType::kLegacyFingerprint:
+      case AuthFactorType::kUnspecified:
+      default:
+        return false;
+    }
+  };
+
+  std::vector<AuthFactorType> supported_auth_factors;
+  if (is_persistent_user) {
+    // Load the USS so that we can use it to check the validity of any auth
+    // factors being loaded.
+    std::set<std::string_view> uss_labels;
+    UserUssStorage user_uss_storage(*uss_storage_, obfuscated_username);
+    auto encrypted_uss = EncryptedUss::FromStorage(user_uss_storage);
+    if (encrypted_uss.ok()) {
+      uss_labels = encrypted_uss->WrappedMainKeyIds();
+    }
+
+    // Prepare the response for configured AuthFactors (with status) with all of
+    // the auth factors from the disk.
+
+    // Load the AuthFactorMap.
+    AuthFactorVaultKeysetConverter converter(keyset_management_);
+    AuthFactorMap auth_factor_map = auth_factor_manager_->LoadAllAuthFactors(
+        obfuscated_username, uss_labels, converter);
+
+    // Populate the response from the items in the AuthFactorMap.
+    for (AuthFactorMap::ValueView item : auth_factor_map) {
+      if (IsPublicType(item.auth_factor().type())) {
+        auto auth_factor_with_status = GetAuthFactorWithStatus(
+            obfuscated_username, *user_policy_file_status,
+            auth_factor_driver_manager_, item.auth_factor());
+        if (auth_factor_with_status.has_value()) {
+          *reply.add_configured_auth_factors_with_status() =
+              std::move(*auth_factor_with_status);
+        }
+      }
+    }
+
+    // Prepare the response for supported AuthFactors for the given user.
+    // Since user is a persistent user this is determined based on the
+    // underlying storage backend and the existing configured factors.
+
+    // Turn the list of configured types into a set that we can use for
+    // computing the list of supported factors.
+    std::set<AuthFactorType> configured_types;
+    for (const auto& configured_factor_status :
+         reply.configured_auth_factors_with_status()) {
+      if (auto type = AuthFactorTypeFromProto(
+              configured_factor_status.auth_factor().type())) {
+        configured_types.insert(*type);
+      }
+    }
+
+    // Determine what auth factors are supported by going through the entire set
+    // of auth factor types and checking each one.
+
+    std::set<AuthFactorStorageType> configured_storages;
+    if (IsUserSecretStashExperimentEnabled(platform_)) {
+      configured_storages.insert(AuthFactorStorageType::kUserSecretStash);
+    }
+    if (!IsUserSecretStashExperimentEnabled(platform_) ||
+        auth_factor_map.HasFactorWithStorage(
+            AuthFactorStorageType::kVaultKeyset)) {
+      configured_storages.insert(AuthFactorStorageType::kVaultKeyset);
+    }
+
+    for (auto proto_type :
+         PROTOBUF_ENUM_ALL_VALUES(user_data_auth::AuthFactorType)) {
+      std::optional<AuthFactorType> type = AuthFactorTypeFromProto(proto_type);
+      if (!type || !IsPublicType(*type)) {
+        continue;
+      }
+      const AuthFactorDriver& factor_driver =
+          auth_factor_driver_manager_->GetDriver(*type);
+      if (factor_driver.IsSupportedByStorage(configured_storages,
+                                             configured_types) &&
+          factor_driver.IsSupportedByHardware()) {
+        reply.add_supported_auth_factors(proto_type);
+        supported_auth_factors.push_back(*type);
+      }
+    }
+  } else if (is_ephemeral_user) {
+    // Use the credential verifier for the session to determine what types of
+    // factors are configured.
+    if (user_session) {
+      for (const CredentialVerifier* verifier :
+           user_session->GetCredentialVerifiers()) {
+        if (IsPublicType(verifier->auth_factor_type())) {
+          auto auth_factor_with_status = GetAuthFactorWithStatus(
+              obfuscated_username, *user_policy_file_status,
+              auth_factor_driver_manager_, verifier);
+          if (auth_factor_with_status.has_value()) {
+            *reply.add_configured_auth_factors_with_status() =
+                std::move(*auth_factor_with_status);
+          }
+        }
+      }
+    }
+    // Determine what auth factors are supported by going through the entire set
+    // of auth factor types and checking each one.
+    for (auto proto_type :
+         PROTOBUF_ENUM_ALL_VALUES(user_data_auth::AuthFactorType)) {
+      std::optional<AuthFactorType> type = AuthFactorTypeFromProto(proto_type);
+      if (!type || !IsPublicType(*type)) {
+        continue;
+      }
+      const AuthFactorDriver& factor_driver =
+          auth_factor_driver_manager_->GetDriver(*type);
+      if (factor_driver.IsLightAuthSupported(AuthIntent::kVerifyOnly)) {
+        reply.add_supported_auth_factors(proto_type);
+        supported_auth_factors.push_back(*type);
+      }
+    }
+  }
+
+  // For every supported auth factor type the user has, report the available
+  // auth intents.
+  for (AuthFactorType type : supported_auth_factors) {
+    const AuthFactorDriver& factor_driver =
+        auth_factor_driver_manager_->GetDriver(type);
+    auto type_policy = GetAuthFactorPolicyFromUserPolicy(
+        (*user_policy_file_status)->GetUserPolicy(), type);
+    // Proto AuthIntentsForAuthFactorType assumes nothing is enabled if the type
+    // policy is empty, but here the emptiness is just an indication of no
+    // change to the default policy.
+    if (type_policy.enabled_intents.empty() &&
+        type_policy.disabled_intents.empty()) {
+      SetAuthIntentsForAuthFactorType(type, factor_driver, std::nullopt,
+                                      /*is_persistent_user=*/is_persistent_user,
+                                      /*is_ephemeral_user=*/is_ephemeral_user,
+                                      reply.add_auth_intents_for_types());
+    } else {
+      SetAuthIntentsForAuthFactorType(type, factor_driver, type_policy,
+                                      /*is_persistent_user=*/is_persistent_user,
+                                      /*is_ephemeral_user=*/is_ephemeral_user,
+                                      reply.add_auth_intents_for_types());
+    }
+  }
+
+  // TODO(b/247122507): Remove this with configured_auth_factor field once tast
+  // test cleanup is done.
+  for (auto configured_auth_factors_with_status :
+       reply.configured_auth_factors_with_status()) {
+    user_data_auth::AuthFactor auth_factor;
+    auth_factor.CopyFrom(configured_auth_factors_with_status.auth_factor());
+    *reply.add_configured_auth_factors() = std::move(auth_factor);
+  }
+
+  // Successfully completed, send the response with OK.
+  ReplyWithError(std::move(on_done), reply, OkStatus<CryptohomeError>());
+}
+
+void UserDataAuth::ModifyAuthFactorIntents(
+    user_data_auth::ModifyAuthFactorIntentsRequest request,
+    base::OnceCallback<
+        void(const user_data_auth::ModifyAuthFactorIntentsReply&)> on_done) {
+  AssertOnMountThread();
+  user_data_auth::ModifyAuthFactorIntentsReply reply;
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  std::optional<AuthFactorType> type = AuthFactorTypeFromProto(request.type());
+  if (!type.has_value()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocAuthFactorTypeNotFoundInModifyAuthFactorIntents),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT));
+    return;
+  }
+  if (!auth_session_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthNoAuthSessionInModifyAuthFactorIntents))
+            .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+  auto user_policy_file_status =
+      LoadUserPolicyFile(auth_session_status.value()->obfuscated_username());
+  if (!user_policy_file_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocCouldntLoadUserPolicyFileInModifyAuthFactorIntents))
+            .Wrap(std::move(user_policy_file_status).err_status()));
+    return;
+  }
+  SerializedUserAuthFactorTypePolicy new_auth_factor_policy;
+  std::set<AuthIntent> intents_for_auth_factor;
+  for (int i = 0; i < request.intents_size(); i++) {
+    auto auth_intent_from_proto = AuthIntentFromProto(request.intents(i));
+    if (!auth_intent_from_proto.has_value()) {
+      ReplyWithError(
+          std::move(on_done), reply,
+          MakeStatus<CryptohomeError>(
+              CRYPTOHOME_ERR_LOC(
+                  kLocCouldntConvertToAuthIntentInModifyAuthFactorIntents),
+              ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                              PossibleAction::kReboot}),
+              user_data_auth::CRYPTOHOME_ERROR_INVALID_ARGUMENT));
+      return;
+    }
+    intents_for_auth_factor.insert(*auth_intent_from_proto);
+  }
+  new_auth_factor_policy.type = SerializeAuthFactorType(*type);
+  const AuthFactorDriver& driver =
+      auth_factor_driver_manager_->GetDriver(*type);
+  bool is_ephemeral_user = auth_session_status.value()->ephemeral_user();
+
+  // Any intent that is enabled should be both supported by the hardware and be
+  // configurable.
+  if (driver.IsSupportedByHardware()) {
+    for (auto intent : intents_for_auth_factor) {
+      if (driver.GetIntentConfigurability(intent) ==
+          AuthFactorDriver::IntentConfigurability::kNotConfigurable) {
+        continue;
+      }
+      if (is_ephemeral_user) {
+        if (!driver.IsLightAuthSupported(intent)) {
+          continue;
+        }
+      } else {
+        if (!driver.IsLightAuthSupported(intent) &&
+            !driver.IsFullAuthSupported(intent)) {
+          continue;
+        }
+      }
+      new_auth_factor_policy.enabled_intents.push_back(
+          SerializeAuthIntent(intent));
+    }
+    for (AuthIntent intent : kAllAuthIntents) {
+      // If the policy has not enabled a configurable intent explicitly, it
+      // should be listed as disabled.
+      if (intents_for_auth_factor.find(intent) ==
+              intents_for_auth_factor.end() &&
+          driver.GetIntentConfigurability(intent) !=
+              AuthFactorDriver::IntentConfigurability::kNotConfigurable) {
+        new_auth_factor_policy.disabled_intents.push_back(
+            SerializeAuthIntent(intent));
+      }
+    }
+  }
+  std::optional<SerializedUserPolicy> user_policy =
+      (*user_policy_file_status)->GetUserPolicy();
+  SerializedUserPolicy new_policy;
+  new_policy.auth_factor_type_policy.push_back(new_auth_factor_policy);
+  // The new user policy should include the policy for all of the auth factors
+  // except for the updated auth factor. The last policy for this auth factor
+  // should be entirely discarded as the modify doesn't update the policy and
+  // rather replaces it.
+  if (user_policy.has_value()) {
+    for (auto policy : user_policy->auth_factor_type_policy) {
+      if (policy.type.has_value() &&
+          *policy.type != SerializeAuthFactorType(*type)) {
+        new_policy.auth_factor_type_policy.push_back(policy);
+      }
+    }
+  }
+  (*user_policy_file_status)->UpdateUserPolicy(new_policy);
+  CryptohomeStatus user_policy_store_status =
+      (*user_policy_file_status)->StoreInFile();
+  if (!user_policy_store_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocCouldntStoreUserPolicyFileInModifyAuthFactorIntents))
+            .Wrap(std::move(user_policy_store_status).err_status()));
+    return;
+  }
+  SetAuthIntentsForAuthFactorType(*type, driver, new_auth_factor_policy,
+                                  /*is_persistent_user=*/!is_ephemeral_user,
+                                  /*is_ephemeral_user=*/is_ephemeral_user,
+                                  reply.mutable_auth_intents());
+  ReplyWithError(std::move(on_done), reply, OkStatus<CryptohomeError>());
+}
+
+void UserDataAuth::GetAuthFactorExtendedInfo(
+    user_data_auth::GetAuthFactorExtendedInfoRequest request,
+    base::OnceCallback<
+        void(const user_data_auth::GetAuthFactorExtendedInfoReply&)> on_done) {
+  AssertOnMountThread();
+
+  user_data_auth::GetAuthFactorExtendedInfoReply reply;
+
+  // Compute the account_id and obfuscated user name from the request.
+  ObfuscatedUsername obfuscated_username =
+      SanitizeUserName(GetAccountId(request.account_id()));
+
+  // Try to find the relevant auth factor with the given label and convert it
+  // into an auth factor proto.
+  user_data_auth::AuthFactor auth_factor_proto;
+  std::optional<AuthFactorType> auth_factor_type;
+  for (const auto& [label, type] :
+       auth_factor_manager_->ListAuthFactors(obfuscated_username)) {
+    if (label == request.auth_factor_label()) {
+      // Save the type.
+      auth_factor_type = type;
+      // Attempt to load the factor and then load it into the response.
+      auto auth_factor = auth_factor_manager_->LoadAuthFactor(
+          obfuscated_username, type, label);
+      if (auth_factor.ok()) {
+        const AuthFactorDriver& driver =
+            auth_factor_driver_manager_->GetDriver(type);
+        if (auto converted_to_proto =
+                driver.ConvertToProto(label, auth_factor->metadata())) {
+          auth_factor_proto = std::move(*converted_to_proto);
+        }
+      }
+      // Stop searching because we found the factor with the requested label,
+      // even if loading it or converting it into a proto failed.
+      break;
+    }
+  }
+
+  // If we at least found the type, also load any type-specific extended info.
+  if (!auth_factor_type) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthFactorExtendedInfoTypeFailure),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CryptohomeErrorCode::
+                CRYPTOHOME_ERROR_KEY_NOT_FOUND));
+    return;
+  }
+  switch (*auth_factor_type) {
+    case AuthFactorType::kCryptohomeRecovery: {
+      if (!request.has_recovery_info_request()) {
+        ReplyWithError(
+            std::move(on_done), reply,
+            MakeStatus<CryptohomeError>(
+                CRYPTOHOME_ERR_LOC(
+                    kLocUserDataAuthFactorExtendedInfoRecoveryIdFailure),
+                ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+                user_data_auth::CryptohomeErrorCode::
+                    CRYPTOHOME_ERROR_INVALID_ARGUMENT));
+        return;
+      }
+      std::unique_ptr<cryptorecovery::RecoveryCryptoImpl> recovery =
+          cryptorecovery::RecoveryCryptoImpl::Create(recovery_crypto_,
+                                                     platform_);
+      if (!recovery) {
+        ReplyWithError(
+            std::move(on_done), reply,
+            MakeStatus<CryptohomeError>(
+                CRYPTOHOME_ERR_LOC(
+                    kLocUserDataAuthRecoveryObjectFailureGetRecoveryId),
+                ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+                user_data_auth::CryptohomeErrorCode::
+                    CRYPTOHOME_ERROR_RECOVERY_FATAL));
+        return;
+      }
+      std::vector<std::string> recovery_ids = recovery->GetLastRecoveryIds(
+          request.account_id(), request.recovery_info_request().max_depth());
+      user_data_auth::RecoveryExtendedInfoReply recovery_reply;
+      for (const std::string& recovery_id : recovery_ids) {
+        recovery_reply.add_recovery_ids(recovery_id);
+      }
+      *reply.mutable_recovery_info_reply() = std::move(recovery_reply);
+      break;
+    }
+    default: {
+      LOG(WARNING) << AuthFactorTypeToString(*auth_factor_type)
+                   << " factor type does not support extended info.";
+    }
+  }
+  ReplyWithError(std::move(on_done), reply, OkStatus<CryptohomeError>());
+}
+
+void UserDataAuth::PrepareAuthFactor(
+    user_data_auth::PrepareAuthFactorRequest request,
+    base::OnceCallback<void(const user_data_auth::PrepareAuthFactorReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::PrepareAuthFactorReply reply;
+  InUseAuthSession auth_session =
+      auth_session_manager_->FindAuthSession(request.auth_session_id());
+  CryptohomeStatus auth_session_status = auth_session.AuthSessionStatus();
+  if (!auth_session_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthPrepareAuthFactorAuthSessionNotFound),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CryptohomeErrorCode::
+                CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN)
+            .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+  AuthSession* auth_session_ptr = auth_session.Get();
+  auth_session_ptr->PrepareAuthFactor(
+      request,
+      base::BindOnce(&ReplyWithStatus<user_data_auth::PrepareAuthFactorReply>,
+                     std::move(auth_session), std::move(on_done)));
+}
+
+void UserDataAuth::TerminateAuthFactor(
+    user_data_auth::TerminateAuthFactorRequest request,
+    base::OnceCallback<void(const user_data_auth::TerminateAuthFactorReply&)>
+        on_done) {
+  AssertOnMountThread();
+  auth_session_manager_->RunWhenAvailable(
+      request.auth_session_id(),
+      base::BindOnce(
+          [](const user_data_auth::TerminateAuthFactorRequest& request,
+             base::OnceCallback<void(
+                 const user_data_auth::TerminateAuthFactorReply&)> on_done,
+             InUseAuthSession auth_session) {
+            user_data_auth::TerminateAuthFactorReply reply;
+            CryptohomeStatus auth_session_status =
+                auth_session.AuthSessionStatus();
+            if (!auth_session_status.ok()) {
+              ReplyWithError(
+                  std::move(on_done), reply,
+                  MakeStatus<CryptohomeError>(
+                      CRYPTOHOME_ERR_LOC(
+                          kLocUserDataAuthTerminateAuthFactorNoAuthSession),
+                      ErrorActionSet(
+                          {PossibleAction::kDevCheckUnexpectedState}),
+                      user_data_auth::CryptohomeErrorCode::
+                          CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN)
+                      .Wrap(std::move(auth_session_status).err_status()));
+              return;
+            }
+            AuthSession* auth_session_ptr = auth_session.Get();
+            auth_session_ptr->TerminateAuthFactor(
+                request,
+                base::BindOnce(
+                    &ReplyWithStatus<user_data_auth::TerminateAuthFactorReply>,
+                    std::move(auth_session), std::move(on_done)));
+          },
+          request, std::move(on_done)));
+}
+
+void UserDataAuth::GetAuthSessionStatus(
+    user_data_auth::GetAuthSessionStatusRequest request,
+    base::OnceCallback<void(const user_data_auth::GetAuthSessionStatusReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::GetAuthSessionStatusReply reply;
+
+  InUseAuthSession auth_session =
+      auth_session_manager_->FindAuthSession(request.auth_session_id());
+  CryptohomeStatus auth_session_status = auth_session.AuthSessionStatus();
+  if (!auth_session_status.ok()) {
+    ReplyWithError(
+        std::move(on_done), reply,
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(
+                kLocUserDataAuthGetAuthSessionStatusNoAuthSession),
+            ErrorActionSet({PossibleAction::kDevCheckUnexpectedState}),
+            user_data_auth::CryptohomeErrorCode::
+                CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN)
+            .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+
+  PopulateAuthSessionProperties(auth_session, reply.mutable_auth_properties());
+  ReplyWithError(std::move(on_done), std::move(reply),
+                 OkStatus<CryptohomeError>());
+}
+
+void UserDataAuth::GetRecoveryRequest(
+    user_data_auth::GetRecoveryRequestRequest request,
+    base::OnceCallback<void(const user_data_auth::GetRecoveryRequestReply&)>
+        on_done) {
+  AssertOnMountThread();
+
+  user_data_auth::GetRecoveryRequestReply reply;
+  InUseAuthSession auth_session =
+      auth_session_manager_->FindAuthSession(request.auth_session_id());
+  CryptohomeStatus auth_session_status = auth_session.AuthSessionStatus();
+  if (!auth_session_status.ok()) {
+    LOG(ERROR) << "Invalid AuthSession token provided.";
+    ReplyWithError(std::move(on_done), reply,
+                   MakeStatus<CryptohomeError>(
+                       CRYPTOHOME_ERR_LOC(
+                           kLocUserDataAuthSessionNotFoundInGetRecoveryRequest),
+                       ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                                       PossibleAction::kReboot}),
+                       user_data_auth::CryptohomeErrorCode::
+                           CRYPTOHOME_INVALID_AUTH_SESSION_TOKEN)
+                       .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+  auth_session->GetRecoveryRequest(request, std::move(on_done));
+}
+
+void UserDataAuth::CreateVaultKeyset(
+    user_data_auth::CreateVaultKeysetRequest request,
+    base::OnceCallback<void(const user_data_auth::CreateVaultKeysetReply&)>
+        on_done) {
+  user_data_auth::CreateVaultKeysetReply reply;
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    ReplyWithError(std::move(on_done), reply,
+                   MakeStatus<CryptohomeError>(
+                       CRYPTOHOME_ERR_LOC(
+                           kLocUserDataAuthNoAuthSessionInCreateVaultKeyset))
+                       .Wrap(std::move(auth_session_status).err_status()));
+    return;
+  }
+  AuthSession& auth_session = **auth_session_status;
+
+  create_vault_keyset_impl_->CreateVaultKeyset(
+      request, auth_session,
+      base::BindOnce(&ReplyWithStatus<user_data_auth::CreateVaultKeysetReply>,
+                     std::move(auth_session_status.value()),
+                     std::move(on_done)));
+}
+
+void UserDataAuth::RestoreDeviceKey(
+    user_data_auth::RestoreDeviceKeyRequest request,
+    base::OnceCallback<void(const user_data_auth::RestoreDeviceKeyReply&)>
+        on_done) {
+  AssertOnMountThread();
+  user_data_auth::RestoreDeviceKeyReply reply;
+
+  CryptohomeStatusOr<InUseAuthSession> auth_session_status =
+      GetAuthenticatedAuthSession(request.auth_session_id());
+  if (!auth_session_status.ok()) {
+    auto status =
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthNoAuthSessionInRestoreDeviceKey))
+            .Wrap(std::move(auth_session_status).err_status());
+    ReplyWithError(std::move(on_done), reply, status);
+    return;
+  }
+
+  InUseAuthSession& auth_session = *auth_session_status;
+  if (auth_session->ephemeral_user()) {
+    auto status = MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(
+            kLocUserDataAuthEphemeralAuthSessionAttemptRestoreDeviceKey),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot}),
+        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+    ReplyWithError(std::move(on_done), reply, status);
+    return;
+  }
+
+  // Check the user is already mounted.
+  UserSession* const session = sessions_->Find(auth_session->username());
+  if (!session || !session->IsActive()) {
+    auto status = MakeStatus<CryptohomeError>(
+        CRYPTOHOME_ERR_LOC(kLocUserDataAuthGetSessionFailedInRestoreDeviceKey),
+        ErrorActionSet({PossibleAction::kDevCheckUnexpectedState,
+                        PossibleAction::kReboot}),
+        user_data_auth::CryptohomeErrorCode::CRYPTOHOME_ERROR_INVALID_ARGUMENT);
+    ReplyWithError(std::move(on_done), reply, status);
+    return;
+  }
+
+  MountStatus mount_status =
+      session->RestoreDeviceKey(auth_session->file_system_keyset());
+  if (!mount_status.ok()) {
+    RemoveInactiveUserSession(auth_session->username());
+    auto status =
+        MakeStatus<CryptohomeError>(
+            CRYPTOHOME_ERR_LOC(kLocUserDataAuthRestoreDeviceKeyFailed))
+            .Wrap(std::move(mount_status).err_status());
+    ReplyWithError(std::move(on_done), reply, status);
+    return;
+  }
+
+  ReplyWithError(std::move(on_done), reply, OkStatus<CryptohomeError>());
 }
 
 }  // namespace cryptohome

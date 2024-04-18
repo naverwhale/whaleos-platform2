@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,14 +15,18 @@
 #ifndef CRASH_REPORTER_ARCVM_CXX_COLLECTOR_H_
 #define CRASH_REPORTER_ARCVM_CXX_COLLECTOR_H_
 
-#include "crash-reporter/arc_util.h"
-#include "crash-reporter/crash_collector.h"
-
+#include <memory>
 #include <string>
 
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/time/time.h>
+#include <metrics/metrics_library.h>
+
+#include "crash-reporter/arc_util.h"
+#include "crash-reporter/crash_collector.h"
 
 // Collector for C++ crashes (native_crash) in ARCVM.
 class ArcvmCxxCollector : public CrashCollector {
@@ -35,7 +39,10 @@ class ArcvmCxxCollector : public CrashCollector {
     std::string exec_name;  // The name of crashed binary.
   };
 
-  ArcvmCxxCollector();
+  explicit ArcvmCxxCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   ~ArcvmCxxCollector() override;
 
   // Handles a C++ crash in ARCVM.
@@ -44,11 +51,18 @@ class ArcvmCxxCollector : public CrashCollector {
                    const CrashInfo& crash_info,
                    base::TimeDelta uptime);
 
+  // Returns the severity level and product group of the crash.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
+
   static CollectorInfo GetHandlerInfo(
       bool arc_native,
       const arc_util::BuildProperty& build_property,
       const CrashInfo& crash_info,
-      int64_t uptime_millis);
+      int64_t uptime_millis,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
 
  private:
   friend class ArcvmCxxCollectorMock;

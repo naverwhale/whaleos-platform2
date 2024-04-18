@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -102,26 +103,22 @@ constexpr char kSessionStarted[] = "started";
 // Maximum smbclient tries.
 constexpr int kSmbClientMaxTries = 5;
 // Wait interval between two smbclient tries.
-constexpr base::TimeDelta kSmbClientRetryDelay =
-    base::TimeDelta::FromSeconds(1);
+constexpr base::TimeDelta kSmbClientRetryDelay = base::Seconds(1);
 
 // Check every 120 minutes whether the machine password has to be changed.
-constexpr base::TimeDelta kPasswordChangeCheckRate =
-    base::TimeDelta::FromMinutes(120);
+constexpr base::TimeDelta kPasswordChangeCheckRate = base::Minutes(120);
 
 // Default GPO version cache TTL. Can be overridden with the
 // DeviceGpoCacheLifetime policy. Make sure the value matches the policy
 // description in policy_templates.json!
-constexpr base::TimeDelta kDefaultGpoVersionCacheTTL =
-    base::TimeDelta::FromHours(25);
+constexpr base::TimeDelta kDefaultGpoVersionCacheTTL = base::Hours(25);
 
 // Default auth data cache TTL. Can be overridden with the
 // DeviceAuthDataCacheLifetime policy. Make sure the value matches the policy
 // description in policy_templates.json!
-constexpr base::TimeDelta kDefaultAuthDataCacheTTL =
-    base::TimeDelta::FromHours(73);
+constexpr base::TimeDelta kDefaultAuthDataCacheTTL = base::Hours(73);
 
-constexpr base::TimeDelta kZeroDelta = base::TimeDelta::FromHours(0);
+constexpr base::TimeDelta kZeroDelta = base::Hours(0);
 
 // Keys for interpreting net output.
 constexpr char kKeyJoinAccessDenied[] = "NT_STATUS_ACCESS_DENIED";
@@ -217,8 +214,8 @@ constexpr int kMaxDefaultLogLevelUptimeMinutes = 30;
 constexpr char kBackupFileName[] = "user_backup_data";
 constexpr int kMaxBackupSizeBytes = 4 * 1024 * 1024;
 
-WARN_UNUSED_RESULT ErrorType GetNetError(const ProcessExecutor& executor,
-                                         const std::string& net_command) {
+[[nodiscard]] ErrorType GetNetError(const ProcessExecutor& executor,
+                                    const std::string& net_command) {
   const std::string& net_out = executor.GetStdout();
   const std::string& net_err = executor.GetStderr();
   const std::string error_msg("net ads " + net_command + " failed: ");
@@ -286,8 +283,8 @@ WARN_UNUSED_RESULT ErrorType GetNetError(const ProcessExecutor& executor,
   return ERROR_NET_FAILED;
 }
 
-WARN_UNUSED_RESULT ErrorType
-GetSmbclientError(const ProcessExecutor& smb_client_cmd) {
+[[nodiscard]] ErrorType GetSmbclientError(
+    const ProcessExecutor& smb_client_cmd) {
   const std::string& smb_client_out = smb_client_cmd.GetStdout();
   if (Contains(smb_client_out, kKeyNetworkTimeout) ||
       Contains(smb_client_out, kKeyConnectionReset)) {
@@ -300,7 +297,7 @@ GetSmbclientError(const ProcessExecutor& smb_client_cmd) {
 }
 
 // Creates the given directory recursively and sets error message on failure.
-WARN_UNUSED_RESULT ErrorType CreateDirectory(const base::FilePath& dir) {
+[[nodiscard]] ErrorType CreateDirectory(const base::FilePath& dir) {
   base::File::Error ferror;
   if (!base::CreateDirectoryAndGetError(dir, &ferror)) {
     LOG(ERROR) << "Failed to create directory '" << dir.value()
@@ -311,8 +308,7 @@ WARN_UNUSED_RESULT ErrorType CreateDirectory(const base::FilePath& dir) {
 }
 
 // Sets file permissions for a given filepath and sets error message on failure.
-WARN_UNUSED_RESULT ErrorType SetFilePermissions(const base::FilePath& fp,
-                                                int mode) {
+[[nodiscard]] ErrorType SetFilePermissions(const base::FilePath& fp, int mode) {
   if (!base::SetPosixFilePermissions(fp, mode)) {
     LOG(ERROR) << "Failed to set permissions on '" << fp.value() << "'";
     return ERROR_LOCAL_IO;
@@ -323,7 +319,7 @@ WARN_UNUSED_RESULT ErrorType SetFilePermissions(const base::FilePath& fp,
 // Similar to |SetFilePermissions|, but sets permissions recursively up the path
 // to |base_fp| (not including |base_fp|). Returns false if |base_fp| is not a
 // parent of |fp|.
-WARN_UNUSED_RESULT ErrorType SetFilePermissionsRecursive(
+[[nodiscard]] ErrorType SetFilePermissionsRecursive(
     const base::FilePath& fp, const base::FilePath& base_fp, int mode) {
   if (!base_fp.IsParent(fp)) {
     LOG(ERROR) << "Base path '" << base_fp.value() << "' is not a parent of '"
@@ -369,9 +365,9 @@ bool CheckFlagsDefaultLevelValid(const base::FilePath& default_level_path) {
 
 // Parses |gpo_policy_data| from |gpo_policy_data_blob|. Returns ERROR_NONE on
 // success. Returns ERROR_PARSE_FAILED and prints an error on failure.
-WARN_UNUSED_RESULT ErrorType
-ParsePolicyData(const std::string& gpo_policy_data_blob,
-                protos::GpoPolicyData* gpo_policy_data) {
+[[nodiscard]] ErrorType ParsePolicyData(
+    const std::string& gpo_policy_data_blob,
+    protos::GpoPolicyData* gpo_policy_data) {
   if (!gpo_policy_data->ParseFromString(gpo_policy_data_blob)) {
     LOG(ERROR) << "Failed to parse policy data from string";
     return ERROR_PARSE_FAILED;
@@ -439,7 +435,7 @@ base::TimeDelta GetMachinePasswordChangeRate(
       !device_policy.device_machine_password_change_rate().has_rate_days()) {
     return kDefaultMachinePasswordChangeRate;
   }
-  return base::TimeDelta::FromDays(
+  return base::Days(
       device_policy.device_machine_password_change_rate().rate_days());
 }
 
@@ -451,7 +447,7 @@ base::TimeDelta GetGpoVersionCacheTTL(
       !device_policy.device_gpo_cache_lifetime().has_lifetime_hours()) {
     return kDefaultGpoVersionCacheTTL;
   }
-  return base::TimeDelta::FromHours(
+  return base::Hours(
       device_policy.device_gpo_cache_lifetime().lifetime_hours());
 }
 
@@ -463,7 +459,7 @@ base::TimeDelta GetAuthDataCacheTTL(
       !device_policy.device_auth_data_cache_lifetime().has_lifetime_hours()) {
     return kDefaultAuthDataCacheTTL;
   }
-  return base::TimeDelta::FromHours(
+  return base::Hours(
       device_policy.device_auth_data_cache_lifetime().lifetime_hours());
 }
 
@@ -527,9 +523,10 @@ bool ReadMachinePasswordToString(const base::FilePath& password_path,
 
 }  // namespace
 
-SambaInterface::SambaInterface(AuthPolicyMetrics* metrics,
-                               const PathService* path_service,
-                               const base::Closure& user_kerberos_files_changed)
+SambaInterface::SambaInterface(
+    AuthPolicyMetrics* metrics,
+    const PathService* path_service,
+    const base::RepeatingClosure& user_kerberos_files_changed)
     : user_account_(Path::USER_SMB_CONF),
       device_account_(Path::DEVICE_SMB_CONF),
       metrics_(metrics),
@@ -605,7 +602,7 @@ ErrorType SambaInterface::Initialize(bool expect_config) {
         std::move(device_policy_impl_for_testing);
     if (!policy_impl)
       policy_impl = std::make_unique<policy::DevicePolicyImpl>();
-    if (!policy_impl->LoadPolicy()) {
+    if (!policy_impl->LoadPolicy(/*delete_invalid_files=*/false)) {
       LOG(ERROR) << "Failed to load device policy. Authentication and policy "
                     "fetch might behave unexpectedly until the next device "
                     "policy fetch.";
@@ -1106,7 +1103,7 @@ ErrorType SambaInterface::ChangeMachinePasswordForTesting() {
     return ERROR_LOCAL_IO;
 
   auto stored_password_change_rate_ = password_change_rate_;
-  password_change_rate_ = base::TimeDelta::FromMilliseconds(1);
+  password_change_rate_ = base::Milliseconds(1);
   ErrorType error = CheckMachinePasswordChange();
   password_change_rate_ = stored_password_change_rate_;
   if (error != ERROR_NONE)
@@ -1125,7 +1122,7 @@ ErrorType SambaInterface::ChangeMachinePasswordForTesting() {
 ErrorType SambaInterface::UpdateKdcIpAndServerTime(AccountData* account) const {
   // Look up KDC IP from cache.
   if (account->kdc_ip.empty()) {
-    base::Optional<std::string> kdc_ip =
+    std::optional<std::string> kdc_ip =
         auth_data_cache_.GetKdcIp(account->realm);
     if (kdc_ip) {
       account->kdc_ip = std::move(*kdc_ip);
@@ -1194,7 +1191,7 @@ ErrorType SambaInterface::UpdateKdcIpAndServerTime(AccountData* account) const {
 ErrorType SambaInterface::UpdateDcName(AccountData* account) const {
   // Look up DC name from cache.
   if (account->dc_name.empty()) {
-    base::Optional<std::string> dc_name =
+    std::optional<std::string> dc_name =
         auth_data_cache_.GetDcName(account->realm);
     if (dc_name) {
       account->dc_name = std::move(*dc_name);
@@ -1310,7 +1307,7 @@ ActiveDirectoryUserStatus::PasswordStatus SambaInterface::GetUserPasswordStatus(
 ErrorType SambaInterface::UpdateWorkgroup(AccountData* account) const {
   // Look up workgroup from cache.
   if (account->workgroup.empty()) {
-    base::Optional<std::string> workgroup =
+    std::optional<std::string> workgroup =
         auth_data_cache_.GetWorkgroup(account->realm);
     if (workgroup) {
       account->workgroup = std::move(*workgroup);
@@ -1449,7 +1446,7 @@ ErrorType SambaInterface::PingServer(AccountData* account) {
 
 bool SambaInterface::IsUserAffiliated() {
   // Check cache first.
-  base::Optional<bool> cached_is_affiliated =
+  std::optional<bool> cached_is_affiliated =
       auth_data_cache_.GetIsAffiliated(user_account_.realm);
   if (cached_is_affiliated) {
     // Right now, only affiliated realms should be cached (but we'll keep it
@@ -2134,7 +2131,7 @@ void SambaInterface::UpdateMachinePasswordAutoChange(
   password_change_rate_ = rate;
 
   // Disable password auto change if the rate is non-positive.
-  if (password_change_rate_ <= base::TimeDelta::FromDays(0)) {
+  if (password_change_rate_ <= base::Days(0)) {
     password_change_timer_.Stop();
     return;
   }

@@ -1,16 +1,16 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ATTESTATION_SERVER_ATTESTATION_FLOW_H_
 #define ATTESTATION_SERVER_ATTESTATION_FLOW_H_
 
+#include <optional>
 #include <string>
 #include <utility>
 
 #include <attestation/proto_bindings/interface.pb.h>
-#include <base/callback.h>
-#include <base/optional.h>
+#include <base/functional/callback.h>
 
 #include "attestation/common/attestation_interface.h"
 
@@ -48,10 +48,9 @@ class AttestationFlowData {
 
  public:
   AttestationFlowData() = delete;
-  AttestationFlowData(const EnrollRequest& request,
-                      const EnrollCallback& callback);
+  AttestationFlowData(const EnrollRequest& request, EnrollCallback callback);
   AttestationFlowData(const GetCertificateRequest& request,
-                      const GetCertificateCallback& callback);
+                      GetCertificateCallback callback);
 
   // Derived information from the static data.
   ACAType aca_type() const;
@@ -77,28 +76,38 @@ class AttestationFlowData {
     result_response_ = result_response;
   }
   const std::string& certificate() const { return certificate_; }
+  const std::string& certified_key_credential() const {
+    return certified_key_credential_;
+  }
+  const std::string& key_blob() const { return key_blob_; }
   void set_public_key(std::string public_key) {
     public_key_ = std::move(public_key);
   }
   void set_certificate(std::string certificate) {
     certificate_ = std::move(certificate);
   }
+  void set_certified_key_credential(std::string certified_key_credential) {
+    certified_key_credential_ = std::move(certified_key_credential);
+  }
+  void set_key_blob(std::string blob) { key_blob_ = std::move(blob); }
 
   // Operations on callbacks.
   void ReturnStatus();
   void ReturnCertificate();
 
  private:
-  const base::Optional<EnrollRequest> enroll_request_;
-  const base::Optional<EnrollCallback> enroll_callback_;
-  const base::Optional<GetCertificateRequest> get_certificate_request_;
-  const base::Optional<GetCertificateCallback> get_certificate_callback_;
+  const std::optional<EnrollRequest> enroll_request_;
+  EnrollCallback enroll_callback_;
+  const std::optional<GetCertificateRequest> get_certificate_request_;
+  GetCertificateCallback get_certificate_callback_;
   AttestationFlowAction action_{AttestationFlowAction::kUnknown};
   AttestationStatus status_{STATUS_SUCCESS};
   std::string result_request_;
   std::string result_response_;
   std::string public_key_;
   std::string certificate_;
+  std::string certified_key_credential_;
+  std::string key_blob_;
 };
 
 }  // namespace attestation

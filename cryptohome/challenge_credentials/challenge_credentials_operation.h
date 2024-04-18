@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,12 +10,13 @@
 #include <string>
 #include <utility>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/threading/thread_checker.h>
 #include <brillo/secure_blob.h>
 
-#include "cryptohome/key.pb.h"
+#include "cryptohome/error/cryptohome_tpm_error.h"
+#include "cryptohome/flatbuffer_schemas/structures.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
@@ -31,8 +32,8 @@ class ChallengeCredentialsOperation {
   //
   // If the challenge succeeded, then |signature| will contain the signature of
   // the challenge. Otherwise, it will be null.
-  using KeySignatureChallengeCallback =
-      base::OnceCallback<void(std::unique_ptr<brillo::Blob> signature)>;
+  using KeySignatureChallengeCallback = base::OnceCallback<void(
+      CryptoStatusOr<std::unique_ptr<brillo::Blob>> signature)>;
 
   virtual ~ChallengeCredentialsOperation();
 
@@ -45,7 +46,7 @@ class ChallengeCredentialsOperation {
   // Should complete the operation with an error result.
   //
   // If the completion already happened, should do nothing.
-  virtual void Abort() = 0;
+  virtual void Abort(CryptoStatus status) = 0;
 
  protected:
   static brillo::SecureBlob ConstructPasskey(
@@ -78,14 +79,28 @@ class ChallengeCredentialsOperation {
     std::move(callback_copy).Run(std::forward<Args>(args)...);
   }
 
+  template <typename CompletionCallback>
+  static void CompleteWithError(CompletionCallback* completion_callback,
+                                CryptoStatus status
+                                [[clang::param_typestate(unconsumed)]]) {
+    if (completion_callback->is_null())
+      return;
+    // Move the callback into a temporary variable *before* running it, as the
+    // value passed via |completion_callback| may become destroyed during the
+    // callback execution.
+    CompletionCallback callback_copy;
+    std::swap(*completion_callback, callback_copy);
+    std::move(callback_copy).Run(std::move(status));
+  }
+
   // Starts a signature challenge request. In real use cases, this will make an
   // IPC request to the service that talks to the cryptographic token with the
   // challenged key.
   void MakeKeySignatureChallenge(
-      const std::string& account_id,
+      const Username& account_id,
       const brillo::Blob& public_key_spki_der,
       const brillo::Blob& data_to_sign,
-      ChallengeSignatureAlgorithm signature_algorithm,
+      SerializedChallengeSignatureAlgorithm signature_algorithm,
       KeySignatureChallengeCallback response_callback);
 
   base::ThreadChecker thread_checker_;

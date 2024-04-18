@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -34,9 +35,9 @@ class VPNConnectionUnderTest : public VPNConnection {
 
   void TriggerConnected(const std::string& link_name,
                         int interface_index,
-                        const IPConfig::Properties& ip_properties);
-  void TriggerFailure(Service::ConnectFailure reason,
-                      const std::string& detail);
+                        std::unique_ptr<IPConfig::Properties> ipv4_properties,
+                        std::unique_ptr<IPConfig::Properties> ipv6_properties);
+  void TriggerFailure(Service::ConnectFailure reason, std::string_view detail);
   void TriggerStopped();
 
   void set_state(State state) { state_ = state; }

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,7 @@
 #include <base/logging.h>
 #include <base/notreached.h>
 
-namespace power_manager {
-namespace policy {
-
-BacklightControllerStub::BacklightControllerStub() {}
-
-BacklightControllerStub::~BacklightControllerStub() {}
+namespace power_manager::policy {
 
 void BacklightControllerStub::ResetStats() {
   power_source_changes_.clear();
@@ -27,6 +22,7 @@ void BacklightControllerStub::ResetStats() {
   policy_changes_.clear();
   display_service_starts_ = 0;
   wake_notification_reports_ = 0;
+  battery_saver_changes_ = 0;
 }
 
 void BacklightControllerStub::NotifyObservers(
@@ -97,6 +93,11 @@ void BacklightControllerStub::HandleDisplayServiceStart() {
   display_service_starts_++;
 }
 
+void BacklightControllerStub::HandleBatterySaverModeChange(
+    const BatterySaverModeState& state) {
+  battery_saver_changes_++;
+}
+
 void BacklightControllerStub::SetDimmedForInactivity(bool dimmed) {
   dimmed_ = dimmed;
 }
@@ -137,5 +138,10 @@ int64_t BacklightControllerStub::PercentToLevel(double percent) const {
   return 0;
 }
 
-}  // namespace policy
-}  // namespace power_manager
+void BacklightControllerStub::RegisterAmbientLightResumeMetricsHandler(
+    AmbientLightOnResumeMetricsCallback callback) {
+  DCHECK(callback);
+  ambient_light_metrics_callback_registered_ = true;
+}
+
+}  // namespace power_manager::policy

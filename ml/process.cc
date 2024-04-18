@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,14 +14,14 @@
 #include <unistd.h>
 #include <pwd.h>
 
-#include <base/bind.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/process/process_metrics.h>
-#include <base/strings/stringprintf.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
-#include <base/task/post_task.h>
+#include <base/strings/stringprintf.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <libminijail.h>
 #include <mojo/core/embedder/embedder.h>
@@ -151,6 +151,10 @@ bool Process::SpawnWorkerProcessAndGetPid(const mojo::PlatformChannel& channel,
     // context in crbug.com/1229376
     minijail_namespace_pids(jail.get());
     minijail_namespace_vfs(jail.get());
+    // Allow changes in parent mount namespace to propagate in.
+    // This is needed for DLC to become visible in child subprocesses
+    // if the DLC is mounted after the child process starts.
+    minijail_remount_mode(jail.get(), MS_SLAVE);
   }
 
   // This is the file descriptor used to bootstrap mojo connection between
@@ -264,7 +268,7 @@ void Process::WorkerProcessRun() {
   DETACH_FROM_SEQUENCE(sequence_checker_);
   mojo::core::Init();
   mojo::core::ScopedIPCSupport ipc_support(
-      base::ThreadTaskRunnerHandle::Get(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
       mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
   mojo::IncomingInvitation invitation;
   {
@@ -300,6 +304,7 @@ void Process::WorkerProcessRun() {
     const std::string seccomp_policy_path = GetSeccompPolicyPath(model_name_);
     minijail_parse_seccomp_filters(jail.get(), seccomp_policy_path.c_str());
     minijail_use_seccomp_filter(jail.get());
+    minijail_remount_mode(jail.get(), MS_SLAVE);
     minijail_enter(jail.get());
   }
   message_loop.Run();
@@ -383,12 +388,11 @@ void Process::ReapWorkerProcess(pid_t child_pid,
     DCHECK(times_tried < sizeof(kWaitPidRetrialDelayTimesMilliseconds) /
                              sizeof(kWaitPidRetrialDelayTimesMilliseconds[0]));
     // Try to reap the process again after some time.
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
         base::BindOnce(&Process::ReapWorkerProcess, base::Unretained(this),
                        child_pid, times_tried + 1, begin_time),
-        base::TimeDelta::FromMilliseconds(
-            kWaitPidRetrialDelayTimesMilliseconds[times_tried]));
+        base::Milliseconds(kWaitPidRetrialDelayTimesMilliseconds[times_tried]));
     return;
   } else {
     // Records the errno first to avoid it being changed.

@@ -1,19 +1,22 @@
-# Copyright 2021 The Chromium OS Authors.All rights reserved.
-# Use of this source code is governed by a BSD - style license that can be
+# Copyright 2021 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//common-mk/generate-dbus-adaptors.gni")
-import("//common-mk/generate-dbus-proxies.gni")
 import("//common-mk/pkg_config.gni")
 import("//common-mk/proto_library.gni")
 
 group("all") {
   deps = [
-    ":libmessaging_layer",
+    ":libmissiveclient_pc",
+    ":missiveclientlib",
+    ":missiveclienttestlib",
     ":missived",
   ]
   if (use.test) {
-    deps += [ ":missived_testrunner" ]
+    deps += [
+      ":missive_testing_tool",
+      ":missived_testrunner",
+    ]
   }
 }
 
@@ -22,6 +25,7 @@ pkg_config("target_defaults") {
     "dbus-1",
     "libbrillo",
     "libchrome",
+    "re2",
 
     # system_api depends on protobuf(or protobuf - lite).It must appear
     # before protobuf here or the linker flags won't be in the right
@@ -35,46 +39,133 @@ pkg_config("target_defaults") {
   }
 }
 
-generate_dbus_adaptors("missive_dbus_adaptors") {
-  dbus_adaptors_out_dir = "include/dbus_adaptors"
-  dbus_service_config = "dbus/dbus-service-config.json"
-  sources = [ "dbus/org.chromium.Missived.xml" ]
+generate_pkg_config("libmissiveclient_pc") {
+  name = "libmissiveclient"
+  output_name = "libmissiveclient"
+  description = "missive client library"
+  version = libbase_ver
+  requires = []
+  requires_private = [
+    "dbus-1",
+    "libbrillo",
+    "libchrome",
+  ]
+  defines = [ "USE_RTTI_FOR_TYPE_TAGS=1" ]
+  libs = [
+    "-lmissiveclientlib",
+    "-lmissiveprotohealth",
+    "-lmissiveprotostatus",
+    "-lmissiveprotorecordconstants",
+    "-lmissiveprotorecord",
+    "-lmissiveprotointerface",
+    "-lmissiveclienttestlib",  # Test-only
+  ]
+  cflags = [ "-I/usr/include/libmissiveclient" ]
 }
 
-# Used by other tools to interact with missived
-generate_dbus_proxies("missive_dbus_proxies") {
-  dbus_service_config = "dbus/dbus-service-config.json"
-  proxy_output_file = "include/dbus_proxies/missive/dbus-proxies.h"
-  mock_output_file = "include/dbus_proxies/missive/dbus-proxies-mocks.h"
-  proxy_path_in_mocks = "missive/dbus-proxies.h"
-  sources = [ "dbus/org.chromium.Missived.xml" ]
-}
-
-static_library("libmessaging_layer") {
-  sources = [ "missive_daemon.cc" ]
+# Client library for use by other daemons to call missived
+static_library("missiveclientlib") {
+  sources = [
+    "analytics/metrics.cc",
+    "analytics/metrics.h",
+    "client/dm_token_retriever.h",
+    "client/empty_dm_token_retriever.cc",
+    "client/empty_dm_token_retriever.h",
+    "client/missive_client.cc",
+    "client/missive_client.h",
+    "client/missive_dbus_constants.h",
+    "client/report_queue.cc",
+    "client/report_queue.h",
+    "client/report_queue_configuration.cc",
+    "client/report_queue_configuration.h",
+    "client/report_queue_factory.cc",
+    "client/report_queue_factory.h",
+    "client/report_queue_impl.cc",
+    "client/report_queue_impl.h",
+    "client/report_queue_nonchrome_provider.cc",
+    "client/report_queue_nonchrome_provider.h",
+    "client/report_queue_provider.cc",
+    "client/report_queue_provider.h",
+    "storage/missive_storage_module.cc",
+    "storage/missive_storage_module.h",
+    "storage/missive_storage_module_delegate_impl.cc",
+    "storage/missive_storage_module_delegate_impl.h",
+    "storage/storage_module_interface.cc",
+    "storage/storage_module_interface.h",
+    "util/disconnectable_client.cc",
+    "util/disconnectable_client.h",
+    "util/status.cc",
+    "util/status.h",
+    "util/statusor.cc",
+    "util/statusor.h",
+  ]
   configs += [ ":target_defaults" ]
-  deps = [
-    ":missive_dbus_adaptors",
-    ":missive_dbus_proxies",
-    "//missive/dbus:upload_client",
-    "//missive/encryption:encryption_module",
-    "//missive/encryption:verification",
-    "//missive/proto:interface_proto",
-    "//missive/scheduler",
-    "//missive/scheduler:enqueue_job",
-    "//missive/scheduler:upload_job",
-    "//missive/storage:storage_configuration",
-    "//missive/storage:storage_module",
-    "//missive/storage:storage_module_interface",
-    "//missive/storage:storage_uploader_interface",
-    "//missive/util:status",
+
+  # Make the library into a standalone one.
+  configs -= [ "//common-mk:use_thin_archive" ]
+  configs += [ "//common-mk:nouse_thin_archive" ]
+
+  public_deps = [
+    "//missive/proto:libmissiveprotohealth",
+    "//missive/proto:libmissiveprotointerface",
+    "//missive/proto:libmissiveprotorecord",
+    "//missive/proto:libmissiveprotorecordconstants",
   ]
 }
 
 executable("missived") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
-  deps = [ ":libmessaging_layer" ]
+  deps = [
+    "//missive/daemon:missive_daemon",
+    "//missive/dbus:dbus_adaptor",
+    "//missive/missive:migration",
+    "//missive/missive:missive_args",
+    "//missive/missive:missive_impl",
+    "//missive/missive:missive_service",
+  ]
+}
+
+static_library("missiveclienttestlib") {
+  # testonly = true
+  sources = [
+    "analytics/metrics_test_util.cc",
+    "analytics/metrics_test_util.h",
+    "client/mock_dm_token_retriever.cc",
+    "client/mock_dm_token_retriever.h",
+    "client/mock_report_queue.cc",
+    "client/mock_report_queue.h",
+    "client/mock_report_queue_provider.cc",
+    "client/mock_report_queue_provider.h",
+    "client/report_queue_provider_test_helper.cc",
+    "client/report_queue_provider_test_helper.h",
+    "storage/test_storage_module.cc",
+    "storage/test_storage_module.h",
+  ]
+  configs += [ ":target_defaults" ]
+
+  # Make the library into a standalone one.
+  configs -= [ "//common-mk:use_thin_archive" ]
+  configs += [ "//common-mk:nouse_thin_archive" ]
+
+  deps = [
+    "//missive/client:report_queue",
+    "//missive/client:report_queue_configuration",
+    "//missive/client:report_queue_factory",
+    "//missive/client:report_queue_provider",
+    "//missive/proto:libmissiveprotorecord",
+    "//missive/proto:libmissiveprotorecordconstants",
+
+    # Temporary replacement for `Priority_Name` that does
+    # not work in certain CQ.
+    # TODO(b/294756107): Remove this function once fixed.
+    "//missive/proto:priority_name",
+    "//missive/proto:test_proto",
+    "//missive/storage:storage_test_support",
+    "//missive/util:dynamic_flag",
+    "//missive/util:status",
+    "//missive/util:status_macros",
+  ]
 }
 
 if (use.test) {
@@ -88,20 +179,44 @@ if (use.test) {
 
   executable("missived_testrunner") {
     sources = [
+      "client/empty_dm_token_retriever_test.cc",
+      "client/report_queue_configuration_test.cc",
+      "client/report_queue_factory_test.cc",
+      "client/report_queue_impl_test.cc",
+      "client/report_queue_provider_test.cc",
+      "client/report_queue_provider_test_helper.cc",
+      "client/report_queue_provider_test_helper.h",
+      "client/report_queue_test.cc",
       "compression/compression_module_test.cc",
-      "dbus/upload_client_test.cc",
-      "missive_daemon_test.cc",
+      "dbus/upload_client_impl_test.cc",
+
+      # Temporary replacement for `Priority_Name` that does
+      # not work in certain CQ.
+      # TODO(b/294756107): Remove this function once fixed.
+      "proto/priority_name_test.cc",
+      "resources/enqueuing_record_tallier_test.cc",
+      "resources/resource_managed_buffer_test.cc",
+      "resources/resource_manager_test.cc",
       "scheduler/enqueue_job_test.cc",
       "scheduler/scheduler_test.cc",
       "scheduler/upload_job_test.cc",
-      "storage/resources/resource_interface_test.cc",
+      "storage/legacy_storage_degradation_test.cc",
+      "storage/legacy_storage_test.cc",
+      "storage/storage_degradation_test.cc",
+      "storage/storage_module_test.cc",
       "storage/storage_queue_stress_test.cc",
-      # "storage/storage_queue_test.cc", flakiness, disabled temporarily (b/194224371)
+      "storage/storage_queue_test.cc",
       "storage/storage_test.cc",
-      "util/shared_queue_test.cc",
+      "storage/storage_util_test.cc",
+      "util/disconnectable_client_test.cc",
+      "util/dynamic_flag_test.cc",
+      "util/file_test.cc",
+      "util/refcounted_closure_list_test.cc",
       "util/status_macros_test.cc",
       "util/status_test.cc",
       "util/statusor_test.cc",
+      "util/task_runner_context_test.cc",
+      "util/time_test.cc",
     ]
 
     configs += [
@@ -111,22 +226,44 @@ if (use.test) {
     ]
 
     deps = [
-      ":libmessaging_layer",
       "//common-mk/testrunner",
+      "//missive/analytics:unit_tests",
+      "//missive/client:client_test_support",
       "//missive/compression:compression_module",
       "//missive/compression:compression_test_support",
-      "//missive/dbus:upload_client",
+      "//missive/daemon:unit_tests",
+      "//missive/dbus:test_support",
       "//missive/encryption:encryption_test_support",
       "//missive/encryption:unit_tests",
+      "//missive/health:unit_tests",
+      "//missive/missive:missive_args",
+      "//missive/missive:unit_tests",
+
+      # Temporary replacement for `Priority_Name` that does
+      # not work in certain CQ.
+      # TODO(b/294756107): Remove this function once fixed.
+      "//missive/proto:priority_name",
+      "//missive/resources:resource_manager",
       "//missive/scheduler",
       "//missive/scheduler:enqueue_job",
       "//missive/scheduler:upload_job",
       "//missive/storage:storage_test_support",
       "//missive/storage:storage_uploader_interface",
-      "//missive/storage/resources:resource_interface",
-      "//missive/util:shared_queue",
+      "//missive/util:dynamic_flag",
+      "//missive/util:file",
+      "//missive/util:refcounted_closure_list",
       "//missive/util:status",
       "//missive/util:test_callbacks_support",
+      "//missive/util:time",
+    ]
+  }
+
+  executable("missive_testing_tool") {
+    sources = [ "testing_tool.cc" ]
+    configs += [ ":target_defaults" ]
+    deps = [
+      ":missiveclientlib",
+      "//missive/analytics:libanalytics",
     ]
   }
 }

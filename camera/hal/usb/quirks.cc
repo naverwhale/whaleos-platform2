@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Chromium OS Authors. All rights reserved.
+ * Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -32,6 +32,8 @@ const QuirksMap& GetQuirksMap() {
       {{"05e3", "f11a"}, kQuirkReportLeastFpsRanges},
       // Logitech Tap HDMI Capture (b/146590270)
       {{"046d", "0876"}, kQuirkRestartOnTimeout},
+      // Magewell USB Capture HDMI (b/262885305)
+      {{"2935", "0006"}, kQuirkRestartOnTimeout},
       // IPEVO Ziggi-HD Plus
       {{"1778", "0225"}, kQuirkDisableFrameRateSetting},
       // Chicony CNFFH37 (b/158957477)
@@ -44,13 +46,26 @@ const QuirksMap& GetQuirksMap() {
       {{"04f2", "b72f"}, kQuirkReportLeastFpsRanges},
       // AZWAVE AM-ABA5521-A (b/194751857)
       {{"13d3", "5521"}, kQuirkPreferLargePreviewResolution},
-      {{"30c9", "001c"}, kQuirkFacingFront},
-      {{"30c9", "001e"}, kQuirkFacingFront},
-      {{"5986", "1163"}, kQuirkFacingFront},
-      {{"04f2", "b67a"}, kQuirkFacingFront},
-      {{"04ca", "707a"}, kQuirkFacingBack},
-      {{"04f2", "b688"}, kQuirkFacingBack},
-      {{"04f2", "b786"}, kQuirkFacingBack},
+      // FO50AF-810H-1 (b/196305314)
+      {{"05c8", "0609"}, kQuirkPreferLargePreviewResolution},
+      // Chicony Integrated IR Camera (b/223587315)
+      {{"04f2", "b615"}, kQuirkInfrared},
+      // Rapoo C260 Webcam (b/245461023)
+      {{"0c45", "636b"}, kQuirkPreferLargePreviewResolution},
+      // Sunplus Innovation Technology Inc. USB2.0 UVC HD Webcam (b/269094788)
+      {{"1bcf", "2cb5"}, kQuirkRestartOnTimeout},
+      // Chicony CKFM517-1 (b/289006377)
+      {{"04f2", "b7da"}, kQuirkPreferLargePreviewResolution},
+      // Quanta(TF) YHVU-1 (b/293388961)
+      {{"0408", "4047"}, kQuirkPreferLargePreviewResolution},
+      // KINGCOME KBFD1004
+      {{"2b7e", "1004"}, kQuirkPreferLargePreviewResolution},
+      // KINGCOME KBAD1005
+      {{"2b7e", "1005"}, kQuirkPreferLargePreviewResolution},
+      // LCE-Optics LSN059BF
+      {{"5959", "59bf"}, kQuirkPreferLargePreviewResolution},
+      // LCE-Optics LSN060BF
+      {{"5959", "60bf"}, kQuirkPreferLargePreviewResolution},
   });
   return *kQuirksMap;
 }

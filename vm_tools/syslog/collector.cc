@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,10 +19,10 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
@@ -30,7 +30,7 @@
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <chromeos/scoped_minijail.h>
 #include <grpcpp/grpcpp.h>
@@ -42,8 +42,7 @@ using std::string;
 
 namespace pb = google::protobuf;
 
-namespace vm_tools {
-namespace syslog {
+namespace vm_tools::syslog {
 namespace {
 
 // Maximum size the buffer can reach before logs are immediately flushed.
@@ -134,8 +133,9 @@ bool Collector::StartWatcher(base::TimeDelta flush_period) {
   }
 
   // Start a timer to periodically flush logs.
-  timer_.Start(FROM_HERE, flush_period,
-               base::Bind(&Collector::FlushLogs, weak_factory_.GetWeakPtr()));
+  timer_.Start(
+      FROM_HERE, flush_period,
+      base::BindRepeating(&Collector::FlushLogs, weak_factory_.GetWeakPtr()));
 
   // Start a new log request buffer.
   syslog_request_ = pb::Arena::CreateMessage<vm_tools::LogRequest>(&arena_);
@@ -220,5 +220,4 @@ bool Collector::ReadOneSyslogRecord() {
   return true;
 }
 
-}  // namespace syslog
-}  // namespace vm_tools
+}  // namespace vm_tools::syslog

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -15,6 +16,7 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/time/time.h>
+#include <base/unguessable_token.h>
 #include <brillo/process/process_mock.h>
 #include <gmock/gmock.h>
 
@@ -60,9 +62,6 @@ class MockFileEnumerator : public FileEnumerator {
 ACTION(CallComputeDirectoryDiskUsage) {
   return Platform().ComputeDirectoryDiskUsage(arg0);
 }
-ACTION(CallStatVFS) {
-  return Platform().StatVFS(arg0, arg1);
-}
 ACTION(CallReportFilesystemDetails) {
   return Platform().ReportFilesystemDetails(arg0, arg1);
 }
@@ -75,24 +74,12 @@ class MockPlatform : public Platform {
   MockPlatform();
   virtual ~MockPlatform();
 
-  MOCK_METHOD(bool,
-              GetUserId,
-              (const std::string&, uid_t*, gid_t*),
-              (const, override));
-  MOCK_METHOD(bool,
-              GetGroupId,
-              (const std::string&, gid_t*),
-              (const, override));
   MOCK_METHOD(FileEnumerator*,
               GetFileEnumerator,
               (const base::FilePath&, bool, int),
               (override));
   MOCK_METHOD(bool,
               Rename,
-              (const base::FilePath&, const base::FilePath&),
-              (override));
-  MOCK_METHOD(bool,
-              Move,
               (const base::FilePath&, const base::FilePath&),
               (override));
   MOCK_METHOD(bool,
@@ -108,14 +95,15 @@ class MockPlatform : public Platform {
   MOCK_METHOD(bool, DeleteFile, (const base::FilePath&), (override));
   MOCK_METHOD(bool, DeletePathRecursively, (const base::FilePath&), (override));
   MOCK_METHOD(bool, DeleteFileDurable, (const base::FilePath&), (override));
-  MOCK_METHOD(bool, FileExists, (const base::FilePath&), (override));
+  MOCK_METHOD(bool, DeleteFileSecurely, (const base::FilePath&), (override));
+  MOCK_METHOD(bool, FileExists, (const base::FilePath&), (const, override));
   MOCK_METHOD(bool, DirectoryExists, (const base::FilePath&), (override));
+  MOCK_METHOD(int, Access, (const base::FilePath&, uint32_t), (override));
   MOCK_METHOD(bool, CreateDirectory, (const base::FilePath&), (override));
   MOCK_METHOD(bool,
               CreateSparseFile,
               (const base::FilePath&, int64_t),
               (override));
-  MOCK_METHOD(bool, DataSyncFile, (const base::FilePath&), (override));
   MOCK_METHOD(bool, SyncFile, (const base::FilePath&), (override));
   MOCK_METHOD(bool, SyncDirectory, (const base::FilePath&), (override));
   MOCK_METHOD(void, Sync, (), (override));
@@ -244,7 +232,8 @@ class MockPlatform : public Platform {
   MOCK_METHOD(bool,
               SetPermissions,
               (const base::FilePath&, mode_t),
-              (const, override));
+              (override));
+  MOCK_METHOD(bool, SafeDirChmod, (const base::FilePath&, mode_t), (override));
   MOCK_METHOD(bool,
               GetOwnership,
               (const base::FilePath&, uid_t*, gid_t*, bool),
@@ -252,14 +241,19 @@ class MockPlatform : public Platform {
   MOCK_METHOD(bool,
               SetOwnership,
               (const base::FilePath&, uid_t, gid_t, bool),
-              (const, override));
+              (override));
+  MOCK_METHOD(bool,
+              SafeDirChown,
+              (const base::FilePath&, uid_t, gid_t),
+              (override));
+  MOCK_METHOD(bool,
+              SafeCreateDirAndSetOwnershipAndPermissions,
+              (const base::FilePath&, mode_t, uid_t, gid_t),
+              (override));
   MOCK_METHOD(int64_t,
               AmountOfFreeDiskSpace,
               (const base::FilePath&),
               (const, override));
-
-  // Calls which do not have a corresponding fake in FakePlatform.
-
   MOCK_METHOD(bool,
               Mount,
               (const base::FilePath&,
@@ -274,11 +268,12 @@ class MockPlatform : public Platform {
       (const base::FilePath&, const base::FilePath&, RemountOption, bool),
       (override));
   MOCK_METHOD(bool, Unmount, (const base::FilePath&, bool, bool*), (override));
-  MOCK_METHOD(ExpireMountResult,
-              ExpireMount,
-              (const base::FilePath&),
-              (override));
   MOCK_METHOD(void, LazyUnmount, (const base::FilePath&), (override));
+  MOCK_METHOD(bool,
+              GetMountsByDevicePrefix,
+              (const std::string&,
+               (std::multimap<const base::FilePath, const base::FilePath>*)),
+              (override));
   MOCK_METHOD(bool,
               GetLoopDeviceMounts,
               ((std::multimap<const base::FilePath, const base::FilePath>*)),
@@ -289,45 +284,39 @@ class MockPlatform : public Platform {
                (std::multimap<const base::FilePath, const base::FilePath>*)),
               (override));
   MOCK_METHOD(bool, IsDirectoryMounted, (const base::FilePath&), (override));
-  MOCK_METHOD(base::Optional<std::vector<bool>>,
+  MOCK_METHOD(std::optional<std::vector<bool>>,
               AreDirectoriesMounted,
               (const std::vector<base::FilePath>&),
+              (override));
+
+  MOCK_METHOD(brillo::LoopDeviceManager*, GetLoopDeviceManager, (), (override));
+  MOCK_METHOD(brillo::LogicalVolumeManager*,
+              GetLogicalVolumeManager,
+              (),
+              (override));
+
+  // Calls which do not have a corresponding fake in FakePlatform.
+
+  MOCK_METHOD(ExpireMountResult,
+              ExpireMount,
+              (const base::FilePath&),
               (override));
   MOCK_METHOD(std::unique_ptr<brillo::Process>,
               CreateProcessInstance,
               (),
               (override));
   MOCK_METHOD(bool,
-              SetGroupAccessible,
-              (const base::FilePath&, gid_t group_id, mode_t group_mode),
-              (const, override));
-  MOCK_METHOD(int64_t,
-              GetQuotaCurrentSpaceForUid,
-              (const base::FilePath&, uid_t),
-              (const, override));
-  MOCK_METHOD(int64_t,
-              GetQuotaCurrentSpaceForGid,
-              (const base::FilePath&, gid_t),
-              (const, override));
-  MOCK_METHOD(int64_t,
-              GetQuotaCurrentSpaceForProjectId,
-              (const base::FilePath&, int),
+              GetQuotaProjectId,
+              (const base::FilePath&, int*),
               (const, override));
   MOCK_METHOD(bool,
               SetQuotaProjectId,
-              (int, const base::FilePath&),
-              (const, override));
-  MOCK_METHOD(bool,
-              SetQuotaProjectIdWithFd,
-              (int, int, int*),
-              (const, override));
-  MOCK_METHOD(int, Access, (const base::FilePath&, uint32_t), (override));
+              (const base::FilePath&, int),
+              (override));
   MOCK_METHOD(int64_t,
               ComputeDirectoryDiskUsage,
               (const base::FilePath&),
               (override));
-  MOCK_METHOD(FILE*, CreateAndOpenTemporaryFile, (base::FilePath*), (override));
-  MOCK_METHOD(bool, WriteOpenFile, (FILE*, const brillo::Blob&), (override));
   MOCK_METHOD(base::Time, GetCurrentTime, (), (const, override));
   MOCK_METHOD(bool,
               StatVFS,
@@ -354,26 +343,20 @@ class MockPlatform : public Platform {
               SetDirCryptoKey,
               (const base::FilePath&, const dircrypto::KeyReference&),
               (override));
-  MOCK_METHOD(bool,
-              AddDirCryptoKeyToKeyring,
-              (const brillo::SecureBlob& key, dircrypto::KeyReference*),
-              (override));
+  MOCK_METHOD(int,
+              GetDirectoryPolicyVersion,
+              (const base::FilePath& dir),
+              (const, override));
+  MOCK_METHOD(bool, CheckFscryptKeyIoctlSupport, (), (const, override));
   MOCK_METHOD(bool,
               InvalidateDirCryptoKey,
               (const dircrypto::KeyReference&, const base::FilePath&),
               (override));
   MOCK_METHOD(bool, ClearUserKeyring, (), (override));
-  MOCK_METHOD(bool,
-              AddEcryptfsAuthToken,
-              (const brillo::SecureBlob&,
-               const std::string&,
-               const brillo::SecureBlob&),
-              (override));
   MOCK_METHOD(bool, FirmwareWriteProtected, (), (override));
-  MOCK_METHOD(std::string, GetHardwareID, (), (override));
   MOCK_METHOD(bool, GetBlkSize, (const base::FilePath&, uint64_t*), (override));
-  MOCK_METHOD(base::FilePath, AttachLoop, (const base::FilePath&), (override));
   MOCK_METHOD(bool, DetachLoop, (const base::FilePath&), (override));
+  MOCK_METHOD(bool, DiscardDevice, (const base::FilePath&), (override));
   MOCK_METHOD(std::vector<LoopDevice>, GetAttachedLoopDevices, (), (override));
   MOCK_METHOD(bool,
               FormatExt4,
@@ -393,24 +376,18 @@ class MockPlatform : public Platform {
               RestoreSELinuxContexts,
               (const base::FilePath&, bool),
               (override));
-  MOCK_METHOD(base::Optional<std::string>,
-              GetSELinuxContextOfFD,
-              (int fd),
+  MOCK_METHOD(void,
+              AddGlobalSELinuxRestoreconExclusion,
+              (const std::vector<base::FilePath>&),
               (override));
   MOCK_METHOD(bool,
               SetSELinuxContext,
               (const base::FilePath&, const std::string&),
               (override));
-  MOCK_METHOD(bool,
-              SafeCreateDirAndSetOwnershipAndPermissions,
-              (const base::FilePath&, mode_t, uid_t, gid_t),
-              (override));
-  MOCK_METHOD(bool,
-              SafeCreateDirAndSetOwnership,
-              (const base::FilePath&, uid_t, gid_t),
-              (override));
   MOCK_METHOD(bool, UdevAdmSettle, (const base::FilePath&, bool), (override));
+  MOCK_METHOD(bool, IsStatefulLogicalVolumeSupported, (), (override));
   MOCK_METHOD(base::FilePath, GetStatefulDevice, (), (override));
+  MOCK_METHOD(base::UnguessableToken, CreateUnguessableToken, (), (override));
 
   brillo::ProcessMock* mock_process() { return mock_process_.get(); }
 
@@ -422,11 +399,6 @@ class MockPlatform : public Platform {
     mock_process_ =
         std::make_unique<::testing::NiceMock<brillo::ProcessMock>>();
     return res;
-  }
-
-  bool MockGetPermissions(const base::FilePath& path, mode_t* mode) const {
-    *mode = S_IRWXU | S_IRGRP | S_IXGRP;
-    return true;
   }
 
   std::unique_ptr<brillo::ProcessMock> mock_process_;

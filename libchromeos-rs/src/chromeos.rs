@@ -1,11 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! Implements Chrome OS specific logic such as code that depends on system_api.
 
 use std::ffi::{CString, NulError};
-use std::os::raw::{c_char, c_int, c_ulong};
+use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
 use std::str::{from_utf8, Utf8Error};
 use std::sync::{Arc, Mutex};
@@ -16,6 +16,7 @@ use dbus::Error as DbusError;
 use lazy_static::lazy_static;
 use system_api::client::OrgChromiumSessionManagerInterface;
 use thiserror::Error as ThisError;
+use vboot_reference_sys::crossystem::*;
 
 // 25 seconds is the default timeout for dbus-send.
 pub const DBUS_TIMEOUT: Duration = Duration::from_secs(25);
@@ -68,19 +69,7 @@ pub fn is_dev_mode() -> Result<bool> {
         .map(|x| x == 1)
 }
 
-const BUFFER_SIZE: usize = 128;
-
-// Bindings to vboot/crossystem.h
-extern "C" {
-    fn VbGetSystemPropertyInt(name: *const c_char) -> c_int;
-    fn VbGetSystemPropertyString(
-        name: *const c_char,
-        dest: *mut c_char,
-        size: c_ulong,
-    ) -> *const c_char;
-    fn VbSetSystemPropertyInt(name: *const c_char, value: c_int) -> c_int;
-    fn VbSetSystemPropertyString(name: *const c_char, value: *const c_char) -> c_int;
-}
+const BUFFER_SIZE: u16 = 128;
 
 /// Integer properties present in crossystem.
 pub enum CrossystemIntProperty {
@@ -123,13 +112,6 @@ fn check_return(ret: c_int) -> Result<c_int> {
     }
 }
 
-fn check_return_str(ret: *const c_char) -> Result<*const c_char> {
-    match ret.is_null() {
-        true => Err(Error::CrossystemFailed),
-        false => Ok(ret),
-    }
-}
-
 impl Crossystem {
     pub fn new() -> Self {
         lazy_static! {
@@ -153,15 +135,15 @@ impl Crossystem {
     pub fn get_string_property(&self, property: CrossystemStringProperty) -> Result<String> {
         let _guard = self.mutex.lock().unwrap();
         let name = CString::new(AsRef::<str>::as_ref(&property)).unwrap();
-        let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
+        let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE as usize];
 
         // Safe because it doesn't change any system state, mutex guard provides thread safety, and
         // both name and buffer are owned.
-        check_return_str(unsafe {
+        check_return(unsafe {
             VbGetSystemPropertyString(
                 name.as_ptr(),
                 buffer.as_mut_ptr() as *mut c_char,
-                BUFFER_SIZE as c_ulong,
+                BUFFER_SIZE.into(),
             )
         })?;
 

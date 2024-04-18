@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,16 +16,26 @@
 #include <dbus/dlcservice/dbus-constants.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <imageloader/proto_bindings/imageloader.pb.h>
 #include <imageloader/dbus-proxy-mocks.h>
+#if USE_LVM_STATEFUL_PARTITION
+#include <lvmd/proto_bindings/lvmd.pb.h>
+// NOLINTNEXTLINE(build/include_alpha)
+#include <lvmd/dbus-proxy-mocks.h>
+#endif  // USE_LVM_STATEFUL_PARTITION
 #include <metrics/metrics_library_mock.h>
 #include <update_engine/dbus-constants.h>
 #include <update_engine/dbus-proxy-mocks.h>
 
 #include "dlcservice/boot/boot_slot.h"
-#include "dlcservice/dlc.h"
+#include "dlcservice/dlc_base.h"
 #include "dlcservice/metrics.h"
+#if USE_LVM_STATEFUL_PARTITION
+#include "dlcservice/lvm/mock_lvmd_proxy_wrapper.h"
+#endif  // USE_LVM_STATEFUL_PARTITION
 #include "dlcservice/system_state.h"
 #include "dlcservice/utils.h"
+#include "dlcservice/utils/utils.h"
 
 using std::string;
 using std::vector;
@@ -40,30 +50,33 @@ namespace dlcservice {
 const char kFirstDlc[] = "first-dlc";
 const char kSecondDlc[] = "second-dlc";
 const char kThirdDlc[] = "third-dlc";
-const char kPackage[] = "package";
+const char kFourthDlc[] = "fourth-dlc";
+const char kScaledDlc[] = "scaled-dlc";
 const char kDefaultOmahaUrl[] = "http://foo-url";
 
 BaseTest::BaseTest() {
   // Create mocks with default behaviors.
+#if USE_LVM_STATEFUL_PARTITION
+  mock_lvmd_proxy_wrapper_ =
+      std::make_unique<StrictMock<MockLvmdProxyWrapper>>();
+  mock_lvmd_proxy_wrapper_ptr_ = mock_lvmd_proxy_wrapper_.get();
+#endif  // USE_LVM_STATEFUL_PARTITION
+
   mock_image_loader_proxy_ =
       std::make_unique<StrictMock<ImageLoaderProxyMock>>();
   mock_image_loader_proxy_ptr_ = mock_image_loader_proxy_.get();
+
+  mock_bus_ = new dbus::MockBus(dbus::Bus::Options{});
+  mock_update_engine_object_proxy_ = new dbus::MockObjectProxy(
+      mock_bus_.get(), update_engine::kUpdateEngineServiceName,
+      dbus::ObjectPath(update_engine::kUpdateEngineServicePath));
 
   mock_update_engine_proxy_ =
       std::make_unique<StrictMock<UpdateEngineProxyMock>>();
   mock_update_engine_proxy_ptr_ = mock_update_engine_proxy_.get();
 
-  mock_session_manager_proxy_ =
-      std::make_unique<StrictMock<SessionManagerProxyMock>>();
-  mock_session_manager_proxy_ptr_ = mock_session_manager_proxy_.get();
-
-  mock_boot_device_ = std::make_unique<MockBootDevice>();
-  mock_boot_device_ptr_ = mock_boot_device_.get();
-  EXPECT_CALL(*mock_boot_device_, GetBootDevice())
-      .WillOnce(Return("/dev/sdb5"));
-  ON_CALL(*mock_boot_device_, IsRemovableDevice(_))
-      .WillByDefault(Return(false));
-  EXPECT_CALL(*mock_boot_device_, IsRemovableDevice(_)).Times(1);
+  mock_boot_slot_ = std::make_unique<MockBootSlot>();
+  mock_boot_slot_ptr_ = mock_boot_slot_.get();
 }
 
 void BaseTest::SetUp() {
@@ -79,13 +92,20 @@ void BaseTest::SetUp() {
   mock_system_properties_ = mock_system_properties.get();
 
   SystemState::Initialize(
+#if USE_LVM_STATEFUL_PARTITION
+      std::move(mock_lvmd_proxy_wrapper_),
+#endif  // USE_LVM_STATEFUL_PARTITION
       std::move(mock_image_loader_proxy_), std::move(mock_update_engine_proxy_),
-      std::move(mock_session_manager_proxy_), &mock_state_change_reporter_,
-      std::make_unique<BootSlot>(std::move(mock_boot_device_)),
+      &mock_state_change_reporter_, std::move(mock_boot_slot_),
       std::move(mock_metrics), std::move(mock_system_properties),
-      manifest_path_, preloaded_content_path_, content_path_, prefs_path_,
-      users_path_, verification_file_path_, &clock_,
+      manifest_path_, preloaded_content_path_, factory_install_path_,
+      deployed_content_path_, content_path_, prefs_path_, users_path_,
+      verification_file_path_, resume_in_progress_path_, &clock_,
       /*for_test=*/true);
+  SystemState::Get()->set_update_engine_service_available(true);
+#if USE_LVM_STATEFUL_PARTITION
+  SystemState::Get()->SetIsLvmStackEnabled(true);
+#endif  // USE_LVM_STATEFUL_PARTITION
 }
 
 void BaseTest::SetUpFilesAndDirectories() {
@@ -94,6 +114,10 @@ void BaseTest::SetUpFilesAndDirectories() {
   manifest_path_ = JoinPaths(scoped_temp_dir_.GetPath(), "rootfs");
   preloaded_content_path_ =
       JoinPaths(scoped_temp_dir_.GetPath(), "preloaded_stateful");
+  factory_install_path_ =
+      JoinPaths(scoped_temp_dir_.GetPath(), "factory_install");
+  deployed_content_path_ =
+      JoinPaths(scoped_temp_dir_.GetPath(), "deployed_stateful");
   content_path_ = JoinPaths(scoped_temp_dir_.GetPath(), "stateful");
   prefs_path_ = JoinPaths(scoped_temp_dir_.GetPath(), "var_lib_dlcservice");
   users_path_ = JoinPaths(scoped_temp_dir_.GetPath(), "users");
@@ -101,8 +125,12 @@ void BaseTest::SetUpFilesAndDirectories() {
       JoinPaths(scoped_temp_dir_.GetPath(), "verification_file");
   mount_path_ = JoinPaths(scoped_temp_dir_.GetPath(), "mount");
   base::FilePath mount_root_path = JoinPaths(mount_path_, "root");
+  resume_in_progress_path_ =
+      JoinPaths(scoped_temp_dir_.GetPath(), "resume_in_progress");
   base::CreateDirectory(manifest_path_);
   base::CreateDirectory(preloaded_content_path_);
+  base::CreateDirectory(factory_install_path_);
+  base::CreateDirectory(deployed_content_path_);
   base::CreateDirectory(content_path_);
   base::CreateDirectory(prefs_path_);
   base::CreateDirectory(users_path_);
@@ -112,10 +140,11 @@ void BaseTest::SetUpFilesAndDirectories() {
   CHECK(base::WriteFile(verification_file_path_, "verification-value"));
 
   // Create DLC manifest sub-directories.
-  for (auto&& id : {kFirstDlc, kSecondDlc, kThirdDlc}) {
+  for (auto&& id : {kFirstDlc, kSecondDlc, kThirdDlc, kFourthDlc, kScaledDlc}) {
     base::CreateDirectory(JoinPaths(manifest_path_, id, kPackage));
     base::CopyFile(JoinPaths(testdata_path_, id, kPackage, kManifestName),
                    JoinPaths(manifest_path_, id, kPackage, kManifestName));
+    supported_dlc_.emplace(id);
   }
 }
 
@@ -125,10 +154,10 @@ int64_t GetFileSize(const base::FilePath& path) {
   return file_size;
 }
 
-base::FilePath BaseTest::SetUpDlcPreloadedImage(const DlcId& id) {
+base::FilePath BaseTest::SetUpImage(const base::FilePath& root,
+                                    const DlcId& id) {
   auto manifest = dlcservice::GetDlcManifest(manifest_path_, id, kPackage);
-  base::FilePath image_path =
-      JoinPaths(preloaded_content_path_, id, kPackage, kDlcImageFileName);
+  base::FilePath image_path = JoinPaths(root, id, kPackage, kDlcImageFileName);
   CreateFile(image_path, manifest->size());
   EXPECT_TRUE(base::PathExists(image_path));
 
@@ -136,6 +165,18 @@ base::FilePath BaseTest::SetUpDlcPreloadedImage(const DlcId& id) {
   WriteToImage(image_path, data);
 
   return image_path;
+}
+
+base::FilePath BaseTest::SetUpDlcPreloadedImage(const DlcId& id) {
+  return SetUpImage(preloaded_content_path_, id);
+}
+
+base::FilePath BaseTest::SetUpDlcFactoryImage(const DlcId& id) {
+  return SetUpImage(factory_install_path_, id);
+}
+
+base::FilePath BaseTest::SetUpDlcDeployedImage(const DlcId& id) {
+  return SetUpImage(deployed_content_path_, id);
 }
 
 // Will create |path/|id|/|package|/dlc_[a|b]/dlc.img files.

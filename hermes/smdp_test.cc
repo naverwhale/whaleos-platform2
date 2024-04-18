@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -49,11 +49,11 @@ TEST_F(SmdpTest, InitiateAuthenticationTest) {
   EXPECT_CALL(smdp_tester_, OnInitiateAuth(_, _, _, _, _)).Times(1);
   EXPECT_CALL(smdp_tester_, FakeError(_)).Times(0);
 
-  smdp_.InitiateAuthentication(
-      fake_info1, fake_challenge,
-      base::Bind(&SmdpFiTester::OnInitiateAuth,
-                 base::Unretained(&smdp_tester_)),
-      base::Bind(&SmdpFiTester::FakeError, base::Unretained(&smdp_tester_)));
+  smdp_.InitiateAuthentication(fake_info1, fake_challenge,
+                               base::BindOnce(&SmdpFiTester::OnInitiateAuth,
+                                              base::Unretained(&smdp_tester_)),
+                               base::BindOnce(&SmdpFiTester::FakeError,
+                                              base::Unretained(&smdp_tester_)));
 }
 
 TEST_F(SmdpTest, AuthenticateClientTest) {
@@ -62,10 +62,11 @@ TEST_F(SmdpTest, AuthenticateClientTest) {
   EXPECT_CALL(smdp_tester_, OnAuthClient(_, _, _, _, _)).Times(1);
   EXPECT_CALL(smdp_tester_, FakeError(_)).Times(0);
 
-  smdp_.AuthenticateClient(
-      transaction_id, esim_data,
-      base::Bind(&SmdpFiTester::OnAuthClient, base::Unretained(&smdp_tester_)),
-      base::Bind(&SmdpFiTester::FakeError, base::Unretained(&smdp_tester_)));
+  smdp_.AuthenticateClient(transaction_id, esim_data,
+                           base::BindOnce(&SmdpFiTester::OnAuthClient,
+                                          base::Unretained(&smdp_tester_)),
+                           base::BindOnce(&SmdpFiTester::FakeError,
+                                          base::Unretained(&smdp_tester_)));
 }
 
 }  // namespace hermes

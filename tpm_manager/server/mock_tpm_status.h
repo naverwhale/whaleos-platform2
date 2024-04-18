@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include "tpm_manager/server/tpm_status.h"
 
+#include <string>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -42,6 +43,12 @@ class MockTpmStatus : public TpmStatus {
               GetRoVerificationStatus,
               (tpm_manager::RoVerificationStatus*),
               (override));
+  MOCK_METHOD(bool, GetAlertsData, (AlertsData * alerts), (override));
+  MOCK_METHOD(bool,
+              GetTi50Stats,
+              (uint32_t*, uint32_t*, uint32_t*, uint32_t*),
+              (override));
+  MOCK_METHOD(bool, GetRwVersion, (std::string*), (override));
 };
 
 }  // namespace tpm_manager

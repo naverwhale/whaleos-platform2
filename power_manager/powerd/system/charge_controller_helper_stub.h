@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,9 @@
 #include <map>
 #include <string>
 
-#include <base/macros.h>
-
 #include "power_manager/powerd/system/charge_controller_helper_interface.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Stub implementation of ChargeControllerHelperInterface for use by tests.
 class ChargeControllerHelperStub : public ChargeControllerHelperInterface {
@@ -96,7 +93,6 @@ class ChargeControllerHelperStub : public ChargeControllerHelperInterface {
   int custom_charge_stop_ = kCustomChargeThresholdUnset;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_CHARGE_CONTROLLER_HELPER_STUB_H_

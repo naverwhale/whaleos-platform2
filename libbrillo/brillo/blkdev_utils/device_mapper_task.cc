@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,6 +19,14 @@ DevmapperTaskImpl::DevmapperTaskImpl(int type)
 bool DevmapperTaskImpl::SetName(const std::string& name) {
   if (!task_ || !dm_task_set_name(task_.get(), name.c_str())) {
     LOG(ERROR) << "SetName failed";
+    return false;
+  }
+  return true;
+}
+
+bool DevmapperTaskImpl::SetMessage(const std::string& msg) {
+  if (!task_ || !dm_task_set_message(task_.get(), msg.c_str())) {
+    LOG(ERROR) << "SetMessage failed";
     return false;
   }
   return true;
@@ -90,6 +98,21 @@ bool DevmapperTaskImpl::Run(bool udev_sync) {
   // Make sure the node exists before continuing.
   // TODO(sarthakkukreti): move to dm_udev_wait_immediate() on uprevving lvm2.
   return udev_sync ? (dm_udev_wait(cookie) != 0) : true;
+}
+
+DeviceMapperVersion DevmapperTaskImpl::GetVersion() {
+  struct dm_versions* dmt_versions = dm_task_get_versions(task_.get());
+  DeviceMapperVersion version;
+
+  version.major = dmt_versions->version[0];
+  version.minor = dmt_versions->version[1];
+  version.patchlevel = dmt_versions->version[2];
+
+  return version;
+}
+
+bool DevmapperTaskImpl::SetDeferredRemove() {
+  return dm_task_deferred_remove(task_.get());
 }
 
 }  // namespace brillo

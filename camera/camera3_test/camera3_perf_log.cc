@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,10 @@
 #include <inttypes.h>
 
 #include <numeric>
+#include <optional>
 
 #include <base/command_line.h>
 #include <base/containers/contains.h>
-#include <base/optional.h>
 #include <base/files/file_util.h>
 #include <base/strings/stringprintf.h>
 
@@ -25,7 +25,6 @@ Camera3PerfLog* Camera3PerfLog::GetInstance() {
 }
 
 Camera3PerfLog::~Camera3PerfLog() {
-  VLOGF_ENTER();
   if (!base::CommandLine::ForCurrentProcess()->HasSwitch("output_log"))
     return;
 
@@ -70,8 +69,8 @@ bool Camera3PerfLog::UpdateDeviceEvent(int cam_id,
   VLOGF(1) << "Updating device event " << static_cast<int>(event)
            << " of camera " << cam_id << " at " << time << " us";
   if (base::Contains(device_events_[cam_id], event)) {
-    LOGF(ERROR) << "Device event " << static_cast<int>(event) << " of camera "
-                << cam_id << " is being updated multiple times";
+    LOGF(WARNING) << "Device event " << static_cast<int>(event) << " of camera "
+                  << cam_id << " is being updated multiple times";
     return false;
   }
   device_events_[cam_id][event] = time;
@@ -86,9 +85,9 @@ bool Camera3PerfLog::UpdateFrameEvent(int cam_id,
            << " of camera " << cam_id << " for frame number " << frame_number
            << " at " << time << " us";
   if (base::Contains(frame_events_[cam_id][frame_number], event)) {
-    LOGF(ERROR) << "Frame event " << static_cast<int>(event) << " of camera "
-                << cam_id << " frame number " << frame_number
-                << " is being updated multiple times";
+    LOGF(WARNING) << "Frame event " << static_cast<int>(event) << " of camera "
+                  << cam_id << " frame number " << frame_number
+                  << " is being updated multiple times";
     return false;
   }
   frame_events_[cam_id][frame_number][event] = time;
@@ -177,7 +176,7 @@ std::vector<std::pair<std::string, int64_t>> Camera3PerfLog::CollectPerfLogs(
 
     // Still capture shot to shot times.
     std::vector<int64_t> logs;
-    base::Optional<base::TimeTicks> start_ticks;
+    std::optional<base::TimeTicks> start_ticks;
     for (const auto& it : frame_events_.at(cam_id)) {
       if (!base::Contains(it.second, FrameEvent::STILL_CAPTURE_RESULT))
         continue;
@@ -193,20 +192,6 @@ std::vector<std::pair<std::string, int64_t>> Camera3PerfLog::CollectPerfLogs(
       perf_logs.emplace_back(
           "shot_to_shot",
           std::accumulate(logs.begin(), logs.end(), 0) / logs.size());
-    }
-
-    // Portrait mode time.
-    for (const auto& it : frame_events_.at(cam_id)) {
-      if (!base::Contains(it.second, FrameEvent::PORTRAIT_MODE_STARTED) ||
-          !base::Contains(it.second, FrameEvent::PORTRAIT_MODE_ENDED))
-        continue;
-      const base::TimeTicks start_ticks =
-          it.second.at(FrameEvent::PORTRAIT_MODE_STARTED);
-      const base::TimeTicks end_ticks =
-          it.second.at(FrameEvent::PORTRAIT_MODE_ENDED);
-      perf_logs.emplace_back("portrait_mode",
-                             (end_ticks - start_ticks).InMicroseconds());
-      break;
     }
   }
 

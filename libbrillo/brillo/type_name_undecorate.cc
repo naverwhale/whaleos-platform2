@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -33,8 +33,7 @@ std::string UndecorateTypeName(const char* type_name) {
 }
 
 std::string GetUndecoratedTypeNameForTag(const char* type_tag) {
-#if defined(USE_RTTI_FOR_TYPE_TAGS) && \
-    (defined(__cpp_rtti) || defined(__GXX_RTTI))
+#if USE_RTTI_FOR_TYPE_TAGS && (defined(__cpp_rtti) || defined(__GXX_RTTI))
   return UndecorateTypeName(type_tag);
 #else
   // The signature of type tag for, say, 'int' would be the following:

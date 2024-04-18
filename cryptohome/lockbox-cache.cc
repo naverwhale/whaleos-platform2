@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,7 @@ namespace {
 const mode_t kCacheFilePermissions = 0644;
 }  // namespace
 
-bool CacheLockbox(cryptohome::Platform* platform,
+bool CacheLockbox(Platform* platform,
                   const base::FilePath& nvram_path,
                   const base::FilePath& lockbox_path,
                   const base::FilePath& cache_path) {
@@ -26,7 +26,7 @@ bool CacheLockbox(cryptohome::Platform* platform,
     LOG(INFO) << "Failed to read NVRAM contents from " << nvram_path.value();
     return false;
   }
-  std::unique_ptr<LockboxContents> lockbox = LockboxContents::New(nvram.size());
+  std::unique_ptr<LockboxContents> lockbox = LockboxContents::New();
   if (!lockbox) {
     LOG(ERROR) << "Unsupported lockbox size!";
     return false;

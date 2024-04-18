@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,9 @@
 #include <tensorflow/lite/model.h>
 
 #include "chrome/knowledge/assist_ranker/ranker_example.pb.h"
+#include "ml/dbus_service/tf_model_graph_executor_util.h"
 #include "ml/example_preprocessor/example_preprocessing.h"
+#include "ml/mojom/model.mojom.h"
 #include "ml/request_metrics.h"
 
 namespace ml {
@@ -21,6 +23,7 @@ namespace {
 
 using ::chromeos::machine_learning::mojom::CreateGraphExecutorResult;
 using ::chromeos::machine_learning::mojom::FloatList;
+using ::chromeos::machine_learning::mojom::GpuDelegateApi;
 using ::chromeos::machine_learning::mojom::Int64List;
 using ::chromeos::machine_learning::mojom::Tensor;
 using ::chromeos::machine_learning::mojom::ValueList;
@@ -85,8 +88,9 @@ TfModelGraphExecutor::TfModelGraphExecutor(
 
   GraphExecutorDelegate* graph_executor_delegate;
   if (model_delegate_->CreateGraphExecutorDelegate(
-          false /*use_nnapi*/, false /*use_gpu*/, &graph_executor_delegate) !=
-      CreateGraphExecutorResult::OK) {
+          false /*use_nnapi*/, false /*use_gpu*/,
+          GpuDelegateApi::OPENGL /*gpu_delegate_api*/,
+          &graph_executor_delegate) != CreateGraphExecutorResult::OK) {
     request_metrics.RecordRequestEvent(
         TfModelGraphExecutorEvent::kCreateGraphExecutorError);
     return;
@@ -127,7 +131,7 @@ bool TfModelGraphExecutor::Execute(
 
   const int preprocessor_result = assist_ranker::ExamplePreprocessor::Process(
       *config_, example, clear_other_features);
-  if (preprocessor_result != assist_ranker::ExamplePreprocessor::kSuccess) {
+  if (!AcceptablePreprocessResult(preprocessor_result)) {
     LOG(ERROR) << "Preprocess example failed! Error type = "
                << preprocessor_result;
     return false;
@@ -146,11 +150,10 @@ bool TfModelGraphExecutor::Execute(
   tensor->shape = Int64List::New();
   tensor->shape->value = std::vector<int64_t>(
       {1, static_cast<int64_t>(vectorized_features.size())});
-  tensor->data = ValueList::New();
-  tensor->data->set_float_list(FloatList::New());
+  tensor->data = ValueList::NewFloatList(FloatList::New());
   tensor->data->get_float_list()->value = std::vector<double>(
       std::begin(vectorized_features), std::end(vectorized_features));
-  // TODO(alanlxl): input node name
+  // "input" is the input node name hardcoded in ../model_metadata.cc.
   inputs.emplace("input", std::move(tensor));
 
   auto execute_result = graph_executor_delegate_->Execute(

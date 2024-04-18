@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include <tuple>
 #include <vector>
 
+#include <base/files/scoped_file.h>
 #include <brillo/dbus/exported_object_manager.h>
 #include <brillo/dbus/exported_property_set.h>
 #include <brillo/dbus/dbus_method_response.h>
@@ -30,6 +31,7 @@
 #include "debugd/src/debug_mode_tool.h"
 #include "debugd/src/dev_features_tool.h"
 #include "debugd/src/dmesg_tool.h"
+#include "debugd/src/drm_trace_tool.h"
 #include "debugd/src/ec_typec_tool.h"
 #include "debugd/src/example_tool.h"
 #include "debugd/src/icmp_tool.h"
@@ -43,6 +45,7 @@
 #include "debugd/src/packet_capture_tool.h"
 #include "debugd/src/perf_tool.h"
 #include "debugd/src/ping_tool.h"
+#include "debugd/src/printscan_tool.h"
 #include "debugd/src/probe_tool.h"
 #include "debugd/src/restricted_tool_wrapper.h"
 #include "debugd/src/route_tool.h"
@@ -51,7 +54,6 @@
 #include "debugd/src/shill_scripts_tool.h"
 #include "debugd/src/simple_service_tool.h"
 #include "debugd/src/storage_tool.h"
-#include "debugd/src/swap_tool.h"
 #include "debugd/src/sysrq_tool.h"
 #include "debugd/src/systrace_tool.h"
 #include "debugd/src/tracepath_tool.h"
@@ -65,12 +67,13 @@ namespace debugd {
 class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
                           public org::chromium::debugdInterface {
  public:
-  explicit DebugdDBusAdaptor(scoped_refptr<dbus::Bus> bus);
-  ~DebugdDBusAdaptor() override = default;
+  explicit DebugdDBusAdaptor(scoped_refptr<dbus::Bus> bus,
+                             const bool perf_logging);
+  ~DebugdDBusAdaptor() override;
 
   // Register the D-Bus object and interfaces.
   void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb);
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb);
 
   // org::chromium::debugdInterface overrides; D-Bus methods.
   std::string BatteryFirmware(const std::string& option) override;
@@ -105,24 +108,40 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
                        const base::ScopedFD& stdout_fd,
                        uint64_t* session_id) override;
   bool StopPerf(brillo::ErrorPtr* error, uint64_t session_id) override;
+  bool GetPerfOutputV2(brillo::ErrorPtr* error,
+                       const std::vector<std::string>& quipper_args,
+                       bool disable_cpu_idle,
+                       const base::ScopedFD& stdout_fd,
+                       uint64_t* session_id) override;
   void DumpDebugLogs(bool is_compressed, const base::ScopedFD& fd) override;
   void SetDebugMode(const std::string& subsystem) override;
   std::string GetLog(const std::string& name) override;
   std::map<std::string, std::string> GetAllLogs() override;
-  void GetBigFeedbackLogs(const base::ScopedFD& fd,
-                          const std::string& username) override;
-
+  void GetFeedbackLogsV2(const base::ScopedFD& fd,
+                         const std::string& username,
+                         const std::vector<int32_t>& requested_logs) override;
+  void GetFeedbackLogsV3(const base::ScopedFD& fd,
+                         const std::string& username,
+                         const std::vector<int32_t>& requested_logs) override;
   void BackupArcBugReport(const std::string& username) override;
   void DeleteArcBugReportBackup(const std::string& username) override;
-  void GetJournalLog(const base::ScopedFD& fd) override;
   std::string GetExample() override;
   int32_t CupsAddAutoConfiguredPrinter(const std::string& name,
                                        const std::string& uri) override;
+  int32_t CupsAddAutoConfiguredPrinterV2(const std::string& name,
+                                         const std::string& uri,
+                                         const std::string& language) override;
   int32_t CupsAddManuallyConfiguredPrinter(
       const std::string& name,
       const std::string& uri,
       const std::vector<uint8_t>& ppd_contents) override;
+  int32_t CupsAddManuallyConfiguredPrinterV2(
+      const std::string& name,
+      const std::string& uri,
+      const std::string& language,
+      const std::vector<uint8_t>& ppd_contents) override;
   bool CupsRemovePrinter(const std::string& name) override;
+  std::vector<uint8_t> CupsRetrievePpd(const std::string& name) override;
   std::string GetInterfaces() override;
   std::string TestICMP(const std::string& host) override;
   std::string TestICMPWithOptions(
@@ -130,6 +149,7 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
       const std::map<std::string, std::string>& options) override;
   std::string Smartctl(const std::string& option) override;
   std::string Mmc(const std::string& option) override;
+  std::string Ufs(const std::string& option) override;
   std::string Nvme(const std::string& option) override;
   std::string NvmeLog(const uint32_t page_id,
                       const uint32_t length,
@@ -152,8 +172,8 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
   void UploadCrashes() override;
   bool UploadSingleCrash(
       brillo::ErrorPtr* error,
-      const std::vector<std::tuple<std::string, base::ScopedFD>>& in_files)
-      override;
+      const std::vector<std::tuple<std::string, base::ScopedFD>>& in_files,
+      bool consent_already_checked_by_crash_reporter) override;
   bool RemoveRootfsVerification(brillo::ErrorPtr* error) override;
   bool EnableBootFromUsb(brillo::ErrorPtr* error) override;
   bool EnableChromeRemoteDebugging(brillo::ErrorPtr* error) override;
@@ -167,15 +187,6 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
   bool EnableDevCoredumpUpload(brillo::ErrorPtr* error) override;
   bool DisableDevCoredumpUpload(brillo::ErrorPtr* error) override;
   std::string SetOomScoreAdj(const std::map<pid_t, int32_t>& scores) override;
-  bool KstaledSetRatio(brillo::ErrorPtr* error,
-                       uint8_t kstaled_ratio,
-                       bool* out_result) override;
-  std::string SwapEnable(int32_t size, bool change_now) override;
-  std::string SwapDisable(bool change_now) override;
-  std::string SwapStartStop(bool on) override;
-  std::string SwapStatus() override;
-  std::string SwapSetParameter(const std::string& parameter_name,
-                               int32_t parameter_value) override;
   std::string SetU2fFlags(const std::string& flags) override;
   std::string GetU2fFlags() override;
   void ContainerStarted() override;
@@ -211,10 +222,11 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
                                    bool lock_policy,
                                    bool* result,
                                    uint32_t* num_cores_disabled) override;
-  bool EvaluateProbeFunction(
-      brillo::ErrorPtr* error,
-      const std::string& probe_statement,
-      brillo::dbus_utils::FileDescriptor* outfd) override;
+  bool EvaluateProbeFunction(brillo::ErrorPtr* error,
+                             const std::string& probe_statement,
+                             int log_level,
+                             base::ScopedFD* outfd,
+                             base::ScopedFD* errfd) override;
   bool CollectSmartBatteryMetric(brillo::ErrorPtr* error,
                                  const std::string& metric_name,
                                  std::string* output) override;
@@ -229,6 +241,12 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
   bool EcTypeCExitMode(brillo::ErrorPtr* error,
                        uint32_t port_num,
                        std::string* output) override;
+  bool EcTypeCDpState(brillo::ErrorPtr* error,
+                      uint32_t port_num,
+                      bool* output) override;
+  bool EcTypeCHpdState(brillo::ErrorPtr* error,
+                       uint32_t port_num,
+                       bool* output) override;
 
   bool KernelFeatureEnable(brillo::ErrorPtr* error,
                            const std::string& name,
@@ -238,9 +256,20 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
                          bool* result,
                          std::string* csv) override;
 
+  bool DRMTraceSetCategories(brillo::ErrorPtr* error,
+                             uint32_t categories) override;
+  bool DRMTraceSetSize(brillo::ErrorPtr* error, uint32_t size_enum) override;
+  bool DRMTraceAnnotateLog(brillo::ErrorPtr* error,
+                           const std::string& log) override;
+  bool DRMTraceSnapshot(brillo::ErrorPtr* error, uint32_t type_enum) override;
+  bool SetCrashSenderTestMode(brillo::ErrorPtr* error, bool mode) override;
+  bool PrintscanDebugSetCategories(brillo::ErrorPtr* error,
+                                   uint32_t categories) override;
+
  private:
+  void OnPacketCaptureStopped();
+
   brillo::dbus_utils::DBusObject dbus_object_;
-  brillo::dbus_utils::ExportedProperty<bool> crash_sender_test_mode_;
 
   std::unique_ptr<SessionManagerProxy> session_manager_proxy_;
 
@@ -251,6 +280,7 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
   std::unique_ptr<DebugLogsTool> debug_logs_tool_;
   std::unique_ptr<DebugModeTool> debug_mode_tool_;
   std::unique_ptr<DmesgTool> dmesg_tool_;
+  std::unique_ptr<DRMTraceTool> drm_trace_tool_;
   std::unique_ptr<RestrictedToolWrapper<DevFeaturesTool>>
       dev_features_tool_wrapper_;
   std::unique_ptr<EcTypeCTool> ec_typec_tool_;
@@ -265,11 +295,11 @@ class DebugdDBusAdaptor : public org::chromium::debugdAdaptor,
   std::unique_ptr<PacketCaptureTool> packet_capture_tool_;
   std::unique_ptr<PerfTool> perf_tool_;
   std::unique_ptr<PingTool> ping_tool_;
+  std::unique_ptr<PrintscanTool> printscan_tool_;
   std::unique_ptr<RouteTool> route_tool_;
   std::unique_ptr<SchedulerConfigurationTool> scheduler_configuration_tool_;
   std::unique_ptr<ShillScriptsTool> shill_scripts_tool_;
   std::unique_ptr<StorageTool> storage_tool_;
-  std::unique_ptr<SwapTool> swap_tool_;
   std::unique_ptr<SysrqTool> sysrq_tool_;
   std::unique_ptr<SystraceTool> systrace_tool_;
   std::unique_ptr<TracePathTool> tracepath_tool_;

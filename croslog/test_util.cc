@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,8 +21,8 @@ base::Time TimeFromExploded(int year,
       base::Time::Exploded{year, month, 0, day_of_month, hour, minute, second,
                            0},
       &time));
-  time += base::TimeDelta::FromMicroseconds(micro_second);
-  time -= base::TimeDelta::FromHours(timezone_offset_hour);
+  time += base::Microseconds(micro_second);
+  time -= base::Hours(timezone_offset_hour);
   return time;
 }
 

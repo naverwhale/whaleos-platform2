@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,9 +13,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "base/bind.h"
 #include "base/files/file.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/strings/string_util.h"
 
 #include "croslog/file_map_reader.h"
@@ -64,9 +64,8 @@ void LogLineReader::OpenFile(const base::FilePath& file_path) {
   file_path_ = file_path;
   pos_ = 0;
 
-  // TODO(yoshiki): Use stat_wrapper_t and File::FStat after libchrome uprev.
-  struct stat file_stat;
-  if (fstat(file_.GetPlatformFile(), &file_stat) == 0)
+  base::stat_wrapper_t file_stat;
+  if (base::File::Fstat(file_.GetPlatformFile(), &file_stat) == 0)
     file_inode_ = file_stat.st_ino;
   DCHECK_NE(0, file_inode_);
 
@@ -142,14 +141,25 @@ void LogLineReader::ReloadRotatedFile() {
   reader_ = FileMapReader::CreateReader(file_.Duplicate());
 }
 
-base::Optional<std::string> LogLineReader::Forward() {
+std::tuple<std::string, LogLineReader::ReadResult> LogLineReader::Forward() {
   DCHECK_LE(0, pos_);
+
+  if (pos_ > reader_->GetFileSize()) {
+    LOG(WARNING) << "Reading next line has failed. Maybe the file has been"
+                 << "truncated and the current read position got invalid.";
+    return {std::string(), ReadResult::ERROR_FILE_TRUNCATED};
+  }
 
   // Checks the current position is at the beginning of the line.
   if (pos_ != 0) {
     auto buffer = reader_->MapBuffer(pos_ - 1, 1);
-    CHECK(buffer->valid()) << "Mmap failed. Maybe the file has been truncated"
-                           << " and the current read position got invalid.";
+    if (!buffer->valid()) {
+      // This should be rarely hit, since the truncate check was done at the
+      // beginning of this method.
+      LOG(ERROR) << "Mmap failed. Maybe the file has been truncated"
+                 << " and the current read position got invalid.";
+      return {std::string(), ReadResult::ERROR_FILE_TRUNCATED};
+    }
 
     if (buffer->GetChar(pos_ - 1) != '\n') {
       LOG(WARNING) << "The line is odd. The line is too long or the file is"
@@ -164,8 +174,13 @@ base::Optional<std::string> LogLineReader::Forward() {
 
   // Allocates a buffer of the segment from |pos_| to |pos_traversal_end|.
   auto buffer = reader_->MapBuffer(pos_, traversal_length);
-  CHECK(buffer->valid()) << "Mmap failed. Maybe the file has been truncated"
-                         << " and the current read position got invalid.";
+  if (!buffer->valid()) {
+    // This should be rarely hit, since the truncate check was done at the
+    // beginning of this method.
+    LOG(ERROR) << "Mmap failed. Maybe the file has been truncated"
+               << " and the current read position got invalid.";
+    return {std::string(), ReadResult::ERROR_FILE_TRUNCATED};
+  }
 
   // Finds the next LF (end of line).
   int64_t pos_line_end = pos_;
@@ -190,7 +205,7 @@ base::Optional<std::string> LogLineReader::Forward() {
     // If next file doesn't exist, leave the remaining string.
     // If next file exists, read the remaining string.
     if (!rotated_)
-      return base::nullopt;
+      return {std::string(), ReadResult::NO_MORE_LOGS};
 
     pos_line_end = reader_->GetFileSize();
   } else if (pos_line_end == (pos_ + g_max_line_length)) {
@@ -210,13 +225,20 @@ base::Optional<std::string> LogLineReader::Forward() {
       pos_ += 1;
   }
 
-  return GetString(std::move(buffer), pos_line_start, line_length);
+  return {GetString(std::move(buffer), pos_line_start, line_length),
+          ReadResult::NO_ERROR};
 }
 
-base::Optional<std::string> LogLineReader::Backward() {
+std::tuple<std::string, LogLineReader::ReadResult> LogLineReader::Backward() {
   DCHECK_LE(0, pos_);
   if (pos_ == 0)
-    return base::nullopt;
+    return {std::string(), ReadResult::NO_MORE_LOGS};
+
+  if (pos_ > reader_->GetFileSize()) {
+    LOG(WARNING) << "Reading next line is failed. Maybe the file has been"
+                 << "truncated and the current read position got invalid.";
+    return {std::string(), ReadResult::ERROR_FILE_TRUNCATED};
+  }
 
   // Calculates the maximum traversable range in the file and allocate a buffer.
   int64_t pos_traversal_start = std::max(pos_ - g_max_line_length, INT64_C(0));
@@ -225,8 +247,13 @@ base::Optional<std::string> LogLineReader::Backward() {
 
   // Allocates a buffer of the segment from |pos_traversal_start| to |pos_|.
   auto buffer = reader_->MapBuffer(pos_traversal_start, traversal_length);
-  CHECK(buffer->valid()) << "Mmap failed. Maybe the file has been truncated"
-                         << " and the current read position got invalid.";
+  if (!buffer->valid()) {
+    // This should be rarely hit, since the truncate check was done at the
+    // beginning of this method.
+    LOG(ERROR) << "Mmap failed. Maybe the file has been truncated"
+               << " and the current read position got invalid.";
+    return {std::string(), ReadResult::ERROR_FILE_TRUNCATED};
+  }
 
   // Ensures the current position is the beginning of the previous line.
   if (buffer->GetChar(pos_ - 1) != '\n') {
@@ -252,7 +279,8 @@ base::Optional<std::string> LogLineReader::Backward() {
   int64_t line_length = pos_ - last_start - 1;
   pos_ = last_start;
 
-  return GetString(std::move(buffer), last_start, line_length);
+  return {GetString(std::move(buffer), last_start, line_length),
+          ReadResult::NO_ERROR};
 }
 
 void LogLineReader::AddObserver(Observer* obs) {

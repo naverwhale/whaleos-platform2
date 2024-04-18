@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -10,7 +10,6 @@
 #include <string>
 
 #include <base/files/scoped_file.h>
-#include <base/optional.h>
 #include <base/unguessable_token.h>
 #include <mojo/public/c/system/types.h>
 #include <mojo/public/cpp/system/message_pipe.h>
@@ -41,7 +40,7 @@ CROS_CAMERA_EXPORT MojoResult CreateMojoChannelToChildByUnixDomainSocket(
     mojo::ScopedMessagePipeHandle* parent_pipe,
     const std::string& pipe_name);
 
-CROS_CAMERA_EXPORT base::UnguessableToken TokenFromString(
+CROS_CAMERA_EXPORT std::optional<base::UnguessableToken> TokenFromString(
     const std::string& token_string);
 
 }  // namespace cros

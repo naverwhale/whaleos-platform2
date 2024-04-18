@@ -1,12 +1,13 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "authpolicy/session_manager_client.h"
 
 #include <memory>
+#include <utility>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <brillo/dbus/dbus_object.h>
 #include <brillo/errors/error.h>
@@ -46,37 +47,12 @@ SessionManagerClient::SessionManagerClient(
 
 SessionManagerClient::~SessionManagerClient() = default;
 
-void SessionManagerClient::StoreUnsignedPolicyEx(
-    const std::vector<uint8_t>& descriptor_blob,
-    const std::vector<uint8_t>& policy_blob,
-    const base::Callback<void(bool success)>& callback) {
-  proxy_->StoreUnsignedPolicyExAsync(
-      descriptor_blob, policy_blob,
-      base::Bind(&SessionManagerClient::OnStorePolicySuccess,
-                 weak_ptr_factory_.GetWeakPtr(), callback),
-      base::Bind(&SessionManagerClient::OnStorePolicyError,
-                 weak_ptr_factory_.GetWeakPtr(), callback));
-}
-
-bool SessionManagerClient::ListStoredComponentPolicies(
-    const std::vector<uint8_t>& descriptor_blob,
-    std::vector<std::string>* component_ids) {
-  brillo::ErrorPtr error;
-  if (!proxy_->ListStoredComponentPolicies(descriptor_blob, component_ids,
-                                           &error)) {
-    PrintError(login_manager::kSessionManagerListStoredComponentPolicies,
-               error.get());
-    return false;
-  }
-  return true;
-}
-
 void SessionManagerClient::ConnectToSessionStateChangedSignal(
-    const base::Callback<void(const std::string& state)>& callback) {
+    const base::RepeatingCallback<void(const std::string& state)>& callback) {
   proxy_->RegisterSessionStateChangedSignalHandler(
-      base::Bind(&SessionManagerClient::OnSessionStateChanged,
-                 weak_ptr_factory_.GetWeakPtr(), callback),
-      base::Bind(&LogOnSignalConnected));
+      base::BindRepeating(&SessionManagerClient::OnSessionStateChanged,
+                          weak_ptr_factory_.GetWeakPtr(), callback),
+      base::BindOnce(&LogOnSignalConnected));
 }
 
 std::string SessionManagerClient::RetrieveSessionState() {
@@ -92,19 +68,8 @@ std::string SessionManagerClient::RetrieveSessionState() {
   return state;
 }
 
-void SessionManagerClient::OnStorePolicySuccess(
-    const base::Callback<void(bool success)>& callback) {
-  callback.Run(true /* success */);
-}
-
-void SessionManagerClient::OnStorePolicyError(
-    const base::Callback<void(bool success)>& callback, brillo::Error* error) {
-  PrintError(login_manager::kSessionManagerStoreUnsignedPolicyEx, error);
-  callback.Run(false /* success */);
-}
-
 void SessionManagerClient::OnSessionStateChanged(
-    const base::Callback<void(const std::string& state)>& callback,
+    const base::RepeatingCallback<void(const std::string& state)>& callback,
     const std::string& state) {
   callback.Run(state);
 }

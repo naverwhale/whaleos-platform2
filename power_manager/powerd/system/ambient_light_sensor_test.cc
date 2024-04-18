@@ -1,28 +1,28 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/system/ambient_light_sensor.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 
-#include <base/optional.h>
 #include <gtest/gtest.h>
 
 #include "power_manager/powerd/system/ambient_light_observer.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
 class TestObserver : public AmbientLightObserver {
  public:
-  TestObserver() {}
+  TestObserver() = default;
   TestObserver(const TestObserver&) = delete;
   TestObserver& operator=(const TestObserver&) = delete;
-  ~TestObserver() override {}
+  ~TestObserver() override = default;
 
   bool Updated() {
     bool updated = updated_;
@@ -47,8 +47,8 @@ class TestDelegate : public AmbientLightSensorDelegate {
     return base::FilePath();
   }
 
-  void SetLuxAndColorTemperature(base::Optional<int> lux,
-                                 base::Optional<int> color_temperature) {
+  void SetLuxAndColorTemperature(std::optional<int> lux,
+                                 std::optional<int> color_temperature) {
     if (color_temperature.has_value())
       is_color_sensor_ = true;
 
@@ -64,13 +64,13 @@ class TestDelegate : public AmbientLightSensorDelegate {
 
 }  // namespace
 
-class AmbientLightSensorTest : public ::testing::Test {
+class AmbientLightSensorTest : public TestEnvironment {
  public:
-  AmbientLightSensorTest() {}
+  AmbientLightSensorTest() = default;
   AmbientLightSensorTest(const AmbientLightSensorTest&) = delete;
   AmbientLightSensorTest& operator=(const AmbientLightSensorTest&) = delete;
 
-  ~AmbientLightSensorTest() override {}
+  ~AmbientLightSensorTest() override = default;
 
  protected:
   void SetUp() override {
@@ -94,7 +94,7 @@ TEST_F(AmbientLightSensorTest, IsColorSensor) {
 }
 
 TEST_F(AmbientLightSensorTest, UpdateWithoutData) {
-  delegate_->SetLuxAndColorTemperature(base::nullopt, base::nullopt);
+  delegate_->SetLuxAndColorTemperature(std::nullopt, std::nullopt);
   EXPECT_TRUE(observer_.Updated());
 
   EXPECT_EQ(-1, sensor_->GetAmbientLightLux());
@@ -102,13 +102,13 @@ TEST_F(AmbientLightSensorTest, UpdateWithoutData) {
 }
 
 TEST_F(AmbientLightSensorTest, UpdateWithLux) {
-  delegate_->SetLuxAndColorTemperature(100, base::nullopt);
+  delegate_->SetLuxAndColorTemperature(100, std::nullopt);
   EXPECT_TRUE(observer_.Updated());
 
   EXPECT_EQ(100, sensor_->GetAmbientLightLux());
   EXPECT_EQ(-1, sensor_->GetColorTemperature());
 
-  delegate_->SetLuxAndColorTemperature(base::nullopt, base::nullopt);
+  delegate_->SetLuxAndColorTemperature(std::nullopt, std::nullopt);
   EXPECT_TRUE(observer_.Updated());
 
   // lux doesn't change.
@@ -118,14 +118,14 @@ TEST_F(AmbientLightSensorTest, UpdateWithLux) {
 
 TEST_F(AmbientLightSensorTest, UpdateWithColorTemperature) {
   EXPECT_FALSE(sensor_->IsColorSensor());
-  delegate_->SetLuxAndColorTemperature(base::nullopt, 200);
+  delegate_->SetLuxAndColorTemperature(std::nullopt, 200);
   EXPECT_TRUE(sensor_->IsColorSensor());
   EXPECT_TRUE(observer_.Updated());
 
   EXPECT_EQ(-1, sensor_->GetAmbientLightLux());
   EXPECT_EQ(200, sensor_->GetColorTemperature());
 
-  delegate_->SetLuxAndColorTemperature(base::nullopt, base::nullopt);
+  delegate_->SetLuxAndColorTemperature(std::nullopt, std::nullopt);
   EXPECT_TRUE(observer_.Updated());
 
   // lux doesn't change.
@@ -140,7 +140,7 @@ TEST_F(AmbientLightSensorTest, UpdateWithLuxAndColorTemperature) {
   EXPECT_EQ(100, sensor_->GetAmbientLightLux());
   EXPECT_EQ(200, sensor_->GetColorTemperature());
 
-  delegate_->SetLuxAndColorTemperature(base::nullopt, base::nullopt);
+  delegate_->SetLuxAndColorTemperature(std::nullopt, std::nullopt);
   EXPECT_TRUE(observer_.Updated());
 
   // lux doesn't change.
@@ -148,5 +148,4 @@ TEST_F(AmbientLightSensorTest, UpdateWithLuxAndColorTemperature) {
   EXPECT_EQ(200, sensor_->GetColorTemperature());
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

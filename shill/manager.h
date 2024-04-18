@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,107 +7,116 @@
 
 #include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <base/cancelable_callback.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <base/observer_list.h>
 #include <chromeos/dbus/service_constants.h>
 #include <chromeos/patchpanel/dbus/client.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
-#include <patchpanel/proto_bindings/patchpanel_service.pb.h>
+#include <metrics/timer.h>
 
+#include "shill/cellular/power_opt.h"
 #include "shill/default_service_observer.h"
 #include "shill/device.h"
 #include "shill/device_info.h"
-#include "shill/dhcp/dhcp_properties.h"
 #include "shill/event_dispatcher.h"
 #include "shill/geolocation_info.h"
 #include "shill/hook_table.h"
 #include "shill/metrics.h"
 #include "shill/mockable.h"
-#include "shill/net/ip_address.h"
+#include "shill/portal_detector.h"
 #include "shill/power_manager.h"
 #include "shill/profile.h"
-#include "shill/property_store.h"
 #include "shill/provider_interface.h"
 #include "shill/service.h"
+#include "shill/store/property_store.h"
+#include "shill/supplicant/supplicant_manager.h"
+#include "shill/tethering_manager.h"
 #include "shill/upstart/upstart.h"
 
 namespace shill {
 
+#if !defined(DISABLE_FLOSS)
+class BluetoothManagerInterface;
+#endif  // DISABLE_FLOSS
+class CellularServiceProvider;
 class ControlInterface;
-class DeviceClaimer;
 class DefaultProfile;
 class Error;
+class EthernetEapProvider;
 class EthernetProvider;
 class EventDispatcher;
 class ManagerAdaptorInterface;
-class Resolver;
-class VPNProvider;
-class Throttler;
-
-#if !defined(DISABLE_CELLULAR)
-class CellularServiceProvider;
 class ModemInfo;
-#endif
-
-#if !defined(DISABLE_WIFI)
+class Network;
+class Resolver;
+class Throttler;
+class VPNProvider;
 class WiFiProvider;
-#endif  // DISABLE_WIFI
+class PowerOpt;
 
-#if !defined(DISABLE_WIRED_8021X)
-class EthernetEapProvider;
-#endif  // DISABLE_WIRED_8021X
-
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
-class SupplicantManager;
-#endif  // !DISABLE_WIFI || !DISABLE_WIRED_8021X
+// Helper class for storing in memory the set of shill Manager DBUS R or RW
+// DBus properties.
+// TODO(hugobenichi): simplify access patterns to the Manager properties and
+// remove virtual mockable getter functions in Manager.
+struct ManagerProperties {
+  // Comma separated list of technologies for which portal detection is
+  // enabled.
+  std::string check_portal_list;
+  // URL used for the first HTTP probe sent by PortalDetector on a new network
+  // connection.
+  std::string portal_http_url;
+  // URL used for the first HTTPS probe sent by PortalDetector on a new
+  // network connection.
+  std::string portal_https_url;
+  // Set of fallback URLs used for retrying the HTTP probe when portal
+  // detection is not conclusive.
+  std::vector<std::string> portal_fallback_http_urls;
+  // Set of fallback URLs used for retrying the HTTPS probe when portal
+  // detection is not conclusive.
+  std::vector<std::string> portal_fallback_https_urls;
+  // Whether to ARP for the default gateway in the DHCP client after
+  // acquiring a lease.
+  bool arp_gateway = true;
+  // Whether DHCP client should request for IPv6-only mode on a capable network.
+  bool enable_rfc_8925 = false;
+  // Comma-separated list of technologies for which auto-connect is disabled.
+  std::string no_auto_connect_technologies;
+  // Comma-separated list of technologies that should never be enabled.
+  std::string prohibited_technologies;
+  // Comma-separated list of DNS search paths to be ignored.
+  std::string ignored_dns_search_paths;
+  // Name of Android VPN package that should be enforced for user traffic.
+  // Empty string if the lockdown feature is not enabled.
+  std::string always_on_vpn_package;
+  // The IPv4 and IPv6 addresses of the DNS Proxy, if applicable. When these
+  // values are set, resolv.conf should use these addresses as the name
+  // servers.
+  std::vector<std::string> dns_proxy_addresses;
+  // Maps DNS-over-HTTPS service providers to a list of standard DNS name
+  // servers. This member stores the value set via the DBus
+  // |DNSProxyDOHProviders| property.
+  KeyValueStore dns_proxy_doh_providers;
+  // Hostname to be used in DHCP request.
+  std::string dhcp_hostname;
+  // Whether apply DSCP values on egress DHCP packets as a DHCP client.
+  bool enable_dhcp_qos = false;
+  std::optional<bool> ft_enabled;
+  bool scan_allow_roam = true;
+  std::string request_scan_type;
+};
 
 class Manager {
  public:
-  struct Properties {
-   public:
-    Properties() : arp_gateway(true), minimum_mtu(IPConfig::kUndefinedMTU) {}
-    std::string check_portal_list;
-    std::string portal_http_url;
-    std::string portal_https_url;
-    std::vector<std::string> portal_fallback_http_urls;
-    // Whether to ARP for the default gateway in the DHCP client after
-    // acquiring a lease.
-    bool arp_gateway;
-    // Comma-separated list of technologies for which auto-connect is disabled.
-    std::string no_auto_connect_technologies;
-    // Comma-separated list of technologies that should never be enabled.
-    std::string prohibited_technologies;
-    // Comma-separated list of DNS search paths to be ignored.
-    std::string ignored_dns_search_paths;
-    // Comma-separated list of DNS servers to prepend to resolver list.
-    std::string prepend_dns_servers;
-    // The minimum MTU value that will be respected in DHCP responses.
-    int minimum_mtu;
-    // Name of Android VPN package that should be enforced for user traffic.
-    // Empty string if the lockdown feature is not enabled.
-    std::string always_on_vpn_package;
-    // The IPv4 address of the DNS Proxy, if applicable. When this value is set,
-    // resolv.conf should use this address as the name server.
-    std::string dns_proxy_ipv4_address;
-    // Maps DNS-over-HTTPS service providers to a list of standard DNS name
-    // servers. This member stores the value set via the DBus
-    // |DNSProxyDOHProviders| property.
-    KeyValueStore dns_proxy_doh_providers;
-
-#if !defined(DISABLE_WIFI)
-    base::Optional<bool> ft_enabled;
-    bool scan_allow_roam = true;
-#endif  // !DISABLE_WIFI
-  };
-
   Manager(ControlInterface* control_interface,
           EventDispatcher* dispatcher,
           Metrics* metrics,
@@ -119,10 +128,7 @@ class Manager {
 
   virtual ~Manager();
 
-  void RegisterAsync(const base::Callback<void(bool)>& completion_callback);
-
-  mockable void OnDhcpPropertyChanged(const std::string& key,
-                                      const std::string& value);
+  void RegisterAsync(base::OnceCallback<void(bool)> completion_callback);
 
   virtual void SetBlockedDevices(
       const std::vector<std::string>& blockeded_devices);
@@ -143,8 +149,8 @@ class Manager {
 
   virtual const ProfileRefPtr& ActiveProfile() const;
   bool IsActiveProfile(const ProfileRefPtr& profile) const;
-  bool MoveServiceToProfile(const ServiceRefPtr& to_move,
-                            const ProfileRefPtr& destination);
+  virtual bool MoveServiceToProfile(const ServiceRefPtr& to_move,
+                                    const ProfileRefPtr& destination);
   virtual bool MatchProfileWithService(const ServiceRefPtr& service);
   ProfileRefPtr LookupProfileByRpcIdentifier(const std::string& profile_rpcid);
 
@@ -171,7 +177,7 @@ class Manager {
   // Persists |to_update| into an appropriate profile.
   virtual void UpdateDevice(const DeviceRefPtr& to_update);
 
-  std::vector<DeviceRefPtr> FilterByTechnology(Technology tech) const;
+  virtual std::vector<DeviceRefPtr> FilterByTechnology(Technology tech) const;
 
   RpcIdentifiers EnumerateAvailableServices(Error* error);
 
@@ -189,8 +195,17 @@ class Manager {
   ServiceRefPtr FindMatchingService(const KeyValueStore& args, Error* error);
 
   // Return the Device that has selected this Service. If no Device has selected
-  // this Service or the Service pointer is null, return nullptr.
-  virtual DeviceRefPtr FindDeviceFromService(const ServiceRefPtr& service);
+  // this Service or the Service pointer is null, return nullptr. Note that
+  // VirtualDevices which are not managed by Manager will also be included here.
+  virtual DeviceRefPtr FindDeviceFromService(
+      const ServiceRefPtr& service) const;
+
+  // It the service has an active Network, returns the Network object associated
+  // with the Device which has selected this Service. This pointer is owned by
+  // Device and thus cannot be held. Returns nullptr if no such Network or the
+  // Service pointer is null.
+  mockable Network* FindActiveNetworkFromService(
+      const ServiceRefPtr& service) const;
 
   // Return the highest priority service of a physical technology type (i.e. not
   // VPN, ARC, etc), or nullptr if no such service is found.
@@ -206,7 +221,15 @@ class Manager {
   // Called by Device when its geolocation data has been updated.
   virtual void OnDeviceGeolocationInfoUpdated(const DeviceRefPtr& device);
 
-  void ConnectToBestServices(Error* error);
+  // Force a wifi scan if applicable, and connect to the best available
+  // services.
+  // Called by chrome when a user profile is loaded and the user's
+  // policy-provided networks are configured.
+  void ScanAndConnectToBestServices(Error* error);
+
+  // For WiFi services, connect to the "best" service available,  as determined
+  // by sorting all services independent of their current state.
+  mockable void ConnectToBestWiFiService();
 
   // Method to create connectivity report for connected services.
   void CreateConnectivityReport(Error* error);
@@ -214,9 +237,11 @@ class Manager {
   // Request portal detection checks on each registered device with a connected
   // Service.
   void RecheckPortal(Error* error);
-  // Request portal detection be restarted on the device connected to
-  // |service|.
-  virtual void RecheckPortalOnService(const ServiceRefPtr& service);
+
+  // Request WiFi device to be restarted. This is to be solely used to track
+  // b/270746800 and should not be invoked otherwise. TODO(b/278765529) Once the
+  // issue is is no longer reproducing, this will be removed.
+  virtual void RequestWiFiRestart(Error* error);
 
   virtual void RequestScan(const std::string& technology, Error* error);
   std::string GetTechnologyOrder();
@@ -248,19 +273,10 @@ class Manager {
   void RemoveProfile(const std::string& name, Error* error);
   // Called by a profile when its properties change.
   void OnProfileChanged(const ProfileRefPtr& profile);
-  // Give the ownership of the device with name |device_name| to claimer with
-  // name |claimer_name|. This will cause shill to stop managing this device.
-  virtual void ClaimDevice(const std::string& claimer_name,
-                           const std::string& interface_name,
-                           Error* error);
-  // Claimer |claimer_name| release the ownership of the device with
-  // |interface_name| back to shill. This method will set |claimer_removed|
-  // to true iff Claimer |claimer_name| is not the default claimer and no
-  // longer claims any devices.
-  virtual void ReleaseDevice(const std::string& claimer_name,
-                             const std::string& interface_name,
-                             bool* claimer_removed,
-                             Error* error);
+  // Let shill stop managing |interface_name|.
+  virtual void ClaimDevice(const std::string& interface_name, Error* error);
+  // Let shill manage |interface_name| again.
+  virtual void ReleaseDevice(const std::string& interface_name, Error* error);
 
   // Called by a service to remove its associated configuration.  If |service|
   // is associated with a non-ephemeral profile, this configuration entry
@@ -268,7 +284,7 @@ class Manager {
   // If the service ends up with no matching profile, it is unloaded (which
   // may also remove the service from the manager's list, e.g. WiFi services
   // that are not visible)..
-  void RemoveService(const ServiceRefPtr& service);
+  virtual void RemoveService(const ServiceRefPtr& service);
   // Handle the event where a profile is about to remove a profile entry.
   // Any Services that are dependent on this storage identifier will need
   // to find new profiles.  Return true if any service has been moved to a new
@@ -309,14 +325,9 @@ class Manager {
   void SetEnabledStateForTechnology(const std::string& technology_name,
                                     bool enabled_state,
                                     bool persist,
-                                    const ResultCallback& callback);
+                                    ResultCallback callback);
   // Return whether a technology is marked as enabled for portal detection.
   virtual bool IsPortalDetectionEnabled(Technology tech);
-  // Set the start-up value for the portal detection list.  This list will
-  // be used until a value set explicitly over the control API.  Until
-  // then, we ignore but do not overwrite whatever value is stored in the
-  // profile.
-  virtual void SetStartupPortalList(const std::string& portal_list);
 
   // Returns true if profile |a| has been pushed on the Manager's
   // |profiles_| stack before profile |b|.
@@ -357,37 +368,20 @@ class Manager {
   // changed.
   void RefreshConnectionState();
 
-  const std::string& GetPortalCheckHttpUrl() const {
-    return props_.portal_http_url;
-  }
-  const std::string& GetPortalCheckHttpsUrl() const {
-    return props_.portal_https_url;
-  }
-  const std::vector<std::string>& GetPortalCheckFallbackHttpUrls() const {
-    return props_.portal_fallback_http_urls;
-  }
-  virtual PortalDetector::Properties GetPortalCheckProperties() const;
-
   virtual DeviceInfo* device_info() { return &device_info_; }
-#if !defined(DISABLE_CELLULAR)
   virtual ModemInfo* modem_info() { return modem_info_.get(); }
   virtual CellularServiceProvider* cellular_service_provider() {
     return cellular_service_provider_.get();
   }
-#endif  // DISABLE_CELLULAR
   PowerManager* power_manager() const { return power_manager_.get(); }
   virtual EthernetProvider* ethernet_provider() {
     return ethernet_provider_.get();
   }
-#if !defined(DISABLE_WIRED_8021X)
   virtual EthernetEapProvider* ethernet_eap_provider() const {
     return ethernet_eap_provider_.get();
   }
-#endif  // DISABLE_WIRED_8021X
   VPNProvider* vpn_provider() const { return vpn_provider_.get(); }
-#if !defined(DISABLE_WIFI)
   WiFiProvider* wifi_provider() const { return wifi_provider_.get(); }
-#endif  // DISABLE_WIFI
   PropertyStore* mutable_store() { return &store_; }
   virtual const PropertyStore& store() const { return store_; }
   virtual const base::FilePath& run_path() const { return run_path_; }
@@ -402,15 +396,15 @@ class Manager {
     return power_manager_->suspend_duration_us();
   }
 
-  bool GetArpGateway() const { return props_.arp_gateway; }
+  virtual const ManagerProperties& GetProperties() const { return props_; }
+  PortalDetector::ProbingConfiguration GetPortalDetectorProbingConfiguration()
+      const;
 
-  virtual int GetMinimumMTU() const { return props_.minimum_mtu; }
-  virtual void SetMinimumMTU(const int mtu) { props_.minimum_mtu = mtu; }
+  // Creates a default DHCP Options object using the DHCP Manager properties.
+  mockable DHCPProvider::Options CreateDefaultDHCPOption() const;
 
   virtual void UpdateEnabledTechnologies();
   virtual void UpdateUninitializedTechnologies();
-
-  const DhcpProperties& dhcp_properties() const { return *dhcp_properties_; }
 
   // Writes the Service |to_update| to persistent storage. If the Service is
   // ephemeral, it is moved to the current Profile.
@@ -421,8 +415,7 @@ class Manager {
   // will be replaced.  |start| will be called when RunTerminationActions() is
   // called.  When an action completed, TerminationActionComplete() must be
   // called.
-  void AddTerminationAction(const std::string& name,
-                            const base::Closure& start);
+  void AddTerminationAction(const std::string& name, base::OnceClosure start);
 
   // Users call this function to report the completion of an action |name|.
   // This function should be called once for each action.
@@ -439,18 +432,11 @@ class Manager {
   // Error::kOperationTimeout.
   //
   // Returns true, if termination actions were run.
-  bool RunTerminationActionsAndNotifyMetrics(
-      const ResultCallback& done_callback);
+  bool RunTerminationActionsAndNotifyMetrics(ResultCallback done_callback);
 
   // Add/remove observers to subscribe to default Service notifications.
   void AddDefaultServiceObserver(DefaultServiceObserver* observer);
   void RemoveDefaultServiceObserver(DefaultServiceObserver* observer);
-
-  // Running in passive mode, manager will not manage any devices (all devices
-  // are blocked) by default. Remote application can specify devices for
-  // shill to manage through ReleaseInterface/ClaimInterface DBus API using
-  // default claimer (with "" as claimer_name).
-  virtual void SetPassiveMode();
 
   // Decides whether Ethernet-like devices are treated as unknown devices
   // if they do not indicate a driver name.
@@ -459,42 +445,16 @@ class Manager {
     return ignore_unknown_ethernet_;
   }
 
-  // Set the list of prepended DNS servers to |prepend_dns_servers|.
-  virtual void SetPrependDNSServers(const std::string& prepend_dns_servers);
-
-  // Accept hostname from DHCP server for devices matching |hostname_from|.
-  virtual void SetAcceptHostnameFrom(const std::string& hostname_from);
-  virtual bool ShouldAcceptHostnameFrom(const std::string& device_name) const;
-
-  // Set DHCPv6 enabled device list.
-  virtual void SetDHCPv6EnabledDevices(
-      const std::vector<std::string>& device_list);
-
-  // Return true if DHCPv6 is enabled for the given device with |device_name|.
-  virtual bool IsDHCPv6EnabledForDevice(const std::string& device_name) const;
-
-  // Filter the list of prepended DNS servers, copying only those that match
-  // |family| into |dns_servers|.  |dns_servers| is cleared, regardless of
-  // whether or not there are any addresses that match |family|.
-  virtual std::vector<std::string> FilterPrependDNSServersByFamily(
-      IPAddress::Family family) const;
-
   // Returns true iff |power_manager_| exists and is suspending (i.e.
   // power_manager->suspending() is true), false otherwise.
   virtual bool IsSuspending();
 
-  // Called when service's inner device changed.
-  virtual void OnInnerDevicesChanged();
-
   void set_suppress_autoconnect(bool val) { suppress_autoconnect_ = val; }
   bool suppress_autoconnect() const { return suppress_autoconnect_; }
 
-  // Called when remote device claimer vanishes.
-  virtual void OnDeviceClaimerVanished();
-
   RpcIdentifiers EnumerateDevices(Error* error);
 
-  bool SetNetworkThrottlingStatus(const ResultCallback& callback,
+  bool SetNetworkThrottlingStatus(ResultCallback callback,
                                   bool enabled,
                                   uint32_t upload_rate_kbits,
                                   uint32_t download_rate_kbits);
@@ -503,110 +463,157 @@ class Manager {
   // on the system e.g. eth0, wlan0.
   virtual std::vector<std::string> GetDeviceInterfaceNames();
 
-#if !defined(DISABLE_WIFI)
   bool GetFTEnabled(Error* error);
   bool scan_allow_roam() const { return props_.scan_allow_roam; }
-#endif  // DISABLE_WIFI
-
-  bool ShouldBlackholeUserTraffic(const std::string& device_name) const;
-
-  const std::vector<uint32_t>& user_traffic_uids() const {
-    return user_traffic_uids_;
+  std::string GetWiFiRequestScanType(Error* /*error*/) {
+    return props_.request_scan_type;
   }
+  bool SetWiFiRequestScanType(const std::string& type, Error* error);
 
   ControlInterface* control_interface() const { return control_interface_; }
   EventDispatcher* dispatcher() const { return dispatcher_; }
   Metrics* metrics() const { return metrics_; }
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
+  PowerOpt* power_opt() const { return power_opt_.get(); }
   SupplicantManager* supplicant_manager() const {
     return supplicant_manager_.get();
   }
-#endif  // !DISABLE_WIFI || !DISABLE_WIRED_8021X
   void set_patchpanel_client_for_testing(
       std::unique_ptr<patchpanel::Client> patchpanel_client) {
     patchpanel_client_ = std::move(patchpanel_client);
   }
   patchpanel::Client* patchpanel_client() { return patchpanel_client_.get(); }
 
-  // Returns a vector of all uids whose traffic is routed through VPN
-  // connections.
-  static std::vector<uint32_t> ComputeUserTrafficUids();
+  // Assigns the IP address(es) of the dns-proxy service.
+  bool SetDNSProxyAddresses(const std::vector<std::string>& addrs,
+                            Error* error);
 
-  // Assigns (or clears) the IPv4 address of the dns-proxy service.
-  bool SetDNSProxyIPv4Address(const std::string& addr, Error* error);
+  // Clears the IP address of the dns-proxy service.
+  void ClearDNSProxyAddresses();
 
   // Assigns the DNS-over-HTTPS service providers for use by the dns-proxy
   // service.
   bool SetDNSProxyDOHProviders(const KeyValueStore& providers, Error* error);
+
+  // Creates a set of Passpoint credentials from |properties| in the profile
+  // referenced by |profile_id|.
+  bool AddPasspointCredentials(const std::string& profile_rpcid,
+                               const KeyValueStore& properties,
+                               Error* error);
+
+  // Removes all Passpoint credentials that matches all property of |properties|
+  // in the profile referenced by |profile_id|.
+  bool RemovePasspointCredentials(const std::string& profile_rpcid,
+                                  const KeyValueStore& properties,
+                                  Error* error);
+
+  // Enable or disable a local only hotspot session.
+  void SetLOHSEnabled(base::OnceCallback<void(std::string result)> callback,
+                      bool enabled);
+
+  // Getter and setter for the |LOHSConfig| property to be used for a local only
+  // hotspot session.
+  KeyValueStore GetLOHSConfig(Error* error);
+  bool SetLOHSConfig(const KeyValueStore& properties, Error* error);
+
+  TetheringManager* tethering_manager() const {
+    return tethering_manager_.get();
+  }
+
+#if !defined(DISABLE_FLOSS)
+  BluetoothManagerInterface* bluetooth_manager() const {
+    return bluetooth_manager_.get();
+  }
+#endif  // DISABLE_FLOSS
+
+  // Emit TetheringStatus dbus property change signal.
+  mockable void TetheringStatusChanged();
+
+  // Get the active cellular service operator two-letter country code defined in
+  // ISO 3166-1.
+  mockable std::optional<std::string> GetCellularOperatorCountryCode();
+
+  void set_time_online_timer_for_testing(
+      std::unique_ptr<chromeos_metrics::Timer> timer) {
+    time_online_timer_ = std::move(timer);
+  }
+
+  void set_time_to_drop_timer_for_testing(
+      std::unique_ptr<chromeos_metrics::Timer> timer) {
+    time_to_drop_timer_ = std::move(timer);
+  }
 
  private:
   friend class ArcVpnDriverTest;
   friend class CellularTest;
   friend class DeviceInfoTest;
   friend class DeviceTest;
+  friend class HotspotDeviceTest;
   friend class L2TPIPsecDriverTest;
   friend class ManagerAdaptorInterface;
   friend class ManagerTest;
   friend class ModemInfoTest;
   friend class ModemManagerTest;
   friend class OpenVPNDriverTest;
+  friend class P2PDeviceTest;
+  friend class P2PManagerTest;
   friend class ServiceTest;
+  friend class TetheringManagerTest;
   friend class VPNServiceTest;
   friend class WiFiObjectTest;
+  friend class DaemonTaskTest;
 
   FRIEND_TEST(CellularCapability3gppTest, TerminationAction);
   FRIEND_TEST(CellularCapability3gppTest, TerminationActionRemovedByStopModem);
-  FRIEND_TEST(CellularTest, LinkEventWontDestroyService);
+  FRIEND_TEST(DaemonTaskTest, SupplicantAppearsAfterStop);
   FRIEND_TEST(DefaultProfileTest, LoadManagerDefaultProperties);
   FRIEND_TEST(DefaultProfileTest, LoadManagerProperties);
   FRIEND_TEST(DefaultProfileTest, Save);
   FRIEND_TEST(DeviceInfoTest, CreateDeviceEthernet);
-  FRIEND_TEST(DeviceTest, AcquireIPConfigWithoutSelectedService);
-  FRIEND_TEST(DeviceTest, AcquireIPConfigWithSelectedService);
   FRIEND_TEST(DeviceTest, StartProhibited);
   FRIEND_TEST(ManagerTest, AvailableTechnologies);
   FRIEND_TEST(ManagerTest, ClaimBlockedDevice);
-  FRIEND_TEST(ManagerTest, ClaimDeviceWithoutClaimer);
+  FRIEND_TEST(ManagerTest, ClaimDevice);
   FRIEND_TEST(ManagerTest, ConnectedTechnologies);
-  FRIEND_TEST(ManagerTest, ConnectionStatusCheck);
-  FRIEND_TEST(ManagerTest, ConnectToBestServices);
   FRIEND_TEST(ManagerTest, CreateConnectivityReport);
-  FRIEND_TEST(ManagerTest, DefaultTechnology);
   FRIEND_TEST(ManagerTest, DefaultServiceStateChange);
-  FRIEND_TEST(ManagerTest, DetectMultiHomedDevices);
+  FRIEND_TEST(ManagerTest, DefaultTechnology);
   FRIEND_TEST(ManagerTest, DevicePresenceStatusCheck);
   FRIEND_TEST(ManagerTest, DeviceRegistrationAndStart);
   FRIEND_TEST(ManagerTest, DeviceRegistrationTriggersThrottler);
   FRIEND_TEST(ManagerTest, EnumerateProfiles);
-  FRIEND_TEST(ManagerTest, EnumerateServiceInnerDevices);
-  FRIEND_TEST(ManagerTest, InitializeProfilesInformsProviders);
+  FRIEND_TEST(ManagerTest, GetPortalDetectorProbingConfiguration);
   FRIEND_TEST(ManagerTest, InitializeProfilesHandlesDefaults);
+  FRIEND_TEST(ManagerTest, InitializeProfilesInformsProviders);
   FRIEND_TEST(ManagerTest, IsTechnologyAutoConnectDisabled);
   FRIEND_TEST(ManagerTest, IsTechnologyProhibited);
   FRIEND_TEST(ManagerTest, IsWifiIdle);
-  FRIEND_TEST(ManagerTest, LinkMonitorEnabled);
   FRIEND_TEST(ManagerTest, MoveService);
-  FRIEND_TEST(ManagerTest, UpdateDefaultServices);
-  FRIEND_TEST(ManagerTest, UpdateDefaultServicesDNSProxy);
-  FRIEND_TEST(ManagerTest,
-              UpdateDefaultServicesWithDefaultServiceCallbacksRemoved);
-  FRIEND_TEST(ManagerTest, UpdateBlackholeUserTraffic);
   FRIEND_TEST(ManagerTest, RefreshAllTrafficCountersTask);
   FRIEND_TEST(ManagerTest, RegisterKnownService);
   FRIEND_TEST(ManagerTest, RegisterUnknownService);
   FRIEND_TEST(ManagerTest, ReleaseBlockedDevice);
+  FRIEND_TEST(ManagerTest, RequestWiFiRestart);
   FRIEND_TEST(ManagerTest, RunTerminationActions);
+  FRIEND_TEST(ManagerTest, ServiceMetricTimeOnlineTimeToDrop);
   FRIEND_TEST(ManagerTest, ServiceRegistration);
   FRIEND_TEST(ManagerTest, SetAlwaysOnVpnPackage);
-  FRIEND_TEST(ManagerTest, ShouldBlackholeUserTraffic);
+  FRIEND_TEST(ManagerTest, SetCheckPortalListProp);
+  FRIEND_TEST(ManagerTest, SetDNSProxyAddresses);
   FRIEND_TEST(ManagerTest, SortServicesWithConnection);
-  FRIEND_TEST(ManagerTest, StartupPortalList);
-  FRIEND_TEST(ManagerTest, SetDNSProxyIPv4Address);
+  FRIEND_TEST(ManagerTest, TetheringLoadAndUnloadConfiguration);
+  FRIEND_TEST(ManagerTest, UpdateDefaultServices);
+  FRIEND_TEST(ManagerTest, UpdateDefaultServicesDNSProxy);
+  FRIEND_TEST(ManagerTest,
+              UpdateDefaultServicesWithDefaultServiceCallbacksRemoved);
   FRIEND_TEST(ServiceTest, IsAutoConnectable);
   FRIEND_TEST(ThirdPartyVpnDriverTest, SetParameters);
-  FRIEND_TEST(VPNProviderTest, SetDefaultRoutingPolicy);
-  FRIEND_TEST(WiFiServiceTest, ConnectTaskFT);
   FRIEND_TEST(WiFiMainTest, ScanAllowRoam);
+  FRIEND_TEST(WiFiMainTest, WiFiRequestScanTypeDefault);
+  FRIEND_TEST(WiFiMainTest, WiFiRequestScanTypeActive);
+  FRIEND_TEST(WiFiMainTest, WiFiRequestScanTypePassive);
+  FRIEND_TEST(WiFiMainTest, WiFiRequestScanTypePassiveNonDBus);
+  FRIEND_TEST(WiFiMainTest, UpdateGeolocationObjects);
+  FRIEND_TEST(WiFiServiceTest, ConnectTaskFT);
 
   void AutoConnect();
   // Ensure always-on VPN follows the current configuration, ie: hardware
@@ -616,6 +623,8 @@ class Manager {
   void UpdateAlwaysOnVpnWith(const ProfileRefPtr& profile);
   // Set the always-on VPN configuration and start or stop VPN lockdown if
   // needed.
+  // TODO(b/188864779) Generalize to support both setups of always-on VPNService
+  // and legacy ARC++ always-on VPN package name property.
   void SetAlwaysOnVpn(const std::string& mode, VPNServiceRefPtr service);
   // Connect the always-on VPN and maintain the previous connection attempts
   // count.
@@ -634,12 +643,16 @@ class Manager {
   RpcIdentifier GetActiveProfileRpcIdentifier(Error* error);
   std::string GetCheckPortalList(Error* error);
   std::string GetIgnoredDNSSearchPaths(Error* error);
-  std::string GetPortalFallbackUrlsString(Error* error);
+  std::string GetPortalFallbackHttpUrls(Error* error);
+  std::string GetPortalFallbackHttpsUrls(Error* error);
   ServiceRefPtr GetServiceInner(const KeyValueStore& args, Error* error);
+  // TODO(b/188864779) Migrate to a Profile property and migrate the storage
+  // from Chrome to shill.
   bool SetAlwaysOnVpnPackage(const std::string& package_name, Error* error);
   bool SetCheckPortalList(const std::string& portal_list, Error* error);
   bool SetIgnoredDNSSearchPaths(const std::string& ignored_paths, Error* error);
-  bool SetPortalFallbackUrlsString(const std::string& urls, Error* error);
+  bool SetPortalFallbackHttpUrls(const std::string& urls, Error* error);
+  bool SetPortalFallbackHttpsUrls(const std::string& urls, Error* error);
   // Emit a kDefaultServiceProperty property-changed D-Bus signal if the default
   // Service has changed. Returns true only if the default Service did actually
   // change.
@@ -647,25 +660,18 @@ class Manager {
   bool IsTechnologyInList(const std::string& technology_list,
                           Technology tech) const;
   void EmitDeviceProperties();
-#if !defined(DISABLE_WIFI)
   bool SetDisableWiFiVHT(const bool& disable_wifi_vht, Error* error);
   bool GetDisableWiFiVHT(Error* error);
 
   bool SetFTEnabled(const bool& ft_enabled, Error* error);
-#endif  // DISABLE_WIFI
   bool SetProhibitedTechnologies(const std::string& prohibited_technologies,
                                  Error* error);
   std::string GetProhibitedTechnologies(Error* error);
   void OnTechnologyProhibited(Technology technology, const Error& error);
 
-  std::string GetDNSProxyIPv4Address(Error* error);
-  void UseDNSProxy(const std::string& proxy_addr);
+  void UseDNSProxy(const std::vector<std::string>& proxy_addrs);
 
   KeyValueStore GetDNSProxyDOHProviders(Error* error);
-
-  // For every device instance that is sharing the same connectivity with
-  // another device, enable the multi-home flag.
-  void DetectMultiHomedDevices();
 
   // Unload a service while iterating through |services_|.  Returns true if
   // service was erased (which means the caller loop should not increment
@@ -680,20 +686,20 @@ class Manager {
   void LoadDeviceFromProfiles(const DeviceRefPtr& device);
 
   void HelpRegisterConstDerivedRpcIdentifier(
-      const std::string& name, RpcIdentifier (Manager::*get)(Error*));
+      std::string_view name, RpcIdentifier (Manager::*get)(Error*));
   void HelpRegisterConstDerivedRpcIdentifiers(
-      const std::string& name, RpcIdentifiers (Manager::*get)(Error*));
-  void HelpRegisterDerivedString(const std::string& name,
+      std::string_view name, RpcIdentifiers (Manager::*get)(Error*));
+  void HelpRegisterDerivedString(std::string_view name,
                                  std::string (Manager::*get)(Error* error),
                                  bool (Manager::*set)(const std::string&,
                                                       Error*));
-  void HelpRegisterConstDerivedStrings(const std::string& name,
+  void HelpRegisterConstDerivedStrings(std::string_view name,
                                        Strings (Manager::*get)(Error*));
   void HelpRegisterDerivedKeyValueStore(
-      const std::string& name,
+      std::string_view name,
       KeyValueStore (Manager::*get)(Error* error),
       bool (Manager::*set)(const KeyValueStore& value, Error* error));
-  void HelpRegisterDerivedBool(const std::string& name,
+  void HelpRegisterDerivedBool(std::string_view name,
                                bool (Manager::*get)(Error* error),
                                bool (Manager::*set)(const bool& value,
                                                     Error* error));
@@ -707,7 +713,6 @@ class Manager {
 
   void SortServicesTask();
   void DeviceStatusCheckTask();
-  void ConnectionStatusCheck();
   void DevicePresenceStatusCheck();
 
   // Sets the profile of |service| to |profile|, without notifying its
@@ -720,9 +725,10 @@ class Manager {
                                     const KeyValueStore& args,
                                     Error* error);
 
-  // For each technology present, connect to the "best" service available,
-  // as determined by sorting all services independent of their current state.
-  void ConnectToBestServicesTask();
+  // For either WiFi or all other technologies available, connect to the "best"
+  // service available, as determined by sorting all services independent of
+  // their current state.
+  void ConnectToBestServicesForTechnologies(bool is_wifi);
 
   void UpdateDefaultServices(const ServiceRefPtr& logical_service,
                              const ServiceRefPtr& physical_service);
@@ -731,7 +737,7 @@ class Manager {
   // |kTerminationActionsTimeoutMilliseconds|, |done_callback| is called with a
   // value of Error::kSuccess.  Otherwise, it is called with
   // Error::kOperationTimeout.
-  void RunTerminationActions(const ResultCallback& done_callback);
+  void RunTerminationActions(ResultCallback done_callback);
 
   // Called when the system is about to be suspended.  Each call will be
   // followed by a call to OnSuspendDone().
@@ -768,18 +774,18 @@ class Manager {
 
   std::string GetAlwaysOnVpnPackage(Error* error);
 
-  void UpdateBlackholeUserTraffic();
-
   // Initializes patchpanel_client_ if it has not already been initialized.
   void InitializePatchpanelClient();
 
   void RefreshAllTrafficCountersCallback(
-      const std::vector<patchpanel::TrafficCounter>& counters);
+      const std::vector<patchpanel::Client::TrafficCounter>& counters);
   void RefreshAllTrafficCountersTask();
 
-  // Returns the names of all of the devices that have been claimed by the
-  // current DeviceClaimer.  Returns an empty vector if no DeviceClaimer is set.
+  // Returns the names of all of the claimed devices by ClaimDevice().
   std::vector<std::string> ClaimedDevices(Error* error);
+
+  // Notifies Metrics when the default logical Service has changed.
+  void NotifyDefaultLogicalServiceChanged(const ServiceRefPtr& logical_service);
 
   EventDispatcher* dispatcher_;
   ControlInterface* control_interface_;
@@ -791,21 +797,14 @@ class Manager {
   base::FilePath user_profile_list_path_;  // Changed in tests.
   std::unique_ptr<ManagerAdaptorInterface> adaptor_;
   DeviceInfo device_info_;
-#if !defined(DISABLE_CELLULAR)
   std::unique_ptr<ModemInfo> modem_info_;
+  std::unique_ptr<PowerOpt> power_opt_;
   std::unique_ptr<CellularServiceProvider> cellular_service_provider_;
-#endif  // DISABLE_CELLULAR
   std::unique_ptr<EthernetProvider> ethernet_provider_;
-#if !defined(DISABLE_WIRED_8021X)
   std::unique_ptr<EthernetEapProvider> ethernet_eap_provider_;
-#endif  // DISABLE_WIRED_8021X
   std::unique_ptr<VPNProvider> vpn_provider_;
-#if !defined(DISABLE_WIFI)
-  std::unique_ptr<WiFiProvider> wifi_provider_;
-#endif  // DISABLE_WIFI
-#if !defined(DISABLE_WIFI) || !defined(DISABLE_WIRED_8021X)
   std::unique_ptr<SupplicantManager> supplicant_manager_;
-#endif  // !DISABLE_WIFI || !DISABLE_WIRED_8021X
+  std::unique_ptr<WiFiProvider> wifi_provider_;
   // For communication with patchpanel.
   std::unique_ptr<patchpanel::Client> patchpanel_client_;
 
@@ -833,7 +832,7 @@ class Manager {
   // Count of always-on VPN service connection attempts since the last reset.
   uint32_t always_on_vpn_connect_attempts_;
   // Task to connect always-on VPN service.
-  base::CancelableClosure always_on_vpn_connect_task_;
+  base::CancelableOnceClosure always_on_vpn_connect_task_;
   // Map of technologies to Provider instances.  These pointers are owned
   // by the respective scoped_reptr objects that are held over the lifetime
   // of the Manager object.
@@ -843,6 +842,9 @@ class Manager {
   ProfileRefPtr ephemeral_profile_;
   std::unique_ptr<PowerManager> power_manager_;
   std::unique_ptr<Upstart> upstart_;
+#if !defined(DISABLE_FLOSS)
+  std::unique_ptr<BluetoothManagerInterface> bluetooth_manager_;
+#endif  // DISABLE_FLOSS
 
   // The priority order of technologies
   std::vector<Technology> technology_order_;
@@ -851,31 +853,20 @@ class Manager {
   // "DefaultService" signal for.
   RpcIdentifier default_service_rpc_identifier_;
 
-  // Manager can be optionally configured with a list of technologies to
-  // do portal detection on at startup.  We need to keep track of that list
-  // as well as a flag that tells us whether we should continue using it
-  // instead of the configured portal list.
-  std::string startup_portal_list_;
-  bool use_startup_portal_list_;
-
   // Properties to be get/set via PropertyStore calls.
-  Properties props_;
+  ManagerProperties props_;
   PropertyStore store_;
 
-  // Accept hostname supplied by the DHCP server from the specified devices.
-  // eg. eth0 or eth*
-  std::string accept_hostname_from_;
-
-  base::CancelableClosure sort_services_task_;
+  base::CancelableOnceClosure sort_services_task_;
 
   // Task for periodically checking various device status.
-  base::CancelableClosure device_status_check_task_;
+  base::CancelableOnceClosure device_status_check_task_;
 
   // Task for initializing patchpanel connection.
-  base::CancelableClosure init_patchpanel_client_task_;
+  base::CancelableOnceClosure init_patchpanel_client_task_;
 
   // Task for periodically refreshing traffic counters.
-  base::CancelableClosure refresh_traffic_counter_task_;
+  base::CancelableOnceClosure refresh_traffic_counter_task_;
 
   // Whether we're currently waiting on a traffic counter fetch from patchpanel.
   bool pending_traffic_counter_request_;
@@ -894,18 +885,14 @@ class Manager {
 
   // Stores the most recent copy of geolocation information for each
   // device the manager is keeping track of.
-  std::map<DeviceRefPtr, std::vector<GeolocationInfo>> device_geolocation_info_;
+  std::map<DeviceConstRefPtr, std::vector<GeolocationInfo>>
+      device_geolocation_info_;
 
   // Stores the state of the highest ranked connected service.
   std::string connection_state_;
 
   // Stores the most recent state of all watched services by serial number.
   std::map<unsigned int, Service::ConnectState> watched_service_states_;
-
-  // Device claimer is a remote application/service that claim/release devices
-  // from/to shill. To reduce complexity, only allow one device claimer at a
-  // time.
-  std::unique_ptr<DeviceClaimer> device_claimer_;
 
   // When true, suppresses autoconnects in Manager::AutoConnect.
   bool suppress_autoconnect_;
@@ -923,11 +910,8 @@ class Manager {
   // List of allowed devices specified from command line.
   std::vector<std::string> allowed_devices_;
 
-  // List of DHCPv6 enabled devices.
-  std::vector<std::string> dhcpv6_enabled_devices_;
-
-  // DhcpProperties stored for the default profile.
-  std::unique_ptr<DhcpProperties> dhcp_properties_;
+  // List of devices claimed by other processes via ClaimerInterface D-Bus API.
+  std::set<std::string> claimed_devices_;
 
   // List of supported vpn types;
   std::string supported_vpn_;
@@ -938,11 +922,15 @@ class Manager {
   uint32_t download_rate_kbits_;
   uint32_t upload_rate_kbits_;
 
-  // "User traffic" refers to traffic from processes that run under one of the
-  // unix users enumered in |kUserTrafficUsernames| constant in
-  // shill/manager.cc.
-  bool should_blackhole_user_traffic_;
-  std::vector<uint32_t> user_traffic_uids_;
+  // Tethering manager to manage tethering related state machine, properties
+  // and session.
+  std::unique_ptr<TetheringManager> tethering_manager_;
+
+  bool was_last_online_;
+  Technology last_default_technology_;
+  std::unique_ptr<chromeos_metrics::Timer> time_online_timer_;
+  std::unique_ptr<chromeos_metrics::Timer> time_to_drop_timer_;
+
   base::WeakPtrFactory<Manager> weak_factory_{this};
 };
 

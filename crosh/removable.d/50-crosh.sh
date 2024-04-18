@@ -1,9 +1,9 @@
 #!/bin/dash
-# Copyright (c) 2009-2010 The Chromium OS Authors. All rights reserved.
+# Copyright 2009-2010 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Chrosh commands that are only loaded when we're booting from removable
+# Crosh commands that are only loaded when we're booting from removable
 # media.
 
 do_install() {
@@ -24,7 +24,9 @@ do_install() {
   fi
 }
 
+# shellcheck disable=SC2034
 USAGE_update_firmware='[--factory]'
+# shellcheck disable=SC2034
 HELP_update_firmware='
   Update system firmware, if applicable. This command will update only the RW
   region by default. To rewrite RO and everything, add option --factory.
@@ -52,24 +54,28 @@ cmd_update_firmware() (
   # TODO(hungte) if some day we have better security jail / sandbox, change the
   # sudo to follow new magic for granting root permission.
 
-  if [ -s $CHROMEOS_FIRMWARE_UPDATE ]; then
-    sudo $CHROMEOS_FIRMWARE_UPDATE --force $UPDATE_OPTION
+  if [ -s "${CHROMEOS_FIRMWARE_UPDATE}" ]; then
+    sudo "${CHROMEOS_FIRMWARE_UPDATE}" --force "${UPDATE_OPTION}"
   else
     echo "There is no firmware update in current system."
   fi
 )
 
+# shellcheck disable=SC2034
 USAGE_install='[<dev>]'
+# shellcheck disable=SC2034
 HELP_install='
-  Install Chrome OS to the target device, clearing out all existing data.
+  Install ChromeOS to the target device, clearing out all existing data.
 '
 cmd_install() (
   do_install "$1"
 )
 
+# shellcheck disable=SC2034
 USAGE_upgrade='[<dev>]'
+# shellcheck disable=SC2034
 HELP_upgrade='
-  Upgrade an existing Chrome OS installation, saving existing user data.
+  Upgrade an existing ChromeOS installation, saving existing user data.
 '
 cmd_upgrade() (
   do_install "$1" --preserve_stateful

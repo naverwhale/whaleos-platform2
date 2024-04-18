@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/strings/string_piece.h>
 #include <brillo/grpc/async_grpc_client.h>
@@ -19,9 +18,9 @@
 #include <dbus/bus.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 
-#include "diagnostics/common/system/bluetooth_client.h"
-#include "diagnostics/common/system/debugd_adapter.h"
-#include "diagnostics/common/system/powerd_adapter.h"
+#include "diagnostics/mojom/public/cros_healthd.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/wilco_dtc_supportd.mojom.h"
 #include "diagnostics/wilco_dtc_supportd/dbus_service.h"
 #include "diagnostics/wilco_dtc_supportd/grpc_service.h"
 #include "diagnostics/wilco_dtc_supportd/mojo_service.h"
@@ -30,14 +29,14 @@
 #include "diagnostics/wilco_dtc_supportd/telemetry/bluetooth_event_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/ec_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/powerd_event_service.h"
-
-#include "mojo/cros_healthd.mojom.h"
-#include "mojo/cros_healthd_probe.mojom.h"
-#include "mojo/wilco_dtc_supportd.mojom.h"
-#include "wilco_dtc.grpc.pb.h"           // NOLINT(build/include)
-#include "wilco_dtc_supportd.grpc.pb.h"  // NOLINT(build/include)
+#include "diagnostics/wilco_dtc_supportd/utils/system/bluetooth_client.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/debugd_adapter.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/powerd_adapter.h"
+#include "wilco_dtc.grpc.pb.h"           // NOLINT(build/include_directory)
+#include "wilco_dtc_supportd.grpc.pb.h"  // NOLINT(build/include_directory)
 
 namespace diagnostics {
+namespace wilco {
 
 class GrpcClientManager;
 class MojoServiceFactory;
@@ -128,45 +127,42 @@ class Core final : public GrpcService::Delegate,
       chromeos::wilco_dtc_supportd::mojom::WilcoDtcSupportdService;
 
   // WilcoDtcSupportdGrpcService::Delegate overrides:
-  void SendWilcoDtcMessageToUi(
-      const std::string& json_message,
-      const SendMessageToUiCallback& callback) override;
+  void SendWilcoDtcMessageToUi(const std::string& json_message,
+                               SendMessageToUiCallback callback) override;
   void PerformWebRequestToBrowser(
       WebRequestHttpMethod http_method,
       const std::string& url,
       const std::vector<std::string>& headers,
       const std::string& request_body,
-      const PerformWebRequestToBrowserCallback& callback) override;
+      PerformWebRequestToBrowserCallback callback) override;
   void GetAvailableRoutinesToService(
-      const GetAvailableRoutinesToServiceCallback& callback) override;
-  void RunRoutineToService(
-      const grpc_api::RunRoutineRequest& request,
-      const RunRoutineToServiceCallback& callback) override;
+      GetAvailableRoutinesToServiceCallback callback) override;
+  void RunRoutineToService(const grpc_api::RunRoutineRequest& request,
+                           RunRoutineToServiceCallback callback) override;
   void GetRoutineUpdateRequestToService(
       int uuid,
       grpc_api::GetRoutineUpdateRequest::Command command,
       bool include_output,
-      const GetRoutineUpdateRequestToServiceCallback& callback) override;
+      GetRoutineUpdateRequestToServiceCallback callback) override;
   void GetConfigurationDataFromBrowser(
-      const GetConfigurationDataFromBrowserCallback& callback) override;
+      GetConfigurationDataFromBrowserCallback callback) override;
   void GetDriveSystemData(DriveSystemDataType data_type,
-                          const GetDriveSystemDataCallback& callback) override;
+                          GetDriveSystemDataCallback callback) override;
   void RequestBluetoothDataNotification() override;
   void ProbeTelemetryInfo(
-      std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum> categories,
+      std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum> categories,
       ProbeTelemetryInfoCallback callback) override;
   EcService* GetEcService() override;
 
   // ProbeService::Delegate overrides:
   bool BindCrosHealthdProbeService(
-      mojo::PendingReceiver<
-          chromeos::cros_healthd::mojom::CrosHealthdProbeService> service)
-      override;
+      mojo::PendingReceiver<ash::cros_healthd::mojom::CrosHealthdProbeService>
+          service) override;
 
   // RoutineService::Delegate overrides:
   bool GetCrosHealthdDiagnosticsService(
       mojo::PendingReceiver<
-          chromeos::cros_healthd::mojom::CrosHealthdDiagnosticsService> service)
+          ash::cros_healthd::mojom::CrosHealthdDiagnosticsService> service)
       override;
 
   // BluetoothEventService::Observer overrides:
@@ -233,6 +229,7 @@ class Core final : public GrpcService::Delegate,
   std::unique_ptr<ProbeService> probe_service_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_CORE_H_

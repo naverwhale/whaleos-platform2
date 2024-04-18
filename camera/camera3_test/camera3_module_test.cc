@@ -1,25 +1,26 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "camera3_test/camera3_module_fixture.h"
 
 #include <algorithm>
+#include <iterator>
+#include <optional>
 #include <string>
+#include <tuple>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
 #include <base/command_line.h>
 #include <base/containers/contains.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/no_destructor.h>
 #include <base/strings/string_split.h>
 #include <base/strings/stringprintf.h>
 #include <base/system/sys_info.h>
 #include <brillo/message_loops/base_message_loop.h>
-#include <chromeos-config/libcros_config/cros_config.h>
 #include <system/camera_metadata_hidden.h>
 
 #include "camera3_test/camera3_device.h"
@@ -29,75 +30,22 @@
 #include "cros-camera/camera_mojo_channel_manager_token.h"
 #include "cros-camera/common.h"
 #include "cros-camera/cros_camera_hal.h"
-
-namespace {
-
-// TODO(kamesan): Consolidate cros_config usages in camera HALs and here.
-struct NumberOfBuiltInCameras {
-  int mipi;
-  int usb;
-};
-
-struct CrosDeviceConfig {
-  std::string model_name;
-  base::Optional<NumberOfBuiltInCameras> num_cameras;
-};
-
-base::Optional<CrosDeviceConfig> GetCrosDeviceConfig() {
-  brillo::CrosConfig cros_config;
-  if (!cros_config.Init()) {
-    ADD_FAILURE() << "Failed to initialize CrOS config";
-    return base::nullopt;
-  }
-
-  CrosDeviceConfig config{};
-  if (!cros_config.GetString("/", "name", &config.model_name)) {
-    ADD_FAILURE() << "Failed to query model name";
-    config.model_name = "";
-  }
-
-  config.num_cameras = [&]() -> base::Optional<NumberOfBuiltInCameras> {
-    std::string count_str;
-    if (cros_config.GetString("/camera", "count", &count_str)) {
-      if (count_str == "0") {
-        return NumberOfBuiltInCameras{.mipi = 0, .usb = 0};
-      }
-    }
-    int mipi_count = 0, usb_count = 0;
-    std::string interface;
-    for (int i = 0;; ++i) {
-      if (!cros_config.GetString(base::StringPrintf("/camera/devices/%i", i),
-                                 "interface", &interface)) {
-        if (i == 0) {
-          return base::nullopt;
-        }
-        break;
-      }
-      if (interface == "mipi") {
-        ++mipi_count;
-      } else if (interface == "usb") {
-        ++usb_count;
-      } else {
-        ADD_FAILURE() << "Unknown camera interface: " << interface;
-      }
-    }
-    return NumberOfBuiltInCameras{.mipi = mipi_count, .usb = usb_count};
-  }();
-
-  return config;
-}
-
-}  // namespace
+#include "cros-camera/device_config.h"
 
 namespace camera3_test {
 
 #define IGNORE_HARDWARE_LEVEL UINT8_MAX
 
-static camera_module_t* g_cam_module = NULL;
+static camera_module_t* g_cam_module = nullptr;
+static cros::cros_camera_hal_t* g_cros_camera_hal = nullptr;
 
 static cros::CameraThread& GetModuleThread() {
   static base::NoDestructor<cros::CameraThread> t("Camera3TestModuleThread");
   return *t;
+}
+
+cros::cros_camera_hal_t* GetCrosCameraHal() {
+  return g_cros_camera_hal;
 }
 
 bool isHardwareLevelSupported(uint8_t actual_level, uint8_t required_level) {
@@ -323,8 +271,8 @@ static std::vector<int> GetCmdLineTestCameraIds() {
 
 // static
 CameraModuleCallbacksAux* CameraModuleCallbacksAux::GetInstance() {
-  static base::NoDestructor<CameraModuleCallbacksAux> aux;
-  return aux.get();
+  static CameraModuleCallbacksAux aux;
+  return &aux;
 }
 
 CameraModuleCallbacksAux::CameraModuleCallbacksAux() {
@@ -368,6 +316,7 @@ static void InitCameraModule(const base::FilePath& camera_hal_path,
   // symbol once all camera HALs have implemented the interface.
   if (*cros_camera_hal != nullptr) {
     (*cros_camera_hal)->set_up(token);
+    g_cros_camera_hal = *cros_camera_hal;
   }
 
   camera_module_t* module = static_cast<camera_module_t*>(
@@ -382,8 +331,9 @@ static void InitCameraModule(const base::FilePath& camera_hal_path,
     ASSERT_GT(module->get_number_of_cameras(), id)
         << "No such test camera id in HAL";
   }
-  ASSERT_EQ(0, GetModuleThread().PostTaskSync(
-                   FROM_HERE, base::Bind(&InitCameraModuleOnThread, module)));
+  ASSERT_EQ(0,
+            GetModuleThread().PostTaskSync(
+                FROM_HERE, base::BindOnce(&InitCameraModuleOnThread, module)));
   *cam_module = module;
 }
 
@@ -436,6 +386,23 @@ static void InitCameraModuleByFacing(int facing,
   FAIL() << "Cannot find camera with facing=" << facing;
 }
 
+static void EnableCameraFacing(int facing,
+                               camera3_test::CameraHalClient* camera_hal_client,
+                               base::FilePath* camera_hal_path) {
+  ASSERT_NE(nullptr, camera_hal_client) << "camera_hal_client is not valid";
+  for (const auto& hal_path : cros::GetCameraHalPaths()) {
+    for (int i = 0; i < camera_hal_client->GetNumberOfCameras(); i++) {
+      camera_info info;
+      ASSERT_EQ(0, camera_hal_client->GetCameraInfo(i, &info));
+      if (info.facing == facing) {
+        *camera_hal_path = hal_path;
+        return;
+      }
+    }
+  }
+  FAIL() << "Cannot find camera with facing=" << facing;
+}
+
 static void InitPerfLog() {
   // GetNumberOfCameras() returns the number of internal cameras, so here we
   // should not see any external cameras (facing = 2).
@@ -447,7 +414,7 @@ static void InitPerfLog() {
     camera_info info;
     ASSERT_EQ(0, camera_module.GetCameraInfo(i, &info));
     ASSERT_LE(0, info.facing);
-    ASSERT_LT(info.facing, base::size(facing_names));
+    ASSERT_LT(info.facing, std::size(facing_names));
     name_map[i] = facing_names[info.facing];
   }
   camera3_test::Camera3PerfLog::GetInstance()->SetCameraNameMap(name_map);
@@ -532,10 +499,6 @@ int Camera3Module::GetCameraInfo(int cam_id, camera_info* info) {
 
 std::unique_ptr<DeviceConnector> Camera3Module::OpenDevice(int cam_id) {
   return cam_module_connector_->OpenDevice(cam_id);
-}
-
-bool Camera3Module::GetVendorTagByName(const std::string name, uint32_t* tag) {
-  return cam_module_connector_->GetVendorTagByName(name, tag);
 }
 
 std::vector<int32_t> Camera3Module::GetOutputFormats(int cam_id) {
@@ -626,24 +589,42 @@ TEST_F(Camera3ModuleFixture, NumberOfCameras) {
   base::CommandLine* cmd_line = base::CommandLine::ForCurrentProcess();
   base::FilePath camera_hal_path =
       cmd_line->GetSwitchValuePath("camera_hal_path");
-  base::Optional<CrosDeviceConfig> config = GetCrosDeviceConfig();
-  if (config.has_value() && config->num_cameras.has_value()) {
-    if (camera_hal_path.empty()) {
-      ASSERT_EQ(cam_module_.GetNumberOfCameras(),
-                config->num_cameras->usb + config->num_cameras->mipi)
-          << "Incorrect number of cameras";
-    } else if (camera_hal_path.value().find("usb") != std::string::npos) {
-      ASSERT_EQ(cam_module_.GetNumberOfCameras(), config->num_cameras->usb)
-          << "Incorrect number of cameras";
-    } else {
-      ASSERT_EQ(cam_module_.GetNumberOfCameras(), config->num_cameras->mipi)
-          << "Incorrect number of cameras";
-    }
-  } else {
-    ASSERT_GT(cam_module_.GetNumberOfCameras(), 0) << "No cameras found";
-    ASSERT_LE(cam_module_.GetNumberOfCameras(), kMaxNumCameras)
-        << "Too many cameras found";
+  std::optional<cros::DeviceConfig> config = cros::DeviceConfig::Create();
+
+  if (g_cam_module != nullptr &&
+      strcmp(g_cam_module->common.name, "Fake Camera HAL") == 0) {
+    // Ignore this test on fake HAL, since it by default have no camera.
+    return;
   }
+
+  if (config.has_value()) {
+    std::optional<int> usb_count =
+        config->GetCameraCount(cros::Interface::kUsb, /*detachable=*/false);
+    std::optional<int> mipi_count =
+        config->GetCameraCount(cros::Interface::kMipi, /*detachable=*/false);
+    if (camera_hal_path.empty()) {
+      if (usb_count.has_value() && mipi_count.has_value()) {
+        ASSERT_EQ(cam_module_.GetNumberOfCameras(), *usb_count + *mipi_count)
+            << "Incorrect number of built-in cameras";
+        return;
+      }
+    } else if (camera_hal_path.value().find("usb") != std::string::npos) {
+      if (usb_count.has_value()) {
+        ASSERT_EQ(cam_module_.GetNumberOfCameras(), *usb_count)
+            << "Incorrect number of USB cameras";
+        return;
+      }
+    } else {
+      if (mipi_count.has_value()) {
+        ASSERT_EQ(cam_module_.GetNumberOfCameras(), *mipi_count)
+            << "Incorrect number of MIPI cameras";
+        return;
+      }
+    }
+  }
+  ASSERT_GT(cam_module_.GetNumberOfCameras(), 0) << "No cameras found";
+  ASSERT_LE(cam_module_.GetNumberOfCameras(), kMaxNumCameras)
+      << "Too many cameras found";
 }
 
 TEST_F(Camera3ModuleFixture, OpenDeviceOfBadIndices) {
@@ -870,7 +851,7 @@ TEST_F(Camera3ModuleFixture, RequiredFormats) {
     }
 
     std::vector<ResolutionInfo> diff;
-    std::set_difference(jpeg_resolutions.begin(), jpeg_resolutions.end(),
+    std::set_difference(yuv_resolutions.begin(), yuv_resolutions.end(),
                         private_resolutions.begin(), private_resolutions.end(),
                         std::inserter(diff, diff.begin()));
     EXPECT_TRUE(diff.empty())
@@ -1345,13 +1326,36 @@ static int GetCmdLineTestCameraFacing(const base::CommandLine& cmd_line) {
     return -ENOENT;
   int idx = std::distance(
       facing_names,
-      std::find(facing_names, facing_names + base::size(facing_names),
+      std::find(facing_names, facing_names + std::size(facing_names),
                 facing_name));
-  if (idx == base::size(facing_names)) {
+  if (idx == std::size(facing_names)) {
     ADD_FAILURE() << "Invalid facing name: " << facing_name;
     return -EINVAL;
   }
   return idx;
+}
+
+// Return true if connect_to_camera_service is true, else false
+static bool GetCmdLineTestConnectToCameraService(
+    const base::CommandLine& cmd_line) {
+  const auto& connect_to_camera_service =
+      cmd_line.GetSwitchValueASCII("connect_to_camera_service");
+  // Camera_service is connected by default if |camera_hal_path| is not
+  // specified.
+  if (connect_to_camera_service.empty()) {
+    return cmd_line.GetSwitchValuePath("camera_hal_path").empty();
+  }
+  std::string str(connect_to_camera_service);
+  std::transform(str.begin(), str.end(), str.begin(), ::tolower);
+  if (str == "true" || str == "1") {
+    return true;
+  } else if (str == "false" || str == "0") {
+    return false;
+  } else {
+    ADD_FAILURE() << "Invalid connect_to_camera_service option: "
+                  << connect_to_camera_service;
+    return false;
+  }
 }
 
 bool InitializeTest(int* argc,
@@ -1376,6 +1380,13 @@ bool InitializeTest(int* argc,
   base::FilePath camera_hal_path =
       cmd_line->GetSwitchValuePath("camera_hal_path");
   int facing = GetCmdLineTestCameraFacing(*cmd_line);
+  bool connect_to_camera_service =
+      GetCmdLineTestConnectToCameraService(*cmd_line);
+  if (!camera_hal_path.empty() && connect_to_camera_service) {
+    LOGF(ERROR) << "Cannot specify both --camera_hal_path and "
+                   "--connect_to_camera_service=true.";
+    return false;
+  }
 
   if (facing != -ENOENT) {
     if (facing == -EINVAL) {
@@ -1399,19 +1410,31 @@ bool InitializeTest(int* argc,
     }
   }
 
-  // Open camera HAL and get module
-  if (facing != -ENOENT) {
-    camera3_test::GetModuleThread().Start();
-    camera3_test::InitCameraModuleByFacing(facing, token, cam_hal_handle,
-                                           cros_camera_hal, &camera_hal_path);
-  } else if (!camera_hal_path.empty()) {
-    camera3_test::GetModuleThread().Start();
-    camera3_test::InitCameraModuleByHalPath(camera_hal_path, token,
-                                            cam_hal_handle, cros_camera_hal);
+  if (!connect_to_camera_service) {
+    // Open camera HAL and get module
+    if (facing != -ENOENT) {
+      camera3_test::GetModuleThread().Start();
+      camera3_test::InitCameraModuleByFacing(facing, token, cam_hal_handle,
+                                             cros_camera_hal, &camera_hal_path);
+    } else if (!camera_hal_path.empty()) {
+      camera3_test::GetModuleThread().Start();
+      camera3_test::InitCameraModuleByHalPath(camera_hal_path, token,
+                                              cam_hal_handle, cros_camera_hal);
+    } else {
+      LOGF(ERROR) << "Cannot specify both --camera_hal_path/--camera_ids and "
+                     "--camera_facing.";
+      return false;
+    }
   } else {
-    if (camera3_test::CameraHalClient::GetInstance()->Start(
+    // Run camera3 module test through camera_service
+    camera3_test::CameraHalClient* camera_hal_client =
+        camera3_test::CameraHalClient::GetInstance();
+    if (camera_hal_client->Start(
             camera3_test::CameraModuleCallbacksAux::GetInstance()) != 0) {
       return false;
+    }
+    if (facing != -ENOENT) {
+      EnableCameraFacing(facing, camera_hal_client, &camera_hal_path);
     }
   }
 
@@ -1433,12 +1456,13 @@ bool InitializeTest(int* argc,
       "scarlet",
   };
   const std::vector<std::string> kIgnoreSensorOrientationTestModels = {
+      "collis",
       "jelboz",
       "jelboz360",
   };
   std::string board = base::SysInfo::GetLsbReleaseBoard();
-  base::Optional<CrosDeviceConfig> config = GetCrosDeviceConfig();
-  std::string model = config.has_value() ? config->model_name : "";
+  std::optional<cros::DeviceConfig> config = cros::DeviceConfig::Create();
+  std::string model = config.has_value() ? config->GetModelName() : "";
   if (base::Contains(kIgnoreSensorOrientationTestBoards, board) ||
       base::Contains(kIgnoreSensorOrientationTestModels, model)) {
     LOGF(INFO) << "Ignore SensorOrientationTest on " << board << "/" << model;
@@ -1468,7 +1492,7 @@ extern "C" int LLVMFuzzerInitialize(int* argc, char*** argv) {
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, size_t Size) {
   camera3_test::Camera3TestDataForwarder::GetInstance()->SetData(Data, Size);
-  ignore_result(RUN_ALL_TESTS());
+  std::ignore = RUN_ALL_TESTS();
   return 0;
 }
 

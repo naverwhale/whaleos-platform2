@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,12 +22,6 @@ extern "C" void CMetricsLibraryDelete(CMetricsLibrary handle) {
   delete lib;
 }
 
-extern "C" void CMetricsLibraryInit(CMetricsLibrary handle) {
-  MetricsLibrary* lib = reinterpret_cast<MetricsLibrary*>(handle);
-  if (lib != NULL)
-    lib->Init();
-}
-
 extern "C" int CMetricsLibrarySendToUMA(CMetricsLibrary handle,
                                         const char* name,
                                         int sample,
@@ -48,6 +42,37 @@ extern "C" int CMetricsLibrarySendEnumToUMA(CMetricsLibrary handle,
   if (lib == NULL)
     return 0;
   return lib->SendEnumToUMA(std::string(name), sample, max);
+}
+
+extern "C" int CMetricsLibrarySendRepeatedEnumToUMA(CMetricsLibrary handle,
+                                                    const char* name,
+                                                    int sample,
+                                                    int max,
+                                                    int num_samples) {
+  MetricsLibrary* lib = reinterpret_cast<MetricsLibrary*>(handle);
+  if (lib == NULL)
+    return 0;
+  return lib->SendRepeatedEnumToUMA(std::string(name), sample, max,
+                                    num_samples);
+}
+
+extern "C" int CMetricsLibrarySendLinearToUMA(CMetricsLibrary handle,
+                                              const char* name,
+                                              int sample,
+                                              int max) {
+  MetricsLibrary* lib = reinterpret_cast<MetricsLibrary*>(handle);
+  if (lib == NULL)
+    return 0;
+  return lib->SendLinearToUMA(std::string(name), sample, max);
+}
+
+extern "C" int CMetricsLibrarySendPercentageToUMA(CMetricsLibrary handle,
+                                                  const char* name,
+                                                  int sample) {
+  MetricsLibrary* lib = reinterpret_cast<MetricsLibrary*>(handle);
+  if (lib == NULL)
+    return 0;
+  return lib->SendPercentageToUMA(std::string(name), sample);
 }
 
 extern "C" int CMetricsLibrarySendSparseToUMA(CMetricsLibrary handle,

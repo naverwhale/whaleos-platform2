@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/memory/weak_ptr.h>
 #include <base/strings/string_util.h>
 #include <gmock/gmock.h>
@@ -19,7 +19,7 @@
 
 #include "shill/mock_adaptors.h"
 #include "shill/mock_control.h"
-#include "shill/mock_process_manager.h"
+#include "shill/net/mock_process_manager.h"
 #include "shill/test_event_dispatcher.h"
 
 using testing::_;
@@ -32,12 +32,12 @@ class ExternalTaskTest : public testing::Test, public RpcTaskDelegate {
  public:
   ExternalTaskTest()
       : weak_ptr_factory_(this),
-        death_callback_(base::Bind(&ExternalTaskTest::TaskDiedCallback,
-                                   weak_ptr_factory_.GetWeakPtr())),
-        external_task_(new ExternalTask(&control_,
-                                        &process_manager_,
-                                        weak_ptr_factory_.GetWeakPtr(),
-                                        death_callback_)),
+        external_task_(
+            new ExternalTask(&control_,
+                             &process_manager_,
+                             weak_ptr_factory_.GetWeakPtr(),
+                             base::BindOnce(&ExternalTaskTest::TaskDiedCallback,
+                                            weak_ptr_factory_.GetWeakPtr()))),
         test_rpc_task_destroyed_(false) {}
 
   ~ExternalTaskTest() override = default;
@@ -87,7 +87,6 @@ class ExternalTaskTest : public testing::Test, public RpcTaskDelegate {
   EventDispatcherForTest dispatcher_;
   MockProcessManager process_manager_;
   base::WeakPtrFactory<ExternalTaskTest> weak_ptr_factory_;
-  base::Callback<void(pid_t, int)> death_callback_;
   std::unique_ptr<ExternalTask> external_task_;
   bool test_rpc_task_destroyed_;
 };
@@ -143,7 +142,7 @@ TEST_F(ExternalTaskTest, Start) {
   const int kPID = 234678;
   EXPECT_CALL(process_manager_,
               StartProcess(_, base::FilePath(kCommand), kCommandOptions,
-                           expected_env, false, _))
+                           expected_env, _, false, _))
       .WillOnce(Return(-1))
       .WillOnce(Return(kPID));
   Error error;

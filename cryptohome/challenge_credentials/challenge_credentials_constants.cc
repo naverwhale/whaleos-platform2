@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,7 @@
 
 #include <base/check.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/no_destructor.h>
-#include <base/stl_util.h>
 
 using brillo::Blob;
 using brillo::BlobFromString;
@@ -29,10 +27,10 @@ namespace {
 constexpr char kChallengeCredentialsSaltConstantPrefix[] =
     "Chrome OS challenge credentials salt Chrome OS challenge credentials "
     "salt\0";
-static_assert(base::size(kChallengeCredentialsSaltConstantPrefix) > 64,
+static_assert(std::size(kChallengeCredentialsSaltConstantPrefix) > 64,
               "The salt prefix is too short");
 static_assert(!kChallengeCredentialsSaltConstantPrefix
-                  [base::size(kChallengeCredentialsSaltConstantPrefix) - 1],
+                  [std::size(kChallengeCredentialsSaltConstantPrefix) - 1],
               "The salt prefix must terminate with a null character");
 
 }  // namespace

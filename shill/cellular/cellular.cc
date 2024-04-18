@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,21 @@
 #include <netinet/in.h>
 #include <linux/if.h>  // NOLINT - Needs definitions from netinet/in.h
 
-#include <tuple>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string_view>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/contains.h>
+#include <base/containers/cxx20_erase.h>
+#include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/notreached.h>
@@ -25,18 +30,25 @@
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
 #include <chromeos/dbus/service_constants.h>
+#include <net-base/ipv6_address.h>
+#include <net-base/rtnl_handler.h>
 #include <ModemManager/ModemManager.h>
 
+#include "dbus/shill/dbus-constants.h"
 #include "shill/adaptor_interfaces.h"
+#include "shill/cellular/apn_list.h"
+#include "shill/cellular/carrier_entitlement.h"
 #include "shill/cellular/cellular_bearer.h"
-#include "shill/cellular/cellular_capability.h"
+#include "shill/cellular/cellular_capability_3gpp.h"
+#include "shill/cellular/cellular_consts.h"
+#include "shill/cellular/cellular_helpers.h"
 #include "shill/cellular/cellular_service.h"
 #include "shill/cellular/cellular_service_provider.h"
 #include "shill/cellular/mobile_operator_info.h"
 #include "shill/cellular/modem_info.h"
-#include "shill/connection.h"
 #include "shill/control_interface.h"
-#include "shill/dbus/dbus_properties_proxy.h"
+#include "shill/data_types.h"
+#include "shill/dbus/dbus_control.h"
 #include "shill/device.h"
 #include "shill/device_info.h"
 #include "shill/error.h"
@@ -45,97 +57,39 @@
 #include "shill/ipconfig.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/net/netlink_sock_diag.h"
-#include "shill/net/rtnl_handler.h"
-#include "shill/net/sockets.h"
+#include "shill/metrics.h"
+#include "shill/net/process_manager.h"
+#include "shill/network/network_config.h"
 #include "shill/ppp_daemon.h"
-#include "shill/ppp_device.h"
-#include "shill/ppp_device_factory.h"
-#include "shill/process_manager.h"
 #include "shill/profile.h"
-#include "shill/property_accessor.h"
-#include "shill/store_interface.h"
+#include "shill/service.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/store_interface.h"
 #include "shill/technology.h"
+#include "shill/tethering_manager.h"
+#include "shill/virtual_device.h"
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kCellular;
-static std::string ObjectID(const Cellular* c) {
-  return c->GetRpcIdentifier().value();
-}
 }  // namespace Logging
 
 namespace {
 
 // Maximum time to wait for Modem registration before canceling a pending
 // connect attempt.
-const int64_t kPendingConnectCancelMilliseconds = 60 * 1000;
+constexpr base::TimeDelta kPendingConnectCancel = base::Minutes(1);
 
-class ApnList {
- public:
-  void AddApns(
-      const std::vector<std::unique_ptr<MobileOperatorInfo::MobileAPN>>& apns) {
-    for (const auto& mobile_apn : apns)
-      AddApn(mobile_apn);
-  }
+// Prefix used by entitlement check logging messages when the entitlement
+// check is not successful. This prefix is used by the anomaly detector to
+// identify these events.
+constexpr char kEntitlementCheckAnomalyDetectorPrefix[] =
+    "Entitlement check failed: ";
 
-  const Stringmaps& GetList() { return apn_dict_list_; }
-
- private:
-  using ApnIndexKey =
-      std::tuple<std::string, std::string, std::string, std::string>;
-
-  ApnIndexKey GetKey(
-      const std::unique_ptr<MobileOperatorInfo::MobileAPN>& mobile_apn) {
-    return std::make_tuple(mobile_apn->apn, mobile_apn->username,
-                           mobile_apn->password, mobile_apn->authentication);
-  }
-
-  void AddApn(
-      const std::unique_ptr<MobileOperatorInfo::MobileAPN>& mobile_apn) {
-    ApnIndexKey index = GetKey(mobile_apn);
-    if (apn_index_[index] == nullptr) {
-      apn_dict_list_.emplace_back();
-      apn_index_[index] = &apn_dict_list_.back();
-    }
-
-    Stringmap* props = apn_index_[index];
-    if (!mobile_apn->apn.empty())
-      props->emplace(kApnProperty, mobile_apn->apn);
-    if (!mobile_apn->username.empty())
-      props->emplace(kApnUsernameProperty, mobile_apn->username);
-    if (!mobile_apn->password.empty())
-      props->emplace(kApnPasswordProperty, mobile_apn->password);
-    if (!mobile_apn->authentication.empty())
-      props->emplace(kApnAuthenticationProperty, mobile_apn->authentication);
-    if (mobile_apn->is_attach_apn)
-      props->emplace(kApnAttachProperty, kApnAttachProperty);
-    if (!mobile_apn->ip_type.empty())
-      props->emplace(kApnIpTypeProperty, mobile_apn->ip_type);
-
-    // Find the first localized and non-localized name, if any.
-    if (!mobile_apn->operator_name_list.empty())
-      props->emplace(kApnNameProperty, mobile_apn->operator_name_list[0].name);
-    for (const auto& lname : mobile_apn->operator_name_list) {
-      if (!lname.language.empty())
-        props->emplace(kApnLocalizedNameProperty, lname.name);
-    }
-  }
-
-  Stringmaps apn_dict_list_;
-  std::map<ApnIndexKey, Stringmap*> apn_index_;
-};
-
-// Gets a printable value from a Stringmap without adding a value when it
-// doesn't exist.
-std::string GetStringmapValue(const Stringmap& string_map,
-                              const std::string& key) {
-  if (!base::Contains(string_map, key))
-    return "";
-
-  return string_map.at(key);
-}
+// Longer tethering start timeout value, used when the upstream network setup
+// requires the connection of a new PDN.
+static constexpr base::TimeDelta kLongTetheringStartTimeout = base::Seconds(45);
 
 bool IsEnabledModemState(Cellular::ModemState state) {
   switch (state) {
@@ -158,6 +112,85 @@ bool IsEnabledModemState(Cellular::ModemState state) {
   return false;
 }
 
+Metrics::DetailedCellularConnectionResult::IPConfigMethod
+BearerIPConfigMethodToMetrics(CellularBearer::IPConfigMethod method) {
+  using BearerType = CellularBearer::IPConfigMethod;
+  using MetricsType = Metrics::DetailedCellularConnectionResult::IPConfigMethod;
+  switch (method) {
+    case BearerType::kUnknown:
+      return MetricsType::kUnknown;
+    case BearerType::kPPP:
+      return MetricsType::kPPP;
+    case BearerType::kStatic:
+      return MetricsType::kStatic;
+    case BearerType::kDHCP:
+      return MetricsType::kDHCP;
+  }
+}
+
+std::string GetFriendlyModelId(const std::string& model_id) {
+  if (model_id.find("L850") != std::string::npos) {
+    return "L850";
+  }
+  if (model_id.find("FM101") != std::string::npos) {
+    return "FM101";
+  }
+  if (model_id.find("7c Compute") != std::string::npos) {
+    return "SC7180";
+  }
+  if (model_id.find("4D75") != std::string::npos) {
+    return "FM350";
+  }
+  if (model_id.find("NL668") != std::string::npos) {
+    return "NL668";
+  }
+  return model_id;
+}
+
+// Returns if specified modem manager error can be classified as
+// subscription related error. This API should be enhanced if
+// better signals become available to detect subscription error.
+bool IsSubscriptionError(std::string mm_error) {
+  return mm_error == MM_MOBILE_EQUIPMENT_ERROR_DBUS_PREFIX
+         ".ServiceOptionNotSubscribed";
+}
+
+void PrintApnListForDebugging(std::deque<Stringmap> apn_try_list,
+                              ApnList::ApnType apn_type) {
+  // Print list for debugging
+  if (SLOG_IS_ON(Cellular, 3)) {
+    std::string log_string =
+        ": Try list: ApnType: " + ApnList::GetApnTypeString(apn_type);
+    for (const auto& it : apn_try_list) {
+      log_string += " " + GetPrintableApnStringmap(it);
+    }
+    SLOG(3) << __func__ << log_string;
+  }
+}
+
+Metrics::DetailedCellularConnectionResult::ConnectionAttemptType
+ConnectionAttemptTypeToMetrics(CellularServiceRefPtr service) {
+  using MetricsType =
+      Metrics::DetailedCellularConnectionResult::ConnectionAttemptType;
+  if (!service)
+    return MetricsType::kUnknown;
+  if (service->is_in_user_connect())
+    return MetricsType::kUserConnect;
+  return MetricsType::kAutoConnect;
+}
+
+Metrics::DetailedCellularConnectionResult::APNType ApnTypeToMetricEnum(
+    ApnList::ApnType apn_type) {
+  switch (apn_type) {
+    case ApnList::ApnType::kDefault:
+      return Metrics::DetailedCellularConnectionResult::APNType::kDefault;
+    case ApnList::ApnType::kAttach:
+      return Metrics::DetailedCellularConnectionResult::APNType::kAttach;
+    case ApnList::ApnType::kDun:
+      return Metrics::DetailedCellularConnectionResult::APNType::kDUN;
+  }
+}
+
 }  // namespace
 
 // static
@@ -166,12 +199,8 @@ const char Cellular::kPolicyAllowRoaming[] = "PolicyAllowRoaming";
 const char Cellular::kUseAttachApn[] = "UseAttachAPN";
 const char Cellular::kQ6V5ModemManufacturerName[] = "QUALCOMM INCORPORATED";
 const char Cellular::kQ6V5DriverName[] = "qcom-q6v5-mss";
-const char Cellular::kModemDriverSysfsName[] =
-    "/sys/class/remoteproc/remoteproc0/device/driver";
-const char Cellular::kModemResetSysfsName[] =
-    "/sys/class/remoteproc/remoteproc0/state";
-const int64_t Cellular::kModemResetTimeoutMilliseconds = 1 * 1000;
-const int64_t Cellular::kPollLocationIntervalMilliseconds = 5 * 60 * 1000;
+const char Cellular::kQ6V5SysfsBasePath[] = "/sys/class/remoteproc";
+const char Cellular::kQ6V5RemoteprocPattern[] = "remoteproc*";
 
 // static
 std::string Cellular::GetStateString(State state) {
@@ -195,7 +224,7 @@ std::string Cellular::GetStateString(State state) {
     default:
       NOTREACHED();
   }
-  return base::StringPrintf("CellularStateUnknown-%d", state);
+  return base::StringPrintf("CellularStateUnknown-%d", static_cast<int>(state));
 }
 
 // static
@@ -233,49 +262,84 @@ std::string Cellular::GetModemStateString(ModemState modem_state) {
   return base::StringPrintf("ModemStateUnknown-%d", modem_state);
 }
 
+// static
+void Cellular::ValidateApnTryList(std::deque<Stringmap>& apn_try_list) {
+  // Entries in the APN try list must have the APN property
+  apn_try_list.erase(
+      std::remove_if(
+          apn_try_list.begin(), apn_try_list.end(),
+          [](const auto& item) { return !base::Contains(item, kApnProperty); }),
+      apn_try_list.end());
+}
+
+// static
+std::deque<Stringmap> Cellular::BuildFallbackEmptyApn(
+    ApnList::ApnType apn_type) {
+  std::deque<Stringmap> apn_list;
+  std::vector<std::string> ip_types = {kApnIpTypeV4V6, kApnIpTypeV4,
+                                       kApnIpTypeV6};
+  for (const auto& ip_type : ip_types) {
+    Stringmap apn;
+    apn[kApnProperty] = "";
+    apn[kApnTypesProperty] = ApnList::GetApnTypeString(apn_type);
+    apn[kApnIpTypeProperty] = ip_type;
+    apn[kApnSourceProperty] = cellular::kApnSourceFallback;
+    apn_list.push_back(apn);
+  }
+  return apn_list;
+}
+
 Cellular::Cellular(Manager* manager,
                    const std::string& link_name,
                    const std::string& address,
                    int interface_index,
-                   Type type,
                    const std::string& service,
                    const RpcIdentifier& path)
     : Device(
           manager, link_name, address, interface_index, Technology::kCellular),
-      home_provider_info_(
-          new MobileOperatorInfo(manager->dispatcher(), "HomeProvider")),
-      serving_operator_info_(
-          new MobileOperatorInfo(manager->dispatcher(), "ServingOperator")),
+      mobile_operator_info_(
+          new MobileOperatorInfo(manager->dispatcher(), "cellular")),
       dbus_service_(service),
       dbus_path_(path),
       dbus_path_str_(path.value()),
-      type_(type),
-      ppp_device_factory_(PPPDeviceFactory::GetInstance()),
       process_manager_(ProcessManager::GetInstance()) {
   RegisterProperties();
+  mobile_operator_info_->Init();
 
-  // TODO(pprabhu) Split MobileOperatorInfo into a context that stores the
-  // costly database, and lighter objects that |Cellular| can own.
-  // crbug.com/363874
-  home_provider_info_->Init();
-  serving_operator_info_->Init();
-
-  socket_destroyer_ = NetlinkSockDiag::Create(std::make_unique<Sockets>());
+  socket_destroyer_ = net_base::NetlinkSockDiag::Create();
   if (!socket_destroyer_) {
-    LOG(WARNING) << "Socket destroyer failed to initialize; "
+    LOG(WARNING) << LoggingTag() << ": Socket destroyer failed to initialize; "
                  << "IPv6 will be unavailable.";
   }
 
   // Create an initial Capability.
   CreateCapability();
 
-  SLOG(this, 1) << "Cellular() " << this->link_name();
+  // Reset networks
+  default_pdn_apn_type_ = std::nullopt;
+  default_pdn_.reset();
+  multiplexed_tethering_pdn_.reset();
+
+  carrier_entitlement_ = std::make_unique<CarrierEntitlement>(
+      this, metrics(),
+      base::BindRepeating(&Cellular::OnEntitlementCheckUpdated,
+                          weak_ptr_factory_.GetWeakPtr()));
+  SLOG(1) << LoggingTag() << ": Cellular()";
 }
 
 Cellular::~Cellular() {
-  SLOG(this, 1) << "~Cellular() " << this->link_name();
+  LOG(INFO) << LoggingTag() << ": ~Cellular()";
   if (capability_)
     DestroyCapability();
+}
+
+void Cellular::CreateImplicitNetwork(bool fixed_ip_params) {
+  // No implicit network in Cellular.
+}
+
+Network* Cellular::GetPrimaryNetwork() const {
+  // The default network is considered as primary always.
+  return default_pdn_ ? default_pdn_->network() : nullptr;
 }
 
 std::string Cellular::GetLegacyEquipmentIdentifier() const {
@@ -302,30 +366,30 @@ std::string Cellular::GetLegacyEquipmentIdentifier() const {
   return mac_address();
 }
 
-std::string Cellular::GetStorageIdentifier() const {
+std::string Cellular::DeviceStorageSuffix() const {
   // Cellular is not guaranteed to have a valid MAC address, and other unique
   // identifiers may not be initially available. Use the link name to
   // differentiate between internal devices and external devices.
-  return "device_" + link_name();
+  return link_name();
 }
 
 bool Cellular::Load(const StoreInterface* storage) {
   std::string id = GetStorageIdentifier();
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": Device ID: " << id;
   if (!storage->ContainsGroup(id)) {
     id = "device_" + GetLegacyEquipmentIdentifier();
     if (!storage->ContainsGroup(id)) {
-      LOG(WARNING) << "Device is not available in the persistent store: " << id;
+      LOG(WARNING) << LoggingTag() << ": " << __func__
+                   << ": Device is not available in the persistent store";
       return false;
     }
     legacy_storage_id_ = id;
   }
   storage->GetBool(id, kAllowRoaming, &allow_roaming_);
   storage->GetBool(id, kPolicyAllowRoaming, &policy_allow_roaming_);
-  storage->GetBool(id, kUseAttachApn, &use_attach_apn_);
-  LOG(INFO) << __func__ << " id:" << id << " " << kAllowRoaming << ":"
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": " << kAllowRoaming << ":"
             << allow_roaming_ << " " << kPolicyAllowRoaming << ":"
-            << policy_allow_roaming_ << " " << kUseAttachApn << ":"
-            << use_attach_apn_ << " ";
+            << policy_allow_roaming_;
   return Device::Load(storage);
 }
 
@@ -333,14 +397,14 @@ bool Cellular::Save(StoreInterface* storage) {
   const std::string id = GetStorageIdentifier();
   storage->SetBool(id, kAllowRoaming, allow_roaming_);
   storage->SetBool(id, kPolicyAllowRoaming, policy_allow_roaming_);
-  storage->SetBool(id, kUseAttachApn, use_attach_apn_);
   bool result = Device::Save(storage);
-  LOG(INFO) << __func__ << " id: " << id << ": " << result;
-  // TODO(b/181843251): Remove after M94.
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": Device ID: " << id;
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": " << result;
+  // TODO(b/181843251): Remove when number of users on M92 are negligible.
   if (result && !legacy_storage_id_.empty() &&
       storage->ContainsGroup(legacy_storage_id_)) {
-    LOG(INFO) << __func__
-              << ": Deleting legacy storage id: " << legacy_storage_id_;
+    SLOG(2) << LoggingTag() << ": " << __func__
+            << ": Deleting legacy storage id: " << legacy_storage_id_;
     storage->DeleteGroup(legacy_storage_id_);
     legacy_storage_id_.clear();
   }
@@ -353,6 +417,12 @@ std::string Cellular::GetTechnologyFamily(Error* error) {
 
 std::string Cellular::GetDeviceId(Error* error) {
   return device_id_ ? device_id_->AsString() : "";
+}
+
+bool Cellular::GetMultiplexSupport() {
+  // The device allows multiplexing support when more than one multiplexed
+  // bearers can be setup at a given time.
+  return (max_multiplexed_bearers_ > 1);
 }
 
 bool Cellular::ShouldBringNetworkInterfaceDownAfterDisabled() const {
@@ -380,11 +450,29 @@ bool Cellular::ShouldBringNetworkInterfaceDownAfterDisabled() const {
   return false;
 }
 
+void Cellular::BringNetworkInterfaceDown() {
+  // The IPA network interface in a Qualcomm SoC should never be brought down
+  // by shill, because the modem processor may get in a bad state if we power
+  // up radio quickly after having brought down the interface (see b/305930007,
+  // and b/302714371).
+  if (IsQ6V5Modem()) {
+    SLOG(2) << LoggingTag() << ": skipping IPA net interface down.";
+    return;
+  }
+
+  // The physical network interface always exists, unconditionally, so it can
+  // be brought down safely regardless of whether a Network exists or not.
+  // There is no need to bring down explicitly any additional multiplexed
+  // network interface managed by the device because those are fully removed
+  // whenever the corresponding PDN is disconnected.
+  rtnl_handler()->SetInterfaceFlags(interface_index(), 0, IFF_UP);
+}
+
 void Cellular::SetState(State state) {
   if (state == state_)
     return;
-  LOG(INFO) << __func__ << ": " << GetStateString(state_) << " -> "
-            << GetStateString(state);
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": "
+            << GetStateString(state_) << " -> " << GetStateString(state);
   state_ = state;
   UpdateScanning();
 }
@@ -392,13 +480,14 @@ void Cellular::SetState(State state) {
 void Cellular::SetModemState(ModemState modem_state) {
   if (modem_state == modem_state_)
     return;
-  LOG(INFO) << __func__ << ": " << GetModemStateString(modem_state_) << " -> "
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": "
+            << GetModemStateString(modem_state_) << " -> "
             << GetModemStateString(modem_state);
   modem_state_ = modem_state;
   UpdateScanning();
 }
 
-void Cellular::HelpRegisterDerivedBool(const std::string& name,
+void Cellular::HelpRegisterDerivedBool(std::string_view name,
                                        bool (Cellular::*get)(Error* error),
                                        bool (Cellular::*set)(const bool& value,
                                                              Error* error)) {
@@ -407,55 +496,54 @@ void Cellular::HelpRegisterDerivedBool(const std::string& name,
 }
 
 void Cellular::HelpRegisterConstDerivedString(
-    const std::string& name, std::string (Cellular::*get)(Error*)) {
+    std::string_view name, std::string (Cellular::*get)(Error*)) {
   mutable_store()->RegisterDerivedString(
       name, StringAccessor(
                 new CustomAccessor<Cellular, std::string>(this, get, nullptr)));
 }
 
-void Cellular::Start(Error* error,
-                     const EnabledStateChangedCallback& callback) {
-  DCHECK(error);
-  SLOG(this, 1) << __func__ << ": " << GetStateString(state_);
+void Cellular::Start(EnabledStateChangedCallback callback) {
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": "
+            << GetStateString(state_);
 
   if (!capability_) {
     // Report success, even though a connection will not succeed until a Modem
     // is instantiated and |cabability_| is created. Setting |state_|
     // to kEnabled here will cause CreateCapability to call StartModem.
     SetState(State::kEnabled);
-    LOG(WARNING) << __func__ << ": Skipping Start (no capability).";
-    if (error)
-      error->Reset();
+    LOG(WARNING) << LoggingTag() << ": " << __func__
+                 << ": Skipping Start (no capability).";
+    std::move(callback).Run(Error(Error::kSuccess));
     return;
   }
 
-  StartModem(error, callback);
+  StartModem(std::move(callback));
 }
 
-void Cellular::Stop(Error* error, const EnabledStateChangedCallback& callback) {
-  SLOG(this, 1) << __func__ << ": " << GetStateString(state_);
+void Cellular::Stop(EnabledStateChangedCallback callback) {
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": "
+            << GetStateString(state_);
   DCHECK(!stop_step_.has_value()) << "Already stopping. Unexpected Stop call.";
   stop_step_ = StopSteps::kStopModem;
-  StopStep(error, callback, Error());
+  StopStep(std::move(callback), Error());
 }
 
-void Cellular::StopStep(Error* error,
-                        const EnabledStateChangedCallback& callback,
+void Cellular::StopStep(EnabledStateChangedCallback callback,
                         const Error& error_result) {
-  SLOG(this, 1) << __func__ << ": " << GetStateString(state_);
+  SLOG(1) << LoggingTag() << ": " << __func__ << ": " << GetStateString(state_);
   DCHECK(stop_step_.has_value());
   switch (stop_step_.value()) {
     case StopSteps::kStopModem:
       if (capability_) {
-        LOG(INFO) << __func__ << ": Calling StopModem.";
+        LOG(INFO) << LoggingTag() << ": " << __func__ << ": Calling StopModem.";
         SetState(State::kModemStopping);
-        capability_->StopModem(
-            error, base::Bind(&Cellular::StopModemCallback,
-                              weak_ptr_factory_.GetWeakPtr(), callback));
+        capability_->StopModem(base::BindOnce(&Cellular::StopModemCallback,
+                                              weak_ptr_factory_.GetWeakPtr(),
+                                              std::move(callback)));
         return;
       }
       stop_step_ = StopSteps::kModemStopped;
-      FALLTHROUGH;
+      [[fallthrough]];
 
     case StopSteps::kModemStopped:
       SetState(State::kDisabled);
@@ -485,32 +573,35 @@ void Cellular::StopStep(Error* error,
         // Allow the callback to succeed so that Shill identifies and persists
         // Cellular as disabled. TODO(b/184974739): StopModem should probably
         // succeed when in a failed state.
-        LOG(ERROR) << "StopModem returned an error: " << error_result;
-        callback.Run(Error());
+        LOG(WARNING) << LoggingTag()
+                     << ": StopModem returned an error: " << error_result;
+        std::move(callback).Run(Error());
       } else {
-        callback.Run(error_result);
+        if (error_result.IsFailure())
+          LOG(ERROR) << LoggingTag()
+                     << ": StopModem returned an error: " << error_result;
+        std::move(callback).Run(error_result);
       }
       stop_step_.reset();
       return;
   }
 }
 
-void Cellular::StartModem(Error* error,
-                          const EnabledStateChangedCallback& callback) {
+void Cellular::StartModem(EnabledStateChangedCallback callback) {
   DCHECK(capability_);
-  LOG(INFO) << __func__;
+  LOG(INFO) << LoggingTag() << ": " << __func__;
   SetState(State::kModemStarting);
-  capability_->StartModem(error,
-                          base::Bind(&Cellular::StartModemCallback,
-                                     weak_ptr_factory_.GetWeakPtr(), callback));
+  capability_->StartModem(base::BindOnce(&Cellular::StartModemCallback,
+                                         weak_ptr_factory_.GetWeakPtr(),
+                                         std::move(callback)));
 }
 
-void Cellular::StartModemCallback(const EnabledStateChangedCallback& callback,
+void Cellular::StartModemCallback(EnabledStateChangedCallback callback,
                                   const Error& error) {
-  LOG(INFO) << __func__ << ": state=" << GetStateString(state_);
+  LOG(INFO) << LoggingTag() << ": " << __func__
+            << ": state=" << GetStateString(state_);
 
   if (!error.IsSuccess()) {
-    LOG(ERROR) << "StartModem failed: " << error;
     SetState(State::kEnabled);
     if (error.type() == Error::kWrongState) {
       // If the enable operation failed with Error::kWrongState, the modem is
@@ -518,9 +609,11 @@ void Cellular::StartModemCallback(const EnabledStateChangedCallback& callback,
       // SIM. Invoke |callback| with no error so that the enable completes.
       // If the ModemState property later changes to 'disabled', StartModem
       // will be called again.
-      callback.Run(Error());
+      LOG(WARNING) << LoggingTag() << ": StartModem failed: " << error;
+      std::move(callback).Run(Error(Error::kSuccess));
     } else {
-      callback.Run(error);
+      LOG(ERROR) << LoggingTag() << ": StartModem failed: " << error;
+      std::move(callback).Run(error);
     }
     return;
   }
@@ -533,26 +626,26 @@ void Cellular::StartModemCallback(const EnabledStateChangedCallback& callback,
 
   metrics()->NotifyDeviceEnableFinished(interface_index());
 
-  callback.Run(Error());
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
-void Cellular::StopModemCallback(const EnabledStateChangedCallback& callback,
+void Cellular::StopModemCallback(EnabledStateChangedCallback callback,
                                  const Error& error_result) {
-  LOG(INFO) << __func__ << ": " << GetStateString(state_)
-            << " Error: " << error_result;
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": "
+            << GetStateString(state_) << " Error: " << error_result;
   stop_step_ = StopSteps::kModemStopped;
-  StopStep(/*error=*/nullptr, callback, error_result);
+  StopStep(std::move(callback), error_result);
 }
 
 void Cellular::DestroySockets() {
   if (!socket_destroyer_)
     return;
 
-  StopIPv6();
-  for (const auto& address :
-       manager()->device_info()->GetAddresses(interface_index())) {
-    rtnl_handler()->RemoveInterfaceAddress(interface_index(), address);
-    socket_destroyer_->DestroySockets(IPPROTO_TCP, address);
+  if (default_pdn_) {
+    default_pdn_->DestroySockets();
+  }
+  if (multiplexed_tethering_pdn_) {
+    multiplexed_tethering_pdn_->DestroySockets();
   }
 }
 
@@ -565,17 +658,10 @@ bool Cellular::IsUnderlyingDeviceEnabled() const {
   return IsEnabledModemState(modem_state_);
 }
 
-void Cellular::LinkEvent(unsigned int flags, unsigned int change) {
-  Device::LinkEvent(flags, change);
-  if (ppp_task_) {
-    LOG(INFO) << "Ignoring LinkEvent on device with PPP interface.";
-    return;
-  }
-  HandleLinkEvent(flags, change);
-}
-
-void Cellular::Scan(Error* error, const std::string& /*reason*/) {
-  SLOG(this, 2) << "Scanning started";
+void Cellular::Scan(Error* error,
+                    const std::string& /*reason*/,
+                    bool /*is_dbus_call*/) {
+  SLOG(2) << LoggingTag() << ": Scanning started";
   CHECK(error);
   if (proposed_scan_in_progress_) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kInProgress,
@@ -586,82 +672,89 @@ void Cellular::Scan(Error* error, const std::string& /*reason*/) {
   if (!capability_)
     return;
 
-  ResultStringmapsCallback cb =
-      base::Bind(&Cellular::OnScanReply, weak_ptr_factory_.GetWeakPtr());
-  capability_->Scan(error, cb);
-  // An immediate failure in |cabapility_->Scan(...)| is indicated through the
-  // |error| argument.
-  if (error->IsFailure())
-    return;
-
-  proposed_scan_in_progress_ = true;
-  UpdateScanning();
+  capability_->Scan(
+      base::BindOnce(&Cellular::OnScanStarted, weak_ptr_factory_.GetWeakPtr()),
+      base::BindOnce(&Cellular::OnScanReply, weak_ptr_factory_.GetWeakPtr()));
 }
 
 void Cellular::RegisterOnNetwork(const std::string& network_id,
-                                 Error* error,
-                                 const ResultCallback& callback) {
-  if (!capability_)
-    callback.Run(Error(Error::Type::kOperationFailed));
-  capability_->RegisterOnNetwork(network_id, error, callback);
+                                 ResultCallback callback) {
+  if (!capability_) {
+    std::move(callback).Run(Error(Error::Type::kOperationFailed));
+    return;
+  }
+  capability_->RegisterOnNetwork(network_id, std::move(callback));
 }
 
 void Cellular::RequirePin(const std::string& pin,
                           bool require,
-                          Error* error,
-                          const ResultCallback& callback) {
-  SLOG(this, 2) << __func__ << "(" << require << ")";
-  if (!capability_)
-    callback.Run(Error(Error::Type::kOperationFailed));
-  capability_->RequirePin(pin, require, error, callback);
+                          ResultCallback callback) {
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": " << require;
+  if (!capability_) {
+    std::move(callback).Run(Error(Error::Type::kOperationFailed));
+    return;
+  }
+  capability_->RequirePin(pin, require, std::move(callback));
 }
 
-void Cellular::EnterPin(const std::string& pin,
-                        Error* error,
-                        const ResultCallback& callback) {
-  SLOG(this, 2) << __func__;
-  if (!capability_)
-    callback.Run(Error(Error::Type::kOperationFailed));
-  capability_->EnterPin(pin, error, callback);
+void Cellular::EnterPin(const std::string& pin, ResultCallback callback) {
+  SLOG(2) << LoggingTag() << ": " << __func__;
+  if (!capability_) {
+    std::move(callback).Run(Error(Error::Type::kOperationFailed));
+    return;
+  }
+  capability_->EnterPin(pin, std::move(callback));
 }
 
 void Cellular::UnblockPin(const std::string& unblock_code,
                           const std::string& pin,
-                          Error* error,
-                          const ResultCallback& callback) {
-  SLOG(this, 2) << __func__;
-  if (!capability_)
-    callback.Run(Error(Error::Type::kOperationFailed));
-  capability_->UnblockPin(unblock_code, pin, error, callback);
+                          ResultCallback callback) {
+  SLOG(2) << LoggingTag() << ": " << __func__;
+  if (!capability_) {
+    std::move(callback).Run(Error(Error::Type::kOperationFailed));
+    return;
+  }
+  capability_->UnblockPin(unblock_code, pin, std::move(callback));
 }
 
 void Cellular::ChangePin(const std::string& old_pin,
                          const std::string& new_pin,
-                         Error* error,
-                         const ResultCallback& callback) {
-  SLOG(this, 2) << __func__;
-  if (!capability_)
-    callback.Run(Error(Error::Type::kOperationFailed));
-  capability_->ChangePin(old_pin, new_pin, error, callback);
+                         ResultCallback callback) {
+  SLOG(2) << LoggingTag() << ": " << __func__;
+  if (!capability_) {
+    std::move(callback).Run(Error(Error::Type::kOperationFailed));
+    return;
+  }
+  capability_->ChangePin(old_pin, new_pin, std::move(callback));
 }
 
-void Cellular::Reset(Error* error, const ResultCallback& callback) {
-  SLOG(this, 2) << __func__;
+void Cellular::Reset(ResultCallback callback) {
+  SLOG(2) << LoggingTag() << ": " << __func__;
 
   // Qualcomm q6v5 modems on trogdor do not support reset using qmi messages.
   // As per QC the only way to reset the modem is to use the sysfs interface.
   if (IsQ6V5Modem()) {
     if (!ResetQ6V5Modem()) {
-      callback.Run(Error(Error::Type::kOperationFailed));
+      std::move(callback).Run(Error(Error::Type::kOperationFailed));
     } else {
-      callback.Run(Error(Error::Type::kSuccess));
+      std::move(callback).Run(Error(Error::Type::kSuccess));
     }
     return;
   }
 
-  if (!capability_)
-    callback.Run(Error(Error::Type::kOperationFailed));
-  capability_->Reset(error, callback);
+  if (!capability_) {
+    std::move(callback).Run(Error(Error::Type::kOperationFailed));
+    return;
+  }
+  capability_->Reset(std::move(callback));
+}
+
+void Cellular::DropConnectionDefault() {
+  SetPrimaryMultiplexedInterface("");
+  default_pdn_apn_type_ = std::nullopt;
+  default_pdn_.reset();
+  multiplexed_tethering_pdn_.reset();
+  SelectService(nullptr);
 }
 
 void Cellular::DropConnection() {
@@ -669,9 +762,10 @@ void Cellular::DropConnection() {
     // For PPP dongles, IP configuration is handled on the |ppp_device_|,
     // rather than the netdev plumbed into |this|.
     ppp_device_->DropConnection();
-  } else {
-    Device::DropConnection();
+    return;
   }
+
+  DropConnectionDefault();
 }
 
 void Cellular::SetServiceState(Service::ConnectState state) {
@@ -682,12 +776,12 @@ void Cellular::SetServiceState(Service::ConnectState state) {
   } else if (service_) {
     service_->SetState(state);
   } else {
-    LOG(WARNING) << "State change with no Service.";
+    LOG(WARNING) << LoggingTag() << ": State change with no Service.";
   }
 }
 
 void Cellular::SetServiceFailure(Service::ConnectFailure failure_state) {
-  LOG(WARNING) << __func__ << ": "
+  LOG(WARNING) << LoggingTag() << ": " << __func__ << ": "
                << Service::ConnectFailureToString(failure_state);
   if (ppp_device_) {
     ppp_device_->SetServiceFailure(failure_state);
@@ -696,13 +790,13 @@ void Cellular::SetServiceFailure(Service::ConnectFailure failure_state) {
   } else if (service_) {
     service_->SetFailure(failure_state);
   } else {
-    LOG(WARNING) << "State change with no Service.";
+    LOG(WARNING) << LoggingTag() << ": State change with no Service.";
   }
 }
 
 void Cellular::SetServiceFailureSilent(Service::ConnectFailure failure_state) {
-  SLOG(this, 2) << __func__ << ": "
-                << Service::ConnectFailureToString(failure_state);
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": "
+          << Service::ConnectFailureToString(failure_state);
   if (ppp_device_) {
     ppp_device_->SetServiceFailureSilent(failure_state);
   } else if (selected_service()) {
@@ -710,19 +804,23 @@ void Cellular::SetServiceFailureSilent(Service::ConnectFailure failure_state) {
   } else if (service_) {
     service_->SetFailureSilent(failure_state);
   } else {
-    LOG(WARNING) << "State change with no Service.";
+    LOG(WARNING) << LoggingTag() << ": State change with no Service.";
   }
 }
 
 void Cellular::OnConnected() {
-  if (StateIsConnected()) {
-    SLOG(this, 1) << __func__ << ": Already connected";
+  // If state is already connected and we have a default Network setup, do
+  // nothing. The missing Network while connected may happen during the
+  // reconnection performed by the tethering logic when using the tethering
+  // APN as default.
+  if (StateIsConnected() && default_pdn_) {
+    SLOG(1) << LoggingTag() << ": " << __func__ << ": Already connected";
     return;
   }
-  SLOG(this, 1) << __func__;
+  SLOG(1) << LoggingTag() << ": " << __func__;
   SetState(State::kConnected);
   if (!service_) {
-    LOG(INFO) << "Disconnecting due to no cellular service.";
+    LOG(INFO) << LoggingTag() << ": Disconnecting due to no cellular service.";
     Disconnect(nullptr, "no cellular service");
   } else if (service_->IsRoamingRuleViolated()) {
     // TODO(pholla): This logic is probably unreachable since we have two gate
@@ -730,46 +828,29 @@ void Cellular::OnConnected() {
     // a) Cellular::Connect prevents connects if roaming rules are violated.
     // b) CellularCapability3gpp::FillConnectPropertyMap will not allow MM to
     //    connect to roaming networks.
-    LOG(INFO) << "Disconnecting due to roaming.";
+    LOG(INFO) << LoggingTag() << ": Disconnecting due to roaming.";
     Disconnect(nullptr, "roaming disallowed");
   } else {
     EstablishLink();
   }
 }
 
-void Cellular::OnBeforeSuspend(const ResultCallback& callback) {
-  LOG(INFO) << __func__;
+void Cellular::OnBeforeSuspend(ResultCallback callback) {
+  LOG(INFO) << LoggingTag() << ": " << __func__;
   Error error;
   StopPPP();
-  capability_->SetModemToLowPowerModeOnModemStop(true);
-  SetEnabledNonPersistent(false, &error, callback);
-  if (error.IsFailure() && error.type() != Error::kInProgress) {
-    // If we fail to disable the modem right away, proceed instead of wasting
-    // the time to wait for the suspend/termination delay to expire.
-    LOG(WARNING) << "Proceed with suspend/termination even though the modem "
-                 << "is not yet disabled: " << error;
-    callback.Run(error);
-  }
+  if (capability_)
+    capability_->SetModemToLowPowerModeOnModemStop(true);
+  SetEnabledNonPersistent(false, std::move(callback));
 }
 
 void Cellular::OnAfterResume() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << LoggingTag() << ": " << __func__;
   if (enabled_persistent()) {
-    LOG(INFO) << "Restarting modem after resume.";
-
-    Error error;
-    SetEnabledUnchecked(true, &error, base::Bind(LogRestartModemResult));
-    if (error.IsSuccess()) {
-      LOG(INFO) << "Modem restart completed immediately.";
-    } else if (error.IsOngoing()) {
-      LOG(INFO) << "Modem restart in progress.";
-    } else {
-      LOG(WARNING) << "Modem restart failed: " << error;
-    }
+    LOG(INFO) << LoggingTag() << ": Restarting modem after resume.";
+    // TODO(b/216847428): replace this with a real toggle
+    SetEnabledUnchecked(true, base::BindOnce(LogRestartModemResult));
   }
-
-  // Re-enable IPv6 so we can renegotiate an IP address.
-  StartIPv6();
 
   // TODO(quiche): Consider if this should be conditional. If, e.g.,
   // the device was still disabling when we suspended, will trying to
@@ -777,7 +858,8 @@ void Cellular::OnAfterResume() {
   Device::OnAfterResume();
 }
 
-std::vector<GeolocationInfo> Cellular::GetGeolocationObjects() const {
+void Cellular::UpdateGeolocationObjects(
+    std::vector<GeolocationInfo>* geolocation_infos) const {
   const std::string& mcc = location_info_.mcc;
   const std::string& mnc = location_info_.mnc;
   const std::string& lac = location_info_.lac;
@@ -794,53 +876,83 @@ std::vector<GeolocationInfo> Cellular::GetGeolocationObjects() const {
   }
   // Else we have either an incomplete location, no location yet,
   // or some unsupported location type, so don't return something incorrect.
-
-  return {geolocation_info};
+  geolocation_infos->clear();
+  geolocation_infos->push_back(geolocation_info);
 }
 
-void Cellular::ReAttach() {
-  SLOG(this, 1) << __func__;
-  if (!enabled() && !enabled_pending()) {
-    LOG(WARNING) << __func__ << " Modem not enabled, skipped re-attach.";
+void Cellular::OnConnectionUpdated(int interface_index) {
+  SLOG(1) << LoggingTag() << ": connection updated: " << interface_index;
+
+  // Event on the default network, propagate it to the parent.
+  if (default_pdn_ &&
+      interface_index == default_pdn_->network()->interface_index()) {
+    // If the requested APN was connected during a DUN as DEFAULT connect or
+    // disconnect operation, we can now complete the operation successfully.
+    // If any event happens before we have connected the APN, we should
+    // ignore it.
+    if (IsTetheringOperationDunAsDefaultOngoing()) {
+      if (tethering_operation_->apn_connected) {
+        SLOG(1) << LoggingTag() << ": tethering operation can be completed";
+        CompleteTetheringOperation(Error(Error::kSuccess));
+      } else {
+        SLOG(1) << LoggingTag() << ": tethering operation still ongoing";
+      }
+    }
+    Device::OnConnectionUpdated(interface_index);
     return;
   }
 
-  capability_->SetModemToLowPowerModeOnModemStop(false);
-  Error error;
-  SetEnabledNonPersistent(false, &error,
-                          base::Bind(&Cellular::ReAttachOnDetachComplete,
-                                     weak_ptr_factory_.GetWeakPtr()));
-  if (error.IsFailure() && error.type() != Error::kInProgress) {
-    LOG(WARNING) << __func__ << " Detaching the modem failed: " << error;
-    // Reset the flag to its default value.
-    capability_->SetModemToLowPowerModeOnModemStop(true);
+  // Event on the tethering-specific multiplexed network.
+  if (multiplexed_tethering_pdn_ &&
+      interface_index ==
+          multiplexed_tethering_pdn_->network()->interface_index()) {
+    if (IsTetheringOperationDunMultiplexedOngoing()) {
+      if (tethering_operation_->apn_connected) {
+        SLOG(1) << LoggingTag()
+                << ": multiplexed tethering operation can be completed";
+        CompleteTetheringOperation(Error(Error::kSuccess));
+      } else {
+        SLOG(1) << LoggingTag()
+                << ": multiplexed tethering operation still ongoing";
+      }
+    }
+    return;
   }
+
+  LOG(WARNING) << LoggingTag()
+               << ": Unexpected network connection update: " << interface_index;
 }
 
-void Cellular::ReAttachOnDetachComplete(const Error&) {
-  Error error;
-  SLOG(this, 2) << __func__;
-  // Reset the flag to its default value.
-  capability_->SetModemToLowPowerModeOnModemStop(true);
+void Cellular::ConfigureAttachApn() {
+  SLOG(1) << LoggingTag() << ": " << __func__;
+  if (!enabled() && !enabled_pending()) {
+    LOG(WARNING) << LoggingTag() << ": " << __func__
+                 << ": Modem not enabled, skip attach APN configuration.";
+    return;
+  }
 
-  SetEnabledUnchecked(true, &error, base::Bind(LogRestartModemResult));
-  if (error.IsFailure() && !error.IsOngoing())
-    LOG(WARNING) << "Modem restart completed immediately.";
+  capability_->ConfigureAttachApn();
 }
 
 void Cellular::CancelPendingConnect() {
   ConnectToPendingFailed(Service::kFailureDisconnect);
 }
 
+void Cellular::OnScanStarted() {
+  proposed_scan_in_progress_ = true;
+  UpdateScanning();
+}
+
 void Cellular::OnScanReply(const Stringmaps& found_networks,
                            const Error& error) {
-  SLOG(this, 2) << "Scanning completed";
+  SLOG(2) << LoggingTag() << ": Scanning completed";
   proposed_scan_in_progress_ = false;
   UpdateScanning();
 
   // TODO(jglasgow): fix error handling.
   // At present, there is no way of notifying user of this asynchronous error.
   if (error.IsFailure()) {
+    error.Log();
     if (!found_networks_.empty())
       SetFoundNetworks(Stringmaps());
     return;
@@ -854,11 +966,12 @@ void Cellular::OnScanReply(const Stringmaps& found_networks,
 void Cellular::GetLocationCallback(const std::string& gpp_lac_ci_string,
                                    const Error& error) {
   // Expects string of form "MCC,MNC,LAC,CI"
-  SLOG(this, 2) << __func__ << ": " << gpp_lac_ci_string;
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": " << gpp_lac_ci_string;
   std::vector<std::string> location_vec = SplitString(
       gpp_lac_ci_string, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
   if (location_vec.size() < 4) {
-    LOG(ERROR) << "Unable to parse location string " << gpp_lac_ci_string;
+    LOG(ERROR) << LoggingTag() << ": "
+               << "Unable to parse location string " << gpp_lac_ci_string;
     return;
   }
   location_info_.mcc = location_vec[0];
@@ -871,35 +984,42 @@ void Cellular::GetLocationCallback(const std::string& gpp_lac_ci_string,
 }
 
 void Cellular::PollLocationTask() {
-  SLOG(this, 4) << __func__;
+  SLOG(4) << LoggingTag() << ": " << __func__;
 
   PollLocation();
 
+  poll_location_task_.Reset(base::BindOnce(&Cellular::PollLocationTask,
+                                           weak_ptr_factory_.GetWeakPtr()));
   dispatcher()->PostDelayedTask(FROM_HERE, poll_location_task_.callback(),
-                                kPollLocationIntervalMilliseconds);
+                                kPollLocationInterval);
 }
 
 void Cellular::PollLocation() {
   if (!capability_)
     return;
-  StringCallback cb = base::Bind(&Cellular::GetLocationCallback,
-                                 weak_ptr_factory_.GetWeakPtr());
-  capability_->GetLocation(cb);
+  capability_->GetLocation(base::BindOnce(&Cellular::GetLocationCallback,
+                                          weak_ptr_factory_.GetWeakPtr()));
 }
 
 void Cellular::HandleNewSignalQuality(uint32_t strength) {
-  SLOG(this, 2) << "Signal strength: " << strength;
+  SLOG(2) << LoggingTag() << ": Signal strength: " << strength;
   if (service_) {
     service_->SetStrength(strength);
   }
 }
 
 void Cellular::HandleNewRegistrationState() {
-  SLOG(this, 2) << __func__ << ": state = " << GetStateString(state_);
+  SLOG(2) << LoggingTag() << ": " << __func__
+          << ": state = " << GetStateString(state_);
 
   CHECK(capability_);
   if (!capability_->IsRegistered()) {
     if (!explicit_disconnect_ && StateIsConnected() && service_.get()) {
+      // TODO(b/200584652): Remove after January 2024
+      if (capability_->GetNetworkTechnologyString() == "")
+        LOG(INFO) << LoggingTag() << ": Logging Drop connection on unknown "
+                  << "cellular technology";
+
       metrics()->NotifyCellularDeviceDrop(
           capability_->GetNetworkTechnologyString(), service_->strength());
     }
@@ -919,8 +1039,8 @@ void Cellular::HandleNewRegistrationState() {
       // Defer updating Services while disabled and during transitions.
       return;
     case State::kEnabled:
-      LOG(WARNING) << "Capability is registered but State=Enabled. Setting to "
-                      "Registered. ModemState="
+      LOG(WARNING) << LoggingTag() << ": Capability is registered but "
+                   << "State=Enabled. Setting to Registered. ModemState="
                    << GetModemStateString(modem_state_);
       SetRegistered();
       break;
@@ -933,7 +1053,9 @@ void Cellular::HandleNewRegistrationState() {
       // Already registered
       break;
   }
-
+  if (service_) {
+    service_->ResetAutoConnectCooldownTime();
+  }
   UpdateServices();
 }
 
@@ -946,7 +1068,7 @@ void Cellular::SetRegistered() {
 }
 
 void Cellular::UpdateServices() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << LoggingTag() << ": " << __func__;
   // When Disabled, ensure all services are destroyed except when ModemState is:
   //  * Locked: The primary SIM is locked and the modem has not started.
   //  * Failed: No valid SIM in the primary slot.
@@ -973,8 +1095,12 @@ void Cellular::UpdateServices() {
     manager()->cellular_service_provider()->UpdateServices(this);
   }
 
-  if (state_ == State::kRegistered && modem_state_ == kModemStateConnected)
+  if (state_ == State::kRegistered && modem_state_ == kModemStateConnected) {
+    // On an idle->registered reg state change while modem is connected, we may
+    // need to establish links both in default and tethering, but the tethering
+    // one will need to go always once the default one is up.
     OnConnected();
+  }
 
   service_->SetNetworkTechnology(capability_->GetNetworkTechnologyString());
   service_->SetRoamingState(capability_->GetRoamingStateString());
@@ -987,7 +1113,8 @@ void Cellular::CreateServices() {
     return;
 
   if (service_ && service_->iccid() == iccid_) {
-    LOG(ERROR) << __func__ << ": Service already exists for ICCID.";
+    LOG(ERROR) << LoggingTag() << ": " << __func__
+               << ": Service already exists for ICCID.";
     return;
   }
 
@@ -997,7 +1124,8 @@ void Cellular::CreateServices() {
   // Create or update Cellular Services for the primary SIM.
   service_ =
       manager()->cellular_service_provider()->LoadServicesForDevice(this);
-  LOG(INFO) << __func__ << ": Service=" << service_->log_name();
+  LOG(INFO) << LoggingTag() << ": " << __func__
+            << ": Service=" << service_->log_name();
 
   // Create or update Cellular Services for secondary SIMs.
   UpdateSecondaryServices();
@@ -1006,10 +1134,12 @@ void Cellular::CreateServices() {
 
   // Ensure operator properties are updated.
   OnOperatorChanged();
+  if (service_ && manager()->power_opt())
+    manager()->power_opt()->AddOptInfoForNewService(service_->iccid());
 }
 
 void Cellular::DestroyAllServices() {
-  LOG(INFO) << __func__;
+  LOG(INFO) << LoggingTag() << ": " << __func__;
   DropConnection();
 
   if (service_for_testing_)
@@ -1033,9 +1163,10 @@ void Cellular::UpdateSecondaryServices() {
 }
 
 void Cellular::OnModemDestroyed() {
-  SLOG(this, 1) << __func__;
+  SLOG(1) << LoggingTag() << ": " << __func__;
   StopLocationPolling();
   DestroyCapability();
+  SetForceInitEpsBearerSettings(true);
   // Clear the dbus path.
   SetDbusPath(shill::RpcIdentifier());
 
@@ -1049,25 +1180,24 @@ void Cellular::OnModemDestroyed() {
 }
 
 void Cellular::CreateCapability() {
-  SLOG(this, 1) << __func__;
+  SLOG(1) << LoggingTag() << ": " << __func__;
   CHECK(!capability_);
-  capability_ = CellularCapability::Create(
-      type_, this, manager()->control_interface(), manager()->metrics(),
+  capability_ = std::make_unique<CellularCapability3gpp>(
+      this, manager()->control_interface(), manager()->metrics(),
       manager()->modem_info()->pending_activation_store());
   if (initial_properties_.has_value()) {
     SetInitialProperties(*initial_properties_);
-    initial_properties_ = base::nullopt;
+    initial_properties_ = std::nullopt;
   }
 
-  home_provider_info_->AddObserver(this);
-  serving_operator_info_->AddObserver(this);
+  mobile_operator_info_->AddObserver(this);
 
   // If Cellular::Start has not been called, or Cellular::Stop has been called,
   // we still want to create the capability, but not call StartModem.
   if (state_ == State::kModemStopping || state_ == State::kDisabled)
     return;
 
-  StartModem(/*error=*/nullptr, base::DoNothing());
+  StartModem(base::DoNothing());
 
   // Update device state that might have been pending
   // due to the lack of |capability_| during Cellular::Start().
@@ -1075,14 +1205,12 @@ void Cellular::CreateCapability() {
 }
 
 void Cellular::DestroyCapability() {
-  SLOG(this, 1) << __func__;
+  SLOG(1) << LoggingTag() << ": " << __func__;
 
-  home_provider_info_->RemoveObserver(this);
-  serving_operator_info_->RemoveObserver(this);
+  mobile_operator_info_->RemoveObserver(this);
   // When there is a SIM swap, ModemManager destroys and creates a new modem
   // object. Reset the mobile operator info to avoid stale data.
-  home_provider_info()->Reset();
-  serving_operator_info()->Reset();
+  mobile_operator_info()->Reset();
 
   // Make sure we are disconnected.
   StopPPP();
@@ -1117,30 +1245,138 @@ bool Cellular::GetConnectable(CellularService* service) const {
 
 void Cellular::NotifyCellularConnectionResult(const Error& error,
                                               const std::string& iccid,
-                                              bool is_user_triggered) {
-  SLOG(this, 3) << __func__ << ": Result: " << error.type();
+                                              bool is_user_triggered,
+                                              ApnList::ApnType apn_type) {
+  SLOG(3) << LoggingTag() << ": " << __func__ << ": Result: " << error.type();
   // Don't report successive failures on the same SIM when the `Connect` is
   // triggered by `AutoConnect`, and the failures are the same.
   if (error.type() != Error::kSuccess && !is_user_triggered &&
       last_cellular_connection_results_.count(iccid) > 0 &&
       error.type() == last_cellular_connection_results_[iccid]) {
-    SLOG(this, 3) << " Skipping repetitive failure metric. Error: "
-                  << error.message();
+    SLOG(3) << LoggingTag() << ": "
+            << " Skipping repetitive failure metric. Error: "
+            << error.message();
     return;
   }
-  metrics()->NotifyCellularConnectionResult(error.type());
+  metrics()->NotifyCellularConnectionResult(error.type(),
+                                            ApnTypeToMetricEnum(apn_type));
   last_cellular_connection_results_[iccid] = error.type();
+  if (error.IsSuccess()) {
+    return;
+  }
+  // used by anomaly detector for cellular subsystem crashes
+  LOG(ERROR) << LoggingTag() << ": " << GetFriendlyModelId(model_id_)
+             << " could not connect (trigger="
+             << (is_user_triggered ? "dbus" : "auto")
+             << ") to mccmnc=" << mobile_operator_info_->mccmnc() << ": "
+             << error.message();
+}
+
+bool Cellular::IsSubscriptionErrorSeen() {
+  return service_ && subscription_error_seen_[service_->iccid()];
+}
+
+void Cellular::NotifyDetailedCellularConnectionResult(
+    const Error& error,
+    ApnList::ApnType apn_type,
+    const shill::Stringmap& apn_info) {
+  CHECK(service_);
+  SLOG(3) << LoggingTag() << ": " << __func__ << ": Result:" << error.type();
+
+  auto ipv4 = CellularBearer::IPConfigMethod::kUnknown;
+  auto ipv6 = CellularBearer::IPConfigMethod::kUnknown;
+  uint32_t tech_used = MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN;
+  uint32_t iccid_len = 0;
+  SimType sim_type = kSimTypeUnknown;
+  brillo::ErrorPtr detailed_error;
+  std::string cellular_error;
+  bool use_apn_revamp_ui = false;
+  std::string iccid = service_->iccid();
+
+  std::string roaming_state;
+  if (service_) {
+    roaming_state = service_->roaming_state();
+    iccid_len = service_->iccid().length();
+    use_apn_revamp_ui = service_->custom_apn_list().has_value();
+    // If EID is not empty, report as eSIM else report as pSIM
+    sim_type = service_->eid().empty() ? kSimTypePsim : kSimTypeEsim;
+  }
+
+  if (capability_) {
+    tech_used = capability_->GetActiveAccessTechnologies();
+    CellularBearer* bearer = capability_->GetActiveBearer(apn_type);
+    if (bearer) {
+      ipv4 = bearer->ipv4_config_method();
+      ipv6 = bearer->ipv6_config_method();
+    }
+  }
+
+  error.ToDetailedError(&detailed_error);
+  if (detailed_error != nullptr)
+    cellular_error = detailed_error->GetCode();
+
+  SLOG(3) << LoggingTag() << ": Cellular Error:" << cellular_error;
+
+  if (error.IsSuccess()) {
+    subscription_error_seen_[iccid] = false;
+  }
+
+  Metrics::DetailedCellularConnectionResult result;
+  result.error = error.type();
+  result.detailed_error = cellular_error;
+  result.uuid = mobile_operator_info_->uuid();
+  result.apn_info = apn_info;
+  result.ipv4_config_method = BearerIPConfigMethodToMetrics(ipv4);
+  result.ipv6_config_method = BearerIPConfigMethodToMetrics(ipv6);
+  result.home_mccmnc = mobile_operator_info_->mccmnc();
+  result.serving_mccmnc = mobile_operator_info_->serving_mccmnc();
+  result.roaming_state = roaming_state;
+  result.use_apn_revamp_ui = use_apn_revamp_ui;
+  result.tech_used = tech_used;
+  result.iccid_length = iccid_len;
+  result.sim_type = sim_type;
+  result.gid1 = mobile_operator_info_->gid1();
+  result.connection_attempt_type = ConnectionAttemptTypeToMetrics(service_);
+  result.subscription_error_seen = subscription_error_seen_[iccid];
+  result.modem_state = modem_state_;
+  result.interface_index = interface_index();
+  result.connection_apn_types = ConnectionApnTypesToMetrics(apn_type);
+  metrics()->NotifyDetailedCellularConnectionResult(result);
+
+  // Update if we reported subscription error for this card so that
+  // subsequent errors report subscription_error_seen=true.
+  // This is needed because when connection attempt fail with
+  // serviceOptionNotSubscribed error which in most cases indicate issues
+  // related to invalid APNs, subsequent connection attempts fails with
+  // different error codes, making analysis of metrics difficult.
+  if (IsSubscriptionError(cellular_error)) {
+    subscription_error_seen_[iccid] = true;
+  }
+}
+
+std::vector<Metrics::DetailedCellularConnectionResult::APNType>
+Cellular::ConnectionApnTypesToMetrics(ApnList::ApnType apn_type) {
+  std::vector<Metrics::DetailedCellularConnectionResult::APNType>
+      connection_apn_types;
+  if (default_pdn_apn_type_.has_value() &&
+      default_pdn_apn_type_.value() != apn_type) {
+    connection_apn_types.push_back(
+        ApnTypeToMetricEnum(default_pdn_apn_type_.value()));
+  }
+  connection_apn_types.push_back(ApnTypeToMetricEnum(apn_type));
+  return connection_apn_types;
 }
 
 void Cellular::Connect(CellularService* service, Error* error) {
   CHECK(service);
-  LOG(INFO) << __func__ << ": " << service->log_name();
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": " << service->log_name();
 
+  const ApnList::ApnType apn_type = ApnList::ApnType::kDefault;
   if (!capability_) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kWrongState,
                           "Connect Failed: Modem not available.");
     NotifyCellularConnectionResult(*error, service->iccid(),
-                                   service_->is_in_user_connect());
+                                   service->is_in_user_connect(), apn_type);
     return;
   }
 
@@ -1148,23 +1384,16 @@ void Cellular::Connect(CellularService* service, Error* error) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kWrongState,
                           "Connect Failed: Inhibited.");
     NotifyCellularConnectionResult(*error, service->iccid(),
-                                   service_->is_in_user_connect());
+                                   service->is_in_user_connect(), apn_type);
     return;
   }
 
   if (!connect_pending_iccid_.empty() &&
       connect_pending_iccid_ == service->iccid()) {
-    Error error_temp = Error(Error::kWrongState, "Connect Failed: Inhibited.");
-    LOG(WARNING) << error_temp.message();
+    Error error_temp = Error(Error::kWrongState, "Connect already pending.");
+    LOG(WARNING) << LoggingTag() << ": " << error_temp.message();
     NotifyCellularConnectionResult(error_temp, service->iccid(),
-                                   service_->is_in_user_connect());
-    return;
-  }
-
-  if (scanning_) {
-    LOG(INFO) << "Cellular is scanning. Pending connect to: "
-              << service->log_name();
-    SetPendingConnect(service->iccid());
+                                   service->is_in_user_connect(), apn_type);
     return;
   }
 
@@ -1175,18 +1404,22 @@ void Cellular::Connect(CellularService* service, Error* error) {
     // slot change completes (which may take a while).
     if (StateIsConnected())
       Disconnect(nullptr, "switching service");
-    if (!sim_slot_switch_allowed_) {
-      LOG(INFO) << "sim_slot_switch_allowed -> true";
-      sim_slot_switch_allowed_ = true;
-    }
     if (capability_->SetPrimarySimSlotForIccid(service->iccid())) {
       SetPendingConnect(service->iccid());
     } else {
       Error::PopulateAndLog(FROM_HERE, error, Error::kOperationFailed,
                             "Connect Failed: ICCID not available.");
       NotifyCellularConnectionResult(*error, service->iccid(),
-                                     service_->is_in_user_connect());
+                                     service->is_in_user_connect(), apn_type);
     }
+    return;
+  }
+
+  if (scanning_) {
+    LOG(INFO) << LoggingTag() << ": "
+              << "Cellular is scanning. Pending connect to: "
+              << service->log_name();
+    SetPendingConnect(service->iccid());
     return;
   }
 
@@ -1194,7 +1427,7 @@ void Cellular::Connect(CellularService* service, Error* error) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kOperationFailed,
                           "Connect Failed: Modem not started.");
     NotifyCellularConnectionResult(*error, service->iccid(),
-                                   service_->is_in_user_connect());
+                                   service->is_in_user_connect(), apn_type);
     return;
   }
 
@@ -1202,14 +1435,29 @@ void Cellular::Connect(CellularService* service, Error* error) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kAlreadyConnected,
                           "Already connected; connection request ignored.");
     NotifyCellularConnectionResult(*error, service->iccid(),
-                                   service_->is_in_user_connect());
+                                   service->is_in_user_connect(), apn_type);
     return;
-  } else if (state_ != State::kRegistered) {
-    LOG(ERROR) << "Connect attempted while state = " << GetStateString(state_);
+  }
+
+  if (ModemIsEnabledButNotRegistered()) {
+    LOG(WARNING) << LoggingTag() << ": " << __func__
+                 << ": Waiting for Modem registration.";
+    SetPendingConnect(service->iccid());
+    return;
+  }
+
+  if (state_ != State::kRegistered) {
+    LOG(ERROR) << LoggingTag() << ": Connect attempted while state = "
+               << GetStateString(state_);
     Error::PopulateAndLog(FROM_HERE, error, Error::kNotRegistered,
                           "Connect Failed: Modem not registered.");
     NotifyCellularConnectionResult(*error, service->iccid(),
-                                   service_->is_in_user_connect());
+                                   service->is_in_user_connect(), apn_type);
+    // If using an attach APN, send detailed metrics since |kNotRegistered| is
+    // a very common error when using Attach APNs.
+    if (service->GetLastAttachApn())
+      NotifyDetailedCellularConnectionResult(*error, apn_type,
+                                             *service->GetLastAttachApn());
     return;
   }
 
@@ -1217,52 +1465,109 @@ void Cellular::Connect(CellularService* service, Error* error) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kNotOnHomeNetwork,
                           "Connect Failed: Roaming disallowed.");
     NotifyCellularConnectionResult(*error, service->iccid(),
-                                   service_->is_in_user_connect());
+                                   service->is_in_user_connect(), apn_type);
+    return;
+  }
+
+  // Build default APN list, guaranteed to never be empty.
+  std::deque<Stringmap> apn_try_list = BuildDefaultApnTryList();
+  if (apn_try_list.empty()) {
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidApn,
+                          "Connect Failed: No APNs provided.");
+    NotifyCellularConnectionResult(*error, service->iccid(),
+                                   service->is_in_user_connect(), apn_type);
     return;
   }
 
   OnConnecting();
   capability_->Connect(
-      base::Bind(&Cellular::OnConnectReply, weak_ptr_factory_.GetWeakPtr(),
-                 service->iccid(), service_->is_in_user_connect()));
+      apn_type, apn_try_list,
+      base::BindOnce(&Cellular::OnConnectReply, weak_ptr_factory_.GetWeakPtr(),
+                     apn_type, service->iccid(),
+                     service->is_in_user_connect()));
 
   metrics()->NotifyDeviceConnectStarted(interface_index());
 }
 
 // Note that there's no ResultCallback argument to this since Connect() isn't
 // yet passed one.
-void Cellular::OnConnectReply(std::string iccid,
+void Cellular::OnConnectReply(ApnList::ApnType apn_type,
+                              std::string iccid,
                               bool is_user_triggered,
                               const Error& error) {
-  NotifyCellularConnectionResult(error, iccid, is_user_triggered);
+  NotifyCellularConnectionResult(error, iccid, is_user_triggered, apn_type);
+
   if (!error.IsSuccess()) {
-    LOG(WARNING) << __func__ << ": Failed: " << error;
-    if (service_ && service_->iccid() == iccid)
-      service_->SetFailure(Service::kFailureConnect);
+    LOG(WARNING) << LoggingTag() << ": " << __func__ << ": Failed: " << error;
+    if (service_ && service_->iccid() == iccid) {
+      switch (error.type()) {
+        case Error::kInvalidApn:
+          service_->SetFailure(Service::kFailureInvalidAPN);
+          break;
+        case Error::kNoCarrier:
+          service_->SetFailure(Service::kFailureOutOfRange);
+          break;
+        default:
+          service_->SetFailure(Service::kFailureConnect);
+          break;
+      }
+    }
+    // If we are connecting or disconnecting DUN as DEFAULT and an error happens
+    // in the reconnection procedure, the operation must be aborted right away.
+    if (IsTetheringOperationDunAsDefaultOngoing()) {
+      AbortTetheringOperation(error, base::DoNothing());
+    }
     return;
   }
+
+  // If we are connecting or disconnecting DUN as DEFAULT, we can now expect to
+  // complete the operation once a (default) Network connection update is
+  // received.
+  if (IsTetheringOperationDunAsDefaultOngoing()) {
+    tethering_operation_->apn_connected = true;
+  }
+
+  // Successful bearer connection, so store the APN type.
+  default_pdn_apn_type_ = apn_type;
+
   metrics()->NotifyDeviceConnectFinished(interface_index());
   OnConnected();
 }
 
+void Cellular::HandleDisableResult(const Error& error) {
+  SLOG(1) << LoggingTag() << ": " << __func__;
+  if (capability_ && !using_capability_for_testing_)
+    DestroyCapability();
+}
+
+void Cellular::SetEnabled(bool enable) {
+  SLOG(1) << LoggingTag() << ": " << __func__;
+  SetEnabledChecked(enable, false,
+                    enable ? base::DoNothing()
+                           : base::BindOnce(&Cellular::HandleDisableResult,
+                                            weak_ptr_factory_.GetWeakPtr()));
+}
+
 void Cellular::OnEnabled() {
-  SLOG(this, 1) << __func__;
+  SLOG(1) << LoggingTag() << ": " << __func__;
   manager()->AddTerminationAction(
-      link_name(),
-      base::Bind(&Cellular::StartTermination, weak_ptr_factory_.GetWeakPtr()));
+      link_name(), base::BindOnce(&Cellular::StartTermination,
+                                  weak_ptr_factory_.GetWeakPtr()));
   if (!enabled() && !enabled_pending()) {
-    LOG(WARNING) << "OnEnabled called while not enabling, setting enabled.";
+    LOG(WARNING) << LoggingTag() << ": OnEnabled called while not enabling, "
+                 << "setting enabled.";
     SetEnabled(true);
   }
 }
 
 void Cellular::OnConnecting() {
-  if (service_)
+  if (service_) {
     service_->SetState(Service::kStateAssociating);
+  }
 }
 
 void Cellular::Disconnect(Error* error, const char* reason) {
-  SLOG(this, 1) << __func__ << ": " << reason;
+  SLOG(1) << LoggingTag() << ": " << __func__ << ": " << reason;
   if (!StateIsConnected()) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kNotConnected,
                           "Not connected; request ignored.");
@@ -1273,17 +1578,21 @@ void Cellular::Disconnect(Error* error, const char* reason) {
                           "Modem not available.");
     return;
   }
+
+  if (IsTetheringOperationDunAsDefaultOngoing()) {
+    AbortTetheringOperation(Error(Error::kOperationFailed, reason),
+                            base::DoNothing());
+  }
   StopPPP();
   explicit_disconnect_ = true;
-  ResultCallback cb =
-      base::Bind(&Cellular::OnDisconnectReply, weak_ptr_factory_.GetWeakPtr());
-  capability_->Disconnect(cb);
+  capability_->DisconnectAll(base::BindOnce(&Cellular::OnDisconnectReply,
+                                            weak_ptr_factory_.GetWeakPtr()));
 }
 
 void Cellular::OnDisconnectReply(const Error& error) {
   explicit_disconnect_ = false;
   if (!error.IsSuccess()) {
-    LOG(WARNING) << __func__ << ": Failed: " << error;
+    LOG(WARNING) << LoggingTag() << ": " << __func__ << ": Failed: " << error;
     OnDisconnectFailed();
     return;
   }
@@ -1291,19 +1600,31 @@ void Cellular::OnDisconnectReply(const Error& error) {
 }
 
 void Cellular::OnDisconnected() {
-  SLOG(this, 1) << __func__;
+  SLOG(1) << LoggingTag() << ": " << __func__;
+
+  // The logic to reconnect the tethering APN as default involves the
+  // disconnection of the currently connected default APN. We explicitly ignore
+  // any additional action on this case, we don't want to do a full cleanup and
+  // report the full device as disconnected.
+  if (IsTetheringOperationDunAsDefaultOngoing()) {
+    LOG(INFO) << LoggingTag()
+              << ": Disconnected during a DUN as DEFAULT tethering operation.";
+    return;
+  }
+
   if (!DisconnectCleanup()) {
-    LOG(WARNING) << "Disconnect occurred while in state "
+    LOG(WARNING) << LoggingTag() << ": Disconnect occurred while in state "
                  << GetStateString(state_);
   }
 }
 
 void Cellular::OnDisconnectFailed() {
-  SLOG(this, 1) << __func__;
+  SLOG(1) << LoggingTag() << ": " << __func__;
   // If the modem is in the disconnecting state, then the disconnect should
   // eventually succeed, so do nothing.
   if (modem_state_ == kModemStateDisconnecting) {
-    LOG(INFO) << "Ignoring failed disconnect while modem is disconnecting.";
+    LOG(INFO) << LoggingTag()
+              << ": Ignoring failed disconnect while modem is disconnecting.";
     return;
   }
 
@@ -1312,7 +1633,8 @@ void Cellular::OnDisconnectFailed() {
   // if we are in one of those.
   if (!DisconnectCleanup()) {
     // otherwise, no-op
-    LOG(WARNING) << "Ignoring failed disconnect while in state "
+    LOG(WARNING) << LoggingTag()
+                 << ": Ignoring failed disconnect while in state "
                  << GetStateString(state_);
   }
 
@@ -1323,90 +1645,899 @@ void Cellular::OnDisconnectFailed() {
   // down the modem and restart it here.
 }
 
+bool Cellular::IsTetheringOperationDunAsDefaultOngoing() {
+  return (tethering_operation_ &&
+          ((tethering_operation_->type ==
+            TetheringOperationType::kConnectDunAsDefaultPdn) ||
+           (tethering_operation_->type ==
+            TetheringOperationType::kDisconnectDunAsDefaultPdn)));
+}
+
+bool Cellular::IsTetheringOperationDunMultiplexedOngoing() {
+  return (tethering_operation_ &&
+          ((tethering_operation_->type ==
+            TetheringOperationType::kConnectDunMultiplexed) ||
+           (tethering_operation_->type ==
+            TetheringOperationType::kDisconnectDunMultiplexed)));
+}
+
+void Cellular::CompleteTetheringOperation(const Error& error) {
+  bool dun_as_default_ongoing = IsTetheringOperationDunAsDefaultOngoing();
+  bool multiplexed_dun_ongoing = IsTetheringOperationDunMultiplexedOngoing();
+  CHECK(dun_as_default_ongoing || multiplexed_dun_ongoing);
+
+  // Reset operation info right away, as there are certain generic actions
+  // updated to ignore events if a tethering operation is ongoing.
+  ResultCallback callback = std::move(tethering_operation_->callback);
+  bool apn_connected = tethering_operation_->apn_connected;
+  tethering_operation_ = std::nullopt;
+
+  // Report error.
+  if (!error.IsSuccess()) {
+    LOG(WARNING) << LoggingTag() << ": Tethering operation failed: " << error;
+    std::move(callback).Run(error);
+    return;
+  }
+
+  // On a successful completion of any DUN as DEFAULT operation (either
+  // connect or disconnect, the APN must have been connected.
+  if (dun_as_default_ongoing) {
+    CHECK(apn_connected);
+  }
+
+  // If the tethering specific multiplexed Network was just connected, start
+  // portal detection. Not needed when connecting DUN as DEFAULT because
+  // Device::OnConnectionUpdated() already does it.
+  // TODO(b/291845893): Remove this special case once the portal detection state
+  // machine is entirely controlled from Network and once Device is not involved
+  // anymore.
+  if (multiplexed_dun_ongoing && multiplexed_tethering_pdn_) {
+    // On a successful completion of a multiplexed DUN connection, the APN must
+    // have been connected.
+    CHECK(apn_connected);
+    multiplexed_tethering_pdn_->network()->StartPortalDetection(
+        Network::ValidationReason::kNetworkConnectionUpdate);
+  }
+
+  // Report success.
+  LOG(INFO) << LoggingTag() << ": Tethering operation successful";
+  std::move(callback).Run(Error(Error::kSuccess));
+}
+
+bool Cellular::InitializeTetheringOperation(TetheringOperationType type,
+                                            ResultCallback callback) {
+  // If an attempt is already ongoing, for whatever reason, fail right away.
+  if (tethering_operation_) {
+    dispatcher()->PostTask(
+        FROM_HERE,
+        base::BindOnce(std::move(callback),
+                       Error(Error::kOperationFailed, "Already ongoing.")));
+    return false;
+  }
+
+  // A capability must always exist at this point both for connections and
+  // disconnections.
+  if (!capability_) {
+    dispatcher()->PostTask(
+        FROM_HERE, base::BindOnce(std::move(callback),
+                                  Error(Error::kWrongState, "No capability.")));
+    return false;
+  }
+
+  // If setting up a multiplexed tethering connection and the tethering
+  // specific Network already exists, fail right away.
+  if (type == TetheringOperationType::kConnectDunMultiplexed &&
+      multiplexed_tethering_pdn_) {
+    dispatcher()->PostTask(
+        FROM_HERE,
+        base::BindOnce(std::move(callback),
+                       Error(Error::kWrongState, "Already available.")));
+    return false;
+  }
+
+  // Tethering connection attempt can go on.
+  LOG(INFO) << LoggingTag() << ": Tethering operation started";
+  tethering_operation_.emplace(type, std::move(callback));
+  tethering_operation_->apn_connected = false;
+  return true;
+}
+
+void Cellular::ConnectMultiplexedTetheringPdn(
+    AcquireTetheringNetworkResultCallback callback) {
+  CHECK(!callback.is_null());
+
+  LOG(INFO) << LoggingTag() << ": Tethering operation requested: "
+            << "connect multiplexed DUN network.";
+
+  if (!InitializeTetheringOperation(
+          TetheringOperationType::kConnectDunMultiplexed,
+          base::BindOnce(&Cellular::OnConnectMultiplexedTetheringPdnReply,
+                         weak_ptr_factory_.GetWeakPtr(),
+                         std::move(callback)))) {
+    return;
+  }
+
+  // Will disconnect DUN as multiplexed PDN.
+  tethering_operation_->apn_type = ApnList::ApnType::kDun;
+  tethering_operation_->apn_try_list = BuildTetheringApnTryList();
+  CHECK(!tethering_operation_->apn_try_list.empty());
+
+  capability_->Connect(
+      tethering_operation_->apn_type, tethering_operation_->apn_try_list,
+      base::BindOnce(&Cellular::OnCapabilityConnectMultiplexedTetheringReply,
+                     weak_ptr_factory_.GetWeakPtr()));
+}
+
+void Cellular::OnCapabilityConnectMultiplexedTetheringReply(
+    const Error& error) {
+  bool bearer_connected = error.IsSuccess();
+
+  // If attempt was aborted, bail out.
+  if (!tethering_operation_) {
+    if (bearer_connected) {
+      // TODO(b/301919183): We should be able to cancel the attempt even before
+      // MM has created a bearer object, otherwise we'll end up in this state.
+      LOG(WARNING) << LoggingTag() << ": Multiplexed DUN bearer connected but"
+                   << " no attempt ongoing";
+      RunDisconnectMultiplexedTetheringPdn();
+    }
+    return;
+  }
+
+  // Bearer connection failed.
+  if (!bearer_connected) {
+    LOG(WARNING) << LoggingTag() << ": Tethering operation failed.";
+    AbortTetheringOperation(error, base::DoNothing());
+    return;
+  }
+
+  // If the device is disconnected or the service was lost, cleanup the
+  // possibly connected bearer and complete.
+  if (state_ != State::kLinked || !service() || !default_pdn_) {
+    AbortTetheringOperation(
+        Error(Error::kWrongState, "Default PDN must be connected"),
+        base::DoNothing());
+    return;
+  }
+
+  // Launch multiplexed tethering Network creation
+  LOG(INFO) << LoggingTag() << ": Tethering connection attempt successful.";
+  tethering_operation_->apn_connected = true;
+  EstablishMultiplexedTetheringLink();
+  if (!multiplexed_tethering_pdn_) {
+    AbortTetheringOperation(
+        Error(Error::kOperationFailed, "Multiplexed DUN bearer setup failed"),
+        base::DoNothing());
+    return;
+  }
+
+  // The tethering operation will be completed once the tethering network is
+  // connected (or an error returned in the process).
+  CHECK(!multiplexed_tethering_pdn_->network()->IsConnected());
+  LOG(INFO) << LoggingTag()
+            << ": Multiplexed tethering connection not fully setup yet.";
+}
+
+void Cellular::DisconnectMultiplexedTetheringPdn(ResultCallback callback) {
+  CHECK(!callback.is_null());
+
+  LOG(INFO) << LoggingTag() << ": Tethering operation requested: "
+            << "disconnect multiplexed DUN network.";
+  if (!InitializeTetheringOperation(
+          TetheringOperationType::kDisconnectDunMultiplexed,
+          std::move(callback))) {
+    return;
+  }
+
+  RunDisconnectMultiplexedTetheringPdn();
+}
+
+// This method may be called either during a normal user initiated tethering
+// network release procedure, or also as fallback when the tethering network
+// acquisition fails. In both cases, CompleteTetheringOperation() would be
+// called after the capability Disconnect().
+void Cellular::RunDisconnectMultiplexedTetheringPdn() {
+  multiplexed_tethering_pdn_.reset();
+
+  LOG(INFO) << LoggingTag() << ": Disconnecting multiplexed tethering network.";
+  capability_->Disconnect(
+      ApnList::ApnType::kDun,
+      base::BindOnce(&Cellular::OnCapabilityDisconnectMultiplexedTetheringReply,
+                     weak_ptr_factory_.GetWeakPtr()));
+}
+
+void Cellular::OnCapabilityDisconnectMultiplexedTetheringReply(
+    const Error& error) {
+  if (error.IsFailure()) {
+    LOG(WARNING) << LoggingTag()
+                 << ": Multiplexed tethering disconnection failed: " << error;
+  }
+
+  if (IsTetheringOperationDunMultiplexedOngoing()) {
+    // Disconnections are not aborted, we can simply complete.
+    CompleteTetheringOperation(error);
+  }
+}
+
+void Cellular::ConnectTetheringAsDefaultPdn(
+    AcquireTetheringNetworkResultCallback callback) {
+  CHECK(!callback.is_null());
+
+  LOG(INFO) << LoggingTag() << ": Tethering operation requested: "
+            << "connect DUN as DEFAULT network.";
+  if (!InitializeTetheringOperation(
+          TetheringOperationType::kConnectDunAsDefaultPdn,
+          base::BindOnce(&Cellular::OnConnectTetheringAsDefaultPdnReply,
+                         weak_ptr_factory_.GetWeakPtr(),
+                         std::move(callback)))) {
+    return;
+  }
+
+  // Will disconnect DEFAULT and connect DUN as default.
+  tethering_operation_->apn_type = ApnList::ApnType::kDun;
+  tethering_operation_->apn_try_list = BuildTetheringApnTryList();
+  CHECK(!tethering_operation_->apn_try_list.empty());
+  RunTetheringOperationDunAsDefault();
+}
+
+void Cellular::DisconnectTetheringAsDefaultPdn(ResultCallback callback) {
+  CHECK(!callback.is_null());
+
+  LOG(INFO) << LoggingTag() << ": Tethering operation requested: "
+            << "disconnect DUN as DEFAULT network.";
+  if (!InitializeTetheringOperation(
+          TetheringOperationType::kDisconnectDunAsDefaultPdn,
+          std::move(callback))) {
+    return;
+  }
+
+  // Will disconnect DUN as default and connect back DEFAULT.
+  tethering_operation_->apn_type = ApnList::ApnType::kDefault;
+  tethering_operation_->apn_try_list = BuildDefaultApnTryList();
+  CHECK(!tethering_operation_->apn_try_list.empty());
+  RunTetheringOperationDunAsDefault();
+}
+
+// Both operations to connect or disconnect DUN as DEFAULT involve the same
+// steps: disconnect the current default and reconnect with a new APN try list.
+// This method runs the logic for both operations in the same way. The only
+// notable difference is that there is no ResultCallback in the disconnect
+// operation.
+void Cellular::RunTetheringOperationDunAsDefault() {
+  // Avoid going through the Disconnect() route because that involves a lot of
+  // cleanups that we shouldn't be doing while reconnecting with the tethering
+  // specific APNs. Instead, run our own disconnection logic, starting with
+  // the disconnection of all bearers (there should be one only either way).
+  explicit_disconnect_ = true;
+  capability_->DisconnectAll(
+      base::BindOnce(&Cellular::OnCapabilityDisconnectBeforeReconnectReply,
+                     weak_ptr_factory_.GetWeakPtr()));
+}
+
+void Cellular::OnCapabilityDisconnectBeforeReconnectReply(const Error& error) {
+  explicit_disconnect_ = false;
+
+  // If tethering operation was aborted already, do nothing.
+  if (!tethering_operation_) {
+    return;
+  }
+
+  // A failure in the disconnection is assumed fatal.
+  if (!error.IsSuccess()) {
+    AbortTetheringOperation(error, base::DoNothing());
+    return;
+  }
+
+  // If service lost while attempt ongoing, abort right away.
+  if (!service()) {
+    AbortTetheringOperation(
+        Error(Error::kWrongState, "Tethering operation failed: no service."),
+        base::DoNothing());
+    return;
+  }
+
+  // Not a full cleanup, but we do transition the Service state out of a
+  // connected state, so that clients can rearrange their connections.
+  SetPrimaryMultiplexedInterface("");
+  default_pdn_apn_type_ = std::nullopt;
+  default_pdn_.reset();
+
+  SetServiceState(Service::kStateAssociating);
+
+  // We trigger a capability connect using a specific APN try list (which may
+  // e.g. be the DUN-specific try list). The generic OnConnectReply() is used so
+  // that it is treated as a standard connection attempt. From now on, the
+  // tethering operation will only be completed once the newly connected Network
+  // has been started.
+  capability_->Connect(
+      tethering_operation_->apn_type, tethering_operation_->apn_try_list,
+      base::BindOnce(&Cellular::OnConnectReply, weak_ptr_factory_.GetWeakPtr(),
+                     tethering_operation_->apn_type, service()->iccid(),
+                     false /* is_in_user_connect */));
+
+  metrics()->NotifyDeviceConnectStarted(interface_index());
+}
+
+void Cellular::ReuseDefaultPdnForTethering(
+    AcquireTetheringNetworkResultCallback callback) {
+  CHECK(!callback.is_null());
+  dispatcher()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(callback), GetPrimaryNetwork(),
+                                Error(Error::kSuccess)));
+}
+
+Cellular::TetheringOperationType Cellular::GetTetheringOperationType(
+    Error* out_error) {
+  Error error(Error::kSuccess);
+  if (!service_) {
+    error = Error(Error::kWrongState, "No service.");
+  } else if (!capability_) {
+    error = Error(Error::kWrongState, "No modem.");
+  } else if (inhibited_) {
+    error = Error(Error::kWrongState, "Inhibited.");
+  } else if (state_ != State::kLinked) {
+    error = Error(Error::kWrongState, "Default connection not available.");
+  } else if (!mobile_operator_info_->tethering_allowed()) {
+    error = Error(Error::kWrongState, "Not allowed by operator.");
+  }
+
+  if (error.IsFailure()) {
+    if (out_error)
+      *out_error = error;
+    return TetheringOperationType::kFailed;
+  }
+
+  std::deque<Stringmap> tethering_apn_try_list = BuildTetheringApnTryList();
+
+  // No other APN is specified for tethering, we can reuse the DEFAULT for
+  // tethering as fallback.
+  if (tethering_apn_try_list.empty()) {
+    // This is a database error, an operator that flags "use_dun_apn_as_default"
+    // must also provide a separate APN of type DUN.
+    if (mobile_operator_info_->use_dun_apn_as_default()) {
+      if (out_error) {
+        *out_error = Error(
+            Error::kWrongState,
+            "Operator requires DUN APN as DEFAULT but no DUN APN configured");
+      }
+      return TetheringOperationType::kFailed;
+    }
+
+    LOG(INFO)
+        << LoggingTag()
+        << ": Tethering network selection: reusing default APN for tethering "
+           "as there is no DUN specific APN";
+    return TetheringOperationType::kReuseDefaultPdn;
+  }
+
+  // The currently connected APN is also flagged as DUN. If this APN is also in
+  // the list of tethering APNs, we can reuse it. This additional check is done
+  // to ensure that a user-defined APN doesn't override the DUN APN explicitly
+  // required by the operator (i.e. is_required_by_carrier_spec).
+  const Stringmap* last_good_apn_info = service_->GetLastGoodApn();
+  if (last_good_apn_info && ApnList::IsTetheringApn(*last_good_apn_info) &&
+      std::find(tethering_apn_try_list.begin(), tethering_apn_try_list.end(),
+                *last_good_apn_info) != tethering_apn_try_list.end()) {
+    LOG(INFO)
+        << LoggingTag()
+        << ": Tethering network selection: reusing default APN for tethering.";
+    return TetheringOperationType::kReuseDefaultPdn;
+  }
+
+  // A different APN is specified for tethering, and the operator requires the
+  // DUN APN to be used also as DEFAULT when tethering is enabled, so we must
+  // disconnect DEFAULT and reconnect DUN as DEFAULT.
+  if (mobile_operator_info_->use_dun_apn_as_default()) {
+    LOG(INFO) << LoggingTag()
+              << ": Tethering network selection: "
+                 "connecting DUN APN as default as required by operator.";
+    return TetheringOperationType::kConnectDunAsDefaultPdn;
+  }
+
+  // A different APN is specified for tethering, and the modem doesn't support
+  // multiplexing, so we must disconnect DEFAULT and reconnect DUN as DEFAULT.
+  if (!GetMultiplexSupport()) {
+    LOG(INFO)
+        << LoggingTag()
+        << ": Tethering network selection: "
+           "connecting DUN APN as default as multiplexing is unsupported.";
+    return TetheringOperationType::kConnectDunAsDefaultPdn;
+  }
+
+  // Connect DUN APN as additional multiplexed network
+  LOG(INFO) << LoggingTag()
+            << ": Tethering network selection: "
+               "connecting multiplexed DUN APN.";
+  return TetheringOperationType::kConnectDunMultiplexed;
+}
+
+void Cellular::OnAcquireTetheringNetworkReady(
+    AcquireTetheringNetworkResultCallback callback,
+    Network* network,
+    const Error& error) {
+  SLOG(3) << __func__;
+  if (!error.IsSuccess()) {
+    tethering_event_callback_.Reset();
+  }
+  std::move(callback).Run(network, error);
+}
+
+void Cellular::AcquireTetheringNetwork(
+    TetheringManager::UpdateTimeoutCallback update_timeout_callback,
+    AcquireTetheringNetworkResultCallback callback,
+    TetheringManager::CellularUpstreamEventCallback tethering_event_callback) {
+  SLOG(1) << LoggingTag() << ": " << __func__;
+  CHECK(!callback.is_null());
+  CHECK(!tethering_event_callback.is_null());
+  tethering_event_callback_ = std::move(tethering_event_callback);
+  auto internal_callback =
+      base::BindOnce(&Cellular::OnAcquireTetheringNetworkReady,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback));
+  Error error;
+  switch (GetTetheringOperationType(&error)) {
+    case TetheringOperationType::kConnectDunMultiplexed:
+      ConnectMultiplexedTetheringPdn(std::move(internal_callback));
+      return;
+    case TetheringOperationType::kConnectDunAsDefaultPdn:
+      // Request a longer start timeout as we need to go through a full
+      // PDN connection setup sequence.
+      update_timeout_callback.Run(kLongTetheringStartTimeout);
+      ConnectTetheringAsDefaultPdn(std::move(internal_callback));
+      return;
+    case TetheringOperationType::kReuseDefaultPdn:
+      ReuseDefaultPdnForTethering(std::move(internal_callback));
+      return;
+    case TetheringOperationType::kFailed:
+      dispatcher()->PostTask(
+          FROM_HERE,
+          base::BindOnce(std::move(internal_callback), nullptr, error));
+      return;
+    case TetheringOperationType::kDisconnectDunAsDefaultPdn:
+    case TetheringOperationType::kDisconnectDunMultiplexed:
+      // Not a valid return of GetTetheringOperationType().
+      NOTREACHED();
+  }
+}
+
+void Cellular::OnConnectTetheringAsDefaultPdnReply(
+    AcquireTetheringNetworkResultCallback callback, const Error& error) {
+  if (error.IsFailure()) {
+    LOG(WARNING) << LoggingTag()
+                 << ": Tethering network selection: failed to connect DUN APN "
+                    "as default: "
+                 << error;
+    std::move(callback).Run(nullptr, error);
+    return;
+  }
+
+  LOG(INFO) << LoggingTag()
+            << ": Tethering network selection: connected DUN APN as default.";
+  CHECK(default_pdn_);
+  std::move(callback).Run(default_pdn_->network(), Error(Error::kSuccess));
+}
+
+void Cellular::OnConnectMultiplexedTetheringPdnReply(
+    AcquireTetheringNetworkResultCallback callback, const Error& error) {
+  if (error.IsFailure()) {
+    LOG(WARNING) << LoggingTag()
+                 << ": Tethering network selection: failed to connect "
+                    "multiplexed DUN APN: "
+                 << error;
+    std::move(callback).Run(nullptr, error);
+    return;
+  }
+
+  LOG(INFO) << LoggingTag()
+            << ": Tethering network selection: connected multiplexed DUN APN.";
+  CHECK(multiplexed_tethering_pdn_);
+  std::move(callback).Run(multiplexed_tethering_pdn_->network(),
+                          Error(Error::kSuccess));
+}
+
+void Cellular::AbortTetheringOperation(const Error& error,
+                                       ResultCallback callback) {
+  if (!tethering_operation_) {
+    LOG(ERROR) << LoggingTag() << ": no ongoing tethering operation to abort.";
+    dispatcher()->PostTask(
+        FROM_HERE, base::BindOnce(std::move(callback), Error(Error::kSuccess)));
+    return;
+  }
+
+  LOG(INFO) << LoggingTag() << ": Tethering operation aborted: " << error;
+
+  // The abort logic is exclusively used during a connection attempt, because it
+  // allows us to go back to the default state without tethering enabled. There
+  // is no point in trying to abort a tethering disconnection attempt.
+  if (tethering_operation_->type ==
+          TetheringOperationType::kDisconnectDunMultiplexed ||
+      tethering_operation_->type ==
+          TetheringOperationType::kDisconnectDunAsDefaultPdn) {
+    LOG(WARNING) << LoggingTag() << ": Ignoring tethering abort request while"
+                 << " disconnecting operation is ongoing.";
+    dispatcher()->PostTask(
+        FROM_HERE, base::BindOnce(std::move(callback), Error(Error::kSuccess)));
+    return;
+  }
+
+  // Keep track of which operation was being done.
+  bool dun_as_default_ongoing = IsTetheringOperationDunAsDefaultOngoing();
+  bool multiplexed_dun_ongoing = IsTetheringOperationDunMultiplexedOngoing();
+
+  // Abort the original connection attempt.
+  LOG(INFO) << LoggingTag()
+            << ": Completing tethering connect during abort sequence.";
+  CompleteTetheringOperation(error);
+
+  // Launch a new disconnection attempt. The disconnection logic needs to
+  // be able to recover the state with tethering disabled from any point in the
+  // logic.
+  LOG(INFO) << LoggingTag()
+            << ": Launching tethering disconnect during abort sequence.";
+  if (dun_as_default_ongoing) {
+    DisconnectTetheringAsDefaultPdn(std::move(callback));
+  } else if (multiplexed_dun_ongoing) {
+    DisconnectMultiplexedTetheringPdn(std::move(callback));
+  } else {
+    NOTREACHED_NORETURN();
+  }
+}
+
+void Cellular::ReleaseTetheringNetwork(Network* network,
+                                       ResultCallback callback) {
+  SLOG(1) << LoggingTag() << ": " << __func__;
+  CHECK(!callback.is_null());
+  tethering_event_callback_.Reset();
+  // No explicit network given, which means there is an ongoing tethering
+  // network acquisition operation that needs to be aborted.
+  if (!network) {
+    AbortTetheringOperation(Error(Error::kOperationAborted, "Aborted."),
+                            std::move(callback));
+    return;
+  }
+
+  // If we connected the tethering APN as default, we need to disconnect it and
+  // reconnect with the default APN.
+  if (default_pdn_apn_type_ &&
+      *default_pdn_apn_type_ == ApnList::ApnType::kDun) {
+    // Validate that the network requested to disconnect is the one we expect.
+    if (!default_pdn_ || default_pdn_->network() != network) {
+      dispatcher()->PostTask(
+          FROM_HERE,
+          base::BindOnce(std::move(callback),
+                         Error(Error::kWrongState,
+                               "Unexpected default network to release")));
+      return;
+    }
+    DisconnectTetheringAsDefaultPdn(std::move(callback));
+    return;
+  }
+
+  // If we connected a multiplexed tethering APN, disconnect it here.
+  if (multiplexed_tethering_pdn_) {
+    // Validate that the network requested to disconnect is the one we expect.
+    if (multiplexed_tethering_pdn_->network() != network) {
+      dispatcher()->PostTask(
+          FROM_HERE,
+          base::BindOnce(std::move(callback),
+                         Error(Error::kWrongState,
+                               "Unexpected multiplexed network to release")));
+      return;
+    }
+    DisconnectMultiplexedTetheringPdn(std::move(callback));
+    return;
+  }
+
+  // We had reused the default PDN, so nothing to do.
+  dispatcher()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(callback), Error(Error::kSuccess)));
+}
+
 void Cellular::EstablishLink() {
-  SLOG(this, 2) << __func__;
+  if (skip_establish_link_for_testing_) {
+    return;
+  }
+
+  SLOG(2) << LoggingTag() << ": " << __func__;
   CHECK_EQ(State::kConnected, state_);
   CHECK(capability_);
 
-  CellularBearer* bearer = capability_->GetActiveBearer();
-  if (bearer && bearer->ipv4_config_method() == IPConfig::kMethodPPP) {
-    LOG(INFO) << "Start PPP connection on " << bearer->data_interface();
+  if (!default_pdn_apn_type_) {
+    LOG(WARNING) << LoggingTag() << ": Disconnecting due to missing APN type.";
+    Disconnect(nullptr, "missing APN type");
+    return;
+  }
+
+  CellularBearer* bearer = capability_->GetActiveBearer(*default_pdn_apn_type_);
+  if (!bearer) {
+    LOG(WARNING) << LoggingTag()
+                 << ": Disconnecting due to missing active bearer.";
+    Disconnect(nullptr, "missing active bearer");
+    return;
+  }
+
+  // The APN type is ensured to be one by GetActiveBearer()
+  CHECK_EQ(bearer->apn_types().size(), 1UL);
+  CHECK_EQ(bearer->apn_types()[0], *default_pdn_apn_type_);
+
+  if (bearer->ipv4_config_method() == CellularBearer::IPConfigMethod::kPPP) {
+    LOG(INFO) << LoggingTag() << ": Start PPP connection on "
+              << bearer->data_interface();
     StartPPP(bearer->data_interface());
     return;
   }
 
-  unsigned int flags = 0;
-  if (manager()->device_info()->GetFlags(interface_index(), &flags) &&
-      (flags & IFF_UP) != 0) {
-    LinkEvent(flags, IFF_UP);
-    return;
-  }
-  // TODO(petkov): Provide a timeout for a failed link-up request.
-  rtnl_handler()->SetInterfaceFlags(interface_index(), IFF_UP, IFF_UP);
+  // ModemManager specifies which is the network interface that has been
+  // connected at this point, which may be either the same interface that was
+  // used to reference this Cellular device, or a completely different one.
+  LOG(INFO) << LoggingTag() << ": Establish link on "
+            << bearer->data_interface();
+
+  // Create default network
+  default_pdn_ = std::make_unique<NetworkInfo>(
+      this, bearer->dbus_path(),
+      rtnl_handler()->GetInterfaceIndex(bearer->data_interface()),
+      bearer->data_interface());
+
+  // Start the link listener, which will ensure the initial link state for the
+  // data interface is notified.
+  StartLinkListener();
 
   // Set state to associating.
   OnConnecting();
 }
 
-void Cellular::HandleLinkEvent(unsigned int flags, unsigned int change) {
-  if ((flags & IFF_UP) != 0 && state_ == State::kConnected) {
-    LOG(INFO) << link_name() << " is up.";
-    SetState(State::kLinked);
-
-    // b/182524993, b/185750211 - Currently we only support 1 config method
-    // (either IPv4 or IPv6) per bearer. On IPv4 only and IPv6 only network,
-    // we will pick the corresponding method from the bearer. For dual stack
-    // networks, IPv4 config will be used here and Ipv6 config will be
-    // populated using the kernel path.
-    CHECK(capability_);
-    CellularBearer* bearer = capability_->GetActiveBearer();
-    if (bearer && bearer->ipv4_config_method() == IPConfig::kMethodStatic) {
-      SLOG(this, 2) << "Assign static IP configuration from bearer.";
-      SelectService(service_);
-      SetServiceState(Service::kStateConfiguring);
-      // Override the MTU with a given limit for a specific serving operator
-      // if the network doesn't report something lower.
-      IPConfig::Properties properties = *bearer->ipv4_config_properties();
-      if (serving_operator_info_ &&
-          serving_operator_info_->mtu() != IPConfig::kUndefinedMTU &&
-          (properties.mtu == IPConfig::kUndefinedMTU ||
-           serving_operator_info_->mtu() < properties.mtu)) {
-        properties.mtu = serving_operator_info_->mtu();
-      }
-      AssignIPConfig(properties);
-      return;
-    }
-
-    if (bearer && bearer->ipv6_config_method() == IPConfig::kMethodStatic) {
-      LOG(INFO) << "Assign static IPv6 configuration from bearer.";
-      SelectService(service_);
-      SetServiceState(Service::kStateConfiguring);
-      IPConfig::Properties properties = *bearer->ipv6_config_properties();
-      // TODO(b:176060170): Combine values from IPv6 as well..
-      AssignIPv6Config(properties);
-      return;
-    }
-
-    if (AcquireIPConfig()) {
-      SLOG(this, 2) << "Start DHCP to acquire IP configuration.";
-      SelectService(service_);
-      SetServiceState(Service::kStateConfiguring);
-      return;
-    }
-
-    LOG(ERROR) << "Unable to acquire IP configuration over DHCP.";
+void Cellular::EstablishMultiplexedTetheringLink() {
+  if (skip_establish_link_for_testing_) {
     return;
   }
 
-  if ((flags & IFF_UP) == 0 && state_ == State::kLinked) {
-    LOG(INFO) << link_name() << " is down.";
+  CHECK_EQ(State::kLinked, state_);
+  CHECK(capability_);
+
+  // The multiplexed DUN bearer selection only works if the current default PDN
+  // APN type is not DUN. This should be ensured by the tethering enablement
+  // logic, so we can assert the assumption.
+  CHECK(default_pdn_apn_type_);
+  CHECK_NE(*default_pdn_apn_type_, ApnList::ApnType::kDun);
+
+  // Do nothing if there is no tethering bearer to setup.
+  CellularBearer* bearer = capability_->GetActiveBearer(ApnList::ApnType::kDun);
+  if (!bearer) {
+    return;
+  }
+
+  SLOG(2) << LoggingTag() << ": " << __func__;
+
+  // The APN type is ensured to be one by GetActiveBearer()
+  CHECK_EQ(bearer->apn_types().size(), 1UL);
+  CHECK_EQ(bearer->apn_types()[0], ApnList::ApnType::kDun);
+
+  if (bearer->ipv4_config_method() == CellularBearer::IPConfigMethod::kPPP) {
+    LOG(WARNING) << LoggingTag() << ": No PPP support for tethering link";
+    return;
+  }
+
+  LOG(INFO) << LoggingTag() << ": Establish tethering link on "
+            << bearer->data_interface();
+
+  // Create multiplexed tethering network
+  multiplexed_tethering_pdn_ = std::make_unique<NetworkInfo>(
+      this, bearer->dbus_path(),
+      rtnl_handler()->GetInterfaceIndex(bearer->data_interface()),
+      bearer->data_interface());
+
+  // Start the link listener, which will ensure the initial link state for the
+  // data interface is notified.
+  StartLinkListener();
+
+  // Unlike with the default PDN, we don't update the device state in any way at
+  // this point. The multiplexed DUN acquisition operation will continue with
+  // the link up event.
+}
+
+void Cellular::DefaultLinkUp() {
+  if (default_pdn_->link_state() == LinkState::kUp) {
+    SLOG(3) << LoggingTag() << ": Default link is up.";
+    return;
+  }
+
+  default_pdn_->SetLinkState(LinkState::kUp);
+  LOG(INFO) << LoggingTag() << ": Default link is up: configuring network";
+
+  CHECK(capability_);
+
+  if (!default_pdn_apn_type_) {
+    LOG(INFO) << LoggingTag() << ": Default link APN type unknown";
+    Disconnect(nullptr, "missing default link APN type.");
+    return;
+  }
+
+  if (!default_pdn_->Configure(
+          capability_->GetActiveBearer(*default_pdn_apn_type_))) {
+    LOG(INFO) << LoggingTag() << ": Default link network configuration failed";
+    Disconnect(nullptr, "link configuration failed.");
+    return;
+  }
+
+  SetPrimaryMultiplexedInterface(default_pdn_->network()->interface_name());
+  SetState(State::kLinked);
+
+  // When a tethering operation to connect or disconnect DUN as DEFAULT is
+  // ongoing we just update the attached network.
+  if (IsTetheringOperationDunAsDefaultOngoing()) {
+    ResetServiceAttachedNetwork();
+  } else {
+    SelectService(service_);
+  }
+  SetServiceState(Service::kStateConfiguring);
+
+  default_pdn_->Start();
+}
+
+void Cellular::DefaultLinkDown() {
+  if (explicit_disconnect_) {
+    SLOG(3) << LoggingTag() << ": Default link is down during disconnection";
+    return;
+  }
+
+  LinkState old_state = default_pdn_->link_state();
+  default_pdn_->SetLinkState(LinkState::kDown);
+
+  // LinkState::kUnknown is the initial state before the first dump
+  if (old_state == LinkState::kUnknown) {
+    LOG(INFO) << LoggingTag() << ": Default link is down, bringing up.";
+    rtnl_handler()->SetInterfaceFlags(
+        default_pdn_->network()->interface_index(), IFF_UP, IFF_UP);
+    return;
+  }
+
+  if (old_state == LinkState::kUp) {
+    LOG(INFO) << LoggingTag() << ": Default link is down, disconnecting.";
+    Disconnect(nullptr, "link is down.");
+    return;
+  }
+
+  SLOG(3) << LoggingTag() << ": Default link is down.";
+}
+
+void Cellular::DefaultLinkDeleted() {
+  LOG(INFO) << LoggingTag() << ": Default link is deleted.";
+  default_pdn_->SetLinkState(LinkState::kUnknown);
+
+  // If not multiplexing, this is an indication that the cellular device is gone
+  // from the system. If multiplexing, just a no-op.
+  if (default_pdn_->network()->interface_index() == interface_index()) {
     DestroyAllServices();
   }
 }
 
+void Cellular::MultiplexedTetheringLinkUp() {
+  if (multiplexed_tethering_pdn_->link_state() == LinkState::kUp) {
+    SLOG(3) << LoggingTag() << ": Multiplexed tethering link is up.";
+    return;
+  }
+
+  multiplexed_tethering_pdn_->SetLinkState(LinkState::kUp);
+  LOG(INFO) << LoggingTag()
+            << ": Multiplexed tethering link is up: configuring network";
+
+  CHECK(capability_);
+
+  // The multiplexed DUN bearer selection only works if the current default PDN
+  // APN type is not DUN. This should be ensured by the tethering enablement
+  // logic, so we can assert the assumption.
+  CHECK(default_pdn_apn_type_);
+  CHECK_NE(*default_pdn_apn_type_, ApnList::ApnType::kDun);
+
+  if (!multiplexed_tethering_pdn_->Configure(
+          capability_->GetActiveBearer(ApnList::ApnType::kDun))) {
+    LOG(INFO) << LoggingTag()
+              << ": Multiplexed tethering link network configuration failed";
+    if (IsTetheringOperationDunMultiplexedOngoing()) {
+      AbortTetheringOperation(
+          Error(Error::kOperationFailed, "Link configuration failed."),
+          base::DoNothing());
+      return;
+    }
+  }
+
+  LOG(INFO) << LoggingTag()
+            << ": Multiplexed tethering network configuration ready.";
+
+  multiplexed_tethering_pdn_->Start();
+  LOG(INFO) << LoggingTag() << ": Multiplexed tethering network started.";
+
+  // Network not connected yet, need to wait for OnConnectionUpdated().
+  CHECK(!multiplexed_tethering_pdn_->network()->IsConnected());
+}
+
+void Cellular::MultiplexedTetheringLinkDown() {
+  LinkState old_state = multiplexed_tethering_pdn_->link_state();
+  multiplexed_tethering_pdn_->SetLinkState(LinkState::kDown);
+
+  // LinkState::kUnknown is the initial state before the first dump
+  if (old_state == LinkState::kUnknown) {
+    LOG(INFO) << LoggingTag()
+              << ": Multiplexed tethering link is down, bringing up.";
+    rtnl_handler()->SetInterfaceFlags(
+        multiplexed_tethering_pdn_->network()->interface_index(), IFF_UP,
+        IFF_UP);
+    return;
+  }
+
+  if (old_state == LinkState::kUp) {
+    LOG(INFO) << LoggingTag()
+              << ": Multiplexed tethering link is down, disconnecting.";
+    RunDisconnectMultiplexedTetheringPdn();
+    return;
+  }
+
+  SLOG(3) << LoggingTag() << ": Multiplexed tethering link is down.";
+}
+
+void Cellular::MultiplexedTetheringLinkDeleted() {
+  LOG(INFO) << LoggingTag() << ": Multiplexed tethering link is deleted.";
+  multiplexed_tethering_pdn_->SetLinkState(LinkState::kUnknown);
+}
+
+void Cellular::LinkMsgHandler(const net_base::RTNLMessage& msg) {
+  DCHECK(msg.type() == net_base::RTNLMessage::kTypeLink);
+
+  int data_interface_index = msg.interface_index();
+
+  // Actions on the default APN Network
+  if (default_pdn_ &&
+      data_interface_index == default_pdn_->network()->interface_index()) {
+    if (msg.mode() == net_base::RTNLMessage::kModeDelete) {
+      DefaultLinkDeleted();
+    } else if (msg.mode() == net_base::RTNLMessage::kModeAdd) {
+      if (msg.link_status().flags & IFF_UP) {
+        DefaultLinkUp();
+      } else {
+        DefaultLinkDown();
+      }
+    } else {
+      LOG(WARNING) << LoggingTag()
+                   << ": Unexpected link message mode: " << msg.mode();
+    }
+  }
+
+  // Actions on the tethering APN Network
+  if (multiplexed_tethering_pdn_ &&
+      data_interface_index ==
+          multiplexed_tethering_pdn_->network()->interface_index()) {
+    if (msg.mode() == net_base::RTNLMessage::kModeDelete) {
+      MultiplexedTetheringLinkDeleted();
+    } else if (msg.mode() == net_base::RTNLMessage::kModeAdd) {
+      if (msg.link_status().flags & IFF_UP) {
+        MultiplexedTetheringLinkUp();
+      } else {
+        MultiplexedTetheringLinkDown();
+      }
+    } else {
+      LOG(WARNING) << LoggingTag()
+                   << ": Unexpected link message mode: " << msg.mode();
+    }
+  }
+}
+
+void Cellular::StopLinkListener() {
+  link_listener_.reset(nullptr);
+}
+
+void Cellular::StartLinkListener() {
+  SLOG(2) << LoggingTag() << ": Started RTNL listener";
+  if (!link_listener_) {
+    link_listener_ = std::make_unique<net_base::RTNLListener>(
+        net_base::RTNLHandler::kRequestLink,
+        base::BindRepeating(&Cellular::LinkMsgHandler, base::Unretained(this)));
+  }
+  rtnl_handler()->RequestDump(net_base::RTNLHandler::kRequestLink);
+}
+
 void Cellular::SetInitialProperties(const InterfaceToProperties& properties) {
   if (!capability_) {
-    LOG(WARNING) << "SetInitialProperties with no Capability";
+    LOG(WARNING) << LoggingTag() << ": SetInitialProperties with no Capability";
     initial_properties_ = properties;
     return;
   }
@@ -1416,12 +2547,14 @@ void Cellular::SetInitialProperties(const InterfaceToProperties& properties) {
 void Cellular::OnModemStateChanged(ModemState new_state) {
   ModemState old_modem_state = modem_state_;
   if (old_modem_state == new_state) {
-    SLOG(this, 3) << "The new state matches the old state. Nothing to do.";
+    SLOG(3) << LoggingTag()
+            << ": The new state matches the old state. Nothing to do.";
     return;
   }
 
-  SLOG(this, 1) << __func__ << " State: " << GetStateString(state_)
-                << " ModemState: " << GetModemStateString(new_state);
+  SLOG(1) << LoggingTag() << ": " << __func__
+          << ": State: " << GetStateString(state_)
+          << " ModemState: " << GetModemStateString(new_state);
   SetModemState(new_state);
   CHECK(capability_);
 
@@ -1431,7 +2564,8 @@ void Cellular::OnModemStateChanged(ModemState new_state) {
       // Avoid un-registering the modem while the Capability is starting the
       // Modem to prevent unexpected spurious state changes.
       // TODO(stevenjb): Audit logs and remove or tighten this logic.
-      LOG(WARNING) << "Modem state change while capability starting, "
+      LOG(WARNING) << LoggingTag()
+                   << ": Modem state change while capability starting, "
                    << " ModemState: " << GetModemStateString(new_state);
     } else {
       capability_->SetUnregistered(modem_state_ == kModemStateSearching);
@@ -1445,6 +2579,14 @@ void Cellular::OnModemStateChanged(ModemState new_state) {
     OnEnabled();
   }
 
+  // Ignore state change actions while we're reconnecting the tethering APN
+  // as default network.
+  if (IsTetheringOperationDunAsDefaultOngoing()) {
+    SLOG(1) << LoggingTag() << ": " << __func__
+            << ": ignoring actions upon new state: tethering attempt ongoing";
+    return;
+  }
+
   switch (modem_state_) {
     case kModemStateFailed:
     case kModemStateUnknown:
@@ -1456,7 +2598,7 @@ void Cellular::OnModemStateChanged(ModemState new_state) {
       // This may occur after a SIM swap or eSIM profile change. Ensure that
       // the Modem is started.
       if (state_ == State::kEnabled)
-        StartModem(/*error=*/nullptr, base::DoNothing());
+        StartModem(base::DoNothing());
       break;
     case kModemStateDisabling:
     case kModemStateEnabling:
@@ -1471,41 +2613,18 @@ void Cellular::OnModemStateChanged(ModemState new_state) {
       }
       break;
     case kModemStateDisconnecting:
-      break;
     case kModemStateConnecting:
-      OnConnecting();
       break;
     case kModemStateConnected:
-      if (old_modem_state == kModemStateConnecting)
-        OnConnected();
+      // Even if the modem state transitions from Connecting to Connected here
+      // we don't report the cellular object as Connected yet; we require the
+      // actual connection attempt operation to finish.
       break;
   }
 }
 
 bool Cellular::IsActivating() const {
   return capability_ && capability_->IsActivating();
-}
-
-bool Cellular::GetAllowRoaming(Error* /*error*/) {
-  return service_ ? service_->GetAllowRoaming() : allow_roaming_;
-}
-
-bool Cellular::SetAllowRoaming(const bool& value, Error* error) {
-  if (allow_roaming_ == value)
-    return false;
-
-  LOG(INFO) << __func__ << ": " << allow_roaming_ << "->" << value;
-
-  allow_roaming_ = value;
-  adaptor()->EmitBoolChanged(kCellularAllowRoamingProperty, value);
-  manager()->UpdateDevice(this);
-
-  if (service_ && service_->IsRoamingRuleViolated()) {
-    Error error;
-    Disconnect(&error, __func__);
-  }
-
-  return true;
 }
 
 bool Cellular::GetPolicyAllowRoaming(Error* /*error*/) {
@@ -1516,34 +2635,26 @@ bool Cellular::SetPolicyAllowRoaming(const bool& value, Error* error) {
   if (policy_allow_roaming_ == value)
     return false;
 
-  LOG(INFO) << __func__ << ": " << policy_allow_roaming_ << "->" << value;
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": " << policy_allow_roaming_
+            << "->" << value;
 
   policy_allow_roaming_ = value;
   adaptor()->EmitBoolChanged(kCellularPolicyAllowRoamingProperty, value);
   manager()->UpdateDevice(this);
 
   if (service_ && service_->IsRoamingRuleViolated()) {
-    Error error;
-    Disconnect(&error, __func__);
+    Disconnect(nullptr, "policy updated: roaming rule violated");
   }
 
   return true;
 }
 
 bool Cellular::SetUseAttachApn(const bool& value, Error* error) {
-  if (use_attach_apn_ == value)
+  LOG(INFO) << __func__;
+  // |use_attach_apn_ | is deprecated. its default value should be true.
+  if (!value)
     return false;
-  LOG(INFO) << __func__ << ": " << use_attach_apn_ << "->" << value;
 
-  use_attach_apn_ = value;
-
-  if (capability_) {
-    // We need to detach and re-attach to the LTE network in order to use the
-    // attach APN.
-    ReAttach();
-  }
-
-  adaptor()->EmitBoolChanged(kUseAttachAPNProperty, value);
   return true;
 }
 
@@ -1553,10 +2664,11 @@ bool Cellular::GetInhibited(Error* error) {
 
 bool Cellular::SetInhibited(const bool& inhibited, Error* error) {
   if (inhibited == inhibited_) {
-    LOG(WARNING) << __func__ << ": State already set, ignoring request.";
+    LOG(WARNING) << LoggingTag() << ": " << __func__
+                 << ": State already set, ignoring request.";
     return false;
   }
-  LOG(INFO) << __func__ << ": " << inhibited;
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": " << inhibited;
 
   // Clear any pending connect when inhibited changes.
   SetPendingConnect(std::string());
@@ -1575,7 +2687,8 @@ bool Cellular::SetInhibited(const bool& inhibited, Error* error) {
 KeyValueStore Cellular::GetSimLockStatus(Error* error) {
   if (!capability_) {
     // modemmanager might be inhibited or restarting.
-    LOG(ERROR) << __func__ << " called with null capability.";
+    LOG(WARNING) << LoggingTag() << ": " << __func__
+                 << ": Called with null capability.";
     return KeyValueStore();
   }
   return capability_->SimLockStatusToProperty(error);
@@ -1590,24 +2703,39 @@ void Cellular::SetSimPresent(bool sim_present) {
 }
 
 void Cellular::StartTermination() {
-  SLOG(this, 2) << __func__;
-  OnBeforeSuspend(base::Bind(&Cellular::OnTerminationCompleted,
-                             weak_ptr_factory_.GetWeakPtr()));
+  SLOG(2) << LoggingTag() << ": " << __func__;
+  OnBeforeSuspend(base::BindOnce(&Cellular::OnTerminationCompleted,
+                                 weak_ptr_factory_.GetWeakPtr()));
 }
 
 void Cellular::OnTerminationCompleted(const Error& error) {
-  LOG(INFO) << __func__ << ": " << error;
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": " << error;
   manager()->TerminationActionComplete(link_name());
   manager()->RemoveTerminationAction(link_name());
 }
 
 bool Cellular::DisconnectCleanup() {
+  SLOG(2) << LoggingTag() << ": " << __func__;
+  DestroySockets();
   if (!StateIsConnected())
     return false;
+  StopLinkListener();
   SetState(State::kRegistered);
   SetServiceFailureSilent(Service::kFailureNone);
-  DestroyIPConfig();
+  SetPrimaryMultiplexedInterface("");
+  default_pdn_apn_type_ = std::nullopt;
+  default_pdn_.reset();
+  multiplexed_tethering_pdn_.reset();
+  ResetCarrierEntitlement();
   return true;
+}
+
+void Cellular::ResetCarrierEntitlement() {
+  carrier_entitlement_->Reset();
+  if (!entitlement_check_callback_.is_null()) {
+    std::move(entitlement_check_callback_)
+        .Run(TetheringManager::EntitlementStatus::kNotAllowed);
+  }
 }
 
 // static
@@ -1620,40 +2748,62 @@ void Cellular::LogRestartModemResult(const Error& error) {
 }
 
 bool Cellular::ResetQ6V5Modem() {
-  // TODO(b/177375637): Check for q6v5 driver before resetting the modem.
-  int fd = HANDLE_EINTR(
-      open(kModemResetSysfsName, O_WRONLY | O_NONBLOCK | O_CLOEXEC));
+  base::FilePath modem_reset_path = GetQ6V5ModemResetPath();
+  if (!base::PathExists(modem_reset_path)) {
+    PLOG(ERROR) << LoggingTag()
+                << ": Unable to find sysfs file to reset modem.";
+    return false;
+  }
+
+  int fd = HANDLE_EINTR(open(modem_reset_path.value().c_str(),
+                             O_WRONLY | O_NONBLOCK | O_CLOEXEC));
   if (fd < 0) {
-    PLOG(ERROR) << "Failed to open sysfs file to reset modem.";
+    PLOG(ERROR) << LoggingTag()
+                << ": Failed to open sysfs file to reset modem.";
     return false;
   }
 
   base::ScopedFD scoped_fd(fd);
   if (!base::WriteFileDescriptor(scoped_fd.get(), "stop")) {
-    PLOG(ERROR) << "Failed to stop modem";
+    PLOG(ERROR) << LoggingTag() << ": Failed to stop modem";
     return false;
   }
-  usleep(kModemResetTimeoutMilliseconds * 1000);
+  usleep(kModemResetTimeout.InMicroseconds());
   if (!base::WriteFileDescriptor(scoped_fd.get(), "start")) {
-    PLOG(ERROR) << "Failed to start modem";
+    PLOG(ERROR) << LoggingTag() << ": Failed to start modem";
     return false;
   }
   return true;
 }
 
-bool Cellular::IsQ6V5Modem() {
-  base::FilePath driver_path, driver_name;
+base::FilePath Cellular::GetQ6V5ModemResetPath() {
+  base::FilePath modem_reset_path, driver_path;
 
+  base::FileEnumerator it(
+      base::FilePath(kQ6V5SysfsBasePath), false,
+      base::FileEnumerator::FILES | base::FileEnumerator::SHOW_SYM_LINKS,
+      kQ6V5RemoteprocPattern);
+  for (base::FilePath name = it.Next(); !name.empty(); name = it.Next()) {
+    if (base::ReadSymbolicLink(name.Append("device/driver"), &driver_path) &&
+        driver_path.BaseName() == base::FilePath(kQ6V5DriverName)) {
+      modem_reset_path = name.Append("state");
+      break;
+    }
+  }
+
+  return modem_reset_path;
+}
+
+bool Cellular::IsQ6V5Modem() {
   // Check if manufacturer is equal to "QUALCOMM INCORPORATED" and
-  // if remoteproc0/device/driver in sysfs links to "qcom-q6v5-mss".
-  driver_path = base::FilePath(kModemDriverSysfsName);
+  // if one of the remoteproc[0-9]/device/driver in sysfs links
+  // to "qcom-q6v5-mss".
   return (manufacturer_ == kQ6V5ModemManufacturerName &&
-          base::ReadSymbolicLink(driver_path, &driver_name) &&
-          driver_name.BaseName() == base::FilePath(kQ6V5DriverName));
+          base::PathExists(GetQ6V5ModemResetPath()));
 }
 
 void Cellular::StartPPP(const std::string& serial_device) {
-  SLOG(PPP, this, 2) << __func__ << " on " << serial_device;
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": on " << serial_device;
   // Detach any SelectedService from this device. It will be grafted onto
   // the PPPDevice after PPP is up (in Cellular::Notify).
   //
@@ -1666,14 +2816,15 @@ void Cellular::StartPPP(const std::string& serial_device) {
     // SelectService, and SelectService will move selected_service()
     // to State::kIdle.
     Service::ConnectState original_state(service_->state());
-    Device::DropConnection();  // Don't redirect to PPPDevice.
+    DropConnectionDefault();  // Don't redirect to PPPDevice.
     service_->SetState(original_state);
   } else {
-    CHECK(!ipconfig());  // Shouldn't have ipconfig without selected_service().
+    // There should be no regular cellular network connected
+    DCHECK(!default_pdn_);
   }
 
   PPPDaemon::DeathCallback death_callback(
-      base::Bind(&Cellular::OnPPPDied, weak_ptr_factory_.GetWeakPtr()));
+      base::BindOnce(&Cellular::OnPPPDied, weak_ptr_factory_.GetWeakPtr()));
 
   PPPDaemon::Options options;
   options.no_detach = true;
@@ -1686,15 +2837,15 @@ void Cellular::StartPPP(const std::string& serial_device) {
   Error error;
   std::unique_ptr<ExternalTask> new_ppp_task(PPPDaemon::Start(
       control_interface(), process_manager_, weak_ptr_factory_.GetWeakPtr(),
-      options, serial_device, death_callback, &error));
+      options, serial_device, std::move(death_callback), &error));
   if (new_ppp_task) {
-    SLOG(this, 1) << "Forked pppd process.";
+    SLOG(1) << LoggingTag() << ": Forked pppd process.";
     ppp_task_ = std::move(new_ppp_task);
   }
 }
 
 void Cellular::StopPPP() {
-  SLOG(PPP, this, 2) << __func__;
+  SLOG(2) << LoggingTag() << ": " << __func__;
   if (!ppp_device_)
     return;
   DropConnection();
@@ -1704,9 +2855,9 @@ void Cellular::StopPPP() {
 
 // called by |ppp_task_|
 void Cellular::GetLogin(std::string* user, std::string* password) {
-  SLOG(PPP, this, 2) << __func__;
+  SLOG(2) << LoggingTag() << ": " << __func__;
   if (!service()) {
-    LOG(ERROR) << __func__ << " with no service ";
+    LOG(ERROR) << LoggingTag() << ": " << __func__ << ": with no service ";
     return;
   }
   CHECK(user);
@@ -1718,7 +2869,7 @@ void Cellular::GetLogin(std::string* user, std::string* password) {
 // Called by |ppp_task_|.
 void Cellular::Notify(const std::string& reason,
                       const std::map<std::string, std::string>& dict) {
-  SLOG(PPP, this, 2) << __func__ << " " << reason << " on " << link_name();
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": " << reason;
 
   if (reason == kPPPReasonAuthenticating) {
     OnPPPAuthenticating();
@@ -1736,19 +2887,29 @@ void Cellular::Notify(const std::string& reason,
 }
 
 void Cellular::OnPPPAuthenticated() {
-  SLOG(PPP, this, 2) << __func__;
+  SLOG(2) << LoggingTag() << ": " << __func__;
   is_ppp_authenticating_ = false;
 }
 
 void Cellular::OnPPPAuthenticating() {
-  SLOG(PPP, this, 2) << __func__;
+  SLOG(2) << LoggingTag() << ": " << __func__;
   is_ppp_authenticating_ = true;
+}
+
+bool Cellular::GetForceInitEpsBearerSettings() {
+  return force_init_eps_bearer_settings_;
+}
+
+void Cellular::SetForceInitEpsBearerSettings(bool force) {
+  SLOG(2) << LoggingTag() << ": " << __func__ << " force: " << std::boolalpha
+          << force;
+  force_init_eps_bearer_settings_ = force;
 }
 
 void Cellular::OnPPPConnected(
     const std::map<std::string, std::string>& params) {
-  SLOG(PPP, this, 2) << __func__;
-  std::string interface_name = PPPDevice::GetInterfaceName(params);
+  SLOG(2) << LoggingTag() << ": " << __func__;
+  std::string interface_name = PPPDaemon::GetInterfaceName(params);
   DeviceInfo* device_info = manager()->device_info();
   int interface_index = device_info->GetIndex(interface_name);
   if (interface_index < 0) {
@@ -1766,8 +2927,8 @@ void Cellular::OnPPPConnected(
       // See https://crbug.com/1032030 for details.
       ppp_device_ = nullptr;
     }
-    ppp_device_ = ppp_device_factory_->CreatePPPDevice(
-        manager(), interface_name, interface_index);
+    ppp_device_ = device_info->CreatePPPDevice(manager(), interface_name,
+                                               interface_index);
     device_info->RegisterDevice(ppp_device_);
   }
 
@@ -1776,19 +2937,31 @@ void Cellular::OnPPPConnected(
   CHECK(!selected_service());
   ppp_device_->SetEnabled(true);
   ppp_device_->SelectService(service_);
-  ppp_device_->UpdateIPConfigFromPPP(params, false /* blackhole_ipv6 */);
+
+  auto properties = std::make_unique<IPConfig::Properties>(
+      PPPDaemon::ParseIPConfiguration(params));
+  ppp_device_->UpdateIPConfig(std::move(properties), nullptr);
 }
 
 void Cellular::OnPPPDied(pid_t pid, int exit) {
-  SLOG(this, 1) << __func__ << " on " << link_name();
+  SLOG(1) << LoggingTag() << ": " << __func__;
   ppp_task_.reset();
   if (is_ppp_authenticating_) {
     SetServiceFailure(Service::kFailurePPPAuth);
   } else {
-    SetServiceFailure(PPPDevice::ExitStatusToFailure(exit));
+    SetServiceFailure(PPPDaemon::ExitStatusToFailure(exit));
   }
-  Error error;
-  Disconnect(&error, __func__);
+  Disconnect(nullptr, "unexpected pppd exit");
+}
+
+bool Cellular::ModemIsEnabledButNotRegistered() {
+  // Normally the Modem becomes Registered immediately after becoming enabled.
+  // In cases where we have an attach APN or eSIM this may not be true. See
+  // b/204847937 and b/205882451 for more details.
+  // TODO(b/186482862): Fix this behavior in ModemManager.
+  return (state_ == State::kEnabled || state_ == State::kModemStarting ||
+          state_ == State::kModemStarted) &&
+         modem_state_ == kModemStateEnabled;
 }
 
 void Cellular::SetPendingConnect(const std::string& iccid) {
@@ -1796,8 +2969,8 @@ void Cellular::SetPendingConnect(const std::string& iccid) {
     return;
 
   if (!connect_pending_iccid_.empty()) {
-    SLOG(this, 1) << "Cancelling pending connect to: "
-                  << connect_pending_iccid_;
+    SLOG(1) << LoggingTag()
+            << ": Cancelling pending connect to: " << connect_pending_iccid_;
     ConnectToPendingFailed(Service::kFailureDisconnect);
   }
 
@@ -1807,14 +2980,14 @@ void Cellular::SetPendingConnect(const std::string& iccid) {
   if (iccid.empty())
     return;
 
-  SLOG(this, 1) << "Set Pending connect: " << iccid;
+  SLOG(1) << LoggingTag() << ": Set Pending connect: " << iccid;
   // Pending connect requests may fail, e.g. a SIM slot change may fail or
   // registration may fail for an inactive eSIM profile. Set a timeout to
   // cancel the pending connect and inform the UI.
-  connect_cancel_callback_.Reset(base::Bind(&Cellular::ConnectToPendingCancel,
-                                            weak_ptr_factory_.GetWeakPtr()));
+  connect_cancel_callback_.Reset(base::BindOnce(
+      &Cellular::ConnectToPendingCancel, weak_ptr_factory_.GetWeakPtr()));
   dispatcher()->PostDelayedTask(FROM_HERE, connect_cancel_callback_.callback(),
-                                kPendingConnectCancelMilliseconds);
+                                kPendingConnectCancel);
 }
 
 void Cellular::ConnectToPending() {
@@ -1824,80 +2997,119 @@ void Cellular::ConnectToPending() {
   }
 
   if (inhibited_) {
-    SLOG(this, 1) << __func__ << ": Inhibited";
+    SLOG(1) << LoggingTag() << ": " << __func__ << ": Inhibited";
     return;
   }
   if (scanning_) {
-    SLOG(this, 1) << __func__ << ": Scanning";
+    SLOG(1) << LoggingTag() << ": " << __func__ << ": Scanning";
     return;
   }
 
   if (modem_state_ == kModemStateLocked) {
-    LOG(WARNING) << __func__ << ": Modem locked";
-    ConnectToPendingFailed(Service::kFailureSimLocked);
+    // Check the lock type and set the failure appropriately
+    KeyValueStore sim_lock_status = GetSimLockStatus(nullptr);
+    std::string lock_type =
+        sim_lock_status.Get<std::string>(kSIMLockTypeProperty);
+    if (lock_type == kSIMLockNetworkPin)
+      ConnectToPendingFailed(Service::kFailureSimCarrierLocked);
+    else
+      ConnectToPendingFailed(Service::kFailureSimLocked);
     return;
   }
 
-  // Normally the Modem becomes Registered immediately after becoming enabled.
-  // For eSIM this is not always true so we need to wait for the Modem to
-  // become registered.
-  // TODO(b/186482862): Fix this behavior in ModemManager.
-  if (state_ == State::kEnabled && modem_state_ == kModemStateEnabled) {
-    LOG(WARNING) << __func__ << ": Waiting for Modem registration.";
+  if (ModemIsEnabledButNotRegistered()) {
+    LOG(WARNING) << LoggingTag() << ": " << __func__
+                 << ": Waiting for Modem registration.";
     return;
   }
+
   if (!StateIsRegistered()) {
-    LOG(WARNING) << __func__ << ": Cellular not registered, State: "
+    LOG(WARNING) << LoggingTag() << ": " << __func__
+                 << ": Cellular not registered, State: "
                  << GetStateString(state_);
     ConnectToPendingFailed(Service::kFailureNotRegistered);
     return;
   }
   if (modem_state_ != kModemStateRegistered) {
-    LOG(WARNING) << __func__ << ": Modem not registered, State: "
+    LOG(WARNING) << LoggingTag() << ": " << __func__
+                 << ": Modem not registered, State: "
                  << GetModemStateString(modem_state_);
     ConnectToPendingFailed(Service::kFailureNotRegistered);
     return;
   }
 
-  SLOG(this, 1) << __func__ << ": " << connect_pending_iccid_;
+  SLOG(1) << LoggingTag() << ": " << __func__ << ": " << connect_pending_iccid_;
   connect_cancel_callback_.Cancel();
-  connect_pending_callback_.Reset(base::Bind(
+  connect_pending_callback_.Reset(base::BindOnce(
       &Cellular::ConnectToPendingAfterDelay, weak_ptr_factory_.GetWeakPtr()));
   dispatcher()->PostDelayedTask(FROM_HERE, connect_pending_callback_.callback(),
-                                kPendingConnectDelay.InMilliseconds());
+                                kPendingConnectDelay);
 }
 
 void Cellular::ConnectToPendingAfterDelay() {
-  SLOG(this, 1) << __func__ << ": " << connect_pending_iccid_;
+  SLOG(1) << LoggingTag() << ": " << __func__ << ": " << connect_pending_iccid_;
+
+  std::string pending_iccid;
+  if (connect_pending_iccid_ == kUnknownIccid) {
+    // Connect to the current iccid if we want to connect to an unknown
+    // iccid. This usually occurs when the inactive slot's iccid is unknown, but
+    // we want to connect to it after a slot switch.
+    pending_iccid = iccid_;
+  } else {
+    pending_iccid = connect_pending_iccid_;
+  }
 
   // Clear pending connect request regardless of whether a service is found.
-  std::string pending_iccid = connect_pending_iccid_;
   connect_pending_iccid_.clear();
 
   CellularServiceRefPtr service =
       manager()->cellular_service_provider()->FindService(pending_iccid);
   if (!service) {
-    LOG(WARNING) << "No matching service for pending connect.";
+    LOG(WARNING) << LoggingTag()
+                 << ": No matching service for pending connect.";
     return;
   }
 
   Error error;
-  LOG(INFO) << "Connecting to pending Cellular Service: "
+  LOG(INFO) << LoggingTag() << ": Connecting to pending Cellular Service: "
             << service->log_name();
   service->Connect(&error, "Pending connect");
   if (!error.IsSuccess())
-    service->SetFailure(Service::kFailureConnect);
+    service->SetFailure(Service::kFailureDelayedConnectSetup);
 }
 
 void Cellular::ConnectToPendingFailed(Service::ConnectFailure failure) {
   if (!connect_pending_iccid_.empty()) {
-    SLOG(this, 1) << __func__ << ": " << connect_pending_iccid_
-                  << " Failure: " << Service::ConnectFailureToString(failure);
+    SLOG(1) << LoggingTag() << ": " << __func__ << ": "
+            << connect_pending_iccid_
+            << " Failure: " << Service::ConnectFailureToString(failure);
     CellularServiceRefPtr service =
         manager()->cellular_service_provider()->FindService(
             connect_pending_iccid_);
-    if (service)
+    bool is_user_triggered = false;
+    if (service) {
       service->SetFailure(failure);
+      is_user_triggered = service->is_in_user_connect();
+    }
+    // populate the error for the sake of metrics
+    Error error;
+    switch (failure) {
+      case Service::kFailureNotRegistered:
+        error.Populate(Error::kNotRegistered);
+        break;
+      case Service::kFailureDisconnect:
+        error.Populate(Error::kOperationAborted);
+        break;
+      case Service::kFailureSimLocked:
+        error.Populate(Error::kPinRequired);
+        break;
+      default:
+        error.Populate(Error::kOperationFailed);
+        break;
+    }
+    NotifyCellularConnectionResult(std::move(error), connect_pending_iccid_,
+                                   is_user_triggered,
+                                   ApnList::ApnType::kDefault);
   }
   connect_cancel_callback_.Cancel();
   connect_pending_callback_.Cancel();
@@ -1905,7 +3117,7 @@ void Cellular::ConnectToPendingFailed(Service::ConnectFailure failure) {
 }
 
 void Cellular::ConnectToPendingCancel() {
-  LOG(WARNING) << __func__;
+  LOG(WARNING) << LoggingTag() << ": " << __func__;
   ConnectToPendingFailed(Service::kFailureNotRegistered);
 }
 
@@ -1976,17 +3188,16 @@ void Cellular::RegisterProperties() {
   store->RegisterConstKeyValueStores(kSIMSlotInfoProperty, &sim_slot_info_);
   store->RegisterConstStringmaps(kCellularApnListProperty, &apn_list_);
   store->RegisterConstString(kIccidProperty, &iccid_);
+  store->RegisterConstString(kPrimaryMultiplexedInterfaceProperty,
+                             &primary_multiplexed_interface_);
 
-  // TODO(pprabhu): Decide whether these need their own custom setters.
   HelpRegisterConstDerivedString(kTechnologyFamilyProperty,
                                  &Cellular::GetTechnologyFamily);
   HelpRegisterConstDerivedString(kDeviceIdProperty, &Cellular::GetDeviceId);
-  HelpRegisterDerivedBool(kCellularAllowRoamingProperty,
-                          &Cellular::GetAllowRoaming,
-                          &Cellular::SetAllowRoaming);
   HelpRegisterDerivedBool(kCellularPolicyAllowRoamingProperty,
                           &Cellular::GetPolicyAllowRoaming,
                           &Cellular::SetPolicyAllowRoaming);
+  // TODO(b/277792069): Remove when Chrome removes the attach APN code.
   HelpRegisterDerivedBool(kUseAttachAPNProperty, &Cellular::GetUseAttachApn,
                           &Cellular::SetUseAttachApn);
   HelpRegisterDerivedBool(kInhibitedProperty, &Cellular::GetInhibited,
@@ -2001,11 +3212,13 @@ void Cellular::RegisterProperties() {
 void Cellular::UpdateModemProperties(const RpcIdentifier& dbus_path,
                                      const std::string& mac_address) {
   if (dbus_path_ == dbus_path) {
-    SLOG(this, 1) << __func__ << " Skipping update. Same dbus_path provided: "
-                  << dbus_path.value();
+    SLOG(1) << LoggingTag() << ": " << __func__
+            << ": Skipping update. Same dbus_path provided: "
+            << dbus_path.value();
     return;
   }
-  LOG(INFO) << __func__ << " Modem Path: " << dbus_path.value();
+  LOG(INFO) << LoggingTag() << ": " << __func__
+            << ": Modem Path: " << dbus_path.value();
   SetDbusPath(dbus_path);
   SetModemState(kModemStateUnknown);
   set_mac_address(mac_address);
@@ -2018,12 +3231,11 @@ const std::string& Cellular::GetSimCardId() const {
   return iccid_;
 }
 
-bool Cellular::HasSimCardId(const std::string& sim_card_id) const {
-  if (sim_card_id == eid_ || sim_card_id == iccid_)
+bool Cellular::HasIccid(const std::string& iccid) const {
+  if (iccid == iccid_)
     return true;
   for (const SimProperties& sim_properties : sim_slot_properties_) {
-    if (sim_properties.iccid == sim_card_id ||
-        sim_properties.eid == sim_card_id) {
+    if (sim_properties.iccid == iccid) {
       return true;
     }
   }
@@ -2032,7 +3244,8 @@ bool Cellular::HasSimCardId(const std::string& sim_card_id) const {
 
 void Cellular::SetSimProperties(
     const std::vector<SimProperties>& sim_properties, size_t primary_slot) {
-  LOG(INFO) << __func__ << " Slots: " << sim_properties.size()
+  LOG(INFO) << LoggingTag() << ": " << __func__
+            << ": Slots: " << sim_properties.size()
             << " Primary: " << primary_slot;
   if (sim_properties.empty()) {
     // This might occur while the Modem is starting.
@@ -2041,7 +3254,7 @@ void Cellular::SetSimProperties(
     return;
   }
   if (primary_slot >= sim_properties.size()) {
-    LOG(ERROR) << "Invalid Primary Slot Id: " << primary_slot;
+    LOG(ERROR) << LoggingTag() << ": Invalid Primary Slot Id: " << primary_slot;
     primary_slot = 0u;
   }
 
@@ -2056,23 +3269,12 @@ void Cellular::SetSimProperties(
 
   // Ensure that secondary services are created and updated.
   UpdateSecondaryServices();
-
-  // If the Primary SIM does not have a SIM profile available, attempt to switch
-  // to a slot with a SIM profile available.
-  if (!inhibited_ && primary_sim_properties.iccid.empty()) {
-    if (sim_slot_switch_allowed_) {
-      LOG(INFO) << "No Primary SIM properties, attempting to switch slots.";
-      // Attempt to switch to the first valid sim slot.
-      capability_->SetPrimarySimSlotForIccid(std::string());
-    } else {
-      LOG(INFO) << "No Primary SIM properties, slot switch disabled.";
-    }
-  }
 }
 
 void Cellular::OnProfilesChanged() {
   if (!service_) {
-    LOG(ERROR) << "3GPP profiles were updated with no service.";
+    LOG(ERROR) << LoggingTag()
+               << ": 3GPP profiles were updated with no service.";
     return;
   }
 
@@ -2083,52 +3285,210 @@ void Cellular::OnProfilesChanged() {
     return;
   }
 
-  LOG(INFO) << "Reconnecting for OTA profile update";
+  LOG(INFO) << LoggingTag() << ": Reconnecting for OTA profile update.";
   Disconnect(nullptr, "OTA profile update");
   SetPendingConnect(service_->iccid());
 }
 
-std::deque<Stringmap> Cellular::BuildApnTryList() const {
-  std::deque<Stringmap> apn_try_list;
-  bool add_last_good_apn = true;
+bool Cellular::CompareApns(const Stringmap& apn1, const Stringmap& apn2) const {
+  static const std::string always_ignore_keys[] = {
+      cellular::kApnVersionProperty, kApnNameProperty,
+      kApnLanguageProperty,          kApnSourceProperty,
+      kApnLocalizedNameProperty,     kApnIsRequiredByCarrierSpecProperty};
+  std::set<std::string> ignore_keys{std::begin(always_ignore_keys),
+                                    std::end(always_ignore_keys)};
 
+  // Enforce the APN keys so that developers explicitly define the behavior
+  // for each key in this function.
+  static const std::string only_allowed_keys[] = {
+      kApnProperty,         kApnTypesProperty,          kApnUsernameProperty,
+      kApnPasswordProperty, kApnAuthenticationProperty, kApnIpTypeProperty,
+      kApnAttachProperty};
+  std::set<std::string> allowed_keys{std::begin(only_allowed_keys),
+                                     std::end(only_allowed_keys)};
+  for (auto const& pair : apn1) {
+    if (ignore_keys.count(pair.first))
+      continue;
+
+    DCHECK(allowed_keys.count(pair.first)) << " key: " << pair.first;
+    if (!base::Contains(apn2, pair.first) || pair.second != apn2.at(pair.first))
+      return false;
+    // Keys match, ignore them below.
+    ignore_keys.insert(pair.first);
+  }
+  // Find keys in apn2 which are not in apn1.
+  for (auto const& pair : apn2) {
+    DCHECK(allowed_keys.count(pair.first) || ignore_keys.count(pair.first))
+        << " key: " << pair.first;
+    if (ignore_keys.count(pair.first) == 0)
+      return false;
+  }
+  return true;
+}
+
+std::deque<Stringmap> Cellular::BuildAttachApnTryList() const {
+  std::deque<Stringmap> try_list = BuildApnTryList(ApnList::ApnType::kAttach);
+  if (try_list.size() > 1) {
+    // When multiple Attach APNs are present, shill should fall back to the
+    // default one(first in the list) if all of them fail to register.
+    try_list.emplace_back(try_list.front());
+    PrintApnListForDebugging(try_list, ApnList::ApnType::kAttach);
+  }
+  return try_list;
+}
+
+std::deque<Stringmap> Cellular::BuildDefaultApnTryList() const {
+  return BuildApnTryList(ApnList::ApnType::kDefault);
+}
+
+std::deque<Stringmap> Cellular::BuildTetheringApnTryList() const {
+  return BuildApnTryList(ApnList::ApnType::kDun);
+}
+
+bool Cellular::IsRequiredByCarrierApn(const Stringmap& apn) const {
+  // Only check the property in MODB APNs to avoid getting into a situation in
+  // which the UI or user send the property by mistake and the UI cannot
+  // update the APN list because there is an existing APN with the property
+  // set to true.
+  return base::Contains(apn, kApnSourceProperty) &&
+         apn.at(kApnSourceProperty) == cellular::kApnSourceMoDb &&
+         base::Contains(apn, kApnIsRequiredByCarrierSpecProperty) &&
+         apn.at(kApnIsRequiredByCarrierSpecProperty) ==
+             kApnIsRequiredByCarrierSpecTrue;
+}
+
+bool Cellular::RequiredApnExists(ApnList::ApnType apn_type) const {
+  for (auto apn : apn_list_) {
+    if (ApnList::IsApnType(apn, apn_type) && IsRequiredByCarrierApn(apn))
+      return true;
+  }
+  return false;
+}
+
+std::deque<Stringmap> Cellular::BuildApnTryList(
+    ApnList::ApnType apn_type) const {
+  std::deque<Stringmap> apn_try_list;
+  // When a required APN exists, no other APNs of that type will be included in
+  // the try list.
+  bool modb_required_apn_exists = RequiredApnExists(apn_type);
+  // If a required APN exists, the last good APN is not added.
+  bool add_last_good_apn = !modb_required_apn_exists;
+  std::vector<const Stringmap*> custom_apns_info;
   const Stringmap* custom_apn_info = nullptr;
   const Stringmap* last_good_apn_info = nullptr;
-  if (service_) {
-    custom_apn_info = service_->GetUserSpecifiedApn();
+  const Stringmaps* custom_apn_list = nullptr;
+  // Add custom APNs(from UI or Admin)
+  if (!modb_required_apn_exists && service_) {
+    if (service_->custom_apn_list().has_value()) {
+      // The LastGoodAPN is no longer used in the try list when the APN Revamp
+      // is enabled.
+      add_last_good_apn = false;
+      custom_apn_list = &service_->custom_apn_list().value();
+      for (const auto& custom_apn : *custom_apn_list) {
+        if (ApnList::IsApnType(custom_apn, apn_type))
+          custom_apns_info.emplace_back(&custom_apn);
+      }
+    } else if (service_->GetUserSpecifiedApn() &&
+               ApnList::IsApnType(*service_->GetUserSpecifiedApn(), apn_type)) {
+      custom_apn_info = service_->GetUserSpecifiedApn();
+      custom_apns_info.emplace_back(custom_apn_info);
+    }
+
     last_good_apn_info = service_->GetLastGoodApn();
-    if (custom_apn_info) {
-      apn_try_list.push_back(*custom_apn_info);
-      SLOG(this, 3) << __func__ << " Adding User Specified APN:"
-                    << GetStringmapValue(*custom_apn_info, kApnProperty)
-                    << " Is attach:"
-                    << GetStringmapValue(*custom_apn_info, kApnAttachProperty);
-      if (last_good_apn_info && *last_good_apn_info == *custom_apn_info) {
+    for (auto custom_apn : custom_apns_info) {
+      apn_try_list.push_back(*custom_apn);
+      if (!base::Contains(apn_try_list.back(), kApnSourceProperty))
+        apn_try_list.back()[kApnSourceProperty] = kApnSourceUi;
+
+      SLOG(3) << LoggingTag() << ": " << __func__
+              << ": Adding User Specified APN: "
+              << GetPrintableApnStringmap(apn_try_list.back());
+      if ((last_good_apn_info &&
+           CompareApns(*last_good_apn_info, apn_try_list.back()))) {
         add_last_good_apn = false;
       }
     }
   }
-
+  // - With the revamp APN UI, if the user has entered an APN in the UI, only
+  // customs APNs are used. Return early.
+  // - For the old UI, the Attach APN round robin is skipped if there is a
+  // custom attach APN.
+  if ((custom_apn_list && custom_apn_list->size() > 0) ||
+      (!custom_apn_list && custom_apn_info &&
+       apn_type == ApnList::ApnType::kAttach)) {
+    PrintApnListForDebugging(apn_try_list, apn_type);
+    ValidateApnTryList(apn_try_list);
+    return apn_try_list;
+  }
+  // Ensure all Modem APNs are added before MODB APNs.
   for (auto apn : apn_list_) {
-    if (custom_apn_info && *custom_apn_info == apn) {
+    if (!ApnList::IsApnType(apn, apn_type))
       continue;
-    }
-    if (last_good_apn_info && *last_good_apn_info == apn) {
-      add_last_good_apn = false;
-    }
+    DCHECK(base::Contains(apn, kApnSourceProperty));
+    // Verify all APNs are either from the Modem or MODB.
+    DCHECK(apn[kApnSourceProperty] == cellular::kApnSourceModem ||
+           apn[kApnSourceProperty] == cellular::kApnSourceMoDb);
+    if (apn[kApnSourceProperty] != cellular::kApnSourceModem)
+      continue;
     apn_try_list.push_back(apn);
   }
+  // Add MODB APNs and update the origin of the custom APN(only for old UI).
+  int index_of_first_modb_apn = apn_try_list.size();
+  for (const auto& apn : apn_list_) {
+    if (!ApnList::IsApnType(apn, apn_type) ||
+        (modb_required_apn_exists && !IsRequiredByCarrierApn(apn)))
+      continue;
+    // Updating the origin of the custom APN is only needed for the old UI,
+    // since the APN UI revamp will include the correct APN source.
+    if (!custom_apn_list && custom_apn_info &&
+        CompareApns(*custom_apn_info, apn) &&
+        base::Contains(apn, kApnSourceProperty)) {
+      // If |custom_apn_info| is not null, it is located at the first position
+      // of |apn_try_list|, and we update the APN source for it.
+      apn_try_list[0][kApnSourceProperty] = apn.at(kApnSourceProperty);
+      continue;
+    }
 
+    bool is_same_as_last_good_apn =
+        last_good_apn_info && CompareApns(*last_good_apn_info, apn);
+    if (is_same_as_last_good_apn)
+      add_last_good_apn = false;
+
+    if (base::Contains(apn, kApnSourceProperty) &&
+        apn.at(kApnSourceProperty) == cellular::kApnSourceMoDb) {
+      if (is_same_as_last_good_apn) {
+        apn_try_list.insert(apn_try_list.begin() + index_of_first_modb_apn,
+                            apn);
+      } else {
+        apn_try_list.push_back(apn);
+      }
+    }
+  }
+  // Add fallback empty APN as a last try for Default and Attach
+  if (apn_type == ApnList::ApnType::kDefault ||
+      apn_type == ApnList::ApnType::kAttach) {
+    bool is_same_as_last_good_apn = false;
+    std::deque<Stringmap> empty_apn_list = BuildFallbackEmptyApn(apn_type);
+    for (const auto& apn : empty_apn_list) {
+      apn_try_list.push_back(apn);
+      if (last_good_apn_info) {
+        is_same_as_last_good_apn |= CompareApns(*last_good_apn_info, apn);
+      }
+    }
+    if (is_same_as_last_good_apn)
+      add_last_good_apn = false;
+  }
   // The last good APN will be a last-ditch effort to connect in case the APN
   // list is misconfigured somehow.
-  if (last_good_apn_info && add_last_good_apn) {
+  if (last_good_apn_info && add_last_good_apn &&
+      ApnList::IsApnType(*last_good_apn_info, apn_type)) {
     apn_try_list.push_back(*last_good_apn_info);
-    LOG(INFO) << __func__ << " Adding last good APN (fallback):"
-              << GetStringmapValue(*last_good_apn_info, kApnProperty)
-              << " Is attach:"
-              << GetStringmapValue(*last_good_apn_info, kApnAttachProperty);
+    LOG(INFO) << LoggingTag() << ": " << __func__ << ": Adding last good APN: "
+              << GetPrintableApnStringmap(*last_good_apn_info);
   }
 
+  PrintApnListForDebugging(apn_try_list, apn_type);
+  ValidateApnTryList(apn_try_list);
   return apn_try_list;
 }
 
@@ -2185,26 +3545,25 @@ void Cellular::SetImei(const std::string& imei) {
 }
 
 void Cellular::SetPrimarySimProperties(const SimProperties& sim_properties) {
-  SLOG(this, 1) << __func__ << " EID= " << sim_properties.eid
-                << " ICCID= " << sim_properties.iccid
-                << " IMSI= " << sim_properties.imsi
-                << " OperatorId= " << sim_properties.operator_id
-                << " ServiceProviderName= " << sim_properties.spn;
+  SLOG(1) << LoggingTag() << ": " << __func__ << ": EID= " << sim_properties.eid
+          << " ICCID= " << sim_properties.iccid
+          << " IMSI= " << sim_properties.imsi
+          << " OperatorId= " << sim_properties.operator_id
+          << " ServiceProviderName= " << sim_properties.spn
+          << " GID1= " << sim_properties.gid1;
 
   eid_ = sim_properties.eid;
   iccid_ = sim_properties.iccid;
   imsi_ = sim_properties.imsi;
 
-  home_provider_info()->UpdateMCCMNC(sim_properties.operator_id);
-  home_provider_info()->UpdateOperatorName(sim_properties.spn);
-  home_provider_info()->UpdateICCID(iccid_);
-  // Provide ICCID to serving operator as well to aid in MVNO identification.
-  serving_operator_info()->UpdateICCID(iccid_);
+  mobile_operator_info()->UpdateMCCMNC(sim_properties.operator_id);
+  mobile_operator_info()->UpdateOperatorName(sim_properties.spn);
+  mobile_operator_info()->UpdateICCID(iccid_);
   if (!imsi_.empty()) {
-    home_provider_info()->UpdateIMSI(imsi_);
-    // We do not obtain IMSI OTA right now. Provide the value to serving
-    // operator as well, to aid in MVNO identification.
-    serving_operator_info()->UpdateIMSI(imsi_);
+    mobile_operator_info()->UpdateIMSI(imsi_);
+  }
+  if (!sim_properties.gid1.empty()) {
+    mobile_operator_info()->UpdateGID1(sim_properties.gid1);
   }
 
   adaptor()->EmitStringChanged(kEidProperty, eid_);
@@ -2222,17 +3581,11 @@ void Cellular::SetSimSlotProperties(
       primary_sim_slot_ == primary_slot) {
     return;
   }
-  SLOG(this, 1) << __func__ << " Slots: " << slot_properties.size()
-                << " Primary: " << primary_slot;
+  SLOG(1) << LoggingTag() << ": " << __func__
+          << ": Slots: " << slot_properties.size()
+          << " Primary: " << primary_slot;
   sim_slot_properties_ = slot_properties;
   if (primary_sim_slot_ != primary_slot) {
-    if (primary_sim_slot_ != -1 && sim_slot_switch_allowed_) {
-      // After a slot change, do not allow Shill to change slots until/unless
-      // an explicit connect to a Service in a different slot is requested.
-      // This helps prevent Shill from interfering with Hermes operations.
-      LOG(INFO) << "sim_slot_switch_allowed -> false";
-      sim_slot_switch_allowed_ = false;
-    }
     primary_sim_slot_ = primary_slot;
   }
   // Set |sim_slot_info_| and emit SIMSlotInfo
@@ -2245,10 +3598,10 @@ void Cellular::SetSimSlotProperties(
     bool is_primary = i == primary_slot;
     properties.Set(kSIMSlotInfoPrimary, is_primary);
     sim_slot_info_.push_back(properties);
-    SLOG(this, 2) << __func__ << " Slot: " << sim_properties.slot
-                  << " EID: " << sim_properties.eid
-                  << " ICCID: " << sim_properties.iccid
-                  << " Primary: " << is_primary;
+    SLOG(2) << LoggingTag() << ": " << __func__
+            << ": Slot: " << sim_properties.slot
+            << " EID: " << sim_properties.eid
+            << " ICCID: " << sim_properties.iccid << " Primary: " << is_primary;
   }
   adaptor()->EmitKeyValueStoresChanged(kSIMSlotInfoProperty, sim_slot_info_);
 }
@@ -2297,11 +3650,16 @@ void Cellular::SetMMPlugin(const std::string& mm_plugin) {
   mm_plugin_ = mm_plugin;
 }
 
+void Cellular::SetMaxActiveMultiplexedBearers(
+    uint32_t max_multiplexed_bearers) {
+  max_multiplexed_bearers_ = max_multiplexed_bearers;
+}
+
 void Cellular::StartLocationPolling() {
   CHECK(capability_);
   if (!capability_->IsLocationUpdateSupported()) {
-    SLOG(this, 2) << "Location polling not enabled for " << mm_plugin_
-                  << " plugin.";
+    SLOG(2) << LoggingTag() << ": Location polling not enabled for "
+            << mm_plugin_ << " plugin.";
     return;
   }
 
@@ -2311,12 +3669,12 @@ void Cellular::StartLocationPolling() {
   polling_location_ = true;
 
   CHECK(poll_location_task_.IsCancelled());
-  SLOG(this, 2) << __func__ << ": "
-                << "Starting location polling tasks.";
-  poll_location_task_.Reset(
-      base::Bind(&Cellular::PollLocationTask, weak_ptr_factory_.GetWeakPtr()));
+  SLOG(2) << LoggingTag() << ": " << __func__
+          << ": Starting location polling tasks.";
 
   // Schedule an immediate task
+  poll_location_task_.Reset(base::BindOnce(&Cellular::PollLocationTask,
+                                           weak_ptr_factory_.GetWeakPtr()));
   dispatcher()->PostTask(FROM_HERE, poll_location_task_.callback());
 }
 
@@ -2326,8 +3684,8 @@ void Cellular::StopLocationPolling() {
   polling_location_ = false;
 
   if (!poll_location_task_.IsCancelled()) {
-    SLOG(this, 2) << __func__ << ": "
-                  << "Cancelling outstanding timeout.";
+    SLOG(2) << LoggingTag() << ": " << __func__
+            << ": Cancelling outstanding timeout.";
     poll_location_task_.Cancel();
   }
 }
@@ -2341,29 +3699,36 @@ void Cellular::SetDbusPath(const shill::RpcIdentifier& dbus_path) {
 void Cellular::SetScanning(bool scanning) {
   if (scanning_ == scanning)
     return;
-  LOG(INFO) << __func__ << ": " << scanning
+  LOG(INFO) << LoggingTag() << ": " << __func__ << ": " << scanning
             << " State: " << GetStateString(state_)
-            << " Modem State: " << GetModemStateString(modem_state_) << ")";
+            << " Modem State: " << GetModemStateString(modem_state_);
   if (scanning) {
     // Set Scanning=true immediately.
-    scanning_clear_callback_.Cancel();
     SetScanningProperty(true);
-  } else {
-    // Delay Scanning=false to delay operations while the Modem is starting.
-    // TODO(b/177588333): Make Modem and/or the MM dbus API more robust.
-    if (!scanning_clear_callback_.IsCancelled())
-      return;
-    SLOG(this, 2) << __func__ << ": Delaying clear";
-    scanning_clear_callback_.Reset(base::Bind(
-        &Cellular::SetScanningProperty, weak_ptr_factory_.GetWeakPtr(), false));
-    dispatcher()->PostDelayedTask(FROM_HERE,
-                                  scanning_clear_callback_.callback(),
-                                  kModemResetTimeoutMilliseconds);
+    return;
   }
+  // If the modem is disabled, set Scanning=false immediately.
+  // A delayed clear in this case might hit after the service is destroyed.
+  if (state_ == State::kDisabled) {
+    SetScanningProperty(false);
+    return;
+  }
+  // Delay Scanning=false to delay operations while the Modem is starting.
+  // TODO(b/177588333): Make Modem and/or the MM dbus API more robust.
+  if (!scanning_clear_callback_.IsCancelled())
+    return;
+
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": Delaying clear";
+  scanning_clear_callback_.Reset(base::BindOnce(
+      &Cellular::SetScanningProperty, weak_ptr_factory_.GetWeakPtr(), false));
+  dispatcher()->PostDelayedTask(FROM_HERE, scanning_clear_callback_.callback(),
+                                kModemResetTimeout);
 }
 
 void Cellular::SetScanningProperty(bool scanning) {
-  SLOG(this, 2) << __func__ << ": " << scanning;
+  SLOG(2) << LoggingTag() << ": " << __func__ << ": " << scanning;
+  if (!scanning_clear_callback_.IsCancelled())
+    scanning_clear_callback_.Cancel();
   scanning_ = scanning;
   adaptor()->EmitBoolChanged(kScanningProperty, scanning_);
 
@@ -2391,6 +3756,17 @@ void Cellular::SetFoundNetworks(const Stringmaps& found_networks) {
   adaptor()->EmitStringmapsChanged(kFoundNetworksProperty, found_networks_);
 }
 
+void Cellular::SetPrimaryMultiplexedInterface(
+    const std::string& interface_name) {
+  if (primary_multiplexed_interface_ == interface_name) {
+    return;
+  }
+
+  primary_multiplexed_interface_ = interface_name;
+  adaptor()->EmitStringChanged(kPrimaryMultiplexedInterfaceProperty,
+                               primary_multiplexed_interface_);
+}
+
 void Cellular::SetProviderRequiresRoaming(bool provider_requires_roaming) {
   if (provider_requires_roaming_ == provider_requires_roaming)
     return;
@@ -2404,6 +3780,10 @@ bool Cellular::IsRoamingAllowed() {
   return service_ && service_->IsRoamingAllowed();
 }
 
+PowerOpt* Cellular::power_opt() {
+  return manager()->power_opt();
+}
+
 void Cellular::SetApnList(const Stringmaps& apn_list) {
   // There is no canonical form of a Stringmaps value, so don't check for
   // redundant updates.
@@ -2411,127 +3791,118 @@ void Cellular::SetApnList(const Stringmaps& apn_list) {
   adaptor()->EmitStringmapsChanged(kCellularApnListProperty, apn_list_);
 }
 
-void Cellular::UpdateHomeProvider(const MobileOperatorInfo* operator_info) {
-  SLOG(this, 2) << __func__;
+void Cellular::UpdateHomeProvider() {
+  SLOG(2) << LoggingTag() << ": " << __func__;
 
   Stringmap home_provider;
-  if (!operator_info->sid().empty()) {
-    home_provider[kOperatorCodeKey] = operator_info->sid();
-  }
-  if (!operator_info->nid().empty()) {
-    home_provider[kOperatorCodeKey] = operator_info->nid();
-  }
-  if (!operator_info->mccmnc().empty()) {
-    home_provider[kOperatorCodeKey] = operator_info->mccmnc();
-  }
-  if (!operator_info->operator_name().empty()) {
-    home_provider[kOperatorNameKey] = operator_info->operator_name();
-  }
-  if (!operator_info->country().empty()) {
-    home_provider[kOperatorCountryKey] = operator_info->country();
-  }
-  if (!operator_info->uuid().empty()) {
-    home_provider[kOperatorUuidKey] = operator_info->uuid();
+  auto AssignIfNotEmpty = [&](const std::string& key,
+                              const std::string& value) {
+    if (!value.empty())
+      home_provider[key] = value;
+  };
+
+  if (mobile_operator_info_->IsMobileNetworkOperatorKnown()) {
+    AssignIfNotEmpty(kOperatorCodeKey, mobile_operator_info_->mccmnc());
+    AssignIfNotEmpty(kOperatorNameKey, mobile_operator_info_->operator_name());
+    AssignIfNotEmpty(kOperatorCountryKey, mobile_operator_info_->country());
+    AssignIfNotEmpty(kOperatorUuidKey, mobile_operator_info_->uuid());
+  } else if (mobile_operator_info_->IsServingMobileNetworkOperatorKnown()) {
+    SLOG(2) << "Serving provider proxying in for home provider.";
+    AssignIfNotEmpty(kOperatorCodeKey, mobile_operator_info_->serving_mccmnc());
+    AssignIfNotEmpty(kOperatorNameKey,
+                     mobile_operator_info_->serving_operator_name());
+    AssignIfNotEmpty(kOperatorCountryKey,
+                     mobile_operator_info_->serving_country());
+    AssignIfNotEmpty(kOperatorUuidKey, mobile_operator_info_->serving_uuid());
+  } else {
+    SLOG(2) << "Home and Serving provider are unknown, so using default info.";
+    AssignIfNotEmpty(kOperatorCodeKey, mobile_operator_info_->mccmnc());
+    AssignIfNotEmpty(kOperatorNameKey, mobile_operator_info_->operator_name());
+    AssignIfNotEmpty(kOperatorCountryKey, mobile_operator_info_->country());
+    AssignIfNotEmpty(kOperatorUuidKey, mobile_operator_info_->uuid());
   }
   if (home_provider != home_provider_) {
     home_provider_ = home_provider;
     adaptor()->EmitStringmapChanged(kHomeProviderProperty, home_provider_);
   }
-
-  ApnList apn_list;
+  // On the new APN UI revamp, modem and modb APNs are not shown to
+  // the user and the behavior of modem APNs should not be altered.
+  bool merge_similar_apns =
+      !(service_ && service_->custom_apn_list().has_value());
+  ApnList apn_list(merge_similar_apns);
   // TODO(b:180004055): remove this when we have captive portal checks that
   // mark APNs as bad and can skip the null APN for data connections
-  if (manufacturer_ != kQ6V5ModemManufacturerName)
-    apn_list.AddApns(capability_->GetProfiles());
-  apn_list.AddApns(operator_info->apn_list());
+  if (manufacturer_ != kQ6V5ModemManufacturerName) {
+    auto profiles = capability_->GetProfiles();
+    if (profiles) {
+      apn_list.AddApns(*profiles, ApnList::ApnSource::kModem);
+    }
+  }
+  apn_list.AddApns(mobile_operator_info_->apn_list(),
+                   ApnList::ApnSource::kModb);
   SetApnList(apn_list.GetList());
 
-  SetProviderRequiresRoaming(operator_info->requires_roaming());
+  SetProviderRequiresRoaming(mobile_operator_info_->requires_roaming());
 }
 
-void Cellular::UpdateServingOperator(
-    const MobileOperatorInfo* operator_info,
-    const MobileOperatorInfo* home_provider_info) {
-  SLOG(this, 3) << __func__;
+void Cellular::UpdateServingOperator() {
+  SLOG(3) << LoggingTag() << ": " << __func__;
   if (!service()) {
     return;
   }
 
   Stringmap serving_operator;
-  if (!operator_info->sid().empty()) {
-    serving_operator[kOperatorCodeKey] = operator_info->sid();
+  auto AssignIfNotEmpty = [&](const std::string& key,
+                              const std::string& value) {
+    if (!value.empty())
+      serving_operator[key] = value;
+  };
+  if (mobile_operator_info_->IsServingMobileNetworkOperatorKnown()) {
+    AssignIfNotEmpty(kOperatorCodeKey, mobile_operator_info_->serving_mccmnc());
+    AssignIfNotEmpty(kOperatorNameKey,
+                     mobile_operator_info_->serving_operator_name());
+    AssignIfNotEmpty(kOperatorCountryKey,
+                     mobile_operator_info_->serving_country());
+    AssignIfNotEmpty(kOperatorUuidKey, mobile_operator_info_->serving_uuid());
+  } else {
+    AssignIfNotEmpty(kOperatorCodeKey, mobile_operator_info_->mccmnc());
+    AssignIfNotEmpty(kOperatorNameKey, mobile_operator_info_->operator_name());
+    AssignIfNotEmpty(kOperatorCountryKey, mobile_operator_info_->country());
+    AssignIfNotEmpty(kOperatorUuidKey, mobile_operator_info_->uuid());
   }
-  if (!operator_info->nid().empty()) {
-    serving_operator[kOperatorCodeKey] = operator_info->nid();
-  }
-  if (!operator_info->mccmnc().empty()) {
-    serving_operator[kOperatorCodeKey] = operator_info->mccmnc();
-  }
-  if (!operator_info->operator_name().empty()) {
-    serving_operator[kOperatorNameKey] = operator_info->operator_name();
-  }
-  if (!operator_info->country().empty()) {
-    serving_operator[kOperatorCountryKey] = operator_info->country();
-  }
-  if (!operator_info->uuid().empty()) {
-    serving_operator[kOperatorUuidKey] = operator_info->uuid();
-  }
+
   service()->SetServingOperator(serving_operator);
 
   // Set friendly name of service.
-  std::string service_name;
-  if (!operator_info->operator_name().empty()) {
-    // If roaming, try to show "<home-provider> | <serving-operator>", per 3GPP
-    // rules (TS 31.102 and annex A of 122.101).
-    if (service()->roaming_state() == kRoamingStateRoaming &&
-        home_provider_info && !home_provider_info->operator_name().empty() &&
-        home_provider_info->operator_name() != operator_info->operator_name()) {
-      service_name += home_provider_info->operator_name() + " | ";
-    }
-    service_name += operator_info->operator_name();
-  } else if (!operator_info->mccmnc().empty()) {
-    // We could not get a name for the operator, just use the code.
-    service_name = "cellular_" + operator_info->mccmnc();
-  }
+  std::string service_name = mobile_operator_info_->friendly_operator_name(
+      service()->roaming_state() == kRoamingStateRoaming);
   if (service_name.empty()) {
-    LOG(WARNING) << "No properties for setting friendly name for: "
+    LOG(WARNING) << LoggingTag()
+                 << ": No properties for setting friendly name for: "
                  << service()->log_name();
     return;
   }
-  SLOG(this, 2) << __func__ << " Service: " << service()->log_name()
-                << " Name: " << service_name;
+  SLOG(2) << LoggingTag() << ": " << __func__
+          << ": Service: " << service()->log_name()
+          << " Name: " << service_name;
   service()->SetFriendlyName(service_name);
+
+  SetProviderRequiresRoaming(mobile_operator_info_->requires_roaming());
 }
 
 void Cellular::OnOperatorChanged() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << LoggingTag() << ": " << __func__;
   CHECK(capability_);
 
   if (service()) {
     capability_->UpdateServiceOLP();
   }
 
-  const bool home_provider_known =
-      home_provider_info_->IsMobileNetworkOperatorKnown();
-  const bool serving_operator_known =
-      serving_operator_info_->IsMobileNetworkOperatorKnown();
-
-  if (home_provider_known) {
-    UpdateHomeProvider(home_provider_info_.get());
-  } else if (serving_operator_known) {
-    SLOG(this, 2) << "Serving provider proxying in for home provider.";
-    UpdateHomeProvider(serving_operator_info_.get());
-  }
-
-  if (serving_operator_known) {
-    if (home_provider_known) {
-      UpdateServingOperator(serving_operator_info_.get(),
-                            home_provider_info_.get());
-    } else {
-      UpdateServingOperator(serving_operator_info_.get(), nullptr);
-    }
-  } else if (home_provider_known) {
-    UpdateServingOperator(home_provider_info_.get(), home_provider_info_.get());
+  UpdateHomeProvider();
+  UpdateServingOperator();
+  if (mobile_operator_info_->IsMobileNetworkOperatorKnown() ||
+      mobile_operator_info_->IsServingMobileNetworkOperatorKnown()) {
+    ResetCarrierEntitlement();
   }
 }
 
@@ -2552,6 +3923,265 @@ bool Cellular::StateIsStarted() {
 void Cellular::SetServiceForTesting(CellularServiceRefPtr service) {
   service_for_testing_ = service;
   service_ = service;
+}
+
+void Cellular::SetSelectedServiceForTesting(CellularServiceRefPtr service) {
+  SelectService(service);
+}
+
+void Cellular::EntitlementCheck(
+    base::OnceCallback<void(TetheringManager::EntitlementStatus)> callback) {
+  // Only one entitlement check request should exist at any point.
+  DCHECK(entitlement_check_callback_.is_null());
+  if (!entitlement_check_callback_.is_null()) {
+    LOG(ERROR) << kEntitlementCheckAnomalyDetectorPrefix
+               << "request received while another one is in progress";
+    metrics()->NotifyCellularEntitlementCheckResult(
+        Metrics::kCellularEntitlementCheckIllegalInProgress);
+    dispatcher()->PostTask(
+        FROM_HERE,
+        base::BindOnce(std::move(callback),
+                       TetheringManager::EntitlementStatus::kNotAllowed));
+    return;
+  }
+
+  if (!mobile_operator_info_->tethering_allowed()) {
+    LOG(ERROR) << kEntitlementCheckAnomalyDetectorPrefix
+               << "tethering is not allowed by database settings";
+    metrics()->NotifyCellularEntitlementCheckResult(
+        Metrics::kCellularEntitlementCheckNotAllowedByModb);
+    dispatcher()->PostTask(
+        FROM_HERE,
+        base::BindOnce(std::move(callback),
+                       TetheringManager::EntitlementStatus::kNotAllowed));
+    return;
+  }
+  // TODO(b/270210498): remove this check when tethering is allowed by default.
+  if (!mobile_operator_info_->IsMobileNetworkOperatorKnown() &&
+      !mobile_operator_info_->IsServingMobileNetworkOperatorKnown()) {
+    LOG(ERROR) << kEntitlementCheckAnomalyDetectorPrefix
+               << "carrier is not known.";
+    metrics()->NotifyCellularEntitlementCheckResult(
+        Metrics::kCellularEntitlementCheckUnknownCarrier);
+    dispatcher()->PostTask(
+        FROM_HERE,
+        base::BindOnce(std::move(callback),
+                       TetheringManager::EntitlementStatus::kNotAllowed));
+    return;
+  }
+
+  entitlement_check_callback_ = std::move(callback);
+  carrier_entitlement_->Check(mobile_operator_info_->entitlement_config());
+}
+
+void Cellular::TriggerEntitlementCheckCallbacks(
+    TetheringManager::EntitlementStatus result) {
+  if (!entitlement_check_callback_.is_null()) {
+    std::move(entitlement_check_callback_).Run(result);
+  }
+  if (!tethering_event_callback_.is_null() &&
+      result != TetheringManager::EntitlementStatus::kReady) {
+    tethering_event_callback_.Run(
+        TetheringManager::CellularUpstreamEvent::kUserNoLongerEntitled);
+  }
+}
+
+void Cellular::OnEntitlementCheckUpdated(CarrierEntitlement::Result result) {
+  LOG(INFO) << "Entitlement check updated: " << static_cast<int>(result);
+  switch (result) {
+    case shill::CarrierEntitlement::Result::kAllowed:
+      TriggerEntitlementCheckCallbacks(
+          TetheringManager::EntitlementStatus::kReady);
+      break;
+    case shill::CarrierEntitlement::Result::kNetworkNotReady:
+      TriggerEntitlementCheckCallbacks(
+          TetheringManager::EntitlementStatus::kUpstreamNetworkNotAvailable);
+      break;
+    case shill::CarrierEntitlement::Result::kGenericError:
+      LOG(ERROR) << kEntitlementCheckAnomalyDetectorPrefix << "Generic error";
+      [[fallthrough]];
+    case shill::CarrierEntitlement::Result::kUnrecognizedUser:  // FALLTHROUGH
+    case shill::CarrierEntitlement::Result::kUserNotAllowedToTether:
+      TriggerEntitlementCheckCallbacks(
+          TetheringManager::EntitlementStatus::kNotAllowed);
+      break;
+  }
+}
+
+void Cellular::SetDefaultPdnForTesting(const RpcIdentifier& dbus_path,
+                                       std::unique_ptr<Network> network,
+                                       LinkState link_state) {
+  default_pdn_ = std::make_unique<NetworkInfo>(this, dbus_path,
+                                               std::move(network), link_state);
+}
+
+void Cellular::SetMultiplexedTetheringPdnForTesting(
+    const RpcIdentifier& dbus_path,
+    std::unique_ptr<Network> network,
+    LinkState link_state) {
+  multiplexed_tethering_pdn_ = std::make_unique<NetworkInfo>(
+      this, dbus_path, std::move(network), link_state);
+}
+
+Cellular::NetworkInfo::NetworkInfo(Cellular* cellular,
+                                   const RpcIdentifier& bearer_path,
+                                   int interface_index,
+                                   const std::string& interface_name)
+    : cellular_(cellular), bearer_path_(bearer_path) {
+  network_ = std::make_unique<Network>(
+      interface_index, interface_name, Technology::kCellular, false,
+      cellular_->manager()->control_interface(),
+      cellular_->manager()->dispatcher(), cellular_->manager()->metrics());
+  network_->RegisterEventHandler(cellular_);
+}
+
+Cellular::NetworkInfo::NetworkInfo(Cellular* cellular,
+                                   const RpcIdentifier& bearer_path,
+                                   std::unique_ptr<Network> network,
+                                   LinkState link_state)
+    : cellular_(cellular),
+      bearer_path_(bearer_path),
+      network_(std::move(network)),
+      link_state_(link_state) {}
+
+Cellular::NetworkInfo::~NetworkInfo() {
+  network_->Stop();
+}
+
+std::string Cellular::NetworkInfo::LoggingTag() {
+  return cellular_->LoggingTag() + " [" + network_->interface_name() + "]";
+}
+
+bool Cellular::NetworkInfo::Configure(const CellularBearer* bearer) {
+  if (!bearer) {
+    LOG(INFO) << LoggingTag()
+              << ": No active bearer detected: aborting network setup.";
+    return false;
+  }
+  if (bearer->dbus_path() != bearer_path_) {
+    LOG(INFO) << LoggingTag()
+              << ": Mismatched active bearer detected: aborting network setup.";
+    return false;
+  }
+
+  bool ipv6_configured = false;
+  bool ipv4_configured = false;
+
+  // If the modem has done its own SLAAC and it was able to retrieve a correct
+  // address and gateway it will report kMethodStatic. If the modem didn't do
+  // SLAAC by itself it will report kMethodDHCP and optionally include a
+  // link-local address to configure before running host SLAAC. In both those
+  // cases, the modem will receive DNS information via PCOs from the network,
+  // which should be considered in the setup.
+  if (bearer->ipv6_config_method() !=
+      CellularBearer::IPConfigMethod::kUnknown) {
+    SLOG(2) << LoggingTag()
+            << ": Assign static IPv6 configuration from bearer.";
+    const auto& props = *bearer->ipv6_config_properties();
+    ipv6_props_ = props;
+    start_opts_.accept_ra = true;
+
+    // TODO(b/285205946): Currently IPv6 method is always set to static so we
+    // need to look into the actual address to tell whether it's a link local
+    // address to be used for SLAAC or it's already a global address reported by
+    // modem SLAAC. After we revert the ModemManager patch we should be able to
+    // simply check IPv6 method here instead.
+    const auto link_local_mask =
+        *net_base::IPv6CIDR::CreateFromStringAndPrefix("fe80::", 10);
+    const auto local = net_base::IPv6Address::CreateFromString(props.address);
+    if (!local) {
+      LOG(ERROR) << LoggingTag()
+                 << ": IPv6 address is not valid: " << props.address;
+    } else if (link_local_mask.InSameSubnetWith(*local)) {
+      ipv6_props_->address.clear();
+      ipv6_props_->subnet_prefix = 0;
+      start_opts_.link_local_address = local;
+    } else {
+      start_opts_.accept_ra = false;
+    }
+    ipv6_configured = true;
+  }
+
+  std::optional<DHCPProvider::Options> dhcp_opts;
+  if (bearer->ipv4_config_method() == CellularBearer::IPConfigMethod::kStatic) {
+    SLOG(2) << LoggingTag()
+            << ": Assign static IPv4 configuration from bearer.";
+    ipv4_props_ = *bearer->ipv4_config_properties();
+    ipv4_configured = true;
+  } else if (bearer->ipv4_config_method() ==
+             CellularBearer::IPConfigMethod::kDHCP) {
+    if (cellular_->capability_->IsModemL850()) {
+      LOG(WARNING) << LoggingTag()
+                   << ": DHCP configuration not supported on L850"
+                      " (Ignoring kDHCP).";
+    } else {
+      SLOG(2) << LoggingTag() << ": Needs DHCP to acquire IPv4 configuration.";
+      dhcp_opts = cellular_->manager()->CreateDefaultDHCPOption();
+      dhcp_opts->use_arp_gateway = false;
+      dhcp_opts->use_rfc_8925 = false;
+      ipv4_configured = true;
+    }
+  }
+
+  if (!ipv6_configured && !ipv4_configured) {
+    LOG(WARNING) << LoggingTag()
+                 << ": No supported IP configuration found in bearer";
+    return false;
+  }
+
+  // Override the MTU with a given limit for a specific serving operator
+  // if the network doesn't report something lower. The setting is applied both
+  // in IPv4 and IPv6 settings.
+  if (cellular_->mobile_operator_info_ &&
+      cellular_->mobile_operator_info_->mtu() != IPConfig::kUndefinedMTU) {
+    if (ipv4_props_ &&
+        (ipv4_props_->mtu == IPConfig::kUndefinedMTU ||
+         cellular_->mobile_operator_info_->mtu() < ipv4_props_->mtu)) {
+      ipv4_props_->mtu = cellular_->mobile_operator_info_->mtu();
+    }
+    if (ipv6_props_ &&
+        (ipv6_props_->mtu == IPConfig::kUndefinedMTU ||
+         cellular_->mobile_operator_info_->mtu() < ipv6_props_->mtu)) {
+      ipv6_props_->mtu = cellular_->mobile_operator_info_->mtu();
+    }
+  }
+
+  start_opts_.dhcp = dhcp_opts;
+  // TODO(b/234300343#comment43): Read probe URL override configuration
+  // from shill APN dB.
+  start_opts_.probing_configuration =
+      cellular_->manager()->GetPortalDetectorProbingConfiguration();
+
+  return true;
+}
+
+void Cellular::NetworkInfo::Start() {
+  // TODO(b/269401899): Use NetworkConfig in NetworkInfo instead of ipv6_props_
+  // and ipv4_props_.
+  if (ipv6_props_ || ipv4_props_) {
+    IPConfig::Properties* ipv6 = ipv6_props_ ? &*ipv6_props_ : nullptr;
+    IPConfig::Properties* ipv4 = ipv4_props_ ? &*ipv4_props_ : nullptr;
+    auto network_config = IPConfig::Properties::ToNetworkConfig(ipv4, ipv6);
+    network_->set_link_protocol_network_config(
+        std::make_unique<NetworkConfig>(std::move(network_config)));
+  }
+  network_->Start(start_opts_);
+}
+
+void Cellular::NetworkInfo::DestroySockets() {
+  for (const auto& address : network_->GetAddresses()) {
+    SLOG(2) << LoggingTag() << ": Destroy all sockets of address: " << address;
+    cellular_->rtnl_handler()->RemoveInterfaceAddress(
+        network_->interface_index(), address);
+    if (!cellular_->socket_destroyer_->DestroySockets(IPPROTO_TCP,
+                                                      address.address()))
+      SLOG(2) << LoggingTag() << ": no tcp sockets found for " << address;
+    // Chrome sometimes binds to UDP sockets, so lets destroy them.
+    if (!cellular_->socket_destroyer_->DestroySockets(IPPROTO_UDP,
+                                                      address.address()))
+      SLOG(2) << LoggingTag() << ": no udp sockets found for " << address;
+  }
+  SLOG(2) << LoggingTag() << ": " << __func__ << " complete.";
 }
 
 }  // namespace shill

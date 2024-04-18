@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,6 +35,9 @@ class Camera3DeviceFixture : public testing::Test {
  public:
   explicit Camera3DeviceFixture(int cam_id) : cam_device_(cam_id) {}
 
+  Camera3DeviceFixture(const Camera3DeviceFixture&) = delete;
+  Camera3DeviceFixture& operator=(const Camera3DeviceFixture&) = delete;
+
   void SetUp() override;
 
   void TearDown() override;
@@ -59,8 +62,6 @@ class Camera3DeviceFixture : public testing::Test {
   // received partial metadata.
   virtual void ProcessPartialMetadata(
       std::vector<ScopedCameraMetadata>* partial_metadata) {}
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(Camera3DeviceFixture);
 };
 
 }  // namespace camera3_test

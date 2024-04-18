@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,7 @@ func main() {
 	identifierFlag := flag.String("identifier", "", "Substring of the identifier printed by lorgnette_cli of the scanner to test.")
 	flag.Parse()
 
-	logFile, err := utils.CreateLogFile()
+	logFile, err := utils.CreateLogFile("test_scanner_capabilities")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -37,18 +37,28 @@ func main() {
 		log.Fatal(err)
 	}
 
-	caps, err := utils.GetScannerCapabilities(scannerInfo.Address)
+	log.Print("INFO: Testing scanner: ", scannerInfo.ToLorgnetteScannerName())
+
+	caps, err := utils.GetScannerCapabilities(scannerInfo)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rawLorgnetteCaps, err := utils.LorgnetteCLIGetJSONCaps(scannerInfo.ToLorgnetteScannerName())
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	tests := map[string]utils.TestFunction{
-		"HasSupportedDocumentSource": hwtests.HasSupportedDocumentSourceTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
-		"NoCameraSource":             hwtests.NoCameraSourceTest(caps.CameraInputCaps),
-		"NoStoredJobSupport":         hwtests.NoStoredJobSupportTest(caps.StoredJobRequestSupport),
-		"HasSupportedResolution":     hwtests.HasSupportedResolutionTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
-		"HasSupportedColorMode":      hwtests.HasSupportedColorModeTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
-		"NoUnsupportedColorMode":     hwtests.NoUnsupportedColorModeTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps)}
+		"HasSupportedDocumentSource":   hwtests.HasSupportedDocumentSourceTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
+		"NoCameraSource":               hwtests.NoCameraSourceTest(caps.CameraInputCaps),
+		"NoStoredJobSupport":           hwtests.NoStoredJobSupportTest(caps.StoredJobRequestSupport),
+		"HasSupportedResolution":       hwtests.HasSupportedResolutionTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
+		"HighestResolutionIsSupported": hwtests.HighestResolutionIsSupportedTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
+		"LowestResolutionIsSupported":  hwtests.LowestResolutionIsSupportedTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
+		"HasSupportedColorMode":        hwtests.HasSupportedColorModeTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
+		"NoUnsupportedColorMode":       hwtests.NoUnsupportedColorModeTest(caps.PlatenInputCaps, caps.AdfCapabilities.AdfSimplexInputCaps, caps.AdfCapabilities.AdfDuplexInputCaps),
+		"MatchesLorgnetteCapabilities": hwtests.MatchesLorgnetteCapabilitiesTest(caps, rawLorgnetteCaps)}
 	failed := []string{}
 	skipped := []string{}
 	errors := []string{}

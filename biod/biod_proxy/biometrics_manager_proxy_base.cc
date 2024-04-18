@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,35 +8,25 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <chromeos/dbus/service_constants.h>
 
-namespace biod {
+#include "biod/biod_constants.h"
+#include "biod/biod_proxy/util.h"
 
-static const int kDbusTimeoutMs = dbus::ObjectProxy::TIMEOUT_USE_DEFAULT;
+namespace biod {
 
 using FinishCallback = base::RepeatingCallback<void(bool success)>;
 
-const char* ScanResultToString(ScanResult result) {
-  switch (result) {
-    case ScanResult::SCAN_RESULT_SUCCESS:
-      return "Success";
-    case ScanResult::SCAN_RESULT_PARTIAL:
-      return "Partial";
-    case ScanResult::SCAN_RESULT_INSUFFICIENT:
-      return "Insufficient";
-    case ScanResult::SCAN_RESULT_SENSOR_DIRTY:
-      return "Sensor Dirty";
-    case ScanResult::SCAN_RESULT_TOO_SLOW:
-      return "Too Slow";
-    case ScanResult::SCAN_RESULT_TOO_FAST:
-      return "Too Fast";
-    case ScanResult::SCAN_RESULT_IMMOBILE:
-      return "Immobile";
+const char* BiometricsManagerStatusToString(
+    const BiometricsManagerStatus& status) {
+  switch (status) {
+    case BiometricsManagerStatus::INITIALIZED:
+      return "Initialized";
     default:
-      return "Unknown Result";
+      return "Unknown status";
   }
 }
 
@@ -114,7 +104,8 @@ bool BiometricsManagerProxyBase::StartAuthSession() {
                                biod::kBiometricsManagerStartAuthSessionMethod);
 
   std::unique_ptr<dbus::Response> response =
-      proxy_->CallMethodAndBlock(&method_call, kDbusTimeoutMs);
+      proxy_->CallMethodAndBlock(&method_call, dbus_constants::kDbusTimeoutMs)
+          .value_or(nullptr);
 
   biod_auth_session_ = HandleAuthSessionResponse(response.get());
   return biod_auth_session_ != nullptr;
@@ -133,7 +124,7 @@ void BiometricsManagerProxyBase::StartAuthSessionAsync(
                                biod::kBiometricsManagerStartAuthSessionMethod);
 
   proxy_->CallMethod(
-      &method_call, kDbusTimeoutMs,
+      &method_call, dbus_constants::kDbusTimeoutMs,
       base::BindOnce(&BiometricsManagerProxyBase::OnStartAuthSessionResp,
                      base::Unretained(this), std::move(callback)));
 }
@@ -142,7 +133,8 @@ void BiometricsManagerProxyBase::EndAuthSession() {
   LOG(INFO) << "Ending biometric authentication";
   dbus::MethodCall end_call(biod::kAuthSessionInterface,
                             biod::kAuthSessionEndMethod);
-  biod_auth_session_->CallMethodAndBlock(&end_call, kDbusTimeoutMs);
+  (void)biod_auth_session_->CallMethodAndBlock(&end_call,
+                                               dbus_constants::kDbusTimeoutMs);
 }
 
 void BiometricsManagerProxyBase::OnFinish(bool success) {

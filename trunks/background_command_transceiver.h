@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 
 #include "trunks/trunks_export.h"
 
@@ -46,14 +46,13 @@ class TRUNKS_EXPORT BackgroundCommandTransceiver : public CommandTransceiver {
 
   // CommandTranceiver methods.
   void SendCommand(const std::string& command,
-                   const ResponseCallback& callback) override;
+                   ResponseCallback callback) override;
   std::string SendCommandAndWait(const std::string& command) override;
 
  private:
   // Sends a |command| to the |next_transceiver_| and invokes a |callback| with
   // the command response.
-  void SendCommandTask(const std::string& command,
-                       const ResponseCallback& callback);
+  void SendCommandTask(const std::string& command, ResponseCallback callback);
 
   base::WeakPtr<BackgroundCommandTransceiver> GetWeakPtr() {
     return weak_factory_.GetWeakPtr();

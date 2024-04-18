@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,17 +9,16 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/scoped_refptr.h>
 #include <base/memory/weak_ptr.h>
 #include <base/sequence_checker_impl.h>
-#include <base/single_thread_task_runner.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/grpc/async_grpc_client.h>
 
 #include "diagnostics/dpsl/public/dpsl_requester.h"
 
-#include "wilco_dtc_supportd.grpc.pb.h"  // NOLINT(build/include)
+#include "wilco_dtc_supportd.grpc.pb.h"  // NOLINT(build/include_directory)
 
 namespace diagnostics {
 
@@ -99,7 +98,7 @@ class DpslRequesterImpl final : public DpslRequester {
   void CallGrpcClientMethod(
       GrpcStubMethod grpc_stub_method,
       std::unique_ptr<RequestType> request,
-      base::Callback<void(grpc::Status, std::unique_ptr<ResponseType>)>
+      base::OnceCallback<void(grpc::Status, std::unique_ptr<ResponseType>)>
           response_callback);
 
   // Task runner of the main thread (on which this instance was created).

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -62,7 +62,6 @@ Codec GetCodec(uint32_t format) {
     case V4L2_PIX_FMT_VP9_FRAME:
       return Codec::kVP9;
     case V4L2_PIX_FMT_JPEG:
-    case V4L2_PIX_FMT_JPEG_RAW:
       return Codec::kJPEG;
     default:
       return Codec::kUnknown;

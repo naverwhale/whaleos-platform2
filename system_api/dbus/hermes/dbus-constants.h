@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,7 +31,9 @@ namespace euicc {
 const char kInstallProfileFromActivationCode[] =
     "InstallProfileFromActivationCode";
 const char kInstallPendingProfile[] = "InstallPendingProfile";
+const char kRefreshInstalledProfiles[] = "RefreshInstalledProfiles";
 const char kRequestPendingProfiles[] = "RequestPendingProfiles";
+const char kRefreshSmdxProfiles[] = "RefreshSmdxProfiles";
 const char kRequestInstalledProfiles[] = "RequestInstalledProfiles";
 const char kUninstallProfile[] = "UninstallProfile";
 const char kResetMemory[] = "ResetMemory";
@@ -47,6 +49,7 @@ const char kEidProperty[] = "Eid";
 const char kInstalledProfilesProperty[] = "InstalledProfiles";
 const char kIsActiveProperty[] = "IsActive";
 const char kPendingProfilesProperty[] = "PendingProfiles";
+const char kProfilesProperty[] = "Profiles";
 const char kPhysicalSlotProperty[] = "PhysicalSlot";
 
 }  // namespace euicc
@@ -111,6 +114,10 @@ const char kErrorInvalidParameter[] =
     "org.chromium.Hermes.Error.InvalidParameter";
 const char kErrorMalformedResponse[] =
     "org.chromium.Hermes.Error.MalformedResponse";
+const char kErrorUnexpectedModemManagerState[] =
+    "org.chromium.Hermes.Error.UnexpectedModemManagerState";
+const char kErrorModemMessageProcessing[] =
+    "org.chromium.Hermes.Error.ModemMessageProcessing";
 const char kErrorNeedConfirmationCode[] =
     "org.chromium.Hermes.Error.NeedConfirmationCode";
 const char kErrorNoResponse[] = "org.chromium.Hermes.Error.NoResponse";

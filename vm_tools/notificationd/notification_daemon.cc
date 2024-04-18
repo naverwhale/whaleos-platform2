@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,9 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/string_number_conversions.h>
@@ -36,7 +36,7 @@ namespace notificationd {
 std::unique_ptr<NotificationDaemon> NotificationDaemon::Create(
     const std::string& display_name,
     const std::string& virtwl_device,
-    base::Closure quit_closure) {
+    base::OnceClosure quit_closure) {
   auto daemon = base::WrapUnique(new NotificationDaemon());
 
   if (!daemon->Init(display_name, virtwl_device, std::move(quit_closure))) {
@@ -49,7 +49,7 @@ std::unique_ptr<NotificationDaemon> NotificationDaemon::Create(
 
 bool NotificationDaemon::Init(const std::string& display_name,
                               const std::string& virtwl_device,
-                              base::Closure quit_closure) {
+                              base::OnceClosure quit_closure) {
   notification_shell_client_ = NotificationShellClient::Create(
       display_name, virtwl_device, this, std::move(quit_closure));
   if (!notification_shell_client_) {
@@ -172,7 +172,7 @@ void NotificationDaemon::OnClicked(const std::string& notification_key,
       action_key = kDefaultActionKey;
     }
   } else {
-    DCHECK_LT(button_index, click_action.action_keys_for_buttons.size());
+    CHECK_LT(button_index, click_action.action_keys_for_buttons.size());
     action_key = click_action.action_keys_for_buttons[button_index];
   }
 

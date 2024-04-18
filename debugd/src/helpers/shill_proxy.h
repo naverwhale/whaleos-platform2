@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@
 #define DEBUGD_SRC_HELPERS_SHILL_PROXY_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 
 #include "debugd/src/helpers/system_service_proxy.h"
@@ -28,9 +28,8 @@ class ShillProxy : public SystemServiceProxy {
 
   // Gets the properties associated with the interface named |interface_name|
   // of a D-Bus object identified by |object_path| through the GetProperties()
-  // D-Bus method exposed by shill. The properties are expected to be a
-  // dictionary. Returns base::nullopt on error.
-  base::Optional<base::Value> GetProperties(
+  // D-Bus method exposed by shill. Returns std::nullopt on error.
+  std::optional<base::Value::Dict> GetProperties(
       const std::string& interface_name,
       const dbus::ObjectPath& object_path) override;
 

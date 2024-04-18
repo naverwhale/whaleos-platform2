@@ -1,18 +1,19 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef OOBE_CONFIG_LOAD_OOBE_CONFIG_ROLLBACK_H_
 #define OOBE_CONFIG_LOAD_OOBE_CONFIG_ROLLBACK_H_
 
+#include "oobe_config/filesystem/file_handler.h"
 #include "oobe_config/load_oobe_config_interface.h"
 
-#include <memory>
 #include <string>
 
 #include <base/files/file_path.h>
 
-#include "oobe_config/metrics.h"
+#include "oobe_config/metrics/enterprise_rollback_metrics_handler.h"
+#include "oobe_config/metrics/metrics_uma.h"
 
 namespace oobe_config {
 
@@ -23,7 +24,10 @@ class RollbackData;
 // file after rollback.
 class LoadOobeConfigRollback : public LoadOobeConfigInterface {
  public:
-  LoadOobeConfigRollback(OobeConfig* oobe_config, bool allow_unencrypted);
+  explicit LoadOobeConfigRollback(
+      OobeConfig* oobe_config,
+      EnterpriseRollbackMetricsHandler* rollback_metrics,
+      FileHandler file_handler = FileHandler());
   LoadOobeConfigRollback(const LoadOobeConfigRollback&) = delete;
   LoadOobeConfigRollback& operator=(const LoadOobeConfigRollback&) = delete;
 
@@ -39,9 +43,11 @@ class LoadOobeConfigRollback : public LoadOobeConfigInterface {
   // failure. During stage 1 of rollback, the process exits before returning.
   bool AssembleConfig(const RollbackData& rollback_data, std::string* config);
 
+  FileHandler file_handler_;
   OobeConfig* oobe_config_;
-  bool allow_unencrypted_ = false;
-  Metrics metrics_;  // For UMA metrics logging.
+  EnterpriseRollbackMetricsHandler* rollback_metrics_;
+  // TODO(b/301924474): Clean old UMA metrics.
+  MetricsUMA metrics_uma_;  // For UMA metrics logging.
 };
 
 }  // namespace oobe_config

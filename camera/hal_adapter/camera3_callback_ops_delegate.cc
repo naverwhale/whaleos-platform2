@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,9 +9,9 @@
 #include <inttypes.h>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/strings/stringprintf.h>
 
 #include "cros-camera/common.h"
@@ -27,47 +27,67 @@ Camera3CallbackOpsDelegate::Camera3CallbackOpsDelegate(
 
 void Camera3CallbackOpsDelegate::ProcessCaptureResult(
     mojom::Camera3CaptureResultPtr result) {
-  VLOGF_ENTER();
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&Camera3CallbackOpsDelegate::ProcessCaptureResultOnThread,
-                 base::AsWeakPtr(this), base::Passed(&result)));
+      base::BindOnce(&Camera3CallbackOpsDelegate::ProcessCaptureResultOnThread,
+                     base::AsWeakPtr(this), std::move(result)));
 }
 
 void Camera3CallbackOpsDelegate::Notify(mojom::Camera3NotifyMsgPtr msg) {
-  VLOGF_ENTER();
-  task_runner_->PostTask(FROM_HERE,
-                         base::Bind(&Camera3CallbackOpsDelegate::NotifyOnThread,
-                                    base::AsWeakPtr(this), base::Passed(&msg)));
+  task_runner_->PostTask(
+      FROM_HERE, base::BindOnce(&Camera3CallbackOpsDelegate::NotifyOnThread,
+                                base::AsWeakPtr(this), std::move(msg)));
+}
+
+void Camera3CallbackOpsDelegate::RequestStreamBuffers(
+    std::vector<mojom::Camera3BufferRequestPtr> buffer_reqs,
+    mojom::Camera3CallbackOps::RequestStreamBuffersCallback cb) {
+  task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&Camera3CallbackOpsDelegate::RequestStreamBuffersOnThread,
+                     base::AsWeakPtr(this), std::move(buffer_reqs),
+                     std::move(cb)));
+}
+
+void Camera3CallbackOpsDelegate::ReturnStreamBuffers(
+    std::vector<mojom::Camera3StreamBufferPtr> buffers) {
+  task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&Camera3CallbackOpsDelegate::ReturnStreamBuffersOnThread,
+                     base::AsWeakPtr(this), std::move(buffers)));
 }
 
 void Camera3CallbackOpsDelegate::ProcessCaptureResultOnThread(
     mojom::Camera3CaptureResultPtr result) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  // process_capture_result may be called multiple times for a single frame,
-  // each time with a new disjoint piece of metadata and/or set of gralloc
-  // buffers. The framework will accumulate these partial metadata results into
-  // one result.
-  // ref:
-  // https://android.googlesource.com/platform/hardware/libhardware/+/8a6fed0d280014d84fe0f6a802f1cf29600e5bae/include/hardware/camera3.h#284
-  TRACE_CAMERA_COUNTER("ResultFrame", result->frame_number);
-  if (result->output_buffers) {
-    for (const auto& output_buffer : *result->output_buffers) {
-      TRACE_CAMERA_ASYNC_END(base::StringPrintf("frame capture stream %" PRIu64,
-                                                output_buffer->stream_id),
-                             result->frame_number);
-    }
-  }
+  TRACE_HAL_ADAPTER("frame_number", result->frame_number);
+
   remote_->ProcessCaptureResult(std::move(result));
 }
 
 void Camera3CallbackOpsDelegate::NotifyOnThread(
     mojom::Camera3NotifyMsgPtr msg) {
-  VLOGF_ENTER();
   DCHECK(task_runner_->BelongsToCurrentThread());
-  TRACE_CAMERA_SCOPED();
+  TRACE_HAL_ADAPTER();
+
   remote_->Notify(std::move(msg));
+}
+
+void Camera3CallbackOpsDelegate::RequestStreamBuffersOnThread(
+    std::vector<mojom::Camera3BufferRequestPtr> buffer_reqs,
+    mojom::Camera3CallbackOps::RequestStreamBuffersCallback cb) {
+  DCHECK(task_runner_->BelongsToCurrentThread());
+  TRACE_HAL_ADAPTER();
+
+  remote_->RequestStreamBuffers(std::move(buffer_reqs), std::move(cb));
+}
+
+void Camera3CallbackOpsDelegate::ReturnStreamBuffersOnThread(
+    std::vector<mojom::Camera3StreamBufferPtr> buffers) {
+  DCHECK(task_runner_->BelongsToCurrentThread());
+  TRACE_HAL_ADAPTER();
+
+  remote_->ReturnStreamBuffers(std::move(buffers));
 }
 
 }  // end of namespace cros

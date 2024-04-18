@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include <optional>
 
 #include <base/check.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/rand_util.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
@@ -50,7 +50,7 @@ struct FrameInit {
   constexpr size_t PayloadSize() const {
     return (static_cast<size_t>(header.bcnth) << 8) + header.bcntl;
   }
-  constexpr static size_t MaxDataSize() { return base::size(decltype(data){}); }
+  constexpr static size_t MaxDataSize() { return std::size(decltype(data){}); }
   constexpr static size_t DataFits(size_t all_data_size) {
     return std::min(all_data_size, MaxDataSize());
   }
@@ -66,7 +66,7 @@ struct FrameCont {
   FrameContHeader header;
   uint8_t data[kFrameSize - sizeof(FrameContHeader)];
 
-  constexpr static size_t MaxDataSize() { return base::size(decltype(data){}); }
+  constexpr static size_t MaxDataSize() { return std::size(decltype(data){}); }
   constexpr static size_t DataFits(size_t all_data_size) {
     return std::min(all_data_size, MaxDataSize());
   }
@@ -292,6 +292,8 @@ std::string U2FHid::Command::CommandName() const {
   switch (static_cast<CommandCode>(cmd)) {
     case CommandCode::kPing:
       return "Ping";
+    case CommandCode::kAtr:
+      return "Atr";
     case CommandCode::kMsg:
       return "Msg";
     case CommandCode::kLock:
@@ -304,6 +306,8 @@ std::string U2FHid::Command::CommandName() const {
       return "Wink";
     case CommandCode::kError:
       return "Error";
+    case CommandCode::kMetrics:
+      return "Metrics";
   }
   return "?";
 }
@@ -557,7 +561,7 @@ bool CheckBlobLength(const brillo::Blob& blob,
 
 }  // namespace
 
-bool U2F::Register(base::Optional<uint8_t> p1,
+bool U2F::Register(std::optional<uint8_t> p1,
                    const brillo::Blob& challenge,
                    const brillo::Blob& application,
                    bool use_g2f_att_key,
@@ -630,7 +634,7 @@ bool U2F::Register(base::Optional<uint8_t> p1,
   return true;
 }
 
-bool U2F::Authenticate(base::Optional<uint8_t> p1,
+bool U2F::Authenticate(std::optional<uint8_t> p1,
                        const brillo::Blob& challenge,
                        const brillo::Blob& application,
                        const brillo::Blob& key_handle,

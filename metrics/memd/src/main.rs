@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -21,6 +21,7 @@ extern crate env_logger;
 extern crate libc;
 #[macro_use]
 extern crate log;
+extern crate procfs;
 extern crate syslog;
 extern crate tempfile;
 
@@ -28,7 +29,7 @@ extern crate protobuf; // needed by proto_include.rs
 include!(concat!(env!("OUT_DIR"), "/proto_include.rs"));
 
 use chrono::prelude::*;
-use {libc::__errno_location, libc::c_void};
+use libc::c_void;
 
 #[cfg(not(test))]
 use dbus::{BusType, Connection, WatchEvent};
@@ -36,10 +37,11 @@ use dbus::{BusType, Connection, WatchEvent};
 use protobuf::Message;
 
 use std::cmp::max;
+use std::collections::hash_map::HashMap;
 use std::fmt;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::prelude::*;
-use std::mem::{self, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -49,12 +51,11 @@ use std::{io, str};
 // Not to be confused with chrono::Duration or the deprecated time::Duration.
 use std::time::Duration;
 
+use procfs::LoadAverage;
 use tempfile::TempDir;
 
 #[cfg(test)]
 mod test;
-
-const PAGE_SIZE: usize = 4096; // old friend
 
 const LOG_DIRECTORY: &str = "/var/log/memd";
 const STATIC_PARAMETERS_LOG: &str = "memd.parameters";
@@ -155,48 +156,6 @@ impl fmt::Display for Error {
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-fn errno() -> i32 {
-    // _errno_location() is trivially safe to call and dereferencing the
-    // returned pointer is always safe because it's guaranteed to be valid and
-    // point to thread-local data.  (Thanks to Zach for this comment.)
-    unsafe { *__errno_location() }
-}
-
-// Returns the string for posix error number |err|.
-fn strerror(err: i32) -> String {
-    let mut buffer = vec![0u8; 128];
-    // |err| is valid because it is the libc errno at all call sites.  |buffer|
-    // is converted to a valid address, and |buffer.len()| is a valid length.
-    let ret = unsafe {
-        libc::strerror_r(
-            err,
-            &mut buffer[0] as *mut u8 as *mut libc::c_char,
-            buffer.len(),
-        )
-    };
-    if ret != 0 {
-        panic!(
-            "strerror_r failed with '{}'; the original error number was '{}'",
-            ret, err
-        );
-    }
-    buffer.resize(
-        buffer
-            .iter()
-            .position(|&a| a == 0u8)
-            .unwrap_or(buffer.len()),
-        0u8,
-    );
-    match String::from_utf8(buffer) {
-        Ok(s) => s,
-        Err(e) => {
-            // Ouch---an error while trying to process another error.
-            // Very unlikely so we just panic.
-            panic!("error {:?} converting to UTF8", e);
-        }
-    }
-}
-
 // Opens a file if it exists, otherwise returns none.
 fn open_maybe(path: &Path) -> Result<Option<File>> {
     if !path.exists() {
@@ -232,7 +191,6 @@ fn read_int(path: &Path) -> Result<u32> {
     let mut content = String::new();
     file.read_to_string(&mut content)?;
     Ok(content
-        .trim()
         .split_whitespace()
         .into_iter()
         .next()
@@ -374,7 +332,7 @@ impl FileWatcher {
             return Err("has_fired_fd: fd is too large".into());
         }
         // see comment for |set()|
-        Ok(unsafe { libc::FD_ISSET(fd, &mut self.inout_read_fds) })
+        Ok(unsafe { libc::FD_ISSET(fd, &self.inout_read_fds) })
     }
 
     fn watch(&mut self, timeout: &Duration, timer: &mut dyn Timer) -> Result<usize> {
@@ -401,7 +359,7 @@ struct Sample {
     info: Sysinfo,
     runnables: u32, // number of runnable processes
     available: u32, // available RAM from low-mem notifier
-    vmstat_values: [u64; VMSTAT_VALUES_COUNT],
+    vmstat_values: [i64; VMSTAT_VALUES_COUNT],
 }
 
 impl Sample {
@@ -413,10 +371,10 @@ impl Sample {
             self.uptime / 1000,
             self.uptime % 1000 / 10,
             self.sample_type,
-            self.info.0.loads[0],
-            self.info.0.freeram,
-            self.info.0.freeswap,
-            self.info.0.procs,
+            self.info.loads_1_minute,
+            self.info.freeram,
+            self.info.freeswap,
+            self.info.procs,
             self.runnables,
             self.available,
             self.vmstat_values[0],
@@ -429,36 +387,33 @@ impl Sample {
     }
 }
 
-#[derive(Copy, Clone)]
-struct Sysinfo(libc::sysinfo);
-
-impl Sysinfo {
-    // Wrapper for sysinfo syscall.
-    fn sysinfo() -> Result<Sysinfo> {
-        let mut info: Sysinfo = Default::default();
-        // sysinfo() is always safe when passed a valid pointer
-        match unsafe { libc::sysinfo(&mut info.0 as *mut libc::sysinfo) } {
-            0 => Ok(info),
-            _ => Err(format!("sysinfo: {}", strerror(errno())).into()),
-        }
-    }
-
-    // Fakes sysinfo system call, for testing.
-    fn fake_sysinfo() -> Result<Sysinfo> {
-        let mut info: Sysinfo = Default::default();
-        // Any numbers will do.
-        info.0.loads[0] = 5;
-        info.0.freeram = 42_000_000;
-        info.0.freeswap = 84_000_000;
-        info.0.procs = 1234;
-        Ok(info)
-    }
+#[derive(Copy, Clone, Default)]
+struct Sysinfo {
+    loads_1_minute: f64,
+    freeram: u64,
+    freeswap: u64,
+    procs: u16,
 }
 
-impl Default for Sysinfo {
-    fn default() -> Sysinfo {
-        // safe because sysinfo contains only numbers
-        unsafe { mem::zeroed() }
+fn sysinfo() -> Result<Sysinfo> {
+    let sysinfo_result = nix::sys::sysinfo::sysinfo()?;
+    Ok(Sysinfo {
+        loads_1_minute: sysinfo_result.load_average().0,
+        freeram: sysinfo_result.ram_unused(),
+        freeswap: sysinfo_result.swap_free(),
+        procs: sysinfo_result.process_count(),
+    })
+}
+
+impl Sysinfo {
+    // Fakes sysinfo for testing.
+    fn fake_sysinfo() -> Result<Sysinfo> {
+        Ok(Sysinfo {
+            loads_1_minute: 5.0,
+            freeram: 42_000_000,
+            freeswap: 84_000_000,
+            procs: 1234,
+        })
     }
 }
 
@@ -517,7 +472,7 @@ impl SampleQueue {
     // Outputs to file |f| samples from |start_time| to the head.  Uses a start
     // time rather than a start index because when we start a clip we have to
     // do a time-based search anyway.
-    fn output_from_time(&self, mut f: &mut File, start_time: i64) -> Result<()> {
+    fn output_from_time(&self, f: &mut File, start_time: i64) -> Result<()> {
         // For now just do a linear search. ;)
         let mut start_index = modulo(self.ihead() - 1, SAMPLE_QUEUE_LENGTH);
         debug!(
@@ -544,125 +499,51 @@ impl SampleQueue {
         let mut index = modulo(start_index as isize + 1, SAMPLE_QUEUE_LENGTH) as isize;
         while index != self.ihead() {
             debug!("output_from_time: outputting index {}", index);
-            self.sample(index).output(&mut f)?;
+            self.sample(index).output(f)?;
             index = modulo(index + 1, SAMPLE_QUEUE_LENGTH) as isize;
         }
         Ok(())
     }
 }
 
-// Returns number of tasks in the run queue as reported in /proc/loadavg, which
-// must be accessible via runnables_file.
-pub fn get_runnables(runnables_file: &File) -> Result<u32> {
-    let content = pread(runnables_file)?;
-    // Example: "0.81 0.66 0.86 22/3873 7043" (22 runnables here).
-    let slash_pos = content.find('/').ok_or("cannot find '/'")?;
-    let space_pos = &content[..slash_pos].rfind(' ').ok_or("cannot find ' '")?;
-    let (value, _) = parse_int_prefix(&content[space_pos + 1..])?;
-    Ok(value)
+// Returns the number of processes currently runnable (running or on ready queue).
+// Rule of thumb:
+// runnable / CPU_count < 3, CPU loading is not high.
+// runnable / CPU_count > 5, CPU loading is very high.
+fn get_runnables() -> Result<u32> {
+    Ok(parse_runnables(LoadAverage::new()?))
 }
 
-// Converts the initial digit characters of |s| to the value of the number they
-// represent.  Returns the number of characters scanned.
-fn parse_int_prefix(s: &str) -> Result<(u32, usize)> {
-    let mut result = 0;
-    let mut count = 0;
-    // Skip whitespace first.
-    for c in s.trim_start().chars() {
-        let x = c.to_digit(10);
-        match x {
-            Some(d) => {
-                result = result * 10 + d;
-                count += 1;
-            }
-            None => {
-                break;
-            }
-        }
-    }
-    if count == 0 {
-        Err(format!("parse_int_prefix: not an int: {}", s).into())
-    } else {
-        Ok((result, count))
-    }
+fn parse_runnables(load_average: LoadAverage) -> u32 {
+    load_average.cur
 }
 
-// Reads selected values from |file| (which should be opened to /proc/vmstat)
-// as specified in |VMSTATS|, and stores them in |vmstat_values|.  The format of
-// the vmstat file is (<name> <integer-value>\n)+.
-fn get_vmstats(file: &File, vmstat_values: &mut [u64]) -> Result<()> {
-    let content = pread(file)?;
-    let mut lines = content.split('\n');
-    let mut targets = VMSTATS.iter().enumerate();
-    let mut line = None;
-    let mut target = None;
-    let mut advance_line = true;
-    let mut advance_target = true;
-    for item in vmstat_values.iter_mut() {
-        *item = 0;
-    }
-    loop {
-        if advance_target {
-            target = targets.next();
-            if target == None {
-                break;
-            }
-        }
-        if advance_line {
-            line = lines.next();
-            // Special case: empty last line.
-            if line.is_some() && line.unwrap() == "" {
-                line = None;
-            }
-            if line.is_none() {
-                break;
-            }
-        }
+fn get_vmstats() -> Result<[i64; VMSTAT_VALUES_COUNT]> {
+    let vmstats = procfs::vmstat()?;
+    parse_vmstats(&vmstats)
+}
 
-        // The default is to advance the line and keep the same target.  When a
-        // target is found in a line, the target is advanced, unless it's an
-        // accumulated target, which adds up the values from consecutive
-        // matching lines.
-        advance_line = true;
-        advance_target = false;
-
-        let (i, &(wanted_name, mandatory, accumulate)) = target.unwrap();
-        match line {
-            Some(string) => {
-                let mut pair = string.split(' ');
-                let found_name = pair.next().ok_or("missing name in vmstat")?;
-                let found_value = pair.next().ok_or("missing value in vmstat")?;
-                // First check accumulative targets.
-                if accumulate {
-                    if found_name.starts_with(wanted_name) {
-                        vmstat_values[i] += found_value.parse::<u64>()?;
-                        advance_line = true;
-                        advance_target = false;
-                    } else {
-                        // Try the next target, but don't consume the line.
-                        advance_line = false;
-                        advance_target = true;
+fn parse_vmstats(vmstats: &HashMap<String, i64>) -> Result<[i64; VMSTAT_VALUES_COUNT]> {
+    let mut result = [0i64; VMSTAT_VALUES_COUNT];
+    for (i, &(field_name, mandatory, accumulate)) in VMSTATS.iter().enumerate() {
+        if accumulate {
+            for (sub_field_name, value) in vmstats {
+                if sub_field_name.starts_with(field_name) {
+                    result[i] += value;
+                }
+            }
+        } else {
+            match vmstats.get(field_name) {
+                Some(value) => result[i] = *value,
+                None => {
+                    if mandatory {
+                        return Err(format!("vmstat: missing value: {}", field_name).into());
                     }
-                    continue;
-                }
-                // Then check for single-shot (not accumulated) fields.
-                if found_name == wanted_name {
-                    vmstat_values[i] = found_value.parse::<u64>()?;
-                    advance_line = true;
-                    advance_target = true;
-                    continue;
-                }
-            }
-            None => {
-                if mandatory {
-                    return Err(format!("vmstat: missing value: {}", wanted_name).into());
-                } else {
-                    vmstat_values[i] = 0;
                 }
             }
         }
     }
-    Ok(())
+    Ok(result)
 }
 
 fn pread_u32(f: &File) -> Result<u32> {
@@ -685,33 +566,6 @@ fn pread_u32(f: &File) -> Result<u32> {
     Ok(String::from_utf8_lossy(&buffer[..length as usize])
         .trim()
         .parse::<u32>()?)
-}
-
-// Reads the content of file |f| starting at offset 0, up to PAGE_SIZE and
-// returns it as a string.
-fn pread(f: &File) -> Result<String> {
-    let mut buffer = vec![0u8; PAGE_SIZE];
-    // pread is safe to call with valid addresses and buffer length.
-    let length = unsafe {
-        libc::pread(
-            f.as_raw_fd(),
-            buffer.as_mut_ptr() as *mut c_void,
-            buffer.len(),
-            0,
-        )
-    };
-    if length == 0 {
-        return Err("unexpected null pread".into());
-    }
-    if length < 0 {
-        return Err(format!("pread failed: {}", strerror(errno())).into());
-    }
-    buffer.resize(length as usize, 0u8);
-
-    // Sysfs files contain only single-byte characters, so from_utf8_unchecked
-    // would be safe for those files.  However, there's no guarantee that this
-    // is only called on sysfs files.
-    Ok(String::from_utf8(buffer)?)
 }
 
 struct Watermarks {
@@ -750,7 +604,8 @@ trait Dbus {
     // Processes incoming dbus events as indicated by |watcher|.  Returns
     // vectors of tab discards reported by chrome, and OOM kills reported by
     // the anomaly detector.
-    fn process_dbus_events(&mut self, watcher: &mut FileWatcher) -> Result<Vec<(Event_Type, i64)>>;
+    fn process_dbus_events(&mut self, watcher: &mut FileWatcher)
+        -> Result<Vec<(event::Type, i64)>>;
 }
 
 #[cfg(not(test))]
@@ -776,8 +631,11 @@ impl Dbus for GenuineDbus {
     // PAYLOAD=array:byte:0x10,0xa8,0xa2,0xc5,0x51
     // dbus-send --system --type=signal / $INTERFACE.ChromeEvent $PAYLOAD
     //
-    fn process_dbus_events(&mut self, watcher: &mut FileWatcher) -> Result<Vec<(Event_Type, i64)>> {
-        let mut events: Vec<(Event_Type, i64)> = Vec::new();
+    fn process_dbus_events(
+        &mut self,
+        watcher: &mut FileWatcher,
+    ) -> Result<Vec<(event::Type, i64)>> {
+        let mut events: Vec<(event::Type, i64)> = Vec::new();
         for &fd in self.fds.iter() {
             if !watcher.has_fired_fd(fd)? {
                 continue;
@@ -805,8 +663,8 @@ impl Dbus for GenuineDbus {
                     let mut protobuf = Event::new();
                     protobuf.merge_from_bytes(&raw_buffer)?;
 
-                    let event_type = protobuf.get_field_type();
-                    let time_stamp = protobuf.get_timestamp();
+                    let event_type = protobuf.type_.enum_value_or_default();
+                    let time_stamp = protobuf.timestamp;
                     events.push((event_type, time_stamp))
                 }
             }
@@ -887,10 +745,6 @@ impl<'a> Sampler<'a> {
         }
 
         let files = Files {
-            vmstat_file: File::open(&paths.vmstat)
-                .map_err(|e| Error::VmstatFileError(Box::new(e)))?,
-            runnables_file: File::open(&paths.runnables)
-                .map_err(|e| Error::RunnablesFileError(Box::new(e)))?,
             available_file_option: open_maybe(&paths.available)
                 .map_err(|e| Error::AvailableFileError(e))?,
             low_mem_file_option,
@@ -952,13 +806,13 @@ impl<'a> Sampler<'a> {
             sample.uptime = time;
             sample.sample_type = sample_type;
             sample.available = self.current_available;
-            sample.runnables = get_runnables(&self.files.runnables_file)?;
+            sample.runnables = get_runnables()?;
             sample.info = if cfg!(test) {
                 Sysinfo::fake_sysinfo()?
             } else {
-                Sysinfo::sysinfo()?
+                sysinfo()?
             };
-            get_vmstats(&self.files.vmstat_file, &mut sample.vmstat_values)?;
+            sample.vmstat_values = get_vmstats()?;
         }
         self.refresh_time();
         Ok(())
@@ -967,7 +821,7 @@ impl<'a> Sampler<'a> {
     // Creates or overwrites a file in the memd log directory containing
     // quantities of interest.
     fn log_static_parameters(&self) -> Result<()> {
-        let mut out = &mut OpenOptions::new()
+        let out = &mut OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
@@ -977,13 +831,11 @@ impl<'a> Sampler<'a> {
         writeln!(out, "margin {}", low_mem_margin)?;
 
         let psv = &self.paths.procsysvm;
-        log_from_procfs(&mut out, psv, "min_filelist_kbytes")?;
-        log_from_procfs(&mut out, psv, "min_free_kbytes")?;
-        log_from_procfs(&mut out, psv, "extra_free_kbytes")?;
+        log_from_procfs(out, psv, "min_filelist_kbytes")?;
+        log_from_procfs(out, psv, "min_free_kbytes")?;
+        log_from_procfs(out, psv, "extra_free_kbytes")?;
 
-        let mut zoneinfo = ZoneinfoFile {
-            0: File::open(&self.paths.zoneinfo)?,
-        };
+        let mut zoneinfo = ZoneinfoFile(File::open(&self.paths.zoneinfo)?);
         let watermarks = zoneinfo.read_watermarks()?;
         writeln!(out, "min_water_mark_kbytes {}", watermarks.min * 4)?;
         writeln!(out, "low_water_mark_kbytes {}", watermarks.low * 4)?;
@@ -1139,9 +991,9 @@ impl<'a> Sampler<'a> {
                 }
                 for event in events {
                     let sample_type = match event.0 {
-                        Event_Type::TAB_DISCARD => SampleType::TabDiscard,
-                        Event_Type::OOM_KILL => SampleType::OomKillBrowser,
-                        Event_Type::OOM_KILL_KERNEL => SampleType::OomKillKernel,
+                        event::Type::TAB_DISCARD => SampleType::TabDiscard,
+                        event::Type::OOM_KILL => SampleType::OomKillBrowser,
+                        event::Type::OOM_KILL_KERNEL => SampleType::OomKillKernel,
                         _ => {
                             warn!("unknown event type {:?}", event.0);
                             continue;
@@ -1263,7 +1115,7 @@ impl<'a> Sampler<'a> {
     // from the queue.
     fn save_clip(&mut self, start_time: i64) -> Result<()> {
         let path = self.next_clip_path();
-        let mut out = &mut OpenOptions::new()
+        let out = &mut OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
@@ -1275,7 +1127,7 @@ impl<'a> Sampler<'a> {
         fprint_datetime(out)?;
         out.write_all(self.sample_header.as_bytes())?;
         // Output samples from |start_time| to the head.
-        self.sample_queue.output_from_time(&mut out, start_time)?;
+        self.sample_queue.output_from_time(out, start_time)?;
         // The queue is now empty.
         self.sample_queue.reset();
         Ok(())
@@ -1356,9 +1208,7 @@ impl SampleType {
 // are collected into this struct because they get special values when testing.
 #[derive(Clone)]
 pub struct Paths {
-    vmstat: PathBuf,
     available: PathBuf,
-    runnables: PathBuf,
     low_mem_margin: PathBuf,
     low_mem_device: PathBuf,
     log_directory: PathBuf,
@@ -1394,8 +1244,6 @@ macro_rules! make_paths {
 // All files that are to be left open go here.  We keep them open to reduce the
 // number of syscalls.  They are mostly files in /proc and /sys.
 struct Files {
-    vmstat_file: File,
-    runnables_file: File,
     // These files might not exist.
     available_file_option: Option<File>,
     low_mem_file_option: Option<File>,
@@ -1403,7 +1251,7 @@ struct Files {
 
 fn build_sample_header() -> String {
     let mut s = "uptime type load freeram freeswap procs runnables available".to_string();
-    for vmstat in VMSTATS.iter() {
+    for vmstat in VMSTATS {
         s = s + " " + vmstat.0;
     }
     s + "\n"
@@ -1413,6 +1261,7 @@ fn main() -> Result<()> {
     let mut always_poll_fast = false;
     let mut debug_log = false;
 
+    libchromeos::panic_handler::install_memfd_handler();
     let args: Vec<String> = std::env::args().collect();
     for arg in &args[1..] {
         match arg.as_ref() {
@@ -1460,18 +1309,6 @@ fn memory_daemon_test() {
     run_memory_daemon(false).expect("run_memory_daemon error");
 }
 
-#[test]
-fn read_loadavg_test() {
-    test::read_loadavg();
-}
-
-#[test]
-fn read_vmstat_test() {
-    let testing_dir_option = make_testing_dir();
-    let paths = get_paths(testing_dir_option);
-    test::read_vmstat(&paths);
-}
-
 /// Regression test for https://crbug.com/1058463. Ensures that output_from_time doesn't read
 /// samples outside of the valid range.
 #[test]
@@ -1488,9 +1325,7 @@ fn get_paths(root: Option<TempDir>) -> Paths {
     make_paths!(
         cfg!(test),
         &testing_root,
-        vmstat:            "/proc/vmstat",
         available:         LOW_MEM_SYSFS.to_string() + "/available",
-        runnables:         "/proc/loadavg",
         low_mem_margin:    LOW_MEM_SYSFS.to_string() + "/margin",
         low_mem_device:    LOW_MEM_DEVICE,
         log_directory:     LOG_DIRECTORY,
@@ -1503,6 +1338,7 @@ fn get_paths(root: Option<TempDir>) -> Paths {
 fn run_memory_daemon(always_poll_fast: bool) -> Result<()> {
     let test_dir_option = make_testing_dir();
     let paths = get_paths(test_dir_option);
+    debug!("Using root: {}", paths.testing_root.display());
 
     #[cfg(test)]
     {
@@ -1534,5 +1370,41 @@ fn run_memory_daemon(always_poll_fast: bool) -> Result<()> {
             sampler.slow_poll()?;
             sampler.fast_poll()?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_vmstats() {
+        let vmstats: HashMap<String, i64> = HashMap::from([
+            ("noop".to_string(), 600),
+            ("pswpin".to_string(), 100),
+            ("pswpout".to_string(), 200),
+            ("pgalloc_dma".to_string(), 1000),
+            ("pgalloc_dma32".to_string(), 2000),
+            ("pgalloc_normal".to_string(), 3000),
+            ("pgalloc_movable".to_string(), 4000),
+            ("pgmajfault".to_string(), 1500),
+            ("pgmajfault_f".to_string(), 550),
+        ]);
+        let result = parse_vmstats(&vmstats).unwrap();
+        assert_eq!(result[0], 100); // pswpin
+        assert_eq!(result[1], 200); // pswpout
+        assert_eq!(result[2], 10000); // paalloc
+        assert_eq!(result[3], 1500); // pgmajfault
+        assert_eq!(result[4], 550); // pgmajfault_f
+    }
+
+    #[test]
+    fn test_parse_runnables() {
+        // See also https://docs.kernel.org/filesystems/proc.html for field values of
+        // /proc/loadavg.
+        let load_average =
+            LoadAverage::from_reader("3.15 2.15 1.15 5/990 1270".as_bytes()).unwrap();
+        let runnables = parse_runnables(load_average);
+        assert_eq!(runnables, 5);
     }
 }

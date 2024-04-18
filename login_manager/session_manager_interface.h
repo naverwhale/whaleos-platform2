@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,6 +27,9 @@ class SessionManagerInterface {
   // Gets feature flags specified in device settings to pass to Chrome on
   // startup.
   virtual std::vector<std::string> GetFeatureFlags() = 0;
+
+  // Gets extra command line arguments to pass to Chrome on startup.
+  virtual std::vector<std::string> GetExtraCommandLineArguments() = 0;
 
   // Emits state change signals.
   virtual void AnnounceSessionStoppingIfNeeded() = 0;

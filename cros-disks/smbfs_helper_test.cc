@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -64,16 +64,15 @@ class PlatformForTest : public MockPlatform {
 
 class SmbfsHelperTest : public ::testing::Test {
  public:
-  SmbfsHelperTest() : helper_(&platform_, &process_reaper_) {
-  }
+  SmbfsHelperTest() : helper_(&platform_, &process_reaper_) {}
 
  protected:
-  MountErrorType ConfigureSandbox(const std::string& source,
-                                  std::vector<std::string>* args) {
+  MountError ConfigureSandbox(const std::string& source,
+                              std::vector<std::string>* args) {
     FakeSandboxedProcess sandbox;
-    MountErrorType error =
+    MountError error =
         helper_.ConfigureSandbox(source, kMountDir, {}, &sandbox);
-    if (error == MOUNT_ERROR_NONE) {
+    if (error == MountError::kSuccess) {
       *args = ParseOptions(sandbox);
     }
     return error;
@@ -86,7 +85,7 @@ class SmbfsHelperTest : public ::testing::Test {
 
 TEST_F(SmbfsHelperTest, CreateMounter) {
   std::vector<std::string> args;
-  EXPECT_EQ(MOUNT_ERROR_NONE, ConfigureSandbox(kSomeSource.value(), &args));
+  EXPECT_EQ(MountError::kSuccess, ConfigureSandbox(kSomeSource.value(), &args));
   EXPECT_THAT(
       args, UnorderedElementsAre("uid=1000", "gid=1001", "mojo_id=foobarbaz"));
 }

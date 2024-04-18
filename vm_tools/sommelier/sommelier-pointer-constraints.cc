@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,12 +22,13 @@
     struct wl_resource* resource;                                          \
     struct INTERFACE* proxy;                                               \
   };                                                                       \
+  MAP_STRUCTS(INTERFACE, sl_host_##NAME);                                  \
   static void sl_destroy_host_##NAME(struct wl_resource* resource) {       \
     struct sl_host_##NAME* host =                                          \
         static_cast<sl_host_##NAME*>(wl_resource_get_user_data(resource)); \
     INTERFACE##_destroy(host->proxy);                                      \
-    wl_resource_set_user_data(resource, NULL);                             \
-    free(host);                                                            \
+    wl_resource_set_user_data(resource, nullptr);                          \
+    delete host;                                                           \
   }                                                                        \
   static void sl_##NAME##_destroy(struct wl_client* client,                \
                                   struct wl_resource* resource) {          \
@@ -56,38 +57,18 @@ static void sl_locked_pointer_unlocked(
   zwp_locked_pointer_v1_send_unlocked(host->resource);
 }
 
-static void sl_locked_pointer_set_cursor_position_hint(
-    struct wl_client* client,
-    struct wl_resource* resource,
-    wl_fixed_t surface_x,
-    wl_fixed_t surface_y) {
-  struct sl_host_locked_pointer* host =
-      static_cast<sl_host_locked_pointer*>(wl_resource_get_user_data(resource));
-
-  zwp_locked_pointer_v1_set_cursor_position_hint(host->proxy, surface_x,
-                                                 surface_y);
-}  // NOLINT(whitespace/indent)
-
-static void sl_locked_pointer_set_region(struct wl_client* client,
-                                         struct wl_resource* resource,
-                                         struct wl_resource* region) {
-  struct sl_host_locked_pointer* host =
-      static_cast<sl_host_locked_pointer*>(wl_resource_get_user_data(resource));
-  struct sl_host_region* host_region =
-      region ? static_cast<sl_host_region*>(wl_resource_get_user_data(region))
-             : NULL;
-  zwp_locked_pointer_v1_set_region(host->proxy,
-                                   host_region ? host_region->proxy : NULL);
-}
-
 static struct zwp_locked_pointer_v1_listener sl_locked_pointer_listener = {
     sl_locked_pointer_locked,
     sl_locked_pointer_unlocked,
 };
 
 static struct zwp_locked_pointer_v1_interface sl_locked_pointer_implementation =
-    {sl_locked_pointer_destroy, sl_locked_pointer_set_cursor_position_hint,
-     sl_locked_pointer_set_region};
+    {
+        sl_locked_pointer_destroy,
+        ForwardRequest<zwp_locked_pointer_v1_set_cursor_position_hint>,
+        ForwardRequest<zwp_locked_pointer_v1_set_region,
+                       AllowNullResource::kYes>,
+};
 
 static void sl_confined_pointer_confined(
     void* data, struct zwp_confined_pointer_v1* confined_pointer) {
@@ -107,20 +88,6 @@ static void sl_confined_pointer_unconfined(
   zwp_confined_pointer_v1_send_unconfined(host->resource);
 }
 
-static void sl_confined_pointer_set_region(struct wl_client* client,
-                                           struct wl_resource* resource,
-                                           struct wl_resource* region) {
-  struct sl_host_confined_pointer* host =
-      static_cast<sl_host_confined_pointer*>(
-          wl_resource_get_user_data(resource));
-  struct sl_host_region* host_region =
-      region ? static_cast<sl_host_region*>(wl_resource_get_user_data(region))
-             : NULL;
-
-  zwp_confined_pointer_v1_set_region(host->proxy,
-                                     host_region ? host_region->proxy : NULL);
-}
-
 static struct zwp_confined_pointer_v1_listener sl_confined_pointer_listener = {
     sl_confined_pointer_confined,
     sl_confined_pointer_unconfined,
@@ -129,7 +96,8 @@ static struct zwp_confined_pointer_v1_listener sl_confined_pointer_listener = {
 static struct zwp_confined_pointer_v1_interface
     sl_confined_pointer_implementation = {
         sl_confined_pointer_destroy,
-        sl_confined_pointer_set_region,
+        ForwardRequest<zwp_confined_pointer_v1_set_region,
+                       AllowNullResource::kYes>,
 };
 
 static void sl_pointer_constraints_lock_pointer(struct wl_client* client,
@@ -151,26 +119,22 @@ static void sl_pointer_constraints_lock_pointer(struct wl_client* client,
       static_cast<sl_host_pointer*>(wl_resource_get_user_data(pointer));
   struct sl_host_region* host_region =
       region ? static_cast<sl_host_region*>(wl_resource_get_user_data(region))
-             : NULL;
+             : nullptr;
 
   struct sl_host_locked_pointer* locked_pointer_host =
-      static_cast<sl_host_locked_pointer*>(
-          malloc(sizeof(struct sl_host_locked_pointer)));
-  assert(locked_pointer_host);
+      new sl_host_locked_pointer();
   locked_pointer_host->resource = locked_pointer_resource;
   locked_pointer_host->ctx = host->ctx;
   locked_pointer_host->proxy = zwp_pointer_constraints_v1_lock_pointer(
-      host->ctx->pointer_constraints->internal, host_surface->proxy,
-      host_pointer->proxy, host_region ? host_region->proxy : NULL, lifetime);
+      host->proxy, host_surface->proxy, host_pointer->proxy,
+      host_region ? host_region->proxy : nullptr, lifetime);
   wl_resource_set_implementation(
       locked_pointer_resource, &sl_locked_pointer_implementation,
       locked_pointer_host, sl_destroy_host_locked_pointer);
-  zwp_locked_pointer_v1_set_user_data(locked_pointer_host->proxy,
-                                      locked_pointer_host);
   zwp_locked_pointer_v1_add_listener(locked_pointer_host->proxy,
                                      &sl_locked_pointer_listener,
                                      locked_pointer_host);
-}  // NOLINT(whitespace/indent)
+}
 
 static void sl_pointer_constraints_confine_pointer(struct wl_client* client,
                                                    struct wl_resource* resource,
@@ -191,26 +155,22 @@ static void sl_pointer_constraints_confine_pointer(struct wl_client* client,
       static_cast<sl_host_pointer*>(wl_resource_get_user_data(pointer));
   struct sl_host_region* host_region =
       region ? static_cast<sl_host_region*>(wl_resource_get_user_data(region))
-             : NULL;
+             : nullptr;
 
   struct sl_host_confined_pointer* confined_pointer_host =
-      static_cast<sl_host_confined_pointer*>(
-          malloc(sizeof(struct sl_host_confined_pointer)));
-  assert(confined_pointer_host);
+      new sl_host_confined_pointer();
   confined_pointer_host->resource = confined_pointer_resource;
   confined_pointer_host->ctx = host->ctx;
   confined_pointer_host->proxy = zwp_pointer_constraints_v1_confine_pointer(
-      host->ctx->pointer_constraints->internal, host_surface->proxy,
-      host_pointer->proxy, host_region ? host_region->proxy : NULL, lifetime);
+      host->proxy, host_surface->proxy, host_pointer->proxy,
+      host_region ? host_region->proxy : nullptr, lifetime);
   wl_resource_set_implementation(
       confined_pointer_resource, &sl_confined_pointer_implementation,
       confined_pointer_host, sl_destroy_host_confined_pointer);
-  zwp_confined_pointer_v1_set_user_data(confined_pointer_host->proxy,
-                                        confined_pointer_host);
   zwp_confined_pointer_v1_add_listener(confined_pointer_host->proxy,
                                        &sl_confined_pointer_listener,
                                        confined_pointer_host);
-}  // NOLINT(whitespace/indent)
+}
 
 static struct zwp_pointer_constraints_v1_interface
     sl_pointer_constraints_implementation = {
@@ -225,11 +185,8 @@ static void sl_bind_host_pointer_constraints(struct wl_client* client,
                                              uint32_t id) {
   struct sl_context* ctx = (struct sl_context*)data;
   struct sl_pointer_constraints* pointer_constraints = ctx->pointer_constraints;
-  struct sl_host_pointer_constraints* host =
-      static_cast<sl_host_pointer_constraints*>(
-          malloc(sizeof(struct sl_host_pointer_constraints)));
+  struct sl_host_pointer_constraints* host = new sl_host_pointer_constraints();
 
-  assert(host);
   host->ctx = ctx;
   host->resource =
       wl_resource_create(client, &zwp_pointer_constraints_v1_interface, 1, id);

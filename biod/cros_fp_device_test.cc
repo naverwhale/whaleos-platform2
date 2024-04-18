@@ -1,20 +1,36 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <optional>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <libec/ec_usb_endpoint.h>
 #include <libec/fingerprint/fp_info_command.h>
+#include <libec/fingerprint/fp_preload_template_command.h>
+#include <libec/fingerprint/fp_template_command.h>
 #include <libec/mock_ec_command_factory.h>
 
 #include "biod/cros_fp_device.h"
 #include "biod/mock_biod_metrics.h"
 #include "biod/mock_cros_fp_device.h"
+#include "libec/fingerprint/fp_sensor_errors.h"
 
 using ec::EcCommandFactoryInterface;
 using ec::EcCommandInterface;
+using ec::FpGetNonceCommand;
 using ec::FpInfoCommand;
 using ec::FpMode;
+using ec::FpPairingKeyKeygenCommand;
+using ec::FpPairingKeyLoadCommand;
+using ec::FpPairingKeyWrapCommand;
+using ec::FpPreloadTemplateCommand;
+using ec::FpReadMatchSecretWithPubkeyCommand;
+using ec::FpSensorErrors;
+using ec::FpSetNonceContextCommand;
+using ec::FpTemplateCommand;
+using testing::An;
 using testing::NiceMock;
 using testing::Return;
 
@@ -24,6 +40,7 @@ namespace {
 class MockEcCommandInterface : public EcCommandInterface {
  public:
   MOCK_METHOD(bool, Run, (int fd), (override));
+  MOCK_METHOD(bool, Run, (ec::EcUsbEndpointInterface & uep), (override));
   MOCK_METHOD(bool,
               RunWithMultipleAttempts,
               (int fd, int num_attempts),
@@ -41,14 +58,16 @@ class CrosFpDevice_ResetContext : public testing::Test {
         std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
         : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
     MOCK_METHOD(FpMode, GetFpMode, (), (override));
+    MOCK_METHOD(bool, SetFpMode, (const FpMode&), (override));
     MOCK_METHOD(bool, SetContext, (std::string user_id), (override));
   };
   class MockFpContextFactory : public ec::MockEcCommandFactory {
    public:
     std::unique_ptr<EcCommandInterface> FpContextCommand(
-        CrosFpDeviceInterface* cros_fp, const std::string& user_id) override {
+        ec::CrosFpDeviceInterface* cros_fp,
+        const std::string& user_id) override {
       auto cmd = std::make_unique<MockEcCommandInterface>();
-      EXPECT_CALL(*cmd, Run).WillOnce(testing::Return(true));
+      EXPECT_CALL(*cmd, Run(An<int>())).WillOnce(testing::Return(true));
       return cmd;
     }
   };
@@ -72,6 +91,8 @@ TEST_F(CrosFpDevice_ResetContext, WrongMode) {
   EXPECT_CALL(mock_cros_fp_device, GetFpMode).Times(1).WillOnce([]() {
     return FpMode(FpMode::Mode::kMatch);
   });
+  EXPECT_CALL(mock_cros_fp_device, SetFpMode(FpMode(FpMode::Mode::kNone)))
+      .WillOnce(Return(true));
   EXPECT_CALL(mock_cros_fp_device, SetContext(std::string())).Times(1);
   EXPECT_CALL(mock_biod_metrics,
               SendResetContextMode(FpMode(FpMode::Mode::kMatch)));
@@ -104,9 +125,10 @@ class CrosFpDevice_SetContext : public testing::Test {
   class MockFpContextFactory : public ec::MockEcCommandFactory {
    public:
     std::unique_ptr<EcCommandInterface> FpContextCommand(
-        CrosFpDeviceInterface* cros_fp, const std::string& user_id) override {
+        ec::CrosFpDeviceInterface* cros_fp,
+        const std::string& user_id) override {
       auto cmd = std::make_unique<MockEcCommandInterface>();
-      EXPECT_CALL(*cmd, Run).WillOnce(testing::Return(true));
+      EXPECT_CALL(*cmd, Run(An<int>())).WillOnce(testing::Return(true));
       return cmd;
     }
   };
@@ -213,6 +235,12 @@ TEST_F(CrosFpDevice_DeadPixelCount, OneDeadPixel) {
 
 class CrosFpDevice_ReadVersion : public testing::Test {
  public:
+  static inline const std::string kValidVersionStr =
+      "1.0.0\n"
+      "bloonchipper_v2.0.4277-9f652bb3\n"
+      "bloonchipper_v2.0.4277-9f652bb3\n"
+      "read-write\n";
+
   class MockCrosFpDevice : public CrosFpDevice {
    public:
     MockCrosFpDevice(
@@ -229,67 +257,839 @@ class CrosFpDevice_ReadVersion : public testing::Test {
       &mock_biod_metrics_, std::make_unique<ec::MockEcCommandFactory>()};
 };
 
+// Test reading the version string where the string returned by the driver is
+// not NUL terminated. The driver won't do this unless the "count" requested
+// by userspace in the "read" system call does not have enough space. This test
+// doesn't exactly replicate that condition exactly since we don't change
+// "count".
 TEST_F(CrosFpDevice_ReadVersion, ValidVersionStringNotNulTerminated) {
-  const std::string kVersionStr =
-      "1.0.0\n"
-      "bloonchipper_v2.0.4277-9f652bb3\n"
-      "bloonchipper_v2.0.4277-9f652bb3\n"
-      "read-writ\n";
-  EXPECT_EQ(kVersionStr.size(), 80);
+  EXPECT_EQ(kValidVersionStr.size(), 81);
 
   EXPECT_CALL(mock_cros_fp_device_, read)
-      .WillOnce([kVersionStr](int, void* buf, size_t count) {
-        EXPECT_EQ(count, kVersionStr.size());
+      .WillOnce([](int, void* buf, size_t count) {
         // Copy string, excluding terminating NUL.
+        int num_bytes_to_copy = kValidVersionStr.size();
+        EXPECT_GE(count, num_bytes_to_copy);
         uint8_t* buffer = static_cast<uint8_t*>(buf);
-        int num_bytes = kVersionStr.size();
-        std::memcpy(buffer, kVersionStr.data(), num_bytes);
-        return num_bytes;
+        std::memcpy(buffer, kValidVersionStr.data(), num_bytes_to_copy);
+        return num_bytes_to_copy;
       });
-  base::Optional<std::string> version = mock_cros_fp_device_.ReadVersion();
+  std::optional<std::string> version = mock_cros_fp_device_.ReadVersion();
   EXPECT_TRUE(version.has_value());
   EXPECT_EQ(*version, std::string("1.0.0"));
 }
 
 TEST_F(CrosFpDevice_ReadVersion, ValidVersionStringNulTerminated) {
-  const std::string kVersionStr =
-      "1.0.0\n"
-      "bloonchipper_v2.0.4277-9f652bb3\n"
-      "bloonchipper_v2.0.4277-9f652bb3\n"
-      "read-writ";
-  EXPECT_EQ(kVersionStr.size(), 79);
+  EXPECT_EQ(kValidVersionStr.size(), 81);
 
   EXPECT_CALL(mock_cros_fp_device_, read)
-      .WillOnce([kVersionStr](int, void* buf, size_t count) {
-        EXPECT_GE(count, kVersionStr.size());
-        // Copy string, excluding terminating NUL.
+      .WillOnce([](int, void* buf, size_t count) {
+        // Copy entire string, including terminating NUL.
+        int num_bytes_to_copy = kValidVersionStr.size() + 1;
+        EXPECT_EQ(num_bytes_to_copy, 82);
+        EXPECT_GE(count, num_bytes_to_copy);
         uint8_t* buffer = static_cast<uint8_t*>(buf);
-        int num_bytes = kVersionStr.size();
-        std::memcpy(buffer, kVersionStr.data(), num_bytes);
-        num_bytes += 1;
-        EXPECT_EQ(num_bytes, 80);
-        buffer[num_bytes] = '\0';
-        return num_bytes;
+        std::memcpy(buffer, kValidVersionStr.data(), num_bytes_to_copy);
+        return num_bytes_to_copy;
       });
-  base::Optional<std::string> version = mock_cros_fp_device_.ReadVersion();
+  std::optional<std::string> version = mock_cros_fp_device_.ReadVersion();
   EXPECT_TRUE(version.has_value());
   EXPECT_EQ(*version, std::string("1.0.0"));
 }
 
 TEST_F(CrosFpDevice_ReadVersion, InvalidVersionStringNoNewline) {
-  const std::string kVersionStr = "1.0.0";
+  const std::string kInvalidVersionStr = "1.0.0";
 
   EXPECT_CALL(mock_cros_fp_device_, read)
-      .WillOnce([kVersionStr](int, void* buf, size_t count) {
-        EXPECT_GE(count, kVersionStr.size());
-        // Copy string, excluding terminating NUL.
+      .WillOnce([kInvalidVersionStr](int, void* buf, size_t count) {
+        // Copy string, including terminating NUL.
+        int num_bytes_to_copy = kInvalidVersionStr.size() + 1;
+        EXPECT_GE(count, num_bytes_to_copy);
         uint8_t* buffer = static_cast<uint8_t*>(buf);
-        int num_bytes = kVersionStr.size();
-        std::memcpy(buffer, kVersionStr.data(), num_bytes);
-        return num_bytes;
+        std::memcpy(buffer, kInvalidVersionStr.data(), num_bytes_to_copy);
+        return num_bytes_to_copy;
       });
-  base::Optional<std::string> version = mock_cros_fp_device_.ReadVersion();
+  std::optional<std::string> version = mock_cros_fp_device_.ReadVersion();
   EXPECT_FALSE(version.has_value());
+}
+
+class CrosFpDevice_UploadTemplate : public testing::Test {
+ public:
+  CrosFpDevice_UploadTemplate() {
+    auto mock_command_factory = std::make_unique<ec::MockEcCommandFactory>();
+    mock_ec_command_factory_ = mock_command_factory.get();
+    mock_cros_fp_device_ = std::make_unique<MockCrosFpDevice>(
+        &mock_biod_metrics_, std::move(mock_command_factory));
+  }
+
+ protected:
+  class MockCrosFpDevice : public CrosFpDevice {
+   public:
+    MockCrosFpDevice(
+        BiodMetricsInterface* biod_metrics,
+        std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
+        : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
+  };
+
+  class MockFpTemplateCommand : public FpTemplateCommand {
+   public:
+    MockFpTemplateCommand(std::vector<uint8_t> tmpl, uint16_t max_write_size)
+        : FpTemplateCommand(tmpl, max_write_size) {
+      ON_CALL(*this, Run).WillByDefault(Return(true));
+      ON_CALL(*this, Result).WillByDefault(Return(EC_RES_SUCCESS));
+    }
+    MOCK_METHOD(bool, Run, (int fd), (override));
+    MOCK_METHOD(uint32_t, Result, (), (override, const));
+  };
+
+  class MockFpPreloadTemplateCommand : public FpPreloadTemplateCommand {
+   public:
+    MockFpPreloadTemplateCommand(uint16_t fgr,
+                                 std::vector<uint8_t> tmpl,
+                                 uint16_t max_write_size)
+        : FpPreloadTemplateCommand(fgr, tmpl, max_write_size) {
+      ON_CALL(*this, Run).WillByDefault(Return(true));
+      ON_CALL(*this, Result).WillByDefault(Return(EC_RES_SUCCESS));
+    }
+    MOCK_METHOD(bool, Run, (int fd), (override));
+    MOCK_METHOD(uint32_t, Result, (), (override, const));
+  };
+
+  metrics::MockBiodMetrics mock_biod_metrics_;
+  ec::MockEcCommandFactory* mock_ec_command_factory_ = nullptr;
+  std::unique_ptr<CrosFpDevice> mock_cros_fp_device_;
+};
+
+TEST_F(CrosFpDevice_UploadTemplate, Success) {
+  std::vector<uint8_t> templ;
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpTemplateCommand)
+      .WillOnce([](std::vector<uint8_t> tmpl, uint16_t max_write_size) {
+        return std::make_unique<NiceMock<MockFpTemplateCommand>>(
+            tmpl, max_write_size);
+      });
+
+  EXPECT_CALL(mock_biod_metrics_, SendUploadTemplateResult(EC_RES_SUCCESS));
+  EXPECT_TRUE(mock_cros_fp_device_->UploadTemplate(templ));
+}
+
+TEST_F(CrosFpDevice_UploadTemplate, RunFailure) {
+  std::vector<uint8_t> templ;
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpTemplateCommand)
+      .WillOnce([](std::vector<uint8_t> tmpl, uint16_t max_write_size) {
+        auto cmd = std::make_unique<NiceMock<MockFpTemplateCommand>>(
+            tmpl, max_write_size);
+        EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(false));
+        return cmd;
+      });
+
+  EXPECT_CALL(mock_biod_metrics_,
+              SendUploadTemplateResult(metrics::kCmdRunFailure));
+  EXPECT_FALSE(mock_cros_fp_device_->UploadTemplate(templ));
+}
+
+TEST_F(CrosFpDevice_UploadTemplate, CommandFailure) {
+  std::vector<uint8_t> templ;
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpTemplateCommand)
+      .WillOnce([](std::vector<uint8_t> tmpl, uint16_t max_write_size) {
+        auto cmd = std::make_unique<NiceMock<MockFpTemplateCommand>>(
+            tmpl, max_write_size);
+        EXPECT_CALL(*cmd, Result).WillRepeatedly(Return(EC_RES_ERROR));
+        return cmd;
+      });
+
+  EXPECT_CALL(mock_biod_metrics_, SendUploadTemplateResult(EC_RES_ERROR));
+  EXPECT_FALSE(mock_cros_fp_device_->UploadTemplate(templ));
+}
+
+TEST_F(CrosFpDevice_UploadTemplate, PreloadSuccess) {
+  constexpr size_t kFinger = 1;
+  std::vector<uint8_t> templ;
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPreloadTemplateCommand)
+      .WillOnce([kFinger](uint16_t fgr, std::vector<uint8_t> tmpl,
+                          uint16_t max_write_size) {
+        EXPECT_EQ(fgr, kFinger);
+        return std::make_unique<NiceMock<MockFpPreloadTemplateCommand>>(
+            fgr, tmpl, max_write_size);
+      });
+
+  EXPECT_TRUE(mock_cros_fp_device_->PreloadTemplate(kFinger, templ));
+}
+
+TEST_F(CrosFpDevice_UploadTemplate, PreloadRunFailure) {
+  constexpr size_t kFinger = 1;
+  std::vector<uint8_t> templ;
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPreloadTemplateCommand)
+      .WillOnce(
+          [](uint16_t fgr, std::vector<uint8_t> tmpl, uint16_t max_write_size) {
+            auto cmd = std::make_unique<NiceMock<MockFpPreloadTemplateCommand>>(
+                fgr, tmpl, max_write_size);
+            EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(false));
+            return cmd;
+          });
+
+  EXPECT_FALSE(mock_cros_fp_device_->PreloadTemplate(kFinger, templ));
+}
+
+TEST_F(CrosFpDevice_UploadTemplate, PreloadCommandFailure) {
+  constexpr size_t kFinger = 1;
+  std::vector<uint8_t> templ;
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPreloadTemplateCommand)
+      .WillOnce(
+          [](uint16_t fgr, std::vector<uint8_t> tmpl, uint16_t max_write_size) {
+            auto cmd = std::make_unique<NiceMock<MockFpPreloadTemplateCommand>>(
+                fgr, tmpl, max_write_size);
+            EXPECT_CALL(*cmd, Result).WillRepeatedly(Return(EC_RES_ERROR));
+            return cmd;
+          });
+
+  EXPECT_FALSE(mock_cros_fp_device_->PreloadTemplate(kFinger, templ));
+}
+
+TEST_F(CrosFpDevice_UploadTemplate, ReloadSuccess) {
+  constexpr uint16_t kNumFingers = 3;
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPreloadTemplateCommand)
+      .Times(kNumFingers)
+      .WillRepeatedly(
+          [](uint16_t fgr, std::vector<uint8_t> tmpl, uint16_t max_write_size) {
+            EXPECT_TRUE(tmpl.empty());
+            return std::make_unique<NiceMock<MockFpPreloadTemplateCommand>>(
+                fgr, tmpl, max_write_size);
+          });
+  EXPECT_CALL(*mock_ec_command_factory_, FpTemplateCommand)
+      .Times(kNumFingers)
+      .WillRepeatedly([](std::vector<uint8_t> tmpl, uint16_t max_write_size) {
+        EXPECT_TRUE(tmpl.empty());
+        return std::make_unique<NiceMock<MockFpTemplateCommand>>(
+            tmpl, max_write_size);
+      });
+
+  EXPECT_TRUE(mock_cros_fp_device_->ReloadTemplates(kNumFingers));
+}
+
+class CrosFpDevice_HwErrors : public testing::Test {
+ public:
+  CrosFpDevice_HwErrors() {
+    auto mock_command_factory = std::make_unique<ec::MockEcCommandFactory>();
+    mock_ec_command_factory_ = mock_command_factory.get();
+    mock_cros_fp_device_ = std::make_unique<MockCrosFpDevice>(
+        &mock_biod_metrics_, std::move(mock_command_factory));
+  }
+
+ protected:
+  class MockCrosFpDevice : public CrosFpDevice {
+   public:
+    MockCrosFpDevice(
+        BiodMetricsInterface* biod_metrics,
+        std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
+        : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
+  };
+
+  class MockFpInfoCommand : public FpInfoCommand {
+   public:
+    MockFpInfoCommand() { ON_CALL(*this, Run).WillByDefault(Return(true)); }
+    MOCK_METHOD(bool, Run, (int fd), (override));
+    MOCK_METHOD(ec_response_fp_info*, Resp, (), (override));
+  };
+
+  metrics::MockBiodMetrics mock_biod_metrics_;
+  ec::MockEcCommandFactory* mock_ec_command_factory_ = nullptr;
+  std::unique_ptr<CrosFpDevice> mock_cros_fp_device_;
+};
+
+TEST_F(CrosFpDevice_HwErrors, Errors_None) {
+  struct ec_response_fp_info resp = {.errors = FP_ERROR_DEAD_PIXELS_UNKNOWN};
+  EXPECT_CALL(*mock_ec_command_factory_, FpInfoCommand).WillOnce([&resp]() {
+    auto mock_fp_info_command = std::make_unique<NiceMock<MockFpInfoCommand>>();
+    EXPECT_CALL(*mock_fp_info_command, Resp).WillRepeatedly(Return(&resp));
+    return mock_fp_info_command;
+  });
+
+  EXPECT_EQ(mock_cros_fp_device_->GetHwErrors(), FpSensorErrors::kNone);
+}
+
+TEST_F(CrosFpDevice_HwErrors, Errors_NoIrq) {
+  struct ec_response_fp_info resp = {.errors = FP_ERROR_NO_IRQ |
+                                               FP_ERROR_DEAD_PIXELS_UNKNOWN};
+  EXPECT_CALL(*mock_ec_command_factory_, FpInfoCommand).WillOnce([&resp]() {
+    auto mock_fp_info_command = std::make_unique<NiceMock<MockFpInfoCommand>>();
+    EXPECT_CALL(*mock_fp_info_command, Resp).WillRepeatedly(Return(&resp));
+    return mock_fp_info_command;
+  });
+
+  EXPECT_EQ(mock_cros_fp_device_->GetHwErrors(), FpSensorErrors::kNoIrq);
+}
+
+TEST_F(CrosFpDevice_HwErrors, Errors_SpiCommunication) {
+  struct ec_response_fp_info resp = {.errors = FP_ERROR_SPI_COMM |
+                                               FP_ERROR_DEAD_PIXELS_UNKNOWN};
+  EXPECT_CALL(*mock_ec_command_factory_, FpInfoCommand).WillOnce([&resp]() {
+    auto mock_fp_info_command = std::make_unique<NiceMock<MockFpInfoCommand>>();
+    EXPECT_CALL(*mock_fp_info_command, Resp).WillRepeatedly(Return(&resp));
+    return mock_fp_info_command;
+  });
+
+  EXPECT_EQ(mock_cros_fp_device_->GetHwErrors(),
+            FpSensorErrors::kSpiCommunication);
+}
+
+TEST_F(CrosFpDevice_HwErrors, Errors_BadHardwareID) {
+  struct ec_response_fp_info resp = {.errors = FP_ERROR_BAD_HWID |
+                                               FP_ERROR_DEAD_PIXELS_UNKNOWN};
+  EXPECT_CALL(*mock_ec_command_factory_, FpInfoCommand).WillOnce([&resp]() {
+    auto mock_fp_info_command = std::make_unique<NiceMock<MockFpInfoCommand>>();
+    EXPECT_CALL(*mock_fp_info_command, Resp).WillRepeatedly(Return(&resp));
+    return mock_fp_info_command;
+  });
+
+  EXPECT_EQ(mock_cros_fp_device_->GetHwErrors(),
+            FpSensorErrors::kBadHardwareID);
+}
+
+TEST_F(CrosFpDevice_HwErrors, Errors_InitializationFailure) {
+  struct ec_response_fp_info resp = {.errors = FP_ERROR_INIT_FAIL |
+                                               FP_ERROR_DEAD_PIXELS_UNKNOWN};
+  EXPECT_CALL(*mock_ec_command_factory_, FpInfoCommand).WillOnce([&resp]() {
+    auto mock_fp_info_command = std::make_unique<NiceMock<MockFpInfoCommand>>();
+    EXPECT_CALL(*mock_fp_info_command, Resp).WillRepeatedly(Return(&resp));
+    return mock_fp_info_command;
+  });
+
+  EXPECT_EQ(mock_cros_fp_device_->GetHwErrors(),
+            FpSensorErrors::kInitializationFailure);
+}
+
+TEST_F(CrosFpDevice_HwErrors, Errors_InitializationFailureOrBadHardwareID) {
+  struct ec_response_fp_info resp = {.errors = FP_ERROR_INIT_FAIL |
+                                               FP_ERROR_DEAD_PIXELS_UNKNOWN |
+                                               FP_ERROR_BAD_HWID};
+  EXPECT_CALL(*mock_ec_command_factory_, FpInfoCommand).WillOnce([&resp]() {
+    auto mock_fp_info_command = std::make_unique<NiceMock<MockFpInfoCommand>>();
+    EXPECT_CALL(*mock_fp_info_command, Resp).WillRepeatedly(Return(&resp));
+    return mock_fp_info_command;
+  });
+
+  EXPECT_EQ(
+      mock_cros_fp_device_->GetHwErrors(),
+      FpSensorErrors::kInitializationFailure | FpSensorErrors::kBadHardwareID);
+}
+
+class CrosFpDevice_GetNonce : public testing::Test {
+ public:
+  CrosFpDevice_GetNonce() {
+    auto mock_command_factory = std::make_unique<ec::MockEcCommandFactory>();
+    mock_ec_command_factory_ = mock_command_factory.get();
+    mock_cros_fp_device_ = std::make_unique<MockCrosFpDevice>(
+        &mock_biod_metrics_, std::move(mock_command_factory));
+  }
+
+ protected:
+  class MockCrosFpDevice : public CrosFpDevice {
+   public:
+    MockCrosFpDevice(
+        BiodMetricsInterface* biod_metrics,
+        std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
+        : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
+  };
+
+  class MockFpGetNonceCommand : public FpGetNonceCommand {
+   public:
+    MockFpGetNonceCommand() { ON_CALL(*this, Run).WillByDefault(Return(true)); }
+    MOCK_METHOD(bool, Run, (int fd), (override));
+    MOCK_METHOD(brillo::Blob, Nonce, (), (override, const));
+  };
+
+  metrics::MockBiodMetrics mock_biod_metrics_;
+  ec::MockEcCommandFactory* mock_ec_command_factory_ = nullptr;
+  std::unique_ptr<CrosFpDevice> mock_cros_fp_device_;
+};
+
+TEST_F(CrosFpDevice_GetNonce, Success) {
+  const brillo::Blob kNonce(32, 1);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpGetNonceCommand).WillOnce([&]() {
+    auto cmd = std::make_unique<NiceMock<MockFpGetNonceCommand>>();
+    EXPECT_CALL(*cmd, Nonce).WillRepeatedly(Return(kNonce));
+    return cmd;
+  });
+
+  std::optional<brillo::Blob> nonce = mock_cros_fp_device_->GetNonce();
+  ASSERT_TRUE(nonce.has_value());
+  EXPECT_EQ(nonce, kNonce);
+}
+
+TEST_F(CrosFpDevice_GetNonce, RunFailure) {
+  EXPECT_CALL(*mock_ec_command_factory_, FpGetNonceCommand).WillOnce([]() {
+    auto cmd = std::make_unique<NiceMock<MockFpGetNonceCommand>>();
+    EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(false));
+    return cmd;
+  });
+
+  std::optional<brillo::Blob> nonce = mock_cros_fp_device_->GetNonce();
+  EXPECT_FALSE(nonce.has_value());
+}
+
+class CrosFpDevice_SetNonceContext : public testing::Test {
+ public:
+  CrosFpDevice_SetNonceContext() {
+    auto mock_command_factory = std::make_unique<ec::MockEcCommandFactory>();
+    mock_ec_command_factory_ = mock_command_factory.get();
+    mock_cros_fp_device_ = std::make_unique<MockCrosFpDevice>(
+        &mock_biod_metrics_, std::move(mock_command_factory));
+  }
+
+ protected:
+  class MockCrosFpDevice : public CrosFpDevice {
+   public:
+    MockCrosFpDevice(
+        BiodMetricsInterface* biod_metrics,
+        std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
+        : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
+  };
+
+  class MockFpSetNonceContextCommand : public FpSetNonceContextCommand {
+   public:
+    using FpSetNonceContextCommand::FpSetNonceContextCommand;
+    MOCK_METHOD(bool, Run, (int fd), (override));
+  };
+
+  metrics::MockBiodMetrics mock_biod_metrics_;
+  ec::MockEcCommandFactory* mock_ec_command_factory_ = nullptr;
+  std::unique_ptr<CrosFpDevice> mock_cros_fp_device_;
+};
+
+TEST_F(CrosFpDevice_SetNonceContext, Success) {
+  const brillo::Blob kNonce(32, 1);
+  const brillo::Blob kUserId(32, 2);
+  const brillo::Blob kIv(16, 3);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpSetNonceContextCommand)
+      .WillOnce([](const brillo::Blob& nonce,
+                   const brillo::Blob& encrypted_user_id,
+                   const brillo::Blob& iv)
+                    -> std::unique_ptr<FpSetNonceContextCommand> {
+        auto cmd =
+            FpSetNonceContextCommand::Create<MockFpSetNonceContextCommand>(
+                nonce, encrypted_user_id, iv);
+        if (cmd) {
+          EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(true));
+        }
+        return cmd;
+      });
+
+  EXPECT_TRUE(mock_cros_fp_device_->SetNonceContext(kNonce, kUserId, kIv));
+}
+
+TEST_F(CrosFpDevice_SetNonceContext, InvalidParams) {
+  // Incorrect size.
+  const brillo::Blob kNonce(33, 1);
+  const brillo::Blob kUserId(32, 2);
+  const brillo::Blob kIv(16, 3);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpSetNonceContextCommand)
+      .WillOnce([](const brillo::Blob& nonce,
+                   const brillo::Blob& encrypted_user_id,
+                   const brillo::Blob& iv)
+                    -> std::unique_ptr<FpSetNonceContextCommand> {
+        auto cmd =
+            FpSetNonceContextCommand::Create<MockFpSetNonceContextCommand>(
+                nonce, encrypted_user_id, iv);
+        EXPECT_EQ(cmd, nullptr);
+        return cmd;
+      });
+
+  EXPECT_FALSE(mock_cros_fp_device_->SetNonceContext(kNonce, kUserId, kIv));
+}
+
+TEST_F(CrosFpDevice_SetNonceContext, RunFailure) {
+  const brillo::Blob kNonce(32, 1);
+  const brillo::Blob kUserId(32, 2);
+  const brillo::Blob kIv(16, 3);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpSetNonceContextCommand)
+      .WillOnce([](const brillo::Blob& nonce,
+                   const brillo::Blob& encrypted_user_id,
+                   const brillo::Blob& iv)
+                    -> std::unique_ptr<FpSetNonceContextCommand> {
+        auto cmd =
+            FpSetNonceContextCommand::Create<MockFpSetNonceContextCommand>(
+                nonce, encrypted_user_id, iv);
+        if (cmd) {
+          EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(false));
+        }
+        return cmd;
+      });
+
+  EXPECT_FALSE(mock_cros_fp_device_->SetNonceContext(kNonce, kUserId, kIv));
+}
+
+class CrosFpDevice_GetPositiveMatchSecretWithPubkey : public testing::Test {
+ public:
+  CrosFpDevice_GetPositiveMatchSecretWithPubkey() {
+    auto mock_command_factory = std::make_unique<ec::MockEcCommandFactory>();
+    mock_ec_command_factory_ = mock_command_factory.get();
+    mock_cros_fp_device_ = std::make_unique<MockCrosFpDevice>(
+        &mock_biod_metrics_, std::move(mock_command_factory));
+  }
+
+ protected:
+  class MockCrosFpDevice : public CrosFpDevice {
+   public:
+    MockCrosFpDevice(
+        BiodMetricsInterface* biod_metrics,
+        std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
+        : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
+  };
+
+  class MockFpReadMatchSecretWithPubkeyCommand
+      : public FpReadMatchSecretWithPubkeyCommand {
+   public:
+    using FpReadMatchSecretWithPubkeyCommand::
+        FpReadMatchSecretWithPubkeyCommand;
+    MOCK_METHOD(bool, Run, (int fd), (override));
+    MOCK_METHOD(brillo::Blob, EncryptedSecret, (), (override, const));
+    MOCK_METHOD(brillo::Blob, Iv, (), (override, const));
+    MOCK_METHOD(brillo::Blob, PkOutX, (), (override, const));
+    MOCK_METHOD(brillo::Blob, PkOutY, (), (override, const));
+  };
+
+  metrics::MockBiodMetrics mock_biod_metrics_;
+  ec::MockEcCommandFactory* mock_ec_command_factory_ = nullptr;
+  std::unique_ptr<CrosFpDevice> mock_cros_fp_device_;
+};
+
+TEST_F(CrosFpDevice_GetPositiveMatchSecretWithPubkey, Success) {
+  const uint16_t kIndex = 0;
+  const brillo::Blob kPkInX(32, 1);
+  const brillo::Blob kPkInY(32, 2);
+  const brillo::Blob kEncryptedSecret(32, 3);
+  const brillo::Blob kIv(16, 4);
+  const brillo::Blob kPkOutX(32, 5);
+  const brillo::Blob kPkOutY(32, 6);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpReadMatchSecretWithPubkeyCommand)
+      .WillOnce([&](uint16_t index, const brillo::Blob& pk_in_x,
+                    const brillo::Blob& pk_in_y)
+                    -> std::unique_ptr<FpReadMatchSecretWithPubkeyCommand> {
+        auto cmd = FpReadMatchSecretWithPubkeyCommand::Create<
+            MockFpReadMatchSecretWithPubkeyCommand>(index, pk_in_x, pk_in_y);
+        if (cmd) {
+          EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(true));
+          EXPECT_CALL(*cmd, EncryptedSecret)
+              .WillRepeatedly(Return(kEncryptedSecret));
+          EXPECT_CALL(*cmd, Iv).WillRepeatedly(Return(kIv));
+          EXPECT_CALL(*cmd, PkOutX).WillRepeatedly(Return(kPkOutX));
+          EXPECT_CALL(*cmd, PkOutY).WillRepeatedly(Return(kPkOutY));
+        }
+        return cmd;
+      });
+
+  std::optional<ec::CrosFpDeviceInterface::GetSecretReply> reply =
+      mock_cros_fp_device_->GetPositiveMatchSecretWithPubkey(kIndex, kPkInX,
+                                                             kPkInY);
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_EQ(reply->encrypted_secret, kEncryptedSecret);
+  EXPECT_EQ(reply->iv, kIv);
+  EXPECT_EQ(reply->pk_out_x, kPkOutX);
+  EXPECT_EQ(reply->pk_out_y, kPkOutY);
+}
+
+TEST_F(CrosFpDevice_GetPositiveMatchSecretWithPubkey, InvalidParams) {
+  const uint16_t kIndex = 0;
+  // Incorrect size.
+  const brillo::Blob kPkInX(33, 1);
+  const brillo::Blob kPkInY(32, 2);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpReadMatchSecretWithPubkeyCommand)
+      .WillOnce([&](uint16_t index, const brillo::Blob& pk_in_x,
+                    const brillo::Blob& pk_in_y)
+                    -> std::unique_ptr<FpReadMatchSecretWithPubkeyCommand> {
+        auto cmd = FpReadMatchSecretWithPubkeyCommand::Create<
+            MockFpReadMatchSecretWithPubkeyCommand>(index, pk_in_x, pk_in_y);
+        EXPECT_EQ(cmd, nullptr);
+        return cmd;
+      });
+
+  std::optional<ec::CrosFpDeviceInterface::GetSecretReply> reply =
+      mock_cros_fp_device_->GetPositiveMatchSecretWithPubkey(kIndex, kPkInX,
+                                                             kPkInY);
+  EXPECT_FALSE(reply.has_value());
+}
+
+TEST_F(CrosFpDevice_GetPositiveMatchSecretWithPubkey, RunFailure) {
+  const uint16_t kIndex = 0;
+  const brillo::Blob kPkInX(32, 1);
+  const brillo::Blob kPkInY(32, 2);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpReadMatchSecretWithPubkeyCommand)
+      .WillOnce([&](uint16_t index, const brillo::Blob& pk_in_x,
+                    const brillo::Blob& pk_in_y)
+                    -> std::unique_ptr<FpReadMatchSecretWithPubkeyCommand> {
+        auto cmd = FpReadMatchSecretWithPubkeyCommand::Create<
+            MockFpReadMatchSecretWithPubkeyCommand>(index, pk_in_x, pk_in_y);
+        if (cmd) {
+          EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(false));
+        }
+        return cmd;
+      });
+
+  std::optional<ec::CrosFpDeviceInterface::GetSecretReply> reply =
+      mock_cros_fp_device_->GetPositiveMatchSecretWithPubkey(kIndex, kPkInX,
+                                                             kPkInY);
+  EXPECT_FALSE(reply.has_value());
+}
+
+class CrosFpDevice_PairingKeyKeygen : public testing::Test {
+ public:
+  CrosFpDevice_PairingKeyKeygen() {
+    auto mock_command_factory = std::make_unique<ec::MockEcCommandFactory>();
+    mock_ec_command_factory_ = mock_command_factory.get();
+    mock_cros_fp_device_ = std::make_unique<MockCrosFpDevice>(
+        &mock_biod_metrics_, std::move(mock_command_factory));
+  }
+
+ protected:
+  class MockCrosFpDevice : public CrosFpDevice {
+   public:
+    MockCrosFpDevice(
+        BiodMetricsInterface* biod_metrics,
+        std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
+        : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
+  };
+
+  class MockFpPairingKeyKeygenCommand : public FpPairingKeyKeygenCommand {
+   public:
+    MockFpPairingKeyKeygenCommand() {
+      ON_CALL(*this, Run).WillByDefault(Return(true));
+    }
+    MOCK_METHOD(bool, Run, (int fd), (override));
+    MOCK_METHOD(brillo::Blob, PubX, (), (override, const));
+    MOCK_METHOD(brillo::Blob, PubY, (), (override, const));
+    MOCK_METHOD(brillo::Blob, EncryptedKey, (), (override, const));
+  };
+
+  metrics::MockBiodMetrics mock_biod_metrics_;
+  ec::MockEcCommandFactory* mock_ec_command_factory_ = nullptr;
+  std::unique_ptr<CrosFpDevice> mock_cros_fp_device_;
+};
+
+TEST_F(CrosFpDevice_PairingKeyKeygen, Success) {
+  const brillo::Blob kPubX(32, 1);
+  const brillo::Blob kPubY(32, 2);
+  const brillo::Blob kEncryptedKey(sizeof(fp_encrypted_private_key), 3);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPairingKeyKeygenCommand)
+      .WillOnce([&]() {
+        auto cmd = std::make_unique<NiceMock<MockFpPairingKeyKeygenCommand>>();
+        EXPECT_CALL(*cmd, PubX).WillRepeatedly(Return(kPubX));
+        EXPECT_CALL(*cmd, PubY).WillRepeatedly(Return(kPubY));
+        EXPECT_CALL(*cmd, EncryptedKey).WillRepeatedly(Return(kEncryptedKey));
+        return cmd;
+      });
+
+  std::optional<ec::CrosFpDeviceInterface::PairingKeyKeygenReply> reply =
+      mock_cros_fp_device_->PairingKeyKeygen();
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_EQ(reply->pub_x, kPubX);
+  EXPECT_EQ(reply->pub_y, kPubY);
+  EXPECT_EQ(reply->encrypted_private_key, kEncryptedKey);
+}
+
+TEST_F(CrosFpDevice_PairingKeyKeygen, RunFailure) {
+  EXPECT_CALL(*mock_ec_command_factory_, FpPairingKeyKeygenCommand)
+      .WillOnce([]() {
+        auto cmd = std::make_unique<NiceMock<MockFpPairingKeyKeygenCommand>>();
+        EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(false));
+        return cmd;
+      });
+
+  std::optional<ec::CrosFpDeviceInterface::PairingKeyKeygenReply> reply =
+      mock_cros_fp_device_->PairingKeyKeygen();
+  EXPECT_FALSE(reply.has_value());
+}
+
+class CrosFpDevice_LoadPairingKey : public testing::Test {
+ public:
+  CrosFpDevice_LoadPairingKey() {
+    auto mock_command_factory = std::make_unique<ec::MockEcCommandFactory>();
+    mock_ec_command_factory_ = mock_command_factory.get();
+    mock_cros_fp_device_ = std::make_unique<MockCrosFpDevice>(
+        &mock_biod_metrics_, std::move(mock_command_factory));
+  }
+
+ protected:
+  class MockCrosFpDevice : public CrosFpDevice {
+   public:
+    MockCrosFpDevice(
+        BiodMetricsInterface* biod_metrics,
+        std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
+        : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
+  };
+
+  class MockFpPairingKeyLoadCommand : public FpPairingKeyLoadCommand {
+   public:
+    using FpPairingKeyLoadCommand::FpPairingKeyLoadCommand;
+    MOCK_METHOD(bool, Run, (int fd), (override));
+  };
+
+  metrics::MockBiodMetrics mock_biod_metrics_;
+  ec::MockEcCommandFactory* mock_ec_command_factory_ = nullptr;
+  std::unique_ptr<CrosFpDevice> mock_cros_fp_device_;
+};
+
+TEST_F(CrosFpDevice_LoadPairingKey, Success) {
+  const brillo::Blob kEncryptedKey(sizeof(ec_fp_encrypted_pairing_key), 1);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPairingKeyLoadCommand)
+      .WillOnce([](const brillo::Blob& encrypted_key)
+                    -> std::unique_ptr<FpPairingKeyLoadCommand> {
+        auto cmd = FpPairingKeyLoadCommand::Create<MockFpPairingKeyLoadCommand>(
+            encrypted_key);
+        if (cmd) {
+          EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(true));
+        }
+        return cmd;
+      });
+
+  EXPECT_TRUE(mock_cros_fp_device_->LoadPairingKey(kEncryptedKey));
+}
+
+TEST_F(CrosFpDevice_LoadPairingKey, InvalidParams) {
+  // Incorrect size.
+  const brillo::Blob kEncryptedKey(sizeof(ec_fp_encrypted_pairing_key) + 1, 1);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPairingKeyLoadCommand)
+      .WillOnce([](const brillo::Blob& encrypted_key)
+                    -> std::unique_ptr<FpPairingKeyLoadCommand> {
+        auto cmd = FpPairingKeyLoadCommand::Create<MockFpPairingKeyLoadCommand>(
+            encrypted_key);
+        EXPECT_EQ(cmd, nullptr);
+        return cmd;
+      });
+
+  EXPECT_FALSE(mock_cros_fp_device_->LoadPairingKey(kEncryptedKey));
+}
+
+TEST_F(CrosFpDevice_LoadPairingKey, RunFailure) {
+  const brillo::Blob kEncryptedKey(sizeof(ec_fp_encrypted_pairing_key), 1);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPairingKeyLoadCommand)
+      .WillOnce([](const brillo::Blob& encrypted_key)
+                    -> std::unique_ptr<FpPairingKeyLoadCommand> {
+        auto cmd = FpPairingKeyLoadCommand::Create<MockFpPairingKeyLoadCommand>(
+            encrypted_key);
+        if (cmd) {
+          EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(false));
+        }
+        return cmd;
+      });
+
+  EXPECT_FALSE(mock_cros_fp_device_->LoadPairingKey(kEncryptedKey));
+}
+
+class CrosFpDevice_PairingKeyWrap : public testing::Test {
+ public:
+  CrosFpDevice_PairingKeyWrap() {
+    auto mock_command_factory = std::make_unique<ec::MockEcCommandFactory>();
+    mock_ec_command_factory_ = mock_command_factory.get();
+    mock_cros_fp_device_ = std::make_unique<MockCrosFpDevice>(
+        &mock_biod_metrics_, std::move(mock_command_factory));
+  }
+
+ protected:
+  class MockCrosFpDevice : public CrosFpDevice {
+   public:
+    MockCrosFpDevice(
+        BiodMetricsInterface* biod_metrics,
+        std::unique_ptr<EcCommandFactoryInterface> ec_command_factory)
+        : CrosFpDevice(biod_metrics, std::move(ec_command_factory)) {}
+  };
+
+  class MockFpPairingKeyWrapCommand : public FpPairingKeyWrapCommand {
+   public:
+    using FpPairingKeyWrapCommand::FpPairingKeyWrapCommand;
+    MOCK_METHOD(bool, Run, (int fd), (override));
+    MOCK_METHOD(brillo::Blob, EncryptedPairingKey, (), (override, const));
+  };
+
+  metrics::MockBiodMetrics mock_biod_metrics_;
+  ec::MockEcCommandFactory* mock_ec_command_factory_ = nullptr;
+  std::unique_ptr<CrosFpDevice> mock_cros_fp_device_;
+};
+
+TEST_F(CrosFpDevice_PairingKeyWrap, Success) {
+  const brillo::Blob kPubX(32, 1);
+  const brillo::Blob kPubY(32, 2);
+  const brillo::Blob kEncryptedKey(sizeof(fp_encrypted_private_key), 3);
+  const brillo::Blob kEncryptedPk(sizeof(ec_fp_encrypted_pairing_key), 4);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPairingKeyWrapCommand)
+      .WillOnce([&](const brillo::Blob& pub_x, const brillo::Blob& pub_y,
+                    const brillo::Blob& encrypted_key)
+                    -> std::unique_ptr<FpPairingKeyWrapCommand> {
+        auto cmd = FpPairingKeyWrapCommand::Create<MockFpPairingKeyWrapCommand>(
+            pub_x, pub_y, encrypted_key);
+        if (cmd) {
+          EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(true));
+          EXPECT_CALL(*cmd, EncryptedPairingKey)
+              .WillRepeatedly(Return(kEncryptedPk));
+        }
+        return cmd;
+      });
+
+  std::optional<brillo::Blob> reply =
+      mock_cros_fp_device_->PairingKeyWrap(kPubX, kPubY, kEncryptedKey);
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_EQ(*reply, kEncryptedPk);
+}
+
+TEST_F(CrosFpDevice_PairingKeyWrap, InvalidParams) {
+  // Incorrect size.
+  const brillo::Blob kPubX(33, 1);
+  const brillo::Blob kPubY(32, 2);
+  const brillo::Blob kEncryptedKey(sizeof(fp_encrypted_private_key), 3);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPairingKeyWrapCommand)
+      .WillOnce([&](const brillo::Blob& pub_x, const brillo::Blob& pub_y,
+                    const brillo::Blob& encrypted_key)
+                    -> std::unique_ptr<FpPairingKeyWrapCommand> {
+        auto cmd = FpPairingKeyWrapCommand::Create<MockFpPairingKeyWrapCommand>(
+            pub_x, pub_y, encrypted_key);
+        EXPECT_EQ(cmd, nullptr);
+        return cmd;
+      });
+
+  std::optional<brillo::Blob> reply =
+      mock_cros_fp_device_->PairingKeyWrap(kPubX, kPubY, kEncryptedKey);
+  EXPECT_FALSE(reply.has_value());
+}
+
+TEST_F(CrosFpDevice_PairingKeyWrap, RunFailure) {
+  const brillo::Blob kPubX(32, 1);
+  const brillo::Blob kPubY(32, 2);
+  const brillo::Blob kEncryptedKey(sizeof(fp_encrypted_private_key), 3);
+
+  EXPECT_CALL(*mock_ec_command_factory_, FpPairingKeyWrapCommand)
+      .WillOnce([&](const brillo::Blob& pub_x, const brillo::Blob& pub_y,
+                    const brillo::Blob& encrypted_key)
+                    -> std::unique_ptr<FpPairingKeyWrapCommand> {
+        auto cmd = FpPairingKeyWrapCommand::Create<MockFpPairingKeyWrapCommand>(
+            pub_x, pub_y, encrypted_key);
+        if (cmd) {
+          EXPECT_CALL(*cmd, Run).WillRepeatedly(Return(false));
+        }
+        return cmd;
+      });
+
+  std::optional<brillo::Blob> reply =
+      mock_cros_fp_device_->PairingKeyWrap(kPubX, kPubY, kEncryptedKey);
+  EXPECT_FALSE(reply.has_value());
 }
 
 }  // namespace

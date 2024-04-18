@@ -1,18 +1,21 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 lstat: 1
 open: 1
 openat: 1
-# Make sure PROT_WRITE (bit 1) and PROT_EXEC (bit 2) are not both set.
-mmap: arg2 in 0xfffffffb || arg2 in 0xfffffffd
+# Prevent PROT_WRITE | PROT_EXEC.
+mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 fstat: 1
 newfstatat: 1
 stat: 1
 close: 1
-# Make sure PROT_WRITE (bit 1) and PROT_EXEC (bit 2) are not both set.
-mprotect: arg2 in 0xfffffffb || arg2 in 0xfffffffd
+# Prevent PROT_WRITE | PROT_EXEC.
+mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 getdents: 1
 getdents64: 1
 read: 1
@@ -58,3 +61,6 @@ fchmod: 1
 # Used by sqlite3 to get thread id.
 gettid: 1
 clock_gettime: 1
+gettimeofday: 1
+dup: 1
+unlinkat: 1

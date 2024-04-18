@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "cros-camera/common_types.h"
+#include "cros-camera/device_config.h"
 #include "cros-camera/timezone.h"
 
 // TODO(crbug.com/661877): Wrap this with kernel version check once the
@@ -22,20 +23,10 @@
 
 namespace cros {
 
-// The definition should match camera_metadata_enum_android_lens_facing_t
-// in camera_metadata_tags.h.
-enum class LensFacing {
-  kFront,
-  kBack,
-  kExternal,
-};
-
 struct DeviceInfo {
   int camera_id = -1;
 
-  // TODO(shik): Change this to base::FilePath.
-  // ex: /dev/video0
-  std::string device_path;
+  base::FilePath device_path;
 
   // Whether the device is an emulated vivid camera.
   bool is_vivid = false;
@@ -48,10 +39,6 @@ struct DeviceInfo {
 
   // Some cameras need to wait several frames to output correct images.
   uint32_t frames_to_skip_after_streamon = 0;
-
-  // Power line frequency supported by device, which will be filled according to
-  // the current location instead of camera_characteristics.conf.
-  PowerLineFrequency power_line_frequency = PowerLineFrequency::FREQ_DEFAULT;
 
   // The camera doesn't support constant frame rate. That means HAL cannot set
   // V4L2_CID_EXPOSURE_AUTO_PRIORITY to 0 to have constant frame rate in low
@@ -92,6 +79,12 @@ struct DeviceInfo {
   float horizontal_view_angle_4_3 = 0;
   float vertical_view_angle_16_9 = 0;
   float vertical_view_angle_4_3 = 0;
+
+  // Whether the device is detachable.
+  bool is_detachable = false;
+
+  // Whether the device has privacy switch.
+  bool has_privacy_switch = false;
 };
 
 typedef std::vector<DeviceInfo> DeviceInfos;

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,22 @@
 
 #include <fcntl.h>
 #include <unistd.h>
+
 #include <memory>
 #include <utility>
 
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library.h>
+#include <metrics/metrics_library_mock.h>
 
+#include "crash-reporter/arc_util.h"
 #include "crash-reporter/test_util.h"
 
 namespace {
@@ -84,7 +90,11 @@ constexpr char kSensitiveDataInRamoops[] = "example@google.com";
 
 class TestArcvmKernelCollector : public ArcvmKernelCollector {
  public:
-  explicit TestArcvmKernelCollector(const base::FilePath& crash_directory) {
+  explicit TestArcvmKernelCollector(const base::FilePath& crash_directory)
+      : ArcvmKernelCollector(
+            base::MakeRefCounted<
+                base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+                std::make_unique<MetricsLibraryMock>())) {
     Initialize(false /* early */);
     set_crash_directory_for_test(crash_directory);
   }
@@ -157,4 +167,13 @@ TEST_F(ArcvmKernelCollectorTest, AddArcMetadata) {
   EXPECT_TRUE(collector_->HasMetaData(arc_util::kDeviceField, kDevice));
   EXPECT_TRUE(collector_->HasMetaData(arc_util::kBoardField, kBoard));
   EXPECT_TRUE(collector_->HasMetaData(arc_util::kCpuAbiField, kCpuAbi));
+}
+
+TEST_F(ArcvmKernelCollectorTest, ComputeSeverity) {
+  CrashCollector::ComputedCrashSeverity computed_severity =
+      collector_->ComputeSeverity("test exec name");
+
+  EXPECT_EQ(computed_severity.crash_severity,
+            CrashCollector::CrashSeverity::kFatal);
+  EXPECT_EQ(computed_severity.product_group, CrashCollector::Product::kArc);
 }

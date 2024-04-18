@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,17 @@
 
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 
 #include "iioservice/include/common.h"
 
 namespace iioservice {
+
+namespace {
+
+constexpr int kSetUpChannelTimeoutInMilliseconds = 3000;
+
+}  // namespace
 
 // static
 void SensorClient::SensorClientDeleter(SensorClient* sensor_client) {
@@ -27,20 +33,14 @@ void SensorClient::SensorClientDeleter(SensorClient* sensor_client) {
   delete sensor_client;
 }
 
-void SensorClient::BindClient(
-    mojo::PendingReceiver<cros::mojom::SensorHalClient> client) {
-  DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
-  DCHECK(!client_.is_bound());
-
-  client_.Bind(std::move(client));
-  client_.set_disconnect_handler(base::BindOnce(
-      &SensorClient::OnClientDisconnect, weak_factory_.GetWeakPtr()));
-}
+SensorClient::~SensorClient() = default;
 
 void SensorClient::SetUpChannel(
     mojo::PendingRemote<cros::mojom::SensorService> pending_remote) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
   DCHECK(!sensor_service_remote_.is_bound());
+
+  sensor_service_setup_ = true;
 
   sensor_service_remote_.Bind(std::move(pending_remote));
   sensor_service_remote_.set_disconnect_handler(base::BindOnce(
@@ -53,12 +53,18 @@ SensorClient::SensorClient(
     scoped_refptr<base::SequencedTaskRunner> ipc_task_runner,
     QuitCallback quit_callback)
     : ipc_task_runner_(std::move(ipc_task_runner)),
-      quit_callback_(std::move(quit_callback)) {}
+      quit_callback_(std::move(quit_callback)) {
+  ipc_task_runner_->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&SensorClient::SetUpChannelTimeout,
+                     weak_factory_.GetWeakPtr()),
+      base::Milliseconds(kSetUpChannelTimeoutInMilliseconds));
+}
 
 void SensorClient::SetUpChannelTimeout() {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
 
-  if (sensor_service_remote_.is_bound())
+  if (sensor_service_setup_)
     return;
 
   // Don't Change: Used as a check sentence in the tast test.
@@ -69,18 +75,10 @@ void SensorClient::SetUpChannelTimeout() {
 void SensorClient::Reset() {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
 
-  client_.reset();
   sensor_service_remote_.reset();
 
   if (quit_callback_)
     std::move(quit_callback_).Run();
-}
-
-void SensorClient::OnClientDisconnect() {
-  DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
-
-  LOGF(ERROR) << "SensorHalClient disconnected";
-  Reset();
 }
 
 void SensorClient::OnServiceDisconnect() {

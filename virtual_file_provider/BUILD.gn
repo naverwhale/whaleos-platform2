@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -6,6 +6,10 @@ import("//common-mk/pkg_config.gni")
 
 group("all") {
   deps = [
+    ":install_configs",
+    ":install_dbus_config",
+    ":install_powerd_prefs",
+    ":install_virtual-file-provider-jailed",
     ":libvirtual-file-provider",
     ":virtual-file-provider",
   ]
@@ -41,6 +45,19 @@ executable("virtual-file-provider") {
     ":target_defaults",
     ":virtual-file-provider_config",
   ]
+  install_path = "bin"
+  deps = [ ":libvirtual-file-provider" ]
+}
+
+install_config("install_virtual-file-provider-jailed") {
+  if (use.arcvm) {
+    sources = [ "virtual-file-provider-jailed-arcvm.sh" ]
+  } else {
+    sources = [ "virtual-file-provider-jailed.sh" ]
+  }
+  outputs = [ "virtual-file-provider-jailed" ]
+  install_path = "bin"
+  type = "executable"
   deps = [ ":libvirtual-file-provider" ]
 }
 
@@ -56,9 +73,30 @@ static_library("libvirtual-file-provider") {
   defines = [ "FUSE_USE_VERSION=26" ]
 }
 
+install_config("install_dbus_config") {
+  sources = [ "org.chromium.VirtualFileProvider.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_configs") {
+  sources = [
+    "init/virtual-file-provider-cgroup.conf",
+    "init/virtual-file-provider.conf",
+  ]
+  install_path = "upstart"
+}
+
+install_config("install_powerd_prefs") {
+  sources = [ "powerd_prefs/suspend_freezer_deps_virtual-file-provider" ]
+  install_path = "/usr/share/power_manager"
+}
+
 if (use.test) {
   executable("virtual-file-provider_testrunner") {
-    sources = [ "operation_throttle_test.cc" ]
+    sources = [
+      "operation_throttle_test.cc",
+      "service_test.cc",
+    ]
     configs += [
       "//common-mk:test",
       ":target_defaults",
@@ -67,5 +105,6 @@ if (use.test) {
       ":libvirtual-file-provider",
       "//common-mk/testrunner",
     ]
+    run_test = true
   }
 }

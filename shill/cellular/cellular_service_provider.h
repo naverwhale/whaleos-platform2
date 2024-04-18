@@ -1,25 +1,32 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_CELLULAR_CELLULAR_SERVICE_PROVIDER_H_
 #define SHILL_CELLULAR_CELLULAR_SERVICE_PROVIDER_H_
 
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
+#include <chromeos-config/libcros_config/cros_config.h>
 
 #include "shill/cellular/cellular_service.h"
+#include "shill/mockable.h"
 #include "shill/provider_interface.h"
 #include "shill/refptr_types.h"
+#include "shill/tethering_manager.h"
 
 namespace shill {
 
 class Error;
 class KeyValueStore;
 class Manager;
+class Network;
 
 class CellularServiceProvider : public ProviderInterface {
  public:
@@ -39,6 +46,7 @@ class CellularServiceProvider : public ProviderInterface {
   ServiceRefPtr CreateTemporaryServiceFromProfile(const ProfileRefPtr& profile,
                                                   const std::string& entry_name,
                                                   Error* error) override;
+  void AbandonService(const ServiceRefPtr& service) override;
   void Start() override;
   void Stop() override;
 
@@ -64,15 +72,47 @@ class CellularServiceProvider : public ProviderInterface {
   // Returns a service matching |iccid_| if available.
   CellularServiceRefPtr FindService(const std::string& iccid) const;
 
-  // Called when the Service is Unloaded from the Profile. If the Service
-  // ICCID is not associated with any SIM, removes the service and returns true.
-  // Otherwise returns false.
-  bool OnServiceUnloaded(const CellularServiceRefPtr& service);
-
   void set_profile_for_testing(ProfileRefPtr profile) { profile_ = profile; }
+
+  void set_cros_config_for_testing(
+      std::unique_ptr<brillo::CrosConfigInterface> cros_config) {
+    cros_config_ = std::move(cros_config);
+  }
+
+  // Returns true if the hardware supports tethering over cellular and the
+  // model was allowlisted for tethering.
+  mockable bool HardwareSupportsTethering();
+
+  // Checks if sharing the Cellular connection in a tethering session with
+  // client devices is allowed and supported for the current carrier and modem.
+  mockable void TetheringEntitlementCheck(
+      base::OnceCallback<void(TetheringManager::EntitlementStatus result)>
+          callback);
+
+  // Returns the Network object to use for sharing the Cellular connection in a
+  // tethering session, creating and connecting a new Network if necessary for
+  // the current carrier and modem.
+  mockable void AcquireTetheringNetwork(
+      TetheringManager::UpdateTimeoutCallback update_timeout_callback,
+      TetheringManager::AcquireNetworkCallback callback,
+      TetheringManager::CellularUpstreamEventCallback tethering_event_callback);
+
+  // Notifies that a tethering session has stopped and that the Network object
+  // obtained with AcquireTetheringNetwork() is not used for tethering anymore.
+  // If that Network had been created specially for tethering, it is destroyed
+  // and the underlying connection is torn down.
+  // If |network| is nullptr, this request will abort the ongoing tethering
+  // network acquisition attempt.
+  mockable void ReleaseTetheringNetwork(
+      Network* network, base::OnceCallback<void(bool is_success)> callback);
+
+  // Return current service operator two-letter country code defined in ISO
+  // 3166-1.
+  std::optional<std::string> GetOperatorCountryCode();
 
  private:
   friend class CellularServiceProviderTest;
+  friend class TetheringManagerTest;
 
   CellularServiceRefPtr LoadMatchingServicesFromProfile(
       const std::string& eid,
@@ -82,6 +122,14 @@ class CellularServiceProvider : public ProviderInterface {
   void AddService(CellularServiceRefPtr service);
   void RemoveService(CellularServiceRefPtr service);
 
+  CellularService* GetActiveService();
+  void OnAcquireTetheringNetworkReady(
+      TetheringManager::AcquireNetworkCallback callback,
+      Network* network,
+      const Error& error);
+  void OnReleaseTetheringNetworkReady(
+      base::OnceCallback<void(bool is_success)> callback, const Error& error);
+
   Manager* manager_;
   // Use a single profile for Cellular services. Set to the first (device)
   // profile when CreateServicesFromProfile is called. This prevents confusing
@@ -89,6 +137,10 @@ class CellularServiceProvider : public ProviderInterface {
   // user profile. The SIM card itself can provide access security with a PIN.
   ProfileRefPtr profile_;
   std::vector<CellularServiceRefPtr> services_;
+  std::unique_ptr<brillo::CrosConfigInterface> cros_config_;
+  std::optional<std::string> variant_;
+
+  base::WeakPtrFactory<CellularServiceProvider> weak_factory_{this};
 };
 
 }  // namespace shill

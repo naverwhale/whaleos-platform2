@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <tpm_manager/proto_bindings/tpm_manager.pb.h>
 #include <trousers/tss.h>
 
@@ -53,6 +52,10 @@ class TpmInitializerImpl : public TpmInitializer {
   DictionaryAttackResetStatus ResetDictionaryAttackLock() override;
   TpmInitializerStatus DisableDictionaryAttackMitigation() override;
   void PruneStoredPasswords() override;
+  // This method changes old owner password with a new owner password.
+  // Returns true on success, else false.
+  bool ChangeOwnerPassword(const std::string& old_password,
+                           const std::string& new_password) override;
 
  private:
   // This method checks if an EndorsementKey exists on the Tpm and creates it

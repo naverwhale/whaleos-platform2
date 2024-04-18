@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,15 +6,14 @@
 
 #include "trunks/tpm_generated.h"
 
+#include <iterator>
 #include <memory>
 #include <string>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
-#include <base/macros.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/sys_byteorder.h>
 #include <crypto/secure_hash.h>
@@ -1127,7 +1126,7 @@ TPM_RC Serialize_TPM2B_DIGEST(const TPM2B_DIGEST& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -1150,7 +1149,7 @@ TPM_RC Parse_TPM2B_DIGEST(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -1172,6 +1171,7 @@ TPM2B_DIGEST Make_TPM2B_DIGEST(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_DIGEST(const TPM2B_DIGEST& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -2216,7 +2216,7 @@ TPM_RC Serialize_TPMU_HA(const TPMU_HA& value,
   VLOG(3) << __func__;
 
   if (selector == TPM_ALG_SHA384) {
-    if (base::size(value.sha384) < SHA384_DIGEST_SIZE) {
+    if (std::size(value.sha384) < SHA384_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SHA384_DIGEST_SIZE; ++i) {
@@ -2228,7 +2228,7 @@ TPM_RC Serialize_TPMU_HA(const TPMU_HA& value,
   }
 
   if (selector == TPM_ALG_SHA1) {
-    if (base::size(value.sha1) < SHA1_DIGEST_SIZE) {
+    if (std::size(value.sha1) < SHA1_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SHA1_DIGEST_SIZE; ++i) {
@@ -2240,7 +2240,7 @@ TPM_RC Serialize_TPMU_HA(const TPMU_HA& value,
   }
 
   if (selector == TPM_ALG_SM3_256) {
-    if (base::size(value.sm3_256) < SM3_256_DIGEST_SIZE) {
+    if (std::size(value.sm3_256) < SM3_256_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SM3_256_DIGEST_SIZE; ++i) {
@@ -2256,7 +2256,7 @@ TPM_RC Serialize_TPMU_HA(const TPMU_HA& value,
   }
 
   if (selector == TPM_ALG_SHA256) {
-    if (base::size(value.sha256) < SHA256_DIGEST_SIZE) {
+    if (std::size(value.sha256) < SHA256_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SHA256_DIGEST_SIZE; ++i) {
@@ -2268,7 +2268,7 @@ TPM_RC Serialize_TPMU_HA(const TPMU_HA& value,
   }
 
   if (selector == TPM_ALG_SHA512) {
-    if (base::size(value.sha512) < SHA512_DIGEST_SIZE) {
+    if (std::size(value.sha512) < SHA512_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SHA512_DIGEST_SIZE; ++i) {
@@ -2289,7 +2289,7 @@ TPM_RC Parse_TPMU_HA(std::string* buffer,
   VLOG(3) << __func__;
 
   if (selector == TPM_ALG_SHA384) {
-    if (base::size(value->sha384) < SHA384_DIGEST_SIZE) {
+    if (std::size(value->sha384) < SHA384_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SHA384_DIGEST_SIZE; ++i) {
@@ -2301,7 +2301,7 @@ TPM_RC Parse_TPMU_HA(std::string* buffer,
   }
 
   if (selector == TPM_ALG_SHA1) {
-    if (base::size(value->sha1) < SHA1_DIGEST_SIZE) {
+    if (std::size(value->sha1) < SHA1_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SHA1_DIGEST_SIZE; ++i) {
@@ -2313,7 +2313,7 @@ TPM_RC Parse_TPMU_HA(std::string* buffer,
   }
 
   if (selector == TPM_ALG_SM3_256) {
-    if (base::size(value->sm3_256) < SM3_256_DIGEST_SIZE) {
+    if (std::size(value->sm3_256) < SM3_256_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SM3_256_DIGEST_SIZE; ++i) {
@@ -2329,7 +2329,7 @@ TPM_RC Parse_TPMU_HA(std::string* buffer,
   }
 
   if (selector == TPM_ALG_SHA256) {
-    if (base::size(value->sha256) < SHA256_DIGEST_SIZE) {
+    if (std::size(value->sha256) < SHA256_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SHA256_DIGEST_SIZE; ++i) {
@@ -2341,7 +2341,7 @@ TPM_RC Parse_TPMU_HA(std::string* buffer,
   }
 
   if (selector == TPM_ALG_SHA512) {
-    if (base::size(value->sha512) < SHA512_DIGEST_SIZE) {
+    if (std::size(value->sha512) < SHA512_DIGEST_SIZE) {
       return TPM_RC_INSUFFICIENT;
     }
     for (uint32_t i = 0; i < SHA512_DIGEST_SIZE; ++i) {
@@ -2397,7 +2397,7 @@ TPM_RC Serialize_TPM2B_DATA(const TPM2B_DATA& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -2420,7 +2420,7 @@ TPM_RC Parse_TPM2B_DATA(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -2442,6 +2442,7 @@ TPM2B_DATA Make_TPM2B_DATA(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_DATA(const TPM2B_DATA& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -2455,7 +2456,7 @@ TPM_RC Serialize_TPM2B_EVENT(const TPM2B_EVENT& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -2478,7 +2479,7 @@ TPM_RC Parse_TPM2B_EVENT(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -2500,6 +2501,7 @@ TPM2B_EVENT Make_TPM2B_EVENT(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_EVENT(const TPM2B_EVENT& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -2514,7 +2516,7 @@ TPM_RC Serialize_TPM2B_MAX_BUFFER(const TPM2B_MAX_BUFFER& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -2537,7 +2539,7 @@ TPM_RC Parse_TPM2B_MAX_BUFFER(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -2559,6 +2561,7 @@ TPM2B_MAX_BUFFER Make_TPM2B_MAX_BUFFER(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_MAX_BUFFER(const TPM2B_MAX_BUFFER& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -2573,7 +2576,7 @@ TPM_RC Serialize_TPM2B_MAX_NV_BUFFER(const TPM2B_MAX_NV_BUFFER& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -2596,7 +2599,7 @@ TPM_RC Parse_TPM2B_MAX_NV_BUFFER(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -2618,6 +2621,7 @@ TPM2B_MAX_NV_BUFFER Make_TPM2B_MAX_NV_BUFFER(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_MAX_NV_BUFFER(const TPM2B_MAX_NV_BUFFER& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -2632,7 +2636,7 @@ TPM_RC Serialize_TPM2B_TIMEOUT(const TPM2B_TIMEOUT& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -2655,7 +2659,7 @@ TPM_RC Parse_TPM2B_TIMEOUT(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -2677,6 +2681,7 @@ TPM2B_TIMEOUT Make_TPM2B_TIMEOUT(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_TIMEOUT(const TPM2B_TIMEOUT& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -2690,7 +2695,7 @@ TPM_RC Serialize_TPM2B_IV(const TPM2B_IV& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -2713,7 +2718,7 @@ TPM_RC Parse_TPM2B_IV(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -2735,6 +2740,7 @@ TPM2B_IV Make_TPM2B_IV(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_IV(const TPM2B_IV& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -2748,7 +2754,7 @@ TPM_RC Serialize_TPM2B_NAME(const TPM2B_NAME& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.name) < value.size) {
+  if (std::size(value.name) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -2771,7 +2777,7 @@ TPM_RC Parse_TPM2B_NAME(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->name) < value->size) {
+  if (std::size(value->name) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -2793,6 +2799,7 @@ TPM2B_NAME Make_TPM2B_NAME(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_NAME(const TPM2B_NAME& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.name));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.name);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -2807,7 +2814,7 @@ TPM_RC Serialize_TPMS_PCR_SELECT(const TPMS_PCR_SELECT& value,
     return result;
   }
 
-  if (base::size(value.pcr_select) < value.sizeof_select) {
+  if (std::size(value.pcr_select) < value.sizeof_select) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.sizeof_select; ++i) {
@@ -2830,7 +2837,7 @@ TPM_RC Parse_TPMS_PCR_SELECT(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->pcr_select) < value->sizeof_select) {
+  if (std::size(value->pcr_select) < value->sizeof_select) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->sizeof_select; ++i) {
@@ -2857,7 +2864,7 @@ TPM_RC Serialize_TPMS_PCR_SELECTION(const TPMS_PCR_SELECTION& value,
     return result;
   }
 
-  if (base::size(value.pcr_select) < value.sizeof_select) {
+  if (std::size(value.pcr_select) < value.sizeof_select) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.sizeof_select; ++i) {
@@ -2885,7 +2892,7 @@ TPM_RC Parse_TPMS_PCR_SELECTION(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->pcr_select) < value->sizeof_select) {
+  if (std::size(value->pcr_select) < value->sizeof_select) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->sizeof_select; ++i) {
@@ -3161,7 +3168,7 @@ TPM_RC Serialize_TPMS_TAGGED_PCR_SELECT(const TPMS_TAGGED_PCR_SELECT& value,
     return result;
   }
 
-  if (base::size(value.pcr_select) < value.sizeof_select) {
+  if (std::size(value.pcr_select) < value.sizeof_select) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.sizeof_select; ++i) {
@@ -3189,7 +3196,7 @@ TPM_RC Parse_TPMS_TAGGED_PCR_SELECT(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->pcr_select) < value->sizeof_select) {
+  if (std::size(value->pcr_select) < value->sizeof_select) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->sizeof_select; ++i) {
@@ -3210,7 +3217,7 @@ TPM_RC Serialize_TPML_CC(const TPML_CC& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.command_codes) < value.count) {
+  if (std::size(value.command_codes) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3233,7 +3240,7 @@ TPM_RC Parse_TPML_CC(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->command_codes) < value->count) {
+  if (std::size(value->command_codes) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3254,7 +3261,7 @@ TPM_RC Serialize_TPML_CCA(const TPML_CCA& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.command_attributes) < value.count) {
+  if (std::size(value.command_attributes) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3277,7 +3284,7 @@ TPM_RC Parse_TPML_CCA(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->command_attributes) < value->count) {
+  if (std::size(value->command_attributes) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3298,7 +3305,7 @@ TPM_RC Serialize_TPML_ALG(const TPML_ALG& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.algorithms) < value.count) {
+  if (std::size(value.algorithms) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3321,7 +3328,7 @@ TPM_RC Parse_TPML_ALG(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->algorithms) < value->count) {
+  if (std::size(value->algorithms) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3342,7 +3349,7 @@ TPM_RC Serialize_TPML_HANDLE(const TPML_HANDLE& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.handle) < value.count) {
+  if (std::size(value.handle) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3365,7 +3372,7 @@ TPM_RC Parse_TPML_HANDLE(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->handle) < value->count) {
+  if (std::size(value->handle) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3386,7 +3393,7 @@ TPM_RC Serialize_TPML_DIGEST(const TPML_DIGEST& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.digests) < value.count) {
+  if (std::size(value.digests) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3409,7 +3416,7 @@ TPM_RC Parse_TPML_DIGEST(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->digests) < value->count) {
+  if (std::size(value->digests) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3431,7 +3438,7 @@ TPM_RC Serialize_TPML_DIGEST_VALUES(const TPML_DIGEST_VALUES& value,
     return result;
   }
 
-  if (base::size(value.digests) < value.count) {
+  if (std::size(value.digests) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3454,7 +3461,7 @@ TPM_RC Parse_TPML_DIGEST_VALUES(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->digests) < value->count) {
+  if (std::size(value->digests) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3476,7 +3483,7 @@ TPM_RC Serialize_TPM2B_DIGEST_VALUES(const TPM2B_DIGEST_VALUES& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -3499,7 +3506,7 @@ TPM_RC Parse_TPM2B_DIGEST_VALUES(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -3521,6 +3528,7 @@ TPM2B_DIGEST_VALUES Make_TPM2B_DIGEST_VALUES(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_DIGEST_VALUES(const TPM2B_DIGEST_VALUES& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -3535,7 +3543,7 @@ TPM_RC Serialize_TPML_PCR_SELECTION(const TPML_PCR_SELECTION& value,
     return result;
   }
 
-  if (base::size(value.pcr_selections) < value.count) {
+  if (std::size(value.pcr_selections) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3558,7 +3566,7 @@ TPM_RC Parse_TPML_PCR_SELECTION(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->pcr_selections) < value->count) {
+  if (std::size(value->pcr_selections) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3581,7 +3589,7 @@ TPM_RC Serialize_TPML_ALG_PROPERTY(const TPML_ALG_PROPERTY& value,
     return result;
   }
 
-  if (base::size(value.alg_properties) < value.count) {
+  if (std::size(value.alg_properties) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3604,7 +3612,7 @@ TPM_RC Parse_TPML_ALG_PROPERTY(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->alg_properties) < value->count) {
+  if (std::size(value->alg_properties) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3627,7 +3635,7 @@ TPM_RC Serialize_TPML_TAGGED_TPM_PROPERTY(const TPML_TAGGED_TPM_PROPERTY& value,
     return result;
   }
 
-  if (base::size(value.tpm_property) < value.count) {
+  if (std::size(value.tpm_property) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3650,7 +3658,7 @@ TPM_RC Parse_TPML_TAGGED_TPM_PROPERTY(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->tpm_property) < value->count) {
+  if (std::size(value->tpm_property) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3673,7 +3681,7 @@ TPM_RC Serialize_TPML_TAGGED_PCR_PROPERTY(const TPML_TAGGED_PCR_PROPERTY& value,
     return result;
   }
 
-  if (base::size(value.pcr_property) < value.count) {
+  if (std::size(value.pcr_property) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3696,7 +3704,7 @@ TPM_RC Parse_TPML_TAGGED_PCR_PROPERTY(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->pcr_property) < value->count) {
+  if (std::size(value->pcr_property) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -3719,7 +3727,7 @@ TPM_RC Serialize_TPML_ECC_CURVE(const TPML_ECC_CURVE& value,
     return result;
   }
 
-  if (base::size(value.ecc_curves) < value.count) {
+  if (std::size(value.ecc_curves) < value.count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.count; ++i) {
@@ -3742,7 +3750,7 @@ TPM_RC Parse_TPML_ECC_CURVE(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->ecc_curves) < value->count) {
+  if (std::size(value->ecc_curves) < value->count) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->count; ++i) {
@@ -4512,7 +4520,7 @@ TPM_RC Serialize_TPM2B_ATTEST(const TPM2B_ATTEST& value, std::string* buffer) {
     return result;
   }
 
-  if (base::size(value.attestation_data) < value.size) {
+  if (std::size(value.attestation_data) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -4535,7 +4543,7 @@ TPM_RC Parse_TPM2B_ATTEST(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->attestation_data) < value->size) {
+  if (std::size(value->attestation_data) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -4557,6 +4565,7 @@ TPM2B_ATTEST Make_TPM2B_ATTEST(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_ATTEST(const TPM2B_ATTEST& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.attestation_data));
   const char* char_buffer =
       reinterpret_cast<const char*>(tpm2b.attestation_data);
   return std::string(char_buffer, tpm2b.size);
@@ -4933,7 +4942,7 @@ TPM_RC Serialize_TPM2B_SYM_KEY(const TPM2B_SYM_KEY& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -4956,7 +4965,7 @@ TPM_RC Parse_TPM2B_SYM_KEY(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -4978,6 +4987,7 @@ TPM2B_SYM_KEY Make_TPM2B_SYM_KEY(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_SYM_KEY(const TPM2B_SYM_KEY& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -5017,7 +5027,7 @@ TPM_RC Serialize_TPM2B_SENSITIVE_DATA(const TPM2B_SENSITIVE_DATA& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -5040,7 +5050,7 @@ TPM_RC Parse_TPM2B_SENSITIVE_DATA(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -5062,6 +5072,7 @@ TPM2B_SENSITIVE_DATA Make_TPM2B_SENSITIVE_DATA(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_SENSITIVE_DATA(const TPM2B_SENSITIVE_DATA& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -6009,7 +6020,7 @@ TPM_RC Serialize_TPM2B_PUBLIC_KEY_RSA(const TPM2B_PUBLIC_KEY_RSA& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -6032,7 +6043,7 @@ TPM_RC Parse_TPM2B_PUBLIC_KEY_RSA(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -6054,6 +6065,7 @@ TPM2B_PUBLIC_KEY_RSA Make_TPM2B_PUBLIC_KEY_RSA(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_PUBLIC_KEY_RSA(const TPM2B_PUBLIC_KEY_RSA& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -6068,7 +6080,7 @@ TPM_RC Serialize_TPM2B_PRIVATE_KEY_RSA(const TPM2B_PRIVATE_KEY_RSA& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -6091,7 +6103,7 @@ TPM_RC Parse_TPM2B_PRIVATE_KEY_RSA(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -6114,6 +6126,7 @@ TPM2B_PRIVATE_KEY_RSA Make_TPM2B_PRIVATE_KEY_RSA(const std::string& bytes) {
 
 std::string StringFrom_TPM2B_PRIVATE_KEY_RSA(
     const TPM2B_PRIVATE_KEY_RSA& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -6128,7 +6141,7 @@ TPM_RC Serialize_TPM2B_ECC_PARAMETER(const TPM2B_ECC_PARAMETER& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -6151,7 +6164,7 @@ TPM_RC Parse_TPM2B_ECC_PARAMETER(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -6173,6 +6186,7 @@ TPM2B_ECC_PARAMETER Make_TPM2B_ECC_PARAMETER(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_ECC_PARAMETER(const TPM2B_ECC_PARAMETER& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -6711,7 +6725,7 @@ TPM_RC Serialize_TPM2B_ENCRYPTED_SECRET(const TPM2B_ENCRYPTED_SECRET& value,
     return result;
   }
 
-  if (base::size(value.secret) < value.size) {
+  if (std::size(value.secret) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -6734,7 +6748,7 @@ TPM_RC Parse_TPM2B_ENCRYPTED_SECRET(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->secret) < value->size) {
+  if (std::size(value->secret) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -6757,6 +6771,7 @@ TPM2B_ENCRYPTED_SECRET Make_TPM2B_ENCRYPTED_SECRET(const std::string& bytes) {
 
 std::string StringFrom_TPM2B_ENCRYPTED_SECRET(
     const TPM2B_ENCRYPTED_SECRET& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.secret));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.secret);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -7254,7 +7269,7 @@ TPM_RC Serialize_TPM2B_PRIVATE_VENDOR_SPECIFIC(
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -7277,7 +7292,7 @@ TPM_RC Parse_TPM2B_PRIVATE_VENDOR_SPECIFIC(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -7301,6 +7316,7 @@ TPM2B_PRIVATE_VENDOR_SPECIFIC Make_TPM2B_PRIVATE_VENDOR_SPECIFIC(
 
 std::string StringFrom_TPM2B_PRIVATE_VENDOR_SPECIFIC(
     const TPM2B_PRIVATE_VENDOR_SPECIFIC& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -7489,50 +7505,6 @@ TPM2B_SENSITIVE Make_TPM2B_SENSITIVE(const TPMT_SENSITIVE& inner) {
   return tpm2b;
 }
 
-TPM_RC Serialize__PRIVATE(const _PRIVATE& value, std::string* buffer) {
-  TPM_RC result = TPM_RC_SUCCESS;
-  VLOG(3) << __func__;
-
-  result = Serialize_TPM2B_DIGEST(value.integrity_outer, buffer);
-  if (result) {
-    return result;
-  }
-
-  result = Serialize_TPM2B_DIGEST(value.integrity_inner, buffer);
-  if (result) {
-    return result;
-  }
-
-  result = Serialize_TPMT_SENSITIVE(value.sensitive, buffer);
-  if (result) {
-    return result;
-  }
-  return result;
-}
-
-TPM_RC Parse__PRIVATE(std::string* buffer,
-                      _PRIVATE* value,
-                      std::string* value_bytes) {
-  TPM_RC result = TPM_RC_SUCCESS;
-  VLOG(3) << __func__;
-
-  result = Parse_TPM2B_DIGEST(buffer, &value->integrity_outer, value_bytes);
-  if (result) {
-    return result;
-  }
-
-  result = Parse_TPM2B_DIGEST(buffer, &value->integrity_inner, value_bytes);
-  if (result) {
-    return result;
-  }
-
-  result = Parse_TPMT_SENSITIVE(buffer, &value->sensitive, value_bytes);
-  if (result) {
-    return result;
-  }
-  return result;
-}
-
 TPM_RC Serialize_TPM2B_PRIVATE(const TPM2B_PRIVATE& value,
                                std::string* buffer) {
   TPM_RC result = TPM_RC_SUCCESS;
@@ -7543,7 +7515,7 @@ TPM_RC Serialize_TPM2B_PRIVATE(const TPM2B_PRIVATE& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -7566,7 +7538,7 @@ TPM_RC Parse_TPM2B_PRIVATE(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -7588,42 +7560,9 @@ TPM2B_PRIVATE Make_TPM2B_PRIVATE(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_PRIVATE(const TPM2B_PRIVATE& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
-}
-
-TPM_RC Serialize__ID_OBJECT(const _ID_OBJECT& value, std::string* buffer) {
-  TPM_RC result = TPM_RC_SUCCESS;
-  VLOG(3) << __func__;
-
-  result = Serialize_TPM2B_DIGEST(value.integrity_hmac, buffer);
-  if (result) {
-    return result;
-  }
-
-  result = Serialize_TPM2B_DIGEST(value.enc_identity, buffer);
-  if (result) {
-    return result;
-  }
-  return result;
-}
-
-TPM_RC Parse__ID_OBJECT(std::string* buffer,
-                        _ID_OBJECT* value,
-                        std::string* value_bytes) {
-  TPM_RC result = TPM_RC_SUCCESS;
-  VLOG(3) << __func__;
-
-  result = Parse_TPM2B_DIGEST(buffer, &value->integrity_hmac, value_bytes);
-  if (result) {
-    return result;
-  }
-
-  result = Parse_TPM2B_DIGEST(buffer, &value->enc_identity, value_bytes);
-  if (result) {
-    return result;
-  }
-  return result;
 }
 
 TPM_RC Serialize_TPM2B_ID_OBJECT(const TPM2B_ID_OBJECT& value,
@@ -7636,7 +7575,7 @@ TPM_RC Serialize_TPM2B_ID_OBJECT(const TPM2B_ID_OBJECT& value,
     return result;
   }
 
-  if (base::size(value.credential) < value.size) {
+  if (std::size(value.credential) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -7659,7 +7598,7 @@ TPM_RC Parse_TPM2B_ID_OBJECT(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->credential) < value->size) {
+  if (std::size(value->credential) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -7681,6 +7620,7 @@ TPM2B_ID_OBJECT Make_TPM2B_ID_OBJECT(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_ID_OBJECT(const TPM2B_ID_OBJECT& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.credential));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.credential);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -7814,7 +7754,7 @@ TPM_RC Serialize_TPM2B_CONTEXT_SENSITIVE(const TPM2B_CONTEXT_SENSITIVE& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -7837,7 +7777,7 @@ TPM_RC Parse_TPM2B_CONTEXT_SENSITIVE(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -7860,6 +7800,7 @@ TPM2B_CONTEXT_SENSITIVE Make_TPM2B_CONTEXT_SENSITIVE(const std::string& bytes) {
 
 std::string StringFrom_TPM2B_CONTEXT_SENSITIVE(
     const TPM2B_CONTEXT_SENSITIVE& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -7910,7 +7851,7 @@ TPM_RC Serialize_TPM2B_CONTEXT_DATA(const TPM2B_CONTEXT_DATA& value,
     return result;
   }
 
-  if (base::size(value.buffer) < value.size) {
+  if (std::size(value.buffer) < value.size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value.size; ++i) {
@@ -7933,7 +7874,7 @@ TPM_RC Parse_TPM2B_CONTEXT_DATA(std::string* buffer,
     return result;
   }
 
-  if (base::size(value->buffer) < value->size) {
+  if (std::size(value->buffer) < value->size) {
     return TPM_RC_INSUFFICIENT;
   }
   for (uint32_t i = 0; i < value->size; ++i) {
@@ -7955,6 +7896,7 @@ TPM2B_CONTEXT_DATA Make_TPM2B_CONTEXT_DATA(const std::string& bytes) {
 }
 
 std::string StringFrom_TPM2B_CONTEXT_DATA(const TPM2B_CONTEXT_DATA& tpm2b) {
+  CHECK(tpm2b.size <= std::size(tpm2b.buffer));
   const char* char_buffer = reinterpret_cast<const char*>(tpm2b.buffer);
   return std::string(char_buffer, tpm2b.size);
 }
@@ -8183,7 +8125,7 @@ TPM_RC Tpm::SerializeCommand_Startup(
   parameter_section_bytes += startup_type_bytes;
   command_size += startup_type_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -8282,9 +8224,10 @@ TPM_RC Tpm::ParseResponse_Startup(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -8293,42 +8236,41 @@ TPM_RC Tpm::ParseResponse_Startup(
   return TPM_RC_SUCCESS;
 }
 
-void StartupErrorCallback(const Tpm::StartupResponse& callback,
-                          TPM_RC response_code) {
+void StartupErrorCallback(Tpm::StartupResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void StartupResponseParser(const Tpm::StartupResponse& callback,
+void StartupResponseParser(Tpm::StartupResponse callback,
                            AuthorizationDelegate* authorization_delegate,
                            const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(StartupErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_Startup(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(StartupErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::Startup(const TPM_SU& startup_type,
                   AuthorizationDelegate* authorization_delegate,
-                  const StartupResponse& callback) {
+                  StartupResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(StartupErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(StartupResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_Startup(startup_type, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(StartupErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      StartupResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::StartupSync(const TPM_SU& startup_type,
@@ -8375,7 +8317,7 @@ TPM_RC Tpm::SerializeCommand_Shutdown(
   parameter_section_bytes += shutdown_type_bytes;
   command_size += shutdown_type_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -8474,9 +8416,10 @@ TPM_RC Tpm::ParseResponse_Shutdown(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -8485,42 +8428,42 @@ TPM_RC Tpm::ParseResponse_Shutdown(
   return TPM_RC_SUCCESS;
 }
 
-void ShutdownErrorCallback(const Tpm::ShutdownResponse& callback,
+void ShutdownErrorCallback(Tpm::ShutdownResponse callback,
                            TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void ShutdownResponseParser(const Tpm::ShutdownResponse& callback,
+void ShutdownResponseParser(Tpm::ShutdownResponse callback,
                             AuthorizationDelegate* authorization_delegate,
                             const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ShutdownErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_Shutdown(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ShutdownErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::Shutdown(const TPM_SU& shutdown_type,
                    AuthorizationDelegate* authorization_delegate,
-                   const ShutdownResponse& callback) {
+                   ShutdownResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ShutdownErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ShutdownResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Shutdown(shutdown_type, &command,
                                         authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ShutdownErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ShutdownResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ShutdownSync(const TPM_SU& shutdown_type,
@@ -8567,7 +8510,7 @@ TPM_RC Tpm::SerializeCommand_SelfTest(
   parameter_section_bytes += full_test_bytes;
   command_size += full_test_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -8666,9 +8609,10 @@ TPM_RC Tpm::ParseResponse_SelfTest(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -8677,42 +8621,42 @@ TPM_RC Tpm::ParseResponse_SelfTest(
   return TPM_RC_SUCCESS;
 }
 
-void SelfTestErrorCallback(const Tpm::SelfTestResponse& callback,
+void SelfTestErrorCallback(Tpm::SelfTestResponse callback,
                            TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void SelfTestResponseParser(const Tpm::SelfTestResponse& callback,
+void SelfTestResponseParser(Tpm::SelfTestResponse callback,
                             AuthorizationDelegate* authorization_delegate,
                             const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SelfTestErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_SelfTest(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SelfTestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::SelfTest(const TPMI_YES_NO& full_test,
                    AuthorizationDelegate* authorization_delegate,
-                   const SelfTestResponse& callback) {
+                   SelfTestResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SelfTestErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(SelfTestResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_SelfTest(full_test, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SelfTestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      SelfTestResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::SelfTestSync(const TPMI_YES_NO& full_test,
@@ -8759,7 +8703,7 @@ TPM_RC Tpm::SerializeCommand_IncrementalSelfTest(
   parameter_section_bytes += to_test_bytes;
   command_size += to_test_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -8859,9 +8803,10 @@ TPM_RC Tpm::ParseResponse_IncrementalSelfTest(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -8875,45 +8820,46 @@ TPM_RC Tpm::ParseResponse_IncrementalSelfTest(
   return TPM_RC_SUCCESS;
 }
 
-void IncrementalSelfTestErrorCallback(
-    const Tpm::IncrementalSelfTestResponse& callback, TPM_RC response_code) {
+void IncrementalSelfTestErrorCallback(Tpm::IncrementalSelfTestResponse callback,
+                                      TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPML_ALG());
+  std::move(callback).Run(response_code, TPML_ALG());
 }
 
 void IncrementalSelfTestResponseParser(
-    const Tpm::IncrementalSelfTestResponse& callback,
+    Tpm::IncrementalSelfTestResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(IncrementalSelfTestErrorCallback, callback);
   TPML_ALG to_do_list;
   TPM_RC rc = Tpm::ParseResponse_IncrementalSelfTest(response, &to_do_list,
                                                      authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(IncrementalSelfTestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, to_do_list);
+  std::move(callback).Run(rc, to_do_list);
 }
 
 void Tpm::IncrementalSelfTest(const TPML_ALG& to_test,
                               AuthorizationDelegate* authorization_delegate,
-                              const IncrementalSelfTestResponse& callback) {
+                              IncrementalSelfTestResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(IncrementalSelfTestErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      IncrementalSelfTestResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_IncrementalSelfTest(to_test, &command,
                                                    authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(IncrementalSelfTestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(IncrementalSelfTestResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::IncrementalSelfTestSync(
@@ -8954,7 +8900,7 @@ TPM_RC Tpm::SerializeCommand_GetTestResult(
       crypto::SecureHash::Create(crypto::SecureHash::SHA256));
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -9055,13 +9001,35 @@ TPM_RC Tpm::ParseResponse_GetTestResult(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_data_bytes;
   rc = Parse_TPM2B_MAX_BUFFER(&buffer, out_data, &out_data_bytes);
@@ -9073,59 +9041,46 @@ TPM_RC Tpm::ParseResponse_GetTestResult(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_data_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_data_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_MAX_BUFFER(&out_data_bytes, out_data, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void GetTestResultErrorCallback(const Tpm::GetTestResultResponse& callback,
+void GetTestResultErrorCallback(Tpm::GetTestResultResponse callback,
                                 TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_MAX_BUFFER(), TPM_RC());
+  std::move(callback).Run(response_code, TPM2B_MAX_BUFFER(), TPM_RC());
 }
 
-void GetTestResultResponseParser(const Tpm::GetTestResultResponse& callback,
+void GetTestResultResponseParser(Tpm::GetTestResultResponse callback,
                                  AuthorizationDelegate* authorization_delegate,
                                  const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetTestResultErrorCallback, callback);
   TPM2B_MAX_BUFFER out_data;
   TPM_RC test_result;
   TPM_RC rc = Tpm::ParseResponse_GetTestResult(
       response, &out_data, &test_result, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetTestResultErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_data, test_result);
+  std::move(callback).Run(rc, out_data, test_result);
 }
 
 void Tpm::GetTestResult(AuthorizationDelegate* authorization_delegate,
-                        const GetTestResultResponse& callback) {
+                        GetTestResultResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetTestResultErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(GetTestResultResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_GetTestResult(&command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetTestResultErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      GetTestResultResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::GetTestResultSync(TPM2B_MAX_BUFFER* out_data,
@@ -9237,7 +9192,7 @@ TPM_RC Tpm::SerializeCommand_StartAuthSession(
   parameter_section_bytes += auth_hash_bytes;
   command_size += auth_hash_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -9344,57 +9299,66 @@ TPM_RC Tpm::ParseResponse_StartAuthSession(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string nonce_tpm_bytes;
   rc = Parse_TPM2B_NONCE(&buffer, nonce_tpm, &nonce_tpm_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = nonce_tpm_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    nonce_tpm_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_NONCE(&nonce_tpm_bytes, nonce_tpm, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void StartAuthSessionErrorCallback(
-    const Tpm::StartAuthSessionResponse& callback, TPM_RC response_code) {
+void StartAuthSessionErrorCallback(Tpm::StartAuthSessionResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMI_SH_AUTH_SESSION(), TPM2B_NONCE());
+  std::move(callback).Run(response_code, TPMI_SH_AUTH_SESSION(), TPM2B_NONCE());
 }
 
 void StartAuthSessionResponseParser(
-    const Tpm::StartAuthSessionResponse& callback,
+    Tpm::StartAuthSessionResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(StartAuthSessionErrorCallback, callback);
   TPMI_SH_AUTH_SESSION session_handle;
   TPM2B_NONCE nonce_tpm;
   TPM_RC rc = Tpm::ParseResponse_StartAuthSession(
       response, &session_handle, &nonce_tpm, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(StartAuthSessionErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, session_handle, nonce_tpm);
+  std::move(callback).Run(rc, session_handle, nonce_tpm);
 }
 
 void Tpm::StartAuthSession(const TPMI_DH_OBJECT& tpm_key,
@@ -9407,21 +9371,22 @@ void Tpm::StartAuthSession(const TPMI_DH_OBJECT& tpm_key,
                            const TPMT_SYM_DEF& symmetric,
                            const TPMI_ALG_HASH& auth_hash,
                            AuthorizationDelegate* authorization_delegate,
-                           const StartAuthSessionResponse& callback) {
+                           StartAuthSessionResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(StartAuthSessionErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      StartAuthSessionResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_StartAuthSession(
       tpm_key, tpm_key_name, bind, bind_name, nonce_caller, encrypted_salt,
       session_type, symmetric, auth_hash, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(StartAuthSessionErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(StartAuthSessionResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::StartAuthSessionSync(
@@ -9482,7 +9447,7 @@ TPM_RC Tpm::SerializeCommand_PolicyRestart(
   handle_section_bytes += session_handle_bytes;
   command_size += session_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -9581,9 +9546,10 @@ TPM_RC Tpm::ParseResponse_PolicyRestart(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -9592,44 +9558,44 @@ TPM_RC Tpm::ParseResponse_PolicyRestart(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyRestartErrorCallback(const Tpm::PolicyRestartResponse& callback,
+void PolicyRestartErrorCallback(Tpm::PolicyRestartResponse callback,
                                 TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyRestartResponseParser(const Tpm::PolicyRestartResponse& callback,
+void PolicyRestartResponseParser(Tpm::PolicyRestartResponse callback,
                                  AuthorizationDelegate* authorization_delegate,
                                  const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyRestartErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyRestart(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyRestartErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyRestart(const TPMI_SH_POLICY& session_handle,
                         const std::string& session_handle_name,
                         AuthorizationDelegate* authorization_delegate,
-                        const PolicyRestartResponse& callback) {
+                        PolicyRestartResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyRestartErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PolicyRestartResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyRestart(
       session_handle, session_handle_name, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyRestartErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PolicyRestartResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyRestartSync(const TPMI_SH_POLICY& session_handle,
@@ -9722,7 +9688,7 @@ TPM_RC Tpm::SerializeCommand_Create(
   parameter_section_bytes += creation_pcr_bytes;
   command_size += creation_pcr_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -9826,13 +9792,35 @@ TPM_RC Tpm::ParseResponse_Create(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_private_bytes;
   rc = Parse_TPM2B_PRIVATE(&buffer, out_private, &out_private_bytes);
@@ -9859,35 +9847,20 @@ TPM_RC Tpm::ParseResponse_Create(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_private_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_private_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_PRIVATE(&out_private_bytes, out_private, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void CreateErrorCallback(const Tpm::CreateResponse& callback,
-                         TPM_RC response_code) {
+void CreateErrorCallback(Tpm::CreateResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_PRIVATE(), TPM2B_PUBLIC(),
-               TPM2B_CREATION_DATA(), TPM2B_DIGEST(), TPMT_TK_CREATION());
+  std::move(callback).Run(response_code, TPM2B_PRIVATE(), TPM2B_PUBLIC(),
+                          TPM2B_CREATION_DATA(), TPM2B_DIGEST(),
+                          TPMT_TK_CREATION());
 }
 
-void CreateResponseParser(const Tpm::CreateResponse& callback,
+void CreateResponseParser(Tpm::CreateResponse callback,
                           AuthorizationDelegate* authorization_delegate,
                           const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CreateErrorCallback, callback);
   TPM2B_PRIVATE out_private;
   TPM2B_PUBLIC out_public;
   TPM2B_CREATION_DATA creation_data;
@@ -9897,11 +9870,13 @@ void CreateResponseParser(const Tpm::CreateResponse& callback,
       response, &out_private, &out_public, &creation_data, &creation_hash,
       &creation_ticket, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CreateErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_private, out_public, creation_data, creation_hash,
-               creation_ticket);
+  std::move(callback).Run(rc, out_private, out_public, creation_data,
+                          creation_hash, creation_ticket);
 }
 
 void Tpm::Create(const TPMI_DH_OBJECT& parent_handle,
@@ -9911,21 +9886,21 @@ void Tpm::Create(const TPMI_DH_OBJECT& parent_handle,
                  const TPM2B_DATA& outside_info,
                  const TPML_PCR_SELECTION& creation_pcr,
                  AuthorizationDelegate* authorization_delegate,
-                 const CreateResponse& callback) {
+                 CreateResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CreateErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(CreateResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Create(
       parent_handle, parent_handle_name, in_sensitive, in_public, outside_info,
       creation_pcr, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CreateErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      CreateResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::CreateSync(const TPMI_DH_OBJECT& parent_handle,
@@ -10012,7 +9987,7 @@ TPM_RC Tpm::SerializeCommand_Load(
   parameter_section_bytes += in_public_bytes;
   command_size += in_public_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -10117,56 +10092,64 @@ TPM_RC Tpm::ParseResponse_Load(const std::string& response,
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string name_bytes;
   rc = Parse_TPM2B_NAME(&buffer, name, &name_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = name_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    name_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_NAME(&name_bytes, name, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void LoadErrorCallback(const Tpm::LoadResponse& callback,
-                       TPM_RC response_code) {
+void LoadErrorCallback(Tpm::LoadResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM_HANDLE(), TPM2B_NAME());
+  std::move(callback).Run(response_code, TPM_HANDLE(), TPM2B_NAME());
 }
 
-void LoadResponseParser(const Tpm::LoadResponse& callback,
+void LoadResponseParser(Tpm::LoadResponse callback,
                         AuthorizationDelegate* authorization_delegate,
                         const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(LoadErrorCallback, callback);
   TPM_HANDLE object_handle;
   TPM2B_NAME name;
   TPM_RC rc = Tpm::ParseResponse_Load(response, &object_handle, &name,
                                       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(LoadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, object_handle, name);
+  std::move(callback).Run(rc, object_handle, name);
 }
 
 void Tpm::Load(const TPMI_DH_OBJECT& parent_handle,
@@ -10174,21 +10157,21 @@ void Tpm::Load(const TPMI_DH_OBJECT& parent_handle,
                const TPM2B_PRIVATE& in_private,
                const TPM2B_PUBLIC& in_public,
                AuthorizationDelegate* authorization_delegate,
-               const LoadResponse& callback) {
+               LoadResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(LoadErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(LoadResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_Load(parent_handle, parent_handle_name, in_private,
                             in_public, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(LoadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      LoadResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::LoadSync(const TPMI_DH_OBJECT& parent_handle,
@@ -10268,7 +10251,7 @@ TPM_RC Tpm::SerializeCommand_LoadExternal(
   parameter_section_bytes += hierarchy_bytes;
   command_size += hierarchy_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -10374,76 +10357,85 @@ TPM_RC Tpm::ParseResponse_LoadExternal(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string name_bytes;
   rc = Parse_TPM2B_NAME(&buffer, name, &name_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = name_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    name_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_NAME(&name_bytes, name, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void LoadExternalErrorCallback(const Tpm::LoadExternalResponse& callback,
+void LoadExternalErrorCallback(Tpm::LoadExternalResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM_HANDLE(), TPM2B_NAME());
+  std::move(callback).Run(response_code, TPM_HANDLE(), TPM2B_NAME());
 }
 
-void LoadExternalResponseParser(const Tpm::LoadExternalResponse& callback,
+void LoadExternalResponseParser(Tpm::LoadExternalResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(LoadExternalErrorCallback, callback);
   TPM_HANDLE object_handle;
   TPM2B_NAME name;
   TPM_RC rc = Tpm::ParseResponse_LoadExternal(response, &object_handle, &name,
                                               authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(LoadExternalErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, object_handle, name);
+  std::move(callback).Run(rc, object_handle, name);
 }
 
 void Tpm::LoadExternal(const TPM2B_SENSITIVE& in_private,
                        const TPM2B_PUBLIC& in_public,
                        const TPMI_RH_HIERARCHY& hierarchy,
                        AuthorizationDelegate* authorization_delegate,
-                       const LoadExternalResponse& callback) {
+                       LoadExternalResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(LoadExternalErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(LoadExternalResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_LoadExternal(in_private, in_public, hierarchy,
                                             &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(LoadExternalErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      LoadExternalResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::LoadExternalSync(const TPM2B_SENSITIVE& in_private,
@@ -10496,7 +10488,7 @@ TPM_RC Tpm::SerializeCommand_ReadPublic(
   handle_section_bytes += object_handle_bytes;
   command_size += object_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -10598,13 +10590,35 @@ TPM_RC Tpm::ParseResponse_ReadPublic(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_public_bytes;
   rc = Parse_TPM2B_PUBLIC(&buffer, out_public, &out_public_bytes);
@@ -10621,63 +10635,51 @@ TPM_RC Tpm::ParseResponse_ReadPublic(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_public_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_public_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_PUBLIC(&out_public_bytes, out_public, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void ReadPublicErrorCallback(const Tpm::ReadPublicResponse& callback,
+void ReadPublicErrorCallback(Tpm::ReadPublicResponse callback,
                              TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_PUBLIC(), TPM2B_NAME(), TPM2B_NAME());
+  std::move(callback).Run(response_code, TPM2B_PUBLIC(), TPM2B_NAME(),
+                          TPM2B_NAME());
 }
 
-void ReadPublicResponseParser(const Tpm::ReadPublicResponse& callback,
+void ReadPublicResponseParser(Tpm::ReadPublicResponse callback,
                               AuthorizationDelegate* authorization_delegate,
                               const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ReadPublicErrorCallback, callback);
   TPM2B_PUBLIC out_public;
   TPM2B_NAME name;
   TPM2B_NAME qualified_name;
   TPM_RC rc = Tpm::ParseResponse_ReadPublic(
       response, &out_public, &name, &qualified_name, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ReadPublicErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_public, name, qualified_name);
+  std::move(callback).Run(rc, out_public, name, qualified_name);
 }
 
 void Tpm::ReadPublic(const TPMI_DH_OBJECT& object_handle,
                      const std::string& object_handle_name,
                      AuthorizationDelegate* authorization_delegate,
-                     const ReadPublicResponse& callback) {
+                     ReadPublicResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ReadPublicErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ReadPublicResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ReadPublic(object_handle, object_handle_name,
                                           &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ReadPublicErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ReadPublicResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ReadPublicSync(const TPMI_DH_OBJECT& object_handle,
@@ -10766,7 +10768,7 @@ TPM_RC Tpm::SerializeCommand_ActivateCredential(
   parameter_section_bytes += secret_bytes;
   command_size += secret_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -10866,56 +10868,65 @@ TPM_RC Tpm::ParseResponse_ActivateCredential(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string cert_info_bytes;
   rc = Parse_TPM2B_DIGEST(&buffer, cert_info, &cert_info_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = cert_info_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    cert_info_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_DIGEST(&cert_info_bytes, cert_info, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void ActivateCredentialErrorCallback(
-    const Tpm::ActivateCredentialResponse& callback, TPM_RC response_code) {
+void ActivateCredentialErrorCallback(Tpm::ActivateCredentialResponse callback,
+                                     TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_DIGEST());
+  std::move(callback).Run(response_code, TPM2B_DIGEST());
 }
 
 void ActivateCredentialResponseParser(
-    const Tpm::ActivateCredentialResponse& callback,
+    Tpm::ActivateCredentialResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ActivateCredentialErrorCallback, callback);
   TPM2B_DIGEST cert_info;
   TPM_RC rc = Tpm::ParseResponse_ActivateCredential(response, &cert_info,
                                                     authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ActivateCredentialErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, cert_info);
+  std::move(callback).Run(rc, cert_info);
 }
 
 void Tpm::ActivateCredential(const TPMI_DH_OBJECT& activate_handle,
@@ -10925,21 +10936,22 @@ void Tpm::ActivateCredential(const TPMI_DH_OBJECT& activate_handle,
                              const TPM2B_ID_OBJECT& credential_blob,
                              const TPM2B_ENCRYPTED_SECRET& secret,
                              AuthorizationDelegate* authorization_delegate,
-                             const ActivateCredentialResponse& callback) {
+                             ActivateCredentialResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ActivateCredentialErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      ActivateCredentialResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ActivateCredential(
       activate_handle, activate_handle_name, key_handle, key_handle_name,
       credential_blob, secret, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ActivateCredentialErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(ActivateCredentialResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ActivateCredentialSync(
@@ -11022,7 +11034,7 @@ TPM_RC Tpm::SerializeCommand_MakeCredential(
   parameter_section_bytes += object_name_bytes;
   command_size += object_name_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -11123,13 +11135,35 @@ TPM_RC Tpm::ParseResponse_MakeCredential(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string credential_blob_bytes;
   rc = Parse_TPM2B_ID_OBJECT(&buffer, credential_blob, &credential_blob_bytes);
@@ -11141,44 +11175,31 @@ TPM_RC Tpm::ParseResponse_MakeCredential(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = credential_blob_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    credential_blob_bytes.replace(2, std::string::npos, tmp);
-    rc =
-        Parse_TPM2B_ID_OBJECT(&credential_blob_bytes, credential_blob, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void MakeCredentialErrorCallback(const Tpm::MakeCredentialResponse& callback,
+void MakeCredentialErrorCallback(Tpm::MakeCredentialResponse callback,
                                  TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ID_OBJECT(), TPM2B_ENCRYPTED_SECRET());
+  std::move(callback).Run(response_code, TPM2B_ID_OBJECT(),
+                          TPM2B_ENCRYPTED_SECRET());
 }
 
-void MakeCredentialResponseParser(const Tpm::MakeCredentialResponse& callback,
+void MakeCredentialResponseParser(Tpm::MakeCredentialResponse callback,
                                   AuthorizationDelegate* authorization_delegate,
                                   const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(MakeCredentialErrorCallback, callback);
   TPM2B_ID_OBJECT credential_blob;
   TPM2B_ENCRYPTED_SECRET secret;
   TPM_RC rc = Tpm::ParseResponse_MakeCredential(
       response, &credential_blob, &secret, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(MakeCredentialErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, credential_blob, secret);
+  std::move(callback).Run(rc, credential_blob, secret);
 }
 
 void Tpm::MakeCredential(const TPMI_DH_OBJECT& handle,
@@ -11186,21 +11207,22 @@ void Tpm::MakeCredential(const TPMI_DH_OBJECT& handle,
                          const TPM2B_DIGEST& credential,
                          const TPM2B_NAME& object_name,
                          AuthorizationDelegate* authorization_delegate,
-                         const MakeCredentialResponse& callback) {
+                         MakeCredentialResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(MakeCredentialErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      MakeCredentialResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_MakeCredential(handle, handle_name, credential,
                                               object_name, &command,
                                               authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(MakeCredentialErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(MakeCredentialResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::MakeCredentialSync(const TPMI_DH_OBJECT& handle,
@@ -11255,7 +11277,7 @@ TPM_RC Tpm::SerializeCommand_Unseal(
   handle_section_bytes += item_handle_bytes;
   command_size += item_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -11355,74 +11377,82 @@ TPM_RC Tpm::ParseResponse_Unseal(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_data_bytes;
   rc = Parse_TPM2B_SENSITIVE_DATA(&buffer, out_data, &out_data_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_data_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_data_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_SENSITIVE_DATA(&out_data_bytes, out_data, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void UnsealErrorCallback(const Tpm::UnsealResponse& callback,
-                         TPM_RC response_code) {
+void UnsealErrorCallback(Tpm::UnsealResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_SENSITIVE_DATA());
+  std::move(callback).Run(response_code, TPM2B_SENSITIVE_DATA());
 }
 
-void UnsealResponseParser(const Tpm::UnsealResponse& callback,
+void UnsealResponseParser(Tpm::UnsealResponse callback,
                           AuthorizationDelegate* authorization_delegate,
                           const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(UnsealErrorCallback, callback);
   TPM2B_SENSITIVE_DATA out_data;
   TPM_RC rc =
       Tpm::ParseResponse_Unseal(response, &out_data, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(UnsealErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_data);
+  std::move(callback).Run(rc, out_data);
 }
 
 void Tpm::Unseal(const TPMI_DH_OBJECT& item_handle,
                  const std::string& item_handle_name,
                  AuthorizationDelegate* authorization_delegate,
-                 const UnsealResponse& callback) {
+                 UnsealResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(UnsealErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(UnsealResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Unseal(item_handle, item_handle_name, &command,
                                       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(UnsealErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      UnsealResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::UnsealSync(const TPMI_DH_OBJECT& item_handle,
@@ -11499,7 +11529,7 @@ TPM_RC Tpm::SerializeCommand_ObjectChangeAuth(
   parameter_section_bytes += new_auth_bytes;
   command_size += new_auth_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -11599,56 +11629,65 @@ TPM_RC Tpm::ParseResponse_ObjectChangeAuth(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_private_bytes;
   rc = Parse_TPM2B_PRIVATE(&buffer, out_private, &out_private_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_private_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_private_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_PRIVATE(&out_private_bytes, out_private, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void ObjectChangeAuthErrorCallback(
-    const Tpm::ObjectChangeAuthResponse& callback, TPM_RC response_code) {
+void ObjectChangeAuthErrorCallback(Tpm::ObjectChangeAuthResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_PRIVATE());
+  std::move(callback).Run(response_code, TPM2B_PRIVATE());
 }
 
 void ObjectChangeAuthResponseParser(
-    const Tpm::ObjectChangeAuthResponse& callback,
+    Tpm::ObjectChangeAuthResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ObjectChangeAuthErrorCallback, callback);
   TPM2B_PRIVATE out_private;
   TPM_RC rc = Tpm::ParseResponse_ObjectChangeAuth(response, &out_private,
                                                   authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ObjectChangeAuthErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_private);
+  std::move(callback).Run(rc, out_private);
 }
 
 void Tpm::ObjectChangeAuth(const TPMI_DH_OBJECT& object_handle,
@@ -11657,21 +11696,22 @@ void Tpm::ObjectChangeAuth(const TPMI_DH_OBJECT& object_handle,
                            const std::string& parent_handle_name,
                            const TPM2B_AUTH& new_auth,
                            AuthorizationDelegate* authorization_delegate,
-                           const ObjectChangeAuthResponse& callback) {
+                           ObjectChangeAuthResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ObjectChangeAuthErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      ObjectChangeAuthResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ObjectChangeAuth(
       object_handle, object_handle_name, parent_handle, parent_handle_name,
       new_auth, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ObjectChangeAuthErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(ObjectChangeAuthResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ObjectChangeAuthSync(
@@ -11763,7 +11803,7 @@ TPM_RC Tpm::SerializeCommand_Duplicate(
   parameter_section_bytes += symmetric_alg_bytes;
   command_size += symmetric_alg_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -11865,13 +11905,35 @@ TPM_RC Tpm::ParseResponse_Duplicate(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string encryption_key_out_bytes;
   rc = Parse_TPM2B_DATA(&buffer, encryption_key_out, &encryption_key_out_bytes);
@@ -11888,36 +11950,20 @@ TPM_RC Tpm::ParseResponse_Duplicate(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = encryption_key_out_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    encryption_key_out_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_DATA(&encryption_key_out_bytes, encryption_key_out,
-                          nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void DuplicateErrorCallback(const Tpm::DuplicateResponse& callback,
+void DuplicateErrorCallback(Tpm::DuplicateResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_DATA(), TPM2B_PRIVATE(),
-               TPM2B_ENCRYPTED_SECRET());
+  std::move(callback).Run(response_code, TPM2B_DATA(), TPM2B_PRIVATE(),
+                          TPM2B_ENCRYPTED_SECRET());
 }
 
-void DuplicateResponseParser(const Tpm::DuplicateResponse& callback,
+void DuplicateResponseParser(Tpm::DuplicateResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(DuplicateErrorCallback, callback);
   TPM2B_DATA encryption_key_out;
   TPM2B_PRIVATE duplicate;
   TPM2B_ENCRYPTED_SECRET out_sym_seed;
@@ -11925,10 +11971,12 @@ void DuplicateResponseParser(const Tpm::DuplicateResponse& callback,
       Tpm::ParseResponse_Duplicate(response, &encryption_key_out, &duplicate,
                                    &out_sym_seed, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(DuplicateErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, encryption_key_out, duplicate, out_sym_seed);
+  std::move(callback).Run(rc, encryption_key_out, duplicate, out_sym_seed);
 }
 
 void Tpm::Duplicate(const TPMI_DH_OBJECT& object_handle,
@@ -11938,22 +11986,22 @@ void Tpm::Duplicate(const TPMI_DH_OBJECT& object_handle,
                     const TPM2B_DATA& encryption_key_in,
                     const TPMT_SYM_DEF_OBJECT& symmetric_alg,
                     AuthorizationDelegate* authorization_delegate,
-                    const DuplicateResponse& callback) {
+                    DuplicateResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(DuplicateErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(DuplicateResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Duplicate(
       object_handle, object_handle_name, new_parent_handle,
       new_parent_handle_name, encryption_key_in, symmetric_alg, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(DuplicateErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      DuplicateResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::DuplicateSync(const TPMI_DH_OBJECT& object_handle,
@@ -12057,7 +12105,7 @@ TPM_RC Tpm::SerializeCommand_Rewrap(
   parameter_section_bytes += in_sym_seed_bytes;
   command_size += in_sym_seed_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -12158,13 +12206,35 @@ TPM_RC Tpm::ParseResponse_Rewrap(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_duplicate_bytes;
   rc = Parse_TPM2B_PRIVATE(&buffer, out_duplicate, &out_duplicate_bytes);
@@ -12176,43 +12246,30 @@ TPM_RC Tpm::ParseResponse_Rewrap(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_duplicate_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_duplicate_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_PRIVATE(&out_duplicate_bytes, out_duplicate, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void RewrapErrorCallback(const Tpm::RewrapResponse& callback,
-                         TPM_RC response_code) {
+void RewrapErrorCallback(Tpm::RewrapResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_PRIVATE(), TPM2B_ENCRYPTED_SECRET());
+  std::move(callback).Run(response_code, TPM2B_PRIVATE(),
+                          TPM2B_ENCRYPTED_SECRET());
 }
 
-void RewrapResponseParser(const Tpm::RewrapResponse& callback,
+void RewrapResponseParser(Tpm::RewrapResponse callback,
                           AuthorizationDelegate* authorization_delegate,
                           const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(RewrapErrorCallback, callback);
   TPM2B_PRIVATE out_duplicate;
   TPM2B_ENCRYPTED_SECRET out_sym_seed;
   TPM_RC rc = Tpm::ParseResponse_Rewrap(response, &out_duplicate, &out_sym_seed,
                                         authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(RewrapErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_duplicate, out_sym_seed);
+  std::move(callback).Run(rc, out_duplicate, out_sym_seed);
 }
 
 void Tpm::Rewrap(const TPMI_DH_OBJECT& old_parent,
@@ -12223,21 +12280,21 @@ void Tpm::Rewrap(const TPMI_DH_OBJECT& old_parent,
                  const TPM2B_NAME& name,
                  const TPM2B_ENCRYPTED_SECRET& in_sym_seed,
                  AuthorizationDelegate* authorization_delegate,
-                 const RewrapResponse& callback) {
+                 RewrapResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(RewrapErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(RewrapResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Rewrap(
       old_parent, old_parent_name, new_parent, new_parent_name, in_duplicate,
       name, in_sym_seed, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(RewrapErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      RewrapResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::RewrapSync(const TPMI_DH_OBJECT& old_parent,
@@ -12348,7 +12405,7 @@ TPM_RC Tpm::SerializeCommand_Import(
   parameter_section_bytes += symmetric_alg_bytes;
   command_size += symmetric_alg_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -12448,55 +12505,63 @@ TPM_RC Tpm::ParseResponse_Import(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_private_bytes;
   rc = Parse_TPM2B_PRIVATE(&buffer, out_private, &out_private_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_private_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_private_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_PRIVATE(&out_private_bytes, out_private, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void ImportErrorCallback(const Tpm::ImportResponse& callback,
-                         TPM_RC response_code) {
+void ImportErrorCallback(Tpm::ImportResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_PRIVATE());
+  std::move(callback).Run(response_code, TPM2B_PRIVATE());
 }
 
-void ImportResponseParser(const Tpm::ImportResponse& callback,
+void ImportResponseParser(Tpm::ImportResponse callback,
                           AuthorizationDelegate* authorization_delegate,
                           const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ImportErrorCallback, callback);
   TPM2B_PRIVATE out_private;
   TPM_RC rc =
       Tpm::ParseResponse_Import(response, &out_private, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ImportErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_private);
+  std::move(callback).Run(rc, out_private);
 }
 
 void Tpm::Import(const TPMI_DH_OBJECT& parent_handle,
@@ -12507,21 +12572,21 @@ void Tpm::Import(const TPMI_DH_OBJECT& parent_handle,
                  const TPM2B_ENCRYPTED_SECRET& in_sym_seed,
                  const TPMT_SYM_DEF_OBJECT& symmetric_alg,
                  AuthorizationDelegate* authorization_delegate,
-                 const ImportResponse& callback) {
+                 ImportResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ImportErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ImportResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Import(
       parent_handle, parent_handle_name, encryption_key, object_public,
       duplicate, in_sym_seed, symmetric_alg, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ImportErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ImportResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ImportSync(const TPMI_DH_OBJECT& parent_handle,
@@ -12612,7 +12677,7 @@ TPM_RC Tpm::SerializeCommand_RSA_Encrypt(
   parameter_section_bytes += label_bytes;
   command_size += label_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -12712,55 +12777,64 @@ TPM_RC Tpm::ParseResponse_RSA_Encrypt(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_data_bytes;
   rc = Parse_TPM2B_PUBLIC_KEY_RSA(&buffer, out_data, &out_data_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_data_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_data_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_PUBLIC_KEY_RSA(&out_data_bytes, out_data, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void RSA_EncryptErrorCallback(const Tpm::RSA_EncryptResponse& callback,
+void RSA_EncryptErrorCallback(Tpm::RSA_EncryptResponse callback,
                               TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_PUBLIC_KEY_RSA());
+  std::move(callback).Run(response_code, TPM2B_PUBLIC_KEY_RSA());
 }
 
-void RSA_EncryptResponseParser(const Tpm::RSA_EncryptResponse& callback,
+void RSA_EncryptResponseParser(Tpm::RSA_EncryptResponse callback,
                                AuthorizationDelegate* authorization_delegate,
                                const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(RSA_EncryptErrorCallback, callback);
   TPM2B_PUBLIC_KEY_RSA out_data;
   TPM_RC rc = Tpm::ParseResponse_RSA_Encrypt(response, &out_data,
                                              authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(RSA_EncryptErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_data);
+  std::move(callback).Run(rc, out_data);
 }
 
 void Tpm::RSA_Encrypt(const TPMI_DH_OBJECT& key_handle,
@@ -12769,21 +12843,21 @@ void Tpm::RSA_Encrypt(const TPMI_DH_OBJECT& key_handle,
                       const TPMT_RSA_DECRYPT& in_scheme,
                       const TPM2B_DATA& label,
                       AuthorizationDelegate* authorization_delegate,
-                      const RSA_EncryptResponse& callback) {
+                      RSA_EncryptResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(RSA_EncryptErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(RSA_EncryptResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_RSA_Encrypt(key_handle, key_handle_name, message,
                                            in_scheme, label, &command,
                                            authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(RSA_EncryptErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      RSA_EncryptResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::RSA_EncryptSync(const TPMI_DH_OBJECT& key_handle,
@@ -12872,7 +12946,7 @@ TPM_RC Tpm::SerializeCommand_RSA_Decrypt(
   parameter_section_bytes += label_bytes;
   command_size += label_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -12972,55 +13046,64 @@ TPM_RC Tpm::ParseResponse_RSA_Decrypt(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string message_bytes;
   rc = Parse_TPM2B_PUBLIC_KEY_RSA(&buffer, message, &message_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = message_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    message_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_PUBLIC_KEY_RSA(&message_bytes, message, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void RSA_DecryptErrorCallback(const Tpm::RSA_DecryptResponse& callback,
+void RSA_DecryptErrorCallback(Tpm::RSA_DecryptResponse callback,
                               TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_PUBLIC_KEY_RSA());
+  std::move(callback).Run(response_code, TPM2B_PUBLIC_KEY_RSA());
 }
 
-void RSA_DecryptResponseParser(const Tpm::RSA_DecryptResponse& callback,
+void RSA_DecryptResponseParser(Tpm::RSA_DecryptResponse callback,
                                AuthorizationDelegate* authorization_delegate,
                                const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(RSA_DecryptErrorCallback, callback);
   TPM2B_PUBLIC_KEY_RSA message;
   TPM_RC rc = Tpm::ParseResponse_RSA_Decrypt(response, &message,
                                              authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(RSA_DecryptErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, message);
+  std::move(callback).Run(rc, message);
 }
 
 void Tpm::RSA_Decrypt(const TPMI_DH_OBJECT& key_handle,
@@ -13029,21 +13112,21 @@ void Tpm::RSA_Decrypt(const TPMI_DH_OBJECT& key_handle,
                       const TPMT_RSA_DECRYPT& in_scheme,
                       const TPM2B_DATA& label,
                       AuthorizationDelegate* authorization_delegate,
-                      const RSA_DecryptResponse& callback) {
+                      RSA_DecryptResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(RSA_DecryptErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(RSA_DecryptResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_RSA_Decrypt(key_handle, key_handle_name,
                                            cipher_text, in_scheme, label,
                                            &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(RSA_DecryptErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      RSA_DecryptResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::RSA_DecryptSync(const TPMI_DH_OBJECT& key_handle,
@@ -13097,7 +13180,7 @@ TPM_RC Tpm::SerializeCommand_ECDH_KeyGen(
   handle_section_bytes += key_handle_bytes;
   command_size += key_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -13198,13 +13281,35 @@ TPM_RC Tpm::ParseResponse_ECDH_KeyGen(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string z_point_bytes;
   rc = Parse_TPM2B_ECC_POINT(&buffer, z_point, &z_point_bytes);
@@ -13216,62 +13321,49 @@ TPM_RC Tpm::ParseResponse_ECDH_KeyGen(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = z_point_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    z_point_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ECC_POINT(&z_point_bytes, z_point, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void ECDH_KeyGenErrorCallback(const Tpm::ECDH_KeyGenResponse& callback,
+void ECDH_KeyGenErrorCallback(Tpm::ECDH_KeyGenResponse callback,
                               TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ECC_POINT(), TPM2B_ECC_POINT());
+  std::move(callback).Run(response_code, TPM2B_ECC_POINT(), TPM2B_ECC_POINT());
 }
 
-void ECDH_KeyGenResponseParser(const Tpm::ECDH_KeyGenResponse& callback,
+void ECDH_KeyGenResponseParser(Tpm::ECDH_KeyGenResponse callback,
                                AuthorizationDelegate* authorization_delegate,
                                const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ECDH_KeyGenErrorCallback, callback);
   TPM2B_ECC_POINT z_point;
   TPM2B_ECC_POINT pub_point;
   TPM_RC rc = Tpm::ParseResponse_ECDH_KeyGen(response, &z_point, &pub_point,
                                              authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ECDH_KeyGenErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, z_point, pub_point);
+  std::move(callback).Run(rc, z_point, pub_point);
 }
 
 void Tpm::ECDH_KeyGen(const TPMI_DH_OBJECT& key_handle,
                       const std::string& key_handle_name,
                       AuthorizationDelegate* authorization_delegate,
-                      const ECDH_KeyGenResponse& callback) {
+                      ECDH_KeyGenResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ECDH_KeyGenErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ECDH_KeyGenResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ECDH_KeyGen(key_handle, key_handle_name,
                                            &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ECDH_KeyGenErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ECDH_KeyGenResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ECDH_KeyGenSync(const TPMI_DH_OBJECT& key_handle,
@@ -13340,7 +13432,7 @@ TPM_RC Tpm::SerializeCommand_ECDH_ZGen(
   parameter_section_bytes += in_point_bytes;
   command_size += in_point_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -13440,75 +13532,84 @@ TPM_RC Tpm::ParseResponse_ECDH_ZGen(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_point_bytes;
   rc = Parse_TPM2B_ECC_POINT(&buffer, out_point, &out_point_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_point_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_point_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ECC_POINT(&out_point_bytes, out_point, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void ECDH_ZGenErrorCallback(const Tpm::ECDH_ZGenResponse& callback,
+void ECDH_ZGenErrorCallback(Tpm::ECDH_ZGenResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ECC_POINT());
+  std::move(callback).Run(response_code, TPM2B_ECC_POINT());
 }
 
-void ECDH_ZGenResponseParser(const Tpm::ECDH_ZGenResponse& callback,
+void ECDH_ZGenResponseParser(Tpm::ECDH_ZGenResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ECDH_ZGenErrorCallback, callback);
   TPM2B_ECC_POINT out_point;
   TPM_RC rc = Tpm::ParseResponse_ECDH_ZGen(response, &out_point,
                                            authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ECDH_ZGenErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_point);
+  std::move(callback).Run(rc, out_point);
 }
 
 void Tpm::ECDH_ZGen(const TPMI_DH_OBJECT& key_handle,
                     const std::string& key_handle_name,
                     const TPM2B_ECC_POINT& in_point,
                     AuthorizationDelegate* authorization_delegate,
-                    const ECDH_ZGenResponse& callback) {
+                    ECDH_ZGenResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ECDH_ZGenErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ECDH_ZGenResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ECDH_ZGen(key_handle, key_handle_name, in_point,
                                          &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ECDH_ZGenErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ECDH_ZGenResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ECDH_ZGenSync(const TPMI_DH_OBJECT& key_handle,
@@ -13558,7 +13659,7 @@ TPM_RC Tpm::SerializeCommand_ECC_Parameters(
   parameter_section_bytes += curve_id_bytes;
   command_size += curve_id_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -13658,9 +13759,10 @@ TPM_RC Tpm::ParseResponse_ECC_Parameters(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -13674,44 +13776,45 @@ TPM_RC Tpm::ParseResponse_ECC_Parameters(
   return TPM_RC_SUCCESS;
 }
 
-void ECC_ParametersErrorCallback(const Tpm::ECC_ParametersResponse& callback,
+void ECC_ParametersErrorCallback(Tpm::ECC_ParametersResponse callback,
                                  TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMS_ALGORITHM_DETAIL_ECC());
+  std::move(callback).Run(response_code, TPMS_ALGORITHM_DETAIL_ECC());
 }
 
-void ECC_ParametersResponseParser(const Tpm::ECC_ParametersResponse& callback,
+void ECC_ParametersResponseParser(Tpm::ECC_ParametersResponse callback,
                                   AuthorizationDelegate* authorization_delegate,
                                   const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ECC_ParametersErrorCallback, callback);
   TPMS_ALGORITHM_DETAIL_ECC parameters;
   TPM_RC rc = Tpm::ParseResponse_ECC_Parameters(response, &parameters,
                                                 authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ECC_ParametersErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, parameters);
+  std::move(callback).Run(rc, parameters);
 }
 
 void Tpm::ECC_Parameters(const TPMI_ECC_CURVE& curve_id,
                          AuthorizationDelegate* authorization_delegate,
-                         const ECC_ParametersResponse& callback) {
+                         ECC_ParametersResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ECC_ParametersErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      ECC_ParametersResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ECC_Parameters(curve_id, &command,
                                               authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ECC_ParametersErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(ECC_ParametersResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ECC_ParametersSync(const TPMI_ECC_CURVE& curve_id,
@@ -13805,7 +13908,7 @@ TPM_RC Tpm::SerializeCommand_ZGen_2Phase(
   parameter_section_bytes += counter_bytes;
   command_size += counter_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -13906,13 +14009,35 @@ TPM_RC Tpm::ParseResponse_ZGen_2Phase(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_z1_bytes;
   rc = Parse_TPM2B_ECC_POINT(&buffer, out_z1, &out_z1_bytes);
@@ -13924,43 +14049,30 @@ TPM_RC Tpm::ParseResponse_ZGen_2Phase(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_z1_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_z1_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ECC_POINT(&out_z1_bytes, out_z1, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void ZGen_2PhaseErrorCallback(const Tpm::ZGen_2PhaseResponse& callback,
+void ZGen_2PhaseErrorCallback(Tpm::ZGen_2PhaseResponse callback,
                               TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ECC_POINT(), TPM2B_ECC_POINT());
+  std::move(callback).Run(response_code, TPM2B_ECC_POINT(), TPM2B_ECC_POINT());
 }
 
-void ZGen_2PhaseResponseParser(const Tpm::ZGen_2PhaseResponse& callback,
+void ZGen_2PhaseResponseParser(Tpm::ZGen_2PhaseResponse callback,
                                AuthorizationDelegate* authorization_delegate,
                                const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ZGen_2PhaseErrorCallback, callback);
   TPM2B_ECC_POINT out_z1;
   TPM2B_ECC_POINT out_z2;
   TPM_RC rc = Tpm::ParseResponse_ZGen_2Phase(response, &out_z1, &out_z2,
                                              authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ZGen_2PhaseErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_z1, out_z2);
+  std::move(callback).Run(rc, out_z1, out_z2);
 }
 
 void Tpm::ZGen_2Phase(const TPMI_DH_OBJECT& key_a,
@@ -13970,21 +14082,21 @@ void Tpm::ZGen_2Phase(const TPMI_DH_OBJECT& key_a,
                       const TPMI_ECC_KEY_EXCHANGE& in_scheme,
                       const UINT16& counter,
                       AuthorizationDelegate* authorization_delegate,
-                      const ZGen_2PhaseResponse& callback) {
+                      ZGen_2PhaseResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ZGen_2PhaseErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ZGen_2PhaseResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ZGen_2Phase(key_a, key_a_name, in_qs_b, in_qe_b,
                                            in_scheme, counter, &command,
                                            authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ZGen_2PhaseErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ZGen_2PhaseResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ZGen_2PhaseSync(const TPMI_DH_OBJECT& key_a,
@@ -14077,7 +14189,7 @@ TPM_RC Tpm::SerializeCommand_EncryptDecrypt(
   parameter_section_bytes += in_data_bytes;
   command_size += in_data_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -14178,13 +14290,35 @@ TPM_RC Tpm::ParseResponse_EncryptDecrypt(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_data_bytes;
   rc = Parse_TPM2B_MAX_BUFFER(&buffer, out_data, &out_data_bytes);
@@ -14196,43 +14330,30 @@ TPM_RC Tpm::ParseResponse_EncryptDecrypt(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_data_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_data_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_MAX_BUFFER(&out_data_bytes, out_data, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void EncryptDecryptErrorCallback(const Tpm::EncryptDecryptResponse& callback,
+void EncryptDecryptErrorCallback(Tpm::EncryptDecryptResponse callback,
                                  TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_MAX_BUFFER(), TPM2B_IV());
+  std::move(callback).Run(response_code, TPM2B_MAX_BUFFER(), TPM2B_IV());
 }
 
-void EncryptDecryptResponseParser(const Tpm::EncryptDecryptResponse& callback,
+void EncryptDecryptResponseParser(Tpm::EncryptDecryptResponse callback,
                                   AuthorizationDelegate* authorization_delegate,
                                   const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(EncryptDecryptErrorCallback, callback);
   TPM2B_MAX_BUFFER out_data;
   TPM2B_IV iv_out;
   TPM_RC rc = Tpm::ParseResponse_EncryptDecrypt(response, &out_data, &iv_out,
                                                 authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(EncryptDecryptErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_data, iv_out);
+  std::move(callback).Run(rc, out_data, iv_out);
 }
 
 void Tpm::EncryptDecrypt(const TPMI_DH_OBJECT& key_handle,
@@ -14242,21 +14363,22 @@ void Tpm::EncryptDecrypt(const TPMI_DH_OBJECT& key_handle,
                          const TPM2B_IV& iv_in,
                          const TPM2B_MAX_BUFFER& in_data,
                          AuthorizationDelegate* authorization_delegate,
-                         const EncryptDecryptResponse& callback) {
+                         EncryptDecryptResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(EncryptDecryptErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      EncryptDecryptResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_EncryptDecrypt(key_handle, key_handle_name,
                                               decrypt, mode, iv_in, in_data,
                                               &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(EncryptDecryptErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(EncryptDecryptResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::EncryptDecryptSync(const TPMI_DH_OBJECT& key_handle,
@@ -14338,7 +14460,7 @@ TPM_RC Tpm::SerializeCommand_Hash(
   parameter_section_bytes += hierarchy_bytes;
   command_size += hierarchy_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -14438,13 +14560,35 @@ TPM_RC Tpm::ParseResponse_Hash(const std::string& response,
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_hash_bytes;
   rc = Parse_TPM2B_DIGEST(&buffer, out_hash, &out_hash_bytes);
@@ -14456,63 +14600,49 @@ TPM_RC Tpm::ParseResponse_Hash(const std::string& response,
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_hash_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_hash_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_DIGEST(&out_hash_bytes, out_hash, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void HashErrorCallback(const Tpm::HashResponse& callback,
-                       TPM_RC response_code) {
+void HashErrorCallback(Tpm::HashResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_DIGEST(), TPMT_TK_HASHCHECK());
+  std::move(callback).Run(response_code, TPM2B_DIGEST(), TPMT_TK_HASHCHECK());
 }
 
-void HashResponseParser(const Tpm::HashResponse& callback,
+void HashResponseParser(Tpm::HashResponse callback,
                         AuthorizationDelegate* authorization_delegate,
                         const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HashErrorCallback, callback);
   TPM2B_DIGEST out_hash;
   TPMT_TK_HASHCHECK validation;
   TPM_RC rc = Tpm::ParseResponse_Hash(response, &out_hash, &validation,
                                       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HashErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_hash, validation);
+  std::move(callback).Run(rc, out_hash, validation);
 }
 
 void Tpm::Hash(const TPM2B_MAX_BUFFER& data,
                const TPMI_ALG_HASH& hash_alg,
                const TPMI_RH_HIERARCHY& hierarchy,
                AuthorizationDelegate* authorization_delegate,
-               const HashResponse& callback) {
+               HashResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HashErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(HashResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Hash(data, hash_alg, hierarchy, &command,
                                     authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HashErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      HashResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::HashSync(const TPM2B_MAX_BUFFER& data,
@@ -14591,7 +14721,7 @@ TPM_RC Tpm::SerializeCommand_HMAC(
   parameter_section_bytes += hash_alg_bytes;
   command_size += hash_alg_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -14690,55 +14820,63 @@ TPM_RC Tpm::ParseResponse_HMAC(const std::string& response,
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_hmac_bytes;
   rc = Parse_TPM2B_DIGEST(&buffer, out_hmac, &out_hmac_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_hmac_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_hmac_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_DIGEST(&out_hmac_bytes, out_hmac, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void HMACErrorCallback(const Tpm::HMACResponse& callback,
-                       TPM_RC response_code) {
+void HMACErrorCallback(Tpm::HMACResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_DIGEST());
+  std::move(callback).Run(response_code, TPM2B_DIGEST());
 }
 
-void HMACResponseParser(const Tpm::HMACResponse& callback,
+void HMACResponseParser(Tpm::HMACResponse callback,
                         AuthorizationDelegate* authorization_delegate,
                         const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HMACErrorCallback, callback);
   TPM2B_DIGEST out_hmac;
   TPM_RC rc =
       Tpm::ParseResponse_HMAC(response, &out_hmac, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HMACErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, out_hmac);
+  std::move(callback).Run(rc, out_hmac);
 }
 
 void Tpm::HMAC(const TPMI_DH_OBJECT& handle,
@@ -14746,20 +14884,20 @@ void Tpm::HMAC(const TPMI_DH_OBJECT& handle,
                const TPM2B_MAX_BUFFER& buffer,
                const TPMI_ALG_HASH& hash_alg,
                AuthorizationDelegate* authorization_delegate,
-               const HMACResponse& callback) {
+               HMACResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HMACErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(HMACResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_HMAC(handle, handle_name, buffer, hash_alg,
                                     &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HMACErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      HMACResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::HMACSync(const TPMI_DH_OBJECT& handle,
@@ -14810,7 +14948,7 @@ TPM_RC Tpm::SerializeCommand_GetRandom(
   parameter_section_bytes += bytes_requested_bytes;
   command_size += bytes_requested_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -14910,73 +15048,82 @@ TPM_RC Tpm::ParseResponse_GetRandom(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string random_bytes_bytes;
   rc = Parse_TPM2B_DIGEST(&buffer, random_bytes, &random_bytes_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = random_bytes_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    random_bytes_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_DIGEST(&random_bytes_bytes, random_bytes, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void GetRandomErrorCallback(const Tpm::GetRandomResponse& callback,
+void GetRandomErrorCallback(Tpm::GetRandomResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_DIGEST());
+  std::move(callback).Run(response_code, TPM2B_DIGEST());
 }
 
-void GetRandomResponseParser(const Tpm::GetRandomResponse& callback,
+void GetRandomResponseParser(Tpm::GetRandomResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetRandomErrorCallback, callback);
   TPM2B_DIGEST random_bytes;
   TPM_RC rc = Tpm::ParseResponse_GetRandom(response, &random_bytes,
                                            authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetRandomErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, random_bytes);
+  std::move(callback).Run(rc, random_bytes);
 }
 
 void Tpm::GetRandom(const UINT16& bytes_requested,
                     AuthorizationDelegate* authorization_delegate,
-                    const GetRandomResponse& callback) {
+                    GetRandomResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetRandomErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(GetRandomResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_GetRandom(bytes_requested, &command,
                                          authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetRandomErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      GetRandomResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::GetRandomSync(const UINT16& bytes_requested,
@@ -15032,7 +15179,7 @@ TPM_RC Tpm::SerializeCommand_StirRandom(
   parameter_section_bytes += in_data_bytes;
   command_size += in_data_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -15131,9 +15278,10 @@ TPM_RC Tpm::ParseResponse_StirRandom(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -15142,42 +15290,42 @@ TPM_RC Tpm::ParseResponse_StirRandom(
   return TPM_RC_SUCCESS;
 }
 
-void StirRandomErrorCallback(const Tpm::StirRandomResponse& callback,
+void StirRandomErrorCallback(Tpm::StirRandomResponse callback,
                              TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void StirRandomResponseParser(const Tpm::StirRandomResponse& callback,
+void StirRandomResponseParser(Tpm::StirRandomResponse callback,
                               AuthorizationDelegate* authorization_delegate,
                               const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(StirRandomErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_StirRandom(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(StirRandomErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::StirRandom(const TPM2B_SENSITIVE_DATA& in_data,
                      AuthorizationDelegate* authorization_delegate,
-                     const StirRandomResponse& callback) {
+                     StirRandomResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(StirRandomErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(StirRandomResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_StirRandom(in_data, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(StirRandomErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      StirRandomResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::StirRandomSync(const TPM2B_SENSITIVE_DATA& in_data,
@@ -15251,7 +15399,7 @@ TPM_RC Tpm::SerializeCommand_HMAC_Start(
   parameter_section_bytes += hash_alg_bytes;
   command_size += hash_alg_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -15356,9 +15504,10 @@ TPM_RC Tpm::ParseResponse_HMAC_Start(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -15367,26 +15516,26 @@ TPM_RC Tpm::ParseResponse_HMAC_Start(
   return TPM_RC_SUCCESS;
 }
 
-void HMAC_StartErrorCallback(const Tpm::HMAC_StartResponse& callback,
+void HMAC_StartErrorCallback(Tpm::HMAC_StartResponse callback,
                              TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMI_DH_OBJECT());
+  std::move(callback).Run(response_code, TPMI_DH_OBJECT());
 }
 
-void HMAC_StartResponseParser(const Tpm::HMAC_StartResponse& callback,
+void HMAC_StartResponseParser(Tpm::HMAC_StartResponse callback,
                               AuthorizationDelegate* authorization_delegate,
                               const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HMAC_StartErrorCallback, callback);
   TPMI_DH_OBJECT sequence_handle;
   TPM_RC rc = Tpm::ParseResponse_HMAC_Start(response, &sequence_handle,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HMAC_StartErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, sequence_handle);
+  std::move(callback).Run(rc, sequence_handle);
 }
 
 void Tpm::HMAC_Start(const TPMI_DH_OBJECT& handle,
@@ -15394,20 +15543,20 @@ void Tpm::HMAC_Start(const TPMI_DH_OBJECT& handle,
                      const TPM2B_AUTH& auth,
                      const TPMI_ALG_HASH& hash_alg,
                      AuthorizationDelegate* authorization_delegate,
-                     const HMAC_StartResponse& callback) {
+                     HMAC_StartResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HMAC_StartErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(HMAC_StartResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_HMAC_Start(handle, handle_name, auth, hash_alg,
                                           &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HMAC_StartErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      HMAC_StartResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::HMAC_StartSync(const TPMI_DH_OBJECT& handle,
@@ -15476,7 +15625,7 @@ TPM_RC Tpm::SerializeCommand_HashSequenceStart(
   parameter_section_bytes += hash_alg_bytes;
   command_size += hash_alg_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -15581,9 +15730,10 @@ TPM_RC Tpm::ParseResponse_HashSequenceStart(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -15592,46 +15742,47 @@ TPM_RC Tpm::ParseResponse_HashSequenceStart(
   return TPM_RC_SUCCESS;
 }
 
-void HashSequenceStartErrorCallback(
-    const Tpm::HashSequenceStartResponse& callback, TPM_RC response_code) {
+void HashSequenceStartErrorCallback(Tpm::HashSequenceStartResponse callback,
+                                    TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMI_DH_OBJECT());
+  std::move(callback).Run(response_code, TPMI_DH_OBJECT());
 }
 
 void HashSequenceStartResponseParser(
-    const Tpm::HashSequenceStartResponse& callback,
+    Tpm::HashSequenceStartResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HashSequenceStartErrorCallback, callback);
   TPMI_DH_OBJECT sequence_handle;
   TPM_RC rc = Tpm::ParseResponse_HashSequenceStart(response, &sequence_handle,
                                                    authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HashSequenceStartErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, sequence_handle);
+  std::move(callback).Run(rc, sequence_handle);
 }
 
 void Tpm::HashSequenceStart(const TPM2B_AUTH& auth,
                             const TPMI_ALG_HASH& hash_alg,
                             AuthorizationDelegate* authorization_delegate,
-                            const HashSequenceStartResponse& callback) {
+                            HashSequenceStartResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HashSequenceStartErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      HashSequenceStartResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_HashSequenceStart(auth, hash_alg, &command,
                                                  authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HashSequenceStartErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(HashSequenceStartResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::HashSequenceStartSync(
@@ -15700,7 +15851,7 @@ TPM_RC Tpm::SerializeCommand_SequenceUpdate(
   parameter_section_bytes += buffer_bytes;
   command_size += buffer_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -15799,9 +15950,10 @@ TPM_RC Tpm::ParseResponse_SequenceUpdate(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -15810,46 +15962,47 @@ TPM_RC Tpm::ParseResponse_SequenceUpdate(
   return TPM_RC_SUCCESS;
 }
 
-void SequenceUpdateErrorCallback(const Tpm::SequenceUpdateResponse& callback,
+void SequenceUpdateErrorCallback(Tpm::SequenceUpdateResponse callback,
                                  TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void SequenceUpdateResponseParser(const Tpm::SequenceUpdateResponse& callback,
+void SequenceUpdateResponseParser(Tpm::SequenceUpdateResponse callback,
                                   AuthorizationDelegate* authorization_delegate,
                                   const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SequenceUpdateErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_SequenceUpdate(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SequenceUpdateErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::SequenceUpdate(const TPMI_DH_OBJECT& sequence_handle,
                          const std::string& sequence_handle_name,
                          const TPM2B_MAX_BUFFER& buffer,
                          AuthorizationDelegate* authorization_delegate,
-                         const SequenceUpdateResponse& callback) {
+                         SequenceUpdateResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SequenceUpdateErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      SequenceUpdateResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_SequenceUpdate(sequence_handle, sequence_handle_name,
                                       buffer, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SequenceUpdateErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(SequenceUpdateResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::SequenceUpdateSync(const TPMI_DH_OBJECT& sequence_handle,
@@ -15926,7 +16079,7 @@ TPM_RC Tpm::SerializeCommand_SequenceComplete(
   parameter_section_bytes += hierarchy_bytes;
   command_size += hierarchy_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -16027,13 +16180,35 @@ TPM_RC Tpm::ParseResponse_SequenceComplete(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string result_bytes;
   rc = Parse_TPM2B_DIGEST(&buffer, result, &result_bytes);
@@ -16045,44 +16220,31 @@ TPM_RC Tpm::ParseResponse_SequenceComplete(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = result_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    result_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_DIGEST(&result_bytes, result, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void SequenceCompleteErrorCallback(
-    const Tpm::SequenceCompleteResponse& callback, TPM_RC response_code) {
+void SequenceCompleteErrorCallback(Tpm::SequenceCompleteResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_DIGEST(), TPMT_TK_HASHCHECK());
+  std::move(callback).Run(response_code, TPM2B_DIGEST(), TPMT_TK_HASHCHECK());
 }
 
 void SequenceCompleteResponseParser(
-    const Tpm::SequenceCompleteResponse& callback,
+    Tpm::SequenceCompleteResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SequenceCompleteErrorCallback, callback);
   TPM2B_DIGEST result;
   TPMT_TK_HASHCHECK validation;
   TPM_RC rc = Tpm::ParseResponse_SequenceComplete(
       response, &result, &validation, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SequenceCompleteErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, result, validation);
+  std::move(callback).Run(rc, result, validation);
 }
 
 void Tpm::SequenceComplete(const TPMI_DH_OBJECT& sequence_handle,
@@ -16090,21 +16252,22 @@ void Tpm::SequenceComplete(const TPMI_DH_OBJECT& sequence_handle,
                            const TPM2B_MAX_BUFFER& buffer,
                            const TPMI_RH_HIERARCHY& hierarchy,
                            AuthorizationDelegate* authorization_delegate,
-                           const SequenceCompleteResponse& callback) {
+                           SequenceCompleteResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SequenceCompleteErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      SequenceCompleteResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_SequenceComplete(
       sequence_handle, sequence_handle_name, buffer, hierarchy, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SequenceCompleteErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(SequenceCompleteResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::SequenceCompleteSync(
@@ -16187,7 +16350,7 @@ TPM_RC Tpm::SerializeCommand_EventSequenceComplete(
   parameter_section_bytes += buffer_bytes;
   command_size += buffer_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -16287,9 +16450,10 @@ TPM_RC Tpm::ParseResponse_EventSequenceComplete(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -16304,26 +16468,26 @@ TPM_RC Tpm::ParseResponse_EventSequenceComplete(
 }
 
 void EventSequenceCompleteErrorCallback(
-    const Tpm::EventSequenceCompleteResponse& callback, TPM_RC response_code) {
+    Tpm::EventSequenceCompleteResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPML_DIGEST_VALUES());
+  std::move(callback).Run(response_code, TPML_DIGEST_VALUES());
 }
 
 void EventSequenceCompleteResponseParser(
-    const Tpm::EventSequenceCompleteResponse& callback,
+    Tpm::EventSequenceCompleteResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(EventSequenceCompleteErrorCallback, callback);
   TPML_DIGEST_VALUES results;
   TPM_RC rc = Tpm::ParseResponse_EventSequenceComplete(response, &results,
                                                        authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(EventSequenceCompleteErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, results);
+  std::move(callback).Run(rc, results);
 }
 
 void Tpm::EventSequenceComplete(const TPMI_DH_PCR& pcr_handle,
@@ -16332,21 +16496,22 @@ void Tpm::EventSequenceComplete(const TPMI_DH_PCR& pcr_handle,
                                 const std::string& sequence_handle_name,
                                 const TPM2B_MAX_BUFFER& buffer,
                                 AuthorizationDelegate* authorization_delegate,
-                                const EventSequenceCompleteResponse& callback) {
+                                EventSequenceCompleteResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(EventSequenceCompleteErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      EventSequenceCompleteResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_EventSequenceComplete(
       pcr_handle, pcr_handle_name, sequence_handle, sequence_handle_name,
       buffer, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(EventSequenceCompleteErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(EventSequenceCompleteResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::EventSequenceCompleteSync(
@@ -16438,7 +16603,7 @@ TPM_RC Tpm::SerializeCommand_Certify(
   parameter_section_bytes += in_scheme_bytes;
   command_size += in_scheme_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -16539,13 +16704,35 @@ TPM_RC Tpm::ParseResponse_Certify(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string certify_info_bytes;
   rc = Parse_TPM2B_ATTEST(&buffer, certify_info, &certify_info_bytes);
@@ -16557,43 +16744,29 @@ TPM_RC Tpm::ParseResponse_Certify(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = certify_info_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    certify_info_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ATTEST(&certify_info_bytes, certify_info, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void CertifyErrorCallback(const Tpm::CertifyResponse& callback,
-                          TPM_RC response_code) {
+void CertifyErrorCallback(Tpm::CertifyResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
+  std::move(callback).Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
 }
 
-void CertifyResponseParser(const Tpm::CertifyResponse& callback,
+void CertifyResponseParser(Tpm::CertifyResponse callback,
                            AuthorizationDelegate* authorization_delegate,
                            const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CertifyErrorCallback, callback);
   TPM2B_ATTEST certify_info;
   TPMT_SIGNATURE signature;
   TPM_RC rc = Tpm::ParseResponse_Certify(response, &certify_info, &signature,
                                          authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CertifyErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, certify_info, signature);
+  std::move(callback).Run(rc, certify_info, signature);
 }
 
 void Tpm::Certify(const TPMI_DH_OBJECT& object_handle,
@@ -16603,21 +16776,21 @@ void Tpm::Certify(const TPMI_DH_OBJECT& object_handle,
                   const TPM2B_DATA& qualifying_data,
                   const TPMT_SIG_SCHEME& in_scheme,
                   AuthorizationDelegate* authorization_delegate,
-                  const CertifyResponse& callback) {
+                  CertifyResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CertifyErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(CertifyResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Certify(
       object_handle, object_handle_name, sign_handle, sign_handle_name,
       qualifying_data, in_scheme, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CertifyErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      CertifyResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::CertifySync(const TPMI_DH_OBJECT& object_handle,
@@ -16728,7 +16901,7 @@ TPM_RC Tpm::SerializeCommand_CertifyCreation(
   parameter_section_bytes += creation_ticket_bytes;
   command_size += creation_ticket_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -16829,13 +17002,35 @@ TPM_RC Tpm::ParseResponse_CertifyCreation(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string certify_info_bytes;
   rc = Parse_TPM2B_ATTEST(&buffer, certify_info, &certify_info_bytes);
@@ -16847,44 +17042,31 @@ TPM_RC Tpm::ParseResponse_CertifyCreation(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = certify_info_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    certify_info_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ATTEST(&certify_info_bytes, certify_info, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void CertifyCreationErrorCallback(const Tpm::CertifyCreationResponse& callback,
+void CertifyCreationErrorCallback(Tpm::CertifyCreationResponse callback,
                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
+  std::move(callback).Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
 }
 
 void CertifyCreationResponseParser(
-    const Tpm::CertifyCreationResponse& callback,
+    Tpm::CertifyCreationResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CertifyCreationErrorCallback, callback);
   TPM2B_ATTEST certify_info;
   TPMT_SIGNATURE signature;
   TPM_RC rc = Tpm::ParseResponse_CertifyCreation(
       response, &certify_info, &signature, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CertifyCreationErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, certify_info, signature);
+  std::move(callback).Run(rc, certify_info, signature);
 }
 
 void Tpm::CertifyCreation(const TPMI_DH_OBJECT& sign_handle,
@@ -16896,22 +17078,23 @@ void Tpm::CertifyCreation(const TPMI_DH_OBJECT& sign_handle,
                           const TPMT_SIG_SCHEME& in_scheme,
                           const TPMT_TK_CREATION& creation_ticket,
                           AuthorizationDelegate* authorization_delegate,
-                          const CertifyCreationResponse& callback) {
+                          CertifyCreationResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CertifyCreationErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      CertifyCreationResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_CertifyCreation(
       sign_handle, sign_handle_name, object_handle, object_handle_name,
       qualifying_data, creation_hash, in_scheme, creation_ticket, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CertifyCreationErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(CertifyCreationResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::CertifyCreationSync(const TPMI_DH_OBJECT& sign_handle,
@@ -17006,7 +17189,7 @@ TPM_RC Tpm::SerializeCommand_Quote(
   parameter_section_bytes += pcrselect_bytes;
   command_size += pcrselect_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -17106,13 +17289,35 @@ TPM_RC Tpm::ParseResponse_Quote(const std::string& response,
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string quoted_bytes;
   rc = Parse_TPM2B_ATTEST(&buffer, quoted, &quoted_bytes);
@@ -17124,43 +17329,29 @@ TPM_RC Tpm::ParseResponse_Quote(const std::string& response,
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = quoted_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    quoted_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ATTEST(&quoted_bytes, quoted, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void QuoteErrorCallback(const Tpm::QuoteResponse& callback,
-                        TPM_RC response_code) {
+void QuoteErrorCallback(Tpm::QuoteResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
+  std::move(callback).Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
 }
 
-void QuoteResponseParser(const Tpm::QuoteResponse& callback,
+void QuoteResponseParser(Tpm::QuoteResponse callback,
                          AuthorizationDelegate* authorization_delegate,
                          const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(QuoteErrorCallback, callback);
   TPM2B_ATTEST quoted;
   TPMT_SIGNATURE signature;
   TPM_RC rc = Tpm::ParseResponse_Quote(response, &quoted, &signature,
                                        authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(QuoteErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, quoted, signature);
+  std::move(callback).Run(rc, quoted, signature);
 }
 
 void Tpm::Quote(const TPMI_DH_OBJECT& sign_handle,
@@ -17169,21 +17360,21 @@ void Tpm::Quote(const TPMI_DH_OBJECT& sign_handle,
                 const TPMT_SIG_SCHEME& in_scheme,
                 const TPML_PCR_SELECTION& pcrselect,
                 AuthorizationDelegate* authorization_delegate,
-                const QuoteResponse& callback) {
+                QuoteResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(QuoteErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(QuoteResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Quote(sign_handle, sign_handle_name,
                                      qualifying_data, in_scheme, pcrselect,
                                      &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(QuoteErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      QuoteResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::QuoteSync(const TPMI_DH_OBJECT& sign_handle,
@@ -17286,7 +17477,7 @@ TPM_RC Tpm::SerializeCommand_GetSessionAuditDigest(
   parameter_section_bytes += in_scheme_bytes;
   command_size += in_scheme_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -17387,13 +17578,35 @@ TPM_RC Tpm::ParseResponse_GetSessionAuditDigest(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string audit_info_bytes;
   rc = Parse_TPM2B_ATTEST(&buffer, audit_info, &audit_info_bytes);
@@ -17405,44 +17618,31 @@ TPM_RC Tpm::ParseResponse_GetSessionAuditDigest(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = audit_info_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    audit_info_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ATTEST(&audit_info_bytes, audit_info, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
 void GetSessionAuditDigestErrorCallback(
-    const Tpm::GetSessionAuditDigestResponse& callback, TPM_RC response_code) {
+    Tpm::GetSessionAuditDigestResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
+  std::move(callback).Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
 }
 
 void GetSessionAuditDigestResponseParser(
-    const Tpm::GetSessionAuditDigestResponse& callback,
+    Tpm::GetSessionAuditDigestResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetSessionAuditDigestErrorCallback, callback);
   TPM2B_ATTEST audit_info;
   TPMT_SIGNATURE signature;
   TPM_RC rc = Tpm::ParseResponse_GetSessionAuditDigest(
       response, &audit_info, &signature, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetSessionAuditDigestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, audit_info, signature);
+  std::move(callback).Run(rc, audit_info, signature);
 }
 
 void Tpm::GetSessionAuditDigest(const TPMI_RH_ENDORSEMENT& privacy_admin_handle,
@@ -17454,22 +17654,23 @@ void Tpm::GetSessionAuditDigest(const TPMI_RH_ENDORSEMENT& privacy_admin_handle,
                                 const TPM2B_DATA& qualifying_data,
                                 const TPMT_SIG_SCHEME& in_scheme,
                                 AuthorizationDelegate* authorization_delegate,
-                                const GetSessionAuditDigestResponse& callback) {
+                                GetSessionAuditDigestResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetSessionAuditDigestErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      GetSessionAuditDigestResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_GetSessionAuditDigest(
       privacy_admin_handle, privacy_admin_handle_name, sign_handle,
       sign_handle_name, session_handle, session_handle_name, qualifying_data,
       in_scheme, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetSessionAuditDigestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(GetSessionAuditDigestResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::GetSessionAuditDigestSync(
@@ -17566,7 +17767,7 @@ TPM_RC Tpm::SerializeCommand_GetCommandAuditDigest(
   parameter_section_bytes += in_scheme_bytes;
   command_size += in_scheme_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -17667,13 +17868,35 @@ TPM_RC Tpm::ParseResponse_GetCommandAuditDigest(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string audit_info_bytes;
   rc = Parse_TPM2B_ATTEST(&buffer, audit_info, &audit_info_bytes);
@@ -17685,44 +17908,31 @@ TPM_RC Tpm::ParseResponse_GetCommandAuditDigest(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = audit_info_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    audit_info_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ATTEST(&audit_info_bytes, audit_info, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
 void GetCommandAuditDigestErrorCallback(
-    const Tpm::GetCommandAuditDigestResponse& callback, TPM_RC response_code) {
+    Tpm::GetCommandAuditDigestResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
+  std::move(callback).Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
 }
 
 void GetCommandAuditDigestResponseParser(
-    const Tpm::GetCommandAuditDigestResponse& callback,
+    Tpm::GetCommandAuditDigestResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetCommandAuditDigestErrorCallback, callback);
   TPM2B_ATTEST audit_info;
   TPMT_SIGNATURE signature;
   TPM_RC rc = Tpm::ParseResponse_GetCommandAuditDigest(
       response, &audit_info, &signature, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetCommandAuditDigestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, audit_info, signature);
+  std::move(callback).Run(rc, audit_info, signature);
 }
 
 void Tpm::GetCommandAuditDigest(const TPMI_RH_ENDORSEMENT& privacy_handle,
@@ -17732,21 +17942,22 @@ void Tpm::GetCommandAuditDigest(const TPMI_RH_ENDORSEMENT& privacy_handle,
                                 const TPM2B_DATA& qualifying_data,
                                 const TPMT_SIG_SCHEME& in_scheme,
                                 AuthorizationDelegate* authorization_delegate,
-                                const GetCommandAuditDigestResponse& callback) {
+                                GetCommandAuditDigestResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetCommandAuditDigestErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      GetCommandAuditDigestResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_GetCommandAuditDigest(
       privacy_handle, privacy_handle_name, sign_handle, sign_handle_name,
       qualifying_data, in_scheme, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetCommandAuditDigestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(GetCommandAuditDigestResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::GetCommandAuditDigestSync(
@@ -17842,7 +18053,7 @@ TPM_RC Tpm::SerializeCommand_GetTime(
   parameter_section_bytes += in_scheme_bytes;
   command_size += in_scheme_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -17943,13 +18154,35 @@ TPM_RC Tpm::ParseResponse_GetTime(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string time_info_bytes;
   rc = Parse_TPM2B_ATTEST(&buffer, time_info, &time_info_bytes);
@@ -17961,43 +18194,29 @@ TPM_RC Tpm::ParseResponse_GetTime(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = time_info_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    time_info_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ATTEST(&time_info_bytes, time_info, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void GetTimeErrorCallback(const Tpm::GetTimeResponse& callback,
-                          TPM_RC response_code) {
+void GetTimeErrorCallback(Tpm::GetTimeResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
+  std::move(callback).Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
 }
 
-void GetTimeResponseParser(const Tpm::GetTimeResponse& callback,
+void GetTimeResponseParser(Tpm::GetTimeResponse callback,
                            AuthorizationDelegate* authorization_delegate,
                            const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetTimeErrorCallback, callback);
   TPM2B_ATTEST time_info;
   TPMT_SIGNATURE signature;
   TPM_RC rc = Tpm::ParseResponse_GetTime(response, &time_info, &signature,
                                          authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetTimeErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, time_info, signature);
+  std::move(callback).Run(rc, time_info, signature);
 }
 
 void Tpm::GetTime(const TPMI_RH_ENDORSEMENT& privacy_admin_handle,
@@ -18007,22 +18226,22 @@ void Tpm::GetTime(const TPMI_RH_ENDORSEMENT& privacy_admin_handle,
                   const TPM2B_DATA& qualifying_data,
                   const TPMT_SIG_SCHEME& in_scheme,
                   AuthorizationDelegate* authorization_delegate,
-                  const GetTimeResponse& callback) {
+                  GetTimeResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetTimeErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(GetTimeResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_GetTime(privacy_admin_handle, privacy_admin_handle_name,
                                sign_handle, sign_handle_name, qualifying_data,
                                in_scheme, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetTimeErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      GetTimeResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::GetTimeSync(const TPMI_RH_ENDORSEMENT& privacy_admin_handle,
@@ -18116,7 +18335,7 @@ TPM_RC Tpm::SerializeCommand_Commit(
   parameter_section_bytes += y2_bytes;
   command_size += y2_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -18220,9 +18439,10 @@ TPM_RC Tpm::ParseResponse_Commit(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -18256,19 +18476,16 @@ TPM_RC Tpm::ParseResponse_Commit(
   return TPM_RC_SUCCESS;
 }
 
-void CommitErrorCallback(const Tpm::CommitResponse& callback,
-                         TPM_RC response_code) {
+void CommitErrorCallback(Tpm::CommitResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, UINT32(), TPM2B_ECC_POINT(), TPM2B_ECC_POINT(),
-               TPM2B_ECC_POINT(), UINT16());
+  std::move(callback).Run(response_code, UINT32(), TPM2B_ECC_POINT(),
+                          TPM2B_ECC_POINT(), TPM2B_ECC_POINT(), UINT16());
 }
 
-void CommitResponseParser(const Tpm::CommitResponse& callback,
+void CommitResponseParser(Tpm::CommitResponse callback,
                           AuthorizationDelegate* authorization_delegate,
                           const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CommitErrorCallback, callback);
   UINT32 param_size_out;
   TPM2B_ECC_POINT k;
   TPM2B_ECC_POINT l;
@@ -18277,10 +18494,12 @@ void CommitResponseParser(const Tpm::CommitResponse& callback,
   TPM_RC rc = Tpm::ParseResponse_Commit(response, &param_size_out, &k, &l, &e,
                                         &counter, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CommitErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, param_size_out, k, l, e, counter);
+  std::move(callback).Run(rc, param_size_out, k, l, e, counter);
 }
 
 void Tpm::Commit(const TPMI_DH_OBJECT& sign_handle,
@@ -18290,21 +18509,21 @@ void Tpm::Commit(const TPMI_DH_OBJECT& sign_handle,
                  const TPM2B_SENSITIVE_DATA& s2,
                  const TPM2B_ECC_PARAMETER& y2,
                  AuthorizationDelegate* authorization_delegate,
-                 const CommitResponse& callback) {
+                 CommitResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CommitErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(CommitResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_Commit(sign_handle, sign_handle_name, param_size, p1, s2,
                               y2, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CommitErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      CommitResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::CommitSync(const TPMI_DH_OBJECT& sign_handle,
@@ -18372,7 +18591,7 @@ TPM_RC Tpm::SerializeCommand_EC_Ephemeral(
   parameter_section_bytes += curve_id_bytes;
   command_size += curve_id_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -18474,9 +18693,10 @@ TPM_RC Tpm::ParseResponse_EC_Ephemeral(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -18500,47 +18720,47 @@ TPM_RC Tpm::ParseResponse_EC_Ephemeral(
   return TPM_RC_SUCCESS;
 }
 
-void EC_EphemeralErrorCallback(const Tpm::EC_EphemeralResponse& callback,
+void EC_EphemeralErrorCallback(Tpm::EC_EphemeralResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, UINT32(), TPM2B_ECC_POINT(), UINT16());
+  std::move(callback).Run(response_code, UINT32(), TPM2B_ECC_POINT(), UINT16());
 }
 
-void EC_EphemeralResponseParser(const Tpm::EC_EphemeralResponse& callback,
+void EC_EphemeralResponseParser(Tpm::EC_EphemeralResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(EC_EphemeralErrorCallback, callback);
   UINT32 param_size_out;
   TPM2B_ECC_POINT q;
   UINT16 counter;
   TPM_RC rc = Tpm::ParseResponse_EC_Ephemeral(response, &param_size_out, &q,
                                               &counter, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(EC_EphemeralErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, param_size_out, q, counter);
+  std::move(callback).Run(rc, param_size_out, q, counter);
 }
 
 void Tpm::EC_Ephemeral(const UINT32& param_size,
                        const TPMI_ECC_CURVE& curve_id,
                        AuthorizationDelegate* authorization_delegate,
-                       const EC_EphemeralResponse& callback) {
+                       EC_EphemeralResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(EC_EphemeralErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(EC_EphemeralResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_EC_Ephemeral(param_size, curve_id, &command,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(EC_EphemeralErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      EC_EphemeralResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::EC_EphemeralSync(const UINT32& param_size,
@@ -18619,7 +18839,7 @@ TPM_RC Tpm::SerializeCommand_VerifySignature(
   parameter_section_bytes += signature_bytes;
   command_size += signature_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -18719,9 +18939,10 @@ TPM_RC Tpm::ParseResponse_VerifySignature(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -18735,27 +18956,27 @@ TPM_RC Tpm::ParseResponse_VerifySignature(
   return TPM_RC_SUCCESS;
 }
 
-void VerifySignatureErrorCallback(const Tpm::VerifySignatureResponse& callback,
+void VerifySignatureErrorCallback(Tpm::VerifySignatureResponse callback,
                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMT_TK_VERIFIED());
+  std::move(callback).Run(response_code, TPMT_TK_VERIFIED());
 }
 
 void VerifySignatureResponseParser(
-    const Tpm::VerifySignatureResponse& callback,
+    Tpm::VerifySignatureResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(VerifySignatureErrorCallback, callback);
   TPMT_TK_VERIFIED validation;
   TPM_RC rc = Tpm::ParseResponse_VerifySignature(response, &validation,
                                                  authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(VerifySignatureErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, validation);
+  std::move(callback).Run(rc, validation);
 }
 
 void Tpm::VerifySignature(const TPMI_DH_OBJECT& key_handle,
@@ -18763,21 +18984,22 @@ void Tpm::VerifySignature(const TPMI_DH_OBJECT& key_handle,
                           const TPM2B_DIGEST& digest,
                           const TPMT_SIGNATURE& signature,
                           AuthorizationDelegate* authorization_delegate,
-                          const VerifySignatureResponse& callback) {
+                          VerifySignatureResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(VerifySignatureErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      VerifySignatureResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_VerifySignature(key_handle, key_handle_name,
                                                digest, signature, &command,
                                                authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(VerifySignatureErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(VerifySignatureResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::VerifySignatureSync(const TPMI_DH_OBJECT& key_handle,
@@ -18866,7 +19088,7 @@ TPM_RC Tpm::SerializeCommand_Sign(
   parameter_section_bytes += validation_bytes;
   command_size += validation_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -18965,9 +19187,10 @@ TPM_RC Tpm::ParseResponse_Sign(const std::string& response,
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -18981,26 +19204,25 @@ TPM_RC Tpm::ParseResponse_Sign(const std::string& response,
   return TPM_RC_SUCCESS;
 }
 
-void SignErrorCallback(const Tpm::SignResponse& callback,
-                       TPM_RC response_code) {
+void SignErrorCallback(Tpm::SignResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMT_SIGNATURE());
+  std::move(callback).Run(response_code, TPMT_SIGNATURE());
 }
 
-void SignResponseParser(const Tpm::SignResponse& callback,
+void SignResponseParser(Tpm::SignResponse callback,
                         AuthorizationDelegate* authorization_delegate,
                         const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SignErrorCallback, callback);
   TPMT_SIGNATURE signature;
   TPM_RC rc =
       Tpm::ParseResponse_Sign(response, &signature, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SignErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, signature);
+  std::move(callback).Run(rc, signature);
 }
 
 void Tpm::Sign(const TPMI_DH_OBJECT& key_handle,
@@ -19009,21 +19231,21 @@ void Tpm::Sign(const TPMI_DH_OBJECT& key_handle,
                const TPMT_SIG_SCHEME& in_scheme,
                const TPMT_TK_HASHCHECK& validation,
                AuthorizationDelegate* authorization_delegate,
-               const SignResponse& callback) {
+               SignResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SignErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(SignResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_Sign(key_handle, key_handle_name, digest, in_scheme,
                             validation, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SignErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      SignResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::SignSync(const TPMI_DH_OBJECT& key_handle,
@@ -19104,7 +19326,7 @@ TPM_RC Tpm::SerializeCommand_SetCommandCodeAuditStatus(
   parameter_section_bytes += clear_list_bytes;
   command_size += clear_list_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -19203,9 +19425,10 @@ TPM_RC Tpm::ParseResponse_SetCommandCodeAuditStatus(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -19215,26 +19438,25 @@ TPM_RC Tpm::ParseResponse_SetCommandCodeAuditStatus(
 }
 
 void SetCommandCodeAuditStatusErrorCallback(
-    const Tpm::SetCommandCodeAuditStatusResponse& callback,
-    TPM_RC response_code) {
+    Tpm::SetCommandCodeAuditStatusResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void SetCommandCodeAuditStatusResponseParser(
-    const Tpm::SetCommandCodeAuditStatusResponse& callback,
+    Tpm::SetCommandCodeAuditStatusResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SetCommandCodeAuditStatusErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_SetCommandCodeAuditStatus(
       response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        SetCommandCodeAuditStatusErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::SetCommandCodeAuditStatus(
@@ -19244,22 +19466,22 @@ void Tpm::SetCommandCodeAuditStatus(
     const TPML_CC& set_list,
     const TPML_CC& clear_list,
     AuthorizationDelegate* authorization_delegate,
-    const SetCommandCodeAuditStatusResponse& callback) {
+    SetCommandCodeAuditStatusResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SetCommandCodeAuditStatusErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(SetCommandCodeAuditStatusResponseParser, callback,
-                 authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_SetCommandCodeAuditStatus(
       auth, auth_name, audit_alg, set_list, clear_list, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        SetCommandCodeAuditStatusErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(SetCommandCodeAuditStatusResponseParser,
+                     std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::SetCommandCodeAuditStatusSync(
@@ -19323,7 +19545,7 @@ TPM_RC Tpm::SerializeCommand_PCR_Extend(
   parameter_section_bytes += digests_bytes;
   command_size += digests_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -19422,9 +19644,10 @@ TPM_RC Tpm::ParseResponse_PCR_Extend(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -19433,44 +19656,44 @@ TPM_RC Tpm::ParseResponse_PCR_Extend(
   return TPM_RC_SUCCESS;
 }
 
-void PCR_ExtendErrorCallback(const Tpm::PCR_ExtendResponse& callback,
+void PCR_ExtendErrorCallback(Tpm::PCR_ExtendResponse callback,
                              TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PCR_ExtendResponseParser(const Tpm::PCR_ExtendResponse& callback,
+void PCR_ExtendResponseParser(Tpm::PCR_ExtendResponse callback,
                               AuthorizationDelegate* authorization_delegate,
                               const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_ExtendErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PCR_Extend(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_ExtendErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PCR_Extend(const TPMI_DH_PCR& pcr_handle,
                      const std::string& pcr_handle_name,
                      const TPML_DIGEST_VALUES& digests,
                      AuthorizationDelegate* authorization_delegate,
-                     const PCR_ExtendResponse& callback) {
+                     PCR_ExtendResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_ExtendErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PCR_ExtendResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PCR_Extend(pcr_handle, pcr_handle_name, digests,
                                           &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_ExtendErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PCR_ExtendResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PCR_ExtendSync(const TPMI_DH_PCR& pcr_handle,
@@ -19537,7 +19760,7 @@ TPM_RC Tpm::SerializeCommand_PCR_Event(
   parameter_section_bytes += event_data_bytes;
   command_size += event_data_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -19637,9 +19860,10 @@ TPM_RC Tpm::ParseResponse_PCR_Event(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -19653,47 +19877,47 @@ TPM_RC Tpm::ParseResponse_PCR_Event(
   return TPM_RC_SUCCESS;
 }
 
-void PCR_EventErrorCallback(const Tpm::PCR_EventResponse& callback,
+void PCR_EventErrorCallback(Tpm::PCR_EventResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPML_DIGEST_VALUES());
+  std::move(callback).Run(response_code, TPML_DIGEST_VALUES());
 }
 
-void PCR_EventResponseParser(const Tpm::PCR_EventResponse& callback,
+void PCR_EventResponseParser(Tpm::PCR_EventResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_EventErrorCallback, callback);
   TPML_DIGEST_VALUES digests;
   TPM_RC rc =
       Tpm::ParseResponse_PCR_Event(response, &digests, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_EventErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, digests);
+  std::move(callback).Run(rc, digests);
 }
 
 void Tpm::PCR_Event(const TPMI_DH_PCR& pcr_handle,
                     const std::string& pcr_handle_name,
                     const TPM2B_EVENT& event_data,
                     AuthorizationDelegate* authorization_delegate,
-                    const PCR_EventResponse& callback) {
+                    PCR_EventResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_EventErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PCR_EventResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_PCR_Event(pcr_handle, pcr_handle_name, event_data,
                                  &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_EventErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PCR_EventResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PCR_EventSync(const TPMI_DH_PCR& pcr_handle,
@@ -19744,7 +19968,7 @@ TPM_RC Tpm::SerializeCommand_PCR_Read(
   parameter_section_bytes += pcr_selection_in_bytes;
   command_size += pcr_selection_in_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -19846,9 +20070,10 @@ TPM_RC Tpm::ParseResponse_PCR_Read(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -19873,18 +20098,17 @@ TPM_RC Tpm::ParseResponse_PCR_Read(
   return TPM_RC_SUCCESS;
 }
 
-void PCR_ReadErrorCallback(const Tpm::PCR_ReadResponse& callback,
+void PCR_ReadErrorCallback(Tpm::PCR_ReadResponse callback,
                            TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, UINT32(), TPML_PCR_SELECTION(), TPML_DIGEST());
+  std::move(callback).Run(response_code, UINT32(), TPML_PCR_SELECTION(),
+                          TPML_DIGEST());
 }
 
-void PCR_ReadResponseParser(const Tpm::PCR_ReadResponse& callback,
+void PCR_ReadResponseParser(Tpm::PCR_ReadResponse callback,
                             AuthorizationDelegate* authorization_delegate,
                             const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_ReadErrorCallback, callback);
   UINT32 pcr_update_counter;
   TPML_PCR_SELECTION pcr_selection_out;
   TPML_DIGEST pcr_values;
@@ -19892,28 +20116,31 @@ void PCR_ReadResponseParser(const Tpm::PCR_ReadResponse& callback,
                                           &pcr_selection_out, &pcr_values,
                                           authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_ReadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, pcr_update_counter, pcr_selection_out, pcr_values);
+  std::move(callback).Run(rc, pcr_update_counter, pcr_selection_out,
+                          pcr_values);
 }
 
 void Tpm::PCR_Read(const TPML_PCR_SELECTION& pcr_selection_in,
                    AuthorizationDelegate* authorization_delegate,
-                   const PCR_ReadResponse& callback) {
+                   PCR_ReadResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_ReadErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PCR_ReadResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PCR_Read(pcr_selection_in, &command,
                                         authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_ReadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PCR_ReadResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PCR_ReadSync(const TPML_PCR_SELECTION& pcr_selection_in,
@@ -19974,7 +20201,7 @@ TPM_RC Tpm::SerializeCommand_PCR_Allocate(
   parameter_section_bytes += pcr_allocation_bytes;
   command_size += pcr_allocation_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -20077,9 +20304,10 @@ TPM_RC Tpm::ParseResponse_PCR_Allocate(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -20109,18 +20337,17 @@ TPM_RC Tpm::ParseResponse_PCR_Allocate(
   return TPM_RC_SUCCESS;
 }
 
-void PCR_AllocateErrorCallback(const Tpm::PCR_AllocateResponse& callback,
+void PCR_AllocateErrorCallback(Tpm::PCR_AllocateResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMI_YES_NO(), UINT32(), UINT32(), UINT32());
+  std::move(callback).Run(response_code, TPMI_YES_NO(), UINT32(), UINT32(),
+                          UINT32());
 }
 
-void PCR_AllocateResponseParser(const Tpm::PCR_AllocateResponse& callback,
+void PCR_AllocateResponseParser(Tpm::PCR_AllocateResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_AllocateErrorCallback, callback);
   TPMI_YES_NO allocation_success;
   UINT32 max_pcr;
   UINT32 size_needed;
@@ -20129,31 +20356,34 @@ void PCR_AllocateResponseParser(const Tpm::PCR_AllocateResponse& callback,
       response, &allocation_success, &max_pcr, &size_needed, &size_available,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_AllocateErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, allocation_success, max_pcr, size_needed, size_available);
+  std::move(callback).Run(rc, allocation_success, max_pcr, size_needed,
+                          size_available);
 }
 
 void Tpm::PCR_Allocate(const TPMI_RH_PLATFORM& auth_handle,
                        const std::string& auth_handle_name,
                        const TPML_PCR_SELECTION& pcr_allocation,
                        AuthorizationDelegate* authorization_delegate,
-                       const PCR_AllocateResponse& callback) {
+                       PCR_AllocateResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_AllocateErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PCR_AllocateResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PCR_Allocate(auth_handle, auth_handle_name,
                                             pcr_allocation, &command,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_AllocateErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PCR_AllocateResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PCR_AllocateSync(const TPMI_RH_PLATFORM& auth_handle,
@@ -20246,7 +20476,7 @@ TPM_RC Tpm::SerializeCommand_PCR_SetAuthPolicy(
   parameter_section_bytes += policy_digest_bytes;
   command_size += policy_digest_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -20345,9 +20575,10 @@ TPM_RC Tpm::ParseResponse_PCR_SetAuthPolicy(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -20356,26 +20587,26 @@ TPM_RC Tpm::ParseResponse_PCR_SetAuthPolicy(
   return TPM_RC_SUCCESS;
 }
 
-void PCR_SetAuthPolicyErrorCallback(
-    const Tpm::PCR_SetAuthPolicyResponse& callback, TPM_RC response_code) {
+void PCR_SetAuthPolicyErrorCallback(Tpm::PCR_SetAuthPolicyResponse callback,
+                                    TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PCR_SetAuthPolicyResponseParser(
-    const Tpm::PCR_SetAuthPolicyResponse& callback,
+    Tpm::PCR_SetAuthPolicyResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_SetAuthPolicyErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PCR_SetAuthPolicy(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_SetAuthPolicyErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PCR_SetAuthPolicy(const TPMI_RH_PLATFORM& auth_handle,
@@ -20385,21 +20616,22 @@ void Tpm::PCR_SetAuthPolicy(const TPMI_RH_PLATFORM& auth_handle,
                             const TPM2B_DIGEST& auth_policy,
                             const TPMI_ALG_HASH& policy_digest,
                             AuthorizationDelegate* authorization_delegate,
-                            const PCR_SetAuthPolicyResponse& callback) {
+                            PCR_SetAuthPolicyResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_SetAuthPolicyErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PCR_SetAuthPolicyResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PCR_SetAuthPolicy(
       auth_handle, auth_handle_name, pcr_num, pcr_num_name, auth_policy,
       policy_digest, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_SetAuthPolicyErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PCR_SetAuthPolicyResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PCR_SetAuthPolicySync(
@@ -20471,7 +20703,7 @@ TPM_RC Tpm::SerializeCommand_PCR_SetAuthValue(
   parameter_section_bytes += auth_bytes;
   command_size += auth_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -20570,9 +20802,10 @@ TPM_RC Tpm::ParseResponse_PCR_SetAuthValue(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -20581,46 +20814,47 @@ TPM_RC Tpm::ParseResponse_PCR_SetAuthValue(
   return TPM_RC_SUCCESS;
 }
 
-void PCR_SetAuthValueErrorCallback(
-    const Tpm::PCR_SetAuthValueResponse& callback, TPM_RC response_code) {
+void PCR_SetAuthValueErrorCallback(Tpm::PCR_SetAuthValueResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PCR_SetAuthValueResponseParser(
-    const Tpm::PCR_SetAuthValueResponse& callback,
+    Tpm::PCR_SetAuthValueResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_SetAuthValueErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PCR_SetAuthValue(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_SetAuthValueErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PCR_SetAuthValue(const TPMI_DH_PCR& pcr_handle,
                            const std::string& pcr_handle_name,
                            const TPM2B_DIGEST& auth,
                            AuthorizationDelegate* authorization_delegate,
-                           const PCR_SetAuthValueResponse& callback) {
+                           PCR_SetAuthValueResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_SetAuthValueErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PCR_SetAuthValueResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PCR_SetAuthValue(
       pcr_handle, pcr_handle_name, auth, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_SetAuthValueErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PCR_SetAuthValueResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PCR_SetAuthValueSync(
@@ -20671,7 +20905,7 @@ TPM_RC Tpm::SerializeCommand_PCR_Reset(
   handle_section_bytes += pcr_handle_bytes;
   command_size += pcr_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -20770,9 +21004,10 @@ TPM_RC Tpm::ParseResponse_PCR_Reset(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -20781,43 +21016,43 @@ TPM_RC Tpm::ParseResponse_PCR_Reset(
   return TPM_RC_SUCCESS;
 }
 
-void PCR_ResetErrorCallback(const Tpm::PCR_ResetResponse& callback,
+void PCR_ResetErrorCallback(Tpm::PCR_ResetResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PCR_ResetResponseParser(const Tpm::PCR_ResetResponse& callback,
+void PCR_ResetResponseParser(Tpm::PCR_ResetResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_ResetErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PCR_Reset(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_ResetErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PCR_Reset(const TPMI_DH_PCR& pcr_handle,
                     const std::string& pcr_handle_name,
                     AuthorizationDelegate* authorization_delegate,
-                    const PCR_ResetResponse& callback) {
+                    PCR_ResetResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PCR_ResetErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PCR_ResetResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PCR_Reset(pcr_handle, pcr_handle_name, &command,
                                          authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PCR_ResetErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PCR_ResetResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PCR_ResetSync(const TPMI_DH_PCR& pcr_handle,
@@ -20929,7 +21164,7 @@ TPM_RC Tpm::SerializeCommand_PolicySigned(
   parameter_section_bytes += auth_bytes;
   command_size += auth_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -21030,13 +21265,35 @@ TPM_RC Tpm::ParseResponse_PolicySigned(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string timeout_bytes;
   rc = Parse_TPM2B_TIMEOUT(&buffer, timeout, &timeout_bytes);
@@ -21048,43 +21305,30 @@ TPM_RC Tpm::ParseResponse_PolicySigned(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = timeout_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    timeout_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_TIMEOUT(&timeout_bytes, timeout, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void PolicySignedErrorCallback(const Tpm::PolicySignedResponse& callback,
+void PolicySignedErrorCallback(Tpm::PolicySignedResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_TIMEOUT(), TPMT_TK_AUTH());
+  std::move(callback).Run(response_code, TPM2B_TIMEOUT(), TPMT_TK_AUTH());
 }
 
-void PolicySignedResponseParser(const Tpm::PolicySignedResponse& callback,
+void PolicySignedResponseParser(Tpm::PolicySignedResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicySignedErrorCallback, callback);
   TPM2B_TIMEOUT timeout;
   TPMT_TK_AUTH policy_ticket;
   TPM_RC rc = Tpm::ParseResponse_PolicySigned(
       response, &timeout, &policy_ticket, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicySignedErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, timeout, policy_ticket);
+  std::move(callback).Run(rc, timeout, policy_ticket);
 }
 
 void Tpm::PolicySigned(const TPMI_DH_OBJECT& auth_object,
@@ -21097,22 +21341,22 @@ void Tpm::PolicySigned(const TPMI_DH_OBJECT& auth_object,
                        const INT32& expiration,
                        const TPMT_SIGNATURE& auth,
                        AuthorizationDelegate* authorization_delegate,
-                       const PolicySignedResponse& callback) {
+                       PolicySignedResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicySignedErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PolicySignedResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicySigned(
       auth_object, auth_object_name, policy_session, policy_session_name,
       nonce_tpm, cp_hash_a, policy_ref, expiration, auth, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicySignedErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PolicySignedResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicySignedSync(const TPMI_DH_OBJECT& auth_object,
@@ -21227,7 +21471,7 @@ TPM_RC Tpm::SerializeCommand_PolicySecret(
   parameter_section_bytes += expiration_bytes;
   command_size += expiration_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -21328,13 +21572,35 @@ TPM_RC Tpm::ParseResponse_PolicySecret(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string timeout_bytes;
   rc = Parse_TPM2B_TIMEOUT(&buffer, timeout, &timeout_bytes);
@@ -21346,43 +21612,30 @@ TPM_RC Tpm::ParseResponse_PolicySecret(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = timeout_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    timeout_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_TIMEOUT(&timeout_bytes, timeout, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void PolicySecretErrorCallback(const Tpm::PolicySecretResponse& callback,
+void PolicySecretErrorCallback(Tpm::PolicySecretResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_TIMEOUT(), TPMT_TK_AUTH());
+  std::move(callback).Run(response_code, TPM2B_TIMEOUT(), TPMT_TK_AUTH());
 }
 
-void PolicySecretResponseParser(const Tpm::PolicySecretResponse& callback,
+void PolicySecretResponseParser(Tpm::PolicySecretResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicySecretErrorCallback, callback);
   TPM2B_TIMEOUT timeout;
   TPMT_TK_AUTH policy_ticket;
   TPM_RC rc = Tpm::ParseResponse_PolicySecret(
       response, &timeout, &policy_ticket, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicySecretErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, timeout, policy_ticket);
+  std::move(callback).Run(rc, timeout, policy_ticket);
 }
 
 void Tpm::PolicySecret(const TPMI_DH_ENTITY& auth_handle,
@@ -21394,22 +21647,22 @@ void Tpm::PolicySecret(const TPMI_DH_ENTITY& auth_handle,
                        const TPM2B_NONCE& policy_ref,
                        const INT32& expiration,
                        AuthorizationDelegate* authorization_delegate,
-                       const PolicySecretResponse& callback) {
+                       PolicySecretResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicySecretErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PolicySecretResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicySecret(
       auth_handle, auth_handle_name, policy_session, policy_session_name,
       nonce_tpm, cp_hash_a, policy_ref, expiration, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicySecretErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PolicySecretResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicySecretSync(const TPMI_DH_ENTITY& auth_handle,
@@ -21522,7 +21775,7 @@ TPM_RC Tpm::SerializeCommand_PolicyTicket(
   parameter_section_bytes += ticket_bytes;
   command_size += ticket_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -21621,9 +21874,10 @@ TPM_RC Tpm::ParseResponse_PolicyTicket(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -21632,24 +21886,24 @@ TPM_RC Tpm::ParseResponse_PolicyTicket(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyTicketErrorCallback(const Tpm::PolicyTicketResponse& callback,
+void PolicyTicketErrorCallback(Tpm::PolicyTicketResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyTicketResponseParser(const Tpm::PolicyTicketResponse& callback,
+void PolicyTicketResponseParser(Tpm::PolicyTicketResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyTicketErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PolicyTicket(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyTicketErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyTicket(const TPMI_SH_POLICY& policy_session,
@@ -21660,21 +21914,21 @@ void Tpm::PolicyTicket(const TPMI_SH_POLICY& policy_session,
                        const TPM2B_NAME& auth_name,
                        const TPMT_TK_AUTH& ticket,
                        AuthorizationDelegate* authorization_delegate,
-                       const PolicyTicketResponse& callback) {
+                       PolicyTicketResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyTicketErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PolicyTicketResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyTicket(
       policy_session, policy_session_name, timeout, cp_hash_a, policy_ref,
       auth_name, ticket, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyTicketErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PolicyTicketResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyTicketSync(const TPMI_SH_POLICY& policy_session,
@@ -21738,7 +21992,7 @@ TPM_RC Tpm::SerializeCommand_PolicyOR(
   parameter_section_bytes += p_hash_list_bytes;
   command_size += p_hash_list_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -21837,9 +22091,10 @@ TPM_RC Tpm::ParseResponse_PolicyOR(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -21848,45 +22103,45 @@ TPM_RC Tpm::ParseResponse_PolicyOR(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyORErrorCallback(const Tpm::PolicyORResponse& callback,
+void PolicyORErrorCallback(Tpm::PolicyORResponse callback,
                            TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyORResponseParser(const Tpm::PolicyORResponse& callback,
+void PolicyORResponseParser(Tpm::PolicyORResponse callback,
                             AuthorizationDelegate* authorization_delegate,
                             const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyORErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PolicyOR(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyORErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyOR(const TPMI_SH_POLICY& policy_session,
                    const std::string& policy_session_name,
                    const TPML_DIGEST& p_hash_list,
                    AuthorizationDelegate* authorization_delegate,
-                   const PolicyORResponse& callback) {
+                   PolicyORResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyORErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PolicyORResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_PolicyOR(policy_session, policy_session_name,
                                 p_hash_list, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyORErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PolicyORResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyORSync(const TPMI_SH_POLICY& policy_session,
@@ -21963,7 +22218,7 @@ TPM_RC Tpm::SerializeCommand_PolicyPCR(
   parameter_section_bytes += pcrs_bytes;
   command_size += pcrs_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -22062,9 +22317,10 @@ TPM_RC Tpm::ParseResponse_PolicyPCR(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -22073,24 +22329,24 @@ TPM_RC Tpm::ParseResponse_PolicyPCR(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyPCRErrorCallback(const Tpm::PolicyPCRResponse& callback,
+void PolicyPCRErrorCallback(Tpm::PolicyPCRResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyPCRResponseParser(const Tpm::PolicyPCRResponse& callback,
+void PolicyPCRResponseParser(Tpm::PolicyPCRResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyPCRErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PolicyPCR(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyPCRErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyPCR(const TPMI_SH_POLICY& policy_session,
@@ -22098,21 +22354,21 @@ void Tpm::PolicyPCR(const TPMI_SH_POLICY& policy_session,
                     const TPM2B_DIGEST& pcr_digest,
                     const TPML_PCR_SELECTION& pcrs,
                     AuthorizationDelegate* authorization_delegate,
-                    const PolicyPCRResponse& callback) {
+                    PolicyPCRResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyPCRErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PolicyPCRResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyPCR(policy_session, policy_session_name,
                                          pcr_digest, pcrs, &command,
                                          authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyPCRErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PolicyPCRResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyPCRSync(const TPMI_SH_POLICY& policy_session,
@@ -22173,7 +22429,7 @@ TPM_RC Tpm::SerializeCommand_PolicyLocality(
   parameter_section_bytes += locality_bytes;
   command_size += locality_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -22272,9 +22528,10 @@ TPM_RC Tpm::ParseResponse_PolicyLocality(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -22283,46 +22540,47 @@ TPM_RC Tpm::ParseResponse_PolicyLocality(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyLocalityErrorCallback(const Tpm::PolicyLocalityResponse& callback,
+void PolicyLocalityErrorCallback(Tpm::PolicyLocalityResponse callback,
                                  TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyLocalityResponseParser(const Tpm::PolicyLocalityResponse& callback,
+void PolicyLocalityResponseParser(Tpm::PolicyLocalityResponse callback,
                                   AuthorizationDelegate* authorization_delegate,
                                   const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyLocalityErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyLocality(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyLocalityErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyLocality(const TPMI_SH_POLICY& policy_session,
                          const std::string& policy_session_name,
                          const TPMA_LOCALITY& locality,
                          AuthorizationDelegate* authorization_delegate,
-                         const PolicyLocalityResponse& callback) {
+                         PolicyLocalityResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyLocalityErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyLocalityResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyLocality(policy_session,
                                               policy_session_name, locality,
                                               &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyLocalityErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyLocalityResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyLocalitySync(const TPMI_SH_POLICY& policy_session,
@@ -22428,7 +22686,7 @@ TPM_RC Tpm::SerializeCommand_PolicyNV(
   parameter_section_bytes += operation_bytes;
   command_size += operation_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -22527,9 +22785,10 @@ TPM_RC Tpm::ParseResponse_PolicyNV(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -22538,24 +22797,24 @@ TPM_RC Tpm::ParseResponse_PolicyNV(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyNVErrorCallback(const Tpm::PolicyNVResponse& callback,
+void PolicyNVErrorCallback(Tpm::PolicyNVResponse callback,
                            TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyNVResponseParser(const Tpm::PolicyNVResponse& callback,
+void PolicyNVResponseParser(Tpm::PolicyNVResponse callback,
                             AuthorizationDelegate* authorization_delegate,
                             const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyNVErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PolicyNV(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyNVErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyNV(const TPMI_RH_NV_AUTH& auth_handle,
@@ -22568,22 +22827,22 @@ void Tpm::PolicyNV(const TPMI_RH_NV_AUTH& auth_handle,
                    const UINT16& offset,
                    const TPM_EO& operation,
                    AuthorizationDelegate* authorization_delegate,
-                   const PolicyNVResponse& callback) {
+                   PolicyNVResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyNVErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PolicyNVResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyNV(
       auth_handle, auth_handle_name, nv_index, nv_index_name, policy_session,
       policy_session_name, operand_b, offset, operation, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyNVErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PolicyNVResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyNVSync(const TPMI_RH_NV_AUTH& auth_handle,
@@ -22676,7 +22935,7 @@ TPM_RC Tpm::SerializeCommand_PolicyCounterTimer(
   parameter_section_bytes += operation_bytes;
   command_size += operation_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -22775,9 +23034,10 @@ TPM_RC Tpm::ParseResponse_PolicyCounterTimer(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -22786,26 +23046,26 @@ TPM_RC Tpm::ParseResponse_PolicyCounterTimer(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyCounterTimerErrorCallback(
-    const Tpm::PolicyCounterTimerResponse& callback, TPM_RC response_code) {
+void PolicyCounterTimerErrorCallback(Tpm::PolicyCounterTimerResponse callback,
+                                     TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PolicyCounterTimerResponseParser(
-    const Tpm::PolicyCounterTimerResponse& callback,
+    Tpm::PolicyCounterTimerResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyCounterTimerErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyCounterTimer(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyCounterTimerErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyCounterTimer(const TPMI_SH_POLICY& policy_session,
@@ -22814,21 +23074,22 @@ void Tpm::PolicyCounterTimer(const TPMI_SH_POLICY& policy_session,
                              const UINT16& offset,
                              const TPM_EO& operation,
                              AuthorizationDelegate* authorization_delegate,
-                             const PolicyCounterTimerResponse& callback) {
+                             PolicyCounterTimerResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyCounterTimerErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyCounterTimerResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyCounterTimer(
       policy_session, policy_session_name, operand_b, offset, operation,
       &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyCounterTimerErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyCounterTimerResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyCounterTimerSync(
@@ -22891,7 +23152,7 @@ TPM_RC Tpm::SerializeCommand_PolicyCommandCode(
   parameter_section_bytes += code_bytes;
   command_size += code_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -22990,9 +23251,10 @@ TPM_RC Tpm::ParseResponse_PolicyCommandCode(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -23001,47 +23263,48 @@ TPM_RC Tpm::ParseResponse_PolicyCommandCode(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyCommandCodeErrorCallback(
-    const Tpm::PolicyCommandCodeResponse& callback, TPM_RC response_code) {
+void PolicyCommandCodeErrorCallback(Tpm::PolicyCommandCodeResponse callback,
+                                    TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PolicyCommandCodeResponseParser(
-    const Tpm::PolicyCommandCodeResponse& callback,
+    Tpm::PolicyCommandCodeResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyCommandCodeErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyCommandCode(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyCommandCodeErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyCommandCode(const TPMI_SH_POLICY& policy_session,
                             const std::string& policy_session_name,
                             const TPM_CC& code,
                             AuthorizationDelegate* authorization_delegate,
-                            const PolicyCommandCodeResponse& callback) {
+                            PolicyCommandCodeResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyCommandCodeErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyCommandCodeResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyCommandCode(
       policy_session, policy_session_name, code, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyCommandCodeErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyCommandCodeResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyCommandCodeSync(
@@ -23093,7 +23356,7 @@ TPM_RC Tpm::SerializeCommand_PolicyPhysicalPresence(
   handle_section_bytes += policy_session_bytes;
   command_size += policy_session_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -23192,9 +23455,10 @@ TPM_RC Tpm::ParseResponse_PolicyPhysicalPresence(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -23204,45 +23468,45 @@ TPM_RC Tpm::ParseResponse_PolicyPhysicalPresence(
 }
 
 void PolicyPhysicalPresenceErrorCallback(
-    const Tpm::PolicyPhysicalPresenceResponse& callback, TPM_RC response_code) {
+    Tpm::PolicyPhysicalPresenceResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PolicyPhysicalPresenceResponseParser(
-    const Tpm::PolicyPhysicalPresenceResponse& callback,
+    Tpm::PolicyPhysicalPresenceResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyPhysicalPresenceErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PolicyPhysicalPresence(response,
                                                         authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        PolicyPhysicalPresenceErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
-void Tpm::PolicyPhysicalPresence(
-    const TPMI_SH_POLICY& policy_session,
-    const std::string& policy_session_name,
-    AuthorizationDelegate* authorization_delegate,
-    const PolicyPhysicalPresenceResponse& callback) {
+void Tpm::PolicyPhysicalPresence(const TPMI_SH_POLICY& policy_session,
+                                 const std::string& policy_session_name,
+                                 AuthorizationDelegate* authorization_delegate,
+                                 PolicyPhysicalPresenceResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyPhysicalPresenceErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyPhysicalPresenceResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyPhysicalPresence(
       policy_session, policy_session_name, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        PolicyPhysicalPresenceErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyPhysicalPresenceResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyPhysicalPresenceSync(
@@ -23309,7 +23573,7 @@ TPM_RC Tpm::SerializeCommand_PolicyCpHash(
   parameter_section_bytes += cp_hash_a_bytes;
   command_size += cp_hash_a_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -23408,9 +23672,10 @@ TPM_RC Tpm::ParseResponse_PolicyCpHash(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -23419,45 +23684,45 @@ TPM_RC Tpm::ParseResponse_PolicyCpHash(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyCpHashErrorCallback(const Tpm::PolicyCpHashResponse& callback,
+void PolicyCpHashErrorCallback(Tpm::PolicyCpHashResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyCpHashResponseParser(const Tpm::PolicyCpHashResponse& callback,
+void PolicyCpHashResponseParser(Tpm::PolicyCpHashResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyCpHashErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PolicyCpHash(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyCpHashErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyCpHash(const TPMI_SH_POLICY& policy_session,
                        const std::string& policy_session_name,
                        const TPM2B_DIGEST& cp_hash_a,
                        AuthorizationDelegate* authorization_delegate,
-                       const PolicyCpHashResponse& callback) {
+                       PolicyCpHashResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyCpHashErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PolicyCpHashResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyCpHash(policy_session, policy_session_name,
                                             cp_hash_a, &command,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyCpHashErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PolicyCpHashResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyCpHashSync(const TPMI_SH_POLICY& policy_session,
@@ -23525,7 +23790,7 @@ TPM_RC Tpm::SerializeCommand_PolicyNameHash(
   parameter_section_bytes += name_hash_bytes;
   command_size += name_hash_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -23624,9 +23889,10 @@ TPM_RC Tpm::ParseResponse_PolicyNameHash(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -23635,46 +23901,47 @@ TPM_RC Tpm::ParseResponse_PolicyNameHash(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyNameHashErrorCallback(const Tpm::PolicyNameHashResponse& callback,
+void PolicyNameHashErrorCallback(Tpm::PolicyNameHashResponse callback,
                                  TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyNameHashResponseParser(const Tpm::PolicyNameHashResponse& callback,
+void PolicyNameHashResponseParser(Tpm::PolicyNameHashResponse callback,
                                   AuthorizationDelegate* authorization_delegate,
                                   const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyNameHashErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyNameHash(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyNameHashErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyNameHash(const TPMI_SH_POLICY& policy_session,
                          const std::string& policy_session_name,
                          const TPM2B_DIGEST& name_hash,
                          AuthorizationDelegate* authorization_delegate,
-                         const PolicyNameHashResponse& callback) {
+                         PolicyNameHashResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyNameHashErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyNameHashResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyNameHash(policy_session,
                                               policy_session_name, name_hash,
                                               &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyNameHashErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyNameHashResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyNameHashSync(const TPMI_SH_POLICY& policy_session,
@@ -23760,7 +24027,7 @@ TPM_RC Tpm::SerializeCommand_PolicyDuplicationSelect(
   parameter_section_bytes += include_object_bytes;
   command_size += include_object_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -23859,9 +24126,10 @@ TPM_RC Tpm::ParseResponse_PolicyDuplicationSelect(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -23871,50 +24139,49 @@ TPM_RC Tpm::ParseResponse_PolicyDuplicationSelect(
 }
 
 void PolicyDuplicationSelectErrorCallback(
-    const Tpm::PolicyDuplicationSelectResponse& callback,
-    TPM_RC response_code) {
+    Tpm::PolicyDuplicationSelectResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PolicyDuplicationSelectResponseParser(
-    const Tpm::PolicyDuplicationSelectResponse& callback,
+    Tpm::PolicyDuplicationSelectResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyDuplicationSelectErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PolicyDuplicationSelect(
       response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        PolicyDuplicationSelectErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
-void Tpm::PolicyDuplicationSelect(
-    const TPMI_SH_POLICY& policy_session,
-    const std::string& policy_session_name,
-    const TPM2B_NAME& object_name,
-    const TPM2B_NAME& new_parent_name,
-    const TPMI_YES_NO& include_object,
-    AuthorizationDelegate* authorization_delegate,
-    const PolicyDuplicationSelectResponse& callback) {
+void Tpm::PolicyDuplicationSelect(const TPMI_SH_POLICY& policy_session,
+                                  const std::string& policy_session_name,
+                                  const TPM2B_NAME& object_name,
+                                  const TPM2B_NAME& new_parent_name,
+                                  const TPMI_YES_NO& include_object,
+                                  AuthorizationDelegate* authorization_delegate,
+                                  PolicyDuplicationSelectResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyDuplicationSelectErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyDuplicationSelectResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyDuplicationSelect(
       policy_session, policy_session_name, object_name, new_parent_name,
       include_object, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        PolicyDuplicationSelectErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyDuplicationSelectResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyDuplicationSelectSync(
@@ -24012,7 +24279,7 @@ TPM_RC Tpm::SerializeCommand_PolicyAuthorize(
   parameter_section_bytes += check_ticket_bytes;
   command_size += check_ticket_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -24111,9 +24378,10 @@ TPM_RC Tpm::ParseResponse_PolicyAuthorize(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -24122,26 +24390,26 @@ TPM_RC Tpm::ParseResponse_PolicyAuthorize(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyAuthorizeErrorCallback(const Tpm::PolicyAuthorizeResponse& callback,
+void PolicyAuthorizeErrorCallback(Tpm::PolicyAuthorizeResponse callback,
                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PolicyAuthorizeResponseParser(
-    const Tpm::PolicyAuthorizeResponse& callback,
+    Tpm::PolicyAuthorizeResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyAuthorizeErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyAuthorize(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyAuthorizeErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyAuthorize(const TPMI_SH_POLICY& policy_session,
@@ -24151,21 +24419,22 @@ void Tpm::PolicyAuthorize(const TPMI_SH_POLICY& policy_session,
                           const TPM2B_NAME& key_sign,
                           const TPMT_TK_VERIFIED& check_ticket,
                           AuthorizationDelegate* authorization_delegate,
-                          const PolicyAuthorizeResponse& callback) {
+                          PolicyAuthorizeResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyAuthorizeErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyAuthorizeResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyAuthorize(
       policy_session, policy_session_name, approved_policy, policy_ref,
       key_sign, check_ticket, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyAuthorizeErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyAuthorizeResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyAuthorizeSync(const TPMI_SH_POLICY& policy_session,
@@ -24219,7 +24488,7 @@ TPM_RC Tpm::SerializeCommand_PolicyAuthValue(
   handle_section_bytes += policy_session_bytes;
   command_size += policy_session_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -24318,9 +24587,10 @@ TPM_RC Tpm::ParseResponse_PolicyAuthValue(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -24329,45 +24599,46 @@ TPM_RC Tpm::ParseResponse_PolicyAuthValue(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyAuthValueErrorCallback(const Tpm::PolicyAuthValueResponse& callback,
+void PolicyAuthValueErrorCallback(Tpm::PolicyAuthValueResponse callback,
                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PolicyAuthValueResponseParser(
-    const Tpm::PolicyAuthValueResponse& callback,
+    Tpm::PolicyAuthValueResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyAuthValueErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyAuthValue(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyAuthValueErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyAuthValue(const TPMI_SH_POLICY& policy_session,
                           const std::string& policy_session_name,
                           AuthorizationDelegate* authorization_delegate,
-                          const PolicyAuthValueResponse& callback) {
+                          PolicyAuthValueResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyAuthValueErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyAuthValueResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyAuthValue(
       policy_session, policy_session_name, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyAuthValueErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyAuthValueResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyAuthValueSync(const TPMI_SH_POLICY& policy_session,
@@ -24416,7 +24687,7 @@ TPM_RC Tpm::SerializeCommand_PolicyPassword(
   handle_section_bytes += policy_session_bytes;
   command_size += policy_session_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -24515,9 +24786,10 @@ TPM_RC Tpm::ParseResponse_PolicyPassword(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -24526,44 +24798,45 @@ TPM_RC Tpm::ParseResponse_PolicyPassword(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyPasswordErrorCallback(const Tpm::PolicyPasswordResponse& callback,
+void PolicyPasswordErrorCallback(Tpm::PolicyPasswordResponse callback,
                                  TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PolicyPasswordResponseParser(const Tpm::PolicyPasswordResponse& callback,
+void PolicyPasswordResponseParser(Tpm::PolicyPasswordResponse callback,
                                   AuthorizationDelegate* authorization_delegate,
                                   const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyPasswordErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyPassword(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyPasswordErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyPassword(const TPMI_SH_POLICY& policy_session,
                          const std::string& policy_session_name,
                          AuthorizationDelegate* authorization_delegate,
-                         const PolicyPasswordResponse& callback) {
+                         PolicyPasswordResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyPasswordErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyPasswordResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyPassword(
       policy_session, policy_session_name, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyPasswordErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyPasswordResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyPasswordSync(const TPMI_SH_POLICY& policy_session,
@@ -24612,7 +24885,7 @@ TPM_RC Tpm::SerializeCommand_PolicyGetDigest(
   handle_section_bytes += policy_session_bytes;
   command_size += policy_session_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -24712,75 +24985,85 @@ TPM_RC Tpm::ParseResponse_PolicyGetDigest(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string policy_digest_bytes;
   rc = Parse_TPM2B_DIGEST(&buffer, policy_digest, &policy_digest_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = policy_digest_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    policy_digest_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_DIGEST(&policy_digest_bytes, policy_digest, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void PolicyGetDigestErrorCallback(const Tpm::PolicyGetDigestResponse& callback,
+void PolicyGetDigestErrorCallback(Tpm::PolicyGetDigestResponse callback,
                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_DIGEST());
+  std::move(callback).Run(response_code, TPM2B_DIGEST());
 }
 
 void PolicyGetDigestResponseParser(
-    const Tpm::PolicyGetDigestResponse& callback,
+    Tpm::PolicyGetDigestResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyGetDigestErrorCallback, callback);
   TPM2B_DIGEST policy_digest;
   TPM_RC rc = Tpm::ParseResponse_PolicyGetDigest(response, &policy_digest,
                                                  authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyGetDigestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, policy_digest);
+  std::move(callback).Run(rc, policy_digest);
 }
 
 void Tpm::PolicyGetDigest(const TPMI_SH_POLICY& policy_session,
                           const std::string& policy_session_name,
                           AuthorizationDelegate* authorization_delegate,
-                          const PolicyGetDigestResponse& callback) {
+                          PolicyGetDigestResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyGetDigestErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyGetDigestResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyGetDigest(
       policy_session, policy_session_name, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyGetDigestErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyGetDigestResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyGetDigestSync(const TPMI_SH_POLICY& policy_session,
@@ -24840,7 +25123,7 @@ TPM_RC Tpm::SerializeCommand_PolicyNvWritten(
   parameter_section_bytes += written_set_bytes;
   command_size += written_set_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -24939,9 +25222,10 @@ TPM_RC Tpm::ParseResponse_PolicyNvWritten(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -24950,47 +25234,48 @@ TPM_RC Tpm::ParseResponse_PolicyNvWritten(
   return TPM_RC_SUCCESS;
 }
 
-void PolicyNvWrittenErrorCallback(const Tpm::PolicyNvWrittenResponse& callback,
+void PolicyNvWrittenErrorCallback(Tpm::PolicyNvWrittenResponse callback,
                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void PolicyNvWrittenResponseParser(
-    const Tpm::PolicyNvWrittenResponse& callback,
+    Tpm::PolicyNvWrittenResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyNvWrittenErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_PolicyNvWritten(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyNvWrittenErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PolicyNvWritten(const TPMI_SH_POLICY& policy_session,
                           const std::string& policy_session_name,
                           const TPMI_YES_NO& written_set,
                           AuthorizationDelegate* authorization_delegate,
-                          const PolicyNvWrittenResponse& callback) {
+                          PolicyNvWrittenResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PolicyNvWrittenErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      PolicyNvWrittenResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PolicyNvWritten(
       policy_session, policy_session_name, written_set, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PolicyNvWrittenErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(PolicyNvWrittenResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PolicyNvWrittenSync(const TPMI_SH_POLICY& policy_session,
@@ -25085,7 +25370,7 @@ TPM_RC Tpm::SerializeCommand_CreatePrimary(
   parameter_section_bytes += creation_pcr_bytes;
   command_size += creation_pcr_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -25195,13 +25480,35 @@ TPM_RC Tpm::ParseResponse_CreatePrimary(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string out_public_bytes;
   rc = Parse_TPM2B_PUBLIC(&buffer, out_public, &out_public_bytes);
@@ -25228,36 +25535,21 @@ TPM_RC Tpm::ParseResponse_CreatePrimary(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = out_public_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    out_public_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_PUBLIC(&out_public_bytes, out_public, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void CreatePrimaryErrorCallback(const Tpm::CreatePrimaryResponse& callback,
+void CreatePrimaryErrorCallback(Tpm::CreatePrimaryResponse callback,
                                 TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM_HANDLE(), TPM2B_PUBLIC(),
-               TPM2B_CREATION_DATA(), TPM2B_DIGEST(), TPMT_TK_CREATION(),
-               TPM2B_NAME());
+  std::move(callback).Run(response_code, TPM_HANDLE(), TPM2B_PUBLIC(),
+                          TPM2B_CREATION_DATA(), TPM2B_DIGEST(),
+                          TPMT_TK_CREATION(), TPM2B_NAME());
 }
 
-void CreatePrimaryResponseParser(const Tpm::CreatePrimaryResponse& callback,
+void CreatePrimaryResponseParser(Tpm::CreatePrimaryResponse callback,
                                  AuthorizationDelegate* authorization_delegate,
                                  const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CreatePrimaryErrorCallback, callback);
   TPM_HANDLE object_handle;
   TPM2B_PUBLIC out_public;
   TPM2B_CREATION_DATA creation_data;
@@ -25268,11 +25560,13 @@ void CreatePrimaryResponseParser(const Tpm::CreatePrimaryResponse& callback,
       response, &object_handle, &out_public, &creation_data, &creation_hash,
       &creation_ticket, &name, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CreatePrimaryErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, object_handle, out_public, creation_data, creation_hash,
-               creation_ticket, name);
+  std::move(callback).Run(rc, object_handle, out_public, creation_data,
+                          creation_hash, creation_ticket, name);
 }
 
 void Tpm::CreatePrimary(const TPMI_RH_HIERARCHY& primary_handle,
@@ -25282,21 +25576,21 @@ void Tpm::CreatePrimary(const TPMI_RH_HIERARCHY& primary_handle,
                         const TPM2B_DATA& outside_info,
                         const TPML_PCR_SELECTION& creation_pcr,
                         AuthorizationDelegate* authorization_delegate,
-                        const CreatePrimaryResponse& callback) {
+                        CreatePrimaryResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(CreatePrimaryErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(CreatePrimaryResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_CreatePrimary(
       primary_handle, primary_handle_name, in_sensitive, in_public,
       outside_info, creation_pcr, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(CreatePrimaryErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      CreatePrimaryResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::CreatePrimarySync(const TPMI_RH_HIERARCHY& primary_handle,
@@ -25376,7 +25670,7 @@ TPM_RC Tpm::SerializeCommand_HierarchyControl(
   parameter_section_bytes += state_bytes;
   command_size += state_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -25475,9 +25769,10 @@ TPM_RC Tpm::ParseResponse_HierarchyControl(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -25486,26 +25781,26 @@ TPM_RC Tpm::ParseResponse_HierarchyControl(
   return TPM_RC_SUCCESS;
 }
 
-void HierarchyControlErrorCallback(
-    const Tpm::HierarchyControlResponse& callback, TPM_RC response_code) {
+void HierarchyControlErrorCallback(Tpm::HierarchyControlResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void HierarchyControlResponseParser(
-    const Tpm::HierarchyControlResponse& callback,
+    Tpm::HierarchyControlResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HierarchyControlErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_HierarchyControl(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HierarchyControlErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::HierarchyControl(const TPMI_RH_HIERARCHY& auth_handle,
@@ -25513,21 +25808,22 @@ void Tpm::HierarchyControl(const TPMI_RH_HIERARCHY& auth_handle,
                            const TPMI_RH_ENABLES& enable,
                            const TPMI_YES_NO& state,
                            AuthorizationDelegate* authorization_delegate,
-                           const HierarchyControlResponse& callback) {
+                           HierarchyControlResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HierarchyControlErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      HierarchyControlResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_HierarchyControl(auth_handle, auth_handle_name,
                                                 enable, state, &command,
                                                 authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HierarchyControlErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(HierarchyControlResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::HierarchyControlSync(
@@ -25606,7 +25902,7 @@ TPM_RC Tpm::SerializeCommand_SetPrimaryPolicy(
   parameter_section_bytes += hash_alg_bytes;
   command_size += hash_alg_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -25705,9 +26001,10 @@ TPM_RC Tpm::ParseResponse_SetPrimaryPolicy(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -25716,26 +26013,26 @@ TPM_RC Tpm::ParseResponse_SetPrimaryPolicy(
   return TPM_RC_SUCCESS;
 }
 
-void SetPrimaryPolicyErrorCallback(
-    const Tpm::SetPrimaryPolicyResponse& callback, TPM_RC response_code) {
+void SetPrimaryPolicyErrorCallback(Tpm::SetPrimaryPolicyResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void SetPrimaryPolicyResponseParser(
-    const Tpm::SetPrimaryPolicyResponse& callback,
+    Tpm::SetPrimaryPolicyResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SetPrimaryPolicyErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_SetPrimaryPolicy(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SetPrimaryPolicyErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::SetPrimaryPolicy(const TPMI_RH_HIERARCHY& auth_handle,
@@ -25743,21 +26040,22 @@ void Tpm::SetPrimaryPolicy(const TPMI_RH_HIERARCHY& auth_handle,
                            const TPM2B_DIGEST& auth_policy,
                            const TPMI_ALG_HASH& hash_alg,
                            AuthorizationDelegate* authorization_delegate,
-                           const SetPrimaryPolicyResponse& callback) {
+                           SetPrimaryPolicyResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SetPrimaryPolicyErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      SetPrimaryPolicyResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_SetPrimaryPolicy(auth_handle, auth_handle_name,
                                                 auth_policy, hash_alg, &command,
                                                 authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SetPrimaryPolicyErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(SetPrimaryPolicyResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::SetPrimaryPolicySync(
@@ -25810,7 +26108,7 @@ TPM_RC Tpm::SerializeCommand_ChangePPS(
   handle_section_bytes += auth_handle_bytes;
   command_size += auth_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -25909,9 +26207,10 @@ TPM_RC Tpm::ParseResponse_ChangePPS(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -25920,43 +26219,43 @@ TPM_RC Tpm::ParseResponse_ChangePPS(
   return TPM_RC_SUCCESS;
 }
 
-void ChangePPSErrorCallback(const Tpm::ChangePPSResponse& callback,
+void ChangePPSErrorCallback(Tpm::ChangePPSResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void ChangePPSResponseParser(const Tpm::ChangePPSResponse& callback,
+void ChangePPSResponseParser(Tpm::ChangePPSResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ChangePPSErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_ChangePPS(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ChangePPSErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::ChangePPS(const TPMI_RH_PLATFORM& auth_handle,
                     const std::string& auth_handle_name,
                     AuthorizationDelegate* authorization_delegate,
-                    const ChangePPSResponse& callback) {
+                    ChangePPSResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ChangePPSErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ChangePPSResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ChangePPS(auth_handle, auth_handle_name,
                                          &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ChangePPSErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ChangePPSResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ChangePPSSync(const TPMI_RH_PLATFORM& auth_handle,
@@ -26005,7 +26304,7 @@ TPM_RC Tpm::SerializeCommand_ChangeEPS(
   handle_section_bytes += auth_handle_bytes;
   command_size += auth_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -26104,9 +26403,10 @@ TPM_RC Tpm::ParseResponse_ChangeEPS(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -26115,43 +26415,43 @@ TPM_RC Tpm::ParseResponse_ChangeEPS(
   return TPM_RC_SUCCESS;
 }
 
-void ChangeEPSErrorCallback(const Tpm::ChangeEPSResponse& callback,
+void ChangeEPSErrorCallback(Tpm::ChangeEPSResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void ChangeEPSResponseParser(const Tpm::ChangeEPSResponse& callback,
+void ChangeEPSResponseParser(Tpm::ChangeEPSResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ChangeEPSErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_ChangeEPS(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ChangeEPSErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::ChangeEPS(const TPMI_RH_PLATFORM& auth_handle,
                     const std::string& auth_handle_name,
                     AuthorizationDelegate* authorization_delegate,
-                    const ChangeEPSResponse& callback) {
+                    ChangeEPSResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ChangeEPSErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ChangeEPSResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ChangeEPS(auth_handle, auth_handle_name,
                                          &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ChangeEPSErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ChangeEPSResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ChangeEPSSync(const TPMI_RH_PLATFORM& auth_handle,
@@ -26200,7 +26500,7 @@ TPM_RC Tpm::SerializeCommand_Clear(
   handle_section_bytes += auth_handle_bytes;
   command_size += auth_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -26298,9 +26598,10 @@ TPM_RC Tpm::ParseResponse_Clear(const std::string& response,
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -26309,43 +26610,42 @@ TPM_RC Tpm::ParseResponse_Clear(const std::string& response,
   return TPM_RC_SUCCESS;
 }
 
-void ClearErrorCallback(const Tpm::ClearResponse& callback,
-                        TPM_RC response_code) {
+void ClearErrorCallback(Tpm::ClearResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void ClearResponseParser(const Tpm::ClearResponse& callback,
+void ClearResponseParser(Tpm::ClearResponse callback,
                          AuthorizationDelegate* authorization_delegate,
                          const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ClearErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_Clear(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ClearErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::Clear(const TPMI_RH_CLEAR& auth_handle,
                 const std::string& auth_handle_name,
                 AuthorizationDelegate* authorization_delegate,
-                const ClearResponse& callback) {
+                ClearResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ClearErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ClearResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_Clear(auth_handle, auth_handle_name, &command,
                                      authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ClearErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ClearResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ClearSync(const TPMI_RH_CLEAR& auth_handle,
@@ -26403,7 +26703,7 @@ TPM_RC Tpm::SerializeCommand_ClearControl(
   parameter_section_bytes += disable_bytes;
   command_size += disable_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -26502,9 +26802,10 @@ TPM_RC Tpm::ParseResponse_ClearControl(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -26513,44 +26814,44 @@ TPM_RC Tpm::ParseResponse_ClearControl(
   return TPM_RC_SUCCESS;
 }
 
-void ClearControlErrorCallback(const Tpm::ClearControlResponse& callback,
+void ClearControlErrorCallback(Tpm::ClearControlResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void ClearControlResponseParser(const Tpm::ClearControlResponse& callback,
+void ClearControlResponseParser(Tpm::ClearControlResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ClearControlErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_ClearControl(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ClearControlErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::ClearControl(const TPMI_RH_CLEAR& auth,
                        const std::string& auth_name,
                        const TPMI_YES_NO& disable,
                        AuthorizationDelegate* authorization_delegate,
-                       const ClearControlResponse& callback) {
+                       ClearControlResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ClearControlErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ClearControlResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ClearControl(auth, auth_name, disable, &command,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ClearControlErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ClearControlResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ClearControlSync(const TPMI_RH_CLEAR& auth,
@@ -26617,7 +26918,7 @@ TPM_RC Tpm::SerializeCommand_HierarchyChangeAuth(
   parameter_section_bytes += new_auth_bytes;
   command_size += new_auth_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -26716,9 +27017,10 @@ TPM_RC Tpm::ParseResponse_HierarchyChangeAuth(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -26727,47 +27029,48 @@ TPM_RC Tpm::ParseResponse_HierarchyChangeAuth(
   return TPM_RC_SUCCESS;
 }
 
-void HierarchyChangeAuthErrorCallback(
-    const Tpm::HierarchyChangeAuthResponse& callback, TPM_RC response_code) {
+void HierarchyChangeAuthErrorCallback(Tpm::HierarchyChangeAuthResponse callback,
+                                      TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void HierarchyChangeAuthResponseParser(
-    const Tpm::HierarchyChangeAuthResponse& callback,
+    Tpm::HierarchyChangeAuthResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HierarchyChangeAuthErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_HierarchyChangeAuth(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HierarchyChangeAuthErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::HierarchyChangeAuth(const TPMI_RH_HIERARCHY_AUTH& auth_handle,
                               const std::string& auth_handle_name,
                               const TPM2B_AUTH& new_auth,
                               AuthorizationDelegate* authorization_delegate,
-                              const HierarchyChangeAuthResponse& callback) {
+                              HierarchyChangeAuthResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(HierarchyChangeAuthErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      HierarchyChangeAuthResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_HierarchyChangeAuth(
       auth_handle, auth_handle_name, new_auth, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(HierarchyChangeAuthErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(HierarchyChangeAuthResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::HierarchyChangeAuthSync(
@@ -26819,7 +27122,7 @@ TPM_RC Tpm::SerializeCommand_DictionaryAttackLockReset(
   handle_section_bytes += lock_handle_bytes;
   command_size += lock_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -26918,9 +27221,10 @@ TPM_RC Tpm::ParseResponse_DictionaryAttackLockReset(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -26930,47 +27234,46 @@ TPM_RC Tpm::ParseResponse_DictionaryAttackLockReset(
 }
 
 void DictionaryAttackLockResetErrorCallback(
-    const Tpm::DictionaryAttackLockResetResponse& callback,
-    TPM_RC response_code) {
+    Tpm::DictionaryAttackLockResetResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void DictionaryAttackLockResetResponseParser(
-    const Tpm::DictionaryAttackLockResetResponse& callback,
+    Tpm::DictionaryAttackLockResetResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(DictionaryAttackLockResetErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_DictionaryAttackLockReset(
       response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        DictionaryAttackLockResetErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::DictionaryAttackLockReset(
     const TPMI_RH_LOCKOUT& lock_handle,
     const std::string& lock_handle_name,
     AuthorizationDelegate* authorization_delegate,
-    const DictionaryAttackLockResetResponse& callback) {
+    DictionaryAttackLockResetResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(DictionaryAttackLockResetErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(DictionaryAttackLockResetResponseParser, callback,
-                 authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_DictionaryAttackLockReset(
       lock_handle, lock_handle_name, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        DictionaryAttackLockResetErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(DictionaryAttackLockResetResponseParser,
+                     std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::DictionaryAttackLockResetSync(
@@ -27048,7 +27351,7 @@ TPM_RC Tpm::SerializeCommand_DictionaryAttackParameters(
   parameter_section_bytes += lockout_recovery_bytes;
   command_size += lockout_recovery_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -27147,9 +27450,10 @@ TPM_RC Tpm::ParseResponse_DictionaryAttackParameters(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -27159,26 +27463,25 @@ TPM_RC Tpm::ParseResponse_DictionaryAttackParameters(
 }
 
 void DictionaryAttackParametersErrorCallback(
-    const Tpm::DictionaryAttackParametersResponse& callback,
-    TPM_RC response_code) {
+    Tpm::DictionaryAttackParametersResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void DictionaryAttackParametersResponseParser(
-    const Tpm::DictionaryAttackParametersResponse& callback,
+    Tpm::DictionaryAttackParametersResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(DictionaryAttackParametersErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_DictionaryAttackParameters(
       response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        DictionaryAttackParametersErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::DictionaryAttackParameters(
@@ -27188,22 +27491,22 @@ void Tpm::DictionaryAttackParameters(
     const UINT32& new_recovery_time,
     const UINT32& lockout_recovery,
     AuthorizationDelegate* authorization_delegate,
-    const DictionaryAttackParametersResponse& callback) {
+    DictionaryAttackParametersResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(DictionaryAttackParametersErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(DictionaryAttackParametersResponseParser, callback,
-                 authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_DictionaryAttackParameters(
       lock_handle, lock_handle_name, new_max_tries, new_recovery_time,
       lockout_recovery, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        DictionaryAttackParametersErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(DictionaryAttackParametersResponseParser,
+                     std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::DictionaryAttackParametersSync(
@@ -27276,7 +27579,7 @@ TPM_RC Tpm::SerializeCommand_PP_Commands(
   parameter_section_bytes += clear_list_bytes;
   command_size += clear_list_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -27375,9 +27678,10 @@ TPM_RC Tpm::ParseResponse_PP_Commands(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -27386,24 +27690,24 @@ TPM_RC Tpm::ParseResponse_PP_Commands(
   return TPM_RC_SUCCESS;
 }
 
-void PP_CommandsErrorCallback(const Tpm::PP_CommandsResponse& callback,
+void PP_CommandsErrorCallback(Tpm::PP_CommandsResponse callback,
                               TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void PP_CommandsResponseParser(const Tpm::PP_CommandsResponse& callback,
+void PP_CommandsResponseParser(Tpm::PP_CommandsResponse callback,
                                AuthorizationDelegate* authorization_delegate,
                                const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PP_CommandsErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_PP_Commands(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PP_CommandsErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::PP_Commands(const TPMI_RH_PLATFORM& auth,
@@ -27411,20 +27715,20 @@ void Tpm::PP_Commands(const TPMI_RH_PLATFORM& auth,
                       const TPML_CC& set_list,
                       const TPML_CC& clear_list,
                       AuthorizationDelegate* authorization_delegate,
-                      const PP_CommandsResponse& callback) {
+                      PP_CommandsResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(PP_CommandsErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(PP_CommandsResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_PP_Commands(
       auth, auth_name, set_list, clear_list, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(PP_CommandsErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      PP_CommandsResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::PP_CommandsSync(const TPMI_RH_PLATFORM& auth,
@@ -27484,7 +27788,7 @@ TPM_RC Tpm::SerializeCommand_SetAlgorithmSet(
   parameter_section_bytes += algorithm_set_bytes;
   command_size += algorithm_set_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -27583,9 +27887,10 @@ TPM_RC Tpm::ParseResponse_SetAlgorithmSet(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -27594,47 +27899,48 @@ TPM_RC Tpm::ParseResponse_SetAlgorithmSet(
   return TPM_RC_SUCCESS;
 }
 
-void SetAlgorithmSetErrorCallback(const Tpm::SetAlgorithmSetResponse& callback,
+void SetAlgorithmSetErrorCallback(Tpm::SetAlgorithmSetResponse callback,
                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void SetAlgorithmSetResponseParser(
-    const Tpm::SetAlgorithmSetResponse& callback,
+    Tpm::SetAlgorithmSetResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SetAlgorithmSetErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_SetAlgorithmSet(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SetAlgorithmSetErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::SetAlgorithmSet(const TPMI_RH_PLATFORM& auth_handle,
                           const std::string& auth_handle_name,
                           const UINT32& algorithm_set,
                           AuthorizationDelegate* authorization_delegate,
-                          const SetAlgorithmSetResponse& callback) {
+                          SetAlgorithmSetResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(SetAlgorithmSetErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      SetAlgorithmSetResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_SetAlgorithmSet(auth_handle, auth_handle_name,
                                                algorithm_set, &command,
                                                authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(SetAlgorithmSetErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(SetAlgorithmSetResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::SetAlgorithmSetSync(const TPMI_RH_PLATFORM& auth_handle,
@@ -27722,7 +28028,7 @@ TPM_RC Tpm::SerializeCommand_FieldUpgradeStart(
   parameter_section_bytes += manifest_signature_bytes;
   command_size += manifest_signature_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -27821,9 +28127,10 @@ TPM_RC Tpm::ParseResponse_FieldUpgradeStart(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -27832,26 +28139,26 @@ TPM_RC Tpm::ParseResponse_FieldUpgradeStart(
   return TPM_RC_SUCCESS;
 }
 
-void FieldUpgradeStartErrorCallback(
-    const Tpm::FieldUpgradeStartResponse& callback, TPM_RC response_code) {
+void FieldUpgradeStartErrorCallback(Tpm::FieldUpgradeStartResponse callback,
+                                    TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void FieldUpgradeStartResponseParser(
-    const Tpm::FieldUpgradeStartResponse& callback,
+    Tpm::FieldUpgradeStartResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(FieldUpgradeStartErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_FieldUpgradeStart(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(FieldUpgradeStartErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::FieldUpgradeStart(const TPMI_RH_PLATFORM& authorization,
@@ -27861,21 +28168,22 @@ void Tpm::FieldUpgradeStart(const TPMI_RH_PLATFORM& authorization,
                             const TPM2B_DIGEST& fu_digest,
                             const TPMT_SIGNATURE& manifest_signature,
                             AuthorizationDelegate* authorization_delegate,
-                            const FieldUpgradeStartResponse& callback) {
+                            FieldUpgradeStartResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(FieldUpgradeStartErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      FieldUpgradeStartResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_FieldUpgradeStart(
       authorization, authorization_name, key_handle, key_handle_name, fu_digest,
       manifest_signature, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(FieldUpgradeStartErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(FieldUpgradeStartResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::FieldUpgradeStartSync(
@@ -27937,7 +28245,7 @@ TPM_RC Tpm::SerializeCommand_FieldUpgradeData(
   parameter_section_bytes += fu_data_bytes;
   command_size += fu_data_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -28038,9 +28346,10 @@ TPM_RC Tpm::ParseResponse_FieldUpgradeData(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -28059,46 +28368,47 @@ TPM_RC Tpm::ParseResponse_FieldUpgradeData(
   return TPM_RC_SUCCESS;
 }
 
-void FieldUpgradeDataErrorCallback(
-    const Tpm::FieldUpgradeDataResponse& callback, TPM_RC response_code) {
+void FieldUpgradeDataErrorCallback(Tpm::FieldUpgradeDataResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMT_HA(), TPMT_HA());
+  std::move(callback).Run(response_code, TPMT_HA(), TPMT_HA());
 }
 
 void FieldUpgradeDataResponseParser(
-    const Tpm::FieldUpgradeDataResponse& callback,
+    Tpm::FieldUpgradeDataResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(FieldUpgradeDataErrorCallback, callback);
   TPMT_HA next_digest;
   TPMT_HA first_digest;
   TPM_RC rc = Tpm::ParseResponse_FieldUpgradeData(
       response, &next_digest, &first_digest, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(FieldUpgradeDataErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, next_digest, first_digest);
+  std::move(callback).Run(rc, next_digest, first_digest);
 }
 
 void Tpm::FieldUpgradeData(const TPM2B_MAX_BUFFER& fu_data,
                            AuthorizationDelegate* authorization_delegate,
-                           const FieldUpgradeDataResponse& callback) {
+                           FieldUpgradeDataResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(FieldUpgradeDataErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      FieldUpgradeDataResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_FieldUpgradeData(fu_data, &command,
                                                 authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(FieldUpgradeDataErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(FieldUpgradeDataResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::FieldUpgradeDataSync(
@@ -28149,7 +28459,7 @@ TPM_RC Tpm::SerializeCommand_FirmwareRead(
   parameter_section_bytes += sequence_number_bytes;
   command_size += sequence_number_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -28249,73 +28559,82 @@ TPM_RC Tpm::ParseResponse_FirmwareRead(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string fu_data_bytes;
   rc = Parse_TPM2B_MAX_BUFFER(&buffer, fu_data, &fu_data_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = fu_data_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    fu_data_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_MAX_BUFFER(&fu_data_bytes, fu_data, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void FirmwareReadErrorCallback(const Tpm::FirmwareReadResponse& callback,
+void FirmwareReadErrorCallback(Tpm::FirmwareReadResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_MAX_BUFFER());
+  std::move(callback).Run(response_code, TPM2B_MAX_BUFFER());
 }
 
-void FirmwareReadResponseParser(const Tpm::FirmwareReadResponse& callback,
+void FirmwareReadResponseParser(Tpm::FirmwareReadResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(FirmwareReadErrorCallback, callback);
   TPM2B_MAX_BUFFER fu_data;
   TPM_RC rc = Tpm::ParseResponse_FirmwareRead(response, &fu_data,
                                               authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(FirmwareReadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, fu_data);
+  std::move(callback).Run(rc, fu_data);
 }
 
 void Tpm::FirmwareRead(const UINT32& sequence_number,
                        AuthorizationDelegate* authorization_delegate,
-                       const FirmwareReadResponse& callback) {
+                       FirmwareReadResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(FirmwareReadErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(FirmwareReadResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_FirmwareRead(sequence_number, &command,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(FirmwareReadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      FirmwareReadResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::FirmwareReadSync(const UINT32& sequence_number,
@@ -28364,7 +28683,7 @@ TPM_RC Tpm::SerializeCommand_ContextSave(
   handle_section_bytes += save_handle_bytes;
   command_size += save_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -28464,9 +28783,10 @@ TPM_RC Tpm::ParseResponse_ContextSave(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -28480,45 +28800,45 @@ TPM_RC Tpm::ParseResponse_ContextSave(
   return TPM_RC_SUCCESS;
 }
 
-void ContextSaveErrorCallback(const Tpm::ContextSaveResponse& callback,
+void ContextSaveErrorCallback(Tpm::ContextSaveResponse callback,
                               TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMS_CONTEXT());
+  std::move(callback).Run(response_code, TPMS_CONTEXT());
 }
 
-void ContextSaveResponseParser(const Tpm::ContextSaveResponse& callback,
+void ContextSaveResponseParser(Tpm::ContextSaveResponse callback,
                                AuthorizationDelegate* authorization_delegate,
                                const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ContextSaveErrorCallback, callback);
   TPMS_CONTEXT context;
   TPM_RC rc = Tpm::ParseResponse_ContextSave(response, &context,
                                              authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ContextSaveErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, context);
+  std::move(callback).Run(rc, context);
 }
 
 void Tpm::ContextSave(const TPMI_DH_CONTEXT& save_handle,
                       const std::string& save_handle_name,
                       AuthorizationDelegate* authorization_delegate,
-                      const ContextSaveResponse& callback) {
+                      ContextSaveResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ContextSaveErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ContextSaveResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ContextSave(save_handle, save_handle_name,
                                            &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ContextSaveErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ContextSaveResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ContextSaveSync(const TPMI_DH_CONTEXT& save_handle,
@@ -28567,7 +28887,7 @@ TPM_RC Tpm::SerializeCommand_ContextLoad(
   parameter_section_bytes += context_bytes;
   command_size += context_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -28672,9 +28992,10 @@ TPM_RC Tpm::ParseResponse_ContextLoad(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -28683,44 +29004,44 @@ TPM_RC Tpm::ParseResponse_ContextLoad(
   return TPM_RC_SUCCESS;
 }
 
-void ContextLoadErrorCallback(const Tpm::ContextLoadResponse& callback,
+void ContextLoadErrorCallback(Tpm::ContextLoadResponse callback,
                               TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMI_DH_CONTEXT());
+  std::move(callback).Run(response_code, TPMI_DH_CONTEXT());
 }
 
-void ContextLoadResponseParser(const Tpm::ContextLoadResponse& callback,
+void ContextLoadResponseParser(Tpm::ContextLoadResponse callback,
                                AuthorizationDelegate* authorization_delegate,
                                const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ContextLoadErrorCallback, callback);
   TPMI_DH_CONTEXT loaded_handle;
   TPM_RC rc = Tpm::ParseResponse_ContextLoad(response, &loaded_handle,
                                              authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ContextLoadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, loaded_handle);
+  std::move(callback).Run(rc, loaded_handle);
 }
 
 void Tpm::ContextLoad(const TPMS_CONTEXT& context,
                       AuthorizationDelegate* authorization_delegate,
-                      const ContextLoadResponse& callback) {
+                      ContextLoadResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ContextLoadErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ContextLoadResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_ContextLoad(context, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ContextLoadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ContextLoadResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ContextLoadSync(const TPMS_CONTEXT& context,
@@ -28769,7 +29090,7 @@ TPM_RC Tpm::SerializeCommand_FlushContext(
   parameter_section_bytes += flush_handle_bytes;
   command_size += flush_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -28868,9 +29189,10 @@ TPM_RC Tpm::ParseResponse_FlushContext(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -28879,42 +29201,42 @@ TPM_RC Tpm::ParseResponse_FlushContext(
   return TPM_RC_SUCCESS;
 }
 
-void FlushContextErrorCallback(const Tpm::FlushContextResponse& callback,
+void FlushContextErrorCallback(Tpm::FlushContextResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void FlushContextResponseParser(const Tpm::FlushContextResponse& callback,
+void FlushContextResponseParser(Tpm::FlushContextResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(FlushContextErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_FlushContext(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(FlushContextErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::FlushContext(const TPMI_DH_CONTEXT& flush_handle,
                        AuthorizationDelegate* authorization_delegate,
-                       const FlushContextResponse& callback) {
+                       FlushContextResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(FlushContextErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(FlushContextResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_FlushContext(flush_handle, &command,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(FlushContextErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      FlushContextResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::FlushContextSync(const TPMI_DH_CONTEXT& flush_handle,
@@ -28982,7 +29304,7 @@ TPM_RC Tpm::SerializeCommand_EvictControl(
   parameter_section_bytes += persistent_handle_bytes;
   command_size += persistent_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -29081,9 +29403,10 @@ TPM_RC Tpm::ParseResponse_EvictControl(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -29092,24 +29415,24 @@ TPM_RC Tpm::ParseResponse_EvictControl(
   return TPM_RC_SUCCESS;
 }
 
-void EvictControlErrorCallback(const Tpm::EvictControlResponse& callback,
+void EvictControlErrorCallback(Tpm::EvictControlResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void EvictControlResponseParser(const Tpm::EvictControlResponse& callback,
+void EvictControlResponseParser(Tpm::EvictControlResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(EvictControlErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_EvictControl(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(EvictControlErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::EvictControl(const TPMI_RH_PROVISION& auth,
@@ -29118,21 +29441,21 @@ void Tpm::EvictControl(const TPMI_RH_PROVISION& auth,
                        const std::string& object_handle_name,
                        const TPMI_DH_PERSISTENT& persistent_handle,
                        AuthorizationDelegate* authorization_delegate,
-                       const EvictControlResponse& callback) {
+                       EvictControlResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(EvictControlErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(EvictControlResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_EvictControl(
       auth, auth_name, object_handle, object_handle_name, persistent_handle,
       &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(EvictControlErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      EvictControlResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::EvictControlSync(const TPMI_RH_PROVISION& auth,
@@ -29175,7 +29498,7 @@ TPM_RC Tpm::SerializeCommand_ReadClock(
       crypto::SecureHash::Create(crypto::SecureHash::SHA256));
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -29275,9 +29598,10 @@ TPM_RC Tpm::ParseResponse_ReadClock(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -29291,42 +29615,42 @@ TPM_RC Tpm::ParseResponse_ReadClock(
   return TPM_RC_SUCCESS;
 }
 
-void ReadClockErrorCallback(const Tpm::ReadClockResponse& callback,
+void ReadClockErrorCallback(Tpm::ReadClockResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMS_TIME_INFO());
+  std::move(callback).Run(response_code, TPMS_TIME_INFO());
 }
 
-void ReadClockResponseParser(const Tpm::ReadClockResponse& callback,
+void ReadClockResponseParser(Tpm::ReadClockResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ReadClockErrorCallback, callback);
   TPMS_TIME_INFO current_time;
   TPM_RC rc = Tpm::ParseResponse_ReadClock(response, &current_time,
                                            authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ReadClockErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, current_time);
+  std::move(callback).Run(rc, current_time);
 }
 
 void Tpm::ReadClock(AuthorizationDelegate* authorization_delegate,
-                    const ReadClockResponse& callback) {
+                    ReadClockResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ReadClockErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ReadClockResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ReadClock(&command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ReadClockErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ReadClockResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ReadClockSync(TPMS_TIME_INFO* current_time,
@@ -29382,7 +29706,7 @@ TPM_RC Tpm::SerializeCommand_ClockSet(
   parameter_section_bytes += new_time_bytes;
   command_size += new_time_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -29481,9 +29805,10 @@ TPM_RC Tpm::ParseResponse_ClockSet(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -29492,44 +29817,44 @@ TPM_RC Tpm::ParseResponse_ClockSet(
   return TPM_RC_SUCCESS;
 }
 
-void ClockSetErrorCallback(const Tpm::ClockSetResponse& callback,
+void ClockSetErrorCallback(Tpm::ClockSetResponse callback,
                            TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void ClockSetResponseParser(const Tpm::ClockSetResponse& callback,
+void ClockSetResponseParser(Tpm::ClockSetResponse callback,
                             AuthorizationDelegate* authorization_delegate,
                             const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ClockSetErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_ClockSet(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ClockSetErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::ClockSet(const TPMI_RH_PROVISION& auth,
                    const std::string& auth_name,
                    const UINT64& new_time,
                    AuthorizationDelegate* authorization_delegate,
-                   const ClockSetResponse& callback) {
+                   ClockSetResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ClockSetErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(ClockSetResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ClockSet(auth, auth_name, new_time, &command,
                                         authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ClockSetErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      ClockSetResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ClockSetSync(const TPMI_RH_PROVISION& auth,
@@ -29588,7 +29913,7 @@ TPM_RC Tpm::SerializeCommand_ClockRateAdjust(
   parameter_section_bytes += rate_adjust_bytes;
   command_size += rate_adjust_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -29687,9 +30012,10 @@ TPM_RC Tpm::ParseResponse_ClockRateAdjust(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -29698,46 +30024,47 @@ TPM_RC Tpm::ParseResponse_ClockRateAdjust(
   return TPM_RC_SUCCESS;
 }
 
-void ClockRateAdjustErrorCallback(const Tpm::ClockRateAdjustResponse& callback,
+void ClockRateAdjustErrorCallback(Tpm::ClockRateAdjustResponse callback,
                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void ClockRateAdjustResponseParser(
-    const Tpm::ClockRateAdjustResponse& callback,
+    Tpm::ClockRateAdjustResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ClockRateAdjustErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_ClockRateAdjust(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ClockRateAdjustErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::ClockRateAdjust(const TPMI_RH_PROVISION& auth,
                           const std::string& auth_name,
                           const TPM_CLOCK_ADJUST& rate_adjust,
                           AuthorizationDelegate* authorization_delegate,
-                          const ClockRateAdjustResponse& callback) {
+                          ClockRateAdjustResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(ClockRateAdjustErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      ClockRateAdjustResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_ClockRateAdjust(
       auth, auth_name, rate_adjust, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(ClockRateAdjustErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(ClockRateAdjustResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::ClockRateAdjustSync(const TPMI_RH_PROVISION& auth,
@@ -29804,7 +30131,7 @@ TPM_RC Tpm::SerializeCommand_GetCapability(
   parameter_section_bytes += property_count_bytes;
   command_size += property_count_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -29905,9 +30232,10 @@ TPM_RC Tpm::ParseResponse_GetCapability(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -29927,47 +30255,47 @@ TPM_RC Tpm::ParseResponse_GetCapability(
   return TPM_RC_SUCCESS;
 }
 
-void GetCapabilityErrorCallback(const Tpm::GetCapabilityResponse& callback,
+void GetCapabilityErrorCallback(Tpm::GetCapabilityResponse callback,
                                 TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPMI_YES_NO(), TPMS_CAPABILITY_DATA());
+  std::move(callback).Run(response_code, TPMI_YES_NO(), TPMS_CAPABILITY_DATA());
 }
 
-void GetCapabilityResponseParser(const Tpm::GetCapabilityResponse& callback,
+void GetCapabilityResponseParser(Tpm::GetCapabilityResponse callback,
                                  AuthorizationDelegate* authorization_delegate,
                                  const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetCapabilityErrorCallback, callback);
   TPMI_YES_NO more_data;
   TPMS_CAPABILITY_DATA capability_data;
   TPM_RC rc = Tpm::ParseResponse_GetCapability(
       response, &more_data, &capability_data, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetCapabilityErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, more_data, capability_data);
+  std::move(callback).Run(rc, more_data, capability_data);
 }
 
 void Tpm::GetCapability(const TPM_CAP& capability,
                         const UINT32& property,
                         const UINT32& property_count,
                         AuthorizationDelegate* authorization_delegate,
-                        const GetCapabilityResponse& callback) {
+                        GetCapabilityResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(GetCapabilityErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(GetCapabilityResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_GetCapability(
       capability, property, property_count, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(GetCapabilityErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      GetCapabilityResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::GetCapabilitySync(const TPM_CAP& capability,
@@ -30019,7 +30347,7 @@ TPM_RC Tpm::SerializeCommand_TestParms(
   parameter_section_bytes += parameters_bytes;
   command_size += parameters_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -30118,9 +30446,10 @@ TPM_RC Tpm::ParseResponse_TestParms(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -30129,42 +30458,42 @@ TPM_RC Tpm::ParseResponse_TestParms(
   return TPM_RC_SUCCESS;
 }
 
-void TestParmsErrorCallback(const Tpm::TestParmsResponse& callback,
+void TestParmsErrorCallback(Tpm::TestParmsResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void TestParmsResponseParser(const Tpm::TestParmsResponse& callback,
+void TestParmsResponseParser(Tpm::TestParmsResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(TestParmsErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_TestParms(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(TestParmsErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::TestParms(const TPMT_PUBLIC_PARMS& parameters,
                     AuthorizationDelegate* authorization_delegate,
-                    const TestParmsResponse& callback) {
+                    TestParmsResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(TestParmsErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(TestParmsResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc =
       SerializeCommand_TestParms(parameters, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(TestParmsErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      TestParmsResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::TestParmsSync(const TPMT_PUBLIC_PARMS& parameters,
@@ -30238,7 +30567,7 @@ TPM_RC Tpm::SerializeCommand_NV_DefineSpace(
   parameter_section_bytes += public_info_bytes;
   command_size += public_info_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -30337,9 +30666,10 @@ TPM_RC Tpm::ParseResponse_NV_DefineSpace(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -30348,25 +30678,25 @@ TPM_RC Tpm::ParseResponse_NV_DefineSpace(
   return TPM_RC_SUCCESS;
 }
 
-void NV_DefineSpaceErrorCallback(const Tpm::NV_DefineSpaceResponse& callback,
+void NV_DefineSpaceErrorCallback(Tpm::NV_DefineSpaceResponse callback,
                                  TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void NV_DefineSpaceResponseParser(const Tpm::NV_DefineSpaceResponse& callback,
+void NV_DefineSpaceResponseParser(Tpm::NV_DefineSpaceResponse callback,
                                   AuthorizationDelegate* authorization_delegate,
                                   const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_DefineSpaceErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_NV_DefineSpace(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_DefineSpaceErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_DefineSpace(const TPMI_RH_PROVISION& auth_handle,
@@ -30374,21 +30704,22 @@ void Tpm::NV_DefineSpace(const TPMI_RH_PROVISION& auth_handle,
                          const TPM2B_AUTH& auth,
                          const TPM2B_NV_PUBLIC& public_info,
                          AuthorizationDelegate* authorization_delegate,
-                         const NV_DefineSpaceResponse& callback) {
+                         NV_DefineSpaceResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_DefineSpaceErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      NV_DefineSpaceResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_DefineSpace(auth_handle, auth_handle_name,
                                               auth, public_info, &command,
                                               authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_DefineSpaceErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(NV_DefineSpaceResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_DefineSpaceSync(const TPMI_RH_PROVISION& auth_handle,
@@ -30450,7 +30781,7 @@ TPM_RC Tpm::SerializeCommand_NV_UndefineSpace(
   handle_section_bytes += nv_index_bytes;
   command_size += nv_index_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -30549,9 +30880,10 @@ TPM_RC Tpm::ParseResponse_NV_UndefineSpace(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -30560,26 +30892,26 @@ TPM_RC Tpm::ParseResponse_NV_UndefineSpace(
   return TPM_RC_SUCCESS;
 }
 
-void NV_UndefineSpaceErrorCallback(
-    const Tpm::NV_UndefineSpaceResponse& callback, TPM_RC response_code) {
+void NV_UndefineSpaceErrorCallback(Tpm::NV_UndefineSpaceResponse callback,
+                                   TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void NV_UndefineSpaceResponseParser(
-    const Tpm::NV_UndefineSpaceResponse& callback,
+    Tpm::NV_UndefineSpaceResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_UndefineSpaceErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_NV_UndefineSpace(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_UndefineSpaceErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_UndefineSpace(const TPMI_RH_PROVISION& auth_handle,
@@ -30587,21 +30919,22 @@ void Tpm::NV_UndefineSpace(const TPMI_RH_PROVISION& auth_handle,
                            const TPMI_RH_NV_INDEX& nv_index,
                            const std::string& nv_index_name,
                            AuthorizationDelegate* authorization_delegate,
-                           const NV_UndefineSpaceResponse& callback) {
+                           NV_UndefineSpaceResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_UndefineSpaceErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      NV_UndefineSpaceResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_UndefineSpace(
       auth_handle, auth_handle_name, nv_index, nv_index_name, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_UndefineSpaceErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(NV_UndefineSpaceResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_UndefineSpaceSync(
@@ -30664,7 +30997,7 @@ TPM_RC Tpm::SerializeCommand_NV_UndefineSpaceSpecial(
   handle_section_bytes += platform_bytes;
   command_size += platform_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -30763,9 +31096,10 @@ TPM_RC Tpm::ParseResponse_NV_UndefineSpaceSpecial(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -30775,49 +31109,48 @@ TPM_RC Tpm::ParseResponse_NV_UndefineSpaceSpecial(
 }
 
 void NV_UndefineSpaceSpecialErrorCallback(
-    const Tpm::NV_UndefineSpaceSpecialResponse& callback,
-    TPM_RC response_code) {
+    Tpm::NV_UndefineSpaceSpecialResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void NV_UndefineSpaceSpecialResponseParser(
-    const Tpm::NV_UndefineSpaceSpecialResponse& callback,
+    Tpm::NV_UndefineSpaceSpecialResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_UndefineSpaceSpecialErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_NV_UndefineSpaceSpecial(
       response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        NV_UndefineSpaceSpecialErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
-void Tpm::NV_UndefineSpaceSpecial(
-    const TPMI_RH_NV_INDEX& nv_index,
-    const std::string& nv_index_name,
-    const TPMI_RH_PLATFORM& platform,
-    const std::string& platform_name,
-    AuthorizationDelegate* authorization_delegate,
-    const NV_UndefineSpaceSpecialResponse& callback) {
+void Tpm::NV_UndefineSpaceSpecial(const TPMI_RH_NV_INDEX& nv_index,
+                                  const std::string& nv_index_name,
+                                  const TPMI_RH_PLATFORM& platform,
+                                  const std::string& platform_name,
+                                  AuthorizationDelegate* authorization_delegate,
+                                  NV_UndefineSpaceSpecialResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_UndefineSpaceSpecialErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      NV_UndefineSpaceSpecialResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_UndefineSpaceSpecial(
       nv_index, nv_index_name, platform, platform_name, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter = base::BindOnce(
+        NV_UndefineSpaceSpecialErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(NV_UndefineSpaceSpecialResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_UndefineSpaceSpecialSync(
@@ -30870,7 +31203,7 @@ TPM_RC Tpm::SerializeCommand_NV_ReadPublic(
   handle_section_bytes += nv_index_bytes;
   command_size += nv_index_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -30971,13 +31304,35 @@ TPM_RC Tpm::ParseResponse_NV_ReadPublic(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string nv_public_bytes;
   rc = Parse_TPM2B_NV_PUBLIC(&buffer, nv_public, &nv_public_bytes);
@@ -30989,62 +31344,49 @@ TPM_RC Tpm::ParseResponse_NV_ReadPublic(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = nv_public_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    nv_public_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_NV_PUBLIC(&nv_public_bytes, nv_public, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void NV_ReadPublicErrorCallback(const Tpm::NV_ReadPublicResponse& callback,
+void NV_ReadPublicErrorCallback(Tpm::NV_ReadPublicResponse callback,
                                 TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_NV_PUBLIC(), TPM2B_NAME());
+  std::move(callback).Run(response_code, TPM2B_NV_PUBLIC(), TPM2B_NAME());
 }
 
-void NV_ReadPublicResponseParser(const Tpm::NV_ReadPublicResponse& callback,
+void NV_ReadPublicResponseParser(Tpm::NV_ReadPublicResponse callback,
                                  AuthorizationDelegate* authorization_delegate,
                                  const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ReadPublicErrorCallback, callback);
   TPM2B_NV_PUBLIC nv_public;
   TPM2B_NAME nv_name;
   TPM_RC rc = Tpm::ParseResponse_NV_ReadPublic(response, &nv_public, &nv_name,
                                                authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ReadPublicErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, nv_public, nv_name);
+  std::move(callback).Run(rc, nv_public, nv_name);
 }
 
 void Tpm::NV_ReadPublic(const TPMI_RH_NV_INDEX& nv_index,
                         const std::string& nv_index_name,
                         AuthorizationDelegate* authorization_delegate,
-                        const NV_ReadPublicResponse& callback) {
+                        NV_ReadPublicResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ReadPublicErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_ReadPublicResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_ReadPublic(nv_index, nv_index_name, &command,
                                              authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ReadPublicErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_ReadPublicResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_ReadPublicSync(const TPMI_RH_NV_INDEX& nv_index,
@@ -31132,7 +31474,7 @@ TPM_RC Tpm::SerializeCommand_NV_Write(
   parameter_section_bytes += offset_bytes;
   command_size += offset_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -31231,9 +31573,10 @@ TPM_RC Tpm::ParseResponse_NV_Write(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -31242,24 +31585,24 @@ TPM_RC Tpm::ParseResponse_NV_Write(
   return TPM_RC_SUCCESS;
 }
 
-void NV_WriteErrorCallback(const Tpm::NV_WriteResponse& callback,
+void NV_WriteErrorCallback(Tpm::NV_WriteResponse callback,
                            TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void NV_WriteResponseParser(const Tpm::NV_WriteResponse& callback,
+void NV_WriteResponseParser(Tpm::NV_WriteResponse callback,
                             AuthorizationDelegate* authorization_delegate,
                             const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_WriteErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_NV_Write(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_WriteErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_Write(const TPMI_RH_NV_AUTH& auth_handle,
@@ -31269,21 +31612,21 @@ void Tpm::NV_Write(const TPMI_RH_NV_AUTH& auth_handle,
                    const TPM2B_MAX_NV_BUFFER& data,
                    const UINT16& offset,
                    AuthorizationDelegate* authorization_delegate,
-                   const NV_WriteResponse& callback) {
+                   NV_WriteResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_WriteErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_WriteResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_Write(auth_handle, auth_handle_name, nv_index,
                                         nv_index_name, data, offset, &command,
                                         authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_WriteErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_WriteResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_WriteSync(const TPMI_RH_NV_AUTH& auth_handle,
@@ -31347,7 +31690,7 @@ TPM_RC Tpm::SerializeCommand_NV_Increment(
   handle_section_bytes += nv_index_bytes;
   command_size += nv_index_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -31446,9 +31789,10 @@ TPM_RC Tpm::ParseResponse_NV_Increment(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -31457,24 +31801,24 @@ TPM_RC Tpm::ParseResponse_NV_Increment(
   return TPM_RC_SUCCESS;
 }
 
-void NV_IncrementErrorCallback(const Tpm::NV_IncrementResponse& callback,
+void NV_IncrementErrorCallback(Tpm::NV_IncrementResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void NV_IncrementResponseParser(const Tpm::NV_IncrementResponse& callback,
+void NV_IncrementResponseParser(Tpm::NV_IncrementResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_IncrementErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_NV_Increment(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_IncrementErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_Increment(const TPMI_RH_NV_AUTH& auth_handle,
@@ -31482,21 +31826,21 @@ void Tpm::NV_Increment(const TPMI_RH_NV_AUTH& auth_handle,
                        const TPMI_RH_NV_INDEX& nv_index,
                        const std::string& nv_index_name,
                        AuthorizationDelegate* authorization_delegate,
-                       const NV_IncrementResponse& callback) {
+                       NV_IncrementResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_IncrementErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_IncrementResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_Increment(auth_handle, auth_handle_name,
                                             nv_index, nv_index_name, &command,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_IncrementErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_IncrementResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_IncrementSync(const TPMI_RH_NV_AUTH& auth_handle,
@@ -31575,7 +31919,7 @@ TPM_RC Tpm::SerializeCommand_NV_Extend(
   parameter_section_bytes += data_bytes;
   command_size += data_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -31674,9 +32018,10 @@ TPM_RC Tpm::ParseResponse_NV_Extend(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -31685,24 +32030,24 @@ TPM_RC Tpm::ParseResponse_NV_Extend(
   return TPM_RC_SUCCESS;
 }
 
-void NV_ExtendErrorCallback(const Tpm::NV_ExtendResponse& callback,
+void NV_ExtendErrorCallback(Tpm::NV_ExtendResponse callback,
                             TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void NV_ExtendResponseParser(const Tpm::NV_ExtendResponse& callback,
+void NV_ExtendResponseParser(Tpm::NV_ExtendResponse callback,
                              AuthorizationDelegate* authorization_delegate,
                              const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ExtendErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_NV_Extend(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ExtendErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_Extend(const TPMI_RH_NV_AUTH& auth_handle,
@@ -31711,21 +32056,21 @@ void Tpm::NV_Extend(const TPMI_RH_NV_AUTH& auth_handle,
                     const std::string& nv_index_name,
                     const TPM2B_MAX_NV_BUFFER& data,
                     AuthorizationDelegate* authorization_delegate,
-                    const NV_ExtendResponse& callback) {
+                    NV_ExtendResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ExtendErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_ExtendResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_Extend(auth_handle, auth_handle_name,
                                          nv_index, nv_index_name, data,
                                          &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ExtendErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_ExtendResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_ExtendSync(const TPMI_RH_NV_AUTH& auth_handle,
@@ -31797,7 +32142,7 @@ TPM_RC Tpm::SerializeCommand_NV_SetBits(
   parameter_section_bytes += bits_bytes;
   command_size += bits_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -31896,9 +32241,10 @@ TPM_RC Tpm::ParseResponse_NV_SetBits(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -31907,24 +32253,24 @@ TPM_RC Tpm::ParseResponse_NV_SetBits(
   return TPM_RC_SUCCESS;
 }
 
-void NV_SetBitsErrorCallback(const Tpm::NV_SetBitsResponse& callback,
+void NV_SetBitsErrorCallback(Tpm::NV_SetBitsResponse callback,
                              TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void NV_SetBitsResponseParser(const Tpm::NV_SetBitsResponse& callback,
+void NV_SetBitsResponseParser(Tpm::NV_SetBitsResponse callback,
                               AuthorizationDelegate* authorization_delegate,
                               const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_SetBitsErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_NV_SetBits(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_SetBitsErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_SetBits(const TPMI_RH_NV_AUTH& auth_handle,
@@ -31933,21 +32279,21 @@ void Tpm::NV_SetBits(const TPMI_RH_NV_AUTH& auth_handle,
                      const std::string& nv_index_name,
                      const UINT64& bits,
                      AuthorizationDelegate* authorization_delegate,
-                     const NV_SetBitsResponse& callback) {
+                     NV_SetBitsResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_SetBitsErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_SetBitsResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_SetBits(auth_handle, auth_handle_name,
                                           nv_index, nv_index_name, bits,
                                           &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_SetBitsErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_SetBitsResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_SetBitsSync(const TPMI_RH_NV_AUTH& auth_handle,
@@ -32010,7 +32356,7 @@ TPM_RC Tpm::SerializeCommand_NV_WriteLock(
   handle_section_bytes += nv_index_bytes;
   command_size += nv_index_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -32109,9 +32455,10 @@ TPM_RC Tpm::ParseResponse_NV_WriteLock(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -32120,24 +32467,24 @@ TPM_RC Tpm::ParseResponse_NV_WriteLock(
   return TPM_RC_SUCCESS;
 }
 
-void NV_WriteLockErrorCallback(const Tpm::NV_WriteLockResponse& callback,
+void NV_WriteLockErrorCallback(Tpm::NV_WriteLockResponse callback,
                                TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void NV_WriteLockResponseParser(const Tpm::NV_WriteLockResponse& callback,
+void NV_WriteLockResponseParser(Tpm::NV_WriteLockResponse callback,
                                 AuthorizationDelegate* authorization_delegate,
                                 const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_WriteLockErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_NV_WriteLock(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_WriteLockErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_WriteLock(const TPMI_RH_NV_AUTH& auth_handle,
@@ -32145,21 +32492,21 @@ void Tpm::NV_WriteLock(const TPMI_RH_NV_AUTH& auth_handle,
                        const TPMI_RH_NV_INDEX& nv_index,
                        const std::string& nv_index_name,
                        AuthorizationDelegate* authorization_delegate,
-                       const NV_WriteLockResponse& callback) {
+                       NV_WriteLockResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_WriteLockErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_WriteLockResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_WriteLock(auth_handle, auth_handle_name,
                                             nv_index, nv_index_name, &command,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_WriteLockErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_WriteLockResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_WriteLockSync(const TPMI_RH_NV_AUTH& auth_handle,
@@ -32211,7 +32558,7 @@ TPM_RC Tpm::SerializeCommand_NV_GlobalWriteLock(
   handle_section_bytes += auth_handle_bytes;
   command_size += auth_handle_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -32310,9 +32657,10 @@ TPM_RC Tpm::ParseResponse_NV_GlobalWriteLock(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -32321,45 +32669,46 @@ TPM_RC Tpm::ParseResponse_NV_GlobalWriteLock(
   return TPM_RC_SUCCESS;
 }
 
-void NV_GlobalWriteLockErrorCallback(
-    const Tpm::NV_GlobalWriteLockResponse& callback, TPM_RC response_code) {
+void NV_GlobalWriteLockErrorCallback(Tpm::NV_GlobalWriteLockResponse callback,
+                                     TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
 void NV_GlobalWriteLockResponseParser(
-    const Tpm::NV_GlobalWriteLockResponse& callback,
+    Tpm::NV_GlobalWriteLockResponse callback,
     AuthorizationDelegate* authorization_delegate,
     const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_GlobalWriteLockErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_NV_GlobalWriteLock(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_GlobalWriteLockErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_GlobalWriteLock(const TPMI_RH_PROVISION& auth_handle,
                              const std::string& auth_handle_name,
                              AuthorizationDelegate* authorization_delegate,
-                             const NV_GlobalWriteLockResponse& callback) {
+                             NV_GlobalWriteLockResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_GlobalWriteLockErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser = base::Bind(
-      NV_GlobalWriteLockResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_GlobalWriteLock(
       auth_handle, auth_handle_name, &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_GlobalWriteLockErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser =
+      base::BindOnce(NV_GlobalWriteLockResponseParser, std::move(callback),
+                     authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_GlobalWriteLockSync(
@@ -32437,7 +32786,7 @@ TPM_RC Tpm::SerializeCommand_NV_Read(
   parameter_section_bytes += offset_bytes;
   command_size += offset_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -32537,55 +32886,63 @@ TPM_RC Tpm::ParseResponse_NV_Read(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string data_bytes;
   rc = Parse_TPM2B_MAX_NV_BUFFER(&buffer, data, &data_bytes);
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = data_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    data_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_MAX_NV_BUFFER(&data_bytes, data, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void NV_ReadErrorCallback(const Tpm::NV_ReadResponse& callback,
-                          TPM_RC response_code) {
+void NV_ReadErrorCallback(Tpm::NV_ReadResponse callback, TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_MAX_NV_BUFFER());
+  std::move(callback).Run(response_code, TPM2B_MAX_NV_BUFFER());
 }
 
-void NV_ReadResponseParser(const Tpm::NV_ReadResponse& callback,
+void NV_ReadResponseParser(Tpm::NV_ReadResponse callback,
                            AuthorizationDelegate* authorization_delegate,
                            const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ReadErrorCallback, callback);
   TPM2B_MAX_NV_BUFFER data;
   TPM_RC rc =
       Tpm::ParseResponse_NV_Read(response, &data, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ReadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, data);
+  std::move(callback).Run(rc, data);
 }
 
 void Tpm::NV_Read(const TPMI_RH_NV_AUTH& auth_handle,
@@ -32595,21 +32952,21 @@ void Tpm::NV_Read(const TPMI_RH_NV_AUTH& auth_handle,
                   const UINT16& size,
                   const UINT16& offset,
                   AuthorizationDelegate* authorization_delegate,
-                  const NV_ReadResponse& callback) {
+                  NV_ReadResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ReadErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_ReadResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_Read(auth_handle, auth_handle_name, nv_index,
                                        nv_index_name, size, offset, &command,
                                        authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ReadErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_ReadResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_ReadSync(const TPMI_RH_NV_AUTH& auth_handle,
@@ -32674,7 +33031,7 @@ TPM_RC Tpm::SerializeCommand_NV_ReadLock(
   handle_section_bytes += nv_index_bytes;
   command_size += nv_index_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -32773,9 +33130,10 @@ TPM_RC Tpm::ParseResponse_NV_ReadLock(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -32784,24 +33142,24 @@ TPM_RC Tpm::ParseResponse_NV_ReadLock(
   return TPM_RC_SUCCESS;
 }
 
-void NV_ReadLockErrorCallback(const Tpm::NV_ReadLockResponse& callback,
+void NV_ReadLockErrorCallback(Tpm::NV_ReadLockResponse callback,
                               TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void NV_ReadLockResponseParser(const Tpm::NV_ReadLockResponse& callback,
+void NV_ReadLockResponseParser(Tpm::NV_ReadLockResponse callback,
                                AuthorizationDelegate* authorization_delegate,
                                const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ReadLockErrorCallback, callback);
   TPM_RC rc = Tpm::ParseResponse_NV_ReadLock(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ReadLockErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_ReadLock(const TPMI_RH_NV_AUTH& auth_handle,
@@ -32809,21 +33167,21 @@ void Tpm::NV_ReadLock(const TPMI_RH_NV_AUTH& auth_handle,
                       const TPMI_RH_NV_INDEX& nv_index,
                       const std::string& nv_index_name,
                       AuthorizationDelegate* authorization_delegate,
-                      const NV_ReadLockResponse& callback) {
+                      NV_ReadLockResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ReadLockErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_ReadLockResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_ReadLock(auth_handle, auth_handle_name,
                                            nv_index, nv_index_name, &command,
                                            authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ReadLockErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_ReadLockResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_ReadLockSync(const TPMI_RH_NV_AUTH& auth_handle,
@@ -32892,7 +33250,7 @@ TPM_RC Tpm::SerializeCommand_NV_ChangeAuth(
   parameter_section_bytes += new_auth_bytes;
   command_size += new_auth_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -32991,9 +33349,10 @@ TPM_RC Tpm::ParseResponse_NV_ChangeAuth(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
@@ -33002,45 +33361,45 @@ TPM_RC Tpm::ParseResponse_NV_ChangeAuth(
   return TPM_RC_SUCCESS;
 }
 
-void NV_ChangeAuthErrorCallback(const Tpm::NV_ChangeAuthResponse& callback,
+void NV_ChangeAuthErrorCallback(Tpm::NV_ChangeAuthResponse callback,
                                 TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code);
+  std::move(callback).Run(response_code);
 }
 
-void NV_ChangeAuthResponseParser(const Tpm::NV_ChangeAuthResponse& callback,
+void NV_ChangeAuthResponseParser(Tpm::NV_ChangeAuthResponse callback,
                                  AuthorizationDelegate* authorization_delegate,
                                  const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ChangeAuthErrorCallback, callback);
   TPM_RC rc =
       Tpm::ParseResponse_NV_ChangeAuth(response, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ChangeAuthErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc);
+  std::move(callback).Run(rc);
 }
 
 void Tpm::NV_ChangeAuth(const TPMI_RH_NV_INDEX& nv_index,
                         const std::string& nv_index_name,
                         const TPM2B_AUTH& new_auth,
                         AuthorizationDelegate* authorization_delegate,
-                        const NV_ChangeAuthResponse& callback) {
+                        NV_ChangeAuthResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_ChangeAuthErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_ChangeAuthResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_ChangeAuth(nv_index, nv_index_name, new_auth,
                                              &command, authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_ChangeAuthErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_ChangeAuthResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_ChangeAuthSync(const TPMI_RH_NV_INDEX& nv_index,
@@ -33154,7 +33513,7 @@ TPM_RC Tpm::SerializeCommand_NV_Certify(
   parameter_section_bytes += offset_bytes;
   command_size += offset_bytes.size();
   std::string command_hash(32, 0);
-  hash->Finish(base::data(command_hash), command_hash.size());
+  hash->Finish(std::data(command_hash), command_hash.size());
   std::string authorization_section_bytes;
   std::string authorization_size_bytes;
   if (authorization_delegate) {
@@ -33255,13 +33614,35 @@ TPM_RC Tpm::ParseResponse_NV_Certify(
   hash->Update(command_code_bytes.data(), command_code_bytes.size());
   hash->Update(buffer.data(), buffer.size());
   std::string response_hash(32, 0);
-  hash->Finish(base::data(response_hash), response_hash.size());
+  hash->Finish(std::data(response_hash), response_hash.size());
   if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
     if (!authorization_delegate->CheckResponseAuthorization(
             response_hash, authorization_section_bytes)) {
       return TRUNKS_RC_AUTHORIZATION_FAILED;
     }
+  }
+  if (tag == TPM_ST_SESSIONS) {
+    if (!authorization_delegate)
+      return TRUNKS_RC_AUTHORIZATION_FAILED;
+
+    // Parse the encrypted parameter size.
+    UINT16 size;
+    std::string size_buffer = buffer.substr(0, 2);
+    if (TPM_RC result = Parse_UINT16(&size_buffer, &size, nullptr); result) {
+      return result;
+    }
+    if (buffer.size() < 2 + size) {
+      return TPM_RC_INSUFFICIENT;
+    }
+
+    // Decrypt just the parameter data, not the size.
+    std::string decrypted_data = buffer.substr(2, size);
+    if (!authorization_delegate->DecryptResponseParameter(&decrypted_data)) {
+      return TRUNKS_RC_ENCRYPTION_FAILED;
+    }
+    buffer.replace(2, size, decrypted_data);
   }
   std::string certify_info_bytes;
   rc = Parse_TPM2B_ATTEST(&buffer, certify_info, &certify_info_bytes);
@@ -33273,43 +33654,30 @@ TPM_RC Tpm::ParseResponse_NV_Certify(
   if (rc != TPM_RC_SUCCESS) {
     return rc;
   }
-  if (tag == TPM_ST_SESSIONS) {
-    CHECK(authorization_delegate) << "Authorization delegate missing!";
-    // Decrypt just the parameter data, not the size.
-    std::string tmp = certify_info_bytes.substr(2);
-    if (!authorization_delegate->DecryptResponseParameter(&tmp)) {
-      return TRUNKS_RC_ENCRYPTION_FAILED;
-    }
-    certify_info_bytes.replace(2, std::string::npos, tmp);
-    rc = Parse_TPM2B_ATTEST(&certify_info_bytes, certify_info, nullptr);
-    if (rc != TPM_RC_SUCCESS) {
-      return rc;
-    }
-  }
   return TPM_RC_SUCCESS;
 }
 
-void NV_CertifyErrorCallback(const Tpm::NV_CertifyResponse& callback,
+void NV_CertifyErrorCallback(Tpm::NV_CertifyResponse callback,
                              TPM_RC response_code) {
   VLOG(1) << __func__;
-  callback.Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
+  std::move(callback).Run(response_code, TPM2B_ATTEST(), TPMT_SIGNATURE());
 }
 
-void NV_CertifyResponseParser(const Tpm::NV_CertifyResponse& callback,
+void NV_CertifyResponseParser(Tpm::NV_CertifyResponse callback,
                               AuthorizationDelegate* authorization_delegate,
                               const std::string& response) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_CertifyErrorCallback, callback);
   TPM2B_ATTEST certify_info;
   TPMT_SIGNATURE signature;
   TPM_RC rc = Tpm::ParseResponse_NV_Certify(response, &certify_info, &signature,
                                             authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_CertifyErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  callback.Run(rc, certify_info, signature);
+  std::move(callback).Run(rc, certify_info, signature);
 }
 
 void Tpm::NV_Certify(const TPMI_DH_OBJECT& sign_handle,
@@ -33323,22 +33691,22 @@ void Tpm::NV_Certify(const TPMI_DH_OBJECT& sign_handle,
                      const UINT16& size,
                      const UINT16& offset,
                      AuthorizationDelegate* authorization_delegate,
-                     const NV_CertifyResponse& callback) {
+                     NV_CertifyResponse callback) {
   VLOG(1) << __func__;
-  base::Callback<void(TPM_RC)> error_reporter =
-      base::Bind(NV_CertifyErrorCallback, callback);
-  base::Callback<void(const std::string&)> parser =
-      base::Bind(NV_CertifyResponseParser, callback, authorization_delegate);
   std::string command;
   TPM_RC rc = SerializeCommand_NV_Certify(
       sign_handle, sign_handle_name, auth_handle, auth_handle_name, nv_index,
       nv_index_name, qualifying_data, in_scheme, size, offset, &command,
       authorization_delegate);
   if (rc != TPM_RC_SUCCESS) {
-    error_reporter.Run(rc);
+    base::OnceCallback<void(TPM_RC)> error_reporter =
+        base::BindOnce(NV_CertifyErrorCallback, std::move(callback));
+    std::move(error_reporter).Run(rc);
     return;
   }
-  transceiver_->SendCommand(command, parser);
+  base::OnceCallback<void(const std::string&)> parser = base::BindOnce(
+      NV_CertifyResponseParser, std::move(callback), authorization_delegate);
+  transceiver_->SendCommand(command, std::move(parser));
 }
 
 TPM_RC Tpm::NV_CertifySync(const TPMI_DH_OBJECT& sign_handle,

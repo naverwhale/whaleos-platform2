@@ -1,12 +1,12 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <dbus/exported_object.h>
 #include <dbus/message.h>
@@ -15,8 +15,7 @@
 
 #include "power_manager/powerd/system/dbus_wrapper.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -93,6 +92,17 @@ void OnGetBrightness(const std::string& method_name,
   std::move(response_sender).Run(std::move(response));
 }
 
+void OnToggleKeyboardBacklight(
+    const std::string& method_name,
+    const BacklightController::ToggleKeyboardBacklightCallback& callback,
+    dbus::MethodCall* method_call,
+    dbus::ExportedObject::ResponseSender response_sender) {
+  callback.Run();
+  std::unique_ptr<dbus::Response> response =
+      dbus::Response::FromMethodCall(method_call);
+  std::move(response_sender).Run(std::move(response));
+}
+
 }  // namespace
 
 // static
@@ -101,8 +111,8 @@ void BacklightController::RegisterIncreaseBrightnessHandler(
     const std::string& method_name,
     const IncreaseBrightnessCallback& callback) {
   DCHECK(dbus_wrapper);
-  dbus_wrapper->ExportMethod(method_name,
-                             base::Bind(&OnIncreaseBrightness, callback));
+  dbus_wrapper->ExportMethod(
+      method_name, base::BindRepeating(&OnIncreaseBrightness, callback));
 }
 
 // static
@@ -111,8 +121,8 @@ void BacklightController::RegisterDecreaseBrightnessHandler(
     const std::string& method_name,
     const DecreaseBrightnessCallback& callback) {
   DCHECK(dbus_wrapper);
-  dbus_wrapper->ExportMethod(method_name,
-                             base::Bind(&OnDecreaseBrightness, callback));
+  dbus_wrapper->ExportMethod(
+      method_name, base::BindRepeating(&OnDecreaseBrightness, callback));
 }
 
 // static
@@ -122,7 +132,8 @@ void BacklightController::RegisterSetBrightnessHandler(
     const SetBrightnessCallback& callback) {
   DCHECK(dbus_wrapper);
   dbus_wrapper->ExportMethod(
-      method_name, base::Bind(&OnSetBrightness, method_name, callback));
+      method_name,
+      base::BindRepeating(&OnSetBrightness, method_name, callback));
 }
 
 // static
@@ -132,7 +143,19 @@ void BacklightController::RegisterGetBrightnessHandler(
     const GetBrightnessCallback& callback) {
   DCHECK(dbus_wrapper);
   dbus_wrapper->ExportMethod(
-      method_name, base::Bind(&OnGetBrightness, method_name, callback));
+      method_name,
+      base::BindRepeating(&OnGetBrightness, method_name, callback));
+}
+
+// static
+void BacklightController::RegisterToggleKeyboardBacklightHandler(
+    system::DBusWrapperInterface* dbus_wrapper,
+    const std::string& method_name,
+    const ToggleKeyboardBacklightCallback& callback) {
+  DCHECK(dbus_wrapper);
+  dbus_wrapper->ExportMethod(
+      method_name,
+      base::BindRepeating(&OnToggleKeyboardBacklight, method_name, callback));
 }
 
 // static
@@ -150,5 +173,4 @@ void BacklightController::EmitBrightnessChangedSignal(
   dbus_wrapper->EmitSignal(&signal);
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

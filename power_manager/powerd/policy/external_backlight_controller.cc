@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,6 @@
 
 #include "power_manager/common/prefs.h"
 #include "power_manager/powerd/policy/backlight_controller_observer.h"
-#include "power_manager/powerd/system/ambient_light_sensor_delegate_file.h"
 #include "power_manager/powerd/system/ambient_light_sensor_watcher_interface.h"
 #include "power_manager/powerd/system/dbus_wrapper.h"
 #include "power_manager/powerd/system/display/display_power_setter.h"
@@ -32,8 +31,7 @@
 #include <base/notreached.h>
 #include <dbus/message.h>
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -177,6 +175,11 @@ void ExternalBacklightController::HandleDisplayServiceStart() {
                                              : chromeos::DISPLAY_POWER_ALL_ON,
                                          base::TimeDelta());
   NotifyObservers(BacklightBrightnessChange_Cause_OTHER);
+}
+
+void ExternalBacklightController::HandleBatterySaverModeChange(
+    const BatterySaverModeState& state) {
+  // TODO(sxm): Figure out how to distinguish USB-powered displays and dim here.
 }
 
 void ExternalBacklightController::SetDimmedForInactivity(bool dimmed) {
@@ -343,9 +346,7 @@ void ExternalBacklightController::NotifyObservers(
 void ExternalBacklightController::UpdateDisplays(
     const std::vector<system::DisplayInfo>& displays) {
   ExternalDisplayMap updated_displays;
-  for (std::vector<system::DisplayInfo>::const_iterator it = displays.begin();
-       it != displays.end(); ++it) {
-    const system::DisplayInfo& info = *it;
+  for (const system::DisplayInfo& info : displays) {
     if (info.i2c_path.empty())
       continue;
     if (info.connector_status !=
@@ -381,10 +382,8 @@ void ExternalBacklightController::AdjustBrightnessByPercent(
 
 int ExternalBacklightController::CalculateAssociationScore(
     const base::FilePath& a, const base::FilePath& b) {
-  std::vector<std::string> a_components;
-  std::vector<std::string> b_components;
-  a.GetComponents(&a_components);
-  b.GetComponents(&b_components);
+  std::vector<std::string> a_components = a.GetComponents();
+  std::vector<std::string> b_components = b.GetComponents();
 
   size_t score = 0;
   while (score < a_components.size() && score < b_components.size() &&
@@ -431,7 +430,7 @@ void ExternalBacklightController::MatchAmbientLightSensorsToDisplays() {
       // If ALS-based brightness is enabled, and no match already exists, create
       // a new one.
       auto sensor =
-          external_ambient_light_sensor_factory_->CreateSensor(als_info.device);
+          external_ambient_light_sensor_factory_->CreateSensor(als_info);
       auto handler = std::make_unique<ExternalAmbientLightHandler>(
           std::move(sensor), best_matching_display, this);
       handler->Init(external_backlight_als_steps_,
@@ -462,7 +461,7 @@ ExternalBacklightController::
     GetAmbientLightSensorAndDisplayMatchesForTesting() {
   std::vector<std::pair<base::FilePath, system::DisplayInfo>> matches;
   for (const auto& [path, pair] : external_als_displays_) {
-    matches.push_back(std::make_pair(path, pair.first));
+    matches.emplace_back(path, pair.first);
   }
   return matches;
 }
@@ -509,5 +508,4 @@ void ExternalBacklightController::HandleGetExternalDisplayALSBrightnessRequest(
   std::move(response_sender).Run(std::move(response));
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

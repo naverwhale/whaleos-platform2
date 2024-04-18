@@ -1,4 +1,4 @@
-/* Copyright 2019 The Chromium OS Authors. All rights reserved.
+/* Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,11 +9,13 @@
 #include "hardware_verifier/verifier.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <chromeos-config/libcros_config/cros_config.h>
 #include <google/protobuf/descriptor.h>
+#include <runtime_probe/proto_bindings/runtime_probe.pb.h>
 
 namespace hardware_verifier {
 
@@ -24,7 +26,7 @@ class VerifierImpl : public Verifier {
  public:
   VerifierImpl();
 
-  base::Optional<HwVerificationReport> Verify(
+  std::optional<HwVerificationReport> Verify(
       const runtime_probe::ProbeResult& probe_result,
       const HwVerificationSpec& hw_verification_spec) const override;
 
@@ -34,7 +36,7 @@ class VerifierImpl : public Verifier {
  private:
   struct CompCategoryInfo {
     // Enum value of of this category.
-    int enum_value;
+    runtime_probe::ProbeRequest_SupportCategory enum_value;
 
     // Enum name of this category.
     std::string enum_name;

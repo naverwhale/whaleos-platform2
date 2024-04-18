@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,6 @@
 #include <string>
 
 #include <annotator/annotator.h>
-#include <base/macros.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/receiver.h>
 #include <tensorflow/lite/model.h>
@@ -54,13 +53,14 @@ class TextClassifierImpl
       AnnotateCallback callback) override;
 
   // chromeos::machine_learning::mojom::TextClassifier:
-  void SuggestSelection(
-      chromeos::machine_learning::mojom::TextSuggestSelectionRequestPtr request,
-      SuggestSelectionCallback callback) override;
-
-  // chromeos::machine_learning::mojom::TextClassifier:
   void FindLanguages(const std::string& text,
                      FindLanguagesCallback callback) override;
+
+  // chromeos::machine_learning::mojom::TextClassifier:
+  void REMOVED_1(
+      chromeos::machine_learning::mojom::REMOVED_TextSuggestSelectionRequestPtr
+          request,
+      REMOVED_1Callback callback) override;
 
   std::unique_ptr<libtextclassifier3::Annotator> annotator_;
 

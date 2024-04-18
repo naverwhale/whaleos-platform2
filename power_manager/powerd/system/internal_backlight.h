@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,17 +11,13 @@
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
 
+#include "power_manager/common/clock.h"
 #include "power_manager/powerd/system/backlight_interface.h"
 
-namespace power_manager {
-
-class Clock;
-
-namespace system {
+namespace power_manager::system {
 
 // Controls a panel or keyboard backlight via sysfs.
 class InternalBacklight : public BacklightInterface {
@@ -32,11 +28,11 @@ class InternalBacklight : public BacklightInterface {
   static const char kBlPowerFilename[];
   static const char kScaleFilename[];
 
-  InternalBacklight();
+  InternalBacklight() = default;
   InternalBacklight(const InternalBacklight&) = delete;
   InternalBacklight& operator=(const InternalBacklight&) = delete;
 
-  ~InternalBacklight() override;
+  ~InternalBacklight() override = default;
 
   // Initialize the backlight object.
   //
@@ -66,7 +62,7 @@ class InternalBacklight : public BacklightInterface {
   // Overridden from BacklightInterface:
   void AddObserver(BacklightObserver* observer) override;
   void RemoveObserver(BacklightObserver* observer) override;
-  bool DeviceExists() override;
+  bool DeviceExists() const override;
   int64_t GetMaxBrightnessLevel() override;
   int64_t GetCurrentBrightnessLevel() override;
   bool SetBrightnessLevel(int64_t level, base::TimeDelta interval) override;
@@ -78,7 +74,7 @@ class InternalBacklight : public BacklightInterface {
   // |current_brightness_level_|, also writing to |bl_power_path_| if necessary.
   // Called by SetBrightnessLevel() and HandleTransitionTimeout(). Returns true
   // on success.
-  bool WriteBrightness(int64_t new_level);
+  virtual bool WriteBrightness(int64_t new_level);
 
   // Sets the brightness level appropriately for the current point in the
   // transition.  When the transition is done, stops |transition_timer_|.
@@ -87,7 +83,7 @@ class InternalBacklight : public BacklightInterface {
   // Cancels |transition_timeout_id_| if set.
   void CancelTransition();
 
-  std::unique_ptr<Clock> clock_;
+  std::unique_ptr<Clock> clock_ = std::make_unique<Clock>();
 
   // Device directory.
   base::FilePath device_path_;
@@ -102,12 +98,8 @@ class InternalBacklight : public BacklightInterface {
   // details.
   base::FilePath bl_power_path_;
 
-  // Cached maximum and last-set brightness levels.
-  int64_t max_brightness_level_;
-  int64_t current_brightness_level_;
-
   // Scale of the brightness curve (linear, non-linear or unknown).
-  BrightnessScale brightness_scale_;
+  BrightnessScale brightness_scale_ = BrightnessScale::kUnknown;
 
   // Calls HandleTransitionTimeout().
   base::RepeatingTimer transition_timer_;
@@ -120,11 +112,17 @@ class InternalBacklight : public BacklightInterface {
   base::TimeTicks transition_end_time_;
 
   // Start and end brightness level for the current transition.
-  int64_t transition_start_level_;
-  int64_t transition_end_level_;
+  int64_t transition_start_level_ = 0;
+  int64_t transition_end_level_ = 0;
+
+ protected:
+  bool DoSetBrightnessLevel(int64_t level, base::TimeDelta interval);
+
+  // Cached maximum and last-set brightness levels.
+  int64_t max_brightness_level_ = 0;
+  int64_t current_brightness_level_ = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_INTERNAL_BACKLIGHT_H_

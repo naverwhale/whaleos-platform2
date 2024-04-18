@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,8 @@
 
 #include <memory>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
+#include "hps/proto_bindings/hps_service.pb.h"
 
 namespace hps {
 //
@@ -17,32 +18,32 @@ namespace hps {
 class Filter {
  public:
   Filter() = default;
-  explicit Filter(bool initial_state);
+  explicit Filter(HpsResult initial_state);
   Filter(const Filter&) = delete;
   Filter& operator=(const Filter&) = delete;
   virtual ~Filter() = default;
 
   // Process an inference result from HPS. Will only be called when there is:
-  // - a valid result from HPS
   // - a new inference has been performed.
   // Parameters:
   // - result: the most recent inference result from HPS
+  // - valid: whether this inference result is valid.
   // Returns:
-  // - bool: That result of the filtered inference. Depending on the filter
-  //   implementation this can be a cumulative result.
-  bool ProcessResult(int result);
+  // - HpsResult: the result of the filtered inference. Depending on the
+  // filter, implementation this can be a cumulative result.
+  HpsResult ProcessResult(int result, bool valid);
 
   // Returns the current inference result of the filter. This is the same as
   // the last result that was returned from ProcessResult.
-  bool GetCurrentResult(void) const;
+  HpsResult GetCurrentResult(void) const;
 
  protected:
   // Called from ProcessResult, derived filters should implement their filtering
   // logic in this method.
-  virtual bool ProcessResultImpl(int result) = 0;
+  virtual HpsResult ProcessResultImpl(int result, bool valid) = 0;
 
  private:
-  bool current_result_ = false;
+  HpsResult current_result_ = HpsResult::UNKNOWN;
 };
 
 }  // namespace hps

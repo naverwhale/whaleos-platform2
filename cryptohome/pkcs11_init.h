@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,14 +11,12 @@
 
 #include <sys/types.h>
 
-#include <memory>
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <chaps/pkcs11/cryptoki.h>
 
-#include "cryptohome/platform.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
@@ -33,12 +31,12 @@ class Pkcs11Init {
   virtual void GetTpmTokenInfo(std::string* OUT_label,
                                std::string* OUT_user_pin);
 
-  virtual void GetTpmTokenInfoForUser(const std::string& username,
+  virtual void GetTpmTokenInfoForUser(const Username& username,
                                       std::string* OUT_label,
                                       std::string* OUT_user_pin);
 
   // Returns the same label as GetTpmTokenInfoForUser.
-  virtual std::string GetTpmTokenLabelForUser(const std::string& username);
+  virtual std::string GetTpmTokenLabelForUser(const Username& username);
 
   // Gets the tpm token |slot| for the given |path|.  If no slot is found,
   // returns false.
@@ -61,9 +59,6 @@ class Pkcs11Init {
   // actual token label.
   bool CheckTokenInSlot(CK_SLOT_ID slot_id,
                         const std::string& expected_label_prefix);
-
-  std::unique_ptr<Platform> default_platform_;
-  Platform* platform_;
 };
 
 }  // namespace cryptohome

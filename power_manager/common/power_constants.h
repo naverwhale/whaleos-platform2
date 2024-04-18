@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,13 +23,20 @@ extern const char kLowBatteryShutdownPercentPref[];
 
 // Integer default delays for dimming the screen, turning it off, and suspending
 // the system while on AC and battery power. Note that these values are
-// overriden by policy messages sent from Chrome.
+// overridden by policy messages sent from Chrome.
 extern const char kPluggedDimMsPref[];
+extern const char kPluggedQuickDimMsPref[];
+extern const char kPluggedQuickLockMsPref[];
 extern const char kPluggedOffMsPref[];
 extern const char kPluggedSuspendMsPref[];
 extern const char kUnpluggedDimMsPref[];
+extern const char kUnpluggedQuickDimMsPref[];
+extern const char kUnpluggedQuickLockMsPref[];
 extern const char kUnpluggedOffMsPref[];
 extern const char kUnpluggedSuspendMsPref[];
+
+// If true, the feedback will be sent to DimAdvisor on an undimming.
+extern const char kSendFeedbackIfUndimmedPref[];
 
 // If true, the system will not suspend due to user inactivity.
 extern const char kDisableIdleSuspendPref[];
@@ -40,6 +47,12 @@ extern const char kFactoryModePref[];
 
 // If true, powerd will monitor the lid switch.
 extern const char kUseLidPref[];
+
+// If non-empty, an input device with this name with a lid switch will be
+// preferred over any other devices with a lid switch, rather than the first
+// device found having priority. If no device with this name exists, this has no
+// effect.
+extern const char kPreferredLidDevicePref[];
 
 // If true, powerd will detect hovering if a capable device is present.
 extern const char kDetectHoverPref[];
@@ -99,20 +112,12 @@ extern const char kKeyboardBacklightNoAlsBrightnessPref[];
 
 // Duration in milliseconds the keyboard backlight should remain on after
 // hovering stops (on systems that support hover detection) or after the last
-// report of user activity (if kKeyboardBacklightTurnOnForUserActivityPref is
-// enabled).
+// report of user activity (otherwise).
 extern const char kKeyboardBacklightKeepOnMsPref[];
 
 // Alternate delay used in place of |kKeyboardBacklightKeepOnMsPref| while
 // fullscreen video is playing.
 extern const char kKeyboardBacklightKeepOnDuringVideoMsPref[];
-
-// If true, powerd will dynamically turn the keyboard backlight on when user
-// activity is detected and disable it after kKeyboardBacklightKeepOnMsPref.
-// This can be set on systems that lack ambient light sensors and hover
-// detection to reduce the backlight's power consumption. It has no effect if
-// kDetectHoverPref is set.
-extern const char kKeyboardBacklightTurnOnForUserActivityPref[];
 
 // Smoothing constant used to calculated smoothed ambient lux level, in the
 // range of (0.0, 1.0]. Value closer to 0.0 means smoothed_lux will respond to
@@ -138,9 +143,16 @@ extern const char kBatteryStabilizedAfterStartupMsPref[];
 extern const char kBatteryStabilizedAfterLinePowerConnectedMsPref[];
 extern const char kBatteryStabilizedAfterLinePowerDisconnectedMsPref[];
 extern const char kBatteryStabilizedAfterResumeMsPref[];
+extern const char kBatteryStabilizedAfterBatterySaverMsPref[];
 
 // If true, multiple battery directories will be read from sysfs if present.
 extern const char kMultipleBatteriesPref[];
+
+// If false, the AC directory will be ignored when enumerating
+// /sys/class/power_supply
+// TODO(b/247037119) evaluate whether this can be handled in firmware. If so,
+// remove this pref and all associated code.
+extern const char kHasBarreljackPref[];
 
 // Number of current and charge samples that need to be averaged before
 // providing time-to-empty/full estimates.
@@ -158,6 +170,31 @@ extern const char kUsbMinAcWattsPref[];
 // "RIGHT", "LEFT_FRONT", etc.).
 extern const char kChargingPortsPref[];
 
+// The number of seconds between rechecking our predictions for Adaptive
+// Charging.
+extern const char kAdaptiveChargingAlarmSecPref[];
+
+// The battery charge percent (display percent) to hold at for Adaptive
+// Charging.
+extern const char kAdaptiveChargingHoldPercentPref[];
+
+// The percent range over which the battery will charge/discharge while Adaptive
+// Charging is delaying the charge to full.
+extern const char kAdaptiveChargingHoldDeltaPercentPref[];
+
+// The probability cutoff value to use for ML models for a prediction on whether
+// the system will be unplugged on a given hour.
+extern const char kAdaptiveChargingMinProbabilityPref[];
+
+// If true, Adaptive Charging will be enabled by default.
+extern const char kAdaptiveChargingEnabledPref[];
+
+// If true, slow charging in Adaptive Charging will be enabled.
+extern const char kSlowAdaptiveChargingEnabledPref[];
+
+// If true, always limit battery charge to the Adaptive Charging hold percent.
+extern const char kChargeLimitEnabledPref[];
+
 // Milliseconds to wait after setting the backlight to 0 before asking Chrome to
 // turn off the display via DPMS.
 extern const char kTurnOffScreenTimeoutMsPref[];
@@ -165,19 +202,10 @@ extern const char kTurnOffScreenTimeoutMsPref[];
 // If true, disables dark resume even on systems where it is available.
 extern const char kDisableDarkResumePref[];
 
-// If true, disables hibernate even on systems where it is available.
-extern const char kDisableHibernatePref[];
-
 // Seconds in suspend without full resume after which the device should
 // hibernate or shut down proactively. Should be a positive integer for
 // the feature to be enabled.
 extern const char kLowerPowerFromSuspendSecPref[];
-
-// sysfs device directories with power/dark_resume_active and
-// power/dark_resume_source files, respectively, that are used to control
-// whether dark resume is enabled in the kernel.
-extern const char kDarkResumeDevicesPref[];
-extern const char kDarkResumeSourcesPref[];
 
 // If true, policies sent by Chrome will be ignored.
 extern const char kIgnoreExternalPolicyPref[];
@@ -206,9 +234,10 @@ extern const char kExternalDisplayOnlyPref[];
 // releases properly.
 extern const char kLegacyPowerButtonPref[];
 
-// If true, record suspend and resume timestamps in eventlog using the "mosys"
-// command.
-extern const char kMosysEventlogPref[];
+// If true, record suspend and resume timestamps in the firmware
+// eventlog manually by calling "elogtool add".  This is usually only
+// necessary on ARM platforms.
+extern const char kManualEventlogAddPref[];
 
 // If true, use CRAS, the Chrome OS audio server, to monitor audio activity and
 // to mute audio when suspending.
@@ -232,6 +261,15 @@ extern const char kSuspendToIdlePref[];
 // These dependencies tell powerd the order to freeze cgroups in during suspend.
 // The pref for cgroup A will be "|kSuspendFreezerDepsPrefix|A".
 extern const char kSuspendFreezerDepsPrefix[];
+
+// If true, enable machine quirk detection feature.
+extern const char kHasMachineQuirksPref[];
+
+// List of devices with the SuspendToIdle machine quirk.
+extern const char kSuspendToIdleListPref[];
+
+// List of devices with the DisableIdleSuspend machine quirk.
+extern const char kSuspendPreventionListPref[];
 
 // If true, return Far when at least one of the sensors report far.
 extern const char kSetTransmitPowerPreferFarForProximityPref[];
@@ -263,6 +301,17 @@ extern const char kSetCellularTransmitPowerForActivityProximityPref[];
 // contains "LEVEL(ENUM) index", where LEVEL is the name of value from the
 // RadioTransmitPower enum (e.g. "LOW", "MEDIUM", "HIGH".).
 extern const char kSetCellularTransmitPowerLevelMappingPref[];
+
+// If true, start with Proximity sensor default value as Far.
+extern const char kSetDefaultProximityStateHighPref[];
+
+// If true, use the offset from kSetCellularRegulatoryDomainMappingPref
+extern const char kUseRegulatoryDomainForDynamicSARPref[];
+
+// String describing the offset corresponding to each regulatory domain.
+// Each line contains "DOMAIN offset", where DOMAIN is the name of value
+// from the CellularRegulatoryDomain enum (e.g. FCC, CE, ISED etc).
+extern const char kSetCellularRegulatoryDomainMappingPref[];
 
 // GPIO number for the dynamic power reduction signal of a built-in cellular
 // modem.
@@ -353,10 +402,10 @@ extern const char kBusNameOwnerChangedSignal[];
 extern const double kEpsilon;
 
 // Total time that should be used to gradually animate the backlight level
-// to a new brightness, in milliseconds.  Note that some
-// BacklightController implementations may not use animated transitions.
-extern const int64_t kFastBacklightTransitionMs;
-extern const int64_t kSlowBacklightTransitionMs;
+// to a new brightness. Note that some BacklightController implementations may
+// not use animated transitions.
+extern const base::TimeDelta kFastBacklightTransition;
+extern const base::TimeDelta kSlowBacklightTransition;
 // udev subsystem to watch for input device related events.
 extern const char kInputUdevSubsystem[];
 
@@ -385,6 +434,24 @@ enum class RadioTransmitPower {
 enum class ModemState {
   OFFLINE,
   ONLINE,
+  UNKNOWN,
+};
+
+enum class TriggerSource {
+  INIT,
+  TABLET_MODE,
+  REG_DOMAIN,
+  PROXIMITY,
+  UDEV_EVENT,
+  UNKNOWN,
+};
+
+enum class CellularRegulatoryDomain {
+  FCC,
+  ISED,
+  CE,
+  MIC,
+  KCC,
   UNKNOWN,
 };
 
@@ -438,6 +505,8 @@ enum class ShutdownReason {
   SYSTEM_UPDATE = 5,
   // Unclassified external request sent to powerd by another process.
   OTHER_REQUEST_TO_POWERD = 7,
+  // Multiple hibernate attempts failed.
+  HIBERNATE_FAILED = 8,
 };
 
 enum class WifiRegDomain {
@@ -451,6 +520,8 @@ enum class SuspendFlavor {
   SUSPEND_DEFAULT = 0,
   SUSPEND_TO_RAM = 1,
   SUSPEND_TO_DISK = 2,
+  RESUME_FROM_DISK_PREPARE = 3,
+  RESUME_FROM_DISK_ABORT = 4,
 };
 
 // Returns human-readable descriptions of enum values.
@@ -459,6 +530,7 @@ std::string LidStateToString(LidState state);
 std::string TabletModeToString(TabletMode mode);
 std::string UserProximityToString(UserProximity proximity);
 std::string RadioTransmitPowerToString(RadioTransmitPower power);
+std::string RegulatoryDomainToString(CellularRegulatoryDomain domain);
 std::string SessionStateToString(SessionState state);
 std::string DisplayModeToString(DisplayMode mode);
 std::string ButtonStateToString(ButtonState state);

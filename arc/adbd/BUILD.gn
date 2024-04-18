@@ -1,11 +1,15 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":arc-adbd" ]
+  deps = [
+    ":arc-adbd",
+    ":install_init",
+    ":install_policy",
+  ]
 
   if (use.fuzzer) {
     deps += [
@@ -13,6 +17,9 @@ group("all") {
       ":arc-adbd-setup-config-fs-fuzzer",
       ":arc-adbd-setup-function-fs-fuzzer",
     ]
+  }
+  if (use.arcvm) {
+    deps += [ ":install_systemd" ]
   }
   if (use.test) {
     deps += [
@@ -44,7 +51,38 @@ static_library("libarcadbd") {
 executable("arc-adbd") {
   sources = [ "adbd_main.cc" ]
   configs += [ ":config" ]
+  install_path = "sbin"
   deps = [ ":libarcadbd" ]
+}
+
+install_config("install_init") {
+  if (use.arcvm) {
+    sources = [ "init/arcvm-adbd.conf" ]
+  } else {
+    sources = [ "init/arc-adbd.conf" ]
+  }
+  install_path = "upstart"
+}
+
+if (use.arcvm) {
+  install_config("install_systemd") {
+    sources = [ "init/dbus-1/ArcVmAdbd.conf" ]
+    install_path = "dbus_system_d"
+  }
+}
+
+if (use.seccomp) {
+  install_config("install_policy") {
+    if (use.arcvm) {
+      _vm = "vm"
+    } else {
+      _vm = ""
+    }
+    _arch = getenv("ARCH")
+    sources = [ "seccomp/arc${_vm}-adbd-${_arch}.policy" ]
+    install_path = "seccomp_policy"
+    outputs = [ "arc${_vm}-adbd-seccomp.policy" ]
+  }
 }
 
 # Fuzzer only.

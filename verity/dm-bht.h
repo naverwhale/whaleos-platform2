@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010 The Chromium OS Authors <chromium-os-dev@chromium.org>
+ * Copyright 2010 The ChromiumOS Authors <chromium-os-dev@chromium.org>
  *
  * Device-Mapper block hash tree interface.
  * See Documentation/device-mapper/dm-bht.txt for details.
@@ -10,6 +10,8 @@
 #define VERITY_DM_BHT_H_
 
 #include <cstdint>
+#include <memory>
+#include <string>
 
 #include <brillo/brillo_export.h>
 
@@ -32,13 +34,13 @@
 /* Additional possible return codes */
 #define DM_BHT_ENTRY_ERROR_MISMATCH -3 /* Digest mismatch */
 
-#define PAGE_SIZE 4096
-#define PAGE_SHIFT 12
+#define PAGE_SIZE 4096ul
+#define PAGE_SHIFT 12ul
 
 typedef uint64_t sector_t;
 
 /* The value is 9 because the sector size is 512 bytes. */
-#define SECTOR_SHIFT 9
+#define SECTOR_SHIFT 9ul
 #define to_sector(x) ((x) >> SECTOR_SHIFT)
 #define verity_to_bytes(x) ((x) << SECTOR_SHIFT)
 
@@ -224,6 +226,46 @@ inline uint8_t* dm_bht_get_node(struct dm_bht* bht,
 
   return dm_bht_node(bht, entry, index % bht->node_count);
 }
+
+class DmBhtInterface {
+ public:
+  virtual ~DmBhtInterface() = default;
+
+  virtual int Create(unsigned int blocksize, std::string alg) = 0;
+  virtual void SetReadCallback(dm_bht_callback callback) = 0;
+  virtual void SetSalt(std::string hexsalt) = 0;
+  virtual void SetBuffer(void* buffer) = 0;
+  virtual sector_t Sectors() = 0;
+  virtual unsigned int DigestSize() = 0;
+  virtual int StoreBlock(unsigned int block, uint8_t* block_data) = 0;
+  virtual int Compute() = 0;
+  virtual void HexDigest(uint8_t* hexdigest, int available) = 0;
+};
+
+// Class wrapping C dm_bht functions.
+class BRILLO_EXPORT DmBht : public DmBhtInterface {
+ public:
+  DmBht() {}
+  ~DmBht() override;
+
+  // Disallow copying.
+  DmBht(const DmBht&) = delete;
+  DmBht& operator=(const DmBht&) = delete;
+
+  // `DmBhtInterface` overrides.
+  int Create(unsigned int blocksize, std::string alg) override;
+  void SetReadCallback(dm_bht_callback callback) override;
+  void SetSalt(std::string hexsalt) override;
+  void SetBuffer(void* buffer) override;
+  sector_t Sectors() override;
+  unsigned int DigestSize() override;
+  int StoreBlock(unsigned int block, uint8_t* block_data) override;
+  int Compute() override;
+  void HexDigest(uint8_t* hexdigest, int available) override;
+
+ private:
+  std::unique_ptr<struct dm_bht> dm_bht_ptr_;
+};
 
 }  // namespace verity
 

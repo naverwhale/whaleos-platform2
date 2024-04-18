@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,14 +30,13 @@
 #include <vector>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_split.h>
 #include <base/strings/stringprintf.h>
@@ -53,37 +52,7 @@
 
 using std::string;
 
-namespace {
-
-// Path to lsb-release file.
-constexpr char kLsbReleasePath[] = "/etc/lsb-release";
-
-// Chrome OS release track.
-constexpr char kChromeosReleaseTrackKey[] = "CHROMEOS_RELEASE_TRACK";
-
-// String denoting a test image.
-constexpr char kTestImageChannel[] = "testimage-channel";
-
-bool IsTestImage() {
-  brillo::KeyValueStore store;
-  if (!store.Load(base::FilePath(kLsbReleasePath))) {
-    LOG(ERROR) << "Could not read lsb-release";
-    return false;
-  }
-
-  std::string release;
-  if (!store.GetString(kChromeosReleaseTrackKey, &release)) {
-    // If the key isn't set, then assume not a test image.
-    return false;
-  }
-
-  return release == kTestImageChannel;
-}
-
-}  // namespace
-
-namespace vm_tools {
-namespace vsh {
+namespace vm_tools::vsh {
 
 std::unique_ptr<VshForwarder> VshForwarder::Create(base::ScopedFD sock_fd,
                                                    bool inherit_env,
@@ -106,8 +75,6 @@ VshForwarder::VshForwarder(base::ScopedFD sock_fd,
                            bool allow_to_switch_user)
     : sock_fd_(std::move(sock_fd)),
       inherit_env_(inherit_env),
-      interactive_(true),
-      exit_pending_(false),
       default_user_(std::move(default_user)),
       allow_to_switch_user_(allow_to_switch_user) {}
 
@@ -127,7 +94,7 @@ bool VshForwarder::Init() {
       user = default_user_;
     }
 
-    if (user != default_user_ && !IsTestImage()) {
+    if (user != default_user_ && !allow_to_switch_user_) {
       LOG(ERROR) << "Only " << default_user_
                  << " is allowed login on the VM shell";
       SendConnectionResponse(
@@ -331,8 +298,8 @@ bool VshForwarder::Init() {
   // signalfd will still have any queued SIGCHLD.
   signal_handler_.Init();
   signal_handler_.RegisterHandler(
-      SIGCHLD,
-      base::Bind(&VshForwarder::HandleSigchld, base::Unretained(this)));
+      SIGCHLD, base::BindRepeating(&VshForwarder::HandleSigchld,
+                                   base::Unretained(this)));
 
   return true;
 }
@@ -703,5 +670,4 @@ void VshForwarder::SendExitMessage() {
   Shutdown();
 }
 
-}  // namespace vsh
-}  // namespace vm_tools
+}  // namespace vm_tools::vsh

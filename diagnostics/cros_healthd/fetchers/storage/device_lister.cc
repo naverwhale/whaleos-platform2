@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,8 @@
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 
+#include "diagnostics/base/file_utils.h"
 #include "diagnostics/cros_healthd/fetchers/storage/platform.h"
-#include "diagnostics/cros_healthd/utils/file_utils.h"
 
 namespace diagnostics {
 

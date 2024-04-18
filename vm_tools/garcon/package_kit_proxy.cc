@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,26 +9,26 @@
 #include <utility>
 #include <vector>
 
-#include <base/command_line.h>
-#include <base/files/scoped_file.h>
-#include <base/process/launch.h>
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/command_line.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/notreached.h>
+#include <base/process/launch.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <dbus/error.h>
 #include <dbus/message.h>
 #include <dbus/property.h>
-#include <dbus/scoped_dbus_error.h>
 #include <vm_protos/proto_bindings/container_guest.grpc.pb.h>
 
 namespace vm_tools {
@@ -95,15 +95,14 @@ constexpr uint32_t kPackageKitTransactionFlagEnumNone = 0;
 // Timeout for when we are querying for package information.
 constexpr int kGetLinuxPackageInfoTimeoutSeconds = 60;
 constexpr base::TimeDelta kGetLinuxPackageInfoTimeout =
-    base::TimeDelta::FromSeconds(kGetLinuxPackageInfoTimeoutSeconds);
+    base::Seconds(kGetLinuxPackageInfoTimeoutSeconds);
 
 // Delay after startup for doing a repository cache refresh.
-constexpr base::TimeDelta kRefreshCacheStartupDelay =
-    base::TimeDelta::FromMinutes(5);
+constexpr base::TimeDelta kRefreshCacheStartupDelay = base::Minutes(5);
 
 // Periodic delay between repository cache refreshes after we do the initial one
 // after startup.
-constexpr base::TimeDelta kRefreshCachePeriod = base::TimeDelta::FromDays(1);
+constexpr base::TimeDelta kRefreshCachePeriod = base::Days(1);
 
 // Ridiculously large size for a config file.
 constexpr size_t kMaxConfigFileSize = 10 * 1024;  // 10 KB
@@ -209,16 +208,21 @@ class PackageKitTransaction : PackageKitProxy::PackageKitDeathObserver {
     dbus::MethodCall method_call(kPackageKitInterface,
                                  kCreateTransactionMethod);
     dbus::MessageWriter writer(&method_call);
-    std::unique_ptr<dbus::Response> dbus_response =
-        packagekit_service_proxy_->CallMethodAndBlockWithErrorDetails(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &dbus_error_);
-    if (!dbus_response) {
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
+        packagekit_service_proxy_->CallMethodAndBlock(
+            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus_error_ = std::move(dbus_response.error());
       GeneralErrorInternal("Failure calling CreateTransaction");
+      return;
+    }
+    if (!dbus_response.value()) {
+      GeneralErrorInternal("Failure getting non-null response.");
       return;
     }
     // CreateTransaction returns the object path for the transaction session we
     // have created.
-    dbus::MessageReader reader(dbus_response.get());
+    dbus::MessageReader reader(dbus_response.value().get());
     if (!reader.PopObjectPath(&transaction_path_)) {
       GeneralErrorInternal(
           "Failure reading object path from transaction result");
@@ -235,15 +239,15 @@ class PackageKitTransaction : PackageKitProxy::PackageKitDeathObserver {
     // of this yet, but it seems like a good idea to set it if it does occur.
     // Set locale with UTF-8 to support unicode in control files.  This is
     // what 'pkcon get-details-local <file>' does.
-    dbus::ScopedDBusError error;
     dbus::MethodCall sethints_call(kPackageKitTransactionInterface,
                                    kSetHintsMethod);
     dbus::MessageWriter sethints_writer(&sethints_call);
     sethints_writer.AppendArrayOfStrings(
         {"locale=en_US.UTF-8", "interactive=false"});
-    dbus_response = transaction_proxy_->CallMethodAndBlockWithErrorDetails(
-        &sethints_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &error);
-    if (!dbus_response) {
+    dbus_response = transaction_proxy_->CallMethodAndBlock(
+        &sethints_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus::Error error = std::move(dbus_response.error());
       // Don't propagate a failure, this was just a hint.
       LOG(WARNING) << "Failure calling SetHints - " << error.name() << ": "
                    << error.message();
@@ -261,8 +265,9 @@ class PackageKitTransaction : PackageKitProxy::PackageKitDeathObserver {
       transaction_properties_ =
           std::make_unique<PackageKitTransactionProperties>(
               transaction_proxy_,
-              base::Bind(&PackageKitTransaction::OnPackageKitPropertyChanged,
-                         base::Unretained(this)));
+              base::BindRepeating(
+                  &PackageKitTransaction::OnPackageKitPropertyChanged,
+                  base::Unretained(this)));
       transaction_properties_->ConnectSignals();
       transaction_properties_->GetAll();
     }
@@ -322,7 +327,7 @@ class PackageKitTransaction : PackageKitProxy::PackageKitDeathObserver {
   }
 
   void GeneralErrorInternal(const std::string& details) {
-    if (dbus_error_.is_set()) {
+    if (dbus_error_.IsValid()) {
       GeneralError(details + "(error=" + dbus_error_.name() + ": " +
                    dbus_error_.message() + ")");
     } else {
@@ -338,31 +343,31 @@ class PackageKitTransaction : PackageKitProxy::PackageKitDeathObserver {
     if (signal_mask_ & kErrorCodeSignalMask) {
       signal_mask_ = signal_mask_ & ~kErrorCodeSignalMask;
       signal_name.assign(kErrorCodeSignal);
-      signal_callback = base::Bind(&PackageKitTransaction::OnErrorSignal,
-                                   base::Unretained(this));
+      signal_callback = base::BindRepeating(
+          &PackageKitTransaction::OnErrorSignal, base::Unretained(this));
     } else if (signal_mask_ & kFinishedSignalMask) {
       signal_mask_ = signal_mask_ & ~kFinishedSignalMask;
       signal_name.assign(kFinishedSignal);
-      signal_callback = base::Bind(&PackageKitTransaction::OnFinishedSignal,
-                                   base::Unretained(this));
+      signal_callback = base::BindRepeating(
+          &PackageKitTransaction::OnFinishedSignal, base::Unretained(this));
     } else if (signal_mask_ & kPackageSignalMask) {
       signal_mask_ = signal_mask_ & ~kPackageSignalMask;
       signal_name.assign(kPackageSignal);
-      signal_callback = base::Bind(&PackageKitTransaction::OnPackageSignal,
-                                   base::Unretained(this));
+      signal_callback = base::BindRepeating(
+          &PackageKitTransaction::OnPackageSignal, base::Unretained(this));
     } else if (signal_mask_ & kDetailsSignalMask) {
       signal_mask_ = signal_mask_ & ~kDetailsSignalMask;
       signal_name.assign(kDetailsSignal);
-      signal_callback = base::Bind(&PackageKitTransaction::OnDetailsSignal,
-                                   base::Unretained(this));
+      signal_callback = base::BindRepeating(
+          &PackageKitTransaction::OnDetailsSignal, base::Unretained(this));
     } else {
       NOTREACHED();
     }
 
     transaction_proxy_->ConnectToSignal(
         kPackageKitTransactionInterface, signal_name, signal_callback,
-        base::Bind(&PackageKitTransaction::OnSignalConnected,
-                   base::Unretained(this)));
+        base::BindOnce(&PackageKitTransaction::OnSignalConnected,
+                       base::Unretained(this)));
   }
 
   void OnSignalConnected(const std::string& interface_name,
@@ -486,7 +491,7 @@ class PackageKitTransaction : PackageKitProxy::PackageKitDeathObserver {
 
  protected:
   scoped_refptr<dbus::Bus> bus_;
-  dbus::ScopedDBusError dbus_error_;
+  dbus::Error dbus_error_;
   PackageKitProxy* packagekit_proxy_;                          // Not owned.
   scoped_refptr<dbus::ObjectProxy> packagekit_service_proxy_;  // Not owned.
 
@@ -541,10 +546,14 @@ class GetDetailsTransaction : public PackageKitTransaction {
     dbus::MessageWriter writer(&method_call);
     writer.AppendArrayOfStrings({value});
 
-    std::unique_ptr<dbus::Response> dbus_response =
-        transaction_proxy->CallMethodAndBlockWithErrorDetails(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &dbus_error_);
-    return !!dbus_response;
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
+        transaction_proxy->CallMethodAndBlock(
+            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus_error_ = std::move(dbus_response.error());
+      return false;
+    }
+    return !!dbus_response.value();
   }
 
   void ErrorReceived(uint32_t error_code, const std::string& details) override {
@@ -605,8 +614,7 @@ class SearchFilesTransaction : public PackageKitTransaction {
             packagekit_service_proxy,
             kErrorCodeSignalMask | kFinishedSignalMask | kPackageSignalMask),
         file_path_(file_path),
-        callback_(std::move(callback)),
-        callback_called_(false) {}
+        callback_(std::move(callback)) {}
 
   bool ExecuteRequest(dbus::ObjectProxy* transaction_proxy) override {
     dbus::MethodCall method_call(kPackageKitTransactionInterface,
@@ -617,34 +625,36 @@ class SearchFilesTransaction : public PackageKitTransaction {
     // packages.
     writer.AppendUint64(kPackageKitFilterInstalled);
     writer.AppendArrayOfStrings({file_path_.value()});
-    std::unique_ptr<dbus::Response> dbus_response =
-        transaction_proxy->CallMethodAndBlockWithErrorDetails(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &dbus_error_);
-    return !!dbus_response;
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
+        transaction_proxy->CallMethodAndBlock(
+            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus_error_ = std::move(dbus_response.error());
+      return false;
+    }
+    return !!dbus_response.value();
   }
 
   void GeneralError(const std::string& details) override {
     LOG(ERROR) << "Problem with SearchFiles transaction for file "
                << file_path_.value() << ": " << details;
     // Check if we've already done the callback.
-    if (callback_called_)
+    if (!callback_)
       return;
-    callback_called_ = true;
-    callback_.Run(false /*success*/, false /*pkg_found*/,
-                  PackageKitProxy::LinuxPackageInfo(), details);
+    std::move(callback_).Run(false /*success*/, false /*pkg_found*/,
+                             PackageKitProxy::LinuxPackageInfo(), details);
   }
 
   void ErrorReceived(uint32_t error_code, const std::string& details) override {
     LOG(ERROR) << "Failure searching local Linux Packages by file "
                << file_path_.value() << ": " << details;
     // Check if we've already done the callback.
-    if (callback_called_)
+    if (!callback_)
       return;
-    callback_called_ = true;
     // We will still get a Finished signal where we finalize everything, but
     // no need to wait for it.
-    callback_.Run(false /*success*/, false /*pkg_found*/,
-                  PackageKitProxy::LinuxPackageInfo(), details);
+    std::move(callback_).Run(false /*success*/, false /*pkg_found*/,
+                             PackageKitProxy::LinuxPackageInfo(), details);
   }
 
   void PackageReceived(uint32_t code,
@@ -652,32 +662,30 @@ class SearchFilesTransaction : public PackageKitTransaction {
                        const std::string& summary) override {
     LOG(INFO) << "Got a package for local file " << file_path_.value();
     // Check if we've already done the callback.
-    if (callback_called_)
+    if (!callback_)
       return;
-    callback_called_ = true;
     PackageKitProxy::LinuxPackageInfo pkg_info;
     pkg_info.package_id = package_id;
     pkg_info.summary = summary;
-    callback_.Run(true /*success*/, true /*pkg_found*/, pkg_info, "");
+    std::move(callback_).Run(true /*success*/, true /*pkg_found*/, pkg_info,
+                             "");
   }
 
   void FinishedReceived(uint32_t exit_code) override {
     LOG(INFO) << "Finished with SearchFiles transaction for local file "
               << file_path_.value();
-    if (callback_called_)
+    if (!callback_)
       return;
-    callback_called_ = true;
 
     // If we got here without calling the callback, PackageKit couldn't find a
     // package corresponding to the file.
-    callback_.Run(true /*success*/, false /*pkg_found*/,
-                  PackageKitProxy::LinuxPackageInfo(), "");
+    std::move(callback_).Run(true /*success*/, false /*pkg_found*/,
+                             PackageKitProxy::LinuxPackageInfo(), "");
   }
 
  private:
   base::FilePath file_path_;
   PackageKitProxy::PackageSearchCallback callback_;
-  bool callback_called_;
 };
 
 // Sublcass for handling InstallFiles and InstallPackages. If |package_id|
@@ -743,10 +751,14 @@ class InstallTransaction : public PackageKitTransaction {
     writer.AppendUint64(0);  // Allow installing untrusted files.
     writer.AppendArrayOfStrings({value});
 
-    std::unique_ptr<dbus::Response> dbus_response =
-        transaction_proxy->CallMethodAndBlockWithErrorDetails(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &dbus_error_);
-    return !!dbus_response;
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
+        transaction_proxy->CallMethodAndBlock(
+            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus_error_ = std::move(dbus_response.error());
+      return false;
+    }
+    return !!dbus_response.value();
   }
 
   void ErrorReceived(uint32_t error_code, const std::string& details) override {
@@ -856,10 +868,14 @@ class UninstallPackagesTransaction : public PackageKitTransaction {
     // don't want to rely on the user knowing they need to run special cleanup
     // commands.
     writer.AppendBool(true);
-    std::unique_ptr<dbus::Response> dbus_response =
-        transaction_proxy->CallMethodAndBlockWithErrorDetails(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &dbus_error_);
-    return !!dbus_response;
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
+        transaction_proxy->CallMethodAndBlock(
+            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus_error_ = std::move(dbus_response.error());
+      return false;
+    }
+    return !!dbus_response.value();
   }
 
   void GeneralError(const std::string& details) override {
@@ -957,10 +973,14 @@ class UpdatePackagesTransaction : public PackageKitTransaction {
     dbus::MessageWriter writer(&method_call);
     writer.AppendUint64(0);  // No transaction flag.
     writer.AppendArrayOfStrings(package_ids_);
-    std::unique_ptr<dbus::Response> dbus_response =
-        transaction_proxy->CallMethodAndBlockWithErrorDetails(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &dbus_error_);
-    return !!dbus_response;
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
+        transaction_proxy->CallMethodAndBlock(
+            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus_error_ = std::move(dbus_response.error());
+      return false;
+    }
+    return !!dbus_response.value();
   }
 
   void ErrorReceived(uint32_t error_code, const std::string& details) override {
@@ -1006,10 +1026,14 @@ class GetUpdatesTransaction : public PackageKitTransaction {
     dbus::MessageWriter writer(&method_call);
     // Set the filter to installed packages.
     writer.AppendUint64(kPackageKitFilterInstalled);
-    std::unique_ptr<dbus::Response> dbus_response =
-        transaction_proxy->CallMethodAndBlockWithErrorDetails(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &dbus_error_);
-    return !!dbus_response;
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
+        transaction_proxy->CallMethodAndBlock(
+            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus_error_ = std::move(dbus_response.error());
+      return false;
+    }
+    return !!dbus_response.value();
   }
 
   void ErrorReceived(uint32_t error_code, const std::string& details) override {
@@ -1070,10 +1094,10 @@ void RunAptUpdate(scoped_refptr<dbus::Bus> bus,
     // Don't do the update now, but schedule another one for later and we will
     // check the setting again then.
     LOG(INFO) << "Not performing automatic update because they are disabled";
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&RunAptUpdate, bus, packagekit_proxy,
-                   packagekit_service_proxy),
+        base::BindOnce(&RunAptUpdate, bus, packagekit_proxy,
+                       packagekit_service_proxy),
         kRefreshCachePeriod);
     return;
   }
@@ -1111,10 +1135,10 @@ void RunAptUpdate(scoped_refptr<dbus::Bus> bus,
     LOG(ERROR) << "Failure performing refresh of package cache, output: "
                << output;
   }
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&RunAptUpdate, bus, packagekit_proxy,
-                 packagekit_service_proxy),
+      base::BindOnce(&RunAptUpdate, bus, packagekit_proxy,
+                     packagekit_service_proxy),
       kRefreshCachePeriod);
 }
 
@@ -1132,8 +1156,7 @@ class ResolveTransaction : public PackageKitTransaction {
             packagekit_service_proxy,
             kErrorCodeSignalMask | kFinishedSignalMask | kPackageSignalMask),
         package_name_(package_name),
-        callback_(std::move(callback)),
-        callback_called_(false) {}
+        callback_(std::move(callback)) {}
 
   bool ExecuteRequest(dbus::ObjectProxy* transaction_proxy) override {
     dbus::MethodCall method_call(kPackageKitTransactionInterface,
@@ -1141,34 +1164,36 @@ class ResolveTransaction : public PackageKitTransaction {
     dbus::MessageWriter writer(&method_call);
     writer.AppendUint64(kPackageKitFilterNone);
     writer.AppendArrayOfStrings({package_name_});
-    std::unique_ptr<dbus::Response> dbus_response =
-        transaction_proxy->CallMethodAndBlockWithErrorDetails(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, &dbus_error_);
-    return !!dbus_response;
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
+        transaction_proxy->CallMethodAndBlock(
+            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+    if (!dbus_response.has_value()) {
+      dbus_error_ = std::move(dbus_response.error());
+      return false;
+    }
+    return !!dbus_response.value();
   }
 
   void GeneralError(const std::string& details) override {
     LOG(ERROR) << "Problem with Resolve transaction for package: "
                << package_name_ << ": " << details;
     // Check if we've already done the callback.
-    if (callback_called_)
+    if (!callback_)
       return;
-    callback_called_ = true;
-    callback_.Run(false /*success*/, false /*pkg_found*/,
-                  PackageKitProxy::LinuxPackageInfo(), details);
+    std::move(callback_).Run(false /*success*/, false /*pkg_found*/,
+                             PackageKitProxy::LinuxPackageInfo(), details);
   }
 
   void ErrorReceived(uint32_t error_code, const std::string& details) override {
     LOG(ERROR) << "Failure resolving package " << package_name_ << ": "
                << details;
     // Check if we've already done the callback.
-    if (callback_called_)
+    if (!callback_)
       return;
-    callback_called_ = true;
     // We will still get a Finished signal where we finalize everything, but
     // no need to wait for it.
-    callback_.Run(false /*success*/, false /*pkg_found*/,
-                  PackageKitProxy::LinuxPackageInfo(), details);
+    std::move(callback_).Run(false /*success*/, false /*pkg_found*/,
+                             PackageKitProxy::LinuxPackageInfo(), details);
   }
 
   void PackageReceived(uint32_t code,
@@ -1176,31 +1201,29 @@ class ResolveTransaction : public PackageKitTransaction {
                        const std::string& summary) override {
     LOG(INFO) << "Got a package for package name: " << package_name_;
     // Check if we've already done the callback.
-    if (callback_called_)
+    if (!callback_)
       return;
-    callback_called_ = true;
     PackageKitProxy::LinuxPackageInfo pkg_info;
     pkg_info.package_id = package_id;
     pkg_info.summary = summary;
-    callback_.Run(true /*success*/, true /*pkg_found*/, pkg_info, "");
+    std::move(callback_).Run(true /*success*/, true /*pkg_found*/, pkg_info,
+                             "");
   }
 
   void FinishedReceived(uint32_t exit_code) override {
     LOG(INFO) << "Finished resolving package name";
-    if (callback_called_)
+    if (!callback_)
       return;
-    callback_called_ = true;
 
     // If we got here without calling the callback, PackageKit couldn't resolve
     // the package name into a package id.
-    callback_.Run(true /*success*/, false /*pkg_found*/,
-                  PackageKitProxy::LinuxPackageInfo(), "");
+    std::move(callback_).Run(true /*success*/, false /*pkg_found*/,
+                             PackageKitProxy::LinuxPackageInfo(), "");
   }
 
  private:
   std::string package_name_;
   PackageKitProxy::PackageSearchCallback callback_;
-  bool callback_called_;
 };
 
 }  // namespace
@@ -1246,7 +1269,7 @@ std::unique_ptr<PackageKitProxy> PackageKitProxy::Create(
 }
 
 PackageKitProxy::PackageKitProxy(PackageKitObserver* observer)
-    : task_runner_(base::ThreadTaskRunnerHandle::Get()),
+    : task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       observer_(observer),
       blocking_operation_active_(false) {}
 
@@ -1268,15 +1291,15 @@ bool PackageKitProxy::Init() {
     LOG(ERROR) << "Failed to get PackageKit D-Bus proxy";
     return false;
   }
-  packagekit_service_proxy_->WaitForServiceToBeAvailable(base::Bind(
+  packagekit_service_proxy_->WaitForServiceToBeAvailable(base::BindOnce(
       &PackageKitProxy::OnPackageKitServiceAvailable, base::Unretained(this)));
 
   // Fire off a delayed task to do a repo update so that we can do automatic
   // upgrades on our managed packages.
   task_runner_->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&RunAptUpdate, bus_, base::Unretained(this),
-                 packagekit_service_proxy_),
+      base::BindOnce(&RunAptUpdate, bus_, base::Unretained(this),
+                     packagekit_service_proxy_),
       kRefreshCacheStartupDelay);
   return true;
 }
@@ -1294,8 +1317,9 @@ bool PackageKitProxy::GetLinuxPackageInfoFromFilePath(
   std::shared_ptr<PackageInfoTransactionData> data =
       std::make_shared<PackageInfoTransactionData>(file_path, out_pkg_info);
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&PackageKitProxy::GetLinuxPackageInfoOnDBusThread,
-                            base::Unretained(this), data));
+      FROM_HERE,
+      base::BindOnce(&PackageKitProxy::GetLinuxPackageInfoOnDBusThread,
+                     base::Unretained(this), data));
 
   bool result;
   if (!data->event.TimedWait(kGetLinuxPackageInfoTimeout)) {
@@ -1327,7 +1351,7 @@ bool PackageKitProxy::GetLinuxPackageInfoFromPackageName(
 
   ResolvePackageName(
       package_name,
-      base::Bind(
+      base::BindOnce(
           &PackageKitProxy::
               GetLinuxPackageInfoFromPackageNameResolvePackageNameCallback,
           base::Unretained(this), data, out_error));
@@ -1349,8 +1373,9 @@ void PackageKitProxy::ResolvePackageName(const std::string& package_name,
   LOG(INFO) << "Resolving package name: " << package_name;
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&PackageKitProxy::ResolvePackageNameOnDBusThread,
-                 base::Unretained(this), package_name, std::move(callback)));
+      base::BindOnce(&PackageKitProxy::ResolvePackageNameOnDBusThread,
+                     base::Unretained(this), package_name,
+                     std::move(callback)));
 }
 
 void PackageKitProxy::
@@ -1386,8 +1411,9 @@ void PackageKitProxy::
   // This object is intentionally leaked and will clean itself up when done
   // with all the D-Bus communication.
   task_runner_->PostTask(
-      FROM_HERE, base::Bind(&PackageKitProxy::GetLinuxPackageInfoOnDBusThread,
-                            base::Unretained(this), data));
+      FROM_HERE,
+      base::BindOnce(&PackageKitProxy::GetLinuxPackageInfoOnDBusThread,
+                     base::Unretained(this), data));
 }
 
 vm_tools::container::InstallLinuxPackageResponse::Status
@@ -1411,9 +1437,9 @@ PackageKitProxy::InstallLinuxPackageFromFilePath(
       &blocking_operation_active_mutex_, &blocking_operation_active_);
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&PackageKitProxy::InstallLinuxPackageFromFilePathOnDBusThread,
-                 base::Unretained(this), file_path, command_uuid,
-                 base::Passed(&clearer)));
+      base::BindOnce(
+          &PackageKitProxy::InstallLinuxPackageFromFilePathOnDBusThread,
+          base::Unretained(this), file_path, command_uuid, std::move(clearer)));
   return vm_tools::container::InstallLinuxPackageResponse::STARTED;
 }
 
@@ -1438,9 +1464,10 @@ PackageKitProxy::InstallLinuxPackageFromPackageId(
       &blocking_operation_active_mutex_, &blocking_operation_active_);
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&PackageKitProxy::InstallLinuxPackageFromPackageIdOnDBusThread,
-                 base::Unretained(this), package_id, command_uuid,
-                 base::Passed(&clearer)));
+      base::BindOnce(
+          &PackageKitProxy::InstallLinuxPackageFromPackageIdOnDBusThread,
+          base::Unretained(this), package_id, command_uuid,
+          std::move(clearer)));
   return vm_tools::container::InstallLinuxPackageResponse::STARTED;
 }
 
@@ -1463,9 +1490,9 @@ PackageKitProxy::UninstallPackageOwningFile(const base::FilePath& file_path,
       &blocking_operation_active_mutex_, &blocking_operation_active_);
 
   // Start search
-  PackageSearchCallback callback = base::Bind(
+  PackageSearchCallback callback = base::BindOnce(
       &PackageKitProxy::UninstallPackageOwningFileSearchForFileCallback,
-      base::Unretained(this), file_path, base::Passed(&clearer));
+      base::Unretained(this), file_path, std::move(clearer));
   SearchLinuxPackagesForFile(file_path, std::move(callback));
   return vm_tools::container::UninstallPackageOwningFileResponse::STARTED;
 }
@@ -1512,8 +1539,8 @@ void PackageKitProxy::SearchLinuxPackagesForFile(
             << file_path.value();
   task_runner_->PostTask(
       FROM_HERE,
-      base::Bind(&PackageKitProxy::SearchLinuxPackagesForFileOnDBusThread,
-                 base::Unretained(this), file_path, std::move(callback)));
+      base::BindOnce(&PackageKitProxy::SearchLinuxPackagesForFileOnDBusThread,
+                     base::Unretained(this), file_path, std::move(callback)));
 }
 
 void PackageKitProxy::AddPackageKitDeathObserver(
@@ -1597,8 +1624,8 @@ void PackageKitProxy::OnPackageKitNameOwnerChanged(
 void PackageKitProxy::OnPackageKitServiceAvailable(bool service_is_available) {
   if (service_is_available) {
     packagekit_service_proxy_->SetNameOwnerChangedCallback(
-        base::Bind(&PackageKitProxy::OnPackageKitNameOwnerChanged,
-                   base::Unretained(this)));
+        base::BindRepeating(&PackageKitProxy::OnPackageKitNameOwnerChanged,
+                            base::Unretained(this)));
   }
 }
 

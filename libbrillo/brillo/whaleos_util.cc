@@ -8,25 +8,50 @@
 #include <base/files/file_util.h>
 #include <base/strings/string_util.h>
 
+namespace {
+
+constexpr char kProductNameFile[] =
+    "/sys/class/dmi/id/product_name";
+constexpr char kBiosVersionFile[] =
+    "/sys/class/dmi/id/bios_version";
+
+}  // namespace
+
 namespace brillo {
 
-bool IsWhalebook2Model() {
-  std::string product_name;
-  base::FilePath file_path("/sys/class/dmi/id/product_name");
+std::string GetBiosVersion() {
+  base::FilePath file_path(kBiosVersionFile);
+  std::string bios_version;
   std::string file_content;
 
-  if (!base::ReadFileToString(file_path, &file_content)) {
-    return false;
-  }
+  base::ReadFileToString(file_path, &file_content);
+  base::TrimWhitespaceASCII(file_content, base::TRIM_ALL, &bios_version);
 
+  return bios_version;
+}
+
+std::string GetProductName() {
+  base::FilePath file_path(kProductNameFile);
+  std::string product_name;
+  std::string file_content;
+
+  base::ReadFileToString(file_path, &file_content);
   base::TrimWhitespaceASCII(file_content, base::TRIM_ALL, &product_name);
+
+  return product_name;
+}
+
+bool IsWhalebook2Model() {
+  std::string product_name = GetProductName();
 
   static const std::string kModelNameStartings[] = {
     "14T30Q",
     "14TN30Q",
     "14TW30Q",
+    "14TN30S",
+    "14TW30S",
   };
-  for (size_t i = 0; i < base::size(kModelNameStartings); i++) {
+  for (size_t i = 0; i < std::size(kModelNameStartings); i++) {
     if (base::StartsWith(product_name, kModelNameStartings[i])) {
       return true;
     }

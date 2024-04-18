@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,13 +13,13 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/message_loop/message_pump_type.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/task/single_thread_task_executor.h>
 #include <base/time/time.h>
 #include <brillo/flag_helper.h>
+#include <libec/ec_command_factory.h>
 
 #include "power_manager/common/battery_percentage_converter.h"
 #include "power_manager/common/power_constants.h"
@@ -51,7 +51,7 @@ std::string ValueToString(T value) {
 
 class InfoDisplay {
  public:
-  InfoDisplay() : name_indent_(0), value_indent_(0) {}
+  InfoDisplay() = default;
   InfoDisplay(const InfoDisplay&) = delete;
   InfoDisplay& operator=(const InfoDisplay&) = delete;
 
@@ -79,8 +79,8 @@ class InfoDisplay {
   }
 
  private:
-  int name_indent_;
-  int value_indent_;
+  int name_indent_ = 0;
+  int value_indent_ = 0;
 };
 
 }  // namespace
@@ -100,15 +100,17 @@ int main(int argc, char** argv) {
   power_manager::system::UdevStub udev;
   power_manager::system::DBusWrapperStub dbus_wrapper;
   base::FilePath path(power_manager::kPowerStatusPath);
+  base::FilePath cros_ec_path(ec::kCrosEcPath);
+  ec::EcCommandFactory ec_command_factory;
 
   auto battery_percentage_converter =
       power_manager::BatteryPercentageConverter::CreateFromPrefs(&prefs);
 
   power_manager::system::PowerSupply power_supply;
-  power_supply.Init(path, &prefs, &udev, &dbus_wrapper,
-                    battery_percentage_converter.get());
+  power_supply.Init(path, cros_ec_path, &ec_command_factory, &prefs, &udev,
+                    &dbus_wrapper, battery_percentage_converter.get());
 
-  CHECK(power_supply.RefreshImmediately());
+  CHECK(power_supply.RefreshImmediatelyWithRetry());
   const PowerStatus status = power_supply.GetPowerStatus();
 
   // NOTE, autotests (see autotest/files/client/cros/power_status.py) rely on

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,7 @@
 
 #include "power_manager/powerd/policy/ambient_light_pref_fuzz_util.h"
 
-namespace power_manager {
-namespace policy {
-namespace test {
+namespace power_manager::policy::test {
 
 std::string GenerateAmbientLightPref(FuzzedDataProvider* data_provider,
                                      int max_step,
@@ -56,6 +54,4 @@ std::string GenerateAmbientLightPref(FuzzedDataProvider* data_provider,
   return pref;
 }
 
-}  // namespace test
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy::test

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,11 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
+#include <base/observer_list.h>
 #include <dbus/bus.h>
+#include <debugd/src/session_manager_observer_interface.h>
 
 namespace dbus {
 class ObjectProxy;
@@ -30,6 +31,11 @@ class SessionManagerProxy {
   SessionManagerProxy& operator=(const SessionManagerProxy&) = delete;
 
   ~SessionManagerProxy() = default;
+
+  // Adds or removes an observer.
+  void AddObserver(SessionManagerObserverInterface* observer);
+  void RemoveObserver(SessionManagerObserverInterface* observer);
+
   // Sets up the proxy for Chrome remote debugging and tries to enable it.
   void EnableChromeRemoteDebugging();
 
@@ -40,6 +46,9 @@ class SessionManagerProxy {
   // Tries to enable Chrome remote debugging.
   void EnableChromeRemoteDebuggingInternal();
 
+  // Handler for SessionStateChanged signal.
+  void OnSessionStateChanged(dbus::Signal*);
+
   scoped_refptr<dbus::Bus> bus_;
   dbus::ObjectProxy* proxy_;  // weak, owned by |bus_|
 
@@ -48,6 +57,7 @@ class SessionManagerProxy {
   // Whether Chrome remote debugging is already successfully enabled.
   bool is_chrome_remote_debugging_enabled_ = false;
 
+  base::ObserverList<SessionManagerObserverInterface> observer_list_;
   base::WeakPtrFactory<SessionManagerProxy> weak_ptr_factory_;
 };
 

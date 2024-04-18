@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -414,6 +414,57 @@ TEST_F(DesktopFileTest, GenerateArgvNoArgs) {
             std::vector<std::string>({"/usr/bin/vim"}));
 }
 
+TEST_F(DesktopFileTest, FindDesktopFileWithHyphens) {
+  base::FilePath test_path = WriteContentsToPath(
+      "[Desktop Entry]\n"
+      "Type=Application\n"
+      "Name=TestApplication\n",
+      "test-file.desktop");
+  EXPECT_EQ(test_path.value(),
+            DesktopFile::FindFileForDesktopId("test-file").value());
+
+  test_path = WriteContentsToPath(
+      "[Desktop Entry]\n"
+      "Type=Application\n"
+      "Name=TestApplication\n",
+      "some/test-file.desktop");
+  EXPECT_EQ(test_path.value(),
+            DesktopFile::FindFileForDesktopId("some-test-file").value());
+
+  test_path = WriteContentsToPath(
+      "[Desktop Entry]\n"
+      "Type=Application\n"
+      "Name=TestApplication\n",
+      "some-small/testfile.desktop");
+  EXPECT_EQ(test_path.value(),
+            DesktopFile::FindFileForDesktopId("some-small-testfile").value());
+
+  test_path = WriteContentsToPath(
+      "[Desktop Entry]\n"
+      "Type=Application\n"
+      "Name=TestApplication\n",
+      "some-small/test-file.desktop");
+  EXPECT_EQ(test_path.value(),
+            DesktopFile::FindFileForDesktopId("some-small-test-file").value());
+
+  test_path = WriteContentsToPath(
+      "[Desktop Entry]\n"
+      "Type=Application\n"
+      "Name=TestApplication\n",
+      "some/other-small/test-file.desktop");
+  EXPECT_EQ(
+      test_path.value(),
+      DesktopFile::FindFileForDesktopId("some-other-small-test-file").value());
+
+  test_path = WriteContentsToPath(
+      "[Desktop Entry]\n"
+      "Type=Application\n"
+      "Name=TestApplication\n",
+      "some/small/test-file.desktop");
+  EXPECT_EQ(test_path.value(),
+            DesktopFile::FindFileForDesktopId("some-small-test-file").value());
+}
+
 TEST_F(DesktopFileTest, GenerateArgvComplexArgs) {
   std::unique_ptr<DesktopFile> desktop_file = ValidateDesktopFile(
       "[Desktop Entry]\n"
@@ -467,17 +518,17 @@ TEST_F(DesktopFileTest, GenerateArgvComplexArgs) {
 
 TEST_F(DesktopFileTest, GenerateArgvWithQuotingAndEscaping) {
   EXPECT_EQ(ValidateDesktopFile(
-                u8R"xxx(
+                R"xxx(
                 [Desktop Entry]
                 Type=Application
-                Name=QuoteMaster
-                Exec=quote-master %% \"A B %f %i C \\" B \\\\ \" \"C D\"
+                Name=QuothTRaven
+                Exec=quoth-t-raven %% \"A B %f %i C \\" B \\\\ \" \"C D\"
                 )xxx",
-                "quoter.desktop",
+                "nevermore.desktop",
                 {
-                    "quoter",
+                    "nevermore",
                     "Application",
-                    {std::make_pair("", "QuoteMaster")},
+                    {std::make_pair("", "QuothTRaven")},
                     {},
                     {},
                     false,
@@ -485,12 +536,12 @@ TEST_F(DesktopFileTest, GenerateArgvWithQuotingAndEscaping) {
                     false,
                     {},
                     "",
-                    u8R"xxx(quote-master %% "A B %f %i C \" B \\ " "C D")xxx",
+                    R"xxx(quoth-t-raven %% "A B %f %i C \" B \\ " "C D")xxx",
                 },
                 true)
                 ->GenerateArgvWithFiles(std::vector<std::string>()),
             std::vector<std::string>(
-                {"quote-master", "%", u8R"xxx(A B %f %i C " B \ )xxx", "C D"}));
+                {"quoth-t-raven", "%", R"xxx(A B %f %i C " B \ )xxx", "C D"}));
 }
 
 TEST_F(DesktopFileTest, MissingNameFails) {
@@ -594,7 +645,7 @@ TEST_F(DesktopFileTest, DontPassDesktopFileWithOnlyShowIn) {
 }
 
 TEST_F(DesktopFileTest, PassCheckTerminalDesktopFiles) {
-  EXPECT_FALSE(
+  EXPECT_TRUE(
       ShouldPassDesktopFileContents("[Desktop Entry]\n"
                                     "Type=Application\n"
                                     "Exec=mybinary\n"

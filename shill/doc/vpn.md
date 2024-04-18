@@ -8,12 +8,8 @@ representing a virtual interface) may not exist when a Connect is
 requested. Therefore the standard means of a `Service` passing Connect requests
 over to its corresponding `Device` does not work. Also since the `VirtualDevice`
 type is not unique to a particular VPN solution (`PPPDevices`, for example, are
-used for cellular dongles, PPPoE, and L2TP/IPsec VPNs), the VPN-specific logic
-cannot be contained within the `VirtualDevice` instance. Note that PPPoE is in a
-similar position but solves this by piggybacking off of the `Ethernet` instance
-that will carry the PPPoE traffic, moving the complexity of PPPoE configuration
-into `Ethernet` code, which creates a `PPPoEService` rather than
-`EthernetService` when PPPoE is used.
+used for cellular dongles, and L2TP/IPsec VPNs), the VPN-specific logic cannot
+be contained within the `VirtualDevice` instance.
 
 For VPN, this is solved through the use of `VPNDrivers`. A `VPNDriver` takes
 care of attaining a proper `VirtualDevice`, communicating with processes outside
@@ -34,7 +30,7 @@ Each of these types has a corresponding `VPNDriver` child which contains the
 functionality needed on the Shill-side to support that VPN solution (note that
 Shill's involvement varies between different types of VPNs):
 
-![VPNDriver Inheritance](images/vpn_driver_inheritance.png)
+![VPNDriver Inheritance](https://storage.googleapis.com/chromium-website-lob-storage/3c5afd9bada7cc8f1d3bfe735d28824aed309d5c)
 
 When a `VPNService` is created by `VPNProvider` (whether from a `Manager`
 ConfigureService D-Bus call or from a `Profile` containing an already-configured
@@ -50,11 +46,11 @@ valid for `Services` whose "Type" property is of value "vpn". See
 Android 3rd-party VPNs (implemented using the [Android `VpnService` API] in ARC
 are the VPN type requiring the least amount of functionality within Shill, where
 the majority of the `ArcVpnDriver` functionality is just setting up routing
-properly. arc-networkd creates an ARC bridge, which serves as a host-side (v4
+properly. patchpanel creates an ARC bridge, which serves as a host-side (v4
 NAT-ed) proxy for the arc0 interface on the Android-side. In addition,
-arc-networkd creates a corresponding arc_${IFNAME} interface for each interface
-named ${IFNAME} exposed by the Shill `Manager` (see arc-networkd
-`DeviceManager::OnDevicesChanged` for more detail). This allows traffic from the
+patchpanel creates a corresponding arc_${IFNAME} interface for each interface
+named ${IFNAME} exposed by the Shill `Manager` (see patchpanel
+`Manager::OnShillDevicesChanged` for more detail). This allows traffic from the
 Android-side to have a specific host-side interface that will carry it.
 
 Traffic that needs to pass through the VPN gets sent to the ARC bridge rather
@@ -167,7 +163,7 @@ both a control and data channel.
 [Android `VpnService` API]: https://developer.android.com/reference/android/net/VpnService
 [ARC net.mojom interface]: https://cs.chromium.org/chromium/src/components/arc/mojom/net.mojom
 [`ArcNetHostImpl`]: https://cs.chromium.org/chromium/src/components/arc/net/arc_net_host_impl.h
-[`ArcNetworkBridge`]: https://cs.corp.google.com/master-arc-dev/vendor/google_arc/libs/arc-services/src/com/android/server/arc/net/ArcNetworkBridge.java
+[`ArcNetworkBridge`]: https://source.corp.google.com/rvc-arc/vendor/google_arc/libs/arc-net-services/src/com/android/server/arc/net/ArcNetworkBridge.java
 [Chrome `VpnService`]: https://cs.chromium.org/chromium/src/extensions/browser/api/vpn_provider/vpn_service.h
 [Chrome vpnProvider API]: https://developer.chrome.com/apps/vpnProvider
 [RFC 2661]: https://tools.ietf.org/html/rfc2661

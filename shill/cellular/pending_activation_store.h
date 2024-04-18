@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,9 +35,6 @@ class PendingActivationStore {
     // Currently, shill knows that activation has gone through, when a non-zero
     // MDN has been received OTA.
     kStateActivated,
-    // This state is used in CDMA activation to indicate that OTA activation
-    // failed and was scheduled for a retry.
-    kStateFailureRetry,
     kStateMax,
   };
 

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,6 +12,7 @@
 #include <base/run_loop.h>
 
 namespace diagnostics {
+namespace wilco {
 
 // Creates a RunLoop with a BarrierClosure and calls the ShutDown method
 // on the passed-in |services|.
@@ -23,7 +24,7 @@ template <typename... Services>
 void ShutDownServicesInRunLoop(Services*... services) {
   CHECK(!base::RunLoop::IsRunningOnCurrentThread());
   base::RunLoop run_loop;
-  const base::Closure barrier_closure =
+  const base::RepeatingClosure barrier_closure =
       base::BarrierClosure(sizeof...(services), run_loop.QuitClosure());
 
   // Braced initializer lists guarantee the execution of clauses from left to
@@ -36,6 +37,7 @@ void ShutDownServicesInRunLoop(Services*... services) {
   run_loop.Run();
 }
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_SERVICE_UTIL_H_

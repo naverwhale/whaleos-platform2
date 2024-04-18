@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright 2016 The Chromium OS Authors. All rights reserved.
+# Copyright 2016 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -9,20 +9,22 @@ UI_MACHINE_INFO_FILE=/run/session_manager/machine-info
 # Just continue if one of the commands below fails.
 set +e
 
-# Grab full VPD data from dump_vpd_log, which contains the machine
-# serial number and echo group code.
-#if defined(WHALEBOOK)
-dmidecode -s system-serial-number |
-    awk '{ print "\"serial_number\"=\"" $1 "\""}' \
-    > "${UI_MACHINE_INFO_FILE}"
-if [ ! -s "${UI_MACHINE_INFO_FILE}" ]; then
-  dump_vpd_log --full --stdout > "${UI_MACHINE_INFO_FILE}"
-fi
-#else
-#dump_vpd_log --full --stdout > "${UI_MACHINE_INFO_FILE}"
-#endif
+# Create an empty file so that we can simply append to it.
+true > "${UI_MACHINE_INFO_FILE}"
 
-# Grab the disk serial number from the udev database.
+# Grab full VPD data from dump_vpd_log, which contains the machine
+# serial number on ChromeOS devices, as well as the echo group code.
+# TODO(drcrash): Filter down this information to what is strictly necessary.
+# IF WHALE
+serial_number="$(dmidecode -s system-serial-number)"
+serial_number=$(whale_serial_number_fallback "${serial_number}")
+echo "\"serial_number\"=\"${serial_number}\"" >> "${UI_MACHINE_INFO_FILE}"
+# ELSE
+# dump_vpd_log --full --stdout >> "${UI_MACHINE_INFO_FILE}"
+# ENDIF
+
+# Grab the disk serial number from the udev database before the VPD is dumped.
+# This prevents someone overriding its value through the VPD.
 ROOTDEV=$(rootdev -s -d || true)
 udevadm info --query=property --name="${ROOTDEV}" |
     awk -F = '/^ID_SERIAL=/ { print "\"root_disk_serial_number\"=\"" $2 "\""}' \

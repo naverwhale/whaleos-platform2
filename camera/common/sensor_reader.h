@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -7,11 +7,12 @@
 #ifndef CAMERA_COMMON_SENSOR_READER_H_
 #define CAMERA_COMMON_SENSOR_READER_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/memory/weak_ptr.h>
-#include <base/single_thread_task_runner.h>
+#include <base/task/single_thread_task_runner.h>
 #include <iioservice/mojo/sensor.mojom.h>
 #include <mojo/public/cpp/bindings/receiver.h>
 #include <mojo/public/cpp/bindings/remote.h>
@@ -20,7 +21,7 @@
 
 namespace cros {
 
-class SensorReader final : public mojom::SensorDeviceSamplesObserver {
+class SensorReader : public mojom::SensorDeviceSamplesObserver {
  public:
   static constexpr int kNumberOfAxes = 3;
 
@@ -31,11 +32,11 @@ class SensorReader final : public mojom::SensorDeviceSamplesObserver {
                double scale,
                SamplesObserver* samples_observer,
                mojo::Remote<mojom::SensorDevice> remote);
-  ~SensorReader();
+  ~SensorReader() override;
 
   // SensorDeviceSamplesObserver Mojo interface implementation.
-  void OnSampleUpdated(const base::flat_map<int32_t, int64_t>& sample);
-  void OnErrorOccurred(mojom::ObserverErrorType type);
+  void OnSampleUpdated(const base::flat_map<int32_t, int64_t>& sample) override;
+  void OnErrorOccurred(mojom::ObserverErrorType type) override;
 
  private:
   void ResetOnError();
@@ -61,8 +62,8 @@ class SensorReader final : public mojom::SensorDeviceSamplesObserver {
   SamplesObserver* samples_observer_;
   mojo::Remote<mojom::SensorDevice> sensor_device_remote_;
 
-  base::Optional<int32_t> channel_indices_[kNumberOfAxes];
-  base::Optional<int32_t> timestamp_index_;
+  std::optional<int32_t> channel_indices_[kNumberOfAxes];
+  std::optional<int32_t> timestamp_index_;
 
   mojo::Receiver<mojom::SensorDeviceSamplesObserver> receiver_{this};
 

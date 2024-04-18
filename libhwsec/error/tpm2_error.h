@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,51 +15,38 @@
 #include "libhwsec/hwsec_export.h"
 
 namespace hwsec {
-namespace error {
 
 // The error handler object for TPM2.
-class HWSEC_EXPORT TPM2ErrorObj : public TPMErrorBaseObj {
+class HWSEC_EXPORT TPM2Error : public TPMErrorBase {
  public:
-  inline explicit TPM2ErrorObj(trunks::TPM_RC error_code)
-      : error_code_(error_code) {}
-  virtual ~TPM2ErrorObj() = default;
-  std::string ToReadableString() const;
-  hwsec_foundation::error::ErrorBase SelfCopy() const;
-  TPMRetryAction ToTPMRetryAction() const;
-  inline trunks::TPM_RC ErrorCode() { return error_code_; }
+  struct MakeStatusTrait {
+    auto operator()(trunks::TPM_RC error_code) {
+      using hwsec_foundation::status::NewStatus;
+      using hwsec_foundation::status::OkStatus;
 
- protected:
-  TPM2ErrorObj(TPM2ErrorObj&&) = default;
+      if (error_code != trunks::TPM_RC_SUCCESS) {
+        return NewStatus<TPM2Error>(error_code);
+      }
+      return OkStatus<TPM2Error>();
+    }
+  };
+
+  explicit TPM2Error(trunks::TPM_RC error_code);
+  ~TPM2Error() override = default;
+  TPMRetryAction ToTPMRetryAction() const override;
+  trunks::TPM_RC ErrorCode() const { return error_code_; }
+  unified_tpm_error::UnifiedError UnifiedErrorCode() const override {
+    // TPM 2.0 error code is 16 bits, with bit 12-15 being the layer bit
+    unified_tpm_error::UnifiedError error_code =
+        static_cast<unified_tpm_error::UnifiedError>(error_code_);
+    DCHECK_EQ(error_code & (~unified_tpm_error::kUnifiedErrorMask), 0);
+    return error_code | unified_tpm_error::kUnifiedErrorBit;
+  }
 
  private:
   const trunks::TPM_RC error_code_;
 };
-using TPM2Error = std::unique_ptr<TPM2ErrorObj>;
 
-}  // namespace error
 }  // namespace hwsec
-
-namespace hwsec_foundation {
-namespace error {
-
-// Overload CreateError, so it would return nullptr when the |error_code|
-// representing success.
-template <typename ErrorType,
-          typename T,
-          typename std::enable_if<
-              std::is_same<ErrorType, hwsec::error::TPM2Error>::value>::type* =
-              nullptr,
-          decltype(hwsec::error::TPM2ErrorObj(
-              std::forward<T>(std::declval<T&&>())))* = nullptr>
-hwsec::error::TPM2Error CreateError(T&& error_code) {
-  if (error_code != trunks::TPM_RC_SUCCESS) {
-    return std::make_unique<hwsec::error::TPM2ErrorObj>(
-        std::forward<T>(error_code));
-  }
-  return nullptr;
-}
-
-}  // namespace error
-}  // namespace hwsec_foundation
 
 #endif  // LIBHWSEC_ERROR_TPM2_ERROR_H_

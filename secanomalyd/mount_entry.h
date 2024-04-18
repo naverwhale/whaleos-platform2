@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,31 @@
 
 #include <base/files/file_path.h>
 #include <base/strings/string_piece.h>
+
+#include "secanomalyd/system_context.h"
+
+namespace secanomalyd {
+
+using ContextChecker = base::RepeatingCallback<bool(const SystemContext&)>;
+// For every known mount there is a callback that ensures mounts are only
+// ignored in the right context (e.g. only ignored if non-persistent).
+const std::map<base::FilePath, ContextChecker> kKnownMounts{
+    // /run/arc/shared_mounts/data and /home/root/<hash>/android-data/data only
+    // exist for less than a second during the setup phase of ARC++ (only
+    // applicable in container-based systems).
+    {base::FilePath("/run/arc/shared_mounts/data"),
+     base::BindRepeating([](const SystemContext& context) {
+       return (context.IsUserLoggedIn() &&
+               !context.IsMountPersistent(
+                   base::FilePath("/run/arc/shared_mounts/data")));
+     })},
+    {base::FilePath("/home/root/<hash>/android-data/data"),
+     base::BindRepeating([](const SystemContext& context) {
+       return (context.IsUserLoggedIn() &&
+               !context.IsMountPersistent(
+                   base::FilePath("/home/root/<hash>/android-data/data")));
+     })},
+};
 
 class MountEntry;
 using MountEntryMap = std::map<base::FilePath, MountEntry>;
@@ -35,9 +60,17 @@ class MountEntry {
   bool IsDestInUsrLocal() const;
   bool IsNamespaceBindMount() const;
 
+  // IsKnownMount() allows us to avoid polluting our reports with W+X mounts
+  // that we know are not high-risk. Each mount that we allow is covered by
+  // a bug tracking its fix.
+  bool IsKnownMount(const SystemContext& context) const;
+
   const base::FilePath& src() const { return src_; }
   const base::FilePath& dest() const { return dest_; }
   const std::string& type() const { return type_; }
+
+  // This will return a string of the form "<src> <dest> <type> <opt1>,...".
+  std::string FullDescription() const;
 
  private:
   base::FilePath src_;
@@ -45,5 +78,7 @@ class MountEntry {
   std::string type_;
   std::vector<std::string> opts_;
 };
+
+}  // namespace secanomalyd
 
 #endif  // SECANOMALYD_MOUNT_ENTRY_H_

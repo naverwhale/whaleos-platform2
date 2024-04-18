@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,12 +9,13 @@
 
 #include <unistd.h>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
-#include <base/files/file.h>
+#include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/files/file.h>
 #include <base/files/memory_mapped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <brillo/message_loops/message_loop.h>
@@ -30,11 +31,18 @@
 #include "ml/grammar_library.h"
 #include "ml/handwriting.h"
 #include "ml/handwriting_recognizer_impl.h"
+#include "ml_core/dlc/dlc_client.h"
+#if USE_ONDEVICE_IMAGE_CONTENT_ANNOTATION
+#include "ml/image_content_annotation.h"
+#endif
+#include "ml/image_content_annotation_impl.h"
 #include "ml/model_impl.h"
 #include "ml/mojom/handwriting_recognizer.mojom.h"
+#include "ml/mojom/image_content_annotation.mojom.h"
 #include "ml/mojom/model.mojom.h"
 #include "ml/mojom/soda.mojom.h"
 #include "ml/mojom/web_platform_handwriting.mojom.h"
+#include "ml/mojom/web_platform_model.mojom.h"
 #include "ml/process.h"
 #include "ml/request_metrics.h"
 #include "ml/soda_recognizer_impl.h"
@@ -42,6 +50,7 @@
 #include "ml/text_suggester_impl.h"
 #include "ml/text_suggestions.h"
 #include "ml/web_platform_handwriting_recognizer_impl.h"
+#include "ml/web_platform_model_loader_impl.h"
 
 namespace ml {
 
@@ -66,6 +75,8 @@ constexpr char kSystemModelDir[] = "/opt/google/chrome/ml_models/";
 // Base name for UMA metrics related to model loading (`LoadBuiltinModel`,
 // `LoadFlatBufferModel`, `LoadTextClassifier` or LoadHandwritingModel).
 constexpr char kMetricsRequestName[] = "LoadModelResult";
+
+constexpr int kMlServiceDBusUid = 20177;
 
 constexpr char kIcuDataFilePath[] = "/opt/google/chrome/icudtl.dat";
 
@@ -138,6 +149,7 @@ void LoadDocumentScannerFromPath(
                  << static_cast<int>(result);
       std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
       request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
+      brillo::MessageLoop::current()->BreakLoop();
       return;
     }
   }
@@ -236,6 +248,7 @@ void MachineLearningServiceImpl::LoadBuiltinModel(
     LOG(ERROR) << "Failed to load model file '" << model_path << "'.";
     std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
     request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
+    brillo::MessageLoop::current()->BreakLoop();
     return;
   }
 
@@ -295,6 +308,7 @@ void MachineLearningServiceImpl::LoadFlatBufferModel(
                << spec->metrics_model_name << "'.";
     std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
     request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
+    brillo::MessageLoop::current()->BreakLoop();
     return;
   }
 
@@ -315,6 +329,28 @@ void MachineLearningServiceImpl::LoadFlatBufferModel(
 void MachineLearningServiceImpl::LoadTextClassifier(
     mojo::PendingReceiver<TextClassifier> receiver,
     LoadTextClassifierCallback callback) {
+  // If it is run in the control process, spawn a worker process and forward the
+  // request to it.
+  if (Process::GetInstance()->IsControlProcess()) {
+    pid_t worker_pid;
+    mojo::PlatformChannel channel;
+    constexpr char kModelName[] = "TextClassifierModel";
+    if (!Process::GetInstance()->SpawnWorkerProcessAndGetPid(
+            channel, kModelName, &worker_pid)) {
+      // UMA metrics have already been reported in
+      // `SpawnWorkerProcessAndGetPid`.
+      std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+      return;
+    }
+    Process::GetInstance()
+        ->SendMojoInvitationAndGetRemote(worker_pid, std::move(channel),
+                                         kModelName)
+        ->LoadTextClassifier(std::move(receiver), std::move(callback));
+    return;
+  }
+
+  // From here below is the worker process.
+
   RequestMetrics request_metrics("TextClassifier", kMetricsRequestName);
   request_metrics.StartRecordingPerformanceMetrics();
 
@@ -323,6 +359,7 @@ void MachineLearningServiceImpl::LoadTextClassifier(
     LOG(ERROR) << "Failed to create TextClassifierImpl object.";
     std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
     request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
+    brillo::MessageLoop::current()->BreakLoop();
     return;
   }
 
@@ -450,9 +487,14 @@ void MachineLearningServiceImpl::LoadHandwritingModel(
   // TODO(claudiomagni): When Language Packs is complete, deprecate the first
   // case and only use Language Packs.
   if (is_handwriting_enabled || is_language_packs_enabled) {
-    LoadHandwritingLibAndRecognizer<HandwritingRecognizer>(
-        std::move(spec), std::move(receiver), std::move(callback),
+    // TODO(honglinyu): when Web Platform HWR's `HandwritingModelConstraint`
+    // also contains the `library_dlc_path` field, we will not need to pass in
+    // the `lib_path` separately because it is already in `spec`. Now this
+    // needed to share the template function `LoadHandwritingLibAndRecognizer`.
+    const std::string lib_path = spec->library_dlc_path.value_or(
         ml::HandwritingLibrary::kHandwritingDefaultInstallDir);
+    LoadHandwritingLibAndRecognizer<HandwritingRecognizer>(
+        std::move(spec), std::move(receiver), std::move(callback), lib_path);
     return;
   }
 
@@ -470,48 +512,11 @@ void MachineLearningServiceImpl::LoadHandwritingModel(
   NOTREACHED();
 }
 
-void MachineLearningServiceImpl::LoadHandwritingModelWithSpec(
+void MachineLearningServiceImpl::REMOVED_4(
     HandwritingRecognizerSpecPtr spec,
     mojo::PendingReceiver<HandwritingRecognizer> receiver,
-    LoadHandwritingModelWithSpecCallback callback) {
-  RequestMetrics request_metrics("HandwritingModel", kMetricsRequestName);
-  request_metrics.StartRecordingPerformanceMetrics();
-
-  // Load HandwritingLibrary.
-  auto* const hwr_library = ml::HandwritingLibrary::GetInstance();
-
-  if (hwr_library->GetStatus() ==
-      ml::HandwritingLibrary::Status::kNotSupported) {
-    LOG(ERROR) << "Initialize ml::HandwritingLibrary with error "
-               << static_cast<int>(hwr_library->GetStatus());
-
-    std::move(callback).Run(LoadModelResult::FEATURE_NOT_SUPPORTED_ERROR);
-    request_metrics.RecordRequestEvent(
-        LoadModelResult::FEATURE_NOT_SUPPORTED_ERROR);
-    return;
-  }
-
-  if (hwr_library->GetStatus() != ml::HandwritingLibrary::Status::kOk) {
-    LOG(ERROR) << "Initialize ml::HandwritingLibrary with error "
-               << static_cast<int>(hwr_library->GetStatus());
-
-    std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
-    request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
-    return;
-  }
-
-  // Create HandwritingRecognizer.
-  if (!HandwritingRecognizerImpl::Create(std::move(spec),
-                                         std::move(receiver))) {
-    LOG(ERROR) << "LoadHandwritingRecognizer returned false.";
-    std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
-    request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
-    return;
-  }
-
-  std::move(callback).Run(LoadModelResult::OK);
-  request_metrics.FinishRecordingPerformanceMetrics();
-  request_metrics.RecordRequestEvent(LoadModelResult::OK);
+    REMOVED_4Callback callback) {
+  NOTIMPLEMENTED();
 }
 
 void MachineLearningServiceImpl::LoadSpeechRecognizer(
@@ -570,6 +575,28 @@ void MachineLearningServiceImpl::LoadGrammarChecker(
     mojo::PendingReceiver<chromeos::machine_learning::mojom::GrammarChecker>
         receiver,
     LoadGrammarCheckerCallback callback) {
+  // If it is run in the control process, spawn a worker process and forward the
+  // request to it.
+  if (Process::GetInstance()->IsControlProcess()) {
+    pid_t worker_pid;
+    mojo::PlatformChannel channel;
+    constexpr char kModelName[] = "GrammarCheckerModel";
+    if (!Process::GetInstance()->SpawnWorkerProcessAndGetPid(
+            channel, kModelName, &worker_pid)) {
+      // UMA metrics have already been reported in
+      // `SpawnWorkerProcessAndGetPid`.
+      std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+      return;
+    }
+    Process::GetInstance()
+        ->SendMojoInvitationAndGetRemote(worker_pid, std::move(channel),
+                                         kModelName)
+        ->LoadGrammarChecker(std::move(receiver), std::move(callback));
+    return;
+  }
+
+  // From here below is the worker process.
+
   RequestMetrics request_metrics("GrammarChecker", kMetricsRequestName);
   request_metrics.StartRecordingPerformanceMetrics();
 
@@ -584,6 +611,7 @@ void MachineLearningServiceImpl::LoadGrammarChecker(
     std::move(callback).Run(LoadModelResult::FEATURE_NOT_SUPPORTED_ERROR);
     request_metrics.RecordRequestEvent(
         LoadModelResult::FEATURE_NOT_SUPPORTED_ERROR);
+    brillo::MessageLoop::current()->BreakLoop();
     return;
   }
 
@@ -593,6 +621,7 @@ void MachineLearningServiceImpl::LoadGrammarChecker(
 
     std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
     request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
+    brillo::MessageLoop::current()->BreakLoop();
     return;
   }
 
@@ -600,6 +629,7 @@ void MachineLearningServiceImpl::LoadGrammarChecker(
   if (!GrammarCheckerImpl::Create(std::move(receiver))) {
     std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
     request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
+    brillo::MessageLoop::current()->BreakLoop();
     return;
   }
 
@@ -726,16 +756,187 @@ void MachineLearningServiceImpl::LoadWebPlatformHandwritingModel(
 void MachineLearningServiceImpl::LoadDocumentScanner(
     mojo::PendingReceiver<chromeos::machine_learning::mojom::DocumentScanner>
         receiver,
+    chromeos::machine_learning::mojom::DocumentScannerConfigPtr config,
     LoadDocumentScannerCallback callback) {
-  // TODO(b/180564352): Make it run on separate worker process.
   if (!ml::DocumentScannerLibrary::IsSupported()) {
     LOG(ERROR) << "Document scanner library is not supported";
     std::move(callback).Run(LoadModelResult::FEATURE_NOT_SUPPORTED_ERROR);
     return;
   }
 
+  // If it is run in the control process, spawn a worker process and forward the
+  // request to it.
+  if (Process::GetInstance()->IsControlProcess()) {
+    pid_t worker_pid;
+    mojo::PlatformChannel channel;
+    constexpr char kModelName[] = "DocumentScanner";
+    if (!Process::GetInstance()->SpawnWorkerProcessAndGetPid(
+            channel, kModelName, &worker_pid)) {
+      // UMA metrics have already been reported in
+      // `SpawnWorkerProcessAndGetPid`.
+      std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+      return;
+    }
+    Process::GetInstance()
+        ->SendMojoInvitationAndGetRemote(worker_pid, std::move(channel),
+                                         kModelName)
+        ->LoadDocumentScanner(std::move(receiver), std::move(config),
+                              std::move(callback));
+    return;
+  }
+
+  // From here below is the worker process.
+  std::string path = ml::kLibDocumentScannerDefaultDir;
+  if (!config.is_null()) {
+    path = config->library_dlc_path->path;
+  }
   LoadDocumentScannerFromPath(std::move(receiver), std::move(callback),
-                              ml::kLibDocumentScannerDefaultDir);
+                              std::move(path));
+}
+
+void MachineLearningServiceImpl::CreateWebPlatformModelLoader(
+    mojo::PendingReceiver<model_loader::mojom::ModelLoader> receiver,
+    model_loader::mojom::CreateModelLoaderOptionsPtr options,
+    CreateWebPlatformModelLoaderCallback callback) {
+  // If it is run in the control process, spawn a worker process and forward the
+  // request to it.
+  if (Process::GetInstance()->IsControlProcess()) {
+    // Currently, we only support "TfLite".
+    //   - If the input type is `kAuto`, we will try to load it as "TfLite".
+    //   - If the device preference is `kGpu`, it will fallback to CPU.
+    if (options->model_format != model_loader::mojom::ModelFormat::kTfLite &&
+        options->model_format != model_loader::mojom::ModelFormat::kAuto) {
+      std::move(callback).Run(
+          model_loader::mojom::CreateModelLoaderResult::kNotSupported);
+      return;
+    }
+
+    pid_t worker_pid;
+    mojo::PlatformChannel channel;
+    constexpr char kModelName[] = "WebPlatformFlatBufferModel";
+    if (!Process::GetInstance()->SpawnWorkerProcessAndGetPid(
+            channel, kModelName, &worker_pid)) {
+      // UMA metrics have already been reported in
+      // `SpawnWorkerProcessAndGetPid`.
+      std::move(callback).Run(
+          model_loader::mojom::CreateModelLoaderResult::kUnknownError);
+      return;
+    }
+    Process::GetInstance()
+        ->SendMojoInvitationAndGetRemote(worker_pid, std::move(channel),
+                                         kModelName)
+        ->CreateWebPlatformModelLoader(std::move(receiver), std::move(options),
+                                       std::move(callback));
+    return;
+  }
+
+  // From here below is the worker process.
+  RequestMetrics request_metrics("WebPlatformTfLiteFlatBufferModel",
+                                 "CreateModelLoaderResult");
+  request_metrics.StartRecordingPerformanceMetrics();
+
+  WebPlatformModelLoaderImpl::Create(std::move(receiver), std::move(options));
+
+  std::move(callback).Run(model_loader::mojom::CreateModelLoaderResult::kOk);
+
+  request_metrics.FinishRecordingPerformanceMetrics();
+  request_metrics.RecordRequestEvent(
+      model_loader::mojom::CreateModelLoaderResult::kOk);
+}
+
+void MachineLearningServiceImpl::LoadImageAnnotator(
+    chromeos::machine_learning::mojom::ImageAnnotatorConfigPtr config,
+    mojo::PendingReceiver<
+        ::chromeos::machine_learning::mojom::ImageContentAnnotator> receiver,
+    LoadImageAnnotatorCallback callback) {
+  if (!USE_ONDEVICE_IMAGE_CONTENT_ANNOTATION) {
+    LOG(ERROR) << "Image content annotator library is not supported";
+    std::move(callback).Run(LoadModelResult::FEATURE_NOT_SUPPORTED_ERROR);
+    return;
+  }
+
+  // If it is run in the control process, spawn a worker process and forward the
+  // request to it.
+  if (Process::GetInstance()->IsControlProcess()) {
+    pid_t worker_pid;
+    mojo::PlatformChannel channel;
+    constexpr char kModelName[] = "ImageAnnotator";
+    if (!Process::GetInstance()->SpawnWorkerProcessAndGetPid(
+            channel, kModelName, &worker_pid)) {
+      // UMA metrics have already been reported in
+      // `SpawnWorkerProcessAndGetPid`.
+      std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+      return;
+    }
+    Process::GetInstance()
+        ->SendMojoInvitationAndGetRemote(worker_pid, std::move(channel),
+                                         kModelName)
+        ->LoadImageAnnotator(std::move(config), std::move(receiver),
+                             std::move(callback));
+    return;
+  }
+  // From here below is the worker process.
+
+  // Change euid so we can connect to dbus to install DLC.
+  if (seteuid(kMlServiceDBusUid) != 0) {
+    LOG(ERROR) << "Failed to seteuid for dbus";
+    std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+    return;
+  }
+  // Create ml core dlc client for this worker process.
+  auto split = base::SplitOnceCallback(std::move(callback));
+  ml_core_dlc_client_ = cros::DlcClient::Create(
+      base::BindOnce(&MachineLearningServiceImpl::InternalLoadImageAnnotator,
+                     base::Unretained(this), std::move(config),
+                     std::move(receiver), std::move(split.first)),
+      base::BindOnce(
+          [](LoadImageAnnotatorCallback callback,
+             const std::string& error_msg) {
+            LOG(ERROR) << "Couldn't install DLC: " << error_msg;
+            std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+          },
+          std::move(split.second)));
+  if (seteuid(0) != 0) {
+    LOG(ERROR) << "Failed to seteuid";
+    std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+    return;
+  }
+  ml_core_dlc_client_->InstallDlc();
+}
+
+void MachineLearningServiceImpl::InternalLoadImageAnnotator(
+    chromeos::machine_learning::mojom::ImageAnnotatorConfigPtr config,
+    mojo::PendingReceiver<
+        ::chromeos::machine_learning::mojom::ImageContentAnnotator> receiver,
+    LoadImageAnnotatorCallback callback,
+    const base::FilePath& dlc_root) {
+  RequestMetrics request_metrics("ImageAnnotator", kMetricsRequestName);
+  request_metrics.StartRecordingPerformanceMetrics();
+
+#if USE_ONDEVICE_IMAGE_CONTENT_ANNOTATION
+  auto* const ica_library = ImageContentAnnotationLibrary::GetInstance(
+      dlc_root.Append("libcros_ml_core_internal.so"));
+  if (ica_library->GetStatus() != ImageContentAnnotationLibrary::Status::kOk) {
+    LOG(ERROR) << "Failed to initialize ImageContentAnnotationLibrary, error "
+               << static_cast<int>(ica_library->GetStatus());
+    std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+    return;
+  }
+#else
+  ImageContentAnnotationLibrary* const ica_library = nullptr;
+#endif
+  if (!ImageContentAnnotatorImpl::Create(std::move(config), std::move(receiver),
+                                         ica_library)) {
+    LOG(ERROR) << "Image content annotator creation failed.";
+    std::move(callback).Run(LoadModelResult::LOAD_MODEL_ERROR);
+    request_metrics.RecordRequestEvent(LoadModelResult::LOAD_MODEL_ERROR);
+    brillo::MessageLoop::current()->BreakLoop();
+    return;
+  }
+
+  request_metrics.FinishRecordingPerformanceMetrics();
+  std::move(callback).Run(LoadModelResult::OK);
+  request_metrics.RecordRequestEvent(LoadModelResult::OK);
 }
 
 }  // namespace ml

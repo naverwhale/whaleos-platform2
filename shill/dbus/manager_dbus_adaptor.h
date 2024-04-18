@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,17 +9,14 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 #include "dbus_bindings/org.chromium.flimflam.Manager.h"
 #include "shill/adaptor_interfaces.h"
 #include "shill/dbus/dbus_adaptor.h"
-#include "shill/dbus/dbus_service_watcher.h"
 
 namespace shill {
 
-class DBusServiceWatcherFactory;
 class Manager;
 
 // Subclass of DBusAdaptor for Manager objects
@@ -44,7 +41,7 @@ class ManagerDBusAdaptor : public org::chromium::flimflam::ManagerAdaptor,
 
   // Implementation of ManagerAdaptorInterface.
   void RegisterAsync(
-      const base::Callback<void(bool)>& completion_callback) override;
+      base::OnceCallback<void(bool)> completion_callback) override;
   const RpcIdentifier& GetRpcIdentifier() const override { return dbus_path(); }
   void EmitBoolChanged(const std::string& name, bool value) override;
   void EmitUintChanged(const std::string& name, uint32_t value) override;
@@ -88,6 +85,7 @@ class ManagerDBusAdaptor : public org::chromium::flimflam::ManagerAdaptor,
   bool RecheckPortal(brillo::ErrorPtr* error) override;
   bool RequestScan(brillo::ErrorPtr* error,
                    const std::string& technology) override;
+  bool RequestWiFiRestart(brillo::ErrorPtr* error) override;
   void EnableTechnology(DBusMethodResponsePtr<> response,
                         const std::string& technology_namer) override;
   void DisableTechnology(DBusMethodResponsePtr<> response,
@@ -115,7 +113,7 @@ class ManagerDBusAdaptor : public org::chromium::flimflam::ManagerAdaptor,
   bool ListDebugTags(brillo::ErrorPtr* error, std::string* tags) override;
   bool GetNetworksForGeolocation(brillo::ErrorPtr* error,
                                  brillo::VariantDictionary* networks) override;
-  bool ConnectToBestServices(brillo::ErrorPtr* error) override;
+  bool ScanAndConnectToBestServices(brillo::ErrorPtr* error) override;
   bool CreateConnectivityReport(brillo::ErrorPtr* error) override;
   bool ClaimInterface(brillo::ErrorPtr* error,
                       dbus::Message* message,
@@ -125,27 +123,41 @@ class ManagerDBusAdaptor : public org::chromium::flimflam::ManagerAdaptor,
                         dbus::Message* message,
                         const std::string& claimer_name,
                         const std::string& interface_name) override;
-  bool SetDNSProxyIPv4Address(brillo::ErrorPtr* error,
-                              const std::string& ipv4_address) override;
+  bool SetDNSProxyAddresses(brillo::ErrorPtr* error,
+                            const std::vector<std::string>& addresses) override;
+  bool ClearDNSProxyAddresses(brillo::ErrorPtr* error) override;
   bool SetDNSProxyDOHProviders(
       brillo::ErrorPtr* error,
       const brillo::VariantDictionary& providers) override;
+  bool AddPasspointCredentials(brillo::ErrorPtr* error,
+                               const dbus::ObjectPath& profile_rpcid,
+                               const brillo::VariantDictionary& args) override;
+  bool RemovePasspointCredentials(
+      brillo::ErrorPtr* error,
+      const dbus::ObjectPath& profile_rpcid,
+      const brillo::VariantDictionary& args) override;
+  void SetTetheringEnabled(DBusMethodResponsePtr<std::string> response,
+                           bool enabled) override;
+  void CheckTetheringReadiness(
+      DBusMethodResponsePtr<std::string> response) override;
+  void SetLOHSEnabled(DBusMethodResponsePtr<std::string> response,
+                      bool enabled) override;
+  void CreateP2PGroup(DBusMethodResponsePtr<brillo::VariantDictionary> response,
+                      const brillo::VariantDictionary& args) override;
+  void ConnectToP2PGroup(
+      DBusMethodResponsePtr<brillo::VariantDictionary> response,
+      const brillo::VariantDictionary& args) override;
+  void DestroyP2PGroup(
+      DBusMethodResponsePtr<brillo::VariantDictionary> response,
+      int shill_id) override;
+  void DisconnectFromP2PGroup(
+      DBusMethodResponsePtr<brillo::VariantDictionary> response,
+      int shill_id) override;
 
  private:
   friend class ManagerDBusAdaptorTest;
-  // Tests that require access to |watcher_for_device_claimer_|.
-  FRIEND_TEST(ManagerDBusAdaptorTest, ClaimInterface);
-  FRIEND_TEST(ManagerDBusAdaptorTest, OnDeviceClaimerVanished);
-  FRIEND_TEST(ManagerDBusAdaptorTest, ReleaseInterface);
-
-  void OnDeviceClaimerVanished();
 
   Manager* manager_;
-  // We store a pointer to |proxy_bus_| in order to create a
-  // DBusServiceWatcher objects.
-  scoped_refptr<dbus::Bus> proxy_bus_;
-  DBusServiceWatcherFactory* dbus_service_watcher_factory_;
-  std::unique_ptr<DBusServiceWatcher> watcher_for_device_claimer_;
 };
 
 }  // namespace shill

@@ -1,10 +1,13 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Use the run_biod_strace.sh script to generate an initial list of syscalls.
 
 # Don't allow execute and write at the same time
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
+
 mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 openat: 1
 read: 1
@@ -82,3 +85,4 @@ tgkill: 1
 # futex: Used by CHECK()/LOG(FATAL).
 futex: 1
 fstatfs: 1
+sysinfo: 1

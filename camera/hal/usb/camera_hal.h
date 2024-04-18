@@ -1,4 +1,4 @@
-/* Copyright 2016 The Chromium OS Authors. All rights reserved.
+/* Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -8,25 +8,25 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
-#include <base/single_thread_task_runner.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/thread_checker.h>
 #include <hardware/camera_common.h>
 
 #include "cros-camera/camera_metrics.h"
 #include "cros-camera/camera_mojo_channel_manager_token.h"
 #include "cros-camera/cros_camera_hal.h"
+#include "cros-camera/device_config.h"
 #include "cros-camera/future.h"
 #include "cros-camera/udev_watcher.h"
 #include "hal/usb/camera_characteristics.h"
 #include "hal/usb/camera_client.h"
-#include "hal/usb/camera_privacy_switch_monitor.h"
 #include "hal/usb/common_types.h"
-#include "hal/usb/cros_device_config.h"
+#include "hal/usb/v4l2_event_monitor.h"
 
 namespace cros {
 
@@ -41,14 +41,13 @@ class CameraHal : public UdevWatcher::Observer {
   CameraHal(const CameraHal&) = delete;
   CameraHal& operator=(const CameraHal&) = delete;
 
-  ~CameraHal();
+  ~CameraHal() override;
 
   static CameraHal& GetInstance();
 
   CameraMojoChannelManagerToken* GetMojoManagerToken();
 
   // Implementations for camera_module_t.
-  int OpenDevice(int id, const hw_module_t* module, hw_device_t** hw_device);
   int GetNumberOfCameras() const;
   int GetCameraInfo(int id, camera_info* info);
   int SetCallbacks(const camera_module_callbacks_t* callbacks);
@@ -65,6 +64,7 @@ class CameraHal : public UdevWatcher::Observer {
   int GetCameraInfo(int camera_id,
                     struct camera_info* info,
                     ClientType client_type);
+  void SetPrivacySwitchState(bool on);
 
   // Runs on device ops thread. Post a task to the thread which is used for
   // OpenDevice.
@@ -79,8 +79,11 @@ class CameraHal : public UdevWatcher::Observer {
   void OnDeviceAdded(ScopedUdevDevicePtr dev) override;
   void OnDeviceRemoved(ScopedUdevDevicePtr dev) override;
 
-  // The monitor for camera privacy switch status changed.
-  CameraPrivacySwitchMonitor privacy_switch_monitor_;
+  V4L2EventMonitor v4l2_event_monitor_;
+
+  // SW privacy switch state. The SW privacy switch is set by OS and independent
+  // from the HW privacy switch that some devices have.
+  bool sw_privacy_switch_on_ = false;
 
   // Cache device information because querying the information is very slow.
   std::map<int, DeviceInfo> device_infos_;
@@ -111,7 +114,7 @@ class CameraHal : public UdevWatcher::Observer {
   std::unique_ptr<UdevWatcher> udev_watcher_;
 
   // Used to access to the main configuration for Chrome OS.
-  std::unique_ptr<CrosDeviceConfig> cros_device_config_;
+  std::optional<DeviceConfig> cros_device_config_;
 
   // Map from device path to camera id.
   std::map<std::string, int> path_to_id_;
@@ -119,7 +122,7 @@ class CameraHal : public UdevWatcher::Observer {
   // The number of built-in cameras.  Use |int| instead of |size_t| here to
   // avoid casting everywhere since we also use it as an upper bound of built-in
   // camera id.
-  int num_builtin_cameras_;
+  int num_builtin_cameras_ = 0;
 
   // The next id for newly plugged external camera, which is starting from
   // |num_builtin_cameras_|.

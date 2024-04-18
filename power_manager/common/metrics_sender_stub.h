@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,7 @@ class MetricsSenderStub : public MetricsSenderInterface {
     };
 
     Metric();
-    ~Metric();
+    ~Metric() = default;
 
     // Returns a new exponential metric initialized to the passed-in values.
     static Metric CreateExp(

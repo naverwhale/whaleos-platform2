@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,10 +21,6 @@ class Ethernet;
 using EthernetConstRefPtr = scoped_refptr<const Ethernet>;
 using EthernetRefPtr = scoped_refptr<Ethernet>;
 
-class PPPDevice;
-using PPPDeviceConstRefPtr = scoped_refptr<const PPPDevice>;
-using PPPDeviceRefPtr = scoped_refptr<PPPDevice>;
-
 class VirtualDevice;
 using VirtualDeviceConstRefPtr = scoped_refptr<const VirtualDevice>;
 using VirtualDeviceRefPtr = scoped_refptr<VirtualDevice>;
@@ -36,6 +32,11 @@ using WiFiRefPtr = scoped_refptr<WiFi>;
 class WiFiEndpoint;
 using WiFiEndpointConstRefPtr = scoped_refptr<const WiFiEndpoint>;
 using WiFiEndpointRefPtr = scoped_refptr<WiFiEndpoint>;
+
+class PasspointCredentials;
+using PasspointCredentialsConstRefPtr =
+    scoped_refptr<const PasspointCredentials>;
+using PasspointCredentialsRefPtr = scoped_refptr<PasspointCredentials>;
 
 class Service;
 using ServiceConstRefPtr = scoped_refptr<const Service>;
@@ -57,19 +58,17 @@ class WiFiService;
 using WiFiServiceConstRefPtr = scoped_refptr<const WiFiService>;
 using WiFiServiceRefPtr = scoped_refptr<WiFiService>;
 
-class IPConfig;
-using IPConfigRefPtr = scoped_refptr<IPConfig>;
-
-class DHCPConfig;
-using DHCPConfigRefPtr = scoped_refptr<DHCPConfig>;
-
 class Profile;
 using ProfileConstRefPtr = scoped_refptr<const Profile>;
 using ProfileRefPtr = scoped_refptr<Profile>;
 
-class Connection;
-using ConnectionConstRefPtr = scoped_refptr<const Connection>;
-using ConnectionRefPtr = scoped_refptr<Connection>;
+class LocalDevice;
+using LocalDeviceConstRefPtr = scoped_refptr<const LocalDevice>;
+using LocalDeviceRefPtr = scoped_refptr<LocalDevice>;
+
+class HotspotDevice;
+using HotspotDeviceConstRefPtr = scoped_refptr<const HotspotDevice>;
+using HotspotDeviceRefPtr = scoped_refptr<HotspotDevice>;
 
 }  // namespace shill
 

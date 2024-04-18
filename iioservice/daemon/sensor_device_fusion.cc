@@ -1,9 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "iioservice/daemon/sensor_device_fusion.h"
 
+#include <optional>
 #include <utility>
 
 #include <base/strings/stringprintf.h>
@@ -70,7 +71,7 @@ void SensorDeviceFusion::SetFrequency(double frequency,
   std::move(callback).Run(frequency);
 
   ClientData& client = it->second;
-  if (client.observer.is_bound()) {
+  if (client.samples_observer.is_bound()) {
     // Let |samples_handler_| update |client.frequency|.
     samples_handler_->UpdateFrequency(&client, frequency);
   } else {
@@ -163,6 +164,30 @@ void SensorDeviceFusion::GetChannelsEnabled(
   std::move(callback).Run(std::move(enabled));
 }
 
+void SensorDeviceFusion::GetAllEvents(GetAllEventsCallback callback) {
+  DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
+
+  std::move(callback).Run({});
+}
+
+void SensorDeviceFusion::GetEventsAttributes(
+    const std::vector<int32_t>& iio_event_indices,
+    const std::string& attr_name,
+    GetEventsAttributesCallback callback) {
+  DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
+
+  std::move(callback).Run(std::vector<std::optional<std::string>>(
+      iio_event_indices.size(), std::nullopt));
+}
+
+void SensorDeviceFusion::StartReadingEvents(
+    const std::vector<int32_t>& iio_event_indices,
+    mojo::PendingRemote<cros::mojom::SensorDeviceEventsObserver> observer) {
+  DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
+
+  // Do nothing.
+}
+
 SensorDeviceFusion::IioDeviceHandler::IioDeviceHandler(
     scoped_refptr<base::SequencedTaskRunner> ipc_task_runner,
     int32_t iio_device_id,
@@ -195,7 +220,7 @@ SensorDeviceFusion::IioDeviceHandler::IioDeviceHandler(
 }
 
 void SensorDeviceFusion::IioDeviceHandler::SetAttribute(
-    std::string attr_name, base::Optional<std::string> attr_value) {
+    std::string attr_name, std::optional<std::string> attr_value) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
 
   attributes_[attr_name] = attr_value;
@@ -220,8 +245,8 @@ void SensorDeviceFusion::IioDeviceHandler::GetAttributes(
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
   if (!remote_.is_bound()) {
     GetAttributesCallback(attr_names, std::move(callback),
-                          std::vector<base::Optional<std::string>>(
-                              attr_names.size(), base::nullopt));
+                          std::vector<std::optional<std::string>>(
+                              attr_names.size(), std::nullopt));
     return;
   }
 
@@ -383,11 +408,11 @@ void SensorDeviceFusion::IioDeviceHandler::SetFrequencyCallback(
 void SensorDeviceFusion::IioDeviceHandler::GetAttributesCallback(
     const std::vector<std::string>& attr_names,
     cros::mojom::SensorDevice::GetAttributesCallback callback,
-    const std::vector<base::Optional<std::string>>& values) {
+    const std::vector<std::optional<std::string>>& values) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
   DCHECK_EQ(attr_names.size(), values.size());
 
-  std::vector<base::Optional<std::string>> overriden_values = values;
+  std::vector<std::optional<std::string>> overriden_values = values;
   for (size_t i = 0; i < attr_names.size(); ++i) {
     auto it = attributes_.find(attr_names[i]);
     if (it == attributes_.end())

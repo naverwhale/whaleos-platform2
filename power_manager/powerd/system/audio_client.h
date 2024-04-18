@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/observer_list.h>
 
@@ -22,8 +21,7 @@ class Response;
 class Signal;
 }  // namespace dbus
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Real implementation of AudioClientInterface that monitors audio activity as
 // reported by CRAS, the Chrome OS audio server.
@@ -121,7 +119,6 @@ class AudioClient : public AudioClientInterface,
   base::WeakPtrFactory<AudioClient> weak_ptr_factory_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_AUDIO_CLIENT_H_

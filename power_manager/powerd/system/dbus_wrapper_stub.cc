@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,16 +8,15 @@
 #include <tuple>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <dbus/dbus.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -126,7 +125,7 @@ void DBusWrapperStub::CallExportedMethod(
 std::unique_ptr<dbus::Response> DBusWrapperStub::CallExportedMethodSync(
     dbus::MethodCall* method_call) {
   std::unique_ptr<dbus::Response> response;
-  CallExportedMethod(method_call, base::Bind(&MoveResponse, &response));
+  CallExportedMethod(method_call, base::BindOnce(&MoveResponse, &response));
   return response;
 }
 
@@ -228,6 +227,12 @@ void DBusWrapperStub::ExportMethod(
 bool DBusWrapperStub::PublishService() {
   CHECK(!service_published_) << "Service already published";
   service_published_ = true;
+
+  // Notify our observers.
+  for (DBusWrapper::Observer& observer : observers_) {
+    observer.OnServicePublished();
+  }
+
   return true;
 }
 
@@ -271,10 +276,9 @@ void DBusWrapperStub::CallMethodAsync(
     base::TimeDelta timeout,
     dbus::ObjectProxy::ResponseCallback callback) {
   // Call the method handler now and post |callback| to run later.
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&RunResponseCallback, std::move(callback),
                                 CallMethodSync(proxy, method_call, timeout)));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

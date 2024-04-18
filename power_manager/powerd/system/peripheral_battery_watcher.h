@@ -1,18 +1,19 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef POWER_MANAGER_POWERD_SYSTEM_PERIPHERAL_BATTERY_WATCHER_H_
 #define POWER_MANAGER_POWERD_SYSTEM_PERIPHERAL_BATTERY_WATCHER_H_
 
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/observer_list.h>
+#include <base/time/time.h>
 #include <base/timer/timer.h>
 #include <dbus/exported_object.h>
 #include <dbus/message.h>
@@ -21,8 +22,7 @@
 #include "power_manager/powerd/system/bluez_battery_provider.h"
 #include "power_manager/powerd/system/udev_subsystem_observer.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class DBusWrapperInterface;
 
@@ -68,7 +68,7 @@ class PeripheralBatteryWatcher : public UdevSubsystemObserver {
   PeripheralBatteryWatcher(const PeripheralBatteryWatcher&) = delete;
   PeripheralBatteryWatcher& operator=(const PeripheralBatteryWatcher&) = delete;
 
-  ~PeripheralBatteryWatcher();
+  ~PeripheralBatteryWatcher() override;
 
   void set_battery_path_for_testing(const base::FilePath& path) {
     peripheral_battery_path_ = path;
@@ -131,8 +131,11 @@ class PeripheralBatteryWatcher : public UdevSubsystemObserver {
                     int status,
                     const std::string& serial_number,
                     bool active_update,
+                    base::TimeTicks start_time,
                     const std::string& data);
-  void ErrorCallback(const base::FilePath& path, const std::string& model_name);
+  void ErrorCallback(const base::FilePath& path,
+                     const std::string& model_name,
+                     base::TimeTicks start_time);
 
   // Useful to pass mock BluezBatteryProvider in tests.
   void SetBluezBatteryProviderForTest(
@@ -141,16 +144,11 @@ class PeripheralBatteryWatcher : public UdevSubsystemObserver {
   }
 
   // Handles D-Bus method calls.
-  // TODO(b/166543531): Remove this method handler after migrating to BlueZ
-  // Battery Provider API.
-  void OnRefreshBluetoothBatteryMethodCall(
-      dbus::MethodCall* method_call,
-      dbus::ExportedObject::ResponseSender response_sender);
   void OnRefreshAllPeripheralBatteryMethodCall(
       dbus::MethodCall* method_call,
       dbus::ExportedObject::ResponseSender response_sender);
 
-  DBusWrapperInterface* dbus_wrapper_;  // weak
+  DBusWrapperInterface* dbus_wrapper_ = nullptr;  // weak
 
   UdevInterface* udev_ = nullptr;  // non-owned
 
@@ -158,20 +156,16 @@ class PeripheralBatteryWatcher : public UdevSubsystemObserver {
   base::FilePath peripheral_battery_path_;
 
   // Calls ReadBatteryStatuses().
-  base::OneShotTimer poll_timer_;
-
-  // Time between polls of the peripheral battery reading, in milliseconds.
-  int poll_interval_ms_;
+  base::RepeatingTimer poll_timer_;
 
   // AsyncFileReaders for different peripheral batteries.
-  std::vector<std::unique_ptr<AsyncFileReader>> battery_readers_;
+  std::map<base::FilePath, std::unique_ptr<AsyncFileReader>> battery_readers_;
 
   std::unique_ptr<BluezBatteryProvider> bluez_battery_provider_;
 
   base::WeakPtrFactory<PeripheralBatteryWatcher> weak_ptr_factory_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_PERIPHERAL_BATTERY_WATCHER_H_

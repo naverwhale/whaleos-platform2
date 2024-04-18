@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,21 +8,19 @@
 #include <string>
 
 #include <base/logging.h>
-#include <base/macros.h>
 
 namespace brillo {
 
 // Interface definition for accessing the Chrome OS model configuration.
 class CrosConfigInterface {
  public:
-  CrosConfigInterface() {}
+  CrosConfigInterface() = default;
   CrosConfigInterface(const CrosConfigInterface&) = delete;
   CrosConfigInterface& operator=(const CrosConfigInterface&) = delete;
-  virtual ~CrosConfigInterface() {}
+  virtual ~CrosConfigInterface() = default;
 
   // Obtain a config property.
-  // This returns a property for the current board model. This can only be
-  // called if Init() was called.
+  // This returns a property for the current board model.
   // @path: Path to property ("/" for a property at the top of the model
   // hierarchy). The path specifies the node that contains the property to be
   // accessed.
@@ -36,15 +34,6 @@ class CrosConfigInterface {
   virtual bool GetString(const std::string& path,
                          const std::string& property,
                          std::string* val_out) = 0;
-
-  // Get a unique integer to the device identity within the identities
-  // supported by the current board. This will fail if the identity
-  // has not been initialized (e.g., Init has not been called) or the
-  // interface does not support this (e.g., the fallback interface for
-  // legacy boards).
-  // @device_index_out: Output parameter to place integer at.
-  // @return: true on success, false on failure.
-  virtual bool GetDeviceIndex(int* device_index_out) = 0;
 
   // Return true iff library debug logging is enabled.
   // Currently this checks for a non-empty CROS_CONFIG_DEBUG environment

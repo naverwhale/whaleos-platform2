@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,7 +22,7 @@ namespace cros_disks {
 
 namespace {
 
-constexpr int kExternalDiskMountFlags =
+constexpr uint64_t kExternalDiskMountFlags =
     MS_NODEV | MS_NOSUID | MS_NOEXEC | MS_NOSYMFOLLOW | MS_DIRSYNC;
 
 }  // namespace
@@ -42,8 +42,8 @@ std::unique_ptr<MountPoint> SystemMounter::Mount(
     const std::string& source,
     const base::FilePath& target_path,
     std::vector<std::string> params,
-    MountErrorType* error) const {
-  int flags = flags_;
+    MountError* error) const {
+  uint64_t flags = flags_;
 
   // We only care about "ro" here.
   if (IsReadOnlyMount(params)) {
@@ -52,25 +52,22 @@ std::unique_ptr<MountPoint> SystemMounter::Mount(
 
   std::vector<std::string> options = options_;
   *error = ParseParams(std::move(params), &options);
-  if (*error != MOUNT_ERROR_NONE) {
+  if (*error != MountError::kSuccess) {
     return nullptr;
   }
 
   std::string option_string;
   if (!JoinParamsIntoOptions(options, &option_string)) {
-    *error = MOUNT_ERROR_INVALID_MOUNT_OPTIONS;
+    *error = MountError::kInvalidMountOptions;
     return nullptr;
   }
 
-  return MountPoint::Mount(
-      {
-          .mount_path = target_path,
-          .source = source,
-          .filesystem_type = filesystem_type_,
-          .flags = flags,
-          .data = option_string,
-      },
-      platform_, error);
+  return MountPoint::Mount({.mount_path = target_path,
+                            .source = source,
+                            .filesystem_type = filesystem_type_,
+                            .flags = flags,
+                            .data = option_string},
+                           platform_, error);
 }
 
 bool SystemMounter::CanMount(const std::string& source,
@@ -84,10 +81,10 @@ bool SystemMounter::CanMount(const std::string& source,
   return true;
 }
 
-MountErrorType SystemMounter::ParseParams(
+MountError SystemMounter::ParseParams(
     std::vector<std::string> /*params*/,
     std::vector<std::string>* /*mount_options*/) const {
-  return MOUNT_ERROR_NONE;
+  return MountError::kSuccess;
 }
 
 }  // namespace cros_disks

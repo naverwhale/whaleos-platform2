@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 
 #include "federated/storage_manager.h"
 
+#include <optional>
 #include <string>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 namespace federated {
@@ -27,9 +27,11 @@ class MockStorageManager : public StorageManager {
               OnExampleReceived,
               (const std::string&, const std::string&),
               (override));
-  MOCK_METHOD(base::Optional<ExampleDatabase::Iterator>,
+  MOCK_METHOD(std::optional<ExampleDatabase::Iterator>,
               GetExampleIterator,
-              (const std::string&),
+              (const std::string&,
+               const std::string&,
+               const fcp::client::CrosExampleSelectorCriteria&),
               (const, override));
 };
 

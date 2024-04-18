@@ -1,21 +1,13 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 /// Runs a [9P] server.
 ///
 /// [9P]: http://man.cat-v.org/plan_9/5/0intro
-extern crate getopts;
-extern crate libc;
-extern crate libchromeos;
-#[macro_use]
-extern crate log;
-extern crate p9;
-extern crate sys_util;
-
 use libc::gid_t;
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::fmt;
 use std::fs::{remove_file, File};
 use std::io::{self, BufReader, BufWriter};
@@ -33,8 +25,13 @@ use std::string;
 use std::sync::Arc;
 use std::thread;
 
+use libchromeos::panic_handler::install_memfd_handler;
 use libchromeos::syslog;
-use sys_util::vsock::*;
+use log::error;
+use log::info;
+use log::warn;
+use vsock::VsockListener;
+use vsock::VMADDR_CID_ANY;
 
 const DEFAULT_BUFFER_SIZE: usize = 8192;
 
@@ -47,7 +44,7 @@ const UNIX_FD: &str = "unix-fd:";
 const USAGE: &str = "9s [options] {vsock:<port>|unix:<path>|unix-fd:<fd>|<ip>:<port>}";
 
 // Program name.
-const IDENT: &[u8] = b"9s\0";
+const IDENT: &str = "9s";
 
 enum ListenAddress {
     Net(net::SocketAddr),
@@ -130,7 +127,7 @@ enum Error {
     MissingAcceptCid,
     SocketGid(ParseIntError),
     SocketPathNotAbsolute(PathBuf),
-    Syslog(log::SetLoggerError),
+    Syslog(syslog::Error),
 }
 
 impl fmt::Display for Error {
@@ -215,15 +212,15 @@ fn spawn_server_thread<
 
 fn run_vsock_server(
     server_params: Arc<ServerParams>,
-    port: c_uint,
-    accept_cid: VsockCid,
+    port: u32,
+    accept_cid: u32,
 ) -> io::Result<()> {
-    let listener = VsockListener::bind((VsockCid::Any, port))?;
+    let listener = VsockListener::bind_with_cid_port(VMADDR_CID_ANY, port)?;
 
     loop {
         let (stream, peer) = listener.accept()?;
 
-        if accept_cid != peer.cid {
+        if accept_cid != peer.cid() {
             warn!("ignoring connection from {}", peer);
             continue;
         }
@@ -334,6 +331,7 @@ fn add_id_mapping<T: Clone + FromStr + Ord>(s: &str, map: &mut p9::ServerIdMap<T
 }
 
 fn main() -> Result<()> {
+    install_memfd_handler();
     let mut opts = getopts::Options::new();
     opts.optopt(
         "",
@@ -394,10 +392,7 @@ fn main() -> Result<()> {
         gid_map,
     });
 
-    // Safe because this string is defined above in this file and it contains exactly
-    // one nul byte, which appears at the end.
-    let ident = CStr::from_bytes_with_nul(IDENT).unwrap();
-    syslog::init(ident).map_err(Error::Syslog)?;
+    syslog::init(IDENT.to_string(), false /* log_to_stderr */).map_err(Error::Syslog)?;
 
     // We already checked that |matches.free| has at least one item.
     match matches.free[0]
@@ -406,7 +401,7 @@ fn main() -> Result<()> {
     {
         ListenAddress::Vsock(port) => {
             let accept_cid = if let Some(cid) = matches.opt_str("accept_cid") {
-                cid.parse::<VsockCid>().map_err(Error::Cid)
+                cid.parse::<u32>().map_err(Error::Cid)
             } else {
                 Err(Error::MissingAcceptCid)
             }?;

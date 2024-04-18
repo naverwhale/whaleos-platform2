@@ -1,22 +1,25 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef IMAGELOADER_IMAGELOADER_IMPL_H_
 #define IMAGELOADER_IMAGELOADER_IMPL_H_
 
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <base/files/file_path.h>
 #include <base/gtest_prod_util.h>
-#include <base/macros.h>
+#include <imageloader/proto_bindings/imageloader.pb.h>
+#include <dlcservice/metadata/metadata_interface.h>
 
 #include "imageloader/helper_process_proxy.h"
 
 namespace imageloader {
 
+using dlcservice::metadata::MetadataInterface;
 using Keys = std::vector<std::vector<uint8_t>>;
 
 struct ImageLoaderConfig {
@@ -37,6 +40,9 @@ class ImageLoaderImpl {
       : config_(std::move(config)) {}
   ImageLoaderImpl(const ImageLoaderImpl&) = delete;
   ImageLoaderImpl& operator=(const ImageLoaderImpl&) = delete;
+
+  // Initialize internal states.
+  void Initialize();
 
   // Register a component.
   bool RegisterComponent(const std::string& name,
@@ -80,6 +86,10 @@ class ImageLoaderImpl {
                            const std::string& a_or_b,
                            HelperProcessProxy* proxy);
 
+  // Load and mount a DLC image based on the proto.
+  // Returns empty string on failure.
+  std::string LoadDlc(const LoadDlcRequest& request, HelperProcessProxy* proxy);
+
   // Load the specified component at a set mount point.
   bool LoadComponent(const std::string& name,
                      const std::string& mount_point,
@@ -122,6 +132,8 @@ class ImageLoaderImpl {
 
   // The configuration traits.
   ImageLoaderConfig config_;
+  // The DLC metadata.
+  std::shared_ptr<MetadataInterface> dlc_metadata_;
 
   // Remove component if removable.
   bool RemoveComponentAtPath(const std::string& name,

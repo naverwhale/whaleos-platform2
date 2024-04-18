@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -11,6 +11,10 @@
 #include <sys/capability.h>
 #include <sys/types.h>
 
+#include <iterator>
+
+#include <base/files/file_util.h>
+#include <base/files/scoped_file.h>
 #include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_piece.h>
@@ -27,18 +31,19 @@ constexpr char kSeccompFilterPath[] =
 
 int perform_capture(base::StringPiece device,
                     base::StringPiece output_file,
-                    base::StringPiece max_size) {
+                    base::StringPiece max_size,
+                    base::StringPiece status_pipe) {
   // Limit the capabilities of the process to required ones.
   const cap_value_t requiredCaps[] = {CAP_SYS_ADMIN, CAP_SETUID, CAP_SETGID,
                                       CAP_NET_RAW};
   cap_t caps = cap_get_proc();
   if (cap_clear(caps) ||
-      cap_set_flag(caps, CAP_EFFECTIVE, base::size(requiredCaps), requiredCaps,
+      cap_set_flag(caps, CAP_EFFECTIVE, std::size(requiredCaps), requiredCaps,
                    CAP_SET) ||
-      cap_set_flag(caps, CAP_PERMITTED, base::size(requiredCaps), requiredCaps,
+      cap_set_flag(caps, CAP_PERMITTED, std::size(requiredCaps), requiredCaps,
                    CAP_SET) ||
-      cap_set_flag(caps, CAP_INHERITABLE, base::size(requiredCaps),
-                   requiredCaps, CAP_SET)) {
+      cap_set_flag(caps, CAP_INHERITABLE, std::size(requiredCaps), requiredCaps,
+                   CAP_SET)) {
     fprintf(
         stderr,
         "Can't clear capabilities and set flags for required capabilities.\n");
@@ -55,7 +60,7 @@ int perform_capture(base::StringPiece device,
   pcap_t* pcap = pcap_open_live(device.data(), sizeof(buf), promiscuous,
                                 PACKET_TIMEOUT_MS, errbuf);
   if (pcap == nullptr) {
-    fprintf(stderr, "Could not open capture handle.\n");
+    fprintf(stderr, "Could not open capture handle: %s\n", errbuf);
     return -1;
   }
 
@@ -91,6 +96,15 @@ int perform_capture(base::StringPiece device,
   u_int64_t max_capture_size = max_size_parsed * mib_to_byte_conversion;
   u_int64_t total_captured_size = 0;
 
+  int status_pipe_fd;
+  if (!base::StringToInt(status_pipe, &status_pipe_fd)) {
+    fprintf(stderr,
+            "Can't parse file descriptor value from the status pipe argument. "
+            "Make sure you pass a valid file descriptor value.\n");
+    return 1;
+  }
+  base::ScopedFD status_scoped_fd(status_pipe_fd);
+
   // Now that we have all our handles open, drop privileges.
   struct minijail* j = minijail_new();
   minijail_namespace_vfs(j);
@@ -102,12 +116,23 @@ int perform_capture(base::StringPiece device,
   minijail_no_new_privs(j);
   minijail_enter(j);
 
-  int packet_count = 0;
+  unsigned int packet_count = 0;
   sigset_t sigset;
   sigemptyset(&sigset);
   sigaddset(&sigset, SIGTERM);
   sigaddset(&sigset, SIGINT);
   sigprocmask(SIG_BLOCK, &sigset, nullptr);
+
+  // Write "1" on the status pipe for signaling the parent process about the
+  // success right before we start capturing the packets.
+  base::StringPiece message = "1";
+  if (!base::WriteFileDescriptor(status_scoped_fd.get(), message)) {
+    fprintf(
+        stderr,
+        "Can't write status update to the pipe for parent process to check.\n");
+    return 1;
+  }
+
   while (sigpending(&sigset) == 0) {
     if (sigismember(&sigset, SIGTERM) || sigismember(&sigset, SIGINT)) {
       break;
@@ -138,10 +163,11 @@ int perform_capture(base::StringPiece device,
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 4) {
-    fprintf(stderr, "Usage: %s <device> <output_file> <max_size>\n", argv[0]);
+  if (argc < 5) {
+    fprintf(stderr,
+            "Usage: %s <device> <output_file> <max_size> <status_pipe>\n",
+            argv[0]);
     return 1;
   }
-
-  return perform_capture(argv[1], argv[2], argv[3]);
+  return perform_capture(argv[1], argv[2], argv[3], argv[4]);
 }

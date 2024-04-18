@@ -1,9 +1,11 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DNS_PROXY_METRICS_H_
 #define DNS_PROXY_METRICS_H_
+
+#include <sys/socket.h>
 
 #include <utility>
 #include <vector>
@@ -109,8 +111,11 @@ class Metrics {
     kReceiveError = 15,
     kOtherClientError = 16,
     kOtherServerError = 17,
+    kEmptyNameServers = 18,
+    kEmptyDoHProviders = 19,
+    kClientInitializationError = 20,
 
-    kMaxValue = kOtherServerError,
+    kMaxValue = kClientInitializationError,
   };
 
   // These values are persisted to logs. Entries should not be renumbered and
@@ -186,10 +191,14 @@ class Metrics {
   void RecordNameservers(unsigned int num_ipv4, unsigned int num_ipv6);
   void RecordDnsOverHttpsMode(DnsOverHttpsMode mode);
   void RecordQueryResult(QueryType type, QueryError error, int http_code = -1);
+  void RecordQueryResultWithRetries(QueryType type, bool success);
   void RecordQueryDuration(const char* stage, int64_t ms, bool success = true);
   void RecordQueryResolveDuration(QueryType type,
                                   int64_t ms,
                                   bool success = true);
+  void RecordProbeResult(sa_family_t family,
+                         int num_attempts,
+                         QueryError error);
 
  private:
   MetricsLibrary metrics_;

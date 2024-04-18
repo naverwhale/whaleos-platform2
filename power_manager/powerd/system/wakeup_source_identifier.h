@@ -1,11 +1,9 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef POWER_MANAGER_POWERD_SYSTEM_WAKEUP_SOURCE_IDENTIFIER_H_
 #define POWER_MANAGER_POWERD_SYSTEM_WAKEUP_SOURCE_IDENTIFIER_H_
-
-#include "power_manager/powerd/system/wakeup_source_identifier.h"
 
 #include <map>
 #include <memory>
@@ -14,12 +12,10 @@
 
 #include <base/files/file_path.h>
 
-#include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/system/udev_subsystem_observer.h"
 #include "power_manager/powerd/system/wakeup_source_identifier_interface.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 struct UdevEvent;
 class UdevInterface;
@@ -60,7 +56,6 @@ class WakeupSourceIdentifier : public WakeupSourceIdentifierInterface,
   MonitoredPathsMap monitored_paths_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_WAKEUP_SOURCE_IDENTIFIER_H_

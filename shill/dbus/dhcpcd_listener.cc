@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,31 +6,25 @@
 
 #include <memory>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/dbus/dbus_method_invoker.h>
+#include <dbus/error.h>
 #include <dbus/util.h>
 
-#include "shill/dhcp/dhcp_config.h"
-#include "shill/dhcp/dhcp_provider.h"
 #include "shill/event_dispatcher.h"
 #include "shill/logging.h"
+#include "shill/network/dhcp_controller.h"
+#include "shill/network/dhcp_provider.h"
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kDHCP;
-static std::string ObjectID(const DHCPCDListener* d) {
-  return "(dhcpcd_listener)";
-}
 }  // namespace Logging
-
-const char DHCPCDListener::kDBusInterfaceName[] = "org.chromium.dhcpcd";
-const char DHCPCDListener::kSignalEvent[] = "Event";
-const char DHCPCDListener::kSignalStatusChanged[] = "StatusChanged";
 
 DHCPCDListener::DHCPCDListener(const scoped_refptr<dbus::Bus>& bus,
                                EventDispatcher* dispatcher,
@@ -51,9 +45,9 @@ DHCPCDListener::DHCPCDListener(const scoped_refptr<dbus::Bus>& bus,
   bus_->AddFilterFunction(&DHCPCDListener::HandleMessageThunk, this);
 
   // Add match rule to the bus.
-  dbus::ScopedDBusError error;
-  bus_->AddMatch(match_rule_, error.get());
-  if (error.is_set()) {
+  dbus::Error error;
+  bus_->AddMatch(match_rule_, &error);
+  if (error.IsValid()) {
     LOG(FATAL) << "Failed to add match rule: " << error.name() << " "
                << error.message();
   }
@@ -61,9 +55,9 @@ DHCPCDListener::DHCPCDListener(const scoped_refptr<dbus::Bus>& bus,
 
 DHCPCDListener::~DHCPCDListener() {
   bus_->RemoveFilterFunction(&DHCPCDListener::HandleMessageThunk, this);
-  dbus::ScopedDBusError error;
-  bus_->RemoveMatch(match_rule_, error.get());
-  if (error.is_set()) {
+  dbus::Error error;
+  bus_->RemoveMatch(match_rule_, &error);
+  if (error.IsValid()) {
     LOG(FATAL) << "Failed to remove match rule: " << error.name() << " "
                << error.message();
   }
@@ -108,9 +102,9 @@ DBusHandlerResult DHCPCDListener::HandleMessage(DBusConnection* connection,
     if (brillo::dbus_utils::ExtractMessageParameters(
             &reader, nullptr, &pid, &reason, &configurations)) {
       dispatcher_->PostTask(
-          FROM_HERE,
-          base::Bind(&DHCPCDListener::EventSignal, weak_factory_.GetWeakPtr(),
-                     sender, pid, reason, configurations));
+          FROM_HERE, base::BindOnce(&DHCPCDListener::EventSignal,
+                                    weak_factory_.GetWeakPtr(), sender, pid,
+                                    reason, configurations));
     }
   } else if (member_name == kSignalStatusChanged) {
     uint32_t pid;
@@ -120,8 +114,8 @@ DBusHandlerResult DHCPCDListener::HandleMessage(DBusConnection* connection,
                                                      &status)) {
       dispatcher_->PostTask(
           FROM_HERE,
-          base::Bind(&DHCPCDListener::StatusChangedSignal,
-                     weak_factory_.GetWeakPtr(), sender, pid, status));
+          base::BindOnce(&DHCPCDListener::StatusChangedSignal,
+                         weak_factory_.GetWeakPtr(), sender, pid, status));
     }
   } else {
     LOG(INFO) << "Ignore signal: " << member_name;
@@ -135,39 +129,67 @@ void DHCPCDListener::EventSignal(
     uint32_t pid,
     const std::string& reason,
     const brillo::VariantDictionary& configuration) {
-  DHCPConfigRefPtr config = provider_->GetConfig(pid);
-  if (!config) {
+  auto* controller = provider_->GetController(pid);
+  if (!controller) {
     if (provider_->IsRecentlyUnbound(pid)) {
-      SLOG(nullptr, 3) << __func__
-                       << ": ignoring message from recently unbound PID "
-                       << pid;
+      SLOG(3) << __func__ << ": ignoring message from recently unbound PID "
+              << pid;
     } else {
       LOG(ERROR) << "Unknown DHCP client PID " << pid;
     }
     return;
   }
-  config->InitProxy(sender);
+  LOG(INFO) << "Event reason: " << reason << " on "
+            << controller->device_name();
+
+  DHCPController::ClientEventReason parsed_reason =
+      DHCPController::ClientEventReason::kUnknown;
+  if (reason == kReasonBound) {
+    parsed_reason = DHCPController::ClientEventReason::kBound;
+  } else if (reason == kReasonFail) {
+    parsed_reason = DHCPController::ClientEventReason::kFail;
+  } else if (reason == kReasonGatewayArp) {
+    parsed_reason = DHCPController::ClientEventReason::kGatewayArp;
+  } else if (reason == kReasonNak) {
+    parsed_reason = DHCPController::ClientEventReason::kNak;
+  } else if (reason == kReasonRebind) {
+    parsed_reason = DHCPController::ClientEventReason::kRebind;
+  } else if (reason == kReasonReboot) {
+    parsed_reason = DHCPController::ClientEventReason::kReboot;
+  } else if (reason == kReasonRenew) {
+    parsed_reason = DHCPController::ClientEventReason::kRenew;
+  }
+
+  controller->InitProxy(sender);
   KeyValueStore configuration_store =
       KeyValueStore::ConvertFromVariantDictionary(configuration);
-  config->ProcessEventSignal(reason, configuration_store);
+  controller->ProcessEventSignal(parsed_reason, configuration_store);
 }
 
 void DHCPCDListener::StatusChangedSignal(const std::string& sender,
                                          uint32_t pid,
                                          const std::string& status) {
-  DHCPConfigRefPtr config = provider_->GetConfig(pid);
-  if (!config) {
+  auto* controller = provider_->GetController(pid);
+  if (!controller) {
     if (provider_->IsRecentlyUnbound(pid)) {
-      SLOG(nullptr, 3) << __func__
-                       << ": ignoring message from recently unbound PID "
-                       << pid;
+      SLOG(3) << __func__ << ": ignoring message from recently unbound PID "
+              << pid;
     } else {
       LOG(ERROR) << "Unknown DHCP client PID " << pid;
     }
     return;
   }
-  config->InitProxy(sender);
-  config->ProcessStatusChangeSignal(status);
+  LOG(INFO) << "Status changed: " << status << " on "
+            << controller->device_name();
+
+  DHCPController::ClientStatus parsed_status =
+      DHCPController::ClientStatus::kUnknown;
+  if (status == kStatusIPv6OnlyPreferred) {
+    parsed_status = DHCPController::ClientStatus::kIPv6Preferred;
+  }
+
+  controller->InitProxy(sender);
+  controller->ProcessStatusChangedSignal(parsed_status);
 }
 
 }  // namespace shill

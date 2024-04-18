@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,12 @@
 #ifndef CRASH_REPORTER_BERT_COLLECTOR_H_
 #define CRASH_REPORTER_BERT_COLLECTOR_H_
 
+#include <memory>
+
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 
@@ -42,14 +46,17 @@ static_assert(sizeof(acpi_table_bert) == 48,
 // Firmware Error Bert dump collector.
 class BERTCollector : public CrashCollector {
  public:
-  BERTCollector();
+  explicit BERTCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   BERTCollector(const BERTCollector&) = delete;
   BERTCollector& operator=(const BERTCollector&) = delete;
 
   ~BERTCollector() override;
 
   // Collect Bert dump.
-  bool Collect();
+  bool Collect(bool use_saved_lsb);
 
  private:
   friend class BERTCollectorTest;

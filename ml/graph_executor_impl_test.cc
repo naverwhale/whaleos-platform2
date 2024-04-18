@@ -1,19 +1,19 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check_op.h>
 #include <base/containers/flat_map.h>
-#include <base/macros.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/run_loop.h>
-#include <base/callback_helpers.h>
 #include <brillo/test_helpers.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -103,7 +103,7 @@ TEST(GraphExecutorTest, TestOk) {
         std::move(inputs), std::move(outputs),
         base::BindOnce(
             [](bool* callback_done, const ExecuteResult result,
-               base::Optional<std::vector<TensorPtr>> outputs) {
+               std::optional<std::vector<TensorPtr>> outputs) {
               // Check that the inference succeeded and gives the expected
               // number of outputs.
               EXPECT_EQ(result, ExecuteResult::OK);
@@ -138,7 +138,7 @@ TEST(GraphExecutorTest, TestOk) {
         std::move(inputs), std::move(outputs),
         base::BindOnce(
             [](bool* callback_done, const ExecuteResult result,
-               base::Optional<std::vector<TensorPtr>> outputs) {
+               std::optional<std::vector<TensorPtr>> outputs) {
               // Check that the inference succeeded and gives the expected
               // number of outputs.
               EXPECT_EQ(result, ExecuteResult::OK);
@@ -222,7 +222,7 @@ TEST(GraphExecutorTest, TestNarrowing) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             // Check that the inference succeeded and gives the expected number
             // of outputs.
             EXPECT_EQ(result, ExecuteResult::OK);
@@ -270,7 +270,7 @@ TEST(GraphExecutorTest, TestInvalidOutputName) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::UNKNOWN_OUTPUT_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -304,7 +304,7 @@ TEST(GraphExecutorTest, TestMissingOutputName) {
       std::move(inputs), {},
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::OUTPUT_MISSING_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -340,7 +340,7 @@ TEST(GraphExecutorTest, TestDuplicateOutputName) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::DUPLICATE_OUTPUT_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -376,7 +376,7 @@ TEST(GraphExecutorTest, TestInvalidInputName) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::UNKNOWN_INPUT_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -410,7 +410,7 @@ TEST(GraphExecutorTest, TestMissingInputName) {
       {}, std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::INPUT_MISSING_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -446,7 +446,7 @@ TEST(GraphExecutorTest, TestWrongInputType) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::INPUT_TYPE_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -482,7 +482,7 @@ TEST(GraphExecutorTest, TestWrongInputShape) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::INPUT_SHAPE_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -519,7 +519,7 @@ TEST(GraphExecutorTest, TestInvalidInputFormat) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::INPUT_FORMAT_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -576,7 +576,7 @@ TEST(GraphExecutorTest, TestInvalidInputNodeType) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::EXECUTION_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -607,7 +607,7 @@ TEST(GraphExecutorTest, TestExecutionFailure) {
       {}, {},
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::EXECUTION_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -664,7 +664,7 @@ TEST(GraphExecutorTest, TestInvalidOutputNodeType) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::EXECUTION_ERROR);
             EXPECT_FALSE(outputs.has_value());
 
@@ -722,7 +722,7 @@ TEST(GraphExecutorTest, TestInvalidOutputNodeShape) {
       std::move(inputs), std::move(outputs),
       base::BindOnce(
           [](bool* callback_done, const ExecuteResult result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             EXPECT_EQ(result, ExecuteResult::EXECUTION_ERROR);
             EXPECT_FALSE(outputs.has_value());
 

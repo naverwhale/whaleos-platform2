@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback_forward.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <dbus/bus.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/receiver.h>
@@ -21,6 +20,7 @@
 #include "ml/dlcservice_client.h"
 #include "ml/model_metadata.h"
 #include "ml/mojom/machine_learning_service.mojom.h"
+#include "ml_core/dlc/dlc_client.h"
 
 namespace ml {
 
@@ -70,11 +70,11 @@ class MachineLearningServiceImpl
       mojo::PendingReceiver<
           chromeos::machine_learning::mojom::HandwritingRecognizer> receiver,
       LoadHandwritingModelCallback callback) override;
-  void LoadHandwritingModelWithSpec(
+  void REMOVED_4(
       chromeos::machine_learning::mojom::HandwritingRecognizerSpecPtr spec,
       mojo::PendingReceiver<
           chromeos::machine_learning::mojom::HandwritingRecognizer> receiver,
-      LoadHandwritingModelWithSpecCallback callback) override;
+      REMOVED_4Callback callback) override;
   void LoadSpeechRecognizer(
       chromeos::machine_learning::mojom::SodaConfigPtr spec,
       mojo::PendingRemote<chromeos::machine_learning::mojom::SodaClient>
@@ -100,7 +100,24 @@ class MachineLearningServiceImpl
   void LoadDocumentScanner(
       mojo::PendingReceiver<chromeos::machine_learning::mojom::DocumentScanner>
           receiver,
+      chromeos::machine_learning::mojom::DocumentScannerConfigPtr config,
       LoadDocumentScannerCallback callback) override;
+  void CreateWebPlatformModelLoader(
+      mojo::PendingReceiver<model_loader::mojom::ModelLoader> receiver,
+      model_loader::mojom::CreateModelLoaderOptionsPtr options,
+      CreateWebPlatformModelLoaderCallback callback) override;
+  void LoadImageAnnotator(
+      chromeos::machine_learning::mojom::ImageAnnotatorConfigPtr config,
+      mojo::PendingReceiver<
+          ::chromeos::machine_learning::mojom::ImageContentAnnotator> receiver,
+      LoadImageAnnotatorCallback callback) override;
+
+  void InternalLoadImageAnnotator(
+      chromeos::machine_learning::mojom::ImageAnnotatorConfigPtr config,
+      mojo::PendingReceiver<
+          ::chromeos::machine_learning::mojom::ImageContentAnnotator> receiver,
+      LoadImageAnnotatorCallback callback,
+      const base::FilePath& dlc_root);
 
   // Metadata required to load builtin models. Initialized at construction.
   const std::map<chromeos::machine_learning::mojom::BuiltinModelId,
@@ -111,6 +128,9 @@ class MachineLearningServiceImpl
 
   // DlcserviceClient used to communicate with DlcService.
   std::unique_ptr<DlcserviceClient> dlcservice_client_;
+
+  // ml_core's DlcClient.
+  std::unique_ptr<cros::DlcClient> ml_core_dlc_client_;
 
   // Primordial receiver bootstrapped over D-Bus. Once opened, is never closed.
   mojo::Receiver<chromeos::machine_learning::mojom::MachineLearningService>

@@ -1,9 +1,10 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "camera3_test/camera3_device_impl.h"
 
+#include <memory>
 #include <utility>
 
 #include <base/check.h>
@@ -11,6 +12,7 @@
 #include <sync/sync.h>
 
 #include "camera3_test/camera3_perf_log.h"
+#include "common/camera_hal3_helpers.h"
 #include "cros-camera/common.h"
 
 namespace camera3_test {
@@ -32,29 +34,28 @@ Camera3DeviceImpl::Camera3DeviceImpl(int cam_id)
       hal_thread_(GetThreadName(cam_id).c_str()),
       initialized_(false),
       cam_stream_idx_(0),
-      gralloc_(Camera3TestGralloc::GetInstance()),
       request_frame_number_(kInitialFrameNumber) {
   DETACH_FROM_THREAD(thread_checker_);
+  base::AutoLock buffer_lock(buffer_lock_);
+  gralloc_ = Camera3TestGralloc::GetInstance();
 }
 
 int Camera3DeviceImpl::Initialize(Camera3Module* cam_module) {
-  VLOGF_ENTER();
   if (!cam_module || !hal_thread_.Start()) {
     return -EINVAL;
   }
   int result = -EIO;
   hal_thread_.PostTaskSync(
-      FROM_HERE, base::Bind(&Camera3DeviceImpl::InitializeOnThread,
-                            base::Unretained(this), cam_module, &result));
+      FROM_HERE, base::BindOnce(&Camera3DeviceImpl::InitializeOnThread,
+                                base::Unretained(this), cam_module, &result));
   return result;
 }
 
 void Camera3DeviceImpl::Destroy() {
-  VLOGF_ENTER();
   int result = -EIO;
   hal_thread_.PostTaskSync(FROM_HERE,
-                           base::Bind(&Camera3DeviceImpl::DestroyOnThread,
-                                      base::Unretained(this), &result));
+                           base::BindOnce(&Camera3DeviceImpl::DestroyOnThread,
+                                          base::Unretained(this), &result));
   EXPECT_EQ(0, result) << "Camera device close failed";
   hal_thread_.Stop();
 
@@ -65,7 +66,7 @@ void Camera3DeviceImpl::RegisterProcessCaptureResultCallback(
     Camera3Device::ProcessCaptureResultCallback cb) {
   hal_thread_.PostTaskSync(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           &Camera3DeviceImpl::RegisterProcessCaptureResultCallbackOnThread,
           base::Unretained(this), cb));
 }
@@ -73,33 +74,40 @@ void Camera3DeviceImpl::RegisterProcessCaptureResultCallback(
 void Camera3DeviceImpl::RegisterNotifyCallback(
     Camera3Device::NotifyCallback cb) {
   hal_thread_.PostTaskSync(
-      FROM_HERE, base::Bind(&Camera3DeviceImpl::RegisterNotifyCallbackOnThread,
-                            base::Unretained(this), cb));
+      FROM_HERE,
+      base::BindOnce(&Camera3DeviceImpl::RegisterNotifyCallbackOnThread,
+                     base::Unretained(this), cb));
 }
 
 void Camera3DeviceImpl::RegisterResultMetadataOutputBufferCallback(
     Camera3Device::ProcessResultMetadataOutputBuffersCallback cb) {
   hal_thread_.PostTaskSync(
       FROM_HERE,
-      base::Bind(&Camera3DeviceImpl::
-                     RegisterResultMetadataOutputBufferCallbackOnThread,
-                 base::Unretained(this), cb));
+      base::BindOnce(&Camera3DeviceImpl::
+                         RegisterResultMetadataOutputBufferCallbackOnThread,
+                     base::Unretained(this), cb));
 }
 
 void Camera3DeviceImpl::RegisterPartialMetadataCallback(
     Camera3Device::ProcessPartialMetadataCallback cb) {
   hal_thread_.PostTaskSync(
       FROM_HERE,
-      base::Bind(&Camera3DeviceImpl::RegisterPartialMetadataCallbackOnThread,
-                 base::Unretained(this), cb));
+      base::BindOnce(
+          &Camera3DeviceImpl::RegisterPartialMetadataCallbackOnThread,
+          base::Unretained(this), cb));
 }
 
 bool Camera3DeviceImpl::IsTemplateSupported(int32_t type) {
   bool result = false;
   hal_thread_.PostTaskSync(
-      FROM_HERE, base::Bind(&Camera3DeviceImpl::IsTemplateSupportedOnThread,
-                            base::Unretained(this), type, &result));
+      FROM_HERE, base::BindOnce(&Camera3DeviceImpl::IsTemplateSupportedOnThread,
+                                base::Unretained(this), type, &result));
   return result;
+}
+
+bool Camera3DeviceImpl::IsBufferManagementSupported() const {
+  return device_api_version_ >= CAMERA_DEVICE_API_VERSION_3_6 &&
+         static_info_->IsBufferManagementSupported();
 }
 
 const camera_metadata_t* Camera3DeviceImpl::ConstructDefaultRequestSettings(
@@ -107,8 +115,9 @@ const camera_metadata_t* Camera3DeviceImpl::ConstructDefaultRequestSettings(
   const camera_metadata_t* metadata = nullptr;
   hal_thread_.PostTaskSync(
       FROM_HERE,
-      base::Bind(&Camera3DeviceImpl::ConstructDefaultRequestSettingsOnThread,
-                 base::Unretained(this), type, &metadata));
+      base::BindOnce(
+          &Camera3DeviceImpl::ConstructDefaultRequestSettingsOnThread,
+          base::Unretained(this), type, &metadata));
   return metadata;
 }
 
@@ -117,64 +126,62 @@ void Camera3DeviceImpl::AddStream(int format,
                                   int height,
                                   int crop_rotate_scale_degrees,
                                   camera3_stream_type_t type) {
-  VLOGF_ENTER();
   hal_thread_.PostTaskSync(
-      FROM_HERE,
-      base::Bind(&Camera3DeviceImpl::AddStreamOnThread, base::Unretained(this),
-                 format, width, height, crop_rotate_scale_degrees, type));
+      FROM_HERE, base::BindOnce(&Camera3DeviceImpl::AddStreamOnThread,
+                                base::Unretained(this), format, width, height,
+                                crop_rotate_scale_degrees, type));
 }
 
 int Camera3DeviceImpl::ConfigureStreams(
     std::vector<const camera3_stream_t*>* streams) {
-  VLOGF_ENTER();
   int32_t result = -EIO;
   hal_thread_.PostTaskSync(
-      FROM_HERE, base::Bind(&Camera3DeviceImpl::ConfigureStreamsOnThread,
-                            base::Unretained(this), streams, &result));
+      FROM_HERE, base::BindOnce(&Camera3DeviceImpl::ConfigureStreamsOnThread,
+                                base::Unretained(this), streams, &result));
   return result;
 }
 
-int Camera3DeviceImpl::AllocateOutputStreamBuffers(
+int Camera3DeviceImpl::PrepareOutputStreamBuffers(
     std::vector<camera3_stream_buffer_t>* output_buffers) {
-  VLOGF_ENTER();
   int32_t result = -EIO;
   hal_thread_.PostTaskSync(
       FROM_HERE,
-      base::Bind(&Camera3DeviceImpl::AllocateOutputStreamBuffersOnThread,
-                 base::Unretained(this), output_buffers, &result));
+      base::BindOnce(&Camera3DeviceImpl::PrepareOutputStreamBuffersOnThread,
+                     base::Unretained(this), output_buffers, &result));
   return result;
 }
 
-int Camera3DeviceImpl::AllocateOutputBuffersByStreams(
+int Camera3DeviceImpl::PrepareOutputBuffersByStreams(
     const std::vector<const camera3_stream_t*>& streams,
     std::vector<camera3_stream_buffer_t>* output_buffers) {
-  VLOGF_ENTER();
   int32_t result = -EIO;
   hal_thread_.PostTaskSync(
       FROM_HERE,
-      base::Bind(&Camera3DeviceImpl::AllocateOutputBuffersByStreamsOnThread,
-                 base::Unretained(this), &streams, output_buffers, &result));
+      base::BindOnce(&Camera3DeviceImpl::PrepareOutputBuffersByStreamsOnThread,
+                     base::Unretained(this), &streams, output_buffers,
+                     /*allocate_buffers=*/!IsBufferManagementSupported(),
+                     &result));
   return result;
 }
 
 int Camera3DeviceImpl::RegisterOutputBuffer(
     const camera3_stream_t& stream, cros::ScopedBufferHandle unique_buffer) {
-  VLOGF_ENTER();
   int32_t result = -EIO;
   hal_thread_.PostTaskSync(
-      FROM_HERE, base::Bind(&Camera3DeviceImpl::RegisterOutputBufferOnThread,
-                            base::Unretained(this), &stream,
-                            base::Passed(&unique_buffer), &result));
+      FROM_HERE,
+      base::BindOnce(&Camera3DeviceImpl::RegisterOutputBufferOnThread,
+                     base::Unretained(this), &stream, std::move(unique_buffer),
+                     &result));
   return result;
 }
 
 int Camera3DeviceImpl::ProcessCaptureRequest(
     camera3_capture_request_t* capture_request) {
-  VLOGF_ENTER();
   int32_t result = -EIO;
   hal_thread_.PostTaskSync(
-      FROM_HERE, base::Bind(&Camera3DeviceImpl::ProcessCaptureRequestOnThread,
-                            base::Unretained(this), capture_request, &result));
+      FROM_HERE,
+      base::BindOnce(&Camera3DeviceImpl::ProcessCaptureRequestOnThread,
+                     base::Unretained(this), capture_request, &result));
   return result;
 }
 
@@ -208,8 +215,15 @@ int Camera3DeviceImpl::WaitCaptureResult(const struct timespec& timeout) {
 
 int Camera3DeviceImpl::Flush() {
   DCHECK(dev_connector_);
-  VLOGF_ENTER();
+
   return dev_connector_->Flush();
+}
+
+void Camera3DeviceImpl::SignalStreamFlush(
+    const std::vector<const camera3_stream_t*>& streams) {
+  DCHECK(dev_connector_);
+
+  return dev_connector_->SignalStreamFlush(streams.size(), streams.data());
 }
 
 void Camera3DeviceImpl::InitializeOnThread(Camera3Module* cam_module,
@@ -230,12 +244,16 @@ void Camera3DeviceImpl::InitializeOnThread(Camera3Module* cam_module,
   }
 
   *result = -EINVAL;
-  ASSERT_NE(nullptr, gralloc_) << "Gralloc initialization fails";
+
+  {
+    base::AutoLock buffer_lock(buffer_lock_);
+    ASSERT_NE(nullptr, gralloc_) << "Gralloc initialization fails";
+  }
 
   camera_info cam_info;
   ASSERT_EQ(0, cam_module->GetCameraInfo(cam_id_, &cam_info));
   device_api_version_ = cam_info.device_version;
-  static_info_.reset(new Camera3Device::StaticInfo(cam_info));
+  static_info_ = std::make_unique<Camera3Device::StaticInfo>(cam_info);
   ASSERT_TRUE(static_info_->IsHardwareLevelAtLeastExternal())
       << "The device must support at least EXTERNAL hardware level";
 
@@ -243,6 +261,15 @@ void Camera3DeviceImpl::InitializeOnThread(Camera3Module* cam_module,
   Camera3DeviceImpl::notify = Camera3DeviceImpl::NotifyForwarder;
   Camera3DeviceImpl::process_capture_result =
       Camera3DeviceImpl::ProcessCaptureResultForwarder;
+  if (IsBufferManagementSupported()) {
+    Camera3DeviceImpl::request_stream_buffers =
+        Camera3DeviceImpl::RequestStreamBuffersForwarder;
+    Camera3DeviceImpl::return_stream_buffers =
+        Camera3DeviceImpl::ReturnStreamBuffersForwarder;
+  } else {
+    Camera3DeviceImpl::request_stream_buffers = nullptr;
+    Camera3DeviceImpl::return_stream_buffers = nullptr;
+  }
   *result = dev_connector_->Initialize(this, cam_info.device_version);
   if (*result) {
     return;
@@ -378,7 +405,7 @@ void Camera3DeviceImpl::ConfigureStreamsOnThread(
   }
 }
 
-void Camera3DeviceImpl::AllocateOutputStreamBuffersOnThread(
+void Camera3DeviceImpl::PrepareOutputStreamBuffersOnThread(
     std::vector<camera3_stream_buffer_t>* output_buffers, int32_t* result) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   std::vector<const camera3_stream_t*> streams;
@@ -388,12 +415,15 @@ void Camera3DeviceImpl::AllocateOutputStreamBuffersOnThread(
       streams.push_back(&it);
     }
   }
-  AllocateOutputBuffersByStreamsOnThread(&streams, output_buffers, result);
+  PrepareOutputBuffersByStreamsOnThread(
+      &streams, output_buffers,
+      /*allocate_buffers=*/!IsBufferManagementSupported(), result);
 }
 
-void Camera3DeviceImpl::AllocateOutputBuffersByStreamsOnThread(
+void Camera3DeviceImpl::PrepareOutputBuffersByStreamsOnThread(
     const std::vector<const camera3_stream_t*>* streams,
     std::vector<camera3_stream_buffer_t>* output_buffers,
+    bool allocate_buffers,
     int32_t* result) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   *result = -EINVAL;
@@ -405,6 +435,20 @@ void Camera3DeviceImpl::AllocateOutputBuffersByStreamsOnThread(
   if (!output_buffers || streams->empty()) {
     return;
   }
+
+  if (!allocate_buffers) {
+    for (const auto& it : *streams) {
+      output_buffers->push_back(
+          camera3_stream_buffer_t{.stream = const_cast<camera3_stream_t*>(it),
+                                  .buffer = nullptr,
+                                  .status = CAMERA3_BUFFER_STATUS_OK,
+                                  .acquire_fence = -1,
+                                  .release_fence = -1});
+    }
+    *result = 0;
+    return;
+  }
+
   int32_t jpeg_max_size = 0;
   if (std::find_if(streams->begin(), streams->end(),
                    [](const camera3_stream_t* stream) {
@@ -416,6 +460,7 @@ void Camera3DeviceImpl::AllocateOutputBuffersByStreamsOnThread(
     }
   }
 
+  base::AutoLock buffer_lock(buffer_lock_);
   for (const auto& it : *streams) {
     cros::ScopedBufferHandle buffer = gralloc_->Allocate(
         (it->format == HAL_PIXEL_FORMAT_BLOB) ? jpeg_max_size : it->width,
@@ -446,7 +491,7 @@ void Camera3DeviceImpl::RegisterOutputBufferOnThread(
     cros::ScopedBufferHandle unique_buffer,
     int32_t* result) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  VLOGF_ENTER();
+
   if (!initialized_) {
     *result = -ENODEV;
     return;
@@ -455,14 +500,17 @@ void Camera3DeviceImpl::RegisterOutputBufferOnThread(
     *result = -EINVAL;
     return;
   }
-  stream_buffer_map_[stream].emplace_back(std::move(unique_buffer));
+  {
+    base::AutoLock buffer_lock(buffer_lock_);
+    stream_buffer_map_[stream].emplace_back(std::move(unique_buffer));
+  }
   *result = 0;
 }
 
 void Camera3DeviceImpl::ProcessCaptureRequestOnThread(
     camera3_capture_request_t* request, int* result) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  VLOGF_ENTER();
+
   if (!initialized_) {
     *result = -ENODEV;
     return;
@@ -471,9 +519,11 @@ void Camera3DeviceImpl::ProcessCaptureRequestOnThread(
     capture_request_map_[request_frame_number_] = *request;
     capture_request_map_[request_frame_number_].frame_number =
         request_frame_number_;
-    for (uint32_t i = 0; i < request->num_output_buffers; i++) {
-      stream_output_buffer_map_[request->output_buffers[i].stream].push_back(
-          *request->output_buffers[i].buffer);
+    if (!IsBufferManagementSupported()) {
+      for (uint32_t i = 0; i < request->num_output_buffers; i++) {
+        stream_output_buffer_map_[request->output_buffers[i].stream].push_back(
+            *request->output_buffers[i].buffer);
+      }
     }
   }
   *result = dev_connector_->ProcessCaptureRequest(
@@ -503,7 +553,6 @@ Camera3DeviceImpl::CaptureResult::CaptureResult(
 
 void Camera3DeviceImpl::ProcessCaptureResultOnThread(
     std::unique_ptr<CaptureResult> result) {
-  VLOGF_ENTER();
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   ASSERT_NE(nullptr, result) << "Capture result is null";
   // At least one of metadata or output buffers or input buffer should be
@@ -537,7 +586,7 @@ void Camera3DeviceImpl::ProcessCaptureResultOnThread(
     ProcessPartialResult(result.get());
   }
 
-  for (const auto& stream_buffer : result->stream_buffers) {
+  for (auto& stream_buffer : result->stream_buffers) {
     ASSERT_NE(nullptr, stream_buffer.buffer)
         << "Capture result output buffer is null";
     // An error may be expected while flushing
@@ -546,17 +595,16 @@ void Camera3DeviceImpl::ProcessCaptureResultOnThread(
     ASSERT_EQ(-1, stream_buffer.acquire_fence)
         << "Capture result buffer fence error";
 
-    // Check buffers for a given streams are returned in order
-    ASSERT_FALSE(stream_output_buffer_map_[stream_buffer.stream].empty());
-    ASSERT_EQ(stream_output_buffer_map_[stream_buffer.stream].front(),
-              stream_buffer.buffer_handle)
-        << "Buffers of the same stream are delivered out of order";
-    stream_output_buffer_map_[stream_buffer.stream].pop_front();
-    if (stream_buffer.release_fence != -1) {
-      ASSERT_EQ(0, sync_wait(stream_buffer.release_fence, 1000))
-          << "Error waiting on buffer acquire fence";
-      close(stream_buffer.release_fence);
+    if (!IsBufferManagementSupported()) {
+      // Check buffers for a given streams are returned in order
+      ASSERT_FALSE(stream_output_buffer_map_[stream_buffer.stream].empty());
+      ASSERT_EQ(stream_output_buffer_map_[stream_buffer.stream].front(),
+                stream_buffer.buffer_handle)
+          << "Buffers of the same stream are delivered out of order";
+      stream_output_buffer_map_[stream_buffer.stream].pop_front();
     }
+    ASSERT_TRUE(cros::WaitOnAndClearReleaseFence(stream_buffer, 1000))
+        << "Error waiting on buffer acquire fence";
   }
   capture_result_info_map_[result->frame_number].output_buffers_.insert(
       capture_result_info_map_[result->frame_number].output_buffers_.end(),
@@ -621,7 +669,7 @@ void Camera3DeviceImpl::NotifyOnThread(camera3_notify_msg_t msg) {
       base::checked_cast<int64_t>(msg.message.shutter.timestamp / 1000LL);
   Camera3PerfLog::GetInstance()->UpdateFrameEvent(
       cam_id_, msg.message.shutter.frame_number, FrameEvent::SHUTTER,
-      base::TimeTicks() + base::TimeDelta::FromMicroseconds(timestamp_ns));
+      base::TimeTicks() + base::Microseconds(timestamp_ns));
 
   if (msg.type == CAMERA3_MSG_SHUTTER) {
     sem_post(&shutter_sem_);
@@ -648,25 +696,52 @@ const Camera3Device::StaticInfo* Camera3DeviceImpl::GetStaticInfo() const {
   return static_info_.get();
 }
 
+// static
 void Camera3DeviceImpl::ProcessCaptureResultForwarder(
     const camera3_callback_ops* cb, const camera3_capture_result_t* result) {
-  // Forward to callback of instance
+  // Forward to callback of instance.
   Camera3DeviceImpl* d =
       const_cast<Camera3DeviceImpl*>(static_cast<const Camera3DeviceImpl*>(cb));
   d->ProcessCaptureResult(result);
 }
 
+// static
 void Camera3DeviceImpl::NotifyForwarder(const camera3_callback_ops* cb,
                                         const camera3_notify_msg_t* msg) {
-  // Forward to callback of instance
+  // Forward to callback of instance.
   Camera3DeviceImpl* d =
       const_cast<Camera3DeviceImpl*>(static_cast<const Camera3DeviceImpl*>(cb));
   d->Notify(msg);
 }
 
+// static
+camera3_buffer_request_status_t
+Camera3DeviceImpl::RequestStreamBuffersForwarder(
+    const camera3_callback_ops* cb,
+    uint32_t num_buffer_reqs,
+    const camera3_buffer_request_t* buffer_reqs,
+    uint32_t* num_returned_buf_reqs,
+    camera3_stream_buffer_ret_t* returned_buf_reqs) {
+  // Forward to callback of instance.
+  Camera3DeviceImpl* d =
+      const_cast<Camera3DeviceImpl*>(static_cast<const Camera3DeviceImpl*>(cb));
+  return d->RequestStreamBuffers(num_buffer_reqs, buffer_reqs,
+                                 num_returned_buf_reqs, returned_buf_reqs);
+}
+
+// static
+void Camera3DeviceImpl::ReturnStreamBuffersForwarder(
+    const camera3_callback_ops* cb,
+    uint32_t num_buffers,
+    const camera3_stream_buffer_t* const* buffers) {
+  // Forward to callback of instance.
+  Camera3DeviceImpl* d =
+      const_cast<Camera3DeviceImpl*>(static_cast<const Camera3DeviceImpl*>(cb));
+  d->ReturnStreamBuffers(num_buffers, buffers);
+}
+
 void Camera3DeviceImpl::ProcessCaptureResult(
     const camera3_capture_result_t* result) {
-  VLOGF_ENTER();
   if (!process_capture_result_cb_.is_null()) {
     process_capture_result_cb_.Run(result);
     return;
@@ -674,27 +749,24 @@ void Camera3DeviceImpl::ProcessCaptureResult(
   std::unique_ptr<CaptureResult> unique_result(new CaptureResult(*result));
   hal_thread_.PostTaskAsync(
       FROM_HERE,
-      base::Bind(&Camera3DeviceImpl::ProcessCaptureResultOnThread,
-                 base::Unretained(this), base::Passed(&unique_result)));
+      base::BindOnce(&Camera3DeviceImpl::ProcessCaptureResultOnThread,
+                     base::Unretained(this), std::move(unique_result)));
 }
 
 void Camera3DeviceImpl::Notify(const camera3_notify_msg_t* msg) {
-  VLOGF_ENTER();
   if (!notify_cb_.is_null()) {
     notify_cb_.Run(msg);
     return;
   }
   hal_thread_.PostTaskAsync(FROM_HERE,
-                            base::Bind(&Camera3DeviceImpl::NotifyOnThread,
-                                       base::Unretained(this), *msg));
+                            base::BindOnce(&Camera3DeviceImpl::NotifyOnThread,
+                                           base::Unretained(this), *msg));
 }
 
 int Camera3DeviceImpl::GetOutputStreamBufferHandles(
     const std::vector<StreamBuffer>& output_buffers,
     std::vector<cros::ScopedBufferHandle>* unique_buffers) {
-  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  VLOGF_ENTER();
-
+  base::AutoLock buffer_lock(buffer_lock_);
   for (const auto& output_buffer : output_buffers) {
     if (!output_buffer.buffer ||
         stream_buffer_map_.find(output_buffer.stream) ==
@@ -717,6 +789,61 @@ int Camera3DeviceImpl::GetOutputStreamBufferHandles(
     }
   }
   return 0;
+}
+
+camera3_buffer_request_status Camera3DeviceImpl::RequestStreamBuffers(
+    uint32_t num_buffer_reqs,
+    const camera3_buffer_request_t* buffer_reqs,
+    uint32_t* num_returned_buf_reqs,
+    camera3_stream_buffer_ret_t* returned_buf_reqs) {
+  *num_returned_buf_reqs = 0;
+  for (size_t i = 0; i < num_buffer_reqs; ++i) {
+    const camera3_buffer_request_t& buffer_req = buffer_reqs[i];
+    camera3_stream* stream = buffer_req.stream;
+    int width = stream->width;
+    int height = stream->height;
+    if (stream->format == HAL_PIXEL_FORMAT_BLOB) {
+      width = static_info_->GetJpegMaxSize();
+      if (width <= 0) {
+        return CAMERA3_BUF_REQ_FAILED_UNKNOWN;
+      }
+      height = 1;
+    }
+
+    camera3_stream_buffer_ret_t& returned_buf_req = returned_buf_reqs[i];
+    base::AutoLock buffer_lock(buffer_lock_);
+    for (size_t j = 0; j < buffer_req.num_buffers_requested; ++j) {
+      cros::ScopedBufferHandle buffer =
+          gralloc_->Allocate(width, height, stream->format, stream->usage);
+      if (!buffer) {
+        LOGF(ERROR) << "Gralloc allocation fails";
+        return CAMERA3_BUF_REQ_FAILED_UNKNOWN;
+      }
+      returned_buf_req.output_buffers[j] =
+          camera3_stream_buffer_t{.stream = stream,
+                                  .buffer = buffer.get(),
+                                  .status = CAMERA3_BUFFER_STATUS_OK,
+                                  .acquire_fence = -1,
+                                  .release_fence = -1};
+      stream_buffer_map_[stream].push_back(std::move(buffer));
+    }
+    ++(*num_returned_buf_reqs);
+    returned_buf_req.stream = buffer_req.stream;
+    returned_buf_req.status = CAMERA3_PS_BUF_REQ_OK;
+    returned_buf_req.num_output_buffers = buffer_req.num_buffers_requested;
+  }
+
+  return CAMERA3_BUF_REQ_OK;
+}
+
+void Camera3DeviceImpl::ReturnStreamBuffers(
+    uint32_t num_buffers, const camera3_stream_buffer_t* const* buffers) {
+  std::vector<StreamBuffer> output_buffers;
+  for (size_t i = 0; i < num_buffers; ++i) {
+    output_buffers.emplace_back(*(buffers[i]));
+  }
+  std::vector<cros::ScopedBufferHandle> unique_buffers;
+  GetOutputStreamBufferHandles(output_buffers, &unique_buffers);
 }
 
 bool Camera3DeviceImpl::UsePartialResult() const {

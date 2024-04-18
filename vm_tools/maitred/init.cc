@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,8 @@
 #include <sys/resource.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -32,17 +34,18 @@
 #include <algorithm>
 #include <limits>
 #include <list>
+#include <optional>
 #include <set>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
@@ -55,6 +58,7 @@
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
+#include <brillo/file_utils.h>
 #include <chromeos/constants/vm_tools.h>
 #include <grpcpp/grpcpp.h>
 #include <vm_protos/proto_bindings/vm_crash.grpc.pb.h>
@@ -70,31 +74,27 @@ namespace {
 // Path to the root directory for cgroups.
 constexpr char kCgroupRootDir[] = "/sys/fs/cgroup";
 
-// Name of the directory in every cgroup subsystem for dealing with containers.
-constexpr char kCgroupContainerSuffix[] = "chronos_containers";
-
 // Default value of the PATH environment variable.
 constexpr char kDefaultPath[] = "/usr/bin:/usr/sbin:/bin:/sbin";
 
-// Uid and Gid for the chronos user and group, respectively.
-constexpr uid_t kChronosUid = 1000;
-constexpr gid_t kChronosGid = 1000;
+#if USE_VM_BOREALIS
+// Name of the file that specifies the hostname within the VM.
+constexpr char kHostnameConfigFile[] = "/etc/hostname";
+#endif
 
 // Retry threshould and duration for processes that respawn.  If a process needs
 // to be respawned more than kMaxRespawnCount times in the last
 // kRespawnWindowSeconds, then it will stop being respawned.
 constexpr size_t kMaxRespawnCount = 10;
-constexpr base::TimeDelta kRespawnWindowSeconds =
-    base::TimeDelta::FromSeconds(30);
+constexpr base::TimeDelta kRespawnWindowSeconds = base::Seconds(30);
 
 // Number of seconds that we should wait before force-killing processes for
 // shutdown.
-constexpr base::TimeDelta kShutdownTimeout = base::TimeDelta::FromSeconds(10);
+constexpr base::TimeDelta kShutdownTimeout = base::Seconds(10);
 
 // Number of seconds that we should wait for tremplin to attempt to gracefully
 // shut down containers.
-constexpr base::TimeDelta kTremplinShutdownTimeout =
-    base::TimeDelta::FromSeconds(2);
+constexpr base::TimeDelta kTremplinShutdownTimeout = base::Seconds(2);
 
 // Maximum number of bytes to capture from a single spawned process.
 constexpr size_t kMaxOutputCaptureSize = 65536;
@@ -362,6 +362,26 @@ constexpr struct {
 #endif
 };
 
+// Overlay mounts to be created on boot.
+constexpr struct {
+  const char* target;
+  const char* lower_dir;
+  const char* upper_dir;
+  const char* work_dir;
+} overlays[] = {
+// TODO(b/286177860): Use overlay /etc for Borealis once Borealis kernel has
+// overlayfs.
+// sludge kernel does not have overlayfs.
+#if !(USE_VM_BOREALIS || USE_VM_SLUDGE)
+    {
+        .target = "/etc",
+        .lower_dir = "/etc",
+        .upper_dir = "/run/etc/upper",
+        .work_dir = "/run/etc/work",
+    },
+#endif
+};
+
 // These limits are based on suggestions from lxd doc/production-setup.md.
 constexpr struct {
   uint8_t resource_type;
@@ -397,32 +417,93 @@ constexpr struct {
         .path = "/proc/sys/vm/max_map_count",
         .value = "262144",
     },
+    {
+        .path = "/proc/sys/net/core/rmem_max",
+        .value = "2097152",
+    },
 };
 
-// Recursively changes the owner and group for all files and directories in
-// |path| (including |path|) to |uid| and |gid|, respectively.
-bool ChangeOwnerAndGroup(base::FilePath path, uid_t uid, gid_t gid) {
-  base::FileEnumerator enumerator(
-      path, true /*recursive*/,
-      base::FileEnumerator::FILES | base::FileEnumerator::DIRECTORIES);
-  for (base::FilePath current = enumerator.Next(); !current.empty();
-       current = enumerator.Next()) {
-    if (chown(current.value().c_str(), uid, gid) != 0) {
-      PLOG(ERROR) << "Failed to change owner and group for " << current.value()
-                  << " to " << uid << ":" << gid;
-      return false;
+}  // namespace
+
+ino_t GetInode(const base::FilePath& path) {
+  struct stat st;
+  if (stat(path.value().c_str(), &st) != 0) {
+    return 0;
+  }
+  return st.st_ino;
+}
+
+// Given a file with text in the format used by /proc/PID/cmdline i.e. a bunch
+// of null-separated strings, read it into a string replacing null bytes with
+// spaces. This is a lossy conversion if args have spaces within them.
+std::string ReadCmdline(const base::FilePath& path) {
+  // Embedded nulls seem to confuse the base:: string functions so we don't get
+  // to use them :'(. Instead read it as bytes then step through byte-by-byte
+  // converting+replacing as we go. cmdline is user-controlled data but all the
+  // bits we care about are ASCII so we don't need to deal with complicated text
+  // encodings. Similarly, all the bits we care about don't have arguments with
+  // spaces so we don't need to worry about that either.
+  auto cmdline = base::ReadFileToBytes(path);
+  std::string ret = "";
+  if (!cmdline) {
+    // Error
+    return ret;
+  }
+  ret.reserve(cmdline->size());
+  for (auto b : *cmdline) {
+    if (b == '\0') {
+      ret.push_back(' ');
+    } else {
+      ret.push_back(b);
     }
   }
-
-  // FileEnumerator doesn't include the root path so change it manually here.
-  if (chown(path.value().c_str(), uid, gid) != 0) {
-    PLOG(ERROR) << "Failed to change owner and group for " << path.value()
-                << " to " << uid << ":" << gid;
-    return false;
-  }
-
-  return true;
+  return ret;
 }
+
+// Sanitises an in-container cmdline by stripping bits which could contain PII.
+std::string SanitiseCmdline(const std::string& cmdline,
+                            ino_t root_inode,
+                            ino_t proc_inode) {
+  if (cmdline == "") {
+    // Unable to read the cmdline. Error reading file, etc.
+    // This commonly happens when the process shuts down between us starting to
+    // iterate over running processes and sending the signal e.g. because
+    // SIGKILL to an earlier process made this one shut down too.
+    return "unknown process";
+  }
+  if (root_inode != 0 && root_inode == proc_inode) {
+    // /ns/mnt inodes match, so the process is _not_ inside a mount namespace,
+    // so it's not inside a container. So we can log the entire cmdline.
+    return cmdline;
+  }
+  if (cmdline.find("/opt/google") != string::npos) {
+    // A Google-provided binary but the last args could be user-supplied e.g.
+    // running their app under Sommelier. So only logs the first few
+    // components - just enough to tell if this is sommelier/garcon/etc.
+    int offset = 0;
+    for (int n = 0; n < 3 && offset != string::npos; n++) {
+      offset = cmdline.find(" ", offset + 1);
+    }
+    return cmdline.substr(0, offset);
+  }
+  // Arbitrary container process, cmdline could have anything. Don't log to be
+  // safe.
+  return "container process";
+}
+
+// Logs the provided `pids` as having timed out while waiting on them to shut
+// down. Will log just the PID for user processes inside the container, will log
+// PID and full cmdline for vm-level process, will log truncated cmdline or
+// Google-supplied in-container processes.
+void LogTimedOutProcess(ino_t root_inode, pid_t pid) {
+  auto path = base::FilePath("/proc").Append(base::NumberToString(pid));
+
+  auto cmdline = SanitiseCmdline(ReadCmdline(path.Append("cmdline")),
+                                 root_inode, GetInode(path.Append("ns/mnt")));
+  LOG(ERROR) << "Sending SIGKILL to " << cmdline << " (PID=" << pid << ")";
+}
+
+namespace {
 
 // Waits for all the processes in |pids| to exit.  Returns when all processes
 // have exited or when |deadline| is reached, whichever happens first.
@@ -590,6 +671,20 @@ void BroadcastSignal(int signo, std::set<pid_t>* pids) {
     PLOG(WARNING) << "Unable to send SIGSTOP to all processes.  System "
                   << "thrashing may occur";
   }
+  ino_t root_inode;
+  if (signo == SIGKILL) {
+    // Only used for SIGKILL, to log processes which are going to get killed.
+    // We use the inode of init's mount namespace as an identifier to figure out
+    // if other processes are in the same namespace as us or a different one
+    // (i.e. inside a container).
+    root_inode = GetInode(base::FilePath("/proc/1/ns/mnt"));
+    if (root_inode == 0) {
+      // Unable to get the root inode so log an error. Still continue, this
+      // means everything will be treated as an in-container process (since no
+      // inodes will match) but we can still get pids in that case.
+      PLOG(ERROR) << "Unable to get inode for root mount namespace";
+    }
+  }
 
   base::FileEnumerator enumerator(base::FilePath("/proc"),
                                   false /* recursive */,
@@ -606,6 +701,9 @@ void BroadcastSignal(int signo, std::set<pid_t>* pids) {
       continue;
     }
 
+    if (signo == SIGKILL) {
+      LogTimedOutProcess(root_inode, process);
+    }
     if (kill(process, signo) < 0) {
       PLOG(ERROR) << "Failed to send " << strsignal(signo) << " to process "
                   << process;
@@ -757,6 +855,17 @@ void UnmountFilesystems() {
 
 }  // namespace
 
+string ParseHostname(const string& etc_hostname_contents) {
+  for (const auto& line : base::SplitStringPiece(etc_hostname_contents, "\n",
+                                                 base::TRIM_WHITESPACE,
+                                                 base::SPLIT_WANT_NONEMPTY)) {
+    if (line[0] != '#') {
+      return string(line);
+    }
+  }
+  return {};
+}
+
 class Init::Worker {
  public:
   // Relevant information about processes launched by this process.
@@ -769,7 +878,7 @@ class Init::Worker {
 
     std::list<base::Time> spawn_times;
 
-    base::Optional<base::Callback<void(ProcessStatus, int)>> exit_cb;
+    std::optional<base::OnceCallback<void(ProcessStatus, int)>> exit_cb;
   };
 
   Worker()
@@ -982,13 +1091,6 @@ void Init::Worker::Shutdown(int notify_fd) {
                     base::Time::Now() + kTremplinShutdownTimeout);
   }
 
-  // Second, send SIGPWR to lxd, if it is running.  This will cause lxd to shut
-  // down all running containers in parallel.
-  pid_t lxd_pid = FindProcessByName("lxd");
-  if (lxd_pid != 0 && kill(lxd_pid, SIGPWR) == 0) {
-    WaitForChildren({lxd_pid}, base::Time::Now() + kShutdownTimeout);
-  }
-
   // Now send SIGTERM to all remaining processes.
   std::set<pid_t> pids;
   BroadcastSignal(SIGTERM, &pids);
@@ -997,7 +1099,7 @@ void Init::Worker::Shutdown(int notify_fd) {
   WaitForChildren(std::move(pids), base::Time::Now() + kShutdownTimeout);
 
   // Kill anything left with SIGKILL.
-  BroadcastSignal(SIGKILL, nullptr);
+  BroadcastSignal(SIGKILL, &pids);
 
   // Detach loopback devices.
   DetachLoopback();
@@ -1071,7 +1173,7 @@ void Init::Worker::OnSignalReadable() {
     }
 
     if (info.exit_cb) {
-      info.exit_cb.value().Run(proc_status, code);
+      std::move(info.exit_cb).value().Run(proc_status, code);
     }
 
     if (!info.respawn) {
@@ -1149,8 +1251,10 @@ pid_t Init::Worker::FindProcessByName(const string& name) {
   return 0;
 }
 
-std::unique_ptr<Init> Init::Create() {
-  auto init = base::WrapUnique<Init>(new Init());
+Init::Init(bool maitred_is_pid1) : maitred_is_pid1_{maitred_is_pid1} {}
+
+std::unique_ptr<Init> Init::Create(bool maitred_is_pid1) {
+  auto init = base::WrapUnique<Init>(new Init(maitred_is_pid1));
 
   if (!init->Setup()) {
     init.reset();
@@ -1174,7 +1278,7 @@ bool Init::Spawn(
     bool use_console,
     bool wait_for_exit,
     ProcessLaunchInfo* launch_info,
-    base::Optional<base::Callback<void(ProcessStatus, int)>> exit_cb) {
+    std::optional<base::OnceCallback<void(ProcessStatus, int)>> exit_cb) {
   CHECK(!argv.empty());
   CHECK(!(respawn && wait_for_exit));
   CHECK(launch_info);
@@ -1201,9 +1305,8 @@ bool Init::Spawn(
   }
 
   bool ret = worker_thread_.task_runner()->PostTask(
-      FROM_HERE,
-      base::Bind(&Worker::Spawn, base::Unretained(worker_.get()),
-                 base::Passed(std::move(info)), sem.get(), launch_info));
+      FROM_HERE, base::BindOnce(&Worker::Spawn, base::Unretained(worker_.get()),
+                                std::move(info), sem.get(), launch_info));
   if (!ret) {
     return false;
   }
@@ -1224,8 +1327,9 @@ void Init::Shutdown() {
   }
 
   bool ret = worker_thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&Worker::Shutdown, base::Unretained(worker_.get()),
-                            notify_fd.get()));
+      FROM_HERE,
+      base::BindOnce(&Worker::Shutdown, base::Unretained(worker_.get()),
+                     notify_fd.get()));
   if (!ret) {
     LOG(ERROR) << "Failed to post task to worker thread";
     return;
@@ -1272,103 +1376,115 @@ bool Init::Setup() {
   // Set the umask properly or the directory modes will not work.
   umask(0000);
 
-  // Do all the mounts.
-  for (const auto& mt : mounts) {
-    if (mkdir(mt.target, 0755) != 0 && errno != EEXIST) {
-      PLOG(ERROR) << "Failed to create " << mt.target;
-      if (mt.failure_is_fatal)
+  if (maitred_is_pid1_) {
+    for (const auto& mt : mounts) {
+      if (mkdir(mt.target, 0755) != 0 && errno != EEXIST) {
+        PLOG(ERROR) << "Failed to create " << mt.target;
+        if (mt.failure_is_fatal)
+          return false;
+      }
+
+      if (mount(mt.source, mt.target, mt.fstype, mt.flags, mt.data) != 0) {
+        rmdir(mt.target);
+        PLOG(ERROR) << "Failed to mount " << mt.target;
+        if (mt.failure_is_fatal)
+          return false;
+      }
+    }
+
+    // Setup the resource limits.
+    if (!SetupResourceLimit()) {
+      return false;
+    }
+
+    // Create all the symlinks
+    for (const auto& sl : symlinks) {
+      if (symlink(sl.source, sl.target) != 0) {
+        PLOG(ERROR) << "Failed to create symlink: source " << sl.source
+                    << ", target " << sl.target;
         return false;
+      }
     }
 
-    if (mount(mt.source, mt.target, mt.fstype, mt.flags, mt.data) != 0) {
-      rmdir(mt.target);
-      PLOG(ERROR) << "Failed to mount " << mt.target;
-      if (mt.failure_is_fatal)
+    // Create all the directories.
+    for (const auto& dir : boot_dirs) {
+      if (mkdir(dir.path, dir.mode) != 0 && errno != EEXIST) {
+        PLOG(ERROR) << "Failed to create " << dir.path;
         return false;
+      }
     }
-  }
 
-  // Setup the resource limits.
-  if (!SetupResourceLimit()) {
-    return false;
-  }
+    for (const auto& overlay : overlays) {
+      if (!brillo::MkdirRecursively(base::FilePath(overlay.upper_dir), 0755)
+               .is_valid()) {
+        PLOG(ERROR) << "Failed to create " << overlay.upper_dir;
+        return false;
+      }
 
-  // Create all the symlinks.
-  for (const auto& sl : symlinks) {
-    if (symlink(sl.source, sl.target) != 0) {
-      PLOG(ERROR) << "Failed to create symlink: source " << sl.source
-                  << ", target " << sl.target;
+      if (!brillo::MkdirRecursively(base::FilePath(overlay.work_dir), 0755)
+               .is_valid()) {
+        PLOG(ERROR) << "Failed to create " << overlay.work_dir;
+        return false;
+      }
+
+      string options = base::StringPrintf("lowerdir=%s,upperdir=%s,workdir=%s",
+                                          overlay.lower_dir, overlay.upper_dir,
+                                          overlay.work_dir);
+      if (mount("overlay", overlay.target, "overlay", 0, options.c_str())) {
+        PLOG(ERROR) << "Failed to mount overlay " << overlay.target;
+        return false;
+      }
+    }
+
+    // Enable hierarchial memory accounting for LXD.
+    base::FilePath use_hierarchy = base::FilePath(kCgroupRootDir)
+                                       .Append("memory")
+                                       .Append("memory.use_hierarchy");
+    if (base::WriteFile(use_hierarchy, "1", 1) != 1) {
+      PLOG(ERROR) << "Failed to set use_hierarchy to 1 on memory cgroup";
+      return false;
+    }
+
+    // Maitred becomes the session leader if PID1.
+    if (setsid() == -1) {
+      PLOG(ERROR) << "Failed to become session leader";
+      return false;
+    }
+
+    // Set the controlling terminal.
+    if (ioctl(STDIN_FILENO, TIOCSCTTY, 1) != 0) {
+      PLOG(ERROR) << "Failed to set controlling terminal";
+      return false;
+    }
+
+    // Setup up PATH.
+    if (clearenv() != 0) {
+      PLOG(ERROR) << "Failed to clear environment";
+      return false;
+    }
+    if (setenv("PATH", kDefaultPath, 1 /*overwrite*/) != 0) {
+      PLOG(ERROR) << "Failed to set PATH";
       return false;
     }
   }
 
-  // Create all the directories.
-  for (const auto& dir : boot_dirs) {
-    if (mkdir(dir.path, dir.mode) != 0 && errno != EEXIST) {
-      PLOG(ERROR) << "Failed to create " << dir.path;
-      return false;
+#if USE_VM_BOREALIS
+  // Set hostname
+  string hostnameconfig;
+  if (base::ReadFileToString(base::FilePath(kHostnameConfigFile),
+                             &hostnameconfig)) {
+    string hostname(ParseHostname(hostnameconfig));
+    if (hostname.empty()) {
+      LOG(WARNING) << "No valid hostname in " << kHostnameConfigFile
+                   << "; will not set hostname";
+    } else if (sethostname(hostname.c_str(), hostname.size()) != 0) {
+      PLOG(ERROR) << "sethostname() failed";
     }
+  } else {
+    PLOG(WARNING) << "Failed to read " << kHostnameConfigFile
+                  << "; will not set hostname";
   }
-
-  // Change the ownership of the kCgroupContainerSuffix directory in each cgroup
-  // subsystem to "chronos".
-  base::FileEnumerator enumerator(base::FilePath(kCgroupRootDir),
-                                  false /*recursive*/,
-                                  base::FileEnumerator::DIRECTORIES);
-  for (base::FilePath current = enumerator.Next(); !current.empty();
-       current = enumerator.Next()) {
-    base::FilePath target_cgroup = current.Append(kCgroupContainerSuffix);
-    if (mkdir(target_cgroup.value().c_str(), 0755) != 0 && errno != EEXIST) {
-      PLOG(ERROR) << "Failed to create cgroup " << target_cgroup.value();
-      return false;
-    }
-    if (!ChangeOwnerAndGroup(target_cgroup, kChronosUid, kChronosGid)) {
-      return false;
-    }
-  }
-
-  // Create and setup the container cpusets with the default settings (all cpus,
-  // all mems).
-  const char* sets[] = {"cpuset.cpus", "cpuset.mems"};
-  base::FilePath root_dir = base::FilePath(kCgroupRootDir).Append("cpuset");
-  base::FilePath chronos_dir = root_dir.Append(kCgroupContainerSuffix);
-  for (const char* set : sets) {
-    string contents;
-    if (!base::ReadFileToString(root_dir.Append(set), &contents)) {
-      PLOG(ERROR) << "Failed to read contents from "
-                  << root_dir.Append(set).value();
-      return false;
-    }
-
-    if (base::WriteFile(chronos_dir.Append(set), contents.c_str(),
-                        contents.length()) != contents.length()) {
-      PLOG(ERROR) << "Failed to write cpuset contents to "
-                  << chronos_dir.Append(set).value();
-      return false;
-    }
-  }
-
-  // Become the session leader.
-  if (setsid() == -1) {
-    PLOG(ERROR) << "Failed to become session leader";
-    return false;
-  }
-
-  // Set the controlling terminal.
-  if (ioctl(STDIN_FILENO, TIOCSCTTY, 1) != 0) {
-    PLOG(ERROR) << "Failed to set controlling terminal";
-    return false;
-  }
-
-  // Setup up PATH.
-  if (clearenv() != 0) {
-    PLOG(ERROR) << "Failed to clear environment";
-    return false;
-  }
-  if (setenv("PATH", kDefaultPath, 1 /*overwrite*/) != 0) {
-    PLOG(ERROR) << "Failed to set PATH";
-    return false;
-  }
+#endif
 
   // Block SIGCHLD here because we want to handle it in the worker thread.
   sigset_t mask;
@@ -1380,76 +1496,79 @@ bool Init::Setup() {
   }
 
   // Start the worker.
-  base::Thread::Options opts(base::MessagePumpType::IO, 0 /*stack_size*/);
-  if (!worker_thread_.StartWithOptions(opts)) {
+  if (!worker_thread_.StartWithOptions(
+          base::Thread::Options(base::MessagePumpType::IO, 0 /*stack_size*/))) {
     LOG(ERROR) << "Failed to start worker thread";
     return false;
   }
 
   worker_ = std::make_unique<Worker>();
   bool ret = worker_thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&Worker::Start, base::Unretained(worker_.get())));
+      FROM_HERE,
+      base::BindOnce(&Worker::Start, base::Unretained(worker_.get())));
   if (!ret) {
     LOG(ERROR) << "Failed to post task to worker thread";
     return false;
   }
 
-  // Applications that should be started for every VM.
-  struct {
-    const char* doc;
-    std::vector<string> argv;
-    std::map<string, string> env;
-    bool respawn;
-    bool use_console;
-    bool wait_for_exit;
-  } startup_applications[] = {
-      {
-          .doc = "system log collector",
-          .argv = {"vm_syslog"},
-          .env = {},
-          .respawn = true,
-          .use_console = false,
-          .wait_for_exit = false,
-      },
-      {
-          .doc = "vsock remote shell daemon",
-          .argv = {"vshd"},
-          .env = {},
-          .respawn = true,
-          .use_console = false,
-          .wait_for_exit = false,
-      },
-  };
+  if (maitred_is_pid1_) {
+    // Applications that should be started for every VM.
+    struct {
+      const char* doc;
+      std::vector<string> argv;
+      std::map<string, string> env;
+      bool respawn;
+      bool use_console;
+      bool wait_for_exit;
+    } startup_applications[] = {
+        {
+            .doc = "system log collector",
+            .argv = {"vm_syslog"},
+            .env = {},
+            .respawn = true,
+            .use_console = false,
+            .wait_for_exit = false,
+        },
+        {
+            .doc = "vsock remote shell daemon",
+            .argv = {"vshd"},
+            .env = {},
+            .respawn = true,
+            .use_console = false,
+            .wait_for_exit = false,
+        },
+    };
 
-  // Spawn all the startup applications.
-  for (auto& app : startup_applications) {
-    CHECK(!app.argv.empty());
+    // Spawn all the startup applications.
+    for (auto& app : startup_applications) {
+      CHECK(!app.argv.empty());
 
-    LOG(INFO) << "Starting " << app.doc;
+      LOG(INFO) << "Starting " << app.doc;
 
-    ProcessLaunchInfo info;
-    if (!Spawn(std::move(app.argv), std::move(app.env), app.respawn,
-               app.use_console, app.wait_for_exit, &info)) {
-      LOG(ERROR) << "Unable to launch " << app.doc;
-      continue;
-    }
+      ProcessLaunchInfo info;
+      if (!Spawn(std::move(app.argv), std::move(app.env), app.respawn,
+                 app.use_console, app.wait_for_exit, &info)) {
+        LOG(ERROR) << "Unable to launch " << app.doc;
+        continue;
+      }
 
-    switch (info.status) {
-      case ProcessStatus::UNKNOWN:
-        LOG(WARNING) << app.doc << " has unknown status";
-        break;
-      case ProcessStatus::EXITED:
-        LOG(INFO) << app.doc << " exited with status " << info.code;
-        break;
-      case ProcessStatus::SIGNALED:
-        LOG(INFO) << app.doc << " killed by signal " << info.code;
-        break;
-      case ProcessStatus::LAUNCHED:
-        LOG(INFO) << app.doc << " started";
-        break;
-      case ProcessStatus::FAILED:
-        LOG(ERROR) << "Failed to start " << app.doc;
-        break;
+      switch (info.status) {
+        case ProcessStatus::UNKNOWN:
+          LOG(WARNING) << app.doc << " has unknown status";
+          break;
+        case ProcessStatus::EXITED:
+          LOG(INFO) << app.doc << " exited with status " << info.code;
+          break;
+        case ProcessStatus::SIGNALED:
+          LOG(INFO) << app.doc << " killed by signal " << info.code;
+          break;
+        case ProcessStatus::LAUNCHED:
+          LOG(INFO) << app.doc << " started";
+          break;
+        case ProcessStatus::FAILED:
+          LOG(ERROR) << "Failed to start " << app.doc;
+          break;
+      }
     }
   }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/synchronization/lock.h>
 #include <base/thread_annotations.h>
 #include <base/threading/thread.h>
@@ -53,7 +53,7 @@ namespace cros {
 //      There can only one active capture session any any given time.
 //   5. During shutdown, Exit() is called and CameraClient would make sure the
 //      cameras are closed before the return of the call.
-class CameraClient final : public mojom::CameraHalClient {
+class CameraClient : public mojom::CameraHalClient {
  public:
   using RegisterClientCallback = base::OnceCallback<void(
       mojo::PendingRemote<mojom::CameraHalClient>, IntOnceCallback)>;

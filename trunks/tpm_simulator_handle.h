@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,7 +25,8 @@ namespace trunks {
 //   std::string response = handle.SendCommandAndWait(command);
 class TpmSimulatorHandle : public CommandTransceiver {
  public:
-  TpmSimulatorHandle();
+  explicit TpmSimulatorHandle(
+      std::string simulator_state_directory = "/var/lib/trunks");
   TpmSimulatorHandle(const TpmSimulatorHandle&) = delete;
   TpmSimulatorHandle& operator=(const TpmSimulatorHandle&) = delete;
 
@@ -34,7 +35,7 @@ class TpmSimulatorHandle : public CommandTransceiver {
   // CommandTranceiver methods.
   bool Init() override;
   void SendCommand(const std::string& command,
-                   const ResponseCallback& callback) override;
+                   ResponseCallback callback) override;
   std::string SendCommandAndWait(const std::string& command) override;
 
  private:
@@ -42,6 +43,7 @@ class TpmSimulatorHandle : public CommandTransceiver {
   void InitializeSimulator();
 
   bool init_ = false;
+  std::string simulator_state_directory_;
 };
 
 }  // namespace trunks

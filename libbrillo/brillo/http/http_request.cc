@@ -1,12 +1,12 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <base/check.h>
 #include <brillo/http/http_request.h>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <brillo/http/http_form_data.h>
 #include <brillo/map_utils.h>
@@ -142,16 +142,17 @@ std::unique_ptr<Response> Request::GetResponseAndBlock(
   return response;
 }
 
-RequestID Request::GetResponse(const SuccessCallback& success_callback,
-                               const ErrorCallback& error_callback) {
+RequestID Request::GetResponse(SuccessCallback success_callback,
+                               ErrorCallback error_callback) {
   ErrorPtr error;
   if (!SendRequestIfNeeded(&error)) {
-    transport_->RunCallbackAsync(
-        FROM_HERE, base::Bind(error_callback, 0, base::Owned(error.release())));
+    transport_->RunCallbackAsync(FROM_HERE,
+                                 base::BindOnce(std::move(error_callback), 0,
+                                                base::Owned(error.release())));
     return 0;
   }
-  RequestID id =
-      connection_->FinishRequestAsync(success_callback, error_callback);
+  RequestID id = connection_->FinishRequestAsync(std::move(success_callback),
+                                                 std::move(error_callback));
   connection_.reset();
   transport_.reset();  // Indicate that the request has been dispatched.
   return id;

@@ -1,0 +1,56 @@
+# Copyright 2020 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+# For cros_healthd-client package.
+group("mojom") {
+  deps = [
+    ":cros_healthd-client",
+    "//diagnostics/mojom/external:libnetwork_diagnostics_mojo_bindings",
+    "//diagnostics/mojom/external:libnetwork_health_mojo_bindings",
+    "//diagnostics/mojom/external:libpublic_dependencies",
+    "//diagnostics/mojom/public:libcros_healthd_mojo_bindings",
+  ]
+}
+
+generate_pkg_config("cros_healthd-client") {
+  description = "Generated Mojo API for communicating with cros_healthd."
+  version = "1.0"
+  requires_private = [
+    "libchrome",
+    "libmojo",
+  ]
+  libs = [
+    "-lnetwork_diagnostics_mojo_bindings",
+    "-lnetwork_health_mojo_bindings",
+    "-lcros_healthd_mojo_bindings",
+    "-lpublic_dependencies",
+  ]
+
+  # This flag will faltten the include space. If need to install files directly,
+  # install path should be `/usr/include/cros_healthd-client/diagnostics`.
+  cflags = [ "-I/usr/include/cros_healthd-client" ]
+  install = true
+}
+
+source_set("libmojom_utils") {
+  sources = [ "routine_output_utils.cc" ]
+  pkg_deps = [ "libchrome" ]
+  deps = [ "//diagnostics/mojom/public:libcros_healthd_mojo_bindings" ]
+}
+
+if (use.test) {
+  source_set("libmojom_utils_test") {
+    sources = [ "routine_output_utils_test.cc" ]
+    pkg_deps = [
+      "libchrome",
+      "libchrome-test",
+    ]
+    deps = [
+      ":libmojom_utils",
+      "//diagnostics/base:healthd_testrunner",
+    ]
+  }
+}

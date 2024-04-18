@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 namespace modemfwd {
 
 const char kGetFirmwareInfo[] = "get_fw_info";
+const char kShillFirmwareRevision[] = "shill_fw_revision";
 const char kPrepareToFlash[] = "prepare_to_flash";
 const char kFlashFirmware[] = "flash_fw";
 const char kFlashModeCheck[] = "flash_mode_check";
@@ -25,6 +26,8 @@ const char kFwVersion[] = "fw_version";
 const char kFwMain[] = "main";
 const char kFwCarrier[] = "carrier";
 const char kFwOem[] = "oem";
+const char kFwAp[] = "ap";
+const char kFwDev[] = "dev";
 const char kFwCarrierUuid[] = "carrier_uuid";
 
 }  // namespace modemfwd

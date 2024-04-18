@@ -1,11 +1,22 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//common-mk/install_seccomp_policy.gni")
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":cros_camera_service" ]
+  deps = [
+    ":cros_camera_service",
+    ":install_cros_camera_conf",
+    ":install_cros_camera_policy",
+    ":install_cros_camera_service_mojo",
+    ":install_dbus_cros_camera_conf",
+  ]
+
+  if (use.cheets) {
+    deps += [ ":install_init_camera_rc" ]
+  }
 }
 
 pkg_config("target_defaults") {
@@ -18,6 +29,7 @@ pkg_config("target_defaults") {
     "libmojo",
     "libsync",
     "libyuv",
+    "mojo_service_manager",
     "re2",
   ]
 }
@@ -28,7 +40,6 @@ executable("cros_camera_service") {
     "//camera/common/utils/camera_config_impl.cc",
     "//camera/common/utils/camera_hal_enumerator.cc",
     "//camera/common/utils/cros_camera_mojo_utils.cc",
-    "//camera/common/vendor_tag_manager.cc",
     "//camera/mojo/CameraMetadataTagsVerifier.cc",
     "camera3_callback_ops_delegate.cc",
     "camera3_device_ops_delegate.cc",
@@ -36,20 +47,53 @@ executable("cros_camera_service") {
     "camera_hal_adapter.cc",
     "camera_hal_server_impl.cc",
     "camera_hal_test_adapter.cc",
-    "camera_metadata_inspector.cc",
     "camera_module_callbacks_associated_delegate.cc",
     "camera_module_delegate.cc",
     "camera_trace_event.cc",
     "cros_camera_main.cc",
-    "reprocess_effect/gpu_algo_manager.cc",
-    "reprocess_effect/portrait_mode_effect.cc",
-    "reprocess_effect/reprocess_effect_manager.cc",
-    "scoped_yuv_buffer_handle.cc",
     "vendor_tag_ops_delegate.cc",
   ]
+  if (use.camera_feature_diagnostics) {
+    sources += [ "camera_diagnostics_client.cc" ]
+  }
   configs += [ ":target_defaults" ]
+  install_path = "bin"
   libs = [
     "dl",
     "rt",
   ]
+  deps = [ "//ml_core/dlc:dlc_client" ]
+}
+
+install_config("install_cros_camera_conf") {
+  sources = [
+    "init/cros-camera-failsafe.conf",
+    "init/cros-camera.conf",
+  ]
+
+  install_path = "upstart"
+}
+
+install_config("install_dbus_cros_camera_conf") {
+  sources = [ "dbus/CrosCamera.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_seccomp_policy("install_cros_camera_policy") {
+  arch = getenv("ARCH")
+  sources = [ "seccomp_filter/cros-camera-${arch}.policy" ]
+  outputs = [ "cros-camera-seccomp.policy" ]
+  install_path = "seccomp_policy"
+}
+
+if (use.cheets) {
+  install_config("install_init_camera_rc") {
+    sources = [ "init/init.camera.rc" ]
+    install_path = "/build/rootfs/opt/google/containers/android/vendor/etc/init"
+  }
+}
+
+install_config("install_cros_camera_service_mojo") {
+  sources = [ "cros_camera_service_mojo_policy.jsonc" ]
+  install_path = "/etc/mojo/service_manager/policy"
 }

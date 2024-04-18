@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 
 #include <base/check.h>
 #include <base/logging.h>
-#include <base/macros.h>
 
 #include "trunks/error_codes.h"
 #include "trunks/hmac_session.h"

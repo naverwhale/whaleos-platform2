@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,10 +12,10 @@
 #include <base/logging.h>
 #include <base/strings/string_util.h>
 
+#include "power_manager/common/tracing.h"
 #include "power_manager/powerd/system/udev.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -33,7 +33,7 @@ const char kI2CDevPath[] = "/dev";
 
 // The delay to advertise about change in display configuration after udev
 // event.
-constexpr base::TimeDelta kDebounceDelay = base::TimeDelta::FromSeconds(1);
+constexpr base::TimeDelta kDebounceDelay = base::Seconds(1);
 
 // Returns true if the device described by |drm_device_dir| is connected.
 bool IsConnectorStatus(const base::FilePath& drm_device_dir,
@@ -56,8 +56,6 @@ const char DisplayWatcher::kDrmUdevSubsystem[] = "drm";
 const char DisplayWatcher::kDrmStatusFile[] = "status";
 const char DisplayWatcher::kDrmStatusConnected[] = "connected";
 const char DisplayWatcher::kDrmStatusUnknown[] = "unknown";
-
-DisplayWatcher::DisplayWatcher() : udev_(nullptr) {}
 
 DisplayWatcher::~DisplayWatcher() {
   if (udev_) {
@@ -109,8 +107,7 @@ base::FilePath DisplayWatcher::GetSysPath(const base::FilePath& drm_dir) {
   sys_path = base::MakeAbsoluteFilePath(sys_path);
 
   // EVDI devices have an additional symlink to their parent device.
-  std::vector<std::string> components;
-  sys_path.GetComponents(&components);
+  std::vector<std::string> components = sys_path.GetComponents();
   for (const auto& component : components) {
     if (base::StartsWith(component, "evdi", base::CompareCase::SENSITIVE) &&
         base::PathExists(sys_path.Append("device"))) {
@@ -152,6 +149,7 @@ base::FilePath DisplayWatcher::FindI2CDeviceInDir(const base::FilePath& dir) {
 }
 
 void DisplayWatcher::HandleDebounceTimeout() {
+  TRACE_EVENT("power", "DisplayWatcher::HandleDebounceTimeout");
   for (DisplayWatcherObserver& observer : observers_)
     observer.OnDisplaysChanged(displays_);
 }
@@ -205,5 +203,4 @@ void DisplayWatcher::UpdateDisplays() {
   }
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

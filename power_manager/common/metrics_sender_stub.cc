@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,8 +15,6 @@ MetricsSenderStub::Metric::Metric()
       min(0),  // NOLINT(build/include_what_you_use)
       max(0),  // NOLINT(build/include_what_you_use)
       num_buckets(0) {}
-
-MetricsSenderStub::Metric::~Metric() {}
 
 // static
 MetricsSenderStub::Metric MetricsSenderStub::Metric::CreateExp(

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,23 +6,24 @@
 #define TPM_MANAGER_SERVER_TPM_MANAGER_SERVICE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/check.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ptr_util.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
 #include <base/synchronization/lock.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/thread.h>
 
 #include "tpm_manager/common/typedefs.h"
 #include "tpm_manager/server/local_data_store.h"
+#include "tpm_manager/server/openssl_crypto_util_impl.h"
 #include "tpm_manager/server/passive_timer.h"
+#include "tpm_manager/server/pinweaver_provision.h"
 #include "tpm_manager/server/tpm_allowlist.h"
 #include "tpm_manager/server/tpm_initializer.h"
 #include "tpm_manager/server/tpm_manager_metrics.h"
@@ -67,26 +68,27 @@ namespace tpm_manager {
 class TpmManagerService : public TpmNvramInterface,
                           public TpmOwnershipInterface {
  public:
-  // If |wait_for_ownership| is set, TPM initialization will be postponed until
-  // an explicit TakeOwnership request is received. If |perform_preinit| is
-  // additionally set, TPM pre-initialization will be performed in case TPM
-  // initialization is postponed.
+  enum class ReplaceOwnerPasswordResult {
+    kSuccess,
+    kClearSuccessButWriteFail,
+    kPasswordGenerationFail,
+    kFail,
+  };
+  // If |perform_preinit| is additionally set, TPM pre-initialization will be
+  // performed in case TPM initialization is postponed.
   //
   // This instance doesn't take the ownership of |local_data_store|, and it must
   // be initialized and remain valid for the lifetime of this instance.
-  explicit TpmManagerService(bool wait_for_ownership,
-                             bool perform_preinit,
+  explicit TpmManagerService(bool perform_preinit,
                              LocalDataStore* local_data_store);
 
-  // If |wait_for_ownership| is set, TPM initialization will be postponed until
-  // an explicit TakeOwnership request is received. If |perform_preinit| is
-  // additionally set, TPM pre-initialization will be performed in case TPM
-  // initialization is postponed.
-  // Does not take ownership of |local_data_store|, |tpm_status|,
-  // |tpm_initializer|, |tpm_nvram|, or |tpm_manager_metrics|.
-  TpmManagerService(bool wait_for_ownership,
-                    bool perform_preinit,
+  // If |perform_preinit| is additionally set, TPM pre-initialization will be
+  // performed in case TPM initialization is postponed. Does not take ownership
+  // of |local_data_store|, |tpm_status|, |tpm_initializer|, |tpm_nvram|, or
+  // |tpm_manager_metrics|.
+  TpmManagerService(bool perform_preinit,
                     LocalDataStore* local_data_store,
+                    std::unique_ptr<PinWeaverProvision> pinweaver_provision,
                     TpmStatus* tpm_status,
                     TpmInitializer* tpm_initializer,
                     TpmNvram* tpm_nvram,
@@ -101,6 +103,8 @@ class TpmManagerService : public TpmNvramInterface,
   bool Initialize();
 
   void ReportVersionFingerprint();
+
+  void UploadAlertsDataTask();
 
   // TpmOwnershipInterface methods.
   void GetTpmStatus(const GetTpmStatusRequest& request,
@@ -172,13 +176,6 @@ class TpmManagerService : public TpmNvramInterface,
 #endif
 
  private:
-  // A relay callback which allows the use of weak pointer semantics for a reply
-  // to TaskRunner::PostTaskAndReply.
-  template <typename ReplyProtobufType>
-  void TaskRelayCallback(
-      const base::OnceCallback<void(const ReplyProtobufType&)> callback,
-      const std::shared_ptr<ReplyProtobufType>& reply);
-
   // This templated method posts the provided |TaskType| to the background
   // thread with the provided |RequestProtobufType|. When |TaskType| finishes
   // executing, the |ReplyCallbackType| is called with the |ReplyProtobufType|.
@@ -203,7 +200,7 @@ class TpmManagerService : public TpmNvramInterface,
   // If an initialization process was interrupted it will be continued. If the
   // TPM is already initialized or cannot yet be initialized, this method has no
   // effect.
-  void InitializeTask(const std::shared_ptr<GetTpmStatusReply>& result);
+  std::unique_ptr<GetTpmStatusReply> InitializeTask();
 
   void ReportSecretStatus(const LocalData& local_data);
 
@@ -216,48 +213,43 @@ class TpmManagerService : public TpmNvramInterface,
 
   // Blocking implementation of GetTpmStatus that can be executed on the
   // background worker thread.
-  void GetTpmStatusTask(const GetTpmStatusRequest& request,
-                        const std::shared_ptr<GetTpmStatusReply>& result);
+  std::unique_ptr<GetTpmStatusReply> GetTpmStatusTask(
+      const GetTpmStatusRequest& request);
 
   // Blocking implementation of GetVersionInfo that can be executed on the
   // background worker thread.
-  void GetVersionInfoTask(const GetVersionInfoRequest& request,
-                          const std::shared_ptr<GetVersionInfoReply>& result);
+  std::unique_ptr<GetVersionInfoReply> GetVersionInfoTask(
+      const GetVersionInfoRequest& request);
 
   // Blocking implementation of GetSupportedFeatures that can be executed on the
   // background worker thread.
-  void GetSupportedFeaturesTask(
-      const GetSupportedFeaturesRequest& request,
-      const std::shared_ptr<GetSupportedFeaturesReply>& result);
+  std::unique_ptr<GetSupportedFeaturesReply> GetSupportedFeaturesTask(
+      const GetSupportedFeaturesRequest& request);
 
   // Blocking implementation of GetDictionaryAttackInfo that can be executed on
   // the background worker thread.
-  void GetDictionaryAttackInfoTask(
-      const GetDictionaryAttackInfoRequest& request,
-      const std::shared_ptr<GetDictionaryAttackInfoReply>& result);
+  std::unique_ptr<GetDictionaryAttackInfoReply> GetDictionaryAttackInfoTask(
+      const GetDictionaryAttackInfoRequest& request);
 
   // Blocking implementation of GetRoVerificationStatus that can be executed on
   // the background worker thread.
-  void GetRoVerificationStatusTask(
-      const GetRoVerificationStatusRequest& request,
-      const std::shared_ptr<GetRoVerificationStatusReply>& result);
+  std::unique_ptr<GetRoVerificationStatusReply> GetRoVerificationStatusTask(
+      const GetRoVerificationStatusRequest& request);
 
   // Blocking implementation of ResetDictionaryAttackLock that can be executed
   // on the background worker thread.
-  void ResetDictionaryAttackLockTask(
-      const ResetDictionaryAttackLockRequest& request,
-      const std::shared_ptr<ResetDictionaryAttackLockReply>& result);
+  std::unique_ptr<ResetDictionaryAttackLockReply> ResetDictionaryAttackLockTask(
+      const ResetDictionaryAttackLockRequest& request);
 
   // Blocking implementation of TakeOwnership that can be executed on the
   // background worker thread.
-  void TakeOwnershipTask(const TakeOwnershipRequest& request,
-                         const std::shared_ptr<TakeOwnershipReply>& result);
+  std::unique_ptr<TakeOwnershipReply> TakeOwnershipTask(
+      const TakeOwnershipRequest& request);
 
   // Blocking implementation of RemoveOwnerDependency that can be executed on
   // the background worker thread.
-  void RemoveOwnerDependencyTask(
-      const RemoveOwnerDependencyRequest& request,
-      const std::shared_ptr<RemoveOwnerDependencyReply>& result);
+  std::unique_ptr<RemoveOwnerDependencyReply> RemoveOwnerDependencyTask(
+      const RemoveOwnerDependencyRequest& request);
 
   // Removes a |owner_dependency| from the list of owner dependencies in
   // |local_data|. If |owner_dependency| is not present in |local_data|,
@@ -267,44 +259,51 @@ class TpmManagerService : public TpmNvramInterface,
 
   // Blocking implementation of ClearStoredOwnerPassword that can be executed
   // on the background worker thread.
-  void ClearStoredOwnerPasswordTask(
-      const ClearStoredOwnerPasswordRequest& request,
-      const std::shared_ptr<ClearStoredOwnerPasswordReply>& result);
+  std::unique_ptr<ClearStoredOwnerPasswordReply> ClearStoredOwnerPasswordTask(
+      const ClearStoredOwnerPasswordRequest& request);
 
   // Blocking implementation of DefineSpace that can be executed on the
   // background worker thread.
-  void DefineSpaceTask(const DefineSpaceRequest& request,
-                       const std::shared_ptr<DefineSpaceReply>& result);
+  std::unique_ptr<DefineSpaceReply> DefineSpaceTask(
+      const DefineSpaceRequest& request);
 
   // Blocking implementation of DestroySpace that can be executed on the
   // background worker thread.
-  void DestroySpaceTask(const DestroySpaceRequest& request,
-                        const std::shared_ptr<DestroySpaceReply>& result);
+  std::unique_ptr<DestroySpaceReply> DestroySpaceTask(
+      const DestroySpaceRequest& request);
 
   // Blocking implementation of WriteSpace that can be executed on the
   // background worker thread.
-  void WriteSpaceTask(const WriteSpaceRequest& request,
-                      const std::shared_ptr<WriteSpaceReply>& result);
+  std::unique_ptr<WriteSpaceReply> WriteSpaceTask(
+      const WriteSpaceRequest& request);
 
   // Blocking implementation of ReadSpace that can be executed on the
   // background worker thread.
-  void ReadSpaceTask(const ReadSpaceRequest& request,
-                     const std::shared_ptr<ReadSpaceReply>& result);
+  std::unique_ptr<ReadSpaceReply> ReadSpaceTask(
+      const ReadSpaceRequest& request);
 
   // Blocking implementation of LockSpace that can be executed on the
   // background worker thread.
-  void LockSpaceTask(const LockSpaceRequest& request,
-                     const std::shared_ptr<LockSpaceReply>& result);
+  std::unique_ptr<LockSpaceReply> LockSpaceTask(
+      const LockSpaceRequest& request);
 
   // Blocking implementation of ListSpaces that can be executed on the
   // background worker thread.
-  void ListSpacesTask(const ListSpacesRequest& request,
-                      const std::shared_ptr<ListSpacesReply>& result);
+  std::unique_ptr<ListSpacesReply> ListSpacesTask(
+      const ListSpacesRequest& request);
 
   // Blocking implementation of GetSpaceInfo that can be executed on the
   // background worker thread.
-  void GetSpaceInfoTask(const GetSpaceInfoRequest& request,
-                        const std::shared_ptr<GetSpaceInfoReply>& result);
+  std::unique_ptr<GetSpaceInfoReply> GetSpaceInfoTask(
+      const GetSpaceInfoRequest& request);
+
+  // Clears owner password in |local_data| if all dependencies have been removed
+  // and it has not yet been cleared; returns true upon successful removal.
+  // Later, it generates another random owner password and assigns it to the TPM
+  // without storing it to |local_data|.
+  ReplaceOwnerPasswordResult
+  ClearOwnerPasswordAndReplaceWithRandomPasswordIfPossible(
+      LocalData& local_data);
 
   // Gets the owner password from local storage. Returns an empty string if the
   // owner password is not available.
@@ -328,7 +327,14 @@ class TpmManagerService : public TpmNvramInterface,
   // Shutdown to be run on the worker thread.
   void ShutdownTask();
 
+  // Check if TPM is cleared after power wash and report the status to UMA
+  void CheckPowerWashResult(const TpmStatus::TpmOwnershipStatus status);
+
   LocalDataStore* local_data_store_;
+  OpensslCryptoUtilImpl openssl_util_;
+
+  std::unique_ptr<PinWeaverProvision> pinweaver_provision_;
+
   TpmStatus* tpm_status_ = nullptr;
   TpmInitializer* tpm_initializer_ = nullptr;
   TpmNvram* tpm_nvram_ = nullptr;
@@ -337,11 +343,11 @@ class TpmManagerService : public TpmNvramInterface,
   TpmManagerMetrics default_tpm_manager_metrics_;
   TpmManagerMetrics* tpm_manager_metrics_{nullptr};
 
-  // Cache of TPM version info, base::nullopt if cache doesn't exist.
-  base::Optional<GetVersionInfoReply> version_info_cache_;
+  // Cache of TPM version info, std::nullopt if cache doesn't exist.
+  std::optional<GetVersionInfoReply> version_info_cache_;
 
-  // Cache of TPM supported features, base::nullopt if cache doesn't exist.
-  base::Optional<GetSupportedFeaturesReply> supported_features_cache_;
+  // Cache of TPM supported features, std::nullopt if cache doesn't exist.
+  std::optional<GetSupportedFeaturesReply> supported_features_cache_;
 
   // Cache of TPM status.
   GetTpmStatusReply get_tpm_status_cache_;
@@ -393,17 +399,13 @@ class TpmManagerService : public TpmNvramInterface,
   std::unique_ptr<TpmNvram> default_tpm_nvram_;
   std::unique_ptr<TpmAllowlist> default_tpm_allowlist_;
 
-  // Whether to clear the stored owner password automatically upon removing all
-  // dependencies.
-  bool auto_clear_stored_owner_password_ = false;
-  // Whether to wait for an explicit call to 'TakeOwnership' before initializing
-  // the TPM. Normally tracks the --wait_for_ownership command line option.
-  bool wait_for_ownership_;
   // Whether to perform pre-initialization (where available) if initialization
   // itself needs to wait for 'TakeOwnership' first.
   bool perform_preinit_;
   // Whether the TPM is allowed to use or not.
   bool tpm_allowed_ = false;
+  // The take ownership should return device error directly or not.
+  bool take_ownership_device_error_ = false;
   // Origin task runner to run the task on origin thread.
   scoped_refptr<base::TaskRunner> origin_task_runner_;
   // Background thread to allow processing of potentially lengthy TPM requests

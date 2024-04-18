@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,13 @@
 #define LORGNETTE_TEST_UTIL_H_
 
 #include <cstdint>
+#include <memory>
 #include <ostream>
 #include <string>
 #include <vector>
 
 #include <gmock/gmock.h>
+#include <libusb.h>
 #include <lorgnette/proto_bindings/lorgnette_service.pb.h>
 
 using ::testing::ExplainMatchResult;
@@ -70,6 +72,18 @@ MATCHER_P(EqualsDocumentSource, expected, "") {
   return ExplainMatchResult(UnorderedElementsAreArray(expected.color_modes()),
                             arg.color_modes(), result_listener);
 }
+
+MATCHER_P(EqualsProto,
+          message,
+          "Match a proto Message equal to the matcher's argument.") {
+  std::string expected_serialized, actual_serialized;
+  message.SerializeToString(&expected_serialized);
+  arg.SerializeToString(&actual_serialized);
+  return expected_serialized == actual_serialized;
+}
+
+libusb_device_descriptor MakeMinimalDeviceDescriptor();
+std::unique_ptr<libusb_interface_descriptor> MakeIppUsbInterfaceDescriptor();
 
 }  // namespace lorgnette
 

@@ -1,17 +1,19 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/arc_util.h"
 
-#include <sstream>
-
 #include <stdint.h>
 #include <sysexits.h>
+
+#include <optional>
+#include <sstream>
 
 #include <base/logging.h>
 #include <brillo/process/process.h>
 
+#include "crash-reporter/paths.h"
 #include "crash-reporter/util.h"
 
 namespace arc_util {
@@ -20,20 +22,19 @@ namespace {
 
 constexpr char kUnknownValue[] = "unknown";
 
-const char kChromePath[] = "/opt/google/chrome/chrome";
+constexpr char kChromeDirectory[] = "/opt/google/chrome";
 
 bool HasExceptionInfo(const std::string& type) {
   static const std::unordered_set<std::string> kTypes = {
-      "data_app_crash", "system_app_crash", "system_app_wtf",
-      "system_server_crash", "system_server_wtf"};
+      kDataAppCrash, kSystemAppCrash, kSystemAppWtf, kSystemServerCrash,
+      kSystemServerWtf};
   return kTypes.count(type);
 }
 
 base::TimeTicks ToSeconds(const base::TimeTicks& time) {
   return base::TimeTicks::FromInternalValue(
-      base::TimeDelta::FromSeconds(
-          base::TimeDelta::FromInternalValue(time.ToInternalValue())
-              .InSeconds())
+      base::Seconds(base::TimeDelta::FromInternalValue(time.ToInternalValue())
+                        .InSeconds())
           .ToInternalValue());
 }
 
@@ -71,7 +72,7 @@ const std::vector<std::pair<const char*, const char*>> kHeaderToFieldMapping = {
     {"Abi-Migration-Status", "abi_migration_status"},
 };
 
-base::Optional<std::string> GetVersionFromFingerprint(
+std::optional<std::string> GetVersionFromFingerprint(
     const std::string& fingerprint) {
   // fingerprint has the following format:
   //   $(PRODUCT_BRAND)/$(TARGET_PRODUCT)/$(TARGET_DEVICE):$(PLATFORM_VERSION)/
@@ -87,7 +88,7 @@ base::Optional<std::string> GetVersionFromFingerprint(
   // '/R' is the version.
   auto begin = fingerprint.find(':');
   if (begin == std::string::npos)
-    return base::nullopt;
+    return std::nullopt;
 
   // Make begin point to the start of the "version".
   begin++;
@@ -95,7 +96,7 @@ base::Optional<std::string> GetVersionFromFingerprint(
   // Version must have at least one digit.
   const auto end = fingerprint.find("/R", begin + 1);
   if (end == std::string::npos)
-    return base::nullopt;
+    return std::nullopt;
 
   return fingerprint.substr(begin, end - begin);
 }
@@ -143,17 +144,17 @@ bool ParseCrashLog(const std::string& type,
 
 const char* GetSubjectTag(const std::string& type) {
   static const CrashLogHeaderMap kTags = {
-      {"data_app_native_crash", "native app crash"},
-      {"system_app_anr", "ANR"},
-      {"data_app_anr", "app ANR"},
-      {"system_server_watchdog", "system server watchdog"}};
+      {kDataAppNativeCrash, "native app crash"},
+      {kSystemAppAnr, "ANR"},
+      {kDataAppAnr, "app ANR"},
+      {kSystemServerWatchdog, "system server watchdog"}};
 
   const auto it = kTags.find(type);
   return it == kTags.cend() ? nullptr : it->second.c_str();
 }
 
 bool IsSilentReport(const std::string& type) {
-  return type == "system_app_wtf" || type == "system_server_wtf";
+  return type == kSystemAppWtf || type == kSystemServerWtf;
 }
 
 std::string GetCrashLogHeader(const CrashLogHeaderMap& map, const char* key) {
@@ -189,18 +190,15 @@ std::vector<std::pair<std::string, std::string>> ListMetadataForBuildProperty(
 }
 
 bool GetChromeVersion(std::string* version) {
-  brillo::ProcessImpl chrome;
-  chrome.AddArg(kChromePath);
-  chrome.AddArg("--product-version");
-
-  int exit_code = util::RunAndCaptureOutput(&chrome, STDOUT_FILENO, version);
-  if (exit_code != EX_OK || version->empty()) {
-    LOG(ERROR) << "Failed to get Chrome version";
-    return false;
+  base::FilePath chrome_metadata_path =
+      paths::Get(kChromeDirectory).Append("metadata.json");
+  if (std::optional<std::string> version_maybe =
+          util::ExtractChromeVersionFromMetadata(chrome_metadata_path);
+      version_maybe) {
+    *version = *version_maybe;
+    return true;
   }
-
-  version->pop_back();  // Discard EOL.
-  return true;
+  return false;
 }
 
 std::string GetProductVersion() {

@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ml/util.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,7 +34,7 @@ bool GetValueFromProcStatusValueStr(const std::string& value_str,
   if (split_value_str.size() != 2 || split_value_str[1] != "kB")
     return false;
 
-  return StringToSizeT(split_value_str[0], value);
+  return base::StringToSizeT(split_value_str[0], value);
 }
 
 }  // namespace
@@ -107,7 +108,7 @@ bool GetTotalProcessMemoryUsage(size_t* total_memory) {
 
 // Gives resolved path using realpath(3), or empty Optional upon error. Leaves
 // realpath's errno unchanged.
-base::Optional<base::FilePath> GetRealPath(const base::FilePath& path) {
+std::optional<base::FilePath> GetRealPath(const base::FilePath& path) {
   const std::unique_ptr<char, base::FreeDeleter> result(
       realpath(path.value().c_str(), nullptr));
   if (!result) {

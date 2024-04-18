@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "runtime_probe/functions/sysfs.h"
+#include "runtime_probe/utils/function_test_utils.h"
 
 namespace runtime_probe {
 
@@ -43,19 +44,19 @@ TEST(SysfsFunctionTest, TestRead) {
       "keys": ["1"],
       "optional_keys": ["2"]
   })");
-  json_val->SetStringKey("dir_path", temp_dir.GetPath().Append("D*").value());
-  auto p = CreateProbeFunction<SysfsFunction>(*json_val);
+  json_val->GetDict().Set("dir_path", temp_dir.GetPath().Append("D*").value());
+  auto p = CreateProbeFunction<SysfsFunction>(json_val->GetDict());
   ASSERT_TRUE(p) << "Failed to create SysfsFunction: " << *json_val;
 
   auto f = dynamic_cast<SysfsFunction*>(p.get());
   ASSERT_TRUE(f) << "Loaded function is not a SysfsFunction";
   f->MockSysfsPathForTesting(temp_dir.GetPath());
 
-  auto results = f->Eval();
+  auto results = EvalProbeFunction(f);
   ASSERT_EQ(results.size(), 2);
 
   for (auto& result : results) {
-    auto* value_1 = result.FindStringKey("1");
+    auto* value_1 = result.GetDict().FindString("1");
     ASSERT_TRUE(value_1) << "result: " << result;
 
     ASSERT_EQ(value_1->at(1), '1') << "result: " << result;
@@ -64,7 +65,7 @@ TEST(SysfsFunctionTest, TestRead) {
       case 'a':
         break;
       case 'b': {
-        auto* value_2 = result.FindStringKey("2");
+        auto* value_2 = result.GetDict().FindString("2");
         ASSERT_TRUE(value_2) << "result: " << result;
         ASSERT_EQ(*value_2, "b2") << "result: " << result;
       } break;
@@ -79,16 +80,16 @@ TEST(SysfsFunctionTest, TestRead) {
       "optional_keys": ["2"]
   })");
 
-  json_val_abs->SetStringKey("dir_path",
-                             temp_dir.GetPath().Append("D*").value());
-  auto p_abs = CreateProbeFunction<SysfsFunction>(*json_val_abs);
+  json_val_abs->GetDict().Set("dir_path",
+                              temp_dir.GetPath().Append("D*").value());
+  auto p_abs = CreateProbeFunction<SysfsFunction>(json_val_abs->GetDict());
   ASSERT_TRUE(p_abs) << "Failed to create SysfsFunction: " << *json_val_abs;
 
   auto f_abs = dynamic_cast<SysfsFunction*>(p_abs.get());
   ASSERT_TRUE(f_abs) << "Loaded function is not a SysfsFunction";
   f_abs->MockSysfsPathForTesting(temp_dir.GetPath());
 
-  auto results_abs = f_abs->Eval();
+  auto results_abs = EvalProbeFunction(f_abs);
   ASSERT_EQ(results_abs.size(), 0);
 }
 

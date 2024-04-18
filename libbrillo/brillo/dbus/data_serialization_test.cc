@@ -1,12 +1,15 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <brillo/dbus/data_serialization.h>
 
+#include <unistd.h>
+
 #include <limits>
 #include <tuple>
 
+#include <base/files/scoped_file.h>
 #include <base/logging.h>
 #include <brillo/variant_dictionary.h>
 #include <gtest/gtest.h>
@@ -34,7 +37,6 @@ TEST(DBusUtils, Supported_BasicTypes) {
   EXPECT_TRUE(IsTypeSupported<double>::value);
   EXPECT_TRUE(IsTypeSupported<std::string>::value);
   EXPECT_TRUE(IsTypeSupported<ObjectPath>::value);
-  EXPECT_TRUE(IsTypeSupported<FileDescriptor>::value);
   EXPECT_TRUE(IsTypeSupported<base::ScopedFD>::value);
   EXPECT_TRUE(IsTypeSupported<Any>::value);
   EXPECT_TRUE(IsTypeSupported<google::protobuf::MessageLite>::value);
@@ -77,72 +79,6 @@ TEST(DBusUtils, Unupported_TypeSet) {
       (IsTypeSupported<bool, std::pair<std::vector<float>, uint8_t>>::value));
   EXPECT_FALSE((IsTypeSupported<char, double, std::string, int16_t>::value));
   EXPECT_FALSE((IsTypeSupported<char, std::vector<float>, float>::value));
-}
-
-TEST(DBusUtils, Signatures_BasicTypes) {
-  EXPECT_EQ("b", GetDBusSignature<bool>());
-  EXPECT_EQ("y", GetDBusSignature<uint8_t>());
-  EXPECT_EQ("n", GetDBusSignature<int16_t>());
-  EXPECT_EQ("q", GetDBusSignature<uint16_t>());
-  EXPECT_EQ("i", GetDBusSignature<int32_t>());
-  EXPECT_EQ("u", GetDBusSignature<uint32_t>());
-  EXPECT_EQ("x", GetDBusSignature<int64_t>());
-  EXPECT_EQ("t", GetDBusSignature<uint64_t>());
-  EXPECT_EQ("d", GetDBusSignature<double>());
-  EXPECT_EQ("s", GetDBusSignature<std::string>());
-  EXPECT_EQ("o", GetDBusSignature<ObjectPath>());
-  EXPECT_EQ("h", GetDBusSignature<FileDescriptor>());
-  EXPECT_EQ("h", GetDBusSignature<base::ScopedFD>());
-  EXPECT_EQ("v", GetDBusSignature<Any>());
-}
-
-TEST(DBusUtils, Signatures_Arrays) {
-  EXPECT_EQ("ab", GetDBusSignature<std::vector<bool>>());
-  EXPECT_EQ("ay", GetDBusSignature<std::vector<uint8_t>>());
-  EXPECT_EQ("an", GetDBusSignature<std::vector<int16_t>>());
-  EXPECT_EQ("aq", GetDBusSignature<std::vector<uint16_t>>());
-  EXPECT_EQ("ai", GetDBusSignature<std::vector<int32_t>>());
-  EXPECT_EQ("au", GetDBusSignature<std::vector<uint32_t>>());
-  EXPECT_EQ("ax", GetDBusSignature<std::vector<int64_t>>());
-  EXPECT_EQ("at", GetDBusSignature<std::vector<uint64_t>>());
-  EXPECT_EQ("ad", GetDBusSignature<std::vector<double>>());
-  EXPECT_EQ("as", GetDBusSignature<std::vector<std::string>>());
-  EXPECT_EQ("ao", GetDBusSignature<std::vector<ObjectPath>>());
-  EXPECT_EQ("ah", GetDBusSignature<std::vector<FileDescriptor>>());
-  EXPECT_EQ("ah", GetDBusSignature<std::vector<base::ScopedFD>>());
-  EXPECT_EQ("av", GetDBusSignature<std::vector<Any>>());
-  EXPECT_EQ("a(is)",
-            (GetDBusSignature<std::vector<std::pair<int, std::string>>>()));
-  EXPECT_EQ("aad", GetDBusSignature<std::vector<std::vector<double>>>());
-}
-
-TEST(DBusUtils, Signatures_Maps) {
-  EXPECT_EQ("a{sb}", (GetDBusSignature<std::map<std::string, bool>>()));
-  EXPECT_EQ("a{ss}", (GetDBusSignature<std::map<std::string, std::string>>()));
-  EXPECT_EQ("a{sv}", (GetDBusSignature<std::map<std::string, Any>>()));
-  EXPECT_EQ("a{id}", (GetDBusSignature<std::map<int, double>>()));
-  EXPECT_EQ(
-      "a{ia{ss}}",
-      (GetDBusSignature<std::map<int, std::map<std::string, std::string>>>()));
-}
-
-TEST(DBusUtils, Signatures_Pairs) {
-  EXPECT_EQ("(sb)", (GetDBusSignature<std::pair<std::string, bool>>()));
-  EXPECT_EQ("(sv)", (GetDBusSignature<std::pair<std::string, Any>>()));
-  EXPECT_EQ("(id)", (GetDBusSignature<std::pair<int, double>>()));
-}
-
-TEST(DBusUtils, Signatures_Tuples) {
-  EXPECT_EQ("(i)", (GetDBusSignature<std::tuple<int>>()));
-  EXPECT_EQ("(sv)", (GetDBusSignature<std::tuple<std::string, Any>>()));
-  EXPECT_EQ("(id(si))",
-            (GetDBusSignature<
-                std::tuple<int, double, std::tuple<std::string, int>>>()));
-}
-
-TEST(DBusUtils, Signatures_Protobufs) {
-  EXPECT_EQ("ay", (GetDBusSignature<google::protobuf::MessageLite>()));
-  EXPECT_EQ("ay", (GetDBusSignature<dbus_utils_test::TestMessage>()));
 }
 
 // Test that a byte can be properly written and read. We only have this
@@ -242,7 +178,7 @@ TEST(DBusUtils, AppendAndPopFileDescriptor) {
   MessageWriter writer(message.get());
 
   // Append stdout.
-  FileDescriptor temp = 1;
+  base::ScopedFD temp(dup(1));
   AppendValueToWriter(&writer, temp);
 
   EXPECT_EQ("h", message->GetSignature());
@@ -695,100 +631,6 @@ TEST(DBusUtils, ReinterpretVariant) {
   EXPECT_EQ(dict_ss, dict_ss_out2);
 }
 
-// Test handling of custom data types.
-struct Person {
-  std::string first_name;
-  std::string last_name;
-  int age;
-  // Provide == operator so we can easily compare arrays of Person.
-  bool operator==(const Person& rhs) const {
-    return first_name == rhs.first_name && last_name == rhs.last_name &&
-           age == rhs.age;
-  }
-};
-
-// Overload AppendValueToWriter() for "Person" structure.
-void AppendValueToWriter(dbus::MessageWriter* writer, const Person& value) {
-  dbus::MessageWriter struct_writer(nullptr);
-  writer->OpenStruct(&struct_writer);
-  AppendValueToWriter(&struct_writer, value.first_name);
-  AppendValueToWriter(&struct_writer, value.last_name);
-  AppendValueToWriter(&struct_writer, value.age);
-  writer->CloseContainer(&struct_writer);
-}
-
-// Overload PopValueFromReader() for "Person" structure.
-bool PopValueFromReader(dbus::MessageReader* reader, Person* value) {
-  dbus::MessageReader variant_reader(nullptr);
-  dbus::MessageReader struct_reader(nullptr);
-  if (!details::DescendIntoVariantIfPresent(&reader, &variant_reader) ||
-      !reader->PopStruct(&struct_reader))
-    return false;
-  return PopValueFromReader(&struct_reader, &value->first_name) &&
-         PopValueFromReader(&struct_reader, &value->last_name) &&
-         PopValueFromReader(&struct_reader, &value->age);
-}
-
-// Specialize DBusType<T> for "Person" structure.
-template <>
-struct DBusType<Person> {
-  inline static std::string GetSignature() {
-    return GetStructDBusSignature<std::string, std::string, int>();
-  }
-  inline static void Write(dbus::MessageWriter* writer, const Person& value) {
-    AppendValueToWriter(writer, value);
-  }
-  inline static bool Read(dbus::MessageReader* reader, Person* value) {
-    return PopValueFromReader(reader, value);
-  }
-};
-
-TEST(DBusUtils, CustomStruct) {
-  std::unique_ptr<Response> message = Response::CreateEmpty();
-  MessageWriter writer(message.get());
-  std::vector<Person> people{{"John", "Doe", 32}, {"Jane", "Smith", 48}};
-  AppendValueToWriter(&writer, people);
-  AppendValueToWriterAsVariant(&writer, people);
-  AppendValueToWriterAsVariant(&writer, people);
-
-  EXPECT_EQ("a(ssi)vv", message->GetSignature());
-
-  std::vector<Person> people_out1;
-  std::vector<Person> people_out2;
-  std::vector<Person> people_out3;
-
-  MessageReader reader(message.get());
-  EXPECT_TRUE(PopValueFromReader(&reader, &people_out1));
-  EXPECT_TRUE(PopValueFromReader(&reader, &people_out2));
-  EXPECT_TRUE(PopVariantValueFromReader(&reader, &people_out3));
-  EXPECT_FALSE(reader.HasMoreData());
-
-  EXPECT_EQ(people, people_out1);
-  EXPECT_EQ(people, people_out2);
-  EXPECT_EQ(people, people_out3);
-}
-
-TEST(DBusUtils, CustomStructInComplexTypes) {
-  std::unique_ptr<Response> message = Response::CreateEmpty();
-  MessageWriter writer(message.get());
-  std::vector<Person> people{{"John", "Doe", 32}, {"Jane", "Smith", 48}};
-  std::vector<std::map<int, Person>> data{{
-      {1, Person{"John", "Doe", 32}},
-      {2, Person{"Jane", "Smith", 48}},
-  }};
-  AppendValueToWriter(&writer, data);
-
-  EXPECT_EQ("aa{i(ssi)}", message->GetSignature());
-
-  std::vector<std::map<int, Person>> data_out;
-
-  MessageReader reader(message.get());
-  EXPECT_TRUE(PopValueFromReader(&reader, &data_out));
-  EXPECT_FALSE(reader.HasMoreData());
-
-  EXPECT_EQ(data, data_out);
-}
-
 TEST(DBusUtils, EmptyVariant) {
   std::unique_ptr<Response> message = Response::CreateEmpty();
   MessageWriter writer(message.get());
@@ -823,6 +665,44 @@ TEST(DBusUtils, Protobuf) {
 
   EXPECT_EQ(123, test_message_out.foo());
   EXPECT_EQ("abcd", test_message_out.bar());
+}
+
+TEST(DBusUtils, ApplyReadDBusArgs) {
+  // Test of storage tuple.
+  {
+    std::unique_ptr<Response> message = Response::CreateEmpty();
+    MessageWriter writer(message.get());
+    WriteDBusArgs(&writer, 1, true, 5.);
+    ASSERT_EQ("ibd", message->GetSignature());
+
+    MessageReader reader(message.get());
+
+    std::tuple<std::int32_t, bool, double> tuple;
+    ASSERT_TRUE(ApplyReadDBusArgs(&reader, tuple));
+    EXPECT_EQ(1, std::get<0>(tuple));
+    EXPECT_TRUE(std::get<1>(tuple));
+    // Intentionally compare by == for double, we do not expect any FP error.
+    EXPECT_EQ(5., std::get<2>(tuple));
+  }
+
+  // Test of reference tuple.
+  {
+    std::unique_ptr<Response> message = Response::CreateEmpty();
+    MessageWriter writer(message.get());
+    WriteDBusArgs(&writer, 1, true, 5.);
+    ASSERT_EQ("ibd", message->GetSignature());
+
+    MessageReader reader(message.get());
+
+    std::int32_t i = 0;
+    bool b = false;
+    double d = 0.;
+    ASSERT_TRUE(ApplyReadDBusArgs(&reader, std::tie(i, b, d)));
+    EXPECT_EQ(1, i);
+    EXPECT_TRUE(b);
+    // Intentionally compare by == for double, we do not expect any FP error.
+    EXPECT_EQ(5., d);
+  }
 }
 
 }  // namespace dbus_utils

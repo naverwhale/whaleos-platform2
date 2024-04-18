@@ -1,23 +1,62 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "sommelier-window.h"  // NOLINT(build/include_directory)
 
 #include <assert.h>
+#include <wayland-client-protocol.h>
+#include <cstdint>
 
-#include "sommelier.h"          // NOLINT(build/include_directory)
-#include "sommelier-tracing.h"  // NOLINT(build/include_directory)
+#include "sommelier.h"            // NOLINT(build/include_directory)
+#include "sommelier-tracing.h"    // NOLINT(build/include_directory)
+#include "sommelier-transform.h"  // NOLINT(build/include_directory)
+#include "xcb/xcb-shim.h"
 
 #include "aura-shell-client-protocol.h"  // NOLINT(build/include_directory)
-#include "xdg-shell-unstable-v6-client-protocol.h"  // NOLINT(build/include_directory)
+#include "xdg-shell-client-protocol.h"   // NOLINT(build/include_directory)
 
-#define APPLICATION_ID_FORMAT_PREFIX "org.chromium.%s"
+#ifdef QUIRKS_SUPPORT
+#include "quirks/sommelier-quirks.h"
+#endif
+
 #define XID_APPLICATION_ID_FORMAT APPLICATION_ID_FORMAT_PREFIX ".xid.%d"
 #define WM_CLIENT_LEADER_APPLICATION_ID_FORMAT \
   APPLICATION_ID_FORMAT_PREFIX ".wmclientleader.%d"
 #define WM_CLASS_APPLICATION_ID_FORMAT \
   APPLICATION_ID_FORMAT_PREFIX ".wmclass.%s"
+#define X11_PROPERTY_APPLICATION_ID_FORMAT \
+  APPLICATION_ID_FORMAT_PREFIX ".xprop.%s"
+sl_window::sl_window(struct sl_context* ctx,
+                     xcb_window_t id,
+                     int x,
+                     int y,
+                     int width,
+                     int height,
+                     int border_width)
+    : ctx(ctx),
+      id(id),
+      x(x),
+      y(y),
+      width(width),
+      height(height),
+      border_width(border_width) {
+  wl_list_insert(&ctx->unpaired_windows, &link);
+  pixman_region32_init(&shape_rectangles);
+}
+
+sl_window::~sl_window() {
+  if (this == ctx->host_focus_window) {
+    ctx->host_focus_window = nullptr;
+    ctx->needs_set_input_focus = 1;
+  }
+
+  free(name);
+  free(clazz);
+  free(startup_id);
+  wl_list_remove(&link);
+  pixman_region32_fini(&shape_rectangles);
+}
 
 void sl_configure_window(struct sl_window* window) {
   TRACE_EVENT("surface", "sl_configure_window", "id", window->id);
@@ -29,8 +68,9 @@ void sl_configure_window(struct sl_window* window) {
     int y = window->y;
     int i = 0;
 
-    xcb_configure_window(window->ctx->connection, window->frame_id,
-                         window->next_config.mask, window->next_config.values);
+    xcb()->configure_window(window->ctx->connection, window->frame_id,
+                            window->next_config.mask,
+                            window->next_config.values);
 
     if (window->next_config.mask & XCB_CONFIG_WINDOW_X)
       x = window->next_config.values[i++];
@@ -50,7 +90,7 @@ void sl_configure_window(struct sl_window* window) {
     values[2] = window->width;
     values[3] = window->height;
     values[4] = window->border_width;
-    xcb_configure_window(
+    xcb()->configure_window(
         window->ctx->connection, window->id,
         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH |
             XCB_CONFIG_WINDOW_HEIGHT | XCB_CONFIG_WINDOW_BORDER_WIDTH,
@@ -64,10 +104,10 @@ void sl_configure_window(struct sl_window* window) {
   }
 
   if (window->managed) {
-    xcb_change_property(window->ctx->connection, XCB_PROP_MODE_REPLACE,
-                        window->id, window->ctx->atoms[ATOM_NET_WM_STATE].value,
-                        XCB_ATOM_ATOM, 32, window->next_config.states_length,
-                        window->next_config.states);
+    xcb()->change_property(
+        window->ctx->connection, XCB_PROP_MODE_REPLACE, window->id,
+        window->ctx->atoms[ATOM_NET_WM_STATE].value, XCB_ATOM_ATOM, 32,
+        window->next_config.states_length, window->next_config.states);
   }
 
   window->pending_config = window->next_config;
@@ -77,23 +117,28 @@ void sl_configure_window(struct sl_window* window) {
 }
 
 void sl_send_configure_notify(struct sl_window* window) {
+  // Send a "synthetic" ConfigureNotify event.
   xcb_configure_notify_event_t event = {};
   event.response_type = XCB_CONFIGURE_NOTIFY;
   event.pad0 = 0;
   event.event = window->id;
   event.window = window->id;
   event.above_sibling = XCB_WINDOW_NONE;
+
+  // Per ICCCM, synthetic ConfigureNotify events use root coordinates
+  // even if the window has been reparented.
   event.x = static_cast<int16_t>(window->x);
   event.y = static_cast<int16_t>(window->y);
+
   event.width = static_cast<uint16_t>(window->width);
   event.height = static_cast<uint16_t>(window->height);
   event.border_width = static_cast<uint16_t>(window->border_width);
   event.override_redirect = 0;
   event.pad1 = 0;
 
-  xcb_send_event(window->ctx->connection, 0, window->id,
-                 XCB_EVENT_MASK_STRUCTURE_NOTIFY,
-                 reinterpret_cast<char*>(&event));
+  xcb()->send_event(window->ctx->connection, 0, window->id,
+                    XCB_EVENT_MASK_STRUCTURE_NOTIFY,
+                    reinterpret_cast<char*>(&event));
 }
 
 int sl_process_pending_configure_acks(struct sl_window* window,
@@ -122,8 +167,8 @@ int sl_process_pending_configure_acks(struct sl_window* window,
   }
 
   if (window->xdg_surface) {
-    zxdg_surface_v6_ack_configure(window->xdg_surface,
-                                  window->pending_config.serial);
+    xdg_surface_ack_configure(window->xdg_surface,
+                              window->pending_config.serial);
   }
   window->pending_config.serial = 0;
 
@@ -140,29 +185,24 @@ void sl_commit(struct sl_window* window, struct sl_host_surface* host_surface) {
   }
 }
 
-static void sl_internal_xdg_popup_configure(void* data,
-                                            struct zxdg_popup_v6* xdg_popup,
-                                            int32_t x,
-                                            int32_t y,
-                                            int32_t width,
-                                            int32_t height) {}
+static const struct xdg_popup_listener sl_internal_xdg_popup_listener = {
+    /*configure=*/DoNothing, /*done=*/DoNothing};
 
-static void sl_internal_xdg_popup_done(void* data,
-                                       struct zxdg_popup_v6* zxdg_popup_v6) {}
-
-static const struct zxdg_popup_v6_listener sl_internal_xdg_popup_listener = {
-    sl_internal_xdg_popup_configure, sl_internal_xdg_popup_done};
-
-static void sl_internal_xdg_surface_configure(
-    void* data, struct zxdg_surface_v6* xdg_surface, uint32_t serial) {
+static void sl_internal_xdg_surface_configure(void* data,
+                                              struct xdg_surface* xdg_surface,
+                                              uint32_t serial) {
   TRACE_EVENT("surface", "sl_internal_xdg_surface_configure");
   struct sl_window* window =
-      static_cast<sl_window*>(zxdg_surface_v6_get_user_data(xdg_surface));
+      static_cast<sl_window*>(xdg_surface_get_user_data(xdg_surface));
 
   window->next_config.serial = serial;
-  if (!window->pending_config.serial) {
+
+  if (window->configure_event_barrier) {
+    window->coalesced_next_config = window->next_config;
+    window->next_config.serial = 0;
+  } else if (!window->pending_config.serial) {
     struct wl_resource* host_resource;
-    struct sl_host_surface* host_surface = NULL;
+    struct sl_host_surface* host_surface = nullptr;
 
     host_resource =
         wl_client_get_object(window->ctx->client, window->host_surface_id);
@@ -175,18 +215,44 @@ static void sl_internal_xdg_surface_configure(
   }
 }
 
-static const struct zxdg_surface_v6_listener sl_internal_xdg_surface_listener =
-    {sl_internal_xdg_surface_configure};
+static const struct xdg_surface_listener sl_internal_xdg_surface_listener = {
+    sl_internal_xdg_surface_configure};
 
-static void sl_internal_xdg_toplevel_configure(
-    void* data,
-    struct zxdg_toplevel_v6* xdg_toplevel,
-    int32_t width,
-    int32_t height,
-    struct wl_array* states) {
-  TRACE_EVENT("other", "sl_internal_xdg_toplevel_configure");
+static void sl_internal_xdg_surface_configure_barrier_done(
+    void* data, struct wl_callback* callback, uint32_t serial) {
   struct sl_window* window =
-      static_cast<sl_window*>(zxdg_toplevel_v6_get_user_data(xdg_toplevel));
+      static_cast<sl_window*>(wl_callback_get_user_data(callback));
+
+  window->configure_event_barrier = nullptr;
+
+  if (window->coalesced_next_config.serial) {
+    window->next_config = window->coalesced_next_config;
+    window->coalesced_next_config.serial = 0;
+    sl_internal_xdg_surface_configure(data, window->xdg_surface,
+                                      window->next_config.serial);
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// common toplevel code
+
+static const int32_t kUnspecifiedCoord = INT32_MIN;
+
+// Handle a configure event on a toplevel object from the compositor.
+//
+// window: The window being configured.
+// x: The configured X coordinate in host logical space, or kUnspecifiedCoord
+//    for toplevel objects that don't send positions.
+// y: The configured Y coordinate in host logical space, or kUnspecifiedCoord
+//    for toplevel objects that don't send positions.
+// width, height: Configured size in host logical space.
+// states: Array of XDG_TOPLEVEL_STATE_* enum values.
+static void sl_internal_toplevel_configure(struct sl_window* window,
+                                           int32_t x,
+                                           int32_t y,
+                                           int32_t width,
+                                           int32_t height,
+                                           struct wl_array* states) {
   int activated = 0;
   uint32_t* state;
   int i = 0;
@@ -195,19 +261,57 @@ static void sl_internal_xdg_toplevel_configure(
     return;
 
   if (width && height) {
-    int32_t width_in_pixels = width * window->ctx->scale;
-    int32_t height_in_pixels = height * window->ctx->scale;
+    int32_t width_in_pixels = width;
+    int32_t height_in_pixels = height;
     int i = 0;
 
+    // We are receiving a request to resize a window (in logical dimensions)
+    // If the request is equal to the cached values we used to make adjustments
+    // do not recalculate the values
+    // However, if the request is not equal to the cached values, try
+    // and keep the buffer same size as what was previously set
+    // by the application.
+    struct sl_host_surface* paired_surface = window->paired_surface;
+
+    if (paired_surface && paired_surface->has_own_scale) {
+      if (width != paired_surface->cached_logical_width ||
+          height != paired_surface->cached_logical_height) {
+        sl_transform_try_window_scale(window->ctx, paired_surface,
+                                      window->width, window->height);
+      }
+    }
+
+    sl_transform_host_to_guest(window->ctx, window->paired_surface,
+                               &width_in_pixels, &height_in_pixels);
     window->next_config.mask = XCB_CONFIG_WINDOW_WIDTH |
                                XCB_CONFIG_WINDOW_HEIGHT |
                                XCB_CONFIG_WINDOW_BORDER_WIDTH;
-    if (!(window->size_flags & (US_POSITION | P_POSITION))) {
+    if (x != kUnspecifiedCoord && y != kUnspecifiedCoord) {
+      // Convert to virtual coordinates
+      int32_t guest_x = x;
+      int32_t guest_y = y;
+      sl_transform_host_position_to_guest_position(
+          window->ctx, window->paired_surface, &guest_x, &guest_y);
+
       window->next_config.mask |= XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y;
-      window->next_config.values[i++] =
-          window->ctx->screen->width_in_pixels / 2 - width_in_pixels / 2;
-      window->next_config.values[i++] =
-          window->ctx->screen->height_in_pixels / 2 - height_in_pixels / 2;
+      window->next_config.values[i++] = guest_x;
+      window->next_config.values[i++] = guest_y;
+    } else if (!(window->size_flags & (US_POSITION | P_POSITION))) {
+      window->next_config.mask |= XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y;
+      const sl_host_output* output = window->paired_surface
+                                         ? window->paired_surface->output.get()
+                                         : nullptr;
+      if (output) {
+        window->next_config.values[i++] =
+            output->virt_x + (output->virt_rotated_width - width_in_pixels) / 2;
+        window->next_config.values[i++] =
+            (output->virt_rotated_height - height_in_pixels) / 2;
+      } else {
+        window->next_config.values[i++] =
+            window->ctx->screen->width_in_pixels / 2 - width_in_pixels / 2;
+        window->next_config.values[i++] =
+            window->ctx->screen->height_in_pixels / 2 - height_in_pixels / 2;
+      }
     }
     window->next_config.values[i++] = width_in_pixels;
     window->next_config.values[i++] = height_in_pixels;
@@ -215,31 +319,33 @@ static void sl_internal_xdg_toplevel_configure(
   }
 
   window->allow_resize = 1;
+  window->compositor_fullscreen = 0;
   sl_array_for_each(state, states) {
-    if (*state == ZXDG_TOPLEVEL_V6_STATE_FULLSCREEN) {
+    if (*state == XDG_TOPLEVEL_STATE_FULLSCREEN) {
       window->allow_resize = 0;
       window->next_config.states[i++] =
           window->ctx->atoms[ATOM_NET_WM_STATE_FULLSCREEN].value;
+      window->compositor_fullscreen = 1;
     }
-    if (*state == ZXDG_TOPLEVEL_V6_STATE_MAXIMIZED) {
+    if (*state == XDG_TOPLEVEL_STATE_MAXIMIZED) {
       window->allow_resize = 0;
       window->next_config.states[i++] =
           window->ctx->atoms[ATOM_NET_WM_STATE_MAXIMIZED_VERT].value;
       window->next_config.states[i++] =
           window->ctx->atoms[ATOM_NET_WM_STATE_MAXIMIZED_HORZ].value;
     }
-    if (*state == ZXDG_TOPLEVEL_V6_STATE_ACTIVATED) {
+    if (*state == XDG_TOPLEVEL_STATE_ACTIVATED) {
       activated = 1;
       window->next_config.states[i++] =
           window->ctx->atoms[ATOM_NET_WM_STATE_FOCUSED].value;
     }
-    if (*state == ZXDG_TOPLEVEL_V6_STATE_RESIZING)
+    if (*state == XDG_TOPLEVEL_STATE_RESIZING)
       window->allow_resize = 0;
   }
 
   if (activated != window->activated) {
     if (activated != (window->ctx->host_focus_window == window)) {
-      window->ctx->host_focus_window = activated ? window : NULL;
+      window->ctx->host_focus_window = activated ? window : nullptr;
       window->ctx->needs_set_input_focus = 1;
     }
     window->activated = activated;
@@ -248,11 +354,33 @@ static void sl_internal_xdg_toplevel_configure(
   window->next_config.states_length = i;
 }
 
-static void sl_internal_xdg_toplevel_close(
-    void* data, struct zxdg_toplevel_v6* xdg_toplevel) {
+////////////////////////////////////////////////////////////////////////////////
+// xdg_toplevel event listeners
+//
+// https://crsrc.org/s/?q=f:sommelier/protocol/xdg-shell.xml%20name=\"xdg_toplevel
+//
+// In Exo, this is sent from
+// https://crsrc.org/s/?q=f:exo%2Fwayland.*cc%20xdg_toplevel_send_configure
+static void sl_internal_xdg_toplevel_configure(
+    void* unused_data,
+    struct xdg_toplevel* xdg_toplevel,
+    int32_t width,
+    int32_t height,
+    struct wl_array* states) {
+  TRACE_EVENT("other", "sl_internal_xdg_toplevel_configure");
+  struct sl_window* window =
+      static_cast<sl_window*>(xdg_toplevel_get_user_data(xdg_toplevel));
+  sl_internal_toplevel_configure(window, kUnspecifiedCoord, kUnspecifiedCoord,
+                                 width, height, states);
+}
+
+// In Exo, this is sent from
+// https://crsrc.org/s/?q=f:exo%2Fwayland.*cc%20xdg_toplevel_send_close
+static void sl_internal_xdg_toplevel_close(void* data,
+                                           struct xdg_toplevel* xdg_toplevel) {
   TRACE_EVENT("other", "sl_internal_xdg_toplevel_close");
   struct sl_window* window =
-      static_cast<sl_window*>(zxdg_toplevel_v6_get_user_data(xdg_toplevel));
+      static_cast<sl_window*>(xdg_toplevel_get_user_data(xdg_toplevel));
   xcb_client_message_event_t event = {};
   event.response_type = XCB_CLIENT_MESSAGE;
   event.format = 32;
@@ -265,9 +393,115 @@ static void sl_internal_xdg_toplevel_close(
                  XCB_EVENT_MASK_NO_EVENT, (const char*)&event);
 }
 
-static const struct zxdg_toplevel_v6_listener
-    sl_internal_xdg_toplevel_listener = {sl_internal_xdg_toplevel_configure,
-                                         sl_internal_xdg_toplevel_close};
+static const struct xdg_toplevel_listener sl_internal_xdg_toplevel_listener = {
+    sl_internal_xdg_toplevel_configure, sl_internal_xdg_toplevel_close};
+
+////////////////////////////////////////////////////////////////////////////////
+// zaura_toplevel event listeners
+//
+// https://crsrc.org/s/?q=f:sommelier/protocol/aura-shell.xml%20name=\"zaura_toplevel
+
+// Sent from Exo here:
+// https://crsrc.org/s/?q=f:exo%2Fwayland.*cc%20zaura_toplevel_send_configure
+static void sl_internal_zaura_toplevel_configure(
+    void* unused_data,
+    struct zaura_toplevel* zaura_toplevel,
+    int32_t x,
+    int32_t y,
+    int32_t width,
+    int32_t height,
+    struct wl_array* states) {
+  TRACE_EVENT("other", "sl_internal_zaura_toplevel_configure");
+  struct sl_window* window =
+      static_cast<sl_window*>(zaura_toplevel_get_user_data(zaura_toplevel));
+
+  // aura_toplevel.configure replaces xdg_toplevel.configure for surfaces on
+  // which zaura_toplevel_set_supports_screen_coordinates() has been called.
+  // So we shouldn't get duplicate events.
+  //
+  // TODO(cpelling): Handle aura-specific states.
+  sl_internal_toplevel_configure(window, x, y, width, height, states);
+}
+
+// Sent from Exo here:
+// https://crsrc.org/s/?q=f:exo%2Fwayland.*cc%20zaura_toplevel_send_origin_change
+static void sl_internal_zaura_toplevel_origin_change(
+    void* data, struct zaura_toplevel* zaura_toplevel, int32_t x, int32_t y) {
+  // aura_toplevel.origin_change is not part of the normal configuration
+  // lifecycle, and is not followed by xdg_surface.configure. So just apply
+  // this change immediately.
+  sl_window* window =
+      static_cast<sl_window*>(zaura_toplevel_get_user_data(zaura_toplevel));
+
+  if (window->configure_event_barrier) {
+    // TODO(cpelling): Coalesce origin_change events instead of dropping them.
+    return;
+  }
+
+  int32_t guest_x = x;
+  int32_t guest_y = y;
+  sl_transform_host_position_to_guest_position(
+      window->ctx, window->paired_surface, &guest_x, &guest_y);
+  uint32_t values[] = {static_cast<uint32_t>(guest_x),
+                       static_cast<uint32_t>(guest_y)};
+  window->x = guest_x;
+  window->y = guest_y;
+  xcb()->configure_window(window->ctx->connection, window->frame_id,
+                          XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
+}
+
+static const struct zaura_toplevel_listener
+    sl_internal_zaura_toplevel_listener = {
+        sl_internal_zaura_toplevel_configure,
+        sl_internal_zaura_toplevel_origin_change};
+
+static const struct wl_callback_listener configure_event_barrier_listener = {
+    sl_internal_xdg_surface_configure_barrier_done};
+
+void sl_toplevel_send_window_bounds_to_host(struct sl_window* window) {
+  // Don't send window bounds if fullscreen/maximized/resizing,
+  // or if the feature is unsupported by the host or disabled by flag.
+  if (!window->allow_resize || !sl_window_is_client_positioned(window) ||
+      !window->ctx->aura_shell ||
+      window->ctx->aura_shell->version <
+          ZAURA_TOPLEVEL_SET_WINDOW_BOUNDS_SINCE_VERSION ||
+      !window->aura_toplevel) {
+    return;
+  }
+  int32_t x = window->x;
+  int32_t y = window->y;
+  int32_t w = window->width;
+  int32_t h = window->height;
+  if (window->size_flags & P_MIN_SIZE) {
+    if (w < window->min_width)
+      w = window->min_width;
+    if (h < window->min_height)
+      h = window->min_height;
+  }
+  if (window->size_flags & P_MAX_SIZE) {
+    if (w > window->max_width)
+      w = window->max_width;
+    if (h > window->max_height)
+      h = window->max_height;
+  }
+
+  sl_host_output* output = sl_transform_guest_position_to_host_position(
+      window->ctx, window->paired_surface, &x, &y);
+  sl_transform_guest_to_host(window->ctx, window->paired_surface, &w, &h);
+
+  zaura_toplevel_set_window_bounds(window->aura_toplevel, x, y, w, h,
+                                   output->proxy);
+
+  if (window->configure_event_barrier) {
+    wl_callback_destroy(window->configure_event_barrier);
+  }
+  window->configure_event_barrier = wl_display_sync(window->ctx->display);
+  wl_callback_add_listener(window->configure_event_barrier,
+                           &configure_event_barrier_listener, window);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 void sl_update_application_id(struct sl_context* ctx,
                               struct sl_window* window) {
   TRACE_EVENT("other", "sl_update_application_id");
@@ -282,7 +516,11 @@ void sl_update_application_id(struct sl_context* ctx,
   // that should appear in application lists.
   if (!ctx->xwayland || window->managed) {
     char* application_id_str;
-    if (window->clazz) {
+    if (!window->app_id_property.empty()) {
+      application_id_str =
+          sl_xasprintf(X11_PROPERTY_APPLICATION_ID_FORMAT, ctx->vm_id,
+                       window->app_id_property.c_str());
+    } else if (window->clazz) {
       application_id_str = sl_xasprintf(WM_CLASS_APPLICATION_ID_FORMAT,
                                         ctx->vm_id, window->clazz);
     } else if (window->client_leader != XCB_WINDOW_NONE) {
@@ -300,10 +538,10 @@ void sl_update_application_id(struct sl_context* ctx,
 
 void sl_window_update(struct sl_window* window) {
   TRACE_EVENT("surface", "sl_window_update", "id", window->id);
-  struct wl_resource* host_resource = NULL;
+  struct wl_resource* host_resource = nullptr;
   struct sl_host_surface* host_surface;
   struct sl_context* ctx = window->ctx;
-  struct sl_window* parent = NULL;
+  struct sl_window* parent = nullptr;
 
   if (window->host_surface_id) {
     host_resource = wl_client_get_object(ctx->client, window->host_surface_id);
@@ -316,24 +554,25 @@ void sl_window_update(struct sl_window* window) {
     wl_list_remove(&window->link);
     wl_list_insert(&ctx->unpaired_windows, &window->link);
     window->unpaired = 1;
+    window->paired_surface = nullptr;
   }
 
   if (!host_resource) {
     if (window->aura_surface) {
       zaura_surface_destroy(window->aura_surface);
-      window->aura_surface = NULL;
+      window->aura_surface = nullptr;
     }
     if (window->xdg_toplevel) {
-      zxdg_toplevel_v6_destroy(window->xdg_toplevel);
-      window->xdg_toplevel = NULL;
+      xdg_toplevel_destroy(window->xdg_toplevel);
+      window->xdg_toplevel = nullptr;
     }
     if (window->xdg_popup) {
-      zxdg_popup_v6_destroy(window->xdg_popup);
-      window->xdg_popup = NULL;
+      xdg_popup_destroy(window->xdg_popup);
+      window->xdg_popup = nullptr;
     }
     if (window->xdg_surface) {
-      zxdg_surface_v6_destroy(window->xdg_surface);
-      window->xdg_surface = NULL;
+      xdg_surface_destroy(window->xdg_surface);
+      window->xdg_surface = nullptr;
     }
     window->realized = 0;
     return;
@@ -343,6 +582,12 @@ void sl_window_update(struct sl_window* window) {
       static_cast<sl_host_surface*>(wl_resource_get_user_data(host_resource));
   assert(host_surface);
   assert(!host_surface->has_role);
+
+  if (!window->unpaired) {
+    window->paired_surface = host_surface;
+    sl_transform_try_window_scale(ctx, host_surface, window->width,
+                                  window->height);
+  }
 
   assert(ctx->xdg_shell);
   assert(ctx->xdg_shell->internal);
@@ -399,8 +644,9 @@ void sl_window_update(struct sl_window* window) {
   }
 
   if (!window->depth) {
-    xcb_get_geometry_reply_t* geometry_reply = xcb_get_geometry_reply(
-        ctx->connection, xcb_get_geometry(ctx->connection, window->id), NULL);
+    xcb_get_geometry_reply_t* geometry_reply = xcb()->get_geometry_reply(
+        ctx->connection, xcb()->get_geometry(ctx->connection, window->id),
+        nullptr);
     if (geometry_reply) {
       window->depth = geometry_reply->depth;
       free(geometry_reply);
@@ -408,11 +654,10 @@ void sl_window_update(struct sl_window* window) {
   }
 
   if (!window->xdg_surface) {
-    window->xdg_surface = zxdg_shell_v6_get_xdg_surface(
-        ctx->xdg_shell->internal, host_surface->proxy);
-    zxdg_surface_v6_set_user_data(window->xdg_surface, window);
-    zxdg_surface_v6_add_listener(window->xdg_surface,
-                                 &sl_internal_xdg_surface_listener, window);
+    window->xdg_surface = xdg_wm_base_get_xdg_surface(ctx->xdg_shell->internal,
+                                                      host_surface->proxy);
+    xdg_surface_add_listener(window->xdg_surface,
+                             &sl_internal_xdg_surface_listener, window);
   }
 
   if (ctx->aura_shell) {
@@ -447,57 +692,93 @@ void sl_window_update(struct sl_window* window) {
   // window is closed.
   if (ctx->xwayland || !parent) {
     if (!window->xdg_toplevel) {
-      window->xdg_toplevel = zxdg_surface_v6_get_toplevel(window->xdg_surface);
-      zxdg_toplevel_v6_set_user_data(window->xdg_toplevel, window);
-      zxdg_toplevel_v6_add_listener(window->xdg_toplevel,
-                                    &sl_internal_xdg_toplevel_listener, window);
+      window->xdg_toplevel = xdg_surface_get_toplevel(window->xdg_surface);
+      xdg_toplevel_add_listener(window->xdg_toplevel,
+                                &sl_internal_xdg_toplevel_listener, window);
     }
+
+    // Right now, aura_toplevel is only needed for windows positioned by the
+    // client (which is all windows if --enable-x11-move-windows is passed).
+    // Setting it up means we get x and y coordinates in configure
+    // events (aura_toplevel.configure replaces xdg_toplevel.configure), which
+    // changes how windows are positioned in the X server's coordinate space. If
+    // windows end up partially offscreen in that space, we get bugs like
+    // b/269053427.
+    //
+    // Bottom line: If --enable-x11-move-windows is enabled, apps are
+    // responsible for keeping themselves onscreen within X space. If not,
+    // Sommelier is; in which case it should ignore the host compositor's
+    // positioning decisions, since those are made without reference to X space.
+    // Sommelier could listen to aura_toplevel.configure and ignore the x and y
+    // coordinates, but for now the most conservative approach is to avoid using
+    // aura_toplevel entirely. This can be revisited later if we need
+    // aura_toplevel for anything else.
+    if (sl_window_is_client_positioned(window) && ctx->aura_shell &&
+        window->xdg_toplevel && !window->aura_toplevel) {
+      window->aura_toplevel = zaura_shell_get_aura_toplevel_for_xdg_toplevel(
+          ctx->aura_shell->internal, window->xdg_toplevel);
+      zaura_toplevel_set_supports_screen_coordinates(window->aura_toplevel);
+      zaura_toplevel_add_listener(window->aura_toplevel,
+                                  &sl_internal_zaura_toplevel_listener, window);
+    }
+
     if (parent)
-      zxdg_toplevel_v6_set_parent(window->xdg_toplevel, parent->xdg_toplevel);
+      xdg_toplevel_set_parent(window->xdg_toplevel, parent->xdg_toplevel);
     if (window->name)
-      zxdg_toplevel_v6_set_title(window->xdg_toplevel, window->name);
+      xdg_toplevel_set_title(window->xdg_toplevel, window->name);
     if (window->size_flags & P_MIN_SIZE) {
-      zxdg_toplevel_v6_set_min_size(window->xdg_toplevel,
-                                    window->min_width / ctx->scale,
-                                    window->min_height / ctx->scale);
+      int32_t minw = window->min_width;
+      int32_t minh = window->min_height;
+
+      sl_transform_guest_to_host(window->ctx, window->paired_surface, &minw,
+                                 &minh);
+      xdg_toplevel_set_min_size(window->xdg_toplevel, minw, minh);
     }
     if (window->size_flags & P_MAX_SIZE) {
-      zxdg_toplevel_v6_set_max_size(window->xdg_toplevel,
-                                    window->max_width / ctx->scale,
-                                    window->max_height / ctx->scale);
+      int32_t maxw = window->max_width;
+      int32_t maxh = window->max_height;
+
+      sl_transform_guest_to_host(window->ctx, window->paired_surface, &maxw,
+                                 &maxh);
+      xdg_toplevel_set_max_size(window->xdg_toplevel, maxw, maxh);
     }
     if (window->maximized) {
-      zxdg_toplevel_v6_set_maximized(window->xdg_toplevel);
+      xdg_toplevel_set_maximized(window->xdg_toplevel);
+    }
+    if (window->fullscreen) {
+      xdg_toplevel_set_fullscreen(window->xdg_toplevel, nullptr);
     }
   } else if (!window->xdg_popup) {
-    struct zxdg_positioner_v6* positioner;
+    struct xdg_positioner* positioner;
+    int32_t diffx = window->x - parent->x;
+    int32_t diffy = window->y - parent->y;
 
-    positioner = zxdg_shell_v6_create_positioner(ctx->xdg_shell->internal);
+    positioner = xdg_wm_base_create_positioner(ctx->xdg_shell->internal);
     assert(positioner);
-    zxdg_positioner_v6_set_anchor(
-        positioner,
-        ZXDG_POSITIONER_V6_ANCHOR_TOP | ZXDG_POSITIONER_V6_ANCHOR_LEFT);
-    zxdg_positioner_v6_set_gravity(
-        positioner,
-        ZXDG_POSITIONER_V6_GRAVITY_BOTTOM | ZXDG_POSITIONER_V6_GRAVITY_RIGHT);
-    zxdg_positioner_v6_set_anchor_rect(
-        positioner, (window->x - parent->x) / ctx->scale,
-        (window->y - parent->y) / ctx->scale, 1, 1);
 
-    window->xdg_popup = zxdg_surface_v6_get_popup(
-        window->xdg_surface, parent->xdg_surface, positioner);
-    zxdg_popup_v6_set_user_data(window->xdg_popup, window);
-    zxdg_popup_v6_add_listener(window->xdg_popup,
-                               &sl_internal_xdg_popup_listener, window);
+    sl_transform_guest_to_host(window->ctx, window->paired_surface, &diffx,
+                               &diffy);
+    xdg_positioner_set_anchor(positioner, XDG_POSITIONER_ANCHOR_TOP_LEFT);
+    xdg_positioner_set_gravity(positioner, XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
+    xdg_positioner_set_anchor_rect(positioner, diffx, diffy, 1, 1);
 
-    zxdg_positioner_v6_destroy(positioner);
+    window->xdg_popup = xdg_surface_get_popup(window->xdg_surface,
+                                              parent->xdg_surface, positioner);
+    xdg_popup_add_listener(window->xdg_popup, &sl_internal_xdg_popup_listener,
+                           window);
+
+    xdg_positioner_destroy(positioner);
   }
 
   if ((window->size_flags & (US_POSITION | P_POSITION)) && parent &&
       ctx->aura_shell) {
-    zaura_surface_set_parent(window->aura_surface, parent->aura_surface,
-                             (window->x - parent->x) / ctx->scale,
-                             (window->y - parent->y) / ctx->scale);
+    int32_t diffx = window->x - parent->x;
+    int32_t diffy = window->y - parent->y;
+
+    sl_transform_guest_to_host(window->ctx, window->paired_surface, &diffx,
+                               &diffy);
+    zaura_surface_set_parent(window->aura_surface, parent->aura_surface, diffx,
+                             diffy);
   }
 
 #ifdef COMMIT_LOOP_FIX
@@ -508,4 +789,23 @@ void sl_window_update(struct sl_window* window) {
 
   if (host_surface->contents_width && host_surface->contents_height)
     window->realized = 1;
+}
+
+#ifdef QUIRKS_SUPPORT
+bool sl_window_should_log_quirk(struct sl_window* window, int feature_enum) {
+  return window->logged_quirks.insert(feature_enum).second;
+}
+
+std::set<int> sl_window_logged_quirks(struct sl_window* window) {
+  return window->logged_quirks;
+}
+#endif
+
+bool sl_window_is_client_positioned(struct sl_window* window) {
+#ifdef QUIRKS_SUPPORT
+  if (window->ctx->quirks.IsEnabled(window, quirks::FEATURE_X11_MOVE_WINDOWS)) {
+    return true;
+  }
+#endif
+  return window->ctx->enable_x11_move_windows;
 }

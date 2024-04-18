@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,9 +22,9 @@
 #include "power_manager/powerd/system/event_device_stub.h"
 #include "power_manager/powerd/system/input_observer.h"
 #include "power_manager/powerd/system/udev_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 namespace {
 
 // Strings that can be compared against TestObserver::GetActions().
@@ -113,14 +113,11 @@ class TestObserver : public InputObserver, public ActionRecorder {
 
 }  // namespace
 
-class InputWatcherTest : public testing::Test {
+class InputWatcherTest : public TestEnvironment {
  public:
   InputWatcherTest()
       : scoped_event_device_factory_(new EventDeviceFactoryStub()),
-        event_device_factory_(scoped_event_device_factory_.get()),
-        use_lid_pref_(1),
-        legacy_power_button_pref_(0),
-        detect_hover_pref_(0) {
+        event_device_factory_(scoped_event_device_factory_.get()) {
     CHECK(temp_dir_.CreateUniqueTempDir());
 
     dev_input_path_ = temp_dir_.GetPath().Append(base::FilePath("dev/input"));
@@ -130,7 +127,7 @@ class InputWatcherTest : public testing::Test {
         temp_dir_.GetPath().Append(base::FilePath("sys/class/input"));
     CHECK(base::CreateDirectory(sys_class_input_path_));
   }
-  ~InputWatcherTest() override {}
+  ~InputWatcherTest() override = default;
 
  protected:
   // Initializes |input_watcher_|. Intended to be called by tests after
@@ -189,9 +186,9 @@ class InputWatcherTest : public testing::Test {
   std::unique_ptr<TestObserver> observer_;
 
   // Initial values for prefs.
-  int64_t use_lid_pref_;
-  int64_t legacy_power_button_pref_;
-  int64_t detect_hover_pref_;
+  int64_t use_lid_pref_ = 1;
+  int64_t legacy_power_button_pref_ = 0;
+  int64_t detect_hover_pref_ = 0;
 };
 
 TEST_F(InputWatcherTest, DetectUSBDevices) {
@@ -298,14 +295,34 @@ TEST_F(InputWatcherTest, PowerButton) {
 }
 
 TEST_F(InputWatcherTest, LidSwitch) {
-  std::shared_ptr<EventDeviceStub> lid_switch(new EventDeviceStub());
+  // Unused since it doesn't have the preferred name.
+  auto unused_lid_switch = std::make_shared<EventDeviceStub>();
+  unused_lid_switch->set_is_lid_switch(true);
+  unused_lid_switch->set_initial_lid_state(LidState::OPEN);
+  unused_lid_switch->set_phys_path("PNP0C0D:00");
   const base::FilePath kAcpiLidSysfsFile("/sys/devices/LNXSYSTM:00/PNP0C0D:00");
+  int lid_switch_event_num = 0;
+  AddDevice("event" + base::NumberToString(lid_switch_event_num++),
+            unused_lid_switch, kAcpiLidSysfsFile.value());
+
+  std::shared_ptr<EventDeviceStub> lid_switch(new EventDeviceStub());
   lid_switch->set_is_lid_switch(true);
   lid_switch->set_initial_lid_state(LidState::CLOSED);
-  lid_switch->set_phys_path(std::string(InputWatcher::kAcpiLidDevice) + "0");
-  int kLidSwitchEventNum = 0;
-  AddDevice("event" + base::NumberToString(kLidSwitchEventNum), lid_switch,
+  lid_switch->set_phys_path("PNP0C0D:00");
+  lid_switch->set_name("preferred_lid");
+  AddDevice("event" + base::NumberToString(lid_switch_event_num++), lid_switch,
             kAcpiLidSysfsFile.value());
+
+  // Unused since another device with the preferred name has already been found.
+  unused_lid_switch = std::make_shared<EventDeviceStub>();
+  unused_lid_switch->set_is_lid_switch(true);
+  unused_lid_switch->set_initial_lid_state(LidState::OPEN);
+  unused_lid_switch->set_phys_path("PNP0C0D:00");
+  unused_lid_switch->set_name("preferred_lid");
+  AddDevice("event" + base::NumberToString(lid_switch_event_num++),
+            unused_lid_switch, kAcpiLidSysfsFile.value());
+
+  prefs_.SetString(power_manager::kPreferredLidDevicePref, "preferred_lid");
 
   // Before any events have been received, check that the initially-read state
   // is returned but no event is sent.
@@ -712,5 +729,32 @@ TEST_F(InputWatcherTest, TolerateMissingDevInputDirectory) {
   EXPECT_FALSE(input_watcher_->IsUSBInputDeviceConnected());
 }
 
-}  // namespace system
-}  // namespace power_manager
+TEST_F(InputWatcherTest, HandleRemovedDevice) {
+  // Checks that a device that starts reporting ENODEV is properly removed.
+  std::shared_ptr<EventDeviceStub> device(new EventDeviceStub());
+  device->set_is_power_button(true);
+  EXPECT_EQ(device.use_count(), 1);
+
+  AddDevice("event" + base::NumberToString(1), device, "foo");
+  Init();
+  EXPECT_EQ(device.use_count(), 3);
+
+  device->set_device_disconnected();
+  device->NotifyAboutEvents();
+
+  // The device should have gotten removed since it was disconnected.
+  EXPECT_EQ(device.use_count(), 2);
+}
+
+TEST_F(InputWatcherTest, HandleRemovedLidSwitch) {
+  // Checks that a lid switch that starts reporting ENODEV is properly removed.
+  std::shared_ptr<EventDeviceStub> device(new EventDeviceStub());
+  device->set_is_lid_switch(true);
+  AddDevice("event" + base::NumberToString(1), device, "foo");
+  Init();
+  EXPECT_EQ(input_watcher_->QueryLidState(), LidState::OPEN);
+  device->set_device_disconnected();
+  EXPECT_EQ(input_watcher_->QueryLidState(), LidState::NOT_PRESENT);
+}
+
+}  // namespace power_manager::system

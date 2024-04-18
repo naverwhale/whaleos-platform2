@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,32 +7,35 @@
 #include <utility>
 
 #include <base/check.h>
+#include <base/containers/contains.h>
 #include <base/logging.h>
+#include <base/strings/string_number_conversions.h>
+#include <base/strings/string_util.h>
 
-#include "cros-disks/error_logger.h"
-#include "cros-disks/mounter.h"
+#include "cros-disks/platform.h"
 #include "cros-disks/quote.h"
 
 namespace cros_disks {
 
-// static
-std::unique_ptr<MountPoint> MountPoint::CreateLeaking(
-    const base::FilePath& path) {
-  auto mount_point =
-      std::make_unique<MountPoint>(MountPointData{path}, nullptr);
-  mount_point->Release();
+std::unique_ptr<MountPoint> MountPoint::CreateUnmounted(
+    MountPointData data, const Platform* const platform) {
+  std::unique_ptr<MountPoint> mount_point =
+      std::make_unique<MountPoint>(std::move(data), platform);
+  mount_point->is_mounted_ = false;
   return mount_point;
 }
 
-// static
 std::unique_ptr<MountPoint> MountPoint::Mount(MountPointData data,
-                                              const Platform* platform,
-                                              MountErrorType* error) {
+                                              const Platform* const platform,
+                                              MountError* const error) {
+  DCHECK(error);
   *error = platform->Mount(data.source, data.mount_path.value(),
                            data.filesystem_type, data.flags, data.data);
-  if (*error != MOUNT_ERROR_NONE) {
+
+  if (*error != MountError::kSuccess) {
     return nullptr;
   }
+
   return std::make_unique<MountPoint>(std::move(data), platform);
 }
 
@@ -41,77 +44,142 @@ MountPoint::MountPoint(MountPointData data, const Platform* platform)
   DCHECK(!path().empty());
 }
 
-MountPoint::~MountPoint() {
-  if (!released_) {
-    MountErrorType error = Unmount();
-    if (error != MOUNT_ERROR_NONE && error != MOUNT_ERROR_PATH_NOT_MOUNTED) {
-      LOG(WARNING) << "Unmount error while destroying MountPoint("
-                   << quote(path()) << "): " << error;
+MountError MountPoint::Unmount() {
+  MountError error = MountError::kPathNotMounted;
+
+  if (is_mounted_) {
+    // To prevent the umount() syscall from blocking for too long (b/258344222),
+    // request the FUSE process termination if this process is "safe" to kill.
+    if (process_ && is_read_only())
+      process_->KillPidNamespace();
+
+    error = platform_->Unmount(data_.mount_path, data_.filesystem_type);
+    if (error == MountError::kSuccess || error == MountError::kPathNotMounted) {
+      is_mounted_ = false;
+
+      if (eject_)
+        std::move(eject_).Run();
     }
   }
-}
 
-void MountPoint::Release() {
-  released_ = true;
-}
+  process_.reset();
 
-MountErrorType MountPoint::Unmount() {
-  if (released_) {
-    // TODO(amistry): "not mounted" and "already unmounted" are logically
-    // different and should be treated differently. Introduce a new error code
-    // to represent this distinction.
-    return MOUNT_ERROR_PATH_NOT_MOUNTED;
+  if (launcher_exit_callback_) {
+    DCHECK_EQ(MountError::kInProgress, data_.error);
+    data_.error = MountError::kCancelled;
+    std::move(launcher_exit_callback_).Run(MountError::kCancelled);
   }
-  MountErrorType error = UnmountImpl();
-  if (error == MOUNT_ERROR_NONE || error == MOUNT_ERROR_PATH_NOT_MOUNTED) {
-    released_ = true;
+
+  if (!is_mounted_ && must_remove_dir_ &&
+      platform_->RemoveEmptyDirectory(data_.mount_path.value())) {
+    must_remove_dir_ = false;
   }
+
   return error;
 }
 
-MountErrorType MountPoint::Remount(bool read_only) {
-  if (released_) {
-    return MOUNT_ERROR_PATH_NOT_MOUNTED;
+MountError MountPoint::Remount(bool read_only) {
+  if (!is_mounted_)
+    return MountError::kPathNotMounted;
+
+  uint64_t flags = data_.flags;
+  if (read_only) {
+    flags |= MS_RDONLY;
+  } else {
+    flags &= ~MS_RDONLY;
   }
-  int new_flags = (data_.flags & ~MS_RDONLY) | (read_only ? MS_RDONLY : 0);
-  MountErrorType error = RemountImpl(new_flags);
-  if (error == MOUNT_ERROR_NONE) {
-    data_.flags = new_flags;
-  }
+
+  const MountError error =
+      platform_->Mount(data_.source, data_.mount_path.value(),
+                       data_.filesystem_type, flags | MS_REMOUNT, data_.data);
+  if (error == MountError::kSuccess)
+    data_.flags = flags;
+
   return error;
 }
 
-MountErrorType MountPoint::UnmountImpl() {
-  // We take a 2-step approach to unmounting FUSE filesystems. First, try a
-  // normal unmount. This lets the VFS flush any pending data and lets the
-  // filesystem shut down cleanly. If the filesystem is busy, force unmount
-  // the filesystem. This is done because there is no good recovery path the
-  // user can take, and these filesystem are sometimes unmounted implicitly on
-  // login/logout/suspend.
+MountError MountPoint::ConvertLauncherExitCodeToMountError(
+    const int exit_code) const {
+  if (exit_code == 0)
+    return MountError::kSuccess;
 
-  MountErrorType error = platform_->Unmount(path().value(), 0 /* flags */);
-  if (error != MOUNT_ERROR_PATH_ALREADY_MOUNTED) {
-    // MOUNT_ERROR_PATH_ALREADY_MOUNTED is returned on EBUSY.
-    return error;
-  }
+  if (base::Contains(password_needed_exit_codes_, exit_code))
+    return MountError::kNeedPassword;
 
-  // For FUSE filesystems, MNT_FORCE will cause the kernel driver to
-  // immediately close the channel to the user-space driver program and cancel
-  // all outstanding requests. However, if any program is still accessing the
-  // filesystem, the umount2() will fail with EBUSY and the mountpoint will
-  // still be attached. Since the mountpoint is no longer valid, use
-  // MNT_DETACH to also force the mountpoint to be disconnected.
-  // On a non-FUSE filesystem MNT_FORCE doesn't have effect, so it only
-  // handles MNT_DETACH, but it's OK to pass MNT_FORCE too.
-  LOG(WARNING) << "Mount point " << quote(path())
-               << " is busy, using force unmount";
-  return platform_->Unmount(path().value(), MNT_FORCE | MNT_DETACH);
+  return MountError::kMountProgramFailed;
 }
 
-MountErrorType MountPoint::RemountImpl(int flags) {
-  return platform_->Mount(data_.source, data_.mount_path.value(),
-                          data_.filesystem_type, flags | MS_REMOUNT,
-                          data_.data);
+void MountPoint::OnLauncherExit(const int exit_code) {
+  // Record the FUSE launcher's exit code in Metrics.
+  if (metrics_ && !metrics_name_.empty())
+    metrics_->RecordFuseMounterErrorCode(metrics_name_, exit_code);
+
+  DCHECK_EQ(MountError::kInProgress, data_.error);
+  data_.error = ConvertLauncherExitCodeToMountError(exit_code);
+  DCHECK_NE(MountError::kInProgress, data_.error);
+
+  if (exit_code != 0 && process_ && !LOG_IS_ON(INFO)) {
+    for (const auto& s : process_->GetCapturedOutput()) {
+      LOG(ERROR) << process_->GetProgramName() << "[" << process_->pid()
+                 << "]: " << s;
+    }
+  }
+
+  if (launcher_exit_callback_)
+    std::move(launcher_exit_callback_).Run(data_.error);
+}
+
+bool MountPoint::ParseProgressMessage(base::StringPiece message,
+                                      int* const percent) {
+  if (message.empty() || message.back() != '%')
+    return false;
+
+  // |message| ends with a percent sign '%'
+  message.remove_suffix(1);
+
+  // Extract the number before the percent sign.
+  base::StringPiece::size_type i = message.size();
+  while (i > 0 && base::IsAsciiDigit(message[i - 1]))
+    i--;
+  message.remove_prefix(i);
+
+  DCHECK(percent);
+  return base::StringToInt(message, percent) && *percent >= 0 &&
+         *percent <= 100;
+}
+
+void MountPoint::OnProgress(const base::StringPiece message) {
+  int percent;
+  if (!ParseProgressMessage(message, &percent))
+    return;
+
+  progress_percent_ = percent;
+  if (progress_callback_)
+    progress_callback_.Run(this);
+}
+
+void MountPoint::SetProcess(std::unique_ptr<Process> process,
+                            Metrics* const metrics,
+                            std::string metrics_name,
+                            std::vector<int> password_needed_exit_codes) {
+  DCHECK(!process_);
+  process_ = std::move(process);
+  DCHECK(process_);
+
+  DCHECK(!metrics_);
+  metrics_ = metrics;
+  DCHECK(metrics_name_.empty());
+  metrics_name_ = std::move(metrics_name);
+
+  password_needed_exit_codes_ = std::move(password_needed_exit_codes);
+
+  DCHECK_EQ(MountError::kSuccess, data_.error);
+  data_.error = MountError::kInProgress;
+
+  process_->SetLauncherExitCallback(
+      base::BindOnce(&MountPoint::OnLauncherExit, GetWeakPtr()));
+  process_->SetOutputCallback(
+      base::BindRepeating(&MountPoint::OnProgress, GetWeakPtr()));
 }
 
 }  // namespace cros_disks

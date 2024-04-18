@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,6 +21,7 @@ enum class PDRevision {
   kNone = 0,
   k20,
   k30,
+  kMaxValue = k30,
 };
 
 // This is a base class which can represent the components connected to a Type C
@@ -80,8 +81,8 @@ class Peripheral {
 
  private:
   friend class PartnerTest;
-  FRIEND_TEST(PartnerTest, TestAltModeManualAddition);
-  FRIEND_TEST(PartnerTest, TestPDIdentityScan);
+  FRIEND_TEST(PartnerTest, AltModeManualAddition);
+  FRIEND_TEST(PartnerTest, PDIdentityScan);
   FRIEND_TEST(PeripheralTest, CheckPDRevision);
 
   // PD Identity Data objects; expected to be read from the peripheral sysfs.

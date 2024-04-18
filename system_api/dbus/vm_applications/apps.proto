@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@ syntax = "proto3";
 option optimize_for = LITE_RUNTIME;
 
 package vm_tools.apps;
+option go_package = "chromiumos/system_api/vm_applications_proto";
 
 // Corresponds to a .desktop file from the Desktop Entry Spec:
 // https://www.freedesktop.org/wiki/Specifications/desktop-entry-spec/
@@ -50,6 +51,7 @@ message App {
   bool startup_notify = 7;
   LocaleStrings keywords = 9;
   string exec = 12;
+  bool terminal = 13;
 
   // This is the first argument of the 'exec' key, representing the name of the
   // executable.
@@ -63,13 +65,20 @@ message App {
   repeated string extensions = 11;
 }
 
-message ApplicationList {
-  enum VmType {
-    TERMINA = 0;
-    PLUGIN_VM = 1;
-    BOREALIS = 2;
-  }
+// Type of VM.
+enum VmType {
+  TERMINA = 0;
+  PLUGIN_VM = 1;
+  BOREALIS = 2;
+  BRUSCHETTA = 3;
+  // Ideally unknown would be 0, but the list was created without an unknown
+  // so for backcompat don't renumber.
+  UNKNOWN = 4;
+  ARCVM = 5;
+}
 
+// List of App.
+message ApplicationList {
   repeated App apps = 1;
 
   string vm_name = 2;

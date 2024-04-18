@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -125,8 +125,7 @@ bool KerberosMetrics::ShouldReportDailyUsageStats() {
 
   // Don't set the new file time to |now|. This would result in an average
   // frequency of less than one day.
-  base::Time new_time =
-      last_file_time + days_elapsed * base::TimeDelta::FromDays(1);
+  base::Time new_time = last_file_time + days_elapsed * base::Days(1);
   const bool res = base::TouchFile(daily_report_time_path_, new_time, new_time);
   if (!res)
     LOG(WARNING) << "Failed to touch " << daily_report_time_path_.value();
@@ -140,8 +139,6 @@ void KerberosMetrics::ReportDailyUsageStats(int total_count,
                                             int unmanaged_count,
                                             int remembered_password_count,
                                             int use_login_password_count) {
-  // TODO(https://crbug.com/984552): Send the proper user type once unmanaged
-  // users can use this feature.
   metrics_lib_.SendEnumToUMA(kerberos_ + kDailyActiveUsers,
                              static_cast<int>(UserType::kManaged),
                              static_cast<int>(UserType::kCount));

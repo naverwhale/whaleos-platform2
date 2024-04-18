@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,10 @@
 #include "tpm_manager/server/tpm_status.h"
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
-#include <base/macros.h>
-#include <base/optional.h>
 #include <trousers/tss.h>
 
 #include <tpm_manager/server/tpm_connection.h>
@@ -48,30 +48,40 @@ class TpmStatusImpl : public TpmStatus {
   GscVersion GetGscVersion() override;
   bool GetRoVerificationStatus(
       tpm_manager::RoVerificationStatus* status) override;
+  bool GetAlertsData(AlertsData* alerts) override;
+  bool GetTi50Stats(uint32_t* fs_init_time,
+                    uint32_t* fs_size,
+                    uint32_t* aprov_time,
+                    uint32_t* aprov_status) override;
+  // This function returns all 0s version number for TPM1.2 device.
+  bool GetRwVersion(std::string* rw_version) override;
 
  private:
   // Tests if the TPM owner password is the default one. Returns:
-  // 1. true if the test succeed.
-  // 2. false if authentication fails with the default owner password.
-  // 3. base::nullopt if any other errors.
+  // 1. TpmOwnershipStatus::kTpmPreOwned if the test succeed.
+  // 2. TpmOwnershipStatus::kTpmOwned if authentication fails with the default
+  // owner password.
+  // 3. TpmOwnershipStatus::kTpmDisabled if the TPM is disabled.
+  // 4. std::nullopt if any other errors.
   //
   // Note that, w/o any useful cache data, testing tpm with owner auth means it
   // could increase DA counter or even fail during DA lockout. In case of no
   // useful delegate to reset DA, we don't have any way to reset DA so the all
   // the hwsec daemons cannot function correctly until DA unlocks itself after
   // timeout (crbug/1110741).
-  base::Optional<bool> TestTpmWithDefaultOwnerPassword();
+  std::optional<TpmStatus::TpmOwnershipStatus>
+  TestTpmWithDefaultOwnerPassword();
   // Tests if the TPM SRK with default auth. Returns:
   // 1. true if the test succeed.
   // 2. false if authentication fails with the default auth.
-  // 3. base::nullopt if any other errors.
+  // 3. std::nullopt if any other errors.
   //
   // Note that, w/o any useful cache data, testing tpm with wrong SRK auth means
   // it could increase DA counter or even fail during DA lockout. In case of no
   // useful delegate to reset DA, we don't have any way to reset DA so the all
   // the hwsec daemons cannot function correctly until DA unlocks itself after
   // timeout (crbug/1110741).
-  base::Optional<bool> TestTpmSrkWithDefaultAuth();
+  std::optional<bool> TestTpmSrkWithDefaultAuth();
   // This method refreshes the |is_owned_| and |is_enabled_| status of the
   // Tpm. It can be called multiple times.
   void RefreshOwnedEnabledInfo();
@@ -99,12 +109,12 @@ class TpmStatusImpl : public TpmStatus {
 
   // Whether current owner password in the TPM is the default one; in case of
   // nullopt the password status is not determined yet.
-  base::Optional<bool> is_owner_password_default_;
+  std::optional<TpmStatus::TpmOwnershipStatus> owner_password_status_;
 
   // Whether current SRK auth in the TPM is the default one(either the empty
   // password or the well-known SRK password); in case of nullopt the password
   // status is not determined yet.
-  base::Optional<bool> is_srk_auth_default_;
+  std::optional<bool> is_srk_auth_default_;
 };
 
 }  // namespace tpm_manager

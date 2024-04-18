@@ -1,25 +1,27 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/vpn/wireguard_driver.h"
 
 #include <poll.h>
-#include <sys/utsname.h>
 
+#include <iterator>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <base/base64.h>
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/json/json_reader.h>
 #include <base/json/json_writer.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
+#include <base/notreached.h>
 #include <base/strings/strcat.h>
 #include <base/strings/string_split.h>
 #include <base/strings/stringprintf.h>
@@ -30,23 +32,21 @@
 
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/process_manager.h"
-#include "shill/property_accessor.h"
-#include "shill/store_interface.h"
+#include "shill/metrics.h"
+#include "shill/net/process_manager.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/store_interface.h"
+#include "shill/vpn/vpn_types.h"
 #include "shill/vpn/vpn_util.h"
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kVPN;
-static std::string ObjectID(const WireGuardDriver*) {
-  return "(wireguard_driver)";
-}
 }  // namespace Logging
 
 namespace {
 
-constexpr char kWireGuardPath[] = "/usr/sbin/wireguard";
 constexpr char kWireGuardToolsPath[] = "/usr/bin/wg";
 constexpr char kDefaultInterfaceName[] = "wg0";
 
@@ -56,10 +56,10 @@ constexpr char kWireGuardKeyPairSource[] = "WireGuard.KeyPairSource";
 
 // Timeout value for spawning the userspace wireguard process and configuring
 // the interface via wireguard-tools.
-constexpr base::TimeDelta kConnectTimeout = base::TimeDelta::FromSeconds(10);
+constexpr base::TimeDelta kConnectTimeout = base::Seconds(10);
 
 // Key length of Curve25519.
-constexpr int kWgKeyLength = 32;
+constexpr size_t kWgKeyLength = 32;
 constexpr int kWgBase64KeyLength = (((kWgKeyLength) + 2) / 3) * 4;
 
 // Properties of a peer.
@@ -120,7 +120,7 @@ std::string GenerateBase64PrivateKey() {
 // wireguard-tools is blocking but with a timeout (kPollTimeout below).
 std::string CalculateBase64PublicKey(const std::string& base64_private_key,
                                      ProcessManager* process_manager) {
-  constexpr auto kPollTimeout = base::TimeDelta::FromMilliseconds(200);
+  constexpr auto kPollTimeout = base::Seconds(1);
 
   constexpr uint64_t kCapMask = 0;
   int stdin_fd = -1;
@@ -198,11 +198,18 @@ const VPNDriver::Property WireGuardDriver::kProperties[] = {
     // TODO(b/177877860): This field is for software-backed keys only. May need
     // to change this logic when hardware-backed keys come.
     {kWireGuardPublicKey, Property::kReadOnly},
+    // Property for the list that contains one IPv4 address and multiple IPv6
+    // addresses which will be used as the client-side overlay addresses.
+    {kWireGuardIPAddress, Property::kArray},
 };
 
 WireGuardDriver::WireGuardDriver(Manager* manager,
                                  ProcessManager* process_manager)
-    : VPNDriver(manager, process_manager, kProperties, base::size(kProperties)),
+    : VPNDriver(manager,
+                process_manager,
+                VPNType::kWireGuard,
+                kProperties,
+                std::size(kProperties)),
       vpn_util_(VPNUtil::New()) {}
 
 WireGuardDriver::~WireGuardDriver() {
@@ -210,7 +217,7 @@ WireGuardDriver::~WireGuardDriver() {
 }
 
 base::TimeDelta WireGuardDriver::ConnectAsync(EventHandler* event_handler) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   event_handler_ = event_handler;
   // To make sure the connect procedure is executed asynchronously.
   dispatcher()->PostTask(
@@ -221,17 +228,25 @@ base::TimeDelta WireGuardDriver::ConnectAsync(EventHandler* event_handler) {
 }
 
 void WireGuardDriver::Disconnect() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   Cleanup();
   event_handler_ = nullptr;
 }
 
-IPConfig::Properties WireGuardDriver::GetIPProperties() const {
-  return ip_properties_;
+std::unique_ptr<IPConfig::Properties> WireGuardDriver::GetIPv4Properties()
+    const {
+  if (ipv4_properties_.address_family) {
+    return std::make_unique<IPConfig::Properties>(ipv4_properties_);
+  }
+  return nullptr;
 }
 
-std::string WireGuardDriver::GetProviderType() const {
-  return kProviderWireGuard;
+std::unique_ptr<IPConfig::Properties> WireGuardDriver::GetIPv6Properties()
+    const {
+  if (ipv6_properties_.address_family) {
+    return std::make_unique<IPConfig::Properties>(ipv6_properties_);
+  }
+  return nullptr;
 }
 
 void WireGuardDriver::OnConnectTimeout() {
@@ -274,7 +289,7 @@ bool WireGuardDriver::Load(const StoreInterface* storage,
   }
 
   for (const auto& peer_json : encoded_peers) {
-    base::Optional<base::Value> val = base::JSONReader::Read(peer_json);
+    std::optional<base::Value> val = base::JSONReader::Read(peer_json);
     if (!val || !val->is_dict()) {
       LOG(ERROR) << "Failed to parse a peer. Skipped it.";
       continue;
@@ -282,7 +297,7 @@ bool WireGuardDriver::Load(const StoreInterface* storage,
     Stringmap peer;
     for (const auto& property : kPeerProperties) {
       const std::string key = property.name;
-      const auto* value = val->FindStringKey(key);
+      const auto* value = val->GetDict().FindString(key);
       if (value != nullptr) {
         peer[key] = *value;
       } else {
@@ -364,10 +379,10 @@ bool WireGuardDriver::Save(StoreInterface* storage,
   // Handles peers.
   std::vector<std::string> encoded_peers;
   for (auto& peer : peers_) {
-    base::Value root(base::Value::Type::DICTIONARY);
+    base::Value::Dict root;
     for (const auto& property : kPeerProperties) {
       const auto& key = property.name;
-      root.SetStringKey(key, peer[key]);
+      root.Set(key, peer[key]);
     }
     std::string peer_json;
     if (!base::JSONWriter::Write(root, &peer_json)) {
@@ -403,65 +418,16 @@ void WireGuardDriver::UnloadCredentials() {
 
 void WireGuardDriver::CreateKernelWireGuardInterface() {
   auto link_ready_callback = base::BindOnce(
-      &WireGuardDriver::ConfigureInterface, weak_factory_.GetWeakPtr(),
-      /*created_in_kernel=*/true);
+      &WireGuardDriver::ConfigureInterface, weak_factory_.GetWeakPtr());
+  constexpr std::string_view kErrMsg = "Failed to create wireguard interface";
   auto failure_callback =
-      base::BindOnce(&WireGuardDriver::StartUserspaceWireGuardTunnel,
-                     weak_factory_.GetWeakPtr());
+      base::BindOnce(&WireGuardDriver::FailService, weak_factory_.GetWeakPtr(),
+                     Service::kFailureInternal, kErrMsg);
   if (!manager()->device_info()->CreateWireGuardInterface(
           kDefaultInterfaceName, std::move(link_ready_callback),
           std::move(failure_callback))) {
-    StartUserspaceWireGuardTunnel();
+    FailService(Service::kFailureInternal, kErrMsg);
   }
-}
-
-void WireGuardDriver::StartUserspaceWireGuardTunnel() {
-  LOG(INFO) << "Failed to create a wireguard interface in the kernel. Fallback "
-               "to userspace tunnel.";
-
-  // Claims the interface before the wireguard process creates it.
-  // TODO(b/177876632): Actually when the tunnel interface is ready, it cannot
-  // guarantee that the wireguard-tools can talk with the userspace wireguard
-  // process now. We should also wait for another event that the UAPI socket
-  // appears (which is a UNIX-domain socket created by the userspace wireguard
-  // process at a fixed path: `/var/run/wireguard/wg0.sock`).
-  manager()->device_info()->AddVirtualInterfaceReadyCallback(
-      kDefaultInterfaceName,
-      base::BindOnce(&WireGuardDriver::ConfigureInterface,
-                     weak_factory_.GetWeakPtr(),
-                     /*created_in_kernel=*/false));
-
-  if (!SpawnWireGuard()) {
-    FailService(Service::kFailureInternal, "Failed to spawn wireguard process");
-  }
-}
-
-bool WireGuardDriver::SpawnWireGuard() {
-  SLOG(this, 2) << __func__;
-
-  // TODO(b/177876632): Change this part after we decide the userspace binary to
-  // use. For wireguard-go, we need to change the way to invoke minijail; for
-  // wireugard-rs, we need to add `--disable-drop-privileges` or change the
-  // capmask.
-  std::vector<std::string> args = {
-      "--foreground",
-      kDefaultInterfaceName,
-  };
-  constexpr uint64_t kCapMask = CAP_TO_MASK(CAP_NET_ADMIN);
-  wireguard_pid_ = process_manager()->StartProcessInMinijail(
-      FROM_HERE, base::FilePath(kWireGuardPath), args,
-      /*environment=*/{}, VPNUtil::BuildMinijailOptions(kCapMask),
-      base::BindRepeating(&WireGuardDriver::WireGuardProcessExited,
-                          weak_factory_.GetWeakPtr()));
-  return wireguard_pid_ > -1;
-}
-
-void WireGuardDriver::WireGuardProcessExited(int exit_code) {
-  wireguard_pid_ = -1;
-  FailService(
-      Service::kFailureInternal,
-      base::StringPrintf("wireguard process exited unexpectedly with code=%d",
-                         exit_code));
 }
 
 std::string WireGuardDriver::GenerateConfigFileContents() {
@@ -509,13 +475,11 @@ std::string WireGuardDriver::GenerateConfigFileContents() {
   return base::JoinString(lines, "\n");
 }
 
-void WireGuardDriver::ConfigureInterface(bool created_in_kernel,
-                                         const std::string& interface_name,
+void WireGuardDriver::ConfigureInterface(const std::string& interface_name,
                                          int interface_index) {
-  LOG(INFO) << "WireGuard interface " << interface_name << " was created "
-            << (created_in_kernel ? "in kernel" : "by userspace program")
-            << ". Start configuration";
-  kernel_interface_open_ = created_in_kernel;
+  LOG(INFO) << "WireGuard interface " << interface_name
+            << " was created. Start configuration";
+  kernel_interface_open_ = true;
 
   if (!event_handler_) {
     LOG(ERROR) << "Missing event_handler_";
@@ -544,13 +508,12 @@ void WireGuardDriver::ConfigureInterface(bool created_in_kernel,
                                    path.value()};
   constexpr uint64_t kCapMask = CAP_TO_MASK(CAP_NET_ADMIN);
   auto minijail_options = VPNUtil::BuildMinijailOptions(kCapMask);
-  // Do not close nonstd fds to leave the anonymous config file open.
-  minijail_options.close_nonstd_fds = false;
+  minijail_options.preserved_nonstd_fds.insert(config_fd_.get());
   pid_t pid = process_manager()->StartProcessInMinijail(
       FROM_HERE, base::FilePath(kWireGuardToolsPath), args,
       /*environment=*/{}, minijail_options,
-      base::BindRepeating(&WireGuardDriver::OnConfigurationDone,
-                          weak_factory_.GetWeakPtr()));
+      base::BindOnce(&WireGuardDriver::OnConfigurationDone,
+                     weak_factory_.GetWeakPtr()));
   if (pid == -1) {
     FailService(Service::kFailureInternal, "Failed to run `wg setconf`");
     return;
@@ -558,7 +521,7 @@ void WireGuardDriver::ConfigureInterface(bool created_in_kernel,
 }
 
 void WireGuardDriver::OnConfigurationDone(int exit_code) {
-  SLOG(this, 2) << __func__ << ": exit_code=" << exit_code;
+  SLOG(2) << __func__ << ": exit_code=" << exit_code;
 
   // Closes the config file to remove it.
   config_fd_.reset();
@@ -571,7 +534,7 @@ void WireGuardDriver::OnConfigurationDone(int exit_code) {
   }
 
   if (!PopulateIPProperties()) {
-    FailService(Service::kFailureInternal, "Failed to populate ip properties");
+    FailService(Service::kFailureConnect, "Failed to populate ip properties");
     return;
   }
 
@@ -581,37 +544,90 @@ void WireGuardDriver::OnConfigurationDone(int exit_code) {
 }
 
 bool WireGuardDriver::PopulateIPProperties() {
-  ip_properties_.default_route = false;
+  ipv4_properties_.default_route = false;
+  const auto ip_address_list =
+      args()->Lookup<std::vector<std::string>>(kWireGuardIPAddress, {});
+
+  std::vector<std::string> ipv4_address_list;
+  std::vector<std::string> ipv6_address_list;
+
+  for (const auto& ip_address : ip_address_list) {
+    const auto ip = net_base::IPAddress::CreateFromString(ip_address);
+    if (!ip.has_value()) {
+      LOG(ERROR) << "Address format is wrong: the input string is "
+                 << ip_address;
+      return false;
+    }
+    switch (ip->GetFamily()) {
+      case net_base::IPFamily::kIPv4:
+        ipv4_address_list.push_back(ip_address);
+        break;
+      case net_base::IPFamily::kIPv6:
+        ipv6_address_list.push_back(ip_address);
+        break;
+    }
+  }
+  if (ipv4_address_list.size() > 1) {
+    LOG(ERROR) << "Multiple IPv4 addresses are set.";
+    return false;
+  }
+  if (ipv4_address_list.size() > 0) {
+    ipv4_properties_.address = ipv4_address_list[0];
+    ipv4_properties_.address_family = net_base::IPFamily::kIPv4;
+    ipv4_properties_.subnet_prefix = 32;
+    // This is a point-to-point link, gateway does not make sense here. Set it
+    // default to skip RTA_GATEWAY when installing routes, and also make shill
+    // users happier (b/276506661).
+    ipv4_properties_.gateway = "0.0.0.0";
+  }
+  if (ipv6_address_list.size() > 1) {
+    LOG(WARNING) << "Multiple IPv6 addresses are set. Only apply the first one";
+  }
+  if (ipv6_address_list.size() > 0) {
+    ipv6_properties_.address = ipv6_address_list[0];
+    ipv6_properties_.address_family = net_base::IPFamily::kIPv6;
+    ipv6_properties_.subnet_prefix = 128;
+    // This is a point-to-point link, gateway does not make sense here. Set it
+    // default to skip RTA_GATEWAY when installing routes, and also make shill
+    // users happier (b/276506661).
+    ipv6_properties_.gateway = "::";
+  }
+  if ((ipv4_address_list.size() == 0) && (ipv6_address_list.size() == 0)) {
+    LOG(ERROR) << "Missing client IP address in the configuration";
+    return false;
+  }
 
   // When we arrive here, the value of AllowedIPs has already been validated
   // by wireguard-tools. AllowedIPs is comma-separated list of CIDR-notation
   // addresses (e.g., "10.8.0.1/16,192.168.1.1/24").
   for (auto& peer : peers_) {
-    std::string allowed_ips_str = peer[kWireGuardPeerAllowedIPs];
-    std::vector<std::string> allowed_ip_list = base::SplitString(
+    std::string_view allowed_ips_str = peer[kWireGuardPeerAllowedIPs];
+    std::vector<std::string_view> allowed_ip_list = base::SplitStringPiece(
         allowed_ips_str, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
-    for (const auto& allowed_ip_str : allowed_ip_list) {
-      IPAddress allowed_ip;
-      // Currently only supports IPv4 addresses.
-      allowed_ip.set_family(IPAddress::kFamilyIPv4);
-      if (!allowed_ip.SetAddressAndPrefixFromString(allowed_ip_str)) {
-        LOG(DFATAL) << "Invalid allowed ip: " << allowed_ip_str;
+    for (const auto& allowed_ip : allowed_ip_list) {
+      const auto prefix = net_base::IPCIDR::CreateFromCIDRString(allowed_ip);
+      if (!prefix.has_value()) {
+        LOG(ERROR) << "Failed to parse AllowedIP: the input string is "
+                   << allowed_ip;
         return false;
       }
-      // We don't need a gateway here, so use the "default" address as the
-      // gateways, and then RoutingTable will skip RTA_GATEWAY when installing
-      // this entry.
-      ip_properties_.routes.push_back({allowed_ip.GetNetworkPart().ToString(),
-                                       static_cast<int>(allowed_ip.prefix()),
-                                       /*gateway=*/"0.0.0.0"});
+      switch (prefix->GetFamily()) {
+        case net_base::IPFamily::kIPv4:
+          ipv4_properties_.inclusion_list.push_back(std::string(allowed_ip));
+          break;
+        case net_base::IPFamily::kIPv6:
+          ipv6_properties_.inclusion_list.push_back(std::string(allowed_ip));
+          break;
+      }
     }
   }
-  ip_properties_.method = kTypeVPN;
+  ipv4_properties_.method = kTypeVPN;
+  ipv6_properties_.method = kTypeVPN;
   return true;
 }
 
 void WireGuardDriver::FailService(Service::ConnectFailure failure,
-                                  const std::string& error_details) {
+                                  std::string_view error_details) {
   LOG(ERROR) << "Driver error: " << error_details;
   Cleanup();
   if (event_handler_) {
@@ -630,7 +646,8 @@ void WireGuardDriver::Cleanup() {
     kernel_interface_open_ = false;
   }
   interface_index_ = -1;
-  ip_properties_ = {};
+  ipv4_properties_ = {};
+  ipv6_properties_ = {};
   config_fd_.reset();
 }
 
@@ -669,19 +686,14 @@ void WireGuardDriver::ClearPeers(Error* error) {
 void WireGuardDriver::ReportConnectionMetrics() {
   // VPN type.
   metrics()->SendEnumToUMA(Metrics::kMetricVpnDriver,
-                           Metrics::kVpnDriverWireGuard,
-                           Metrics::kMetricVpnDriverMax);
+                           Metrics::kVpnDriverWireGuard);
 
   // Key pair source.
   metrics()->SendEnumToUMA(Metrics::kMetricVpnWireGuardKeyPairSource,
-                           key_pair_source_,
-                           Metrics::kMetricVpnWireGuardKeyPairSourceMax);
+                           key_pair_source_);
 
   // Number of peers.
-  metrics()->SendToUMA(Metrics::kMetricVpnWireGuardPeersNum, peers_.size(),
-                       Metrics::kMetricVpnWireGuardPeersNumMin,
-                       Metrics::kMetricVpnWireGuardPeersNumMax,
-                       Metrics::kMetricVpnWireGuardPeersNumNumBuckets);
+  metrics()->SendToUMA(Metrics::kMetricVpnWireGuardPeersNum, peers_.size());
 
   // Allowed IPs type.
   // TODO(b/194243702): Collect metrics for IPv6 usages in Allowed IPs.
@@ -693,22 +705,13 @@ void WireGuardDriver::ReportConnectionMetrics() {
     }
   }
   metrics()->SendEnumToUMA(Metrics::kMetricVpnWireGuardAllowedIPsType,
-                           allowed_ips_type,
-                           Metrics::kMetricVpnWireGuardAllowedIPsTypeMax);
+                           allowed_ips_type);
 }
 
 // static
 bool WireGuardDriver::IsSupported() {
-  // WireGuard is current supported on kernel version >= 5.10
-  struct utsname buf;
-  if (uname(&buf) != 0) {
-    return false;
-  }
-  // Extract the numeric part of release string
-  std::string version = base::SplitString(
-      buf.release, "-", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)[0];
-  base::Version kernel_version = base::Version(version);
-  return kernel_version.IsValid() && kernel_version >= base::Version("5.10");
+  // WireGuard is current supported on kernel version >= 5.4
+  return VPNUtil::CheckKernelVersion(base::Version("5.4"));
 }
 
 }  // namespace shill

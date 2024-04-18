@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,14 +16,6 @@ constexpr char kSystemKeyStatus[] = "Platform.MountEncrypted.SystemKeyStatus";
 constexpr char kEncryptionKeyStatus[] =
     "Platform.MountEncrypted.EncryptionKeyStatus";
 
-constexpr char kTimeToTakeTpmOwnership[] =
-    "Platform.MountEncrypted.TimeToTakeTpmOwnership";
-constexpr base::TimeDelta kTimeToTakeTpmOwnershipMin =
-    base::TimeDelta::FromMilliseconds(1);
-constexpr base::TimeDelta kTimeToTakeTpmOwnershipMax =
-    base::TimeDelta::FromMinutes(5);
-constexpr int kTimeToTakeTpmOwnershipNumBuckets = 50;
-
 }  // namespace
 
 MountEncryptedMetrics::MountEncryptedMetrics(const std::string& output_file) {
@@ -32,19 +24,19 @@ MountEncryptedMetrics::MountEncryptedMetrics(const std::string& output_file) {
 
 // static
 void MountEncryptedMetrics::Initialize(const std::string& output_file) {
-  DCHECK_EQ(g_metrics, nullptr);
+  CHECK(!g_metrics);
   g_metrics = new MountEncryptedMetrics(output_file);
 }
 
 // static
 MountEncryptedMetrics* MountEncryptedMetrics::Get() {
-  DCHECK_NE(g_metrics, nullptr);
+  CHECK(g_metrics);
   return g_metrics;
 }
 
 // static
 void MountEncryptedMetrics::Reset() {
-  DCHECK_NE(g_metrics, nullptr);
+  CHECK(g_metrics);
   delete g_metrics;
   g_metrics = nullptr;
 }
@@ -61,15 +53,6 @@ void MountEncryptedMetrics::ReportEncryptionKeyStatus(
   metrics_library_.SendEnumToUMA(
       kEncryptionKeyStatus, static_cast<int>(status),
       static_cast<int>(EncryptionKey::EncryptionKeyStatus::kCount));
-}
-
-void MountEncryptedMetrics::ReportTimeToTakeTpmOwnership(
-    base::TimeDelta elapsed_time) {
-  metrics_library_.SendToUMA(kTimeToTakeTpmOwnership,
-                             elapsed_time.InMilliseconds(),
-                             kTimeToTakeTpmOwnershipMin.InMilliseconds(),
-                             kTimeToTakeTpmOwnershipMax.InMilliseconds(),
-                             kTimeToTakeTpmOwnershipNumBuckets);
 }
 
 }  // namespace mount_encrypted

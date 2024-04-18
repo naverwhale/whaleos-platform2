@@ -1,18 +1,32 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MINIOS_UTILS_H_
 #define MINIOS_UTILS_H_
 
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
+#include <vector>
 
 #include <base/files/file_path.h>
+#include <brillo/udev/udev.h>
 
 #include "minios/process_manager.h"
 
 namespace minios {
+
+// Alert Log error categories.
+extern const char kCategoryInit[];
+extern const char kCategoryReboot[];
+extern const char kCategoryUpdate[];
+
+extern const char kLogFilePath[];
+
+extern const base::FilePath kDefaultArchivePath;
 
 // Reads the content of `file_path` from `start_offset` to `end_offset` with
 // maximum characters per line being `max_columns` at max. If the file ends
@@ -52,6 +66,57 @@ bool GetCrosRegionData(ProcessManagerInterface* process_manager,
 // failure.
 std::string GetKeyboardLayout(ProcessManagerInterface* process_manager);
 
-}  // namespace minios
+// Read frecon created symbolic link and return the virtual terminal path.
+base::FilePath GetLogConsole();
 
+bool TriggerShutdown();
+
+// Create a tag that can be added to an Error log message to allow easier
+// filtering from listnr logs. Expected to be used as the first field of a log
+// message. e.g.: `LOG(ERROR) << AlertLogTag(kCategoryName) << err_msg << ....;`
+inline std::string AlertLogTag(const std::string& category) {
+  return base::StringPrintf("[CoreServicesAlert<%s>] ", category.c_str());
+}
+
+// Mount the stateful partition at `/stateful/` if its not currently mounted.
+// Returns true if successfully mounted, false otherwise.
+bool MountStatefulPartition(ProcessManagerInterface* process_manager);
+
+// Compress a pre-determined list of NBR logs and save it to the provided path.
+// Returns the result of running a `tar` command.
+int CompressLogs(std::unique_ptr<ProcessManagerInterface> process_manager,
+                 const base::FilePath& archive_path = kDefaultArchivePath);
+
+// Calculate kernel size.
+std::optional<uint64_t> KernelSize(
+    std::unique_ptr<ProcessManagerInterface> process_manager,
+    const base::FilePath& device);
+
+// Read the kernel cmdline and get the current version.
+std::optional<std::string> GetMiniOSVersion();
+
+// Enumerate udev devices and query for removable storage devices. Returns true
+// on success and devices will be added to the passed in vector. Vector will be
+// cleared before any devices are possibly added to it.
+bool GetRemovableDevices(
+    std::vector<base::FilePath>& devices,
+    std::unique_ptr<brillo::Udev> udev = brillo::Udev::Create());
+
+// Check if the given log store key is valid.
+bool IsLogStoreKeyValid(const std::string& key);
+
+// Trim the provided key for any trailing whitespace beyond
+// `kLogStoreKeySizeBytes`.
+void TrimLogStoreKey(std::string& key);
+
+// Get log encryption key from VPD. Returns `nullopt` if not found.
+std::optional<std::string> GetLogStoreKey(
+    ProcessManagerInterface* process_manager);
+
+// Save a given log encryption key to VPD. Returns true on success, false
+// otherwise.
+bool SaveLogStoreKey(ProcessManagerInterface* process_manager,
+                     const std::string& key);
+
+}  // namespace minios
 #endif  // MINIOS_UTILS_H__

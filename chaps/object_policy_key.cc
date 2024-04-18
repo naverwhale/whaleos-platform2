@@ -1,11 +1,10 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chaps/object_policy_key.h"
 
-#include <base/macros.h>
-#include <base/stl_util.h>
+#include <iterator>
 
 namespace chaps {
 
@@ -24,7 +23,7 @@ static const AttributePolicy kKeyPolicies[] = {
 };
 
 ObjectPolicyKey::ObjectPolicyKey() {
-  AddPolicies(kKeyPolicies, base::size(kKeyPolicies));
+  AddPolicies(kKeyPolicies, std::size(kKeyPolicies));
 }
 
 ObjectPolicyKey::~ObjectPolicyKey() {}
@@ -32,7 +31,7 @@ ObjectPolicyKey::~ObjectPolicyKey() {}
 void ObjectPolicyKey::SetDefaultAttributes() {
   ObjectPolicyCommon::SetDefaultAttributes();
   CK_ATTRIBUTE_TYPE empty[] = {CKA_ID, CKA_START_DATE, CKA_END_DATE};
-  for (size_t i = 0; i < base::size(empty); ++i) {
+  for (size_t i = 0; i < std::size(empty); ++i) {
     if (!object_->IsAttributePresent(empty[i]))
       object_->SetAttributeString(empty[i], "");
   }

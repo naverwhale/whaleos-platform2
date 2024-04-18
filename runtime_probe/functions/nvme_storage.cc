@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <pcrecpp.h>
 
+#include <optional>
 #include <utility>
 
 #include <base/files/file_util.h>
@@ -14,7 +15,7 @@
 #include <brillo/errors/error.h>
 #include <debugd/dbus-proxies.h>
 
-#include "runtime_probe/system/context_instance.h"
+#include "runtime_probe/system/context.h"
 #include "runtime_probe/utils/file_utils.h"
 #include "runtime_probe/utils/value_utils.h"
 
@@ -33,12 +34,14 @@ bool CheckStorageTypeMatch(const base::FilePath& node_path) {
   const auto nvme_driver_path = node_path.Append(kNvmeDriverPath);
   base::FilePath driver_symlink_target;
   if (!base::ReadSymbolicLink(nvme_driver_path, &driver_symlink_target)) {
-    VLOG(1) << "\"" << nvme_driver_path.value() << "\" is not a symbolic link";
-    VLOG(2) << "\"" << node_path.value() << "\" is not NVMe.";
+    VLOG(2) << "\"" << nvme_driver_path.value() << "\" is not a symbolic link";
     return false;
   }
   pcrecpp::RE nvme_driver_re(R"(drivers/nvme)", pcrecpp::RE_Options());
   if (!nvme_driver_re.PartialMatch(driver_symlink_target.value())) {
+    VLOG(2) << "Path \"" << driver_symlink_target.value()
+            << "\" does not match the pattern \"" << nvme_driver_re.pattern()
+            << "\".";
     return false;
   }
   VLOG(2) << "\"" << node_path.value() << "\" is NVMe.";
@@ -47,68 +50,76 @@ bool CheckStorageTypeMatch(const base::FilePath& node_path) {
 
 bool NvmeCliList(std::string* output) {
   brillo::ErrorPtr error;
-  if (ContextInstance::Get()->debugd_proxy()->Nvme(/*option=*/"list", output,
-                                                   &error)) {
+  if (Context::Get()->debugd_proxy()->Nvme(/*option=*/"list", output, &error)) {
     return true;
   }
-  LOG(ERROR) << "Debugd::Nvme failed: " << error->GetMessage();
+  std::string err_message = "(no error message)";
+  if (error)
+    err_message = error->GetMessage();
+  LOG(ERROR) << "Debugd::Nvme failed: " << err_message;
   return false;
 }
 
-base::Optional<base::Value> GetStorageToolData() {
+std::optional<base::Value> GetStorageToolData() {
   std::string output;
   if (!NvmeCliList(&output))
-    return base::nullopt;
+    return std::nullopt;
 
   auto value = base::JSONReader::Read(output);
   if (!value) {
     LOG(ERROR) << "Debugd::Nvme failed to parse output as json:\n" << output;
-    return base::nullopt;
+    return std::nullopt;
   }
   return value;
 }
 
 }  // namespace
 
-base::Optional<base::Value> NvmeStorageFunction::ProbeFromSysfs(
+std::optional<base::Value> NvmeStorageFunction::ProbeFromSysfs(
     const base::FilePath& node_path) const {
   VLOG(2) << "Processnig the node \"" << node_path.value() << "\"";
   if (!CheckStorageTypeMatch(node_path))
-    return base::nullopt;
+    return std::nullopt;
 
   const auto nvme_path = node_path.Append(kNvmeDevicePath);
-  auto nvme_res = MapFilesToDict(nvme_path, kNvmeFields, {});
+  auto nvme_res = MapFilesToDict(nvme_path, kNvmeFields);
   if (!nvme_res)
-    return base::nullopt;
+    return std::nullopt;
   PrependToDVKey(&*nvme_res, kNvmePrefix);
-  nvme_res->SetStringKey("type", kNvmeType);
+  nvme_res->GetDict().Set("type", kNvmeType);
   return nvme_res;
 }
 
-base::Optional<base::Value> NvmeStorageFunction::ProbeFromStorageTool(
+std::optional<base::Value> NvmeStorageFunction::ProbeFromStorageTool(
     const base::FilePath& node_path) const {
   auto nvme_data = GetStorageToolData();
-  if (!nvme_data)
-    return base::nullopt;
-  const auto* devices = nvme_data->FindListKey("Devices");
+  if (!nvme_data || !nvme_data->is_dict())
+    return std::nullopt;
+  const auto& nvme_data_dict = nvme_data->GetDict();
+
+  const auto* devices = nvme_data_dict.FindList("Devices");
   if (!devices) {
     LOG(ERROR) << "Cannot find \"Devices\" in nvme output.";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   const auto& device_name = node_path.BaseName();
-  base::Value result(base::Value::Type::DICTIONARY);
-  for (const auto& device : devices->GetList()) {
-    const auto* path = device.FindStringKey("DevicePath");
+  base::Value result(base::Value::Type::DICT);
+  for (const auto& device : *devices) {
+    if (!device.is_dict())
+      continue;
+    const auto& device_dict = device.GetDict();
+
+    const auto* path = device_dict.FindString("DevicePath");
     if (!path || base::FilePath(*path).BaseName() != device_name)
       continue;
-    const auto* firmware = device.FindStringKey("Firmware");
+    const auto* firmware = device_dict.FindString("Firmware");
     if (firmware) {
-      result.SetStringKey("storage_fw_version", *firmware);
+      result.GetDict().Set("storage_fw_version", *firmware);
     }
-    const auto* model = device.FindStringKey("ModelNumber");
+    const auto* model = device_dict.FindString("ModelNumber");
     if (model) {
-      result.SetStringKey("nvme_model", *model);
+      result.GetDict().Set("nvme_model", *model);
     }
     break;
   }

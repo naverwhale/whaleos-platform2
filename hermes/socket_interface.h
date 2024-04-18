@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,14 @@
 
 #include <cstdint>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 
 namespace hermes {
 
 // Interface representing a socket used to communicate with a modem.
 class SocketInterface {
  public:
-  using DataAvailableCallback = base::Callback<void(SocketInterface*)>;
+  using DataAvailableCallback = base::RepeatingCallback<void(SocketInterface*)>;
 
   enum class Type {
     kQrtr,

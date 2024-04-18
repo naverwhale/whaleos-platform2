@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/strings/string_tokenizer.h>
 #include <base/strings/string_util.h>
@@ -89,11 +89,11 @@ bool ParseProxyInfo(dbus::Response* response,
   return true;
 }
 
-void OnResolveProxy(const brillo::http::GetChromeProxyServersCallback& callback,
+void OnResolveProxy(brillo::http::GetChromeProxyServersCallback callback,
                     dbus::Response* response) {
   std::vector<std::string> proxies;
   bool result = ParseProxyInfo(response, &proxies);
-  callback.Run(result, std::move(proxies));
+  std::move(callback).Run(result, std::move(proxies));
 }
 }  // namespace
 
@@ -111,14 +111,17 @@ bool GetChromeProxyServers(scoped_refptr<dbus::Bus> bus,
       chromeos::kNetworkProxyServiceResolveProxyMethod);
   dbus::MessageWriter writer(&method_call);
   writer.AppendString(url);
-  std::unique_ptr<dbus::Response> response = proxy->CallMethodAndBlock(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+  std::unique_ptr<dbus::Response> response =
+      proxy
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   return ParseProxyInfo(response.get(), proxies_out);
 }
 
 void GetChromeProxyServersAsync(scoped_refptr<dbus::Bus> bus,
                                 const std::string& url,
-                                const GetChromeProxyServersCallback& callback) {
+                                GetChromeProxyServersCallback callback) {
   dbus::ObjectProxy* proxy =
       bus->GetObjectProxy(chromeos::kNetworkProxyServiceName,
                           dbus::ObjectPath(chromeos::kNetworkProxyServicePath));
@@ -128,14 +131,14 @@ void GetChromeProxyServersAsync(scoped_refptr<dbus::Bus> bus,
   dbus::MessageWriter writer(&method_call);
   writer.AppendString(url);
   proxy->CallMethod(&method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-                    base::Bind(&OnResolveProxy, callback));
+                    base::BindOnce(&OnResolveProxy, std::move(callback)));
 }
 
 void GetChromeProxyServersWithOverrideAsync(
     scoped_refptr<dbus::Bus> bus,
     const std::string& url,
     const SystemProxyOverride system_proxy_override,
-    const GetChromeProxyServersCallback& callback) {
+    GetChromeProxyServersCallback callback) {
   dbus::ObjectProxy* proxy =
       bus->GetObjectProxy(chromeos::kNetworkProxyServiceName,
                           dbus::ObjectPath(chromeos::kNetworkProxyServicePath));
@@ -146,7 +149,7 @@ void GetChromeProxyServersWithOverrideAsync(
   writer.AppendString(url);
   writer.AppendInt32(system_proxy_override);
   proxy->CallMethod(&method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-                    base::Bind(&OnResolveProxy, callback));
+                    base::BindOnce(&OnResolveProxy, std::move(callback)));
 }
 
 }  // namespace http

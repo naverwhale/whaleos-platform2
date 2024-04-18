@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,7 @@
 
 #include <attestation/pca_agent/dbus-proxy-mocks.h>
 #include <attestation/proto_bindings/pca_agent.pb.h>
-#include <base/optional.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 
 namespace attestation {
@@ -80,7 +79,7 @@ class FakePcaAgentProxy : public org::chromium::PcaAgentProxyMock {
     bool is_good_pca_response{true};
 
     // Delay the task is posted with.
-    base::TimeDelta delay{base::TimeDelta::FromMilliseconds(0)};
+    base::TimeDelta delay{base::Milliseconds(0)};
   };
 
   // Respective configurations for enrollment and certification.
@@ -92,7 +91,7 @@ class FakePcaAgentProxy : public org::chromium::PcaAgentProxyMock {
   GetCertificateReply get_certificate_reply_;
 
   // Error returned when dbus error.
-  brillo::ErrorPtr dummy_error_{
+  brillo::ErrorPtr dbus_error_{
       brillo::Error::Create(base::Location(), "", "", "")};
 
   template <class ReplyType, class SuccessCallbackType, class ErrorCallbackType>
@@ -102,8 +101,8 @@ class FakePcaAgentProxy : public org::chromium::PcaAgentProxyMock {
                 ErrorCallbackType on_error) {
     auto task = config.success
                     ? base::BindOnce(std::move(on_success), reply)
-                    : base::BindOnce(std::move(on_error), dummy_error_.get());
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+                    : base::BindOnce(std::move(on_error), dbus_error_.get());
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE, std::move(task), config.delay);
   }
 

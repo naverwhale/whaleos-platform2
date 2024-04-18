@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,15 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <optional>
+
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/system/sys_info.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/key_value_store.h>
 #include <brillo/process/process.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
@@ -80,12 +82,12 @@ bool CheckForMockCrashReporterConsent() {
 
 }  // namespace
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 
 CrashListenerImpl::CrashListenerImpl(
     base::WeakPtr<vm_tools::cicerone::Service> service)
-    : service_(service), task_runner_(base::ThreadTaskRunnerHandle::Get()) {}
+    : service_(service),
+      task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {}
 
 grpc::Status CrashListenerImpl::CheckMetricsConsent(
     grpc::ServerContext* ctx,
@@ -131,7 +133,12 @@ grpc::Status CrashListenerImpl::SendCrashReport(grpc::ServerContext* ctx,
   read.reset();
 
   google::protobuf::io::FileOutputStream output(write.get());
-  if (!google::protobuf::TextFormat::Print(*crash_report, &output)) {
+
+  // Some VMs may not have the correct channel/milestone info populated
+  // correctly since it is not correct in the VM's /etc/lsb-release.
+  // Modify it here before it gets sent.
+  CrashReport modified_cr = ModifyCrashReport(crash_report);
+  if (!google::protobuf::TextFormat::Print(modified_cr, &output)) {
     return {grpc::INVALID_ARGUMENT, "Failed to print CrashReport protobuf"};
   }
   if (!output.Flush()) {
@@ -148,10 +155,35 @@ grpc::Status CrashListenerImpl::SendCrashReport(grpc::ServerContext* ctx,
     return {grpc::UNKNOWN, "Crash_reporter encountered an error"};
 }
 
-base::Optional<pid_t> CrashListenerImpl::GetPidFromPeerAddress(
+CrashReport CrashListenerImpl::ModifyCrashReport(
+    const CrashReport* crash_report) {
+  CrashReport modified_cr = *crash_report;
+  std::string channel = GetLsbReleaseValue("CHROMEOS_RELEASE_TRACK");
+  channel = channel.substr(0, channel.find("-"));
+  if (channel == "testimage") {
+    channel = "test";
+  }
+  (*modified_cr.mutable_metadata())["upload_var_channel"] = channel;
+  (*modified_cr.mutable_metadata())["upload_var_cros_milestone"] =
+      GetLsbReleaseValue("CHROMEOS_RELEASE_CHROME_MILESTONE");
+  (*modified_cr.mutable_metadata())["upload_var_lsb-release"] =
+      GetLsbReleaseValue("CHROMEOS_RELEASE_DESCRIPTION");
+  return modified_cr;
+}
+
+std::string CrashListenerImpl::GetLsbReleaseValue(std::string key) {
+  std::string output;
+  if (!base::SysInfo::GetLsbReleaseValue(key, &output)) {
+    LOG(ERROR) << "Failed to obtain lsb value for " << key;
+    output = "unknown";
+  }
+  return output;
+}
+
+std::optional<pid_t> CrashListenerImpl::GetPidFromPeerAddress(
     grpc::ServerContext* ctx) {
   VirtualMachine* vm = GetVirtualMachineForContext(ctx);
-  return vm ? base::Optional<pid_t>(vm->pid()) : base::nullopt;
+  return vm ? std::optional<pid_t>(vm->pid()) : std::nullopt;
 }
 
 VirtualMachine* CrashListenerImpl::GetVirtualMachineForContext(
@@ -203,8 +235,7 @@ grpc::Status CrashListenerImpl::SendFailureReport(
     EmptyMessage* response) {
   VirtualMachine* vm = GetVirtualMachineForContext(ctx);
   const std::string histogram =
-      vm && vm->GetType() ==
-                  VirtualMachine::VmType::ApplicationList_VmType_BOREALIS
+      vm && vm->GetType() == VirtualMachine::VmType::BOREALIS
           ? "Borealis.Stability"
           : "Crostini.Stability";
   const std::string service = failure_report->failed_process();
@@ -290,5 +321,4 @@ void CrashListenerImpl::GetVmStoppingOnDBusThread(const uint32_t cid,
   event->Signal();
 }
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone

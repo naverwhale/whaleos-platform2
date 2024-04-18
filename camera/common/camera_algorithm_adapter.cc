@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -12,8 +12,8 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/notreached.h>
 #include <mojo/core/embedder/embedder.h>
 #include <mojo/core/embedder/scoped_ipc_support.h>
@@ -58,15 +58,14 @@ CameraAlgorithmAdapter::~CameraAlgorithmAdapter() = default;
 
 void CameraAlgorithmAdapter::Run(std::string pipe_name,
                                  base::ScopedFD channel) {
-  VLOGF_ENTER();
   auto future = cros::Future<void>::Create(&relay_);
   ipc_lost_cb_ = cros::GetFutureCallback(future);
   ipc_thread_.StartWithOptions(
       base::Thread::Options(base::MessagePumpType::IO, 0));
   ipc_thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::Bind(&CameraAlgorithmAdapter::InitializeOnIpcThread,
-                 base::Unretained(this), pipe_name, base::Passed(&channel)));
+      base::BindOnce(&CameraAlgorithmAdapter::InitializeOnIpcThread,
+                     base::Unretained(this), pipe_name, std::move(channel)));
   future->Wait(-1);
   exit(EXIT_SUCCESS);
 }
@@ -84,7 +83,6 @@ void CameraAlgorithmAdapter::InitializeOnIpcThread(std::string pipe_name,
   mojo::PendingReceiver<mojom::CameraAlgorithmOps> pending_receiver(
       invitation.ExtractMessagePipe(pipe_name));
 
-  VLOGF_ENTER();
   const char* algo_lib_name = GetAlgorithmLibraryName(pipe_name);
   algo_dll_handle_ = dlopen(algo_lib_name, RTLD_NOW);
   if (!algo_dll_handle_) {
@@ -100,29 +98,31 @@ void CameraAlgorithmAdapter::InitializeOnIpcThread(std::string pipe_name,
     return;
   }
 
-  base::Closure ipc_lost_handler = base::Bind(
+  base::OnceClosure ipc_lost_handler = base::BindOnce(
       &CameraAlgorithmAdapter::DestroyOnIpcThread, base::Unretained(this));
   if (!algo_impl_->Bind(std::move(pending_receiver), cam_algo,
-                        ipc_thread_.task_runner(), ipc_lost_handler)) {
+                        ipc_thread_.task_runner(),
+                        std::move(ipc_lost_handler))) {
     LOGF(ERROR) << "Failed to bind algorithm implementation";
     DestroyOnIpcThread();
     return;
   }
   is_algo_impl_bound_ = true;
-  VLOGF_EXIT();
 }
 
 void CameraAlgorithmAdapter::DestroyOnIpcThread() {
   DCHECK(ipc_thread_.task_runner()->BelongsToCurrentThread());
-  VLOGF_ENTER();
-  if (is_algo_impl_bound_)
+
+  if (is_algo_impl_bound_) {
+    algo_impl_->Deinitialize();
     algo_impl_->Unbind();
+  }
+
   ipc_support_ = nullptr;
   if (algo_dll_handle_) {
     dlclose(algo_dll_handle_);
   }
-  ipc_lost_cb_.Run();
-  VLOGF_EXIT();
+  std::move(ipc_lost_cb_).Run();
 }
 
 }  // namespace cros

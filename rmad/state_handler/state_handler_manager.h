@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 
 #include <base/memory/scoped_refptr.h>
 
+#include "rmad/daemon/daemon_callback.h"
 #include "rmad/state_handler/base_state_handler.h"
 
 namespace rmad {
@@ -21,7 +22,7 @@ class StateHandlerManager {
   ~StateHandlerManager() = default;
 
   void RegisterStateHandler(scoped_refptr<BaseStateHandler> handler);
-  void RegisterStateHandlers();
+  void RegisterStateHandlers(scoped_refptr<DaemonCallback> daemon_callback);
 
   scoped_refptr<BaseStateHandler> GetStateHandler(
       RmadState::StateCase state) const;

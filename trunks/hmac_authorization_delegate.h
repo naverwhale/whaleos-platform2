@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,6 @@
 
 namespace trunks {
 
-const uint8_t kContinueSession = 1;
 const size_t kAesKeySize = 16;      // 128 bits is minimum AES key size.
 const size_t kHashDigestSize = 32;  // 256 bits is SHA256 digest size.
 

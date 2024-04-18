@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include <stdlib.h>
@@ -8,21 +8,17 @@
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 
-#include <algorithm>
+#include <utility>
 #include <vector>
 
 #include "shill/logging.h"
-#include "shill/net/io_handler_factory.h"
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 #include "shill/throttler.h"
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kTC;
-static std::string ObjectID(const Throttler* t) {
-  return "throttler";
-}
 }  // namespace Logging
 
 const char Throttler::kTCPath[] = "/sbin/tc";
@@ -59,13 +55,12 @@ Throttler::Throttler(EventDispatcher* dispatcher, Manager* manager)
       tc_stdin_(-1),
       tc_pid_(0),
       manager_(manager),
-      io_handler_factory_(IOHandlerFactory::GetInstance()),
       process_manager_(ProcessManager::GetInstance()) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
 }
 
 Throttler::~Throttler() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
 }
 
 void Throttler::ClearTCState() {
@@ -76,8 +71,7 @@ void Throttler::ClearTCState() {
   callback_.Reset();
 }
 
-bool Throttler::DisableThrottlingOnAllInterfaces(
-    const ResultCallback& callback) {
+bool Throttler::DisableThrottlingOnAllInterfaces(ResultCallback callback) {
   bool result = false;
 
   std::vector<std::string> interfaces = manager_->GetDeviceInterfaceNames();
@@ -92,12 +86,12 @@ bool Throttler::DisableThrottlingOnAllInterfaces(
   }
 
   if (commands.empty()) {
-    Done(callback, Error::kSuccess, "");
+    Done(std::move(callback), Error::kSuccess, "");
     ClearThrottleStatus();
     return true;
   }
 
-  callback_ = callback;
+  callback_ = std::move(callback);
   result = StartTCForCommands(commands);
   if (result) {
     ClearThrottleStatus();
@@ -105,28 +99,30 @@ bool Throttler::DisableThrottlingOnAllInterfaces(
   return result;
 }
 
-void Throttler::Done(const ResultCallback& callback,
+void Throttler::Done(ResultCallback callback,
                      Error::Type error_type,
                      const std::string& message) {
-  Error error;
-  Error::PopulateAndLog(FROM_HERE, &error, error_type, message);
+  Error error(error_type, message, FROM_HERE);
+  if (error_type != Error::kSuccess) {
+    error.Log();
+  }
   if (!callback.is_null()) {
-    callback.Run(error);
-    SLOG(this, 4) << "ran callback";
+    std::move(callback).Run(error);
+    SLOG(4) << "ran callback";
   } else {
-    SLOG(this, 4) << "null callback";
+    SLOG(4) << "null callback";
   }
   ClearTCState();
   return;
 }
 
-bool Throttler::ThrottleInterfaces(const ResultCallback& callback,
+bool Throttler::ThrottleInterfaces(ResultCallback callback,
                                    uint32_t upload_rate_kbits,
                                    uint32_t download_rate_kbits) {
   // At least one of upload/download should be throttled.
   // 0 value indicates no throttling.
   if ((upload_rate_kbits == 0) && (download_rate_kbits == 0)) {
-    Done(callback, Error::kInvalidArguments,
+    Done(std::move(callback), Error::kInvalidArguments,
          "One of download/upload rates should be set");
     return false;
   }
@@ -136,7 +132,7 @@ bool Throttler::ThrottleInterfaces(const ResultCallback& callback,
   std::string interface_name = GetNextInterface();
 
   if (interface_name.empty()) {
-    Done(callback, Error::kOperationFailed,
+    Done(std::move(callback), Error::kOperationFailed,
          "No interfaces available for throttling");
     return false;
   }
@@ -146,19 +142,20 @@ bool Throttler::ThrottleInterfaces(const ResultCallback& callback,
   desired_upload_rate_kbits_ = upload_rate_kbits;
   desired_download_rate_kbits_ = download_rate_kbits;
 
-  return Throttle(callback, interface_name, upload_rate_kbits,
+  return Throttle(std::move(callback), interface_name, upload_rate_kbits,
                   download_rate_kbits);
 }
 
-bool Throttler::Throttle(const ResultCallback& callback,
+bool Throttler::Throttle(ResultCallback callback,
                          const std::string& interface_name,
                          uint32_t upload_rate_kbits,
                          uint32_t download_rate_kbits) {
-  SLOG(this, 4) << __func__ << " : " << interface_name << "("
-                << upload_rate_kbits << ", " << download_rate_kbits << ")";
+  SLOG(4) << __func__ << " : " << interface_name << "(" << upload_rate_kbits
+          << ", " << download_rate_kbits << ")";
 
   if (tc_pid_ || !tc_commands_.empty() || !tc_current_interface_.empty()) {
-    Done(callback, Error::kWrongState, "Cannot run concurrent TC operations");
+    Done(std::move(callback), Error::kWrongState,
+         "Cannot run concurrent TC operations");
     return false;
   }
 
@@ -197,7 +194,7 @@ bool Throttler::Throttle(const ResultCallback& callback,
       commands.push_back(command);
     }
   }
-  callback_ = callback;
+  callback_ = std::move(callback);
   tc_current_interface_ = interface_name;
   return StartTCForCommands(commands);
 }
@@ -213,8 +210,7 @@ bool Throttler::ApplyThrottleToNewInterface(const std::string& interface_name) {
     return true;
   }
   // No operation currently in progress, start a new tc process
-  ResultCallback fake;
-  return Throttle(fake, interface_name, desired_upload_rate_kbits_,
+  return Throttle(base::DoNothing(), interface_name, desired_upload_rate_kbits_,
                   desired_download_rate_kbits_);
 }
 
@@ -232,8 +228,6 @@ bool Throttler::StartTCForCommands(const std::vector<std::string>& commands) {
   minijail_options.group = kTCGroup;
   minijail_options.capmask = CAP_TO_MASK(CAP_NET_ADMIN);
   minijail_options.inherit_supplementary_groups = false;
-  // TODO(crrev.com/c/3162356): Check if |close_nonstd_fds| can be set to true.
-  minijail_options.close_nonstd_fds = false;
 
   tc_commands_ = commands;
   // shill's stderr is wired to syslog, so nullptr for stderr
@@ -243,28 +237,33 @@ bool Throttler::StartTCForCommands(const std::vector<std::string>& commands) {
   };
   tc_pid_ = process_manager_->StartProcessInMinijailWithPipes(
       FROM_HERE, base::FilePath(kTCPath), args, {}, minijail_options,
-      base::Bind(&Throttler::OnProcessExited, weak_factory_.GetWeakPtr()),
+      base::BindOnce(&Throttler::OnProcessExited, weak_factory_.GetWeakPtr()),
       std_fds);
 
-  SLOG(this, 1) << "Spawned tc with pid: " << tc_pid_;
+  SLOG(1) << "Spawned tc with pid: " << tc_pid_;
 
   if (file_io_->SetFdNonBlocking(tc_stdin_)) {
-    Done(callback_, Error::kOperationFailed,
+    Done(std::move(callback_), Error::kOperationFailed,
          "Unable to set TC pipes to be non-blocking");
     return false;
   }
-  tc_stdin_handler_.reset(io_handler_factory_->CreateIOReadyHandler(
-      tc_stdin_, IOHandler::kModeOutput,
-      Bind(&Throttler::WriteTCCommands, weak_factory_.GetWeakPtr())));
+  tc_stdin_watcher_ = base::FileDescriptorWatcher::WatchWritable(
+      tc_stdin_,
+      base::BindRepeating(&Throttler::WriteTCCommands, base::Unretained(this)));
+  if (tc_stdin_watcher_ == nullptr) {
+    Done(std::move(callback_), Error::kOperationFailed,
+         "Failed to watch on TC stdin fd");
+    return false;
+  }
+
   return true;
 }
 
-void Throttler::WriteTCCommands(int fd) {
-  CHECK_EQ(fd, tc_stdin_);
+void Throttler::WriteTCCommands() {
   CHECK(tc_pid_);
 
   for (const auto& command : tc_commands_) {
-    SLOG(this, 2) << "Issuing tc command: " << command;
+    SLOG(2) << "Issuing tc command: " << command;
 
     ssize_t bytes_written =
         file_io_->Write(tc_stdin_, command.data(), command.size());
@@ -274,7 +273,7 @@ void Throttler::WriteTCCommands(int fd) {
     }
   }
 
-  tc_stdin_handler_.reset();
+  tc_stdin_watcher_.reset();
   file_io_->Close(tc_stdin_);
   tc_stdin_ = -1;
   return;
@@ -301,29 +300,26 @@ void Throttler::OnProcessExited(int exit_status) {
   // Should keep track of interface names if throttling, but not if disabling
   CHECK(!desired_throttling_enabled_ || !tc_current_interface_.empty());
 
-  Error::Type error_type =
-      (exit_status == EXIT_SUCCESS) ? Error::kSuccess : Error::kOperationFailed;
-
-  std::string message =
-      ((desired_throttling_enabled_) ? "throttling " : "disabling throttle ") +
-      ((exit_status == EXIT_SUCCESS)
-           ? std::string("succeeded")
-           : (std::string("failed: ") + base::NumberToString(exit_status)));
-
-  Error error;
-  Error::PopulateAndLog(FROM_HERE, &error, error_type, message);
+  if (exit_status != EXIT_SUCCESS) {
+    if (!desired_throttling_enabled_) {
+      LOG(WARNING) << "Attempted to disable throttling when no throttles "
+                   << "were applied";
+    } else {
+      LOG(ERROR) << "Throttler failed with status: " << exit_status;
+    }
+  }
 
   std::string next_interface = GetNextInterface();
 
   if (next_interface.empty()) {
-    Done(callback_, Error::kSuccess, "");
+    Done(std::move(callback_), Error::kSuccess, "");
   } else {
-    SLOG(this, 2) << "Done with " << tc_current_interface_ << " now calling "
-                  << next_interface;
+    SLOG(2) << "Done with " << tc_current_interface_ << " now calling "
+            << next_interface;
     tc_pid_ = 0;
     tc_commands_.clear();
     tc_current_interface_.clear();
-    Throttle(callback_, next_interface, desired_upload_rate_kbits_,
+    Throttle(std::move(callback_), next_interface, desired_upload_rate_kbits_,
              desired_download_rate_kbits_);
   }
 }

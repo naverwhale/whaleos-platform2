@@ -1,17 +1,17 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <absl/base/attributes.h>
 #include <gtest/gtest.h>
 
 #include "base/at_exit.h"
-#include "base/bind.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/system/sys_info.h"
 #include "base/task/single_thread_task_executor.h"
-#include "base/threading/thread_local.h"
 #include "base/time/time.h"
 #include "metrics/cumulative_metrics.h"
 
@@ -20,8 +20,6 @@ using chromeos_metrics::CumulativeMetrics;
 namespace chromeos_metrics {
 
 namespace {
-
-base::ThreadLocalPointer<base::RunLoop> tls_run_loop;
 
 constexpr char kMetricNameX[] = "x.pi";
 constexpr char kMetricNameY[] = "y.pi";
@@ -44,7 +42,8 @@ static void UpdateAccumulators(CumulativeMetrics* cm) {
   accumulator_update_total_count++;
 }
 
-static void ReportAccumulators(CumulativeMetrics* cm) {
+static void ReportAccumulators(const base::RepeatingClosure& quit_closure,
+                               CumulativeMetrics* cm) {
   // The first call is done at initialization, to possibly report metrics
   // accumulated in the previous cycle.  We ignore it because we want to
   // test through at least one cycle.
@@ -55,7 +54,7 @@ static void ReportAccumulators(CumulativeMetrics* cm) {
   }
   // Quit loop.
   if (accumulator_report_count == kTotalReportCount) {
-    tls_run_loop.Get()->Quit();
+    quit_closure.Run();
   }
   accumulator_update_partial_count = 0;
   accumulator_report_count += 1;
@@ -64,7 +63,6 @@ static void ReportAccumulators(CumulativeMetrics* cm) {
 TEST_F(CumulativeMetricsTest, TestLoop) {
   base::SingleThreadTaskExecutor task_executor_;
   base::RunLoop run_loop;
-  tls_run_loop.Set(&run_loop);
 
   base::ScopedTempDir temp_dir;
   ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
@@ -72,10 +70,10 @@ TEST_F(CumulativeMetricsTest, TestLoop) {
   ASSERT_TRUE(base::CreateDirectory(pi_path));
 
   std::vector<std::string> names = {kMetricNameX, kMetricNameY, kMetricNameZ};
-  CumulativeMetrics cm(pi_path, names, base::TimeDelta::FromMilliseconds(100),
-                       base::BindRepeating(&UpdateAccumulators),
-                       base::TimeDelta::FromMilliseconds(500),
-                       base::BindRepeating(&ReportAccumulators));
+  CumulativeMetrics cm(
+      pi_path, names, base::Milliseconds(100),
+      base::BindRepeating(&UpdateAccumulators), base::Milliseconds(500),
+      base::BindRepeating(&ReportAccumulators, run_loop.QuitClosure()));
 
   run_loop.Run();
 

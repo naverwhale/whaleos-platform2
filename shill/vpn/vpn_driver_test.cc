@@ -1,26 +1,26 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/vpn/vpn_driver.h"
 
+#include <iterator>
+#include <memory>
+#include <string>
 #include <vector>
 
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "shill/fake_store.h"
-#include "shill/mock_connection.h"
 #include "shill/mock_control.h"
-#include "shill/mock_device_info.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
-#include "shill/mock_service.h"
-#include "shill/property_store.h"
+#include "shill/store/fake_store.h"
+#include "shill/store/property_store.h"
 #include "shill/test_event_dispatcher.h"
+#include "shill/vpn/vpn_types.h"
 
 using testing::_;
 using testing::NiceMock;
@@ -31,17 +31,17 @@ namespace shill {
 
 namespace {
 
-const char kVPNHostProperty[] = "VPN.Host";
-const char kOTPProperty[] = "VPN.OTP";
-const char kPinProperty[] = "VPN.PIN";
-const char kPSKProperty[] = "VPN.PSK";
-const char kPasswordProperty[] = "VPN.Password";
-const char kPortProperty[] = "VPN.Port";
+constexpr char kVPNHostProperty[] = "VPN.Host";
+constexpr char kOTPProperty[] = "VPN.OTP";
+constexpr char kPinProperty[] = "VPN.PIN";
+constexpr char kPSKProperty[] = "VPN.PSK";
+constexpr char kPasswordProperty[] = "VPN.Password";
+constexpr char kPortProperty[] = "VPN.Port";
 
-const char kPin[] = "5555";
-const char kPassword[] = "random-password";
-const char kPort[] = "1234";
-const char kStorageID[] = "vpn_service_id";
+constexpr char kPin[] = "5555";
+constexpr char kPassword[] = "random-password";
+constexpr char kPort[] = "1234";
+constexpr char kStorageID[] = "vpn_service_id";
 
 }  // namespace
 
@@ -57,8 +57,14 @@ class VPNDriverUnderTest : public VPNDriver {
   MOCK_METHOD(base::TimeDelta, ConnectAsync, (EventHandler*), (override));
   MOCK_METHOD(void, Disconnect, (), (override));
   MOCK_METHOD(void, OnConnectTimeout, (), (override));
-  MOCK_METHOD(IPConfig::Properties, GetIPProperties, (), (const, override));
-  MOCK_METHOD(std::string, GetProviderType, (), (const, override));
+  MOCK_METHOD(std::unique_ptr<IPConfig::Properties>,
+              GetIPv4Properties,
+              (),
+              (const, override));
+  MOCK_METHOD(std::unique_ptr<IPConfig::Properties>,
+              GetIPv6Properties,
+              (),
+              (const, override));
 
  private:
   static const Property kProperties[];
@@ -78,14 +84,16 @@ const VPNDriverUnderTest::Property VPNDriverUnderTest::kProperties[] = {
 };
 
 VPNDriverUnderTest::VPNDriverUnderTest(Manager* manager)
-    : VPNDriver(manager, nullptr, kProperties, base::size(kProperties)) {}
+    : VPNDriver(manager,
+                nullptr,
+                VPNType::kIKEv2,
+                kProperties,
+                std::size(kProperties)) {}
 
 class VPNDriverTest : public Test {
  public:
   VPNDriverTest()
-      : manager_(&control_, &dispatcher_, &metrics_),
-        device_info_(&manager_),
-        driver_(&manager_) {}
+      : manager_(&control_, &dispatcher_, &metrics_), driver_(&manager_) {}
 
   ~VPNDriverTest() override = default;
 
@@ -115,7 +123,6 @@ class VPNDriverTest : public Test {
   EventDispatcherForTest dispatcher_;
   MockMetrics metrics_;
   MockManager manager_;
-  NiceMock<MockDeviceInfo> device_info_;
   VPNDriverUnderTest driver_;
 };
 
@@ -349,14 +356,15 @@ TEST_F(VPNDriverTest, InitPropertyStore) {
   {
     const std::string kValue = "some-value";
     Error error;
-    EXPECT_TRUE(store.SetStringProperty(kPinProperty, kValue, &error));
+    store.SetStringProperty(kPinProperty, kValue, &error);
+    EXPECT_TRUE(error.IsSuccess());
     EXPECT_EQ(kValue, GetArgs()->Get<std::string>(kPinProperty));
   }
   {
     const std::vector<std::string> kValue{"some-value"};
     Error error;
-    EXPECT_TRUE(
-        store.SetStringsProperty(kEapCaCertPemProperty, kValue, &error));
+    store.SetStringsProperty(kEapCaCertPemProperty, kValue, &error);
+    EXPECT_TRUE(error.IsSuccess());
     EXPECT_EQ(kValue, GetArgs()->Get<Strings>(kEapCaCertPemProperty));
   }
 }

@@ -1,10 +1,13 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <string>
+#include <utility>
 #include <vector>
 
+#include <base/test/task_environment.h>
+#include <base/test/test_future.h>
 #include <brillo/errors/error.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gmock/gmock.h>
@@ -15,16 +18,15 @@
 #include "diagnostics/cros_healthd/system/mock_context.h"
 
 namespace diagnostics {
+namespace {
 
-using ::chromeos::cros_healthd::mojom::ErrorType;
+namespace mojom = ::ash::cros_healthd::mojom;
 using ::testing::_;
+using ::testing::AnyNumber;
 using ::testing::DoAll;
-using ::testing::Invoke;
 using ::testing::Return;
 using ::testing::SetArgPointee;
 using ::testing::WithArg;
-
-namespace {
 
 const brillo::VariantDictionary kInactiveOutputDevice = {
     {cras::kNameProperty, std::string("Inactive output device")},
@@ -56,31 +58,65 @@ struct GetVolumeStateOutput {
   bool output_user_mute;
 };
 
-}  // namespace
-
 class AudioFetcherTest : public ::testing::Test {
  protected:
-  AudioFetcherTest() = default;
-
-  AudioFetcher* audio_fetcher() { return &audio_fetcher_; }
+  void SetUp() override {
+    // Set a default behavior for these methods. These may be overridden in
+    // tests.
+    ON_CALL(*mock_cras_proxy(), GetVolumeState(_, _, _, _, _, _))
+        .WillByDefault(Return(true));
+    EXPECT_CALL(*mock_cras_proxy(), GetVolumeState(_, _, _, _, _, _))
+        .Times(AnyNumber());
+    ON_CALL(*mock_cras_proxy(), GetNodeInfos(_, _, _))
+        .WillByDefault(Return(true));
+    EXPECT_CALL(*mock_cras_proxy(), GetNodeInfos(_, _, _)).Times(AnyNumber());
+  }
 
   org::chromium::cras::ControlProxyMock* mock_cras_proxy() {
     return mock_context_.mock_cras_proxy();
   }
 
-  std::vector<brillo::VariantDictionary> get_node_infos_output() {
-    return get_node_infos_output_;
+  void SetExpectedVolumeState(bool output_mute,
+                              bool input_mute,
+                              bool output_user_mute) {
+    EXPECT_CALL(*mock_cras_proxy(), GetVolumeState(_, _, _, _, _, _))
+        .WillOnce(DoAll(SetArgPointee<1>(output_mute),
+                        SetArgPointee<2>(input_mute),
+                        SetArgPointee<3>(output_user_mute), Return(true)));
   }
 
-  void append_node_infos_output(const brillo::VariantDictionary& data) {
-    get_node_infos_output_.push_back(data);
+  void SetExpectedNodeInfos(
+      const std::vector<brillo::VariantDictionary>& node_info) {
+    EXPECT_CALL(*mock_cras_proxy(), GetNodeInfos(_, _, _))
+        .WillOnce(DoAll(SetArgPointee<0>(node_info), Return(true)));
+  }
+
+  void SetExpectedVolumeStateError() {
+    EXPECT_CALL(*mock_cras_proxy(), GetVolumeState(_, _, _, _, _, _))
+        .WillOnce(DoAll(WithArg<4>([](brillo::ErrorPtr* error) {
+                          *error = brillo::Error::Create(FROM_HERE, "", "", "");
+                        }),
+                        Return(false)));
+  }
+
+  void SetExpectedNodeInfosError() {
+    EXPECT_CALL(*mock_cras_proxy(), GetNodeInfos(_, _, _))
+        .WillOnce(DoAll(WithArg<1>([](brillo::ErrorPtr* error) {
+                          *error = brillo::Error::Create(FROM_HERE, "", "", "");
+                        }),
+                        Return(false)));
+  }
+
+  mojom::AudioResultPtr FetchAudioInfoSync() {
+    base::test::TestFuture<mojom::AudioResultPtr> future;
+    FetchAudioInfo(&mock_context_, future.GetCallback());
+    return future.Take();
   }
 
  private:
+  base::test::TaskEnvironment task_environment_{
+      base::test::TaskEnvironment::ThreadingMode::MAIN_THREAD_ONLY};
   MockContext mock_context_;
-  AudioFetcher audio_fetcher_{&mock_context_};
-  std::vector<brillo::VariantDictionary> get_node_infos_output_{
-      kInactiveOutputDevice, kInactiveInputDevice};
 };
 
 class AudioFetcherGetVolumeStateTest
@@ -95,9 +131,9 @@ class AudioFetcherGetVolumeStateTest
 // This is a parameterized test, we test all possible combination of
 // GetVolumeState() output.
 TEST_P(AudioFetcherGetVolumeStateTest, FetchAudioInfo) {
-  // Add active input, output device to the mock output data
-  append_node_infos_output(kActiveOutputDevice);
-  append_node_infos_output(kActiveInputDevice);
+  const bool output_mute = params().output_mute;
+  const bool input_mute = params().input_mute;
+  const bool output_user_mute = params().output_user_mute;
   std::string output_device_name =
       brillo::GetVariantValueOrDefault<std::string>(kActiveOutputDevice,
                                                     cras::kNameProperty);
@@ -112,18 +148,10 @@ TEST_P(AudioFetcherGetVolumeStateTest, FetchAudioInfo) {
   uint32_t severe_underruns = brillo::GetVariantValueOrDefault<uint32_t>(
       kActiveOutputDevice, cras::kNumberOfSevereUnderrunsProperty);
 
-  const bool output_mute = params().output_mute;
-  const bool input_mute = params().input_mute;
-  const bool output_user_mute = params().output_user_mute;
+  SetExpectedVolumeState(output_mute, input_mute, output_user_mute);
+  SetExpectedNodeInfos({kActiveOutputDevice, kActiveInputDevice});
 
-  EXPECT_CALL(*mock_cras_proxy(), GetVolumeState(_, _, _, _, _, _))
-      .WillOnce(DoAll(SetArgPointee<1>(output_mute),
-                      SetArgPointee<2>(input_mute),
-                      SetArgPointee<3>(output_user_mute), Return(true)));
-  EXPECT_CALL(*mock_cras_proxy(), GetNodeInfos(_, _, _))
-      .WillOnce(DoAll(SetArgPointee<0>(get_node_infos_output()), Return(true)));
-
-  auto audio_result = audio_fetcher()->FetchAudioInfo();
+  auto audio_result = FetchAudioInfoSync();
   ASSERT_TRUE(audio_result->is_audio_info());
 
   const auto& audio = audio_result->get_audio_info();
@@ -151,12 +179,7 @@ INSTANTIATE_TEST_SUITE_P(
 
 // Test no active output device.
 TEST_F(AudioFetcherTest, FetchAudioInfoWithoutActiveOutputDevice) {
-  EXPECT_CALL(*mock_cras_proxy(), GetVolumeState(_, _, _, _, _, _))
-      .WillOnce(DoAll(Return(true)));
-  EXPECT_CALL(*mock_cras_proxy(), GetNodeInfos(_, _, _))
-      .WillOnce(DoAll(SetArgPointee<0>(get_node_infos_output()), Return(true)));
-
-  auto audio_result = audio_fetcher()->FetchAudioInfo();
+  auto audio_result = FetchAudioInfoSync();
   ASSERT_TRUE(audio_result->is_audio_info());
 
   const auto& audio = audio_result->get_audio_info();
@@ -165,30 +188,23 @@ TEST_F(AudioFetcherTest, FetchAudioInfoWithoutActiveOutputDevice) {
 
 // Test that when GetVolumeState fails.
 TEST_F(AudioFetcherTest, FetchAudioInfoGetVolumeStateFail) {
-  EXPECT_CALL(*mock_cras_proxy(), GetVolumeState(_, _, _, _, _, _))
-      .WillOnce(DoAll(WithArg<4>(Invoke([](brillo::ErrorPtr* error) {
-                        *error = brillo::Error::Create(FROM_HERE, "", "", "");
-                      })),
-                      Return(false)));
+  SetExpectedVolumeStateError();
 
-  auto audio_result = audio_fetcher()->FetchAudioInfo();
+  auto audio_result = FetchAudioInfoSync();
   ASSERT_TRUE(audio_result->is_error());
-  EXPECT_EQ(audio_result->get_error()->type, ErrorType::kSystemUtilityError);
+  EXPECT_EQ(audio_result->get_error()->type,
+            mojom::ErrorType::kSystemUtilityError);
 }
 
 // Test that when GetNodeInfos fails.
 TEST_F(AudioFetcherTest, FetchAudioInfoGetNodeInfosFail) {
-  EXPECT_CALL(*mock_cras_proxy(), GetVolumeState(_, _, _, _, _, _))
-      .WillOnce(DoAll(Return(true)));
-  EXPECT_CALL(*mock_cras_proxy(), GetNodeInfos(_, _, _))
-      .WillOnce(DoAll(WithArg<1>(Invoke([](brillo::ErrorPtr* error) {
-                        *error = brillo::Error::Create(FROM_HERE, "", "", "");
-                      })),
-                      Return(false)));
+  SetExpectedNodeInfosError();
 
-  auto audio_result = audio_fetcher()->FetchAudioInfo();
+  auto audio_result = FetchAudioInfoSync();
   ASSERT_TRUE(audio_result->is_error());
-  EXPECT_EQ(audio_result->get_error()->type, ErrorType::kSystemUtilityError);
+  EXPECT_EQ(audio_result->get_error()->type,
+            mojom::ErrorType::kSystemUtilityError);
 }
 
+}  // namespace
 }  // namespace diagnostics

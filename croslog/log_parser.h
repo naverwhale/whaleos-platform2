@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,12 @@
 
 #include "croslog/log_entry.h"
 
+#include <optional>
 #include <string>
-
-#include "base/optional.h"
 
 namespace croslog {
 
-using MaybeLogEntry = base::Optional<LogEntry>;
+using MaybeLogEntry = std::optional<LogEntry>;
 
 class LogParser {
  public:

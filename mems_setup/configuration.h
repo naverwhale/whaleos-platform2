@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,12 @@
 #define MEMS_SETUP_CONFIGURATION_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/values.h>
 
 #include <libmems/iio_device.h>
 #include "mems_setup/delegate.h"
@@ -20,8 +21,6 @@ namespace mems_setup {
 
 class Configuration {
  public:
-  static const char* GetGroupNameForSysfs();
-
   Configuration(libmems::IioContext* context,
                 libmems::IioDevice* sensor,
                 Delegate* delegate);
@@ -30,12 +29,24 @@ class Configuration {
 
   bool Configure();
 
+  const char* GetGroupNameForSysfs();
+
  private:
   bool ConfigureOnKind();
 
   bool ConfigGyro();
   bool ConfigAccelerometer();
   bool ConfigIlluminance();
+  bool ConfigProximity();
+
+  bool IsIioActivitySensor(const std::string& sys_path);
+
+  bool GetDevlinks(const std::string& syspath, std::vector<std::string>* out);
+
+  bool SetIioRisingFallingValue(const base::Value::Dict& config_dict,
+                                const std::string& config_postfix,
+                                const std::string& path_prefix,
+                                const std::string& postfix);
 
   bool CopyImuCalibationFromVpd(int max_value);
   bool CopyImuCalibationFromVpd(int max_value, const std::string& location);
@@ -61,7 +72,7 @@ class Configuration {
   libmems::IioDevice* sensor_;    // non-owned
   libmems::IioContext* context_;  // non-owned
 
-  base::Optional<gid_t> iioservice_gid_ = base::nullopt;
+  std::optional<gid_t> iioservice_gid_ = std::nullopt;
 };
 
 }  // namespace mems_setup

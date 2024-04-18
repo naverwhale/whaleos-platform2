@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,25 +9,27 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <iterator>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/command_line.h>
 #include <base/files/file.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
+#include <base/hash/md5.h>
 #include <base/json/json_reader.h>
 #include <base/logging.h>
-#include <base/macros.h>
-#include <base/stl_util.h>
 #include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
@@ -40,6 +42,7 @@
 #include <brillo/key_value_store.h>
 #include <brillo/mime_utils.h>
 #include <brillo/process/process.h>
+#include <brillo/syslog_logging.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -53,11 +56,18 @@
 #include "crash-reporter/util.h"
 
 using ::testing::_;
+using ::testing::AllOf;
+using ::testing::ContainsRegex;
 using ::testing::DoAll;
+using ::testing::Eq;
 using ::testing::ExitedWithCode;
+using ::testing::Ge;
 using ::testing::HasSubstr;
 using ::testing::Invoke;
 using ::testing::IsEmpty;
+using ::testing::Le;
+using ::testing::Ne;
+using ::testing::Pointee;
 using ::testing::Return;
 using ::testing::UnorderedElementsAre;
 
@@ -67,6 +77,8 @@ using test_util::kFakeClientId;
 
 namespace util {
 namespace {
+
+constexpr char kChromeCrashLog[] = "/var/log/chrome/Crash Reports/uploads.log";
 
 // Enum types for setting the runtime conditions.
 enum BuildType { kOfficialBuild, kUnofficialBuild };
@@ -108,22 +120,12 @@ void MockMethodHandler(bool success,
 
 // Replaces Sender's functionality with a predefined behavior.
 class MockSender : public util::Sender {
- private:
-  bool success_;
-  std::string response_;
-
- protected:
-  std::shared_ptr<brillo::http::Transport> GetTransport() override {
-    std::shared_ptr<brillo::http::fake::Transport> fake_transport =
-        std::make_shared<brillo::http::fake::Transport>();
-    fake_transport->AddHandler(
-        kReportUploadProdUrl, brillo::http::request_type::kPost,
-        base::BindRepeating(MockMethodHandler, success_, response_));
-
-    return fake_transport;
-  }
-
  public:
+  MOCK_METHOD(std::shared_ptr<brillo::http::Transport>,
+              GetTransport,
+              (),
+              (override));
+
   MockSender(bool is_success,
              std::string response_text,
              std::unique_ptr<MetricsLibraryMock> metrics_lib,
@@ -131,7 +133,22 @@ class MockSender : public util::Sender {
              const Sender::Options& options)
       : Sender(std::move(metrics_lib), std::move(clock), options),
         success_(is_success),
-        response_(std::move(response_text)) {}
+        response_(std::move(response_text)) {
+    ON_CALL(*this, GetTransport)
+        .WillByDefault([this]() -> std::shared_ptr<brillo::http::Transport> {
+          std::shared_ptr<brillo::http::fake::Transport> fake_transport =
+              std::make_shared<brillo::http::fake::Transport>();
+          fake_transport->AddHandler(
+              kReportUploadProdUrl, brillo::http::request_type::kPost,
+              base::BindRepeating(MockMethodHandler, success_, response_));
+
+          return fake_transport;
+        });
+  }
+
+ private:
+  bool success_;
+  std::string response_;
 };
 
 // Parses the Chrome uploads.log file from Sender to a vector of items per line.
@@ -142,9 +159,9 @@ class MockSender : public util::Sender {
 //
 // => [{"field1":"foo1","field2":"foo2"}, {"field1":"bar1","field2":"bar2"}]
 //
-std::vector<base::Optional<base::Value>> ParseChromeUploadsLog(
+std::vector<std::optional<base::Value>> ParseChromeUploadsLog(
     const std::string& contents) {
-  std::vector<base::Optional<base::Value>> rows;
+  std::vector<std::optional<base::Value>> rows;
 
   std::vector<std::string> lines = base::SplitString(
       contents, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
@@ -231,8 +248,8 @@ class CrashSenderUtilTest : public testing::Test {
 
     // Creates the directory where crashes will be stored, normally done by
     // Chrome
-    ASSERT_TRUE(
-        base::CreateDirectory(paths::Get(paths::kChromeCrashLog).DirName()));
+    ASSERT_TRUE(base::CreateDirectory(
+        paths::Get(paths::ChromeCrashLog::Get()).DirName()));
 
     // We need to properly init the CommandLine object for the command line
     // parsing tests.
@@ -300,7 +317,7 @@ class CrashSenderUtilTest : public testing::Test {
 
     // Wait for the file to actually be locked. Don't wait forever in case the
     // subprocess fails in some way.
-    base::Time stop_time = base::Time::Now() + base::TimeDelta::FromMinutes(1);
+    base::Time stop_time = base::Time::Now() + base::Minutes(1);
     bool success = false;
     base::Time wait_start_time = base::Time::Now();
     LOG(INFO) << "Took " << wait_start_time - start_time
@@ -322,7 +339,7 @@ class CrashSenderUtilTest : public testing::Test {
       }
 
       if (!success) {
-        base::PlatformThread::Sleep(base::TimeDelta::FromSeconds(5));
+        base::PlatformThread::Sleep(base::Seconds(5));
       }
     }
     LOG(INFO) << "Took " << base::Time::Now() - wait_start_time
@@ -349,7 +366,7 @@ class CrashSenderUtilTest : public testing::Test {
   // Creates test crash files in |crash_directory|. Returns true on success.
   bool CreateTestCrashFiles(const base::FilePath& crash_directory) {
     const base::Time now = test_util::GetDefaultTime();
-    const base::TimeDelta hour = base::TimeDelta::FromHours(1);
+    const base::TimeDelta hour = base::Hours(1);
 
     // Choose timestamps so that the return value of GetMetaFiles() is sorted
     // per timestamps correctly.
@@ -405,6 +422,14 @@ class CrashSenderUtilTest : public testing::Test {
                     devcore_meta_time))
       return false;
     if (!CreateFile(devcore_devcore_, "", now))
+      return false;
+
+    // These should be kept, since the payload is a known kind and exists.
+    txt_meta_ = crash_directory.Append("txt.meta");
+    txt_txt_ = crash_directory.Append("txt.txt");
+    if (!CreateFile(txt_meta_, "payload=txt.txt\ndone=1\n", now))
+      return false;
+    if (!CreateFile(txt_txt_, "", now))
       return false;
 
     // This should be ignored, since the metadata is corrupted but the file is
@@ -479,12 +504,12 @@ class CrashSenderUtilTest : public testing::Test {
     // This should be removed since the OS timestamp is old.
     old_os_meta_ = crash_directory.Append("old_os.meta");
     if (!CreateFile(old_os_meta_,
-                    base::StringPrintf("payload=good.log\n"
-                                       "os_millis=%" PRId64 "\n"
-                                       "done=1\n",
-                                       ((now - base::Time::UnixEpoch()) -
-                                        base::TimeDelta::FromDays(200))
-                                           .InMilliseconds()),
+                    base::StringPrintf(
+                        "payload=good.log\n"
+                        "os_millis=%" PRId64 "\n"
+                        "done=1\n",
+                        ((now - base::Time::UnixEpoch()) - base::Days(200))
+                            .InMilliseconds()),
                     now)) {
       return false;
     }
@@ -493,16 +518,15 @@ class CrashSenderUtilTest : public testing::Test {
     // new.
     old_os_new_lacros_meta_ = crash_directory.Append("old_os_new_lacros.meta");
     if (!CreateFile(old_os_new_lacros_meta_,
-                    base::StringPrintf("payload=good.log\n"
-                                       "os_millis=%" PRId64 "\n"
-                                       "build_time_millis=%" PRId64 "\n"
-                                       "done=1\n",
-                                       ((now - base::Time::UnixEpoch()) -
-                                        base::TimeDelta::FromDays(200))
-                                           .InMilliseconds(),
-                                       ((now - base::Time::UnixEpoch()) -
-                                        base::TimeDelta::FromDays(20))
-                                           .InMilliseconds()),
+                    base::StringPrintf(
+                        "payload=good.log\n"
+                        "os_millis=%" PRId64 "\n"
+                        "upload_var_build_time_millis=%" PRId64 "\n"
+                        "done=1\n",
+                        ((now - base::Time::UnixEpoch()) - base::Days(200))
+                            .InMilliseconds(),
+                        ((now - base::Time::UnixEpoch()) - base::Days(20))
+                            .InMilliseconds()),
                     now)) {
       return false;
     }
@@ -510,16 +534,15 @@ class CrashSenderUtilTest : public testing::Test {
     // This should not be removed since the OS timestamp and lacros are old.
     old_os_old_lacros_meta_ = crash_directory.Append("old_os_old_lacros.meta");
     if (!CreateFile(old_os_old_lacros_meta_,
-                    base::StringPrintf("payload=good.log\n"
-                                       "os_millis=%" PRId64 "\n"
-                                       "build_time_millis=%" PRId64 "\n"
-                                       "done=1\n",
-                                       ((now - base::Time::UnixEpoch()) -
-                                        base::TimeDelta::FromDays(200))
-                                           .InMilliseconds(),
-                                       ((now - base::Time::UnixEpoch()) -
-                                        base::TimeDelta::FromDays(200))
-                                           .InMilliseconds()),
+                    base::StringPrintf(
+                        "payload=good.log\n"
+                        "os_millis=%" PRId64 "\n"
+                        "upload_var_build_time_millis=%" PRId64 "\n"
+                        "done=1\n",
+                        ((now - base::Time::UnixEpoch()) - base::Days(200))
+                            .InMilliseconds(),
+                        ((now - base::Time::UnixEpoch()) - base::Days(200))
+                            .InMilliseconds()),
                     now)) {
       return false;
     }
@@ -529,6 +552,12 @@ class CrashSenderUtilTest : public testing::Test {
     if (!CreateFile(large_meta_, std::string(1024 * 1024 + 1, 'x'), now)) {
       return false;
     }
+
+    loop_meta_ = crash_directory.Append("loop.meta");
+    if (!CreateFile(
+            loop_meta_,
+            "payload=good.log\nupload_var_crash_loop_mode=true\ndone=1\n", now))
+      return false;
 
     return true;
   }
@@ -577,6 +606,8 @@ class CrashSenderUtilTest : public testing::Test {
   base::FilePath root_payload_meta_;
   base::FilePath devcore_meta_;
   base::FilePath devcore_devcore_;
+  base::FilePath txt_meta_;
+  base::FilePath txt_txt_;
   base::FilePath empty_meta_;
   base::FilePath new_corrupted_meta_;
   base::FilePath old_corrupted_meta_;
@@ -592,173 +623,325 @@ class CrashSenderUtilTest : public testing::Test {
   base::FilePath old_os_new_lacros_meta_;
   base::FilePath old_os_old_lacros_meta_;
   base::FilePath large_meta_;
+  base::FilePath loop_meta_;
+};
+
+// Upon destruction, resets crash log path, log prefix and flags changed by the
+// dry run mode during command line parsing.
+class ScopedDryRunSettingsResetter {
+ public:
+  ScopedDryRunSettingsResetter() = default;
+  ScopedDryRunSettingsResetter(const ScopedDryRunSettingsResetter&) = delete;
+  ScopedDryRunSettingsResetter& operator=(const ScopedDryRunSettingsResetter&) =
+      delete;
+  ~ScopedDryRunSettingsResetter() {
+    logging::SetLogPrefix(nullptr);
+    brillo::SetLogFlags(brillo::GetLogFlags() & ~brillo::kLogHeader);
+    paths::ChromeCrashLog::SetDryRun(false);
+  }
 };
 
 base::FilePath* CrashSenderUtilTest::build_directory_ = nullptr;
 using CrashSenderUtilDeathTest = CrashSenderUtilTest;
 
+// Death tests that require parametrizing dry run mode.
+class CrashSenderUtilDryRunParamDeathTest
+    : public CrashSenderUtilDeathTest,
+      public ::testing::WithParamInterface<bool> {
+ protected:
+  void SetUp() override {
+    dry_run_ = GetParam();
+    CrashSenderUtilDeathTest::SetUp();
+  }
+  bool dry_run_;
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    CrashSenderUtilDryRunParamDeathInstantiation,
+    CrashSenderUtilDryRunParamDeathTest,
+    ::testing::Bool(),
+    [](const ::testing::TestParamInfo<
+        CrashSenderUtilDryRunParamDeathTest::ParamType>& info) {
+      std::ostringstream name;
+      name << "dry_run_" << info.param;
+      return name.str();
+    });
+
 }  // namespace
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_NoFlags) {
   const char* argv[] = {"crash_sender"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
+  ParseCommandLine(std::size(argv), argv, &flags);
   EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
   EXPECT_TRUE(flags.crash_directory.empty());
   EXPECT_FALSE(flags.ignore_rate_limits);
   EXPECT_FALSE(flags.ignore_hold_off_time);
   EXPECT_FALSE(flags.allow_dev_sending);
   EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_FALSE(flags.upload_old_reports);
+  EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
 }
 
 TEST_F(CrashSenderUtilDeathTest, ParseCommandLine_InvalidMaxSpreadTime) {
   const char* argv[] = {"crash_sender", "--max_spread_time=-1"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  EXPECT_DEATH(ParseCommandLine(base::size(argv), argv, &flags),
+  EXPECT_DEATH(ParseCommandLine(std::size(argv), argv, &flags),
                "Invalid value for max spread time: -1");
 }
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_ValidMaxSpreadTime) {
   const char* argv[] = {"crash_sender", "--max_spread_time=0"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
-  EXPECT_EQ(base::TimeDelta::FromSeconds(0), flags.max_spread_time);
+  ParseCommandLine(std::size(argv), argv, &flags);
+  EXPECT_EQ(base::Seconds(0), flags.max_spread_time);
   EXPECT_TRUE(flags.crash_directory.empty());
   EXPECT_FALSE(flags.ignore_rate_limits);
   EXPECT_FALSE(flags.ignore_hold_off_time);
   EXPECT_FALSE(flags.allow_dev_sending);
   EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_FALSE(flags.upload_old_reports);
   EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
 }
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_IgnoreRateLimits) {
   const char* argv[] = {"crash_sender", "--ignore_rate_limits"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
+  ParseCommandLine(std::size(argv), argv, &flags);
   EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
   EXPECT_TRUE(flags.crash_directory.empty());
   EXPECT_TRUE(flags.ignore_rate_limits);
   EXPECT_FALSE(flags.ignore_hold_off_time);
   EXPECT_FALSE(flags.allow_dev_sending);
   EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_FALSE(flags.upload_old_reports);
   EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
 }
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_IgnoreHoldOffTime) {
   const char* argv[] = {"crash_sender", "--ignore_hold_off_time"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
+  ParseCommandLine(std::size(argv), argv, &flags);
   EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
   EXPECT_TRUE(flags.crash_directory.empty());
   EXPECT_FALSE(flags.ignore_rate_limits);
   EXPECT_TRUE(flags.ignore_hold_off_time);
   EXPECT_FALSE(flags.allow_dev_sending);
   EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_FALSE(flags.upload_old_reports);
   EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
 }
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_CrashDirectory) {
   const char* argv[] = {"crash_sender", "--crash_directory=/tmp"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
+  ParseCommandLine(std::size(argv), argv, &flags);
   EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
   EXPECT_EQ(flags.crash_directory, "/tmp");
   EXPECT_FALSE(flags.ignore_rate_limits);
   EXPECT_FALSE(flags.ignore_hold_off_time);
   EXPECT_FALSE(flags.allow_dev_sending);
   EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_FALSE(flags.upload_old_reports);
   EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
 }
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_Dev) {
   const char* argv[] = {"crash_sender", "--dev"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
+  ParseCommandLine(std::size(argv), argv, &flags);
   EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
   EXPECT_TRUE(flags.crash_directory.empty());
   EXPECT_FALSE(flags.ignore_rate_limits);
   EXPECT_FALSE(flags.ignore_hold_off_time);
   EXPECT_TRUE(flags.allow_dev_sending);
   EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_FALSE(flags.upload_old_reports);
   EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
 }
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_IgnorePauseFile) {
   const char* argv[] = {"crash_sender", "--ignore_pause_file"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
+  ParseCommandLine(std::size(argv), argv, &flags);
   EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
   EXPECT_TRUE(flags.crash_directory.empty());
   EXPECT_FALSE(flags.ignore_rate_limits);
   EXPECT_FALSE(flags.ignore_hold_off_time);
   EXPECT_FALSE(flags.allow_dev_sending);
   EXPECT_TRUE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_FALSE(flags.upload_old_reports);
   EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
 }
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_UploadOldReports) {
   const char* argv[] = {"crash_sender", "--upload_old_reports"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
+  ParseCommandLine(std::size(argv), argv, &flags);
   EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
   EXPECT_TRUE(flags.crash_directory.empty());
   EXPECT_FALSE(flags.ignore_rate_limits);
   EXPECT_FALSE(flags.ignore_hold_off_time);
   EXPECT_FALSE(flags.allow_dev_sending);
   EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_TRUE(flags.upload_old_reports);
   EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
 }
 
 TEST_F(CrashSenderUtilTest, ParseCommandLine_ForceUploadOnTestImages) {
   const char* argv[] = {"crash_sender", "--force_upload_on_test_images"};
-  base::CommandLine command_line(base::size(argv), argv);
+  base::CommandLine command_line(std::size(argv), argv);
   brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
       &command_line);
   CommandLineFlags flags;
-  ParseCommandLine(base::size(argv), argv, &flags);
+  ParseCommandLine(std::size(argv), argv, &flags);
   EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
   EXPECT_TRUE(flags.crash_directory.empty());
   EXPECT_FALSE(flags.ignore_rate_limits);
   EXPECT_FALSE(flags.ignore_hold_off_time);
   EXPECT_FALSE(flags.allow_dev_sending);
   EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
   EXPECT_FALSE(flags.upload_old_reports);
   EXPECT_TRUE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
+}
+
+TEST_F(CrashSenderUtilDeathTest,
+       ParseCommandLine_ConsentAlreadyCheckedWithEmptyDir) {
+  const char* argv[] = {"crash_sender",
+                        "--consent_already_checked_by_crash_reporter"};
+  base::CommandLine command_line(std::size(argv), argv);
+  brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
+      &command_line);
+  CommandLineFlags flags;
+  EXPECT_DEATH(ParseCommandLine(std::size(argv), argv, &flags),
+               "Skipping the consent check is only valid via debugd");
+}
+
+TEST_F(CrashSenderUtilTest, ParseCommandLine_ConsentAlreadyCheckedWithDir) {
+  const char* argv[] = {"crash_sender",
+                        "--consent_already_checked_by_crash_reporter",
+                        "--crash_directory=/tmp"};
+  base::CommandLine command_line(std::size(argv), argv);
+  brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
+      &command_line);
+  CommandLineFlags flags;
+  ParseCommandLine(std::size(argv), argv, &flags);
+  EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
+  EXPECT_EQ(flags.crash_directory, "/tmp");
+  EXPECT_FALSE(flags.ignore_rate_limits);
+  EXPECT_FALSE(flags.ignore_hold_off_time);
+  EXPECT_FALSE(flags.allow_dev_sending);
+  EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
+  EXPECT_FALSE(flags.upload_old_reports);
+  EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_TRUE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_FALSE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), kChromeCrashLog);
+}
+
+TEST_F(CrashSenderUtilTest, ParseCommandLine_DryRun) {
+  static constexpr char kLogMessage[] = "Some sensible message";
+  const char* argv[] = {"crash_sender", "--dry_run"};
+  // Use ScopedLogSettingsResetter here so that dry run-specific settings can be
+  // restored even if the test exits for other reasons.
+  ScopedDryRunSettingsResetter scoped_log_settings_resetter;
+  base::CommandLine command_line(std::size(argv), argv);
+  brillo::FlagHelper::GetInstance()->set_command_line_for_testing(
+      &command_line);
+  CommandLineFlags flags;
+  ParseCommandLine(std::size(argv), argv, &flags);
+  brillo::ClearLog();
+  LOG(ERROR) << kLogMessage;
+  EXPECT_THAT(brillo::GetLog(),
+              ContainsRegex(base::StrCat({"dryrun:.*", kLogMessage})));
+  EXPECT_EQ(flags.max_spread_time.InSeconds(), kMaxSpreadTimeInSeconds);
+  EXPECT_TRUE(flags.crash_directory.empty());
+  EXPECT_FALSE(flags.ignore_rate_limits);
+  EXPECT_FALSE(flags.ignore_hold_off_time);
+  EXPECT_FALSE(flags.allow_dev_sending);
+  EXPECT_FALSE(flags.ignore_pause_file);
+  EXPECT_FALSE(flags.test_mode);
+  EXPECT_FALSE(flags.upload_old_reports);
+  EXPECT_FALSE(flags.force_upload_on_test_images);
+  EXPECT_FALSE(flags.consent_already_checked_by_crash_reporter);
+  EXPECT_TRUE(flags.dry_run);
+  // Test here because the setting of ChromeCrashLog is done during CLI
+  // parsing.
+  EXPECT_STREQ(paths::ChromeCrashLog::Get(), "/dev/full");
 }
 
 TEST_F(CrashSenderUtilTest, DoesPauseFileExist) {
@@ -817,25 +1000,20 @@ TEST_F(CrashSenderUtilTest, RemoveOrphanedCrashFiles) {
   // old1_log is old but comes with the meta file thus should not be removed.
   ASSERT_TRUE(test_util::CreateFile(old1_log, ""));
   ASSERT_TRUE(test_util::CreateFile(old1_meta, ""));
-  ASSERT_TRUE(test_util::TouchFileHelper(old1_log,
-                                         now - base::TimeDelta::FromHours(24)));
-  ASSERT_TRUE(test_util::TouchFileHelper(old1_meta,
-                                         now - base::TimeDelta::FromHours(24)));
+  ASSERT_TRUE(test_util::TouchFileHelper(old1_log, now - base::Hours(24)));
+  ASSERT_TRUE(test_util::TouchFileHelper(old1_meta, now - base::Hours(24)));
 
   // old2_log is old without the meta file thus should be removed.
   ASSERT_TRUE(test_util::CreateFile(old2_log, ""));
-  ASSERT_TRUE(test_util::TouchFileHelper(old2_log,
-                                         now - base::TimeDelta::FromHours(24)));
+  ASSERT_TRUE(test_util::TouchFileHelper(old2_log, now - base::Hours(24)));
 
   // old3_log is very old without the meta file thus should be removed.
   ASSERT_TRUE(test_util::CreateFile(old3_log, ""));
-  ASSERT_TRUE(test_util::TouchFileHelper(old3_log,
-                                         now - base::TimeDelta::FromDays(365)));
+  ASSERT_TRUE(test_util::TouchFileHelper(old3_log, now - base::Days(365)));
 
   // old4_log is misnamed, but should be removed since it's old.
   ASSERT_TRUE(test_util::CreateFile(old4_log, ""));
-  ASSERT_TRUE(test_util::TouchFileHelper(old4_log,
-                                         now - base::TimeDelta::FromHours(24)));
+  ASSERT_TRUE(test_util::TouchFileHelper(old4_log, now - base::Hours(24)));
 
   RemoveOrphanedCrashFiles(crash_directory);
 
@@ -1003,6 +1181,9 @@ TEST_F(CrashSenderUtilTest, ChooseAction) {
   EXPECT_EQ(Sender::kSend,
             sender.ChooseAction(old_os_new_lacros_meta_, &reason, &info));
 
+  // Txt files should be sent if metrics enabled and we're using user consent.
+  EXPECT_EQ(Sender::kSend, sender.ChooseAction(txt_meta_, &reason, &info));
+
   EXPECT_CALL(
       *raw_metrics_lib,
       SendEnumToUMA("Platform.CrOS.CrashSenderRemoveReason",
@@ -1038,6 +1219,39 @@ TEST_F(CrashSenderUtilTest, ChooseAction) {
   EXPECT_THAT(reason, HasSubstr("Not an official OS version"));
   EXPECT_FALSE(base::PathExists(good_meta_.ReplaceExtension(".processing")));
 
+
+  // Valid crash files should be kept in the guest mode.
+  ASSERT_TRUE(SetConditions(kOfficialBuild, kGuestMode, kMetricsDisabled,
+                            raw_metrics_lib));
+  EXPECT_EQ(Sender::kIgnore, sender.ChooseAction(good_meta_, &reason, &info));
+
+  // Valid crash files in the system directory should be ignored if metrics are
+  // disabled.
+  ASSERT_TRUE(SetConditions(kOfficialBuild, kSignInMode, kMetricsDisabled,
+                            raw_metrics_lib));
+  EXPECT_EQ(Sender::kIgnore, sender.ChooseAction(good_meta_, &reason, &info));
+  EXPECT_THAT(reason, HasSubstr("delayed for system dir"));
+
+  // Valid crash files in the system directory should be sent if metrics are
+  // enabled and we're using per-user consent.
+  ASSERT_TRUE(SetConditions(kOfficialBuild, kSignInMode, kMetricsEnabled,
+                            raw_metrics_lib));
+  EXPECT_EQ(Sender::kSend, sender.ChooseAction(good_meta_, &reason, &info));
+}
+
+TEST_F(CrashSenderUtilTest, ChooseAction_UserDir) {
+  const base::FilePath crash_directory =
+      paths::Get(paths::kCryptohomeCrashDirectory).Append("fakehash");
+  ASSERT_TRUE(CreateDirectory(crash_directory));
+  ASSERT_TRUE(CreateTestCrashFiles(crash_directory));
+  MetricsLibraryMock* raw_metrics_lib = metrics_lib_.get();
+
+  Sender::Options options;
+  Sender sender(std::move(metrics_lib_),
+                std::make_unique<test_util::AdvancingClock>(), options);
+
+  std::string reason;
+  CrashInfo info;
   ASSERT_TRUE(SetConditions(kOfficialBuild, kSignInMode, kMetricsDisabled,
                             raw_metrics_lib));
   EXPECT_CALL(
@@ -1047,11 +1261,6 @@ TEST_F(CrashSenderUtilTest, ChooseAction) {
   EXPECT_EQ(Sender::kRemove, sender.ChooseAction(good_meta_, &reason, &info));
   EXPECT_THAT(reason, HasSubstr("Crash reporting is disabled"));
   EXPECT_FALSE(base::PathExists(good_meta_.ReplaceExtension(".processing")));
-
-  // Valid crash files should be kept in the guest mode.
-  ASSERT_TRUE(SetConditions(kOfficialBuild, kGuestMode, kMetricsDisabled,
-                            raw_metrics_lib));
-  EXPECT_EQ(Sender::kIgnore, sender.ChooseAction(good_meta_, &reason, &info));
 }
 
 // Test that when force_upload_on_test_images is set, we set hwtest_suite_run.
@@ -1106,7 +1315,7 @@ TEST_F(CrashSenderUtilTest, ChooseAction_NonForceNoHwTestSuiteRun) {
             false);
 }
 
-TEST_F(CrashSenderUtilDeathTest, ChooseActionCrash) {
+TEST_P(CrashSenderUtilDryRunParamDeathTest, ChooseActionCrash) {
   ASSERT_TRUE(SetConditions(kOfficialBuild, kSignInMode, kMetricsEnabled));
 
   const base::FilePath crash_directory =
@@ -1115,6 +1324,7 @@ TEST_F(CrashSenderUtilDeathTest, ChooseActionCrash) {
   ASSERT_TRUE(CreateTestCrashFiles(crash_directory));
 
   Sender::Options options;
+  options.dry_run = dry_run_;
   MockSender sender(true,   // success=true
                     "123",  // Response
                     std::move(metrics_lib_),
@@ -1128,8 +1338,10 @@ TEST_F(CrashSenderUtilDeathTest, ChooseActionCrash) {
   EXPECT_DEATH(sender.ChooseAction(good_meta_, &reason, &info),
                "crashing as requested");
 
-  // ChooseAction crashed so the file should remain.
-  EXPECT_TRUE(base::PathExists(good_meta_.ReplaceExtension(".processing")));
+  // Normally, ChooseAction crashed so the ".processing" file should remain. But
+  // under the dry run mode, ".processing" files should have never been created.
+  EXPECT_THAT(base::PathExists(good_meta_.ReplaceExtension(".processing")),
+              Ne(dry_run_));
 }
 
 TEST_F(CrashSenderUtilTest, ChooseActionDevMode) {
@@ -1169,6 +1381,27 @@ TEST_F(CrashSenderUtilTest, ChooseActionUploadOldReports) {
   std::string reason;
   CrashInfo info;
 
+  EXPECT_EQ(Sender::kSend, sender.ChooseAction(old_os_meta_, &reason, &info));
+}
+
+TEST_F(CrashSenderUtilTest, ChooseActionDryRun) {
+  // If we set dry_run, then the OS check will be skipped.
+  ASSERT_TRUE(SetConditions(kUnofficialBuild, kSignInMode, kMetricsEnabled));
+
+  const base::FilePath crash_directory =
+      paths::Get(paths::kSystemCrashDirectory);
+  ASSERT_TRUE(CreateDirectory(crash_directory));
+  ASSERT_TRUE(CreateTestCrashFiles(crash_directory));
+
+  Sender::Options options;
+  options.dry_run = true;
+  Sender sender(std::move(metrics_lib_),
+                std::make_unique<test_util::AdvancingClock>(), options);
+
+  std::string reason;
+  CrashInfo info;
+
+  EXPECT_EQ(Sender::kSend, sender.ChooseAction(good_meta_, &reason, &info));
   EXPECT_EQ(Sender::kSend, sender.ChooseAction(old_os_meta_, &reason, &info));
 }
 
@@ -1217,8 +1450,9 @@ TEST_F(CrashSenderUtilTest, RemoveAndPickCrashFiles) {
   EXPECT_TRUE(base::PathExists(old_os_new_lacros_meta_));
   EXPECT_FALSE(base::PathExists(old_os_old_lacros_meta_));
   EXPECT_FALSE(base::PathExists(root_payload_meta_));
+  EXPECT_TRUE(base::PathExists(loop_meta_));
   // Check what files were picked for sending.
-  EXPECT_EQ(3, to_send.size());
+  EXPECT_EQ(5, to_send.size());
   EXPECT_EQ(good_meta_.value(), to_send[0].first.value());
   EXPECT_EQ(recent_os_meta_.value(), to_send[1].first.value());
 
@@ -1237,13 +1471,15 @@ TEST_F(CrashSenderUtilTest, RemoveAndPickCrashFiles) {
   EXPECT_TRUE(base::IsDirectoryEmpty(crash_directory));
   EXPECT_TRUE(to_send.empty());
 
-  // All crash files should be removed if metrics are disabled.
+  // System crash files should not be removed if metrics are disabled.
   ASSERT_TRUE(CreateTestCrashFiles(crash_directory));
   ASSERT_TRUE(SetConditions(kOfficialBuild, kSignInMode, kMetricsDisabled,
                             raw_metrics_lib));
   to_send.clear();
   sender.RemoveAndPickCrashFiles(crash_directory, &to_send);
-  EXPECT_TRUE(base::IsDirectoryEmpty(crash_directory));
+  // Directory should still contain files, since it's the *system* directory...
+  EXPECT_FALSE(base::IsDirectoryEmpty(crash_directory));
+  // But to_send should still be empty.
   EXPECT_TRUE(to_send.empty());
 
   // Valid crash files should be kept in the guest mode, thus the directory
@@ -1264,20 +1500,19 @@ TEST_F(CrashSenderUtilTest, RemoveAndPickCrashFiles) {
   CreateDeviceCoredumpUploadAllowedFile();
   to_send.clear();
   sender.RemoveAndPickCrashFiles(crash_directory, &to_send);
-  EXPECT_EQ(4, to_send.size());
+  EXPECT_EQ(6, to_send.size());
   EXPECT_EQ(devcore_meta_.value(), to_send[2].first.value());
 }
 
 TEST_F(CrashSenderUtilTest, RemoveReportFiles) {
-  Sender::Options options;
-  MetricsLibraryMock* raw_metrics_lib = metrics_lib_.get();
-  Sender sender(std::move(metrics_lib_),
-                std::make_unique<test_util::AdvancingClock>(), options);
-
-  EXPECT_CALL(*raw_metrics_lib,
+  EXPECT_CALL(*metrics_lib_,
               SendEnumToUMA("Platform.CrOS.CrashSenderRemoveReason",
                             Sender::kTotalRemoval, Sender::kSendReasonCount))
       .Times(1);
+
+  Sender::Options options;
+  Sender sender(std::move(metrics_lib_),
+                std::make_unique<test_util::AdvancingClock>(), options);
 
   const base::FilePath crash_directory =
       paths::Get(paths::kSystemCrashDirectory);
@@ -1302,6 +1537,33 @@ TEST_F(CrashSenderUtilTest, RemoveReportFiles) {
   EXPECT_FALSE(base::PathExists(foo_log));
   EXPECT_FALSE(base::PathExists(foo_dmp));
   EXPECT_TRUE(base::PathExists(bar_log));
+}
+
+TEST_F(CrashSenderUtilTest, RemoveReportFilesUnderDryRunMode) {
+  EXPECT_CALL(*metrics_lib_,
+              SendEnumToUMA("Platform.CrOS.CrashSenderRemoveReason", _, _))
+      .Times(0);
+  EXPECT_CALL(*metrics_lib_,
+              SendCrosEventToUMA("Crash.Sender.AttemptedCrashRemoval"))
+      .Times(0);
+  EXPECT_CALL(*metrics_lib_,
+              SendCrosEventToUMA("Crash.Sender.FailedCrashRemoval"))
+      .Times(0);
+
+  Sender::Options options;
+  options.dry_run = true;
+  Sender sender(std::move(metrics_lib_),
+                std::make_unique<test_util::AdvancingClock>(), options);
+
+  const base::FilePath crash_directory =
+      paths::Get(paths::kSystemCrashDirectory);
+  ASSERT_TRUE(base::CreateDirectory(crash_directory));
+  const base::FilePath foo_meta = crash_directory.Append("foo.meta");
+  ASSERT_TRUE(test_util::CreateFile(foo_meta, ""));
+  // This should remove foo.* were it not under the dry run mode.
+  sender.RemoveReportFiles(foo_meta);
+  // The file should still exist.
+  EXPECT_TRUE(base::PathExists(foo_meta));
 }
 
 TEST_F(CrashSenderUtilTest, FailRemoveReportFilesSendsMetric) {
@@ -1375,16 +1637,11 @@ TEST_F(CrashSenderUtilTest, GetMetaFiles) {
 
   // Change timestamps so that meta_1 is the newest and metal_5 is the oldest.
   base::Time now = base::Time::Now();
-  ASSERT_TRUE(
-      test_util::TouchFileHelper(meta_1, now - base::TimeDelta::FromHours(1)));
-  ASSERT_TRUE(
-      test_util::TouchFileHelper(meta_2, now - base::TimeDelta::FromHours(2)));
-  ASSERT_TRUE(
-      test_util::TouchFileHelper(meta_3, now - base::TimeDelta::FromHours(3)));
-  ASSERT_TRUE(
-      test_util::TouchFileHelper(meta_4, now - base::TimeDelta::FromHours(4)));
-  ASSERT_TRUE(
-      test_util::TouchFileHelper(metal_5, now - base::TimeDelta::FromHours(5)));
+  ASSERT_TRUE(test_util::TouchFileHelper(meta_1, now - base::Hours(1)));
+  ASSERT_TRUE(test_util::TouchFileHelper(meta_2, now - base::Hours(2)));
+  ASSERT_TRUE(test_util::TouchFileHelper(meta_3, now - base::Hours(3)));
+  ASSERT_TRUE(test_util::TouchFileHelper(meta_4, now - base::Hours(4)));
+  ASSERT_TRUE(test_util::TouchFileHelper(metal_5, now - base::Hours(5)));
 
   std::vector<base::FilePath> meta_files = GetMetaFiles(crash_directory);
   ASSERT_EQ(4, meta_files.size());
@@ -1404,8 +1661,7 @@ TEST_F(CrashSenderUtilTest, IsTimestampNewEnough) {
 
   // Make it older than 24 hours.
   const base::Time now = base::Time::Now();
-  ASSERT_TRUE(
-      test_util::TouchFileHelper(file, now - base::TimeDelta::FromHours(25)));
+  ASSERT_TRUE(test_util::TouchFileHelper(file, now - base::Hours(25)));
 
   // Should be no longer new enough.
   ASSERT_FALSE(IsTimestampNewEnough(file));
@@ -1436,8 +1692,7 @@ TEST_F(CrashSenderUtilTest, IsBelowRateReachesMaxRate) {
   const base::Time now = base::Time::Now();
 
   // Make one of them older than 24 hours.
-  ASSERT_TRUE(test_util::TouchFileHelper(files[0],
-                                         now - base::TimeDelta::FromHours(25)));
+  ASSERT_TRUE(test_util::TouchFileHelper(files[0], now - base::Hours(25)));
 
   // It should now pass the rate limit.
   EXPECT_TRUE(IsBelowRate(timestamp_dir, kMaxRate, kMaxBytes));
@@ -1471,8 +1726,7 @@ TEST_F(CrashSenderUtilTest, IsBelowRateReachesMaxBytes) {
   std::vector<base::FilePath> files = GetFileNamesIn(timestamp_dir);
   ASSERT_EQ(5, files.size());
   const base::Time now = base::Time::Now();
-  ASSERT_TRUE(test_util::TouchFileHelper(files[0],
-                                         now - base::TimeDelta::FromHours(25)));
+  ASSERT_TRUE(test_util::TouchFileHelper(files[0], now - base::Hours(25)));
   EXPECT_TRUE(IsBelowRate(timestamp_dir, kMaxRate, kMaxBytes));
 }
 
@@ -1535,6 +1789,46 @@ TEST_F(CrashSenderUtilTest, GetUserCrashDirectories) {
                            paths::Get("/home/user/hash2/crash"),
                            paths::Get("/run/daemon-store/crash/hash1"),
                            paths::Get("/run/daemon-store/crash/hash2")));
+}
+
+TEST_F(CrashSenderUtilTest, SkipConsentCheckWhenFlagIsProvided) {
+  ASSERT_TRUE(SetConditions(kOfficialBuild, kSignInMode, kMetricsDisabled));
+
+  const base::FilePath crash_directory =
+      paths::Get(paths::kSystemCrashDirectory);
+  ASSERT_TRUE(CreateDirectory(crash_directory));
+  ASSERT_TRUE(CreateTestCrashFiles(crash_directory));
+
+  Sender::Options options;
+  options.consent_already_checked_by_crash_reporter = true;
+  Sender sender(std::move(metrics_lib_),
+                std::make_unique<test_util::AdvancingClock>(), options);
+
+  std::string reason;
+  CrashInfo info;
+
+  EXPECT_EQ(Sender::kSend, sender.ChooseAction(loop_meta_, &reason, &info));
+}
+
+TEST_F(CrashSenderUtilTest, DoNotSkipConsentCheckWithoutCrashLoopMeta) {
+  ASSERT_TRUE(SetConditions(kOfficialBuild, kSignInMode, kMetricsDisabled));
+
+  const base::FilePath crash_directory =
+      paths::Get(paths::kSystemCrashDirectory);
+  ASSERT_TRUE(CreateDirectory(crash_directory));
+  ASSERT_TRUE(CreateTestCrashFiles(crash_directory));
+
+  Sender::Options options;
+  options.consent_already_checked_by_crash_reporter = true;
+  Sender sender(std::move(metrics_lib_),
+                std::make_unique<test_util::AdvancingClock>(), options);
+
+  std::string reason;
+  CrashInfo info;
+
+  // Ignore crashes without consent in the system directory in case a
+  // consenting user later logs back in.
+  EXPECT_EQ(Sender::kIgnore, sender.ChooseAction(good_meta_, &reason, &info));
 }
 
 enum MissingFile {
@@ -1710,7 +2004,44 @@ INSTANTIATE_TEST_SUITE_P(
     testing::Combine(
         testing::Values(kNone, kPayloadFile, kLogFile, kTextFile, kBinFile)));
 
-TEST_F(CrashSenderUtilTest, SendCrashes) {
+class CrashSenderSendCrashesTest : public CrashSenderUtilTest,
+                                   public ::testing::WithParamInterface<
+                                       std::tuple<bool, int, base::TimeDelta>> {
+ protected:
+  // Capture cout. Reset cout to normal after the instance is destructed.
+  class ScopedCoutCapture {
+   public:
+    ScopedCoutCapture() {
+      cout_buf_ = std::cout.rdbuf();
+      std::cout.rdbuf(buffer_.rdbuf());
+    }
+
+    ~ScopedCoutCapture() { std::cout.rdbuf(cout_buf_); }
+
+    ScopedCoutCapture(const ScopedCoutCapture&) = delete;
+    ScopedCoutCapture(ScopedCoutCapture&&) = delete;
+    ScopedCoutCapture& operator=(const ScopedCoutCapture&) = delete;
+    ScopedCoutCapture& operator=(ScopedCoutCapture&&) = delete;
+
+    // Get the captured string.
+    std::string GetString() { return buffer_.str(); }
+
+   private:
+    std::streambuf* cout_buf_;
+    std::stringstream buffer_;
+  };
+
+  void SetUp() override {
+    std::tie(dry_run_, max_crash_rate_, max_spread_time_) = GetParam();
+    CrashSenderUtilTest::SetUp();
+  }
+
+  bool dry_run_;
+  int max_crash_rate_;
+  base::TimeDelta max_spread_time_;
+};
+
+TEST_P(CrashSenderSendCrashesTest, SendCrashes) {
   // Set up the mock session manager client.
   auto mock =
       std::make_unique<org::chromium::SessionManagerInterfaceProxyMock>();
@@ -1727,7 +2058,8 @@ TEST_F(CrashSenderUtilTest, SendCrashes) {
   const base::FilePath system_log = system_dir.Append("0.0.0.0.0.log");
   const base::FilePath system_processing =
       system_dir.Append("0.0.0.0.0.processing");
-  const char system_meta[] =
+  static constexpr char system_meta[] =
+      "upload_var_collector=kernel\n"
       "payload=0.0.0.0.0.log\n"
       "exec_name=exec_foo\n"
       "fake_report_id=123\n"
@@ -1751,7 +2083,8 @@ TEST_F(CrashSenderUtilTest, SendCrashes) {
   const base::FilePath user_log = user_dir.Append("0.0.0.0.0.log");
   const base::FilePath user_processing =
       user_dir.Append("0.0.0.0.0.processing");
-  const char user_meta[] =
+  static constexpr char user_meta[] =
+      "upload_var_collector=ec\n"
       "payload=0.0.0.0.0.log\n"
       "exec_name=exec_bar\n"
       "fake_report_id=456\n"
@@ -1772,7 +2105,8 @@ TEST_F(CrashSenderUtilTest, SendCrashes) {
   // crash rate will be set to 2.
   const base::FilePath user_meta_file2 = user_dir.Append("1.1.1.1.1.meta");
   const base::FilePath user_log2 = user_dir.Append("1.1.1.1.1.log");
-  const char user_meta2[] =
+  static constexpr char user_meta2[] =
+      "upload_var_collector=collector_baz\n"
       "payload=1.1.1.1.1.log\n"
       "exec_name=exec_baz\n"
       "fake_report_id=789\n"
@@ -1801,11 +2135,15 @@ TEST_F(CrashSenderUtilTest, SendCrashes) {
   std::vector<base::TimeDelta> sleep_times;
   Sender::Options options;
   options.session_manager_proxy = mock.release();
-  options.max_crash_rate = 2;
-  // Setting max_crash_bytes to 0 will limit to the uploader to max_crash_rate.
+  options.max_crash_rate = max_crash_rate_;
+  // Setting max_crash_bytes to 0 will limit to the uploader to
+  // max_crash_rate.
   options.max_crash_bytes = 0;
   options.sleep_function = base::BindRepeating(&FakeSleep, &sleep_times);
   options.always_write_uploads_log = true;
+  options.hold_off_time = base::TimeDelta();
+  options.max_spread_time = max_spread_time_;
+  options.dry_run = dry_run_;
   MockSender sender(true /*success*/,
                     "123",  // upload_id
                     std::move(metrics_lib_),
@@ -1828,7 +2166,7 @@ TEST_F(CrashSenderUtilTest, SendCrashes) {
   // The Chrome uploads.log file shouldn't exist because we had nothing to
   // upload, but we will have slept once until we determined we shouldn't be
   // doing uploads.
-  EXPECT_FALSE(base::PathExists(paths::Get(paths::kChromeCrashLog)));
+  EXPECT_FALSE(base::PathExists(paths::Get(paths::ChromeCrashLog::Get())));
   EXPECT_EQ(1, sleep_times.size());
   sleep_times.clear();
 
@@ -1837,69 +2175,228 @@ TEST_F(CrashSenderUtilTest, SendCrashes) {
   raw_metrics_lib->set_guest_mode(false);
   raw_metrics_lib->set_metrics_enabled(true);
 
-  // 2 times because there are 2 valid crashes to send
+  // expected UMA sending count.
+  // max_crash_rate_ times because there are max_crash_rate_ valid crashes to
+  // send.
+  const int expected_uma_send_count = dry_run_ ? 0 : max_crash_rate_;
   EXPECT_CALL(
       *raw_metrics_lib,
       SendEnumToUMA("Platform.CrOS.CrashSenderRemoveReason",
                     Sender::kFinishedUploading, Sender::kSendReasonCount))
-      .Times(2);
+      .Times(expected_uma_send_count);
   EXPECT_CALL(*raw_metrics_lib,
               SendEnumToUMA("Platform.CrOS.CrashSenderRemoveReason",
                             Sender::kTotalRemoval, Sender::kSendReasonCount))
-      .Times(2);
-  sender.SendCrashes(crashes_to_send);
+      .Times(expected_uma_send_count);
+
+  // uploads.log content
+  std::string contents;
+  if (dry_run_) {
+    ScopedCoutCapture cout_capture;
+    sender.SendCrashes(crashes_to_send);
+    contents = cout_capture.GetString();
+  } else {
+    sender.SendCrashes(crashes_to_send);
+    if (max_crash_rate_ > 0) {
+      ASSERT_TRUE(base::ReadFileToString(
+          paths::Get(paths::ChromeCrashLog::Get()), &contents));
+    } else {
+      // No log file, contents remain empty.
+      EXPECT_FALSE(base::PathExists(paths::Get(paths::ChromeCrashLog::Get())));
+    }
+  }
 
   // We shouldn't be processing any crashes still.
   EXPECT_FALSE(base::PathExists(system_processing));
   EXPECT_FALSE(base::PathExists(user_processing));
 
-  // Check the upload log from crash_sender.
-  std::string contents;
-  ASSERT_TRUE(
-      base::ReadFileToString(paths::Get(paths::kChromeCrashLog), &contents));
-  std::vector<base::Optional<base::Value>> rows =
+  // Examine the upload log from crash_sender.
+  std::vector<std::optional<base::Value>> rows =
       ParseChromeUploadsLog(contents);
-  // Should only contain two results, since max_crash_rate is set to 2.
-  // FakeSleep should be called three times since we sleep before we check the
-  // crash rate.
-  ASSERT_EQ(2, rows.size());
-  EXPECT_EQ(3, sleep_times.size());
+
+  const char* expected_upload_id;
+  int expected_sleep_times;
+  if (dry_run_) {
+    // No rate limiting in dry run mode.
+    ASSERT_EQ(3, rows.size());
+    expected_upload_id = "";
+    // Under the dry run mode, spread time should be always zero. Given that
+    // hold off time is zero, sleep time should always be zero.
+    for (const auto& sleep_time : sleep_times) {
+      EXPECT_EQ(sleep_time, base::TimeDelta());
+    }
+    expected_sleep_times = 3;
+  } else {
+    // Should only contain max_crash_rate results, since max_crash_rate is set
+    // to max_crash_rate_. FakeSleep should be called max_crash_rate_ + 1 times
+    // since we sleep before we check the crash rate.
+    ASSERT_EQ(max_crash_rate_, rows.size());
+    expected_upload_id = "123";
+    // When it's not under the dry run mode, spread time should be always
+    // between 0 and max_spread_time_. Given that hold off time is zero, sleep
+    // time should always be in the same range.
+    for (const auto& sleep_time : sleep_times) {
+      EXPECT_THAT(sleep_time,
+                  AllOf(Ge(base::TimeDelta()), Le(max_spread_time_)));
+    }
+    expected_sleep_times = max_crash_rate_ + 1;
+  }
+  EXPECT_EQ(expected_sleep_times, sleep_times.size());
 
   // Each line of the uploads.log file is "{"upload_time":<value>,"upload_id":
   // <value>,"local_id":<value>,"capture_time":<value>,"state":<value>,"source":
   // <value>}".
-  // The first run should be for the meta file in the system directory.
-  base::Optional<base::Value> row = std::move(rows[0]);
-  ASSERT_TRUE(row.has_value());
-  ASSERT_EQ(6, row->DictSize());
-  EXPECT_TRUE(row->FindKey("upload_time"));
-  EXPECT_EQ("123", row->FindKey("upload_id")->GetString());
-  EXPECT_EQ("foo", row->FindKey("local_id")->GetString());
-  EXPECT_EQ("1000", row->FindKey("capture_time")->GetString());
-  EXPECT_EQ(3, row->FindKey("state")->GetInt());
-  EXPECT_EQ("exec_foo", row->FindKey("source")->GetString());
+  if (max_crash_rate_ >= 1 || dry_run_) {
+    // The first run should be for the meta file in the system directory.
+    std::optional<base::Value> row = std::move(rows[0]);
+    ASSERT_TRUE(row.has_value() && row->is_dict());
+    auto dict = std::move(row->GetDict());
+    ASSERT_EQ(8, dict.size());
+    EXPECT_TRUE(dict.Find("upload_time"));
+    EXPECT_THAT(dict.FindString("upload_id"), Pointee(Eq(expected_upload_id)));
+    EXPECT_THAT(dict.FindString("local_id"), Pointee(Eq("foo")));
+    EXPECT_THAT(dict.FindString("capture_time"), Pointee(Eq("1000")));
+    EXPECT_EQ(3, dict.FindInt("state"));
+    EXPECT_THAT(dict.FindString("source"), Pointee(Eq("exec_foo")));
+    EXPECT_THAT(dict.FindString("fatal_crash_type"), Pointee(Eq("kernel")));
+    EXPECT_THAT(dict.FindString("path_hash"),
+                Pointee(Eq(base::MD5String(system_meta_file.value()))));
+  }
 
-  // The second run should be for the meta file in the "user" directory.
-  row = std::move(rows[1]);
-  ASSERT_TRUE(row.has_value());
-  ASSERT_EQ(6, row->DictSize());
-  EXPECT_TRUE(row->FindKey("upload_time"));
-  EXPECT_EQ("123", row->FindKey("upload_id")
-                       ->GetString());  // This is the value we set before
-  EXPECT_EQ("bar", row->FindKey("local_id")->GetString());
-  EXPECT_EQ("2000", row->FindKey("capture_time")->GetString());
-  EXPECT_EQ(3, row->FindKey("state")->GetInt());
-  EXPECT_EQ("REDACTED", row->FindKey("source")->GetString());
+  if (max_crash_rate_ >= 2 || dry_run_) {
+    // The second run should be for the meta file in the "user" directory.
+    std::optional<base::Value> row = std::move(rows[1]);
+    ASSERT_TRUE(row.has_value() && row->is_dict());
+    auto dict = std::move(row->GetDict());
+    ASSERT_EQ(8, dict.size());
+    EXPECT_TRUE(dict.Find("upload_time"));
+    EXPECT_THAT(
+        dict.FindString("upload_id"),
+        Pointee(Eq(expected_upload_id)));  // This is the value we set before
+    EXPECT_THAT(dict.FindString("local_id"), Pointee(Eq("bar")));
+    EXPECT_THAT(dict.FindString("capture_time"), Pointee(Eq("2000")));
+    EXPECT_EQ(3, dict.FindInt("state"));
+    EXPECT_THAT(dict.FindString("source"), Pointee(Eq("REDACTED")));
+    EXPECT_THAT(dict.FindString("fatal_crash_type"), Pointee(Eq("ec")));
+    EXPECT_THAT(dict.FindString("path_hash"),
+                Pointee(Eq(base::MD5String(user_meta_file.value()))));
+  }
 
-  // The uploaded crash files should be removed now.
-  EXPECT_FALSE(base::PathExists(system_meta_file));
-  EXPECT_FALSE(base::PathExists(system_log));
-  EXPECT_FALSE(base::PathExists(user_meta_file));
-  EXPECT_FALSE(base::PathExists(user_log));
+  // We don't have a test with max_crash_rate_ >= 3. However, had there been
+  // one, this if-block should only take effect when max_crash_rate_ >= 3.
+  if (max_crash_rate_ >= 3 || dry_run_) {
+    std::optional<base::Value> row = std::move(rows[2]);
+    ASSERT_TRUE(row.has_value() && row->is_dict());
+    auto dict = std::move(row->GetDict());
+    ASSERT_EQ(6, dict.size());
+    EXPECT_TRUE(dict.Find("upload_time"));
+    EXPECT_THAT(dict.FindString("upload_id"),
+                Pointee(Eq("")));  // This is empty
+    EXPECT_THAT(dict.FindString("local_id"), Pointee(Eq("baz")));
+    EXPECT_FALSE(dict.Find("capture_time"));
+    EXPECT_EQ(3, dict.FindInt("state"));
+    EXPECT_THAT(dict.FindString("source"), Pointee(Eq("REDACTED")));
+    EXPECT_THAT(dict.FindString("path_hash"),
+                Pointee(Eq(base::MD5String(user_meta_file2.value()))));
+  }
+
+  // The crash files should be kept in dry run mode and removed otherwise.
+  EXPECT_THAT(base::PathExists(system_meta_file),
+              Eq(dry_run_ || max_crash_rate_ < 1));
+  EXPECT_THAT(base::PathExists(system_log),
+              Eq(dry_run_ || max_crash_rate_ < 1));
+  EXPECT_THAT(base::PathExists(user_meta_file),
+              Eq(dry_run_ || max_crash_rate_ < 2));
+  EXPECT_THAT(base::PathExists(user_log), Eq(dry_run_ || max_crash_rate_ < 2));
 
   // The following should be kept since the crash report was not uploaded.
   EXPECT_TRUE(base::PathExists(user_meta_file2));
   EXPECT_TRUE(base::PathExists(user_log2));
+}
+
+// Notes on the combination of parameters:
+//
+// When max_spread_time=0:
+// - dry_run=true, max_crash_rate=0 is essential because as long as additional
+//   files (max_crash_rate > 1) are allowed to be uploaded, dry run mode won't
+//   consume the allowance, thus IsBelowRate always returns true. Therefore,
+//   dry_run=true, max_crash_rate=1,2 won't be able to reveal a (broken) dry run
+//   mode that depends on rate limiting.
+// - dry_run=true, max_crash_rate=1,2 ensures dry run mode works correctly under
+//   normal circumstances, i.e., max_crash_rate>0.
+// - dry_run=false, max_crash_rate=0,1,2 ensures the correct order of upload
+//   (system first, then user).
+//
+// When max_spread_time=5:
+// - dry_run=true, max_crash_rate=0,1,2 ensures that crash_sender under the dry
+//   run mode ignores max_spread_time.
+// - dry_run=false, max_crash_rate=0,1,2 ensures that crash_sender not under the
+//   dry run mode respects max_spread_time.
+INSTANTIATE_TEST_SUITE_P(
+    CrashSenderSendCrashesInstantiation,
+    CrashSenderSendCrashesTest,
+    testing::Combine(
+        /*dry_run=*/testing::Bool(),
+        /*max_crash_rate=*/
+        testing::Values(0,   // No upload
+                        1,   // Upload the system crash only
+                        2),  // upload the user crash only
+        /*max_spread_time=*/
+        testing::Values(base::TimeDelta(), base::Seconds(5))),
+    [](const ::testing::TestParamInfo<CrashSenderSendCrashesTest::ParamType>&
+           info) {
+      std::ostringstream name;
+      name << "dry_run_" << std::get<0>(info.param) << "_max_crash_rate_"
+           << std::get<1>(info.param) << "_max_spread_time_"
+           << std::get<2>(info.param).InSeconds();
+      return name.str();
+    });
+
+TEST_F(CrashSenderUtilTest, SendCrashes_DontSendUnderDryRunMode) {
+  // Set up the mock session manager client.
+  auto mock =
+      std::make_unique<org::chromium::SessionManagerInterfaceProxyMock>();
+  test_util::SetActiveSessions(mock.get(), {{"user", "hash"}});
+
+  // Establish the client ID.
+  ASSERT_TRUE(CreateClientIdFile());
+
+  // Create the system crash directory, and crash files in it.
+  const base::FilePath crash_directory =
+      paths::Get(paths::kSystemCrashDirectory);
+  ASSERT_TRUE(CreateDirectory(crash_directory));
+  ASSERT_TRUE(CreateTestCrashFiles(crash_directory));
+
+  // Set up the crash sender so that it succeeds.
+  SetMockCrashSending(true);
+
+  // No crash sender removal reason UMA counts.
+  EXPECT_CALL(*metrics_lib_,
+              SendEnumToUMA("Platform.CrOS.CrashSenderRemoveReason", _, _))
+      .Times(0);
+
+  // Set up the sender.
+  std::vector<base::TimeDelta> sleep_times;
+  Sender::Options options;
+  options.session_manager_proxy = mock.release();
+  options.max_crash_rate = 2;
+  // Setting max_crash_bytes to 0 will limit to the uploader to
+  // max_crash_rate.
+  options.max_crash_bytes = 0;
+  options.sleep_function = base::BindRepeating(&FakeSleep, &sleep_times);
+  options.always_write_uploads_log = true;
+  options.dry_run = true;
+  MockSender sender(true /*success*/,
+                    "123",  // upload_id
+                    std::move(metrics_lib_),
+                    std::make_unique<test_util::AdvancingClock>(), options);
+  std::vector<MetaFile> crashes_to_send;
+  sender.RemoveAndPickCrashFiles(crash_directory, &crashes_to_send);
+  ASSERT_FALSE(crashes_to_send.empty());  // ensure at least one crash to send
+  // Nothing should be sent
+  EXPECT_CALL(sender, GetTransport()).Times(0);
+
+  sender.SendCrashes(crashes_to_send);
 }
 
 TEST_F(CrashSenderUtilTest, SendCrashes_TooManyRequests) {
@@ -1949,7 +2446,8 @@ TEST_F(CrashSenderUtilTest, SendCrashes_TooManyRequests) {
   Sender::Options options;
   options.session_manager_proxy = mock.release();
   options.max_crash_rate = 2;
-  // Setting max_crash_bytes to 0 will limit to the uploader to max_crash_rate.
+  // Setting max_crash_bytes to 0 will limit to the uploader to
+  // max_crash_rate.
   options.max_crash_bytes = 0;
   options.sleep_function = base::BindRepeating(&FakeSleep, &sleep_times);
   options.always_write_uploads_log = true;
@@ -1978,6 +2476,84 @@ TEST_F(CrashSenderUtilTest, SendCrashes_TooManyRequests) {
 
   // We shouldn't be processing any crashes still.
   EXPECT_FALSE(base::PathExists(user_processing));
+}
+
+TEST_F(CrashSenderUtilTest, SendCrashes_DroppedDueToThrottling) {
+  // Set up the mock session manager client.
+  auto mock =
+      std::make_unique<org::chromium::SessionManagerInterfaceProxyMock>();
+  test_util::SetActiveSessions(mock.get(), {{"user", "hash"}});
+  std::vector<MetaFile> crashes_to_send;
+
+  // Establish the client ID.
+  ASSERT_TRUE(CreateClientIdFile());
+
+  // Create a user crash directory, and crash files in it.
+  const base::FilePath user_dir = paths::Get("/home/user/hash/crash");
+  ASSERT_TRUE(base::CreateDirectory(user_dir));
+  const base::FilePath user_meta_file = user_dir.Append("0.0.0.0.0.meta");
+  const base::FilePath user_log = user_dir.Append("0.0.0.0.0.log");
+  const base::FilePath user_processing =
+      user_dir.Append("0.0.0.0.0.processing");
+  const char user_meta[] =
+      "payload=0.0.0.0.0.log\n"
+      "exec_name=exec_bar\n"
+      "fake_report_id=456\n"
+      "upload_var_prod=bar\n"
+      "done=1\n"
+      "upload_var_reportTimeMillis=2000000\n";
+  ASSERT_TRUE(test_util::CreateFile(user_meta_file, user_meta));
+  ASSERT_TRUE(test_util::CreateFile(user_log, ""));
+  CrashInfo user_info;
+  EXPECT_TRUE(user_info.metadata.LoadFromString(user_meta));
+  user_info.payload_file = user_log;
+  user_info.payload_kind = "log";
+  EXPECT_TRUE(base::Time::FromString("25 Apr 2018 1:24:01 GMT",
+                                     &user_info.last_modified));
+  crashes_to_send.emplace_back(user_meta_file, std::move(user_info));
+
+  // Set up the conditions to emulate a device with metrics enabled.
+  ASSERT_TRUE(SetConditions(kOfficialBuild, kSignInMode, kMetricsEnabled));
+  // Keep the raw pointer, that's needed to exit from guest mode later.
+  MetricsLibraryMock* raw_metrics_lib = metrics_lib_.get();
+
+  // Set up the crash sender so that it succeeds.
+  SetMockCrashSending(true);
+
+  // Set up the sender.
+  std::vector<base::TimeDelta> sleep_times;
+  Sender::Options options;
+  options.session_manager_proxy = mock.release();
+  options.max_crash_rate = 2;
+  // Setting max_crash_bytes to 0 will limit to the uploader to
+  // max_crash_rate.
+  options.max_crash_bytes = 0;
+  options.sleep_function = base::BindRepeating(&FakeSleep, &sleep_times);
+  options.always_write_uploads_log = true;
+  MockSender sender(true,                // success=false
+                    "0000000000000001",  // Response
+                    std::move(metrics_lib_),
+                    std::make_unique<test_util::AdvancingClock>(), options);
+
+  // Send crashes.
+  EXPECT_CALL(
+      *raw_metrics_lib,
+      SendEnumToUMA("Platform.CrOS.CrashSenderRemoveReason",
+                    Sender::kFinishedUploading, Sender::kSendReasonCount))
+      .Times(1);
+  EXPECT_CALL(*raw_metrics_lib,
+              SendEnumToUMA("Platform.CrOS.CrashSenderRemoveReason",
+                            Sender::kTotalRemoval, Sender::kSendReasonCount))
+      .Times(1);
+
+  sender.SendCrashes(crashes_to_send);
+  testing::Mock::VerifyAndClearExpectations(raw_metrics_lib);
+
+  // We shouldn't be processing any crashes still.
+  EXPECT_FALSE(base::PathExists(user_processing));
+  EXPECT_FALSE(base::PathExists(user_meta_file));
+  // Verify we recognized the crash report was dropped due to throttling.
+  ASSERT_TRUE(brillo::FindLog("dropped due to crash report upload throttling"));
 }
 
 TEST_F(CrashSenderUtilTest, SendCrashes_Fail) {
@@ -2036,11 +2612,11 @@ TEST_F(CrashSenderUtilTest, SendCrashes_Fail) {
 
   // The Chrome uploads.log file shouldn't exist because we had nothing to
   // report.
-  EXPECT_FALSE(base::PathExists(paths::Get(paths::kChromeCrashLog)));
+  EXPECT_FALSE(base::PathExists(paths::Get(paths::ChromeCrashLog::Get())));
 }
 
 // Verify behavior when SendCrashes itself crashes.
-TEST_F(CrashSenderUtilDeathTest, SendCrashes_Crash) {
+TEST_P(CrashSenderUtilDryRunParamDeathTest, SendCrashesCrash) {
   // Set up the mock session manager client.
   auto mock =
       std::make_unique<org::chromium::SessionManagerInterfaceProxyMock>();
@@ -2075,6 +2651,7 @@ TEST_F(CrashSenderUtilDeathTest, SendCrashes_Crash) {
   options.max_crash_rate = 2;
   options.sleep_function = base::BindRepeating(&FakeSleep, &sleep_times);
   options.always_write_uploads_log = true;
+  options.dry_run = dry_run_;
   MockSender sender(true,                 // success=true
                     "Too Many Requests",  // Response
                     std::move(metrics_lib_),
@@ -2084,9 +2661,65 @@ TEST_F(CrashSenderUtilDeathTest, SendCrashes_Crash) {
   sender.SetCrashDuringSendForTesting(true);
   EXPECT_DEATH(sender.SendCrashes(crashes_to_send), "crashing as requested");
 
-  // We crashed, so the ".processing" file should still exist.
-  EXPECT_TRUE(base::PathExists(system_processing));
+  // We crashed, so the ".processing" file should still exist if not under dry
+  // run mode. Under the dry run mode, the ".processing" file should never be
+  // created.
+  EXPECT_THAT(base::PathExists(system_processing), Ne(dry_run_));
 }
+
+class CrashSenderGetFatalCrashTypeTest
+    : public ::testing::TestWithParam<
+          std::tuple<std::optional<std::string>, std::optional<std::string>>> {
+ protected:
+  void SetUp() override {
+    std::tie(collector_, fatal_crash_type_) = GetParam();
+  }
+
+  std::optional<std::string> collector_;
+  std::optional<std::string> fatal_crash_type_;
+};
+
+TEST_P(CrashSenderGetFatalCrashTypeTest, GetFatalCrashType) {
+  brillo::KeyValueStore metadata;
+  if (collector_.has_value()) {
+    metadata.SetString("upload_var_collector", collector_.value());
+  }
+  // Add some random fields
+  metadata.SetString("exec_name", "fake_exec_name");
+  metadata.SetString("ver", "fake_chromeos_ver");
+  metadata.SetString("upload_var_prod", "fake_product");
+  metadata.SetString("upload_var_ver", "fake_version");
+  CrashDetails details = {
+      // Add some other random fields
+      .payload_kind = "fake_payload",
+      .client_id = kFakeClientId,
+
+      .metadata = metadata,
+  };
+  EXPECT_EQ(GetFatalCrashType(details), fatal_crash_type_);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    CrashSenderGetFatalCrashTypeInstantiation,
+    CrashSenderGetFatalCrashTypeTest,
+    testing::Values(
+        CrashSenderGetFatalCrashTypeTest::ParamType(std::nullopt, std::nullopt),
+        CrashSenderGetFatalCrashTypeTest::ParamType("cool_collector",
+                                                    std::nullopt),
+        CrashSenderGetFatalCrashTypeTest::ParamType("kernel", "kernel"),
+        CrashSenderGetFatalCrashTypeTest::ParamType("ec", "ec")),
+    [](const ::testing::TestParamInfo<
+        CrashSenderGetFatalCrashTypeTest::ParamType>& info) {
+      std::ostringstream name;
+      auto collector = std::get<0>(info.param);
+      auto fatal_crash_type = std::get<1>(info.param);
+      name << "collector_"
+           << (collector.has_value() ? collector.value() : "absent")
+           << "_crash_type_"
+           << (fatal_crash_type.has_value() ? fatal_crash_type.value()
+                                            : "absent");
+      return name.str();
+    });
 
 TEST_F(CrashSenderUtilTest, LockFile) {
   auto clock = std::make_unique<MockClock>();
@@ -2119,13 +2752,13 @@ TEST_F(CrashSenderUtilTest, LockFileTriesAgainIfFirstAttemptFails) {
   EXPECT_CALL(*clock, Now())
       .WillOnce(Return(start_time))
       .WillOnce(Return(start_time))
-      .WillOnce(Return(start_time + base::TimeDelta::FromMinutes(1)))
-      .WillOnce(Return(start_time + base::TimeDelta::FromMinutes(2)))
-      .WillOnce(Return(start_time + base::TimeDelta::FromMinutes(3)))
+      .WillOnce(Return(start_time + base::Minutes(1)))
+      .WillOnce(Return(start_time + base::Minutes(2)))
+      .WillOnce(Return(start_time + base::Minutes(3)))
       .WillOnce(Invoke([&lock_process, start_time]() {
         lock_process->Kill(SIGKILL, 10);
         lock_process->Wait();
-        return start_time + base::TimeDelta::FromMinutes(4);
+        return start_time + base::Minutes(4);
       }));
   std::vector<base::TimeDelta> sleep_times;
   Sender::Options options;
@@ -2145,19 +2778,19 @@ TEST_F(CrashSenderUtilTest, LockFileTriesOneLastTimeAfterTimeout) {
   base::Time start_time;
   ASSERT_TRUE(base::Time::FromUTCString("2019-04-20 13:53", &start_time));
 
-  // Make AcquireLockFileOrDie sleep enough that the loop exits, then unlock the
-  // file.
+  // Make AcquireLockFileOrDie sleep enough that the loop exits, then unlock
+  // the file.
   EXPECT_CALL(*clock, Now())
       .WillOnce(Return(start_time))
       .WillOnce(Return(start_time))
-      .WillOnce(Return(start_time + base::TimeDelta::FromMinutes(1)))
-      .WillOnce(Return(start_time + base::TimeDelta::FromMinutes(2)))
-      .WillOnce(Return(start_time + base::TimeDelta::FromMinutes(3)))
-      .WillOnce(Return(start_time + base::TimeDelta::FromMinutes(4)))
+      .WillOnce(Return(start_time + base::Minutes(1)))
+      .WillOnce(Return(start_time + base::Minutes(2)))
+      .WillOnce(Return(start_time + base::Minutes(3)))
+      .WillOnce(Return(start_time + base::Minutes(4)))
       .WillOnce(Invoke([&lock_process, start_time]() {
         lock_process->Kill(SIGKILL, 10);
         lock_process->Wait();
-        return start_time + base::TimeDelta::FromMinutes(6);
+        return start_time + base::Minutes(6);
       }));
   std::vector<base::TimeDelta> sleep_times;
   Sender::Options options;

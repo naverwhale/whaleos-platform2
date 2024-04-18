@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "midis/device.h"
@@ -7,9 +7,9 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
@@ -46,10 +46,10 @@ Device::Device(const std::string& name,
       device_(device),
       num_subdevices_(num_subdevices),
       flags_(flags),
-      in_sub_cb_(in_sub_cb),
-      out_sub_cb_(out_sub_cb),
-      in_del_cb_(in_del_cb),
-      out_del_cb_(out_del_cb),
+      in_sub_cb_(std::move(in_sub_cb)),
+      out_sub_cb_(std::move(out_sub_cb)),
+      in_del_cb_(std::move(in_del_cb)),
+      out_del_cb_(std::move(out_del_cb)),
       send_data_cb_(send_data_cb),
       port_caps_(port_caps),
       weak_factory_(this) {
@@ -171,8 +171,8 @@ base::ScopedFD Device::AddClientToReadSubdevice(uint32_t client_id,
 
     list_entries.emplace_back(SubDeviceClientFdHolder::Create(
         client_id, subdevice_id, std::move(server_fd),
-        base::Bind(&Device::WriteClientDataToDevice,
-                   weak_factory_.GetWeakPtr())));
+        base::BindRepeating(&Device::WriteClientDataToDevice,
+                            weak_factory_.GetWeakPtr())));
 
     client_fds_.emplace(subdevice_id, std::move(list_entries));
   } else {
@@ -187,8 +187,8 @@ base::ScopedFD Device::AddClientToReadSubdevice(uint32_t client_id,
     }
     id_fd_list->second.emplace_back(SubDeviceClientFdHolder::Create(
         client_id, subdevice_id, std::move(server_fd),
-        base::Bind(&Device::WriteClientDataToDevice,
-                   weak_factory_.GetWeakPtr())));
+        base::BindRepeating(&Device::WriteClientDataToDevice,
+                            weak_factory_.GetWeakPtr())));
   }
 
   return client_fd;

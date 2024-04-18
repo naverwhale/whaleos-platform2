@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -57,12 +57,12 @@ class AuthPolicy : public org::chromium::AuthPolicyAdaptor,
   ~AuthPolicy();
 
   // Initializes internals. See SambaInterface::Initialize() for details.
-  ErrorType Initialize(bool device_is_locked) WARN_UNUSED_RESULT;
+  [[nodiscard]] ErrorType Initialize(bool device_is_locked);
 
   // Registers the D-Bus object and interfaces.
   void RegisterAsync(
       std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object,
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction&
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction
           completion_callback);
 
   // Cleans all persistent state files. Returns true if all files were cleared.
@@ -85,7 +85,7 @@ class AuthPolicy : public org::chromium::AuthPolicyAdaptor,
                      int32_t* error,
                      std::vector<uint8_t>* user_status_blob) override;
 
-  // |kerberos_files_blob| is a serialized KerberosFiles profobuf.
+  // |kerberos_files_blob| is a serialized KerberosFiles protobuf.
   void GetUserKerberosFiles(const std::string& account_id,
                             int32_t* error,
                             std::vector<uint8_t>* kerberos_files_blob) override;
@@ -97,7 +97,7 @@ class AuthPolicy : public org::chromium::AuthPolicyAdaptor,
                     std::string* joined_domain) override;
 
   void RefreshUserPolicy(PolicyResponseCallback callback,
-                         const std::string& acccount_id) override;
+                         const std::string& account_id) override;
 
   void RefreshDevicePolicy(PolicyResponseCallback callback) override;
 

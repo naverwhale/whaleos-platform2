@@ -1,11 +1,9 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef P2P_SERVER_PEER_UPDATE_MANAGER_H_
 #define P2P_SERVER_PEER_UPDATE_MANAGER_H_
-
-#include <base/macros.h>
 
 #include "p2p/server/file_watcher.h"
 #include "p2p/server/http_server.h"

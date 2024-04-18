@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,10 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/command_line.h>
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/run_loop.h>
@@ -22,6 +22,7 @@
 
 #include <chromeos/dbus/service_constants.h>
 
+#include "biod/biod_constants.h"
 #include "biod/biod_proxy/biometrics_manager_proxy_base.h"
 #include "biod/biod_version.h"
 #include "biod/biometrics_manager.h"
@@ -44,13 +45,13 @@ static const char kHelpText[] =
     "<label>.\n"
     "  destroy_all [<biometrics manager>] - Destroys all records for the given "
     "biometrics manager, or all biometrics managers if no object path is "
-    "given.\n\n"
+    "given.\n"
+    "  listen <biometrics manager> - Listens to the signal from given "
+    "biometrics manager until the program is interrupted.\n\n"
     "The <biometrics manager> parameter is the D-Bus object path of the "
     "biometrics manager, and can be abbreviated as the path's basename (the "
     "part after the last forward slash)\n\n"
     "The <record> parameter is also a D-Bus object path.";
-
-static const int kDbusTimeoutMs = dbus::ObjectProxy::TIMEOUT_USE_DEFAULT;
 
 using BiometricsManagerType = biod::BiometricType;
 using ScanResult = biod::ScanResult;
@@ -85,13 +86,23 @@ class RecordProxy {
                                  biod::kRecordSetLabelMethod);
     dbus::MessageWriter method_writer(&method_call);
     method_writer.AppendString(label);
-    return !!proxy_->CallMethodAndBlock(&method_call, kDbusTimeoutMs);
+    std::unique_ptr<dbus::Response> response =
+        proxy_
+            ->CallMethodAndBlock(&method_call,
+                                 biod::dbus_constants::kDbusTimeoutMs)
+            .value_or(nullptr);
+    return !!response;
   }
 
   bool Remove() {
     dbus::MethodCall method_call(biod::kRecordInterface,
                                  biod::kRecordRemoveMethod);
-    return !!proxy_->CallMethodAndBlock(&method_call, kDbusTimeoutMs);
+    std::unique_ptr<dbus::Response> response =
+        proxy_
+            ->CallMethodAndBlock(&method_call,
+                                 biod::dbus_constants::kDbusTimeoutMs)
+            .value_or(nullptr);
+    return !!response;
   }
 
  private:
@@ -102,7 +113,10 @@ class RecordProxy {
     method_writer.AppendString(biod::kRecordInterface);
     method_writer.AppendString(biod::kRecordLabelProperty);
     std::unique_ptr<dbus::Response> response =
-        proxy_->CallMethodAndBlock(&method_call, kDbusTimeoutMs);
+        proxy_
+            ->CallMethodAndBlock(&method_call,
+                                 biod::dbus_constants::kDbusTimeoutMs)
+            .value_or(nullptr);
     CHECK(response);
 
     dbus::MessageReader response_reader(response.get());
@@ -144,7 +158,10 @@ class BiometricsManagerProxy : public biod::BiometricsManagerProxyBase {
     method_writer.AppendString(label);
 
     std::unique_ptr<dbus::Response> response =
-        proxy_->CallMethodAndBlock(&method_call, kDbusTimeoutMs);
+        proxy_
+            ->CallMethodAndBlock(&method_call,
+                                 biod::dbus_constants::kDbusTimeoutMs)
+            .value_or(nullptr);
     if (!response)
       return nullptr;
 
@@ -160,7 +177,12 @@ class BiometricsManagerProxy : public biod::BiometricsManagerProxyBase {
     dbus::MethodCall method_call(
         biod::kBiometricsManagerInterface,
         biod::kBiometricsManagerDestroyAllRecordsMethod);
-    return !!proxy_->CallMethodAndBlock(&method_call, kDbusTimeoutMs);
+    std::unique_ptr<dbus::Response> response =
+        proxy_
+            ->CallMethodAndBlock(&method_call,
+                                 biod::dbus_constants::kDbusTimeoutMs)
+            .value_or(nullptr);
+    return !!response;
   }
 
   std::vector<RecordProxy> GetRecordsForUser(const std::string& user_id) const {
@@ -171,10 +193,15 @@ class BiometricsManagerProxy : public biod::BiometricsManagerProxyBase {
     method_writer.AppendString(user_id);
 
     std::unique_ptr<dbus::Response> response =
-        proxy_->CallMethodAndBlock(&method_call, kDbusTimeoutMs);
-    CHECK(response);
+        proxy_
+            ->CallMethodAndBlock(&method_call,
+                                 biod::dbus_constants::kDbusTimeoutMs)
+            .value_or(nullptr);
 
     std::vector<RecordProxy> records;
+    if (!response)
+      return records;
+
     dbus::MessageReader response_reader(response.get());
     dbus::MessageReader records_reader(nullptr);
     CHECK(response_reader.PopArray(&records_reader));
@@ -229,6 +256,13 @@ class BiometricsManagerProxy : public biod::BiometricsManagerProxyBase {
                             weak_factory_.GetWeakPtr()),
         base::BindOnce(&BiometricsManagerProxy::OnSignalConnected,
                        weak_factory_.GetWeakPtr()));
+    proxy_->ConnectToSignal(
+        biod::kBiometricsManagerInterface,
+        biod::kBiometricsManagerStatusChangedSignal,
+        base::BindRepeating(&BiometricsManagerProxy::OnStatusChanged,
+                            weak_factory_.GetWeakPtr()),
+        base::BindOnce(&BiometricsManagerProxy::OnSignalConnected,
+                       weak_factory_.GetWeakPtr()));
     return true;
   }
 
@@ -258,12 +292,26 @@ class BiometricsManagerProxy : public biod::BiometricsManagerProxyBase {
   void OnAuthScanDone(dbus::Signal* signal) {
     dbus::MessageReader signal_reader(signal);
 
-    ScanResult scan_result;
+    biod::FingerprintMessage proto;
     dbus::MessageReader matches_reader(nullptr);
     std::vector<std::string> user_ids;
 
-    CHECK(signal_reader.PopUint32(reinterpret_cast<uint32_t*>(&scan_result)));
-    LOG(INFO) << "Authentication: " << ScanResultToString(scan_result);
+    CHECK(signal_reader.PopArrayOfBytesAsProto(&proto));
+    switch (proto.msg_case()) {
+      case biod::FingerprintMessage::MsgCase::kScanResult:
+        LOG(INFO) << "Authentication: "
+                  << ScanResultToString(proto.scan_result());
+        break;
+      case biod::FingerprintMessage::MsgCase::kError:
+        LOG(WARNING) << "Authentication failed: "
+                     << FingerprintErrorToString(proto.error());
+        break;
+      case biod::FingerprintMessage::MsgCase::MSG_NOT_SET:
+        LOG(WARNING) << "Fingerprint response doesn't contain any data";
+        break;
+      default:
+        LOG(ERROR) << "Unsupported message received";
+    }
 
     CHECK(signal_reader.PopArray(&matches_reader));
     while (matches_reader.HasMoreData()) {
@@ -289,6 +337,16 @@ class BiometricsManagerProxy : public biod::BiometricsManagerProxyBase {
     }
   }
 
+  void OnStatusChanged(dbus::Signal* signal) {
+    biod::BiometricsManagerStatusChanged proto;
+
+    dbus::MessageReader reader(signal);
+    CHECK(reader.PopArrayOfBytesAsProto(&proto));
+
+    LOG(INFO) << "Status changed to: "
+              << BiometricsManagerStatusToString(proto.status());
+  }
+
   BiometricsManagerType type_ = BiometricsManagerType::BIOMETRIC_TYPE_UNKNOWN;
   std::vector<RecordProxy> records_;
   base::WeakPtrFactory<BiometricsManagerProxy> weak_factory_;
@@ -304,7 +362,10 @@ class BiodProxy {
                                         dbus::kObjectManagerGetManagedObjects);
 
     std::unique_ptr<dbus::Response> objects_msg =
-        proxy_->CallMethodAndBlock(&get_objects_method, kDbusTimeoutMs);
+        proxy_
+            ->CallMethodAndBlock(&get_objects_method,
+                                 biod::dbus_constants::kDbusTimeoutMs)
+            .value_or(nullptr);
     CHECK(objects_msg) << "Failed to retrieve biometrics managers.";
 
     dbus::MessageReader reader(objects_msg.get());
@@ -413,7 +474,8 @@ int DoEnroll(base::WeakPtr<BiometricsManagerProxy> biometrics_manager,
     LOG(INFO) << "Ending biometric enrollment";
     dbus::MethodCall cancel_call(biod::kEnrollSessionInterface,
                                  biod::kEnrollSessionCancelMethod);
-    enroll_session_object->CallMethodAndBlock(&cancel_call, kDbusTimeoutMs);
+    (void)enroll_session_object->CallMethodAndBlock(
+        &cancel_call, biod::dbus_constants::kDbusTimeoutMs);
   }
 
   return ret;
@@ -443,11 +505,22 @@ int DoAuthenticate(base::WeakPtr<BiometricsManagerProxy> biometrics_manager) {
   return ret;
 }
 
+int DoListen(base::WeakPtr<BiometricsManagerProxy> biometrics_manager) {
+  base::RunLoop run_loop;
+
+  int ret = 1;
+  biometrics_manager->SetFinishHandler(
+      base::BindRepeating(&OnFinish, &run_loop, &ret));
+
+  run_loop.Run();
+
+  return ret;
+}
+
 int DoList(BiodProxy* biod, const std::string& user_id) {
   LOG(INFO) << biod::kBiodServicePath << " : BioD Root Object Path";
   for (const auto& biometrics_manager : biod->biometrics_managers()) {
-    base::StringPiece biometrics_manager_path =
-        biometrics_manager->path().value();
+    std::string biometrics_manager_path = biometrics_manager->path().value();
     if (base::StartsWith(biometrics_manager_path, biod::kBiodServicePath,
                          base::CompareCase::SENSITIVE)) {
       biometrics_manager_path =
@@ -464,7 +537,7 @@ int DoList(BiodProxy* biod, const std::string& user_id) {
 
     for (const RecordProxy& record :
          biometrics_manager->GetRecordsForUser(user_id)) {
-      base::StringPiece record_path(record.path().value());
+      std::string record_path(record.path().value());
       if (base::StartsWith(record_path, biometrics_manager_path,
                            base::CompareCase::SENSITIVE)) {
         record_path = record_path.substr(biometrics_manager_path.size() + 1);
@@ -556,6 +629,18 @@ int main(int argc, char* argv[]) {
     } else {
       return biod.DestroyAllRecords();
     }
+  }
+
+  if (command == "listen") {
+    if (args.size() != 2) {
+      LOG(ERROR) << "Expected 2 parameters for listen command.";
+      return 1;
+    }
+    base::WeakPtr<BiometricsManagerProxy> biometrics_manager =
+        biod.GetBiometricsManager(args[1]);
+    CHECK(biometrics_manager)
+        << "Failed to find biometrics manager with given path";
+    return DoListen(biometrics_manager);
   }
 
   LOG(ERROR) << "Unrecognized command " << command;

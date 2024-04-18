@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,10 @@
 
 #include <memory>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <trunks/cr50_headers/ap_ro_status.h>
 #include <trunks/mock_tpm_state.h>
 #include <trunks/mock_tpm_utility.h>
 #include <trunks/tpm_constants.h>
@@ -266,16 +267,16 @@ TEST_F(Tpm2StatusTest, IsDictionaryAttackMitigationEnabledSuccess) {
   EXPECT_FALSE(is_enabled);
 }
 
-TEST_F(Tpm2StatusTest, SupportU2f) {
-  EXPECT_CALL(mock_tpm_utility_, IsCr50).WillRepeatedly(Return(true));
+TEST_F(Tpm2StatusTest, Cr50SupportsU2f) {
+  EXPECT_CALL(mock_tpm_utility_, IsGsc).WillRepeatedly(Return(true));
 
   EXPECT_TRUE(tpm_status_->SupportU2f());
 }
 
-TEST_F(Tpm2StatusTest, NotSupportU2f) {
-  EXPECT_CALL(mock_tpm_utility_, IsCr50).WillRepeatedly(Return(false));
+TEST_F(Tpm2StatusTest, NonCr50SupportsU2f) {
+  EXPECT_CALL(mock_tpm_utility_, IsGsc).WillRepeatedly(Return(false));
 
-  EXPECT_FALSE(tpm_status_->SupportU2f());
+  EXPECT_TRUE(tpm_status_->SupportU2f());
 }
 
 TEST_F(Tpm2StatusTest, SupportPinweaver) {
@@ -292,22 +293,15 @@ TEST_F(Tpm2StatusTest, NotSupportPinweaver) {
   EXPECT_FALSE(tpm_status_->SupportPinweaver());
 }
 
-TEST_F(Tpm2StatusTest, GetGscVersionCr50) {
-  EXPECT_CALL(mock_tpm_utility_, IsCr50).WillRepeatedly(Return(true));
-
-  EXPECT_EQ(tpm_status_->GetGscVersion(), GscVersion::GSC_VERSION_CR50);
-}
-
-TEST_F(Tpm2StatusTest, GetGscVersionNotGsc) {
-  EXPECT_CALL(mock_tpm_utility_, IsCr50).WillRepeatedly(Return(false));
-
-  EXPECT_EQ(tpm_status_->GetGscVersion(), GscVersion::GSC_VERSION_NOT_GSC);
+TEST_F(Tpm2StatusTest, GetGscVersion) {
+  // Running this command should not crash.
+  tpm_status_->GetGscVersion();
 }
 
 TEST_F(Tpm2StatusTest, GetRoVerificationStatusSuccess) {
   EXPECT_CALL(mock_tpm_utility_, GetRoVerificationStatus(_))
-      .WillRepeatedly(Invoke([](trunks::TpmUtility::ApRoStatus* status) {
-        *status = trunks::TpmUtility::ApRoStatus::kApRoPass;
+      .WillRepeatedly(Invoke([](ap_ro_status* status) {
+        *status = AP_RO_PASS;
         return TPM_RC_SUCCESS;
       }));
   tpm_manager::RoVerificationStatus status;
@@ -321,5 +315,125 @@ TEST_F(Tpm2StatusTest, GetRoVerificationStatusFailure) {
   tpm_manager::RoVerificationStatus status;
   EXPECT_FALSE(tpm_status_->GetRoVerificationStatus(&status));
 }
+
+TEST_F(Tpm2StatusTest, GetAlertsDataSuccess) {
+  EXPECT_CALL(mock_tpm_utility_, GetAlertsData(_))
+      .WillOnce([](trunks::TpmAlertsData* alerts) {
+        *alerts = trunks::TpmAlertsData{
+            .chip_family = trunks::kFamilyH1,
+            .alerts_num = 2,
+            .counters = {5, 9},
+        };
+        return TPM_RC_SUCCESS;
+      });
+  TpmStatus::AlertsData alerts;
+  EXPECT_TRUE(tpm_status_->GetAlertsData(&alerts));
+  EXPECT_EQ(alerts.counters[1], 5);
+  EXPECT_EQ(alerts.counters[2], 9);
+}
+
+TEST_F(Tpm2StatusTest, GetAlertsDataWrongFamily) {
+  EXPECT_CALL(mock_tpm_utility_, GetAlertsData(_))
+      .WillOnce([](trunks::TpmAlertsData* alerts) {
+        *alerts = trunks::TpmAlertsData{
+            .chip_family = 0x42,
+            .alerts_num = 2,
+            .counters = {5, 9},
+        };
+        return TPM_RC_SUCCESS;
+      });
+  TpmStatus::AlertsData alerts;
+  EXPECT_FALSE(tpm_status_->GetAlertsData(&alerts));
+}
+
+TEST_F(Tpm2StatusTest, GetAlertsDataNoSuchCommand) {
+  EXPECT_CALL(mock_tpm_utility_, GetAlertsData(_))
+      .WillRepeatedly(Return(trunks::TPM_RC_NO_SUCH_COMMAND));
+  TpmStatus::AlertsData alerts;
+  EXPECT_FALSE(tpm_status_->GetAlertsData(&alerts));
+}
+
+TEST_F(Tpm2StatusTest, GetAlertsDataFailure) {
+  EXPECT_CALL(mock_tpm_utility_, GetAlertsData(_))
+      .WillRepeatedly(Return(trunks::TPM_RC_FAILURE));
+  TpmStatus::AlertsData alerts;
+  EXPECT_TRUE(tpm_status_->GetAlertsData(&alerts));
+  EXPECT_EQ(alerts.counters[1], 0);
+}
+
+TEST_F(Tpm2StatusTest, GetTi50StatsSuccess) {
+  EXPECT_CALL(mock_tpm_utility_, GetTi50Stats(_, _, _, _))
+      .WillOnce([](uint32_t* fs_time, uint32_t* fs_size, uint32_t* aprov_time,
+                   uint32_t* aprov_status) {
+        *fs_time = 1234;
+        *fs_size = 5678;
+        *aprov_time = 9012;
+        *aprov_status = 3456;
+        return TPM_RC_SUCCESS;
+      });
+  uint32_t fs_time = 0;
+  uint32_t fs_size = 0;
+  uint32_t aprov_time = 0;
+  uint32_t aprov_status = 0;
+  EXPECT_TRUE(tpm_status_->GetTi50Stats(&fs_time, &fs_size, &aprov_time,
+                                        &aprov_status));
+  EXPECT_EQ(fs_time, 1234);
+  EXPECT_EQ(fs_size, 5678);
+  EXPECT_EQ(aprov_time, 9012);
+  EXPECT_EQ(aprov_status, 3456);
+}
+
+TEST_F(Tpm2StatusTest, GetTi50StatsFailure) {
+  EXPECT_CALL(mock_tpm_utility_, GetTi50Stats(_, _, _, _))
+      .WillRepeatedly(Return(trunks::TPM_RC_FAILURE));
+  uint32_t fs_time = 0;
+  uint32_t fs_size = 0;
+  uint32_t aprov_time = 0;
+  uint32_t aprov_status = 0;
+  EXPECT_FALSE(tpm_status_->GetTi50Stats(&fs_time, &fs_size, &aprov_time,
+                                         &aprov_status));
+  EXPECT_EQ(fs_time, 0);
+  EXPECT_EQ(fs_size, 0);
+  EXPECT_EQ(aprov_time, 0);
+  EXPECT_EQ(aprov_status, 0);
+}
+
+TEST_F(Tpm2StatusTest, GetTi50StatsNoSuchCommand) {
+  EXPECT_CALL(mock_tpm_utility_, GetTi50Stats(_, _, _, _))
+      .WillRepeatedly(Return(trunks::TPM_RC_NO_SUCH_COMMAND));
+  uint32_t fs_time = 0;
+  uint32_t fs_size = 0;
+  uint32_t aprov_time = 0;
+  uint32_t aprov_status = 0;
+  EXPECT_FALSE(tpm_status_->GetTi50Stats(&fs_time, &fs_size, &aprov_time,
+                                         &aprov_status));
+  EXPECT_EQ(fs_time, 0);
+  EXPECT_EQ(fs_size, 0);
+  EXPECT_EQ(aprov_time, 0);
+  EXPECT_EQ(aprov_status, 0);
+}
+
+#if USE_CR50_ONBOARD || USE_TI50_ONBOARD
+TEST_F(Tpm2StatusTest, GetRwVersionSuccess) {
+  EXPECT_CALL(mock_tpm_utility_, GetRwVersion(_, _, _))
+      .WillOnce([](uint32_t* epoch, uint32_t* major, uint32_t* minor) {
+        *epoch = 1;
+        *major = 2;
+        *minor = 3;
+        return TPM_RC_SUCCESS;
+      });
+  std::string rw_version;
+  EXPECT_TRUE(tpm_status_->GetRwVersion(&rw_version));
+  EXPECT_EQ(rw_version, "1.2.3");
+}
+
+TEST_F(Tpm2StatusTest, GetRwVersionFailure) {
+  EXPECT_CALL(mock_tpm_utility_, GetRwVersion(_, _, _))
+      .WillRepeatedly(Return(TPM_RC_FAILURE));
+  std::string rw_version;
+  EXPECT_FALSE(tpm_status_->GetRwVersion(&rw_version));
+  EXPECT_EQ(rw_version, "");
+}
+#endif
 
 }  // namespace tpm_manager

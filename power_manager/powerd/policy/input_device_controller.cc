@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,13 +12,12 @@
 #include "power_manager/common/power_constants.h"
 #include "power_manager/common/prefs.h"
 #include "power_manager/powerd/policy/backlight_controller.h"
-#include "power_manager/powerd/system/acpi_wakeup_helper.h"
-#include "power_manager/powerd/system/cros_ec_helper.h"
+#include "power_manager/powerd/system/acpi_wakeup_helper_interface.h"
+#include "power_manager/powerd/system/cros_ec_helper_interface.h"
 #include "power_manager/powerd/system/tagged_device.h"
 #include "power_manager/powerd/system/udev.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -114,8 +113,6 @@ const char InputDeviceController::kInhibited[] = "inhibited";
 const char InputDeviceController::kTPAD[] = "TPAD";
 const char InputDeviceController::kTSCR[] = "TSCR";
 const char InputDeviceController::kCRFP[] = "CRFP";
-
-InputDeviceController::InputDeviceController() {}
 
 InputDeviceController::~InputDeviceController() {
   if (udev_)
@@ -298,5 +295,4 @@ void InputDeviceController::UpdatePolicy() {
   ConfigureEcWakeup();
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

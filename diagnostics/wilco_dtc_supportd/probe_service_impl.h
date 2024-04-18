@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,14 +10,16 @@
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
+#include <mojo/public/cpp/bindings/remote.h>
 
+#include "diagnostics/mojom/public/cros_healthd.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 #include "diagnostics/wilco_dtc_supportd/probe_service.h"
-#include "mojo/cros_healthd.mojom.h"
-#include "mojo/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
+namespace wilco {
 
 class ProbeServiceImpl final : public ProbeService {
  public:
@@ -31,7 +33,7 @@ class ProbeServiceImpl final : public ProbeService {
 
   // ProbeService overrides:
   void ProbeTelemetryInfo(
-      std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum> categories,
+      std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum> categories,
       ProbeTelemetryInfoCallback callback) override;
 
  private:
@@ -39,9 +41,9 @@ class ProbeServiceImpl final : public ProbeService {
   // callback.
   void ForwardProbeTelemetryInfoResponse(
       size_t callback_key,
-      chromeos::cros_healthd::mojom::TelemetryInfoPtr telemetry_info);
+      ash::cros_healthd::mojom::TelemetryInfoPtr telemetry_info);
 
-  // Binds |service_ptr_| to an implementation of CrosHealthdProbeService,
+  // Binds |service_| to an implementation of CrosHealthdProbeService,
   // if it is not already bound. Returns false if wilco_dtc_supportd's mojo
   // service is not yet running and the binding cannot be attempted.
   bool BindCrosHealthdProbeServiceIfNeeded();
@@ -56,9 +58,9 @@ class ProbeServiceImpl final : public ProbeService {
   // Mojo interface to the CrosHealthdProbeService endpoint.
   //
   // In production this interface is implemented by the cros_healthd process.
-  chromeos::cros_healthd::mojom::CrosHealthdProbeServicePtr service_ptr_;
+  mojo::Remote<ash::cros_healthd::mojom::CrosHealthdProbeService> service_;
 
-  // The following map holds in flight callbacks to |service_ptr_|.
+  // The following map holds in flight callbacks to |service_|.
   // In case the remote mojo endpoint closes while there are any in flight
   // callbacks, the disconnect handler will call those callbacks with nullptr
   // response. This allows wilco_dtc_supportd to remain responsive if
@@ -76,6 +78,7 @@ class ProbeServiceImpl final : public ProbeService {
   base::WeakPtrFactory<ProbeServiceImpl> weak_ptr_factory_{this};
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_PROBE_SERVICE_IMPL_H_

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define TRUNKS_TPM_STATE_H_
 
 #include <string>
-
-#include <base/macros.h>
 
 #include "trunks/tpm_generated.h"
 #include "trunks/trunks_export.h"

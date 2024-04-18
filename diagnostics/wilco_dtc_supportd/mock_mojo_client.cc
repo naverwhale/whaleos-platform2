@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,11 @@
 
 #include <utility>
 
-#include "diagnostics/common/mojo_test_utils.h"
-#include "diagnostics/common/mojo_utils.h"
+#include "diagnostics/wilco_dtc_supportd/utils/mojo_test_utils.h"
+#include "diagnostics/wilco_dtc_supportd/utils/mojo_utils.h"
 
 namespace diagnostics {
+namespace wilco {
 
 void MockMojoClient::SendWilcoDtcMessageToUi(
     mojo::ScopedHandle json_message, SendWilcoDtcMessageToUiCallback callback) {
@@ -41,4 +42,5 @@ void MockMojoClient::PerformWebRequest(
                         request_body_content, std::move(callback));
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

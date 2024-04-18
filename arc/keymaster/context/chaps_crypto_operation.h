@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,10 @@
 #define ARC_KEYMASTER_CONTEXT_CHAPS_CRYPTO_OPERATION_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
 #include <brillo/secure_blob.h>
 
 #include "arc/keymaster/context/context_adaptor.h"
@@ -41,9 +41,9 @@ class ChapsCryptoOperation : public CryptoOperation {
   ChapsCryptoOperation& operator=(const ChapsCryptoOperation&) = delete;
 
   // CryptoOperation overrides:
-  base::Optional<uint64_t> Begin(MechanismDescription description) override;
-  base::Optional<brillo::Blob> Update(const brillo::Blob& input) override;
-  base::Optional<brillo::Blob> Finish() override;
+  std::optional<uint64_t> Begin(MechanismDescription description) override;
+  std::optional<brillo::Blob> Update(const brillo::Blob& input) override;
+  std::optional<brillo::Blob> Finish() override;
   bool Abort() override;
 
   bool IsSupportedMechanism(MechanismDescription description) const override;

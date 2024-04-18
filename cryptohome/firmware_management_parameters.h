@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -7,15 +7,15 @@
 #ifndef CRYPTOHOME_FIRMWARE_MANAGEMENT_PARAMETERS_H_
 #define CRYPTOHOME_FIRMWARE_MANAGEMENT_PARAMETERS_H_
 
+#include "cryptohome/firmware_management_parameters_interface.h"
+#include "cryptohome/proto_bindings/UserDataAuth.pb.h"
+#include "libhwsec/frontend/cryptohome/frontend.h"
+
 #include <memory>
 
-#include <base/macros.h>
 #include <base/strings/string_util.h>
 #include <brillo/secure_blob.h>
 #include <openssl/sha.h>
-
-#include "cryptohome/fwmp_checker.h"
-#include "cryptohome/tpm.h"
 
 namespace cryptohome {
 
@@ -44,21 +44,9 @@ struct FirmwareManagementParametersRawV1_0;
 //   fwmp->GetFlags(&dev_flags);
 //   fwmp->GetDeveloperKeyHash(&dev_hash);
 // ...
-class FirmwareManagementParameters {
+class FirmwareManagementParameters
+    : public FirmwareManagementParametersInterface {
  public:
-  // TODO(b/183474803): add doc.
-  enum class ResetMethod {
-    kRecreateSpace,
-    kStoreDefaultFlags,
-  };
-  enum class WriteProtectionMethod {
-    kWriteLock,
-    kOwnerAuthorization,
-  };
-  // Creates a propoer firmware management parameters according to the TPM
-  // version on the device.
-  static std::unique_ptr<FirmwareManagementParameters> CreateInstance(Tpm* tpm);
-
   // Populates the basic internal state of the firmware management parameters.
   //
   // Parameters
@@ -70,15 +58,32 @@ class FirmwareManagementParameters {
   // FirmwareManagementParameters requires a |tpm|.  If a NULL |tpm| is
   // supplied, none of the operations will succeed, but it should not crash or
   // behave unexpectedly. See firmware_management_parameters.md for info.
-  FirmwareManagementParameters(ResetMethod reset_method,
-                               WriteProtectionMethod write_protection_method,
-                               Tpm* tpm,
-                               std::unique_ptr<FwmpChecker> fwmp_checker);
+  explicit FirmwareManagementParameters(const hwsec::CryptohomeFrontend* hwsec);
+  FirmwareManagementParameters(hwsec::Space fwmp_type,
+                               const hwsec::CryptohomeFrontend* hwsec);
   FirmwareManagementParameters(const FirmwareManagementParameters&) = delete;
   FirmwareManagementParameters& operator=(const FirmwareManagementParameters&) =
       delete;
 
   virtual ~FirmwareManagementParameters();
+
+  bool GetFWMP(user_data_auth::FirmwareManagementParameters* fwmp) override;
+
+  bool SetFWMP(
+      const user_data_auth::FirmwareManagementParameters& fwmp) override;
+
+  bool Destroy() override;
+
+  // NVRAM index for firmware management parameters space
+  static const uint32_t kNvramIndex;
+  // Size of the NVRAM structure
+  static const uint32_t kNvramBytes;
+  // Offset of CRC'd data (past CRC and size)
+  static const uint32_t kCrcDataOffset;
+
+  // No-op in legacy install_attributes.
+  void SetDeviceManagementProxy(
+      std::unique_ptr<org::chromium::DeviceManagementProxy> proxy) override{};
 
   // Creates the backend state needed for this firmware management parameters.
   //
@@ -88,16 +93,6 @@ class FirmwareManagementParameters {
   // - true if a new space was instantiated or an old one could be used.
   // - false if the space cannot be created or claimed.
   virtual bool Create(void);
-
-  // Destroys all backend state for this firmware management parameters.
-  //
-  // This call deletes the NVRAM space if defined.
-  //
-  // Returns
-  // - false if TPM Owner authorization is missing or the space cannot be
-  //   destroyed.
-  // - true if the space is already undefined or has been destroyed.
-  virtual bool Destroy(void);
 
   // Loads the TPM NVRAM state date into memory
   //
@@ -134,27 +129,15 @@ class FirmwareManagementParameters {
   virtual bool GetDeveloperKeyHash(brillo::Blob* hash);
 
   // Returns true if the firmware management parameters have been loaded
-  virtual bool IsLoaded() const { return loaded_; }
+  bool IsLoaded() const { return loaded_; }
 
-  // NVRAM index for firmware management parameters space
-  static const uint32_t kNvramIndex;
-  // Size of the NVRAM structure
-  static const uint32_t kNvramBytes;
-  // Offset of CRC'd data (past CRC and size)
-  static const uint32_t kCrcDataOffset;
+ protected:
+  // constructor for mock testing purpose.
+  FirmwareManagementParameters();
 
  private:
-  // Returns true if we have the authorization needed to create/destroy
-  // NVRAM spaces.
-  bool HasAuthorization() const;
-
-  // Returns true if the tpm is owned and connected.
-  bool TpmIsReady() const;
-
-  const ResetMethod reset_method_;
-  const WriteProtectionMethod write_protection_method_;
-  Tpm* const tpm_;
-  const std::unique_ptr<FwmpChecker> fwmp_checker_;
+  hwsec::Space fwmp_type_;
+  const hwsec::CryptohomeFrontend* const hwsec_;
   std::unique_ptr<FirmwareManagementParametersRawV1_0> raw_;
   bool loaded_ = false;
 };

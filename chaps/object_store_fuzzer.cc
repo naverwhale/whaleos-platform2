@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <stddef.h>
 #include <stdint.h>
 
+#include <base/files/scoped_temp_dir.h>
 #include <base/logging.h>
 #include <brillo/secure_blob.h>
 #include <fuzzer/FuzzedDataProvider.h>
@@ -23,7 +24,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   static Environment env;
   FuzzedDataProvider data_provider(data, size);
   chaps::ObjectStoreImpl store;
-  store.Init(base::FilePath(":memory:"));
+  chaps::ChapsMetrics metrics;
+  base::ScopedTempDir tmp_dir;
+  CHECK(tmp_dir.CreateUniqueTempDir());
+  store.Init(tmp_dir.GetPath(), &metrics);
   std::string encryption_key = data_provider.ConsumeBytesAsString(32);
   if (encryption_key.size() < 32) {
     // We won't have any data to fuzz further, so no reason to even continue.

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,8 +25,13 @@ class ModemSignalProxyInterface {
 
   virtual void Setup(const int rate,
                      Error* error,
-                     const ResultCallback& callback,
+                     ResultCallback callback,
                      int timeout) = 0;
+
+  virtual void SetupThresholds(const KeyValueStore& settings,
+                               Error* error,
+                               ResultCallback callback,
+                               int timeout) = 0;
 };
 
 }  // namespace mm1

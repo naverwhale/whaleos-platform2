@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -65,11 +65,12 @@ class MyDbusObject {
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
+#include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
-#include <base/macros.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/brillo_export.h>
 #include <brillo/dbus/async_event_sequencer.h>
@@ -96,7 +97,7 @@ class DBusObject;
 // AddProperty() respectively.
 // There are three overloads for DBusInterface::AddSimpleMethodHandler() and
 // AddMethodHandler() each:
-//  1. That takes a handler as base::Callback
+//  1. That takes a handler as base::RepeatingCallback
 //  2. That takes a static function
 //  3. That takes a class instance pointer and a class member function
 // The signature of the handler for AddSimpleMethodHandler must be one of:
@@ -123,13 +124,38 @@ class BRILLO_EXPORT DBusInterface final {
   DBusInterface(const DBusInterface&) = delete;
   DBusInterface& operator=(const DBusInterface&) = delete;
 
-  // Register sync DBus method handler for |method_name| as base::Callback.
+  // Register sync DBus method handler for |method_name| as
+  // base::RepeatingCallback.
   template <typename R, typename... Args>
+  inline std::enable_if_t<!std::is_same_v<R, void>> AddSimpleMethodHandler(
+      const std::string& method_name,
+      const base::RepeatingCallback<R(Args...)>& handler) {
+    static_assert((!std::is_pointer_v<Args> && ...),
+                  "AddSimpleMethodHandler with return value should not have a "
+                  "callback with output params.");
+    AddSimpleMethodHandlerWithErrorAndMessage(
+        method_name,
+        base::BindRepeating(
+            [](decltype(handler) handler, ErrorPtr* error,
+               dbus::Message* unused_message, Args... args, R* out) {
+              *out = handler.Run(args...);
+              return true;
+            },
+            handler));
+  }
+
+  template <typename... Args>
   inline void AddSimpleMethodHandler(
       const std::string& method_name,
-      const base::Callback<R(Args...)>& handler) {
-    Handler<SimpleDBusInterfaceMethodHandler<R, Args...>>::Add(
-        this, method_name, handler);
+      const base::RepeatingCallback<void(Args...)>& handler) {
+    AddSimpleMethodHandlerWithErrorAndMessage(
+        method_name, base::BindRepeating(
+                         [](decltype(handler) handler, ErrorPtr* error,
+                            dbus::Message* unused_message, Args... args) {
+                           handler.Run(args...);
+                           return true;
+                         },
+                         handler));
   }
 
   // Register sync D-Bus method handler for |method_name| as a static
@@ -137,8 +163,7 @@ class BRILLO_EXPORT DBusInterface final {
   template <typename R, typename... Args>
   inline void AddSimpleMethodHandler(const std::string& method_name,
                                      R (*handler)(Args...)) {
-    Handler<SimpleDBusInterfaceMethodHandler<R, Args...>>::Add(
-        this, method_name, base::Bind(handler));
+    AddSimpleMethodHandler(method_name, base::BindRepeating(handler));
   }
 
   // Register sync D-Bus method handler for |method_name| as a class member
@@ -147,8 +172,7 @@ class BRILLO_EXPORT DBusInterface final {
   inline void AddSimpleMethodHandler(const std::string& method_name,
                                      Instance instance,
                                      R (Class::*handler)(Args...)) {
-    Handler<SimpleDBusInterfaceMethodHandler<R, Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddSimpleMethodHandler(method_name, base::BindRepeating(handler, instance));
   }
 
   // Same as above but for const-method of a class.
@@ -156,17 +180,22 @@ class BRILLO_EXPORT DBusInterface final {
   inline void AddSimpleMethodHandler(const std::string& method_name,
                                      Instance instance,
                                      R (Class::*handler)(Args...) const) {
-    Handler<SimpleDBusInterfaceMethodHandler<R, Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddSimpleMethodHandler(method_name, base::BindRepeating(handler, instance));
   }
 
-  // Register sync DBus method handler for |method_name| as base::Callback.
+  // Register sync DBus method handler for |method_name| as
+  // base::RepeatingCallback.
   template <typename... Args>
   inline void AddSimpleMethodHandlerWithError(
       const std::string& method_name,
-      const base::Callback<bool(ErrorPtr*, Args...)>& handler) {
-    Handler<SimpleDBusInterfaceMethodHandlerWithError<Args...>>::Add(
-        this, method_name, handler);
+      const base::RepeatingCallback<bool(ErrorPtr*, Args...)>& handler) {
+    AddSimpleMethodHandlerWithErrorAndMessage(
+        method_name, base::BindRepeating(
+                         [](decltype(handler) handler, ErrorPtr* error,
+                            dbus::Message* unused_message, Args... args) {
+                           return handler.Run(error, args...);
+                         },
+                         handler));
   }
 
   // Register sync D-Bus method handler for |method_name| as a static
@@ -175,8 +204,7 @@ class BRILLO_EXPORT DBusInterface final {
   inline void AddSimpleMethodHandlerWithError(const std::string& method_name,
                                               bool (*handler)(ErrorPtr*,
                                                               Args...)) {
-    Handler<SimpleDBusInterfaceMethodHandlerWithError<Args...>>::Add(
-        this, method_name, base::Bind(handler));
+    AddSimpleMethodHandlerWithError(method_name, base::BindRepeating(handler));
   }
 
   // Register sync D-Bus method handler for |method_name| as a class member
@@ -186,8 +214,8 @@ class BRILLO_EXPORT DBusInterface final {
                                               Instance instance,
                                               bool (Class::*handler)(ErrorPtr*,
                                                                      Args...)) {
-    Handler<SimpleDBusInterfaceMethodHandlerWithError<Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddSimpleMethodHandlerWithError(method_name,
+                                    base::BindRepeating(handler, instance));
   }
 
   // Same as above but for const-method of a class.
@@ -197,19 +225,41 @@ class BRILLO_EXPORT DBusInterface final {
                                               bool (Class::*handler)(ErrorPtr*,
                                                                      Args...)
                                                   const) {
-    Handler<SimpleDBusInterfaceMethodHandlerWithError<Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddSimpleMethodHandlerWithError(method_name,
+                                    base::BindRepeating(handler, instance));
   }
 
-  // Register sync DBus method handler for |method_name| as base::Callback.
-  // Passing the method sender as a first parameter to the callback.
+  // Register sync DBus method handler for |method_name| as
+  // base::RepeatingCallback. Passing the method sender as a first parameter to
+  // the callback.
   template <typename... Args>
   inline void AddSimpleMethodHandlerWithErrorAndMessage(
       const std::string& method_name,
-      const base::Callback<bool(ErrorPtr*, ::dbus::Message*, Args...)>&
+      const base::RepeatingCallback<bool(ErrorPtr*, ::dbus::Message*, Args...)>&
           handler) {
-    Handler<SimpleDBusInterfaceMethodHandlerWithErrorAndMessage<Args...>>::Add(
-        this, method_name, handler);
+    AddMethodHandlerWithMessageInternal(
+        method_name,
+        base::BindRepeating(
+            [](decltype(handler) handler,
+               std::unique_ptr<DBusMethodResponseBase> response,
+               dbus::Message* message, Args... args) {
+              ErrorPtr error;
+              if (!handler.Run(&error, message, args...)) {
+                response->ReplyWithError(error.get());
+                return;
+              }
+
+              auto custom_response = response->CreateCustomResponse();
+              dbus::MessageWriter writer(custom_response.get());
+              std::apply(
+                  [&writer](auto*... args) {
+                    WriteDBusArgs(&writer, *args...);
+                  },
+                  internal::FilterTuple<std::is_pointer_v<Args>...>(
+                      std::forward_as_tuple(args...)));
+              response->SendRawResponse(std::move(custom_response));
+            },
+            handler));
   }
 
   // Register sync D-Bus method handler for |method_name| as a static
@@ -219,8 +269,8 @@ class BRILLO_EXPORT DBusInterface final {
   inline void AddSimpleMethodHandlerWithErrorAndMessage(
       const std::string& method_name,
       bool (*handler)(ErrorPtr*, ::dbus::Message*, Args...)) {
-    Handler<SimpleDBusInterfaceMethodHandlerWithErrorAndMessage<Args...>>::Add(
-        this, method_name, base::Bind(handler));
+    AddSimpleMethodHandlerWithErrorAndMessage(method_name,
+                                              base::BindRepeating(handler));
   }
 
   // Register sync D-Bus method handler for |method_name| as a class member
@@ -231,8 +281,8 @@ class BRILLO_EXPORT DBusInterface final {
       const std::string& method_name,
       Instance instance,
       bool (Class::*handler)(ErrorPtr*, ::dbus::Message*, Args...)) {
-    Handler<SimpleDBusInterfaceMethodHandlerWithErrorAndMessage<Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddSimpleMethodHandlerWithErrorAndMessage(
+        method_name, base::BindRepeating(handler, instance));
   }
 
   // Same as above but for const-method of a class.
@@ -241,19 +291,24 @@ class BRILLO_EXPORT DBusInterface final {
       const std::string& method_name,
       Instance instance,
       bool (Class::*handler)(ErrorPtr*, ::dbus::Message*, Args...) const) {
-    Handler<SimpleDBusInterfaceMethodHandlerWithErrorAndMessage<Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddSimpleMethodHandlerWithErrorAndMessage(
+        method_name, base::BindRepeating(handler, instance));
   }
 
-  // Register an async DBus method handler for |method_name| as base::Callback.
+  // Register an async DBus method handler for |method_name| as
+  // base::RepeatingCallback.
   template <typename Response, typename... Args>
   inline void AddMethodHandler(
       const std::string& method_name,
-      const base::Callback<void(std::unique_ptr<Response>, Args...)>& handler) {
-    static_assert(std::is_base_of<DBusMethodResponseBase, Response>::value,
-                  "Response must be DBusMethodResponse<T...>");
-    Handler<DBusInterfaceMethodHandler<Response, Args...>>::Add(
-        this, method_name, handler);
+      const base::RepeatingCallback<void(std::unique_ptr<Response>, Args...)>&
+          handler) {
+    AddMethodHandlerWithMessage(
+        method_name,
+        base::BindRepeating(
+            [](decltype(handler) handler, std::unique_ptr<Response> response,
+               dbus::Message* unused_message,
+               Args... args) { handler.Run(std::move(response), args...); },
+            handler));
   }
 
   // Register an async D-Bus method handler for |method_name| as a static
@@ -262,10 +317,7 @@ class BRILLO_EXPORT DBusInterface final {
   inline void AddMethodHandler(const std::string& method_name,
                                void (*handler)(std::unique_ptr<Response>,
                                                Args...)) {
-    static_assert(std::is_base_of<DBusMethodResponseBase, Response>::value,
-                  "Response must be DBusMethodResponse<T...>");
-    Handler<DBusInterfaceMethodHandler<Response, Args...>>::Add(
-        this, method_name, base::Bind(handler));
+    AddMethodHandler(method_name, base::BindRepeating(handler));
   }
 
   // Register an async D-Bus method handler for |method_name| as a class member
@@ -278,10 +330,7 @@ class BRILLO_EXPORT DBusInterface final {
                                Instance instance,
                                void (Class::*handler)(std::unique_ptr<Response>,
                                                       Args...)) {
-    static_assert(std::is_base_of<DBusMethodResponseBase, Response>::value,
-                  "Response must be DBusMethodResponse<T...>");
-    Handler<DBusInterfaceMethodHandler<Response, Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddMethodHandler(method_name, base::BindRepeating(handler, instance));
   }
 
   // Same as above but for const-method of a class.
@@ -293,22 +342,60 @@ class BRILLO_EXPORT DBusInterface final {
                                Instance instance,
                                void (Class::*handler)(std::unique_ptr<Response>,
                                                       Args...) const) {
-    static_assert(std::is_base_of<DBusMethodResponseBase, Response>::value,
-                  "Response must be DBusMethodResponse<T...>");
-    Handler<DBusInterfaceMethodHandler<Response, Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddMethodHandler(method_name, base::BindRepeating(handler, instance));
   }
 
-  // Register an async DBus method handler for |method_name| as base::Callback.
+  // Register an async DBus method handler for |method_name| as
+  // base::RepeatingCallback.
   template <typename Response, typename... Args>
   inline void AddMethodHandlerWithMessage(
       const std::string& method_name,
-      const base::Callback<void(
+      const base::RepeatingCallback<void(
+          std::unique_ptr<Response>, ::dbus::Message*, Args...)>& handler) {
+    static_assert((!std::is_pointer_v<Args> && ...),
+                  "AddMethodHandlerWithMessage's callback should not have "
+                  "output params.");
+    AddMethodHandlerWithMessageInternal(method_name, handler);
+  }
+
+  template <typename Response, typename... Args>
+  inline void AddMethodHandlerWithMessageInternal(
+      const std::string& method_name,
+      const base::RepeatingCallback<void(
           std::unique_ptr<Response>, ::dbus::Message*, Args...)>& handler) {
     static_assert(std::is_base_of<DBusMethodResponseBase, Response>::value,
                   "Response must be DBusMethodResponse<T...>");
-    Handler<DBusInterfaceMethodHandlerWithMessage<Response, Args...>>::Add(
-        this, method_name, handler);
+    AddRawMethodHandler(
+        method_name,
+        base::BindRepeating(
+            [](decltype(handler) handler, dbus::MethodCall* method_call,
+               ResponseSender sender) {
+              ::dbus::MessageReader reader(method_call);
+              auto response =
+                  std::make_unique<Response>(method_call, std::move(sender));
+
+              std::tuple<StorageType<Args>...> args;
+              if (!ApplyReadDBusArgs(
+                      &reader,
+                      internal::FilterTuple<!std::is_pointer_v<Args>...>(
+                          args))) {
+                // Error parsing method arguments.
+                response->ReplyWithError(
+                    Error::Create(FROM_HERE, errors::dbus::kDomain,
+                                  DBUS_ERROR_INVALID_ARGS,
+                                  "failed to read arguments")
+                        .get());
+                return;
+              }
+
+              std::apply(
+                  [&handler, &response, method_call](auto&&... args) {
+                    handler.Run(std::move(response), method_call,
+                                std::forward<decltype(args)>(args)...);
+                  },
+                  internal::MapArgTypes<Args...>(args));
+            },
+            handler));
   }
 
   // Register an async D-Bus method handler for |method_name| as a static
@@ -317,10 +404,7 @@ class BRILLO_EXPORT DBusInterface final {
   inline void AddMethodHandlerWithMessage(
       const std::string& method_name,
       void (*handler)(std::unique_ptr<Response>, ::dbus::Message*, Args...)) {
-    static_assert(std::is_base_of<DBusMethodResponseBase, Response>::value,
-                  "Response must be DBusMethodResponse<T...>");
-    Handler<DBusInterfaceMethodHandlerWithMessage<Response, Args...>>::Add(
-        this, method_name, base::Bind(handler));
+    AddMethodHandlerWithMessage(method_name, base::BindRepeating(handler));
   }
 
   // Register an async D-Bus method handler for |method_name| as a class member
@@ -335,10 +419,8 @@ class BRILLO_EXPORT DBusInterface final {
       void (Class::*handler)(std::unique_ptr<Response>,
                              ::dbus::Message*,
                              Args...)) {
-    static_assert(std::is_base_of<DBusMethodResponseBase, Response>::value,
-                  "Response must be DBusMethodResponse<T...>");
-    Handler<DBusInterfaceMethodHandlerWithMessage<Response, Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddMethodHandlerWithMessage(method_name,
+                                base::BindRepeating(handler, instance));
   }
 
   // Same as above but for const-method of a class.
@@ -352,16 +434,15 @@ class BRILLO_EXPORT DBusInterface final {
       void (Class::*handler)(std::unique_ptr<Response>,
                              ::dbus::Message*,
                              Args...) const) {
-    static_assert(std::is_base_of<DBusMethodResponseBase, Response>::value,
-                  "Response must be DBusMethodResponse<T...>");
-    Handler<DBusInterfaceMethodHandlerWithMessage<Response, Args...>>::Add(
-        this, method_name, base::Bind(handler, instance));
+    AddMethodHandlerWithMessage(method_name,
+                                base::BindRepeating(handler, instance));
   }
 
-  // Register a raw D-Bus method handler for |method_name| as base::Callback.
+  // Register a raw D-Bus method handler for |method_name| as
+  // base::RepeatingCallback.
   inline void AddRawMethodHandler(
       const std::string& method_name,
-      const base::Callback<void(::dbus::MethodCall*, ResponseSender)>&
+      const base::RepeatingCallback<void(::dbus::MethodCall*, ResponseSender)>&
           handler) {
     Handler<RawDBusInterfaceMethodHandler>::Add(this, method_name, handler);
   }
@@ -373,8 +454,7 @@ class BRILLO_EXPORT DBusInterface final {
                                   Instance instance,
                                   void (Class::*handler)(::dbus::MethodCall*,
                                                          ResponseSender)) {
-    Handler<RawDBusInterfaceMethodHandler>::Add(this, method_name,
-                                                base::Bind(handler, instance));
+    AddRawMethodHandler(method_name, base::BindRepeating(handler, instance));
   }
 
   // Register a D-Bus property.
@@ -431,6 +511,10 @@ class BRILLO_EXPORT DBusInterface final {
     return RegisterSignalOfType<DBusSignal<Args...>>(signal_name);
   }
 
+  // Returns the set of registered method names. The result is guaranteed to
+  // contain no duplicates; there's NO guarantee about any particular ordering.
+  std::vector<std::string> GetMethodNames() const;
+
  private:
   // Helper to create an instance of DBusInterfaceMethodHandlerInterface-derived
   // handler and add it to the method handler map of the interface.
@@ -479,7 +563,7 @@ class BRILLO_EXPORT DBusInterface final {
       ::dbus::Bus* bus,
       ::dbus::ExportedObject* exported_object,
       const ::dbus::ObjectPath& object_path,
-      const AsyncEventSequencer::CompletionAction& completion_callback);
+      AsyncEventSequencer::CompletionAction completion_callback);
   // Exports all the methods and properties of this interface and claims the
   // D-Bus interface synchronously.
   // object_manager - ExportedObjectManager instance that notifies D-Bus
@@ -496,7 +580,7 @@ class BRILLO_EXPORT DBusInterface final {
       ExportedObjectManager* object_manager,
       ::dbus::ExportedObject* exported_object,
       const ::dbus::ObjectPath& object_path,
-      const AsyncEventSequencer::CompletionAction& completion_callback);
+      AsyncEventSequencer::CompletionAction completion_callback);
   // Releases the D-Bus interface and unexports all the methods synchronously.
   BRILLO_PRIVATE void UnexportAndBlock(ExportedObjectManager* object_manager,
                                        ::dbus::ExportedObject* exported_object,
@@ -527,7 +611,7 @@ class BRILLO_EXPORT DBusInterface final {
 // by this object.
 class BRILLO_EXPORT DBusObject {
  public:
-  using PropertyHandlerSetupCallback = base::Callback<void(
+  using PropertyHandlerSetupCallback = base::OnceCallback<void(
       DBusInterface* prop_interface, ExportedPropertySet* property_set)>;
 
   // object_manager - ExportedObjectManager instance that notifies D-Bus
@@ -568,7 +652,7 @@ class BRILLO_EXPORT DBusObject {
   // interface proxy does not exist yet, it will be automatically created.
   void ExportInterfaceAsync(
       const std::string& interface_name,
-      const AsyncEventSequencer::CompletionAction& completion_callback);
+      AsyncEventSequencer::CompletionAction completion_callback);
 
   // Exports a proxy handler for the interface |interface_name|. If the
   // interface proxy does not exist yet, it will be automatically created. This
@@ -582,7 +666,7 @@ class BRILLO_EXPORT DBusObject {
   // to make sure it will start with a clean state of method handlers.
   void UnexportInterfaceAsync(
       const std::string& interface_name,
-      const AsyncEventSequencer::CompletionAction& completion_callback);
+      AsyncEventSequencer::CompletionAction completion_callback);
 
   // Unexports the interface |interface_name| and unexports all method handlers.
   // In some cases, one may want to export an interface even after it's removed.
@@ -596,18 +680,24 @@ class BRILLO_EXPORT DBusObject {
   // that will call |completion_callback| when the object and all of its
   // interfaces are registered.
   virtual void RegisterAsync(
-      const AsyncEventSequencer::CompletionAction& completion_callback);
+      AsyncEventSequencer::CompletionAction completion_callback);
 
-  // Registers the object instance with D-Bus. This is call is synchronous and
+  // Registers the object instance with D-Bus. This call is synchronous and
   // will block until the object and all of its interfaces are registered.
+  // This requires the origin thread and D-Bus thread are the same.
   virtual void RegisterAndBlock();
 
-  // Unregister the object instance with D-Bus.  This will unregister the
+  // TODO(b/278483576): Add UnregisterAsync().
+
+  // Unregisters the object instance with D-Bus.  This will unregister the
   // |exported_object_| and its path from the bus.  The destruction of
   // |exported_object_| will be deferred in an async task posted by the bus.
   // It is guarantee that upon return from this call a new DBusObject with the
   // same object path can be created/registered.
-  virtual void UnregisterAsync();
+  // This call is synchronous and will block until the object and all of
+  // its interfaces are unregistered.
+  // This requires the origin thread and D-Bus thread are the same.
+  virtual void UnregisterAndBlock();
 
   // Returns the ExportedObjectManager proxy, if any. If DBusObject has been
   // constructed without an object manager, this method returns an empty

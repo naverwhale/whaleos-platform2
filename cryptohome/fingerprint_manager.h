@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,15 @@
 
 #include <memory>
 #include <string>
+#include "cryptohome/username.h"
 
 #include <biod/biod_proxy/biometrics_manager_proxy_base.h>
 
 namespace cryptohome {
 
-const char kCrosFpBiometricsManagerRelativePath[] = "/CrosFpBiometricsManager";
-const int kMaxFingerprintRetries = 5;
+inline constexpr char kCrosFpBiometricsManagerRelativePath[] =
+    "/CrosFpBiometricsManager";
+inline constexpr int kMaxFingerprintRetries = 5;
 
 enum class FingerprintScanStatus {
   SUCCESS = 0,
@@ -29,8 +31,9 @@ enum class FingerprintScanStatus {
 class FingerprintManager {
  public:
   using StartSessionCallback = base::OnceCallback<void(bool success)>;
-  using ResultCallback =
-      base::RepeatingCallback<void(FingerprintScanStatus status)>;
+  using ResultCallback = base::OnceCallback<void(FingerprintScanStatus status)>;
+  using SignalCallback =
+      base::RepeatingCallback<void(FingerprintScanStatus result)>;
 
   // Factory method. Returns nullptr if Biometrics Daemon is not in a good
   // state or if the device does not have fingerprint support.
@@ -40,7 +43,7 @@ class FingerprintManager {
   FingerprintManager();
   virtual ~FingerprintManager();
 
-  const std::string& GetCurrentUser();
+  const ObfuscatedUsername& GetCurrentUser();
 
   // Returns a weak pointer to this instance. Used when creating callbacks.
   base::WeakPtr<FingerprintManager> GetWeakPtr();
@@ -60,19 +63,24 @@ class FingerprintManager {
   // 3. EndAuthSession() is called, e.g. user decides to cancel operation
   //    through UI.
   virtual void StartAuthSessionAsyncForUser(
-      const std::string& user,
+      const ObfuscatedUsername& user,
       StartSessionCallback auth_session_start_client_callback);
 
   // Tells Biometrics Daemon to end fingerprint auth session and resets all
   // states.
   virtual void EndAuthSession();
 
-  virtual bool HasAuthSessionForUser(const std::string& user);
+  virtual bool HasAuthSessionForUser(const ObfuscatedUsername& user);
 
   // Sets the callback for a fingerprint scan. Must be called after
   // StartAuthSessionAsyncForUser. |auth_scan_done_callback| will be
   // called with the status of a fingerprint match, once biod sends it.
   virtual void SetAuthScanDoneCallback(ResultCallback auth_scan_done_callback);
+
+  // Sets the repeating callback for fingerprint scan results. The callback will
+  // be called when converting incoming biod fingerprint scan signals to
+  // outgoing cryptohome signals.
+  virtual void SetSignalCallback(SignalCallback signal_callback);
 
   // For testing.
   void SetProxy(biod::BiometricsManagerProxyBase* proxy);
@@ -96,11 +104,10 @@ class FingerprintManager {
         : fingerprint_manager_(fingerprint_manager) {}
 
     ~AuthScanDoneResourceManager() {
-      fingerprint_manager_->auth_scan_done_callback_.Reset();
       // If auth session is still open, then we are waiting for retry, so keep
       // |current_user_|.
       if (fingerprint_manager_->state_ != State::AUTH_SESSION_OPEN)
-        fingerprint_manager_->current_user_.clear();
+        fingerprint_manager_->current_user_->clear();
     }
 
    private:
@@ -111,8 +118,8 @@ class FingerprintManager {
   // connects to relevant dbus signals. Returns false if failing to get the
   // dbus object proxy (e.g. if biod is not in a good state or the device does
   // not have fingerprint support).
-  bool Initialize(const scoped_refptr<dbus::Bus>& bus,
-                  const dbus::ObjectPath& path);
+  [[nodiscard]] bool Initialize(const scoped_refptr<dbus::Bus>& bus,
+                                const dbus::ObjectPath& path);
 
   // Callback for connecting to biod's AuthScanDoneSignal.
   void OnAuthScanDoneSignalConnected(const std::string& interface,
@@ -129,12 +136,15 @@ class FingerprintManager {
   // before running the client's callback.
   void SetUserAndRunClientCallback(
       StartSessionCallback auth_session_start_client_callback,
-      const std::string& user,
+      const ObfuscatedUsername& user,
       bool success);
 
   // Calculates the retry count left in the current auth session, and run
   // |auth_scan_done_callback_|.
   void ProcessRetry();
+
+  // Run |auth_scan_done_callback_| with FAILED_RETRY_NOT_ALLOWED.
+  void ProcessFailed();
 
   void Reset();
 
@@ -145,9 +155,10 @@ class FingerprintManager {
   biod::BiometricsManagerProxyBase* proxy_;
   bool connected_to_auth_scan_done_signal_;
   ResultCallback auth_scan_done_callback_;
+  SignalCallback signal_callback_;
   State state_ = State::NO_AUTH_SESSION;
-  // The obfuscated username tied to the current auth session.
-  std::string current_user_;
+  // The username tied to the current auth session.
+  ObfuscatedUsername current_user_;
   // The number of retries left in the current auth session.
   int retry_left_ = 0;
   base::WeakPtrFactory<FingerprintManager> weak_factory_;

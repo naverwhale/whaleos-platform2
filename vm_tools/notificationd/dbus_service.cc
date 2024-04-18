@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 
@@ -19,7 +19,8 @@ const char kNotificationsServiceName[] = "org.freedesktop.Notifications";
 const char kNotificationsServicePath[] = "/org/freedesktop/Notifications";
 
 void HandleSynchronousDBusMethodCall(
-    base::Callback<std::unique_ptr<dbus::Response>(dbus::MethodCall*)> handler,
+    base::RepeatingCallback<std::unique_ptr<dbus::Response>(dbus::MethodCall*)>
+        handler,
     dbus::MethodCall* method_call,
     dbus::ExportedObject::ResponseSender response_sender) {
   auto response = handler.Run(method_call);
@@ -117,8 +118,9 @@ bool DBusService::RegisterMethods() {
   for (const auto& iter : kServiceMethods) {
     const bool ret = exported_object_->ExportMethodAndBlock(
         kNotificationsServiceName, iter.first,
-        base::Bind(&HandleSynchronousDBusMethodCall,
-                   base::Bind(iter.second, base::Unretained(this))));
+        base::BindRepeating(
+            &HandleSynchronousDBusMethodCall,
+            base::BindRepeating(iter.second, base::Unretained(this))));
     if (!ret) {
       LOG(ERROR) << "Failed to export method " << iter.first;
       return false;

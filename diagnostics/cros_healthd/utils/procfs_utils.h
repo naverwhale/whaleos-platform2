@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,9 +15,14 @@ namespace diagnostics {
 // numerical order. Note that this is not an enum class so that it can be
 // implicitly converted to ints when used as an index into an array or vector.
 enum ProcPidStatIndices {
+  kProcessID = 0,
+  kName = 1,
   kState = 2,
+  kParentProcessID = 3,
+  kProcessGroupID = 4,
   kPriority = 17,
   kNice = 18,
+  kThreads = 19,
   kStartTime = 21,
   kMaxValue = kStartTime,  // Must be updated whenever a larger index is added.
 };

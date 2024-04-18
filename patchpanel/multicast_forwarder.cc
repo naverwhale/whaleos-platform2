@@ -1,10 +1,9 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "patchpanel/multicast_forwarder.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <net/if.h>
 #include <netinet/ip.h>
@@ -15,14 +14,15 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 
 #include "patchpanel/dns/dns_protocol.h"
 #include "patchpanel/dns/dns_response.h"
 #include "patchpanel/net_util.h"
 #include "patchpanel/socket.h"
+#include "patchpanel/system.h"
 
 namespace {
 
@@ -56,7 +56,7 @@ struct in_addr GetInterfaceIp(int fd, const std::string& ifname) {
 void SetSockaddr(struct sockaddr_storage* saddr_storage,
                  sa_family_t sa_family,
                  uint16_t port,
-                 char* addr) {
+                 const char* addr) {
   struct sockaddr* saddr = reinterpret_cast<sockaddr*>(saddr_storage);
   if (sa_family == AF_INET) {
     struct sockaddr_in* saddr4 = reinterpret_cast<struct sockaddr_in*>(saddr);
@@ -81,57 +81,48 @@ void SetSockaddr(struct sockaddr_storage* saddr_storage,
 
 namespace patchpanel {
 
-MulticastForwarder::Socket::Socket(
-    base::ScopedFD fd,
-    sa_family_t sa_family,
-    const base::Callback<void(int, sa_family_t)>& callback)
-    : fd(std::move(fd)) {
-  watcher = base::FileDescriptorWatcher::WatchReadable(
-      Socket::fd.get(),
-      base::BindRepeating(callback, Socket::fd.get(), sa_family));
+std::unique_ptr<MulticastForwarder::Socket> MulticastForwarder::CreateSocket(
+    base::ScopedFD fd, sa_family_t sa_family) {
+  auto socket = std::make_unique<Socket>();
+  socket->watcher = base::FileDescriptorWatcher::WatchReadable(
+      fd.get(),
+      base::BindRepeating(&MulticastForwarder::OnFileCanReadWithoutBlocking,
+                          base::Unretained(this), fd.get(), sa_family));
+  socket->fd = std::move(fd);
+  return socket;
 }
 
 MulticastForwarder::MulticastForwarder(const std::string& lan_ifname,
-                                       uint32_t mcast_addr,
-                                       const std::string& mcast_addr6,
+                                       const net_base::IPv4Address& mcast_addr,
+                                       const net_base::IPv6Address& mcast_addr6,
                                        uint16_t port)
-    : lan_ifname_(lan_ifname), port_(port) {
-  mcast_addr_.s_addr = mcast_addr;
-  CHECK(inet_pton(AF_INET6, mcast_addr6.c_str(), mcast_addr6_.s6_addr));
+    : lan_ifname_(lan_ifname),
+      port_(port),
+      mcast_addr_(mcast_addr),
+      mcast_addr6_(mcast_addr6) {}
 
+void MulticastForwarder::Init() {
   base::ScopedFD lan_fd(Bind(AF_INET, lan_ifname_));
-  if (!lan_fd.is_valid()) {
+  if (lan_fd.is_valid()) {
+    lan_socket_.emplace(AF_INET, CreateSocket(std::move(lan_fd), AF_INET));
+  } else {
     LOG(WARNING) << "Could not bind socket on " << lan_ifname_ << " for "
                  << mcast_addr_ << ":" << port_;
   }
 
   base::ScopedFD lan_fd6(Bind(AF_INET6, lan_ifname_));
-  if (!lan_fd6.is_valid()) {
+  if (lan_fd6.is_valid()) {
+    lan_socket_.emplace(AF_INET6, CreateSocket(std::move(lan_fd6), AF_INET6));
+  } else {
     LOG(WARNING) << "Could not bind socket on " << lan_ifname_ << " for "
                  << mcast_addr6_ << ":" << port_;
   }
-
-  lan_socket_.emplace(
-      AF_INET, new Socket(std::move(lan_fd), AF_INET,
-                          base::BindRepeating(
-                              &MulticastForwarder::OnFileCanReadWithoutBlocking,
-                              base::Unretained(this))));
-
-  lan_socket_.emplace(
-      AF_INET6,
-      new Socket(
-          std::move(lan_fd6), AF_INET6,
-          base::BindRepeating(&MulticastForwarder::OnFileCanReadWithoutBlocking,
-                              base::Unretained(this))));
 }
 
 base::ScopedFD MulticastForwarder::Bind(sa_family_t sa_family,
                                         const std::string& ifname) {
-  char mcast_addr[INET6_ADDRSTRLEN];
-  inet_ntop(sa_family,
-            sa_family == AF_INET ? reinterpret_cast<const void*>(&mcast_addr_)
-                                 : reinterpret_cast<const void*>(&mcast_addr6_),
-            mcast_addr, INET6_ADDRSTRLEN);
+  const std::string mcast_addr =
+      (sa_family == AF_INET) ? mcast_addr_.ToString() : mcast_addr6_.ToString();
 
   base::ScopedFD fd(socket(sa_family, SOCK_DGRAM, 0));
   if (!fd.is_valid()) {
@@ -153,7 +144,8 @@ base::ScopedFD MulticastForwarder::Bind(sa_family_t sa_family,
     return base::ScopedFD();
   }
 
-  int ifindex = if_nametoindex(ifname.c_str());
+  System system;
+  int ifindex = system.IfNametoindex(ifname);
   if (ifindex == 0) {
     PLOG(ERROR) << "Could not obtain interface index of " << ifname << " for "
                 << mcast_addr << ":" << port_;
@@ -164,7 +156,7 @@ base::ScopedFD MulticastForwarder::Bind(sa_family_t sa_family,
   if (sa_family == AF_INET) {
     struct ip_mreqn mreqn;
     memset(&mreqn, 0, sizeof(mreqn));
-    mreqn.imr_multiaddr = mcast_addr_;
+    mreqn.imr_multiaddr = mcast_addr_.ToInAddr();
     mreqn.imr_address.s_addr = htonl(INADDR_ANY);
     mreqn.imr_ifindex = ifindex;
     if (setsockopt(fd.get(), IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreqn,
@@ -179,8 +171,8 @@ base::ScopedFD MulticastForwarder::Bind(sa_family_t sa_family,
   } else if (sa_family == AF_INET6) {
     struct ipv6_mreq mreqn;
     memset(&mreqn, 0, sizeof(mreqn));
-    mreqn.ipv6mr_multiaddr = mcast_addr6_;
-    mreqn.ipv6mr_interface = ifindex;
+    mreqn.ipv6mr_multiaddr = mcast_addr6_.ToIn6Addr();
+    mreqn.ipv6mr_interface = static_cast<uint32_t>(ifindex);
     if (setsockopt(fd.get(), IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreqn,
                    sizeof(mreqn)) < 0) {
       PLOG(ERROR) << "Can't add IPv6 multicast membership on " << ifname
@@ -238,13 +230,8 @@ bool MulticastForwarder::AddGuest(const std::string& int_ifname) {
   if (int_fd4.is_valid()) {
     int_fds_.emplace(std::make_pair(AF_INET, int_fd4.get()));
 
-    std::unique_ptr<Socket> int_socket4 = std::make_unique<Socket>(
-        std::move(int_fd4), AF_INET,
-        base::BindRepeating(&MulticastForwarder::OnFileCanReadWithoutBlocking,
-                            base::Unretained(this)));
-
     int_sockets_.emplace(std::make_pair(AF_INET, int_ifname),
-                         std::move(int_socket4));
+                         CreateSocket(std::move(int_fd4), AF_INET));
 
     success = true;
     LOG(INFO) << "Started IPv4 forwarding between " << lan_ifname_ << " and "
@@ -258,14 +245,8 @@ bool MulticastForwarder::AddGuest(const std::string& int_ifname) {
   base::ScopedFD int_fd6(Bind(AF_INET6, int_ifname));
   if (int_fd6.is_valid()) {
     int_fds_.emplace(std::make_pair(AF_INET6, int_fd6.get()));
-
-    std::unique_ptr<Socket> int_socket6 = std::make_unique<Socket>(
-        std::move(int_fd6), AF_INET6,
-        base::BindRepeating(&MulticastForwarder::OnFileCanReadWithoutBlocking,
-                            base::Unretained(this)));
-
     int_sockets_.emplace(std::make_pair(AF_INET6, int_ifname),
-                         std::move(int_socket6));
+                         CreateSocket(std::move(int_fd6), AF_INET6));
 
     success = true;
     LOG(INFO) << "Started IPv6 forwarding between " << lan_ifname_ << " and "
@@ -310,14 +291,15 @@ void MulticastForwarder::OnFileCanReadWithoutBlocking(int fd,
 
   socklen_t addrlen = sizeof(struct sockaddr_storage);
 
-  ssize_t len = recvfrom(fd, data, kBufSize, 0, fromaddr, &addrlen);
-  if (len < 0) {
+  ssize_t r = Receive(fd, data, kBufSize, fromaddr, &addrlen);
+  if (r < 0) {
     // Ignore ENETDOWN: this can happen if the interface is not yet configured
     if (errno != ENETDOWN) {
       PLOG(WARNING) << "recvfrom failed";
     }
     return;
   }
+  size_t len = static_cast<size_t>(r);
 
   socklen_t expectlen = sa_family == AF_INET ? sizeof(struct sockaddr_in)
                                              : sizeof(struct sockaddr_in6);
@@ -340,9 +322,12 @@ void MulticastForwarder::OnFileCanReadWithoutBlocking(int fd,
         reinterpret_cast<const struct sockaddr_in6*>(fromaddr);
     src_port = ntohs(addr6->sin6_port);
   }
+  const auto mcast_in_addr = mcast_addr_.ToInAddr();
+  const auto mcast_in6_addr = mcast_addr6_.ToIn6Addr();
   SetSockaddr(&dst_storage, sa_family, port_,
-              sa_family == AF_INET ? reinterpret_cast<char*>(&mcast_addr_)
-                                   : reinterpret_cast<char*>(&mcast_addr6_));
+              sa_family == AF_INET
+                  ? reinterpret_cast<const char*>(&mcast_in_addr)
+                  : reinterpret_cast<const char*>(&mcast_in6_addr));
 
   // Forward ingress traffic to all guests.
   const auto& lan_socket = lan_socket_.find(sa_family);
@@ -385,19 +370,20 @@ void MulticastForwarder::OnFileCanReadWithoutBlocking(int fd,
 
 bool MulticastForwarder::SendTo(uint16_t src_port,
                                 const void* data,
-                                ssize_t len,
+                                size_t len,
                                 const struct sockaddr* dst,
                                 socklen_t dst_len) {
+  auto* lan_socket = lan_socket_.find(dst->sa_family)->second.get();
   if (src_port == port_) {
-    int lan_fd = lan_socket_.find(dst->sa_family)->second->fd.get();
-    if (sendto(lan_fd, data, len, 0, dst, dst_len) < 0) {
-      // Ignore ENETDOWN: this can happen if the interface is not yet configured
-      if (errno != ENETDOWN) {
+    if (sendto(lan_socket->fd.get(), data, len, 0, dst, dst_len) < 0) {
+      if (lan_socket->last_errno != errno) {
         PLOG(WARNING) << "sendto " << *dst << " on " << lan_ifname_
                       << " from port " << src_port << " failed";
+        lan_socket->last_errno = errno;
       }
       return false;
     }
+    lan_socket->last_errno = 0;
     return true;
   }
 
@@ -450,18 +436,21 @@ bool MulticastForwarder::SendTo(uint16_t src_port,
   }
 
   if (temp_socket.SendTo(data, len, dst, dst_len) < 0) {
-    // Ignore ENETDOWN: this can happen if the interface is not yet configured
-    if (errno != ENETDOWN) {
+    // Use |lan_socket_| to track last errno. The only expected difference
+    // between |temp_socket| and |lan_socket_| is port number.
+    if (lan_socket->last_errno != errno) {
       PLOG(WARNING) << "sendto " << *dst << " on " << lan_ifname_
                     << " from port " << src_port << " failed";
+      lan_socket->last_errno = errno;
     }
     return false;
   }
+  lan_socket->last_errno = 0;
   return true;
 }
 
 bool MulticastForwarder::SendToGuests(const void* data,
-                                      ssize_t len,
+                                      size_t len,
                                       const struct sockaddr* dst,
                                       socklen_t dst_len,
                                       int ignore_fd) {
@@ -475,9 +464,14 @@ bool MulticastForwarder::SendToGuests(const void* data,
 
     // Use already created multicast fd.
     if (sendto(fd, data, len, 0, dst, dst_len) < 0) {
-      PLOG(WARNING) << "sendto " << socket.first.second << " failed";
+      if (socket.second->last_errno != errno) {
+        PLOG(WARNING) << "sendto " << socket.first.second << " failed";
+        socket.second->last_errno = errno;
+      }
       success = false;
+      continue;
     }
+    socket.second->last_errno = 0;
   }
   return success;
 }
@@ -486,7 +480,7 @@ bool MulticastForwarder::SendToGuests(const void* data,
 void MulticastForwarder::TranslateMdnsIp(const struct in_addr& lan_ip,
                                          const struct in_addr& guest_ip,
                                          char* data,
-                                         ssize_t len) {
+                                         size_t len) {
   if (guest_ip.s_addr == htonl(INADDR_ANY)) {
     return;
   }
@@ -524,7 +518,10 @@ void MulticastForwarder::TranslateMdnsIp(const struct in_addr& lan_ip,
         // address inside the resource record by assuming that the
         // StringPiece returns a pointer inside the io_buffer.  It works
         // today, but future libchrome changes might break it.
-        size_t ip_offset = record.rdata.data() - resp.io_buffer()->data();
+        // |record|'s data is a pointer into |resp|'s data therefore it is safe
+        // to assume that subtraction is a positive number and cast it to size_t
+        size_t ip_offset =
+            static_cast<size_t>(record.rdata.data() - resp.io_buffer()->data());
         CHECK(ip_offset <= len - ipv4_addr_len);
         memcpy(&data[ip_offset], &lan_ip.s_addr, ipv4_addr_len);
       }
@@ -532,4 +529,11 @@ void MulticastForwarder::TranslateMdnsIp(const struct in_addr& lan_ip,
   }
 }
 
+ssize_t MulticastForwarder::Receive(int fd,
+                                    char* buffer,
+                                    size_t buffer_size,
+                                    struct sockaddr* src_addr,
+                                    socklen_t* addrlen) {
+  return recvfrom(fd, buffer, buffer_size, 0, src_addr, addrlen);
+}
 }  // namespace patchpanel

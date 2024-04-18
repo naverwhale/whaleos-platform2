@@ -1,21 +1,24 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "cryptohome/encrypted_reboot_vault/encrypted_reboot_vault.h"
 
-#include <cryptohome/dircrypto_util.h>
-#include <cryptohome/platform.h>
-#include <cryptohome/storage/encrypted_container/filesystem_key.h>
-#include <cryptohome/storage/encrypted_container/fscrypt_container.h>
+#include <utility>
 
+#include <absl/cleanup/cleanup.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <brillo/key_value_store.h>
+#include <libhwsec-foundation/crypto/secure_blob_util.h>
 
-#include "cryptohome/crypto/secure_blob_util.h"
+#include "cryptohome/dircrypto_util.h"
+#include "cryptohome/platform.h"
+#include "cryptohome/storage/encrypted_container/filesystem_key.h"
+#include "cryptohome/storage/encrypted_container/fscrypt_container.h"
+#include "cryptohome/storage/keyring/real_keyring.h"
 
 namespace {
 // Pstore-pmsg path.
@@ -30,6 +33,7 @@ const char kPstorePath[] = "/sys/fs/pstore";
 const char kEncryptionKeyTag[] = "pmsg-key";
 // Encryption key size.
 const size_t kEncryptionKeySize = 64;
+const size_t kMaxFileSize = 200;
 
 bool IsSupported() {
   if (!base::PathExists(base::FilePath(kPmsgDevicePath))) {
@@ -49,7 +53,8 @@ bool SaveKey(const cryptohome::FileSystemKey& key) {
   // Do not use store.Save() since it uses WriteFileAtomically() which will
   // fail on /dev/pmsg0.
   brillo::KeyValueStore store;
-  store.SetString(kEncryptionKeyTag, cryptohome::SecureBlobToHex(key.fek));
+  store.SetString(kEncryptionKeyTag,
+                  hwsec_foundation::SecureBlobToHex(key.fek));
 
   std::string store_contents = store.SaveToString();
   if (store_contents.empty() ||
@@ -69,8 +74,12 @@ cryptohome::FileSystemKey RetrieveKey() {
   for (base::FilePath ramoops_file = pmsg_ramoops_enumerator.Next();
        !ramoops_file.empty(); ramoops_file = pmsg_ramoops_enumerator.Next()) {
     brillo::KeyValueStore store;
+    std::string pmsg_contents;
     std::string val;
-    if (store.Load(ramoops_file) && store.GetString(kEncryptionKeyTag, &val)) {
+    if (base::ReadFileToStringWithMaxSize(ramoops_file, &pmsg_contents,
+                                          kMaxFileSize) &&
+        store.LoadFromString(pmsg_contents) &&
+        store.GetString(kEncryptionKeyTag, &val)) {
       key.fek = brillo::SecureHexToSecureBlob(brillo::SecureBlob(val));
       base::DeleteFile(ramoops_file);
       // SaveKey stores the key again into pstore-pmsg on every boot since the
@@ -88,14 +97,16 @@ cryptohome::FileSystemKey RetrieveKey() {
 }  // namespace
 
 EncryptedRebootVault::EncryptedRebootVault()
-    : vault_path_(base::FilePath(kEncryptedRebootVaultPath)) {
+    : vault_path_(base::FilePath(kEncryptedRebootVaultPath)),
+      keyring_(std::make_unique<cryptohome::RealKeyring>()) {
   cryptohome::FileSystemKeyReference key_reference;
   key_reference.fek_sig = brillo::SecureBlob(kEncryptionKeyTag);
 
   // TODO(dlunev): change the allow_v2 to true once all the boards are on
   // 5.4+
   encrypted_container_ = std::make_unique<cryptohome::FscryptContainer>(
-      vault_path_, key_reference, /*allow_v2=*/false, &platform_);
+      vault_path_, key_reference, /*allow_v2=*/false, &platform_,
+      keyring_.get());
 }
 
 bool EncryptedRebootVault::CreateVault() {
@@ -104,9 +115,7 @@ bool EncryptedRebootVault::CreateVault() {
     return false;
   }
 
-  base::ScopedClosureRunner reset_vault(
-      base::BindOnce(base::IgnoreResult(&EncryptedRebootVault::PurgeVault),
-                     base::Unretained(this)));
+  absl::Cleanup purge_on_exit = [this]() { PurgeVault(); };
 
   // Remove the existing vault.
   PurgeVault();
@@ -114,7 +123,7 @@ bool EncryptedRebootVault::CreateVault() {
   // Generate encryption key.
   cryptohome::FileSystemKey transient_encryption_key;
   transient_encryption_key.fek =
-      cryptohome::CreateSecureRandomBlob(kEncryptionKeySize);
+      hwsec_foundation::CreateSecureRandomBlob(kEncryptionKeySize);
 
   // Store key into pmsg. If it fails, we bail out.
   if (!SaveKey(transient_encryption_key)) {
@@ -123,12 +132,12 @@ bool EncryptedRebootVault::CreateVault() {
   }
 
   // Set up the encrypted reboot vault.
-  if (!encrypted_container_->Setup(transient_encryption_key, /*create=*/true)) {
+  if (!encrypted_container_->Setup(transient_encryption_key)) {
     LOG(ERROR) << "Failed to setup encrypted container";
     return false;
   }
 
-  ignore_result(reset_vault.Release());
+  std::move(purge_on_exit).Cancel();
   return true;
 }
 
@@ -153,9 +162,7 @@ bool EncryptedRebootVault::UnlockVault() {
   }
 
   // We reset the vault if we fail to unlock it for any reason.
-  base::ScopedClosureRunner reset_vault(
-      base::BindOnce(base::IgnoreResult(&EncryptedRebootVault::PurgeVault),
-                     base::Unretained(this)));
+  absl::Cleanup purge_on_exit = [this]() { PurgeVault(); };
 
   if (!Validate()) {
     LOG(ERROR) << "Invalid vault; purging.";
@@ -170,13 +177,13 @@ bool EncryptedRebootVault::UnlockVault() {
     return false;
   }
 
-  // Unlock vault.
-  if (!encrypted_container_->Setup(transient_encryption_key,
-                                   /*create=*/false)) {
+  // Unlock vault. We expect the container to be present in this situation.
+  if (!encrypted_container_->Exists() ||
+      !encrypted_container_->Setup(transient_encryption_key)) {
     LOG(ERROR) << "Failed to add key to keyring.";
     return false;
   }
 
-  ignore_result(reset_vault.Release());
+  std::move(purge_on_exit).Cancel();
   return true;
 }

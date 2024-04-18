@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 
 void Trial2() {
   TRACE_EVENT("perfetto_simple_producer", "Trial2");
-  base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(500));
+  base::PlatformThread::Sleep(base::Milliseconds(500));
 }
 
 // This demonstrates an event that begins and ends on different threads.
@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
   perfetto::TrackEvent::Register();
 
   // Wait for the connection to the system Perfetto daemon being setup.
-  base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(500));
+  base::PlatformThread::Sleep(base::Milliseconds(500));
 
   TRACE_EVENT("perfetto_simple_producer", "Trial1", "int", 100);
 
@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
   Trial2();
   TRACE_EVENT_BEGIN("perfetto_simple_producer", "Trial3");
   OnNewRequest(100);
-  base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(500));
+  base::PlatformThread::Sleep(base::Milliseconds(500));
 
   TRACE_EVENT_END("perfetto_simple_producer");
 

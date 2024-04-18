@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,24 +12,27 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include <attestation/proto_bindings/attestation_ca.pb.h>
 #include <attestation/proto_bindings/pca_agent.pb.h>
-#include <base/callback.h>
 #include <base/check.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
 #include <base/threading/thread.h>
 #include <brillo/secure_blob.h>
 #include <gtest/gtest_prod.h>
+#include <libhwsec/factory/factory.h>
+#include <libhwsec/frontend/attestation/frontend.h>
+#include <libhwsec/structures/key.h>
 #include <policy/libpolicy.h>
 
 #include "attestation/common/crypto_utility.h"
 #include "attestation/common/crypto_utility_impl.h"
-#include "attestation/common/tpm_utility_factory.h"
+#include "attestation/common/nvram_quoter.h"
+#include "attestation/common/tpm_utility.h"
 #include "attestation/pca_agent/dbus-proxies.h"
 #include "attestation/server/attestation_flow.h"
 #include "attestation/server/attestation_service_metrics.h"
@@ -65,11 +68,21 @@ namespace attestation {
 // process a task after destruction). Weak pointers are used to post replies
 // back to the main thread.
 
-#if USE_GENERIC_TPM2
-constexpr static KeyType kEndorsementKeyTypeForEnrollmentID = KEY_TYPE_ECC;
+// There are 3 configurations to support:
+// 1. TPM1.2 uses RSA.
+// 2. cr50 uses RSA.
+// 3. Other TPM2.0-based devices, including generic TPM2, tpm2-simulator, and
+// ti50, use ECC.
+#if USE_TPM2 && !USE_CR50_ONBOARD
+inline constexpr KeyType kEndorsementKeyTypeForEnrollmentID = KEY_TYPE_ECC;
 #else
-constexpr static KeyType kEndorsementKeyTypeForEnrollmentID = KEY_TYPE_RSA;
+inline constexpr KeyType kEndorsementKeyTypeForEnrollmentID = KEY_TYPE_RSA;
 #endif
+
+inline constexpr KeyType kDefaultEndorsementKeyType =
+    (USE_TPM2 ? KEY_TYPE_ECC : KEY_TYPE_RSA);
+inline constexpr KeyType kDefaultIdentityKeyType =
+    (USE_TPM2 ? KEY_TYPE_ECC : KEY_TYPE_RSA);
 
 class AttestationService : public AttestationInterface {
  public:
@@ -88,7 +101,8 @@ class AttestationService : public AttestationInterface {
 
   // If abe_data is not an empty blob, its contents will be
   // used to enable attestation-based enterprise enrollment.
-  explicit AttestationService(brillo::SecureBlob* abe_data);
+  AttestationService(brillo::SecureBlob* abe_data,
+                     const std::string& attested_device_id);
   AttestationService(const AttestationService&) = delete;
   AttestationService& operator=(const AttestationService&) = delete;
 
@@ -96,64 +110,58 @@ class AttestationService : public AttestationInterface {
 
   // AttestationInterface methods.
   bool Initialize() override;
+  void GetFeatures(const GetFeaturesRequest& request,
+                   GetFeaturesCallback callback) override;
   void GetEnrollmentPreparations(
       const GetEnrollmentPreparationsRequest& request,
-      const GetEnrollmentPreparationsCallback& callback) override;
+      GetEnrollmentPreparationsCallback callback) override;
   void GetKeyInfo(const GetKeyInfoRequest& request,
-                  const GetKeyInfoCallback& callback) override;
+                  GetKeyInfoCallback callback) override;
   void GetEndorsementInfo(const GetEndorsementInfoRequest& request,
-                          const GetEndorsementInfoCallback& callback) override;
-  void GetAttestationKeyInfo(
-      const GetAttestationKeyInfoRequest& request,
-      const GetAttestationKeyInfoCallback& callback) override;
-  void ActivateAttestationKey(
-      const ActivateAttestationKeyRequest& request,
-      const ActivateAttestationKeyCallback& callback) override;
-  void CreateCertifiableKey(
-      const CreateCertifiableKeyRequest& request,
-      const CreateCertifiableKeyCallback& callback) override;
+                          GetEndorsementInfoCallback callback) override;
+  void GetAttestationKeyInfo(const GetAttestationKeyInfoRequest& request,
+                             GetAttestationKeyInfoCallback callback) override;
+  void ActivateAttestationKey(const ActivateAttestationKeyRequest& request,
+                              ActivateAttestationKeyCallback callback) override;
+  void CreateCertifiableKey(const CreateCertifiableKeyRequest& request,
+                            CreateCertifiableKeyCallback callback) override;
   void Decrypt(const DecryptRequest& request,
-               const DecryptCallback& callback) override;
-  void Sign(const SignRequest& request, const SignCallback& callback) override;
+               DecryptCallback callback) override;
+  void Sign(const SignRequest& request, SignCallback callback) override;
   void RegisterKeyWithChapsToken(
       const RegisterKeyWithChapsTokenRequest& request,
-      const RegisterKeyWithChapsTokenCallback& callback) override;
+      RegisterKeyWithChapsTokenCallback callback) override;
   void GetStatus(const GetStatusRequest& request,
-                 const GetStatusCallback& callback) override;
-  void Verify(const VerifyRequest& request,
-              const VerifyCallback& callback) override;
-  void CreateEnrollRequest(
-      const CreateEnrollRequestRequest& request,
-      const CreateEnrollRequestCallback& callback) override;
+                 GetStatusCallback callback) override;
+  void Verify(const VerifyRequest& request, VerifyCallback callback) override;
+  void CreateEnrollRequest(const CreateEnrollRequestRequest& request,
+                           CreateEnrollRequestCallback callback) override;
   void FinishEnroll(const FinishEnrollRequest& request,
-                    const FinishEnrollCallback& callback) override;
-  void Enroll(const EnrollRequest& request,
-              const EnrollCallback& callback) override;
+                    FinishEnrollCallback callback) override;
+  void Enroll(const EnrollRequest& request, EnrollCallback callback) override;
   void CreateCertificateRequest(
       const CreateCertificateRequestRequest& request,
-      const CreateCertificateRequestCallback& callback) override;
+      CreateCertificateRequestCallback callback) override;
   void FinishCertificateRequest(
       const FinishCertificateRequestRequest& request,
-      const FinishCertificateRequestCallback& callback) override;
+      FinishCertificateRequestCallback callback) override;
   void GetCertificate(const GetCertificateRequest& request,
-                      const GetCertificateCallback& callback) override;
+                      GetCertificateCallback callback) override;
   void SignEnterpriseChallenge(
       const SignEnterpriseChallengeRequest& request,
-      const SignEnterpriseChallengeCallback& callback) override;
-  void SignSimpleChallenge(
-      const SignSimpleChallengeRequest& request,
-      const SignSimpleChallengeCallback& callback) override;
+      SignEnterpriseChallengeCallback callback) override;
+  void SignSimpleChallenge(const SignSimpleChallengeRequest& request,
+                           SignSimpleChallengeCallback callback) override;
   void SetKeyPayload(const SetKeyPayloadRequest& request,
-                     const SetKeyPayloadCallback& callback) override;
+                     SetKeyPayloadCallback callback) override;
   void DeleteKeys(const DeleteKeysRequest& request,
-                  const DeleteKeysCallback& callback) override;
+                  DeleteKeysCallback callback) override;
   void ResetIdentity(const ResetIdentityRequest& request,
-                     const ResetIdentityCallback& callback) override;
+                     ResetIdentityCallback callback) override;
   void GetEnrollmentId(const GetEnrollmentIdRequest& request,
-                       const GetEnrollmentIdCallback& callback) override;
-  void GetCertifiedNvIndex(
-      const GetCertifiedNvIndexRequest& request,
-      const GetCertifiedNvIndexCallback& callback) override;
+                       GetEnrollmentIdCallback callback) override;
+  void GetCertifiedNvIndex(const GetCertifiedNvIndexRequest& request,
+                           GetCertifiedNvIndexCallback callback) override;
 
   // Same as initialize but calls callback when tasks finish.
   bool InitializeWithCallback(InitializeCompleteCallback callback);
@@ -175,9 +183,35 @@ class AttestationService : public AttestationInterface {
 
   void set_tpm_utility(TpmUtility* tpm_utility) { tpm_utility_ = tpm_utility; }
 
+  void set_hwsec_factory(hwsec::Factory* hwsec_factory) {
+    hwsec_factory_ = hwsec_factory;
+  }
+
+  void set_hwsec(const hwsec::AttestationFrontend* hwsec) { hwsec_ = hwsec; }
+
+  void set_nvram_quoter(NvramQuoter* nvram_quoter) {
+    nvram_quoter_ = nvram_quoter;
+  }
+
   void set_hwid(const std::string& hwid) { hwid_ = hwid; }
 
   void set_abe_data(brillo::SecureBlob* abe_data) { abe_data_ = abe_data; }
+
+  void set_attested_device_id(const std::string& attested_device_id) {
+    attested_device_id_ = attested_device_id;
+  }
+
+  void set_endorsement_key_for_enrollment_id(KeyType type) {
+    endorsement_key_type_for_enrollment_id_ = type;
+  }
+
+  void set_default_endorsement_key_type(KeyType type) {
+    default_endorsement_key_type_ = type;
+  }
+
+  void set_vtpm_ek_support(bool does_support) {
+    does_support_vtpm_ek_ = does_support;
+  }
 
   void set_pca_agent_proxy(org::chromium::PcaAgentProxyInterface* proxy) {
     pca_agent_proxy_ = proxy;
@@ -230,9 +264,9 @@ class AttestationService : public AttestationInterface {
   // to TaskRunner::PostTaskAndReply.
   template <typename ReplyProtobufType>
   void TaskRelayCallback(
-      const base::Callback<void(const ReplyProtobufType&)> callback,
+      base::OnceCallback<void(const ReplyProtobufType&)> callback,
       const std::shared_ptr<ReplyProtobufType>& reply) {
-    callback.Run(*reply);
+    std::move(callback).Run(*reply);
   }
 
   // Initialization to be run on the worker thread.
@@ -254,6 +288,10 @@ class AttestationService : public AttestationInterface {
   void GetEnrollmentPreparationsTask(
       const GetEnrollmentPreparationsRequest& request,
       const std::shared_ptr<GetEnrollmentPreparationsReply>& result);
+
+  // A blocking implementation of GetFeatures.
+  void GetFeaturesTask(const GetFeaturesRequest& request,
+                       const std::shared_ptr<GetFeaturesReply>& result);
 
   // A blocking implementation of GetKeyInfo.
   void GetKeyInfoTask(const GetKeyInfoRequest& request,
@@ -388,26 +426,16 @@ class AttestationService : public AttestationInterface {
   // Creates a |certificate_request| compatible with the Google Attestation CA
   // for the given |key|, according to the given |profile|, |username| and
   // |origin|.
-  bool CreateCertificateRequestInternal(ACAType aca_type,
-                                        const std::string& username,
-                                        const CertifiedKey& key,
-                                        CertificateProfile profile,
-                                        const std::string& origin,
-                                        std::string* certificate_request,
-                                        std::string* message_id);
-
-  // Finishes a certificate request by decoding the |certificate_response| to
-  // recover the |certificate_chain| and storing it in association with the
-  // |key| identified by |username| and |key_label|. Returns true on success. On
-  // failure, returns false and sets |server_error| to the error string from the
-  // CA. Calls PopulateAndStoreCertifiedKey internally.
-  bool FinishCertificateRequestInternal(const std::string& certificate_response,
-                                        const std::string& username,
-                                        const std::string& key_label,
-                                        const std::string& message_id,
-                                        CertifiedKey* key,
-                                        std::string* certificate_chain,
-                                        std::string* server_error);
+  bool CreateCertificateRequestInternal(
+      ACAType aca_type,
+      const std::string& username,
+      const CertifiedKey& key,
+      CertificateProfile profile,
+      const std::string& origin,
+      std::string* certificate_request,
+      std::string* message_id,
+      std::optional<DeviceSetupCertificateRequestMetadata>
+          device_setup_certificate_request_metadata);
 
   // Recover the |certificate_chain| from |response_pb| and store it in
   // association with the |key| identified by |username| and |key_label|.
@@ -416,8 +444,7 @@ class AttestationService : public AttestationInterface {
       const AttestationCertificateResponse& response_pb,
       const std::string& username,
       const std::string& key_label,
-      CertifiedKey* key,
-      std::string* certificate_chain);
+      CertifiedKey* key);
 
   // Creates, certifies, and saves a new |key| for |username| with the given
   // |key_label|, |key_type|, and |key_usage|. Returns true on success.
@@ -425,6 +452,7 @@ class AttestationService : public AttestationInterface {
                  const std::string& key_label,
                  KeyType key_type,
                  KeyUsage key_usage,
+                 hwsec::KeyRestriction key_restriction,
                  CertifiedKey* key);
 
   // Finds the |key| associated with |username| and |key_label|. Returns false
@@ -479,11 +507,11 @@ class AttestationService : public AttestationInterface {
 
   // Get endorsement public key. Get it from proto database if exists, otherwise
   // get it from tpm_utility.
-  base::Optional<std::string> GetEndorsementPublicKey() const;
+  std::optional<std::string> GetEndorsementPublicKey() const;
 
   // Get endorsement certificate. Get it from proto database if exists,
   // otherwise get it from tpm_utility.
-  base::Optional<std::string> GetEndorsementCertificate() const;
+  std::optional<std::string> GetEndorsementCertificate() const;
 
   // Prepares the attestation system for enrollment with an ACA.
   void PrepareForEnrollment(InitializeCompleteCallback callback);
@@ -507,15 +535,7 @@ class AttestationService : public AttestationInterface {
   AttestationDatabase_IdentityCertificate* FindOrCreateIdentityCertificate(
       int identity, ACAType aca_type, int* cert_index);
 
-  // Creates a new identity and returns its index, or -1 if it could not be
-  // created.
-  int CreateIdentity(int identity_features);
-
-  // Quote NVRAM data. Returns the quoted data in |quote| and |true| if
-  // success, |false| otherwise.
-  bool QuoteNvramData(NVRAMQuoteType quote_type,
-                      const IdentityKey& identity_key,
-                      Quote* quote);
+  bool CreateIdentity(int identity_features);
 
   // Certify NVRAM data and insert it into the given |identity|. Returns false
   // if data cannot be inserted, or if |must_be_present| is true and the data
@@ -722,6 +742,16 @@ class AttestationService : public AttestationInterface {
   // Compute the enterprise EID for attestation-based enrollment.
   std::string ComputeEnterpriseEnrollmentId();
 
+  // Finds CA by |issuer_name| and |is_cros_core| flag, then verifies the
+  // |ek_cert| by the CA public key hex-encoded DER. On success returns true.
+  bool VerifyCertificateWithSubjectPublicKeyInfo(const std::string& issuer_name,
+                                                 bool is_cros_core,
+                                                 const std::string& ek_cert);
+
+  // Returns `true` if the RSA EK certificate quote shall be part of identity
+  // data.
+  bool ShallQuoteRsaEkCertificate() const;
+
   base::WeakPtr<AttestationService> GetWeakPtr();
 
   FRIEND_TEST(AttestationServiceBaseTest, MigrateAttestationDatabase);
@@ -729,6 +759,8 @@ class AttestationService : public AttestationInterface {
               MigrateAttestationDatabaseWithCorruptedFields);
   FRIEND_TEST(AttestationServiceBaseTest,
               MigrateAttestationDatabaseAllEndorsementCredentials);
+  FRIEND_TEST(AttestationServiceBaseTest,
+              VerifyCertificateWithSubjectPublicKeyInfo);
   FRIEND_TEST_ALL_PREFIXES(AttestationServiceEnterpriseTest,
                            SignEnterpriseChallengeSuccess);
   FRIEND_TEST_ALL_PREFIXES(AttestationServiceEnterpriseTest,
@@ -745,14 +777,24 @@ class AttestationService : public AttestationInterface {
   // on the |worker_thread_|. As such, should not be accessed after that thread
   // is stopped/destroyed.
   TpmUtility* tpm_utility_{nullptr};
+  hwsec::Factory* hwsec_factory_{nullptr};
+  const hwsec::AttestationFrontend* hwsec_{nullptr};
+  NvramQuoter* nvram_quoter_{nullptr};
   std::string hwid_;
   CertRequestMap pending_cert_requests_;
   std::string system_salt_;
   brillo::SecureBlob* abe_data_;
+  std::string attested_device_id_;
+  KeyType endorsement_key_type_for_enrollment_id_ =
+      kEndorsementKeyTypeForEnrollmentID;
+  KeyType default_endorsement_key_type_ = kDefaultEndorsementKeyType;
+  const KeyType default_identity_key_type_ = kDefaultIdentityKeyType;
+
+  // If `false`, disable VTPM EK support by force. Note that not all TPM2 but
+  // only GSC devices are supported while we use `USE_TPM2` in productiono for
+  // simplicity.
+  bool does_support_vtpm_ek_ = USE_TPM2;
   GoogleKeys google_keys_;
-  // Default identity features for newly created identities.
-  int default_identity_features_ =
-      attestation::IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID;
   // Maps NVRAMQuoteType indices to indices into the static NVRAM data we
   // use for NVRAM quotes.
   std::map<NVRAMQuoteType, int> nvram_quote_type_to_index_data_;
@@ -772,6 +814,9 @@ class AttestationService : public AttestationInterface {
   // |default_tpm_utility_| is created and destroyed on the |worker_thread_|,
   // and is not available after the thread is stopped/destroyed.
   std::unique_ptr<TpmUtility> default_tpm_utility_;
+  std::unique_ptr<hwsec::Factory> default_hwsec_factory_;
+  std::unique_ptr<const hwsec::AttestationFrontend> default_hwsec_;
+  std::unique_ptr<NvramQuoter> default_nvram_quoter_;
 
   scoped_refptr<dbus::Bus> bus_;
   std::unique_ptr<org::chromium::PcaAgentProxyInterface>

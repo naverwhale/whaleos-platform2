@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <base/files/file_path.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Information about a connected display.
 struct DisplayInfo {
@@ -41,7 +40,6 @@ struct DisplayInfo {
   ConnectorStatus connector_status = ConnectorStatus::UNKNOWN;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_DISPLAY_DISPLAY_INFO_H_

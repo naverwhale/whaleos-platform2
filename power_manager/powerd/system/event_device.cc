@@ -1,8 +1,10 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/system/event_device.h"
+
+#include <utility>
 
 #include <fcntl.h>
 #include <linux/input.h>
@@ -12,6 +14,7 @@
 #include <base/posix/eintr_wrapper.h>
 
 #include "power_manager/common/power_constants.h"
+#include "power_manager/common/tracing.h"
 
 // Helper macros for accessing the bitfields returned by the kernel interface,
 // compare with include/linux/bitops.h.
@@ -22,8 +25,7 @@
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 // C++14's <algorithm> could do std::max(EV_MAX, KEY_MAX, SW_MAX);
@@ -140,7 +142,10 @@ bool EventDevice::GetSwitchBit(int bit) {
   return BITMASK_GET_BIT(bitmask, bit);
 }
 
-bool EventDevice::ReadEvents(std::vector<input_event>* events_out) {
+EventDevice::ReadResult EventDevice::ReadEvents(
+    std::vector<input_event>* events_out) {
+  TRACE_EVENT("power", "EventDevice::ReadEvents", "fd", fd_, "path",
+              path_.value());
   DCHECK(events_out);
   events_out->clear();
 
@@ -148,34 +153,43 @@ bool EventDevice::ReadEvents(std::vector<input_event>* events_out) {
   ssize_t read_size = HANDLE_EINTR(read(fd_, events, sizeof(events)));
   if (read_size < 0) {
     // ENODEV is expected if the device was just unplugged.
-    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ENODEV)
+    if (errno == ENODEV) {
+      return ReadResult::kNoDevice;
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK)
       PLOG(ERROR) << "Reading events from " << path_.value() << " failed";
-    return false;
+    return ReadResult::kFailure;
   } else if (read_size == 0) {
     LOG(ERROR) << "Read returned 0 when reading events from " << path_.value();
-    return false;
+    return ReadResult::kFailure;
   }
 
   const size_t num_events = read_size / sizeof(struct input_event);
   if (read_size % sizeof(struct input_event)) {
     LOG(ERROR) << "Read " << read_size << " byte(s) while expecting "
                << sizeof(struct input_event) << "-byte events";
-    return false;
+    return ReadResult::kFailure;
   }
 
   events_out->reserve(num_events);
   for (size_t i = 0; i < num_events; ++i)
     events_out->push_back(events[i]);
-  return true;
+  return ReadResult::kSuccess;
 }
 
-void EventDevice::WatchForEvents(base::Closure new_events_cb) {
-  fd_watcher_ = base::FileDescriptorWatcher::WatchReadable(fd_, new_events_cb);
+void EventDevice::WatchForEvents(const base::RepeatingClosure& new_events_cb) {
+  // Annotate received events with a trace event.
+  auto callback = base::BindRepeating(
+      [](const base::RepeatingClosure& callback, int fd,
+         const base::FilePath& path) {
+        TRACE_EVENT("power", "EventDevice::OnEvent", "fd", fd, "path",
+                    path.value());
+        callback.Run();
+      },
+      new_events_cb, fd_, std::ref(path_));
+  fd_watcher_ =
+      base::FileDescriptorWatcher::WatchReadable(fd_, std::move(callback));
 }
-
-EventDeviceFactory::EventDeviceFactory() {}
-
-EventDeviceFactory::~EventDeviceFactory() {}
 
 std::shared_ptr<EventDeviceInterface> EventDeviceFactory::Open(
     const base::FilePath& path) {
@@ -187,5 +201,4 @@ std::shared_ptr<EventDeviceInterface> EventDeviceFactory::Open(
   return std::shared_ptr<EventDeviceInterface>(new EventDevice(fd, path));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

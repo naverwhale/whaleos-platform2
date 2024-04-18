@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include <base/test/task_environment.h>
 #include <base/run_loop.h>
 #include <brillo/asan.h>
+#include <dbus/error.h>
 #include <dbus/login_manager/dbus-constants.h>
 #include <dbus/mock_bus.h>
 #include <dbus/mock_exported_object.h>
@@ -34,7 +35,7 @@ using dbus::MockBus;
 using dbus::MockExportedObject;
 using dbus::MockObjectProxy;
 using dbus::ObjectPath;
-using testing::_;
+using testing::A;
 using testing::AnyNumber;
 using testing::Invoke;
 using testing::Mock;
@@ -109,10 +110,9 @@ TResponse ParseResponse(const ByteArray& response_blob) {
 }
 
 // Stub RetrievePrimarySession Session Manager method.
-std::unique_ptr<dbus::Response> StubRetrievePrimarySession(
-    dbus::MethodCall* method_call,
-    int /* timeout_ms */,
-    dbus::ScopedDBusError* /* error */) {
+base::expected<std::unique_ptr<dbus::Response>, dbus::Error>
+StubRetrievePrimarySession(dbus::MethodCall* method_call,
+                           int /* timeout_ms */) {
   // Respond with username = kUser and sanitized_username = kUserHash.
   method_call->SetSerial(kDBusSerial);
   auto response = dbus::Response::FromMethodCall(method_call);
@@ -146,9 +146,13 @@ class KerberosAdaptorTest : public ::testing::Test {
     EXPECT_CALL(*mock_bus_, GetExportedObject(object_path))
         .WillRepeatedly(Return(mock_exported_object_.get()));
     EXPECT_CALL(*mock_exported_object_, Unregister()).Times(AnyNumber());
-    EXPECT_CALL(*mock_exported_object_, ExportMethod(_, _, _, _))
+    EXPECT_CALL(
+        *mock_exported_object_,
+        ExportMethod(A<const std::string&>(), A<const std::string&>(),
+                     A<const dbus::ExportedObject::MethodCallCallback&>(),
+                     A<dbus::ExportedObject::OnExportedCallback>()))
         .Times(AnyNumber());
-    EXPECT_CALL(*mock_exported_object_, SendSignal(_))
+    EXPECT_CALL(*mock_exported_object_, SendSignal(A<dbus::Signal*>()))
         .WillRepeatedly(
             Invoke(this, &KerberosAdaptorTest::OnKerberosFilesChanged));
 
@@ -272,12 +276,13 @@ TEST_F(KerberosAdaptorTest, RetrievesPrimarySession) {
   // Stub out Session Manager's RetrievePrimarySession D-Bus method.
   auto mock_session_manager_proxy = base::MakeRefCounted<MockObjectProxy>(
       mock_bus_.get(), login_manager::kSessionManagerServiceName,
-      dbus::ObjectPath(login_manager::kSessionManagerServicePath));
+      ObjectPath(login_manager::kSessionManagerServicePath));
   EXPECT_CALL(*mock_bus_,
-              GetObjectProxy(login_manager::kSessionManagerServiceName, _))
+              GetObjectProxy(login_manager::kSessionManagerServiceName,
+                             A<const ObjectPath&>()))
       .WillOnce(Return(mock_session_manager_proxy.get()));
   EXPECT_CALL(*mock_session_manager_proxy,
-              CallMethodAndBlockWithErrorDetails(_, _, _))
+              CallMethodAndBlock(A<dbus::MethodCall*>(), A<int>()))
       .WillOnce(Invoke(&StubRetrievePrimarySession));
 
   // Recreate an adaptor, but don't call set_storage_dir_for_testing().
@@ -413,6 +418,6 @@ TEST_F(KerberosAdaptorTest, Metrics_ValidateConfigErrorCode) {
   EXPECT_EQ(ERROR_NONE, ValidateConfig());
 }
 
-// TODO(https://crbug.com/952247): Add more tests.
+// TODO(b/259178130): Add more tests.
 
 }  // namespace kerberos

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,15 +16,8 @@ namespace cryptohome {
 MockPlatform::MockPlatform()
     : mock_process_(new NiceMock<brillo::ProcessMock>()),
       fake_platform_(new FakePlatform()) {
-  ON_CALL(*this, GetUserId(_, _, _))
-      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::GetUserId));
-  ON_CALL(*this, GetGroupId(_, _))
-      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::GetGroupId));
-
   ON_CALL(*this, Rename(_, _))
       .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::Rename));
-  ON_CALL(*this, Move(_, _))
-      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::Move));
   ON_CALL(*this, Copy(_, _))
       .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::Copy));
   ON_CALL(*this, TouchFileDurable(_))
@@ -38,6 +31,9 @@ MockPlatform::MockPlatform()
   ON_CALL(*this, DeleteFileDurable(_))
       .WillByDefault(
           Invoke(fake_platform_.get(), &FakePlatform::DeleteFileDurable));
+  ON_CALL(*this, DeleteFileSecurely(_))
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::DeleteFileSecurely));
   ON_CALL(*this, EnumerateDirectoryEntries(_, _, _))
       .WillByDefault(Invoke(fake_platform_.get(),
                             &FakePlatform::EnumerateDirectoryEntries));
@@ -49,6 +45,8 @@ MockPlatform::MockPlatform()
           Invoke(fake_platform_.get(), &FakePlatform::IsDirectoryEmpty));
   ON_CALL(*this, FileExists(_))
       .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::FileExists));
+  ON_CALL(*this, Access(_, _))
+      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::Access));
   ON_CALL(*this, DirectoryExists(_))
       .WillByDefault(
           Invoke(fake_platform_.get(), &FakePlatform::DirectoryExists));
@@ -59,8 +57,6 @@ MockPlatform::MockPlatform()
       .WillByDefault(
           Invoke(fake_platform_.get(), &FakePlatform::CreateSparseFile));
 
-  ON_CALL(*this, DataSyncFile(_))
-      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::DataSyncFile));
   ON_CALL(*this, SyncFile(_))
       .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::SyncFile));
   ON_CALL(*this, SyncDirectory(_))
@@ -159,26 +155,67 @@ MockPlatform::MockPlatform()
   ON_CALL(*this, HasNoDumpFileAttribute(_))
       .WillByDefault(
           Invoke(fake_platform_.get(), &FakePlatform::HasNoDumpFileAttribute));
+  ON_CALL(*this, GetQuotaProjectId(_, _))
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::GetQuotaProjectId));
+  ON_CALL(*this, SetQuotaProjectId(_, _))
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::SetQuotaProjectId));
 
   ON_CALL(*this, GetOwnership(_, _, _, _))
       .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::GetOwnership));
   ON_CALL(*this, SetOwnership(_, _, _, _))
       .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::SetOwnership));
+  ON_CALL(*this, SafeDirChown(_, _, _))
+      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::SafeDirChown));
   ON_CALL(*this, GetPermissions(_, _))
       .WillByDefault(
           Invoke(fake_platform_.get(), &FakePlatform::GetPermissions));
   ON_CALL(*this, SetPermissions(_, _))
       .WillByDefault(
           Invoke(fake_platform_.get(), &FakePlatform::SetPermissions));
+  ON_CALL(*this, SafeDirChmod(_, _))
+      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::SafeDirChmod));
+  ON_CALL(*this, SafeCreateDirAndSetOwnershipAndPermissions(_, _, _, _))
+      .WillByDefault(
+          Invoke(fake_platform_.get(),
+                 &FakePlatform::SafeCreateDirAndSetOwnershipAndPermissions));
+  ON_CALL(*this, GetLoopDeviceManager())
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::GetLoopDeviceManager));
+  ON_CALL(*this, GetLogicalVolumeManager())
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::GetLogicalVolumeManager));
 
   ON_CALL(*this, AmountOfFreeDiskSpace(_))
       .WillByDefault(
           Invoke(fake_platform_.get(), &FakePlatform::AmountOfFreeDiskSpace));
+  ON_CALL(*this, StatVFS(_, _))
+      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::StatVFS));
 
-  ON_CALL(*this, SetGroupAccessible(_, _, _)).WillByDefault(Return(true));
+  ON_CALL(*this, Mount(_, _, _, _, _))
+      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::Mount));
+  ON_CALL(*this, Bind(_, _, _, _))
+      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::Bind));
+  ON_CALL(*this, Unmount(_, _, _))
+      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::Unmount));
+  ON_CALL(*this, LazyUnmount(_))
+      .WillByDefault(Invoke(fake_platform_.get(), &FakePlatform::LazyUnmount));
+  ON_CALL(*this, GetLoopDeviceMounts(_))
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::GetLoopDeviceMounts));
+  ON_CALL(*this, GetMountsBySourcePrefix(_, _))
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::GetMountsBySourcePrefix));
+  ON_CALL(*this, IsDirectoryMounted(_))
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::IsDirectoryMounted));
+  ON_CALL(*this, AreDirectoriesMounted(_))
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::AreDirectoriesMounted));
+
   ON_CALL(*this, GetCurrentTime())
       .WillByDefault(Return(base::Time::NowFromSystemTime()));
-  ON_CALL(*this, StatVFS(_, _)).WillByDefault(CallStatVFS());
   ON_CALL(*this, ReportFilesystemDetails(_, _))
       .WillByDefault(CallReportFilesystemDetails());
   ON_CALL(*this, FindFilesystemDevice(_, _))
@@ -190,10 +227,9 @@ MockPlatform::MockPlatform()
       .WillByDefault(Return(dircrypto::KeyState::NO_KEY));
   ON_CALL(*this, CreateProcessInstance())
       .WillByDefault(Invoke(this, &MockPlatform::MockCreateProcessInstance));
-  ON_CALL(*this, AreDirectoriesMounted(_))
-      .WillByDefault([](const std::vector<base::FilePath>& directories) {
-        return std::vector<bool>(directories.size(), false);
-      });
+  ON_CALL(*this, CreateUnguessableToken())
+      .WillByDefault(
+          Invoke(fake_platform_.get(), &FakePlatform::CreateUnguessableToken));
 }
 
 MockPlatform::~MockPlatform() {}

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,17 +21,23 @@ class ProcessMock : public Process {
 
   MOCK_METHOD(void, AddArg, (const std::string&), (override));
   MOCK_METHOD(void, RedirectDevNull, (int), (override));
+  MOCK_METHOD(void, RedirectInput, (const base::FilePath&), (override));
   MOCK_METHOD(void, RedirectInput, (const std::string&), (override));
+  MOCK_METHOD(void, RedirectOutput, (const base::FilePath&), (override));
   MOCK_METHOD(void, RedirectOutput, (const std::string&), (override));
   MOCK_METHOD(void, RedirectOutputToMemory, (bool), (override));
-  MOCK_METHOD(void, RedirectUsingFile, (int, const std::string&), (override));
+  MOCK_METHOD(void,
+              RedirectUsingFile,
+              (int, const base::FilePath&),
+              (override));
   MOCK_METHOD(void, RedirectUsingMemory, (int), (override));
   MOCK_METHOD(void, RedirectUsingPipe, (int, bool), (override));
   MOCK_METHOD(void, BindFd, (int, int), (override));
   MOCK_METHOD(void, SetUid, (uid_t), (override));
   MOCK_METHOD(void, SetGid, (gid_t), (override));
+  MOCK_METHOD(void, SetPgid, (pid_t), (override));
   MOCK_METHOD(void, SetCapabilities, (uint64_t), (override));
-  MOCK_METHOD(void, ApplySyscallFilter, (const std::string&), (override));
+  MOCK_METHOD(void, ApplySyscallFilter, (const base::FilePath&), (override));
   MOCK_METHOD(void, EnterNewPidNamespace, (), (override));
   MOCK_METHOD(void, SetInheritParentSignalMask, (bool), (override));
   MOCK_METHOD(void, SetPreExecCallback, (PreExecCallback), (override));
@@ -42,10 +48,10 @@ class ProcessMock : public Process {
   MOCK_METHOD(bool, Start, (), (override));
   MOCK_METHOD(int, Wait, (), (override));
   MOCK_METHOD(int, Run, (), (override));
-  MOCK_METHOD(pid_t, pid, (), (override));
+  MOCK_METHOD(pid_t, pid, (), (const, override));
   MOCK_METHOD(bool, Kill, (int, int), (override));
   MOCK_METHOD(void, Reset, (pid_t), (override));
-  MOCK_METHOD(bool, ResetPidByFile, (const std::string&), (override));
+  MOCK_METHOD(bool, ResetPidByFile, (const base::FilePath&), (override));
   MOCK_METHOD(pid_t, Release, (), (override));
   MOCK_METHOD(void, SetCloseUnusedFileDescriptors, (bool), (override));
 };

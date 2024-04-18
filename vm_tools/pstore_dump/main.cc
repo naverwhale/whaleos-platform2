@@ -1,10 +1,6 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-#include "vm_tools/common/naming.h"
-#include "vm_tools/common/pstore.h"
-#include "vm_tools/pstore_dump/persistent_ram_buffer.h"
 
 #include <string>
 
@@ -18,6 +14,10 @@
 #include <dbus/bus.h>
 #include <dbus/message.h>
 #include <dbus/object_proxy.h>
+#include <dbus/vm_concierge/dbus-constants.h>
+
+#include "vm_tools/common/naming.h"
+#include "vm_tools/pstore_dump/persistent_ram_buffer.h"
 
 namespace {
 
@@ -41,8 +41,10 @@ bool RetrieveSanitizedPrimaryUsername(std::string* out_sanitized_username) {
       login_manager::kSessionManagerInterface,
       login_manager::kSessionManagerRetrievePrimarySession);
   std::unique_ptr<dbus::Response> response =
-      session_manager_proxy->CallMethodAndBlock(
-          &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
+      session_manager_proxy
+          ->CallMethodAndBlock(&method_call,
+                               dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
   if (!response.get()) {
     LOG(ERROR) << "Cannot retrieve username for primary session.";
     bus->ShutdownAndBlock();
@@ -68,17 +70,6 @@ bool RetrieveSanitizedPrimaryUsername(std::string* out_sanitized_username) {
 bool FindARCVMPstorePath(base::FilePath* out_path) {
   DCHECK(out_path);
 
-  // Before users logged in to Chrome OS, mini-ARCVM uses
-  // /run/arcvm/arcvm.pstore for the path.
-  base::FilePath nonuser_pstore_path(vm_tools::kArcVmPstorePath);
-  if (base::PathExists(nonuser_pstore_path)) {
-    *out_path = nonuser_pstore_path;
-    return true;
-  }
-
-  // /run/arcvm/arcvm.pstore is moved to /home/root/<hash>/crosvm/*.pstore by
-  // arcvm-forward-pstore service after users logged in and mini-ARCVM is
-  // upgraded.
   std::string sanitized_primary_username;
   if (!RetrieveSanitizedPrimaryUsername(&sanitized_primary_username)) {
     LOG(ERROR) << "Failed to get primary username";
@@ -87,14 +78,14 @@ bool FindARCVMPstorePath(base::FilePath* out_path) {
   base::FilePath cryptohome_pstore_path =
       base::FilePath("/run/daemon-store/crosvm")
           .Append(sanitized_primary_username)
-          .Append(vm_tools::GetEncodedName("arcvm") + ".pstore");
+          .Append(vm_tools::GetEncodedName(vm_tools::concierge::kArcVmName) +
+                  ".pstore");
   if (base::PathExists(cryptohome_pstore_path)) {
     *out_path = cryptohome_pstore_path;
     return true;
   }
 
-  LOG(ERROR) << "The .pstore file doesn't exist at both "
-             << vm_tools::kArcVmPstorePath << " and " << cryptohome_pstore_path;
+  LOG(ERROR) << "The .pstore file doesn't exist at " << cryptohome_pstore_path;
   return false;
 }
 

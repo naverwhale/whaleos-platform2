@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/optional.h>
 #include <gtest/gtest.h>
 #include <re2/re2.h>
 
@@ -25,7 +24,8 @@ using ReaderRun = std::vector<LogEntry>;
 template <typename T>
 std::unique_ptr<LogReader> InitializeLogReaderForTest(
     const std::string& input_file_name, const char* pattern) {
-  base::FilePath input_file_path = test_util::GetTestDataPath(input_file_name);
+  base::FilePath input_file_path =
+      test_util::GetTestDataPath(input_file_name, /*use_testdata=*/true);
   auto r = std::make_unique<T>(input_file_path, pattern);
 
   return r;

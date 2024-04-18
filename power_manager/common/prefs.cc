@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,20 +8,21 @@
 #include <set>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
+#include <base/time/time.h>
 #include <cros_config/cros_config.h>
 
 #include "power_manager/common/cros_config_prefs_source.h"
+#include "power_manager/common/cros_ec_prefs_source.h"
 #include "power_manager/common/file_prefs_store.h"
 #include "power_manager/common/prefs_observer.h"
-#include "power_manager/common/util.h"
 
 namespace power_manager {
 
@@ -38,13 +39,11 @@ constexpr char kBoardSpecificPrefsSubdir[] = "board_specific";
 
 // Minimum time between batches of prefs being written to disk, in
 // milliseconds.
-const int kDefaultWriteIntervalMs = 1000;
+constexpr base::TimeDelta kDefaultWriteInterval = base::Seconds(1);
 
 }  // namespace
 
 Prefs::TestApi::TestApi(Prefs* prefs) : prefs_(prefs) {}
-
-Prefs::TestApi::~TestApi() {}
 
 bool Prefs::TestApi::TriggerWriteTimeout() {
   if (!prefs_->write_prefs_timer_.IsRunning())
@@ -55,9 +54,7 @@ bool Prefs::TestApi::TriggerWriteTimeout() {
   return true;
 }
 
-Prefs::Prefs()
-    : write_interval_(
-          base::TimeDelta::FromMilliseconds(kDefaultWriteIntervalMs)) {}
+Prefs::Prefs() : write_interval_(kDefaultWriteInterval) {}
 
 Prefs::~Prefs() {
   if (write_prefs_timer_.IsRunning())
@@ -75,10 +72,11 @@ PrefsSourceInterfaceVector Prefs::GetDefaultSources() {
 
   const base::FilePath read_only_path(kReadOnlyPrefsDir);
 
-  auto config = std::make_unique<brillo::CrosConfig>();
-  if (config->Init()) {
-    sources.emplace_back(new CrosConfigPrefsSource(std::move(config)));
-  }
+  if (CrosEcPrefsSource::IsSupported())
+    sources.emplace_back(new CrosEcPrefsSource);
+
+  sources.emplace_back(
+      new CrosConfigPrefsSource(std::make_unique<brillo::CrosConfig>()));
 
   sources.emplace_back(
       new FilePrefsStore(read_only_path.Append(kBoardSpecificPrefsSubdir)));
@@ -91,7 +89,7 @@ bool Prefs::Init(std::unique_ptr<PrefsStoreInterface> pref_store,
   pref_store_ = std::move(pref_store);
   pref_sources_ = std::move(pref_sources);
   return pref_store_->Watch(
-      base::Bind(&Prefs::HandlePrefChanged, base::Unretained(this)));
+      base::BindRepeating(&Prefs::HandlePrefChanged, base::Unretained(this)));
 }
 
 void Prefs::AddObserver(PrefsObserver* observer) {
@@ -214,6 +212,17 @@ void Prefs::SetDouble(const std::string& name, double value) {
 
 void Prefs::SetBool(const std::string& name, bool value) {
   SetInt64(name, static_cast<int64_t>(value));
+}
+
+bool Prefs::GetExternalString(const std::string& path,
+                              const std::string& name,
+                              std::string* value) {
+  DCHECK(value);
+  for (const auto& source : pref_sources_) {
+    if (source->ReadExternalString(path, name, value))
+      return true;
+  }
+  return false;
 }
 
 void Prefs::ScheduleWrite() {

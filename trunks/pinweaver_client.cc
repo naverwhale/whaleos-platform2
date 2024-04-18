@@ -1,16 +1,23 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 // pinweaver_client is a command line tool for executing PinWeaver vendor
-// specific commands to Cr50.
+// specific commands to GSC.
 
 #include <base/check.h>
 #include <base/command_line.h>
 #include <base/json/json_writer.h>
 #include <base/logging.h>
+#include <base/rand_util.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/threading/platform_thread.h>
+#include <base/time/time.h>
 #include <base/values.h>
 #include <brillo/syslog_logging.h>
+#include <libhwsec-foundation/crypto/aes.h>
+#include <libhwsec-foundation/crypto/big_num_util.h>
+#include <libhwsec-foundation/crypto/ecdh_hkdf.h>
+#include <libhwsec-foundation/crypto/sha.h>
 #include <openssl/sha.h>
 
 #include <algorithm>
@@ -21,6 +28,8 @@
 #include "trunks/tpm_utility.h"
 #include "trunks/trunks_client_test.h"
 #include "trunks/trunks_factory_impl.h"
+
+using hwsec_foundation::EllipticCurve;
 
 namespace {
 
@@ -76,8 +85,17 @@ void PrintUsage() {
   puts("  resetleaf [...] - sends an reset auth command.");
   puts("  getlog [...] - sends an get log command.");
   puts("  replay [...] - sends an log replay command.");
+  puts(
+      "  generate_ba_pk <auth_channel> <public_key.x> <public_key.y> - sends "
+      "a generate ba pk command.");
+  puts(
+      "  block_generate_ba_pk - blocks future generate_ba_pk commands until "
+      "GSC reboots.");
   puts("  selftest [--protocol=<version>] - runs a self test with the");
   puts("           following commands:");
+  puts("  biometrics_selftest [--full] - runs a self test for the biometrics");
+  puts("           pinweaver commands. Full test can only be run on platforms");
+  puts("           that support at least two Pk slots.");
 }
 
 std::string HexEncode(const std::string& bytes) {
@@ -134,6 +152,20 @@ std::string PwErrorStr(int code) {
       return "PW_ERR_NV_LENGTH_MISMATCH";
     case PW_ERR_NV_VERSION_MISMATCH:
       return "PW_ERR_NV_VERSION_MISMATCH";
+    case PW_ERR_PCR_NOT_MATCH:
+      return "PW_ERR_PCR_NOT_MATCH";
+    case PW_ERR_INTERNAL_FAILURE:
+      return "PW_ERR_INTERNAL_FAILURE";
+    case PW_ERR_EXPIRED:
+      return "PW_ERR_EXPIRED";
+    case PW_ERR_BIO_AUTH_CHANNEL_INVALID:
+      return "PW_ERR_BIO_AUTH_CHANNEL_INVALID";
+    case PW_ERR_BIO_AUTH_PUBLIC_KEY_VERSION_MISMATCH:
+      return "PW_ERR_BIO_AUTH_PUBLIC_KEY_VERSION_MISMATCH";
+    case PW_ERR_BIO_AUTH_ACCESS_DENIED:
+      return "PW_ERR_BIO_AUTH_ACCESS_DENIED";
+    case PW_ERR_BIO_AUTH_PK_NOT_ESTABLISHED:
+      return "PW_ERR_BIO_AUTH_PK_NOT_ESTABLISHED";
     default:
       return "?";
   }
@@ -163,30 +195,41 @@ void GetEmptyPath(uint8_t bits_per_level, uint8_t height, std::string* h_aux) {
   }
 }
 
-void GetInsertLeafDefaults(uint64_t* label,
-                           std::string* h_aux,
-                           brillo::SecureBlob* le_secret,
-                           brillo::SecureBlob* he_secret,
-                           brillo::SecureBlob* reset_secret,
-                           std::map<uint32_t, uint32_t>* delay_schedule,
-                           trunks::ValidPcrCriteria* valid_pcr_criteria) {
-  *label = 0x1b1llu;  // {0, 1, 2, 3, 0, 1}
+uint64_t GetDefaultLabel() {
+  return 0x1b1llu;  // {0, 1, 2, 3, 0, 1}
+}
 
+void GetDefaultHAux(std::string* h_aux) {
   GetEmptyPath(DEFAULT_BITS_PER_LEVEL, DEFAULT_HEIGHT, h_aux);
-  le_secret->assign(DEFAULT_LE_SECRET,
-                    DEFAULT_LE_SECRET + sizeof(DEFAULT_LE_SECRET));
-  he_secret->assign(DEFAULT_HE_SECRET,
-                    DEFAULT_HE_SECRET + sizeof(DEFAULT_HE_SECRET));
-  reset_secret->assign(DEFAULT_RESET_SECRET,
-                       DEFAULT_RESET_SECRET + sizeof(DEFAULT_RESET_SECRET));
+}
+
+void GetDefaultLeSecret(brillo::SecureBlob* secret) {
+  secret->assign(DEFAULT_LE_SECRET,
+                 DEFAULT_LE_SECRET + sizeof(DEFAULT_LE_SECRET));
+}
+
+void GetDefaultHeSecret(brillo::SecureBlob* secret) {
+  secret->assign(DEFAULT_HE_SECRET,
+                 DEFAULT_HE_SECRET + sizeof(DEFAULT_HE_SECRET));
+}
+
+void GetDefaultResetSecret(brillo::SecureBlob* secret) {
+  secret->assign(DEFAULT_RESET_SECRET,
+                 DEFAULT_RESET_SECRET + sizeof(DEFAULT_RESET_SECRET));
+}
+
+void GetDefaultDelaySchedule(std::map<uint32_t, uint32_t>* delay_schedule) {
   delay_schedule->clear();
-  delay_schedule->emplace(5, 20);
-  delay_schedule->emplace(6, 60);
+  delay_schedule->emplace(5, 5);
+  delay_schedule->emplace(6, 10);
   delay_schedule->emplace(7, 300);
   delay_schedule->emplace(8, 600);
   delay_schedule->emplace(9, 1800);
   delay_schedule->emplace(10, 3600);
   delay_schedule->emplace(50, PW_BLOCK_ATTEMPTS);
+}
+
+void GetDefaultValidPcrCriteria(trunks::ValidPcrCriteria* valid_pcr_criteria) {
   valid_pcr_criteria->Clear();
   if (protocol_version > 0) {
     trunks::ValidPcrValue* default_pcr_value =
@@ -196,16 +239,33 @@ void GetInsertLeafDefaults(uint64_t* label,
   }
 }
 
-base::Value SetupBaseOutcome(uint32_t result_code, const std::string& root) {
+void GetInsertLeafDefaults(uint64_t* label,
+                           std::string* h_aux,
+                           brillo::SecureBlob* le_secret,
+                           brillo::SecureBlob* he_secret,
+                           brillo::SecureBlob* reset_secret,
+                           std::map<uint32_t, uint32_t>* delay_schedule,
+                           trunks::ValidPcrCriteria* valid_pcr_criteria) {
+  *label = GetDefaultLabel();
+  GetDefaultHAux(h_aux);
+  GetDefaultLeSecret(le_secret);
+  GetDefaultHeSecret(he_secret);
+  GetDefaultResetSecret(reset_secret);
+  GetDefaultDelaySchedule(delay_schedule);
+  GetDefaultValidPcrCriteria(valid_pcr_criteria);
+}
+
+base::Value::Dict SetupBaseOutcome(uint32_t result_code,
+                                   const std::string& root) {
   // This is exported as a string because the API handles integers as signed.
-  base::Value outcome(base::Value::Type::DICTIONARY);
-  outcome.SetStringPath("result_code.value", std::to_string(result_code));
-  outcome.SetStringPath("result_code.name", PwErrorStr(result_code));
-  outcome.SetStringKey("root_hash", HexEncode(root));
+  base::Value::Dict outcome;
+  outcome.SetByDottedPath("result_code.value", std::to_string(result_code));
+  outcome.SetByDottedPath("result_code.name", PwErrorStr(result_code));
+  outcome.Set("root_hash", HexEncode(root));
   return outcome;
 }
 
-std::string GetOutcomeJson(const base::Value& outcome) {
+std::string GetOutcomeJson(const base::Value::Dict& outcome) {
   std::string json;
   base::JSONWriter::WriteWithOptions(
       outcome, base::JSONWriter::OPTIONS_PRETTY_PRINT, &json);
@@ -239,7 +299,7 @@ int HandleResetTree(base::CommandLine::StringVector::const_iterator begin,
     LOG(ERROR) << "PinWeaverResetTree: " << trunks::GetErrorString(result);
   }
 
-  base::Value outcome = SetupBaseOutcome(result_code, root);
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
   puts(GetOutcomeJson(outcome).c_str());
   return result;
 }
@@ -298,16 +358,16 @@ int HandleInsert(base::CommandLine::StringVector::const_iterator begin,
   std::unique_ptr<trunks::TpmUtility> tpm_utility = factory->GetTpmUtility();
   trunks::TPM_RC result = tpm_utility->PinWeaverInsertLeaf(
       protocol_version, label, h_aux, le_secret, he_secret, reset_secret,
-      delay_schedule, valid_pcr_criteria, &result_code, &root, &cred_metadata,
-      &mac);
+      delay_schedule, valid_pcr_criteria, std::nullopt, &result_code, &root,
+      &cred_metadata, &mac);
 
   if (result) {
     LOG(ERROR) << "PinWeaverInsertLeaf: " << trunks::GetErrorString(result);
   }
 
-  base::Value outcome = SetupBaseOutcome(result_code, root);
-  outcome.SetStringKey("cred_metadata", HexEncode(cred_metadata));
-  outcome.SetStringKey("mac", HexEncode(mac));
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
+  outcome.Set("cred_metadata", HexEncode(cred_metadata));
+  outcome.Set("mac", HexEncode(mac));
   puts(GetOutcomeJson(outcome).c_str());
   return result;
 }
@@ -342,7 +402,7 @@ int HandleRemove(base::CommandLine::StringVector::const_iterator begin,
     LOG(ERROR) << "PinWeaverRemoveLeaf: " << trunks::GetErrorString(result);
   }
 
-  base::Value outcome = SetupBaseOutcome(result_code, root);
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
   puts(GetOutcomeJson(outcome).c_str());
   return result;
 }
@@ -391,11 +451,11 @@ int HandleAuth(base::CommandLine::StringVector::const_iterator begin,
     LOG(ERROR) << "PinWeaverTryAuth: " << trunks::GetErrorString(result);
   }
 
-  base::Value outcome = SetupBaseOutcome(result_code, root);
-  outcome.SetStringKey("seconds_to_wait", std::to_string(seconds_to_wait));
-  outcome.SetStringKey("he_secret", HexEncode(he_secret.to_string()));
-  outcome.SetStringKey("cred_metadata", HexEncode(cred_metadata_out));
-  outcome.SetStringKey("mac", HexEncode(mac_out));
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
+  outcome.Set("seconds_to_wait", std::to_string(seconds_to_wait));
+  outcome.Set("he_secret", HexEncode(he_secret.to_string()));
+  outcome.Set("cred_metadata", HexEncode(cred_metadata_out));
+  outcome.Set("mac", HexEncode(mac_out));
   puts(GetOutcomeJson(outcome).c_str());
   return result;
 }
@@ -429,22 +489,20 @@ int HandleResetLeaf(base::CommandLine::StringVector::const_iterator begin,
 
   uint32_t result_code = 0;
   std::string root;
-  brillo::SecureBlob he_secret;
   std::string cred_metadata_out;
   std::string mac_out;
   std::unique_ptr<trunks::TpmUtility> tpm_utility = factory->GetTpmUtility();
   trunks::TPM_RC result = tpm_utility->PinWeaverResetAuth(
-      protocol_version, reset_secret, h_aux, cred_metadata, &result_code, &root,
-      &he_secret, &cred_metadata_out, &mac_out);
+      protocol_version, reset_secret, false, h_aux, cred_metadata, &result_code,
+      &root, &cred_metadata_out, &mac_out);
 
   if (result) {
     LOG(ERROR) << "PinWeaverResetAuth: " << trunks::GetErrorString(result);
   }
 
-  base::Value outcome = SetupBaseOutcome(result_code, root);
-  outcome.SetStringKey("he_secret", HexEncode(he_secret.to_string()));
-  outcome.SetStringKey("cred_metadata", HexEncode(cred_metadata_out));
-  outcome.SetStringKey("mac", HexEncode(mac_out));
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
+  outcome.Set("cred_metadata", HexEncode(cred_metadata_out));
+  outcome.Set("mac", HexEncode(mac_out));
   puts(GetOutcomeJson(outcome).c_str());
   return result;
 }
@@ -477,44 +535,33 @@ int HandleGetLog(base::CommandLine::StringVector::const_iterator begin,
     LOG(ERROR) << "PinWeaverGetLog: " << trunks::GetErrorString(result);
   }
 
-  base::Value outcome = SetupBaseOutcome(result_code, root);
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
 
-  base::Value out_entries(base::Value::Type::LIST);
+  base::Value::List out_entries;
   for (const auto& entry : log) {
-    base::Value out_entry(base::Value::Type::DICTIONARY);
-    out_entry.SetStringKey("label", std::to_string(entry.label()));
-    out_entry.SetStringKey("root", HexEncode(entry.root()));
+    base::Value::Dict out_entry;
+    out_entry.Set("label", std::to_string(entry.label()));
+    out_entry.Set("root", HexEncode(entry.root()));
     switch (entry.type_case()) {
       case trunks::PinWeaverLogEntry::TypeCase::kInsertLeaf:
-        out_entry.SetStringKey("type", "InsertLeaf");
-        out_entry.SetStringKey("hmac", HexEncode(entry.insert_leaf().hmac()));
+        out_entry.Set("type", "InsertLeaf");
+        out_entry.Set("hmac", HexEncode(entry.insert_leaf().hmac()));
         break;
       case trunks::PinWeaverLogEntry::TypeCase::kRemoveLeaf:
-        out_entry.SetStringKey("type", "RemoveLeaf");
+        out_entry.Set("type", "RemoveLeaf");
         break;
       case trunks::PinWeaverLogEntry::TypeCase::kAuth:
-        out_entry.SetStringKey("type", "Auth");
-        out_entry.SetStringKey(
-            "timestamp.boot_count",
-            std::to_string(entry.auth().timestamp().boot_count()));
-        out_entry.SetStringKey(
-            "timestamp.timer_value",
-            std::to_string(entry.auth().timestamp().timer_value()));
-        out_entry.SetStringPath("return_code.value",
-                                std::to_string(entry.auth().return_code()));
-        out_entry.SetStringPath(
-            "return_code.name",
-            trunks::GetErrorString(entry.auth().return_code()));
+        out_entry.Set("type", "Auth");
         break;
       case trunks::PinWeaverLogEntry::TypeCase::kResetTree:
-        out_entry.SetStringKey("type", "ResetTree");
+        out_entry.Set("type", "ResetTree");
         break;
       default:
-        out_entry.SetStringKey("type", std::to_string(entry.type_case()));
+        out_entry.Set("type", std::to_string(entry.type_case()));
     }
     out_entries.Append(std::move(out_entry));
   }
-  outcome.SetKey("entries", std::move(out_entries));
+  outcome.Set("entries", std::move(out_entries));
   puts(GetOutcomeJson(outcome).c_str());
   return result;
 }
@@ -559,11 +606,93 @@ int HandleReplay(base::CommandLine::StringVector::const_iterator begin,
     LOG(ERROR) << "PinWeaverResetAuth: " << trunks::GetErrorString(result);
   }
 
-  base::Value outcome = SetupBaseOutcome(result_code, root);
-  outcome.SetStringKey("cred_metadata", HexEncode(cred_metadata_out));
-  outcome.SetStringKey("mac", HexEncode(mac_out));
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
+  outcome.Set("cred_metadata", HexEncode(cred_metadata_out));
+  outcome.Set("mac", HexEncode(mac_out));
   puts(GetOutcomeJson(outcome).c_str());
   return result;
+}
+
+int HandleGenerateBiometricsAuthPk(
+    base::CommandLine::StringVector::const_iterator begin,
+    base::CommandLine::StringVector::const_iterator end,
+    TrunksFactoryImpl* factory) {
+  uint8_t auth_channel;
+  trunks::PinWeaverEccPoint client_pt;
+  if (end - begin != 3) {
+    puts("Invalid options!");
+    PrintUsage();
+    return EXIT_FAILURE;
+  } else {
+    auth_channel = std::stoul(begin[0]);
+
+    std::vector<uint8_t> bytes;
+    if (!base::HexStringToBytes(begin[1], &bytes) ||
+        bytes.size() != trunks::PinWeaverEccPointSize) {
+      puts("Invalid point!");
+      return EXIT_FAILURE;
+    }
+    memcpy(client_pt.x, bytes.data(), bytes.size());
+
+    bytes.clear();
+    if (!base::HexStringToBytes(begin[2], &bytes) ||
+        bytes.size() != trunks::PinWeaverEccPointSize)
+      return EXIT_FAILURE;
+    memcpy(client_pt.y, bytes.data(), bytes.size());
+  }
+
+  uint32_t result_code = 0;
+  std::string root;
+  trunks::PinWeaverEccPoint server_pt;
+  std::unique_ptr<trunks::TpmUtility> tpm_utility = factory->GetTpmUtility();
+  trunks::TPM_RC result = tpm_utility->PinWeaverGenerateBiometricsAuthPk(
+      protocol_version, auth_channel, client_pt, &result_code, &root,
+      &server_pt);
+
+  if (result) {
+    LOG(ERROR) << "PinWeaverGenerateBiometricsAuthPk: "
+               << trunks::GetErrorString(result);
+    return result;
+  }
+
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
+  if (result_code == 0) {
+    base::Value::Dict server_public_key;
+    server_public_key.Set(
+        "x", base::HexEncode(server_pt.x, trunks::PinWeaverEccPointSize));
+    server_public_key.Set(
+        "y", base::HexEncode(server_pt.y, trunks::PinWeaverEccPointSize));
+    outcome.Set("server_public_key", std::move(server_public_key));
+  }
+  puts(GetOutcomeJson(outcome).c_str());
+  return 0;
+}
+
+int HandleBlockGenerateBiometricsAuthPk(
+    base::CommandLine::StringVector::const_iterator begin,
+    base::CommandLine::StringVector::const_iterator end,
+    TrunksFactoryImpl* factory) {
+  if (begin != end) {
+    puts("Invalid options!");
+    PrintUsage();
+    return EXIT_FAILURE;
+  }
+
+  uint32_t result_code = 0;
+  std::string root;
+  std::unique_ptr<trunks::TpmUtility> tpm_utility = factory->GetTpmUtility();
+  trunks::TPM_RC result = tpm_utility->PinWeaverBlockGenerateBiometricsAuthPk(
+      protocol_version, &result_code, &root);
+
+  if (result) {
+    LOG(ERROR) << "PinWeaverBlockGenerateBiometricsAuthPk: "
+               << trunks::GetErrorString(result);
+    return result;
+  }
+
+  base::Value::Dict outcome = SetupBaseOutcome(result_code, root);
+  puts(GetOutcomeJson(outcome).c_str());
+  return 0;
 }
 
 int HandleSelfTest(base::CommandLine::StringVector::const_iterator begin,
@@ -604,8 +733,8 @@ int HandleSelfTest(base::CommandLine::StringVector::const_iterator begin,
   std::string mac;
   result = tpm_utility->PinWeaverInsertLeaf(
       protocol_version, label, h_aux, le_secret, he_secret, reset_secret,
-      delay_schedule, valid_pcr_criteria, &result_code, &root, &cred_metadata,
-      &mac);
+      delay_schedule, valid_pcr_criteria, std::nullopt, &result_code, &root,
+      &cred_metadata, &mac);
   if (result || result_code) {
     LOG(ERROR) << "insert_leaf failed! " << result_code << " "
                << PwErrorStr(result_code);
@@ -686,19 +815,13 @@ int HandleSelfTest(base::CommandLine::StringVector::const_iterator begin,
     LOG(ERROR) << log.front().type_case();
     fail = true;
   }
-  if (log.front().auth().return_code() != PW_ERR_LOWENT_AUTH_FAILED) {
-    LOG(ERROR) << "get_log verification failed: wrong return code!";
-    LOG(ERROR) << PwErrorStr(log.front().auth().return_code());
-    fail = true;
-  }
   if (fail) {
     return EXIT_FAILURE;
   }
 
   LOG(INFO) << "log_replay";
   result_code = 0;
-  std::string replay_metadata = cred_metadata;
-  std::string replay_mac = mac;
+  std::string replay_metadata, replay_mac;
   result = tpm_utility->PinWeaverLogReplay(protocol_version, root, h_aux,
                                            old_metadata, &result_code, &root,
                                            &replay_metadata, &replay_mac);
@@ -719,18 +842,100 @@ int HandleSelfTest(base::CommandLine::StringVector::const_iterator begin,
   LOG(INFO) << "reset_auth";
   result_code = 0;
   result = tpm_utility->PinWeaverResetAuth(
-      protocol_version, reset_secret, h_aux, cred_metadata, &result_code, &root,
-      &he_secret, &cred_metadata, &mac);
+      protocol_version, reset_secret, false, h_aux, cred_metadata, &result_code,
+      &root, &cred_metadata, &mac);
   if (result || result_code) {
     LOG(ERROR) << "reset_auth failed! " << result_code << " "
                << PwErrorStr(result_code);
     return EXIT_FAILURE;
   }
 
+  LOG(INFO) << "try_auth auth fail for 5 times";
+  for (int i = 0; i < 5; ++i) {
+    result_code = 0;
+    result = tpm_utility->PinWeaverTryAuth(
+        protocol_version, wrong_le_secret, h_aux, cred_metadata, &result_code,
+        &root, &seconds_to_wait, &he_secret, &test_reset_secret, &cred_metadata,
+        &mac);
+    if (result) {
+      LOG(ERROR) << "try_auth failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+    if (result_code != PW_ERR_LOWENT_AUTH_FAILED) {
+      LOG(ERROR) << "try_auth verification failed!";
+      return EXIT_FAILURE;
+    }
+  }
+  LOG(INFO) << "Now credential should be locked for 5 seconds.";
+
+  LOG(INFO) << "try_auth should fail (rate-limited)";
+  result_code = 0;
+  std::string no_cred_metadata, no_mac;
+  result = tpm_utility->PinWeaverTryAuth(
+      protocol_version, le_secret, h_aux, cred_metadata, &result_code, &root,
+      &seconds_to_wait, &he_secret, &test_reset_secret, &no_cred_metadata,
+      &no_mac);
+  if (result) {
+    LOG(ERROR) << "try_auth failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+  if (result_code != PW_ERR_RATE_LIMIT_REACHED) {
+    LOG(ERROR) << "try_auth verification failed!";
+    return EXIT_FAILURE;
+  }
+
+  LOG(INFO) << "try_auth fail after waiting 7 seconds";
+  base::PlatformThread::Sleep(base::Seconds(7));
+  result_code = 0;
+  result = tpm_utility->PinWeaverTryAuth(
+      protocol_version, wrong_le_secret, h_aux, cred_metadata, &result_code,
+      &root, &seconds_to_wait, &he_secret, &test_reset_secret, &cred_metadata,
+      &mac);
+  if (result) {
+    LOG(ERROR) << "try_auth failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+  if (result_code != PW_ERR_LOWENT_AUTH_FAILED) {
+    LOG(ERROR) << "try_auth verification failed!";
+    return EXIT_FAILURE;
+  }
+  LOG(INFO) << "Now credential should be locked for 10 seconds.";
+
+  LOG(INFO) << "try_auth should fail (rate-limited) after waiting 8 seconds";
+  base::PlatformThread::Sleep(base::Seconds(8));
+  result_code = 0;
+  result = tpm_utility->PinWeaverTryAuth(
+      protocol_version, le_secret, h_aux, cred_metadata, &result_code, &root,
+      &seconds_to_wait, &he_secret, &test_reset_secret, &no_cred_metadata,
+      &no_mac);
+  if (result) {
+    LOG(ERROR) << "try_auth failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+  if (result_code != PW_ERR_RATE_LIMIT_REACHED) {
+    LOG(ERROR) << "try_auth verification failed!";
+    return EXIT_FAILURE;
+  }
+
+  LOG(INFO) << "try_auth success after waiting 4 seconds";
+  base::PlatformThread::Sleep(base::Seconds(4));
+  result_code = 0;
+  result = tpm_utility->PinWeaverTryAuth(
+      protocol_version, le_secret, h_aux, cred_metadata, &result_code, &root,
+      &seconds_to_wait, &he_secret, &test_reset_secret, &cred_metadata, &mac);
+  if (result || result_code) {
+    LOG(ERROR) << "try_auth failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
   if (he_secret.size() != PW_SECRET_SIZE ||
       std::mismatch(he_secret.begin(), he_secret.end(), DEFAULT_HE_SECRET)
               .first != he_secret.end()) {
-    LOG(ERROR) << "reset_auth credential retrieval failed!";
+    LOG(ERROR) << "try_auth credential retrieval failed!";
     return EXIT_FAILURE;
   }
 
@@ -758,8 +963,8 @@ int HandleSelfTest(base::CommandLine::StringVector::const_iterator begin,
   }
   result = tpm_utility->PinWeaverInsertLeaf(
       protocol_version, label, h_aux, le_secret, he_secret, reset_secret,
-      delay_schedule, valid_pcr_criteria, &result_code, &root, &cred_metadata,
-      &mac);
+      delay_schedule, valid_pcr_criteria, std::nullopt, &result_code, &root,
+      &cred_metadata, &mac);
   if (result || result_code) {
     LOG(ERROR) << "insert_leaf failed! " << result_code << " "
                << PwErrorStr(result_code);
@@ -805,8 +1010,8 @@ int HandleSelfTest(base::CommandLine::StringVector::const_iterator begin,
     value->set_digest("bad_digest");
     result = tpm_utility->PinWeaverInsertLeaf(
         protocol_version, label, h_aux, le_secret, he_secret, reset_secret,
-        delay_schedule, valid_pcr_criteria, &result_code, &root, &cred_metadata,
-        &mac);
+        delay_schedule, valid_pcr_criteria, std::nullopt, &result_code, &root,
+        &cred_metadata, &mac);
     if (result || result_code) {
       LOG(ERROR) << "insert_leaf failed! " << result_code << " "
                  << PwErrorStr(result_code);
@@ -842,6 +1047,600 @@ int HandleSelfTest(base::CommandLine::StringVector::const_iterator begin,
     }
   }
 
+  if (protocol_version > 1) {
+    LOG(INFO) << "sending sys_info to check initial timestamp";
+    uint32_t boot_count;
+    uint64_t seconds_since_boot;
+    result =
+        tpm_utility->PinWeaverSysInfo(protocol_version, &result_code, &root,
+                                      &boot_count, &seconds_since_boot);
+    if (result || result_code) {
+      LOG(ERROR) << "sys_info failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+    uint32_t old_boot_count = boot_count;
+    uint64_t old_seconds_since_boot = seconds_since_boot;
+
+    GetInsertLeafDefaults(&label, &h_aux, &le_secret, &he_secret, &reset_secret,
+                          &delay_schedule, &valid_pcr_criteria);
+    // Choose a reasonable value to test for credential expiration.
+    uint32_t expiration_delay = 5;
+    result = tpm_utility->PinWeaverInsertLeaf(
+        protocol_version, label, h_aux, le_secret, he_secret, reset_secret,
+        delay_schedule, valid_pcr_criteria, expiration_delay, &result_code,
+        &root, &cred_metadata, &mac);
+    if (result || result_code) {
+      LOG(ERROR) << "insert_leaf failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "the leaf has a 5-second expiration window.";
+    LOG(INFO) << "try_auth should fail (expired) after waiting 7 seconds";
+    base::PlatformThread::Sleep(base::Seconds(7));
+    result_code = 0;
+    result = tpm_utility->PinWeaverTryAuth(
+        protocol_version, le_secret, h_aux, cred_metadata, &result_code, &root,
+        &seconds_to_wait, &he_secret, &test_reset_secret, &no_cred_metadata,
+        &no_mac);
+    if (result) {
+      LOG(ERROR) << "try_auth failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+    if (result_code != PW_ERR_EXPIRED) {
+      LOG(ERROR) << "try_auth verification failed!";
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "reset_auth";
+    result_code = 0;
+    result = tpm_utility->PinWeaverResetAuth(
+        protocol_version, reset_secret, false, h_aux, cred_metadata,
+        &result_code, &root, &cred_metadata, &mac);
+    if (result || result_code) {
+      LOG(ERROR) << "reset_auth failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "try_auth should still fail (expired) because normal reset "
+                 "doesn't reset expiration";
+    result_code = 0;
+    result = tpm_utility->PinWeaverTryAuth(
+        protocol_version, le_secret, h_aux, cred_metadata, &result_code, &root,
+        &seconds_to_wait, &he_secret, &test_reset_secret, &no_cred_metadata,
+        &no_mac);
+    if (result) {
+      LOG(ERROR) << "try_auth failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+    if (result_code != PW_ERR_EXPIRED) {
+      LOG(ERROR) << "try_auth verification failed!";
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "reset_auth (strong)";
+    result_code = 0;
+    result = tpm_utility->PinWeaverResetAuth(
+        protocol_version, reset_secret, true, h_aux, cred_metadata,
+        &result_code, &root, &cred_metadata, &mac);
+    if (result || result_code) {
+      LOG(ERROR) << "reset_auth failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "try_auth success";
+    result_code = 0;
+    result = tpm_utility->PinWeaverTryAuth(
+        protocol_version, le_secret, h_aux, cred_metadata, &result_code, &root,
+        &seconds_to_wait, &he_secret, &test_reset_secret, &cred_metadata, &mac);
+    if (result || result_code) {
+      LOG(ERROR) << "try_auth failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+    if (he_secret.size() != PW_SECRET_SIZE ||
+        std::mismatch(he_secret.begin(), he_secret.end(), DEFAULT_HE_SECRET)
+                .first != he_secret.end()) {
+      LOG(ERROR) << "try_auth credential retrieval failed!";
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "remove_leaf";
+    result_code = 0;
+    result = tpm_utility->PinWeaverRemoveLeaf(protocol_version, label, h_aux,
+                                              mac, &result_code, &root);
+    if (result || result_code) {
+      LOG(ERROR) << "remove_leaf failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "sending sys_info to check final timestamp";
+    result =
+        tpm_utility->PinWeaverSysInfo(protocol_version, &result_code, &root,
+                                      &boot_count, &seconds_since_boot);
+    if (result || result_code) {
+      LOG(ERROR) << "sys_info failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "boot_count: before = " << old_boot_count
+              << ", after = " << boot_count;
+    if (boot_count != old_boot_count) {
+      LOG(ERROR) << "boot_count increased!";
+    }
+    LOG(INFO) << "seconds_since_boot: before = " << old_seconds_since_boot
+              << ", after = " << seconds_since_boot;
+    if (seconds_since_boot < old_seconds_since_boot) {
+      LOG(ERROR) << "seconds_since_boot decreased!";
+    }
+    uint64_t seconds_passed = seconds_since_boot - old_seconds_since_boot;
+    if (seconds_passed < 5 || seconds_passed > 9) {
+      LOG(ERROR) << "seconds_passed isn't reasonable!";
+    }
+  }
+
+  puts("Success!");
+  return EXIT_SUCCESS;
+}
+
+std::optional<trunks::PinWeaverEccPoint> ToPinWeaverEccPoint(
+    const EllipticCurve& ec, BN_CTX* ctx, const EC_POINT* point) {
+  crypto::ScopedBIGNUM out_x = hwsec_foundation::CreateBigNum(),
+                       out_y = hwsec_foundation::CreateBigNum();
+  if (!out_x || !out_y) {
+    LOG(ERROR) << "Failed to create bignums.";
+    return std::nullopt;
+  }
+  if (!EC_POINT_get_affine_coordinates(ec.GetGroup(), point, out_x.get(),
+                                       out_y.get(), ctx)) {
+    LOG(ERROR) << "Failed to get affine coords for point";
+    return std::nullopt;
+  }
+  brillo::SecureBlob out_x_blob, out_y_blob;
+  if (!hwsec_foundation::BigNumToSecureBlob(*out_x, PW_BA_ECC_CORD_SIZE,
+                                            &out_x_blob) ||
+      !hwsec_foundation::BigNumToSecureBlob(*out_y, PW_BA_ECC_CORD_SIZE,
+                                            &out_y_blob)) {
+    LOG(ERROR) << "Failed to transform bignums to secure blobs.";
+    return std::nullopt;
+  }
+
+  trunks::PinWeaverEccPoint ret;
+  memcpy(ret.x, out_x_blob.data(), PW_BA_ECC_CORD_SIZE);
+  memcpy(ret.y, out_y_blob.data(), PW_BA_ECC_CORD_SIZE);
+
+  return ret;
+}
+
+crypto::ScopedEC_POINT FromPinWeaverEccPoint(
+    const EllipticCurve& ec,
+    BN_CTX* ctx,
+    const trunks::PinWeaverEccPoint& point_in) {
+  crypto::ScopedEC_POINT point = ec.CreatePoint();
+  if (!point) {
+    LOG(ERROR) << "Failed to create EC point.";
+    return nullptr;
+  }
+  const brillo::SecureBlob in_x_blob(point_in.x,
+                                     point_in.x + PW_BA_ECC_CORD_SIZE),
+      in_y_blob(point_in.y, point_in.y + PW_BA_ECC_CORD_SIZE);
+  const crypto::ScopedBIGNUM in_x =
+      hwsec_foundation::SecureBlobToBigNum(in_x_blob);
+  const crypto::ScopedBIGNUM in_y =
+      hwsec_foundation::SecureBlobToBigNum(in_y_blob);
+  if (!in_x || !in_y) {
+    LOG(ERROR) << "Failed to transform secure blobs to bignums.";
+    return nullptr;
+  }
+  if (!EC_POINT_set_affine_coordinates(ec.GetGroup(), point.get(), in_x.get(),
+                                       in_y.get(), ctx)) {
+    LOG(ERROR) << "Failed to set affine coords for point";
+    return nullptr;
+  }
+  return point;
+}
+
+std::optional<brillo::SecureBlob> CalculatePkFromKeys(
+    const EllipticCurve& ec,
+    BN_CTX* ctx,
+    const BIGNUM& own_priv,
+    const EC_POINT& others_pub) {
+  crypto::ScopedEC_POINT shared_point =
+      ComputeEcdhSharedSecretPoint(ec, others_pub, own_priv);
+  if (!shared_point) {
+    LOG(ERROR) << "Failed to compute shared secret point.";
+    return std::nullopt;
+  }
+  brillo::SecureBlob secret;
+  if (!ComputeEcdhSharedSecret(ec, *shared_point, &secret)) {
+    LOG(ERROR) << "Failed to compute shared secret.";
+    return std::nullopt;
+  }
+
+  return hwsec_foundation::Sha256(secret);
+}
+
+int HandleBiometricsSelfTest(
+    base::CommandLine::StringVector::const_iterator begin,
+    base::CommandLine::StringVector::const_iterator end,
+    TrunksFactoryImpl* factory) {
+  const uint8_t kFpAuthChannel = 0, kFaceAuthChannel = 1;
+
+  bool full = false;
+  if (end - begin == 1 && begin[0] == "--full") {
+    full = true;
+  } else if (begin != end) {
+    puts("Invalid options!");
+    PrintUsage();
+    return EXIT_FAILURE;
+  }
+
+  if (protocol_version < 2) {
+    LOG(ERROR) << "Biometrics feature is only available since v2.";
+    return EXIT_FAILURE;
+  }
+
+  // 1. Reset tree
+  LOG(INFO) << "reset_tree";
+  uint32_t result_code = 0;
+  std::string root;
+  std::unique_ptr<trunks::TpmUtility> tpm_utility = factory->GetTpmUtility();
+  trunks::TPM_RC result =
+      tpm_utility->PinWeaverResetTree(protocol_version, DEFAULT_BITS_PER_LEVEL,
+                                      DEFAULT_HEIGHT, &result_code, &root);
+  if (result || result_code) {
+    LOG(ERROR) << "reset_tree failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+
+  // Initialize the context and the curve for EC operations.
+  hwsec_foundation::ScopedBN_CTX context =
+      hwsec_foundation::CreateBigNumContext();
+  std::optional<EllipticCurve> ec =
+      EllipticCurve::Create(EllipticCurve::CurveType::kPrime256, context.get());
+  if (!ec.has_value()) {
+    LOG(ERROR) << "Failed to create EllipticCurve.";
+    return EXIT_FAILURE;
+  }
+
+  // 2. Generate Pk for fingerprint slot
+  LOG(INFO) << "generate_ba_pk (fp slot)";
+  result_code = 0;
+  crypto::ScopedEC_KEY key_pair = ec->GenerateKey(context.get());
+  if (!key_pair) {
+    LOG(ERROR) << "Failed to generate EC key.";
+    return EXIT_FAILURE;
+  }
+  const EC_POINT* pub_point = EC_KEY_get0_public_key(key_pair.get());
+  std::optional<trunks::PinWeaverEccPoint> auth_pk =
+      ToPinWeaverEccPoint(*ec, context.get(), pub_point);
+  if (!auth_pk.has_value()) {
+    LOG(ERROR) << "Failed to generate EC point proto.";
+    return EXIT_FAILURE;
+  }
+  trunks::PinWeaverEccPoint gsc_pk;
+  result = tpm_utility->PinWeaverGenerateBiometricsAuthPk(
+      protocol_version, kFpAuthChannel, *auth_pk, &result_code, &root, &gsc_pk);
+  if (result || result_code) {
+    LOG(ERROR) << "generate_ba_pk failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+  crypto::ScopedEC_POINT gsc_pub_point =
+      FromPinWeaverEccPoint(*ec, context.get(), gsc_pk);
+  const std::optional<brillo::SecureBlob> pk_fp = CalculatePkFromKeys(
+      *ec, context.get(), *EC_KEY_get0_private_key(key_pair.get()),
+      *gsc_pub_point);
+  if (!pk_fp.has_value()) {
+    LOG(ERROR) << "Failed to calculate Pk.";
+    return EXIT_FAILURE;
+  }
+
+  if (full) {
+    // 3. Generate Pk for face slot
+    LOG(INFO) << "generate_ba_pk (face slot)";
+    result_code = 0;
+    key_pair = ec->GenerateKey(context.get());
+    if (!key_pair) {
+      LOG(ERROR) << "Failed to generate EC key.";
+      return EXIT_FAILURE;
+    }
+    pub_point = EC_KEY_get0_public_key(key_pair.get());
+    auth_pk = ToPinWeaverEccPoint(*ec, context.get(), pub_point);
+    if (!auth_pk.has_value()) {
+      LOG(ERROR) << "Failed to generate EC point proto.";
+      return EXIT_FAILURE;
+    }
+    result = tpm_utility->PinWeaverGenerateBiometricsAuthPk(
+        protocol_version, kFaceAuthChannel, *auth_pk, &result_code, &root,
+        &gsc_pk);
+    if (result || result_code) {
+      LOG(ERROR) << "generate_ba_pk failed! " << result_code << " "
+                 << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+    gsc_pub_point = FromPinWeaverEccPoint(*ec, context.get(), gsc_pk);
+    const std::optional<brillo::SecureBlob> pk_face = CalculatePkFromKeys(
+        *ec, context.get(), *EC_KEY_get0_private_key(key_pair.get()),
+        *gsc_pub_point);
+    if (!pk_face.has_value()) {
+      LOG(ERROR) << "Failed to calculate Pk.";
+      return EXIT_FAILURE;
+    }
+  }
+
+  // 4. Generate Pk for fingerprint slot again should fail because there's
+  // already a Pk for it.
+  LOG(INFO) << "generate_ba_pk should fail (fingerprint slot)";
+  result_code = 0;
+  result = tpm_utility->PinWeaverGenerateBiometricsAuthPk(
+      protocol_version, kFpAuthChannel, *auth_pk, &result_code, &root, &gsc_pk);
+  if (result) {
+    LOG(ERROR) << "generate_ba_pk failed!";
+    return EXIT_FAILURE;
+  }
+  if (result_code != PW_ERR_BIO_AUTH_ACCESS_DENIED) {
+    LOG(ERROR) << "unexpected generate_ba_pk result code: " << result_code
+               << " " << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+
+  // 5. Create a rate-limiter for FP channel.
+  LOG(INFO) << "create_rate_limiter";
+  result_code = 0;
+  uint64_t label = GetDefaultLabel();
+  std::string h_aux;
+  brillo::SecureBlob reset_secret;
+  std::map<uint32_t, uint32_t> delay_schedule({{2, PW_BLOCK_ATTEMPTS}});
+  trunks::ValidPcrCriteria valid_pcr_criteria;
+  GetDefaultHAux(&h_aux);
+  GetDefaultResetSecret(&reset_secret);
+  GetDefaultValidPcrCriteria(&valid_pcr_criteria);
+
+  std::string cred_metadata;
+  std::string mac;
+  result = tpm_utility->PinWeaverCreateBiometricsAuthRateLimiter(
+      protocol_version, kFpAuthChannel, label, h_aux, reset_secret,
+      delay_schedule, valid_pcr_criteria, std::nullopt, &result_code, &root,
+      &cred_metadata, &mac);
+  if (result || result_code) {
+    LOG(ERROR) << "create_rate_limiter failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+
+  std::string old_root = root;
+  std::string old_metadata = cred_metadata;
+
+  // 6. Start an authenticate attempt toward the rate-limiter.
+  LOG(INFO) << "start_bio_auth success";
+  result_code = 0;
+  brillo::Blob auth_nonce(PW_SECRET_SIZE, 0);
+  base::RandBytes(auth_nonce.data(), auth_nonce.size());
+  brillo::Blob gsc_nonce, encrypted_hec, iv;
+  result = tpm_utility->PinWeaverStartBiometricsAuth(
+      protocol_version, kFpAuthChannel, auth_nonce, h_aux, cred_metadata,
+      &result_code, &root, &gsc_nonce, &encrypted_hec, &iv, &cred_metadata,
+      &mac);
+  if (result || result_code) {
+    LOG(ERROR) << "start_bio_auth failed!\npw error: " << result_code << " "
+               << PwErrorStr(result_code)
+               << "\ntrunks error: " << trunks::GetErrorString(result);
+    return EXIT_FAILURE;
+  }
+  if (gsc_nonce.size() != PW_SECRET_SIZE ||
+      encrypted_hec.size() != PW_SECRET_SIZE ||
+      iv.size() != PW_WRAP_BLOCK_SIZE) {
+    LOG(ERROR) << "start_bio_auth returned bad credential!";
+    return EXIT_FAILURE;
+  }
+  brillo::SecureBlob session_key =
+      hwsec_foundation::Sha256(brillo::SecureBlob::Combine(
+          brillo::SecureBlob(brillo::CombineBlobs({auth_nonce, gsc_nonce})),
+          *pk_fp));
+  brillo::SecureBlob label_seed;
+  if (!hwsec_foundation::AesDecryptSpecifyBlockMode(
+          encrypted_hec, 0, encrypted_hec.size(), session_key, iv,
+          hwsec_foundation::PaddingScheme::kPaddingNone,
+          hwsec_foundation::BlockMode::kCtr, &label_seed)) {
+    LOG(ERROR) << "decrypting label_seed failed!";
+  }
+  brillo::SecureBlob old_label_seed(label_seed);
+
+  LOG(INFO) << "get_log";
+  result_code = 0;
+  std::vector<trunks::PinWeaverLogEntry> log;
+  result = tpm_utility->PinWeaverGetLog(protocol_version, old_root,
+                                        &result_code, &root, &log);
+  if (result || result_code) {
+    LOG(ERROR) << "get_log failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+  bool fail = false;
+  if (log.empty()) {
+    LOG(ERROR) << "get_log verification failed: empty log!";
+    fail = true;
+  }
+  if (log.front().root() != root) {
+    LOG(ERROR) << "get_log verification failed: wrong root!";
+    LOG(ERROR) << HexEncode(log.front().root());
+    fail = true;
+  }
+  if (log.front().type_case() != trunks::PinWeaverLogEntry::TypeCase::kAuth) {
+    LOG(ERROR) << "get_log verification failed: wrong entry type!";
+    LOG(ERROR) << log.front().type_case();
+    fail = true;
+  }
+  if (fail) {
+    return EXIT_FAILURE;
+  }
+
+  LOG(INFO) << "log_replay";
+  result_code = 0;
+  std::string replay_metadata = cred_metadata;
+  std::string replay_mac = mac;
+  result = tpm_utility->PinWeaverLogReplay(protocol_version, root, h_aux,
+                                           old_metadata, &result_code, &root,
+                                           &replay_metadata, &replay_mac);
+  if (result) {
+    LOG(ERROR) << "log_replay failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+  if (replay_metadata != cred_metadata) {
+    LOG(ERROR) << "log_replay verification failed: bad metadata!";
+    return EXIT_FAILURE;
+  }
+  if (replay_mac != mac) {
+    LOG(ERROR) << "log_replay verification failed: bad HMAC!";
+    return EXIT_FAILURE;
+  }
+
+  // 6. Start an authenticate attempt toward the rate-limiter again, and verify
+  // the returned secret is identical.
+  LOG(INFO) << "start_bio_auth success (check label_seed is the same)";
+  result_code = 0;
+  base::RandBytes(auth_nonce.data(), auth_nonce.size());
+  result = tpm_utility->PinWeaverStartBiometricsAuth(
+      protocol_version, kFpAuthChannel, auth_nonce, h_aux, cred_metadata,
+      &result_code, &root, &gsc_nonce, &encrypted_hec, &iv, &cred_metadata,
+      &mac);
+  if (result || result_code) {
+    LOG(ERROR) << "start_bio_auth failed!\npw error: " << result_code << " "
+               << PwErrorStr(result_code)
+               << "\ntrunks error: " << trunks::GetErrorString(result);
+    return EXIT_FAILURE;
+  }
+  if (gsc_nonce.size() != PW_SECRET_SIZE ||
+      encrypted_hec.size() != PW_SECRET_SIZE ||
+      iv.size() != PW_WRAP_BLOCK_SIZE) {
+    LOG(ERROR) << "start_bio_auth returned bad credential!";
+    return EXIT_FAILURE;
+  }
+  session_key = hwsec_foundation::Sha256(brillo::SecureBlob::Combine(
+      brillo::SecureBlob(brillo::CombineBlobs({auth_nonce, gsc_nonce})),
+      *pk_fp));
+  if (!hwsec_foundation::AesDecryptSpecifyBlockMode(
+          encrypted_hec, 0, encrypted_hec.size(), session_key, iv,
+          hwsec_foundation::PaddingScheme::kPaddingNone,
+          hwsec_foundation::BlockMode::kCtr, &label_seed)) {
+    LOG(ERROR) << "decrypting label_seed failed!";
+  }
+  if (label_seed != old_label_seed) {
+    LOG(ERROR) << "Label seeds returned from the two attempts are different!";
+    return EXIT_FAILURE;
+  }
+
+  // 7. Start an authenticate attempt toward the rate-limiter again, it should
+  // fail because the rate-limiter is locked out after 2 attempts.
+  LOG(INFO) << "start_bio_auth should fail (rate-limited)";
+  result_code = 0;
+  base::RandBytes(auth_nonce.data(), auth_nonce.size());
+  std::string no_cred_metadata, no_mac;
+  result = tpm_utility->PinWeaverStartBiometricsAuth(
+      protocol_version, kFpAuthChannel, auth_nonce, h_aux, cred_metadata,
+      &result_code, &root, &gsc_nonce, &encrypted_hec, &iv, &no_cred_metadata,
+      &no_mac);
+  if (result) {
+    LOG(ERROR) << "start_bio_auth failed!\npw error: " << result_code << " "
+               << PwErrorStr(result_code)
+               << "\ntrunks error: " << trunks::GetErrorString(result);
+    return EXIT_FAILURE;
+  }
+  if (result_code != PW_ERR_RATE_LIMIT_REACHED) {
+    LOG(ERROR) << "unexpected start_bio_auth result code: " << result_code
+               << " " << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+  // Verify that secrets are not leaked
+  if (!gsc_nonce.empty() || !encrypted_hec.empty() || !iv.empty()) {
+    LOG(ERROR) << "secrets are leaked!";
+    return EXIT_FAILURE;
+  }
+
+  // 8. Reset the rate-limiter.
+  LOG(INFO) << "reset_auth";
+  result_code = 0;
+  result = tpm_utility->PinWeaverResetAuth(
+      protocol_version, reset_secret, false, h_aux, cred_metadata, &result_code,
+      &root, &cred_metadata, &mac);
+  if (result || result_code) {
+    LOG(ERROR) << "reset_auth failed! " << result_code << " "
+               << PwErrorStr(result_code);
+    return EXIT_FAILURE;
+  }
+
+  if (full) {
+    // 9. Verify the authenticate attempt will fail with
+    // PW_ERR_LOWENT_AUTH_FAILED if we send the wrong auth channel.
+    LOG(INFO) << "start_bio_auth should fail (wrong channel)";
+    result_code = 0;
+    base::RandBytes(auth_nonce.data(), auth_nonce.size());
+    result = tpm_utility->PinWeaverStartBiometricsAuth(
+        protocol_version, kFaceAuthChannel, auth_nonce, h_aux, cred_metadata,
+        &result_code, &root, &gsc_nonce, &encrypted_hec, &iv, &cred_metadata,
+        &mac);
+    if (result) {
+      LOG(ERROR) << "start_bio_auth failed!\ntrunks error: "
+                 << trunks::GetErrorString(result);
+      return EXIT_FAILURE;
+    }
+    if (result_code != PW_ERR_LOWENT_AUTH_FAILED) {
+      LOG(ERROR) << "unexpected start_bio_auth result code: " << result_code
+                 << " " << PwErrorStr(result_code);
+      return EXIT_FAILURE;
+    }
+    // Verify that secrets are not leaked
+    if (!gsc_nonce.empty() || !encrypted_hec.empty() || !iv.empty()) {
+      LOG(ERROR) << "secrets are leaked!";
+      return EXIT_FAILURE;
+    }
+  }
+
+  // 10. Start an authenticate attempt toward the rate-limiter again, and verify
+  // the returned secret is identical.
+  LOG(INFO) << "start_bio_auth success (check label_seed is the same)";
+  result_code = 0;
+  base::RandBytes(auth_nonce.data(), auth_nonce.size());
+  result = tpm_utility->PinWeaverStartBiometricsAuth(
+      protocol_version, kFpAuthChannel, auth_nonce, h_aux, cred_metadata,
+      &result_code, &root, &gsc_nonce, &encrypted_hec, &iv, &cred_metadata,
+      &mac);
+  if (result || result_code) {
+    LOG(ERROR) << "start_bio_auth failed!\npw error: " << result_code << " "
+               << PwErrorStr(result_code)
+               << "\ntrunks error: " << trunks::GetErrorString(result);
+    return EXIT_FAILURE;
+  }
+  if (gsc_nonce.size() != PW_SECRET_SIZE ||
+      encrypted_hec.size() != PW_SECRET_SIZE ||
+      iv.size() != PW_WRAP_BLOCK_SIZE) {
+    LOG(ERROR) << "start_bio_auth returned bad credential!";
+    return EXIT_FAILURE;
+  }
+  session_key = hwsec_foundation::Sha256(brillo::SecureBlob::Combine(
+      brillo::SecureBlob(brillo::CombineBlobs({auth_nonce, gsc_nonce})),
+      *pk_fp));
+  if (!hwsec_foundation::AesDecryptSpecifyBlockMode(
+          encrypted_hec, 0, encrypted_hec.size(), session_key, iv,
+          hwsec_foundation::PaddingScheme::kPaddingNone,
+          hwsec_foundation::BlockMode::kCtr, &label_seed)) {
+    LOG(ERROR) << "decrypting label_seed failed!";
+  }
+  if (label_seed != old_label_seed) {
+    LOG(ERROR) << "Label seeds returned from the two attempts are different!";
+    return EXIT_FAILURE;
+  }
+
   puts("Success!");
   return EXIT_SUCCESS;
 }
@@ -868,7 +1667,7 @@ int main(int argc, char** argv) {
   const auto& command = args[0];
 
   if (command == "help") {
-    puts("Pinweaver Client: A command line tool to invoke PinWeaver on Cr50.");
+    puts("Pinweaver Client: A command line tool to invoke PinWeaver on GSC.");
     PrintUsage();
     return EXIT_SUCCESS;
   }
@@ -907,7 +1706,10 @@ int main(int argc, char** argv) {
       {"resetleaf", HandleResetLeaf},
       {"getlog", HandleGetLog},
       {"replay", HandleReplay},
+      {"generate_ba_pk", HandleGenerateBiometricsAuthPk},
+      {"block_generate_ba_pk", HandleBlockGenerateBiometricsAuthPk},
       {"selftest", HandleSelfTest},
+      {"biometrics_selftest", HandleBiometricsSelfTest},
       // clang-format on
   };
 

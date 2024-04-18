@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,28 +17,35 @@
 #include <base/strings/stringprintf.h>
 #include <brillo/secure_blob.h>
 #include <gtest/gtest.h>
+#include <libhwsec/frontend/cryptohome/mock_frontend.h>
+#include <libhwsec/frontend/pinweaver/mock_frontend.h>
+#include <libhwsec-foundation/crypto/aes.h>
+#include <libhwsec-foundation/crypto/hmac.h>
+#include <libhwsec-foundation/crypto/secure_blob_util.h>
+#include <libhwsec-foundation/crypto/sha.h>
 #include <libhwsec-foundation/error/testing_helper.h>
 #include <vector>
 
-#include "cryptohome/attestation.pb.h"
-#include "cryptohome/crypto/aes.h"
-#include "cryptohome/crypto/hmac.h"
-#include "cryptohome/crypto/secure_blob_util.h"
-#include "cryptohome/crypto/sha.h"
 #include "cryptohome/crypto_error.h"
+#include "cryptohome/filesystem_layout.h"
 #include "cryptohome/mock_cryptohome_keys_manager.h"
-#include "cryptohome/mock_le_credential_manager.h"
 #include "cryptohome/mock_platform.h"
-#include "cryptohome/mock_tpm.h"
+#include "cryptohome/pinweaver_manager/mock_le_credential_manager.h"
+#include "cryptohome/storage/file_system_keyset.h"
 #include "cryptohome/vault_keyset.h"
 
-using base::FilePath;
-using brillo::Blob;
-using brillo::SecureBlob;
-using ::hwsec::error::TPMError;
-using ::hwsec::error::TPMErrorBase;
-using ::hwsec::error::TPMRetryAction;
+using ::base::FilePath;
+using ::brillo::Blob;
+using ::brillo::SecureBlob;
+using ::hwsec::TPMError;
+using ::hwsec::TPMErrorBase;
+using ::hwsec::TPMRetryAction;
+using ::hwsec_foundation::GetSecureRandom;
+using ::hwsec_foundation::SecureBlobToHexToBuffer;
+using ::hwsec_foundation::Sha1;
+using ::hwsec_foundation::Sha256;
 using ::hwsec_foundation::error::testing::ReturnError;
+using ::hwsec_foundation::error::testing::ReturnValue;
 using ::testing::_;
 using ::testing::AtLeast;
 using ::testing::DoAll;
@@ -48,8 +55,6 @@ using ::testing::SaveArg;
 using ::testing::SetArgPointee;
 
 namespace cryptohome {
-
-const char kImageDir[] = "test_image_dir";
 
 // FIPS 180-2 test vectors for SHA-1 and SHA-256
 class ShaTestVectors {
@@ -147,45 +152,6 @@ class CryptoTest : public ::testing::Test {
   MockPlatform platform_;
 };
 
-TEST_F(CryptoTest, SaltCreateTest) {
-  MockPlatform platform;
-  Crypto crypto(&platform);
-
-  // Case 1: No salt exists
-  SecureBlob salt;
-  SecureBlob salt_written;
-  SecureBlob* salt_ptr = &salt_written;
-  FilePath salt_path(FilePath(kImageDir).Append("crypto_test_salt"));
-  EXPECT_CALL(platform, FileExists(salt_path)).WillOnce(Return(false));
-  EXPECT_CALL(platform, WriteSecureBlobToFileAtomicDurable(salt_path, _, _))
-      .WillOnce(DoAll(SaveArg<1>(salt_ptr), Return(true)));
-  crypto.GetOrCreateSalt(salt_path, 32, false, &salt);
-
-  ASSERT_EQ(32, salt.size());
-  EXPECT_EQ(salt.to_string(), std::string(salt_ptr->begin(), salt_ptr->end()));
-
-  // Case 2: Salt exists, but forced
-  SecureBlob new_salt;
-  salt_written.resize(0);
-  salt_ptr = &salt_written;
-  EXPECT_CALL(platform, FileExists(salt_path)).WillOnce(Return(true));
-  int64_t salt_size = 32;
-  EXPECT_CALL(platform, GetFileSize(salt_path, _))
-      .WillOnce(DoAll(SetArgPointee<1>(salt_size), Return(true)));
-  EXPECT_CALL(platform, WriteSecureBlobToFileAtomicDurable(salt_path, _, _))
-      .WillOnce(DoAll(SaveArg<1>(salt_ptr), Return(true)));
-  crypto.GetOrCreateSalt(salt_path, 32, true, &new_salt);
-  ASSERT_EQ(32, new_salt.size());
-  EXPECT_EQ(new_salt.to_string(),
-            std::string(salt_ptr->begin(), salt_ptr->end()));
-
-  EXPECT_EQ(salt.size(), new_salt.size());
-  EXPECT_FALSE(CryptoTest::FindBlobInBlob(salt, new_salt));
-
-  // TODO(wad): cases not covered: file is 0 bytes, file fails to read,
-  //            existing salt is read.
-}
-
 TEST_F(CryptoTest, BlobToHexTest) {
   // Check that BlobToHexToBuffer works
   SecureBlob blob_in(256);
@@ -205,233 +171,7 @@ TEST_F(CryptoTest, BlobToHexTest) {
   }
 }
 
-TEST_F(CryptoTest, TpmStepTest) {
-  // Check that the code path changes to support the TPM work
-  MockPlatform platform;
-  Crypto crypto(&platform);
-  NiceMock<MockTpm> tpm;
-  NiceMock<MockCryptohomeKeysManager> cryptohome_keys_manager;
-
-  SecureBlob vkk_key;
-  EXPECT_CALL(tpm, GetVersion()).WillRepeatedly(Return(Tpm::TPM_2_0));
-  EXPECT_CALL(tpm, SealToPcrWithAuthorization(_, _, _, _))
-      .Times(2)  // Once for each valid PCR state.
-      .WillRepeatedly(DoAll(SaveArg<0>(&vkk_key), ReturnError<TPMErrorBase>()));
-  EXPECT_CALL(*cryptohome_keys_manager.get_mock_cryptohome_key_loader(),
-              HasCryptohomeKey())
-      .WillOnce(Return(false))
-      .WillRepeatedly(Return(true));
-  EXPECT_CALL(cryptohome_keys_manager, HasAnyCryptohomeKey()).Times(0);
-  EXPECT_CALL(cryptohome_keys_manager, Init())
-      .Times(AtLeast(1));  // One by crypto.Init()
-  SecureBlob blob("public key hash");
-  EXPECT_CALL(tpm, GetPublicKeyHash(_, _))
-      .Times(2)  // Once on Encrypt and once on Decrypt of Vault.
-      .WillRepeatedly(
-          DoAll(SetArgPointee<1>(blob), ReturnError<TPMErrorBase>()));
-  EXPECT_CALL(tpm, IsOwned()).WillRepeatedly(Return(true));
-
-  crypto.Init(&tpm, &cryptohome_keys_manager);
-
-  VaultKeyset vault_keyset;
-  vault_keyset.Initialize(&platform_, &crypto);
-  vault_keyset.CreateRandom();
-
-  SecureBlob key(20);
-  GetSecureRandom(key.data(), key.size());
-
-  AuthBlockState auth_block_state;
-  ASSERT_TRUE(vault_keyset.EncryptVaultKeyset(key, "", &auth_block_state));
-
-  // TODO(kerrnel): This is a hack to bridge things until DecryptVaultKeyset is
-  // modified to take a key material and an auth block state.
-  vault_keyset.SetAuthBlockState(auth_block_state);
-
-  CryptoError crypto_error = CryptoError::CE_NONE;
-
-  EXPECT_CALL(tpm, PreloadSealedData(_, _)).Times(1);
-  EXPECT_CALL(tpm, UnsealWithAuthorization(_, _, _, _, _))
-      .WillOnce(DoAll(SetArgPointee<4>(vkk_key), ReturnError<TPMErrorBase>()));
-
-  SecureBlob original_data;
-  ASSERT_TRUE(vault_keyset.ToKeysBlob(&original_data));
-
-  ASSERT_TRUE(vault_keyset.DecryptVaultKeyset(
-      key, false /* locked_to_single_user */, &crypto_error));
-
-  SecureBlob new_data;
-  ASSERT_TRUE(vault_keyset.ToKeysBlob(&new_data));
-
-  EXPECT_EQ(new_data.size(), original_data.size());
-  ASSERT_TRUE(CryptoTest::FindBlobInBlob(new_data, original_data));
-
-  // Check that the keyset was indeed wrapped by the TPM, and the
-  // keys were derived using scrypt.
-  unsigned int crypt_flags = vault_keyset.flags_;
-  EXPECT_EQ(0, (crypt_flags & SerializedVaultKeyset::SCRYPT_WRAPPED));
-  EXPECT_EQ(SerializedVaultKeyset::TPM_WRAPPED,
-            (crypt_flags & SerializedVaultKeyset::TPM_WRAPPED));
-  EXPECT_EQ(SerializedVaultKeyset::SCRYPT_DERIVED,
-            (crypt_flags & SerializedVaultKeyset::SCRYPT_DERIVED));
-  EXPECT_EQ(SerializedVaultKeyset::PCR_BOUND,
-            (crypt_flags & SerializedVaultKeyset::PCR_BOUND));
-}
-
-TEST_F(CryptoTest, Tpm1_2_StepTest) {
-  // Check that the code path changes to support the TPM work
-  MockPlatform platform;
-  Crypto crypto(&platform);
-  NiceMock<MockTpm> tpm;
-  NiceMock<MockCryptohomeKeysManager> cryptohome_keys_manager;
-
-  SecureBlob vkk_key;
-  EXPECT_CALL(tpm, GetVersion()).WillRepeatedly(Return(Tpm::TPM_1_2));
-  EXPECT_CALL(tpm, EncryptBlob(_, _, _, _))
-      .Times(1)
-      .WillRepeatedly(DoAll(SaveArg<1>(&vkk_key), ReturnError<TPMErrorBase>()));
-  EXPECT_CALL(*cryptohome_keys_manager.get_mock_cryptohome_key_loader(),
-              HasCryptohomeKey())
-      .WillOnce(Return(false))
-      .WillRepeatedly(Return(true));
-  EXPECT_CALL(cryptohome_keys_manager, HasAnyCryptohomeKey()).Times(0);
-  EXPECT_CALL(cryptohome_keys_manager, Init())
-      .Times(AtLeast(1));  // One by crypto.Init()
-  SecureBlob blob("public key hash");
-  EXPECT_CALL(tpm, GetPublicKeyHash(_, _))
-      .Times(2)  // Once on Encrypt and once on Decrypt of Vault.
-      .WillRepeatedly(
-          DoAll(SetArgPointee<1>(blob), ReturnError<TPMErrorBase>()));
-  EXPECT_CALL(tpm, IsOwned()).WillRepeatedly(Return(true));
-
-  crypto.Init(&tpm, &cryptohome_keys_manager);
-
-  VaultKeyset vault_keyset;
-  vault_keyset.Initialize(&platform_, &crypto);
-  vault_keyset.CreateRandom();
-
-  SecureBlob key(20);
-  GetSecureRandom(key.data(), key.size());
-
-  AuthBlockState auth_block_state;
-  ASSERT_TRUE(vault_keyset.EncryptVaultKeyset(key, "", &auth_block_state));
-
-  // TODO(kerrnel): This is a hack to bridge things until DecryptVaultKeyset is
-  // modified to take a key material and an auth block state.
-  vault_keyset.SetAuthBlockState(auth_block_state);
-
-  CryptoError crypto_error = CryptoError::CE_NONE;
-
-  EXPECT_CALL(tpm, DecryptBlob(_, _, _, _, _))
-      .WillOnce(DoAll(SetArgPointee<4>(vkk_key), ReturnError<TPMErrorBase>()));
-
-  SecureBlob original_data;
-  ASSERT_TRUE(vault_keyset.ToKeysBlob(&original_data));
-
-  ASSERT_TRUE(vault_keyset.DecryptVaultKeyset(
-      key, false /* locked_to_single_user */, &crypto_error));
-
-  SecureBlob new_data;
-  ASSERT_TRUE(vault_keyset.ToKeysBlob(&new_data));
-
-  EXPECT_EQ(new_data.size(), original_data.size());
-  ASSERT_TRUE(CryptoTest::FindBlobInBlob(new_data, original_data));
-
-  // Check that the keyset was indeed wrapped by the TPM, and the
-  // keys were derived using scrypt.
-  unsigned int crypt_flags = vault_keyset.flags_;
-  EXPECT_EQ(0, (crypt_flags & SerializedVaultKeyset::SCRYPT_WRAPPED));
-  EXPECT_EQ(SerializedVaultKeyset::TPM_WRAPPED,
-            (crypt_flags & SerializedVaultKeyset::TPM_WRAPPED));
-  EXPECT_EQ(SerializedVaultKeyset::SCRYPT_DERIVED,
-            (crypt_flags & SerializedVaultKeyset::SCRYPT_DERIVED));
-  EXPECT_EQ(0, (crypt_flags & SerializedVaultKeyset::PCR_BOUND));
-}
-
-TEST_F(CryptoTest, TpmDecryptFailureTest) {
-  // Check how TPM error on Decrypt is reported.
-  MockPlatform platform;
-  Crypto crypto(&platform);
-  NiceMock<MockTpm> tpm;
-  NiceMock<MockCryptohomeKeysManager> cryptohome_keys_manager;
-
-  EXPECT_CALL(tpm, SealToPcrWithAuthorization(_, _, _, _)).Times(2);
-  EXPECT_CALL(*cryptohome_keys_manager.get_mock_cryptohome_key_loader(),
-              HasCryptohomeKey())
-      .WillOnce(Return(false))
-      .WillRepeatedly(Return(true));
-  EXPECT_CALL(cryptohome_keys_manager, HasAnyCryptohomeKey()).Times(0);
-  EXPECT_CALL(cryptohome_keys_manager, Init())
-      .Times(AtLeast(1));  // One by crypto.Init()
-  SecureBlob blob("public key hash");
-  EXPECT_CALL(tpm, GetPublicKeyHash(_, _))
-      .Times(2)  // Once on Encrypt and once on Decrypt of Vault.
-      .WillRepeatedly(
-          DoAll(SetArgPointee<1>(blob), ReturnError<TPMErrorBase>()));
-  EXPECT_CALL(tpm, IsOwned()).WillRepeatedly(Return(true));
-  crypto.Init(&tpm, &cryptohome_keys_manager);
-
-  VaultKeyset vault_keyset;
-  vault_keyset.Initialize(&platform_, &crypto);
-  vault_keyset.CreateRandom();
-
-  SecureBlob key(20);
-  GetSecureRandom(key.data(), key.size());
-
-  AuthBlockState auth_block_state;
-  ASSERT_TRUE(vault_keyset.EncryptVaultKeyset(key, "", &auth_block_state));
-
-  // TODO(kerrnel): This is a hack to bridge things until DecryptVaultKeyset is
-  // modified to take a key material and an auth block state.
-  vault_keyset.SetAuthBlockState(auth_block_state);
-
-  CryptoError crypto_error = CryptoError::CE_NONE;
-
-  // UnsealWithAuthorization operation will fail.
-  EXPECT_CALL(tpm, PreloadSealedData(_, _)).Times(1);
-  EXPECT_CALL(tpm, UnsealWithAuthorization(_, _, _, _, _))
-      .WillOnce(ReturnError<TPMError>("fake", TPMRetryAction::kNoRetry));
-
-  ASSERT_FALSE(vault_keyset.DecryptVaultKeyset(
-      key, false /* locked_to_single_user */, &crypto_error));
-  ASSERT_NE(CryptoError::CE_NONE, crypto_error);
-}
-
-TEST_F(CryptoTest, ScryptStepTest) {
-  // Check that the code path changes to support scrypt work
-  MockPlatform platform;
-  Crypto crypto(&platform);
-
-  VaultKeyset vault_keyset;
-  vault_keyset.Initialize(&platform, &crypto);
-  vault_keyset.CreateRandom();
-
-  SecureBlob key(20);
-  GetSecureRandom(key.data(), key.size());
-
-  AuthBlockState auth_block_state;
-  ASSERT_TRUE(vault_keyset.EncryptVaultKeyset(key, "", &auth_block_state));
-
-  // TODO(kerrnel): This is a hack to bridge things until DecryptVaultKeyset is
-  // modified to take a key material and an auth block state.
-  vault_keyset.SetAuthBlockState(auth_block_state);
-
-  SecureBlob original_data;
-  ASSERT_TRUE(vault_keyset.ToKeysBlob(&original_data));
-
-  CryptoError crypto_error = CryptoError::CE_NONE;
-  ASSERT_TRUE(vault_keyset.DecryptVaultKeyset(
-      key, false /* locked_to_single_user */, &crypto_error));
-
-  SecureBlob new_data;
-  ASSERT_TRUE(vault_keyset.ToKeysBlob(&new_data));
-
-  EXPECT_EQ(new_data.size(), original_data.size());
-  ASSERT_TRUE(CryptoTest::FindBlobInBlob(new_data, original_data));
-}
-
 TEST_F(CryptoTest, GetSha1FipsTest) {
-  MockPlatform platform;
-  Crypto crypto(&platform);
   ShaTestVectors vectors(1);
   for (size_t i = 0; i < vectors.count(); ++i) {
     Blob digest = Sha1(*vectors.input(i));
@@ -443,8 +183,6 @@ TEST_F(CryptoTest, GetSha1FipsTest) {
 }
 
 TEST_F(CryptoTest, GetSha256FipsTest) {
-  MockPlatform platform;
-  Crypto crypto(&platform);
   ShaTestVectors vectors(256);
   for (size_t i = 0; i < vectors.count(); ++i) {
     Blob digest = Sha256(*vectors.input(i));
@@ -453,33 +191,6 @@ TEST_F(CryptoTest, GetSha256FipsTest) {
     std::string expected = vectors.output(i)->to_string();
     EXPECT_EQ(expected, computed);
   }
-}
-
-TEST_F(CryptoTest, ComputeEncryptedDataHmac) {
-  MockPlatform platform;
-  Crypto crypto(&platform);
-  EncryptedData pb;
-  std::string data = "iamsoawesome";
-  std::string iv = "123456";
-  pb.set_encrypted_data(data.data(), data.size());
-  pb.set_iv(iv.data(), iv.size());
-
-  // Create hash key.
-  SecureBlob hmac_key(32);
-  GetSecureRandom(hmac_key.data(), hmac_key.size());
-
-  // Perturb iv and data slightly. Verify hashes are all different.
-  std::string hmac1 = ComputeEncryptedDataHmac(pb, hmac_key);
-  data = "iamsoawesomf";
-  pb.set_encrypted_data(data.data(), data.size());
-  std::string hmac2 = ComputeEncryptedDataHmac(pb, hmac_key);
-  iv = "123457";
-  pb.set_iv(iv.data(), iv.size());
-  std::string hmac3 = ComputeEncryptedDataHmac(pb, hmac_key);
-
-  EXPECT_NE(hmac1, hmac2);
-  EXPECT_NE(hmac2, hmac3);
-  EXPECT_NE(hmac1, hmac3);
 }
 
 }  // namespace cryptohome

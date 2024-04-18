@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,15 +13,15 @@
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/time/time.h>
+#include <brillo/brillo_export.h>
 
 namespace chromeos {
 namespace ui {
 
 // ChromiumCommandBuilder facilitates building a command line for running a
 // Chromium-derived binary and performing related setup.
-class ChromiumCommandBuilder {
+class BRILLO_EXPORT ChromiumCommandBuilder {
  public:
   typedef std::map<std::string, std::string> StringMap;
   typedef std::vector<std::string> StringVector;
@@ -52,6 +52,9 @@ class ChromiumCommandBuilder {
   static const char kDisableFeaturesFlag[];
   static const char kEnableBlinkFeaturesFlag[];
   static const char kDisableBlinkFeaturesFlag[];
+
+  static const char kCrosConfigBluetoothFlagsPath[];
+  static const char kCrosConfigBlockFlossAvailability[];
 
   ChromiumCommandBuilder();
   ChromiumCommandBuilder(const ChromiumCommandBuilder&) = delete;

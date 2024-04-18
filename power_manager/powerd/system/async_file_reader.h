@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,13 +11,11 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/timer/timer.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class AsyncFileReader {
  public:
@@ -36,8 +34,8 @@ class AsyncFileReader {
   // Read file asynchronously, passing its contents to |read_cb| when done.
   // Invokes |error_cb| on failure. If a read is already in progress, abort it
   // first.  Note that |error_cb| may be invoked synchronously.
-  void StartRead(const base::Callback<void(const std::string&)>& read_cb,
-                 const base::Callback<void()>& error_cb);
+  void StartRead(base::OnceCallback<void(const std::string&)> read_cb,
+                 base::OnceCallback<void()> error_cb);
 
   // The file reader will open a file handle and keep it open even over
   // repeated reads.
@@ -52,7 +50,7 @@ class AsyncFileReader {
   // Updates the state based on whether there is an ongoing file I/O.
   void UpdateState();
 
-  // Goes back to the idle state, cleans up allocated resouces.
+  // Goes back to the idle state, cleans up allocated resources.
   void Reset();
 
   // Initiates an AIO read operation.  This is a helper function for
@@ -63,7 +61,7 @@ class AsyncFileReader {
   void CancelUpdateStateTimeout();
 
   // Flag indicating whether there is an active AIO read.
-  bool read_in_progress_;
+  bool read_in_progress_ = false;
 
   // AIO control object.
   aiocb aio_control_;
@@ -72,7 +70,7 @@ class AsyncFileReader {
   base::FilePath path_;
 
   // File for AIO reads.
-  int fd_;
+  int fd_ = -1;
 
   // Buffer for AIO reads.
   std::unique_ptr<char[]> aio_buffer_;
@@ -84,15 +82,18 @@ class AsyncFileReader {
   // Accumulator for data read by AIO.
   std::string stored_data_;
 
+  // Unique identifier for this object for joining async operations with trace
+  // flow events.
+  uint64_t trace_id_ = 0;
+
   // Callbacks invoked when the read completes or encounters an error.
-  base::Callback<void(const std::string&)> read_cb_;
-  base::Callback<void()> error_cb_;
+  base::OnceCallback<void(const std::string&)> read_cb_;
+  base::OnceCallback<void()> error_cb_;
 
   // Runs UpdateState().
   base::RepeatingTimer update_state_timer_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_ASYNC_FILE_READER_H_

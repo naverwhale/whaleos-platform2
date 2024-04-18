@@ -1,23 +1,20 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MISSIVE_STORAGE_TEST_STORAGE_MODULE_H_
 #define MISSIVE_STORAGE_TEST_STORAGE_MODULE_H_
 
-#include <utility>
+#include <optional>
 
-#include <base/callback.h>
-#include <base/optional.h>
+#include <base/functional/callback.h>
 #include <gmock/gmock.h>
-#include <gtest/gtest.h>
 
 #include "missive/proto/record.pb.h"
 #include "missive/proto/record_constants.pb.h"
 #include "missive/storage/storage_module_interface.h"
 
-namespace reporting {
-namespace test {
+namespace reporting::test {
 
 class TestStorageModuleStrict : public StorageModuleInterface {
  public:
@@ -27,27 +24,15 @@ class TestStorageModuleStrict : public StorageModuleInterface {
 
   MOCK_METHOD(void,
               AddRecord,
-              (Priority priority,
-               Record record,
-               base::OnceCallback<void(Status)> callback),
+              (Priority priority, Record record, EnqueueCallback callback),
               (override));
 
   MOCK_METHOD(void,
               Flush,
-              (Priority priority, base::OnceCallback<void(Status)> callback),
+              (Priority priority, FlushCallback callback),
               (override));
 
-  MOCK_METHOD(void,
-              ReportSuccess,
-              (SequencingInformation sequencing_information, bool force),
-              (override));
-
-  MOCK_METHOD(void,
-              UpdateEncryptionKey,
-              (SignedEncryptionInfo signed_encryption_key),
-              (override));
-
-  Record record() const;
+  const Record& record() const;
   Priority priority() const;
 
  protected:
@@ -56,16 +41,15 @@ class TestStorageModuleStrict : public StorageModuleInterface {
  private:
   void AddRecordSuccessfully(Priority priority,
                              Record record,
-                             base::OnceCallback<void(Status)> callback);
+                             EnqueueCallback callback);
 
-  base::Optional<Record> record_;
-  base::Optional<Priority> priority_;
+  std::optional<Record> record_;
+  std::optional<Priority> priority_;
 };
 
 // Most of the time no need to log uninterested calls to |AddRecord|.
 typedef ::testing::NiceMock<TestStorageModuleStrict> TestStorageModule;
 
-}  // namespace test
-}  // namespace reporting
+}  // namespace reporting::test
 
 #endif  // MISSIVE_STORAGE_TEST_STORAGE_MODULE_H_

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@ option cc_enable_arenas = true;
 
 // This file defines services that will be running in the guest VM.
 package vm_tools;
+
+option go_package = "chromiumos/vm_tools/vm_rpc";
 
 import "common.proto";
 import "google/protobuf/timestamp.proto";
@@ -40,10 +42,48 @@ message NetworkConfigRequest {
   ResolvConfig resolv_config = 2;
 }
 
+// Possible states for the host stateful disk to be in.
+enum StatefulDiskSpaceState {
+  // No value was set.
+  DISK_NONE = 0;
+  // No action is taken in this state.
+  DISK_NORMAL = 1;
+  // Prepare applications for impending critical disk space state.
+  DISK_LOW = 2;
+  // Critical disk space state.
+  DISK_CRITICAL = 3;
+}
+
+// Request to update the storage balloon according to a stateful disk update.
+message UpdateStorageBalloonRequest {
+  // What overall state the disk is in.
+  StatefulDiskSpaceState state = 1;
+
+  // How many bytes remain free on the host's stateful.
+  int64 free_space_bytes = 2;
+}
+
+// Possible results of a UpdateStorageBalloonRequest.
+enum UpdateStorageBalloonResult {
+  // Request worked as intended.
+  SUCCESS = 0;
+  // Balloon failed to be inflated.
+  BALLOON_INFLATE_FAILED = 1;
+}
+
+// Response to UpdateStorageBalloonRequest.
+message UpdateStorageBalloonResponse {
+  // Result of the UpdateStorageBalloonRequest.
+  UpdateStorageBalloonResult result = 1;
+}
+
 // Parameters needed to spawn a container guest.
 message ConfigureContainerGuestRequest {
   // Token which cicerone will check to verify that the guest spawned.
   string container_token = 1;
+  // Optional suggested username of the owner of the VM. Only used by
+  // VM types that support dynamic usernames.
+  string vm_username = 2;
 }
 
 // Description of a single process that should be spawned by maitre'd.
@@ -146,7 +186,8 @@ message StartTerminaRequest {
     USED_BY_TESTS = 1;
     START_LXD = 2 [deprecated = true];
     RESET_LXD_ON_LAUNCH = 3 [deprecated = true];
-    LXD_4_LTS = 4;
+    LXD_4_LTS = 4 [deprecated = true];
+    LXD_5_LTS = 5;
     // This list must stay in sync with the one in concierge_service.proto
   }
   // The address for tremplin to connect to.
@@ -210,6 +251,17 @@ message SetResolvConfigRequest {
 message SetTimeRequest {
   // The current time, as seconds and nanos since UTC epoch. (Jan 1, 1970)
   google.protobuf.Timestamp time = 1;
+}
+
+message SetTimezoneRequest {
+  // Timezone name as per values from the timezone-data package in
+  // /usr/share/zoneinfo. Empty string is not a valid input.
+  // Examples: UTC, Australia/Melbourne
+  string timezone_name = 1;
+  // Some applications in the VM may not support chained symlinks (ex. Steam in
+  // Linux). In those instances, we need to bind-mount the zoneinfo file
+  // directly to /etc/localtime.
+  bool use_bind_mount = 2;
 }
 
 // Response to GetKernelVersion, containing detailed Termina kernel information
@@ -305,6 +357,9 @@ service Maitred {
   // (e.g. due to the host being suspended for a while).
   rpc SetTime(SetTimeRequest) returns (EmptyMessage);
 
+  // Set the VM timezone to a specified value.
+  rpc SetTimezone(SetTimezoneRequest) returns (EmptyMessage);
+
   // Mount a 9P server using a vsock socket.  This uses the trans=fd option
   // when mounting the 9P server, which requires first connecting a socket
   // to the server.  Other transports should use the normal Mount rpc instead.
@@ -331,4 +386,10 @@ service Maitred {
 
   // Prepares to suspend the VM.
   rpc PrepareToSuspend(EmptyMessage) returns (EmptyMessage);
+
+  // Adjusts the disk state of the VM based on the given state. This generally
+  // means adjusting the size of the storage balloon and/or other parameters
+  // (e.g /proc/sys/dirty_ratio).
+  rpc UpdateStorageBalloon(UpdateStorageBalloonRequest)
+      returns (UpdateStorageBalloonResponse);
 }

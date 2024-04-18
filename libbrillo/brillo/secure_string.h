@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define LIBBRILLO_BRILLO_SECURE_STRING_H_
 
 #include <cstddef>
+#include <iterator>
 #include <memory>
 #include <type_traits>
 

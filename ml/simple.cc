@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -6,15 +6,17 @@
 // tool.
 #include "ml/simple.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/run_loop.h>
 #include <mojo/public/cpp/bindings/remote.h>
 
 #include "ml/machine_learning_service_impl.h"
+#include "ml/model_conversions.h"
 #include "ml/mojom/graph_executor.mojom.h"
 #include "ml/mojom/machine_learning_service.mojom.h"
 #include "ml/mojom/model.mojom.h"
@@ -25,6 +27,7 @@ using ::chromeos::machine_learning::mojom::BuiltinModelSpec;
 using ::chromeos::machine_learning::mojom::BuiltinModelSpecPtr;
 using ::chromeos::machine_learning::mojom::CreateGraphExecutorResult;
 using ::chromeos::machine_learning::mojom::ExecuteResult;
+using ::chromeos::machine_learning::mojom::GpuDelegateApi;
 using ::chromeos::machine_learning::mojom::GraphExecutor;
 using ::chromeos::machine_learning::mojom::GraphExecutorOptions;
 using ::chromeos::machine_learning::mojom::LoadModelResult;
@@ -51,7 +54,8 @@ TensorPtr NewSingleValueTensor(const double value) {
 AddResult Add(const double x,
               const double y,
               const bool use_nnapi,
-              const bool use_gpu) {
+              const bool use_gpu,
+              const std::string& gpu_delegate_api_str) {
   AddResult result = {"Not completed.", -1.0};
 
   // Create ML Service
@@ -80,8 +84,12 @@ AddResult Add(const double x,
   // Get graph executor for model.
   mojo::Remote<GraphExecutor> graph_executor;
   bool graph_executor_ok = false;
-  auto options = GraphExecutorOptions::New(use_nnapi, use_gpu);
-  model->CreateGraphExecutorWithOptions(
+
+  GpuDelegateApi gpu_delegate_api(
+      GpuDelegateApiFromString(gpu_delegate_api_str));
+  auto options =
+      GraphExecutorOptions::New(use_nnapi, use_gpu, gpu_delegate_api);
+  model->CreateGraphExecutor(
       std::move(options), graph_executor.BindNewPipeAndPassReceiver(),
       base::BindOnce(
           [](bool* const graph_executor_ok,
@@ -106,7 +114,7 @@ AddResult Add(const double x,
       base::BindOnce(
           [](bool* const inference_ok, double* const sum,
              const ExecuteResult execute_result,
-             base::Optional<std::vector<TensorPtr>> outputs) {
+             std::optional<std::vector<TensorPtr>> outputs) {
             // Check that the inference succeeded and gave the expected number
             // of outputs.
             *inference_ok = execute_result == ExecuteResult::OK &&
@@ -126,7 +134,7 @@ AddResult Add(const double x,
     return result;
   }
 
-  result.status = "OK";
+  result.status = kStatusOk;
   return result;
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,12 +12,10 @@
 
 #include <base/check.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/strings/string_number_conversions.h>
-
+#include <libhwsec-foundation/crypto/sha.h>
 #include <vboot/tlcl.h>
 
-#include "cryptohome/crypto/sha.h"
 #include "cryptohome/mount_encrypted/mount_encrypted.h"
 
 namespace mount_encrypted {
@@ -62,7 +60,7 @@ result_code IsSpaceDefinedCorrectly(NvramSpace* space) {
 
 // Derive the system key from the key material in |area|.
 brillo::SecureBlob DeriveSystemKey(const struct nvram_area_tpm2* area) {
-  return cryptohome::Sha256(brillo::SecureBlob(
+  return hwsec_foundation::Sha256(brillo::SecureBlob(
       area->key_material, area->key_material + sizeof(area->key_material)));
 }
 

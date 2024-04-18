@@ -1,8 +1,11 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
 # This seccomp policy is used by debugd while creating the sandbox to run the
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
+
 # following command:
 # ectool inventory
 #
@@ -18,7 +21,7 @@ openat: 1
 write: 1
 mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 stat: 1
-mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+mprotect: arg2 in ~PROT_EXEC
 fstat: 1
 newfstatat: 1
 close: 1
@@ -53,3 +56,5 @@ exit: 1
 rt_sigreturn: 1
 connect: 1
 lseek: 1
+clock_gettime: 1
+gettimeofday: 1

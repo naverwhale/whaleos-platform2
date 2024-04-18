@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,14 +9,13 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/observer_list.h>
 #include <base/observer_list_types.h>
 #include <base/sequence_checker_impl.h>
-#include <base/single_thread_task_runner.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/simple_thread.h>
 
 #include "diagnostics/cros_healthd/wilco_ec/ec_constants.h"

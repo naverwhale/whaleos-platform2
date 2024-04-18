@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -49,7 +49,7 @@ class MockMounter : public Mounter {
               (const std::string& source,
                const base::FilePath& target_path,
                std::vector<std::string> params,
-               MountErrorType* error),
+               MountError* error),
               (const, override));
   MOCK_METHOD(bool,
               CanMount,
@@ -62,9 +62,7 @@ class MockMounter : public Mounter {
 class MockSandboxedProcess : public SandboxedProcess {
  public:
   MockSandboxedProcess() = default;
-  pid_t StartImpl(base::ScopedFD, base::ScopedFD, base::ScopedFD) override {
-    return 123;
-  }
+  pid_t StartImpl(base::ScopedFD, base::ScopedFD) override { return 123; }
   MOCK_METHOD(int, WaitImpl, (), (override));
   MOCK_METHOD(int, WaitNonBlockingImpl, (), (override));
 };
@@ -83,7 +81,7 @@ class FUSEMountManagerTest : public ::testing::Test {
         bar_(new MockMounter()),
         baz_(new MockMounter()) {
     ON_CALL(platform_, Unmount(_, _))
-        .WillByDefault(Return(MOUNT_ERROR_INVALID_ARGUMENT));
+        .WillByDefault(Return(MountError::kInvalidArgument));
     ON_CALL(platform_, DirectoryExists(_)).WillByDefault(Return(true));
   }
 
@@ -94,10 +92,10 @@ class FUSEMountManagerTest : public ::testing::Test {
 
   std::unique_ptr<MountPoint> DoMount(const std::string& type,
                                       const std::string& src,
-                                      MountErrorType* error) {
+                                      MountError* error) {
     std::unique_ptr<MountPoint> mount_point =
         manager_.DoMount(src, type, {}, base::FilePath(kSomeMountpoint), error);
-    if (*error == MOUNT_ERROR_NONE) {
+    if (*error == MountError::kSuccess) {
       EXPECT_TRUE(mount_point);
     } else {
       EXPECT_FALSE(mount_point);
@@ -157,10 +155,10 @@ TEST_F(FUSEMountManagerTest, SuggestMountPath) {
 
 // Verify that DoMount fails when there are no helpers.
 TEST_F(FUSEMountManagerTest, DoMount_NoHandlers) {
-  MountErrorType mount_error;
+  MountError mount_error;
   std::unique_ptr<MountPoint> mount_point =
       DoMount(kNoType, kSomeSource.value(), &mount_error);
-  EXPECT_EQ(MOUNT_ERROR_UNKNOWN_FILESYSTEM, mount_error);
+  EXPECT_EQ(MountError::kUnknownFilesystem, mount_error);
 }
 
 // Verify that DoMount fails when helpers don't handle this source.
@@ -171,10 +169,10 @@ TEST_F(FUSEMountManagerTest, DoMount_NotHandled) {
   RegisterHelper(std::move(foo_));
   RegisterHelper(std::move(bar_));
   RegisterHelper(std::move(baz_));
-  MountErrorType mount_error;
+  MountError mount_error;
   std::unique_ptr<MountPoint> mount_point =
       DoMount(kNoType, kSomeSource.value(), &mount_error);
-  EXPECT_EQ(MOUNT_ERROR_UNKNOWN_FILESYSTEM, mount_error);
+  EXPECT_EQ(MountError::kUnknownFilesystem, mount_error);
 }
 
 // Verify that DoMount delegates mounting to the correct helpers when
@@ -190,17 +188,18 @@ TEST_F(FUSEMountManagerTest, DoMount_BySource) {
   EXPECT_CALL(*baz_, Mount).Times(0);
 
   EXPECT_CALL(*bar_, Mount(kSomeSource.value(), _, _, _))
-      .WillOnce(DoAll(SetArgPointee<3>(MOUNT_ERROR_NONE),
-                      Return(ByMove(MountPoint::CreateLeaking(
-                          base::FilePath(kSomeMountpoint))))));
+      .WillOnce(DoAll(SetArgPointee<3>(MountError::kSuccess),
+                      Return(ByMove(MountPoint::CreateUnmounted(
+                          {.mount_path = base::FilePath(kSomeMountpoint),
+                           .source = kSomeSource.value()})))));
 
   RegisterHelper(std::move(foo_));
   RegisterHelper(std::move(bar_));
   RegisterHelper(std::move(baz_));
-  MountErrorType mount_error;
+  MountError mount_error;
   std::unique_ptr<MountPoint> mount_point =
       DoMount(kNoType, kSomeSource.value(), &mount_error);
-  EXPECT_EQ(MOUNT_ERROR_NONE, mount_error);
+  EXPECT_EQ(MountError::kSuccess, mount_error);
   EXPECT_EQ(base::FilePath(kSomeMountpoint), mount_point->path());
 }
 

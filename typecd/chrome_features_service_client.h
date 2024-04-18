@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,9 +23,16 @@ class ChromeFeaturesServiceClient {
 
   ~ChromeFeaturesServiceClient() = default;
 
-  bool IsPeripheralDataAccessEnabled();
+  // Retrieve the Peripheral Data Access setting state from Chrome.
+  void FetchPeripheralDataAccessEnabled();
+
+  bool GetPeripheralDataAccessEnabled() { return peripheral_data_access_en_; }
+  void SetPeripheralDataAccessEnabled(bool enabled);
 
  private:
+  // Denotes whether the Data Access Protection for peripherals is disabled or
+  // not.
+  bool peripheral_data_access_en_;
   dbus::ObjectProxy* proxy_;
 
   base::WeakPtrFactory<ChromeFeaturesServiceClient> weak_ptr_factory_{this};

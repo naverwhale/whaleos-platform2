@@ -1,26 +1,26 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef VM_TOOLS_CICERONE_SERVICE_H_
 #define VM_TOOLS_CICERONE_SERVICE_H_
 
+#include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_path.h>
 #include <base/files/file_path_watcher.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
 #include <base/sequence_checker.h>
 #include <base/threading/thread.h>
 #include <brillo/process/process.h>
@@ -28,22 +28,23 @@
 #include <dbus/exported_object.h>
 #include <dbus/message.h>
 #include <grpcpp/grpcpp.h>
-#include <vm_applications/proto_bindings/apps.pb.h>
-#include <vm_cicerone/proto_bindings/cicerone_service.pb.h>
-#include <vm_concierge/proto_bindings/concierge_service.pb.h>
-#include <vm_sk_forwarding/proto_bindings/sk_forwarding.pb.h>
-#include <vm_disk_management/proto_bindings/disk_management.pb.h>
+#include <vm_applications/apps.pb.h>
+#include <vm_cicerone/cicerone_service.pb.h>
+#include <vm_concierge/concierge_service.pb.h>
+#include <vm_protos/proto_bindings/container_host.pb.h>
+#include <vm_sk_forwarding/sk_forwarding.pb.h>
 #include <chromeos/dbus/service_constants.h>
 
 #include "vm_tools/cicerone/container.h"
 #include "vm_tools/cicerone/container_listener_impl.h"
 #include "vm_tools/cicerone/crash_listener_impl.h"
+#include "vm_tools/cicerone/guest_metrics.h"
+#include "vm_tools/cicerone/shadercached_helper.h"
 #include "vm_tools/cicerone/shill_client.h"
 #include "vm_tools/cicerone/tremplin_listener_impl.h"
 #include "vm_tools/cicerone/virtual_machine.h"
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 
 // VM Container Service responsible for responding to DBus method calls for
 // interacting with VM containers.
@@ -56,8 +57,8 @@ class Service final {
   // tests, the services only listen on an AF_UNIX socket by giving
   // |unix_socket_path_for_testing| a value.
   static std::unique_ptr<Service> Create(
-      base::Closure quit_closure,
-      const base::Optional<base::FilePath>& unix_socket_path_for_testing,
+      base::OnceClosure quit_closure,
+      const std::optional<base::FilePath>& unix_socket_path_for_testing,
       scoped_refptr<dbus::Bus> bus);
 
   ~Service();
@@ -97,6 +98,16 @@ class Service final {
   // be called before calling Service::Init (and therefore Service::Create).
   static void DisableGrpcForTesting();
 
+  // For testing only. Replace |guest_metrics_| with a mock.
+  void SetGuestMetricsForTesting(std::unique_ptr<GuestMetrics> guest_metrics) {
+    guest_metrics_ = std::move(guest_metrics);
+  }
+
+  GuestMetrics* guest_metrics_for_testing() { return guest_metrics_.get(); }
+
+  // For testing only. Disable initialization of |guest_metrics_|.
+  static void DisableGuestMetricsCreation() { create_guest_metrics_ = false; }
+
   // Connect to the Tremplin instance on the VM with the given |cid|.
   void ConnectTremplin(const uint32_t cid,
                        bool* result,
@@ -118,6 +129,15 @@ class Service final {
     CANCELLED,
     FAILED,
     STARTING,
+  };
+
+  // The status of an ongoing LXD container stop operation.
+  enum class StopStatus {
+    UNKNOWN,
+    STOPPED,
+    STOPPING,
+    CANCELLED,
+    FAILED,
   };
 
   // Notifies the service that a VM with |cid| has finished its create
@@ -163,6 +183,17 @@ class Service final {
                             bool* result,
                             base::WaitableEvent* event);
 
+  // Notifies the service that a VM with |cid| is stopping a container
+  // |container_name| with status |status|. |failure_reason| will describe the
+  // failure reason if status == FAILED. Sets |result| to true if the VM cid
+  // is known. Signals |event| when done.
+  void LxdContainerStopping(const uint32_t cid,
+                            std::string container_name,
+                            StopStatus status,
+                            std::string failure_reason,
+                            bool* result,
+                            base::WaitableEvent* event);
+
   // Notifies the service that a container with |container_token| and running
   // in a VM |cid| has completed startup. Sets |result| to true if this maps to
   // a currently running VM and |container_token| matches a security token for
@@ -170,6 +201,7 @@ class Service final {
   void ContainerStartupCompleted(const std::string& container_token,
                                  const uint32_t cid,
                                  const uint32_t garcon_vsock_port,
+                                 const uint32_t sftp_port,
                                  bool* result,
                                  base::WaitableEvent* event);
 
@@ -377,41 +409,52 @@ class Service final {
           security_key_response,
       base::WaitableEvent* event);
 
-  // Sends a D-Bus message to Chrome to request information about the VM disk,
-  // how much space is available and how much it could be expanded by. It uses
-  // |cid| and |container_token| to identify the source and somewhat verify that
-  // it is borealis (the only VM this method is available for). |result| is
-  // filled with information about the disk, if the request fails, than the
-  // error field will be set to !0. Signals |event| when done.
-  void GetDiskInfo(const std::string& container_token,
-                   const uint32_t cid,
-                   vm_tools::disk_management::GetDiskInfoResponse* result,
-                   base::WaitableEvent* event);
+  // Passes metrics from a container.  Used by e.g. Borealis, for IO and swap
+  // metrics.
+  void ReportMetrics(const std::string& container_token,
+                     const uint32_t cid,
+                     const vm_tools::container::ReportMetricsRequest& request,
+                     vm_tools::container::ReportMetricsResponse* result,
+                     base::WaitableEvent* event);
 
-  // Sends a D-Bus message to Chrome to request that the VM disk be expanded by
-  // |space_requested| bytes. It uses |cid| and |container_token| to identify
-  // the source and somewhat verify that it is borealis (the only VM this method
-  // is available for). If a resize occurs, |result| will be filled with the
-  // information of how many bytes the disk was expanded by, if the request
-  // fails, than the error field will be set to !0. Signals |event| when done.
-  void RequestSpace(const std::string& container_token,
-                    const uint32_t cid,
-                    const uint64_t space_requested,
-                    vm_tools::disk_management::RequestSpaceResponse* result,
-                    base::WaitableEvent* event);
+  // Install shader cache DLC and optionally mount for the VM specified.
+  void InstallVmShaderCache(
+      const uint32_t cid,
+      const vm_tools::container::InstallShaderCacheRequest* request,
+      std::string* error_out,
+      base::WaitableEvent* event);
 
-  // Sends a D-Bus message to Chrome to notify it that the VM disk can be
-  // shrunk by |space_to_release| bytes. It uses |cid| and |container_token| to
-  // identify the source and somewhat verify that it is borealis (the only VM
-  // this method is available for). If a resize occurs, |result| will be filled
-  // with the information of how many bytes the disk was shrunk by, if the
-  // request fails, than the error field will be set to !0. Signals |event| when
-  // done.
-  void ReleaseSpace(const std::string& container_token,
-                    const uint32_t cid,
-                    const uint64_t space_to_release,
-                    vm_tools::disk_management::ReleaseSpaceResponse* result,
-                    base::WaitableEvent* event);
+  // Uninstall shader cache, unmount the shader cache DLC for all VMs.
+  void UninstallVmShaderCache(
+      const uint32_t cid,
+      const vm_tools::container::UninstallShaderCacheRequest* request,
+      std::string* error_out,
+      base::WaitableEvent* event);
+
+  // Uninstall shader cache, unmount the shader cache DLC for all VMs.
+  void UnmountVmShaderCache(
+      const uint32_t cid,
+      const vm_tools::container::UnmountShaderCacheRequest* request,
+      std::string* error_out,
+      base::WaitableEvent* event);
+
+  // Sends a D-Bus message to request that sleep be inhibited.
+  void InhibitScreensaver(const std::string& container_token,
+                          const uint32_t cid,
+                          InhibitScreensaverSignal* signal,
+                          bool* result,
+                          base::WaitableEvent* event);
+
+  // Sends a D-Bus message to request that sleep be Uninhibited.
+  void UninhibitScreensaver(const std::string& container_token,
+                            const uint32_t cid,
+                            UninhibitScreensaverSignal* signal,
+                            bool* result,
+                            base::WaitableEvent* event);
+
+  base::WeakPtr<Service> GetWeakPtrForTesting() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
 
  private:
   // Sends the |signal_name| D-Bus signal with |signal_proto| as its contents.
@@ -475,60 +518,8 @@ class Service final {
     return true;
   }
 
-  // Sends the disk-related |method_name| D-Bus method with |input_proto| as
-  // its contents. It will use |cid| and |container_token| to lookup VM, owner,
-  // and container name, and set these fields on the |origin| of |input_proto|
-  // before sending it and storing the response in |output_proto|.
-  template <typename I, typename O>
-  bool SendDiskMethod(const std::string& method_name,
-                      const std::string& container_token,
-                      const uint32_t cid,
-                      I* input_proto,
-                      O* output_proto) {
-    DCHECK(sequence_checker_.CalledOnValidSequence());
-    CHECK(output_proto);
-    output_proto->set_error(1);
-    VirtualMachine* vm;
-    std::string owner_id;
-    std::string vm_name;
-
-    if (!GetVirtualMachineForCidOrToken(cid, "", &vm, &owner_id, &vm_name)) {
-      LOG(ERROR) << "Could not get virtual machine for cid";
-      return false;
-    }
-
-    std::string container_name = vm->GetContainerNameForToken(container_token);
-    if (container_name.empty()) {
-      LOG(ERROR) << "Could not get container name for token";
-      return false;
-    }
-
-    vm_tools::disk_management::MessageOrigin* origin =
-        new vm_tools::disk_management::MessageOrigin();
-    origin->set_vm_name(vm_name);
-    origin->set_container_name(container_name);
-    origin->set_owner_id(owner_id);
-    input_proto->set_allocated_origin(origin);
-    dbus::MethodCall method_call(
-        vm_tools::disk_management::kVmDiskManagementServiceInterface,
-        method_name);
-    dbus::MessageWriter(&method_call).AppendProtoAsArrayOfBytes(*input_proto);
-    std::unique_ptr<dbus::Response> dbus_response =
-        vm_disk_management_service_proxy_->CallMethodAndBlock(
-            &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-
-    dbus::MessageReader reader(dbus_response.get());
-    O response;
-    if (!reader.PopArrayOfBytesAsProto(&response)) {
-      LOG(ERROR) << "Unable to parse GetDiskInfoReponse from response";
-      output_proto->set_error(1);
-    } else {
-      *output_proto = response;
-    }
-    return true;
-  }
-
-  explicit Service(base::Closure quit_closure, scoped_refptr<dbus::Bus> bus);
+  explicit Service(base::OnceClosure quit_closure,
+                   scoped_refptr<dbus::Bus> bus);
   Service(const Service&) = delete;
   Service& operator=(const Service&) = delete;
 
@@ -536,7 +527,7 @@ class Service final {
   // its name, and starting our gRPC servers. If |unix_socket_path_for_testing|
   // has a value, the services are bound only to an AF_UNIX socket in that
   // directory instead of the normal VSOCK and AF_UNIX socket.
-  bool Init(const base::Optional<base::FilePath>& unix_socket_path_for_testing);
+  bool Init(const std::optional<base::FilePath>& unix_socket_path_for_testing);
 
   // Handles the termination of a child process.
   void HandleChildExit();
@@ -594,6 +585,10 @@ class Service final {
 
   // Handles a request to start an LXD container.
   std::unique_ptr<dbus::Response> StartLxdContainer(
+      dbus::MethodCall* method_call);
+
+  // Handles a request to stop an LXD container.
+  std::unique_ptr<dbus::Response> StopLxdContainer(
       dbus::MethodCall* method_call);
 
   // Handles a request to set the default timezone for an LXD instance.
@@ -668,16 +663,25 @@ class Service final {
   // Handles a notification from Chrome in response to a SelectFile() request.
   std::unique_ptr<dbus::Response> FileSelected(dbus::MethodCall* method_call);
 
-  // Gets the container's SSH keys from concierge.
-  bool GetContainerSshKeys(const std::string& owner_id,
-                           const std::string& vm_name,
-                           const std::string& container_name,
-                           std::string* host_pubkey_out,
-                           std::string* host_privkey_out,
-                           std::string* container_pubkey_out,
-                           std::string* container_privkey_out,
-                           std::string* hostname_out,
-                           std::string* error_out);
+  // Handles a request to attach a USB port to a container.
+  std::unique_ptr<dbus::Response> AttachUsbToContainer(
+      dbus::MethodCall* method_call);
+
+  // Handles a request to detach a USB port from a container.
+  std::unique_ptr<dbus::Response> DetachUsbFromContainer(
+      dbus::MethodCall* method_call);
+
+  // Handles a request to list containers.
+  std::unique_ptr<dbus::Response> ListRunningContainers(
+      dbus::MethodCall* method_call);
+
+  // Handles a request to get session info from Garcon.
+  std::unique_ptr<dbus::Response> GetGarconSessionInfo(
+      dbus::MethodCall* method_call);
+
+  // Handles a request to update the devices available to a container.
+  std::unique_ptr<dbus::Response> UpdateContainerDevices(
+      dbus::MethodCall* method_call);
 
   // Registers |hostname| and |ip| with the hostname resolver service so that
   // the container is reachable from a known hostname.
@@ -714,6 +718,11 @@ class Service final {
   // Send all listening ports to chunneld.
   void SendListeningPorts();
 
+  // Returns true if a metric reporting operation will be within the rules for
+  // rate limiting, false if it should be blocked. This will also increment the
+  // rate limit counter as a side effect.
+  bool CheckReportMetricsRateLimit(const std::string& vm_name);
+
   // Gets a VirtualMachine pointer to the registered VM with corresponding
   // |owner_id| and |vm_name|. Returns a nullptr if not found.
   VirtualMachine* FindVm(const std::string& owner_id,
@@ -748,7 +757,7 @@ class Service final {
   dbus::ObjectProxy* crosdns_service_proxy_;             // Owned by |bus_|.
   dbus::ObjectProxy* concierge_service_proxy_;           // Owned by |bus_|.
   dbus::ObjectProxy* vm_sk_forwarding_service_proxy_;    // Owned by |bus_|.
-  dbus::ObjectProxy* vm_disk_management_service_proxy_;  // Owned by |bus_|.
+  dbus::ObjectProxy* shadercached_proxy_;                // Owned by |bus_|.
 
   // The ContainerListener service.
   std::unique_ptr<ContainerListenerImpl> container_listener_;
@@ -779,7 +788,7 @@ class Service final {
 
   // Closure that's posted to the current thread's TaskRunner when the service
   // receives a SIGTERM.
-  base::Closure quit_closure_;
+  base::OnceClosure quit_closure_;
 
   // Ensure calls are made on the right thread.
   base::SequenceChecker sequence_checker_;
@@ -801,14 +810,30 @@ class Service final {
   // Watcher to monitor changes to the system timezone file.
   base::FilePathWatcher localtime_watcher_;
 
+  // Handler and accumulator for guest metrics.
+  std::unique_ptr<GuestMetrics> guest_metrics_;
+
+  // Helper for shadercached requests
+  std::unique_ptr<ShadercachedHelper> shadercached_helper_;
+
+  // Should Service create GuestMetric instance on initialization?  Used for
+  // testing.
+  static bool create_guest_metrics_;
+
   // Should Service start GRPC servers for ContainerListener and
   // TremplinListener Used for testing
   static bool run_grpc_;
 
+  // Per-VM rate limiting for metric reporting.
+  struct RateLimitState {
+    uint32_t count;
+    base::TimeTicks window_start;
+  };
+  std::map<std::string, RateLimitState> metric_rate_limit_state_;
+
   base::WeakPtrFactory<Service> weak_ptr_factory_;
 };
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone
 
 #endif  // VM_TOOLS_CICERONE_SERVICE_H_

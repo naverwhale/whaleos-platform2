@@ -1,4 +1,4 @@
-/* Copyright 2016 The Chromium OS Authors. All rights reserved.
+/* Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -10,8 +10,8 @@
 
 #include <hardware/hardware.h>
 
-#include <base/bind.h>
 #include <base/command_line.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <brillo/daemons/daemon.h>
 #include <brillo/syslog_logging.h>

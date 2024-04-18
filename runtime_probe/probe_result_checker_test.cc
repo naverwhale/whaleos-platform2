@@ -1,7 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "runtime_probe/probe_result_checker.h"
+
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -10,8 +13,6 @@
 #include <brillo/map_utils.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-
-#include "runtime_probe/probe_result_checker.h"
 
 namespace runtime_probe {
 
@@ -92,23 +93,25 @@ TEST(ProbeResultCheckerDictTest, TestApplySuccess) {
   ASSERT_TRUE(probe_result.has_value());
   ASSERT_TRUE(probe_result->is_dict());
 
+  const auto& probe_result_dict = probe_result->GetDict();
+
   auto checker = ProbeResultCheckerDict::FromValue(*expect);
 
   ASSERT_TRUE(checker->Apply(&*probe_result));
 
-  auto* str_value = probe_result->FindStringKey("str");
+  auto* str_value = probe_result_dict.FindString("str");
   ASSERT_NE(str_value, nullptr);
   ASSERT_EQ(*str_value, "string result");
 
-  auto int_value = probe_result->FindIntKey("int");
-  ASSERT_TRUE(int_value.has_value());
-  ASSERT_EQ(*int_value, 1024);
+  auto int_value = probe_result_dict.FindString("int");
+  ASSERT_NE(int_value, nullptr);
+  ASSERT_EQ(*int_value, "1024");
 
-  auto* hex_value = probe_result->FindStringKey("hex");
+  auto* hex_value = probe_result_dict.FindString("hex");
   ASSERT_NE(hex_value, nullptr);
   ASSERT_EQ(*hex_value, "123");
 
-  auto double_value = probe_result->FindDoubleKey("double");
+  auto double_value = probe_result_dict.FindDouble("double");
   ASSERT_TRUE(double_value.has_value());
   ASSERT_EQ(*double_value, 100);
 }
@@ -140,19 +143,21 @@ TEST(ProbeResultCheckerDictTest, TestApplyWithLimitsSuccess) {
 
   ASSERT_TRUE(checker->Apply(&*probe_result));
 
-  auto* str_value = probe_result->FindStringKey("str");
+  const auto& probe_result_dict = probe_result->GetDict();
+
+  auto* str_value = probe_result_dict.FindString("str");
   ASSERT_NE(str_value, nullptr);
   ASSERT_EQ(*str_value, "string result");
 
-  auto int_value = probe_result->FindIntKey("int");
-  ASSERT_TRUE(int_value.has_value());
-  ASSERT_EQ(*int_value, 1024);
+  auto int_value = probe_result_dict.FindString("int");
+  ASSERT_NE(int_value, nullptr);
+  ASSERT_EQ(*int_value, "1024");
 
-  auto* hex_value = probe_result->FindStringKey("hex");
+  auto* hex_value = probe_result_dict.FindString("hex");
   ASSERT_NE(hex_value, nullptr);
   ASSERT_EQ(*hex_value, "123");
 
-  auto double_value = probe_result->FindDoubleKey("double");
+  auto double_value = probe_result_dict.FindDouble("double");
   ASSERT_TRUE(double_value.has_value());
   ASSERT_EQ(*double_value, 100);
 }
@@ -257,7 +262,8 @@ TEST(ProbeResultCheckerListTest, TestApply) {
       ON_CALL(*mock_checker, Apply(_)).WillByDefault(Return(input));
       checker_list->checkers.push_back(std::move(mock_checker));
     }
-    ASSERT_EQ(output, checker_list->Apply(nullptr));
+    auto probe_result_stub = std::make_unique<base::Value>();
+    ASSERT_EQ(output, checker_list->Apply(&*probe_result_stub));
   }
 }
 
@@ -272,7 +278,8 @@ TEST(ProbeResultCheckerListTest, TestApplyShortCircuit) {
   mock_checker = std::make_unique<StrictMock<MockProbeResultChecker>>();
   checker_list->checkers.push_back(std::move(mock_checker));
 
-  ASSERT_TRUE(checker_list->Apply(nullptr));
+  auto probe_result_stub = std::make_unique<base::Value>();
+  ASSERT_TRUE(checker_list->Apply(&*probe_result_stub));
 }
 
 TEST(ProbeResultCheckerTest, TestFromValueDict) {

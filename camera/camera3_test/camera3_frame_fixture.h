@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,9 @@ namespace camera3_test {
 
 class Camera3FrameFixture : public Camera3StreamFixture {
  public:
-  const uint32_t kDefaultTimeoutMs = 1000;
+  // "kDefaultTimeoutMs" is matched with CTS "WAIT_FOR_RESULT_TIMEOUT_MS"
+  const uint32_t kDefaultTimeoutMs = 3000;
+  const uint32_t kSWPrivacyRetryTimeIntervalMs = 33;
   static const uint32_t kARGBPixelWidth = 4;
 
   explicit Camera3FrameFixture(int cam_id)

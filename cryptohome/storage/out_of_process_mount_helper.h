@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,15 +17,14 @@
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <brillo/process/process.h>
 #include <brillo/secure_blob.h>
 #include <chromeos/dbus/service_constants.h>
 
 #include "cryptohome/platform.h"
+#include "cryptohome/storage/error.h"
 #include "cryptohome/storage/mount_constants.h"
-#include "cryptohome/storage/mount_helper.h"
-#include "cryptohome/storage/mount_namespace.h"
+#include "cryptohome/storage/mount_helper_interface.h"
 
 using base::FilePath;
 
@@ -38,18 +37,9 @@ class OutOfProcessMountResponse;
 
 class OutOfProcessMountHelper : public MountHelperInterface {
  public:
-  OutOfProcessMountHelper(const brillo::SecureBlob& system_salt,
-                          std::unique_ptr<MountNamespace> chrome_mnt_ns,
-                          bool legacy_home,
+  OutOfProcessMountHelper(bool legacy_home,
                           bool bind_mount_downloads,
-                          Platform* platform)
-      : system_salt_(system_salt),
-        chrome_mnt_ns_(std::move(chrome_mnt_ns)),
-        legacy_home_(legacy_home),
-        bind_mount_downloads_(bind_mount_downloads),
-        platform_(platform),
-        username_(),
-        write_to_helper_(-1) {}
+                          Platform* platform);
   OutOfProcessMountHelper(const OutOfProcessMountHelper&) = delete;
   OutOfProcessMountHelper& operator=(const OutOfProcessMountHelper&) = delete;
 
@@ -57,18 +47,14 @@ class OutOfProcessMountHelper : public MountHelperInterface {
 
   // Carries out dircrypto mount(2) operations for an ephemeral cryptohome,
   // but does so out of process.
-  bool PerformEphemeralMount(const std::string& username) override;
+  StorageStatus PerformEphemeralMount(
+      const Username& username,
+      const base::FilePath& ephemeral_loop_device) override;
 
-  // Tears down an ephemeral cryptohome mount by terminating the out-of-process
-  // helper.
-  bool TearDownEphemeralMount() override;
-
-  // Tears down the non-ephemeral cryptohome mount by terminating the
-  // out-of-process helper.
-  void TearDownNonEphemeralMount() override;
-
-  // Returns whether an ephemeral mount operation can be performed.
   bool CanPerformEphemeralMount() const override;
+
+  // Unmounts all the currently mounted vaults.
+  void UnmountAll() override;
 
   // Returns whether a mount operation has been performed.
   bool MountPerformed() const override;
@@ -77,12 +63,10 @@ class OutOfProcessMountHelper : public MountHelperInterface {
   bool IsPathMounted(const base::FilePath& path) const override;
 
   // Carries out dircrypto mount(2) operations for a regular cryptohome.
-  bool PerformMount(const Options& mount_opts,
-                    const std::string& username,
-                    const std::string& fek_signature,
-                    const std::string& fnek_signature,
-                    bool is_pristine,
-                    MountError* error) override;
+  StorageStatus PerformMount(MountType mount_type,
+                             const Username& username,
+                             const std::string& fek_signature,
+                             const std::string& fnek_signature) override;
 
  private:
   // Launches an out-of-process helper, sends |request|, and waits until it
@@ -98,12 +82,6 @@ class OutOfProcessMountHelper : public MountHelperInterface {
   // Tears down the existing cryptohome mount by terminating the out-of-process
   // helper.
   bool TearDownExistingMount();
-
-  // Stores the global system salt.
-  brillo::SecureBlob system_salt_;
-
-  // If populated, mount namespace where to perform the mount.
-  std::unique_ptr<MountNamespace> chrome_mnt_ns_;
 
   // Whether to make the legacy home directory (/home/chronos/user) available.
   bool legacy_home_;

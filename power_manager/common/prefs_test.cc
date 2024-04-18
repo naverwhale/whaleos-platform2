@@ -1,21 +1,27 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/common/prefs.h"
 
 #include <memory>
+#include <utility>
 
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
+#include <base/test/task_environment.h>
+#include <base/time/time.h>
 #include <cros_config/fake_cros_config.h>
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "power_manager/common/cros_config_prefs_source.h"
+#include "power_manager/common/cros_ec_prefs_source.h"
 #include "power_manager/common/file_prefs_store.h"
+#include "power_manager/common/power_constants.h"
 #include "power_manager/common/prefs_observer.h"
 #include "power_manager/common/test_main_loop_runner.h"
 
@@ -29,9 +35,9 @@ const char kGarbageString[] = "This is garbage";
 const char kIntTestFileName[] = "intfile";
 const char kDoubleTestFileName[] = "doublefile";
 
-// The test crashes after this many milliseconds if an expected preference
+// The test crashes after this period of time if an expected preference
 // change notification is never received.
-const int kPrefChangeTimeoutMs = 60 * 1000;
+constexpr base::TimeDelta kPrefChangeTimeout = base::Minutes(1);
 
 }  // namespace
 
@@ -52,8 +58,7 @@ class TestPrefsObserver : public PrefsObserver {
   // Runs |loop_| until OnPrefChanged() is called, then quits the loop
   // and returns a string containing the name of the pref that was changed.
   std::string RunUntilPrefChanged() {
-    CHECK(loop_runner_.StartLoop(
-        base::TimeDelta::FromMilliseconds(kPrefChangeTimeoutMs)))
+    CHECK(loop_runner_.StartLoop(kPrefChangeTimeout))
         << "Pref change not received";
     return pref_name_;
   }
@@ -65,7 +70,7 @@ class TestPrefsObserver : public PrefsObserver {
   }
 
  private:
-  Prefs* prefs_;  // weak; owned by PrefsTest
+  Prefs* prefs_;  // owned by PrefsTest
 
   TestMainLoopRunner loop_runner_;
 
@@ -76,16 +81,16 @@ class TestPrefsObserver : public PrefsObserver {
 class PrefsTest : public testing::Test {
  public:
   PrefsTest() : test_api_(&prefs_) {}
-  ~PrefsTest() override {}
+  ~PrefsTest() override = default;
 
   void SetUp() override {
     paths_.clear();
     // Create new temp directories.
-    for (int i = 0; i < kNumPrefDirectories; ++i) {
-      temp_dir_generators_[i].reset(new base::ScopedTempDir());
-      ASSERT_TRUE(temp_dir_generators_[i]->CreateUniqueTempDir());
-      EXPECT_TRUE(temp_dir_generators_[i]->IsValid());
-      paths_.push_back(temp_dir_generators_[i]->GetPath());
+    for (auto& temp_dir_generator : temp_dir_generators_) {
+      temp_dir_generator = std::make_unique<base::ScopedTempDir>();
+      ASSERT_TRUE(temp_dir_generator->CreateUniqueTempDir());
+      EXPECT_TRUE(temp_dir_generator->IsValid());
+      paths_.push_back(temp_dir_generator->GetPath());
     }
 
     // By default, don't defer writes.
@@ -110,11 +115,15 @@ class PrefsTest : public testing::Test {
         prefs_.Init(std::make_unique<FilePrefsStore>(paths_[0]), GetSources()));
   }
 
+  base::test::SingleThreadTaskEnvironment task_environment_{
+      base::test::TaskEnvironment::MainThreadType::IO,
+      base::test::TaskEnvironment::TimeSource::SYSTEM_TIME};
+
   std::vector<base::FilePath> paths_;
   std::unique_ptr<base::ScopedTempDir>
       temp_dir_generators_[kNumPrefDirectories];
 
-  brillo::FakeCrosConfig* cros_config_;  // weak
+  brillo::FakeCrosConfig* cros_config_;  // owned elsewhere
 
   Prefs prefs_;
   Prefs::TestApi test_api_;
@@ -325,7 +334,7 @@ TEST_F(PrefsTest, WatchPrefs) {
 // Test that additional write requests made soon after an initial request
 // are deferred.
 TEST_F(PrefsTest, DeferredWrites) {
-  test_api_.set_write_interval(base::TimeDelta::FromSeconds(120));
+  test_api_.set_write_interval(base::Seconds(120));
   InitPrefs();
 
   // Write 1 to a pref.
@@ -391,6 +400,84 @@ TEST_F(PrefsTest, TestLibCrosConfigPrefsTrailingWhitespace) {
   std::string value;
   EXPECT_TRUE(prefs_.GetString("name", &value));
   EXPECT_EQ("value", value);
+}
+
+TEST_F(PrefsTest, TestLibCrosConfigPrefsExternalString) {
+  InitPrefs();
+  cros_config_->SetString("/external", "name", "value");
+
+  std::string value;
+  EXPECT_TRUE(prefs_.GetExternalString("/external", "name", &value));
+  EXPECT_EQ("value", value);
+}
+
+TEST_F(PrefsTest, TestLibCrosConfigExternalTrailingWhitespace) {
+  InitPrefs();
+  cros_config_->SetString("/external", "name", "value \n");
+
+  std::string value;
+  EXPECT_TRUE(prefs_.GetExternalString("/external", "name", &value));
+  EXPECT_EQ("value", value);
+}
+
+class MockDisplayStateOfChargeCommand : public ec::DisplayStateOfChargeCommand {
+ public:
+  using DisplayStateOfChargeCommand::DisplayStateOfChargeCommand;
+  MOCK_METHOD(struct ec_response_display_soc*, Resp, (), (const, override));
+};
+
+std::unique_ptr<ec::DisplayStateOfChargeCommand> ReturnMockCommand(
+    std::unique_ptr<MockDisplayStateOfChargeCommand> cmd) {
+  return cmd;
+}
+
+TEST_F(PrefsTest, CrosEcSuccess) {
+  auto mock_command = std::make_unique<MockDisplayStateOfChargeCommand>();
+  struct ec_response_display_soc response = {
+      .display_soc = 990, .full_factor = 980, .shutdown_soc = 51};
+  EXPECT_CALL(*mock_command, Resp).WillRepeatedly(testing::Return(&response));
+
+  auto prefs_source =
+      std::make_unique<CrosEcPrefsSource>(std::move(mock_command));
+  auto sources = GetSources();
+  cros_config_->SetString("/power", "low-battery-shutdown-percent", "4");
+  cros_config_->SetString("/power", "power-supply-full-factor", "0.9");
+  cros_config_->SetString("/power", "low-battery-shutdown-time-s", "200");
+  sources.insert(sources.begin(), std::move(prefs_source));
+  ASSERT_TRUE(prefs_.Init(std::make_unique<FilePrefsStore>(paths_[0]),
+                          std::move(sources)));
+  double shutdown_percent, full_factor;
+  int64_t shutdown_time;
+  ASSERT_TRUE(prefs_.GetInt64(kLowBatteryShutdownTimePref, &shutdown_time));
+  ASSERT_TRUE(
+      prefs_.GetDouble(kLowBatteryShutdownPercentPref, &shutdown_percent));
+  ASSERT_TRUE(prefs_.GetDouble(kPowerSupplyFullFactorPref, &full_factor));
+  EXPECT_EQ(5.1, shutdown_percent);
+  EXPECT_EQ(0.98, full_factor);
+  EXPECT_EQ(200, shutdown_time);
+  std::string value;
+  EXPECT_FALSE(prefs_.GetExternalString("/external", "name", &value));
+}
+
+TEST_F(PrefsTest, CrosEcUnsupported) {
+  auto prefs_source = std::make_unique<CrosEcPrefsSource>(nullptr);
+  auto sources = GetSources();
+  cros_config_->SetString("/power", "low-battery-shutdown-percent", "4");
+  cros_config_->SetString("/power", "power-supply-full-factor", "0.9");
+  cros_config_->SetString("/power", "low-battery-shutdown-time-s", "200");
+  sources.insert(sources.begin(), std::move(prefs_source));
+  ASSERT_TRUE(prefs_.Init(std::make_unique<FilePrefsStore>(paths_[0]),
+                          std::move(sources)));
+  std::string pref;
+  double shutdown_percent, full_factor;
+  int64_t shutdown_time;
+  ASSERT_TRUE(prefs_.GetInt64(kLowBatteryShutdownTimePref, &shutdown_time));
+  ASSERT_TRUE(
+      prefs_.GetDouble(kLowBatteryShutdownPercentPref, &shutdown_percent));
+  ASSERT_TRUE(prefs_.GetDouble(kPowerSupplyFullFactorPref, &full_factor));
+  EXPECT_EQ(4, shutdown_percent);
+  EXPECT_EQ(0.9, full_factor);
+  EXPECT_EQ(200, shutdown_time);
 }
 
 }  // namespace power_manager

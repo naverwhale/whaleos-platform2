@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -7,6 +7,7 @@
 syntax = "proto3";
 
 package runtime_probe;
+
 option go_package = "chromiumos/system_api/runtime_probe_proto";
 
 // Defined error code.
@@ -32,7 +33,7 @@ message ProbeRequest {
   // The name style here is on purposely align with factory probe output.
   enum SupportCategory {
     UNKNOWN = 0;
-    audio_codec = 1;
+    reserved 1;
     battery = 2;
     storage = 3;
     vpd_cached = 4;
@@ -47,6 +48,7 @@ message ProbeRequest {
     cellular = 12;
     ethernet = 13;
     wireless = 14;
+    cpu = 15;
   }
   reserved 1;
   repeated SupportCategory categories = 4;
@@ -89,7 +91,7 @@ message Battery {
     // https://chromium.git.corp.google.com/chromiumos/third_party/kernel/+/d7380965752505951668e85de59c128d1d6fd21f%5E%21/#F1
 
     // Index number of this battery, starts from 1.
-    int32 index = 1;
+    int32 index = 1 [deprecated = true];
     // Manufacturer for length not exceeding EC_COMM_TEXT_MAX.
     string manufacturer = 2;
     // Model name for length not exceeding EC_COMM_TEXT_MAX.
@@ -124,6 +126,8 @@ message Battery {
     // /sys/class/power_supply/<supply_name>/technology section in
     // https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-class-power.
     string technology = 15;
+    // DeviceChemistry (0x22) in Smart Battery Data Specification.
+    string chemistry = 16;
   }
   // Component alias.
   string name = 1;
@@ -186,6 +190,13 @@ message Storage {
     string ata_vendor = 13;
     // Model name, 16 bytes
     string ata_model = 14;
+
+    // The following are fields for UFS. Every field name comes with prefix
+    // "ufs_".
+    // Vendor name.
+    string ufs_vendor = 16;
+    // Model name.
+    string ufs_model = 17;
   }
   // Component alias.
   string name = 1;
@@ -278,7 +289,7 @@ message Camera {
     // if the caller needs to correlate with other information.
     string path = 1;
 
-    // HW interface type, currently must be "usb".
+    // HW interface type, currently must be "usb" or "mipi".
     string bus_type = 2;
 
     // The following are fields for USB.  Every field name must start with
@@ -293,6 +304,18 @@ message Camera {
 
     // Whether this USB device is removable or not.
     UsbRemovable usb_removable = 6;
+
+    // The following are fields for MIPI.  Every field name must start with
+    // prefix "mipi_".
+
+    // Entity name from V4L2.
+    string mipi_name = 7;
+    // Camera module vendor ID and product ID read from camera EEPROM.
+    string mipi_module_id = 8;
+    // Image sensor vendor ID and product ID read from camera EEPROM.
+    string mipi_sensor_id = 9;
+    // Image sensor vendor ID queried via V4L2.
+    string mipi_vendor = 10;
   }
   // Component alias.
   string name = 1;
@@ -304,6 +327,13 @@ message Camera {
 
 // Things about input_device.
 message InputDevice {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    TYPE_UNKNOWN = 1;
+    TYPE_STYLUS = 2;
+    TYPE_TOUCHPAD = 3;
+    TYPE_TOUCHSCREEN = 4;
+  }
   message Fields {
     // The name of the device.
     string name = 1;
@@ -321,6 +351,8 @@ message InputDevice {
     uint32 version = 7;
     // The firmware version.
     string fw_version = 8;
+    // The type of the device.
+    Type device_type = 9;
   }
   // Component alias.
   string name = 1;
@@ -510,6 +542,48 @@ message Edid {
   Information information = 3;
 }
 
+message ApI2c {
+  message Fields {
+    uint32 data = 1;
+  }
+  string name = 1;
+  Fields values = 2;
+}
+
+message EcI2c {
+  message Fields {
+    uint32 data = 1;
+  }
+  string name = 1;
+  Fields values = 2;
+}
+
+message Tcpc {
+  message Fields {
+    // Port ID, 8 bits.
+    uint32 port = 1;
+    // Vendor ID, 16 bits.
+    uint32 vendor_id = 2;
+    // Product ID, 16 bits.
+    uint32 product_id = 3;
+    // Device ID, 16 bits.
+    uint32 device_id = 4;
+  }
+  string name = 1;
+  Fields values = 2;
+}
+
+message Cpu {
+  message Fields {
+    // CPU model name
+    string model = 1;
+    // Number of cores.
+    uint32 cores = 2;
+  }
+  string name = 1;
+  Fields values = 2;
+}
+
 // A ProbeResult contains all potential probe results. For category not
 // existed or not requested for probing, field is expected to be empty.
 message ProbeResult {
@@ -534,6 +608,27 @@ message ProbeResult {
   repeated Network cellular = 14;
   repeated Network ethernet = 15;
   repeated Network wireless = 16;
+  repeated Cpu cpu = 17;
+}
+
+// Holds componenet fields for any component categories.
+message ComponentFields {
+  oneof component_fields {
+    AudioCodec.Fields audio_codec = 1;
+    Battery.Fields battery = 2;
+    Storage.Fields storage = 3;
+    VpdCached.Fields vpd_cached = 4;
+    Camera.Fields camera = 5;
+    InputDevice.Fields stylus = 6;
+    InputDevice.Fields touchpad = 7;
+    InputDevice.Fields touchscreen = 8;
+    Memory.Fields dram = 9;
+    Edid.Fields display_panel = 10;
+    Network.Fields cellular = 11;
+    Network.Fields ethernet = 12;
+    Network.Fields wireless = 13;
+    Cpu.Fields cpu = 14;
+  }
 }
 
 message GetKnownComponentsRequest {
@@ -543,4 +638,16 @@ message GetKnownComponentsRequest {
 message GetKnownComponentsResult {
   ErrorCode error = 1;
   repeated string component_names = 2;
+}
+
+message ProbeSsfcComponentsRequest {}
+
+message ProbeSsfcComponentsResponse {
+  ErrorCode error = 1;
+  string probe_config_checksum = 2;
+
+  // Components
+  repeated ApI2c ap_i2c = 11;
+  repeated EcI2c ec_i2c = 12;
+  repeated Tcpc tcpc = 13;
 }

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,17 @@
 
 #include <memory>
 
-#include <base/callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
 #include <google/protobuf/arena.h>
 #include <vm_protos/proto_bindings/vm_host.grpc.pb.h>
 
-namespace vm_tools {
-namespace syslog {
+namespace vm_tools::syslog {
 
 class Collector {
  public:
@@ -44,12 +42,11 @@ class Collector {
   const LogRequest& syslog_request() const { return *syslog_request_; }
 
   // Periodic interval for flushing buffered logs.
-  static constexpr base::TimeDelta kFlushPeriod =
-      base::TimeDelta::FromMilliseconds(5000);
+  static constexpr base::TimeDelta kFlushPeriod = base::Milliseconds(5000);
 
   // Periodic interval for flushing buffered logs during testing.
   static constexpr base::TimeDelta kFlushPeriodForTesting =
-      base::TimeDelta::FromMilliseconds(500);
+      base::Milliseconds(500);
 
  private:
   // File descriptor bound to logging socket.
@@ -75,7 +72,6 @@ class Collector {
   base::WeakPtrFactory<Collector> weak_factory_{this};
 };
 
-}  // namespace syslog
-}  // namespace vm_tools
+}  // namespace vm_tools::syslog
 
 #endif  // VM_TOOLS_SYSLOG_COLLECTOR_H_

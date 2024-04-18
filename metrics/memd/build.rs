@@ -1,8 +1,6 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-extern crate protoc_rust;
 
 use std::env;
 use std::fs;
@@ -41,7 +39,7 @@ fn main() {
         note_rerun_if_changed(file);
     }
 
-    protoc_rust::Codegen::new()
+    protobuf_codegen::Codegen::new()
         .out_dir(out_dir.as_os_str().to_str().unwrap())
         .inputs(
             &input_files

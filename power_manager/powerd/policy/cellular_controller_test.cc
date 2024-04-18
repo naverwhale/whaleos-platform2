@@ -1,20 +1,18 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/policy/cellular_controller.h"
 
 #include <base/check_op.h>
-#include <base/macros.h>
 #include <gtest/gtest.h>
 
 #include "power_manager/common/fake_prefs.h"
 #include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/system/dbus_wrapper_stub.h"
-#include "power_manager/powerd/system/udev_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 namespace {
 
 constexpr int64_t kFakeDprGpioNumber = 123;
@@ -67,7 +65,7 @@ class TestCellularControllerDelegate : public CellularController::Delegate {
 
 }  // namespace
 
-class CellularControllerTest : public ::testing::Test {
+class CellularControllerTest : public TestEnvironment {
  public:
   CellularControllerTest() = default;
   CellularControllerTest(const CellularControllerTest&) = delete;
@@ -195,5 +193,4 @@ TEST_F(CellularControllerTest, ProximityAndTabletModeWithMultiLevel) {
   EXPECT_EQ(RadioTransmitPower::HIGH, delegate_.last_transmit_power());
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

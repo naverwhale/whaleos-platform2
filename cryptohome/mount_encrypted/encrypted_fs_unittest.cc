@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include <base/files/file_util.h>
@@ -22,6 +23,8 @@
 #include "cryptohome/storage/encrypted_container/encrypted_container.h"
 #include "cryptohome/storage/encrypted_container/fake_backing_device.h"
 #include "cryptohome/storage/encrypted_container/filesystem_key.h"
+#include "cryptohome/storage/keyring/fake_keyring.h"
+#include "cryptohome/storage/keyring/utils.h"
 
 using ::testing::_;
 using ::testing::DoAll;
@@ -55,9 +58,15 @@ class EncryptedFsTest : public ::testing::Test {
     brillo::SecureBlob secret;
     brillo::SecureBlob::HexStringToSecureBlob("0123456789ABCDEF", &secret);
     key_.fek = secret;
+    key_reference_ = {.fek_sig = brillo::SecureBlob("some_ref")};
+    auto keyring_key_reference =
+        cryptohome::dmcrypt::GenerateKeyringDescription(key_reference_.fek_sig);
+    key_descriptor_ = cryptohome::dmcrypt::GenerateDmcryptKeyDescriptor(
+        keyring_key_reference.fek_sig, key_.fek.size());
 
     auto container = std::make_unique<cryptohome::DmcryptContainer>(
         config_, std::move(fake_backing_device), key_reference_, &platform_,
+        &keyring_,
         std::make_unique<brillo::DeviceMapper>(
             base::BindRepeating(&brillo::fake::CreateDevmapperTask)));
 
@@ -72,36 +81,18 @@ class EncryptedFsTest : public ::testing::Test {
         platform_.CreateDirectory(base::FilePath("/mnt/stateful_partition/")));
     ASSERT_TRUE(platform_.CreateDirectory(base::FilePath("/var")));
     ASSERT_TRUE(platform_.CreateDirectory(base::FilePath("/home/chronos")));
-
-    platform_.GetFake()->SetStandardUsersAndGroups();
   }
 
-  void ExpectSetup() {
-    EXPECT_CALL(platform_, StatVFS(_, _)).WillOnce(Return(true));
+  void ExpectSetup(bool is_formatted) {
     EXPECT_CALL(platform_, GetBlkSize(_, _))
         .WillRepeatedly(DoAll(SetArgPointee<1>(40920000), Return(true)));
     EXPECT_CALL(platform_, UdevAdmSettle(_, _)).WillOnce(Return(true));
     EXPECT_CALL(platform_, Tune2Fs(_, _)).WillOnce(Return(true));
-    EXPECT_CALL(platform_, Access(_, _)).WillRepeatedly(Return(0));
   }
 
   void ExpectCreate() {
     EXPECT_CALL(platform_, FormatExt4(dmcrypt_device_, _, _))
         .WillOnce(Return(true));
-  }
-
-  void ExpectMount() {
-    EXPECT_CALL(platform_, Mount(dmcrypt_device_, mount_point_, _, _, _))
-        .WillOnce(Return(true));
-    EXPECT_CALL(platform_, Bind(_, _, _, false))
-        .Times(2)
-        .WillRepeatedly(Return(true));
-  }
-
-  void ExpectUnmount() {
-    EXPECT_CALL(platform_, Unmount(_, _, _))
-        .Times(3)
-        .WillRepeatedly(Return(true));
   }
 
  protected:
@@ -111,25 +102,27 @@ class EncryptedFsTest : public ::testing::Test {
   cryptohome::DmcryptConfig config_;
 
   NiceMock<cryptohome::MockPlatform> platform_;
+  cryptohome::FakeKeyring keyring_;
   brillo::DeviceMapper device_mapper_;
   cryptohome::FakeBackingDeviceFactory fake_backing_device_factory_;
   cryptohome::FileSystemKey key_;
   cryptohome::FileSystemKeyReference key_reference_;
+  brillo::SecureBlob key_descriptor_;
   cryptohome::BackingDevice* backing_device_;
   std::unique_ptr<EncryptedFs> encrypted_fs_;
 };
 
 TEST_F(EncryptedFsTest, RebuildStateful) {
-  ExpectSetup();
+  ExpectSetup(/*is_formatted=*/false);
   ExpectCreate();
-  ExpectMount();
-  ExpectUnmount();
 
   // Check if dm device is mounted and has the correct key.
   EXPECT_EQ(encrypted_fs_->Setup(key_, true), RESULT_SUCCESS);
 
   // Check that the dm-crypt device is created and has the correct key.
-  EXPECT_EQ(encrypted_fs_->GetKey(), key_.fek);
+  brillo::DevmapperTable table =
+      encrypted_fs_->device_mapper_->GetTable(dmcrypt_name_);
+  EXPECT_EQ(table.CryptGetKey(), key_descriptor_);
   // Check if backing device is attached.
   EXPECT_EQ(backing_device_->GetPath(), base::FilePath("/dev/encstateful"));
 
@@ -139,13 +132,11 @@ TEST_F(EncryptedFsTest, RebuildStateful) {
   EXPECT_EQ(device_mapper_.GetTable(dmcrypt_name_).CryptGetKey(),
             brillo::SecureBlob());
   // Check if backing device is not attached.
-  EXPECT_EQ(backing_device_->GetPath(), base::nullopt);
+  EXPECT_EQ(backing_device_->GetPath(), std::nullopt);
 }
 
 TEST_F(EncryptedFsTest, OldStateful) {
-  ExpectSetup();
-  ExpectMount();
-  ExpectUnmount();
+  ExpectSetup(/*is_formatted=*/true);
 
   // Create the fake backing device.
   ASSERT_TRUE(backing_device_->Create());
@@ -153,7 +144,9 @@ TEST_F(EncryptedFsTest, OldStateful) {
   // Expect setup to succeed.
   EXPECT_EQ(encrypted_fs_->Setup(key_, false), RESULT_SUCCESS);
   // Check that the dm-crypt device is created and has the correct key.
-  EXPECT_EQ(encrypted_fs_->GetKey(), key_.fek);
+  brillo::DevmapperTable table =
+      encrypted_fs_->device_mapper_->GetTable(dmcrypt_name_);
+  EXPECT_EQ(table.CryptGetKey(), key_descriptor_);
   // Check if backing device is attached.
   EXPECT_EQ(backing_device_->GetPath(), base::FilePath("/dev/encstateful"));
 
@@ -162,7 +155,7 @@ TEST_F(EncryptedFsTest, OldStateful) {
   EXPECT_EQ(device_mapper_.GetTable(dmcrypt_name_).CryptGetKey(),
             brillo::SecureBlob());
   // Check if backing device is not attached.
-  EXPECT_EQ(backing_device_->GetPath(), base::nullopt);
+  EXPECT_EQ(backing_device_->GetPath(), std::nullopt);
 }
 
 TEST_F(EncryptedFsTest, LoopdevTeardown) {
@@ -175,12 +168,12 @@ TEST_F(EncryptedFsTest, LoopdevTeardown) {
   // Expect setup to fail.
   EXPECT_EQ(encrypted_fs_->Setup(key_, false), RESULT_FAIL_FATAL);
   // Make sure that the backing device is not left attached.
-  EXPECT_EQ(backing_device_->GetPath(), base::nullopt);
+  EXPECT_EQ(backing_device_->GetPath(), std::nullopt);
 }
 
 TEST_F(EncryptedFsTest, DevmapperTeardown) {
   // Mount failed --> Teardown devmapper
-  ExpectSetup();
+  ExpectSetup(/*is_formatted=*/true);
   EXPECT_CALL(platform_, Mount(_, _, _, _, _)).WillOnce(Return(false));
 
   // Create the fake backing device.
@@ -188,7 +181,7 @@ TEST_F(EncryptedFsTest, DevmapperTeardown) {
   // Expect setup to fail.
   EXPECT_EQ(encrypted_fs_->Setup(key_, false), RESULT_FAIL_FATAL);
   // Make sure that the backing device is no left attached.
-  EXPECT_EQ(backing_device_->GetPath(), base::nullopt);
+  EXPECT_EQ(backing_device_->GetPath(), std::nullopt);
 }
 
 }  // namespace mount_encrypted

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,51 +10,19 @@
 #include <fuzzer/FuzzedDataProvider.h>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/values.h>
 #include <openssl/sha.h>
+
+using Record = biod::BiodStorageInterface::Record;
+using RecordMetadata = biod::BiodStorageInterface::RecordMetadata;
 
 class Environment {
  public:
   Environment() { logging::SetMinLogLevel(logging::LOGGING_FATAL); }
 };
-
-class TestRecord : public biod::BiometricsManagerRecord {
- public:
-  TestRecord(const std::string& id,
-             const std::string& user_id,
-             const std::string& label,
-             const std::vector<uint8_t>& validation_val,
-             const std::vector<uint8_t>& data)
-      : id_(id),
-        user_id_(user_id),
-        label_(label),
-        validation_val_(validation_val),
-        data_(data) {}
-
-  const std::string& GetId() const override { return id_; }
-  const std::string& GetUserId() const override { return user_id_; }
-  const std::string& GetLabel() const override { return label_; }
-  const std::vector<uint8_t>& GetValidationVal() const override {
-    return validation_val_;
-  }
-  const std::vector<uint8_t>& GetData() const { return data_; }
-
-  bool SetLabel(std::string label) override { return true; }
-  bool Remove() override { return true; }
-  bool SupportsPositiveMatchSecret() const override { return true; }
-
- private:
-  std::string id_;
-  std::string user_id_;
-  std::string label_;
-  std::vector<uint8_t> validation_val_;
-  std::vector<uint8_t> data_;
-};
-
-static std::vector<TestRecord> records;
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   static Environment env;
@@ -69,6 +37,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   int data_len = data_provider.ConsumeIntegralInRange<int32_t>(
       MAX_DATA_LEN - 1000, MAX_DATA_LEN);
 
+  const int version = data_provider.ConsumeIntegral<int>();
   const std::string id = data_provider.ConsumeBytesAsString(id_len);
   const std::string user_id = data_provider.ConsumeBytesAsString(user_id_len);
   const std::string label = data_provider.ConsumeBytesAsString(label_len);
@@ -82,24 +51,19 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   else
     biod_data = data_provider.ConsumeRemainingBytes<uint8_t>();
 
-  biod::BiodStorage biod_storage = biod::BiodStorage("BiometricsManager");
+  base::FilePath root_path("/tmp/biod_storage_fuzzing_data/biod");
+
+  biod::BiodStorage biod_storage =
+      biod::BiodStorage(root_path, "BiometricsManager");
   biod_storage.set_allow_access(true);
 
-  auto record = std::make_unique<TestRecord>(id, user_id, label, validation_val,
-                                             biod_data);
+  RecordMetadata record_metadata = {version, id, user_id, label,
+                                    validation_val};
 
-  base::FilePath root_path("/tmp/biod_storage_fuzzing_data");
-  biod_storage.SetRootPathForTesting(root_path);
   bool status =
-      biod_storage.WriteRecord(*record, base::Value(record->GetData()));
+      biod_storage.WriteRecord(record_metadata, base::Value(biod_data));
   if (status) {
-    auto records_result = biod_storage.ReadRecordsForSingleUser(user_id);
-    for (const auto& r : records_result.valid_records) {
-      std::vector<uint8_t> record_data(r.data.cbegin(), r.data.cend());
-      records.emplace_back(r.metadata.record_id, r.metadata.user_id,
-                           r.metadata.label, r.metadata.validation_val,
-                           record_data);
-    }
+    biod_storage.ReadRecordsForSingleUser(user_id);
   }
 
   return 0;

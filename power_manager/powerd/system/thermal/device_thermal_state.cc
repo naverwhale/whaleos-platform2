@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 
 #include "power_manager/proto_bindings/thermal.pb.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 std::string DeviceThermalStateToString(DeviceThermalState state) {
   switch (state) {
@@ -47,5 +46,4 @@ ThermalEvent::ThermalState DeviceThermalStateToProto(
   NOTREACHED();
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

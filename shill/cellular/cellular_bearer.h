@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,10 @@
 #include <utility>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <gtest/gtest_prod.h>
 
+#include "shill/cellular/apn_list.h"
 #include "shill/ipconfig.h"
 
 namespace shill {
@@ -25,10 +25,23 @@ class ControlInterface;
 // ModemManager.
 class CellularBearer {
  public:
+  // ModemManager Bearer Properties.
+  static const char kMMApnProperty[];
+  static const char kMMApnTypeProperty[];
+  static const char kMMUserProperty[];
+  static const char kMMPasswordProperty[];
+  static const char kMMAllowedAuthProperty[];
+  static const char kMMAllowRoamingProperty[];
+  static const char kMMIpTypeProperty[];
+  static const char kMMMultiplexProperty[];
+  static const char kMMForceProperty[];
+
+  enum class IPConfigMethod { kUnknown, kPPP, kStatic, kDHCP };
+
   // Constructs a cellular bearer for observing property changes of a
   // corresponding bearer object, at the DBus path |dbus_path| of DBus service
-  // |dbus_service|,  exposed by ModemManager. The ownership of |proxy_factory|
-  // is not transferred, and should outlive this object.
+  // |dbus_service|,  exposed by ModemManager. The ownership of
+  // |control_interface| is not transferred, and should outlive this object.
   //
   // TODO(benchan): Use a context object approach to pass objects like
   // ControlInterface through constructor.
@@ -55,29 +68,50 @@ class CellularBearer {
 
   bool connected() const { return connected_; }
   const std::string& data_interface() const { return data_interface_; }
-  IPConfig::Method ipv4_config_method() const { return ipv4_config_method_; }
+  IPConfigMethod ipv4_config_method() const { return ipv4_config_method_; }
   const IPConfig::Properties* ipv4_config_properties() const {
     return ipv4_config_properties_.get();
   }
-  IPConfig::Method ipv6_config_method() const { return ipv6_config_method_; }
+  IPConfigMethod ipv6_config_method() const { return ipv6_config_method_; }
   const IPConfig::Properties* ipv6_config_properties() const {
     return ipv6_config_properties_.get();
   }
 
- private:
-  friend class CellularBearerTest;
-  FRIEND_TEST(CellularTest, EstablishLinkDHCP);
-  FRIEND_TEST(CellularTest, EstablishLinkPPP);
-  FRIEND_TEST(CellularTest, EstablishLinkStatic);
+  const std::string& apn() const { return apn_; }
+  const std::vector<ApnList::ApnType>& apn_types() const { return apn_types_; }
 
+  // Setters for unit tests.
+  void set_connected_for_testing(bool connected) { connected_ = connected; }
+  void set_data_interface_for_testing(const std::string& data_interface) {
+    data_interface_ = data_interface;
+  }
+  void set_ipv4_config_method_for_testing(IPConfigMethod ipv4_config_method) {
+    ipv4_config_method_ = ipv4_config_method;
+  }
+  void set_ipv4_config_properties_for_testing(
+      std::unique_ptr<IPConfig::Properties> ipv4_config_properties) {
+    ipv4_config_properties_ = std::move(ipv4_config_properties);
+  }
+  void set_ipv6_config_method_for_testing(IPConfigMethod ipv6_config_method) {
+    ipv6_config_method_ = ipv6_config_method;
+  }
+  void set_ipv6_config_properties_for_testing(
+      std::unique_ptr<IPConfig::Properties> ipv6_config_properties) {
+    ipv6_config_properties_ = std::move(ipv6_config_properties);
+  }
+  void set_apn_type_for_testing(ApnList::ApnType apn_type) {
+    apn_types_.push_back(apn_type);
+  }
+
+ private:
   // Gets the IP configuration method and properties from |properties|.
   // |address_family| specifies the IP address family of the configuration.
   // |ipconfig_method| and |ipconfig_properties| are used to return the IP
   // configuration method and properties and should be non-NULL.
   void GetIPConfigMethodAndProperties(
       const KeyValueStore& properties,
-      IPAddress::Family address_family,
-      IPConfig::Method* ipconfig_method,
+      net_base::IPFamily address_family,
+      IPConfigMethod* ipconfig_method,
       std::unique_ptr<IPConfig::Properties>* ipconfig_properties) const;
 
   // Resets bearer properties.
@@ -87,26 +121,6 @@ class CellularBearer {
   // corresponding bearer object exposed by ModemManager over DBus.
   void UpdateProperties();
 
-  // Setters for unit tests.
-  void set_connected(bool connected) { connected_ = connected; }
-  void set_data_interface(const std::string& data_interface) {
-    data_interface_ = data_interface;
-  }
-  void set_ipv4_config_method(IPConfig::Method ipv4_config_method) {
-    ipv4_config_method_ = ipv4_config_method;
-  }
-  void set_ipv4_config_properties(
-      std::unique_ptr<IPConfig::Properties> ipv4_config_properties) {
-    ipv4_config_properties_ = std::move(ipv4_config_properties);
-  }
-  void set_ipv6_config_method(IPConfig::Method ipv6_config_method) {
-    ipv6_config_method_ = ipv6_config_method;
-  }
-  void set_ipv6_config_properties(
-      std::unique_ptr<IPConfig::Properties> ipv6_config_properties) {
-    ipv6_config_properties_ = std::move(ipv6_config_properties);
-  }
-
   ControlInterface* control_interface_;
   RpcIdentifier dbus_path_;
   std::string dbus_service_;
@@ -114,14 +128,19 @@ class CellularBearer {
   bool connected_ = false;
   std::string data_interface_;
 
-  // If |ipv4_config_method_| is set to |IPConfig::kMethodStatic|,
+  // If |ipv4_config_method_| is set to |IPConfigMethod::kStatic|,
   // |ipv4_config_properties_| is guaranteed to contain valid IP configuration
   // properties. Otherwise, |ipv4_config_properties_| is set to nullptr.
   // |ipv6_config_properties_| is handled similarly.
-  IPConfig::Method ipv4_config_method_ = IPConfig::kMethodUnknown;
+  IPConfigMethod ipv4_config_method_ = IPConfigMethod::kUnknown;
   std::unique_ptr<IPConfig::Properties> ipv4_config_properties_;
-  IPConfig::Method ipv6_config_method_ = IPConfig::kMethodUnknown;
+  IPConfigMethod ipv6_config_method_ = IPConfigMethod::kUnknown;
   std::unique_ptr<IPConfig::Properties> ipv6_config_properties_;
+
+  // Properties that were used to create the bearer, just the ones we need
+  // in the already created bearer
+  std::string apn_;
+  std::vector<ApnList::ApnType> apn_types_;
 
   base::WeakPtrFactory<CellularBearer> weak_ptr_factory_{this};
 };

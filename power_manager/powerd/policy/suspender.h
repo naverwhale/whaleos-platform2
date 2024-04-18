@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,13 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <base/compiler_specific.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
@@ -22,6 +22,7 @@
 #include <dbus/message.h>
 
 #include "power_manager/common/power_constants.h"
+#include "power_manager/powerd/policy/adaptive_charging_controller.h"
 #include "power_manager/powerd/policy/suspend_delay_observer.h"
 #include "power_manager/powerd/system/display/display_watcher_observer.h"
 #include "power_manager/powerd/system/suspend_configurator.h"
@@ -44,6 +45,7 @@ namespace policy {
 
 class ShutdownFromSuspendInterface;
 class SuspendDelayController;
+class SuspendInternalDelay;
 
 // Suspender is responsible for suspending the system.
 //
@@ -107,7 +109,7 @@ class Suspender : public SuspendDelayObserver,
       CANCELED,
     };
 
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
 
     // Returns a initial value for suspend-related IDs that's likely (but not
     // guaranteed) to yield successive IDs that are unique across all of the
@@ -140,8 +142,16 @@ class Suspender : public SuspendDelayObserver,
 
     // Performs any work that needs to happen before other processes are
     // informed that the system is about to suspend, including turning off the
-    // backlight and muting audio. Called by StartRequest().
+    // backlight. Called by StartRequest().
     virtual void PrepareToSuspend() = 0;
+
+    // Suspend audio: it needs to happen after other processes have announced
+    // suspend readiness. It can't be done earlier since VMs using virtio-snd
+    // requires active CRAS to properly suspend themselves. Called by Suspend().
+    virtual void SuspendAudio() = 0;
+
+    // Undoes SuspendAudio
+    virtual void ResumeAudio() = 0;
 
     // Synchronously runs the powerd_suspend script to suspend the system for
     // |duration|. If |wakeup_count_valid| is true, passes |wakeup_count| to the
@@ -155,7 +165,8 @@ class Suspender : public SuspendDelayObserver,
     // Undoes the preparations performed by PrepareToSuspend(). Called by
     // FinishRequest().
     virtual void UndoPrepareToSuspend(bool success,
-                                      int num_suspend_attempts) = 0;
+                                      int num_suspend_attempts,
+                                      bool hibernated) = 0;
 
     // Generates and reports metrics for wakeups in dark resume.
     virtual void GenerateDarkResumeMetrics(
@@ -163,11 +174,19 @@ class Suspender : public SuspendDelayObserver,
         base::TimeDelta suspend_duration_) = 0;
 
     // Shuts the system down in response to repeated failed suspend attempts.
-    virtual void ShutDownForFailedSuspend() = 0;
+    virtual void ShutDownForFailedSuspend(bool hibernate) = 0;
 
     // Shuts the system down in response to the ShutdownFromSuspend determining
     // the system should shut down.
     virtual void ShutDownFromSuspend() = 0;
+
+    // Apply system quirks before attempting to suspend. Quirks should focus on
+    // workarounds for devices that don't behave correctly because of how they
+    // handle wakeup_events.
+    virtual void ApplyQuirksBeforeSuspend() = 0;
+
+    // Unapply system quirks after suspend.
+    virtual void UnapplyQuirksAfterSuspend() = 0;
   };
 
   // Helper class providing functionality needed by tests.
@@ -200,7 +219,6 @@ class Suspender : public SuspendDelayObserver,
 
    private:
     Suspender* suspender_;  // weak
-
   };
 
   Suspender();
@@ -215,6 +233,7 @@ class Suspender : public SuspendDelayObserver,
             system::DisplayWatcherInterface* display_watcher,
             system::WakeupSourceIdentifierInterface* wakeup_source_identifier,
             policy::ShutdownFromSuspendInterface* shutdown_from_suspend,
+            AdaptiveChargingControllerInterface* adaptive_charging_controller,
             PrefsInterface* prefs,
             system::SuspendConfiguratorInterface* suspend_configurator);
 
@@ -222,20 +241,12 @@ class Suspender : public SuspendDelayObserver,
   // asynchronously. The system will automatically resume after |duration| if it
   // is non-zero.
   void RequestSuspend(SuspendImminent::Reason reason,
+                      std::optional<uint64_t> wakeup_count,
                       base::TimeDelta duration,
                       SuspendFlavor flavor);
 
-  // Like RequestSuspend(), but aborts the suspend attempt immediately if
-  // the current wakeup count reported by the kernel exceeds
-  // |wakeup_count|. Autotests can pass an external wakeup count to ensure
-  // that machines in the test cluster don't sleep indefinitely (see
-  // http://crbug.com/218175).
-  // TODO(chromeos-power): Delete this and add a std::optional<uint64_t> arg to
-  // RequestSuspend.
-  void RequestSuspendWithExternalWakeupCount(SuspendImminent::Reason reason,
-                                             uint64_t wakeup_count,
-                                             base::TimeDelta duration,
-                                             SuspendFlavor flavor);
+  // Aborts an imminent resume from hibernation.
+  void AbortResumeFromHibernate();
 
   // Handles events that may abort in-progress suspend attempts.
   void HandleSleepButtonPressed();
@@ -259,6 +270,17 @@ class Suspender : public SuspendDelayObserver,
   void OnDisplaysChanged(
       const std::vector<system::DisplayInfo>& displays) override;
 
+  // Add |delay| to any of the SuspendDelayControllers owned by the Suspender.
+  // Returns true if |delay| is successfully added to all
+  // SuspendDelayControllers. If |delay| fails to be added to any
+  // SuspendDelayController, it is removed from all of them and false is
+  // returned.
+  bool AddSuspendInternalDelay(const SuspendInternalDelay* delay);
+
+  // Remove |delay| to any of the SuspendDelayControllers owned by the
+  // Suspender.
+  void RemoveSuspendInternalDelay(const SuspendInternalDelay* delay);
+
  private:
   // States that Suspender can be in while the event loop is running.
   enum class State {
@@ -272,11 +294,14 @@ class Suspender : public SuspendDelayObserver,
     // powerd is waiting to resuspend after waking into a dark resume.
     WAITING_FOR_DARK_SUSPEND_DELAYS,
     // powerd is waiting to resuspend after a failed suspend attempt from normal
-    // or dark resume i.e.|dark_resume_->InDarkResume()| can be true in thi
+    // or dark resume i.e.|dark_resume_->InDarkResume()| can be true in this
     // state.
     WAITING_TO_RETRY_SUSPEND,
     // The system is shutting down. Suspend requests are ignored.
     SHUTTING_DOWN,
+    // The system is braced for an imminent hibernate resume, which if
+    // successful transfers execution to an entirely new world.
+    RESUMING_FROM_HIBERNATE,
   };
 
   enum class Event {
@@ -298,6 +323,8 @@ class Suspender : public SuspendDelayObserver,
     DISPLAY_MODE_CHANGE,
     // New display observed by powerd.
     NEW_DISPLAY,
+    // A request aborting resume from hibernation was received.
+    ABORT_RESUME_FROM_HIBERNATE,
   };
 
   // Converts |event| to a string.
@@ -339,25 +366,32 @@ class Suspender : public SuspendDelayObserver,
   // Event::WAKE_NOTIFICATION. Returns new value for |state_|.
   State HandleWakeEventInSuspend(Event event);
 
+  // Helper method called by HandleEvent when in
+  // State::RESUMING_FROM_HIBERNATE.
+  void HandleEventInResumingFromHibernate(Event event);
+
   // Starts a new suspend request, notifying clients that have registered delays
   // that the system is about to suspend.
   void StartRequest();
 
   // Completes the current suspend request, undoing any work performed by
   // StartRequest().
-  void FinishRequest(bool success, SuspendDone::WakeupType wakeup_type);
+  void FinishRequest(bool success,
+                     SuspendDone::WakeupType wakeup_type,
+                     bool hibernated);
 
   // Actually performs a suspend attempt and waits for the system to resume,
   // returning a new value for |state_|.
   State Suspend();
 
   // Helper methods called by Suspend() to handle various suspend results.
-  State HandleNormalResume(Delegate::SuspendResult result);
-  State HandleDarkResume(Delegate::SuspendResult result);
+  State HandleNormalResume(Delegate::SuspendResult result, bool from_hibernate);
+  State HandleDarkResume(Delegate::SuspendResult result, bool from_hibernate);
 
   // Helper method called by HandleNormalResume() or HandleDarkResume() in
-  // response to a failed or canceled suspend attempt.
-  State HandleUnsuccessfulSuspend(Delegate::SuspendResult result);
+  // response to a failed or canceled suspend or hibernation attempt.
+  State HandleUnsuccessfulSuspend(Delegate::SuspendResult result,
+                                  bool hibernate);
 
   // Starts |resuspend_timer_| to send EVENT_READY_TO_RESUSPEND after |delay|.
   void ScheduleResuspend(const base::TimeDelta& delay);
@@ -365,11 +399,16 @@ class Suspender : public SuspendDelayObserver,
   // Emits D-Bus signal announcing the end of a suspend request.
   void EmitSuspendDoneSignal(int suspend_request_id,
                              const base::TimeDelta& suspend_duration,
-                             SuspendDone::WakeupType wakeup_type);
+                             SuspendDone::WakeupType wakeup_type,
+                             bool hibernated);
 
   // Emits a D-Bus signal announcing that the system will soon resuspend from
   // dark resume. |dark_resume_id_| is used as the request ID.
   void EmitDarkSuspendImminentSignal();
+
+  // Emits a D-Bus signal indicating that suspend callbacks have been processed
+  // and the system is fully ready to resume from hibernation.
+  void EmitHibernateResumeReadySignal(int suspend_request_id);
 
   Delegate* delegate_ = nullptr;                          // weak
   system::DBusWrapperInterface* dbus_wrapper_ = nullptr;  // weak
@@ -378,8 +417,12 @@ class Suspender : public SuspendDelayObserver,
       nullptr;  // weak
   policy::ShutdownFromSuspendInterface* shutdown_from_suspend_ =
       nullptr;  // weak
+  AdaptiveChargingControllerInterface* adaptive_charging_controller_ =
+      nullptr;  // weak
 
   PrefsInterface* prefs_ = nullptr;  // weak
+  system::SuspendConfiguratorInterface* suspend_configurator_ =
+      nullptr;  // weak
   std::unique_ptr<Clock> clock_;
   std::unique_ptr<SuspendDelayController> suspend_delay_controller_;
   std::unique_ptr<SuspendDelayController> dark_suspend_delay_controller_;
@@ -443,7 +486,7 @@ class Suspender : public SuspendDelayObserver,
   int initial_num_attempts_ = 0;
 
   // The boot time at which the system entered dark resume. Set by
-  // HandleDarkResume() when it sees a sucessful dark resume.
+  // HandleDarkResume() when it sees a successful dark resume.
   base::TimeTicks dark_resume_start_time_;
 
   // Information about each wake that occurred during dark resume. This vector
@@ -467,9 +510,6 @@ class Suspender : public SuspendDelayObserver,
 
   // Whether the system is presenting or not.
   DisplayMode display_mode_ = DisplayMode::NORMAL;
-
-  // Whether or not the system supports hibernate.
-  bool hibernate_available_;
 
   bool sleep_button_pressed_ = false;
 

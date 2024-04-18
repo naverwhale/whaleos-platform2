@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,6 +23,10 @@ class MockSessionManager : public SessionManagerInterface {
   MOCK_METHOD(void, Finalize, (), (override));
   MOCK_METHOD(bool, StartDBusService, (), (override));
   MOCK_METHOD(std::vector<std::string>, GetFeatureFlags, (), (override));
+  MOCK_METHOD(std::vector<std::string>,
+              GetExtraCommandLineArguments,
+              (),
+              (override));
   MOCK_METHOD(void, AnnounceSessionStoppingIfNeeded, (), (override));
   MOCK_METHOD(void, AnnounceSessionStopped, (), (override));
   MOCK_METHOD(bool, ShouldEndSession, (std::string*), (override));

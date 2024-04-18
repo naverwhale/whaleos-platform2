@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include "cryptohome/cleanup/disk_cleanup.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include <gmock/gmock.h>
@@ -19,23 +20,29 @@ class MockDiskCleanup : public DiskCleanup {
   MockDiskCleanup();
   virtual ~MockDiskCleanup();
 
-  MOCK_METHOD(base::Optional<int64_t>,
+  MOCK_METHOD(std::optional<int64_t>,
               AmountOfFreeDiskSpace,
               (),
               (override, const));
   MOCK_METHOD(DiskCleanup::FreeSpaceState,
               GetFreeDiskSpaceState,
-              (base::Optional<int64_t>),
+              (std::optional<int64_t>),
               (override, const));
   MOCK_METHOD(DiskCleanup::FreeSpaceState,
               GetFreeDiskSpaceState,
               (),
               (override, const));
+  MOCK_METHOD(void, CheckNumUserHomeDirectories, (), (override, const));
   MOCK_METHOD(bool, HasTargetFreeSpace, (), (override, const));
   MOCK_METHOD(bool, IsFreeableDiskSpaceAvailable, (), (override));
   MOCK_METHOD(bool, FreeDiskSpace, (), (override));
+  MOCK_METHOD(bool,
+              FreeDiskSpaceDuringLogin,
+              (const ObfuscatedUsername&),
+              (override));
   MOCK_METHOD(void, set_cleanup_threshold, (uint64_t), (override));
   MOCK_METHOD(void, set_aggressive_cleanup_threshold, (uint64_t), (override));
+  MOCK_METHOD(void, set_critical_cleanup_threshold, (uint64_t), (override));
   MOCK_METHOD(void, set_target_free_space, (uint64_t), (override));
 };
 

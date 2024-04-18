@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,7 +26,7 @@ RuleEngine::RuleEngine(const std::string& udev_run_path,
   CHECK(udev_) << "Could not create udev context, is sysfs mounted?";
 }
 
-RuleEngine::~RuleEngine() {}
+RuleEngine::~RuleEngine() = default;
 
 void RuleEngine::AddRule(Rule* rule) {
   CHECK(rule) << "Cannot add NULL as a rule.";

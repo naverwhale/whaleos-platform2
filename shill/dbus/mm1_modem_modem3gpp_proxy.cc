@@ -1,13 +1,16 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dbus/mm1_modem_modem3gpp_proxy.h"
 
-#include "shill/cellular/cellular_error.h"
-#include "shill/logging.h"
+#include <utility>
 
 #include <base/logging.h>
+#include <base/time/time.h>
+
+#include "shill/cellular/cellular_error.h"
+#include "shill/logging.h"
 
 namespace shill {
 
@@ -17,6 +20,12 @@ static std::string ObjectID(const dbus::ObjectPath* p) {
   return p->value();
 }
 }  // namespace Logging
+
+namespace {
+constexpr base::TimeDelta kScanTimeout = base::Minutes(2);
+constexpr base::TimeDelta kSetInitialEpsBearerTimeout = base::Seconds(45);
+constexpr base::TimeDelta kRegisterTimeout = base::Seconds(90);
+}  // namespace
 
 namespace mm1 {
 
@@ -29,61 +38,63 @@ ModemModem3gppProxy::ModemModem3gppProxy(const scoped_refptr<dbus::Bus>& bus,
 ModemModem3gppProxy::~ModemModem3gppProxy() = default;
 
 void ModemModem3gppProxy::Register(const std::string& operator_id,
-                                   Error* error,
-                                   const ResultCallback& callback,
-                                   int timeout) {
+                                   ResultCallback callback) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__ << ": " << operator_id;
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
   proxy_->RegisterAsync(operator_id,
-                        base::Bind(&ModemModem3gppProxy::OnRegisterSuccess,
-                                   weak_factory_.GetWeakPtr(), callback),
-                        base::Bind(&ModemModem3gppProxy::OnRegisterFailure,
-                                   weak_factory_.GetWeakPtr(), callback),
-                        timeout);
+                        base::BindOnce(&ModemModem3gppProxy::OnRegisterSuccess,
+                                       weak_factory_.GetWeakPtr(),
+                                       std::move(split_callback.first)),
+                        base::BindOnce(&ModemModem3gppProxy::OnRegisterFailure,
+                                       weak_factory_.GetWeakPtr(),
+                                       std::move(split_callback.second)),
+                        kRegisterTimeout.InMilliseconds());
 }
 
-void ModemModem3gppProxy::Scan(Error* error,
-                               const KeyValueStoresCallback& callback,
-                               int timeout) {
+void ModemModem3gppProxy::Scan(KeyValueStoresCallback callback) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  proxy_->ScanAsync(base::Bind(&ModemModem3gppProxy::OnScanSuccess,
-                               weak_factory_.GetWeakPtr(), callback),
-                    base::Bind(&ModemModem3gppProxy::OnScanFailure,
-                               weak_factory_.GetWeakPtr(), callback),
-                    timeout);
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
+  proxy_->ScanAsync(base::BindOnce(&ModemModem3gppProxy::OnScanSuccess,
+                                   weak_factory_.GetWeakPtr(),
+                                   std::move(split_callback.first)),
+                    base::BindOnce(&ModemModem3gppProxy::OnScanFailure,
+                                   weak_factory_.GetWeakPtr(),
+                                   std::move(split_callback.second)),
+                    kScanTimeout.InMilliseconds());
 }
 
 void ModemModem3gppProxy::SetInitialEpsBearerSettings(
-    const KeyValueStore& properties,
-    Error* error,
-    const ResultCallback& callback,
-    int timeout) {
+    const KeyValueStore& properties, ResultCallback callback) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   brillo::VariantDictionary properties_dict =
       KeyValueStore::ConvertToVariantDictionary(properties);
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
   proxy_->SetInitialEpsBearerSettingsAsync(
       properties_dict,
-      base::Bind(&ModemModem3gppProxy::OnSetInitialEpsBearerSettingsSuccess,
-                 weak_factory_.GetWeakPtr(), callback),
-      base::Bind(&ModemModem3gppProxy::OnSetInitialEpsBearerSettingsFailure,
-                 weak_factory_.GetWeakPtr(), callback),
-      timeout);
+      base::BindOnce(&ModemModem3gppProxy::OnSetInitialEpsBearerSettingsSuccess,
+                     weak_factory_.GetWeakPtr(),
+                     std::move(split_callback.first)),
+      base::BindOnce(&ModemModem3gppProxy::OnSetInitialEpsBearerSettingsFailure,
+                     weak_factory_.GetWeakPtr(),
+                     std::move(split_callback.second)),
+      kSetInitialEpsBearerTimeout.InMilliseconds());
 }
 
-void ModemModem3gppProxy::OnRegisterSuccess(const ResultCallback& callback) {
+void ModemModem3gppProxy::OnRegisterSuccess(ResultCallback callback) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  callback.Run(Error());
+  std::move(callback).Run(Error());
 }
 
-void ModemModem3gppProxy::OnRegisterFailure(const ResultCallback& callback,
+void ModemModem3gppProxy::OnRegisterFailure(ResultCallback callback,
                                             brillo::Error* dbus_error) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   Error error;
   CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(error);
+  std::move(callback).Run(error);
 }
 
 void ModemModem3gppProxy::OnScanSuccess(
-    const KeyValueStoresCallback& callback,
+    KeyValueStoresCallback callback,
     const std::vector<brillo::VariantDictionary>& results) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   std::vector<KeyValueStore> result_stores;
@@ -92,29 +103,29 @@ void ModemModem3gppProxy::OnScanSuccess(
         KeyValueStore::ConvertFromVariantDictionary(result);
     result_stores.push_back(result_store);
   }
-  callback.Run(result_stores, Error());
+  std::move(callback).Run(result_stores, Error());
 }
 
-void ModemModem3gppProxy::OnScanFailure(const KeyValueStoresCallback& callback,
+void ModemModem3gppProxy::OnScanFailure(KeyValueStoresCallback callback,
                                         brillo::Error* dbus_error) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   Error error;
   CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(std::vector<KeyValueStore>(), error);
+  std::move(callback).Run(std::vector<KeyValueStore>(), error);
 }
 
 void ModemModem3gppProxy::OnSetInitialEpsBearerSettingsSuccess(
-    const ResultCallback& callback) {
+    ResultCallback callback) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  callback.Run(Error());
+  std::move(callback).Run(Error());
 }
 
 void ModemModem3gppProxy::OnSetInitialEpsBearerSettingsFailure(
-    const ResultCallback& callback, brillo::Error* dbus_error) {
+    ResultCallback callback, brillo::Error* dbus_error) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   Error error;
   CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(error);
+  std::move(callback).Run(error);
 }
 
 }  // namespace mm1

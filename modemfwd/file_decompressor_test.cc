@@ -1,9 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "modemfwd/file_decompressor.h"
 
+#include <iterator>
 #include <memory>
 #include <string>
 
@@ -11,7 +12,6 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <gtest/gtest.h>
 
 #include "modemfwd/scoped_temp_file.h"
@@ -80,8 +80,8 @@ TEST_F(FileDecompressorTest, Decompress1MOfZeroes) {
 
   ASSERT_EQ(base::WriteFile(in_file_->path(),
                             reinterpret_cast<const char*>(kCompressedContent),
-                            base::size(kCompressedContent)),
-            base::size(kCompressedContent));
+                            std::size(kCompressedContent)),
+            std::size(kCompressedContent));
   EXPECT_TRUE(DecompressXzFile(in_file_->path(), out_file_->path()));
 
   std::string content;

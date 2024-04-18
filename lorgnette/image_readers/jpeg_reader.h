@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <stdio.h>  // Needed by jpeglib.h.
 
 #include <memory>
+#include <optional>
 
 #include <jerror.h>
 #include <jpeglib.h>
@@ -23,18 +24,18 @@ class JpegReader final : public ImageReader {
   static std::unique_ptr<ImageReader> Create(
       brillo::ErrorPtr* error,
       const ScanParameters& params,
-      const base::Optional<int>& resolution,
-      base::ScopedFILE out_file);
+      const std::optional<int>& resolution,
+      FILE* out_file);
   ~JpegReader();
 
   bool ReadRow(brillo::ErrorPtr* error, uint8_t* data) override;
   bool Finalize(brillo::ErrorPtr* error) override;
 
  private:
-  JpegReader(const ScanParameters& params, base::ScopedFILE out_file);
+  JpegReader(const ScanParameters& params, FILE* out_file);
   bool ValidateParams(brillo::ErrorPtr* error) override;
   bool Initialize(brillo::ErrorPtr* error,
-                  const base::Optional<int>& resolution) override;
+                  const std::optional<int>& resolution) override;
 
   // Whether or not the libjpeg objects owned by JpegReader have been
   // initialized.

@@ -1,14 +1,16 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/wifi/wifi.h"
 
+#include <gmock/gmock.h>
 #include <linux/if.h>
 #include <linux/netlink.h>  // Needs typedefs from sys/socket.h.
 #include <netinet/ether.h>
 #include <sys/socket.h>
 
+#include <iterator>
 #include <memory>
 #include <set>
 #include <string>
@@ -18,27 +20,23 @@
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/memory/ref_counted.h>
-#include <base/stl_util.h>
+#include <base/time/time.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <chromeos/dbus/service_constants.h>
-#include <patchpanel/proto_bindings/patchpanel_service.pb.h>
+#include <chromeos/patchpanel/dbus/client.h>
+#include <crypto/random.h>
+#include <net-base/mock_rtnl_handler.h>
 
-#include "shill/dhcp/mock_dhcp_config.h"
-#include "shill/dhcp/mock_dhcp_provider.h"
+#include "shill/dbus/dbus_control.h"
 #include "shill/error.h"
 #include "shill/event_dispatcher.h"
-#include "shill/geolocation_info.h"
-#include "shill/ip_address_store.h"
-#include "shill/key_value_store.h"
-#include "shill/logging.h"
 #include "shill/manager.h"
+#include "shill/metrics.h"
 #include "shill/mock_adaptors.h"
-#include "shill/mock_connection.h"
 #include "shill/mock_control.h"
-#include "shill/mock_device.h"
 #include "shill/mock_device_info.h"
 #include "shill/mock_eap_credentials.h"
 #include "shill/mock_event_dispatcher.h"
@@ -47,17 +45,16 @@
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
 #include "shill/mock_power_manager.h"
-#include "shill/mock_profile.h"
+#include "shill/mock_time.h"
 #include "shill/net/ieee80211.h"
-#include "shill/net/ip_address.h"
 #include "shill/net/mock_netlink_manager.h"
-#include "shill/net/mock_rtnl_handler.h"
-#include "shill/net/mock_time.h"
 #include "shill/net/netlink_message_matchers.h"
 #include "shill/net/netlink_packet.h"
-#include "shill/net/nl80211_attribute.h"
 #include "shill/net/nl80211_message.h"
-#include "shill/property_store_test.h"
+#include "shill/network/mock_network.h"
+#include "shill/network/network.h"
+#include "shill/store/key_value_store.h"
+#include "shill/store/property_store_test.h"
 #include "shill/supplicant/mock_supplicant_bss_proxy.h"
 #include "shill/supplicant/mock_supplicant_eap_state_handler.h"
 #include "shill/supplicant/mock_supplicant_interface_proxy.h"
@@ -68,26 +65,34 @@
 #include "shill/technology.h"
 #include "shill/test_event_dispatcher.h"
 #include "shill/testing.h"
+#include "shill/wifi/mock_passpoint_credentials.h"
 #include "shill/wifi/mock_wake_on_wifi.h"
+#include "shill/wifi/mock_wifi_link_statistics.h"
 #include "shill/wifi/mock_wifi_provider.h"
 #include "shill/wifi/mock_wifi_service.h"
+#include "shill/wifi/passpoint_credentials.h"
 #include "shill/wifi/wake_on_wifi.h"
 #include "shill/wifi/wifi_endpoint.h"
+#include "shill/wifi/wifi_link_statistics.h"
+#include "shill/wifi/wifi_phy.h"
 #include "shill/wifi/wifi_service.h"
 
 using ::testing::_;
+using ::testing::AllOf;
 using ::testing::AnyNumber;
 using ::testing::AtLeast;
 using ::testing::ByMove;
 using ::testing::ContainsRegex;
 using ::testing::DoAll;
 using ::testing::EndsWith;
+using ::testing::Field;
 using ::testing::HasSubstr;
 using ::testing::InSequence;
 using ::testing::Invoke;
 using ::testing::InvokeWithoutArgs;
 using ::testing::Mock;
 using ::testing::NiceMock;
+using ::testing::Optional;
 using ::testing::Ref;
 using ::testing::Return;
 using ::testing::ReturnRef;
@@ -95,19 +100,20 @@ using ::testing::SetArgPointee;
 using ::testing::StrEq;
 using ::testing::StrictMock;
 using ::testing::Test;
+using ::testing::WithArg;
 
 namespace shill {
 
 namespace {
 
 const uint16_t kNl80211FamilyId = 0x13;
-const uint16_t kRandomScanFrequency1 = 5600;
-const uint16_t kRandomScanFrequency2 = 5560;
-const uint16_t kRandomScanFrequency3 = 2422;
 const int kInterfaceIndex = 1234;
+const uint32_t kPhyIndex = 5678;
+const std::array<uint8_t, ETH_ALEN> kPermDeviceAddress{0x01, 0x23, 0x45,
+                                                       0x67, 0x89, 0xab};
 
 // Bytes representing a NL80211_CMD_NEW_WIPHY message reporting the WiFi
-// capabilities of a NIC with wiphy index |kNewWiphyNlMsg_WiphyIndex| which
+// capabilities of a NIC with wiphy index |kNewWiphyNlMsg_PhyIndex| which
 // supports operating bands with the frequencies specified in
 // |kNewWiphyNlMsg_UniqueFrequencies|.
 const uint8_t kNewWiphyNlMsg[] = {
@@ -376,15 +382,11 @@ const uint8_t kNewWiphyNlMsg[] = {
     0x1e, 0x00, 0x94, 0x00, 0x42, 0x08, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-const uint32_t kNewWiphyNlMsg_WiphyIndex = 2;
+const uint32_t kNewWiphyNlMsg_PhyIndex = 2;
+const uint32_t kNewWiphyNlMsg_ChangedPhyIndex = 3;
 const int kNewWiphyNlMsg_Nl80211AttrWiphyOffset = 4;
-const uint16_t kNewWiphyNlMsg_UniqueFrequencies[] = {
-    2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457,
-    2462, 2467, 2472, 2484, 5180, 5200, 5220, 5240, 5260, 5280,
-    5300, 5320, 5500, 5520, 5540, 5560, 5580, 5600, 5620, 5640,
-    5660, 5680, 5700, 5745, 5765, 5785, 5805, 5825};
 
-const uint32_t kScanTriggerMsgWiphyIndex = 0;
+const uint32_t kScanTriggerMsgPhyIndex = 0;
 const uint8_t kActiveScanTriggerNlMsg[] = {
     0x44, 0x01, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x21, 0x01, 0x00, 0x00, 0x08, 0x00, 0x01, 0x00,
@@ -443,6 +445,19 @@ const uint8_t kPassiveScanTriggerNlMsg[] = {
     0x99, 0x16, 0x00, 0x00, 0x08, 0x00, 0x1f, 0x00, 0xad, 0x16, 0x00, 0x00,
     0x08, 0x00, 0x20, 0x00, 0xc1, 0x16, 0x00, 0x00};
 
+void AddVendorIE(uint32_t oui,
+                 uint8_t vendor_type,
+                 const std::vector<uint8_t>& data,
+                 std::vector<uint8_t>* ies) {
+  ies->push_back(IEEE_80211::kElemIdVendor);  // type
+  ies->push_back(4 + data.size());            // length
+  ies->push_back((oui >> 16) & 0xff);         // OUI MSByte
+  ies->push_back((oui >> 8) & 0xff);          // OUI middle octet
+  ies->push_back(oui & 0xff);                 // OUI LSByte
+  ies->push_back(vendor_type);                // OUI Type
+  ies->insert(ies->end(), data.begin(), data.end());
+}
+
 }  // namespace
 
 class WiFiPropertyTest : public PropertyStoreTest {
@@ -452,6 +467,7 @@ class WiFiPropertyTest : public PropertyStoreTest {
                          "wifi",
                          "",
                          kInterfaceIndex,
+                         kPhyIndex,
                          std::make_unique<MockWakeOnWiFi>())) {}
   ~WiFiPropertyTest() override = default;
 
@@ -469,36 +485,41 @@ TEST_F(WiFiPropertyTest, Contains) {
 TEST_F(WiFiPropertyTest, SetProperty) {
   {
     Error error;
-    EXPECT_TRUE(device_->mutable_store()->SetAnyProperty(
-        kBgscanSignalThresholdProperty, PropertyStoreTest::kInt32V, &error));
+    device_->mutable_store()->SetAnyProperty(
+        kBgscanSignalThresholdProperty, PropertyStoreTest::kInt32V, &error);
+    EXPECT_TRUE(error.IsSuccess());
   }
   {
     Error error;
-    EXPECT_TRUE(device_->mutable_store()->SetAnyProperty(
-        kScanIntervalProperty, PropertyStoreTest::kUint16V, &error));
+    device_->mutable_store()->SetAnyProperty(
+        kScanIntervalProperty, PropertyStoreTest::kUint16V, &error);
+    EXPECT_TRUE(error.IsSuccess());
   }
   // Ensure that an attempt to write a R/O property returns InvalidArgs error.
   {
     Error error;
-    EXPECT_FALSE(device_->mutable_store()->SetAnyProperty(
-        kScanningProperty, PropertyStoreTest::kBoolV, &error));
+    device_->mutable_store()->SetAnyProperty(kScanningProperty,
+                                             PropertyStoreTest::kBoolV, &error);
     ASSERT_TRUE(error.IsFailure());
     EXPECT_EQ(Error::kInvalidArguments, error.type());
   }
 
   {
     Error error;
-    EXPECT_TRUE(device_->mutable_store()->SetAnyProperty(
+    device_->mutable_store()->SetAnyProperty(
         kBgscanMethodProperty,
         brillo::Any(std::string(WPASupplicant::kNetworkBgscanMethodSimple)),
-        &error));
+        &error);
+    EXPECT_TRUE(error.IsSuccess());
   }
 
   {
     Error error;
-    EXPECT_FALSE(device_->mutable_store()->SetAnyProperty(
+    device_->mutable_store()->SetAnyProperty(
         kBgscanMethodProperty,
-        brillo::Any(std::string("not a real scan method")), &error));
+        brillo::Any(std::string("not a real scan method")), &error);
+    ASSERT_TRUE(error.IsFailure());
+    EXPECT_EQ(Error::kInvalidArguments, error.type());
   }
 }
 
@@ -515,10 +536,11 @@ TEST_F(WiFiPropertyTest, BgscanMethodProperty) {
   EXPECT_EQ(WPASupplicant::kNetworkBgscanMethodSimple, method);
 
   Error error;
-  EXPECT_TRUE(device_->mutable_store()->SetAnyProperty(
+  device_->mutable_store()->SetAnyProperty(
       kBgscanMethodProperty,
       brillo::Any(std::string(WPASupplicant::kNetworkBgscanMethodLearn)),
-      &error));
+      &error);
+  EXPECT_TRUE(error.IsSuccess());
   EXPECT_EQ(WPASupplicant::kNetworkBgscanMethodLearn, device_->bgscan_method_);
   EXPECT_TRUE(device_->store().GetStringProperty(kBgscanMethodProperty, &method,
                                                  &unused_error));
@@ -530,6 +552,30 @@ TEST_F(WiFiPropertyTest, BgscanMethodProperty) {
                                                  &unused_error));
   EXPECT_EQ(WiFi::kDefaultBgscanMethod, method);
   EXPECT_TRUE(device_->bgscan_method_.empty());
+}
+
+TEST_F(WiFiPropertyTest, PasspointInterworkingProperty) {
+  Error unused_error;
+  device_->mutable_store()->SetBoolProperty(
+      kPasspointInterworkingSelectEnabledProperty, false, &unused_error);
+
+  bool enabled;
+  EXPECT_TRUE(device_->store().GetBoolProperty(
+      kPasspointInterworkingSelectEnabledProperty, &enabled, &unused_error));
+  EXPECT_FALSE(enabled);
+
+  Error error;
+  device_->mutable_store()->SetAnyProperty(
+      kPasspointInterworkingSelectEnabledProperty, brillo::Any(true), &error);
+  EXPECT_TRUE(error.IsSuccess());
+  // We expect the selection to be enabled and a selection to be requested after
+  // next scan.
+  EXPECT_TRUE(device_->interworking_select_enabled_);
+  EXPECT_TRUE(device_->need_interworking_select_);
+
+  EXPECT_TRUE(device_->store().GetBoolProperty(
+      kPasspointInterworkingSelectEnabledProperty, &enabled, &unused_error));
+  EXPECT_TRUE(enabled);
 }
 
 MATCHER_P(EndpointMatch, endpoint, "") {
@@ -544,21 +590,22 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
       : event_dispatcher_(std::move(dispatcher)),
         manager_(&control_interface_, event_dispatcher_.get(), &metrics_),
         power_manager_(new MockPowerManager(control_interface())),
-        device_info_(&manager_),
-        wifi_(new WiFi(&manager_,
-                       kDeviceName,
-                       kDeviceAddress,
-                       kInterfaceIndex,
-                       std::make_unique<MockWakeOnWiFi>())),
+        wifi_provider_(&manager_),
         bss_counter_(0),
         supplicant_process_proxy_(new NiceMock<MockSupplicantProcessProxy>()),
         supplicant_bss_proxy_(new NiceMock<MockSupplicantBSSProxy>()),
-        dhcp_config_(new MockDHCPConfig(&control_interface_, kDeviceName)),
+        dhcp_hostname_("chromeos"),
         adaptor_(new DeviceMockAdaptor()),
         eap_state_handler_(new NiceMock<MockSupplicantEAPStateHandler>()),
+        wifi_link_statistics_(new NiceMock<MockWiFiLinkStatistics>()),
         supplicant_interface_proxy_(
             new NiceMock<MockSupplicantInterfaceProxy>()),
         supplicant_network_proxy_(new NiceMock<MockSupplicantNetworkProxy>()) {
+    ON_CALL(*device_info(), GetPermAddress(kInterfaceIndex))
+        .WillByDefault(
+            Return(net_base::MacAddress::CreateFromBytes(kPermDeviceAddress)));
+    wifi_ = new WiFi(&manager_, kDeviceName, kDeviceAddress, kInterfaceIndex,
+                     kPhyIndex, std::make_unique<MockWakeOnWiFi>());
     manager_.supplicant_manager()->set_proxy(supplicant_process_proxy_);
     ON_CALL(*supplicant_process_proxy_, CreateInterface(_, _))
         .WillByDefault(DoAll(SetArgPointee<1>(RpcIdentifier("/default/path")),
@@ -581,9 +628,6 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     ON_CALL(*supplicant_network_proxy_, SetEnabled(_))
         .WillByDefault(Return(true));
 
-    ON_CALL(dhcp_provider_, CreateIPv4Config(_, _, _, _))
-        .WillByDefault(Return(dhcp_config_));
-    ON_CALL(*dhcp_config_, RequestIP()).WillByDefault(Return(true));
     ON_CALL(*manager(), IsSuspending()).WillByDefault(Return(false));
 
     ON_CALL(control_interface_, CreateSupplicantInterfaceProxy(_, _))
@@ -596,6 +640,11 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
             Invoke(this, &WiFiObjectTest::CreateSupplicantNetworkProxy));
     Nl80211Message::SetMessageType(kNl80211FamilyId);
 
+    auto network = std::make_unique<MockNetwork>(kInterfaceIndex, kDeviceName,
+                                                 Technology::kWiFi);
+    network_ = network.get();
+    wifi_->set_network_for_testing(std::move(network));
+
     // Transfers ownership.
     wifi_->eap_state_handler_.reset(eap_state_handler_);
 
@@ -603,14 +652,9 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     wifi_->time_ = &time_;
     wifi_->netlink_manager_ = &netlink_manager_;
     wifi_->adaptor_.reset(adaptor_);  // Transfers ownership.
+    wifi_->wifi_link_statistics_.reset(wifi_link_statistics_);
 
     manager_.set_power_manager(power_manager_);  // Transfers ownership.
-
-    // The following is only useful when a real |ScanSession| is used; it is
-    // ignored by |MockScanSession|.
-    wifi_->all_scan_frequencies_.insert(kRandomScanFrequency1);
-    wifi_->all_scan_frequencies_.insert(kRandomScanFrequency2);
-    wifi_->all_scan_frequencies_.insert(kRandomScanFrequency3);
 
     wake_on_wifi_ = static_cast<MockWakeOnWiFi*>(wifi_->wake_on_wifi_.get());
   }
@@ -620,9 +664,12 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     ScopeLogger::GetInstance()->EnableScopesByName("wifi");
     ScopeLogger::GetInstance()->set_verbose_level(3);
     static_cast<Device*>(wifi_.get())->rtnl_handler_ = &rtnl_handler_;
-    wifi_->set_dhcp_provider(&dhcp_provider_);
-    ON_CALL(manager_, device_info()).WillByDefault(Return(&device_info_));
     EXPECT_CALL(manager_, UpdateEnabledTechnologies()).Times(AnyNumber());
+    EXPECT_CALL(manager_, CreateDefaultDHCPOption())
+        .WillRepeatedly(Return(DHCPProvider::Options{
+            .use_arp_gateway = true,
+            .hostname = dhcp_hostname_,
+        }));
     EXPECT_CALL(*supplicant_bss_proxy_, Die()).Times(AnyNumber());
   }
 
@@ -633,11 +680,12 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     if (supplicant_bss_proxy_) {
       EXPECT_CALL(*supplicant_bss_proxy_, Die());
     }
+    EXPECT_CALL(*wifi_provider(),
+                DeregisterDeviceFromPhy(wifi(), GetPhyIndex()));
     // must Stop WiFi instance, to clear its list of services.
     // otherwise, the WiFi instance will not be deleted. (because
     // services reference a WiFi instance, creating a cycle.)
-    wifi_->Stop(nullptr, ResultCallback());
-    wifi_->set_dhcp_provider(nullptr);
+    wifi_->Stop(base::DoNothing());
     // Reset scope logging, to avoid interfering with other tests.
     ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
     ScopeLogger::GetInstance()->set_verbose_level(0);
@@ -650,27 +698,48 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
 
   void ResetPendingService() { SetPendingService(nullptr); }
 
-  void SetScanState(WiFi::ScanState new_state,
-                    WiFi::ScanMethod new_method,
+  void SetScanState(WiFiState::PhyState new_state,
+                    WiFiState::ScanMethod new_method,
                     const char* reason) {
-    wifi_->SetScanState(new_state, new_method, reason);
+    wifi_->SetPhyState(new_state, new_method, reason);
   }
 
-  void VerifyScanState(WiFi::ScanState state, WiFi::ScanMethod method) const {
-    EXPECT_EQ(state, wifi_->scan_state_);
-    EXPECT_EQ(method, wifi_->scan_method_);
+  void VerifyScanState(WiFiState::PhyState state,
+                       WiFiState::ScanMethod method) const {
+    EXPECT_EQ(state, wifi_->wifi_state_->GetPhyState());
+    EXPECT_EQ(method, wifi_->wifi_state_->GetScanMethod());
+  }
+
+  void VerifyEnsuredScanState(WiFiState::EnsuredScanState state) const {
+    EXPECT_EQ(state, wifi_->wifi_state_->GetEnsuredScanState());
   }
 
   void PropertiesChanged(const KeyValueStore& props) {
     wifi_->PropertiesChanged(props);
   }
 
+  void SignalChanged(const KeyValueStore& props) {
+    wifi_->SignalChanged(props);
+  }
+
   void SelectService(const WiFiServiceRefPtr& service) {
     wifi_->SelectService(service);
   }
 
+  bool UpdateSupplicantProperties(const WiFiService* service,
+                                  const KeyValueStore& kv,
+                                  Error* error) {
+    return wifi_->UpdateSupplicantProperties(service, kv, error);
+  }
+
+  void Scan(Error* error, const std::string& reason, bool is_dbus_call) {
+    wifi_->Scan(error, reason, is_dbus_call);
+  }
+
  protected:
   using MockWiFiServiceRefPtr = scoped_refptr<MockWiFiService>;
+  using MockPasspointCredentialsRefPtr =
+      scoped_refptr<MockPasspointCredentials>;
 
   // Simulate the course of events when the last endpoint of a service is
   // removed.
@@ -727,11 +796,12 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
                                           bssid, mode, 0, 0);
   }
   MockWiFiServiceRefPtr MakeMockServiceWithSSID(std::vector<uint8_t> ssid,
-                                                const std::string& security) {
+                                                const WiFiSecurity& security) {
     return new NiceMock<MockWiFiService>(&manager_, &wifi_provider_, ssid,
-                                         kModeManaged, security, false);
+                                         kModeManaged, security.SecurityClass(),
+                                         security, false);
   }
-  MockWiFiServiceRefPtr MakeMockService(const std::string& security) {
+  MockWiFiServiceRefPtr MakeMockService(const WiFiSecurity& security) {
     return MakeMockServiceWithSSID(std::vector<uint8_t>(1, 'a'), security);
   }
   RpcIdentifier MakeNewEndpointAndService(int16_t signal_strength,
@@ -746,9 +816,10 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
         MakeMockServiceWithSSID(endpoint->ssid(), endpoint->security_mode());
     EXPECT_CALL(wifi_provider_, FindServiceForEndpoint(EndpointMatch(endpoint)))
         .WillRepeatedly(Return(service));
-    ON_CALL(*service, GetEndpointCount()).WillByDefault(Return(1));
+    ON_CALL(*service, GetBSSIDConnectableEndpointCount())
+        .WillByDefault(Return(1));
     ReportBSS(path, ssid, bssid, signal_strength, frequency,
-              kNetworkModeInfrastructure);
+              kNetworkModeInfrastructure, 0);
     if (service_ptr) {
       *service_ptr = service;
     }
@@ -768,7 +839,7 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     EXPECT_CALL(wifi_provider_, FindServiceForEndpoint(EndpointMatch(endpoint)))
         .WillRepeatedly(Return(service));
     ReportBSS(path, ssid, bssid, signal_strength, frequency,
-              kNetworkModeInfrastructure);
+              kNetworkModeInfrastructure, 0);
     if (endpoint_ptr) {
       *endpoint_ptr = endpoint;
     }
@@ -798,8 +869,8 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
           .WillOnce(DoAll(SetArgPointee<1>(network_path), Return(true)));
       EXPECT_CALL(*GetSupplicantInterfaceProxy(), SelectNetwork(network_path));
     }
-    EXPECT_CALL(*service, SetState(Service::kStateAssociating));
     InitiateConnect(service);
+    EXPECT_EQ(service->state(), Service::kStateAssociating);
     Mock::VerifyAndClearExpectations(service.get());
     EXPECT_FALSE(GetPendingTimeout().IsCancelled());
     if (endpoint_ptr) {
@@ -829,12 +900,13 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     EXPECT_TRUE(GetPendingTimeout().IsCancelled());
     Mock::VerifyAndClearExpectations(service.get());
 
-    EXPECT_CALL(*service, SetState(Service::kStateConfiguring));
+    ReportStateChanged(WPASupplicant::kInterfaceStateAssociated);
+    EXPECT_FALSE(GetHandshakeTimeout().IsCancelled());
+
     EXPECT_CALL(*service, ResetSuspectedCredentialFailures());
-    EXPECT_CALL(*dhcp_provider(), CreateIPv4Config(_, _, _, _))
-        .Times(AnyNumber());
-    EXPECT_CALL(*dhcp_config_, RequestIP()).Times(AnyNumber());
     ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
+    EXPECT_TRUE(GetHandshakeTimeout().IsCancelled());
+    EXPECT_EQ(service->state(), Service::kStateConfiguring);
     Mock::VerifyAndClearExpectations(service.get());
 
     EXPECT_EQ(service, GetCurrentService());
@@ -842,7 +914,7 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
   }
 
   void FireScanTimer() { wifi_->ScanTimerHandler(); }
-  void TriggerScan() { wifi_->Scan(nullptr, __func__); }
+  void TriggerScan() { wifi_->Scan(nullptr, __func__, false); }
   const WiFiServiceRefPtr& GetCurrentService() {
     return wifi_->current_service_;
   }
@@ -855,21 +927,25 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
   const WiFiServiceRefPtr& GetPendingService() {
     return wifi_->pending_service_;
   }
-  const base::CancelableClosure& GetPendingTimeout() {
+  const base::CancelableOnceClosure& GetPendingTimeout() {
     return wifi_->pending_timeout_callback_;
   }
-  const base::CancelableClosure& GetReconnectTimeoutCallback() {
+  const base::CancelableOnceClosure& GetHandshakeTimeout() {
+    return wifi_->handshake_timeout_callback_;
+  }
+  const base::CancelableOnceClosure& GetReconnectTimeoutCallback() {
     return wifi_->reconnect_timeout_callback_;
   }
   const ServiceRefPtr& GetSelectedService() {
     return wifi_->selected_service();
   }
   const RpcIdentifier& GetSupplicantBSS() { return wifi_->supplicant_bss_; }
+  const std::string& GetPreSuspendBSSID() { return wifi_->pre_suspend_bssid_; }
   void SetSupplicantBSS(const RpcIdentifier& bss) {
     wifi_->supplicant_bss_ = bss;
   }
-  int GetReconnectTimeoutSeconds() { return WiFi::kReconnectTimeoutSeconds; }
-  const base::CancelableClosure& GetScanTimer() {
+  base::TimeDelta GetReconnectTimeout() { return WiFi::kReconnectTimeout; }
+  const base::CancelableOnceClosure& GetScanTimer() {
     return wifi_->scan_timer_callback_;
   }
   // note: the tests need the proxies referenced by WiFi (not the
@@ -887,10 +963,24 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     MockSupplicantInterfaceProxy* proxy = GetSupplicantInterfaceProxyFromWiFi();
     return proxy ? proxy : supplicant_interface_proxy_.get();
   }
+  MockSupplicantNetworkProxy* GetSupplicantNetworkProxy() {
+    return supplicant_network_proxy_.get();
+  }
   const std::string& GetSupplicantState() { return wifi_->supplicant_state_; }
   IEEE_80211::WiFiReasonCode GetSupplicantDisconnectReason() {
     return wifi_->supplicant_disconnect_reason_;
   }
+  const WiFiPhy* GetWiFiPhy() { return wifi_->GetWiFiPhy(); }
+
+  void SetWiFiPhy(const WiFiPhy* phy) {
+    ON_CALL(*wifi_provider(), GetPhyAtIndex(wifi_->phy_index_))
+        .WillByDefault(Return(phy));
+  }
+
+  WiFiLinkStatistics::StationStats GetStationStats() {
+    return wifi_->station_stats_;
+  }
+
   void ClearCachedCredentials(const WiFiService* service) {
     return wifi_->ClearCachedCredentials(service);
   }
@@ -904,19 +994,29 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
                                     const std::string& bssid,
                                     int16_t signal_strength,
                                     uint16_t frequency,
-                                    const char* mode);
+                                    const char* mode,
+                                    uint32_t age);
   void RemoveBSS(const RpcIdentifier& bss_path);
   void ReportBSS(const RpcIdentifier& bss_path,
                  const std::string& ssid,
                  const std::string& bssid,
                  int16_t signal_strength,
                  uint16_t frequency,
-                 const char* mode);
-  void ReportIPConfigComplete() {
-    wifi_->OnIPConfigUpdated(dhcp_config_, true);
+                 const char* mode,
+                 uint32_t age);
+  void ReportBSSWithIEs(const RpcIdentifier& bss_path,
+                        const std::string& ssid,
+                        const std::string& bssid,
+                        int16_t signal_strength,
+                        uint16_t frequency,
+                        const char* mode,
+                        const std::vector<uint8_t>& ies);
+  void ReportGetDHCPLease() { wifi_->OnGetDHCPLease(wifi_->interface_index()); }
+  void ReportIPv4ConfiguredWithDHCPLease() {
+    wifi_->OnIPv4ConfiguredWithDHCPLease(wifi_->interface_index());
   }
-  void ReportIPConfigCompleteGatewayArpReceived() {
-    wifi_->OnIPConfigUpdated(dhcp_config_, false);
+  void ReportIPv6ConfiguredWithSLAACAddress() {
+    wifi_->OnIPv6ConfiguredWithSLAACAddress(wifi_->interface_index());
   }
 
   // Calls the delayed version of the BSS methods.
@@ -928,7 +1028,6 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     wifi_->BSSRemoved(bss_path);
   }
 
-  void ReportIPv6ConfigComplete() { wifi_->OnIPv6ConfigUpdated(); }
   void ReportIPConfigFailure() { wifi_->OnIPConfigFailure(); }
   void ReportConnected() { wifi_->OnConnected(); }
   void ReportSelectedServiceChanged(const ServiceRefPtr& old_service) {
@@ -953,9 +1052,19 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
   void ReportWiFiDebugScopeChanged(bool enabled) {
     wifi_->OnWiFiDebugScopeChanged(enabled);
   }
-  void RequestStationInfo() { wifi_->RequestStationInfo(); }
-  void ReportReceivedStationInfo(const Nl80211Message& nl80211_message) {
-    wifi_->OnReceivedStationInfo(nl80211_message);
+  void RequestStationInfo(WiFiLinkStatistics::Trigger trigger) {
+    wifi_->RequestStationInfo(trigger);
+  }
+  void StopRequestingStationInfo() { wifi_->StopRequestingStationInfo(); }
+  void EmitStationInfoRequest(WiFiLinkStatistics::Trigger trigger) {
+    wifi_->EmitStationInfoRequestEvent(trigger);
+  }
+  void EmitStationInfoReceivedEvent(
+      const WiFiLinkStatistics::StationStats& stats) {
+    wifi_->EmitStationInfoReceivedEvent(stats);
+  }
+  void ReportReceivedRtnlLinkStatistics(const rtnl_link_stats64& stats) {
+    wifi_->OnReceivedRtnlLinkStatistics(stats);
   }
   KeyValueStore GetLinkStatistics() {
     return wifi_->GetLinkStatistics(nullptr);
@@ -974,21 +1083,14 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
   uint16_t GetScanInterval() { return wifi_->GetScanInterval(nullptr); }
   void StartWiFi(bool supplicant_present) {
     EXPECT_CALL(netlink_manager_,
-                SubscribeToEvents(Nl80211Message::kMessageTypeString,
-                                  NetlinkManager::kEventTypeConfig));
-    EXPECT_CALL(netlink_manager_,
-                SubscribeToEvents(Nl80211Message::kMessageTypeString,
-                                  NetlinkManager::kEventTypeScan));
-    EXPECT_CALL(netlink_manager_,
-                SubscribeToEvents(Nl80211Message::kMessageTypeString,
-                                  NetlinkManager::kEventTypeRegulatory));
-    EXPECT_CALL(netlink_manager_,
-                SubscribeToEvents(Nl80211Message::kMessageTypeString,
-                                  NetlinkManager::kEventTypeMlme));
-    EXPECT_CALL(netlink_manager_,
                 SendNl80211Message(
                     IsNl80211Command(kNl80211FamilyId, NL80211_CMD_GET_WIPHY),
                     _, _, _));
+    EXPECT_CALL(netlink_manager_,
+                SendNl80211Message(
+                    IsNl80211Command(kNl80211FamilyId, NL80211_CMD_GET_STATION),
+                    _, _, _))
+        .Times(AtLeast(0));
 
     wifi_->supplicant_present_ = supplicant_present;
     wifi_->SetEnabled(true);  // Start(nullptr, ResultCallback());
@@ -1003,14 +1105,12 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     wifi_->OnAfterResume();
   }
   void OnBeforeSuspend() {
-    ResultCallback callback(
-        base::Bind(&WiFiObjectTest::SuspendCallback, base::Unretained(this)));
-    wifi_->OnBeforeSuspend(callback);
+    wifi_->OnBeforeSuspend(base::BindOnce(&WiFiObjectTest::SuspendCallback,
+                                          base::Unretained(this)));
   }
   void OnDarkResume() {
-    ResultCallback callback(
-        base::Bind(&WiFiObjectTest::SuspendCallback, base::Unretained(this)));
-    wifi_->OnDarkResume(callback);
+    wifi_->OnDarkResume(base::BindOnce(&WiFiObjectTest::SuspendCallback,
+                                       base::Unretained(this)));
   }
   void RemoveSupplicantNetworks() { wifi_->RemoveSupplicantNetworks(); }
   void InitiateScan() { wifi_->InitiateScan(); }
@@ -1028,18 +1128,19 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     wifi_->OnSupplicantPresence(false);
     EXPECT_FALSE(wifi_->supplicant_present_);
   }
+  void OnLinkMonitorFailure(net_base::IPFamily family) {
+    wifi_->OnLinkMonitorFailure(family);
+  }
   bool GetSupplicantPresent() { return wifi_->supplicant_present_; }
   bool GetIsRoamingInProgress() { return wifi_->is_roaming_in_progress_; }
   void SetIsRoamingInProgress(bool is_roaming_in_progress) {
     wifi_->is_roaming_in_progress_ = is_roaming_in_progress;
   }
-  void SetIPConfig(const IPConfigRefPtr& ipconfig) {
-    return wifi_->set_ipconfig(ipconfig);
-  }
   bool SetBgscanMethod(const std::string& method) {
     Error error;
-    return wifi_->mutable_store()->SetAnyProperty(kBgscanMethodProperty,
-                                                  brillo::Any(method), &error);
+    wifi_->mutable_store()->SetAnyProperty(kBgscanMethodProperty,
+                                           brillo::Any(method), &error);
+    return error.IsSuccess();
   }
 
   void AppendBgscan(WiFiService* service, KeyValueStore* service_params) {
@@ -1054,6 +1155,8 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     wifi_->EAPEventTask(status, parameter);
   }
 
+  void ReportPskMismatch() { wifi_->PskMismatchTask(); }
+
   void RestartFastScanAttempts() { wifi_->RestartFastScanAttempts(); }
 
   void SetFastScansRemaining(int num) { wifi_->fast_scans_remaining_ = num; }
@@ -1067,21 +1170,17 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     return wifi_->SuspectCredentials(service, failure);
   }
 
-  void SetConnection(ConnectionRefPtr connection) {
-    wifi_->connection_ = connection;
-  }
-
-  void OnNeighborReachabilityEvent(
-      const IPAddress& ip_address,
-      patchpanel::NeighborReachabilityEventSignal::Role role,
-      patchpanel::NeighborReachabilityEventSignal::EventType event_type) {
-    wifi_->OnNeighborReachabilityEvent(ip_address, role, event_type);
+  void OnNeighborReachabilityEvent(const net_base::IPAddress& ip_address,
+                                   patchpanel::Client::NeighborRole role,
+                                   patchpanel::Client::NeighborStatus status) {
+    wifi_->OnNeighborReachabilityEvent(wifi_->interface_index(), ip_address,
+                                       role, status);
   }
 
   MOCK_METHOD(void, ReliableLinkCallback, ());
 
   void SetReliableLinkCallback() {
-    wifi_->reliable_link_callback_.Reset(base::Bind(
+    wifi_->reliable_link_callback_.Reset(base::BindOnce(
         &WiFiObjectTest::ReliableLinkCallback, base::Unretained(this)));
   }
 
@@ -1091,16 +1190,14 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
 
   // Used by tests for link status (L2 failure, reliability).
   void SetupConnectionAndIPConfig(const std::string& ipv4_gateway_address) {
-    scoped_refptr<MockConnection> connection(new MockConnection(device_info()));
-    SetConnection(connection);
-    scoped_refptr<MockIPConfig> ipconfig(
-        new MockIPConfig(control_interface(), kDeviceName));
-    SetIPConfig(ipconfig);
+    auto ipconfig =
+        std::make_unique<MockIPConfig>(control_interface(), kDeviceName);
     // We use ReturnRef() below for this object so use `static` here.
     static IPConfig::Properties ip_props;
-    ip_props.address_family = IPAddress::kFamilyIPv4;
+    ip_props.address_family = net_base::IPFamily::kIPv4;
     ip_props.gateway = ipv4_gateway_address;
     EXPECT_CALL(*ipconfig, properties()).WillRepeatedly(ReturnRef(ip_props));
+    network_->set_ipconfig(std::move(ipconfig));
   }
 
   bool SetBgscanShortInterval(const uint16_t& interval, Error* error) {
@@ -1111,7 +1208,21 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     return wifi_->SetBgscanSignalThreshold(threshold, error);
   }
 
-  void TimeoutPendingConnection() { wifi_->PendingTimeoutHandler(); }
+  void TimeoutPendingConnection(MockWiFiServiceRefPtr service) {
+    auto& pending_timeout = GetPendingTimeout();
+
+    EXPECT_FALSE(pending_timeout.IsCancelled());
+    EXPECT_EQ(service, GetPendingService());
+    // The timeout handler is calling Disconnect() on service, which eventually
+    // leads to WiFi::DisconnectFrom() call - which should be tested as part of
+    // handling of the pending timeout.  Instead of mocking this up let's invoke
+    // the actual code to make the call.
+    EXPECT_CALL(*service, Disconnect(_, HasSubstr("PendingTimeoutHandler")))
+        .WillOnce(Invoke([service](auto err, auto reason) {
+          service->Service::Disconnect(err, reason);
+        }));
+    pending_timeout.callback().Run();
+  }
 
   void OnNewWiphy(const Nl80211Message& new_wiphy_message) {
     wifi_->OnNewWiphy(new_wiphy_message);
@@ -1129,9 +1240,9 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
 
   MockPowerManager* power_manager() { return power_manager_; }
 
-  MockDeviceInfo* device_info() { return &device_info_; }
+  MockDeviceInfo* device_info() { return manager_.mock_device_info(); }
 
-  MockDHCPProvider* dhcp_provider() { return &dhcp_provider_; }
+  MockNetwork* network() { return network_; }
 
   const WiFiConstRefPtr wifi() const { return wifi_; }
 
@@ -1147,16 +1258,22 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     return wifi_->broadcast_probe_was_skipped_;
   }
 
-  bool ParseWiphyIndex(const Nl80211Message& nl80211_message) {
-    return wifi_->ParseWiphyIndex(nl80211_message);
+  uint32_t GetPhyIndex() { return wifi_->phy_index_; }
+
+  uint32_t SetPhyIndex(uint32_t phy_index) {
+    return wifi_->phy_index_ = phy_index;
   }
-
-  uint32_t GetWiphyIndex() { return wifi_->wiphy_index_; }
-
-  void SetWiphyIndex(uint32_t index) { wifi_->wiphy_index_ = index; }
 
   void ParseFeatureFlags(const Nl80211Message& nl80211_message) {
     wifi_->ParseFeatureFlags(nl80211_message);
+  }
+
+  void ParseCipherSuites(const Nl80211Message& nl80211_message) {
+    wifi_->ParseCipherSuites(nl80211_message);
+  }
+
+  bool CipherSuiteSupported(uint32_t cipher_suite) {
+    return base::Contains(wifi_->supported_cipher_suites_, cipher_suite);
   }
 
   bool GetRandomMacSupported() { return wifi_->random_mac_supported_; }
@@ -1174,12 +1291,12 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
 
   std::vector<unsigned char> GetRandomMacMask() { return WiFi::kRandomMacMask; }
 
-  std::set<uint16_t>* GetAllScanFrequencies() {
-    return &wifi_->all_scan_frequencies_;
-  }
-
   void HandleNetlinkBroadcast(const NetlinkMessage& netlink_message) {
     wifi_->HandleNetlinkBroadcast(netlink_message);
+  }
+
+  void RetrieveLinkStatistics(WiFiLinkStatistics::Trigger event) {
+    wifi_->RetrieveLinkStatistics(event);
   }
 
   bool ScanFailedCallbackIsCancelled() {
@@ -1188,7 +1305,29 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
 
   void SetWiFiEnabled(bool enabled) { wifi_->enabled_ = enabled; }
 
+  void OnRegChange(const Nl80211Message& msg) {
+    EXPECT_CALL(wifi_provider_, RegionChanged(_)).Times(AtLeast(0));
+    wifi_->OnRegChange(msg);
+  }
+
   void OnGetReg(const Nl80211Message& msg) { wifi_->OnGetReg(msg); }
+
+  void EnsureScanAndConnectToBestService() {
+    wifi_->EnsureScanAndConnectToBestService(nullptr);
+  }
+
+  void SetEnsuredScanState(WiFiState::EnsuredScanState ensured_scan_state) {
+    wifi_->wifi_state_->SetEnsuredScanState(ensured_scan_state);
+  }
+
+  void HandleEnsuredScan(
+      WiFiState::EnsuredScanState ensured_scan_state,
+      WiFiState::EnsuredScanState expected_ensured_scan_state) {
+    wifi_->wifi_state_->SetEnsuredScanState(ensured_scan_state);
+    wifi_->HandleEnsuredScan();
+    EXPECT_EQ(expected_ensured_scan_state,
+              wifi_->wifi_state_->GetEnsuredScanState());
+  }
 
   MOCK_METHOD(void, SuspendCallback, (const Error&));
 
@@ -1214,9 +1353,51 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
     }
   }
 
+  bool AddCred(const PasspointCredentialsRefPtr& credentials) {
+    return wifi_->AddCred(credentials);
+  }
+
+  bool RemoveCred(const PasspointCredentialsRefPtr& credentials) {
+    return wifi_->RemoveCred(credentials);
+  }
+
+  void ReportInterworkingAPAdded(const RpcIdentifier& BSS,
+                                 const RpcIdentifier& cred,
+                                 const KeyValueStore& properties) {
+    wifi_->InterworkingAPAdded(BSS, cred, properties);
+  }
+
+  void ReportInterworkingSelectDone() { wifi_->InterworkingSelectDone(); }
+
+  bool NeedInterworkingSelect() { return wifi_->need_interworking_select_; }
+
+  void TriggerNetworkStart() {
+    // Reset the state and set to completed again to trigger Network start.
+    wifi_->supplicant_state_ = WPASupplicant::kInterfaceStateDisconnected;
+    wifi_->StateChanged(WPASupplicant::kInterfaceStateCompleted);
+  }
+
+  bool GetWEPSupport() { return wifi_->SupportsWEP(); }
+
+  void SetWEPSupport(bool supported) {
+    if (supported) {
+      wifi_->supported_cipher_suites_.insert(WiFi::kWEP40CipherCode);
+      wifi_->supported_cipher_suites_.insert(WiFi::kWEP104CipherCode);
+      return;
+    }
+    wifi_->supported_cipher_suites_.erase(WiFi::kWEP40CipherCode);
+    wifi_->supported_cipher_suites_.erase(WiFi::kWEP104CipherCode);
+  }
+
+  std::string perm_address() const { return wifi_->perm_address_; }
+  void SetMacAddress(const std::string& addr) { wifi_->set_mac_address(addr); }
+  std::string GetStorageIdentifier() const {
+    return wifi_->GetStorageIdentifier();
+  }
+
   std::unique_ptr<EventDispatcher> event_dispatcher_;
   MockWakeOnWiFi* wake_on_wifi_;  // Owned by |wifi_|.
-  NiceMock<MockRTNLHandler> rtnl_handler_;
+  NiceMock<net_base::MockRTNLHandler> rtnl_handler_;
   MockTime time_;
   MockNetlinkManager netlink_manager_;
 
@@ -1225,10 +1406,10 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
   MockMetrics metrics_;
   MockManager manager_;
   MockPowerManager* power_manager_;  // Owned by |manager_|.
-  MockDeviceInfo device_info_;
   WiFiRefPtr wifi_;
   NiceMock<MockWiFiProvider> wifi_provider_;
   int bss_counter_;
+  MockNetwork* network_;  // Owned by |wifi_|
 
   // protected fields interspersed between private fields, due to
   // initialization order
@@ -1242,13 +1423,13 @@ class WiFiObjectTest : public ::testing::TestWithParam<std::string> {
 
   MockSupplicantProcessProxy* supplicant_process_proxy_;
   std::unique_ptr<MockSupplicantBSSProxy> supplicant_bss_proxy_;
-  MockDHCPProvider dhcp_provider_;
-  scoped_refptr<MockDHCPConfig> dhcp_config_;
+  std::string dhcp_hostname_;
 
   // These pointers track mock objects owned by the WiFi device instance
   // and manager so we can perform expectations against them.
   DeviceMockAdaptor* adaptor_;
   MockSupplicantEAPStateHandler* eap_state_handler_;
+  MockWiFiLinkStatistics* wifi_link_statistics_;
 
  private:
   std::unique_ptr<SupplicantInterfaceProxyInterface>
@@ -1287,7 +1468,8 @@ KeyValueStore WiFiObjectTest::CreateBSSProperties(const std::string& ssid,
                                                   const std::string& bssid,
                                                   int16_t signal_strength,
                                                   uint16_t frequency,
-                                                  const char* mode) {
+                                                  const char* mode,
+                                                  uint32_t age) {
   KeyValueStore bss_properties;
   bss_properties.Set<std::vector<uint8_t>>(
       "SSID", std::vector<uint8_t>(ssid.begin(), ssid.end()));
@@ -1302,6 +1484,7 @@ KeyValueStore WiFiObjectTest::CreateBSSProperties(const std::string& ssid,
                               signal_strength);
   bss_properties.Set<uint16_t>(WPASupplicant::kBSSPropertyFrequency, frequency);
   bss_properties.Set<std::string>(WPASupplicant::kBSSPropertyMode, mode);
+  bss_properties.Set<uint32_t>(WPASupplicant::kBSSPropertyAge, age);
 
   return bss_properties;
 }
@@ -1311,10 +1494,24 @@ void WiFiObjectTest::ReportBSS(const RpcIdentifier& bss_path,
                                const std::string& bssid,
                                int16_t signal_strength,
                                uint16_t frequency,
-                               const char* mode) {
+                               const char* mode,
+                               uint32_t age) {
   wifi_->BSSAddedTask(
       bss_path,
-      CreateBSSProperties(ssid, bssid, signal_strength, frequency, mode));
+      CreateBSSProperties(ssid, bssid, signal_strength, frequency, mode, age));
+}
+
+void WiFiObjectTest::ReportBSSWithIEs(const RpcIdentifier& bss_path,
+                                      const std::string& ssid,
+                                      const std::string& bssid,
+                                      int16_t signal_strength,
+                                      uint16_t frequency,
+                                      const char* mode,
+                                      const std::vector<uint8_t>& ies) {
+  KeyValueStore properties =
+      CreateBSSProperties(ssid, bssid, signal_strength, frequency, mode, 0);
+  properties.Set<std::vector<uint8_t>>(WPASupplicant::kBSSPropertyIEs, ies);
+  wifi_->BSSAddedTask(bss_path, properties);
 }
 
 // Most of our tests involve using a real EventDispatcher object.
@@ -1323,18 +1520,18 @@ class WiFiMainTest : public WiFiObjectTest {
   WiFiMainTest() : WiFiObjectTest(std::make_unique<EventDispatcherForTest>()) {}
 
  protected:
-  void StartScan(WiFi::ScanMethod method) {
-    VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  void StartScan(WiFiState::ScanMethod method) {
+    VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
     EXPECT_CALL(*adaptor_, EmitBoolChanged(kPoweredProperty, _))
         .Times(AnyNumber());
 
     ExpectScanStart(method, false);
     StartWiFi();
     event_dispatcher_->DispatchPendingEvents();
-    VerifyScanState(WiFi::kScanScanning, method);
+    VerifyScanState(WiFiState::PhyState::kScanning, method);
   }
 
-  MockWiFiServiceRefPtr AttemptConnection(WiFi::ScanMethod method,
+  MockWiFiServiceRefPtr AttemptConnection(WiFiState::ScanMethod method,
                                           WiFiEndpointRefPtr* endpoint,
                                           RpcIdentifier* bss_path) {
     WiFiEndpointRefPtr fake_endpoint;
@@ -1353,12 +1550,12 @@ class WiFiMainTest : public WiFiObjectTest {
         SetupConnectingService(RpcIdentifier(""), endpoint, bss_path);
     ReportScanDone();
     event_dispatcher_->DispatchPendingEvents();
-    VerifyScanState(WiFi::kScanConnecting, method);
+    VerifyScanState(WiFiState::PhyState::kConnecting, method);
 
     return service;
   }
 
-  void ExpectScanStart(WiFi::ScanMethod method, bool is_continued) {
+  void ExpectScanStart(WiFiState::ScanMethod method, bool is_continued) {
     EXPECT_CALL(*GetSupplicantInterfaceProxy(), Scan(_));
     if (!is_continued) {
       EXPECT_CALL(*adaptor_, EmitBoolChanged(kScanningProperty, true));
@@ -1374,6 +1571,11 @@ class WiFiMainTest : public WiFiObjectTest {
   void ExpectConnecting() {
     EXPECT_CALL(*metrics(), NotifyDeviceScanFinished(_));
     EXPECT_CALL(*metrics(), NotifyDeviceConnectStarted(_));
+  }
+
+  void ExpectNotConnecting() {
+    EXPECT_CALL(*metrics(), NotifyDeviceScanFinished(_)).Times(0);
+    EXPECT_CALL(*metrics(), NotifyDeviceConnectStarted(_)).Times(0);
   }
 
   void ExpectConnected() {
@@ -1392,6 +1594,22 @@ class WiFiMainTest : public WiFiObjectTest {
     EXPECT_CALL(*metrics(), ResetConnectTimer(_)).RetiresOnSaturation();
   }
 };
+
+TEST_F(WiFiMainTest, GetStorageIdentifier) {
+  // First test the base line - that the stored hardware MAC is what we expect.
+  EXPECT_EQ(perm_address(),
+            base::ToLowerASCII(base::HexEncode(kPermDeviceAddress.data(),
+                                               kPermDeviceAddress.size())));
+  auto storage_id = GetStorageIdentifier();
+  // Now check the expected storage ID and that it does no change when MAC
+  // address changes.
+  EXPECT_EQ(storage_id, std::string("device_") + perm_address());
+  std::array<uint8_t, ETH_ALEN> bytes;
+  crypto::RandBytes(bytes.data(), bytes.size());
+  SetMacAddress(
+      base::ToLowerASCII(base::HexEncode(bytes.data(), bytes.size())));
+  EXPECT_EQ(storage_id, GetStorageIdentifier());
+}
 
 TEST_F(WiFiMainTest, ProxiesSetUpDuringStart) {
   EXPECT_EQ(nullptr, GetSupplicantInterfaceProxyFromWiFi());
@@ -1414,6 +1632,7 @@ TEST_F(WiFiMainTest, OnSupplicantAppearStarted) {
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), FlushBSS(0));
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), SetFastReauth(false));
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), SetScanInterval(_));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveAllCreds());
 
   OnSupplicantAppear();
   EXPECT_NE(nullptr, GetSupplicantInterfaceProxyFromWiFi());
@@ -1512,32 +1731,20 @@ TEST_F(WiFiMainTest, RemoveNetwork) {
   EXPECT_TRUE(RemoveNetwork(network));
 }
 
-TEST_F(WiFiMainTest, UseArpGateway) {
+TEST_F(WiFiMainTest, StartNetworkUseArpGateway) {
   StartWiFi();
 
-  // With no selected service.
-  EXPECT_TRUE(wifi()->ShouldUseArpGateway());
-  EXPECT_CALL(dhcp_provider_, CreateIPv4Config(kDeviceName, _, true, _))
-      .WillOnce(Return(dhcp_config_));
-  const_cast<WiFi*>(wifi().get())->AcquireIPConfig();
-
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   InitiateConnect(service);
 
-  // Selected service that does not have a static IP address.
-  EXPECT_CALL(*service, HasStaticIPAddress()).WillRepeatedly(Return(false));
-  EXPECT_TRUE(wifi()->ShouldUseArpGateway());
-  EXPECT_CALL(dhcp_provider_, CreateIPv4Config(kDeviceName, _, true, _))
-      .WillOnce(Return(dhcp_config_));
-  const_cast<WiFi*>(wifi().get())->AcquireIPConfig();
+  const auto dhcp_matcher =
+      Optional(AllOf(Field(&DHCPProvider::Options::use_arp_gateway, true),
+                     Field(&DHCPProvider::Options::hostname, dhcp_hostname_)));
+  EXPECT_CALL(*network(),
+              Start(AllOf(Field(&Network::StartOptions::dhcp, dhcp_matcher),
+                          Field(&Network::StartOptions::accept_ra, true))));
+  TriggerNetworkStart();
   Mock::VerifyAndClearExpectations(service.get());
-
-  // Selected service that has a static IP address.
-  EXPECT_CALL(*service, HasStaticIPAddress()).WillRepeatedly(Return(true));
-  EXPECT_FALSE(wifi()->ShouldUseArpGateway());
-  EXPECT_CALL(dhcp_provider_, CreateIPv4Config(kDeviceName, _, false, _))
-      .WillOnce(Return(dhcp_config_));
-  const_cast<WiFi*>(wifi().get())->AcquireIPConfig();
 }
 
 TEST_F(WiFiMainTest, RemoveNetworkFailed) {
@@ -1554,7 +1761,7 @@ TEST_F(WiFiMainTest, Restart) {
       .WillRepeatedly(Return(false));
   EXPECT_CALL(*supplicant_process_proxy_, GetInterface(_, _));
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Scan(_));
-  EXPECT_CALL(*metrics(), NotifyWiFiSupplicantSuccess(1));
+  EXPECT_CALL(*metrics(), SendToUMA(Metrics::kMetricWifiSupplicantAttempts, 1));
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
 }
@@ -1562,19 +1769,21 @@ TEST_F(WiFiMainTest, Restart) {
 TEST_F(WiFiMainTest, StartClearsState) {
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveAllNetworks());
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), FlushBSS(_));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveAllCreds());
   StartWiFi();
 }
 
 TEST_F(WiFiMainTest, NoScansWhileConnecting) {
   // Setup 'connecting' state.
-  StartScan(WiFi::kScanMethodFull);
+  StartScan(WiFiState::ScanMethod::kFull);
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 
   ExpectScanStop();
   ExpectConnecting();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   InitiateConnect(service);
-  VerifyScanState(WiFi::kScanConnecting, WiFi::kScanMethodFull);
+  VerifyScanState(WiFiState::PhyState::kConnecting,
+                  WiFiState::ScanMethod::kFull);
 
   // If we're connecting, we ignore scan requests and stay on channel.
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Scan(_)).Times(0);
@@ -1585,11 +1794,11 @@ TEST_F(WiFiMainTest, NoScansWhileConnecting) {
 
   // Terminate the scan.
   ExpectFoundNothing();
-  TimeoutPendingConnection();
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  TimeoutPendingConnection(service);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 
   // Start a fresh scan.
-  ExpectScanStart(WiFi::kScanMethodFull, false);
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
   TriggerScan();
   event_dispatcher_->DispatchPendingEvents();
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
@@ -1611,7 +1820,7 @@ TEST_F(WiFiMainTest, NoScansWhileConnecting) {
   EXPECT_CALL(*service, IsConnecting())
       .Times(AtLeast(2))
       .WillRepeatedly(Return(false));
-  ExpectScanStart(WiFi::kScanMethodFull, false);
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
   TriggerScan();
   event_dispatcher_->DispatchPendingEvents();
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
@@ -1623,11 +1832,11 @@ TEST_F(WiFiMainTest, NoScansWhileConnecting) {
 }
 
 TEST_F(WiFiMainTest, ResetScanStateWhenScanFailed) {
-  StartScan(WiFi::kScanMethodFull);
+  StartScan(WiFiState::ScanMethod::kFull);
   ExpectScanStop();
-  VerifyScanState(WiFi::kScanScanning, WiFi::kScanMethodFull);
+  VerifyScanState(WiFiState::PhyState::kScanning, WiFiState::ScanMethod::kFull);
   ReportScanFailed();
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 }
 
 TEST_F(WiFiMainTest, ResumeStartsScanWhenIdle) {
@@ -1698,6 +1907,15 @@ TEST_F(WiFiMainTest, ResumeDoesNotStartScanWhenDisabled) {
   event_dispatcher_->DispatchPendingEvents();
 }
 
+TEST_F(WiFiMainTest, PreSuspendBSSIDSet) {
+  StartWiFi();
+  WiFiEndpointRefPtr endpoint;
+  SetupConnectedService(RpcIdentifier(""), &endpoint, nullptr);
+  std::string bssid = GetCurrentService()->bssid();
+  OnBeforeSuspend();
+  EXPECT_EQ(GetPreSuspendBSSID(), bssid);
+}
+
 TEST_F(WiFiMainTest, ResumeWithCurrentService) {
   StartWiFi();
   SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
@@ -1711,16 +1929,16 @@ TEST_F(WiFiMainTest, ScanResults) {
   StartWiFi();
   // Ad-hoc networks will be dropped.
   ReportBSS(RpcIdentifier("bss0"), "ssid0", "00:00:00:00:00:00", 0, 0,
-            kNetworkModeAdHoc);
+            kNetworkModeAdHoc, 0);
   ReportBSS(RpcIdentifier("bss1"), "ssid1", "00:00:00:00:00:01", 1, 0,
-            kNetworkModeInfrastructure);
+            kNetworkModeInfrastructure, 0);
   ReportBSS(RpcIdentifier("bss2"), "ssid2", "00:00:00:00:00:02", 2, 0,
-            kNetworkModeInfrastructure);
+            kNetworkModeInfrastructure, 0);
   ReportBSS(RpcIdentifier("bss3"), "ssid3", "00:00:00:00:00:03", 3, 0,
-            kNetworkModeInfrastructure);
+            kNetworkModeInfrastructure, 0);
   const uint16_t frequency = 2412;
   ReportBSS(RpcIdentifier("bss4"), "ssid4", "00:00:00:00:00:04", 4, frequency,
-            kNetworkModeAdHoc);
+            kNetworkModeAdHoc, 0);
 
   const WiFi::EndpointMap& endpoints_by_rpcid = GetEndpointMap();
   EXPECT_EQ(3, endpoints_by_rpcid.size());
@@ -1739,9 +1957,9 @@ TEST_F(WiFiMainTest, ScanCompleted) {
   EXPECT_CALL(*wifi_provider(), OnEndpointAdded(EndpointMatch(ap0))).Times(1);
   EXPECT_CALL(*wifi_provider(), OnEndpointAdded(EndpointMatch(ap1))).Times(1);
   ReportBSS(RpcIdentifier("bss0"), ap0->ssid_string(), ap0->bssid_string(), 0,
-            0, kNetworkModeInfrastructure);
+            0, kNetworkModeInfrastructure, 0);
   ReportBSS(RpcIdentifier("bss1"), ap1->ssid_string(), ap1->bssid_string(), 0,
-            0, kNetworkModeInfrastructure);
+            0, kNetworkModeInfrastructure, 0);
   manager()->set_suppress_autoconnect(true);
   ReportScanDone();
   EXPECT_FALSE(manager()->suppress_autoconnect());
@@ -1751,11 +1969,163 @@ TEST_F(WiFiMainTest, ScanCompleted) {
 
   // BSSes with SSIDs that start with nullptr should be filtered.
   ReportBSS(RpcIdentifier("bss2"), std::string(1, 0), "00:00:00:00:00:02", 3, 0,
-            kNetworkModeInfrastructure);
+            kNetworkModeInfrastructure, 0);
 
   // BSSes with empty SSIDs should be filtered.
   ReportBSS(RpcIdentifier("bss2"), std::string(), "00:00:00:00:00:02", 3, 0,
-            kNetworkModeInfrastructure);
+            kNetworkModeInfrastructure, 0);
+}
+
+TEST_F(WiFiMainTest, EnsuredScan) {
+  // Setup
+  EXPECT_CALL(*adaptor_, EmitBoolChanged(kPoweredProperty, _))
+      .Times(AnyNumber());
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
+  StartWiFi();
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kIdle);
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Handle the initial scan from setup
+  ExpectScanStop();
+  ReportScanDone();
+  event_dispatcher_->DispatchPendingEvents();
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kIdle);
+
+  // Ensure the Scan
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
+  EnsureScanAndConnectToBestService();
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Verify the ensured scan
+  VerifyScanState(WiFiState::PhyState::kScanning, WiFiState::ScanMethod::kFull);
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kScanning);
+  ExpectScanStop();
+  ReportScanDone();
+
+  // Verify that ConnectToBestServices is called
+  EXPECT_CALL(*manager(), ConnectToBestWiFiService());
+  event_dispatcher_->DispatchPendingEvents();
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kIdle);
+}
+
+TEST_F(WiFiMainTest, ConnectToBestWiFiServiceDeviceDisabled) {
+  event_dispatcher_->DispatchPendingEvents();
+
+  EnsureScanAndConnectToBestService();
+
+  // Verify that ConnectToBestWiFiService is not called
+  EXPECT_CALL(*manager(), ConnectToBestWiFiService()).Times(0);
+  event_dispatcher_->DispatchPendingEvents();
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kIdle);
+}
+
+TEST_F(WiFiMainTest, ConnectToBestWiFiServiceNoSupplicant) {
+  // Setup Start without SupplicantProxy to ensure idle state.
+  StartWiFi(false);
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Handle the initial scan from setup
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kIdle);
+  EnsureScanAndConnectToBestService();
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kScanning);
+  // Verify that ConnectToBestWiFiService is not called
+  EXPECT_CALL(*manager(), ConnectToBestWiFiService()).Times(0);
+  event_dispatcher_->DispatchPendingEvents();
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kIdle);
+}
+
+TEST_F(WiFiMainTest, QueueEnsuredScan) {
+  // Setup
+  EXPECT_CALL(*adaptor_, EmitBoolChanged(kPoweredProperty, _))
+      .Times(AnyNumber());
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
+  StartWiFi();
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kIdle);
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Queue the ensured scan
+  EnsureScanAndConnectToBestService();
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
+  VerifyScanState(WiFiState::PhyState::kScanning, WiFiState::ScanMethod::kFull);
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kWaiting);
+  // Handle the initial scan from setup
+  ExpectScanStop();
+  ReportScanDone();
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Verify the ensured scan
+  VerifyScanState(WiFiState::PhyState::kScanning, WiFiState::ScanMethod::kFull);
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kScanning);
+  event_dispatcher_->DispatchPendingEvents();
+  // Handle the ensured scan
+  ExpectScanStop();
+  ReportScanDone();
+
+  // Verify that ConnectToBestWiFiService is called
+  EXPECT_CALL(*manager(), ConnectToBestWiFiService());
+  event_dispatcher_->DispatchPendingEvents();
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kIdle);
+}
+
+TEST_F(WiFiMainTest, QueuedEnsuredScan) {
+  // Setup
+  EXPECT_CALL(*adaptor_, EmitBoolChanged(kPoweredProperty, _))
+      .Times(AnyNumber());
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
+  StartWiFi();
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Handle the initial scan from setup
+  ExpectScanStop();
+  ReportScanDone();
+  event_dispatcher_->DispatchPendingEvents();
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
+
+  // Queue the ensured scan
+  SetEnsuredScanState(WiFiState::EnsuredScanState::kWaiting);
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kWaiting);
+
+  // Ensure that an idle -> idle transition triggers a scan.
+  SetScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone, "");
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
+
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Verify the ensured scan
+  VerifyScanState(WiFiState::PhyState::kScanning, WiFiState::ScanMethod::kFull);
+  VerifyEnsuredScanState(WiFiState::EnsuredScanState::kScanning);
+  ExpectScanStop();
+  ReportScanDone();
+
+  // Verify that ConnectToBestWiFiService is called
+  EXPECT_CALL(*manager(), ConnectToBestWiFiService());
+  event_dispatcher_->DispatchPendingEvents();
+}
+
+TEST_F(WiFiMainTest, QueuedEnsuredScanFinished) {
+  // Setup
+  EXPECT_CALL(*adaptor_, EmitBoolChanged(kPoweredProperty, _))
+      .Times(AnyNumber());
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
+  StartWiFi();
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Handle the initial scan from setup
+  ExpectScanStop();
+  ReportScanDone();
+  event_dispatcher_->DispatchPendingEvents();
+
+  // Verify that ConnectToBestWiFiService is called
+  EXPECT_CALL(*manager(), ConnectToBestWiFiService());
+  // Simulate an idle radio when a scan had been queued
+  HandleEnsuredScan(WiFiState::EnsuredScanState::kScanning,
+                    WiFiState::EnsuredScanState::kIdle);
+  // Verify that there wasn't an extra scan
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 }
 
 TEST_F(WiFiMainTest, LoneBSSRemovedWhileConnected) {
@@ -1824,10 +2194,9 @@ TEST_F(WiFiMainTest, DisconnectPendingService) {
   EXPECT_EQ(GetPendingService(), service);
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Disconnect());
   EXPECT_CALL(*service, SetFailure(_)).Times(0);
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(AtLeast(1));
   service->set_expecting_disconnect(true);
   InitiateDisconnect(service);
-  Mock::VerifyAndClearExpectations(service.get());
+  EXPECT_EQ(service->state(), Service::kStateIdle);
   EXPECT_EQ(nullptr, GetPendingService());
 }
 
@@ -1839,9 +2208,8 @@ TEST_F(WiFiMainTest, DisconnectPendingServiceWithFailure) {
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Disconnect());
   EXPECT_CALL(*service, ShouldIgnoreFailure()).WillOnce(Return(false));
   EXPECT_CALL(*service, SetFailure(Service::kFailureUnknown));
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(AtLeast(1));
   InitiateDisconnect(service);
-  Mock::VerifyAndClearExpectations(service.get());
+  EXPECT_EQ(service->state(), Service::kStateIdle);
   EXPECT_EQ(nullptr, GetPendingService());
 }
 
@@ -1857,11 +2225,10 @@ TEST_F(WiFiMainTest, DisconnectPendingServiceWithOutOfRange) {
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Disconnect());
   EXPECT_CALL(*service, ShouldIgnoreFailure()).WillOnce(Return(false));
   EXPECT_CALL(*service, SetFailure(Service::kFailureOutOfRange));
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(AtLeast(1));
   EXPECT_CALL(*service, SignalLevel()).WillRepeatedly(Return(-90));
   ReportDisconnectReasonChanged(-IEEE_80211::kReasonCodeInactivity);
   InitiateDisconnect(service);
-  Mock::VerifyAndClearExpectations(service.get());
+  EXPECT_EQ(service->state(), Service::kStateIdle);
   EXPECT_EQ(nullptr, GetPendingService());
 }
 
@@ -1882,10 +2249,9 @@ TEST_F(WiFiMainTest, DisconnectPendingServiceWithCurrent) {
 
   EXPECT_EQ(service0, GetCurrentService());
   EXPECT_EQ(service1, GetPendingService());
-  EXPECT_CALL(*service1, SetState(Service::kStateIdle)).Times(AtLeast(1));
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Disconnect());
   InitiateDisconnect(service1);
-  Mock::VerifyAndClearExpectations(service1.get());
+  EXPECT_EQ(service1->state(), Service::kStateIdle);
 
   // |current_service_| will be unchanged until supplicant signals
   // that CurrentBSS has changed.
@@ -1916,8 +2282,8 @@ TEST_F(WiFiMainTest, DisconnectCurrentService) {
   EXPECT_CALL(*eap_state_handler_, Reset());
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveNetwork(kPath)).Times(0);
   EXPECT_CALL(*service, SetFailure(_)).Times(0);
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(AtLeast(1));
   ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
+  EXPECT_EQ(service->state(), Service::kStateIdle);
   EXPECT_EQ(nullptr, GetCurrentService());
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 }
@@ -1943,8 +2309,8 @@ TEST_F(WiFiMainTest, DisconnectCurrentServiceWithFailure) {
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveNetwork(kPath)).Times(0);
   EXPECT_CALL(*service, ShouldIgnoreFailure()).WillOnce(Return(false));
   EXPECT_CALL(*service, SetFailure(Service::kFailureUnknown));
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(AtLeast(1));
   ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
+  EXPECT_EQ(service->state(), Service::kStateIdle);
   EXPECT_EQ(nullptr, GetCurrentService());
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 }
@@ -1982,9 +2348,9 @@ TEST_F(WiFiMainTest, DisconnectCurrentServiceWithOutOfRange) {
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveNetwork(kPath)).Times(0);
   EXPECT_CALL(*service, ShouldIgnoreFailure()).WillOnce(Return(false));
   EXPECT_CALL(*service, SetFailure(Service::kFailureOutOfRange));
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(AtLeast(1));
   ReportDisconnectReasonChanged(-IEEE_80211::kReasonCodeInactivity);
   ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
+  EXPECT_EQ(service->state(), Service::kStateIdle);
   EXPECT_EQ(nullptr, GetCurrentService());
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 }
@@ -2019,9 +2385,9 @@ TEST_F(WiFiMainTest, DisconnectCurrentServiceWithPending) {
   EXPECT_EQ(service1, GetPendingService());
   EXPECT_FALSE(GetPendingTimeout().IsCancelled());
 
-  EXPECT_CALL(*service0, SetState(Service::kStateIdle)).Times(AtLeast(1));
   EXPECT_CALL(*service0, SetFailure(_)).Times(0);
   ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
+  EXPECT_EQ(service0->state(), Service::kStateIdle);
 }
 
 TEST_F(WiFiMainTest, DisconnectCurrentServiceWhileRoaming) {
@@ -2118,23 +2484,12 @@ TEST_F(WiFiMainTest, DisconnectWithWiFiServiceConnectedInError) {
 }
 
 TEST_F(WiFiMainTest, TimeoutPendingServiceWithEndpoints) {
-  StartScan(WiFi::kScanMethodFull);
-  const base::CancelableClosure& pending_timeout = GetPendingTimeout();
+  StartScan(WiFiState::ScanMethod::kFull);
+  const base::CancelableOnceClosure& pending_timeout = GetPendingTimeout();
   EXPECT_TRUE(pending_timeout.IsCancelled());
   MockWiFiServiceRefPtr service =
-      AttemptConnection(WiFi::kScanMethodFull, nullptr, nullptr);
+      AttemptConnection(WiFiState::ScanMethod::kFull, nullptr, nullptr);
 
-  // Timeout the connection attempt.
-  EXPECT_FALSE(pending_timeout.IsCancelled());
-  EXPECT_EQ(service, GetPendingService());
-  // Simulate a service with a wifi_ reference calling DisconnectFrom().
-  EXPECT_CALL(*service,
-              DisconnectWithFailure(Service::kFailureOutOfRange, _,
-                                    HasSubstr("PendingTimeoutHandler")))
-      .WillOnce(InvokeWithoutArgs(this, &WiFiObjectTest::ResetPendingService));
-  // DisconnectFrom() should not be called directly from WiFi.
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(1);
-  EXPECT_CALL(*GetSupplicantInterfaceProxy(), Disconnect()).Times(0);
   EXPECT_CALL(*service, SignalLevel()).WillRepeatedly(Return(-80));
 
   // Innocuous redundant call to NotifyDeviceScanFinished.
@@ -2145,10 +2500,19 @@ TEST_F(WiFiMainTest, TimeoutPendingServiceWithEndpoints) {
   ScopeLogger::GetInstance()->set_verbose_level(10);
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
   EXPECT_CALL(log, Log(_, _, HasSubstr("-> FULL_NOCONNECTION")));
-  pending_timeout.callback().Run();
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+
+  // In PendingTimeoutHandler we depend on Service internal behaviour for
+  // SetFailure() so let's "unmock" SetFailure() and call the implementation.
+  EXPECT_CALL(*service, SetFailure(_))
+      .WillRepeatedly(WithArg<0>([&service](auto failure) {
+        service->WiFiService::SetFailure(failure);
+      }));
+  // Timeout the connection attempt.
+  TimeoutPendingConnection(service);
   // Service state should be idle, so it is connectable again.
-  EXPECT_EQ(Service::kStateIdle, service->state());
+  EXPECT_EQ(service->state(), Service::kStateIdle);
+
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
   EXPECT_EQ(nullptr, GetPendingService());
   Mock::VerifyAndClearExpectations(service.get());
 
@@ -2158,7 +2522,7 @@ TEST_F(WiFiMainTest, TimeoutPendingServiceWithEndpoints) {
 
 TEST_F(WiFiMainTest, TimeoutPendingServiceWithoutEndpoints) {
   StartWiFi();
-  const base::CancelableClosure& pending_timeout = GetPendingTimeout();
+  const base::CancelableOnceClosure& pending_timeout = GetPendingTimeout();
   EXPECT_TRUE(pending_timeout.IsCancelled());
   MockWiFiServiceRefPtr service(
       SetupConnectingService(RpcIdentifier(""), nullptr, nullptr));
@@ -2166,18 +2530,73 @@ TEST_F(WiFiMainTest, TimeoutPendingServiceWithoutEndpoints) {
   EXPECT_EQ(service, GetPendingService());
   // We expect the service to get a disconnect call, but in this scenario
   // the service does nothing.
-  EXPECT_CALL(*service,
-              DisconnectWithFailure(Service::kFailureOutOfRange, _,
-                                    HasSubstr("PendingTimeoutHandler")));
+  EXPECT_CALL(*service, Disconnect(_, HasSubstr("PendingTimeoutHandler")));
   // current_endpoint_ == nullptr so, without endpoint,
   // the service should return min possible value of int16_t
   EXPECT_CALL(*service, SignalLevel())
       .WillRepeatedly(Return(WiFiService::SignalLevelMin));
   // DisconnectFrom() should be called directly from WiFi.
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(AtLeast(1));
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Disconnect());
+  // In PendingTimeoutHandler we depend on Service internal behaviour for
+  // SetFailure() so let's "unmock" SetFailure() and call the implementation.
+  EXPECT_CALL(*service, SetFailure(_))
+      .WillRepeatedly(WithArg<0>([&service](auto failure) {
+        service->WiFiService::SetFailure(failure);
+      }));
   pending_timeout.callback().Run();
+  EXPECT_EQ(service->state(), Service::kStateIdle);
   EXPECT_EQ(nullptr, GetPendingService());
+}
+
+TEST_F(WiFiMainTest, HandshakeTimerCancelledByConnectionFailure) {
+  StartWiFi();
+  event_dispatcher_->DispatchPendingEvents();
+  auto& handshake_timeout = GetHandshakeTimeout();
+  WiFiEndpointRefPtr endpoint;
+  RpcIdentifier bss_path;
+  MockWiFiServiceRefPtr service(
+      SetupConnectingService(RpcIdentifier(""), &endpoint, &bss_path));
+
+  // When 802.11 association finishes, the pending timer stops and the handshake
+  // timer starts. Note the pending timer is stopped by BSS change and the
+  // handshake timers is triggered by supplicant state change.
+  ReportCurrentBSSChanged(bss_path);
+  EXPECT_TRUE(GetPendingTimeout().IsCancelled());
+  EXPECT_TRUE(handshake_timeout.IsCancelled());
+  ReportStateChanged(WPASupplicant::kInterfaceStateAssociated);
+  EXPECT_FALSE(handshake_timeout.IsCancelled());
+
+  // When handshake fails, the timer is cancelled.
+  ReportStateChanged(WPASupplicant::kInterfaceStateDisconnected);
+  EXPECT_TRUE(handshake_timeout.IsCancelled());
+}
+
+TEST_F(WiFiMainTest, TimeoutHandshake) {
+  StartWiFi();
+  event_dispatcher_->DispatchPendingEvents();
+  auto& handshake_timeout = GetHandshakeTimeout();
+  WiFiEndpointRefPtr endpoint;
+  RpcIdentifier bss_path;
+  MockWiFiServiceRefPtr service(
+      SetupConnectingService(RpcIdentifier(""), &endpoint, &bss_path));
+
+  // When 802.11 association finishes, the pending timer stops and the handshake
+  // timer starts. Note the pending timer is stopped by BSS change and the
+  // handshake timers is triggered by supplicant state change.
+  ReportCurrentBSSChanged(bss_path);
+  EXPECT_TRUE(GetPendingTimeout().IsCancelled());
+  EXPECT_TRUE(handshake_timeout.IsCancelled());
+  ReportStateChanged(WPASupplicant::kInterfaceStateAssociated);
+  EXPECT_FALSE(handshake_timeout.IsCancelled());
+  EXPECT_EQ(nullptr, GetPendingService());
+  EXPECT_NE(nullptr, GetCurrentService());
+
+  // Handshake timeout initiates disconnection.
+  EXPECT_CALL(*service, Disconnect(_, HasSubstr("HandshakeTimeoutHandler")));
+  handshake_timeout.callback().Run();
+  // Verify expectations now, because WiFi may report other state changes
+  // when WiFi is Stop()-ed (during TearDown()).
+  Mock::VerifyAndClearExpectations(service.get());
 }
 
 TEST_F(WiFiMainTest, DisconnectInvalidService) {
@@ -2211,8 +2630,11 @@ TEST_F(WiFiMainTest, Stop) {
       .WillOnce(Return(nullptr));
   EXPECT_CALL(*wifi_provider(), OnEndpointRemoved(EndpointMatch(endpoint1)))
       .WillOnce(Return(nullptr));
+  EXPECT_CALL(*wifi_provider(), ResetServicesAutoConnectCooldownTime())
+      .Times(1);
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveNetwork(kPath)).Times(1);
   StopWiFi();
+  Mock::VerifyAndClearExpectations(wifi_provider());
   EXPECT_TRUE(GetScanTimer().IsCancelled());
   EXPECT_FALSE(wifi()->weak_ptr_factory_while_started_.HasWeakPtrs());
 }
@@ -2246,7 +2668,153 @@ TEST_F(WiFiMainTest, StopDisconnectReason) {
                                     IEEE_80211::kReasonCodeSenderHasLeft));
 
   event_dispatcher_->DispatchPendingEvents();
-  Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
+}
+
+TEST_F(WiFiMainTest, SignalChanged) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  // Use a reference to the endpoint instance in the WiFi device instead of
+  // the copy returned by SetupConnectedService().
+  WiFiEndpointRefPtr endpoint = GetEndpointMap().begin()->second;
+
+  KeyValueStore props;
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI, -70);
+  KeyValueStore properties;
+  properties.Set<KeyValueStore>(WPASupplicant::kSignalChangeProperty, props);
+
+  PropertiesChanged(properties);
+  event_dispatcher_->DispatchPendingEvents();
+
+  EXPECT_EQ(GetStationStats().signal, -70);
+  EXPECT_EQ(endpoint->signal_strength(), -70);
+
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, SignalChangedBeaconAverage) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  // Use a reference to the endpoint instance in the WiFi device instead of
+  // the copy returned by SetupConnectedService().
+  WiFiEndpointRefPtr endpoint = GetEndpointMap().begin()->second;
+
+  KeyValueStore props;
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI, -70);
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyAverageBeaconRSSI,
+                     -60);
+  KeyValueStore properties;
+  properties.Set<KeyValueStore>(WPASupplicant::kSignalChangeProperty, props);
+
+  PropertiesChanged(properties);
+  event_dispatcher_->DispatchPendingEvents();
+
+  EXPECT_EQ(GetStationStats().signal, -70);
+  EXPECT_EQ(endpoint->signal_strength(), -60);
+
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, SignalChangedAverage) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  // Use a reference to the endpoint instance in the WiFi device instead of
+  // the copy returned by SetupConnectedService().
+  WiFiEndpointRefPtr endpoint = GetEndpointMap().begin()->second;
+
+  KeyValueStore props;
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI, -70);
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyAverageRSSI, -65);
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyAverageBeaconRSSI,
+                     -60);
+  KeyValueStore properties;
+  properties.Set<KeyValueStore>(WPASupplicant::kSignalChangeProperty, props);
+
+  PropertiesChanged(properties);
+  event_dispatcher_->DispatchPendingEvents();
+
+  EXPECT_EQ(GetStationStats().signal, -70);
+  EXPECT_EQ(endpoint->signal_strength(), -65);
+
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, UpdateLinkSpeed) {
+  StartWiFi();
+  WiFiEndpointRefPtr endpoint;
+  RpcIdentifier bss_path;
+  MockWiFiServiceRefPtr service(
+      SetupConnectedService(RpcIdentifier(""), &endpoint, &bss_path));
+
+  KeyValueStore props;
+  // We dont care about Signal but signal related properties are required.
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI, -70);
+  props.Set<uint32_t>(WPASupplicant::kSignalChangePropertyRxSpeed, 20000UL);
+  props.Set<uint32_t>(WPASupplicant::kSignalChangePropertyTxSpeed, 50000UL);
+  KeyValueStore properties;
+  properties.Set<KeyValueStore>(WPASupplicant::kSignalChangeProperty, props);
+
+  EXPECT_CALL(*service, SetDownlinkSpeedKbps(20000)).Times(1);
+  EXPECT_CALL(*service, SetUplinkSpeedKbps(50000)).Times(1);
+
+  PropertiesChanged(properties);
+  event_dispatcher_->DispatchPendingEvents();
+
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, EmptyLinkSpeed) {
+  StartWiFi();
+  WiFiEndpointRefPtr endpoint;
+  RpcIdentifier bss_path;
+  MockWiFiServiceRefPtr service(
+      SetupConnectedService(RpcIdentifier(""), &endpoint, &bss_path));
+
+  KeyValueStore props;
+  // We dont care about Signal but signal related properties are required.
+  // Check if link speeds will be set when the properties are not set.
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI, -70);
+  KeyValueStore properties;
+  properties.Set<KeyValueStore>(WPASupplicant::kSignalChangeProperty, props);
+
+  EXPECT_CALL(*service, SetDownlinkSpeedKbps(_)).Times(0);
+  EXPECT_CALL(*service, SetUplinkSpeedKbps(_)).Times(0);
+
+  PropertiesChanged(properties);
+  event_dispatcher_->DispatchPendingEvents();
+
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, UpdateLinkSpeedWhenDisconnected) {
+  StartWiFi();
+  WiFiEndpointRefPtr endpoint;
+  RpcIdentifier bss_path;
+  MockWiFiServiceRefPtr service(
+      SetupConnectedService(RpcIdentifier(""), &endpoint, &bss_path));
+
+  // Disconnect wifi and make sure it is disconnected.
+  ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
+  EXPECT_EQ(nullptr, GetCurrentService());
+
+  KeyValueStore props;
+  // We dont care about Signal but signal related properties are required.
+  // Check if link speeds will be set when wifi is disconnected.
+  props.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI, -70);
+  props.Set<uint32_t>(WPASupplicant::kSignalChangePropertyRxSpeed, 20000UL);
+  props.Set<uint32_t>(WPASupplicant::kSignalChangePropertyTxSpeed, 50000UL);
+  KeyValueStore properties;
+  properties.Set<KeyValueStore>(WPASupplicant::kSignalChangeProperty, props);
+
+  EXPECT_CALL(*service, SetDownlinkSpeedKbps(_)).Times(0);
+  EXPECT_CALL(*service, SetUplinkSpeedKbps(_)).Times(0);
+
+  PropertiesChanged(properties);
+  event_dispatcher_->DispatchPendingEvents();
+
+  StopWiFi();
 }
 
 TEST_F(WiFiMainTest, ReconnectTimer) {
@@ -2482,7 +3050,7 @@ TEST_F(WiFiMainTest, ScanRejected) {
   ScopedMockLog log;
   StartWiFi();
   ReportScanDone();
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
   EXPECT_CALL(log, Log(_, _, EndsWith("Scan failed"))).Times(1);
@@ -2512,6 +3080,117 @@ TEST_F(WiFiMainTest, ScanAllowRoam) {
   event_dispatcher_->DispatchPendingEvents();
 }
 
+MATCHER_P3(RequestScanType,
+           scan_type_expected,
+           scan_non_coloc_6ghz_expected,
+           scan_6ghz_only_expected,
+           "") {
+  if (!arg.template Contains<std::string>(WPASupplicant::kPropertyScanType)) {
+    return false;
+  }
+  if (!arg.template Contains<bool>(WPASupplicant::kPropertyScanNonColoc6GHz)) {
+    return false;
+  }
+  if (!arg.template Contains<bool>(WPASupplicant::kPropertyScan6GHzOnly)) {
+    return false;
+  }
+
+  std::string scan_type_actual =
+      arg.template Get<std::string>(WPASupplicant::kPropertyScanType);
+  bool scan_non_coloc_6ghz_actual =
+      arg.template Get<bool>(WPASupplicant::kPropertyScanNonColoc6GHz);
+  bool scan_6ghz_only_actual =
+      arg.template Get<bool>(WPASupplicant::kPropertyScan6GHzOnly);
+  return scan_type_expected == scan_type_actual &&
+         scan_non_coloc_6ghz_expected == scan_non_coloc_6ghz_actual &&
+         scan_6ghz_only_expected == scan_6ghz_only_actual;
+}
+
+TEST_F(WiFiMainTest, WiFiRequestScanTypeDefault) {
+  Error error;
+  StartWiFi();
+  // Dispatch any scan tasks that may have been called previously.
+  event_dispatcher_->DispatchPendingEvents();
+  manager()->props_.request_scan_type = kWiFiRequestScanTypeDefault;
+  // kWiFiRequestScanTypeDefault is equivalent to kWiFiRequestScanTypeActive
+  EXPECT_CALL(
+      *GetSupplicantInterfaceProxy(),
+      Scan(RequestScanType(WPASupplicant::kScanTypeActive, false, false)));
+  SetScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone,
+               __func__);
+  Scan(&error, "RequestScan", true);
+  event_dispatcher_->DispatchPendingEvents();
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, WiFiRequestScanTypeActive) {
+  Error error;
+  StartWiFi();
+  // Dispatch any scan tasks that may have been called previously.
+  event_dispatcher_->DispatchPendingEvents();
+  EXPECT_CALL(
+      *GetSupplicantInterfaceProxy(),
+      Scan(RequestScanType(WPASupplicant::kScanTypeActive, false, false)));
+  manager()->props_.request_scan_type = kWiFiRequestScanTypeActive;
+  SetScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone,
+               __func__);
+  Scan(&error, "RequestScan", true);
+  event_dispatcher_->DispatchPendingEvents();
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, WiFiRequestScanTypePassive) {
+  Error error;
+  StartWiFi();
+  // Dispatch any scan tasks that may have been called previously.
+  event_dispatcher_->DispatchPendingEvents();
+  EXPECT_CALL(
+      *GetSupplicantInterfaceProxy(),
+      Scan(RequestScanType(WPASupplicant::kScanTypePassive, true, true)));
+  manager()->props_.request_scan_type = kWiFiRequestScanTypePassive;
+  SetScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone,
+               __func__);
+  Scan(&error, "RequestScan", true);
+  event_dispatcher_->DispatchPendingEvents();
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, WiFiRequestScanTypePassiveNonDBus) {
+  Error error;
+  StartWiFi();
+  // Dispatch any scan tasks that may have been called previously.
+  event_dispatcher_->DispatchPendingEvents();
+  EXPECT_CALL(
+      *GetSupplicantInterfaceProxy(),
+      Scan(RequestScanType(WPASupplicant::kScanTypeActive, false, false)));
+  manager()->props_.request_scan_type = kWiFiRequestScanTypePassive;
+  SetScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone,
+               __func__);
+  Scan(&error, "NotRequestScan", false);
+  event_dispatcher_->DispatchPendingEvents();
+  StopWiFi();
+}
+
+TEST_F(WiFiMainTest, WEPSupported) {
+  // Connection attempt to service with WEP security should succeed when WEP is
+  // supported.
+  StartWiFi();
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kWep);
+  SetWEPSupport(true);
+  ExpectConnecting();
+  InitiateConnect(service);
+}
+
+TEST_F(WiFiMainTest, WEPUnsupported) {
+  // Connection attempt to service with WEP security should fail when WEP is
+  // unsupported.
+  StartWiFi();
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kWep);
+  SetWEPSupport(false);
+  ExpectNotConnecting();
+  InitiateConnect(service);
+}
+
 TEST_F(WiFiMainTest, InitialSupplicantState) {
   EXPECT_EQ(WiFi::kInterfaceStateUnknown, GetSupplicantState());
 }
@@ -2526,46 +3205,36 @@ TEST_F(WiFiMainTest, StateChangeWithService) {
   // Forward transition should trigger a Service state change.
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   InitiateConnect(service);
-  EXPECT_CALL(*service, SetState(Service::kStateAssociating));
+  EXPECT_EQ(service->state(), Service::kStateAssociating);
   ReportStateChanged(WPASupplicant::kInterfaceStateAssociated);
-  // Verify expectations now, because WiFi may report other state changes
-  // when WiFi is Stop()-ed (during TearDown()).
-  Mock::VerifyAndClearExpectations(service.get());
-  EXPECT_CALL(*service, SetState(_)).Times(AnyNumber());
+  EXPECT_EQ(service->state(), Service::kStateAssociating);
 }
 
 TEST_F(WiFiMainTest, StateChangeBackwardsWithService) {
   // Some backwards transitions should not trigger a Service state change.
   // Supplicant state should still be updated, however.
-  EXPECT_CALL(*dhcp_provider(), CreateIPv4Config(_, _, _, _))
-      .Times(AnyNumber());
-  EXPECT_CALL(*dhcp_config_, RequestIP()).Times(AnyNumber());
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
-  EXPECT_CALL(*service, SetState(Service::kStateAssociating));
-  EXPECT_CALL(*service, SetState(Service::kStateConfiguring));
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   EXPECT_CALL(*service, ResetSuspectedCredentialFailures());
   InitiateConnect(service);
+  EXPECT_EQ(service->state(), Service::kStateAssociating);
   ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
+  EXPECT_EQ(service->state(), Service::kStateConfiguring);
   SetIsRoamingInProgress(true);
   ReportStateChanged(WPASupplicant::kInterfaceStateAuthenticating);
   EXPECT_EQ(WPASupplicant::kInterfaceStateAuthenticating, GetSupplicantState());
   ReportStateChanged(WPASupplicant::kInterfaceStateAssociating);
   EXPECT_EQ(WPASupplicant::kInterfaceStateAssociating, GetSupplicantState());
-  // Verify expectations now, because WiFi may report other state changes
-  // when WiFi is Stop()-ed (during TearDown()).
-  Mock::VerifyAndClearExpectations(service.get());
-  EXPECT_CALL(*service, SetState(_)).Times(AnyNumber());
 }
 
 TEST_F(WiFiMainTest, RoamStateChange) {
   // Forward transition should trigger a Service state change.
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   InitiateConnect(service);
   ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
   SetIsRoamingInProgress(true);
@@ -2576,18 +3245,19 @@ TEST_F(WiFiMainTest, RoamStateChange) {
   ReportStateChanged(WPASupplicant::kInterfaceStateAssociating);
   EXPECT_EQ(Service::kRoamStateAssociating, service->roam_state());
   EXPECT_CALL(*service, IsConnected(nullptr)).WillOnce(Return(true));
+  EXPECT_CALL(*network(), TimeToNextDHCPLeaseRenewal())
+      .WillOnce(Return(base::Minutes(1)));
   ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
   EXPECT_EQ(Service::kRoamStateConfiguring, service->roam_state());
   // Verify expectations now, because WiFi may report other state changes
   // when WiFi is Stop()-ed (during TearDown()).
   Mock::VerifyAndClearExpectations(service.get());
-  EXPECT_CALL(*service, SetState(_)).Times(AnyNumber());
 }
 
 TEST_F(WiFiMainTest, ConnectToServiceWithoutRecentIssues) {
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   EXPECT_CALL(*service, HasRecentConnectionIssues()).WillOnce(Return(false));
   InitiateConnect(service);
   EXPECT_EQ(wifi()->is_debugging_connection_, false);
@@ -2601,7 +3271,7 @@ TEST_F(WiFiMainTest, ConnectToServiceWithRecentIssues) {
   MockSupplicantProcessProxy* process_proxy = supplicant_process_proxy_;
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   EXPECT_CALL(*process_proxy, GetDebugLevel(_))
       .WillOnce(
           DoAll(SetArgPointee<0>(std::string(WPASupplicant::kDebugLevelInfo)),
@@ -2632,11 +3302,60 @@ TEST_F(WiFiMainTest, CurrentBSSChangeConnectedToDisconnected) {
   MockWiFiServiceRefPtr service =
       SetupConnectedService(RpcIdentifier(""), &endpoint, nullptr);
 
-  EXPECT_CALL(*service, SetState(Service::kStateIdle)).Times(AtLeast(1));
   ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
+  EXPECT_EQ(service->state(), Service::kStateIdle);
   EXPECT_EQ(nullptr, GetCurrentService());
   EXPECT_EQ(nullptr, GetPendingService());
   EXPECT_FALSE(GetIsRoamingInProgress());
+}
+
+TEST_F(WiFiMainTest, BSSIDChangeInvokesNotifyBSSIDChange) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service0 =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  MockWiFiServiceRefPtr service1;
+  RpcIdentifier bss_path1(MakeNewEndpointAndService(0, 0, nullptr, &service1));
+  EXPECT_EQ(service0, GetCurrentService());
+
+  // Ensure call to NotifyBSSIDChanged is called on BSSIDChanged.
+  EXPECT_CALL(*metrics(), NotifyBSSIDChanged());
+  ReportCurrentBSSChanged(bss_path1);
+  Mock::VerifyAndClearExpectations(service0.get());
+  Mock::VerifyAndClearExpectations(service1.get());
+}
+
+TEST_F(WiFiMainTest, RekeyInvokesNotifyRekeyStart) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service0 =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  EXPECT_EQ(service0, GetCurrentService());
+  EXPECT_CALL(*metrics(), NotifyRekeyStart());
+  ReportStateChanged(WPASupplicant::kInterfaceState4WayHandshake);
+  Mock::VerifyAndClearExpectations(service0.get());
+}
+
+TEST_F(WiFiMainTest,
+       UnreliableConnectionInvokesNotifyWiFiConnectionUnreliable) {
+  StartWiFi();
+
+  const std::string kGatewayIPAddressString = "192.168.1.1";
+  SetupConnectionAndIPConfig(kGatewayIPAddressString);
+  const auto kGatewayIPAddress =
+      *net_base::IPAddress::CreateFromString(kGatewayIPAddressString);
+
+  // Sets up Service.
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+  SetCurrentService(service);
+
+  // Gateway has been found.
+  ON_CALL(*network(), ipv4_gateway_found()).WillByDefault(Return(true));
+  // Service is unreliable.
+  service->set_unreliable(true);
+  // If gateway is found, service is unreliable, and supplicant is active,
+  // OnLinkMonitorFailure should invoke NotifyWiFiConnectionUnreliable.
+  EXPECT_CALL(*metrics(), NotifyWiFiConnectionUnreliable());
+  OnLinkMonitorFailure(kGatewayIPAddress.GetFamily());
+  Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 }
 
 TEST_F(WiFiMainTest, CurrentBSSChangeConnectedToConnectedNewService) {
@@ -2651,21 +3370,19 @@ TEST_F(WiFiMainTest, CurrentBSSChangeConnectedToConnectedNewService) {
   // (e.g. kInterfaceStateAssociating), on the theory that they are
   // unreliable. Specifically, they may be quashed if the association
   // completes before supplicant flushes its changed properties.
-  EXPECT_CALL(*service0, SetState(Service::kStateIdle)).Times(AtLeast(1));
   ReportCurrentBSSChanged(bss_path1);
-  EXPECT_CALL(*service1, SetState(Service::kStateConfiguring));
+  EXPECT_EQ(service0->state(), Service::kStateIdle);
   EXPECT_CALL(*service1, ResetSuspectedCredentialFailures());
   ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
+  EXPECT_EQ(service1->state(), Service::kStateConfiguring);
   EXPECT_EQ(service1, GetCurrentService());
   EXPECT_FALSE(GetIsRoamingInProgress());
-  Mock::VerifyAndClearExpectations(service0.get());
-  Mock::VerifyAndClearExpectations(service1.get());
 }
 
 TEST_F(WiFiMainTest, CurrentBSSChangedUpdateServiceEndpoint) {
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
-  VerifyScanState(WiFi::kScanScanning, WiFi::kScanMethodFull);
+  VerifyScanState(WiFiState::PhyState::kScanning, WiFiState::ScanMethod::kFull);
 
   MockWiFiServiceRefPtr service =
       SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
@@ -2674,22 +3391,22 @@ TEST_F(WiFiMainTest, CurrentBSSChangedUpdateServiceEndpoint) {
   EXPECT_CALL(*service, NotifyCurrentEndpoint(EndpointMatch(endpoint)));
   ReportCurrentBSSChanged(bss_path);
   EXPECT_TRUE(GetIsRoamingInProgress());
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 
   // If we report a "completed" state change on a connected service after
-  // wpa_supplicant has roamed, we should renew our IPConfig.
-  scoped_refptr<MockIPConfig> ipconfig(
-      new MockIPConfig(control_interface(), kDeviceName));
-  SetIPConfig(ipconfig);
-  EXPECT_CALL(*service, IsConnected(nullptr)).WillOnce(Return(true));
-  EXPECT_CALL(*ipconfig, RenewIP());
+  // wpa_supplicant has roamed, we should renew our DHCP lease.
+  EXPECT_CALL(*service, IsConnected(nullptr)).WillRepeatedly(Return(true));
+  EXPECT_CALL(*network(), TimeToNextDHCPLeaseRenewal())
+      .WillOnce(Return(base::Minutes(1)));
+  EXPECT_CALL(*network(), RenewDHCPLease());
   ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
-  Mock::VerifyAndClearExpectations(ipconfig.get());
   EXPECT_FALSE(GetIsRoamingInProgress());
 }
 
 TEST_F(WiFiMainTest, DisconnectReasonUpdated) {
   ScopedMockLog log;
+  // Don't error if there are extra logs on top of the ones we're testing for.
+  EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
   IEEE_80211::WiFiReasonCode test_reason = IEEE_80211::kReasonCodeInactivity;
   EXPECT_CALL(*adaptor_, EmitBoolChanged(kPoweredProperty, _))
       .Times(AnyNumber());
@@ -2720,6 +3437,145 @@ TEST_F(WiFiMainTest, DisconnectReasonCleared) {
   ReportStateChanged(WPASupplicant::kInterfaceStateAssociated);
   EXPECT_EQ(wifi().get()->supplicant_disconnect_reason_,
             IEEE_80211::kReasonCodeInvalid);
+}
+
+TEST_F(WiFiMainTest, DisconnectReasonEmitEventOnUserDisconnection) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  int32_t reason = -IEEE_80211::kReasonCodeNonAssociated;
+  // If the disconnection is user-initiated, we report that the disconnection
+  // is expected.
+  Error error;
+  service->UserInitiatedDisconnect("", &error);
+  EXPECT_CALL(*service, EmitDisconnectionEvent(
+                            Metrics::kWiFiDisconnectionTypeExpectedUserAction,
+                            IEEE_80211::kReasonCodeNonAssociated));
+  ReportDisconnectReasonChanged(reason);
+}
+
+TEST_F(WiFiMainTest, DisconnectReasonEmitEventOnExpectedSTA) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  int32_t reason = -IEEE_80211::kReasonCodeSenderHasLeft;
+  service->set_expecting_disconnect(true);
+  // If supplicant reports a < 0 disconnection reason it means the station
+  // decided to disconnect. If the service was expecting a disconnection, we
+  // report that the disconnection is expected.
+  EXPECT_CALL(*service, EmitDisconnectionEvent(
+                            Metrics::kWiFiDisconnectionTypeExpectedUserAction,
+                            IEEE_80211::kReasonCodeSenderHasLeft));
+  ReportDisconnectReasonChanged(reason);
+}
+
+TEST_F(WiFiMainTest, DisconnectReasonEmitEventOnSSIDSwitch) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service0 =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  MockWiFiServiceRefPtr service1;
+  RpcIdentifier bss_path1(MakeNewEndpointAndService(0, 0, nullptr, &service1));
+  int32_t reason = -IEEE_80211::kReasonCodeSenderHasLeft;
+  // When we're already connected to |service0| and we attempt to connect to
+  // another service, we expect |service0| to report that the disconnection was
+  // expected.
+  EXPECT_CALL(*service0, EmitDisconnectionEvent(
+                             Metrics::kWiFiDisconnectionTypeExpectedUserAction,
+                             IEEE_80211::kReasonCodeSenderHasLeft));
+  InitiateConnect(service1);
+  ReportDisconnectReasonChanged(reason);
+}
+
+TEST_F(WiFiMainTest, DisconnectReasonEmitEventOnUnexpectedSTA) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  int32_t reason = -IEEE_80211::kReasonCodeInactivity;
+  service->set_expecting_disconnect(false);
+  // If supplicant reports a < 0 disconnection reason it means the station
+  // decided to disconnect. If the service wasn't expecting a disconnection, we
+  // report that the disconnection is unexpected.
+  EXPECT_CALL(*service,
+              EmitDisconnectionEvent(
+                  Metrics::kWiFiDisconnectionTypeUnexpectedSTADisconnect,
+                  IEEE_80211::kReasonCodeInactivity));
+  ReportDisconnectReasonChanged(reason);
+}
+
+TEST_F(WiFiMainTest, DisconnectReasonEmitEventOnUnexpectedAP) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  int32_t reason = IEEE_80211::kReasonCodeInactivity;
+  // If supplicant reports a > 0 disconnection reason it means the AP decided to
+  // disconnect.
+  EXPECT_CALL(*service,
+              EmitDisconnectionEvent(
+                  Metrics::kWiFiDisconnectionTypeUnexpectedAPDisconnect,
+                  IEEE_80211::kReasonCodeInactivity));
+  ReportDisconnectReasonChanged(reason);
+}
+
+TEST_F(WiFiMainTest, DisconnectReasonEmitEventOnAttemptFailureInAssoc) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectingService(RpcIdentifier(""), nullptr, nullptr);
+  EXPECT_EQ(service, GetPendingService());
+  EXPECT_EQ(nullptr, GetCurrentService());
+  // For the failure during a connection attempt, shill should not emit the
+  // disconnection event. During a connection attempt, |pending_service_| could
+  // be valid or set to nullptr, depending on the stage. Association failure
+  // reflects the case when |pending_service_| is still valid.
+  int32_t reason = IEEE_80211::kReasonCodeNonAssociated;
+  EXPECT_CALL(*service,
+              EmitDisconnectionEvent(
+                  Metrics::kWiFiDisconnectionTypeUnexpectedAPDisconnect,
+                  IEEE_80211::kReasonCodeNonAssociated))
+      .Times(0);
+  ReportDisconnectReasonChanged(reason);
+}
+
+TEST_F(WiFiMainTest, DisconnectReasonEmitEventOnAttemptFailureIn4WayHandshake) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectingService(RpcIdentifier(""), nullptr, nullptr);
+  ReportStateChanged(WPASupplicant::kInterfaceState4WayHandshake);
+  EXPECT_EQ(service, GetPendingService());
+  EXPECT_EQ(nullptr, GetCurrentService());
+  // For the failure during a connection attempt, shill should not emit the
+  // disconnection event. During a connection attempt, |pending_service_| could
+  // be valid or set to nullptr, depending on the stage. 4-way handshake timeout
+  // reflects the case when |pending_service_| is set to nullptr. In addition,
+  // some connection failure reason code is shared by both attempt failure and
+  // disconnection, and 4-way handshake timeout is one of the examples. Failure
+  // in a connection attempt accompanied by 4-way handshake timeout reason code
+  // should not trigger a Disconnection event.
+  int32_t reason = IEEE_80211::kReasonCode4WayTimeout;
+  EXPECT_CALL(*service,
+              EmitDisconnectionEvent(
+                  Metrics::kWiFiDisconnectionTypeUnexpectedAPDisconnect,
+                  IEEE_80211::kReasonCode4WayTimeout))
+      .Times(0);
+  ReportDisconnectReasonChanged(reason);
+}
+
+TEST_F(WiFiMainTest, DisconnectReasonEmitEventOnDisconnectionInRekey) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  ReportStateChanged(WPASupplicant::kInterfaceState4WayHandshake);
+  EXPECT_EQ(nullptr, GetPendingService());
+  // Some connection failure reason code is shared by both attempt failure and
+  // disconnection, and 4-way handshake timeout is one of the examples. Failure
+  // during rekey process accompanied by 4-way handshake timeout reason code
+  // should trigger a Disconnection event.
+  int32_t reason = IEEE_80211::kReasonCode4WayTimeout;
+  EXPECT_CALL(*service,
+              EmitDisconnectionEvent(
+                  Metrics::kWiFiDisconnectionTypeUnexpectedAPDisconnect,
+                  IEEE_80211::kReasonCode4WayTimeout))
+      .Times(1);
+  ReportDisconnectReasonChanged(reason);
 }
 
 TEST_F(WiFiMainTest, GetSuffixFromAuthMode) {
@@ -2769,11 +3625,11 @@ TEST_F(WiFiMainTest, ConnectedToUnintendedPreemptsPending) {
   // Connected to the unintended service (service0).
   ReportCurrentBSSChanged(bss_path);
 
-  // Verify the pending service is disconnected, and the service state is back
-  // to idle, so it is connectable again.
+  // Expect the pending service to go back to idle, so it is connectable again.
+  EXPECT_EQ(intended_service->state(), Service::kStateIdle);
+  // Verify the pending service is disconnected
   EXPECT_EQ(nullptr, GetPendingService());
   EXPECT_EQ(nullptr, GetCurrentService());
-  EXPECT_EQ(Service::kStateIdle, intended_service->state());
 }
 
 TEST_F(WiFiMainTest, IsIdle) {
@@ -2819,12 +3675,13 @@ TEST_F(WiFiMainTest, AddNetworkArgsNoBgscan) {
 
 TEST_F(WiFiMainTest, AppendBgscan) {
   StartWiFi();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   {
     // 1 endpoint, default bgscan method -- background scan frequency very
     // reduced.
     KeyValueStore params;
-    EXPECT_CALL(*service, GetEndpointCount()).WillOnce(Return(1));
+    EXPECT_CALL(*service, GetBSSIDConnectableEndpointCount())
+        .WillOnce(Return(1));
     AppendBgscan(service.get(), &params);
     Mock::VerifyAndClearExpectations(service.get());
     std::string config_string;
@@ -2842,7 +3699,8 @@ TEST_F(WiFiMainTest, AppendBgscan) {
   {
     // 2 endpoints, default bgscan method -- background scan frequency reduced.
     KeyValueStore params;
-    EXPECT_CALL(*service, GetEndpointCount()).WillOnce(Return(2));
+    EXPECT_CALL(*service, GetBSSIDConnectableEndpointCount())
+        .WillOnce(Return(2));
     AppendBgscan(service.get(), &params);
     Mock::VerifyAndClearExpectations(service.get());
     std::string config_string;
@@ -2861,7 +3719,7 @@ TEST_F(WiFiMainTest, AppendBgscan) {
     // Explicit bgscan method -- regular background scan frequency.
     EXPECT_TRUE(SetBgscanMethod(WPASupplicant::kNetworkBgscanMethodSimple));
     KeyValueStore params;
-    EXPECT_CALL(*service, GetEndpointCount()).Times(0);
+    EXPECT_CALL(*service, GetBSSIDConnectableEndpointCount()).Times(0);
     AppendBgscan(service.get(), &params);
     Mock::VerifyAndClearExpectations(service.get());
     EXPECT_TRUE(
@@ -2878,7 +3736,7 @@ TEST_F(WiFiMainTest, AppendBgscan) {
     // No scan method, simply returns without appending properties
     EXPECT_TRUE(SetBgscanMethod(WPASupplicant::kNetworkBgscanMethodNone));
     KeyValueStore params;
-    EXPECT_CALL(*service, GetEndpointCount()).Times(0);
+    EXPECT_CALL(*service, GetBSSIDConnectableEndpointCount()).Times(0);
     AppendBgscan(service.get(), &params);
     Mock::VerifyAndClearExpectations(service.get());
     std::string config_string;
@@ -2894,7 +3752,6 @@ TEST_F(WiFiMainTest, StateAndIPIgnoreLinkEvent) {
   MockWiFiServiceRefPtr service(
       SetupConnectingService(RpcIdentifier(""), nullptr, nullptr));
   EXPECT_CALL(*service, SetState(_)).Times(0);
-  EXPECT_CALL(*dhcp_config_, RequestIP()).Times(0);
   ReportLinkUp();
 
   // Verify expectations now, because WiFi may cause |service| state
@@ -2906,19 +3763,16 @@ TEST_F(WiFiMainTest, SupplicantCompletedAlreadyConnected) {
   StartWiFi();
   MockWiFiServiceRefPtr service(
       SetupConnectedService(RpcIdentifier(""), nullptr, nullptr));
-  Mock::VerifyAndClearExpectations(dhcp_config_.get());
-  EXPECT_CALL(*dhcp_config_, RequestIP()).Times(0);
   // Simulate a rekeying event from the AP.  These show as transitions from
   // completed->completed from wpa_supplicant.
   ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
-  EXPECT_CALL(*manager(), device_info()).WillOnce(Return(device_info()));
-  ReportIPConfigComplete();
+  ReportGetDHCPLease();
   // Similarly, rekeying events after we have an IP don't trigger L3
   // configuration.  However, we treat all transitions to completed as potential
   // reassociations, so we will reenable high rates again here.
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
-  EXPECT_CALL(*service, IsConnected(nullptr)).WillOnce(Return(true));
+  EXPECT_CALL(*service, IsConnected(nullptr)).WillRepeatedly(Return(true));
   ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
 }
 
@@ -2930,7 +3784,7 @@ TEST_F(WiFiMainTest, BSSAddedCreatesBSSProxy) {
   EXPECT_CALL(*control_interface(), CreateSupplicantBSSProxy(_, _));
   StartWiFi();
   ReportBSS(RpcIdentifier("bss0"), "ssid0", "00:00:00:00:00:00", 0, 0,
-            kNetworkModeInfrastructure);
+            kNetworkModeInfrastructure, 0);
 }
 
 TEST_F(WiFiMainTest, BSSRemovedDestroysBSSProxy) {
@@ -2985,7 +3839,7 @@ TEST_F(WiFiMainTest, CallWakeOnWiFi_OnScanDone) {
 
   // If the WiFi device is not Idle, do not call
   // WakeOnWiFi::OnNoAutoConnectableServicesAfterScan.
-  SetCurrentService(MakeMockService(kSecurityWep));
+  SetCurrentService(MakeMockService(WiFiSecurity::kWep));
   EXPECT_FALSE(wifi()->IsIdle());
   EXPECT_CALL(*wifi_provider(), NumAutoConnectableServices())
       .WillOnce(Return(0));
@@ -3111,15 +3965,16 @@ TEST_F(WiFiMainTest, LinkMonitorFailure) {
   StartWiFi();
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
 
-  using EventSignal = patchpanel::NeighborReachabilityEventSignal;
+  using Role = patchpanel::Client::NeighborRole;
+  using Status = patchpanel::Client::NeighborStatus;
 
   const std::string kGatewayIPAddressString = "192.168.1.1";
   SetupConnectionAndIPConfig(kGatewayIPAddressString);
-  const IPAddress kGatewayIPAddress(kGatewayIPAddressString);
-  const IPAddress kAnotherIPAddress("1.2.3.4");
+  const auto kGatewayIPAddress =
+      *net_base::IPAddress::CreateFromString(kGatewayIPAddressString);
 
   // Sets up Service.
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   SetCurrentService(service);
   // Can be used to clear link status (last failure time, etc.), so that the
   // following tests will not be affected by service->unreliable().
@@ -3131,73 +3986,55 @@ TEST_F(WiFiMainTest, LinkMonitorFailure) {
 
   // We haven't heard the gateway is reachable, so we assume the problem is
   // gateway, rather than link.
-  EXPECT_CALL(
-      log, Log(logging::LOGGING_INFO, _, EndsWith("gateway was never found.")))
-      .Times(1);
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Reattach()).Times(0);
-  OnNeighborReachabilityEvent(kGatewayIPAddress, EventSignal::GATEWAY,
-                              EventSignal::FAILED);
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kFailed);
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 
   // Gateway has been discovered now.
-  OnNeighborReachabilityEvent(kGatewayIPAddress, EventSignal::GATEWAY,
-                              EventSignal::REACHABLE);
-
-  // Nothing should happen if the event is not for the current connection.
-  reset_service();
-  OnNeighborReachabilityEvent(kAnotherIPAddress, EventSignal::GATEWAY,
-                              EventSignal::FAILED);
+  ON_CALL(*network(), ipv4_gateway_found()).WillByDefault(Return(true));
 
   // No supplicant, so we can't Reattach.
   reset_service();
   OnSupplicantVanish();
-  EXPECT_CALL(log,
-              Log(logging::LOGGING_ERROR, _, EndsWith("Cannot reassociate.")))
-      .Times(1);
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Reattach()).Times(0);
-  OnNeighborReachabilityEvent(kGatewayIPAddress, EventSignal::GATEWAY,
-                              EventSignal::FAILED);
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kFailed);
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 
   // Normal case: call Reattach.
   reset_service();
   OnSupplicantAppear();
-  EXPECT_CALL(log,
-              Log(logging::LOGGING_INFO, _, EndsWith("Called Reattach().")))
-      .Times(1);
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Reattach())
       .WillOnce(Return(true));
-  OnNeighborReachabilityEvent(kGatewayIPAddress, EventSignal::GATEWAY,
-                              EventSignal::FAILED);
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kFailed);
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 
   // Service is unreliable, skip reassociate attempt.
   reset_service();
   service->set_unreliable(true);
-  EXPECT_CALL(log, Log(logging::LOGGING_INFO, _,
-                       EndsWith("skipping reassociate attempt.")))
-      .Times(1);
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Reattach()).Times(0);
-  OnNeighborReachabilityEvent(kGatewayIPAddress, EventSignal::GATEWAY,
-                              EventSignal::FAILED);
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kFailed);
   Mock::VerifyAndClearExpectations(GetSupplicantInterfaceProxy());
 }
 
 TEST_F(WiFiMainTest, LinkStatusOnLinkMonitorFailure) {
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   SelectService(service);
 
   // To make the call lines shorter.
-  using EventSignal = patchpanel::NeighborReachabilityEventSignal;
-  constexpr auto kReachable = EventSignal::REACHABLE;
-  constexpr auto kGateway = EventSignal::GATEWAY;
-  constexpr auto kFailed = EventSignal::FAILED;
+  using Role = patchpanel::Client::NeighborRole;
+  using Status = patchpanel::Client::NeighborStatus;
 
   // Make the object ready to respond to link monitor failures.
   constexpr auto kGatewayIPAddressString = "192.168.0.1";
   SetupConnectionAndIPConfig(kGatewayIPAddressString);
-  const IPAddress kGatewayIPAddress("192.168.0.1");
-  OnNeighborReachabilityEvent(kGatewayIPAddress, kGateway, kReachable);
+  const auto kGatewayIPAddress =
+      *net_base::IPAddress::CreateFromString("192.168.0.1");
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kReachable);
 
   time_t current_time = 1000;
   EXPECT_CALL(time_, GetSecondsBoottime(_))
@@ -3207,14 +4044,20 @@ TEST_F(WiFiMainTest, LinkStatusOnLinkMonitorFailure) {
       });
 
   // Initial link monitor failure.
-  EXPECT_CALL(*metrics(), NotifyUnreliableLinkSignalStrength(_, _)).Times(0);
-  OnNeighborReachabilityEvent(kGatewayIPAddress, kGateway, kFailed);
+  EXPECT_CALL(*metrics(),
+              SendToUMA(Metrics::kMetricUnreliableLinkSignalStrength, _))
+      .Times(0);
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kFailed);
   EXPECT_FALSE(service->unreliable());
 
   // Another link monitor failure after 3 minutes, report signal strength.
   current_time += 180;
-  EXPECT_CALL(*metrics(), NotifyUnreliableLinkSignalStrength(_, _)).Times(1);
-  OnNeighborReachabilityEvent(kGatewayIPAddress, kGateway, kFailed);
+  EXPECT_CALL(*metrics(),
+              SendToUMA(Metrics::kMetricUnreliableLinkSignalStrength, _))
+      .Times(1);
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kFailed);
   EXPECT_TRUE(service->unreliable());
 
   // Device is connected with the reliable link callback setup, then
@@ -3222,8 +4065,11 @@ TEST_F(WiFiMainTest, LinkStatusOnLinkMonitorFailure) {
   // still unreliable, reliable link callback should be cancelled.
   current_time += 180;
   SetReliableLinkCallback();
-  EXPECT_CALL(*metrics(), NotifyUnreliableLinkSignalStrength(_, _)).Times(1);
-  OnNeighborReachabilityEvent(kGatewayIPAddress, kGateway, kFailed);
+  EXPECT_CALL(*metrics(),
+              SendToUMA(Metrics::kMetricUnreliableLinkSignalStrength, _))
+      .Times(1);
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kFailed);
   EXPECT_TRUE(service->unreliable());
   EXPECT_TRUE(ReliableLinkCallbackIsCancelled());
 
@@ -3231,13 +4077,16 @@ TEST_F(WiFiMainTest, LinkStatusOnLinkMonitorFailure) {
   // strength not reported.
   current_time += 3600;
   service->set_unreliable(false);
-  EXPECT_CALL(*metrics(), NotifyUnreliableLinkSignalStrength(_, _)).Times(0);
-  OnNeighborReachabilityEvent(kGatewayIPAddress, kGateway, kFailed);
+  EXPECT_CALL(*metrics(),
+              SendToUMA(Metrics::kMetricUnreliableLinkSignalStrength, _))
+      .Times(0);
+  OnNeighborReachabilityEvent(kGatewayIPAddress, Role::kGateway,
+                              Status::kFailed);
   EXPECT_FALSE(service->unreliable());
 }
 
 TEST_F(WiFiMainTest, LinkStatusResetOnSelectService) {
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   SelectService(service);
   service->set_unreliable(true);
   SetReliableLinkCallback();
@@ -3250,7 +4099,7 @@ TEST_F(WiFiMainTest, LinkStatusResetOnSelectService) {
 }
 
 TEST_F(WiFiMainTest, LinkStatusOnConnected) {
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   SelectService(service);
 
   // Link is reliable, no need to post delayed task to reset link status.
@@ -3266,7 +4115,7 @@ TEST_F(WiFiMainTest, LinkStatusOnConnected) {
 
 TEST_F(WiFiMainTest, ResumeWithUnreliableLink) {
   StartWiFi();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   SelectService(service);
   service->set_unreliable(true);
   SetReliableLinkCallback();
@@ -3277,16 +4126,25 @@ TEST_F(WiFiMainTest, ResumeWithUnreliableLink) {
   EXPECT_TRUE(ReliableLinkCallbackIsCancelled());
 }
 
+TEST_F(WiFiMainTest, PskMismatchSignalOnReceive) {
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kWpa2);
+  SetPendingService(service);
+  EXPECT_CALL(*service, AddSuspectedCredentialFailure()).Times(1);
+  ReportPskMismatch();
+}
+
 TEST_F(WiFiMainTest, SuspectCredentialsOpen) {
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure()).Times(0);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+  EXPECT_CALL(*service, AddAndCheckSuspectedCredentialFailure()).Times(0);
   EXPECT_FALSE(SuspectCredentials(service, nullptr));
 }
 
 TEST_F(WiFiMainTest, SuspectCredentialsWPA) {
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityPsk);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kWpa2);
+  SetPendingService(service);
   ReportStateChanged(WPASupplicant::kInterfaceState4WayHandshake);
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure())
+  ReportPskMismatch();
+  EXPECT_CALL(*service, CheckSuspectedCredentialFailure())
       .WillOnce(Return(false))
       .WillOnce(Return(true));
   EXPECT_FALSE(SuspectCredentials(service, nullptr));
@@ -3298,7 +4156,9 @@ TEST_F(WiFiMainTest, SuspectCredentialsWPA) {
 TEST_F(WiFiMainTest, SuspectCredentialsWEP) {
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityWep);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kWep);
+
+  SetWEPSupport(true);
   ExpectConnecting();
   InitiateConnect(service);
   SetCurrentService(service);
@@ -3306,15 +4166,11 @@ TEST_F(WiFiMainTest, SuspectCredentialsWEP) {
   // These expectations are very much like SetupConnectedService except
   // that we verify that ResetSupsectCredentialFailures() is not called
   // on the service just because supplicant entered the Completed state.
-  EXPECT_CALL(*service, SetState(Service::kStateConfiguring));
   EXPECT_CALL(*service, ResetSuspectedCredentialFailures()).Times(0);
-  EXPECT_CALL(*dhcp_provider(), CreateIPv4Config(_, _, _, _))
-      .Times(AnyNumber());
-  EXPECT_CALL(*dhcp_config_, RequestIP()).Times(AnyNumber());
-  EXPECT_CALL(*manager(), device_info()).WillRepeatedly(Return(device_info()));
   EXPECT_CALL(*device_info(), GetByteCounts(_, _, _))
       .WillOnce(DoAll(SetArgPointee<2>(0LL), Return(true)));
   ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
+  EXPECT_EQ(service->state(), Service::kStateConfiguring);
 
   Mock::VerifyAndClearExpectations(device_info());
   Mock::VerifyAndClearExpectations(service.get());
@@ -3338,7 +4194,7 @@ TEST_F(WiFiMainTest, SuspectCredentialsWEP) {
 
   // Connection failed during DHCP but service does not (yet) believe this is
   // due to a passphrase issue.
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure())
+  EXPECT_CALL(*service, AddAndCheckSuspectedCredentialFailure())
       .WillOnce(Return(false));
   EXPECT_CALL(*service, DisconnectWithFailure(Service::kFailureDHCP, _,
                                               HasSubstr("OnIPConfigFailure")));
@@ -3347,71 +4203,78 @@ TEST_F(WiFiMainTest, SuspectCredentialsWEP) {
 
   // Connection failed during DHCP and service believes this is due to a
   // passphrase issue.
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure()).WillOnce(Return(true));
+  EXPECT_CALL(*service, AddAndCheckSuspectedCredentialFailure())
+      .WillOnce(Return(true));
   EXPECT_CALL(*service, DisconnectWithFailure(Service::kFailureBadPassphrase, _,
                                               HasSubstr("OnIPConfigFailure")));
   ReportIPConfigFailure();
 }
 
 TEST_F(WiFiMainTest, SuspectCredentialsEAPInProgress) {
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurity8021x);
+  MockWiFiServiceRefPtr service =
+      MakeMockService(WiFiSecurity::kWpa2Enterprise);
   EXPECT_CALL(*eap_state_handler_, is_eap_in_progress())
       .WillOnce(Return(false))
       .WillOnce(Return(true))
       .WillOnce(Return(false))
       .WillOnce(Return(true));
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure()).Times(0);
+  EXPECT_CALL(*service, AddAndCheckSuspectedCredentialFailure()).Times(0);
   EXPECT_FALSE(SuspectCredentials(service, nullptr));
   Mock::VerifyAndClearExpectations(service.get());
 
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure()).WillOnce(Return(true));
+  EXPECT_CALL(*service, AddAndCheckSuspectedCredentialFailure())
+      .WillOnce(Return(true));
   Service::ConnectFailure failure;
   EXPECT_TRUE(SuspectCredentials(service, &failure));
   EXPECT_EQ(Service::kFailureEAPAuthentication, failure);
   Mock::VerifyAndClearExpectations(service.get());
 
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure()).Times(0);
+  EXPECT_CALL(*service, AddAndCheckSuspectedCredentialFailure()).Times(0);
   EXPECT_FALSE(SuspectCredentials(service, nullptr));
   Mock::VerifyAndClearExpectations(service.get());
 
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure())
+  EXPECT_CALL(*service, AddAndCheckSuspectedCredentialFailure())
       .WillOnce(Return(false));
   EXPECT_FALSE(SuspectCredentials(service, nullptr));
 }
 
 TEST_F(WiFiMainTest, SuspectCredentialsYieldFailurePSK) {
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityPsk);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kWpa2);
   SetPendingService(service);
   ReportStateChanged(WPASupplicant::kInterfaceState4WayHandshake);
+  ReportPskMismatch();
 
   ExpectScanIdle();
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure()).WillOnce(Return(true));
+  EXPECT_CALL(*service, CheckSuspectedCredentialFailure())
+      .WillOnce(Return(true));
   EXPECT_CALL(*service, SetFailure(Service::kFailureBadPassphrase));
-  EXPECT_CALL(*service, SetState(Service::kStateIdle));
   ScopedMockLog log;
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
   EXPECT_CALL(log,
               Log(logging::LOGGING_ERROR, _, EndsWith(kErrorBadPassphrase)));
   ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
+  EXPECT_EQ(service->state(), Service::kStateIdle);
 }
 
 TEST_F(WiFiMainTest, SuspectCredentialsYieldFailureEAP) {
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurity8021x);
+  MockWiFiServiceRefPtr service =
+      MakeMockService(WiFiSecurity::kWpa2Enterprise);
   SetCurrentService(service);
 
   ScopedMockLog log;
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
-  EXPECT_CALL(*service, SetState(Service::kStateIdle));
   // Ensure that we retrieve is_eap_in_progress() before resetting the
   // EAP handler's state.
   InSequence seq;
   EXPECT_CALL(*eap_state_handler_, is_eap_in_progress()).WillOnce(Return(true));
-  EXPECT_CALL(*service, AddSuspectedCredentialFailure()).WillOnce(Return(true));
+  EXPECT_CALL(*service, AddAndCheckSuspectedCredentialFailure())
+      .WillOnce(Return(true));
   EXPECT_CALL(*service, SetFailure(Service::kFailureEAPAuthentication));
   EXPECT_CALL(log, Log(logging::LOGGING_ERROR, _,
                        EndsWith(kErrorEapAuthenticationFailed)));
   EXPECT_CALL(*eap_state_handler_, Reset());
   ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
+  EXPECT_EQ(service->state(), Service::kStateIdle);
 }
 
 TEST_F(WiFiMainTest, ReportConnectedToServiceAfterWake_CallsWakeOnWiFi) {
@@ -3429,6 +4292,15 @@ class WiFiTimerTest : public WiFiObjectTest {
         mock_dispatcher_(static_cast<StrictMock<MockEventDispatcher>*>(
             event_dispatcher_.get())) {}
 
+  void TearDown() override {
+    Mock::VerifyAndClearExpectations(&*mock_dispatcher_);
+
+    // Loose the expectation on EventDispatcher to allow it being used in
+    // cleanup.
+    EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, _)).Times(AnyNumber());
+    WiFiObjectTest::TearDown();
+  }
+
  protected:
   void ExpectInitialScanSequence();
 
@@ -3442,7 +4314,8 @@ void WiFiTimerTest::ExpectInitialScanSequence() {
 
   // Each time we call FireScanTimer() below, WiFi will post a task to actually
   // run Scan() on the wpa_supplicant proxy.
-  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, 0)).Times(kScanTimes);
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, base::TimeDelta()))
+      .Times(kScanTimes);
   {
     InSequence seq;
     // The scans immediately after the initial scan should happen at the short
@@ -3450,12 +4323,12 @@ void WiFiTimerTest::ExpectInitialScanSequence() {
     // the ones in the expectation below, we get WiFi::kNumFastScanAttempts at
     // the fast scan interval.
     EXPECT_CALL(*mock_dispatcher_,
-                PostDelayedTask(_, _, WiFi::kFastScanIntervalSeconds * 1000))
+                PostDelayedTask(_, _, WiFi::kFastScanInterval))
         .Times(WiFi::kNumFastScanAttempts - 1);
 
     // After this, the WiFi device should use the normal scan interval.
     EXPECT_CALL(*mock_dispatcher_,
-                PostDelayedTask(_, _, GetScanInterval() * 1000))
+                PostDelayedTask(_, _, base::Seconds(GetScanInterval())))
         .Times(kScanTimes - WiFi::kNumFastScanAttempts + 1);
 
     for (int i = 0; i < kScanTimes; i++) {
@@ -3469,56 +4342,54 @@ TEST_F(WiFiTimerTest, FastRescan) {
   EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, _)).Times(AnyNumber());
   // This PostTask is a result of the call to Scan(nullptr), and is meant to
   // post a task to call Scan() on the wpa_supplicant proxy immediately.
-  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, 0));
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, base::TimeDelta()));
   EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(_, _, WiFi::kFastScanIntervalSeconds * 1000));
+              PostDelayedTask(_, _, WiFi::kFastScanInterval));
   StartWiFi();
 
   ExpectInitialScanSequence();
 
   // If we end up disconnecting, the sequence should repeat.
   EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(_, _, WiFi::kFastScanIntervalSeconds * 1000));
+              PostDelayedTask(_, _, WiFi::kFastScanInterval));
   RestartFastScanAttempts();
 
   ExpectInitialScanSequence();
 }
 
 TEST_F(WiFiTimerTest, ReconnectTimer) {
-  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, 0)).Times(AnyNumber());
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, base::TimeDelta()))
+      .Times(AnyNumber());
   EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, _)).Times(AnyNumber());
   StartWiFi();
   SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
   Mock::VerifyAndClearExpectations(&*mock_dispatcher_);
 
-  EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(_, _, GetReconnectTimeoutSeconds() * 1000))
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, GetReconnectTimeout()))
       .Times(1);
   StartReconnectTimer();
   Mock::VerifyAndClearExpectations(&*mock_dispatcher_);
   StopReconnectTimer();
 
-  EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(_, _, GetReconnectTimeoutSeconds() * 1000))
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, GetReconnectTimeout()))
       .Times(1);
   StartReconnectTimer();
   Mock::VerifyAndClearExpectations(&*mock_dispatcher_);
   GetReconnectTimeoutCallback().callback().Run();
 
-  EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(_, _, GetReconnectTimeoutSeconds() * 1000))
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, GetReconnectTimeout()))
       .Times(1);
   StartReconnectTimer();
   Mock::VerifyAndClearExpectations(&*mock_dispatcher_);
 
-  EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(_, _, GetReconnectTimeoutSeconds() * 1000))
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, GetReconnectTimeout()))
       .Times(0);
   StartReconnectTimer();
 }
 
 TEST_F(WiFiTimerTest, RequestStationInfo) {
-  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, 0)).Times(AnyNumber());
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, base::TimeDelta()))
+      .Times(AnyNumber());
   EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, _)).Times(AnyNumber());
 
   // Setup a connected service here while we have the expectations above set.
@@ -3528,47 +4399,32 @@ TEST_F(WiFiTimerTest, RequestStationInfo) {
   RpcIdentifier connected_bss = GetSupplicantBSS();
   Mock::VerifyAndClearExpectations(&*mock_dispatcher_);
 
-  EXPECT_CALL(netlink_manager_, SendNl80211Message(_, _, _, _)).Times(0);
   EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, _)).Times(0);
   NiceScopedMockLog log;
 
-  // There is no current_service_.
+  // It is not L2 connected.
   EXPECT_CALL(log, Log(_, _, HasSubstr("we are not connected")));
-  SetCurrentService(nullptr);
-  RequestStationInfo();
-
-  // current_service_ is not connected.
-  EXPECT_CALL(*service, IsConnected(nullptr)).WillOnce(Return(false));
-  SetCurrentService(service);
-  EXPECT_CALL(log, Log(_, _, HasSubstr("we are not connected")));
-  RequestStationInfo();
+  ReportStateChanged(WPASupplicant::kInterfaceStateAuthenticating);
+  RequestStationInfo(WiFiLinkStatistics::Trigger::kUnknown);
 
   // Endpoint does not exist in endpoint_by_rpcid_.
-  EXPECT_CALL(*service, IsConnected(nullptr)).WillRepeatedly(Return(true));
   SetSupplicantBSS(
       RpcIdentifier("/some/path/that/does/not/exist/in/endpoint_by_rpcid"));
+  ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
   EXPECT_CALL(
       log,
       Log(_, _, HasSubstr("Can't get endpoint for current supplicant BSS")));
-  RequestStationInfo();
-  Mock::VerifyAndClearExpectations(&netlink_manager_);
+  RequestStationInfo(WiFiLinkStatistics::Trigger::kUnknown);
   Mock::VerifyAndClearExpectations(&*mock_dispatcher_);
 
-  // We successfully trigger a request to get the station and start a timer
-  // for the next call.
-  EXPECT_CALL(netlink_manager_,
-              SendNl80211Message(
-                  IsNl80211Command(kNl80211FamilyId, NL80211_CMD_GET_STATION),
-                  _, _, _));
-  EXPECT_CALL(
-      *mock_dispatcher_,
-      PostDelayedTask(_, _, WiFi::kRequestStationInfoPeriodSeconds * 1000));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), SignalPoll(_))
+      .WillOnce(Return(false));
+  EXPECT_CALL(*mock_dispatcher_,
+              PostDelayedTask(_, _, WiFi::kRequestStationInfoPeriod));
   SetSupplicantBSS(connected_bss);
-  RequestStationInfo();
 
-  // Now test that a properly formatted New Station message updates strength.
-  NewStationMessage new_station;
-  new_station.attributes()->CreateRawAttribute(NL80211_ATTR_MAC, "BSSID");
+  RequestStationInfo(WiFiLinkStatistics::Trigger::kBackground);
+  StopRequestingStationInfo();
 
   // Confirm that up until now no link statistics exist.
   KeyValueStore link_statistics = GetLinkStatistics();
@@ -3577,72 +4433,41 @@ TEST_F(WiFiTimerTest, RequestStationInfo) {
   // Use a reference to the endpoint instance in the WiFi device instead of
   // the copy returned by SetupConnectedService().
   WiFiEndpointRefPtr endpoint = GetEndpointMap().begin()->second;
-  new_station.attributes()->SetRawAttributeValue(
-      NL80211_ATTR_MAC, ByteString::CreateFromHexString(endpoint->bssid_hex()));
-  new_station.attributes()->CreateNestedAttribute(NL80211_ATTR_STA_INFO,
-                                                  "Station Info");
-  AttributeListRefPtr station_info;
-  new_station.attributes()->GetNestedAttributeList(NL80211_ATTR_STA_INFO,
-                                                   &station_info);
-  station_info->CreateU8Attribute(NL80211_STA_INFO_SIGNAL, "Signal");
-  const int kSignalValue = -20;
-  station_info->SetU8AttributeValue(NL80211_STA_INFO_SIGNAL, kSignalValue);
-  station_info->CreateU8Attribute(NL80211_STA_INFO_SIGNAL_AVG, "SignalAverage");
-  const int kSignalAvgValue = -40;
-  station_info->SetU8AttributeValue(NL80211_STA_INFO_SIGNAL_AVG,
-                                    kSignalAvgValue);
-  station_info->CreateU32Attribute(NL80211_STA_INFO_INACTIVE_TIME,
-                                   "InactiveTime");
-  const int32_t kInactiveTime = 100;
-  station_info->SetU32AttributeValue(NL80211_STA_INFO_INACTIVE_TIME,
-                                     kInactiveTime);
-  station_info->CreateU32Attribute(NL80211_STA_INFO_RX_PACKETS,
-                                   "ReceivedSuccesses");
-  const int32_t kReceiveSuccesses = 200;
-  station_info->SetU32AttributeValue(NL80211_STA_INFO_RX_PACKETS,
-                                     kReceiveSuccesses);
-  station_info->CreateU32Attribute(NL80211_STA_INFO_TX_FAILED,
-                                   "TransmitFailed");
-  const int32_t kTransmitFailed = 300;
-  station_info->SetU32AttributeValue(NL80211_STA_INFO_TX_FAILED,
-                                     kTransmitFailed);
-  station_info->CreateU32Attribute(NL80211_STA_INFO_TX_PACKETS,
-                                   "TransmitSuccesses");
-  const int32_t kTransmitSuccesses = 400;
-  station_info->SetU32AttributeValue(NL80211_STA_INFO_TX_PACKETS,
-                                     kTransmitSuccesses);
-  station_info->CreateU32Attribute(NL80211_STA_INFO_TX_RETRIES,
-                                   "TransmitRetries");
-  const int32_t kTransmitRetries = 500;
-  station_info->SetU32AttributeValue(NL80211_STA_INFO_TX_RETRIES,
-                                     kTransmitRetries);
-  station_info->CreateNestedAttribute(NL80211_STA_INFO_TX_BITRATE,
-                                      "TX Bitrate Info");
 
-  // Embed transmit bitrate info within the station info element.
-  AttributeListRefPtr bitrate_info;
-  station_info->GetNestedAttributeList(NL80211_STA_INFO_TX_BITRATE,
-                                       &bitrate_info);
-  bitrate_info->CreateU16Attribute(NL80211_RATE_INFO_BITRATE, "Bitrate");
-  const int16_t kBitrate = 6005;
-  bitrate_info->SetU16AttributeValue(NL80211_RATE_INFO_BITRATE, kBitrate);
-  bitrate_info->CreateU8Attribute(NL80211_RATE_INFO_MCS, "MCS");
-  const int16_t kMCS = 7;
-  bitrate_info->SetU8AttributeValue(NL80211_RATE_INFO_MCS, kMCS);
-  bitrate_info->CreateFlagAttribute(NL80211_RATE_INFO_40_MHZ_WIDTH, "HT40");
-  bitrate_info->SetFlagAttributeValue(NL80211_RATE_INFO_40_MHZ_WIDTH, true);
-  bitrate_info->CreateFlagAttribute(NL80211_RATE_INFO_SHORT_GI, "SGI");
-  bitrate_info->SetFlagAttributeValue(NL80211_RATE_INFO_SHORT_GI, false);
-  station_info->SetNestedAttributeHasAValue(NL80211_STA_INFO_TX_BITRATE);
+  // Create the properties object.
+  KeyValueStore properties;
+  const int32_t kSignalValue = -20;
+  properties.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI,
+                          kSignalValue);
+  const int32_t kSignalAvgValue = -40;
+  properties.Set<int32_t>(WPASupplicant::kSignalChangePropertyAverageRSSI,
+                          kSignalAvgValue);
+  const uint32_t kReceiveSuccesses = 200U;
+  properties.Set<uint32_t>(WPASupplicant::kSignalChangePropertyRxPackets,
+                           kReceiveSuccesses);
+  const uint32_t kTransmitFailed = 300U;
+  properties.Set<uint32_t>(WPASupplicant::kSignalChangePropertyRetriesFailed,
+                           kTransmitFailed);
+  const uint32_t kTransmitSuccesses = 400U;
+  properties.Set<uint32_t>(WPASupplicant::kSignalChangePropertyTxPackets,
+                           kTransmitSuccesses);
+  const uint32_t kTransmitRetries = 500U;
+  properties.Set<uint32_t>(WPASupplicant::kSignalChangePropertyRetries,
+                           kTransmitRetries);
+  const uint32_t kBitrate = 6005U;
+  properties.Set<uint32_t>(WPASupplicant::kSignalChangePropertyTxSpeed,
+                           kBitrate * 100);
+  const uint32_t kMCS = 7U;
+  properties.Set<uint32_t>(WPASupplicant::kSignalChangePropertyTxMCS, kMCS);
+  properties.Set<std::string>(WPASupplicant::kSignalChangePropertyChannelWidth,
+                              "40 MHz");
 
-  new_station.attributes()->SetNestedAttributeHasAValue(NL80211_ATTR_STA_INFO);
-
-  EXPECT_NE(kSignalValue, endpoint->signal_strength());
+  EXPECT_NE(kSignalAvgValue, endpoint->signal_strength());
   EXPECT_CALL(*wifi_provider(), OnEndpointUpdated(EndpointMatch(endpoint)));
-  EXPECT_CALL(*metrics(), NotifyWifiTxBitrate(kBitrate / 10));
-  AttributeListConstRefPtr station_info_prime;
-  ReportReceivedStationInfo(new_station);
-  EXPECT_EQ(kSignalValue, endpoint->signal_strength());
+  EXPECT_CALL(*metrics(),
+              SendToUMA(Metrics::kMetricWifiTxBitrate, kBitrate / 10));
+  SignalChanged(properties);
+  EXPECT_EQ(kSignalAvgValue, endpoint->signal_strength());
 
   link_statistics = GetLinkStatistics();
   ASSERT_FALSE(link_statistics.IsEmpty());
@@ -3653,10 +4478,6 @@ TEST_F(WiFiTimerTest, RequestStationInfo) {
       link_statistics.Contains<int32_t>(kAverageReceiveSignalDbmProperty));
   EXPECT_EQ(kSignalAvgValue,
             link_statistics.Get<int32_t>(kAverageReceiveSignalDbmProperty));
-  ASSERT_TRUE(
-      link_statistics.Contains<uint32_t>(kInactiveTimeMillisecondsProperty));
-  EXPECT_EQ(kInactiveTime,
-            link_statistics.Get<uint32_t>(kInactiveTimeMillisecondsProperty));
   ASSERT_TRUE(
       link_statistics.Contains<uint32_t>(kPacketReceiveSuccessesProperty));
   EXPECT_EQ(kReceiveSuccesses,
@@ -3677,84 +4498,121 @@ TEST_F(WiFiTimerTest, RequestStationInfo) {
             link_statistics.Lookup<std::string>(kTransmitBitrateProperty, ""));
   EXPECT_EQ("",
             link_statistics.Lookup<std::string>(kReceiveBitrateProperty, ""));
+}
 
-  // New station info with VHT rate parameters.
-  NewStationMessage new_vht_station;
-  new_vht_station.attributes()->CreateRawAttribute(NL80211_ATTR_MAC, "BSSID");
-
-  new_vht_station.attributes()->SetRawAttributeValue(
-      NL80211_ATTR_MAC, ByteString::CreateFromHexString(endpoint->bssid_hex()));
-  new_vht_station.attributes()->CreateNestedAttribute(NL80211_ATTR_STA_INFO,
-                                                      "Station Info");
-  new_vht_station.attributes()->GetNestedAttributeList(NL80211_ATTR_STA_INFO,
-                                                       &station_info);
-  station_info->CreateU8Attribute(NL80211_STA_INFO_SIGNAL, "Signal");
-  station_info->SetU8AttributeValue(NL80211_STA_INFO_SIGNAL, kSignalValue);
-  station_info->CreateNestedAttribute(NL80211_STA_INFO_RX_BITRATE,
-                                      "RX Bitrate Info");
-  station_info->CreateNestedAttribute(NL80211_STA_INFO_TX_BITRATE,
-                                      "TX Bitrate Info");
-
-  // Embed transmit VHT bitrate info within the station info element.
-  station_info->GetNestedAttributeList(NL80211_STA_INFO_TX_BITRATE,
-                                       &bitrate_info);
-  bitrate_info->CreateU32Attribute(NL80211_RATE_INFO_BITRATE32, "Bitrate32");
-  const int32_t kVhtBitrate = 70000;
-  bitrate_info->SetU32AttributeValue(NL80211_RATE_INFO_BITRATE32, kVhtBitrate);
-  bitrate_info->CreateU8Attribute(NL80211_RATE_INFO_VHT_MCS, "VHT-MCS");
-  const int8_t kVhtMCS = 7;
-  bitrate_info->SetU8AttributeValue(NL80211_RATE_INFO_VHT_MCS, kVhtMCS);
-  bitrate_info->CreateU8Attribute(NL80211_RATE_INFO_VHT_NSS, "VHT-NSS");
-  const int8_t kVhtNSS = 1;
-  bitrate_info->SetU8AttributeValue(NL80211_RATE_INFO_VHT_NSS, kVhtNSS);
-  bitrate_info->CreateFlagAttribute(NL80211_RATE_INFO_80_MHZ_WIDTH, "VHT80");
-  bitrate_info->SetFlagAttributeValue(NL80211_RATE_INFO_80_MHZ_WIDTH, true);
-  bitrate_info->CreateFlagAttribute(NL80211_RATE_INFO_SHORT_GI, "SGI");
-  bitrate_info->SetFlagAttributeValue(NL80211_RATE_INFO_SHORT_GI, false);
-  station_info->SetNestedAttributeHasAValue(NL80211_STA_INFO_TX_BITRATE);
-
-  // Embed receive VHT bitrate info within the station info element.
-  station_info->GetNestedAttributeList(NL80211_STA_INFO_RX_BITRATE,
-                                       &bitrate_info);
-  bitrate_info->CreateU32Attribute(NL80211_RATE_INFO_BITRATE32, "Bitrate32");
-  bitrate_info->SetU32AttributeValue(NL80211_RATE_INFO_BITRATE32, kVhtBitrate);
-  bitrate_info->CreateU8Attribute(NL80211_RATE_INFO_VHT_MCS, "VHT-MCS");
-  bitrate_info->SetU8AttributeValue(NL80211_RATE_INFO_VHT_MCS, kVhtMCS);
-  bitrate_info->CreateU8Attribute(NL80211_RATE_INFO_VHT_NSS, "VHT-NSS");
-  bitrate_info->SetU8AttributeValue(NL80211_RATE_INFO_VHT_NSS, kVhtNSS);
-  bitrate_info->CreateFlagAttribute(NL80211_RATE_INFO_80_MHZ_WIDTH, "VHT80");
-  bitrate_info->SetFlagAttributeValue(NL80211_RATE_INFO_80_MHZ_WIDTH, true);
-  bitrate_info->CreateFlagAttribute(NL80211_RATE_INFO_SHORT_GI, "SGI");
-  bitrate_info->SetFlagAttributeValue(NL80211_RATE_INFO_SHORT_GI, false);
-  station_info->SetNestedAttributeHasAValue(NL80211_STA_INFO_RX_BITRATE);
-
-  new_vht_station.attributes()->SetNestedAttributeHasAValue(
-      NL80211_ATTR_STA_INFO);
-
-  EXPECT_CALL(*metrics(), NotifyWifiTxBitrate(kVhtBitrate / 10));
-
-  ReportReceivedStationInfo(new_vht_station);
-
-  link_statistics = GetLinkStatistics();
-  {
-    const auto rate = base::StringPrintf(
-        "%d.%d MBit/s VHT-MCS %d 80MHz VHT-NSS %d", kVhtBitrate / 10,
-        kVhtBitrate % 10, kVhtMCS, kVhtNSS);
-    EXPECT_EQ(rate, link_statistics.Lookup<std::string>(
-                        kTransmitBitrateProperty, ""));
-    EXPECT_EQ(rate,
-              link_statistics.Lookup<std::string>(kReceiveBitrateProperty, ""));
+TEST_F(WiFiMainTest, EmitStationInfoRequestEvery30thPeriod) {
+  // Setup a connected service.
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  constexpr int iterations = 90;
+  // For every 30 calls to RequestStationInfo() for background monitoring
+  // we emit 1 "periodic check" event.
+  EXPECT_CALL(*service, EmitLinkQualityTriggerEvent(
+                            Metrics::kWiFiLinkQualityTriggerBackgroundCheck))
+      .Times(iterations / 30);
+  for (int i = 0; i < iterations; ++i) {
+    RequestStationInfo(WiFiLinkStatistics::Trigger::kBackground);
   }
 }
 
+TEST_F(WiFiMainTest, EmitStationInfoRequestEventOnLinkStatsRequest) {
+  // Setup a connected service.
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  WiFiLinkStatistics::Trigger trigger =
+      WiFiLinkStatistics::Trigger::kCQMBeaconLoss;
+  EXPECT_CALL(*service, EmitLinkQualityTriggerEvent(
+                            Metrics::kWiFiLinkQualityTriggerCQMBeaconLoss))
+      .Times(1);
+  RetrieveLinkStatistics(trigger);
+}
+
+TEST_F(WiFiMainTest, EmitStationInfoReportOnInfoReceived) {
+  // Setup a connected service.
+  StartWiFi();
+  WiFiEndpointRefPtr endpoint;
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), &endpoint, nullptr);
+
+  // Create a KeyValueStore. The message must contain the signal property.
+  KeyValueStore properties;
+  properties.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI, -20);
+
+  RetrieveLinkStatistics(WiFiLinkStatistics::Trigger::kConnected);
+  EXPECT_CALL(*service, EmitLinkQualityReportEvent(_)).Times(1);
+  SignalChanged(properties);
+}
+
+TEST_F(WiFiMainTest, EmitStationInfoRequest) {
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+
+  // If we're connected to a service, we emit a trigger event.
+  SetCurrentService(service);
+  WiFiLinkStatistics::Trigger trigger =
+      WiFiLinkStatistics::Trigger::kCQMBeaconLoss;
+  EXPECT_CALL(*service, EmitLinkQualityTriggerEvent(
+                            Metrics::kWiFiLinkQualityTriggerCQMBeaconLoss))
+      .Times(1);
+  EmitStationInfoRequest(trigger);
+}
+
+TEST_F(WiFiMainTest, EmitStationInfoRequestNotConnected) {
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+  // We never connected to a service, we do not emit an event.
+  EXPECT_CALL(*service, EmitLinkQualityTriggerEvent(_)).Times(0);
+  EmitStationInfoRequest(WiFiLinkStatistics::Trigger::kCQMBeaconLoss);
+}
+
+TEST_F(WiFiMainTest, EmitStationInfoRequestDisconnected) {
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+  // We're connected to a service.
+  SetCurrentService(service);
+  // We disconnect from the service.
+  SetCurrentService(nullptr);
+  // If we're disconnected from the service, we do not emit an event.
+  EXPECT_CALL(*service, EmitLinkQualityTriggerEvent(_)).Times(0);
+  EmitStationInfoRequest(WiFiLinkStatistics::Trigger::kCQMBeaconLoss);
+}
+
+TEST_F(WiFiMainTest, EmitStationInfoReceivedEvent) {
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+  // If we're connected to a service, we emit a report event.
+  SetCurrentService(service);
+  EXPECT_CALL(*service, EmitLinkQualityReportEvent(_)).Times(1);
+  WiFiLinkStatistics::StationStats stats;
+  EmitStationInfoReceivedEvent(stats);
+}
+
+TEST_F(WiFiMainTest, EmitStationInfoReceivedEventNotConnected) {
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+  // We never connected to a service, we do not emit an event.
+  EXPECT_CALL(*service, EmitLinkQualityReportEvent(_)).Times(0);
+  WiFiLinkStatistics::StationStats stats;
+  EmitStationInfoReceivedEvent(stats);
+}
+
+TEST_F(WiFiMainTest, EmitStationInfoReceivedEventDisconnected) {
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+  // We're connected to a service.
+  SetCurrentService(service);
+  // We disconnect from the service.
+  SetCurrentService(nullptr);
+  // If we're disconnected from the service, we do not emit an event.
+  EXPECT_CALL(*service, EmitLinkQualityReportEvent(_)).Times(0);
+  WiFiLinkStatistics::StationStats stats;
+  EmitStationInfoReceivedEvent(stats);
+}
+
 TEST_F(WiFiTimerTest, ResumeDispatchesConnectivityReportTask) {
-  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, 0)).Times(AnyNumber());
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, base::TimeDelta()))
+      .Times(AnyNumber());
   EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, _)).Times(AnyNumber());
   StartWiFi();
   SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
   EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(
-                  _, _, WiFi::kPostWakeConnectivityReportDelayMilliseconds));
+              PostDelayedTask(_, _, WiFi::kPostWakeConnectivityReportDelay));
   OnAfterResume();
 }
 
@@ -3772,7 +4630,7 @@ TEST_F(WiFiTimerTest, StartScanTimer_HaveFastScansRemaining) {
   SetScanInterval(scan_interval, &e);
   SetFastScansRemaining(1);
   EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(_, _, WiFi::kFastScanIntervalSeconds * 1000));
+              PostDelayedTask(_, _, WiFi::kFastScanInterval));
   StartScanTimer();
 }
 
@@ -3781,14 +4639,16 @@ TEST_F(WiFiTimerTest, StartScanTimer_NoFastScansRemaining) {
   const int scan_interval = 10;
   SetScanInterval(scan_interval, &e);
   SetFastScansRemaining(0);
-  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, scan_interval * 1000));
+  EXPECT_CALL(*mock_dispatcher_,
+              PostDelayedTask(_, _, base::Seconds(scan_interval)));
   StartScanTimer();
 }
 
 TEST_F(WiFiMainTest, EAPCertification) {
   StartWiFi();
 
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurity8021x);
+  MockWiFiServiceRefPtr service =
+      MakeMockService(WiFiSecurity::kWpa2Enterprise);
   EXPECT_CALL(*service, AddEAPCertification(_, _)).Times(0);
 
   ScopedMockLog log;
@@ -3824,13 +4684,13 @@ TEST_F(WiFiTimerTest, ScanDoneDispatchesTasks) {
   // Dispatch WiFi::ScanFailedTask if scan failed.
   EXPECT_TRUE(ScanFailedCallbackIsCancelled());
   EXPECT_CALL(*mock_dispatcher_,
-              PostDelayedTask(_, _, WiFi::kPostScanFailedDelayMilliseconds));
+              PostDelayedTask(_, _, WiFi::kPostScanFailedDelay));
   ScanDone(false);
   EXPECT_FALSE(ScanFailedCallbackIsCancelled());
 
   // Dispatch WiFi::ScanDoneTask if scan succeeded, and cancel the scan failed
   // callback if has been dispatched.
-  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, 0));
+  EXPECT_CALL(*mock_dispatcher_, PostDelayedTask(_, _, base::TimeDelta()));
   ScanDone(true);
   EXPECT_TRUE(ScanFailedCallbackIsCancelled());
 }
@@ -3847,7 +4707,8 @@ TEST_F(WiFiMainTest, EAPEvent) {
   Mock::VerifyAndClearExpectations(&log);
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
 
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurity8021x);
+  MockWiFiServiceRefPtr service =
+      MakeMockService(WiFiSecurity::kWpa2Enterprise);
   EXPECT_CALL(*service, SetFailure(_)).Times(0);
   EXPECT_CALL(*eap_state_handler_, ParseStatus(kEAPStatus, kEAPParameter, _));
   SetCurrentService(service);
@@ -3920,34 +4781,73 @@ struct BSS {
   int16_t signal_strength;
   uint16_t frequency;
   const char* mode;
+  uint32_t age;
 };
 
-TEST_F(WiFiMainTest, GetGeolocationObjects) {
+TEST_F(WiFiMainTest, UpdateGeolocationObjects) {
   BSS bsses[] = {
       {RpcIdentifier("bssid1"), "ssid1", "00:00:00:00:00:00", 5,
-       Metrics::kWiFiFrequency2412, kNetworkModeInfrastructure},
+       Metrics::kWiFiFrequency2412, kNetworkModeInfrastructure, 0},
       {RpcIdentifier("bssid2"), "ssid2", "01:00:00:00:00:00", 30,
-       Metrics::kWiFiFrequency5170, kNetworkModeInfrastructure},
+       Metrics::kWiFiFrequency5170, kNetworkModeInfrastructure,
+       WiFi::kWiFiGeolocationInfoExpiration.InSeconds() + 1},
       // Same SSID but different BSSID is an additional geolocation object.
       {RpcIdentifier("bssid3"), "ssid1", "02:00:00:00:00:00", 100, 0,
-       kNetworkModeInfrastructure}};
+       kNetworkModeInfrastructure, 0}};
   StartWiFi();
-  std::vector<GeolocationInfo> objects;
-  EXPECT_EQ(objects.size(), 0);
+  auto objects = &(manager()->device_geolocation_info_[wifi()]);
+  EXPECT_EQ(objects->size(), 0);
 
-  for (size_t i = 0; i < base::size(bsses); ++i) {
+  for (size_t i = 0; i < std::size(bsses); ++i) {
     ReportBSS(bsses[i].bsspath, bsses[i].ssid, bsses[i].bssid,
-              bsses[i].signal_strength, bsses[i].frequency, bsses[i].mode);
-    objects = wifi()->GetGeolocationObjects();
-    EXPECT_EQ(objects.size(), i + 1);
-
-    GeolocationInfo expected_info;
-    expected_info[kGeoMacAddressProperty] = bsses[i].bssid;
-    expected_info[kGeoSignalStrengthProperty] =
-        base::StringPrintf("%d", bsses[i].signal_strength);
-    expected_info[kGeoChannelProperty] = base::StringPrintf(
-        "%d", Metrics::WiFiFrequencyToChannel(bsses[i].frequency));
-    EXPECT_EQ(expected_info, objects[i]);
+              bsses[i].signal_strength, bsses[i].frequency, bsses[i].mode,
+              bsses[i].age);
+    wifi()->UpdateGeolocationObjects(objects);
+    EXPECT_EQ(objects->size(), i + 1);
+    EXPECT_EQ((*objects)[i][kGeoMacAddressProperty], bsses[i].bssid);
+    EXPECT_EQ((*objects)[i][kGeoSignalStrengthProperty],
+              base::StringPrintf("%d", bsses[i].signal_strength));
+    EXPECT_EQ((*objects)[i][kGeoChannelProperty],
+              base::StringPrintf(
+                  "%d", Metrics::WiFiFrequencyToChannel(bsses[i].frequency)));
+  }
+  // Update the geolocation cache using new scan results
+  for (size_t i = 0; i < std::size(bsses); ++i) {
+    RemoveBSS(bsses[i].bsspath);
+  }
+  //  bsses_in_scan are the BSSes reported in the latest scan result
+  BSS bsses_in_scan[] = {
+      {RpcIdentifier("bssid1"), "ssid1", "00:00:00:00:00:00", 6,
+       Metrics::kWiFiFrequency2412, kNetworkModeInfrastructure, 0},
+      {RpcIdentifier("bssid4"), "ssid4", "03:00:00:00:00:00", 100,
+       Metrics::kWiFiFrequency5170, kNetworkModeInfrastructure, 0}};
+  for (size_t i = 0; i < std::size(bsses_in_scan); ++i) {
+    ReportBSS(bsses_in_scan[i].bsspath, bsses_in_scan[i].ssid,
+              bsses_in_scan[i].bssid, bsses_in_scan[i].signal_strength,
+              bsses_in_scan[i].frequency, bsses_in_scan[i].mode,
+              bsses_in_scan[i].age);
+  }
+  //  bsses_after_update are the BSSes remained in the geolocation cache after
+  //  the update using the latest scan result, where
+  // 1. bssid1 is in the latest scan result, it replaces the one in the
+  // current geolocation cache
+  // 2. bssid2 is not shown in the latest scan result and has reached
+  // expiration, so it is evicted from the geolocation cache
+  // 3. bssid3 is not shown in the latest scan result but has not reached
+  // expiration yet, so it is put back to the geolocation cache
+  // 4. bssid4 is a new BSS discovered in the latest scan, it is inserted
+  // into the geolocation cache
+  BSS bsses_after_update[] = {bsses_in_scan[0], bsses_in_scan[1], bsses[2]};
+  wifi()->UpdateGeolocationObjects(objects);
+  EXPECT_EQ(objects->size(), std::size(bsses_after_update));
+  for (size_t i = 0; i < std::size(bsses_after_update); ++i) {
+    EXPECT_EQ((*objects)[i][kGeoMacAddressProperty],
+              bsses_after_update[i].bssid);
+    EXPECT_EQ((*objects)[i][kGeoSignalStrengthProperty],
+              base::StringPrintf("%d", bsses_after_update[i].signal_strength));
+    EXPECT_EQ((*objects)[i][kGeoChannelProperty],
+              base::StringPrintf(
+                  "%d", Metrics::WiFiFrequencyToChannel(bsses[i].frequency)));
   }
 }
 
@@ -4042,11 +4942,23 @@ TEST_F(WiFiMainTest, SetSupplicantDebugLevel) {
   EXPECT_CALL(*process_proxy, SetDebugLevel(_)).Times(0);
   ReportWiFiDebugScopeChanged(true);
   ReportWiFiDebugScopeChanged(false);
+  Mock::VerifyAndClearExpectations(process_proxy);
 
-  // After WiFi is stopped, we shouldn't be calling the proxy.
+  // After WiFi is stopped, we may still call the proxy if it hasn't vanished.
+  // Make sure we don't crash.
+  StopWiFi();
+  ReportWiFiDebugScopeChanged(true);
+  ReportWiFiDebugScopeChanged(false);
+}
+
+TEST_F(WiFiMainTest, LogLevelOnSupplicantVanish) {
+  MockSupplicantProcessProxy* process_proxy = supplicant_process_proxy_;
+  StartWiFi();
+
+  // After supplicant vanishes, we shouldn't be calling the proxy.
   EXPECT_CALL(*process_proxy, GetDebugLevel(_)).Times(0);
   EXPECT_CALL(*process_proxy, SetDebugLevel(_)).Times(0);
-  StopWiFi();
+  OnSupplicantVanish();
   ReportWiFiDebugScopeChanged(true);
   ReportWiFiDebugScopeChanged(false);
 }
@@ -4094,7 +5006,7 @@ TEST_F(WiFiMainTest, CustomSetterNoopChange) {
 // The following tests check the scan_state_ / scan_method_ state machine.
 
 TEST_F(WiFiMainTest, FullScanFindsNothing) {
-  StartScan(WiFi::kScanMethodFull);
+  StartScan(WiFiState::ScanMethod::kFull);
   ReportScanDone();
   ExpectScanStop();
   ExpectFoundNothing();
@@ -4106,18 +5018,18 @@ TEST_F(WiFiMainTest, FullScanFindsNothing) {
   EXPECT_CALL(*manager(), OnDeviceGeolocationInfoUpdated(_));
   event_dispatcher_
       ->DispatchPendingEvents();  // Launch UpdateScanStateAfterScanDone
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 
   ScopeLogger::GetInstance()->set_verbose_level(0);
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
 }
 
 TEST_F(WiFiMainTest, FullScanConnectingToConnected) {
-  StartScan(WiFi::kScanMethodFull);
+  StartScan(WiFiState::ScanMethod::kFull);
   WiFiEndpointRefPtr endpoint;
   RpcIdentifier bss_path;
   MockWiFiServiceRefPtr service =
-      AttemptConnection(WiFi::kScanMethodFull, &endpoint, &bss_path);
+      AttemptConnection(WiFiState::ScanMethod::kFull, &endpoint, &bss_path);
 
   // Complete the connection.
   ExpectConnected();
@@ -4128,44 +5040,47 @@ TEST_F(WiFiMainTest, FullScanConnectingToConnected) {
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
   EXPECT_CALL(log, Log(_, _, HasSubstr("-> FULL_CONNECTED")));
   ReportCurrentBSSChanged(bss_path);
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 
   ScopeLogger::GetInstance()->set_verbose_level(0);
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
 }
 
 TEST_F(WiFiMainTest, ScanStateUma) {
-  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricScanResult, _, _))
-      .Times(0);
+  EXPECT_CALL(*metrics(), ReportDeviceScanResultToUma(_)).Times(0);
   EXPECT_CALL(*metrics(), NotifyDeviceScanStarted(_));
-  SetScanState(WiFi::kScanScanning, WiFi::kScanMethodFull, __func__);
+  SetScanState(WiFiState::PhyState::kScanning, WiFiState::ScanMethod::kFull,
+               __func__);
 
   EXPECT_CALL(*metrics(), NotifyDeviceScanFinished(_));
   EXPECT_CALL(*metrics(), NotifyDeviceConnectStarted(_));
-  SetScanState(WiFi::kScanConnecting, WiFi::kScanMethodFull, __func__);
+  SetScanState(WiFiState::PhyState::kConnecting, WiFiState::ScanMethod::kFull,
+               __func__);
 
   ExpectScanIdle();  // After connected.
   EXPECT_CALL(*metrics(), NotifyDeviceConnectFinished(_));
-  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricScanResult, _, _));
-  SetScanState(WiFi::kScanConnected, WiFi::kScanMethodFull, __func__);
+  EXPECT_CALL(*metrics(), ReportDeviceScanResultToUma(_));
+  SetScanState(WiFiState::PhyState::kConnected, WiFiState::ScanMethod::kFull,
+               __func__);
 }
 
 TEST_F(WiFiMainTest, ScanStateNotScanningNoUma) {
   EXPECT_CALL(*metrics(), NotifyDeviceScanStarted(_)).Times(0);
   EXPECT_CALL(*metrics(), NotifyDeviceConnectStarted(_));
-  SetScanState(WiFi::kScanConnecting, WiFi::kScanMethodNone, __func__);
+  SetScanState(WiFiState::PhyState::kConnecting, WiFiState::ScanMethod::kNone,
+               __func__);
 
   ExpectScanIdle();  // After connected.
   EXPECT_CALL(*metrics(), NotifyDeviceConnectFinished(_));
-  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricScanResult, _, _))
-      .Times(0);
-  SetScanState(WiFi::kScanConnected, WiFi::kScanMethodNone, __func__);
+  EXPECT_CALL(*metrics(), ReportDeviceScanResultToUma(_)).Times(0);
+  SetScanState(WiFiState::PhyState::kConnected, WiFiState::ScanMethod::kNone,
+               __func__);
 }
 
 TEST_F(WiFiMainTest, ConnectToServiceNotPending) {
   // Test for SetPendingService(nullptr), condition a)
   // |ConnectTo|->|DisconnectFrom|.
-  StartScan(WiFi::kScanMethodFull);
+  StartScan(WiFiState::ScanMethod::kFull);
 
   // Setup pending service.
   ExpectScanStop();
@@ -4189,25 +5104,25 @@ TEST_F(WiFiMainTest, ConnectToServiceNotPending) {
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
   EXPECT_EQ(service_connecting, GetPendingService());
   EXPECT_EQ(nullptr, GetCurrentService());
-  VerifyScanState(WiFi::kScanConnecting, WiFi::kScanMethodFull);
+  VerifyScanState(WiFiState::PhyState::kConnecting,
+                  WiFiState::ScanMethod::kFull);
 
   ExpectScanIdle();  // To silence messages from the destructor.
 }
 
 TEST_F(WiFiMainTest, ConnectToWithError) {
-  StartScan(WiFi::kScanMethodFull);
+  StartScan(WiFiState::ScanMethod::kFull);
 
   ExpectScanIdle();
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), AddNetwork(_, _))
       .WillOnce(Return(false));
   EXPECT_CALL(*metrics(), NotifyDeviceScanFinished(_)).Times(0);
-  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricScanResult, _, _))
-      .Times(0);
+  EXPECT_CALL(*metrics(), ReportDeviceScanResultToUma(_)).Times(0);
   EXPECT_CALL(*adaptor_, EmitBoolChanged(kScanningProperty, false));
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   EXPECT_CALL(*service, GetSupplicantConfigurationParameters());
   InitiateConnect(service);
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 }
 
 TEST_F(WiFiMainTest, ScanStateHandleDisconnect) {
@@ -4215,23 +5130,23 @@ TEST_F(WiFiMainTest, ScanStateHandleDisconnect) {
   // scanning.
 
   // Start scanning.
-  StartScan(WiFi::kScanMethodFull);
+  StartScan(WiFiState::ScanMethod::kFull);
 
   // Set the pending service.
   ReportScanDone();
   ExpectScanStop();
   ExpectConnecting();
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityNone);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
   SetPendingService(service);
-  VerifyScanState(WiFi::kScanConnecting, WiFi::kScanMethodFull);
+  VerifyScanState(WiFiState::PhyState::kConnecting,
+                  WiFiState::ScanMethod::kFull);
 
   // Disconnect from the pending service.
   ExpectScanIdle();
   EXPECT_CALL(*metrics(), NotifyDeviceScanFinished(_)).Times(0);
-  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricScanResult, _, _))
-      .Times(0);
+  EXPECT_CALL(*metrics(), ReportDeviceScanResultToUma(_)).Times(0);
   ReportCurrentBSSChanged(RpcIdentifier(WPASupplicant::kCurrentBSSNull));
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 }
 
 TEST_F(WiFiMainTest, ConnectWhileNotScanning) {
@@ -4239,7 +5154,7 @@ TEST_F(WiFiMainTest, ConnectWhileNotScanning) {
   EXPECT_CALL(*adaptor_, EmitBoolChanged(kPoweredProperty, _))
       .Times(AnyNumber());
 
-  ExpectScanStart(WiFi::kScanMethodFull, false);
+  ExpectScanStart(WiFiState::ScanMethod::kFull, false);
   StartWiFi();
   event_dispatcher_->DispatchPendingEvents();
 
@@ -4247,7 +5162,7 @@ TEST_F(WiFiMainTest, ConnectWhileNotScanning) {
   ExpectFoundNothing();
   ReportScanDone();
   event_dispatcher_->DispatchPendingEvents();
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 
   // Connecting.
   ExpectConnecting();
@@ -4270,71 +5185,87 @@ TEST_F(WiFiMainTest, ConnectWhileNotScanning) {
   ReportCurrentBSSChanged(bss_path);
   ScopeLogger::GetInstance()->set_verbose_level(0);
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 }
 
 TEST_F(WiFiMainTest, BackgroundScan) {
   StartWiFi();
   SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 
   EXPECT_CALL(*GetSupplicantInterfaceProxy(), Scan(_)).Times(1);
   event_dispatcher_->DispatchPendingEvents();
-  VerifyScanState(WiFi::kScanBackgroundScanning, WiFi::kScanMethodFull);
+  VerifyScanState(WiFiState::PhyState::kBackgroundScanning,
+                  WiFiState::ScanMethod::kFull);
 
   ReportScanDone();
   EXPECT_CALL(*manager(), OnDeviceGeolocationInfoUpdated(_));
   event_dispatcher_
       ->DispatchPendingEvents();  // Launch UpdateScanStateAfterScanDone
-  VerifyScanState(WiFi::kScanIdle, WiFi::kScanMethodNone);
+  VerifyScanState(WiFiState::PhyState::kIdle, WiFiState::ScanMethod::kNone);
 }
 
 TEST_F(WiFiMainTest, OnNewWiphy) {
+  SetPhyIndex(kNewWiphyNlMsg_PhyIndex);
   NewWiphyMessage new_wiphy_message;
-  NetlinkPacket packet(kNewWiphyNlMsg, sizeof(kNewWiphyNlMsg));
+  NetlinkPacket packet(kNewWiphyNlMsg);
   new_wiphy_message.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   EXPECT_CALL(*wake_on_wifi_, ParseWakeOnWiFiCapabilities(_));
-  EXPECT_CALL(*wake_on_wifi_, OnWiphyIndexReceived(kNewWiphyNlMsg_WiphyIndex));
-  GetAllScanFrequencies()->clear();
+  EXPECT_CALL(*wake_on_wifi_, OnWiphyIndexReceived(kNewWiphyNlMsg_PhyIndex));
+  EXPECT_CALL(*wifi_provider(),
+              RegisterDeviceToPhy(wifi(), kNewWiphyNlMsg_PhyIndex));
   OnNewWiphy(new_wiphy_message);
-  EXPECT_EQ(base::size(kNewWiphyNlMsg_UniqueFrequencies),
-            GetAllScanFrequencies()->size());
-  for (uint16_t freq : kNewWiphyNlMsg_UniqueFrequencies) {
-    EXPECT_TRUE(GetAllScanFrequencies()->find(freq) !=
-                GetAllScanFrequencies()->end());
-  }
 }
 
-TEST_F(WiFiMainTest, OnIPConfigUpdated_InvokesOnConnectedAndReachable) {
+TEST_F(WiFiMainTest, OnNewWiphy_IndexChanged) {
+  SetPhyIndex(kNewWiphyNlMsg_PhyIndex);
+  NewWiphyMessage new_wiphy_message;
+  NetlinkPacket packet(kNewWiphyNlMsg);
+  new_wiphy_message.InitFromPacket(&packet, NetlinkMessage::MessageContext());
+  EXPECT_CALL(*wifi_provider(),
+              RegisterDeviceToPhy(wifi(), kNewWiphyNlMsg_PhyIndex));
+  EXPECT_CALL(*wifi_provider(), OnNewWiphy(_));
+  OnNewWiphy(new_wiphy_message);
+  EXPECT_EQ(GetPhyIndex(), kNewWiphyNlMsg_PhyIndex);
+
+  // A second call to OnNewWiphy with a new index should cause the device to
+  // deregister from the previous phy and register to a new one. The phy_index
+  // should also change.
+  new_wiphy_message.attributes()->SetU32AttributeValue(
+      NL80211_ATTR_WIPHY, kNewWiphyNlMsg_ChangedPhyIndex);
+  EXPECT_CALL(*wifi_provider(),
+              DeregisterDeviceFromPhy(wifi(), kNewWiphyNlMsg_PhyIndex));
+  EXPECT_CALL(*wifi_provider(),
+              RegisterDeviceToPhy(wifi(), kNewWiphyNlMsg_ChangedPhyIndex));
+  EXPECT_CALL(*wifi_provider(), OnNewWiphy(_));
+  OnNewWiphy(new_wiphy_message);
+  EXPECT_EQ(GetPhyIndex(), kNewWiphyNlMsg_ChangedPhyIndex);
+}
+
+TEST_F(WiFiMainTest, OnGetDHCPLease_InvokesOnConnectedAndReachable) {
   ScopedMockLog log;
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
   ScopeLogger::GetInstance()->EnableScopesByName("wifi");
   ScopeLogger::GetInstance()->set_verbose_level(3);
   EXPECT_CALL(log, Log(_, _, HasSubstr("IPv4 DHCP lease obtained")));
-  EXPECT_CALL(*wake_on_wifi_, OnConnectedAndReachable(_, _));
-  EXPECT_CALL(*manager(), device_info()).WillOnce(Return(device_info()));
-  ReportIPConfigComplete();
+  EXPECT_CALL(*wake_on_wifi_, OnConnectedAndReachable(_));
+  ReportIPv4ConfiguredWithDHCPLease();
 
   // We should not call WakeOnWiFi::OnConnectedAndReachable if we are not
   // actually connected to a service.
   SetCurrentService(nullptr);
-  EXPECT_CALL(*wake_on_wifi_, OnConnectedAndReachable(_, _)).Times(0);
-  ReportIPv6ConfigComplete();
+  EXPECT_CALL(*wake_on_wifi_, OnConnectedAndReachable(_)).Times(0);
+  ReportIPv6ConfiguredWithSLAACAddress();
 
   // If we are actually connected to a service when our IPv6 configuration is
   // updated, we should call WakeOnWiFi::OnConnectedAndReachable.
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurity8021x);
+  MockWiFiServiceRefPtr service =
+      MakeMockService(WiFiSecurity::kWpa2Enterprise);
   EXPECT_CALL(*service, IsConnected(nullptr)).WillOnce(Return(true));
   SetCurrentService(service);
   EXPECT_CALL(log, Log(_, _, HasSubstr("IPv6 configuration obtained")));
-  EXPECT_CALL(*wake_on_wifi_, OnConnectedAndReachable(_, _));
-  ReportIPv6ConfigComplete();
-
-  // Do not call WakeOnWiFi::OnConnectedAndReachable if the IP config update was
-  // triggered by a gateway ARP.
-  EXPECT_CALL(log, Log(_, _, HasSubstr("Gateway ARP received")));
-  EXPECT_CALL(*wake_on_wifi_, OnConnectedAndReachable(_, _)).Times(0);
-  ReportIPConfigCompleteGatewayArpReceived();
+  EXPECT_CALL(*wake_on_wifi_, OnConnectedAndReachable(_));
+  ReportIPv6ConfiguredWithSLAACAddress();
 
   ScopeLogger::GetInstance()->EnableScopesByName("-wifi");
   ScopeLogger::GetInstance()->set_verbose_level(0);
@@ -4343,13 +5274,13 @@ TEST_F(WiFiMainTest, OnIPConfigUpdated_InvokesOnConnectedAndReachable) {
 TEST_F(WiFiMainTest, OnBeforeSuspend_CallsWakeOnWiFi) {
   SetWiFiEnabled(true);
   EXPECT_CALL(*wake_on_wifi_,
-              OnBeforeSuspend(IsConnectedToCurrentService(), _, _, _, _, _, _));
+              OnBeforeSuspend(IsConnectedToCurrentService(), _, _, _, _, _));
   EXPECT_CALL(*this, SuspendCallback(_)).Times(0);
   OnBeforeSuspend();
 
   SetWiFiEnabled(false);
   EXPECT_CALL(*wake_on_wifi_,
-              OnBeforeSuspend(IsConnectedToCurrentService(), _, _, _, _, _, _))
+              OnBeforeSuspend(IsConnectedToCurrentService(), _, _, _, _, _))
       .Times(0);
   EXPECT_CALL(*this, SuspendCallback(ErrorTypeIs(Error::kSuccess)));
   OnBeforeSuspend();
@@ -4372,8 +5303,10 @@ TEST_F(WiFiMainTest, OnDarkResume_CallsWakeOnWiFi) {
 
 TEST_F(WiFiMainTest, RemoveSupplicantNetworks) {
   StartWiFi();
-  MockWiFiServiceRefPtr service1 = MakeMockService(kSecurity8021x);
-  MockWiFiServiceRefPtr service2 = MakeMockService(kSecurity8021x);
+  MockWiFiServiceRefPtr service1 =
+      MakeMockService(WiFiSecurity::kWpaEnterprise);
+  MockWiFiServiceRefPtr service2 =
+      MakeMockService(WiFiSecurity::kWpa2Enterprise);
   const RpcIdentifier kNetworkRpcId1("/service/network/rpcid1");
   const RpcIdentifier kNetworkRpcId2("/service/network/rpcid2");
   SetServiceNetworkRpcId(service1, kNetworkRpcId1);
@@ -4397,7 +5330,7 @@ TEST_F(WiFiMainTest, InitiateScan_NotIdle) {
   ScopedMockLog log;
   ScopeLogger::GetInstance()->EnableScopesByName("wifi");
   ScopeLogger::GetInstance()->set_verbose_level(1);
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityPsk);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kWpa2);
   SetPendingService(service);
   EXPECT_FALSE(wifi()->IsIdle());
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
@@ -4426,7 +5359,7 @@ TEST_F(WiFiMainTest, InitiateScanInDarkResume_Idle) {
 TEST_F(WiFiMainTest, InitiateScanInDarkResume_NotIdle) {
   const WiFi::FreqSet freqs;
   ScopedMockLog log;
-  MockWiFiServiceRefPtr service = MakeMockService(kSecurityPsk);
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kWpa2);
   SetPendingService(service);
   manager()->set_suppress_autoconnect(false);
   EXPECT_FALSE(wifi()->IsIdle());
@@ -4484,14 +5417,14 @@ TEST_F(WiFiMainTest, PendingScanEvents) {
   StartWiFi();
   BSSAdded(RpcIdentifier("bss0"),
            CreateBSSProperties("ssid0", "00:00:00:00:00:00", 0, 0,
-                               kNetworkModeInfrastructure));
+                               kNetworkModeInfrastructure, 0));
   BSSAdded(RpcIdentifier("bss1"),
            CreateBSSProperties("ssid1", "00:00:00:00:00:01", 0, 0,
-                               kNetworkModeInfrastructure));
+                               kNetworkModeInfrastructure, 0));
   BSSRemoved(RpcIdentifier("bss0"));
   BSSAdded(RpcIdentifier("bss2"),
            CreateBSSProperties("ssid2", "00:00:00:00:00:02", 0, 0,
-                               kNetworkModeInfrastructure));
+                               kNetworkModeInfrastructure, 0));
 
   WiFiEndpointRefPtr ap0 = MakeEndpoint("ssid0", "00:00:00:00:00:00");
   WiFiEndpointRefPtr ap1 = MakeEndpoint("ssid1", "00:00:00:00:00:01");
@@ -4511,39 +5444,29 @@ TEST_F(WiFiMainTest, PendingScanEvents) {
   EXPECT_EQ(2, endpoints_by_rpcid.size());
 }
 
-TEST_F(WiFiMainTest, ParseWiphyIndex_Success) {
-  // Verify that the wiphy index in kNewWiphyNlMsg is parsed, and that the flag
-  // for having the wiphy index is set by ParseWiphyIndex.
-  EXPECT_EQ(GetWiphyIndex(), WiFi::kDefaultWiphyIndex);
-  NewWiphyMessage msg;
-  NetlinkPacket packet(kNewWiphyNlMsg, sizeof(kNewWiphyNlMsg));
-  msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
-  EXPECT_TRUE(ParseWiphyIndex(msg));
-  EXPECT_EQ(GetWiphyIndex(), kNewWiphyNlMsg_WiphyIndex);
-}
-
-TEST_F(WiFiMainTest, ParseWiphyIndex_Failure) {
+TEST_F(WiFiMainTest, OnNewWiphy_ExcludesIndex) {
   ScopedMockLog log;
   // Change the NL80211_ATTR_WIPHY U32 attribute to the NL80211_ATTR_WIPHY_FREQ
-  // U32 attribute, so that this message no longer contains a wiphy_index to be
+  // U32 attribute, so that this message no longer contains a phy_index to be
   // parsed.
   NewWiphyMessage msg;
-  MutableNetlinkPacket packet(kNewWiphyNlMsg, sizeof(kNewWiphyNlMsg));
-  struct nlattr* nl80211_attr_wiphy = reinterpret_cast<struct nlattr*>(
-      &packet.GetMutablePayload()
-           ->GetData()[kNewWiphyNlMsg_Nl80211AttrWiphyOffset]);
+  MutableNetlinkPacket packet(kNewWiphyNlMsg);
+  struct nlattr* nl80211_attr_wiphy =
+      reinterpret_cast<struct nlattr*>(packet.GetMutablePayload()->data() +
+                                       kNewWiphyNlMsg_Nl80211AttrWiphyOffset);
   nl80211_attr_wiphy->nla_type = NL80211_ATTR_WIPHY_FREQ;
   msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   EXPECT_CALL(log, Log(_, _, _)).Times(AnyNumber());
   EXPECT_CALL(log, Log(logging::LOGGING_ERROR, _,
                        "NL80211_CMD_NEW_WIPHY had no NL80211_ATTR_WIPHY"));
-  EXPECT_FALSE(ParseWiphyIndex(msg));
+  EXPECT_CALL(*wifi_provider(), RegisterDeviceToPhy(_, _)).Times(0);
+  OnNewWiphy(msg);
   EXPECT_CALL(*wake_on_wifi_, OnWiphyIndexReceived(_)).Times(0);
 }
 
 TEST_F(WiFiMainTest, ParseFeatureFlags_RandomMacSupport) {
   NewWiphyMessage msg;
-  NetlinkPacket packet(kNewWiphyNlMsg, sizeof(kNewWiphyNlMsg));
+  NetlinkPacket packet(kNewWiphyNlMsg);
   msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   // Make sure the feature is marked unsupported
   uint32_t flags;
@@ -4563,6 +5486,84 @@ TEST_F(WiFiMainTest, ParseFeatureFlags_RandomMacSupport) {
   msg.attributes()->SetU32AttributeValue(NL80211_ATTR_FEATURE_FLAGS, flags);
   ParseFeatureFlags(msg);
   EXPECT_TRUE(GetRandomMacSupported());
+}
+
+TEST_F(WiFiMainTest, ParseCipherSuites) {
+  NewWiphyMessage msg;
+  NetlinkPacket packet(kNewWiphyNlMsg);
+  msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
+
+  constexpr uint8_t ciphers[] = {0x01, 0xac, 0x0f, 0x00, 0x05, 0xac, 0x0f,
+                                 0x00, 0x02, 0xac, 0x0f, 0x00, 0x04, 0xac,
+                                 0x0f, 0x00, 0x06, 0xac, 0x0f, 0x00};
+  msg.attributes()->SetRawAttributeValue(NL80211_ATTR_CIPHER_SUITES, ciphers);
+  ParseCipherSuites(msg);
+
+  EXPECT_TRUE(CipherSuiteSupported(0x000fac01));
+  EXPECT_TRUE(CipherSuiteSupported(0x000fac05));
+  EXPECT_TRUE(CipherSuiteSupported(0x000fac02));
+  EXPECT_TRUE(CipherSuiteSupported(0x000fac06));
+  EXPECT_FALSE(CipherSuiteSupported(0x000fac07));
+
+  // This is an empty bytes.
+  msg.attributes()->SetRawAttributeValue(NL80211_ATTR_CIPHER_SUITES, {});
+  ParseCipherSuites(msg);
+  EXPECT_FALSE(CipherSuiteSupported(0x000fac01));
+  EXPECT_FALSE(CipherSuiteSupported(0x000fac05));
+}
+
+TEST_F(WiFiMainTest, WEPInCipherSuites_Unsupported) {
+  NewWiphyMessage msg;
+  NetlinkPacket packet(kNewWiphyNlMsg);
+  msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
+  EXPECT_FALSE(GetWEPSupport());
+  // This bytes indicates support for WEP40 (0x01, 0xac, 0x0f, 0x00), but
+  // not WEP104 (0x05, 0xac, 0x0f, 0x00).
+  constexpr uint8_t ciphers_no_wep40[] = {
+      0x01, 0xac, 0x0f, 0x00, 0x07, 0xac, 0x0f, 0x00, 0x02, 0xac,
+      0x0f, 0x00, 0x04, 0xac, 0x0f, 0x00, 0x06, 0xac, 0x0f, 0x00};
+  msg.attributes()->SetRawAttributeValue(NL80211_ATTR_CIPHER_SUITES,
+                                         ciphers_no_wep40);
+  ParseCipherSuites(msg);
+  EXPECT_FALSE(GetWEPSupport());
+
+  msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
+  // This bytes indicates support for WEP104 (0x05, 0xac, 0x0f, 0x00), but
+  // not WEP40 (0x01, 0xac, 0x0f, 0x00).
+  constexpr uint8_t ciphers_no_wep104[] = {
+      0x05, 0xac, 0x0f, 0x00, 0x07, 0xac, 0x0f, 0x00, 0x02, 0xac,
+      0x0f, 0x00, 0x04, 0xac, 0x0f, 0x00, 0x06, 0xac, 0x0f, 0x00};
+  msg.attributes()->SetRawAttributeValue(NL80211_ATTR_CIPHER_SUITES,
+                                         ciphers_no_wep104);
+  ParseCipherSuites(msg);
+  EXPECT_FALSE(GetWEPSupport());
+
+  msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
+  // This bytes indicates no support for WEP40 (0x01, 0xac, 0x0f, 0x00) or
+  // WEP104 (0x05, 0xac, 0x0f, 0x00).
+  constexpr uint8_t ciphers_no_wep[] = {
+      0x09, 0xac, 0x0f, 0x00, 0x07, 0xac, 0x0f, 0x00, 0x02, 0xac,
+      0x0f, 0x00, 0x04, 0xac, 0x0f, 0x00, 0x06, 0xac, 0x0f, 0x00};
+  msg.attributes()->SetRawAttributeValue(NL80211_ATTR_CIPHER_SUITES,
+                                         ciphers_no_wep);
+  ParseCipherSuites(msg);
+  EXPECT_FALSE(GetWEPSupport());
+}
+
+TEST_F(WiFiMainTest, WEPInCipherSuites_Supported) {
+  NewWiphyMessage msg;
+  NetlinkPacket packet(kNewWiphyNlMsg);
+  msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
+
+  // This bytes indicates support for WEP40 (0x01, 0xac, 0x0f, 0x00), and
+  // WEP104 (0x05, 0xac, 0x0f, 0x00).
+  constexpr uint8_t ciphers_with_wep[] = {
+      0x01, 0xac, 0x0f, 0x00, 0x05, 0xac, 0x0f, 0x00, 0x02, 0xac,
+      0x0f, 0x00, 0x04, 0xac, 0x0f, 0x00, 0x06, 0xac, 0x0f, 0x00};
+  msg.attributes()->SetRawAttributeValue(NL80211_ATTR_CIPHER_SUITES,
+                                         ciphers_with_wep);
+  ParseCipherSuites(msg);
+  EXPECT_TRUE(GetWEPSupport());
 }
 
 TEST_F(WiFiMainTest, RandomMacProperty_Unsupported) {
@@ -4618,20 +5619,20 @@ TEST_F(WiFiMainTest, RandomMacProperty_SupplicantFailed) {
 }
 
 TEST_F(WiFiMainTest, OnScanStarted_ActiveScan) {
-  SetWiphyIndex(kScanTriggerMsgWiphyIndex);
+  SetPhyIndex(kScanTriggerMsgPhyIndex);
+  SetWiFiPhy(new NiceMock<WiFiPhy>(kScanTriggerMsgPhyIndex));
   TriggerScanMessage msg;
-  NetlinkPacket packet(kActiveScanTriggerNlMsg,
-                       sizeof(kActiveScanTriggerNlMsg));
+  NetlinkPacket packet(kActiveScanTriggerNlMsg);
   msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   EXPECT_CALL(*wake_on_wifi_, OnScanStarted(true));
   HandleNetlinkBroadcast(msg);
 }
 
 TEST_F(WiFiMainTest, OnScanStarted_PassiveScan) {
-  SetWiphyIndex(kScanTriggerMsgWiphyIndex);
+  SetPhyIndex(kScanTriggerMsgPhyIndex);
+  SetWiFiPhy(new NiceMock<WiFiPhy>(kScanTriggerMsgPhyIndex));
   TriggerScanMessage msg;
-  NetlinkPacket packet(kPassiveScanTriggerNlMsg,
-                       sizeof(kPassiveScanTriggerNlMsg));
+  NetlinkPacket packet(kPassiveScanTriggerNlMsg);
   msg.InitFromPacket(&packet, NetlinkMessage::MessageContext());
   EXPECT_CALL(*wake_on_wifi_, OnScanStarted(false));
   HandleNetlinkBroadcast(msg);
@@ -4644,50 +5645,118 @@ TEST_F(WiFiMainTest, RemoveNetlinkHandler) {
   EXPECT_CALL(netlink_manager_, RemoveBroadcastHandler(_)).Times(1);
 }
 
-TEST_F(WiFiMainTest, OnGetReg) {
-  GetRegMessage msg;
-  msg.attributes()->CreateStringAttribute(NL80211_ATTR_REG_ALPHA2, "alpha2");
-  msg.attributes()->CreateU8Attribute(NL80211_ATTR_DFS_REGION, "dfs-region");
+TEST_F(WiFiMainTest, OnRegChange) {
+  WiphyRegChangeMessage msg;
+  // Verify Metrics collection for the changes initiated not by the user.
+  msg.attributes()->CreateU32Attribute(NL80211_ATTR_REG_INITIATOR, "initiator");
+  msg.attributes()->SetU32AttributeValue(NL80211_ATTR_REG_INITIATOR,
+                                         NL80211_REGDOM_SET_BY_DRIVER);
 
-  // First Regulatory Domain enum enrty.
-  msg.attributes()->SetStringAttributeValue(NL80211_ATTR_REG_ALPHA2, "00");
+  msg.attributes()->CreateU8Attribute(NL80211_ATTR_REG_TYPE, "reg-type");
+  msg.attributes()->SetU8AttributeValue(NL80211_ATTR_REG_TYPE,
+                                        NL80211_REGDOM_TYPE_WORLD);
   EXPECT_CALL(*metrics(),
               SendEnumToUMA(Metrics::kMetricRegulatoryDomain,
                             Metrics::RegulatoryDomain::kRegDom00, _))
       .Times(1);
-  // Should call ChangeRegDomain with region UNSET when no dfs_region present.
-  EXPECT_CALL(*power_manager(), ChangeRegDomain(NL80211_DFS_UNSET)).Times(1);
-  OnGetReg(msg);
-  // Last Regulatory Domain enum entry. Zimbabwe = 674.
-  msg.attributes()->SetStringAttributeValue(NL80211_ATTR_REG_ALPHA2, "ZW");
+  OnRegChange(msg);
+
+  msg.attributes()->SetU8AttributeValue(NL80211_ATTR_REG_TYPE,
+                                        NL80211_REGDOM_TYPE_CUSTOM_WORLD);
   EXPECT_CALL(*metrics(),
-              SendEnumToUMA(Metrics::kMetricRegulatoryDomain, 674, _))
+              SendEnumToUMA(Metrics::kMetricRegulatoryDomain,
+                            Metrics::RegulatoryDomain::kRegDom99, _))
       .Times(1);
-  msg.attributes()->SetU8AttributeValue(NL80211_ATTR_DFS_REGION,
-                                        NL80211_DFS_FCC);
-  // Subsequent calls should all call ChangeRegDomain() with the current region.
-  EXPECT_CALL(*power_manager(), ChangeRegDomain(NL80211_DFS_FCC)).Times(4);
-  OnGetReg(msg);
-  // Second call with same country code should not trigger SendEnumToUMA() call.
-  OnGetReg(msg);
+  OnRegChange(msg);
+
+  msg.attributes()->SetU8AttributeValue(NL80211_ATTR_REG_TYPE,
+                                        NL80211_REGDOM_TYPE_INTERSECTION);
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(Metrics::kMetricRegulatoryDomain,
+                            Metrics::RegulatoryDomain::kRegDom98, _))
+      .Times(1);
+  OnRegChange(msg);
+
+  msg.attributes()->SetU8AttributeValue(NL80211_ATTR_REG_TYPE,
+                                        NL80211_REGDOM_TYPE_COUNTRY);
+  msg.attributes()->CreateStringAttribute(NL80211_ATTR_REG_ALPHA2, "alpha2");
+  // First valid alpha2 country code Andorra = 5.
+  msg.attributes()->SetStringAttributeValue(NL80211_ATTR_REG_ALPHA2, "AD");
+  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricRegulatoryDomain, 5, _))
+      .Times(1);
+  OnRegChange(msg);
+
   // Lower case valid country code. United States = 540.
   msg.attributes()->SetStringAttributeValue(NL80211_ATTR_REG_ALPHA2, "us");
   EXPECT_CALL(*metrics(),
               SendEnumToUMA(Metrics::kMetricRegulatoryDomain, 540, _))
       .Times(1);
-  OnGetReg(msg);
+  OnRegChange(msg);
+
   // Invalid country code.
   msg.attributes()->SetStringAttributeValue(NL80211_ATTR_REG_ALPHA2, "err");
   EXPECT_CALL(*metrics(),
               SendEnumToUMA(Metrics::kMetricRegulatoryDomain,
                             Metrics::RegulatoryDomain::kCountryCodeInvalid, _))
       .Times(1);
-  OnGetReg(msg);
-  // Message with no alpha2 attribute.
-  WiphyRegChangeMessage no_alpha2;
+  OnRegChange(msg);
+
+  // Last Regulatory Domain enum entry. Zimbabwe = 674.
+  msg.attributes()->SetStringAttributeValue(NL80211_ATTR_REG_ALPHA2, "ZW");
+  EXPECT_CALL(*metrics(),
+              SendEnumToUMA(Metrics::kMetricRegulatoryDomain, 674, _))
+      .Times(1);
+  OnRegChange(msg);
+  // Second call with same country code should not trigger SendEnumToUMA() call.
   EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricRegulatoryDomain, _, _))
       .Times(0);
-  OnGetReg(no_alpha2);
+  OnRegChange(msg);
+
+  // Now some messages that should not trigger metrics collection.
+  EXPECT_CALL(*metrics(), SendEnumToUMA(Metrics::kMetricRegulatoryDomain, _, _))
+      .Times(0);
+  // No initiator.
+  WiphyRegChangeMessage no_metrics_msg;
+  OnRegChange(no_metrics_msg);
+  // User initiated.
+  no_metrics_msg.attributes()->CreateU32Attribute(NL80211_ATTR_REG_INITIATOR,
+                                                  "initiator");
+  no_metrics_msg.attributes()->SetU32AttributeValue(NL80211_ATTR_REG_INITIATOR,
+                                                    NL80211_REGDOM_SET_BY_USER);
+  OnRegChange(no_metrics_msg);
+
+  // Missing country.
+  no_metrics_msg.attributes()->SetU32AttributeValue(
+      NL80211_ATTR_REG_INITIATOR, NL80211_REGDOM_SET_BY_DRIVER);
+  no_metrics_msg.attributes()->CreateU8Attribute(NL80211_ATTR_REG_TYPE,
+                                                 "reg-type");
+  no_metrics_msg.attributes()->SetU8AttributeValue(NL80211_ATTR_REG_TYPE,
+                                                   NL80211_REGDOM_TYPE_COUNTRY);
+  OnRegChange(no_metrics_msg);
+
+  // Invalid country.
+  no_metrics_msg.attributes()->SetStringAttributeValue(NL80211_ATTR_REG_ALPHA2,
+                                                       "err");
+  OnRegChange(no_metrics_msg);
+}
+
+TEST_F(WiFiMainTest, OnGetReg) {
+  GetRegMessage msg;
+  msg.attributes()->CreateStringAttribute(NL80211_ATTR_REG_ALPHA2, "alpha2");
+  msg.attributes()->CreateU8Attribute(NL80211_ATTR_DFS_REGION, "dfs-region");
+
+  // First Regulatory Domain enum entry.
+  msg.attributes()->SetStringAttributeValue(NL80211_ATTR_REG_ALPHA2, "00");
+  // Should call ChangeRegDomain with region UNSET when no dfs_region present.
+  EXPECT_CALL(*power_manager(), ChangeRegDomain(NL80211_DFS_UNSET)).Times(1);
+  OnGetReg(msg);
+  msg.attributes()->SetU8AttributeValue(NL80211_ATTR_DFS_REGION,
+                                        NL80211_DFS_FCC);
+  // Subsequent calls should all call ChangeRegDomain() with the current region.
+  EXPECT_CALL(*power_manager(), ChangeRegDomain(NL80211_DFS_FCC)).Times(2);
+  OnGetReg(msg);
+  OnGetReg(msg);
+
   msg.attributes()->SetU8AttributeValue(NL80211_ATTR_DFS_REGION,
                                         NL80211_DFS_ETSI);
   EXPECT_CALL(*power_manager(), ChangeRegDomain(NL80211_DFS_ETSI)).Times(2);
@@ -4697,6 +5766,374 @@ TEST_F(WiFiMainTest, OnGetReg) {
   msg.attributes()->SetU8AttributeValue(NL80211_ATTR_DFS_REGION,
                                         NL80211_DFS_JP);
   OnGetReg(msg);
+}
+
+TEST_F(WiFiMainTest, AddCred) {
+  MockPasspointCredentialsRefPtr creds = new MockPasspointCredentials("an_id");
+
+  // Supplicant not started yet: device should fail.
+  EXPECT_FALSE(AddCred(creds));
+  EXPECT_EQ(DBusControl::NullRpcIdentifier(), creds->supplicant_id());
+
+  StartWiFi();
+
+  // Failure to convert credentials to supplicant properties.
+  EXPECT_CALL(*creds, ToSupplicantProperties(_)).WillOnce(Return(false));
+  EXPECT_FALSE(AddCred(creds));
+
+  // Supplicant fails to add credentials: device should fail.
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), AddCred(_, _))
+      .WillOnce(Return(false));
+  EXPECT_CALL(*creds, ToSupplicantProperties(_)).WillOnce(Return(true));
+  EXPECT_FALSE(AddCred(creds));
+  EXPECT_EQ(DBusControl::NullRpcIdentifier(), creds->supplicant_id());
+
+  // Credentials added successfully.
+  RpcIdentifier path("/credentials/0");
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), AddCred(_, _))
+      .WillOnce(DoAll(SetArgPointee<1>(path), Return(true)));
+  EXPECT_CALL(*creds, ToSupplicantProperties(_)).WillOnce(Return(true));
+  EXPECT_TRUE(AddCred(creds));
+  EXPECT_EQ(path, creds->supplicant_id());
+}
+
+TEST_F(WiFiMainTest, RemoveCred) {
+  RpcIdentifier path("/credentials/1");
+  PasspointCredentialsRefPtr creds = new PasspointCredentials("an_id");
+
+  // Supplicant not started
+  creds->SetSupplicantId(path);
+  EXPECT_FALSE(RemoveCred(creds));
+  EXPECT_EQ(DBusControl::NullRpcIdentifier(), creds->supplicant_id());
+
+  StartWiFi();
+
+  // Credentials with null path cannot be removed
+  creds->SetSupplicantId(DBusControl::NullRpcIdentifier());
+  EXPECT_FALSE(RemoveCred(creds));
+
+  // Supplicant refuses to remove the credentials.
+  creds->SetSupplicantId(path);
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveCred(path))
+      .WillOnce(Return(false));
+  EXPECT_FALSE(RemoveCred(creds));
+  EXPECT_EQ(DBusControl::NullRpcIdentifier(), creds->supplicant_id());
+
+  // Removal is done correctly
+  creds->SetSupplicantId(path);
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveCred(path))
+      .WillOnce(Return(true));
+  EXPECT_TRUE(RemoveCred(creds));
+  EXPECT_EQ(DBusControl::NullRpcIdentifier(), creds->supplicant_id());
+}
+
+TEST_F(WiFiMainTest, ClearsAndRestoresCredentials) {
+  MockPasspointCredentialsRefPtr cred1 = new MockPasspointCredentials("id1");
+  MockPasspointCredentialsRefPtr cred2 = new MockPasspointCredentials("id2");
+  std::vector<PasspointCredentialsRefPtr> credentials{cred1, cred2};
+
+  // Supplicant state is cleared and the credentials we own are added.
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveAllCreds());
+  EXPECT_CALL(*wifi_provider(), GetCredentials()).WillOnce(Return(credentials));
+  EXPECT_CALL(*cred1, ToSupplicantProperties(_)).WillOnce(Return(true));
+  EXPECT_CALL(*cred2, ToSupplicantProperties(_)).WillOnce(Return(true));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), AddCred(_, _))
+      .Times(2)
+      .WillRepeatedly(Return(true));
+
+  StartWiFi();
+
+  // When supplicant is stopped, we remove our credentials.
+  EXPECT_CALL(*wifi_provider(), GetCredentials()).WillOnce(Return(credentials));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), RemoveCred(_))
+      .Times(2)
+      .WillRepeatedly(Return(true));
+}
+
+TEST_F(WiFiMainTest, InterworkingSelectSimpleMatch) {
+  // A simple credentials set
+  MockPasspointCredentialsRefPtr cred0 = new MockPasspointCredentials("cred0");
+  std::vector<PasspointCredentialsRefPtr> credentials{cred0};
+  RpcIdentifier cred0_path("/creds/0");
+  EXPECT_CALL(*cred0, ToSupplicantProperties(_)).WillRepeatedly(Return(true));
+  EXPECT_CALL(*wifi_provider(), GetCredentials())
+      .WillRepeatedly(Return(credentials));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), AddCred(_, _))
+      .WillOnce(DoAll(SetArgPointee<1>(cred0_path), Return(true)));
+
+  StartWiFi();
+
+  // Provide scan results
+  WiFiEndpointRefPtr ap0 = MakeEndpoint("ssid0", "00:00:00:00:00:00");
+  WiFiEndpointRefPtr ap1 = MakeEndpoint("ssid1", "00:00:00:00:00:01");
+  RpcIdentifier bss0_path("bss0"), bss1_path("bss1");
+  ReportBSS(bss0_path, ap0->ssid_string(), ap0->bssid_string(), 0, 0,
+            kNetworkModeInfrastructure, 0);
+  ReportBSS(bss1_path, ap1->ssid_string(), ap1->bssid_string(), 0, 0,
+            kNetworkModeInfrastructure, 0);
+  ReportScanDone();
+
+  // No credentials added, we must ignore false matches.
+  Mock::VerifyAndClearExpectations(wifi_provider());
+  EXPECT_CALL(*wifi_provider(), GetCredentials())
+      .WillRepeatedly(Return(credentials));
+  EXPECT_CALL(*wifi_provider(), OnPasspointCredentialsMatches(_)).Times(0);
+
+  KeyValueStore properties;
+  properties.Set<std::string>(WPASupplicant::kCredentialsMatchType,
+                              WPASupplicant::kCredentialsMatchTypeHome);
+  ReportInterworkingAPAdded(bss0_path, RpcIdentifier("unknown_cred"),
+                            properties);
+  ReportInterworkingSelectDone();
+
+  // Credentials set with wrong match
+  ReportInterworkingAPAdded(RpcIdentifier("unknown_bss"), cred0_path,
+                            properties);
+  ReportInterworkingSelectDone();
+
+  // Match between credentials and BSS
+  Mock::VerifyAndClearExpectations(wifi_provider());
+  EXPECT_CALL(*wifi_provider(), GetCredentials())
+      .WillRepeatedly(Return(credentials));
+  EXPECT_CALL(*wifi_provider(), OnPasspointCredentialsMatches(_)).Times(1);
+
+  ReportInterworkingAPAdded(bss0_path, cred0_path, properties);
+  ReportInterworkingSelectDone();
+}
+
+TEST_F(WiFiMainTest, InterworkingSelectMultipleMatches) {
+  MockPasspointCredentialsRefPtr cred0 = new MockPasspointCredentials("cred0");
+  RpcIdentifier cred0_path("/creds/0");
+  EXPECT_CALL(*cred0, ToSupplicantProperties(_)).WillRepeatedly(Return(true));
+
+  MockPasspointCredentialsRefPtr cred1 = new MockPasspointCredentials("cred1");
+  RpcIdentifier cred1_path("/creds/1");
+  EXPECT_CALL(*cred1, ToSupplicantProperties(_)).WillRepeatedly(Return(true));
+
+  // The provider will provide both credentials
+  std::vector<PasspointCredentialsRefPtr> credentials{cred0, cred1};
+  EXPECT_CALL(*wifi_provider(), GetCredentials())
+      .WillRepeatedly(Return(credentials));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), AddCred(_, _))
+      .WillOnce(DoAll(SetArgPointee<1>(cred0_path), Return(true)))
+      .WillOnce(DoAll(SetArgPointee<1>(cred1_path), Return(true)));
+
+  StartWiFi();
+
+  // Provide scan results
+  WiFiEndpointRefPtr ap0 = MakeEndpoint("ssid0", "00:00:00:00:00:00");
+  WiFiEndpointRefPtr ap1 = MakeEndpoint("ssid1", "00:00:00:00:00:01");
+  RpcIdentifier bss0_path("bss0"), bss1_path("bss1");
+  ReportBSS(bss0_path, ap0->ssid_string(), ap0->bssid_string(), 0, 0,
+            kNetworkModeInfrastructure, 0);
+  ReportBSS(bss1_path, ap1->ssid_string(), ap1->bssid_string(), 0, 0,
+            kNetworkModeInfrastructure, 0);
+  ReportScanDone();
+
+  // Interworking select will find two matches and report them to the provider.
+  EXPECT_CALL(*wifi_provider(), OnPasspointCredentialsMatches(_)).Times(1);
+  KeyValueStore properties;
+  properties.Set<std::string>(WPASupplicant::kCredentialsMatchType,
+                              WPASupplicant::kCredentialsMatchTypeHome);
+  ReportInterworkingAPAdded(bss0_path, cred0_path, properties);
+  ReportInterworkingAPAdded(bss1_path, cred1_path, properties);
+  ReportInterworkingSelectDone();
+}
+
+TEST_F(WiFiMainTest, ScanTriggersInterworkingSelect) {
+  // Ensure the provider contains credentials
+  MockPasspointCredentialsRefPtr cred0 = new MockPasspointCredentials("cred0");
+  EXPECT_CALL(*cred0, ToSupplicantProperties(_)).WillRepeatedly(Return(true));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), AddCred(_, _))
+      .WillOnce(Return(true));
+
+  std::vector<PasspointCredentialsRefPtr> credentials{cred0};
+  EXPECT_CALL(*wifi_provider(), GetCredentials())
+      .WillRepeatedly(Return(credentials));
+
+  StartWiFi();
+
+  // Prepare a scan result compatible with Passpoint.
+  std::vector<uint8_t> ies;
+  std::vector<uint8_t> data = {0x20};
+  AddVendorIE(IEEE_80211::kOUIVendorWiFiAlliance,
+              IEEE_80211::kOUITypeWiFiAllianceHS20Indicator, data, &ies);
+  RpcIdentifier bss0_path("bss0");
+  ReportBSSWithIEs(RpcIdentifier("bss0"), "ssid0", "00:00:00:00:00:00", 0, 0,
+                   kNetworkModeInfrastructure, ies);
+
+  // When a Passpoint compatible AP is found, an interworking selection is
+  // scheduled.
+  EXPECT_TRUE(NeedInterworkingSelect());
+}
+
+TEST_F(WiFiMainTest, AddCredTriggersInterworkingSelect) {
+  StartWiFi();
+
+  MockPasspointCredentialsRefPtr cred0 = new MockPasspointCredentials("cred0");
+  EXPECT_CALL(*cred0, ToSupplicantProperties(_)).WillRepeatedly(Return(true));
+  EXPECT_CALL(*GetSupplicantInterfaceProxy(), AddCred(_, _))
+      .WillOnce(Return(true));
+
+  std::vector<PasspointCredentialsRefPtr> credentials{cred0};
+  EXPECT_CALL(*wifi_provider(), GetCredentials())
+      .WillRepeatedly(Return(credentials));
+
+  EXPECT_TRUE(AddCred(cred0));
+  // The addition of a set of credentials schedules an interworking selection.
+  EXPECT_TRUE(NeedInterworkingSelect());
+}
+
+TEST_F(WiFiMainTest, NetworkEventTransition) {
+  StartWiFi();
+  MockWiFiServiceRefPtr service =
+      SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  SetCurrentService(service);
+  RpcIdentifier connected_bss = GetSupplicantBSS();
+  SetSupplicantBSS(connected_bss);
+
+  KeyValueStore properties;
+  properties.Set<int32_t>(WPASupplicant::kSignalChangePropertyRSSI, -70);
+
+  rtnl_link_stats64 stats;
+
+  // IP configuration starts
+  ReportStateChanged(WPASupplicant::kInterfaceStateCompleted);
+  // Catch all to avoid failing on calls triggered by other events
+  // (e.g. monitoring).
+  EXPECT_CALL(*wifi_link_statistics_, UpdateNl80211LinkStatistics(_, _))
+      .Times(AnyNumber());
+  // One of the call to |UpdateNl80211LinkStatistics()| must correspond to the
+  // IP configuration start.
+  EXPECT_CALL(*wifi_link_statistics_,
+              UpdateNl80211LinkStatistics(
+                  WiFiLinkStatistics::Trigger::kIPConfigurationStart, _))
+      .Times(1);
+  SignalChanged(properties);
+  EXPECT_CALL(*wifi_link_statistics_,
+              UpdateRtnlLinkStatistics(
+                  WiFiLinkStatistics::Trigger::kIPConfigurationStart, _))
+      .Times(1);
+  ReportReceivedRtnlLinkStatistics(stats);
+
+  RetrieveLinkStatistics(WiFiLinkStatistics::Trigger::kDHCPFailure);
+
+  EXPECT_CALL(
+      *wifi_link_statistics_,
+      UpdateNl80211LinkStatistics(WiFiLinkStatistics::Trigger::kDHCPFailure, _))
+      .Times(1);
+  SignalChanged(properties);
+  EXPECT_CALL(
+      *wifi_link_statistics_,
+      UpdateRtnlLinkStatistics(WiFiLinkStatistics::Trigger::kDHCPFailure, _))
+      .Times(1);
+  ReportReceivedRtnlLinkStatistics(stats);
+
+  // Test network validation failure
+  RetrieveLinkStatistics(WiFiLinkStatistics::Trigger::kNetworkValidationStart);
+
+  EXPECT_CALL(*wifi_link_statistics_,
+              UpdateNl80211LinkStatistics(
+                  WiFiLinkStatistics::Trigger::kNetworkValidationStart, _))
+      .Times(1);
+  SignalChanged(properties);
+  EXPECT_CALL(*wifi_link_statistics_,
+              UpdateRtnlLinkStatistics(
+                  WiFiLinkStatistics::Trigger::kNetworkValidationStart, _))
+      .Times(1);
+  ReportReceivedRtnlLinkStatistics(stats);
+
+  // DHCP failure
+  RetrieveLinkStatistics(WiFiLinkStatistics::Trigger::kDHCPFailure);
+  EXPECT_CALL(
+      *wifi_link_statistics_,
+      UpdateNl80211LinkStatistics(WiFiLinkStatistics::Trigger::kDHCPFailure, _))
+      .Times(1);
+  SignalChanged(properties);
+  EXPECT_CALL(
+      *wifi_link_statistics_,
+      UpdateRtnlLinkStatistics(WiFiLinkStatistics::Trigger::kDHCPFailure, _))
+      .Times(1);
+  ReportReceivedRtnlLinkStatistics(stats);
+  // SLAAC success
+  RetrieveLinkStatistics(WiFiLinkStatistics::Trigger::kSlaacFinished);
+  EXPECT_CALL(*wifi_link_statistics_,
+              UpdateNl80211LinkStatistics(
+                  WiFiLinkStatistics::Trigger::kSlaacFinished, _))
+      .Times(1);
+  SignalChanged(properties);
+  EXPECT_CALL(
+      *wifi_link_statistics_,
+      UpdateRtnlLinkStatistics(WiFiLinkStatistics::Trigger::kSlaacFinished, _))
+      .Times(1);
+  ReportReceivedRtnlLinkStatistics(stats);
+
+  // Network validation failure
+  RetrieveLinkStatistics(
+      WiFiLinkStatistics::Trigger::kNetworkValidationFailure);
+  EXPECT_CALL(*wifi_link_statistics_,
+              UpdateNl80211LinkStatistics(
+                  WiFiLinkStatistics::Trigger::kNetworkValidationFailure, _))
+      .Times(1);
+  SignalChanged(properties);
+  EXPECT_CALL(*wifi_link_statistics_,
+              UpdateRtnlLinkStatistics(
+                  WiFiLinkStatistics::Trigger::kNetworkValidationFailure, _))
+      .Times(1);
+  ReportReceivedRtnlLinkStatistics(stats);
+}
+
+TEST_F(WiFiMainTest, GetWiFiPhy) {
+  NiceMock<WiFiPhy>* phy = new NiceMock<WiFiPhy>(kPhyIndex);
+  SetWiFiPhy(phy);
+  EXPECT_EQ(phy, GetWiFiPhy());
+}
+
+TEST_F(WiFiMainTest, ConnectStopsNetwork) {
+  StartWiFi();
+  SetupConnectedService(RpcIdentifier(""), nullptr, nullptr);
+  EXPECT_CALL(*network(), Stop());
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+  InitiateConnect(service);
+  Mock::VerifyAndClearExpectations(network());
+}
+
+TEST_F(WiFiMainTest, UpdateSupplicantPropertiesSuccess) {
+  Error error;
+  StartWiFi();
+  RpcIdentifier kPath("/test/path");
+  MockWiFiServiceRefPtr service(SetupConnectedService(kPath, nullptr, nullptr));
+
+  KeyValueStore kv;
+  EXPECT_CALL(*GetSupplicantNetworkProxy(), SetProperties(kv))
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(UpdateSupplicantProperties(service.get(), kv, &error));
+  EXPECT_TRUE(error.IsSuccess());
+}
+
+TEST_F(WiFiMainTest, UpdateSupplicantPropertiesFail) {
+  Error error;
+  StartWiFi();
+  RpcIdentifier kPath("/test/path");
+  MockWiFiServiceRefPtr service(SetupConnectedService(kPath, nullptr, nullptr));
+
+  KeyValueStore kv;
+  EXPECT_CALL(*GetSupplicantNetworkProxy(), SetProperties(kv))
+      .WillOnce(Return(false));
+
+  EXPECT_FALSE(UpdateSupplicantProperties(service.get(), kv, &error));
+  EXPECT_EQ(error.type(), Error::kOperationFailed);
+}
+
+TEST_F(WiFiMainTest, UpdateSupplicantPropertiesNotFound) {
+  Error error;
+  StartWiFi();
+  MockWiFiServiceRefPtr service = MakeMockService(WiFiSecurity::kNone);
+
+  KeyValueStore kv;
+  EXPECT_FALSE(UpdateSupplicantProperties(service.get(), kv, &error));
+  EXPECT_EQ(error.type(), Error::kNotFound);
 }
 
 }  // namespace shill

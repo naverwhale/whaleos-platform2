@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,13 +15,13 @@ namespace rmad {
 
 class MockSensorCalibrationUtils : public SensorCalibrationUtils {
  public:
-  MockSensorCalibrationUtils(const std::string& location,
-                             const std::string& name)
-      : SensorCalibrationUtils(location, name) {}
+  MockSensorCalibrationUtils() = default;
   ~MockSensorCalibrationUtils() override = default;
 
-  MOCK_METHOD(bool, Calibrate, (), (override));
-  MOCK_METHOD(bool, GetProgress, (double*), (const, override));
+  MOCK_METHOD(void,
+              Calibrate,
+              (CalibrationComponentStatusCallback, CalibrationResultCallback),
+              (override));
 };
 
 }  // namespace rmad

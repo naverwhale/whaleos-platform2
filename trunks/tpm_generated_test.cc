@@ -1,15 +1,17 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // Note: These tests are not generated. They test generated code.
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <iterator>
+#include <utility>
+
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/run_loop.h>
-#include <base/stl_util.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/test/task_environment.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <gtest/gtest.h>
 
 #include "trunks/mock_authorization_delegate.h"
@@ -83,7 +85,7 @@ TEST(GeneratorTest, SerializeParseEmptyStruct) {
 
 TEST(GeneratorTest, SerializeBufferOverflow) {
   TPM2B_MAX_BUFFER value;
-  value.size = base::size(value.buffer) + 1;
+  value.size = std::size(value.buffer) + 1;
   std::string tmp;
   EXPECT_EQ(TPM_RC_INSUFFICIENT, Serialize_TPM2B_MAX_BUFFER(value, &tmp));
 }
@@ -313,9 +315,9 @@ class CommandFlowTest : public testing::Test {
 class PostResponse {
  public:
   explicit PostResponse(const std::string& response) : response_(response) {}
-  void operator()(const base::Callback<void(const std::string&)>& callback) {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
-        FROM_HERE, base::Bind(callback, response_));
+  void operator()(base::OnceCallback<void(const std::string&)> callback) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(std::move(callback), response_));
   }
 
  private:
@@ -359,9 +361,9 @@ TEST_F(CommandFlowTest, SimpleCommandFlow) {
       .WillOnce(Return(true));
   Tpm tpm(&transceiver);
   response_code_ = TPM_RC_FAILURE;
-  tpm.Startup(
-      TPM_SU_CLEAR, &authorization,
-      base::Bind(&CommandFlowTest::StartupCallback, base::Unretained(this)));
+  tpm.Startup(TPM_SU_CLEAR, &authorization,
+              base::BindOnce(&CommandFlowTest::StartupCallback,
+                             base::Unretained(this)));
   Run();
   EXPECT_EQ(TPM_RC_SUCCESS, response_code_);
 }
@@ -386,9 +388,9 @@ TEST_F(CommandFlowTest, SimpleCommandFlowWithError) {
   EXPECT_CALL(authorization, GetCommandAuthorization(_, _, _, _))
       .WillOnce(Return(true));
   Tpm tpm(&transceiver);
-  tpm.Startup(
-      TPM_SU_CLEAR, &authorization,
-      base::Bind(&CommandFlowTest::StartupCallback, base::Unretained(this)));
+  tpm.Startup(TPM_SU_CLEAR, &authorization,
+              base::BindOnce(&CommandFlowTest::StartupCallback,
+                             base::Unretained(this)));
   Run();
   EXPECT_EQ(TPM_RC_FAILURE, response_code_);
 }
@@ -452,10 +454,10 @@ TEST_F(CommandFlowTest, FullCommandFlow) {
   null_scheme.scheme = TPM_ALG_NULL;
   null_scheme.details.rsassa.hash_alg = TPM_ALG_SHA256;
   Tpm tpm(&transceiver);
-  tpm.Certify(
-      0x11223344u, "object_handle", 0x55667788u, "sign_handle",
-      Make_TPM2B_DATA("pt_user_data"), null_scheme, &authorization,
-      base::Bind(&CommandFlowTest::CertifyCallback, base::Unretained(this)));
+  tpm.Certify(0x11223344u, "object_handle", 0x55667788u, "sign_handle",
+              Make_TPM2B_DATA("pt_user_data"), null_scheme, &authorization,
+              base::BindOnce(&CommandFlowTest::CertifyCallback,
+                             base::Unretained(this)));
   Run();
   ASSERT_EQ(TPM_RC_SUCCESS, response_code_);
   EXPECT_EQ("pt_signed_data", signed_data_);

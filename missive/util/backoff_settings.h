@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,7 @@ namespace reporting {
 // doubles the delay on every failure, to a maximum delay of 90 seconds.
 // Caller owns the object and is responsible for resetting the delay on
 // successful completion.
-std::unique_ptr<::net::BackoffEntry> GetBackoffEntry();
+std::unique_ptr<::brillo::BackoffEntry> GetBackoffEntry();
 
 }  // namespace reporting
 

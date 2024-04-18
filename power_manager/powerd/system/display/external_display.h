@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,10 +12,8 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/compiler_specific.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
 
@@ -23,8 +21,7 @@
 
 struct i2c_rdwr_ioctl_data;
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Class for controlling an external display via DDC/CI.
 //
@@ -79,15 +76,15 @@ class ExternalDisplay {
 
   // Minimum amount of time to wait after sending a "Set VCP Feature" message
   // before sending the next message (per DDC/CI v1.1 4.4).
-  static const int kDdcSetDelayMs;
+  static constexpr base::TimeDelta kDdcSetDelay = base::Milliseconds(50);
 
   // Amount of time to wait after sending a "Get VCP Feature" message before
   // reading the reply message (per DDC/CI v1.1 4.3).
-  static const int kDdcGetDelayMs;
+  static constexpr base::TimeDelta kDdcGetDelay = base::Milliseconds(40);
 
   // Amount of time that the brightness value last read from or written to the
   // display should be honored before a new brightness value is read.
-  static const int kCachedBrightnessValidMs;
+  static constexpr base::TimeDelta kCachedBrightnessValid = base::Seconds(3);
 
   // Possible outcomes when sending a message to the display. These values are
   // reported as a histogram and cannot be renumbered.
@@ -125,7 +122,7 @@ class ExternalDisplay {
   // communicate with devices.
   class Delegate {
    public:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
 
     // Returns a name describing the I2C bus represented by this object.
     virtual std::string GetName() const = 0;
@@ -138,7 +135,7 @@ class ExternalDisplay {
   // Real implementation of the Delegate interface.
   class RealDelegate : public Delegate {
    public:
-    RealDelegate();
+    RealDelegate() = default;
     RealDelegate(const RealDelegate&) = delete;
     RealDelegate& operator=(const RealDelegate&) = delete;
 
@@ -171,7 +168,7 @@ class ExternalDisplay {
     std::string name_;
 
     // File descriptor corresponding to the I2C bus passed to the c'tor.
-    int fd_;
+    int fd_ = -1;
 
     // File path for the I2C bus.
     base::FilePath i2c_path_;
@@ -184,7 +181,7 @@ class ExternalDisplay {
     TestApi(const TestApi&) = delete;
     TestApi& operator=(const TestApi&) = delete;
 
-    ~TestApi();
+    ~TestApi() = default;
 
     // Advances |display_|'s clock by |interval|.
     void AdvanceTime(base::TimeDelta interval);
@@ -194,17 +191,17 @@ class ExternalDisplay {
 
     // If |display_|'s |timer_| is running, stops it, executes UpdateState(),
     // and returns true. Otherwise, returns false.
-    bool TriggerTimeout() WARN_UNUSED_RESULT;
+    [[nodiscard]] bool TriggerTimeout();
 
    private:
-    ExternalDisplay* display_;  // weak pointer
+    ExternalDisplay* display_;  // owned elsewhere
   };
 
   explicit ExternalDisplay(std::unique_ptr<Delegate> delegate);
   ExternalDisplay(const ExternalDisplay&) = delete;
   ExternalDisplay& operator=(const ExternalDisplay&) = delete;
 
-  ~ExternalDisplay();
+  ~ExternalDisplay() = default;
 
   // Adjusts the display's brightness by |offset_percent|, a linearly-calculated
   // percent in the range [-100.0, 100.0]. Note that the adjustment will happen
@@ -273,17 +270,17 @@ class ExternalDisplay {
   Clock clock_;
 
   // Current state of the object.
-  State state_;
+  State state_ = State::IDLE;
 
   // Brightness believed to be currently used by the display, as a percentage in
   // the range [0.0, 100.0]. Note that the actual brightness may change in the
   // background, e.g. in response to the user hitting physical buttons on the
   // display.
-  double current_brightness_percent_;
+  double current_brightness_percent_ = 0.0;
 
   // Maximum brightness value supported by the display, in display-specific
   // units.
-  uint16_t max_brightness_level_;
+  uint16_t max_brightness_level_ = 0;
 
   // Last time at which |current_brightness_percent_| and
   // |max_brightness_level_| were updated.
@@ -291,11 +288,11 @@ class ExternalDisplay {
 
   // Amount by which the brightness should be offset, as a percentage in the
   // range [-100.0, 100.0].
-  double pending_brightness_adjustment_percent_;
+  double pending_brightness_adjustment_percent_ = 0.0;
 
   // Absolute brightness to set, as a percentage in the range [0.0, 100.0]. This
   // value will be less than zero if no change is pending.
-  double pending_brightness_percent_;
+  double pending_brightness_percent_ = -1.0;
 
   // Invokes UpdateState(). Used to enforce the mandatory delays between
   // requesting the brightness and reading the reply, and after sending a "set"
@@ -303,7 +300,6 @@ class ExternalDisplay {
   base::OneShotTimer timer_;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_DISPLAY_EXTERNAL_DISPLAY_H_

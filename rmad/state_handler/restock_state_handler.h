@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 
 #include <memory>
 
+#include <base/files/file_path.h>
 #include <base/timer/timer.h>
 
 #include "rmad/system/power_manager_client.h"
@@ -17,14 +18,16 @@ namespace rmad {
 
 class RestockStateHandler : public BaseStateHandler {
  public:
-  // Wait for 5 seconds before shutting down.
-  static constexpr base::TimeDelta kShutdownDelay =
-      base::TimeDelta::FromSeconds(5);
+  // Wait for 3 seconds before shutting down.
+  static constexpr base::TimeDelta kShutdownDelay = base::Seconds(3);
 
-  explicit RestockStateHandler(scoped_refptr<JsonStore> json_store);
+  explicit RestockStateHandler(scoped_refptr<JsonStore> json_store,
+                               scoped_refptr<DaemonCallback> daemon_callback);
   // Used to inject mocked |power_manager_client_| for testing.
-  RestockStateHandler(scoped_refptr<JsonStore> json_store,
-                      std::unique_ptr<PowerManagerClient> power_manager_client);
+  explicit RestockStateHandler(
+      scoped_refptr<JsonStore> json_store,
+      scoped_refptr<DaemonCallback> daemon_callback,
+      std::unique_ptr<PowerManagerClient> power_manager_client);
 
   ASSIGN_STATE(RmadState::StateCase::kRestock);
   SET_REPEATABLE;
@@ -39,6 +42,8 @@ class RestockStateHandler : public BaseStateHandler {
   void Shutdown();
 
   std::unique_ptr<PowerManagerClient> power_manager_client_;
+
+  bool shutdown_scheduled_;
   base::OneShotTimer timer_;
 };
 

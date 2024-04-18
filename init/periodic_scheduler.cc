@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,12 +12,14 @@
 #include <base/logging.h>
 #include <base/process/launch.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/threading/platform_thread.h>
+#include <brillo/files/file_util.h>
 #include <brillo/process/process.h>
 #include <brillo/syslog_logging.h>
 
 namespace {
-constexpr time_t kCheckDelay = 300;
-constexpr time_t kKillDelay = 10;
+constexpr base::TimeDelta kCheckDelay = base::Minutes(5);
+constexpr base::TimeDelta kKillDelay = base::Seconds(10);
 constexpr char kSpoolDir[] = "/var/spool";
 constexpr char kSpoolCronLiteDir[] = "cron-lite";
 
@@ -28,7 +30,7 @@ bool SanitizePath(const base::FilePath& path) {
   if (lstat(path.value().c_str(), &path_stat) != 0 ||
       !S_ISDIR(path_stat.st_mode)) {
     // Don't recursively delete the directory if we can't stat it.
-    base::DeleteFile(path);
+    brillo::DeleteFile(path);
     if (!base::CreateDirectory(path)) {
       PLOG(ERROR) << "Failed to create new directory " << path.value();
       return false;
@@ -81,7 +83,7 @@ static void SigtermHandler(int signal) {
     // process to exit.
     base::Process p(child_pid);
     p.Terminate(-1, false /* wait */);
-    p.WaitForExitWithTimeout(base::TimeDelta::FromSeconds(kKillDelay), nullptr);
+    p.WaitForExitWithTimeout(kKillDelay, nullptr);
   }
   exit(0);
 }
@@ -105,8 +107,7 @@ PeriodicScheduler::PeriodicScheduler(
     const std::vector<std::string>& task_command)
     : period_seconds_(period),
       timeout_seconds_(timeout),
-      check_frequency_seconds_(
-          base::TimeDelta::FromSeconds(kCheckDelay + kKillDelay)),
+      check_frequency_(kCheckDelay + kKillDelay),
       task_name_(task_name),
       spool_dir_(base::FilePath(kSpoolDir)),
       process_args_(task_command) {}
@@ -129,14 +130,14 @@ bool PeriodicScheduler::Run(bool start_immediately) {
         auto now = base::Time::Now();
         base::TouchFile(spool_file, now, now);
       }
-      base::PlatformThread::Sleep(check_frequency_seconds_);
+      base::PlatformThread::Sleep(check_frequency_);
     }
 
     auto file_last_mtime = GetPathMtime(spool_file);
     auto current_time = base::Time::Now();
 
     if (start_immediately || current_time - file_last_mtime > period_seconds_) {
-      base::DeleteFile(spool_file);
+      brillo::DeleteFile(spool_file);
       base::WriteFile(spool_file, nullptr, 0);
       auto now = base::Time::Now();
       base::TouchFile(spool_file, now, now);

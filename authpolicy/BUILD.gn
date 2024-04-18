@@ -1,6 +1,9 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# TODO(b/262375406): Migrate to re2.
+# gnlint: disable=GnLintLibraries
 
 import("//common-mk/generate-dbus-adaptors.gni")
 import("//common-mk/pkg_config.gni")
@@ -12,6 +15,11 @@ group("all") {
     ":authpolicyd",
     ":container-protos",
     ":dbus_code_generator",
+    ":install_init",
+    ":install_minijail_conf",
+    ":install_policy",
+    ":install_process_management_policies",
+    ":install_systemd",
     ":libauthpolicy",
     ":policy_code_generator",
   ]
@@ -65,7 +73,7 @@ action("policy_code_generator") {
 
   sources = [
     "${policy_resources_dir}/VERSION",
-    "${policy_resources_dir}/policy_templates.json",
+    "${policy_resources_dir}/generated_policy_templates.json",
   ]
   outputs = [
     "${out_dir}/policy_constants.h",
@@ -76,7 +84,7 @@ action("policy_code_generator") {
     "--cros-policy-constants-source=${out_dir}/policy_constants.cc",
     "--chrome-version-file=${policy_resources_dir}/VERSION",
     "--target-platform=chromeos",
-    "--policy-templates-file=${policy_resources_dir}/policy_templates.json",
+    "--policy-templates-file=${policy_resources_dir}/generated_policy_templates.json",
   ]
 }
 
@@ -114,7 +122,6 @@ static_library("libauthpolicy") {
     "log_colors.cc",
     "path_service.cc",
     "platform_helper.cc",
-    "policy/device_policy_encoder.cc",
     "policy/extension_policy_encoder.cc",
     "policy/policy_encoder_helper.cc",
     "policy/preg_parser.cc",
@@ -173,6 +180,7 @@ executable("authpolicy_parser") {
     ":authpolicy_parser_config",
     ":target_defaults",
   ]
+  install_path = "sbin"
   deps = [ ":libauthpolicy" ]
 }
 
@@ -183,10 +191,40 @@ executable("authpolicyd") {
     ":authpolicy_parser_config",
     ":target_defaults",
   ]
+  install_path = "sbin"
   deps = [
     ":authpolicy_parser",
     ":libauthpolicy",
   ]
+}
+
+install_config("install_init") {
+  sources = [ "etc/init/authpolicyd.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "minijail/authpolicyd.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_policy") {
+  sources = [
+    "seccomp_filters/authpolicy_parser-seccomp.policy",
+    "seccomp_filters/klist-seccomp.policy",
+    "seccomp_filters/samba-seccomp.policy",
+  ]
+  install_path = "seccomp_policy"
+}
+
+install_config("install_process_management_policies") {
+  sources = [ "setuid_restrictions/authpolicyd_uid_allowlist.txt" ]
+  install_path = "/usr/share/cros/startup/process_management_policies"
+}
+
+install_config("install_systemd") {
+  sources = [ "etc/dbus-1/org.chromium.AuthPolicy.conf" ]
+  install_path = "dbus_system_d"
 }
 
 # Unit tests.
@@ -222,9 +260,7 @@ if (use.test) {
       "anonymizer_test.cc",
       "auth_data_cache_test.cc",
       "authpolicy_flags_test.cc",
-      "authpolicy_test.cc",
       "gpo_version_cache_test.cc",
-      "policy/device_policy_encoder_test.cc",
       "policy/extension_policy_encoder_test.cc",
       "policy/preg_parser_test.cc",
       "policy/preg_policy_encoder_test.cc",
@@ -238,6 +274,7 @@ if (use.test) {
       ":authpolicy_test_config",
       ":target_defaults",
     ]
+    run_test = true
     defines = [ "UNIT_TEST" ]
     deps = [
       ":libauthpolicy",

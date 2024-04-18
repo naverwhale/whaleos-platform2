@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,15 +22,13 @@ const char kSessionManagerLoginScreenStorageListKeys[] =
 const char kSessionManagerLoginScreenStorageDelete[] =
     "LoginScreenStorageDelete";
 const char kSessionManagerStartSession[] = "StartSession";
+const char kSessionManagerStartSessionEx[] = "StartSessionEx";
 const char kSessionManagerStopSession[] = "StopSession";
 const char kSessionManagerStopSessionWithReason[] = "StopSessionWithReason";
 const char kSessionManagerLoadShillProfile[] = "LoadShillProfile";
 const char kSessionManagerRestartJob[] = "RestartJob";
 const char kSessionManagerStorePolicyEx[] = "StorePolicyEx";
-const char kSessionManagerStoreUnsignedPolicyEx[] = "StoreUnsignedPolicyEx";
 const char kSessionManagerRetrievePolicyEx[] = "RetrievePolicyEx";
-const char kSessionManagerListStoredComponentPolicies[] =
-    "ListStoredComponentPolicies";
 const char kSessionManagerRetrieveSessionState[] = "RetrieveSessionState";
 const char kSessionManagerRetrieveActiveSessions[] = "RetrieveActiveSessions";
 const char kSessionManagerRetrievePrimarySession[] = "RetrievePrimarySession";
@@ -39,10 +37,12 @@ const char kSessionManagerStartDeviceWipe[] = "StartDeviceWipe";
 const char kSessionManagerStartRemoteDeviceWipe[] = "StartRemoteDeviceWipe";
 const char kSessionManagerClearForcedReEnrollmentVpd[] =
     "ClearForcedReEnrollmentVpd";
-const char kSessionManagerHandleSupervisedUserCreationStarting[] =
-    "HandleSupervisedUserCreationStarting";
-const char kSessionManagerHandleSupervisedUserCreationFinished[] =
-    "HandleSupervisedUserCreationFinished";
+const char kSessionManagerUnblockDevModeForEnrollment[] =
+    "UnblockDevModeForEnrollment";
+const char kSessionManagerUnblockDevModeForInitialStateDetermination[] =
+    "UnblockDevModeForInitialStateDetermination";
+const char kSessionManagerUnblockDevModeForCarrierLock[] =
+    "UnblockDevModeForCarrierLock";
 const char kSessionManagerLockScreen[] = "LockScreen";
 const char kSessionManagerHandleLockScreenShown[] = "HandleLockScreenShown";
 const char kSessionManagerHandleLockScreenDismissed[] =
@@ -52,6 +52,8 @@ const char kSessionManagerSetFlagsForUser[] = "SetFlagsForUser";
 const char kSessionManagerSetFeatureFlagsForUser[] = "SetFeatureFlagsForUser";
 const char kSessionManagerGetServerBackedStateKeys[] =
     "GetServerBackedStateKeys";
+const char kSessionManagerGetPsmDeviceActiveSecret[] =
+    "GetPsmDeviceActiveSecret";
 const char kSessionManagerInitMachineInfo[] = "InitMachineInfo";
 const char kSessionManagerCheckArcAvailability[] = "CheckArcAvailability";
 const char kSessionManagerStartArcMiniContainer[] = "StartArcMiniContainer";
@@ -66,6 +68,8 @@ const char kSessionManagerEnableAdbSideload[] = "EnableAdbSideload";
 const char kSessionManagerQueryAdbSideload[] = "QueryAdbSideload";
 const char kSessionManagerStartBrowserDataMigration[] =
     "StartBrowserDataMigration";
+const char kSessionManagerStartBrowserDataBackwardMigration[] =
+    "StartBrowserDataBackwardMigration";
 // Signals
 const char kLoginPromptVisibleSignal[] = "LoginPromptVisible";
 const char kSessionStateChangedSignal[] = "SessionStateChanged";
@@ -114,6 +118,10 @@ const char kVerifyFail[] = INTERFACE ".VerifyFail";
 const char kSystemPropertyUpdateFailed[] =
     INTERFACE ".SystemPropertyUpdateFailed";
 const char kVpdUpdateFailed[] = INTERFACE ".VpdUpdateFailed";
+const char kFwmpRemovalFailed[] = INTERFACE ".FwmpRemovalFailed";
+const char kNvramClearedReadFailed[] = INTERFACE ".NvramClearedReadFailed";
+const char kNvramClearedUpdateFailed[] = INTERFACE ".NvramClearedUpdateFailed";
+const char kInvalidArgs[] = INTERFACE ".InvalidArgs";
 
 #undef INTERFACE
 }  // namespace dbus_error

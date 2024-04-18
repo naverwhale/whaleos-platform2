@@ -1,11 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_CELLULAR_MOCK_DBUS_OBJECTMANAGER_PROXY_H_
 #define SHILL_CELLULAR_MOCK_DBUS_OBJECTMANAGER_PROXY_H_
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/cellular/dbus_objectmanager_proxy_interface.h"
@@ -21,10 +20,7 @@ class MockDBusObjectManagerProxy : public DBusObjectManagerProxyInterface {
 
   ~MockDBusObjectManagerProxy() override;
 
-  MOCK_METHOD(void,
-              GetManagedObjects,
-              (Error*, const ManagedObjectsCallback&, int),
-              (override));
+  MOCK_METHOD(void, GetManagedObjects, (ManagedObjectsCallback), (override));
   MOCK_METHOD(void,
               set_interfaces_added_callback,
               (const InterfacesAddedSignalCallback&),

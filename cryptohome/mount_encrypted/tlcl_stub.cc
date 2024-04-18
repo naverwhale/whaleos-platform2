@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,7 @@
 
 #include <brillo/secure_blob.h>
 
-#include "cryptohome/crypto/sha.h"
+#include <libhwsec-foundation/crypto/sha.h>
 #include "cryptohome/mount_encrypted/tpm.h"
 
 namespace mount_encrypted {
@@ -439,7 +439,7 @@ uint32_t TlclInitNvAuthPolicy(uint32_t pcr_selection_bitmap,
     }
   }
 
-  brillo::SecureBlob digest = cryptohome::Sha256ToSecureBlob(input);
+  brillo::SecureBlob digest = hwsec_foundation::Sha256ToSecureBlob(input);
   memcpy(auth_policy, digest.data(), digest.size());
   return TPM_SUCCESS;
 }

@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "lorgnette/ippusb_device.h"
 
 #include <memory>
+#include <optional>
 
 #include <libusb.h>
 #include <sys/socket.h>
@@ -25,18 +26,19 @@
 
 namespace lorgnette {
 
+const base::TimeDelta kSocketCreationTimeout = base::Seconds(3);
+
 namespace {
 
-const char kIppUsbSocketDir[] = "/run/ippusb";
-const base::TimeDelta kSocketCreationTimeout = base::TimeDelta::FromSeconds(3);
 const char kScannerTypeMFP[] = "multi-function peripheral";  // Matches SANE.
 const uint8_t kIppUsbInterfaceProtocol = 0x04;
 
-// Wait for |sock_name| to appear in kIppUsbSocketDir.  Return true if that
+// Wait for |sock_name| to appear in |socket_dir|.  Return true if that
 // happens, or false if the socket doesn't appear within |timeout|.
-bool WaitForSocket(const std::string& sock_name, base::TimeDelta timeout) {
-  base::FilePath socket_path(kIppUsbSocketDir);
-  socket_path = socket_path.Append(sock_name);
+bool WaitForSocket(base::FilePath socket_dir,
+                   const std::string& sock_name,
+                   base::TimeDelta timeout) {
+  base::FilePath socket_path = socket_dir.Append(sock_name);
   LOG(INFO) << "Waiting for socket " << socket_path;
 
   base::ElapsedTimer timer;
@@ -46,7 +48,7 @@ bool WaitForSocket(const std::string& sock_name, base::TimeDelta timeout) {
       return false;
     }
 
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(10));
+    base::PlatformThread::Sleep(base::Milliseconds(10));
   }
 
   return true;
@@ -57,36 +59,14 @@ std::string VidPid(const libusb_device_descriptor& descriptor) {
                             descriptor.idProduct);
 }
 
-// Loop through all altsettings for all interfaces in |config| and return true
-// if any is a printer interface class that implements the IPP-USB protocol.
-// Also sets |isPrinter| to true if any interface has the printer class
-// regardless of whether it supports IPP-USB.
-bool ContainsIppUsbInterface(const libusb_config_descriptor* config,
-                             bool* isPrinter) {
-  for (uint8_t i = 0; i < config->bNumInterfaces; i++) {
-    for (uint8_t j = 0; j < config->interface[i].num_altsetting; j++) {
-      const libusb_interface_descriptor* interface =
-          &config->interface[i].altsetting[j];
-
-      if (interface->bInterfaceClass != LIBUSB_CLASS_PRINTER) {
-        continue;
-      }
-
-      *isPrinter = true;
-      if (interface->bInterfaceProtocol == kIppUsbInterfaceProtocol) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 // Create a ScannerInfo protobuf describing |device|, which is presumed to be an
 // IPP-USB capable printer.  The resulting |device_name| member will claim escl
 // support through the ippusb backend, but this function will not check for
 // proper support.  The caller must connect to the device and probe it before
 // attempting to scan.
-base::Optional<ScannerInfo> ScannerInfoForDevice(
+// TODO(b/277049540): Remove this once all callers are migrated over to the
+// version in UsbDevice.
+std::optional<ScannerInfo> ScannerInfoForDevice(
     libusb_device* device, const libusb_device_descriptor& descriptor) {
   const std::string vid_pid = VidPid(descriptor);
 
@@ -95,7 +75,7 @@ base::Optional<ScannerInfo> ScannerInfoForDevice(
   if (status < 0) {
     LOG(ERROR) << "Failed to open device " << vid_pid << ": "
                << libusb_error_name(status);
-    return base::nullopt;
+    return std::nullopt;
   }
   auto handle = std::unique_ptr<libusb_device_handle, decltype(&libusb_close)>(
       h, libusb_close);
@@ -106,7 +86,7 @@ base::Optional<ScannerInfo> ScannerInfoForDevice(
   if (bytes < 0) {
     LOG(ERROR) << "Failed to read manufacturer from device " << vid_pid << ": "
                << libusb_error_name(bytes);
-    return base::nullopt;
+    return std::nullopt;
   }
   std::string mfgr_name((const char*)buf.data(), bytes);
 
@@ -115,7 +95,7 @@ base::Optional<ScannerInfo> ScannerInfoForDevice(
   if (bytes < 0) {
     LOG(ERROR) << "Failed to read product name from device " << vid_pid << ": "
                << libusb_error_name(bytes);
-    return base::nullopt;
+    return std::nullopt;
   }
   std::string model_name((const char*)buf.data(), bytes);
 
@@ -141,20 +121,22 @@ base::Optional<ScannerInfo> ScannerInfoForDevice(
 
 // Check if |device| is a printer that supports IPP-USB and return a ScannerInfo
 // proto if it is.
-base::Optional<ScannerInfo> CheckUsbDevice(libusb_device* device) {
+// TODO(b/277049540): Remove this once all callers are migrated over to the
+// version in UsbDevice.
+std::optional<ScannerInfo> CheckUsbDevice(libusb_device* device) {
   libusb_device_descriptor descriptor;
   int status = libusb_get_device_descriptor(device, &descriptor);
   if (status < 0) {
     LOG(WARNING) << "Failed to get device descriptor: "
                  << libusb_error_name(status);
-    return base::nullopt;
+    return std::nullopt;
   }
   const std::string vid_pid = VidPid(descriptor);
 
   // Printers always have a printer class interface defined.  They don't define
   // a top-level device class.
   if (descriptor.bDeviceClass != LIBUSB_CLASS_PER_INTERFACE) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   bool isPrinter = false;
@@ -179,7 +161,7 @@ base::Optional<ScannerInfo> CheckUsbDevice(libusb_device* device) {
     LOG(INFO) << "Device " << vid_pid << " is a printer without IPP-USB";
   }
   if (!isIppUsb) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   return ScannerInfoForDevice(device, descriptor);
@@ -187,20 +169,22 @@ base::Optional<ScannerInfo> CheckUsbDevice(libusb_device* device) {
 
 }  // namespace
 
-base::Optional<std::string> BackendForDevice(const std::string& device_name) {
+std::optional<std::string> BackendForDevice(const std::string& device_name,
+                                            base::FilePath socket_dir,
+                                            base::TimeDelta timeout) {
   LOG(INFO) << "Finding real backend for device: " << device_name;
   std::string protocol, name, vid, pid, path;
   if (!RE2::FullMatch(
           device_name,
           "ippusb:([^:]+):([^:]+):([0-9A-Fa-f]{4})_([0-9A-Fa-f]{4})(/.*)",
           &protocol, &name, &vid, &pid, &path)) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   std::string socket =
       base::StringPrintf("%s-%s.sock", vid.c_str(), pid.c_str());
-  if (!WaitForSocket(socket, kSocketCreationTimeout)) {
-    return base::nullopt;
+  if (!WaitForSocket(socket_dir, socket, timeout)) {
+    return std::nullopt;
   }
 
   std::string real_device =
@@ -209,18 +193,9 @@ base::Optional<std::string> BackendForDevice(const std::string& device_name) {
   return real_device;
 }
 
-std::vector<ScannerInfo> FindIppUsbDevices() {
-  libusb_context* ctx;
-  int status = libusb_init(&ctx);
-  if (status != 0) {
-    LOG(ERROR) << "Failed to initialize libusb: " << libusb_error_name(status);
-    return {};
-  }
-  auto context =
-      std::unique_ptr<libusb_context, decltype(&libusb_exit)>(ctx, libusb_exit);
-
+std::vector<ScannerInfo> FindIppUsbDevices(libusb_context* context) {
   libusb_device** dev_list;
-  ssize_t num_devices = libusb_get_device_list(context.get(), &dev_list);
+  ssize_t num_devices = libusb_get_device_list(context, &dev_list);
   if (num_devices < 0) {
     LOG(ERROR) << "Failed to enumerate USB devices: "
                << libusb_error_name(num_devices);
@@ -229,7 +204,7 @@ std::vector<ScannerInfo> FindIppUsbDevices() {
 
   std::vector<ScannerInfo> scanners;
   for (ssize_t i = 0; i < num_devices; i++) {
-    base::Optional<ScannerInfo> info = CheckUsbDevice(dev_list[i]);
+    std::optional<ScannerInfo> info = CheckUsbDevice(dev_list[i]);
     if (info.has_value()) {
       scanners.push_back(info.value());
     }
@@ -237,6 +212,26 @@ std::vector<ScannerInfo> FindIppUsbDevices() {
 
   libusb_free_device_list(dev_list, 1);
   return scanners;
+}
+
+bool ContainsIppUsbInterface(const libusb_config_descriptor* config,
+                             bool* isPrinter) {
+  for (uint8_t i = 0; i < config->bNumInterfaces; i++) {
+    for (uint8_t j = 0; j < config->interface[i].num_altsetting; j++) {
+      const libusb_interface_descriptor* interface =
+          &config->interface[i].altsetting[j];
+
+      if (interface->bInterfaceClass != LIBUSB_CLASS_PRINTER) {
+        continue;
+      }
+
+      *isPrinter = true;
+      if (interface->bInterfaceProtocol == kIppUsbInterfaceProtocol) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 }  // namespace lorgnette

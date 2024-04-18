@@ -1,6 +1,9 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 gettimeofday: 1
 close: 1
@@ -25,7 +28,7 @@ munmap: 1
 brk: 1
 bind: 1
 getsockname: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 getdents64: 1
 rt_sigaction: 1
 getuid: 1
@@ -76,3 +79,6 @@ flock: 1
 utimensat: 1
 newfstatat: 1
 fstatfs: 1
+statfs: 1
+process_vm_readv: 1
+renameat: 1

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,37 +7,44 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <memory>
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
+#include <dirent.h>
+#include <fcntl.h>
+
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/files/file.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/time/time.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
+#include <libec/display_soc_command.h>
 
 #include "power_manager/common/battery_percentage_converter.h"
 #include "power_manager/common/clock.h"
 #include "power_manager/common/metrics_constants.h"
 #include "power_manager/common/power_constants.h"
 #include "power_manager/common/prefs.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/common/util.h"
-#include "power_manager/powerd/system/cros_ec_ioctl.h"
 #include "power_manager/powerd/system/dbus_wrapper.h"
 #include "power_manager/powerd/system/udev.h"
 #include "power_manager/proto_bindings/power_supply_properties.pb.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -45,18 +52,29 @@ namespace {
 // up by 10^6.  This factor scales them back down accordingly.
 const double kDoubleScaleFactor = 0.000001;
 
-// Default time interval between polls, in milliseconds.
-const int kDefaultPollMs = 30000;
+// Default time interval between polls.
+constexpr base::TimeDelta kDefaultPoll = base::Seconds(30);
 
 // Default time interval between polls when the number of samples is less than
-// |kMaxCurrentSamplesPref|, in milliseconds.
-const int kDefaultPollInitialMs = 1000;
+// |kMaxCurrentSamplesPref|.
+constexpr base::TimeDelta kDefaultPollInitial = base::Seconds(1);
 
-// Default values for |battery_stabilized_after_*_delay_|, in milliseconds.
-const int kDefaultBatteryStabilizedAfterStartupDelayMs = 5000;
-const int kDefaultBatteryStabilizedAfterLinePowerConnectedDelayMs = 5000;
-const int kDefaultBatteryStabilizedAfterLinePowerDisconnectedDelayMs = 5000;
-const int kDefaultBatteryStabilizedAfterResumeDelayMs = 5000;
+// Default values for |battery_stabilized_after_*_delay_|.
+constexpr base::TimeDelta kDefaultBatteryStabilizedAfterStartupDelay =
+    base::Seconds(5);
+constexpr base::TimeDelta
+    kDefaultBatteryStabilizedAfterLinePowerConnectedDelay = base::Seconds(5);
+constexpr base::TimeDelta
+    kDefaultBatteryStabilizedAfterLinePowerDisconnectedDelay = base::Seconds(5);
+constexpr base::TimeDelta kDefaultBatteryStabilizedAfterResumeDelay =
+    base::Seconds(5);
+constexpr base::TimeDelta kDefaultBatteryStabilizedAfterBatterySaverDelay =
+    base::Seconds(5);
+
+// Number of retry attempts for reading the PowerStatus.
+constexpr int kPowerRefreshRetries = 5;
+// Delay in milliseconds of retry attempts for reading the PowerStatus.
+constexpr int kPowerRefreshDelays[] = {1, 10, 100, 1000, 1000};
 
 // Reads the contents of |filename| within |directory| into |out|, trimming
 // trailing whitespace.  Returns true on success.
@@ -81,8 +99,10 @@ bool ReadInt64(const base::FilePath& directory,
 double ReadScaledDouble(const base::FilePath& directory,
                         const std::string& filename) {
   int64_t value = 0;
-  return ReadInt64(directory, filename, &value) ? kDoubleScaleFactor * value
-                                                : 0.0;
+  if (!ReadInt64(directory, filename, &value))
+    return 0.0;
+
+  return kDoubleScaleFactor * static_cast<double>(value);
 }
 
 // Returns the string surrounded by brackets via the |out| parameter.
@@ -121,19 +141,35 @@ bool IsPdDrpType(const std::string& type) {
                         base::CompareCase::SENSITIVE);
 }
 
-// Returns true if |type|, a power supply type read from a "type" file in
-// sysfs, indicates USB_PD_DRP, meaning a USB Power Delivery Dual Role Port.
-bool IsDualRoleType(const std::string& type, const base::FilePath& path) {
-  // 4.19+ kernels have the type as just "USB", and an extra usb_type file
-  // in the form:
-  // Unknown SDP DCP CDP C PD [PD_DRP] BrickID
-  if (type == PowerSupply::kUsbType) {
-    std::string usb_type;
-    if (ReadBracketSelectedString(path, "usb_type", &usb_type))
-      return IsPdDrpType(usb_type);
-  }
+// Returns the type of connection for the power supply. If the type
+// cannot be read, kUnknownType is returned.
+std::string ReadPowerSupplyType(const base::FilePath& path) {
+  std::string type;
+  if (!ReadAndTrimString(path, "type", &type))
+    return PowerSupply::kUnknownType;
 
-  return IsPdDrpType(type);
+  if (type != PowerSupply::kUsbType)
+    return type;
+
+  // Some drivers in newer kernels (4.19+) report a static type of USB,
+  // and separately report all supported connection types in a usb_type
+  // file, with the active value in brackets. For example:
+  // "Unknown SDP DCP CDP C PD [PD_DRP] BrickID".
+  std::string usb_type;
+  if (!ReadBracketSelectedString(path, "usb_type", &usb_type))
+    return PowerSupply::kUsbType;
+
+  // The exact type is unknown, but we still know it's USB.
+  if (usb_type == PowerSupply::kUnknownType || usb_type.empty())
+    return PowerSupply::kUsbType;
+
+  // For compatibility with the old dynamic type, prepend "USB_"
+  // to the type. The only exception is for the BrickId type,
+  // which is unprefixed.
+  if (usb_type != PowerSupply::kBrickIdType)
+    usb_type = "USB_" + usb_type;
+
+  return usb_type;
 }
 
 // Returns true if |path|, a sysfs directory, corresponds to an external
@@ -216,20 +252,15 @@ enum class UpowerBatteryState {
 };
 
 // Returns a mapping of |curr_state| to its equivalent upower enum.
-UpowerBatteryState BatteryStateToUpowerEnum(
-    PowerSupplyProperties::BatteryState curr_state) {
-  switch (curr_state) {
-    case PowerSupplyProperties_BatteryState_NOT_PRESENT:
-      return UpowerBatteryState::UpowerUnknown;
-    case PowerSupplyProperties_BatteryState_CHARGING:
-      return UpowerBatteryState::UpowerCharging;
-    case PowerSupplyProperties_BatteryState_DISCHARGING:
-      return UpowerBatteryState::UpowerDischarging;
-    case PowerSupplyProperties_BatteryState_FULL:
-      return UpowerBatteryState::UpowerFullyCharged;
-    default:
-      return UpowerBatteryState::UpowerUnknown;
-  }
+UpowerBatteryState BatteryStateToUpowerEnum(std::string curr_state) {
+  if (curr_state == PowerSupply::kBatteryStatusCharging)
+    return UpowerBatteryState::UpowerCharging;
+  else if (curr_state == PowerSupply::kBatteryStatusDischarging)
+    return UpowerBatteryState::UpowerDischarging;
+  else if (curr_state == PowerSupply::kBatteryStatusFull)
+    return UpowerBatteryState::UpowerFullyCharged;
+  else
+    return UpowerBatteryState::UpowerUnknown;
 }
 
 // Returns true if |port| is connected to a dedicated power source or dual-role
@@ -293,6 +324,61 @@ PowerSupplyProperties::PowerSource::Type GetPowerSourceTypeFromString(
   return PowerSupplyProperties_PowerSource_Type_OTHER;
 }
 
+// Dump the set of file descriptors opened by the process for debugging fd
+// leaks. Implemented directly with the POSIX APIs to avoid accidentally opening
+// any extra fds.
+void DumpOpenFileDescriptorsAndInputDevices() {
+  auto get_resolved_links = [](const std::string& directory) {
+    std::vector<std::pair<std::string, std::string>> entries;
+    DIR* dir = opendir(directory.c_str());
+    if (!dir) {
+      PLOG(ERROR) << "Unable to open " << dir;
+      return entries;
+    }
+    std::unique_ptr<char[]> link_target(new char[PATH_MAX]);
+    while (true) {
+      errno = 0;
+      const dirent* entry = readdir(dir);
+      if (!entry) {
+        if (errno) {
+          PLOG(ERROR) << "Unable to read dir entry";
+        }
+        break;
+      }
+      // Ignore '.' and '..'.
+      if (entry->d_name[0] == '.') {
+        continue;
+      }
+      ssize_t result =
+          readlinkat(dirfd(dir), entry->d_name, link_target.get(), PATH_MAX);
+      if (result > 0) {
+        entries.push_back(std::make_pair(
+            entry->d_name, std::string(link_target.get(), result)));
+      } else {
+        PLOG(ERROR) << "Unable to resolve link: " << entry->d_name;
+      }
+    }
+    closedir(dir);
+    return entries;
+  };
+
+  auto entries = get_resolved_links("/proc/self/fd");
+  std::map<std::string, int> entry_counts;
+  for (const auto& it : entries) {
+    entry_counts[it.second]++;
+  }
+  LOG(ERROR) << "Total file descriptors opened: " << entries.size();
+  for (const auto& it : entry_counts) {
+    LOG(ERROR) << "Open count for " << it.first << ": " << it.second;
+  }
+
+  // Also dump the input device mapping, since most file descriptors opened by
+  // powerd are input devices.
+  for (const auto& it : get_resolved_links("/sys/class/input")) {
+    LOG(ERROR) << "Input device mapping: " << it.first << " -> " << it.second;
+  }
+}
+
 }  // namespace
 
 void CopyPowerStatusToProtocolBuffer(const PowerStatus& status,
@@ -320,6 +406,13 @@ void CopyPowerStatusToProtocolBuffer(const PowerStatus& status,
     } else {
       proto->set_battery_discharge_rate(status.battery_energy_rate);
     }
+
+    // Parameters for the Adaptive Charging UI
+    proto->set_adaptive_charging_supported(status.adaptive_charging_supported);
+    proto->set_adaptive_charging_heuristic_enabled(
+        status.adaptive_charging_heuristic_enabled);
+    proto->set_adaptive_delaying_charge(status.adaptive_delaying_charge);
+    proto->set_charge_limited(status.charge_limited);
 
     // Cros_healthd is interested in the following items for reporting
     // telemetry data.
@@ -550,12 +643,14 @@ const char PowerSupply::kBatteryStatusNotCharging[] = "Not charging";
 const char PowerSupply::kBatteryStatusFull[] = "Full";
 const char PowerSupply::kLinePowerStatusCharging[] = "Charging";
 
-const int PowerSupply::kObservedBatteryChargeRateMinMs = kDefaultPollMs;
-const int PowerSupply::kBatteryStabilizedSlackMs = 50;
 const double PowerSupply::kLowBatteryShutdownSafetyPercent = 5.0;
 
 PowerSupply::PowerSupply()
-    : clock_(std::make_unique<Clock>()), weak_ptr_factory_(this) {}
+    : clock_(std::make_unique<Clock>()), weak_ptr_factory_(this) {
+  // TODO(b/207716926): Temporary change to find FD leaks in powerd.
+  spare_files_[0].reset(base::OpenFile(base::FilePath("/dev/null"), "r"));
+  spare_files_[1].reset(base::OpenFile(base::FilePath("/dev/null"), "r"));
+}
 
 PowerSupply::~PowerSupply() {
   if (udev_)
@@ -564,6 +659,8 @@ PowerSupply::~PowerSupply() {
 
 void PowerSupply::Init(
     const base::FilePath& power_supply_path,
+    const base::FilePath& cros_ec_path,
+    ec::EcCommandFactoryInterface* ec_command_factory,
     PrefsInterface* prefs,
     UdevInterface* udev,
     system::DBusWrapperInterface* dbus_wrapper,
@@ -573,6 +670,8 @@ void PowerSupply::Init(
 
   prefs_ = prefs;
   power_supply_path_ = power_supply_path;
+  cros_ec_path_ = cros_ec_path;
+  ec_command_factory_ = ec_command_factory;
 
   dbus_wrapper_ = dbus_wrapper;
   dbus_wrapper->ExportMethod(
@@ -590,41 +689,40 @@ void PowerSupply::Init(
 
   battery_percentage_converter_ = battery_percentage_converter;
 
+  prefs_->GetBool(kFactoryModePref, &factory_mode_);
   prefs_->GetBool(kMultipleBatteriesPref, &allow_multiple_batteries_);
+  prefs_->GetBool(kHasBarreljackPref, &has_barreljack_);
 
-  poll_delay_ = GetMsPref(kBatteryPollIntervalPref, kDefaultPollMs);
+  poll_delay_ = GetMsPref(kBatteryPollIntervalPref).value_or(kDefaultPoll);
   poll_delay_initial_ =
-      GetMsPref(kBatteryPollIntervalInitialPref, kDefaultPollInitialMs);
+      GetMsPref(kBatteryPollIntervalInitialPref).value_or(kDefaultPollInitial);
   battery_stabilized_after_startup_delay_ =
-      GetMsPref(kBatteryStabilizedAfterStartupMsPref,
-                kDefaultBatteryStabilizedAfterStartupDelayMs);
+      GetMsPref(kBatteryStabilizedAfterStartupMsPref)
+          .value_or(kDefaultBatteryStabilizedAfterStartupDelay);
   battery_stabilized_after_line_power_connected_delay_ =
-      GetMsPref(kBatteryStabilizedAfterLinePowerConnectedMsPref,
-                kDefaultBatteryStabilizedAfterLinePowerConnectedDelayMs);
+      GetMsPref(kBatteryStabilizedAfterLinePowerConnectedMsPref)
+          .value_or(kDefaultBatteryStabilizedAfterLinePowerConnectedDelay);
   battery_stabilized_after_line_power_disconnected_delay_ =
-      GetMsPref(kBatteryStabilizedAfterLinePowerDisconnectedMsPref,
-                kDefaultBatteryStabilizedAfterLinePowerDisconnectedDelayMs);
+      GetMsPref(kBatteryStabilizedAfterLinePowerDisconnectedMsPref)
+          .value_or(kDefaultBatteryStabilizedAfterLinePowerDisconnectedDelay);
   battery_stabilized_after_resume_delay_ =
-      GetMsPref(kBatteryStabilizedAfterResumeMsPref,
-                kDefaultBatteryStabilizedAfterResumeDelayMs);
+      GetMsPref(kBatteryStabilizedAfterResumeMsPref)
+          .value_or(kDefaultBatteryStabilizedAfterResumeDelay);
+  battery_stabilized_after_battery_saver_delay_ =
+      GetMsPref(kBatteryStabilizedAfterBatterySaverMsPref)
+          .value_or(kDefaultBatteryStabilizedAfterBatterySaverDelay);
 
   prefs_->GetDouble(kUsbMinAcWattsPref, &usb_min_ac_watts_);
 
   int64_t shutdown_time_sec = 0;
   if (prefs_->GetInt64(kLowBatteryShutdownTimePref, &shutdown_time_sec)) {
-    low_battery_shutdown_time_ =
-        base::TimeDelta::FromSeconds(shutdown_time_sec);
+    low_battery_shutdown_time_ = base::Seconds(shutdown_time_sec);
   }
 
-  if (!GetDisplayStateOfChargeFromEC(nullptr)) {
-    // Fall back to old method.
-    import_display_soc_ = false;
-    prefs_->GetDouble(kPowerSupplyFullFactorPref, &full_factor_);
-    full_factor_ = std::min(std::max(kEpsilon, full_factor_), 1.0);
-    LOG(WARNING) << "Setting full factor in OS is deprecated.";
-    prefs_->GetDouble(kLowBatteryShutdownPercentPref,
-                      &low_battery_shutdown_percent_);
-  }
+  prefs_->GetDouble(kPowerSupplyFullFactorPref, &full_factor_);
+  full_factor_ = std::min(std::max(kEpsilon, full_factor_), 1.0);
+  prefs_->GetDouble(kLowBatteryShutdownPercentPref,
+                    &low_battery_shutdown_percent_);
 
   // The percentage-based threshold takes precedence over the time-based
   // threshold. This behavior is duplicated in check_powerd_config.
@@ -634,13 +732,15 @@ void PowerSupply::Init(
 
   LOG(INFO) << "Using full factor of " << full_factor_;
 
+  import_display_soc_ = GetDisplayStateOfChargeFromEC(nullptr);
+
   int64_t samples = 0;
   CHECK(prefs_->GetInt64(kMaxCurrentSamplesPref, &samples));
-  current_samples_on_line_power_.reset(new RollingAverage(samples));
-  current_samples_on_battery_power_.reset(new RollingAverage(samples));
+  current_samples_on_line_power_ = std::make_unique<RollingAverage>(samples);
+  current_samples_on_battery_power_ = std::make_unique<RollingAverage>(samples);
 
   CHECK(prefs_->GetInt64(kMaxChargeSamplesPref, &samples));
-  charge_samples_.reset(new RollingAverage(samples));
+  charge_samples_ = std::make_unique<RollingAverage>(samples);
 
   LOG(INFO) << "Using low battery time threshold of "
             << low_battery_shutdown_time_.InSeconds()
@@ -690,6 +790,16 @@ bool PowerSupply::RefreshImmediately() {
                        NotifyPolicy::ASYNCHRONOUSLY);
 }
 
+bool PowerSupply::RefreshImmediatelyWithRetry() {
+  for (int i = 0; i < kPowerRefreshRetries; i++) {
+    if (RefreshImmediately()) {
+      return true;
+    }
+    base::PlatformThread::Sleep(base::Milliseconds(kPowerRefreshDelays[i]));
+  }
+  return false;
+}
+
 void PowerSupply::SetSuspended(bool suspended) {
   if (is_suspended_ == suspended)
     return;
@@ -708,47 +818,88 @@ void PowerSupply::SetSuspended(bool suspended) {
   }
 }
 
+void PowerSupply::SetAdaptiveChargingSupported(bool supported) {
+  adaptive_charging_supported_ = supported;
+}
+
+void PowerSupply::SetAdaptiveChargingHeuristicEnabled(bool enabled) {
+  adaptive_charging_heuristic_enabled_ = enabled;
+}
+
+void PowerSupply::SetAdaptiveCharging(
+    const base::TimeDelta& target_time_to_full,
+    double hold_percent,
+    double hold_delta_percent) {
+  DCHECK(adaptive_charging_supported_);
+  adaptive_charging_target_time_to_full_ = target_time_to_full;
+  adaptive_charging_hold_percent_ = hold_percent;
+  adaptive_charging_hold_delta_percent_ = hold_delta_percent;
+  adaptive_delaying_charge_ = true;
+}
+
+void PowerSupply::ClearAdaptiveChargingChargeDelay() {
+  adaptive_delaying_charge_ = false;
+  adaptive_charging_heuristic_enabled_ = false;
+  adaptive_charging_target_time_to_full_ = base::TimeDelta();
+}
+
+void PowerSupply::SetChargeLimited(double hold_percent,
+                                   double hold_delta_percent) {
+  // Adaptive Charging and Charge Limit should not be active at the same time.
+  DCHECK(!adaptive_delaying_charge_);
+  DCHECK(adaptive_charging_supported_);
+  charge_limited_ = true;
+  adaptive_charging_hold_percent_ = hold_percent;
+  adaptive_charging_hold_delta_percent_ = hold_delta_percent;
+}
+
+void PowerSupply::ClearChargeLimited() {
+  charge_limited_ = false;
+}
+
+void PowerSupply::OnBatterySaverStateChanged() {
+  DeferBatterySampling(battery_stabilized_after_battery_saver_delay_);
+  charge_samples_->Clear();
+  current_samples_on_line_power_->Clear();
+  current_samples_on_battery_power_->Clear();
+  has_max_samples_ = false;
+  PerformUpdate(UpdatePolicy::UNCONDITIONALLY, NotifyPolicy::ASYNCHRONOUSLY);
+}
+
 void PowerSupply::OnUdevEvent(const UdevEvent& event) {
   VLOG(1) << "Got udev event for " << event.device_info.sysname;
   // Bail out of the update if the available power sources didn't actually
   // change to avoid recording new samples and updating battery estimates in
   // response to spurious udev events (see http://crosbug.com/p/37403).
-  if (!is_suspended_) {
+  if (!is_suspended_ && !IsSupplyIgnored(event.device_info.sysname)) {
     PerformUpdate(UpdatePolicy::ONLY_IF_STATE_CHANGED,
                   NotifyPolicy::SYNCHRONOUSLY);
   }
 }
 
 bool PowerSupply::GetDisplayStateOfChargeFromEC(double* display_soc) {
-  struct ec_response_display_soc* r;
-
   if (!import_display_soc_)
     return false;
 
   base::ScopedFD ec_fd =
-      base::ScopedFD(open(cros_ec_ioctl::kCrosEcDevNodePath, O_RDWR));
+      base::ScopedFD(open(cros_ec_path_.value().c_str(), O_RDWR));
 
   if (!ec_fd.is_valid()) {
-    PLOG(ERROR) << "Failed to open " << cros_ec_ioctl::kCrosEcDevNodePath;
+    // This is expect on systems without the CrOS EC.
+    LOG(INFO) << "Failed to open " << cros_ec_path_;
     return false;
   }
 
-  cros_ec_ioctl::IoctlCommand<cros_ec_ioctl::EmptyParam,
-                              struct ec_response_display_soc>
-      cmd(EC_CMD_DISPLAY_SOC);
-
-  if (!cmd.Run(ec_fd.get())) {
+  auto cmd = ec_command_factory_->DisplayStateOfChargeCommand();
+  if (!cmd->Run(ec_fd.get())) {
     // This is expected if EC doesn't export display SoC.
     LOG(INFO) << "Failed to read display SoC from EC";
     return false;
   }
 
-  r = cmd.Resp();
   if (display_soc != nullptr) {
-    *display_soc = r->display_soc / 10.0;
+    *display_soc = cmd->CurrentPercentCharge();
   }
-  full_factor_ = r->full_factor / 1000.0;
-  low_battery_shutdown_percent_ = r->shutdown_soc / 10.0;
 
   return true;
 }
@@ -774,10 +925,12 @@ base::FilePath PowerSupply::GetPathForId(const std::string& id) const {
   return path;
 }
 
-base::TimeDelta PowerSupply::GetMsPref(const std::string& pref_name,
-                                       int64_t default_duration_ms) const {
-  prefs_->GetInt64(pref_name, &default_duration_ms);
-  return base::TimeDelta::FromMilliseconds(default_duration_ms);
+std::optional<base::TimeDelta> PowerSupply::GetMsPref(
+    const std::string& pref_name) const {
+  int64_t duration_ms;
+  if (prefs_->GetInt64(pref_name, &duration_ms))
+    return base::Milliseconds(duration_ms);
+  return std::nullopt;
 }
 
 void PowerSupply::DeferBatterySampling(base::TimeDelta stabilized_delay) {
@@ -806,6 +959,9 @@ bool PowerSupply::UpdatePowerStatus(UpdatePolicy policy) {
   for (base::FilePath path = file_enum.Next(); !path.empty();
        path = file_enum.Next()) {
     if (IsExternalPeripheral(path))
+      continue;
+
+    if (IsSupplyIgnored(path.BaseName().value()))
       continue;
 
     std::string type;
@@ -921,7 +1077,39 @@ bool PowerSupply::UpdatePowerStatus(UpdatePolicy policy) {
     UpdateObservedBatteryChargeRate(&status);
     status.is_calculating_battery_time = !UpdateBatteryTimeEstimates(&status);
     status.battery_below_shutdown_threshold =
-        IsBatteryBelowShutdownThreshold(status);
+        status.battery_is_present && IsBatteryBelowShutdownThreshold(status);
+
+    // Update and modify values based on Adaptive Charging
+    status.adaptive_charging_supported = adaptive_charging_supported_;
+    status.adaptive_charging_heuristic_enabled =
+        adaptive_charging_heuristic_enabled_;
+    status.adaptive_delaying_charge = adaptive_delaying_charge_;
+    status.charge_limited = charge_limited_;
+
+    // Overwrite the `display_battery_percentage` for Adaptive Charging and
+    // Charge Limit. We only overwrite the value if it's currently within the
+    // range [`adaptive_charging_hold_percent_` -
+    // `adaptive_charging_hold_delta_percent_` - 1,
+    // `adaptive_charging_hold_percent_`].
+    // This prevents the value from being overwritten if the true display
+    // percentage is greater than the hold percentage or too far below the hold
+    // percentage.
+    // Overwriting the display percentage prevents confusion when Adaptive
+    // Charging or Charge Limit charge/discharge over a range while maintaining
+    // charge.
+    if (status.display_battery_percentage <= adaptive_charging_hold_percent_ &&
+        status.display_battery_percentage >=
+            (adaptive_charging_hold_percent_ -
+             adaptive_charging_hold_delta_percent_ - 1)) {
+      if (adaptive_delaying_charge_) {
+        status.display_battery_percentage = adaptive_charging_hold_percent_;
+        // If `adaptive_charging_target_time_to_full_` is the zero value,
+        // there's no current target for fully charging.
+        status.battery_time_to_full = adaptive_charging_target_time_to_full_;
+      } else if (charge_limited_) {
+        status.display_battery_percentage = adaptive_charging_hold_percent_;
+      }
+    }
   }
 
   power_status_ = status;
@@ -932,7 +1120,7 @@ bool PowerSupply::UpdatePowerStatus(UpdatePolicy policy) {
 void PowerSupply::ReadLinePowerDirectory(const base::FilePath& path,
                                          PowerStatus* status) {
   // Add the port and fill in its details as we go.
-  status->ports.push_back(PowerStatus::Port());
+  status->ports.emplace_back();
   PowerStatus::Port* port = &status->ports.back();
   port->id = GetIdForPath(path);
   const auto location_it = port_names_.find(path.BaseName().value());
@@ -947,11 +1135,11 @@ void PowerSupply::ReadLinePowerDirectory(const base::FilePath& path,
     status->supports_dual_role_devices = true;
 
   // An "Unknown" type indicates a sink-only device that can't supply power.
-  ReadAndTrimString(path, "type", &port->type);
+  port->type = ReadPowerSupplyType(path);
   if (port->type == kUnknownType)
     return;
 
-  const bool dual_role_connected = IsDualRoleType(port->type, path);
+  const bool dual_role_connected = IsPdDrpType(port->type);
 
   // If "online" is 0, nothing is connected unless it is USB_PD_DRP, in which
   // case a value of 0 indicates we're connected to a dual-role device but not
@@ -1116,6 +1304,7 @@ bool PowerSupply::ReadBatteryDirectory(const base::FilePath& path,
     }
   }
 
+  DCHECK_GT(nominal_voltage, 0);
   status->nominal_voltage = nominal_voltage;
 
   // ACPI has two different battery types: charge_battery and energy_battery.
@@ -1133,6 +1322,8 @@ bool PowerSupply::ReadBatteryDirectory(const base::FilePath& path,
   // just read those and the energy_now attribute.
   double charge_full = 0;
   double charge_full_design = 0;
+  double energy_full = 0;
+  double energy_full_design = 0;
   double charge = 0;
   double energy = 0;
 
@@ -1142,14 +1333,16 @@ bool PowerSupply::ReadBatteryDirectory(const base::FilePath& path,
   if (base::PathExists(path.Append("charge_full"))) {
     charge_full = ReadScaledDouble(path, "charge_full");
     charge_full_design = ReadScaledDouble(path, "charge_full_design");
+    energy_full = charge_full * nominal_voltage;
+    energy_full_design = charge_full_design * nominal_voltage;
     charge = ReadScaledDouble(path, "charge_now");
     if (energy <= 0.0)
       energy = charge * nominal_voltage;
   } else if (base::PathExists(path.Append("energy_full"))) {
-    DCHECK_GT(nominal_voltage, 0);
-    charge_full = ReadScaledDouble(path, "energy_full") / nominal_voltage;
-    charge_full_design =
-        ReadScaledDouble(path, "energy_full_design") / nominal_voltage;
+    energy_full = ReadScaledDouble(path, "energy_full");
+    energy_full_design = ReadScaledDouble(path, "energy_full_design");
+    charge_full = energy_full / nominal_voltage;
+    charge_full_design = energy_full_design / nominal_voltage;
     charge = energy / nominal_voltage;
   } else {
     LOG(WARNING) << "Ignoring reading without battery charge/energy";
@@ -1166,6 +1359,8 @@ bool PowerSupply::ReadBatteryDirectory(const base::FilePath& path,
 
   status->battery_charge_full = charge_full;
   status->battery_charge_full_design = charge_full_design;
+  status->battery_energy_full = energy_full;
+  status->battery_energy_full_design = energy_full_design;
   status->battery_charge = charge;
   status->battery_energy = energy;
 
@@ -1178,12 +1373,10 @@ bool PowerSupply::ReadBatteryDirectory(const base::FilePath& path,
   status->battery_current = current;
   status->battery_energy_rate = current * voltage;
 
-  UpdateBatteryPercentagesAndState(status);
-
-  return true;
+  return UpdateBatteryPercentagesAndState(status);
 }
 
-void PowerSupply::UpdateBatteryPercentagesAndState(PowerStatus* status) {
+bool PowerSupply::UpdateBatteryPercentagesAndState(PowerStatus* status) {
   DCHECK(status);
   status->battery_percentage = util::ClampPercent(
       100.0 * status->battery_charge / status->battery_charge_full);
@@ -1191,11 +1384,25 @@ void PowerSupply::UpdateBatteryPercentagesAndState(PowerStatus* status) {
   double display_soc;
   bool is_full;
   if (GetDisplayStateOfChargeFromEC(&display_soc)) {
-    // New way
+    // Error out for bad display percentages. We'll try again later.
     if (display_soc < 0.0 || 100.0 < display_soc) {
       LOG(ERROR) << "Received bad value of display SoC: " << display_soc;
-      display_soc = util::ClampPercent(display_soc);
+      return false;
     }
+
+    // If |display_soc| is 0, check that it's not a false 0 reading by comparing
+    // it to |status->battery_percentage|. |low_battery_shutdown_percent_| maps
+    // to a |display_soc| value of 0, so if |status->battery_percentage_| is
+    // greater than that (plus 1.0 for race conditions), error out.
+    if (display_soc == 0.0 &&
+        status->battery_percentage > (low_battery_shutdown_percent_ + 1.0)) {
+      LOG(ERROR) << "Display and battery percentage values have too much of a "
+                 << "discrepancy. battery_percentage is "
+                 << status->battery_percentage
+                 << " and display_battery_percentage is " << display_soc;
+      return false;
+    }
+
     status->display_battery_percentage = display_soc;
     is_full = status->display_battery_percentage >= 100.0;
   } else {
@@ -1220,6 +1427,8 @@ void PowerSupply::UpdateBatteryPercentagesAndState(PowerStatus* status) {
   } else {
     status->battery_state = PowerSupplyProperties_BatteryState_DISCHARGING;
   }
+
+  return true;
 }
 
 bool PowerSupply::ReadMultipleBatteryDirectories(
@@ -1298,21 +1507,21 @@ bool PowerSupply::UpdateBatteryTimeEstimates(PowerStatus* status) {
   switch (status->battery_state) {
     case PowerSupplyProperties_BatteryState_CHARGING:
       if (signed_current <= kEpsilon) {
-        status->battery_time_to_full = base::TimeDelta::FromSeconds(-1);
+        status->battery_time_to_full = base::Seconds(-1);
       } else {
         const double charge_to_full =
             std::max(0.0, status->battery_charge_full * full_factor_ -
                               status->battery_charge);
-        status->battery_time_to_full = base::TimeDelta::FromSeconds(
-            roundl(3600 * charge_to_full / signed_current));
+        status->battery_time_to_full =
+            base::Seconds(roundl(3600 * charge_to_full / signed_current));
       }
       break;
     case PowerSupplyProperties_BatteryState_DISCHARGING:
       if (signed_current >= -kEpsilon) {
-        status->battery_time_to_empty = base::TimeDelta::FromSeconds(-1);
-        status->battery_time_to_shutdown = base::TimeDelta::FromSeconds(-1);
+        status->battery_time_to_empty = base::Seconds(-1);
+        status->battery_time_to_shutdown = base::Seconds(-1);
       } else {
-        status->battery_time_to_empty = base::TimeDelta::FromSeconds(
+        status->battery_time_to_empty = base::Seconds(
             roundl(3600 * (status->battery_charge * status->nominal_voltage) /
                    (-signed_current * status->battery_voltage)));
 
@@ -1321,7 +1530,7 @@ bool PowerSupply::UpdateBatteryTimeEstimates(PowerStatus* status) {
         const double available_charge =
             std::max(0.0, status->battery_charge - shutdown_charge);
         status->battery_time_to_shutdown =
-            base::TimeDelta::FromSeconds(
+            base::Seconds(
                 roundl(3600 * (available_charge * status->nominal_voltage) /
                        (-signed_current * status->battery_voltage))) -
             low_battery_shutdown_time_;
@@ -1343,7 +1552,7 @@ void PowerSupply::UpdateObservedBatteryChargeRate(PowerStatus* status) const {
   DCHECK(status);
   const base::TimeDelta time_delta = charge_samples_->GetTimeDelta();
   status->observed_battery_charge_rate =
-      (time_delta.InMilliseconds() < kObservedBatteryChargeRateMinMs)
+      (time_delta < kObservedBatteryChargeRateMin)
           ? 0.0
           : charge_samples_->GetValueDelta() / (time_delta.InSecondsF() / 3600);
 }
@@ -1358,8 +1567,14 @@ bool PowerSupply::IsBatteryBelowShutdownThreshold(
       (status.battery_time_to_empty > base::TimeDelta() &&
        status.battery_time_to_empty <= low_battery_shutdown_time_ &&
        status.battery_percentage <= kLowBatteryShutdownSafetyPercent) ||
-      status.battery_percentage <= low_battery_shutdown_percent_;
+      (import_display_soc_
+           ? status.display_battery_percentage <= 0
+           : status.battery_percentage <= low_battery_shutdown_percent_);
 
+  if (below_threshold && factory_mode_) {
+    LOG(INFO) << "Battery is low, but not shutting down in factory mode";
+    return false;
+  }
   // Most AC chargers can deliver enough current to prevent the battery from
   // discharging while the device is in use; other chargers (e.g. USB) may not
   // be able to, though. The observed charge rate is checked to verify whether
@@ -1370,8 +1585,18 @@ bool PowerSupply::IsBatteryBelowShutdownThreshold(
   return below_threshold;
 }
 
+bool PowerSupply::IsSupplyIgnored(const std::string& sysname) const {
+  if (sysname == "AC" && !has_barreljack_) {
+    return true;
+  }
+
+  return false;
+}
+
 bool PowerSupply::PerformUpdate(UpdatePolicy update_policy,
                                 NotifyPolicy notify_policy) {
+  TRACE_EVENT("power", "PowerSupply::PerformUpdate", "update_policy",
+              update_policy, "notify_policy", notify_policy);
   const bool success = UpdatePowerStatus(update_policy);
   if (!is_suspended_)
     SchedulePoll();
@@ -1382,9 +1607,9 @@ bool PowerSupply::PerformUpdate(UpdatePolicy update_policy,
   if (notify_policy == NotifyPolicy::SYNCHRONOUSLY) {
     NotifyObservers();
   } else {
-    notify_observers_task_.Reset(base::BindRepeating(
-        &PowerSupply::NotifyObservers, base::Unretained(this)));
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    notify_observers_task_.Reset(
+        base::BindOnce(&PowerSupply::NotifyObservers, base::Unretained(this)));
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, notify_observers_task_.callback());
   }
 
@@ -1396,9 +1621,12 @@ bool PowerSupply::PerformUpdate(UpdatePolicy update_policy,
   dbus::MessageWriter writer(&signal);
   writer.AppendUint32(static_cast<uint32_t>(
       ExternalPowerToExternalPowerEnum(power_status_.external_power)));
-  writer.AppendUint32(static_cast<uint32_t>(
-      BatteryStateToUpowerEnum(power_status_.battery_state)));
-  writer.AppendDouble(power_status_.display_battery_percentage);
+  UpowerBatteryState battery_state =
+      power_status_.battery_percentage == 100
+          ? UpowerBatteryState::UpowerFullyCharged
+          : BatteryStateToUpowerEnum(power_status_.battery_status_string);
+  writer.AppendUint32(static_cast<uint32_t>(battery_state));
+  writer.AppendDouble(power_status_.battery_percentage);
   dbus_wrapper_->EmitSignal(&signal);
 
   return true;
@@ -1408,15 +1636,22 @@ void PowerSupply::SchedulePoll() {
   base::TimeDelta delay;
   base::TimeTicks now = clock_->GetCurrentTime();
   int64_t samples = 0;
-  CHECK(prefs_->GetInt64(kMaxCurrentSamplesPref, &samples));
+  // TODO(b/207716926): Temporary change to find FD leaks in powerd.
+  bool ok = prefs_->GetInt64(kMaxCurrentSamplesPref, &samples);
+  if (!ok) {
+    LOG(ERROR) << "Potential fd leak detected, dumping open files";
+    spare_files_[0].reset();
+    spare_files_[1].reset();
+    DumpOpenFileDescriptorsAndInputDevices();
+  }
+  CHECK(ok);
 
-  // Wait |kBatteryStabilizedSlackMs| after |battery_stabilized_timestamp_| to
+  // Wait |kBatteryStabilizedSlack| after |battery_stabilized_timestamp_| to
   // start polling for the current and charge to stabilized.
   // Poll every |poll_delay_initial_| ms until having |kMaxCurrentSamplesPref|
   // samples then poll every |poll_delay_|.
   if (battery_stabilized_timestamp_ > now) {
-    delay = battery_stabilized_timestamp_ - now +
-            base::TimeDelta::FromMilliseconds(kBatteryStabilizedSlackMs);
+    delay = battery_stabilized_timestamp_ - now + kBatteryStabilizedSlack;
   } else if (!has_max_samples_ && num_zero_samples_ < samples) {
     delay = poll_delay_initial_;
   } else {
@@ -1429,11 +1664,13 @@ void PowerSupply::SchedulePoll() {
 }
 
 void PowerSupply::OnPollTimeout() {
+  TRACE_EVENT("power", "PowerSupply::OnPollTimeout");
   current_poll_delay_for_testing_ = base::TimeDelta();
   PerformUpdate(UpdatePolicy::UNCONDITIONALLY, NotifyPolicy::SYNCHRONOUSLY);
 }
 
 void PowerSupply::NotifyObservers() {
+  TRACE_EVENT("power", "PowerSupply::NotifyObservers");
   for (PowerSupplyObserver& observer : observers_)
     observer.OnPowerStatusUpdate();
 }
@@ -1441,6 +1678,13 @@ void PowerSupply::NotifyObservers() {
 void PowerSupply::OnGetPowerSupplyPropertiesMethodCall(
     dbus::MethodCall* method_call,
     dbus::ExportedObject::ResponseSender response_sender) {
+  if (!power_status_initialized_) {
+    std::move(response_sender)
+        .Run(dbus::ErrorResponse::FromMethodCall(
+            method_call, DBUS_ERROR_FAILED,
+            "PowerSupplyProperties has not been initialized."));
+    return;
+  }
   PowerSupplyProperties protobuf;
   CopyPowerStatusToProtocolBuffer(power_status_, &protobuf);
   std::unique_ptr<dbus::Response> response =
@@ -1458,9 +1702,12 @@ void PowerSupply::OnGetBatteryStateMethodCall(
   dbus::MessageWriter writer(response.get());
   writer.AppendUint32(static_cast<uint32_t>(
       ExternalPowerToExternalPowerEnum(power_status_.external_power)));
-  writer.AppendUint32(static_cast<uint32_t>(
-      BatteryStateToUpowerEnum(power_status_.battery_state)));
-  writer.AppendDouble(power_status_.display_battery_percentage);
+  UpowerBatteryState battery_state =
+      power_status_.battery_percentage == 100
+          ? UpowerBatteryState::UpowerFullyCharged
+          : BatteryStateToUpowerEnum(power_status_.battery_status_string);
+  writer.AppendUint32(static_cast<uint32_t>(battery_state));
+  writer.AppendDouble(power_status_.battery_percentage);
   std::move(response_sender).Run(std::move(response));
 }
 
@@ -1506,5 +1753,4 @@ bool PowerSupply::SetPowerSource(const std::string& id) {
   return true;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

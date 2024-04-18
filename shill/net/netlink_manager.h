@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -59,26 +59,25 @@
 #include <map>
 #include <memory>
 #include <queue>
-#include <set>
 #include <string>
+#include <vector>
 
-#include <base/bind.h>
 #include <base/cancelable_callback.h>
+#include <base/containers/span.h>
+#include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/bind.h>
 #include <base/lazy_instance.h>
-#include <base/macros.h>
+#include <base/time/time.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <net-base/netlink_socket.h>
 
 #include "shill/net/generic_netlink_message.h"
-#include "shill/net/io_handler_factory_container.h"
 #include "shill/net/netlink_message.h"
-#include "shill/net/netlink_socket.h"
 #include "shill/net/shill_export.h"
-#include "shill/net/shill_time.h"
 
 namespace shill {
 
 class ControlNetlinkMessage;
-struct InputData;
 class NetlinkPacket;
 class Nl80211Message;
 
@@ -95,23 +94,25 @@ class Nl80211Message;
 //  netlink_manager_->Start();
 class SHILL_EXPORT NetlinkManager {
  public:
-  enum AuxilliaryMessageType {
+  enum AuxiliaryMessageType {
     kDone,
     kErrorFromKernel,
     kTimeoutWaitingForResponse,
     kUnexpectedResponseType
   };
-  using NetlinkMessageHandler = base::Callback<void(const NetlinkMessage&)>;
+  using NetlinkMessageHandler =
+      base::RepeatingCallback<void(const NetlinkMessage&)>;
   using ControlNetlinkMessageHandler =
-      base::Callback<void(const ControlNetlinkMessage&)>;
-  using Nl80211MessageHandler = base::Callback<void(const Nl80211Message&)>;
-  // NetlinkAuxilliaryMessageHandler handles netlink error messages, things
+      base::RepeatingCallback<void(const ControlNetlinkMessage&)>;
+  using Nl80211MessageHandler =
+      base::RepeatingCallback<void(const Nl80211Message&)>;
+  // NetlinkAuxiliaryMessageHandler handles netlink error messages, things
   // like the DoneMessage at the end of a multi-part message, and any errors
   // discovered by |NetlinkManager| (which are passed as NULL pointers because
   // there is no way to reserve a part of the ErrorAckMessage space for
   // non-netlink errors).
-  using NetlinkAuxilliaryMessageHandler =
-      base::Callback<void(AuxilliaryMessageType type, const NetlinkMessage*)>;
+  using NetlinkAuxiliaryMessageHandler = base::RepeatingCallback<void(
+      AuxiliaryMessageType type, const NetlinkMessage*)>;
   // NetlinkAckHandler handles netlink Ack messages, which are a special type
   // of netlink error message carrying an error code of 0. Since Ack messages
   // contain no useful data (other than the error code of 0 to differentiate
@@ -122,28 +123,28 @@ class SHILL_EXPORT NetlinkManager {
   // removed after this callback is executed. This allows a sender of an NL80211
   // message to handle both an Ack and another response message, rather than
   // handle only the first response received.
-  using NetlinkAckHandler = base::Callback<void(bool*)>;
+  using NetlinkAckHandler = base::RepeatingCallback<void(bool*)>;
 
-  // ResponseHandlers provide a polymorphic context for the base::Callback
-  // message handlers so that handlers for different types of messages can be
-  // kept in the same container (namely, |message_handlers_|).
+  // ResponseHandlers provide a polymorphic context for the
+  // base::RepeatingCallback message handlers so that handlers for different
+  // types of messages can be kept in the same container (namely,
+  // |message_handlers_|).
   class NetlinkResponseHandler
       : public base::RefCounted<NetlinkResponseHandler> {
    public:
-    NetlinkResponseHandler(
-        const NetlinkAckHandler& ack_handler,
-        const NetlinkAuxilliaryMessageHandler& error_handler);
+    NetlinkResponseHandler(const NetlinkAckHandler& ack_handler,
+                           const NetlinkAuxiliaryMessageHandler& error_handler);
     virtual ~NetlinkResponseHandler();
     // Calls wrapper-type-specific callback for |netlink_message|.  Returns
     // false if |netlink_message| is not the correct type.  Calls callback
     // (which is declared in the private area of derived classes) with
     // properly cast version of |netlink_message|.
     virtual bool HandleMessage(const NetlinkMessage& netlink_message) const = 0;
-    void HandleError(AuxilliaryMessageType type,
+    void HandleError(AuxiliaryMessageType type,
                      const NetlinkMessage* netlink_message) const;
     virtual bool HandleAck() const;
-    void set_delete_after(const timeval& time) { delete_after_ = time; }
-    const struct timeval& delete_after() const { return delete_after_; }
+    void set_delete_after(base::TimeTicks time) { delete_after_ = time; }
+    base::TimeTicks delete_after() const { return delete_after_; }
 
    protected:
     NetlinkResponseHandler();
@@ -153,8 +154,8 @@ class SHILL_EXPORT NetlinkManager {
     NetlinkAckHandler ack_handler_;
 
    private:
-    NetlinkAuxilliaryMessageHandler error_handler_;
-    struct timeval delete_after_;
+    NetlinkAuxiliaryMessageHandler error_handler_;
+    base::TimeTicks delete_after_;
   };
 
   // Encapsulates all the different things we know about a specific message
@@ -229,15 +230,18 @@ class SHILL_EXPORT NetlinkManager {
       ControlNetlinkMessage* message,
       const ControlNetlinkMessageHandler& message_handler,
       const NetlinkAckHandler& ack_handler,
-      const NetlinkAuxilliaryMessageHandler& error_handler);
+      const NetlinkAuxiliaryMessageHandler& error_handler);
   virtual bool SendNl80211Message(
       Nl80211Message* message,
       const Nl80211MessageHandler& message_handler,
       const NetlinkAckHandler& ack_handler,
-      const NetlinkAuxilliaryMessageHandler& error_handler);
+      const NetlinkAuxiliaryMessageHandler& error_handler);
+
+  // Get string version of NetlinkMessage for logging purposes
+  static std::string GetRawMessage(const NetlinkMessage* raw_message);
 
   // Generic erroneous message handler everyone can use.
-  static void OnNetlinkMessageError(AuxilliaryMessageType type,
+  static void OnNetlinkMessageError(AuxiliaryMessageType type,
                                     const NetlinkMessage* raw_message);
 
   // Generic Ack handler that does nothing. Other callbacks registered for the
@@ -249,8 +253,8 @@ class SHILL_EXPORT NetlinkManager {
   // Uninstall the handler for a specific netlink message.
   bool RemoveMessageHandler(const NetlinkMessage& message);
 
-  // Sign-up to receive and log multicast events of a specific type (once wifi
-  // is up).
+  // Sign-up to receive and log multicast events of a specific type. These
+  // events are processed by message handlers added with |AddBroadcastHandler|.
   virtual bool SubscribeToEvents(const std::string& family,
                                  const std::string& group);
 
@@ -297,40 +301,40 @@ class SHILL_EXPORT NetlinkManager {
   struct NetlinkPendingMessage {
     NetlinkPendingMessage(uint32_t sequence_number_arg,
                           bool is_dump_request_arg,
-                          ByteString message_string_arg,
+                          base::span<const uint8_t> message_string_arg,
                           NetlinkResponseHandlerRefPtr handler_arg)
         : retries_left(kMaxNlMessageRetries),
           sequence_number(sequence_number_arg),
           is_dump_request(is_dump_request_arg),
-          message_string(message_string_arg),
+          message_string(
+              {std::begin(message_string_arg), std::end(message_string_arg)}),
           handler(handler_arg) {}
 
     int retries_left;
     uint32_t sequence_number;
     bool is_dump_request;
-    ByteString message_string;
+    std::vector<uint8_t> message_string;
     NetlinkResponseHandlerRefPtr handler;
     uint32_t last_received_error;
   };
 
   // These need to be member variables, even though they're only used once in
   // the code, since they're needed for unittests.
-  static const long kMaximumNewFamilyWaitSeconds;       // NOLINT
-  static const long kMaximumNewFamilyWaitMicroSeconds;  // NOLINT
-  static const long kResponseTimeoutSeconds;            // NOLINT
-  static const long kResponseTimeoutMicroSeconds;       // NOLINT
-  static const long kPendingDumpTimeoutMilliseconds;    // NOLINT
-  static const long kNlMessageRetryDelayMilliseconds;   // NOLINT
-  static const int kMaxNlMessageRetries;                // NOLINT
+  static constexpr base::TimeDelta kMaximumNewFamilyTimeout = base::Seconds(1);
+  static constexpr base::TimeDelta kResponseTimeout = base::Seconds(5);
+  static constexpr base::TimeDelta kPendingDumpTimeout = base::Seconds(1);
+  static constexpr base::TimeDelta kNlMessageRetryDelay =
+      base::Milliseconds(300);
+  static const int kMaxNlMessageRetries;
 
-  // Returns the file descriptor of socket used to read wifi data.
-  int file_descriptor() const;
+  // Called by |sock_watcher_| when |sock_| is ready to read.
+  void OnReadable();
 
   // MessageLoop calls this when data is available on our socket.  This
   // method passes each, individual, message in the input to
   // |OnNlMessageReceived|.  Each part of a multipart message gets handled,
   // individually, by this method.
-  void OnRawNlMessageReceived(InputData* data);
+  void OnRawNlMessageReceived(base::span<const uint8_t> data);
 
   // This method processes a message from |OnRawNlMessageReceived| by passing
   // the message to either the NetlinkManager callback that matches the sequence
@@ -347,15 +351,11 @@ class SHILL_EXPORT NetlinkManager {
   // and |netlink_message|, then erases the NetlinkResponseHandler from
   // |message_handlers_|.
   void CallErrorHandler(uint32_t sequence_number,
-                        AuxilliaryMessageType type,
+                        AuxiliaryMessageType type,
                         const NetlinkMessage* netlink_message);
 
-  // Called by InputHandler on exceptional events.
-  void OnReadError(const std::string& error_msg);
-
   // Utility function that posts a task to the message loop to call
-  // NetlinkManager::ResendPendingDumpMessage kNlMessageRetryDelayMilliseconds
-  // from now.
+  // NetlinkManager::ResendPendingDumpMessage kNlMessageRetryDelay from now.
   void ResendPendingDumpMessageAfterDelay();
 
   // Just for tests, this method turns off WiFi and clears the subscribed
@@ -367,9 +367,8 @@ class SHILL_EXPORT NetlinkManager {
 
   // Sends a netlink message if |pending_dump_| is false. Otherwise, post
   // a message to |pending_messages_| to be sent later.
-  bool SendOrPostMessage(
-      NetlinkMessage* message,
-      NetlinkResponseHandler* message_wrapper);  // Passes ownership.
+  bool SendOrPostMessage(NetlinkMessage* message,
+                         NetlinkResponseHandlerRefPtr message_wrapper);
 
   // Install a handler to deal with kernel's response to the message contained
   // in |pending_message|, then sends the message by calling
@@ -422,15 +421,16 @@ class SHILL_EXPORT NetlinkManager {
   std::queue<NetlinkPendingMessage> pending_messages_;
 
   base::WeakPtrFactory<NetlinkManager> weak_ptr_factory_;
-  base::CancelableClosure pending_dump_timeout_callback_;
-  base::CancelableClosure resend_dump_message_callback_;
-  std::unique_ptr<IOHandler> dispatcher_handler_;
+  base::CancelableOnceClosure pending_dump_timeout_callback_;
+  base::CancelableOnceClosure resend_dump_message_callback_;
 
-  std::unique_ptr<NetlinkSocket> sock_;
+  std::unique_ptr<net_base::NetlinkSocket> sock_;
+  // Watcher to wait for |sock_| ready to read. It should be destructed
+  // prior than |sock_|, so it's declared after |sock_|.
+  std::unique_ptr<base::FileDescriptorWatcher::Controller> sock_watcher_;
+
   std::map<const std::string, MessageType> message_types_;
   NetlinkMessageFactory message_factory_;
-  Time* time_;
-  IOHandlerFactory* io_handler_factory_;
   bool dump_pending_;
 };
 

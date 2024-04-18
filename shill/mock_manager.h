@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,13 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/manager.h"
+#include "shill/mock_device_info.h"
 
 namespace shill {
 
@@ -23,30 +24,28 @@ class MockManager : public Manager {
   MockManager(ControlInterface* control_interface,
               EventDispatcher* dispatcher,
               Metrics* metrics);
+  MockManager(ControlInterface* control_interface,
+              EventDispatcher* dispatcher,
+              Metrics* metrics,
+              const std::string& run_directory,
+              const std::string& storage_directory,
+              const std::string& user_storage_directory);
   MockManager(const MockManager&) = delete;
   MockManager& operator=(const MockManager&) = delete;
 
   ~MockManager() override;
 
-  MOCK_METHOD(void,
-              OnDhcpPropertyChanged,
-              (const std::string&, const std::string&),
-              (override));
   MOCK_METHOD(DeviceInfo*, device_info, (), (override));
-#if !defined(DISABLE_CELLULAR)
   MOCK_METHOD(ModemInfo*, modem_info, (), (override));
   MOCK_METHOD(CellularServiceProvider*,
               cellular_service_provider,
               (),
               (override));
-#endif  // DISABLE_CELLULAR
   MOCK_METHOD(EthernetProvider*, ethernet_provider, (), (override));
-#if !defined(DISABLE_WIRED_8021X)
   MOCK_METHOD(EthernetEapProvider*,
               ethernet_eap_provider,
               (),
               (const, override));
-#endif  // DISABLE_WIRED_8021X
   MOCK_METHOD(const PropertyStore&, store, (), (const, override));
   MOCK_METHOD(const base::FilePath&, run_path, (), (const, override));
   MOCK_METHOD(void, Start, (), (override));
@@ -58,6 +57,10 @@ class MockManager : public Manager {
   MOCK_METHOD(bool,
               MatchProfileWithService,
               (const ServiceRefPtr&),
+              (override));
+  MOCK_METHOD(bool,
+              MoveServiceToProfile,
+              (const ServiceRefPtr&, const ProfileRefPtr& destination),
               (override));
   MOCK_METHOD(void, RegisterDevice, (const DeviceRefPtr&), (override));
   MOCK_METHOD(void, DeregisterDevice, (const DeviceRefPtr&), (override));
@@ -71,7 +74,7 @@ class MockManager : public Manager {
               OnDeviceGeolocationInfoUpdated,
               (const DeviceRefPtr&),
               (override));
-  MOCK_METHOD(void, RecheckPortalOnService, (const ServiceRefPtr&), (override));
+  MOCK_METHOD(void, RemoveService, (const ServiceRefPtr&), (override));
   MOCK_METHOD(bool,
               HandleProfileEntryDeletion,
               (const ProfileRefPtr&, const std::string&),
@@ -103,30 +106,13 @@ class MockManager : public Manager {
               (Technology),
               (const, override));
   MOCK_METHOD(void, RequestScan, (const std::string&, Error*), (override));
-  MOCK_METHOD(PortalDetector::Properties,
-              GetPortalCheckProperties,
-              (),
-              (const, override));
   MOCK_METHOD(bool, IsSuspending, (), (override));
   MOCK_METHOD(DeviceRefPtr,
               GetEnabledDeviceWithTechnology,
               (Technology),
               (const, override));
-  MOCK_METHOD(int, GetMinimumMTU, (), (const, override));
-  MOCK_METHOD(bool,
-              ShouldAcceptHostnameFrom,
-              (const std::string&),
-              (const, override));
-  MOCK_METHOD(bool,
-              IsDHCPv6EnabledForDevice,
-              (const std::string&),
-              (const, override));
   MOCK_METHOD(void,
               SetBlockedDevices,
-              (const std::vector<std::string>&),
-              (override));
-  MOCK_METHOD(void,
-              SetDHCPv6EnabledDevices,
               (const std::vector<std::string>&),
               (override));
   MOCK_METHOD(void,
@@ -134,46 +120,47 @@ class MockManager : public Manager {
               (const std::string&, Error*),
               (override));
   MOCK_METHOD(void, SetIgnoreUnknownEthernet, (bool), (override));
-  MOCK_METHOD(void, SetStartupPortalList, (const std::string&), (override));
-  MOCK_METHOD(void, SetPassiveMode, (), (override));
-  MOCK_METHOD(void, SetPrependDNSServers, (const std::string&), (override));
-  MOCK_METHOD(void, SetMinimumMTU, (const int), (override));
-  MOCK_METHOD(void, SetAcceptHostnameFrom, (const std::string&), (override));
   MOCK_METHOD(bool, ignore_unknown_ethernet, (), (const, override));
-  MOCK_METHOD(std::vector<std::string>,
-              FilterPrependDNSServersByFamily,
-              (IPAddress::Family),
-              (const, override));
   MOCK_METHOD(int64_t, GetSuspendDurationUsecs, (), (const, override));
-  MOCK_METHOD(void, OnInnerDevicesChanged, (), (override));
-  MOCK_METHOD(void,
-              ClaimDevice,
-              (const std::string&, const std::string&, Error*),
-              (override));
-  MOCK_METHOD(void,
-              ReleaseDevice,
-              (const std::string&, const std::string&, bool*, Error*),
-              (override));
-  MOCK_METHOD(void, OnDeviceClaimerVanished, (), (override));
+  MOCK_METHOD(void, ClaimDevice, (const std::string&, Error*), (override));
+  MOCK_METHOD(void, ReleaseDevice, (const std::string&, Error*), (override));
   MOCK_METHOD(std::vector<std::string>,
               GetDeviceInterfaceNames,
               (),
               (override));
-  MOCK_METHOD(const ProfileRefPtr&, ActiveProfile, (), (const, override));
   MOCK_METHOD(ServiceRefPtr, GetFirstEthernetService, (), (override));
   MOCK_METHOD(DeviceRefPtr,
               FindDeviceFromService,
               (const ServiceRefPtr&),
-              (override));
+              (const, override));
+  MOCK_METHOD(void, ConnectToBestWiFiService, (), (override));
+  MOCK_METHOD(const ManagerProperties&, GetProperties, (), (const, override));
+  MOCK_METHOD(std::vector<DeviceRefPtr>,
+              FilterByTechnology,
+              (Technology tech),
+              (const, override));
+  MOCK_METHOD(void, TetheringStatusChanged, (), ());
+  MOCK_METHOD(DHCPProvider::Options,
+              CreateDefaultDHCPOption,
+              (),
+              (const, override));
+  MOCK_METHOD(Network*,
+              FindActiveNetworkFromService,
+              (const ServiceRefPtr&),
+              (const, override));
+  MOCK_METHOD(std::optional<std::string>,
+              GetCellularOperatorCountryCode,
+              (),
+              ());
 
   // Getter and setter for a mocked device info instance.
-  DeviceInfo* mock_device_info() { return mock_device_info_; }
-  void set_mock_device_info(DeviceInfo* mock_device_info) {
-    mock_device_info_ = mock_device_info;
+  MockDeviceInfo* mock_device_info() { return mock_device_info_.get(); }
+  void set_mock_device_info(std::unique_ptr<MockDeviceInfo> mock_device_info) {
+    mock_device_info_ = std::move(mock_device_info);
   }
 
  private:
-  DeviceInfo* mock_device_info_;
+  std::unique_ptr<MockDeviceInfo> mock_device_info_;
   std::unique_ptr<MockEthernetProvider> mock_ethernet_provider_;
 };
 

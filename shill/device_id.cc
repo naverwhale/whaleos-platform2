@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -101,12 +101,13 @@ std::unique_ptr<DeviceId> DeviceId::CreateFromSysfs(
   std::string bus_type = subsystem.BaseName().value();
   if (bus_type == "pci") {
     auto dev = ReadDeviceId(DeviceId::BusType::kPci, syspath.Append("vendor"),
-                            syspath.Append("product"));
+                            syspath.Append("device"));
 
     std::string is_external;
     if (base::ReadFileToString(syspath.Append(kExternalAttribute),
                                &is_external) &&
         !is_external.empty()) {
+      is_external = base::CollapseWhitespaceASCII(is_external, true);
       if (is_external == "0") {
         dev->location_type_ = LocationType::kInternal;
       } else {
@@ -129,6 +130,9 @@ std::string DeviceId::AsString() const {
       break;
     case BusType::kPci:
       bus_name = "pci";
+      break;
+    case BusType::kSoc:
+      bus_name = "soc";
       break;
   }
 
@@ -186,9 +190,8 @@ bool DeviceId::Match(const DeviceId& pattern) const {
          product_id_.value() == pattern.product_id_.value();
 }
 
-}  // namespace shill
-
-std::ostream& operator<<(std::ostream& stream,
-                         const shill::DeviceId& device_id) {
+std::ostream& operator<<(std::ostream& stream, const DeviceId& device_id) {
   return stream << device_id.AsString();
 }
+
+}  // namespace shill

@@ -1,21 +1,28 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/ephemeral_crash_collector.h"
 
+#include <memory>
+#include <string>
+
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <brillo/process/process.h>
-
-#include <string>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/paths.h"
 #include "crash-reporter/util.h"
 
-EphemeralCrashCollector::EphemeralCrashCollector()
-    : CrashCollector("ephemeral_crash_collector"),
+EphemeralCrashCollector::EphemeralCrashCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("ephemeral_crash_collector", metrics_lib),
       early_(false),
       source_directories_({base::FilePath(paths::kSystemRunCrashDirectory)}) {}
 
@@ -27,6 +34,7 @@ void EphemeralCrashCollector::Initialize(bool preserve_across_clobber) {
     system_crash_path_ =
         base::FilePath(paths::kEncryptedRebootVaultCrashDirectory);
     skip_consent_ = true;
+    crash_directory_selection_method_ = kAlwaysUseSystemCrashDirectory;
   } else {
     // In case of powerwash, there is a chance that the powerwash was a result
     // of failure to mount the partition: in such situations, we may have crash

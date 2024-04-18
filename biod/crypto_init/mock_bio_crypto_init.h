@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,8 @@
 #define BIOD_CRYPTO_INIT_MOCK_BIO_CRYPTO_INIT_H_
 
 #include <gmock/gmock.h>
+
+#include <optional>
 
 #include "biod/crypto_init/bio_crypto_init.h"
 
@@ -24,15 +26,14 @@ class MockBioCryptoInit : public BioCryptoInit {
               (const brillo::SecureVector& seed),
               (override));
   MOCK_METHOD(bool, InitCrosFp, (), (override));
-  MOCK_METHOD(base::Optional<uint32_t>,
+  MOCK_METHOD(std::optional<uint32_t>,
               GetFirmwareTemplateVersion,
               (),
               (override));
   MOCK_METHOD(base::ScopedFD, OpenCrosFpDevice, (), (override));
   MOCK_METHOD(bool,
               WaitOnEcBoot,
-              (const base::ScopedFD& cros_fp_fd,
-               ec_current_image expected_image),
+              (const base::ScopedFD& cros_fp_fd, ec_image expected_image),
               (override));
 
   bool WriteSeedToCrosFpDelegate(const brillo::SecureVector& seed) {

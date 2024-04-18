@@ -1,9 +1,9 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <base/at_exit.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/message_loops/base_message_loop.h>
 #include <brillo/test_helpers.h>
 #include <mojo/core/embedder/embedder.h>
@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
 
   mojo::core::Init();
   mojo::core::ScopedIPCSupport _(
-      base::ThreadTaskRunnerHandle::Get(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
       mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
 
   return RUN_ALL_TESTS();

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,14 +15,12 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
-#include <base/optional.h>
-#include <base/posix/eintr_wrapper.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
+#include <base/posix/eintr_wrapper.h>
 #include <base/run_loop.h>
 #include <base/strings/string_piece.h>
 #include <base/test/task_environment.h>
@@ -146,6 +144,44 @@ TEST_F(LocalFileTest, FstatError) {
   arc_proxy::FstatResponse response;
   stream.Fstat(
       base::BindOnce(&StoreArgument<arc_proxy::FstatResponse>, &response));
+  base::RunLoop().RunUntilIdle();
+  EXPECT_EQ(EBADF, response.error_code());
+}
+
+TEST_F(LocalFileTest, Ftruncate) {
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  const base::FilePath file_path = temp_dir.GetPath().Append("test_file.txt");
+  ASSERT_EQ(0, base::WriteFile(file_path, nullptr, 0));
+
+  base::ScopedFD fd(HANDLE_EINTR(open(file_path.value().c_str(), O_WRONLY)));
+  ASSERT_TRUE(fd.is_valid());
+
+  LocalFile file(std::move(fd), false, base::BindOnce([]() { ADD_FAILURE(); }),
+                 task_environment_.GetMainThreadTaskRunner());
+  arc_proxy::FtruncateResponse response;
+  constexpr int64_t kLength = 5;
+  file.Ftruncate(
+      kLength,
+      base::BindOnce(&StoreArgument<arc_proxy::FtruncateResponse>, &response));
+  base::RunLoop().RunUntilIdle();
+  EXPECT_EQ(0, response.error_code());
+
+  std::string contents;
+  ASSERT_TRUE(ReadFileToString(file_path, &contents));
+  EXPECT_EQ(contents.size(), kLength);
+}
+
+TEST_F(LocalFileTest, FtruncateError) {
+  // Use -1 (invalid file descriptor) to let ftruncate(2) return error.
+  LocalFile file{base::ScopedFD(), false,
+                 base::BindOnce([]() { ADD_FAILURE(); }),
+                 task_environment_.GetMainThreadTaskRunner()};
+  arc_proxy::FtruncateResponse response;
+  constexpr int64_t kLength = 5;
+  file.Ftruncate(
+      kLength,
+      base::BindOnce(&StoreArgument<arc_proxy::FtruncateResponse>, &response));
   base::RunLoop().RunUntilIdle();
   EXPECT_EQ(EBADF, response.error_code());
 }

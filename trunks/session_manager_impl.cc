@@ -1,21 +1,24 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "trunks/session_manager_impl.h"
 
+#include <iterator>
+#include <memory>
 #include <string>
+#include <utility>
 
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <brillo/secure_blob.h>
 #include <crypto/openssl_util.h>
 #include <crypto/libcrypto-compat.h>
 #include <crypto/scoped_openssl_types.h>
 #include <libhwsec-foundation/utility/crypto.h>
+#include <libhwsec-foundation/crypto/rsa.h>
 #include <openssl/bn.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
@@ -28,12 +31,20 @@
 
 #include "trunks/error_codes.h"
 #include "trunks/openssl_utility.h"
+#include "trunks/tpm_constants.h"
 #include "trunks/tpm_generated.h"
 #include "trunks/tpm_utility.h"
 
+using brillo::BlobFromString;
+using hwsec_foundation::CreateRSAFromNumber;
+using hwsec_foundation::kWellKnownExponent;
+
 namespace {
 
-constexpr size_t kWellKnownExponent = 0x10001;
+// The required attributes for the salting key.
+constexpr uint32_t kGoodSaltingKeyAttribute = trunks::kSensitiveDataOrigin |
+                                              trunks::kUserWithAuth |
+                                              trunks::kNoDA | trunks::kDecrypt;
 
 // The label constant for RSAES-OAEP and ECDH session secret generation, defined
 // in the TPM 2.0 specs, Part 1, Annex B.10.2 and C.6.2.
@@ -149,22 +160,13 @@ trunks::TPM_RC GenerateRsaSessionSalt(const trunks::TPMT_PUBLIC& public_area,
     return trunks::TRUNKS_RC_SESSION_SETUP_ERROR;
   }
 
-  crypto::ScopedRSA salting_key_rsa(RSA_new());
-  crypto::ScopedBIGNUM n(BN_new()), e(BN_new());
-  if (!salting_key_rsa || !n || !e) {
-    LOG(ERROR) << "Failed to allocate RSA or BIGNUM: "
+  brillo::Blob modulus =
+      BlobFromString(StringFrom_TPM2B_PUBLIC_KEY_RSA(public_area.unique.rsa));
+  crypto::ScopedRSA salting_key_rsa =
+      CreateRSAFromNumber(modulus, kWellKnownExponent);
+  if (!salting_key_rsa) {
+    LOG(ERROR) << "Failed to create RSA: "
                << hwsec_foundation::utility::GetOpensslError();
-    return trunks::TRUNKS_RC_SESSION_SETUP_ERROR;
-  }
-
-  if (!BN_set_word(e.get(), kWellKnownExponent) ||
-      !BN_bin2bn(public_area.unique.rsa.buffer, rsa_key_size, n.get())) {
-    LOG(ERROR) << "Error setting public area of rsa key: "
-               << hwsec_foundation::utility::GetOpensslError();
-    return trunks::TRUNKS_RC_SESSION_SETUP_ERROR;
-  }
-  if (!RSA_set0_key(salting_key_rsa.get(), n.release(), e.release(), nullptr)) {
-    LOG(ERROR) << "Failed to set exponent or modulus.";
     return trunks::TRUNKS_RC_SESSION_SETUP_ERROR;
   }
 
@@ -201,7 +203,7 @@ trunks::TPM_RC GenerateRsaSessionSalt(const trunks::TPMT_PUBLIC& public_area,
   size_t out_length = EVP_PKEY_size(salting_key.get());
   encrypted_salt->resize(out_length);
   if (!EVP_PKEY_encrypt(salt_encrypt_context.get(),
-                        reinterpret_cast<uint8_t*>(base::data(*encrypted_salt)),
+                        reinterpret_cast<uint8_t*>(std::data(*encrypted_salt)),
                         &out_length, salt->data(), salt->size())) {
     LOG(ERROR) << "Error encrypting salt: "
                << hwsec_foundation::utility::GetOpensslError();
@@ -283,7 +285,7 @@ trunks::TPM_RC GenerateEccSessionSalt(const trunks::TPMT_PUBLIC& public_area,
   unsigned int final_seed_size = 0;
   if (!EVP_DigestInit(ctx.get(), digest_type) ||
       !EVP_DigestUpdate(ctx.get(), marshaled_counter,
-                        base::size(marshaled_counter)) ||
+                        std::size(marshaled_counter)) ||
       !EVP_DigestUpdate(ctx.get(), z_value.buffer, z_value.size) ||
       !EVP_DigestUpdate(ctx.get(), kSessionKeyLabelValue,
                         kSessionKeyLabelLength) ||
@@ -306,7 +308,9 @@ trunks::TPM_RC GenerateEccSessionSalt(const trunks::TPMT_PUBLIC& public_area,
 namespace trunks {
 
 SessionManagerImpl::SessionManagerImpl(const TrunksFactory& factory)
-    : factory_(factory), session_handle_(kUninitializedHandle) {
+    : factory_(factory),
+      session_handle_(kUninitializedHandle),
+      temp_salting_key_(factory) {
   crypto::EnsureOpenSSLInit();
 }
 
@@ -341,9 +345,7 @@ TPM_RC SessionManagerImpl::StartSession(
   TPMI_DH_OBJECT tpm_key = TPM_RH_NULL;
 
   if (salted) {
-    tpm_key = kSaltingKey;
-
-    TPM_RC salt_result = GenerateSessionSalt(&salt, &encrypted_salt);
+    TPM_RC salt_result = GenerateSessionSalt(&tpm_key, &salt, &encrypted_salt);
     if (salt_result != TPM_RC_SUCCESS) {
       LOG(ERROR) << "Error creating session secret: "
                  << GetErrorString(salt_result);
@@ -402,17 +404,49 @@ TPM_RC SessionManagerImpl::StartSession(
   return TPM_RC_SUCCESS;
 }
 
-TPM_RC SessionManagerImpl::GenerateSessionSalt(brillo::SecureBlob* salt,
+TPM_RC SessionManagerImpl::GenerateSessionSalt(TPMI_DH_OBJECT* tpm_key,
+                                               brillo::SecureBlob* salt,
                                                std::string* encrypted_salt) {
-  TPMT_PUBLIC public_area;
-  TPM_RC result = factory_.GetTpmCache()->GetSaltingKeyPublicArea(&public_area);
-  if (result != TPM_RC_SUCCESS) {
-    LOG(ERROR) << "Error fetching salting key public info: "
-               << GetErrorString(result);
-    return result;
+  TPM2B_PUBLIC public_data;
+  TPMT_PUBLIC& public_area = public_data.public_area;
+
+  if (!temp_salting_key_.get()) {
+    *tpm_key = kSaltingKey;
+    TPM_RC result =
+        factory_.GetTpmCache()->GetSaltingKeyPublicArea(&public_area);
+
+    bool shall_create_temp_salting_key = false;
+    if (GetFormatOneError(result) == TPM_RC_HANDLE) {
+      LOG(WARNING) << "No valid salting key.";
+      shall_create_temp_salting_key = true;
+    } else if (result != TPM_RC_SUCCESS) {
+      LOG(ERROR) << "Error fetching salting key public info: "
+                 << GetErrorString(result);
+      return result;
+    } else if ((public_area.object_attributes & kGoodSaltingKeyAttribute) !=
+               kGoodSaltingKeyAttribute) {
+      LOG(WARNING) << "The salting key doesn't have correct attributes.";
+      shall_create_temp_salting_key = true;
+    }
+
+    if (shall_create_temp_salting_key) {
+      result = CreateTempSaltingKey();
+      if (result != TPM_RC_SUCCESS) {
+        LOG(ERROR) << "Error creating temp salting key: "
+                   << GetErrorString(result);
+        return result;
+      }
+    }
+  }
+
+  if (temp_salting_key_.get() && temp_salting_key_public_data_.has_value()) {
+    *tpm_key = temp_salting_key_.get();
+    public_data = temp_salting_key_public_data_.value();
   }
 
   const TPMI_ALG_PUBLIC& salting_key_type = public_area.type;
+
+  TPM_RC result;
 
   if (salting_key_type == TPM_ALG_RSA) {
     result = GenerateRsaSessionSalt(public_area, salt, encrypted_salt);
@@ -427,6 +461,38 @@ TPM_RC SessionManagerImpl::GenerateSessionSalt(brillo::SecureBlob* salt,
     LOG(ERROR) << "Error generating a session salt: " << GetErrorString(result);
     return result;
   }
+
+  return TPM_RC_SUCCESS;
+}
+
+TPM_RC SessionManagerImpl::CreateTempSaltingKey() {
+  TPM_HANDLE key_handle;
+  TPM2B_NAME key_name;
+  std::unique_ptr<TpmUtility> utility = factory_.GetTpmUtility();
+  TPM_RC result = utility->CreateSaltingKey(&key_handle, &key_name);
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << __func__ << ": Error creating temp salting key: "
+               << GetErrorString(result);
+    return result;
+  }
+
+  temp_salting_key_.reset(key_handle);
+
+  TPM2B_PUBLIC public_data;
+  TPM2B_NAME unused_out_name;
+  TPM2B_NAME unused_qualified_name;
+  result = factory_.GetTpm()->ReadPublicSync(
+      key_handle, /*object_handle_name=*/"", &public_data, &unused_out_name,
+      &unused_qualified_name,
+      /*authorization_delegate=*/nullptr);
+
+  if (result != TPM_RC_SUCCESS) {
+    LOG(ERROR) << "Error fetching temp salting key public info: "
+               << GetErrorString(result);
+    return result;
+  }
+
+  temp_salting_key_public_data_ = std::move(public_data);
 
   return TPM_RC_SUCCESS;
 }

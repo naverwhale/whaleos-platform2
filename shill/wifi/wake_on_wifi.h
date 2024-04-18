@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,21 +11,21 @@
 #include <netinet/ip6.h>
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <base/cancelable_callback.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
-#include <components/timers/alarm_timer_chromeos.h>
+#include <base/time/time.h>
+#include <brillo/timers/alarm_timer.h>
 
 #include "shill/callbacks.h"
-#include "shill/ip_address_store.h"
-#include "shill/net/event_history.h"
-#include "shill/net/ip_address.h"
+#include "shill/event_history.h"
+#include "shill/metrics.h"
 #include "shill/net/netlink_manager.h"
 #include "shill/refptr_types.h"
 #include "shill/wifi/wake_on_wifi_interface.h"
@@ -33,11 +33,9 @@
 
 namespace shill {
 
-class ByteString;
 class Error;
 class EventDispatcher;
 class GetWakeOnWiFiMessage;
-class Metrics;
 class Nl80211Message;
 class PropertyStore;
 class SetWakeOnWiFiMessage;
@@ -110,7 +108,7 @@ class SetWakeOnWiFiMessage;
 // +--------------------+       +-------+<---------------------------+   |
 //         ^                                                             |
 //         |                   +-------------------+                     |
-//         +-------------------+ OnIPConfigUpdated/|             Yes     |
+//         +-------------------+   OnGetDHCPLease/ |             Yes     |
 //                             |OnIPv6ConfigUpdated|<--------------------+
 //                             +-------------------+
 //
@@ -194,16 +192,15 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
   //    renewal.
   //  - |remove_supplicant_networks_callback|: callback to invoke
   //    to remove all networks from WPA supplicant.
-  //  - |have_dhcp_lease|: whether or not there is a DHCP lease to renew.
-  //  - |time_to_next_lease_renewal|: number of seconds until next DHCP lease
-  //    renewal is due.
-  void OnBeforeSuspend(bool is_connected,
-                       const std::vector<ByteString>& allowed_ssids,
-                       const ResultCallback& done_callback,
-                       const base::Closure& renew_dhcp_lease_callback,
-                       const base::Closure& remove_supplicant_networks_callback,
-                       bool have_dhcp_lease,
-                       uint32_t time_to_next_lease_renewal) override;
+  //  - |time_to_next_lease_renewal|: duration until next DHCP lease renewal is
+  //    due, if there is a DHCP lease to renew; std::nullopt otherwise.
+  void OnBeforeSuspend(
+      bool is_connected,
+      const std::vector<std::vector<uint8_t>>& allowed_ssids,
+      ResultCallback done_callback,
+      base::OnceClosure renew_dhcp_lease_callback,
+      base::OnceClosure remove_supplicant_networks_callback,
+      std::optional<base::TimeDelta> time_to_next_lease_renewal) override;
   // Performs post-resume actions relevant to wake on wireless functionality.
   void OnAfterResume() override;
   // Performs and post actions to be performed in dark resume.
@@ -219,18 +216,18 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
   //  - |initate_scan_callback|: callback to invoke to initiate a scan.
   //  - |remove_supplicant_networks_callback|: callback to invoke
   //    to remove all networks from WPA supplicant.
-  void OnDarkResume(
-      bool is_connected,
-      const std::vector<ByteString>& allowed_ssids,
-      const ResultCallback& done_callback,
-      const base::Closure& renew_dhcp_lease_callback,
-      const InitiateScanCallback& initiate_scan_callback,
-      const base::Closure& remove_supplicant_networks_callback) override;
+  void OnDarkResume(bool is_connected,
+                    const std::vector<std::vector<uint8_t>>& allowed_ssids,
+                    ResultCallback done_callback,
+                    base::OnceClosure renew_dhcp_lease_callback,
+                    InitiateScanCallback initiate_scan_callback,
+                    const base::RepeatingClosure&
+                        remove_supplicant_networks_callback) override;
   // Called when we the current service is connected, and we have IP
   // reachability. Calls WakeOnWiFi::BeforeSuspendActions if we are in dark
   // resume to end the current dark resume. Otherwise, does nothing.
-  void OnConnectedAndReachable(bool start_lease_renewal_timer,
-                               uint32_t time_to_next_lease_renewal) override;
+  void OnConnectedAndReachable(
+      std::optional<base::TimeDelta> time_to_next_lease_renewal) override;
   // Callback invoked to report whether this WiFi device is connected to
   // a service after waking from suspend.
   void ReportConnectedToServiceAfterWake(bool is_connected,
@@ -239,9 +236,9 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
   // for auto-connect after a scan. |initiate_scan_callback| is used for dark
   // resume scan retries.
   void OnNoAutoConnectableServicesAfterScan(
-      const std::vector<ByteString>& allowed_ssids,
-      const base::Closure& remove_supplicant_networks_callback,
-      const InitiateScanCallback& initiate_scan_callback) override;
+      const std::vector<std::vector<uint8_t>>& allowed_ssids,
+      base::OnceClosure remove_supplicant_networks_callback,
+      InitiateScanCallback initiate_scan_callback) override;
   // Called by WiFi when it is notified by the kernel that a scan has started.
   // If |is_active_scan| is true, the scan is an active scan. Otherwise, the
   // scan is a passive scan.
@@ -262,7 +259,7 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
               RetrySetWakeOnWiFiConnections_MaxAttemptsWithCallbackSet);
   FRIEND_TEST(WakeOnWiFiTestWithMockDispatcher,
               RetrySetWakeOnWiFiConnections_MaxAttemptsCallbackUnset);
-  // kDarkResumeActionsTimeoutMilliseconds
+  // kDarkResumeActionsTimeout
   FRIEND_TEST(WakeOnWiFiTestWithMockDispatcher,
               OnBeforeSuspend_DHCPLeaseRenewal);
   // Dark resume wake reason strings (e.g. kWakeReasonStringDisconnect)
@@ -270,13 +267,13 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
               OnWakeupReasonReceived_Disconnect);
   FRIEND_TEST(WakeOnWiFiTestWithMockDispatcher, OnWakeupReasonReceived_SSID);
   // kMaxDarkResumesPerPeriodShort
-  // kDarkResumeFrequencySamplingPeriodShortMinutes,
+  // kDarkResumeFrequencySamplingPeriodShort,
   // kMaxDarkResumesPerPeriodShort
   FRIEND_TEST(WakeOnWiFiTestWithDispatcher,
               OnDarkResume_NotConnected_MaxDarkResumes_ShortPeriod);
-  // kDarkResumeFrequencySamplingPeriodLongMinutes,
+  // kDarkResumeFrequencySamplingPeriodLong,
   // kMaxDarkResumesPerPeriodLong,
-  // kDarkResumeFrequencySamplingPeriodShortMinutes,
+  // kDarkResumeFrequencySamplingPeriodShort,
   // kMaxDarkResumesPerPeriodShort
   FRIEND_TEST(WakeOnWiFiTestWithDispatcher,
               OnDarkResume_NotConnected_MaxDarkResumes_LongPeriod);
@@ -284,28 +281,32 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
   FRIEND_TEST(WakeOnWiFiTestWithDispatcher, InitiateScanInDarkResume);
 
   static const char kWakeOnWiFiNotAllowed[];
-  static const int kVerifyWakeOnWiFiSettingsDelayMilliseconds;
+  static constexpr base::TimeDelta kVerifyWakeOnWiFiSettingsDelay =
+      base::Milliseconds(300);
   static const int kMaxSetWakeOnWiFiRetries;
-  static const int kMetricsReportingFrequencySeconds;
+  static constexpr base::TimeDelta kMetricsReportingFrequency =
+      base::Minutes(10);
   static const uint32_t kDefaultWakeToScanPeriodSeconds;
   static const uint32_t kDefaultNetDetectScanPeriodSeconds;
-  static const uint32_t kImmediateDHCPLeaseRenewalThresholdSeconds;
-  static const int kDarkResumeFrequencySamplingPeriodShortMinutes;
-  static const int kDarkResumeFrequencySamplingPeriodLongMinutes;
+  static constexpr base::TimeDelta kImmediateDHCPLeaseRenewalThreshold =
+      base::Minutes(1);
+  static constexpr base::TimeDelta kDarkResumeFrequencySamplingPeriodShort =
+      base::Minutes(1);
+  static constexpr base::TimeDelta kDarkResumeFrequencySamplingPeriodLong =
+      base::Minutes(10);
   static const int kMaxDarkResumesPerPeriodShort;
   static const int kMaxDarkResumesPerPeriodLong;
-  static int64_t DarkResumeActionsTimeoutMilliseconds;  // non-const for testing
+  static base::TimeDelta DarkResumeActionsTimeout;  // non-const for testing
   static const int kMaxFreqsForDarkResumeScanRetries;
   static const int kMaxDarkResumeScanRetries;
 
-  void StartMetricsTimer();
   bool GetWakeOnWiFiAllowed(Error* error);
   bool SetWakeOnWiFiAllowed(const bool& enabled, Error* error);
   std::string GetWakeOnWiFiFeaturesEnabled(Error* error);
   bool SetWakeOnWiFiFeaturesEnabled(const std::string& enabled, Error* error);
   std::string GetLastWakeReason(Error* error);
-  // Helper function to run and reset |suspend_actions_done_callback_|.
-  void RunAndResetSuspendActionsDoneCallback(const Error& error);
+  // Helper function to run |suspend_actions_done_callback_|.
+  void RunSuspendActionsDoneCallback(const Error& error);
 
   // Creates and sets an attribute in a NL80211 message |msg| which indicates
   // the index of the wiphy interface to program. Returns true iff |msg| is
@@ -330,7 +331,7 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
       const std::set<WakeOnWiFiTrigger>& trigs,
       uint32_t wiphy_index,
       uint32_t net_detect_scan_period_seconds,
-      const std::vector<ByteString>& allowed_ssids,
+      const std::vector<std::vector<uint8_t>>& allowed_ssids,
       Error* error);
   // Creates and sets attributes in an GetWakeOnWiFiMessage msg| so that
   // the message will request for wake-on-packet settings information from the
@@ -353,11 +354,11 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
       const Nl80211Message& msg,
       const std::set<WakeOnWiFiTrigger>& trigs,
       uint32_t net_detect_scan_period_seconds,
-      const std::vector<ByteString>& allowed_ssids);
+      const std::vector<std::vector<uint8_t>>& allowed_ssids);
   // Handler for NL80211 message error responses from NIC wake on WiFi setting
   // programming attempts.
   void OnWakeOnWiFiSettingsErrorResponse(
-      NetlinkManager::AuxilliaryMessageType type,
+      NetlinkManager::AuxiliaryMessageType type,
       const NetlinkMessage* raw_message);
   // Message handler for NL80211_CMD_SET_WOWLAN responses.
   static void OnSetWakeOnWiFiConnectionResponse(
@@ -386,28 +387,18 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
   // enabled based on the descriptor |wake_on_wifi_features_enabled_| and
   // are supported by the NIC.
   bool WakeOnWiFiDarkConnectEnabledAndSupported();
-  // Called by metrics_timer_ to reports metrics.
-  void ReportMetrics();
   // Actions executed before normal suspend and dark resume suspend.
   //
   // Arguments:
   //  - |is_connected|: whether the WiFi device is connected.
-  //  - |start_lease_renewal_timer|: whether or not to start the DHCP lease
-  //    renewal timer.
-  //  - |time_to_next_lease_renewal|: number of seconds until next DHCP lease
-  //    renewal is due.
+  //  - |time_to_next_lease_renewal|: duration until next DHCP lease renewal is
+  //    due if start the DHCP lease renewal timer; std::nullopt if not.
   //  - |remove_supplicant_networks_callback|: callback to invoke
   //    to remove all networks from WPA supplicant.
   void BeforeSuspendActions(
       bool is_connected,
-      bool start_lease_renewal_timer,
-      uint32_t time_to_next_lease_renewal,
-      const base::Closure& remove_supplicant_networks_callback);
-
-  // Needed for |dhcp_lease_renewal_timer_| and |wake_to_scan_timer_| since
-  // passing a empty base::Closure() causes a run-time DCHECK error when
-  // SimpleAlarmTimer::Start or SimpleAlarmTimer::Reset are called.
-  void OnTimerWakeDoNothing() {}
+      std::optional<base::TimeDelta> time_to_next_lease_renewal,
+      base::OnceClosure remove_supplicant_networks_callback);
 
   // Parses an attribute list containing the SSID matches that caused the
   // system wake, along with the corresponding channels that these SSIDs were
@@ -425,9 +416,8 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
 
   // Sets the |dark_resume_scan_retries_left_| counter if necessary, then runs
   // |initiate_scan_callback| with |freqs|.
-  void InitiateScanInDarkResume(
-      const InitiateScanCallback& initiate_scan_callback,
-      const WiFi::FreqSet& freqs);
+  void InitiateScanInDarkResume(InitiateScanCallback initiate_scan_callback,
+                                const WiFi::FreqSet& freqs);
 
   // Pointers to objects owned by the WiFi object that created this object.
   EventDispatcher* dispatcher_;
@@ -436,12 +426,10 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
   // Executes after the NIC's wake on WiFi settings are configured via
   // NL80211 messages to verify that the new configuration has taken effect.
   // Calls RequestWakeOnWiFiSettings.
-  base::CancelableClosure verify_wake_on_wifi_settings_callback_;
+  base::CancelableOnceClosure verify_wake_on_wifi_settings_callback_;
   // Callback to be invoked after all suspend actions finish executing both
   // before regular suspend and before suspend in dark resume.
   ResultCallback suspend_actions_done_callback_;
-  // Callback to report wake on WiFi related metrics.
-  base::CancelableClosure report_metrics_callback_;
   // Number of retry attempts to program the NIC's wake-on-WiFi settings.
   int num_set_wake_on_wifi_retries_;
   // Keeps track of triggers that the NIC will be programmed to wake from
@@ -455,7 +443,7 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
   // Keeps track of SSIDs that this device will wake on the appearance of while
   // the device is suspended. Only used if the NIC is programmed to wake on
   // SSIDs.
-  std::vector<ByteString> wake_on_allowed_ssids_;
+  std::vector<std::vector<uint8_t>> wake_on_allowed_ssids_;
   uint32_t wiphy_index_;
   bool wiphy_index_received_;
   // Describes if wake on WiFi is allowed to be enabled.
@@ -463,12 +451,12 @@ class WakeOnWiFi : public WakeOnWiFiInterface {
   // Describes the wake on WiFi features that are currently enabled.
   std::string wake_on_wifi_features_enabled_;
   // Timer that wakes the system to renew DHCP leases.
-  std::unique_ptr<timers::SimpleAlarmTimer> dhcp_lease_renewal_timer_;
+  std::unique_ptr<brillo::timers::SimpleAlarmTimer> dhcp_lease_renewal_timer_;
   // Timer that wakes the system to scan for networks.
-  std::unique_ptr<timers::SimpleAlarmTimer> wake_to_scan_timer_;
+  std::unique_ptr<brillo::timers::SimpleAlarmTimer> wake_to_scan_timer_;
   // Executes when the dark resume actions timer expires. Calls
   // ScanTimerHandler.
-  base::CancelableClosure dark_resume_actions_timeout_callback_;
+  base::CancelableOnceClosure dark_resume_actions_timeout_callback_;
   // Whether shill is currently in dark resume.
   bool in_dark_resume_;
   // Period (in seconds) between instances where the system wakes from suspend

@@ -1,9 +1,12 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "brillo/blkdev_utils/lvm_device.h"
 
+#include <unistd.h>
+
+#include <optional>
 #include <utility>
 
 // lvm2 has multiple options for managing LVM objects:
@@ -20,11 +23,22 @@
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/string_split.h>
 #include <base/values.h>
 #include <brillo/process/process.h>
+#include <brillo/scoped_umask.h>
 
 namespace brillo {
 namespace {
+
+const int64_t kLbaSize = 512;
+const int64_t kCentiFactor = 10000;
+const ssize_t kLbaCountValIdx = 1;
+const ssize_t kDataAllocStatIdx = 5;
+const ssize_t kDataUsedBlocksStatIdx = 0;
+const ssize_t kDataTotalBlocksStatIdx = 1;
+const char kCheckThinpoolMappingsConfig[] =
+    R"('global/thin_check_options = [ "-q", "--clear-needs-check-flag"]')";
 
 void LogLvmError(int rc, const std::string& cmd) {
   switch (rc) {
@@ -44,7 +58,6 @@ void LogLvmError(int rc, const std::string& cmd) {
       break;
   }
 }
-
 }  // namespace
 
 PhysicalVolume::PhysicalVolume(const base::FilePath& device_path,
@@ -69,7 +82,7 @@ bool PhysicalVolume::Remove() {
   if (device_path_.empty() || !lvm_)
     return false;
 
-  bool ret = lvm_->RunCommand({"pvremove", device_path_.value()});
+  bool ret = lvm_->RunCommand({"pvremove", "-ff", device_path_.value()});
   device_path_ = base::FilePath();
   return ret;
 }
@@ -112,9 +125,18 @@ bool VolumeGroup::Deactivate() {
 bool VolumeGroup::Remove() {
   if (volume_group_name_.empty() || !lvm_)
     return false;
-  bool ret = lvm_->RunCommand({"vgremove", volume_group_name_});
+  bool ret = lvm_->RunCommand({"vgremove", "-f", volume_group_name_});
   volume_group_name_ = "";
   return ret;
+}
+
+bool VolumeGroup::Rename(const std::string& volume_group_name) {
+  if (volume_group_name_.empty() || volume_group_name.empty() || !lvm_)
+    return false;
+  if (!lvm_->RunCommand({"vgrename", volume_group_name_, volume_group_name}))
+    return false;
+  volume_group_name_ = volume_group_name;
+  return true;
 }
 
 LogicalVolume::LogicalVolume(const std::string& logical_volume_name,
@@ -173,10 +195,19 @@ bool Thinpool::Repair() {
   return lvm_->RunProcess({"lvconvert", "--repair", GetName()});
 }
 
-bool Thinpool::Activate() {
+bool Thinpool::Activate(bool check) {
   if (thinpool_name_.empty() || !lvm_)
     return false;
-  return lvm_->RunCommand({"lvchange", "-ay", GetName()});
+
+  std::vector<std::string> command = {"lvchange", "-ay"};
+
+  if (check) {
+    command.push_back("--config");
+    command.push_back(kCheckThinpoolMappingsConfig);
+  }
+  command.push_back(GetName());
+
+  return lvm_->RunCommand(command);
 }
 
 bool Thinpool::Deactivate() {
@@ -200,48 +231,30 @@ bool Thinpool::GetTotalSpace(int64_t* size) {
     return false;
 
   std::string output;
-
-  if (!lvm_->RunProcess(
-          {"/sbin/lvdisplay", "-S", "pool_lv=\"\"", "-C", "--reportformat",
-           "json", "--units", "b", volume_group_name_ + "/" + thinpool_name_},
-          &output)) {
-    LOG(ERROR) << "Failed to get output from lvdisplay.";
+  const std::string target =
+      volume_group_name_ + "-" + thinpool_name_ + "-tpool";
+  if (!lvm_->RunProcess({"/sbin/dmsetup", "status", "--noflush", target},
+                        &output)) {
+    LOG(ERROR) << "Failed to get output from dmsetup status for " << target;
     return false;
   }
 
-  base::Optional<base::Value> report_contents =
-      lvm_->UnwrapReportContents(output, "lv");
+  const std::vector<base::StringPiece> dmstatus_strs = base::SplitStringPiece(
+      output, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
 
-  if (!report_contents || !report_contents->is_dict()) {
-    LOG(ERROR) << "Failed to get report contents.";
+  if (dmstatus_strs.size() < kLbaCountValIdx + 1) {
+    LOG(ERROR) << "malformed dmsetup status, str:  " << output;
     return false;
   }
 
-  // Get the thinpool size.
-  std::string* thinpool_size = report_contents->FindStringKey("lv_size");
-  if (!thinpool_size) {
-    LOG(ERROR) << "Failed to get thinpool size.";
+  int64_t total_lba;
+  if (!base::StringToInt64(dmstatus_strs[kLbaCountValIdx], &total_lba)) {
+    LOG(ERROR) << "Failed to parse total lba count, str:  "
+               << dmstatus_strs[kLbaCountValIdx];
     return false;
   }
 
-  if (thinpool_size->empty()) {
-    LOG(ERROR) << "Empty thinpool size string.";
-    return false;
-  }
-
-  // Last character for size is always "B".
-  if (thinpool_size->back() != 'B') {
-    LOG(ERROR) << "Last character of thinpool size string should always be B.";
-    return false;
-  }
-
-  // Use base::StringToInt64 to validate the returned thinpool size.
-  if (!base::StringToInt64(
-          base::StringPiece(thinpool_size->data(), thinpool_size->length() - 1),
-          size)) {
-    LOG(ERROR) << "Failed to convert thinpool size to a numeric value";
-    return false;
-  }
+  *size = total_lba * kLbaSize;
 
   return true;
 }
@@ -251,45 +264,62 @@ bool Thinpool::GetFreeSpace(int64_t* size) {
     return false;
 
   std::string output;
-
-  if (!lvm_->RunProcess(
-          {"/sbin/lvdisplay", "-S", "pool_lv=\"\"", "-C", "--reportformat",
-           "json", "--units", "b", volume_group_name_ + "/" + thinpool_name_},
-          &output)) {
-    LOG(ERROR) << "Failed to get output from lvdisplay.";
+  const std::string target =
+      volume_group_name_ + "-" + thinpool_name_ + "-tpool";
+  if (!lvm_->RunProcess({"/sbin/dmsetup", "status", "--noflush", target},
+                        &output)) {
+    LOG(ERROR) << "Failed to get output from dmsetup status for " << target;
     return false;
   }
 
-  base::Optional<base::Value> report_contents =
-      lvm_->UnwrapReportContents(output, "lv");
+  const std::vector<base::StringPiece> dmstatus_strs = base::SplitStringPiece(
+      output, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
 
-  if (!report_contents || !report_contents->is_dict()) {
-    LOG(ERROR) << "Failed to get report contents.";
+  if (dmstatus_strs.size() < kDataAllocStatIdx + 1) {
+    LOG(ERROR) << "malformed dmsetup status, str:  " << output;
     return false;
   }
 
-  // Get the percentage of used data from the thinpool. The value is stored as a
-  // string in the json.
-  std::string* data_used_percent =
-      report_contents->FindStringKey("data_percent");
-  if (!data_used_percent) {
-    LOG(ERROR) << "Failed to get percentage size of thinpool used.";
+  const std::vector<base::StringPiece> data_alloc_strs =
+      base::SplitStringPiece(dmstatus_strs[kDataAllocStatIdx], "/",
+                             base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+
+  if (data_alloc_strs.size() < kDataTotalBlocksStatIdx + 1) {
+    LOG(ERROR) << "malformed data allocation value, str:  "
+               << dmstatus_strs[kDataAllocStatIdx];
     return false;
   }
 
-  double used_percent;
-  if (!base::StringToDouble(*data_used_percent, &used_percent)) {
-    LOG(ERROR) << "Failed to convert used percentage string to double.";
+  int64_t total_lba;
+  int64_t used_blocks_nr;
+  int64_t total_blocks_nr;
+
+  if (!base::StringToInt64(dmstatus_strs[kLbaCountValIdx], &total_lba)) {
+    LOG(ERROR) << "Failed to parse total lba count, str:  "
+               << dmstatus_strs[kLbaCountValIdx];
     return false;
   }
 
-  int64_t total_size;
-  if (!GetTotalSpace(&total_size)) {
-    LOG(ERROR) << "Failed to get total thinpool size.";
+  if (!base::StringToInt64(data_alloc_strs[kDataUsedBlocksStatIdx],
+                           &used_blocks_nr)) {
+    LOG(ERROR) << "Failed to parse used data block count, str:  "
+               << data_alloc_strs[kDataUsedBlocksStatIdx];
     return false;
   }
 
-  *size = static_cast<int64_t>((100.0 - used_percent) / 100.0 * total_size);
+  if (!base::StringToInt64(data_alloc_strs[kDataTotalBlocksStatIdx],
+                           &total_blocks_nr)) {
+    LOG(ERROR) << "Failed to parse total data blockcount, str:  "
+               << data_alloc_strs[kDataTotalBlocksStatIdx];
+    return false;
+  }
+
+  // To avoid floating point operations, carry operations with fractions
+  // multiplied by a large factor.
+  int64_t total_size = total_lba * kLbaSize;
+  int64_t free_blocks_nr = total_blocks_nr - used_blocks_nr;
+  int64_t free_centi_percent = free_blocks_nr * kCentiFactor / total_blocks_nr;
+  *size = total_size * free_centi_percent / kCentiFactor;
 
   return true;
 }
@@ -302,6 +332,12 @@ bool LvmCommandRunner::RunCommand(const std::vector<std::string>& cmd) {
   // lvm2_run() does not exec/fork a separate process, instead it parses the
   // command line and calls the relevant functions within liblvm2cmd directly.
   std::string lvm_cmd = base::JoinString(cmd, " ");
+
+  // liblvm2cmd sets a global umask() but doesn't reset it.
+  // Instead add a scoped umask here to reset the umask once we are done
+  // executing.
+  brillo::ScopedUmask lvm_umask(0);
+
   int rc = lvm2_run(nullptr, lvm_cmd.c_str());
   LogLvmError(rc, lvm_cmd);
 
@@ -346,48 +382,48 @@ bool LvmCommandRunner::RunProcess(const std::vector<std::string>& cmd,
 // Common function to fetch the underlying dictionary (assume for now
 // that the reports will be reporting just a single type (lv/vg/pv) for now).
 
-base::Optional<base::Value> LvmCommandRunner::UnwrapReportContents(
+std::optional<base::Value> LvmCommandRunner::UnwrapReportContents(
     const std::string& output, const std::string& key) {
   auto report = base::JSONReader::Read(output);
   if (!report || !report->is_dict()) {
     LOG(ERROR) << "Failed to get report as dictionary";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  base::Value* report_list = report->FindListKey("report");
+  base::Value::List* report_list = report->GetDict().FindList("report");
   if (!report_list) {
     LOG(ERROR) << "Failed to find 'report' list";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  if (report_list->GetList().size() != 1) {
-    LOG(ERROR) << "Unexpected size: " << report_list->GetList().size();
-    return base::nullopt;
+  if (report_list->size() != 1) {
+    LOG(ERROR) << "Unexpected size: " << report_list->size();
+    return std::nullopt;
   }
 
-  base::Value& report_dictionary = report_list->GetList()[0];
+  base::Value& report_dictionary = report_list->front();
   if (!report_dictionary.is_dict()) {
     LOG(ERROR) << "Failed to find 'report' dictionary";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  base::Value* key_list = report_dictionary.FindListKey(key);
+  base::Value::List* key_list = report_dictionary.GetDict().FindList(key);
   if (!key_list) {
     LOG(ERROR) << "Failed to find " << key << " list";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   // If the list has just a single dictionary element, return it directly.
-  if (key_list->GetList().size() == 1) {
-    base::Value& key_dictionary = key_list->GetList()[0];
+  if (key_list->size() == 1) {
+    base::Value& key_dictionary = key_list->front();
     if (!key_dictionary.is_dict()) {
       LOG(ERROR) << "Failed to get " << key << " dictionary";
-      return base::nullopt;
+      return std::nullopt;
     }
     return std::move(key_dictionary);
   }
 
-  return std::move(*key_list);
+  return base::Value{std::move(*key_list)};
 }
 
 }  // namespace brillo

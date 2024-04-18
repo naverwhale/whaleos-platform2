@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,12 +26,14 @@
 #include <base/strings/string_number_conversions.h>
 #include <base/synchronization/lock.h>
 #include <base/synchronization/waitable_event.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/platform_thread.h>
 #include <base/threading/thread.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <brillo/daemons/dbus_daemon.h>
 #include <brillo/syslog_logging.h>
-#include <libhwsec-foundation/tpm/tpm_version.h>
+#include <libhwsec/factory/factory_impl.h>
+#include <libhwsec-foundation/profiling/profiling.h>
+#include <libhwsec-foundation/tpm_error/tpm_error_uma_reporter.h>
 #include <libminijail.h>
 #include <scoped_minijail.h>
 
@@ -42,17 +44,6 @@
 #include "chaps/dbus_bindings/constants.h"
 #include "chaps/platform_globals.h"
 #include "chaps/slot_manager_impl.h"
-
-#include "chaps/tpm_utility.h"
-#include "chaps/tpm_utility_stub.h"
-
-#if USE_TPM2
-#include "chaps/tpm2_utility_impl.h"
-#endif
-
-#if USE_TPM1
-#include "chaps/tpm_utility_impl.h"
-#endif
 
 using base::AutoLock;
 using base::FilePath;
@@ -65,9 +56,6 @@ using std::string;
 
 namespace {
 
-const char kTpmThreadName[] = "tpm_background_thread";
-const char kInitThreadName[] = "async_init_thread";
-
 void MaskSignals() {
   sigset_t signal_mask;
   CHECK_EQ(0, sigemptyset(&signal_mask));
@@ -75,27 +63,6 @@ void MaskSignals() {
     CHECK_EQ(0, sigaddset(&signal_mask, signal));
   }
   CHECK_EQ(0, sigprocmask(SIG_BLOCK, &signal_mask, nullptr));
-}
-
-void InitAsync(WaitableEvent* started_event,
-               Lock* lock,
-               chaps::TPMUtility* tpm,
-               chaps::SlotManagerImpl* slot_manager) {
-  // It's important that we acquire 'lock' before signaling 'started_event'.
-  // This will prevent any D-Bus requests from being processed until we've
-  // finished initialization.
-  AutoLock auto_lock(*lock);
-  started_event->Signal();
-  LOG(INFO) << "Starting asynchronous initialization.";
-  if (!tpm->Init())
-    // Just warn and continue in this case.  The effect will be a functional
-    // daemon which handles dbus requests but any attempt to load a token will
-    // fail.  To a PKCS #11 client this will look like a library with a few
-    // empty slots.
-    LOG(WARNING) << "TPM initialization failed (this is expected if no TPM is"
-                 << " available).  PKCS #11 tokens will not be available.";
-  if (!slot_manager->Init())
-    LOG(FATAL) << "Slot initialization failed.";
 }
 
 void SetProcessUserAndGroup(const char* user_name, const char* group_name) {
@@ -119,83 +86,57 @@ class Daemon : public brillo::DBusServiceDaemon {
   Daemon(const std::string& srk_auth_data, bool auto_load_system_token)
       : DBusServiceDaemon(kChapsServiceName),
         srk_auth_data_(srk_auth_data),
-        auto_load_system_token_(auto_load_system_token),
-        tpm_background_thread_(kTpmThreadName),
-        async_init_thread_(kInitThreadName) {}
+        auto_load_system_token_(auto_load_system_token) {}
   Daemon(const Daemon&) = delete;
   Daemon& operator=(const Daemon&) = delete;
 
   ~Daemon() override {
-    // We join these two threads here so that the code running in these two
-    // threads can be certain that all the other members of this class will
-    // be available when the thread is still running.
-    async_init_thread_.Stop();
-
     // adaptor_ contains a pointer to service_
     adaptor_.reset();
 
     // service_ contains a pointer to slot_manager_
     service_.reset();
 
-    // Destructor of slot_manager_ will use tpm_
+    // Destructor of slot_manager_ will use hwsec_
     slot_manager_.reset();
 
-    TPM_SELECT_BEGIN;
-    TPM2_SECTION({
-      // tpm_ will need tpm_background_thread_ to function
-      tpm_.reset();
-      tpm_background_thread_.Stop();
-    });
-    OTHER_TPM_SECTION();
-    TPM_SELECT_END;
+    hwsec_.reset();
+
+    hwsec_factory_.reset();
+
+    factory_.reset();
+    // Both slot_manager_ and factory_ contains a pointer to chaps_metrics_
+    chaps_metrics_.reset();
   }
 
  protected:
   int OnInit() override {
-    TPM_SELECT_BEGIN;
-    TPM2_SECTION({
-      CHECK(tpm_background_thread_.StartWithOptions(base::Thread::Options(
-          base::MessagePumpType::IO, 0 /* use default stack size */)));
-      tpm_.reset(new TPM2UtilityImpl(tpm_background_thread_.task_runner()));
-    });
-    TPM1_SECTION({
-      // Instantiate a TPM1.2 Utility.
-      tpm_.reset(new TPMUtilityImpl(srk_auth_data_));
-    });
-    OTHER_TPM_SECTION({ tpm_.reset(new TPMUtilityStub()); });
-    TPM_SELECT_END;
+    hwsec_factory_ = std::make_unique<hwsec::FactoryImpl>();
+    hwsec_ = hwsec_factory_->GetChapsFrontend();
 
-    factory_.reset(new ChapsFactoryImpl);
-    system_shutdown_blocker_.reset(
-        new SystemShutdownBlocker(base::ThreadTaskRunnerHandle::Get()));
-    slot_manager_.reset(new SlotManagerImpl(factory_.get(), tpm_.get(),
-                                            auto_load_system_token_,
-                                            system_shutdown_blocker_.get()));
+    chaps_metrics_.reset(new ChapsMetrics);
+    factory_.reset(new ChapsFactoryImpl(chaps_metrics_.get()));
+    system_shutdown_blocker_.reset(new SystemShutdownBlocker(
+        base::SingleThreadTaskRunner::GetCurrentDefault()));
+    slot_manager_.reset(new SlotManagerImpl(
+        factory_.get(), hwsec_.get(), auto_load_system_token_,
+        system_shutdown_blocker_.get(), chaps_metrics_.get()));
     service_.reset(new ChapsServiceImpl(slot_manager_.get()));
 
-    // Initialize the TPM utility and slot manager asynchronously because
-    // we might be able to serve some requests while they are being
-    // initialized.
-    WaitableEvent init_started(WaitableEvent::ResetPolicy::MANUAL,
-                               WaitableEvent::InitialState::NOT_SIGNALED);
-    CHECK(async_init_thread_.StartWithOptions(base::Thread::Options(
-        base::MessagePumpType::IO, 0 /* use default stack size */)));
-    async_init_thread_.task_runner()->PostTask(
-        FROM_HERE, base::Bind(&InitAsync, &init_started, &lock_, tpm_.get(),
-                              slot_manager_.get()));
-    // We're not finished with initialization until the initialization thread
-    // has had a chance to acquire the lock.
-    init_started.Wait();
+    // Initialize the slot manager.
+    if (!slot_manager_->Init()) {
+      LOG(FATAL) << "Slot initialization failed.";
+    }
 
     // Now we can export D-Bus objects.
     int return_code = DBusServiceDaemon::OnInit();
     if (return_code != EX_OK)
       return return_code;
 
-    RegisterHandler(SIGTERM, base::Bind(&Daemon::ShutdownSignalHandler,
-                                        base::Unretained(this)));
-    RegisterHandler(SIGINT, base::Bind(&Daemon::ShutdownSignalHandler,
-                                       base::Unretained(this)));
+    RegisterHandler(SIGTERM, base::BindRepeating(&Daemon::ShutdownSignalHandler,
+                                                 base::Unretained(this)));
+    RegisterHandler(SIGINT, base::BindRepeating(&Daemon::ShutdownSignalHandler,
+                                                base::Unretained(this)));
 
     return EX_OK;
   }
@@ -206,8 +147,7 @@ class Daemon : public brillo::DBusServiceDaemon {
 
   void RegisterDBusObjectsAsync(
       brillo::dbus_utils::AsyncEventSequencer* sequencer) override {
-    adaptor_.reset(
-        new ChapsAdaptor(bus_, &lock_, service_.get(), slot_manager_.get()));
+    adaptor_.reset(new ChapsAdaptor(bus_, service_.get(), slot_manager_.get()));
     adaptor_->RegisterAsync(
         sequencer->GetHandler("RegisterAsync() failed", true));
   }
@@ -226,11 +166,13 @@ class Daemon : public brillo::DBusServiceDaemon {
 
   std::string srk_auth_data_;
   bool auto_load_system_token_;
-  base::Thread tpm_background_thread_;
-  base::Thread async_init_thread_;
-  Lock lock_;
 
-  std::unique_ptr<TPMUtility> tpm_;
+  // The object to generate the other frontends.
+  std::unique_ptr<hwsec::Factory> hwsec_factory_;
+  // The object for accessing the HWSec related functions.
+  std::unique_ptr<const hwsec::ChapsFrontend> hwsec_;
+
+  std::unique_ptr<ChapsMetrics> chaps_metrics_;
   std::unique_ptr<ChapsFactory> factory_;
   std::unique_ptr<SystemShutdownBlocker> system_shutdown_blocker_;
   std::unique_ptr<SlotManagerImpl> slot_manager_;
@@ -262,6 +204,9 @@ int main(int argc, char** argv) {
   }
 
   LOG(INFO) << "Starting PKCS #11 services.";
+  // Set TPM metrics client ID.
+  hwsec_foundation::SetTpmMetricsClientID(
+      hwsec_foundation::TpmMetricsClientID::kChaps);
   // Run as 'chaps'.
   SetProcessUserAndGroup(chaps::kChapsdProcessUser, chaps::kChapsdProcessGroup);
   // Determine SRK authorization data from the command line.
@@ -282,6 +227,10 @@ int main(int argc, char** argv) {
   // below.
   MaskSignals();
   LOG(INFO) << "Starting D-Bus dispatcher.";
+
+  // Start profiling.
+  hwsec_foundation::SetUpProfiling();
+
   chaps::Daemon(srk_auth_data, auto_load_system_token).Run();
   return 0;
 }

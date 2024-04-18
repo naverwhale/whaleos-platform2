@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,9 +28,11 @@
 
 #include "lorgnette/enums.h"
 #include "lorgnette/sane_client_fake.h"
+#include "lorgnette/sane_device_fake.h"
 #include "lorgnette/test_util.h"
 
 using brillo::dbus_utils::MockDBusMethodResponse;
+using ::testing::_;
 using ::testing::ContainsRegex;
 using ::testing::ElementsAre;
 
@@ -68,15 +70,12 @@ void ValidateSignals(const std::vector<ScanStatusChangedSignal>& signals,
 }
 
 template <typename T>
-std::unique_ptr<MockDBusMethodResponse<std::vector<uint8_t>>>
-BuildMockDBusResponse(T* response) {
-  auto dbus_response =
-      std::make_unique<MockDBusMethodResponse<std::vector<uint8_t>>>();
-  dbus_response->set_return_callback(base::BindRepeating(
-      [](T* response_out, const std::vector<uint8_t>& serialized_response) {
+std::unique_ptr<MockDBusMethodResponse<T>> BuildMockDBusResponse(T* response) {
+  auto dbus_response = std::make_unique<MockDBusMethodResponse<T>>();
+  dbus_response->set_return_callback(base::BindOnce(
+      [](T* response_out, const T& response_in) {
         ASSERT_TRUE(response_out);
-        ASSERT_TRUE(response_out->ParseFromArray(serialized_response.data(),
-                                                 serialized_response.size()));
+        *response_out = response_in;
       },
       base::Unretained(response)));
   return dbus_response;
@@ -88,11 +87,11 @@ class ManagerTest : public testing::Test {
  protected:
   ManagerTest()
       : sane_client_(new SaneClientFake()),
-        manager_(base::RepeatingCallback<void(size_t)>(),
-                 std::unique_ptr<SaneClient>(sane_client_)),
+        manager_(base::RepeatingCallback<void(base::TimeDelta)>(),
+                 sane_client_.get()),
         metrics_library_(new MetricsLibraryMock) {
     manager_.metrics_library_.reset(metrics_library_);
-    manager_.SetProgressSignalInterval(base::TimeDelta::FromSeconds(0));
+    manager_.SetProgressSignalInterval(base::Seconds(0));
   }
 
   void SetUp() override {
@@ -103,7 +102,7 @@ class ManagerTest : public testing::Test {
     ASSERT_TRUE(scan.IsValid());
     scan_fd_ = base::ScopedFD(scan.TakePlatformFile());
 
-    manager_.SetScanStatusChangedSignalSenderForTest(base::BindRepeating(
+    manager_.SetScanStatusChangedSignalSender(base::BindRepeating(
         [](std::vector<ScanStatusChangedSignal>* signals,
            const ScanStatusChangedSignal& signal) {
           signals->push_back(signal);
@@ -127,6 +126,12 @@ class ManagerTest : public testing::Test {
     EXPECT_CALL(*metrics_library_,
                 SendEnumToUMA(Manager::kMetricScanFailed, backend,
                               DocumentScanSaneBackend::kMaxValue + 1));
+  }
+
+  void ExpectScanFailureReason(ScanJobFailureReason failure_reason) {
+    EXPECT_CALL(*metrics_library_,
+                SendEnumToUMA(Manager::kMetricScanFailedFailureReason,
+                              static_cast<int>(failure_reason), _));
   }
 
   void CompareImages(const std::string& path_a, const std::string& path_b) {
@@ -181,14 +186,7 @@ class ManagerTest : public testing::Test {
     request.mutable_settings()->set_color_mode(color_mode);
     request.mutable_settings()->set_source_name(source_name);
     request.mutable_settings()->set_image_format(image_format);
-
-    std::vector<uint8_t> serialized_response =
-        manager_.StartScan(impl::SerializeProto(request));
-
-    StartScanResponse response;
-    EXPECT_TRUE(response.ParseFromArray(serialized_response.data(),
-                                        serialized_response.size()));
-    return response;
+    return manager_.StartScan(request);
   }
 
   GetNextImageResponse GetNextImage(const std::string& scan_uuid,
@@ -197,22 +195,14 @@ class ManagerTest : public testing::Test {
     request.set_scan_uuid(scan_uuid);
 
     GetNextImageResponse response;
-    manager_.GetNextImage(BuildMockDBusResponse(&response),
-                          impl::SerializeProto(request), output_fd);
+    manager_.GetNextImage(BuildMockDBusResponse(&response), request, output_fd);
     return response;
   }
 
   CancelScanResponse CancelScan(const std::string& scan_uuid) {
     CancelScanRequest request;
     request.set_scan_uuid(scan_uuid);
-
-    std::vector<uint8_t> serialized_response =
-        manager_.CancelScan(impl::SerializeProto(request));
-
-    CancelScanResponse response;
-    EXPECT_TRUE(response.ParseFromArray(serialized_response.data(),
-                                        serialized_response.size()));
-    return response;
+    return manager_.CancelScan(request);
   }
 
   // Run a one-page scan to completion, and verify that it was successful.
@@ -233,7 +223,7 @@ class ManagerTest : public testing::Test {
 
   std::vector<ScanStatusChangedSignal> signals_;
 
-  SaneClientFake* sane_client_;
+  std::unique_ptr<SaneClientFake> sane_client_;
   Manager manager_;
   MetricsLibraryMock* metrics_library_;  // Owned by manager_.
   base::ScopedTempDir temp_dir_;
@@ -241,11 +231,44 @@ class ManagerTest : public testing::Test {
   base::ScopedFD scan_fd_;
 };
 
+TEST_F(ManagerTest, ListScannerSuccess) {
+  brillo::ErrorPtr error;
+  sane_client_->AddDevice("TestName", "TestMaker", "TestModel", "TestType");
+  sane_client_->SetListDevicesResult(true);
+  std::optional<std::vector<ScannerInfo>> result =
+      sane_client_->ListDevices(&error);
+  EXPECT_EQ(error, nullptr);
+  EXPECT_NE(result, std::nullopt);
+  EXPECT_EQ(result.value().size(), 1);
+  sane_client_->RemoveDevice("TestName");
+  result = sane_client_->ListDevices(&error);
+  EXPECT_NE(result, std::nullopt);
+  EXPECT_EQ(result.value().size(), 0);
+  EXPECT_EQ(error, nullptr);
+}
+
+TEST_F(ManagerTest, ListScannersFailure) {
+  brillo::ErrorPtr error;
+  sane_client_->SetListDevicesResult(false);
+  std::optional<std::vector<ScannerInfo>> result =
+      sane_client_->ListDevices(&error);
+  EXPECT_EQ(result, std::nullopt);
+}
+
+TEST_F(ManagerTest, GetColorModeFromDevice) {
+  brillo::ErrorPtr error;
+  std::unique_ptr<SaneDeviceFake> device = std::make_unique<SaneDeviceFake>();
+  device->SetColorMode(&error, MODE_COLOR);
+  std::optional<ColorMode> color_mode = device->GetColorMode(&error);
+  EXPECT_NE(color_mode, std::nullopt);
+  EXPECT_EQ(color_mode.value(), MODE_COLOR);
+}
+
 TEST_F(ManagerTest, GetScannerCapabilitiesInvalidIppUsbFailure) {
-  std::vector<uint8_t> serialized;
+  ScannerCapabilities response;
   brillo::ErrorPtr error;
   EXPECT_FALSE(
-      manager_.GetScannerCapabilities(&error, "ippusb:invalid", &serialized));
+      manager_.GetScannerCapabilities(&error, "ippusb:invalid", &response));
   EXPECT_NE(error, nullptr);
   EXPECT_NE(error->GetMessage().find("ippusb"), std::string::npos);
 }
@@ -265,12 +288,8 @@ TEST_F(ManagerTest, GetScannerCapabilitiesSuccess) {
   device->SetValidOptionValues(opts);
   sane_client_->SetDeviceForName("TestDevice", std::move(device));
 
-  std::vector<uint8_t> serialized;
-  EXPECT_TRUE(
-      manager_.GetScannerCapabilities(nullptr, "TestDevice", &serialized));
-
   ScannerCapabilities caps;
-  EXPECT_TRUE(caps.ParseFromArray(serialized.data(), serialized.size()));
+  EXPECT_TRUE(manager_.GetScannerCapabilities(nullptr, "TestDevice", &caps));
 
   EXPECT_THAT(caps.resolutions(), ElementsAre(100, 200, 300, 600));
 
@@ -517,6 +536,7 @@ TEST_F(ManagerTest, StartScanFailToStart) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kIoError);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -538,6 +558,7 @@ TEST_F(ManagerTest, StartScanDeviceBusy) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kDeviceBusy);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -559,6 +580,7 @@ TEST_F(ManagerTest, StartScanAdfJammed) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kAdfJammed);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -580,6 +602,7 @@ TEST_F(ManagerTest, StartScanAdfEmpty) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kAdfEmpty);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -601,6 +624,7 @@ TEST_F(ManagerTest, StartScanFlatbedOpen) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kFlatbedOpen);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -611,6 +635,13 @@ TEST_F(ManagerTest, StartScanFlatbedOpen) {
 }
 
 TEST_F(ManagerTest, StartScanFailToRead) {
+  ScanParameters parameters = {
+      .format = kRGB,
+      .bytes_per_line = 4095,
+      .pixels_per_line = 1365,
+      .lines = 100,
+      .depth = 8,
+  };
   std::string contents;
   ASSERT_TRUE(base::ReadFileToString(base::FilePath("./test_images/color.pnm"),
                                      &contents));
@@ -618,10 +649,12 @@ TEST_F(ManagerTest, StartScanFailToRead) {
   std::unique_ptr<SaneDeviceFake> device = std::make_unique<SaneDeviceFake>();
   device->SetScanData({image_data});
   device->SetReadScanDataResult(SANE_STATUS_IO_ERROR);
+  device->SetScanParameters(parameters);
   sane_client_->SetDeviceForName("TestDevice", std::move(device));
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kIoError);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -632,11 +665,11 @@ TEST_F(ManagerTest, StartScanFailToRead) {
       GetNextImage(response.scan_uuid(), scan_fd_);
   EXPECT_TRUE(get_next_image_response.success());
 
-  EXPECT_EQ(signals_.size(), 1);
+  ASSERT_EQ(signals_.size(), 1);
   EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
   EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
-  EXPECT_NE(signals_[0].failure_reason(), "");
-  EXPECT_EQ(signals_[0].scan_failure_mode(), SCAN_FAILURE_MODE_UNKNOWN);
+  EXPECT_THAT(signals_[0].failure_reason(), ContainsRegex("Reading.*failed"));
+  EXPECT_EQ(signals_[0].scan_failure_mode(), SCAN_FAILURE_MODE_IO_ERROR);
 }
 
 TEST_F(ManagerTest, GetNextImageDeviceBusy) {
@@ -651,6 +684,7 @@ TEST_F(ManagerTest, GetNextImageDeviceBusy) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kDeviceBusy);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -661,7 +695,7 @@ TEST_F(ManagerTest, GetNextImageDeviceBusy) {
       GetNextImage(response.scan_uuid(), scan_fd_);
   EXPECT_TRUE(get_next_image_response.success());
 
-  EXPECT_EQ(signals_.size(), 1);
+  ASSERT_EQ(signals_.size(), 1);
   EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
   EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
   EXPECT_NE(signals_[0].failure_reason(), "");
@@ -680,6 +714,7 @@ TEST_F(ManagerTest, GetNextImageAdfJammed) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kAdfJammed);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -690,7 +725,7 @@ TEST_F(ManagerTest, GetNextImageAdfJammed) {
       GetNextImage(response.scan_uuid(), scan_fd_);
   EXPECT_TRUE(get_next_image_response.success());
 
-  EXPECT_EQ(signals_.size(), 1);
+  ASSERT_EQ(signals_.size(), 1);
   EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
   EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
   EXPECT_NE(signals_[0].failure_reason(), "");
@@ -709,6 +744,7 @@ TEST_F(ManagerTest, GetNextImageFlatbedOpen) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kFlatbedOpen);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -719,7 +755,7 @@ TEST_F(ManagerTest, GetNextImageFlatbedOpen) {
       GetNextImage(response.scan_uuid(), scan_fd_);
   EXPECT_TRUE(get_next_image_response.success());
 
-  EXPECT_EQ(signals_.size(), 1);
+  ASSERT_EQ(signals_.size(), 1);
   EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
   EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
   EXPECT_NE(signals_[0].failure_reason(), "");
@@ -738,6 +774,7 @@ TEST_F(ManagerTest, GetNextImageIoError) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kIoError);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -748,7 +785,7 @@ TEST_F(ManagerTest, GetNextImageIoError) {
       GetNextImage(response.scan_uuid(), scan_fd_);
   EXPECT_TRUE(get_next_image_response.success());
 
-  EXPECT_EQ(signals_.size(), 1);
+  ASSERT_EQ(signals_.size(), 1);
   EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
   EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
   EXPECT_NE(signals_[0].failure_reason(), "");
@@ -817,6 +854,7 @@ TEST_F(ManagerTest, GetNextImageNegativeWidth) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kUnknownScannerError);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -827,16 +865,13 @@ TEST_F(ManagerTest, GetNextImageNegativeWidth) {
 
   GetNextImageResponse get_next_image_response =
       GetNextImage(response.scan_uuid(), scan_fd_);
-  EXPECT_TRUE(get_next_image_response.success());
-  EXPECT_EQ(get_next_image_response.failure_reason(), "");
+  EXPECT_FALSE(get_next_image_response.success());
+  EXPECT_THAT(get_next_image_response.failure_reason(),
+              ContainsRegex("invalid width"));
   EXPECT_EQ(get_next_image_response.scan_failure_mode(),
-            SCAN_FAILURE_MODE_NO_FAILURE);
+            SCAN_FAILURE_MODE_UNKNOWN);
 
-  EXPECT_EQ(signals_.size(), 1);
-  EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
-  EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
-  EXPECT_THAT(signals_[0].failure_reason(), ContainsRegex("invalid width"));
-  EXPECT_EQ(signals_[0].scan_failure_mode(), SCAN_FAILURE_MODE_UNKNOWN);
+  EXPECT_EQ(signals_.size(), 0);
 }
 
 TEST_F(ManagerTest, GetNextImageExcessWidth) {
@@ -851,6 +886,7 @@ TEST_F(ManagerTest, GetNextImageExcessWidth) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kUnknownScannerError);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -861,22 +897,19 @@ TEST_F(ManagerTest, GetNextImageExcessWidth) {
 
   GetNextImageResponse get_next_image_response =
       GetNextImage(response.scan_uuid(), scan_fd_);
-  EXPECT_TRUE(get_next_image_response.success());
-  EXPECT_EQ(get_next_image_response.failure_reason(), "");
+  EXPECT_FALSE(get_next_image_response.success());
+  EXPECT_THAT(get_next_image_response.failure_reason(),
+              ContainsRegex("invalid width"));
   EXPECT_EQ(get_next_image_response.scan_failure_mode(),
-            SCAN_FAILURE_MODE_NO_FAILURE);
+            SCAN_FAILURE_MODE_UNKNOWN);
 
-  EXPECT_EQ(signals_.size(), 1);
-  EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
-  EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
-  EXPECT_THAT(signals_[0].failure_reason(), ContainsRegex("invalid width"));
-  EXPECT_EQ(signals_[0].scan_failure_mode(), SCAN_FAILURE_MODE_UNKNOWN);
+  EXPECT_EQ(signals_.size(), 0);
 }
 
-TEST_F(ManagerTest, GetNextImageInvalidHeight) {
+TEST_F(ManagerTest, GetNextImageExcessHeight) {
   ScanParameters parameters;
   parameters.format = kRGB;
-  parameters.bytes_per_line = 0x40000000 + (0x10 * 0x08);
+  parameters.bytes_per_line = 0x30;
   parameters.pixels_per_line = 0x10;
   parameters.lines = 0x02000000;
   parameters.depth = 8;
@@ -885,6 +918,7 @@ TEST_F(ManagerTest, GetNextImageInvalidHeight) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kUnknownScannerError);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -895,16 +929,45 @@ TEST_F(ManagerTest, GetNextImageInvalidHeight) {
 
   GetNextImageResponse get_next_image_response =
       GetNextImage(response.scan_uuid(), scan_fd_);
-  EXPECT_TRUE(get_next_image_response.success());
-  EXPECT_EQ(get_next_image_response.failure_reason(), "");
+  EXPECT_FALSE(get_next_image_response.success());
+  EXPECT_THAT(get_next_image_response.failure_reason(),
+              ContainsRegex("invalid height"));
   EXPECT_EQ(get_next_image_response.scan_failure_mode(),
-            SCAN_FAILURE_MODE_NO_FAILURE);
+            SCAN_FAILURE_MODE_UNKNOWN);
 
-  EXPECT_EQ(signals_.size(), 1);
-  EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
-  EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
-  EXPECT_THAT(signals_[0].failure_reason(), ContainsRegex("invalid height"));
-  EXPECT_EQ(signals_[0].scan_failure_mode(), SCAN_FAILURE_MODE_UNKNOWN);
+  EXPECT_EQ(signals_.size(), 0);
+}
+
+TEST_F(ManagerTest, GetNextImageZeroHeight) {
+  ScanParameters parameters;
+  parameters.format = kRGB;
+  parameters.bytes_per_line = 0x30;
+  parameters.pixels_per_line = 0x10;
+  parameters.lines = 0;
+  parameters.depth = 8;
+  SetUpTestDevice("TestDevice", {base::FilePath("./test_images/color.pnm")},
+                  parameters);
+
+  ExpectScanRequest(kOtherBackend);
+  ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kUnknownScannerError);
+  StartScanResponse response =
+      StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
+
+  EXPECT_EQ(response.state(), SCAN_STATE_IN_PROGRESS);
+  EXPECT_EQ(response.failure_reason(), "");
+  EXPECT_EQ(response.scan_failure_mode(), SCAN_FAILURE_MODE_NO_FAILURE);
+  EXPECT_NE(response.scan_uuid(), "");
+
+  GetNextImageResponse get_next_image_response =
+      GetNextImage(response.scan_uuid(), scan_fd_);
+  EXPECT_FALSE(get_next_image_response.success());
+  EXPECT_THAT(get_next_image_response.failure_reason(),
+              ContainsRegex("invalid height"));
+  EXPECT_EQ(get_next_image_response.scan_failure_mode(),
+            SCAN_FAILURE_MODE_UNKNOWN);
+
+  EXPECT_EQ(signals_.size(), 0);
 }
 
 TEST_F(ManagerTest, GetNextImageMismatchedSizes) {
@@ -919,6 +982,7 @@ TEST_F(ManagerTest, GetNextImageMismatchedSizes) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kUnknownScannerError);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -929,17 +993,13 @@ TEST_F(ManagerTest, GetNextImageMismatchedSizes) {
 
   GetNextImageResponse get_next_image_response =
       GetNextImage(response.scan_uuid(), scan_fd_);
-  EXPECT_TRUE(get_next_image_response.success());
-  EXPECT_EQ(get_next_image_response.failure_reason(), "");
-  EXPECT_EQ(get_next_image_response.scan_failure_mode(),
-            SCAN_FAILURE_MODE_NO_FAILURE);
-
-  EXPECT_EQ(signals_.size(), 1);
-  EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
-  EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
-  EXPECT_THAT(signals_[0].failure_reason(),
+  EXPECT_FALSE(get_next_image_response.success());
+  EXPECT_THAT(get_next_image_response.failure_reason(),
               ContainsRegex("bytes_per_line.*too small"));
-  EXPECT_EQ(signals_[0].scan_failure_mode(), SCAN_FAILURE_MODE_UNKNOWN);
+  EXPECT_EQ(get_next_image_response.scan_failure_mode(),
+            SCAN_FAILURE_MODE_UNKNOWN);
+
+  EXPECT_EQ(signals_.size(), 0);
 }
 
 TEST_F(ManagerTest, GetNextImageTooLarge) {
@@ -954,6 +1014,7 @@ TEST_F(ManagerTest, GetNextImageTooLarge) {
 
   ExpectScanRequest(kOtherBackend);
   ExpectScanFailure(kOtherBackend);
+  ExpectScanFailureReason(ScanJobFailureReason::kUnknownScannerError);
   StartScanResponse response =
       StartScan("TestDevice", MODE_COLOR, "Flatbed", IMAGE_FORMAT_PNG);
 
@@ -964,17 +1025,13 @@ TEST_F(ManagerTest, GetNextImageTooLarge) {
 
   GetNextImageResponse get_next_image_response =
       GetNextImage(response.scan_uuid(), scan_fd_);
-  EXPECT_TRUE(get_next_image_response.success());
-  EXPECT_EQ(get_next_image_response.failure_reason(), "");
-  EXPECT_EQ(get_next_image_response.scan_failure_mode(),
-            SCAN_FAILURE_MODE_NO_FAILURE);
-
-  EXPECT_EQ(signals_.size(), 1);
-  EXPECT_EQ(signals_[0].scan_uuid(), response.scan_uuid());
-  EXPECT_EQ(signals_[0].state(), SCAN_STATE_FAILED);
-  EXPECT_THAT(signals_[0].failure_reason(),
+  EXPECT_FALSE(get_next_image_response.success());
+  EXPECT_THAT(get_next_image_response.failure_reason(),
               ContainsRegex("scan buffer.*too large"));
-  EXPECT_EQ(signals_[0].scan_failure_mode(), SCAN_FAILURE_MODE_UNKNOWN);
+  EXPECT_EQ(get_next_image_response.scan_failure_mode(),
+            SCAN_FAILURE_MODE_UNKNOWN);
+
+  EXPECT_EQ(signals_.size(), 0);
 }
 
 TEST_F(ManagerTest, RemoveDupNoRepeats) {
@@ -1049,6 +1106,37 @@ TEST_F(ManagerTest, RemoveDupWithRepeats) {
   for (int s = 0; s < scanners_present.size(); s++) {
     EXPECT_EQ(scanners_present[s].name(), expected_present[s].name());
   }
+}
+
+TEST_F(ManagerTest, UsableScannerInfo) {
+  ScannerInfo scanner;
+  scanner.set_name(
+      "airscan:escl:Canon MF260 II Series:http://192.168.0.100/eSCL/");
+  scanner.set_manufacturer("CANON");
+  scanner.set_model("MF260 II Series");
+
+  EXPECT_TRUE(Manager::ScannerCanBeUsed(scanner));
+}
+
+TEST_F(ManagerTest, UnusableScannerInfo) {
+  ScannerInfo net_scanner;
+  net_scanner.set_name("pixma:MF260_192.168.0.100");
+  net_scanner.set_manufacturer("CANON");
+  net_scanner.set_model("MF260 II Series");
+
+  ScannerInfo usb_scanner;
+  usb_scanner.set_name("pixma:05d90023_265798");
+  usb_scanner.set_manufacturer("CANON");
+  usb_scanner.set_model("MF260 II Series");
+
+  ScannerInfo usb_scanner_variant;
+  usb_scanner_variant.set_name("pixma:05d90023_265798");
+  usb_scanner_variant.set_manufacturer("CANON");
+  usb_scanner_variant.set_model("MF 260 II Series");
+
+  EXPECT_FALSE(Manager::ScannerCanBeUsed(net_scanner));
+  EXPECT_FALSE(Manager::ScannerCanBeUsed(usb_scanner));
+  EXPECT_FALSE(Manager::ScannerCanBeUsed(usb_scanner_variant));
 }
 
 TEST(BackendFromDeviceName, IppUsbAndAirscan) {

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,13 +10,16 @@
 #include <vector>
 
 #include <base/check.h>
+#include <base/command_line.h>
 #include <base/files/file_path.h>
 #include <base/logging.h>
 #include <base/test/scoped_chromeos_version_info.h>
+#include <base/test/task_environment.h>
+#include <base/test/test_timeouts.h>
 #include <chromeos/chromeos-config/libcros_config/fake_cros_config.h>
 #include <fuzzer/FuzzedDataProvider.h>
 
-#include "diagnostics/common/file_test_utils.h"
+#include "diagnostics/base/file_test_utils.h"
 #include "diagnostics/cros_healthd/fetchers/system_fetcher.h"
 #include "diagnostics/cros_healthd/fetchers/system_fetcher_constants.h"
 #include "diagnostics/cros_healthd/system/mock_context.h"
@@ -56,13 +59,28 @@ void SetUpSystemFiles(const base::FilePath& root_dir,
   }
 }
 
+void OnGetSystemInfoResponse(
+    ash::cros_healthd::mojom::SystemResultPtr* response_update,
+    ash::cros_healthd::mojom::SystemResultPtr response) {
+  *response_update = std::move(response);
+}
+
 }  // namespace
 
 class Environment {
  public:
   Environment() {
     logging::SetMinLogLevel(logging::LOGGING_FATAL);  // Disable logging.
+    // Needed for TestTimeouts::Initialize().
+    base::CommandLine::Init(0, nullptr);
+    // Needed for SingleThreadTaskEnvironment.
+    // TestTimeouts::Initialize() should be called exactly once.
+    TestTimeouts::Initialize();
   }
+
+  // base::RunLoop requires a task environment.
+  base::test::SingleThreadTaskEnvironment task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 };
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
@@ -84,9 +102,14 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   SetUpSystemFiles(mock_context.root_dir(), &provider);
   mock_context.fake_system_config()->SetHasSkuNumber(true);
   mock_context.fake_system_config()->SetMarketingName("fake_marketing_name");
+  mock_context.fake_system_config()->SetOemName("fake_oem_name");
   mock_context.fake_system_config()->SetCodeName("fake_code_name");
-  SystemFetcher system_fetcher{&mock_context};
-  auto system_info = system_fetcher.FetchSystemInfo();
+
+  base::RunLoop run_loop;
+  ash::cros_healthd::mojom::SystemResultPtr result;
+  FetchSystemInfo(&mock_context,
+                  base::BindOnce(&OnGetSystemInfoResponse, &result));
+  run_loop.RunUntilIdle();
 
   return 0;
 }

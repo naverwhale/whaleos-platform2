@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <base/check_op.h>
@@ -22,9 +23,6 @@ namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kCrypto;
-static std::string ObjectID(const CertificateFile* c) {
-  return "(certificate_file)";
-}
 }  // namespace Logging
 
 const char CertificateFile::kDefaultRootDirectory[] =
@@ -33,11 +31,11 @@ const char CertificateFile::kPEMHeader[] = "-----BEGIN CERTIFICATE-----";
 const char CertificateFile::kPEMFooter[] = "-----END CERTIFICATE-----";
 
 CertificateFile::CertificateFile() : root_directory_(kDefaultRootDirectory) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
 }
 
 CertificateFile::~CertificateFile() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   if (!output_file_.empty()) {
     base::DeleteFile(output_file_);
   }
@@ -58,7 +56,7 @@ base::FilePath CertificateFile::CreatePEMFromStrings(
 }
 
 // static
-std::string CertificateFile::ExtractHexData(const std::string& pem_data) {
+std::string CertificateFile::ExtractHexData(const std::string_view pem_data) {
   bool found_header = false;
   bool found_footer = false;
   const auto input_lines = base::SplitString(

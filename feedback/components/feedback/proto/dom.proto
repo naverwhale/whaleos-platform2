@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,11 +9,12 @@ syntax = "proto2";
 
 option optimize_for = LITE_RUNTIME;
 
+option go_package = "chromiumos/tast/local/bundles/cros/feedback/proto";
+
 package userfeedback;
 
 // Data captured from HTMLDocument DOM object.
 message HtmlDocument {
-
   // The value of document.URL property.
   required string url = 1;
 
@@ -26,7 +27,6 @@ message HtmlDocument {
 
 // Data captured from HTMLElement DOM object.
 message HtmlElement {
-
   // The value of element.tagName property.
   required string tag_name = 1;
 
@@ -45,7 +45,6 @@ message HtmlElement {
 
 // Data captured from DOM Navigator object.
 message Navigator {
-
   // The value of 'navigator.appCodeName' property.
   optional string app_code_name = 1;
 
@@ -92,7 +91,6 @@ message Navigator {
 // A path in the HTML document between two elements, which are in the
 // ancestor-descendant relationship.
 message HtmlPath {
-
   // Ordered list of zero-based indices.
   // Empty path selects root element.
   // Non-negative index N selects (N+1)-th child.

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,8 @@ using brillo::Error;
 namespace {
 
 brillo::ErrorPtr GenerateNetworkError() {
-  base::Location loc("GenerateNetworkError", "error_test.cc", 15,
-                     ::base::GetProgramCounter());
+  base::Location loc = base::Location::CreateForTesting(
+      "GenerateNetworkError", "error_test.cc", 15, ::base::GetProgramCounter());
   return Error::Create(loc, "network", "not_found", "Resource not found");
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/macros.h>
+#include <base/functional/bind.h>
 #include <brillo/dbus/dbus_object.h>
 #include <brillo/dbus/dbus_object_test_helpers.h>
 #include <brillo/errors/error_codes.h>
@@ -174,8 +173,8 @@ class PropertyValidatorObserver {
  public:
   PropertyValidatorObserver()
       : validate_property_callback_(
-            base::Bind(&PropertyValidatorObserver::ValidateProperty,
-                       base::Unretained(this))) {}
+            base::BindRepeating(&PropertyValidatorObserver::ValidateProperty,
+                                base::Unretained(this))) {}
   PropertyValidatorObserver(const PropertyValidatorObserver&) = delete;
   PropertyValidatorObserver& operator=(const PropertyValidatorObserver&) =
       delete;
@@ -184,13 +183,14 @@ class PropertyValidatorObserver {
 
   MOCK_METHOD(bool, ValidateProperty, (brillo::ErrorPtr*, const T&));
 
-  const base::Callback<bool(brillo::ErrorPtr*, const T&)>&
+  const base::RepeatingCallback<bool(brillo::ErrorPtr*, const T&)>&
   validate_property_callback() const {
     return validate_property_callback_;
   }
 
  private:
-  base::Callback<bool(brillo::ErrorPtr*, const T&)> validate_property_callback_;
+  base::RepeatingCallback<bool(brillo::ErrorPtr*, const T&)>
+      validate_property_callback_;
 };
 
 TEST_F(ExportedPropertySetTest, UpdateNotifications) {

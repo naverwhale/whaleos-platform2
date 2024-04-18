@@ -1,25 +1,49 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <limits.h>
+#include <stdlib.h>
+
+#include <memory>
+#include <optional>
 #include <string>
 
+#include <base/cpu.h>
+#include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/strings/string_util.h>
+#include <chromeos/constants/vm_tools.h>
+#include <dbus/vm_concierge/dbus-constants.h>
+#include <vboot/crossystem.h>
+#include <libcrossystem/crossystem.h>
+#include <metrics/metrics_library.h>
 
+#include "vm_tools/common/naming.h"
 #include "vm_tools/common/pstore.h"
+#include "vm_tools/common/vm_id.h"
 #include "vm_tools/concierge/arc_vm.h"
+#include "vm_tools/concierge/balloon_policy.h"
+#include "vm_tools/concierge/byte_unit.h"
+#include "vm_tools/concierge/metrics/duration_recorder.h"
+#include "vm_tools/concierge/network/arc_network.h"
 #include "vm_tools/concierge/service.h"
-#include "vm_tools/concierge/shared_data.h"
+#include "vm_tools/concierge/service_common.h"
+#include "vm_tools/concierge/service_start_vm_helper.h"
 #include "vm_tools/concierge/vm_util.h"
+#include "vm_tools/concierge/vmm_swap_low_disk_policy.h"
+#include "vm_tools/concierge/vmm_swap_metrics.h"
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 
 namespace {
 
 // Android data directory.
 constexpr char kAndroidDataDir[] = "/run/arcvm/android-data";
+
+// Android stub volume directory for MyFiles and removable media.
+constexpr char kStubVolumeSharedDir[] = "/run/arcvm/media";
 
 // Path to the VM guest kernel.
 constexpr char kKernelPath[] = "/opt/google/vms/android/vmlinux";
@@ -27,102 +51,128 @@ constexpr char kKernelPath[] = "/opt/google/vms/android/vmlinux";
 // Path to the VM rootfs image file.
 constexpr char kRootfsPath[] = "/opt/google/vms/android/system.raw.img";
 
+// Path to the VM ramdisk file.
+constexpr char kRamdiskPath[] = "/opt/google/vms/android/ramdisk.img";
+
 // Path to the VM fstab file.
 constexpr char kFstabPath[] = "/run/arcvm/host_generated/fstab";
+
+// /home/root/<hash>/crosvm is bind-mounted to /run/daemon-store/crosvm on
+// sign-in.
+constexpr char kCryptohomeRoot[] = "/run/daemon-store/crosvm";
+constexpr char kPstoreExtension[] = ".pstore";
+constexpr char kVmmSwapUsageHistoryExtension[] = ".vmm_swap_history";
+
+// A feature name for enabling jemalloc multi-arena settings
+// in low memory devices.
+constexpr char kArcVmLowMemJemallocArenasFeatureName[] =
+    "CrOSLateBootArcVmLowMemJemallocArenas";
+
+// A feature name for enabling AAudio MMAP support in audio HAL
+constexpr char kArcVmAAudioMMAPFeatureName[] = "CrOSLateBootArcVmAAudioMMAP";
+
+// A feature name for using low latency (5ms) AAudio MMAP
+constexpr char kArcVmAAudioMMAPLowLatencyFeatureName[] =
+    "CrOSLateBootArcVmAAudioMMAPLowLatency";
+
+// The timeout in ms for LMKD to read from it's vsock connection to concierge.
+// 100ms is long enough to allow concierge to respond even under extreme system
+// load, but short enough that LMKD can still kill processes before the linux
+// OOM killer wakes up.
+constexpr uint32_t kLmkdVsockTimeoutMs = 100;
+
+// Needs to be const as libfeatures does pointers checking.
+const VariationsFeature kArcVmLowMemJemallocArenasFeature{
+    kArcVmLowMemJemallocArenasFeatureName, FEATURE_DISABLED_BY_DEFAULT};
+
+const VariationsFeature kArcVmAAudioMMAPFeature{kArcVmAAudioMMAPFeatureName,
+                                                FEATURE_ENABLED_BY_DEFAULT};
+
+const VariationsFeature kArcVmAAudioMMAPLowLatencyFeature{
+    kArcVmAAudioMMAPLowLatencyFeatureName, FEATURE_DISABLED_BY_DEFAULT};
+
+// Returns |image_path| on production. Returns a canonicalized path of the image
+// file when in dev mode.
+base::FilePath GetImagePath(const base::FilePath& image_path,
+                            bool is_dev_mode) {
+  if (!is_dev_mode)
+    return image_path;
+
+  // When in dev mode, the Android images might be on the stateful partition and
+  // |kRootfsPath| might be a symlink to the stateful partition image file. In
+  // that case, we need to use the resolved path so that brillo::SafeFD calls
+  // can handle the path without errors. The same is true for vendor.raw.image
+  // too. On the other hand, when in production mode, we should NEVER do the
+  // special handling. In production, the images files in /opt should NEVER ever
+  // be a symlink.
+
+  // We cannot use base::NormalizeFilePath because the function fails
+  // if |path| points to a directory (for Windows compatibility.)
+  char buf[PATH_MAX] = {};
+  if (realpath(image_path.value().c_str(), buf))
+    return base::FilePath(buf);
+  if (errno != ENOENT)
+    PLOG(WARNING) << "Failed to resolve " << image_path.value();
+  return image_path;
+}
+
+base::FilePath GetCryptohomePath(const std::string& owner_id) {
+  return base::FilePath(kCryptohomeRoot).Append(owner_id);
+}
+
+base::FilePath GetPstoreDest(const std::string& owner_id) {
+  return GetCryptohomePath(owner_id)
+      .Append(vm_tools::GetEncodedName(kArcVmName))
+      .AddExtension(kPstoreExtension);
+}
+
+base::FilePath GetVmmSwapUsageHistoryPath(const std::string& owner_id) {
+  return GetCryptohomePath(owner_id)
+      .Append(kArcVmName)
+      .AddExtension(kVmmSwapUsageHistoryExtension);
+}
 
 // Returns true if the path is a valid demo image path.
 bool IsValidDemoImagePath(const base::FilePath& path) {
   // A valid demo image path looks like:
   //   /run/imageloader/demo-mode-resources/<version>/android_demo_apps.squash
-  std::vector<std::string> components;
-  path.GetComponents(&components);
-  // TODO(hashimoto): Replace components[4] != ".." with a more strict check.
-  // b/219677829
+  //   <version> part looks like 0.12.34.56 ("[0-9]+(.[0-9]+){0,3}" in regex).
+  std::vector<std::string> components = path.GetComponents();
   return components.size() == 6 && components[0] == "/" &&
          components[1] == "run" && components[2] == "imageloader" &&
-         components[3] == "demo-mode-resources" && components[4] != ".." &&
+         components[3] == "demo-mode-resources" &&
+         base::ContainsOnlyChars(components[4], "0123456789.") &&
+         !base::StartsWith(components[4], ".") &&
          components[5] == "android_demo_apps.squash";
 }
 
 // Returns true if the path is a valid data image path.
 bool IsValidDataImagePath(const base::FilePath& path) {
-  // A valid data image path looks like: /home/root/<hash>/crosvm/YXJjdm0=.img.
-  std::vector<std::string> components;
-  path.GetComponents(&components);
-  return components.size() == 6 && components[0] == "/" &&
-         components[1] == "home" && components[2] == "root" &&
-         base::ContainsOnlyChars(components[3], "0123456789abcdef") &&
-         components[4] == "crosvm" && components[5] == "YXJjdm0=.img";
+  std::vector<std::string> components = path.GetComponents();
+  // A disk image created by concierge:
+  // /run/daemon-store/crosvm/<hash>/YXJjdm0=.img
+  if (components.size() == 6 && components[0] == "/" &&
+      components[1] == "run" && components[2] == "daemon-store" &&
+      components[3] == "crosvm" &&
+      base::ContainsOnlyChars(components[4], "0123456789abcdef") &&
+      components[5] == vm_tools::GetEncodedName(kArcVmName) + ".img")
+    return true;
+  // An LVM block device:
+  // /dev/mapper/vm/dmcrypt-<hash>-arcvm
+  if (components.size() == 5 && components[0] == "/" &&
+      components[1] == "dev" && components[2] == "mapper" &&
+      components[3] == "vm" && base::StartsWith(components[4], "dmcrypt-") &&
+      base::EndsWith(components[4], "-arcvm"))
+    return true;
+  return false;
 }
 
 // TODO(hashimoto): Move VM configuration logic from chrome to concierge and
 // remove this function. b/219677829
 // Returns true if the StartArcVmRequest contains valid ARCVM config values.
 bool ValidateStartArcVmRequest(StartArcVmRequest* request) {
-  // List of allowed kernel parameters.
-  const std::set<std::string> kAllowedKernelParams = {
-      "androidboot.arc_generate_pai=1",
-      "androidboot.arcvm_mount_debugfs=1",
-      "androidboot.container=1",
-      "androidboot.disable_download_provider=1",
-      "androidboot.disable_media_store_maintenance=1",
-      "androidboot.hardware=bertha",
-      "androidboot.vshd_service_override=vshd_for_test",
-      "init=/init",
-      "root=/dev/vda",
-      "rw",
-  };
-  // List of allowed kernel parameter prefixes.
-  const std::vector<std::string> kAllowedKernelParamPrefixes = {
-      "androidboot.arc_custom_tabs=",
-      "androidboot.arc_dalvik_memory_profile=",
-      "androidboot.arc_file_picker=",
-      "androidboot.arcvm.logd.size=",
-      "androidboot.arcvm_metrics_mem_psi_period=",
-      "androidboot.arcvm_ureadahead_mode=",
-      "androidboot.arcvm_virtio_blk_data=",
-      "androidboot.chromeos_channel=",
-      "androidboot.dev_mode=",
-      "androidboot.disable_runas=",
-      "androidboot.disable_system_default_app=",
-      "androidboot.enable_notifications_refresh=",
-      "androidboot.host_is_in_vm=",
-      "androidboot.iioservice_present=",
-      "androidboot.keyboard_shortcut_helper_integration=",
-      "androidboot.lcd_density=",
-      "androidboot.native_bridge=",
-      "androidboot.play_store_auto_update=",
-      "androidboot.usap_profile=",
-      "androidboot.zram_size=",
-      // TODO(hashimoto): This param was removed in R98. Remove this.
-      "androidboot.image_copy_paste_compat=",
-  };
-  // Filter kernel params.
-  const std::vector<std::string> params(request->params().begin(),
-                                        request->params().end());
-  request->clear_params();
-  for (const auto& param : params) {
-    if (kAllowedKernelParams.count(param) != 0) {
-      request->add_params(param);
-      continue;
-    }
-
-    auto it = std::find_if(kAllowedKernelParamPrefixes.begin(),
-                           kAllowedKernelParamPrefixes.end(),
-                           [&param](const std::string& prefix) {
-                             return base::StartsWith(param, prefix);
-                           });
-    if (it != kAllowedKernelParamPrefixes.end()) {
-      request->add_params(param);
-      continue;
-    }
-
-    LOG(WARNING) << param << " was removed because it doesn't match with any "
-                 << "allowed param or prefix";
-  }
-
   // Validate disks.
-  constexpr char kEmptyDiskPath[] = "/dev/null";
+  static constexpr char kEmptyDiskPath[] = "/dev/null";
   if (request->disks().size() < 1 || request->disks().size() > 4) {
     LOG(ERROR) << "Invalid number of disks: " << request->disks().size();
     return false;
@@ -148,69 +198,175 @@ bool ValidateStartArcVmRequest(StartArcVmRequest* request) {
     return false;
   }
   // Disk #3 must be a valid data image path or /dev/null.
-  if (request->disks().size() >= 4 &&
-      !IsValidDataImagePath(base::FilePath(request->disks()[3].path())) &&
-      request->disks()[3].path() != kEmptyDiskPath) {
-    LOG(ERROR) << "Disk #3 has invalid path: " << request->disks()[3].path();
-    return false;
+  if (request->disks().size() >= kDataDiskIndex + 1) {
+    const std::string& disk_path = request->disks()[kDataDiskIndex].path();
+    if (!IsValidDataImagePath(base::FilePath(disk_path)) &&
+        disk_path != kEmptyDiskPath) {
+      LOG(ERROR) << "Disk #3 has invalid path: " << disk_path;
+      return false;
+    }
+    LOG(INFO) << "Android /data disk path: " << disk_path;
   }
   return true;
 }
 
+// Returns whether AAudio MMAP feature should be enabled based on the flag.
+// In dev mode, it is always enabled.
+bool ShouldEnableAAudioMMAP(bool is_feature_enabled, bool is_dev_mode) {
+  return is_dev_mode || is_feature_enabled;
+}
+
+// Returns the period size to use for AAudio MMAP.
+// - If low latency is enabled and CPU is supported, use 256 frames which has
+//   lower latency but may cause audio glitches.
+// - If not, use 512 frames.
+int GetAAudioMMAPPeriodSize(bool is_low_latency_enabled) {
+  // Support any CPU that is not Celeron or Pentium.
+  const std::string cpu_model_name =
+      base::ToLowerASCII(base::CPU().cpu_brand());
+  const bool supported_cpu =
+      (cpu_model_name.find("celeron") == std::string::npos &&
+       cpu_model_name.find("pentium") == std::string::npos);
+  return is_low_latency_enabled && supported_cpu ? 256 : 512;
+}
+
+// This function boosts the arcvm and arcvm-vcpus cgroups, by applying the
+// cpu.uclamp.min boost for all the vcpus and crosvm services and enabling the
+// latency_sensitive attribute.
+// Appropriate boost is required for the little.BIG architecture, to reduce
+// latency and improve general ARCVM experience. b/217825939
+bool BoostArcVmCgroups(double boost_value) {
+  bool ret = true;
+  const base::FilePath arcvm_cgroup = base::FilePath(kArcvmCpuCgroup);
+  const base::FilePath arcvm_vcpu_cgroup = base::FilePath(kArcvmVcpuCpuCgroup);
+
+  if (!UpdateCpuLatencySensitive(arcvm_cgroup, true))
+    ret = false;
+
+  if (!UpdateCpuLatencySensitive(arcvm_vcpu_cgroup, true))
+    ret = false;
+
+  if (!UpdateCpuUclampMin(arcvm_cgroup, boost_value))
+    ret = false;
+
+  if (!UpdateCpuUclampMin(arcvm_vcpu_cgroup, boost_value))
+    ret = false;
+
+  return ret;
+}
+
 }  // namespace
 
-std::unique_ptr<dbus::Response> Service::StartArcVm(
-    dbus::MethodCall* method_call) {
+void Service::StartArcVm(
+    std::unique_ptr<brillo::dbus_utils::DBusMethodResponse<
+        vm_tools::concierge::StartVmResponse>> response_sender,
+    const vm_tools::concierge::StartArcVmRequest& request) {
   LOG(INFO) << "Received StartArcVm request";
-  std::unique_ptr<dbus::Response> dbus_response(
-      dbus::Response::FromMethodCall(method_call));
-  dbus::MessageReader reader(method_call);
-  dbus::MessageWriter writer(dbus_response.get());
-  StartArcVmRequest request;
-  StartVmResponse response;
-  auto helper_result = StartVmHelper<StartArcVmRequest>(
-      method_call, &reader, &writer, true /* allow_zero_cpus */);
-  if (!helper_result) {
-    return dbus_response;
-  }
-  std::tie(request, response) = *helper_result;
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
+  StartVmResponse response;
+  // We change to a success status later if necessary.
+  response.set_status(VM_STATUS_FAILURE);
+
+  if (!CheckStartVmPreconditions(request, &response)) {
+    response_sender->Return(response);
+    return;
+  }
+
+  StartArcVmInternal(request, response);
+  response_sender->Return(response);
+}
+
+StartVmResponse Service::StartArcVmInternal(StartArcVmRequest request,
+                                            StartVmResponse& response) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   VmInfo* vm_info = response.mutable_vm_info();
   vm_info->set_vm_type(VmInfo::ARC_VM);
+
+  // Log how long it takes to start the VM.
+  metrics::DurationRecorder duration_recorder(
+      raw_ref<MetricsLibraryInterface>::from_ptr(metrics_.get()),
+      apps::VmType::ARCVM, metrics::DurationRecorder::Event::kVmStart);
 
   if (request.disks_size() > kMaxExtraDisks) {
     LOG(ERROR) << "Rejecting request with " << request.disks_size()
                << " extra disks";
 
     response.set_failure_reason("Too many extra disks");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   // TODO(hashimoto): Move VM configuration logic from chrome to concierge and
   // remove this check. b/219677829
   if (!ValidateStartArcVmRequest(&request)) {
     response.set_failure_reason("Invalid request");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   std::vector<Disk> disks;
+  // Exists just to keep FDs around for crosvm to inherit
+  std::vector<brillo::SafeFD> owned_fds;
+  auto root_fd = brillo::SafeFD::Root();
+
+  if (brillo::SafeFD::IsError(root_fd.second)) {
+    LOG(ERROR) << "Could not open root directory: "
+               << static_cast<int>(root_fd.second);
+    response.set_failure_reason("Could not open root directory");
+    return response;
+  }
+
   // The rootfs can be treated as a disk as well and needs to be added before
   // other disks.
-  Disk::Config config{};
-  config.o_direct = false;
-  config.writable = request.rootfs_writable();
-  disks.push_back(Disk(base::FilePath(kRootfsPath), config));
-  for (const auto& disk : request.disks()) {
-    if (!base::PathExists(base::FilePath(disk.path()))) {
-      LOG(ERROR) << "Missing disk path: " << disk.path();
+  Disk rootdisk{.writable = request.rootfs_writable(),
+                .o_direct = request.rootfs_o_direct()};
+  const size_t rootfs_block_size = request.rootfs_block_size();
+  if (rootfs_block_size) {
+    rootdisk.block_size = rootfs_block_size;
+  }
+  const bool is_dev_mode = (VbGetSystemPropertyInt("cros_debug") == 1);
+  auto rootfsPath = GetImagePath(base::FilePath(kRootfsPath), is_dev_mode);
+  auto failure_reason =
+      ConvertToFdBasedPath(root_fd.first, &rootfsPath,
+                           rootdisk.writable ? O_RDWR : O_RDONLY, owned_fds);
+  if (!failure_reason.empty()) {
+    LOG(ERROR) << "Could not open rootfs image" << rootfsPath;
+    response.set_failure_reason("Rootfs path does not exist");
+    return response;
+  }
+  rootdisk.path = rootfsPath;
+  disks.push_back(rootdisk);
+
+  for (const auto& d : request.disks()) {
+    Disk disk{.path = GetImagePath(base::FilePath(d.path()), is_dev_mode),
+              .writable = d.writable(),
+              .o_direct = d.o_direct()};
+    if (!base::PathExists(disk.path)) {
+      LOG(ERROR) << "Missing disk path: " << disk.path;
       response.set_failure_reason("One or more disk paths do not exist");
-      writer.AppendProtoAsArrayOfBytes(response);
-      return dbus_response;
+      return response;
     }
-    config.writable = disk.writable();
-    disks.push_back(Disk(base::FilePath(disk.path()), config));
+    const size_t block_size = d.block_size();
+    if (block_size) {
+      disk.block_size = block_size;
+    }
+    failure_reason =
+        ConvertToFdBasedPath(root_fd.first, &disk.path,
+                             disk.writable ? O_RDWR : O_RDONLY, owned_fds);
+
+    if (!failure_reason.empty()) {
+      LOG(ERROR) << "Could not open disk file";
+      response.set_failure_reason(failure_reason);
+      return response;
+    }
+
+    disks.push_back(disk);
+  }
+
+  base::FilePath data_disk_path;
+  if (request.disks().size() > kDataDiskIndex) {
+    const std::string disk_path = request.disks()[kDataDiskIndex].path();
+    if (IsValidDataImagePath(base::FilePath(disk_path)))
+      data_disk_path = base::FilePath(disk_path);
   }
 
   // Create the runtime directory.
@@ -221,8 +377,7 @@ std::unique_ptr<dbus::Response> Service::StartArcVm(
 
     response.set_failure_reason(
         "Internal error: unable to create runtime directory");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   // Allocate resources for the VM.
@@ -231,19 +386,16 @@ std::unique_ptr<dbus::Response> Service::StartArcVm(
     LOG(ERROR) << "Unable to allocate vsock context id";
 
     response.set_failure_reason("Unable to allocate vsock cid");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
   vm_info->set_cid(vsock_cid);
 
-  std::unique_ptr<patchpanel::Client> network_client =
-      patchpanel::Client::New(bus_);
-  if (!network_client) {
-    LOG(ERROR) << "Unable to open networking service client";
+  std::unique_ptr<ArcNetwork> network = ArcNetwork::Create(bus_, vsock_cid);
+  if (!network) {
+    LOG(ERROR) << "Unable to open networking service";
 
-    response.set_failure_reason("Unable to open network service client");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    response.set_failure_reason("Unable to open network service");
+    return response;
   }
 
   // Map the chronos user (1000) and the chronos-access group (1001) to the
@@ -257,50 +409,103 @@ std::unique_ptr<dbus::Response> Service::StartArcVm(
     LOG(ERROR) << "Unable to start shared directory server";
 
     response.set_failure_reason("Unable to start shared directory server");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   uint32_t seneschal_server_handle = server_proxy->handle();
   vm_info->set_seneschal_server_handle(seneschal_server_handle);
 
-  // Build the plugin params.
-  std::vector<std::string> params(
-      std::make_move_iterator(request.mutable_params()->begin()),
-      std::make_move_iterator(request.mutable_params()->end()));
-  params.emplace_back(base::StringPrintf("androidboot.seneschal_server_port=%d",
-                                         seneschal_server_port));
+  crossystem::Crossystem cros_system;
+  std::vector<std::string> params =
+      ArcVm::GetKernelParams(cros_system, request, seneschal_server_port);
 
   // Start the VM and build the response.
   ArcVmFeatures features;
   features.rootfs_writable = request.rootfs_writable();
   features.use_dev_conf = !request.ignore_dev_conf();
+  features.low_mem_jemalloc_arenas_enabled =
+      feature::PlatformFeatures::Get()->IsEnabledBlocking(
+          kArcVmLowMemJemallocArenasFeature);
 
-  if (request.has_balloon_policy()) {
-    const auto& params = request.balloon_policy();
-    features.balloon_policy_params = (LimitCacheBalloonPolicy::Params){
-        .reclaim_target_cache = params.reclaim_target_cache(),
-        .critical_target_cache = params.critical_target_cache(),
-        .moderate_target_cache = params.moderate_target_cache()};
+  // If the VmMemoryManagementService is active and initialized, then ARC should
+  // connect to it instead of the normal lmkd vsock port.
+  features.use_vm_memory_management_client =
+      vm_memory_management_service_ != nullptr;
+  if (features.use_vm_memory_management_client) {
+    params.emplace_back(base::StringPrintf(
+        "androidboot.lmkd.use_vm_memory_management_client=%s", "true"));
+    params.emplace_back(
+        base::StringPrintf("androidboot.lmkd.vm_memory_management_kill_"
+                           "decision_timeout_ms=%" PRId64,
+                           arc_kill_decision_timeout_.InMilliseconds()));
+    params.emplace_back(base::StringPrintf(
+        "androidboot.lmkd.vm_memory_management_reclaim_port=%d",
+        kVmMemoryManagementReclaimServerPort));
+    params.emplace_back(base::StringPrintf(
+        "androidboot.lmkd.vm_memory_management_kills_port=%d",
+        kVmMemoryManagementKillsServerPort));
+  } else {
+    params.emplace_back(base::StringPrintf("androidboot.lmkd.vsock_timeout=%d",
+                                           kLmkdVsockTimeoutMs));
   }
+
+  if (ShouldEnableAAudioMMAP(
+          feature::PlatformFeatures::Get()->IsEnabledBlocking(
+              kArcVmAAudioMMAPFeature),
+          is_dev_mode)) {
+    params.emplace_back("androidboot.audio.aaudio_mmap_enabled=1");
+    bool low_latency_enabled =
+        feature::PlatformFeatures::Get()->IsEnabledBlocking(
+            kArcVmAAudioMMAPLowLatencyFeature);
+    params.emplace_back(
+        base::StringPrintf("androidboot.audio.aaudio_mmap_period_size=%d",
+                           GetAAudioMMAPPeriodSize(low_latency_enabled)));
+  }
+
+  // Workaround for slow vm-host IPC when recording video.
+  params.emplace_back("androidboot.camera.async_process_capture_request=true");
+
+  const auto pstore_path = GetPstoreDest(request.owner_id());
 
   base::FilePath data_dir = base::FilePath(kAndroidDataDir);
   if (!base::PathExists(data_dir)) {
     LOG(WARNING) << "Android data directory does not exist";
 
     response.set_failure_reason("Android data directory does not exist");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   VmId vm_id(request.owner_id(), request.name());
   SendVmStartingUpSignal(vm_id, *vm_info);
 
   const std::vector<uid_t> privileged_quota_uids = {0};  // Root is privileged.
-  std::string shared_data = CreateSharedDataParam(data_dir, "_data", true,
-                                                  false, privileged_quota_uids);
-  std::string shared_data_media = CreateSharedDataParam(
-      data_dir, "_data_media", false, true, privileged_quota_uids);
+  SharedDataParam shared_data{.data_dir = data_dir,
+                              .tag = "_data",
+                              .uid_map = kAndroidUidMap,
+                              .gid_map = kAndroidGidMap,
+                              .enable_caches = SharedDataParam::Cache::kAlways,
+                              .ascii_casefold = false,
+                              .posix_acl = true,
+                              .privileged_quota_uids = privileged_quota_uids};
+  SharedDataParam shared_data_media{
+      .data_dir = data_dir,
+      .tag = "_data_media",
+      .uid_map = kAndroidUidMap,
+      .gid_map = kAndroidGidMap,
+      .enable_caches = SharedDataParam::Cache::kAlways,
+      .ascii_casefold = true,
+      .posix_acl = true,
+      .privileged_quota_uids = privileged_quota_uids};
+
+  const base::FilePath stub_dir(kStubVolumeSharedDir);
+  SharedDataParam shared_stub{.data_dir = stub_dir,
+                              .tag = "stub",
+                              .uid_map = kAndroidUidMap,
+                              .gid_map = kAndroidGidMap,
+                              .enable_caches = SharedDataParam::Cache::kAuto,
+                              .ascii_casefold = true,
+                              .posix_acl = false,
+                              .privileged_quota_uids = privileged_quota_uids};
 
   // TOOD(kansho): |non_rt_cpus_num|, |rt_cpus_num| and |affinity|
   // should be passed from chrome instead of |enable_rt_vcpu|.
@@ -308,70 +513,142 @@ std::unique_ptr<dbus::Response> Service::StartArcVm(
   // By default we don't request any RT CPUs
   ArcVmCPUTopology topology(request.cpus(), 0);
 
-  if (request.enable_rt_vcpu()) {
-    // We create only 1 RT VCPU for the time being
+  // We create only 1 RT VCPU for the time being
+  if (request.enable_rt_vcpu())
     topology.SetNumRTCPUs(1);
-    topology.CreateCPUAffinity();
 
+  topology.CreateCPUAffinity();
+
+  if (request.enable_rt_vcpu()) {
     params.emplace_back("isolcpus=" + topology.RTCPUMask());
     params.emplace_back("androidboot.rtcpus=" + topology.RTCPUMask());
     params.emplace_back("androidboot.non_rtcpus=" + topology.NonRTCPUMask());
   }
 
+  params.emplace_back("ramoops.record_size=" +
+                      std::to_string(kArcVmRamoopsRecordSize));
+  params.emplace_back("ramoops.console_size=" +
+                      std::to_string(kArcVmRamoopsConsoleSize));
+  params.emplace_back("ramoops.ftrace_size=" +
+                      std::to_string(kArcVmRamoopsFtraceSize));
+  params.emplace_back("ramoops.pmsg_size=" +
+                      std::to_string(kArcVmRamoopsPmsgSize));
+  params.emplace_back("ramoops.dump_oops=1");
+
+  // Customize cache size of squashfs metadata for faster guest OS
+  // boot/provisioning.
+  params.emplace_back("squashfs.cached_blks=20");
+
   VmBuilder vm_builder;
   vm_builder.AppendDisks(std::move(disks))
       .SetCpus(topology.NumCPUs())
       .AppendKernelParam(base::JoinString(params, " "))
-      .AppendCustomParam("--android-fstab", kFstabPath)
-      .AppendCustomParam("--pstore",
-                         base::StringPrintf("path=%s,size=%d", kArcVmPstorePath,
-                                            kArcVmPstoreSize))
+      .AppendCustomParam("--vcpu-cgroup-path",
+                         base::FilePath(kArcvmVcpuCpuCgroup).value())
+      .AppendCustomParam(
+          "--pstore",
+          base::StringPrintf("path=%s,size=%" PRId64,
+                             pstore_path.value().c_str(), kArcVmRamoopsSize))
       .AppendSharedDir(shared_data)
       .AppendSharedDir(shared_data_media)
-      .EnableSmt(false /* enable */);
+      .AppendSharedDir(shared_stub)
+      .EnableSmt(false /* enable */)
+      .EnablePerVmCoreScheduling(request.use_per_vm_core_scheduling())
+      .SetWaylandSocket(request.vm().wayland_server());
+
+  if (USE_ARCVM_GKI) {
+    vm_builder.AppendCustomParam("--initrd", kRamdiskPath);
+    // This is set to 0 by the GKI kernel so we set back to the default.
+    vm_builder.AppendKernelParam("8250.nr_uarts=4");
+  } else {
+    vm_builder.AppendCustomParam("--android-fstab", kFstabPath);
+  }
 
   if (request.enable_rt_vcpu()) {
     vm_builder.AppendCustomParam("--rt-cpus", topology.RTCPUMask());
-    if (!topology.AffinityMask().empty())
-      vm_builder.AppendCustomParam("--cpu-affinity", topology.AffinityMask());
   }
 
-  if (!topology.CapacityMask().empty()) {
+  if (!topology.IsSymmetricCPU() && !topology.AffinityMask().empty()) {
+    vm_builder.AppendCustomParam("--cpu-affinity", topology.AffinityMask());
+  }
+
+  if (!topology.IsSymmetricCPU() && !topology.CapacityMask().empty()) {
     vm_builder.AppendCustomParam("--cpu-capacity", topology.CapacityMask());
+    // Rise the uclamp_min value of the top-app in the ARCVM. This is a
+    // performance tuning for games on big.LITTLE platform and Capacity
+    // Aware Scheduler (CAS) on Linux.
+    vm_builder.AppendKernelParam(base::StringPrintf(
+        "androidboot.arc_top_app_uclamp_min=%d", topology.TopAppUclampMin()));
   }
 
-  if (!topology.PackageMask().empty()) {
+  if (!topology.IsSymmetricCPU() && !topology.PackageMask().empty()) {
     for (auto& package : topology.PackageMask()) {
       vm_builder.AppendCustomParam("--cpu-cluster", package);
     }
+  }
+
+  if (request.lock_guest_memory()) {
+    vm_builder.AppendCustomParam("--lock-guest-memory", "");
   }
 
   if (request.use_hugepages()) {
     vm_builder.AppendCustomParam("--hugepages", "");
   }
 
-  const uint32_t memory_mib = request.memory_mib();
-  if (memory_mib > 0) {
-    vm_builder.SetMemory(std::to_string(memory_mib));
-  } else {
-    vm_builder.SetMemory(GetVmMemoryMiB());
-  }
+  const int64_t memory_mib =
+      request.memory_mib() > 0 ? request.memory_mib() : GetVmMemoryMiB();
+  vm_builder.SetMemory(std::to_string(memory_mib));
 
   /* Enable THP if the VM has at least 7G of memory */
   if (base::SysInfo::AmountOfPhysicalMemoryMB() >= 7 * 1024) {
     vm_builder.AppendCustomParam("--hugepages", "");
   }
 
-  auto vm =
-      ArcVm::Create(base::FilePath(kKernelPath), vsock_cid,
-                    std::move(network_client), std::move(server_proxy),
-                    std::move(runtime_dir), features, std::move(vm_builder));
+  base::FilePath swap_dir = GetCryptohomePath(request.owner_id());
+  std::unique_ptr<VmmSwapLowDiskPolicy> vmm_swap_low_disk_policy =
+      std::make_unique<VmmSwapLowDiskPolicy>(
+          swap_dir,
+          raw_ref<spaced::DiskUsageProxy>::from_ptr(disk_usage_proxy_.get()));
+  base::FilePath vmm_swap_usage_path =
+      GetVmmSwapUsageHistoryPath(request.owner_id());
+
+  if (request.enable_vmm_swap()) {
+    vm_builder.SetVmmSwapDir(swap_dir);
+  }
+
+  base::RepeatingCallback<void(SwappingState)> vm_swapping_notify_callback =
+      base::BindRepeating(&Service::NotifyVmSwapping,
+                          weak_ptr_factory_.GetWeakPtr(), vm_id);
+
+  auto vm = ArcVm::Create(ArcVm::Config{
+      .kernel = base::FilePath(kKernelPath),
+      .vsock_cid = vsock_cid,
+      .network = std::move(network),
+      .seneschal_server_proxy = std::move(server_proxy),
+      .is_vmm_swap_enabled = request.enable_vmm_swap(),
+      .vmm_swap_metrics = std::make_unique<VmmSwapMetrics>(
+          apps::VmType::ARCVM,
+          raw_ref<MetricsLibraryInterface>::from_ptr(metrics_.get())),
+      .vmm_swap_low_disk_policy = std::move(vmm_swap_low_disk_policy),
+      .vmm_swap_tbw_policy =
+          raw_ref<VmmSwapTbwPolicy>::from_ptr(vmm_swap_tbw_policy_.get()),
+      .vmm_swap_usage_path = vmm_swap_usage_path,
+      .vm_swapping_notify_callback = std::move(vm_swapping_notify_callback),
+      .virtio_blk_metrics = std::make_unique<VirtioBlkMetrics>(
+          raw_ref<MetricsLibraryInterface>::from_ptr(metrics_.get())),
+      .balloon_metrics = std::make_unique<mm::BalloonMetrics>(
+          apps::VmType::ARCVM,
+          raw_ref<MetricsLibraryInterface>::from_ptr(metrics_.get())),
+      .guest_memory_size = MiB(memory_mib),
+      .runtime_dir = std::move(runtime_dir),
+      .data_disk_path = std::move(data_disk_path),
+      .features = features,
+      .vm_builder = std::move(vm_builder)});
   if (!vm) {
     LOG(ERROR) << "Unable to start VM";
 
     response.set_failure_reason("Unable to start VM");
-    writer.AppendProtoAsArrayOfBytes(response);
-    return dbus_response;
+    return response;
   }
 
   // ARCVM is ready.
@@ -381,13 +658,54 @@ std::unique_ptr<dbus::Response> Service::StartArcVm(
   response.set_status(VM_STATUS_RUNNING);
   vm_info->set_ipv4_address(vm->IPv4Address());
   vm_info->set_pid(vm->pid());
-  writer.AppendProtoAsArrayOfBytes(response);
-
-  SendVmStartedSignal(vm_id, *vm_info, response.status());
 
   vms_[vm_id] = std::move(vm);
-  return dbus_response;
+
+  HandleVmStarted(vm_id, apps::VmType::ARCVM, *vm_info,
+                  vms_[vm_id]->GetVmSocketPath(), response.status());
+
+  double vm_boost = topology.GlobalVMBoost();
+  if (vm_boost > 0.0) {
+    if (!BoostArcVmCgroups(vm_boost))
+      LOG(WARNING) << "Failed to boost the ARCVM to " << vm_boost;
+  }
+
+  return response;
 }
 
-}  // namespace concierge
-}  // namespace vm_tools
+ArcVmCompleteBootResponse Service::ArcVmCompleteBoot(
+    const ArcVmCompleteBootRequest& request) {
+  LOG(INFO) << "Received request: " << __func__;
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  ArcVmCompleteBootResponse response;
+
+  VmId vm_id(request.owner_id(), kArcVmName);
+  if (!CheckVmNameAndOwner(request, response)) {
+    response.set_result(ArcVmCompleteBootResult::BAD_REQUEST);
+    return response;
+  }
+
+  auto iter = FindVm(vm_id);
+  if (iter == vms_.end()) {
+    LOG(ERROR) << "Unable to locate ArcVm instance";
+    response.set_result(ArcVmCompleteBootResult::ARCVM_NOT_FOUND);
+    return response;
+  }
+
+  ArcVm* vm = dynamic_cast<ArcVm*>(iter->second.get());
+  vm->HandleUserlandReady();
+
+  // Notify the VM guest userland ready
+  SendVmGuestUserlandReadySignal(vm_id,
+                                 GuestUserlandReady::ARC_BRIDGE_CONNECTED);
+
+  if (vm_memory_management_service_) {
+    vm_memory_management_service_->NotifyVmBootComplete(vm->GetInfo().cid);
+  }
+
+  response.set_result(ArcVmCompleteBootResult::SUCCESS);
+  return response;
+}
+
+}  // namespace vm_tools::concierge

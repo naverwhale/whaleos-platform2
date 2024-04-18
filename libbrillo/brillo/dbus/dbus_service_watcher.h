@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/brillo_export.h>
@@ -31,7 +30,7 @@ class BRILLO_EXPORT DBusServiceWatcher {
  public:
   DBusServiceWatcher(scoped_refptr<::dbus::Bus> bus,
                      const std::string& connection_name,
-                     const base::Closure& on_connection_vanish);
+                     const base::RepeatingClosure& on_connection_vanish);
   DBusServiceWatcher(const DBusServiceWatcher&) = delete;
   DBusServiceWatcher& operator=(const DBusServiceWatcher&) = delete;
 
@@ -44,7 +43,7 @@ class BRILLO_EXPORT DBusServiceWatcher {
   scoped_refptr<::dbus::Bus> bus_;
   const std::string connection_name_;
   ::dbus::Bus::ServiceOwnerChangeCallback monitoring_callback_;
-  base::Closure on_connection_vanish_;
+  base::RepeatingClosure on_connection_vanish_;
 
   base::WeakPtrFactory<DBusServiceWatcher> weak_factory_{this};
 };

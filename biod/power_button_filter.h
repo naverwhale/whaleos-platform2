@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,9 +20,10 @@
 
 namespace biod {
 
-constexpr char kFingerprintSensorTypePrefName[] = "fingerprint-sensor-type";
-constexpr char kFingerprintSensorTypeOverlapped[] = "on-power-button";
-constexpr char kFingerprintSensorTypeStandAlone[] = "stand-alone";
+inline constexpr char kFingerprintSensorTypePrefName[] =
+    "fingerprint-sensor-type";
+inline constexpr char kFingerprintSensorTypeOverlapped[] = "on-power-button";
+inline constexpr char kFingerprintSensorTypeStandAlone[] = "stand-alone";
 
 // Number of msecs to ignore fp match after seeing a power button down event on
 // devices with fp overlapped on power button. This is picked based on max
@@ -32,7 +33,7 @@ constexpr char kFingerprintSensorTypeStandAlone[] = "stand-alone";
 // to accommodate minor regressions in the future.
 // TODO(ravisadineni): Add autotest to verify that the time taken to fp match is
 // less than 1000 msecs..
-constexpr int64_t kAuthIgnoreTimeoutmsecs = 1000;
+inline constexpr int64_t kAuthIgnoreTimeoutmsecs = 1000;
 
 class PowerButtonFilter : public PowerButtonFilterInterface,
                           public PowerEventObserver {

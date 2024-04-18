@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,8 +15,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <base/bind.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/time/time.h>
@@ -76,12 +76,16 @@ void HelperProcessReceiver::OnCommandReady() {
   msg.msg_controllen = sizeof(c_buffer);
 
   ssize_t bytes = HANDLE_EINTR(recvmsg(control_fd_.get(), &msg, 0));
-  if (bytes < 0)
-    PLOG(FATAL) << "recvmsg failed";
+  if (bytes < 0) {
+    PLOG(ERROR) << "recvmsg failed, socket might be closed";
+    _exit(0);
+  }
   // Per recvmsg(2), the return value will be 0 when the peer has performed an
   // orderly shutdown.
-  if (bytes == 0)
+  if (bytes == 0) {
+    LOG(INFO) << "parent socket has shutdown.";
     _exit(0);
+  }
   // This means that the data sent over is too long.
   if (bytes > kAllowedBufferLimit) {
     LOG(ERROR) << "recvmsg is getting too much data.";
@@ -155,7 +159,7 @@ CommandResponse HelperProcessReceiver::HandleCommand(
 
 void HelperProcessReceiver::SendResponse(const CommandResponse& response) {
   if (!response.SerializeToFileDescriptor(control_fd_.get()))
-    LOG(FATAL) << "failed to serialize protobuf";
+    LOG(ERROR) << "failed to serialize protobuf";
 }
 
 }  // namespace imageloader

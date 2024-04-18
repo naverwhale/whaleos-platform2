@@ -1,4 +1,4 @@
-/* Copyright 2017 The Chromium OS Authors. All rights reserved.
+/* Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -15,7 +15,11 @@ CaptureRequest::CaptureRequest(const camera3_capture_request& request,
   // We cannot merge the two loops because the address of elements in
   // buffer_handles_ may be changed when new element is push into the vector.
   for (size_t i = 0; i < request.num_output_buffers; i++) {
-    buffer_handles_.push_back(*request.output_buffers[i].buffer);
+    if (request.output_buffers[i].buffer) {
+      buffer_handles_.push_back(*request.output_buffers[i].buffer);
+    } else {
+      buffer_handles_.push_back(nullptr);
+    }
   }
 
   for (size_t i = 0; i < request.num_output_buffers; i++) {

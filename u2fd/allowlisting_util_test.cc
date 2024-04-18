@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 
 #include <attestation/proto_bindings/interface.pb.h>
-#include <base/optional.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <policy/device_policy.h>
@@ -17,7 +17,7 @@
 #include <policy/mock_device_policy.h>
 #include <policy/mock_libpolicy.h>
 
-#include "u2fd/util.h"
+#include "u2fd/client/util.h"
 
 namespace u2f {
 namespace {
@@ -161,7 +161,7 @@ class AllowlistingUtilTest : public ::testing::Test {
   }
 
  private:
-  std::function<base::Optional<attestation::GetCertifiedNvIndexReply>(int)>
+  std::function<std::optional<attestation::GetCertifiedNvIndexReply>(int)>
   CreateMockAttestationdCallback() {
     return [this](int size) {
       // Check we were expecting this.
@@ -192,7 +192,7 @@ class AllowlistingUtilTest : public ::testing::Test {
   StrictMock<policy::MockDevicePolicy> mock_device_policy_;
 
   // If called, what we should return from 'attestationd'
-  base::Optional<attestation::GetCertifiedNvIndexReply> attestationd_reply_;
+  std::optional<attestation::GetCertifiedNvIndexReply> attestationd_reply_;
 };
 
 TEST_F(AllowlistingUtilTest, AppendDataSuccess) {
@@ -254,7 +254,7 @@ TEST_F(AllowlistingUtilTest, AppendDataAttestationdCallFails) {
   std::vector<uint8_t> cert = BuildCert();
   ExpectGetDeviceId(kDeviceId);
 
-  // Expect the call, we haven't set the reply so will return base::nullopt.
+  // Expect the call, we haven't set the reply so will return std::nullopt.
   ExpectAttestationCall();
 
   ExpectAppendDataFails(&cert);

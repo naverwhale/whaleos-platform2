@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,12 @@
 #include <cryptohome/proto_bindings/rpc.pb.h>
 #include <cryptohome/proto_bindings/UserDataAuth.pb.h>
 #include <dbus/bus.h>
-#include <user_data_auth-client/user_data_auth/dbus-proxies.h>
+
+namespace org {
+namespace chromium {
+class InstallAttributesInterfaceProxyInterface;
+}  // namespace chromium
+}  // namespace org
 
 namespace rmad {
 
@@ -27,10 +32,9 @@ class CryptohomeClientImpl : public CryptohomeClient {
   CryptohomeClientImpl(const CryptohomeClientImpl&) = delete;
   CryptohomeClientImpl& operator=(const CryptohomeClientImpl&) = delete;
 
-  ~CryptohomeClientImpl() override = default;
+  ~CryptohomeClientImpl() override;
 
-  bool HasFwmp() override;
-  bool IsEnrolled() override;
+  bool IsCcdBlocked() override;
 
  private:
   bool GetFwmp(uint32_t* flags);

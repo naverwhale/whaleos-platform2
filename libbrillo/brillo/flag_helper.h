@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -57,9 +57,9 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <base/command_line.h>
-#include <base/macros.h>
 #include <brillo/brillo_export.h>
 
 namespace brillo {
@@ -244,8 +244,33 @@ class BRILLO_EXPORT FlagHelper final {
   // Flag definitions from carrying over from previous tests.
   static void ResetForTesting();
 
-  // Initializes the base::CommandLine class, then calls UpdateFlagValues().
-  static void Init(int argc, const char* const* argv, std::string help_usage);
+  enum class InitFuncType {
+    kAbort,   // Always aborts.
+    kExit,    // Always exits the function with exit code.
+    kReturn,  // Always returns boolean results.
+  };
+
+  enum class ParseFailure {
+    kBadValue,     // Bad value (e.g. string when expected int)
+    kUnknownFlag,  // Unknown name
+  };
+
+  struct ParseResultsEntry {
+    std::string flag_name;
+    // to avoid uninitialized memory, give it *a* default.
+    ParseFailure failure_type = ParseFailure::kBadValue;
+
+    bool operator==(const ParseResultsEntry& other) const {
+      return flag_name == other.flag_name && failure_type == other.failure_type;
+    }
+  };
+
+  // This function aborts/exits/returns based on the func_type arg.
+  static bool Init(int argc,
+                   const char* const* argv,
+                   std::string help_usage,
+                   InitFuncType func_type = InitFuncType::kExit,
+                   std::vector<ParseResultsEntry>* out = nullptr);
 
   // Only to be used for running unit tests.
   void set_command_line_for_testing(base::CommandLine* command_line) {
@@ -255,10 +280,10 @@ class BRILLO_EXPORT FlagHelper final {
   // Checks all the parsed command line flags.  This iterates over the switch
   // map from base::CommandLine, and finds the corresponding Flag in order to
   // update the FLAGS_xxxx values to the parsed value.  If the --help flag is
-  // passed in, it outputs a help message and exits the program.  If an unknown
-  // flag is passed in, it outputs an error message and exits the program with
-  // exit code EX_USAGE.
-  void UpdateFlagValues();
+  // passed in, it outputs a help message and exits the program. If an unknown
+  // flag is passed in, it outputs an error message and returns exit code
+  // EX_USAGE.
+  int UpdateFlagValues(std::vector<ParseResultsEntry>* out = nullptr);
 
   // Adds a flag to be tracked and updated once the command line is actually
   // parsed.  This function is an implementation detail, and is not meant
@@ -268,6 +293,9 @@ class BRILLO_EXPORT FlagHelper final {
 
   // Sets the usage message, which is prepended to the --help message.
   void SetUsageMessage(std::string help_usage);
+
+  // Sets the program name.
+  void SetProgramName(std::string prog_name);
 
  private:
   FlagHelper();
@@ -279,7 +307,11 @@ class BRILLO_EXPORT FlagHelper final {
   // Generates a help message from the Usage Message and registered flags.
   std::string GetHelpMessage() const;
 
+  // Returns the program name.
+  std::string GetProgramName() const;
+
   std::string help_usage_;
+  std::string program_name_;
   std::map<std::string, std::unique_ptr<Flag>> defined_flags_;
 
   // base::CommandLine object for parsing the command line switches.  This

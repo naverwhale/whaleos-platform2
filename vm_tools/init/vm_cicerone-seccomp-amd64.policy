@@ -1,18 +1,23 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
+
 epoll_pwait: 1
 gettid: 1
 futex: 1
 # Disallow mprotect with PROT_EXEC set.
-mprotect: arg2 in 0xfffffffb
+mprotect: arg2 in ~PROT_EXEC
 recvmsg: 1
 epoll_wait: 1
 sendmsg: 1
 write: 1
+pwrite64: 1
 read: 1
 pread64: 1
-mmap: 1
+# Don't allow mmap with both PROT_WRITE and PROT_EXEC.
+mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 sendto: 1
 poll: 1
 epoll_ctl: 1
@@ -41,6 +46,7 @@ fstat: 1
 getsockname: 1
 accept4: 1
 bind: 1
+pipe: 1
 pipe2: 1
 restart_syscall: 1
 exit_group: 1
@@ -48,7 +54,7 @@ rt_sigreturn: 1
 lseek: 1
 getresuid: 1
 exit: 1
-prctl: arg0 == PR_SET_NAME
+prctl: arg0 == PR_SET_NAME || arg0 == PR_CAPBSET_READ
 clock_getres: 1
 getresgid: 1
 setpriority: 1
@@ -100,7 +106,11 @@ inotify_add_watch: 1
 inotify_rm_watch: 1
 dup2: 1
 flock: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 sched_setattr: 1
 sched_getattr: 1
 fstatfs: 1
+sched_getaffinity: 1
+sched_getparam: 1
+sched_yield: 1
+process_vm_readv: 1

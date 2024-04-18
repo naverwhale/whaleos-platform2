@@ -1,15 +1,16 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "patchpanel/dns/dns_response.h"
 
 #include <algorithm>
+#include <iterator>
 #include <memory>
+#include <optional>
+#include <string_view>
 
 #include "base/big_endian.h"
-#include "base/optional.h"
-#include "base/stl_util.h"
 #include "base/time/time.h"
 
 #include "patchpanel/dns/dns_protocol.h"
@@ -44,15 +45,14 @@ static const uint8_t kT0ResponseDatagram[] = {
     0x4a, 0x7d, 0xe2, 0xb0, 0xc0, 0x2c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
     0x00, 0xe4, 0x00, 0x04, 0x4a, 0x7d, 0xe2, 0xb1, 0xc0, 0x2c, 0x00, 0x01,
     0x00, 0x01, 0x00, 0x00, 0x00, 0xe4, 0x00, 0x04, 0x4a, 0x7d, 0xe2, 0xb2};
-static const char* const kT0IpAddresses[] = {
-  "74.125.226.179", "74.125.226.180", "74.125.226.176",
-  "74.125.226.177", "74.125.226.178"
-};
+static const char* const kT0IpAddresses[] = {"74.125.226.179", "74.125.226.180",
+                                             "74.125.226.176", "74.125.226.177",
+                                             "74.125.226.178"};
 // +1 for the CNAME record.
-static const unsigned kT0RecordCount = base::size(kT0IpAddresses) + 1;
+static const unsigned kT0RecordCount = std::size(kT0IpAddresses) + 1;
 
 TEST(DnsRecordParserTest, Constructor) {
-  const char data[] = { 0 };
+  const char data[] = {0};
 
   EXPECT_FALSE(DnsRecordParser().IsValid());
   EXPECT_TRUE(DnsRecordParser(data, 1, 0).IsValid());
@@ -109,15 +109,25 @@ TEST(DnsRecordParserTest, ReadName) {
 TEST(DnsRecordParserTest, ReadNameFail) {
   const uint8_t data[] = {
       // label length beyond packet
-      0x30, 'x', 'x', 0x00,
+      0x30,
+      'x',
+      'x',
+      0x00,
       // pointer offset beyond packet
-      0xc0, 0x20,
+      0xc0,
+      0x20,
       // pointer loop
-      0xc0, 0x08, 0xc0, 0x06,
+      0xc0,
+      0x08,
+      0xc0,
+      0x06,
       // incorrect label type (currently supports only direct and pointer)
-      0x80, 0x00,
+      0x80,
+      0x00,
       // truncated name (missing root label)
-      0x02, 'x', 'x',
+      0x02,
+      'x',
+      'x',
   };
 
   DnsRecordParser parser(data, sizeof(data), 0);
@@ -138,7 +148,9 @@ TEST(DnsRecordParserTest, ReadNameFail) {
 std::vector<uint8_t> BuildRfc1034Name(const size_t name_len,
                                       std::string* dotted_str) {
   CHECK(dotted_str != nullptr);
-  auto ChoosePrintableCharLambda = [](uint8_t n) { return n % 26 + 'A'; };
+  auto ChoosePrintableCharLambda = [](uint8_t n) {
+    return static_cast<uint8_t>(n % 26 + 'A');
+  };
   const size_t max_label_len = 63;
   std::vector<uint8_t> data;
 
@@ -160,14 +172,15 @@ std::vector<uint8_t> BuildRfc1034Name(const size_t name_len,
     const size_t label_len =
         std::min(name_len - data.size() - 2, max_label_len);
     // Write the length octet
-    data.push_back(label_len);
+    data.push_back(static_cast<uint8_t>(label_len));
 
     // Write |label_len| bytes of label data
     const size_t size_with_label = data.size() + label_len;
     while (data.size() < size_with_label) {
-      const uint8_t chr = ChoosePrintableCharLambda(data.size());
+      const uint8_t chr =
+          ChoosePrintableCharLambda(static_cast<uint8_t>(data.size()));
       data.push_back(chr);
-      dotted_str->push_back(chr);
+      dotted_str->push_back(static_cast<char>(chr));
 
       CHECK(data.size() <= name_len);
     }
@@ -258,7 +271,7 @@ TEST(DnsRecordParserTest, ReadRecord) {
   EXPECT_EQ(dns_protocol::kClassIN, record.klass);
   EXPECT_EQ(0x00201355u, record.ttl);
   EXPECT_EQ(4u, record.rdata.length());
-  EXPECT_EQ(base::StringPiece("\x7f\x02\x04\x01"), record.rdata);
+  EXPECT_EQ(std::string_view("\x7f\x02\x04\x01"), record.rdata);
   EXPECT_TRUE(parser.AtEnd());
 
   // Test truncated record.
@@ -288,7 +301,7 @@ TEST(DnsResponseTest, InitParseWithoutQuery) {
 
   DnsResourceRecord record;
   DnsRecordParser parser = resp.Parser();
-  for (unsigned i = 0; i < kT0RecordCount; i ++) {
+  for (unsigned i = 0; i < kT0RecordCount; i++) {
     EXPECT_FALSE(parser.AtEnd());
     EXPECT_TRUE(parser.ReadRecord(&record));
   }
@@ -299,22 +312,59 @@ TEST(DnsResponseTest, InitParseWithoutQuery) {
 TEST(DnsResponseTest, InitParseWithoutQueryNoQuestions) {
   const uint8_t response_data[] = {
       // Header
-      0xca, 0xfe,  // ID
-      0x81, 0x80,  // Standard query response, RA, no error
-      0x00, 0x00,  // No question
-      0x00, 0x01,  // 2 RRs (answers)
-      0x00, 0x00,  // 0 authority RRs
-      0x00, 0x00,  // 0 additional RRs
+      0xca,
+      0xfe,  // ID
+      0x81,
+      0x80,  // Standard query response, RA, no error
+      0x00,
+      0x00,  // No question
+      0x00,
+      0x01,  // 2 RRs (answers)
+      0x00,
+      0x00,  // 0 authority RRs
+      0x00,
+      0x00,  // 0 additional RRs
 
       // Answer 1
-      0x0a, 'c', 'o', 'd', 'e', 'r', 'e', 'v', 'i', 'e', 'w', 0x08, 'c', 'h',
-      'r', 'o', 'm', 'i', 'u', 'm', 0x03, 'o', 'r', 'g', 0x00, 0x00,
-      0x01,                    // TYPE is A.
-      0x00, 0x01,              // CLASS is IN.
-      0x00, 0x00,              // TTL (4 bytes) is 53 seconds.
-      0x00, 0x35, 0x00, 0x04,  // RDLENGTH is 4 bytes.
-      0x4a, 0x7d,              // RDATA is the IP: 74.125.95.121
-      0x5f, 0x79,
+      0x0a,
+      'c',
+      'o',
+      'd',
+      'e',
+      'r',
+      'e',
+      'v',
+      'i',
+      'e',
+      'w',
+      0x08,
+      'c',
+      'h',
+      'r',
+      'o',
+      'm',
+      'i',
+      'u',
+      'm',
+      0x03,
+      'o',
+      'r',
+      'g',
+      0x00,
+      0x00,
+      0x01,  // TYPE is A.
+      0x00,
+      0x01,  // CLASS is IN.
+      0x00,
+      0x00,  // TTL (4 bytes) is 53 seconds.
+      0x00,
+      0x35,
+      0x00,
+      0x04,  // RDLENGTH is 4 bytes.
+      0x4a,
+      0x7d,  // RDATA is the IP: 74.125.95.121
+      0x5f,
+      0x79,
   };
 
   DnsResponse resp;
@@ -344,22 +394,59 @@ TEST(DnsResponseTest, InitParseWithoutQueryNoQuestions) {
 TEST(DnsResponseTest, InitParseWithoutQueryInvalidFlags) {
   const uint8_t response_data[] = {
       // Header
-      0xca, 0xfe,  // ID
-      0x01, 0x80,  // RA, no error. Note the absence of the required QR bit.
-      0x00, 0x00,  // No question
-      0x00, 0x01,  // 2 RRs (answers)
-      0x00, 0x00,  // 0 authority RRs
-      0x00, 0x00,  // 0 additional RRs
+      0xca,
+      0xfe,  // ID
+      0x01,
+      0x80,  // RA, no error. Note the absence of the required QR bit.
+      0x00,
+      0x00,  // No question
+      0x00,
+      0x01,  // 2 RRs (answers)
+      0x00,
+      0x00,  // 0 authority RRs
+      0x00,
+      0x00,  // 0 additional RRs
 
       // Answer 1
-      0x0a, 'c', 'o', 'd', 'e', 'r', 'e', 'v', 'i', 'e', 'w', 0x08, 'c', 'h',
-      'r', 'o', 'm', 'i', 'u', 'm', 0x03, 'o', 'r', 'g', 0x00, 0x00,
-      0x01,                    // TYPE is A.
-      0x00, 0x01,              // CLASS is IN.
-      0x00, 0x00,              // TTL (4 bytes) is 53 seconds.
-      0x00, 0x35, 0x00, 0x04,  // RDLENGTH is 4 bytes.
-      0x4a, 0x7d,              // RDATA is the IP: 74.125.95.121
-      0x5f, 0x79,
+      0x0a,
+      'c',
+      'o',
+      'd',
+      'e',
+      'r',
+      'e',
+      'v',
+      'i',
+      'e',
+      'w',
+      0x08,
+      'c',
+      'h',
+      'r',
+      'o',
+      'm',
+      'i',
+      'u',
+      'm',
+      0x03,
+      'o',
+      'r',
+      'g',
+      0x00,
+      0x00,
+      0x01,  // TYPE is A.
+      0x00,
+      0x01,  // CLASS is IN.
+      0x00,
+      0x00,  // TTL (4 bytes) is 53 seconds.
+      0x00,
+      0x35,
+      0x00,
+      0x04,  // RDLENGTH is 4 bytes.
+      0x4a,
+      0x7d,  // RDATA is the IP: 74.125.95.121
+      0x5f,
+      0x79,
   };
 
   DnsResponse resp;
@@ -372,33 +459,87 @@ TEST(DnsResponseTest, InitParseWithoutQueryInvalidFlags) {
 TEST(DnsResponseTest, InitParseWithoutQueryTwoQuestions) {
   const uint8_t response_data[] = {
       // Header
-      0xca, 0xfe,  // ID
-      0x81, 0x80,  // Standard query response, RA, no error
-      0x00, 0x02,  // 2 questions
-      0x00, 0x01,  // 2 RRs (answers)
-      0x00, 0x00,  // 0 authority RRs
-      0x00, 0x00,  // 0 additional RRs
+      0xca,
+      0xfe,  // ID
+      0x81,
+      0x80,  // Standard query response, RA, no error
+      0x00,
+      0x02,  // 2 questions
+      0x00,
+      0x01,  // 2 RRs (answers)
+      0x00,
+      0x00,  // 0 authority RRs
+      0x00,
+      0x00,  // 0 additional RRs
 
       // Question 1
-      0x0a, 'c', 'o', 'd', 'e', 'r', 'e', 'v', 'i', 'e', 'w', 0x08, 'c', 'h',
-      'r', 'o', 'm', 'i', 'u', 'm', 0x03, 'o', 'r', 'g', 0x00, 0x00,
-      0x01,        // TYPE is A.
-      0x00, 0x01,  // CLASS is IN.
+      0x0a,
+      'c',
+      'o',
+      'd',
+      'e',
+      'r',
+      'e',
+      'v',
+      'i',
+      'e',
+      'w',
+      0x08,
+      'c',
+      'h',
+      'r',
+      'o',
+      'm',
+      'i',
+      'u',
+      'm',
+      0x03,
+      'o',
+      'r',
+      'g',
+      0x00,
+      0x00,
+      0x01,  // TYPE is A.
+      0x00,
+      0x01,  // CLASS is IN.
 
       // Question 2
-      0x0b, 'c', 'o', 'd', 'e', 'r', 'e', 'v', 'i', 'e', 'w', '2', 0xc0,
-      0x18,        // pointer to "chromium.org"
-      0x00, 0x01,  // TYPE is A.
-      0x00, 0x01,  // CLASS is IN.
+      0x0b,
+      'c',
+      'o',
+      'd',
+      'e',
+      'r',
+      'e',
+      'v',
+      'i',
+      'e',
+      'w',
+      '2',
+      0xc0,
+      0x18,  // pointer to "chromium.org"
+      0x00,
+      0x01,  // TYPE is A.
+      0x00,
+      0x01,  // CLASS is IN.
 
       // Answer 1
-      0xc0, 0x0c,              // NAME is a pointer to name in Question section.
-      0x00, 0x01,              // TYPE is A.
-      0x00, 0x01,              // CLASS is IN.
-      0x00, 0x00,              // TTL (4 bytes) is 53 seconds.
-      0x00, 0x35, 0x00, 0x04,  // RDLENGTH is 4 bytes.
-      0x4a, 0x7d,              // RDATA is the IP: 74.125.95.121
-      0x5f, 0x79,
+      0xc0,
+      0x0c,  // NAME is a pointer to name in Question section.
+      0x00,
+      0x01,  // TYPE is A.
+      0x00,
+      0x01,  // CLASS is IN.
+      0x00,
+      0x00,  // TTL (4 bytes) is 53 seconds.
+      0x00,
+      0x35,
+      0x00,
+      0x04,  // RDLENGTH is 4 bytes.
+      0x4a,
+      0x7d,  // RDATA is the IP: 74.125.95.121
+      0x5f,
+      0x79,
   };
 
   DnsResponse resp;
@@ -464,7 +605,7 @@ TEST(DnsResponseWriteTest, SingleARecordAnswer) {
   std::vector<DnsResourceRecord> answers(1, answer);
   DnsResponse response(0x1234 /* response_id */, true /* is_authoritative*/,
                        answers, {} /* authority_records */,
-                       {} /* additional records */, base::nullopt);
+                       {} /* additional records */, std::nullopt);
   ASSERT_NE(nullptr, response.io_buffer());
   EXPECT_TRUE(response.IsValid());
   std::string expected_response(reinterpret_cast<const char*>(response_data),
@@ -500,7 +641,7 @@ TEST(DnsResponseWriteTest, SingleARecordAnswerWithFinalDotInName) {
   std::vector<DnsResourceRecord> answers(1, answer);
   DnsResponse response(0x1234 /* response_id */, true /* is_authoritative*/,
                        answers, {} /* authority_records */,
-                       {} /* additional records */, base::nullopt);
+                       {} /* additional records */, std::nullopt);
   ASSERT_NE(nullptr, response.io_buffer());
   EXPECT_TRUE(response.IsValid());
   std::string expected_response(reinterpret_cast<const char*>(response_data),
@@ -541,7 +682,7 @@ TEST(DnsResponseWriteTest,
       2 /* qclass */ +
       10 /* extra bytes that inflate the internal buffer of a query */;
   auto buf = base::MakeRefCounted<IOBufferWithSize>(buf_size);
-  memset(buf->data(), 0, buf->size());
+  memset(buf->data(), 0, buf_size);
   base::BigEndianWriter writer(buf->data(), buf_size);
   writer.WriteU16(0x1234);                              // id
   writer.WriteU16(0);                                   // flags, is query
@@ -553,7 +694,7 @@ TEST(DnsResponseWriteTest,
   writer.WriteU16(dns_protocol::kTypeA);                // qtype
   writer.WriteU16(dns_protocol::kClassIN);              // qclass
   // buf contains 10 extra zero bytes.
-  base::Optional<DnsQuery> query;
+  std::optional<DnsQuery> query;
   query.emplace(buf);
   query->Parse(buf_size);
   patchpanel::DnsResourceRecord answer;
@@ -603,7 +744,7 @@ TEST(DnsResponseWriteTest, SingleQuadARecordAnswer) {
   std::vector<DnsResourceRecord> answers(1, answer);
   DnsResponse response(0x1234 /* id */, true /* is_authoritative*/, answers,
                        {} /* authority_records */, {} /* additional records */,
-                       base::nullopt);
+                       std::nullopt);
   ASSERT_NE(nullptr, response.io_buffer());
   EXPECT_TRUE(response.IsValid());
   std::string expected_response(reinterpret_cast<const char*>(response_data),
@@ -656,7 +797,7 @@ TEST(DnsResponseWriteTest, TwoAnswersWithAAndQuadARecords) {
   answers[1] = answer2;
   DnsResponse response(0x1234 /* id */, true /* is_authoritative*/, answers,
                        {} /* authority_records */, {} /* additional records */,
-                       base::nullopt);
+                       std::nullopt);
   ASSERT_NE(nullptr, response.io_buffer());
   EXPECT_TRUE(response.IsValid());
   std::string expected_response(reinterpret_cast<const char*>(response_data),
@@ -692,7 +833,7 @@ TEST(DnsResponseWriteTest, AnswerWithAuthorityRecord) {
   std::vector<DnsResourceRecord> authority_records(1, record);
   DnsResponse response(0x1235 /* response_id */, true /* is_authoritative*/,
                        {} /* answers */, authority_records,
-                       {} /* additional records */, base::nullopt);
+                       {} /* additional records */, std::nullopt);
   ASSERT_NE(nullptr, response.io_buffer());
   EXPECT_TRUE(response.IsValid());
   std::string expected_response(reinterpret_cast<const char*>(response_data),
@@ -713,7 +854,7 @@ TEST(DnsResponseWriteTest, AnswerWithRcode) {
   };
   DnsResponse response(0x1212 /* response_id */, false /* is_authoritative*/,
                        {} /* answers */, {} /* authority_records */,
-                       {} /* additional records */, base::nullopt,
+                       {} /* additional records */, std::nullopt,
                        dns_protocol::kRcodeNXDOMAIN);
   ASSERT_NE(nullptr, response.io_buffer());
   EXPECT_TRUE(response.IsValid());
@@ -743,7 +884,7 @@ TEST(DnsResponseWriteTest, WrittenResponseCanBeParsed) {
   std::vector<DnsResourceRecord> additional_records(1, additional_record);
   DnsResponse response(0x1234 /* response_id */, true /* is_authoritative*/,
                        answers, {} /* authority_records */, additional_records,
-                       base::nullopt);
+                       std::nullopt);
   ASSERT_NE(nullptr, response.io_buffer());
   EXPECT_TRUE(response.IsValid());
   EXPECT_THAT(response.id(), testing::Optional(0x1234));

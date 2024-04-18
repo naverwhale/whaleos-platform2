@@ -1,41 +1,59 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "metrics/metrics_library.h"
 
+#include <memory>
+#include <utility>
+
 #include <base/check.h>
+#include <base/files/file_enumerator.h>
+#include "base/files/file_path.h"
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
-#include <base/guid.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#include <base/time/time.h>
+#include <base/uuid.h>
+#include <brillo/files/safe_fd.h>
 #include <errno.h>
 #include <session_manager/dbus-proxies.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <vector>
 
+#include "base/memory/scoped_refptr.h"
+#include "metrics/metrics_writer.h"
 #include "metrics/serialization/metric_sample.h"
 #include "metrics/serialization/serialization_utils.h"
 
 #include "policy/device_policy.h"
 
+using brillo::SafeFD;
 using org::chromium::SessionManagerInterfaceProxy;
 
 namespace {
 
-const char kUMAEventsPath[] = "/var/lib/metrics/uma-events";
 // If you change this path make sure to also change the corresponding rollback
 // constant: src/platform2/oobe_config/rollback_constants.cc
-const char kConsentFile[] = "/home/chronos/Consent To Send Stats";
-const char kCrosEventHistogramName[] = "Platform.CrOSEvent";
+constexpr char kConsentFile[] = "/home/chronos/Consent To Send Stats";
+constexpr char kDaemonStoreUmaConsentDir[] = "/run/daemon-store/uma-consent";
+constexpr char kDaemonStoreAppSyncOptinDir[] =
+    "/run/daemon-store/appsync-optin";
+constexpr char kDaemonStoreConsentFile[] = "consent-enabled";
+constexpr char kDaemonStoreOptinFile[] = "opted-in";
+constexpr char kCrosEventHistogramName[] = "Platform.CrOSEvent";
 const int kCrosEventHistogramMax = 100;
+// Arbitrary maximum for repeated user actions; above this, we emit a warning
+// for debugging in case it causes performance issues.
+const int kMaxRepeatedUserActions = 100'000;
 
 // Add new cros events here.
 //
@@ -81,22 +99,37 @@ const char* kCrosEventNames[] = {
     "SessionManager.SafeModeEnabled",           // 29
     "Crash.Sender.FailedCrashRemoval",          // 30
     "Crash.Sender.AttemptedCrashRemoval",       // 31
+    "Chaps.DatabaseOpenedSuccessfully",         // 32
+    "Chaps.DatabaseOpenAttempt",                // 33
+    "Crostini.OomEvent",                        // 34
 };
 
 // Update this to be last entry + 1 when you add new entries to the end. Checks
 // that no one tries to remove entries from the middle or misnumbers during a
 // merge conflict.
-static_assert(base::size(kCrosEventNames) == 32,
+static_assert(std::size(kCrosEventNames) == 35,
               "CrosEvent enums not lining up properly");
+
+// Per base::UmaHistogramExactLinear documentation in chromium, we cannot have
+// more than 101 buckets for linear histograms. Break the build if we fail this.
+// (Also, the max is exclusive.)
+static_assert(std::size(kCrosEventNames) < kCrosEventHistogramMax,
+              "Too many CrOS events for a linear histogram.");
 
 }  // namespace
 
-time_t MetricsLibrary::cached_enabled_time_ = 0;
-bool MetricsLibrary::cached_enabled_ = false;
-
 MetricsLibrary::MetricsLibrary()
-    : uma_events_file_(base::FilePath(kUMAEventsPath)),
-      consent_file_(base::FilePath(kConsentFile)) {}
+    : MetricsLibrary(base::MakeRefCounted<SynchronousMetricsWriter>()) {}
+
+MetricsLibrary::MetricsLibrary(scoped_refptr<MetricsWriter> metrics_writer)
+    : cached_enabled_time_(0),
+      cached_appsync_enabled_time_(0),
+      cached_enabled_(false),
+      cached_appsync_enabled_(false),
+      metrics_writer_(std::move(metrics_writer)),
+      consent_file_(base::FilePath(kConsentFile)),
+      daemon_store_dir_(kDaemonStoreUmaConsentDir),
+      appsync_daemon_store_dir_(kDaemonStoreAppSyncOptinDir) {}
 
 MetricsLibrary::~MetricsLibrary() {}
 
@@ -164,10 +197,74 @@ bool MetricsLibrary::ConsentId(std::string* id) {
   return true;
 }
 
+std::optional<bool> MetricsLibrary::ArePerUserMetricsEnabled() {
+  return CheckUserConsent(daemon_store_dir_, kDaemonStoreConsentFile);
+}
+
+std::optional<bool> MetricsLibrary::IsPerUserAppSyncEnabled() {
+  return CheckUserConsent(appsync_daemon_store_dir_, kDaemonStoreOptinFile);
+}
+
+// AppSync opt-in/UMA consent are determined as follows:
+//  * if all users logged in have opted in, return true
+//  * if at least one user has not opted in, return false
+//  * if no users exist, there can be no apps to sync, return false
+std::optional<bool> MetricsLibrary::CheckUserConsent(
+    const base::FilePath& root_path, std::string consent_file) {
+  base::FileEnumerator consent_files(
+      root_path,
+      /*recursive=*/true, base::FileEnumerator::FILES, consent_file,
+      base::FileEnumerator::FolderSearchPolicy::ALL);
+  SafeFD::SafeFDResult root_err = SafeFD::Root();
+  if (SafeFD::IsError(root_err.second)) {
+    LOG(ERROR) << "Failed to open root directory: "
+               << static_cast<int>(root_err.second);
+    return std::nullopt;
+  }
+  bool checked_any = false;
+  for (base::FilePath name = consent_files.Next(); !name.empty();
+       name = consent_files.Next()) {
+    SafeFD::SafeFDResult file_err =
+        root_err.first.OpenExistingFile(name, O_RDONLY | O_CLOEXEC);
+    if (SafeFD::IsError(file_err.second)) {
+      LOG(ERROR) << "Failed to open file: " << name.value() << ": "
+                 << static_cast<int>(file_err.second);
+      continue;
+    }
+    auto read_result = file_err.first.ReadContents();
+    if (SafeFD::IsError(read_result.second)) {
+      LOG(ERROR) << "Failed to read file: " << name.value() << ": "
+                 << static_cast<int>(read_result.second);
+      continue;
+    }
+    checked_any = true;
+    std::string consent(read_result.first.begin(), read_result.first.end());
+    if (consent != "1") {
+      return false;
+    }
+  }
+
+  if (checked_any) {
+    // If we got here and didn't bail, all active users consented.
+    return true;
+  }
+  return std::nullopt;
+}
+
 bool MetricsLibrary::AreMetricsEnabled() {
   time_t this_check_time = time(nullptr);
   if (this_check_time != cached_enabled_time_) {
     cached_enabled_time_ = this_check_time;
+
+    std::optional<bool> user_consent = ArePerUserMetricsEnabled();
+    if (user_consent.has_value() && !user_consent.value()) {
+      // If the user consented, also make sure device owner opted in.
+      // (Theoretically, if device policy is off, the user shouldn't be *able*
+      // to opt in based on the current-as-of-2022-03 design, but add this as
+      // a secondary layer of defense.)
+      // If the user opted out, we opt out.
+      return false;
+    }
 
     if (!policy_provider_.get())
       policy_provider_.reset(new policy::PolicyProvider());
@@ -201,12 +298,25 @@ bool MetricsLibrary::AreMetricsEnabled() {
   return cached_enabled_;
 }
 
+bool MetricsLibrary::IsAppSyncEnabled() {
+  time_t this_check_time = time(nullptr);
+  if (this_check_time != cached_appsync_enabled_time_) {
+    cached_appsync_enabled_time_ = this_check_time;
+
+    std::optional<bool> appsync_optin = IsPerUserAppSyncEnabled();
+
+    cached_appsync_enabled_ = appsync_optin.value_or(false);
+  }
+
+  return cached_appsync_enabled_;
+}
+
 bool MetricsLibrary::EnableMetrics() {
   // Already enabled? Don't touch anything.
   if (AreMetricsEnabled())
     return true;
 
-  std::string guid = base::GenerateGUID();
+  std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
 
   if (guid.empty())
     return false;
@@ -224,13 +334,8 @@ bool MetricsLibrary::DisableMetrics() {
   return base::DeleteFile(base::FilePath(consent_file_));
 }
 
-void MetricsLibrary::Init() {
-  // Deprecated.  Initialization code should go in constructor.
-  // Remove this function when it is no longer used.
-}
-
 void MetricsLibrary::SetOutputFile(const std::string& output_file) {
-  uma_events_file_ = base::FilePath(output_file);
+  metrics_writer_->SetOutputFile(output_file);
 }
 
 bool MetricsLibrary::Replay(const std::string& input_file) {
@@ -240,31 +345,23 @@ bool MetricsLibrary::Replay(const std::string& input_file) {
           metrics::SerializationUtils::kSampleBatchMaxLength)) {
     return false;
   }
-  return metrics::SerializationUtils::WriteMetricsToFile(
-      samples, uma_events_file_.value());
+  return metrics_writer_->WriteMetrics(samples);
 }
 
 bool MetricsLibrary::SendToUMA(
     const std::string& name, int sample, int min, int max, int nbuckets) {
-  return metrics::SerializationUtils::WriteMetricsToFile(
-      {metrics::MetricSample::HistogramSample(name, sample, min, max,
-                                              nbuckets)},
-      uma_events_file_.value());
+  return SendRepeatedToUMA(name, sample, min, max, nbuckets, /*num_samples=*/1);
 }
 
-#if USE_METRICS_UPLOADER
 bool MetricsLibrary::SendRepeatedToUMA(const std::string& name,
                                        int sample,
                                        int min,
                                        int max,
                                        int nbuckets,
                                        int num_samples) {
-  return metrics::SerializationUtils::WriteMetricsToFile(
-      {metrics::MetricSample::HistogramSample(name, sample, min, max, nbuckets,
-                                              num_samples)},
-      uma_events_file_.value());
+  return metrics_writer_->WriteMetrics({metrics::MetricSample::HistogramSample(
+      name, sample, min, max, nbuckets, num_samples)});
 }
-#endif
 
 void MetricsLibrary::SetConsentFileForTest(const base::FilePath& consent_file) {
   consent_file_ = consent_file;
@@ -273,33 +370,109 @@ void MetricsLibrary::SetConsentFileForTest(const base::FilePath& consent_file) {
 bool MetricsLibrary::SendEnumToUMA(const std::string& name,
                                    int sample,
                                    int max) {
-  return metrics::SerializationUtils::WriteMetricsToFile(
-      {metrics::MetricSample::LinearHistogramSample(name, sample, max)},
-      uma_events_file_.value());
+  return SendRepeatedEnumToUMA(name, sample, max, /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedEnumToUMA(const std::string& name,
+                                           int sample,
+                                           int max,
+                                           int num_samples) {
+  return metrics_writer_->WriteMetrics(
+      {metrics::MetricSample::LinearHistogramSample(name, sample, max,
+                                                    num_samples)});
+}
+
+bool MetricsLibrary::SendLinearToUMA(const std::string& name,
+                                     int sample,
+                                     int max) {
+  return SendRepeatedLinearToUMA(name, sample, max, /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedLinearToUMA(const std::string& name,
+                                             int sample,
+                                             int max,
+                                             int num_samples) {
+  return metrics_writer_->WriteMetrics(
+      {metrics::MetricSample::LinearHistogramSample(name, sample, max,
+                                                    num_samples)});
+}
+
+bool MetricsLibrary::SendPercentageToUMA(const std::string& name, int sample) {
+  return SendRepeatedPercentageToUMA(name, sample, /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedPercentageToUMA(const std::string& name,
+                                                 int sample,
+                                                 int num_samples) {
+  return SendRepeatedLinearToUMA(name, sample, 101, num_samples);
 }
 
 bool MetricsLibrary::SendBoolToUMA(const std::string& name, bool sample) {
-  return metrics::SerializationUtils::WriteMetricsToFile(
-      {metrics::MetricSample::LinearHistogramSample(name, sample ? 1 : 0, 2)},
-      uma_events_file_.value());
+  return SendRepeatedBoolToUMA(name, sample, /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedBoolToUMA(const std::string& name,
+                                           bool sample,
+                                           int num_samples) {
+  return metrics_writer_->WriteMetrics(
+      {metrics::MetricSample::LinearHistogramSample(name, sample ? 1 : 0, 2,
+                                                    num_samples)});
 }
 
 bool MetricsLibrary::SendSparseToUMA(const std::string& name, int sample) {
-  return metrics::SerializationUtils::WriteMetricsToFile(
-      {metrics::MetricSample::SparseHistogramSample(name, sample)},
-      uma_events_file_.value());
+  return SendRepeatedSparseToUMA(name, sample, /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedSparseToUMA(const std::string& name,
+                                             int sample,
+                                             int num_samples) {
+  return metrics_writer_->WriteMetrics(
+      {metrics::MetricSample::SparseHistogramSample(name, sample,
+                                                    num_samples)});
 }
 
 bool MetricsLibrary::SendUserActionToUMA(const std::string& action) {
-  return metrics::SerializationUtils::WriteMetricsToFile(
-      {metrics::MetricSample::UserActionSample(action)},
-      uma_events_file_.value());
+  return SendRepeatedUserActionToUMA(action, /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedUserActionToUMA(const std::string& action,
+                                                 int num_samples) {
+  if (num_samples > kMaxRepeatedUserActions) {
+    LOG(WARNING) << "Sending a large number of repeated UMA events to chrome; "
+                 << "performance may suffer.";
+  }
+  return metrics_writer_->WriteMetrics(
+      {metrics::MetricSample::UserActionSample(action, num_samples)});
 }
 
 bool MetricsLibrary::SendCrashToUMA(const char* crash_kind) {
-  return metrics::SerializationUtils::WriteMetricsToFile(
-      {metrics::MetricSample::CrashSample(crash_kind)},
-      uma_events_file_.value());
+  return SendRepeatedCrashToUMA(crash_kind, /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedCrashToUMA(const char* crash_kind,
+                                            int num_samples) {
+  return metrics_writer_->WriteMetrics(
+      {metrics::MetricSample::CrashSample(crash_kind, num_samples)});
+}
+
+bool MetricsLibrary::SendTimeToUMA(std::string_view name,
+                                   base::TimeDelta sample,
+                                   base::TimeDelta min,
+                                   base::TimeDelta max,
+                                   size_t buckets) {
+  return SendRepeatedTimeToUMA(name, sample, min, max, buckets,
+                               /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedTimeToUMA(std::string_view name,
+                                           base::TimeDelta sample,
+                                           base::TimeDelta min,
+                                           base::TimeDelta max,
+                                           size_t buckets,
+                                           int num_samples) {
+  return SendRepeatedToUMA(std::string(name), sample.InMilliseconds(),
+                           min.InMilliseconds(), max.InMilliseconds(), buckets,
+                           num_samples);
 }
 
 void MetricsLibrary::SetPolicyProvider(policy::PolicyProvider* provider) {
@@ -307,9 +480,15 @@ void MetricsLibrary::SetPolicyProvider(policy::PolicyProvider* provider) {
 }
 
 bool MetricsLibrary::SendCrosEventToUMA(const std::string& event) {
-  for (size_t i = 0; i < base::size(kCrosEventNames); i++) {
-    if (strcmp(event.c_str(), kCrosEventNames[i]) == 0) {
-      return SendEnumToUMA(kCrosEventHistogramName, i, kCrosEventHistogramMax);
+  return SendRepeatedCrosEventToUMA(event, /*num_samples=*/1);
+}
+
+bool MetricsLibrary::SendRepeatedCrosEventToUMA(const std::string& event,
+                                                int num_samples) {
+  for (size_t i = 0; i < std::size(kCrosEventNames); i++) {
+    if (event == kCrosEventNames[i]) {
+      return SendRepeatedEnumToUMA(kCrosEventHistogramName, i,
+                                   kCrosEventHistogramMax, num_samples);
     }
   }
   LOG(WARNING) << "Unknown CrosEvent '" << event << "'";

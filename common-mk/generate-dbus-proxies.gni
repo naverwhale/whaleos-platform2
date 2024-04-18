@@ -1,7 +1,9 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+# TODO(crbug.com/983008): Unify build rule of generate_dbus_proxies and
+# generate_dbus_adaptors for easy to maintain.
 template("generate_dbus_proxies") {
   forward_variables_from(invoker,
                          [
@@ -9,11 +11,9 @@ template("generate_dbus_proxies") {
                            "proxy_output_file",
                            "mock_output_file",
                            "proxy_path_in_mocks",
-                           "new_fd_bindings",
                          ])
-  if (!defined(new_fd_bindings)) {
-    new_fd_bindings = true
-  }
+  h_dir = "${root_gen_dir}"
+
   if (!defined(proxy_output_file)) {
     proxy_output_file = ""
   }
@@ -33,22 +33,21 @@ template("generate_dbus_proxies") {
     sources = invoker.sources
     script = "//common-mk/file_generator_wrapper.py"
     outputs = []
-    args = [ "generate-chromeos-dbus-bindings" ] +
-           rebase_path(sources, root_build_dir) +
-           [ "--service-config=${service_config}" ]
+    args = [
+      "go-generate-chromeos-dbus-bindings",
+      "-service-config=${service_config}",
+    ]
     if (proxy_output_file != "") {
-      outputs += [ "${root_gen_dir}/${proxy_output_file}" ]
-      args += [ "--proxy=${root_gen_dir}/${proxy_output_file}" ]
+      outputs += [ "${h_dir}/${proxy_output_file}" ]
+      args += [ "-proxy=${h_dir}/${proxy_output_file}" ]
     }
     if (mock_output_file != "") {
-      outputs += [ "${root_gen_dir}/${mock_output_file}" ]
-      args += [ "--mock=${root_gen_dir}/${mock_output_file}" ]
+      outputs += [ "${h_dir}/${mock_output_file}" ]
+      args += [ "-mock=${h_dir}/${mock_output_file}" ]
     }
     if (proxy_path_in_mocks != "") {
-      args += [ "--proxy-path-in-mocks=${proxy_path_in_mocks}" ]
+      args += [ "-proxy-path-for-mocks=${proxy_path_in_mocks}" ]
     }
-    if (new_fd_bindings) {
-      args += [ "--new-fd-bindings" ]
-    }
+    args += rebase_path(sources, root_build_dir)
   }
 }

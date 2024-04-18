@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <linux/input.h>
 #include <sys/epoll.h>
 #include <unistd.h>
 
@@ -21,17 +22,8 @@
 
 namespace minios {
 
-// Key values.
-const int kKeyUp = 103;
-const int kKeyDown = 108;
-const int kKeyEnter = 28;
-const int kKeyVolUp = 115;
-const int kKeyVolDown = 114;
-const int kKeyPower = 116;
-
-// Key state parameters.
+// Key state parameter.
 const int kFdsMax = 10;
-const int kKeyMax = 200;
 
 namespace {
 constexpr char kDevInputEvent[] = "/dev/input";
@@ -77,7 +69,8 @@ KeyReader::KeyReader(bool include_usb)
       delegate_(nullptr) {}
 
 KeyReader::KeyReader(bool include_usb, std::string keyboard_layout)
-    : backspace_counter_(0),
+    : repeated_key_(0),
+      repeated_counter_(0),
       return_pressed_(false),
       include_usb_(include_usb),
       keyboard_layout_(keyboard_layout),
@@ -96,6 +89,7 @@ KeyReader::~KeyReader() {
 
 bool KeyReader::Init(const std::vector<int>& valid_keys) {
   keys_ = valid_keys;
+
   if (!GetValidFds(/*check_supported_keys=*/true)) {
     LOG(ERROR) << "No valid input devices found.";
     return false;
@@ -165,14 +159,14 @@ bool KeyReader::EpollCreate(base::ScopedFD* epfd) {
   return true;
 }
 
-bool KeyReader::GetEpEvent(int epfd, struct input_event* ev, int* index) {
+bool KeyReader::GetEpEvent(int epfd, struct input_event* ev) {
   struct epoll_event ep_event;
   if (epoll_wait(epfd, &ep_event, 1, -1) <= 0) {
     PLOG(ERROR) << "epoll_wait failed";
     return false;
   }
-  *index = ep_event.data.u32;
-  if (read(fds_[*index].get(), ev, sizeof(*ev)) != sizeof(*ev)) {
+  if (HANDLE_EINTR(read(fds_[ep_event.data.u32].get(), ev, sizeof(*ev))) !=
+      sizeof(*ev)) {
     PLOG(ERROR) << "Could not read event";
     return false;
   }
@@ -181,11 +175,15 @@ bool KeyReader::GetEpEvent(int epfd, struct input_event* ev, int* index) {
 
 void KeyReader::OnKeyEvent() {
   struct input_event ev;
-  int index = 0;
-  if (!GetEpEvent(epfd_.get(), &ev, &index)) {
+  if (!GetEpEvent(epfd_.get(), &ev)) {
     PLOG(ERROR) << "Could not get event";
     return;
   }
+
+  if (!delegate_) {
+    return;
+  }
+
   if (ev.type != EV_KEY || ev.code > KEY_MAX) {
     return;
   }
@@ -194,12 +192,26 @@ void KeyReader::OnKeyEvent() {
     return;
   }
 
-  if (!delegate_) {
-    LOG(ERROR) << "Delegate not initialized.";
-    return;
+  switch (ev.value) {
+    case kKeyPress:
+      delegate_->OnKeyPress(ev.code);
+      repeated_counter_ = 0;
+      return;
+    case kKeyHold:
+      if (repeated_key_ != ev.code) {
+        repeated_key_ = ev.code;
+        repeated_counter_ = 0;
+        return;
+      }
+      if (++repeated_counter_ < kRepeatedSensitivity) {
+        return;
+      }
+      repeated_counter_ = 0;
+      delegate_->OnKeyPress(ev.code);
+      return;
+    default:
+      return;
   }
-
-  delegate_->OnKeyPress(index, ev.code, (ev.value == 0));
 }
 
 bool KeyReader::SetKeyboardContext() {
@@ -253,21 +265,25 @@ bool KeyReader::InputSetUp() {
 }
 
 bool KeyReader::GetChar(const struct input_event& ev, bool* tab_toggle) {
-  xkb_keycode_t keycode = ev.code + kXkbOffset;
-  xkb_keysym_t sym = xkb_state_key_get_one_sym(state_, keycode);
-  if (ev.value == 0) {
-    // Key up event.
-    if (sym == XKB_KEY_Return && return_pressed_) {
-      // Only end if RETURN key press was already recorded.
-      return false;
-    } else if (sym == XKB_KEY_Tab) {
-      *tab_toggle = !(*tab_toggle);
-    }
+  const xkb_keycode_t key_code = ev.code + kXkbOffset;
 
+  if (ev.value == kKeyRelease) {
+    // Update underlying state on release.
+    xkb_state_update_key(state_, key_code, XKB_KEY_UP);
+  } else if (ev.value == kKeyPress) {
+    xkb_state_update_key(state_, key_code, XKB_KEY_DOWN);
+    const xkb_keysym_t sym = xkb_state_key_get_one_sym(state_, key_code);
+    // Only return false when `return` key is pressed.
+    if (sym == XKB_KEY_Return)
+      return false;
+    if (sym == XKB_KEY_Tab) {
+      *tab_toggle = !(*tab_toggle);
+      return true;
+    }
     // Put char representation in buffer.
-    int size = xkb_state_key_get_utf8(state_, keycode, nullptr, 0) + 1;
+    int size = xkb_state_key_get_utf8(state_, key_code, nullptr, 0) + 1;
     std::vector<char> buff(size);
-    xkb_state_key_get_utf8(state_, keycode, buff.data(), size);
+    xkb_state_key_get_utf8(state_, key_code, buff.data(), size);
 
     if (sym == XKB_KEY_BackSpace && !user_input_.empty()) {
       user_input_.pop_back();
@@ -275,21 +291,19 @@ bool KeyReader::GetChar(const struct input_event& ev, bool* tab_toggle) {
       // Only printable ASCII characters stored in output.
       user_input_.push_back(buff[0]);
     }
-    xkb_state_update_key(state_, keycode, XKB_KEY_UP);
-  } else if (ev.value == 1) {
-    // Key down event.
-    if (sym == XKB_KEY_Return)
-      return_pressed_ = true;
-
-    xkb_state_update_key(state_, keycode, XKB_KEY_DOWN);
-
-  } else if (ev.value == 2) {
-    // Long press or repeating key event.
+  } else if (ev.value == kKeyHold) {
+    // Long press or repeating key event. Only backspace is supported in this
+    // case, ignore all other keys.
+    const xkb_keysym_t sym = xkb_state_key_get_one_sym(state_, key_code);
+    if (repeated_key_ != ev.code) {
+      repeated_key_ = ev.code;
+      repeated_counter_ = 0;
+    }
     if (sym == XKB_KEY_BackSpace && !user_input_.empty() &&
-        ++backspace_counter_ >= kBackspaceSensitivity) {
+        ++repeated_counter_ >= kRepeatedSensitivity) {
       // Remove characters until empty.
       user_input_.pop_back();
-      backspace_counter_ = 0;
+      repeated_counter_ = 0;
     }
   }
   return true;
@@ -299,8 +313,7 @@ bool KeyReader::GetUserInput(bool* enter,
                              bool* tab_toggle,
                              std::string* user_input) {
   struct input_event ev;
-  int index = 0;
-  if (!GetEpEvent(epfd_.get(), &ev, &index)) {
+  if (!GetEpEvent(epfd_.get(), &ev)) {
     PLOG(ERROR) << "Could not get event";
     return false;
   }

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 
+#include "minios/metrics_reporter.h"
 #include "minios/recovery_installer.h"
 #include "minios/screens/screen_base.h"
 #include "minios/update_engine_proxy.h"
@@ -20,6 +21,7 @@ class ScreenDownload : public UpdateEngineProxy::UpdaterDelegate,
   ScreenDownload(std::unique_ptr<RecoveryInstallerInterface> recovery_installer,
                  std::shared_ptr<UpdateEngineProxy> update_engine_proxy,
                  std::shared_ptr<DrawInterface> draw_utils,
+                 std::unique_ptr<MetricsReporterInterface> metrics_reporter,
                  ScreenControllerInterface* screen_controller);
 
   ~ScreenDownload() = default;
@@ -44,6 +46,7 @@ class ScreenDownload : public UpdateEngineProxy::UpdaterDelegate,
   FRIEND_TEST(ScreenDownloadTest, RepartitionDiskFailed);
   FRIEND_TEST(ScreenDownloadTest, StartUpdateFailed);
   FRIEND_TEST(ScreenDownloadTest, IdleError);
+  FRIEND_TEST(ScreenDownloadTest, CheckingForUpdateToIdleError);
   FRIEND_TEST(ScreenDownloadTest, ShowUpdateProgress);
 
   // Updates buttons with current selection.
@@ -75,6 +78,9 @@ class ScreenDownload : public UpdateEngineProxy::UpdaterDelegate,
   // unnecessary screen changes.
   update_engine::Operation previous_update_state_{
       update_engine::Operation::IDLE};
+
+  // Used to report network-based recovery metrics.
+  std::unique_ptr<MetricsReporterInterface> metrics_reporter_;
 };
 
 }  // namespace minios

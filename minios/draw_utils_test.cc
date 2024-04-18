@@ -1,6 +1,8 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include <optional>
 
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
@@ -39,8 +41,8 @@ class DrawUtilsTest : public ::testing::Test {
 
     // Create directories.
     ASSERT_TRUE(
-        base::CreateDirectory(base::FilePath(test_root_).Append("dev/pts")));
-    console_ = base::FilePath(test_root_).Append("dev/pts/0");
+        base::CreateDirectory(base::FilePath(test_root_).Append("run/frecon")));
+    console_ = base::FilePath(test_root_).Append("run/frecon/vt0");
     ASSERT_TRUE(base::WriteFile(console_, ""));
     ASSERT_TRUE(CreateDirectory(
         base::FilePath(screens_path_).Append("glyphs").Append("white")));
@@ -534,6 +536,38 @@ TEST_F(DrawUtilsTestMocks, ShowProgressPercentage) {
   EXPECT_CALL(mock_draw_utils_, ShowBox(_, _, _, _, _))
       .WillOnce(testing::Return(true));
   mock_draw_utils_.ShowProgressPercentage(.5);
+}
+
+TEST_F(DrawUtilsTestMocks, ShowInvalidVersion) {
+  // Empty/nullopt versions don't show anything.
+  EXPECT_CALL(mock_draw_utils_, ShowText(_, _, _, _)).Times(0);
+  mock_draw_utils_.minios_version_ = std::nullopt;
+  mock_draw_utils_.ShowVersion();
+  mock_draw_utils_.minios_version_ = "";
+  mock_draw_utils_.ShowVersion();
+}
+
+TEST_F(DrawUtilsTestMocks, ShowLeftToRightVersion) {
+  // Valid version that should be displayed.
+  mock_draw_utils_.minios_version_ = "123.4.5";
+  const int y_offset = -mock_draw_utils_.frecon_canvas_size_ / 2 + 40;
+  // Text is left to right.
+  mock_draw_utils_.SetLanguageForTest("en-US");
+  const int x_offset = mock_draw_utils_.frecon_canvas_size_ / 2;
+  EXPECT_CALL(mock_draw_utils_, ShowText("123.4.5", x_offset, y_offset, _))
+      .Times(1);
+  mock_draw_utils_.ShowVersion();
+}
+
+TEST_F(DrawUtilsTestMocks, ShowRightToLeftVersion) {
+  mock_draw_utils_.minios_version_ = "123.4.5";
+  const int y_offset = -mock_draw_utils_.frecon_canvas_size_ / 2 + 40;
+  // Text is right to left.
+  mock_draw_utils_.SetLanguageForTest("he");
+  const int x_offset = -mock_draw_utils_.frecon_canvas_size_ / 2;
+  EXPECT_CALL(mock_draw_utils_, ShowText("123.4.5", x_offset, y_offset, _))
+      .Times(1);
+  mock_draw_utils_.ShowVersion();
 }
 
 }  // namespace minios

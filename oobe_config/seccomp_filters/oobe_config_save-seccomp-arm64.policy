@@ -1,6 +1,9 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 bind: 1
 brk: 1
@@ -19,10 +22,12 @@ execve: 1
 exit: 1
 exit_group: 1
 faccessat: 1
+fchmod: 1
 fcntl: 1
 flock: 1
 fstat: 1
 fstatfs: 1
+ftruncate: 1
 futex: 1
 getcwd: 1
 getdents64: 1
@@ -34,7 +39,7 @@ getpgid: 1
 getpid: 1
 getppid: 1
 getpriority: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 getresgid: 1
 getresuid: 1
 getrlimit: 1
@@ -57,7 +62,9 @@ openat: 1
 pipe2: 1
 ppoll: 1
 prctl: arg0 == PR_GET_DUMPABLE || arg0 == PR_SET_DUMPABLE
+pread64: 1
 prlimit64: 1
+process_vm_readv: 1
 read: 1
 recvmsg: 1
 restart_syscall: 1
@@ -75,6 +82,8 @@ setresgid: 1
 setresuid: 1
 socket: arg0 == AF_NETLINK || arg0 == AF_UNIX
 sysinfo: 1
+# tgkill is used by abort() and CHECK()/LOG(FATAL).
+tgkill: 1
 umask: 1
 uname: 1
 wait4: 1

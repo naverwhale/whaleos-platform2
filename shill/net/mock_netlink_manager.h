@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,11 +15,11 @@ namespace shill {
 
 class MockNetlinkManager : public NetlinkManager {
  public:
-  MockNetlinkManager() = default;
+  MockNetlinkManager();
   MockNetlinkManager(const MockNetlinkManager&) = delete;
   MockNetlinkManager& operator=(const MockNetlinkManager&) = delete;
 
-  ~MockNetlinkManager() override = default;
+  ~MockNetlinkManager() override;
 
   MOCK_METHOD(bool, Init, (), (override));
   MOCK_METHOD(void, Start, (), (override));
@@ -40,14 +40,14 @@ class MockNetlinkManager : public NetlinkManager {
               (ControlNetlinkMessage*,
                const ControlNetlinkMessageHandler&,
                const NetlinkAckHandler&,
-               const NetlinkAuxilliaryMessageHandler&),
+               const NetlinkAuxiliaryMessageHandler&),
               (override));
   MOCK_METHOD(bool,
               SendNl80211Message,
               (Nl80211Message*,
                const Nl80211MessageHandler&,
                const NetlinkAckHandler&,
-               const NetlinkAuxilliaryMessageHandler&),
+               const NetlinkAuxiliaryMessageHandler&),
               (override));
   MOCK_METHOD(bool,
               SubscribeToEvents,

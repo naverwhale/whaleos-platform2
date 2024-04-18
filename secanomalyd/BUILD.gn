@@ -1,11 +1,15 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import("//common-mk/pkg_config.gni")
 
 group("all") {
-  deps = [ ":secanomalyd" ]
+  deps = [
+    ":install_minijail_conf",
+    ":install_upstart_config",
+    ":secanomalyd",
+  ]
   if (use.test) {
     deps += [ ":secanomalyd_testrunner" ]
   }
@@ -16,25 +20,56 @@ pkg_config("target_defaults") {
     "libbrillo",
     "libchrome",
     "libmetrics",
+    "libsession_manager-client",
     "vboot_host",
   ]
 }
 
+pkg_config("libsecanomaly_config") {
+  pkg_deps = [
+    "absl",
+    "re2",
+  ]
+}
+
+source_set("landlock") {
+  sources = [ "landlock.c" ]
+}
+
 static_library("libsecanomaly") {
   sources = [
+    "audit_log_reader.cc",
     "daemon.cc",
     "metrics.cc",
     "mount_entry.cc",
     "mounts.cc",
     "processes.cc",
+    "reporter.cc",
+    "system_context.cc",
+    "text_file_reader.cc",
   ]
-  configs += [ ":target_defaults" ]
+  configs += [
+    ":target_defaults",
+    ":libsecanomaly_config",
+  ]
+  deps = [ ":landlock" ]
 }
 
 executable("secanomalyd") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "sbin"
   deps = [ ":libsecanomaly" ]
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "minijail/secanomalyd.conf" ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_upstart_config") {
+  sources = [ "secanomalyd.conf" ]
+  install_path = "upstart"
 }
 
 if (use.test) {
@@ -44,15 +79,19 @@ if (use.test) {
 
   executable("secanomalyd_testrunner") {
     sources = [
+      "audit_log_reader_test.cc",
       "mount_entry_test.cc",
       "mounts_test.cc",
       "processes_test.cc",
+      "reporter_test.cc",
+      "text_file_reader_test.cc",
     ]
     configs += [
       "//common-mk:test",
       ":secanomalyd_testrunner_config",
       ":target_defaults",
     ]
+    run_test = true
     deps = [
       ":libsecanomaly",
       "//common-mk/testrunner",

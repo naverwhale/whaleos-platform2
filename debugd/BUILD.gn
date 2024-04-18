@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,8 +8,10 @@ import("//common-mk/proto_library.gni")
 
 group("all") {
   deps = [
+    ":audit_log_filter",
     ":bt_usb_disconnect_helper",
     ":capture_packets",
+    ":cryptohome-proto",
     ":cups_uri_helper",
     ":debugd",
     ":debugd-adaptors",
@@ -19,46 +21,65 @@ group("all") {
     ":dev_features_rootfs_verification",
     ":dev_features_ssh",
     ":dev_features_usb_boot",
-    ":external-proto",
+    ":folder_size_dump",
     ":generate_logs",
     ":icmp",
+    ":install_helper_scripts",
+    ":install_tmpfilesd",
+    ":install_tmpfilesd_dev",
     ":libdebugd",
+    ":modetest_helper",
     ":netif",
     ":network_status",
-    ":scheduler_configuration_helper",
+    ":power_manager-proto",
+    ":typec_connector_class_helper",
     ":usb4_devinfo_helper",
   ]
+  if (use.amd64) {
+    deps += [ ":scheduler_configuration_helper" ]
+  }
   if (use.test) {
     deps += [ ":debugd_testrunner" ]
   }
+  if (use.fuzzer) {
+    deps += [ ":debugd_cups_uri_helper_utils_fuzzer" ]
+  }
 }
+
+debugd_helpers_install_path = "/usr/libexec/debugd/helpers"
 
 pkg_config("target_defaults") {
   defines = [
     "USE_CELLULAR=${use.cellular}",
     "USE_IWLWIFI_DUMP=${use.iwlwifi_dump}",
-    "USE_TPM=${use.tpm}",
-    "USE_ARCVM=${use.arcvm}",
   ]
 
   pkg_deps = [
     "dbus-1",
     "libbrillo",
     "libchrome",
-    "libcryptohome-client",
     "liblzma",
+    "libmetrics",
     "libminijail",
+    "libuser_data_auth-client",
     "vboot_host",
   ]
 }
 
-proto_library("external-proto") {
+proto_library("cryptohome-proto") {
   proto_in_dir = "${sysroot}/usr/include/chromeos/dbus/cryptohome"
   proto_out_dir = "include"
   sources = [
     "${proto_in_dir}/key.proto",
     "${proto_in_dir}/rpc.proto",
   ]
+}
+
+proto_library("power_manager-proto") {
+  proto_in_dir = "${sysroot}/usr/include/chromeos/dbus/power_manager"
+  proto_out_dir = "include"
+  sources = [ "${proto_in_dir}/battery_saver.proto" ]
+  all_dependent_pkg_deps = [ "protobuf" ]
 }
 
 generate_dbus_adaptors("debugd-adaptors") {
@@ -95,6 +116,7 @@ static_library("libdebugd") {
     "src/dev_features_tool.cc",
     "src/dev_mode_no_owner_restriction.cc",
     "src/dmesg_tool.cc",
+    "src/drm_trace_tool.cc",
     "src/ec_typec_tool.cc",
     "src/ectool_util.cc",
     "src/example_tool.cc",
@@ -103,13 +125,17 @@ static_library("libdebugd") {
     "src/ipaddrs_tool.cc",
     "src/kernel_feature_tool.cc",
     "src/log_tool.cc",
+    "src/lp_tools.cc",
     "src/memory_tool.cc",
+    "src/metrics.cc",
     "src/netif_tool.cc",
     "src/network_status_tool.cc",
     "src/oom_adj_tool.cc",
     "src/packet_capture_tool.cc",
     "src/perf_tool.cc",
+    "src/perfetto_tool.cc",
     "src/ping_tool.cc",
+    "src/printscan_tool.cc",
     "src/probe_tool.cc",
     "src/process_with_id.cc",
     "src/process_with_output.cc",
@@ -121,11 +147,11 @@ static_library("libdebugd") {
     "src/simple_service_tool.cc",
     "src/storage_tool.cc",
     "src/subprocess_tool.cc",
-    "src/swap_tool.cc",
     "src/sysrq_tool.cc",
     "src/systrace_tool.cc",
     "src/tracepath_tool.cc",
     "src/u2f_tool.cc",
+    "src/upstart_tools.cc",
     "src/variant_utils.cc",
     "src/verify_ro_tool.cc",
     "src/wifi_fw_dump_tool.cc",
@@ -133,11 +159,16 @@ static_library("libdebugd") {
   ]
   configs += [ ":target_defaults" ]
   all_dependent_configs = [ ":libdebugd_dependent_config" ]
-  libs = [ "policy" ]
-  deps = [
-    ":debugd-adaptors",
-    ":external-proto",
+  libs = [
+    "policy",
+    "rootdev",
   ]
+  deps = [
+    ":cryptohome-proto",
+    ":debugd-adaptors",
+    ":scheduler_configuration_utils",
+  ]
+  pkg_deps = [ "re2" ]
 }
 
 static_library("debugd_dbus_utils") {
@@ -148,17 +179,45 @@ static_library("debugd_dbus_utils") {
   configs += [ ":target_defaults" ]
 }
 
+static_library("scheduler_configuration_utils") {
+  sources = [ "src/helpers/scheduler_configuration_utils.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [
+    ":debugd_dbus_utils",
+    ":power_manager-proto",
+  ]
+}
+
 pkg_config("debugd_config") {
   pkg_deps = [ "protobuf" ]
 }
 
+install_config("debugd_share_config") {
+  sources = [ "share/perfetto_feedback_config.textproto" ]
+  install_path = "/usr/share/debugd"
+}
+
 executable("debugd") {
   sources = [ "src/main.cc" ]
+  install_path = "/sbin"
   configs += [
     ":debugd_config",
     ":target_defaults",
   ]
-  deps = [ ":libdebugd" ]
+  deps = [
+    ":debugd_share_config",
+    ":libdebugd",
+  ]
+}
+
+install_config("install_tmpfilesd") {
+  sources = [ "tmpfiles.d/debugd.conf" ]
+  install_path = "tmpfilesd"
+}
+
+install_config("install_tmpfilesd_dev") {
+  sources = [ "tmpfiles.d/on-demand/debugd-dev.conf" ]
+  install_path = "tmpfiled_ondemand"
 }
 
 pkg_config("capture_packets_config") {
@@ -171,6 +230,7 @@ executable("capture_packets") {
     ":capture_packets_config",
     ":target_defaults",
   ]
+  install_path = debugd_helpers_install_path
   libs = [ "pcap" ]
 }
 
@@ -179,11 +239,13 @@ executable("cups_uri_helper") {
     "src/helpers/cups_uri_helper.cc",
     "src/helpers/cups_uri_helper_utils.cc",
   ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
 }
 
 executable("dev_features_chrome_remote_debugging") {
   sources = [ "src/helpers/dev_features_chrome_remote_debugging.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
   deps = [ ":libdebugd" ]
 }
@@ -193,12 +255,14 @@ executable("dev_features_password") {
     "src/helpers/dev_features_password.cc",
     "src/helpers/dev_features_password_utils.cc",
   ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
   deps = [ ":libdebugd" ]
 }
 
 executable("dev_features_rootfs_verification") {
   sources = [ "src/helpers/dev_features_rootfs_verification.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
   libs = [ "rootdev" ]
   deps = [ ":libdebugd" ]
@@ -206,6 +270,7 @@ executable("dev_features_rootfs_verification") {
 
 executable("dev_features_ssh") {
   sources = [ "src/helpers/dev_features_ssh.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
   deps = [ ":libdebugd" ]
 }
@@ -216,6 +281,7 @@ pkg_config("dev_features_usb_boot_config") {
 
 executable("dev_features_usb_boot") {
   sources = [ "src/helpers/dev_features_usb_boot.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [
     ":dev_features_usb_boot_config",
     ":target_defaults",
@@ -223,34 +289,84 @@ executable("dev_features_usb_boot") {
   deps = [ ":libdebugd" ]
 }
 
+pkg_config("audit_log_utils_config") {
+  pkg_deps = [ "re2" ]
+}
+
+executable("audit_log_filter") {
+  sources = [
+    "src/helpers/audit_log_filter.cc",
+    "src/helpers/audit_log_utils.cc",
+  ]
+  install_path = debugd_helpers_install_path
+  configs += [
+    ":target_defaults",
+    ":audit_log_utils_config",
+  ]
+  deps = [ ":libdebugd" ]
+}
+
+pkg_config("folder_size_dump_config") {
+  pkg_deps = [ "re2" ]
+}
+
+executable("folder_size_dump") {
+  sources = [ "src/helpers/folder_size_dump.cc" ]
+  install_path = debugd_helpers_install_path
+  configs += [
+    ":target_defaults",
+    ":folder_size_dump_config",
+  ]
+}
+
 executable("generate_logs") {
   sources = [ "tools/generate_logs.cc" ]
+  install_path = "bin"
   configs += [ ":target_defaults" ]
+}
+
+pkg_config("icmp_config") {
+  pkg_deps = [ "re2" ]
 }
 
 executable("icmp") {
   sources = [ "src/helpers/icmp.cc" ]
+  install_path = debugd_helpers_install_path
+  configs += [
+    ":target_defaults",
+    ":icmp_config",
+  ]
+}
+
+executable("modetest_helper") {
+  sources = [
+    "src/helpers/modetest_helper.cc",
+    "src/helpers/modetest_helper_utils.cc",
+  ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
+  pkg_deps = [ "re2" ]
 }
 
 executable("netif") {
   sources = [ "src/helpers/netif.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
   deps = [ ":debugd_dbus_utils" ]
 }
 
 executable("network_status") {
   sources = [ "src/helpers/network_status.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
   deps = [ ":debugd_dbus_utils" ]
 }
 
 executable("scheduler_configuration_helper") {
-  sources = [
-    "src/helpers/scheduler_configuration_helper.cc",
-    "src/helpers/scheduler_configuration_utils.cc",
-  ]
+  sources = [ "src/helpers/scheduler_configuration_helper.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [ ":target_defaults" ]
+  deps = [ ":scheduler_configuration_utils" ]
 }
 
 pkg_config("usb4_devinfo_helper_config") {
@@ -259,9 +375,26 @@ pkg_config("usb4_devinfo_helper_config") {
 
 executable("usb4_devinfo_helper") {
   sources = [ "src/helpers/usb4_devinfo_helper.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [
     ":target_defaults",
     ":usb4_devinfo_helper_config",
+  ]
+}
+
+pkg_config("typec_connector_class_helper_config") {
+  pkg_deps = [ "re2" ]
+}
+
+executable("typec_connector_class_helper") {
+  sources = [
+    "src/helpers/typec_connector_class_helper.cc",
+    "src/helpers/typec_connector_class_helper_utils.cc",
+  ]
+  install_path = debugd_helpers_install_path
+  configs += [
+    ":target_defaults",
+    ":typec_connector_class_helper_config",
   ]
 }
 
@@ -271,10 +404,21 @@ pkg_config("bt_usb_disconnect_helper_config") {
 
 executable("bt_usb_disconnect_helper") {
   sources = [ "src/helpers/bt_usb_disconnect_helper.cc" ]
+  install_path = debugd_helpers_install_path
   configs += [
     ":target_defaults",
     ":bt_usb_disconnect_helper_config",
   ]
+}
+
+install_config("install_helper_scripts") {
+  sources = [
+    "src/helpers/capture_utility.sh",
+    "src/helpers/minijail-setuid-hack.sh",
+    "src/helpers/systrace.sh",
+  ]
+  install_path = debugd_helpers_install_path
+  options = "-m755"
 }
 
 if (use.test) {
@@ -282,28 +426,43 @@ if (use.test) {
     pkg_deps = [
       "libchrome-test",
       "protobuf",
+      "re2",
     ]
   }
 
   executable("debugd_testrunner") {
     sources = [
       "src/crash_sender_tool_test.cc",
+      "src/cups_tool_test.cc",
       "src/dev_mode_no_owner_restriction_test.cc",
+      "src/dmesg_tool_test.cc",
+      "src/drm_trace_tool_test.cc",
+      "src/ec_typec_tool_test.cc",
       "src/helper_utils_test.cc",
+      "src/helpers/audit_log_utils.cc",
+      "src/helpers/audit_log_utils_test.cc",
       "src/helpers/cups_uri_helper_test.cc",
       "src/helpers/cups_uri_helper_utils.cc",
       "src/helpers/dev_features_password_utils.cc",
       "src/helpers/dev_features_password_utils_test.cc",
-      "src/helpers/scheduler_configuration_utils.cc",
+      "src/helpers/modetest_helper_utils.cc",
+      "src/helpers/modetest_helper_utils_test.cc",
       "src/helpers/scheduler_configuration_utils_test.cc",
       "src/log_tool_doc_test.cc",
       "src/log_tool_test.cc",
+      "src/metrics_test.cc",
+      "src/perf_tool_test.cc",
+      "src/printscan_tool_test.cc",
+      "src/probe_tool_test.cc",
       "src/process_with_id_test.cc",
       "src/storage_tool_test.cc",
       "src/subprocess_tool_test.cc",
+      "src/upstart_tools_test.cc",
     ]
+    run_test = true
     configs += [
       "//common-mk:test",
+      ":audit_log_utils_config",
       ":debugd_testrunner_config",
       ":target_defaults",
     ]
@@ -311,7 +470,21 @@ if (use.test) {
     deps = [
       ":debugd_dbus_utils",
       ":libdebugd",
+      ":scheduler_configuration_utils",
       "//common-mk/testrunner",
+    ]
+  }
+}
+
+if (use.fuzzer) {
+  executable("debugd_cups_uri_helper_utils_fuzzer") {
+    sources = [
+      "src/helpers/cups_uri_helper_utils.cc",
+      "src/helpers/cups_uri_helper_utils_fuzzer.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":target_defaults",
     ]
   }
 }

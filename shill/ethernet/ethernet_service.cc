@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,7 +20,7 @@
 #include "shill/ethernet/ethernet_provider.h"
 #include "shill/manager.h"
 #include "shill/profile.h"
-#include "shill/store_interface.h"
+#include "shill/store/store_interface.h"
 
 namespace shill {
 
@@ -82,7 +82,7 @@ std::string EthernetService::GetStorageIdentifier() const {
   if (mac_address->empty()) {
     mac_address = &props_.ethernet_->mac_address();
   }
-  return base::StringPrintf("%s_%s", technology().GetName().c_str(),
+  return base::StringPrintf("%s_%s", GetTechnologyName().c_str(),
                             mac_address->c_str());
 }
 
@@ -101,7 +101,7 @@ bool EthernetService::SetAutoConnectFull(const bool& connect, Error* error) {
 }
 
 void EthernetService::Remove(Error* error) {
-  error->Populate(Error::kNotSupported);
+  error->Populate(Error::kNotImplemented);
 }
 
 bool EthernetService::IsVisible() const {
@@ -123,10 +123,10 @@ void EthernetService::OnVisibilityChanged() {
   NotifyIfVisibilityChanged();
 }
 
-std::string EthernetService::GetTethering(Error* /*error*/) const {
-  return props_.ethernet_ && props_.ethernet_->IsConnectedViaTether()
-             ? kTetheringConfirmedState
-             : kTetheringNotDetectedState;
+Service::TetheringState EthernetService::GetTethering() const {
+  return attached_network() && attached_network()->IsConnectedViaTether()
+             ? TetheringState::kConfirmed
+             : TetheringState::kNotDetected;
 }
 
 }  // namespace shill

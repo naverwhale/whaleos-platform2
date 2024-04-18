@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,42 +6,43 @@
 
 #include <utility>
 
-#include <base/callback.h>
-#include <base/check.h>
-#include <base/optional.h>
+#include <base/functional/callback.h>
 
+#include "diagnostics/cros_healthd/system/context.h"
 #include "diagnostics/cros_healthd/utils/error_utils.h"
-#include "mojo/cros_healthd_probe.mojom.h"
-#include "mojo/network_health.mojom.h"
+#include "diagnostics/mojom/external/network_health_types.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
 
 namespace {
 
-namespace cros_healthd_ipc = ::chromeos::cros_healthd::mojom;
+namespace cros_healthd_ipc = ::ash::cros_healthd::mojom;
 namespace network_health_ipc = ::chromeos::network_health::mojom;
 
 // Forwards the response from Chrome's NetworkHealthService to the caller.
-void HandleNetworkInfoResponse(
+void HandleNetworkHealthStateResponse(
     base::OnceCallback<void(cros_healthd_ipc::NetworkResultPtr)> callback,
-    base::Optional<network_health_ipc::NetworkHealthStatePtr> result) {
-  if (result == base::nullopt) {
+    network_health_ipc::NetworkHealthStatePtr result) {
+  auto info =
+      cros_healthd_ipc::NetworkResult::NewNetworkHealth(std::move(result));
+  std::move(callback).Run(std::move(info));
+}
+
+}  // namespace
+
+void FetchNetworkInfo(Context* context, FetchNetworkInfoCallback callback) {
+  auto* network_health = context->mojo_service()->GetNetworkHealth();
+
+  if (!network_health) {
     std::move(callback).Run(cros_healthd_ipc::NetworkResult::NewError(
         CreateAndLogProbeError(cros_healthd_ipc::ErrorType::kServiceUnavailable,
                                "Network Health Service unavailable")));
     return;
   }
 
-  auto info = cros_healthd_ipc::NetworkResult::New();
-  info->set_network_health(std::move(result.value()));
-  std::move(callback).Run(std::move(info));
-}
-
-}  // namespace
-
-void NetworkFetcher::FetchNetworkInfo(FetchNetworkInfoCallback callback) {
-  context_->network_health_adapter()->GetNetworkHealthState(
-      base::BindOnce(&HandleNetworkInfoResponse, std::move(callback)));
+  network_health->GetHealthSnapshot(
+      base::BindOnce(&HandleNetworkHealthStateResponse, std::move(callback)));
 }
 
 }  // namespace diagnostics

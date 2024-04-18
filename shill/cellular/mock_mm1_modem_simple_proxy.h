@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
 #include "shill/cellular/mm1_modem_simple_proxy_interface.h"
@@ -25,13 +24,12 @@ class MockModemSimpleProxy : public ModemSimpleProxyInterface {
 
   MOCK_METHOD(void,
               Connect,
-              (const KeyValueStore&, const RpcIdentifierCallback&, int),
+              (const KeyValueStore&, RpcIdentifierCallback, int),
               (override));
   MOCK_METHOD(void,
               Disconnect,
-              (const RpcIdentifier&, const ResultCallback&, int),
+              (const RpcIdentifier&, ResultCallback, int),
               (override));
-  MOCK_METHOD(void, GetStatus, (const KeyValueStoreCallback&, int), (override));
 };
 
 }  // namespace mm1

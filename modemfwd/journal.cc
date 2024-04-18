@@ -1,17 +1,20 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "modemfwd/journal.h"
 
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include <base/check.h>
 #include <base/files/file.h>
 #include <base/logging.h>
+#include <base/stl_util.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <base/types/optional_util.h>
 #include <brillo/proto_file_io.h>
 #include <chromeos/switches/modemfwd_switches.h>
 
@@ -81,18 +84,19 @@ bool RestartOperation(const JournalEntry& entry,
 
     switch (entry_type) {
       case JournalEntryType::MAIN:
-        info = base::OptionalOrNullptr<FirmwareFileInfo>(res.main_firmware);
+        info = base::OptionalToPtr<FirmwareFileInfo>(res.main_firmware);
         break;
       case JournalEntryType::CARRIER:
-        info = base::OptionalOrNullptr<FirmwareFileInfo>(res.carrier_firmware);
+        info = base::OptionalToPtr<FirmwareFileInfo>(res.carrier_firmware);
         break;
       case JournalEntryType::OEM:
-        info = base::OptionalOrNullptr<FirmwareFileInfo>(res.oem_firmware);
+        info = base::OptionalToPtr<FirmwareFileInfo>(res.oem_firmware);
         break;
     }
 
     auto firmware_file = std::make_unique<FirmwareFile>();
-    if (info == nullptr || !firmware_file->PrepareFrom(*info)) {
+    if (info == nullptr ||
+        !firmware_file->PrepareFrom(firmware_dir->GetFirmwarePath(), *info)) {
       LOG(ERROR) << "Unfinished \"" << fw_type
                  << "\" firmware flash for device with ID \""
                  << entry.device_id() << "\" but no firmware was found";
@@ -103,6 +107,26 @@ bool RestartOperation(const JournalEntry& entry,
         {fw_type, firmware_file->path_on_filesystem(), info->version});
     paths_for_logging.push_back(firmware_file->path_for_logging().value());
     all_files.push_back(std::move(firmware_file));
+
+    // Main firmware may also include associated firmware payloads that we will
+    // simply reflash as well.
+    if (entry_type == JournalEntryType::MAIN) {
+      for (const auto& assoc_entry : res.assoc_firmware) {
+        auto assoc_file = std::make_unique<FirmwareFile>();
+        if (!assoc_file->PrepareFrom(firmware_dir->GetFirmwarePath(),
+                                     assoc_entry.second)) {
+          LOG(ERROR) << "Unfinished \"" << fw_type
+                     << "\" firmware flash for device with ID \""
+                     << entry.device_id() << "\" but no firmware was found";
+          continue;
+        }
+
+        flashed_fw.push_back({assoc_entry.first,
+                              assoc_file->path_on_filesystem(),
+                              assoc_entry.second.version});
+        paths_for_logging.push_back(assoc_file->path_for_logging().value());
+      }
+    }
   }
   if (flashed_fw.size() != entry.type_size() || !flashed_fw.size()) {
     LOG(ERROR) << "Malformed journal entry with invalid types.";

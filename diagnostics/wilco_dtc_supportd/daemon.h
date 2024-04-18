@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <memory>
 
-#include <base/macros.h>
 #include <base/timer/timer.h>
 #include <brillo/daemons/dbus_daemon.h>
 #include <mojo/core/embedder/scoped_ipc_support.h>
@@ -20,6 +19,7 @@
 #include "diagnostics/wilco_dtc_supportd/mojo_service_factory.h"
 
 namespace diagnostics {
+namespace wilco {
 
 // Daemon class for the wilco_dtc_supportd daemon.
 class Daemon final : public brillo::DBusServiceDaemon {
@@ -52,6 +52,7 @@ class Daemon final : public brillo::DBusServiceDaemon {
   base::OneShotTimer force_shutdown_timer_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_DAEMON_H_

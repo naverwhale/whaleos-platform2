@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -10,16 +10,19 @@
 
 #include <base/check_op.h>
 #include <base/command_line.h>
+#include <base/containers/cxx20_erase.h>
 #include <base/files/file_util.h>
 #include <base/process/launch.h>
 #include <base/posix/safe_strerror.h>
-#include <base/stl_util.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/synchronization/waitable_event.h>
+#include <base/time/time.h>
 #include <base/threading/thread.h>
+#include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
 #include <gtest/gtest.h>
 #include <libyuv.h>
@@ -29,15 +32,47 @@
 #include "common/libcamera_connector_test/util.h"
 #include "cros-camera/camera_service_connector.h"
 #include "cros-camera/common.h"
+#include "cros-camera/common_types.h"
 #include "cros-camera/future.h"
 #include "cros-camera/ipc_util.h"
 
-namespace cros {
-namespace tests {
+namespace cros::tests {
+
+struct ContinuousCaptureOptions {
+  int capture_duration_secs = 3;
+  int camera_id = 0;
+  Size capture_size{1280, 720};
+  int fps = 30;
+  uint32_t format = V4L2_PIX_FMT_NV12;
+} g_cont_capture_args;
+
+cros::Size ParseSize(std::string size_str) {
+  CHECK(!size_str.empty());
+  std::vector<std::string> arg_split = base::SplitString(
+      size_str, "x", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+  CHECK_EQ(arg_split.size(), 2);
+  Size ret;
+  CHECK(base::StringToUint(arg_split[0], &ret.width));
+  CHECK(base::StringToUint(arg_split[1], &ret.height));
+  return ret;
+}
+
+uint32_t ParseFormat(std::string argv) {
+  CHECK(!argv.empty());
+  std::string upper_argv = base::ToUpperASCII(argv);
+
+  CHECK(upper_argv == "NV12" || upper_argv == "MJPEG")
+      << "Unrecognized input format: " << argv;
+  if (upper_argv == "NV12") {
+    return V4L2_PIX_FMT_NV12;
+  } else {  // upper_argv == "MJPEG"
+    return V4L2_PIX_FMT_MJPEG;
+  }
+}
 
 namespace {
 
-constexpr auto kDefaultTimeout = base::TimeDelta::FromSeconds(5);
+constexpr auto kDefaultTimeout = base::Seconds(5);
 
 // TODO(b/151047930): Test hotplugging with vivid.
 bool IsVividLoaded() {
@@ -130,15 +165,14 @@ class FrameCapturer {
   // Run starts a capture session with the given |id| and |format|. Fires
   // |callback| with the number of frames captured or the error status if an
   // error is encountered.
-  // TODO(b/168769598): Change |callback| to base::OnceCallback once
-  // cros::GetFutureCallback() returns base::OnceCallback.
   void RunAsync(int id,
                 cros_cam_format_info_t format,
-                base::Callback<void(int)> callback) {
+                base::OnceCallback<void(int)> callback) {
     int ret = StartCapture(id, std::move(format));
     if (ret != 0) {
       LOGF(ERROR) << "Failed to start capture";
-      callback.Run(ret);
+      std::move(callback).Run(ret);
+      return;
     }
     thread_.task_runner()->PostTask(
         FROM_HERE, base::BindOnce(&FrameCapturer::WaitForCaptureResult,
@@ -163,7 +197,7 @@ class FrameCapturer {
                                   this);
   }
 
-  void WaitForCaptureResult(base::Callback<void(int)> callback) {
+  void WaitForCaptureResult(base::OnceCallback<void(int)> callback) {
     // Wait until |duration_| passed or |num_frames_| captured. Fires |callback|
     // with the number of frames captured or the error status if an error is
     // encountered.
@@ -173,7 +207,8 @@ class FrameCapturer {
     }
     LOGF(INFO) << "Last status = " << last_status_;
     LOGF(INFO) << "Captured " << num_frames_captured_ << " frames";
-    callback.Run(last_status_ != 0 ? last_status_ : num_frames_captured_);
+    std::move(callback).Run(last_status_ != 0 ? last_status_
+                                              : num_frames_captured_);
   }
 
   // Non-zero return value should stop the capture.
@@ -206,6 +241,11 @@ class FrameCapturer {
 
   static int CaptureCallback(void* context,
                              const cros_cam_capture_result_t* result) {
+    static base::Time last_frame_time = base::Time::Now();
+    base::TimeDelta frame_interval = base::Time::Now() - last_frame_time;
+    last_frame_time = base::Time::Now();
+    VLOGF(1) << "Frame interval: " << frame_interval.InMilliseconds() << " ms";
+
     auto* self = reinterpret_cast<FrameCapturer*>(context);
     return self->GotCaptureResult(result);
   }
@@ -348,10 +388,26 @@ TEST_P(CaptureTest, OneFrame) {
 }
 
 TEST_P(CaptureTest, ThreeSeconds) {
-  const auto kDuration = base::TimeDelta::FromSeconds(3);
+  const auto kDuration = base::Seconds(3);
   int num_frames_captured =
       capturer_.SetDuration(kDuration).Run(camera_id_, format_);
   // It's expected to get more than 1 frame in 3s.
+  EXPECT_GT(num_frames_captured, 1);
+}
+
+TEST(DISABLED_CaptureTest, ContinuousCapture) {
+  const auto kDuration =
+      base::Seconds(g_cont_capture_args.capture_duration_secs);
+  cros_cam_format_info_t format = {
+      .fourcc = g_cont_capture_args.format,
+      .width = static_cast<int>(g_cont_capture_args.capture_size.width),
+      .height = static_cast<int>(g_cont_capture_args.capture_size.height),
+      .fps = g_cont_capture_args.fps,
+  };
+  FrameCapturer capturer;
+  int num_frames_captured = capturer.SetDuration(kDuration).Run(
+      g_cont_capture_args.camera_id, format);
+  // It's expected to get more than 1 frame.
   EXPECT_GT(num_frames_captured, 1);
 }
 
@@ -385,9 +441,9 @@ TEST(ConnectorTest, CompareFrames) {
   EXPECT_GE(ssim, 0.3);
 
   // If the frames are exactly same (ssim = 1.0), the frame is likely broken
-  // such as all pixels are black. Set the threshold as 0.99 for potential jpeg
+  // such as all pixels are black. Set the threshold as 0.999 for potential jpeg
   // artifacts and floating point error.
-  EXPECT_LE(ssim, 0.99);
+  EXPECT_LE(ssim, 0.999);
 }
 
 TEST(ConnectorTest, RestartCrosCameraIdle) {
@@ -433,16 +489,32 @@ INSTANTIATE_TEST_SUITE_P(ConnectorTest,
                                fmt.height, fmt.fps);
                          });
 
-}  // namespace tests
-}  // namespace cros
+}  // namespace cros::tests
 
 int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
   base::CommandLine::Init(argc, argv);
+
   brillo::InitLog(brillo::kLogToStderr);
   logging::SetLogItems(/*enable_process_id=*/true, /*enable_thread_id=*/true,
                        /*enable_timestamp=*/true, /*enable_tickcount=*/false);
 
   ::testing::AddGlobalTestEnvironment(new cros::tests::ConnectorEnvironment());
-  ::testing::InitGoogleTest(&argc, argv);
+
+  DEFINE_int32(duration, 3, "Duration in seconds to capture for");
+  DEFINE_int32(camera_id, 0, "ID of the camera to open");
+  DEFINE_string(size, "1280x720", "[width]x[height] of the frames to capture");
+  DEFINE_int32(fps, 30, "Frame rate to capture with");
+  DEFINE_string(format, "NV12", "The pixel format to capture with");
+  brillo::FlagHelper::Init(argc, argv, "CaptureTest.ContinuousCapture args");
+
+  cros::tests::g_cont_capture_args = {
+      .capture_duration_secs = FLAGS_duration,
+      .camera_id = FLAGS_camera_id,
+      .capture_size = cros::tests::ParseSize(FLAGS_size),
+      .fps = FLAGS_fps,
+      .format = cros::tests::ParseFormat(FLAGS_format),
+  };
+
   return RUN_ALL_TESTS();
 }

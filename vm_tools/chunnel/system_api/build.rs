@@ -1,10 +1,9 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-extern crate protoc_rust;
-
 use std::env;
+use std::ffi::OsStr;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::Write;
@@ -20,19 +19,31 @@ fn paths_to_strs<P: AsRef<Path>>(paths: &[P]) -> Vec<&str> {
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let proto_root = match env::var("SYSROOT") {
-        Ok(dir) => PathBuf::from(dir).join("usr/include/chromeos"),
+        Ok(dir) => {
+            let sysroot = PathBuf::from(dir);
+            sysroot.join(
+                if matches!(sysroot.file_name(), Some(name) if name == OsStr::new("usr")) {
+                    "include/chromeos"
+                } else {
+                    "usr/include/chromeos"
+                },
+            )
+        }
         // Make this work when typing "cargo build" in platform2/vm_tools/chunnel.
         Err(_) => PathBuf::from("../../../system_api"),
     };
+    let dbus_dir = proto_root.join("dbus");
+    let applications_dir = proto_root.join("dbus/vm_applications");
     let chunneld_dir = proto_root.join("dbus/chunneld");
     let cicerone_dir = proto_root.join("dbus/vm_cicerone");
     let input_files = [
+        applications_dir.join("apps.proto"),
         chunneld_dir.join("chunneld_service.proto"),
         cicerone_dir.join("cicerone_service.proto"),
     ];
-    let include_dirs = [chunneld_dir, cicerone_dir];
+    let include_dirs = [dbus_dir, chunneld_dir, cicerone_dir];
 
-    protoc_rust::Codegen::new()
+    protobuf_codegen::Codegen::new()
         .out_dir(out_dir.as_os_str().to_str().unwrap())
         .inputs(&paths_to_strs(&input_files))
         .includes(&paths_to_strs(&include_dirs))

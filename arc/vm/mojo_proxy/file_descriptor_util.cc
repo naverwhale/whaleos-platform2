@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,10 +17,13 @@
 // Needs to be included after sys/socket.h
 #include <linux/un.h>
 
+#include <optional>
+
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
+#include <brillo/files/file_util.h>
 
 namespace arc {
 namespace {
@@ -43,26 +46,26 @@ bool ToSockAddr(const base::FilePath& path, struct sockaddr_un* sa) {
 
 }  // namespace
 
-base::Optional<std::pair<base::ScopedFD, base::ScopedFD>> CreatePipe() {
+std::optional<std::pair<base::ScopedFD, base::ScopedFD>> CreatePipe() {
   int fds[2];
   if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) == -1) {
     PLOG(ERROR) << "Failed to create pipe";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  return base::make_optional(
+  return std::make_optional(
       std::make_pair(base::ScopedFD(fds[0]), base::ScopedFD(fds[1])));
 }
 
-base::Optional<std::pair<base::ScopedFD, base::ScopedFD>> CreateSocketPair(
+std::optional<std::pair<base::ScopedFD, base::ScopedFD>> CreateSocketPair(
     int type) {
   int fds[2];
   if (socketpair(AF_UNIX, type | SOCK_CLOEXEC, 0 /* protocol */, fds) == -1) {
     PLOG(ERROR) << "Failed to create socketpair";
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  return base::make_optional(
+  return std::make_optional(
       std::make_pair(base::ScopedFD(fds[0]), base::ScopedFD(fds[1])));
 }
 
@@ -81,7 +84,7 @@ base::ScopedFD CreateUnixDomainSocket(const base::FilePath& path) {
   }
 
   // Remove stale file first. Ignore the error intentionally.
-  base::DeleteFile(path);
+  brillo::DeleteFile(path);
 
   if (bind(fd.get(), reinterpret_cast<const struct sockaddr*>(&sa),
            sizeof(sa)) == -1) {

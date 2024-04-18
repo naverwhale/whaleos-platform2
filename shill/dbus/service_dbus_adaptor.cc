@@ -1,9 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dbus/service_dbus_adaptor.h"
 
+#include <cstdint>
 #include <utility>
 
 #include <base/logging.h>
@@ -32,7 +33,7 @@ const char ServiceDBusAdaptor::kPath[] = "/service/";
 ServiceDBusAdaptor::ServiceDBusAdaptor(const scoped_refptr<dbus::Bus>& bus,
                                        Service* service)
     : org::chromium::flimflam::ServiceAdaptor(this),
-      DBusAdaptor(bus, kPath + service->GetDBusObjectPathIdentifer()),
+      DBusAdaptor(bus, kPath + service->GetDBusObjectPathIdentifier()),
       service_(service) {
   // Register DBus object.
   RegisterWithDBusObject(dbus_object());
@@ -40,7 +41,7 @@ ServiceDBusAdaptor::ServiceDBusAdaptor(const scoped_refptr<dbus::Bus>& bus,
 }
 
 ServiceDBusAdaptor::~ServiceDBusAdaptor() {
-  dbus_object()->UnregisterAsync();
+  dbus_object()->UnregisterAndBlock();
   service_ = nullptr;
 }
 
@@ -73,6 +74,12 @@ void ServiceDBusAdaptor::EmitUintChanged(const std::string& name,
   SendPropertyChangedSignal(name, brillo::Any(value));
 }
 
+void ServiceDBusAdaptor::EmitUint64Changed(const std::string& name,
+                                           uint64_t value) {
+  SLOG(this, 2) << __func__ << ": " << name;
+  SendPropertyChangedSignal(name, brillo::Any(value));
+}
+
 void ServiceDBusAdaptor::EmitIntChanged(const std::string& name, int value) {
   SLOG(this, 2) << __func__ << ": " << name;
   SendPropertyChangedSignal(name, brillo::Any(value));
@@ -92,6 +99,12 @@ void ServiceDBusAdaptor::EmitStringChanged(const std::string& name,
 
 void ServiceDBusAdaptor::EmitStringmapChanged(const std::string& name,
                                               const Stringmap& value) {
+  SLOG(this, 2) << __func__ << ": " << name;
+  SendPropertyChangedSignal(name, brillo::Any(value));
+}
+
+void ServiceDBusAdaptor::EmitStringmapsChanged(const std::string& name,
+                                               const Stringmaps& value) {
   SLOG(this, 2) << __func__ << ": " << name;
   SendPropertyChangedSignal(name, brillo::Any(value));
 }
@@ -161,15 +174,6 @@ bool ServiceDBusAdaptor::Remove(brillo::ErrorPtr* error) {
   return !e.ToChromeosError(error);
 }
 
-bool ServiceDBusAdaptor::ActivateCellularModem(brillo::ErrorPtr* error,
-                                               const std::string& carrier) {
-  SLOG(this, 2) << __func__;
-  Error e;
-  Error::PopulateAndLog(FROM_HERE, &e, Error::kNotSupported,
-                        "Service doesn't support cellular modem activation.");
-  return !e.ToChromeosError(error);
-}
-
 bool ServiceDBusAdaptor::CompleteCellularActivation(brillo::ErrorPtr* error) {
   SLOG(this, 2) << __func__;
   Error e;
@@ -216,20 +220,20 @@ bool ServiceDBusAdaptor::GetEapPassphrase(brillo::ErrorPtr* error,
   return true;
 }
 
+bool ServiceDBusAdaptor::RequestPortalDetection(brillo::ErrorPtr* error) {
+  SLOG(this, 2) << __func__;
+  Error e;
+  service_->RequestPortalDetection(&e);
+  return !e.ToChromeosError(error);
+}
+
 void ServiceDBusAdaptor::RequestTrafficCounters(
     DBusMethodResponsePtr<VariantDictionaries> response) {
   SLOG(this, 2) << __func__;
 
-  Error e(Error::kOperationInitiated);
-  ResultVariantDictionariesCallback callback =
-      base::Bind(&ServiceDBusAdaptor::VariantDictionariesMethodReplyCallback,
-                 weak_factory_.GetWeakPtr(), base::Passed(&response));
-  service_->RequestTrafficCounters(&e, callback);
-  // Invoke response if command is completed synchronously (either success or
-  // failure).
-  if (!e.IsOngoing()) {
-    callback.Run(e, std::vector<brillo::VariantDictionary>());
-  }
+  service_->RequestTrafficCounters(base::BindOnce(
+      &ServiceDBusAdaptor::VariantDictionariesMethodReplyCallback,
+      weak_factory_.GetWeakPtr(), std::move(response)));
 }
 
 void ServiceDBusAdaptor::VariantDictionariesMethodReplyCallback(

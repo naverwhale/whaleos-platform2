@@ -1,21 +1,23 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ethernet/ethernet_service.h"
 
+#include <base/memory/weak_ptr.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "shill/ethernet/mock_ethernet.h"
-#include "shill/ethernet/mock_ethernet_provider.h"
-#include "shill/fake_store.h"
 #include "shill/mock_adaptors.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_profile.h"
-#include "shill/property_store_test.h"
+#include "shill/network/mock_network.h"
 #include "shill/refptr_types.h"
 #include "shill/service_property_change_test.h"
+#include "shill/store/fake_store.h"
+#include "shill/store/property_store_test.h"
+#include "shill/technology.h"
 
 using ::testing::_;
 using ::testing::NiceMock;
@@ -112,11 +114,17 @@ TEST_F(EthernetServiceTest, LoadAutoConnect) {
 }
 
 TEST_F(EthernetServiceTest, GetTethering) {
-  EXPECT_CALL(*ethernet_, IsConnectedViaTether())
+  EXPECT_EQ(nullptr, service_->attached_network());
+  EXPECT_EQ(Service::TetheringState::kNotDetected, service_->GetTethering());
+
+  MockNetwork network(1, "eth0", Technology::kEthernet);
+  service_->SetAttachedNetwork(network.AsWeakPtr());
+  EXPECT_CALL(network, IsConnectedViaTether())
       .WillOnce(Return(true))
       .WillOnce(Return(false));
-  EXPECT_EQ(kTetheringConfirmedState, service_->GetTethering(nullptr));
-  EXPECT_EQ(kTetheringNotDetectedState, service_->GetTethering(nullptr));
+  EXPECT_NE(nullptr, service_->attached_network());
+  EXPECT_EQ(Service::TetheringState::kConfirmed, service_->GetTethering());
+  EXPECT_EQ(Service::TetheringState::kNotDetected, service_->GetTethering());
 }
 
 TEST_F(EthernetServiceTest, IsVisible) {

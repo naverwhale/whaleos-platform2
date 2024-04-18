@@ -1,20 +1,25 @@
-/* Copyright 2019 The Chromium OS Authors. All rights reserved.
+/* Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
 
-#include <base/files/file_util.h>
-#include <base/strings/string_number_conversions.h>
-#include <brillo/dbus/dbus_connection.h>
-#include <mojo/core/embedder/embedder.h>
-#include <mojo/public/cpp/platform/platform_channel.h>
+#include "cros-camera/cros_camera_hal.h"
+
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+
 #include <utility>
 
+#include <base/functional/bind.h>
+#include <base/files/scoped_file.h>
+#include <base/strings/string_number_conversions.h>
+#include <brillo/dbus/dbus_connection.h>
+#include <chromeos-config/libcros_config/cros_config.h>
+#include <mojo/core/embedder/embedder.h>
+#include <mojo/public/cpp/platform/platform_channel.h>
+
 #include "cros-camera/common.h"
-#include "cros-camera/cros_camera_hal.h"
 #include "cros-camera/export.h"
 #include "dbus_proxies/dbus-proxies.h"
 #include "hal/ip/camera_hal.h"
@@ -117,10 +122,14 @@ int CameraHal::Init() {
     return -EBUSY;
   }
 
-  // Do not try to connect to the IP peripheral on devices where the IGB driver
-  // does not exist.
-  if (!base::DirectoryExists(base::FilePath("/sys/bus/pci/drivers/igb"))) {
-    LOGF(INFO) << "IGB driver not found, IP cameras won't work";
+  brillo::CrosConfig config;
+  std::string has_poe_peripheral_support;
+  if (!config.GetString("/hardware-properties", "has-poe-peripheral-support",
+                        &has_poe_peripheral_support) ||
+      has_poe_peripheral_support.compare("true")) {
+    // Do not try to connect to the IP peripheral on devices where support does
+    // not exist.
+    LOGF(INFO) << "IP peripherals not supported, IP cameras won't work";
     return 0;
   }
 
@@ -147,8 +156,8 @@ void CameraHal::InitOnIpcThread(scoped_refptr<Future<int>> return_val) {
       dbus_connection.Connect(), "org.chromium.IpPeripheralService");
 
   mojo::PlatformChannel channel;
-  brillo::dbus_utils::FileDescriptor handle(
-      channel.TakeRemoteEndpoint().TakePlatformHandle().TakeFD());
+  base::ScopedFD handle =
+      channel.TakeRemoteEndpoint().TakePlatformHandle().TakeFD();
 
   if (!proxy.BootstrapMojoConnection(handle, nullptr)) {
     LOGF(ERROR) << "Failed to send handle over DBus";
@@ -163,12 +172,12 @@ void CameraHal::InitOnIpcThread(scoped_refptr<Future<int>> return_val) {
   detector_.Bind(
       mojo::PendingRemote<mojom::IpCameraDetector>(std::move(pipe), 0u));
   detector_.set_disconnect_handler(
-      base::Bind(&CameraHal::OnConnectionError, base::Unretained(this)));
+      base::BindOnce(&CameraHal::OnConnectionError, base::Unretained(this)));
 
   mojo::PendingRemote<IpCameraConnectionListener> listener =
       receiver_.BindNewPipeAndPassRemote();
   receiver_.set_disconnect_handler(
-      base::Bind(&CameraHal::OnConnectionError, base::Unretained(this)));
+      base::BindOnce(&CameraHal::OnConnectionError, base::Unretained(this)));
 
   detector_->RegisterConnectionListener(std::move(listener));
   return_val->Set(0);
@@ -332,7 +341,7 @@ camera_module_t HAL_MODULE_INFO_SYM CROS_CAMERA_EXPORT = {
                .hal_api_version = HARDWARE_HAL_API_VERSION,
                .id = CAMERA_HARDWARE_MODULE_ID,
                .name = "IP Camera HAL v3",
-               .author = "The Chromium OS Authors",
+               .author = "The ChromiumOS Authors",
                .methods = &gCameraModuleMethods,
                .dso = nullptr,
                .reserved = {0}},

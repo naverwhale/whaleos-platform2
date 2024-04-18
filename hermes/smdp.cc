@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,9 @@
 #include <utility>
 
 #include <base/base64.h>
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
 #include <base/json/json_reader.h>
 #include <base/json/json_writer.h>
 #include <base/logging.h>
@@ -20,8 +20,8 @@
 
 namespace {
 
-constexpr auto kSmdxTimeout = base::TimeDelta::FromMinutes(3);
-constexpr auto kSendNotificationsTimeout = base::TimeDelta::FromSeconds(15);
+constexpr auto kSmdxTimeout = base::Minutes(3);
+constexpr auto kSendNotificationsTimeout = base::Seconds(15);
 constexpr std::string_view kHandleNotification = "handleNotification";
 
 void OnHttpsResponse(hermes::Smdp::LpaCallback cb,
@@ -61,11 +61,12 @@ std::unique_ptr<lpa::smdp::SmdpClient> SmdpFactory::NewSmdpClient(
     std::string smdp_addr,
     const lpa::proto::EuiccSpecVersion& card_verison) {
   return std::make_unique<Smdp>(std::move(smdp_addr), std::move(tls_certs_dir),
-                                logger_, executor_);
+                                card_verison, logger_, executor_);
 }
 
 Smdp::Smdp(std::string server_addr,
            const std::string& certs_dir,
+           const lpa::proto::EuiccSpecVersion& card_version,
            Logger* logger,
            Executor* executor)
     : server_transport_(brillo::http::Transport::CreateDefault()),
@@ -89,6 +90,10 @@ Smdp::Smdp(std::string server_addr,
   if (found != std::string::npos) {
     smdp_addr_.erase(0, found + 3);
   }
+  std::ostringstream stringStream;
+  stringStream << card_version.major() << "." << card_version.minor() << "."
+               << card_version.revision();
+  card_version_ = stringStream.str();
 }
 
 lpa::util::EuiccLog* Smdp::logger() {
@@ -117,12 +122,12 @@ void Smdp::SendHttps(const std::string& path,
                                      server_transport_);
   http_request.SetContentType("application/json");
   http_request.SetUserAgent("gsma-rsp-lpad");
-  http_request.AddHeader("X-Admin-Protocol", "gsma/rsp/v2.0.0");
+  http_request.AddHeader("X-Admin-Protocol", "gsma/rsp/v2.2.2");
   http_request.AddRequestBody(&request[0], request.size(), &error);
   CHECK(!error);
 
-  http_request.GetResponse(base::Bind(&OnHttpsResponse, cb),
-                           base::Bind(&OnHttpsError, cb));
+  http_request.GetResponse(base::BindOnce(&OnHttpsResponse, cb),
+                           base::BindOnce(&OnHttpsError, cb));
 }
 
 }  // namespace hermes

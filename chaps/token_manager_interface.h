@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -57,21 +57,12 @@ class TokenManagerInterface {
                          const std::string& label,
                          int* slot_id) = 0;
 
-  // Unloads a token from the given isolate.
+  // Unloads a token from the given isolate. Returns true on success.
   //
   //  isolate_credential - The isolate from which the token should be unloaded.
   //  path - The path to the token directory.
-  virtual void UnloadToken(const brillo::SecureBlob& isolate_credential,
+  virtual bool UnloadToken(const brillo::SecureBlob& isolate_credential,
                            const base::FilePath& path) = 0;
-
-  // Changes authorization data for a token.
-  //
-  //  path - The path to the token directory.
-  //  old_auth_data - The current authorization data.
-  //  new_auth_data - The new authorization data.
-  virtual void ChangeTokenAuthData(const base::FilePath& path,
-                                   const brillo::SecureBlob& old_auth_data,
-                                   const brillo::SecureBlob& new_auth_data) = 0;
 
   // Provides the token path associated with the given slot.  Returns true on
   // success.  Returns false if the slot does not exist in the given isolate or

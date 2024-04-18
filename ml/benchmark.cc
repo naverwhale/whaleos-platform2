@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,21 +7,22 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/containers/flat_map.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/run_loop.h>
 #include <base/strings/stringprintf.h>
 #include <base/task/current_thread.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/message_loops/base_message_loop.h>
 #include <google/protobuf/text_format.h>
 #include <mojo/core/core.h>
@@ -29,11 +30,13 @@
 #include <mojo/public/cpp/bindings/remote.h>
 
 #include "ml/benchmark.pb.h"
+#include "ml/model_conversions.h"
 #include "ml/model_impl.h"
 #include "ml/mojom/graph_executor.mojom.h"
 #include "ml/mojom/machine_learning_service.mojom.h"
 #include "ml/mojom/model.mojom.h"
 #include "ml/test_utils.h"
+#include "ml_benchmark/driver_common/utils.h"
 #include "proto/benchmark_config.pb.h"
 
 using ::chrome::ml_benchmark::BenchmarkResults;
@@ -42,8 +45,10 @@ using ::chrome::ml_benchmark::CrOSBenchmarkConfig;
 using ::chrome::ml_benchmark::Metric;
 using ::chromeos::machine_learning::mojom::CreateGraphExecutorResult;
 using ::chromeos::machine_learning::mojom::ExecuteResult;
+using ::chromeos::machine_learning::mojom::GpuDelegateApi;
 using ::chromeos::machine_learning::mojom::GraphExecutor;
 using ::chromeos::machine_learning::mojom::GraphExecutorOptions;
+using ::chromeos::machine_learning::mojom::GraphExecutorOptionsPtr;
 using ::chromeos::machine_learning::mojom::LoadModelResult;
 using ::chromeos::machine_learning::mojom::Model;
 using ::chromeos::machine_learning::mojom::TensorPtr;
@@ -58,8 +63,6 @@ using NodeSpec = ml::FlatBufferModelSpecProto::NodeSpec;
 namespace ml {
 namespace {
 
-// Percentiles for latency.
-constexpr int kLatencyPercentile[] = {50, 90, 95, 99};
 // Use a fake model name for benchmark runs.
 constexpr char kMlBenchmarkMetricsName[] = "benchmark_model";
 
@@ -76,24 +79,6 @@ struct AccumulativeResult {
   // Error message.
   std::string error_message;
 };
-
-// Serialize `results` into results_data and returns results.status().
-int32_t SerializeResults(const BenchmarkResults& results,
-                         void** results_data,
-                         int32_t* results_size) {
-  if (results.status() != BenchmarkReturnStatus::OK) {
-    LOG(ERROR) << "result with error: " << results.DebugString();
-  }
-  const std::string result_pb = results.SerializeAsString();
-  CHECK(!result_pb.empty());
-  const int size = result_pb.size();
-  // Will be released by the caller.
-  char* const data = new char[size];
-  result_pb.copy(data, size);
-  *results_data = data;
-  *results_size = size;
-  return results.status();
-}
 
 void InitializeOnce() {
   if (!base::CurrentThread::IsSet()) {
@@ -138,14 +123,32 @@ bool ConstructModel(const FlatBufferModelSpecProto& model_proto,
   return true;
 }
 
+void CheckGraphExecutorOptions(
+    const TfliteBenchmarkConfig& tflite_config,
+    const GraphExecutorOptions& graph_executor_options) {
+  if ((tflite_config.use_gpu()) &&
+      (graph_executor_options.gpu_delegate_api == GpuDelegateApi::UNKNOWN)) {
+    LOG(FATAL) << "Must specify GPU delegate API during benchmarking when "
+                  "using GPU delegate";
+  }
+}
+
 // Constructs `graph_executor`; returns whether the construction is successful.
 bool ConstructGraphExecutor(const mojo::Remote<Model>& model,
                             const TfliteBenchmarkConfig& tflite_config,
                             mojo::Remote<GraphExecutor>* const graph_executor) {
   bool succeeded = false;
-  model->CreateGraphExecutorWithOptions(
-      GraphExecutorOptions::New(/*use_nnapi=*/false,
-                                /*use_gpu=*/tflite_config.use_gpu()),
+
+  GpuDelegateApi gpu_delegate_api(
+      GpuDelegateApiFromProto(tflite_config.gpu_delegate_api()));
+  GraphExecutorOptionsPtr graph_executor_options(GraphExecutorOptions::New(
+      /*use_nnapi=*/false,
+      /*use_gpu=*/tflite_config.use_gpu(),
+      /*gpu_delegate_api=*/gpu_delegate_api));
+  CheckGraphExecutorOptions(tflite_config, *graph_executor_options);
+
+  model->CreateGraphExecutor(
+      std::move(graph_executor_options),
       graph_executor->BindNewPipeAndPassReceiver(),
       base::BindOnce(
           [](bool* succeeded, const CreateGraphExecutorResult result) {
@@ -199,23 +202,21 @@ BenchmarkResults ToBenchmarkResults(AccumulativeResult* accumulative_result) {
   }
 
   benchmark_result.set_status(BenchmarkReturnStatus::OK);
+  benchmark_result.set_power_normalization_factor(
+      accumulative_result->cputimes_in_us.size());
 
   // Sorts all walltimes_in_us for all the successful runs.
   std::sort(accumulative_result->walltimes_in_us.begin(),
             accumulative_result->walltimes_in_us.end());
-  // Gets percentile for walltimes_in_us.
-  for (const int i : kLatencyPercentile) {
-    const int pos = i * accumulative_result->walltimes_in_us.size() / 100;
-    // Add walltime as default time metrics.
-    (*benchmark_result.mutable_percentile_latencies_in_us())[i] =
-        accumulative_result->walltimes_in_us[pos];
-  }
+  // Add walltime as default time metrics.
+  chrome::ml_benchmark::SetPercentileLatencies(
+      benchmark_result, accumulative_result->walltimes_in_us);
 
   auto& error_metric = *benchmark_result.add_metrics();
   error_metric.set_name("average_error");
-  error_metric.set_units(chrome::ml_benchmark::Metric::UNITLESS);
-  error_metric.set_direction(chrome::ml_benchmark::Metric::SMALLER_IS_BETTER);
-  error_metric.set_cardinality(chrome::ml_benchmark::Metric::SINGLE);
+  error_metric.set_units(Metric::UNITLESS);
+  error_metric.set_direction(Metric::SMALLER_IS_BETTER);
+  error_metric.set_cardinality(Metric::SINGLE);
   error_metric.add_values(accumulative_result->total_error /
                           accumulative_result->cputimes_in_us.size());
 
@@ -223,15 +224,17 @@ BenchmarkResults ToBenchmarkResults(AccumulativeResult* accumulative_result) {
   std::sort(accumulative_result->cputimes_in_us.begin(),
             accumulative_result->cputimes_in_us.end());
   // Gets percentile for cputimes_in_us.
-  for (const int i : kLatencyPercentile) {
-    const int pos = i * accumulative_result->cputimes_in_us.size() / 100;
+  for (const int i : chrome::ml_benchmark::kLatencyPercentiles) {
     // Add cputime as extra metrics.
     auto& metric = *benchmark_result.add_metrics();
     metric.set_name(base::StringPrintf("%dth_perc_cpu_time", i));
     metric.set_units(Metric::MS);
     metric.set_direction(Metric::SMALLER_IS_BETTER);
     metric.set_cardinality(Metric::SINGLE);
-    metric.add_values(accumulative_result->cputimes_in_us[pos]);
+    metric.add_values(
+        static_cast<double>(chrome::ml_benchmark::ComputePercentile(
+            accumulative_result->cputimes_in_us, i)) /
+        1000.0);
   }
 
   return benchmark_result;
@@ -274,10 +277,10 @@ void AccumulateDistance(const TensorPtr& tensor1,
                         const TensorPtr& tensor2,
                         AccumulativeResult* const accumulative_result) {
   switch (tensor1->data->which()) {
-    case ValueList::Tag::INT64_LIST:
+    case ValueList::Tag::kInt64List:
       AccumulateDistance<int64_t>(tensor1, tensor2, accumulative_result);
       return;
-    case ValueList::Tag::FLOAT_LIST:
+    case ValueList::Tag::kFloatList:
       AccumulateDistance<double>(tensor1, tensor2, accumulative_result);
       return;
     default:
@@ -343,7 +346,7 @@ BenchmarkResults InferenceForTfliteModel(
                const base::flat_map<std::string, TensorPtr>* const
                    expected_output,
                ExecuteResult result,
-               base::Optional<std::vector<TensorPtr>> outputs) {
+               std::optional<std::vector<TensorPtr>> outputs) {
               // Check that the inference run successfully.
               if (result != ExecuteResult::OK || !outputs.has_value()) {
                 accumulative_result->error_message = "Inference not OK";
@@ -397,23 +400,23 @@ int32_t benchmark_start(const void* config_bytes,
   CHECK(results_bytes);
   CHECK(results_bytes_size);
 
-  BenchmarkResults result;
-
   // Step 1 De-serialize the CrOSBenchmarkConfig.
   CrOSBenchmarkConfig benchmark_config;
   if (!benchmark_config.ParseFromArray(config_bytes, config_bytes_size)) {
-    result.set_status(BenchmarkReturnStatus::INCORRECT_CONFIGURATION);
-    result.set_results_message("Can't parse CrOSBenchmarkConfig.");
-    return ml::SerializeResults(result, results_bytes, results_bytes_size);
+    return chrome::ml_benchmark::SerializeError(
+        "Can't parse CrOSBenchmarkConfig.",
+        BenchmarkReturnStatus::INCORRECT_CONFIGURATION, results_bytes,
+        results_bytes_size);
   }
 
   // Step 2 Parse the TfliteBenchmarkConfig
   ml::TfliteBenchmarkConfig tflite_config;
   if (!TextFormat::ParseFromString(benchmark_config.driver_config(),
                                    &tflite_config)) {
-    result.set_status(BenchmarkReturnStatus::INCORRECT_CONFIGURATION);
-    result.set_results_message("Can't parse TfliteBenchmarkConfig.");
-    return ml::SerializeResults(result, results_bytes, results_bytes_size);
+    return chrome::ml_benchmark::SerializeError(
+        "Can't parse TfliteBenchmarkConfig.",
+        BenchmarkReturnStatus::INCORRECT_CONFIGURATION, results_bytes,
+        results_bytes_size);
   }
 
   // Step 3 Parse the FlatBufferModelSpecProto.
@@ -421,15 +424,16 @@ int32_t benchmark_start(const void* config_bytes,
   std::string model_buf;
   if (!base::ReadFileToString(
           base::FilePath(tflite_config.tflite_model_filepath()), &model_buf)) {
-    result.set_status(BenchmarkReturnStatus::INITIALIZATION_FAILED);
-    result.set_results_message(tflite_config.tflite_model_filepath() +
-                               " can't be read.");
-    return ml::SerializeResults(result, results_bytes, results_bytes_size);
+    return chrome::ml_benchmark::SerializeError(
+        tflite_config.tflite_model_filepath() + " can't be read.",
+        BenchmarkReturnStatus::INITIALIZATION_FAILED, results_bytes,
+        results_bytes_size);
   }
   if (!model_proto.ParseFromString(model_buf)) {
-    result.set_status(BenchmarkReturnStatus::INITIALIZATION_FAILED);
-    result.set_results_message("Can't parse FlatBufferModelSpecProto");
-    return ml::SerializeResults(result, results_bytes, results_bytes_size);
+    return chrome::ml_benchmark::SerializeError(
+        "Can't parse FlatBufferModelSpecProto",
+        BenchmarkReturnStatus::INITIALIZATION_FAILED, results_bytes,
+        results_bytes_size);
   }
 
   // Step 4 Parse the ExpectedInputOutput.
@@ -437,23 +441,25 @@ int32_t benchmark_start(const void* config_bytes,
   std::string input_buf;
   if (!base::ReadFileToString(
           base::FilePath(tflite_config.input_output_filepath()), &input_buf)) {
-    result.set_status(BenchmarkReturnStatus::INITIALIZATION_FAILED);
-    result.set_results_message(tflite_config.input_output_filepath() +
-                               " can't be read.");
-    return ml::SerializeResults(result, results_bytes, results_bytes_size);
+    return chrome::ml_benchmark::SerializeError(
+        tflite_config.input_output_filepath() + " can't be read.",
+        BenchmarkReturnStatus::INITIALIZATION_FAILED, results_bytes,
+        results_bytes_size);
   }
   if (!input_output.ParseFromString(input_buf)) {
-    result.set_status(BenchmarkReturnStatus::INITIALIZATION_FAILED);
-    result.set_results_message("Can't parse ExpectedInputOutput");
-    return ml::SerializeResults(result, results_bytes, results_bytes_size);
+    return chrome::ml_benchmark::SerializeError(
+        "Can't parse ExpectedInputOutput",
+        BenchmarkReturnStatus::INITIALIZATION_FAILED, results_bytes,
+        results_bytes_size);
   }
 
   // Step 5 runs InferenceForTfliteModel with the tflite_config,
-  result =
+  BenchmarkResults result =
       ml::InferenceForTfliteModel(tflite_config, model_proto, input_output);
-  return ml::SerializeResults(result, results_bytes, results_bytes_size);
+  return chrome::ml_benchmark::SerializeResults(result, results_bytes,
+                                                results_bytes_size);
 }
 
 void free_benchmark_results(void* results_bytes) {
-  delete[] static_cast<char*>(results_bytes);
+  chrome::ml_benchmark::FreeSerializedResults(results_bytes);
 }

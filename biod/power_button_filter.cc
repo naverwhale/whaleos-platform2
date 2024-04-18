@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,19 +19,13 @@ namespace biod {
 
 std::unique_ptr<PowerButtonFilterInterface> PowerButtonFilter::Create(
     const scoped_refptr<dbus::Bus>& bus) {
-  auto config = std::make_unique<brillo::CrosConfig>();
-  // Init won't succeed on non-unibuild boards. If it fails, reset config to
-  // null.
-  if (!config->Init()) {
-    config = nullptr;
-  }
-
   auto power_button_filter = base::WrapUnique(new PowerButtonFilter());
   // DefaultTickClock uses TimeTicks with clock of type CLOCK_MONOTONIC in the
   // background. CLOCK_MONOTONIC advances monotonically while the system is in
   // S0. Note that CLOCK_MONOTONIC stands still when the system is suspended.
   // But that should not cause any problems in this use case.
-  power_button_filter->Init(PowerManagerClient::Create(bus), std::move(config),
+  power_button_filter->Init(PowerManagerClient::Create(bus),
+                            std::make_unique<brillo::CrosConfig>(),
                             std::make_unique<base::DefaultTickClock>());
   return power_button_filter;
 }
@@ -57,8 +51,7 @@ bool PowerButtonFilter::ShouldFilterFingerprintMatch() {
   if (is_already_filtered_ == true)
     return false;
 
-  if ((tick_clock_->NowTicks() -
-       base::TimeDelta::FromMilliseconds(kAuthIgnoreTimeoutmsecs)) <
+  if ((tick_clock_->NowTicks() - base::Milliseconds(kAuthIgnoreTimeoutmsecs)) <
       last_power_button_event_) {
     is_already_filtered_ = true;
     return true;

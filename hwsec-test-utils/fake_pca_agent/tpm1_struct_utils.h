@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,9 @@
 #error "This file is used for TPM1.2 only"
 #endif
 
+#include <optional>
 #include <string>
 
-#include <base/optional.h>
 #include <crypto/scoped_openssl_types.h>
 #include <trousers/tss.h>
 
@@ -36,7 +36,7 @@ std::string Serialize(TPM_SYM_CA_ATTESTATION* contents);
 
 // Parse |serialized| into |TPM_CERTIFY_INFO| and get the public key digest
 // stored in it.
-base::Optional<std::string> ParseDigestFromTpmCertifyInfo(
+std::optional<std::string> ParseDigestFromTpmCertifyInfo(
     const std::string& serialized);
 
 }  // namespace fake_pca_agent

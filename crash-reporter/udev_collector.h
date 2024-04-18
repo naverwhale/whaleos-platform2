@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,21 +16,31 @@
 #define CRASH_REPORTER_UDEV_COLLECTOR_H_
 
 #include <map>
+#include <memory>
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 
 // Udev crash collector.
 class UdevCollector : public CrashCollector {
  public:
-  UdevCollector();
+  explicit UdevCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   UdevCollector(const UdevCollector&) = delete;
   UdevCollector& operator=(const UdevCollector&) = delete;
 
   ~UdevCollector() override;
+
+  // Returns the severity level and product group of the crash.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
 
   // The udev event string should be formatted as follows:
   //   "ACTION=[action]:KERNEL=[name]:SUBSYSTEM=[subsystem]"
@@ -38,7 +48,11 @@ class UdevCollector : public CrashCollector {
   // could be omitted, in which case it would be treated as a wildcard (*).
   bool HandleCrash(const std::string& udev_event);
 
-  static CollectorInfo GetHandlerInfo(const std::string& udev_event);
+  static CollectorInfo GetHandlerInfo(
+      const std::string& udev_event,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
 
  protected:
   std::string dev_coredump_directory_;
@@ -61,6 +75,11 @@ class UdevCollector : public CrashCollector {
   // coredump instance.
   bool ProcessDevCoredump(const base::FilePath& crash_directory,
                           int instance_number);
+  // Copy bluetooth device coredump file to crash directory, and perform
+  // necessary coredump file management.
+  bool AppendBluetoothCoredump(const base::FilePath& crash_directory,
+                               const base::FilePath& coredump_path,
+                               int instance_number);
   // Copy device coredump file to crash directory, and perform necessary
   // coredump file management.
   bool AppendDevCoredump(const base::FilePath& crash_directory,

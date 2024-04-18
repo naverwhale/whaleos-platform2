@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -269,7 +269,7 @@ class CROS_CAMERA_EXPORT V4L2DevicePoller {
   // from Poll() in case of flush request, i.e., to abort poll before timeout
   explicit V4L2DevicePoller(std::vector<V4L2Device*> devices, int flush_fd);
 
-  virtual ~V4L2DevicePoller() {}
+  virtual ~V4L2DevicePoller() = default;
 
   // This method polls the V4L2 device.
   //
@@ -303,11 +303,11 @@ class CROS_CAMERA_EXPORT V4L2DevicePoller {
  * with the device.
  * This class introduces new methods specific to control video device nodes.
  */
-class CROS_CAMERA_EXPORT V4L2VideoNode final : public V4L2Device {
+class CROS_CAMERA_EXPORT V4L2VideoNode : public V4L2Device {
  public:
   explicit V4L2VideoNode(const std::string name);
 
-  ~V4L2VideoNode();
+  ~V4L2VideoNode() override;
 
   // This method opens the video device.
   //
@@ -316,13 +316,13 @@ class CROS_CAMERA_EXPORT V4L2VideoNode final : public V4L2Device {
   //
   // Returns:
   //    0 on success; corresponding error code on failure.
-  int Open(int flags) final;
+  int Open(int flags) override;
 
   // This method closes the video device.
   //
   // Returns:
   //    0 on success; corresponding error code on failure.
-  int Close() final;
+  int Close() override;
 
   // This method gets the data format of video device.
   //
@@ -454,7 +454,9 @@ class CROS_CAMERA_EXPORT V4L2VideoNode final : public V4L2Device {
 
   int QueryBuffer(int index, enum v4l2_memory memory_type, V4L2Buffer* buf);
 
-  int RequestBuffers(size_t num_buffers, enum v4l2_memory memory_type);
+  int RequestBuffers(size_t num_buffers,
+                     enum v4l2_memory memory_type,
+                     unsigned int flags);
 
   int StopLocked(bool releaseBuffers = true);
 
@@ -492,11 +494,11 @@ class CROS_CAMERA_EXPORT V4L2VideoNode final : public V4L2Device {
  * Sub-devices are control points to the new V4L2 media controller
  * architecture.
  */
-class CROS_CAMERA_EXPORT V4L2Subdevice final : public V4L2Device {
+class CROS_CAMERA_EXPORT V4L2Subdevice : public V4L2Device {
  public:
   explicit V4L2Subdevice(const std::string name);
 
-  ~V4L2Subdevice();
+  ~V4L2Subdevice() override;
 
   // This method opens the sub-device.
   //
@@ -505,13 +507,13 @@ class CROS_CAMERA_EXPORT V4L2Subdevice final : public V4L2Device {
   //
   // Returns:
   //    0 on success; corresponding error code on failure.
-  int Open(int flags) final;
+  int Open(int flags) override;
 
   // This method closes the sub-device.
   //
   // Returns:
   //    0 on success; corresponding error code on failure.
-  int Close() final;
+  int Close() override;
 
   // This method configures format of the sub-device.
   //

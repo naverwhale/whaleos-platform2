@@ -1,29 +1,41 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/policy/shutdown_from_suspend.h"
 
 #include <utility>
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 
 #include "power_manager/common/power_constants.h"
 #include "power_manager/common/prefs.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/common/util.h"
 #include "power_manager/powerd/system/power_supply.h"
 #include "power_manager/powerd/system/suspend_configurator.h"
+#include "power_manager/powerd/system/wakeup_timer.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
+
+const base::TimeDelta kDefaultHibernateDelay = base::Days(1);
+const int kMaxHibernateAttempts = 3;
+
+using power_manager::system::RealWakeupTimer;
+using power_manager::system::WakeupTimer;
 
 ShutdownFromSuspend::ShutdownFromSuspend()
-    : ShutdownFromSuspend(timers::SimpleAlarmTimer::Create()) {}
+    : ShutdownFromSuspend(RealWakeupTimer::Create(CLOCK_BOOTTIME_ALARM),
+                          RealWakeupTimer::Create(CLOCK_BOOTTIME_ALARM)) {}
+
 ShutdownFromSuspend::ShutdownFromSuspend(
-    std::unique_ptr<timers::SimpleAlarmTimer> alarm_timer)
-    : alarm_timer_(std::move(alarm_timer)) {}
+    std::unique_ptr<WakeupTimer> shutdown_alarm_timer,
+    std::unique_ptr<WakeupTimer> hibernate_alarm_timer)
+    : shutdown_alarm_timer_(std::move(shutdown_alarm_timer)),
+      hibernate_alarm_timer_(std::move(hibernate_alarm_timer)) {}
+
 ShutdownFromSuspend::~ShutdownFromSuspend() = default;
 
 void ShutdownFromSuspend::Init(
@@ -32,9 +44,13 @@ void ShutdownFromSuspend::Init(
     system::SuspendConfiguratorInterface* suspend_configurator) {
   DCHECK(prefs);
   DCHECK(power_supply);
+  DCHECK(suspend_configurator);
 
   power_supply_ = power_supply;
-  // Shutdown after X can only work if dark resume is enabled.
+  suspend_configurator_ = suspend_configurator;
+
+  // Shutdown after X / Hibernate after X can only work if dark resume is
+  // enabled.
   bool dark_resume_disable =
       prefs->GetBool(kDisableDarkResumePref, &dark_resume_disable) &&
       dark_resume_disable;
@@ -45,22 +61,16 @@ void ShutdownFromSuspend::Init(
       prefs->GetInt64(kLowerPowerFromSuspendSecPref, &shutdown_after_sec) &&
       shutdown_after_sec > 0;
 
-  // Hibernate only works if the system supports it, and
-  // shutdown-after-x works.
-  bool disable_hibernate = true;
+  hibernate_delay_ = kDefaultHibernateDelay;
 
-  CHECK(prefs->GetBool(kDisableHibernatePref, &disable_hibernate))
-      << "Failed to read pref " << kDisableHibernatePref;
-
-  hibernate_enabled_ = global_enabled_ &&
-                       suspend_configurator->IsHibernateAvailable() &&
-                       !disable_hibernate;
+  // Hibernate enabled / disabled is controlled externally via the
+  // SuspendConfigurator and must be checked before each suspend. This is
+  // because it's a decision that might change based on the logged in user.
   if (global_enabled_) {
-    shutdown_delay_ = base::TimeDelta::FromSeconds(shutdown_after_sec);
+    shutdown_delay_ = base::Seconds(shutdown_after_sec);
     prefs->GetDouble(kLowBatteryShutdownPercentPref,
                      &low_battery_shutdown_percent_);
-    LOG(INFO) << (hibernate_enabled_ ? "Hibernate" : "Shutdown")
-              << " from suspend is configured to "
+    LOG(INFO) << "Shutdown from suspend is configured to "
               << util::TimeDeltaToString(shutdown_delay_)
               << ". low_battery_shutdown_percent is "
               << low_battery_shutdown_percent_;
@@ -71,9 +81,10 @@ void ShutdownFromSuspend::Init(
 
 bool ShutdownFromSuspend::IsBatteryLow() {
   if (power_supply_->RefreshImmediately()) {
-    const double percent = power_supply_->GetPowerStatus().battery_percentage;
-    if (0 <= percent && percent <= low_battery_shutdown_percent_) {
-      LOG(INFO) << "Battery percentage " << base::StringPrintf("%0.2f", percent)
+    system::PowerStatus status = power_supply_->GetPowerStatus();
+    if (status.battery_below_shutdown_threshold) {
+      LOG(INFO) << "Battery percentage "
+                << base::StringPrintf("%0.2f", status.battery_percentage)
                 << "% <= low_battery_shutdown_percent ("
                 << base::StringPrintf("%0.2f", low_battery_shutdown_percent_)
                 << "%).";
@@ -86,67 +97,82 @@ bool ShutdownFromSuspend::IsBatteryLow() {
   return false;
 }
 
-bool ShutdownFromSuspend::ShouldHibernate() {
-  if (!hibernate_enabled_) {
-    return false;
+ShutdownFromSuspend::Action ShutdownFromSuspend::DetermineTargetState() {
+  const system::PowerStatus power_status = power_supply_->GetPowerStatus();
+  if (power_status.line_power_on)
+    return Action::SUSPEND;
+
+  if (shutdown_timer_fired_) {
+    // Shutdown after x (if not on line power).
+    LOG(INFO) << "Shutdown timer expired. The system will shutdown";
+    return Action::SHUT_DOWN;
+  }
+
+  bool hibernate_available = suspend_configurator_->IsHibernateAvailable();
+  if (hibernate_timer_fired_ && hibernate_available &&
+      hibernate_attempts_ < kMaxHibernateAttempts) {
+    LOG(INFO) << "Hibernate timer expired. The system will attempt to "
+                 "hibernate";
+    hibernate_attempts_++;
+    return Action::HIBERNATE;
   }
 
   if (ShutdownFromSuspend::IsBatteryLow()) {
-    LOG(INFO) << "Hibernate due to low battery";
-    return true;
+    // If the battery is low we always will attempt to hibernate (if it's
+    // available) or shutdown.
+    if (hibernate_available && hibernate_attempts_ < kMaxHibernateAttempts) {
+      LOG(INFO) << "Hibernate due to low battery";
+      hibernate_attempts_++;
+      return Action::HIBERNATE;
+    } else {
+      LOG(INFO) << "Shutdown due to low battery";
+      return Action::SHUT_DOWN;
+    }
   }
 
-  if (!timer_fired_) {
-    LOG(INFO) << "Don't hibernate, timer hasn't fired";
-    return false;
-  }
-
-  return true;
+  // By default we will suspend.
+  return Action::SUSPEND;
 }
 
-bool ShutdownFromSuspend::ShouldShutdown() {
-  if (timer_fired_) {
-    LOG(INFO) << "Timer expired. Device should shut down";
-    return true;
+void ShutdownFromSuspend::ConfigureTimers() {
+  if (!shutdown_alarm_timer_ || !hibernate_alarm_timer_) {
+    LOG(WARNING) << "System doesn't support CLOCK_REALTIME_ALARM";
+    return;
   }
 
-  if (ShutdownFromSuspend::IsBatteryLow()) {
-    LOG(INFO) << "Shut down due to low battery";
-    return true;
+  // Only start the timer for hibernate if the delay is non-zero.
+  if (suspend_configurator_->IsHibernateAvailable() &&
+      hibernate_delay_ != base::TimeDelta() &&
+      !hibernate_alarm_timer_->IsRunning() && !hibernate_timer_fired_) {
+    hibernate_alarm_timer_->Start(
+        hibernate_delay_,
+        base::BindRepeating(&ShutdownFromSuspend::OnHibernateTimerWake,
+                            base::Unretained(this)));
+    hibernate_timer_fired_ = false;
+    hibernate_attempts_ = 0;
   }
 
-  return false;
+  if (!shutdown_alarm_timer_->IsRunning()) {
+    shutdown_alarm_timer_->Start(
+        shutdown_delay_,
+        base::BindRepeating(&ShutdownFromSuspend::OnShutdownTimerWake,
+                            base::Unretained(this)));
+    shutdown_timer_fired_ = false;
+  }
 }
 
 ShutdownFromSuspend::Action ShutdownFromSuspend::PrepareForSuspendAttempt() {
   if (!global_enabled_)
     return ShutdownFromSuspend::Action::SUSPEND;
 
-  if (in_dark_resume_ && ShutdownFromSuspend::ShouldHibernate()) {
-    return ShutdownFromSuspend::Action::HIBERNATE;
+  ShutdownFromSuspend::Action action = ShutdownFromSuspend::Action::SUSPEND;
+
+  if (in_dark_resume_) {
+    action = DetermineTargetState();
   }
 
-  // TODO(crbug.com/964510): If the timer is gonna expire in next few minutes,
-  // shutdown.
-  if (in_dark_resume_ && ShutdownFromSuspend::ShouldShutdown()) {
-    if (!power_supply_->GetPowerStatus().line_power_on) {
-      LOG(INFO) << "Shutting down.";
-      return ShutdownFromSuspend::Action::SHUT_DOWN;
-    }
-    LOG(INFO) << "Not shutting down from resume as line power is connected.";
-  }
-
-  if (!alarm_timer_) {
-    LOG(WARNING) << "System doesn't support CLOCK_REALTIME_ALARM";
-    return ShutdownFromSuspend::Action::SUSPEND;
-  }
-  if (!alarm_timer_->IsRunning()) {
-    alarm_timer_->Start(
-        FROM_HERE, shutdown_delay_,
-        base::Bind(&ShutdownFromSuspend::OnTimerWake, base::Unretained(this)));
-  }
-
-  return ShutdownFromSuspend::Action::SUSPEND;
+  ConfigureTimers();
+  return action;
 }
 
 void ShutdownFromSuspend::HandleDarkResume() {
@@ -155,16 +181,33 @@ void ShutdownFromSuspend::HandleDarkResume() {
 
 void ShutdownFromSuspend::HandleFullResume() {
   in_dark_resume_ = false;
-  if (alarm_timer_)
-    alarm_timer_->Stop();
-  else
-    LOG(WARNING) << "System doesn't support CLOCK_REALTIME_ALARM.";
-  timer_fired_ = false;
+
+  if (shutdown_alarm_timer_)
+    shutdown_alarm_timer_->Stop();
+
+  if (hibernate_alarm_timer_)
+    hibernate_alarm_timer_->Stop();
+
+  LOG_IF(WARNING, !shutdown_alarm_timer_ || !hibernate_alarm_timer_)
+      << "System doesn't support CLOCK_REALTIME_ALARM.";
+  shutdown_timer_fired_ = false;
+  hibernate_timer_fired_ = false;
 }
 
-void ShutdownFromSuspend::OnTimerWake() {
-  timer_fired_ = true;
+void ShutdownFromSuspend::HandlePolicyChange(
+    const PowerManagementPolicy& policy) {
+  if (policy.has_hibernate_delay_sec())
+    hibernate_delay_ = base::Seconds(policy.hibernate_delay_sec());
 }
 
-}  // namespace policy
-}  // namespace power_manager
+void ShutdownFromSuspend::OnHibernateTimerWake() {
+  TRACE_EVENT("power", "ShutdownFromSuspend::OnHibernateTimerWake");
+  hibernate_timer_fired_ = true;
+}
+
+void ShutdownFromSuspend::OnShutdownTimerWake() {
+  TRACE_EVENT("power", "ShutdownFromSuspend::OnShutdownTimerWake");
+  shutdown_timer_fired_ = true;
+}
+
+}  // namespace power_manager::policy

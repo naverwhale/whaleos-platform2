@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,10 @@
 
 #include <base/check.h>
 #include <base/logging.h>
+#include <brillo/message_loops/message_loop.h>
 #include <mojo/public/cpp/system/platform_handle.h>
 
+#include "ml/mojom/shared_memory.mojom.h"
 #include "ml/request_metrics.h"
 
 namespace ml {
@@ -108,7 +110,9 @@ DocumentScannerImpl::DocumentScannerImpl(
         scanner)
     : scanner_(std::move(scanner)) {}
 
-DocumentScannerImpl::~DocumentScannerImpl() = default;
+DocumentScannerImpl::~DocumentScannerImpl() {
+  brillo::MessageLoop::current()->BreakLoop();
+}
 
 void DocumentScannerImpl::DetectCornersFromNV12Image(
     ReadOnlySharedMemoryRegionPtr nv12_image,
@@ -158,6 +162,7 @@ void DocumentScannerImpl::DetectCornersFromJPEGImage(
 void DocumentScannerImpl::DoPostProcessing(
     ReadOnlySharedMemoryRegionPtr jpeg_image,
     std::vector<PointFPtr> gfx_corners,
+    chromeos::machine_learning::mojom::Rotation rotation,
     DoPostProcessingCallback callback) {
   RequestMetrics request_metrics("DocumentScanner", "DoPostProcessing");
   request_metrics.StartRecordingPerformanceMetrics();
@@ -183,9 +188,25 @@ void DocumentScannerImpl::DoPostProcessing(
     corners.push_back(FromGfxCorner(gfx_corner));
   }
 
+  auto imageRotation = ([rotation]() {
+    using MojoRotation = chromeos::machine_learning::mojom::Rotation;
+    using Rotation =
+        chromeos_camera::document_scanning::DocumentScanner::Rotation;
+    switch (rotation) {
+      case MojoRotation::ROTATION_0:
+        return Rotation::ROTATION_0;
+      case MojoRotation::ROTATION_90:
+        return Rotation::ROTATION_90;
+      case MojoRotation::ROTATION_180:
+        return Rotation::ROTATION_180;
+      case MojoRotation::ROTATION_270:
+        return Rotation::ROTATION_270;
+    }
+  })();
   std::vector<uint8_t> processed_jpeg_image;
-  if (!scanner_->DoPostProcessingFromJPEGImage(
-          image.data(), image.size(), corners, &processed_jpeg_image)) {
+  if (!scanner_->DoPostProcessingFromJPEGImage(image.data(), image.size(),
+                                               corners, imageRotation,
+                                               &processed_jpeg_image)) {
     LOG(ERROR) << "Failed to do post processing";
     error_callback();
     return;

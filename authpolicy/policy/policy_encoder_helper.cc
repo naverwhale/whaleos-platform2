@@ -1,18 +1,19 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "authpolicy/policy/policy_encoder_helper.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/run_loop.h>
 #include <base/strings/string_number_conversions.h>
@@ -69,26 +70,18 @@ bool LoadPRegFilesIntoDict(const std::vector<base::FilePath>& preg_files,
   return true;
 }
 
-bool GetAsBoolean(const base::Value* value, bool* bool_value) {
-  if (value->GetAsBoolean(bool_value))
-    return true;
+std::optional<bool> GetAsBoolean(const base::Value* value) {
+  if (value->is_bool())
+    return value->GetBool();
 
-  // Boolean policies are represented as integer 0/1 in the registry.
-  int int_value = 0;
-  if (value->GetAsInteger(&int_value) && (int_value == 0 || int_value == 1)) {
-    *bool_value = int_value != 0;
-    return true;
+  if (value->is_int()) {
+    // Boolean policies are represented as integer 0/1 in the registry.
+    int int_value = value->GetInt();
+    if (int_value == 0 || int_value == 1)
+      return int_value != 0;
   }
 
-  return false;
-}
-
-bool GetAsInteger(const base::Value* value, int* int_value) {
-  return value->GetAsInteger(int_value);
-}
-
-bool GetAsString(const base::Value* value, std::string* string_value) {
-  return value->GetAsString(string_value);
+  return std::nullopt;
 }
 
 void PrintConversionError(const base::Value* value,
@@ -106,11 +99,12 @@ bool GetAsIntegerInRangeAndPrintError(const base::Value* value,
                                       int range_max,
                                       const char* policy_name,
                                       int* int_value) {
-  *int_value = 0;
-  if (!GetAsInteger(value, int_value)) {
+  if (!value->is_int()) {
+    *int_value = 0;
     PrintConversionError(value, "integer", policy_name);
     return false;
   }
+  *int_value = value->GetInt();
 
   if (*int_value < range_min || *int_value > range_max) {
     LOG(ERROR) << "Value of policy '" << policy_name << "' is " << *int_value
@@ -138,29 +132,29 @@ void SetPolicyOptions(em::PolicyOptions* options, PolicyLevel level) {
                         : em::PolicyOptions_PolicyMode_MANDATORY);
 }
 
-base::Optional<bool> EncodeBooleanPolicy(const char* policy_name,
-                                         PolicyValueCallback get_policy_value,
-                                         bool log_policy_value) {
+std::optional<bool> EncodeBooleanPolicy(const char* policy_name,
+                                        PolicyValueCallback get_policy_value,
+                                        bool log_policy_value) {
   const base::Value* value = get_policy_value.Run(policy_name);
 
   if (!value)
-    return base::nullopt;
+    return std::nullopt;
 
   // Get actual value, doing type conversion if necessary.
-  bool bool_value;
-  if (!GetAsBoolean(value, &bool_value)) {
+  std::optional<bool> bool_value = GetAsBoolean(value);
+  if (!bool_value.has_value()) {
     PrintConversionError(value, "boolean", policy_name);
-    return base::nullopt;
+    return std::nullopt;
   }
 
   LOG_IF(INFO, log_policy_value)
       << authpolicy::kColorPolicy << "  " << policy_name << " = "
-      << (bool_value ? "true" : "false") << authpolicy::kColorReset;
+      << (*bool_value ? "true" : "false") << authpolicy::kColorReset;
 
-  return base::make_optional(bool_value);
+  return bool_value;
 }
 
-base::Optional<int> EncodeIntegerInRangePolicy(
+std::optional<int> EncodeIntegerInRangePolicy(
     const char* policy_name,
     PolicyValueCallback get_policy_value,
     int range_min,
@@ -168,46 +162,46 @@ base::Optional<int> EncodeIntegerInRangePolicy(
     bool log_policy_value) {
   const base::Value* value = get_policy_value.Run(policy_name);
   if (!value)
-    return base::nullopt;
+    return std::nullopt;
 
   // Get actual value, doing type conversion if necessary.
   int int_value;
   if (!GetAsIntegerInRangeAndPrintError(value, range_min, range_max,
                                         policy_name, &int_value)) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   LOG_IF(INFO, log_policy_value)
       << authpolicy::kColorPolicy << "  " << policy_name << " = " << int_value
       << authpolicy::kColorReset;
 
-  return base::make_optional(int_value);
+  return std::make_optional(int_value);
 }
 
-base::Optional<std::string> EncodeStringPolicy(
+std::optional<std::string> EncodeStringPolicy(
     const char* policy_name,
     PolicyValueCallback get_policy_value,
     bool log_policy_value) {
   // Try to get policy value from dict.
   const base::Value* value = get_policy_value.Run(policy_name);
   if (!value)
-    return base::nullopt;
+    return std::nullopt;
 
   // Get actual value, doing type conversion if necessary.
-  std::string string_value;
-  if (!GetAsString(value, &string_value)) {
+  if (!value->is_string()) {
     PrintConversionError(value, "string", policy_name);
-    return base::nullopt;
+    return std::nullopt;
   }
 
+  const std::string& string_value = value->GetString();
   LOG_IF(INFO, log_policy_value)
       << authpolicy::kColorPolicy << "  " << policy_name << " = "
       << string_value << authpolicy::kColorReset;
 
-  return base::make_optional(string_value);
+  return string_value;
 }
 
-base::Optional<std::vector<std::string>> EncodeStringListPolicy(
+std::optional<std::vector<std::string>> EncodeStringListPolicy(
     const char* policy_name,
     PolicyValueCallback get_policy_value,
     bool log_policy_value) {
@@ -219,12 +213,11 @@ base::Optional<std::vector<std::string>> EncodeStringListPolicy(
     if (!value)
       break;
 
-    std::string string_value;
-    if (!GetAsString(value, &string_value)) {
+    if (!value->is_string()) {
       PrintConversionError(value, "string", policy_name, &index_str);
-      return base::nullopt;
+      return std::nullopt;
     }
-    string_values.push_back(string_value);
+    string_values.push_back(value->GetString());
   }
 
   if (log_policy_value && LOG_IS_ON(INFO)) {
@@ -235,7 +228,7 @@ base::Optional<std::vector<std::string>> EncodeStringListPolicy(
                 << authpolicy::kColorReset;
   }
 
-  return base::make_optional(string_values);
+  return std::make_optional(string_values);
 }
 
 }  // namespace policy

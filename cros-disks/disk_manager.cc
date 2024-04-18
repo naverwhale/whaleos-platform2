@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,9 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/stl_util.h>
 #include <base/strings/string_piece.h>
@@ -32,14 +33,20 @@
 #include "cros-disks/platform.h"
 #include "cros-disks/quote.h"
 #include "cros-disks/system_mounter.h"
+#include "dbus/cros-disks/dbus-constants.h"
 
 namespace cros_disks {
 
 namespace {
 
-constexpr char kOptionDirSync[] = "dirsync";
-constexpr char kOptionFlush[] = "flush";
-constexpr char kOptionUtf8[] = "utf8";
+// Options passed to the mount syscall for various filesystem types.
+constexpr char kMountOptionFlush[] = "flush";
+constexpr char kMountOptionUtf8[] = "utf8";
+
+// Options passed to the FUSE module for various filesystem types.
+constexpr char kFUSEOptionDirSync[] = "dirsync";
+constexpr char kFUSEOptionDmask[] = "dmask=0027";  // directory permissions 0750
+constexpr char kFUSEOptionFmask[] = "fmask=0027";  // file permissions 0750
 
 // Implementation of FUSEMounter aimed at removable storage with
 // exFAT or NTFS filesystems.
@@ -54,12 +61,7 @@ class DiskFUSEMounter : public FUSEMounter {
                   std::vector<std::string> options)
       : FUSEMounter(platform, reaper, std::move(filesystem_type), {}),
         upstream_factory_(upstream_factory),
-        sandbox_factory_(platform,
-                         std::move(executable),
-                         run_as,
-                         false,  // no network needed
-                         {},
-                         {}),
+        sandbox_factory_(platform, std::move(executable), run_as),
         options_(std::move(options)) {}
 
  private:
@@ -76,20 +78,20 @@ class DiskFUSEMounter : public FUSEMounter {
       const std::string& source,
       const base::FilePath&,
       std::vector<std::string>,
-      MountErrorType* error) const override {
+      MountError* error) const override {
     auto device = base::FilePath(source);
 
     if (!device.IsAbsolute() || device.ReferencesParent() ||
         !base::StartsWith(device.value(), "/dev/",
                           base::CompareCase::SENSITIVE)) {
-      LOG(ERROR) << "Source path " << quote(device) << " is invalid";
-      *error = MOUNT_ERROR_INVALID_ARGUMENT;
+      LOG(ERROR) << "Device path " << quote(device) << " is invalid";
+      *error = MountError::kInvalidArgument;
       return nullptr;
     }
 
     if (!platform()->PathExists(device.value())) {
-      LOG(ERROR) << "Source path " << quote(device) << " does not exist";
-      *error = MOUNT_ERROR_INVALID_DEVICE_PATH;
+      PLOG(ERROR) << "Cannot access device " << quote(device);
+      *error = MountError::kInvalidDevicePath;
       return nullptr;
     }
 
@@ -98,8 +100,8 @@ class DiskFUSEMounter : public FUSEMounter {
                                   sandbox_factory_.run_as().gid) ||
         !platform()->SetPermissions(source,
                                     S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP)) {
-      LOG(ERROR) << "Can't set up permissions on " << quote(source);
-      *error = MOUNT_ERROR_INSUFFICIENT_PERMISSIONS;
+      PLOG(ERROR) << "Cannot set up permissions on device " << quote(source);
+      *error = MountError::kInsufficientPermissions;
       return nullptr;
     }
 
@@ -114,16 +116,16 @@ class DiskFUSEMounter : public FUSEMounter {
 
     // Bind-mount the device into the sandbox.
     if (!sandbox->BindMount(device.value(), device.value(), true, false)) {
-      LOG(ERROR) << "Can't bind the device " << quote(device)
-                 << " into the sandbox";
-      *error = MOUNT_ERROR_INTERNAL;
+      PLOG(ERROR) << "Cannot bind-mount device " << quote(device)
+                  << " into the sandbox";
+      *error = MountError::kInternalError;
       return nullptr;
     }
 
     if (!options_.empty()) {
       std::string options;
       if (!JoinParamsIntoOptions(options_, &options)) {
-        *error = MOUNT_ERROR_INVALID_MOUNT_OPTIONS;
+        *error = MountError::kInvalidMountOptions;
         return nullptr;
       }
       sandbox->AddArgument("-o");
@@ -132,7 +134,7 @@ class DiskFUSEMounter : public FUSEMounter {
 
     sandbox->AddArgument(device.value());
 
-    *error = MOUNT_ERROR_NONE;
+    *error = MountError::kSuccess;
     return sandbox;
   }
 
@@ -152,7 +154,7 @@ class FATMounter : public SystemMounter {
             platform, "vfat", /* read_only= */ false, std::move(options)) {}
 
  private:
-  MountErrorType ParseParams(
+  MountError ParseParams(
       std::vector<std::string> params,
       std::vector<std::string>* mount_options) const override {
     // FAT32 stores times as local time instead of UTC. By default, the vfat
@@ -183,63 +185,6 @@ class FATMounter : public SystemMounter {
 };
 
 }  // namespace
-
-class DiskManager::EjectingMountPoint : public MountPoint {
- public:
-  EjectingMountPoint(std::unique_ptr<MountPoint> mount_point,
-                     const Platform* platform,
-                     DiskManager* disk_manager,
-                     const std::string& device_file)
-      : MountPoint(
-            {
-                .mount_path = mount_point->path(),
-                .source = mount_point->source(),
-                .filesystem_type = mount_point->fstype(),
-                .flags = mount_point->flags(),
-                .data = mount_point->data(),
-            },
-            platform),
-        mount_point_(std::move(mount_point)),
-        disk_manager_(disk_manager),
-        device_file_(device_file) {
-    DCHECK(mount_point_);
-    DCHECK(disk_manager_);
-    DCHECK(!device_file_.empty());
-  }
-
-  EjectingMountPoint(const EjectingMountPoint&) = delete;
-  EjectingMountPoint& operator=(const EjectingMountPoint&) = delete;
-
-  ~EjectingMountPoint() override {}
-
-  void Release() override {
-    MountPoint::Release();
-    mount_point_->Release();
-  }
-
- protected:
-  MountErrorType UnmountImpl() override { return CleanUp(); }
-
-  MountErrorType RemountImpl(int flags) override {
-    return mount_point_->Remount(flags & MS_RDONLY);
-  }
-
- private:
-  MountErrorType CleanUp() {
-    MountErrorType error = mount_point_->Unmount();
-    if (error == MOUNT_ERROR_NONE || error == MOUNT_ERROR_PATH_NOT_MOUNTED) {
-      bool success = disk_manager_->EjectDevice(device_file_);
-      LOG_IF(ERROR, !success)
-          << "Unable to eject device " << quote(device_file_)
-          << " for mount path " << quote(path());
-    }
-    return error;
-  }
-
-  const std::unique_ptr<MountPoint> mount_point_;
-  DiskManager* const disk_manager_;
-  const std::string device_file_;
-};
 
 DiskManager::DiskManager(const std::string& mount_root,
                          Platform* platform,
@@ -277,29 +222,33 @@ bool DiskManager::Initialize() {
 
   // FAT32 - typical USB stick/SD card filesystem.
   mounters_["vfat"] = std::make_unique<FATMounter>(
-      platform(), std::vector<std::string>{kOptionFlush, "shortname=mixed",
-                                           kOptionUtf8, uid, gid});
+      platform(), std::vector<std::string>{kMountOptionFlush, "shortname=mixed",
+                                           kMountOptionUtf8, uid, gid});
 
   // Fancier newer version of FAT used for new big SD cards and USB sticks.
   mounters_["exfat"] = std::make_unique<DiskFUSEMounter>(
       platform(), process_reaper(), "exfat", test_sandbox_factory_,
       SandboxedExecutable{base::FilePath("/usr/sbin/mount.exfat-fuse")},
-      run_as_exfat, std::vector<std::string>{kOptionDirSync, uid, gid});
+      run_as_exfat,
+      std::vector<std::string>{kFUSEOptionDirSync, kFUSEOptionDmask,
+                               kFUSEOptionFmask, uid, gid});
 
   // External drives and some big USB sticks would likely have NTFS.
   mounters_["ntfs"] = std::make_unique<DiskFUSEMounter>(
       platform(), process_reaper(), "ntfs", test_sandbox_factory_,
       SandboxedExecutable{base::FilePath("/usr/bin/ntfs-3g")}, run_as_ntfs,
-      std::vector<std::string>{kOptionDirSync, uid, gid});
+      std::vector<std::string>{kFUSEOptionDirSync, kFUSEOptionDmask,
+                               kFUSEOptionFmask, uid, gid});
 
   // Typical CD/DVD filesystem. Inherently read-only.
   mounters_["iso9660"] = std::make_unique<SystemMounter>(
       platform(), "iso9660", true,
-      std::vector<std::string>{kOptionUtf8, uid, gid});
+      std::vector<std::string>{kMountOptionUtf8, uid, gid});
 
   // Newer DVD filesystem. Inherently read-only.
   mounters_["udf"] = std::make_unique<SystemMounter>(
-      platform(), "udf", true, std::vector<std::string>{kOptionUtf8, uid, gid});
+      platform(), "udf", true,
+      std::vector<std::string>{kMountOptionUtf8, uid, gid});
 
   // MacOS's HFS+ is not properly/officially supported, but sort of works,
   // although with severe limitaions.
@@ -336,79 +285,91 @@ std::unique_ptr<MountPoint> DiskManager::DoMount(
     const std::string& filesystem_type,
     const std::vector<std::string>& options,
     const base::FilePath& mount_path,
-    MountErrorType* error) {
+    MountError* error) {
   CHECK(!source_path.empty()) << "Invalid source path argument";
   CHECK(!mount_path.empty()) << "Invalid mount path argument";
 
   Disk disk;
   if (!disk_monitor_->GetDiskByDevicePath(base::FilePath(source_path), &disk)) {
     LOG(ERROR) << quote(source_path) << " is not a valid device";
-    *error = MOUNT_ERROR_INVALID_DEVICE_PATH;
+    *error = MountError::kInvalidDevicePath;
     return nullptr;
   }
 
   if (disk.is_on_boot_device) {
     LOG(ERROR) << quote(source_path)
                << " is on boot device and not allowed to mount";
-    *error = MOUNT_ERROR_INVALID_DEVICE_PATH;
+    *error = MountError::kInvalidDevicePath;
     return nullptr;
   }
 
   if (disk.device_file.empty()) {
     LOG(ERROR) << quote(source_path) << " does not have a device file";
-    *error = MOUNT_ERROR_INVALID_DEVICE_PATH;
+    *error = MountError::kInvalidDevicePath;
     return nullptr;
   }
 
   if (!platform()->PathExists(disk.device_file)) {
-    LOG(ERROR) << quote(source_path) << " has device file "
-               << quote(disk.device_file) << " which is missing";
-    *error = MOUNT_ERROR_INVALID_DEVICE_PATH;
+    PLOG(ERROR) << quote(source_path) << " has device file "
+                << quote(disk.device_file) << " which is missing";
+    *error = MountError::kInvalidDevicePath;
     return nullptr;
   }
 
-  std::string device_filesystem_type =
+  const std::string fstype =
       filesystem_type.empty() ? disk.filesystem_type : filesystem_type;
   metrics()->RecordDeviceMediaType(disk.media_type);
-  metrics()->RecordFilesystemType(device_filesystem_type);
-  if (device_filesystem_type.empty()) {
-    LOG(ERROR) << "Cannot determine the file system type of device "
+  metrics()->RecordFilesystemType(fstype);
+  if (fstype.empty()) {
+    LOG(ERROR) << "Cannot determine filesystem type of device "
                << quote(source_path);
-    *error = MOUNT_ERROR_UNKNOWN_FILESYSTEM;
+    *error = MountError::kUnknownFilesystem;
     return nullptr;
   }
 
-  auto it = mounters_.find(device_filesystem_type);
+  const auto it = mounters_.find(fstype);
   if (it == mounters_.end()) {
-    LOG(ERROR) << "Unsupported file system type "
-               << quote(device_filesystem_type) << " of device "
-               << quote(source_path);
-    *error = MOUNT_ERROR_UNSUPPORTED_FILESYSTEM;
+    LOG(ERROR) << "Cannot handle filesystem type " << quote(fstype)
+               << " of device " << quote(source_path);
+    *error = MountError::kUnsupportedFilesystem;
     return nullptr;
   }
 
-  const Mounter* mounter = it->second.get();
+  const Mounter* const mounter = it->second.get();
+  DCHECK(mounter);
 
   auto applied_options = options;
-  bool media_read_only = disk.is_read_only || disk.IsOpticalDisk();
-  if (media_read_only && !IsReadOnlyMount(applied_options)) {
+  if (const bool media_read_only = disk.is_read_only || disk.IsOpticalDisk();
+      media_read_only && !IsReadOnlyMount(applied_options)) {
     applied_options.push_back("ro");
   }
 
   std::unique_ptr<MountPoint> mount_point =
       mounter->Mount(disk.device_file, mount_path, applied_options, error);
-  if (*error != MOUNT_ERROR_NONE) {
+  if (*error != MountError::kSuccess) {
     DCHECK(!mount_point);
     // Try to mount the filesystem read-only if mounting it read-write failed.
     if (!IsReadOnlyMount(applied_options)) {
-      LOG(INFO) << "Trying to mount " << quote(source_path) << " read-only";
+      LOG(INFO) << "Trying to mount " << quote(disk.device_file)
+                << " again, but in read-only mode this time";
       applied_options.push_back("ro");
       mount_point =
           mounter->Mount(disk.device_file, mount_path, applied_options, error);
+      if (*error == MountError::kSuccess) {
+        // crbug.com/1366204: Managed to mount the external media in read-only
+        // mode after failing to mount it in read-write mode.
+        DCHECK(mount_point);
+        DCHECK(mount_point->is_read_only());
+        LOG(WARNING) << "Mounted " << quote(mount_point->source())
+                     << " as read-only " << quote(mount_point->fstype()) << " "
+                     << redact(mount_point->path())
+                     << " because it could not be mounted in writable mode";
+        metrics()->RecordReadOnlyFileSystem(fstype);
+      }
     }
   }
 
-  if (*error != MOUNT_ERROR_NONE) {
+  if (*error != MountError::kSuccess) {
     DCHECK(!mount_point);
     return nullptr;
   }
@@ -425,10 +386,9 @@ std::string DiskManager::SuggestMountPath(
   return mount_root().Append(disk.GetPresentationName()).value();
 }
 
-bool DiskManager::ShouldReserveMountPathOnError(
-    MountErrorType error_type) const {
-  return error_type == MOUNT_ERROR_UNKNOWN_FILESYSTEM ||
-         error_type == MOUNT_ERROR_UNSUPPORTED_FILESYSTEM;
+bool DiskManager::ShouldReserveMountPathOnError(MountError error_type) const {
+  return error_type == MountError::kUnknownFilesystem ||
+         error_type == MountError::kUnsupportedFilesystem;
 }
 
 bool DiskManager::EjectDevice(const std::string& device_file) {
@@ -440,21 +400,27 @@ bool DiskManager::EjectDevice(const std::string& device_file) {
 
 std::unique_ptr<MountPoint> DiskManager::MaybeWrapMountPointForEject(
     std::unique_ptr<MountPoint> mount_point, const Disk& disk) {
-  if (!disk.IsOpticalDisk()) {
-    return mount_point;
+  DCHECK(mount_point);
+
+  if (disk.IsOpticalDisk()) {
+    mount_point->SetEject(base::BindOnce(
+        [](DiskManager* const disk_manager, const std::string& device_file) {
+          if (!disk_manager->EjectDevice(device_file))
+            LOG(ERROR) << "Cannot eject device " << quote(device_file);
+        },
+        this, disk.device_file));
   }
-  return std::make_unique<EjectingMountPoint>(
-      std::move(mount_point), platform(), this, disk.device_file);
+
+  return mount_point;
 }
 
-bool DiskManager::UnmountAll() {
+void DiskManager::UnmountAll() {
   // UnmountAll() is called when a user session ends. We do not want to eject
   // devices in that situation and thus set |eject_device_on_unmount_| to
   // false temporarily to prevent devices from being ejected upon unmount.
   eject_device_on_unmount_ = false;
-  bool all_unmounted = MountManager::UnmountAll();
+  MountManager::UnmountAll();
   eject_device_on_unmount_ = true;
-  return all_unmounted;
 }
 
 }  // namespace cros_disks

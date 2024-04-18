@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,11 +13,10 @@
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
 
-namespace vm_tools {
-namespace vsh {
+namespace vm_tools::vsh {
 
 ScopedTermios::ScopedTermios(base::ScopedFD tty_fd)
-    : tty_fd_(std::move(tty_fd)), has_termios_(false) {}
+    : tty_fd_(std::move(tty_fd)) {}
 
 ScopedTermios::~ScopedTermios() {
   if (!Restore())
@@ -79,9 +78,8 @@ bool ScopedTermios::Restore() {
   return true;
 }
 
-int ScopedTermios::GetRawFD() {
+int ScopedTermios::GetRawFD() const {
   return tty_fd_.get();
 }
 
-}  // namespace vsh
-}  // namespace vm_tools
+}  // namespace vm_tools::vsh

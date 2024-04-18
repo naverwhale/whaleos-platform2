@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -46,6 +46,7 @@ toolchain("toolchain") {
     description = "CXX {{output}}"
     outputs =
         [ "{{source_out_dir}}/{{target_output_name}}.{{source_name_part}}.o" ]
+    precompiled_header_type = "gcc"
   }
 
   tool("alink") {
@@ -80,7 +81,7 @@ toolchain("toolchain") {
   }
 
   tool("link") {
-    outfile = "{{target_output_name}}{{output_extension}}"
+    outfile = "{{output_dir}}/{{target_output_name}}{{output_extension}}"
 
     command = "$cxx {{ldflags}} -o $outfile -Wl,--start-group {{inputs}} -Wl,--end-group {{solibs}} {{libs}}"
     description = "LINK $outfile"

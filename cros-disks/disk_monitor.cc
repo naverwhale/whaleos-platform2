@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,10 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
-#include <base/logging.h>
 #include <base/containers/contains.h>
+#include <base/functional/bind.h>
+#include <base/logging.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
@@ -24,7 +24,6 @@
 #include <brillo/udev/udev_enumerate.h>
 #include <brillo/udev/udev_monitor.h>
 
-#include "cros-disks/device_ejector.h"
 #include "cros-disks/quote.h"
 #include "cros-disks/udev_device.h"
 
@@ -116,13 +115,13 @@ void LogDevice(const UdevDevice& dev) {
   if (!VLOG_IS_ON(1))
     return;
 
-  VLOG(1) << "path: " << quote(dev.NativePath());
-  VLOG(1) << "  attributes: virtual=" << dev.IsVirtual()
-          << " loop=" << dev.IsLoopDevice() << " boot=" << dev.IsOnBootDevice()
-          << " removable=" << dev.IsOnRemovableDevice()
-          << " broadband=" << dev.IsMobileBroadbandDevice()
-          << " automount=" << dev.IsAutoMountable()
-          << " media=" << dev.IsMediaAvailable();
+  VLOG(1) << "Device " << quote(dev.NativePath());
+  VLOG(1) << " virtual:" << dev.IsVirtual() << " loop:" << dev.IsLoopDevice()
+          << " boot:" << dev.IsOnBootDevice()
+          << " removable:" << dev.IsOnRemovableDevice()
+          << " broadband:" << dev.IsMobileBroadbandDevice()
+          << " automount:" << dev.IsAutoMountable()
+          << " media:" << dev.IsMediaAvailable();
 }
 
 }  // namespace
@@ -334,7 +333,7 @@ bool DiskMonitor::GetDeviceEvents(DeviceEventList* events) {
 
 bool DiskMonitor::GetDiskByDevicePath(const base::FilePath& device_path,
                                       Disk* disk) const {
-  LOG(INFO) << "Get disk by path " << quote(device_path);
+  VLOG(1) << "Getting disk by path " << quote(device_path) << "...";
   if (device_path.empty())
     return false;
 

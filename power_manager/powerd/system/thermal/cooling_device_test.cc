@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,33 +21,31 @@
 #include "power_manager/common/test_main_loop_runner.h"
 #include "power_manager/powerd/system/thermal/device_thermal_state.h"
 #include "power_manager/powerd/system/thermal/thermal_device_observer.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
-// Abort if expected thermal event hasn't been received after this many
-// milliseconds.
-const int kUpdateTimeoutMs = 5000;
+// Abort if expected thermal event hasn't been received after this much time.
+constexpr base::TimeDelta kUpdateTimeout = base::Seconds(5);
 
 // Frequency with which the cooling device is polled.
-const int kPollIntervalMs = 100;
+constexpr base::TimeDelta kPollInterval = base::Milliseconds(100);
 
 // Simple ThermalDeviceObserver implementation that runs the event loop until
 // it receives a thermal state change.
 class TestObserver : public ThermalDeviceObserver {
  public:
-  TestObserver() {}
+  TestObserver() = default;
   TestObserver(const TestObserver&) = delete;
   TestObserver& operator=(const TestObserver&) = delete;
 
-  ~TestObserver() override {}
+  ~TestObserver() override = default;
 
   // Runs |loop_| until OnThermalChanged() is called.
   bool RunUntilThermalChanged() {
-    return loop_runner_.StartLoop(
-        base::TimeDelta::FromMilliseconds(kUpdateTimeoutMs));
+    return loop_runner_.StartLoop(kUpdateTimeout);
   }
 
   void OnThermalChanged(ThermalDeviceInterface* sensor) override {
@@ -60,13 +58,13 @@ class TestObserver : public ThermalDeviceObserver {
 
 }  // namespace
 
-class CoolingDeviceTest : public ::testing::Test {
+class CoolingDeviceTest : public TestEnvironment {
  public:
-  CoolingDeviceTest() {}
+  CoolingDeviceTest() = default;
   CoolingDeviceTest(const CoolingDeviceTest&) = delete;
   CoolingDeviceTest& operator=(const CoolingDeviceTest&) = delete;
 
-  ~CoolingDeviceTest() override {}
+  ~CoolingDeviceTest() override = default;
 
   void SetUp() override {
     CHECK(temp_dir_.CreateUniqueTempDir());
@@ -81,8 +79,8 @@ class CoolingDeviceTest : public ::testing::Test {
     WriteCurState(0);
     WriteType("Processor");
 
-    cooling_device_.reset(new CoolingDevice(device_dir_));
-    cooling_device_->set_poll_interval_ms_for_testing(kPollIntervalMs);
+    cooling_device_ = std::make_unique<CoolingDevice>(device_dir_);
+    cooling_device_->set_poll_interval_for_testing(kPollInterval);
     cooling_device_->AddObserver(&observer_);
   }
 
@@ -221,5 +219,4 @@ TEST_F(CoolingDeviceTest, ZeroMaxState) {
   EXPECT_EQ(DeviceThermalState::kUnknown, cooling_device_->GetThermalState());
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

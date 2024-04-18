@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -148,11 +148,12 @@ TEST_F(MlBenchmarkTest, TfliteModelMatchedValueTest) {
   CHECK(results.ParseFromArray(results_data, results_size));
   free_benchmark_results(results_data);
   EXPECT_EQ(results.status(), BenchmarkReturnStatus::OK);
+  EXPECT_EQ(results.power_normalization_factor(), 100);
 
   auto latencies = results.percentile_latencies_in_us();
   EXPECT_EQ(latencies.size(), 4);
-  EXPECT_TRUE(0 < latencies[50] && latencies[50] < latencies[90] &&
-              latencies[90] < latencies[95] && latencies[95] < latencies[99]);
+  EXPECT_TRUE(0 <= latencies[50] && latencies[50] <= latencies[90] &&
+              latencies[90] <= latencies[95] && latencies[95] <= latencies[99]);
 
   auto& metrics = results.metrics();
   EXPECT_EQ(metrics[0].name(), "average_error");
@@ -167,17 +168,17 @@ TEST_F(MlBenchmarkTest, TfliteModelMatchedValueTest) {
   EXPECT_EQ(metrics[1].direction(),
             chrome::ml_benchmark::Metric::SMALLER_IS_BETTER);
   EXPECT_EQ(metrics[1].cardinality(), chrome::ml_benchmark::Metric::SINGLE);
-  EXPECT_GT(metrics[1].values()[0], 0.0f);
+  EXPECT_GE(metrics[1].values()[0], 0.0f);
 
   EXPECT_EQ(metrics[2].name(), "90th_perc_cpu_time");
-  EXPECT_GT(metrics[2].values()[0], metrics[1].values()[0]);
+  EXPECT_GE(metrics[2].values()[0], metrics[1].values()[0]);
   EXPECT_EQ(metrics[3].name(), "95th_perc_cpu_time");
-  EXPECT_GT(metrics[3].values()[0], metrics[2].values()[0]);
+  EXPECT_GE(metrics[3].values()[0], metrics[2].values()[0]);
   EXPECT_EQ(metrics[4].name(), "99th_perc_cpu_time");
-  EXPECT_GT(metrics[4].values()[0], metrics[3].values()[0]);
+  EXPECT_GE(metrics[4].values()[0], metrics[3].values()[0]);
 }
 
-TEST_F(MlBenchmarkTest, TfliteModelUnmachedValueTest) {
+TEST_F(MlBenchmarkTest, TfliteModelUnmatchedValueTest) {
   SetExpectedValue(0.76f);
   // Step 1 run benchmark_start.
   const std::string config = benchmark_config_.SerializeAsString();

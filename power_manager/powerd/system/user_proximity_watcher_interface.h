@@ -1,14 +1,13 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef POWER_MANAGER_POWERD_SYSTEM_USER_PROXIMITY_WATCHER_INTERFACE_H_
 #define POWER_MANAGER_POWERD_SYSTEM_USER_PROXIMITY_WATCHER_INTERFACE_H_
 
-#include <base/macros.h>
+#include "power_manager/common/power_constants.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class UserProximityObserver;
 
@@ -31,7 +30,6 @@ class UserProximityWatcherInterface {
   // TODO(egranata): add querying mechanisms
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_USER_PROXIMITY_WATCHER_INTERFACE_H_

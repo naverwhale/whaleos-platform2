@@ -1,7 +1,10 @@
 #!/bin/bash
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+#
+# Start the fingerprint study server, study_serve.py, on a host/non-Chromebook
+# machine. It uses the mocked ectool, in mock-bin, to simiulate finger presses.
 #
 # This can be run or sourced, which is why we don't choose to exec the final
 # launch line.
@@ -17,7 +20,7 @@ LOG_DIR=
 FPSTUDY_VIRTENV=/tmp/virtualenv-study
 
 # Check for required commands.
-CMDS_REQUIRED=( pip3 virtualenv )
+CMDS_REQUIRED=( virtualenv )
 if ! which "${CMDS_REQUIRED[@]}" >/dev/null 2>&1; then
   echo "Error - Missing one or more required commands: ${CMDS_REQUIRED[*]}" >&2
   exit 1

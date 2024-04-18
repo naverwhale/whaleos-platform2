@@ -23,13 +23,11 @@ classes).
 
 *   [Manager](#Manager) This is the primary / top-level shill class.
     `DaemonTask::Start` calls `Manager::Start`.
-*   [RTNLHandler class](../net/rtnl_handler.h) Available globally using
-    RTNLHandler::GetInstance(). See also [RTNL](#RTNL).
 *   [RoutingTable class](../routing_table.h) Available globally using
     RoutingTable::GetInstance(). See also [routing](routing.md).
 *   [NetlinkManager class](../net/netlink_manager.h) Available globally using
     NetlinkManager::GetInstance().
-*   [DHCPProvider class](../dhcp/dhcp_provider.h) Available globally using
+*   [DHCPProvider class](../network/dhcp_provider.h) Available globally using
     DHCPProvider::GetInstance().
 
 
@@ -71,7 +69,7 @@ The [DeviceInfo class](../device_info.h) is a singleton owned by
 [Manager](#Manager).
 
 *   `DeviceInfo` listens to network interface and address-configuration events
-    using [RTNL](#RTNL).
+    using RTNL.
 *   On startup, `DeviceInfo` requests a dump of existing network interface and
     address-configuration information in order to be in sync with the current
     kernel state.
@@ -105,15 +103,14 @@ network interface.
     *   [Cellular](cellular.md#Cellular)
     *   [Ethernet class](../ethernet/ethernet.h)
     *   [VirtualDevice class](../virtual_device.h)
-        *   [PPPDevice class](../ppp_device.h)
         *   See also [vpn.md](vpn.md)
     *   [WiFi class](../wifi/wifi.h)
 
-![Device Inheritance](images/device_inheritance.png)
+![Device Inheritance](https://storage.googleapis.com/chromium-website-lob-storage/16d9864a22c27acc9058dab23d8afa7c1ef711d6)
 
 *   `Device` instances are managed by [DeviceInfo](#DeviceInfo).
     *   Exception: `VirtualDevice` instances corresponding to virtual interfaces
-        (for use-cases like PPPoE, VPN, and cellular dongles).
+        (for use-cases like VPN, and cellular dongles).
 
 
 ## ServiceProvider
@@ -129,7 +126,7 @@ singleton instances owned by [Manager](#Manager).
     *   [EthernetProvider class](../ethernet/ethernet_provider.h)
     *   [VpnProvider class](../vpn/vpn_provider.h)
     *   [WiFiProvider class](../wifi/wifi_provider.h)
-[![Provider Inheritance](images/provider_inheritance.svg)][ProviderInheritance]
+[![Provider Inheritance](https://storage.googleapis.com/chromium-website-lob-storage/1ca5af01448a1f4580b5dacb22bed8d7cffa0f16)][ProviderInheritance]
 *   `ServiceProvider` instances create new `Services` from the persisted state
     in the [Profile](#Profile) and/or properties from the D-Bus interface.
     *   See [CellularServiceProvider](cellular.md#CellularServiceProvider)
@@ -163,12 +160,11 @@ network configuration and a connection through an associated
     *   [CellularService](cellular.md#CellularService)
     *   [EthernetService class](../ethernet/ethernet_service.h)
     *   [EthernetEapService class](../ethernet/ethernet_eap_service.h)
-    *   [PPPoEService class](../pppoe/pppoe_service.h)
     *   [VPNService class](../vpn/vpn_service.h)
         *   See also [vpn.md](vpn.md)
     *   [WiFiService class](../wifi/wifi_service.h)
 
-![Service Inheritance](images/service_inheritance.png)
+![Service Inheritance](https://storage.googleapis.com/chromium-website-lob-storage/44c323a47d23b956035c9dd714bb2a1d494a2dd5)
 
 *   A `Service` has an associated `Device` instance, stored as a type specific
     `RefPtr` in the subclass.
@@ -213,7 +209,7 @@ and a per-user Profile when a user is logged in.
     `WiFiService` that was created from a WiFi scan but that the user has never
     attempted to configure or connect to.
 
-![Profile Inheritance](images/profile_inheritance.png)
+![Profile Inheritance](https://storage.googleapis.com/chromium-website-lob-storage/5dba6837e02797273e55a0311bcf9ea99f1a1a53){inl}
 
 *   A `Service` can be "linked" to a different `Profile` through the use of the
     `Service` kProfileProperty D-Bus property, which is how `Service` instances
@@ -265,16 +261,6 @@ and a per-user Profile when a user is logged in.
 
 # Glossary
 
-## RTNL
-
-**RTNL** is short for [rtnetlink].
-
-*   [Netlink] is a protocol that can be used for kernel <-> user-space and
-    user-space <-> user-space communication.
-    *   See also [rtnetlink.h].
-*   *TODO:* Document the [RTNLHandler class](../net/rtnl_handler.h) and the
-    [RTNLListener class](../net/rtnl_listener.h).
-
 [ProviderInheritance]: https://docs.google.com/drawings/d/13bSfym4MoC3qxQS1c7aiJktyJkzs8qmF6-ulh57mbuE
 [org.chromium.flimflam.Device]: ../dbus_bindings/org.chromium.flimflam.Device.dbus-xml
 [org.chromium.flimflam.Manager]: ../dbus_bindings/org.chromium.flimflam.Manager.dbus-xml
@@ -282,6 +268,3 @@ and a per-user Profile when a user is logged in.
 [org.chromium.flimflam.IPConfig]: ../dbus_bindings/org.chromium.flimflam.IPConfig.dbus-xml
 [org.chromium.flimflam.Profile]: ../dbus_bindings/org.chromium.flimflam.Profile.dbus-xml
 [org.chromium.flimflam.ThirdPartyVpn]: ../dbus_bindings/org.chromium.flimflam.ThirdPartyVpn.dbus-xml
-[rtnetlink]: http://man7.org/linux/man-pages/man7/rtnetlink.7.html
-[Netlink]: http://man7.org/linux/man-pages/man7/netlink.7.html
-[rtnetlink.h]: https://elixir.bootlin.com/linux/v5.0/source/include/uapi/linux/rtnetlink.h

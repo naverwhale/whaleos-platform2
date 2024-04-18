@@ -1,18 +1,18 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "federated/session_manager_proxy.h"
 
-#include <memory>
 #include <stdlib.h>
-#include <string>
 #include <time.h>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/callback.h>
 #include <base/memory/ptr_util.h>
 #include <base/memory/ref_counted.h>
 #include <gmock/gmock.h>

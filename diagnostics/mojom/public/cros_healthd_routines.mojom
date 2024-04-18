@@ -1,0 +1,685 @@
+// Copyright 2022 The ChromiumOS Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// API exposed by the cros_healthd daemon. This API is normally consumed by the
+// browser and the telem and diag command-line tools.
+
+// NOTE: This mojom should be kept in sync with the copy in Chromium's repo in
+// src/chromeos/ash/services/cros_healthd/public/mojom/cros_healthd_routines.mojom.
+//
+// This interface is in the process of being synced to Chromium from ChromiumOS.
+// Thus, we have the following routines that are supported by cros_healthd in
+// ChromiumOS but not yet part of Chromium's interface (in both
+// `RoutineArgument` and `RoutineDetail`):
+// - Audio driver routine
+// - Cpu stress routine
+// - Ufs lifetime routine
+// - Disk read routine
+// - Cpu cache routine
+// - Prime search routine
+// - Led lit up routine
+// - Floating point routine
+// - Bluetooth power routine
+// - Bluetooth discovery routine
+// - Fan routine
+// - Bluetooth scanning routine
+
+module ash.cros_healthd.mojom;
+
+import "diagnostics/mojom/external/time.mojom";
+import "diagnostics/mojom/public/cros_healthd_exception.mojom";
+
+// Routines interface exposed by the cros_healthd daemon.
+//
+// NextMinVersion: 2, NextIndex: 2
+interface CrosHealthdRoutinesService {
+  // Requests that a routine using the RoutineControl API is created on the
+  // platform. This function creates a different routine based on the
+  // RoutineArgument supplied.
+  //
+  // Error Handling:
+  // This method will result in the creation of the routine on the device, which
+  // might require allocation of additional resources and checking preconditions
+  // for the routine, e.g. available hardware, correct arguments, etc.
+  //
+  // All exceptions that occur (either during initialization or while executing
+  // the routine) will close the connection to the provided RoutineControl
+  // with a specific reason (see cros_healthd.mojom.Exception) and a string
+  // message containing human readable information about the exception.
+  // For that reason it is necessary to always setup a disconnect handler on the
+  // RoutineControl remote to be informed about potential exceptions.
+  //
+  // Please note exceptions are different from a routine reporting `has_passed
+  // == false` (in case it failed, see RoutineStateFinished). Exception are
+  // something not intended to happen. The details of the reasons for Exceptions
+  // can be found in cros_healthd.mojom.Exception type and the corresponding
+  // reason enum.
+  //
+  // To know if an exception occurs during the initialization, callers can wait
+  // for the routine being initialized (get via `GetState` or RoutineObserver) on
+  // the RoutineControl remote, before calling the `Start` method.
+  //
+  // The request:
+  // * |routine_argument| - a RoutineArgument type that provides all the
+  //                        necessary parameters and configs to create a
+  //                        particular type of routine.
+  // * |routine_receiver| - a receiver that will be bound to the actual routine
+  //                        control implementation, where the remote will be
+  //                        held by the client for starting the routine.
+  // * |routine_observer| - an optional observer to receive status updates about
+  //                        changing routine states.
+  CreateRoutine@0(RoutineArgument routine_argument,
+      pending_receiver<RoutineControl> routine_receiver,
+      pending_remote<RoutineObserver>? routine_observer);
+
+  // Checks whether a given `RoutineArgument` is supported.
+  //
+  // The request:
+  // * |routine_argument| - a `RoutineArgument` type that provides all the
+  //                        necessary parameters to create a particular type of
+  //                        routine.
+  //
+  // The response:
+  // * |status| - See the documentation of `SupportStatus`.
+  [MinVersion=1] IsRoutineArgumentSupported@1(
+      RoutineArgument routine_argument) => (SupportStatus status);
+};
+
+// Argument types for the possible routines the routine control API can create.
+[Extensible]
+union RoutineArgument {
+  // Default field is required by extensible unions for backward compatibility.
+  // Any unrecognized Mojo field will deserialize to this field. Don't use this.
+  [Default] bool unrecognizedArgument;
+  // Arguments to create a memory routine.
+  [MinVersion=1] MemoryRoutineArgument memory;
+  // Arguments to create a volume button routine.
+  [MinVersion=2] VolumeButtonRoutineArgument volume_button;
+  // Arguments to create an audio driver malfunction test routine.
+  AudioDriverRoutineArgument audio_driver;
+  // Arguments to create a CPU stress routine.
+  CpuStressRoutineArgument cpu_stress;
+  // Arguments to create a UFS lifetime routine.
+  UfsLifetimeRoutineArgument ufs_lifetime;
+  // Arguments to create a disk read routine.
+  DiskReadRoutineArgument disk_read;
+  // Arguments to create a CPU cache routine.
+  CpuCacheRoutineArgument cpu_cache;
+  // Arguments to create a prime search routine.
+  PrimeSearchRoutineArgument prime_search;
+  // Arguments to create a LED lit up routine.
+  LedLitUpRoutineArgument led_lit_up;
+  // Arguments to create a floating point routine.
+  FloatingPointRoutineArgument floating_point;
+  // Arguments to create a Bluetooth power routine.
+  BluetoothPowerRoutineArgument bluetooth_power;
+  // Arguments to create a Bluetooth discovery routine.
+  BluetoothDiscoveryRoutineArgument bluetooth_discovery;
+  // Arguments to create a fan routine.
+  FanRoutineArgument fan;
+  // Arguments to create a Bluetooth scanning routine.
+  BluetoothScanningRoutineArgument bluetooth_scanning;
+};
+
+// This routine checks whether there is any memory problem by
+// reading/writing different patterns.
+struct MemoryRoutineArgument {
+  // An optional field to indicate how much memory should be tested. If the
+  // value is null, memory test will run with as much memory as possible.
+  uint32? max_testing_mem_kib;
+};
+
+// |AudioDriverRoutineArgument| is the argument struct to create the audio
+// driver malfunction test routine by calling |CreateRoutine|. There is no input
+// parameters so the struct remains empty.
+//
+// The routine checks the health of audio driver. It contains the following
+// examinations:
+// - CRAS can detect at least one internal audio card.
+// - No audio devices failed to open.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct AudioDriverRoutineArgument {};
+
+// This routine checks whether there is any CPU problem by stress testing the
+// CPU.
+//
+// NextMinVersion: 1, NextIndex: 1
+struct CpuStressRoutineArgument {
+  // |exec_duration| determines how long the stressapptest binary will run. If
+  // the provided value is null, default to running for 1 minute. The duration
+  // is rounded to the nearest seconds towards zero (see behaviour of
+  // std::trunc()).
+  ash.cros_healthd.external.mojo_base.mojom.TimeDelta? exec_duration@0;
+};
+
+// This routine checks the UFS drive's life time.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct UfsLifetimeRoutineArgument {};
+
+// The routine will create a test file with md5 checksum, read the test file
+// either randomly or linearly, repeatedly for a dedicated duration. If the md5
+// checksum of read back is validated, then the test will pass.
+struct DiskReadRoutineArgument {
+  // Type of how disk reading is performed, either linear or random.
+  DiskReadTypeEnum type@0;
+  // Expected duration to read the test file in the DiskRead routine, which will
+  // be rounded towards zero to the nearest second. This parameter should be
+  // strictly greater than zero.
+  ash.cros_healthd.external.mojo_base.mojom.TimeDelta disk_read_duration@1;
+  // Test file size, in megabytes (MiB), to test with DiskRead routine
+  uint32 file_size_mib@2;
+};
+
+// This routine checks whether there is any CPU cache problem by running a CPU
+// cache coherency test.
+//
+// NextMinVersion: 1, NextIndex: 1
+struct CpuCacheRoutineArgument {
+  // |exec_duration| determines how long the stressapptest binary will run. If
+  // the provided value is null, default to running for 1 minute. The duration
+  // is rounded to the nearest seconds towards zero (see behaviour of
+  // std::trunc()).
+  ash.cros_healthd.external.mojo_base.mojom.TimeDelta? exec_duration@0;
+};
+
+// This routine checks whether there is any CPU problem by repeatedly
+// calculating prime numbers.
+//
+// NextMinVersion: 1, NextIndex: 1
+struct PrimeSearchRoutineArgument {
+  // |exec_duration| determines how long the prime search test will run. If
+  // the provided value is null, default to running for 1 minute. If the value
+  // is less than 1 second, run for 1 second.
+  ash.cros_healthd.external.mojo_base.mojom.TimeDelta? exec_duration@0;
+};
+
+// This routine checks the functionality of the volume button. The routine
+// passes if the specified volume button event is received before the timeout.
+// Otherwise, the routine fails.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct VolumeButtonRoutineArgument {
+  [Stable, Extensible]
+  enum ButtonType {
+    // The default value is for backward compatibility, should not be used.
+    [Default] kUnmappedEnumField = 0,
+    kVolumeUp = 1,    // Test for the volume up button.
+    kVolumeDown = 2,  // Test for the volume down button.
+  };
+
+  // The type of volume button to test.
+  ButtonType type@0;
+  // Length of time to listen to the volume button events. The timeout should be
+  // positive and less or equal to 600 seconds.
+  ash.cros_healthd.external.mojo_base.mojom.TimeDelta timeout@1;
+};
+
+// Replier interface for the LED lit up routine.
+//
+// NextMinVersion: 1, NextIndex: 1
+[Stable]
+interface LedLitUpRoutineReplier {
+  // Returns whether the actual LED color matches the expected color.
+  //
+  // The response:
+  // * |matched| - true if the actual LED color matches the expected color.
+  //               Otherwise, false.
+  GetColorMatched@0() => (bool matched);
+};
+
+// The routine lights up the target LED in the specified color and requests the
+// caller to verify the change.
+//
+// The routine proceeds with the following steps:
+// 1. Set the specified LED with the specified color. If the LED name or color
+//    is not supported by EC, the routine reports error at this step.
+// 2. Invoke the |GetColorMatched| method of |replier|. The method should
+//    return |true| if the actual color matches the specified color and
+//    |false|, otherwise. Notice that there is no timeout so it will wait
+//    indefinitely.
+// 3. After receiving the response from |replier|, the color of the LED will
+//    be reset (back the auto control). If the replier disconnects before
+//    the response is received, the LED will also be reset.
+// 4. The status of the routine is then updated. The routine passes when the
+//    response is |true|. If the response is |false|, the routine fails.
+//
+// NextMinVersion: 1, NextIndex: 3
+struct LedLitUpRoutineArgument {
+  // The LED to be lit up.
+  LedName name@0;
+  // The color to be lit up.
+  LedColor color@1;
+  // A replier to answer whether the actual LED color matches the expected color.
+  pending_remote<LedLitUpRoutineReplier> replier@2;
+};
+
+// This routine checks whether there is any CPU problem by repeatedly
+// calculating floating point values.
+//
+// NextMinVersion: 1, NextIndex: 1
+struct FloatingPointRoutineArgument {
+  // `exec_duration` determines how long the prime search test will run. If
+  // the provided value is null, default to running for 1 minute. If the value
+  // is less than 1 second, run for 1 second.
+  ash.cros_healthd.external.mojo_base.mojom.TimeDelta? exec_duration@0;
+};
+
+// This routine checks whether the Bluetooth adapter can be powered off/on and
+// the powered status is consistent in both HCI and D-Bus levels.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct BluetoothPowerRoutineArgument {};
+
+// This routine checks whether the Bluetooth adapter can start/stop discovery
+// mode and the discovering status is consistent in both HCI and D-Bus levels.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct BluetoothDiscoveryRoutineArgument {};
+
+// This routine checks whether the fan is controllable.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct FanRoutineArgument {};
+
+// This routine checks whether the Bluetooth adapter can scan nearby Bluetooth
+// peripherals and collect peripherals' information.
+//
+// NextMinVersion: 1, NextIndex: 1
+struct BluetoothScanningRoutineArgument {
+  // `exec_duration` determines how long the scanning routine will run. This
+  // parameter needs to be strictly greater than zero, otherwise the routine
+  // will fail with an exception. If the provided value is null, default to
+  // running for 5 seconds.
+  ash.cros_healthd.external.mojo_base.mojom.TimeDelta? exec_duration@0;
+};
+
+// Interface exposed to clients for controlling a routine.
+//
+// Error Handling:
+// Please check the Error Handling section of CrosHealthdRoutinesService.
+//
+// NextMinVersion: 1, NextIndex: 2
+interface RoutineControl {
+  // Gets the current state of the routine. Note that if the routine fails to
+  // initialize, the RoutineControl may disconnect before the callback is
+  // called.
+  GetState@0() => (RoutineState state);
+
+  // Starts the routine. Each routine can only be started once. Calling this
+  // method multiple times results in no-ops.
+  //
+  // See the error handling section above to know how to handle possible
+  // exceptions that occur before and after the routine has been started.
+  Start@1();
+};
+
+// Implemented by clients who desire routine update notifications.
+//
+// NextMinVersion: 1, NextIndex: 1
+interface RoutineObserver {
+  // Called when the routine state has changed. This is also called as soon
+  // as a routine is initialized (right after calling `CreateRoutine`).
+  // Note that if the routine fails to initialize, the RoutineControl may
+  // disconnect before the first invocation of this observer method.
+  OnRoutineStateChange@0(RoutineState state);
+};
+
+// Used to pass information regarding routine state.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct RoutineState {
+  // The percentage of the completion of the routine. 0 to 100.
+  uint8 percentage@0;
+
+  RoutineStateUnion state_union@1;
+};
+
+// Possible routine states.
+//
+// NextMinVersion: 1, NextIndex: 4
+union RoutineStateUnion {
+  // Default field is required by extensible unions for backward compatibility.
+  // Any unrecognized Mojo field will deserialize to this field. Don't use this.
+  [Default] bool unrecognizedArgument @0;
+  // Routine has been initialized but not yet started.
+  RoutineStateInitialized initialized@1;
+  // Routine is running.
+  RoutineStateRunning running@2;
+  // Routine is waiting for something.
+  RoutineStateWaiting waiting@3;
+  // Routine has finished.
+  RoutineStateFinished finished@4;
+};
+
+// Routine has been initialized but not yet started.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct RoutineStateInitialized {};
+
+// Routine is currently running.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct RoutineStateRunning {};
+
+// Routine is currently waiting.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct RoutineStateWaiting {
+  // The reason why routine is waiting.
+  //
+  // NextMinVersion: 2, NextIndex: 3
+  [Extensible]
+  enum Reason {
+    [Default] kUnmappedEnumField = 0,
+    // Waiting for the job to be scheduled for running.
+    kWaitingToBeScheduled = 1,
+    // Waiting for user input.
+    [MinVersion=1] kWaitingUserInput = 2,
+  };
+  // Reason for why the routine is waiting.
+  Reason reason@0;
+  // Message for why the routine is waiting, may be used to pass instruction or
+  // explanation.
+  string message@1;
+};
+
+// Routine has finished.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct RoutineStateFinished {
+  // Whether the routine has passed or not.
+  bool has_passed@0;
+  // The details of the routine.
+  RoutineDetail? detail@1;
+};
+
+// Details about a finished routine.
+[Extensible]
+union RoutineDetail {
+  // Default field is required by extensible unions for backward compatibility.
+  // Any unrecognized Mojo field will deserialize to this field. Don't use this.
+  [Default] bool unrecognizedArgument;
+  MemoryRoutineDetail memory;
+  VolumeButtonRoutineDetail volume_button;
+  AudioDriverRoutineDetail audio_driver;
+  CpuStressRoutineDetail cpu_stress;
+  UfsLifetimeRoutineDetail ufs_lifetime;
+  DiskReadRoutineDetail disk_read;
+  CpuCacheRoutineDetail cpu_cache;
+  PrimeSearchRoutineDetail prime_search;
+  LedLitUpRoutineDetail led_lit_up;
+  FloatingPointRoutineDetail floating_point;
+  BluetoothPowerRoutineDetail bluetooth_power;
+  BluetoothDiscoveryRoutineDetail bluetooth_discovery;
+  FanRoutineDetail fan;
+  BluetoothScanningRoutineDetail bluetooth_scanning;
+};
+
+// Details regarding memory routine.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct MemoryRoutineDetail {
+  // Number of bytes tested in the memory routine.
+  uint64 bytes_tested@0;
+  // Contains the memtester test results.
+  MemtesterResult result@1;
+};
+
+// Details regarding audio driver routine.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct AudioDriverRoutineDetail {
+  // Whether or not the routine can detect an internal audio card.
+  bool internal_card_detected@0;
+  // Whether or not all audio devices succeed to open.
+  bool audio_devices_succeed_to_open@1;
+};
+
+// Details regarding CPU stress routine.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct CpuStressRoutineDetail {};
+
+// Details regarding UFS lifetime routine.
+//
+// NextMinVersion: 1, NextIndex: 3
+struct UfsLifetimeRoutineDetail {
+  // Pre-end of life information.
+  uint8 pre_eol_info@0;
+  // Device life time estimation (type A).
+  uint8 device_life_time_est_a@1;
+  // Device life time estimation (type B).
+  uint8 device_life_time_est_b@2;
+};
+
+// Details regarding disk_read routine.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct DiskReadRoutineDetail {};
+
+// Details regarding CPU cache routine.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct CpuCacheRoutineDetail {};
+
+// Details regarding prime search routine.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct PrimeSearchRoutineDetail {};
+
+// Details regarding floating point routine.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct FloatingPointRoutineDetail {
+};
+
+// Enumeration of each possible memtester test item.
+//
+// NextMinVersion: 1, NextIndex: 20
+[Extensible]
+enum MemtesterTestItemEnum {
+  [Default] kUnmappedEnumField = 0,
+  // The memtester test is not recognized.
+  kUnknown = 1,
+
+  // Test that all memory addresses to be tested can be set to itself and its
+  // complement.
+  kStuckAddress = 2,
+
+  // These tests test different operation of a random int64 with buffer
+  // initialized as 0xFFFFFFFF, repeating over 64 bit blocks.
+  // Perform AND operation.
+  kCompareAND = 3,
+  // Perform DIV operation.
+  kCompareDIV = 4,
+  // Perform MUL operation.
+  kCompareMUL = 5,
+  // Perform OR operation.
+  kCompareOR = 6,
+  // Perform SUB operation.
+  kCompareSUB = 7,
+  // Perform XOR operation.
+  kCompareXOR = 8,
+  // Perform ADD operation.
+  kSequentialIncrement = 9,
+
+  // These tests test setting memory regions in a certain pattern, repeating
+  // over each 64 bit blocks.
+  // Test Pattern: |0*10*| and |1*01*|.
+  kBitFlip = 10,
+  // Test Pattern:|0*1010*| and |1*0101*|.
+  kBitSpread = 11,
+  // Test Pattern: all 256 possible combinations of a 8 bit block, repeated 8
+  // times.
+  kBlockSequential = 12,
+  // Test Pattern: Alternating 0 and 1.
+  kCheckerboard = 13,
+  // Test Pattern: Random 64 bits.
+  kRandomValue = 14,
+  // Test Pattern: all 0s and all 1s.
+  kSolidBits = 15,
+  // Test Pattern: |0*10*|.
+  kWalkingOnes = 16,
+  // Test Pattern: |1*01*|.
+  kWalkingZeroes = 17,
+
+  // These tests test writing random n bit words across the memory regions.
+  // Test Pattern: 8 bit random words.
+  k8BitWrites = 18,
+  // Test Pattern: 16 bit random words.
+  k16BitWrites = 19,
+};
+
+// Result from running memtester.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct MemtesterResult {
+  // Tests that have passed.
+  array<MemtesterTestItemEnum> passed_items@0;
+  // Tests that have failed.
+  array<MemtesterTestItemEnum> failed_items@1;
+};
+
+// Details regarding volume_button routine.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct VolumeButtonRoutineDetail {};
+
+// Details regarding LED lit up routine.
+//
+// NextMinVersion: 1, NextIndex: 0
+struct LedLitUpRoutineDetail {};
+
+// Details regarding Bluetooth powered state.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct BluetoothPoweredDetail {
+  // Bluetooth powered state in HCI level.
+  bool hci_powered@0;
+  // Bluetooth powered state in D-Bus level.
+  bool dbus_powered@1;
+};
+
+// Details regarding Bluetooth power routine.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct BluetoothPowerRoutineDetail {
+  // Result of powering off Bluetooth adapter, or null if error occurs.
+  BluetoothPoweredDetail? power_off_result@0;
+  // Result of powering on Bluetooth adapter, or null if error occurs.
+  BluetoothPoweredDetail? power_on_result@1;
+};
+
+// Details regarding Bluetooth discovering state.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct BluetoothDiscoveringDetail {
+  // Bluetooth discovering state in HCI level.
+  bool hci_discovering@0;
+  // Bluetooth discovering state in D-Bus level.
+  bool dbus_discovering@1;
+};
+
+// Details regarding Bluetooth discovery routine.
+//
+// NextMinVersion: 1, NextIndex: 2
+struct BluetoothDiscoveryRoutineDetail {
+  // Result of starting discovery, or null if error occurs.
+  BluetoothDiscoveringDetail? start_discovery_result@0;
+  // Result of stopping discovery, or null if error occurs.
+  BluetoothDiscoveringDetail? stop_discovery_result@1;
+};
+
+// Details regarding the scanned peripheral.
+//
+// NextMinVersion: 1, NextIndex: 3
+struct BluetoothScannedPeripheralInfo {
+  // All collected RSSI during the routine.
+  array<int16> rssi_history@0;
+  // The readable name of peripheral, which is reported when the average RSSI is
+  // higher than -60.
+  string? name@1;
+  // The unique id of peripheral, which is reported when the average RSSI is
+  // higher than -60.
+  string? peripheral_id@2;
+};
+
+// Details regarding Bluetooth scanning routine.
+//
+// NextMinVersion: 1, NextIndex: 1
+struct BluetoothScanningRoutineDetail {
+  // Scanned nearby peripheral info.
+  array<BluetoothScannedPeripheralInfo> peripherals@0;
+};
+
+// Enumeration of the possible DiskRead routine's command type.
+//
+// NextMinVersion: 1, NextIndex: 3
+[Extensible]
+enum DiskReadTypeEnum {
+  // This is required for backwards compatibility, should not be used.
+  [Default] kUnmappedEnumField = 0,
+  kLinearRead = 1,
+  kRandomRead = 2,
+};
+
+// Enumeration of each possible LEDs on a device. This enum type is a mirror of
+// the enums defined in EC. To find out the actual names of each installed LEDs,
+// please refer to the EC firmware.
+//
+// NextMinVersion: 1, NextIndex: 6
+[Extensible]
+enum LedName {
+  // The default value is for backward compatibility, should not be used.
+  [Default] kUnmappedEnumField = 0,
+  kBattery = 1,
+  kPower = 2,
+  kAdapter = 3,
+  kLeft = 4,
+  kRight = 5,
+};
+
+// Enumeration of each possible LED colors.
+//
+// NextMinVersion: 1, NextIndex: 7
+[Extensible]
+enum LedColor {
+  // The default value is for backward compatibility, should not be used.
+  [Default] kUnmappedEnumField = 0,
+  kRed = 1,
+  kGreen = 2,
+  kBlue = 3,
+  kYellow = 4,
+  kWhite = 5,
+  kAmber = 6,
+};
+
+// Whether the given hardware probed matches the hardware description recorded.
+//
+// NextMinVersion: 1, NextIndex: 4
+[Extensible]
+enum HardwarePresenceStatus {
+  // The default value is for backward compatibility, should not be used.
+  [Default] kUnmappedEnumField = 0,
+  // The hardware presence matches the description.
+  kMatched = 1,
+  // The hardware presence does not match the description.
+  kNotMatched = 2,
+  // There is no description available, skipping check.
+  kNotConfigured = 3,
+};
+
+// Details regarding fan routine.
+//
+// NextMinVersion: 1, NextIndex: 3
+struct FanRoutineDetail {
+  // The ids of fans that can be controlled.
+  array<uint8> passed_fan_ids@0;
+  // The ids of fans that cannot be controlled.
+  array<uint8> failed_fan_ids@1;
+  // Whether the number of fan probed is matched.
+  HardwarePresenceStatus fan_count_status@2;
+};

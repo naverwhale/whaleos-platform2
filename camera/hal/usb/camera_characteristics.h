@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -12,7 +12,6 @@
 #include <utility>
 
 #include <base/files/file.h>
-#include <base/macros.h>
 
 #include "hal/usb/common_types.h"
 
@@ -32,7 +31,6 @@ static const base::FilePath kCameraCharacteristicsConfigFile(
 //
 // Example of the config file:
 //  camera0.lens_facing=0
-//  camera0.sensor_orientation=0
 //  camera0.module0.usb_vid_pid=0123:4567
 //  camera0.module0.horizontal_view_angle=68.4
 //  camera0.module0.lens_info_available_focal_lengths=1.64
@@ -42,7 +40,6 @@ static const base::FilePath kCameraCharacteristicsConfigFile(
 //  camera0.module1.usb_vid_pid=89ab:cdef
 //  camera0.module1.lens_info_available_focal_lengths=1.69,2
 //  camera1.lens_facing=1
-//  camera1.sensor_orientation=180
 //  ...
 class CameraCharacteristics {
  public:

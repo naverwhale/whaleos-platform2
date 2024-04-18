@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,13 @@ int main(int argc, char** argv) {
     printf("Usage: %s <system|user> <username>\n", argv[0]);
     return 1;
   }
+  brillo::cryptohome::home::Username username(argv[2]);
   base::FilePath fp;
-  if (!strcmp(argv[1], "system"))
-    fp = brillo::cryptohome::home::GetRootPath(argv[2]);
-  else
-    fp = brillo::cryptohome::home::GetUserPath(argv[2]);
+  if (!strcmp(argv[1], "system")) {
+    fp = brillo::cryptohome::home::GetRootPath(username);
+  } else {
+    fp = brillo::cryptohome::home::GetUserPath(username);
+  }
   printf("%s\n", fp.value().c_str());
   return 0;
 }

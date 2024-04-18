@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,43 +9,34 @@
 #include <memory>
 #include <string>
 
+#include <linux/if.h>
+
 #include <base/cancelable_callback.h>
 #include <base/files/file_path.h>
 #include <base/memory/weak_ptr.h>
+#include <chromeos/patchpanel/dbus/client.h>
+#include <net-base/ip_address.h>
+#include <net-base/socket.h>
 
 #include "shill/certificate_file.h"
 #include "shill/device.h"
-#include "shill/event_dispatcher.h"
 #include "shill/refptr_types.h"
-
-#if !defined(DISABLE_WIRED_8021X)
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 #include "shill/supplicant/supplicant_eap_state_handler.h"
 #include "shill/supplicant/supplicant_event_delegate_interface.h"
-#endif  // DISABLE_WIRED_8021X
 
 namespace shill {
 
-class EthernetProvider;
-class Sockets;
-class StoreInterface;
-
-#if !defined(DISABLE_WIRED_8021X)
 class CertificateFile;
 class EapListener;
 class EthernetEapProvider;
+class EthernetProvider;
+class StoreInterface;
 class SupplicantEAPStateHandler;
 class SupplicantInterfaceProxyInterface;
 class SupplicantProcessProxyInterface;
-#endif  // DISABLE_WIRED_8021X
 
-class Ethernet
-#if !defined(DISABLE_WIRED_8021X)
-    : public Device,
-      public SupplicantEventDelegateInterface {
-#else
-    : public Device {
-#endif  // DISABLE_WIRED_8021X
+class Ethernet : public Device, public SupplicantEventDelegateInterface {
  public:
   Ethernet(Manager* manager,
            const std::string& link_name,
@@ -56,9 +47,8 @@ class Ethernet
 
   ~Ethernet() override;
 
-  void Start(Error* error,
-             const EnabledStateChangedCallback& callback) override;
-  void Stop(Error* error, const EnabledStateChangedCallback& callback) override;
+  void Start(EnabledStateChangedCallback callback) override;
+  void Stop(EnabledStateChangedCallback callback) override;
   void LinkEvent(unsigned int flags, unsigned int change) override;
   bool Load(const StoreInterface* storage) override;
   bool Save(StoreInterface* storage) override;
@@ -66,7 +56,6 @@ class Ethernet
   virtual void ConnectTo(EthernetService* service);
   virtual void DisconnectFrom(EthernetService* service);
 
-#if !defined(DISABLE_WIRED_8021X)
   // Test to see if conditions are correct for EAP authentication (both
   // credentials and a remote EAP authenticator is present) and initiate
   // an authentication if possible.
@@ -81,11 +70,26 @@ class Ethernet
   void Certification(const KeyValueStore& properties) override;
   void EAPEvent(const std::string& status,
                 const std::string& parameter) override;
+  void InterworkingAPAdded(const RpcIdentifier& BSS,
+                           const RpcIdentifier& cred,
+                           const KeyValueStore& properties) override;
+  void InterworkingSelectDone() override;
   void PropertiesChanged(const KeyValueStore& properties) override;
   void ScanDone(const bool& /*success*/) override;
-#endif  // DISABLE_WIRED_8021X
+  void StationAdded(const RpcIdentifier& Station,
+                    const KeyValueStore& properties) override{};
+  void StationRemoved(const RpcIdentifier& Station) override{};
+  void PskMismatch() override{};
 
-  std::string GetStorageIdentifier() const override;
+  // Inherited from Device and responds to a neighbor reachability event from
+  // patchpanel. Restarts network validation if the event type contradicts the
+  // current connection state (neighbor failure + kStateOnline, or neighbour
+  // reachable + kStateNoConnectivity).
+  void OnNeighborReachabilityEvent(
+      int interface_index,
+      const net_base::IPAddress& ip_address,
+      patchpanel::Client::NeighborRole role,
+      patchpanel::Client::NeighborStatus status) override;
 
   virtual bool link_up() const { return link_up_; }
 
@@ -96,14 +100,16 @@ class Ethernet
  private:
   friend class EthernetTest;
   friend class EthernetServiceTest;  // For weak_ptr_factory_.
-  friend class PPPoEServiceTest;     // For weak_ptr_factory_.
 
   FRIEND_TEST(EthernetProviderTest, MultipleServices);
+  FRIEND_TEST(EthernetTest, RunEthtoolCmdSuccess);
+  FRIEND_TEST(EthernetTest, RunEthtoolCmdFail);
+
+  std::string DeviceStorageSuffix() const override;
 
   // Return a pointer to the EthernetProvider for Ethernet devices.
   EthernetProvider* GetProvider();
 
-#if !defined(DISABLE_WIRED_8021X)
   // Return a pointer to the EAP provider for Ethernet devices.
   EthernetEapProvider* GetEapProvider();
 
@@ -133,19 +139,9 @@ class Ethernet
   void TryEapAuthenticationTask();
 
   SupplicantProcessProxyInterface* supplicant_process_proxy() const;
-#endif  // DISABLE_WIRED_8021X
-
-  // Accessors for the PPoE property.
-  bool GetPPPoEMode(Error* error);
-  bool ConfigurePPPoEMode(const bool& mode, Error* error);
-  void ClearPPPoEMode(Error* error);
 
   // Accessors for the UsbEthernetMacAddressSource property.
   std::string GetUsbEthernetMacAddressSource(Error* error);
-
-  // Helpers for creating services with |this| as their device.
-  EthernetServiceRefPtr CreateEthernetService();
-  EthernetServiceRefPtr CreatePPPoEService();
 
   void RegisterService(EthernetServiceRefPtr service);
   void DeregisterService(EthernetServiceRefPtr service);
@@ -156,8 +152,7 @@ class Ethernet
   bool DisableOffloadFeatures();
 
   void SetUsbEthernetMacAddressSource(const std::string& source,
-                                      Error* error,
-                                      const ResultCallback& callback) override;
+                                      ResultCallback callback) override;
 
   // Returns hex coded MAC address in lower case and without colons on success.
   // Otherwise returns an empty string.
@@ -168,18 +163,27 @@ class Ethernet
   // if |error == 0|;
   void OnSetInterfaceMacResponse(const std::string& mac_address_source,
                                  const std::string& new_mac_address,
-                                 const ResultCallback& callback,
+                                 ResultCallback callback,
                                  int32_t error);
   // Sets new MAC address and reconnects to the |service_| to renew IP address
   // if needed.
   void set_mac_address(const std::string& mac_address) override;
 
-  // Queries the kernel for a permanent MAC address. Returns a permanent MAC
-  // address in lower case on success. Otherwise returns an empty string.
-  std::string GetPermanentMacAddressFromKernel();
-
   // Returns device bus type on success. Otherwise, returns empty string.
   std::string GetDeviceBusType() const;
+
+  void UpdateLinkSpeed();
+
+  // Runs ethtool command and returns true when command is successfully
+  // run otherwise returns false. Note that |ifr_data| field of
+  // |interface_command| should already be set when passed in.
+  // |ifr_name| is always set to the name of the interface associated
+  // with that Device.
+  bool RunEthtoolCmd(ifreq* interface_command);
+
+  // Gets driver name from ETHTOOL and notifies driver name of an ethernet
+  // connection to metrics.
+  void NotifyEthernetDriverName();
 
   EthernetServiceRefPtr service_;
   bool link_up_;
@@ -188,7 +192,6 @@ class Ethernet
 
   std::string bus_type_;
 
-#if !defined(DISABLE_WIRED_8021X)
   // Track whether we have completed EAP authentication successfully.
   bool is_eap_authenticated_;
 
@@ -211,10 +214,10 @@ class Ethernet
 
   // Make sure TryEapAuthenticationTask is only queued for execution once
   // at a time.
-  base::CancelableClosure try_eap_authentication_callback_;
-#endif  // DISABLE_WIRED_8021X
+  base::CancelableOnceClosure try_eap_authentication_callback_;
 
-  std::unique_ptr<Sockets> sockets_;
+  std::unique_ptr<net_base::SocketFactory> socket_factory_ =
+      std::make_unique<net_base::SocketFactory>();
 
   std::string permanent_mac_address_;
 

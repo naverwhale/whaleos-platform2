@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,13 @@
 #define CRASH_REPORTER_CRASH_SENDER_UTIL_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <base/files/file.h>
 #include <base/files/file_path.h>
-#include <base/optional.h>
 #include <base/time/clock.h>
 #include <base/time/time.h>
 #include <base/values.h>
@@ -22,31 +22,33 @@
 #include <metrics/metrics_library.h>
 #include <session_manager/dbus-proxies.h>
 #include <shill/dbus-proxies.h>
+#include <third_party/abseil-cpp/absl/types/variant.h>
 
 #include "crash-reporter/crash_sender_base.h"
 
 namespace util {
 
 // URL to send official build crash reports to.
-constexpr char kReportUploadProdUrl[] = "https://clients2.google.com/cr/report";
+inline constexpr char kReportUploadProdUrl[] =
+    "https://clients2.google.com/cr/report";
 
 // URL to send test/dev build crash reports to.
-constexpr char kReportUploadStagingUrl[] =
+inline constexpr char kReportUploadStagingUrl[] =
     "https://clients2.google.com/cr/staging_report";
 
 // Maximum crashes to send per 24 hours.
-constexpr int kMaxCrashRate = 32;
+inline constexpr int kMaxCrashRate = 32;
 
 // Maximum bytes of crash reports to send per 24 hours. Note that "whichever
 // comes last" maximum with kMaxCrashRate; that is, we'll always send 32 crashes
 // per 24 hours, even if that exceeds 24MB, and we'll always send 24MB per 24
 // hours, even if that exceeds 32 crashes.
-constexpr int kMaxCrashBytes = 24 * 1024 * 1024;
+inline constexpr int kMaxCrashBytes = 24 * 1024 * 1024;
 
 // Maximum time to sleep before attempting to send a crash report. This value is
 // inclusive as an upper bound, thus 0 means a crash report can be sent
 // immediately.
-constexpr int kMaxSpreadTimeInSeconds = 600;
+inline constexpr int kMaxSpreadTimeInSeconds = 600;
 
 // Parsed command line flags.
 struct CommandLineFlags {
@@ -59,6 +61,8 @@ struct CommandLineFlags {
   bool test_mode = false;
   bool upload_old_reports = false;
   bool force_upload_on_test_images = false;
+  bool consent_already_checked_by_crash_reporter = false;
+  bool dry_run = false;
 };
 
 // Represents a metadata file name, and its parsed metadata.
@@ -122,6 +126,10 @@ bool IsBelowRate(const base::FilePath& timestamps_dir,
 // |bytes| is the number of bytes sent over the network.
 void RecordSendAttempt(const base::FilePath& timestamps_dir, int bytes);
 
+// Gets the crash type based on crash details. Returns std::nullopt if the crash
+// type is unknown. This is mainly used by healthD for fatal crashes.
+std::optional<std::string> GetFatalCrashType(const CrashDetails& details);
+
 // A helper class for sending crashes. The behaviors can be customized with
 // Options class for unit testing.
 //
@@ -155,7 +163,7 @@ class Sender : public SenderBase {
     // the reports are uploaded to a staging crash server instead.
     bool allow_dev_sending = false;
 
-    // If true, just log the kTestModeSuccessful message if the crash report
+    // If true, just touch the kTestModeSuccessfulFile if the crash report
     // looks legible instead of actually uploading it.
     bool test_mode = false;
 
@@ -165,6 +173,14 @@ class Sender : public SenderBase {
     // If true, always upload on test images and add a flag to the metadata
     // indicating that it's from a test image.
     bool force_upload_on_test_images = false;
+
+    // If true, the caller is asserting that it is crash_reporter and has
+    // already checked for consent, so any additional checks are not needed.
+    bool consent_already_checked_by_crash_reporter = false;
+
+    // If true, crash_sender will run under the dry run mode -- it will not
+    // upload any crashes and writes log content to stdout.
+    bool dry_run = false;
   };
 
   Sender(std::unique_ptr<MetricsLibraryInterface> metrics_lib,
@@ -211,6 +227,7 @@ class Sender : public SenderBase {
  private:
   friend class IsNetworkOnlineTest;
   FRIEND_TEST(CrashSenderUtilTest, RemoveReportFiles);
+  FRIEND_TEST(CrashSenderUtilTest, RemoveReportFilesUnderDryRunMode);
   FRIEND_TEST(CrashSenderUtilTest, FailRemoveReportFilesSendsMetric);
 
   // Removes report files associated with the given meta file.
@@ -221,9 +238,15 @@ class Sender : public SenderBase {
   void RecordCrashRemoveReason(SenderBase::CrashRemoveReason reason) override;
 
   // Creates a JSON entity with the required fields for uploads.log file.
-  std::unique_ptr<base::Value> CreateJsonEntity(const std::string& report_id,
-                                                const std::string& product_name,
-                                                const CrashDetails& details);
+  base::Value::Dict CreateJsonEntity(const std::string& report_id,
+                                     const std::string& product_name,
+                                     const CrashDetails& details);
+
+  // Creates an upload log entry and returns it. On failure, returns the reason.
+  absl::variant<std::string, SenderBase::CrashRemoveReason>
+  CreateUploadLogEntry(const std::string& report_id,
+                       const std::string& product_name,
+                       const CrashDetails& details);
 
   // Requests to send a crash report represented with the given crash details.
   // If the return code is kRetryUploading, the failure can be retried and the
@@ -231,8 +254,14 @@ class Sender : public SenderBase {
   // remove the crash report using the returned removal reason code.
   SenderBase::CrashRemoveReason RequestToSendCrash(const CrashDetails& details);
 
+  // Writes upload.log based on crash details and report ID. Writes to stdout
+  // under the dry run mode.
+  SenderBase::CrashRemoveReason WriteUploadLog(const CrashDetails& details,
+                                               const std::string& report_id,
+                                               std::string product_name);
+
   // Returns true if we have consent to send crashes to Google.
-  bool HasCrashUploadingConsent();
+  bool HasCrashUploadingConsent(const CrashInfo& info);
 
   // Is this a "safe" device coredump, from an allowlist of driver names
   // for devices whose device coredump does not contain PII?
@@ -241,6 +270,12 @@ class Sender : public SenderBase {
   // Checks if we have an online connection state so we can try sending crash
   // reports.
   bool IsNetworkOnline();
+
+  // Creates a `ScopedProcessingFileBase` object based on whether we are running
+  // under the dry run mode. ".processing" file should never be created under
+  // the dry run mode but must be created under other scenarios.
+  std::unique_ptr<ScopedProcessingFileBase> MakeScopedProcessingFile(
+      const base::FilePath& meta_file) override;
 
   std::unique_ptr<MetricsLibraryInterface> metrics_lib_;
   std::unique_ptr<org::chromium::flimflam::ManagerProxyInterface> shill_proxy_;
@@ -254,6 +289,8 @@ class Sender : public SenderBase {
   const bool test_mode_;
   const bool upload_old_reports_;
   const bool force_upload_on_test_images_;
+  const bool consent_already_checked_by_crash_reporter_;
+  const bool dry_run_;
 };
 
 }  // namespace util

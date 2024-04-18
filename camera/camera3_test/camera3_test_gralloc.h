@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -102,16 +102,6 @@ class Camera3TestGralloc {
   // Returns:
   //    V4L2 pixel format on success; 0 on failure.
   static uint32_t GetV4L2PixelFormat(buffer_handle_t buffer);
-
-  // Get the width of the buffer handle.
-  // Returns:
-  //    The width; 0 if |buffer| is invalid.
-  static uint32_t GetWidth(buffer_handle_t buffer);
-
-  // Get the height of the buffer handle.
-  // Returns:
-  //    The height; 0 if |buffer| is invalid.
-  static uint32_t GetHeight(buffer_handle_t buffer);
 
  private:
   Camera3TestGralloc();

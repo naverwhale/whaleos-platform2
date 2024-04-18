@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,26 +29,14 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   loop.SetAsCurrent();
 
   FuzzedDataProvider provider(data, size);
-  AresClient ares_client(base::TimeDelta::FromSeconds(1), 1, 1);
+  AresClient ares_client(base::Seconds(1));
 
   while (provider.remaining_bytes() > 0) {
-    size_t n = provider.ConsumeIntegralInRange<size_t>(0, 99);
-    std::vector<std::string> s;
-    s.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-      s.emplace_back(provider.ConsumeRandomLengthString(
-          std::numeric_limits<unsigned int>::max()));
-    }
-    ares_client.SetNameServers(s);
-
-    s.clear();
-    s.push_back("8.8.8.8");
-    ares_client.SetNameServers(s);
     auto msg = provider.ConsumeBytes<unsigned char>(
         std::numeric_limits<unsigned int>::max());
-    ares_client.Resolve(
-        msg.data(), msg.size(),
-        base::BindRepeating([](void*, int, uint8_t*, size_t) {}), nullptr);
+    ares_client.Resolve(msg.data(), msg.size(),
+                        base::BindRepeating([](int, uint8_t*, size_t) {}),
+                        "8.8.8.8");
     base::RunLoop().RunUntilIdle();
   }
 

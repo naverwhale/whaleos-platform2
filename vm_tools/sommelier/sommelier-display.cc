@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,6 +26,7 @@ static void sl_registry_bind(struct wl_client* client,
       break;
   }
 
+  assert(sl_client_supports_interface(host->ctx, client, global->interface));
   assert(&global->link != &host->ctx->globals);
   assert(version != 0);
   assert(global->version >= version);
@@ -55,8 +56,8 @@ static void sl_host_callback_destroy(struct wl_resource* resource) {
       static_cast<sl_host_callback*>(wl_resource_get_user_data(resource));
 
   wl_callback_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_display_sync(struct wl_client* client,
@@ -64,16 +65,13 @@ static void sl_display_sync(struct wl_client* client,
                             uint32_t id) {
   struct sl_context* ctx =
       static_cast<sl_context*>(wl_resource_get_user_data(resource));
-  struct sl_host_callback* host_callback =
-      static_cast<sl_host_callback*>(malloc(sizeof(*host_callback)));
-  assert(host_callback);
+  struct sl_host_callback* host_callback = new sl_host_callback();
 
   host_callback->resource =
       wl_resource_create(client, &wl_callback_interface, 1, id);
-  wl_resource_set_implementation(host_callback->resource, NULL, host_callback,
-                                 sl_host_callback_destroy);
+  wl_resource_set_implementation(host_callback->resource, nullptr,
+                                 host_callback, sl_host_callback_destroy);
   host_callback->proxy = wl_display_sync(ctx->display);
-  wl_callback_set_user_data(host_callback->proxy, host_callback);
   wl_callback_add_listener(host_callback->proxy, &sl_sync_callback_listener,
                            host_callback);
 }
@@ -83,7 +81,7 @@ static void sl_destroy_host_registry(struct wl_resource* resource) {
       static_cast<sl_host_registry*>(wl_resource_get_user_data(resource));
 
   wl_list_remove(&host->link);
-  free(host);
+  delete host;
 }
 
 static void sl_display_get_registry(struct wl_client* client,
@@ -93,9 +91,7 @@ static void sl_display_get_registry(struct wl_client* client,
       static_cast<sl_context*>(wl_resource_get_user_data(resource));
   struct sl_global* global;
 
-  struct sl_host_registry* host_registry =
-      static_cast<sl_host_registry*>(malloc(sizeof(*host_registry)));
-  assert(host_registry);
+  struct sl_host_registry* host_registry = new sl_host_registry();
 
   host_registry->ctx = ctx;
   host_registry->resource =
@@ -106,9 +102,11 @@ static void sl_display_get_registry(struct wl_client* client,
                                  sl_destroy_host_registry);
 
   wl_list_for_each(global, &ctx->globals, link) {
-    wl_resource_post_event(host_registry->resource, WL_REGISTRY_GLOBAL,
-                           global->name, global->interface->name,
-                           global->version);
+    if (sl_client_supports_interface(ctx, client, global->interface)) {
+      wl_resource_post_event(host_registry->resource, WL_REGISTRY_GLOBAL,
+                             global->name, global->interface->name,
+                             global->version);
+    }
   }
 }
 
@@ -121,14 +119,15 @@ static enum wl_iterator_result sl_set_implementation(
 
   if (strcmp(wl_resource_get_class(resource), "wl_display") == 0) {
     wl_resource_set_implementation(resource, &sl_display_implementation, ctx,
-                                   NULL);
+                                   nullptr);
     return WL_ITERATOR_STOP;
   }
 
   return WL_ITERATOR_CONTINUE;
 }
 
-void sl_set_display_implementation(struct sl_context* ctx) {
+void sl_set_display_implementation(struct sl_context* ctx,
+                                   struct wl_client* client) {
   // Find display resource and set implementation.
-  wl_client_for_each_resource(ctx->client, sl_set_implementation, ctx);
+  wl_client_for_each_resource(client, sl_set_implementation, ctx);
 }

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,8 +24,7 @@ class MockPcaHttpUtils : public PcaHttpUtils {
 
   MOCK_METHOD(void,
               GetChromeProxyServersAsync,
-              (const std::string&,
-               const brillo::http::GetChromeProxyServersCallback&),
+              (const std::string&, brillo::http::GetChromeProxyServersCallback),
               (override));
 };
 

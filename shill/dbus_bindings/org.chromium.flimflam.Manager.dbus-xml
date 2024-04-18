@@ -35,6 +35,7 @@
 		<method name="PopAnyProfile"/>
 		<method name="PopAllUserProfiles"/>
 		<method name="RecheckPortal"/>
+		<method name="RequestWiFiRestart" />
 		<method name="RequestScan">
 			<arg type="s" direction="in"/>
 		</method>
@@ -101,7 +102,7 @@
 		<method name="GetNetworksForGeolocation">
 		        <arg type="a{sv}" direction="out"/>
 		</method>
-		<method name="ConnectToBestServices"/>
+		<method name="ScanAndConnectToBestServices"/>
 		<method name="CreateConnectivityReport"/>
 		<method name="ClaimInterface">
 			<arg name="claimer_name" type="s" direction="in"/>
@@ -115,11 +116,54 @@
 			<annotation name="org.chromium.DBus.Method.IncludeDBusMessage"
 		                value="true"/>
 		</method>
-		<method name="SetDNSProxyIPv4Address">
-			<arg type="s" direction="in"/>
+		<method name="SetDNSProxyAddresses">
+			<arg type="as" direction="in"/>
 		</method>
+		<method name="ClearDNSProxyAddresses"/>
 		<method name="SetDNSProxyDOHProviders">
 			<arg type="a{sv}" direction="in"/>
+		</method>
+		<method name="AddPasspointCredentials">
+			<arg name="profile" type="o" direction="in"/>
+			<arg name="properties" type="a{sv}" direction="in"/>
+		</method>
+		<method name="RemovePasspointCredentials">
+			<arg name="profile" type="o" direction="in"/>
+			<arg name="properties" type="a{sv}" direction="in"/>
+		</method>
+		<method name="SetTetheringEnabled">
+			<arg type="b" direction="in"/>
+			<arg type="s" direction="out"/>
+			<annotation name="org.chromium.DBus.Method.Kind" value="async"/>
+		</method>
+		<method name="CheckTetheringReadiness">
+			<arg type="s" direction="out"/>
+			<annotation name="org.chromium.DBus.Method.Kind" value="async"/>
+		</method>
+		<method name="SetLOHSEnabled">
+			<arg type="b" direction="in"/>
+			<arg type="s" direction="out"/>
+			<annotation name="org.chromium.DBus.Method.Kind" value="async"/>
+		</method>
+		<method name="CreateP2PGroup">
+			<arg type="a{sv}" direction="in"/>
+			<arg type="a{sv}" direction="out"/>
+			<annotation name="org.chromium.DBus.Method.Kind" value="async"/>
+		</method>
+		<method name="ConnectToP2PGroup">
+			<arg type="a{sv}" direction="in"/>
+			<arg type="a{sv}" direction="out"/>
+			<annotation name="org.chromium.DBus.Method.Kind" value="async"/>
+		</method>
+		<method name="DestroyP2PGroup">
+			<arg type="i" direction="in"/>
+			<arg type="a{sv}" direction="out"/>
+			<annotation name="org.chromium.DBus.Method.Kind" value="async"/>
+		</method>
+		<method name="DisconnectFromP2PGroup">
+			<arg type="i" direction="in"/>
+			<arg type="a{sv}" direction="out"/>
+			<annotation name="org.chromium.DBus.Method.Kind" value="async"/>
 		</method>
 	</interface>
 	<node name="device"/>

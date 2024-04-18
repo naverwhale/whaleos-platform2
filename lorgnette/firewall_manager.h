@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,20 +34,21 @@ class PortToken {
 };
 
 // Class for managing required firewall rules for lorgnette.
-class FirewallManager final {
+class FirewallManager {
  public:
   explicit FirewallManager(const std::string& interface);
   FirewallManager(const FirewallManager&) = delete;
   FirewallManager& operator=(const FirewallManager&) = delete;
-  ~FirewallManager() = default;
+  virtual ~FirewallManager() = default;
 
-  void Init(const scoped_refptr<dbus::Bus>& bus);
+  void Init(std::unique_ptr<org::chromium::PermissionBrokerProxyInterface>
+                permission_broker_proxy);
 
   // Request port access for all well-known Canon scanner port.
   PortToken RequestPixmaPortAccess();
 
   // Request UDP port access for the specified port.
-  PortToken RequestUdpPortAccess(uint16_t port);
+  virtual PortToken RequestUdpPortAccess(uint16_t port);
 
  private:
   // ReleaseUdpPortAccess() should be private so that users don't free ports
@@ -73,7 +74,7 @@ class FirewallManager final {
   void ReleaseUdpPortAccess(uint16_t port);
 
   // DBus proxy for permission_broker.
-  std::unique_ptr<org::chromium::PermissionBrokerProxy>
+  std::unique_ptr<org::chromium::PermissionBrokerProxyInterface>
       permission_broker_proxy_;
   // File descriptors for the two end of the pipe use for communicating with
   // remote firewall server (permission_broker), where the remote firewall

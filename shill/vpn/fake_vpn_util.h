@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,9 +25,13 @@ class FakeVPNUtil : public VPNUtil {
   ~FakeVPNUtil() = default;
 
   // Writes |contents| into file with path |filename| without changing
-  // permissions.
+  // ownerships.
   bool WriteConfigFile(const base::FilePath& filename,
                        const std::string& contents) const override;
+
+  // Create |directory_path| without changing ownerships.
+  bool PrepareConfigDirectory(
+      const base::FilePath& directory_path) const override;
 
   // Same as the real implementation.
   std::pair<base::ScopedFD, base::FilePath> WriteAnonymousConfigFile(

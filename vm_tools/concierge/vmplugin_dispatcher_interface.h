@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,10 +13,7 @@
 
 #include <vm_tools/common/vm_id.h>
 
-namespace vm_tools {
-namespace concierge {
-namespace pvm {
-namespace dispatcher {
+namespace vm_tools::concierge::pvm::dispatcher {
 
 enum class VmOpResult {
   SUCCESS,
@@ -64,9 +61,6 @@ bool ParseVmToolsChangedSignal(dbus::Signal* signal,
                                std::string* vm_name,
                                bool* running);
 
-}  // namespace dispatcher
-}  // namespace pvm
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge::pvm::dispatcher
 
 #endif  //  VM_TOOLS_CONCIERGE_VMPLUGIN_DISPATCHER_INTERFACE_H_

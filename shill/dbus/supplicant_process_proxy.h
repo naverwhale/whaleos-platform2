@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 
@@ -23,10 +22,11 @@ class EventDispatcher;
 
 class SupplicantProcessProxy : public SupplicantProcessProxyInterface {
  public:
-  SupplicantProcessProxy(EventDispatcher* dispatcher,
-                         const scoped_refptr<dbus::Bus>& bus,
-                         const base::Closure& service_appeared_callback,
-                         const base::Closure& service_vanished_callback);
+  SupplicantProcessProxy(
+      EventDispatcher* dispatcher,
+      const scoped_refptr<dbus::Bus>& bus,
+      const base::RepeatingClosure& service_appeared_callback,
+      const base::RepeatingClosure& service_vanished_callback);
   SupplicantProcessProxy(const SupplicantProcessProxy&) = delete;
   SupplicantProcessProxy& operator=(const SupplicantProcessProxy&) = delete;
 
@@ -93,8 +93,8 @@ class SupplicantProcessProxy : public SupplicantProcessProxyInterface {
   std::unique_ptr<fi::w1::wpa_supplicant1Proxy> supplicant_proxy_;
   std::unique_ptr<PropertySet> properties_;
   EventDispatcher* dispatcher_;
-  base::Closure service_appeared_callback_;
-  base::Closure service_vanished_callback_;
+  base::RepeatingClosure service_appeared_callback_;
+  base::RepeatingClosure service_vanished_callback_;
   bool service_available_;
 
   base::WeakPtrFactory<SupplicantProcessProxy> weak_factory_{this};

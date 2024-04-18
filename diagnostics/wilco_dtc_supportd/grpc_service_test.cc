@@ -1,20 +1,20 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/optional.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/run_loop.h>
 #include <base/strings/string_piece.h>
 #include <base/strings/stringprintf.h>
@@ -25,15 +25,14 @@
 #include <google/protobuf/repeated_field.h>
 #include <gtest/gtest.h>
 
-#include "diagnostics/common/file_test_utils.h"
-#include "diagnostics/common/protobuf_test_utils.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 #include "diagnostics/wilco_dtc_supportd/ec_constants.h"
 #include "diagnostics/wilco_dtc_supportd/grpc_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/mock_system_files_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/mock_system_info_service.h"
-
-#include "mojo/cros_healthd_probe.mojom.h"
-#include "wilco_dtc_supportd.pb.h"  // NOLINT(build/include)
+#include "diagnostics/wilco_dtc_supportd/utils/file_test_utils.h"
+#include "diagnostics/wilco_dtc_supportd/utils/protobuf_test_utils.h"
+#include "wilco_dtc_supportd.pb.h"  // NOLINT(build/include_directory)
 
 using testing::_;
 using testing::AnyOf;
@@ -51,7 +50,7 @@ using testing::UnorderedElementsAre;
 using testing::WithArgs;
 
 namespace diagnostics {
-
+namespace wilco {
 namespace {
 
 using DelegateWebRequestHttpMethod =
@@ -102,9 +101,9 @@ std::string FakeFileContents() {
 }
 
 template <class T>
-base::Callback<void(grpc::Status, std::unique_ptr<T>)>
+base::RepeatingCallback<void(grpc::Status, std::unique_ptr<T>)>
 GrpcCallbackResponseSaver(std::unique_ptr<T>* response) {
-  return base::Bind(
+  return base::BindRepeating(
       [](std::unique_ptr<T>* response, grpc::Status status,
          std::unique_ptr<T> received_response) {
         *response = std::move(received_response);
@@ -263,7 +262,7 @@ class MockGrpcServiceDelegate : public GrpcService::Delegate {
   // GrpcService::Delegate overrides:
   MOCK_METHOD(void,
               SendWilcoDtcMessageToUi,
-              (const std::string&, const SendMessageToUiCallback&),
+              (const std::string&, SendMessageToUiCallback),
               (override));
   MOCK_METHOD(void,
               PerformWebRequestToBrowser,
@@ -271,37 +270,36 @@ class MockGrpcServiceDelegate : public GrpcService::Delegate {
                const std::string&,
                const std::vector<std::string>&,
                const std::string&,
-               const PerformWebRequestToBrowserCallback&),
+               PerformWebRequestToBrowserCallback),
               (override));
   MOCK_METHOD(void,
               GetAvailableRoutinesToService,
-              (const GetAvailableRoutinesToServiceCallback&),
+              (GetAvailableRoutinesToServiceCallback),
               (override));
   MOCK_METHOD(void,
               RunRoutineToService,
-              (const grpc_api::RunRoutineRequest&,
-               const RunRoutineToServiceCallback&),
+              (const grpc_api::RunRoutineRequest&, RunRoutineToServiceCallback),
               (override));
   MOCK_METHOD(void,
               GetRoutineUpdateRequestToService,
               (const int,
                const grpc_api::GetRoutineUpdateRequest::Command,
                const bool,
-               const GetRoutineUpdateRequestToServiceCallback&),
+               GetRoutineUpdateRequestToServiceCallback),
               (override));
   MOCK_METHOD(void,
               GetConfigurationDataFromBrowser,
-              (const GetConfigurationDataFromBrowserCallback&),
+              (GetConfigurationDataFromBrowserCallback),
               (override));
   MOCK_METHOD(void,
               GetDriveSystemData,
-              (DriveSystemDataType, const GetDriveSystemDataCallback&),
+              (DriveSystemDataType, GetDriveSystemDataCallback),
               (override));
   MOCK_METHOD(void, RequestBluetoothDataNotification, (), (override));
   MOCK_METHOD(
       void,
       ProbeTelemetryInfo,
-      (std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum> categories,
+      (std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum> categories,
        ProbeTelemetryInfoCallback callback),
       (override));
   EcService* GetEcService() override { return ec_service_.get(); }
@@ -332,9 +330,9 @@ class GrpcServiceTest : public testing::Test {
     request->set_json_message(json_message);
     EXPECT_CALL(delegate_, SendWilcoDtcMessageToUi(json_message, _))
         .WillOnce(WithArgs<1>(Invoke(
-            [json_message](const base::Callback<void(
-                               grpc::Status, base::StringPiece)>& callback) {
-              callback.Run(grpc::Status::OK, json_message);
+            [json_message](base::OnceCallback<void(
+                               grpc::Status, base::StringPiece)> callback) {
+              std::move(callback).Run(grpc::Status::OK, json_message);
             })));
     service()->SendMessageToUi(std::move(request),
                                GrpcCallbackResponseSaver(response));
@@ -396,16 +394,15 @@ class GrpcServiceTest : public testing::Test {
 
     request->set_request_body(request_body);
 
-    base::Callback<void(DelegateWebRequestStatus, int)> callback;
     if (delegate_http_method) {
       EXPECT_CALL(delegate_,
                   PerformWebRequestToBrowser(Eq(*delegate_http_method), url,
                                              string_headers, request_body, _))
-          .WillOnce(WithArgs<4>(Invoke(
-              [](const base::Callback<void(DelegateWebRequestStatus, int,
-                                           base::StringPiece)>& callback) {
-                callback.Run(DelegateWebRequestStatus::kOk, kHttpStatusOk,
-                             kFakeWebResponseBody);
+          .WillOnce(WithArgs<4>(
+              Invoke([](base::OnceCallback<void(DelegateWebRequestStatus, int,
+                                                base::StringPiece)> callback) {
+                std::move(callback).Run(DelegateWebRequestStatus::kOk,
+                                        kHttpStatusOk, kFakeWebResponseBody);
               })));
     }
     service()->PerformWebRequest(std::move(request),
@@ -416,13 +413,13 @@ class GrpcServiceTest : public testing::Test {
       std::unique_ptr<grpc_api::GetAvailableRoutinesResponse>* response) {
     auto request = std::make_unique<grpc_api::GetAvailableRoutinesRequest>();
     EXPECT_CALL(delegate_, GetAvailableRoutinesToService(_))
-        .WillOnce(Invoke([](const base::Callback<void(
+        .WillOnce(Invoke([](base::OnceCallback<void(
                                 const std::vector<grpc_api::DiagnosticRoutine>&,
-                                grpc_api::RoutineServiceStatus)>& callback) {
-          callback.Run(std::vector<grpc_api::DiagnosticRoutine>(
-                           std::begin(kFakeAvailableRoutines),
-                           std::end(kFakeAvailableRoutines)),
-                       grpc_api::ROUTINE_SERVICE_STATUS_OK);
+                                grpc_api::RoutineServiceStatus)> callback) {
+          std::move(callback).Run(std::vector<grpc_api::DiagnosticRoutine>(
+                                      std::begin(kFakeAvailableRoutines),
+                                      std::end(kFakeAvailableRoutines)),
+                                  grpc_api::ROUTINE_SERVICE_STATUS_OK);
         }));
     service()->GetAvailableRoutines(std::move(request),
                                     GrpcCallbackResponseSaver(response));
@@ -434,12 +431,12 @@ class GrpcServiceTest : public testing::Test {
       bool is_valid_request) {
     if (is_valid_request) {
       EXPECT_CALL(delegate_, RunRoutineToService(_, _))
-          .WillOnce(WithArgs<1>(
-              Invoke([](const base::Callback<void(
-                            int, grpc_api::DiagnosticRoutineStatus,
-                            grpc_api::RoutineServiceStatus)>& callback) {
-                callback.Run(kFakeUuid, kFakeStatus,
-                             grpc_api::ROUTINE_SERVICE_STATUS_OK);
+          .WillOnce(WithArgs<1>(Invoke(
+              [](base::OnceCallback<void(int, grpc_api::DiagnosticRoutineStatus,
+                                         grpc_api::RoutineServiceStatus)>
+                     callback) {
+                std::move(callback).Run(kFakeUuid, kFakeStatus,
+                                        grpc_api::ROUTINE_SERVICE_STATUS_OK);
               })));
     }
     service()->RunRoutine(std::move(request),
@@ -455,12 +452,12 @@ class GrpcServiceTest : public testing::Test {
       EXPECT_CALL(delegate_, GetRoutineUpdateRequestToService(
                                  uuid, command, include_output, _))
           .WillOnce(WithArgs<3>(
-              Invoke([=](const base::Callback<void(
+              Invoke([=](base::OnceCallback<void(
                              int, grpc_api::DiagnosticRoutineStatus, int,
                              grpc_api::DiagnosticRoutineUserMessage,
                              const std::string&, const std::string&,
-                             grpc_api::RoutineServiceStatus)>& callback) {
-                callback.Run(
+                             grpc_api::RoutineServiceStatus)> callback) {
+                std::move(callback).Run(
                     uuid, kFakeStatus, kFakeProgressPercent, kFakeUserMessage,
                     include_output ? kFakeOutput : "", kFakeStatusMessage,
                     grpc_api::ROUTINE_SERVICE_STATUS_OK);
@@ -479,10 +476,10 @@ class GrpcServiceTest : public testing::Test {
       std::unique_ptr<grpc_api::GetConfigurationDataResponse>* response) {
     auto request = std::make_unique<grpc_api::GetConfigurationDataRequest>();
     EXPECT_CALL(delegate_, GetConfigurationDataFromBrowser(_))
-        .WillOnce(WithArgs<0>(Invoke(
-            [json_configuration_data](
-                const base::Callback<void(const std::string&)>& callback) {
-              callback.Run(json_configuration_data);
+        .WillOnce(WithArgs<0>(
+            Invoke([json_configuration_data](
+                       base::OnceCallback<void(const std::string&)> callback) {
+              std::move(callback).Run(json_configuration_data);
             })));
     service()->GetConfigurationData(std::move(request),
                                     GrpcCallbackResponseSaver(response));
@@ -846,10 +843,10 @@ TEST_F(GrpcServiceTest, GetDriveSystemDataInternalError) {
   auto request = std::make_unique<grpc_api::GetDriveSystemDataRequest>();
   request->set_type(grpc_api::GetDriveSystemDataRequest::SMART_ATTRIBUTES);
   EXPECT_CALL(*delegate(), GetDriveSystemData(_, _))
-      .WillOnce(WithArgs<1>(
-          Invoke([](const base::Callback<void(const std::string& payload,
-                                              bool success)>& callback) {
-            callback.Run("", false /* success */);
+      .WillOnce(WithArgs<1>(Invoke(
+          [](base::OnceCallback<void(const std::string& payload, bool success)>
+                 callback) {
+            std::move(callback).Run("", false /* success */);
           })));
 
   std::unique_ptr<grpc_api::GetDriveSystemDataResponse> response;
@@ -873,8 +870,8 @@ TEST_F(GrpcServiceTest, RequestBluetoothDataNotification) {
   base::RunLoop run_loop;
   service()->RequestBluetoothDataNotification(
       std::move(request),
-      base::Bind(
-          [](base::Closure callback, grpc::Status status,
+      base::BindRepeating(
+          [](base::RepeatingClosure callback, grpc::Status status,
              std::unique_ptr<
                  grpc_api::RequestBluetoothDataNotificationResponse>) {
             callback.Run();
@@ -887,14 +884,14 @@ TEST_F(GrpcServiceTest, RequestBluetoothDataNotification) {
 class GetStatefulPartitionAvailableCapacityTest
     : public GrpcServiceTest,
       public testing::WithParamInterface<std::tuple<
-          base::Callback<chromeos::cros_healthd::mojom::TelemetryInfoPtr()>,
+          base::RepeatingCallback<ash::cros_healthd::mojom::TelemetryInfoPtr()>,
           grpc_api::GetStatefulPartitionAvailableCapacityResponse::Status,
           int32_t>> {
  protected:
   // Accessors to individual test parameters from the test parameter tuple
   // returned by gtest's GetParam():
 
-  chromeos::cros_healthd::mojom::TelemetryInfoPtr get_probe_response() const {
+  ash::cros_healthd::mojom::TelemetryInfoPtr get_probe_response() const {
     return std::get<0>(GetParam()).Run();
   }
 
@@ -907,11 +904,11 @@ class GetStatefulPartitionAvailableCapacityTest
 };
 
 TEST_P(GetStatefulPartitionAvailableCapacityTest, All) {
-  const std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum>
+  const std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum>
       kExpectedCategories{
-          chromeos::cros_healthd::mojom::ProbeCategoryEnum::kStatefulPartition};
+          ash::cros_healthd::mojom::ProbeCategoryEnum::kStatefulPartition};
 
-  chromeos::cros_healthd::mojom::TelemetryInfoPtr probe_response =
+  ash::cros_healthd::mojom::TelemetryInfoPtr probe_response =
       get_probe_response();
 
   EXPECT_CALL(*delegate(), ProbeTelemetryInfo(kExpectedCategories, _))
@@ -923,7 +920,7 @@ TEST_P(GetStatefulPartitionAvailableCapacityTest, All) {
 
   auto callback_impl =
       [](grpc_api::GetStatefulPartitionAvailableCapacityResponse::Status status,
-         int32_t expected_capacity, base::Closure loop_callback,
+         int32_t expected_capacity, base::RepeatingClosure loop_callback,
          grpc::Status grpcStatus,
          std::unique_ptr<
              grpc_api::GetStatefulPartitionAvailableCapacityResponse> reply) {
@@ -933,8 +930,9 @@ TEST_P(GetStatefulPartitionAvailableCapacityTest, All) {
       };
 
   base::RunLoop run_loop;
-  auto callback = base::Bind(callback_impl, get_expected_status(),
-                             get_expected_capacity(), run_loop.QuitClosure());
+  auto callback =
+      base::BindRepeating(callback_impl, get_expected_status(),
+                          get_expected_capacity(), run_loop.QuitClosure());
   service()->GetStatefulPartitionAvailableCapacity(
       std::make_unique<
           grpc_api::GetStatefulPartitionAvailableCapacityRequest>(),
@@ -947,27 +945,27 @@ INSTANTIATE_TEST_SUITE_P(
     GetStatefulPartitionAvailableCapacityTest,
     testing::Values(
         std::make_tuple(
-            base::Bind([]() {
-              return chromeos::cros_healthd::mojom::TelemetryInfoPtr(nullptr);
+            base::BindRepeating([]() {
+              return ash::cros_healthd::mojom::TelemetryInfoPtr(nullptr);
             }),
             grpc_api::GetStatefulPartitionAvailableCapacityResponse::
                 STATUS_ERROR_REQUEST_PROCESSING,
             0),
         std::make_tuple(
-            base::Bind([]() {
-              return chromeos::cros_healthd::mojom::TelemetryInfo::New();
+            base::BindRepeating([]() {
+              return ash::cros_healthd::mojom::TelemetryInfo::New();
             }),
             grpc_api::GetStatefulPartitionAvailableCapacityResponse::
                 STATUS_ERROR_REQUEST_PROCESSING,
             0),
         std::make_tuple(
-            base::Bind([]() {
+            base::BindRepeating([]() {
               auto probe_response =
-                  chromeos::cros_healthd::mojom::TelemetryInfo::New();
+                  ash::cros_healthd::mojom::TelemetryInfo::New();
               probe_response->stateful_partition_result =
-                  chromeos::cros_healthd::mojom::StatefulPartitionResult::
-                      NewError(chromeos::cros_healthd::mojom::ProbeError::New(
-                          chromeos::cros_healthd::mojom::ErrorType::
+                  ash::cros_healthd::mojom::StatefulPartitionResult::NewError(
+                      ash::cros_healthd::mojom::ProbeError::New(
+                          ash::cros_healthd::mojom::ErrorType::
                               kSystemUtilityError,
                           ""));
               return probe_response;
@@ -976,16 +974,15 @@ INSTANTIATE_TEST_SUITE_P(
                 STATUS_ERROR_REQUEST_PROCESSING,
             0),
         std::make_tuple(
-            base::Bind([]() {
+            base::BindRepeating([]() {
               constexpr uint64_t kAvailableBytes = 220403699712ull;
               constexpr auto kFakeFilesystem = "ext4";
               constexpr auto kFakeMountSource = "/dev/mmcblk0p1";
               auto probe_response =
-                  chromeos::cros_healthd::mojom::TelemetryInfo::New();
-              probe_response
-                  ->stateful_partition_result = chromeos::cros_healthd::mojom::
-                  StatefulPartitionResult::NewPartitionInfo(
-                      chromeos::cros_healthd::mojom::StatefulPartitionInfo::New(
+                  ash::cros_healthd::mojom::TelemetryInfo::New();
+              probe_response->stateful_partition_result = ash::cros_healthd::
+                  mojom::StatefulPartitionResult::NewPartitionInfo(
+                      ash::cros_healthd::mojom::StatefulPartitionInfo::New(
                           kAvailableBytes, 0, kFakeFilesystem,
                           kFakeMountSource));
               return probe_response;
@@ -1135,7 +1132,7 @@ TEST_F(GrpcServiceWithMockSystemFilesServiceTest, DirectoryAcpiButtonEmpty) {
 TEST_F(GrpcServiceWithMockSystemFilesServiceTest, DirectoryAcpiButtonMissing) {
   EXPECT_CALL(*system_files_service_,
               GetDirectoryDump(SystemFilesService::Directory::kProcAcpiButton))
-      .WillOnce(Return(ByMove(base::nullopt)));
+      .WillOnce(Return(ByMove(std::nullopt)));
 
   std::vector<grpc_api::FileDump> file_dumps;
   ExecuteGetProcData(grpc_api::GetProcDataRequest::DIRECTORY_ACPI_BUTTON,
@@ -1194,7 +1191,7 @@ TEST_P(SingleProcFileGrpcServiceTest, Success) {
 // Test that GetProcData() returns empty result when the file doesn't exist.
 TEST_P(SingleProcFileGrpcServiceTest, NonExisting) {
   EXPECT_CALL(*system_files_service_, GetFileDump(expected_location()))
-      .WillOnce(Return(ByMove(base::nullopt)));
+      .WillOnce(Return(ByMove(std::nullopt)));
 
   std::vector<grpc_api::FileDump> file_dumps;
   ExecuteGetProcData(proc_data_request_type(), &file_dumps);
@@ -1303,7 +1300,7 @@ TEST_P(SysfsDirectoryGrpcServiceTest, MultiFile) {
 // exist.
 TEST_P(SysfsDirectoryGrpcServiceTest, NonExisting) {
   EXPECT_CALL(*system_files_service_, GetDirectoryDump(expected_location()))
-      .WillOnce(Return(ByMove(base::nullopt)));
+      .WillOnce(Return(ByMove(std::nullopt)));
 
   std::vector<grpc_api::FileDump> file_dumps;
   ExecuteGetSysfsData(sysfs_data_request_type(), &file_dumps);
@@ -1678,7 +1675,7 @@ TEST_P(GetVpdFieldGrpcServiceTest, Success) {
 // Test that GetVpdField() returns error if VPD field does not exist.
 TEST_P(GetVpdFieldGrpcServiceTest, NoVpdField) {
   EXPECT_CALL(*system_files_service_, GetVpdField(expected_vpd_field()))
-      .WillOnce(Return(base::nullopt));
+      .WillOnce(Return(std::nullopt));
 
   grpc_api::GetVpdFieldResponse::Status status;
   std::string vpd_field_value;
@@ -1737,11 +1734,11 @@ TEST_P(GetDriveSystemDataGrpcServiceTest, GetDriveSystem) {
   auto request = std::make_unique<grpc_api::GetDriveSystemDataRequest>();
   request->set_type(data_type());
   EXPECT_CALL(*delegate(), GetDriveSystemData(expected_data_type(), _))
-      .WillOnce(WithArgs<1>(
-          Invoke([kFakeDriveSystemData](
-                     const base::Callback<void(const std::string& payload,
-                                               bool success)>& callback) {
-            callback.Run(kFakeDriveSystemData, true /* success */);
+      .WillOnce(WithArgs<1>(Invoke(
+          [kFakeDriveSystemData](
+              base::OnceCallback<void(const std::string& payload, bool success)>
+                  callback) {
+            std::move(callback).Run(kFakeDriveSystemData, true /* success */);
           })));
 
   std::unique_ptr<grpc_api::GetDriveSystemDataResponse> response;
@@ -1768,5 +1765,5 @@ INSTANTIATE_TEST_SUITE_P(
             DelegateDriveSystemDataType::kIdentityAttributes)));
 
 }  // namespace
-
+}  // namespace wilco
 }  // namespace diagnostics

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,7 @@
 
 #include <cstdint>
 #include <string>
-#include <vector>
 
-#include <base/optional.h>
 #include <brillo/secure_blob.h>
 #include <crypto/scoped_openssl_types.h>
 #include <openssl/bn.h>
@@ -44,20 +42,6 @@ HWSEC_FOUNDATION_EXPORT brillo::SecureBlob CreateSecureRandomBlob(
 // Gets the latest OpenSSL error in the following format:
 //   error:[error code]:[library name]:[function name]:[reason string]
 HWSEC_FOUNDATION_EXPORT std::string GetOpensslError();
-
-// Convert RSA key (with public and/or private key set) key to the binary DER
-// encoded SubjectPublicKeyInfo format.
-//
-// Return nullopt if key is null, or OpenSSL returned error.
-HWSEC_FOUNDATION_EXPORT base::Optional<std::vector<uint8_t>>
-RsaKeyToSubjectPublicKeyInfoBytes(const crypto::ScopedRSA& key);
-
-// Convert ECC key (with public and/or private key set) key to the binary DER
-// encoded SubjectPublicKeyInfo format.
-//
-// Return nullopt if key is null, or OpenSSL returned error.
-HWSEC_FOUNDATION_EXPORT base::Optional<std::vector<uint8_t>>
-EccKeyToSubjectPublicKeyInfoBytes(const crypto::ScopedEC_KEY& key);
 
 }  // namespace utility
 }  // namespace hwsec_foundation

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,12 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <gmock/gmock.h>
+#include <libhwsec/structures/key.h>
 
 namespace attestation {
 
@@ -27,6 +30,7 @@ class MockTpmUtility : public TpmUtility {
                                const std::string& input);
 
   MOCK_METHOD(bool, Initialize, (), (override));
+  MOCK_METHOD(std::vector<KeyType>, GetSupportedKeyTypes, (), (override));
   MOCK_METHOD(TpmVersion, GetVersion, (), (override));
   MOCK_METHOD(bool, IsTpmReady, (), (override));
   MOCK_METHOD(bool,
@@ -49,6 +53,8 @@ class MockTpmUtility : public TpmUtility {
               CreateCertifiedKey,
               (KeyType,
                KeyUsage,
+               hwsec::KeyRestriction,
+               std::optional<CertificateProfile>,
                const std::string&,
                const std::string&,
                std::string*,
@@ -57,8 +63,6 @@ class MockTpmUtility : public TpmUtility {
                std::string*,
                std::string*),
               (override));
-  MOCK_METHOD(bool, SealToPCR0, (const std::string&, std::string*), (override));
-  MOCK_METHOD(bool, Unseal, (const std::string&, std::string*), (override));
   MOCK_METHOD(bool,
               GetEndorsementPublicKey,
               (KeyType, std::string*),
@@ -83,29 +87,12 @@ class MockTpmUtility : public TpmUtility {
               Sign,
               (const std::string&, const std::string&, std::string*),
               (override));
-  MOCK_METHOD(
-      bool,
-      QuotePCR,
-      (uint32_t, const std::string&, std::string*, std::string*, std::string*),
-      (override));
-  MOCK_METHOD(bool, GetNVDataSize, (uint32_t, uint16_t*), (const, override));
-  MOCK_METHOD(bool,
-              CertifyNV,
-              (uint32_t, int, const std::string&, std::string*, std::string*),
-              (override));
-  MOCK_METHOD(
-      bool,
-      IsQuoteForPCR,
-      (const std::string&, const std::string&, const std::string&, uint32_t),
-      (const, override));
   MOCK_METHOD(bool, ReadPCR, (uint32_t, std::string*), (override));
-  MOCK_METHOD(bool, IsPCR0Valid, (), (override));
   MOCK_METHOD(bool, RemoveOwnerDependency, (), (override));
   MOCK_METHOD(bool,
               CreateIdentity,
               (KeyType, AttestationDatabase::Identity*),
               (override));
-  MOCK_METHOD(bool, GetRsuDeviceId, (std::string*), (override));
 };
 
 }  // namespace attestation

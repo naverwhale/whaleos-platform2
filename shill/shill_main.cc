@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,13 +10,14 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/command_line.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <brillo/minijail/minijail.h>
 #include <brillo/syslog_logging.h>
+#include <mojo/core/embedder/embedder.h>
 
 #include "shill/daemon_task.h"
 #include "shill/error.h"
@@ -37,25 +38,6 @@ const char kDevicesBlocked[] = "devices-blocked";
 const char kDevicesAllowed[] = "devices-allowed";
 // Ignore Ethernet-like devices that don't have any driver information.
 const char kIgnoreUnknownEthernet[] = "ignore-unknown-ethernet";
-// Technologies to enable for portal check at startup.
-const char kPortalList[] = "portal-list";
-// When in passive mode, Shill will not manage any devices by default.
-// Remote service can instruct Shill to manage/unmanage devices through
-// org.chromium.flimflam.Manager's ClaimInterface/ReleaseInterface APIs.
-const char kPassiveMode[] = "passive-mode";
-// Default priority order of the technologies.
-const char kTechnologyOrder[] = "default-technology-order";
-// Comma-separated list of DNS servers to prepend to the resolver list.
-const char kPrependDNSServers[] = "prepend-dns-servers";
-// The minimum MTU value that will be respected in DHCP responses.
-const char kMinimumMTU[] = "minimum-mtu";
-// Accept hostname from the DHCP server for the specified devices.
-// eg. eth0 or eth*
-const char kAcceptHostnameFrom[] = "accept-hostname-from";
-#ifndef DISABLE_DHCPV6
-// List of devices to enable DHCPv6.
-const char kDhcpv6EnabledDevices[] = "dhcpv6-enabled-devices";
-#endif  // DISABLE_DHCPV6
 // Flag that causes shill to show the help message and exit.
 const char kHelp[] = "help";
 
@@ -77,27 +59,14 @@ const char kHelpMessage[] =
     "      -1 = SLOG(..., 1), -2 = SLOG(..., 2), etc.\n"
     "  --log-scopes=\"*scope1+scope2\".\n"
     "    Scopes to enable for SLOG()-based logging.\n"
-    "  --portal-list=technology1,technology2\n"
-    "    Specify technologies to perform portal detection on at startup.\n"
     "  --passive-mode\n"
     "    Do not manage any devices by default\n"
     "  --default-technology-order=technology1,technology2\n"
-    "    Specify the default priority order of the technologies.\n"
-    "  --prepend-dns-servers=server1,server2,...\n"
-    "    Prepend the provided DNS servers to the resolver list.\n"
-    "  --accept-hostname-from=eth0 or --accept-hostname-from=eth*\n"
-    "    Accept a hostname from the DHCP server for the matching devices.\n"
-#ifndef DISABLE_DHCPV6
-    "  --dhcpv6-enabled-devices=device1,device2\n"
-    "    Enable DHCPv6 for devices named device1 and device2\n"
-#endif  // DISABLE_DHCPV6
-    "  --minimum-mtu=mtu\n"
-    "    Set the minimum value to respect as the MTU from DHCP responses.\n";
+    "    Specify the default priority order of the technologies.\n";
 }  // namespace switches
 
 const char kLoggerCommand[] = "/usr/bin/logger";
 const char kLoggerUser[] = "syslog";
-const char kDefaultTechnologyOrder[] = "vpn,ethernet,wifi,cellular";
 
 // Always logs to the syslog and logs to stderr if
 // we are running in the foreground.
@@ -152,22 +121,6 @@ int main(int argc, char** argv) {
   }
 
   shill::DaemonTask::Settings settings;
-  if (cl->HasSwitch(switches::kTechnologyOrder)) {
-    shill::Error error;
-    std::string order_flag =
-        cl->GetSwitchValueASCII(switches::kTechnologyOrder);
-    std::vector<shill::Technology> test_order_vector;
-    if (shill::GetTechnologyVectorFromString(order_flag, &test_order_vector,
-                                             &error)) {
-      settings.default_technology_order = order_flag;
-    } else {
-      LOG(ERROR) << "Invalid default technology order: [" << order_flag
-                 << "] Error: " << error.message();
-    }
-  }
-  if (settings.default_technology_order.empty()) {
-    settings.default_technology_order = kDefaultTechnologyOrder;
-  }
 
   if (cl->HasSwitch(switches::kDevicesBlocked)) {
     settings.devices_blocked =
@@ -184,39 +137,8 @@ int main(int argc, char** argv) {
   settings.ignore_unknown_ethernet =
       cl->HasSwitch(switches::kIgnoreUnknownEthernet);
 
-  if (cl->HasSwitch(switches::kPortalList)) {
-    settings.use_portal_list = true;
-    settings.portal_list = cl->GetSwitchValueASCII(switches::kPortalList);
-  }
-
-  settings.passive_mode = cl->HasSwitch(switches::kPassiveMode);
-
-  if (cl->HasSwitch(switches::kPrependDNSServers)) {
-    settings.prepend_dns_servers =
-        cl->GetSwitchValueASCII(switches::kPrependDNSServers);
-  }
-
-  if (cl->HasSwitch(switches::kMinimumMTU)) {
-    int mtu;
-    std::string value = cl->GetSwitchValueASCII(switches::kMinimumMTU);
-    if (!base::StringToInt(value, &mtu)) {
-      LOG(FATAL) << "Could not convert '" << value << "' to integer.";
-    }
-    settings.minimum_mtu = mtu;
-  }
-
-  if (cl->HasSwitch(switches::kAcceptHostnameFrom)) {
-    settings.accept_hostname_from =
-        cl->GetSwitchValueASCII(switches::kAcceptHostnameFrom);
-  }
-
-#ifndef DISABLE_DHCPV6
-  if (cl->HasSwitch(switches::kDhcpv6EnabledDevices)) {
-    settings.dhcpv6_enabled_devices = base::SplitString(
-        cl->GetSwitchValueASCII(switches::kDhcpv6EnabledDevices), ",",
-        base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
-  }
-#endif  // DISABLE_DHCPV6
+  // Initialize Mojo for the whole process.
+  mojo::core::Init();
 
   shill::Config config;
   // Construct the daemon first, so we get our AtExitManager.

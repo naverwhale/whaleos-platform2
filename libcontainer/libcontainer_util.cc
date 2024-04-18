@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,12 +20,11 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
@@ -101,7 +100,7 @@ bool RunInNamespacesHelper(HookCallback callback,
 
     // Preserve normal POSIX semantics of calling exit(2) with 0 for success and
     // non-zero for failure.
-    _exit(callback.Run(container_pid) ? 0 : 1);
+    _exit(std::move(callback).Run(container_pid) ? 0 : 1);
   }
 
   int status;
@@ -255,7 +254,7 @@ bool HookState::InstallHook(struct minijail* j, minijail_hook_event_t event) {
   return true;
 }
 
-bool HookState::WaitForHookAndRun(const std::vector<HookCallback>& callbacks,
+bool HookState::WaitForHookAndRun(std::vector<HookCallback> callbacks,
                                   pid_t container_pid) {
   if (!installed_) {
     LOG(ERROR) << "Failed to wait for hook: not installed";
@@ -264,7 +263,7 @@ bool HookState::WaitForHookAndRun(const std::vector<HookCallback>& callbacks,
   reached_pipe_.Wait();
 
   for (auto& callback : callbacks) {
-    bool success = callback.Run(container_pid);
+    bool success = std::move(callback).Run(container_pid);
     if (!success)
       return false;
   }
@@ -374,7 +373,7 @@ bool LoopdevSetup(const base::FilePath& source, Loopdev* loopdev_out) {
 
     // Cleanup in case the setup fails. This frees |num| altogether.
     base::ScopedClosureRunner loop_device_cleanup(
-        base::Bind(&RemoveLoopDevice, control_fd.get(), num));
+        base::BindOnce(&RemoveLoopDevice, control_fd.get(), num));
 
     base::FilePath loopdev_path(base::StringPrintf("/dev/loop%i", num));
     base::ScopedFD loop_fd(
@@ -407,7 +406,7 @@ bool LoopdevSetup(const base::FilePath& source, Loopdev* loopdev_out) {
       return false;
     }
 
-    ignore_result(loop_device_cleanup.Release());
+    loop_device_cleanup.ReplaceClosure(base::DoNothing());
     loopdev_out->path = loopdev_path;
     loopdev_out->fd = std::move(loop_fd);
     loopdev_out->info = loop_info;
@@ -506,8 +505,8 @@ bool DeviceMapperDetach(const std::string& dm_name) {
     return false;
   }
 
-  base::ScopedClosureRunner teardown(
-      base::Bind(base::IgnoreResult(&dm_task_destroy), base::Unretained(dmt)));
+  base::ScopedClosureRunner teardown(base::BindOnce(
+      base::IgnoreResult(&dm_task_destroy), base::Unretained(dmt)));
 
   if (dm_task_set_name(dmt, dm_name.c_str()) != 0) {
     PLOG(ERROR) << "Failed to dm_task_set_name() for " << dm_name;
@@ -568,15 +567,15 @@ HookCallback CreateExecveCallback(base::FilePath filename,
                                   base::ScopedFD stdin_fd,
                                   base::ScopedFD stdout_fd,
                                   base::ScopedFD stderr_fd) {
-  return base::Bind(
-      &ExecveCallbackHelper, filename, args, base::Passed(std::move(stdin_fd)),
-      base::Passed(std::move(stdout_fd)), base::Passed(std::move(stderr_fd)));
+  return base::BindOnce(&ExecveCallbackHelper, filename, args,
+                        std::move(stdin_fd), std::move(stdout_fd),
+                        std::move(stderr_fd));
 }
 
 HookCallback AdaptCallbackToRunInNamespaces(HookCallback callback,
                                             std::vector<int> nstypes) {
-  return base::Bind(&RunInNamespacesHelper, base::Passed(std::move(callback)),
-                    base::Passed(std::move(nstypes)));
+  return base::BindOnce(&RunInNamespacesHelper, std::move(callback),
+                        std::move(nstypes));
 }
 
 bool CreateDirectoryOwnedBy(const base::FilePath& full_path,

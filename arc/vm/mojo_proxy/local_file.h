@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,10 +12,9 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 
@@ -68,6 +67,12 @@ class LocalFile {
   // Runs the callback with the file descriptor's stat attribute.
   using FstatCallback = base::OnceCallback<void(arc_proxy::FstatResponse)>;
   void Fstat(FstatCallback callback);
+
+  // Truncates the file to the specified length and runs the callback with the
+  // result.
+  using FtruncateCallback =
+      base::OnceCallback<void(arc_proxy::FtruncateResponse)>;
+  void Ftruncate(int64_t length, FtruncateCallback callback);
 
  private:
   void TrySendMsg();

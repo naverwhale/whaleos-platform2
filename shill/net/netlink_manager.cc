@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,30 +6,27 @@
 
 #include <errno.h>
 #include <sys/select.h>
-#include <sys/time.h>
+
+#include <memory>
+#include <utility>
+#include <vector>
 
 #include <base/containers/contains.h>
 #include <base/location.h>
 #include <base/logging.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/time/time.h>
 
-#include "shill/logging.h"
 #include "shill/net/attribute_list.h"
-#include "shill/net/io_handler.h"
 #include "shill/net/netlink_packet.h"
 #include "shill/net/nl80211_message.h"
-#include "shill/net/sockets.h"
 
 namespace shill {
 
-namespace Logging {
-static auto kModuleLogScope = ScopeLogger::kRTNL;
-static std::string ObjectID(const NetlinkManager* obj) {
-  return "(netlink_manager)";
-}
-}  // namespace Logging
-
 namespace {
+// TODO(b/301905012): Remove this type alias when moving this file to net-base.
+using net_base::NetlinkSocket;
+
 base::LazyInstance<NetlinkManager>::DestructorAtExit g_netlink_manager =
     LAZY_INSTANCE_INITIALIZER;
 }  // namespace
@@ -38,26 +35,17 @@ const char NetlinkManager::kEventTypeConfig[] = "config";
 const char NetlinkManager::kEventTypeScan[] = "scan";
 const char NetlinkManager::kEventTypeRegulatory[] = "regulatory";
 const char NetlinkManager::kEventTypeMlme[] = "mlme";
-const long NetlinkManager::kMaximumNewFamilyWaitSeconds = 1;        // NOLINT
-const long NetlinkManager::kMaximumNewFamilyWaitMicroSeconds = 0;   // NOLINT
-const long NetlinkManager::kResponseTimeoutSeconds = 5;             // NOLINT
-const long NetlinkManager::kResponseTimeoutMicroSeconds = 0;        // NOLINT
-// TODO(dankit): Further enhancement, -kPendingDumpTimeoutMilliseconds timer
-// should be able to tune using the experiment config, if more number of
-// stations connected to AP. (Ref bug - b/186899140)
-const long NetlinkManager::kPendingDumpTimeoutMilliseconds = 1000;  // NOLINT
-const long NetlinkManager::kNlMessageRetryDelayMilliseconds = 300;  // NOLINT
-const int NetlinkManager::kMaxNlMessageRetries = 1;                 // NOLINT
+const int NetlinkManager::kMaxNlMessageRetries = 1;
 
 NetlinkManager::NetlinkResponseHandler::NetlinkResponseHandler(
     const NetlinkManager::NetlinkAckHandler& ack_handler,
-    const NetlinkManager::NetlinkAuxilliaryMessageHandler& error_handler)
+    const NetlinkManager::NetlinkAuxiliaryMessageHandler& error_handler)
     : ack_handler_(ack_handler), error_handler_(error_handler) {}
 
 NetlinkManager::NetlinkResponseHandler::~NetlinkResponseHandler() = default;
 
 void NetlinkManager::NetlinkResponseHandler::HandleError(
-    AuxilliaryMessageType type, const NetlinkMessage* netlink_message) const {
+    AuxiliaryMessageType type, const NetlinkMessage* netlink_message) const {
   if (!error_handler_.is_null())
     error_handler_.Run(type, netlink_message);
 }
@@ -83,7 +71,7 @@ class ControlResponseHandler : public NetlinkManager::NetlinkResponseHandler {
  public:
   ControlResponseHandler(
       const NetlinkManager::NetlinkAckHandler& ack_handler,
-      const NetlinkManager::NetlinkAuxilliaryMessageHandler& error_handler,
+      const NetlinkManager::NetlinkAuxiliaryMessageHandler& error_handler,
       const NetlinkManager::ControlNetlinkMessageHandler& handler)
       : NetlinkManager::NetlinkResponseHandler(ack_handler, error_handler),
         handler_(handler) {}
@@ -125,7 +113,7 @@ class Nl80211ResponseHandler : public NetlinkManager::NetlinkResponseHandler {
  public:
   Nl80211ResponseHandler(
       const NetlinkManager::NetlinkAckHandler& ack_handler,
-      const NetlinkManager::NetlinkAuxilliaryMessageHandler& error_handler,
+      const NetlinkManager::NetlinkAuxiliaryMessageHandler& error_handler,
       const NetlinkManager::Nl80211MessageHandler& handler)
       : NetlinkManager::NetlinkResponseHandler(ack_handler, error_handler),
         handler_(handler) {}
@@ -166,11 +154,7 @@ NetlinkManager::MessageType::MessageType()
     : family_id(NetlinkMessage::kIllegalMessageType) {}
 
 NetlinkManager::NetlinkManager()
-    : weak_ptr_factory_(this),
-      time_(Time::GetInstance()),
-      io_handler_factory_(
-          IOHandlerFactoryContainer::GetInstance()->GetIOHandlerFactory()),
-      dump_pending_(false) {}
+    : weak_ptr_factory_(this), dump_pending_(false) {}
 
 NetlinkManager::~NetlinkManager() = default;
 
@@ -189,6 +173,7 @@ void NetlinkManager::Reset(bool full) {
   resend_dump_message_callback_.Cancel();
   dump_pending_ = false;
   if (full) {
+    sock_watcher_.reset();
     sock_.reset();
   }
 }
@@ -209,7 +194,7 @@ void NetlinkManager::OnNewFamilyMessage(const ControlNetlinkMessage& message) {
     return;
   }
 
-  SLOG(this, 3) << "Socket family '" << family_name << "' has id=" << family_id;
+  VLOG(2) << "Socket family '" << family_name << "' has id=" << family_id;
 
   // Extract the available multicast groups from the message.
   AttributeListConstRefPtr multicast_groups;
@@ -232,7 +217,7 @@ void NetlinkManager::OnNewFamilyMessage(const ControlNetlinkMessage& message) {
         LOG(WARNING) << "Expected CTRL_ATTR_MCAST_GRP_ID, found none";
         continue;
       }
-      SLOG(this, 3) << "  Adding group '" << group_name << "' = " << group_id;
+      VLOG(2) << "  Adding group '" << group_name << "' = " << group_id;
       message_types_[family_name].groups[group_name] = group_id;
     }
   }
@@ -240,14 +225,21 @@ void NetlinkManager::OnNewFamilyMessage(const ControlNetlinkMessage& message) {
   message_types_[family_name].family_id = family_id;
 }
 
+std::string NetlinkManager::GetRawMessage(const NetlinkMessage* raw_message) {
+  if (raw_message) {
+    return raw_message->ToString();
+  }
+  return "<none>";
+}
+
 // static
-void NetlinkManager::OnNetlinkMessageError(AuxilliaryMessageType type,
+void NetlinkManager::OnNetlinkMessageError(AuxiliaryMessageType type,
                                            const NetlinkMessage* raw_message) {
   switch (type) {
     case kErrorFromKernel:
       if (!raw_message) {
         LOG(ERROR) << "Unknown error from kernel.";
-        break;
+        return;
       }
       if (raw_message->message_type() == ErrorAckMessage::GetMessageType()) {
         const ErrorAckMessage* error_ack_message =
@@ -259,23 +251,25 @@ void NetlinkManager::OnNetlinkMessageError(AuxilliaryMessageType type,
                    << ": Message (seq: " << error_ack_message->sequence_number()
                    << ") failed: " << error_ack_message->ToString();
       }
-      break;
+      return;
 
     case kUnexpectedResponseType:
-      LOG(ERROR) << "Message not handled by regular message handler:";
-      if (raw_message) {
-        raw_message->Print(0, 0);
-      }
-      break;
+      LOG(ERROR) << "Message not handled by regular message handler: "
+                 << GetRawMessage(raw_message);
+      return;
 
     case kTimeoutWaitingForResponse:
-      LOG(WARNING) << "Timeout waiting for response";
-      break;
+      LOG(WARNING) << "Timeout waiting for response: "
+                   << GetRawMessage(raw_message);
+      return;
 
-    default:
-      LOG(ERROR) << "Unexpected auxilliary message type: " << type;
-      break;
+    case kDone:
+      VLOG(1) << __func__ << ": received kDone: " << GetRawMessage(raw_message);
+      return;
   }
+
+  LOG(ERROR) << "Unexpected auxiliary message type: " << type
+             << ", message: " << GetRawMessage(raw_message);
 }
 
 bool NetlinkManager::Init() {
@@ -283,15 +277,11 @@ bool NetlinkManager::Init() {
   // statically-known message type.
   message_factory_.AddFactoryMethod(
       ControlNetlinkMessage::kMessageType,
-      base::Bind(&ControlNetlinkMessage::CreateMessage));
+      base::BindRepeating(&ControlNetlinkMessage::CreateMessage));
   if (!sock_) {
-    sock_.reset(new NetlinkSocket);
+    sock_ = NetlinkSocket::Create();
     if (!sock_) {
-      LOG(ERROR) << "No memory";
-      return false;
-    }
-
-    if (!sock_->Init()) {
+      LOG(ERROR) << "Failed to create netlink socket";
       return false;
     }
   }
@@ -299,18 +289,28 @@ bool NetlinkManager::Init() {
 }
 
 void NetlinkManager::Start() {
-  // Create an IO handler for receiving messages on the netlink socket.
-  // IO handler will be installed to the current message loop.
-  dispatcher_handler_.reset(io_handler_factory_->CreateIOInputHandler(
-      file_descriptor(),
-      base::Bind(&NetlinkManager::OnRawNlMessageReceived,
-                 weak_ptr_factory_.GetWeakPtr()),
-      base::Bind(&NetlinkManager::OnReadError,
-                 weak_ptr_factory_.GetWeakPtr())));
+  if (!sock_) {
+    LOG(ERROR) << "The netlink socket hasn't been initialized";
+    return;
+  }
+
+  // Create an watcher for receiving messages on the netlink socket.
+  sock_watcher_ = base::FileDescriptorWatcher::WatchReadable(
+      sock_->file_descriptor(),
+      // base::Unretained() is safe because |sock_watcher_| is owned by |*this|.
+      base::BindRepeating(&NetlinkManager::OnReadable, base::Unretained(this)));
+  if (sock_watcher_ == nullptr) {
+    LOG(ERROR) << "Failed on watching the netlink socket";
+  }
 }
 
-int NetlinkManager::file_descriptor() const {
-  return (sock_ ? sock_->file_descriptor() : Sockets::kInvalidFileDescriptor);
+void NetlinkManager::OnReadable() {
+  std::vector<uint8_t> message;
+  if (sock_->RecvMessage(&message)) {
+    OnRawNlMessageReceived(message);
+  } else {
+    PLOG(ERROR) << "NetlinkManager's netlink Socket read returns error";
+  }
 }
 
 uint16_t NetlinkManager::GetFamily(
@@ -330,11 +330,12 @@ uint16_t NetlinkManager::GetFamily(
     LOG(ERROR) << "Couldn't set string attribute";
     return false;
   }
-  SendControlMessage(&msg,
-                     base::Bind(&NetlinkManager::OnNewFamilyMessage,
-                                weak_ptr_factory_.GetWeakPtr()),
-                     base::Bind(&NetlinkManager::OnAckDoNothing),
-                     base::Bind(&NetlinkManager::OnNetlinkMessageError));
+  SendControlMessage(
+      &msg,
+      base::BindRepeating(&NetlinkManager::OnNewFamilyMessage,
+                          weak_ptr_factory_.GetWeakPtr()),
+      base::BindRepeating(&NetlinkManager::OnAckDoNothing),
+      base::BindRepeating(&NetlinkManager::OnNetlinkMessageError));
 
   // Wait for a response.  The code absolutely needs family_ids for its
   // message types so we do a synchronous wait.  It's OK to do this because
@@ -345,26 +346,17 @@ uint16_t NetlinkManager::GetFamily(
   // GETFAMILY / NEWFAMILY transaction to transpire (this transaction was timed
   // over 20 times and found a maximum duration of 11.1 microseconds and an
   // average of 4.0 microseconds).
-  struct timeval now, end_time;
-  struct timeval maximum_wait_duration = {kMaximumNewFamilyWaitSeconds,
-                                          kMaximumNewFamilyWaitMicroSeconds};
-  time_->GetTimeMonotonic(&now);
-  timeradd(&now, &maximum_wait_duration, &end_time);
+  const base::TimeTicks end_time =
+      base::TimeTicks::Now() + kMaximumNewFamilyTimeout;
 
-  do {
+  while (true) {
+    const base::TimeDelta timeout = end_time - base::TimeTicks::Now();
+    if (!timeout.is_positive()) {
+      break;
+    }
+
     // Wait with timeout for a message from the netlink socket.
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
-
-    int socket = file_descriptor();
-    if (socket >= FD_SETSIZE)
-      LOG(FATAL) << "Invalid file_descriptor.";
-    FD_SET(socket, &read_fds);
-
-    struct timeval wait_duration;
-    timersub(&end_time, &now, &wait_duration);
-    int result = sock_->sockets()->Select(file_descriptor() + 1, &read_fds,
-                                          nullptr, nullptr, &wait_duration);
+    const int result = sock_->WaitForRead(timeout);
     if (result < 0) {
       PLOG(ERROR) << "Select failed";
       return NetlinkMessage::kIllegalMessageType;
@@ -376,10 +368,9 @@ uint16_t NetlinkManager::GetFamily(
     }
 
     // Read and process any messages.
-    ByteString received;
+    std::vector<uint8_t> received;
     sock_->RecvMessage(&received);
-    InputData input_data(received.GetData(), received.GetLength());
-    OnRawNlMessageReceived(&input_data);
+    OnRawNlMessageReceived(received);
     if (message_type.family_id != NetlinkMessage::kIllegalMessageType) {
       uint16_t family_id = message_type.family_id;
       if (family_id != NetlinkMessage::kIllegalMessageType) {
@@ -387,8 +378,7 @@ uint16_t NetlinkManager::GetFamily(
       }
       return message_type.family_id;
     }
-    time_->GetTimeMonotonic(&now);
-  } while (timercmp(&now, &end_time, <));
+  }
 
   LOG(ERROR) << "Timed out waiting for family_id for family '" << name << "'.";
   return NetlinkMessage::kIllegalMessageType;
@@ -404,7 +394,7 @@ bool NetlinkManager::AddBroadcastHandler(const NetlinkMessageHandler& handler) {
     return false;
   }
   // And add the handler to the list.
-  SLOG(this, 3) << "NetlinkManager::" << __func__ << " - adding handler";
+  VLOG(2) << "NetlinkManager::" << __func__ << " - adding handler";
   broadcast_handlers_.push_back(handler);
   return true;
 }
@@ -442,7 +432,7 @@ bool NetlinkManager::SendControlMessage(
     ControlNetlinkMessage* message,
     const ControlNetlinkMessageHandler& message_handler,
     const NetlinkAckHandler& ack_handler,
-    const NetlinkAuxilliaryMessageHandler& error_handler) {
+    const NetlinkAuxiliaryMessageHandler& error_handler) {
   return SendOrPostMessage(
       message,
       new ControlResponseHandler(ack_handler, error_handler, message_handler));
@@ -452,15 +442,14 @@ bool NetlinkManager::SendNl80211Message(
     Nl80211Message* message,
     const Nl80211MessageHandler& message_handler,
     const NetlinkAckHandler& ack_handler,
-    const NetlinkAuxilliaryMessageHandler& error_handler) {
+    const NetlinkAuxiliaryMessageHandler& error_handler) {
   return SendOrPostMessage(
-      message,
-      new Nl80211ResponseHandler(ack_handler, error_handler, message_handler));
+      message, NetlinkResponseHandlerRefPtr(new Nl80211ResponseHandler(
+                   ack_handler, error_handler, message_handler)));
 }
 
 bool NetlinkManager::SendOrPostMessage(
-    NetlinkMessage* message,
-    NetlinkManager::NetlinkResponseHandler* response_handler) {
+    NetlinkMessage* message, NetlinkResponseHandlerRefPtr response_handler) {
   if (!message) {
     LOG(ERROR) << "Message is NULL.";
     return false;
@@ -468,24 +457,22 @@ bool NetlinkManager::SendOrPostMessage(
 
   const uint32_t sequence_number = this->GetSequenceNumber();
   const bool is_dump_msg = message->flags() & NLM_F_DUMP;
-  NetlinkPendingMessage pending_message(
-      sequence_number, is_dump_msg, message->Encode(sequence_number),
-      NetlinkResponseHandlerRefPtr(response_handler));
+  NetlinkPendingMessage pending_message(sequence_number, is_dump_msg,
+                                        message->Encode(sequence_number),
+                                        std::move(response_handler));
 
   // TODO(samueltan): print this debug message above the actual call to
   // NetlinkSocket::SendMessage in NetlinkManager::SendMessageInternal.
-  SLOG(this, 5) << "NL Message " << pending_message.sequence_number
-                << " to send (" << pending_message.message_string.GetLength()
-                << " bytes) ===>";
+  VLOG(5) << "NL Message " << pending_message.sequence_number << " to send ("
+          << pending_message.message_string.size() << " bytes) ===>";
   message->Print(6, 7);
-  NetlinkMessage::PrintBytes(8, pending_message.message_string.GetConstData(),
-                             pending_message.message_string.GetLength());
+  NetlinkMessage::PrintBytes(8, pending_message.message_string.data(),
+                             pending_message.message_string.size());
 
   if (is_dump_msg) {
     pending_messages_.push(pending_message);
     if (IsDumpPending()) {
-      SLOG(this, 5)
-          << "Dump pending -- will send message after dump is complete";
+      VLOG(5) << "Dump pending -- will send message after dump is complete";
       return true;
     }
   }
@@ -497,15 +484,13 @@ bool NetlinkManager::RegisterHandlersAndSendMessage(
   // Clean out timed-out message handlers.  The list of outstanding messages
   // should be small so the time wasted by looking through all of them should
   // be small.
-  struct timeval now;
-  time_->GetTimeMonotonic(&now);
-  std::map<uint32_t, NetlinkResponseHandlerRefPtr>::iterator handler_it =
-      message_handlers_.begin();
+  const base::TimeTicks now = base::TimeTicks::Now();
+  auto handler_it = message_handlers_.begin();
   while (handler_it != message_handlers_.end()) {
-    if (timercmp(&now, &handler_it->second->delete_after(), >)) {
+    if (now > handler_it->second->delete_after()) {
       // A timeout isn't always unexpected so this is not a warning.
-      SLOG(this, 3) << "Removing timed-out handler for sequence number "
-                    << handler_it->first;
+      VLOG(2) << "Removing timed-out handler for sequence number "
+              << handler_it->first;
       handler_it->second->HandleError(kTimeoutWaitingForResponse, nullptr);
       handler_it = message_handlers_.erase(handler_it);
     } else {
@@ -515,19 +500,14 @@ bool NetlinkManager::RegisterHandlersAndSendMessage(
 
   // Register handlers for replies to this message.
   if (!pending_message.handler) {
-    SLOG(this, 3) << "Handler for message was null.";
+    VLOG(2) << "Handler for message was null.";
   } else if (base::Contains(message_handlers_,
                             pending_message.sequence_number)) {
     LOG(ERROR) << "A handler already existed for sequence: "
                << pending_message.sequence_number;
     return false;
   } else {
-    struct timeval response_timeout = {kResponseTimeoutSeconds,
-                                       kResponseTimeoutMicroSeconds};
-    struct timeval delete_after;
-    timeradd(&now, &response_timeout, &delete_after);
-    pending_message.handler->set_delete_after(delete_after);
-
+    pending_message.handler->set_delete_after(now + kResponseTimeout);
     message_handlers_[pending_message.sequence_number] =
         pending_message.handler;
   }
@@ -536,21 +516,21 @@ bool NetlinkManager::RegisterHandlersAndSendMessage(
 
 bool NetlinkManager::SendMessageInternal(
     const NetlinkPendingMessage& pending_message) {
-  SLOG(this, 5) << "Sending NL message " << pending_message.sequence_number;
+  VLOG(5) << "Sending NL message " << pending_message.sequence_number;
 
   if (!sock_->SendMessage(pending_message.message_string)) {
     LOG(ERROR) << "Failed to send Netlink message.";
     return false;
   }
   if (pending_message.is_dump_request) {
-    SLOG(this, 5) << "Waiting for replies to NL dump message "
-                  << pending_message.sequence_number;
+    VLOG(5) << "Waiting for replies to NL dump message "
+            << pending_message.sequence_number;
     dump_pending_ = true;
-    pending_dump_timeout_callback_.Reset(base::Bind(
+    pending_dump_timeout_callback_.Reset(base::BindOnce(
         &NetlinkManager::OnPendingDumpTimeout, weak_ptr_factory_.GetWeakPtr()));
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE, pending_dump_timeout_callback_.callback(),
-        base::TimeDelta::FromMilliseconds(kPendingDumpTimeoutMilliseconds));
+        kPendingDumpTimeout);
   }
   return true;
 }
@@ -575,21 +555,26 @@ NetlinkMessage::MessageContext NetlinkManager::InferMessageContext(
 }
 
 void NetlinkManager::OnPendingDumpTimeout() {
-  SLOG(this, 3) << "Timed out waiting for replies to NL dump message "
-                << PendingDumpSequenceNumber();
+  VLOG(2) << "Timed out waiting for replies to NL dump message "
+          << PendingDumpSequenceNumber();
+  if (IsDumpPending() && pending_messages_.front().retries_left > 0) {
+    VLOG(2) << "Resending NL dump message";
+    ResendPendingDumpMessage();
+    return;
+  }
   CallErrorHandler(PendingDumpSequenceNumber(), kTimeoutWaitingForResponse,
                    nullptr);
   OnPendingDumpComplete();
 }
 
 void NetlinkManager::OnPendingDumpComplete() {
-  SLOG(this, 3) << __func__;
+  VLOG(2) << __func__;
   dump_pending_ = false;
   pending_dump_timeout_callback_.Cancel();
   resend_dump_message_callback_.Cancel();
   pending_messages_.pop();
   if (!pending_messages_.empty()) {
-    SLOG(this, 3) << "Sending next pending message";
+    VLOG(2) << "Sending next pending message";
     NetlinkPendingMessage to_send = pending_messages_.front();
     RegisterHandlersAndSendMessage(to_send);
   }
@@ -640,19 +625,14 @@ bool NetlinkManager::SubscribeToEvents(const std::string& family_id,
   return sock_->SubscribeToEvents(group_id);
 }
 
-void NetlinkManager::OnRawNlMessageReceived(InputData* data) {
-  if (!data) {
-    LOG(ERROR) << __func__ << "() called with null header.";
-    return;
-  }
-  const unsigned char* buf = data->buf;
-  const unsigned char* end = buf + data->len;
-  while (buf < end) {
-    NetlinkPacket packet(buf, end - buf);
+void NetlinkManager::OnRawNlMessageReceived(base::span<const uint8_t> data) {
+  base::span<const uint8_t> remain_data = data;
+  while (!remain_data.empty()) {
+    NetlinkPacket packet(remain_data);
     if (!packet.IsValid()) {
       break;
     }
-    buf += packet.GetLength();
+    remain_data = remain_data.subspan(packet.GetLength());
     OnNlMessageReceived(&packet);
   }
 }
@@ -667,12 +647,12 @@ void NetlinkManager::OnNlMessageReceived(NetlinkPacket* packet) {
   std::unique_ptr<NetlinkMessage> message(
       message_factory_.CreateMessage(packet, InferMessageContext(*packet)));
   if (message == nullptr) {
-    SLOG(this, 3) << "NL Message " << sequence_number << " <===";
-    SLOG(this, 3) << __func__ << "(msg:NULL)";
+    VLOG(2) << "NL Message " << sequence_number << " <===";
+    VLOG(2) << __func__ << "(msg:NULL)";
     return;  // Skip current message, continue parsing buffer.
   }
-  SLOG(this, 5) << "NL Message " << sequence_number << " Received ("
-                << packet->GetLength() << " bytes) <===";
+  VLOG(5) << "NL Message " << sequence_number << " Received ("
+          << packet->GetLength() << " bytes) <===";
   message->Print(6, 7);
   NetlinkMessage::PrintPacket(8, *packet);
 
@@ -698,8 +678,8 @@ void NetlinkManager::OnNlMessageReceived(NetlinkPacket* packet) {
     // of the pending dump request, and we are not in the middle of receiving a
     // multi-part reply.
     if (is_error_ack_message && (error_code == static_cast<uint32_t>(-EBUSY))) {
-      SLOG(this, 3) << "EBUSY reply received for NL dump message "
-                    << PendingDumpSequenceNumber();
+      VLOG(2) << "EBUSY reply received for NL dump message "
+              << PendingDumpSequenceNumber();
       if (pending_messages_.front().retries_left) {
         pending_messages_.front().last_received_error = error_code;
         pending_dump_timeout_callback_.Cancel();
@@ -707,32 +687,31 @@ void NetlinkManager::OnNlMessageReceived(NetlinkPacket* packet) {
         // Since we will resend the message, do not invoke error handler.
         return;
       } else {
-        SLOG(this, 3) << "No more resend attempts left for NL dump message "
-                      << PendingDumpSequenceNumber()
-                      << " -- stop waiting "
-                         "for replies";
+        VLOG(2) << "No more resend attempts left for NL dump message "
+                << PendingDumpSequenceNumber()
+                << " -- stop waiting "
+                   "for replies";
         OnPendingDumpComplete();
       }
     } else {
-      SLOG(this, 3) << "Reply received for NL dump message "
-                    << PendingDumpSequenceNumber()
-                    << " -- stop waiting for replies";
+      VLOG(2) << "Reply received for NL dump message "
+              << PendingDumpSequenceNumber() << " -- stop waiting for replies";
       OnPendingDumpComplete();
     }
   }
 
   if (is_error_ack_message) {
-    SLOG(this, 3) << "Error/ACK response to message " << sequence_number;
+    VLOG(2) << "Error/ACK response to message " << sequence_number;
     if (error_code) {
       CallErrorHandler(sequence_number, kErrorFromKernel, message.get());
     } else {
       if (base::Contains(message_handlers_, sequence_number)) {
-        SLOG(this, 6) << "Found message-specific ACK handler";
+        VLOG(6) << "Found message-specific ACK handler";
         if (message_handlers_[sequence_number]->HandleAck()) {
-          SLOG(this, 6) << "ACK handler invoked -- removing callback";
+          VLOG(6) << "ACK handler invoked -- removing callback";
           message_handlers_.erase(sequence_number);
         } else {
-          SLOG(this, 6) << "ACK handler invoked -- not removing callback";
+          VLOG(6) << "ACK handler invoked -- not removing callback";
         }
       }
     }
@@ -740,7 +719,7 @@ void NetlinkManager::OnNlMessageReceived(NetlinkPacket* packet) {
   }
 
   if (base::Contains(message_handlers_, sequence_number)) {
-    SLOG(this, 6) << "Found message-specific handler";
+    VLOG(6) << "Found message-specific handler";
     if ((message->flags() & NLM_F_MULTI) &&
         (message->message_type() == NLMSG_DONE)) {
       message_handlers_[sequence_number]->HandleError(kDone, message.get());
@@ -753,16 +732,16 @@ void NetlinkManager::OnNlMessageReceived(NetlinkPacket* packet) {
     }
     if ((message->flags() & NLM_F_MULTI) &&
         (message->message_type() != NLMSG_DONE)) {
-      SLOG(this, 6) << "Multi-part message -- not removing callback";
+      VLOG(6) << "Multi-part message -- not removing callback";
     } else {
-      SLOG(this, 6) << "Removing callbacks";
+      VLOG(6) << "Removing callbacks";
       message_handlers_.erase(sequence_number);
     }
     return;
   }
 
   for (const auto& handler : broadcast_handlers_) {
-    SLOG(this, 6) << "Calling broadcast handler";
+    VLOG(6) << "Calling broadcast handler";
     if (!handler.is_null()) {
       handler.Run(*message);
     }
@@ -771,24 +750,23 @@ void NetlinkManager::OnNlMessageReceived(NetlinkPacket* packet) {
 
 void NetlinkManager::ResendPendingDumpMessage() {
   if (!IsDumpPending()) {
-    SLOG(this, 3) << "No pending dump, so do not resend dump message";
+    VLOG(2) << "No pending dump, so do not resend dump message";
     return;
   }
   --pending_messages_.front().retries_left;
   if (SendMessageInternal(pending_messages_.front())) {
-    SLOG(this, 3) << "NL message " << PendingDumpSequenceNumber()
-                  << " sent again successfully";
+    VLOG(2) << "NL message " << PendingDumpSequenceNumber()
+            << " sent again successfully";
     return;
   }
-  SLOG(this, 3) << "Failed to resend NL message "
-                << PendingDumpSequenceNumber();
+  VLOG(2) << "Failed to resend NL message " << PendingDumpSequenceNumber();
   if (pending_messages_.front().retries_left) {
     ResendPendingDumpMessageAfterDelay();
   } else {
-    SLOG(this, 3) << "No more resend attempts left for NL dump message "
-                  << PendingDumpSequenceNumber()
-                  << " -- stop waiting "
-                     "for replies";
+    VLOG(2) << "No more resend attempts left for NL dump message "
+            << PendingDumpSequenceNumber()
+            << " -- stop waiting "
+               "for replies";
     ErrorAckMessage err_message(pending_messages_.front().last_received_error);
     CallErrorHandler(PendingDumpSequenceNumber(), kErrorFromKernel,
                      &err_message);
@@ -797,32 +775,24 @@ void NetlinkManager::ResendPendingDumpMessage() {
 }
 
 void NetlinkManager::CallErrorHandler(uint32_t sequence_number,
-                                      AuxilliaryMessageType type,
+                                      AuxiliaryMessageType type,
                                       const NetlinkMessage* netlink_message) {
   if (base::Contains(message_handlers_, sequence_number)) {
-    SLOG(this, 6) << "Found message-specific error handler";
+    VLOG(6) << "Found message-specific error handler";
     message_handlers_[sequence_number]->HandleError(type, netlink_message);
     message_handlers_.erase(sequence_number);
   }
 }
 
-void NetlinkManager::OnReadError(const std::string& error_msg) {
-  // TODO(wdg): When netlink_manager is used for scan, et al., this should
-  // either be LOG(FATAL) or the code should properly deal with errors,
-  // e.g., dropped messages due to the socket buffer being full.
-  LOG(ERROR) << "NetlinkManager's netlink Socket read returns error: "
-             << error_msg;
-}
-
 void NetlinkManager::ResendPendingDumpMessageAfterDelay() {
-  SLOG(this, 3) << "Resending NL dump message " << PendingDumpSequenceNumber()
-                << " after " << kNlMessageRetryDelayMilliseconds << " ms";
+  VLOG(2) << "Resending NL dump message " << PendingDumpSequenceNumber()
+          << " after " << kNlMessageRetryDelay.InMilliseconds() << " ms";
   resend_dump_message_callback_.Reset(
-      base::Bind(&NetlinkManager::ResendPendingDumpMessage,
-                 weak_ptr_factory_.GetWeakPtr()));
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+      base::BindOnce(&NetlinkManager::ResendPendingDumpMessage,
+                     weak_ptr_factory_.GetWeakPtr()));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, resend_dump_message_callback_.callback(),
-      base::TimeDelta::FromMilliseconds(kNlMessageRetryDelayMilliseconds));
+      kNlMessageRetryDelay);
 }
 
 }  // namespace shill.

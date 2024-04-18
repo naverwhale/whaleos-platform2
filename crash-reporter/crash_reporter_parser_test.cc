@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -154,9 +155,8 @@ class CrashReporterParserTest : public ::testing::Test {
     // constructor will advance on each Now() call. Less that the normal 10
     // seconds because each match calls Now() once, and the interleaved tests
     // want to get 3 matches without going past the timeout.
-    const base::TimeDelta kClockAdvanceAmount = base::TimeDelta::FromSeconds(1);
+    const base::TimeDelta kClockAdvanceAmount = base::Seconds(1);
 
-    EXPECT_CALL(*metrics, Init()).Times(1);
     auto parser = std::make_unique<CrashReporterParser>(
         std::make_unique<AdvancingClock>(kClockAdvanceAmount),
         std::move(metrics), true /* testonly_send_all */);
@@ -296,7 +296,8 @@ TEST_F(CrashReporterParserTest, UnmatchedCallFromKernelTest) {
 
 TEST_F(CrashReporterParserTest, InterleavedMessagesTest) {
   auto log_msgs = GetTestLogMessages(
-      test_util::GetTestDataPath("TEST_CHROME_CRASH_MATCH_INTERLEAVED.txt"));
+      test_util::GetTestDataPath("TEST_CHROME_CRASH_MATCH_INTERLEAVED.txt",
+                                 /*use_testdata=*/true));
   std::sort(log_msgs.begin(), log_msgs.end());
   do {
     auto metrics = std::make_unique<MetricsLibraryMock>();
@@ -318,7 +319,8 @@ TEST_F(CrashReporterParserTest, InterleavedMismatchedMessagesTest) {
       "--recent_match_count=2",  // The other 2 PIDs in the file.
       "--pending_miss_count=0"};
   auto log_msgs = GetTestLogMessages(
-      test_util::GetTestDataPath("TEST_CHROME_CRASH_MATCH_INTERLEAVED.txt"));
+      test_util::GetTestDataPath("TEST_CHROME_CRASH_MATCH_INTERLEAVED.txt",
+                                 /*use_testdata=*/true));
 
   ReplaceMsgContent(&log_msgs,
                     "Received crash notification for chrome[1570] user 1000 "
@@ -343,7 +345,8 @@ TEST_F(CrashReporterParserTest, InterleavedMismatchedMessagesTest) {
 
 TEST_F(CrashReporterParserTest, PendingAndRecentMissCount) {
   auto log_msgs = GetTestLogMessages(
-      test_util::GetTestDataPath("TEST_CHROME_CRASH_MATCH_INTERLEAVED.txt"));
+      test_util::GetTestDataPath("TEST_CHROME_CRASH_MATCH_INTERLEAVED.txt",
+                                 /*use_testdata=*/true));
 
   ReplaceMsgContent(&log_msgs,
                     "Received crash notification for chrome[1570] user 1000 "
@@ -367,7 +370,7 @@ TEST_F(CrashReporterParserTest, PendingAndRecentMissCount) {
   // enough that the new pending miss won't be handled in the last
   // PeriodicUpdate, but not so much that the previous miss will be handled.
   for (int i = 0; i < CrashReporterParser::kTimeout.InSeconds() / 2; ++i) {
-    EXPECT_EQ(parser->PeriodicUpdate(), base::nullopt);
+    EXPECT_EQ(parser->PeriodicUpdate(), std::nullopt);
   }
 
   // Add in one more called-for-kernel so that we have another pending miss.
@@ -375,7 +378,7 @@ TEST_F(CrashReporterParserTest, PendingAndRecentMissCount) {
                 "[user] Received crash notification for chrome[777] sig 10, "
                 "user 1000 group 1000 (ignoring call by kernel - chrome crash; "
                 "waiting for chrome to call us directly)"),
-            base::nullopt);
+            std::nullopt);
   // Run PeriodicUpdate until the report for the miss in the INTERLEAVED file
   // comes out. That should be PID 1570.
   expected_flags_ = {
@@ -424,7 +427,7 @@ TEST_F(CrashReporterParserTest, PendingAndRecentMissCount) {
                 "[user] Received crash notification for chrome[772] sig 10, "
                 "user 1000 group 1000 (ignoring call by kernel - chrome crash; "
                 "waiting for chrome to call us directly)"),
-            base::nullopt);
+            std::nullopt);
 
   // We should get a CrashReport for the called-by-kernel line we just added
   // with a direct call to ParseLogEntry, but all those others (PID 777 and the

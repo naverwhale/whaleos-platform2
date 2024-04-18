@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,7 @@ class CryptohomeClient {
   CryptohomeClient() = default;
   virtual ~CryptohomeClient() = default;
 
-  virtual bool HasFwmp() = 0;
-  virtual bool IsEnrolled() = 0;
+  virtual bool IsCcdBlocked() = 0;
 };
 
 }  // namespace rmad

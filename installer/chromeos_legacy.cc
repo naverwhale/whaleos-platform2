@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include <base/environment.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
@@ -18,12 +19,107 @@
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 
+#include "installer/efi_boot_management.h"
 #include "installer/inst_util.h"
+
+#include <brillo/whaleos_util.h>
 
 using std::string;
 using std::vector;
 
+// String matching the kernel boot lines in grub.cfg files.
+const std::string CommandPatternForSlot(BootSlot slot) {
+  switch (slot) {
+    case BootSlot::A:
+      return "/syslinux/vmlinuz.A";
+    case BootSlot::B:
+      return "/syslinux/vmlinuz.B";
+  }
+}
+
+std::string EfiGrubCfg::GetKernelCommand(BootSlot slot,
+                                         EfiGrubCfg::DmOption dm) const {
+  const string kernel_pattern = CommandPatternForSlot(slot);
+  const bool want_empty_dm = dm == EfiGrubCfg::DmOption::None;
+  for (const auto& line : file_lines_) {
+    if (line.find(kernel_pattern) == string::npos)
+      continue;
+
+    if (ExtractKernelArg(line, "dm").empty() == want_empty_dm)
+      return line;
+  }
+  return "";
+}
+
+bool EfiGrubCfg::ReplaceKernelCommand(BootSlot slot,
+                                      EfiGrubCfg::DmOption dm,
+                                      std::string cmd) {
+  const string kernel_pattern = CommandPatternForSlot(slot);
+  const bool want_empty_dm = dm == EfiGrubCfg::DmOption::None;
+  bool did_set = false;
+  for (auto& line : file_lines_) {
+    if (line.find(kernel_pattern) == string::npos)
+      continue;
+
+    if (ExtractKernelArg(line, "dm").empty() == want_empty_dm) {
+      DLOG(INFO) << "Replacing: " << line;
+      line = cmd;
+      // Continue to replace all matching lines.
+      // It is not expected that there are multiple entries
+      // however replace them if they occur.
+      did_set = true;
+    }
+  }
+  return did_set;
+}
+
+bool EfiGrubCfg::LoadFile(const base::FilePath& path) {
+  string grub_src;
+  if (!base::ReadFileToString(path, &grub_src)) {
+    PLOG(ERROR) << "Unable to read grub template file: " << path.value();
+    return false;
+  }
+  // Split the file contents into lines.
+  file_lines_ = base::SplitString(grub_src, "\n", base::KEEP_WHITESPACE,
+                                  base::SPLIT_WANT_ALL);
+  return true;
+}
+
+std::string EfiGrubCfg::ToString() const {
+  return base::JoinString(file_lines_, "\n");
+}
+
+bool EfiGrubCfg::UpdateBootParameters(BootSlot slot,
+                                      const string& root_uuid,
+                                      const string& verity_args) {
+  const string kernel_pattern = CommandPatternForSlot(slot);
+  for (auto& line : file_lines_) {
+    // Convert all "linuxefi" grub commands to "linux" for the updated
+    // version of grub.
+    base::ReplaceFirstSubstringAfterOffset(&line, 0, "linuxefi", "linux");
+
+    if (line.find(kernel_pattern) == string::npos)
+      continue;
+
+    DLOG(INFO) << "Updating command: " << line;
+    if (ExtractKernelArg(line, "dm").empty()) {
+      // If it's an unverified boot line, just set the root partition to boot.
+      if (!SetKernelArg("root", "PARTUUID=" + root_uuid, &line)) {
+        LOG(ERROR) << "Unable to update unverified root flag in " << line;
+        return false;
+      }
+    } else if (!SetKernelArg("dm", verity_args, &line)) {
+      LOG(INFO) << "Unable to update verified dm flag.";
+      return false;
+    }
+  }
+  return true;
+}
+
 bool UpdateLegacyKernel(const InstallConfig& install_config) {
+  auto env = base::Environment::Create();
+  bool is_install = env->HasVar("IS_INSTALL");
+
   const base::FilePath root_mount(install_config.root.mount());
   const base::FilePath boot_mount(install_config.boot.mount());
 
@@ -31,11 +127,91 @@ bool UpdateLegacyKernel(const InstallConfig& install_config) {
   const base::FilePath kernel_to =
       boot_mount.Append("syslinux").Append("vmlinuz." + install_config.slot);
 
+  // In the event of a typical install, `kernel_from` may not exist.
+  // There is an expectation that `include_vmlinuz` be added to the board
+  // overlay's `profiles/base/make.defaults` as a `USE=` flag. Without this,
+  // `src/scripts/build_library/base_image_util.sh` will move the Kernel during
+  // `build_image`.
+  if (is_install && (install_config.bios_type == BiosType::kLegacy ||
+                     install_config.bios_type == BiosType::kEFI)) {
+    // This is a non-fatal condition. The new Kernel is already present at the
+    // destination. Log a warning and continue.
+    if (!base::PathExists(kernel_from) && base::PathExists(kernel_to)) {
+      LOG(WARNING) << "Legacy Kernel '" << kernel_from
+                   << "' does not exist. Consider adding "
+                   << "`USE=\"${USE} include_vmlinuz\"` "
+                   << "to the board's `make.defaults`.";
+      return true;
+    }
+  }
+  // In any other scenario (like an update), ensure we copy the new Kernel.
   return base::CopyFile(kernel_from, kernel_to);
 }
 
-string ExplandVerityArguments(const string& kernel_config,
-                              const string& root_uuid) {
+bool UpdateMiniosKernel(const InstallConfig& install_config) {
+  const base::FilePath root_mount(install_config.root.mount());
+  const base::FilePath boot_mount(install_config.boot.mount());
+
+  const base::FilePath kernel_from = root_mount.Append("boot").Append("syslinux").Append("vmlinuz.minios");
+  const base::FilePath kernel_to =
+      boot_mount.Append("syslinux").Append("vmlinuz.minios");
+
+  if (base::PathExists(kernel_from))
+    return base::CopyFile(kernel_from, kernel_to);
+
+  PLOG(WARNING) << "There are no vmlinuz.minios in efi partition";
+
+  return true;
+}
+
+bool UpdateBIOS(const InstallConfig& install_config) {
+  const base::FilePath root_mount(install_config.root.mount());
+  const base::FilePath boot_mount(install_config.boot.mount());
+  const base::FilePath bios_dir = root_mount.Append("boot")
+      .Append("syslinux").Append("fw_upd");
+
+  if (!base::PathExists(bios_dir)) {
+    PLOG(WARNING) << "There are no bios updater in efi partition";
+    return true;
+  }
+
+  std::string file_content;
+  std::string target_model;
+  std::string next_version;
+  base::ReadFileToString(bios_dir.Append("target"), &file_content);
+  base::TrimWhitespaceASCII(file_content, base::TRIM_ALL, &target_model);
+  base::ReadFileToString(bios_dir.Append("version"), &file_content);
+  base::TrimWhitespaceASCII(file_content, base::TRIM_ALL, &next_version);
+
+  if (base::StartsWith(brillo::GetProductName(), target_model,
+                       base::CompareCase::SENSITIVE) &&
+      brillo::GetBiosVersion() < next_version) {
+    LOG(INFO) << "Try to BIOS update.";
+
+    if (RunCommand({bios_dir.Append("fw_upd_prepare.sh").value(), bios_dir.value()}) != 0) {
+      PLOG(ERROR) << "Failed to run update script.";
+      return false;
+    }
+
+    if (!base::DeletePathRecursively(bios_dir)) {
+      LOG(WARNING) << "Failed to delete bios updater";
+    }
+
+    LOG(INFO) << "BIOS will be updated after rebooting";
+  } else {
+    LOG(INFO) << "It's not target model or it has Already latest version";
+    if (!base::DeletePathRecursively(bios_dir)) {
+      LOG(ERROR) << "Failed to delete bios updater";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+
+string ExpandVerityArguments(const string& kernel_config,
+                             const string& root_uuid) {
   string kernel_config_dm = ExtractKernelArg(kernel_config, "dm");
 
   // The verity config from the kernel contains short hand symbols for
@@ -66,7 +242,8 @@ bool RunLegacyPostInstall(const InstallConfig& install_config) {
     return false;
 
   string kernel_config = DumpKernelConfig(install_config.kernel.device());
-  string kernel_config_root = ExtractKernelArg(kernel_config, "root");
+  base::FilePath kernel_config_root =
+      base::FilePath(ExtractKernelArg(kernel_config, "root"));
 
   // Prepare the new default.cfg
 
@@ -98,7 +275,7 @@ bool RunLegacyPostInstall(const InstallConfig& install_config) {
     return false;
 
   string kernel_config_dm =
-      ExplandVerityArguments(kernel_config, install_config.root.uuid());
+      ExpandVerityArguments(kernel_config, install_config.root.uuid());
 
   if (kernel_config_dm.empty()) {
     LOG(ERROR) << "Failed to extract Verity arguments.";
@@ -151,9 +328,9 @@ bool RunLegacyUBootPostInstall(const InstallConfig& install_config) {
 bool UpdateEfiBootloaders(const InstallConfig& install_config) {
   bool result = true;
   const base::FilePath src_dir =
-      base::FilePath(install_config.root.mount()).Append("boot/efi/boot");
+      install_config.root.mount().Append("boot/efi/boot");
   const base::FilePath dest_dir =
-      base::FilePath(install_config.boot.mount()).Append("efi/boot");
+      install_config.boot.mount().Append("efi/boot");
   base::FileEnumerator file_enum(src_dir, false, base::FileEnumerator::FILES,
                                  "*.efi");
   for (auto src = file_enum.Next(); !src.empty(); src = file_enum.Next()) {
@@ -164,6 +341,99 @@ bool UpdateEfiBootloaders(const InstallConfig& install_config) {
   return result;
 }
 
+// Convert a slot string into the BootSlot enum value.
+// Returns false when the slot_string is not a valid enum value.
+bool StringToSlot(const std::string& slot_string, BootSlot* slot) {
+  if (slot_string == "A")
+    *slot = BootSlot::A;
+  else if (slot_string == "B")
+    *slot = BootSlot::B;
+  else
+    return false;
+  return true;
+}
+
+// Modifies the slot's command line arguments in the boot
+// grub.cfg for the update.
+//
+// The rootfs and dm= arguments will be taken from target kernel.
+// The rest of the kernel parameters will come from the grub.cfg
+// template in the target rootfs.
+//
+// Returns true if the boot grub.cfg file was successfully updated.
+bool UpdateEfiGrubCfg(const InstallConfig& install_config) {
+  // Of the form: PARTUUID=XXX-YYY-ZZZ
+  string kernel_config = DumpKernelConfig(install_config.kernel.device());
+  string root_uuid = install_config.root.uuid();
+  string kernel_config_dm = ExpandVerityArguments(kernel_config, root_uuid);
+
+  BootSlot slot;
+  if (!StringToSlot(install_config.slot, &slot)) {
+    LOG(ERROR) << "Invalid slot value.";
+    return false;
+  }
+
+  // Path to the target grub.cfg to be updated in the EFI partition.
+  const base::FilePath boot_grub_path =
+      install_config.boot.mount().Append("efi/boot/grub.cfg");
+  // Grub.cfg source in the new root filesystem.
+  const base::FilePath root_grub_path =
+      install_config.root.mount().Append("boot/efi/boot/grub.cfg");
+
+  EfiGrubCfg boot_cfg;
+  if (!boot_cfg.LoadFile(boot_grub_path)) {
+    LOG(ERROR) << "Unable to read the target grub config.";
+    return false;
+  }
+
+  EfiGrubCfg root_cfg;
+  if (!root_cfg.LoadFile(root_grub_path)) {
+    LOG(ERROR) << "Unable to read the source grub kernel config. ";
+    return false;
+  }
+
+  // Extract the dm and non-dm kernel command lines from the grub config
+  // on new rootfs.
+  string dm_entry =
+      root_cfg.GetKernelCommand(slot, EfiGrubCfg::DmOption::Present);
+  if (dm_entry.empty()) {
+    LOG(ERROR) << "Unable to to find dm entry from the root grub.cfg";
+    return false;
+  }
+  string no_dm_entry =
+      root_cfg.GetKernelCommand(slot, EfiGrubCfg::DmOption::None);
+  if (no_dm_entry.empty()) {
+    LOG(ERROR) << "Unable to to find non-dm entry from the root grub.cfg";
+    return false;
+  }
+
+  // Replace the kernel command lines with those taken from the root's
+  // grub.cfg.
+  if (!boot_cfg.ReplaceKernelCommand(slot, EfiGrubCfg::DmOption::Present,
+                                     dm_entry)) {
+    LOG(ERROR) << "Unable to update the grub kernel boot options.";
+    return false;
+  }
+  if (!boot_cfg.ReplaceKernelCommand(slot, EfiGrubCfg::DmOption::None,
+                                     no_dm_entry)) {
+    LOG(ERROR) << "Unable to update the grub kernel boot options.";
+    return false;
+  }
+
+  // Update the root partition parameters in the boot grub.cfg.
+  if (!boot_cfg.UpdateBootParameters(slot, root_uuid, kernel_config_dm)) {
+    LOG(ERROR) << "Unable to update the rootfs grub configuration.";
+    return false;
+  }
+
+  // Write out the new grub.cfg.
+  if (!base::WriteFile(boot_grub_path, boot_cfg.ToString())) {
+    PLOG(ERROR) << "Unable to write boot menu file: " << boot_grub_path;
+    return false;
+  }
+  return true;
+}
+
 bool RunEfiPostInstall(const InstallConfig& install_config) {
   LOG(INFO) << "Running EfiPostInstall.";
 
@@ -171,73 +441,23 @@ bool RunEfiPostInstall(const InstallConfig& install_config) {
   if (!UpdateLegacyKernel(install_config))
     return false;
 
+  // Update the vmlinuz.minios for Whalebook
+  if (!UpdateMiniosKernel(install_config))
+    return false;
+
   if (!UpdateEfiBootloaders(install_config))
     return false;
 
-  // Of the form: PARTUUID=XXX-YYY-ZZZ
-  string kernel_config = DumpKernelConfig(install_config.kernel.device());
-  string root_uuid = install_config.root.uuid();
-  string kernel_config_dm = ExplandVerityArguments(kernel_config, root_uuid);
-
-  base::FilePath grub_path =
-      base::FilePath(install_config.boot.mount()).Append("efi/boot/grub.cfg");
-
-  // Read in the grub.cfg to be updated.
-  string grub_src;
-  if (!base::ReadFileToString(grub_path, &grub_src)) {
-    PLOG(ERROR) << "Unable to read grub template file: " << grub_path.value();
+  // Update the grub.cfg configuration files.
+  if (!UpdateEfiGrubCfg(install_config))
     return false;
-  }
 
-  string output;
-  if (!EfiGrubUpdate(grub_src, install_config.slot, root_uuid, kernel_config_dm,
-                     &output)) {
+  if (!UpdateEfiBootEntries(install_config))
     return false;
-  }
 
-  // Write out the new grub.cfg.
-  if (!base::WriteFile(grub_path, output)) {
-    PLOG(ERROR) << "Unable to write boot menu file: " << grub_path;
+  if (!UpdateBIOS(install_config))
     return false;
-  }
 
   // We finished.
-  return true;
-}
-
-bool EfiGrubUpdate(const string& input,
-                   const string& slot,
-                   const string& root_uuid,
-                   const string& verity_args,
-                   string* output) {
-  // Split the file contents into lines.
-  vector<string> file_lines = base::SplitString(
-      input, "\n", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
-
-  // Search pattern for lines are related to our slot.
-  string kernel_pattern = "/syslinux/vmlinuz." + slot;
-
-  for (vector<string>::iterator line = file_lines.begin();
-       line < file_lines.end(); line++) {
-    if (line->find(kernel_pattern) != string::npos) {
-      if (ExtractKernelArg(*line, "dm").empty()) {
-        // If it's an unverified boot line, just set the root partition to boot.
-        if (!SetKernelArg("root", "PARTUUID=" + root_uuid, &(*line))) {
-          LOG(ERROR) << "Unable to update unverified root flag in " << *line;
-          return false;
-        }
-      } else {
-        if (!SetKernelArg("dm", verity_args, &(*line))) {
-          LOG(INFO) << "Unable to update verified dm flag.";
-          return false;
-        }
-      }
-    }
-  }
-
-  // Join the lines back into file contents.
-  *output = base::JoinString(file_lines, "\n");
-
-  // Other EFI post-install actions, if any, go here.
   return true;
 }

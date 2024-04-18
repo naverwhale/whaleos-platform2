@@ -1,24 +1,24 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/crash_sender_base.h"
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 
 #include <base/check.h>
 #include <base/files/file_util.h>
-#include <base/guid.h>
 #include <base/logging.h>
 #include <base/rand_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <base/uuid.h>
 
 #include "crash-reporter/constants.h"
 #include "crash-reporter/crash_sender_paths.h"
-#include "crash-reporter/crash_sender_util.h"
 #include "crash-reporter/paths.h"
 #include "crash-reporter/util.h"
 
@@ -42,7 +42,8 @@ constexpr size_t kMaxMetaFileSize = 1024 * 1024;
 bool IsKnownKind(const std::string& kind) {
   return (kind == constants::kKindForMinidump || kind == "kcrash" ||
           kind == "log" || kind == "devcore" || kind == "eccrash" ||
-          kind == "bertdump" || kind == constants::kKindForJavaScriptError);
+          kind == "bertdump" || kind == "txt" ||
+          kind == constants::kKindForJavaScriptError);
 }
 
 // Returns true if the given key is valid for crash metadata.
@@ -144,6 +145,11 @@ void RecordCrashDone() {
     // third_party/autotest/files/client/cros/crash/crash_test.py and
     // platform/tast-tests/src/chromiumos/tast/local/crash/sender.go
     LOG(INFO) << "crash_sender done. (mock)";
+    base::FilePath done_file =
+        paths::GetAt(paths::kSystemRunStateDirectory, paths::kCrashSenderDone);
+    if (base::WriteFile(done_file, "", 0) != 0) {
+      PLOG(ERROR) << "Error writing out crash-sender-done file: " << done_file;
+    }
   }
 }
 
@@ -194,7 +200,7 @@ bool GetSleepTime(const base::FilePath& meta_file,
   const int seconds = (max_spread_time.InSeconds() <= 0
                            ? 0
                            : base::RandInt(0, max_spread_time.InSeconds()));
-  const base::TimeDelta spread_time = base::TimeDelta::FromSeconds(seconds);
+  const base::TimeDelta spread_time = base::Seconds(seconds);
 
   *sleep_time = std::max(spread_time, hold_off_time_remaining);
 
@@ -219,7 +225,7 @@ std::string GetClientId() {
       return client_id;
     }
   }
-  client_id = base::GenerateGUID();
+  client_id = base::Uuid::GenerateRandomV4().AsLowercaseString();
   // Strip out the dashes, we don't want those.
   base::RemoveChars(client_id, "-", &client_id);
 
@@ -231,6 +237,9 @@ std::string GetClientId() {
 
   return client_id;
 }
+
+ScopedProcessingFileBase::ScopedProcessingFileBase() = default;
+ScopedProcessingFileBase::~ScopedProcessingFileBase() = default;
 
 ScopedProcessingFile::ScopedProcessingFile(const base::FilePath& meta_file)
     : processing_file_(meta_file.ReplaceExtension(kProcessingExt)) {
@@ -246,6 +255,11 @@ ScopedProcessingFile::~ScopedProcessingFile() {
     LOG(ERROR) << "Failed to remove .processing file. Crash will be deleted.";
   }
 }
+
+DummyScopedProcessingFile::DummyScopedProcessingFile(
+    const base::FilePath& meta_file) {}
+
+DummyScopedProcessingFile::~DummyScopedProcessingFile() = default;
 
 SenderBase::SenderBase(std::unique_ptr<base::Clock> clock,
                        const SenderBase::Options& options)
@@ -270,12 +284,12 @@ base::File SenderBase::AcquireLockFileOrDie() {
                << base::File::ErrorToString(lock_file.error_details());
   }
 
-  base::TimeDelta wait_for_lock_file = base::TimeDelta::FromMinutes(5);
+  base::TimeDelta wait_for_lock_file = base::Minutes(5);
 
   if (IsCrashTestInProgress()) {
     // When running crash.SenderLock test, don't wait a full 5 minutes before
     // completing the test.
-    wait_for_lock_file = base::TimeDelta::FromSeconds(1);
+    wait_for_lock_file = base::Seconds(1);
   }
 
   base::Time stop_time = clock_->Now() + wait_for_lock_file;
@@ -289,7 +303,7 @@ base::File SenderBase::AcquireLockFileOrDie() {
       }
       return lock_file;
     }
-    const base::TimeDelta kSleepTime = base::TimeDelta::FromSeconds(1);
+    const base::TimeDelta kSleepTime = base::Seconds(1);
     if (sleep_function_.is_null()) {
       base::PlatformThread::Sleep(kSleepTime);
     } else {
@@ -325,14 +339,14 @@ SenderBase::Action SenderBase::EvaluateMetaFileMinimal(
     bool allow_old_os_timestamps,
     std::string* reason,
     CrashInfo* info,
-    std::unique_ptr<ScopedProcessingFile>* processing_file) {
+    std::unique_ptr<ScopedProcessingFileBase>* processing_file) {
   if (base::PathExists(meta_file.ReplaceExtension(kProcessingExt))) {
     *reason = ".processing file already exists for: " + meta_file.value();
     RecordCrashRemoveReason(kProcessingFileExists);
     return kRemove;
   }
 
-  auto f = std::make_unique<ScopedProcessingFile>(meta_file);
+  auto f = MakeScopedProcessingFile(meta_file);
   if (processing_file) {
     // The caller wants to take care of this, so move it to their scope before
     // we return.
@@ -446,7 +460,8 @@ SenderBase::Action SenderBase::EvaluateMetaFileMinimal(
     // sufficiently new, we'll send the crash anyway, as it's possible there's
     // an ash<->lacros compatibility issue.
     int64_t build_time_millis;
-    if (!info->metadata.GetString("build_time_millis", &build_time_str)) {
+    if (!info->metadata.GetString("upload_var_build_time_millis",
+                                  &build_time_str)) {
       *reason = "Old OS version";
       RecordCrashRemoveReason(kOSVersionTooOld);
       return kRemove;
@@ -590,7 +605,7 @@ FullCrash SenderBase::ReadMetaFile(const CrashDetails& details) {
   return crash;
 }
 
-base::Optional<std::string> SenderBase::GetOsReleaseValue(
+std::optional<std::string> SenderBase::GetOsReleaseValue(
     const std::vector<std::string>& keys) {
   if (!os_release_reader_) {
     os_release_reader_ = std::make_unique<brillo::OsReleaseReader>();
@@ -599,9 +614,9 @@ base::Optional<std::string> SenderBase::GetOsReleaseValue(
   std::string value;
   for (const auto& key : keys) {
     if (os_release_reader_->GetString(key, &value))
-      return base::Optional<std::string>(value);
+      return std::optional<std::string>(value);
   }
-  return base::Optional<std::string>();
+  return std::optional<std::string>();
 }
 
 }  // namespace util

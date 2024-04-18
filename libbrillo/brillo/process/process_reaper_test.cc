@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/task/single_thread_task_executor.h>
@@ -147,8 +147,8 @@ TEST_F(ProcessReaperTest, ReapKilledAndForgottenChild) {
   // Run the loop with a timeout, as the BreakLoop() above is not expected.
   brillo_loop_.PostDelayedTask(
       FROM_HERE,
-      base::Bind(&MessageLoop::BreakLoop, base::Unretained(&brillo_loop_)),
-      base::TimeDelta::FromMilliseconds(100));
+      base::BindOnce(&MessageLoop::BreakLoop, base::Unretained(&brillo_loop_)),
+      base::Milliseconds(100));
   brillo_loop_.Run();
 }
 

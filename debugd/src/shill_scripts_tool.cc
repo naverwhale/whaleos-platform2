@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@
 // interactions.
 
 #include "debugd/src/shill_scripts_tool.h"
+
+#include <unistd.h>
 
 #include <memory>
 #include <string>
@@ -63,11 +65,11 @@ bool ShillScriptsTool::Run(const base::ScopedFD& outfd,
                            std::string* out_id,
                            brillo::ErrorPtr* error) {
   if (!AllowedScript(script, error))
-    return false;
+    return false;  // DEBUGD_ADD_ERROR is already called.
 
   auto p = std::make_unique<ProcessWithId>();
   p->SandboxAs(kUser, kGroup);
-  p->Init();
+  p->Init({"-n"});  // Add NoNewPrivs.
 
   const base::FilePath dir(kScriptsDir);
   p->AddArg(dir.Append(script).value());

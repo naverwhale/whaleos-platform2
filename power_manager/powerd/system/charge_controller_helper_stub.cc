@@ -1,11 +1,10 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/system/charge_controller_helper_stub.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 constexpr int ChargeControllerHelperStub::kPeakShiftThresholdUnset = -1;
 
@@ -84,5 +83,4 @@ void ChargeControllerHelperStub::Reset() {
   custom_charge_stop_ = kCustomChargeThresholdUnset;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

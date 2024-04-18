@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <string>
 
 #include <base/files/file_path.h>
+#include <base/types/expected.h>
 #include <gmock/gmock.h>
 
 #include "diagnostics/cros_healthd/fetchers/storage/platform.h"
@@ -25,14 +26,16 @@ class MockPlatform : public Platform {
   ~MockPlatform() override = default;
 
   MOCK_METHOD(std::string, GetRootDeviceName, (), (const, override));
-  MOCK_METHOD(StatusOr<uint64_t>,
-              GetDeviceSizeBytes,
-              (const base::FilePath&),
-              (const, override));
-  MOCK_METHOD(StatusOr<uint64_t>,
-              GetDeviceBlockSizeBytes,
-              (const base::FilePath&),
-              (const, override));
+  MOCK_METHOD(
+      (base::expected<uint64_t, ash::cros_healthd::mojom::ProbeErrorPtr>),
+      GetDeviceSizeBytes,
+      (const base::FilePath&),
+      (const, override));
+  MOCK_METHOD(
+      (base::expected<uint64_t, ash::cros_healthd::mojom::ProbeErrorPtr>),
+      GetDeviceBlockSizeBytes,
+      (const base::FilePath&),
+      (const, override));
 };
 
 }  // namespace diagnostics

@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,7 +8,15 @@ group("all") {
   deps = [
     ":apk-cache-cleaner",
     ":apk-cache-ctl",
+    ":install_apk_cache_cleaner_jailed",
+    ":install_init",
   ]
+  if (use.seccomp) {
+    deps += [ ":install_policy" ]
+  }
+  if (use.fuzzer) {
+    deps += [ ":apk_cache_database_fuzzer" ]
+  }
   if (use.test) {
     deps += [
       ":apk-cache-cleaner_testrunner",
@@ -56,6 +64,7 @@ pkg_config("apk-cache-common_config") {
 executable("apk-cache-cleaner") {
   sources = [ "cache_cleaner_main.cc" ]
   configs += [ ":apk-cache-common_config" ]
+  install_path = "sbin"
   deps = [
     ":libapk-cache",
     ":libapk-cache-cleaner",
@@ -65,15 +74,48 @@ executable("apk-cache-cleaner") {
 executable("apk-cache-ctl") {
   sources = [ "apk_cache_ctl_main.cc" ]
   configs += [ ":apk-cache-common_config" ]
+  install_path = "bin"
   deps = [
     ":libapk-cache",
     ":libapk-cache-ctl",
   ]
 }
 
+install_config("install_init") {
+  sources = [ "init/apk-cache-cleaner.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_apk_cache_cleaner_jailed") {
+  sources = [ "apk-cache-cleaner-jailed" ]
+  install_path = "sbin"
+  type = "executable"
+}
+
+if (use.seccomp) {
+  install_config("install_policy") {
+    sources =
+        [ "seccomp/apk-cache-cleaner-seccomp-" + getenv("ARCH") + ".policy" ]
+    install_path = "seccomp_policy"
+    outputs = [ "apk-cache-cleaner-seccomp.policy" ]
+  }
+}
+
+if (use.fuzzer) {
+  executable("apk_cache_database_fuzzer") {
+    sources = [ "apk_cache_database_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":apk-cache-common_config",
+    ]
+    deps = [ ":libapk-cache" ]
+  }
+}
+
 if (use.test) {
   pkg_config("apk-cache-common_testrunner_config") {
     pkg_deps = [
+      "libbrillo",
       "libchrome",
       "libchrome-test",
       "sqlite3",
@@ -91,6 +133,7 @@ if (use.test) {
       "//common-mk:test",
       ":apk-cache-common_testrunner_config",
     ]
+    run_test = true
     deps = [
       ":libapk-cache",
       ":libapk-cache-cleaner",
@@ -106,6 +149,7 @@ if (use.test) {
       "//common-mk:test",
       ":apk-cache-common_testrunner_config",
     ]
+    run_test = true
     deps = [
       ":libapk-cache",
       ":libapk-cache-ctl",

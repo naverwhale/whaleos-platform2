@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 #include <utility>
 
 #include <base/run_loop.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 
 namespace shill {
@@ -28,14 +28,14 @@ void EventDispatcher::DispatchPendingEvents() {
 
 void EventDispatcher::PostTask(const base::Location& location,
                                base::OnceClosure task) {
-  PostDelayedTask(FROM_HERE, std::move(task), 0);
+  PostDelayedTask(FROM_HERE, std::move(task), base::TimeDelta());
 }
 
 void EventDispatcher::PostDelayedTask(const base::Location& location,
                                       base::OnceClosure task,
-                                      int64_t delay_ms) {
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-      location, std::move(task), base::TimeDelta::FromMilliseconds(delay_ms));
+                                      base::TimeDelta delay) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      location, std::move(task), delay);
 }
 
 void EventDispatcher::QuitDispatchForever() {

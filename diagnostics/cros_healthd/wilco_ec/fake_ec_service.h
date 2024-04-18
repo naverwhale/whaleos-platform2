@@ -1,11 +1,9 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DIAGNOSTICS_CROS_HEALTHD_WILCO_EC_FAKE_EC_SERVICE_H_
 #define DIAGNOSTICS_CROS_HEALTHD_WILCO_EC_FAKE_EC_SERVICE_H_
-
-#include <base/macros.h>
 
 #include "diagnostics/cros_healthd/wilco_ec/ec_service.h"
 

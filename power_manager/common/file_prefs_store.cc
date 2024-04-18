@@ -1,13 +1,15 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "power_manager/common/file_prefs_store.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/common/util.h"
 
 #include <base/files/file_enumerator.h>
@@ -30,6 +32,14 @@ bool FilePrefsStore::ReadPrefString(const std::string& name,
   return util::MaybeReadStringFile(path, value_out);
 }
 
+bool FilePrefsStore::ReadExternalString(const std::string& path,
+                                        const std::string& name,
+                                        std::string* value_out) {
+  // Not currently implemented since there's no non-powerd setting we need to
+  // read from a directory, such as /usr/share/<non-power_manager directory>/
+  return false;
+}
+
 bool FilePrefsStore::WritePrefString(const std::string& name,
                                      const std::string& value) {
   base::FilePath path = pref_path_.Append(name);
@@ -39,13 +49,16 @@ bool FilePrefsStore::WritePrefString(const std::string& name,
 bool FilePrefsStore::Watch(
     const PrefsStoreInterface::ChangeCallback& callback) {
   callback_ = callback;
-  dir_watcher_.reset(new base::FilePathWatcher);
+  dir_watcher_ = std::make_unique<base::FilePathWatcher>();
   return dir_watcher_->Watch(
       pref_path_, base::FilePathWatcher::Type::kNonRecursive,
-      base::Bind(&FilePrefsStore::HandlePathChanged, base::Unretained(this)));
+      base::BindRepeating(&FilePrefsStore::HandlePathChanged,
+                          base::Unretained(this)));
 }
 
 void FilePrefsStore::HandlePathChanged(const base::FilePath& path, bool error) {
+  TRACE_EVENT("power", "FilePrefsStore::HandlePathChanged", "path",
+              path.value(), "error", error, "pref_path", pref_path_.value());
   if (error) {
     LOG(ERROR) << "Got error while hearing about change to " << path.value();
     return;
@@ -86,8 +99,8 @@ void FilePrefsStore::UpdateFileWatchers() {
     std::unique_ptr<base::FilePathWatcher> watcher =
         std::make_unique<base::FilePathWatcher>();
     if (watcher->Watch(path, base::FilePathWatcher::Type::kNonRecursive,
-                       base::Bind(&FilePrefsStore::HandlePathChanged,
-                                  base::Unretained(this)))) {
+                       base::BindRepeating(&FilePrefsStore::HandlePathChanged,
+                                           base::Unretained(this)))) {
       file_watchers_.insert(std::make_pair(name, std::move(watcher)));
     } else {
       LOG(ERROR) << "Unable to watch " << path.value() << " for changes";

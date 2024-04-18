@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,19 +6,19 @@
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/run_loop.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 #include "diagnostics/constants/grpc_constants.h"
 #include "diagnostics/dpsl/internal/callback_utils.h"
 #include "diagnostics/dpsl/public/dpsl_thread_context.h"
 
-#include "wilco_dtc_supportd.pb.h"  // NOLINT(build/include)
+#include "wilco_dtc_supportd.pb.h"  // NOLINT(build/include_directory)
 
 namespace diagnostics {
 
@@ -38,7 +38,7 @@ std::string DpslRequesterImpl::GetWilcoDtcSupportdGrpcUri(
 
 DpslRequesterImpl::DpslRequesterImpl(
     const std::string& wilco_dtc_supportd_grpc_uri)
-    : task_runner_(base::ThreadTaskRunnerHandle::Get()),
+    : task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       async_grpc_client_(task_runner_, wilco_dtc_supportd_grpc_uri) {
   DCHECK(task_runner_);
 }
@@ -180,11 +180,10 @@ void DpslRequesterImpl::ScheduleGrpcClientMethodCall(
     std::function<void(std::unique_ptr<ResponseType>)> response_callback) {
   task_runner_->PostTask(
       location,
-      base::Bind(
+      base::BindOnce(
           &DpslRequesterImpl::CallGrpcClientMethod<GrpcStubMethod, RequestType,
                                                    ResponseType>,
-          weak_ptr_factory_.GetWeakPtr(), grpc_stub_method,
-          base::Passed(std::move(request)),
+          weak_ptr_factory_.GetWeakPtr(), grpc_stub_method, std::move(request),
           MakeCallbackFromStdFunctionGrpc(std::move(response_callback))));
 }
 
@@ -192,15 +191,16 @@ template <typename GrpcStubMethod, typename RequestType, typename ResponseType>
 void DpslRequesterImpl::CallGrpcClientMethod(
     GrpcStubMethod grpc_stub_method,
     std::unique_ptr<RequestType> request,
-    base::Callback<void(grpc::Status, std::unique_ptr<ResponseType>)>
+    base::OnceCallback<void(grpc::Status, std::unique_ptr<ResponseType>)>
         response_callback) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
   if (async_grpc_client_shutting_down_) {
     // Bail out if the client is already being shut down, to avoid doing
     // CallRpc() in this state.
-    response_callback.Run(
-        grpc::Status(grpc::StatusCode::CANCELLED, "Client is shutting down"),
-        nullptr /* response */);
+    std::move(response_callback)
+        .Run(grpc::Status(grpc::StatusCode::CANCELLED,
+                          "Client is shutting down"),
+             nullptr /* response */);
     return;
   }
   async_grpc_client_.CallRpc(grpc_stub_method, *request,
@@ -214,8 +214,11 @@ std::unique_ptr<DpslRequester> DpslRequester::Create(
   CHECK(thread_context->BelongsToCurrentThread())
       << "Thread context does not belong to the current thread";
 
-  return std::make_unique<DpslRequesterImpl>(
-      DpslRequesterImpl::GetWilcoDtcSupportdGrpcUri(grpc_client_uri));
+  const std::string uri_string =
+      DpslRequesterImpl::GetWilcoDtcSupportdGrpcUri(grpc_client_uri);
+  if (uri_string.empty())
+    return nullptr;
+  return std::make_unique<DpslRequesterImpl>(uri_string);
 }
 
 }  // namespace diagnostics

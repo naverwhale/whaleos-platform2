@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -196,7 +196,7 @@ TEST_F(DeviceIdFromSysfsTest, UnknownSubsystem) {
 TEST_F(DeviceIdFromSysfsTest, PciDevice) {
   CreateDeviceSysfs(kDeviceName1, kPciBusName);
   CreateDeviceSysfsFile(kDeviceName1, "vendor", "0x97ba");
-  CreateDeviceSysfsFile(kDeviceName1, "product", "0x6012");
+  CreateDeviceSysfsFile(kDeviceName1, "device", "0x6012");
   ExpectDeviceId(kDeviceName1, {DeviceId::BusType::kPci, 0x97ba, 0x6012});
 }
 
@@ -221,6 +221,13 @@ TEST_F(DeviceIdFromSysfsTest, ExternalPciDeviceWithAnyVendorId) {
 TEST_F(DeviceIdFromSysfsTest, InternalPciDeviceWithAnyVendorId) {
   CreateDeviceSysfs(kDeviceName0, kPciBusName);
   CreateDeviceSysfsFile(kDeviceName0, "untrusted", "0");
+  ExpectDeviceId(kDeviceName0, DeviceId{DeviceId::BusType::kPci,
+                                        DeviceId::LocationType::kInternal});
+}
+
+TEST_F(DeviceIdFromSysfsTest, InternalPciDeviceWithAnyVendorIdTrailingNewline) {
+  CreateDeviceSysfs(kDeviceName0, kPciBusName);
+  CreateDeviceSysfsFile(kDeviceName0, "untrusted", "0\n");
   ExpectDeviceId(kDeviceName0, DeviceId{DeviceId::BusType::kPci,
                                         DeviceId::LocationType::kInternal});
 }

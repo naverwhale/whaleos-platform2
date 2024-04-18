@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,59 +6,58 @@
 
 #include <arpa/inet.h>
 
+#include <iterator>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include <base/check.h>
+#include <base/containers/fixed_flat_map.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/notreached.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <chromeos/dbus/service_constants.h>
+#include <net-base/ip_address.h>
 
 #include "shill/certificate_file.h"
-#include "shill/connection.h"
 #include "shill/device_info.h"
 #include "shill/error.h"
 #include "shill/ipconfig.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
-#include "shill/net/sockets.h"
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 #include "shill/rpc_task.h"
-#include "shill/virtual_device.h"
 #include "shill/vpn/openvpn_management_server.h"
 #include "shill/vpn/vpn_service.h"
+#include "shill/vpn/vpn_types.h"
 
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kVPN;
-static std::string ObjectID(const OpenVPNDriver*) {
-  return "(openvpn_driver)";
-}
 }  // namespace Logging
 
 namespace {
 
-const char kChromeOSReleaseName[] = "CHROMEOS_RELEASE_NAME";
-const char kChromeOSReleaseVersion[] = "CHROMEOS_RELEASE_VERSION";
-const char kOpenVPNForeignOptionPrefix[] = "foreign_option_";
-const char kOpenVPNIfconfigBroadcast[] = "ifconfig_broadcast";
-const char kOpenVPNIfconfigLocal[] = "ifconfig_local";
-const char kOpenVPNIfconfigNetmask[] = "ifconfig_netmask";
-const char kOpenVPNIfconfigRemote[] = "ifconfig_remote";
-const char kOpenVPNRedirectGateway[] = "redirect_gateway";
-const char kOpenVPNRouteOptionPrefix[] = "route_";
-const char kOpenVPNRouteNetGateway[] = "route_net_gateway";
-const char kOpenVPNRouteVPNGateway[] = "route_vpn_gateway";
-const char kOpenVPNTrustedIP[] = "trusted_ip";
-const char kOpenVPNTunMTU[] = "tun_mtu";
+constexpr char kChromeOSReleaseName[] = "CHROMEOS_RELEASE_NAME";
+constexpr char kChromeOSReleaseVersion[] = "CHROMEOS_RELEASE_VERSION";
+constexpr char kOpenVPNForeignOptionPrefix[] = "foreign_option_";
+constexpr char kOpenVPNIfconfigLocal[] = "ifconfig_local";
+constexpr char kOpenVPNIfconfigNetmask[] = "ifconfig_netmask";
+constexpr char kOpenVPNIfconfigRemote[] = "ifconfig_remote";
+constexpr char kOpenVPNIfconfigIPv6Local[] = "ifconfig_ipv6_local";
+constexpr char kOpenVPNIfconfigIPv6Netbits[] = "ifconfig_ipv6_netbits";
+constexpr char kOpenVPNRedirectGateway[] = "redirect_gateway";
+constexpr char kOpenVPNRouteOptionPrefix[] = "route_";
+constexpr char kOpenVPNRouteNetGateway[] = "route_net_gateway";
+constexpr char kOpenVPNRouteVPNGateway[] = "route_vpn_gateway";
+constexpr char kOpenVPNTunMTU[] = "tun_mtu";
 
-// Typically OpenVPN will set environment variables like:
+// Typically OpenVPN will set environment variables for IPv4 like:
 //   route_net_gateway=<existing default LAN gateway>
 //   route_vpn_gateway=10.8.0.1
 //   route_gateway_1=10.8.0.1
@@ -66,29 +65,40 @@ const char kOpenVPNTunMTU[] = "tun_mtu";
 //   route_network_1=192.168.10.0
 // This example shows a split include route of 192.168.10.0/24, and
 // 10.8.0.1 is the ifconfig_remote (remote peer) address.
-const char kOpenVPNRouteNetworkPrefix[] = "network_";
-const char kOpenVPNRouteNetmaskPrefix[] = "netmask_";
-const char kOpenVPNRouteGatewayPrefix[] = "gateway_";
+//
+// For IPv6, they will be like:
+//   ifconfig_ipv6_local: fdfd::1000
+//   ifconfig_ipv6_netbits: 64
+//   ifconfig_ipv6_remote: fdfd::1
+//   route_ipv6_gateway_1: fdfd::1
+//   route_ipv6_network_1: ::/3
+// Different from IPv4, for a route entry, there are only two variables for it
+// in IPv6, and the network variable will be a prefix string.
 
-const char kDefaultPKCS11Provider[] = "libchaps.so";
+constexpr char kOpenVPNRouteNetworkPrefix[] = "network_";
+constexpr char kOpenVPNRouteNetmaskPrefix[] = "netmask_";
+constexpr char kOpenVPNRouteGatewayPrefix[] = "gateway_";
+constexpr char kOpenVPNRouteIPv6NetworkPrefix[] = "ipv6_network_";
+constexpr char kOpenVPNRouteIPv6GatewayPrefix[] = "ipv6_gateway_";
+
+constexpr char kDefaultPKCS11Provider[] = "libchaps.so";
 
 // Some configurations pass the netmask in the ifconfig_remote property.
 // This is due to some servers not explicitly indicating that they are using
 // a "broadcast mode" network instead of peer-to-peer.  See
 // http://crbug.com/241264 for an example of this issue.
-const char kSuspectedNetmaskPrefix[] = "255.";
+constexpr char kSuspectedNetmaskPrefix[] = "255.";
 
-void DoNothingWithExitStatus(int exit_status) {}
+constexpr char kOpenVPNPath[] = "/usr/sbin/openvpn";
+constexpr char kOpenVPNScript[] = SHIMDIR "/openvpn-script";
+
+// Directory where OpenVPN configuration files are exported while the
+// process is running.
+constexpr char kDefaultOpenVPNConfigurationDirectory[] =
+    RUNDIR "/openvpn_config";
 
 }  // namespace
 
-// static
-const char OpenVPNDriver::kDefaultCACertificates[] =
-    "/etc/ssl/certs/ca-certificates.crt";
-// static
-const char OpenVPNDriver::kOpenVPNPath[] = "/usr/sbin/openvpn";
-// static
-const char OpenVPNDriver::kOpenVPNScript[] = SHIMDIR "/openvpn-script";
 // static
 const VPNDriver::Property OpenVPNDriver::kProperties[] = {
     {kOpenVPNAuthNoCacheProperty, 0},
@@ -139,29 +149,27 @@ const VPNDriver::Property OpenVPNDriver::kProperties[] = {
     {kVPNMTUProperty, 0},
 };
 
-const char OpenVPNDriver::kLSBReleaseFile[] = "/etc/lsb-release";
-
-// Directory where OpenVPN configuration files are exported while the
-// process is running.
-const char OpenVPNDriver::kDefaultOpenVPNConfigurationDirectory[] =
-    RUNDIR "/openvpn_config";
-
 OpenVPNDriver::OpenVPNDriver(Manager* manager, ProcessManager* process_manager)
-    : VPNDriver(manager, process_manager, kProperties, base::size(kProperties)),
+    : VPNDriver(manager,
+                process_manager,
+                VPNType::kOpenVPN,
+                kProperties,
+                std::size(kProperties)),
       management_server_(new OpenVPNManagementServer(this)),
       certificate_file_(new CertificateFile()),
       extra_certificates_file_(new CertificateFile()),
       lsb_release_file_(kLSBReleaseFile),
       openvpn_config_directory_(kDefaultOpenVPNConfigurationDirectory),
-      pid_(0) {}
+      pid_(0),
+      vpn_util_(VPNUtil::New()) {}
 
 OpenVPNDriver::~OpenVPNDriver() {
   Cleanup();
 }
 
 void OpenVPNDriver::FailService(Service::ConnectFailure failure,
-                                const std::string& error_details) {
-  SLOG(this, 2) << __func__ << "(" << error_details << ")";
+                                std::string_view error_details) {
+  SLOG(2) << __func__ << "(" << error_details << ")";
   Cleanup();
   if (event_handler_) {
     event_handler_->OnDriverFailure(failure, error_details);
@@ -175,8 +183,7 @@ void OpenVPNDriver::Cleanup() {
   // the callback for OnOpenVPNDied, and then terminating and reaping
   // the process with StopProcess().
   if (pid_) {
-    process_manager()->UpdateExitCallback(pid_,
-                                          base::Bind(DoNothingWithExitStatus));
+    process_manager()->UpdateExitCallback(pid_, base::DoNothing());
   }
   management_server_->Stop();
   if (!tls_auth_file_.empty()) {
@@ -188,7 +195,9 @@ void OpenVPNDriver::Cleanup() {
     openvpn_config_file_.clear();
   }
   rpc_task_.reset();
-  ip_properties_ = IPConfig::Properties();
+  params_.clear();
+  ipv4_properties_ = nullptr;
+  ipv6_properties_ = nullptr;
   if (pid_) {
     process_manager()->StopProcessAndBlock(pid_);
     pid_ = 0;
@@ -230,43 +239,24 @@ std::string OpenVPNDriver::JoinOptions(
 bool OpenVPNDriver::WriteConfigFile(
     const std::vector<std::vector<std::string>>& options,
     base::FilePath* config_file) {
-  if (!base::DirectoryExists(openvpn_config_directory_)) {
-    if (!base::CreateDirectory(openvpn_config_directory_)) {
-      LOG(ERROR) << "Unable to create configuration directory  "
-                 << openvpn_config_directory_.value();
-      return false;
-    }
-    // OpenVPN running as user 'openvpn' needs access to the config directory,
-    // and openvpn user is not member of shill group so make the dir
-    // world-readable. We'd rather not have openvpn belong to shill group since
-    // shill is more privileged than openvpn, hence the idea of 'dropping'
-    // UID/GID from shill to openvpn. Moreover since shill no longer runs with
-    // CAP_CHOWN, we can't chown the dir to shill:openvpn.
-    if (chmod(openvpn_config_directory_.value().c_str(),
-              S_IRWXU | S_IRWXG | S_IROTH)) {
-      LOG(ERROR) << "Failed to set permissions on "
-                 << openvpn_config_directory_.value();
-      base::DeletePathRecursively(openvpn_config_directory_);
-      return false;
-    }
+  if (!vpn_util_->PrepareConfigDirectory(openvpn_config_directory_)) {
+    LOG(ERROR) << "Unable to setup OpenVPN config directory.";
+    return false;
   }
 
   std::string contents = JoinOptions(options, '\n');
   contents.push_back('\n');
   if (!base::CreateTemporaryFileInDir(openvpn_config_directory_, config_file) ||
-      base::WriteFile(*config_file, contents.data(), contents.size()) !=
-          static_cast<int>(contents.size()) ||
-      chmod(config_file->value().c_str(), S_IRWXU | S_IRWXG | S_IROTH)) {
-    // Make the config file world-readable. Same rationale as listed above for
-    // the config directory.
+      !vpn_util_->WriteConfigFile(*config_file, contents)) {
     LOG(ERROR) << "Unable to setup OpenVPN config file.";
     return false;
   }
+
   return true;
 }
 
 bool OpenVPNDriver::SpawnOpenVPN() {
-  SLOG(this, 2) << __func__ << "(" << interface_name_ << ")";
+  SLOG(2) << __func__ << "(" << interface_name_ << ")";
 
   std::vector<std::vector<std::string>> options;
   Error error;
@@ -297,17 +287,13 @@ bool OpenVPNDriver::SpawnOpenVPN() {
   };
 
   ProcessManager::MinijailOptions minijail_options;
-  // TODO(b/177984585): Change user and group to "vpn".
-  minijail_options.user = "shill";
-  minijail_options.group = "shill";
-  minijail_options.capmask = CAP_TO_MASK(CAP_NET_ADMIN) |
-                             CAP_TO_MASK(CAP_NET_RAW) |
-                             CAP_TO_MASK(CAP_SETUID) | CAP_TO_MASK(CAP_SETGID);
+  minijail_options.user = "vpn";
+  minijail_options.group = "vpn";
+  minijail_options.capmask = 0;
   minijail_options.inherit_supplementary_groups = true;
-  minijail_options.close_nonstd_fds = true;
   openvpn_pid = process_manager()->StartProcessInMinijail(
       FROM_HERE, base::FilePath(kOpenVPNPath), args, kEnv, minijail_options,
-      base::Bind(&OpenVPNDriver::OnOpenVPNDied, base::Unretained(this)));
+      base::BindOnce(&OpenVPNDriver::OnOpenVPNDied, base::Unretained(this)));
   if (openvpn_pid == -1) {
     LOG(ERROR) << "Minijail couldn't run our child process";
     return false;
@@ -318,7 +304,7 @@ bool OpenVPNDriver::SpawnOpenVPN() {
 }
 
 void OpenVPNDriver::OnOpenVPNDied(int exit_status) {
-  SLOG(nullptr, 2) << __func__ << "(" << pid_ << ", " << exit_status << ")";
+  SLOG(2) << __func__ << "(" << pid_ << ", " << exit_status << ")";
   pid_ = 0;
   FailService(Service::kFailureInternal, Service::kErrorDetailsNone);
   // TODO(petkov): Figure if we need to restart the connection.
@@ -338,8 +324,20 @@ void OpenVPNDriver::Notify(const std::string& reason,
     LOG(DFATAL) << "Unexpected notification reason";
     return;
   }
-  // On restart/reconnect, update the existing IP configuration.
-  ParseIPConfiguration(dict, &ip_properties_);
+  // On restart/reconnect, update the existing dict, and generate IP
+  // configurations from it.
+  for (const auto& [k, v] : dict) {
+    params_[k] = v;
+  }
+  auto props = ParseIPConfiguration(
+      params_,
+      const_args()->Contains<std::string>(kOpenVPNIgnoreDefaultRouteProperty));
+  ipv4_properties_ = std::move(props.ipv4_props);
+  ipv6_properties_ = std::move(props.ipv6_props);
+  if (!ipv4_properties_ && !ipv6_properties_) {
+    FailService(Service::kFailureConnect, "No valid IP config");
+    return;
+  }
   ReportConnectionMetrics();
   if (event_handler_) {
     event_handler_->OnDriverConnected(interface_name_, interface_index_);
@@ -348,34 +346,112 @@ void OpenVPNDriver::Notify(const std::string& reason,
   }
 }
 
-IPConfig::Properties OpenVPNDriver::GetIPProperties() const {
-  return ip_properties_;
+std::unique_ptr<IPConfig::Properties> OpenVPNDriver::GetIPv4Properties() const {
+  if (ipv4_properties_ == nullptr) {
+    return nullptr;
+  }
+  return std::make_unique<IPConfig::Properties>(*ipv4_properties_);
 }
 
-void OpenVPNDriver::ParseIPConfiguration(
-    const std::map<std::string, std::string>& configuration,
-    IPConfig::Properties* properties) const {
-  ForeignOptions foreign_options;
-  RouteOptions routes;
-  bool redirect_gateway = false;
-
-  properties->address_family = IPAddress::kFamilyIPv4;
-  if (!properties->subnet_prefix) {
-    properties->subnet_prefix =
-        IPAddress::GetMaxPrefixLength(properties->address_family);
+std::unique_ptr<IPConfig::Properties> OpenVPNDriver::GetIPv6Properties() const {
+  if (ipv6_properties_ == nullptr) {
+    return nullptr;
   }
+  return std::make_unique<IPConfig::Properties>(*ipv6_properties_);
+}
+
+// static
+std::unique_ptr<IPConfig::Properties> OpenVPNDriver::CreateIPProperties(
+    net_base::IPFamily family,
+    const std::string& local,
+    const std::string& peer,
+    std::optional<int> prefix_length,
+    bool default_route,
+    const RouteOptions& routes) {
+  const int max_prefix_length = net_base::IPCIDR::GetMaxPrefixLength(family);
+  auto properties = std::make_unique<IPConfig::Properties>();
+  properties->method = kTypeVPN;
+  properties->address_family = family;
+  properties->address = local;
+  properties->subnet_prefix = prefix_length.value_or(max_prefix_length);
+  // L3 VPN doesn't need gateway. Set it to default to skip RTA_GATEWAY when
+  // installing routes.
+  properties->gateway = net_base::IPAddress(family).ToString();
+
+  properties->default_route = default_route;
+  if (!peer.empty()) {
+    // --topology net30 or p2p will set ifconfig_remote
+
+    // Setting a point-to-point address in the kernel will create a route
+    // in RT_TABLE_MAIN instead of our per-device table.  To avoid this,
+    // create an explicit host route here, and clear
+    // |properties->peer_address.|
+    properties->inclusion_list.push_back(
+        base::StringPrintf("%s/%d", peer.c_str(), max_prefix_length));
+  } else if (properties->subnet_prefix != max_prefix_length) {
+    // --topology subnet will set ifconfig_netmask instead
+    const auto network_cidr = net_base::IPCIDR::CreateFromStringAndPrefix(
+        properties->address, properties->subnet_prefix,
+        properties->address_family);
+    if (!network_cidr.has_value()) {
+      LOG(WARNING) << "Error obtaining network address for "
+                   << properties->address;
+    } else {
+      properties->inclusion_list.push_back(
+          network_cidr->GetPrefixCIDR().ToString());
+    }
+  }
+
+  // Ignore |route.gateway|.  If it's wrong, it can cause the kernel to
+  // refuse to add the route.  If it's correct, it has no effect anyway.
+  for (const auto& route_map : routes) {
+    const IPConfig::Route& route = route_map.second;
+    if (route.host.empty() || route.gateway.empty()) {
+      LOG(WARNING) << "Ignoring incomplete route: " << route_map.first;
+      continue;
+    }
+    properties->inclusion_list.push_back(
+        base::StringPrintf("%s/%d", route.host.c_str(), route.prefix));
+  }
+
+  if (properties->inclusion_list.empty() && properties->default_route) {
+    LOG(WARNING) << "No routes provided for " << family;
+  }
+
+  return properties;
+}
+
+// static
+OpenVPNDriver::IPProperties OpenVPNDriver::ParseIPConfiguration(
+    const std::map<std::string, std::string>& configuration,
+    bool ignore_redirect_gateway) {
+  // Values parsed from |configuration|.
+  ForeignOptions foreign_options;
+  int mtu = 0;
+  std::string ipv4_local;
+  std::string ipv4_peer;
+  std::optional<int> ipv4_prefix = std::nullopt;
+  bool ipv4_redirect_gateway = false;
+  RouteOptions ipv4_routes;
+  std::string ipv6_local;
+  std::optional<int> ipv6_prefix = std::nullopt;
+  RouteOptions ipv6_routes;
+
   for (const auto& configuration_map : configuration) {
     const std::string& key = configuration_map.first;
     const std::string& value = configuration_map.second;
-    SLOG(this, 2) << "Processing: " << key << " -> " << value;
-    if (base::LowerCaseEqualsASCII(key, kOpenVPNIfconfigLocal)) {
-      properties->address = value;
-    } else if (base::LowerCaseEqualsASCII(key, kOpenVPNIfconfigBroadcast)) {
-      properties->broadcast_address = value;
-    } else if (base::LowerCaseEqualsASCII(key, kOpenVPNIfconfigNetmask)) {
-      properties->subnet_prefix =
-          IPAddress::GetPrefixLengthFromMask(properties->address_family, value);
-    } else if (base::LowerCaseEqualsASCII(key, kOpenVPNIfconfigRemote)) {
+    SLOG(2) << "Processing: " << key << " -> " << value;
+    if (base::EqualsCaseInsensitiveASCII(key, kOpenVPNIfconfigLocal)) {
+      ipv4_local = value;
+    } else if (base::EqualsCaseInsensitiveASCII(key, kOpenVPNIfconfigNetmask)) {
+      const auto netmask = net_base::IPv4Address::CreateFromString(value);
+      if (netmask) {
+        ipv4_prefix = net_base::IPv4CIDR::GetPrefixLength(*netmask);
+      }
+      if (!ipv4_prefix) {
+        LOG(WARNING) << "Failed to get prefix length from " << value;
+      }
+    } else if (base::EqualsCaseInsensitiveASCII(key, kOpenVPNIfconfigRemote)) {
       if (base::StartsWith(value, kSuspectedNetmaskPrefix,
                            base::CompareCase::INSENSITIVE_ASCII)) {
         LOG(WARNING) << "Option " << key << " value " << value
@@ -386,24 +462,37 @@ void OpenVPNDriver::ParseIPConfiguration(
         // interface as if it were a broadcast-style network.  The
         // kernel will, automatically set the peer address equal to
         // the local address.
-        properties->subnet_prefix = IPAddress::GetPrefixLengthFromMask(
-            properties->address_family, value);
+        const auto netmask = net_base::IPv4Address::CreateFromString(value);
+        if (netmask) {
+          ipv4_prefix = net_base::IPv4CIDR::GetPrefixLength(*netmask);
+        }
+        if (!ipv4_prefix) {
+          LOG(WARNING) << "Failed to get prefix length from " << value;
+        }
       } else {
-        // This creates an explicit route to the peer address in SetRoutes().
-        properties->peer_address = value;
+        ipv4_peer = value;
       }
-    } else if (base::LowerCaseEqualsASCII(key, kOpenVPNRedirectGateway)) {
-      redirect_gateway = true;
-    } else if (base::LowerCaseEqualsASCII(key, kOpenVPNTrustedIP)) {
-      size_t prefix = IPAddress::GetMaxPrefixLength(properties->address_family);
-      properties->exclusion_list.push_back(value + "/" +
-                                           base::NumberToString(prefix));
-    } else if (base::LowerCaseEqualsASCII(key, kOpenVPNTunMTU)) {
-      int mtu = 0;
-      if (base::StringToInt(value, &mtu) && mtu >= IPConfig::kMinIPv4MTU) {
-        properties->mtu = mtu;
+    } else if (base::EqualsCaseInsensitiveASCII(key, kOpenVPNRedirectGateway)) {
+      if (ignore_redirect_gateway) {
+        LOG(INFO) << "Ignoring default route parameter as requested by "
+                  << "configuration.";
       } else {
-        LOG(ERROR) << "MTU " << value << " ignored.";
+        ipv4_redirect_gateway = true;
+      }
+    } else if (base::EqualsCaseInsensitiveASCII(key,
+                                                kOpenVPNIfconfigIPv6Local)) {
+      ipv6_local = value;
+    } else if (base::EqualsCaseInsensitiveASCII(key,
+                                                kOpenVPNIfconfigIPv6Netbits)) {
+      int prefix = 0;
+      if (!base::StringToInt(value, &prefix)) {
+        LOG(ERROR) << "IPv6 netbits ignored, value=" << value;
+      } else {
+        ipv6_prefix = prefix;
+      }
+    } else if (base::EqualsCaseInsensitiveASCII(key, kOpenVPNTunMTU)) {
+      if (!base::StringToInt(value, &mtu)) {
+        LOG(ERROR) << "Failed to parse MTU " << value;
       }
     } else if (base::StartsWith(key, kOpenVPNForeignOptionPrefix,
                                 base::CompareCase::INSENSITIVE_ASCII)) {
@@ -414,78 +503,123 @@ void OpenVPNDriver::ParseIPConfiguration(
       } else {
         LOG(ERROR) << "Ignored unexpected foreign option suffix: " << suffix;
       }
-    } else if (base::LowerCaseEqualsASCII(key, kOpenVPNRouteNetGateway) ||
-               base::LowerCaseEqualsASCII(key, kOpenVPNRouteVPNGateway)) {
+    } else if (base::EqualsCaseInsensitiveASCII(key, kOpenVPNRouteNetGateway) ||
+               base::EqualsCaseInsensitiveASCII(key, kOpenVPNRouteVPNGateway)) {
       // These options are unused.  Catch them here so that they don't
       // get passed to ParseRouteOption().
     } else if (base::StartsWith(key, kOpenVPNRouteOptionPrefix,
                                 base::CompareCase::INSENSITIVE_ASCII)) {
-      ParseRouteOption(key.substr(strlen(kOpenVPNRouteOptionPrefix)), value,
-                       &routes);
+      const std::string trimmed_key =
+          key.substr(strlen(kOpenVPNRouteOptionPrefix));
+      if (!ParseIPv4RouteOption(trimmed_key, value, &ipv4_routes) &&
+          !ParseIPv6RouteOption(trimmed_key, value, &ipv6_routes)) {
+        LOG(WARNING) << "Route option ignored: " << key;
+      }
     } else {
-      SLOG(this, 2) << "Key ignored.";
+      SLOG(2) << "Key ignored.";
     }
   }
-  ParseForeignOptions(foreign_options, properties);
 
-  // Since we use persist-tun, we expect that a reconnection will use the same
-  // routes *and* that OpenVPN will not re-provide us with all the needed
-  // routing information. Simply re-use the routing information we attained from
-  // the initial connection.
-  if (!properties->routes.empty())
-    return;
-
-  // Ignore the route_vpn_gateway parameter as VPNs don't need gateway IPs.
-  // This guarantees that we will pass the various coherence checks in
-  // connection.cc.
-  properties->gateway = properties->address;
-
-  if (redirect_gateway &&
-      const_args()->Contains<std::string>(kOpenVPNIgnoreDefaultRouteProperty)) {
-    LOG(INFO) << "Ignoring default route parameter as requested by "
-              << "configuration.";
-    redirect_gateway = false;
+  std::vector<std::string> search_domains;
+  std::vector<std::string> dns_servers;
+  if (!foreign_options.empty()) {
+    ParseForeignOptions(foreign_options, &search_domains, &dns_servers);
+  } else {
+    LOG(INFO) << "No foreign option provided";
   }
-  properties->default_route = properties->blackhole_ipv6 = redirect_gateway;
-  SetRoutes(routes, properties);
-  properties->method = kTypeVPN;
+
+  const bool has_ipv4 = !ipv4_local.empty();
+  const bool has_ipv6 = !ipv6_local.empty();
+  if (mtu != 0) {
+    const int min_mtu =
+        has_ipv6 ? NetworkConfig::kMinIPv6MTU : NetworkConfig::kMinIPv4MTU;
+    if (mtu < min_mtu) {
+      LOG(ERROR) << "MTU value " << mtu << " ignored";
+      mtu = 0;
+    }
+  }
+
+  // Notes on `redirect-gateway`:
+  //
+  // In openvpn configuration, the user can add a `ipv6` flag to the
+  // `redirect-gateway` option to indicate a default route for IPv6, but in the
+  // context of environment variables passed from openvpn, `redirect-gateway` is
+  // an IPv4-only option: for IPv6, openvpn client will translate it into routes
+  // and set them in the variables. So at the server side, suppose there is no
+  // route configured directly, there are 4 cases:
+  // - No `redirect-gateway`: indicates no default route for both v4 and v6;
+  //   openvpn client will set neither `redirect-gateway` nor routes in env
+  //   variables.
+  // - `redirect-gateway (def1)?`: indicates IPv4-only default route; openvpn
+  //   client will set only `redirect-gateway` but no route in env variables.
+  // - `redirect-gateway ipv6 !ipv4`: indicates IPv6-only default route; openvpn
+  //   client will set only routes (for IPv6) but no `redirect-gateway` in env
+  //   variables.
+  // - `redirect-gateway ipv6`: indicates default route for both v4 and v6;
+  //   openvpn client will set both `redirect-gateway` and routes (for IPv6) in
+  //   env variables.
+  std::unique_ptr<IPConfig::Properties> ipv4_props, ipv6_props;
+  if (has_ipv4) {
+    ipv4_props =
+        CreateIPProperties(net_base::IPFamily::kIPv4, ipv4_local, ipv4_peer,
+                           ipv4_prefix, ipv4_redirect_gateway, ipv4_routes);
+    ipv4_props->blackhole_ipv6 = ipv4_redirect_gateway && !has_ipv6;
+    ipv4_props->domain_search = search_domains;
+    // For DNS servers, ideally we want put v4 servers here and v6 servers below
+    // given the current IPConfig structure. Having a merged list in both
+    // objects should have no real impact, and this issue will be resolved by
+    // the latter IPConfig refactor.
+    ipv4_props->dns_servers = dns_servers;
+    ipv4_props->mtu = mtu;
+  }
+  if (has_ipv6) {
+    ipv6_props =
+        CreateIPProperties(net_base::IPFamily::kIPv6, ipv6_local, /*peer=*/"",
+                           ipv6_prefix, /*default_route=*/false, ipv6_routes);
+    // We probably want a blackhole_ipv4 here, but that cannot be done easily at
+    // the routing layer now, and IPv6-only OpenVPN should be rare.
+    ipv6_props->domain_search = search_domains;
+    ipv6_props->dns_servers = dns_servers;
+    ipv6_props->mtu = mtu;
+  }
+  return {
+      .ipv4_props = std::move(ipv4_props),
+      .ipv6_props = std::move(ipv6_props),
+  };
 }
+
+namespace {
+bool ParseForeignOption(const std::string& option,
+                        std::vector<std::string>* domain_search,
+                        std::vector<std::string>* dns_servers) {
+  SLOG(2) << __func__ << "(" << option << ")";
+  const auto tokens = base::SplitStringPiece(option, " ", base::TRIM_WHITESPACE,
+                                             base::SPLIT_WANT_ALL);
+  if (tokens.size() != 3 ||
+      !base::EqualsCaseInsensitiveASCII(tokens[0], "dhcp-option")) {
+    return false;
+  }
+  if (base::EqualsCaseInsensitiveASCII(tokens[1], "domain")) {
+    domain_search->push_back(std::string(tokens[2]));
+    return true;
+  } else if (base::EqualsCaseInsensitiveASCII(tokens[1], "dns")) {
+    dns_servers->push_back(std::string(tokens[2]));
+    return true;
+  }
+  return false;
+}
+}  // namespace
 
 // static
 void OpenVPNDriver::ParseForeignOptions(const ForeignOptions& options,
-                                        IPConfig::Properties* properties) {
-  std::vector<std::string> domain_search;
-  std::vector<std::string> dns_servers;
+                                        std::vector<std::string>* domain_search,
+                                        std::vector<std::string>* dns_servers) {
+  domain_search->clear();
+  dns_servers->clear();
   for (const auto& option_map : options) {
-    ParseForeignOption(option_map.second, &domain_search, &dns_servers);
-  }
-  if (!domain_search.empty()) {
-    properties->domain_search.swap(domain_search);
-  }
-  LOG_IF(INFO, properties->domain_search.empty())
-      << "No search domains provided.";
-  if (!dns_servers.empty()) {
-    properties->dns_servers.swap(dns_servers);
-  }
-  LOG_IF(WARNING, properties->dns_servers.empty())
-      << "No DNS servers provided.";
-}
-
-// static
-void OpenVPNDriver::ParseForeignOption(const std::string& option,
-                                       std::vector<std::string>* domain_search,
-                                       std::vector<std::string>* dns_servers) {
-  SLOG(nullptr, 2) << __func__ << "(" << option << ")";
-  const auto tokens = base::SplitString(option, " ", base::TRIM_WHITESPACE,
-                                        base::SPLIT_WANT_ALL);
-  if (tokens.size() != 3 ||
-      !base::LowerCaseEqualsASCII(tokens[0], "dhcp-option")) {
-    return;
-  }
-  if (base::LowerCaseEqualsASCII(tokens[1], "domain")) {
-    domain_search->push_back(tokens[2]);
-  } else if (base::LowerCaseEqualsASCII(tokens[1], "dns")) {
-    dns_servers->push_back(tokens[2]);
+    if (!ParseForeignOption(option_map.second, domain_search, dns_servers)) {
+      LOG(INFO) << "Ignore foreign option " << option_map.second;
+    }
   }
 }
 
@@ -502,88 +636,65 @@ IPConfig::Route* OpenVPNDriver::GetRouteOptionEntry(const std::string& prefix,
 }
 
 // static
-void OpenVPNDriver::ParseRouteOption(const std::string& key,
-                                     const std::string& value,
-                                     RouteOptions* routes) {
+bool OpenVPNDriver::ParseIPv4RouteOption(const std::string& key,
+                                         const std::string& value,
+                                         RouteOptions* routes) {
   // IPv4 uses route_{network,netmask,gateway}_<index>
-  // IPv6 uses route_ipv6_{network,gateway}_<index>
   IPConfig::Route* route =
       GetRouteOptionEntry(kOpenVPNRouteNetworkPrefix, key, routes);
   if (route) {
     route->host = value;
-    return;
+    return true;
   }
   route = GetRouteOptionEntry(kOpenVPNRouteNetmaskPrefix, key, routes);
   if (route) {
-    route->prefix =
-        IPAddress::GetPrefixLengthFromMask(IPAddress::kFamilyIPv4, value);
-    return;
+    const auto netmask = net_base::IPv4Address::CreateFromString(value);
+    if (netmask) {
+      route->prefix = net_base::IPv4CIDR::GetPrefixLength(*netmask).value_or(0);
+    }
+    if (route->prefix == 0) {
+      LOG(WARNING) << "Failed to get prefix length from " << value;
+    }
+    return true;
   }
   route = GetRouteOptionEntry(kOpenVPNRouteGatewayPrefix, key, routes);
   if (route) {
     route->gateway = value;
-    return;
+    return true;
   }
-  LOG(WARNING) << "Unknown route option ignored: " << key;
+  return false;
 }
 
 // static
-void OpenVPNDriver::SetRoutes(const RouteOptions& routes,
-                              IPConfig::Properties* properties) {
-  std::vector<IPConfig::Route> new_routes;
-  int32_t max_prefix =
-      IPAddress::GetMaxPrefixLength(properties->address_family);
-  if (!properties->peer_address.empty()) {
-    // --topology net30 or p2p will set ifconfig_remote
-
-    // Setting a point-to-point address in the kernel will create a route
-    // in RT_TABLE_MAIN instead of our per-device table.  To avoid this,
-    // create an explicit host route here, and clear
-    // |properties->peer_address.|
-    IPConfig::Route route(properties->peer_address, max_prefix,
-                          properties->address);
-    new_routes.push_back(route);
-    properties->peer_address.clear();
-  } else if (properties->subnet_prefix != max_prefix) {
-    // --topology subnet will set ifconfig_netmask instead
-    IPAddress network_addr(properties->address);
-    if (network_addr.family() != properties->address_family) {
-      LOG(WARNING) << "Error obtaining network address for "
-                   << properties->address;
-    } else {
-      network_addr.set_prefix(properties->subnet_prefix);
-
-      IPConfig::Route route(network_addr.GetNetworkPart().ToString(),
-                            properties->subnet_prefix, properties->address);
-      new_routes.push_back(route);
+bool OpenVPNDriver::ParseIPv6RouteOption(const std::string& key,
+                                         const std::string& value,
+                                         RouteOptions* routes) {
+  // IPv6 uses route_ipv6_{network,gateway}_<index>
+  IPConfig::Route* route =
+      GetRouteOptionEntry(kOpenVPNRouteIPv6NetworkPrefix, key, routes);
+  if (route) {
+    auto cidr = net_base::IPCIDR::CreateFromCIDRString(value);
+    if (!cidr.has_value()) {
+      return false;
     }
+    route->host = cidr->address().ToString();
+    route->prefix = cidr->prefix_length();
+    return true;
   }
-
-  // Ignore |route.gateway|.  If it's wrong, it can cause the kernel to
-  // refuse to add the route.  If it's correct, it has no effect anyway.
-  for (const auto& route_map : routes) {
-    const IPConfig::Route& route = route_map.second;
-    if (route.host.empty() || route.gateway.empty()) {
-      LOG(WARNING) << "Ignoring incomplete route: " << route_map.first;
-      continue;
-    }
-    IPConfig::Route new_route(route.host, route.prefix, properties->address);
-    new_routes.push_back(new_route);
+  route = GetRouteOptionEntry(kOpenVPNRouteIPv6GatewayPrefix, key, routes);
+  if (route) {
+    route->gateway = value;
+    return true;
   }
-
-  if (!new_routes.empty()) {
-    properties->routes.swap(new_routes);
-  } else if (!properties->default_route) {
-    LOG(WARNING) << "No routes provided.";
-  }
+  return false;
 }
 
 // static
-bool OpenVPNDriver::SplitPortFromHost(const std::string& host,
+bool OpenVPNDriver::SplitPortFromHost(std::string_view host,
                                       std::string* name,
                                       std::string* port) {
-  const auto tokens =
-      base::SplitString(host, ":", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+  const auto tokens = base::SplitStringPiece(host, ":", base::TRIM_WHITESPACE,
+                                             base::SPLIT_WANT_ALL);
   int port_number = 0;
   if (tokens.size() != 2 || tokens[0].empty() || tokens[1].empty() ||
       !base::IsAsciiDigit(tokens[1][0]) ||
@@ -667,9 +778,10 @@ void OpenVPNDriver::InitOptions(std::vector<std::vector<std::string>>* options,
     const auto contents =
         args()->Lookup<std::string>(kOpenVPNTLSAuthContentsProperty, "");
     if (!contents.empty()) {
-      if (!base::CreateTemporaryFile(&tls_auth_file_) ||
-          base::WriteFile(tls_auth_file_, contents.data(), contents.size()) !=
-              static_cast<int>(contents.size())) {
+      if (!vpn_util_->PrepareConfigDirectory(openvpn_config_directory_) ||
+          !base::CreateTemporaryFileInDir(openvpn_config_directory_,
+                                          &tls_auth_file_) ||
+          !vpn_util_->WriteConfigFile(tls_auth_file_, contents)) {
         Error::PopulateAndLog(FROM_HERE, error, Error::kInternalError,
                               "Unable to setup tls-auth file.");
         return;
@@ -755,11 +867,6 @@ void OpenVPNDriver::InitOptions(std::vector<std::vector<std::string>>* options,
   // Disable openvpn handling since we do route+ifconfig work.
   AppendOption("route-noexec", options);
   AppendOption("ifconfig-noexec", options);
-
-  // Drop root privileges on connection and enable callback scripts to send
-  // notify messages.
-  AppendOption("user", "openvpn", options);
-  AppendOption("group", "openvpn", options);
 }
 
 bool OpenVPNDriver::InitCAOptions(
@@ -831,8 +938,7 @@ bool OpenVPNDriver::InitExtraCertOptions(
 
 void OpenVPNDriver::InitPKCS11Options(
     std::vector<std::vector<std::string>>* options) {
-  const auto id =
-      args()->Lookup<std::string>(kOpenVPNClientCertIdProperty, "");
+  const auto id = args()->Lookup<std::string>(kOpenVPNClientCertIdProperty, "");
   if (!id.empty()) {
     AppendOption("pkcs11-providers", kDefaultPKCS11Provider, options);
     AppendOption("pkcs11-id", id, options);
@@ -853,7 +959,7 @@ void OpenVPNDriver::InitClientAuthOptions(
 
 bool OpenVPNDriver::InitManagementChannelOptions(
     std::vector<std::vector<std::string>>* options, Error* error) {
-  if (!management_server_->Start(&sockets_, options)) {
+  if (!management_server_->Start(options)) {
     Error::PopulateAndLog(FROM_HERE, error, Error::kInternalError,
                           "Unable to setup management channel.");
     return false;
@@ -901,27 +1007,28 @@ void OpenVPNDriver::InitLoggingOptions(
 }
 
 void OpenVPNDriver::AppendOption(
-    const std::string& option, std::vector<std::vector<std::string>>* options) {
-  options->push_back({option});
+    std::string_view option, std::vector<std::vector<std::string>>* options) {
+  options->push_back({std::string(option)});
 }
 
 void OpenVPNDriver::AppendOption(
-    const std::string& option,
-    const std::string& value,
+    std::string_view option,
+    std::string_view value,
     std::vector<std::vector<std::string>>* options) {
-  options->push_back({option, value});
+  options->push_back({std::string(option), std::string(value)});
 }
 
 void OpenVPNDriver::AppendOption(
-    const std::string& option,
-    const std::string& value0,
-    const std::string& value1,
+    std::string_view option,
+    std::string_view value0,
+    std::string_view value1,
     std::vector<std::vector<std::string>>* options) {
-  options->push_back({option, value0, value1});
+  options->push_back(
+      {std::string(option), std::string(value0), std::string(value1)});
 }
 
 void OpenVPNDriver::AppendRemoteOption(
-    const std::string& host, std::vector<std::vector<std::string>>* options) {
+    std::string_view host, std::vector<std::vector<std::string>>* options) {
   std::string host_name, host_port;
   if (SplitPortFromHost(host, &host_name, &host_port)) {
     DCHECK(!host_name.empty());
@@ -933,8 +1040,8 @@ void OpenVPNDriver::AppendRemoteOption(
 }
 
 bool OpenVPNDriver::AppendValueOption(
-    const std::string& property,
-    const std::string& option,
+    std::string_view property,
+    std::string_view option,
     std::vector<std::vector<std::string>>* options) {
   const auto value = args()->Lookup<std::string>(property, "");
   if (!value.empty()) {
@@ -954,7 +1061,7 @@ bool OpenVPNDriver::AppendDelimitedValueOption(
     auto parts = base::SplitString(value, std::string{delimiter},
                                    base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
     parts.insert(parts.begin(), option);
-    options->push_back(parts);
+    options->push_back(std::move(parts));
     return true;
   }
   return false;
@@ -971,7 +1078,7 @@ bool OpenVPNDriver::AppendFlag(const std::string& property,
 }
 
 void OpenVPNDriver::Disconnect() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   Cleanup();
   event_handler_ = nullptr;
 }
@@ -1006,12 +1113,8 @@ base::TimeDelta OpenVPNDriver::GetReconnectTimeout(ReconnectReason reason) {
   }
 }
 
-std::string OpenVPNDriver::GetProviderType() const {
-  return kProviderOpenVpn;
-}
-
 KeyValueStore OpenVPNDriver::GetProvider(Error* error) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   KeyValueStore props = VPNDriver::GetProvider(error);
   props.Set<bool>(
       kPassphraseRequiredProperty,
@@ -1021,7 +1124,7 @@ KeyValueStore OpenVPNDriver::GetProvider(Error* error) {
 }
 
 std::vector<std::string> OpenVPNDriver::GetCommandLineArgs() {
-  SLOG(this, 2) << __func__ << "(" << lsb_release_file_.value() << ")";
+  SLOG(2) << __func__ << "(" << lsb_release_file_.value() << ")";
   std::vector<std::string> args = {"--config", openvpn_config_file_.value()};
   std::string contents;
   if (!base::ReadFileToString(lsb_release_file_, &contents)) {
@@ -1029,15 +1132,15 @@ std::vector<std::string> OpenVPNDriver::GetCommandLineArgs() {
                << lsb_release_file_.value();
     return args;
   }
-  const auto lines = base::SplitString(contents, "\n", base::TRIM_WHITESPACE,
-                                       base::SPLIT_WANT_ALL);
-  for (const auto& line : lines) {
+  const auto lines = base::SplitStringPiece(
+      contents, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+  for (const std::string_view line : lines) {
     const size_t assign = line.find('=');
     if (assign == std::string::npos) {
       continue;
     }
     const auto key = line.substr(0, assign);
-    const auto value = line.substr(assign + 1);
+    const std::string value(line.substr(assign + 1));
     if (key == kChromeOSReleaseName) {
       args.push_back("--setenv");
       args.push_back("UV_PLAT");
@@ -1097,8 +1200,7 @@ void OpenVPNDriver::OnDefaultPhysicalServiceEvent(
 
 void OpenVPNDriver::ReportConnectionMetrics() {
   metrics()->SendEnumToUMA(Metrics::kMetricVpnDriver,
-                           Metrics::kVpnDriverOpenVpn,
-                           Metrics::kMetricVpnDriverMax);
+                           Metrics::kVpnDriverOpenVpn);
 
   if (args()->Contains<std::vector<std::string>>(kOpenVPNCaCertPemProperty) &&
       !args()
@@ -1106,50 +1208,59 @@ void OpenVPNDriver::ReportConnectionMetrics() {
            .empty()) {
     metrics()->SendEnumToUMA(
         Metrics::kMetricVpnRemoteAuthenticationType,
-        Metrics::kVpnRemoteAuthenticationTypeOpenVpnCertificate,
-        Metrics::kMetricVpnRemoteAuthenticationTypeMax);
+        Metrics::kVpnRemoteAuthenticationTypeOpenVpnCertificate);
   } else {
     metrics()->SendEnumToUMA(
         Metrics::kMetricVpnRemoteAuthenticationType,
-        Metrics::kVpnRemoteAuthenticationTypeOpenVpnDefault,
-        Metrics::kMetricVpnRemoteAuthenticationTypeMax);
+        Metrics::kVpnRemoteAuthenticationTypeOpenVpnDefault);
   }
 
   bool has_user_authentication = false;
   if (args()->Lookup<std::string>(kOpenVPNTokenProperty, "") != "") {
     metrics()->SendEnumToUMA(
         Metrics::kMetricVpnUserAuthenticationType,
-        Metrics::kVpnUserAuthenticationTypeOpenVpnUsernameToken,
-        Metrics::kMetricVpnUserAuthenticationTypeMax);
+        Metrics::kVpnUserAuthenticationTypeOpenVpnUsernameToken);
     has_user_authentication = true;
   }
   if (args()->Lookup<std::string>(kOpenVPNOTPProperty, "") != "") {
     metrics()->SendEnumToUMA(
         Metrics::kMetricVpnUserAuthenticationType,
-        Metrics::kVpnUserAuthenticationTypeOpenVpnUsernamePasswordOtp,
-        Metrics::kMetricVpnUserAuthenticationTypeMax);
+        Metrics::kVpnUserAuthenticationTypeOpenVpnUsernamePasswordOtp);
     has_user_authentication = true;
   }
   if (args()->Lookup<std::string>(kOpenVPNAuthUserPassProperty, "") != "" ||
       args()->Lookup<std::string>(kOpenVPNUserProperty, "") != "") {
     metrics()->SendEnumToUMA(
         Metrics::kMetricVpnUserAuthenticationType,
-        Metrics::kVpnUserAuthenticationTypeOpenVpnUsernamePassword,
-        Metrics::kMetricVpnUserAuthenticationTypeMax);
+        Metrics::kVpnUserAuthenticationTypeOpenVpnUsernamePassword);
     has_user_authentication = true;
   }
   if (args()->Lookup<std::string>(kOpenVPNClientCertIdProperty, "") != "") {
     metrics()->SendEnumToUMA(
         Metrics::kMetricVpnUserAuthenticationType,
-        Metrics::kVpnUserAuthenticationTypeOpenVpnCertificate,
-        Metrics::kMetricVpnUserAuthenticationTypeMax);
+        Metrics::kVpnUserAuthenticationTypeOpenVpnCertificate);
     has_user_authentication = true;
   }
   if (!has_user_authentication) {
     metrics()->SendEnumToUMA(Metrics::kMetricVpnUserAuthenticationType,
-                             Metrics::kVpnUserAuthenticationTypeOpenVpnNone,
-                             Metrics::kMetricVpnUserAuthenticationTypeMax);
+                             Metrics::kVpnUserAuthenticationTypeOpenVpnNone);
   }
+}
+
+void OpenVPNDriver::ReportCipherMetrics(std::string_view cipher) {
+  static constexpr auto str2enum =
+      base::MakeFixedFlatMap<std::string_view, Metrics::VpnOpenVPNCipher>({
+          {"BF-CBC", Metrics::kVpnOpenVPNCipher_BF_CBC},
+          {"AES-256-GCM", Metrics::kVpnOpenVPNCipher_AES_256_GCM},
+          {"AES-128-GCM", Metrics::kVpnOpenVPNCipher_AES_128_GCM},
+      });
+  Metrics::VpnOpenVPNCipher metric = Metrics::kVpnOpenVPNCipherUnknown;
+  const auto it = str2enum.find(cipher);
+  if (it != str2enum.end()) {
+    metric = it->second;
+  }
+
+  metrics()->SendEnumToUMA(Metrics::kMetricVpnOpenVPNCipher, metric);
 }
 
 }  // namespace shill

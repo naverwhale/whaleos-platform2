@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -9,15 +9,35 @@ import("//common-mk/proto_library.gni")
 
 group("all") {
   deps = [
+    ":install_minijail_config_restore",
+    ":install_minijail_config_save",
     ":liboobeconfig",
-    ":librollback_helper",
     ":oobe_config_restore",
     ":oobe_config_save",
-    ":rollback_finish_restore",
-    ":rollback_prepare_save",
+    ":rollback_cleanup",
+    "metrics:install_headers",
+    "metrics:install_pkgconfig",
+    "metrics:install_proto_header",
+    "metrics:libenterprise_rollback_metrics",
   ]
   if (use.test) {
-    deps += [ ":oobe_config_test" ]
+    deps += [
+      ":oobe_config_test",
+      "filesystem:filesystem_test",
+      "metrics:enterprise_rollback_metrics_tests",
+      "metrics:install_headers-test",
+      "metrics:install_pkgconfig-test",
+      "metrics:libenterprise_rollback_metrics-test",
+    ]
+  }
+  if (use.fuzzer) {
+    deps += [
+      ":load_oobe_config_rollback_fuzzer",
+      ":openssl_encryption_fuzzer",
+      "metrics:install_headers-test",
+      "metrics:install_pkgconfig-test",
+      "metrics:libenterprise_rollback_metrics-test",
+    ]
   }
 }
 
@@ -28,7 +48,6 @@ pkg_config("target_defaults") {
   pkg_deps = [
     "libbrillo",
     "libchrome",
-    "libmetrics",
     "libmojo",
 
     # system_api depends on protobuf (or protobuf-lite). It must
@@ -60,27 +79,38 @@ pkg_config("liboobeconfig_config") {
 # oobe_config library.
 static_library("liboobeconfig") {
   sources = [
+    "encryption/openssl_encryption.cc",
+    "encryption/pstore_storage.cc",
     "load_oobe_config_rollback.cc",
-    "metrics.cc",
     "network_exporter.cc",
     "oobe_config.cc",
-    "pstore_storage.cc",
-    "rollback_constants.cc",
-    "rollback_openssl_encryption.cc",
+    "rollback_cleanup.cc",
   ]
   configs += [ ":liboobeconfig_config" ]
   all_dependent_configs = [ ":target_defaults" ]
-  libs = [ "policy" ]
+  libs = [
+    "hwsec",
+    "policy",
+  ]
   deps = [
     ":librollback_helper_mojom",
     ":oobe_config_proto",
+    "filesystem:filesystem",
+    "metrics:libenterprise_rollback_metrics",
+    "metrics:metrics_uma",
   ]
 }
 
 executable("oobe_config_save") {
   sources = [ "oobe_config_save_main.cc" ]
   configs += [ ":target_defaults" ]
-  deps = [ ":liboobeconfig" ]
+  install_path = "sbin"
+  deps = [
+    ":install_init_config_save",
+    ":install_policy_config_save",
+    ":install_tmpfilesd_config_save",
+    ":liboobeconfig",
+  ]
 }
 
 executable("oobe_config_restore") {
@@ -89,7 +119,12 @@ executable("oobe_config_restore") {
     "oobe_config_restore_service.cc",
   ]
   configs += [ ":target_defaults" ]
+  install_path = "sbin"
   deps = [
+    ":install_dbus_config",
+    ":install_init_config_restore",
+    ":install_policy_config_restore",
+    ":install_tmpfilesd_config_restore",
     ":liboobeconfig",
     ":oobe_config_restore_adaptors",
   ]
@@ -99,34 +134,66 @@ generate_mojom_bindings("librollback_helper_mojom") {
   sources = [ "mojom/rollback_network_config.mojom" ]
 }
 
-# rollback_helper library.
-# Used by rollback_prepare_save and rollback_finish_restore.
-static_library("librollback_helper") {
+# Cleanup running as root after oobe_config_restore.
+executable("rollback_cleanup") {
+  sources = [ "rollback_cleanup_main.cc" ]
+  configs += [ ":target_defaults" ]
+  install_path = "sbin"
+  deps = [ ":liboobeconfig" ]
+}
+
+install_config("install_dbus_config") {
+  sources = [ "etc/dbus-1/org.chromium.OobeConfigRestore.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_init_config_restore") {
+  sources = [ "etc/init/oobe_config_restore.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_init_config_save") {
   sources = [
-    "rollback_constants.cc",
-    "rollback_helper.cc",
+    "etc/init/oobe_config_save.conf",
+    "etc/init/shill_stop_waiter.conf",
+    "etc/init/ui_stop_waiter.conf",
   ]
-  configs += [ ":target_defaults" ]
+  install_path = "upstart"
 }
 
-# Helper running as root before oobe_config_save.
-executable("rollback_prepare_save") {
-  sources = [ "rollback_prepare_save_main.cc" ]
-  configs += [ ":target_defaults" ]
-  deps = [
-    ":liboobeconfig",
-    ":librollback_helper",
-  ]
+install_config("install_minijail_config_restore") {
+  sources = [ "minijail/oobe_config_restore.conf" ]
+  install_path = "minijail_conf"
 }
 
-# Helper running as root after oobe_config_restore.
-executable("rollback_finish_restore") {
-  sources = [ "rollback_finish_restore_main.cc" ]
-  configs += [ ":target_defaults" ]
-  deps = [
-    ":liboobeconfig",
-    ":librollback_helper",
-  ]
+install_config("install_minijail_config_save") {
+  sources = [ "minijail/oobe_config_save.conf" ]
+  install_path = "minijail_conf"
+}
+
+# Install seccomp policy files
+install_config("install_policy_config_restore") {
+  sources = [ "seccomp_filters/oobe_config_restore-seccomp-" + getenv("ARCH") +
+              ".policy" ]
+  install_path = "seccomp_policy"
+  outputs = [ "oobe_config_restore-seccomp.policy" ]
+}
+
+install_config("install_policy_config_save") {
+  sources = [ "seccomp_filters/oobe_config_save-seccomp-" + getenv("ARCH") +
+              ".policy" ]
+  install_path = "seccomp_policy"
+  outputs = [ "oobe_config_save-seccomp.policy" ]
+}
+
+install_config("install_tmpfilesd_config_restore") {
+  sources = [ "tmpfiles.d/on-demand/oobe_config_restore.conf" ]
+  install_path = "tmpfiled_ondemand"
+}
+
+install_config("install_tmpfilesd_config_save") {
+  sources = [ "tmpfiles.d/on-demand/oobe_config_save.conf" ]
+  install_path = "tmpfiled_ondemand"
 }
 
 proto_library("oobe_config_proto") {
@@ -142,20 +209,49 @@ if (use.test) {
 
   executable("oobe_config_test") {
     sources = [
+      "encryption/openssl_encryption_test.cc",
       "load_oobe_config_rollback_test.cc",
       "oobe_config_test.cc",
-      "rollback_helper_test.cc",
-      "rollback_openssl_encryption_test.cc",
+      "rollback_cleanup_test.cc",
     ]
     configs += [
       "//common-mk:test",
       ":target_defaults",
       ":test_config",
     ]
+    run_test = true
+    libs = [ "hwsec_test" ]
     deps = [
       ":liboobeconfig",
-      ":librollback_helper",
+      "filesystem:filesystem_for_testing",
+      "metrics:libenterprise_rollback_metrics-test",
       "//common-mk/testrunner",
     ]
+  }
+}
+
+if (use.fuzzer) {
+  executable("load_oobe_config_rollback_fuzzer") {
+    sources = [ "load_oobe_config_rollback_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer:common_fuzzer",
+      ":target_defaults",
+    ]
+    deps = [
+      ":liboobeconfig",
+      ":oobe_config_proto",
+      "filesystem:filesystem_for_testing",
+      "metrics:libenterprise_rollback_metrics-test",
+    ]
+    pkg_deps = [ "libprotobuf-mutator" ]
+  }
+
+  executable("openssl_encryption_fuzzer") {
+    sources = [ "encryption/openssl_encryption_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer:common_fuzzer",
+      ":target_defaults",
+    ]
+    deps = [ ":liboobeconfig" ]
   }
 }

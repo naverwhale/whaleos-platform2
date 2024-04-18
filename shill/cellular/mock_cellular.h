@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,8 @@
 
 #include <gmock/gmock.h>
 
+#include "shill/tethering_manager.h"
+
 #include "shill/cellular/cellular.h"
 
 namespace shill {
@@ -20,7 +22,6 @@ class MockCellular : public Cellular {
                const std::string& link_name,
                const std::string& address,
                int interface_index,
-               Type type,
                const std::string& service,
                const RpcIdentifier& path);
   MockCellular(const MockCellular&) = delete;
@@ -30,8 +31,14 @@ class MockCellular : public Cellular {
 
   MOCK_METHOD(void, Connect, (CellularService*, Error*), (override));
   MOCK_METHOD(void, Disconnect, (Error*, const char*), (override));
-  MOCK_METHOD(void, ReAttach, (), (override));
+  MOCK_METHOD(Network*, GetPrimaryNetwork, (), (const override));
   MOCK_METHOD(void, StartPPP, (const std::string&), (override));
+  MOCK_METHOD(void,
+              AcquireTetheringNetwork,
+              (TetheringManager::UpdateTimeoutCallback,
+               (AcquireTetheringNetworkResultCallback),
+               TetheringManager::CellularUpstreamEventCallback),
+              (override));
 };
 
 }  // namespace shill

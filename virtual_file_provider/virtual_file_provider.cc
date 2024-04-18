@@ -1,18 +1,19 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <sys/vfs.h>
 
 #include <memory>
+#include <optional>
+#include <utility>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/message_loop/message_pump_type.h>
-#include <base/optional.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/threading/platform_thread.h>
 #include <base/threading/thread.h>
@@ -57,8 +58,7 @@ class ServiceThread : public base::Thread {
   // Waits for the FUSE mount to get ready.
   bool WaitForFuseMount() {
     constexpr int kMaxRetryCount = 3000;
-    constexpr base::TimeDelta kRetryInterval =
-        base::TimeDelta::FromMilliseconds(1);
+    constexpr base::TimeDelta kRetryInterval = base::Milliseconds(1);
 
     for (int retry_count = 0; retry_count < kMaxRetryCount; ++retry_count) {
       struct statfs buf = {};
@@ -157,15 +157,15 @@ int main(int argc, char** argv) {
                                                       &size_map);
   base::Thread::Options options;
   options.message_pump_type = base::MessagePumpType::IO;
-  service_thread.StartWithOptions(options);
+  service_thread.StartWithOptions(std::move(options));
 
   // Enter the FUSE main loop.
   virtual_file_provider::FuseMainDelegateImpl delegate(&service_thread,
                                                        &size_map);
-  base::Optional<uid_t> userId =
-      FLAGS_uid >= 0 ? base::make_optional(FLAGS_uid) : base::nullopt;
-  base::Optional<gid_t> groupId =
-      FLAGS_gid >= 0 ? base::make_optional(FLAGS_gid) : base::nullopt;
+  std::optional<uid_t> userId =
+      FLAGS_uid >= 0 ? std::make_optional(FLAGS_uid) : std::nullopt;
+  std::optional<gid_t> groupId =
+      FLAGS_gid >= 0 ? std::make_optional(FLAGS_gid) : std::nullopt;
   return virtual_file_provider::FuseMain(fuse_mount_path, &delegate, userId,
                                          groupId);
 }

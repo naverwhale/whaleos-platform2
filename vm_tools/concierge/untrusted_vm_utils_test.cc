@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,14 +10,9 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/logging.h>
-#include <base/macros.h>
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-using ::testing::_;
-using ::testing::Invoke;
-using ::testing::Return;
+#include "vm_tools/concierge/vm_util.h"
 
 namespace vm_tools {
 namespace concierge {
@@ -144,6 +139,77 @@ TEST_F(UntrustedVMUtilsTest, CheckMDSStatus) {
   CheckMDSStatus(
       "Mitigation: Clear CPU buffers; SMT Host state unknown",
       UntrustedVMUtils::MitigationStatus::VULNERABLE_DUE_TO_SMT_ENABLED);
+}
+
+UntrustedVMUtils::UntrustedVMUtils() {}
+
+namespace {
+
+class FakeUntrustedVMUtils : public UntrustedVMUtils {
+ public:
+  explicit FakeUntrustedVMUtils(
+      UntrustedVMUtils::MitigationStatus mitigation_status)
+      : mitigation_status_(mitigation_status) {}
+  virtual ~FakeUntrustedVMUtils() {}
+
+  virtual MitigationStatus CheckUntrustedVMMitigationStatus() const {
+    return mitigation_status_;
+  }
+
+ private:
+  UntrustedVMUtils::MitigationStatus mitigation_status_;
+};
+}  // anonymous namespace
+
+TEST(ServiceTest, IsUntrustedVMAllowed) {
+  auto failing_untrusted_vm_utils = std::make_unique<FakeUntrustedVMUtils>(
+      UntrustedVMUtils::MitigationStatus::VULNERABLE);
+  auto succeeding_untrusted_vm_utils = std::make_unique<FakeUntrustedVMUtils>(
+      UntrustedVMUtils::MitigationStatus::NOT_VULNERABLE);
+
+  KernelVersionAndMajorRevision old_kernel_version{4, 4};
+  KernelVersionAndMajorRevision new_kernel_version{5, 15};
+  std::string reason;
+
+  EXPECT_FALSE(succeeding_untrusted_vm_utils->IsUntrustedVMAllowed(
+      old_kernel_version, &reason))
+      << "Old kernel version not trusted.";
+  EXPECT_FALSE(failing_untrusted_vm_utils->IsUntrustedVMAllowed(
+      new_kernel_version, &reason))
+      << "New enough kernel version trusted but CPU is not";
+  EXPECT_TRUE(succeeding_untrusted_vm_utils->IsUntrustedVMAllowed(
+      new_kernel_version, &reason))
+      << "New enough kernel version trusted and CPU is great";
+}
+
+TEST(ServiceTest, IsUntrustedVM) {
+  KernelVersionAndMajorRevision old_kernel_version{4, 4};
+  EXPECT_TRUE(IsUntrustedVM(/*run_as_untrusted*/ true,
+                            /*is_trusted_image*/ true,
+                            /*has_custom_kernel_params*/ false,
+                            old_kernel_version))
+      << "VM runs as untrusted VM is untrusted";
+  EXPECT_TRUE(IsUntrustedVM(/*run_as_untrusted*/ false,
+                            /*is_trusted_image*/ false,
+                            /*has_custom_kernel_params*/ false,
+                            old_kernel_version))
+      << "VM using untrusted image can not be trusted";
+  EXPECT_TRUE(IsUntrustedVM(/*run_as_untrusted*/ false,
+                            /*is_trusted_image*/ true,
+                            /*has_custom_kernel_params*/ true,
+                            old_kernel_version))
+      << "VM started with custom parameters can not be trusted";
+  EXPECT_TRUE(IsUntrustedVM(/*run_as_untrusted*/ false,
+                            /*is_trusted_image*/ true,
+                            /*has_custom_kernel_params*/ true,
+                            kMinKernelVersionForUntrustedAndNestedVM))
+      << "Host kernel version >= v4.19 enables nested VM which is untrusted";
+  EXPECT_FALSE(IsUntrustedVM(/*run_as_untrusted*/ false,
+                             /*is_trusted_image*/ true,
+                             /*has_custom_kernel_params*/ false,
+                             old_kernel_version))
+      << "A VM using a trusted image runs as trusted without custom kernel "
+         "parameters, and host kernel versions below 4.19 are trusted";
 }
 
 }  // namespace concierge

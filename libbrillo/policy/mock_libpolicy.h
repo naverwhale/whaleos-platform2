@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,6 +27,7 @@ class MockPolicyProvider : public PolicyProvider {
   MOCK_METHOD(bool, device_policy_is_loaded, (), (const, override));
   MOCK_METHOD(const DevicePolicy&, GetDevicePolicy, (), (const, override));
   MOCK_METHOD(bool, IsConsumerDevice, (), (const, override));
+  MOCK_METHOD(bool, IsEnterpriseEnrolledDevice, (), (const, override));
 };
 
 }  // namespace policy

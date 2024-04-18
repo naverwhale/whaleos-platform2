@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -9,8 +9,8 @@
 
 #include <vector>
 
-#include <base/callback.h>
 #include <base/containers/flat_map.h>
+#include <base/functional/callback.h>
 #include <base/synchronization/lock.h>
 #include <base/threading/thread.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
@@ -52,7 +52,7 @@ class CameraClientOps : public mojom::Camera3CallbackOps {
   static const int kStreamId = 0;
 
   using CaptureResultCallback =
-      base::Callback<void(const cros_cam_capture_result_t&)>;
+      base::RepeatingCallback<void(const cros_cam_capture_result_t&)>;
 
   CameraClientOps();
 
@@ -87,6 +87,18 @@ class CameraClientOps : public mojom::Camera3CallbackOps {
   // Notify is an implementation of Notify in Camera3CallbackOps. It receives
   // shutter messages and error notifications.
   void Notify(mojom::Camera3NotifyMsgPtr msg) override;
+
+  // RequestStreamBuffers is an implementation of RequestStreamBuffers in
+  // Camera3CallbackOps. It receives output buffer requests and a callback to
+  // receive results.
+  void RequestStreamBuffers(
+      std::vector<mojom::Camera3BufferRequestPtr> buffer_reqs,
+      RequestStreamBuffersCallback callback) override;
+
+  // ReturnStreamBuffers is an implementation of ReturnStreamBuffers in
+  // Camera3CallbackOps. It receives returned output buffers.
+  void ReturnStreamBuffers(
+      std::vector<mojom::Camera3StreamBufferPtr> buffers) override;
 
  private:
   void InitializeDevice();

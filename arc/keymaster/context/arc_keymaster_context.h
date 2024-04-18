@@ -1,16 +1,15 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ARC_KEYMASTER_CONTEXT_ARC_KEYMASTER_CONTEXT_H_
 #define ARC_KEYMASTER_CONTEXT_ARC_KEYMASTER_CONTEXT_H_
 
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/memory/scoped_refptr.h>
-#include <base/optional.h>
 #include <brillo/secure_blob.h>
 #include <hardware/keymaster_defs.h>
 #include <keymaster/authorization_set.h>
@@ -43,7 +42,7 @@ class ArcKeymasterContext : public ::keymaster::PureSoftKeymasterContext {
   }
 
   // Returns the Chrome OS key correspponding to the given key blob, if any.
-  base::Optional<mojom::ChromeOsKeyPtr> FindPlaceholderKey(
+  std::optional<mojom::ChromeOsKeyPtr> FindPlaceholderKey(
       const ::keymaster::KeymasterKeyBlob& key_material) const;
 
   // PureSoftKeymasterContext overrides.
@@ -109,15 +108,15 @@ class ArcKeymasterContext : public ::keymaster::PureSoftKeymasterContext {
                         ::keymaster::KeymasterKeyBlob* key_blob) const;
 
   // Deserializes the contents of |key_blob| into |key_data|.
-  base::Optional<KeyData> DeserializeKeyData(
+  std::optional<KeyData> DeserializeKeyData(
       const ::keymaster::KeymasterKeyBlob& key_blob,
       const ::keymaster::AuthorizationSet& hidden) const;
 
   // Parses the given parameter into an instance of KeyData.
   //
-  // May return |base::nullopt| when the placeholder key correspponding to this
+  // May return |std::nullopt| when the placeholder key correspponding to this
   // |key_material| is invalid.
-  base::Optional<KeyData> PackToKeyData(
+  std::optional<KeyData> PackToKeyData(
       const ::keymaster::KeymasterKeyBlob& key_material,
       const ::keymaster::AuthorizationSet& hw_enforced,
       const ::keymaster::AuthorizationSet& sw_enforced) const;

@@ -1,6 +1,9 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 mmap2: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 openat: 1
@@ -71,7 +74,7 @@ creat: 1
 rmdir: 1
 unlink: 1
 lstat: 1
-getrandom: 1
+getrandom: arg2 in ~GRND_RANDOM
 getdents: 1
 getdents64: 1
 recvmsg: 1

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,11 +15,8 @@
 #include <brillo/udev/udev.h>
 #include <brillo/udev/udev_device.h>
 
-#include "diagnostics/common/statusor.h"
 #include "diagnostics/cros_healthd/fetchers/storage/device_info.h"
 #include "diagnostics/cros_healthd/fetchers/storage/device_lister.h"
-#include "diagnostics/cros_healthd/fetchers/storage/device_resolver.h"
-#include "diagnostics/cros_healthd/utils/error_utils.h"
 
 namespace diagnostics {
 
@@ -27,7 +24,6 @@ namespace diagnostics {
 class StorageDeviceManager final {
  public:
   StorageDeviceManager(std::unique_ptr<StorageDeviceLister> device_lister,
-                       std::unique_ptr<StorageDeviceResolver> device_resolver,
                        std::unique_ptr<brillo::Udev> udev,
                        std::unique_ptr<Platform> platform);
   StorageDeviceManager(const StorageDeviceManager&) = delete;
@@ -35,20 +31,21 @@ class StorageDeviceManager final {
   StorageDeviceManager& operator=(const StorageDeviceManager&) = delete;
   StorageDeviceManager& operator=(StorageDeviceManager&&) = delete;
 
-  StatusOr<std::vector<
-      chromeos::cros_healthd::mojom::NonRemovableBlockDeviceInfoPtr>>
+  base::expected<
+      std::vector<ash::cros_healthd::mojom::NonRemovableBlockDeviceInfoPtr>,
+      ash::cros_healthd::mojom::ProbeErrorPtr>
   FetchDevicesInfo(const base::FilePath& root);
 
  private:
   // Updates the list of present non-removable block devices;
-  Status RefreshDevices(const base::FilePath& root);
+  ash::cros_healthd::mojom::ProbeErrorPtr RefreshDevices(
+      const base::FilePath& root);
 
   // Returns a list of sysfs paths of non-removable block devices;
   std::vector<base::FilePath> ListDevicesPaths(
       const base::FilePath& root) const;
 
   const std::unique_ptr<const StorageDeviceLister> device_lister_;
-  const std::unique_ptr<const StorageDeviceResolver> device_resolver_;
   std::unique_ptr<brillo::Udev> udev_;  // Has non-const interface
   const std::unique_ptr<const Platform> platform_;
 

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,13 @@
 #include <memory>
 
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/memory/scoped_refptr.h>
 #include <brillo/dbus/async_event_sequencer.h>
 #include <brillo/dbus/dbus_object.h>
 #include <brillo/errors/error.h>
 
 namespace diagnostics {
+namespace wilco {
 
 class MojoServiceFactory;
 
@@ -51,6 +51,7 @@ class DBusService final {
   std::unique_ptr<brillo::dbus_utils::DBusObject> dbus_object_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_DBUS_SERVICE_H_

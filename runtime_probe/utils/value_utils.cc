@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,12 +19,12 @@ void PrependToDVKey(base::Value* dict_value, const std::string& prefix) {
   if (prefix.empty())
     return;
   std::vector<std::string> original_keys;
-  for (const auto& entry : dict_value->DictItems()) {
+  for (const auto& entry : dict_value->GetDict()) {
     original_keys.push_back(entry.first);
   }
   for (const auto& key : original_keys) {
-    auto value = dict_value->ExtractKey(key);
-    dict_value->SetKey(prefix + key, std::move(*value));
+    auto value = dict_value->GetDict().Extract(key);
+    dict_value->GetDict().Set(prefix + key, std::move(*value));
   }
 }
 
@@ -33,10 +33,10 @@ bool RenameKey(base::Value* dv,
                const std::string& new_key) {
   if (!dv->is_dict())
     return false;
-  auto value = dv->ExtractKey(old_key);
+  auto value = dv->GetDict().Extract(old_key);
   if (!value)
     return false;
-  dv->SetKey(new_key, std::move(*value));
+  dv->GetDict().Set(new_key, std::move(*value));
   return true;
 }
 

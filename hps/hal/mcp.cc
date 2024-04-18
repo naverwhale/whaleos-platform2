@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,7 @@
 #include <base/strings/stringprintf.h>
 #include <base/threading/thread.h>
 #include <base/time/time.h>
-
-#define BIT(x) (1ULL << (x))
+#include <base/timer/elapsed_timer.h>
 
 namespace {
 
@@ -32,16 +31,20 @@ static const uint8_t kReadEndpoint = 0x83;   // device to host
 
 static const int kTimeout = 1000;      // Timeout in milliseconds.
 static const int kRetries = 50;        // Max retries.
-static const int kDelay = 10;          // Milliseconds delay between retries.
+
+static constexpr base::TimeDelta kDelay =
+    base::Milliseconds(10);  // Delay between retries.
+static constexpr base::TimeDelta kReadSleep = base::Milliseconds(1);
+static constexpr base::TimeDelta kReadTimeout = base::Milliseconds(1000);
+
 /*
  * Calculate write block size.
  * The I2C header is 4 bytes.
  * 1 byte is reserved for the I2C cmd byte, 4 for the 32 bit address.
- * The value should be a multiple of 8 since the flash writing
- * is generally done in 64 bit blocks.
+ * The value should be a power of 2
+ * 48 == ((hps::kMcpTransferSize - 4 - sizeof(uint32_t) - 1) / 8) * 8;
  */
-static constexpr size_t kBlockSize =
-    ((hps::kMcpTransferSize - 4 - sizeof(uint32_t) - 1) / 8) * 8;
+static constexpr size_t kBlockSize = 32;
 
 // Command byte to send to MCP2221
 enum : uint8_t {
@@ -64,8 +67,10 @@ static inline const char* errString(int status) {
  * Clock divider uses 12MHz clock as base, divided by target
  * bus speed in Hz, offset by 2.
  */
-static inline uint8_t ClockDivider(uint32_t speedKHz) {
-  return (12 * 1000) / speedKHz - 2;
+static inline uint8_t ClockDivider(uint32_t speed_khz) {
+  DCHECK_GE(speed_khz, 50u);
+  DCHECK_LE(speed_khz, 1000u);
+  return static_cast<uint8_t>((12 * 1000) / speed_khz - 2);
 }
 
 }  // namespace
@@ -81,12 +86,12 @@ Mcp::~Mcp() {
  * Scan the available USB devices until the correct VID/PID is found,
  * and then open that device.
  */
-bool Mcp::Init(uint32_t speedKHz) {
-  if (speedKHz > 1000 || speedKHz < 50) {
-    LOG(ERROR) << "I2C bus peed must be > 50KHz and < 1000KHz";
+bool Mcp::Init(uint32_t speed_khz) {
+  if (speed_khz > 1000 || speed_khz < 50) {
+    LOG(ERROR) << "I2C bus speed must be > 50KHz and < 1000KHz";
     return false;
   }
-  this->div_ = ClockDivider(speedKHz);
+  this->div_ = ClockDivider(speed_khz);
   int status = libusb_init(&this->context_);
   if (status != 0) {
     this->context_ = nullptr;
@@ -187,12 +192,6 @@ void Mcp::Close() {
 }
 
 bool Mcp::ReadDevice(uint8_t cmd, uint8_t* data, size_t len) {
-  // 3 bytes at the start of the buffer are reserved for the response header,
-  // so do not allow transfers that are larger than the remaining space.
-  if (len > (kMcpTransferSize - 3)) {
-    LOG(ERROR) << base::StringPrintf("Read req too long (%zu)", len);
-    return false;
-  }
   if (!this->PrepareBus()) {
     return false;
   }
@@ -214,8 +213,8 @@ bool Mcp::ReadDevice(uint8_t cmd, uint8_t* data, size_t len) {
   }
   this->Clear();
   this->out_[0] = kCmdReadRepeatStart;
-  this->out_[1] = len;                 // LSB transfer length
-  this->out_[2] = 0;                   // MSB transfer length
+  this->out_[1] = len & 0xff;          // LSB transfer length
+  this->out_[2] = (len >> 8) & 0xff;   // MSB transfer length
   this->out_[3] = this->address_ | 1;  // For read.
   if (!this->Cmd()) {
     LOG(ERROR) << "Read (read phase) failed";
@@ -226,8 +225,11 @@ bool Mcp::ReadDevice(uint8_t cmd, uint8_t* data, size_t len) {
     LOG(ERROR) << "Read (read busy) failed";
     return false;
   }
+  size_t len_remaining = len;
+  uint8_t* data_remaining = data;
   this->Clear();
-  for (int i = 0; i < kRetries; i++) {
+  base::ElapsedTimer timer;
+  do {
     this->out_[0] = kCmdReadData;
     if (!this->Cmd()) {
       LOG(ERROR) << "Read (read data) failed";
@@ -239,16 +241,22 @@ bool Mcp::ReadDevice(uint8_t cmd, uint8_t* data, size_t len) {
         return false;
       }
       size_t sz = this->in_[3];
-      if (sz > len) {
+      if (sz > len_remaining) {
         LOG(ERROR) << base::StringPrintf("Read size error (%zu)", sz);
         return false;
       }
-      memcpy(data, &this->in_[4], sz);
-      return true;
+      memcpy(data_remaining, &this->in_[4], sz);
+      data_remaining += sz;
+      len_remaining -= sz;
+      if (len_remaining) {
+        continue;
+      } else {
+        return true;
+      }
     }
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(kDelay));
-  }
-  LOG(ERROR) << "Read (retries exceeded) failed";
+    base::PlatformThread::Sleep(kReadSleep);
+  } while (timer.Elapsed() < kReadTimeout);
+  LOG(ERROR) << "Read (retries exceeded) failed: " << timer.Elapsed();
   return false;
 }
 
@@ -263,8 +271,8 @@ bool Mcp::WriteDevice(uint8_t cmd, const uint8_t* data, size_t len) {
   // Send I2C Write Data
   this->Clear();
   this->out_[0] = kCmdWriteData;
-  this->out_[1] = len + 1;  // LSB transfer length
-  this->out_[2] = 0;        // MSB transfer length
+  this->out_[1] = (len + 1) & 0xff;  // LSB transfer length
+  this->out_[2] = 0;                 // MSB transfer length
   this->out_[3] = this->address_;
   this->out_[4] = cmd;
   memcpy(&this->out_[5], data, len);
@@ -283,7 +291,7 @@ bool Mcp::WriteDevice(uint8_t cmd, const uint8_t* data, size_t len) {
     if (this->in_[8] == 0) {  // bus is idle.
       return true;
     }
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(kDelay));
+    base::PlatformThread::Sleep(kDelay);
   }
   LOG(ERROR) << "Write (retries exceeded) failed";
   return false;
@@ -320,7 +328,7 @@ bool Mcp::PrepareBus() {
     if (this->in_[3] == 0x20) {  // Set speed succeeded.
       return true;
     }
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(kDelay));
+    base::PlatformThread::Sleep(kDelay);
   }
   LOG(ERROR) << "PrepareBus retries exceeded";
   return false;
@@ -369,10 +377,10 @@ void Mcp::Clear() {
 }
 
 // Static factory method.
-std::unique_ptr<DevInterface> Mcp::Create(uint8_t address, uint32_t speedKHz) {
+std::unique_ptr<DevInterface> Mcp::Create(uint8_t address, uint32_t speed_khz) {
   // Use new so that private constructor can be accessed.
   auto dev = std::unique_ptr<Mcp>(new Mcp(address));
-  CHECK(dev->Init(speedKHz));
+  CHECK(dev->Init(speed_khz));
   return std::unique_ptr<DevInterface>(std::move(dev));
 }
 

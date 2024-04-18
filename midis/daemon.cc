@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,9 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
@@ -54,8 +54,8 @@ void Daemon::InitDBus() {
   CHECK(exported_object);
   CHECK(exported_object->ExportMethodAndBlock(
       kMidisInterfaceName, kBootstrapMojoConnectionMethod,
-      base::Bind(&Daemon::BootstrapMojoConnection,
-                 weak_factory_.GetWeakPtr())));
+      base::BindRepeating(&Daemon::BootstrapMojoConnection,
+                          weak_factory_.GetWeakPtr())));
   CHECK(bus->RequestOwnershipAndBlock(kMidisServiceName,
                                       dbus::Bus::REQUIRE_PRIMARY));
   VLOG(1) << "D-Bus Registration succeeded";

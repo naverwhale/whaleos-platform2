@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,20 +6,456 @@
 
 #include <fcntl.h>
 
-#include <base/bind.h>
+#include <algorithm>
+#include <optional>
+#include <ostream>
+
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/weak_ptr.h>
+#include <base/synchronization/waitable_event.h>
 #include <base/strings/string_util.h>
+#include <base/task/bind_post_task.h>
+#include <base/time/time.h>
 #include <brillo/dbus/dbus_proxy_util.h>
+#include <brillo/errors/error.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
 #include <dbus/object_path.h>
+#include <patchpanel/proto_bindings/patchpanel_service.pb.h>
 
-#include "patchpanel/net_util.h"
+#include "patchpanel/dbus-proxies.h"
 
 namespace patchpanel {
 
 namespace {
+
+using org::chromium::PatchPanelProxyInterface;
+
+patchpanel::TrafficCounter::Source ConvertTrafficSource(
+    Client::TrafficSource source) {
+  switch (source) {
+    case Client::TrafficSource::kUnknown:
+      return patchpanel::TrafficCounter::UNKNOWN;
+    case Client::TrafficSource::kChrome:
+      return patchpanel::TrafficCounter::CHROME;
+    case Client::TrafficSource::kUser:
+      return patchpanel::TrafficCounter::USER;
+    case Client::TrafficSource::kArc:
+      return patchpanel::TrafficCounter::ARC;
+    case Client::TrafficSource::kCrosVm:
+      return patchpanel::TrafficCounter::CROSVM;
+    case Client::TrafficSource::kParallelsVm:
+      return patchpanel::TrafficCounter::PARALLELS_VM;
+    case Client::TrafficSource::kUpdateEngine:
+      return patchpanel::TrafficCounter::UPDATE_ENGINE;
+    case Client::TrafficSource::kVpn:
+      return patchpanel::TrafficCounter::VPN;
+    case Client::TrafficSource::kSystem:
+      return patchpanel::TrafficCounter::SYSTEM;
+  }
+}
+
+Client::TrafficSource ConvertTrafficSource(
+    patchpanel::TrafficCounter::Source source) {
+  switch (source) {
+    case patchpanel::TrafficCounter::CHROME:
+      return Client::TrafficSource::kChrome;
+    case patchpanel::TrafficCounter::USER:
+      return Client::TrafficSource::kUser;
+    case patchpanel::TrafficCounter::ARC:
+      return Client::TrafficSource::kArc;
+    case patchpanel::TrafficCounter::CROSVM:
+      return Client::TrafficSource::kCrosVm;
+    case patchpanel::TrafficCounter::PARALLELS_VM:
+      return Client::TrafficSource::kParallelsVm;
+    case patchpanel::TrafficCounter::UPDATE_ENGINE:
+      return Client::TrafficSource::kUpdateEngine;
+    case patchpanel::TrafficCounter::VPN:
+      return Client::TrafficSource::kVpn;
+    case patchpanel::TrafficCounter::SYSTEM:
+      return Client::TrafficSource::kSystem;
+    default:
+      return Client::TrafficSource::kUnknown;
+  }
+}
+
+patchpanel::NeighborReachabilityEventSignal::Role ConvertNeighborRole(
+    Client::NeighborRole role) {
+  switch (role) {
+    case Client::NeighborRole::kGateway:
+      return patchpanel::NeighborReachabilityEventSignal::GATEWAY;
+    case Client::NeighborRole::kDnsServer:
+      return patchpanel::NeighborReachabilityEventSignal::DNS_SERVER;
+    case Client::NeighborRole::kGatewayAndDnsServer:
+      return patchpanel::NeighborReachabilityEventSignal::
+          GATEWAY_AND_DNS_SERVER;
+  }
+}
+
+patchpanel::NeighborReachabilityEventSignal::EventType ConvertNeighborStatus(
+    Client::NeighborStatus status) {
+  switch (status) {
+    case Client::NeighborStatus::kFailed:
+      return patchpanel::NeighborReachabilityEventSignal::FAILED;
+    case Client::NeighborStatus::kReachable:
+      return patchpanel::NeighborReachabilityEventSignal::REACHABLE;
+  }
+}
+
+patchpanel::ModifyPortRuleRequest::Operation ConvertFirewallRequestOperation(
+    Client::FirewallRequestOperation op) {
+  switch (op) {
+    case Client::FirewallRequestOperation::kCreate:
+      return ModifyPortRuleRequest::CREATE;
+    case Client::FirewallRequestOperation::kDelete:
+      return ModifyPortRuleRequest::DELETE;
+  }
+}
+
+patchpanel::ModifyPortRuleRequest::RuleType ConvertFirewallRequestType(
+    Client::FirewallRequestType type) {
+  switch (type) {
+    case Client::FirewallRequestType::kAccess:
+      return ModifyPortRuleRequest::ACCESS;
+    case Client::FirewallRequestType::kLockdown:
+      return ModifyPortRuleRequest::LOCKDOWN;
+    case Client::FirewallRequestType::kForwarding:
+      return ModifyPortRuleRequest::FORWARDING;
+  }
+}
+
+patchpanel::ModifyPortRuleRequest::Protocol ConvertFirewallRequestProtocol(
+    Client::FirewallRequestProtocol protocol) {
+  switch (protocol) {
+    case Client::FirewallRequestProtocol::kTcp:
+      return ModifyPortRuleRequest::TCP;
+    case Client::FirewallRequestProtocol::kUdp:
+      return ModifyPortRuleRequest::UDP;
+  }
+}
+
+patchpanel::SetDnsRedirectionRuleRequest::RuleType
+ConvertDnsRedirectionRequestType(Client::DnsRedirectionRequestType type) {
+  switch (type) {
+    case Client::DnsRedirectionRequestType::kDefault:
+      return patchpanel::SetDnsRedirectionRuleRequest::DEFAULT;
+    case Client::DnsRedirectionRequestType::kArc:
+      return patchpanel::SetDnsRedirectionRuleRequest::ARC;
+    case Client::DnsRedirectionRequestType::kUser:
+      return patchpanel::SetDnsRedirectionRuleRequest::USER;
+    case Client::DnsRedirectionRequestType::kExcludeDestination:
+      return patchpanel::SetDnsRedirectionRuleRequest::EXCLUDE_DESTINATION;
+  }
+}
+
+patchpanel::SetFeatureFlagRequest::FeatureFlag ConvertFeatureFlag(
+    Client::FeatureFlag flag) {
+  switch (flag) {
+    case Client::FeatureFlag::kWiFiQoS:
+      return patchpanel::SetFeatureFlagRequest::FeatureFlag::
+          SetFeatureFlagRequest_FeatureFlag_WIFI_QOS;
+    case Client::FeatureFlag::kClat:
+      return patchpanel::SetFeatureFlagRequest::FeatureFlag::
+          SetFeatureFlagRequest_FeatureFlag_CLAT;
+  }
+}
+
+std::optional<net_base::IPv4CIDR> ConvertIPv4Subnet(const IPv4Subnet& in) {
+  return net_base::IPv4CIDR::CreateFromBytesAndPrefix(
+      in.addr(), static_cast<int>(in.prefix_len()));
+}
+
+std::optional<Client::TrafficCounter> ConvertTrafficCounter(
+    const TrafficCounter& in) {
+  auto out = std::make_optional<Client::TrafficCounter>();
+  out->rx_bytes = in.rx_bytes();
+  out->tx_bytes = in.tx_bytes();
+  out->rx_packets = in.rx_packets();
+  out->tx_packets = in.tx_packets();
+  out->ifname = in.device();
+  out->source = ConvertTrafficSource(in.source());
+  switch (in.ip_family()) {
+    case patchpanel::TrafficCounter::IPV4:
+      out->ip_family = Client::IPFamily::kIPv4;
+      break;
+    case patchpanel::TrafficCounter::IPV6:
+      out->ip_family = Client::IPFamily::kIPv6;
+      break;
+    default:
+      LOG(ERROR) << __func__ << ": Unknown IpFamily "
+                 << patchpanel::TrafficCounter::IpFamily_Name(in.ip_family());
+      return std::nullopt;
+  }
+  return out;
+}
+
+std::optional<Client::VirtualDevice> ConvertVirtualDevice(
+    const NetworkDevice& in) {
+  auto out = std::make_optional<Client::VirtualDevice>();
+  out->ifname = in.ifname();
+  out->phys_ifname = in.phys_ifname();
+  out->guest_ifname = in.guest_ifname();
+  out->ipv4_addr = net_base::IPv4Address(in.ipv4_addr());
+  out->host_ipv4_addr = net_base::IPv4Address(in.host_ipv4_addr());
+  out->ipv4_subnet = ConvertIPv4Subnet(in.ipv4_subnet());
+
+  out->dns_proxy_ipv4_addr =
+      net_base::IPv4Address::CreateFromBytes(in.dns_proxy_ipv4_addr());
+  out->dns_proxy_ipv6_addr =
+      net_base::IPv6Address::CreateFromBytes(in.dns_proxy_ipv6_addr());
+
+  switch (in.guest_type()) {
+    case patchpanel::NetworkDevice::ARC:
+      out->guest_type = Client::GuestType::kArcContainer;
+      break;
+    case patchpanel::NetworkDevice::ARCVM:
+      out->guest_type = Client::GuestType::kArcVm;
+      break;
+    case patchpanel::NetworkDevice::TERMINA_VM:
+      out->guest_type = Client::GuestType::kTerminaVm;
+      break;
+    case patchpanel::NetworkDevice::PARALLELS_VM:
+      out->guest_type = Client::GuestType::kParallelsVm;
+      break;
+    default:
+      LOG(ERROR) << __func__ << ": Unknown GuestType "
+                 << patchpanel::NetworkDevice::GuestType_Name(in.guest_type());
+      return std::nullopt;
+  }
+  return out;
+}
+
+std::optional<Client::TerminaAllocation> ConvertTerminaAllocation(
+    const TerminaVmStartupResponse& in) {
+  if (!in.has_ipv4_subnet()) {
+    LOG(ERROR) << __func__ << ": No Termina IPv4 subnet found";
+    return std::nullopt;
+  }
+  if (!in.has_container_ipv4_subnet()) {
+    LOG(ERROR) << __func__ << ": No Termina container IPv4 subnet found";
+    return std::nullopt;
+  }
+  const auto termina_subnet = ConvertIPv4Subnet(in.ipv4_subnet());
+  const auto termina_address =
+      net_base::IPv4Address::CreateFromBytes(in.ipv4_address());
+  const auto gateway_address =
+      net_base::IPv4Address::CreateFromBytes(in.gateway_ipv4_address());
+  const auto container_subnet = ConvertIPv4Subnet(in.container_ipv4_subnet());
+  const auto container_address =
+      net_base::IPv4Address::CreateFromBytes(in.container_ipv4_address());
+  if (!termina_subnet) {
+    LOG(ERROR) << __func__ << ": Invalid Termina IPv4 subnet";
+    return std::nullopt;
+  }
+  if (!termina_address || !termina_subnet->InSameSubnetWith(*termina_address)) {
+    LOG(ERROR) << __func__ << ": Invalid Termina IPv4 address";
+    return std::nullopt;
+  }
+  if (!gateway_address || !termina_subnet->InSameSubnetWith(*gateway_address)) {
+    LOG(ERROR) << __func__ << ": Invalid Termina gateway IPv4 address";
+    return std::nullopt;
+  }
+  if (!container_subnet) {
+    LOG(ERROR) << __func__ << ": Invalid Termina container IPv4 subnet";
+    return std::nullopt;
+  }
+  if (!container_address) {
+    LOG(ERROR) << __func__ << ": Invalid Termina container IPv4 address";
+    return std::nullopt;
+  }
+  Client::TerminaAllocation termina_alloc;
+  termina_alloc.tap_device_ifname = in.tap_device_ifname();
+  termina_alloc.termina_ipv4_subnet = *termina_subnet;
+  termina_alloc.termina_ipv4_address = *termina_address;
+  termina_alloc.gateway_ipv4_address = *gateway_address;
+  termina_alloc.container_ipv4_subnet = *container_subnet;
+  termina_alloc.container_ipv4_address = *container_address;
+  return termina_alloc;
+}
+
+std::optional<Client::ParallelsAllocation> ConvertParallelsAllocation(
+    const ParallelsVmStartupResponse& in) {
+  if (!in.has_ipv4_subnet()) {
+    LOG(ERROR) << __func__ << ": No Parallels IPv4 subnet found";
+    return std::nullopt;
+  }
+  const auto parallels_subnet = ConvertIPv4Subnet(in.ipv4_subnet());
+  const auto parallels_address =
+      net_base::IPv4Address::CreateFromBytes(in.ipv4_address());
+  if (!parallels_subnet) {
+    LOG(ERROR) << __func__ << ": Invalid Parallels IPv4 subnet";
+    return std::nullopt;
+  }
+  if (!parallels_address ||
+      !parallels_subnet->InSameSubnetWith(*parallels_address)) {
+    LOG(ERROR) << __func__ << ": Invalid Parallels IPv4 address";
+    return std::nullopt;
+  }
+  Client::ParallelsAllocation parallels_alloc;
+  parallels_alloc.tap_device_ifname = in.tap_device_ifname();
+  parallels_alloc.parallels_ipv4_subnet = *parallels_subnet;
+  parallels_alloc.parallels_ipv4_address = *parallels_address;
+  return parallels_alloc;
+}
+
+std::optional<Client::BruschettaAllocation> ConvertBruschettaAllocation(
+    const BruschettaVmStartupResponse& in) {
+  if (in.tap_device_ifname().empty()) {
+    LOG(ERROR) << __func__ << ": No Bruschetta device interface found";
+    return std::nullopt;
+  }
+  if (!in.has_ipv4_subnet()) {
+    LOG(ERROR) << __func__ << ": No Bruschetta IPv4 subnet found";
+    return std::nullopt;
+  }
+  const auto bruschetta_subnet = ConvertIPv4Subnet(in.ipv4_subnet());
+  const auto bruschetta_address =
+      net_base::IPv4Address::CreateFromBytes(in.ipv4_address());
+  const auto gateway_address =
+      net_base::IPv4Address::CreateFromBytes(in.gateway_ipv4_address());
+  if (!bruschetta_subnet) {
+    LOG(ERROR) << __func__ << ": Invalid Bruschetta IPv4 subnet";
+    return std::nullopt;
+  }
+  if (!bruschetta_address ||
+      !bruschetta_subnet->InSameSubnetWith(*bruschetta_address)) {
+    LOG(ERROR) << __func__ << ": Invalid Bruschetta IPv4 address";
+    return std::nullopt;
+  }
+  if (!gateway_address ||
+      !bruschetta_subnet->InSameSubnetWith(*gateway_address)) {
+    LOG(ERROR) << __func__ << ": Invalid Bruschetta gateway IPv4 address";
+    return std::nullopt;
+  }
+
+  Client::BruschettaAllocation bruschetta_alloc;
+  bruschetta_alloc.tap_device_ifname = in.tap_device_ifname();
+  bruschetta_alloc.bruschetta_ipv4_subnet = *bruschetta_subnet;
+  bruschetta_alloc.bruschetta_ipv4_address = *bruschetta_address;
+  bruschetta_alloc.gateway_ipv4_address = *gateway_address;
+  return bruschetta_alloc;
+}
+
+std::optional<Client::NetworkClientInfo> ConvertNetworkClientInfo(
+    const NetworkClientInfo& in) {
+  auto out = std::make_optional<Client::NetworkClientInfo>();
+  std::copy(in.mac_addr().begin(), in.mac_addr().end(),
+            std::back_inserter(out->mac_addr));
+  const auto ipv4_addr = net_base::IPv4Address::CreateFromBytes(in.ipv4_addr());
+  if (!ipv4_addr) {
+    LOG(ERROR) << "Failed to convert protobuf bytes to IPv4Address. size="
+               << in.ipv4_addr().size();
+    return std::nullopt;
+  }
+  out->ipv4_addr = *ipv4_addr;
+  for (const auto& in_ipv6_addr : in.ipv6_addresses()) {
+    const auto ipv6_addr = net_base::IPv6Address::CreateFromBytes(in_ipv6_addr);
+    if (!ipv6_addr) {
+      LOG(ERROR) << "Failed to convert protobuf bytes to IPv6Address. size="
+                 << in_ipv6_addr.size();
+      return std::nullopt;
+    }
+    out->ipv6_addresses.push_back(*ipv6_addr);
+  }
+  out->hostname = in.hostname();
+  out->vendor_class = in.vendor_class();
+  return out;
+}
+
+std::optional<Client::DownstreamNetwork> ConvertDownstreamNetwork(
+    const DownstreamNetwork& in) {
+  auto out = std::make_optional<Client::DownstreamNetwork>();
+  out->ifname = in.downstream_ifname();
+
+  const auto ipv4_subnet = ConvertIPv4Subnet(in.ipv4_subnet());
+  if (!ipv4_subnet) {
+    LOG(ERROR) << "Failed to create IPv4CIDR for ipv4_subnet";
+    return std::nullopt;
+  }
+  out->ipv4_subnet = *ipv4_subnet;
+
+  const auto ipv4_gateway_addr =
+      net_base::IPv4Address::CreateFromBytes(in.ipv4_gateway_addr());
+  if (!ipv4_gateway_addr) {
+    LOG(ERROR) << "Failed to create IPv4Address for gateway address: size="
+               << in.ipv4_gateway_addr().size();
+    return std::nullopt;
+  }
+  out->ipv4_gateway_addr = *ipv4_gateway_addr;
+  return out;
+}
+
+std::optional<Client::NeighborReachabilityEvent>
+ConvertNeighborReachabilityEvent(const NeighborReachabilityEventSignal& in) {
+  auto out = std::make_optional<Client::NeighborReachabilityEvent>();
+  out->ifindex = in.ifindex();
+  out->ip_addr = in.ip_addr();
+  switch (in.role()) {
+    case patchpanel::NeighborReachabilityEventSignal::GATEWAY:
+      out->role = Client::NeighborRole::kGateway;
+      break;
+    case patchpanel::NeighborReachabilityEventSignal::DNS_SERVER:
+      out->role = Client::NeighborRole::kDnsServer;
+      break;
+    case patchpanel::NeighborReachabilityEventSignal::GATEWAY_AND_DNS_SERVER:
+      out->role = Client::NeighborRole::kGatewayAndDnsServer;
+      break;
+    default:
+      LOG(ERROR) << __func__ << ": Unknown NeighborReachability role "
+                 << patchpanel::NeighborReachabilityEventSignal::Role_Name(
+                        in.role());
+      return std::nullopt;
+  }
+  switch (in.type()) {
+    case patchpanel::NeighborReachabilityEventSignal::FAILED:
+      out->status = Client::NeighborStatus::kFailed;
+      break;
+    case patchpanel::NeighborReachabilityEventSignal::REACHABLE:
+      out->status = Client::NeighborStatus::kReachable;
+      break;
+    default:
+      LOG(ERROR) << __func__ << ": Unknown NeighborReachability event type "
+                 << patchpanel::NeighborReachabilityEventSignal::EventType_Name(
+                        in.type());
+      return std::nullopt;
+  }
+  return out;
+}
+
+std::optional<Client::VirtualDeviceEvent> ConvertVirtualDeviceEvent(
+    const NetworkDeviceChangedSignal& in) {
+  switch (in.event()) {
+    case patchpanel::NetworkDeviceChangedSignal::DEVICE_ADDED:
+      return Client::VirtualDeviceEvent::kAdded;
+    case patchpanel::NetworkDeviceChangedSignal::DEVICE_REMOVED:
+      return Client::VirtualDeviceEvent::kRemoved;
+    default:
+      LOG(ERROR) << __func__ << ": Unknown NetworkDeviceChangedSignal event "
+                 << patchpanel::NetworkDeviceChangedSignal::Event_Name(
+                        in.event());
+      return std::nullopt;
+  }
+}
+
+std::optional<Client::ConnectedNamespace> ConvertConnectedNamespace(
+    const ConnectNamespaceResponse& in) {
+  auto out = std::make_optional<Client::ConnectedNamespace>();
+
+  const auto ipv4_subnet = ConvertIPv4Subnet(in.ipv4_subnet());
+  if (!ipv4_subnet) {
+    LOG(ERROR) << "Failed to create IPv4CIDR for ipv4_subnet";
+    return std::nullopt;
+  }
+  out->ipv4_subnet = *ipv4_subnet;
+
+  out->peer_ifname = in.peer_ifname();
+  out->peer_ipv4_address = net_base::IPv4Address(in.peer_ipv4_address());
+  out->host_ifname = in.host_ifname();
+  out->host_ipv4_address = net_base::IPv4Address(in.host_ipv4_address());
+  out->netns_name = in.netns_name();
+  return out;
+}
 
 std::ostream& operator<<(std::ostream& stream,
                          const ModifyPortRuleRequest& request) {
@@ -67,52 +503,70 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
+std::ostream& operator<<(std::ostream& stream, const Client::FeatureFlag flag) {
+  switch (flag) {
+    case Client::FeatureFlag::kWiFiQoS:
+      return stream << "WiFiQoS";
+    case Client::FeatureFlag::kClat:
+      return stream << "Clat";
+  }
+}
+
+// Prepares a pair of ScopedFDs corresponding to the write end (pair first
+// element) and read end (pair second element) of a Linux pipe. The client must
+// keep the write end alive until the setup requested from patchpanel is not
+// necessary anymore.
+std::pair<base::ScopedFD, base::ScopedFD> CreateLifelineFd() {
+  int pipe_fds[2] = {-1, -1};
+  if (pipe2(pipe_fds, O_CLOEXEC) < 0) {
+    PLOG(ERROR) << "Failed to create a pair of fds with pipe2()";
+    return {};
+  }
+  return {base::ScopedFD(pipe_fds[0]), base::ScopedFD(pipe_fds[1])};
+}
+
 void OnGetTrafficCountersDBusResponse(
     Client::GetTrafficCountersCallback callback,
-    dbus::Response* dbus_response) {
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send TrafficCountersRequest message to patchpanel "
-                  "service";
-    std::move(callback).Run({});
-    return;
+    const TrafficCountersResponse& response) {
+  std::vector<Client::TrafficCounter> counters;
+  for (const auto& proto_counter : response.counters()) {
+    auto client_counter = ConvertTrafficCounter(proto_counter);
+    if (client_counter) {
+      counters.push_back(*client_counter);
+    }
   }
-
-  TrafficCountersResponse response;
-  dbus::MessageReader reader(dbus_response);
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse TrafficCountersResponse proto";
-    std::move(callback).Run({});
-    return;
-  }
-
-  std::move(callback).Run(
-      {response.counters().begin(), response.counters().end()});
+  std::move(callback).Run(counters);
 }
 
-void OnNetworkDeviceChangedSignal(
-    const Client::NetworkDeviceChangedSignalHandler& handler,
-    dbus::Signal* signal) {
-  dbus::MessageReader reader(signal);
-  NetworkDeviceChangedSignal proto;
-  if (!reader.PopArrayOfBytesAsProto(&proto)) {
-    LOG(ERROR) << "Failed to parse NetworkDeviceChangedSignal proto";
+void OnGetTrafficCountersError(Client::GetTrafficCountersCallback callback,
+                               brillo::Error* error) {
+  LOG(ERROR) << __func__ << "(): " << error->GetMessage();
+  std::move(callback).Run({});
+}
+
+void OnNetworkDeviceChanged(
+    Client::VirtualDeviceEventHandler handler,
+    const patchpanel::NetworkDeviceChangedSignal& signal) {
+  const auto event = ConvertVirtualDeviceEvent(signal);
+  if (!event) {
     return;
   }
 
-  handler.Run(proto);
+  const auto device = ConvertVirtualDevice(signal.device());
+  if (!device) {
+    return;
+  }
+
+  handler.Run(*event, *device);
 }
 
-void OnNeighborReachabilityEventSignal(
+void OnNeighborReachabilityEvent(
     const Client::NeighborReachabilityEventHandler& handler,
-    dbus::Signal* signal) {
-  dbus::MessageReader reader(signal);
-  NeighborReachabilityEventSignal proto;
-  if (!reader.PopArrayOfBytesAsProto(&proto)) {
-    LOG(ERROR) << "Failed to parse NeighborConnectedStateChangedSignal proto";
-    return;
+    const NeighborReachabilityEventSignal& signal) {
+  const auto event = ConvertNeighborReachabilityEvent(signal);
+  if (event) {
+    handler.Run(*event);
   }
-
-  handler.Run(proto);
 }
 
 void OnSignalConnectedCallback(const std::string& interface_name,
@@ -122,16 +576,87 @@ void OnSignalConnectedCallback(const std::string& interface_name,
     LOG(ERROR) << "Failed to connect to " << signal_name;
 }
 
+// Helper static function to process answers to CreateTetheredNetwork calls.
+void OnTetheredNetworkResponse(Client::CreateTetheredNetworkCallback callback,
+                               base::ScopedFD fd_local,
+                               const TetheredNetworkResponse& response) {
+  if (response.response_code() != DownstreamNetworkResult::SUCCESS) {
+    LOG(ERROR) << kCreateTetheredNetworkMethod << " failed: "
+               << patchpanel::DownstreamNetworkResult_Name(
+                      response.response_code());
+    std::move(callback).Run({});
+    return;
+  }
+
+  std::move(callback).Run(std::move(fd_local));
+}
+
+void OnTetheredNetworkError(Client::CreateTetheredNetworkCallback callback,
+                            brillo::Error* error) {
+  LOG(ERROR) << __func__ << "(): " << error->GetMessage();
+  std::move(callback).Run({});
+}
+
+// Helper static function to process answers to CreateLocalOnlyNetwork calls.
+void OnLocalOnlyNetworkResponse(Client::CreateLocalOnlyNetworkCallback callback,
+                                base::ScopedFD fd_local,
+                                const LocalOnlyNetworkResponse& response) {
+  if (response.response_code() != DownstreamNetworkResult::SUCCESS) {
+    LOG(ERROR) << kCreateLocalOnlyNetworkMethod << " failed: "
+               << patchpanel::DownstreamNetworkResult_Name(
+                      response.response_code());
+    std::move(callback).Run({});
+    return;
+  }
+
+  std::move(callback).Run(std::move(fd_local));
+}
+
+void OnLocalOnlyNetworkError(Client::CreateLocalOnlyNetworkCallback callback,
+                             brillo::Error* error) {
+  LOG(ERROR) << __func__ << "(): " << error->GetMessage();
+  std::move(callback).Run({});
+}
+
+// Helper static function to process answers to GetDownstreamNetworkInfo calls.
+void OnGetDownstreamNetworkInfoResponse(
+    Client::GetDownstreamNetworkInfoCallback callback,
+    const GetDownstreamNetworkInfoResponse& response) {
+  auto downstream_network =
+      ConvertDownstreamNetwork(response.downstream_network());
+  if (!downstream_network) {
+    std::move(callback).Run(false, {}, {});
+    return;
+  }
+
+  std::vector<Client::NetworkClientInfo> clients_info;
+  for (const auto& ci : response.clients_info()) {
+    const auto info = ConvertNetworkClientInfo(ci);
+    if (info) {
+      clients_info.push_back(*info);
+    }
+  }
+
+  std::move(callback).Run(true, *downstream_network, clients_info);
+}
+
+void OnGetDownstreamNetworkInfoError(
+    Client::GetDownstreamNetworkInfoCallback callback, brillo::Error* error) {
+  LOG(ERROR) << __func__ << "(): " << error->GetMessage();
+  std::move(callback).Run(false, {}, {});
+}
+
 class ClientImpl : public Client {
  public:
-  ClientImpl(const scoped_refptr<dbus::Bus>& bus,
-             dbus::ObjectProxy* proxy,
+  ClientImpl(scoped_refptr<dbus::Bus> bus,
+             std::unique_ptr<org::chromium::PatchPanelProxyInterface> proxy,
              bool owns_bus)
-      : bus_(std::move(bus)), proxy_(proxy), owns_bus_(owns_bus) {}
+      : bus_(std::move(bus)), proxy_(std::move(proxy)), owns_bus_(owns_bus) {}
+
   ClientImpl(const ClientImpl&) = delete;
   ClientImpl& operator=(const ClientImpl&) = delete;
 
-  ~ClientImpl();
+  ~ClientImpl() override;
 
   void RegisterOnAvailableCallback(
       base::RepeatingCallback<void(bool)> callback) override;
@@ -142,63 +667,123 @@ class ClientImpl : public Client {
   bool NotifyArcStartup(pid_t pid) override;
   bool NotifyArcShutdown() override;
 
-  std::vector<NetworkDevice> NotifyArcVmStartup(uint32_t cid) override;
+  std::optional<Client::ArcVMAllocation> NotifyArcVmStartup(
+      uint32_t cid) override;
   bool NotifyArcVmShutdown(uint32_t cid) override;
 
-  bool NotifyTerminaVmStartup(uint32_t cid,
-                              NetworkDevice* device,
-                              IPv4Subnet* container_subnet) override;
+  std::optional<Client::TerminaAllocation> NotifyTerminaVmStartup(
+      uint32_t cid) override;
   bool NotifyTerminaVmShutdown(uint32_t cid) override;
 
-  bool NotifyPluginVmStartup(uint64_t vm_id,
-                             int subnet_index,
-                             NetworkDevice* device) override;
-  bool NotifyPluginVmShutdown(uint64_t vm_id) override;
+  std::optional<ParallelsAllocation> NotifyParallelsVmStartup(
+      uint64_t vm_id, int subnet_index) override;
+  bool NotifyParallelsVmShutdown(uint64_t vm_id) override;
 
-  bool DefaultVpnRouting(int socket) override;
+  std::optional<BruschettaAllocation> NotifyBruschettaVmStartup(
+      uint64_t vm_id) override;
+  bool NotifyBruschettaVmShutdown(uint64_t vm_id) override;
 
-  bool RouteOnVpn(int socket) override;
+  bool DefaultVpnRouting(const base::ScopedFD& socket) override;
 
-  bool BypassVpn(int socket) override;
+  bool RouteOnVpn(const base::ScopedFD& socket) override;
 
-  std::pair<base::ScopedFD, patchpanel::ConnectNamespaceResponse>
-  ConnectNamespace(pid_t pid,
-                   const std::string& outbound_ifname,
-                   bool forward_user_traffic,
-                   bool route_on_vpn,
-                   TrafficCounter::Source traffic_source) override;
+  bool BypassVpn(const base::ScopedFD& socket) override;
+
+  std::pair<base::ScopedFD, Client::ConnectedNamespace> ConnectNamespace(
+      pid_t pid,
+      const std::string& outbound_ifname,
+      bool forward_user_traffic,
+      bool route_on_vpn,
+      Client::TrafficSource traffic_source,
+      bool static_ipv6) override;
 
   void GetTrafficCounters(const std::set<std::string>& devices,
                           GetTrafficCountersCallback callback) override;
 
-  bool ModifyPortRule(patchpanel::ModifyPortRuleRequest::Operation op,
-                      patchpanel::ModifyPortRuleRequest::RuleType type,
-                      patchpanel::ModifyPortRuleRequest::Protocol proto,
+  bool ModifyPortRule(Client::FirewallRequestOperation op,
+                      Client::FirewallRequestType type,
+                      Client::FirewallRequestProtocol proto,
                       const std::string& input_ifname,
                       const std::string& input_dst_ip,
                       uint32_t input_dst_port,
                       const std::string& dst_ip,
                       uint32_t dst_port) override;
 
-  bool SetVpnLockdown(bool enable) override;
+  void SetVpnLockdown(bool enable) override;
 
-  base::ScopedFD RedirectDns(
-      patchpanel::SetDnsRedirectionRuleRequest::RuleType type,
-      const std::string& input_ifname,
-      const std::string& proxy_address,
-      const std::vector<std::string>& nameservers) override;
+  base::ScopedFD RedirectDns(Client::DnsRedirectionRequestType type,
+                             const std::string& input_ifname,
+                             const std::string& proxy_address,
+                             const std::vector<std::string>& nameservers,
+                             const std::string& host_ifname) override;
 
-  std::vector<NetworkDevice> GetDevices() override;
+  std::vector<Client::VirtualDevice> GetDevices() override;
 
-  void RegisterNetworkDeviceChangedSignalHandler(
-      NetworkDeviceChangedSignalHandler handler) override;
+  void RegisterVirtualDeviceEventHandler(
+      VirtualDeviceEventHandler handler) override;
 
   void RegisterNeighborReachabilityEventHandler(
       NeighborReachabilityEventHandler handler) override;
 
+  bool CreateTetheredNetwork(
+      const std::string& downstream_ifname,
+      const std::string& upstream_ifname,
+      const std::optional<DHCPOptions>& dhcp_options,
+      const std::optional<UplinkIPv6Configuration>& uplink_ipv6_config,
+      const std::optional<int>& mtu,
+      CreateTetheredNetworkCallback callback) override;
+
+  bool CreateLocalOnlyNetwork(const std::string& ifname,
+                              CreateLocalOnlyNetworkCallback callback) override;
+
+  bool GetDownstreamNetworkInfo(
+      const std::string& ifname,
+      GetDownstreamNetworkInfoCallback callback) override;
+
+  bool SendSetFeatureFlagRequest(FeatureFlag flag, bool enable) override;
+
  private:
+  // Runs the |task| on the DBus thread synchronously.
+  // The generated proxy uses brillo::dbus_utils::CallMethod*(), which asserts
+  // to be executed on the DBus thread, instead of hopping on the DBus thread.
+  // Therefore we need to do it by ourselves.
+  bool RunOnDBusThreadSync(base::OnceCallback<bool()> task) {
+    if (!bus_->HasDBusThread() ||
+        bus_->GetDBusTaskRunner()->RunsTasksInCurrentSequence()) {
+      return std::move(task).Run();
+    }
+
+    base::WaitableEvent event;
+    bool result = false;
+    bus_->GetDBusTaskRunner()->PostTask(
+        FROM_HERE, base::BindOnce(
+                       [](base::OnceCallback<bool()> task, bool* result,
+                          base::WaitableEvent* event) {
+                         *result = std::move(task).Run();
+                         event->Signal();
+                       },
+                       std::move(task), base::Unretained(&result),
+                       base::Unretained(&event)));
+    event.Wait();
+    return result;
+  }
+
+  // Runs the |task| on the DBus thread asynchronously.
+  // The generated proxy uses brillo::dbus_utils::CallMethod*(), which asserts
+  // to be executed on the DBus thread, instead of hopping on the DBus thread.
+  // Therefore we need to do it by ourselves.
+  void RunOnDBusThreadAsync(base::OnceClosure task) {
+    if (!bus_->HasDBusThread() ||
+        bus_->GetDBusTaskRunner()->RunsTasksInCurrentSequence()) {
+      std::move(task).Run();
+      return;
+    }
+
+    bus_->GetDBusTaskRunner()->PostTask(FROM_HERE, std::move(task));
+  }
+
   scoped_refptr<dbus::Bus> bus_;
-  dbus::ObjectProxy* proxy_ = nullptr;  // owned by |bus_|
+  std::unique_ptr<org::chromium::PatchPanelProxyInterface> proxy_;
   bool owns_bus_;  // Yes if |bus_| is created by Client::New
 
   base::RepeatingCallback<void(bool)> owner_callback_;
@@ -206,7 +791,7 @@ class ClientImpl : public Client {
   void OnOwnerChanged(const std::string& old_owner,
                       const std::string& new_owner);
 
-  bool SendSetVpnIntentRequest(int socket,
+  bool SendSetVpnIntentRequest(const base::ScopedFD& socket,
                                SetVpnIntentRequest::VpnRoutingPolicy policy);
 
   base::WeakPtrFactory<ClientImpl> weak_factory_{this};
@@ -219,19 +804,20 @@ ClientImpl::~ClientImpl() {
 
 void ClientImpl::RegisterOnAvailableCallback(
     base::RepeatingCallback<void(bool)> callback) {
-  if (!proxy_) {
+  auto* object_proxy = proxy_->GetObjectProxy();
+  if (!object_proxy) {
     LOG(ERROR) << "Cannot register callback - no proxy";
     return;
   }
-  proxy_->WaitForServiceToBeAvailable(callback);
+  object_proxy->WaitForServiceToBeAvailable(callback);
 }
 
 void ClientImpl::RegisterProcessChangedCallback(
     base::RepeatingCallback<void(bool)> callback) {
   owner_callback_ = callback;
   bus_->GetObjectProxy(kPatchPanelServiceName, dbus::ObjectPath{"/"})
-      ->SetNameOwnerChangedCallback(
-          base::Bind(&ClientImpl::OnOwnerChanged, weak_factory_.GetWeakPtr()));
+      ->SetNameOwnerChangedCallback(base::BindRepeating(
+          &ClientImpl::OnOwnerChanged, weak_factory_.GetWeakPtr()));
 }
 
 void ClientImpl::OnOwnerChanged(const std::string& old_owner,
@@ -249,29 +835,20 @@ void ClientImpl::OnOwnerChanged(const std::string& old_owner,
 }
 
 bool ClientImpl::NotifyArcStartup(pid_t pid) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kArcStartupMethod);
-  dbus::MessageWriter writer(&method_call);
-
   ArcStartupRequest request;
-  request.set_pid(static_cast<uint32_t>(pid));
+  request.set_pid(pid);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode ArcStartupRequest proto";
-    return false;
-  }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return false;
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
+  // TODO(b/284076578): Check if we can call the DBus method asynchronously.
   ArcStartupResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, const ArcStartupRequest& request,
+         ArcStartupResponse* response, brillo::ErrorPtr* error) {
+        return proxy->ArcStartup(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+  if (!result) {
+    LOG(ERROR) << "ARC network startup failed: " << error->GetMessage();
     return false;
   }
 
@@ -279,279 +856,266 @@ bool ClientImpl::NotifyArcStartup(pid_t pid) {
 }
 
 bool ClientImpl::NotifyArcShutdown() {
-  dbus::MethodCall method_call(kPatchPanelInterface, kArcShutdownMethod);
-  dbus::MessageWriter writer(&method_call);
-
-  ArcShutdownRequest request;
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode ArcShutdownRequest proto";
-    return false;
-  }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return false;
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
-  ArcShutdownResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
+  // TODO(b/284076578): Check if we can call the DBus method asynchronously.
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, brillo::ErrorPtr* error) {
+        ArcShutdownResponse response;
+        return proxy->ArcShutdown({}, &response, error);
+      },
+      proxy_.get(), &error));
+  if (!result) {
+    LOG(ERROR) << "ARC network shutdown failed: " << error->GetMessage();
     return false;
   }
 
   return true;
 }
 
-std::vector<NetworkDevice> ClientImpl::NotifyArcVmStartup(uint32_t cid) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kArcVmStartupMethod);
-  dbus::MessageWriter writer(&method_call);
-
+std::optional<Client::ArcVMAllocation> ClientImpl::NotifyArcVmStartup(
+    uint32_t cid) {
   ArcVmStartupRequest request;
   request.set_cid(cid);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode ArcVmStartupRequest proto";
-    return {};
-  }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return {};
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
+  // TODO(b/284076578): Check if concierge can handle the result asynchronously.
   ArcVmStartupResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
-    return {};
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, const ArcVmStartupRequest& request,
+         ArcVmStartupResponse* response, brillo::ErrorPtr* error) {
+        return proxy->ArcVmStartup(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+  if (!result) {
+    LOG(ERROR) << "ARCVM network startup failed: " << error->GetMessage();
+    return std::nullopt;
   }
 
-  std::vector<NetworkDevice> devices;
-  for (const auto& d : response.devices()) {
-    devices.emplace_back(d);
+  const auto arc0_addr =
+      net_base::IPv4Address::CreateFromBytes(response.arc0_ipv4_address());
+  if (!arc0_addr) {
+    LOG(ERROR) << "Could not deserialize arc0 IPv4 address";
+    return std::nullopt;
   }
-  return devices;
+
+  ArcVMAllocation arcvm_alloc;
+  arcvm_alloc.arc0_ipv4_address = *arc0_addr;
+  for (const auto& tap : response.tap_device_ifnames()) {
+    arcvm_alloc.tap_device_ifnames.push_back(tap);
+  }
+  return arcvm_alloc;
 }
 
 bool ClientImpl::NotifyArcVmShutdown(uint32_t cid) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kArcVmShutdownMethod);
-  dbus::MessageWriter writer(&method_call);
-
   ArcVmShutdownRequest request;
   request.set_cid(cid);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode ArcVmShutdownRequest proto";
-    return false;
-  }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return false;
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
+  // TODO(b/284076578): Check if concierge can handle the result asynchronously.
   ArcVmShutdownResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
-    return false;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, const ArcVmShutdownRequest& request,
+         ArcVmShutdownResponse* response, brillo::ErrorPtr* error) {
+        return proxy->ArcVmShutdown(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+  if (!result) {
+    LOG(ERROR) << "ARCVM network shutdown failed: " << error->GetMessage();
   }
 
-  return true;
+  return result;
 }
 
-bool ClientImpl::NotifyTerminaVmStartup(uint32_t cid,
-                                        NetworkDevice* device,
-                                        IPv4Subnet* container_subnet) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kTerminaVmStartupMethod);
-  dbus::MessageWriter writer(&method_call);
-
+std::optional<Client::TerminaAllocation> ClientImpl::NotifyTerminaVmStartup(
+    uint32_t cid) {
   TerminaVmStartupRequest request;
   request.set_cid(cid);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode TerminaVmStartupRequest proto";
-    return false;
-  }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return false;
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
   TerminaVmStartupResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
-    return false;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const TerminaVmStartupRequest& request,
+         TerminaVmStartupResponse* response, brillo::ErrorPtr* error) {
+        return proxy->TerminaVmStartup(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+
+  if (!result) {
+    LOG(ERROR) << __func__ << "(cid: " << cid
+               << "): TerminaVM network startup failed: "
+               << error->GetMessage();
+    return std::nullopt;
   }
 
-  if (!response.has_device()) {
-    LOG(ERROR) << "No device found";
-    return false;
+  const auto termina_alloc = ConvertTerminaAllocation(response);
+  if (!termina_alloc) {
+    LOG(ERROR) << __func__ << "(cid: " << cid
+               << "): Failed to convert network allocation";
   }
-  *device = response.device();
-
-  if (response.has_container_subnet()) {
-    *container_subnet = response.container_subnet();
-  } else {
-    LOG(WARNING) << "No container subnet found";
-  }
-
-  return true;
+  return termina_alloc;
 }
 
 bool ClientImpl::NotifyTerminaVmShutdown(uint32_t cid) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kTerminaVmShutdownMethod);
-  dbus::MessageWriter writer(&method_call);
-
   TerminaVmShutdownRequest request;
   request.set_cid(cid);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode TerminaVmShutdownRequest proto";
-    return false;
-  }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return false;
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
   TerminaVmShutdownResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const TerminaVmShutdownRequest& request,
+         TerminaVmShutdownResponse* response, brillo::ErrorPtr* error) {
+        return proxy->TerminaVmShutdown(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+  if (!result) {
+    LOG(ERROR) << "TerminaVM network shutdown failed: " << error->GetMessage();
     return false;
   }
-
   return true;
 }
 
-bool ClientImpl::NotifyPluginVmStartup(uint64_t vm_id,
-                                       int subnet_index,
-                                       NetworkDevice* device) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kPluginVmStartupMethod);
-  dbus::MessageWriter writer(&method_call);
-
-  PluginVmStartupRequest request;
+std::optional<Client::ParallelsAllocation> ClientImpl::NotifyParallelsVmStartup(
+    uint64_t vm_id, int subnet_index) {
+  ParallelsVmStartupRequest request;
   request.set_id(vm_id);
   request.set_subnet_index(subnet_index);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode PluginVmStartupRequest proto";
-    return false;
+  ParallelsVmStartupResponse response;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const ParallelsVmStartupRequest& request,
+         ParallelsVmStartupResponse* response, brillo::ErrorPtr* error) {
+        return proxy->ParallelsVmStartup(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+
+  if (!result) {
+    LOG(ERROR) << __func__ << "(cid: " << vm_id
+               << ", subnet_index: " << subnet_index
+               << "): Parallels VM network startup failed: "
+               << error->GetMessage();
+    return std::nullopt;
   }
 
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return false;
+  const auto network_alloc = ConvertParallelsAllocation(response);
+  if (!network_alloc) {
+    LOG(ERROR) << __func__ << "(cid: " << vm_id
+               << ", subnet_index: " << subnet_index
+               << "): Failed to convert Parallels VM network configuration";
   }
-
-  dbus::MessageReader reader(dbus_response.get());
-  PluginVmStartupResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
-    return false;
-  }
-
-  if (!response.has_device()) {
-    LOG(ERROR) << "No device found";
-    return false;
-  }
-  *device = response.device();
-
-  return true;
+  return network_alloc;
 }
 
-bool ClientImpl::NotifyPluginVmShutdown(uint64_t vm_id) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kPluginVmShutdownMethod);
-  dbus::MessageWriter writer(&method_call);
-
-  PluginVmShutdownRequest request;
+bool ClientImpl::NotifyParallelsVmShutdown(uint64_t vm_id) {
+  ParallelsVmShutdownRequest request;
   request.set_id(vm_id);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode PluginVmShutdownRequest proto";
+  ParallelsVmShutdownResponse response;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const ParallelsVmShutdownRequest& request,
+         ParallelsVmShutdownResponse* response, brillo::ErrorPtr* error) {
+        return proxy->ParallelsVmShutdown(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+  if (!result) {
+    LOG(ERROR) << "ParallelsVM network shutdown failed: "
+               << error->GetMessage();
     return false;
   }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return false;
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
-  PluginVmShutdownResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
-    return false;
-  }
-
   return true;
 }
 
-bool ClientImpl::DefaultVpnRouting(int socket) {
+std::optional<Client::BruschettaAllocation>
+ClientImpl::NotifyBruschettaVmStartup(uint64_t vm_id) {
+  BruschettaVmStartupRequest request;
+  request.set_id(vm_id);
+
+  BruschettaVmStartupResponse response;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const BruschettaVmStartupRequest& request,
+         BruschettaVmStartupResponse* response, brillo::ErrorPtr* error) {
+        return proxy->BruschettaVmStartup(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+
+  if (!result) {
+    LOG(ERROR) << __func__ << "(vm_id: " << vm_id
+               << "): Bruschetta VM network startup failed: "
+               << error->GetMessage();
+    return std::nullopt;
+  }
+
+  const auto network_alloc = ConvertBruschettaAllocation(response);
+  if (!network_alloc) {
+    LOG(ERROR) << __func__ << "(vm_id: " << vm_id
+               << "): Failed to convert Bruschetta VM network configuration";
+  }
+  return network_alloc;
+}
+
+bool ClientImpl::NotifyBruschettaVmShutdown(uint64_t vm_id) {
+  BruschettaVmShutdownRequest request;
+  request.set_id(vm_id);
+
+  BruschettaVmShutdownResponse response;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const BruschettaVmShutdownRequest& request,
+         BruschettaVmShutdownResponse* response, brillo::ErrorPtr* error) {
+        return proxy->BruschettaVmShutdown(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+  if (!result) {
+    LOG(ERROR) << "BruschettaVM network shutdown failed: "
+               << error->GetMessage();
+    return false;
+  }
+  return true;
+}
+
+bool ClientImpl::DefaultVpnRouting(const base::ScopedFD& socket) {
   return SendSetVpnIntentRequest(socket, SetVpnIntentRequest::DEFAULT_ROUTING);
 }
 
-bool ClientImpl::RouteOnVpn(int socket) {
+bool ClientImpl::RouteOnVpn(const base::ScopedFD& socket) {
   return SendSetVpnIntentRequest(socket, SetVpnIntentRequest::ROUTE_ON_VPN);
 }
 
-bool ClientImpl::BypassVpn(int socket) {
+bool ClientImpl::BypassVpn(const base::ScopedFD& socket) {
   return SendSetVpnIntentRequest(socket, SetVpnIntentRequest::BYPASS_VPN);
 }
 
 bool ClientImpl::SendSetVpnIntentRequest(
-    int socket, SetVpnIntentRequest::VpnRoutingPolicy policy) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kSetVpnIntentMethod);
-  dbus::MessageWriter writer(&method_call);
-
+    const base::ScopedFD& socket,
+    SetVpnIntentRequest::VpnRoutingPolicy policy) {
   SetVpnIntentRequest request;
-  SetVpnIntentResponse response;
   request.set_policy(policy);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode SetVpnIntentRequest proto";
-    return false;
-  }
-  writer.AppendFileDescriptor(socket);
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR)
-        << "Failed to send SetVpnIntentRequest message to patchpanel service";
+  base::ScopedFD dup_socket(dup(socket.get()));
+  if (!dup_socket.is_valid()) {
+    LOG(ERROR) << "Failed to duplicate the socket fd";
     return false;
   }
 
-  dbus::MessageReader reader(dbus_response.get());
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse SetVpnIntentResponse proto";
+  SetVpnIntentResponse response;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, const SetVpnIntentRequest& request,
+         base::ScopedFD socket, SetVpnIntentResponse* response,
+         brillo::ErrorPtr* error) {
+        return proxy->SetVpnIntent(request, socket, response, error);
+      },
+      proxy_.get(), request, std::move(dup_socket), &response, &error));
+  if (!result) {
+    LOG(ERROR) << "SetVpnIntent failed: " << error->GetMessage();
     return false;
   }
 
@@ -562,51 +1126,40 @@ bool ClientImpl::SendSetVpnIntentRequest(
   return true;
 }
 
-std::pair<base::ScopedFD, patchpanel::ConnectNamespaceResponse>
+std::pair<base::ScopedFD, Client::ConnectedNamespace>
 ClientImpl::ConnectNamespace(pid_t pid,
                              const std::string& outbound_ifname,
                              bool forward_user_traffic,
                              bool route_on_vpn,
-                             TrafficCounter::Source traffic_source) {
+                             Client::TrafficSource traffic_source,
+                             bool static_ipv6) {
   // Prepare and serialize the request proto.
   ConnectNamespaceRequest request;
   request.set_pid(static_cast<int32_t>(pid));
   request.set_outbound_physical_device(outbound_ifname);
   request.set_allow_user_traffic(forward_user_traffic);
   request.set_route_on_vpn(route_on_vpn);
-  request.set_traffic_source(traffic_source);
+  request.set_traffic_source(ConvertTrafficSource(traffic_source));
+  request.set_static_ipv6(static_ipv6);
 
-  dbus::MethodCall method_call(kPatchPanelInterface, kConnectNamespaceMethod);
-  dbus::MessageWriter writer(&method_call);
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode ConnectNamespaceRequest proto";
+  auto [fd_local, fd_remote] = CreateLifelineFd();
+  if (!fd_local.is_valid()) {
+    LOG(ERROR)
+        << "Cannot send ConnectNamespace message to patchpanel: no lifeline fd";
     return {};
   }
 
-  // Prepare an fd pair and append one fd directly after the serialized request.
-  int pipe_fds[2] = {-1, -1};
-  if (pipe2(pipe_fds, O_CLOEXEC) < 0) {
-    PLOG(ERROR) << "Failed to create a pair of fds with pipe2()";
-    return {};
-  }
-  base::ScopedFD fd_local(pipe_fds[0]);
-  // MessageWriter::AppendFileDescriptor duplicates the fd, so use ScopeFD to
-  // make sure the original fd is closed eventually.
-  base::ScopedFD fd_remote(pipe_fds[1]);
-  writer.AppendFileDescriptor(pipe_fds[1]);
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send ConnectNamespace message to patchpanel";
-    return {};
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
   ConnectNamespaceResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse ConnectNamespaceResponse proto";
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const ConnectNamespaceRequest& request, base::ScopedFD fd_remote,
+         ConnectNamespaceResponse* response, brillo::ErrorPtr* error) {
+        return proxy->ConnectNamespace(request, fd_remote, response, error);
+      },
+      proxy_.get(), request, std::move(fd_remote), &response, &error));
+  if (!result) {
+    LOG(ERROR) << "ConnectNamespace failed: " << error->GetMessage();
     return {};
   }
 
@@ -615,82 +1168,73 @@ ClientImpl::ConnectNamespace(pid_t pid,
     return {};
   }
 
-  std::string subnet_info = IPv4AddressToCidrString(
-      response.ipv4_subnet().base_addr(), response.ipv4_subnet().prefix_len());
-  LOG(INFO) << "ConnectNamespace for netns pid " << pid
-            << " succeeded: peer_ifname=" << response.peer_ifname()
-            << " peer_ipv4_address="
-            << IPv4AddressToString(response.peer_ipv4_address())
-            << " host_ifname=" << response.host_ifname()
-            << " host_ipv4_address="
-            << IPv4AddressToString(response.host_ipv4_address())
-            << " subnet=" << subnet_info;
+  const auto connected_ns = ConvertConnectedNamespace(response);
+  if (!connected_ns) {
+    LOG(ERROR) << "Failed to convert ConnectedNamespace";
+    return {};
+  }
 
-  return std::make_pair(std::move(fd_local), std::move(response));
+  LOG(INFO) << "ConnectNamespace for netns pid " << pid
+            << " succeeded: peer_ifname=" << connected_ns->peer_ifname
+            << " peer_ipv4_address=" << connected_ns->peer_ipv4_address
+            << " host_ifname=" << connected_ns->host_ifname
+            << " host_ipv4_address=" << connected_ns->host_ipv4_address
+            << " subnet=" << connected_ns->ipv4_subnet.ToString();
+
+  return std::make_pair(std::move(fd_local), *connected_ns);
 }
 
 void ClientImpl::GetTrafficCounters(const std::set<std::string>& devices,
                                     GetTrafficCountersCallback callback) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kGetTrafficCountersMethod);
-  dbus::MessageWriter writer(&method_call);
-
   TrafficCountersRequest request;
   for (const auto& device : devices) {
     request.add_devices(device);
   }
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode TrafficCountersRequest proto";
-    std::move(callback).Run({});
-    return;
-  }
-
-  proxy_->CallMethod(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
-      base::BindOnce(&OnGetTrafficCountersDBusResponse, std::move(callback)));
+  RunOnDBusThreadAsync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, const TrafficCountersRequest& request,
+         GetTrafficCountersCallback callback) {
+        auto split_callback = SplitOnceCallback(std::move(callback));
+        proxy->GetTrafficCountersAsync(
+            request,
+            base::BindOnce(&OnGetTrafficCountersDBusResponse,
+                           std::move(split_callback.first)),
+            base::BindOnce(&OnGetTrafficCountersError,
+                           std::move(split_callback.second)));
+      },
+      proxy_.get(), request,
+      base::BindPostTaskToCurrentDefault(std::move(callback))));
 }
 
-bool ClientImpl::ModifyPortRule(ModifyPortRuleRequest::Operation op,
-                                ModifyPortRuleRequest::RuleType type,
-                                ModifyPortRuleRequest::Protocol proto,
+bool ClientImpl::ModifyPortRule(Client::FirewallRequestOperation op,
+                                Client::FirewallRequestType type,
+                                Client::FirewallRequestProtocol proto,
                                 const std::string& input_ifname,
                                 const std::string& input_dst_ip,
                                 uint32_t input_dst_port,
                                 const std::string& dst_ip,
                                 uint32_t dst_port) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kModifyPortRuleMethod);
-  dbus::MessageWriter writer(&method_call);
-
   ModifyPortRuleRequest request;
-  ModifyPortRuleResponse response;
-
-  request.set_op(op);
-  request.set_type(type);
-  request.set_proto(proto);
+  request.set_op(ConvertFirewallRequestOperation(op));
+  request.set_type(ConvertFirewallRequestType(type));
+  request.set_proto(ConvertFirewallRequestProtocol(proto));
   request.set_input_ifname(input_ifname);
   request.set_input_dst_ip(input_dst_ip);
   request.set_input_dst_port(input_dst_port);
   request.set_dst_ip(dst_ip);
   request.set_dst_port(dst_port);
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode ModifyPortRuleRequest proto " << request;
-    return false;
-  }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR)
-        << "Failed to send ModifyPortRuleRequest message to patchpanel service "
-        << request;
-    return false;
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse ModifyPortRuleResponse proto " << request;
+  // TODO(b/284797476): Switch permission_brokker to use the async DBus call.
+  ModifyPortRuleResponse response;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, const ModifyPortRuleRequest& request,
+         ModifyPortRuleResponse* response, brillo::ErrorPtr* error) {
+        return proxy->ModifyPortRule(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+  if (!result) {
+    LOG(ERROR) << "ModifyPortRule failed: " << error->GetMessage();
     return false;
   }
 
@@ -701,88 +1245,61 @@ bool ClientImpl::ModifyPortRule(ModifyPortRuleRequest::Operation op,
   return true;
 }
 
-bool ClientImpl::SetVpnLockdown(bool enable) {
-  dbus::MethodCall method_call(kPatchPanelInterface, kSetVpnLockdown);
-  dbus::MessageWriter writer(&method_call);
-
+void ClientImpl::SetVpnLockdown(bool enable) {
   SetVpnLockdownRequest request;
-  SetVpnLockdownResponse response;
-
   request.set_enable_vpn_lockdown(enable);
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode SetVpnLockdownRequest proto";
-    return false;
-  }
 
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to call SetVpnLockdown patchpanel API";
-    return false;
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse SetVpnLockdownResponse";
-    return false;
-  }
-
-  return true;
+  RunOnDBusThreadAsync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const SetVpnLockdownRequest& request) {
+        // This API doesn't return anything.
+        auto success_callback = base::DoNothing();
+        // The current use case do not care about failures. Leaving a log is
+        // enough now.
+        auto error_callback = [](brillo::Error* error) {
+          LOG(ERROR) << "SetVpnLockdown failed: " << error->GetMessage();
+        };
+        proxy->SetVpnLockdownAsync(request, success_callback,
+                                   base::BindOnce(error_callback));
+      },
+      proxy_.get(), request));
 }
 
 base::ScopedFD ClientImpl::RedirectDns(
-    patchpanel::SetDnsRedirectionRuleRequest::RuleType type,
+    Client::DnsRedirectionRequestType type,
     const std::string& input_ifname,
     const std::string& proxy_address,
-    const std::vector<std::string>& nameservers) {
-  dbus::MethodCall method_call(kPatchPanelInterface,
-                               kSetDnsRedirectionRuleMethod);
-  dbus::MessageWriter writer(&method_call);
-
+    const std::vector<std::string>& nameservers,
+    const std::string& host_ifname) {
   SetDnsRedirectionRuleRequest request;
-  SetDnsRedirectionRuleResponse response;
-
-  request.set_type(type);
+  request.set_type(ConvertDnsRedirectionRequestType(type));
   request.set_input_ifname(input_ifname);
   request.set_proxy_address(proxy_address);
+  request.set_host_ifname(host_ifname);
   for (const auto& nameserver : nameservers) {
     request.add_nameservers(nameserver);
   }
 
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode SetDnsRedirectionRuleRequest proto "
-               << request;
-    return {};
-  }
-
   // Prepare an fd pair and append one fd directly after the serialized request.
-  int pipe_fds[2] = {-1, -1};
-  if (pipe2(pipe_fds, O_CLOEXEC) < 0) {
-    PLOG(ERROR) << "Failed to create a pair of fds with pipe2() of request "
-                << request;
-    return {};
-  }
-  base::ScopedFD fd_local(pipe_fds[0]);
-  // MessageWriter::AppendFileDescriptor duplicates the fd, so use ScopeFD to
-  // make sure the original fd is closed eventually.
-  base::ScopedFD fd_remote(pipe_fds[1]);
-  writer.AppendFileDescriptor(pipe_fds[1]);
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send SetDnsRedirectionRuleRequest message to "
-                  "patchpanel service "
-               << request;
+  auto [fd_local, fd_remote] = CreateLifelineFd();
+  if (!fd_local.is_valid()) {
+    LOG(ERROR) << "Cannot send SetDnsRedirectionRuleRequest message to "
+                  "patchpanel: no lifeline fd";
     return {};
   }
 
-  dbus::MessageReader reader(dbus_response.get());
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse SetDnsRedirectionRuleResponse proto "
-               << request;
+  SetDnsRedirectionRuleResponse response;
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const SetDnsRedirectionRuleRequest& request, base::ScopedFD fd_remote,
+         SetDnsRedirectionRuleResponse* response, brillo::ErrorPtr* error) {
+        return proxy->SetDnsRedirectionRule(request, fd_remote, response,
+                                            error);
+      },
+      proxy_.get(), request, std::move(fd_remote), &response, &error));
+  if (!result) {
+    LOG(ERROR) << "SetDnsRedirectionRule failed: " << error->GetMessage();
     return {};
   }
 
@@ -790,64 +1307,197 @@ base::ScopedFD ClientImpl::RedirectDns(
     LOG(ERROR) << "SetDnsRedirectionRuleRequest failed " << request;
     return {};
   }
-  return fd_local;
+  return std::move(fd_local);
 }
 
-std::vector<NetworkDevice> ClientImpl::GetDevices() {
-  dbus::MethodCall method_call(kPatchPanelInterface, kGetDevicesMethod);
-  dbus::MessageWriter writer(&method_call);
-
-  GetDevicesRequest request;
-  if (!writer.AppendProtoAsArrayOfBytes(request)) {
-    LOG(ERROR) << "Failed to encode GetDevicesRequest proto";
-    return {};
-  }
-
-  std::unique_ptr<dbus::Response> dbus_response =
-      brillo::dbus_utils::CallDBusMethod(
-          bus_, proxy_, &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (!dbus_response) {
-    LOG(ERROR) << "Failed to send dbus message to patchpanel service";
-    return {};
-  }
-
-  dbus::MessageReader reader(dbus_response.get());
+std::vector<Client::VirtualDevice> ClientImpl::GetDevices() {
+  // TODO(b/284797476): Add a DBus service in dns-proxy to let patchpanel push
+  // information to dns-proxy.
   GetDevicesResponse response;
-  if (!reader.PopArrayOfBytesAsProto(&response)) {
-    LOG(ERROR) << "Failed to parse response proto";
+  brillo::ErrorPtr error;
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, GetDevicesResponse* response,
+         brillo::ErrorPtr* error) {
+        return proxy->GetDevices({}, response, error);
+      },
+      proxy_.get(), &response, &error));
+  if (!result) {
+    LOG(ERROR) << "GetDevices failed: " << error->GetMessage();
     return {};
   }
 
-  std::vector<NetworkDevice> devices;
+  std::vector<Client::VirtualDevice> devices;
   for (const auto& d : response.devices()) {
-    devices.emplace_back(d);
+    const auto device = ConvertVirtualDevice(d);
+    if (device) {
+      devices.push_back(*device);
+    }
   }
   return devices;
 }
 
-void ClientImpl::RegisterNetworkDeviceChangedSignalHandler(
-    NetworkDeviceChangedSignalHandler handler) {
-  proxy_->ConnectToSignal(
-      kPatchPanelInterface, kNetworkDeviceChangedSignal,
-      base::BindRepeating(OnNetworkDeviceChangedSignal, handler),
+void ClientImpl::RegisterVirtualDeviceEventHandler(
+    VirtualDeviceEventHandler handler) {
+  proxy_->RegisterNetworkDeviceChangedSignalHandler(
+      base::BindRepeating(OnNetworkDeviceChanged, std::move(handler)),
       base::BindOnce(OnSignalConnectedCallback));
 }
 
 void ClientImpl::RegisterNeighborReachabilityEventHandler(
     NeighborReachabilityEventHandler handler) {
-  proxy_->ConnectToSignal(
-      kPatchPanelInterface, kNeighborReachabilityEventSignal,
-      base::BindRepeating(OnNeighborReachabilityEventSignal, handler),
+  proxy_->RegisterNeighborReachabilityEventSignalHandler(
+      base::BindRepeating(OnNeighborReachabilityEvent, std::move(handler)),
       base::BindOnce(OnSignalConnectedCallback));
 }
 
-dbus::ObjectProxy* GetProxy(const scoped_refptr<dbus::Bus>& bus) {
-  dbus::ObjectProxy* proxy = bus->GetObjectProxy(
-      kPatchPanelServiceName, dbus::ObjectPath(kPatchPanelServicePath));
-  if (!proxy) {
-    LOG(ERROR) << "Unable to get dbus proxy for " << kPatchPanelServiceName;
+bool ClientImpl::CreateTetheredNetwork(
+    const std::string& downstream_ifname,
+    const std::string& upstream_ifname,
+    const std::optional<DHCPOptions>& dhcp_options,
+    const std::optional<UplinkIPv6Configuration>& uplink_ipv6_config,
+    const std::optional<int>& mtu,
+    CreateTetheredNetworkCallback callback) {
+  TetheredNetworkRequest request;
+  request.set_ifname(downstream_ifname);
+  request.set_upstream_ifname(upstream_ifname);
+  if (mtu) {
+    request.set_mtu(*mtu);
   }
-  return proxy;
+  if (dhcp_options.has_value()) {
+    auto* ipv4_config = request.mutable_ipv4_config();
+    ipv4_config->set_use_dhcp(true);
+    for (const auto& dns_server : dhcp_options->dns_server_addresses) {
+      ipv4_config->add_dns_servers(dns_server.ToByteString());
+    }
+    for (const auto& domain_search : dhcp_options->domain_search_list) {
+      ipv4_config->add_domain_searches(domain_search);
+    }
+    if (dhcp_options->is_android_metered) {
+      auto options = ipv4_config->add_options();
+      // RFC 3925 defines the DHCP option 43 is Vendor Specific.
+      options->set_code(43);
+      options->set_content("ANDROID_METERED");
+    }
+  }
+  request.set_enable_ipv6(true);
+  if (uplink_ipv6_config.has_value()) {
+    auto* ipv6_config = request.mutable_uplink_ipv6_config();
+    auto* uplink_ipv6_cidr = ipv6_config->mutable_uplink_ipv6_cidr();
+    uplink_ipv6_cidr->set_addr(
+        uplink_ipv6_config->uplink_address.address().ToByteString());
+    uplink_ipv6_cidr->set_prefix_len(
+        uplink_ipv6_config->uplink_address.prefix_length());
+    for (const auto& dns_server : uplink_ipv6_config->dns_server_addresses) {
+      ipv6_config->add_dns_servers(dns_server.ToByteString());
+    }
+  }
+
+  // Prepare an fd pair and append one fd directly after the serialized request.
+  auto [fd_local, fd_remote] = CreateLifelineFd();
+  if (!fd_local.is_valid()) {
+    LOG(ERROR) << kCreateTetheredNetworkMethod << "(" << downstream_ifname
+               << "," << upstream_ifname << "): Cannot create lifeline fds";
+    return false;
+  }
+
+  RunOnDBusThreadAsync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, const TetheredNetworkRequest& request,
+         base::ScopedFD fd_local, base::ScopedFD fd_remote,
+         CreateTetheredNetworkCallback callback) {
+        auto split_callback = SplitOnceCallback(std::move(callback));
+        proxy->CreateTetheredNetworkAsync(
+            request, fd_remote,
+            base::BindOnce(&OnTetheredNetworkResponse,
+                           std::move(split_callback.first),
+                           std::move(fd_local)),
+            base::BindOnce(&OnTetheredNetworkError,
+                           std::move(split_callback.second)));
+      },
+      proxy_.get(), request, std::move(fd_local), std::move(fd_remote),
+      base::BindPostTaskToCurrentDefault(std::move(callback))));
+
+  return true;
+}
+
+bool ClientImpl::CreateLocalOnlyNetwork(
+    const std::string& ifname, CreateLocalOnlyNetworkCallback callback) {
+  LocalOnlyNetworkRequest request;
+  request.set_ifname(ifname);
+  auto* ipv4_config = request.mutable_ipv4_config();
+  ipv4_config->set_use_dhcp(true);
+
+  // Prepare an fd pair and append one fd directly after the serialized request.
+  auto [fd_local, fd_remote] = CreateLifelineFd();
+  if (!fd_local.is_valid()) {
+    LOG(ERROR) << kCreateLocalOnlyNetworkMethod
+               << ": Cannot create lifeline fds";
+    return false;
+  }
+
+  RunOnDBusThreadAsync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const LocalOnlyNetworkRequest& request, base::ScopedFD fd_local,
+         base::ScopedFD fd_remote, CreateLocalOnlyNetworkCallback callback) {
+        auto split_callback = SplitOnceCallback(std::move(callback));
+        proxy->CreateLocalOnlyNetworkAsync(
+            request, fd_remote,
+            base::BindOnce(&OnLocalOnlyNetworkResponse,
+                           std::move(split_callback.first),
+                           std::move(fd_local)),
+            base::BindOnce(&OnLocalOnlyNetworkError,
+                           std::move(split_callback.second)));
+      },
+      proxy_.get(), request, std::move(fd_local), std::move(fd_remote),
+      base::BindPostTaskToCurrentDefault(std::move(callback))));
+
+  return true;
+}
+
+bool ClientImpl::GetDownstreamNetworkInfo(
+    const std::string& ifname, GetDownstreamNetworkInfoCallback callback) {
+  GetDownstreamNetworkInfoRequest request;
+  request.set_downstream_ifname(ifname);
+
+  RunOnDBusThreadAsync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy,
+         const GetDownstreamNetworkInfoRequest& request,
+         GetDownstreamNetworkInfoCallback callback) {
+        auto split_callback = SplitOnceCallback(std::move(callback));
+        proxy->GetDownstreamNetworkInfoAsync(
+            request,
+            base::BindOnce(&OnGetDownstreamNetworkInfoResponse,
+                           std::move(split_callback.first)),
+            base::BindOnce(&OnGetDownstreamNetworkInfoError,
+                           std::move(split_callback.second)));
+      },
+      proxy_.get(), request,
+      base::BindPostTaskToCurrentDefault(std::move(callback))));
+
+  return true;
+}
+
+bool ClientImpl::SendSetFeatureFlagRequest(FeatureFlag flag, bool enable) {
+  SetFeatureFlagRequest request;
+  request.set_enabled(enable);
+  request.set_flag(ConvertFeatureFlag(flag));
+
+  SetFeatureFlagResponse response;
+  brillo::ErrorPtr error;
+
+  const bool result = RunOnDBusThreadSync(base::BindOnce(
+      [](PatchPanelProxyInterface* proxy, const SetFeatureFlagRequest& request,
+         SetFeatureFlagResponse* response, brillo::ErrorPtr* error) {
+        return proxy->SetFeatureFlag(request, response, error);
+      },
+      proxy_.get(), request, &response, &error));
+
+  if (!result) {
+    LOG(ERROR) << "Failed to set feature flag of " << flag << ": "
+               << error->GetMessage();
+    return false;
+  }
+
+  return true;
 }
 
 }  // namespace
@@ -863,27 +1513,78 @@ std::unique_ptr<Client> Client::New() {
     return nullptr;
   }
 
-  dbus::ObjectProxy* proxy = GetProxy(bus);
-  if (!proxy)
+  auto proxy = std::make_unique<org::chromium::PatchPanelProxy>(bus);
+  if (!proxy) {
+    LOG(ERROR) << "Failed to create proxy";
     return nullptr;
+  }
 
-  return std::make_unique<ClientImpl>(std::move(bus), proxy,
-                                      true /* owns_bus */);
+  return std::make_unique<ClientImpl>(std::move(bus), std::move(proxy),
+                                      /*owns_bus=*/true);
 }
 
+// static
 std::unique_ptr<Client> Client::New(const scoped_refptr<dbus::Bus>& bus) {
-  dbus::ObjectProxy* proxy = GetProxy(bus);
-  if (!proxy)
+  auto proxy = std::make_unique<org::chromium::PatchPanelProxy>(bus);
+  if (!proxy) {
+    LOG(ERROR) << "Failed to create proxy";
     return nullptr;
-
-  return std::make_unique<ClientImpl>(std::move(bus), proxy,
-                                      false /* owns_bus */);
+  }
+  return std::make_unique<ClientImpl>(bus, std::move(proxy),
+                                      /*owns_bus=*/false);
 }
 
-std::unique_ptr<Client> Client::New(const scoped_refptr<dbus::Bus>& bus,
-                                    dbus::ObjectProxy* proxy) {
-  return std::make_unique<ClientImpl>(std::move(bus), proxy,
-                                      false /* owns_bus */);
+// static
+std::unique_ptr<Client> Client::NewForTesting(
+    scoped_refptr<dbus::Bus> bus,
+    std::unique_ptr<org::chromium::PatchPanelProxyInterface> proxy) {
+  return std::make_unique<ClientImpl>(std::move(bus), std::move(proxy),
+                                      /*owns_bus=*/false);
+}
+
+// static
+bool Client::IsArcGuest(Client::GuestType guest_type) {
+  switch (guest_type) {
+    case Client::GuestType::kArcContainer:
+    case Client::GuestType::kArcVm:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// static
+std::string Client::TrafficSourceName(
+    patchpanel::Client::TrafficSource source) {
+  return patchpanel::TrafficCounter::Source_Name(ConvertTrafficSource(source));
+}
+
+// static
+std::string Client::ProtocolName(
+    patchpanel::Client::FirewallRequestProtocol protocol) {
+  return patchpanel::ModifyPortRuleRequest::Protocol_Name(
+      ConvertFirewallRequestProtocol(protocol));
+}
+
+// static
+std::string Client::NeighborRoleName(patchpanel::Client::NeighborRole role) {
+  return NeighborReachabilityEventSignal::Role_Name(ConvertNeighborRole(role));
+}
+
+// static
+std::string Client::NeighborStatusName(
+    patchpanel::Client::NeighborStatus status) {
+  return NeighborReachabilityEventSignal::EventType_Name(
+      ConvertNeighborStatus(status));
+}
+
+BRILLO_EXPORT std::ostream& operator<<(
+    std::ostream& stream, const Client::NeighborReachabilityEvent& event) {
+  return stream << "{ifindex: " << event.ifindex
+                << ", ip_address: " << event.ip_addr
+                << ", role: " << Client::NeighborRoleName(event.role)
+                << ", status: " << Client::NeighborStatusName(event.status)
+                << "}";
 }
 
 }  // namespace patchpanel

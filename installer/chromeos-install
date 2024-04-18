@@ -1,5 +1,5 @@
 #!/bin/sh -u
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
@@ -20,6 +20,9 @@ SRC_BLKSIZE=512
 
 # Copy the rootfs in chunks to optimize disk cache usage.
 NUM_ROOTFS_CHUNKS=4
+
+# Cached recovery key version read from flashrom.
+RECOVERY_KEY_VERSION=
 
 # Helpful constants.
 HARDWARE_DIAGNOSTICS_PATH=/tmp/hardware_diagnostics.log
@@ -63,6 +66,7 @@ DEFINE_boolean storage_diags "${FLAGS_FALSE}" "Print storage diagnostic \
 information on failure"
 DEFINE_boolean lvm_stateful "${FLAGS_FALSE}" "Create LVM-based stateful \
 partition"
+DEFINE_boolean minimal_copy "${FLAGS_FALSE}" "Minimal copy of partitions."
 
 
 # Parse command line
@@ -406,12 +410,14 @@ loop_offset_cleanup() {
 }
 
 # Mount the existing loop device at the mountpoint in $TMPMNT.
-# Args: optional 'readwrite'. If present, mount read-write, otherwise read-only.
+# Args: optional 'rw'. If present, mount read-write, otherwise read-only.
 mount_on_loop_dev() {
-  local rw_flag=${1-readonly}
-  set --
-  if [ "${rw_flag}" != "readwrite" ]; then
-    set -- "$@" -o ro
+  local rw_flag=${1-ro}
+  set -- -o nosuid,nodev
+  if [ "${rw_flag}" != "rw" ]; then
+    set -- "$@",ro,exec
+  else
+    set -- "$@",rw,noexec
   fi
   tracked_mount "$@" "${LOOP_DEV}" "${TMPMNT}"
 }
@@ -579,14 +585,14 @@ wipe_stateful() {
     local thinpool_metadata_size="$(get_thinpool_metadata_size \
       "${thinpool_size}")"
 
-    lvcreate --size "${thinpool_size}M" --poolmetadatasize \
+    lvcreate --zero n --size "${thinpool_size}M" --poolmetadatasize \
       "${thinpool_metadata_size}M" --thinpool "thinpool" "${vg_name}/thinpool"
 
     echo "Creating unencrypted volume"
     local lv_size="$(get_logical_volume_size "${DEV}")"
     lvcreate --thin -V "${lv_size}M" -n "unencrypted" "${vg_name}/thinpool"
 
-    NUM_STATEFUL_SECTORS=$(( lv_size * 2 * 1024 ))
+    NUM_STATEFUL_SECTORS=$(( lv_size * 1024 * 1024 / DST_BLKSIZE ))
     DEV="/dev/${vg_name}/unencrypted"
   fi
 
@@ -606,10 +612,14 @@ wipe_stateful() {
     ;;
   esac
 
-  # When the stateful partition is wiped the TPM ownership must be reset. This
-  # command will not work on older devices which do not support it. In that case
-  # it will be ignored.
-  crossystem clear_tpm_owner_request=1 || true
+  # When the stateful partition is wiped the TPM ownership must be reset.
+  # This command will not work on Flex devices which do not support it.
+  # In that case the result will be ignored.
+  if [ "$(crossystem mainfw_type)" != "nonchrome" ]; then
+    crossystem clear_tpm_owner_request=1
+  else
+    crossystem clear_tpm_owner_request=1 || true
+  fi
 }
 
 # Install the stateful partition content
@@ -664,7 +674,7 @@ install_stateful() {
     fi
     ;;
   esac
-  mount_on_loop_dev readwrite
+  mount_on_loop_dev rw
 
   # Move log files listed in FLAGS_lab_preserve_logs from stateful_partition to
   # a dedicated location. This flag is used to enable Autotest to collect log
@@ -707,20 +717,6 @@ install_stateful() {
   "
 
   if crossystem 'cros_debug?1'; then
-    # For a debug install, add a separate partition for developer-tools.
-    if [ "${FLAGS_lvm_stateful}" -eq "${FLAGS_TRUE}" ]; then
-      local lv_size="$(get_logical_volume_size "${dst_stateful_partition}")"
-      local stateful_fs_format="$(get_fs_format "${PARTITION_NUM_STATE}")"
-
-      lvcreate --thin -V "${lv_size}M" -n "dev-image" "${vg_name}/thinpool"
-      lvchange -ay "${vg_name}/dev-image"
-
-      mkfs "${stateful_fs_format}" ${NUM_STATEFUL_SECTORS} \
-        "/dev/${vg_name}/dev-image" "DEVTOOLS"
-      mkdir -p "${TMPMNT}/dev_image"
-      mount "/dev/${vg_name}/dev-image" "${TMPMNT}/dev_image"
-    fi
-
     dirlist="
       ${dirlist}
       var_overlay/db/pkg
@@ -734,7 +730,8 @@ install_stateful() {
        local f_path=$(dirname "${f}")
        local dlc_package=$(basename "${f_path}")
        local dlc_id=$(basename $(dirname "${f_path}"))
-       if grep '\"preload-allowed\":\s*true' "${f}"; then
+       if grep -q '\"preload-allowed\":\s*true' "${f}"; then
+         echo "Preloading DLC=${dlc_id}"
          dirlist="
            ${dirlist}
            var_overlay/cache/dlc-images/${dlc_id}/${dlc_package}
@@ -778,8 +775,11 @@ install_stateful() {
     cp -au "${ROOT}/mnt/stateful_partition/${dir}" "${TMPMNT}/${parent}"
   done
 
-  if mountpoint -q "${TMPMNT}/dev_image"; then
-    umount "${TMPMNT}/dev_image"
+  local manifest="${ROOT}/home/chronos/user/startup_manifest.json"
+  if [ -e "${manifest}" ]; then
+    local dst_dir="${TMPMNT}/unencrypted/preserve"
+    mkdir -p "${dst_dir}"
+    cp "${manifest}" "${dst_dir}"
   fi
 
   umount_from_loop_dev
@@ -793,6 +793,41 @@ install_stateful() {
     fi
     ;;
   esac
+}
+
+# Get the recovery key version.
+# Default value on failure is "1".
+get_recovery_key_version() {
+  local tmpdir="$(mktemp -d)"
+  local tmpflash="${tmpdir}/flash"
+  local tmpflashparsed="${tmpdir}/flashparsed"
+
+  # Suppress failures and fallback to default value.
+  set +e
+
+  # Read the flashrom.
+  flashrom -i GBB:"${tmpflash}" -r >&2
+  if [ "$?" -ne 0 ]; then
+    echo "Failed to read flashrom, defaulting to recovery key version=\"1\"" >&2
+    # Default.
+    echo "1"
+  else
+    # If successful, continue to extract the key version.
+    futility show "${tmpflash}" > "${tmpflashparsed}"
+    local key_version=$(grep -A3 'Recovery Key:' "${tmpflashparsed}" \
+      | grep 'Key Version:' \
+      | grep -Eo '[0-9]+')
+    echo "${key_version}"
+  fi
+
+  # Cleanup tmp files and directory.
+  for p in "${tmpflash}" "${tmpflashparsed}"; do
+    unlink "${p}"
+  done
+  rmdir "${tmpdir}"
+
+  # Back to strict.
+  set -e
 }
 
 # Copy partition from src to dst (figures out partition offsets). Note, this
@@ -851,9 +886,21 @@ copy_partition() {
       "${cache_input}"
     ;;
   "${PARTITION_NUM_MINIOS_A}"|"${PARTITION_NUM_MINIOS_B}")
-    # Always copy from MINIOS_A for MiniOS partitions.
-    part_size=$(partsize "${src}" "${PARTITION_NUM_MINIOS_A}")
-    src_offset=$(partoffset "${src}" "${PARTITION_NUM_MINIOS_A}")
+    # Choose to copy from A or B for miniOS partitions.
+    local src_part_num
+    if [ -n "${RECOVERY_KEY_VERSION}" ]; then
+      echo "Using cached recovery key version=\"${RECOVERY_KEY_VERSION}\""
+    else
+      RECOVERY_KEY_VERSION=$(get_recovery_key_version)
+      echo "Using recovery key version=\"${RECOVERY_KEY_VERSION}\""
+    fi
+    if [ "${RECOVERY_KEY_VERSION}" -eq "1" ]; then
+      src_part_num="${PARTITION_NUM_MINIOS_A}"
+    else
+      src_part_num="${PARTITION_NUM_MINIOS_B}"
+    fi
+    part_size=$(partsize "${src}" "${src_part_num}")
+    src_offset=$(partoffset "${src}" "${src_part_num}")
     write_partition "${part_num}" "${part_size}" "${dst_offset}" \
       "${src_offset}" "${src}" "${dst}" "${chunk_num}" "${total_chunks}" \
       "${cache_input}"
@@ -1021,6 +1068,13 @@ legacy_offset_size_export() {
   NUM_STATEFUL_SECTORS="$(partsize "$1" "${PARTITION_NUM_STATE}")"
 }
 
+ufs_init() {
+  local ufs_init_bin="/usr/sbin/factory_ufs"
+  if [ -x "${ufs_init_bin}" ]; then
+    ${ufs_init_bin} provision
+  fi
+}
+
 main() {
   # Be aggressive.
   set -eu
@@ -1033,7 +1087,8 @@ main() {
 
   # We untrap on success and run cleanup ourselves. Otherwise, on any failure,
   # run our custom trap method to gather any diagnostic data before cleaning up.
-  trap cleanup_on_failure EXIT
+  # Also, cleanup mounts if install is interrupted.
+  trap cleanup_on_failure INT TERM EXIT
 
   # Clean media browser mounts if they've popped up.
   prepare_disk
@@ -1060,23 +1115,11 @@ main() {
   . "${ROOT}/usr/sbin/write_gpt.sh"
   load_base_vars
 
-  # This was moved out of check_payload_image because DEFAULT_ROOTDEV
-  # is not defined until after the GPT helper functions are loaded.
-  if [ "${FLAGS_skip_src_removable}" -eq "${FLAGS_FALSE}" ]; then
-    if [ "$(cat "/sys/block/${SRC#/dev/}/removable")" != "1" ]; then
-      # Removable flag is implemented inconsistently for ARM sdcard reader.
-      # Allow all devices except the default fixed drive.
-      if [ "${SRC}" = "$(get_fixed_dst_drive)" ]; then
-        trap - EXIT
-        cleanup
-        die "Error: Source can not be the destination device: ${SRC}"
-      fi
-    fi
-  fi
-
   # Now that we have loaded the partition table we can actually read the format
   # and partition information.
   STATEFUL_FORMAT="$(get_format "${PARTITION_NUM_STATE}")"
+
+  ufs_init
 
   DST=${FLAGS_dst:-$(get_fixed_dst_drive)}
   check_dst
@@ -1151,7 +1194,13 @@ main() {
   copy_partition "${PARTITION_NUM_OEM}" "${SRC}" "${DST}" 1 1 false        # 8
   copy_partition "${PARTITION_NUM_ROOT_C}" "${SRC}" "${DST}" 1 1 false     # 7
   copy_partition "${PARTITION_NUM_KERN_C}" "${SRC}" "${DST}" 1 1 false     # 6
-  copy_partition "${PARTITION_NUM_KERN_B}" "${SRC}" "${DST}" 1 1 false     # 4
+  # Cache the first read of KERN so the second is read from RAM.
+  # This is okay as they read from the same source.
+  if [ "${FLAGS_minimal_copy}" -eq "${FLAGS_TRUE}" ]; then
+    echo "Skipping copy of B kernel partition."
+  else
+    copy_partition "${PARTITION_NUM_KERN_B}" "${SRC}" "${DST}" 1 1 true    # 4
+  fi
   copy_partition "${PARTITION_NUM_KERN_A}" "${SRC}" "${DST}" 1 1 false     # 2
 
   # We want to chunk up the root filesystem.  We do this because we're
@@ -1162,8 +1211,12 @@ main() {
   # prevents this.
   local chunk_num
   for chunk_num in $(seq "${NUM_ROOTFS_CHUNKS}"); do
-    copy_partition "${PARTITION_NUM_ROOT_B}" "${SRC}" "${DST}" \
-       "${chunk_num}" "${NUM_ROOTFS_CHUNKS}" true                          # 5
+    if [ "${FLAGS_minimal_copy}" -eq "${FLAGS_TRUE}" ]; then
+      echo "Skipping copy of B root partition."
+    else
+      copy_partition "${PARTITION_NUM_ROOT_B}" "${SRC}" "${DST}" \
+         "${chunk_num}" "${NUM_ROOTFS_CHUNKS}" true                        # 5
+    fi
     copy_partition "${PARTITION_NUM_ROOT_A}" "${SRC}" "${DST}" \
        "${chunk_num}" "${NUM_ROOTFS_CHUNKS}" false                         # 3
   done
@@ -1174,9 +1227,14 @@ main() {
   # We want the MINIOS partitions be last just in case writing to other
   # partitions fail at some point, we don't lose the ability to do recovery.
   if [ -n "${PARTITION_NUM_MINIOS_A}" ]; then
-    copy_partition "${PARTITION_NUM_MINIOS_A}" "${SRC}" "${DST}" 1 1 false # 9
+    # Cache the first read of MINIOS so the second is read from RAM.
+    # This is okay as they read from the same source.
+    copy_partition "${PARTITION_NUM_MINIOS_A}" "${SRC}" "${DST}" 1 1 true  # 9
   fi
-  if [ -n "${PARTITION_NUM_MINIOS_B}" ]; then
+
+  if [ "${FLAGS_minimal_copy}" -eq "${FLAGS_TRUE}" ]; then
+    echo "Skipping copy of B miniOS partition."
+  elif [ -n "${PARTITION_NUM_MINIOS_B}" ]; then
     copy_partition "${PARTITION_NUM_MINIOS_B}" "${SRC}" "${DST}" 1 1 false # 10
   fi
 

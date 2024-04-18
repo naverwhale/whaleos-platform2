@@ -1,14 +1,19 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "trunks/tpm_simulator_handle.h"
 
+#include <iterator>
 #include <unistd.h>
+#include <utility>
 
 #include <base/check_op.h>
+#include <base/functional/callback.h>
+#include <base/hash/sha1.h>
+#include <base/logging.h>
+#include <crypto/sha2.h>
 
-#if defined(USE_SIMULATOR)
 extern "C" {
 #include <tpm2/_TPM_Init_fp.h>
 #include <tpm2/BaseTypes.h>
@@ -18,21 +23,11 @@ extern "C" {
 #include <tpm2/Manufacture_fp.h>  // NOLINT(build/include_alpha) - needs TpmBuildSwitches.h
 #include <tpm2/Platform.h>
 }  // extern "C"
-#endif  // USE_SIMULATOR
-
-#include <base/callback.h>
-#include <base/hash/sha1.h>
-#include <base/logging.h>
-#include <base/stl_util.h>
-#include <crypto/sha2.h>
 
 #include "trunks/error_codes.h"
 
 namespace {
 
-const char kSimulatorStateDirectory[] = "/var/lib/trunks";
-
-#if defined(USE_SIMULATOR)
 // Resizes extend_data to size crypto::kSHA256Length and uses the result to
 // extend the indicated PCR.
 void ExtendPcr(unsigned int pcr_index, const std::string& extend_data) {
@@ -45,7 +40,7 @@ void ExtendPcr(unsigned int pcr_index, const std::string& extend_data) {
   }
 }
 
-// According to the specified boot mode, extends PCR0 as cr50 does.
+// According to the specified boot mode, extends PCR0 as GSC does.
 // It should only be called once after the PCR0 value is set to all 0s
 // (e.g. running Startup with Clear). Calling it twice without resetting the PCR
 // will leave the TPM in an unknown boot mode.
@@ -58,18 +53,18 @@ void ExtendPcr0BootMode(const char developer_mode,
   const std::string mode({developer_mode, recovery_mode, verified_firmware});
   ExtendPcr(/*pcr_index=*/0, base::SHA1HashString(mode));
 }
-#endif
 
 }  // namespace
 
 namespace trunks {
 
-TpmSimulatorHandle::TpmSimulatorHandle() {}
+TpmSimulatorHandle::TpmSimulatorHandle(std::string simulator_state_directory)
+    : simulator_state_directory_(simulator_state_directory) {}
 
 TpmSimulatorHandle::~TpmSimulatorHandle() {}
 
 bool TpmSimulatorHandle::Init() {
-  CHECK_EQ(chdir(kSimulatorStateDirectory), 0);
+  CHECK_EQ(chdir(simulator_state_directory_.c_str()), 0);
   if (!init_) {
     InitializeSimulator();
     init_ = true;
@@ -78,7 +73,6 @@ bool TpmSimulatorHandle::Init() {
 }
 
 void TpmSimulatorHandle::InitializeSimulator() {
-#if defined(USE_SIMULATOR)
   // Initialize TPM.
   _plat__Signal_PowerOn();
   /*
@@ -116,15 +110,11 @@ void TpmSimulatorHandle::InitializeSimulator() {
                      /*verified_firmware=*/0);
   // Assign an arbitrary value to PCR1.
   ExtendPcr(/*pcr_index=*/1, /*extend_data=*/"PCR1");
-
-#else
-  LOG(FATAL) << "Simulator not configured.";
-#endif
 }
 
 void TpmSimulatorHandle::SendCommand(const std::string& command,
-                                     const ResponseCallback& callback) {
-  callback.Run(SendCommandAndWait(command));
+                                     ResponseCallback callback) {
+  std::move(callback).Run(SendCommandAndWait(command));
 }
 
 std::string TpmSimulatorHandle::SendCommandAndWait(const std::string& command) {
@@ -132,17 +122,13 @@ std::string TpmSimulatorHandle::SendCommandAndWait(const std::string& command) {
     InitializeSimulator();
     init_ = true;
   }
-#if defined(USE_SIMULATOR)
   unsigned int response_size;
   unsigned char* response;
   std::string mutable_command(command);
   ExecuteCommand(command.size(),
-                 reinterpret_cast<unsigned char*>(base::data(mutable_command)),
+                 reinterpret_cast<unsigned char*>(std::data(mutable_command)),
                  &response_size, &response);
   return std::string(reinterpret_cast<char*>(response), response_size);
-#else
-  return CreateErrorResponse(TCTI_RC_GENERAL_FAILURE);
-#endif
 }
 
 }  // namespace trunks

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,9 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/brillo_export.h>
@@ -54,10 +54,12 @@ class BRILLO_EXPORT Process {
 
   // Redirects to read stdin from |input_file|. |input_file| must not be
   // a symlink.
+  virtual void RedirectInput(const base::FilePath& input_file) = 0;
   virtual void RedirectInput(const std::string& input_file) = 0;
 
   // Redirects stderr and stdout to |output_file|. |output_file| must not be
   // a symlink.
+  virtual void RedirectOutput(const base::FilePath& output_file) = 0;
   virtual void RedirectOutput(const std::string& output_file) = 0;
 
   // Redirect stderr and stdout to memfd, use |combine| to combine stderr and
@@ -67,7 +69,7 @@ class BRILLO_EXPORT Process {
   // Indicates we want to redirect |child_fd| in the child process's
   // file table to |output_file|.
   virtual void RedirectUsingFile(int child_fd,
-                                 const std::string& output_file) = 0;
+                                 const base::FilePath& output_file) = 0;
 
   // Indicates we want to redirect |child_fd| in the child process's
   // file table to a memfd.
@@ -94,6 +96,11 @@ class BRILLO_EXPORT Process {
   // Set the real/effective/saved group ID of the child process.
   virtual void SetGid(gid_t gid) = 0;
 
+  // Set the process group ID of the child process. If the argument is 0,
+  // then it will be set to the pid of the child process, which will be a
+  // new group initially only containing itself.
+  virtual void SetPgid(pid_t pgid) = 0;
+
   // Set the capabilities assigned to the child process.
   // NOTE: |capmask| is indeed a mask and should be passed in as the result of
   // the CAP_TO_MASK(capability) macro, e.g.
@@ -106,7 +113,7 @@ class BRILLO_EXPORT Process {
   // Apply a syscall filter to the process using the policy file at |path|.
   // NOTE: supporting this sandboxing feature is optional (provide no-op
   // implementation if your Process implementation does not support this).
-  virtual void ApplySyscallFilter(const std::string& path) = 0;
+  virtual void ApplySyscallFilter(const base::FilePath& path) = 0;
 
   // Enter new PID namespace when this process is run.
   // NOTE: supporting this sandboxing feature is optional (provide no-op
@@ -157,7 +164,7 @@ class BRILLO_EXPORT Process {
   // Returns the pid of this process or else returns 0 if there is no
   // corresponding process (either because it has not yet been started
   // or has since exited).
-  virtual pid_t pid() = 0;
+  virtual pid_t pid() const = 0;
 
   // Sends |signal| to process and wait |timeout| seconds until it
   // dies.  If process is not a child, returns immediately with a
@@ -172,7 +179,7 @@ class BRILLO_EXPORT Process {
 
   // Same as Reset but reads the pid from |pid_file|.  Returns false
   // only when the file cannot be read/parsed.
-  virtual bool ResetPidByFile(const std::string& pid_file) = 0;
+  virtual bool ResetPidByFile(const base::FilePath& pid_file) = 0;
 
   // Releases the process so that on destruction, the process is not killed.
   virtual pid_t Release() = 0;
@@ -192,18 +199,22 @@ class BRILLO_EXPORT ProcessImpl : public Process {
 
   virtual void AddArg(const std::string& arg);
   virtual void RedirectDevNull(int child_fd);
+  virtual void RedirectInput(const base::FilePath& input_file);
   virtual void RedirectInput(const std::string& input_file);
+  virtual void RedirectOutput(const base::FilePath& output_file);
   virtual void RedirectOutput(const std::string& output_file);
   virtual void RedirectOutputToMemory(bool combine);
-  virtual void RedirectUsingFile(int child_fd, const std::string& output_file);
+  virtual void RedirectUsingFile(int child_fd,
+                                 const base::FilePath& output_file);
   virtual void RedirectUsingMemory(int child_fd);
   virtual void RedirectUsingPipe(int child_fd, bool is_input);
   virtual void BindFd(int parent_fd, int child_fd);
   virtual void SetCloseUnusedFileDescriptors(bool close_unused_fds);
   virtual void SetUid(uid_t uid);
   virtual void SetGid(gid_t gid);
+  virtual void SetPgid(pid_t pgid);
   virtual void SetCapabilities(uint64_t capmask);
-  virtual void ApplySyscallFilter(const std::string& path);
+  virtual void ApplySyscallFilter(const base::FilePath& path);
   virtual void EnterNewPidNamespace();
   virtual void SetInheritParentSignalMask(bool inherit);
   virtual void SetPreExecCallback(PreExecCallback cb);
@@ -214,10 +225,10 @@ class BRILLO_EXPORT ProcessImpl : public Process {
   virtual bool Start();
   virtual int Wait();
   virtual int Run();
-  virtual pid_t pid();
+  virtual pid_t pid() const;
   virtual bool Kill(int signal, int timeout);
   virtual void Reset(pid_t pid);
-  virtual bool ResetPidByFile(const std::string& pid_file);
+  virtual bool ResetPidByFile(const base::FilePath& pid_file);
   virtual pid_t Release();
 
  protected:
@@ -247,14 +258,13 @@ class BRILLO_EXPORT ProcessImpl : public Process {
     StandardFileDescriptorInfo()
         : parent_fd_(-1),
           type_(FileDescriptorRedirectType::kIgnore),
-          filename_("") {}
+          filename_(base::FilePath("")) {}
     // (Optional) Parent file descriptor, only exists for kMemory.
     int parent_fd_;
     // File descriptor redirect type.
     FileDescriptorRedirectType type_;
     // (Optional) Filename if the type is kFile.
-    // TODO(sarthakkukreti): Switch to using base::FilePath.
-    std::string filename_;
+    base::FilePath filename_;
   };
 
   void UpdatePid(pid_t new_pid);
@@ -278,6 +288,7 @@ class BRILLO_EXPORT ProcessImpl : public Process {
   StandardFileDescriptorInfo stdin_, stdout_, stderr_;
   uid_t uid_;
   gid_t gid_;
+  pid_t pgid_;
   PreExecCallback pre_exec_;
   bool search_path_;
   // Flag indicating to inherit signal mask from the parent process. It

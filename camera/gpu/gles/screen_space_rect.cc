@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -48,7 +48,7 @@ Buffer CreateVertexBuffer(float x, float y, float width, float height) {
   const uint8_t* buffer_as_bytes =
       reinterpret_cast<const uint8_t*>(raw_buffer.data());
   Buffer buffer(kBufferSizeBytes, GL_STATIC_DRAW);
-  buffer.Set({buffer_as_bytes, kBufferSizeBytes});
+  buffer.Set({buffer_as_bytes, static_cast<size_t>(kBufferSizeBytes)});
   return buffer;
 }
 

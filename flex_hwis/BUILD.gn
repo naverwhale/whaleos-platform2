@@ -1,0 +1,172 @@
+# Copyright 2023 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+group("all") {
+  deps = [
+    ":flex_hwis_tool",
+    ":install_minijail_config",
+    ":install_seccomp_policy",
+    ":install_tmpfiles_config",
+    ":install_upstart_config",
+    ":libflex_hwis",
+    "//flex_hwis/flex_disk_metrics:all",
+  ]
+  if (use.test) {
+    deps += [
+      ":flex_hwis_check_test",
+      ":flex_hwis_mojo_test",
+      ":flex_hwis_server_info_test",
+      ":flex_hwis_test",
+    ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "cros_healthd-client",
+    "libbrillo",
+    "libchrome",
+    "libmojo",
+    "mojo_service_manager",
+    "protobuf",
+  ]
+  defines = [ "USE_FLEX_INTERNAL=${use.flex_internal}" ]
+}
+
+pkg_config("metrics") {
+  pkg_deps = [ "libmetrics" ]
+}
+
+proto_library("hwis_data_proto") {
+  proto_in_dir = "./proto"
+  proto_out_dir = "include/flex_hwis"
+  sources = [ "${proto_in_dir}/hwis_data.proto" ]
+}
+
+static_library("libflex_hwis") {
+  sources = [
+    "flex_hwis.cc",
+    "flex_hwis_check.cc",
+    "flex_hwis_mojo.cc",
+    "flex_hwis_server_info.cc",
+    "http_sender.cc",
+    "telemetry_for_testing.cc",
+  ]
+  configs += [
+    ":target_defaults",
+    ":metrics",
+  ]
+  libs = [ "policy" ]
+}
+
+executable("flex_hwis_tool") {
+  sources = [ "flex_hwis_tool.cc" ]
+  install_path = "bin"
+  configs += [ ":target_defaults" ]
+  deps = [
+    ":hwis_data_proto",
+    ":libflex_hwis",
+  ]
+}
+
+install_config("install_minijail_config") {
+  sources = [
+    "minijail/flex_disk_metrics.conf",
+    "minijail/flex_hwis.conf",
+  ]
+  install_path = "minijail_conf"
+}
+
+install_config("install_seccomp_policy") {
+  install_path = "seccomp_policy"
+  sources = [
+    "seccomp_filters/flex_disk_metrics.policy",
+    "seccomp_filters/flex_hwis.policy",
+  ]
+  outputs = [
+    "flex_disk_metrics-seccomp.policy",
+    "flex_hwis-seccomp.policy",
+  ]
+}
+
+install_config("install_tmpfiles_config") {
+  sources = [ "init/tmpfiles.d/flex_hwis.conf" ]
+  install_path = "tmpfilesd"
+}
+
+install_config("install_upstart_config") {
+  sources = [
+    "init/upstart/flex_disk_metrics.conf",
+    # TODO(b/305052945): install this file once the client is ready to ship.
+    # "init/upstart/flex_hwis.conf",
+  ]
+  install_path = "upstart"
+}
+
+if (use.test) {
+  pkg_config("flex_hwis_test_config") {
+    pkg_deps = [ "libchrome-test" ]
+  }
+
+  executable("flex_hwis_mojo_test") {
+    sources = [ "flex_hwis_mojo_test.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":flex_hwis_test_config",
+      ":target_defaults",
+    ]
+    run_test = true
+    deps = [
+      ":hwis_data_proto",
+      ":libflex_hwis",
+      "//common-mk/testrunner",
+    ]
+  }
+
+  executable("flex_hwis_check_test") {
+    sources = [ "flex_hwis_check_test.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":flex_hwis_test_config",
+      ":target_defaults",
+    ]
+    run_test = true
+    deps = [
+      ":libflex_hwis",
+      "//common-mk/testrunner",
+    ]
+  }
+
+  executable("flex_hwis_test") {
+    sources = [ "flex_hwis_test.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":flex_hwis_test_config",
+      ":target_defaults",
+    ]
+    run_test = true
+    deps = [
+      ":hwis_data_proto",
+      ":libflex_hwis",
+      "//common-mk/testrunner",
+    ]
+  }
+
+  executable("flex_hwis_server_info_test") {
+    sources = [ "flex_hwis_server_info_test.cc" ]
+    configs += [
+      "//common-mk:test",
+      ":flex_hwis_test_config",
+      ":target_defaults",
+    ]
+    run_test = true
+    deps = [
+      ":libflex_hwis",
+      "//common-mk/testrunner",
+    ]
+  }
+}

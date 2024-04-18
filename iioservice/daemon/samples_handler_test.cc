@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <iterator>
 #include <set>
 #include <string>
 #include <tuple>
@@ -16,6 +17,7 @@
 #include <base/rand_util.h>
 #include <base/run_loop.h>
 #include <base/test/task_environment.h>
+#include <base/test/test_timeouts.h>
 #include <libmems/common_types.h>
 #include <libmems/test_fakes.h>
 #include <mojo/public/cpp/bindings/receiver_set.h>
@@ -28,6 +30,8 @@
 namespace iioservice {
 
 namespace {
+
+constexpr uint32_t kTimeoutInMilliseconds = 10;
 
 constexpr double kMinFrequency = 5.00;
 constexpr double kMaxFrequency = 40.0;
@@ -42,6 +46,8 @@ constexpr char kFakeLightName[] = "cros-ec-light";
 constexpr int kFakeLightId = 2;
 constexpr int kFakeLightData = 100;
 constexpr char kGreenChannel[] = "illuminance_green";
+
+constexpr char kFakeAccelMatrixAttribute[] = "-1, 0, 0; 0, -1, 0; 0, 0, 1";
 
 double FixFrequency(double frequency) {
   if (frequency < libmems::kFrequencyEpsilon)
@@ -86,45 +92,26 @@ class SamplesHandlerTestBase : public cros::mojom::SensorDeviceSamplesObserver {
   }
 
  protected:
-  void SetUpAccelBase(bool with_hrtimer) {
+  void SetUpAccelBase(bool with_hrtimer, bool with_matrix = false) {
     device_ = std::make_unique<libmems::fakes::FakeIioDevice>(
         nullptr, fakes::kAccelDeviceName, fakes::kAccelDeviceId);
-    if (with_hrtimer) {
-      hrtimer_ = std::make_unique<libmems::fakes::FakeIioDevice>(
-          nullptr, kFakeTriggerName, kFakeTriggerId);
-      device_->SetHrtimer(hrtimer_.get());
+
+    if (with_matrix) {
+      EXPECT_TRUE(device_->WriteStringAttribute(kAccelMatrixAttribute,
+                                                kFakeAccelMatrixAttribute));
     }
 
-    EXPECT_TRUE(
-        device_->WriteStringAttribute(libmems::kSamplingFrequencyAvailable,
-                                      fakes::kFakeSamplingFrequencyAvailable));
-
-    for (int i = 0; i < base::size(libmems::fakes::kFakeAccelChns); ++i) {
-      device_->AddChannel(std::make_unique<libmems::fakes::FakeIioChannel>(
-          libmems::fakes::kFakeAccelChns[i], true));
+    for (const auto& channel : libmems::fakes::kFakeAccelChns) {
+      device_->AddChannel(
+          std::make_unique<libmems::fakes::FakeIioChannel>(channel, true));
     }
 
-    EXPECT_TRUE(
-        device_->WriteDoubleAttribute(libmems::kSamplingFrequencyAttr, 0.0));
-
-    handler_ = fakes::FakeSamplesHandler::Create(
-        task_environment_.GetMainThreadTaskRunner(),
-        task_environment_.GetMainThreadTaskRunner(), device_.get());
-    EXPECT_TRUE(handler_);
+    SetUpHandler(with_hrtimer, cros::mojom::DeviceType::ACCEL);
   }
 
   void SetUpLightBase(bool with_hrtimer) {
     device_ = std::make_unique<libmems::fakes::FakeIioDevice>(
         nullptr, kFakeLightName, kFakeLightId);
-    if (with_hrtimer) {
-      hrtimer_ = std::make_unique<libmems::fakes::FakeIioDevice>(
-          nullptr, kFakeTriggerName, kFakeTriggerId);
-      device_->SetHrtimer(hrtimer_.get());
-    }
-
-    EXPECT_TRUE(
-        device_->WriteStringAttribute(libmems::kSamplingFrequencyAvailable,
-                                      fakes::kFakeSamplingFrequencyAvailable));
 
     auto light_channel = std::make_unique<libmems::fakes::FakeIioChannel>(
         cros::mojom::kLightChannel, true);
@@ -139,12 +126,30 @@ class SamplesHandlerTestBase : public cros::mojom::SensorDeviceSamplesObserver {
     device_->AddChannel(std::make_unique<libmems::fakes::FakeIioChannel>(
         libmems::kTimestampAttr, true));
 
+    SetUpHandler(with_hrtimer, cros::mojom::DeviceType::LIGHT);
+  }
+
+  void SetUpHandler(bool with_hrtimer, cros::mojom::DeviceType type) {
+    if (with_hrtimer) {
+      hrtimer_ = std::make_unique<libmems::fakes::FakeIioDevice>(
+          nullptr, kFakeTriggerName, kFakeTriggerId);
+      device_->SetHrtimer(hrtimer_.get());
+    }
+
+    EXPECT_TRUE(
+        device_->WriteStringAttribute(libmems::kSamplingFrequencyAvailable,
+                                      fakes::kFakeSamplingFrequencyAvailable));
+
     EXPECT_TRUE(
         device_->WriteDoubleAttribute(libmems::kSamplingFrequencyAttr, 0.0));
 
+    device_data_ = std::make_unique<DeviceData>(
+        device_.get(), std::set<cros::mojom::DeviceType>{type});
+
     handler_ = fakes::FakeSamplesHandler::Create(
         task_environment_.GetMainThreadTaskRunner(),
-        task_environment_.GetMainThreadTaskRunner(), device_.get());
+        task_environment_.GetMainThreadTaskRunner(), device_data_.get(),
+        device_.get());
     EXPECT_TRUE(handler_);
   }
 
@@ -197,10 +202,6 @@ TEST_F(SamplesHandlerTest, AddClientAndRemoveClient) {
   // No samples in this test
   device_->SetPauseCallbackAtKthSamples(0, base::BindOnce([]() {}));
 
-  device_data_ = std::make_unique<DeviceData>(
-      device_.get(),
-      std::set<cros::mojom::DeviceType>{cros::mojom::DeviceType::ACCEL});
-
   // ClientData should be valid until |handler_| is destructed.
   clients_data_.emplace_back(ClientData(0, device_data_.get()));
   ClientData& client_data = clients_data_[0];
@@ -228,16 +229,73 @@ TEST_F(SamplesHandlerTest, AddClientAndRemoveClient) {
   }
 }
 
+// Even if the new client data uses the same memory address, the timeout task of
+// the unregistered client should not be triggered.
+TEST_F(SamplesHandlerTest, NoTimeout) {
+  // No samples in this test
+  device_->SetPauseCallbackAtKthSamples(0, base::BindOnce([]() {}));
+
+  // ClientData should be valid until |handler_| is destructed.
+  clients_data_.emplace_back(ClientData(0, device_data_.get()));
+  ClientData& client_data = clients_data_[0];
+
+  client_data.timeout = kTimeoutInMilliseconds;
+  client_data.frequency = kFooFrequency;
+  client_data.enabled_chn_indices.emplace(3);  // timestamp
+
+  {
+    base::RunLoop run_loop;
+    fakes::FakeObserver observer(run_loop.QuitClosure());
+    handler_->AddClient(&client_data, observer.GetRemote());
+    handler_->RemoveClient(&client_data, base::DoNothing());
+
+    run_loop.Run();
+  }
+
+  // Don't trigger timeout task in the second client.
+  client_data.timeout = 0;
+  fakes::FakeObserver observer(base::DoNothing());
+  handler_->AddClient(&client_data, observer.GetRemote());
+
+  base::RunLoop run_loop;
+  task_environment_.GetMainThreadTaskRunner()->PostDelayedTask(
+      FROM_HERE, run_loop.QuitClosure(),
+      base::Milliseconds(kTimeoutInMilliseconds * 2));
+
+  run_loop.Run();
+
+  EXPECT_FALSE(observer.GetError().has_value());
+
+  handler_->RemoveClient(&client_data, base::DoNothing());
+}
+
+TEST_F(SamplesHandlerTest, ConsecutiveTimeouts) {
+  // No samples in this test
+  device_->SetPauseCallbackAtKthSamples(0, base::BindOnce([]() {}));
+
+  // ClientData should be valid until |handler_| is destructed.
+  clients_data_.emplace_back(ClientData(0, device_data_.get()));
+  ClientData& client_data = clients_data_[0];
+
+  client_data.frequency = kFooFrequency;
+  client_data.enabled_chn_indices.emplace(3);  // timestamp
+
+  fakes::FakeObserver observer(base::DoNothing());
+  handler_->AddClient(&client_data, observer.GetRemote());
+
+  // Wait until |observer| received |kNumFailures| READ_TIMEOUT.
+  for (int i = 0; i < kNumFailures; ++i)
+    observer.WaitForError(cros::mojom::ObserverErrorType::READ_TIMEOUT);
+
+  handler_->RemoveClient(&client_data, base::DoNothing());
+}
+
 // Add clients with only timestamp channel enabled, enable all other channels,
 // and disable all channels except for accel_x. Enabled channels are checked
 // after each modification.
 TEST_F(SamplesHandlerTest, UpdateChannelsEnabled) {
   // No samples in this test
   device_->SetPauseCallbackAtKthSamples(0, base::BindOnce([]() {}));
-
-  device_data_ = std::make_unique<DeviceData>(
-      device_.get(),
-      std::set<cros::mojom::DeviceType>{cros::mojom::DeviceType::ACCEL});
 
   std::vector<double> freqs = {0.0, 10.0};
   clients_data_.reserve(freqs.size());
@@ -284,10 +342,6 @@ TEST_F(SamplesHandlerTest, UpdateChannelsEnabled) {
 
 TEST_F(SamplesHandlerTest, BadDeviceWithNoSamples) {
   device_->DisableFd();
-
-  device_data_ = std::make_unique<DeviceData>(
-      device_.get(),
-      std::set<cros::mojom::DeviceType>{cros::mojom::DeviceType::ACCEL});
 
   std::vector<double> freqs = {5.0, 0.0, 10.0, 100.0};
   clients_data_.reserve(freqs.size());
@@ -341,13 +395,14 @@ TEST_F(SamplesHandlerTest, BadDeviceWithNoSamples) {
 }
 
 class SamplesHandlerTestWithParam
-    : public ::testing::TestWithParam<std::vector<std::pair<double, double>>>,
+    : public ::testing::TestWithParam<
+          std::tuple<std::vector<std::pair<double, double>>, bool>>,
       public SamplesHandlerTestBase {
  protected:
   void SetUp() override {
     SensorMetricsMock::InitializeForTesting();
 
-    SetUpAccelBase(/*with_hrtimer=*/false);
+    SetUpAccelBase(/*with_hrtimer=*/false, std::get<1>(GetParam()));
   }
 
   void TearDown() override {
@@ -364,23 +419,19 @@ TEST_P(SamplesHandlerTestWithParam, UpdateFrequency) {
   // No samples in this test
   device_->SetPauseCallbackAtKthSamples(0, base::BindOnce([]() {}));
 
-  device_data_ = std::make_unique<DeviceData>(
-      device_.get(),
-      std::set<cros::mojom::DeviceType>{cros::mojom::DeviceType::ACCEL});
-
-  clients_data_.reserve(GetParam().size());
+  clients_data_.reserve(std::get<0>(GetParam()).size());
 
   std::multiset<double> frequencies;
 
   // Add clients
-  for (size_t i = 0; i < GetParam().size(); ++i) {
+  for (size_t i = 0; i < std::get<0>(GetParam()).size(); ++i) {
     clients_data_.emplace_back(ClientData(i, device_data_.get()));
     ClientData& client_data = clients_data_[i];
 
     // At least one channel enabled
     client_data.enabled_chn_indices.emplace(3);  // timestamp
     client_data.timeout = 0;
-    client_data.frequency = GetParam()[i].first;
+    client_data.frequency = std::get<0>(GetParam())[i].first;
 
     handler_->AddClient(&client_data, GetRemote());
 
@@ -389,10 +440,10 @@ TEST_P(SamplesHandlerTestWithParam, UpdateFrequency) {
   }
 
   // Update clients' frequencies
-  for (size_t i = 0; i < GetParam().size(); ++i) {
+  for (size_t i = 0; i < std::get<0>(GetParam()).size(); ++i) {
     ClientData& client_data = clients_data_[i];
 
-    double new_freq = GetParam()[i].second;
+    double new_freq = std::get<0>(GetParam())[i].second;
     handler_->UpdateFrequency(
         &client_data, new_freq,
         base::BindOnce(
@@ -403,7 +454,7 @@ TEST_P(SamplesHandlerTestWithParam, UpdateFrequency) {
             },
             &client_data, FixFrequency(new_freq)));
 
-    auto it = frequencies.find(FixFrequency(GetParam()[i].first));
+    auto it = frequencies.find(FixFrequency(std::get<0>(GetParam())[i].first));
     EXPECT_TRUE(it != frequencies.end());
     frequencies.erase(it);
     frequencies.emplace(FixFrequency(new_freq));
@@ -412,16 +463,16 @@ TEST_P(SamplesHandlerTestWithParam, UpdateFrequency) {
   }
 
   // Remove clients
-  for (size_t i = 0; i < GetParam().size(); ++i) {
+  for (size_t i = 0; i < std::get<0>(GetParam()).size(); ++i) {
     ClientData& client_data = clients_data_[i];
 
     handler_->RemoveClient(&client_data, base::DoNothing());
-    auto it = frequencies.find(FixFrequency(GetParam()[i].second));
+    auto it = frequencies.find(FixFrequency(std::get<0>(GetParam())[i].second));
     EXPECT_TRUE(it != frequencies.end());
     frequencies.erase(it);
 
     handler_->CheckRequestedFrequency(
-        i == GetParam().size() - 1 ? 0.0 : *frequencies.rbegin());
+        i == std::get<0>(GetParam()).size() - 1 ? 0.0 : *frequencies.rbegin());
   }
 }
 
@@ -434,41 +485,37 @@ TEST_P(SamplesHandlerTestWithParam, ReadSamplesWithFrequency) {
   // clients added.
   device_->SetPauseCallbackAtKthSamples(0, base::BindOnce([]() {}));
 
-  device_data_ = std::make_unique<DeviceData>(
-      device_.get(),
-      std::set<cros::mojom::DeviceType>{cros::mojom::DeviceType::ACCEL});
-
   std::multiset<std::pair<int, cros::mojom::ObserverErrorType>> rf_failures;
   for (int i = 0; i < kNumFailures; ++i) {
-    int k = base::RandInt(0, base::size(libmems::fakes::kFakeAccelSamples) - 1);
+    int k = base::RandInt(0, std::size(libmems::fakes::kFakeAccelSamples) - 1);
 
     device_->AddFailedReadAtKthSample(k);
     rf_failures.insert(
         std::make_pair(k, cros::mojom::ObserverErrorType::READ_FAILED));
   }
 
-  clients_data_.reserve(GetParam().size());
+  clients_data_.reserve(std::get<0>(GetParam()).size());
 
   double max_freq = -1, max_freq2 = -1;
-  for (size_t i = 0; i < GetParam().size(); ++i) {
-    max_freq = std::max(max_freq, GetParam()[i].first);
-    max_freq2 = std::max(max_freq2, GetParam()[i].second);
+  for (size_t i = 0; i < std::get<0>(GetParam()).size(); ++i) {
+    max_freq = std::max(max_freq, std::get<0>(GetParam())[i].first);
+    max_freq2 = std::max(max_freq2, std::get<0>(GetParam())[i].second);
   }
 
   max_freq = FixFrequencyWithMin(max_freq);
   max_freq2 = FixFrequencyWithMin(max_freq2);
 
-  for (size_t i = 0; i < GetParam().size(); ++i) {
+  for (size_t i = 0; i < std::get<0>(GetParam()).size(); ++i) {
     clients_data_.emplace_back(ClientData(i, device_data_.get()));
     ClientData& client_data = clients_data_[i];
 
     client_data.enabled_chn_indices.emplace(0);  // accel_x
     client_data.enabled_chn_indices.emplace(2);  // accel_z
     client_data.enabled_chn_indices.emplace(3);  // timestamp
-    client_data.frequency = GetParam()[i].first;
+    client_data.frequency = std::get<0>(GetParam())[i].first;
 
     auto failures = rf_failures;
-    if (GetParam()[i].first == 0.0) {
+    if (std::get<0>(GetParam())[i].first == 0.0) {
       while (!failures.empty() && failures.begin()->first < fakes::kPauseIndex)
         failures.erase(failures.begin());
 
@@ -479,8 +526,9 @@ TEST_P(SamplesHandlerTestWithParam, ReadSamplesWithFrequency) {
     // The fake observer needs |max_freq| and |max_freq2| to calculate the
     // correct values of samples
     auto fake_observer = fakes::FakeSamplesObserver::Create(
-        device_.get(), std::move(failures), FixFrequency(GetParam()[i].first),
-        FixFrequency(GetParam()[i].second), max_freq, max_freq2);
+        device_.get(), std::move(failures),
+        FixFrequency(std::get<0>(GetParam())[i].first),
+        FixFrequency(std::get<0>(GetParam())[i].second), max_freq, max_freq2);
 
     handler_->AddClient(&client_data, fake_observer->GetRemote());
 
@@ -507,12 +555,12 @@ TEST_P(SamplesHandlerTestWithParam, ReadSamplesWithFrequency) {
 
               // Update to the second frequency
               handler->UpdateFrequency(
-                  &client_data, GetParam()[i].second,
+                  &client_data, std::get<0>(GetParam())[i].second,
                   base::BindOnce(
                       [](double fixed_new_freq, double result_freq) {
                         EXPECT_EQ(result_freq, fixed_new_freq);
                       },
-                      FixFrequency(GetParam()[i].second)));
+                      FixFrequency(std::get<0>(GetParam())[i].second)));
 
               // Enable accel_y
               handler->UpdateChannelsEnabled(
@@ -550,25 +598,44 @@ TEST_P(SamplesHandlerTestWithParam, ReadSamplesWithFrequency) {
 INSTANTIATE_TEST_SUITE_P(
     SamplesHandlerTestWithParamRun,
     SamplesHandlerTestWithParam,
-    ::testing::Values(std::vector<std::pair<double, double>>(3, {10.0, 10.0}),
-                      std::vector<std::pair<double, double>>{
-                          {20.0, 50.0}, {10.0, 10.0}, {2.0, 3.0}},
-                      std::vector<std::pair<double, double>>{
-                          {10.0, 20.0}, {20.0, 30.0}, {0.0, 0.0}},
-                      std::vector<std::pair<double, double>>{
-                          {80.0, 50.0}, {10.0, 10.0}, {2.0, 3.0}},
-                      std::vector<std::pair<double, double>>{
-                          {10.0, 40.0}, {0.0, 20.0}, {2.0, 3.0}, {40.0, 10.0}},
-                      std::vector<std::pair<double, double>>{
-                          {2.0, 10.0}, {10.0, 30.0}, {80.0, 0.0}},
-                      std::vector<std::pair<double, double>>{
-                          {0.0, 10.0}, {10.0, 30.0}, {80.0, 60.0}},
-                      std::vector<std::pair<double, double>>{
-                          {2.0, 10.0}, {50.0, 30.0}, {80.0, 60.0}},
-                      std::vector<std::pair<double, double>>{
-                          {2.0, 10.0}, {3.0, 30.0}, {1.0, 60.0}},
-                      std::vector<std::pair<double, double>>{{20.0, 30.0},
-                                                             {10.0, 10.0}}));
+    ::testing::Values(
+        std::make_tuple(std::vector<std::pair<double, double>>(3, {10.0, 10.0}),
+                        false),
+        std::make_tuple(std::vector<std::pair<double, double>>{{20.0, 50.0},
+                                                               {10.0, 10.0},
+                                                               {2.0, 3.0}},
+                        false),
+        std::make_tuple(std::vector<std::pair<double, double>>{{10.0, 20.0},
+                                                               {20.0, 30.0},
+                                                               {0.0, 0.0}},
+                        false),
+        std::make_tuple(std::vector<std::pair<double, double>>{{80.0, 50.0},
+                                                               {10.0, 10.0},
+                                                               {2.0, 3.0}},
+                        false),
+        std::make_tuple(
+            std::vector<std::pair<double, double>>{
+                {10.0, 40.0}, {0.0, 20.0}, {2.0, 3.0}, {40.0, 10.0}},
+            false),
+        std::make_tuple(std::vector<std::pair<double, double>>{{2.0, 10.0},
+                                                               {10.0, 30.0},
+                                                               {80.0, 0.0}},
+                        false),
+        std::make_tuple(std::vector<std::pair<double, double>>{{0.0, 10.0},
+                                                               {10.0, 30.0},
+                                                               {80.0, 60.0}},
+                        false),
+        std::make_tuple(std::vector<std::pair<double, double>>{{2.0, 10.0},
+                                                               {50.0, 30.0},
+                                                               {80.0, 60.0}},
+                        false),
+        std::make_tuple(std::vector<std::pair<double, double>>{{2.0, 10.0},
+                                                               {3.0, 30.0},
+                                                               {1.0, 60.0}},
+                        true),
+        std::make_tuple(std::vector<std::pair<double, double>>{{20.0, 30.0},
+                                                               {10.0, 10.0}},
+                        true)));
 
 class SamplesHandlerWithTriggerTest : public ::testing::Test,
                                       public SamplesHandlerTestBase {
@@ -587,10 +654,6 @@ class SamplesHandlerWithTriggerTest : public ::testing::Test,
 };
 
 TEST_F(SamplesHandlerWithTriggerTest, CheckFrequenciesSet) {
-  device_data_ = std::make_unique<DeviceData>(
-      device_.get(),
-      std::set<cros::mojom::DeviceType>{cros::mojom::DeviceType::ACCEL});
-
   // ClientData should be valid until |handler_| is destructed.
   clients_data_.emplace_back(ClientData(0, device_data_.get()));
   ClientData& client_data = clients_data_[0];
@@ -659,7 +722,7 @@ TEST_F(SamplesHandlerLightTest, CrosECLight) {
   EXPECT_EQ(observers_.front()->GetSampleIndex(), 1);
 
   auto& sample = observers_.front()->GetLatestSample();
-  EXPECT_EQ(sample.size(), 2);
+  EXPECT_EQ(sample.size(), 3);
 
   auto it = sample.find(0);
   EXPECT_TRUE(it != sample.end());
@@ -668,6 +731,15 @@ TEST_F(SamplesHandlerLightTest, CrosECLight) {
   it = sample.find(1);
   EXPECT_TRUE(it != sample.end());
   EXPECT_EQ(it->second, kFakeLightData);
+
+  it = sample.find(2);
+  EXPECT_TRUE(it != sample.end());
+
+  struct timespec ts = {};
+  EXPECT_EQ(clock_gettime(CLOCK_BOOTTIME, &ts), 0);
+  EXPECT_LE(static_cast<int64_t>(ts.tv_sec) * 1000 * 1000 * 1000 + ts.tv_nsec -
+                it->second,
+            TestTimeouts::tiny_timeout().InNanoseconds());
 }
 
 TEST_F(SamplesHandlerLightTest, AcpiAls) {
@@ -676,10 +748,6 @@ TEST_F(SamplesHandlerLightTest, AcpiAls) {
   // Set the pause in the beginning to test only the first sample from raw
   // values.
   device_->SetPauseCallbackAtKthSamples(0, base::BindOnce([]() {}));
-
-  device_data_ = std::make_unique<DeviceData>(
-      device_.get(),
-      std::set<cros::mojom::DeviceType>{cros::mojom::DeviceType::LIGHT});
 
   // ClientData should be valid until |handler_| is destructed.
   clients_data_.emplace_back(ClientData(0, device_data_.get()));

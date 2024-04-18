@@ -1,14 +1,14 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-#include "missive/missive_daemon.h"
 
 #include <base/logging.h>
 #include <base/task/thread_pool/thread_pool_instance.h>
 
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
+
+#include "missive/daemon/missive_daemon.h"
 
 namespace {
 
@@ -38,7 +38,7 @@ int main(int argc, char* argv[]) {
       "missive_daemon_thread_pool");
 
   LOG(INFO) << "Starting Missive Service.";
-  int exit_code = reporting::MissiveDaemon().Run();
+  const int exit_code = ::reporting::MissiveDaemon().Run();
   LOG(INFO) << "Missive Service ended with exit_code=" << exit_code;
 
   return exit_code;

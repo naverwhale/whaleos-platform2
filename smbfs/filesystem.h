@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,8 @@
 #include <fuse_lowlevel.h>
 
 #include <memory>
+#include <optional>
 #include <string>
-
-#include <base/macros.h>
-#include <base/optional.h>
 
 #include "smbfs/request.h"
 
@@ -31,7 +29,7 @@ class Filesystem {
   virtual void GetAttr(std::unique_ptr<AttrRequest> request, fuse_ino_t inode);
   virtual void SetAttr(std::unique_ptr<AttrRequest> request,
                        fuse_ino_t inode,
-                       base::Optional<uint64_t> file_handle,
+                       std::optional<uint64_t> file_handle,
                        const struct stat& attr,
                        int to_set);
 

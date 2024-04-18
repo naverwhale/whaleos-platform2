@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <vector>
 
 #include <base/compiler_specific.h>
-#include <base/macros.h>
 
 #include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/system/ambient_light_observer.h"
@@ -46,8 +45,8 @@ class AmbientLightHandler : public system::AmbientLightObserver {
   // AmbientLightHandler.
   class Delegate {
    public:
-    Delegate() {}
-    virtual ~Delegate() {}
+    Delegate() = default;
+    virtual ~Delegate() = default;
 
     // Invoked when the backlight brightness should be adjusted in response
     // to a change in ambient light.
@@ -56,6 +55,12 @@ class AmbientLightHandler : public system::AmbientLightObserver {
 
     // Invoked when the color temperature changes.
     virtual void OnColorTemperatureChanged(int color_temperature) = 0;
+
+    // Invoked when ALS reading is taken after resume from suspension.
+    virtual void ReportAmbientLightOnResumeMetrics(int lux) {}
+
+    // Used to shortcut ALS calculations if they are not being used by Delegate.
+    virtual bool IsUsingAmbientLight() const { return true; }
   };
 
   AmbientLightHandler(system::AmbientLightSensorInterface* sensor,
@@ -63,7 +68,7 @@ class AmbientLightHandler : public system::AmbientLightObserver {
   AmbientLightHandler(const AmbientLightHandler&) = delete;
   AmbientLightHandler& operator=(const AmbientLightHandler&) = delete;
 
-  virtual ~AmbientLightHandler();
+  ~AmbientLightHandler() override;
 
   void set_name(const std::string& name) { name_ = name; }
 
@@ -159,25 +164,25 @@ class AmbientLightHandler : public system::AmbientLightObserver {
   system::AmbientLightSensorInterface* sensor_;  // weak
   Delegate* delegate_;                           // weak
 
-  PowerSource power_source_;
+  PowerSource power_source_ = PowerSource::AC;
 
   // Rounded value of |smoothed_lux_| at the time of the last brightness
   // adjustment.
-  int smoothed_lux_at_last_adjustment_;
+  int smoothed_lux_at_last_adjustment_ = 0;
 
   // Smoothed lux value from simple exponential smoothing.
-  double smoothed_lux_;
+  double smoothed_lux_ = 0.0;
 
   // Smoothing constant used to calculated smoothed ambient lux level, in the
   // range of (0.0, 1.0]. Value closer to 0.0 means |smoothed_lux_| will respond
   // to ambient light change slower. Value of 1.0 means smoothing is disabled.
-  double smoothing_constant_;
+  double smoothing_constant_ = 1.0;
 
-  HysteresisState hysteresis_state_;
+  HysteresisState hysteresis_state_ = HysteresisState::IMMEDIATE;
 
   // If |hysteresis_state_| is DECREASING or INCREASING, number of readings
   // that have been received in the current state.
-  int hysteresis_count_;
+  int hysteresis_count_ = 0;
 
   // Brightness step data read from prefs. It is assumed that this data is
   // well-formed; specifically, for each entry in the file, the decrease
@@ -186,11 +191,11 @@ class AmbientLightHandler : public system::AmbientLightObserver {
   std::vector<BrightnessStep> steps_;
 
   // Current brightness step within |steps_|.
-  size_t step_index_;
+  size_t step_index_ = 0;
 
   // Has |delegate_| been notified about an ambient-light-triggered change
   // yet?
-  bool sent_initial_adjustment_;
+  bool sent_initial_adjustment_ = false;
 
   // Human-readable name included in logging messages.  Useful for
   // distinguishing between different AmbientLightHandler instances.
@@ -201,6 +206,9 @@ class AmbientLightHandler : public system::AmbientLightObserver {
   // around). Used for logging.
   std::vector<int> recent_lux_readings_;
   int recent_lux_start_index_ = 0;
+
+  // Does the ambient light sensor need to report its next reading.
+  bool report_on_resuming_ = false;
 };
 
 }  // namespace policy

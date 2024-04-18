@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <base/values.h>
 #include <brillo/file_utils.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -18,7 +19,7 @@ using chrome::ml_benchmark::Metric;
 namespace {
 
 // Maps to |tast/common/perf/perf.go| |supportedUnits|.
-base::Optional<std::string> metric_units(const Metric::Units u) {
+std::optional<std::string> metric_units(const Metric::Units u) {
   switch (u) {
     case Metric::UNITLESS:
       return "unitless";
@@ -40,12 +41,12 @@ base::Optional<std::string> metric_units(const Metric::Units u) {
       return "tsMs";
     default:
       LOG(ERROR) << "Unhandled unit: " << u;
-      return base::nullopt;
+      return std::nullopt;
   }
 }
 
 // Maps to |mlbenchmark/scenario.go| |ImprovementDirection|.
-base::Optional<std::string> metric_direction(const Metric::Direction d) {
+std::optional<std::string> metric_direction(const Metric::Direction d) {
   switch (d) {
     case Metric::SMALLER_IS_BETTER:
       return "smaller_is_better";
@@ -53,12 +54,12 @@ base::Optional<std::string> metric_direction(const Metric::Direction d) {
       return "bigger_is_better";
     default:
       LOG(ERROR) << "Unhandled direction: " << d;
-      return base::nullopt;
+      return std::nullopt;
   }
 }
 
 // Maps to |mlbenchmark/scenario.go| |Cardinality|.
-base::Optional<std::string> metric_cardinality(const Metric::Cardinality c) {
+std::optional<std::string> metric_cardinality(const Metric::Cardinality c) {
   switch (c) {
     case Metric::SINGLE:
       return "single";
@@ -66,7 +67,7 @@ base::Optional<std::string> metric_cardinality(const Metric::Cardinality c) {
       return "multiple";
     default:
       LOG(ERROR) << "Unhandled cardinality: " << c;
-      return base::nullopt;
+      return std::nullopt;
   }
 }
 
@@ -74,62 +75,63 @@ base::Optional<std::string> metric_cardinality(const Metric::Cardinality c) {
 
 namespace ml_benchmark {
 
-base::Optional<base::Value> BenchmarkResultsToJson(
+std::optional<base::Value::Dict> BenchmarkResultsToJson(
     const BenchmarkResults& results) {
-  base::Value doc(base::Value::Type::DICTIONARY);
-  doc.SetKey("status", base::Value(results.status()));
-  doc.SetKey("results_message", base::Value(results.results_message()));
+  base::Value::Dict doc;
+  doc.Set("status", results.status());
+  doc.Set("results_message", results.results_message());
   if (results.status() != chrome::ml_benchmark::OK) {
     return doc;
   }
 
-  base::Value percentiles(base::Value::Type::DICTIONARY);
+  base::Value::Dict percentiles;
   for (const auto& latencies : results.percentile_latencies_in_us()) {
     std::string percentile = std::to_string(latencies.first);
-    percentiles.SetKey(percentile,
-                       base::Value(static_cast<int>(latencies.second)));
+    percentiles.Set(percentile, static_cast<int>(latencies.second));
   }
-  doc.SetKey("percentile_latencies_in_us", std::move(percentiles));
+  doc.Set("percentile_latencies_in_us", std::move(percentiles));
 
-  base::Value metrics(base::Value::Type::LIST);
+  base::Value::List metrics;
   for (const auto& m : results.metrics()) {
-    base::Value metric(base::Value::Type::DICTIONARY);
-    metric.SetKey("name", base::Value(m.name()));
+    base::Value::Dict metric;
+    metric.Set("name", m.name());
     const auto direction = metric_direction(m.direction());
     if (!direction)
-      return base::nullopt;
-    metric.SetKey("improvement_direction", base::Value(*direction));
+      return std::nullopt;
+    metric.Set("improvement_direction", *direction);
     const auto units = metric_units(m.units());
     if (!units)
-      return base::nullopt;
-    metric.SetKey("units", base::Value(*units));
+      return std::nullopt;
+    metric.Set("units", *units);
     const auto cardinality = metric_cardinality(m.cardinality());
     if (!cardinality)
-      return base::nullopt;
-    metric.SetKey("cardinality", base::Value(*cardinality));
+      return std::nullopt;
+    metric.Set("cardinality", *cardinality);
 
     if (m.cardinality() == Metric::SINGLE && m.values().size() != 1) {
       LOG(ERROR) << "Single cardinality metrics should contain a single value. "
                  << m.values().size() << " values found instead for metric "
                  << m.name();
-      return base::nullopt;
+      return std::nullopt;
     }
-    base::Value values(base::Value::Type::LIST);
+    base::Value::List values;
     for (const auto& v : m.values()) {
-      values.Append(base::Value(v));
+      values.Append(v);
     }
-    metric.SetKey("values", std::move(values));
+    metric.Set("values", std::move(values));
 
     metrics.Append(std::move(metric));
   }
-  doc.SetKey("metrics", std::move(metrics));
+  doc.Set("metrics", std::move(metrics));
+
+  doc.Set("power_normalization_factor", results.power_normalization_factor());
 
   return doc;
 }
 
 void WriteResultsToPath(const BenchmarkResults& results,
                         const base::FilePath& output_path) {
-  base::Optional<base::Value> doc = BenchmarkResultsToJson(results);
+  std::optional<base::Value::Dict> doc = BenchmarkResultsToJson(results);
   if (!doc) {
     return;
   }

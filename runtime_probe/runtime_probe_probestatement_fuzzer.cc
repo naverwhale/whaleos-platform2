@@ -1,13 +1,16 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <base/json/json_reader.h>
 #include <fuzzer/FuzzedDataProvider.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include <string>
+
+#include <base/functional/callback_helpers.h>
+#include <base/json/json_reader.h>
+#include <base/logging.h>
 
 #include "runtime_probe/probe_function.h"
 #include "runtime_probe/probe_statement.h"
@@ -48,19 +51,17 @@ inline string GetShellDictionary(FuzzedDataProvider* fuzz_data) {
   })";
 }
 
-inline string GetEctoolDictionary(FuzzedDataProvider* fuzz_data) {
+inline string GetEcI2cDictionary(FuzzedDataProvider* fuzz_data) {
   return R"({
-    "ectool_i2cread": {
+    "ec_i2c": {
       "size": )" +
          rand_int() + R"(,
-      "port": )" +
+      "i2c_bus": )" +
          rand_int() + R"(,
-      "addr": )" +
+      "chip_addr": )" +
          rand_int() + R"(,
-      "offset": )" +
-         rand_int() + R"(,
-      "key": ")" +
-         JsonSafe(rand_str(30)) + R"("
+      "data_addr": )" +
+         rand_int() + R"(
     }
   })";
 }
@@ -96,7 +97,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
       })";
       break;
     case 2:
-      eval_str = GetEctoolDictionary(&fuzz_data);
+      eval_str = GetEcI2cDictionary(&fuzz_data);
       break;
     case 3:
       eval_str = GetVPDCachedDictionary(&fuzz_data);
@@ -112,7 +113,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     auto probe_statement = ProbeStatement::FromValue("nop", *eval);
 
     if (probe_statement != nullptr)
-      auto results = probe_statement->Eval();
+      probe_statement->Eval(base::DoNothing());
   } else {  // Fuzz EvalInHelper
     auto probe_function = runtime_probe::ProbeFunction::FromValue(*eval);
 

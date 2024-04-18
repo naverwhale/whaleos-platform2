@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,14 @@
 
 #include <utility>
 
+#include <absl/base/attributes.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/lazy_instance.h>
 #include <base/location.h>
 #include <base/logging.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/thread_local.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <base/time/time.h>
 
 #include "diagnostics/dpsl/internal/callback_utils.h"
@@ -23,14 +24,13 @@ namespace {
 
 // Whether an instance of DpslThreadContextImpl was created on the current
 // thread.
-base::LazyInstance<base::ThreadLocalBoolean>::Leaky
-    g_thread_context_impl_created = LAZY_INSTANCE_INITIALIZER;
+ABSL_CONST_INIT thread_local bool g_thread_context_impl_created = false;
 
 }  // namespace
 
 // static
 void DpslThreadContextImpl::CleanThreadCounterForTesting() {
-  g_thread_context_impl_created.Pointer()->Set(false);
+  g_thread_context_impl_created = false;
 }
 
 DpslThreadContextImpl::DpslThreadContextImpl()
@@ -39,11 +39,11 @@ DpslThreadContextImpl::DpslThreadContextImpl()
       // yet (it could be already set up by the calling code via other means,
       // e.g., brillo::Daemon).
       owned_task_executor_(
-          base::ThreadTaskRunnerHandle::IsSet()
+          base::SingleThreadTaskRunner::HasCurrentDefault()
               ? nullptr
               : std::make_unique<base::SingleThreadTaskExecutor>(
                     base::MessagePumpType::IO)),
-      task_runner_(base::ThreadTaskRunnerHandle::Get()) {}
+      task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {}
 
 DpslThreadContextImpl::~DpslThreadContextImpl() {
   CHECK(sequence_checker_.CalledOnValidSequence())
@@ -83,9 +83,9 @@ void DpslThreadContextImpl::PostTask(std::function<void()> task) {
 void DpslThreadContextImpl::PostDelayedTask(std::function<void()> task,
                                             int64_t delay_milliseconds) {
   CHECK_GE(delay_milliseconds, 0) << "Delay must be non-negative";
-  task_runner_->PostDelayedTask(
-      FROM_HERE, MakeCallbackFromStdFunction(std::move(task)),
-      base::TimeDelta::FromMilliseconds(delay_milliseconds));
+  task_runner_->PostDelayedTask(FROM_HERE,
+                                MakeCallbackFromStdFunction(std::move(task)),
+                                base::Milliseconds(delay_milliseconds));
 }
 
 void DpslThreadContextImpl::QuitEventLoop() {
@@ -102,9 +102,9 @@ std::unique_ptr<DpslThreadContext> DpslThreadContext::Create(
   CHECK(global_context) << "GlobalContext is nullptr";
 
   // Verify we're not called twice on the current thread.
-  CHECK(!g_thread_context_impl_created.Pointer()->Get())
+  CHECK(!g_thread_context_impl_created)
       << "Duplicate DpslThreadContext instances constructed on the same thread";
-  g_thread_context_impl_created.Pointer()->Set(true);
+  g_thread_context_impl_created = true;
 
   return std::make_unique<DpslThreadContextImpl>();
 }

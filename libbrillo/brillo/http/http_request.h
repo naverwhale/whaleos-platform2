@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,6 @@
 #include <utility>
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/brillo_export.h>
 #include <brillo/errors/error.h>
 #include <brillo/http/http_connection.h>
@@ -290,8 +289,8 @@ class BRILLO_EXPORT Request final {
   // Sends out the request and invokes the |success_callback| when the response
   // is received. In case of an error, the |error_callback| is invoked.
   // Returns the ID of the asynchronous request created.
-  RequestID GetResponse(const SuccessCallback& success_callback,
-                        const ErrorCallback& error_callback);
+  RequestID GetResponse(SuccessCallback success_callback,
+                        ErrorCallback error_callback);
 
  private:
   friend class HttpRequestTest;

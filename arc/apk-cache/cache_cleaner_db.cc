@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,6 +19,7 @@
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
+#include <brillo/files/file_util.h>
 #include <sqlite3.h>
 
 #include "arc/apk-cache/apk_cache_database.h"
@@ -31,11 +32,11 @@ namespace apk_cache {
 constexpr char kCacheCleanerSessionSource[] = "cache_cleaner";
 
 // Maximum age of sessions.
-constexpr base::TimeDelta kSessionMaxAge = base::TimeDelta::FromMinutes(10);
+constexpr base::TimeDelta kSessionMaxAge = base::Minutes(10);
 
 // Maximum age of cached files. If a file expires, the whole package will be
 // removed.
-constexpr base::TimeDelta kValidityPeriod = base::TimeDelta::FromDays(30);
+constexpr base::TimeDelta kValidityPeriod = base::Days(30);
 
 namespace {
 
@@ -152,7 +153,8 @@ bool OpaqueFilesCleaner::DeleteCache() const {
 }
 
 bool OpaqueFilesCleaner::DeleteFiles() const {
-  if (base::PathExists(files_path_) && base::DeletePathRecursively(files_path_))
+  if (base::PathExists(files_path_) &&
+      brillo::DeletePathRecursively(files_path_))
     return true;
 
   LOG(ERROR) << "Failed to delete files directory";

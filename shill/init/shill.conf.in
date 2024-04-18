@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -23,13 +23,8 @@ env SHILL_LOG_LEVEL=
 env SHILL_LOG_SCOPES=
 # Disable noisy libchrome and libbrillo VLOGs by default
 env SHILL_LOG_VMODULES="object_proxy=0,dbus_object=0,bus=0"
-env SHILL_PASSIVE_MODE=
-env SHILL_PREPEND_DNS_SERVERS=
-env SHILL_ACCEPT_HOSTNAME_FROM=
-env SHILL_MINIMUM_MTU=
 env ALLOWED_DEVICES=
 env BLOCKED_DEVICES=
-env DHCPV6_ENABLED_DEVICES=
 
 # Hook for mod_for_test_scripts/100setupTestingInterface.
 env SHILL_TEST_DEVICES=""
@@ -37,22 +32,21 @@ env SHILL_TEST_DEVICES=""
 # Allow the parameters to be overridden by upstart commands and events.
 import ALLOWED_DEVICES
 import BLOCKED_DEVICES
-import DHCPV6_ENABLED_DEVICES
-import SHILL_ACCEPT_HOSTNAME_FROM
 import SHILL_LOG_LEVEL
 import SHILL_LOG_SCOPES
 import SHILL_LOG_VMODULES
-import SHILL_MINIMUM_MTU
-import SHILL_PASSIVE_MODE
-import SHILL_PREPEND_DNS_SERVERS
 import SHILL_TEST_DEVICES
 
 # Make shill killable, because if it has a leak it's better to
 # restart it than to OOM-panic.
 oom score -100
-# Let the daemon crash if it grows too much.  "as" is "address space" (vm
-# size).  We expect a typical VM size of about 40MB for the daemon.
-limit as 200000000 unlimited
+# Let the daemon crash if it grows too much.  "as" is "address space" (vm size).
+# Each extra thread (i.e., except for the main one) may take 8MB (stack) + 64MB
+# (malloc arena) and currently shill may have 4 extra threads at most, so set
+# the value to ~500MB here. Note that the shill code we care about here is
+# single-threaded, but the libs that shill is using may start some threads by
+# themselves (e.g., libbase, libchaps). Also see b/268424208.
+limit as 500000000 unlimited
 
 pre-start exec /usr/share/cros/init/shill-pre-start.sh
 

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -41,6 +41,16 @@ class ECUtil {
   // Instruct the system to exit the current operating mode on port with index
   // |port|.
   virtual bool ExitMode(int port) = 0;
+
+  // Provides DP alternate mode state on port with index |port|.
+  // Returns false if the EcUtil command could not be executed, otherwise
+  // returns true.
+  virtual bool DpState(int port, bool* entered) = 0;
+
+  // Provides HPD GPIO state for port with index |port|.
+  // Returns true on systems that use HPD GPIO signalling from the EC (i.e AMD),
+  // otherwise returns false.
+  virtual bool HpdState(int port, bool* hpd) = 0;
 
   virtual ~ECUtil() = default;
 };

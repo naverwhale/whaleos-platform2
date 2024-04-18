@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <base/macros.h>
 
 #include "shill/refptr_types.h"
 #include "shill/supplicant/supplicant_interface_proxy_interface.h"
@@ -60,6 +58,11 @@ class SupplicantInterfaceProxy : public SupplicantInterfaceProxyInterface {
   bool SetScanInterval(int seconds) override;
   bool SetScan(bool enable) override;
   bool GetCapabilities(KeyValueStore* capabilities) override;
+  bool AddCred(const KeyValueStore& args, RpcIdentifier* cred) override;
+  bool RemoveCred(const RpcIdentifier& cred) override;
+  bool RemoveAllCreds() override;
+  bool InterworkingSelect() override;
+  bool SignalPoll(KeyValueStore* signalInfo) override;
 
  private:
   class PropertySet : public dbus::PropertySet {
@@ -97,12 +100,20 @@ class SupplicantInterfaceProxy : public SupplicantInterfaceProxyInterface {
   void BSSRemoved(const dbus::ObjectPath& BSS);
   void Certification(const brillo::VariantDictionary& properties);
   void EAP(const std::string& status, const std::string& parameter);
+  void InterworkingAPAdded(const dbus::ObjectPath& BSS,
+                           const dbus::ObjectPath& cred,
+                           const brillo::VariantDictionary& properties);
+  void InterworkingSelectDone();
   void NetworkAdded(const dbus::ObjectPath& network,
                     const brillo::VariantDictionary& properties);
   void NetworkRemoved(const dbus::ObjectPath& network);
   void NetworkSelected(const dbus::ObjectPath& network);
   void PropertiesChanged(const brillo::VariantDictionary& properties);
   void ScanDone(bool success);
+  void StationAdded(const dbus::ObjectPath& station,
+                    const brillo::VariantDictionary& properties);
+  void StationRemoved(const dbus::ObjectPath& station);
+  void PskMismatch();
 
   // Callback invoked when the value of property |property_name| is changed.
   void OnPropertyChanged(const std::string& property_name);

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,21 +6,23 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/sys_byteorder.h>
+#include <base/time/time.h>
 #include <base/timer/timer.h>
 #include <openssl/bn.h>
 #include <openssl/ecdsa.h>
 #include <trunks/cr50_headers/u2f.h>
 
-#include "u2fd/u2f_apdu.h"
+#include "u2fd/client/u2f_apdu.h"
+#include "u2fd/client/u2f_corp_firmware_version.h"
+#include "u2fd/client/user_state.h"
+#include "u2fd/client/util.h"
+#include "u2fd/u2f_corp_processor_interface.h"
 #include "u2fd/u2fhid.h"
-#include "u2fd/user_state.h"
-#include "u2fd/util.h"
 
 namespace {
 
@@ -31,7 +33,7 @@ constexpr size_t kContReportPayloadSize = 59;
 
 constexpr uint8_t kInterfaceVersion = 2;
 
-constexpr int kU2fHidTimeoutMs = 500;
+constexpr base::TimeDelta kU2fHidTimeout = base::Milliseconds(500);
 
 // Maximum duration one can keep the channel lock as specified by the U2FHID
 // specification
@@ -198,14 +200,20 @@ struct U2fHid::Transaction {
 };
 
 U2fHid::U2fHid(std::unique_ptr<HidInterface> hid,
-               U2fMessageHandlerInterface* msg_handler)
+               U2fCorpFirmwareVersion fw_version,
+               std::string dev_id,
+               U2fMessageHandlerInterface* msg_handler,
+               U2fCorpProcessorInterface* u2f_corp_processor)
     : hid_(std::move(hid)),
+      fw_version_(fw_version),
+      dev_id_(std::move(dev_id)),
       free_cid_(1),
       locked_cid_(0),
-      msg_handler_(msg_handler) {
+      msg_handler_(msg_handler),
+      u2f_corp_processor_(u2f_corp_processor) {
   transaction_ = std::make_unique<Transaction>();
   hid_->SetOutputReportHandler(
-      base::Bind(&U2fHid::ProcessReport, base::Unretained(this)));
+      base::BindRepeating(&U2fHid::ProcessReport, base::Unretained(this)));
 }
 
 U2fHid::~U2fHid() = default;
@@ -300,13 +308,12 @@ int U2fHid::CmdPing(std::string* resp) {
 }
 
 int U2fHid::CmdLock(std::string* resp) {
-  int duration = transaction_->payload[0];
+  uint8_t duration = static_cast<uint8_t>(transaction_->payload[0]);
 
   VLOG(1) << "LOCK " << duration << "s CID:" << std::hex << transaction_->cid;
 
   if (duration > kMaxLockDurationSeconds) {
-    ReturnError(U2fHidError::kInvalidPar, transaction_->cid, true);
-    return -EINVAL;
+    duration = kMaxLockDurationSeconds;
   }
 
   if (!duration) {
@@ -315,14 +322,33 @@ int U2fHid::CmdLock(std::string* resp) {
   } else {
     locked_cid_ = transaction_->cid;
     lock_timeout_.Start(
-        FROM_HERE, base::TimeDelta::FromSeconds(duration),
-        base::Bind(&U2fHid::LockTimeout, base::Unretained(this)));
+        FROM_HERE, base::Seconds(duration),
+        base::BindOnce(&U2fHid::LockTimeout, base::Unretained(this)));
   }
   return 0;
 }
 
 int U2fHid::CmdSysInfo(std::string* resp) {
+  if (u2f_corp_processor_) {
+    std::string version = fw_version_.ToString();
+    // 8 bytes name + 3 bytes firmware version + 3 bytes applet version.
+    *resp = std::string("cr50") + std::string(4, '\x00') + version + version;
+    return 0;
+  }
+
   LOG(WARNING) << "Received unsupported SysInfo command";
+  ReturnError(U2fHidError::kInvalidCmd, transaction_->cid, true);
+  return -EINVAL;
+}
+
+int U2fHid::CmdMetrics(std::string* resp) {
+  if (u2f_corp_processor_) {
+    VLOG(1) << "Received Metrics command";
+    *resp = dev_id_;
+    return 0;
+  }
+
+  LOG(WARNING) << "Received unsupported Metrics command";
   ReturnError(U2fHidError::kInvalidCmd, transaction_->cid, true);
   return -EINVAL;
 }
@@ -335,23 +361,41 @@ int U2fHid::CmdMsg(std::string* resp) {
   return 0;
 }
 
+int U2fHid::CmdAtr(std::string* resp) {
+  if (u2f_corp_processor_) {
+    VLOG(1) << "Received Atr command";
+    u2f_corp_processor_->Reset();
+    return 0;
+  }
+
+  LOG(WARNING) << "Received unsupported Atr command";
+  ReturnError(U2fHidError::kInvalidCmd, transaction_->cid, true);
+  return -EINVAL;
+}
+
 void U2fHid::ExecuteCmd() {
   int rc;
   std::string resp;
 
   transaction_->timeout.Stop();
   switch (transaction_->cmd) {
-    case U2fHidCommand::kMsg:
-      rc = CmdMsg(&resp);
-      break;
     case U2fHidCommand::kPing:
       rc = CmdPing(&resp);
+      break;
+    case U2fHidCommand::kAtr:
+      rc = CmdAtr(&resp);
+      break;
+    case U2fHidCommand::kMsg:
+      rc = CmdMsg(&resp);
       break;
     case U2fHidCommand::kLock:
       rc = CmdLock(&resp);
       break;
     case U2fHidCommand::kVendorSysInfo:
       rc = CmdSysInfo(&resp);
+      break;
+    case U2fHidCommand::kMetrics:
+      rc = CmdMetrics(&resp);
       break;
     default:
       LOG(WARNING) << "Unknown command " << std::hex
@@ -425,8 +469,8 @@ void U2fHid::ProcessReport(const std::string& report) {
     }
 
     transaction_->timeout.Start(
-        FROM_HERE, base::TimeDelta::FromMilliseconds(kU2fHidTimeoutMs),
-        base::Bind(&U2fHid::TransactionTimeout, base::Unretained(this)));
+        FROM_HERE, kU2fHidTimeout,
+        base::BindOnce(&U2fHid::TransactionTimeout, base::Unretained(this)));
 
     // record transaction parameters
     transaction_->cid = pkt.ChannelId();
@@ -449,8 +493,8 @@ void U2fHid::ProcessReport(const std::string& report) {
     }
     // reload timeout
     transaction_->timeout.Start(
-        FROM_HERE, base::TimeDelta::FromMilliseconds(kU2fHidTimeoutMs),
-        base::Bind(&U2fHid::TransactionTimeout, base::Unretained(this)));
+        FROM_HERE, kU2fHidTimeout,
+        base::BindOnce(&U2fHid::TransactionTimeout, base::Unretained(this)));
     // record the payload
     transaction_->payload += report.substr(pkt.PayloadIndex());
     transaction_->seq++;

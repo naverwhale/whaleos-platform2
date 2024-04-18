@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,36 +16,53 @@ using speech::soda::chrome::SodaResponse;
 
 namespace ml {
 
-chromeos::machine_learning::mojom::SpeechRecognizerEventPtr
+std::optional<chromeos::machine_learning::mojom::SpeechRecognizerEventPtr>
 SpeechRecognizerEventFromProto(const SodaResponse& soda_response) {
-  auto speech_recognizer_event =
-      chromeos::machine_learning::mojom::SpeechRecognizerEvent::New();
+  // Always print the log lines.
+  if (soda_response.log_lines_size() > 0) {
+    for (const auto& log_line : soda_response.log_lines()) {
+      LOG(ERROR) << log_line;
+    }
+  }
+
+  chromeos::machine_learning::mojom::SpeechRecognizerEventPtr
+      speech_recognizer_event;
   if (soda_response.soda_type() == SodaResponse::AUDIO_LEVEL) {
     auto audio_level_event = internal::AudioLevelEventFromProto(soda_response);
-    speech_recognizer_event->set_audio_event(std::move(audio_level_event));
+    speech_recognizer_event =
+        chromeos::machine_learning::mojom::SpeechRecognizerEvent::NewAudioEvent(
+            std::move(audio_level_event));
   } else if (soda_response.soda_type() == SodaResponse::RECOGNITION) {
     const auto& rec_result = soda_response.recognition_result();
     if (rec_result.result_type() == SodaRecognitionResult::PARTIAL) {
-      speech_recognizer_event->set_partial_result(
-          internal::PartialResultFromProto(soda_response));
+      speech_recognizer_event =
+          chromeos::machine_learning::mojom::SpeechRecognizerEvent::
+              NewPartialResult(internal::PartialResultFromProto(soda_response));
     } else if (rec_result.result_type() == SodaRecognitionResult::FINAL) {
-      speech_recognizer_event->set_final_result(
-          internal::FinalResultFromProto(soda_response));
+      speech_recognizer_event =
+          chromeos::machine_learning::mojom::SpeechRecognizerEvent::
+              NewFinalResult(internal::FinalResultFromProto(soda_response));
     } else if (rec_result.result_type() == SodaRecognitionResult::PREFETCH) {
-      speech_recognizer_event->set_partial_result(
-          internal::PartialResultFromPrefetchProto(soda_response));
+      speech_recognizer_event = chromeos::machine_learning::mojom::
+          SpeechRecognizerEvent::NewPartialResult(
+              internal::PartialResultFromPrefetchProto(soda_response));
     } else {
       LOG(ERROR) << "Only partial/prefetch/final results are supported, not "
                  << speech::soda::chrome::SodaRecognitionResult_ResultType_Name(
                         rec_result.result_type());
     }
   } else if (soda_response.soda_type() == SodaResponse::ENDPOINT) {
-    speech_recognizer_event->set_endpointer_event(
-        internal::EndpointerEventFromProto(soda_response));
+    speech_recognizer_event = chromeos::machine_learning::mojom::
+        SpeechRecognizerEvent::NewEndpointerEvent(
+            internal::EndpointerEventFromProto(soda_response));
+  } else if (soda_response.soda_type() ==
+             SodaResponse::LOGS_ONLY_ARTIFICIAL_MESSAGE) {
+    return std::nullopt;
   } else {
-    LOG(DFATAL) << "Unexpected type of soda type to convert: "
-                << speech::soda::chrome::SodaResponse_SodaMessageType_Name(
-                       soda_response.soda_type());
+    LOG(ERROR) << "Unexpected type of soda type to convert: "
+               << speech::soda::chrome::SodaResponse_SodaMessageType_Name(
+                      soda_response.soda_type());
+    return std::nullopt;
   }
   return speech_recognizer_event;
 }
@@ -142,7 +159,7 @@ chromeos::machine_learning::mojom::FinalResultPtr FinalResultFromProto(
         part_in_result->text.push_back(part);
       }
       part_in_result->alignment =
-          base::TimeDelta::FromMilliseconds(hypothesis_part.alignment_ms());
+          base::Milliseconds(hypothesis_part.alignment_ms());
       final_result->hypothesis_part->push_back(std::move(part_in_result));
     }
   }
@@ -199,20 +216,19 @@ TimingInfoFromTimingMetricsProto(
   auto timing_info = chromeos::machine_learning::mojom::TimingInfo::New();
   if (timing_metric.has_audio_start_epoch_usec()) {
     timing_info->audio_start_epoch = base::Time::FromDeltaSinceWindowsEpoch(
-        base::TimeDelta::FromMicroseconds(
-            timing_metric.audio_start_epoch_usec()));
+        base::Microseconds(timing_metric.audio_start_epoch_usec()));
   }
   if (timing_metric.has_audio_start_time_usec()) {
-    timing_info->audio_start_time = base::TimeDelta::FromMicroseconds(
-        timing_metric.audio_start_time_usec());
+    timing_info->audio_start_time =
+        base::Microseconds(timing_metric.audio_start_time_usec());
   }
   if (timing_metric.has_elapsed_wall_time_usec()) {
-    timing_info->elapsed_wall_time = base::TimeDelta::FromMicroseconds(
-        timing_metric.elapsed_wall_time_usec());
+    timing_info->elapsed_wall_time =
+        base::Microseconds(timing_metric.elapsed_wall_time_usec());
   }
   if (timing_metric.has_event_end_time_usec()) {
     timing_info->event_end_time =
-        base::TimeDelta::FromMicroseconds(timing_metric.event_end_time_usec());
+        base::Microseconds(timing_metric.event_end_time_usec());
   }
   return timing_info;
 }

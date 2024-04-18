@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -341,7 +341,7 @@ int ParseGpoList(const std::string& net_out,
       flags_error = !ParseGpFlags(value, &current_gpo.gp_flags);
     }
 
-    // Sanity check that we don't miss separators between GPOs.
+    // Confidence check that we don't miss separators between GPOs.
     if (already_set) {
       LOG(ERROR) << "Failed to parse GPO data (bad format)";
       return EXIT_CODE_PARSE_INPUT_FAILED;

@@ -1,46 +1,79 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <cryptohome/credential_verifier.h>
+#include "cryptohome/credential_verifier.h"
 
 #include <memory>
+#include <variant>
 
-#include <brillo/secure_blob.h>
 #include <gtest/gtest.h>
 
-#include <cryptohome/scrypt_verifier.h>
+#include "cryptohome/auth_factor/auth_factor_metadata.h"
+#include "cryptohome/auth_factor/auth_factor_type.h"
+#include "cryptohome/key_objects.h"
 
 namespace cryptohome {
+namespace {
 
-class VerifierTest : public ::testing::TestWithParam<CredentialVerifier*> {
+using ::cryptohome::error::CryptohomeError;
+using ::hwsec_foundation::status::MakeStatus;
+using ::hwsec_foundation::status::OkStatus;
+
+// Minimal concrete implementation of CredentialVerifier, so that we can test
+// the abstract base class functions.
+class TestVerifier : public SyncCredentialVerifier {
  public:
-  VerifierTest() { password_verifier_.reset(GetParam()); }
+  TestVerifier(AuthFactorType auth_factor_type,
+               std::string auth_factor_label,
+               AuthFactorMetadata auth_factor_metadata)
+      : SyncCredentialVerifier(auth_factor_type,
+                               std::move(auth_factor_label),
+                               std::move(auth_factor_metadata)) {}
 
- protected:
-  std::unique_ptr<CredentialVerifier> password_verifier_;
+  // Just work. Doesn't matter because we don't use this in the test.
+  CryptohomeStatus VerifySync(const AuthInput&) const override {
+    return OkStatus<CryptohomeError>();
+  }
 };
 
-INSTANTIATE_TEST_SUITE_P(Scrypt,
-                         VerifierTest,
-                         ::testing::Values(new ScryptVerifier()));
+class CredentialVerifierTest : public ::testing::Test {
+ public:
+  CredentialVerifierTest()
+      : pw_verifier_(AuthFactorType::kPassword,
+                     "password",
+                     {.metadata = PasswordMetadata()}),
+        pin_verifier_(
+            AuthFactorType::kPin, "pin", {.metadata = PinMetadata()}) {}
 
-TEST_P(VerifierTest, Ok) {
-  brillo::SecureBlob secret("good");
-  EXPECT_TRUE(password_verifier_->Set(secret));
-  EXPECT_TRUE(password_verifier_->Verify(secret));
+ protected:
+  // A couple of verifiers that we can test with.
+  TestVerifier pw_verifier_;
+  TestVerifier pin_verifier_;
+};
+
+TEST_F(CredentialVerifierTest, AuthFactorType) {
+  EXPECT_EQ(pw_verifier_.auth_factor_type(), AuthFactorType::kPassword);
+  EXPECT_EQ(pin_verifier_.auth_factor_type(), AuthFactorType::kPin);
 }
 
-TEST_P(VerifierTest, Fail) {
-  brillo::SecureBlob secret("good");
-  brillo::SecureBlob wrong_secret("wrong");
-  EXPECT_TRUE(password_verifier_->Set(secret));
-  EXPECT_FALSE(password_verifier_->Verify(wrong_secret));
+TEST_F(CredentialVerifierTest, AuthFactorLabel) {
+  EXPECT_EQ(pw_verifier_.auth_factor_label(), "password");
+  EXPECT_EQ(pin_verifier_.auth_factor_label(), "pin");
 }
 
-TEST_P(VerifierTest, NotSet) {
-  brillo::SecureBlob secret("not set secret");
-  EXPECT_FALSE(password_verifier_->Verify(secret));
+TEST_F(CredentialVerifierTest, AuthFactorMetadata) {
+  EXPECT_TRUE(std::holds_alternative<PasswordMetadata>(
+      pw_verifier_.auth_factor_metadata().metadata));
+  EXPECT_TRUE(std::holds_alternative<PinMetadata>(
+      pin_verifier_.auth_factor_metadata().metadata));
 }
 
+TEST_F(CredentialVerifierTest, AuthFactorChangeLabel) {
+  EXPECT_EQ(pw_verifier_.auth_factor_label(), "password");
+  pw_verifier_.ChangeLabel("pass");
+  EXPECT_EQ(pw_verifier_.auth_factor_label(), "pass");
+}
+
+}  // namespace
 }  // namespace cryptohome

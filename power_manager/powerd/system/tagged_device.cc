@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,7 @@
 
 #include <base/strings/string_tokenizer.h>
 
-namespace power_manager {
-namespace system {
-
-TaggedDevice::TaggedDevice() {}
+namespace power_manager::system {
 
 TaggedDevice::TaggedDevice(const std::string& syspath,
                            const base::FilePath& wakeup_device_path,
@@ -22,11 +19,8 @@ TaggedDevice::TaggedDevice(const std::string& syspath,
     tags_.insert(parts.token());
 }
 
-TaggedDevice::~TaggedDevice() {}
-
 bool TaggedDevice::HasTag(const std::string& tag) const {
   return tags_.find(tag) != tags_.end();
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

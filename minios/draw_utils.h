@@ -1,16 +1,19 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MINIOS_DRAW_UTILS_H_
 #define MINIOS_DRAW_UTILS_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/files/file.h>
 #include <base/files/file_util.h>
 #include <base/strings/string_split.h>
+#include <base/time/time.h>
+#include <base/timer/timer.h>
 #include <gtest/gtest_prod.h>
 
 #include "minios/draw_interface.h"
@@ -24,6 +27,7 @@ extern const char kMenuBlack[];
 extern const char kMenuBlue[];
 extern const char kMenuGrey[];
 extern const char kMenuDropdownFrameNavy[];
+extern const char kMenuDropdownHighlightNavy[];
 extern const char kMenuDropdownBackgroundBlack[];
 extern const char kMenuButtonFrameGrey[];
 
@@ -36,22 +40,24 @@ extern const int kMonospaceGlyphWidth;
 extern const int kDefaultButtonWidth;
 extern const int kSmallCanvasSize;
 extern const int kProgressBarYScale;
+extern const int kProgressBarHeight;
 
 // Frecon constants
 extern const char kScreens[];
 extern const int kFreconScalingFactor;
 extern const int kCanvasSize;
+extern const int kFreconNoOffset;
 
 // `DrawUtils` contains all the different components needed to show MiniOS
 // Screens.
 class DrawUtils : public DrawInterface {
  public:
+  // The period corresponding to 66.67 fps.
+  static constexpr base::TimeDelta kAnimationPeriod = base::Milliseconds(15);
+
   explicit DrawUtils(ProcessManagerInterface* process_manager)
       : process_manager_(process_manager),
-        screens_path_(root_.Append(kScreens)) {
-    // TODO(b/183791649): minios: Clean up. Replace screens_path_ with
-    // GetScreenPath.
-  }
+        screens_path_(root_.Append(kScreens)) {}
   ~DrawUtils() override = default;
   // Not copyable or movable.
   DrawUtils(const DrawUtils&) = delete;
@@ -102,9 +108,19 @@ class DrawUtils : public DrawInterface {
 
   void ShowLanguageMenu(bool is_selected) override;
 
+  void ShowAdvancedOptionsButton(bool focused) override;
+
+  void ShowPowerButton(bool focused) override;
+
   void LocaleChange(int selected_locale) override;
 
+  void ShowProgressBar() override;
+
   void ShowProgressPercentage(double progress) override;
+
+  void ShowIndeterminateProgressBar() override;
+
+  void HideIndeterminateProgressBar() override;
 
   int GetSupportedLocalesSize() override { return supported_locales_.size(); }
 
@@ -112,7 +128,7 @@ class DrawUtils : public DrawInterface {
 
   int GetFreconCanvasSize() override { return frecon_canvas_size_; }
 
-  base::FilePath GetScreenPath() override { return screens_path_; }
+  base::FilePath GetScreensPath() override { return screens_path_; }
 
   // Override the root directory for testing. Default is '/'.
   void SetRootForTest(const std::string& test_root) {
@@ -141,6 +157,23 @@ class DrawUtils : public DrawInterface {
   FRIEND_TEST(DrawUtilsTest, GetFreconConstNoInt);
   FRIEND_TEST(DrawUtilsTest, GetFreconConstNoFile);
   FRIEND_TEST(DrawUtilsTestMocks, ShowFooter);
+  FRIEND_TEST(DrawUtilsTestMocks, ShowInvalidVersion);
+  FRIEND_TEST(DrawUtilsTestMocks, ShowLeftToRightVersion);
+  FRIEND_TEST(DrawUtilsTestMocks, ShowRightToLeftVersion);
+
+  // Shows a progress bar (box of a predetermined location) at the given offset
+  // with the given size. Color should be given as a hex string. Acts as a No-op
+  // if offset is outside the bounds of the canvas. Will also clamp progress bar
+  // to the bounds of the canvas.
+  void ShowProgressBar(int offset_x, int size_x, const std::string& color);
+  // Initialize the segments and offsets for the head and tail of the
+  // indeterminate progress bar.
+  void InitIndeterminateProgressBar();
+  // Reset the offsets for the head and tail of the indeterminate progress bar
+  // to starting positions.
+  void ResetIndeterminateProgressBar();
+  // Draw the next segment of the indeterminate progress bar.
+  void DrawIndeterminateProgressBar();
 
   // Clears full screen except the footer.
   void ClearMainArea();
@@ -173,10 +206,30 @@ class DrawUtils : public DrawInterface {
   // Get hardware Id from crossystem. Set hwid to `CHROMEBOOK` as default.
   void ReadHardwareId();
 
+  // Show minios version in UI.
+  void ShowVersion();
+
+  // Show non navigational buttons. These buttons don't have a box, and can have
+  // icons or arrows next to them.
+  void ShowControlButton(const std::optional<std::string>& icon,
+                         const std::string& token,
+                         int x_offset,
+                         int y_offset,
+                         int button_width,
+                         bool show_arrow,
+                         bool focused);
+
   ProcessManagerInterface* process_manager_;
+
+  // Timer for animating the indeterminate progress bar.
+  base::RepeatingTimer timer_;
 
   int frecon_canvas_size_{1080};
   int frecon_scale_factor_{1};
+  // This is always half of `frecon_canvas_size` since offsets are always
+  // relative to the center of the screen and thus go from
+  // `-frecon_offset_limit` to `+frecon_offset_limit`.
+  int frecon_offset_limit_{540};
   // Default button width. Changes for each locale.
   int default_button_width_{80};
   // Default root directory.
@@ -200,8 +253,19 @@ class DrawUtils : public DrawInterface {
   // Hardware Id read from crossystem.
   std::string hwid_;
 
+  // X-offsets for the current head and tail of the indeterminate progress bar.
+  int indeterminate_progress_bar_head_;
+  int indeterminate_progress_bar_tail_;
+  // Per frame segment size for the head and tail of the indeterminate progress
+  // bar.
+  int segment_size_head_;
+  int segment_size_tail_;
+
   // Whether the device has a detachable keyboard.
   bool is_detachable_{false};
+
+  // The version parsed from cmdline, nullopt on failure.
+  std::optional<std::string> minios_version_;
 };
 
 }  // namespace minios

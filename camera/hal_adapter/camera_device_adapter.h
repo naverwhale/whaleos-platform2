@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -17,12 +17,13 @@
 
 #include <hardware/camera3.h>
 
-#include <base/callback_helpers.h>
 #include <base/containers/flat_map.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/callback_helpers.h>
 #include <base/synchronization/lock.h>
 #include <base/threading/thread.h>
 #include <base/timer/timer.h>
+#include <base/types/expected.h>
 #include <camera/camera_metadata.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/pending_remote.h>
@@ -31,12 +32,12 @@
 #include "camera/mojo/camera3.mojom.h"
 #include "common/camera_hal3_helpers.h"
 #include "common/stream_manipulator.h"
+#include "common/stream_manipulator_manager.h"
 #include "common/utils/common_types.h"
 #include "common/utils/cros_camera_mojo_utils.h"
 #include "cros-camera/camera_buffer_manager.h"
 #include "cros-camera/camera_metrics.h"
-#include "hal_adapter/camera_metadata_inspector.h"
-#include "hal_adapter/scoped_yuv_buffer_handle.h"
+#include "cutils/native_handle.h"
 
 namespace cros {
 
@@ -47,34 +48,58 @@ class Camera3CallbackOpsDelegate;
 // It is a watchdog-like monitor. It detects the kick event. If there is no
 // kick event between 2 timeout it outputs log to indicate it. We can use it to
 // detect if there is any continuous event stopped. e.g. capture request.
-class CameraMonitor : public base::OneShotTimer {
+class CameraMonitor {
  public:
-  explicit CameraMonitor(const std::string& name);
+  enum class MonitorType {
+    kRequestsMonitor,
+    kResultsMonitor,
+  };
+
+  CameraMonitor();
   CameraMonitor(const CameraMonitor&) = delete;
   CameraMonitor& operator=(const CameraMonitor&) = delete;
 
-  ~CameraMonitor() override = default;
+  ~CameraMonitor();
 
-  void Attach();
-  void Detach();
-  void StartMonitor(base::OnceClosure timeout_callback = base::DoNothing());
-  void Kick();
-  bool HasBeenKicked();
+  void StartMonitor(MonitorType type,
+                    base::OnceClosure timeout_callback = base::NullCallback());
+  void StopMonitor(MonitorType type);
+  void Kick(MonitorType type);
+  bool HasBeenKicked(MonitorType type);
 
  private:
-  void SetTaskRunnerOnThread(base::Callback<void()> callback);
-  void StartMonitorOnThread();
-  void MaybeResumeMonitorOnThread();
-  void MonitorTimeout();
+  // Per-type monitor state.
+  struct State {
+    // A repeating oneshot timer to periodically check whether |is_kicked| is
+    // set. |timer| stops if the monitor is not kicked before timeout and will
+    // be resumed when kicked again.
+    std::unique_ptr<base::RetainingOneShotTimer> timer;
 
-  std::string name_;
+    // Set when we stop monitoring for the given type. |timer| will not resume
+    // when |is_stopped| is set.
+    bool is_stopped = true;
+
+    bool is_kicked = false;
+    base::OnceClosure timeout_callback = base::NullCallback();
+
+    void ResetTimer() {
+      is_kicked = false;
+      if (timer) {
+        timer->Reset();
+      }
+    }
+  };
+
+  void StartMonitorOnThread(MonitorType type,
+                            base::OnceClosure timeout_callback);
+  void StopMonitorOnThread(MonitorType type);
+  void KickOnThread(MonitorType type);
+  void MonitorTimeoutOnThread(MonitorType type);
+
   // A thread that handles timeouts of request/response monitors.
   base::Thread thread_;
-
-  base::Lock lock_;
-  bool is_kicked_ GUARDED_BY(lock_);
-
-  base::OnceClosure timeout_callback_;
+  // Access to |monitor_states_| is sequenced on |thread_|.
+  base::flat_map<MonitorType, State> monitor_states_;
 };
 
 class CameraDeviceAdapter : public camera3_callback_ops_t {
@@ -85,27 +110,20 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
       const camera_metadata_t* static_info,
       base::RepeatingCallback<int(int)> get_internal_camera_id_callback,
       base::RepeatingCallback<int(int)> get_public_camera_id_callback,
-      base::Callback<void()> close_callback,
-      std::vector<std::unique_ptr<StreamManipulator>> stream_manipulators);
+      base::OnceCallback<void()> close_callback,
+      std::unique_ptr<StreamManipulatorManager> stream_manipulator_manager,
+      const bool async_capture_request_call = false);
+
+  CameraDeviceAdapter(const CameraDeviceAdapter&) = delete;
+  CameraDeviceAdapter& operator=(const CameraDeviceAdapter&) = delete;
 
   ~CameraDeviceAdapter();
 
-  using HasReprocessEffectVendorTagCallback =
-      base::Callback<bool(const camera_metadata_t&)>;
-  using ReprocessEffectCallback =
-      base::Callback<int32_t(const camera_metadata_t&,
-                             ScopedYUVBufferHandle*,
-                             uint32_t,
-                             uint32_t,
-                             android::CameraMetadata*,
-                             ScopedYUVBufferHandle*)>;
   using AllocatedBuffers =
       base::flat_map<uint64_t, std::vector<mojom::Camera3StreamBufferPtr>>;
   // Starts the camera device adapter.  This method must be called before all
   // the other methods are called.
-  bool Start(HasReprocessEffectVendorTagCallback
-                 has_reprocess_effect_vendor_tag_callback,
-             ReprocessEffectCallback reprocess_effect_callback);
+  bool Start();
 
   // Bind() is called by CameraHalAdapter in OpenDevice() on the mojo IPC
   // handler thread in |module_delegate_|.
@@ -139,8 +157,10 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
                          uint32_t width,
                          uint32_t height,
                          const std::vector<uint32_t>& strides,
-                         const std::vector<uint32_t>& offsets);
+                         const std::vector<uint32_t>& offsets,
+                         uint64_t modifier);
 
+  // Close the camera and return all inflight requests.
   int32_t Close();
 
   int32_t ConfigureStreamsAndGetAllocatedBuffers(
@@ -148,7 +168,13 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
       mojom::Camera3StreamConfigurationPtr* updated_config,
       AllocatedBuffers* allocated_buffers);
 
+  void SignalStreamFlush(const std::vector<uint64_t>& stream_ids);
+
   bool IsRequestOrResultStalling();
+
+  // Closes the camera as a fallback solution for HALs that have not implemented
+  // HAL-level SW privacy switch yet.
+  void ForceClose();
 
  private:
   // Implementation of camera3_callback_ops_t.
@@ -159,6 +185,20 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
 
   static void Notify(const camera3_callback_ops_t* ops,
                      const camera3_notify_msg_t* msg);
+  static void NotifyClient(const camera3_callback_ops_t* ops,
+                           camera3_notify_msg_t msg);
+
+  static camera3_buffer_request_status_t RequestStreamBuffers(
+      const camera3_callback_ops_t* ops,
+      uint32_t num_buffer_reqs,
+      const camera3_buffer_request_t* buffer_reqs,
+      uint32_t* num_returned_buf_reqs,
+      camera3_stream_buffer_ret_t* returned_buf_reqs);
+
+  static void ReturnStreamBuffers(
+      const camera3_callback_ops_t* ops,
+      uint32_t num_buffers,
+      const camera3_stream_buffer_t* const* buffers);
 
   // Allocates buffers for given |streams|. Returns true and the allocated
   // buffers will be put in |allocated_buffers| if the allocation succeeds.
@@ -177,34 +217,68 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
                                uint32_t width,
                                uint32_t height,
                                const std::vector<uint32_t>& strides,
-                               const std::vector<uint32_t>& offsets);
+                               const std::vector<uint32_t>& offsets,
+                               uint64_t modifier);
   int32_t RegisterBufferLocked(mojom::CameraBufferHandlePtr buffer);
 
   // NOTE: All the fds in |result| (e.g. fences and buffer handles) will be
   // closed after the function returns.  The caller needs to dup a fd in
   // |result| if the fd will be accessed after calling ProcessCaptureResult.
   mojom::Camera3CaptureResultPtr PrepareCaptureResult(
-      const camera3_capture_result_t* result);
+      Camera3CaptureDescriptor result);
 
   mojom::Camera3NotifyMsgPtr PrepareNotifyMsg(const camera3_notify_msg_t* msg);
 
+  base::expected<std::vector<mojom::Camera3BufferRequestPtr>,
+                 camera3_buffer_request_status_t>
+  PrepareBufferRequest(uint32_t num_buffer_reqs,
+                       const camera3_buffer_request_t* buffer_reqs);
+
+  camera3_buffer_request_status_t DeserializeReturnedBufferRequest(
+      mojom::Camera3BufferRequestStatus req_status,
+      std::vector<mojom::Camera3StreamBufferRetPtr>& ret_ptrs,
+      uint32_t* num_returned_buf_reqs,
+      camera3_stream_buffer_ret_t* returned_buf_reqs);
+
+  std::vector<mojom::Camera3StreamBufferPtr> PrepareBufferReturn(
+      uint32_t num_buffers, const camera3_stream_buffer_t* const* buffers);
+
   // Caller must hold |buffer_handles_lock_|.
   void RemoveBufferLocked(const camera3_stream_buffer_t& buffer);
+
+  // Deregisters buffer before returned to the client and marks the buffer as
+  // returned. The given |buffer| must be already registered.
+  // Caller must hold |buffer_handles_lock_|.
+  void RemoveReturnBufferLocked(uint64_t buffer_id,
+                                const camera3_stream_buffer_t& buffer);
+
+  // Deregisters all buffers from a capture request if registered.
+  // Should be called when cancelling process_capture_request,
+  // before reading/writing the buffer.
+  // Caller must hold |buffer_handles_lock_|.
+  void CancelBuffersRegistrationLocked(
+      const std::vector<std::pair<uint64_t, const camera3_stream_buffer_t&>>&
+          registered_buffers);
 
   // Waits until |release_fence| is signaled and then deletes |buffer|.
   void RemoveBufferOnFenceSyncThread(
       base::ScopedFD release_fence,
       std::unique_ptr<camera_buffer_handle_t> buffer);
 
-  void ReprocessEffectsOnReprocessEffectThread(
-      std::unique_ptr<Camera3CaptureDescriptor> req);
-
-  void ProcessReprocessRequestOnDeviceOpsThread(
-      std::unique_ptr<Camera3CaptureDescriptor> req,
-      base::Callback<void(int32_t)> callback);
-
   void ResetDeviceOpsDelegateOnThread();
   void ResetCallbackOpsDelegateOnThread();
+
+  // Calls notify() with type ERROR_REQUEST and also calls
+  // process_capture_result() to return output buffers to the client.
+  void NotifyInvalidCaptureRequest(
+      const mojom::Camera3CaptureRequestPtr& request_ptr);
+
+  void ForceCloseOnDeviceOpsThread();
+
+  bool IsBufferManagementSupported() const;
+
+  // Wait for the pending requests in |inflight_requests_| to finish.
+  int32_t WaitForPendingRequests(base::TimeDelta timeout);
 
   // The thread that all the camera3 device ops operate on.
   base::Thread camera_device_ops_thread_;
@@ -218,9 +292,6 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
   // synchronize thread start/stop/status checking on different threads.
   base::Lock fence_sync_thread_lock_;
   base::Thread fence_sync_thread_;
-
-  // A thread to apply reprocessing effects
-  base::Thread reprocess_effect_thread_;
 
   // The delegate that handles the Camera3DeviceOps mojo IPC.
   std::unique_ptr<Camera3DeviceOpsDelegate> device_ops_delegate_;
@@ -238,15 +309,11 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
   base::RepeatingCallback<int(int)> get_public_camera_id_callback_;
 
   // The callback to run when the device is closed.
-  base::Callback<void()> close_callback_;
-
-  // Since Close() can be called in |camera_device_ops_thread_| or in
-  // main thread, use lock to protect |close_called_|.
-  base::Lock close_lock_;
+  base::OnceCallback<void()> close_callback_;
 
   // Set when Close() is called. No more calls to the device APIs may be
-  // made once |close_called_| is set.
-  bool close_called_ GUARDED_BY(close_lock_);
+  // made once |device_closed_| is set.
+  bool device_closed_;
 
   // The real camera device.
   camera3_device_t* camera_device_;
@@ -265,10 +332,13 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
       request_templates_;
 
   // A mapping from Andoird HAL for all the configured streams.
-  internal::ScopedStreams streams_;
+  internal::ScopedStreams streams_ GUARDED_BY(streams_lock_);
 
   // A mutex to guard |streams_|.
   base::Lock streams_lock_;
+
+  // Needs to be locked during ConfigureStreams() or RequestStreamBuffers().
+  base::Lock configuring_streams_lock_;
 
   // A mapping from the locally created buffer handle to the handle ID of the
   // imported buffer.  We need to return the correct handle ID in
@@ -276,62 +346,54 @@ class CameraDeviceAdapter : public camera3_callback_ops_t {
   // buffer, can restore the buffer handle in the capture result before passing
   // up to the upper layer.
   std::unordered_map<uint64_t, std::unique_ptr<camera_buffer_handle_t>>
-      buffer_handles_;
+      buffer_handles_ GUARDED_BY(buffer_handles_lock_);
+
+  // A mutex to guard |buffer_handles_|.
+  base::Lock buffer_handles_lock_;
 
   // A mapping that stores all buffer handles that are allocated when streams
   // are configured locally. When the session is over, all of these handles
   // should be freed.
   std::map<uint64_t, buffer_handle_t> allocated_stream_buffers_;
 
-  // A queue of reprocessing buffers.
-  std::deque<ScopedYUVBufferHandle> reprocess_handles_;
-
-  // A queue of original input buffer handles replaced by reprocessing ones.
-  std::deque<uint64_t> input_buffer_handle_ids_;
-
-  // A mapping from the frame number to the result metadata generated by
-  // reprocessing effects
-  std::unordered_map<uint32_t, android::CameraMetadata>
-      reprocess_result_metadata_;
-
-  // A pending reprocessing request task for HAL to run.
-  base::OnceClosure process_reprocess_request_callback_;
-  base::Lock process_reprocess_request_callback_lock_;
-
-  // A mutex to guard |buffer_handles_|.
-  base::Lock buffer_handles_lock_;
-
-  // A mutex to guard |reprocess_handles_| and |input_buffer_handle_ids_|.
-  base::Lock reprocess_handles_lock_;
-
-  // A mutex to guard |reprocess_result_metadata_|.
-  base::Lock reprocess_result_metadata_lock_;
-
-  // The callback to check reprocessing effect vendor tags.
-  HasReprocessEffectVendorTagCallback has_reprocess_effect_vendor_tag_callback_;
-
-  // The callback to handle reprocessing effect.
-  ReprocessEffectCallback reprocess_effect_callback_;
-
-  // The metadata inspector to dump capture requests / results in realtime
-  // for debugging if enabled.
-  std::unique_ptr<CameraMetadataInspector> camera_metadata_inspector_;
-
   // Metrics for camera service.
   std::unique_ptr<CameraMetrics> camera_metrics_;
 
-  // ANDROID_PARTIAL_RESULT_COUNT from static metadata.
-  int32_t partial_result_count_;
+  // Cached request settings that always track the latest set of request
+  // metadata.
+  internal::ScopedCameraMetadata capture_settings_;
 
-  // Monitors for capture requests and capture results. If there is no capture
+  // Monitors capture requests and capture results. If there is no capture
   // requests/responses for a while the monitors will output a log to indicate
   // this situation.
-  CameraMonitor capture_request_monitor_;
-  CameraMonitor capture_result_monitor_;
+  CameraMonitor capture_monitor_;
 
-  std::vector<std::unique_ptr<StreamManipulator>> stream_manipulators_;
+  std::unique_ptr<StreamManipulatorManager> stream_manipulator_manager_;
 
-  DISALLOW_IMPLICIT_CONSTRUCTORS(CameraDeviceAdapter);
+  // If true, client can ignore the return value of process_capture_request.
+  // Validation error during the process_capture_request will be treated like
+  // any other error by the HAL:
+  // - notify() will be called, but in this case the error type will be
+  //   CAMERA3_MSG_ERROR_REQUEST.
+  // - process_capture_result() will be called to return all the buffers.
+  const bool async_capture_request_call_ = false;
+
+  uint32_t partial_result_count_ = 0;
+
+  // Whether to allow a capture result metadata loss from the HAL. The HAL
+  // can choose not to send any result metadata with non-zero |partial_result|
+  // once Close() has been called. This is used to count inflight requests.
+  bool allow_result_metadata_loss_ = false;
+
+  struct InflightRequestInfo {
+    base::flat_set<const camera3_stream_t*> pending_streams;
+    bool has_pending_metadata = false;
+  };
+
+  base::Lock inflight_requests_lock_;
+  base::ConditionVariable inflight_requests_empty_cv_;
+  std::map<uint32_t, InflightRequestInfo> inflight_requests_
+      GUARDED_BY(inflight_requests_lock_);
 };
 
 }  // namespace cros

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,13 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/variant_dictionary.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
 
-#include "shill/dhcp/dhcpcd_listener_interface.h"
+#include "shill/network/dhcpcd_listener_interface.h"
 
 namespace shill {
 
@@ -35,9 +34,39 @@ class DHCPCDListener final : public DHCPCDListenerInterface {
   ~DHCPCDListener() override;
 
  private:
-  static const char kDBusInterfaceName[];
-  static const char kSignalEvent[];
-  static const char kSignalStatusChanged[];
+  // dbus constants.
+  static constexpr char kDBusInterfaceName[] = "org.chromium.dhcpcd";
+  static constexpr char kSignalEvent[] = "Event";
+  static constexpr char kSignalStatusChanged[] = "StatusChanged";
+
+  // Constants used as event type got from dhcpcd.
+  static constexpr char kReasonBound[] = "BOUND";
+  static constexpr char kReasonFail[] = "FAIL";
+  static constexpr char kReasonGatewayArp[] = "GATEWAY-ARP";
+  static constexpr char kReasonNak[] = "NAK";
+  static constexpr char kReasonRebind[] = "REBIND";
+  static constexpr char kReasonReboot[] = "REBOOT";
+  static constexpr char kReasonRenew[] = "RENEW";
+
+  // Possible status string in StatusChanged event from dhcpcd.
+  static constexpr char kStatusInit[] = "Init";
+  static constexpr char kStatusBound[] = "Bound";
+  static constexpr char kStatusRelease[] = "Release";
+  static constexpr char kStatusDiscover[] = "Discover";
+  static constexpr char kStatusRequest[] = "Request";
+  static constexpr char kStatusRenew[] = "Renew";
+  static constexpr char kStatusRebind[] = "Rebind";
+  static constexpr char kStatusArpSelf[] = "ArpSelf";
+  static constexpr char kStatusInform[] = "Inform";
+  static constexpr char kStatusReboot[] = "Reboot";
+  static constexpr char kStatusNakDefer[] = "NakDefer";
+  static constexpr char kStatusIPv6OnlyPreferred[] = "IPv6OnlyPreferred";
+  static constexpr char kStatusIgnoreInvalidOffer[] = "IgnoreInvalidOffer";
+  static constexpr char kStatusIgnoreFailedOffer[] = "IgnoreFailedOffer";
+  static constexpr char kStatusIgnoreAdditionalOffer[] =
+      "IgnoreAdditionalOffer";
+  static constexpr char kStatusIgnoreNonOffer[] = "IgnoreNonOffer";
+  static constexpr char kStatusArpGateway[] = "ArpGateway";
 
   // Redirects the function call to HandleMessage
   static DBusHandlerResult HandleMessageThunk(DBusConnection* connection,

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,15 +10,16 @@
 #include <base/logging.h>
 
 #include "debugd/dbus-proxies.h"
-#include "diagnostics/common/system/bluetooth_client_impl.h"
-#include "diagnostics/common/system/debugd_adapter_impl.h"
-#include "diagnostics/common/system/powerd_adapter_impl.h"
 #include "diagnostics/wilco_dtc_supportd/probe_service_impl.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/bluetooth_event_service_impl.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/ec_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/powerd_event_service_impl.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/bluetooth_client_impl.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/debugd_adapter_impl.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/powerd_adapter_impl.h"
 
 namespace diagnostics {
+namespace wilco {
 
 CoreDelegateImpl::CoreDelegateImpl() = default;
 
@@ -66,4 +67,5 @@ std::unique_ptr<ProbeService> CoreDelegateImpl::CreateProbeService(
   return std::make_unique<ProbeServiceImpl>(delegate);
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

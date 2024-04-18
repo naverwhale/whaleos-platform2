@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,16 +15,23 @@
 #ifndef CRASH_REPORTER_UNCLEAN_SHUTDOWN_COLLECTOR_H_
 #define CRASH_REPORTER_UNCLEAN_SHUTDOWN_COLLECTOR_H_
 
+#include <memory>
+
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 
 // Unclean shutdown collector.
 class UncleanShutdownCollector : public CrashCollector {
  public:
-  UncleanShutdownCollector();
+  explicit UncleanShutdownCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   UncleanShutdownCollector(const UncleanShutdownCollector&) = delete;
   UncleanShutdownCollector& operator=(const UncleanShutdownCollector&) = delete;
 
@@ -58,6 +65,9 @@ class UncleanShutdownCollector : public CrashCollector {
   // Check for unclean shutdown due to battery running out by analyzing powerd
   // trace files.
   bool DeadBatteryCausedUncleanShutdown();
+  // Check for unclean shutdown
+  void LogEcUptime();
+  void LogGscUptime();
 
   const char* unclean_shutdown_file_;
   base::FilePath powerd_trace_path_;

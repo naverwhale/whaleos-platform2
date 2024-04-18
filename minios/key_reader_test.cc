@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,8 +20,25 @@ class KeyReaderTest : public ::testing::Test {
     test_root_ = temp_dir_.GetPath();
     ASSERT_TRUE(base::CreateDirectory(
         base::FilePath(test_root_).Append("usr/share/misc")));
-    ev_.value = 0;
   }
+
+  bool PressKey(int code, KeyReader& key_reader) {
+    ev_.code = code;
+    ev_.value = kKeyPress;
+    return key_reader.GetCharForTest(ev_);
+  }
+
+  bool ReleaseKey(int code, KeyReader& key_reader) {
+    ev_.code = code;
+    ev_.value = kKeyRelease;
+    return key_reader.GetCharForTest(ev_);
+  }
+
+  void PressAndReleaseKey(int code, KeyReader& key_reader) {
+    PressKey(code, key_reader);
+    ReleaseKey(code, key_reader);
+  }
+
   struct input_event ev_;
   // Test directory.
   base::ScopedTempDir temp_dir_;
@@ -34,54 +51,46 @@ class MockKeyReader : public KeyReader {
   explicit MockKeyReader(bool include_usb) : KeyReader(include_usb) {}
   MockKeyReader(bool include_usb, std::string country_code)
       : KeyReader(include_usb, country_code) {}
-  MOCK_METHOD(bool, GetEpEvent, (int epfd, struct input_event* ev, int* index));
+  MOCK_METHOD(bool, GetEpEvent, (int epfd, struct input_event* ev));
   MOCK_METHOD(bool, GetValidFds, (bool check_supported_keys));
   MOCK_METHOD(bool, EpollCreate, (base::ScopedFD * epfd));
-  MOCK_METHOD(void, OnKeyEvent, ());
+};
+
+class MockDelegate : public KeyReader::Delegate {
+ public:
+  MOCK_METHOD(void, OnKeyPress, (int));
 };
 
 TEST_F(KeyReaderTest, BasicKeyTest) {
   KeyReader key_reader(true, "us");
   EXPECT_TRUE(key_reader.SetKeyboardContext());
   // Test Basic Numbers.
-  ev_.code = 2;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(2, key_reader);
+  PressAndReleaseKey(4, key_reader);
 
-  ev_.code = 4;
-  key_reader.GetCharForTest(ev_);
   EXPECT_EQ("13", key_reader.GetUserInputForTest());
 
   // Test capitalization and special characters.
   // Left shift key down.
-  ev_.code = 42;
-  ev_.value = 1;
-  key_reader.GetCharForTest(ev_);
+  PressKey(42, key_reader);
 
-  ev_.code = 16;
-  ev_.value = 0;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(16, key_reader);
   EXPECT_EQ("13Q", key_reader.GetUserInputForTest());
 
-  ev_.code = 17;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(17, key_reader);
   EXPECT_EQ("13QW", key_reader.GetUserInputForTest());
 
-  ev_.code = 3;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(3, key_reader);
   EXPECT_EQ("13QW@", key_reader.GetUserInputForTest());
 
   // Left shit key release.
-  ev_.code = 42;
-  ev_.value = 0;
-  key_reader.GetCharForTest(ev_);
+  ReleaseKey(42, key_reader);
 
   // No longer capitalized or special.
-  ev_.code = 18;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(18, key_reader);
   EXPECT_EQ("13QW@e", key_reader.GetUserInputForTest());
 
-  ev_.code = 3;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(3, key_reader);
   EXPECT_EQ("13QW@e2", key_reader.GetUserInputForTest());
 }
 
@@ -89,47 +98,37 @@ TEST_F(KeyReaderTest, PrintableKeyTest) {
   KeyReader key_reader(true, "us");
   EXPECT_TRUE(key_reader.SetKeyboardContext());
 
-  ev_.code = 2;
-  key_reader.GetCharForTest(ev_);
-
-  ev_.code = 4;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(2, key_reader);
+  PressAndReleaseKey(4, key_reader);
   EXPECT_EQ("13", key_reader.GetUserInputForTest());
 
   // Non-alphanumeric keys should not affect input length.
   // Left Shift.
-  ev_.code = 42;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(42, key_reader);
   EXPECT_EQ("13", key_reader.GetUserInputForTest());
 
   // Escape.
-  ev_.code = 1;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(1, key_reader);
   EXPECT_EQ("13", key_reader.GetUserInputForTest());
 
   // Left Alt.
-  ev_.code = 56;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(56, key_reader);
   EXPECT_EQ("13", key_reader.GetUserInputForTest());
 
   // Tab.
-  ev_.code = 15;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(15, key_reader);
   EXPECT_EQ("13", key_reader.GetUserInputForTest());
 
   // Ctrl.
-  ev_.code = 29;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(29, key_reader);
   EXPECT_EQ("13", key_reader.GetUserInputForTest());
 
   // Continue taking in input.
-  ev_.code = 3;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(3, key_reader);
   EXPECT_EQ("132", key_reader.GetUserInputForTest());
 
   // Space bar.
-  ev_.code = 57;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(57, key_reader);
   EXPECT_EQ("132 ", key_reader.GetUserInputForTest());
 }
 
@@ -138,24 +137,21 @@ TEST_F(KeyReaderTest, InputLengthTest) {
   EXPECT_TRUE(key_reader.SetKeyboardContext());
 
   // Add max input chars.
-  ev_.code = 52;
   for (int i = 0; i < kMaxInputLength; i++) {
-    key_reader.GetCharForTest(ev_);
+    PressAndReleaseKey(52, key_reader);
   }
 
   EXPECT_EQ(std::string(kMaxInputLength, '.'),
             key_reader.GetUserInputForTest());
 
   // Cannot add past kMaxInputLength.
-  ev_.code = 3;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(3, key_reader);
   EXPECT_EQ(std::string(kMaxInputLength, '.'),
             key_reader.GetUserInputForTest());
 
   // Test backspace. individual key press.
-  ev_.code = 14;
   for (int i = 0; i < 20; i++) {
-    key_reader.GetCharForTest(ev_);
+    PressAndReleaseKey(14, key_reader);
   }
 
   EXPECT_EQ(std::string(kMaxInputLength - 20, '.'),
@@ -164,7 +160,7 @@ TEST_F(KeyReaderTest, InputLengthTest) {
   // Back space repeated keypress.
   // Stop deleting when string empty.
   ev_.value = 2;
-  int remaining_chars = kBackspaceSensitivity * (kMaxInputLength - 20);
+  int remaining_chars = kRepeatedSensitivity * (kMaxInputLength - 20);
   for (int i = 0; i < remaining_chars + 2; i++) {
     key_reader.GetCharForTest(ev_);
   }
@@ -176,79 +172,54 @@ TEST_F(KeyReaderTest, ReturnKeyTest) {
   KeyReader key_reader(true, "us");
   EXPECT_TRUE(key_reader.SetKeyboardContext());
 
-  // Return key press should return true.
-
+  // Return key press should return false.
   ev_.code = 28;
-  EXPECT_TRUE(key_reader.GetCharForTest(ev_));
+  ev_.code = kKeyPress;
+  EXPECT_FALSE(PressKey(28, key_reader));
 
-  ev_.code = 16;
-  ev_.value = 0;
   for (int i = 0; i < 5; i++) {
-    key_reader.GetCharForTest(ev_);
+    PressAndReleaseKey(16, key_reader);
   }
   EXPECT_EQ("qqqqq", key_reader.GetUserInputForTest());
 
-  ev_.code = 28;
-  EXPECT_TRUE(key_reader.GetCharForTest(ev_));
+  EXPECT_FALSE(PressKey(28, key_reader));
 }
 
 TEST_F(KeyReaderTest, FrenchKeyTest) {
   KeyReader key_reader(true, "fr");
   EXPECT_TRUE(key_reader.SetKeyboardContext());
 
-  ev_.code = 16;
-  key_reader.GetCharForTest(ev_);
-
-  ev_.code = 17;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(16, key_reader);
+  PressAndReleaseKey(17, key_reader);
   EXPECT_EQ("az", key_reader.GetUserInputForTest());
 
-  ev_.code = 4;
-  key_reader.GetCharForTest(ev_);
-  ev_.code = 5;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(4, key_reader);
+  PressAndReleaseKey(5, key_reader);
   EXPECT_EQ("az\"'", key_reader.GetUserInputForTest());
 
   // Not a printable ASCII (accent aigu), do not add to input.
-  ev_.code = 8;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(8, key_reader);
   EXPECT_EQ("az\"'", key_reader.GetUserInputForTest());
 
   // Test capitalization and special characters.
   // Left shift key down.
-  ev_.code = 42;
-  ev_.value = 1;
-  key_reader.GetCharForTest(ev_);
+  PressKey(42, key_reader);
 
-  ev_.value = 0;
-  ev_.code = 17;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(17, key_reader);
   EXPECT_EQ("az\"'Z", key_reader.GetUserInputForTest());
 
-  ev_.code = 4;
-  key_reader.GetCharForTest(ev_);
-  ev_.code = 5;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(4, key_reader);
+  PressAndReleaseKey(5, key_reader);
   EXPECT_EQ("az\"'Z34", key_reader.GetUserInputForTest());
 
-  ev_.code = 42;
-  ev_.value = 0;
-  key_reader.GetCharForTest(ev_);
+  ReleaseKey(42, key_reader);
 
   // Get third char on key.
   // ALTGR (right alt) + CTL key press.
+  PressKey(29, key_reader);
+  PressKey(100, key_reader);
 
-  ev_.code = 29;
-  ev_.value = 1;
-  key_reader.GetCharForTest(ev_);
-
-  ev_.code = 100;
-  ev_.value = 1;
-  key_reader.GetCharForTest(ev_);
-
-  ev_.code = 4;
-  ev_.value = 0;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(4, key_reader);
   EXPECT_EQ("az\"'Z34#", key_reader.GetUserInputForTest());
 }
 
@@ -256,54 +227,30 @@ TEST_F(KeyReaderTest, JapaneseKeyTest) {
   KeyReader key_reader(true, "jp");
   EXPECT_TRUE(key_reader.SetKeyboardContext());
 
-  ev_.code = 16;
-  key_reader.GetCharForTest(ev_);
-
-  ev_.code = 17;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(16, key_reader);
+  PressAndReleaseKey(17, key_reader);
   EXPECT_EQ("qw", key_reader.GetUserInputForTest());
-
-  ev_.code = 42;
-  ev_.value = 1;
-  key_reader.GetCharForTest(ev_);
-
-  ev_.value = 0;
-  ev_.code = 4;
-  key_reader.GetCharForTest(ev_);
-  ev_.code = 5;
-  key_reader.GetCharForTest(ev_);
-  EXPECT_EQ("qw#$", key_reader.GetUserInputForTest());
 
   // Test capitalization and special characters.
   // Left shift key down.
-  ev_.code = 42;
-  ev_.value = 1;
-  key_reader.GetCharForTest(ev_);
+  PressKey(42, key_reader);
 
-  ev_.value = 0;
-  ev_.code = 17;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(4, key_reader);
+  PressAndReleaseKey(5, key_reader);
+  EXPECT_EQ("qw#$", key_reader.GetUserInputForTest());
+
+  PressAndReleaseKey(17, key_reader);
   EXPECT_EQ("qw#$W", key_reader.GetUserInputForTest());
 
-  ev_.code = 42;
-  ev_.value = 0;
-  key_reader.GetCharForTest(ev_);
+  ReleaseKey(42, key_reader);
 
   // Get third char on key.
   // ALT + CTL key press.
-
-  ev_.code = 29;
-  ev_.value = 1;
-  key_reader.GetCharForTest(ev_);
-
-  ev_.code = 56;
-  ev_.value = 1;
-  key_reader.GetCharForTest(ev_);
+  PressKey(29, key_reader);
+  PressKey(56, key_reader);
 
   // Japanese character should not be added to input.
-  ev_.code = 16;
-  ev_.value = 0;
-  key_reader.GetCharForTest(ev_);
+  PressAndReleaseKey(16, key_reader);
   EXPECT_EQ("qw#$W", key_reader.GetUserInputForTest());
 }
 
@@ -323,11 +270,11 @@ TEST_F(KeyReaderTest, GetUserInputTab) {
   MockKeyReader key_reader(false, "us");
   EXPECT_CALL(key_reader, GetValidFds(false)).WillOnce(testing::Return(true));
   EXPECT_CALL(key_reader, EpollCreate(_)).WillOnce(testing::Return(true));
-  // Tab key release recorded
+  // Tab key press recorded
   struct input_event ev_release {
-    .type = EV_KEY, .code = 15, .value = 0,
+    .type = EV_KEY, .code = 15, .value = kKeyPress,
   };
-  EXPECT_CALL(key_reader, GetEpEvent(_, _, _))
+  EXPECT_CALL(key_reader, GetEpEvent(_, _))
       .WillOnce(testing::DoAll(testing::SetArgPointee<1>(ev_release),
                                testing::Return(true)));
 
@@ -345,25 +292,19 @@ TEST_F(KeyReaderTest, GetUserInputEnter) {
   testing::InSequence s;
   EXPECT_CALL(key_reader, GetValidFds(false)).WillOnce(testing::Return(true));
   EXPECT_CALL(key_reader, EpollCreate(_)).WillOnce(testing::Return(true));
-  // Enter key release recorded.
-  struct input_event ev_release {
-    .type = EV_KEY, .code = 28, .value = 1,
+  // Enter key press recorded.
+  struct input_event ev_press {
+    .type = EV_KEY, .code = 28, .value = kKeyPress,
   };
-  EXPECT_CALL(key_reader, GetEpEvent(_, _, _))
-      .WillOnce(testing::DoAll(testing::SetArgPointee<1>(ev_release),
-                               testing::Return(true)));
-
-  ev_release.value = 0;
-  EXPECT_CALL(key_reader, GetEpEvent(_, _, _))
-      .WillOnce(testing::DoAll(testing::SetArgPointee<1>(ev_release),
+  EXPECT_CALL(key_reader, GetEpEvent(_, _))
+      .WillOnce(testing::DoAll(testing::SetArgPointee<1>(ev_press),
                                testing::Return(true)));
 
   bool enter, tab = false;
   std::string input;
 
   EXPECT_TRUE(key_reader.InputSetUp());
-  // Record enter press and release key events.
-  EXPECT_TRUE(key_reader.GetUserInput(&enter, &tab, &input));
+  // Record enter press.
   EXPECT_TRUE(key_reader.GetUserInput(&enter, &tab, &input));
   EXPECT_TRUE(enter);
   EXPECT_TRUE(input.empty());
@@ -375,7 +316,7 @@ TEST_F(KeyReaderTest, GetUserInputError) {
   EXPECT_CALL(key_reader, GetValidFds(false)).WillOnce(testing::Return(true));
   EXPECT_CALL(key_reader, EpollCreate(_)).WillOnce(testing::Return(true));
 
-  EXPECT_CALL(key_reader, GetEpEvent(_, _, _)).WillOnce(testing::Return(false));
+  EXPECT_CALL(key_reader, GetEpEvent(_, _)).WillOnce(testing::Return(false));
 
   bool enter, tab;
   std::string input;
@@ -389,12 +330,12 @@ TEST_F(KeyReaderTest, GetUserInputGetChar) {
   MockKeyReader key_reader(false, "us");
   EXPECT_CALL(key_reader, GetValidFds(false)).WillOnce(testing::Return(true));
   EXPECT_CALL(key_reader, EpollCreate(_)).WillOnce(testing::Return(true));
-  // A-key release recorded.
-  struct input_event ev_release {
-    .type = EV_KEY, .code = 30, .value = 0,
+  // A-key press recorded.
+  struct input_event ev_press {
+    .type = EV_KEY, .code = 30, .value = kKeyPress,
   };
-  EXPECT_CALL(key_reader, GetEpEvent(_, _, _))
-      .WillOnce(testing::DoAll(testing::SetArgPointee<1>(ev_release),
+  EXPECT_CALL(key_reader, GetEpEvent(_, _))
+      .WillOnce(testing::DoAll(testing::SetArgPointee<1>(ev_press),
                                testing::Return(true)));
 
   bool enter, tab;
@@ -405,10 +346,10 @@ TEST_F(KeyReaderTest, GetUserInputGetChar) {
   EXPECT_TRUE(key_reader.GetUserInput(&enter, &tab, &input));
   EXPECT_EQ("a", input);
 
-  // P-key release recorded.
-  ev_release.code = 25;
-  EXPECT_CALL(key_reader, GetEpEvent(_, _, _))
-      .WillOnce(testing::DoAll(testing::SetArgPointee<1>(ev_release),
+  // P-key press recorded.
+  ev_press.code = 25;
+  EXPECT_CALL(key_reader, GetEpEvent(_, _))
+      .WillOnce(testing::DoAll(testing::SetArgPointee<1>(ev_press),
                                testing::Return(true)));
 
   EXPECT_TRUE(key_reader.GetUserInput(&enter, &tab, &input));
@@ -426,6 +367,28 @@ TEST_F(KeyReaderTest, InitEpollFailure) {
   EXPECT_CALL(key_reader, GetValidFds(true)).WillOnce(testing::Return(true));
   EXPECT_CALL(key_reader, EpollCreate(_)).WillOnce(testing::Return(false));
   EXPECT_FALSE(key_reader.Init({103, 108, 28}));
+}
+
+TEST_F(KeyReaderTest, OnKeyEventRepeat) {
+  MockKeyReader key_reader(false, "us");
+  MockDelegate delegate;
+
+  // Key repeat event.
+  struct input_event ev_repeat {
+    .type = EV_KEY, .code = KEY_ENTER, .value = kKeyHold,
+  };
+  EXPECT_CALL(key_reader, GetEpEvent(_, _))
+      .WillRepeatedly(testing::DoAll(testing::SetArgPointee<1>(ev_repeat),
+                                     testing::Return(true)));
+
+  int num_repeats = 5;
+  EXPECT_CALL(delegate, OnKeyPress(_)).Times(num_repeats);
+
+  key_reader.keys_ = {KEY_UP, KEY_DOWN, KEY_ENTER, KEY_ESC};
+  key_reader.SetDelegate(&delegate);
+  // Repeated key press.
+  for (int i = 0; i <= num_repeats * kRepeatedSensitivity; ++i)
+    key_reader.OnKeyEvent();
 }
 
 }  // namespace minios

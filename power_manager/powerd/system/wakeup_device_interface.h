@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,18 +9,17 @@
 
 #include <base/files/file_path.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Per device object that helps in identifying if this device is one of the
 // reasons for last wake.
 class WakeupDeviceInterface {
  public:
-  WakeupDeviceInterface() {}
+  WakeupDeviceInterface() = default;
   WakeupDeviceInterface(const WakeupDeviceInterface&) = delete;
   WakeupDeviceInterface& operator=(const WakeupDeviceInterface&) = delete;
 
-  virtual ~WakeupDeviceInterface() {}
+  virtual ~WakeupDeviceInterface() = default;
 
   // Records wakeup_count before suspending to identify if the
   // device woke up the system after resume.
@@ -34,7 +33,6 @@ class WakeupDeviceInterface {
   virtual bool CausedLastWake() const = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_WAKEUP_DEVICE_INTERFACE_H_

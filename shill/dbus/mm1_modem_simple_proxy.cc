@@ -1,8 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dbus/mm1_modem_simple_proxy.h"
+
+#include <utility>
 
 #include "shill/cellular/cellular_error.h"
 #include "shill/logging.h"
@@ -29,83 +31,62 @@ ModemSimpleProxy::ModemSimpleProxy(const scoped_refptr<dbus::Bus>& bus,
 ModemSimpleProxy::~ModemSimpleProxy() = default;
 
 void ModemSimpleProxy::Connect(const KeyValueStore& properties,
-                               const RpcIdentifierCallback& callback,
+                               RpcIdentifierCallback callback,
                                int timeout) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   brillo::VariantDictionary properties_dict =
       KeyValueStore::ConvertToVariantDictionary(properties);
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
   proxy_->ConnectAsync(properties_dict,
-                       base::Bind(&ModemSimpleProxy::OnConnectSuccess,
-                                  weak_factory_.GetWeakPtr(), callback),
-                       base::Bind(&ModemSimpleProxy::OnConnectFailure,
-                                  weak_factory_.GetWeakPtr(), callback),
+                       base::BindOnce(&ModemSimpleProxy::OnConnectSuccess,
+                                      weak_factory_.GetWeakPtr(),
+                                      std::move(split_callback.first)),
+                       base::BindOnce(&ModemSimpleProxy::OnConnectFailure,
+                                      weak_factory_.GetWeakPtr(),
+                                      std::move(split_callback.second)),
                        timeout);
 }
 
 void ModemSimpleProxy::Disconnect(const RpcIdentifier& bearer,
-                                  const ResultCallback& callback,
+                                  ResultCallback callback,
                                   int timeout) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__ << ": " << bearer.value();
+  auto split_callback = base::SplitOnceCallback(std::move(callback));
   proxy_->DisconnectAsync(dbus::ObjectPath(bearer),
-                          base::Bind(&ModemSimpleProxy::OnDisconnectSuccess,
-                                     weak_factory_.GetWeakPtr(), callback),
-                          base::Bind(&ModemSimpleProxy::OnDisconnectFailure,
-                                     weak_factory_.GetWeakPtr(), callback),
+                          base::BindOnce(&ModemSimpleProxy::OnDisconnectSuccess,
+                                         weak_factory_.GetWeakPtr(),
+                                         std::move(split_callback.first)),
+                          base::BindOnce(&ModemSimpleProxy::OnDisconnectFailure,
+                                         weak_factory_.GetWeakPtr(),
+                                         std::move(split_callback.second)),
                           timeout);
 }
 
-void ModemSimpleProxy::GetStatus(const KeyValueStoreCallback& callback,
-                                 int timeout) {
-  SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  proxy_->GetStatusAsync(base::Bind(&ModemSimpleProxy::OnGetStatusSuccess,
-                                    weak_factory_.GetWeakPtr(), callback),
-                         base::Bind(&ModemSimpleProxy::OnGetStatusFailure,
-                                    weak_factory_.GetWeakPtr(), callback),
-                         timeout);
-}
-
-void ModemSimpleProxy::OnConnectSuccess(const RpcIdentifierCallback& callback,
+void ModemSimpleProxy::OnConnectSuccess(RpcIdentifierCallback callback,
                                         const dbus::ObjectPath& path) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__ << ": " << path.value();
-  callback.Run(path, Error());
+  std::move(callback).Run(path, Error());
 }
 
-void ModemSimpleProxy::OnConnectFailure(const RpcIdentifierCallback& callback,
+void ModemSimpleProxy::OnConnectFailure(RpcIdentifierCallback callback,
                                         brillo::Error* dbus_error) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   Error error;
   CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(RpcIdentifier(""), error);
+  std::move(callback).Run(RpcIdentifier(""), error);
 }
 
-void ModemSimpleProxy::OnDisconnectSuccess(const ResultCallback& callback) {
+void ModemSimpleProxy::OnDisconnectSuccess(ResultCallback callback) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  callback.Run(Error());
+  std::move(callback).Run(Error());
 }
 
-void ModemSimpleProxy::OnDisconnectFailure(const ResultCallback& callback,
+void ModemSimpleProxy::OnDisconnectFailure(ResultCallback callback,
                                            brillo::Error* dbus_error) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   Error error;
   CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(error);
-}
-
-void ModemSimpleProxy::OnGetStatusSuccess(
-    const KeyValueStoreCallback& callback,
-    const brillo::VariantDictionary& status) {
-  SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  KeyValueStore status_store =
-      KeyValueStore::ConvertFromVariantDictionary(status);
-  callback.Run(status_store, Error());
-}
-
-void ModemSimpleProxy::OnGetStatusFailure(const KeyValueStoreCallback& callback,
-                                          brillo::Error* dbus_error) {
-  SLOG(&proxy_->GetObjectPath(), 2) << __func__;
-  Error error;
-  CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(KeyValueStore(), error);
+  std::move(callback).Run(error);
 }
 
 }  // namespace mm1

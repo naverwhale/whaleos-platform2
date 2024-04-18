@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <brillo/message_loops/message_loop.h>
 #include <brillo/streams/stream_errors.h>
 #include <brillo/streams/stream_utils.h>
@@ -156,43 +156,47 @@ bool InputStreamSet::CloseBlocking(ErrorPtr* error) {
   return success;
 }
 
-bool InputStreamSet::WaitForData(
-    AccessMode mode,
-    const base::Callback<void(AccessMode)>& callback,
-    ErrorPtr* error) {
+bool InputStreamSet::WaitForDataRead(base::OnceClosure callback,
+                                     ErrorPtr* error) {
   if (!IsOpen())
     return stream_utils::ErrorStreamClosed(FROM_HERE, error);
 
-  if (stream_utils::IsWriteAccessMode(mode))
-    return stream_utils::ErrorOperationNotSupported(FROM_HERE, error);
-
   if (!source_streams_.empty()) {
     Stream* stream = source_streams_.front();
-    return stream->WaitForData(mode, callback, error);
+    return stream->WaitForDataRead(std::move(callback), error);
   }
 
-  MessageLoop::current()->PostTask(FROM_HERE, base::BindOnce(callback, mode));
+  MessageLoop::current()->PostTask(FROM_HERE, std::move(callback));
   return true;
 }
 
-bool InputStreamSet::WaitForDataBlocking(AccessMode in_mode,
-                                         base::TimeDelta timeout,
-                                         AccessMode* out_mode,
-                                         ErrorPtr* error) {
+bool InputStreamSet::WaitForDataReadBlocking(base::TimeDelta timeout,
+                                             ErrorPtr* error) {
   if (!IsOpen())
     return stream_utils::ErrorStreamClosed(FROM_HERE, error);
 
-  if (stream_utils::IsWriteAccessMode(in_mode))
-    return stream_utils::ErrorOperationNotSupported(FROM_HERE, error);
-
   if (!source_streams_.empty()) {
     Stream* stream = source_streams_.front();
-    return stream->WaitForDataBlocking(in_mode, timeout, out_mode, error);
+    return stream->WaitForDataReadBlocking(timeout, error);
   }
 
-  if (out_mode)
-    *out_mode = in_mode;
   return true;
+}
+
+bool InputStreamSet::WaitForDataWrite(base::OnceClosure /* callback */,
+                                      ErrorPtr* error) {
+  if (!IsOpen())
+    return stream_utils::ErrorStreamClosed(FROM_HERE, error);
+
+  return stream_utils::ErrorOperationNotSupported(FROM_HERE, error);
+}
+
+bool InputStreamSet::WaitForDataWriteBlocking(base::TimeDelta /* timeout */,
+                                              ErrorPtr* error) {
+  if (!IsOpen())
+    return stream_utils::ErrorStreamClosed(FROM_HERE, error);
+
+  return stream_utils::ErrorOperationNotSupported(FROM_HERE, error);
 }
 
 void InputStreamSet::CancelPendingAsyncOperations() {

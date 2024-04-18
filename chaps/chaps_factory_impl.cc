@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 
 #include <base/check.h>
 #include <base/logging.h>
+#include <libhwsec/frontend/chaps/frontend.h>
 
 #include "chaps/object_impl.h"
 #include "chaps/object_policy_cert.h"
@@ -20,7 +21,6 @@
 #include "chaps/object_pool_impl.h"
 #include "chaps/object_store_fake.h"
 #include "chaps/object_store_impl.h"
-#include "chaps/opencryptoki_importer.h"
 #include "chaps/session_impl.h"
 #include "chaps/slot_policy_default.h"
 #include "chaps/slot_policy_shared_slot.h"
@@ -30,22 +30,26 @@ using std::string;
 
 namespace chaps {
 
+ChapsFactoryImpl::ChapsFactoryImpl(ChapsMetrics* chaps_metrics)
+    : chaps_metrics_(chaps_metrics) {
+  CHECK(chaps_metrics_);
+}
+
 Session* ChapsFactoryImpl::CreateSession(int slot_id,
                                          ObjectPool* token_object_pool,
-                                         TPMUtility* tpm_utility,
+                                         const hwsec::ChapsFrontend* hwsec,
                                          HandleGenerator* handle_generator,
                                          bool is_read_only) {
-  return new SessionImpl(slot_id, token_object_pool, tpm_utility, this,
-                         handle_generator, is_read_only);
+  return new SessionImpl(slot_id, token_object_pool, hwsec, this,
+                         handle_generator, is_read_only, chaps_metrics_);
 }
 
 ObjectPool* ChapsFactoryImpl::CreateObjectPool(
     HandleGenerator* handle_generator,
     SlotPolicy* slot_policy,
-    ObjectStore* object_store,
-    ObjectImporter* object_importer) {
-  std::unique_ptr<ObjectPoolImpl> pool(new ObjectPoolImpl(
-      this, handle_generator, slot_policy, object_store, object_importer));
+    ObjectStore* object_store) {
+  std::unique_ptr<ObjectPoolImpl> pool(
+      new ObjectPoolImpl(this, handle_generator, slot_policy, object_store));
   CHECK(pool.get());
   if (!pool->Init())
     return NULL;
@@ -54,7 +58,7 @@ ObjectPool* ChapsFactoryImpl::CreateObjectPool(
 
 ObjectStore* ChapsFactoryImpl::CreateObjectStore(const FilePath& file_name) {
   std::unique_ptr<ObjectStoreImpl> store(new ObjectStoreImpl());
-  if (!store->Init(file_name)) {
+  if (!store->Init(file_name, chaps_metrics_)) {
     // The approach here is to limp along without a persistent object store so
     // crypto services do not become unavailable. The side-effect is that all
     // objects will disappear when the token is removed (e.g. at logout).
@@ -71,14 +75,6 @@ Object* ChapsFactoryImpl::CreateObject() {
 
 ObjectPolicy* ChapsFactoryImpl::CreateObjectPolicy(CK_OBJECT_CLASS type) {
   return ChapsFactoryImpl::GetObjectPolicyForType(type);
-}
-
-ObjectImporter* ChapsFactoryImpl::CreateObjectImporter(
-    int slot_id, const FilePath& path, TPMUtility* tpm_utility) {
-  if (!tpm_utility->IsTPMAvailable()) {
-    return NULL;
-  }
-  return new OpencryptokiImporter(slot_id, path, tpm_utility, this);
 }
 
 SlotPolicy* ChapsFactoryImpl::CreateSlotPolicy(bool is_shared_slot) {

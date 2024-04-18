@@ -1,6 +1,9 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 poll: 1
 read: 1
@@ -17,10 +20,8 @@ getdents64: 1
 ioctl: arg1 == FIOCLEX
 pread64: 1
 pwrite64: 1
-# Disallow mmap with PROT_EXEC set.  The syntax here doesn't allow bit
-# negation, thus the manually negated mask constant.
-mmap2: arg2 in 0xfffffffb
-mprotect: arg2 in 0xfffffffb
+mmap2: arg2 in ~PROT_EXEC
+mprotect: arg2 in ~PROT_EXEC
 rt_sigaction: 1
 sigaltstack: 1
 munmap: 1
@@ -67,8 +68,13 @@ futex_time64: 1
 bind: 1
 rmdir: 1
 fchmod: 1
+fchmodat: 1
 fchown: 1
+fchownat: 1
+fchown32: 1
 mremap: 1
 fstatat64: 1
 send: 1
+readlinkat: 1
+recv: 1
 recvfrom: 1

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -216,12 +216,12 @@ bool ArtContainer::PatchImageChild(uint64_t offset_seed) {
   // TODO(xzhou): Simplify using minijail mounts.
   std::unique_ptr<ScopedMount> art_rootfs = ScopedMount::CreateScopedLoopMount(
       mounter_, kSystemImage, art_paths_->art_rootfs_directory,
-      MS_RDONLY | MS_NOSUID | MS_NODEV);
+      LoopMountFilesystemType::kUnspecified, MS_RDONLY | MS_NOSUID | MS_NODEV);
   if (!art_rootfs)
     return false;
   std::unique_ptr<ScopedMount> loop_vendor = ScopedMount::CreateScopedLoopMount(
       mounter_, kVendorImage, art_paths_->vendor_directory,
-      MS_RDONLY | MS_NOEXEC | MS_NOSUID);
+      LoopMountFilesystemType::kUnspecified, MS_RDONLY | MS_NOEXEC | MS_NOSUID);
   if (!loop_vendor)
     return false;
   std::unique_ptr<ScopedMount> art_vendor = ScopedMount::CreateScopedBindMount(
@@ -232,7 +232,7 @@ bool ArtContainer::PatchImageChild(uint64_t offset_seed) {
   // Patchoat did not map /dev/ashmem with PROT_EXEC and using MS_NOEXEC here.
   std::unique_ptr<ScopedMount> loop_dev = ScopedMount::CreateScopedLoopMount(
       mounter_, kArtDevRootfsImage, art_paths_->art_dev_rootfs_directory,
-      MS_RDONLY | MS_NOEXEC | MS_NOSUID);
+      LoopMountFilesystemType::kUnspecified, MS_RDONLY | MS_NOEXEC | MS_NOSUID);
   if (!loop_dev)
     return false;
   std::unique_ptr<ScopedMount> art_dev = ScopedMount::CreateScopedBindMount(

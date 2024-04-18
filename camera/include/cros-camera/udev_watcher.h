@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -44,7 +44,7 @@ class CROS_CAMERA_EXPORT UdevWatcher {
     virtual void OnDeviceRemoved(ScopedUdevDevicePtr device);
   };
 
-  // The observer must outlive this wathcer.
+  // The observer must outlive this watcher.
   UdevWatcher(Observer* observer, std::string subsystem);
   ~UdevWatcher();
 
@@ -52,7 +52,7 @@ class CROS_CAMERA_EXPORT UdevWatcher {
   UdevWatcher(const UdevWatcher&) = delete;
   UdevWatcher& operator=(const UdevWatcher&) = delete;
 
-  // Start monitoring. This shuold be called before EnumerateExistingDevices().
+  // Start monitoring. This should be called before EnumerateExistingDevices().
   // All callbacks will be run on |task_runner|.
   bool Start(scoped_refptr<base::SingleThreadTaskRunner> task_runner);
 
@@ -63,7 +63,7 @@ class CROS_CAMERA_EXPORT UdevWatcher {
  private:
   void OnReadable();
 
-  void StartOnThread(int fd, base::Callback<void(bool)> callback);
+  void StartOnThread(int fd, base::OnceCallback<void(bool)> callback);
   void StopOnThread();
 
   Observer* observer_;

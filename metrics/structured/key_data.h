@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,10 @@
 #define METRICS_STRUCTURED_KEY_DATA_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
-#include <base/optional.h>
 
 #include "metrics/structured/persistent_proto.h"
 #include "metrics/structured/proto/storage.pb.h"
@@ -86,8 +85,8 @@ class KeyData {
 
  private:
   // Ensure that a valid key exists for |project|, and return it. Either returns
-  // a string of size |kKeySize| or base::nullopt, which indicates an error.
-  base::Optional<std::string> ValidateAndGetKey(uint64_t project_name_hash);
+  // a string of size |kKeySize| or std::nullopt, which indicates an error.
+  std::optional<std::string> ValidateAndGetKey(uint64_t project_name_hash);
 
   // Regenerate |key|, also updating the |last_rotation| and |rotation_period|.
   // This triggers a save.

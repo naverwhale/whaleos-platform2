@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 
 namespace {
 
-constexpr base::TimeDelta kUsbControlTimeout = base::TimeDelta::FromSeconds(5);
+constexpr base::TimeDelta kUsbControlTimeout = base::Seconds(5);
 
 const int kLibusbUnrefDevices = 1;
 
@@ -84,8 +84,12 @@ bool UsbDevice::SetPowerState(bool enabled, uint16_t port) const {
   uint8_t request =
       enabled ? LIBUSB_REQUEST_SET_FEATURE : LIBUSB_REQUEST_CLEAR_FEATURE;
   result = libusb_control_transfer(
-      handle, LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_OTHER, request,
-      USB_PORT_FEAT_POWER, port, nullptr, 0,
+      handle,
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-enum-enum-conversion"
+      LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_OTHER,
+#pragma clang diagnostic pop
+      request, USB_PORT_FEAT_POWER, port, nullptr, 0,
       kUsbControlTimeout.InMilliseconds());
   libusb_close(handle);
 

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/http/mock_connection.h>
@@ -20,14 +20,12 @@
 #include <brillo/streams/mock_stream.h>
 #include <curl/curl.h>
 #include <gtest/gtest.h>
+#include <net-base/ip_address.h>
 
 #include "shill/http_url.h"
 #include "shill/mock_control.h"
-#include "shill/mock_device_info.h"
 #include "shill/mock_dns_client.h"
 #include "shill/mock_manager.h"
-#include "shill/net/ip_address.h"
-#include "shill/net/mock_sockets.h"
 #include "shill/test_event_dispatcher.h"
 
 using ::testing::_;
@@ -52,17 +50,10 @@ const char kTextURL[] = "http://www.chromium.org/path/to/resource";
 const char kNumericURL[] = "http://10.1.1.1";
 const char kInterfaceName[] = "int0";
 const char kLoggingTag[] = "int0 IPv4 attempt=1";
-const char kDNSServer0[] = "8.8.8.8";
-const char kDNSServer1[] = "8.8.4.4";
-const char* const kDNSServers[] = {kDNSServer0, kDNSServer1};
+constexpr net_base::IPAddress kDNSServer0(net_base::IPv4Address(8, 8, 8, 8));
+constexpr net_base::IPAddress kDNSServer1(net_base::IPv4Address(8, 8, 4, 4));
 const char kServerAddress[] = "10.1.1.1";
 }  // namespace
-
-MATCHER_P(IsIPAddress, address, "") {
-  IPAddress ip_address(IPAddress::kFamilyIPv4);
-  EXPECT_TRUE(ip_address.SetAddressFromString(address));
-  return ip_address.Equals(arg);
-}
 
 MATCHER_P(ByteStringMatches, byte_string, "") {
   return byte_string.Equals(arg);
@@ -76,49 +67,35 @@ class HttpRequestTest : public Test {
  public:
   HttpRequestTest()
       : interface_name_(kInterfaceName),
-        dns_list_(kDNSServers, kDNSServers + 2),
         dns_client_(new StrictMock<MockDnsClient>()),
         transport_(std::make_shared<brillo::http::MockTransport>()),
         brillo_connection_(
             std::make_shared<brillo::http::MockConnection>(transport_)),
-        manager_(&control_, &dispatcher_, nullptr),
-        device_info_(new NiceMock<MockDeviceInfo>(&manager_)) {}
+        manager_(&control_, &dispatcher_, nullptr) {}
 
  protected:
   class CallbackTarget {
    public:
-    CallbackTarget()
-        : request_success_callback_(
-              base::Bind(&CallbackTarget::RequestSuccessCallTarget,
-                         base::Unretained(this))),
-          request_error_callback_(
-              base::Bind(&CallbackTarget::RequestErrorCallTarget,
-                         base::Unretained(this))) {}
-
     MOCK_METHOD(void,
                 RequestSuccessCallTarget,
                 (std::shared_ptr<brillo::http::Response>));
     MOCK_METHOD(void, RequestErrorCallTarget, (HttpRequest::Result));
 
-    const base::Callback<void(std::shared_ptr<brillo::http::Response>)>&
-    request_success_callback() const {
-      return request_success_callback_;
+    base::OnceCallback<void(std::shared_ptr<brillo::http::Response>)>
+    request_success_callback() {
+      return base::BindOnce(&CallbackTarget::RequestSuccessCallTarget,
+                            base::Unretained(this));
     }
 
-    const base::Callback<void(HttpRequest::Result)>& request_error_callback()
-        const {
-      return request_error_callback_;
+    base::OnceCallback<void(HttpRequest::Result)> request_error_callback() {
+      return base::BindOnce(&CallbackTarget::RequestErrorCallTarget,
+                            base::Unretained(this));
     }
-
-   private:
-    base::Callback<void(std::shared_ptr<brillo::http::Response>)>
-        request_success_callback_;
-    base::Callback<void(HttpRequest::Result)> request_error_callback_;
   };
 
   void SetUp() override {
     request_.reset(new HttpRequest(&dispatcher_, interface_name_,
-                                   IPAddress(IPAddress::kFamilyIPv4),
+                                   net_base::IPFamily::kIPv4,
                                    {kDNSServer0, kDNSServer1}, true));
     // Passes ownership.
     request_->dns_client_.reset(dns_client_);
@@ -145,7 +122,6 @@ class HttpRequestTest : public Test {
     EXPECT_TRUE(request_->request_success_callback_.is_null());
     EXPECT_FALSE(request_->dns_client_callback_.is_null());
     EXPECT_EQ(dns_client_, request_->dns_client_.get());
-    EXPECT_TRUE(request_->server_hostname_.empty());
     EXPECT_FALSE(request_->is_running_);
   }
   void ExpectStop() { EXPECT_CALL(*dns_client_, Stop()).Times(AtLeast(1)); }
@@ -179,15 +155,14 @@ class HttpRequestTest : public Test {
   }
   void GetDNSResultFailure(const std::string& error_msg) {
     Error error(Error::kOperationFailed, error_msg);
-    IPAddress address(IPAddress::kFamilyUnknown);
-    request_->GetDNSResult(error, address);
+    request_->GetDNSResult(base::unexpected(error));
   }
-  void GetDNSResultSuccess(const IPAddress& address) {
-    Error error;
-    request_->GetDNSResult(error, address);
+  void GetDNSResultSuccess(const net_base::IPAddress& address) {
+    request_->GetDNSResult(address);
   }
-  HttpRequest::Result StartRequest(const std::string& url) {
-    return request_->Start(kLoggingTag, url, {},
+  HttpRequest::Result StartRequest(const std::string& url_string) {
+    auto url = HttpUrl::CreateFromString(url_string);
+    return request_->Start(kLoggingTag, *url, {},
                            target_.request_success_callback(),
                            target_.request_error_callback());
   }
@@ -203,7 +178,7 @@ class HttpRequestTest : public Test {
     EXPECT_CALL(*transport_, ResolveHostToIp(host, port, path));
   }
   void FinishRequestAsyncSuccess(
-      const brillo::http::SuccessCallback& success_callback) {
+      brillo::http::SuccessCallback success_callback) {
     auto read_data = [this](void* buffer, Unused, size_t* read,
                             Unused) -> bool {
       memcpy(buffer, resp_data_.data(), resp_data_.size());
@@ -220,33 +195,33 @@ class HttpRequestTest : public Test {
         .WillOnce(Return(mock_stream.release()));
     auto resp = std::make_unique<brillo::http::Response>(brillo_connection_);
     // request_id_ has not yet been set. Pass -1 to match default value.
-    success_callback.Run(-1, std::move(resp));
+    std::move(success_callback).Run(-1, std::move(resp));
   }
-  void FinishRequestAsyncFail(
-      const brillo::http::ErrorCallback& error_callback) {
+  void FinishRequestAsyncFail(brillo::http::ErrorCallback error_callback) {
     brillo::ErrorPtr error;
     brillo::Error::AddTo(&error, FROM_HERE, "curl_easy_error",
                          base::NumberToString(CURLE_COULDNT_CONNECT), "");
     // request_id_ has not yet been set. Pass -1 to match default value.
-    error_callback.Run(-1, error.get());
+    std::move(error_callback).Run(-1, error.get());
   }
   void ExpectFinishRequestAsyncSuccess(const std::string& resp_data) {
     resp_data_ = resp_data;
     EXPECT_CALL(*brillo_connection_, FinishRequestAsync(_, _))
-        .WillOnce(DoAll(WithArg<0>(Invoke(
-                            this, &HttpRequestTest::FinishRequestAsyncSuccess)),
-                        Return(0)));
+        .WillOnce(WithArg<0>([this](auto callback) {
+          FinishRequestAsyncSuccess(std::move(callback));
+          return 0;
+        }));
   }
   void ExpectFinishRequestAsyncFail() {
     EXPECT_CALL(*brillo_connection_, FinishRequestAsync(_, _))
-        .WillOnce(DoAll(
-            WithArg<1>(Invoke(this, &HttpRequestTest::FinishRequestAsyncFail)),
-            Return(0)));
+        .WillOnce(WithArg<1>([this](auto callback) {
+          FinishRequestAsyncFail(std::move(callback));
+          return 0;
+        }));
   }
 
  private:
   const std::string interface_name_;
-  std::vector<std::string> dns_list_;
   // Owned by the HttpRequest, but tracked here for EXPECT().
   StrictMock<MockDnsClient>* dns_client_;
   std::shared_ptr<brillo::http::MockTransport> transport_;
@@ -254,7 +229,6 @@ class HttpRequestTest : public Test {
   EventDispatcherForTest dispatcher_;
   MockControl control_;
   MockManager manager_;
-  std::unique_ptr<MockDeviceInfo> device_info_;
   std::unique_ptr<HttpRequest> request_;
   StrictMock<CallbackTarget> target_;
   std::string expected_response_;
@@ -301,8 +275,7 @@ TEST_F(HttpRequestTest, TextRequestSuccess) {
 
   ExpectStop();
   EXPECT_EQ(HttpRequest::kResultInProgress, StartRequest(kTextURL));
-  IPAddress addr(IPAddress::kFamilyIPv4);
-  EXPECT_TRUE(addr.SetAddressFromString(kServerAddress));
+  const auto addr = *net_base::IPAddress::CreateFromString(kServerAddress);
   GetDNSResultSuccess(addr);
   ExpectReset();
 }

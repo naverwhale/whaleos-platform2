@@ -1,9 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "lorgnette/image_readers/jpeg_reader.h"
 
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -18,14 +19,13 @@ namespace lorgnette {
 std::unique_ptr<ImageReader> JpegReader::Create(
     brillo::ErrorPtr* error,
     const ScanParameters& params,
-    const base::Optional<int>& resolution,
-    base::ScopedFILE out_file) {
-  std::unique_ptr<JpegReader> reader(
-      new JpegReader(params, std::move(out_file)));
+    const std::optional<int>& resolution,
+    FILE* out_file) {
+  std::unique_ptr<JpegReader> reader(new JpegReader(params, out_file));
 
   if (!reader->ValidateParams(error) ||
       !reader->Initialize(error, resolution)) {
-    return nullptr;
+    return nullptr;  // brillo::Error::AddTo already called.
   }
 
   return reader;
@@ -58,6 +58,7 @@ bool JpegReader::ReadRow(brillo::ErrorPtr* error, uint8_t* data) {
   }
 
   jpeg_write_scanlines(&cinfo_, row_pointer, 1);
+  fflush(out_file_);
 
   return true;
 }
@@ -74,12 +75,12 @@ bool JpegReader::Finalize(brillo::ErrorPtr* error) {
   return true;
 }
 
-JpegReader::JpegReader(const ScanParameters& params, base::ScopedFILE out_file)
-    : ImageReader(params, std::move(out_file)) {}
+JpegReader::JpegReader(const ScanParameters& params, FILE* out_file)
+    : ImageReader(params, out_file) {}
 
 bool JpegReader::ValidateParams(brillo::ErrorPtr* error) {
   if (!ImageReader::ValidateParams(error)) {
-    return false;
+    return false;  // brillo::Error::AddTo already called.
   }
 
   if (params_.depth != 1 && params_.depth != 8) {
@@ -93,10 +94,10 @@ bool JpegReader::ValidateParams(brillo::ErrorPtr* error) {
 }
 
 bool JpegReader::Initialize(brillo::ErrorPtr* error,
-                            const base::Optional<int>& resolution) {
+                            const std::optional<int>& resolution) {
   cinfo_.err = jpeg_std_error(&jerr_);
   jpeg_create_compress(&cinfo_);
-  jpeg_stdio_dest(&cinfo_, out_file_.get());
+  jpeg_stdio_dest(&cinfo_, out_file_);
 
   switch (params_.format) {
     case kGrayscale:
@@ -126,9 +127,13 @@ bool JpegReader::Initialize(brillo::ErrorPtr* error,
     cinfo_.Y_density = resolution.value();
   }
 
-  cinfo_.optimize_coding = TRUE;
+  cinfo_.optimize_coding = FALSE;
 
-  jpeg_set_quality(&cinfo_, 95, TRUE);
+  if (!resolution.has_value() || resolution.value() < 300) {
+    jpeg_set_quality(&cinfo_, 90, TRUE);
+  } else {
+    jpeg_set_quality(&cinfo_, 85, TRUE);
+  }
   jpeg_start_compress(&cinfo_, TRUE);
 
   initialized_ = true;

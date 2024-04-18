@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,15 +8,17 @@
 #include <inttypes.h>
 #include <string>
 
+#include <base/files/file_path.h>
+
 namespace brillo {
 
 namespace installer {
 
 // Remove the partition numbered |partno| from |dev|.
-bool RemoveNandPartition(const std::string& dev, int partno);
+bool RemoveNandPartition(const base::FilePath& dev, int partno);
 
 // Add a partition to |dev|, starting from |offset|, for |length| bytes.
-bool AddNandPartition(const std::string& dev,
+bool AddNandPartition(const base::FilePath& dev,
                       int partno,
                       uint64_t offset,
                       uint64_t length);

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 
@@ -134,6 +135,7 @@ bool Spawn(std::vector<std::string> argv,
   //     the normal child reaping mechanism.
   if (ret == sizeof(child_info)) {
     // Error occurred in the child.
+    LOG(ERROR) << "Tried to spawn \"" << argv_c[0] << "\"";
     LogChildError(child_info, info_fds[0], working_dir);
 
     // Reap the child process here since we know it already failed.

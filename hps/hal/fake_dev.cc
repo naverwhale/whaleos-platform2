@@ -1,106 +1,64 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 /*
  * Simulated HPS hardware device.
- *
- * When started, a thread is spawned to asynchronously
- * process register reads/writes and memory writes.
- *
- * The idea is to simulate the asynch device operation by
- * passing messages to the thread, which maintains its
- * own state representing the current state of the device.
- * Some messages require replies, which are passed via atomics.
- * WaitableEvent is used to signal when messages are passed,
- * and also when results are available.
- *
- * So a typical register read is:
- *
- *   Main thread                 device thread
- * ->DevInterface->Read
- *     FakeDev->ReadRegister
- *       create event/result
- *       FakeDev->send
- *           Add msg to queue
- *               signal  - - -> FakeDev->Run
- *                                read msg from queue
- *                                FakeDev->ReadRegActual
- *             result < - - - -
- *             event  < - - - -
- *     return result
  */
 #include "hps/hal/fake_dev.h"
 
-#include <atomic>
-#include <deque>
 #include <iostream>
 #include <map>
 
 #include <base/check.h>
 #include <base/logging.h>
-#include <base/memory/ref_counted.h>
 #include <base/strings/stringprintf.h>
-#include <base/synchronization/lock.h>
-#include <base/synchronization/waitable_event.h>
-#include <base/threading/simple_thread.h>
 
 #include "hps/hps_reg.h"
 #include "hps/utils.h"
 
 namespace hps {
 
-/*
- * SimDev is an internal class (implementing DevInterface) that
- * forwards calls to the simulator.
- */
-class SimDev : public DevInterface {
+class FakeWakeLock : public WakeLock {
  public:
-  explicit SimDev(scoped_refptr<FakeDev> device) : device_(device) {}
-  virtual ~SimDev() {}
-
-  bool ReadDevice(uint8_t cmd, uint8_t* data, size_t len) override {
-    return this->device_->ReadDevice(cmd, data, len);
+  explicit FakeWakeLock(FakeDev& dev) : dev_(dev) {
+    if (dev_.wake_lock_count_ == 0) {
+      // Reset back to stage0 as if the device had been power-cycled.
+      dev_.SetStage(FakeDev::Stage::kStage0);
+    }
+    dev_.wake_lock_count_++;
   }
 
-  bool WriteDevice(uint8_t cmd, const uint8_t* data, size_t len) override {
-    return this->device_->WriteDevice(cmd, data, len);
+  ~FakeWakeLock() override {
+    dev_.wake_lock_count_--;
+    DCHECK_GE(dev_.wake_lock_count_, 0);
+    if (!dev_.wake_lock_count_ && dev_.power_on_failure_count_)
+      dev_.power_on_failure_count_--;
   }
 
-  size_t BlockSizeBytes() override { return this->device_->BlockSizeBytes(); }
+  bool supports_power_management() override { return true; }
 
  private:
-  // Reference counted simulator object.
-  scoped_refptr<FakeDev> device_;
+  FakeDev& dev_;
 };
 
-FakeDev::~FakeDev() {
-  // If thread is running, send a request to terminate it.
-  if (SimpleThread::HasBeenStarted() && !SimpleThread::HasBeenJoined()) {
-    this->MsgStop();
-    this->Join();
-  }
-}
-
-// Start the simulator.
-void FakeDev::Start() {
-  CHECK(!SimpleThread::HasBeenStarted());
-  SimpleThread::Start();
-}
-
 bool FakeDev::ReadDevice(uint8_t cmd, uint8_t* data, size_t len) {
+  DCHECK(wake_lock_count_);
+  if (power_on_failure_count_)
+    return false;
   // Clear the whole buffer.
-  for (int i = 0; i < len; i++) {
-    data[i] = 0;
-  }
+  memset(data, 0, len);
   if ((cmd & 0x80) != 0) {
     // Register read.
-    uint16_t value = this->ReadRegister(cmd & 0x7F);
+    std::optional<uint16_t> result =
+        this->ReadRegister(static_cast<HpsReg>(cmd & 0x7F));
+    if (!result)
+      return false;
     // Store the value of the register into the buffer.
     if (len > 0) {
-      data[0] = (value >> 8) & 0xFF;
+      data[0] = (result.value() >> 8) & 0xFF;
       if (len > 1) {
-        data[1] = value & 0xFF;
+        data[1] = result.value() & 0xFF;
       }
     }
   } else {
@@ -111,19 +69,21 @@ bool FakeDev::ReadDevice(uint8_t cmd, uint8_t* data, size_t len) {
 }
 
 bool FakeDev::WriteDevice(uint8_t cmd, const uint8_t* data, size_t len) {
+  DCHECK(wake_lock_count_);
+  if (power_on_failure_count_)
+    return false;
   if ((cmd & 0x80) != 0) {
     if (len != 0) {
       // Register write.
-      int reg = cmd & 0x7F;
-      uint16_t value = data[0] << 8;
+      uint16_t value = static_cast<uint16_t>(data[0] << 8);
       if (len > 1) {
         value |= data[1];
       }
-      this->WriteRegister(reg, value);
+      return this->WriteRegister(static_cast<HpsReg>(cmd & 0x7F), value);
     }
   } else if ((cmd & 0xC0) == 0) {
     // Memory write.
-    return this->WriteMemory(cmd & 0x3F, data, len);
+    return this->WriteMemory(static_cast<HpsBank>(cmd & 0x3F), data, len);
   } else {
     // Unknown command.
     return false;
@@ -137,141 +97,50 @@ bool FakeDev::WriteDevice(uint8_t cmd, const uint8_t* data, size_t len) {
 void FakeDev::SetStage(Stage s) {
   this->stage_ = s;
   switch (s) {
-    case kFault:
+    case Stage::kStage0:
+      this->bank_ = BIT(0);
+      this->fault_ = RError::kNone;
+      this->feature_on_ = 0;
+      break;
+    case Stage::kStage1:
+      this->bank_ = BIT(1) | BIT(2);
+      break;
+    case Stage::kAppl:
       this->bank_ = 0;
       break;
-    case kStage0:
-      this->bank_ = 0x0001;
-      break;
-    case kStage1:
-      this->bank_ = 0x0002;
-      break;
-    case kAppl:
-      this->bank_ = 0;
-      break;
   }
 }
 
-// Run reads the message queue and processes each message.
-void FakeDev::Run() {
-  // Initial startup.
-  // Check for boot fault.
-  if (this->Flag(kBootFault)) {
-    this->SetStage(kFault);
-  } else {
-    this->SetStage(kStage0);
-  }
-  for (;;) {
-    // Main message loop.
-    this->ev_.Wait();
-    this->ev_.Reset();
-    for (;;) {
-      // Read all messages available.
-      Msg m;
-      {
-        base::AutoLock l(this->qlock_);
-        if (this->q_.empty()) {
-          break;
-        }
-        // Retrieve the next message.
-        m = this->q_.front();
-        this->q_.pop_front();
-      }
-      switch (m.cmd) {
-        case kStop:
-          // Exit simulator.
-          return;
-        case kReadReg:
-          // Read a register and return the result.
-          m.result->store(this->ReadRegActual(HpsReg(m.reg)));
-          m.sig->Signal();
-          break;
-        case kWriteReg:
-          // Write a register.
-          this->WriteRegActual(HpsReg(m.reg), m.value);
-          break;
-        case kWriteMem:
-          // Memory write request.
-          m.result->store(this->WriteMemActual(m.reg, m.data, m.length));
-          m.sig->Signal();
-          // Re-enable the bank.
-          // TODO(amcrae): Add delay to simulate a flash write.
-          // This should be done in a separate thread so that
-          // registers can be read while the memory is being
-          // written.
-          this->bank_.fetch_or(1 << m.reg);
-          break;
-      }
-    }
-  }
-}
-
-uint16_t FakeDev::ReadRegister(int r) {
-  std::atomic<uint16_t> res(0);
-  base::WaitableEvent ev;
-  this->Send(Msg(Cmd::kReadReg, r, 0, &ev, &res));
-  ev.Wait();
-  return res.load();
-}
-
-void FakeDev::WriteRegister(int r, uint16_t v) {
-  this->Send(Msg(Cmd::kWriteReg, r, v, nullptr, nullptr));
-}
-
-// At the start of the write, clear the bank ready bit.
-// The simulator will set it again once the memory write completes.
-bool FakeDev::WriteMemory(int base, const uint8_t* mem, size_t len) {
-  // Ensure minimum length (4 bytes of address).
-  if (len < sizeof(uint32_t)) {
-    return false;
-  }
-  this->bank_.fetch_and(~(1 << base));
-  std::atomic<uint16_t> res(0);
-  base::WaitableEvent ev;
-  Msg m(Cmd::kWriteMem, base, 0, &ev, &res);
-  m.data = mem;
-  m.length = len;
-  this->Send(m);
-  ev.Wait();
-  // Device response is number of bytes written.
-  // Return true if write succeeded.
-  return res.load() == len;
-}
-
-uint16_t FakeDev::ReadRegActual(HpsReg reg) {
+std::optional<uint16_t> FakeDev::ReadRegister(HpsReg reg) {
   uint16_t v = 0;
   switch (reg) {
     case HpsReg::kMagic:
       v = kHpsMagic;
       break;
     case HpsReg::kHwRev:
-      if (this->stage_ == kStage0) {
-        v = 0x0101;  // Version return in stage0.
+      if (this->stage_ == Stage::kStage0) {
+        v = 0x0104;  // Version return in stage0.
       }
       break;
     case HpsReg::kSysStatus:
-      if (this->stage_ == kFault) {
-        v = hps::R2::kFault;
-        break;
+      if (Flag(Flags::kFailStatusRegRead)) {
+        Clear(Flags::kFailStatusRegRead);
+        return std::nullopt;
       }
       v = hps::R2::kOK;
-      if (this->Flag(kApplNotVerified)) {
-        v |= hps::R2::kApplNotVerified;
-      } else {
-        v |= hps::R2::kApplVerified;
+      if (this->fault_ != RError::kNone) {
+        v |= hps::R2::kFault;
       }
-      if (this->Flag(kWpOff)) {
+      if (this->stage_ == Stage::kStage0) {
+        v |= hps::R2::kStage0;
+      }
+      if (this->Flag(Flags::kWpOff)) {
         v |= hps::R2::kWpOff;
       } else {
         v |= hps::R2::kWpOn;
       }
-      if (this->stage_ == kStage1) {
+      if (this->stage_ == Stage::kStage1) {
         v |= hps::R2::kStage1;
-        if (this->Flag(kSpiNotVerified)) {
-          v |= hps::R2::kSpiNotVerified;
-        } else {
-          v |= hps::R2::kSpiVerified;
-        }
       }
       if (this->stage_ == Stage::kAppl) {
         v |= hps::R2::kAppl;
@@ -279,64 +148,103 @@ uint16_t FakeDev::ReadRegActual(HpsReg reg) {
       break;
 
     case HpsReg::kBankReady:
-      v = this->bank_.load();
+      v = this->bank_;
       break;
 
-    case HpsReg::kF1:
-      if (this->feature_on_ & hps::R7::kFeature1Enable) {
-        v = hps::RFeat::kValid | this->f1_result_.load();
+    case HpsReg::kFeature0:
+      if (this->feature_on_ & hps::R7::kFeature0Enable) {
+        v = this->f0_result_;
       }
       break;
 
-    case HpsReg::kF2:
-      if (this->feature_on_ & hps::R7::kFeature2Enable) {
-        v = hps::RFeat::kValid | this->f2_result_.load();
+    case HpsReg::kFeature1:
+      if (this->feature_on_ & hps::R7::kFeature1Enable) {
+        v = this->f1_result_;
       }
       break;
 
     case HpsReg::kFirmwareVersionHigh:
-      // Firmware version, only returned in stage0 if the
-      // application has been verified.
-      if (this->stage_ == kStage0 && !this->Flag(kApplNotVerified)) {
-        v = static_cast<uint16_t>(firmware_version_.load() >> 16);
+      // Firmware version, only returned in stage1.
+      if (this->stage_ == Stage::kStage1) {
+        v = static_cast<uint16_t>(firmware_version_ >> 16);
       } else {
         v = 0xFFFF;
       }
       break;
 
     case HpsReg::kFirmwareVersionLow:
-      // Firmware version, only returned in stage0 if the
-      // application has been verified.
-      if (this->stage_ == kStage0 && !this->Flag(kApplNotVerified)) {
-        v = static_cast<uint16_t>(firmware_version_.load() & 0xFFFF);
+      // Firmware version, only returned in stage1.
+      if (this->stage_ == Stage::kStage1) {
+        v = static_cast<uint16_t>(firmware_version_ & 0xFFFF);
       } else {
         v = 0xFFFF;
       }
       break;
 
-    default:
+    case HpsReg::kError:
+      v = this->fault_;
+      break;
+
+    case HpsReg::kSysCmd:
+    case HpsReg::kFeatEn:
+    case HpsReg::kFpgaBootCount:
+    case HpsReg::kFpgaLoopCount:
+    case HpsReg::kFpgaRomVersion:
+    case HpsReg::kSpiFlashStatus:
+    case HpsReg::kCameraConfig:
+    case HpsReg::kStartCameraTest:
+    case HpsReg::kOptionBytesConfig:
+    case HpsReg::kPartIds:
+    case HpsReg::kPreviousCrashMessage:
+    case HpsReg::kFpgaCrashMessage:
+    case HpsReg::kMax:
       break;
   }
-  VLOG(2) << "Read reg " << HpsRegToString(reg) << " value " << v;
+  VLOG(2) << "Read reg " << HpsRegInfo(reg)->name << " value " << v;
   return v;
 }
 
-void FakeDev::WriteRegActual(HpsReg reg, uint16_t value) {
-  VLOG(2) << "Write reg " << HpsRegToString(reg) << " value " << value;
+bool FakeDev::WriteRegister(HpsReg reg, uint16_t value) {
+  VLOG(2) << "Write reg " << HpsRegInfo(reg)->name << " value " << value;
   // Ignore everything except the command register.
   switch (reg) {
     case HpsReg::kSysCmd:
       if (value & hps::R3::kReset) {
-        this->SetStage(kStage0);
-      } else if (value & hps::R3::kLaunch) {
+        this->SetStage(Stage::kStage0);
+      } else if (value & hps::R3::kLaunch1) {
         // Only valid in stage0
-        if (this->stage_ == kStage0) {
-          this->SetStage(kStage1);
+        if (this->stage_ == Stage::kStage0) {
+          // Only boot if stage1 was valid, or WP is off
+          if (this->Flag(Flags::kStage1NotVerified) &&
+              !this->Flag(Flags::kWpOff)) {
+            this->fault_ = hps::RError::kStage1InvalidSignature;
+          } else if (this->Flag(Flags::kFlashEccError)) {
+            this->Clear(Flags::kFlashEccError);
+            this->fault_ = hps::RError::kMcuFlashEcc;
+          } else {
+            this->SetStage(Stage::kStage1);
+          }
         }
-      } else if (value & hps::R3::kEnable) {
+      } else if (value & hps::R3::kLaunchAppl) {
         // Only valid in stage1
-        if (this->stage_ == kStage1) {
-          this->SetStage(kAppl);
+        if (this->stage_ == Stage::kStage1) {
+          // only boot valid spi flash, else set fault bit
+          if (this->Flag(Flags::kSpiNotVerified)) {
+            this->fault_ = hps::RError::kSpiFlashNotVerified;
+          } else {
+            this->SetStage(Stage::kAppl);
+          }
+        }
+      } else if (value & hps::R3::kEraseStage1) {
+        // Only valid in stage0
+        if (this->stage_ == Stage::kStage0) {
+          this->bank_erased_[HpsBank::kMcuFlash] = true;
+        }
+      } else if (value & hps::R3::kEraseSpiFlash) {
+        // Only valid in stage1
+        if (this->stage_ == Stage::kStage1) {
+          this->bank_erased_[HpsBank::kSpiFlash] = true;
+          this->bank_erased_[HpsBank::kSocRom] = true;
         }
       }
       break;
@@ -346,80 +254,85 @@ void FakeDev::WriteRegActual(HpsReg reg, uint16_t value) {
       this->feature_on_ = value;
       break;
 
-    default:
+    case HpsReg::kMagic:
+    case HpsReg::kHwRev:
+    case HpsReg::kSysStatus:
+    case HpsReg::kBankReady:
+    case HpsReg::kError:
+    case HpsReg::kFeature0:
+    case HpsReg::kFeature1:
+    case HpsReg::kFirmwareVersionHigh:
+    case HpsReg::kFirmwareVersionLow:
+    case HpsReg::kFpgaBootCount:
+    case HpsReg::kFpgaLoopCount:
+    case HpsReg::kFpgaRomVersion:
+    case HpsReg::kSpiFlashStatus:
+    case HpsReg::kCameraConfig:
+    case HpsReg::kStartCameraTest:
+    case HpsReg::kOptionBytesConfig:
+    case HpsReg::kPartIds:
+    case HpsReg::kPreviousCrashMessage:
+    case HpsReg::kFpgaCrashMessage:
+    case HpsReg::kMax:
       break;
   }
+  return true;
 }
 
 // Returns the number of bytes written.
 // The length includes 4 bytes of prepended address.
-uint16_t FakeDev::WriteMemActual(int bank, const uint8_t* data, size_t len) {
-  if (this->Flag(kMemFail)) {
-    return 0;
+bool FakeDev::WriteMemory(HpsBank bank, const uint8_t* data, size_t len) {
+  if (this->Flag(Flags::kMemFail)) {
+    return false;
   }
   // Don't allow writes that exceed the max block size.
-  if (len > (this->block_size_b_.load() + sizeof(uint32_t))) {
-    return 0;
+  if (len > (this->block_size_b_ + sizeof(uint32_t))) {
+    return false;
+  }
+  // Bank must be explicitly erased before writing.
+  if (!this->bank_erased_[bank]) {
+    return false;
   }
   switch (this->stage_) {
-    case kStage0:
+    case Stage::kStage0:
       // Stage0 allows the MCU flash to be written.
-      if (bank == 0) {
+      if (bank == HpsBank::kMcuFlash) {
         this->bank_len_[bank] += len - sizeof(uint32_t);
         // Check if the fake needs to reset the not-verified bit.
-        if (this->Flag(kResetApplVerification)) {
-          this->Clear(kApplNotVerified);
+        if (this->Flag(Flags::kResetApplVerification)) {
+          this->Clear(Flags::kStage1NotVerified);
         }
         // Check if the fake should increment the version.
-        if (this->Flag(kIncrementVersion)) {
-          this->Clear(kIncrementVersion);
+        if (this->Flag(Flags::kIncrementVersion)) {
+          this->Clear(Flags::kIncrementVersion);
           this->firmware_version_++;
         }
-        return len;
+        return true;
       }
       break;
-    case kStage1:
+    case Stage::kStage1:
       // Stage1 allows the SPI flash to be written.
-      if (bank == 1) {
+      if (bank == HpsBank::kSpiFlash || bank == HpsBank::kSocRom) {
         this->bank_len_[bank] += len - sizeof(uint32_t);
         // Check if the fake needs to reset the not-verified bit.
-        if (this->Flag(kResetSpiVerification)) {
-          this->Clear(kSpiNotVerified);
+        if (this->Flag(Flags::kResetSpiVerification)) {
+          this->Clear(Flags::kSpiNotVerified);
         }
-        return len;
+        return true;
       }
       break;
-    default:
+    case Stage::kAppl:
       break;
   }
-  return 0;
+  return false;
 }
 
 size_t FakeDev::GetBankLen(hps::HpsBank bank) {
-  base::AutoLock l(this->bank_lock_);
-  return this->bank_len_[static_cast<int>(bank)];
+  return this->bank_len_[bank];
 }
 
-void FakeDev::MsgStop() {
-  this->Send(Msg(Cmd::kStop, 0, 0, nullptr, nullptr));
-}
-
-void FakeDev::Send(const Msg& m) {
-  base::AutoLock l(this->qlock_);
-  this->q_.push_back(m);
-  this->ev_.Signal();
-}
-
-// Return a DevInterface connected to the simulated device.
-std::unique_ptr<DevInterface> FakeDev::CreateDevInterface() {
-  return std::unique_ptr<DevInterface>(std::make_unique<SimDev>(this));
-}
-
-// Static factory method to create and start an instance of a fake device.
-scoped_refptr<FakeDev> FakeDev::Create() {
-  auto fake_dev = base::MakeRefCounted<FakeDev>();
-  fake_dev->Start();
-  return fake_dev;
+std::unique_ptr<WakeLock> FakeDev::CreateWakeLock() {
+  return std::make_unique<FakeWakeLock>(*this);
 }
 
 }  // namespace hps

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@
 #include <string>
 
 #include "runtime_probe/probe_function.h"
+#include "runtime_probe/probe_function_argument.h"
 
 namespace runtime_probe {
 
@@ -28,17 +29,10 @@ class InputDeviceFunction : public PrivilegedProbeFunction {
  public:
   NAME_PROBE_FUNCTION("input_device");
 
-  template <typename T>
-  static auto FromKwargsValue(const base::Value& dict_value) {
-    PARSE_BEGIN();
-    PARSE_ARGUMENT(device_type, std::string(""));
-    PARSE_END();
-  }
-
  private:
   DataType EvalImpl() const override;
 
-  std::string device_type_;
+  PROBE_FUNCTION_ARG_DEF(std::string, device_type, (std::string("")));
 };
 
 }  // namespace runtime_probe

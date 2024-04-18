@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -37,22 +37,24 @@ struct MetadataKeyValue {
 
 class Camera3Service {
  public:
-  explicit Camera3Service(std::vector<int> cam_ids)
-      : cam_ids_(cam_ids), initialized_(false) {}
+  explicit Camera3Service(std::vector<int> cam_ids) : cam_ids_(cam_ids) {}
+
+  Camera3Service(const Camera3Service&) = delete;
+  Camera3Service& operator=(const Camera3Service&) = delete;
 
   ~Camera3Service();
 
-  typedef base::Callback<void(int cam_id,
-                              uint32_t frame_number,
-                              ScopedCameraMetadata metadata,
-                              cros::ScopedBufferHandle buffer)>
+  typedef base::RepeatingCallback<void(int cam_id,
+                                       uint32_t frame_number,
+                                       ScopedCameraMetadata metadata,
+                                       cros::ScopedBufferHandle buffer)>
       ProcessStillCaptureResultCallback;
 
-  typedef base::Callback<void(
+  typedef base::RepeatingCallback<void(
       int cam_id, uint32_t frame_number, ScopedCameraMetadata metadata)>
       ProcessRecordingResultCallback;
 
-  typedef base::Callback<void(
+  typedef base::RepeatingCallback<void(
       int cam_id, uint32_t frame_number, ScopedCameraMetadata metadata)>
       ProcessPreviewResultCallback;
 
@@ -125,13 +127,11 @@ class Camera3Service {
 
   base::Lock lock_;
 
-  bool initialized_;
+  bool initialized_ = false;
 
   class Camera3DeviceService;
   std::unordered_map<int, std::unique_ptr<Camera3DeviceService>>
       cam_dev_service_map_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(Camera3Service);
 };
 
 class Camera3Service::Camera3DeviceService {
@@ -145,12 +145,10 @@ class Camera3Service::Camera3DeviceService {
         service_thread_("Camera3 Test Service Thread"),
         process_still_capture_result_cb_(still_capture_cb),
         process_recording_result_cb_(recording_cb),
-        process_preview_result_cb_(preview_cb),
-        preview_state_(PREVIEW_STOPPED),
-        number_of_capture_requests_(0),
-        number_of_in_flight_requests_(0),
-        still_capture_metadata_(nullptr),
-        recording_metadata_(nullptr) {}
+        process_preview_result_cb_(preview_cb) {}
+
+  Camera3DeviceService(const Camera3DeviceService&) = delete;
+  Camera3DeviceService& operator=(const Camera3DeviceService&) = delete;
 
   int Initialize();
 
@@ -220,11 +218,11 @@ class Camera3Service::Camera3DeviceService {
 
   void StartAutoFocusOnServiceThread();
 
-  void StopPreviewOnServiceThread(base::Callback<void()> cb);
+  void StopPreviewOnServiceThread(base::OnceCallback<void()> cb);
 
   void AddMetadataListenerOnServiceThread(int32_t key,
                                           std::unordered_set<int32_t> values,
-                                          base::Callback<void()> cb,
+                                          base::OnceCallback<void()> cb,
                                           int32_t* result);
 
   void DeleteMetadataListenerOnServiceThread(
@@ -239,12 +237,12 @@ class Camera3Service::Camera3DeviceService {
   void StopFaceDetectionOnServiceThread();
 
   void TakeStillCaptureOnServiceThread(const camera_metadata_t* metadata,
-                                       base::Callback<void()> cb);
+                                       base::OnceCallback<void()> cb);
 
   void StartRecordingOnServiceThread(const camera_metadata_t* metadata,
-                                     base::Callback<void(int)> cb);
+                                     base::OnceCallback<void(int)> cb);
 
-  void StopRecordingOnServiceThread(base::Callback<void()> cb);
+  void StopRecordingOnServiceThread(base::OnceCallback<void()> cb);
 
   // This function can be called by PrepareStillCaptureAndStartPreview() or
   // ProcessResultMetadataOutputBuffers() to process one preview request.
@@ -270,13 +268,13 @@ class Camera3Service::Camera3DeviceService {
 
   ProcessPreviewResultCallback process_preview_result_cb_;
 
-  int32_t preview_state_;
+  int32_t preview_state_ = PREVIEW_STOPPED;
 
-  base::Callback<void()> stop_preview_cb_;
+  base::OnceCallback<void()> stop_preview_cb_;
 
   std::vector<const camera3_stream_t*> streams_;
 
-  uint32_t number_of_capture_requests_;
+  uint32_t number_of_capture_requests_ = 0;
 
   // Keep |number_of_capture_requests_| number of capture request and a boolean
   // indicating whether it is used (in the pipeline) or not
@@ -287,7 +285,7 @@ class Camera3Service::Camera3DeviceService {
   std::vector<std::vector<camera3_stream_buffer_t>> output_stream_buffers_;
 
   // Number of capture requests that are being processed by HAL
-  size_t number_of_in_flight_requests_;
+  size_t number_of_in_flight_requests_ = 0;
 
   // Metadata for repeating preview requests
   ScopedCameraMetadata repeating_preview_metadata_;
@@ -297,32 +295,30 @@ class Camera3Service::Camera3DeviceService {
   ScopedCameraMetadata oneshot_preview_metadata_;
 
   // Metadata for still capture requests
-  const camera_metadata_t* still_capture_metadata_;
+  const camera_metadata_t* still_capture_metadata_ = nullptr;
 
-  base::Callback<void()> still_capture_cb_;
+  base::OnceCallback<void()> still_capture_cb_;
 
   // Metadata for recording requests
-  const camera_metadata_t* recording_metadata_;
+  const camera_metadata_t* recording_metadata_ = nullptr;
 
-  base::Callback<void()> stop_recording_cb_;
+  base::OnceCallback<void()> stop_recording_cb_;
 
   struct MetadataListener {
     int32_t key;
     std::unordered_set<int32_t> values;
-    base::Callback<void()> cb;
+    base::OnceCallback<void()> cb;
     int32_t* result;
     MetadataListener(int32_t k,
                      const std::unordered_set<int32_t>& v,
-                     base::Callback<void()> c,
+                     base::OnceCallback<void()> c,
                      int32_t* r)
-        : key(k), values(v), cb(c), result(r) {}
+        : key(k), values(v), cb(std::move(c)), result(r) {}
   };
 
   std::list<MetadataListener> metadata_listener_list_;
 
   sem_t preview_frame_sem_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(Camera3DeviceService);
 };
 
 }  // namespace camera3_test

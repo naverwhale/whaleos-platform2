@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,34 +10,33 @@
 #include <memory>
 #include <utility>
 
+#include <base/files/file_path.h>
 #include <base/timer/timer.h>
 
-namespace rmad {
+#include "rmad/utils/futility_utils.h"
+#include "rmad/utils/write_protect_utils.h"
 
-class CrosSystemUtils;
+namespace rmad {
 
 class WriteProtectEnablePhysicalStateHandler : public BaseStateHandler {
  public:
   // Poll every 2 seconds.
-  static constexpr base::TimeDelta kPollInterval =
-      base::TimeDelta::FromSeconds(2);
+  static constexpr base::TimeDelta kPollInterval = base::Seconds(2);
 
   explicit WriteProtectEnablePhysicalStateHandler(
-      scoped_refptr<JsonStore> json_store);
-  // Used to inject mock |crossystem_utils_| for testing.
-  WriteProtectEnablePhysicalStateHandler(
       scoped_refptr<JsonStore> json_store,
-      std::unique_ptr<CrosSystemUtils> crossystem_utils);
-
-  void RegisterSignalSender(
-      std::unique_ptr<base::RepeatingCallback<bool(bool)>> callback) override {
-    write_protect_signal_sender_ = std::move(callback);
-  }
+      scoped_refptr<DaemonCallback> daemon_callback);
+  // Used to inject mock |write_protect_utils_| for testing.
+  explicit WriteProtectEnablePhysicalStateHandler(
+      scoped_refptr<JsonStore> json_store,
+      scoped_refptr<DaemonCallback> daemon_callback,
+      std::unique_ptr<WriteProtectUtils> write_protect_utils);
 
   ASSIGN_STATE(RmadState::StateCase::kWpEnablePhysical);
-  SET_REPEATABLE;
+  SET_UNREPEATABLE;
 
   RmadErrorCode InitializeState() override;
+  void RunState() override;
   void CleanUpState() override;
   GetNextStateCaseReply GetNextStateCase(const RmadState& state) override;
 
@@ -45,13 +44,11 @@ class WriteProtectEnablePhysicalStateHandler : public BaseStateHandler {
   ~WriteProtectEnablePhysicalStateHandler() override = default;
 
  private:
-  void PollUntilWriteProtectOn();
   void CheckWriteProtectOnTask();
 
-  std::unique_ptr<CrosSystemUtils> crossystem_utils_;
-  std::unique_ptr<base::RepeatingCallback<bool(bool)>>
-      write_protect_signal_sender_;
   base::RepeatingTimer timer_;
+
+  std::unique_ptr<WriteProtectUtils> write_protect_utils_;
 };
 
 }  // namespace rmad

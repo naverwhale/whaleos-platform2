@@ -1,37 +1,78 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "diagnostics/cros_healthd/events/power_events_impl.h"
 
+#include <string>
 #include <utility>
+#include <vector>
 
 #include <base/check.h>
 #include <base/logging.h>
+#include <power_manager/dbus-proxies.h>
+
+namespace {
+
+namespace mojom = ::ash::cros_healthd::mojom;
+
+// Handles the result of an attempt to connect to a D-Bus signal.
+void HandleSignalConnected(const std::string& interface,
+                           const std::string& signal,
+                           bool success) {
+  if (!success) {
+    LOG(ERROR) << "Failed to connect to signal " << interface << "." << signal;
+    return;
+  }
+  VLOG(2) << "Successfully connected to D-Bus signal " << interface << "."
+          << signal;
+}
+
+}  // namespace
 
 namespace diagnostics {
 
-PowerEventsImpl::PowerEventsImpl(Context* context) : context_(context) {
-  DCHECK(context_);
-}
+PowerEventsImpl::PowerEventsImpl(Context* context)
+    : context_(context), weak_ptr_factory_(this) {
+  CHECK(context_);
 
-PowerEventsImpl::~PowerEventsImpl() {
-  if (is_observing_powerd_)
-    context_->powerd_adapter()->RemovePowerObserver(this);
+  context_->power_manager_proxy()->RegisterPowerSupplyPollSignalHandler(
+      base::BindRepeating(&PowerEventsImpl::OnPowerSupplyPollSignal,
+                          weak_ptr_factory_.GetWeakPtr()),
+      base::BindOnce(&HandleSignalConnected));
+  context_->power_manager_proxy()->RegisterSuspendImminentSignalHandler(
+      base::BindRepeating(&PowerEventsImpl::OnSuspendImminentSignal,
+                          weak_ptr_factory_.GetWeakPtr()),
+      base::BindOnce(&HandleSignalConnected));
+  context_->power_manager_proxy()->RegisterDarkSuspendImminentSignalHandler(
+      base::BindRepeating(&PowerEventsImpl::OnDarkSuspendImminentSignal,
+                          weak_ptr_factory_.GetWeakPtr()),
+      base::BindOnce(&HandleSignalConnected));
+  context_->power_manager_proxy()->RegisterSuspendDoneSignalHandler(
+      base::BindRepeating(&PowerEventsImpl::OnSuspendDoneSignal,
+                          weak_ptr_factory_.GetWeakPtr()),
+      base::BindOnce(&HandleSignalConnected));
 }
 
 void PowerEventsImpl::AddObserver(
-    mojo::PendingRemote<chromeos::cros_healthd::mojom::CrosHealthdPowerObserver>
-        observer) {
-  if (!is_observing_powerd_) {
-    context_->powerd_adapter()->AddPowerObserver(this);
-    is_observing_powerd_ = true;
-  }
+    mojo::PendingRemote<mojom::EventObserver> observer) {
   observers_.Add(std::move(observer));
 }
 
+void PowerEventsImpl::AddObserver(
+    mojo::PendingRemote<mojom::CrosHealthdPowerObserver> observer) {
+  deprecated_observers_.Add(std::move(observer));
+}
+
 void PowerEventsImpl::OnPowerSupplyPollSignal(
-    const power_manager::PowerSupplyProperties& power_supply) {
+    const std::vector<uint8_t>& signal) {
+  power_manager::PowerSupplyProperties power_supply;
+  if (signal.empty() ||
+      !power_supply.ParseFromArray(&signal.front(), signal.size())) {
+    LOG(ERROR) << "Unable to parse PowerSupplyPoll signal";
+    return;
+  }
+
   if (!power_supply.has_external_power())
     return;
 
@@ -58,7 +99,19 @@ void PowerEventsImpl::OnPowerSupplyPollSignal(
   }
 
   external_power_ac_event_ = event_type;
+  mojom::PowerEventInfo info;
   for (auto& observer : observers_) {
+    switch (event_type) {
+      case PowerEventType::kAcInserted:
+        info.state = mojom::PowerEventInfo::State::kAcInserted;
+        break;
+      case PowerEventType::kAcRemoved:
+        info.state = mojom::PowerEventInfo::State::kAcRemoved;
+        break;
+    }
+    observer->OnEvent(mojom::EventInfo::NewPowerEventInfo(info.Clone()));
+  }
+  for (auto& observer : deprecated_observers_) {
     switch (event_type) {
       case PowerEventType::kAcInserted:
         observer->OnAcInserted();
@@ -68,41 +121,35 @@ void PowerEventsImpl::OnPowerSupplyPollSignal(
         break;
     }
   }
-
-  StopObservingPowerdIfNecessary();
 }
 
 void PowerEventsImpl::OnSuspendImminentSignal(
-    const power_manager::SuspendImminent& suspend_imminent) {
+    const std::vector<uint8_t>& /* signal */) {
   OnAnySuspendImminentSignal();
 }
 
 void PowerEventsImpl::OnDarkSuspendImminentSignal(
-    const power_manager::SuspendImminent& suspend_imminent) {
+    const std::vector<uint8_t>& /* signal */) {
   OnAnySuspendImminentSignal();
 }
 
 void PowerEventsImpl::OnSuspendDoneSignal(
-    const power_manager::SuspendDone& suspend_done) {
+    const std::vector<uint8_t>& /* signal */) {
+  mojom::PowerEventInfo info;
+  info.state = mojom::PowerEventInfo::State::kOsResume;
   for (auto& observer : observers_)
+    observer->OnEvent(mojom::EventInfo::NewPowerEventInfo(info.Clone()));
+  for (auto& observer : deprecated_observers_)
     observer->OnOsResume();
-
-  StopObservingPowerdIfNecessary();
 }
 
 void PowerEventsImpl::OnAnySuspendImminentSignal() {
+  mojom::PowerEventInfo info;
+  info.state = mojom::PowerEventInfo::State::kOsSuspend;
   for (auto& observer : observers_)
+    observer->OnEvent(mojom::EventInfo::NewPowerEventInfo(info.Clone()));
+  for (auto& observer : deprecated_observers_)
     observer->OnOsSuspend();
-
-  StopObservingPowerdIfNecessary();
-}
-
-void PowerEventsImpl::StopObservingPowerdIfNecessary() {
-  if (!observers_.empty())
-    return;
-
-  context_->powerd_adapter()->RemovePowerObserver(this);
-  is_observing_powerd_ = false;
 }
 
 }  // namespace diagnostics

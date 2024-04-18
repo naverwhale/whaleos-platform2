@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Chromium OS Authors. All rights reserved.
+ * Copyright 2019 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -89,6 +89,7 @@ std::unique_ptr<CaptureRequest> RequestQueue::Pop() {
     if (sync_wait(buffer->acquire_fence, 300)) {
       LOGF(ERROR) << "Timed out waiting on camera buffer acquire fence";
     }
+    close(buffer->acquire_fence);
   }
 
   struct timespec time;

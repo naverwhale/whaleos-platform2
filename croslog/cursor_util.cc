@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,8 +30,8 @@ bool ParseCursor(const std::string& cursor_str, base::Time* output) {
           &time_value))
     return false;
 
-  *output = base::Time::FromDeltaSinceWindowsEpoch(
-      base::TimeDelta::FromMicroseconds(time_value));
+  *output =
+      base::Time::FromDeltaSinceWindowsEpoch(base::Microseconds(time_value));
   return true;
 }
 

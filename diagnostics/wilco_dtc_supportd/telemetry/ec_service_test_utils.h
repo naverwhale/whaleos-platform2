@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@
 #include "diagnostics/wilco_dtc_supportd/telemetry/ec_service.h"
 
 namespace diagnostics {
+namespace wilco {
 
 // Valid EcEvents
 extern const EcService::EcEvent kEcEventNonWilcoCharger;
@@ -37,6 +38,7 @@ std::string ConvertDataInWordsToString(const uint16_t* data, uint16_t size);
 // Returns a pre-initialized EcEvent whose reason matches the provided reason
 EcService::EcEvent GetEcEventWithReason(EcService::EcEvent::Reason reason);
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_TELEMETRY_EC_SERVICE_TEST_UTILS_H_

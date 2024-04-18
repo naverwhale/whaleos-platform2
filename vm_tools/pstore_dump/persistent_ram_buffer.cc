@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,31 +16,15 @@
 #include <base/files/memory_mapped_file.h>
 #include <base/logging.h>
 
-namespace vm_tools {
-namespace pstore_dump {
+namespace vm_tools::pstore_dump {
 
 namespace {
 
-// kernel parameters for ARCVM kernel.
-// These values are decided by vm_concierge process, crosvm process, and Linux
-// kernel. So it's difficult to avoid embedding them as constants. We can see
-// some of these values from /proc/cmdline in ARCVM, but this file is
-// unavailable when ARCVM is not running.
-constexpr int kRamoopsMemSize = kArcVmPstoreSize;  // decided by vm_concierge
-constexpr int kRamoopsRecordSize =
-    kArcVmPstoreSize / 4;  // calculated at crosvm
-constexpr int kRamoopsConsoleSize =
-    kArcVmPstoreSize / 4;  // calculated at crosvm
-constexpr int kRamoopsFtraceSize =
-    0x1000;  // default for kernel module parameter ramoops.ftrace_size
-constexpr int kRamoopsPmsgSize =
-    0x1000;  // default for kernel module parameter ramoops.pmsg_size
-
 // The values to compute offsets of the ring buffers in the same way to
 // fs/pstore/ram.c.
-constexpr int kDumpMemSize = kRamoopsMemSize - kRamoopsConsoleSize -
-                             kRamoopsFtraceSize - kRamoopsPmsgSize;
-constexpr int kZoneCount = kDumpMemSize / kRamoopsRecordSize;
+constexpr int kDumpMemSize = kArcVmRamoopsSize - kArcVmRamoopsConsoleSize -
+                             kArcVmRamoopsFtraceSize - kArcVmRamoopsPmsgSize;
+constexpr int kZoneCount = kDumpMemSize / kArcVmRamoopsRecordSize;
 constexpr int kZoneSize = kDumpMemSize / kZoneCount;
 
 // FindPersistentRamBufferForConsoleOutput finds the ring buffer for kernel's
@@ -50,10 +34,10 @@ constexpr int kZoneSize = kDumpMemSize / kZoneCount;
 // ramoops, and also assumes that the values of kernel parameters about ramoops.
 const persistent_ram_buffer* FindPersistentRamBufferForConsoleOutput(
     const char* pstore, size_t pstore_size) {
-  if (pstore_size != kRamoopsMemSize) {
+  if (pstore_size != kArcVmRamoopsSize) {
     LOG(ERROR) << "The pstore file doesn't follow the expected format. The "
                   "expected file size is "
-               << kRamoopsMemSize << " bytes but the actual size is "
+               << kArcVmRamoopsSize << " bytes but the actual size is "
                << pstore_size << " bytes.";
     return nullptr;
   }
@@ -74,10 +58,10 @@ const persistent_ram_buffer* FindPersistentRamBufferForConsoleOutput(
 const persistent_ram_buffer* FindPersistentRamBufferForDmesg(const char* pstore,
                                                              size_t pstore_size,
                                                              int index) {
-  if (pstore_size != kRamoopsMemSize) {
+  if (pstore_size != kArcVmRamoopsSize) {
     LOG(ERROR) << "The pstore file doesn't follow the expected format. The "
                   "expected file size is "
-               << kRamoopsMemSize << " bytes but the actual size is "
+               << kArcVmRamoopsSize << " bytes but the actual size is "
                << pstore_size << " bytes.";
     return nullptr;
   }
@@ -180,5 +164,4 @@ bool HandlePstoreDmesg(const base::FilePath& path) {
   return true;
 }
 
-}  // namespace pstore_dump
-}  // namespace vm_tools
+}  // namespace vm_tools::pstore_dump

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,49 +9,31 @@
 #include <string>
 #include <utility>
 
-#include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
-#include <base/run_loop.h>
 #include <base/strings/stringprintf.h>
+#include <base/test/gmock_callback_support.h>
 #include <base/test/task_environment.h>
+#include <base/test/test_future.h>
+#include <brillo/files/file_util.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "diagnostics/cros_healthd/executor/mock_executor_adapter.h"
 #include "diagnostics/cros_healthd/fetchers/fan_fetcher.h"
+#include "diagnostics/cros_healthd/mojom/executor.mojom.h"
 #include "diagnostics/cros_healthd/system/mock_context.h"
-#include "mojo/cros_healthd_executor.mojom.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
-namespace executor_ipc = chromeos::cros_healthd_executor::mojom;
-namespace mojo_ipc = chromeos::cros_healthd::mojom;
+namespace mojom = ::ash::cros_healthd::mojom;
 
 using ::testing::_;
-using ::testing::DoAll;
-using ::testing::Invoke;
-using ::testing::Return;
-using ::testing::StrictMock;
-using ::testing::WithArg;
 
 // Test values for fan speed.
-constexpr uint32_t kFirstFanSpeedRpm = 2255;
-constexpr uint32_t kSecondFanSpeedRpm = 1263;
-constexpr uint64_t kOverflowingValue = 0xFFFFFFFFFF;
-
-// Saves |response| to |response_destination|.
-void OnGetFanSpeedResponseReceived(mojo_ipc::FanResultPtr* response_destination,
-                                   base::Closure quit_closure,
-                                   mojo_ipc::FanResultPtr response) {
-  *response_destination = std::move(response);
-  quit_closure.Run();
-}
-
-}  // namespace
+constexpr uint16_t kFirstFanSpeedRpm = 2255;
+constexpr uint16_t kSecondFanSpeedRpm = 1263;
 
 class FanUtilsTest : public ::testing::Test {
  protected:
@@ -63,17 +45,12 @@ class FanUtilsTest : public ::testing::Test {
 
   const base::FilePath& root_dir() { return mock_context_.root_dir(); }
 
-  MockExecutorAdapter* mock_executor() { return mock_context_.mock_executor(); }
+  MockExecutor* mock_executor() { return mock_context_.mock_executor(); }
 
-  mojo_ipc::FanResultPtr FetchFanInfo() {
-    base::RunLoop run_loop;
-    mojo_ipc::FanResultPtr result;
-    fan_fetcher_.FetchFanInfo(base::BindOnce(&OnGetFanSpeedResponseReceived,
-                                             &result, run_loop.QuitClosure()));
-
-    run_loop.Run();
-
-    return result;
+  mojom::FanResultPtr FetchFanInfo() {
+    base::test::TestFuture<mojom::FanResultPtr> future;
+    fan_fetcher_.FetchFanInfo(future.GetCallback());
+    return future.Take();
   }
 
  private:
@@ -86,16 +63,10 @@ class FanUtilsTest : public ::testing::Test {
 // Test that fan information can be fetched successfully.
 TEST_F(FanUtilsTest, FetchFanInfo) {
   // Set the mock executor response.
-  EXPECT_CALL(*mock_executor(), GetFanSpeed(_))
-      .WillOnce(WithArg<0>(
-          Invoke([](executor_ipc::Executor::GetFanSpeedCallback callback) {
-            executor_ipc::ProcessResult result;
-            result.return_code = EXIT_SUCCESS;
-            result.out =
-                base::StringPrintf("Fan 0 RPM: %u\nFan 1 RPM: %u\n",
-                                   kFirstFanSpeedRpm, kSecondFanSpeedRpm);
-            std::move(callback).Run(result.Clone());
-          })));
+  std::vector<uint16_t> fan_rpms = {kFirstFanSpeedRpm, kSecondFanSpeedRpm};
+  std::optional<std::string> error = std::nullopt;
+  EXPECT_CALL(*mock_executor(), GetAllFanSpeed(_))
+      .WillOnce(base::test::RunOnceCallback<0>(fan_rpms, error));
 
   auto fan_result = FetchFanInfo();
 
@@ -109,14 +80,10 @@ TEST_F(FanUtilsTest, FetchFanInfo) {
 // Test that no fan information is returned for a device that has no fan.
 TEST_F(FanUtilsTest, NoFan) {
   // Set the mock executor response.
-  EXPECT_CALL(*mock_executor(), GetFanSpeed(_))
-      .WillOnce(WithArg<0>(
-          Invoke([](executor_ipc::Executor::GetFanSpeedCallback callback) {
-            executor_ipc::ProcessResult result;
-            result.return_code = EXIT_SUCCESS;
-            result.out = "";
-            std::move(callback).Run(result.Clone());
-          })));
+  std::vector<uint16_t> fan_rpms = {};
+  std::optional<std::string> error = std::nullopt;
+  EXPECT_CALL(*mock_executor(), GetAllFanSpeed(_))
+      .WillOnce(base::test::RunOnceCallback<0>(fan_rpms, error));
 
   auto fan_result = FetchFanInfo();
 
@@ -128,90 +95,22 @@ TEST_F(FanUtilsTest, NoFan) {
 // returns a ProbeError.
 TEST_F(FanUtilsTest, CollectFanSpeedFailure) {
   // Set the mock executor response.
-  EXPECT_CALL(*mock_executor(), GetFanSpeed(_))
-      .WillOnce(WithArg<0>(
-          Invoke([](executor_ipc::Executor::GetFanSpeedCallback callback) {
-            executor_ipc::ProcessResult result;
-            result.return_code = EXIT_FAILURE;
-            result.err = "Some error happened!";
-            std::move(callback).Run(result.Clone());
-          })));
+  std::vector<uint16_t> fan_rpms = {};
+  std::optional<std::string> error = "Some error happened!";
+  EXPECT_CALL(*mock_executor(), GetAllFanSpeed(_))
+      .WillOnce(base::test::RunOnceCallback<0>(fan_rpms, error));
 
   auto fan_result = FetchFanInfo();
 
   ASSERT_TRUE(fan_result->is_error());
   EXPECT_EQ(fan_result->get_error()->type,
-            chromeos::cros_healthd::mojom::ErrorType::kSystemUtilityError);
-}
-
-// Test that fan speed is set to 0 RPM when a fan stalls.
-TEST_F(FanUtilsTest, FanStalled) {
-  // Set the mock executor response.
-  EXPECT_CALL(*mock_executor(), GetFanSpeed(_))
-      .WillOnce(WithArg<0>(
-          Invoke([](executor_ipc::Executor::GetFanSpeedCallback callback) {
-            executor_ipc::ProcessResult result;
-            result.return_code = EXIT_SUCCESS;
-            result.out = base::StringPrintf("Fan 0 stalled!\nFan 1 RPM: %u\n",
-                                            kSecondFanSpeedRpm);
-            std::move(callback).Run(result.Clone());
-          })));
-
-  auto fan_result = FetchFanInfo();
-
-  ASSERT_TRUE(fan_result->is_fan_info());
-  const auto& fan_info = fan_result->get_fan_info();
-  ASSERT_EQ(fan_info.size(), 2);
-  EXPECT_EQ(fan_info[0]->speed_rpm, 0);
-  EXPECT_EQ(fan_info[1]->speed_rpm, kSecondFanSpeedRpm);
-}
-
-// Test that failing to match a line of output to the fan speed regex fails
-// gracefully and returns a ProbeError.
-TEST_F(FanUtilsTest, BadLine) {
-  // Set the mock executor response.
-  EXPECT_CALL(*mock_executor(), GetFanSpeed(_))
-      .WillOnce(WithArg<0>(
-          Invoke([](executor_ipc::Executor::GetFanSpeedCallback callback) {
-            executor_ipc::ProcessResult result;
-            result.return_code = EXIT_SUCCESS;
-            result.out = base::StringPrintf("Fan 0 RPM: bad\nFan 1 RPM: %u\n",
-                                            kSecondFanSpeedRpm);
-            std::move(callback).Run(result.Clone());
-          })));
-
-  auto fan_result = FetchFanInfo();
-
-  ASSERT_TRUE(fan_result->is_error());
-  EXPECT_EQ(fan_result->get_error()->type,
-            chromeos::cros_healthd::mojom::ErrorType::kParseError);
-}
-
-// Test that failing to convert the first fan speed string to an integer fails
-// gracefully and returns a ProbeError.
-TEST_F(FanUtilsTest, BadValue) {
-  // Set the mock executor response.
-  EXPECT_CALL(*mock_executor(), GetFanSpeed(_))
-      .WillOnce(WithArg<0>(
-          Invoke([](executor_ipc::Executor::GetFanSpeedCallback callback) {
-            executor_ipc::ProcessResult result;
-            result.return_code = EXIT_SUCCESS;
-            result.out = base::StringPrintf("Fan 0 RPM: -115\nFan 1 RPM: %u\n",
-                                            kSecondFanSpeedRpm);
-            std::move(callback).Run(result.Clone());
-          })));
-
-  auto fan_result = FetchFanInfo();
-
-  ASSERT_TRUE(fan_result->is_error());
-  EXPECT_EQ(fan_result->get_error()->type,
-            chromeos::cros_healthd::mojom::ErrorType::kParseError);
+            mojom::ErrorType::kSystemUtilityError);
 }
 
 // Test that no fan info is fetched for a device that does not have a Google EC.
 TEST_F(FanUtilsTest, NoGoogleEc) {
   ASSERT_TRUE(
-      base::DeletePathRecursively(root_dir().Append(kRelativeCrosEcPath)));
+      brillo::DeletePathRecursively(root_dir().Append(kRelativeCrosEcPath)));
 
   auto fan_result = FetchFanInfo();
 
@@ -219,26 +118,5 @@ TEST_F(FanUtilsTest, NoGoogleEc) {
   EXPECT_EQ(fan_result->get_fan_info().size(), 0);
 }
 
-// Test that overflowing fan speed integer values from ectool are handled
-// gracefully.
-TEST_F(FanUtilsTest, OverflowingFanSpeedValue) {
-  // Set the mock executor response.
-  EXPECT_CALL(*mock_executor(), GetFanSpeed(_))
-      .WillOnce(WithArg<0>(
-          Invoke([](executor_ipc::Executor::GetFanSpeedCallback callback) {
-            executor_ipc::ProcessResult result;
-            result.return_code = EXIT_SUCCESS;
-            result.out =
-                base::StringPrintf("Fan 0 RPM: %u\nFan 1 RPM: %" PRId64 "\n",
-                                   kFirstFanSpeedRpm, kOverflowingValue);
-            std::move(callback).Run(result.Clone());
-          })));
-
-  auto fan_result = FetchFanInfo();
-
-  ASSERT_TRUE(fan_result->is_error());
-  EXPECT_EQ(fan_result->get_error()->type,
-            chromeos::cros_healthd::mojom::ErrorType::kParseError);
-}
-
+}  // namespace
 }  // namespace diagnostics

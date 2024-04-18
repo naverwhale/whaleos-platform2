@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,11 +12,7 @@
 
 #include <base/files/file_path.h>
 
-#include "power_manager/common/power_constants.h"
-#include "power_manager/powerd/system/udev_subsystem_observer.h"
-
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Monitors device sys paths to identify the potential wakeup reason. Monitors
 // only if the |wakeup_device_path| points to a directory with power/wakeup
@@ -24,13 +20,13 @@ namespace system {
 
 class WakeupSourceIdentifierInterface {
  public:
-  WakeupSourceIdentifierInterface() {}
+  WakeupSourceIdentifierInterface() = default;
   WakeupSourceIdentifierInterface(const WakeupSourceIdentifierInterface&) =
       delete;
   WakeupSourceIdentifierInterface& operator=(
       const WakeupSourceIdentifierInterface&) = delete;
 
-  virtual ~WakeupSourceIdentifierInterface() {}
+  virtual ~WakeupSourceIdentifierInterface() = default;
 
   // Should be called at the beginning of a new suspend request.
   virtual void PrepareForSuspendRequest() = 0;
@@ -43,7 +39,6 @@ class WakeupSourceIdentifierInterface {
   virtual bool InputDeviceCausedLastWake() const = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_WAKEUP_SOURCE_IDENTIFIER_INTERFACE_H_

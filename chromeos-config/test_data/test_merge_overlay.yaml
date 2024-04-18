@@ -1,5 +1,5 @@
 #
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 #
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
@@ -10,9 +10,9 @@ chromeos:
       skus:
         - config:
             identity:
-              # - smbios-name-match should be case insensitive.
+              # - frid should be case insensitive.
               # - sku-id should match, as it was unspecified.
-              smbios-name-match: "SMBIOSnamematch"
+              frid: "google_somedevice"
             wallpaper: "wallpaper-overridden-by-identity"
     - $name: "NameMatch"
       skus:
@@ -25,7 +25,7 @@ chromeos:
             name: "{{$name}}"
             identity:
               platform-name: "PlatformName"
-              smbios-name-match: "SMBiosNameMatch"
+              frid: "Google_SomeDevice"
               sku-id: 4
             firmware:
               image-name: "foo"

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,28 +11,11 @@
 #include <base/containers/contains.h>
 #include <base/logging.h>
 #include <base/strings/string_piece.h>
+#include <base/strings/string_split.h>
 
 namespace {
 
-std::string GetParentChildName(const char* path) {
-  base::StringPiece name(path ? path : ".");
-
-  if (name.empty() || name == "/")
-    return path;
-  if (name == "." || name == "..")
-    return {};
-  if (name.find('/') != base::StringPiece::npos)
-    return {};
-
-  return std::string("/").append(name.data(), name.size());
-}
-
 using Node = fusebox::Node;
-
-inline Node* NodeError(int error) {
-  errno = error;
-  return nullptr;
-}
 
 Node* CreateNode(ino_t parent, const std::string& child, ino_t ino) {
   Node* node = new Node();
@@ -45,30 +28,58 @@ Node* CreateNode(ino_t parent, const std::string& child, ino_t ino) {
   return node;
 }
 
+std::string GetChildNodeName(const char* name) {
+  base::StringPiece entry(name ? name : "");
+
+  // Verify entry name is POSIX conformant: return "" if not.
+  if (entry == "." || entry == "..")
+    return {};  // path traversals not allowed
+  if (entry.find('/') != base::StringPiece::npos)
+    return {};  // path components not allowed
+  if (entry.empty())
+    return {};  // trivial cases "" or nullptr
+
+  return std::string("/").append(entry.data(), entry.size());
+}
+
+inline Node* NodeError(int error) {
+  errno = error;
+  return nullptr;
+}
+
 }  // namespace
 
 namespace fusebox {
 
-InodeTable::InodeTable() : ino_(0), stat_cache_(1024) {
-  root_node_ = InsertNode(CreateNode(0, "/", CreateIno()));
+InodeTable::InodeTable() : stat_cache_(1024) {
+  root_node_ = InsertNode(CreateNode(0, "/", FUSE_ROOT_ID));
 }
 
+static_assert(sizeof(fuse_ino_t) <= sizeof(ino_t),
+              "fuse_ino_t size should not exceed the system ino_t size");
+
 ino_t InodeTable::CreateIno() {
-  ino_t ino = ++ino_;
+  fuse_ino_t ino = ino_++;
   CHECK(ino) << "inodes wrapped";
   return ino;
 }
 
-Node* InodeTable::Create(ino_t parent, const char* name) {
-  std::string child = GetParentChildName(name);
+Node* InodeTable::Create(ino_t parent, const char* name, ino_t ino) {
+  std::string child = GetChildNodeName(name);
   if (child.empty() || !parent)
+    return NodeError(EINVAL);
+
+  auto parent_it = node_map_.find(parent);
+  if (parent_it == node_map_.end())
     return NodeError(EINVAL);
 
   auto p = parent_map_.find(std::to_string(parent).append(child));
   if (p != parent_map_.end())
     return NodeError(EEXIST);
 
-  return InsertNode(CreateNode(parent, child, CreateIno()));
+  Node* node = InsertNode(CreateNode(parent, child, ino ? ino : CreateIno()));
+  node->device = parent_it->second->device;
+  return node;
 }
 
 Node* InodeTable::Lookup(ino_t ino, uint64_t ref) {
@@ -82,7 +93,7 @@ Node* InodeTable::Lookup(ino_t ino, uint64_t ref) {
 }
 
 Node* InodeTable::Lookup(ino_t parent, const char* name, uint64_t ref) {
-  std::string child = GetParentChildName(name);
+  std::string child = GetChildNodeName(name);
   if (child.empty())
     return NodeError(EINVAL);
 
@@ -95,19 +106,47 @@ Node* InodeTable::Lookup(ino_t parent, const char* name, uint64_t ref) {
   return node;
 }
 
+Node* InodeTable::Ensure(ino_t parent,
+                         const char* name,
+                         uint64_t ref,
+                         ino_t ino) {
+  std::string child = GetChildNodeName(name);
+  if (child.empty() || !parent)
+    return NodeError(EINVAL);
+
+  auto parent_it = node_map_.find(parent);
+  if (parent_it == node_map_.end())
+    return NodeError(EINVAL);
+
+  auto p = parent_map_.find(std::to_string(parent).append(child));
+  if (p != parent_map_.end()) {
+    p->second->refcount += ref;
+    return p->second;
+  }
+
+  Node* node = InsertNode(CreateNode(parent, child, ino ? ino : CreateIno()));
+  node->device = parent_it->second->device;
+  node->refcount += ref;
+  return node;
+}
+
 Node* InodeTable::Move(Node* node, ino_t parent, const char* name) {
   CHECK_NE(node, root_node_);
 
-  if (node_map_.find(parent) == node_map_.end())
+  auto parent_it = node_map_.find(parent);
+  if (parent_it == node_map_.end())
     return NodeError(EINVAL);
 
-  std::string child = GetParentChildName(name);
+  std::string child = GetChildNodeName(name);
   if (child.empty() || !node || node->ino == parent)
     return NodeError(EINVAL);
 
   auto p = parent_map_.find(std::to_string(parent).append(child));
   if (p != parent_map_.end())
     return NodeError(EEXIST);
+
+  if (parent_it->second->device != node->device)
+    return NodeError(ENOTSUP);  // cross-device move
 
   RemoveNode(node);
   node->parent = parent;
@@ -142,17 +181,15 @@ std::string InodeTable::GetName(ino_t ino) {
 std::string InodeTable::GetPath(Node* node) {
   DCHECK(node);
 
-  std::vector<std::string> names;
-  while (node->ino && node->parent) {
-    names.push_back(node->name);
-    auto parent = node_map_.find(node->parent);
-    CHECK(parent != node_map_.end());
-    node = parent->second.get();
+  std::deque<std::string> names;
+  while (node && node->parent) {
+    names.push_front(node->name);
+    node = Lookup(node->parent);
   }
 
   std::string path;
-  for (auto it = names.rbegin(); it != names.rend(); ++it)
-    path.append(it->data(), it->size());
+  for (const auto& name : names)
+    path.append(name);
   if (path.empty())
     path.push_back('/');
 
@@ -215,6 +252,111 @@ Node* InodeTable::RemoveNode(Node* node) {
   node_map_.erase(n);
 
   return node;
+}
+
+Device InodeTable::MakeFromName(const std::string& name) const {
+  Device device;
+
+  std::vector<std::string> parts = base::SplitString(
+      name, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+
+  if (parts.size() >= 1)
+    device.name = parts.at(0);
+  if (parts.size() >= 2)
+    device.path = parts.at(1);
+  else
+    device.path = device.name;
+  device.mode = "rw";
+  if (parts.size() >= 3)
+    device.mode = parts.at(2);
+
+  return device;
+}
+
+dev_t InodeTable::CreateDev() {
+  dev_t dev = ++dev_;
+  CHECK(dev) << "devices wrapped";
+  return dev;
+}
+
+Node* InodeTable::AttachDevice(ino_t parent, struct Device& device, ino_t ino) {
+  Node* node = nullptr;
+
+  if (parent == root_node_->ino) {
+    node = Create(root_node_->ino, device.name.c_str(), ino);
+  } else if (!parent) {
+    node = root_node_;
+  } else {  // Device node must attach to the root node.
+    return NodeError(EINVAL);
+  }
+
+  if (!node) {
+    DCHECK_NE(0, errno);
+    return nullptr;
+  }
+
+  device.device = 0;
+  if (node != root_node_)
+    device.device = node->device = CreateDev();
+  device.ino = node->ino;
+
+  device_map_[device.device] = device;
+  return node;
+}
+
+bool InodeTable::DetachDevice(ino_t ino) {
+  dev_t device = 0;
+  if (Node* node = Lookup(ino))
+    device = node->device;
+
+  auto it = device_map_.find(device);
+  if (!device || it == device_map_.end())
+    return errno = EINVAL, false;
+
+  for (Node* node : GetDeviceNodes(device))
+    Forget(node->ino);
+
+  device_map_.erase(it);
+  return true;
+}
+
+std::deque<Node*> InodeTable::GetDeviceNodes(dev_t device) const {
+  std::deque<Node*> nodes;
+
+  for (const auto& it : node_map_) {
+    Node* node = it.second.get();
+    if (device == node->device)
+      nodes.push_front(node);
+  }
+
+  return nodes;
+}
+
+std::string InodeTable::GetDevicePath(Node* node) {
+  Device device = GetDevice(node);
+
+  // Remove the device.name from the path.
+  std::string path = GetPath(node);
+  if (device.device && !device.name.empty())
+    path = path.substr(1 + device.name.size());
+
+  // Add the device.path prefix if needed.
+  if (path != "/")
+    return path.insert(0, device.path);
+  if (!device.path.empty())
+    return device.path;
+
+  return path;
+}
+
+Device InodeTable::GetDevice(Node* node) const {
+  DCHECK(node);
+
+  auto it = device_map_.find(node->device);
+  if (it != device_map_.end())
+    return it->second;
+
+  return {};
 }
 
 }  // namespace fusebox

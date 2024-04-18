@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,18 +19,18 @@ struct FirmwareFileInfo {
 
   FirmwareFileInfo() : compression(Compression::NONE) {}
 
-  FirmwareFileInfo(const base::FilePath& firmware_path,
-                   const std::string& version)
+  FirmwareFileInfo(const std::string& firmware_path, const std::string& version)
       : FirmwareFileInfo(firmware_path, version, Compression::NONE) {}
 
-  FirmwareFileInfo(const base::FilePath& firmware_path,
+  FirmwareFileInfo(const std::string& firmware_path,
                    const std::string& version,
                    Compression compression)
       : firmware_path(firmware_path),
         version(version),
         compression(compression) {}
 
-  base::FilePath firmware_path;
+  // relative path to the firmware file.
+  std::string firmware_path;
   std::string version;
   Compression compression;
 };

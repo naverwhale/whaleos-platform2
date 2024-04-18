@@ -1,39 +1,46 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "diagnostics/wilco_dtc_supportd/fake_wilco_dtc.h"
 
+#include <utility>
+
 #include <base/barrier_closure.h>
 #include <base/check.h>
 #include <base/run_loop.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 namespace diagnostics {
+namespace wilco {
 
 FakeWilcoDtc::FakeWilcoDtc(const std::string& grpc_server_uri,
                            const std::string& wilco_dtc_supportd_grpc_uri)
-    : grpc_server_(base::ThreadTaskRunnerHandle::Get(), {grpc_server_uri}),
-      wilco_dtc_supportd_grp_client_(base::ThreadTaskRunnerHandle::Get(),
-                                     wilco_dtc_supportd_grpc_uri) {
+    : grpc_server_(base::SingleThreadTaskRunner::GetCurrentDefault(),
+                   {grpc_server_uri}),
+      wilco_dtc_supportd_grp_client_(
+          base::SingleThreadTaskRunner::GetCurrentDefault(),
+          wilco_dtc_supportd_grpc_uri) {
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandleMessageFromUi,
-      base::Bind(&FakeWilcoDtc::HandleMessageFromUi, base::Unretained(this)));
+      base::BindRepeating(&FakeWilcoDtc::HandleMessageFromUi,
+                          base::Unretained(this)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandleEcNotification,
-      base::Bind(&FakeWilcoDtc::HandleEcNotification, base::Unretained(this)));
+      base::BindRepeating(&FakeWilcoDtc::HandleEcNotification,
+                          base::Unretained(this)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandlePowerNotification,
-      base::Bind(&FakeWilcoDtc::HandlePowerNotification,
-                 base::Unretained(this)));
+      base::BindRepeating(&FakeWilcoDtc::HandlePowerNotification,
+                          base::Unretained(this)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandleConfigurationDataChanged,
-      base::Bind(&FakeWilcoDtc::HandleConfigurationDataChanged,
-                 base::Unretained(this)));
+      base::BindRepeating(&FakeWilcoDtc::HandleConfigurationDataChanged,
+                          base::Unretained(this)));
   grpc_server_.RegisterHandler(
       &grpc_api::WilcoDtc::AsyncService::RequestHandleBluetoothDataChanged,
-      base::Bind(&FakeWilcoDtc::HandleBluetoothDataChanged,
-                 base::Unretained(this)));
+      base::BindRepeating(&FakeWilcoDtc::HandleBluetoothDataChanged,
+                          base::Unretained(this)));
 
   grpc_server_.Start();
 }
@@ -41,7 +48,7 @@ FakeWilcoDtc::FakeWilcoDtc(const std::string& grpc_server_uri,
 FakeWilcoDtc::~FakeWilcoDtc() {
   // Wait until both gRPC server and client get shut down.
   base::RunLoop run_loop;
-  const base::Closure barrier_closure =
+  const base::RepeatingClosure barrier_closure =
       base::BarrierClosure(2, run_loop.QuitClosure());
   grpc_server_.ShutDown(barrier_closure);
   wilco_dtc_supportd_grp_client_.ShutDown(barrier_closure);
@@ -53,13 +60,14 @@ void FakeWilcoDtc::SendMessageToUi(
     SendMessageToUiCallback callback) {
   wilco_dtc_supportd_grp_client_.CallRpc(
       &grpc_api::WilcoDtcSupportd::Stub::AsyncSendMessageToUi, request,
-      callback);
+      std::move(callback));
 }
 
 void FakeWilcoDtc::GetProcData(const grpc_api::GetProcDataRequest& request,
                                GetProcDataCallback callback) {
   wilco_dtc_supportd_grp_client_.CallRpc(
-      &grpc_api::WilcoDtcSupportd::Stub::AsyncGetProcData, request, callback);
+      &grpc_api::WilcoDtcSupportd::Stub::AsyncGetProcData, request,
+      std::move(callback));
 }
 
 void FakeWilcoDtc::GetEcTelemetry(
@@ -67,61 +75,60 @@ void FakeWilcoDtc::GetEcTelemetry(
     GetEcTelemetryCallback callback) {
   wilco_dtc_supportd_grp_client_.CallRpc(
       &grpc_api::WilcoDtcSupportd::Stub::AsyncGetEcTelemetry, request,
-      callback);
+      std::move(callback));
 }
 
 void FakeWilcoDtc::PerformWebRequest(
     const grpc_api::PerformWebRequestParameter& parameter,
-    const PerformWebRequestResponseCallback& callback) {
+    PerformWebRequestResponseCallback callback) {
   wilco_dtc_supportd_grp_client_.CallRpc(
       &grpc_api::WilcoDtcSupportd::Stub::AsyncPerformWebRequest, parameter,
-      callback);
+      std::move(callback));
 }
 
 void FakeWilcoDtc::GetConfigurationData(
     const grpc_api::GetConfigurationDataRequest& request,
-    const GetConfigurationDataCallback& callback) {
+    GetConfigurationDataCallback callback) {
   wilco_dtc_supportd_grp_client_.CallRpc(
       &grpc_api::WilcoDtcSupportd::Stub::AsyncGetConfigurationData, request,
-      callback);
+      std::move(callback));
 }
 
 void FakeWilcoDtc::GetDriveSystemData(
     const grpc_api::GetDriveSystemDataRequest& request,
-    const GetDriveSystemDataCallback& callback) {
+    GetDriveSystemDataCallback callback) {
   wilco_dtc_supportd_grp_client_.CallRpc(
       &grpc_api::WilcoDtcSupportd::Stub::AsyncGetDriveSystemData, request,
-      callback);
+      std::move(callback));
 }
 
 void FakeWilcoDtc::RequestBluetoothDataNotification(
     const grpc_api::RequestBluetoothDataNotificationRequest& request,
-    const RequestBluetoothDataNotificationCallback& callback) {
+    RequestBluetoothDataNotificationCallback callback) {
   wilco_dtc_supportd_grp_client_.CallRpc(
       &grpc_api::WilcoDtcSupportd::Stub::AsyncRequestBluetoothDataNotification,
-      request, callback);
+      request, std::move(callback));
 }
 
 void FakeWilcoDtc::GetStatefulPartitionAvailableCapacity(
     const grpc_api::GetStatefulPartitionAvailableCapacityRequest& request,
-    const GetStatefulPartitionAvailableCapacityCallback& callback) {
+    GetStatefulPartitionAvailableCapacityCallback callback) {
   wilco_dtc_supportd_grp_client_.CallRpc(
       &grpc_api::WilcoDtcSupportd::Stub::
           AsyncGetStatefulPartitionAvailableCapacity,
-      request, callback);
+      request, std::move(callback));
 }
 
-void FakeWilcoDtc::GetAvailableRoutines(
-    const GetAvailableRoutinesCallback& callback) {
+void FakeWilcoDtc::GetAvailableRoutines(GetAvailableRoutinesCallback callback) {
   grpc_api::GetAvailableRoutinesRequest request;
   wilco_dtc_supportd_grp_client_.CallRpc(
       &grpc_api::WilcoDtcSupportd::Stub::AsyncGetAvailableRoutines, request,
-      callback);
+      std::move(callback));
 }
 
 void FakeWilcoDtc::HandleMessageFromUi(
     std::unique_ptr<grpc_api::HandleMessageFromUiRequest> request,
-    const HandleMessageFromUiCallback& callback) {
+    HandleMessageFromUiCallback callback) {
   DCHECK(handle_message_from_ui_callback_);
   DCHECK(handle_message_from_ui_json_message_response_.has_value());
 
@@ -130,55 +137,58 @@ void FakeWilcoDtc::HandleMessageFromUi(
   auto response = std::make_unique<grpc_api::HandleMessageFromUiResponse>();
   response->set_response_json_message(
       handle_message_from_ui_json_message_response_.value());
-  callback.Run(grpc::Status::OK, std::move(response));
+  std::move(callback).Run(grpc::Status::OK, std::move(response));
 
-  handle_message_from_ui_callback_->Run();
+  if (handle_message_from_ui_callback_.has_value())
+    std::move(handle_message_from_ui_callback_.value()).Run();
 }
 
 void FakeWilcoDtc::HandleEcNotification(
     std::unique_ptr<grpc_api::HandleEcNotificationRequest> request,
-    const HandleEcNotificationCallback& callback) {
+    HandleEcNotificationCallback callback) {
   DCHECK(handle_ec_event_request_callback_);
 
   auto response = std::make_unique<grpc_api::HandleEcNotificationResponse>();
-  callback.Run(grpc::Status::OK, std::move(response));
+  std::move(callback).Run(grpc::Status::OK, std::move(response));
 
   handle_ec_event_request_callback_->Run(request->type(), request->payload());
 }
 
 void FakeWilcoDtc::HandlePowerNotification(
     std::unique_ptr<grpc_api::HandlePowerNotificationRequest> request,
-    const HandlePowerNotificationCallback& callback) {
+    HandlePowerNotificationCallback callback) {
   DCHECK(handle_power_event_request_callback_);
 
   auto response = std::make_unique<grpc_api::HandlePowerNotificationResponse>();
-  callback.Run(grpc::Status::OK, std::move(response));
+  std::move(callback).Run(grpc::Status::OK, std::move(response));
 
   handle_power_event_request_callback_->Run(request->power_event());
 }
 
 void FakeWilcoDtc::HandleConfigurationDataChanged(
     std::unique_ptr<grpc_api::HandleConfigurationDataChangedRequest> request,
-    const HandleConfigurationDataChangedCallback& callback) {
+    HandleConfigurationDataChangedCallback callback) {
   DCHECK(configuration_data_changed_callback_);
 
   auto response =
       std::make_unique<grpc_api::HandleConfigurationDataChangedResponse>();
-  callback.Run(grpc::Status::OK, std::move(response));
+  std::move(callback).Run(grpc::Status::OK, std::move(response));
 
-  configuration_data_changed_callback_->Run();
+  if (configuration_data_changed_callback_.has_value())
+    std::move(configuration_data_changed_callback_.value()).Run();
 }
 
 void FakeWilcoDtc::HandleBluetoothDataChanged(
     std::unique_ptr<grpc_api::HandleBluetoothDataChangedRequest> request,
-    const HandleBluetoothDataChangedCallback& callback) {
+    HandleBluetoothDataChangedCallback callback) {
   DCHECK(bluetooth_data_changed_request_callback_);
 
   auto response =
       std::make_unique<grpc_api::HandleBluetoothDataChangedResponse>();
-  callback.Run(grpc::Status::OK, std::move(response));
+  std::move(callback).Run(grpc::Status::OK, std::move(response));
 
   bluetooth_data_changed_request_callback_->Run(*request);
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

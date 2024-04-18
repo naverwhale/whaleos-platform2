@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,21 +15,20 @@
 #include <gtest/gtest.h>
 
 #include "power_manager/powerd/system/udev_stub.h"
-#include "power_manager/powerd/system/udev_subsystem_observer.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
 // Stub implementation of DisplayWatcherObserver.
 class TestObserver : public DisplayWatcherObserver {
  public:
-  TestObserver() : num_display_changes_(0) {}
+  TestObserver() = default;
   TestObserver(const TestObserver&) = delete;
   TestObserver& operator=(const TestObserver&) = delete;
 
-  virtual ~TestObserver() {}
+  ~TestObserver() override = default;
 
   int num_display_changes() const { return num_display_changes_; }
 
@@ -40,12 +39,12 @@ class TestObserver : public DisplayWatcherObserver {
 
  private:
   // Number of times that OnDisplaysChanged() has been called.
-  int num_display_changes_;
+  int num_display_changes_ = 0;
 };
 
 }  // namespace
 
-class DisplayWatcherTest : public testing::Test {
+class DisplayWatcherTest : public TestEnvironment {
  public:
   DisplayWatcherTest() {
     CHECK(drm_dir_.CreateUniqueTempDir());
@@ -53,7 +52,7 @@ class DisplayWatcherTest : public testing::Test {
     CHECK(device_dir_.CreateUniqueTempDir());
     watcher_.set_i2c_dev_path_for_testing(device_dir_.GetPath());
   }
-  ~DisplayWatcherTest() override {}
+  ~DisplayWatcherTest() override = default;
 
  protected:
   // Creates a directory named |device_name| in |device_dir_| and adds a symlink
@@ -145,7 +144,7 @@ TEST_F(DisplayWatcherTest, DisplayStatus) {
   EXPECT_EQ(system::DisplayInfo::ConnectorStatus::CONNECTED,
             watcher_.GetDisplays().front().connector_status);
   // Make sure observers receive a notification when the status changes from
-  // "unkown" to "connected".
+  // "unknown" to "connected".
   EXPECT_TRUE(watcher_.trigger_debounce_timeout_for_testing());
   EXPECT_EQ(2, observer.num_display_changes());
 
@@ -368,5 +367,4 @@ TEST_F(DisplayWatcherTest, NonEvdiDeviceSysPath) {
   EXPECT_EQ(pci_path.value(), watcher_.GetDisplays()[0].sys_path.value());
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

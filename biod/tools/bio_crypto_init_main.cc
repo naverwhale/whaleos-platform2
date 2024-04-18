@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -118,8 +118,8 @@ int main(int argc, char* argv[]) {
 
   auto process = base::Process::Open(pid);
   int exit_code = -1;
-  if (!process.WaitForExitWithTimeout(
-          base::TimeDelta::FromSeconds(kTimeoutSeconds), &exit_code)) {
+  if (!process.WaitForExitWithTimeout(base::Seconds(kTimeoutSeconds),
+                                      &exit_code)) {
     LOG(ERROR) << "bio_crypto_init timeout";
     process.Terminate(-1, false);
   }

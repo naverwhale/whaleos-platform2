@@ -1,11 +1,11 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "trunks/tpm_state_impl.h"
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 
 #include "trunks/error_codes.h"
@@ -284,8 +284,8 @@ uint32_t TpmStateImpl::TpmPropertiesCallback(
 }
 
 TPM_RC TpmStateImpl::CacheTpmProperties() {
-  CapabilityCallback callback =
-      base::Bind(&TpmStateImpl::TpmPropertiesCallback, base::Unretained(this));
+  CapabilityCallback callback = base::BindRepeating(
+      &TpmStateImpl::TpmPropertiesCallback, base::Unretained(this));
   if (tpm_properties_.empty()) {
     TPM_RC result = GetCapability(callback, TPM_CAP_TPM_PROPERTIES, PT_FIXED,
                                   MAX_TPM_PROPERTIES);
@@ -314,9 +314,9 @@ uint32_t TpmStateImpl::AlgorithmCallback(
 
 TPM_RC TpmStateImpl::CacheAlgorithmProperties() {
   if (algorithm_properties_.empty()) {
-    return GetCapability(
-        base::Bind(&TpmStateImpl::AlgorithmCallback, base::Unretained(this)),
-        TPM_CAP_ALGS, TPM_ALG_FIRST, MAX_CAP_ALGS);
+    return GetCapability(base::BindRepeating(&TpmStateImpl::AlgorithmCallback,
+                                             base::Unretained(this)),
+                         TPM_CAP_ALGS, TPM_ALG_FIRST, MAX_CAP_ALGS);
   }
   return TPM_RC_SUCCESS;
 }

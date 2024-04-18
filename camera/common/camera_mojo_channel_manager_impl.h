@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Chromium OS Authors. All rights reserved.
+ * Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -29,45 +29,45 @@
 
 namespace cros {
 
-class CameraMojoChannelManagerImpl final : public CameraMojoChannelManager {
+class CameraMojoChannelManagerImpl : public CameraMojoChannelManager {
  public:
   CameraMojoChannelManagerImpl();
   CameraMojoChannelManagerImpl(const CameraMojoChannelManagerImpl&) = delete;
   CameraMojoChannelManagerImpl& operator=(const CameraMojoChannelManagerImpl&) =
       delete;
 
-  ~CameraMojoChannelManagerImpl();
+  ~CameraMojoChannelManagerImpl() override;
 
   // CameraMojoChannelManager implementations.
 
-  scoped_refptr<base::SingleThreadTaskRunner> GetIpcTaskRunner();
+  scoped_refptr<base::SingleThreadTaskRunner> GetIpcTaskRunner() override;
 
   void RegisterServer(
       mojo::PendingRemote<mojom::CameraHalServer> server,
       mojom::CameraHalDispatcher::RegisterServerWithTokenCallback
           on_construct_callback,
-      Callback on_error_callback);
-
-  void CreateMjpegDecodeAccelerator(
-      mojo::PendingReceiver<mojom::MjpegDecodeAccelerator> receiver,
-      Callback on_construct_callback,
-      Callback on_error_callback);
-
-  void CreateJpegEncodeAccelerator(
-      mojo::PendingReceiver<mojom::JpegEncodeAccelerator> receiver,
-      Callback on_construct_callback,
-      Callback on_error_callback);
+      Callback on_error_callback) override;
 
   mojo::Remote<mojom::CameraAlgorithmOps> CreateCameraAlgorithmOpsRemote(
-      const std::string& socket_path, const std::string& pipe_name);
+      const std::string& socket_path, const std::string& pipe_name) override;
 
-  SensorHalClient* GetSensorHalClient();
+  SensorHalClient* GetSensorHalClient() override;
 
   void RegisterSensorHalClient(
       mojo::PendingRemote<mojom::SensorHalClient> client,
       mojom::CameraHalDispatcher::RegisterSensorClientWithTokenCallback
           on_construct_callback,
-      Callback on_error_callback);
+      Callback on_error_callback) override;
+
+  void RequestServiceFromMojoServiceManager(
+      const std::string& service_name,
+      mojo::ScopedMessagePipeHandle receiver) override;
+
+  void RegisterServiceToMojoServiceManager(
+      const std::string& service_name,
+      mojo::PendingRemote<
+          chromeos::mojo_service_manager::mojom::ServiceProvider> remote)
+      override;
 
  protected:
   friend class CameraMojoChannelManager;
@@ -94,13 +94,6 @@ class CameraMojoChannelManagerImpl final : public CameraMojoChannelManager {
   template <typename T>
   using JpegPendingMojoTask = PendingMojoTask<T, Callback>;
 
-  void OnSocketFileStatusChange(const base::FilePath& socket_path, bool error);
-
-  // Callback method for the unix domain socket file change events.  The method
-  // will try to establish the Mojo connection to the CameraHalDispatcher
-  // started by Chrome.
-  void OnSocketFileStatusChangeOnIpcThread();
-
   void TryConnectToDispatcher();
 
   void TryConsumePendingMojoTasks();
@@ -109,6 +102,14 @@ class CameraMojoChannelManagerImpl final : public CameraMojoChannelManager {
 
   // Reset the dispatcher.
   void ResetDispatcherPtr();
+
+  chromeos::mojo_service_manager::mojom::ServiceManager*
+  GetServiceManagerProxy();
+
+  void RegisterServiceToMojoServiceManagerOnIpcThread(
+      const std::string& service_name,
+      mojo::PendingRemote<
+          chromeos::mojo_service_manager::mojom::ServiceProvider> remote);
 
   // The Mojo channel to CameraHalDispatcher in Chrome. All the Mojo
   // communication to |dispatcher_| happens on |ipc_thread_|.
@@ -120,19 +121,10 @@ class CameraMojoChannelManagerImpl final : public CameraMojoChannelManager {
   // connection to CameraHalDispatcher.
   base::FilePathWatcher watcher_;
 
-  // Inode number of current bound socket file.
-  ino_t bound_socket_inode_num_;
-
   // Pending Mojo tasks information which should be consumed when the
   // |dispatcher_| is connected.
   ServerPendingMojoTask camera_hal_server_task_;
   SensorClientPendingMojoTask sensor_hal_client_task_;
-  std::vector<
-      JpegPendingMojoTask<mojo::PendingReceiver<mojom::JpegEncodeAccelerator>>>
-      jea_tasks_;
-  std::vector<
-      JpegPendingMojoTask<mojo::PendingReceiver<mojom::MjpegDecodeAccelerator>>>
-      jda_tasks_;
 
   // TODO(b/151270948): Remove this static variable once we implemnet CrOS
   // specific interface on all camera HALs.

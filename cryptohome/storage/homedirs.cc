@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,81 +6,57 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <set>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_path.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
+#include <base/location.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/cryptohome.h>
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
 #include <brillo/blkdev_utils/lvm.h>
-#endif  // USE_LVM_STATEFUL_PARTITION
 #include <brillo/scoped_umask.h>
 #include <brillo/secure_blob.h>
 #include <chromeos/constants/cryptohome.h>
+#include <cryptohome/proto_bindings/key.pb.h>
+#include <libhwsec-foundation/status/status_chain_macros.h>
 
-#include "cryptohome/credentials.h"
-#include "cryptohome/crypto.h"
-#include "cryptohome/crypto_error.h"
-#include "cryptohome/cryptohome_metrics.h"
 #include "cryptohome/dircrypto_util.h"
 #include "cryptohome/filesystem_layout.h"
-#include "cryptohome/key.pb.h"
 #include "cryptohome/platform.h"
-#include "cryptohome/signed_secret.pb.h"
 #include "cryptohome/storage/cryptohome_vault.h"
 #include "cryptohome/storage/cryptohome_vault_factory.h"
 #include "cryptohome/storage/encrypted_container/encrypted_container.h"
-#include "cryptohome/storage/mount_helper.h"
+#include "cryptohome/storage/ephemeral_policy_util.h"
+#include "cryptohome/storage/error.h"
+#include "cryptohome/storage/mount_constants.h"
+#include "cryptohome/username.h"
 
 using base::FilePath;
 using brillo::SecureBlob;
-using brillo::cryptohome::home::SanitizeUserNameWithSalt;
+using brillo::cryptohome::home::SanitizeUserName;
 
 namespace cryptohome {
 
-const char* kEmptyOwner = "";
-// Each xattr is set to Android app internal data directory, contains
-// 8-byte inode number of cache subdirectory.  See
-// frameworks/base/core/java/android/app/ContextImpl.java
-const char kAndroidCacheInodeAttribute[] = "user.inode_cache";
-const char kAndroidCodeCacheInodeAttribute[] = "user.inode_code_cache";
-const char kTrackedDirectoryNameAttribute[] = "user.TrackedDirectoryName";
-const char kRemovableFileAttribute[] = "user.GCacheRemovable";
+const char kForceKeylockerForTestingFlag[] =
+    "/run/cryptohome/.force_keylocker_for_testing";
 
 HomeDirs::HomeDirs(Platform* platform,
-                   const brillo::SecureBlob& system_salt,
-                   std::unique_ptr<policy::PolicyProvider> policy_provider,
-                   const RemoveCallback& remove_callback)
-    : HomeDirs(platform,
-               system_salt,
-               std::move(policy_provider),
-               remove_callback,
-               std::make_unique<CryptohomeVaultFactory>(platform)) {}
-
-HomeDirs::HomeDirs(Platform* platform,
-                   const brillo::SecureBlob& system_salt,
                    std::unique_ptr<policy::PolicyProvider> policy_provider,
                    const RemoveCallback& remove_callback,
-                   std::unique_ptr<CryptohomeVaultFactory> vault_factory)
+                   CryptohomeVaultFactory* vault_factory)
     : platform_(platform),
-      system_salt_(system_salt),
       policy_provider_(std::move(policy_provider)),
       enterprise_owned_(false),
-      vault_factory_(std::move(vault_factory)),
-      remove_callback_(remove_callback) {
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
-  lvm_ = std::make_unique<brillo::LogicalVolumeManager>();
-#endif  // USE_LVM_STATEFUL_PARTITION
-}
+      lvm_migration_enabled_(false),
+      vault_factory_(vault_factory),
+      remove_callback_(remove_callback) {}
 
 HomeDirs::~HomeDirs() {}
 
@@ -88,42 +64,86 @@ void HomeDirs::LoadDevicePolicy() {
   policy_provider_->Reload();
 }
 
-bool HomeDirs::AreEphemeralUsersEnabled() {
+bool HomeDirs::GetEphemeralSettings(
+    policy::DevicePolicy::EphemeralSettings* settings) {
   LoadDevicePolicy();
-  // If the policy cannot be loaded, default to non-ephemeral users.
-  bool ephemeral_users_enabled = false;
+  if (!policy_provider_->device_policy_is_loaded()) {
+    return false;
+  }
+
+  if (!policy_provider_->GetDevicePolicy().GetEphemeralSettings(settings)) {
+    return false;
+  }
+
+  return true;
+}
+
+bool HomeDirs::KeylockerForStorageEncryptionEnabled() {
+  // Search through /proc/crypto for 'aeskl' as an indicator that AES Keylocker
+  // is supported.
+  if (!IsAesKeylockerSupported())
+    return false;
+
+  // Check if keylocker is force enabled for testing.
+  // TODO(sarthakkukreti@, b/209516710): Remove in M102.
+  if (platform_->FileExists(base::FilePath(kForceKeylockerForTestingFlag))) {
+    LOG(INFO) << "Forced keylocker enabled for testing";
+    return true;
+  }
+
+  LoadDevicePolicy();
+
+  // If the policy cannot be loaded, default to AESNI.
+  bool keylocker_for_storage_encryption_enabled = false;
   if (policy_provider_->device_policy_is_loaded())
-    policy_provider_->GetDevicePolicy().GetEphemeralUsersEnabled(
-        &ephemeral_users_enabled);
-  return ephemeral_users_enabled;
+    policy_provider_->GetDevicePolicy()
+        .GetDeviceKeylockerForStorageEncryptionEnabled(
+            &keylocker_for_storage_encryption_enabled);
+  return keylocker_for_storage_encryption_enabled;
+}
+
+bool HomeDirs::MustRunAutomaticCleanupOnLogin() {
+  // If the policy cannot be loaded, default to not run cleanup.
+  if (!policy_provider_->device_policy_is_loaded())
+    return false;
+
+  // If the device is not enterprise owned, do not run cleanup.
+  if (!enterprise_owned()) {
+    return false;
+  }
+
+  // Get the value of the policy and default to true if unset.
+  return policy_provider_->GetDevicePolicy()
+      .GetRunAutomaticCleanupOnLogin()
+      .value_or(true);
 }
 
 bool HomeDirs::SetLockedToSingleUser() const {
   return platform_->TouchFileDurable(base::FilePath(kLockedToSingleUserFile));
 }
 
-bool HomeDirs::Exists(const std::string& obfuscated_username) const {
-  FilePath user_dir = ShadowRoot().Append(obfuscated_username);
+bool HomeDirs::Exists(const ObfuscatedUsername& obfuscated_username) const {
+  FilePath user_dir = UserPath(obfuscated_username);
   return platform_->DirectoryExists(user_dir);
 }
 
-bool HomeDirs::CryptohomeExists(const std::string& obfuscated_username,
-                                MountError* error) const {
-  *error = MOUNT_ERROR_NONE;
-  return EcryptfsCryptohomeExists(obfuscated_username) ||
-         DircryptoCryptohomeExists(obfuscated_username, error) ||
+StorageStatusOr<bool> HomeDirs::CryptohomeExists(
+    const ObfuscatedUsername& obfuscated_username) const {
+  ASSIGN_OR_RETURN(bool dircrypto_exists,
+                   DircryptoCryptohomeExists(obfuscated_username));
+  return EcryptfsCryptohomeExists(obfuscated_username) || dircrypto_exists ||
          DmcryptCryptohomeExists(obfuscated_username);
 }
 
 bool HomeDirs::EcryptfsCryptohomeExists(
-    const std::string& obfuscated_username) const {
+    const ObfuscatedUsername& obfuscated_username) const {
   // Check for the presence of a vault directory for ecryptfs.
   return platform_->DirectoryExists(
       GetEcryptfsUserVaultPath(obfuscated_username));
 }
 
-bool HomeDirs::DircryptoCryptohomeExists(const std::string& obfuscated_username,
-                                         MountError* error) const {
+StorageStatusOr<bool> HomeDirs::DircryptoCryptohomeExists(
+    const ObfuscatedUsername& obfuscated_username) const {
   // Check for the presence of an encrypted mount directory for dircrypto.
   FilePath mount_path = GetUserMountDirectory(obfuscated_username);
 
@@ -138,82 +158,82 @@ bool HomeDirs::DircryptoCryptohomeExists(const std::string& obfuscated_username,
     case dircrypto::KeyState::ENCRYPTED:
       return true;
     case dircrypto::KeyState::UNKNOWN:
-      *error = MOUNT_ERROR_FATAL;
-      PLOG(ERROR) << "Directory has inconsistent Fscrypt state:"
-                  << mount_path.value();
-      return false;
+      return StorageStatus::Make(
+          FROM_HERE,
+          std::string("Directory has inconsistent Fscrypt state: ") +
+              mount_path.value(),
+          MOUNT_ERROR_FATAL);
   }
   return false;
 }
 
 bool HomeDirs::DmcryptContainerExists(
-    const std::string& obfuscated_username,
+    const ObfuscatedUsername& obfuscated_username,
     const std::string& container_suffix) const {
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
   // Check for the presence of the logical volume for the user's data container.
   std::string logical_volume_container =
       LogicalVolumePrefix(obfuscated_username).append(container_suffix);
 
-  // Attempt to check if the stateful partition is setup with a valid physical
-  // volume.
-  base::FilePath physical_volume = platform_->GetStatefulDevice();
-  if (physical_volume.empty())
-    return false;
-
-  auto pv = lvm_->GetPhysicalVolume(physical_volume);
-  if (!pv || !pv->IsValid())
-    return false;
-
-  auto vg = lvm_->GetVolumeGroup(*pv);
-  if (!vg || !vg->IsValid())
-    return false;
-
-  return lvm_->GetLogicalVolume(*vg, logical_volume_container) != base::nullopt;
-#else
-  return false;
-#endif  // USE_LVM_STATEFUL_PARTITION
+  return vault_factory_->ContainerExists(logical_volume_container);
 }
 
 bool HomeDirs::DmcryptCryptohomeExists(
-    const std::string& obfuscated_username) const {
+    const ObfuscatedUsername& obfuscated_username) const {
   return DmcryptContainerExists(obfuscated_username,
                                 kDmcryptDataContainerSuffix);
 }
 
 bool HomeDirs::DmcryptCacheContainerExists(
-    const std::string& obfuscated_username) const {
+    const ObfuscatedUsername& obfuscated_username) const {
   return DmcryptContainerExists(obfuscated_username,
                                 kDmcryptCacheContainerSuffix);
 }
 
-void HomeDirs::RemoveNonOwnerCryptohomes() {
+HomeDirs::CryptohomesRemovedStatus HomeDirs::RemoveCryptohomesBasedOnPolicy() {
   // If the device is not enterprise owned it should have an owner user.
-  std::string owner;
-  if (!enterprise_owned_ && !GetOwner(&owner)) {
-    return;
+  auto state = HomeDirs::CryptohomesRemovedStatus::kError;
+  ObfuscatedUsername owner;
+  bool has_owner = GetOwner(&owner);
+  if (!enterprise_owned() && !has_owner) {
+    return state;
   }
 
   auto homedirs = GetHomeDirs();
   FilterMountedHomedirs(&homedirs);
+  policy::DevicePolicy::EphemeralSettings settings;
+  if (!GetEphemeralSettings(&settings)) {
+    return state;
+  }
 
+  size_t cryptohomes_removed = 0;
+  EphemeralPolicyUtil ephemeral_util(settings);
   for (const auto& dir : homedirs) {
-    if (GetOwner(&owner)) {
-      if (dir.obfuscated == owner && !enterprise_owned_) {
-        continue;  // Remove them all if enterprise owned.
-      }
+    if (has_owner && !enterprise_owned() && dir.obfuscated == owner) {
+      continue;  // Owner vault shouldn't be remove.
     }
-    if (platform_->IsDirectoryMounted(
-            brillo::cryptohome::home::GetUserPathPrefix().Append(
-                dir.obfuscated)) ||
-        platform_->IsDirectoryMounted(
-            brillo::cryptohome::home::GetRootPathPrefix().Append(
-                dir.obfuscated))) {
-      continue;  // Don't use LE credentials if user cryptohome is mounted.
-    } else if (!HomeDirs::Remove(dir.obfuscated)) {
-      LOG(WARNING) << "Failed to remove all non-owner home directories.";
+
+    if (!ephemeral_util.ShouldRemoveBasedOnPolicy(dir.obfuscated)) {
+      continue;
+    }
+
+    if (HomeDirs::Remove(dir.obfuscated)) {
+      cryptohomes_removed++;
+    } else {
+      LOG(WARNING)
+          << "Failed to remove ephemeral cryptohome with obfuscated username: "
+          << dir.obfuscated;
     }
   }
+
+  if (cryptohomes_removed == 0) {
+    state = HomeDirs::CryptohomesRemovedStatus::kNone;
+  } else if (cryptohomes_removed == homedirs.size()) {
+    state = HomeDirs::CryptohomesRemovedStatus::kAll;
+  } else {
+    state = HomeDirs::CryptohomesRemovedStatus::kSome;
+  }
+
+  return state;
 }
 
 std::vector<HomeDirs::HomeDir> HomeDirs::GetHomeDirs() {
@@ -225,16 +245,11 @@ std::vector<HomeDirs::HomeDir> HomeDirs::GetHomeDirs() {
 
   for (const auto& entry : entries) {
     HomeDirs::HomeDir dir;
-
-    dir.obfuscated = entry.BaseName().value();
-
-    if (!brillo::cryptohome::home::IsSanitizedUserName(dir.obfuscated))
+    FilePath basename = entry.BaseName();
+    if (!brillo::cryptohome::home::IsSanitizedUserName(basename.value())) {
       continue;
-
-    if (!platform_->DirectoryExists(
-            brillo::cryptohome::home::GetHashedUserPath(dir.obfuscated)))
-      continue;
-
+    }
+    dir.obfuscated = ObfuscatedUsername(basename.value());
     ret.push_back(dir);
   }
 
@@ -288,8 +303,7 @@ bool HomeDirs::GetTrackedDirectoryForDirCrypto(const FilePath& mount_dir,
 
   // Iterate over name components. This way, we don't have to inspect every
   // directory under |mount_dir|.
-  std::vector<std::string> name_components;
-  tracked_dir_name.GetComponents(&name_components);
+  std::vector<std::string> name_components = tracked_dir_name.GetComponents();
   for (const auto& name_component : name_components) {
     FilePath next_path;
     std::unique_ptr<FileEnumerator> enumerator(
@@ -321,21 +335,9 @@ bool HomeDirs::GetTrackedDirectoryForDirCrypto(const FilePath& mount_dir,
 }
 
 EncryptedContainerType HomeDirs::ChooseVaultType() {
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
-  // Validate stateful partition thinpool.
-  base::Optional<brillo::PhysicalVolume> pv =
-      lvm_->GetPhysicalVolume(platform_->GetStatefulDevice());
-  if (pv && pv->IsValid()) {
-    base::Optional<brillo::VolumeGroup> vg = lvm_->GetVolumeGroup(*pv);
-    if (vg && vg->IsValid()) {
-      base::Optional<brillo::Thinpool> thinpool =
-          lvm_->GetThinpool(*vg, "thinpool");
-      if (thinpool && thinpool->IsValid())
-        return EncryptedContainerType::kDmcrypt;
-    }
-  }
-#endif  // USE_LVM_STATEFUL_PARTITION
+  // Validate stateful partition logical volume support.
+  if (platform_->IsStatefulLogicalVolumeSupported())
+    return EncryptedContainerType::kDmcrypt;
 
   dircrypto::KeyState state = platform_->GetDirCryptoKeyState(ShadowRoot());
   switch (state) {
@@ -350,150 +352,137 @@ EncryptedContainerType HomeDirs::ChooseVaultType() {
   }
 }
 
-std::unique_ptr<CryptohomeVault> HomeDirs::CreatePristineVault(
-    const std::string& obfuscated_username,
-    const FileSystemKeyReference& key_reference,
-    CryptohomeVault::Options options,
-    MountError* mount_error) {
-  EncryptedContainerType container_type =
-      options.force_type == EncryptedContainerType::kUnknown
-          ? ChooseVaultType()
-          : options.force_type;
+StorageStatusOr<EncryptedContainerType> HomeDirs::GetVaultType(
+    const ObfuscatedUsername& obfuscated_username) {
+  ASSIGN_OR_RETURN(bool dircrypto_exists,
+                   DircryptoCryptohomeExists(obfuscated_username),
+                   (_.LogError() << "Can't get vault type"));
 
-  if (container_type == EncryptedContainerType::kUnknown) {
-    LOG(ERROR) << "Pristine mount attempted with unknown vault type";
-    *mount_error = MOUNT_ERROR_UNEXPECTED_MOUNT_TYPE;
-    return nullptr;
-  }
-
-  return vault_factory_->Generate(obfuscated_username, key_reference,
-                                  container_type,
-                                  EncryptedContainerType::kUnknown);
-}
-
-std::unique_ptr<CryptohomeVault> HomeDirs::CreateNonMigratingVault(
-    const std::string& obfuscated_username,
-    const FileSystemKeyReference& key_reference,
-    CryptohomeVault::Options options,
-    MountError* mount_error) {
-  EncryptedContainerType container_type = EncryptedContainerType::kUnknown;
   if (EcryptfsCryptohomeExists(obfuscated_username)) {
-    if (DircryptoCryptohomeExists(obfuscated_username, mount_error)) {
-      if (*mount_error != MOUNT_ERROR_NONE) {
-        // Preserve dircrypto encryption check error
-        return nullptr;
-      }
-      // If both types of home directory existed, it implies that the
-      // migration attempt was aborted in the middle before doing clean up.
-      LOG(ERROR) << "Mount failed because both eCryptfs and dircrypto home"
-                 << " directories were found. Need to resume and finish"
-                 << " migration first.";
-      *mount_error = MOUNT_ERROR_PREVIOUS_MIGRATION_INCOMPLETE;
-      return nullptr;
+    if (dircrypto_exists) {
+      return EncryptedContainerType::kEcryptfsToFscrypt;
     }
-
-    if (options.block_ecryptfs) {
-      LOG(ERROR) << "Mount attempt with block_ecryptfs on eCryptfs.";
-      *mount_error = MOUNT_ERROR_OLD_ENCRYPTION;
-      return nullptr;
+    if (DmcryptCryptohomeExists(obfuscated_username)) {
+      return EncryptedContainerType::kEcryptfsToDmcrypt;
     }
-
-    container_type = EncryptedContainerType::kEcryptfs;
-  } else if (DircryptoCryptohomeExists(obfuscated_username, mount_error)) {
-    if (*mount_error != MOUNT_ERROR_NONE) {
-      // Preserve dircrypto encryption check error
-      return nullptr;
+    return EncryptedContainerType::kEcryptfs;
+  } else if (dircrypto_exists) {
+    if (DmcryptCryptohomeExists(obfuscated_username)) {
+      return EncryptedContainerType::kFscryptToDmcrypt;
     }
-    container_type = EncryptedContainerType::kFscrypt;
+    return EncryptedContainerType::kFscrypt;
   } else if (DmcryptCryptohomeExists(obfuscated_username)) {
-    container_type = EncryptedContainerType::kDmcrypt;
-  } else {
-    LOG(ERROR) << "Non-migrating mount attempted with unknown vault type";
-    *mount_error = MOUNT_ERROR_UNEXPECTED_MOUNT_TYPE;
-    return nullptr;
+    return EncryptedContainerType::kDmcrypt;
   }
-
-  return vault_factory_->Generate(obfuscated_username, key_reference,
-                                  container_type,
-                                  EncryptedContainerType::kUnknown);
+  return EncryptedContainerType::kUnknown;
 }
 
-std::unique_ptr<CryptohomeVault> HomeDirs::CreateMigratingVault(
-    const std::string& obfuscated_username,
-    const FileSystemKeyReference& key_reference,
-    CryptohomeVault::Options options,
-    MountError* mount_error) {
-  EncryptedContainerType container_type = EncryptedContainerType::kUnknown;
-  EncryptedContainerType migrating_container_type =
-      EncryptedContainerType::kUnknown;
-  if (EcryptfsCryptohomeExists(obfuscated_username)) {
-    container_type = EncryptedContainerType::kEcryptfs;
-    migrating_container_type = EncryptedContainerType::kFscrypt;
-  } else {
-    LOG(ERROR) << "Mount attempt with migration on non-eCryptfs mount";
-    *mount_error = MOUNT_ERROR_UNEXPECTED_MOUNT_TYPE;
-    return nullptr;
-  }
-
-  return vault_factory_->Generate(obfuscated_username, key_reference,
-                                  container_type, migrating_container_type);
+bool HomeDirs::enterprise_owned() const {
+  CHECK(device_management_client_)
+      << __func__ << " proxy class instance is not initialized";
+  return device_management_client_->IsEnterpriseOwned();
 }
 
-std::unique_ptr<CryptohomeVault> HomeDirs::GenerateCryptohomeVault(
-    const std::string& obfuscated_username,
-    const FileSystemKeyReference& key_reference,
-    CryptohomeVault::Options options,
-    bool is_pristine,
-    MountError* mount_error) {
-  if (is_pristine) {
-    return CreatePristineVault(obfuscated_username, key_reference, options,
-                               mount_error);
+StorageStatusOr<EncryptedContainerType> HomeDirs::PickVaultType(
+    const ObfuscatedUsername& obfuscated_username,
+    const CryptohomeVault::Options& options) {
+  // See if the vault exists.
+  ASSIGN_OR_RETURN(EncryptedContainerType vault_type,
+                   GetVaultType(obfuscated_username));
+  // If existing vault is ecryptfs and migrate == true - make migrating vault.
+  if (vault_type == EncryptedContainerType::kEcryptfs && options.migrate) {
+    if (lvm_migration_enabled_) {
+      vault_type = EncryptedContainerType::kEcryptfsToDmcrypt;
+    } else {
+      vault_type = EncryptedContainerType::kEcryptfsToFscrypt;
+    }
+  }
+  if (vault_type == EncryptedContainerType::kFscrypt && options.migrate) {
+    vault_type = EncryptedContainerType::kFscryptToDmcrypt;
+  }
+
+  if (vault_type == EncryptedContainerType::kEcryptfs &&
+      options.block_ecryptfs) {
+    return StorageStatus::Make(FROM_HERE,
+                               "Mount attempt with block_ecryptfs on eCryptfs.",
+                               MOUNT_ERROR_OLD_ENCRYPTION);
+  }
+
+  if (EncryptedContainer::IsMigratingType(vault_type) && !options.migrate) {
+    return StorageStatus::Make(
+        FROM_HERE,
+        "Mount failed because both eCryptfs and dircrypto home"
+        " directories were found. Need to resume and finish"
+        " migration first.",
+        MOUNT_ERROR_PREVIOUS_MIGRATION_INCOMPLETE);
+  }
+
+  if (!EncryptedContainer::IsMigratingType(vault_type) && options.migrate) {
+    return StorageStatus::Make(
+        FROM_HERE, "Mount attempt with migration on non-eCryptfs mount",
+        MOUNT_ERROR_UNEXPECTED_MOUNT_TYPE);
+  }
+
+  // Vault exists, so we return its type.
+  if (vault_type != EncryptedContainerType::kUnknown) {
+    return vault_type;
   }
 
   if (options.migrate) {
-    return CreateMigratingVault(obfuscated_username, key_reference, options,
-                                mount_error);
+    return StorageStatus::Make(
+        FROM_HERE, "Can not set up migration for a non-existing vault.",
+        MOUNT_ERROR_UNEXPECTED_MOUNT_TYPE);
   }
 
-  return CreateNonMigratingVault(obfuscated_username, key_reference, options,
-                                 mount_error);
+  if (options.block_ecryptfs) {
+    LOG(WARNING) << "Ecryptfs mount block flag has no effect for new vaults.";
+  }
+
+  // If there is no existing vault, see if we are asked for a specific type.
+  // Otherwise choose the best type based on configuration.
+  return options.force_type != EncryptedContainerType::kUnknown
+             ? options.force_type
+             : ChooseVaultType();
 }
 
-bool HomeDirs::GetPlainOwner(std::string* owner) {
+void HomeDirs::CreateAndSetDeviceManagementClientProxy(
+    scoped_refptr<dbus::Bus> bus) {
+  default_device_management_client_ =
+      std::make_unique<DeviceManagementClientProxy>(bus);
+  device_management_client_ = default_device_management_client_.get();
+}
+
+bool HomeDirs::GetPlainOwner(Username* owner) {
   LoadDevicePolicy();
   if (!policy_provider_->device_policy_is_loaded())
     return false;
-  policy_provider_->GetDevicePolicy().GetOwner(owner);
+  std::string owner_str;
+  policy_provider_->GetDevicePolicy().GetOwner(&owner_str);
+  *owner = Username(owner_str);
   return true;
 }
 
-bool HomeDirs::GetOwner(std::string* owner) {
-  std::string plain_owner;
-  if (!GetPlainOwner(&plain_owner) || plain_owner.empty())
+bool HomeDirs::GetOwner(ObfuscatedUsername* owner) {
+  Username plain_owner;
+  if (!GetPlainOwner(&plain_owner) || plain_owner->empty())
     return false;
 
-  *owner = SanitizeUserNameWithSalt(plain_owner, system_salt_);
+  *owner = SanitizeUserName(plain_owner);
   return true;
 }
 
-bool HomeDirs::IsOrWillBeOwner(const std::string& account_id) {
-  std::string owner;
+bool HomeDirs::IsOrWillBeOwner(const Username& account_id) {
+  Username owner;
   GetPlainOwner(&owner);
-  return !enterprise_owned_ && (owner.empty() || account_id == owner);
+  return !enterprise_owned() && (owner->empty() || account_id == owner);
 }
 
-bool HomeDirs::GetSystemSalt(SecureBlob* blob) {
-  *blob = system_salt_;
-  return true;
-}
-
-bool HomeDirs::Create(const std::string& username) {
+bool HomeDirs::Create(const Username& username) {
   brillo::ScopedUmask scoped_umask(kDefaultUmask);
-  std::string obfuscated_username =
-      SanitizeUserNameWithSalt(username, system_salt_);
+  ObfuscatedUsername obfuscated_username = SanitizeUserName(username);
 
   // Create the user's entry in the shadow root
-  FilePath user_dir = ShadowRoot().Append(obfuscated_username);
+  FilePath user_dir = UserPath(obfuscated_username);
   if (!platform_->CreateDirectory(user_dir)) {
     return false;
   }
@@ -501,20 +490,25 @@ bool HomeDirs::Create(const std::string& username) {
   return true;
 }
 
-bool HomeDirs::Remove(const std::string& obfuscated) {
+bool HomeDirs::Remove(const ObfuscatedUsername& obfuscated) {
   remove_callback_.Run(obfuscated);
-  FilePath user_dir = ShadowRoot().Append(obfuscated);
+  FilePath user_dir = UserPath(obfuscated);
   FilePath user_path =
-      brillo::cryptohome::home::GetUserPathPrefix().Append(obfuscated);
+      brillo::cryptohome::home::GetUserPathPrefix().Append(*obfuscated);
   FilePath root_path =
-      brillo::cryptohome::home::GetRootPathPrefix().Append(obfuscated);
+      brillo::cryptohome::home::GetRootPathPrefix().Append(*obfuscated);
+
+  if (platform_->IsDirectoryMounted(user_path) ||
+      platform_->IsDirectoryMounted(root_path)) {
+    LOG(ERROR) << "Can't remove mounted vault";
+    return false;
+  }
 
   bool ret = true;
 
   if (DmcryptCryptohomeExists(obfuscated)) {
     auto vault = vault_factory_->Generate(obfuscated, FileSystemKeyReference(),
-                                          EncryptedContainerType::kDmcrypt,
-                                          EncryptedContainerType::kUnknown);
+                                          EncryptedContainerType::kDmcrypt);
     ret = vault->Purge();
   }
 
@@ -523,112 +517,25 @@ bool HomeDirs::Remove(const std::string& obfuscated) {
          platform_->DeletePathRecursively(root_path);
 }
 
-bool HomeDirs::Rename(const std::string& account_id_from,
-                      const std::string& account_id_to) {
-  if (account_id_from == account_id_to) {
-    return true;
-  }
-
-  const std::string obfuscated_from =
-      SanitizeUserNameWithSalt(account_id_from, system_salt_);
-  const std::string obfuscated_to =
-      SanitizeUserNameWithSalt(account_id_to, system_salt_);
-
-  const FilePath user_dir_from = ShadowRoot().Append(obfuscated_from);
-  const FilePath user_path_from =
-      brillo::cryptohome::home::GetUserPath(account_id_from);
-  const FilePath root_path_from =
-      brillo::cryptohome::home::GetRootPath(account_id_from);
-  const FilePath new_user_path_from =
-      FilePath(MountHelper::GetNewUserPath(account_id_from));
-
-  const FilePath user_dir_to = ShadowRoot().Append(obfuscated_to);
-  const FilePath user_path_to =
-      brillo::cryptohome::home::GetUserPath(account_id_to);
-  const FilePath root_path_to =
-      brillo::cryptohome::home::GetRootPath(account_id_to);
-  const FilePath new_user_path_to =
-      FilePath(MountHelper::GetNewUserPath(account_id_to));
-
-  LOG(INFO) << "HomeDirs::Rename(from='" << account_id_from << "', to='"
-            << account_id_to << "'):"
-            << " renaming '" << user_dir_from.value() << "' "
-            << "(exists=" << platform_->DirectoryExists(user_dir_from) << ") "
-            << "=> '" << user_dir_to.value() << "' "
-            << "(exists=" << platform_->DirectoryExists(user_dir_to) << "); "
-            << "renaming '" << user_path_from.value() << "' "
-            << "(exists=" << platform_->DirectoryExists(user_path_from) << ") "
-            << "=> '" << user_path_to.value() << "' "
-            << "(exists=" << platform_->DirectoryExists(user_path_to) << "); "
-            << "renaming '" << root_path_from.value() << "' "
-            << "(exists=" << platform_->DirectoryExists(root_path_from) << ") "
-            << "=> '" << root_path_to.value() << "' "
-            << "(exists=" << platform_->DirectoryExists(root_path_to) << "); "
-            << "renaming '" << new_user_path_from.value() << "' "
-            << "(exists=" << platform_->DirectoryExists(new_user_path_from)
-            << ") "
-            << "=> '" << new_user_path_to.value() << "' "
-            << "(exists=" << platform_->DirectoryExists(new_user_path_to)
-            << ")";
-
-  const bool already_renamed = !platform_->DirectoryExists(user_dir_from);
-
-  if (already_renamed) {
-    LOG(INFO) << "HomeDirs::Rename(from='" << account_id_from << "', to='"
-              << account_id_to << "'): Consider already renamed. "
-              << "('" << user_dir_from.value() << "' doesn't exist.)";
-    return true;
-  }
-
-  const bool can_rename = !platform_->DirectoryExists(user_dir_to);
-
-  if (!can_rename) {
-    LOG(ERROR) << "HomeDirs::Rename(from='" << account_id_from << "', to='"
-               << account_id_to << "'): Destination already exists! "
-               << " '" << user_dir_from.value() << "' "
-               << "(exists=" << platform_->DirectoryExists(user_dir_from)
-               << ") "
-               << "=> '" << user_dir_to.value() << "' "
-               << "(exists=" << platform_->DirectoryExists(user_dir_to)
-               << "); ";
+bool HomeDirs::RemoveDmcryptCacheContainer(
+    const ObfuscatedUsername& obfuscated) {
+  if (!DmcryptCacheContainerExists(obfuscated))
     return false;
-  }
 
-  // |user_dir_renamed| is return value, because three other directories are
-  // empty and will be created as needed.
-  const bool user_dir_renamed = !platform_->DirectoryExists(user_dir_from) ||
-                                platform_->Rename(user_dir_from, user_dir_to);
+  auto vault = vault_factory_->Generate(obfuscated, FileSystemKeyReference(),
+                                        EncryptedContainerType::kDmcrypt);
+  if (!vault)
+    return false;
 
-  if (user_dir_renamed) {
-    const bool user_path_deleted =
-        platform_->DeletePathRecursively(user_path_from);
-    const bool root_path_deleted =
-        platform_->DeletePathRecursively(root_path_from);
-    const bool new_user_path_deleted =
-        platform_->DeletePathRecursively(new_user_path_from);
-    if (!user_path_deleted) {
-      LOG(WARNING) << "HomeDirs::Rename(from='" << account_id_from << "', to='"
-                   << account_id_to << "'): failed to delete user_path.";
-    }
-    if (!root_path_deleted) {
-      LOG(WARNING) << "HomeDirs::Rename(from='" << account_id_from << "', to='"
-                   << account_id_to << "'): failed to delete root_path.";
-    }
-    if (!new_user_path_deleted) {
-      LOG(WARNING) << "HomeDirs::Rename(from='" << account_id_from << "', to='"
-                   << account_id_to << "'): failed to delete new_user_path.";
-    }
-  } else {
-    LOG(ERROR) << "HomeDirs::Rename(from='" << account_id_from << "', to='"
-               << account_id_to << "'): failed to rename user_dir.";
-  }
+  if (vault->GetCacheContainerType() != EncryptedContainerType::kDmcrypt)
+    return false;
 
-  return user_dir_renamed;
+  return vault->PurgeCacheContainer();
 }
 
-int64_t HomeDirs::ComputeDiskUsage(const std::string& account_id) {
+int64_t HomeDirs::ComputeDiskUsage(const Username& account_id) {
   // SanitizeUserNameWithSalt below doesn't accept empty username.
-  if (account_id.empty()) {
+  if (account_id->empty()) {
     // Empty account is always non-existent, return 0 as specified.
     return 0;
   }
@@ -636,8 +543,8 @@ int64_t HomeDirs::ComputeDiskUsage(const std::string& account_id) {
   // Note that for ephemeral mounts, there could be a vault that's not
   // ephemeral, but the current mount is ephemeral. In this case,
   // ComputeDiskUsage() return the non ephemeral on disk vault's size.
-  std::string obfuscated = SanitizeUserNameWithSalt(account_id, system_salt_);
-  FilePath user_dir = ShadowRoot().Append(obfuscated);
+  ObfuscatedUsername obfuscated = SanitizeUserName(account_id);
+  FilePath user_dir = UserPath(obfuscated);
 
   int64_t size = 0;
   if (!platform_->DirectoryExists(user_dir)) {
@@ -674,12 +581,12 @@ namespace {
 const char* kChapsDaemonName = "chaps";
 }  // namespace
 
-FilePath HomeDirs::GetChapsTokenDir(const std::string& user) const {
+FilePath HomeDirs::GetChapsTokenDir(const Username& user) const {
   return brillo::cryptohome::home::GetDaemonStorePath(user, kChapsDaemonName);
 }
 
 bool HomeDirs::NeedsDircryptoMigration(
-    const std::string& obfuscated_username) const {
+    const ObfuscatedUsername& obfuscated_username) const {
   // Bail if dircrypto is not supported.
   const dircrypto::KeyState state =
       platform_->GetDirCryptoKeyState(ShadowRoot());
@@ -692,7 +599,7 @@ bool HomeDirs::NeedsDircryptoMigration(
   // dircrypto migration. eCryptfs test is adapted from
   // Mount::DoesEcryptfsCryptohomeExist.
   const FilePath user_ecryptfs_vault_dir =
-      ShadowRoot().Append(obfuscated_username).Append(kEcryptfsVaultDir);
+      UserPath(obfuscated_username).Append(kEcryptfsVaultDir);
   return platform_->DirectoryExists(user_ecryptfs_vault_dir);
 }
 
@@ -700,14 +607,14 @@ int32_t HomeDirs::GetUnmountedAndroidDataCount() {
   const auto homedirs = GetHomeDirs();
 
   return std::count_if(
-      homedirs.begin(), homedirs.end(), [&](const HomeDirs::HomeDir& dir) {
+      homedirs.begin(), homedirs.end(), [this](const HomeDirs::HomeDir& dir) {
         if (dir.is_mounted)
           return false;
 
         if (EcryptfsCryptohomeExists(dir.obfuscated))
           return false;
 
-        FilePath shadow_dir = ShadowRoot().Append(dir.obfuscated);
+        FilePath shadow_dir = UserPath(dir.obfuscated);
         FilePath root_home_dir;
         return GetTrackedDirectory(shadow_dir, FilePath(kRootHomeSuffix),
                                    &root_home_dir) &&
@@ -750,6 +657,18 @@ bool HomeDirs::IsOwnedByAndroidSystem(const base::FilePath& directory) const {
     return false;
   }
   return uid == kAndroidSystemUid + kArcContainerShiftUid;
+}
+
+bool HomeDirs::IsAesKeylockerSupported() {
+  // Perform the check only if there's no cached result yet.
+  if (!is_aes_keylocker_supported_.has_value()) {
+    std::string proc_crypto_contents;
+    is_aes_keylocker_supported_ =
+        platform_->ReadFileToString(base::FilePath("/proc/crypto"),
+                                    &proc_crypto_contents) &&
+        proc_crypto_contents.find("aeskl") != std::string::npos;
+  }
+  return is_aes_keylocker_supported_.value();
 }
 
 }  // namespace cryptohome

@@ -1,9 +1,9 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // This file is meant for debugging use to manually trigger a proper
-// suspend, excercising the full path through the power manager.
+// suspend, exercising the full path through the power manager.
 // The actual work to suspend the system is done by powerd_suspend.
 // This tool will block and only exit after it has received a D-Bus
 // resume signal from powerd.
@@ -13,17 +13,17 @@
 #include <memory>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/command_line.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/message_loop/message_pump_type.h>
 #include <base/run_loop.h>
 #include <base/strings/string_number_conversions.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <base/task/single_thread_task_executor.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/time/time.h>
 #include <brillo/flag_helper.h>
 #include <brillo/file_utils.h>
@@ -70,6 +70,12 @@ void OnSuspendDone(base::RunLoop* run_loop,
     LOG(INFO) << "Wakeup type: " << WakeupTypeToString(info.wakeup_type());
   }
 
+  run_loop->Quit();
+}
+
+// Exits when powerd announces that the hibernate resume preparation is
+// complete.
+void OnHibernateResumeReady(base::RunLoop* run_loop, dbus::Signal* signal) {
   run_loop->Quit();
 }
 
@@ -203,8 +209,14 @@ int main(int argc, char* argv[]) {
   base::RunLoop run_loop;
   powerd_proxy->ConnectToSignal(
       power_manager::kPowerManagerInterface, power_manager::kSuspendDoneSignal,
-      base::Bind(&OnSuspendDone, &run_loop, FLAGS_print_wakeup_type),
-      base::Bind(&OnDBusSignalConnected));
+      base::BindRepeating(&OnSuspendDone, &run_loop, FLAGS_print_wakeup_type),
+      base::BindOnce(&OnDBusSignalConnected));
+
+  powerd_proxy->ConnectToSignal(
+      power_manager::kPowerManagerInterface,
+      power_manager::kHibernateResumeReadySignal,
+      base::BindRepeating(&OnHibernateResumeReady, &run_loop),
+      base::BindOnce(&OnDBusSignalConnected));
 
   // Send a suspend request.
   dbus::MethodCall method_call(power_manager::kPowerManagerInterface,
@@ -225,18 +237,39 @@ int main(int argc, char* argv[]) {
     dbus::MessageWriter writer(&method_call);
     writer.AppendUint32(FLAGS_flavor);
   }
-  std::unique_ptr<dbus::Response> response(powerd_proxy->CallMethodAndBlock(
-      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT));
-  CHECK(response) << power_manager::kRequestSuspendMethod << " failed";
+
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response(
+      powerd_proxy->CallMethodAndBlock(&method_call,
+                                       dbus::ObjectProxy::TIMEOUT_USE_DEFAULT));
+  CHECK(response.has_value() && response.value())
+      << power_manager::kRequestSuspendMethod << " failed";
 
   // Schedule a task to fire after the timeout.
   if (FLAGS_timeout) {
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
-        FROM_HERE, base::Bind(&OnTimeout),
-        base::TimeDelta::FromSeconds(FLAGS_timeout));
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, base::BindOnce(&OnTimeout), base::Seconds(FLAGS_timeout));
   }
 
   run_loop.Run();
+
+  if (FLAGS_suspend_for_sec != 0) {
+    dbus::MethodCall method_call2(power_manager::kPowerManagerInterface,
+                                  power_manager::kGetLastWakealarmMethod);
+    base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response2(
+        powerd_proxy->CallMethodAndBlock(
+            &method_call2, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT));
+    CHECK(response2.has_value() && response2.value())
+        << power_manager::kGetLastWakealarmMethod << " failed";
+
+    dbus::MessageReader reader2(response2.value().get());
+    uint64_t wakealarm_time;
+    if (!reader2.PopUint64(&wakealarm_time)) {
+      LOG(ERROR) << "Unable to get wakealarm time";
+      exit(1);
+    } else {
+      std::cout << "rtc wakealarm: " << wakealarm_time << std::endl;
+    }
+  }
 
   return 0;
 }

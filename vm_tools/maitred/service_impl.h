@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,11 @@
 #include <string>
 #include <utility>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include "base/files/file_path.h"
+#include <base/functional/callback.h>
+#include "brillo/storage_balloon.h"
+#include <dbus/bus.h>
+#include <dbus/object_proxy.h>
 #include <grpcpp/grpcpp.h>
 #include <vm_protos/proto_bindings/vm_guest.grpc.pb.h>
 
@@ -23,17 +26,25 @@ namespace maitred {
 // Actually implements the maitred service.
 class ServiceImpl final : public vm_tools::Maitred::Service {
  public:
-  explicit ServiceImpl(std::unique_ptr<Init> init);
+  explicit ServiceImpl(std::unique_ptr<Init> init, bool maitred_is_pid1);
   ServiceImpl(const ServiceImpl&) = delete;
   ServiceImpl& operator=(const ServiceImpl&) = delete;
 
   ~ServiceImpl() override = default;
 
   // Initializes ServiceImpl for first use.
-  bool Init();
+  bool Init(scoped_refptr<base::SequencedTaskRunner> dbus_task_runner);
 
-  void set_shutdown_cb(base::Callback<bool(void)> cb) {
+  void set_shutdown_cb(base::OnceCallback<bool(void)> cb) {
     shutdown_cb_ = std::move(cb);
+  }
+
+  void set_localtime_file_path_for_test(const base::FilePath& dir) {
+    localtime_file_path_ = dir;
+  }
+
+  void set_zoneinfo_file_path_for_test(const base::FilePath& dir) {
+    zoneinfo_file_path_ = dir;
   }
 
   // Maitred::Service overrides.
@@ -81,6 +92,10 @@ class ServiceImpl final : public vm_tools::Maitred::Service {
                        const vm_tools::SetTimeRequest* request,
                        vm_tools::EmptyMessage* response) override;
 
+  grpc::Status SetTimezone(grpc::ServerContext* ctx,
+                           const vm_tools::SetTimezoneRequest* request,
+                           vm_tools::EmptyMessage* response) override;
+
   grpc::Status GetKernelVersion(
       grpc::ServerContext* ctx,
       const vm_tools::EmptyMessage* request,
@@ -110,12 +125,21 @@ class ServiceImpl final : public vm_tools::Maitred::Service {
                                 const EmptyMessage* request,
                                 EmptyMessage* response) override;
 
+  // TODO(b/241185611): Remove this grpc when we put ballooning into its own
+  // service.
+  grpc::Status UpdateStorageBalloon(
+      grpc::ServerContext* ctx,
+      const vm_tools::UpdateStorageBalloonRequest* request,
+      vm_tools::UpdateStorageBalloonResponse* response) override;
+
  private:
+  bool maitred_is_pid1_;
+
   std::unique_ptr<vm_tools::maitred::Init> init_;
 
   // Callback used for shutting down the gRPC server.  Called when handling a
   // Shutdown RPC.
-  base::Callback<bool(void)> shutdown_cb_;
+  base::OnceCallback<bool(void)> shutdown_cb_;
 
   // Flags to configure LXD functionality. Configuration happens statically in
   // the constructor as well as at runtime in the |StartTermina| function.
@@ -134,6 +158,19 @@ class ServiceImpl final : public vm_tools::Maitred::Service {
 
   // Name of the stateful device (e.g. /dev/vdb) as determined by StartTermina.
   std::string stateful_device_;
+
+  // Set timezone according to different implementations.
+  grpc::Status SetTimezoneSymlink(const std::string& zoneinfo_file);
+  grpc::Status SetTimezoneBindMount(const std::string& zoneinfo_file);
+  // Path to system localtime file
+  base::FilePath localtime_file_path_;
+  // Path to zoneinfo directory
+  base::FilePath zoneinfo_file_path_;
+
+  std::unique_ptr<brillo::StorageBalloon> balloon_;
+
+  scoped_refptr<dbus::Bus> bus_;
+  dbus::ObjectProxy* logind_service_proxy_;
 };
 
 }  // namespace maitred

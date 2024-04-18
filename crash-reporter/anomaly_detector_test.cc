@@ -1,33 +1,43 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/anomaly_detector.h"
 
+#include <memory>
+#include <utility>
+#include <vector>
+
 #include <base/files/file_path.h>
-#include <base/optional.h>
+#include <base/strings/stringprintf.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
 #include <dbus/mock_bus.h>
 #include <dbus/mock_exported_object.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library_mock.h>
 
 #include "crash-reporter/anomaly_detector_test_utils.h"
+#include "crash-reporter/util.h"
 
 namespace {
 
 using ::testing::_;
 using ::testing::Eq;
 using ::testing::IsEmpty;
+using ::testing::NiceMock;
 using ::testing::Return;
 
 using ::anomaly::CryptohomeParser;
+using ::anomaly::HermesParser;
 using ::anomaly::KernelParser;
+using ::anomaly::ModemfwdParser;
 using ::anomaly::ParserRun;
 using ::anomaly::ParserTest;
 using ::anomaly::SELinuxParser;
 using ::anomaly::ServiceParser;
+using ::anomaly::ShillParser;
 using ::anomaly::SuspendParser;
 using ::anomaly::TcsdParser;
 using ::anomaly::TerminaParser;
@@ -122,6 +132,69 @@ TEST(AnomalyDetectorTest, KernelAth10kErrorNoEnd) {
       .expected_flags = {{"--kernel_ath10k_error", "--weight=50"}}};
   KernelParser parser(true);
   ParserTest("TEST_ATH10K_NO_END", {wifi_error}, &parser);
+}
+
+TEST(AnomalyDetectorTest, KernelAth11kError) {
+  ParserRun wifi_error = {
+      .expected_text =
+          "[   88.311695] ath11k_pci 0000:01:00.0: firmware crashed:"
+          " MHI_CB_EE_RDDM\n"
+          "[   88.324206] ieee80211 phy0: Hardware restart was requested\n"
+          "[   88.655410] mhi mhi0: Requested to power ON\n"
+          "[   88.655549] mhi mhi0: Power on setup success\n"
+          "[   89.006232] mhi mhi0: Wait for device to enter SBL"
+          " or Mission mode\n"
+          "[   89.636634] ath11k_pci 0000:01:00.0: chip_id "
+          "0x12 chip_family 0xb board_id 0xff soc_id 0x400c1211\n"
+          "[   89.636640] ath11k_pci 0000:01:00.0: fw_version 0x110b196e"
+          " fw_build_timestamp 2022-12-22 12:54 fw_build_id "
+          "QC_IMAGE_VERSION_STRING=WLAN.HSP.1.1-03125-"
+          "QCAHSPSWPL_V1_V2_SILICONZ_LITE-3.6510.23\n",
+      .expected_flags = {{"--kernel_ath11k_error", "--weight=50"}}};
+  KernelParser parser(true);
+  ParserTest("TEST_ATH11K", {wifi_error}, &parser);
+}
+
+TEST(AnomalyDetectorTest, KernelAth11WrongTag) {
+  ParserRun wifi_error = {
+      .expected_text =
+          "[   72.930992] ath11k_pci 0000:01:00.0: firmware crashed: "
+          "MHI_CB_EE_RDDM\n"
+          "[   72.940206] ieee80211 phy0: Hardware restart was requested\n"
+          "[   73.272757] mhi mhi0: Requested to power ON\n"
+          "[   73.272872] mhi mhi0: Power on setup success\n"
+          "[   73.624227] mhi mhi0: Wait for device to enter SBL or Mission "
+          "mode\n"
+          "[   74.255350] ath11k_pci 0000:01:00.0: chip_id 0x12 chip_family "
+          "0xb board_id 0xff soc_id 0x400c1211\n",
+      .expected_flags = {{"--kernel_ath11k_error", "--weight=50"}}};
+  KernelParser parser(true);
+  ParserTest("TEST_ATH11K_WRONG_TAG", {wifi_error}, &parser);
+}
+
+TEST(AnomalyDetectorTest, KernelAth11ErrorNoEnd) {
+  ParserRun wifi_error = {
+      .expected_text =
+          "[   88.311695] ath11k_pci 0000:01:00.0: firmware crashed:"
+          " MHI_CB_EE_RDDM\n"
+          "[   88.324206] ieee80211 phy0: Hardware restart was requested\n"
+          "[   88.655410] mhi mhi0: Requested to power ON\n"
+          "[   88.655549] mhi mhi0: Power on setup success\n"
+          "[   89.006232] mhi mhi0: Wait for device to enter SBL"
+          " or Mission mode\n"
+          "[   89.636634] ath11k_pci 0000:01:00.0: chip_id "
+          "0x12 chip_family 0xb board_id 0xff soc_id 0x400c1211\n"
+          "[   89.674574] ath11k_pci 0000:01:00.0: "
+          "Last interrupt received for each CE:\n"
+          "[   89.674580] ath11k_pci 0000:01:00.0: "
+          "CE_id 0 pipe_num 0 76901ms before\n"
+          "[   89.674582] ath11k_pci 0000:01:00.0: "
+          "CE_id 1 pipe_num 1 76661ms before\n"
+          "[   89.674583] ath11k_pci 0000:01:00.0: "
+          "CE_id 2 pipe_num 2 1781ms before\n",
+      .expected_flags = {{"--kernel_ath11k_error", "--weight=50"}}};
+  KernelParser parser(true);
+  ParserTest("TEST_ATH11K_NO_END", {wifi_error}, &parser);
 }
 
 TEST(AnomalyDetectorTest, KernelIwlwifiErrorLmacUmac) {
@@ -242,6 +315,7 @@ TEST(AnomalyDetectorTest, KernelIwlwifiErrorLmacTwoSpace) {
 TEST(AnomalyDetectorTest, KernelIwlwifiDriverError) {
   ParserRun wifi_error = {
       .expected_text =
+          "2020-09-01T11:03:11.221374-07:00 ERR kernel: [ 2448.183332] iwlwifi "
           "0000:01:00.0: Loaded firmware version: 17.bfb58538.0 7260-17.ucode\n"
           "2020-09-01T11:03:11.221401-07:00 ERR kernel: [ 2448.183344] iwlwifi "
           "0000:01:00.0: 0x00000000 | ADVANCED_SYSASSERT\n"
@@ -375,11 +449,11 @@ TEST(AnomalyDetectorTest, KernelSMMU_FAULT) {
 }
 
 TEST(AnomalyDetectorTest, KernelWarning) {
-  ParserRun second{
-      .find_this = "ttm_bo_vm.c",
-      .replace_with = "file_one.c",
-      .expected_text = "0x19e/0x1ab [ttm]()\n[ 3955.309298] Modules linked in",
-      .expected_flags = {{"--kernel_warning", "--weight=10"}}};
+  ParserRun second{.find_this = "ttm_bo_vm.c",
+                   .replace_with = "file_one.c",
+                   .expected_substr =
+                       "0x19e/0x1ab [ttm]()\n[ 3955.309298] Modules linked in",
+                   .expected_flags = {{"--kernel_warning", "--weight=10"}}};
   KernelParser parser(true);
   ParserTest("TEST_WARNING", {simple_run, second}, &parser);
 }
@@ -391,7 +465,8 @@ TEST(AnomalyDetectorTest, KernelWarningNoDuplicate) {
 }
 
 TEST(AnomalyDetectorTest, KernelWarningHeader) {
-  ParserRun warning_message{.expected_text = "Test Warning message asdfghjkl"};
+  ParserRun warning_message{.expected_substr =
+                                "Test Warning message asdfghjkl"};
   KernelParser parser(true);
   ParserTest("TEST_WARNING_HEADER", {warning_message}, &parser);
 }
@@ -402,7 +477,7 @@ TEST(AnomalyDetectorTest, KernelWarningOld) {
 }
 
 TEST(AnomalyDetectorTest, KernelWarningOldARM64) {
-  ParserRun unknown_function{.expected_text = "-unknown-function\n"};
+  ParserRun unknown_function{.expected_substr = "-unknown-function\n"};
   KernelParser parser(true);
   ParserTest("TEST_WARNING_OLD_ARM64", {unknown_function}, &parser);
 }
@@ -423,10 +498,19 @@ TEST(AnomalyDetectorTest, KernelWarningWifiMac80211) {
   ParserTest("TEST_WIFI_WARNING", {wifi_warning}, &parser);
 }
 
-TEST(AnomalyDetectorTest, KernelWarningSuspend) {
+TEST(AnomalyDetectorTest, KernelWarningSuspend_v4_14) {
   ParserRun suspend_warning = {
       .find_this = "gpu/drm/ttm",
       .replace_with = "idle",
+      .expected_flags = {{"--kernel_suspend_warning", "--weight=10"}}};
+  KernelParser parser(true);
+  ParserTest("TEST_WARNING", {suspend_warning}, &parser);
+}
+
+TEST(AnomalyDetectorTest, KernelWarningSuspend_EC) {
+  ParserRun suspend_warning = {
+      .find_this = "gpu/drm/ttm/ttm_bo_vm.c",
+      .replace_with = "platform/chrome/cros_ec.c",
       .expected_flags = {{"--kernel_suspend_warning", "--weight=10"}}};
   KernelParser parser(true);
   ParserTest("TEST_WARNING", {suspend_warning}, &parser);
@@ -447,7 +531,7 @@ TEST(AnomalyDetectorTest, CrashReporterCrashRateLimit) {
 }
 
 TEST(AnomalyDetectorTest, ServiceFailure) {
-  ParserRun one{.expected_text = "-exit2-"};
+  ParserRun one{.expected_substr = "-exit2-"};
   ParserRun two{.find_this = "crash-crash", .replace_with = "fresh-fresh"};
   ServiceParser parser(true);
   ParserTest("TEST_SERVICE_FAILURE", {one, two}, &parser);
@@ -457,7 +541,7 @@ TEST(AnomalyDetectorTest, ServiceFailureArc) {
   ParserRun service_failure = {
       .find_this = "crash-crash",
       .replace_with = "arc-crash",
-      .expected_text = "-exit2-arc-",
+      .expected_substr = "-exit2-arc-",
       .expected_flags = {{"--arc_service_failure=arc-crash"}}};
   ServiceParser parser(true);
   ParserTest("TEST_SERVICE_FAILURE", {service_failure}, &parser);
@@ -473,9 +557,9 @@ TEST(AnomalyDetectorTest, ServiceFailureCamera) {
 
 TEST(AnomalyDetectorTest, SELinuxViolation) {
   ParserRun selinux_violation = {
-      .expected_text =
+      .expected_substr =
           "-selinux-u:r:cros_init:s0-u:r:kernel:s0-module_request-init-",
-      .expected_flags = {{"--selinux_violation"}}};
+      .expected_flags = {{"--selinux_violation", "--weight=100"}}};
   SELinuxParser parser(true);
   ParserTest("TEST_SELINUX", {selinux_violation}, &parser);
 }
@@ -488,6 +572,20 @@ TEST(AnomalyDetectorTest, SELinuxViolationPermissive) {
   ParserTest("TEST_SELINUX", {selinux_violation}, &parser);
 }
 
+TEST(AnomalyDetectorTest, KernelWarningSuspend_v4_19_up) {
+  ParserRun suspend_warning = {
+      .expected_flags = {{"--kernel_suspend_warning", "--weight=10"}}};
+  KernelParser parser(true);
+  ParserTest("TEST_SUSPEND_WARNING_LOWERCASE", {suspend_warning}, &parser);
+}
+
+TEST(AnomalyDetectorTest, KernelWarningSuspendNoDuplicate_v4_19_up) {
+  ParserRun identical_warning{.expected_size = 0};
+  KernelParser parser(true);
+  ParserTest("TEST_SUSPEND_WARNING_LOWERCASE", {simple_run, identical_warning},
+             &parser);
+}
+
 // Verify that we skip non-CrOS selinux violations
 TEST(AnomalyDetectorTest, SELinuxViolationNonCros) {
   ParserRun selinux_violation = {
@@ -498,7 +596,7 @@ TEST(AnomalyDetectorTest, SELinuxViolationNonCros) {
 
 TEST(AnomalyDetectorTest, SuspendFailure) {
   ParserRun suspend_failure = {
-      .expected_text =
+      .expected_substr =
           "-suspend failure: device: dummy_dev step: suspend errno: -22",
       .expected_flags = {{"--suspend_failure"}}};
   SuspendParser parser(true);
@@ -526,9 +624,12 @@ TEST(AnomalyDetectorTest, BTRFSExtentCorruption) {
                   anomaly_detector::kAnomalyGuestFileCorruptionSignalName)))
       .Times(1);
 
-  TerminaParser parser(bus);
+  auto metrics = std::make_unique<NiceMock<MetricsLibraryMock>>();
+  EXPECT_CALL(*metrics, SendCrosEventToUMA(_)).Times(0);
 
-  parser.ParseLogEntry(
+  TerminaParser parser(bus, std::move(metrics), /*testonly_send_all=*/true);
+
+  parser.ParseLogEntryForBtrfs(
       3,
       "BTRFS warning (device vdb): csum failed root 5 ino 257 off 409600 csum "
       "0x76ad9387 expected csum 0xd8d34542 mirror 1");
@@ -544,41 +645,126 @@ TEST(AnomalyDetectorTest, BTRFSTreeCorruption) {
       new dbus::MockExportedObject(bus.get(), obj_path);
 
   EXPECT_CALL(*bus, GetExportedObject(Eq(obj_path)))
-      .WillOnce(Return(exported_object.get()));
+      .Times(3)
+      .WillRepeatedly(Return(exported_object.get()));
   EXPECT_CALL(*exported_object,
               SendSignal(SignalEq(
                   anomaly_detector::kAnomalyEventServiceInterface,
                   anomaly_detector::kAnomalyGuestFileCorruptionSignalName)))
+      .Times(3);
+
+  auto metrics = std::make_unique<NiceMock<MetricsLibraryMock>>();
+  EXPECT_CALL(*metrics, SendCrosEventToUMA(_)).Times(0);
+
+  TerminaParser parser(bus, std::move(metrics), /*testonly_send_all=*/true);
+
+  // prior to 5.14
+  parser.ParseLogEntryForBtrfs(
+      3,
+      "BTRFS warning (device vdb): vdb checksum verify failed "
+      "on 122798080 wanted 4E5B4C99 found 5F261FEB level 0");
+
+  // since 5.14
+  parser.ParseLogEntryForBtrfs(
+      3,
+      "BTRFS warning (device vdb): checksum verify failed "
+      "on 122798080 wanted 4E5B4C99 found 5F261FEB level 0");
+
+  // since 6.0
+  parser.ParseLogEntryForBtrfs(
+      3,
+      "BTRFS warning (device vdb): checksum verify failed "
+      "on logical 122077184 mirror 1 wanted 0xd3d7da82 found 0x9ad50d66 "
+      "level 0");
+}
+
+TEST(AnomalyDetectorTest, OomEvent) {
+  dbus::Bus::Options options;
+  options.bus_type = dbus::Bus::SYSTEM;
+  scoped_refptr<dbus::MockBus> bus = new dbus::MockBus(options);
+
+  auto obj_path = dbus::ObjectPath(anomaly_detector::kAnomalyEventServicePath);
+  scoped_refptr<dbus::MockExportedObject> exported_object =
+      new dbus::MockExportedObject(bus.get(), obj_path);
+
+  EXPECT_CALL(*bus, GetExportedObject(Eq(obj_path)))
+      .WillOnce(Return(exported_object.get()));
+  EXPECT_CALL(
+      *exported_object,
+      SendSignal(SignalEq(anomaly_detector::kAnomalyEventServiceInterface,
+                          anomaly_detector::kAnomalyGuestOomEventSignalName)))
       .Times(1);
 
-  TerminaParser parser(bus);
+  auto metrics = std::make_unique<NiceMock<MetricsLibraryMock>>();
+  EXPECT_CALL(*metrics, SendCrosEventToUMA("Crostini.OomEvent"))
+      .WillOnce(Return(true));
 
-  parser.ParseLogEntry(3,
-                       "BTRFS warning (device vdb): vdb checksum verify failed "
-                       "on 122798080 wanted 4E5B4C99 found 5F261FEB level 0");
+  TerminaParser parser(bus, std::move(metrics), /*testonly_send_all=*/true);
+
+  std::string oom_log =
+      "Out of memory: Killed process 293 (python 3.6) total-vm:15633956kB, "
+      "anon-rss:14596640kB, file-rss:4kB, shmem-rss:0kB, UID:0 "
+      "pgtables:28628kB "
+      "oom_score_adj:0";
+
+  auto crash_report = parser.ParseLogEntryForOom(3, oom_log);
+
+  EXPECT_THAT(crash_report->text,
+              testing::HasSubstr("guest-oom-event-python_3_6"));
+  EXPECT_THAT(crash_report->text, testing::HasSubstr(oom_log));
+
+  std::vector<std::string> expected_flags = {"--guest_oom_event"};
+  EXPECT_EQ(crash_report->flags, expected_flags);
 }
 
 TEST(AnomalyDetectorTest, CryptohomeMountFailure) {
   ParserRun cryptohome_mount_failure = {
       .expected_flags = {{"--mount_failure", "--mount_device=cryptohome"}}};
-  ParserTest<CryptohomeParser>("TEST_CRYPTOHOME_MOUNT_FAILURE",
-                               {cryptohome_mount_failure});
+  CryptohomeParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CRYPTOHOME_MOUNT_FAILURE", {cryptohome_mount_failure},
+             &parser);
 }
 
 TEST(AnomalyDetectorTest, CryptohomeIgnoreMountFailure) {
   ParserRun cryptohome_mount_failure = {.expected_size = 0};
-  ParserTest<CryptohomeParser>("TEST_CRYPTOHOME_MOUNT_FAILURE_IGNORE",
-                               {cryptohome_mount_failure});
+  CryptohomeParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CRYPTOHOME_MOUNT_FAILURE_IGNORE", {cryptohome_mount_failure},
+             &parser);
 }
 
 TEST(AnomalyDetectorTest, CryptohomeIgnoreFailedLogin) {
   ParserRun cryptohome_mount_failure = {.expected_size = 0};
-  ParserTest<CryptohomeParser>("TEST_CRYPTOHOME_FAILED_LOGIN_IGNORE",
-                               {cryptohome_mount_failure});
+  CryptohomeParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CRYPTOHOME_FAILED_LOGIN_IGNORE", {cryptohome_mount_failure},
+             &parser);
+}
+
+TEST(AnomalyDetectorTest, CryptohomeRecoveryRequestFailure) {
+  ParserRun cryptohome_recovery_failure = {
+      .expected_substr = "GetRecoveryRequest-3-recovery-failure",
+      .expected_flags = {{"--cryptohome_recovery_failure"}}};
+  CryptohomeParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CRYPTOHOME_RECOVERY_REQUEST_FAILURE",
+             {cryptohome_recovery_failure}, &parser);
+}
+
+TEST(AnomalyDetectorTest, CryptohomeRecoveryDeriveFailure) {
+  ParserRun cryptohome_recovery_failure = {
+      .expected_substr = "Derive-8-recovery-failure",
+      .expected_flags = {{"--cryptohome_recovery_failure"}}};
+  CryptohomeParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CRYPTOHOME_RECOVERY_DERIVE_FAILURE",
+             {cryptohome_recovery_failure}, &parser);
+}
+
+TEST(AnomalyDetectorTest, CryptohomeRecoveryIgnoreFailure) {
+  ParserRun no_failure = {.expected_size = 0};
+  CryptohomeParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CRYPTOHOME_RECOVERY_NO_FAILURE", {no_failure}, &parser);
 }
 
 TEST(AnomalyDetectorTest, TcsdAuthFailure) {
-  ParserRun tcsd_auth_failure = {.expected_text = "b349c715-auth failure",
+  ParserRun tcsd_auth_failure = {.expected_text = "b349c715-auth failure\n",
                                  .expected_flags = {{"--auth_failure"}}};
   ParserTest<TcsdParser>("TEST_TCSD_AUTH_FAILURE", {tcsd_auth_failure});
 }
@@ -587,4 +773,89 @@ TEST(AnomalyDetectorTest, TcsdAuthFailureBlocklist) {
   ParserRun tcsd_auth_failure = {.expected_size = 0};
   ParserTest<TcsdParser>("TEST_TCSD_AUTH_FAILURE_BLOCKLIST",
                          {tcsd_auth_failure});
+}
+
+TEST(AnomalyDetectorTest, CellularFailureMM) {
+  ParserRun modem_failure = {
+      .expected_substr = "Core.Failed",
+      .expected_flags = {
+          {"--modem_failure", base::StringPrintf("--weight=%d", 50)}}};
+  ShillParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CELLULAR_FAILURE_MM", {modem_failure}, &parser);
+}
+
+TEST(AnomalyDetectorTest, CellularFailureEnable) {
+  ParserRun enable_failure = {
+      .expected_substr = "InProgress-enable",
+      .expected_flags = {
+          {"--modem_failure", base::StringPrintf("--weight=%d", 200)}}};
+  ShillParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CELLULAR_FAILURE_ENABLE", {enable_failure}, &parser);
+}
+
+TEST(AnomalyDetectorTest, CellularFailureConnect) {
+  ParserRun connect_failure = {
+      .expected_substr = "auto-connect",
+      .expected_flags = {
+          {"--modem_failure", base::StringPrintf("--weight=%d", 5)}}};
+  ShillParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CELLULAR_FAILURE_CONNECT", {connect_failure}, &parser);
+}
+
+TEST(AnomalyDetectorTest, CellularFailureBlocked) {
+  ParserRun modem_failure = {.expected_size = 0};
+  ShillParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CELLULAR_FAILURE_BLOCKED", {modem_failure}, &parser);
+}
+
+TEST(AnomalyDetectorTest, CellularFailureEntitlementCheck) {
+  ParserRun entitlement_failure = {
+      .expected_substr = "EntitlementCheckFailure",
+      .expected_flags = {
+          {"--modem_failure", base::StringPrintf("--weight=%d", 1)}}};
+  ShillParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_CELLULAR_FAILURE_ENTITLEMENT_CHECK", {entitlement_failure},
+             &parser);
+}
+
+TEST(AnomalyDetectorTest, ESimInstallSendHttpsFailure) {
+  ParserRun install_failure = {
+      .expected_substr = "SendHttpsFailure",
+      .expected_flags = {
+          {"--hermes_failure", base::StringPrintf("--weight=%d", 5)}}};
+  HermesParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_ESIM_INSTALL_SEND_HTTPS_FAILURE", {install_failure},
+             &parser);
+}
+
+TEST(AnomalyDetectorTest, ESimInstallUnknownFailure) {
+  ParserRun install_failure = {
+      .expected_substr = "Unknown",
+      .expected_flags = {
+          {"--hermes_failure", base::StringPrintf("--weight=%d", 1)}}};
+  HermesParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_ESIM_INSTALL_UNKNOWN_FAILURE", {install_failure}, &parser);
+}
+
+TEST(AnomalyDetectorTest, ESimInstallFailureBlocked) {
+  ParserRun install_failure = {.expected_size = 0};
+  HermesParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_ESIM_INSTALL_MALFORMED_RESPONSE", {install_failure},
+             &parser);
+}
+
+TEST(AnomalyDetectorTest, CellularFailureModemfwd) {
+  ParserRun modemfwd_failure = {
+      .expected_substr = "dlcServiceReturnedErrorOnInstall",
+      .expected_flags = {
+          {"--modemfwd_failure", base::StringPrintf("--weight=%d", 50)}}};
+  ModemfwdParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_MODEMFWD_FAILURE_ERROR", {modemfwd_failure}, &parser);
+}
+
+TEST(AnomalyDetectorTest, CellularFailureModemfwdNonCellularSku) {
+  ParserRun modemfwd_failure_non_cellular = {.expected_size = 0};
+  ModemfwdParser parser(/*testonly_send_all=*/true);
+  ParserTest("TEST_MODEMFWD_FAILURE_SKIP_UPLOAD",
+             {modemfwd_failure_non_cellular}, &parser);
 }

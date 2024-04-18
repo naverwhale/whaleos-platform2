@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
@@ -35,11 +34,7 @@ class ModemInfo {
   virtual ~ModemInfo();
 
   // Starts watching for and handling the DBus modem manager service.
-  virtual void Start();
-
-  // Stops watching for the DBus modem manager service and destroys any
-  // associated modems.
-  virtual void Stop();
+  void Start();
 
   // Called when a Cellular Device is created.
   virtual void OnDeviceInfoAvailable(const std::string& link_name);
@@ -65,6 +60,12 @@ class ModemInfo {
   FRIEND_TEST(ModemInfoTest, AddRemoveInterfaces);
   FRIEND_TEST(ModemInfoTest, Connect);
   FRIEND_TEST(ModemInfoTest, StartStop);
+  FRIEND_TEST(ModemInfoTest, ModemManagerDown);
+  FRIEND_TEST(ModemInfoTest, RestartModemManager);
+
+  // Stops watching for the DBus modem manager service and destroys any
+  // associated modems.
+  void Stop();
 
   void Connect();
   void Disconnect();

@@ -1,26 +1,40 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CRASH_REPORTER_ARC_UTIL_H_
 #define CRASH_REPORTER_ARC_UTIL_H_
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include <base/optional.h>
 #include <base/time/tick_clock.h>
 #include <base/time/time.h>
 #include <session_manager/dbus-proxies.h>
 
-#include "crash-reporter/crash_collector.h"
-
 namespace arc_util {
 
 using CrashLogHeaderMap = std::unordered_map<std::string, std::string>;
+
+// ARC crash types used to determine crash severity.
+// NOTE: Not every crash type name is included in this file, only the ones used
+// to compute crash severity according to go/cros-stability-metrics#logic are
+// included to reduce redundancy and make sure names don't go out of sync.
+inline constexpr char kDataAppAnr[] = "data_app_anr";
+inline constexpr char kDataAppCrash[] = "data_app_crash";
+inline constexpr char kDataAppNativeCrash[] = "data_app_native_crash";
+inline constexpr char kNativeCrash[] =
+    "native_crash";  // crash type of Android.
+inline constexpr char kSystemAppAnr[] = "system_app_anr";
+inline constexpr char kSystemAppCrash[] = "system_app_crash";
+inline constexpr char kSystemAppWtf[] = "system_app_wtf";
+inline constexpr char kSystemServerCrash[] = "system_server_crash";
+inline constexpr char kSystemServerWatchdog[] = "system_server_watchdog";
+inline constexpr char kSystemServerWtf[] = "system_server_wtf";
 
 extern const char kArcProduct[];
 
@@ -62,7 +76,7 @@ struct BuildProperty {
 };
 
 // Returns the Android version (eg: 7.1.1) from the fingerprint.
-base::Optional<std::string> GetVersionFromFingerprint(
+std::optional<std::string> GetVersionFromFingerprint(
     const std::string& fingerprint);
 
 bool ParseCrashLog(const std::string& type,

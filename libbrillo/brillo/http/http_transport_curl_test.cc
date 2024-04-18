@@ -1,14 +1,16 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include <optional>
 
 #include <brillo/http/http_transport_curl.h>
 
 #include <base/at_exit.h>
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/run_loop.h>
 #include <base/task/single_thread_task_executor.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/http/http_connection_curl.h>
 #include <brillo/http/http_request.h>
 #include <brillo/http/mock_curl_api.h>
@@ -233,14 +235,14 @@ TEST_F(HttpCurlTransportAsyncTest, StartAsyncTransfer) {
 
   // Success/error callback needed to report the result of an async operation.
   int success_call_count = 0;
-  auto success_callback = base::Bind(
-      [](int* success_call_count, const base::Closure& quit_closure,
-         RequestID /* request_id */,
-         std::unique_ptr<http::Response> /* resp */) {
-        base::ThreadTaskRunnerHandle::Get()->PostTask(FROM_HERE, quit_closure);
-        (*success_call_count)++;
-      },
-      &success_call_count, run_loop.QuitClosure());
+  auto success_callback = [](int* success_call_count,
+                             base::OnceClosure quit_closure,
+                             RequestID /* request_id */,
+                             std::unique_ptr<http::Response> /* resp */) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, std::move(quit_closure));
+    (*success_call_count)++;
+  };
 
   auto error_callback = [](RequestID /* request_id */,
                            const Error* /* error */) {
@@ -264,9 +266,11 @@ TEST_F(HttpCurlTransportAsyncTest, StartAsyncTransfer) {
   EXPECT_CALL(*curl_api_, MultiAddHandle(multi_handle_, handle_))
       .WillOnce(Return(CURLM_OK));
 
-  EXPECT_EQ(1,
-            transport_->StartAsyncTransfer(connection.get(), success_callback,
-                                           base::Bind(error_callback)));
+  EXPECT_EQ(1, transport_->StartAsyncTransfer(
+                   connection.get(),
+                   base::BindOnce(success_callback, &success_call_count,
+                                  run_loop.QuitClosure()),
+                   base::BindOnce(error_callback)));
   EXPECT_EQ(0, success_call_count);
 
   timer_callback(multi_handle_, 1, transport_.get());
@@ -303,7 +307,7 @@ TEST_F(HttpCurlTransportAsyncTest, StartAsyncTransfer) {
   // Just in case something goes wrong and |success_callback| isn't called,
   // post a time-out quit closure to abort the message loop after 1 second.
   task_executor.task_runner()->PostDelayedTask(
-      FROM_HERE, run_loop.QuitClosure(), base::TimeDelta::FromSeconds(1));
+      FROM_HERE, run_loop.QuitClosure(), base::Seconds(1));
   run_loop.Run();
   EXPECT_EQ(1, success_call_count);
 
@@ -316,7 +320,7 @@ TEST_F(HttpCurlTransportAsyncTest, StartAsyncTransfer) {
 }
 
 TEST_F(HttpCurlTransportTest, RequestGetTimeout) {
-  transport_->SetDefaultTimeout(base::TimeDelta::FromMilliseconds(2000));
+  transport_->SetDefaultTimeout(base::Milliseconds(2000));
   EXPECT_CALL(*curl_api_,
               EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
       .WillOnce(Return(CURLE_OK));
@@ -370,7 +374,7 @@ TEST_F(HttpCurlTransportTest, RequestGetBufferSize) {
 }
 
 TEST_F(HttpCurlTransportTest, RequestGetBufferSizeDefault) {
-  transport_->SetBufferSize(base::nullopt);
+  transport_->SetBufferSize(std::nullopt);
   EXPECT_CALL(*curl_api_,
               EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
       .WillOnce(Return(CURLE_OK));
@@ -408,7 +412,7 @@ TEST_F(HttpCurlTransportTest, RequestGetUploadBufferSize) {
 }
 
 TEST_F(HttpCurlTransportTest, RequestGetUploadBufferSizeDefault) {
-  transport_->SetUploadBufferSize(base::nullopt);
+  transport_->SetUploadBufferSize(std::nullopt);
   EXPECT_CALL(*curl_api_,
               EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
       .WillOnce(Return(CURLE_OK));
@@ -416,6 +420,154 @@ TEST_F(HttpCurlTransportTest, RequestGetUploadBufferSizeDefault) {
       .Times(0);
   EXPECT_CALL(*curl_api_, EasySetOptInt(handle_, CURLOPT_HTTPGET, 1))
       .WillOnce(Return(CURLE_OK));
+  auto connection = transport_->CreateConnection(
+      "http://foo.bar/get", request_type::kGet, {}, "", "", nullptr);
+
+  testing::Mock::VerifyAndClearExpectations(curl_api_.get());
+  EXPECT_NE(nullptr, connection.get());
+
+  EXPECT_CALL(*curl_api_, EasyCleanup(handle_)).Times(1);
+  connection.reset();
+}
+
+TEST_F(HttpCurlTransportTest, SetDnsServers) {
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptInt(handle_, CURLOPT_HTTPGET, 1))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_DNS_SERVERS, "1.2.3.4,3.4.5.6"))
+      .WillOnce(Return(CURLE_OK));
+
+  transport_->SetDnsServers({"1.2.3.4", "3.4.5.6"});
+  auto connection = transport_->CreateConnection(
+      "http://foo.bar/get", request_type::kGet, {}, "", "", nullptr);
+
+  testing::Mock::VerifyAndClearExpectations(curl_api_.get());
+  EXPECT_NE(nullptr, connection.get());
+
+  EXPECT_CALL(*curl_api_, EasyCleanup(handle_)).Times(1);
+  connection.reset();
+}
+
+TEST_F(HttpCurlTransportTest, SetDnsInterface) {
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptInt(handle_, CURLOPT_HTTPGET, 1))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptStr(handle_, CURLOPT_DNS_INTERFACE, "eth0"))
+      .WillOnce(Return(CURLE_OK));
+
+  transport_->SetDnsInterface("eth0");
+  auto connection = transport_->CreateConnection(
+      "http://foo.bar/get", request_type::kGet, {}, "", "", nullptr);
+
+  testing::Mock::VerifyAndClearExpectations(curl_api_.get());
+  EXPECT_NE(nullptr, connection.get());
+
+  EXPECT_CALL(*curl_api_, EasyCleanup(handle_)).Times(1);
+  connection.reset();
+}
+
+TEST_F(HttpCurlTransportTest, SetDnsLocalIPv4Address) {
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptInt(handle_, CURLOPT_HTTPGET, 1))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_DNS_LOCAL_IP4, "192.168.0.14"))
+      .WillOnce(Return(CURLE_OK));
+
+  transport_->SetDnsLocalIPv4Address("192.168.0.14");
+  auto connection = transport_->CreateConnection(
+      "http://foo.bar/get", request_type::kGet, {}, "", "", nullptr);
+
+  testing::Mock::VerifyAndClearExpectations(curl_api_.get());
+  EXPECT_NE(nullptr, connection.get());
+
+  EXPECT_CALL(*curl_api_, EasyCleanup(handle_)).Times(1);
+  connection.reset();
+}
+
+TEST_F(HttpCurlTransportTest, SetDnsLocalIPv6Address) {
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptInt(handle_, CURLOPT_HTTPGET, 1))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptStr(handle_, CURLOPT_DNS_LOCAL_IP6,
+                                        "fe80::a9ff:fe46:b619"))
+      .WillOnce(Return(CURLE_OK));
+
+  transport_->SetDnsLocalIPv6Address("fe80::a9ff:fe46:b619");
+  auto connection = transport_->CreateConnection(
+      "http://foo.bar/get", request_type::kGet, {}, "", "", nullptr);
+
+  testing::Mock::VerifyAndClearExpectations(curl_api_.get());
+  EXPECT_NE(nullptr, connection.get());
+
+  EXPECT_CALL(*curl_api_, EasyCleanup(handle_)).Times(1);
+  connection.reset();
+}
+
+TEST_F(HttpCurlTransportTest, SetInterface) {
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptInt(handle_, CURLOPT_HTTPGET, 1))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptStr(handle_, CURLOPT_INTERFACE, "if!eth0"))
+      .WillOnce(Return(CURLE_OK));
+
+  transport_->SetInterface("eth0");
+  auto connection = transport_->CreateConnection(
+      "http://foo.bar/get", request_type::kGet, {}, "", "", nullptr);
+
+  testing::Mock::VerifyAndClearExpectations(curl_api_.get());
+  EXPECT_NE(nullptr, connection.get());
+
+  EXPECT_CALL(*curl_api_, EasyCleanup(handle_)).Times(1);
+  connection.reset();
+}
+
+TEST_F(HttpCurlTransportTest, SetLocalIpAddress) {
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptInt(handle_, CURLOPT_HTTPGET, 1))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_INTERFACE, "host!192.168.1.13"))
+      .WillOnce(Return(CURLE_OK));
+
+  transport_->SetLocalIpAddress("192.168.1.13");
+  auto connection = transport_->CreateConnection(
+      "http://foo.bar/get", request_type::kGet, {}, "", "", nullptr);
+
+  testing::Mock::VerifyAndClearExpectations(curl_api_.get());
+  EXPECT_NE(nullptr, connection.get());
+
+  EXPECT_CALL(*curl_api_, EasyCleanup(handle_)).Times(1);
+  connection.reset();
+}
+
+TEST_F(HttpCurlTransportTest, SetInterfaceAndLocalIpAddress) {
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_URL, "http://foo.bar/get"))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptInt(handle_, CURLOPT_HTTPGET, 1))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_, EasySetOptStr(handle_, CURLOPT_INTERFACE, "if!wlan0"))
+      .WillOnce(Return(CURLE_OK));
+  EXPECT_CALL(*curl_api_,
+              EasySetOptStr(handle_, CURLOPT_INTERFACE, "host!192.168.1.13"))
+      .Times(0);
+
+  transport_->SetInterface("wlan0");
+  transport_->SetLocalIpAddress("192.168.1.13");
   auto connection = transport_->CreateConnection(
       "http://foo.bar/get", request_type::kGet, {}, "", "", nullptr);
 

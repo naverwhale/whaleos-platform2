@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <string>
 
 #include <base/files/file_enumerator.h>
+#include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
@@ -14,6 +15,7 @@
 
 #include "typecd/pd_vdo_constants.h"
 #include "typecd/port.h"
+#include "typecd/utils.h"
 
 namespace {
 
@@ -32,7 +34,8 @@ Partner::Partner(const base::FilePath& syspath)
       num_alt_modes_(-1),
       supports_pd_(false),
       metrics_reported_(false),
-      port_(nullptr) {
+      port_(nullptr),
+      power_profile_(nullptr) {
   // Search for all alt modes which were already registered prior to daemon
   // init.
   base::FileEnumerator iter(GetSysPath(), false,
@@ -66,7 +69,9 @@ bool Partner::AddAltMode(const base::FilePath& mode_syspath) {
 
   alt_modes_.emplace(index, std::move(alt_mode));
 
-  LOG(INFO) << "Added alt mode for port " << port << " index " << index;
+  LOG(INFO) << "Added SOP alt mode. Port: " << port << ", Index: " << index
+            << ", SVID: " << FormatHexString(alt_modes_[index]->GetSVID(), 4)
+            << ", VDO: " << FormatHexString(alt_modes_[index]->GetVDO(), 8);
 
   return true;
 }
@@ -100,12 +105,26 @@ bool Partner::IsAltModePresent(int index) {
   return false;
 }
 
+void Partner::AddPowerProfile() {
+  if (power_profile_ || !supports_pd_)
+    return;
+  auto path = GetSysPath().Append("usb_power_delivery");
+  // Not all devices have USB power delivery directories.
+  if (base::DirectoryExists(path))
+    power_profile_ = std::make_unique<PowerProfile>(path);
+}
+
+void Partner::RemovePowerProfile() {
+  power_profile_.reset();
+}
+
 void Partner::UpdatePDInfoFromSysfs() {
   if (GetNumAltModes() == -1)
     SetNumAltModes(ParseNumAltModes());
   UpdatePDIdentityVDOs();
   UpdatePDRevision();
   UpdateSupportsPD();
+  AddPowerProfile();
 }
 
 int Partner::ParseNumAltModes() {
@@ -153,40 +172,16 @@ void Partner::UpdateSupportsPD() {
 }
 
 PartnerTypeMetric Partner::GetPartnerTypeMetric() {
-  bool usb4 = false;
-  auto partner_cap = (GetProductTypeVDO1() >> kDeviceCapabilityBitOffset) &
-                     kDeviceCapabilityMask;
-  if (partner_cap & kDeviceCapabilityUSB4) {
-    usb4 = true;
-  }
-
-  // Check for TBT/DP.
-  bool tbt_present = false;
-  bool dp_present = false;
-  for (const auto& [index, mode] : alt_modes_) {
-    if (mode->GetSVID() == kTBTAltModeVID)
-      tbt_present = true;
-
-    if ((mode->GetSVID() == kDPAltModeSID) && (mode->GetVDO() & kDPModeSnk))
-      dp_present = true;
-  }
-
-  bool usb_present = false;
-  // For situations where the device is a "regular" USB peripheral, try to
-  // determine whether it at least supports anything other than billboard.
-  auto product_type = (GetIdHeaderVDO() >> kIDHeaderVDOProductTypeBitOffset) &
-                      kIDHeaderVDOProductTypeMask;
-  if (product_type == kIDHeaderVDOProductTypeUFPPeripheral ||
-      product_type == kIDHeaderVDOProductTypeUFPHub) {
-    auto device_cap = (GetProductTypeVDO1() >> kDeviceCapabilityBitOffset) &
-                      kDeviceCapabilityMask;
-    if (device_cap != kDeviceCapabilityBillboard)
-      usb_present = true;
-  }
+  bool usb4 = SupportsUsb4();
+  bool tbt_present = SupportsTbt();
+  bool dp_present = SupportsDp();
+  bool usb_present = SupportsUsb();
 
   // Determine whether it is a hub or peripheral.
   bool hub = false;
   bool peripheral = false;
+  auto product_type = (GetIdHeaderVDO() >> kIDHeaderVDOProductTypeBitOffset) &
+                      kIDHeaderVDOProductTypeMask;
   if (product_type == kIDHeaderVDOProductTypeUFPHub) {
     hub = true;
   } else if (product_type == kIDHeaderVDOProductTypeUFPPeripheral) {
@@ -231,6 +226,13 @@ PartnerTypeMetric Partner::GetPartnerTypeMetric() {
       ret = PartnerTypeMetric::kUSBPeripheral;
   }
 
+  // Edge case of power brick.
+  auto product_type_dfp =
+      GetIdHeaderVDO() >> kIDHeaderVDOProductTypeDFPBitOffset &
+      kIDHeaderVDOProductTypeMask;
+  if (product_type_dfp == kIDHeaderVDOProductTypePowerBrick)
+    ret = PartnerTypeMetric::kPowerBrick;
+
   // If we've found a valid category let's return.
   if (ret != PartnerTypeMetric::kOther)
     return ret;
@@ -239,12 +241,6 @@ PartnerTypeMetric Partner::GetPartnerTypeMetric() {
   // based on current port state and hints about partner capabilities.
   if (!port_) {
     LOG(INFO) << "Port pointer not available; can't determine partner type";
-    return ret;
-  }
-
-  // We only proceed in this exercise if the partner doesn't have an ID header
-  // VDO. Otherwise, it should have been classified some way from the above.
-  if (GetIdHeaderVDO() != 0x0) {
     return ret;
   }
 
@@ -277,13 +273,105 @@ PartnerTypeMetric Partner::GetPartnerTypeMetric() {
   return ret;
 }
 
+DataRoleMetric Partner::GetDataRoleMetric() {
+  DataRoleMetric ret = DataRoleMetric::kOther;
+  DataRole port_dr = port_->GetDataRole();
+
+  if (port_dr == DataRole::kHost)
+    ret = DataRoleMetric::kDevice;
+  else if (port_dr == DataRole::kDevice)
+    ret = DataRoleMetric::kHost;
+
+  return ret;
+}
+
+PowerRoleMetric Partner::GetPowerRoleMetric() {
+  PowerRoleMetric ret = PowerRoleMetric::kOther;
+  PowerRole port_pr = port_->GetPowerRole();
+
+  if (port_pr == PowerRole::kSource)
+    ret = PowerRoleMetric::kSink;
+  else if (port_pr == PowerRole::kSink)
+    ret = PowerRoleMetric::kSource;
+
+  return ret;
+}
+
 void Partner::ReportMetrics(Metrics* metrics) {
   if (!metrics || metrics_reported_)
     return;
 
+  if (GetSupportsPD() && !DiscoveryComplete()) {
+    LOG(WARNING)
+        << "Partner discovery not complete before attempt to report metrics";
+    return;
+  }
+
   metrics->ReportPartnerType(GetPartnerTypeMetric());
+  metrics->ReportBasicPdDeviceInfo(
+      GetVendorId(), GetProductId(), GetXid(), GetSupportsPD(), SupportsUsb(),
+      SupportsDp(), SupportsTbt(), SupportsUsb4(), GetDataRoleMetric(),
+      GetPowerRoleMetric(), GetPartnerTypeMetric());
 
   metrics_reported_ = true;
+}
+
+bool Partner::SupportsUsb() {
+  // For situations where the device is a "regular" USB peripheral, try to
+  // determine whether it at least supports anything other than billboard.
+  auto product_type = (GetIdHeaderVDO() >> kIDHeaderVDOProductTypeBitOffset) &
+                      kIDHeaderVDOProductTypeMask;
+  if (product_type == kIDHeaderVDOProductTypeUFPPeripheral ||
+      product_type == kIDHeaderVDOProductTypeUFPHub) {
+    auto device_cap = (GetProductTypeVDO1() >> kDeviceCapabilityBitOffset) &
+                      kDeviceCapabilityMask;
+    if (device_cap != kDeviceCapabilityBillboard)
+      return true;
+  }
+  return false;
+}
+
+bool Partner::SupportsDp() {
+  for (const auto& [index, mode] : alt_modes_) {
+    if ((mode->GetSVID() == kDPAltModeSID) && (mode->GetVDO() & kDPModeSnk))
+      return true;
+  }
+  return false;
+}
+
+bool Partner::SupportsTbt() {
+  for (const auto& [index, mode] : alt_modes_) {
+    if (mode->GetSVID() == kTBTAltModeVID)
+      return true;
+  }
+  return false;
+}
+
+bool Partner::SupportsUsb4() {
+  // Only PDUSB hub or PDUSB peripheral provide UFP VDO.
+  // Otherwise, USB4 is not supported.
+  auto product_type = (GetIdHeaderVDO() >> kIDHeaderVDOProductTypeBitOffset) &
+                      kIDHeaderVDOProductTypeMask;
+  if (product_type != kIDHeaderVDOProductTypeUFPHub &&
+      product_type != kIDHeaderVDOProductTypeUFPPeripheral)
+    return false;
+
+  // Product Type VDO1 is UFP VDO at this point.
+  auto partner_cap = (GetProductTypeVDO1() >> kDeviceCapabilityBitOffset) &
+                     kDeviceCapabilityMask;
+  return (partner_cap & kDeviceCapabilityUSB4);
+}
+
+int Partner::GetVendorId() {
+  return GetIdHeaderVDO() & kIdHeaderVDOVidMask;
+}
+
+int Partner::GetProductId() {
+  return (GetProductVDO() >> kProductVDOPidBitOffset) & kProductVDOPidMask;
+}
+
+int Partner::GetXid() {
+  return GetCertStateVDO();
 }
 
 }  // namespace typecd

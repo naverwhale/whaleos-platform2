@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <string>
 
-#include "u2fd/u2f_apdu.h"
+#include "u2fd/client/u2f_apdu.h"
 #include "u2fd/u2f_msg_handler_interface.h"
 
 namespace u2f {

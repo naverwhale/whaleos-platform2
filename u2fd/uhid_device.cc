@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,10 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/posix/eintr_wrapper.h>
@@ -80,7 +80,8 @@ bool UHidDevice::Init(uint32_t hid_version, const std::string& report_desc) {
   created_ = true;
 
   watcher_ = base::FileDescriptorWatcher::WatchReadable(
-      fd_.get(), base::Bind(&UHidDevice::FdEvent, base::Unretained(this)));
+      fd_.get(),
+      base::BindRepeating(&UHidDevice::FdEvent, base::Unretained(this)));
   if (!watcher_) {
     LOG(ERROR) << "Unable to watch " << kUHidNode << " events";
     return false;
@@ -130,7 +131,7 @@ void UHidDevice::FdEvent() {
 
 bool UHidDevice::WriteEvent(const struct uhid_event& ev) {
   return base::WriteFileDescriptor(fd_.get(),
-                                   base::as_bytes(base::make_span(&ev, 1)));
+                                   base::as_bytes(base::make_span(&ev, 1u)));
 }
 
 bool UHidDevice::SendReport(const std::string& report) {

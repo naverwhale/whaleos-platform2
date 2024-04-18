@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,9 +18,11 @@ use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
-use sys_util::{
-    debug, error, info, register_signal_handler, syslog, EventFd, PollContext, PollToken,
-};
+use libchromeos::deprecated::{EventFd, PollContext, PollToken};
+use libchromeos::signal::register_signal_handler;
+use libchromeos::syslog;
+use log::{debug, error, info};
+use nix::sys::signal::Signal;
 use tiny_http::{ClientConnection, Stream};
 
 use crate::arguments::Args;
@@ -32,12 +34,12 @@ use crate::usb_connector::{UnplugDetector, UsbConnector};
 pub enum Error {
     CreateSocket(io::Error),
     CreateUsbConnector(usb_connector::Error),
-    EventFd(sys_util::Error),
+    EventFd(io::Error),
     ParseArgs(arguments::Error),
-    PollEvents(sys_util::Error),
-    RegisterHandler(sys_util::Error),
+    PollEvents(nix::Error),
+    RegisterHandler(nix::Error),
     Syslog(syslog::Error),
-    SysUtil(sys_util::Error),
+    SysUtil(nix::Error),
 }
 
 impl std::error::Error for Error {}
@@ -84,16 +86,15 @@ extern "C" fn sigint_handler(_: c_int) {
 
 /// Registers a SIGINT handler that, when triggered, will write to `shutdown_fd`
 /// to notify any listeners of a pending shutdown.
-fn add_sigint_handler(shutdown_fd: EventFd) -> sys_util::Result<()> {
+fn add_sigint_handler(shutdown_fd: EventFd) -> nix::Result<()> {
     // Leak our copy of the fd to ensure SHUTDOWN_FD remains valid until ippusb_bridge closes, so
     // that we aren't inadvertently writing to an invalid FD in the SIGINT handler. The FD will be
     // reclaimed by the OS once our process has stopped.
     SHUTDOWN_FD.store(shutdown_fd.into_raw_fd(), Ordering::Relaxed);
 
-    const SIGINT: libc::c_int = 2;
     // Safe because sigint_handler is an extern "C" function that only performs
     // async signal-safe operations.
-    unsafe { register_signal_handler(SIGINT, sigint_handler) }
+    unsafe { register_signal_handler(Signal::SIGINT, sigint_handler) }
 }
 
 struct Daemon {
@@ -197,14 +198,14 @@ impl Daemon {
 }
 
 fn run() -> Result<()> {
-    syslog::init().map_err(Error::Syslog)?;
+    syslog::init("ippusb_bridge".to_string(), true).map_err(Error::Syslog)?;
     let argv: Vec<String> = std::env::args().collect();
     let args = match Args::parse(&argv).map_err(Error::ParseArgs)? {
         None => return Ok(()),
         Some(args) => args,
     };
 
-    let shutdown_fd = EventFd::new().map_err(Error::EventFd)?;
+    let shutdown_fd = EventFd::new().map_err(|e| Error::EventFd(e.into()))?;
     let sigint_shutdown_fd = shutdown_fd.try_clone().map_err(Error::EventFd)?;
     add_sigint_handler(sigint_shutdown_fd).map_err(Error::RegisterHandler)?;
 
@@ -240,6 +241,7 @@ fn run() -> Result<()> {
 }
 
 fn main() {
+    libchromeos::panic_handler::install_memfd_handler();
     // Use run() instead of returning a Result from main() so that we can print
     // errors using Display instead of Debug.
     if let Err(e) = run() {

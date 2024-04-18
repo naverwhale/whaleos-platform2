@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,21 +10,21 @@
 
 #include <gmock/gmock.h>
 
-#include "biod/biometrics_manager_record.h"
+#include "biod/biometrics_manager_record_interface.h"
 
 namespace biod {
 
-class MockBiometricsManagerRecord : public BiometricsManagerRecord {
+class MockBiometricsManagerRecord : public BiometricsManagerRecordInterface {
  public:
   MockBiometricsManagerRecord() = default;
   ~MockBiometricsManagerRecord() override = default;
 
   MOCK_METHOD(const std::string&, GetId, (), (const, override));
-  MOCK_METHOD(const std::string&, GetUserId, (), (const, override));
-  MOCK_METHOD(const std::string&, GetLabel, (), (const, override));
-  MOCK_METHOD(void, SetLabel, (std::string label), (override));
-  MOCK_METHOD(const std::vector<uint8_t>&, GetValidationVal, (), (const));
-  MOCK_METHOD(bool, SupportsPositiveMatchSecret, (), (const, override));
+  MOCK_METHOD(std::string, GetUserId, (), (const, override));
+  MOCK_METHOD(std::string, GetLabel, (), (const, override));
+  MOCK_METHOD(std::vector<uint8_t>, GetValidationVal, (), (const, override));
+  MOCK_METHOD(bool, SetLabel, (std::string label), (override));
+  MOCK_METHOD(bool, Remove, (), (override));
 };
 
 }  //  namespace biod

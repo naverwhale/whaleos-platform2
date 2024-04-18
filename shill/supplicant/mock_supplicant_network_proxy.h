@@ -1,14 +1,13 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_SUPPLICANT_MOCK_SUPPLICANT_NETWORK_PROXY_H_
 #define SHILL_SUPPLICANT_MOCK_SUPPLICANT_NETWORK_PROXY_H_
 
-#include <base/macros.h>
 #include <gmock/gmock.h>
 
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 #include "shill/supplicant/supplicant_network_proxy_interface.h"
 
 namespace shill {

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,7 @@ constexpr char kDefaultSharedUser[] = "chronos";
 
 constexpr char kCacheDir[] = "Cache";
 constexpr char kDownloadsDir[] = "Downloads";
+constexpr char kDownloadsBackupDir[] = "Downloads-backup";
 constexpr char kMyFilesDir[] = "MyFiles";
 constexpr char kGCacheDir[] = "GCache";
 constexpr char kGCacheVersion1Dir[] = "v1";
@@ -29,5 +30,16 @@ constexpr char kEphemeralMountOptions[] = "";
 
 constexpr char kEtcDaemonStoreBaseDir[] = "/etc/daemon-store/";
 constexpr char kRunDaemonStoreBaseDir[] = "/run/daemon-store/";
+constexpr char kRunDaemonStoreCacheBaseDir[] = "/run/daemon-store-cache/";
+
+constexpr char kDaemonStoreCacheDir[] = ".cache";
+
+// Each xattr is set to Android app internal data directory, contains
+// 8-byte inode number of cache subdirectory.  See
+// frameworks/base/core/java/android/app/ContextImpl.java
+constexpr char kAndroidCacheInodeAttribute[] = "user.inode_cache";
+constexpr char kAndroidCodeCacheInodeAttribute[] = "user.inode_code_cache";
+constexpr char kTrackedDirectoryNameAttribute[] = "user.TrackedDirectoryName";
+constexpr char kRemovableFileAttribute[] = "user.GCacheRemovable";
 
 }  // namespace cryptohome

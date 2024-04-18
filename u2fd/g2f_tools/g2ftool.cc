@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,11 @@
 #include <algorithm>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/command_line.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/strings/string_number_conversions.h>
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
@@ -122,7 +122,7 @@ int main(int argc, char* argv[]) {
       LOG(ERROR) << "P1 value should be 0-255, or -1 for default" << std::endl;
       return EX_USAGE;
     }
-    base::Optional<uint8_t> p1;
+    std::optional<uint8_t> p1;
     if (FLAGS_p1 > -1) {
       p1 = FLAGS_p1;
     }
@@ -160,7 +160,7 @@ int main(int argc, char* argv[]) {
       LOG(ERROR) << "P1 value should be 0-255, or -1 for default" << std::endl;
       return EX_USAGE;
     }
-    base::Optional<uint8_t> p1;
+    std::optional<uint8_t> p1;
     if (FLAGS_p1 > -1) {
       p1 = FLAGS_p1;
     }

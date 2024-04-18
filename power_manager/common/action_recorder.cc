@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,10 +22,6 @@ std::string JoinActions(const char* action, ...) {
   va_end(arg_list);
   return actions;
 }
-
-ActionRecorder::ActionRecorder() {}
-
-ActionRecorder::~ActionRecorder() {}
 
 std::string ActionRecorder::GetActions() {
   std::string actions = actions_;

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -11,17 +11,16 @@
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/observer_list.h>
 #include <base/observer_list_types.h>
-#include <base/values.h>
+#include <brillo/proto_bindings/install_attributes.pb.h>
 #include <brillo/secure_blob.h>
+#include <libhwsec/frontend/cryptohome/frontend.h>
 
 #include "cryptohome/crypto.h"
-#include "cryptohome/install_attributes.pb.h"
+#include "cryptohome/install_attributes_interface.h"
 #include "cryptohome/lockbox.h"
 #include "cryptohome/platform.h"
-#include "cryptohome/tpm.h"
 
 namespace cryptohome {
 
@@ -33,45 +32,29 @@ namespace cryptohome {
 // until the next install.
 //
 // InstallAttributes is not thread-safe and should not be accessed in parallel.
-class InstallAttributes {
+class InstallAttributes : public InstallAttributesInterface {
  public:
-  enum class Status {
-    kUnknown,       // Not initialized yet.
-    kTpmNotOwned,   // TPM not owned yet.
-    kFirstInstall,  // Allows writing.
-    kValid,         // Validated successfully.
-    kInvalid,       // Not valid, e.g. clobbered, absent.
-    COUNT,          // This is unused, just for counting the number of elements.
-                    // Note that COUNT should always be the last element.
-  };
-
   class Observer : public base::CheckedObserver {
    public:
     virtual void OnFinalized() = 0;
   };
 
-  // Creates an instance of install attributes that will use the |tpm|. If |tpm|
-  // is NULL, InstallAttributes will proceed insecurely (unless it is set with
-  // SetTpm at a later time).
-  explicit InstallAttributes(Tpm* tpm);
+  // The provided pointers must outlive this instance.
+  InstallAttributes(Platform* platform, const hwsec::CryptohomeFrontend* hwsec);
+
   InstallAttributes(const InstallAttributes&) = delete;
   InstallAttributes& operator=(const InstallAttributes&) = delete;
 
   virtual ~InstallAttributes();
 
-  virtual Status status() const { return status_; }
+  Status status() override { return status_; }
 
   // Sets status (for testing).
   void set_status_for_testing(Status status) { status_ = status; }
 
-  // Updates the TPM used by Lockbox or disables the use of the TPM.
-  // This does NOT take ownership of the pointer.
-  virtual void SetTpm(Tpm* tpm);
-
   // Prepares the class for use including instantiating a new environment
-  // if needed. If initialization completes, |tpm| will be used to remove
-  // this instance's dependency on the TPM ownership.
-  virtual bool Init(Tpm* tpm);
+  // if needed.
+  [[nodiscard]] bool Init() override;
 
   // Populates |value| based on the content referenced by |name|.
   //
@@ -80,19 +63,8 @@ class InstallAttributes {
   // - value: pointer to a Blob to populate with the value, if found.
   // Returns true if |name| exists in the store and |value| will be populated.
   // Returns false if the |name| does not exist.
-  virtual bool Get(const std::string& name, brillo::Blob* value) const;
-
-  // Populates |name| and |value| based on the content referenced by |index|.
-  //
-  // Parameters
-  // - index: 0-addressable index of the desired entry.
-  // - name: addressable name of the entry to retrieve
-  // - value: pointer to a Blob to populate with the value, if found.
-  // Returns true if |index| exists in the store.
-  // Returns false if the |index| does not exist.
-  virtual bool GetByIndex(int index,
-                          std::string* name,
-                          brillo::Blob* value) const;
+  [[nodiscard]] bool Get(const std::string& name,
+                         brillo::Blob* value) const override;
 
   // Appends |name| and |value| as an attribute pair to the internal store.
   //
@@ -101,13 +73,21 @@ class InstallAttributes {
   // - value: Blob of data to store with |name|.
   // Returns true if the association can be stored, and false if it can't.
   // If the given |name| already exists, it will be replaced.
-  virtual bool Set(const std::string& name, const brillo::Blob& value);
+  [[nodiscard]] bool Set(const std::string& name,
+                         const brillo::Blob& value) override;
 
   // Finalizes the install-time attributes making them tamper-evident.
-  virtual bool Finalize();
+  [[nodiscard]] bool Finalize() override;
 
   // Returns the number of entries in the Lockbox.
-  virtual int Count() const;
+  int Count() const override;
+
+  // Indicates if there is hardware protection or not.
+  bool IsSecure() override;
+
+  // No-op in legacy install_attributes.
+  void SetDeviceManagementProxy(
+      std::unique_ptr<org::chromium::DeviceManagementProxy> proxy) override{};
 
   // Return InstallAttributes version.
   // This is populated from the default value in install_attributes.proto and
@@ -117,30 +97,11 @@ class InstallAttributes {
   // Allows overriding the version, often for testing.
   virtual void set_version(uint64_t version) { version_ = version; }
 
-  // Returns true if the attribute storage is securely stored.  It does not
-  // indicate if the store has been finalized, just if the system TPM/Lockbox
-  // is being used.
-  virtual bool is_secure() const { return is_secure_; }
-
-  virtual void set_is_secure(bool is_secure) { is_secure_ = is_secure; }
-
   // Allows replacement of the underlying lockbox.
   // This does NOT take ownership of the pointer.
   virtual void set_lockbox(Lockbox* lockbox) { lockbox_ = lockbox; }
 
   virtual Lockbox* lockbox() { return lockbox_; }
-
-  // Replaces the platform implementation.
-  // Does NOT take ownership of the pointer.
-  virtual void set_platform(Platform* platform) { platform_ = platform; }
-
-  virtual Platform* platform() { return platform_; }
-
-  // Returns a description of the system's install attributes as a Value.
-  //
-  // The Value is of type Dictionary, with keys "initialized", "version",
-  // "lockbox_index", "secure", "invalid", "first_install" and "size".
-  virtual base::Value GetStatus();
 
   void AddObserver(Observer* obs) { observer_list_.AddObserver(obs); }
 
@@ -161,6 +122,9 @@ class InstallAttributes {
   static const mode_t kCacheFilePermissions;
 
  protected:
+  // constructor for mock testing purpose.
+  InstallAttributes() {}
+
   // Helper to find a given entry index using its name.
   virtual int FindIndexByName(const std::string& name) const;
   // Convert the current attributes to a byte stream and write it
@@ -170,8 +134,20 @@ class InstallAttributes {
   bool ClearData();
 
  private:
+  // Populates |name| and |value| based on the content referenced by |index|.
+  //
+  // Parameters
+  // - index: 0-addressable index of the desired entry.
+  // - name: addressable name of the entry to retrieve
+  // - value: pointer to a Blob to populate with the value, if found.
+  // Returns true if |index| exists in the store.
+  // Returns false if the |index| does not exist.
+  [[nodiscard]] bool GetByIndex(int index,
+                                std::string* name,
+                                brillo::Blob* value) const;
+  Platform* const platform_ = nullptr;
+  const hwsec::CryptohomeFrontend* const hwsec_ = nullptr;
   Status status_ = Status::kUnknown;
-  bool is_secure_ = false;  // Indicates if there is hardware protection (TPM).
   base::FilePath data_file_;   // Location data is persisted to.
   base::FilePath cache_file_;  // World-readable data cache file.
   uint64_t version_ = 0;       // Default implementation version.
@@ -179,10 +155,9 @@ class InstallAttributes {
   std::unique_ptr<SerializedInstallAttributes> default_attributes_;
   std::unique_ptr<Lockbox> default_lockbox_;
   std::unique_ptr<Platform> default_platform_;
-  // Overridable dependency pointer which allow for easy injection.
+  // Overridable dependency pointers which allow for easy injection.
   SerializedInstallAttributes* attributes_ = nullptr;
   Lockbox* lockbox_ = nullptr;
-  Platform* platform_ = nullptr;
   base::ObserverList<Observer> observer_list_;
 };
 

@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -37,9 +37,12 @@ constexpr char kOwnershipTakenSignal[] = "SignalOwnershipTaken";
 constexpr const char* kTpmOwnerDependency_Nvram = "TpmOwnerDependency_Nvram";
 constexpr const char* kTpmOwnerDependency_Attestation =
     "TpmOwnerDependency_Attestation";
+constexpr const char* kTpmOwnerDependency_Bootlockbox =
+    "TpmOwnerDependency_Bootlockbox";
 
 constexpr const char* kInitialTpmOwnerDependencies[] = {
-    kTpmOwnerDependency_Nvram, kTpmOwnerDependency_Attestation};
+    kTpmOwnerDependency_Nvram, kTpmOwnerDependency_Attestation,
+    kTpmOwnerDependency_Bootlockbox};
 
 }  // namespace tpm_manager
 

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,10 @@
 #include <tuple>
 
 #include <base/barrier_closure.h>
-#include <base/bind.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
 #include <base/run_loop.h>
 #include <base/test/task_environment.h>
 #include <gmock/gmock.h>
@@ -25,7 +25,6 @@
 #include "diagnostics/cros_healthd/wilco_ec/ec_service_test_utils.h"
 
 namespace diagnostics {
-
 namespace {
 
 using testing::_;
@@ -188,5 +187,4 @@ TEST_F(StartedWilcoEcServiceTest, ReadManyEvent) {
 }
 
 }  // namespace
-
 }  // namespace diagnostics

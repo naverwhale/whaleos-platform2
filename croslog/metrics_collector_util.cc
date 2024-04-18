@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -73,8 +73,7 @@ void CalculateLogMetrics(const base::FilePath& path,
 
       // Keeps the timestamps only within 1 minute.
       recent_timestamps.push_back(entry->time());
-      while ((recent_timestamps.front() - entry->time()) >
-             base::TimeDelta::FromMinutes(1)) {
+      while ((recent_timestamps.front() - entry->time()) > base::Minutes(1)) {
         recent_timestamps.pop_front();
       }
 
@@ -120,8 +119,7 @@ void CalculateMultipleLogMetrics(Multiplexer* multiplexer,
 
       // Keeps the timestamps only within 1 minute.
       recent_timestamps.push_back(entry->time());
-      while ((recent_timestamps.front() - entry->time()) >
-             base::TimeDelta::FromMinutes(1)) {
+      while ((recent_timestamps.front() - entry->time()) > base::Minutes(1)) {
         recent_timestamps.pop_front();
       }
 

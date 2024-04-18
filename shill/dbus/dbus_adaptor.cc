@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,13 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 
 #include "shill/error.h"
 #include "shill/logging.h"
-#include "shill/property_store.h"
+#include "shill/store/property_store.h"
 
 using brillo::dbus_utils::DBusObject;
 
@@ -87,17 +87,8 @@ std::string DBusAdaptor::SanitizePathElement(const std::string& object_path) {
 
 ResultCallback DBusAdaptor::GetMethodReplyCallback(
     DBusMethodResponsePtr<> response) {
-  return base::Bind(&DBusAdaptor::MethodReplyCallback,
-                    weak_factory_.GetWeakPtr(), base::Passed(&response));
-}
-
-void DBusAdaptor::ReturnResultOrDefer(const ResultCallback& callback,
-                                      const Error& error) {
-  // Invoke response if command is completed synchronously (either
-  // success or failure).
-  if (!error.IsOngoing()) {
-    callback.Run(error);
-  }
+  return base::BindOnce(&DBusAdaptor::MethodReplyCallback,
+                        weak_factory_.GetWeakPtr(), std::move(response));
 }
 
 void DBusAdaptor::MethodReplyCallback(DBusMethodResponsePtr<> response,

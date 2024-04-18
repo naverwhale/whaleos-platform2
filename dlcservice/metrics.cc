@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -33,6 +33,8 @@ Metrics::InstallResultMap Metrics::install_result_ = {
     {kErrorNoImageFound, InstallResult::kFailedNoImageFound},  // dbus error
     {error::kFailedToVerifyImage, InstallResult::kFailedToVerifyImage},
     {error::kFailedToMountImage, InstallResult::kFailedToMountImage},
+    {error::kFailedCreationDuringHibernateResume,
+     InstallResult::kFailedCreationDuringHibernateResume},
 };
 
 Metrics::UninstallResultMap Metrics::uninstall_result_ = {
@@ -40,9 +42,7 @@ Metrics::UninstallResultMap Metrics::uninstall_result_ = {
     {kErrorBusy, UninstallResult::kFailedUpdateEngineBusy},  // dbus error
 };
 
-void Metrics::Init() {
-  metrics_library_->Init();
-}
+void Metrics::Init() {}
 
 void Metrics::SendInstallResultSuccess(const bool& installed_by_ue) {
   if (installed_by_ue) {
@@ -68,7 +68,6 @@ void Metrics::SendInstallResult(InstallResult result) {
   metrics_library_->SendEnumToUMA(
       metrics::kMetricInstallResult, static_cast<int>(result),
       static_cast<int>(InstallResult::kNumConstants));
-  // TODO(andrewlassalle): Remove log after 2020-12-25
   LOG(INFO) << "InstallResult metric sent:" << static_cast<int>(result);
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,7 @@
 #include <set>
 #include <string>
 #include <vector>
-
-#include <base/callback_forward.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <brillo/brillo_export.h>
 
@@ -25,7 +23,7 @@ namespace dbus_utils {
 //
 // Usage:
 //
-// void Init(const base::Callback<void(bool success)> cb) {
+// void Init(const base::OnceCallback<void(bool success)> cb) {
 //   scoped_refptr<AsyncEventSequencer> sequencer(
 //       new AsyncEventSequencer());
 //   one_delegate_needing_init_.Init(sequencer->GetHandler(
@@ -33,17 +31,18 @@ namespace dbus_utils {
 //   dbus_init_delegate_.Init(sequencer->GetExportHandler(
 //       "org.test.Interface", "ExposedMethodName",
 //       "another delegate is flaky", false));
-//   sequencer->OnAllTasksCompletedCall({cb});
+//   sequencer->OnAllTasksCompletedCall(std::move(cb));
 // }
 class BRILLO_EXPORT AsyncEventSequencer
     : public base::RefCounted<AsyncEventSequencer> {
  public:
-  using Handler = base::Callback<void(bool success)>;
-  using ExportHandler = base::Callback<void(const std::string& interface_name,
-                                            const std::string& method_name,
-                                            bool success)>;
-  using CompletionAction = base::Callback<void(bool all_succeeded)>;
-  using CompletionTask = base::Callback<void(void)>;
+  using Handler = base::OnceCallback<void(bool success)>;
+  using ExportHandler =
+      base::OnceCallback<void(const std::string& interface_name,
+                              const std::string& method_name,
+                              bool success)>;
+  using CompletionAction = base::OnceCallback<void(bool all_succeeded)>;
+  using CompletionTask = base::OnceClosure;
 
   AsyncEventSequencer();
   AsyncEventSequencer(const AsyncEventSequencer&) = delete;
@@ -64,13 +63,13 @@ class BRILLO_EXPORT AsyncEventSequencer
                                  bool failure_is_fatal);
 
   // Once all handlers obtained via GetHandler have run,
-  // we'll run each CompletionAction, then discard our references.
+  // we'll run the CompletionAction, then discard our reference.
   // No more handlers may be obtained after this call.
-  void OnAllTasksCompletedCall(std::vector<CompletionAction> actions);
+  void OnAllTasksCompletedCall(CompletionAction action);
 
   // Wrap a CompletionTask with a function that discards the result.
   // This CompletionTask retains no references to the AsyncEventSequencer.
-  static CompletionAction WrapCompletionTask(const CompletionTask& task);
+  static CompletionAction WrapCompletionTask(CompletionTask task);
   // Create a default CompletionAction that doesn't do anything when called.
   static CompletionAction GetDefaultCompletionAction();
 
@@ -85,7 +84,7 @@ class BRILLO_EXPORT AsyncEventSequencer
                                    bool success);
   // Similar to HandleFinish.
   BRILLO_PRIVATE void HandleDBusMethodExported(
-      const Handler& finish_handler,
+      Handler finish_handler,
       const std::string& expected_interface_name,
       const std::string& expected_method_name,
       const std::string& actual_interface_name,
@@ -100,7 +99,7 @@ class BRILLO_EXPORT AsyncEventSequencer
   bool started_{false};
   int registration_counter_{0};
   std::set<int> outstanding_registrations_;
-  std::vector<CompletionAction> completion_actions_;
+  CompletionAction completion_action_;
   bool had_failures_{false};
   // Ref counted objects have private destructors.
   ~AsyncEventSequencer();

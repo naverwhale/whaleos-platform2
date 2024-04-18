@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback_forward.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <brillo/brillo_export.h>
 #include <brillo/errors/error.h>
 #include <brillo/http/http_transport.h>
@@ -70,8 +69,8 @@ class BRILLO_EXPORT Connection
   virtual bool FinishRequest(brillo::ErrorPtr* error) = 0;
   // Send the request asynchronously and invoke the callback with the response
   // received. Returns the ID of the pending async request.
-  virtual RequestID FinishRequestAsync(const SuccessCallback& success_callback,
-                                       const ErrorCallback& error_callback) = 0;
+  virtual RequestID FinishRequestAsync(SuccessCallback success_callback,
+                                       ErrorCallback error_callback) = 0;
 
   // The following methods are used by http::Response object to obtain the
   // response data. They are used only after the response data has been received

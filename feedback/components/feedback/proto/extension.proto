@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,11 @@ syntax = "proto2";
 
 option optimize_for = LITE_RUNTIME;
 
+option go_package = "chromiumos/tast/local/bundles/cros/feedback/proto";
+
 package userfeedback;
 
-import "common.proto";
+import "common_data.proto";
 import "chrome.proto";
 import "dom.proto";
 import "math.proto";
@@ -19,7 +21,6 @@ import "web.proto";
 // Sent along with request for extension page when user attempts to open
 // feedback tab.
 message ExtensionPageRequestParams {
-
   required ExtensionDetails extension_details = 1;
 
   // Url of the page (without request params) that user wants to open
@@ -28,7 +29,6 @@ message ExtensionPageRequestParams {
 };
 
 message PostedScreenshot {
-
   required string mime_type = 1;
 
   required Dimensions dimensions = 2;
@@ -40,9 +40,8 @@ message PostedScreenshot {
 
 // Contains data about possible errors on the client side.
 // Describes number of attempts to send feedback and possible error codes/
-// exceptions which occured.
+// exceptions which occurred.
 message ExtensionErrors {
-
   required int32 number_of_attempts = 1;
 
   required string errors = 2;
@@ -50,7 +49,6 @@ message ExtensionErrors {
 
 // Sent when user hits final submit button.
 message ExtensionSubmit {
-
   required CommonData common_data = 1;
 
   required WebData web_data = 2;
@@ -72,7 +70,6 @@ message ExtensionSubmit {
 
 // A query for suggestions, sent when the user hits the preview button.
 message SuggestQuery {
-
   required CommonData common_data = 1;
 
   required WebData web_data = 2;

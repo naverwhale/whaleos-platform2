@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,10 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <pcrecpp.h>
 
-#include <base/strings/string_piece.h>
 #include <base/values.h>
 #include <gtest/gtest.h>
 
@@ -83,9 +83,9 @@ class StringFieldConverter : public FieldConverter {
   std::string ToString() const override;
 
   static std::unique_ptr<StringFieldConverter> Build(
-      const base::StringPiece& validate_rule);
+      std::string_view validate_rule);
 
-  StringFieldConverter(ValidatorOperator op, const base::StringPiece& operand)
+  StringFieldConverter(ValidatorOperator op, std::string_view operand)
       : operator_(op), operand_(operand) {
     if (op == ValidatorOperator::RE) {
       // pcrecpp::RE constructor will always succeed, but might set "error()" if
@@ -124,7 +124,7 @@ class StringFieldConverter : public FieldConverter {
 class IntegerFieldConverter : public FieldConverter {
  public:
   using FieldConverter::FieldConverter;
-  using OperandType = int;
+  using OperandType = int64_t;
 
   ReturnCode Convert(const std::string& field_name,
                      base::Value* dict_value) const override;
@@ -135,13 +135,13 @@ class IntegerFieldConverter : public FieldConverter {
   std::string ToString() const override;
 
   static std::unique_ptr<IntegerFieldConverter> Build(
-      const base::StringPiece& validate_rule);
+      std::string_view validate_rule);
 
   IntegerFieldConverter(ValidatorOperator op, OperandType operand)
       : operator_(op), operand_(operand) {}
 
-  static bool StringToOperand(base::StringPiece s, OperandType* output) {
-    return StringToInt(s, output);
+  static bool StringToOperand(std::string_view s, OperandType* output) {
+    return runtime_probe::StringToInt64(s, output);
   }
 
  private:
@@ -172,13 +172,13 @@ class HexFieldConverter : public FieldConverter {
   std::string ToString() const override;
 
   static std::unique_ptr<HexFieldConverter> Build(
-      const base::StringPiece& validate_rule);
+      std::string_view validate_rule);
 
   HexFieldConverter(ValidatorOperator op, OperandType operand)
       : operator_(op), operand_(operand) {}
 
-  static bool StringToOperand(base::StringPiece s, OperandType* output) {
-    return HexStringToInt64(s, output);
+  static bool StringToOperand(std::string_view s, OperandType* output) {
+    return runtime_probe::HexStringToInt64(s, output);
   }
 
  private:
@@ -206,13 +206,13 @@ class DoubleFieldConverter : public FieldConverter {
   std::string ToString() const override;
 
   static std::unique_ptr<DoubleFieldConverter> Build(
-      const base::StringPiece& validate_rule);
+      std::string_view validate_rule);
 
   DoubleFieldConverter(ValidatorOperator op, OperandType operand)
       : operator_(op), operand_(operand) {}
 
-  static bool StringToOperand(base::StringPiece s, OperandType* output) {
-    return StringToDouble(s, output);
+  static bool StringToOperand(std::string_view s, OperandType* output) {
+    return runtime_probe::StringToDouble(s, output);
   }
 
  private:

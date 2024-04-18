@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,22 +8,20 @@
 #include <stdint.h>
 
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/time/time.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class BacklightObserver;
 
 // Interface for getting and setting the backlight level from hardware.
 class BacklightInterface {
  public:
-  BacklightInterface() {}
+  BacklightInterface() = default;
   BacklightInterface(const BacklightInterface&) = delete;
   BacklightInterface& operator=(const BacklightInterface&) = delete;
 
-  virtual ~BacklightInterface() {}
+  virtual ~BacklightInterface() = default;
 
   enum class BrightnessScale {
     kUnknown,
@@ -37,7 +35,7 @@ class BacklightInterface {
 
   // Returns true iff the underlying backlight device is present.
   // If not, other methods may report failure.
-  virtual bool DeviceExists() = 0;
+  virtual bool DeviceExists() const = 0;
 
   // Gets the maximum brightness level (in an an arbitrary device-specific
   // range; note that 0 is always the minimum allowable value, though).
@@ -57,7 +55,6 @@ class BacklightInterface {
   virtual bool TransitionInProgress() const = 0;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_BACKLIGHT_INTERFACE_H_

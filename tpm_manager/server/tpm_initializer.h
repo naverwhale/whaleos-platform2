@@ -1,9 +1,11 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef TPM_MANAGER_SERVER_TPM_INITIALIZER_H_
 #define TPM_MANAGER_SERVER_TPM_INITIALIZER_H_
+
+#include <string>
 
 #include "tpm_manager/server/dictionary_attack_reset_status.h"
 
@@ -65,6 +67,11 @@ class TpmInitializer {
   // Note that this function doesn't guarantee to remove all stale data if there
   // is a TPM and/or disk IO error. It does the work in its best effort.
   virtual void PruneStoredPasswords() = 0;
+
+  // Changes TPM owner password from `old_password` to `new_password`.
+  // Returns true on success, false otherwise.
+  virtual bool ChangeOwnerPassword(const std::string& old_password,
+                                   const std::string& new_password) = 0;
 };
 
 }  // namespace tpm_manager

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,10 @@
 #ifndef LIBHWSEC_OVERALLS_OVERALLS_H_
 #define LIBHWSEC_OVERALLS_OVERALLS_H_
 
+#include <trousers/trousers.h>
 #include <trousers/tss.h>
-#include <trousers/trousers.h>  // NOLINT(build/include_alpha) - needs tss.h
+
+#include "libhwsec/tss_utils/extended_apis.h"
 
 namespace hwsec {
 namespace overalls {
@@ -33,28 +35,139 @@ class Overalls {
                                        BYTE* blob) {
     return Trspi_UnloadBlob_UINT32(offset, out, blob);
   }
+  virtual TSS_RESULT Orspi_UnloadBlob_UINT32_s(UINT64* offset,
+                                               UINT32* out,
+                                               BYTE* blob,
+                                               UINT64 capacity) {
+    return Trspi_UnloadBlob_UINT32_s(offset, out, blob, capacity);
+  }
   virtual void Orspi_UnloadBlob_UINT16(UINT64* offset,
                                        UINT16* out,
                                        BYTE* blob) {
     return Trspi_UnloadBlob_UINT16(offset, out, blob);
   }
-  virtual TSS_RESULT Orspi_UnloadBlob_PUBKEY(UINT64* offset,
-                                             BYTE* blob,
-                                             TCPA_PUBKEY* pubKey) {
-    return Trspi_UnloadBlob_PUBKEY(offset, blob, pubKey);
+  virtual TSS_RESULT Orspi_UnloadBlob_UINT16_s(UINT64* offset,
+                                               UINT16* out,
+                                               BYTE* blob,
+                                               UINT64 capacity) {
+    return Trspi_UnloadBlob_UINT16_s(offset, out, blob, capacity);
   }
-  virtual TSS_RESULT Orspi_UnloadBlob_KEY12(UINT64* offset,
-                                            BYTE* blob,
-                                            TPM_KEY12* key) {
-    return Trspi_UnloadBlob_KEY12(offset, blob, key);
+  virtual TSS_RESULT Orspi_UnloadBlob_RSA_KEY_PARMS_s(
+      UINT64* offset, BYTE* blob, UINT64 capacity, TCPA_RSA_KEY_PARMS* parms) {
+    return Trspi_UnloadBlob_RSA_KEY_PARMS_s(offset, blob, capacity, parms);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_PCR_SELECTION(UINT64* offset,
+                                                    BYTE* blob,
+                                                    TCPA_PCR_SELECTION* pcr) {
+    return Trspi_UnloadBlob_PCR_SELECTION(offset, blob, pcr);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_PUBKEY_s(UINT64* offset,
+                                               BYTE* blob,
+                                               UINT64 capacity,
+                                               TCPA_PUBKEY* pubKey) {
+    return Trspi_UnloadBlob_PUBKEY_s(offset, blob, capacity, pubKey);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_KEY12_s(UINT64* offset,
+                                              BYTE* blob,
+                                              UINT64 capacity,
+                                              TPM_KEY12* key) {
+    return Trspi_UnloadBlob_KEY12_s(offset, blob, capacity, key);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_SYMMETRIC_KEY(UINT64* offset,
+                                                    BYTE* blob,
+                                                    TCPA_SYMMETRIC_KEY* key) {
+    return Trspi_UnloadBlob_SYMMETRIC_KEY(offset, blob, key);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_IDENTITY_REQ(UINT64* offset,
+                                                   BYTE* blob,
+                                                   TCPA_IDENTITY_REQ* req) {
+    return Trspi_UnloadBlob_IDENTITY_REQ(offset, blob, req);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_IDENTITY_PROOF(
+      UINT64* offset, BYTE* blob, TCPA_IDENTITY_PROOF* proof) {
+    return Trspi_UnloadBlob_IDENTITY_PROOF(offset, blob, proof);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_CERTIFY_INFO(UINT64* offset,
+                                                   BYTE* blob,
+                                                   TPM_CERTIFY_INFO* c) {
+    return Trspi_UnloadBlob_CERTIFY_INFO(offset, blob, c);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_TPM_DELEGATE_OWNER_BLOB(
+      UINT64* offset, BYTE* blob, TPM_DELEGATE_OWNER_BLOB* owner) {
+    return Trspi_UnloadBlob_TPM_DELEGATE_OWNER_BLOB(offset, blob, owner);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_TPM_DELEGATE_OWNER_BLOB_s(
+      UINT64* offset,
+      BYTE* blob,
+      UINT64 capacity,
+      TPM_DELEGATE_OWNER_BLOB* owner) {
+    return Trspi_UnloadBlob_TPM_DELEGATE_OWNER_BLOB_s(offset, blob, capacity,
+                                                      owner);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_CAP_VERSION_INFO_s(
+      UINT64* offset, BYTE* blob, UINT64 capacity, TPM_CAP_VERSION_INFO* v) {
+    return Trspi_UnloadBlob_CAP_VERSION_INFO_s(offset, blob, capacity, v);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_NV_DATA_PUBLIC(UINT64* offset,
+                                                     BYTE* blob,
+                                                     TPM_NV_DATA_PUBLIC* v) {
+    return Trspi_UnloadBlob_NV_DATA_PUBLIC(offset, blob, v);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_NV_DATA_PUBLIC_s(UINT64* offset,
+                                                       BYTE* blob,
+                                                       UINT64 capacity,
+                                                       TPM_NV_DATA_PUBLIC* v) {
+    return Trspi_UnloadBlob_NV_DATA_PUBLIC_s(offset, blob, capacity, v);
+  }
+  virtual TSS_RESULT Orspi_UnloadBlob_DA_INFO_s(UINT64* offset,
+                                                BYTE* blob,
+                                                UINT64 capacity,
+                                                TPM_DA_INFO* info) {
+    return Trspi_UnloadBlob_DA_INFO_s(offset, blob, capacity, info);
   }
   virtual void Orspi_LoadBlob_UINT32(UINT64* offset, UINT32 in, BYTE* blob) {
     return Trspi_LoadBlob_UINT32(offset, in, blob);
+  }
+  virtual void Orspi_LoadBlob_UINT16(UINT64* offset, UINT16 in, BYTE* blob) {
+    return Trspi_LoadBlob_UINT16(offset, in, blob);
+  }
+  virtual void Orspi_LoadBlob_BYTE(UINT64* offset, BYTE data, BYTE* blob) {
+    return Trspi_LoadBlob_BYTE(offset, data, blob);
+  }
+  virtual void Orspi_LoadBlob_RSA_KEY_PARMS(UINT64* offset,
+                                            BYTE* blob,
+                                            TCPA_RSA_KEY_PARMS* parms) {
+    return Trspi_LoadBlob_RSA_KEY_PARMS(offset, blob, parms);
+  }
+  virtual void Orspi_LoadBlob_PCR_INFO_SHORT(UINT64* offset,
+                                             BYTE* blob,
+                                             TPM_PCR_INFO_SHORT* pcr) {
+    return Trspi_LoadBlob_PCR_INFO_SHORT(offset, blob, pcr);
   }
   virtual void Orspi_LoadBlob_PUBKEY(UINT64* offset,
                                      BYTE* blob,
                                      TCPA_PUBKEY* pubKey) {
     return Trspi_LoadBlob_PUBKEY(offset, blob, pubKey);
+  }
+  virtual void Orspi_LoadBlob_KEY12(UINT64* offset,
+                                    BYTE* blob,
+                                    TPM_KEY12* key) {
+    return Trspi_LoadBlob_KEY12(offset, blob, key);
+  }
+  virtual void Orspi_LoadBlob_SYM_CA_ATTESTATION(UINT64* offset,
+                                                 BYTE* blob,
+                                                 TCPA_SYM_CA_ATTESTATION* sym) {
+    return Trspi_LoadBlob_SYM_CA_ATTESTATION(offset, blob, sym);
+  }
+  virtual void Orspi_LoadBlob_ASYM_CA_CONTENTS(UINT64* offset,
+                                               BYTE* blob,
+                                               TCPA_ASYM_CA_CONTENTS* asym) {
+    return Trspi_LoadBlob_ASYM_CA_CONTENTS(offset, blob, asym);
+  }
+  virtual void Orspi_LoadBlob_MSA_COMPOSITE(UINT64* offset,
+                                            BYTE* blob,
+                                            TPM_MSA_COMPOSITE* msaComp) {
+    return Trspi_LoadBlob_MSA_COMPOSITE(offset, blob, msaComp);
   }
   virtual TSS_RESULT Orspi_SymDecrypt(UINT16 alg,
                                       UINT16 mode,
@@ -69,6 +182,9 @@ class Overalls {
   virtual TSS_RESULT Orspi_MGF1(
       UINT32 alg, UINT32 seedLen, BYTE* seed, UINT32 outLen, BYTE* out) {
     return Trspi_MGF1(alg, seedLen, seed, outLen, out);
+  }
+  virtual BYTE* Orspi_Native_To_UNICODE(BYTE* string, unsigned* len) {
+    return Trspi_Native_To_UNICODE(string, len);
   }
   virtual char* Orspi_Error_String(TSS_RESULT arg0) {
     return Trspi_Error_String(arg0);
@@ -164,6 +280,9 @@ class Overalls {
                                            BYTE* rgbSecret) {
     return Tspi_Policy_SetSecret(hPolicy, secretMode, ulSecretLength,
                                  rgbSecret);
+  }
+  virtual TSS_RESULT Ospi_Policy_FlushSecret(TSS_HPOLICY hPolicy) {
+    return Tspi_Policy_FlushSecret(hPolicy);
   }
   virtual TSS_RESULT Ospi_Policy_AssignToObject(TSS_HPOLICY hPolicy,
                                                 TSS_HOBJECT hObject) {
@@ -292,6 +411,21 @@ class Overalls {
                                               TSS_HMIGDATA hSigData) {
     return Tspi_TPM_CMKCreateTicket(hTPM, hVerifyKey, hSigData);
   }
+  virtual TSS_RESULT Ospi_TPM_Delegate_AddFamily(TSS_HTPM hTPM,
+                                                 BYTE bLabel,
+                                                 TSS_HDELFAMILY* phFamily) {
+    return Tspi_TPM_Delegate_AddFamily(hTPM, bLabel, phFamily);
+  }
+  virtual TSS_RESULT Ospi_TPM_Delegate_CreateDelegation(
+      TSS_HOBJECT hObject,
+      BYTE bLabel,
+      UINT32 ulFlags,
+      TSS_HPCRS hPcr,
+      TSS_HDELFAMILY hFamily,
+      TSS_HPOLICY hDelegation) {
+    return Tspi_TPM_Delegate_CreateDelegation(hObject, bLabel, ulFlags, hPcr,
+                                              hFamily, hDelegation);
+  }
   virtual TSS_RESULT Ospi_PcrComposite_SelectPcrIndex(TSS_HPCRS hPcrComposite,
                                                       UINT32 ulPcrIndex) {
     return Tspi_PcrComposite_SelectPcrIndex(hPcrComposite, ulPcrIndex);
@@ -406,6 +540,10 @@ class Overalls {
                                        UINT32* ulDataLength,
                                        BYTE** rgbDataRead) {
     return Tspi_NV_ReadValue(hNVStore, offset, ulDataLength, rgbDataRead);
+  }
+  virtual TSS_RESULT Ospi_Context_SecureFreeMemory(TSS_HCONTEXT hContext,
+                                                   BYTE* rgbMemory) {
+    return Tspi_Context_SecureFreeMemory(hContext, rgbMemory);
   }
 };
 

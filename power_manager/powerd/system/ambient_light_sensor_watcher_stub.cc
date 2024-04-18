@@ -1,28 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/system/ambient_light_sensor_watcher_stub.h"
 
-namespace power_manager {
-namespace system {
-
-const std::vector<AmbientLightSensorInfo>&
-AmbientLightSensorWatcherStub::GetAmbientLightSensors() const {
-  return ambient_light_sensors_;
-}
-
-void AmbientLightSensorWatcherStub::AddObserver(
-    AmbientLightSensorWatcherObserver* observer) {
-  DCHECK(observer);
-  observers_.AddObserver(observer);
-}
-
-void AmbientLightSensorWatcherStub::RemoveObserver(
-    AmbientLightSensorWatcherObserver* observer) {
-  DCHECK(observer);
-  observers_.RemoveObserver(observer);
-}
+namespace power_manager::system {
 
 void AmbientLightSensorWatcherStub::AddSensor(
     const AmbientLightSensorInfo& device_info) {
@@ -60,5 +42,4 @@ void AmbientLightSensorWatcherStub::RemoveSensor(
   }
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

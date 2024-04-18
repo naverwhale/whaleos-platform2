@@ -1,10 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <algorithm>
 #include <string>
-#include <tuple>
+#include <string_view>
 #include <utility>
 
 #include <base/check.h>
@@ -13,43 +13,18 @@
 #include <base/logging.h>
 #include <base/strings/string_util.h>
 
+#include "runtime_probe/system/context.h"
 #include "runtime_probe/utils/file_utils.h"
 
-using base::FilePath;
-using base::ReadFileToStringWithMaxSize;
-using base::TrimWhitespaceASCII;
-using base::Value;
-using base::TrimPositions::TRIM_ALL;
-using std::pair;
-using std::string;
-using std::vector;
-
+namespace runtime_probe {
 namespace {
 
 constexpr int kReadFileMaxSize = 1024;
 constexpr int kGlobIterateCountLimit = 32768;
 
-// Get string to be used as key name in |MapFilesToDict|.
-const string& GetKeyName(const string& key) {
-  return key;
-}
-
-const string& GetKeyName(const pair<string, string>& key) {
-  return key.first;
-}
-
-// Get string to be used as file name in |MapFilesToDict|.
-const string& GetFileName(const string& key) {
-  return key;
-}
-
-const string& GetFileName(const pair<string, string>& key) {
-  return key.second;
-}
-
 bool ReadFile(const base::FilePath& dir_path,
-              const string& file_name,
-              string* out) {
+              std::string_view file_name,
+              std::string& out) {
   if (base::FilePath{file_name}.IsAbsolute()) {
     LOG(ERROR) << "file_name " << file_name << " is absolute";
     return false;
@@ -57,31 +32,17 @@ bool ReadFile(const base::FilePath& dir_path,
   const auto file_path = dir_path.Append(file_name);
   if (!base::PathExists(file_path))
     return false;
-  if (!ReadFileToStringWithMaxSize(file_path, out, kReadFileMaxSize)) {
+  if (!ReadAndTrimFileToString(file_path, out)) {
     LOG(ERROR) << file_path.value() << " exists, but we can't read it";
     return false;
   }
-  TrimWhitespaceASCII(*out, TRIM_ALL, out);
   return true;
 }
 
-template <typename KeyType>
-bool ReadFileToDict(const FilePath& dir_path,
-                    const KeyType& key,
-                    Value* result) {
-  const string& file_name = GetFileName(key);
-  string content;
-  if (!ReadFile(dir_path, file_name, &content))
-    return false;
-  const string& key_name = GetKeyName(key);
-  result->SetStringKey(key_name, content);
-  return true;
-}
-
-bool HasPathWildcard(const string& path) {
+bool HasPathWildcard(const std::string& path) {
   const std::string wildcard = "*?[";
   for (const auto& c : path) {
-    if (wildcard.find(c) != string::npos)
+    if (wildcard.find(c) != std::string::npos)
       return true;
   }
   return false;
@@ -121,41 +82,43 @@ std::vector<base::FilePath> GlobInternal(
 
 }  // namespace
 
-namespace runtime_probe {
+namespace internal {
 
-template <typename KeyType>
-base::Optional<Value> MapFilesToDict(const FilePath& dir_path,
-                                     const vector<KeyType>& keys,
-                                     const vector<KeyType>& optional_keys) {
-  Value result(Value::Type::DICTIONARY);
-
-  for (const auto& key : keys) {
-    if (!ReadFileToDict(dir_path, key, &result)) {
-      LOG(ERROR) << "file: \"" << GetFileName(key) << "\" is required.";
-      return base::nullopt;
-    }
-  }
-  for (const auto& key : optional_keys) {
-    ReadFileToDict(dir_path, key, &result);
-  }
-  return result;
+bool ReadFileToDict(const base::FilePath& dir_path,
+                    std::string_view key,
+                    bool log_error,
+                    base::Value& result) {
+  return ReadFileToDict(dir_path, {key, key}, log_error, result);
 }
 
-// Explicit template instantiation
-template base::Optional<Value> MapFilesToDict<string>(
-    const FilePath& dir_path,
-    const vector<string>& keys,
-    const vector<string>& optional_keys);
+bool ReadFileToDict(const base::FilePath& dir_path,
+                    const std::pair<std::string_view, std::string_view>& key,
+                    bool log_error,
+                    base::Value& result) {
+  std::string_view file_name = key.second;
+  std::string content;
+  if (!ReadFile(dir_path, file_name, content)) {
+    LOG_IF(ERROR, log_error) << "file \"" << file_name << "\" is required.";
+    return false;
+  }
+  std::string_view key_name = key.first;
+  result.GetDict().Set(key_name, content);
+  return true;
+}
 
-// Explicit template instantiation
-template base::Optional<Value> MapFilesToDict<pair<string, string>>(
-    const FilePath& dir_path,
-    const vector<pair<string, string>>& keys,
-    const vector<pair<string, string>>& optional_keys);
+}  // namespace internal
+
+bool ReadAndTrimFileToString(const base::FilePath& file_path,
+                             std::string& out) {
+  if (!base::ReadFileToStringWithMaxSize(file_path, &out, kReadFileMaxSize)) {
+    return false;
+  }
+  base::TrimWhitespaceASCII(out, base::TrimPositions::TRIM_ALL, &out);
+  return true;
+}
 
 std::vector<base::FilePath> Glob(const base::FilePath& pattern) {
-  std::vector<std::string> components;
-  pattern.GetComponents(&components);
+  std::vector<std::string> components = pattern.GetComponents();
   int iterate_counter = 0;
   auto res = GlobInternal(base::FilePath(components[0]), components, 1,
                           &iterate_counter);
@@ -169,6 +132,26 @@ std::vector<base::FilePath> Glob(const base::FilePath& pattern) {
 
 std::vector<base::FilePath> Glob(const std::string& pattern) {
   return Glob(base::FilePath(pattern));
+}
+
+base::FilePath GetRootedPath(const base::FilePath& path) {
+  CHECK(!path.empty());
+  CHECK(path.IsAbsolute());
+  const base::FilePath& root_dir = Context::Get()->root_dir();
+
+  // Special case for who only want to get the root dir, which is not supported
+  // by `AppendRelativePath()`.
+  if (path == base::FilePath("/"))
+    return root_dir;
+  base::FilePath res = root_dir;
+  CHECK(base::FilePath("/").AppendRelativePath(path, &res))
+      << "Cannot append path " << path << " to " << root_dir
+      << " related to /.";
+  return res;
+}
+
+base::FilePath GetRootedPath(std::string_view path) {
+  return GetRootedPath(base::FilePath{path});
 }
 
 }  // namespace runtime_probe

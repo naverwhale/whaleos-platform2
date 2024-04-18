@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,10 +15,12 @@
 #include <metrics/metrics_library.h>
 #include <trunks/cr50_headers/u2f.h>
 
+#include "u2fd/client/u2f_apdu.h"
+#include "u2fd/client/u2f_corp_firmware_version.h"
+#include "u2fd/client/user_state.h"
 #include "u2fd/hid_interface.h"
-#include "u2fd/u2f_apdu.h"
+#include "u2fd/u2f_corp_processor_interface.h"
 #include "u2fd/u2f_msg_handler_interface.h"
-#include "u2fd/user_state.h"
 
 namespace u2f {
 
@@ -49,12 +51,14 @@ class U2fHid {
   // U2FHID Command codes
   enum class U2fHidCommand : uint8_t {
     kPing = 1,
+    kAtr = 2,
     kMsg = 3,
     kLock = 4,
     kVendorSysInfo = 5,
     kInit = 6,
     kWink = 8,
     kError = 0x3f,
+    kMetrics = 0x41,
   };
 
   // U2FHID error codes
@@ -74,7 +78,10 @@ class U2fHid {
   // Create a new virtual U2F HID Device. Does not take ownership of
   // msg_handler, which must outlive this instance.
   U2fHid(std::unique_ptr<HidInterface> hid,
-         U2fMessageHandlerInterface* msg_handler);
+         U2fCorpFirmwareVersion fw_version,
+         std::string dev_id,
+         U2fMessageHandlerInterface* msg_handler,
+         U2fCorpProcessorInterface* u2f_corp_processor);
   U2fHid(const U2fHid&) = delete;
   U2fHid& operator=(const U2fHid&) = delete;
 
@@ -83,11 +90,13 @@ class U2fHid {
 
  private:
   // U2FHID protocol commands implementation.
+  int CmdAtr(std::string* resp);
   void CmdInit(uint32_t cid, const std::string& payload);
   int CmdLock(std::string* resp);
   int CmdMsg(std::string* resp);
   int CmdPing(std::string* resp);
   int CmdSysInfo(std::string* resp);
+  int CmdMetrics(std::string* resp);
 
   // Fully resets the state of the possibly on-going U2FHID transaction.
   void ClearTransaction();
@@ -116,10 +125,13 @@ class U2fHid {
   void ProcessReport(const std::string& report);
 
   std::unique_ptr<HidInterface> hid_;
+  const U2fCorpFirmwareVersion fw_version_;
+  const std::string dev_id_;
   uint32_t free_cid_;
   uint32_t locked_cid_;
   base::OneShotTimer lock_timeout_;
   U2fMessageHandlerInterface* msg_handler_;
+  U2fCorpProcessorInterface* u2f_corp_processor_;
 
   class HidPacket;
   class HidMessage;

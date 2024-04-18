@@ -1,12 +1,12 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/encryption/decryption.h"
 
 #include <limits>
-#include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <base/containers/span.h>
@@ -15,10 +15,8 @@
 #include <base/rand_util.h>
 #include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
-#include <base/strings/string_piece.h>
-#include <base/task/post_task.h>
+#include <base/task/task_runner.h>
 #include <base/task/thread_pool.h>
-#include <base/task_runner.h>
 
 #include "missive/encryption/encryption.h"
 #include "missive/encryption/primitives.h"
@@ -26,16 +24,15 @@
 #include "missive/util/status.h"
 #include "missive/util/statusor.h"
 
-namespace reporting {
-namespace test {
+namespace reporting::test {
 
-Decryptor::Handle::Handle(base::StringPiece shared_secret,
+Decryptor::Handle::Handle(std::string_view shared_secret,
                           scoped_refptr<Decryptor> decryptor)
     : shared_secret_(shared_secret), decryptor_(decryptor) {}
 
 Decryptor::Handle::~Handle() = default;
 
-void Decryptor::Handle::AddToRecord(base::StringPiece data,
+void Decryptor::Handle::AddToRecord(std::string_view data,
                                     base::OnceCallback<void(Status)> cb) {
   // Add piece of data to the record.
   record_.append(data.data(), data.size());
@@ -43,7 +40,7 @@ void Decryptor::Handle::AddToRecord(base::StringPiece data,
 }
 
 void Decryptor::Handle::CloseRecord(
-    base::OnceCallback<void(StatusOr<base::StringPiece>)> cb) {
+    base::OnceCallback<void(StatusOr<std::string_view>)> cb) {
   // Make sure the record self-destructs when returning from this method.
   const auto self_destruct = base::WrapUnique(this);
 
@@ -66,13 +63,13 @@ void Decryptor::Handle::CloseRecord(
   std::move(cb).Run(decrypted);
 }
 
-void Decryptor::OpenRecord(base::StringPiece shared_secret,
+void Decryptor::OpenRecord(std::string_view shared_secret,
                            base::OnceCallback<void(StatusOr<Handle*>)> cb) {
   std::move(cb).Run(new Handle(shared_secret, this));
 }
 
 StatusOr<std::string> Decryptor::DecryptSecret(
-    base::StringPiece private_key, base::StringPiece peer_public_value) {
+    std::string_view private_key, std::string_view peer_public_value) {
   // Verify the keys.
   if (private_key.size() != kKeySize) {
     return Status(error::FAILED_PRECONDITION,
@@ -107,8 +104,8 @@ Decryptor::Decryptor()
 Decryptor::~Decryptor() = default;
 
 void Decryptor::RecordKeyPair(
-    base::StringPiece private_key,
-    base::StringPiece public_key,
+    std::string_view private_key,
+    std::string_view public_key,
     base::OnceCallback<void(StatusOr<Encryptor::PublicKeyId>)> cb) {
   // Schedule key recording on the sequenced task runner.
   keys_sequenced_task_runner_->PostTask(
@@ -175,8 +172,8 @@ void Decryptor::RetrieveMatchingPrivateKey(
             DCHECK_CALLED_ON_VALID_SEQUENCE(decryptor->keys_sequence_checker_);
             auto key_info_it = decryptor->keys_.find(public_key_id);
             if (key_info_it != decryptor->keys_.end()) {
-              DCHECK_EQ(key_info_it->second.private_key.size(),
-                        static_cast<size_t>(kKeySize));
+              CHECK_EQ(key_info_it->second.private_key.size(),
+                       static_cast<size_t>(kKeySize));
             }
             // Schedule response on a generic thread pool.
             base::ThreadPool::PostTask(
@@ -199,5 +196,4 @@ StatusOr<scoped_refptr<Decryptor>> Decryptor::Create() {
   return base::WrapRefCounted(new Decryptor());
 }
 
-}  // namespace test
-}  // namespace reporting
+}  // namespace reporting::test

@@ -1,10 +1,10 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ethernet/ethernet_eap_service.h"
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
 

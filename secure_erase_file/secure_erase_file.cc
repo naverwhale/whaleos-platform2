@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,6 +30,7 @@
 #include <base/process/launch.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#include <brillo/blkdev_utils/get_backing_block_device.h>
 
 namespace secure_erase_file {
 namespace {
@@ -50,48 +51,14 @@ constexpr int kMaxExtents = 32;
 // chunks instead of reading the whole file at once.
 constexpr size_t kVerifyReadSizeBytes = 1024 * 1024;
 
-const char kMountsPath[] = "/proc/mounts";
-
-// Given a file path, return the corresponding mount entry info in /proc/mount.
-// TODO(teravest): This will not work for files on eCryptfs partitions.
-// See Platform::FindFilesystemDevice() in cryptohome for logic that would work
-// for more paths.
-std::string PartitionForPath(const base::FilePath& file_path) {
-  std::string partition;
-
-  const std::string path = file_path.value();
-  std::unique_ptr<FILE, int (*)(FILE*)> mnts(setmntent(kMountsPath, "re"),
-                                             endmntent);
-  if (!mnts) {
-    PLOG(ERROR) << "Unable to open " << kMountsPath;
-    return std::string();
-  }
-
-  size_t best_length = 0;
-  auto best_mntent = std::make_unique<struct mntent>();
-
-  struct mntent* mnt;
-  // getmntent() returns a thread local, so it's safe.
-  while ((mnt = getmntent(mnts.get())) != nullptr) {
-    auto l = strlen(mnt->mnt_dir);
-    if (l > best_length && path.size() > l && path[l] == '/' &&
-        path.compare(0, l, mnt->mnt_dir) == 0) {
-      partition = std::string(mnt->mnt_fsname);
-      best_length = l;
-    }
-  }
-
-  if (best_length == 0) {
-    LOG(ERROR) << "Didn't find a partition to match path " << path;
-  }
-  return partition;
-}
-
 // Verifies that the data for an extent has been erased by seeking within the
 // partition and confirming that the original file data is erased.
 //
 // Returns true only if the read succeeds and all bytes are 0x00 or 0xFF.
-bool VerifyExtentErased(int partition_fd, uint64_t start, uint64_t len) {
+bool VerifyExtentErased(int partition_fd,
+                        uint64_t start,
+                        uint64_t len,
+                        bool zero_only) {
   // NOTE: This verification scheme assumes that blocks can be read after being
   // trimmed. According to gwendal@, this is not true for NVMe 1.3 devices with
   // NSFEAT bit 2 set to 1. If that is something we need to support, we could
@@ -113,7 +80,7 @@ bool VerifyExtentErased(int partition_fd, uint64_t start, uint64_t len) {
     }
     for (int i = 0; i < rc; i++) {
       unsigned char ch = buf.get()[i];
-      if (ch != 0x00 && ch != 0xFF) {
+      if (ch != 0x00 && (zero_only || ch != 0xFF)) {
         LOG(ERROR) << "Found uncleared data at partition byte: "
                    << start + (len - to_read) + i;
         return false;
@@ -207,15 +174,46 @@ bool TrimExtents(int partition_fd, const struct fiemap* fm) {
   return true;
 }
 
-// Verifies that the data in given extents cannot be recovered.
-bool VerifyExtentsErased(int partition_fd, const struct fiemap* fm) {
+// Zero extents specified in |fm| on the partition specified in |partition_fd|.
+bool ZeroExtents(int partition_fd, const struct fiemap* fm) {
   for (uint32_t i = 0; i < fm->fm_mapped_extents; i++) {
-    if (!VerifyExtentErased(partition_fd, fm->fm_extents[i].fe_physical,
-                            fm->fm_extents[i].fe_length)) {
+    uint64_t range[2];
+    range[0] = fm->fm_extents[i].fe_physical;
+    range[1] = fm->fm_extents[i].fe_length;
+
+    if (HANDLE_EINTR(ioctl(partition_fd, BLKZEROOUT, &range)) < 0) {
+      PLOG(ERROR) << "Unable to BLKZEROOUT target range";
       return false;
     }
   }
   return true;
+}
+
+// Verifies that the data in given extents cannot be recovered.
+bool VerifyExtentsErased(int partition_fd,
+                         const struct fiemap* fm,
+                         bool zero_only) {
+  for (uint32_t i = 0; i < fm->fm_mapped_extents; i++) {
+    if (!VerifyExtentErased(partition_fd, fm->fm_extents[i].fe_physical,
+                            fm->fm_extents[i].fe_length, zero_only)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsDevMmc(const base::FilePath& path) {
+  struct stat stat_buf;
+  if (stat(path.value().c_str(), &stat_buf) < 0) {
+    PLOG(WARNING) << "Could not stat: " << path.value();
+    return false;
+  }
+
+  if (major(stat_buf.st_rdev) == MMC_BLOCK_MAJOR) {
+    return true;
+  }
+
+  return false;
 }
 
 }  // namespace
@@ -232,15 +230,13 @@ bool IsSupported(const base::FilePath& path) {
   }
 
   // Note that this prevents us from supporting files on mount points like /var.
-  // TODO(teravest): Support files that aren't directly mounted.
-  if (major(stat_buf.st_dev) != MMC_BLOCK_MAJOR) {
-    LOG(WARNING) << "secure_erase_file only supports eMMC devices. "
-                 << "Ineligible file: " << path.value();
-    return false;
+  if (IsDevMmc(brillo::GetBackingLogicalDeviceForFile(path))) {
+    return true;
   }
 
-  // TODO(teravest): Send EXT_CSD commands to probe for eMMC command support.
-  return true;
+  LOG(WARNING) << "secure_erase_file only supports eMMC devices. "
+               << "Ineligible file: " << path.value();
+  return false;
 }
 
 bool SecureErase(const base::FilePath& path) {
@@ -256,7 +252,7 @@ bool SecureErase(const base::FilePath& path) {
     return false;
   }
 
-  std::string partition = PartitionForPath(path);
+  std::string partition = brillo::GetBackingLogicalDeviceForFile(path).value();
   if (partition.empty()) {
     LOG(ERROR) << "Partition could not be found for file: " << path.value();
     return false;
@@ -272,7 +268,54 @@ bool SecureErase(const base::FilePath& path) {
     return false;
   }
 
-  if (!VerifyExtentsErased(partition_fd.get(), fm.get())) {
+  if (!VerifyExtentsErased(partition_fd.get(), fm.get(), /*zero_only=*/false)) {
+    return false;
+  }
+
+  if (unlink(path.value().c_str()) < 0) {
+    PLOG(ERROR) << "Failed to unlink() file: " << path.value();
+    return false;
+  }
+  sync();
+
+  return true;
+}
+
+bool ZeroFile(const base::FilePath& path) {
+  struct stat stat_buf;
+  if (stat(path.value().c_str(), &stat_buf) < 0) {
+    PLOG(WARNING) << "Could not stat: " << path.value();
+    return false;
+  }
+  if (!S_ISREG(stat_buf.st_mode)) {
+    LOG(WARNING) << "File is not a regular file: " << path.value();
+    return false;
+  }
+
+  ScopedFiemap fm = GetExtentsForFile(path);
+  if (!fm) {
+    LOG(ERROR) << "Failed to get extents for file: " << path.value();
+    return false;
+  }
+
+  base::FilePath dev_node = brillo::GetBackingLogicalDeviceForFile(path);
+  if (dev_node.empty()) {
+    PLOG(ERROR) << "Can not find backing logical device for a file: " << path;
+    return false;
+  }
+
+  base::ScopedFD dev_fd(
+      open(dev_node.value().c_str(), O_RDWR | O_LARGEFILE | O_CLOEXEC));
+  if (dev_fd.get() < 0) {
+    PLOG(ERROR) << "Unable to open partition: " << dev_node;
+    return false;
+  }
+
+  if (!ZeroExtents(dev_fd.get(), fm.get())) {
+    return false;
+  }
+
+  if (!VerifyExtentsErased(dev_fd.get(), fm.get(), /*zero_only=*/true)) {
     return false;
   }
 

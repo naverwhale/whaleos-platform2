@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,10 +9,11 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
+#include <net-base/rtnl_handler.h>
 
 #include "shill/event_dispatcher.h"
+#include "shill/metrics.h"
 
 namespace shill {
 
@@ -21,14 +22,11 @@ class ControlInterface;
 class DHCPProvider;
 class Error;
 class Manager;
-class Metrics;
-class ProcessManager;
-class RoutingTable;
-class RTNLHandler;
-
-#if !defined(DISABLE_WIFI)
+class MojoServiceProvider;
 class NetlinkManager;
-#endif  // !defined(DISABLE_WIFI)
+class ProcessManager;
+class RoutingPolicyService;
+class RoutingTable;
 
 // DaemonTask contains most of the logic used in ShillDaemon (e.g.
 // init/shutdown, start/stop). This class is kept separate from ShillDaemon to
@@ -40,22 +38,9 @@ class DaemonTask {
  public:
   // Run-time settings retrieved from command line.
   struct Settings {
-    Settings()
-        : ignore_unknown_ethernet(false),
-          minimum_mtu(0),
-          passive_mode(false),
-          use_portal_list(false) {}
-    std::string accept_hostname_from;
-    std::string default_technology_order;
     std::vector<std::string> devices_blocked;
     std::vector<std::string> devices_allowed;
-    std::vector<std::string> dhcpv6_enabled_devices;
-    bool ignore_unknown_ethernet;
-    int minimum_mtu;
-    bool passive_mode;
-    std::string portal_list;
-    std::string prepend_dns_servers;
-    bool use_portal_list;
+    bool ignore_unknown_ethernet = false;
   };
 
   DaemonTask(const Settings& settings, Config* config);
@@ -71,7 +56,7 @@ class DaemonTask {
   // otherwise. Arranges for |completion_callback| to be invoked after
   // all asynchronous work completes, but ignores
   // |completion_callback| if no asynchronous work is required.
-  virtual bool Quit(const base::Closure& completion_callback);
+  virtual bool Quit(base::OnceClosure completion_callback);
 
   // Break the termination loop started in DaemonTask::OnShutdown. Invoked
   // after shill completes its termination tasks during shutdown.
@@ -100,15 +85,15 @@ class DaemonTask {
   std::unique_ptr<EventDispatcher> dispatcher_;
   std::unique_ptr<ControlInterface> control_;
   std::unique_ptr<Metrics> metrics_;
-  RTNLHandler* rtnl_handler_;
+  net_base::RTNLHandler* rtnl_handler_;
   RoutingTable* routing_table_;
+  RoutingPolicyService* rule_table_;
   DHCPProvider* dhcp_provider_;
-#if !defined(DISABLE_WIFI)
   NetlinkManager* netlink_manager_;
-#endif  // !defined(DISABLE_WIFI)
   ProcessManager* process_manager_;
   std::unique_ptr<Manager> manager_;
-  base::Closure termination_completed_callback_;
+  std::unique_ptr<MojoServiceProvider> mojo_provider_;
+  base::OnceClosure termination_completed_callback_;
 };
 
 }  // namespace shill

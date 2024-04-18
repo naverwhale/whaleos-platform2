@@ -1,12 +1,13 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2016 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Next MinVersion: 8
+// Next MinVersion: 10
 
 module arc.mojom;
 
 import "arc/vm/libvda/gpu/mojom/video_decode_accelerator.mojom";
+import "arc/vm/libvda/gpu/mojom/video_decoder.mojom";
 import "arc/vm/libvda/gpu/mojom/video_encode_accelerator.mojom";
 import "arc/vm/libvda/gpu/mojom/video_protected_buffer_allocator.mojom";
 
@@ -21,17 +22,15 @@ interface VideoHost {
                                              string token);
 };
 
+// Deprecated method IDs: 0
 // Next method ID: 2
 interface VideoInstance {
-  // DEPRECATED: Please use Init@1 instead.
-  InitDeprecated@0(pending_remote<VideoHost> host_remote);
-
   // Establishes full-duplex communication with the host.
   [MinVersion=5] Init@1(pending_remote<VideoHost> host_remote) => ();
 };
 
 // Deprecated method IDs: 0
-// Next method ID: 4
+// Next method ID: 5
 interface VideoAcceleratorFactory {
   [MinVersion=1]
   CreateEncodeAccelerator@1(
@@ -41,7 +40,12 @@ interface VideoAcceleratorFactory {
   CreateDecodeAccelerator@2(
       pending_receiver<VideoDecodeAccelerator> video_decoder);
 
-  [Minversion=7]
+  // Create a new |video_decoder| instance.
+  [MinVersion=9]
+  CreateVideoDecoder@4(
+      pending_receiver<VideoDecoder> video_decoder);
+
+  [MinVersion=7]
   CreateProtectedBufferAllocator@3(
       pending_receiver<VideoProtectedBufferAllocator>
            video_protected_buffer_allocator);

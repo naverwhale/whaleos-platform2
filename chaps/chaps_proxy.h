@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 #include <vector>
 
 #include <base/at_exit.h>
+#include <base/functional/callback_forward.h>
 #include <base/memory/ref_counted.h>
-#include <base/synchronization/lock.h>
 #include <base/threading/thread.h>
 #include <brillo/secure_blob.h>
 #include <chaps/proto_bindings/ck_structs.pb.h>
@@ -19,12 +19,14 @@
 #include <dbus/message.h>
 
 #include "chaps/chaps_interface.h"
+#include "chaps/threading_mode.h"
+#include "pkcs11/cryptoki.h"
 
 namespace chaps {
 
 // ChapsProxyImpl is the default implementation of the chaps proxy interface.
 // All calls are forwarded to a libchrome proxy object.
-class ChapsProxyImpl : public ChapsInterface {
+class EXPORT_SPEC ChapsProxyImpl : public ChapsInterface {
  public:
   // Factory method for creating a new proxy. The proxy requires that an
   // AtExitManager is instantiated. |shadow_at_exit| flag passed to Create()
@@ -34,8 +36,12 @@ class ChapsProxyImpl : public ChapsInterface {
   // instantiate it themselves and still pass false here. Only those callers
   // that may or may not have AtExitManager depending on how they are called in
   // turn, should pass true as |shadow_at_exit|.
-  static std::unique_ptr<ChapsProxyImpl> Create(bool shadow_at_exit);
+  static std::unique_ptr<ChapsProxyImpl> Create(bool shadow_at_exit,
+                                                ThreadingMode mode);
   ~ChapsProxyImpl() override;
+
+  ChapsProxyImpl(const ChapsProxyImpl&) = delete;
+  ChapsProxyImpl& operator=(const ChapsProxyImpl&) = delete;
 
   bool OpenIsolate(brillo::SecureBlob* isolate_credential,
                    bool* new_isolate_created);
@@ -45,11 +51,8 @@ class ChapsProxyImpl : public ChapsInterface {
                  const brillo::SecureBlob& auth_data,
                  const std::string& label,
                  uint64_t* slot_id);
-  void UnloadToken(const brillo::SecureBlob& isolate_credential,
+  bool UnloadToken(const brillo::SecureBlob& isolate_credential,
                    const std::string& path);
-  void ChangeTokenAuthData(const std::string& path,
-                           const brillo::SecureBlob& old_auth_data,
-                           const brillo::SecureBlob& new_auth_data);
   bool GetTokenPath(const brillo::SecureBlob& isolate_credential,
                     uint64_t slot_id,
                     std::string* path);
@@ -364,10 +367,7 @@ class ChapsProxyImpl : public ChapsInterface {
   // Use the static factory method to create a ChapsProxyImpl.
   explicit ChapsProxyImpl(std::unique_ptr<base::AtExitManager> at_exit);
 
-  ChapsProxyImpl(const ChapsProxyImpl&) = delete;
-  ChapsProxyImpl& operator=(const ChapsProxyImpl&) = delete;
-
-  void InitializationTask(base::WaitableEvent* completion, bool* connected);
+  void InitializationTask(base::OnceClosure callback, bool* connected);
   void ShutdownTask();
 
   template <typename MethodType, typename... Args>

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 #include <base/time/time.h>
 
@@ -18,8 +19,20 @@ using GeolocationInfo = std::map<std::string, std::string>;
 
 // Helper functions to serialize and transform the last-seen time for a
 // geolocation object, so up-to-date age values can be returned over D-Bus.
-void AddLastSeenTime(GeolocationInfo* info, const base::TimeTicks& time);
+void AddLastSeenTime(GeolocationInfo* info, const base::Time& time);
 GeolocationInfo PrepareGeolocationInfoForExport(const GeolocationInfo& info);
+
+bool IsGeolocationInfoOlderThan(const GeolocationInfo& geoinfo,
+                                base::TimeDelta expiration);
+
+// Populate |oldest_timestamp| and |newest_timestamp| with the last seen time of
+// the oldest and newest endpoints in |geoinfos|, respectively.
+void GeolocationInfoAgeRange(const std::vector<GeolocationInfo>& geoinfos,
+                             base::Time* oldest_timestamp,
+                             base::Time* newest_timestamp);
+
+// Convert a geolocation information object into string.
+std::string GeolocationInfoToString(const GeolocationInfo& geoinfo);
 
 }  // namespace shill
 

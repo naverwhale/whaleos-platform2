@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <utility>
 
 namespace diagnostics {
+namespace wilco {
 
 // static
 SystemFilesService::FileDump MockSystemFilesService::CopyFileDump(
@@ -36,4 +37,5 @@ MockSystemFilesService::MockSystemFilesService() = default;
 
 MockSystemFilesService::~MockSystemFilesService() = default;
 
+}  // namespace wilco
 }  // namespace diagnostics

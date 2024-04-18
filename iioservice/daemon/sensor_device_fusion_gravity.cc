@@ -1,9 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "iioservice/daemon/sensor_device_fusion_gravity.h"
 
+#include <optional>
 #include <utility>
 
 #include <base/logging.h>
@@ -61,8 +62,8 @@ void SensorDeviceFusionGravity::GetChannelsAttributes(
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
 
   // Do not provide gravity device channels' attributes.
-  std::move(callback).Run(std::vector<base::Optional<std::string>>(
-      iio_chn_indices.size(), base::nullopt));
+  std::move(callback).Run(std::vector<std::optional<std::string>>(
+      iio_chn_indices.size(), std::nullopt));
 }
 
 void SensorDeviceFusionGravity::UpdateRequestedFrequency(double frequency) {
@@ -149,7 +150,7 @@ SensorDeviceFusionGravity::SensorDeviceFusionGravity(
 
 void SensorDeviceFusionGravity::GetScaleCallback(
     cros::mojom::DeviceType type,
-    const std::vector<base::Optional<std::string>>& values) {
+    const std::vector<std::optional<std::string>>& values) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
 
   double scale = 1.0;

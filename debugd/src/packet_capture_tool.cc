@@ -1,12 +1,21 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "debugd/src/packet_capture_tool.h"
 
+#include <memory>
+#include <string>
+#include <unistd.h>
+#include <utility>
+#include <sys/select.h>
+
+#include <base/files/file_descriptor_watcher_posix.h>
+#include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
-#include <string>
 
 #include "debugd/src/error_utils.h"
 #include "debugd/src/helper_utils.h"
@@ -20,6 +29,49 @@ namespace {
 
 const char kPacketCaptureToolErrorString[] =
     "org.chromium.debugd.error.PacketCapture";
+
+bool CreateStatusPipe(base::ScopedFD* read_fd, base::ScopedFD* write_fd) {
+  int pipe_fd[2];
+  int ret = pipe(pipe_fd);
+  if (ret != 0) {
+    return false;
+  }
+  read_fd->reset(pipe_fd[0]);
+  write_fd->reset(pipe_fd[1]);
+  return true;
+}
+
+// Reads the status from the given file descriptor with a timeout of 3 seconds.
+// Returns true if "1" is successfully read from the pipe, returns false
+// otherwise.
+bool ReadStatusFromPipe(int read_fd) {
+  fd_set set;
+  struct timeval timeout;
+  int rv;
+  // The helper process (capture_packets.cc) will write "1" to the pipe on
+  // successful start.
+  char buff[1];
+  int len = 1;
+
+  FD_ZERO(&set);
+  FD_SET(read_fd, &set);
+
+  // The timeout will be three seconds for read.
+  timeout.tv_sec = 3;
+  timeout.tv_usec = 0;
+
+  rv = select(read_fd + 1, &set, NULL, NULL, &timeout);
+  if (rv == -1) {
+    PLOG(ERROR) << "packet_capture: failed to read from pipe";
+    return false;
+  } else if (rv == 0) {
+    // The read operation didn't complete on time.
+    return false;
+  } else {
+    // The character we read must be "1".
+    return base::ReadFromFD(read_fd, buff, len) && buff[0] == '1';
+  }
+}
 
 bool ValidateInterfaceName(const std::string& name) {
   for (char c : name) {
@@ -100,6 +152,8 @@ bool CheckDeviceBasedCaptureMode(const brillo::VariantDictionary& options,
   // present in device based capture mode.
   if (debugd::GetOption(options, "device", &device_value, error) !=
       debugd::ParseResult::PARSED) {
+    DEBUGD_ADD_ERROR(error, kPacketCaptureToolErrorString,
+                     "Option 'device' is required.");
     return false;
   }
   int freq_value;
@@ -107,6 +161,9 @@ bool CheckDeviceBasedCaptureMode(const brillo::VariantDictionary& options,
   // present in device based capture mode.
   if (debugd::GetOption(options, "frequency", &freq_value, error) ==
       debugd::ParseResult::PARSED) {
+    DEBUGD_ADD_ERROR(
+        error, kPacketCaptureToolErrorString,
+        "Option 'frequency' cannot be present in device based capture mode.");
     return false;
   }
   std::string frequency_based_options[] = {"ht_location", "vht_width",
@@ -118,6 +175,11 @@ bool CheckDeviceBasedCaptureMode(const brillo::VariantDictionary& options,
     debugd::ParseResult result =
         debugd::GetOption(options, option, &val, error);
     if (result == debugd::ParseResult::PARSED) {
+      DEBUGD_ADD_ERROR_FMT(
+          error, kPacketCaptureToolErrorString,
+          "Frequency-based option '%s' cannot be present in device based "
+          "capture mode.",
+          val.c_str());
       return false;
     }
   }
@@ -136,6 +198,7 @@ debugd::ProcessWithId*
 PacketCaptureTool::CreateCaptureProcessForFrequencyBasedCapture(
     const brillo::VariantDictionary& options,
     int output_fd,
+    int status_fd,
     brillo::ErrorPtr* error) {
   std::string exec_path;
   if (!GetHelperPath("capture_utility.sh", &exec_path)) {
@@ -153,22 +216,24 @@ PacketCaptureTool::CreateCaptureProcessForFrequencyBasedCapture(
   }
   p->AddArg(exec_path);
   if (!AddValidatedStringOption(p, options, "device", "--device", error))
-    return nullptr;
-  if (!AddIntOption(p, options, "max_size", "--max-size", error))
-    return nullptr;
+    return nullptr;  // DEBUGD_ADD_ERROR is already called.
   if (!AddIntOption(p, options, "frequency", "--frequency", error))
-    return nullptr;
+    return nullptr;  // DEBUGD_ADD_ERROR is already called.
   if (!AddValidatedStringOption(p, options, "ht_location", "--ht-location",
                                 error))
-    return nullptr;
+    return nullptr;  // DEBUGD_ADD_ERROR is already called.
   if (!AddValidatedStringOption(p, options, "vht_width", "--vht-width", error))
-    return nullptr;
+    return nullptr;  // DEBUGD_ADD_ERROR is already called.
   if (!AddValidatedStringOption(p, options, "monitor_connection_on",
                                 "--monitor-connection-on", error))
-    return nullptr;
+    return nullptr;  // DEBUGD_ADD_ERROR is already called.
+  int max_size = 0;
+  debugd::GetOption(options, "max_size", &max_size, error);
+  p->AddIntOption("--max-size", max_size);
   // Pass the output fd of the pcap as a command line option to the child
   // process.
   p->AddIntOption("--output-file", output_fd);
+  p->AddIntOption("--status-pipe", status_fd);
 
   return p;
 }
@@ -179,6 +244,7 @@ debugd::ProcessWithId*
 PacketCaptureTool::CreateCaptureProcessForDeviceBasedCapture(
     const brillo::VariantDictionary& options,
     int output_fd,
+    int status_fd,
     brillo::ErrorPtr* error) {
   std::string exec_path;
   if (!GetHelperPath("capture_packets", &exec_path)) {
@@ -195,8 +261,8 @@ PacketCaptureTool::CreateCaptureProcessForDeviceBasedCapture(
     return nullptr;
   }
   p->AddArg(exec_path);
-  // capture_packets executable takes three arguments as <device> <output_file>
-  // <max_size>
+  // capture_packets executable takes four arguments as <device> <output_file>
+  // <max_size> <status_pipe>
   std::string device;
   // device option must be present and successfully parsed in order to create
   // process.
@@ -212,8 +278,25 @@ PacketCaptureTool::CreateCaptureProcessForDeviceBasedCapture(
   int max_size = 0;
   debugd::GetOption(options, "max_size", &max_size, error);
   p->AddArg(std::to_string(max_size));
+  p->AddArg(std::to_string(status_fd));
 
   return p;
+}
+
+void PacketCaptureTool::OnPacketCaptureStopped(std::string helper_process) {
+  auto process_info_iter = helper_processes_.find(helper_process);
+  if (process_info_iter == helper_processes_.end()) {
+    // Helper process has already been cleaned up. Don't need to do anything.
+    return;
+  }
+  base::OnceClosure callback =
+      std::move(process_info_iter->second.on_stopped_callback);
+  helper_processes_.erase(process_info_iter);
+  std::move(callback).Run();
+}
+
+bool PacketCaptureTool::HasActivePacketCaptureProcess() {
+  return !helper_processes_.empty();
 }
 
 bool PacketCaptureTool::Start(bool is_dev_mode,
@@ -221,6 +304,7 @@ bool PacketCaptureTool::Start(bool is_dev_mode,
                               const base::ScopedFD& output_fd,
                               const brillo::VariantDictionary& options,
                               std::string* out_id,
+                              base::OnceClosure on_stopped_callback,
                               brillo::ErrorPtr* error) {
   if (!IsDevicePacketCaptureAllowed(error)) {
     DEBUGD_ADD_ERROR(error, kPacketCaptureToolErrorString,
@@ -233,16 +317,25 @@ bool PacketCaptureTool::Start(bool is_dev_mode,
   // The fd in the child that we bind output_fd to. Since all other fd's are
   // cleared automatically, picking a hardcoded value should be safe.
   int child_output_fd = STDERR_FILENO + 1;
+
+  // Create a pipe to check the child process state and send the write end of
+  // the pipe to the child process.
+  base::ScopedFD write_fd, read_fd;
+  if (!CreateStatusPipe(&read_fd, &write_fd)) {
+    DEBUGD_ADD_ERROR(error, kPacketCaptureToolErrorString,
+                     "Cannot create a pipe");
+    return false;
+  }
   // Check if the capture will be device-based or frequency-based and create
   // helper process accordingly using different executables.
   // TODO(b/188391723): Merge capture_utility.sh and capture_packets executables
   // into one.
   if (CheckDeviceBasedCaptureMode(options, error)) {
     p = CreateCaptureProcessForDeviceBasedCapture(options, child_output_fd,
-                                                  error);
+                                                  write_fd.get(), error);
   } else if (is_dev_mode) {
     p = CreateCaptureProcessForFrequencyBasedCapture(options, child_output_fd,
-                                                     error);
+                                                     write_fd.get(), error);
   } else {
     DEBUGD_ADD_ERROR(
         error, kPacketCaptureToolErrorString,
@@ -255,11 +348,35 @@ bool PacketCaptureTool::Start(bool is_dev_mode,
                      "Failed to create helper process.");
     return false;
   }
+
   p->BindFd(output_fd.get(), child_output_fd);
   p->BindFd(status_fd.get(), STDOUT_FILENO);
   p->BindFd(status_fd.get(), STDERR_FILENO);
+  p->BindFd(write_fd.get(), write_fd.get());
+
   LOG(INFO) << "packet_capture: running process id: " << p->id();
   p->Start();
+
+  // Read the helper process status from the pipe and check if it was
+  // successful.
+  if (!ReadStatusFromPipe(read_fd.get())) {
+    DEBUGD_ADD_ERROR(error, kPacketCaptureToolErrorString,
+                     "Packet capture helper process failed to start.");
+    return false;
+  }
+
+  // Watch the read end of the pipe. Since we read from the pipe already, the
+  // pipe will be readable again when the helper process closes the pipe. It
+  // means the packet capture has stopped.
+  std::unique_ptr<base::FileDescriptorWatcher::Controller> fd_watcher =
+      base::FileDescriptorWatcher::WatchReadable(
+          read_fd.get(),
+          base::BindRepeating(&PacketCaptureTool::OnPacketCaptureStopped,
+                              base::Unretained(this), p->id()));
+
+  helper_processes_.insert(std::make_pair(
+      p->id(), ChildProcessInfo(std::move(read_fd), std::move(fd_watcher),
+                                std::move(on_stopped_callback))));
   *out_id = p->id();
   return true;
 }

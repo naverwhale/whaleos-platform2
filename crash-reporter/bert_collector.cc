@@ -1,17 +1,21 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/bert_collector.h"
 
 #include <fcntl.h>
-#include <string>
 #include <sys/stat.h>
+
+#include <memory>
+#include <string>
 
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 
-#include "crash-reporter/util.h"
+#include "crash-reporter/constants.h"
 
 using base::FilePath;
 
@@ -21,6 +25,7 @@ constexpr char kACPITablePath[] = "/sys/firmware/acpi/tables";
 constexpr char kBertTable[] = "BERT";
 constexpr char kBertData[] = "data/BERT";
 constexpr char kBertErrorName[] = "bert_error";
+const char kSignatureKey[] = "sig";
 
 // Validate BERT table signature, length and region length.
 bool BertCheckTable(const struct acpi_table_bert& bert_table) {
@@ -67,12 +72,17 @@ bool BertRead(const FilePath& bert_table_path,
 
 }  // namespace
 
-BERTCollector::BERTCollector()
-    : CrashCollector("bert"), acpitable_path_(kACPITablePath) {}
+BERTCollector::BERTCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("bert", metrics_lib), acpitable_path_(kACPITablePath) {}
 
 BERTCollector::~BERTCollector() {}
 
-bool BERTCollector::Collect() {
+bool BERTCollector::Collect(bool use_saved_lsb) {
+  SetUseSavedLsb(use_saved_lsb);
+
   FilePath root_crash_directory;
 
   const FilePath bert_table_path = acpitable_path_.Append(kBertTable);
@@ -98,8 +108,8 @@ bool BERTCollector::Collect() {
   }
 
   // Dump BERT table and BERT data into single bertdump file.
-  if (!GetCreatedCrashDirectoryByEuid(kRootUid, &root_crash_directory,
-                                      nullptr)) {
+  if (!GetCreatedCrashDirectoryByEuid(constants::kRootUid,
+                                      &root_crash_directory, nullptr)) {
     return false;
   }
   std::string dump_basename =
@@ -123,9 +133,11 @@ bool BERTCollector::Collect() {
     return false;
   }
 
+  AddCrashMetaData(kSignatureKey, kBertErrorName);
+
   // Create meta file with bert dump info and finish up.
   FinishCrash(GetCrashPath(root_crash_directory, dump_basename, "meta"),
-              kBertErrorName, bert_crash_path.value());
+              kBertErrorName, bert_crash_path.BaseName().value());
 
   VLOG(3) << "Stored BERT dump to " << bert_crash_path.value();
 

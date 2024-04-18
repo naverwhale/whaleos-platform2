@@ -1,17 +1,18 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef CRASH_REPORTER_CRASH_SENDER_BASE_H_
 #define CRASH_REPORTER_CRASH_SENDER_BASE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file.h>
 #include <base/files/file_path.h>
+#include <base/functional/callback.h>
 #include <base/time/clock.h>
 #include <base/time/time.h>
 #include <brillo/key_value_store.h>
@@ -21,9 +22,9 @@
 namespace util {
 
 // Maximum time to wait for ensuring a meta file is complete.
-constexpr base::TimeDelta kMaxHoldOffTime = base::TimeDelta::FromSeconds(30);
-constexpr char kUndefined[] = "undefined";
-constexpr char kChromeOsProduct[] = "ChromeOS";
+inline constexpr base::TimeDelta kMaxHoldOffTime = base::Seconds(30);
+inline constexpr char kUndefined[] = "undefined";
+inline constexpr char kChromeOsProduct[] = "ChromeOS";
 
 // Crash information obtained in ChooseAction().
 struct CrashInfo {
@@ -132,25 +133,41 @@ bool GetSleepTime(const base::FilePath& meta_file,
 // empty string is returned.
 std::string GetClientId();
 
+class ScopedProcessingFileBase {
+ public:
+  // Disallow copy and assign (and implicitly, move).
+  ScopedProcessingFileBase(const ScopedProcessingFileBase& other) = delete;
+  ScopedProcessingFileBase& operator=(const ScopedProcessingFileBase& other) =
+      delete;
+  virtual ~ScopedProcessingFileBase();
+
+ protected:
+  ScopedProcessingFileBase();
+};
+
 // This class assists us in recovering from crashes while processing crashes.
 // When it is constructed, it attempts to create a ".processing" file for the
 // given metadata file, and when it is destructed it removes it.
 // If crash_sender crashes, or otherwise exits without running the destructor,
 // the .processing file will still exist. ChooseAction uses the existence of
 // this file to determine that the crash may be malformed and avoid processing
-// it again.
-class ScopedProcessingFile {
+// it again. It also has a dummy sibling `DummyScopedProcessingFile` that
+// handles situations that ".processing" files shouldn't be created, such as the
+// dry run mode.
+class ScopedProcessingFile : public ScopedProcessingFileBase {
  public:
   explicit ScopedProcessingFile(const base::FilePath& meta_file);
-
-  // Disallow copy and assign (and implicitly, move).
-  ScopedProcessingFile(const ScopedProcessingFile& other) = delete;
-  ScopedProcessingFile& operator=(const ScopedProcessingFile& other) = delete;
-
-  ~ScopedProcessingFile();
+  ~ScopedProcessingFile() override;
 
  private:
   const base::FilePath processing_file_;
+};
+
+// A sibling of `ScopedProcessingFile` that does nothing.
+class DummyScopedProcessingFile : public ScopedProcessingFileBase {
+ public:
+  explicit DummyScopedProcessingFile(const base::FilePath& meta_file);
+  ~DummyScopedProcessingFile() override;
 };
 
 // Base class for crash reading functionality. Used by both crash sender and
@@ -206,8 +223,9 @@ class SenderBase {
     // Do not remove just yet
     kRetryUploading = 15,
     kLaCrosVersionTooOld = 16,
+    kDryRun = 17,
     // Keep kSendReasonCount one larger than any other enum value.
-    kSendReasonCount = 17,
+    kSendReasonCount = 18,
   };
 
   // Lock the lock file so no concurrently running process can access the
@@ -250,7 +268,7 @@ class SenderBase {
       bool allow_old_os_timestamps,
       std::string* reason,
       CrashInfo* info,
-      std::unique_ptr<ScopedProcessingFile>* processing_file);
+      std::unique_ptr<ScopedProcessingFileBase>* processing_file);
 
   // Record the reason for removing a crash.
   virtual void RecordCrashRemoveReason(CrashRemoveReason reason) = 0;
@@ -266,10 +284,15 @@ class SenderBase {
   const bool log_extra_times_ = false;
 
  private:
+  // Creates a `ScopedProcessingFileBase` object. Called in
+  // EvaluateMetaFileMinimal.
+  virtual std::unique_ptr<ScopedProcessingFileBase> MakeScopedProcessingFile(
+      const base::FilePath& meta_file) = 0;
+
   // Looks through |keys| in the os-release data using brillo::OsReleaseReader.
   // Keys are searched in order until a value is found. Returns the value in
   // the Optional if found, otherwise the Optional is empty.
-  base::Optional<std::string> GetOsReleaseValue(
+  std::optional<std::string> GetOsReleaseValue(
       const std::vector<std::string>& keys);
 
   std::unique_ptr<base::Clock> clock_;

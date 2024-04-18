@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define POWER_MANAGER_POWERD_POLICY_INPUT_DEVICE_CONTROLLER_H_
 
 #include <string>
-
-#include <base/macros.h>
 
 #include "power_manager/common/power_constants.h"
 #include "power_manager/powerd/policy/backlight_controller_observer.h"
@@ -65,7 +63,7 @@ class InputDeviceController : public policy::BacklightControllerObserver,
     TABLET,       // Tablet mode, e.g. lid open more than 180 degrees.
   };
 
-  InputDeviceController();
+  InputDeviceController() = default;
   InputDeviceController(const InputDeviceController&) = delete;
   InputDeviceController& operator=(const InputDeviceController&) = delete;
 

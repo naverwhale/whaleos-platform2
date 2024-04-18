@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,25 +7,40 @@
 
 namespace tpm_manager {
 
-constexpr char kDictionaryAttackResetStatusHistogram[] =
+inline constexpr char kDictionaryAttackResetStatusHistogram[] =
     "Platform.TPM.DictionaryAttackResetStatus";
-constexpr char kDictionaryAttackCounterHistogram[] =
+inline constexpr char kDictionaryAttackCounterHistogram[] =
     "Platform.TPM.DictionaryAttackCounter";
-constexpr char kTPMVersionFingerprint[] = "Platform.TPM.VersionFingerprint";
-constexpr char kTPMTimeToTakeOwnership[] = "Platform.TPM.TimeToTakeOwnership";
+inline constexpr char kTPMVersionFingerprint[] =
+    "Platform.TPM.VersionFingerprint";
+inline constexpr char kTPMTimeToTakeOwnership[] =
+    "Platform.TPM.TimeToTakeOwnership";
+inline constexpr char kTPMAlertsHistogram[] = "Platform.TPM.HardwareAlerts";
+inline constexpr char kTPMPowerWashResult[] = "Platform.TPM.PowerWashResult";
+inline constexpr char kTPMTakeOwnershipResult[] =
+    "Platform.TPM.TakeOwnershipResult";
 
 // The secret status records the presence of each secret in the bit fields along
 // with the TPM version information. Currently only the least significant byte
 // is used.
-constexpr char kSecretStatusHitogram[] = "Platform.TPM.TpmManagerSecretStatus";
-constexpr int kSecretStatusHasResetLockPermissions = 1 << 0;
-constexpr int kSecretStatusHasOwnerDelegate = 1 << 1;
-constexpr int kSecretStatusHasLockoutPassword = 1 << 2;
-constexpr int kSecretStatusHasEndorsementPassword = 1 << 3;
-constexpr int kSecretStatusHasOwnerPassword = 1 << 4;
+inline constexpr char kSecretStatusHitogram[] =
+    "Platform.TPM.TpmManagerSecretStatus";
+inline constexpr int kSecretStatusHasResetLockPermissions = 1 << 0;
+inline constexpr int kSecretStatusHasOwnerDelegate = 1 << 1;
+inline constexpr int kSecretStatusHasLockoutPassword = 1 << 2;
+inline constexpr int kSecretStatusHasEndorsementPassword = 1 << 3;
+inline constexpr int kSecretStatusHasOwnerPassword = 1 << 4;
 // (1<<5) ~ (1<<6) are reserved for future use.
-constexpr int kSecretStatusIsTpm2 = 1 << 7;
-constexpr int kSecretMaxBit = kSecretStatusIsTpm2;
+inline constexpr int kSecretStatusIsTpm2 = 1 << 7;
+inline constexpr int kSecretMaxBit = kSecretStatusIsTpm2;
+
+inline constexpr char kFilesystemUtilization[] =
+    "Platform.TPM.FilesystemUtilization";
+inline constexpr char kFilesystemInitTime[] = "Platform.TPM.FilesystemInitTime";
+inline constexpr char kApRoVerificationTime[] =
+    "Platform.TPM.ApRoVerificationTime";
+inline constexpr char kExpandedApRoVerificationStatus[] =
+    "Platform.TPM.ExpandedApRoVerificationStatus";
 
 }  // namespace tpm_manager
 

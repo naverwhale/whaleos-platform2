@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,8 @@
 #include <termios.h>
 
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 
-namespace vm_tools {
-namespace vsh {
+namespace vm_tools::vsh {
 
 // ScopedTermios is a helper class for managing termios settings,
 // namely raw/canonical mode. When an instance of this class goes
@@ -37,15 +35,14 @@ class ScopedTermios {
   bool Restore();
 
   // Gets the raw FD for this terminal.
-  int GetRawFD();
+  int GetRawFD() const;
 
  private:
   base::ScopedFD tty_fd_;
-  bool has_termios_;
+  bool has_termios_ = false;
   struct termios saved_termios_;
 };
 
-}  // namespace vsh
-}  // namespace vm_tools
+}  // namespace vm_tools::vsh
 
 #endif  // VM_TOOLS_VSH_SCOPED_TERMIOS_H_

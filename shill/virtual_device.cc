@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,19 +7,13 @@
 #include <netinet/ether.h>
 #include <linux/if.h>  // NOLINT - Needs definitions from netinet/ether.h
 
-#include "shill/logging.h"
-#include "shill/net/rtnl_handler.h"
+#include <memory>
+#include <string>
+#include <utility>
 
-#include <base/logging.h>
+#include "shill/manager.h"
 
 namespace shill {
-
-namespace Logging {
-static auto kModuleLogScope = ScopeLogger::kDevice;
-static std::string ObjectID(const VirtualDevice* v) {
-  return "(virtual_device)";
-}
-}  // namespace Logging
 
 namespace {
 const char kHardwareAddressEmpty[] = "";
@@ -28,12 +22,14 @@ const char kHardwareAddressEmpty[] = "";
 VirtualDevice::VirtualDevice(Manager* manager,
                              const std::string& link_name,
                              int interface_index,
-                             Technology technology)
+                             Technology technology,
+                             bool fixed_ip_params)
     : Device(manager,
              link_name,
              kHardwareAddressEmpty,
              interface_index,
-             technology) {}
+             technology,
+             fixed_ip_params) {}
 
 VirtualDevice::~VirtualDevice() = default;
 
@@ -47,32 +43,37 @@ bool VirtualDevice::Save(StoreInterface* /*storage*/) {
   return true;
 }
 
-void VirtualDevice::Start(Error* error,
-                          const EnabledStateChangedCallback& /*callback*/) {
-  if (!fixed_ip_params()) {
+void VirtualDevice::Start(EnabledStateChangedCallback callback) {
+  if (!GetPrimaryNetwork()->fixed_ip_params()) {
     rtnl_handler()->SetInterfaceFlags(interface_index(), IFF_UP, IFF_UP);
   }
-  // TODO(crbug.com/1030324) We should call OnEnabledStateChanged, as for other
-  // Devices, so that VirtualDevices can have enabled() == true.
-  if (error)
-    error->Reset();  // indicate immediate completion
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
-void VirtualDevice::Stop(Error* error,
-                         const EnabledStateChangedCallback& /*callback*/) {
-  // TODO(crbug.com/1030324) We should call OnEnabledStateChanged, as for other
-  // Devices.
-  if (error)
-    error->Reset();  // indicate immediate completion
+void VirtualDevice::Stop(EnabledStateChangedCallback callback) {
+  std::move(callback).Run(Error(Error::kSuccess));
 }
 
-void VirtualDevice::UpdateIPConfig(const IPConfig::Properties& properties) {
-  SLOG(this, 2) << __func__ << " on " << link_name();
-  if (!ipconfig()) {
-    set_ipconfig(new IPConfig(control_interface(), link_name()));
-  }
-  ipconfig()->set_properties(properties);
-  OnIPConfigUpdated(ipconfig(), true);
+void VirtualDevice::UpdateIPConfig(
+    std::unique_ptr<IPConfig::Properties> ipv4_properties,
+    std::unique_ptr<IPConfig::Properties> ipv6_properties) {
+  // TODO(b/269401899): VPNDriver to use NetworkConfig instead of
+  // IPConfig::Properties internally.
+  auto network_config = IPConfig::Properties::ToNetworkConfig(
+      ipv4_properties.get(), ipv6_properties.get());
+  GetPrimaryNetwork()->set_link_protocol_network_config(
+      std::make_unique<NetworkConfig>(std::move(network_config)));
+  GetPrimaryNetwork()->Start(Network::StartOptions{
+      .dhcp = std::nullopt,
+      .accept_ra = false,
+      .probing_configuration =
+          manager()->GetPortalDetectorProbingConfiguration(),
+  });
+}
+
+void VirtualDevice::ResetConnection() {
+  GetPrimaryNetwork()->Stop();
+  Device::SelectService(/*service=*/nullptr, /*reset_old_service_state=*/false);
 }
 
 void VirtualDevice::DropConnection() {

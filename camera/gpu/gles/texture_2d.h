@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -41,6 +41,14 @@ class Texture2D {
             int height,
             int mipmap_levels = 1);
 
+  // Wraps an existing GL texture with internal format |internal_format| and
+  // dimensions |width| x |height|.
+  Texture2D(GLuint texture,
+            GLenum internal_format,
+            int width,
+            int height,
+            int mipmap_levels = 1);
+
   Texture2D(const Texture2D& other) = delete;
   Texture2D(Texture2D&& other);
   Texture2D& operator=(const Texture2D& other) = delete;
@@ -63,6 +71,13 @@ class Texture2D {
   int height() const { return height_; }
   // The texture target for this texture object.
   GLenum target() const { return target_; }
+
+  // Release ownership of texture to caller.
+  GLuint Release() {
+    GLuint ret(id_);
+    id_ = 0;
+    return ret;
+  }
 
  private:
   void Invalidate();

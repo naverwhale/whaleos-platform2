@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,10 +14,10 @@
 #include "power_manager/powerd/system/acpi_wakeup_helper_stub.h"
 #include "power_manager/powerd/system/cros_ec_helper_stub.h"
 #include "power_manager/powerd/system/udev_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 #include "power_manager/proto_bindings/backlight.pb.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 // An artificial syspath for tests.
@@ -48,7 +48,7 @@ const char* const kTSCR = InputDeviceController::kTSCR;
 
 }  // namespace
 
-class InputDeviceControllerTest : public ::testing::Test {
+class InputDeviceControllerTest : public TestEnvironment {
  public:
   InputDeviceControllerTest() = default;
   InputDeviceControllerTest(const InputDeviceControllerTest&) = delete;
@@ -341,5 +341,4 @@ TEST_F(InputDeviceControllerTest, InitWithoutBacklightController) {
       initial_tablet_mode_, initial_display_mode_, &prefs_);
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

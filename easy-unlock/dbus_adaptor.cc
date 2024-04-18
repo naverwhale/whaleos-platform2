@@ -1,11 +1,13 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "easy-unlock/dbus_adaptor.h"
 
-#include <chromeos/dbus/service_constants.h>
+#include <utility>
+
 #include <base/check.h>
+#include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
 
 #include "easy-unlock/easy_unlock_service.h"
@@ -79,7 +81,7 @@ DBusAdaptor::DBusAdaptor(const scoped_refptr<dbus::Bus>& bus,
 
 DBusAdaptor::~DBusAdaptor() {}
 
-void DBusAdaptor::Register(const CompletionAction& callback) {
+void DBusAdaptor::Register(CompletionAction callback) {
   brillo::dbus_utils::DBusInterface* interface =
       dbus_object_.AddOrGetInterface(kEasyUnlockServiceInterface);
 
@@ -98,7 +100,7 @@ void DBusAdaptor::Register(const CompletionAction& callback) {
   interface->AddSimpleMethodHandler(kUnwrapSecureMessageMethod,
                                     base::Unretained(this),
                                     &DBusAdaptor::UnwrapSecureMessage);
-  dbus_object_.RegisterAsync(callback);
+  dbus_object_.RegisterAsync(std::move(callback));
 }
 
 void DBusAdaptor::GenerateEcP256KeyPair(std::vector<uint8_t>* private_key,

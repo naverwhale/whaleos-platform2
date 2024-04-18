@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -51,9 +51,8 @@ base::Time StringTransformer::GetLineTimestamp(const std::string& s) {
     return logline_tm_;
 
   // Calculate delta from EC's uptime.
-  const base::TimeDelta ec_sync(
-      base::TimeDelta::FromMilliseconds(ec_current_uptime_ms_));
-  const base::TimeDelta logline_tm(base::TimeDelta::FromSecondsD(ec_ts));
+  const base::TimeDelta ec_sync(base::Milliseconds(ec_current_uptime_ms_));
+  const base::TimeDelta logline_tm(base::Seconds(ec_ts));
   const base::TimeDelta logline_delta(ec_sync - logline_tm);
   logline_tm_ = timestamp_ - logline_delta;
 

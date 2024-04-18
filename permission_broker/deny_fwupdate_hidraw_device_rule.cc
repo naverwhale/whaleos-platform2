@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -56,8 +56,7 @@ bool DenyFwUpdateHidrawDeviceRule::IsFwUpdateDevice(
   }
 
   // Split the path by directories.
-  std::vector<std::string> dirs;
-  base::FilePath(path).GetComponents(&dirs);
+  std::vector<std::string> dirs = base::FilePath(path).GetComponents();
 
   for (const auto& dir : dirs) {
     // Split the path by colons (:). We are searching for the pattern:

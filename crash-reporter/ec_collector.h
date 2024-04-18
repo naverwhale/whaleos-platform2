@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,13 @@
 #ifndef CRASH_REPORTER_EC_COLLECTOR_H_
 #define CRASH_REPORTER_EC_COLLECTOR_H_
 
+#include <memory>
+#include <string>
+
 #include <base/files/file_path.h>
-#include <base/macros.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/crash_collector.h"
 
@@ -25,15 +30,23 @@
 // EC crash collector.
 class ECCollector : public CrashCollector {
  public:
-  ECCollector();
+  explicit ECCollector(
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib);
   ECCollector(const ECCollector&) = delete;
   ECCollector& operator=(const ECCollector&) = delete;
 
   ~ECCollector() override;
 
   // Collect any preserved EC panicinfo. Returns true if there was
-  // a dump (even if there were problems storing the dump), false otherwise.
-  bool Collect();
+  // a valid dump (even if there were problems storing the dump), false
+  // otherwise.
+  bool Collect(bool use_saved_lsb);
+
+  // Returns the severity level and product group of the crash.
+  CrashCollector::ComputedCrashSeverity ComputeSeverity(
+      const std::string& exec_name) override;
 
  private:
   friend class ECCollectorTest;

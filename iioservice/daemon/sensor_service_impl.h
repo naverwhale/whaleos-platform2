@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,9 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/memory/weak_ptr.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 #include <libmems/iio_context.h>
 #include <mojo/public/cpp/bindings/receiver_set.h>
 
@@ -43,6 +43,7 @@ class SensorServiceImpl : public cros::mojom::SensorService {
       const std::string& description);
 
   void OnDeviceAdded(int iio_device_id);
+  void OnDeviceRemoved(int iio_device_id);
 
   // cros::mojom::SensorService overrides:
   void GetDeviceIds(cros::mojom::DeviceType type,

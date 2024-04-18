@@ -1,7 +1,7 @@
 [package]
 name = "chunnel"
 version = "0.1.0"
-authors = ["The Chromium OS Authors"]
+authors = ["The ChromiumOS Authors"]
 edition = "2018"
 
 [dependencies]
@@ -11,10 +11,11 @@ getopts = "0.2"
 libc = "0.2"
 libchromeos = { path = "../../libchromeos-rs" } # provided by ebuild
 log = "0.4"
-protobuf = "2.16.2"
+nix = { version = "0.26", features = ["signal"] }
+protobuf = "3.2"
 remain = "0.2"
-sys_util = { path = "../../../platform/crosvm/sys_util" } # provided by ebuild
 system_api = { path = "system_api" }
+vsock = "0.3"
 
 [build-dependencies]
 protoc-rust = "2"

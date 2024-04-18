@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,9 @@
 #include <base/logging.h>
 
 namespace diagnostics {
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
+namespace wilco {
+
+namespace mojo_ipc = ::ash::cros_healthd::mojom;
 
 ProbeServiceImpl::ProbeServiceImpl(Delegate* delegate) : delegate_(delegate) {
   DCHECK(delegate_);
@@ -22,7 +24,7 @@ ProbeServiceImpl::~ProbeServiceImpl() {
 }
 
 void ProbeServiceImpl::ProbeTelemetryInfo(
-    std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum> categories,
+    std::vector<mojo_ipc::ProbeCategoryEnum> categories,
     ProbeTelemetryInfoCallback callback) {
   if (!BindCrosHealthdProbeServiceIfNeeded()) {
     LOG(WARNING) << "ProbeTelemetryInfo called before mojo was bootstrapped.";
@@ -34,15 +36,14 @@ void ProbeServiceImpl::ProbeTelemetryInfo(
   next_callback_key_++;
   DCHECK_EQ(callbacks_.count(callback_key), 0);
   callbacks_.insert({callback_key, std::move(callback)});
-  service_ptr_->ProbeTelemetryInfo(
+  service_->ProbeTelemetryInfo(
       std::move(categories),
-      base::Bind(&ProbeServiceImpl::ForwardProbeTelemetryInfoResponse,
-                 weak_ptr_factory_.GetWeakPtr(), callback_key));
+      base::BindOnce(&ProbeServiceImpl::ForwardProbeTelemetryInfoResponse,
+                     weak_ptr_factory_.GetWeakPtr(), callback_key));
 }
 
 void ProbeServiceImpl::ForwardProbeTelemetryInfoResponse(
-    size_t callback_key,
-    chromeos::cros_healthd::mojom::TelemetryInfoPtr telemetry_info) {
+    size_t callback_key, mojo_ipc::TelemetryInfoPtr telemetry_info) {
   auto it = callbacks_.find(callback_key);
   if (it == callbacks_.end()) {
     LOG(ERROR) << "Unknown callback_key for received mojo ProbeTelemetryInfo "
@@ -56,21 +57,21 @@ void ProbeServiceImpl::ForwardProbeTelemetryInfoResponse(
 }
 
 bool ProbeServiceImpl::BindCrosHealthdProbeServiceIfNeeded() {
-  if (service_ptr_.is_bound())
+  if (service_.is_bound())
     return true;
 
-  auto request = mojo::MakeRequest(&service_ptr_);
+  auto receiver = service_.BindNewPipeAndPassReceiver();
 
-  service_ptr_.set_connection_error_handler(base::Bind(
+  service_.set_disconnect_handler(base::BindOnce(
       &ProbeServiceImpl::OnDisconnect, weak_ptr_factory_.GetWeakPtr()));
 
-  return delegate_->BindCrosHealthdProbeService(std::move(request));
+  return delegate_->BindCrosHealthdProbeService(std::move(receiver));
 }
 
 void ProbeServiceImpl::OnDisconnect() {
   VLOG(1) << "Mojo connection to cros_healthd probe service is closed.";
   RunInFlightCallbacks();
-  service_ptr_.reset();
+  service_.reset();
 }
 
 void ProbeServiceImpl::RunInFlightCallbacks() {
@@ -80,4 +81,5 @@ void ProbeServiceImpl::RunInFlightCallbacks() {
   callbacks_.clear();
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

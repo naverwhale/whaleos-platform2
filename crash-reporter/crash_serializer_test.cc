@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,7 +34,8 @@ namespace {
 bool SetMockCrashSending(bool success) {
   util::g_force_is_mock = true;
   util::g_force_is_mock_successful = success;
-  return base::CreateDirectory(paths::Get(paths::kChromeCrashLog).DirName());
+  return base::CreateDirectory(
+      paths::Get(paths::ChromeCrashLog::Get()).DirName());
 }
 
 }  // namespace
@@ -72,11 +73,11 @@ class CrashSerializerTest : public testing::Test {
   // Creates test crash files in |crash_directory|. Returns true on success.
   bool CreateTestCrashFiles(const base::FilePath& crash_directory) {
     const base::Time now = test_util::GetDefaultTime();
-    const base::TimeDelta hour = base::TimeDelta::FromHours(1);
+    const base::TimeDelta hour = base::Hours(1);
 
     // Choose timestamps so that the return value of GetMetaFiles() is sorted
     // per timestamps correctly.
-    const base::Time old_os_meta_time = now - base::TimeDelta::FromDays(200);
+    const base::Time old_os_meta_time = now - base::Days(200);
     const base::Time good_meta_time = now - hour * 4;
     const base::Time absolute_meta_time = now - hour * 3;
     const base::Time uploaded_meta_time = now - hour * 2;
@@ -193,12 +194,12 @@ class CrashSerializerTest : public testing::Test {
     // This should be serialized despite the old OS timestamp.
     old_os_meta_ = crash_directory.Append("old_os.meta");
     if (!CreateFile(old_os_meta_,
-                    base::StringPrintf("payload=good.log\n"
-                                       "os_millis=%" PRId64 "\n"
-                                       "done=1\n",
-                                       ((now - base::Time::UnixEpoch()) -
-                                        base::TimeDelta::FromDays(200))
-                                           .InMilliseconds()),
+                    base::StringPrintf(
+                        "payload=good.log\n"
+                        "os_millis=%" PRId64 "\n"
+                        "done=1\n",
+                        ((now - base::Time::UnixEpoch()) - base::Days(200))
+                            .InMilliseconds()),
                     old_os_meta_time)) {
       return false;
     }
@@ -347,7 +348,8 @@ TEST_F(CrashSerializerTest, SerializeCrashes) {
   std::vector<base::TimeDelta> sleep_times;
   Serializer::Options options;
   options.fetch_coredumps = true;
-  options.sleep_function = base::Bind(&test_util::FakeSleep, &sleep_times);
+  options.sleep_function =
+      base::BindRepeating(&test_util::FakeSleep, &sleep_times);
   Serializer serializer(std::make_unique<test_util::AdvancingClock>(), options);
 
   base::FilePath out = test_dir_.Append("SerializeCrashes");
@@ -371,7 +373,8 @@ TEST_F(CrashSerializerTest, SerializeCrashes) {
   while (pos < written.size()) {
     std::string size_str = written.substr(pos, sizeof(uint64_t));
     uint64_t size;
-    base::ReadBigEndian(size_str.data(), &size);
+    base::ReadBigEndian(reinterpret_cast<const uint8_t*>(size_str.data()),
+                        &size);
     pos += sizeof(size);
 
     // All of our payloads are small, so don't need to combine subsequent
@@ -460,7 +463,8 @@ TEST_F(CrashSerializerTest, WriteFetchCrashesResponse) {
   // Read the size and verify that it matches what we expect.
   std::string actual_size_str = actual.substr(0, sizeof(uint64_t));
   uint64_t actual_size;
-  base::ReadBigEndian(actual_size_str.data(), &actual_size);
+  base::ReadBigEndian(reinterpret_cast<const uint8_t*>(actual_size_str.data()),
+                      &actual_size);
   EXPECT_EQ(expected.size(), actual_size);
 
   // Note that we don't verify that the size in bytes matches, because to do so
@@ -517,7 +521,8 @@ TEST_F(CrashSerializerTest, WriteBlobs_Basic) {
     std::string actual_size_str = actual.substr(pos, sizeof(uint64_t));
     pos += sizeof(uint64_t);
     uint64_t actual_size;
-    base::ReadBigEndian(actual_size_str.data(), &actual_size);
+    base::ReadBigEndian(
+        reinterpret_cast<const uint8_t*>(actual_size_str.data()), &actual_size);
     crash::FetchCrashesResponse resp;
     resp.ParseFromString(actual.substr(pos, actual_size));
     EXPECT_EQ(resp.crash_id(), 42);
@@ -557,7 +562,8 @@ TEST_F(CrashSerializerTest, WriteBlobs_ManySizes) {
     std::string actual_size_str = actual.substr(pos, sizeof(uint64_t));
     pos += sizeof(uint64_t);
     uint64_t actual_size;
-    base::ReadBigEndian(actual_size_str.data(), &actual_size);
+    base::ReadBigEndian(
+        reinterpret_cast<const uint8_t*>(actual_size_str.data()), &actual_size);
     crash::FetchCrashesResponse resp;
     resp.ParseFromString(actual.substr(pos, actual_size));
     pos += actual_size;
@@ -639,7 +645,8 @@ TEST_F(CrashSerializerTest, WriteCoredump_Basic) {
 
   std::string actual_size_str = actual.substr(0, sizeof(uint64_t));
   uint64_t actual_size;
-  base::ReadBigEndian(actual_size_str.data(), &actual_size);
+  base::ReadBigEndian(reinterpret_cast<const uint8_t*>(actual_size_str.data()),
+                      &actual_size);
   EXPECT_EQ(expected.size(), actual_size);
   EXPECT_EQ(expected, actual.substr(sizeof(uint64_t)));
 }
@@ -677,7 +684,8 @@ TEST_F(CrashSerializerTest, WriteCoredump_LargerThanChunkSize) {
   std::string actual_size_str1 = actual.substr(0, sizeof(uint64_t));
   pos += sizeof(uint64_t);
   uint64_t actual_size1;
-  base::ReadBigEndian(actual_size_str1.data(), &actual_size1);
+  base::ReadBigEndian(reinterpret_cast<const uint8_t*>(actual_size_str1.data()),
+                      &actual_size1);
   EXPECT_EQ(expected1.size(), actual_size1);
   EXPECT_EQ(expected1, actual.substr(pos, actual_size1));
   pos += actual_size1;
@@ -685,7 +693,8 @@ TEST_F(CrashSerializerTest, WriteCoredump_LargerThanChunkSize) {
   std::string actual_size_str2 = actual.substr(pos, sizeof(uint64_t));
   pos += sizeof(uint64_t);
   uint64_t actual_size2;
-  base::ReadBigEndian(actual_size_str2.data(), &actual_size2);
+  base::ReadBigEndian(reinterpret_cast<const uint8_t*>(actual_size_str2.data()),
+                      &actual_size2);
   EXPECT_EQ(expected2.size(), actual_size2);
   EXPECT_EQ(expected2, actual.substr(pos));
 }
@@ -718,7 +727,9 @@ TEST_F(CrashSerializerTest, WriteCoredump_ManySizes) {
       std::string actual_size_str = actual.substr(0, sizeof(uint64_t));
       pos += sizeof(uint64_t);
       uint64_t actual_size;
-      base::ReadBigEndian(actual_size_str.data(), &actual_size);
+      base::ReadBigEndian(
+          reinterpret_cast<const uint8_t*>(actual_size_str.data()),
+          &actual_size);
 
       resp.ParseFromString(actual.substr(pos, actual_size));
       EXPECT_EQ(resp.crash_id(), 1) << "core size: " << core_size;

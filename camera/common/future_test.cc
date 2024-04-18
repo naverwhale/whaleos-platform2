@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -21,7 +21,7 @@ class FutureTest : public ::testing::Test {
   FutureTest(const FutureTest&) = delete;
   FutureTest& operator=(const FutureTest&) = delete;
 
-  virtual void SetUp() {
+  void SetUp() override {
     if (!thread_.StartWithOptions(
             base::Thread::Options(base::MessagePumpType::IO, 0))) {
       LOGF(ERROR) << "Test thread failed to start";
@@ -30,13 +30,13 @@ class FutureTest : public ::testing::Test {
     thread_.WaitUntilThreadStarted();
   }
 
-  virtual void TearDown() { thread_.Stop(); }
+  void TearDown() override { thread_.Stop(); }
 
-  void SignalCallback(const base::Callback<void()>& cb) { cb.Run(); }
+  void SignalCallback(base::OnceCallback<void()> cb) { std::move(cb).Run(); }
 
   template <typename T>
-  void SignalCallbackWith(const base::Callback<void(T)>& cb, T val) {
-    cb.Run(std::move(val));
+  void SignalCallbackWith(base::OnceCallback<void(T)> cb, T val) {
+    std::move(cb).Run(std::move(val));
   }
 
   void CancelCallback() { relay_.CancelAllFutures(); }
@@ -54,9 +54,9 @@ TEST_F(FutureTest, WaitTest) {
   auto future = Future<void>::Create(&relay_);
   thread_.task_runner()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&FutureTest::SignalCallback, base::Unretained(this),
-                 cros::GetFutureCallback(future)),
-      base::TimeDelta::FromMilliseconds(2000));
+      base::BindOnce(&FutureTest::SignalCallback, base::Unretained(this),
+                     cros::GetFutureCallback(future)),
+      base::Milliseconds(2000));
   ASSERT_TRUE(future->Wait());
 
   // Subsequent wait to a signalled future should return true.
@@ -71,9 +71,9 @@ TEST_F(FutureTest, WaitTest) {
 TEST_F(FutureTest, GetTest) {
   auto future = Future<int>::Create(&relay_);
   thread_.task_runner()->PostTask(
-      FROM_HERE,
-      base::Bind(&FutureTest::SignalCallbackWith<int>, base::Unretained(this),
-                 cros::GetFutureCallback(future), 42));
+      FROM_HERE, base::BindOnce(&FutureTest::SignalCallbackWith<int>,
+                                base::Unretained(this),
+                                cros::GetFutureCallback(future), 42));
   ASSERT_EQ(future->Get(), 42);
 }
 
@@ -82,9 +82,9 @@ TEST_F(FutureTest, GetMoveOnlyTest) {
   auto ptr = std::make_unique<int>(42);
   thread_.task_runner()->PostTask(
       FROM_HERE,
-      base::Bind(&FutureTest::SignalCallbackWith<std::unique_ptr<int>>,
-                 base::Unretained(this), cros::GetFutureCallback(future),
-                 base::Passed(std::move(ptr))));
+      base::BindOnce(&FutureTest::SignalCallbackWith<std::unique_ptr<int>>,
+                     base::Unretained(this), cros::GetFutureCallback(future),
+                     std::move(ptr)));
   ptr = future->Get();
   ASSERT_EQ(*ptr, 42);
 }
@@ -95,14 +95,14 @@ TEST_F(FutureTest, TimeoutTest) {
   auto future = Future<void>::Create(&relay_);
   base::TimeTicks start = base::TimeTicks::Now();
   ASSERT_FALSE(future->Wait(1000));
-  ASSERT_GE(base::TimeTicks::Now() - start,
-            base::TimeDelta::FromMilliseconds(1000));
+  ASSERT_GE(base::TimeTicks::Now() - start, base::Milliseconds(1000));
   // Subsequent wait to a timed-out future can time out again.
   ASSERT_FALSE(future->Wait(1000));
   // Now we signal the future and the final wait should return true.
   thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&FutureTest::SignalCallback, base::Unretained(this),
-                            cros::GetFutureCallback(future)));
+      FROM_HERE,
+      base::BindOnce(&FutureTest::SignalCallback, base::Unretained(this),
+                     cros::GetFutureCallback(future)));
   ASSERT_TRUE(future->Wait());
 }
 
@@ -119,8 +119,9 @@ TEST_F(FutureTest, CancelTest) {
   // called.
   future = Future<void>::Create(&relay_);
   thread_.task_runner()->PostTask(
-      FROM_HERE, base::Bind(&FutureTest::SignalCallback, base::Unretained(this),
-                            cros::GetFutureCallback(future)));
+      FROM_HERE,
+      base::BindOnce(&FutureTest::SignalCallback, base::Unretained(this),
+                     cros::GetFutureCallback(future)));
   ASSERT_FALSE(future->Wait());
 }
 
@@ -130,8 +131,8 @@ TEST_F(FutureTest, DelayedCancelTest) {
   auto future = Future<void>::Create(&relay_);
   thread_.task_runner()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&FutureTest::CancelCallback, base::Unretained(this)),
-      base::TimeDelta::FromMilliseconds(2000));
+      base::BindOnce(&FutureTest::CancelCallback, base::Unretained(this)),
+      base::Milliseconds(2000));
   ASSERT_FALSE(future->Wait());
 }
 
@@ -146,9 +147,9 @@ TEST_F(FutureTest, FutureRefcountTest) {
   relay_.CancelAllFutures();
   thread_.task_runner()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&FutureTest::SignalCallback, base::Unretained(this),
-                 cros::GetFutureCallback(future)),
-      base::TimeDelta::FromMilliseconds(2000));
+      base::BindOnce(&FutureTest::SignalCallback, base::Unretained(this),
+                     cros::GetFutureCallback(future)),
+      base::Milliseconds(2000));
   ASSERT_FALSE(future->Wait());
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include <stddef.h>
@@ -10,6 +10,7 @@
 #include <base/at_exit.h>
 #include <base/notreached.h>
 #include <brillo/syslog_logging.h>
+#include <dbus/error.h>
 #include <libprotobuf-mutator/src/libfuzzer/libfuzzer_macro.h>
 #include <gmock/gmock.h>
 #include <vm_protos/proto_bindings/container_host.grpc.pb.h>
@@ -24,11 +25,11 @@
 namespace {
 
 using ::testing::_;
+using ::testing::A;
 using ::testing::AnyNumber;
+using ::testing::ByMove;
 using ::testing::DoAll;
-using ::testing::InvokeWithoutArgs;
 using ::testing::Return;
-using ::testing::ReturnNull;
 using ::testing::SetArgPointee;
 using ::vm_tools::cicerone::ContainerListenerImpl;
 using ::vm_tools::cicerone::CrashListenerImpl;
@@ -55,15 +56,14 @@ void SetUpMockObjectProxy(
     const vm_tools::container::ContainerListenerFuzzerSingleAction& action,
     dbus::MockObjectProxy* mock_object_proxy) {
   if (action.return_dbus_response()) {
-    EXPECT_CALL(*mock_object_proxy, CallMethodAndBlock(_, _))
-        .WillRepeatedly(InvokeWithoutArgs(&dbus::Response::CreateEmpty));
-    EXPECT_CALL(*mock_object_proxy, CallMethodAndBlockWithErrorDetails(_, _, _))
-        .WillRepeatedly(InvokeWithoutArgs(&dbus::Response::CreateEmpty));
+    EXPECT_CALL(*mock_object_proxy,
+                CallMethodAndBlock(A<dbus::MethodCall*>(), A<int>()))
+        .WillRepeatedly(
+            Return(ByMove(base::ok(dbus::Response::CreateEmpty()))));
   } else {
-    EXPECT_CALL(*mock_object_proxy, CallMethodAndBlock(_, _))
-        .WillRepeatedly(ReturnNull());
-    EXPECT_CALL(*mock_object_proxy, CallMethodAndBlockWithErrorDetails(_, _, _))
-        .WillRepeatedly(ReturnNull());
+    EXPECT_CALL(*mock_object_proxy,
+                CallMethodAndBlock(A<dbus::MethodCall*>(), A<int>()))
+        .WillRepeatedly(Return(ByMove(base::unexpected(dbus::Error()))));
   }
 }
 
@@ -89,6 +89,11 @@ std::unique_ptr<vm_tools::tremplin::MockTremplinStub> CreateMockTremplinStub(
       .WillOnce(
           DoAll(SetArgPointee<2>(action.tremplin_start_container_response()),
                 Return(ToStatus(action.tremplin_start_container_status()))));
+  EXPECT_CALL(*mock_tremplin_stub, StopContainer(_, _, _))
+      .Times(AnyNumber())
+      .WillOnce(
+          DoAll(SetArgPointee<2>(action.tremplin_stop_container_response()),
+                Return(ToStatus(action.tremplin_stop_container_status()))));
   EXPECT_CALL(*mock_tremplin_stub, GetContainerUsername(_, _, _))
       .Times(AnyNumber())
       .WillOnce(DoAll(
@@ -183,8 +188,6 @@ DEFINE_PROTO_FUZZER(
         action, &test_framework.get_mock_vm_applications_service_proxy());
     SetUpMockObjectProxy(
         action, &test_framework.get_mock_vm_sk_forwarding_service_proxy());
-    SetUpMockObjectProxy(
-        action, &test_framework.get_mock_vm_disk_management_service_proxy());
     SetUpMockObjectProxy(action,
                          &test_framework.get_mock_url_handler_service_proxy());
     SetUpMockObjectProxy(action,
@@ -201,9 +204,7 @@ DEFINE_PROTO_FUZZER(
     vm_tools::tremplin::EmptyMessage tremplin_response;
     vm_tools::cicerone::MetricsConsentResponse metrics_response;
     vm_tools::container::ForwardSecurityKeyMessageResponse forward_sk_response;
-    vm_tools::container::GetDiskInfoResponse get_disk_info_response;
-    vm_tools::container::RequestSpaceResponse request_space_response;
-    vm_tools::container::ReleaseSpaceResponse release_space_response;
+    vm_tools::container::ReportMetricsResponse report_metrics_response;
 
     switch (action.input_case()) {
       case vm_tools::container::ContainerListenerFuzzerSingleAction::
@@ -294,6 +295,12 @@ DEFINE_PROTO_FUZZER(
         break;
 
       case vm_tools::container::ContainerListenerFuzzerSingleAction::
+          kContainerStopProgress:
+        tremplin_listener->UpdateStopStatus(
+            &context, &action.container_stop_progress(), &tremplin_response);
+        break;
+
+      case vm_tools::container::ContainerListenerFuzzerSingleAction::
           kContainerExportProgress:
         tremplin_listener->UpdateExportStatus(
             &context, &action.container_export_progress(), &tremplin_response);
@@ -375,21 +382,22 @@ DEFINE_PROTO_FUZZER(
         break;
 
       case vm_tools::container::ContainerListenerFuzzerSingleAction::
-          kGetDiskInfoRequest:
-        container_listener->GetDiskInfo(
-            &context, &action.get_disk_info_request(), &get_disk_info_response);
+          kReportMetricsRequest:
+        container_listener->ReportMetrics(&context,
+                                          &action.report_metrics_request(),
+                                          &report_metrics_response);
         break;
 
       case vm_tools::container::ContainerListenerFuzzerSingleAction::
-          kRequestSpaceRequest:
-        container_listener->RequestSpace(
-            &context, &action.request_space_request(), &request_space_response);
+          kInhibitScreensaverInfo:
+        container_listener->InhibitScreensaver(
+            &context, &action.inhibit_screensaver_info(), &response);
         break;
 
       case vm_tools::container::ContainerListenerFuzzerSingleAction::
-          kReleaseSpaceRequest:
-        container_listener->ReleaseSpace(
-            &context, &action.release_space_request(), &release_space_response);
+          kUninhibitScreensaverInfo:
+        container_listener->UninhibitScreensaver(
+            &context, &action.uninhibit_screensaver_info(), &response);
         break;
 
       default:

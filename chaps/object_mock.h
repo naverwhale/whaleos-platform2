@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <base/notreached.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>

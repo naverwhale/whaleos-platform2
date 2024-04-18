@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,17 +11,16 @@
 
 #include "shill/net/nl80211_message.h"
 
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <net-base/byte_utils.h>
 
-#include "shill/net/mock_netlink_socket.h"
-#include "shill/net/netlink_attribute.h"
 #include "shill/net/netlink_packet.h"
 
 using testing::_;
@@ -278,7 +277,7 @@ class NetlinkMessageTest : public Test {
  public:
   NetlinkMessageTest() {
     message_factory_.AddFactoryMethod(
-        kNl80211FamilyId, base::Bind(&Nl80211Message::CreateMessage));
+        kNl80211FamilyId, base::BindRepeating(&Nl80211Message::CreateMessage));
     Nl80211Message::SetMessageType(kNl80211FamilyId);
   }
 
@@ -331,13 +330,12 @@ class NetlinkMessageTest : public Test {
     AttributeIdIterator ssid_iter(*ssid_list);
     value->clear();
     for (; !ssid_iter.AtEnd(); ssid_iter.Advance()) {
-      ByteString bytes;
+      std::vector<uint8_t> bytes;
       if (ssid_list->GetRawAttributeValue(ssid_iter.GetId(), &bytes)) {
-        if (bytes.IsEmpty()) {
+        if (bytes.empty()) {
           value->push_back("");
         } else {
-          value->push_back(
-              std::string(bytes.GetConstCString(), bytes.GetLength()));
+          value->push_back(net_base::byte_utils::ByteStringFromBytes(bytes));
         }
       }
     }
@@ -348,8 +346,7 @@ class NetlinkMessageTest : public Test {
 };
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_TRIGGER_SCAN) {
-  NetlinkPacket trigger_scan_packet(kNL80211_CMD_TRIGGER_SCAN,
-                                    sizeof(kNL80211_CMD_TRIGGER_SCAN));
+  NetlinkPacket trigger_scan_packet(kNL80211_CMD_TRIGGER_SCAN);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&trigger_scan_packet,
                                      NetlinkMessage::MessageContext()));
@@ -380,7 +377,7 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_TRIGGER_SCAN) {
   {
     std::vector<uint32_t> list;
     EXPECT_TRUE(GetScanFrequenciesFromMessage(*message, &list));
-    EXPECT_EQ(list.size(), base::size(kScanFrequencyTrigger));
+    EXPECT_EQ(list.size(), std::size(kScanFrequencyTrigger));
     int i = 0;
     auto j = list.begin();
     while (j != list.end()) {
@@ -402,8 +399,7 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_TRIGGER_SCAN) {
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_NEW_SCAN_RESULTS) {
-  NetlinkPacket new_scan_results_packet(kNL80211_CMD_NEW_SCAN_RESULTS,
-                                        sizeof(kNL80211_CMD_NEW_SCAN_RESULTS));
+  NetlinkPacket new_scan_results_packet(kNL80211_CMD_NEW_SCAN_RESULTS);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&new_scan_results_packet,
                                      NetlinkMessage::MessageContext()));
@@ -434,7 +430,7 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_NEW_SCAN_RESULTS) {
   {
     std::vector<uint32_t> list;
     EXPECT_TRUE(GetScanFrequenciesFromMessage(*message, &list));
-    EXPECT_EQ(base::size(kScanFrequencyResults), list.size());
+    EXPECT_EQ(std::size(kScanFrequencyResults), list.size());
     int i = 0;
     auto j = list.begin();
     while (j != list.end()) {
@@ -456,8 +452,7 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_NEW_SCAN_RESULTS) {
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_NEW_STATION) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_NEW_STATION,
-                               sizeof(kNL80211_CMD_NEW_STATION));
+  NetlinkPacket netlink_packet(kNL80211_CMD_NEW_STATION);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));
@@ -498,8 +493,7 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_NEW_STATION) {
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_AUTHENTICATE) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_AUTHENTICATE,
-                               sizeof(kNL80211_CMD_AUTHENTICATE));
+  NetlinkPacket netlink_packet(kNL80211_CMD_AUTHENTICATE);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));
@@ -526,21 +520,19 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_AUTHENTICATE) {
   }
 
   {
-    ByteString rawdata;
+    std::vector<uint8_t> rawdata;
     EXPECT_TRUE(message->const_attributes()->GetRawAttributeValue(
         NL80211_ATTR_FRAME, &rawdata));
-    EXPECT_FALSE(rawdata.IsEmpty());
+    EXPECT_FALSE(rawdata.empty());
     Nl80211Frame frame(rawdata);
-    Nl80211Frame expected_frame(
-        ByteString(kAuthenticateFrame, sizeof(kAuthenticateFrame)));
+    Nl80211Frame expected_frame(kAuthenticateFrame);
     EXPECT_EQ(Nl80211Frame::kAuthFrameType, frame.frame_type());
     EXPECT_TRUE(frame.IsEqual(expected_frame));
   }
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_ASSOCIATE) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_ASSOCIATE,
-                               sizeof(kNL80211_CMD_ASSOCIATE));
+  NetlinkPacket netlink_packet(kNL80211_CMD_ASSOCIATE);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));
@@ -567,21 +559,19 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_ASSOCIATE) {
   }
 
   {
-    ByteString rawdata;
+    std::vector<uint8_t> rawdata;
     EXPECT_TRUE(message->const_attributes()->GetRawAttributeValue(
         NL80211_ATTR_FRAME, &rawdata));
-    EXPECT_FALSE(rawdata.IsEmpty());
+    EXPECT_FALSE(rawdata.empty());
     Nl80211Frame frame(rawdata);
-    Nl80211Frame expected_frame(
-        ByteString(kAssociateFrame, sizeof(kAssociateFrame)));
+    Nl80211Frame expected_frame(kAssociateFrame);
     EXPECT_EQ(Nl80211Frame::kAssocResponseFrameType, frame.frame_type());
     EXPECT_TRUE(frame.IsEqual(expected_frame));
   }
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_CONNECT) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_CONNECT,
-                               sizeof(kNL80211_CMD_CONNECT));
+  NetlinkPacket netlink_packet(kNL80211_CMD_CONNECT);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));
@@ -622,11 +612,11 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_CONNECT) {
   }
 
   {
-    ByteString rawdata;
+    std::vector<uint8_t> rawdata;
     EXPECT_TRUE(message->const_attributes()->GetRawAttributeValue(
         NL80211_ATTR_RESP_IE, &rawdata));
-    EXPECT_TRUE(
-        rawdata.Equals(ByteString(kRespIeBytes, base::size(kRespIeBytes))));
+    EXPECT_EQ(rawdata,
+              std::vector(std::begin(kRespIeBytes), std::end(kRespIeBytes)));
   }
 }
 
@@ -645,9 +635,8 @@ TEST_F(NetlinkMessageTest, Build_NL80211_CMD_CONNECT) {
 
   EXPECT_TRUE(message.attributes()->CreateNl80211Attribute(
       NL80211_ATTR_MAC, NetlinkMessage::MessageContext()));
-  EXPECT_TRUE(message.attributes()->SetRawAttributeValue(
-      NL80211_ATTR_MAC,
-      ByteString(kMacAddressBytes, base::size(kMacAddressBytes))));
+  EXPECT_TRUE(message.attributes()->SetRawAttributeValue(NL80211_ATTR_MAC,
+                                                         kMacAddressBytes));
 
   // In the middle, let's try adding an attribute without populating it.
   EXPECT_TRUE(message.attributes()->CreateNl80211Attribute(
@@ -660,27 +649,25 @@ TEST_F(NetlinkMessageTest, Build_NL80211_CMD_CONNECT) {
 
   EXPECT_TRUE(message.attributes()->CreateNl80211Attribute(
       NL80211_ATTR_RESP_IE, NetlinkMessage::MessageContext()));
-  EXPECT_TRUE(message.attributes()->SetRawAttributeValue(
-      NL80211_ATTR_RESP_IE,
-      ByteString(kRespIeBytes, base::size(kRespIeBytes))));
+  EXPECT_TRUE(message.attributes()->SetRawAttributeValue(NL80211_ATTR_RESP_IE,
+                                                         kRespIeBytes));
 
   // Encode the message to a ByteString and remove all the run-specific
   // values.
   static const uint32_t kArbitrarySequenceNumber = 42;
-  ByteString message_bytes = message.Encode(kArbitrarySequenceNumber);
-  nlmsghdr* header = reinterpret_cast<nlmsghdr*>(message_bytes.GetData());
+  std::vector<uint8_t> message_bytes = message.Encode(kArbitrarySequenceNumber);
+  nlmsghdr* header = reinterpret_cast<nlmsghdr*>(message_bytes.data());
   header->nlmsg_flags = 0;  // Overwrite with known values.
   header->nlmsg_seq = 0;
   header->nlmsg_pid = 0;
 
   // Verify that the messages are equal.
-  EXPECT_TRUE(message_bytes.Equals(
-      ByteString(kNL80211_CMD_CONNECT, base::size(kNL80211_CMD_CONNECT))));
+  EXPECT_EQ(message_bytes, std::vector(std::begin(kNL80211_CMD_CONNECT),
+                                       std::end(kNL80211_CMD_CONNECT)));
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_DEAUTHENTICATE) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_DEAUTHENTICATE,
-                               sizeof(kNL80211_CMD_DEAUTHENTICATE));
+  NetlinkPacket netlink_packet(kNL80211_CMD_DEAUTHENTICATE);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));
@@ -707,21 +694,19 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_DEAUTHENTICATE) {
   }
 
   {
-    ByteString rawdata;
+    std::vector<uint8_t> rawdata;
     EXPECT_TRUE(message->const_attributes()->GetRawAttributeValue(
         NL80211_ATTR_FRAME, &rawdata));
-    EXPECT_FALSE(rawdata.IsEmpty());
+    EXPECT_FALSE(rawdata.empty());
     Nl80211Frame frame(rawdata);
-    Nl80211Frame expected_frame(
-        ByteString(kDeauthenticateFrame, sizeof(kDeauthenticateFrame)));
+    Nl80211Frame expected_frame(kDeauthenticateFrame);
     EXPECT_EQ(Nl80211Frame::kDeauthFrameType, frame.frame_type());
     EXPECT_TRUE(frame.IsEqual(expected_frame));
   }
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_DISCONNECT) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_DISCONNECT,
-                               sizeof(kNL80211_CMD_DISCONNECT));
+  NetlinkPacket netlink_packet(kNL80211_CMD_DISCONNECT);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));
@@ -759,8 +744,7 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_DISCONNECT) {
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_NOTIFY_CQM) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_NOTIFY_CQM,
-                               sizeof(kNL80211_CMD_NOTIFY_CQM));
+  NetlinkPacket netlink_packet(kNL80211_CMD_NOTIFY_CQM);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));
@@ -820,8 +804,7 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_NOTIFY_CQM) {
 }
 
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_DISASSOCIATE) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_DISASSOCIATE,
-                               sizeof(kNL80211_CMD_DISASSOCIATE));
+  NetlinkPacket netlink_packet(kNL80211_CMD_DISASSOCIATE);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));
@@ -848,13 +831,12 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_DISASSOCIATE) {
   }
 
   {
-    ByteString rawdata;
+    std::vector<uint8_t> rawdata;
     EXPECT_TRUE(message->const_attributes()->GetRawAttributeValue(
         NL80211_ATTR_FRAME, &rawdata));
-    EXPECT_FALSE(rawdata.IsEmpty());
+    EXPECT_FALSE(rawdata.empty());
     Nl80211Frame frame(rawdata);
-    Nl80211Frame expected_frame(
-        ByteString(kDisassociateFrame, sizeof(kDisassociateFrame)));
+    Nl80211Frame expected_frame(kDisassociateFrame);
     EXPECT_EQ(Nl80211Frame::kDisassocFrameType, frame.frame_type());
     EXPECT_TRUE(frame.IsEqual(expected_frame));
   }
@@ -863,8 +845,7 @@ TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_DISASSOCIATE) {
 // This test is to ensure that an unknown nl80211 message generates an
 // Nl80211UnknownMessage with all Nl80211 parts.
 TEST_F(NetlinkMessageTest, Parse_NL80211_CMD_UNKNOWN) {
-  NetlinkPacket netlink_packet(kNL80211_CMD_UNKNOWN,
-                               sizeof(kNL80211_CMD_UNKNOWN));
+  NetlinkPacket netlink_packet(kNL80211_CMD_UNKNOWN);
   std::unique_ptr<NetlinkMessage> netlink_message(
       message_factory_.CreateMessage(&netlink_packet,
                                      NetlinkMessage::MessageContext()));

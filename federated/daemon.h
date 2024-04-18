@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <memory>
 
 #include <base/memory/weak_ptr.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/daemons/dbus_daemon.h>
 #include <dbus/exported_object.h>
 #include <mojo/core/embedder/scoped_ipc_support.h>
@@ -34,7 +34,7 @@ class Daemon : public brillo::DBusDaemon {
  private:
   void InitDBus();
 
-  // Handles org.chromium.BootstrapMojoConnection D-Bus method calls.
+  // Handles org.chromium.Federated.BootstrapMojoConnection D-Bus method calls.
   void BootstrapMojoConnection(
       dbus::MethodCall* method_call,
       dbus::ExportedObject::ResponseSender response_sender);
@@ -51,6 +51,13 @@ class Daemon : public brillo::DBusDaemon {
       federated_service_;
 
   std::unique_ptr<Scheduler> scheduler_;
+
+  // If true, starts the scheduling OnInit, useful when testing.
+#if USE_LOCAL_FEDERATED_SERVER
+  bool should_schedule_ = true;
+#else
+  bool should_schedule_ = false;
+#endif
 
   // Must be last class member.
   const base::WeakPtrFactory<Daemon> weak_ptr_factory_;

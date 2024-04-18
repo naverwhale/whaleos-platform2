@@ -1,15 +1,17 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <iterator>
+
 #include <base/check_op.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <crypto/sha2.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <openssl/aes.h>
 
+#include "trunks/cr50_headers/ap_ro_status.h"
 #include "trunks/error_codes.h"
 #include "trunks/hmac_authorization_delegate.h"
 #include "trunks/mock_authorization_delegate.h"
@@ -34,8 +36,8 @@ using testing::SetArgPointee;
 
 namespace {
 
-// Cr50 Vendor ID ("CROS").
-const uint32_t kVendorIdCr50 = 0x43524f53;
+// GSC Vendor ID ("CROS").
+const uint32_t kVendorIdGsc = 0x43524f53;
 
 // Returns the total number of bits set in the first |size| elements from
 // |array|.
@@ -65,6 +67,12 @@ trunks::TPM2B_PUBLIC MakeEmptyTpm2bPublic() {
   // Intentionally not initializing |tpm2b_public.public_area| as a size of zero
   // indicates that |public_area| is not meant to be read.
   return tpm2b_public;
+}
+
+std::string HexDecode(const std::string hex) {
+  std::vector<uint8_t> output;
+  CHECK(base::HexStringToBytes(hex, &output));
+  return std::string(reinterpret_cast<char*>(output.data()), output.size());
 }
 
 }  // namespace
@@ -100,8 +108,8 @@ class TpmUtilityTest : public testing::Test {
     return utility_.CreateStorageRootKeys(owner_password);
   }
 
-  TPM_RC CreateSaltingKey(const std::string& owner_password) {
-    return utility_.CreateSaltingKey(owner_password);
+  TPM_RC CreatePersistentSaltingKey(const std::string& owner_password) {
+    return utility_.CreatePersistentSaltingKey(owner_password);
   }
 
   void SetExistingKeyHandleExpectation(TPM_HANDLE handle) {
@@ -158,7 +166,7 @@ class TpmUtilityTest : public testing::Test {
     std::string unencrypted_private(private_data.size, 0);
     AES_cfb128_encrypt(
         reinterpret_cast<const unsigned char*>(private_data.buffer),
-        reinterpret_cast<unsigned char*>(base::data(unencrypted_private)),
+        reinterpret_cast<unsigned char*>(std::data(unencrypted_private)),
         private_data.size, &key, iv, &iv_in, AES_DECRYPT);
     TPM2B_DIGEST inner_integrity;
     EXPECT_EQ(TPM_RC_SUCCESS, Parse_TPM2B_DIGEST(&unencrypted_private,
@@ -186,9 +194,9 @@ class TpmUtilityTest : public testing::Test {
             DoAll(SetArgPointee<4>(capability_data), Return(TPM_RC_SUCCESS)));
   }
 
-  void SetCr50(bool is_cr50) {
+  void SetGsc(bool is_gsc) {
     EXPECT_CALL(mock_tpm_state_, Initialize()).WillOnce(Return(TPM_RC_SUCCESS));
-    uint32_t vendor_id = is_cr50 ? kVendorIdCr50 : 1;
+    uint32_t vendor_id = is_gsc ? kVendorIdGsc : 1;
     EXPECT_CALL(mock_tpm_state_, GetTpmProperty(TPM_PT_MANUFACTURER, _))
         .WillOnce(DoAll(SetArgPointee<1>(vendor_id), Return(true)));
   }
@@ -358,8 +366,11 @@ TEST_F(TpmUtilityTest, AllocatePCRFromNone) {
   ASSERT_EQ(1u, new_pcr_allocation.count);
   TPML_PCR_SELECTION expected_pcr_allocation;
   PopulatePCRSelection(false, false, true, &expected_pcr_allocation);
-  ASSERT_EQ(0, memcmp(&expected_pcr_allocation, &new_pcr_allocation,
-                      sizeof(TPML_PCR_SELECTION)));
+  ASSERT_EQ(expected_pcr_allocation.count, new_pcr_allocation.count);
+  ASSERT_EQ(0,
+            memcmp(expected_pcr_allocation.pcr_selections,
+                   new_pcr_allocation.pcr_selections,
+                   sizeof(TPMS_PCR_SELECTION) * expected_pcr_allocation.count));
 }
 
 TEST_F(TpmUtilityTest, AllocatePCRFromSHA1Only) {
@@ -372,8 +383,11 @@ TEST_F(TpmUtilityTest, AllocatePCRFromSHA1Only) {
   ASSERT_EQ(2u, new_pcr_allocation.count);
   TPML_PCR_SELECTION expected_pcr_allocation;
   PopulatePCRSelection(true, true, true, &expected_pcr_allocation);
-  ASSERT_EQ(0, memcmp(&expected_pcr_allocation, &new_pcr_allocation,
-                      sizeof(TPML_PCR_SELECTION)));
+  ASSERT_EQ(expected_pcr_allocation.count, new_pcr_allocation.count);
+  ASSERT_EQ(0,
+            memcmp(expected_pcr_allocation.pcr_selections,
+                   new_pcr_allocation.pcr_selections,
+                   sizeof(TPMS_PCR_SELECTION) * expected_pcr_allocation.count));
 }
 
 TEST_F(TpmUtilityTest, AllocatePCRFromSHA1AndSHA256) {
@@ -386,8 +400,11 @@ TEST_F(TpmUtilityTest, AllocatePCRFromSHA1AndSHA256) {
   ASSERT_EQ(1u, new_pcr_allocation.count);
   TPML_PCR_SELECTION expected_pcr_allocation;
   PopulatePCRSelection(true, true, false, &expected_pcr_allocation);
-  ASSERT_EQ(0, memcmp(&expected_pcr_allocation, &new_pcr_allocation,
-                      sizeof(TPML_PCR_SELECTION)));
+  ASSERT_EQ(expected_pcr_allocation.count, new_pcr_allocation.count);
+  ASSERT_EQ(0,
+            memcmp(expected_pcr_allocation.pcr_selections,
+                   new_pcr_allocation.pcr_selections,
+                   sizeof(TPMS_PCR_SELECTION) * expected_pcr_allocation.count));
 }
 
 TEST_F(TpmUtilityTest, AllocatePCRFromSHA256Only) {
@@ -868,6 +885,85 @@ TEST_F(TpmUtilityTest, AsymmetricDecryptSchemeForward) {
                 key_handle, TPM_ALG_RSAES, TPM_ALG_NULL, ciphertext,
                 &mock_authorization_delegate_, &plaintext));
   EXPECT_EQ(scheme.scheme, TPM_ALG_RSAES);
+}
+
+TEST_F(TpmUtilityTest, ECDHZGenSuccess) {
+  TPM_HANDLE key_handle = 4231;
+  trunks::TPMS_ECC_POINT ecc_point;
+  std::string x = HexDecode(
+      "4d389be4b2542a71fff17e1ac8105077b8fcfe2c565fa202d07f386f576eb564");
+  std::string y = HexDecode(
+      "4491a3ac1cf9166a60d906ed06a5b1a2f29ca223b81064ca8b08f8bac68dd875");
+  ecc_point.x = trunks::Make_TPM2B_ECC_PARAMETER(x);
+  ecc_point.y = trunks::Make_TPM2B_ECC_PARAMETER(y);
+
+  trunks::TPM2B_ECC_POINT in_point = trunks::Make_TPM2B_ECC_POINT(ecc_point);
+  trunks::TPM2B_ECC_POINT z_point;
+
+  TPM2B_PUBLIC public_area = kTpm2bPublic;
+  public_area.public_area.type = TPM_ALG_ECC;
+  public_area.public_area.object_attributes = kDecrypt;
+  public_area.public_area.auth_policy.size = 0;
+  public_area.public_area.unique.rsa.size = 0;
+  EXPECT_CALL(mock_tpm_, ReadPublicSync(key_handle, _, _, _, _, _))
+      .WillRepeatedly(
+          DoAll(SetArgPointee<2>(public_area), Return(TPM_RC_SUCCESS)));
+  EXPECT_CALL(mock_tpm_,
+              ECDH_ZGenSync(key_handle, _, _, _, &mock_authorization_delegate_))
+      .WillOnce(Return(TPM_RC_SUCCESS));
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.ECDHZGen(key_handle, in_point,
+                              &mock_authorization_delegate_, &z_point));
+}
+
+TEST_F(TpmUtilityTest, ECDHZGenFail) {
+  TPM_HANDLE key_handle = 4231;
+  trunks::TPMS_ECC_POINT ecc_point;
+  trunks::TPM2B_ECC_POINT in_point = trunks::Make_TPM2B_ECC_POINT(ecc_point);
+  trunks::TPM2B_ECC_POINT z_point;
+
+  TPM2B_PUBLIC public_area = kTpm2bPublic;
+  public_area.public_area.type = TPM_ALG_ECC;
+  public_area.public_area.object_attributes = kDecrypt;
+  public_area.public_area.auth_policy.size = 0;
+  public_area.public_area.unique.rsa.size = 0;
+  EXPECT_CALL(mock_tpm_, ReadPublicSync(key_handle, _, _, _, _, _))
+      .WillRepeatedly(
+          DoAll(SetArgPointee<2>(public_area), Return(TPM_RC_SUCCESS)));
+  EXPECT_CALL(mock_tpm_,
+              ECDH_ZGenSync(key_handle, _, _, _, &mock_authorization_delegate_))
+      .WillOnce(Return(TPM_RC_FAILURE));
+  EXPECT_EQ(TPM_RC_FAILURE,
+            utility_.ECDHZGen(key_handle, in_point,
+                              &mock_authorization_delegate_, &z_point));
+}
+
+TEST_F(TpmUtilityTest, ECDHZGenBadParams) {
+  TPM_HANDLE key_handle = 4231;
+  trunks::TPMS_ECC_POINT ecc_point;
+  trunks::TPM2B_ECC_POINT in_point = trunks::Make_TPM2B_ECC_POINT(ecc_point);
+  trunks::TPM2B_ECC_POINT z_point;
+
+  std::string plaintext;
+  std::string output_plaintext("plaintext");
+  std::string ciphertext;
+  TPM2B_PUBLIC public_area = kTpm2bPublic;
+  public_area.public_area.type = TPM_ALG_ECC;
+  public_area.public_area.object_attributes = kDecrypt | kRestricted;
+  EXPECT_CALL(mock_tpm_, ReadPublicSync(key_handle, _, _, _, _, _))
+      .WillRepeatedly(
+          DoAll(SetArgPointee<2>(public_area), Return(TPM_RC_SUCCESS)));
+  EXPECT_EQ(SAPI_RC_BAD_PARAMETER,
+            utility_.ECDHZGen(key_handle, in_point,
+                              &mock_authorization_delegate_, &z_point));
+}
+
+TEST_F(TpmUtilityTest, ECDHZGenBadSession) {
+  TPM_HANDLE key_handle = TPM_RH_FIRST;
+  trunks::TPM2B_ECC_POINT in_point;
+  trunks::TPM2B_ECC_POINT z_point;
+  EXPECT_EQ(SAPI_RC_INVALID_SESSIONS,
+            utility_.ECDHZGen(key_handle, in_point, nullptr, &z_point));
 }
 
 TEST_F(TpmUtilityTest, SignRsaSuccess) {
@@ -1497,7 +1593,7 @@ TEST_F(TpmUtilityTest, CreateRSAKeyPairSignKeySuccess) {
   TPM2B_SENSITIVE_CREATE sensitive_create;
   EXPECT_CALL(mock_tpm_state_, Initialize()).WillOnce(Return(TPM_RC_SUCCESS));
   EXPECT_CALL(mock_tpm_state_, GetTpmProperty(TPM_PT_MANUFACTURER, _))
-      .WillOnce(DoAll(SetArgPointee<1>(kVendorIdCr50), Return(true)));
+      .WillOnce(DoAll(SetArgPointee<1>(kVendorIdGsc), Return(true)));
   EXPECT_CALL(mock_tpm_, CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _,
                                          _, &mock_authorization_delegate_))
       .WillOnce(DoAll(SaveArg<1>(&sensitive_create), SaveArg<2>(&public_area),
@@ -1564,7 +1660,7 @@ TEST_F(TpmUtilityTest, CreateRSAKeyPairBadDelegate) {
 TEST_F(TpmUtilityTest, CreateRSAKeyPairFailure) {
   EXPECT_CALL(mock_tpm_state_, Initialize()).WillOnce(Return(TPM_RC_SUCCESS));
   EXPECT_CALL(mock_tpm_state_, GetTpmProperty(TPM_PT_MANUFACTURER, _))
-      .WillOnce(DoAll(SetArgPointee<1>(kVendorIdCr50), Return(true)));
+      .WillOnce(DoAll(SetArgPointee<1>(kVendorIdGsc), Return(true)));
   EXPECT_CALL(mock_tpm_, CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _,
                                          _, &mock_authorization_delegate_))
       .WillOnce(Return(TPM_RC_FAILURE));
@@ -1580,7 +1676,7 @@ TEST_F(TpmUtilityTest, CreateRSAKeyPairKeyParserFail) {
   std::string key_blob;
   EXPECT_CALL(mock_tpm_state_, Initialize()).WillOnce(Return(TPM_RC_SUCCESS));
   EXPECT_CALL(mock_tpm_state_, GetTpmProperty(TPM_PT_MANUFACTURER, _))
-      .WillOnce(DoAll(SetArgPointee<1>(kVendorIdCr50), Return(true)));
+      .WillOnce(DoAll(SetArgPointee<1>(kVendorIdGsc), Return(true)));
   EXPECT_CALL(mock_blob_parser_, SerializeKeyBlob(_, _, &key_blob))
       .WillOnce(Return(false));
   EXPECT_EQ(SAPI_RC_BAD_TCTI_STRUCTURE,
@@ -1595,7 +1691,7 @@ TEST_F(TpmUtilityTest, CreateRSAKeyPairCreationParserFail) {
   std::string key_blob;
   EXPECT_CALL(mock_tpm_state_, Initialize()).WillOnce(Return(TPM_RC_SUCCESS));
   EXPECT_CALL(mock_tpm_state_, GetTpmProperty(TPM_PT_MANUFACTURER, _))
-      .WillOnce(DoAll(SetArgPointee<1>(kVendorIdCr50), Return(true)));
+      .WillOnce(DoAll(SetArgPointee<1>(kVendorIdGsc), Return(true)));
   EXPECT_CALL(mock_blob_parser_, SerializeCreationBlob(_, _, _, &creation_blob))
       .WillOnce(Return(false));
   EXPECT_EQ(SAPI_RC_BAD_TCTI_STRUCTURE,
@@ -1774,6 +1870,186 @@ TEST_F(TpmUtilityTest, CreateECCKeyPairCreationParserFail) {
       .WillOnce(Return(false));
   EXPECT_EQ(SAPI_RC_BAD_TCTI_STRUCTURE,
             utility_.CreateECCKeyPair(
+                TpmUtility::AsymmetricKeyUsage::kSignKey, TPM_ECC_NIST_P256,
+                "password", "", false, std::vector<uint32_t>(),
+                &mock_authorization_delegate_, &key_blob, &creation_blob));
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairSuccess) {
+  TPM2B_PUBLIC public_area = kTpm2bPublic;
+  TPM2B_SENSITIVE_CREATE sensitive_create;
+  EXPECT_CALL(mock_tpm_, CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _,
+                                         _, &mock_authorization_delegate_))
+      .WillOnce(DoAll(SaveArg<1>(&sensitive_create), SaveArg<2>(&public_area),
+                      Return(TPM_RC_SUCCESS)));
+  std::string key_blob;
+  std::string creation_blob;
+  std::string key_auth("password");
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.CreateRestrictedECCKeyPair(
+                TpmUtility::AsymmetricKeyUsage::kDecryptAndSignKey,
+                TPM_ECC_NIST_P256, key_auth, "", false, std::vector<uint32_t>(),
+                &mock_authorization_delegate_, &key_blob, &creation_blob));
+  EXPECT_EQ(public_area.public_area.object_attributes & kRestricted,
+            kRestricted);
+  EXPECT_EQ(public_area.public_area.object_attributes & kDecrypt, kDecrypt);
+  EXPECT_EQ(public_area.public_area.object_attributes & kSign, kSign);
+  EXPECT_EQ(public_area.public_area.object_attributes & kUserWithAuth,
+            kUserWithAuth);
+  EXPECT_EQ(public_area.public_area.object_attributes & kAdminWithPolicy, 0u);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.curve_id,
+            TPM_ECC_NIST_P256);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.kdf.scheme,
+            TPM_ALG_NULL);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.scheme.scheme,
+            TPM_ALG_NULL);
+  EXPECT_EQ(sensitive_create.sensitive.user_auth.size, key_auth.size());
+  EXPECT_EQ(0, memcmp(sensitive_create.sensitive.user_auth.buffer,
+                      key_auth.data(), key_auth.size()));
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairMultiplePCRSuccess) {
+  TPML_PCR_SELECTION creation_pcrs;
+  EXPECT_CALL(mock_tpm_, CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _,
+                                         _, &mock_authorization_delegate_))
+      .WillOnce(DoAll(SaveArg<3>(&creation_pcrs), Return(TPM_RC_SUCCESS)));
+  std::string key_blob;
+  std::string creation_blob;
+  std::vector<uint32_t> creation_pcr_indexes({0, 2});
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.CreateRestrictedECCKeyPair(
+                TpmUtility::AsymmetricKeyUsage::kDecryptAndSignKey,
+                TPM_ECC_NIST_P256, "password", "", false, creation_pcr_indexes,
+                &mock_authorization_delegate_, &key_blob, &creation_blob));
+  EXPECT_EQ(1u, creation_pcrs.count);
+  TPMS_PCR_SELECTION pcr_selection = creation_pcrs.pcr_selections[0];
+  EXPECT_EQ(TPM_ALG_SHA256, pcr_selection.hash);
+  EXPECT_EQ(PCR_SELECT_MIN, pcr_selection.sizeof_select);
+  EXPECT_EQ(creation_pcr_indexes.size(),
+            CountSetBits(pcr_selection.pcr_select, PCR_SELECT_MIN));
+  for (uint32_t pcr_index : creation_pcr_indexes) {
+    uint8_t creation_pcr_index = pcr_index / 8;
+    uint8_t creation_pcr_mask = 1u << (pcr_index % 8);
+    EXPECT_EQ(creation_pcr_mask,
+              creation_pcr_mask & pcr_selection.pcr_select[creation_pcr_index]);
+  }
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairDecryptKeySuccess) {
+  TPM2B_PUBLIC public_area = kTpm2bPublic;
+  EXPECT_CALL(mock_tpm_, CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _,
+                                         _, &mock_authorization_delegate_))
+      .WillOnce(DoAll(SaveArg<2>(&public_area), Return(TPM_RC_SUCCESS)));
+  std::string key_blob;
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.CreateRestrictedECCKeyPair(
+                TpmUtility::AsymmetricKeyUsage::kDecryptKey, TPM_ECC_NIST_P256,
+                "password", "", false, std::vector<uint32_t>(),
+                &mock_authorization_delegate_, &key_blob, nullptr));
+  EXPECT_EQ(public_area.public_area.object_attributes & kRestricted,
+            kRestricted);
+  EXPECT_EQ(public_area.public_area.object_attributes & kDecrypt, kDecrypt);
+  EXPECT_EQ(public_area.public_area.object_attributes & kSign, 0u);
+  EXPECT_EQ(public_area.public_area.object_attributes & kUserWithAuth,
+            kUserWithAuth);
+  EXPECT_EQ(public_area.public_area.object_attributes & kAdminWithPolicy, 0u);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.curve_id,
+            TPM_ECC_NIST_P256);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.kdf.scheme,
+            TPM_ALG_NULL);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.scheme.scheme,
+            TPM_ALG_NULL);
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairSignKeySuccess) {
+  TPM2B_PUBLIC public_area = kTpm2bPublic;
+  EXPECT_CALL(mock_tpm_, CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _,
+                                         _, &mock_authorization_delegate_))
+      .WillOnce(DoAll(SaveArg<2>(&public_area), Return(TPM_RC_SUCCESS)));
+  std::string key_blob;
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.CreateRestrictedECCKeyPair(
+                TpmUtility::AsymmetricKeyUsage::kSignKey, TPM_ECC_NIST_P256,
+                "password", "", false, std::vector<uint32_t>(),
+                &mock_authorization_delegate_, &key_blob, nullptr));
+  EXPECT_EQ(public_area.public_area.object_attributes & kDecrypt, 0);
+  EXPECT_EQ(public_area.public_area.object_attributes & kSign, kSign);
+  EXPECT_EQ(public_area.public_area.object_attributes & kUserWithAuth,
+            kUserWithAuth);
+  EXPECT_EQ(public_area.public_area.object_attributes & kAdminWithPolicy, 0u);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.curve_id,
+            TPM_ECC_NIST_P256);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.kdf.scheme,
+            TPM_ALG_NULL);
+  EXPECT_EQ(public_area.public_area.parameters.ecc_detail.scheme.scheme,
+            TPM_ALG_NULL);
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairWithPolicyAuthSuccess) {
+  TPM2B_PUBLIC public_area = kTpm2bPublic;
+  EXPECT_CALL(mock_tpm_, CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _,
+                                         _, &mock_authorization_delegate_))
+      .WillOnce(DoAll(SaveArg<2>(&public_area), Return(TPM_RC_SUCCESS)));
+  std::string key_blob;
+  std::string policy_digest(32, 'a');
+  EXPECT_EQ(
+      TPM_RC_SUCCESS,
+      utility_.CreateRestrictedECCKeyPair(
+          TpmUtility::AsymmetricKeyUsage::kSignKey, TPM_ECC_NIST_P256,
+          "password", policy_digest, true /* use_only_policy_authorization */,
+          std::vector<uint32_t>(), &mock_authorization_delegate_, &key_blob,
+          nullptr));
+  EXPECT_EQ(public_area.public_area.object_attributes & kRestricted,
+            kRestricted);
+  EXPECT_EQ(public_area.public_area.object_attributes & kDecrypt, 0u);
+  EXPECT_EQ(public_area.public_area.object_attributes & kSign, kSign);
+  EXPECT_EQ(public_area.public_area.object_attributes & kUserWithAuth, 0u);
+  EXPECT_EQ(public_area.public_area.object_attributes & kAdminWithPolicy,
+            kAdminWithPolicy);
+  EXPECT_EQ(public_area.public_area.auth_policy.size, policy_digest.size());
+  EXPECT_EQ(0, memcmp(public_area.public_area.auth_policy.buffer,
+                      policy_digest.data(), policy_digest.size()));
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairBadDelegate) {
+  std::string key_blob;
+  EXPECT_EQ(SAPI_RC_INVALID_SESSIONS,
+            utility_.CreateRestrictedECCKeyPair(
+                TpmUtility::AsymmetricKeyUsage::kDecryptKey, TPM_ECC_NIST_P256,
+                "password", "", false, std::vector<uint32_t>(), nullptr,
+                &key_blob, nullptr));
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairFailure) {
+  EXPECT_CALL(mock_tpm_, CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _,
+                                         _, &mock_authorization_delegate_))
+      .WillOnce(Return(TPM_RC_FAILURE));
+  std::string key_blob;
+  EXPECT_EQ(TPM_RC_FAILURE,
+            utility_.CreateRestrictedECCKeyPair(
+                TpmUtility::AsymmetricKeyUsage::kSignKey, TPM_ECC_NIST_P256,
+                "password", "", false, std::vector<uint32_t>(),
+                &mock_authorization_delegate_, &key_blob, nullptr));
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairKeyParserFail) {
+  std::string key_blob;
+  EXPECT_CALL(mock_blob_parser_, SerializeKeyBlob(_, _, &key_blob))
+      .WillOnce(Return(false));
+  EXPECT_EQ(SAPI_RC_BAD_TCTI_STRUCTURE,
+            utility_.CreateRestrictedECCKeyPair(
+                TpmUtility::AsymmetricKeyUsage::kSignKey, TPM_ECC_NIST_P256,
+                "password", "", false, std::vector<uint32_t>(),
+                &mock_authorization_delegate_, &key_blob, nullptr));
+}
+
+TEST_F(TpmUtilityTest, CreateRestrictedECCKeyPairCreationParserFail) {
+  std::string creation_blob;
+  std::string key_blob;
+  EXPECT_CALL(mock_blob_parser_, SerializeCreationBlob(_, _, _, &creation_blob))
+      .WillOnce(Return(false));
+  EXPECT_EQ(SAPI_RC_BAD_TCTI_STRUCTURE,
+            utility_.CreateRestrictedECCKeyPair(
                 TpmUtility::AsymmetricKeyUsage::kSignKey, TPM_ECC_NIST_P256,
                 "password", "", false, std::vector<uint32_t>(),
                 &mock_authorization_delegate_, &key_blob, &creation_blob));
@@ -2022,20 +2298,77 @@ TEST_F(TpmUtilityTest, SealedDataSuccess) {
       .WillOnce(DoAll(SaveArg<1>(&sensitive_create), SaveArg<2>(&in_public),
                       Return(TPM_RC_SUCCESS)));
   EXPECT_EQ(TPM_RC_SUCCESS,
-            utility_.SealData(data_to_seal, "", "",
+            utility_.SealData(data_to_seal, "none_empty_policy_digest",
+                              "none_empty_auth_value",
+                              /*require_admin_with_policy=*/true,
                               &mock_authorization_delegate_, &sealed_data));
   EXPECT_EQ(sensitive_create.sensitive.data.size, data_to_seal.size());
   EXPECT_EQ(0, memcmp(sensitive_create.sensitive.data.buffer,
                       data_to_seal.data(), data_to_seal.size()));
   EXPECT_EQ(in_public.public_area.type, TPM_ALG_KEYEDHASH);
   EXPECT_EQ(in_public.public_area.name_alg, TPM_ALG_SHA256);
+  EXPECT_EQ(in_public.public_area.object_attributes, kAdminWithPolicy | kNoDA);
+}
+
+TEST_F(TpmUtilityTest, SealedDataEmptyAuthValueSuccess) {
+  std::string data_to_seal("seal_data");
+  std::string sealed_data;
+  TPM2B_SENSITIVE_CREATE sensitive_create;
+  TPM2B_PUBLIC in_public = kTpm2bPublic;
+  EXPECT_CALL(mock_tpm_,
+              CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _, _, _))
+      .WillOnce(DoAll(SaveArg<1>(&sensitive_create), SaveArg<2>(&in_public),
+                      Return(TPM_RC_SUCCESS)));
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.SealData(data_to_seal, "none_empty_policy_digest", "",
+                              /*require_admin_with_policy=*/true,
+                              &mock_authorization_delegate_, &sealed_data));
+  EXPECT_EQ(sensitive_create.sensitive.data.size, data_to_seal.size());
+  EXPECT_EQ(0, memcmp(sensitive_create.sensitive.data.buffer,
+                      data_to_seal.data(), data_to_seal.size()));
+  EXPECT_EQ(in_public.public_area.type, TPM_ALG_KEYEDHASH);
+  EXPECT_EQ(in_public.public_area.name_alg, TPM_ALG_SHA256);
+  EXPECT_EQ(in_public.public_area.object_attributes, kAdminWithPolicy | kNoDA);
+}
+
+TEST_F(TpmUtilityTest, SealedDataEmptyPolicySuccess) {
+  std::string data_to_seal("seal_data");
+  std::string sealed_data;
+  TPM2B_SENSITIVE_CREATE sensitive_create;
+  TPM2B_PUBLIC in_public = kTpm2bPublic;
+  EXPECT_CALL(mock_tpm_,
+              CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _, _, _))
+      .WillOnce(DoAll(SaveArg<1>(&sensitive_create), SaveArg<2>(&in_public),
+                      Return(TPM_RC_SUCCESS)));
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.SealData(data_to_seal, "", "none_empty_auth_value",
+                              /*require_admin_with_policy=*/false,
+                              &mock_authorization_delegate_, &sealed_data));
+  EXPECT_EQ(sensitive_create.sensitive.data.size, data_to_seal.size());
+  EXPECT_EQ(0, memcmp(sensitive_create.sensitive.data.buffer,
+                      data_to_seal.data(), data_to_seal.size()));
+  EXPECT_EQ(in_public.public_area.type, TPM_ALG_KEYEDHASH);
+  EXPECT_EQ(in_public.public_area.name_alg, TPM_ALG_SHA256);
+  EXPECT_EQ(in_public.public_area.object_attributes, kUserWithAuth | kNoDA);
+}
+
+TEST_F(TpmUtilityTest, SealedDataOnlyEmptyPolicy) {
+  std::string data_to_seal("seal_data");
+  std::string sealed_data;
+  EXPECT_EQ(SAPI_RC_BAD_PARAMETER,
+            utility_.SealData(data_to_seal, "", "none_empty_auth_value",
+                              /*require_admin_with_policy=*/true,
+                              &mock_authorization_delegate_, &sealed_data));
 }
 
 TEST_F(TpmUtilityTest, SealDataBadDelegate) {
   std::string data_to_seal("seal_data");
   std::string sealed_data;
   EXPECT_EQ(SAPI_RC_INVALID_SESSIONS,
-            utility_.SealData(data_to_seal, "", "", nullptr, &sealed_data));
+            utility_.SealData(data_to_seal, "none_empty_policy_digest",
+                              "none_empty_auth_value",
+                              /*require_admin_with_policy=*/true, nullptr,
+                              &sealed_data));
 }
 
 TEST_F(TpmUtilityTest, SealDataFailure) {
@@ -2045,7 +2378,9 @@ TEST_F(TpmUtilityTest, SealDataFailure) {
               CreateSyncShort(kStorageRootKey, _, _, _, _, _, _, _, _, _))
       .WillOnce(Return(TPM_RC_FAILURE));
   EXPECT_EQ(TPM_RC_FAILURE,
-            utility_.SealData(data_to_seal, "", "",
+            utility_.SealData(data_to_seal, "none_empty_policy_digest",
+                              "none_empty_auth_value",
+                              /*require_admin_with_policy=*/true,
                               &mock_authorization_delegate_, &sealed_data));
 }
 
@@ -2055,7 +2390,9 @@ TEST_F(TpmUtilityTest, SealDataParserFail) {
   EXPECT_CALL(mock_blob_parser_, SerializeKeyBlob(_, _, &sealed_data))
       .WillOnce(Return(false));
   EXPECT_EQ(SAPI_RC_BAD_TCTI_STRUCTURE,
-            utility_.SealData(data_to_seal, "", "",
+            utility_.SealData(data_to_seal, "none_empty_policy_digest",
+                              "none_empty_auth_value",
+                              /*require_admin_with_policy=*/true,
                               &mock_authorization_delegate_, &sealed_data));
 }
 
@@ -2277,7 +2614,7 @@ TEST_F(TpmUtilityTest, GetPolicyDigestForPcrValuesBadSession) {
   int index = 5;
   std::string pcr_value("value");
   std::string policy_digest;
-  EXPECT_CALL(mock_trial_session_, StartUnboundSession(true, false))
+  EXPECT_CALL(mock_trial_session_, StartUnboundSession(false, false))
       .WillOnce(Return(TPM_RC_FAILURE));
   EXPECT_EQ(TPM_RC_FAILURE,
             utility_.GetPolicyDigestForPcrValues(
@@ -2653,6 +2990,66 @@ TEST_F(NVTpmUtilityTest, WriteNVSpaceFailureGetChunkSize) {
                                   &mock_authorization_delegate_));
 }
 
+TEST_F(NVTpmUtilityTest, IncrementNVCounterReadPublicFailure) {
+  EXPECT_CALL(mock_tpm_, NV_ReadPublicSync(kNvTpmIndex, _, _, _, _))
+      .WillOnce(Return(TPM_RC_FAILURE));
+
+  EXPECT_EQ(TPM_RC_FAILURE,
+            utility_.IncrementNVCounter(kNvIndex,
+                                        /*using_owner_authorization=*/false,
+                                        &mock_authorization_delegate_));
+}
+
+TEST_F(NVTpmUtilityTest, IncrementNVCounterIncrementFailure) {
+  EXPECT_CALL(mock_tpm_, NV_ReadPublicSync(kNvTpmIndex, _, _, _, _))
+      .WillOnce(
+          DoAll(SetArgPointee<2>(kTpm2bNvPublic), Return(TPM_RC_SUCCESS)));
+
+  EXPECT_CALL(mock_tpm_, NV_IncrementSync(_, _, _, _, _))
+      .WillOnce(Return(TPM_RC_FAILURE));
+
+  EXPECT_EQ(TPM_RC_FAILURE,
+            utility_.IncrementNVCounter(kNvIndex,
+                                        /*using_owner_authorization=*/true,
+                                        &mock_authorization_delegate_));
+}
+
+TEST_F(NVTpmUtilityTest, IncrementNVCounterNotOwnerSuccess) {
+  EXPECT_CALL(mock_tpm_, NV_ReadPublicSync(kNvTpmIndex, _, _, _, _))
+      .WillOnce(
+          DoAll(SetArgPointee<2>(kTpm2bNvPublic), Return(TPM_RC_SUCCESS)));
+
+  EXPECT_CALL(mock_tpm_, NV_IncrementSync(kNvTpmIndex, _, kNvTpmIndex, _, _))
+      .WillOnce(Return(TPM_RC_SUCCESS));
+
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.IncrementNVCounter(kNvIndex,
+                                        /*using_owner_authorization=*/false,
+                                        &mock_authorization_delegate_));
+
+  TPMS_NV_PUBLIC public_area;
+  EXPECT_EQ(TPM_RC_SUCCESS, GetNVRAMMap(kNvIndex, &public_area));
+  EXPECT_EQ(kNvAttributes | TPMA_NV_WRITTEN, public_area.attributes);
+}
+
+TEST_F(NVTpmUtilityTest, IncrementNVCounterOwnerSuccess) {
+  EXPECT_CALL(mock_tpm_, NV_ReadPublicSync(kNvTpmIndex, _, _, _, _))
+      .WillOnce(
+          DoAll(SetArgPointee<2>(kTpm2bNvPublic), Return(TPM_RC_SUCCESS)));
+
+  EXPECT_CALL(mock_tpm_, NV_IncrementSync(TPM_RH_OWNER, _, kNvTpmIndex, _, _))
+      .WillOnce(Return(TPM_RC_SUCCESS));
+
+  EXPECT_EQ(TPM_RC_SUCCESS,
+            utility_.IncrementNVCounter(kNvIndex,
+                                        /*using_owner_authorization=*/true,
+                                        &mock_authorization_delegate_));
+
+  TPMS_NV_PUBLIC public_area;
+  EXPECT_EQ(TPM_RC_SUCCESS, GetNVRAMMap(kNvIndex, &public_area));
+  EXPECT_EQ(kNvAttributes | TPMA_NV_WRITTEN, public_area.attributes);
+}
+
 TEST_F(NVTpmUtilityTest, ReadNVSpaceSuccess) {
   uint32_t offset = 5;
   EXPECT_CALL(mock_tpm_, NV_ReadPublicSync(kNvTpmIndex, _, _, _, _))
@@ -2928,7 +3325,7 @@ TEST_F(TpmUtilityTest, SaltingKeyRsaSuccess) {
   TPM2B_PUBLIC public_area = kTpm2bPublic;
   EXPECT_CALL(mock_tpm_, CreateSyncShort(_, _, _, _, _, _, _, _, _, _))
       .WillOnce(DoAll(SaveArg<2>(&public_area), Return(TPM_RC_SUCCESS)));
-  EXPECT_EQ(TPM_RC_SUCCESS, CreateSaltingKey("password"));
+  EXPECT_EQ(TPM_RC_SUCCESS, CreatePersistentSaltingKey("password"));
   EXPECT_EQ(TPM_ALG_RSA, public_area.public_area.type);
   EXPECT_EQ(TPM_ALG_SHA256, public_area.public_area.name_alg);
 }
@@ -2939,7 +3336,7 @@ TEST_F(TpmUtilityTest, SaltingKeyEccSuccess) {
   TPM2B_PUBLIC public_area = kTpm2bPublic;
   EXPECT_CALL(mock_tpm_, CreateSyncShort(_, _, _, _, _, _, _, _, _, _))
       .WillOnce(DoAll(SaveArg<2>(&public_area), Return(TPM_RC_SUCCESS)));
-  EXPECT_EQ(TPM_RC_SUCCESS, CreateSaltingKey("password"));
+  EXPECT_EQ(TPM_RC_SUCCESS, CreatePersistentSaltingKey("password"));
   EXPECT_EQ(TPM_ALG_ECC, public_area.public_area.type);
 }
 
@@ -2948,7 +3345,7 @@ TEST_F(TpmUtilityTest, SaltingKeyTypeUnsupported) {
       .WillOnce(Return(TPM_ALG_ERROR));
   EXPECT_CALL(mock_tpm_, CreateSyncShort(_, _, _, _, _, _, _, _, _, _))
       .Times(0);
-  EXPECT_EQ(TPM_RC_FAILURE, CreateSaltingKey("password"));
+  EXPECT_EQ(TPM_RC_FAILURE, CreatePersistentSaltingKey("password"));
 }
 
 TEST_F(TpmUtilityTest, SaltingKeyConsistency) {
@@ -2958,30 +3355,30 @@ TEST_F(TpmUtilityTest, SaltingKeyConsistency) {
           DoAll(SetArgPointee<4>(test_handle), Return(TPM_RC_SUCCESS)));
   EXPECT_CALL(mock_tpm_, EvictControlSync(_, _, test_handle, _, _, _))
       .WillRepeatedly(Return(TPM_RC_SUCCESS));
-  EXPECT_EQ(TPM_RC_SUCCESS, CreateSaltingKey("password"));
+  EXPECT_EQ(TPM_RC_SUCCESS, CreatePersistentSaltingKey("password"));
 }
 
 TEST_F(TpmUtilityTest, SaltingKeyCreateFailure) {
   EXPECT_CALL(mock_tpm_, CreateSyncShort(_, _, _, _, _, _, _, _, _, _))
       .WillRepeatedly(Return(TPM_RC_FAILURE));
-  EXPECT_EQ(TPM_RC_FAILURE, CreateSaltingKey("password"));
+  EXPECT_EQ(TPM_RC_FAILURE, CreatePersistentSaltingKey("password"));
 }
 
 TEST_F(TpmUtilityTest, SaltingKeyLoadFailure) {
   EXPECT_CALL(mock_tpm_, LoadSync(_, _, _, _, _, _, _))
       .WillRepeatedly(Return(TPM_RC_FAILURE));
-  EXPECT_EQ(TPM_RC_FAILURE, CreateSaltingKey("password"));
+  EXPECT_EQ(TPM_RC_FAILURE, CreatePersistentSaltingKey("password"));
 }
 
 TEST_F(TpmUtilityTest, SaltingKeyPersistFailure) {
   EXPECT_CALL(mock_tpm_, EvictControlSync(_, _, _, _, _, _))
       .WillRepeatedly(Return(TPM_RC_FAILURE));
-  EXPECT_EQ(TPM_RC_FAILURE, CreateSaltingKey("password"));
+  EXPECT_EQ(TPM_RC_FAILURE, CreatePersistentSaltingKey("password"));
 }
 
 TEST_F(TpmUtilityTest, SaltingKeyAlreadyExists) {
   SetExistingKeyHandleExpectation(kSaltingKey);
-  EXPECT_EQ(TPM_RC_SUCCESS, CreateSaltingKey("password"));
+  EXPECT_EQ(TPM_RC_SUCCESS, CreatePersistentSaltingKey("password"));
 }
 
 TEST_F(TpmUtilityTest, SetDictionaryAttackParametersSuccess) {
@@ -3015,9 +3412,11 @@ TEST_F(TpmUtilityTest, ResetDictionaryAttackLockFailure) {
 }
 
 TEST_F(TpmUtilityTest, GetEndorsementKey) {
+  TPM2B_NAME key_name = {};
   EXPECT_CALL(mock_tpm_, CreatePrimarySyncShort(TPM_RH_ENDORSEMENT, _, _, _, _,
                                                 _, _, _, _, _))
-      .WillRepeatedly(Return(TPM_RC_SUCCESS));
+      .WillRepeatedly(
+          DoAll(SetArgPointee<8>(key_name), Return(TPM_RC_SUCCESS)));
   TPM_HANDLE key_handle;
   EXPECT_EQ(TPM_RC_SUCCESS, utility_.GetEndorsementKey(TPM_ALG_RSA, nullptr,
                                                        nullptr, &key_handle));
@@ -3048,47 +3447,47 @@ TEST_F(TpmUtilityTest, CreateIdentityKeyFail) {
             utility_.CreateIdentityKey(TPM_ALG_RSA, nullptr, &key_blob));
 }
 
-TEST_F(TpmUtilityTest, DeclareTpmFirmwareStableNonCr50) {
-  SetCr50(false);
+TEST_F(TpmUtilityTest, DeclareTpmFirmwareStableNonGsc) {
+  SetGsc(false);
   EXPECT_CALL(mock_transceiver_, SendCommandAndWait(_)).Times(0);
   EXPECT_EQ(TPM_RC_SUCCESS, utility_.DeclareTpmFirmwareStable());
 }
 
-TEST_F(TpmUtilityTest, DeclareTpmFirmwareStableCr50Success) {
-  // A hand-coded kCr50SubcmdInvalidateInactiveRW command and response.
+TEST_F(TpmUtilityTest, DeclareTpmFirmwareStableGscSuccess) {
+  // A hand-coded kGscSubcmdInvalidateInactiveRW command and response.
   std::string expected_command(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0C"  // size=12
-      "\x20\x00\x00\x00"  // code=kCr50VendorCC
-      "\x00\x14",         // subcommand=kCr50SubcmdInvalidateInactiveRW
+      "\x20\x00\x00\x00"  // code=kGscVendorCC
+      "\x00\x14",         // subcommand=kGscSubcmdInvalidateInactiveRW
       12);
   std::string command_response(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0C"  // size=12
       "\x00\x00\x00\x00"  // code=TPM_RC_SUCCESS
-      "\x00\x14",         // subcommand=kCr50SubcmdInvalidateInactiveRW
+      "\x00\x14",         // subcommand=kGscSubcmdInvalidateInactiveRW
       12);
-  SetCr50(true);
+  SetGsc(true);
   EXPECT_CALL(mock_transceiver_, SendCommandAndWait(expected_command))
       .WillOnce(Return(command_response));
   EXPECT_EQ(TPM_RC_SUCCESS, utility_.DeclareTpmFirmwareStable());
 }
 
-TEST_F(TpmUtilityTest, DeclareTpmFirmwareStableCr50Failure) {
-  // A hand-coded kCr50SubcmdInvalidateInactiveRW command and response.
+TEST_F(TpmUtilityTest, DeclareTpmFirmwareStableGscFailure) {
+  // A hand-coded kGscSubcmdInvalidateInactiveRW command and response.
   std::string expected_command(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0C"  // size=12
-      "\x20\x00\x00\x00"  // code=kCr50VendorCC
-      "\x00\x14",         // subcommand=kCr50SubcmdInvalidateInactiveRW
+      "\x20\x00\x00\x00"  // code=kGscVendorCC
+      "\x00\x14",         // subcommand=kGscSubcmdInvalidateInactiveRW
       12);
   std::string command_response(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0C"  // size=10
       "\x00\x00\x01\x01"  // code=TPM_RC_FAILURE
-      "\x00\x14",         // subcommand=kCr50SubcmdInvalidateInactiveRW
+      "\x00\x14",         // subcommand=kGscSubcmdInvalidateInactiveRW
       12);
-  SetCr50(true);
+  SetGsc(true);
   EXPECT_CALL(mock_transceiver_, SendCommandAndWait(expected_command))
       .WillOnce(Return(command_response));
   EXPECT_EQ(TPM_RC_FAILURE, utility_.DeclareTpmFirmwareStable());
@@ -3217,12 +3616,12 @@ TEST_F(TpmUtilityTest,
 }
 
 TEST_F(TpmUtilityTest, GetRsuDeviceIdDecodesCorrectly) {
-  // Hardcoded kCr50GetRmaChallenge command and response.
+  // Hardcoded kGscGetRmaChallenge command and response.
   std::string expected_command(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0c"  // size=12
-      "\x20\x00\x00\x00"  // code=kCr50VendorCC
-      "\x00\x1e",         // subcommand=kCr50GetRmaChallenge
+      "\x20\x00\x00\x00"  // code=kGscVendorCC
+      "\x00\x1e",         // subcommand=kGscGetRmaChallenge
       12);
   std::string command_response(
       "\x80\x01"          // tag=TPM_STD_NO_SESSIONS
@@ -3239,7 +3638,7 @@ TEST_F(TpmUtilityTest, GetRsuDeviceIdDecodesCorrectly) {
       "\xa3\x79\xfc\x49\x29\x27\x8a\xf1\x31\x67\x33\xf3\x89\xa9",
       32);
 
-  SetCr50(true);
+  SetGsc(true);
   EXPECT_CALL(mock_transceiver_, SendCommandAndWait(expected_command))
       .WillOnce(Return(command_response));
 
@@ -3250,7 +3649,7 @@ TEST_F(TpmUtilityTest, GetRsuDeviceIdDecodesCorrectly) {
 
 TEST_F(TpmUtilityTest, GetRsuDeviceIdCaching) {
   std::string rsu_device_id, rsu_device_id2, rsu_device_id3;
-  SetCr50(true);
+  SetGsc(true);
   // Hardcoded RMA challenges from two devices.
   std::string command_response(
       "\x80\x01"          // tag=TPM_STD_NO_SESSIONS
@@ -3285,8 +3684,8 @@ TEST_F(TpmUtilityTest, GetRsuDeviceIdCaching) {
 
 TEST_F(TpmUtilityTest,
        GetRsuDeviceIdReturnsTheSameValueForDifferentChallenges) {
-  SetCr50(true);
-  // Hardcoded RMA challanges from the same device.
+  SetGsc(true);
+  // Hardcoded RMA challenges from the same device.
   std::string command_response(
       "\x80\x01"          // tag=TPM_STD_NO_SESSIONS
       "\x00\x00\x00\x5c"  // size=92
@@ -3317,36 +3716,36 @@ TEST_F(TpmUtilityTest,
   EXPECT_EQ(rsu_device_id, rsu_device_id2);
 }
 
-TEST_F(TpmUtilityTest, ManageCCDPwdNonCr50) {
-  SetCr50(false);
+TEST_F(TpmUtilityTest, ManageCCDPwdNonGsc) {
+  SetGsc(false);
   EXPECT_CALL(mock_transceiver_, SendCommandAndWait(_)).Times(0);
   EXPECT_EQ(TPM_RC_SUCCESS, utility_.ManageCCDPwd(true));
 }
 
-TEST_F(TpmUtilityTest, ManageCCDPwdCr50Success) {
-  // A hand-coded kCr50SubcmdManageCCDPwd command (two variants: true and false)
+TEST_F(TpmUtilityTest, ManageCCDPwdGscSuccess) {
+  // A hand-coded kGscSubcmdManageCCDPwd command (two variants: true and false)
   // and response.
   std::string expected_command_true(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0D"  // size=13
-      "\x20\x00\x00\x00"  // code=kCr50VendorCC
-      "\x00\x21"          // subcommand=kCr50SubcmdManageCCDPwd
+      "\x20\x00\x00\x00"  // code=kGscVendorCC
+      "\x00\x21"          // subcommand=kGscSubcmdManageCCDPwd
       "\x01",             // value=true
       13);
   std::string expected_command_false(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0D"  // size=13
-      "\x20\x00\x00\x00"  // code=kCr50VendorCC
-      "\x00\x21"          // subcommand=kCr50SubcmdManageCCDPwd
+      "\x20\x00\x00\x00"  // code=kGscVendorCC
+      "\x00\x21"          // subcommand=kGscSubcmdManageCCDPwd
       "\x00",             // value=false
       13);
   std::string command_response(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0C"  // size=12
       "\x00\x00\x00\x00"  // code=TPM_RC_SUCCESS
-      "\x00\x21",         // subcommand=kCr50SubcmdManageCCDPwd
+      "\x00\x21",         // subcommand=kGscSubcmdManageCCDPwd
       12);
-  SetCr50(true);
+  SetGsc(true);
   EXPECT_CALL(mock_transceiver_, SendCommandAndWait(expected_command_true))
       .WillOnce(Return(command_response));
   EXPECT_EQ(TPM_RC_SUCCESS, utility_.ManageCCDPwd(true));
@@ -3357,58 +3756,131 @@ TEST_F(TpmUtilityTest, ManageCCDPwdCr50Success) {
 }
 
 TEST_F(TpmUtilityTest, ManageCCDPwdFailure) {
-  // A hand-coded kCr50SubcmdManageCCDPwd command and response.
+  // A hand-coded kGscSubcmdManageCCDPwd command and response.
   std::string expected_command(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0D"  // size=13
-      "\x20\x00\x00\x00"  // code=kCr50VendorCC
-      "\x00\x21"          // subcommand=kCr50SubcmdManageCCDPwd
+      "\x20\x00\x00\x00"  // code=kGscVendorCC
+      "\x00\x21"          // subcommand=kGscSubcmdManageCCDPwd
       "\x01",             // value=true
       13);
   std::string command_response(
       "\x80\x01"          // tag=TPM_ST_NO_SESSIONS
       "\x00\x00\x00\x0C"  // size=12
       "\x00\x00\x01\x01"  // code=TPM_RC_FAILURE
-      "\x00\x21",         // subcommand=kCr50SubcmdManageCCDPwd
+      "\x00\x21",         // subcommand=kGscSubcmdManageCCDPwd
       12);
-  SetCr50(true);
+  SetGsc(true);
   EXPECT_CALL(mock_transceiver_, SendCommandAndWait(expected_command))
       .WillOnce(Return(command_response));
   EXPECT_EQ(TPM_RC_FAILURE, utility_.ManageCCDPwd(true));
 }
 
-TEST_F(TpmUtilityTest, IsCr50) {
-  SetCr50(true);
-  EXPECT_TRUE(utility_.IsCr50());
+TEST_F(TpmUtilityTest, IsGsc) {
+  SetGsc(true);
+  EXPECT_TRUE(utility_.IsGsc());
 }
 
-TEST_F(TpmUtilityTest, NotCr50) {
-  SetCr50(false);
-  EXPECT_FALSE(utility_.IsCr50());
+TEST_F(TpmUtilityTest, NotGsc) {
+  SetGsc(false);
+  EXPECT_FALSE(utility_.IsGsc());
 }
 
 TEST_F(TpmUtilityTest, GetRoVerificationStatus) {
-  // A hand-coded kCr50SubcmdGetRoStatus command and response.
+  // A hand-coded kGscSubcmdGetRoStatus command and response.
   std::string command_response(
       "\x80\x01"          // tag=TPM_STD_NO_SESSIONS
       "\x00\x00\x00\x0D"  // size=13
       "\x00\x00\x00\x00"  // code=TPM_RC_SUCCESS
-      "\x00\x39"          // subcommand=kCr50SubcmdGetRoStatus
-      "\x01",             // ApRoStatus=kApRoPass
+      "\x00\x39"          // subcommand=kGscSubcmdGetRoStatus
+      "\x01",             // ap_ro_status=AP_RO_PASS_UNVERIFIED_GBB
       13);
-  SetCr50(true);
+  SetGsc(true);
   EXPECT_CALL(mock_transceiver_, SendCommandAndWait(_))
       .WillOnce(Return(command_response));
-  TpmUtility::ApRoStatus status;
+  ap_ro_status status;
   EXPECT_EQ(TPM_RC_SUCCESS, utility_.GetRoVerificationStatus(&status));
-  EXPECT_EQ(status, TpmUtility::ApRoStatus::kApRoPass);
+  EXPECT_EQ(status, AP_RO_PASS_UNVERIFIED_GBB);
 }
 
-TEST_F(TpmUtilityTest, GetRoVerificationStatusForNotCr50) {
-  SetCr50(false);
-  TpmUtility::ApRoStatus status;
+TEST_F(TpmUtilityTest, GetRoVerificationStatusForNotGsc) {
+  SetGsc(false);
+  ap_ro_status status;
   EXPECT_EQ(TPM_RC_SUCCESS, utility_.GetRoVerificationStatus(&status));
-  EXPECT_EQ(status, TpmUtility::ApRoStatus::kApRoUnsupported);
+  EXPECT_EQ(status, AP_RO_NOT_RUN);
 }
 
+TEST_F(TpmUtilityTest, GetTi50Stats) {
+  std::string command_response(
+      "\x80\x01"           // tag=TPM_STD_NO_SESSIONS
+      "\x00\x00\x00\x1C"   // size=28
+      "\x00\x00\x00\x00"   // code=TPM_RC_SUCCESS
+      "\x00\x41"           // subcommand=kTi50GetMetrics
+      "\xAA\xBB\xCC\xDD"   // fs_init_time = 0xAABBCCDD
+      "\x11\x22\x33\x44"   // fs_size = 0x11223344
+      "\x55\x66\x77\x88"   // aprov_time = 0x55667788
+      "\x99\x00\xAA\xBB",  // aprov_status = 0x9900AABB
+      28);
+  EXPECT_CALL(mock_transceiver_, SendCommandAndWait(_))
+      .WillOnce(Return(command_response));
+  uint32_t fs_time = 0;
+  uint32_t fs_size = 0;
+  uint32_t aprov_time = 0;
+  uint32_t aprov_status = 0;
+  EXPECT_EQ(TPM_RC_SUCCESS, utility_.GetTi50Stats(&fs_time, &fs_size,
+                                                  &aprov_time, &aprov_status));
+  EXPECT_EQ(fs_time, 0xAABBCCDD);
+  EXPECT_EQ(fs_size, 0x11223344);
+  EXPECT_EQ(aprov_time, 0x55667788);
+  EXPECT_EQ(aprov_status, 0x9900AABB);
+}
+
+TEST_F(TpmUtilityTest, GetRwVersion) {
+  std::string command_response(
+      "\x80\x01"           // tag=TPM_STD_NO_SESSIONS
+      "\x00\x00\x00\x3C"   // size=60
+      "\x00\x00\x00\x00"   // code=TPM_RC_SUCCESS
+      "\x00\x04"           // subcommand=EXTENSION_FW_UPGRADE
+      "\x00\x00\x00\x00"   // return_value
+      "\x00\x00\x00\x00"   // protocol_version
+      "\x00\x00\x00\x00"   // backup_ro_offset
+      "\x00\x00\x00\x00"   // backup_rw_offset
+      "\x00\x00\x00\x00"   // shv[0].minor
+      "\x00\x00\x00\x00"   // shv[0].major
+      "\x00\x00\x00\x00"   // shv[0].epoch
+      "\x11\x22\x33\x44"   // shv[1].minor
+      "\xDD\xCC\xBB\xAA"   // shv[1].major
+      "\x88\x77\x66\x55"   // shv[1].epoch
+      "\x00\x00\x00\x00"   // keyid[0]
+      "\x00\x00\x00\x00",  // keyid[1]
+      60);
+  SetGsc(true);
+  EXPECT_CALL(mock_transceiver_, SendCommandAndWait(_))
+      .WillOnce(Return(command_response));
+  uint32_t epoch;
+  uint32_t major;
+  uint32_t minor;
+  EXPECT_EQ(TPM_RC_SUCCESS, utility_.GetRwVersion(&epoch, &major, &minor));
+  EXPECT_EQ(minor, 0x11223344);
+  EXPECT_EQ(major, 0xDDCCBBAA);
+  EXPECT_EQ(epoch, 0x88776655);
+}
+
+TEST_F(TpmUtilityTest, GetConsoleLogs) {
+  std::string command_response(
+      "\x80\x01"           // tag=TPM_STD_NO_SESSIONS
+      "\x00\x00\x00\x18"   // size=24
+      "\x00\x00\x00\x00"   // code=TPM_RC_SUCCESS
+      "\x00\x43"           // subcommand=kTi50GetConsoleLogs
+      "\x41\x42\x43\x44"   // "ABCD"
+      "\x45\x46\x47\x48"   // "EFGH"
+      "\x49\x4A\x4B\x4C",  // "IJKL"
+      24);
+  EXPECT_CALL(mock_transceiver_, SendCommandAndWait(_))
+      .WillOnce(Return(command_response));
+
+  std::string logs;
+  EXPECT_EQ(TPM_RC_SUCCESS, utility_.GetConsoleLogs(&logs));
+  EXPECT_EQ(logs, "ABCDEFGHIJKL");
+}
 }  // namespace trunks

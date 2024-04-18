@@ -1,8 +1,10 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "dns-proxy/metrics.h"
+
+#include <sys/socket.h>
 
 #include <map>
 #include <type_traits>
@@ -26,8 +28,21 @@ constexpr char kNameserverTypes[] = "Network.DnsProxy.NameserverTypes";
 constexpr char kDnsOverHttpsMode[] = "Network.DnsProxy.DnsOverHttpsMode";
 
 constexpr char kQueryResultsTemplate[] = "Network.DnsProxy.$1Query.Results";
+constexpr char kQueryResultsWithRetriesTemplate[] =
+    "Network.DnsProxy.$1Query.ResultsWithRetries";
 constexpr char kQueryErrorsTemplate[] = "Network.DnsProxy.$1Query.Errors";
 constexpr char kHttpErrors[] = "Network.DnsProxy.DnsOverHttpsQuery.HttpErrors";
+
+constexpr char kProbeResultsTemplate[] =
+    "Network.DnsProxy.PlainTextProbe.$1.Results";
+constexpr char kProbeErrorsTemplate[] =
+    "Network.DnsProxy.PlainTextProbe.$1.Errors";
+constexpr char kProbeRetriesUntilSuccess[] =
+    "Network.DnsProxy.PlainTextProbe.$1.RetriesUntilSuccess";
+constexpr char kProbeResultsWithRetriesTemplate[] =
+    "Network.DnsProxy.PlainTextProbe.$1.ResultsWithRetries";
+constexpr char kProbeFailedRetriesTemplate[] =
+    "Network.DnsProxy.PlainTextProbe.$1.FailedRetries";
 
 constexpr char kQueryDurationTemplate[] = "Network.DnsProxy.Query.$1$2Duration";
 constexpr char kQueryDurationResolveTemplate[] =
@@ -38,6 +53,14 @@ constexpr char kQueryDurationTotal[] = "Total";
 constexpr char kQueryDurationFailed[] = "Failed";
 constexpr int kQueryDurationMillisecondsMax = 60 * 1000;
 constexpr int kQueryDurationMillisecondsBuckets = 60;
+constexpr int kProbeRetriesMax = 19;
+constexpr int kProbeRetriesBuckets = 20;
+
+// Number of probe failure attempts before it is considered consistent. This
+// value is added because for IPv6, connectivity might not be ready right away.
+// The value itself is an arbitrary value which requires DNS proxy ~2 minutes
+// to be in the state (calculated based on an exponential backoff of 1.5x).
+constexpr int kProbeFailureNumAttempts = 9;
 
 const char* ProcessTypeString(Metrics::ProcessType type) {
   static const std::map<Metrics::ProcessType, const char*> m{
@@ -59,6 +82,17 @@ const char* QueryTypeString(Metrics::QueryType type) {
       return "PlainText";
     case Metrics::QueryType::kDnsOverHttps:
       return "DnsOverHttps";
+    default:
+      return nullptr;
+  }
+}
+
+const char* IpFamilyTypeString(sa_family_t family) {
+  switch (family) {
+    case AF_INET:
+      return kIPv4;
+    case AF_INET6:
+      return kIPv6;
     default:
       return nullptr;
   }
@@ -162,6 +196,20 @@ void Metrics::RecordQueryResult(Metrics::QueryType type,
   }
 }
 
+void Metrics::RecordQueryResultWithRetries(Metrics::QueryType type,
+                                           bool success) {
+  const char* qs = QueryTypeString(type);
+  if (!qs)
+    return;
+
+  auto name = base::ReplaceStringPlaceholders(kQueryResultsWithRetriesTemplate,
+                                              {qs}, nullptr);
+
+  auto result =
+      success ? Metrics::QueryResult::kSuccess : Metrics::QueryResult::kFailure;
+  metrics_.SendEnumToUMA(name, result);
+}
+
 void Metrics::RecordQueryDuration(const char* stage, int64_t ms, bool success) {
   const char* prefix = !success ? kQueryDurationFailed : "";
   auto name = base::ReplaceStringPlaceholders(kQueryDurationTemplate,
@@ -182,6 +230,48 @@ void Metrics::RecordQueryResolveDuration(QueryType type,
                                               {qs, prefix}, nullptr);
   metrics_.SendToUMA(name, ms, 1, kQueryDurationMillisecondsMax,
                      kQueryDurationMillisecondsBuckets);
+}
+
+void Metrics::RecordProbeResult(sa_family_t family,
+                                int num_attempts,
+                                Metrics::QueryError error) {
+  const char* fs = IpFamilyTypeString(family);
+  if (!fs) {
+    return;
+  }
+
+  auto result_name =
+      base::ReplaceStringPlaceholders(kProbeResultsTemplate, {fs}, nullptr);
+  auto result_retry_name = base::ReplaceStringPlaceholders(
+      kProbeResultsWithRetriesTemplate, {fs}, nullptr);
+  auto retries_until_success_name =
+      base::ReplaceStringPlaceholders(kProbeRetriesUntilSuccess, {fs}, nullptr);
+
+  // Record success metrics.
+  if (error == Metrics::QueryError::kNone) {
+    metrics_.SendEnumToUMA(result_name, Metrics::QueryResult::kSuccess);
+    metrics_.SendEnumToUMA(result_retry_name, Metrics::QueryResult::kSuccess);
+    metrics_.SendToUMA(retries_until_success_name, num_attempts, 0,
+                       kProbeRetriesMax, kProbeRetriesBuckets);
+    return;
+  }
+
+  // Record failure metrics.
+  metrics_.SendEnumToUMA(result_name, Metrics::QueryResult::kFailure);
+  if (num_attempts >= kProbeFailureNumAttempts) {
+    metrics_.SendEnumToUMA(result_retry_name, Metrics::QueryResult::kFailure);
+  }
+
+  // Record num of current failing attempts metrics.
+  auto retries_name = base::ReplaceStringPlaceholders(
+      kProbeFailedRetriesTemplate, {fs}, nullptr);
+  metrics_.SendToUMA(retries_name, num_attempts, 0, kProbeRetriesMax,
+                     kProbeRetriesBuckets);
+
+  // Record probe error type.
+  auto error_name =
+      base::ReplaceStringPlaceholders(kProbeErrorsTemplate, {fs}, nullptr);
+  metrics_.SendEnumToUMA(error_name, error);
 }
 
 Metrics::QueryTimer::~QueryTimer() {
@@ -258,6 +348,10 @@ void Metrics::QueryTimer::Record(Metrics* metrics) {
     overall |= r.success;
     metrics->RecordQueryResolveDuration(r.type, r.elapsed.InMilliseconds(),
                                         r.success);
+  }
+  if (!elapsed_resolve_.empty()) {
+    metrics->RecordQueryResultWithRetries(elapsed_resolve_.front().type,
+                                          overall);
   }
 
   metrics->RecordQueryDuration(kQueryDurationReply,

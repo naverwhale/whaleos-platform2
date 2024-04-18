@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,8 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <chromeos/dbus/service_constants.h>
@@ -17,9 +17,9 @@
 #include <google/protobuf/message_lite.h>
 
 #include "power_manager/common/power_constants.h"
+#include "power_manager/common/tracing.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 namespace {
 
 // Handles the result of an attempt to connect to a D-Bus signal, logging an
@@ -41,9 +41,9 @@ DBusWrapper::DBusWrapper(scoped_refptr<dbus::Bus> bus,
       bus->GetObjectProxy(kBusServiceName, dbus::ObjectPath(kBusServicePath));
   bus_proxy->ConnectToSignal(
       kBusInterface, kBusNameOwnerChangedSignal,
-      base::Bind(&DBusWrapper::HandleNameOwnerChangedSignal,
-                 weak_ptr_factory_.GetWeakPtr()),
-      base::Bind(&HandleSignalConnected));
+      base::BindRepeating(&DBusWrapper::HandleNameOwnerChangedSignal,
+                          weak_ptr_factory_.GetWeakPtr()),
+      base::BindOnce(&HandleSignalConnected));
 }
 
 DBusWrapper::~DBusWrapper() = default;
@@ -101,24 +101,46 @@ void DBusWrapper::RegisterForSignal(
     dbus::ObjectProxy::SignalCallback callback) {
   DCHECK(proxy);
   proxy->ConnectToSignal(interface_name, signal_name, callback,
-                         base::Bind(&HandleSignalConnected));
+                         base::BindOnce(&HandleSignalConnected));
 }
 
 void DBusWrapper::ExportMethod(
     const std::string& method_name,
     dbus::ExportedObject::MethodCallCallback callback) {
+  // Annotate the method handler with a trace event.
+  callback = base::BindRepeating(
+      [](const std::string& method_name,
+         dbus::ExportedObject::MethodCallCallback callback,
+         dbus::MethodCall* method_call,
+         dbus::ExportedObject::ResponseSender sender) {
+        TRACE_EVENT("power", perfetto::DynamicString{method_name});
+        callback.Run(method_call, std::move(sender));
+      },
+      method_name, std::move(callback));
   CHECK(exported_object_->ExportMethodAndBlock(kPowerManagerInterface,
                                                method_name, callback));
 }
 
 bool DBusWrapper::PublishService() {
-  return bus_->RequestOwnershipAndBlock(kPowerManagerServiceName,
-                                        dbus::Bus::REQUIRE_PRIMARY);
+  // Publish the service.
+  bool success = bus_->RequestOwnershipAndBlock(kPowerManagerServiceName,
+                                                dbus::Bus::REQUIRE_PRIMARY);
+  if (!success) {
+    return false;
+  }
+
+  // Notify our observers.
+  for (DBusWrapper::Observer& observer : observers_) {
+    observer.OnServicePublished();
+  }
+
+  return true;
 }
 
 void DBusWrapper::EmitSignal(dbus::Signal* signal) {
   DCHECK(exported_object_);
   DCHECK(signal);
+  TRACE_EVENT("power", "DBusWrapper::EmitSignal", "signal", signal->ToString());
   exported_object_->SendSignal(signal);
 }
 
@@ -140,10 +162,13 @@ std::unique_ptr<dbus::Response> DBusWrapper::CallMethodSync(
     dbus::ObjectProxy* proxy,
     dbus::MethodCall* method_call,
     base::TimeDelta timeout) {
+  TRACE_EVENT("power", "DBusWrapper::CallMethodSync", "method_call",
+              method_call->ToString(), "timeout_ms", timeout.InMilliseconds());
   DCHECK(proxy);
   DCHECK(method_call);
-  return std::unique_ptr<dbus::Response>(
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> response(
       proxy->CallMethodAndBlock(method_call, timeout.InMilliseconds()));
+  return std::move(response).value_or(nullptr);
 }
 
 void DBusWrapper::CallMethodAsync(
@@ -153,11 +178,26 @@ void DBusWrapper::CallMethodAsync(
     dbus::ObjectProxy::ResponseCallback callback) {
   DCHECK(proxy);
   DCHECK(method_call);
+  uint64_t trace_id = next_async_trace_id_++;
+  TRACE_EVENT("power", perfetto::DynamicString{method_call->ToString()},
+              perfetto::Flow::ProcessScoped(trace_id));
+  // Annotate the response with a trace event that is connected to the original
+  // method call.
+  callback = base::BindOnce(
+      [](uint64_t trace_id, dbus::ObjectProxy::ResponseCallback callback,
+         dbus::Response* response) {
+        TRACE_EVENT("power", "DBusWrapper::AsyncMethodResponse",
+                    perfetto::Flow::ProcessScoped(trace_id));
+        std::move(callback).Run(response);
+      },
+      trace_id, std::move(callback));
   proxy->CallMethod(method_call, timeout.InMilliseconds(), std::move(callback));
 }
 
 void DBusWrapper::HandleNameOwnerChangedSignal(dbus::Signal* signal) {
   DCHECK(signal);
+  TRACE_EVENT("power", "DBusWrapper::HandleNameOwnerChangedSignal", "signal",
+              signal->ToString());
 
   dbus::MessageReader reader(signal);
   std::string name, old_owner, new_owner;
@@ -171,5 +211,4 @@ void DBusWrapper::HandleNameOwnerChangedSignal(dbus::Signal* signal) {
     observer.OnDBusNameOwnerChanged(name, old_owner, new_owner);
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

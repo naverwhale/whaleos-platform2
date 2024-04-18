@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,31 +10,35 @@
 #include <sys/un.h>
 #include <sysexits.h>
 
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/key_value_store.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
 #include <dbus/object_path.h>
 #include <vboot/crossystem.h>
+#include <net-base/ipv4_address.h>
 
-#include "patchpanel/manager.h"
+#include "patchpanel/ipc.h"
+#include "patchpanel/message_dispatcher.h"
 #include "patchpanel/minijailed_process_runner.h"
 #include "patchpanel/net_util.h"
+#include "patchpanel/patchpanel_daemon.h"
 
 namespace patchpanel {
 namespace {
 // adb-proxy will connect to adbd on its standard TCP port.
 constexpr uint16_t kTcpConnectPort = 5555;
-constexpr uint32_t kTcpAddr = Ipv4Addr(100, 115, 92, 2);
+constexpr net_base::IPv4Address kTcpAddr(100, 115, 92, 2);
 constexpr uint32_t kVsockPort = 5555;
 constexpr int kMaxConn = 16;
 // Reference: "device/google/cheets2/init.usb.rc".
@@ -42,8 +46,7 @@ constexpr char kUnixConnectAddr[] = "/run/arc/adb/adb.sock";
 constexpr int kDbusTimeoutMs = 200;
 // The maximum number of ADB sideloading query failures before stopping.
 constexpr int kAdbSideloadMaxTry = 5;
-constexpr base::TimeDelta kAdbSideloadUpdateDelay =
-    base::TimeDelta::FromMilliseconds(5000);
+constexpr base::TimeDelta kAdbSideloadUpdateDelay = base::Milliseconds(5000);
 
 const std::set<GuestMessage::GuestType> kArcGuestTypes{GuestMessage::ARC,
                                                        GuestMessage::ARC_VM};
@@ -56,12 +59,12 @@ bool IsDevModeEnabled() {
 AdbProxy::AdbProxy(base::ScopedFD control_fd)
     : msg_dispatcher_(std::move(control_fd)),
       arc_type_(GuestMessage::UNKNOWN_GUEST),
-      arcvm_vsock_cid_(-1) {
-  msg_dispatcher_.RegisterFailureHandler(
-      base::Bind(&AdbProxy::OnParentProcessExit, weak_factory_.GetWeakPtr()));
+      arcvm_vsock_cid_(std::nullopt) {
+  msg_dispatcher_.RegisterFailureHandler(base::BindRepeating(
+      &AdbProxy::OnParentProcessExit, weak_factory_.GetWeakPtr()));
 
-  msg_dispatcher_.RegisterGuestMessageHandler(
-      base::Bind(&AdbProxy::OnGuestMessage, weak_factory_.GetWeakPtr()));
+  msg_dispatcher_.RegisterMessageHandler(base::BindRepeating(
+      &AdbProxy::OnGuestMessage, weak_factory_.GetWeakPtr()));
 }
 
 AdbProxy::~AdbProxy() = default;
@@ -74,9 +77,9 @@ int AdbProxy::OnInit() {
   }
   EnterChildProcessJail();
   // Run after DBusDaemon::OnInit().
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
-      base::Bind(&AdbProxy::InitialSetup, weak_factory_.GetWeakPtr()));
+      base::BindOnce(&AdbProxy::InitialSetup, weak_factory_.GetWeakPtr()));
   return DBusDaemon::OnInit();
 }
 
@@ -85,21 +88,15 @@ void AdbProxy::InitialSetup() {
   if (dev_mode_enabled_) {
     return;
   }
-  CheckAdbSideloadingStatus(0 /*num_try*/);
+  CheckAdbSideloadingStatus(/*num_try=*/0);
 }
 
 void AdbProxy::Reset() {
   src_watcher_.reset();
   src_.reset();
   fwd_.clear();
-  arcvm_vsock_cid_ = -1;
+  arcvm_vsock_cid_ = std::nullopt;
   arc_type_ = GuestMessage::UNKNOWN_GUEST;
-}
-
-void AdbProxy::OnParentProcessExit() {
-  LOG(ERROR) << "Quitting because the parent process died";
-  Reset();
-  Quit();
 }
 
 void AdbProxy::OnFileCanReadWithoutBlocking() {
@@ -149,10 +146,14 @@ std::unique_ptr<Socket> AdbProxy::Connect() const {
       break;
     }
     case GuestMessage::ARC_VM: {
+      if (!arcvm_vsock_cid_.has_value()) {
+        LOG(ERROR) << "Undefined ARCVM CID";
+        return nullptr;
+      }
       struct sockaddr_vm addr_vm = {0};
       addr_vm.svm_family = AF_VSOCK;
       addr_vm.svm_port = kVsockPort;
-      addr_vm.svm_cid = arcvm_vsock_cid_;
+      addr_vm.svm_cid = arcvm_vsock_cid_.value();
       auto dst = std::make_unique<Socket>(AF_VSOCK, SOCK_STREAM);
       if (!dst->is_valid()) {
         PLOG(ERROR) << "Failed to create VSOCK socket";
@@ -175,7 +176,7 @@ std::unique_ptr<Socket> AdbProxy::Connect() const {
   struct sockaddr_in addr_in = {0};
   addr_in.sin_family = AF_INET;
   addr_in.sin_port = htons(kTcpConnectPort);
-  addr_in.sin_addr.s_addr = kTcpAddr;
+  addr_in.sin_addr = kTcpAddr.ToInAddr();
   auto dst = std::make_unique<Socket>(AF_INET, SOCK_STREAM);
   if (!dst->is_valid()) {
     PLOG(ERROR) << "Failed to create TCP socket";
@@ -189,7 +190,21 @@ std::unique_ptr<Socket> AdbProxy::Connect() const {
   return nullptr;
 }
 
-void AdbProxy::OnGuestMessage(const GuestMessage& msg) {
+void AdbProxy::OnParentProcessExit() {
+  LOG(ERROR) << "Quitting because the parent process died";
+  Reset();
+  Quit();
+}
+
+void AdbProxy::OnGuestMessage(const SubprocessMessage& root_msg) {
+  if (!root_msg.has_control_message()) {
+    LOG(ERROR) << "Unexpected message type";
+    return;
+  }
+  if (!root_msg.control_message().has_guest_message()) {
+    return;
+  }
+  const GuestMessage& msg = root_msg.control_message().guest_message();
   if (msg.type() == GuestMessage::UNKNOWN_GUEST) {
     LOG(DFATAL) << "Unexpected message from unknown guest";
     return;
@@ -201,11 +216,16 @@ void AdbProxy::OnGuestMessage(const GuestMessage& msg) {
 
   // On ARC down, cull any open connections and stop listening.
   if (msg.event() == GuestMessage::STOP) {
+    if (msg.type() == GuestMessage::ARC_VM && !arcvm_vsock_cid_.has_value()) {
+      LOG(WARNING)
+          << "Received STOP message for ARC_VM but ARCVM CID was undefined";
+      return;
+    }
     // The stop message for ARCVM may be sent after a new VM is started. Only
     // stop if the CID matched the latest started ARCVM CID.
     if (msg.type() == GuestMessage::ARC_VM &&
-        msg.arcvm_vsock_cid() != arcvm_vsock_cid_) {
-      LOG(WARNING) << "Mismatched ARCVM CIDs " << arcvm_vsock_cid_
+        msg.arcvm_vsock_cid() != arcvm_vsock_cid_.value()) {
+      LOG(WARNING) << "Mismatched ARCVM CIDs " << arcvm_vsock_cid_.value()
                    << " != " << msg.arcvm_vsock_cid();
       return;
     }
@@ -282,11 +302,11 @@ void AdbProxy::CheckAdbSideloadingStatus(int num_try) {
       dbus::ObjectPath(login_manager::kSessionManagerServicePath));
   dbus::MethodCall method_call(login_manager::kSessionManagerInterface,
                                login_manager::kSessionManagerQueryAdbSideload);
-  std::unique_ptr<dbus::Response> dbus_response =
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error> dbus_response =
       proxy->CallMethodAndBlock(&method_call, kDbusTimeoutMs);
 
-  if (!dbus_response) {
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  if (!dbus_response.has_value() || !dbus_response.value()) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
         base::BindOnce(&AdbProxy::CheckAdbSideloadingStatus,
                        weak_factory_.GetWeakPtr(), num_try + 1),
@@ -294,7 +314,7 @@ void AdbProxy::CheckAdbSideloadingStatus(int num_try) {
     return;
   }
 
-  dbus::MessageReader reader(dbus_response.get());
+  dbus::MessageReader reader(dbus_response.value().get());
   reader.PopBool(&adb_sideloading_enabled_);
   if (!adb_sideloading_enabled_) {
     LOG(INFO) << "Chrome OS is not in developer mode and ADB sideloading is "

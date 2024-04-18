@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,8 @@ std::string ReasonToString(WiFiReasonCode reason) {
     case kReasonCodePreviousAuthenticationInvalid:
       return "Previous authentication no longer valid";
     case kReasonCodeSenderHasLeft:
-      return "Deauthentcated because sending STA is leaving (or has left) IBSS "
+      return "Deauthenticated because sending STA is leaving (or has left) "
+             "IBSS "
              "or ESS";
     case kReasonCodeInactivity:
       return "Disassociated due to inactivity";

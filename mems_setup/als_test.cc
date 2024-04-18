@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,16 +28,15 @@ namespace {
 constexpr int kDeviceId = 5;
 static gid_t kIioserviceGroupId = 777;
 
-class AlsTest : public SensorTestBase {
+class AlsTest : public SensorTestBase, public ::testing::Test {
  public:
   AlsTest() : SensorTestBase("acpi-als", kDeviceId) {
-    mock_delegate_->AddGroup(Configuration::GetGroupNameForSysfs(),
+    mock_delegate_->AddGroup(GetConfiguration()->GetGroupNameForSysfs(),
                              kIioserviceGroupId);
     mock_delegate_->SetMockContext(mock_context_.get());
   }
 };
 
-#if USE_IIOSERVICE
 TEST_F(AlsTest, TriggerSet) {
   SetSingleSensor(kBaseSensorLocation);
   ConfigureVpd({{"als_cal_intercept", "100"}});
@@ -51,7 +50,6 @@ TEST_F(AlsTest, TriggerSet) {
                 .size(),
             1);
 }
-#endif  // USE_IIOSERVICE
 
 TEST_F(AlsTest, PartialVpd) {
   SetSingleSensor(kBaseSensorLocation);

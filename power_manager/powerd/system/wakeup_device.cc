@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,8 +24,7 @@ char kWakeupSysDirPattern[] = "wakeup*";
 
 }  // namespace
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // static
 std::unique_ptr<WakeupDeviceInterface> WakeupDevice::CreateWakeupDevice(
@@ -43,8 +42,6 @@ const char WakeupDevice::kWakeupDir[] = "wakeup";
 const char WakeupDevice::kPowerEventCountPath[] = "event_count";
 
 WakeupDevice::WakeupDevice(const base::FilePath& path) : sys_path_(path) {}
-
-WakeupDevice::~WakeupDevice() {}
 
 void WakeupDevice::PrepareForSuspend() {
   // This can happen when the device is no more a wake source (if power/wakeup
@@ -130,5 +127,4 @@ bool WakeupDevice::ReadEventCount(uint64_t* event_count_out) {
   return false;
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

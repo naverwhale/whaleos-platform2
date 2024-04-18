@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -60,18 +60,24 @@ void ParserTest(const std::string& input_file_name,
                 std::initializer_list<ParserRun> parser_runs,
                 anomaly::Parser* parser) {
   auto log_msgs =
-      GetTestLogMessages(test_util::GetTestDataPath(input_file_name));
+      GetTestLogMessages(test_util::GetTestDataPath(input_file_name,
+                                                    /*use_testdata=*/true));
   for (auto& run : parser_runs) {
     if (run.find_this && run.replace_with)
       ReplaceMsgContent(&log_msgs, *run.find_this, *run.replace_with);
     auto crash_reports = ParseLogMessages(parser, log_msgs);
 
     ASSERT_THAT(crash_reports, SizeIs(run.expected_size));
-    if (run.expected_text)
-      EXPECT_THAT(crash_reports[0].text, HasSubstr(*run.expected_text));
-    if (run.expected_flags)
+    if (run.expected_text) {
+      EXPECT_EQ(crash_reports[0].text, *run.expected_text);
+    }
+    if (run.expected_substr) {
+      EXPECT_THAT(crash_reports[0].text, HasSubstr(*run.expected_substr));
+    }
+    if (run.expected_flags) {
       EXPECT_THAT(crash_reports[0].flags,
                   UnorderedElementsAreArray(*run.expected_flags));
+    }
   }
 }
 

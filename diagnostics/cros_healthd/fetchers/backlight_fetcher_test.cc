@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,22 +8,22 @@
 
 #include <base/check.h>
 #include <base/files/file_path.h>
+#include <base/strings/string_number_conversions.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "diagnostics/common/file_test_utils.h"
+#include "diagnostics/base/file_test_utils.h"
 #include "diagnostics/cros_healthd/fetchers/backlight_fetcher.h"
 #include "diagnostics/cros_healthd/system/mock_context.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
-using ::chromeos::cros_healthd::mojom::BacklightInfo;
-using ::chromeos::cros_healthd::mojom::BacklightInfoPtr;
-using ::chromeos::cros_healthd::mojom::BacklightResultPtr;
-using ::chromeos::cros_healthd::mojom::ErrorType;
+using ::ash::cros_healthd::mojom::BacklightInfo;
+using ::ash::cros_healthd::mojom::BacklightInfoPtr;
+using ::ash::cros_healthd::mojom::BacklightResultPtr;
+using ::ash::cros_healthd::mojom::ErrorType;
 using ::testing::UnorderedElementsAreArray;
 
 constexpr char kRelativeBacklightDirectoryPath[] = "sys/class/backlight";
@@ -45,15 +45,13 @@ base::FilePath GetSecondFakeBacklightDirectory(const base::FilePath& root) {
 }
 
 // Workaround for UnorderedElementsAreArray not accepting move-only types - this
-// simple matcher expects a std::cref(mojo_ipc::BacklightInfoPtr) and checks
+// simple matcher expects a std::cref(mojom::BacklightInfoPtr) and checks
 // each of the three fields for equality.
 MATCHER_P(MatchesBacklightInfoPtr, ptr, "") {
   return arg->path == ptr.get()->path &&
          arg->max_brightness == ptr.get()->max_brightness &&
          arg->brightness == ptr.get()->brightness;
 }
-
-}  // namespace
 
 class BacklightUtilsTest : public ::testing::Test {
  protected:
@@ -82,18 +80,18 @@ TEST_F(BacklightUtilsTest, TestFetchBacklightInfo) {
       GetFirstFakeBacklightDirectory(root_dir());
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       first_backlight_dir.Append(kMaxBrightnessFileName),
-      std::to_string(kFirstFakeBacklightMaxBrightness)));
+      base::NumberToString(kFirstFakeBacklightMaxBrightness)));
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       first_backlight_dir.Append(kBrightnessFileName),
-      std::to_string(kFirstFakeBacklightBrightness)));
+      base::NumberToString(kFirstFakeBacklightBrightness)));
   base::FilePath second_backlight_dir =
       GetSecondFakeBacklightDirectory(root_dir());
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       second_backlight_dir.Append(kMaxBrightnessFileName),
-      std::to_string(kSecondFakeBacklightMaxBrightness)));
+      base::NumberToString(kSecondFakeBacklightMaxBrightness)));
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       second_backlight_dir.Append(kBrightnessFileName),
-      std::to_string(kSecondFakeBacklightBrightness)));
+      base::NumberToString(kSecondFakeBacklightBrightness)));
 
   std::vector<BacklightInfoPtr> expected_results;
   expected_results.push_back(BacklightInfo::New(
@@ -124,15 +122,15 @@ TEST_F(BacklightUtilsTest, TestFetchBacklightInfoOneBadOneGoodDirectory) {
   // Skip the brightness file for the first directory.
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       first_backlight_dir.Append(kMaxBrightnessFileName),
-      std::to_string(kFirstFakeBacklightMaxBrightness)));
+      base::NumberToString(kFirstFakeBacklightMaxBrightness)));
   base::FilePath second_backlight_dir =
       GetSecondFakeBacklightDirectory(root_dir());
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       second_backlight_dir.Append(kMaxBrightnessFileName),
-      std::to_string(kSecondFakeBacklightMaxBrightness)));
+      base::NumberToString(kSecondFakeBacklightMaxBrightness)));
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       second_backlight_dir.Append(kBrightnessFileName),
-      std::to_string(kSecondFakeBacklightBrightness)));
+      base::NumberToString(kSecondFakeBacklightBrightness)));
 
   auto backlight_result = FetchBacklightInfo();
   ASSERT_TRUE(backlight_result->is_error());
@@ -154,7 +152,7 @@ TEST_F(BacklightUtilsTest, TestFetchBacklightInfoNoBrightness) {
       GetFirstFakeBacklightDirectory(root_dir());
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       first_backlight_dir.Append(kMaxBrightnessFileName),
-      std::to_string(kFirstFakeBacklightMaxBrightness)));
+      base::NumberToString(kFirstFakeBacklightMaxBrightness)));
 
   auto backlight_result = FetchBacklightInfo();
   ASSERT_TRUE(backlight_result->is_error());
@@ -168,7 +166,7 @@ TEST_F(BacklightUtilsTest, TestFetchBacklightInfoNoMaxBrightness) {
       GetFirstFakeBacklightDirectory(root_dir());
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       first_backlight_dir.Append(kBrightnessFileName),
-      std::to_string(kFirstFakeBacklightBrightness)));
+      base::NumberToString(kFirstFakeBacklightBrightness)));
 
   auto backlight_result = FetchBacklightInfo();
   ASSERT_TRUE(backlight_result->is_error());
@@ -183,7 +181,7 @@ TEST_F(BacklightUtilsTest,
       GetFirstFakeBacklightDirectory(root_dir());
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       first_backlight_dir.Append(kMaxBrightnessFileName),
-      std::to_string(kFirstFakeBacklightMaxBrightness)));
+      base::NumberToString(kFirstFakeBacklightMaxBrightness)));
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       first_backlight_dir.Append(kBrightnessFileName),
       kFakeNonIntegerFileContents));
@@ -204,7 +202,7 @@ TEST_F(BacklightUtilsTest,
       kFakeNonIntegerFileContents));
   ASSERT_TRUE(WriteFileAndCreateParentDirs(
       first_backlight_dir.Append(kBrightnessFileName),
-      std::to_string(kFirstFakeBacklightMaxBrightness)));
+      base::NumberToString(kFirstFakeBacklightMaxBrightness)));
 
   auto backlight_result = FetchBacklightInfo();
   ASSERT_TRUE(backlight_result->is_error());
@@ -221,4 +219,5 @@ TEST_F(BacklightUtilsTest, TestCrosConfigReportsNoBacklight) {
   EXPECT_EQ(backlight_result->get_backlight_info().size(), 0);
 }
 
+}  // namespace
 }  // namespace diagnostics

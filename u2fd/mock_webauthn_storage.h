@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 
 #include "u2fd/webauthn_storage.h"
 
+#include <optional>
 #include <string>
 
-#include <base/optional.h>
 #include <brillo/secure_blob.h>
 #include <gmock/gmock.h>
 
@@ -31,14 +31,31 @@ class MockWebAuthnStorage : public WebAuthnStorage {
 
   MOCK_METHOD(void, Reset, (), (override));
 
-  MOCK_METHOD(base::Optional<brillo::Blob>,
+  MOCK_METHOD(std::optional<brillo::SecureBlob>,
               GetSecretByCredentialId,
               (const std::string& credential_id),
               (override));
 
-  MOCK_METHOD(base::Optional<WebAuthnRecord>,
+  MOCK_METHOD(bool,
+              GetSecretAndKeyBlobByCredentialId,
+              (const std::string& credential_id,
+               brillo::SecureBlob* secret,
+               brillo::Blob* key_blob),
+              (override));
+
+  MOCK_METHOD(std::optional<WebAuthnRecord>,
               GetRecordByCredentialId,
               (const std::string& credential_id),
+              (override));
+
+  MOCK_METHOD(int,
+              CountRecordsInTimeRange,
+              (int64_t timestamp_min, int64_t timestamp_max),
+              (override));
+
+  MOCK_METHOD(int,
+              DeleteRecordsInTimeRange,
+              (int64_t timestamp_min, int64_t timestamp_max),
               (override));
 };
 

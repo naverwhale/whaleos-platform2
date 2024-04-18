@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <string>
 #include <unordered_map>
 
-#include <base/macros.h>
 #include <base/time/time.h>
 
 #include "smbprovider/proto.h"
@@ -78,7 +77,6 @@ class MetadataCache {
 
     DirectoryEntry entry;
     base::TimeTicks expiration_time;
-
   };
 
   // Returns true if the expiration time of this entry has passed.

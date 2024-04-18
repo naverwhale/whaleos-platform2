@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,10 +27,8 @@ int Download(std::unique_ptr<hps::HPS> hps,
     return 1;
   }
   int bank = 0;
-  if (!base::StringToInt(args[1], &bank) || bank < 0 ||
-      bank >= hps::kNumBanks) {
-    std::cerr << args[1] << ": Illegal bank (0 - " << (hps::kNumBanks - 1)
-              << ")" << std::endl;
+  if (!base::StringToInt(args[1], &bank)) {
+    std::cerr << "Illegal bank: " << args[1] << std::endl;
     return 1;
   }
   // Assume downloading to start of bank.

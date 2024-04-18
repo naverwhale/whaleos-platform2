@@ -1,10 +1,11 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "rmad/utils/json_store.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -15,6 +16,7 @@
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/values.h>
+#include <brillo/file_utils.h>
 
 namespace rmad {
 
@@ -42,7 +44,7 @@ JsonStore::ReadError TranslateJsonFileReadErrors(const base::Value* value,
   return JsonStore::READ_ERROR_NONE;
 }
 
-bool SerializeValue(const base::Value& value, std::string* output) {
+bool SerializeValue(const base::Value::Dict& value, std::string* output) {
   JSONStringValueSerializer serializer(output);
   serializer.set_pretty_print(false);
   return serializer.Serialize(value);
@@ -59,71 +61,37 @@ struct JsonStore::ReadResult {
   JsonStore::ReadError read_error;
 };
 
-bool JsonStore::GetValueInternal(const base::Value* data, bool* result) {
-  if (!data || !data->is_bool()) {
-    return false;
-  }
-  if (result) {
-    *result = data->GetBool();
-  }
-  return true;
-}
-
-bool JsonStore::GetValueInternal(const base::Value* data, int* result) {
-  if (!data || !data->is_int()) {
-    return false;
-  }
-  if (result) {
-    *result = data->GetInt();
-  }
-  return true;
-}
-
-bool JsonStore::GetValueInternal(const base::Value* data, double* result) {
-  if (!data || !data->is_double()) {
-    return false;
-  }
-  if (result) {
-    *result = data->GetDouble();
-  }
-  return true;
-}
-
-bool JsonStore::GetValueInternal(const base::Value* data, std::string* result) {
-  if (!data || !data->is_string()) {
-    return false;
-  }
-  if (result) {
-    *result = data->GetString();
-  }
-  return true;
-}
-
-JsonStore::JsonStore(const base::FilePath& file_path)
-    : file_path_(file_path),
-      data_(base::Value::Type::DICTIONARY),
-      read_error_(READ_ERROR_NONE),
-      read_only_(false) {
-  InitFromFile();
+JsonStore::JsonStore(const base::FilePath& file_path, bool read_only)
+    : file_path_(file_path), initialized_(false) {
+  InitFromFile(read_only);
 }
 
 bool JsonStore::SetValue(const std::string& key, base::Value&& value) {
-  DCHECK(data_.is_dict());
   if (read_only_) {
     return false;
   }
-  const base::Value* result = data_.FindKey(key);
+  const base::Value* result = data_.Find(key);
   if (!result || *result != value) {
-    data_.SetKey(key, std::move(value));
-    return WriteToFile();
+    std::optional<base::Value> result_backup =
+        result ? std::make_optional(result->Clone()) : std::nullopt;
+    data_.Set(key, std::move(value));
+    bool ret = WriteToFile();
+    if (!ret) {
+      if (result_backup) {
+        data_.Set(key, std::move(*result_backup));
+      } else {
+        data_.Remove(key);
+      }
+      read_only_ = true;
+    }
+    return ret;
   }
   return true;
 }
 
 bool JsonStore::GetValue(const std::string& key,
                          const base::Value** value) const {
-  DCHECK(data_.is_dict());
-  const base::Value* result = data_.FindKey(key);
+  const base::Value* result = data_.Find(key);
   if (!result) {
     return false;
   }
@@ -144,21 +112,48 @@ bool JsonStore::GetValue(const std::string& key, base::Value* value) const {
   return true;
 }
 
-base::Value JsonStore::GetValues() const {
+base::Value::Dict JsonStore::GetValues() const {
   return data_.Clone();
 }
 
+bool JsonStore::RemoveKey(const std::string& key) {
+  if (read_only_) {
+    return false;
+  }
+
+  const base::Value* result = data_.Find(key);
+  if (result) {
+    base::Value result_backup = result->Clone();
+    data_.Remove(key);
+    bool ret = WriteToFile();
+    if (!ret) {
+      data_.Set(key, std::move(result_backup));
+      read_only_ = true;
+    }
+    return ret;
+  }
+  return false;
+}
+
 bool JsonStore::Clear() {
-  data_ = base::Value(base::Value::Type::DICTIONARY);
-  return WriteToFile();
+  data_ = base::Value::Dict();
+  return WriteToFile(true);
 }
 
 bool JsonStore::ClearAndDeleteFile() {
   return Clear() && base::DeleteFile(file_path_);
 }
 
-void JsonStore::InitFromFile() {
+bool JsonStore::Sync() const {
+  return brillo::SyncFileOrDirectory(file_path_, /*is_directory=*/false,
+                                     /*data_sync=*/false);
+}
+
+bool JsonStore::InitFromFile(bool read_only) {
+  initialized_ = false;
   std::unique_ptr<JsonStore::ReadResult> read_result = ReadFromFile();
+  data_ = base::Value::Dict();
+  read_only_ = read_only;
   read_error_ = read_result->read_error;
   switch (read_error_) {
     case READ_ERROR_JSON_PARSE:
@@ -166,19 +161,28 @@ void JsonStore::InitFromFile() {
     case READ_ERROR_FILE_ACCESS_DENIED:
     case READ_ERROR_FILE_LOCKED:
     case READ_ERROR_FILE_OTHER:
-      read_only_ = true;
       break;
     case READ_ERROR_NONE:
-      data_ = std::move(*read_result->value);
+      // A result with non-dict-type value will have READ_ERROR_JSON_TYPE error.
+      data_ = std::move(read_result->value->GetDict());
+      initialized_ = true;
       break;
     case READ_ERROR_NO_SUCH_FILE:
-      data_ = base::Value(base::Value::Type::DICTIONARY);
+      // If read_only is false, we allow the file to not exist because we can
+      // create it.
+      initialized_ = !read_only_;
       break;
     case READ_ERROR_MAX_ENUM:
       NOTREACHED();
       break;
   }
+  // Check if we can write to the file.
+  if (initialized_ && !read_only_ && !WriteToFile()) {
+    read_only_ = true;
+    initialized_ = false;
+  }
   VLOG(2) << "JsonStore::InitFromFile complete.";
+  return initialized_;
 }
 
 std::unique_ptr<JsonStore::ReadResult> JsonStore::ReadFromFile() {
@@ -192,8 +196,8 @@ std::unique_ptr<JsonStore::ReadResult> JsonStore::ReadFromFile() {
   return read_result;
 }
 
-bool JsonStore::WriteToFile() {
-  if (read_only_)
+bool JsonStore::WriteToFile(bool force) {
+  if (read_only_ && !force)
     return false;
 
   std::string serialized_data;

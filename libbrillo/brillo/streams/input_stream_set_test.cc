@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -147,8 +147,7 @@ TEST_F(InputStreamSetTest, ReadBlocking) {
   EXPECT_CALL(*itf2_, ReadNonBlocking(IntToPtr(1000), 100, _, _, _))
       .WillOnce(
           DoAll(SetArgPointee<2>(0), SetArgPointee<3>(false), Return(true)));
-  EXPECT_CALL(*itf2_, WaitForDataBlocking(Stream::AccessMode::READ, _, _, _))
-      .WillOnce(Return(true));
+  EXPECT_CALL(*itf2_, WaitForDataReadBlocking(_, _)).WillOnce(Return(true));
   EXPECT_CALL(*itf2_, ReadNonBlocking(IntToPtr(1000), 100, _, _, _))
       .WillOnce(
           DoAll(SetArgPointee<2>(100), SetArgPointee<3>(false), Return(true)));

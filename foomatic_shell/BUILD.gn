@@ -1,4 +1,4 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -18,6 +18,7 @@ pkg_config("target_defaults") {
   pkg_deps = [
     "libbrillo",
     "libchrome",
+    "libmetrics",
   ]
 }
 
@@ -38,23 +39,35 @@ executable("foomatic_shell") {
     "verifier.h",
   ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
 }
 
 if (use.test) {
   executable("foomatic_shell_test") {
     sources = [
+      "grammar.cc",
       "grammar.h",
       "parser.cc",
       "parser.h",
       "parser_test.cc",
+      "process_launcher.cc",
+      "process_launcher.h",
+      "process_launcher_test.cc",
       "scanner.cc",
       "scanner.h",
       "scanner_test.cc",
+      "shell.cc",
+      "shell.h",
+      "shell_test.cc",
+      "verifier.cc",
+      "verifier.h",
+      "verifier_test.cc",
     ]
     configs += [
       "//common-mk:test",
       ":target_defaults",
     ]
+    run_test = true
     deps = [ "//common-mk/testrunner" ]
   }
 }

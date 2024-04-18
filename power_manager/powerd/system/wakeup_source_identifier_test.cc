@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,9 +17,9 @@
 #include "power_manager/common/power_constants.h"
 #include "power_manager/common/util.h"
 #include "power_manager/powerd/system/udev_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 namespace {
 
 const char kRandomEventCountPath[] = "wakeup/wakeup45/event_count";
@@ -58,7 +58,7 @@ void IncrementEventCount(const base::FilePath& dir_path) {
   ASSERT_TRUE(util::WriteInt64File(event_count_path, current_count + 1));
 }
 
-class WakeupSourceIdentifierTest : public ::testing::Test {
+class WakeupSourceIdentifierTest : public TestEnvironment {
  public:
   WakeupSourceIdentifierTest() {
     CHECK(temp_dir_.CreateUniqueTempDir());
@@ -125,5 +125,4 @@ TEST_F(WakeupSourceIdentifierTest, TestMultipleInputDevicesWithSameWakePath) {
 }
 
 }  // namespace
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

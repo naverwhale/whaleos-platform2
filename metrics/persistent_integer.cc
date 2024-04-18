@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,9 @@
 #include <algorithm>
 #include <fcntl.h>
 
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/files/file.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
 #include <base/strings/string_util.h>
@@ -74,13 +74,21 @@ void PersistentInteger::Max(int64_t x) {
 void PersistentInteger::Write() {
   // Open the backing file, creating it if it doesn't exist.
   base::File f(path_, base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE);
-  PCHECK(f.IsValid()) << "cannot open " << path_.MaybeAsASCII();
+  if (!f.IsValid()) {
+    // The disk might be bad. Not much we (or the caller) can do; just log an
+    // ERROR. (That might fail, too, if the disk isn't writeable)
+    PLOG(ERROR) << "cannot open " << path_.MaybeAsASCII();
+    return;
+  }
 
   const char* version_ptr = reinterpret_cast<const char*>(&version_);
   const char* value_ptr = reinterpret_cast<const char*>(&value_);
-  PCHECK(f.Write(0, version_ptr, sizeof(version_)) == sizeof(version_) &&
-         f.Write(sizeof(version_), value_ptr, sizeof(value_)) == sizeof(value_))
-      << "cannot write to " << path_.MaybeAsASCII();
+  if (!(f.Write(0, version_ptr, sizeof(version_)) == sizeof(version_) &&
+        f.Write(sizeof(version_), value_ptr, sizeof(value_)) ==
+            sizeof(value_))) {
+    PLOG(ERROR) << "cannot write to " << path_.MaybeAsASCII();
+    return;
+  }
   synced_ = true;
 }
 

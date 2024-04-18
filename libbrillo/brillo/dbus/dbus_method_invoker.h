@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -66,18 +66,18 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/scoped_file.h>
-#include <brillo/dbus/dbus_param_reader.h>
-#include <brillo/dbus/dbus_param_writer.h>
-#include <brillo/dbus/file_descriptor.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
+#include <brillo/dbus/data_serialization.h>
 #include <brillo/dbus/utils.h>
 #include <brillo/errors/error.h>
 #include <brillo/errors/error_codes.h>
 #include <brillo/brillo_export.h>
+#include <dbus/error.h>
 #include <dbus/message.h>
 #include <dbus/object_proxy.h>
 
@@ -105,22 +105,24 @@ inline std::unique_ptr<::dbus::Response> CallMethodAndBlockWithTimeout(
   ::dbus::MethodCall method_call(interface_name, method_name);
   // Add method arguments to the message buffer.
   ::dbus::MessageWriter writer(&method_call);
-  DBusParamWriter::Append(&writer, args...);
-  ::dbus::ScopedDBusError dbus_error;
-  auto response = object->CallMethodAndBlockWithErrorDetails(
-      &method_call, timeout_ms, &dbus_error);
-  if (!response) {
-    if (dbus_error.is_set()) {
-      Error::AddTo(error, FROM_HERE, errors::dbus::kDomain, dbus_error.name(),
-                   dbus_error.message());
+  WriteDBusArgs(&writer, args...);
+  auto response = object->CallMethodAndBlock(&method_call, timeout_ms);
+  if (!response.has_value()) {
+    ::dbus::Error dbus_error = std::move(response.error());
+    if (dbus_error.IsValid()) {
+      Error::AddToPrintf(
+          error, FROM_HERE, errors::dbus::kDomain, dbus_error.name(),
+          "Error calling D-Bus method: %s.%s: %s", interface_name.c_str(),
+          method_name.c_str(), dbus_error.message().c_str());
     } else {
       Error::AddToPrintf(error, FROM_HERE, errors::dbus::kDomain,
                          DBUS_ERROR_FAILED,
                          "Failed to call D-Bus method: %s.%s",
                          interface_name.c_str(), method_name.c_str());
     }
+    return nullptr;
   }
-  return response;
+  return std::move(response.value());
 }
 
 // Same as CallMethodAndBlockWithTimeout() but uses a default timeout value.
@@ -134,58 +136,6 @@ inline std::unique_ptr<::dbus::Response> CallMethodAndBlock(
   return CallMethodAndBlockWithTimeout(::dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
                                        object, interface_name, method_name,
                                        error, args...);
-}
-
-namespace internal {
-// In order to support non-copyable file descriptor types, we have this
-// internal::HackMove() helper function that does really nothing for normal
-// types but uses Pass() for file descriptors so we can move them out from
-// the temporaries created inside DBusParamReader<...>::Invoke().
-// If only libchrome supported real rvalues so we can just do std::move() and
-// be done with it.
-template <typename T>
-inline const T& HackMove(const T& val) {
-  return val;
-}
-
-// Even though |val| here is passed as const&, the actual value is created
-// inside DBusParamReader<...>::Invoke() and is temporary in nature, so it is
-// safe to move the file descriptor out of |val|. That's why we are doing
-// const_cast here. It is a bit hacky, but there is no negative side effects.
-inline base::ScopedFD HackMove(const base::ScopedFD& val) {
-  return std::move(const_cast<base::ScopedFD&>(val));
-}
-inline FileDescriptor HackMove(const FileDescriptor& val) {
-  return std::move(const_cast<FileDescriptor&>(val));
-}
-}  // namespace internal
-
-// Extracts the parameters of |ResultTypes...| types from the message reader
-// and puts the values in the resulting |tuple|. Returns false on error and
-// provides additional error details in |error| object.
-template <typename... ResultTypes>
-inline bool ExtractMessageParametersAsTuple(
-    ::dbus::MessageReader* reader,
-    ErrorPtr* error,
-    std::tuple<ResultTypes...>* val_tuple) {
-  auto callback = [val_tuple](const ResultTypes&... params) {
-    *val_tuple = std::forward_as_tuple(internal::HackMove(params)...);
-  };
-  return DBusParamReader<false, ResultTypes...>::Invoke(callback, reader,
-                                                        error);
-}
-// Overload of ExtractMessageParametersAsTuple to handle reference types in
-// tuples created with std::tie().
-template <typename... ResultTypes>
-inline bool ExtractMessageParametersAsTuple(
-    ::dbus::MessageReader* reader,
-    ErrorPtr* error,
-    std::tuple<ResultTypes&...>* ref_tuple) {
-  auto callback = [ref_tuple](const ResultTypes&... params) {
-    *ref_tuple = std::forward_as_tuple(internal::HackMove(params)...);
-  };
-  return DBusParamReader<false, ResultTypes...>::Invoke(callback, reader,
-                                                        error);
 }
 
 // A helper method to extract a list of values from a message buffer.
@@ -205,9 +155,13 @@ template <typename... ResultTypes>
 inline bool ExtractMessageParameters(::dbus::MessageReader* reader,
                                      ErrorPtr* error,
                                      ResultTypes*... results) {
-  auto ref_tuple = std::tie(*results...);
-  return ExtractMessageParametersAsTuple<ResultTypes...>(reader, error,
-                                                         &ref_tuple);
+  if (!ReadDBusArgs(reader, results...)) {
+    *error = Error::Create(FROM_HERE, errors::dbus::kDomain,
+                           DBUS_ERROR_INVALID_ARGS, "Failed to read params");
+    return false;
+  }
+
+  return true;
 }
 
 // Convenient helper method to extract return value(s) of a D-Bus method call.
@@ -254,17 +208,20 @@ void TranslateSuccessResponse(
     base::OnceCallback<void(OutArgs...)> success_callback,
     AsyncErrorCallback error_callback,
     ::dbus::Response* resp) {
-  auto callback = [&success_callback](const OutArgs&... params) {
-    if (!success_callback.is_null()) {
-      std::move(success_callback).Run(params...);
-    }
-  };
-  ErrorPtr error;
+  std::tuple<StorageType<OutArgs>...> tuple;
   ::dbus::MessageReader reader(resp);
-  if (!DBusParamReader<false, OutArgs...>::Invoke(callback, &reader, &error) &&
-      !error_callback.is_null()) {
-    std::move(error_callback).Run(error.get());
+  if (!ApplyReadDBusArgs(&reader, tuple)) {
+    std::move(error_callback)
+        .Run(Error::Create(FROM_HERE, errors::dbus::kDomain,
+                           DBUS_ERROR_INVALID_ARGS, "Failed to read params")
+                 .get());
+    return;
   }
+  std::apply(
+      [&success_callback](auto&&... args) {
+        std::move(success_callback).Run(std::forward<decltype(args)>(args)...);
+      },
+      std::move(tuple));
 }
 
 // A helper method to dispatch a non-blocking D-Bus method call. Can specify
@@ -288,7 +245,7 @@ inline void CallMethodWithTimeout(
     const InArgs&... params) {
   ::dbus::MethodCall method_call(interface_name, method_name);
   ::dbus::MessageWriter writer(&method_call);
-  DBusParamWriter::Append(&writer, params...);
+  WriteDBusArgs(&writer, params...);
 
   auto split_error_callback =
       base::SplitOnceCallback(std::move(error_callback));
@@ -304,32 +261,6 @@ inline void CallMethodWithTimeout(
                                       std::move(dbus_error_callback));
 }
 
-// TODO(crbug/1205291): Remove this repeating callback helper after migration
-// finished.
-template <typename... InArgs, typename... OutArgs>
-inline void CallMethodWithTimeout(
-    int timeout_ms,
-    ::dbus::ObjectProxy* object,
-    const std::string& interface_name,
-    const std::string& method_name,
-    const base::RepeatingCallback<void(OutArgs...)>& success_callback,
-    const base::RepeatingCallback<void(Error* error)>& error_callback,
-    const InArgs&... params) {
-  ::dbus::MethodCall method_call(interface_name, method_name);
-  ::dbus::MessageWriter writer(&method_call);
-  DBusParamWriter::Append(&writer, params...);
-
-  ::dbus::ObjectProxy::ErrorCallback dbus_error_callback =
-      base::BindOnce(&TranslateErrorResponse, error_callback);
-  ::dbus::ObjectProxy::ResponseCallback dbus_success_callback =
-      base::BindOnce(&TranslateSuccessResponse<OutArgs...>,
-                     std::move(success_callback), error_callback);
-
-  object->CallMethodWithErrorCallback(&method_call, timeout_ms,
-                                      std::move(dbus_success_callback),
-                                      std::move(dbus_error_callback));
-}
-
 // Same as CallMethodWithTimeout() but uses a default timeout value.
 template <typename... InArgs, typename... OutArgs>
 inline void CallMethod(::dbus::ObjectProxy* object,
@@ -338,22 +269,6 @@ inline void CallMethod(::dbus::ObjectProxy* object,
                        base::OnceCallback<void(OutArgs...)> success_callback,
                        AsyncErrorCallback error_callback,
                        const InArgs&... params) {
-  return CallMethodWithTimeout(::dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, object,
-                               interface_name, method_name,
-                               std::move(success_callback),
-                               std::move(error_callback), params...);
-}
-
-// TODO(crbug/1205291): Remove this repeating callback helper after migration
-// finished.
-template <typename... InArgs, typename... OutArgs>
-inline void CallMethod(
-    ::dbus::ObjectProxy* object,
-    const std::string& interface_name,
-    const std::string& method_name,
-    const base::RepeatingCallback<void(OutArgs...)>& success_callback,
-    const base::RepeatingCallback<void(Error* error)>& error_callback,
-    const InArgs&... params) {
   return CallMethodWithTimeout(::dbus::ObjectProxy::TIMEOUT_USE_DEFAULT, object,
                                interface_name, method_name,
                                std::move(success_callback),

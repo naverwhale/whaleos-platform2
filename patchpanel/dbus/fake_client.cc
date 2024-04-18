@@ -1,8 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "patchpanel/dbus/fake_client.h"
+
+#include <optional>
 
 namespace patchpanel {
 
@@ -20,52 +22,61 @@ bool FakeClient::NotifyArcShutdown() {
   return true;
 }
 
-std::vector<NetworkDevice> FakeClient::NotifyArcVmStartup(uint32_t cid) {
-  return {};
+std::optional<Client::ArcVMAllocation> FakeClient::NotifyArcVmStartup(
+    uint32_t cid) {
+  return std::nullopt;
 }
 
 bool FakeClient::NotifyArcVmShutdown(uint32_t cid) {
   return true;
 }
 
-bool FakeClient::NotifyTerminaVmStartup(uint32_t cid,
-                                        NetworkDevice* device,
-                                        IPv4Subnet* container_subnet) {
-  return true;
+std::optional<Client::TerminaAllocation> FakeClient::NotifyTerminaVmStartup(
+    uint32_t cid) {
+  return std::nullopt;
 }
 
 bool FakeClient::NotifyTerminaVmShutdown(uint32_t cid) {
   return true;
 }
 
-bool FakeClient::NotifyPluginVmStartup(uint64_t vm_id,
-                                       int subnet_index,
-                                       NetworkDevice* device) {
+std::optional<Client::ParallelsAllocation> FakeClient::NotifyParallelsVmStartup(
+    uint64_t vm_id, int subnet_index) {
+  return std::nullopt;
+}
+
+bool FakeClient::NotifyParallelsVmShutdown(uint64_t vm_id) {
   return true;
 }
 
-bool FakeClient::NotifyPluginVmShutdown(uint64_t vm_id) {
+std::optional<Client::BruschettaAllocation>
+FakeClient::NotifyBruschettaVmStartup(uint64_t vm_id) {
+  return std::nullopt;
+}
+
+bool FakeClient::NotifyBruschettaVmShutdown(uint64_t vm_id) {
   return true;
 }
 
-bool FakeClient::DefaultVpnRouting(int socket) {
+bool FakeClient::DefaultVpnRouting(const base::ScopedFD& socket) {
   return true;
 }
 
-bool FakeClient::RouteOnVpn(int socket) {
+bool FakeClient::RouteOnVpn(const base::ScopedFD& socket) {
   return true;
 }
 
-bool FakeClient::BypassVpn(int socket) {
+bool FakeClient::BypassVpn(const base::ScopedFD& socket) {
   return true;
 }
 
-std::pair<base::ScopedFD, patchpanel::ConnectNamespaceResponse>
+std::pair<base::ScopedFD, Client::ConnectedNamespace>
 FakeClient::ConnectNamespace(pid_t pid,
                              const std::string& outbound_ifname,
                              bool forward_user_traffic,
                              bool route_on_vpn,
-                             TrafficCounter::Source traffic_source) {
+                             Client::TrafficSource traffic_source,
+                             bool static_ipv6) {
   return {};
 }
 
@@ -77,56 +88,85 @@ void FakeClient::GetTrafficCounters(const std::set<std::string>& devices,
     return;
   }
 
-  std::vector<TrafficCounter> return_counters;
+  std::vector<Client::TrafficCounter> return_counters;
   for (const auto& counter : stored_traffic_counters_) {
-    if (devices.find(counter.device()) != devices.end())
+    if (devices.find(counter.ifname) != devices.end())
       return_counters.push_back(counter);
   }
 
   std::move(callback).Run({return_counters.begin(), return_counters.end()});
 }
 
-bool FakeClient::ModifyPortRule(
-    patchpanel::ModifyPortRuleRequest::Operation op,
-    patchpanel::ModifyPortRuleRequest::RuleType type,
-    patchpanel::ModifyPortRuleRequest::Protocol proto,
-    const std::string& input_ifname,
-    const std::string& input_dst_ip,
-    uint32_t input_dst_port,
-    const std::string& dst_ip,
-    uint32_t dst_port) {
+bool FakeClient::ModifyPortRule(Client::FirewallRequestOperation op,
+                                Client::FirewallRequestType type,
+                                Client::FirewallRequestProtocol proto,
+                                const std::string& input_ifname,
+                                const std::string& input_dst_ip,
+                                uint32_t input_dst_port,
+                                const std::string& dst_ip,
+                                uint32_t dst_port) {
   return true;
 }
 
-bool FakeClient::SetVpnLockdown(bool enable) {
-  return true;
-}
+void FakeClient::SetVpnLockdown(bool enable) {}
 
 base::ScopedFD FakeClient::RedirectDns(
-    patchpanel::SetDnsRedirectionRuleRequest::RuleType type,
+    Client::DnsRedirectionRequestType type,
     const std::string& input_ifname,
     const std::string& proxy_address,
-    const std::vector<std::string>& nameservers) {
+    const std::vector<std::string>& nameservers,
+    const std::string& host_ifname) {
   return {};
 }
 
-std::vector<NetworkDevice> FakeClient::GetDevices() {
+std::vector<Client::VirtualDevice> FakeClient::GetDevices() {
   return {};
 }
 
-void FakeClient::RegisterNetworkDeviceChangedSignalHandler(
-    NetworkDeviceChangedSignalHandler handler) {
-  network_device_changed_handler_ = handler;
+void FakeClient::RegisterVirtualDeviceEventHandler(
+    VirtualDeviceEventHandler handler) {
+  virtual_device_event_handlers_ = handler;
 }
 
 void FakeClient::RegisterNeighborReachabilityEventHandler(
     NeighborReachabilityEventHandler handler) {
-  neighbor_handlers_.push_back(handler);
+  neighbor_event_handlers_.push_back(handler);
+}
+
+bool FakeClient::CreateTetheredNetwork(
+    const std::string& downstream_ifname,
+    const std::string& upstream_ifname,
+    const std::optional<DHCPOptions>& dhcp_options,
+    const std::optional<UplinkIPv6Configuration>& uplink_ipv6_config,
+    const std::optional<int>& mtu,
+    CreateTetheredNetworkCallback callback) {
+  // TODO(b/239559602) Run synchronously or schedule |callback| to run if
+  // necessary for unit tests.
+  return true;
+}
+
+bool FakeClient::CreateLocalOnlyNetwork(
+    const std::string& ifname, CreateLocalOnlyNetworkCallback callback) {
+  // TODO(b/239559602) Run synchronously or schedule |callback| to run if
+  // necessary for unit tests.
+  return true;
+}
+
+bool FakeClient::GetDownstreamNetworkInfo(
+    const std::string& ifname, GetDownstreamNetworkInfoCallback callback) {
+  // TODO(b/239559602) Run synchronously or schedule |callback| to run if
+  // necessary for unit tests.
+  return true;
+}
+
+bool FakeClient::SendSetFeatureFlagRequest(Client::FeatureFlag flag,
+                                           bool enable) {
+  return true;
 }
 
 void FakeClient::TriggerNeighborReachabilityEvent(
-    const NeighborReachabilityEventSignal& signal) {
-  for (const auto& handler : neighbor_handlers_)
+    const NeighborReachabilityEvent& signal) {
+  for (const auto& handler : neighbor_event_handlers_)
     handler.Run(signal);
 }
 

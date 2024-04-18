@@ -1,15 +1,20 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/crash_reporter_failure_collector.h"
 
+#include <memory>
 #include <string>
 
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library.h>
+#include <metrics/metrics_library_mock.h>
 
 #include "crash-reporter/test_util.h"
 
@@ -28,10 +33,13 @@ constexpr char kTestCrashReporterFailureMessagePayload[] =
 constexpr char kTestCrashReporterFailureLogMessages[] =
     "===/var/log/messages===";
 
-}  // namespace
-
 class CrashReporterFailureCollectorMock : public CrashReporterFailureCollector {
  public:
+  CrashReporterFailureCollectorMock()
+      : CrashReporterFailureCollector(
+            base::MakeRefCounted<
+                base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+                std::make_unique<MetricsLibraryMock>())) {}
   MOCK_METHOD(void, SetUpDBus, (), (override));
 };
 
@@ -49,7 +57,8 @@ class CrashReporterFailureCollectorTest : public ::testing::Test {
 
     collector_.set_crash_directory_for_test(test_crash_directory_);
     collector_.set_log_config_path(
-        test_util::GetTestDataPath(kLogConfigFileName).value());
+        test_util::GetTestDataPath(kLogConfigFileName, /*use_testdata=*/false)
+            .value());
   }
 
  protected:
@@ -92,3 +101,16 @@ TEST_F(CrashReporterFailureCollectorTest, CollectLog) {
   EXPECT_FALSE((meta_content.find("payload=" + log_path.BaseName().value()) ==
                 std::string::npos));
 }
+
+TEST_F(CrashReporterFailureCollectorTest,
+       ComputeSeverity_CrashReporterFailureExecutable) {
+  CrashCollector::ComputedCrashSeverity computed_severity =
+      collector_.ComputeSeverity("crash_reporter_failure");
+
+  EXPECT_EQ(computed_severity.crash_severity,
+            CrashCollector::CrashSeverity::kInfo);
+  EXPECT_EQ(computed_severity.product_group,
+            CrashCollector::Product::kPlatform);
+}
+
+}  // namespace

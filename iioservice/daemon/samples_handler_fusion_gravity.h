@@ -1,17 +1,17 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef IIOSERVICE_DAEMON_SAMPLES_HANDLER_FUSION_GRAVITY_H_
 #define IIOSERVICE_DAEMON_SAMPLES_HANDLER_FUSION_GRAVITY_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/containers/flat_map.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 
 #include "iioservice/daemon/fusion.h"
 #include "iioservice/daemon/samples_handler_fusion.h"
@@ -45,8 +45,8 @@ class SamplesHandlerFusionGravity final : public SamplesHandlerFusion {
  private:
   Fusion fusion_;
 
-  base::Optional<double> accel_scale_;
-  base::Optional<double> gyro_scale_;
+  std::optional<double> accel_scale_;
+  std::optional<double> gyro_scale_;
 
   int64_t accel_timestamp_ = 0;
   int64_t gyro_timestamp_ = 0;

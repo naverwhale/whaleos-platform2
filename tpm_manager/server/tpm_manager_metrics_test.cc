@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -104,12 +104,74 @@ TEST_F(TpmManagerMetricsTest, ReportVersionFingerprint) {
 }
 
 TEST_F(TpmManagerMetricsTest, ReportTimeToTakeOwnership) {
-  const base::TimeDelta elapsed_time = base::TimeDelta::FromMinutes(3);
+  const base::TimeDelta elapsed_time = base::Minutes(3);
   EXPECT_CALL(mock_metrics_library_,
               SendToUMA(kTPMTimeToTakeOwnership, elapsed_time.InMilliseconds(),
                         _, _, _))
       .WillOnce(Return(true));
   tpm_manager_metrics_.ReportTimeToTakeOwnership(elapsed_time);
+}
+
+TEST_F(TpmManagerMetricsTest, ReportPowerWashResult) {
+  const TPMPowerWashResult results[]{
+      TPMPowerWashResult::kTPMClearSuccess,
+      TPMPowerWashResult::kTPMClearFailed,
+  };
+  constexpr auto max_value = static_cast<int>(TPMPowerWashResult::kMaxValue);
+  for (auto result : results) {
+    EXPECT_CALL(mock_metrics_library_,
+                SendEnumToUMA(kTPMPowerWashResult, static_cast<int>(result),
+                              max_value + 1))
+        .WillOnce(Return(true));
+    tpm_manager_metrics_.ReportPowerWashResult(result);
+  }
+}
+
+TEST_F(TpmManagerMetricsTest, ReportTakeOwnershipResult) {
+  const TPMTakeOwnershipResult results[]{
+      TPMTakeOwnershipResult::kSuccess,
+      TPMTakeOwnershipResult::kFailed,
+  };
+  constexpr auto max_value =
+      static_cast<int>(TPMTakeOwnershipResult::kMaxValue);
+  for (auto result : results) {
+    EXPECT_CALL(mock_metrics_library_,
+                SendEnumToUMA(kTPMTakeOwnershipResult, static_cast<int>(result),
+                              max_value + 1))
+        .WillOnce(Return(true));
+    tpm_manager_metrics_.ReportTakeOwnershipResult(result);
+  }
+}
+
+TEST_F(TpmManagerMetricsTest, ReportFilesystemUtilization) {
+  EXPECT_CALL(mock_metrics_library_,
+              SendSparseToUMA(kFilesystemUtilization, 0xdeadbeaf))
+      .WillOnce(Return(true));
+  tpm_manager_metrics_.ReportFilesystemUtilization(0xdeadbeaf);
+}
+
+TEST_F(TpmManagerMetricsTest, ReportFilesystemInitTime) {
+  const uint32_t time = 35;
+  EXPECT_CALL(mock_metrics_library_,
+              SendToUMA(kFilesystemInitTime, time, _, _, _))
+      .WillOnce(Return(true));
+  tpm_manager_metrics_.ReportFilesystemInitTime(time);
+}
+
+TEST_F(TpmManagerMetricsTest, ReportApRoVerificationTime) {
+  const uint32_t time = 35;
+  EXPECT_CALL(mock_metrics_library_,
+              SendToUMA(kApRoVerificationTime, time, _, _, _))
+      .WillOnce(Return(true));
+  tpm_manager_metrics_.ReportApRoVerificationTime(time);
+}
+
+TEST_F(TpmManagerMetricsTest, ReportExpApRoVerificationStatus) {
+  const uint32_t status = 35;
+  EXPECT_CALL(mock_metrics_library_,
+              SendSparseToUMA(kExpandedApRoVerificationStatus, status))
+      .WillOnce(Return(true));
+  tpm_manager_metrics_.ReportExpApRoVerificationStatus(status);
 }
 
 }  // namespace tpm_manager

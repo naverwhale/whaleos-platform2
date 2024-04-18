@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -19,10 +19,9 @@ import re
 
 def error(elem, msg):
     """Raise a nicely formatted error with some context."""
-    name = elem.attrib.get('name', None)
-    name = name + ' ' if name else ''
-    msg = 'Structured metrics error, {} node {}: {}.'.format(
-            elem.tag, name, msg)
+    name = elem.attrib.get("name", None)
+    name = name + " " if name else ""
+    msg = f"Structured metrics error, {elem.tag} node {name}: {msg}."
     raise ValueError(msg)
 
 
@@ -34,10 +33,13 @@ def get_attr(elem, tag, regex=None):
     """
     attr = elem.attrib.get(tag, None)
     if not attr:
-        error(elem, "missing attribute '{}'".format(tag))
+        error(elem, f"missing attribute '{tag}'")
     if regex and not re.match(regex, attr):
-        error(elem, ("has '{}' attribute '{}' which does "
-                     "not match regex '{}'").format(tag, attr, regex))
+        error(
+            elem,
+            f"has '{tag}' attribute '{attr}' which does "
+            f"not match regex '{regex}'",
+        )
     return attr
 
 
@@ -48,7 +50,7 @@ def get_compound_children(elem, tag):
     """
     children = elem.findall(tag)
     if not children:
-        error(elem, "missing node '{}'".format(tag))
+        error(elem, f"missing node '{tag}'")
     for child in children:
         if child.text.strip():
             error(child, "contains text, but shouldn't")
@@ -62,7 +64,7 @@ def get_compound_child(elem, tag):
     """
     children = elem.findall(tag)
     if len(children) != 1:
-        error(elem, "needs exactly one '{}' node".format(tag))
+        error(elem, f"needs exactly one '{tag}' node")
     return children[0]
 
 
@@ -74,7 +76,7 @@ def get_text_children(elem, tag, regex=None):
     """
     children = elem.findall(tag)
     if not children:
-        error(elem, "missing node '{}'".format(tag))
+        error(elem, f"missing node '{tag}'")
 
     result = []
     for child in children:
@@ -82,10 +84,13 @@ def get_text_children(elem, tag, regex=None):
         check_children(child, set())
         text = child.text.strip()
         if not text:
-            error(elem, "missing text in '{}'".format(tag))
+            error(elem, f"missing text in '{tag}'")
         if regex and not re.match(regex, text):
-            error(elem, ("has '{}' node '{}' which does "
-                         "not match regex '{}'").format(tag, text, regex))
+            error(
+                elem,
+                f"has '{tag}' node '{text}' which does "
+                f"not match regex '{regex}'",
+            )
         result.append(text)
     return result
 
@@ -98,7 +103,7 @@ def get_text_child(elem, tag, regex=None):
     """
     result = get_text_children(elem, tag, regex)
     if len(result) != 1:
-        error(elem, "needs exactly one '{}' node".format(tag))
+        error(elem, f"needs exactly one '{tag}' node")
     return result[0]
 
 
@@ -107,8 +112,8 @@ def check_attributes(elem, expected_attrs):
     actual_attrs = elem.attrib.keys()
     unexpected_attrs = actual_attrs - set(expected_attrs)
     if unexpected_attrs:
-        attrs = ' '.join(unexpected_attrs)
-        error(elem, 'has unexpected attributes: ' + attrs)
+        attrs = " ".join(unexpected_attrs)
+        error(elem, f"has unexpected attributes: {attrs}")
 
 
 def check_children(elem, expected_children):
@@ -116,15 +121,16 @@ def check_children(elem, expected_children):
     actual_children = {child.tag for child in elem}
     unexpected_children = actual_children - set(expected_children)
     if unexpected_children:
-        children = ' '.join(unexpected_children)
-        error(elem, 'has unexpected nodes: ' + children)
+        children = " ".join(unexpected_children)
+        error(elem, f"has unexpected nodes: {children}")
 
 
 def check_child_names_unique(elem, tag):
     """Ensure uniqueness of the 'name' of all children of `elem` with `tag`."""
-    names = [child.attrib.get('name', None)
-                     for child in elem if child.tag == tag]
+    names = [
+        child.attrib.get("name", None) for child in elem if child.tag == tag
+    ]
     name_counts = collections.Counter(names)
     has_duplicates = any(c > 1 for c in name_counts.values())
     if has_duplicates:
-        error(elem, 'has {} nodes with duplicate names'.format(tag))
+        error(elem, f"has {tag} nodes with duplicate names")

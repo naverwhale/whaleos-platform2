@@ -1,10 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/ethernet/virtio_ethernet.h"
 
 #include <unistd.h>
+#include <utility>
 
 #include "shill/control_interface.h"
 #include "shill/event_dispatcher.h"
@@ -34,8 +35,7 @@ VirtioEthernet::~VirtioEthernet() {
   // Nothing to be done beyond what Ethernet dtor does.
 }
 
-void VirtioEthernet::Start(Error* error,
-                           const EnabledStateChangedCallback& callback) {
+void VirtioEthernet::Start(EnabledStateChangedCallback callback) {
   // We are sometimes instantiated (by DeviceInfo) before the Linux kernel
   // has completed the setup function for the device (virtio_net:virtnet_probe).
   //
@@ -50,7 +50,7 @@ void VirtioEthernet::Start(Error* error,
   SLOG(this, 2) << "Sleeping to let virtio initialize.";
   sleep(2);
   SLOG(this, 2) << "Starting virtio Ethernet.";
-  Ethernet::Start(error, callback);
+  Ethernet::Start(std::move(callback));
 }
 
 }  // namespace shill

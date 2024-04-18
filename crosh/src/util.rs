@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,13 @@ use std::env;
 use std::error;
 use std::fmt::{self, Display};
 use std::fs::read_to_string;
+use std::fs::File;
+use std::io::stdin;
+use std::io::stdout;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::io::Read;
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -19,13 +25,22 @@ use chrono::Local;
 use dbus::blocking::Connection;
 use libc::c_int;
 use libchromeos::chromeos;
+use libchromeos::signal::{clear_signal_handler, register_signal_handler};
+use log::error;
+use nix::sys::signal::Signal;
 use regex::Regex;
-use sys_util::{clear_signal_handler, error, register_signal_handler};
+use system_api::client::OrgChromiumSessionManagerInterface;
 
 // 25 seconds is the default timeout for dbus-send.
 pub const DEFAULT_DBUS_TIMEOUT: Duration = Duration::from_secs(25);
+// Path to update_engine_client.
+pub const UPDATE_ENGINE: &str = "/usr/bin/update_engine_client";
 
+const BOARD_NAME_PREFIX: &str = "CHROMEOS_RELEASE_BOARD=";
 const CROS_USER_ID_HASH: &str = "CROS_USER_ID_HASH";
+
+// The return value of cryptohome when call install_attributes_get and the value is not set.
+const CRYPTOHOME_ERROR_INSTALL_ATTRIBUTES_GET_FAILED: i32 = 34;
 
 static INCLUDE_DEV: AtomicBool = AtomicBool::new(false);
 static INCLUDE_USB: AtomicBool = AtomicBool::new(false);
@@ -35,6 +50,7 @@ pub enum Error {
     DbusChromeFeaturesService(dbus::Error, String),
     DbusConnection(dbus::Error),
     DbusGetUserIdHash(chromeos::Error),
+    DbusGuestSessionActive(dbus::Error),
     NoMatchFound,
     WrappedError(String),
 }
@@ -52,6 +68,13 @@ impl Display for Error {
             DbusConnection(err) => write!(f, "failed to connect to D-Bus: {}", err),
             DbusGetUserIdHash(err) => {
                 write!(f, "failed to get user-id hash over to D-Bus: {:?}", err)
+            }
+            DbusGuestSessionActive(err) => {
+                write!(
+                    f,
+                    "failed to check whether guest session is active over D-Bus: {:?}",
+                    err
+                )
             }
             NoMatchFound => write!(f, "No match found."),
             WrappedError(err) => write!(f, "{}", err),
@@ -88,7 +111,7 @@ pub fn generate_output_file_path(output_type: &str, file_extension: &str) -> Res
     let user_id_hash = get_user_id_hash()?;
     let random_string: String = thread_rng().sample_iter(&Alphanumeric).take(6).collect();
     Ok(format!(
-        "/home/user/{}/Downloads/{}_{}_{}.{}",
+        "/home/user/{}/MyFiles/Downloads/{}_{}_{}.{}",
         user_id_hash, output_type, formatted_date, random_string, file_extension
     ))
 }
@@ -143,11 +166,11 @@ pub fn is_consumer_device() -> Result<bool> {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
 
-    // If the attribute is not set, cryptohome will treat it as an error, return 1 and output
-    // nothing.
+    // If the attribute is not set, cryptohome will treat it as an error, return
+    // CRYPTOHOME_ERROR_INSTALL_ATTRIBUTES_GET_FAILED and output nothing.
     match output.status.code() {
         Some(0) => Ok(!stdout.contains("enterprise")),
-        Some(1) if stdout.is_empty() => Ok(true),
+        Some(CRYPTOHOME_ERROR_INSTALL_ATTRIBUTES_GET_FAILED) if stdout.is_empty() => Ok(true),
         None => Err(Error::WrappedError("failed to get exit code".to_string())),
         _ => Err(Error::WrappedError(stdout)),
     }
@@ -171,7 +194,7 @@ pub fn usb_commands_included() -> bool {
 
 /// # Safety
 /// handler needs to be async safe.
-pub unsafe fn set_signal_handlers(signums: &[c_int], handler: extern "C" fn(c_int)) {
+pub unsafe fn set_signal_handlers(signums: &[Signal], handler: extern "C" fn(c_int)) {
     for signum in signums {
         // Safe as long as handler is async safe.
         if unsafe { register_signal_handler(*signum, handler) }.is_err() {
@@ -180,12 +203,44 @@ pub unsafe fn set_signal_handlers(signums: &[c_int], handler: extern "C" fn(c_in
     }
 }
 
-pub fn clear_signal_handlers(signums: &[c_int]) {
+pub fn clear_signal_handlers(signums: &[Signal]) {
     for signum in signums {
         if clear_signal_handler(*signum).is_err() {
             error!("sigaction failed for {}", signum);
         }
     }
+}
+
+pub fn board_name() -> String {
+    let file = File::open("/etc/lsb-release").unwrap();
+
+    for line in BufReader::new(file).lines().flatten() {
+        if let Some(board) = line.strip_prefix(BOARD_NAME_PREFIX) {
+            return board.to_string();
+        }
+    }
+
+    "UNKNOWN".to_string()
+}
+
+pub fn is_guest_session_active() -> Result<bool> {
+    let connection = Connection::new_system().map_err(|err| {
+        error!("ERROR: Failed to get D-Bus connection: {}", err);
+        Error::DbusConnection(err)
+    })?;
+
+    let conn_path = connection.with_proxy(
+        "org.chromium.SessionManager",
+        "/org/chromium/SessionManager",
+        DEFAULT_DBUS_TIMEOUT,
+    );
+
+    let guest_session_active = conn_path.is_guest_session_active().map_err(|err| {
+        println!("ERROR: Got unexpected result: {}", err);
+        Error::DbusGuestSessionActive(err)
+    })?;
+
+    Ok(guest_session_active)
 }
 
 fn root_dev() -> Result<String> {
@@ -202,6 +257,16 @@ fn root_dev() -> Result<String> {
     Ok(result.trim().to_string())
 }
 
+/// Print 'msg' followed by a [y/N] prompt and test the user input. Return true for 'y' or 'Y'.
+pub fn prompt_for_yes(msg: &str) -> bool {
+    print!("{} [y/N] ", msg);
+    stdout().flush().ok();
+
+    let mut response = String::new();
+    stdin().read_line(&mut response).ok();
+    matches!(response.as_str(), "y\n" | "Y\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,8 +275,11 @@ mod tests {
     fn test_generate_output_file_path() {
         // Set the user id hash env variable to a random value because it is necessary for output path generation.
         env::set_var(CROS_USER_ID_HASH, "useridhashfortesting");
-        let expected_path_re =
-            Regex::new(r"^/home/user/.+/Downloads/packet_capture_\d{4}-\d{2}-\d{2}_\d{2}.\d{2}.\d{2}_.{6}\.pcap$").unwrap();
+        let expected_path_re = Regex::new(concat!(
+            r"^/home/user/.+/MyFiles/Downloads/",
+            r"packet_capture_\d{4}-\d{2}-\d{2}_\d{2}.\d{2}.\d{2}_.{6}\.pcap$"
+        ))
+        .unwrap();
         let result_output_path = generate_output_file_path("packet_capture", "pcap").unwrap();
         assert!(expected_path_re.is_match(&result_output_path));
     }

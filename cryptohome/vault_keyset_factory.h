@@ -1,11 +1,9 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CRYPTOHOME_VAULT_KEYSET_FACTORY_H_
 #define CRYPTOHOME_VAULT_KEYSET_FACTORY_H_
-
-#include <base/macros.h>
 
 namespace cryptohome {
 class Crypto;
@@ -21,6 +19,7 @@ class VaultKeysetFactory {
 
   virtual ~VaultKeysetFactory();
   virtual VaultKeyset* New(Platform* platform, Crypto* crypto);
+  virtual VaultKeyset* NewBackup(Platform* platform, Crypto* crypto);
 };
 
 }  // namespace cryptohome

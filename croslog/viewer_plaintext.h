@@ -1,15 +1,16 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CROSLOG_VIEWER_PLAINTEXT_H_
 #define CROSLOG_VIEWER_PLAINTEXT_H_
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "re2/re2.h"
 
@@ -41,13 +42,13 @@ class ViewerPlaintext : public Multiplexer::Observer {
   base::OnceCallback<void()> quit_closure_{run_loop_.QuitWhenIdleClosure()};
 
   const croslog::Config config_;
-  base::Optional<RE2> config_grep_;
+  std::optional<RE2> config_grep_;
 
   CursorMode config_cursor_mode_ = CursorMode::UNSPECIFIED;
   base::Time config_cursor_time_;
   bool config_show_cursor_ = false;
 
-  base::Optional<BootRecords::BootRange> config_boot_range_;
+  std::optional<BootRecords::BootRange> config_boot_range_;
   int cache_boot_range_index_ = -1;
 
   BootRecords boot_records_;

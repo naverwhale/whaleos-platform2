@@ -1,10 +1,12 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "smbfs/filesystem.h"
 
 #include <errno.h>
+
+#include <optional>
 
 namespace smbfs {
 
@@ -32,7 +34,7 @@ void Filesystem::GetAttr(std::unique_ptr<AttrRequest> request,
 
 void Filesystem::SetAttr(std::unique_ptr<AttrRequest> request,
                          fuse_ino_t inode,
-                         base::Optional<uint64_t> file_handle,
+                         std::optional<uint64_t> file_handle,
                          const struct stat& attr,
                          int to_set) {
   request->ReplyError(ENOSYS);

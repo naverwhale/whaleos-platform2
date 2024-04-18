@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,14 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <gmock/gmock.h>
 
 #include "trunks/authorization_delegate.h"
 #include "trunks/blob_parser.h"
+#include "trunks/cr50_headers/ap_ro_status.h"
 #include "trunks/hmac_session.h"
 #include "trunks/mock_blob_parser.h"
 #include "trunks/mock_hmac_session.h"
@@ -164,6 +166,11 @@ class TpmUtilityForwarder : public TpmUtility {
     return target_->StirRandom(entropy_data, delegate);
   }
 
+  TPM_RC ChangeOwnerPassword(const std::string& old_password,
+                             const std::string& new_password) override {
+    return target_->ChangeOwnerPassword(old_password, new_password);
+  }
+
   TPM_RC GenerateRandom(size_t num_bytes,
                         AuthorizationDelegate* delegate,
                         std::string* random_data) override {
@@ -211,6 +218,13 @@ class TpmUtilityForwarder : public TpmUtility {
                            std::string* plaintext) override {
     return target_->AsymmetricDecrypt(key_handle, scheme, hash_alg, ciphertext,
                                       delegate, plaintext);
+  }
+
+  TPM_RC ECDHZGen(TPM_HANDLE key_handle,
+                  const TPM2B_ECC_POINT& in_point,
+                  AuthorizationDelegate* delegate,
+                  TPM2B_ECC_POINT* out_point) override {
+    return target_->ECDHZGen(key_handle, in_point, delegate, out_point);
   }
 
   TPM_RC RawSign(TPM_HANDLE key_handle,
@@ -272,6 +286,19 @@ class TpmUtilityForwarder : public TpmUtility {
                                  delegate, key_blob);
   }
 
+  TPM_RC ImportECCKeyWithPolicyDigest(AsymmetricKeyUsage key_type,
+                                      TPMI_ECC_CURVE curve_id,
+                                      const std::string& public_point_x,
+                                      const std::string& public_point_y,
+                                      const std::string& private_value,
+                                      const std::string& policy_digest,
+                                      AuthorizationDelegate* delegate,
+                                      std::string* key_blob) override {
+    return target_->ImportECCKeyWithPolicyDigest(
+        key_type, curve_id, public_point_x, public_point_y, private_value,
+        policy_digest, delegate, key_blob);
+  }
+
   TPM_RC CreateRSAKeyPair(AsymmetricKeyUsage key_type,
                           int modulus_bits,
                           uint32_t public_exponent,
@@ -298,6 +325,22 @@ class TpmUtilityForwarder : public TpmUtility {
                           std::string* key_blob,
                           std::string* creation_blob) override {
     return target_->CreateECCKeyPair(
+        key_type, curve_id, password, policy_digest,
+        use_only_policy_authorization, creation_pcr_indexes, delegate, key_blob,
+        creation_blob);
+  }
+
+  TPM_RC CreateRestrictedECCKeyPair(
+      AsymmetricKeyUsage key_type,
+      TPMI_ECC_CURVE curve_id,
+      const std::string& password,
+      const std::string& policy_digest,
+      bool use_only_policy_authorization,
+      const std::vector<uint32_t>& creation_pcr_indexes,
+      AuthorizationDelegate* delegate,
+      std::string* key_blob,
+      std::string* creation_blob) override {
+    return target_->CreateRestrictedECCKeyPair(
         key_type, curve_id, password, policy_digest,
         use_only_policy_authorization, creation_pcr_indexes, delegate, key_blob,
         creation_blob);
@@ -344,10 +387,11 @@ class TpmUtilityForwarder : public TpmUtility {
   TPM_RC SealData(const std::string& data_to_seal,
                   const std::string& policy_digest,
                   const std::string& auth_value,
+                  bool require_admin_with_policy,
                   AuthorizationDelegate* delegate,
                   std::string* sealed_data) override {
-    return target_->SealData(data_to_seal, policy_digest, auth_value, delegate,
-                             sealed_data);
+    return target_->SealData(data_to_seal, policy_digest, auth_value,
+                             require_admin_with_policy, delegate, sealed_data);
   }
 
   TPM_RC UnsealData(const std::string& sealed_data,
@@ -365,6 +409,14 @@ class TpmUtilityForwarder : public TpmUtility {
 
   TPM_RC StartSession(HmacSession* session) override {
     return target_->StartSession(session);
+  }
+
+  TPM_RC AddPcrValuesToPolicySession(
+      const std::map<uint32_t, std::string>& pcr_map,
+      bool use_auth_value,
+      PolicySession* policy_session) override {
+    return target_->AddPcrValuesToPolicySession(pcr_map, use_auth_value,
+                                                policy_session);
   }
 
   TPM_RC GetPolicyDigestForPcrValues(
@@ -409,6 +461,13 @@ class TpmUtilityForwarder : public TpmUtility {
                                  using_owner_authorization, extend, delegate);
   }
 
+  TPM_RC IncrementNVCounter(uint32_t index,
+                            bool using_owner_authorization,
+                            AuthorizationDelegate* delegate) override {
+    return target_->IncrementNVCounter(index, using_owner_authorization,
+                                       delegate);
+  }
+
   TPM_RC ReadNVSpace(uint32_t index,
                      uint32_t offset,
                      size_t num_bytes,
@@ -444,6 +503,16 @@ class TpmUtilityForwarder : public TpmUtility {
 
   TPM_RC ResetDictionaryAttackLock(AuthorizationDelegate* delegate) override {
     return target_->ResetDictionaryAttackLock(delegate);
+  }
+
+  TPM_RC GetAuthPolicyEndorsementKey(
+      TPM_ALG_ID key_type,
+      const std::string& auth_policy,
+      AuthorizationDelegate* endorsement_delegate,
+      TPM_HANDLE* key_handle,
+      TPM2B_NAME* key_name) override {
+    return target_->GetAuthPolicyEndorsementKey(
+        key_type, auth_policy, endorsement_delegate, key_handle, key_name);
   }
 
   TPM_RC GetEndorsementKey(TPM_ALG_ID key_type,
@@ -494,14 +563,15 @@ class TpmUtilityForwarder : public TpmUtility {
                              const brillo::SecureBlob& reset_secret,
                              const std::map<uint32_t, uint32_t>& delay_schedule,
                              const ValidPcrCriteria& valid_pcr_criteria,
+                             std::optional<uint32_t> expiration_delay,
                              uint32_t* result_code,
                              std::string* root_hash,
                              std::string* cred_metadata,
                              std::string* mac) override {
     return target_->PinWeaverInsertLeaf(
         protocol_version, label, h_aux, le_secret, he_secret, reset_secret,
-        delay_schedule, valid_pcr_criteria, result_code, root_hash,
-        cred_metadata, mac);
+        delay_schedule, valid_pcr_criteria, expiration_delay, result_code,
+        root_hash, cred_metadata, mac);
   }
 
   TPM_RC PinWeaverRemoveLeaf(uint8_t protocol_version,
@@ -533,16 +603,16 @@ class TpmUtilityForwarder : public TpmUtility {
 
   TPM_RC PinWeaverResetAuth(uint8_t protocol_version,
                             const brillo::SecureBlob& reset_secret,
+                            bool strong_reset,
                             const std::string& h_aux,
                             const std::string& cred_metadata,
                             uint32_t* result_code,
                             std::string* root_hash,
-                            brillo::SecureBlob* he_secret,
                             std::string* cred_metadata_out,
                             std::string* mac_out) override {
-    return target_->PinWeaverResetAuth(protocol_version, reset_secret, h_aux,
-                                       cred_metadata, result_code, root_hash,
-                                       he_secret, cred_metadata_out, mac_out);
+    return target_->PinWeaverResetAuth(
+        protocol_version, reset_secret, strong_reset, h_aux, cred_metadata,
+        result_code, root_hash, cred_metadata_out, mac_out);
   }
 
   TPM_RC PinWeaverGetLog(uint8_t protocol_version,
@@ -567,15 +637,145 @@ class TpmUtilityForwarder : public TpmUtility {
                                        cred_metadata_out, mac_out);
   }
 
+  TPM_RC PinWeaverSysInfo(uint8_t protocol_version,
+                          uint32_t* result_code,
+                          std::string* root_hash,
+                          uint32_t* boot_count,
+                          uint64_t* seconds_since_boot) override {
+    return target_->PinWeaverSysInfo(protocol_version, result_code, root_hash,
+                                     boot_count, seconds_since_boot);
+  }
+
+  TPM_RC PinWeaverGenerateBiometricsAuthPk(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      const PinWeaverEccPoint& client_public_key,
+      uint32_t* result_code,
+      std::string* root_hash,
+      PinWeaverEccPoint* server_public_key) override {
+    return target_->PinWeaverGenerateBiometricsAuthPk(
+        protocol_version, auth_channel, client_public_key, result_code,
+        root_hash, server_public_key);
+  }
+
+  TPM_RC PinWeaverCreateBiometricsAuthRateLimiter(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      uint64_t label,
+      const std::string& h_aux,
+      const brillo::SecureBlob& reset_secret,
+      const std::map<uint32_t, uint32_t>& delay_schedule,
+      const ValidPcrCriteria& valid_pcr_criteria,
+      std::optional<uint32_t> expiration_delay,
+      uint32_t* result_code,
+      std::string* root_hash,
+      std::string* cred_metadata,
+      std::string* mac) override {
+    return target_->PinWeaverCreateBiometricsAuthRateLimiter(
+        protocol_version, auth_channel, label, h_aux, reset_secret,
+        delay_schedule, valid_pcr_criteria, expiration_delay, result_code,
+        root_hash, cred_metadata, mac);
+  }
+
+  TPM_RC PinWeaverStartBiometricsAuth(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      const brillo::Blob& client_nonce,
+      const std::string& h_aux,
+      const std::string& cred_metadata,
+      uint32_t* result_code,
+      std::string* root_hash,
+      brillo::Blob* server_nonce,
+      brillo::Blob* encrypted_high_entropy_secret,
+      brillo::Blob* iv,
+      std::string* cred_metadata_out,
+      std::string* mac_out) override {
+    return target_->PinWeaverStartBiometricsAuth(
+        protocol_version, auth_channel, client_nonce, h_aux, cred_metadata,
+        result_code, root_hash, server_nonce, encrypted_high_entropy_secret, iv,
+        cred_metadata_out, mac_out);
+  }
+
+  TPM_RC PinWeaverBlockGenerateBiometricsAuthPk(
+      uint8_t protocol_version,
+      uint32_t* result_code,
+      std::string* root_hash) override {
+    return target_->PinWeaverBlockGenerateBiometricsAuthPk(
+        protocol_version, result_code, root_hash);
+  }
+
+  TPM_RC U2fGenerate(const uint8_t version,
+                     const brillo::Blob& app_id,
+                     const brillo::SecureBlob& user_secret,
+                     const bool consume,
+                     const bool up_required,
+                     const std::optional<brillo::Blob>& auth_time_secret_hash,
+                     brillo::Blob* public_key,
+                     brillo::Blob* key_handle) override {
+    return target_->U2fGenerate(version, app_id, user_secret, consume,
+                                up_required, auth_time_secret_hash, public_key,
+                                key_handle);
+  }
+
+  TPM_RC U2fSign(const uint8_t version,
+                 const brillo::Blob& app_id,
+                 const brillo::SecureBlob& user_secret,
+                 const std::optional<brillo::SecureBlob>& auth_time_secret,
+                 const std::optional<brillo::Blob>& hash_to_sign,
+                 const bool check_only,
+                 const bool consume,
+                 const bool up_required,
+                 const brillo::Blob& key_handle,
+                 brillo::Blob* sig_r,
+                 brillo::Blob* sig_s) override {
+    return target_->U2fSign(version, app_id, user_secret, auth_time_secret,
+                            hash_to_sign, check_only, consume, up_required,
+                            key_handle, sig_r, sig_s);
+  }
+
+  TPM_RC U2fAttest(const brillo::SecureBlob& user_secret,
+                   uint8_t format,
+                   const brillo::Blob& data,
+                   brillo::Blob* sig_r,
+                   brillo::Blob* sig_s) override {
+    return target_->U2fAttest(user_secret, format, data, sig_r, sig_s);
+  }
+
   TPM_RC GetRsuDeviceId(std::string* device_id) override {
     return target_->GetRsuDeviceId(device_id);
   }
 
-  TPM_RC GetRoVerificationStatus(ApRoStatus* status) override {
+  TPM_RC GetRoVerificationStatus(ap_ro_status* status) override {
     return target_->GetRoVerificationStatus(status);
   }
 
-  bool IsCr50() override { return target_->IsCr50(); }
+  bool IsGsc() override { return target_->IsGsc(); }
+
+  std::string SendCommandAndWait(const std::string& command) override {
+    return target_->SendCommandAndWait(command);
+  }
+
+  TPM_RC CreateSaltingKey(TPM_HANDLE* key, TPM2B_NAME* key_name) override {
+    return target_->CreateSaltingKey(key, key_name);
+  }
+
+  TPM_RC GetTi50Stats(uint32_t* fs_init_time,
+                      uint32_t* fs_size,
+                      uint32_t* aprov_time,
+                      uint32_t* aprov_status) override {
+    return target_->GetTi50Stats(fs_init_time, fs_size, aprov_time,
+                                 aprov_status);
+  }
+
+  TPM_RC GetRwVersion(uint32_t* epoch,
+                      uint32_t* major,
+                      uint32_t* minor) override {
+    return target_->GetRwVersion(epoch, major, minor);
+  }
+
+  TPM_RC GetConsoleLogs(std::string* logs) override {
+    return target_->GetConsoleLogs(logs);
+  }
 
  private:
   TpmUtility* target_;
@@ -748,6 +948,16 @@ class PolicySessionForwarder : public PolicySession {
                           AuthorizationDelegate* delegate) override {
     return target_->PolicyFidoSigned(auth_entity, auth_entity_name, auth_data,
                                      auth_data_descr, signature, delegate);
+  }
+
+  TPM_RC PolicyNV(uint32_t index,
+                  uint32_t offset,
+                  bool using_owner_authorization,
+                  TPM2B_OPERAND operand,
+                  TPM_EO operation,
+                  AuthorizationDelegate* delegate) override {
+    return target_->PolicyNV(index, offset, using_owner_authorization, operand,
+                             operation, delegate);
   }
 
   TPM_RC PolicyAuthValue() override { return target_->PolicyAuthValue(); }

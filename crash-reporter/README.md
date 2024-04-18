@@ -1,4 +1,4 @@
-# Chromium OS Crash Reporter
+# ChromiumOS Crash Reporter
 
 This is the project for handling all crash related operations on the device.
 The intention is to be as low-overhead as possible while still maximizing
@@ -17,15 +17,24 @@ We're in the process of migrating to buganizer:
 
 ## Data Consent
 
-No crashes get collected without explicit consent from the device owner.
-This is normally part of the OOBE setup flow (but can also be controlled via OS
-Settings).
+No crashes get collected without explicit consent from the device owner AND
+the currently logged in user.  This is normally part of the OOBE setup flow (but
+can also be controlled via OS Settings).
 
-Consent is controlled by the device owner and covers all users of that device.
+Consent is first set up by the device owner and covers all users of that device.
 If no consent has been granted, then `crash_reporter`  will generally exit
-rather than doing any further processing (e.g. running collectors).
+rather than doing any further processing (e.g. running collectors). If the
+device owner consents, users will be able to opt in or out as well, post M-103.
+`metrics_library` determines whether the currently logged-in-user consents to
+crash collection, with one exception: boot crash collection.
 
-The only case where we `crash_reporter` collects crashes even without consent is
+When the device kernel panics or otherwise forcibly reboots, we use the
+`/home/chronos/boot-collect-consent` file to determine whether the user that was
+signed in *at the time of the crash* consented to crash collection, since no
+user will be logged in when the boot collector runs. If the last-logged-in user
+consented to collection, we then fall back to device policy.
+
+The only case where `crash_reporter` collects crashes even without consent is
 for early crashes that occur before stateful partitions are mounted (because we
 cannot check consent then). `crash_sender` still checks consent before it
 uploads crashes.
@@ -40,10 +49,15 @@ privacy guarantees.
 
 *** aside
 Crashes are technically collected, but because they are saved in the guest's
-informal profile, they are all automatically throw away on log out.
+informal profile, they are all automatically thrown away on log out.
 ***
 
 If consent is later revoked, we do not upload any crashes that had been queued.
+In general, `crash_sender` will remove crashes that are present if consent is
+revoked, but in some cases it will not: most notably, if a crash is stored to a
+system directory (i.e., not in a cryptohome) and we're using per-user consent,
+`crash_sender` keeps the report around in case it is associated with a
+consenting user that later logs in again.
 
 ## Life Cycle
 
@@ -123,6 +137,7 @@ More details on each can be found in the sections below.
 * [crash-reporter-early-init.conf]: One-off early boot initialization
   (before stateful is mounted).
 * [crash-sender.conf]: Background daemon for uploading reports.
+* [crash-sender-login.conf]: One-off instance of crash-sender to run on login.
 
 ## Initialization
 
@@ -151,32 +166,27 @@ For more details, see the [core(5)] man page.
 
 We store reports in a couple of different places.
 
-*   `/var/spool/crash/`: Non-user (i.e. system) queued reports.
-*   `/home/chronos/<user_hash>/crash/`: User-specific queued reports.
-    Used when invoked as the user (e.g. by Chrome as `chronos` while logged in).
-*   `/home/chronos/crash`: Crashes from the `chronos` user when not logged in,
+*   `/var/spool/crash/`: Non-user (i.e. system) queued reports, when not logged
+    in or half of the time when logged in.
+    *** promo
+    When on a test build, all system crashes are written to `/var/spool/crash`
+    instead of `/run/daemon-store/crash/<user_hash>/`. This avoids having crashes
+    become inaccessible if a test logs the user out.
+    ***
+*   `/home/chronos/crash/`: Crashes from the `chronos` user when not logged in,
     for instance, if Chrome crashes while not logged in.
     *** promo
     When on a test build, all user crashes are written to `/home/chronos/crash`
-    instead of `/home/chronos/<user_hash>/crash/`. This avoids having crashes
+    instead of `/run/daemon-store/crash/<user_hash>/`. This avoids having crashes
     become inaccessible if a test logs the user out.
     ***
-*   `/run/daemon-store/crash/<user_hash>`: Some crashes from the `chronos` user
-    are sent here.  In the long term. All `chronos` user crashes should go here
-    when the user is logged in.
+*   `/run/daemon-store/crash/<user_hash>/`: All crashes that occur when a user
+    is logged in are sent here.
 *   `/mnt/stateful_partition/unencrypted/preserve/crash`: Crashes found early in
     the boot process (before `/var/spool/crash` is available) are stored here if
     we wish to preserve them across clobbers.
 *   `/run/crash_reporter/crash`: Crashes found early in the boot process (before
     `/var/spool/crash` is available) are stored here.
-*   `/home/root/<user_hash>/crash-reporter/`: User-specific queued reports.
-    Used when invoked as root (e.g. by the kernel to handle crashes for
-    processes that were running as `chronos`).
-
-    *** promo
-    The `/home/root/...` support is in progress.
-    See https://chromium-review.googlesource.com/1155107 for more details.
-    ***
 
 These directories are only written to by the crash-reporter at collection time.
 The [crash_sender] program will also delete reports after it uploads them.
@@ -309,6 +319,15 @@ This info can then be exported or passed to tools like `curl`.
 
 For Chromeless devices, this presents a bit of a challenge.
 
+### Throttling
+
+The crash report server has quotas on the number of crash reports it will accept
+for a particular product/version combination. When this quota is exceeded, it
+will return good status to the device (HTTP 200) along with a special crash
+report receipt ID of "0000000000000001". This prevents the device from
+re-attempting the crash report upload due to bad status (i.e., HTTP 429:
+"Too Many Requests").
+
 ## Filesystem Paths
 
 We won't cover (in depth) files covered by these topics:
@@ -343,8 +362,10 @@ These paths are guaranteed to persist across boots.
 These spool dirs are covered in detail in [Crash Report Storage].
 
 *   `/var/spool/crash/`: System crash reports.
-*   `/home/chronos/<user_hash>/crash/`: User-specific queued reports.
-*   `/home/root/<user_hash>/crash-reporter/`: User-specific queued reports.
+*   `/home/chronos/crash/`: Logged-out Chrome crashes.
+*   `/run/daemon-store/crash/<user_hash>/`: User-specific queued reports.
+    Note that `/home/root/<user_hash>/crash/` is the same directory and can be
+    referenced instead.
 
 ### Boot Clean Paths (/run)
 
@@ -513,6 +534,7 @@ Check out the their [docs][1] for more details (especially on minidumps).
 [crash-reporter.conf]: ./init/crash-reporter.conf
 [crash_sender]: ./crash_sender.cc
 [crash-sender.conf]: ./init/crash-sender.conf
+[crash-sender-login.conf]: ./init/crash-sender-login.conf
 [crash_serializer]: ./crash_serializer.cc
 [init/]: ./init/
 [kernel_warning_collector]: ../kernel_warning_collector.cc

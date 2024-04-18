@@ -1,15 +1,17 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "bootstat/bootstat.h"
 
 #include <fcntl.h>
+#include <inttypes.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -17,6 +19,9 @@
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
 #include <base/memory/ptr_util.h>
+#include <base/strings/stringprintf.h>
+#include <base/time/time.h>
+#include <brillo/scoped_umask.h>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -32,6 +37,10 @@ using ::testing::Return;
 using ::testing::SetArgPointee;
 
 namespace {
+
+constexpr char kProcPath[] = "proc";
+constexpr char kProcUptimePath[] = "proc/uptime";
+
 void RemoveFile(const base::FilePath& file_path) {
   // Either this is a link, or the path exists (PathExists would resolve
   // symlink).
@@ -62,8 +71,10 @@ void ValidateEventFileContents(const base::FilePath& file_path,
 // Mock class to interact with the system.
 class MockBootStatSystem : public BootStatSystem {
  public:
-  explicit MockBootStatSystem(const base::FilePath& disk_statistics_file_path)
-      : disk_statistics_file_path_(disk_statistics_file_path) {}
+  explicit MockBootStatSystem(const base::FilePath& disk_statistics_file_path,
+                              const base::FilePath& root_path)
+      : BootStatSystem(root_path),
+        disk_statistics_file_path_(disk_statistics_file_path) {}
 
   base::FilePath GetDiskStatisticsFilePath() const override {
     return disk_statistics_file_path_;
@@ -92,6 +103,11 @@ class BootstatTest : public ::testing::Test {
   // Writes disk stats to mock file.
   bool WriteMockDiskStats(const std::string& content);
 
+  // Writes uptime to mock file.
+  bool WriteUptime(const std::string& content);
+
+  bool WriteUptime(const struct timespec& uptime, const struct timespec& idle);
+
   // Checks that the stats directory only contains the expected files.
   void ValidateStatsDirectoryContent(const std::set<base::FilePath>& expected);
 
@@ -103,6 +119,7 @@ class BootstatTest : public ::testing::Test {
 
  private:
   base::FilePath mock_disk_file_path_;
+  base::FilePath mock_root_path_;
 };
 
 void BootstatTest::SetUp() {
@@ -110,13 +127,35 @@ void BootstatTest::SetUp() {
   stats_output_dir_ = temp_dir_.GetPath().Append("stats");
   ASSERT_TRUE(base::CreateDirectory(stats_output_dir_));
   mock_disk_file_path_ = temp_dir_.GetPath().Append("block_stats");
-  boot_stat_system_ = new MockBootStatSystem(mock_disk_file_path_);
+  mock_root_path_ = temp_dir_.GetPath();
+  boot_stat_system_ =
+      new MockBootStatSystem(mock_disk_file_path_, mock_root_path_);
   boot_stat_ = std::make_unique<BootStat>(stats_output_dir_,
                                           base::WrapUnique(boot_stat_system_));
 }
 
 bool BootstatTest::WriteMockDiskStats(const std::string& content) {
   return base::WriteFile(mock_disk_file_path_, content);
+}
+
+bool BootstatTest::WriteUptime(const std::string& content) {
+  base::FilePath dir = mock_root_path_.Append(kProcPath);
+  if (!base::CreateDirectoryAndGetError(dir, nullptr))
+    return false;
+  return base::WriteFile(mock_root_path_.Append(kProcUptimePath), content);
+}
+
+bool BootstatTest::WriteUptime(const struct timespec& uptime,
+                               const struct timespec& idle) {
+  static constexpr int kNsecsPerSec = 1e9;
+
+  std::string content = base::StringPrintf(
+      "%" PRId64 ".%02ld %" PRId64 ".%02ld",
+      static_cast<int64_t>(uptime.tv_sec),
+      uptime.tv_nsec / (kNsecsPerSec / 100), static_cast<int64_t>(idle.tv_sec),
+      idle.tv_nsec / (kNsecsPerSec / 100));
+
+  return WriteUptime(content);
 }
 
 void BootstatTest::ValidateStatsDirectoryContent(
@@ -136,6 +175,7 @@ void BootstatTest::ValidateStatsDirectoryContent(
 // Holds LogEvent test data and expected results.
 struct LogEventTestData {
   const struct timespec uptime;
+  const struct timespec idle;
   const char* expected_uptime;
   const char* mock_disk_content;
   const char* expected_disk_content;
@@ -144,8 +184,10 @@ struct LogEventTestData {
 constexpr struct LogEventTestData kDefaultTestData = {
     // uptime (tv_sec, tv_nsec)
     {691448, 123456789},
+    // idle (tv_sec, tv_nsec)
+    {600000, 870000000},
     // expected_uptime
-    "691448.123456789\n",
+    "691448.123456789 600000.870000000\n",
     // mock_disk_content
     " 1417116    14896 55561564 10935990  4267850 78379879"
     " 661568738 1635920520      158 17856450 1649520570\n",
@@ -161,8 +203,10 @@ TEST_F(BootstatTest, ContentGeneration) {
       {
           // uptime (tv_sec, tv_nsec)
           {691448, 123456789},
+          // idle (tv_sec, tv_nsec)
+          {600000, 870000000},
           // expected_uptime
-          "691448.123456789\n",
+          "691448.123456789 600000.870000000\n",
           // mock_disk_content
           " 1417116    14896 55561564 10935990  4267850 78379879"
           " 661568738 1635920520      158 17856450 1649520570\n",
@@ -174,7 +218,9 @@ TEST_F(BootstatTest, ContentGeneration) {
           // uptime (tv_sec, tv_nsec)
           {691623, 12},  // Tests zero padding
                          // expected_uptime
-          "691448.123456789\n691623.000000012\n",
+          {600200, 0},
+          "691448.123456789 600000.870000000\n"
+          "691623.000000012 600200.000000000\n",
           // mock_disk_content
           " 1420714    14918 55689988 11006390  4287385 78594261"
           " 663441564 1651579200      152 17974280 1665255160\n",
@@ -196,9 +242,10 @@ TEST_F(BootstatTest, ContentGeneration) {
   for (int i = 0; i < std::size(kTestData); i++) {
     EXPECT_CALL(*boot_stat_system_, GetUpTime())
         .WillOnce(Return(std::make_optional(kTestData[i].uptime)));
+    ASSERT_TRUE(WriteUptime(kTestData[i].uptime, kTestData[i].idle));
     ASSERT_TRUE(WriteMockDiskStats(kTestData[i].mock_disk_content));
 
-    boot_stat_->LogEvent(kEventName);
+    ASSERT_TRUE(boot_stat_->LogEvent(kEventName));
 
     Mock::VerifyAndClear(boot_stat_system_);
 
@@ -249,9 +296,10 @@ TEST_F(BootstatTest, EventNameTruncation) {
   for (int i = 0; i < std::size(kTestData); i++) {
     EXPECT_CALL(*boot_stat_system_, GetUpTime())
         .WillOnce(Return(std::make_optional(kDefaultTestData.uptime)));
+    ASSERT_TRUE(WriteUptime(kDefaultTestData.uptime, kDefaultTestData.idle));
     ASSERT_TRUE(WriteMockDiskStats(kDefaultTestData.mock_disk_content));
 
-    boot_stat_->LogEvent(kTestData[i].event_name);
+    ASSERT_TRUE(boot_stat_->LogEvent(kTestData[i].event_name));
 
     Mock::VerifyAndClear(boot_stat_system_);
 
@@ -281,6 +329,7 @@ TEST_F(BootstatTest, SymlinkFollowTarget) {
 
   EXPECT_CALL(*boot_stat_system_, GetUpTime())
       .WillRepeatedly(Return(std::make_optional(kDefaultTestData.uptime)));
+  ASSERT_TRUE(WriteUptime(kDefaultTestData.uptime, kDefaultTestData.idle));
   ASSERT_TRUE(WriteMockDiskStats(kDefaultTestData.mock_disk_content));
 
   // Relative targets for the symbolic links.
@@ -296,7 +345,7 @@ TEST_F(BootstatTest, SymlinkFollowTarget) {
   ASSERT_TRUE(base::WriteFile(uptime_file_path, kDefaultContent));
   ASSERT_TRUE(base::WriteFile(diskstats_file_path, kDefaultContent));
 
-  boot_stat_->LogEvent(kEventName);
+  EXPECT_FALSE(boot_stat_->LogEvent(kEventName));
 
   // Expect no additional content in the files.
   std::string data;
@@ -317,6 +366,7 @@ TEST_F(BootstatTest, SymlinkFollowNoTarget) {
 
   EXPECT_CALL(*boot_stat_system_, GetUpTime())
       .WillRepeatedly(Return(std::make_optional(kDefaultTestData.uptime)));
+  ASSERT_TRUE(WriteUptime(kDefaultTestData.uptime, kDefaultTestData.idle));
   ASSERT_TRUE(WriteMockDiskStats(kDefaultTestData.mock_disk_content));
 
   // Relative targets for the symbolic links.
@@ -327,7 +377,7 @@ TEST_F(BootstatTest, SymlinkFollowNoTarget) {
   ASSERT_TRUE(
       base::CreateSymbolicLink(diskstats_link_path, diskstats_file_path));
 
-  boot_stat_->LogEvent(kEventName);
+  EXPECT_FALSE(boot_stat_->LogEvent(kEventName));
 
   // Expect to be unable to read content
   std::string data;
@@ -424,6 +474,115 @@ TEST_F(BootstatTest, RtcGenerationTimeout) {
       .WillRepeatedly(Return(std::make_optional(kRtcTestData)));
 
   boot_stat_->LogRtcSync(kEventName);
+}
+
+TEST_F(BootstatTest, GetIdleTime) {
+  {
+    ASSERT_TRUE(WriteUptime("3.00 2.50"));
+    auto ts = boot_stat_system_->GetIdleTime();
+    ASSERT_TRUE(ts);
+    EXPECT_EQ(ts->InMilliseconds(), 2500);
+  }
+  {
+    ASSERT_TRUE(WriteUptime("5.43 0.00"));
+    auto ts = boot_stat_system_->GetIdleTime();
+    ASSERT_TRUE(ts);
+    EXPECT_EQ(ts->InMilliseconds(), 0);
+  }
+}
+
+TEST_F(BootstatTest, GetEventTimings) {
+  constexpr struct LogEventTestData kTestData[] = {
+      {
+          .uptime =
+              {
+                  .tv_sec = 1234,
+                  .tv_nsec = 56789,
+              },
+          .idle =
+              {
+                  .tv_sec = 60000,
+                  .tv_nsec = 120000000,
+              },
+          .mock_disk_content =
+              " 1417116    14896 55561564 10935990  4267850 78379879"
+              " 661568738 1635920520      158 17856450 1649520570\n",
+      },
+      {
+          .uptime =
+              {
+                  .tv_sec = 20000,
+                  .tv_nsec = 0,
+              },
+          .idle =
+              {
+                  .tv_sec = 90017,
+                  .tv_nsec = 0,
+              },
+          .mock_disk_content =
+              " 1420714    14918 55689988 11006390  4287385 78594261"
+              " 663441564 1651579200      152 17974280 1665255160\n",
+      },
+  };
+
+  for (int i = 0; i < std::size(kTestData); i++) {
+    EXPECT_CALL(*boot_stat_system_, GetUpTime())
+        .WillOnce(Return(std::make_optional(kTestData[i].uptime)));
+    ASSERT_TRUE(WriteUptime(kTestData[i].uptime, kTestData[i].idle));
+    ASSERT_TRUE(WriteMockDiskStats(kTestData[i].mock_disk_content));
+
+    ASSERT_TRUE(boot_stat_->LogEvent("ev"));
+
+    Mock::VerifyAndClear(boot_stat_system_);
+  }
+
+  auto events = boot_stat_->GetEventTimings("ev");
+  ASSERT_TRUE(events);
+
+  ASSERT_EQ(events->size(), std::size(kTestData));
+  for (int i = 0; i < std::size(kTestData); i++) {
+    auto& event = (*events)[i];
+    EXPECT_EQ(event.uptime, base::Seconds(kTestData[i].uptime.tv_sec) +
+                                base::Nanoseconds(kTestData[i].uptime.tv_nsec));
+    EXPECT_EQ(event.idle_time,
+              base::Seconds(kTestData[i].idle.tv_sec) +
+                  base::Nanoseconds(kTestData[i].idle.tv_nsec));
+  }
+}
+
+TEST_F(BootstatTest, Umask) {
+  constexpr char kEventName[] = "umasking";
+
+  EXPECT_CALL(*boot_stat_system_, GetUpTime())
+      .WillRepeatedly(Return(std::make_optional(kDefaultTestData.uptime)));
+  ASSERT_TRUE(WriteUptime(kDefaultTestData.uptime, kDefaultTestData.idle));
+  ASSERT_TRUE(WriteMockDiskStats(kDefaultTestData.mock_disk_content));
+
+  // By default (umask), create files without group/other read/write
+  // permissions. Bootstat should still force group/other read permissions.
+  brillo::ScopedUmask scoped_mask(S_IWGRP | S_IWOTH | S_IRGRP | S_IROTH);
+
+  ASSERT_TRUE(boot_stat_->LogEvent(kEventName));
+
+  base::FilePath uptime_file_path =
+      stats_output_dir_.Append(std::string("uptime-") + kEventName);
+  base::FilePath diskstats_file_path =
+      stats_output_dir_.Append(std::string("disk-") + kEventName);
+
+  int mode;
+  ASSERT_TRUE(GetPosixFilePermissions(uptime_file_path, &mode));
+  // Honor write mask:
+  EXPECT_EQ(mode & (S_IWGRP | S_IWOTH), 0) << "Unexpected write permissions";
+  // But don't honor read mask:
+  EXPECT_EQ(mode & (S_IRGRP | S_IROTH), S_IRGRP | S_IROTH)
+      << "Unexpected read permissions";
+
+  ASSERT_TRUE(GetPosixFilePermissions(diskstats_file_path, &mode));
+  // Honor write mask:
+  EXPECT_EQ(mode & (S_IWGRP | S_IWOTH), 0) << "Unexpected write permissions";
+  // But don't honor read mask:
+  EXPECT_EQ(mode & (S_IRGRP | S_IROTH), S_IRGRP | S_IROTH)
+      << "Unexpected read permissions";
 }
 
 }  // namespace bootstat

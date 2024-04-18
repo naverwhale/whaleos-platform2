@@ -1,24 +1,21 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef DIAGNOSTICS_CROS_HEALTHD_FETCHERS_BLUETOOTH_FETCHER_H_
 #define DIAGNOSTICS_CROS_HEALTHD_FETCHERS_BLUETOOTH_FETCHER_H_
 
-#include "diagnostics/cros_healthd/fetchers/base_fetcher.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/cros_healthd/system/context.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
 
-// The BluetoothFetcher class is responsible for gathering a device's Bluetooth
-// information.
-class BluetoothFetcher final : public BaseFetcher {
- public:
-  using BaseFetcher::BaseFetcher;
-
-  // Returns the device's Bluetooth information.
-  chromeos::cros_healthd::mojom::BluetoothResultPtr FetchBluetoothInfo();
-};
+// Fetches Bluetooth info and pass the result to the callback. Returns a
+// structure with either the Bluetooth information or the error that occurred
+// fetching the information.
+using FetchBluetoothInfoCallback =
+    base::OnceCallback<void(ash::cros_healthd::mojom::BluetoothResultPtr)>;
+void FetchBluetoothInfo(Context* context, FetchBluetoothInfoCallback callback);
 
 }  // namespace diagnostics
 

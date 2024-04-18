@@ -1,8 +1,10 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <brillo/errors/error_codes.h>
+
+#include <errno.h>
 
 #include <base/posix/safe_strerror.h>
 
@@ -12,6 +14,10 @@ namespace errors {
 namespace dbus {
 const char kDomain[] = "dbus";
 }  // namespace dbus
+
+namespace shill {
+const char kDomain[] = "shill";
+}  // namespace shill
 
 namespace json {
 const char kDomain[] = "json_parser";

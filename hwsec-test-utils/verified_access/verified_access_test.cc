@@ -1,13 +1,13 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "hwsec-test-utils/verified_access/verified_access.h"
 
-#include <base/optional.h>
 #include <brillo/data_encoding.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <optional>
 
 #include "hwsec-test-utils/common/openssl_utility.h"
 #include "hwsec-test-utils/well_known_key_pairs/well_known_key_pairs.h"
@@ -121,7 +121,7 @@ class VerifiedAccessChallengeTest : public testing::Test {
 TEST_F(VerifiedAccessChallengeTest, GenerateChallenge) {
   // Creates the output under test.
   constexpr char kExpectedPrefix[] = "prefix";
-  base::Optional<attestation::SignedData> optional_signed_data =
+  std::optional<attestation::SignedData> optional_signed_data =
       va_challenge_.GenerateChallenge(kExpectedPrefix);
   ASSERT_TRUE(optional_signed_data.has_value());
   const attestation::SignedData& signed_data = *optional_signed_data;

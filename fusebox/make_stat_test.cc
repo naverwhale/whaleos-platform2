@@ -1,11 +1,12 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "fusebox/make_stat.h"
 
-#include <unistd.h>
+#include <memory>
 
+#include <base/files/file.h>
 #include <gtest/gtest.h>
 
 namespace fusebox {
@@ -120,6 +121,37 @@ TEST(MakeStatTest, MakeStatModeBits) {
   EXPECT_EQ(expect, MakeStatModeBits(mode, read_only));
 }
 
+TEST(MakeStatTest, MakeTimeStat) {
+  const time_t kTimeNow = std::time(nullptr);
+
+  // Test directory mode.
+  struct stat dir = {0};
+  dir.st_mode = mode_t(S_IFDIR | 0755);
+  dir.st_atime = kTimeNow;
+  dir.st_mtime = kTimeNow;
+  dir.st_ctime = kTimeNow;
+
+  struct stat dir_stat = MakeTimeStat(dir.st_mode, kTimeNow);
+  EXPECT_EQ("drwxr-xr-x", StatModeToString(dir_stat.st_mode));
+  EXPECT_EQ(0, std::memcmp(&dir_stat, &dir, sizeof(dir)));
+
+  // Test regular file mode.
+  struct stat reg = {0};
+  reg.st_mode = mode_t(S_IFREG | 0644);
+  reg.st_atime = kTimeNow;
+  reg.st_mtime = kTimeNow;
+  reg.st_ctime = kTimeNow;
+
+  struct stat reg_stat = MakeTimeStat(reg.st_mode, kTimeNow);
+  EXPECT_EQ("-rw-r--r--", StatModeToString(reg_stat.st_mode));
+  EXPECT_EQ(0, std::memcmp(&reg_stat, &reg, sizeof(reg)));
+
+  // Other modes are not allowed.
+  struct stat other = {0};
+  other.st_mode = mode_t(~(S_IFDIR | S_IFREG));
+  EXPECT_DEATH(MakeTimeStat(other.st_mode, kTimeNow), "");
+}
+
 TEST(MakeStatTest, MakeStat) {
   const bool read_only = true;
   const ino_t ino = 1;
@@ -129,8 +161,8 @@ TEST(MakeStatTest, MakeStat) {
   expected.st_ino = ino;
   expected.st_mode = 0;
   expected.st_nlink = 1;
-  expected.st_uid = getuid();
-  expected.st_gid = getgid();
+  expected.st_uid = kChronosUID;
+  expected.st_gid = kChronosAccessGID;
 
   for (const mode_t type : {S_IFDIR, S_IFREG}) {
     struct stat stat = {0};

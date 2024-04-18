@@ -1,11 +1,11 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef TPM_MANAGER_SERVER_TPM_OWNERSHIP_INTERFACE_H_
 #define TPM_MANAGER_SERVER_TPM_OWNERSHIP_INTERFACE_H_
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <tpm_manager/proto_bindings/tpm_manager.pb.h>
 
 #include "tpm_manager/common/export.h"

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,7 +22,7 @@ namespace glib_bridge {
 
 namespace {
 
-constexpr base::TimeDelta kTestTimeout = base::TimeDelta::FromSeconds(1);
+constexpr base::TimeDelta kTestTimeout = base::Seconds(1);
 
 // Use instead of g_idle_add, which implicitly uses the global default context.
 void ScheduleIdleCallback(GSourceFunc func, gpointer data) {

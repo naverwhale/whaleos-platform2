@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,16 +14,21 @@
 
 #include <base/check_op.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 
 #if USE_DIRENCRYPTION
 #include <keyutils.h>
 #endif  // USE_DIRENCRYPTION
 
 #include <base/command_line.h>
+#include <base/files/file.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/json/json_reader.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#include <base/values.h>
 #include <brillo/cryptohome.h>
 #include <brillo/key_value_store.h>
 #include <brillo/userdb_utils.h>
@@ -41,13 +46,18 @@ namespace {
 constexpr size_t kBufferSize = 4096;
 
 // Path to hardware class description.
-constexpr char kHwClassPath[] = "/sys/devices/platform/chromeos_acpi/HWID";
+// The order here is important: the legacy one should come first.
+const char* kHwClassPaths[] = {
+    "/sys/devices/platform/chromeos_acpi/HWID",
+    "/sys/devices/platform/GGL0001:00/HWID",
+    "/sys/devices/platform/GOOG0016:00/HWID",
+};
 
 constexpr char kDevSwBoot[] = "devsw_boot";
 constexpr char kDevMode[] = "dev";
 
 // If the OS version is older than this we do not upload crash reports.
-constexpr base::TimeDelta kAgeForNoUploads = base::TimeDelta::FromDays(180);
+constexpr base::TimeDelta kAgeForNoUploads = base::Days(180);
 
 #if USE_DIRENCRYPTION
 // Name of the session keyring.
@@ -80,17 +90,31 @@ bool IsDeveloperImage() {
 // Use sparingly, and only if you're really sure you want to have different
 // behavior during crash tests than on real devices.
 bool IsReallyTestImage() {
-  LOG(INFO) << "IsReallyTestImage() : return false temporary";
-  return false;
+  std::string channel;
+  if (!GetCachedKeyValueDefault(base::FilePath(paths::kLsbRelease),
+                                "CHROMEOS_RELEASE_TRACK", &channel)) {
+    return false;
+  }
+  return base::StartsWith(channel, "test", base::CompareCase::SENSITIVE);
 }
 
 bool IsTestImage() {
-  return false;
+  // If we're testing crash reporter itself, we don't want to special-case
+  // for test images.
+  if (IsCrashTestInProgress())
+    return false;
+
+  return IsReallyTestImage();
 }
 
 bool IsOfficialImage() {
-  LOG(INFO) << "IsOfficialImage() : return true temporary";
-  return true;
+  std::string description;
+  if (!GetCachedKeyValueDefault(base::FilePath(paths::kLsbRelease),
+                                "CHROMEOS_RELEASE_DESCRIPTION", &description)) {
+    return false;
+  }
+
+  return description.find("Official") != std::string::npos;
 }
 
 bool HasMockConsent() {
@@ -104,7 +128,17 @@ bool HasMockConsent() {
       paths::GetAt(paths::kSystemRunStateDirectory, paths::kMockConsent));
 }
 
-bool IsFeedbackAllowed(MetricsLibraryInterface* metrics_lib) {
+bool UseLooseCoreSizeForChromeCrashEarly() {
+  return util::IsReallyTestImage() &&
+         base::PathExists(
+             paths::GetAt(paths::kSystemRunStateDirectory,
+                          paths::kRunningLooseChromeCrashEarlyTestFile));
+}
+
+bool IsFeedbackAllowed(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
   if (HasMockConsent()) {
     LOG(INFO) << "mock-consent file present; assuming consent";
     return true;
@@ -122,7 +156,7 @@ bool IsFeedbackAllowed(MetricsLibraryInterface* metrics_lib) {
   if (vm_support) {
     ret = vm_support->GetMetricsConsent();
   } else {
-    ret = metrics_lib->AreMetricsEnabled();
+    ret = metrics_lib->data->AreMetricsEnabled();
   }
 
   if (!ret) {
@@ -132,6 +166,21 @@ bool IsFeedbackAllowed(MetricsLibraryInterface* metrics_lib) {
   }
 
   return ret;
+}
+
+bool IsBootFeedbackAllowed(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
+  std::string contents;
+  if (base::ReadFileToString(paths::Get(paths::kBootConsentFile), &contents)) {
+    if (contents != "1") {
+      return false;
+    }
+    // else fall back to normal consent -- checking policy, etc., as
+    // metrics_library does.
+  }
+  return IsFeedbackAllowed(metrics_lib);
 }
 
 // Determine if the filter-in file tells us to skip
@@ -264,7 +313,7 @@ bool IsBuildTimestampTooOldForUploads(int64_t build_time_millis,
     return false;
   }
   base::Time timestamp(base::Time::UnixEpoch() +
-                       base::TimeDelta::FromMilliseconds(build_time_millis));
+                       base::Milliseconds(build_time_millis));
   if (timestamp.is_null()) {
     return false;
   }
@@ -283,10 +332,19 @@ bool IsBuildTimestampTooOldForUploads(int64_t build_time_millis,
 
 std::string GetHardwareClass() {
   std::string hw_class;
-  if (base::ReadFileToString(paths::Get(kHwClassPath), &hw_class))
-    return hw_class;
+  for (const auto& path : kHwClassPaths) {
+    if (base::ReadFileToString(paths::Get(path), &hw_class)) {
+      base::TrimWhitespaceASCII(hw_class, base::TRIM_TRAILING, &hw_class);
+      return hw_class;
+    }
+  }
   auto vb_value = crossystem::GetInstance()->VbGetSystemPropertyString("hwid");
-  return vb_value ? vb_value.value() : "undefined";
+  if (vb_value.has_value()) {
+    std::string out;
+    base::TrimWhitespaceASCII(vb_value.value(), base::TRIM_TRAILING, &out);
+    return out;
+  }
+  return "undefined";
 }
 
 std::string GetBootModeString() {
@@ -358,8 +416,9 @@ bool GetUserHomeDirectories(
   }
 
   for (const auto& iter : sessions) {
+    brillo::cryptohome::home::ObfuscatedUsername username(iter.second);
     directories->push_back(paths::Get(
-        brillo::cryptohome::home::GetHashedUserPath(iter.second).value()));
+        brillo::cryptohome::home::GetHashedUserPath(username).value()));
   }
 
   return true;
@@ -383,6 +442,10 @@ bool GetUserCrashDirectories(
 bool GetDaemonStoreCrashDirectories(
     org::chromium::SessionManagerInterfaceProxyInterface* session_manager_proxy,
     std::vector<base::FilePath>* directories) {
+  if (!session_manager_proxy) {
+    LOG(ERROR) << "Can't get active sessions - no session manager proxy";
+    return false;
+  }
   brillo::ErrorPtr error;
   std::map<std::string, std::string> sessions;
   session_manager_proxy->RetrieveActiveSessions(&sessions, &error);
@@ -535,7 +598,14 @@ bool ReadMemfdToString(int mem_fd, std::string* contents) {
 }
 
 int GetSelinuxWeight() {
-  return 1000;
+  return 100'000;
+}
+
+int GetSelinuxWeightForCrash() {
+  // For consistency, and to avoid a sudden change in the apparent number of
+  // selinux violations, weight them to be 1000x fewer when reporting to crash
+  // (see util.h).
+  return GetSelinuxWeight() / 1000;
 }
 
 int GetServiceFailureWeight() {
@@ -546,13 +616,17 @@ int GetSuspendFailureWeight() {
   return 50;
 }
 
+int GetOomEventWeight() {
+  return 10;
+}
+
 int GetKernelWarningWeight(const std::string& flag) {
   // Sample kernel wifi warnings at a higher weight, since they're heavily
   // environmentally influenced.
   // Sample iwlwifi errors and ath10k errors using a higher weight since they're
   // not as useful and are only actionable for WiFi vendors.
   if (flag == "--kernel_wifi_warning" || flag == "--kernel_ath10k_error" ||
-      flag == "--kernel_iwlwifi_error") {
+      flag == "--kernel_ath11k_error" || flag == "--kernel_iwlwifi_error") {
     return 50;
   } else if (flag == "--kernel_warning" || flag == "--kernel_suspend_warning") {
     return 10;
@@ -562,6 +636,10 @@ int GetKernelWarningWeight(const std::string& flag) {
 }
 
 int GetUmountStatefulFailureWeight() {
+  return 10;
+}
+
+int GetRecoveryFailureWeight() {
   return 10;
 }
 
@@ -579,6 +657,17 @@ bool ReadFdToStream(unsigned int fd, std::stringstream* stream) {
 
     stream->write(buffer, count);
   }
+}
+
+int GetNextLine(base::File& file, std::string& out_str) {
+  char ch;
+
+  out_str.clear();
+  while (file.ReadAtCurrentPos(&ch, sizeof(ch)) > 0 && ch != '\n') {
+    out_str.push_back(ch);
+  }
+
+  return out_str.size();
 }
 
 #if USE_DIRENCRYPTION
@@ -622,6 +711,63 @@ bool RedactDigests(std::string* to_filter) {
   static constexpr const LazyRE2 digest_re = {
       R"((^|[^0-9a-fA-F])(?:[0-9a-fA-F]{32,})([^0-9a-fA-F]|$))"};
   return re2::RE2::Replace(to_filter, *digest_re, R"(\1<Redacted Digest>\2)");
+}
+
+std::optional<std::string> ExtractChromeVersionFromMetadata(
+    const base::FilePath& metadata_path) {
+  // Arbitrary max, just for safety. The json file should be under a kilobyte.
+  constexpr size_t kMaxSize = 128 * 1024;
+  std::string raw_metadata;
+  if (!ReadFileToStringWithMaxSize(metadata_path, &raw_metadata, kMaxSize)) {
+    PLOG(ERROR) << "Could not read Chrome metadata file "
+                << metadata_path.value() << ": ";
+    return std::nullopt;
+  }
+
+  auto parsed_metadata =
+      base::JSONReader::ReadAndReturnValueWithError(raw_metadata);
+
+  if (!parsed_metadata.has_value()) {
+    LOG(ERROR) << "Error parsing Chrome metadata file " << metadata_path.value()
+               << " as JSON: " << parsed_metadata.error().message;
+    return std::nullopt;
+  }
+
+  if (!parsed_metadata->is_dict()) {
+    LOG(ERROR) << "Error parsing Chrome metadata file " << metadata_path.value()
+               << ": expected outermost value to be a DICTIONARY but got a "
+               << base::Value::GetTypeName(parsed_metadata->type());
+    return std::nullopt;
+  }
+
+  const base::Value* content = parsed_metadata->GetDict().Find("content");
+  if (content == nullptr) {
+    LOG(ERROR) << "Error parsing Chrome metadata file " << metadata_path.value()
+               << ": could not find 'content' key";
+    return std::nullopt;
+  }
+  if (!content->is_dict()) {
+    LOG(ERROR) << "Error parsing Chrome metadata file " << metadata_path.value()
+               << ": content is not a DICT but instead a "
+               << base::Value::GetTypeName(content->type());
+    return std::nullopt;
+  }
+  const base::Value* version = content->GetDict().Find("version");
+  if (version == nullptr) {
+    LOG(ERROR) << "Error parsing Chrome metadata file " << metadata_path.value()
+               << ": could not find 'version' key";
+    return std::nullopt;
+  }
+
+  const std::string* version_string = version->GetIfString();
+  if (version_string == nullptr) {
+    LOG(ERROR) << "Error parsing Chrome metadata file " << metadata_path.value()
+               << ": version is not a string but instead a "
+               << base::Value::GetTypeName(version->type());
+    return std::nullopt;
+  }
+
+  return *version_string;
 }
 
 }  // namespace util

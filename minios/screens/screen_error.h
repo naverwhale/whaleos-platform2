@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,8 @@
 
 #include <memory>
 #include <string>
+
+#include <brillo/errors/error.h>
 
 #include "minios/screens/screen_base.h"
 
@@ -28,6 +30,8 @@ class ScreenError : public ScreenBase {
   void OnKeyPress(int key_changed) override;
   ScreenType GetType() override;
   std::string GetName() override;
+  bool MoveForward(brillo::ErrorPtr* error) override;
+  bool MoveBackward(brillo::ErrorPtr* error) override;
 
  private:
   // Updates buttons with current selection.

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <dbus/bus.h>
 #include <dbus/object_path.h>
@@ -50,6 +49,8 @@ class ModemTracker {
 
   // Called when the device list changes.
   void OnDeviceListChanged(const std::vector<dbus::ObjectPath>& new_list);
+
+  void DelayedSimCheck(dbus::ObjectPath device_path);
 
   scoped_refptr<dbus::Bus> bus_;
   std::unique_ptr<org::chromium::flimflam::ManagerProxy> shill_proxy_;

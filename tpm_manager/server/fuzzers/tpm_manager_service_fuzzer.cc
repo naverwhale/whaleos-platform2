@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,13 @@
 #include <memory>
 #include <sysexits.h>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/functional/bind.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/daemons/daemon.h>
+#include <brillo/files/file_util.h>
 #include <fuzzer/FuzzedDataProvider.h>
 #include <gmock/gmock.h>
 #include <libhwsec-foundation/tpm/tpm_version.h>
@@ -22,6 +23,7 @@
 #include "tpm_manager/proto_bindings/tpm_manager.pb.h"
 #include "tpm_manager/server/fuzzers/tpm_manager_service_fuzzer_data.pb.h"
 #include "tpm_manager/server/local_data_store_impl.h"
+#include "tpm_manager/server/mock_pinweaver_provision.h"
 #include "tpm_manager/server/tpm_manager_service.h"
 
 #include "tpm_manager/server/fuzzers/tpm_fuzzer_utils.h"
@@ -83,21 +85,25 @@ class TpmManagerServiceFuzzer : public brillo::Daemon {
     OTHER_TPM_SECTION();
     TPM_SELECT_END;
 
-    if (!base::DeletePathRecursively(base::FilePath(kTpmLocalDataFile))) {
+    if (!brillo::DeletePathRecursively(base::FilePath(kTpmLocalDataFile))) {
       PLOG(FATAL) << "Failed to clear directory for LocalDataStore.";
     }
 
     tpm_manager_metrics_.set_metrics_library_for_testing(&mock_metrics_);
 
+    auto mock_pinweaver_provision = std::make_unique<
+        testing::NiceMock<tpm_manager::MockPinWeaverProvision>>();
+
     tpm_manager_ = std::make_unique<tpm_manager::TpmManagerService>(
-        fuzzer_data_.wait_for_ownership(), fuzzer_data_.perform_preinit(),
-        &local_data_store_, nullptr, nullptr, nullptr, &tpm_manager_metrics_);
+        fuzzer_data_.perform_preinit(), &local_data_store_,
+        std::move(mock_pinweaver_provision), nullptr, nullptr, nullptr,
+        &tpm_manager_metrics_);
     fuzzer_utils_->SetupTpm(tpm_manager_.get());
     CHECK(tpm_manager_->Initialize());
   }
 
   void ScheduleSendFuzzedRequest() {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&TpmManagerServiceFuzzer::SendFuzzedRequest,
                                   base::Unretained(this)));
   }

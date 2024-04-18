@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2015 The Chromium OS Authors. All rights reserved.
+# Copyright 2015 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -15,5 +15,5 @@ shift
 
 sed \
   -e "s|@INCLUDE_DIR@|${INCLUDE_DIR}|g" \
-  -e "s|@PV@|${PV}|g" \
+  -e "s|@PV@|${PV:?}|g" \
   "${PC_IN}.pc.in" > "${OUT}/${PC_IN}.pc"

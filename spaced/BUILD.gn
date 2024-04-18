@@ -1,4 +1,4 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -9,6 +9,12 @@ import("//common-mk/proto_library.gni")
 
 group("all") {
   deps = [
+    ":install_dbus_config",
+    ":install_headers",
+    ":install_init",
+    ":install_minijail_conf",
+    ":libspaced-test_pc",
+    ":libspaced_pc",
     ":spaced",
     ":spaced_cli",
   ]
@@ -22,6 +28,12 @@ pkg_config("target_defaults") {
   pkg_deps = [
     "libbrillo",
     "libchrome",
+
+    # system_api depends on protobuf (or protobuf-lite). It must appear
+    # before protobuf here or the linker flags won't be in the right
+    # order.
+    "protobuf-lite",
+    "system_api",
   ]
 }
 
@@ -39,13 +51,32 @@ generate_dbus_proxies("spaced_proxy") {
   sources = [ "dbus_bindings/org.chromium.Spaced.xml" ]
 }
 
+generate_pkg_config("libspaced_pc") {
+  name = "libspaced"
+  description = "Library for disk usage introspection"
+  version = getenv("PV")
+  cflags = [ "-I/usr/include/spaced-client" ]
+  libs = [ "-lspaced" ]
+  install = true
+}
+
+generate_pkg_config("libspaced-test_pc") {
+  name = "libspaced-test"
+  description = "Library for disk usage introspection"
+  version = getenv("PV")
+  cflags = [ "-I/usr/include/spaced-client-test" ]
+  libs = [ "-lspaced" ]
+  install = true
+}
+
 shared_library("libspaced") {
   sources = [
-    "disk_usage.cc",
+    "calculator/stateful_free_space_calculator.cc",
+    "disk_usage_impl.cc",
     "disk_usage_proxy.cc",
   ]
-  libs = [ "rootdev" ]
   configs += [ ":target_defaults" ]
+  install_path = "lib"
   deps = [ ":spaced_proxy" ]
 }
 
@@ -55,6 +86,8 @@ executable("spaced") {
     "main.cc",
   ]
   configs += [ ":target_defaults" ]
+  install_path = "sbin"
+  libs = [ "rootdev" ]
   deps = [
     ":libspaced",
     ":spaced_adaptor",
@@ -64,16 +97,46 @@ executable("spaced") {
 executable("spaced_cli") {
   sources = [ "cli.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "sbin"
   deps = [ ":libspaced" ]
+}
+
+install_config("install_dbus_config") {
+  sources = [ "dbus_bindings/org.chromium.Spaced.conf" ]
+  install_path = "dbus_system_d"
+}
+
+install_config("install_init") {
+  sources = [ "init/spaced.conf" ]
+  install_path = "upstart"
+}
+
+install_config("install_headers") {
+  sources = [
+    "daemon.h",
+    "disk_usage.h",
+    "disk_usage_impl.h",
+    "disk_usage_proxy.h",
+  ]
+  install_path = "/usr/include/spaced"
+}
+
+install_config("install_minijail_conf") {
+  sources = [ "minijail/spaced.conf" ]
+  install_path = "minijail_conf"
 }
 
 if (use.test) {
   executable("libspaced_unittests") {
-    sources = [ "disk_usage_test.cc" ]
+    sources = [
+      "calculator/stateful_free_space_calculator_test.cc",
+      "disk_usage_test.cc",
+    ]
     configs += [
       "//common-mk:test",
       ":target_defaults",
     ]
+    run_test = true
     deps = [
       ":libspaced",
       "//common-mk/testrunner",

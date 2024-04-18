@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,11 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <string>
+#include <vector>
 
-#include <base/macros.h>
+#include <libhwsec/structures/key.h>
 #include <openssl/rsa.h>
 #include <trousers/scoped_tss_type.h>
 #include <trousers/tss.h>
@@ -31,6 +33,7 @@ class TpmUtilityV1 : public TpmUtilityCommon {
 
   // TpmUtility methods.
   bool Initialize() override;
+  std::vector<KeyType> GetSupportedKeyTypes() override;
   TpmVersion GetVersion() override { return TPM_1_2; }
   bool ActivateIdentity(const std::string& identity_key_blob,
                         const std::string& asym_ca_contents,
@@ -44,6 +47,8 @@ class TpmUtilityV1 : public TpmUtilityCommon {
                                std::string* credential) override;
   bool CreateCertifiedKey(KeyType key_type,
                           KeyUsage key_usage,
+                          hwsec::KeyRestriction key_restriction,
+                          std::optional<CertificateProfile> profile_hint,
                           const std::string& identity_key_blob,
                           const std::string& external_data,
                           std::string* key_blob,
@@ -51,8 +56,6 @@ class TpmUtilityV1 : public TpmUtilityCommon {
                           std::string* public_key_tpm_format,
                           std::string* key_info,
                           std::string* proof) override;
-  bool SealToPCR0(const std::string& data, std::string* sealed_data) override;
-  bool Unseal(const std::string& sealed_data, std::string* data) override;
   bool GetEndorsementPublicKey(KeyType key_type,
                                std::string* public_key_der) override;
   bool GetEndorsementCertificate(KeyType key_type,
@@ -63,21 +66,6 @@ class TpmUtilityV1 : public TpmUtilityCommon {
   bool Sign(const std::string& key_blob,
             const std::string& data_to_sign,
             std::string* signature) override;
-  bool QuotePCR(uint32_t pcr_index,
-                const std::string& key_blob,
-                std::string* quoted_pcr_value,
-                std::string* quoted_data,
-                std::string* quote) override;
-  bool IsQuoteForPCR(const std::string& quoted_pcr_value,
-                     const std::string& quoted_data,
-                     const std::string& quote,
-                     uint32_t pcr_index) const override;
-  bool GetNVDataSize(uint32_t nv_index, uint16_t* nv_size) const override;
-  bool CertifyNV(uint32_t nv_index,
-                 int nv_size,
-                 const std::string& key_blob,
-                 std::string* quoted_data,
-                 std::string* quote) override;
   bool ReadPCR(uint32_t pcr_index, std::string* pcr_value) override;
   bool GetEndorsementPublicKeyModulus(KeyType key_type,
                                       std::string* ekm) override;
@@ -86,11 +74,6 @@ class TpmUtilityV1 : public TpmUtilityCommon {
 
   bool CreateIdentity(KeyType key_type,
                       AttestationDatabase::Identity* identity) override;
-
-  bool GetRsuDeviceId(std::string* device_id) override;
-
- protected:
-  std::string GetPCRValueForMode(const std::string& mode) override;
 
  private:
   // Populates |context_handle| with a valid TSS_HCONTEXT and |tpm_handle|

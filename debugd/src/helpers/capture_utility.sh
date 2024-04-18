@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+# Copyright 2013 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -448,17 +448,20 @@ start_capture ()
   local device="${1}"
   local output_file="${2}"
   local max_size="${3}"
+  local status_pipe="${4}"
   echo "Capturing from ${device}.  Press Ctrl-C to stop."
   ip link set "${device}" up
   exec /usr/libexec/debugd/helpers/capture_packets \
-    "${device}" "${output_file}" "${max_size}"
+    "${device}" "${output_file}" "${max_size}" "${status_pipe}"
 }
 
 
 # usage displays a help message explaining the available options.
 usage ()
 {
-  echo "Usage: $0 [ --device <device> ] [ --frequency <frequency> ] "
+  echo "Available options are: "
+  echo "        [ --device <device> ] "
+  echo "        [ --frequency <frequency> ] "
   echo "        [ --max-size <max size in MiB> ] "
   echo "        [ --ht-location <above|below> ] "
   echo "        [ --vht-width <80|160> ] "
@@ -529,6 +532,7 @@ main ()
   local center_freq
   local monitor_connection_on
   local output_file
+  local status_pipe
   while [ $# -gt 0 ] ; do
     param="${1}"
     shift
@@ -565,6 +569,10 @@ main ()
         ;;
       --output-file)
         output_file="${1}"
+        shift
+        ;;
+      --status-pipe)
+        status_pipe="${1}"
         shift
         ;;
       --help)
@@ -625,7 +633,7 @@ main ()
     done
   fi
 
-  start_capture "${device}" "${output_file}" "${max_size}"
+  start_capture "${device}" "${output_file}" "${max_size}" "${status_pipe}"
 }
 
 set -e  # exit on failures

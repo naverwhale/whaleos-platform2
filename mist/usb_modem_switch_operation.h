@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,21 +10,24 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
 #include <base/cancelable_callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <base/time/time.h>
+#include <brillo/usb/usb_device_event_observer.h>
 
-#include "mist/usb_device_event_observer.h"
+namespace brillo {
+
+class UsbBulkTransfer;
+class UsbDevice;
+class UsbTransfer;
+
+}  // namespace brillo
 
 namespace mist {
 
 class Context;
-class UsbBulkTransfer;
-class UsbDevice;
 class UsbModemSwitchContext;
-class UsbTransfer;
 
 // A USB modem switch operation for switching a USB modem into the modem mode.
 // The whole operation involves the following tasks:
@@ -46,7 +49,7 @@ class UsbTransfer;
 // message loop via EventDispatcher.
 class UsbModemSwitchOperation
     : public base::SupportsWeakPtr<UsbModemSwitchOperation>,
-      public UsbDeviceEventObserver {
+      public brillo::UsbDeviceEventObserver {
  public:
   using CompletionCallback = base::OnceCallback<void(
       UsbModemSwitchOperation* operation, bool success)>;
@@ -76,7 +79,7 @@ class UsbModemSwitchOperation
  private:
   using Task = void (UsbModemSwitchOperation::*)();
   using UsbTransferCompletionHandler =
-      void (UsbModemSwitchOperation::*)(UsbTransfer* transfer);
+      void (UsbModemSwitchOperation::*)(brillo::UsbTransfer* transfer);
 
   // Schedules the specified |task| in the message loop for execution. At most
   // one pending task is allowed, so any pending task previously scheduled by
@@ -150,11 +153,11 @@ class UsbModemSwitchOperation
 
   // Invoked upon the completion of the last USB bulk transfer submitted by
   // SendMessageToMassStorageEndpoint().
-  void OnSendMessageCompleted(UsbTransfer* transfer);
+  void OnSendMessageCompleted(brillo::UsbTransfer* transfer);
 
   // Invoked upon the completion of the last USB bulk transfer submitted by
   // ReceiveMessageFromMassStorageEndpoint().
-  void OnReceiveMessageCompleted(UsbTransfer* transfer);
+  void OnReceiveMessageCompleted(brillo::UsbTransfer* transfer);
 
   // Invoked when this switcher times out waiting for the device to reconnect
   // to the bus, after a specified period time since
@@ -171,7 +174,7 @@ class UsbModemSwitchOperation
 
   Context* const context_;
   std::unique_ptr<UsbModemSwitchContext> switch_context_;
-  std::unique_ptr<UsbDevice> device_;
+  std::unique_ptr<brillo::UsbDevice> device_;
   CompletionCallback completion_callback_;
   bool interface_claimed_;
   uint8_t interface_number_;
@@ -179,7 +182,7 @@ class UsbModemSwitchOperation
   uint8_t out_endpoint_address_;
   int message_index_;
   int num_usb_messages_;
-  std::unique_ptr<UsbBulkTransfer> bulk_transfer_;
+  std::unique_ptr<brillo::UsbBulkTransfer> bulk_transfer_;
   base::CancelableOnceClosure pending_task_;
   base::CancelableOnceClosure reconnect_timeout_callback_;
 };

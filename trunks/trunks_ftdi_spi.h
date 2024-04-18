@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define TRUNKS_TRUNKS_FTDI_SPI_H_
 
 #include <string>
-
-#include <base/macros.h>
 
 #include "trunks/command_transceiver.h"
 #include "trunks/trunks_export.h"
@@ -79,8 +77,7 @@ class TRUNKS_EXPORT TrunksFtdiSpi : public CommandTransceiver {
   ~TrunksFtdiSpi() {}
 
   bool Init() { return false; }
-  void SendCommand(const std::string& command,
-                   const ResponseCallback& callback) {}
+  void SendCommand(const std::string& command, ResponseCallback callback) {}
   std::string SendCommandAndWait(const std::string& command) {
     return std::string("");
   }

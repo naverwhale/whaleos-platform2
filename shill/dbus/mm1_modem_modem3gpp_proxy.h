@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 
 #include "cellular/dbus-proxies.h"
 #include "shill/cellular/mm1_modem_modem3gpp_proxy_interface.h"
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 namespace mm1 {
@@ -30,32 +30,25 @@ class ModemModem3gppProxy : public ModemModem3gppProxyInterface {
   ~ModemModem3gppProxy() override;
   // Inherited methods from ModemModem3gppProxyInterface.
   void Register(const std::string& operator_id,
-                Error* error,
-                const ResultCallback& callback,
-                int timeout) override;
-  void Scan(Error* error,
-            const KeyValueStoresCallback& callback,
-            int timeout) override;
+                ResultCallback callback) override;
+  void Scan(KeyValueStoresCallback callback) override;
   void SetInitialEpsBearerSettings(const KeyValueStore& properties,
-                                   Error* error,
-                                   const ResultCallback& callback,
-                                   int timeout) override;
+                                   ResultCallback callback) override;
 
  private:
   // Callbacks for Register async call.
-  void OnRegisterSuccess(const ResultCallback& callback);
-  void OnRegisterFailure(const ResultCallback& callback,
-                         brillo::Error* dbus_error);
+  void OnRegisterSuccess(ResultCallback callback);
+  void OnRegisterFailure(ResultCallback callback, brillo::Error* dbus_error);
 
   // Callbacks for Scan async call.
-  void OnScanSuccess(const KeyValueStoresCallback& callback,
+  void OnScanSuccess(KeyValueStoresCallback callback,
                      const std::vector<brillo::VariantDictionary>& results);
-  void OnScanFailure(const KeyValueStoresCallback& callback,
+  void OnScanFailure(KeyValueStoresCallback callback,
                      brillo::Error* dbus_error);
 
   // Callbacks for SetInitialEpsBearerSettings async call.
-  void OnSetInitialEpsBearerSettingsSuccess(const ResultCallback& callback);
-  void OnSetInitialEpsBearerSettingsFailure(const ResultCallback& callback,
+  void OnSetInitialEpsBearerSettingsSuccess(ResultCallback callback);
+  void OnSetInitialEpsBearerSettingsFailure(ResultCallback callback,
                                             brillo::Error* dbus_error);
 
   std::unique_ptr<org::freedesktop::ModemManager1::Modem::Modem3gppProxy>

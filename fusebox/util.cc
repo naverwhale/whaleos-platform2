@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -65,7 +65,7 @@ std::string FlagsToString(const FlagDef (&defs)[N], int flags) {
 std::string OpenFlagsToString(int flags) {
   std::string open_flags_string;
 
-  switch (flags & O_ACCMODE) {
+  switch (flags & O_ACCMODE) {  // Only three things, ...
     case O_RDONLY:
       open_flags_string = "O_RDONLY";
       break;
@@ -76,7 +76,7 @@ std::string OpenFlagsToString(int flags) {
       open_flags_string = "O_RDWR";
       break;
     default:
-      open_flags_string = "INVALID_OPEN_MODE";
+      open_flags_string = "INVALID_O_ACCMODE_FLAG";
       break;
   }
 

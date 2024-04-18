@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/brillo_export.h>
 #include <brillo/streams/stream.h>
 
@@ -94,14 +93,15 @@ class BRILLO_EXPORT InputStreamSet : public Stream {
   bool CloseBlocking(ErrorPtr* error) override;
 
   // == Data availability monitoring ==========================================
-  bool WaitForData(AccessMode mode,
-                   const base::Callback<void(AccessMode)>& callback,
-                   ErrorPtr* error) override;
+  bool WaitForDataRead(base::OnceClosure callback, ErrorPtr* error) override;
 
-  bool WaitForDataBlocking(AccessMode in_mode,
-                           base::TimeDelta timeout,
-                           AccessMode* out_mode,
-                           ErrorPtr* error) override;
+  bool WaitForDataReadBlocking(base::TimeDelta timeout,
+                               ErrorPtr* error) override;
+
+  bool WaitForDataWrite(base::OnceClosure callback, ErrorPtr* error) override;
+
+  bool WaitForDataWriteBlocking(base::TimeDelta timeout,
+                                ErrorPtr* error) override;
 
   void CancelPendingAsyncOperations() override;
 

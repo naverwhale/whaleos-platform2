@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,7 @@
 
 #include <string>
 
-#include <base/callback_forward.h>
-#include <base/macros.h>
+#include <base/functional/callback_forward.h>
 #include <chaps/pkcs11/cryptoki.h>
 #include <chaps/token_manager_client.h>
 
@@ -60,7 +59,7 @@ class Pkcs11KeyStore : public KeyStore {
                            const std::string& certificate) override;
 
  private:
-  using EnumObjectsCallback = base::Callback<bool(
+  using EnumObjectsCallback = base::RepeatingCallback<bool(
       const std::string& key_name, CK_OBJECT_HANDLE object_handle)>;
 
   // Searches for a PKCS #11 object for a given key name.  If one exists, the

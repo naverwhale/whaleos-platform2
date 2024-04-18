@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,6 @@
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/macros.h>
 #include <gtest/gtest.h>
 
 #include "power_manager/common/power_constants.h"
@@ -19,9 +18,9 @@
 #include "power_manager/powerd/system/backlight_observer.h"
 #include "power_manager/powerd/system/internal_backlight.h"
 #include "power_manager/powerd/system/udev_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -58,7 +57,7 @@ class TestObserver : public BacklightObserver {
 
 }  // namespace
 
-class PluggableInternalBacklightTest : public ::testing::Test {
+class PluggableInternalBacklightTest : public TestEnvironment {
  public:
   PluggableInternalBacklightTest() {
     CHECK(temp_dir_.CreateUniqueTempDir());
@@ -152,5 +151,4 @@ TEST_F(PluggableInternalBacklightTest, InvalidDevice) {
   EXPECT_EQ(0, observer.num_changes());
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

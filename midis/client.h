@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,7 +24,7 @@ namespace midis {
 
 class Client : public DeviceTracker::Observer, public arc::mojom::MidisServer {
  public:
-  using ClientDeletionCallback = base::Callback<void(uint32_t)>;
+  using ClientDeletionCallback = base::OnceCallback<void(uint32_t)>;
   Client(DeviceTracker* device_tracker,
          uint32_t client_id,
          ClientDeletionCallback del_cb,
@@ -63,7 +63,7 @@ class Client : public DeviceTracker::Observer, public arc::mojom::MidisServer {
   // updates and derive information regarding devices.
   DeviceTracker* device_tracker_;
   uint32_t client_id_;
-  base::Callback<void(uint32_t)> del_cb_;
+  ClientDeletionCallback del_cb_;
 
   // Handle to the Mojo client interface. This is used to send necessary
   // information to the clients when required.

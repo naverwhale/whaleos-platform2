@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -43,6 +43,7 @@ class Smdp : public lpa::smdp::SmdpClient {
 
   Smdp(std::string server_addr,
        const std::string& certs_dir,
+       const lpa::proto::EuiccSpecVersion& card_version,
        Logger* logger,
        Executor* executor);
 
@@ -58,6 +59,8 @@ class Smdp : public lpa::smdp::SmdpClient {
 
  private:
   std::shared_ptr<brillo::http::Transport> server_transport_;
+
+  std::string card_version_;
 
   // Objects owned by the Daemon instance.
   Logger* logger_;

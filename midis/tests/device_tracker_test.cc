@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/notreached.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
@@ -72,21 +72,21 @@ TEST_F(DeviceTrackerTest, Add2DevicesPositive) {
   // to set the callbacks to be no-ops.
   auto dev = std::make_unique<Device>(
       kFakeName1, kFakeManufacturer1, kFakeSysNum1, kFakeDevNum1, kFakeSubdevs1,
-      kFakeFlags1, base::Bind(&FakeInPortSubscribeCallback),
-      base::Bind(&FakeOutPortSubscribeCallback),
-      base::Bind(&FakeInPortDeleteCallback),
-      base::Bind(&FakeOutPortDeleteCallback),
-      base::Bind(&FakeSendMidiDataCallback),
+      kFakeFlags1, base::BindRepeating(&FakeInPortSubscribeCallback),
+      base::BindRepeating(&FakeOutPortSubscribeCallback),
+      base::BindRepeating(&FakeInPortDeleteCallback),
+      base::BindRepeating(&FakeOutPortDeleteCallback),
+      base::BindRepeating(&FakeSendMidiDataCallback),
       std::map<uint32_t, unsigned int>());
   tracker_.AddDevice(std::move(dev));
 
   auto dev2 = std::make_unique<Device>(
       kFakeName2, kFakeManufacturer2, kFakeSysNum2, kFakeDevNum2, kFakeSubdevs2,
-      kFakeFlags2, base::Bind(&FakeInPortSubscribeCallback),
-      base::Bind(&FakeOutPortSubscribeCallback),
-      base::Bind(&FakeInPortDeleteCallback),
-      base::Bind(&FakeOutPortDeleteCallback),
-      base::Bind(&FakeSendMidiDataCallback),
+      kFakeFlags2, base::BindRepeating(&FakeInPortSubscribeCallback),
+      base::BindRepeating(&FakeOutPortSubscribeCallback),
+      base::BindRepeating(&FakeInPortDeleteCallback),
+      base::BindRepeating(&FakeOutPortDeleteCallback),
+      base::BindRepeating(&FakeSendMidiDataCallback),
       std::map<uint32_t, unsigned int>());
   tracker_.AddDevice(std::move(dev2));
 
@@ -108,11 +108,11 @@ TEST_F(DeviceTrackerTest, Add2DevicesPositive) {
 TEST_F(DeviceTrackerTest, AddRemoveDevicePositive) {
   auto dev = std::make_unique<Device>(
       kFakeName1, kFakeManufacturer1, kFakeSysNum1, kFakeDevNum1, kFakeSubdevs1,
-      kFakeFlags1, base::Bind(&FakeInPortSubscribeCallback),
-      base::Bind(&FakeOutPortSubscribeCallback),
-      base::Bind(&FakeInPortDeleteCallback),
-      base::Bind(&FakeOutPortDeleteCallback),
-      base::Bind(&FakeSendMidiDataCallback),
+      kFakeFlags1, base::BindRepeating(&FakeInPortSubscribeCallback),
+      base::BindRepeating(&FakeOutPortSubscribeCallback),
+      base::BindRepeating(&FakeInPortDeleteCallback),
+      base::BindRepeating(&FakeOutPortDeleteCallback),
+      base::BindRepeating(&FakeSendMidiDataCallback),
       std::map<uint32_t, unsigned int>());
   tracker_.AddDevice(std::move(dev));
   EXPECT_EQ(1, tracker_.devices_.size());
@@ -125,11 +125,11 @@ TEST_F(DeviceTrackerTest, AddRemoveDevicePositive) {
 TEST_F(DeviceTrackerTest, AddDeviceRemoveNegative) {
   auto dev = std::make_unique<Device>(
       kFakeName1, kFakeManufacturer1, kFakeSysNum1, kFakeDevNum1, kFakeSubdevs1,
-      kFakeFlags1, base::Bind(&FakeInPortSubscribeCallback),
-      base::Bind(&FakeOutPortSubscribeCallback),
-      base::Bind(&FakeInPortDeleteCallback),
-      base::Bind(&FakeOutPortDeleteCallback),
-      base::Bind(&FakeSendMidiDataCallback),
+      kFakeFlags1, base::BindRepeating(&FakeInPortSubscribeCallback),
+      base::BindRepeating(&FakeOutPortSubscribeCallback),
+      base::BindRepeating(&FakeInPortDeleteCallback),
+      base::BindRepeating(&FakeOutPortDeleteCallback),
+      base::BindRepeating(&FakeSendMidiDataCallback),
       std::map<uint32_t, unsigned int>());
   tracker_.AddDevice(std::move(dev));
   EXPECT_EQ(1, tracker_.devices_.size());

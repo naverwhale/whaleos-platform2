@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <memory>
 #include <string>
 
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <dbus/bus.h>
 #include <dbus/object_proxy.h>
@@ -26,17 +25,17 @@ class KerberosClient : public KerberosArtifactClientInterface {
   KerberosClient& operator=(const KerberosClient&) = delete;
 
   // KerberosArtifactClientInterface overrides.
-  void GetUserKerberosFiles(const std::string& principal_name,
-                            GetUserKerberosFilesCallback callback) override;
+  void GetKerberosFiles(const std::string& principal_name,
+                        GetKerberosFilesCallback callback) override;
   void ConnectToKerberosFilesChangedSignal(
       dbus::ObjectProxy::SignalCallback signal_callback,
       dbus::ObjectProxy::OnConnectedCallback on_connected_callback) override;
 
  private:
-  void HandleGetUserKeberosFiles(GetUserKerberosFilesCallback callback,
-                                 dbus::Response* response);
+  void HandleGetKerberosFiles(GetKerberosFilesCallback callback,
+                              dbus::Response* response);
 
-  dbus::ObjectProxy* const kerberos_object_proxy_;
+  dbus::ObjectProxy* const kerberos_object_proxy_ = nullptr;
   base::WeakPtrFactory<KerberosClient> weak_ptr_factory_{this};
 };
 

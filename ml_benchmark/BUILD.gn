@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,7 +8,13 @@ import("//common-mk/proto_library.gni")
 group("all") {
   deps = [ ":ml_benchmark" ]
   if (use.test) {
-    deps += [ ":ml_benchmark_test" ]
+    deps += [
+      ":ml_benchmark_test",
+      "driver_common:driver_common_test",
+    ]
+  }
+  if (use.ml_benchmark_drivers) {
+    deps += [ "//ml:libml_for_benchmark" ]
   }
 }
 
@@ -30,6 +36,7 @@ proto_library("ml_benchmark_config_proto") {
 
 shared_library("libmlbenchmark_proto") {
   configs += [ ":target_defaults" ]
+  install_path = "lib"
   public_deps = [ ":ml_benchmark_config_proto" ]
 }
 
@@ -54,6 +61,7 @@ static_library("libmlbenchmark") {
 executable("ml_benchmark") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
+  install_path = "bin"
   deps = [ ":libmlbenchmark" ]
   pkg_deps = [ "protobuf" ]
 }
@@ -75,6 +83,7 @@ if (use.test) {
       ":ml_benchmark_test_config",
       ":target_defaults",
     ]
+    run_test = true
     deps = [
       ":libmlbenchmark",
       ":ml_benchmark_config_proto",

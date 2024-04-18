@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,7 @@
 
 #include <tuple>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 bool AmbientLightSensorInfo::operator<(
     const AmbientLightSensorInfo& rhs) const {
@@ -19,5 +18,4 @@ bool AmbientLightSensorInfo::operator==(const AmbientLightSensorInfo& o) const {
   return !(*this < o || o < *this);
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

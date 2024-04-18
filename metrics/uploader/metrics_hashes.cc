@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 #include <base/check_op.h>
 #include <base/hash/md5.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/sys_byteorder.h>
 
 namespace metrics {
@@ -34,7 +33,7 @@ uint64_t HashMetricName(const std::string& name) {
   base::MD5Digest digest;
   base::MD5Final(&digest, &context);
 
-  std::string hash_str(reinterpret_cast<char*>(digest.a), base::size(digest.a));
+  std::string hash_str(reinterpret_cast<char*>(digest.a), std::size(digest.a));
   return HashToUInt64(hash_str);
 }
 

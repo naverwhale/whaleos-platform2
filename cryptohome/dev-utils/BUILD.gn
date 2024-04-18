@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -11,54 +11,45 @@ group("all") {
   ]
 }
 
-pkg_config("cryptohome-test-tool_config") {
-  pkg_deps = [
-    "libbrillo",
-    "libchrome",
-  ]
-}
-
 executable("cryptohome-test-tool") {
   sources = [
     "../cryptohome-test-tool.cc",
     "../cryptorecovery/fake_recovery_mediator_crypto.cc",
+    "../cryptorecovery/inclusion_proof.cc",
+    "../cryptorecovery/inclusion_proof_test_util.cc",
     "../cryptorecovery/recovery_crypto_hsm_cbor_serialization.cc",
   ]
-  configs += [
-    ":cryptohome-test-tool_config",
-    "//cryptohome/libs:target_defaults",
-  ]
+  install_path = "sbin"
   libs = [ "cbor" ]
-  deps = [ "//cryptohome/libs:libcrosplatform" ]
-}
-
-pkg_config("cryptohome-tpm-live-test_config") {
-  pkg_deps = [
-    "libbrillo",
-    "libchrome",
-    "libmetrics",
-    "openssl",
-    "protobuf",
+  deps = [
+    "//cryptohome/libs:libcrosplatform",
+    "//cryptohome/libs:libcrostpm",
+    "//cryptohome/libs:libcryptohome",
   ]
 }
 
 executable("cryptohome-tpm-live-test") {
+  # TODO(b/238114321): Reuse fake/test libraries from the parent GN file instead
+  # of listing all their sources here.
   sources = [
     "../cryptohome-tpm-live-test.cc",
+    "../fake_platform.cc",
+    "../fake_platform/fake_mount_mapper.cc",
+    "../fake_platform/real_fake_mount_mapping_redirect_factory.cc",
+    "../fake_platform/test_file_path.cc",
     "../tpm_live_test.cc",
   ]
-  configs += [
-    ":cryptohome-tpm-live-test_config",
-    "//cryptohome/libs:target_defaults",
+  configs += [ "//common-mk:test" ]
+  install_path = "sbin"
+  deps = [
+    "//cryptohome/libs:libcrostpm",
+    "//cryptohome/libs:libcryptohome",
   ]
-  deps = [ "//cryptohome/libs:libcrostpm" ]
 
-  # NOSORT
   pkg_deps = [
-    # system_api depends on protobuf (or protobuf-lite). It must appear
-    # before protobuf here or the linker flags won't be in the right
-    # order.
-    "system_api",
-    "protobuf",
+    "libbrillo",
+    "libbrillo-test",
+    "libchrome",
+    "libmetrics",
   ]
 }

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,41 +9,17 @@
 
 #include <base/files/file.h>
 #include <base/time/time.h>
+#include <cryptohome/proto_bindings/UserDataAuth.pb.h>
+#include <libhwsec/error/tpm_retry_action.h>
 #include <metrics/metrics_library.h>
 
-#include "cryptohome/le_credential_manager.h"
+#include "cryptohome/auth_blocks/auth_block_type.h"
+#include "cryptohome/auth_factor/auth_factor.h"
+#include "cryptohome/data_migrator/metrics.h"
 #include "cryptohome/migration_type.h"
-#include "cryptohome/tpm.h"
-#include "cryptohome/tpm_metrics.h"
+#include "cryptohome/pinweaver_manager/le_credential_manager.h"
 
 namespace cryptohome {
-
-// List of all the possible operation types. Used to construct the correct
-// histogram while logging to UMA.
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum LECredOperationType {
-  LE_CRED_OP_RESET_TREE = 0,
-  LE_CRED_OP_INSERT = 1,
-  LE_CRED_OP_CHECK = 2,
-  LE_CRED_OP_RESET = 3,
-  LE_CRED_OP_REMOVE = 4,
-  LE_CRED_OP_SYNC = 5,
-  LE_CRED_OP_MAX
-};
-
-// List of all possible actions taken within an LE Credential operation.
-// Used to construct the correct histogram while logging to UMA.
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum LECredActionType {
-  LE_CRED_ACTION_LOAD_FROM_DISK = 0,
-  LE_CRED_ACTION_BACKEND = 1,
-  LE_CRED_ACTION_SAVE_TO_DISK = 2,
-  LE_CRED_ACTION_BACKEND_GET_LOG = 3,
-  LE_CRED_ACTION_BACKEND_REPLAY_LOG = 4,
-  LE_CRED_ACTION_MAX
-};
 
 // The derivation types used in the implementations of AuthBlock class.
 // Refer to cryptohome/docs/ for more details.
@@ -73,15 +49,21 @@ enum DerivationType : int {
   // Secret is generated on the device and later derived by Cryptohome Recovery
   // process using data stored on the device and by Recovery Mediator service.
   kCryptohomeRecovery = 6,
+  // TPM/GSC and user passkey is used to derive the wrapping keys which are
+  // sealed to PCR and ECC auth value.
+  kTpmBackedEcc = 7,
+  // Biometrics credentials are protected by a rate-limiting protocol between
+  // GSC and the biometrics auth stack. The auth stack is trusted to perform
+  // matching correctly and securely, but rate-limiting is guarded by GSC.
+  // Biometrics auth stack and GSC each provides half of the secret to derive
+  // the key.
+  kBiometrics = 8,
   kDerivationTypeNumBuckets  // Must be the last entry.
 };
 
-// This enum lists the cryptohome phases, used for reporting purposes.
-enum CryptohomePhase { kCreated, kMounted };
-
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
-enum CryptohomeError {
+enum CryptohomeErrorMetric {
   kTpmFail = 1,
   kTcsKeyLoadFailed = 2,
   kTpmDefendLockRunning = 3,
@@ -105,102 +87,51 @@ enum CryptohomeError {
   kCryptohomeErrorNumBuckets  // Must be the last entry.
 };
 
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
+// These values are used to get the right param to send to metrics
+// server. Entries should not be renumbered without a corresponding change in
+// kTimerHistogramParams.
 enum TimerType {
-  kAsyncMountTimer = 0,       // Unused.
-  kSyncMountTimer = 1,        // Unused.
-  kAsyncGuestMountTimer = 2,  // Unused.
-  kSyncGuestMountTimer = 3,   // Unused.
-  kTpmTakeOwnershipTimer = 4,
-  kPkcs11InitTimer = 5,
-  kMountExTimer = 6,
-  kDircryptoMigrationTimer = 7,
-  kDircryptoMinimalMigrationTimer = 8,
-  kOOPMountOperationTimer = 9,
-  kOOPMountCleanupTimer = 10,
-  kSessionUnlockTimer = 11,
-  kMountGuestExTimer = 12,
-  kPerformEphemeralMountTimer = 13,
-  kPerformMountTimer = 14,
+  kPkcs11InitTimer = 0,
+  kMountExTimer = 1,
+  kMountGuestExTimer = 2,
+  kPerformEphemeralMountTimer = 3,
+  kPerformMountTimer = 4,
+  kGenerateEccAuthValueTimer = 5,
+  kAuthSessionAddAuthFactorVKTimer = 6,
+  kAuthSessionAddAuthFactorUSSTimer = 7,
+  kAuthSessionAuthenticateAuthFactorVKTimer = 8,
+  kAuthSessionAuthenticateAuthFactorUSSTimer = 9,
+  kAuthSessionUpdateAuthFactorVKTimer = 10,
+  kAuthSessionUpdateAuthFactorUSSTimer = 11,
+  kAuthSessionRemoveAuthFactorVKTimer = 12,
+  kAuthSessionRemoveAuthFactorUSSTimer = 13,
+  kCreatePersistentUserTimer = 14,
+  kAuthSessionTotalLifetimeTimer = 15,
+  kAuthSessionAuthenticatedLifetimeTimer = 16,
+  kUSSPersistTimer = 17,
+  kUSSLoadPersistedTimer = 18,
+  kUSSMigrationTimer = 19,
+  kVaultSetupTimer = 20,
+  kSELinuxRelabelTimer = 21,
+  kStoreUserPolicyTimer = 22,
+  kLoadUserPolicyTimer = 23,
+  kAuthSessionReplaceAuthFactorTimer = 24,
   kNumTimerTypes  // For the number of timer types.
 };
 
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum DictionaryAttackResetStatus {
-  kResetNotNecessary = 0,
-  kResetAttemptSucceeded = 1,
-  kResetAttemptFailed = 2,
-  kDelegateNotAllowed = 3,
-  kDelegateNotAvailable = 4,
-  kCounterQueryFailed = 5,
-  kInvalidPcr0State = 6,
-  kDictionaryAttackResetStatusNumBuckets
-};
+// Struct for recording metrics on how long certain AuthSession operations take.
+struct AuthSessionPerformanceTimer {
+  TimerType type;
+  base::TimeTicks start_time;
+  std::optional<AuthBlockType> auth_block_type;
 
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum ChecksumStatus {
-  kChecksumOK = 0,
-  kChecksumDoesNotExist = 1,
-  kChecksumReadError = 2,
-  kChecksumMismatch = 3,
-  kChecksumOutOfSync = 4,
-  kChecksumStatusNumBuckets
-};
-
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum DircryptoMigrationStartStatus {
-  kMigrationStarted = 1,
-  kMigrationResumed = 2,
-  kMigrationStartStatusNumBuckets
-};
-
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum DircryptoMigrationEndStatus {
-  kNewMigrationFailedGeneric = 1,
-  kNewMigrationFinished = 2,
-  kResumedMigrationFailedGeneric = 3,
-  kResumedMigrationFinished = 4,
-  kNewMigrationFailedLowDiskSpace = 5,
-  kResumedMigrationFailedLowDiskSpace = 6,
-  // The detail of the "FileError" failures (the failed file operation,
-  // error code, and the rough classification of the failed path) will be
-  // reported in separate metrics, too. Since there's no good way to relate the
-  // multi-dimensional metric however, we treat some combinations as special
-  // cases and distinguish them here as well.
-  kNewMigrationFailedFileError = 7,
-  kResumedMigrationFailedFileError = 8,
-  kNewMigrationFailedFileErrorOpenEIO = 9,
-  kResumedMigrationFailedFileErrorOpenEIO = 10,
-  kNewMigrationCancelled = 11,
-  kResumedMigrationCancelled = 12,
-  kMigrationEndStatusNumBuckets
-};
-
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum DircryptoMigrationFailedOperationType {
-  kMigrationFailedAtOtherOperation = 1,
-  kMigrationFailedAtOpenSourceFile = 2,
-  kMigrationFailedAtOpenDestinationFile = 3,
-  kMigrationFailedAtCreateLink = 4,
-  kMigrationFailedAtDelete = 5,
-  kMigrationFailedAtGetAttribute = 6,
-  kMigrationFailedAtMkdir = 7,
-  kMigrationFailedAtReadLink = 8,
-  kMigrationFailedAtSeek = 9,
-  kMigrationFailedAtSendfile = 10,
-  kMigrationFailedAtSetAttribute = 11,
-  kMigrationFailedAtStat = 12,
-  kMigrationFailedAtSync = 13,
-  kMigrationFailedAtTruncate = 14,
-  kMigrationFailedAtOpenSourceFileNonFatal = 15,
-  kMigrationFailedAtRemoveAttribute = 16,
-  kMigrationFailedOperationTypeNumBuckets
+  explicit AuthSessionPerformanceTimer(TimerType init_type)
+      : type(init_type), start_time(base::TimeTicks::Now()) {}
+  AuthSessionPerformanceTimer(TimerType init_type,
+                              AuthBlockType init_auth_block_type)
+      : type(init_type),
+        start_time(base::TimeTicks::Now()),
+        auth_block_type(init_auth_block_type) {}
 };
 
 // These values are persisted to logs. Entries should not be renumbered and
@@ -236,6 +167,23 @@ enum class DiskCleanupProgress {
   kWholeUserProfilesCleanedAboveTarget = 7,
   kWholeUserProfilesCleaned = 8,
   kNoUnmountedCryptohomes = 9,
+  kCacheVaultsCleanedAboveTarget = 10,
+  kCacheVaultsCleanedAboveMinimum = 11,
+  kSomeEphemeralUserProfilesCleanedAboveTarget = 12,
+  kSomeEphemeralUserProfilesCleaned = 13,
+  kDaemonStoreCacheCleanedAboveTarget = 14,
+  kDaemonStoreCacheCleanedAboveMinimum = 15,
+  kDaemonStoreCacheMountedUsersCleanedAboveTarget = 16,
+  kDaemonStoreCacheMountedUsersCleanedAboveMinimum = 17,
+  kNumBuckets
+};
+
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class LoginDiskCleanupProgress {
+  kWholeUserProfilesCleanedAboveTarget = 1,
+  kWholeUserProfilesCleaned = 2,
+  kNoUnmountedCryptohomes = 3,
   kNumBuckets
 };
 
@@ -246,129 +194,6 @@ enum class DiskCleanupResult {
   kDiskCleanupError = 2,
   kDiskCleanupSkip = 3,
   kNumBuckets
-};
-
-// Add new deprecated function event here.
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-// Note: All updates here must also update Chrome's enums.xml database.
-// Please see this document for more details:
-// https://chromium.googlesource.com/chromium/src/+/HEAD/tools/metrics/histograms/
-//
-// You can view them live here:
-// https://uma.googleplex.com/histograms/?histograms=Platform.Cryptohome.DeprecatedApiCalled
-enum class DeprecatedApiEvent {
-  kInitializeCastKey = 0,
-  kGetBootAttribute = 1,
-  kSetBootAttribute = 2,
-  kFlushAndSignBootAttributes = 3,
-  kSignBootLockbox = 4,
-  kVerifyBootLockbox = 5,
-  kFinalizeBootLockbox = 6,
-  kTpmIsBeingOwned = 7,
-  kProxyIsMounted = 8,
-  kProxyIsMountedForUser = 9,
-  kProxyListKeysEx = 10,
-  kProxyCheckKeyEx = 11,
-  kProxyRemoveKeyEx = 12,
-  kProxyMassRemoveKeys = 13,
-  kProxyGetKeyDataEx = 14,
-  kProxyMigrateKeyEx = 15,
-  kProxyAddKeyEx = 16,
-  kProxyAddDataRestoreKey = 17,
-  kProxyRemoveEx = 18,
-  kProxyGetSystemSalt = 19,
-  kProxyGetSanitizedUsername = 20,
-  kProxyMountEx = 21,
-  kProxyMountGuestEx = 22,
-  kProxyRenameCryptohome = 23,
-  kProxyGetAccountDiskUsage = 24,
-  kProxyUnmountEx = 25,
-  kProxyUpdateCurrentUserActivityTimestamp = 26,
-  kProxyTpmIsReady = 27,
-  kProxyTpmIsEnabled = 28,
-  kProxyTpmGetPassword = 29,
-  kProxyTpmIsOwned = 30,
-  kProxyTpmIsBeingOwned = 31,
-  kProxyTpmCanAttemptOwnership = 32,
-  kProxyTpmClearStoredPassword = 33,
-  kProxyTpmIsAttestationPrepared = 34,
-  kProxyTpmAttestationGetEnrollmentPreparationsEx = 35,
-  kProxyTpmVerifyAttestationData = 36,
-  kProxyTpmVerifyEK = 37,
-  kProxyTpmAttestationCreateEnrollRequest = 38,
-  kProxyAsyncTpmAttestationCreateEnrollRequest = 39,
-  kProxyTpmAttestationEnroll = 40,
-  kProxyAsyncTpmAttestationEnroll = 41,
-  kProxyTpmAttestationEnrollEx = 42,
-  kProxyAsyncTpmAttestationEnrollEx = 43,
-  kProxyTpmAttestationCreateCertRequest = 44,
-  kProxyAsyncTpmAttestationCreateCertRequest = 45,
-  kProxyTpmAttestationFinishCertRequest = 46,
-  kProxyAsyncTpmAttestationFinishCertRequest = 47,
-  kProxyTpmAttestationGetCertificateEx = 48,
-  kProxyAsyncTpmAttestationGetCertificateEx = 49,
-  kProxyTpmIsAttestationEnrolled = 50,
-  kProxyTpmAttestationDoesKeyExist = 51,
-  kProxyTpmAttestationGetCertificate = 52,
-  kProxyTpmAttestationGetPublicKey = 53,
-  kProxyTpmAttestationGetEnrollmentId = 54,
-  kProxyTpmAttestationRegisterKey = 55,
-  kProxyTpmAttestationSignEnterpriseChallenge = 56,
-  kProxyTpmAttestationSignEnterpriseVaChallenge = 57,
-  kProxyTpmAttestationSignEnterpriseVaChallengeV2 = 58,
-  kProxyTpmAttestationSignSimpleChallenge = 59,
-  kProxyTpmAttestationGetKeyPayload = 60,
-  kProxyTpmAttestationSetKeyPayload = 61,
-  kProxyTpmAttestationDeleteKeys = 62,
-  kProxyTpmAttestationDeleteKey = 63,
-  kProxyTpmAttestationGetEK = 64,
-  kProxyTpmAttestationResetIdentity = 65,
-  kProxyTpmGetVersionStructured = 66,
-  kProxyPkcs11IsTpmTokenReady = 67,
-  kProxyPkcs11GetTpmTokenInfo = 68,
-  kProxyPkcs11GetTpmTokenInfoForUser = 69,
-  kProxyPkcs11Terminate = 70,
-  kProxyGetStatusString = 71,
-  kProxyInstallAttributesGet = 72,
-  kProxyInstallAttributesSet = 73,
-  kProxyInstallAttributesCount = 74,
-  kProxyInstallAttributesFinalize = 75,
-  kProxyInstallAttributesIsReady = 76,
-  kProxyInstallAttributesIsSecure = 77,
-  kProxyInstallAttributesIsInvalid = 78,
-  kProxyInstallAttributesIsFirstInstall = 79,
-  kProxySignBootLockbox = 80,
-  kProxyVerifyBootLockbox = 81,
-  kProxyFinalizeBootLockbox = 82,
-  kProxyGetBootAttribute = 83,
-  kProxySetBootAttribute = 84,
-  kProxyFlushAndSignBootAttributes = 85,
-  kProxyGetLoginStatus = 86,
-  kProxyGetTpmStatus = 87,
-  kProxyGetEndorsementInfo = 88,
-  kProxyInitializeCastKey = 89,
-  kProxyStartFingerprintAuthSession = 90,
-  kProxyEndFingerprintAuthSession = 91,
-  kProxyGetWebAuthnSecret = 92,
-  kProxyGetFirmwareManagementParameters = 93,
-  kProxySetFirmwareManagementParameters = 94,
-  kProxyRemoveFirmwareManagementParameters = 95,
-  kProxyMigrateToDircrypto = 96,
-  kProxyNeedsDircryptoMigration = 97,
-  kProxyGetSupportedKeyPolicies = 98,
-  kProxyIsQuotaSupported = 99,
-  kProxyGetCurrentSpaceForUid = 100,
-  kProxyGetCurrentSpaceForGid = 101,
-  kProxyGetCurrentSpaceForProjectId = 102,
-  kProxySetProjectId = 103,
-  kProxyLockToSingleUserMountUntilReboot = 104,
-  kProxyGetRsuDeviceId = 105,
-  kProxyCheckHealth = 106,
-  kProxyStartAuthSession = 107,
-  kProxyAuthenticateAuthSession = 108,
-  kProxyAddCredentials = 109,
-  kMaxValue
 };
 
 // List of the possible results of attempting a mount operation using the
@@ -396,58 +221,74 @@ enum class OOPMountCleanupResult {
   kMaxValue = kFailedToKill
 };
 
-// List of generic results of attestation-related operations. These entries
-// should not be renumbered and numeric values should never be reused.
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum class AttestationOpsStatus {
+// List of possible results from migrating the files at ~/MyFiles to
+// ~/MyFiles/Downloads. These values are persisted to logs. Entries should not
+// be renumbered and numeric values should never be reused.
+enum class DownloadsBindMountMigrationStatus {
   kSuccess = 0,
-  kFailure = 1,
-  kInvalidPcr0Value = 2,
-  kMaxValue
+  kSettingMigratedPreviouslyFailed = 1,
+  kUpdatingXattrFailed = 2,
+  kCleanupFailed = 3,
+  kBackupFailed = 4,
+  kRestoreFailed = 5,
+  kFailedMovingToMyFiles = 6,
+  kFailedSettingMigratedXattr = 7,
+  kMaxValue = kFailedMovingToMyFiles
 };
 
-// List of all the possible auth block types. Used to construct the correct
-// histogram while logging to UMA.
+// Constants related to LE Credential UMA logging.
+inline constexpr char kLEOpResetTree[] = ".ResetTree";
+inline constexpr char kLEOpInsert[] = ".Insert";
+inline constexpr char kLEOpInsertRateLimiter[] = ".InsertRateLimiter";
+inline constexpr char kLEOpCheck[] = ".Check";
+inline constexpr char kLEOpReset[] = ".Reset";
+inline constexpr char kLEOpRemove[] = ".Remove";
+inline constexpr char kLEOpStartBiometricsAuth[] = ".StartBiometricsAuth";
+inline constexpr char kLEOpSync[] = ".Sync";
+inline constexpr char kLEOpGetDelayInSeconds[] = ".GetDelayInSeconds";
+inline constexpr char kLEOpGetExpirationInSeconds[] = ".GetExpirationInSeconds";
+inline constexpr char kLEOpGetDelaySchedule[] = ".GetDelaySchedule";
+inline constexpr char kLEOpReplay[] = ".Replay";
+inline constexpr char kLEOpReplayResetTree[] = ".ReplayResetTree";
+inline constexpr char kLEOpReplayInsert[] = ".ReplayInsert";
+inline constexpr char kLEOpReplayCheck[] = ".ReplayCheck";
+inline constexpr char kLEOpReplayRemove[] = ".ReplayRemove";
+inline constexpr char kLEActionLoadFromDisk[] = ".LoadFromDisk";
+inline constexpr char kLEActionBackend[] = ".Backend";
+inline constexpr char kLEActionSaveToDisk[] = ".SaveToDisk";
+inline constexpr char kLEActionBackendGetLog[] = ".BackendGetLog";
+inline constexpr char kLEActionBackendReplayLog[] = ".BackendReplayLog";
+inline constexpr char kLEActionBackendReplayLogForFullReplay[] =
+    ".BackendReplayLogForFullReplay";
+inline constexpr char kLEActionBackendRecoverInsert[] = ".BackendRecoverInsert";
+inline constexpr char kLEReplayTypeNormal[] = ".Normal";
+inline constexpr char kLEReplayTypeFull[] = ".Full";
+
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
-enum class AuthBlockType {
-  kPinWeaver = 0,
-  kChallengeCredential = 1,
-  kDoubleWrappedCompat = 2,
-  kTpmBoundToPcr = 3,
-  kTpmNotBoundToPcr = 4,
-  kLibScryptCompat = 5,
+enum class LEReplayError {
+  kSuccess = 0,
+  kInvalidLogEntry = 1,
+  kOperationError = 2,
+  kHashMismatch = 3,
+  kRemoveInsertedCredentialsError = 4,
   kMaxValue,
 };
 
-// Just to make sure I count correctly.
-static_assert(static_cast<int>(DeprecatedApiEvent::kMaxValue) == 110,
-              "DeprecatedApiEvent Enum miscounted");
-
-// Cros events emitted by cryptohome.
-const char kAttestationOriginSpecificIdentifiersExhausted[] =
-    "Attestation.OriginSpecificExhausted";
-const char kCryptohomeDoubleMount[] = "Cryptohome.DoubleMountRequest";
-
-// Constants related to LE Credential UMA logging.
-constexpr char kLEOpResetTree[] = ".ResetTree";
-constexpr char kLEOpInsert[] = ".Insert";
-constexpr char kLEOpCheck[] = ".Check";
-constexpr char kLEOpReset[] = ".Reset";
-constexpr char kLEOpRemove[] = ".Remove";
-constexpr char kLEOpSync[] = ".Sync";
-constexpr char kLEActionLoadFromDisk[] = ".LoadFromDisk";
-constexpr char kLEActionBackend[] = ".Backend";
-constexpr char kLEActionSaveToDisk[] = ".SaveToDisk";
-constexpr char kLEActionBackendGetLog[] = ".BackendGetLog";
-constexpr char kLEActionBackendReplayLog[] = ".BackendReplayLog";
-
-// Attestation-related operations. Those are suffixes of the histogram
-// kAttestationStatusHistogramPrefix defined in the .cc file.
-constexpr char kAttestationDecryptDatabase[] = "DecryptDatabase";
-constexpr char kAttestationMigrateDatabase[] = "MigrateDatabase";
-constexpr char kAttestationPrepareForEnrollment[] = "PrepareForEnrollment";
+// Various counts for ReportVaultKeysetMetrics.
+struct VaultKeysetMetrics {
+  int missing_key_data_count = 0;
+  int empty_label_count = 0;
+  int empty_label_le_cred_count = 0;
+  int le_cred_count = 0;
+  int untyped_count = 0;
+  int password_count = 0;
+  int smart_unlock_count = 0;
+  int smartcard_count = 0;
+  int fingerprint_count = 0;
+  int kiosk_count = 0;
+  int unclassified_count = 0;
+};
 
 // List of all the legacy code paths' usage we are tracking. This will enable us
 // to further clean up the code in the future, should any of these code paths
@@ -464,6 +305,98 @@ enum class LegacyCodePathLocation {
   kMaxValue = kGenerateResetSeedDuringAddKey
 };
 
+inline constexpr char kCryptohomeErrorPrefix[] = "Cryptohome";
+inline constexpr char kCryptohomeErrorHashedStackSuffix[] = "HashedStack";
+inline constexpr char kCryptohomeErrorLeafWithTPMSuffix[] = "LeafErrorWithTPM";
+inline constexpr char kCryptohomeErrorDevCheckUnexpectedStateSuffix[] =
+    "DevUnexpectedState";
+inline constexpr char kCryptohomeErrorAllLocationsSuffix[] = "AllLocations";
+inline constexpr char kCryptohomeErrorUssMigrationErrorBucket[] =
+    "UssMigrationError";
+inline constexpr char kCryptohomeErrorRecreateAuthFactorErrorBucket[] =
+    "RecreateAuthFactorError";
+inline constexpr char kCryptohomeErrorPrepareAuthFactorErrorBucket[] =
+    "PrepareAuthFactorError";
+inline constexpr char kCryptohomeErrorAddAuthFactorErrorBucket[] =
+    "AddAuthFactorError";
+inline constexpr char kCryptohomeErrorAuthenticateAuthFactorErrorBucket[] =
+    "AuthenticateAuthFactorError";
+inline constexpr char kCryptohomeErrorRemoveAuthFactorErrorBucket[] =
+    "RemoveAuthFactorError";
+
+// List of possible results of fetching the USS experiment config. If fetching
+// failed, the status is kFetchError. If parsing failed, the status is
+// kParseError.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class FetchUssExperimentConfigStatus {
+  kEnabled = 0,
+  kDisabled = 1,
+  // kError = 2, // no longer used, separated into kFetchError and kParseError
+  kFetchError = 3,
+  kParseError = 4,
+  kNoReleaseTrack = 5,
+  kMaxValue,
+};
+
+// List of possible results when AuthSession checks whether USS experiment
+// should be enabled. This reports the normal case, which is the flag set by the
+// config fetcher. If the enable/disable behavior is overridden this will not be
+// reported. kNotFound means that the config fetching failed or haven't
+// completed by the time AuthSession checks the flag.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class UssExperimentFlag {
+  kEnabled = 0,
+  kDisabled = 1,
+  kNotFound = 2,
+  kMaxValue,
+};
+
+// List of possible auth factor backing store configurations that a user can
+// have. This is determined by whether a user's factors are stored in vault
+// keysets or the USS.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class AuthFactorBackingStoreConfig {
+  kEmpty = 0,            // User has no auth factors.
+  kVaultKeyset = 1,      // All factors are stored in vault keysets.
+  kUserSecretStash = 2,  // All factors are stored in the user secret stash.
+  kMixed = 3,            // Factors are stoed in a mix of backings stores.
+  kMaxValue = kMixed,
+};
+
+// List of errors from migrating a vault keyset to USS (or success=0). This enum
+// should be updated with any new errors that can occur, along with enums.xml.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class VkToUssMigrationStatus {
+  kSuccess = 0,                      // Migration succeeded with no errors.
+  kFailedPersist = 1,                // Migration failed when persisting to USS.
+  kFailedInput = 2,                  // Unable to construct an AuthInput.
+  kFailedUssCreation = 3,            // Unable to construct USS.
+  kFailedAddingMigrationSecret = 4,  // Unable to construct a migration secret.
+  kFailedUssDecrypt = 5,             // Unable to decrypt USS.
+  kFailedRecordingMigrated = 6,      // Unable to store migrated state.
+  kMaxValue = kFailedRecordingMigrated,
+};
+
+// List of possible results of attempting to cleanup a backup keyset for a user
+// with mixed USS-VaultKeyset(VK) configuration. Mixed configuration is expected
+// to happen with PIN and password factors and enum values are defined based on
+// this.
+enum class BackupKeysetCleanupResult {
+  kRemovedBackupPassword = 0,      // Removal of password backup VK succeeded.
+  kRemovedBackupPin = 1,           // Removal of PIN backup VK succeeded.
+  kRemovedBackupOtherType = 2,     // Removal of other type backup VK succeeded.
+  kAddResetSecretFailed = 3,       // Adding reset_secret to USS failed.
+  kGetValidKeysetFailed = 4,       // Decrypt or load of backup VK failed.
+  kRemoveFileFailedPin = 5,        // Remove file failed for password type.
+  kRemoveFileFailedPassword = 6,   // Remove file failed for PIN type.
+  kRemoveFileFailedOtherType = 7,  // Remove file failed for other factor type.
+  kMaxValue = kRemoveFileFailedOtherType,
+};
+
 // Initializes cryptohome metrics. If this is not called, all calls to Report*
 // will have no effect.
 void InitializeMetrics();
@@ -478,20 +411,8 @@ void OverrideMetricsLibraryForTesting(MetricsLibraryInterface* lib);
 // used with OverrideMetricsLibraryForTesting().
 void ClearMetricsLibraryForTesting();
 
-// The |derivation_type| value is reported to the
-// "Cryptohome.WrappingKeyDerivation.[Create]/[Mount]" histograms.
-// Reported to:
-// *.Create - when the cryptohome is being created &
-//            when the new wrapping keys are generated for the cryptohome
-// *.Mount  - when the cryptohome is being mounted
-void ReportWrappingKeyDerivationType(DerivationType derivation_type,
-                                     CryptohomePhase crypto_phase);
-
 // The |error| value is reported to the "Cryptohome.Errors" enum histogram.
-void ReportCryptohomeError(CryptohomeError error);
-
-// The |result| value is reported to the "Cryptohome.TpmResults" enum histogram.
-void ReportTpmResult(TpmResult result);
+void ReportCryptohomeError(CryptohomeErrorMetric error);
 
 // Cros events are translated to an enum and reported to the generic
 // "Platform.CrOSEvent" enum histogram. The |event| string must be registered in
@@ -505,15 +426,19 @@ void ReportTimerStart(TimerType timer_type);
 // "Cryptohome.TimeTo*" histograms.
 void ReportTimerStop(TimerType timer_type);
 
-// Reports a status value on the "Platform.TPM.DictionaryAttackResetStatus"
-// histogram.
-void ReportDictionaryAttackResetStatus(DictionaryAttackResetStatus status);
+// Reports a timer length in milliseconds, duration is calculated by the time it
+// is called minus the start_time of the reported timer.
+void ReportTimerDuration(
+    const AuthSessionPerformanceTimer* auth_session_performance_timer);
 
-// Reports a dictionary attack counter value to the
-// "Platform.TPM.DictionaryAttackCounter" histogram.
-void ReportDictionaryAttackCounter(int counter);
+void ReportTimerDuration(const TimerType& timer_type,
+                         base::TimeTicks start_time,
+                         const std::string& parameter_string);
 
-void ReportChecksum(ChecksumStatus status);
+// Reports the result of credentials revocation for `auth_block_type` to the
+// "Cryptohome.{AuthBlockType}.CredentialRevocationResult" histogram.
+void ReportRevokeCredentialResult(AuthBlockType auth_block_type,
+                                  hwsec::TPMRetryAction result);
 
 // Reports number of deleted user profiles to the
 // "Cryptohome.DeletedUserProfiles" histogram.
@@ -524,7 +449,7 @@ void ReportDeletedUserProfiles(int user_profile_count);
 void ReportFreeDiskSpaceTotalTime(int ms);
 
 // Reports total space freed by HomeDirs::FreeDiskSpace (in MiB) to
-// the "Cryptohome.FreeDiskSpaceTotalTime" histogram.
+// the "Cryptohome.FreeDiskSpaceTotalFreedInMb" histogram.
 void ReportFreeDiskSpaceTotalFreedInMb(int mb);
 
 // Reports the time between HomeDirs::FreeDiskSpace cleanup calls (seconds) to
@@ -532,51 +457,28 @@ void ReportFreeDiskSpaceTotalFreedInMb(int mb);
 void ReportTimeBetweenFreeDiskSpace(int s);
 
 // Reports removed GCache size by cryptohome to the
-// "Cryptohome.FreedGCacheDiskSpaceInMb" histogram.
+// "Cryptohome.GCache.FreedDiskSpaceInMb" histogram.
 void ReportFreedGCacheDiskSpaceInMb(int mb);
 
-// The |status| value is reported to the
-// "Cryptohome.DircryptoMigrationStartStatus" (full migration)
-// or the "Cryptohome.DircryptoMinimalMigrationStartStatus" (minimal migration)
-// enum histogram.
-void ReportDircryptoMigrationStartStatus(MigrationType migration_type,
-                                         DircryptoMigrationStartStatus status);
+// Reports removed Daemon Store Cache size by cryptohome to the
+// "Cryptohome.FreedDaemonStoreCacheDiskSpaceInMb" histogram.
+void ReportFreedDaemonStoreCacheDiskSpaceInMb(int mb);
 
-// The |status| value is reported to the
-// "Cryptohome.DircryptoMigrationEndStatus" (full migration)
-// or the "Cryptohome.DircryptoMinimalMigrationEndStatus" (minimal migration)
-// enum histogram.
-void ReportDircryptoMigrationEndStatus(MigrationType migration_type,
-                                       DircryptoMigrationEndStatus status);
+// Reports removed Daemon Store Cache size by cryptohome for mounted users to
+// the "Cryptohome.FreedDaemonStoreCacheMountedUsersDiskSpaceInMb" histogram.
+void ReportFreedDaemonStoreCacheMountedUsersDiskSpaceInMb(int mb);
 
-// The |error_code| value is reported to the
-// "Cryptohome.DircryptoMigrationFailedErrorCode"
-// enum histogram.
-void ReportDircryptoMigrationFailedErrorCode(base::File::Error error_code);
+// Reports removed Cache Vault size by cryptohome to the
+// "Cryptohome.FreedCacheVaultDiskSpaceInMb" histogram.
+void ReportFreedCacheVaultDiskSpaceInMb(int mb);
 
-// The |type| value is reported to the
-// "Cryptohome.DircryptoMigrationFailedOperationType"
-// enum histogram.
-void ReportDircryptoMigrationFailedOperationType(
-    DircryptoMigrationFailedOperationType type);
+// Reports total time taken by HomeDirs::FreeDiskSpaceDuringLogin cleanup
+// (milliseconds) to the "Cryptohome.LoginDiskCleanupTotalTime" histogram.
+void ReportLoginDiskCleanupTotalTime(int ms);
 
-// The |alerts| data set is reported to the
-// "Platform.TPM.HardwareAlerts" enum histogram.
-void ReportAlertsData(const Tpm::AlertsData& alerts);
-
-// The |type| value is reported to the
-// "Cryptohome.DircryptoMigrationFailedPathType"
-// enum histogram.
-void ReportDircryptoMigrationFailedPathType(
-    DircryptoMigrationFailedPathType type);
-
-// Reports the total byte count in MB to migrate to the
-// "Cryptohome.DircryptoMigrationTotalByteCountInMb" histogram.
-void ReportDircryptoMigrationTotalByteCountInMb(int total_byte_count_mb);
-
-// Reports the total file count to migrate to the
-// "Cryptohome.DircryptoMigrationTotalFileCount" histogram.
-void ReportDircryptoMigrationTotalFileCount(int total_file_count);
+// Reports total space freed by HomeDirs::FreeDiskSpaceDuringLogin (in MiB) to
+// the "Cryptohome.FreeDiskSpaceDuringLoginTotalFreedInMb" histogram.
+void ReportFreeDiskSpaceDuringLoginTotalFreedInMb(int mb);
 
 // Reports which topmost priority was reached to fulfill a cleanup request
 // to the "Cryptohome.DiskCleanupProgress" enum histogram.
@@ -586,9 +488,24 @@ void ReportDiskCleanupProgress(DiskCleanupProgress progress);
 // "Cryptohome.DiskCleanupResult" enum histogram.
 void ReportDiskCleanupResult(DiskCleanupResult result);
 
+// Reports which topmost priority was reached to fulfill a cleanup request
+// to the "Cryptohome.LoginDiskCleanupProgress" enum histogram.
+void ReportLoginDiskCleanupProgress(LoginDiskCleanupProgress progress);
+
+// Report if the automatic disk cleanup encountered an error to the
+// "Cryptohome.LoginDiskCleanupResult" enum histogram.
+void ReportLoginDiskCleanupResult(DiskCleanupResult result);
+
+// Report the amount of free space available during login to the
+// "Cryptohome.LoginDiskCleanupAvailableSpace" enum histogram.
+void ReportLoginDiskCleanupAvailableSpace(int64_t space);
+
 // The |type| value is reported to the "Cryptohome.HomedirEncryptionType" enum
 // histogram.
 void ReportHomedirEncryptionType(HomedirEncryptionType type);
+
+// Reports the number of user directories present in the system.
+void ReportNumUserHomeDirectories(int num_users);
 
 // Reports the result of a Low Entropy (LE) Credential operation to the relevant
 // LE Credential histogram.
@@ -603,31 +520,13 @@ void ReportLESyncOutcome(LECredError result);
 // entries", reported when none of the log entries matches the root hash.
 void ReportLELogReplayEntryCount(size_t entry_count);
 
-// Reports the free space in MB when the migration fails and what the free space
-// was initially when the migration was started.
-void ReportDircryptoMigrationFailedNoSpace(int initial_migration_free_space_mb,
-                                           int failure_free_space_mb);
-
-// Reports the total size in bytes of the current xattrs already set on a file
-// and the xattr that caused the setxattr call to fail.
-void ReportDircryptoMigrationFailedNoSpaceXattrSizeInBytes(
-    int total_xattr_size_bytes);
-
-// Reports the total running time of a dbus request.
-void ReportAsyncDbusRequestTotalTime(std::string task_name,
-                                     base::TimeDelta running_time);
-
-// Reports the total in-queue time of mount thread of a dbus request
-void ReportAsyncDbusRequestInqueueTime(std::string task_name,
-                                       base::TimeDelta running_time);
-
-// Reports the amount of total tasks waiting in the queue of mount thread.
-void ReportParallelTasks(int amount_of_task);
-
-// Reports when a deprecated function that is exposed on the DBus is called.
-// This is used to determine which deprecated function is truly dead code,
-// and removing it will not trigger side effects.
-void ReportDeprecatedApiCalled(DeprecatedApiEvent event);
+// Reports the log entries replay result. We didn't reuse the LECredError here
+// because the error possibilities are quite different. We separate the
+// results between a normal replay and a full replay because the error
+// distribution in a full replay might be very different (since we're just doing
+// a best-effort attempt hoping that we are only 1 entry behind the first log
+// entry).
+void ReportLEReplayResult(bool is_full_replay, LEReplayError result);
 
 // Reports the result of an out-of-process mount operation.
 void ReportOOPMountOperationResult(OOPMountOperationResult result);
@@ -635,14 +534,10 @@ void ReportOOPMountOperationResult(OOPMountOperationResult result);
 // Reports the result of an out-of-process cleanup operation.
 void ReportOOPMountCleanupResult(OOPMountCleanupResult result);
 
-// Reports the result of attestation-related operations. |operation| should be
-// one of the suffixes of the histogram kAttestationStatusHistogramPrefix listed
-// above.
-void ReportAttestationOpsStatus(const std::string& operation,
-                                AttestationOpsStatus status);
-
-// Reports the result of an InvalidateDirCryptoKey operation.
-void ReportInvalidateDirCryptoKeyResult(bool result);
+// Reports the result of PrepareForRemoval() for `auth_block_type`
+// to the "Cryptohome.{AuthBlockType}.PrepareForRemovalResult" histogram.
+void ReportPrepareForRemovalResult(AuthBlockType auth_block_type,
+                                   CryptoError result);
 
 // Reports the result of a RestoreSELinuxContexts operation for /home/.shadow.
 void ReportRestoreSELinuxContextResultForShadowDir(bool success);
@@ -657,15 +552,82 @@ void ReportCreateAuthBlock(AuthBlockType type);
 // Reports which kinds of auth block we are used to derive.
 void ReportDeriveAuthBlock(AuthBlockType type);
 
-// Reports whether the existing user subdirectory under the home mount has the
-// correct group. This is a temporary metric to diagnose an issue where this
-// directory is not owned by group chronos-access.
-// TODO(crbug.com/1205308): Remove once the root cause is fixed and we stop
-// seeing cases where this directory has the wrong group owner.
-void ReportUserSubdirHasCorrectGroup(bool correct);
+// Reports which kinds of auth block we are used to select auth factor.
+void ReportSelectFactorAuthBlock(AuthBlockType type);
 
 // Reports which code paths are being used today and performing what actions.
 void ReportUsageOfLegacyCodePath(LegacyCodePathLocation location, bool result);
+
+// Reports certain metrics around VaultKeyset such as the number of empty
+// labels, the number of smart unlock keys, number of password keys with and
+// without KeyProviderData, and the number of labeled/label-less PIN
+// VaultKeysets.
+void ReportVaultKeysetMetrics(const VaultKeysetMetrics& keyset_metrics);
+
+// Reports number of files that exist in ~/MyFiles/Downloads prior to migrating
+// and bind mounting. This only records the top-level items but does not record
+// items in sub-directories.
+void ReportMaskedDownloadsItems(int num_items);
+
+// Reports the overall status after attempting to migrate a user's ~/Downloads
+// to ~/MyFiles/Downloads.
+void ReportDownloadsBindMountMigrationStatus(
+    DownloadsBindMountMigrationStatus status);
+
+// Cryptohome Error Reporting related UMAs
+
+// Reports the full error id's hash when an error occurred.
+void ReportCryptohomeErrorHashedStack(std::string error_bucket_name,
+                                      const uint32_t hashed);
+
+// Reports the leaf node and TPM error when an error occurred.
+void ReportCryptohomeErrorLeafWithTPM(std::string error_bucket_name,
+                                      const uint32_t mixed);
+
+// Reports the error location when kDevCheckUnexpectedState happened.
+void ReportCryptohomeErrorDevCheckUnexpectedState(std::string error_bucket_name,
+                                                  const uint32_t loc);
+
+// Reports a node in the error ID. This will be called multiple times for
+// an error ID with multiple nodes.
+void ReportCryptohomeErrorAllLocations(std::string error_bucket_name,
+                                       const uint32_t loc);
+
+// Call this to disable all CryptohomeError related metrics reporting. This is
+// for situations in which we generate too many possible values in
+// CryptohomeError related reporting.
+void DisableErrorMetricsReporting();
+
+// Reports the result of fetching the USS experiment config.
+void ReportFetchUssExperimentConfigStatus(
+    FetchUssExperimentConfigStatus status);
+
+// Reports the number of retries when fetching the USS experiment config.
+void ReportFetchUssExperimentConfigRetries(int retries);
+
+// Reports the result of reading the USS experiment flag.
+void ReportUssExperimentFlag(UssExperimentFlag flag);
+
+// Reports the current state of the auth factor backing stores.
+void ReportAuthFactorBackingStoreConfig(AuthFactorBackingStoreConfig config);
+
+// Reports the result of an (attempted) migration of a keyset to USS.
+void ReportVkToUssMigrationStatus(VkToUssMigrationStatus status);
+
+// Reports the result of the backup VaultKeyset cleanup for users with
+// semi-migrated users, i.e users with mixed USS-VaultKeyset configuration.
+void ReportBackupKeysetCleanupResult(BackupKeysetCleanupResult status);
+void ReportBackupKeysetCleanupSucessWithType(AuthFactorType auth_factor_type);
+void ReportBackupKeysetCleanupFileFailureWithType(
+    AuthFactorType auth_factor_type);
+
+// Reports the emitted fingerprint enroll signal.
+void ReportFingerprintEnrollSignal(
+    user_data_auth::FingerprintScanResult scan_result);
+
+// Reports the emitted fingerprint auth signal.
+void ReportFingerprintAuthSignal(
+    user_data_auth::FingerprintScanResult scan_result);
 
 // Initialization helper.
 class ScopedMetricsInitializer {

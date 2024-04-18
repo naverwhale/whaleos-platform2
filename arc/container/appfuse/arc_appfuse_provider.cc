@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,8 @@
 
 #include <base/check.h>
 #include <base/command_line.h>
+#include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <brillo/daemons/dbus_daemon.h>
 #include <brillo/syslog_logging.h>
@@ -50,16 +50,16 @@ class DBusAdaptor : public org::chromium::ArcAppfuseProviderAdaptor,
   ~DBusAdaptor() override = default;
 
   void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb) {
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb) {
     RegisterWithDBusObject(&dbus_object_);
-    dbus_object_.RegisterAsync(cb);
+    dbus_object_.RegisterAsync(std::move(cb));
   }
 
   // org::chromium::ArcAppfuseProviderInterface overrides:
   bool Mount(brillo::ErrorPtr* error,
              uint32_t uid,
              int32_t mount_id,
-             brillo::dbus_utils::FileDescriptor* out_fd) override {
+             base::ScopedFD* out_fd) override {
     // Remove existing mount.
     auto it = mounts_.find(std::make_pair(uid, mount_id));
     if (it != mounts_.end()) {
@@ -110,7 +110,7 @@ class DBusAdaptor : public org::chromium::ArcAppfuseProviderAdaptor,
                 int32_t mount_id,
                 int32_t file_id,
                 int32_t flags,
-                brillo::dbus_utils::FileDescriptor* out_fd) override {
+                base::ScopedFD* out_fd) override {
     auto it = mounts_.find(std::make_pair(uid, mount_id));
     if (it == mounts_.end()) {
       LOG(ERROR) << "No mount found: " << uid << " " << mount_id;

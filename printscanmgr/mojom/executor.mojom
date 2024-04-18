@@ -1,0 +1,22 @@
+// Copyright 2023 The ChromiumOS Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// API exposed by printscanmgr's root-level executor. The only client is the
+// sandboxed printscanmgr daemon when it needs to perform a high-privilege
+// operation.
+
+module printscanmgr.mojom;
+
+// Enumeration of the upstart jobs that the executor can control.
+enum UpstartJob {
+  kCupsd = 0,
+};
+
+interface Executor {
+  // Requests that the init daemon restart `job`. If `success` is false, then
+  // `errorMsg` contains details about the failure. Note that if `job` is not
+  // running, this method will report success and leave `job` in its previous
+  // state.
+  RestartUpstartJob(UpstartJob job) => (bool success, string errorMsg);
+};

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,27 +12,25 @@
 
 #include <base/files/file_path.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/macros.h>
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
-#include "diagnostics/common/file_test_utils.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/system_files_service.h"
+#include "diagnostics/wilco_dtc_supportd/utils/file_test_utils.h"
 
 using testing::AnyOf;
 using testing::StrEq;
 
+namespace diagnostics {
+namespace wilco {
 namespace {
+
 std::string FakeFileContents() {
   constexpr char kFakeFileContents[] = "test1 \0 Œ test2/test3 \0 Ö";
 
   return std::string(std::begin(kFakeFileContents),
                      std::end(kFakeFileContents));
 }
-}  // namespace
-
-namespace diagnostics {
-
 // Tests for SystemFilesService
 class SystemFilesServiceTest : public testing::Test {
  public:
@@ -499,4 +497,6 @@ INSTANTIATE_TEST_SUITE_P(
                     std::make_tuple(SystemFilesService::VpdField::kUuid,
                                     "run/wilco_dtc/vpd_fields/uuid_id")));
 
+}  // namespace
+}  // namespace wilco
 }  // namespace diagnostics

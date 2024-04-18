@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -8,10 +8,10 @@
 
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/posix/safe_strerror.h>
 #include <mojo/public/cpp/system/platform_handle.h>
 #include <drm_fourcc.h>
@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 
 #include "camera/mojo/camera3.mojom.h"
+#include "common/camera_hal3_helpers.h"
 #include "common/libcamera_connector/camera_metadata_utils.h"
 #include "common/libcamera_connector/supported_formats.h"
 #include "cros-camera/common.h"
@@ -32,9 +33,7 @@ CameraClientOps::CameraClientOps() : camera3_callback_ops_(this) {}
 
 mojo::PendingReceiver<mojom::Camera3DeviceOps> CameraClientOps::Init(
     uint32_t device_api_version, CaptureResultCallback result_callback) {
-  VLOGF_ENTER();
-
-  ops_runner_ = base::SequencedTaskRunnerHandle::Get();
+  ops_runner_ = base::SequencedTaskRunner::GetCurrentDefault();
   capturing_ = false;
   device_api_version_ = device_api_version;
   result_callback_ = std::move(result_callback);
@@ -45,7 +44,6 @@ mojo::PendingReceiver<mojom::Camera3DeviceOps> CameraClientOps::Init(
 void CameraClientOps::StartCapture(int32_t camera_id,
                                    const cros_cam_format_info_t* format,
                                    int32_t jpeg_max_size) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   capturing_ = true;
@@ -57,7 +55,6 @@ void CameraClientOps::StartCapture(int32_t camera_id,
 }
 
 void CameraClientOps::StopCapture(IntOnceCallback close_callback) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   capturing_ = false;
@@ -67,7 +64,6 @@ void CameraClientOps::StopCapture(IntOnceCallback close_callback) {
 }
 
 void CameraClientOps::Reset() {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   capturing_ = false;
@@ -77,7 +73,6 @@ void CameraClientOps::Reset() {
 
 void CameraClientOps::ProcessCaptureResult(
     mojom::Camera3CaptureResultPtr result) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   if (!capturing_) {
@@ -91,7 +86,7 @@ void CameraClientOps::ProcessCaptureResult(
       CHECK_EQ(mojo::UnwrapPlatformFile(std::move(output_buffer->release_fence),
                                         &fence),
                MOJO_RESULT_OK);
-      if (sync_wait(fence.release(), 1000) != 0) {
+      if (sync_wait(fence.get(), 1000) != 0) {
         LOGF(ERROR) << "Failed to wait for release fence on buffer";
       }
     }
@@ -100,6 +95,8 @@ void CameraClientOps::ProcessCaptureResult(
       return;
     }
 
+    // Map the buffer. We use mmap instead of CameraBufferManager since minigbm
+    // is blocked in the Guest VM sandbox.
     int64_t page_size = sysconf(_SC_PAGE_SIZE);
     const auto* buffer_handle_ptr = buffer_manager_.GetBufferHandle(
         result->output_buffers->at(0)->buffer_id);
@@ -114,8 +111,8 @@ void CameraClientOps::ProcessCaptureResult(
       uint32_t mapped_size = buffer_handle->sizes->at(0) + unaligned_offset;
       uint32_t aligned_offset = buffer_handle->offsets[0] - unaligned_offset;
       CHECK_NE(fds_ptr, nullptr);
-      void* data = mmap(NULL, mapped_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                        fds_ptr->at(0).get(), aligned_offset);
+      void* data = mmap(nullptr, mapped_size, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, fds_ptr->at(0).get(), aligned_offset);
       CHECK_NE(data, MAP_FAILED);
       auto* blob = reinterpret_cast<camera3_jpeg_blob_t*>(
           static_cast<char*>(data) + unaligned_offset + jpeg_max_size_ -
@@ -140,46 +137,60 @@ void CameraClientOps::ProcessCaptureResult(
       CHECK_EQ(buffer_handle->fds.size(), 2);
 
       const auto* fds_ptr = buffer_manager_.GetFds(output_buffer->buffer_id);
+      uint8_t* y_ptr = nullptr;
+      uint8_t* cb_ptr = nullptr;
+      base::ScopedClosureRunner y_unmapper, cb_unmapper;
 
-      uint32_t y_unaligned_offset = buffer_handle->offsets[0] % page_size;
-      uint32_t y_mapped_size = buffer_handle->sizes->at(0) + y_unaligned_offset;
-      uint32_t y_aligned_offset =
-          buffer_handle->offsets[0] - y_unaligned_offset;
-      void* y_ptr = mmap(NULL, y_mapped_size, PROT_READ | PROT_WRITE,
-                         MAP_SHARED, fds_ptr->at(0).get(), y_aligned_offset);
-      CHECK_NE(y_ptr, MAP_FAILED);
-
-      uint32_t cb_unaligned_offset = buffer_handle->offsets[1] % page_size;
-      uint32_t cb_mapped_size =
-          buffer_handle->sizes->at(1) + cb_unaligned_offset;
-      uint32_t cb_aligned_offset =
-          buffer_handle->offsets[1] - cb_unaligned_offset;
-      void* cb_ptr = mmap(NULL, cb_mapped_size, PROT_READ | PROT_WRITE,
-                          MAP_SHARED, fds_ptr->at(1).get(), cb_aligned_offset);
-      CHECK_NE(cb_ptr, MAP_FAILED);
+      CHECK_EQ(buffer_handle->offsets[0], 0);
+      if (buffer_handle->offsets[1] != 0) {
+        // Some platforms don't handle offset correctly in mmap(). We assume the
+        // UV plane lies on the same buffer of Y plane, and add offset to the
+        // mapped address manually.
+        CHECK_GE(buffer_handle->offsets[1], buffer_handle->sizes->at(0));
+        const size_t y_mapped_size =
+            buffer_handle->offsets[1] + buffer_handle->sizes->at(1);
+        y_ptr = static_cast<uint8_t*>(mmap(nullptr, y_mapped_size,
+                                           PROT_READ | PROT_WRITE, MAP_SHARED,
+                                           fds_ptr->at(0).get(), 0));
+        CHECK_NE(y_ptr, MAP_FAILED);
+        y_unmapper.ReplaceClosure(
+            base::BindOnce(base::IgnoreResult(&munmap), y_ptr, y_mapped_size));
+        cb_ptr = y_ptr + buffer_handle->offsets[1];
+      } else {
+        const size_t y_mapped_size = buffer_handle->sizes->at(0);
+        y_ptr = static_cast<uint8_t*>(mmap(nullptr, y_mapped_size,
+                                           PROT_READ | PROT_WRITE, MAP_SHARED,
+                                           fds_ptr->at(0).get(), 0));
+        CHECK_NE(y_ptr, MAP_FAILED);
+        y_unmapper.ReplaceClosure(
+            base::BindOnce(base::IgnoreResult(&munmap), y_ptr, y_mapped_size));
+        const size_t cb_mapped_size = buffer_handle->sizes->at(1);
+        cb_ptr = static_cast<uint8_t*>(mmap(nullptr, cb_mapped_size,
+                                            PROT_READ | PROT_WRITE, MAP_SHARED,
+                                            fds_ptr->at(1).get(), 0));
+        CHECK_NE(cb_ptr, MAP_FAILED);
+        cb_unmapper.ReplaceClosure(base::BindOnce(base::IgnoreResult(&munmap),
+                                                  cb_ptr, cb_mapped_size));
+      }
 
       cros_cam_frame_t frame = {
           .format = request_format_,
-          .planes = {
-              {.stride = static_cast<int>(buffer_handle->strides[0]),
-               .size = static_cast<int>(buffer_handle->sizes->at(0)),
-               .data = static_cast<uint8_t*>(y_ptr) + y_unaligned_offset},
-              {.stride = static_cast<int>(buffer_handle->strides[1]),
-               .size = static_cast<int>(buffer_handle->sizes->at(1)),
-               .data = static_cast<uint8_t*>(cb_ptr) + cb_unaligned_offset},
-              {.size = 0},
-              {.size = 0}}};
+          .planes = {{.stride = static_cast<int>(buffer_handle->strides[0]),
+                      .size = static_cast<int>(buffer_handle->sizes->at(0)),
+                      .data = y_ptr},
+                     {.stride = static_cast<int>(buffer_handle->strides[1]),
+                      .size = static_cast<int>(buffer_handle->sizes->at(1)),
+                      .data = cb_ptr},
+                     {.size = 0},
+                     {.size = 0}}};
       SendCaptureResult(0, &frame);
 
-      munmap(y_ptr, y_mapped_size);
-      munmap(cb_ptr, cb_mapped_size);
       buffer_manager_.ReleaseBuffer(output_buffer->buffer_id);
     }
   }
 }
 
 void CameraClientOps::Notify(mojom::Camera3NotifyMsgPtr msg) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   // We only need to handle error messages for libcamera_connector.
@@ -193,17 +204,26 @@ void CameraClientOps::Notify(mojom::Camera3NotifyMsgPtr msg) {
   SendCaptureResult(status, nullptr);
 }
 
+void CameraClientOps::RequestStreamBuffers(
+    std::vector<mojom::Camera3BufferRequestPtr> buffer_reqs,
+    RequestStreamBuffersCallback callback) {
+  // TODO(b/226688669): Implement CameraClientOps::RequestStreamBuffers.
+}
+
+void CameraClientOps::ReturnStreamBuffers(
+    std::vector<mojom::Camera3StreamBufferPtr> buffers) {
+  // TODO(b/226688669): Implement CameraClientOps::ReturnStreamBuffers.
+}
+
 void CameraClientOps::InitializeDevice() {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   device_ops_->Initialize(camera3_callback_ops_.BindNewPipeAndPassRemote(),
-                          base::Bind(&CameraClientOps::OnInitializedDevice,
-                                     base::Unretained(this)));
+                          base::BindOnce(&CameraClientOps::OnInitializedDevice,
+                                         base::Unretained(this)));
 }
 
 void CameraClientOps::OnInitializedDevice(int32_t result) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   if (result != 0) {
@@ -217,7 +237,6 @@ void CameraClientOps::OnInitializedDevice(int32_t result) {
 }
 
 void CameraClientOps::ConfigureStreams() {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
   if (!capturing_) {
     return;
@@ -249,8 +268,8 @@ void CameraClientOps::ConfigureStreams() {
 
   device_ops_->ConfigureStreamsAndGetAllocatedBuffers(
       std::move(stream_config),
-      base::Bind(&CameraClientOps::OnConfiguredStreams,
-                 base::Unretained(this)));
+      base::BindOnce(&CameraClientOps::OnConfiguredStreams,
+                     base::Unretained(this)));
 }
 
 void CameraClientOps::OnConfiguredStreams(
@@ -258,7 +277,6 @@ void CameraClientOps::OnConfiguredStreams(
     cros::mojom::Camera3StreamConfigurationPtr updated_config,
     base::flat_map<uint64_t, std::vector<mojom::Camera3StreamBufferPtr>>
         allocated_buffers) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   if (result != 0) {
@@ -275,7 +293,6 @@ void CameraClientOps::OnConfiguredStreams(
 }
 
 void CameraClientOps::ConstructDefaultRequestSettings() {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
   if (!capturing_) {
     return;
@@ -286,13 +303,12 @@ void CameraClientOps::ConstructDefaultRequestSettings() {
       mojom::Camera3RequestTemplate::CAMERA3_TEMPLATE_PREVIEW;
   device_ops_->ConstructDefaultRequestSettings(
       request_template,
-      base::Bind(&CameraClientOps::OnConstructedDefaultRequestSettings,
-                 base::Unretained(this)));
+      base::BindOnce(&CameraClientOps::OnConstructedDefaultRequestSettings,
+                     base::Unretained(this)));
 }
 
 void CameraClientOps::OnConstructedDefaultRequestSettings(
     mojom::CameraMetadataPtr settings) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   if (settings.is_null()) {
@@ -308,7 +324,6 @@ void CameraClientOps::OnConstructedDefaultRequestSettings(
 }
 
 void CameraClientOps::ConstructCaptureRequest() {
-  VLOGF_ENTER();
   ops_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(&CameraClientOps::ConstructCaptureRequestOnThread,
@@ -316,7 +331,6 @@ void CameraClientOps::ConstructCaptureRequest() {
 }
 
 void CameraClientOps::ConstructCaptureRequestOnThread() {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   if (!buffer_manager_.HasFreeBuffers()) {
@@ -342,7 +356,6 @@ void CameraClientOps::ConstructCaptureRequestOnThread() {
 
 void CameraClientOps::ProcessCaptureRequest(
     mojom::Camera3CaptureRequestPtr request) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
   if (!capturing_) {
     return;
@@ -350,12 +363,11 @@ void CameraClientOps::ProcessCaptureRequest(
 
   device_ops_->ProcessCaptureRequest(
       std::move(request),
-      base::Bind(&CameraClientOps::OnProcessedCaptureRequest,
-                 base::Unretained(this)));
+      base::BindOnce(&CameraClientOps::OnProcessedCaptureRequest,
+                     base::Unretained(this)));
 }
 
 void CameraClientOps::OnProcessedCaptureRequest(int32_t result) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   if (result != 0) {
@@ -368,7 +380,6 @@ void CameraClientOps::OnProcessedCaptureRequest(int32_t result) {
 }
 
 void CameraClientOps::SendCaptureResult(int status, cros_cam_frame_t* frame) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   cros_cam_capture_result_t result = {.status = status, .frame = frame};
@@ -377,7 +388,6 @@ void CameraClientOps::SendCaptureResult(int status, cros_cam_frame_t* frame) {
 
 void CameraClientOps::OnClosedDevice(IntOnceCallback close_callback,
                                      int32_t result) {
-  VLOGF_ENTER();
   DCHECK(ops_runner_->RunsTasksInCurrentSequence());
 
   device_ops_.reset();

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,6 @@
 #include <base/atomicops.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/threading/thread.h>
 
@@ -70,12 +69,9 @@ class DecodeEventThread {
   void CallUseOutputBuffer(int32_t picture_buffer_id, gbm_bo* bo);
 
   base::Thread thread_;
-  // TODO(alexlau): Use THREAD_CHECKER macro after libchrome uprev
-  // (crbug.com/909719).
-  base::ThreadChecker thread_checker_;
+  THREAD_CHECKER(thread_checker_);
 
-  base::ScopedFD gbm_device_fd_;
-  arc::ScopedGbmDevicePtr gbm_device_;
+  arc::ScopedGbmDevice gbm_device_;
   const vda_capabilities_t* const caps_;
   vda_pixel_format_t vda_format_;
   uint32_t gbm_format_;

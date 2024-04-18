@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -147,8 +147,7 @@ int32_t GetOpenFilePermissions(const bool writeable) {
 PathParts SplitPath(const std::string& full_path) {
   DCHECK(!full_path.empty());
   base::FilePath path(full_path);
-  std::vector<std::string> result;
-  path.GetComponents(&result);
+  std::vector<std::string> result = path.GetComponents();
   return result;
 }
 

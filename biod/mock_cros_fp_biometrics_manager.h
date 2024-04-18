@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define BIOD_MOCK_CROS_FP_BIOMETRICS_MANAGER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -13,6 +14,7 @@
 
 #include <gmock/gmock.h>
 
+#include "base/memory/weak_ptr.h"
 #include "biod/cros_fp_biometrics_manager.h"
 #include "biod/mock_biod_metrics.h"
 #include "biod/power_button_filter.h"
@@ -22,6 +24,11 @@ namespace biod {
 class MockCrosFpBiometricsManager : public CrosFpBiometricsManager {
  public:
   using CrosFpBiometricsManager::CrosFpBiometricsManager;
+
+  base::WeakPtr<CrosFpBiometricsManager> GetWeakFactoryPtr() {
+    return weak_factory_.GetWeakPtr();
+  }
+
   ~MockCrosFpBiometricsManager() override = default;
 
   MOCK_METHOD(BiometricType, GetType, (), (override));
@@ -30,8 +37,8 @@ class MockCrosFpBiometricsManager : public CrosFpBiometricsManager {
               (std::string user_id, std::string label),
               (override));
   MOCK_METHOD(BiometricsManager::AuthSession, StartAuthSession, (), (override));
-  MOCK_METHOD(std::vector<std::unique_ptr<BiometricsManagerRecord>>,
-              GetRecords,
+  MOCK_METHOD(std::vector<std::unique_ptr<BiometricsManagerRecordInterface>>,
+              GetLoadedRecords,
               (),
               (override));
   MOCK_METHOD(bool, DestroyAllRecords, (), (override));
@@ -58,22 +65,17 @@ class MockCrosFpBiometricsManager : public CrosFpBiometricsManager {
   MOCK_METHOD(bool, SendStatsOnLogin, (), (override));
   MOCK_METHOD(void, SetDiskAccesses, (bool allow), (override));
   MOCK_METHOD(bool, ResetSensor, (), (override));
-  MOCK_METHOD(bool, ResetEntropy, (bool factory_init), (override));
   MOCK_METHOD(void, EndEnrollSession, (), (override));
   MOCK_METHOD(void, EndAuthSession, (), (override));
-  MOCK_METHOD(void, OnMaintenanceTimerFired, (), (override));
-  MOCK_METHOD(bool,
-              WriteRecord,
-              (const BiometricsManagerRecord& record,
-               uint8_t* tmpl_data,
-               size_t tmpl_size),
+  MOCK_METHOD(std::optional<BiodStorageInterface::RecordMetadata>,
+              GetRecordMetadata,
+              (const std::string& record_id),
+              (const, override));
+  MOCK_METHOD(std::optional<std::string>,
+              GetLoadedRecordId,
+              (int id),
               (override));
 
-  // Delegate to the real implementation in the base class:
-  // https://github.com/google/googletest/blob/HEAD/googlemock/docs/cook_book.md#delegating-calls-to-a-parent-class
-  void OnMaintenanceTimerFiredDelegate() {
-    CrosFpBiometricsManager::OnMaintenanceTimerFired();
-  }
   // Expose protected methods for testing
   using CrosFpBiometricsManager::GetDirtyList;
   using CrosFpBiometricsManager::LoadRecord;

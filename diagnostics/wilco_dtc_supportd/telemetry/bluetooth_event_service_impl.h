@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,10 +12,11 @@
 
 #include <dbus/object_path.h>
 
-#include "diagnostics/common/system/bluetooth_client.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/bluetooth_event_service.h"
+#include "diagnostics/wilco_dtc_supportd/utils/system/bluetooth_client.h"
 
 namespace diagnostics {
+namespace wilco {
 
 // Adapter for communication with bluetooth daemon.
 class BluetoothEventServiceImpl final : public BluetoothEventService,
@@ -69,6 +70,7 @@ class BluetoothEventServiceImpl final : public BluetoothEventService,
   BluetoothClient* bluetooth_client_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_TELEMETRY_BLUETOOTH_EVENT_SERVICE_IMPL_H_

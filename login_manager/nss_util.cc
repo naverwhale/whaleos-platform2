@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -76,6 +76,8 @@ class NssUtilImpl : public NssUtil {
       const base::FilePath& user_homedir,
       const OptionalFilePath& ns_mnt_path) override;
 
+  ScopedPK11SlotDescriptor GetInternalSlot() override;
+
   std::unique_ptr<crypto::RSAPrivateKey> GetPrivateKeyForUser(
       const std::vector<uint8_t>& public_key_der,
       PK11SlotDescriptor* user_slot) override;
@@ -89,9 +91,11 @@ class NssUtilImpl : public NssUtil {
 
   bool CheckPublicKeyBlob(const std::vector<uint8_t>& blob) override;
 
-  bool Verify(const std::vector<uint8_t>& signature,
-              const std::vector<uint8_t>& data,
-              const std::vector<uint8_t>& public_key) override;
+  bool Verify(
+      const std::vector<uint8_t>& signature,
+      const std::vector<uint8_t>& data,
+      const std::vector<uint8_t>& public_key,
+      const crypto::SignatureVerifier::SignatureAlgorithm algorithm) override;
 
   bool Sign(const std::vector<uint8_t>& data,
             crypto::RSAPrivateKey* key,
@@ -158,6 +162,13 @@ ScopedPK11SlotDescriptor NssUtilImpl::OpenUserDB(
   }
 
   res->slot = std::move(db_slot);
+  return res;
+}
+
+ScopedPK11SlotDescriptor NssUtilImpl::GetInternalSlot() {
+  auto res = std::make_unique<PK11SlotDescriptor>();
+  res->slot = crypto::ScopedPK11Slot(PK11_GetInternalKeySlot());
+  DCHECK_EQ(PK11_IsReadOnly(res->slot.get()), true);
   return res;
 }
 
@@ -262,13 +273,14 @@ bool NssUtilImpl::CheckPublicKeyBlob(const std::vector<uint8_t>& blob) {
 
 // This is pretty much just a blind passthrough, so I won't test it
 // in the NssUtil unit tests.  I'll test it from a class that uses this API.
-bool NssUtilImpl::Verify(const std::vector<uint8_t>& signature,
-                         const std::vector<uint8_t>& data,
-                         const std::vector<uint8_t>& public_key) {
+bool NssUtilImpl::Verify(
+    const std::vector<uint8_t>& signature,
+    const std::vector<uint8_t>& data,
+    const std::vector<uint8_t>& public_key,
+    const crypto::SignatureVerifier::SignatureAlgorithm algorithm) {
   crypto::SignatureVerifier verifier;
 
-  if (!verifier.VerifyInit(crypto::SignatureVerifier::RSA_PKCS1_SHA1,
-                           signature.data(), signature.size(),
+  if (!verifier.VerifyInit(algorithm, signature.data(), signature.size(),
                            public_key.data(), public_key.size())) {
     LOG(ERROR) << "Could not initialize verifier";
     return false;

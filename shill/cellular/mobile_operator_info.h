@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,16 +6,20 @@
 #define SHILL_CELLULAR_MOBILE_OPERATOR_INFO_H_
 
 #include <memory>
+#include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <base/files/file_path.h>
+#include <base/memory/weak_ptr.h>
 #include <base/observer_list_types.h>
+
+#include "shill/cellular/mobile_operator_mapper.h"
 
 namespace shill {
 
 class EventDispatcher;
-class MobileOperatorInfoImpl;
 
 // An MobileOperatorInfo object encapsulates the knowledge pertaining to all
 // mobile operators. Typical usage consists of three steps:
@@ -28,7 +32,7 @@ class MobileOperatorInfoImpl;
 // So a class Foo that wants to use this object typically looks like:
 //
 // class Foo {
-//   class OperatorObserver : public MobileOperatorInfoObserver {
+//   class OperatorObserver : public MobileOperatorInfo::Observer {
 //     // Implement all Observer functions.
 //   }
 //   ...
@@ -50,12 +54,12 @@ class MobileOperatorInfoImpl;
 //   through |my_observer|.
 // };
 //
+
 class MobileOperatorInfo {
  public:
   class Observer : public base::CheckedObserver {
    public:
     virtual ~Observer() = default;
-
     // This event fires when
     //   - A mobile [virtual] network operator
     //     - is first determined.
@@ -64,7 +68,6 @@ class MobileOperatorInfo {
     //   - Some information about the known operator changes.
     virtual void OnOperatorChanged() = 0;
   };
-
   // |Init| must be called on the constructed object before it is used.
   // This object does not take ownership of dispatcher, and |dispatcher| is
   // expected to outlive this object.
@@ -88,68 +91,8 @@ class MobileOperatorInfo {
   void RemoveObserver(MobileOperatorInfo::Observer* observer);
 
   // ///////////////////////////////////////////////////////////////////////////
-  // Objects that encapsulate related information about the mobile operator.
-
-  // Encapsulates a name and the language that name has been localized to.
-  // The name can be a carrier name, or the name that a cellular carrier
-  // prefers to show for a certain access point.
-  struct LocalizedName {
-    // The name as it appears in the corresponding language.
-    std::string name;
-    // The language of this localized name. The format of a language is a two
-    // letter language code, e.g. 'en' for English.
-    // It is legal for an instance of LocalizedName to have an empty |language|
-    // field, as sometimes the underlying database does not contain that
-    // information.
-    std::string language;
-  };
-
-  // Encapsulates information on a mobile access point name. This information
-  // is usually necessary for 3GPP networks to be able to connect to a mobile
-  // network. So far, CDMA networks don't use this information.
-  struct MobileAPN {
-    // The access point url, which is fed to the modemmanager while connecting.
-    std::string apn;
-    // A list of localized names for this access point. Usually there is only
-    // one for each country that the associated cellular carrier operates in.
-    std::vector<LocalizedName> operator_name_list;
-    // The username and password fields that are required by the modemmanager.
-    // Either of these values can be empty if none is present. If a MobileAPN
-    // instance that is obtained from this parser contains a non-empty value
-    // for username/password, this usually means that the carrier requires
-    // a certain default pair.
-    std::string username;
-    std::string password;
-    // The authentication method for sending username / password, which could
-    // be one of the following values:
-    // * (empty):
-    //   - When no username or password is provided, no authentication method
-    //     is specified.
-    //   - When a username and password is provided, the default authentication
-    //     method is used (which is PAP for most cases in the current
-    //     implementation of ModemManager).
-    // * "pap" (kApnAuthenticationPap):
-    //   - Password Authentication Protocol (PAP) is used for authentication
-    // * "chap" (kApnAuthenticationChap):
-    //   - Challenge-Handshake Authentication Protocol (CHAP) for authentication
-    std::string authentication;
-    // Specify whether this APN should be requested as part of an LTE Attach.
-    bool is_attach_apn = false;
-    // IP type as one of "ipv4", "ipv6", "ipv4v6" (dual-stack)
-    std::string ip_type;
-  };
-
-  // Encapsulates information about the Online payment portal used by chrome to
-  // redirect users for some carriers.
-  struct OnlinePortal {
-    std::string url;
-    std::string method;
-    std::string post_data;
-  };
-
-  // ///////////////////////////////////////////////////////////////////////////
   // Functions to obtain information about the current mobile operator.
-  // Any of these accessors can return an emtpy response if the information is
+  // Any of these accessors can return an empty response if the information is
   // not available. Use |IsMobileNetworkOperatorKnown| and
   // |IsMobileVirtualNetworkOperatorKnown| to determine if a fix on the operator
   // has been made. Note that the information returned by the other accessors is
@@ -158,46 +101,53 @@ class MobileOperatorInfo {
 
   // Query whether a mobile network operator has been successfully determined.
   virtual bool IsMobileNetworkOperatorKnown() const;
-  // Query whether a mobile network operator has been successfully
+  // Query whether the serving network operator has been successfully
   // determined.
-  bool IsMobileVirtualNetworkOperatorKnown() const;
+  virtual bool IsServingMobileNetworkOperatorKnown() const;
 
   // The unique identifier of this carrier. This is primarily used to
   // identify the user profile in store for each carrier. This identifier is
-  // access technology agnostic and should be the same across 3GPP and CDMA.
+  // access technology agnostic.
   virtual const std::string& uuid() const;
-
   virtual const std::string& operator_name() const;
   virtual const std::string& country() const;
   virtual const std::string& mccmnc() const;
-  const std::string& sid() const;
-  const std::string& nid() const;
+  // Home provider two-letter country code defined in ISO 3166-1 converted from
+  // MCC.
+  virtual const std::string& mcc_alpha2() const;
+  virtual const std::string& serving_uuid() const;
+  virtual const std::string& serving_operator_name() const;
+  virtual const std::string& serving_country() const;
+  virtual const std::string& serving_mccmnc() const;
+  // Serving operator two-letter country code defined in ISO 3166-1 converted
+  // from MCC.
+  virtual const std::string& serving_mcc_alpha2() const;
+  const std::string& gid1() const;
 
-  // A given MVNO can be associated with multiple mcc/mnc pairs. A list of all
-  // associated mcc/mnc pairs concatenated together.
-  const std::vector<std::string>& mccmnc_list() const;
-  // A given MVNO can be associated with multiple sid(s). A list of all
-  // associated sid(s).
-  // There are likely many SID values associated with a CDMA carrier as they
-  // vary across regions and are more fine grained than countries. An important
-  // thing to keep in mind is that, since an SID contains fine grained
-  // information on where a modem is physically located, it should be regarded
-  // as user-sensitive information.
-  const std::vector<std::string>& sid_list() const;
-  // All localized names associated with this carrier entry.
-  const std::vector<LocalizedName>& operator_name_list() const;
+  // Gets the friendly name for the service based on the home and serving
+  // operators.
+  virtual std::string friendly_operator_name(bool is_roaming) const;
   // All access point names associated with this carrier entry.
-  virtual const std::vector<std::unique_ptr<MobileAPN>>& apn_list() const;
+  virtual const std::vector<MobileOperatorMapper::MobileAPN>& apn_list() const;
   // All Online Payment Portal URLs associated with this carrier entry. There
   // are usually multiple OLPs based on access technology and it is up to the
   // application to use the appropriate one.
-  virtual const std::vector<OnlinePortal>& olp_list() const;
+  virtual const std::vector<MobileOperatorMapper::OnlinePortal>& olp_list()
+      const;
 
-  // The number to dial for automatic activation.
-  virtual const std::string& activation_code() const;
   // Some carriers are only available while roaming. This is mainly used by
   // Chrome.
   bool requires_roaming() const;
+  // Weather the carrier allows tethering or not.
+  virtual bool tethering_allowed() const;
+  // If specified, the MTU value to be used on the network interface.
+  // If the carrier requires all traffic to go through the DUN APN when
+  // tethering.
+  virtual bool use_dun_apn_as_default() const;
+
+  // The entitlement check configuration.
+  virtual const MobileOperatorMapper::EntitlementConfig& entitlement_config()
+      const;
   // If specified, the MTU value to be used on the network interface.
   int32_t mtu() const;
 
@@ -211,26 +161,55 @@ class MobileOperatorInfo {
   // Throw away all information provided to the object, and start from top.
   void Reset();
 
-  // Both MCCMNC and SID correspond to operator code in the different
-  // technologies. They are never to be used together. If you want to use SID
-  // after MCCMNC (or vice-versa), ensure a call to |Reset| to clear state.
   virtual void UpdateMCCMNC(const std::string& mccmnc);
-  virtual void UpdateSID(const std::string& sid);
 
   virtual void UpdateIMSI(const std::string& imsi);
   void UpdateICCID(const std::string& iccid);
-  virtual void UpdateNID(const std::string& nid);
   virtual void UpdateOperatorName(const std::string& operator_name);
-  void UpdateOnlinePortal(const std::string& url,
-                          const std::string& method,
-                          const std::string& post_data);
+  virtual void UpdateServingMCCMNC(const std::string& mccmnc);
+  virtual void UpdateServingOperatorName(const std::string& operator_name);
+  void UpdateGID1(const std::string& gid1);
 
+  static const char kExclusiveOverrideDatabasePath[];
+
+ protected:
   // ///////////////////////////////////////////////////////////////////////////
-  // Expose implementation for test purposes only.
-  MobileOperatorInfoImpl* impl() { return impl_.get(); }
+  // Static variables.
+  // Default databases to load.
+  static const char kDefaultDatabasePath[];
+
+  // For testing
+  explicit MobileOperatorInfo(EventDispatcher* dispatcher,
+                              const std::string& info_owner,
+                              MobileOperatorMapper* home,
+                              MobileOperatorMapper* serving);
 
  private:
-  std::unique_ptr<MobileOperatorInfoImpl> impl_;
+  // Callbacks for MobileOperatorMapper:
+  void OnHomeOperatorChanged();
+  void OnServingOperatorChanged();
+
+  // Query whether a mobile network operator has been successfully
+  // determined.
+  bool IsMobileVirtualNetworkOperatorKnown() const;
+
+  void AddDefaultDatabasePaths();
+
+  // ///////////////////////////////////////////////////////////////////////////
+  // Data.
+  const std::string info_owner_;
+
+  // The observers added to this list are not owned by this object. Moreover,
+  // the observer is likely to outlive this object. We do enforce removal of all
+  // observers before this object is destroyed.
+  base::ObserverList<MobileOperatorInfo::Observer> observers_;
+
+  // Instance for the home provider
+  std::unique_ptr<MobileOperatorMapper> home_;
+  // Instance for the serving operator
+  std::unique_ptr<MobileOperatorMapper> serving_;
+
+  base::WeakPtrFactory<MobileOperatorInfo> weak_ptr_factory_{this};
 };
 
 }  // namespace shill

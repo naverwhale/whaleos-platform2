@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,10 @@ namespace errors {
 namespace dbus {
 BRILLO_EXPORT extern const char kDomain[];
 }  // namespace dbus
+
+namespace shill {
+BRILLO_EXPORT extern const char kDomain[];
+}  // namespace shill
 
 namespace json {
 BRILLO_EXPORT extern const char kDomain[];

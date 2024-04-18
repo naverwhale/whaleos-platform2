@@ -1,28 +1,23 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <algorithm>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/command_line.h>
 #include <base/containers/contains.h>
 #include <base/files/file.h>
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/callback_helpers.h>
 #include <base/json/json_writer.h>
-#include <base/memory/ref_counted.h>
-#include <base/memory/weak_ptr.h>
-#include <base/optional.h>
 #include <base/run_loop.h>
-#include <base/strings/stringprintf.h>
-#include <base/strings/string_util.h>
 #include <base/strings/string_split.h>
-#include <base/synchronization/condition_variable.h>
-#include <base/synchronization/lock.h>
+#include <base/strings/string_util.h>
 #include <base/task/single_thread_task_executor.h>
 #include <base/values.h>
 #include <brillo/errors/error.h>
@@ -34,19 +29,41 @@
 #include <lorgnette/proto_bindings/lorgnette_service.pb.h>
 #include <re2/re2.h>
 
+#include "lorgnette/cli/advanced_scan.h"
+#include "lorgnette/cli/commands.h"
+#include "lorgnette/cli/discovery_handler.h"
+#include "lorgnette/cli/print_config.h"
+#include "lorgnette/cli/scan_handler.h"
+#include "lorgnette/cli/scan_options.h"
 #include "lorgnette/dbus-proxies.h"
 #include "lorgnette/guess_source.h"
 
+using lorgnette::cli::Command;
+using lorgnette::cli::DiscoveryHandler;
+using lorgnette::cli::kCommandMap;
+using lorgnette::cli::ScanHandler;
 using org::chromium::lorgnette::ManagerProxy;
 
 namespace {
 
-base::Optional<std::vector<std::string>> ReadLines(base::File* file) {
+// ListScanners can take a long time if many USB scanners are plugged in.
+constexpr int kListScannersTimeoutMs = 60000;
+
+template <class T, class M>
+std::vector<T> MapKeys(const M& map) {
+  std::vector<T> keys;
+  for (const auto& [k, v] : map) {
+    keys.push_back(k);
+  }
+  return keys;
+}
+
+std::optional<std::vector<std::string>> ReadLines(base::File* file) {
   std::string buf(1 << 20, '\0');
   int read = file->ReadAtCurrentPos(&buf[0], buf.size());
   if (read < 0) {
     PLOG(ERROR) << "Reading from file failed";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   buf.resize(read);
@@ -54,286 +71,27 @@ base::Optional<std::vector<std::string>> ReadLines(base::File* file) {
                            base::SPLIT_WANT_ALL);
 }
 
-std::string EscapeScannerName(const std::string& scanner_name) {
-  std::string escaped;
-  for (char c : scanner_name) {
-    if (isalnum(c)) {
-      escaped += c;
-    } else {
-      escaped += '_';
-    }
-  }
-  return escaped;
-}
-
-std::string ExtensionForFormat(lorgnette::ImageFormat image_format) {
-  switch (image_format) {
-    case lorgnette::IMAGE_FORMAT_PNG:
-      return "png";
-
-    case lorgnette::IMAGE_FORMAT_JPEG:
-      return "jpg";
-
-    default:
-      LOG(ERROR) << "No extension for format " << image_format;
-      return "raw";
-  }
-}
-
-base::Optional<lorgnette::CancelScanResponse> CancelScan(
+std::optional<lorgnette::CancelScanResponse> CancelScan(
     ManagerProxy* manager, const std::string& uuid) {
   lorgnette::CancelScanRequest request;
   request.set_scan_uuid(uuid);
-  std::vector<uint8_t> request_in(request.ByteSizeLong());
-  request.SerializeToArray(request_in.data(), request_in.size());
 
   brillo::ErrorPtr error;
-  std::vector<uint8_t> response_out;
-  if (!manager->CancelScan(request_in, &response_out, &error)) {
-    LOG(ERROR) << "Cancelling scan failed: " << error->GetMessage();
-    return base::nullopt;
-  }
-
   lorgnette::CancelScanResponse response;
-  if (!response.ParseFromArray(response_out.data(), response_out.size())) {
-    LOG(ERROR) << "Failed to parse CancelScanResponse";
-    return base::nullopt;
+  if (!manager->CancelScan(request, &response, &error)) {
+    LOG(ERROR) << "Cancelling scan failed: " << error->GetMessage();
+    return std::nullopt;
   }
 
   return response;
 }
 
-class ScanHandler {
- public:
-  ScanHandler(base::RepeatingClosure quit_closure,
-              ManagerProxy* manager,
-              std::string scanner_name,
-              std::string output_pattern)
-      : cvar_(&lock_),
-        quit_closure_(quit_closure),
-        manager_(manager),
-        scanner_name_(scanner_name),
-        output_pattern_(output_pattern),
-        current_page_(1),
-        connected_callback_called_(false),
-        connection_status_(false) {
-    manager_->RegisterScanStatusChangedSignalHandler(
-        base::BindRepeating(&ScanHandler::HandleScanStatusChangedSignal,
-                            weak_factory_.GetWeakPtr()),
-        base::BindOnce(&ScanHandler::OnConnectedCallback,
-                       weak_factory_.GetWeakPtr()));
-  }
-
-  bool WaitUntilConnected();
-
-  bool StartScan(uint32_t resolution,
-                 const lorgnette::DocumentSource& scan_source,
-                 const base::Optional<lorgnette::ScanRegion>& scan_region,
-                 lorgnette::ColorMode color_mode,
-                 lorgnette::ImageFormat image_format);
-
- private:
-  void HandleScanStatusChangedSignal(
-      const std::vector<uint8_t>& signal_serialized);
-
-  void OnConnectedCallback(const std::string& interface_name,
-                           const std::string& signal_name,
-                           bool signal_connected);
-
-  void RequestNextPage();
-  base::Optional<lorgnette::GetNextImageResponse> GetNextImage(
-      const base::FilePath& output_path);
-
-  base::Lock lock_;
-  base::ConditionVariable cvar_;
-  base::RepeatingClosure quit_closure_;
-
-  ManagerProxy* manager_;  // Not owned.
-  std::string scanner_name_;
-  std::string output_pattern_;
-  std::string format_extension_;
-  base::Optional<std::string> scan_uuid_;
-  int current_page_;
-
-  bool connected_callback_called_;
-  bool connection_status_;
-
-  base::WeakPtrFactory<ScanHandler> weak_factory_{this};
-};
-
-bool ScanHandler::WaitUntilConnected() {
-  base::AutoLock auto_lock(lock_);
-  while (!connected_callback_called_) {
-    cvar_.Wait();
-  }
-  return connection_status_;
-}
-
-bool ScanHandler::StartScan(
-    uint32_t resolution,
-    const lorgnette::DocumentSource& scan_source,
-    const base::Optional<lorgnette::ScanRegion>& scan_region,
-    lorgnette::ColorMode color_mode,
-    lorgnette::ImageFormat image_format) {
-  lorgnette::StartScanRequest request;
-  request.set_device_name(scanner_name_);
-  request.mutable_settings()->set_resolution(resolution);
-  request.mutable_settings()->set_source_name(scan_source.name());
-  request.mutable_settings()->set_color_mode(color_mode);
-  if (scan_region.has_value())
-    *request.mutable_settings()->mutable_scan_region() = scan_region.value();
-  request.mutable_settings()->set_image_format(image_format);
-  format_extension_ = ExtensionForFormat(image_format);
-
-  std::vector<uint8_t> request_in(request.ByteSizeLong());
-  request.SerializeToArray(request_in.data(), request_in.size());
-
+std::optional<std::vector<std::string>> ListScanners(ManagerProxy* manager) {
   brillo::ErrorPtr error;
-  std::vector<uint8_t> response_out;
-  if (!manager_->StartScan(request_in, &response_out, &error)) {
-    LOG(ERROR) << "StartScan failed: " << error->GetMessage();
-    return false;
-  }
-
-  lorgnette::StartScanResponse response;
-  if (!response.ParseFromArray(response_out.data(), response_out.size())) {
-    LOG(ERROR) << "Failed to parse StartScanResponse";
-    return false;
-  }
-
-  if (response.state() == lorgnette::SCAN_STATE_FAILED) {
-    LOG(ERROR) << "StartScan failed: " << response.failure_reason();
-    return false;
-  }
-
-  std::cout << "Scan " << response.scan_uuid() << " started successfully"
-            << std::endl;
-  scan_uuid_ = response.scan_uuid();
-
-  RequestNextPage();
-  return true;
-}
-
-void ScanHandler::HandleScanStatusChangedSignal(
-    const std::vector<uint8_t>& signal_serialized) {
-  if (!scan_uuid_.has_value()) {
-    return;
-  }
-
-  lorgnette::ScanStatusChangedSignal signal;
-  if (!signal.ParseFromArray(signal_serialized.data(),
-                             signal_serialized.size())) {
-    LOG(ERROR) << "Failed to parse ScanStatusSignal";
-    return;
-  }
-
-  if (signal.state() == lorgnette::SCAN_STATE_IN_PROGRESS) {
-    std::cout << "Page " << signal.page() << " is " << signal.progress()
-              << "% finished" << std::endl;
-  } else if (signal.state() == lorgnette::SCAN_STATE_FAILED) {
-    LOG(ERROR) << "Scan failed: " << signal.failure_reason();
-    quit_closure_.Run();
-  } else if (signal.state() == lorgnette::SCAN_STATE_PAGE_COMPLETED) {
-    std::cout << "Page " << signal.page() << " completed." << std::endl;
-    current_page_ += 1;
-    if (signal.more_pages())
-      RequestNextPage();
-  } else if (signal.state() == lorgnette::SCAN_STATE_COMPLETED) {
-    std::cout << "Scan completed successfully." << std::endl;
-    quit_closure_.Run();
-  } else if (signal.state() == lorgnette::SCAN_STATE_CANCELLED) {
-    std::cout << "Scan cancelled." << std::endl;
-    quit_closure_.Run();
-  }
-}
-
-void ScanHandler::OnConnectedCallback(const std::string& interface_name,
-                                      const std::string& signal_name,
-                                      bool signal_connected) {
-  base::AutoLock auto_lock(lock_);
-  connected_callback_called_ = true;
-  connection_status_ = signal_connected;
-  if (!signal_connected) {
-    LOG(ERROR) << "Failed to connect to ScanStatusChanged signal";
-  }
-  cvar_.Signal();
-}
-
-base::Optional<lorgnette::GetNextImageResponse> ScanHandler::GetNextImage(
-    const base::FilePath& output_path) {
-  lorgnette::GetNextImageRequest request;
-  request.set_scan_uuid(scan_uuid_.value());
-  std::vector<uint8_t> request_in(request.ByteSizeLong());
-  request.SerializeToArray(request_in.data(), request_in.size());
-
-  base::File output_file(
-      output_path, base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE);
-
-  if (!output_file.IsValid()) {
-    PLOG(ERROR) << "Failed to open output file " << output_path;
-    return base::nullopt;
-  }
-
-  brillo::ErrorPtr error;
-  std::vector<uint8_t> response_out;
-  if (!manager_->GetNextImage(request_in, output_file.GetPlatformFile(),
-                              &response_out, &error)) {
-    LOG(ERROR) << "GetNextImage failed: " << error->GetMessage();
-    return base::nullopt;
-  }
-
-  lorgnette::GetNextImageResponse response;
-  if (!response.ParseFromArray(response_out.data(), response_out.size())) {
-    LOG(ERROR) << "Failed to parse StartScanResponse";
-    return base::nullopt;
-  }
-
-  return response;
-}
-
-void ScanHandler::RequestNextPage() {
-  std::string expanded_path = output_pattern_;
-  base::ReplaceFirstSubstringAfterOffset(
-      &expanded_path, 0, "%n", base::StringPrintf("%d", current_page_));
-  base::ReplaceFirstSubstringAfterOffset(&expanded_path, 0, "%s",
-                                         EscapeScannerName(scanner_name_));
-  base::ReplaceFirstSubstringAfterOffset(&expanded_path, 0, "%e",
-                                         format_extension_);
-  base::FilePath output_path = base::FilePath(expanded_path);
-  if (current_page_ > 1 && output_pattern_.find("%n") == std::string::npos) {
-    output_path = output_path.InsertBeforeExtension(
-        base::StringPrintf("_page%d", current_page_));
-  }
-
-  base::Optional<lorgnette::GetNextImageResponse> response =
-      GetNextImage(output_path);
-  if (!response.has_value()) {
-    quit_closure_.Run();
-  }
-
-  if (!response.value().success()) {
-    LOG(ERROR) << "Requesting next page failed: "
-               << response.value().failure_reason();
-    quit_closure_.Run();
-  } else {
-    std::cout << "Reading page " << current_page_ << " to "
-              << output_path.value() << std::endl;
-  }
-}
-
-base::Optional<std::vector<std::string>> ListScanners(ManagerProxy* manager) {
-  brillo::ErrorPtr error;
-  std::vector<uint8_t> out_scanner_list;
-  if (!manager->ListScanners(&out_scanner_list, &error)) {
-    LOG(ERROR) << "ListScanners failed: " << error->GetMessage();
-    return base::nullopt;
-  }
-
   lorgnette::ListScannersResponse scanner_list;
-  if (!scanner_list.ParseFromArray(out_scanner_list.data(),
-                                   out_scanner_list.size())) {
-    LOG(ERROR) << "Failed to parse ListScanners response";
-    return base::nullopt;
+  if (!manager->ListScanners(&scanner_list, &error, kListScannersTimeoutMs)) {
+    LOG(ERROR) << "ListScanners failed: " << error->GetMessage();
+    return std::nullopt;
   }
 
   std::vector<std::string> scanner_names;
@@ -348,21 +106,74 @@ base::Optional<std::vector<std::string>> ListScanners(ManagerProxy* manager) {
   return scanner_names;
 }
 
-base::Optional<lorgnette::ScannerCapabilities> GetScannerCapabilities(
+std::optional<lorgnette::ScannerCapabilities> GetScannerCapabilities(
     ManagerProxy* manager, const std::string& scanner_name) {
   brillo::ErrorPtr error;
-  std::vector<uint8_t> serialized;
-  if (!manager->GetScannerCapabilities(scanner_name, &serialized, &error)) {
+  lorgnette::ScannerCapabilities capabilities;
+  if (!manager->GetScannerCapabilities(scanner_name, &capabilities, &error)) {
     LOG(ERROR) << "GetScannerCapabilities failed: " << error->GetMessage();
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  lorgnette::ScannerCapabilities capabilities;
-  if (!capabilities.ParseFromArray(serialized.data(), serialized.size())) {
-    LOG(ERROR) << "Failed to parse ScannerCapabilities response";
-    return base::nullopt;
-  }
   return capabilities;
+}
+
+std::optional<lorgnette::ScannerConfig> OpenScanner(
+    ManagerProxy* manager, const std::string& scanner_name) {
+  brillo::ErrorPtr error;
+  lorgnette::OpenScannerRequest open_request;
+  open_request.mutable_scanner_id()->set_connection_string(scanner_name);
+  open_request.set_client_id("lorgnette_cli");
+  lorgnette::OpenScannerResponse open_response;
+  if (!manager->OpenScanner(open_request, &open_response, &error)) {
+    LOG(ERROR) << "OpenScanner failed: " << error->GetMessage();
+    return std::nullopt;
+  }
+  if (open_response.result() != lorgnette::OPERATION_RESULT_SUCCESS) {
+    LOG(ERROR) << "OpenScanner returned error result "
+               << lorgnette::OperationResult_Name(open_response.result());
+    return std::nullopt;
+  }
+  return open_response.config();
+}
+
+void CloseScanner(ManagerProxy* manager,
+                  const lorgnette::ScannerHandle& scanner) {
+  brillo::ErrorPtr error;
+  lorgnette::CloseScannerRequest close_request;
+  *close_request.mutable_scanner() = scanner;
+  lorgnette::CloseScannerResponse close_response;
+  if (!manager->CloseScanner(close_request, &close_response, &error)) {
+    LOG(WARNING) << "CloseScanner failed: " << error->GetMessage();
+    return;
+  }
+  if (close_response.result() != lorgnette::OPERATION_RESULT_SUCCESS) {
+    LOG(WARNING) << "CloseScanner returned error result "
+                 << lorgnette::OperationResult_Name(close_response.result());
+  }
+}
+
+std::optional<lorgnette::ScannerConfig> SetScannerOptions(
+    ManagerProxy* manager, const lorgnette::SetOptionsRequest& request) {
+  brillo::ErrorPtr error;
+  lorgnette::SetOptionsResponse response;
+  if (!manager->SetOptions(request, &response, &error)) {
+    LOG(ERROR) << "SetOptions failed: " << error->GetMessage();
+    return std::nullopt;
+  }
+  for (const auto& [option, result] : response.results()) {
+    if (result != lorgnette::OPERATION_RESULT_SUCCESS) {
+      LOG(WARNING) << "SetOptions returned error result for " << option << ": "
+                   << lorgnette::OperationResult_Name(result);
+    }
+    // Fall through even if some options failed.
+  }
+  return response.config();
+}
+
+// RoundThousandth will round the input number at the thousandth place
+double RoundThousandth(double num) {
+  return round(num * 1000) / 1000.0;
 }
 
 void PrintScannerCapabilities(
@@ -374,8 +185,9 @@ void PrintScannerCapabilities(
     std::cout << "\t" << source.name() << " ("
               << lorgnette::SourceType_Name(source.type()) << ")" << std::endl;
     if (source.has_area()) {
-      std::cout << "\t\t" << source.area().width() << "mm wide by "
-                << source.area().height() << "mm tall" << std::endl;
+      std::cout << "\t\t" << RoundThousandth(source.area().width())
+                << "mm wide by " << RoundThousandth(source.area().height())
+                << "mm tall" << std::endl;
     }
     std::cout << "\t\tResolutions:" << std::endl;
     for (uint32_t resolution : source.resolutions()) {
@@ -389,24 +201,24 @@ void PrintScannerCapabilities(
   }
 }
 
-base::Optional<std::vector<std::string>> ReadAirscanOutput(
+std::optional<std::vector<std::string>> ReadAirscanOutput(
     brillo::ProcessImpl* discover) {
   base::File discover_output(discover->GetPipe(STDOUT_FILENO));
   if (!discover_output.IsValid()) {
     LOG(ERROR) << "Failed to open airscan-discover output pipe";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   int ret = discover->Wait();
   if (ret != 0) {
     LOG(ERROR) << "airscan-discover exited with error " << ret;
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  base::Optional<std::vector<std::string>> lines = ReadLines(&discover_output);
+  std::optional<std::vector<std::string>> lines = ReadLines(&discover_output);
   if (!lines.has_value()) {
     LOG(ERROR) << "Failed to read output from airscan-discover";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   std::vector<std::string> scanner_names;
@@ -451,7 +263,7 @@ class ScanRunner {
   ManagerProxy* manager_;  // Not owned.
   uint32_t resolution_;
   lorgnette::SourceType source_;
-  base::Optional<lorgnette::ScanRegion> region_;
+  std::optional<lorgnette::ScanRegion> region_;
   lorgnette::ColorMode color_mode_;
   lorgnette::ImageFormat image_format_;
 };
@@ -459,7 +271,7 @@ class ScanRunner {
 bool ScanRunner::RunScanner(const std::string& scanner,
                             const std::string& output_pattern) {
   std::cout << "Getting device capabilities for " << scanner << std::endl;
-  base::Optional<lorgnette::ScannerCapabilities> capabilities =
+  std::optional<lorgnette::ScannerCapabilities> capabilities =
       GetScannerCapabilities(manager_, scanner);
   if (!capabilities.has_value())
     return false;
@@ -474,7 +286,7 @@ bool ScanRunner::RunScanner(const std::string& scanner,
                     "Attempting to request it anyways.";
   }
 
-  base::Optional<lorgnette::DocumentSource> scan_source;
+  std::optional<lorgnette::DocumentSource> scan_source;
   for (const lorgnette::DocumentSource& source : capabilities->sources()) {
     if (source.type() == source_) {
       scan_source = source;
@@ -546,12 +358,11 @@ std::vector<std::string> BuildScannerList(ManagerProxy* manager) {
   }
 
   std::cout << "Getting scanner list." << std::endl;
-  base::Optional<std::vector<std::string>> sane_scanners =
-      ListScanners(manager);
+  std::optional<std::vector<std::string>> sane_scanners = ListScanners(manager);
   if (!sane_scanners.has_value())
     return {};
 
-  base::Optional<std::vector<std::string>> airscan_scanners =
+  std::optional<std::vector<std::string>> airscan_scanners =
       ReadAirscanOutput(&discover);
   if (!airscan_scanners.has_value())
     return {};
@@ -632,35 +443,47 @@ bool DoScan(std::unique_ptr<ManagerProxy> manager,
 
 std::string ScannerCapabilitiesToJson(
     const lorgnette::ScannerCapabilities& caps) {
-  base::Value caps_dict(base::Value::Type::DICTIONARY);
+  base::Value::Dict caps_dict;
 
   for (const lorgnette::DocumentSource& source : caps.sources()) {
-    base::Value source_dict(base::Value::Type::DICTIONARY);
-    source_dict.SetStringKey("Name", source.name());
+    base::Value::Dict source_dict;
+    source_dict.Set("Name", source.name());
     if (source.has_area()) {
-      base::Value area_dict(base::Value::Type::DICTIONARY);
-      area_dict.SetDoubleKey("Width", source.area().width());
-      area_dict.SetDoubleKey("Height", source.area().height());
-      source_dict.SetKey("ScannableArea", std::move(area_dict));
+      base::Value::Dict area_dict;
+      area_dict.Set("Width", RoundThousandth(source.area().width()));
+      area_dict.Set("Height", RoundThousandth(source.area().height()));
+      source_dict.Set("ScannableArea", std::move(area_dict));
     }
-    base::Value resolution_list(base::Value::Type::LIST);
+    base::Value::List resolution_list;
     for (const uint32_t resolution : source.resolutions()) {
       resolution_list.Append(static_cast<int>(resolution));
     }
-    source_dict.SetKey("Resolutions", std::move(resolution_list));
-    base::Value color_mode_list(base::Value::Type::LIST);
+    source_dict.Set("Resolutions", std::move(resolution_list));
+    base::Value::List color_mode_list;
     for (const int color_mode : source.color_modes()) {
       color_mode_list.Append(lorgnette::ColorMode_Name(color_mode));
     }
-    source_dict.SetKey("ColorModes", std::move(color_mode_list));
+    source_dict.Set("ColorModes", std::move(color_mode_list));
 
-    caps_dict.SetKey(lorgnette::SourceType_Name(source.type()),
-                     std::move(source_dict));
+    caps_dict.Set(lorgnette::SourceType_Name(source.type()),
+                  std::move(source_dict));
   }
 
   std::string json;
   base::JSONWriter::Write(caps_dict, &json);
   return json;
+}
+
+lorgnette::SetDebugConfigResponse SetLorgnetteDebug(ManagerProxy* manager,
+                                                    bool enabled) {
+  lorgnette::SetDebugConfigRequest request;
+  request.set_enabled(enabled);
+  lorgnette::SetDebugConfigResponse response;
+  brillo::ErrorPtr error;
+  if (!manager->SetDebugConfig(request, &response, &error)) {
+    LOG(ERROR) << "Failed to call SetDebugConfig: " << error->GetMessage();
+  }
+  return response;
 }
 
 }  // namespace
@@ -695,9 +518,22 @@ int main(int argc, char** argv) {
                 "the selected image format.");
   DEFINE_string(image_format, "PNG",
                 "Image format for the output file (PNG or JPG)");
+  DEFINE_bool(debug, false,
+              "Enable lorgnette debug logging for this operation.  The "
+              "previous debug value will be restored when lorgnette_cli "
+              "exits.");
 
   // Cancel Scan options
   DEFINE_string(uuid, "", "UUID of the scan job to cancel.");
+
+  // show_config options
+  DEFINE_bool(show_inactive, false,
+              "Show inactive options in scanner config output.");
+  DEFINE_bool(show_advanced, false,
+              "Show advanced options in scanner config output.");
+
+  // discover options
+  DEFINE_bool(show_details, false, "Show full scanner info during discovery");
 
   // General scanner operations options.
   DEFINE_string(scanner, "",
@@ -709,14 +545,22 @@ int main(int argc, char** argv) {
 
   const std::vector<std::string>& args =
       base::CommandLine::ForCurrentProcess()->GetArgs();
-  if (args.size() != 1 || (args[0] != "scan" && args[0] != "cancel_scan" &&
-                           args[0] != "list" && args[0] != "get_json_caps")) {
-    std::cerr << "usage: lorgnette_cli [list|scan|cancel_scan|get_json_caps] "
-                 "[FLAGS...]"
-              << std::endl;
+  if (args.size() < 1 || !base::Contains(kCommandMap, args[0])) {
+    std::cerr << "Usage: lorgnette_cli "
+              << base::JoinString(MapKeys<std::string_view>(kCommandMap), "|")
+              << " [FLAGS...]" << std::endl;
     return 1;
   }
-  const std::string& command = args[0];
+  Command command = kCommandMap.at(args[0]);
+
+  base::StringPairs scan_options = lorgnette::cli::GetScanOptions(args);
+  if (scan_options.size() > 0) {
+    if (command != Command::kAdvancedScan && command != Command::kShowConfig) {
+      std::cerr << "set_options can only be used with "
+                << "advanced_scan and show_config" << std::endl;
+      return 1;
+    }
+  }
 
   // Create a task executor for this thread. This will automatically be bound
   // to the current thread so that it is usable by other code for posting tasks.
@@ -733,99 +577,203 @@ int main(int argc, char** argv) {
   auto manager =
       std::make_unique<ManagerProxy>(bus, lorgnette::kManagerServiceName);
 
-  if (command == "scan") {
-    if (!FLAGS_uuid.empty()) {
-      LOG(ERROR) << "--uuid flag is not supported in scan mode.";
-      return 1;
+  base::ScopedClosureRunner debug_cleanup;
+  if (FLAGS_debug) {
+    lorgnette::SetDebugConfigResponse response =
+        SetLorgnetteDebug(manager.get(), true);
+    if (!response.old_enabled()) {
+      debug_cleanup.ReplaceClosure(base::BindOnce(
+          [](ManagerProxy* manager) { SetLorgnetteDebug(manager, false); },
+          manager.get()));
     }
-
-    base::Optional<lorgnette::SourceType> source_type =
-        GuessSourceType(FLAGS_scan_source);
-
-    if (!source_type.has_value()) {
-      LOG(ERROR)
-          << "Unknown source type: \"" << FLAGS_scan_source
-          << "\". Supported values are \"Platen\",\"ADF\", \"ADF Simplex\""
-             ", and \"ADF Duplex\"";
-      return 1;
+    if (!response.success()) {
+      LOG(WARNING) << "Failed to enable lorgnette debugging.";
     }
-
-    lorgnette::ScanRegion region;
-    region.set_top_left_x(FLAGS_top_left_x);
-    region.set_top_left_y(FLAGS_top_left_y);
-    region.set_bottom_right_x(FLAGS_bottom_right_x);
-    region.set_bottom_right_y(FLAGS_bottom_right_y);
-
-    std::string color_mode_string = base::ToLowerASCII(FLAGS_color_mode);
-    lorgnette::ColorMode color_mode;
-    if (color_mode_string == "color") {
-      color_mode = lorgnette::MODE_COLOR;
-    } else if (color_mode_string == "grayscale" ||
-               color_mode_string == "gray") {
-      color_mode = lorgnette::MODE_GRAYSCALE;
-    } else if (color_mode_string == "lineart" || color_mode_string == "bw") {
-      color_mode = lorgnette::MODE_LINEART;
-    } else {
-      LOG(ERROR) << "Unknown color mode: \"" << color_mode_string
-                 << "\". Supported values are \"Color\", \"Grayscale\", and "
-                    "\"Lineart\"";
-      return 1;
-    }
-
-    std::string image_format_string = base::ToLowerASCII(FLAGS_image_format);
-    lorgnette::ImageFormat image_format;
-    if (image_format_string == "png") {
-      image_format = lorgnette::IMAGE_FORMAT_PNG;
-    } else if (image_format_string == "jpg") {
-      image_format = lorgnette::IMAGE_FORMAT_JPEG;
-    } else {
-      LOG(ERROR) << "Unknown image format: \"" << image_format_string
-                 << "\". Supported values are \"PNG\" and \"JPG\"";
-      return 1;
-    }
-
-    bool success = DoScan(std::move(manager), FLAGS_scan_resolution,
-                          source_type.value(), region, color_mode, image_format,
-                          FLAGS_all, FLAGS_scanner, FLAGS_output);
-    return success ? 0 : 1;
-  } else if (command == "list") {
-    std::vector<std::string> scanners = BuildScannerList(manager.get());
-
-    std::cout << "Detected scanners:" << std::endl;
-    for (int i = 0; i < scanners.size(); i++) {
-      std::cout << scanners[i] << std::endl;
-    }
-
-  } else if (command == "cancel_scan") {
-    if (FLAGS_uuid.empty()) {
-      LOG(ERROR) << "Must specify scan uuid to cancel using --uuid=[...]";
-      return 1;
-    }
-
-    base::Optional<lorgnette::CancelScanResponse> response =
-        CancelScan(manager.get(), FLAGS_uuid);
-    if (!response.has_value())
-      return 1;
-
-    if (!response->success()) {
-      LOG(ERROR) << "Failed to cancel scan: " << response->failure_reason();
-      return 1;
-    }
-    return 0;
-  } else if (command == "get_json_caps") {
-    if (FLAGS_scanner.empty()) {
-      LOG(ERROR) << "Must specify scanner to get capabilities";
-      return 1;
-    }
-
-    base::Optional<lorgnette::ScannerCapabilities> capabilities =
-        GetScannerCapabilities(manager.get(), FLAGS_scanner);
-    if (!capabilities.has_value()) {
-      LOG(ERROR) << "Received null capabilities from lorgnette";
-      return 1;
-    }
-
-    std::cout << ScannerCapabilitiesToJson(capabilities.value());
-    return 0;
   }
+
+  switch (command) {
+    case Command::kScan: {
+      if (!FLAGS_uuid.empty()) {
+        LOG(ERROR) << "--uuid flag is not supported in scan mode.";
+        return 1;
+      }
+
+      std::optional<lorgnette::SourceType> source_type =
+          GuessSourceType(FLAGS_scan_source);
+
+      if (!source_type.has_value()) {
+        LOG(ERROR)
+            << "Unknown source type: \"" << FLAGS_scan_source
+            << "\". Supported values are \"Platen\",\"ADF\", \"ADF Simplex\""
+               ", and \"ADF Duplex\"";
+        return 1;
+      }
+
+      lorgnette::ScanRegion region;
+      region.set_top_left_x(FLAGS_top_left_x);
+      region.set_top_left_y(FLAGS_top_left_y);
+      region.set_bottom_right_x(FLAGS_bottom_right_x);
+      region.set_bottom_right_y(FLAGS_bottom_right_y);
+
+      std::string color_mode_string = base::ToLowerASCII(FLAGS_color_mode);
+      lorgnette::ColorMode color_mode;
+      if (color_mode_string == "color") {
+        color_mode = lorgnette::MODE_COLOR;
+      } else if (color_mode_string == "grayscale" ||
+                 color_mode_string == "gray") {
+        color_mode = lorgnette::MODE_GRAYSCALE;
+      } else if (color_mode_string == "lineart" || color_mode_string == "bw") {
+        color_mode = lorgnette::MODE_LINEART;
+      } else {
+        LOG(ERROR) << "Unknown color mode: \"" << color_mode_string
+                   << "\". Supported values are \"Color\", \"Grayscale\", and "
+                      "\"Lineart\"";
+        return 1;
+      }
+
+      std::string image_format_string = base::ToLowerASCII(FLAGS_image_format);
+      lorgnette::ImageFormat image_format;
+      if (image_format_string == "png") {
+        image_format = lorgnette::IMAGE_FORMAT_PNG;
+      } else if (image_format_string == "jpg") {
+        image_format = lorgnette::IMAGE_FORMAT_JPEG;
+      } else {
+        LOG(ERROR) << "Unknown image format: \"" << image_format_string
+                   << "\". Supported values are \"PNG\" and \"JPG\"";
+        return 1;
+      }
+
+      bool success =
+          DoScan(std::move(manager), FLAGS_scan_resolution, source_type.value(),
+                 region, color_mode, image_format, FLAGS_all, FLAGS_scanner,
+                 FLAGS_output);
+      return success ? 0 : 1;
+    }
+
+    case Command::kList: {
+      std::vector<std::string> scanners = BuildScannerList(manager.get());
+
+      std::cout << "Detected scanners:" << std::endl;
+      for (int i = 0; i < scanners.size(); i++) {
+        std::cout << scanners[i] << std::endl;
+      }
+      return 0;
+    }
+
+    case Command::kDiscover: {
+      std::cout << "Discovering scanners: " << std::endl;
+      base::RunLoop run_loop;
+      DiscoveryHandler handler(run_loop.QuitClosure(), manager.get());
+      if (!handler.WaitUntilConnected()) {
+        LOG(ERROR) << "Failed to set up ScannerListChangedSignal handler";
+        return 1;
+      }
+      handler.SetShowDetails(FLAGS_show_details);
+      handler.SetScannerPattern(FLAGS_scanner);
+      if (!handler.StartDiscovery()) {
+        LOG(ERROR) << "Failed to start discovery";
+        return 1;
+      }
+      run_loop.Run();
+      return 0;
+    }
+    case Command::kCancelScan: {
+      if (FLAGS_uuid.empty()) {
+        LOG(ERROR) << "Must specify scan uuid to cancel using --uuid=[...]";
+        return 1;
+      }
+
+      std::optional<lorgnette::CancelScanResponse> response =
+          CancelScan(manager.get(), FLAGS_uuid);
+      if (!response.has_value())
+        return 1;
+
+      if (!response->success()) {
+        LOG(ERROR) << "Failed to cancel scan: " << response->failure_reason();
+        return 1;
+      }
+      return 0;
+    }
+    case Command::kGetJsonCaps: {
+      if (FLAGS_scanner.empty()) {
+        LOG(ERROR) << "Must specify scanner to get capabilities";
+        return 1;
+      }
+
+      std::optional<lorgnette::ScannerCapabilities> capabilities =
+          GetScannerCapabilities(manager.get(), FLAGS_scanner);
+      if (!capabilities.has_value()) {
+        LOG(ERROR) << "Received null capabilities from lorgnette";
+        return 1;
+      }
+
+      std::cout << ScannerCapabilitiesToJson(capabilities.value());
+      return 0;
+    }
+    case Command::kShowConfig: {
+      if (FLAGS_scanner.empty()) {
+        LOG(ERROR) << "Must specify scanner to get its config";
+        return 1;
+      }
+
+      std::optional<lorgnette::ScannerConfig> config =
+          OpenScanner(manager.get(), FLAGS_scanner);
+      if (!config.has_value()) {
+        LOG(ERROR) << "Unable to open scanner " << FLAGS_scanner;
+        return 1;
+      }
+
+      if (scan_options.size()) {
+        std::optional<lorgnette::SetOptionsRequest> request =
+            lorgnette::cli::MakeSetOptionsRequest(config.value(), scan_options);
+        if (!request.has_value()) {
+          LOG(ERROR) << "Unable to parse set_options values";
+          return 1;
+        }
+
+        config = SetScannerOptions(manager.get(), request.value());
+        if (!config.has_value()) {
+          LOG(ERROR) << "Unable to set scanner options";
+          return 1;
+        }
+      }
+
+      CloseScanner(manager.get(), config->scanner());
+
+      lorgnette::cli::PrintScannerConfig(config.value(), FLAGS_show_inactive,
+                                         FLAGS_show_advanced, std::cout);
+      return 0;
+    }
+    case Command::kAdvancedScan: {
+      if (FLAGS_scanner.empty()) {
+        LOG(ERROR) << "Must specify scanner for advanced scan";
+        return 1;
+      }
+
+      std::string image_format_string = base::ToLowerASCII(FLAGS_image_format);
+      std::string mime_type;
+      if (image_format_string == "png") {
+        mime_type = "image/png";
+      } else if (image_format_string == "jpg") {
+        mime_type = "image/jpeg";
+      } else {
+        LOG(ERROR) << "Unknown image format: \"" << image_format_string
+                   << "\". Supported values are \"PNG\" and \"JPG\"";
+        return 1;
+      }
+
+      return lorgnette::cli::DoAdvancedScan(manager.get(), FLAGS_scanner,
+                                            scan_options, mime_type,
+                                            FLAGS_output)
+                 ? 0
+                 : 1;
+    }
+    case Command::kSetOptions: {
+      std::cerr << "set_options must come after the main command" << std::endl;
+      return 1;
+    }
+  }
+
+  NOTREACHED();
+  return 1;
 }

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,21 +6,21 @@
 #include <memory>
 #include <type_traits>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/grpc/async_grpc_client.h>
 #include <gmock/gmock.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <gtest/gtest.h>
 
-#include "diagnostics/common/protobuf_test_utils.h"
 #include "diagnostics/constants/grpc_constants.h"
 #include "diagnostics/dpsl/internal/dpsl_global_context_impl.h"
 #include "diagnostics/dpsl/internal/dpsl_rpc_server_impl.h"
 #include "diagnostics/dpsl/internal/dpsl_thread_context_impl.h"
+#include "diagnostics/dpsl/internal/protobuf_test_utils.h"
 #include "diagnostics/dpsl/internal/test_dpsl_background_thread.h"
 #include "diagnostics/dpsl/public/dpsl_global_context.h"
 #include "diagnostics/dpsl/public/dpsl_rpc_handler.h"
@@ -28,15 +28,14 @@
 #include "diagnostics/dpsl/public/dpsl_thread_context.h"
 #include "diagnostics/dpsl/test_utils/common.h"
 
-#include "wilco_dtc.grpc.pb.h"           // NOLINT(build/include)
-#include "wilco_dtc_supportd.grpc.pb.h"  // NOLINT(build/include)
+#include "wilco_dtc.grpc.pb.h"           // NOLINT(build/include_directory)
+#include "wilco_dtc_supportd.grpc.pb.h"  // NOLINT(build/include_directory)
 
 using testing::_;
 using testing::ReturnRef;
 using testing::StrictMock;
 
 namespace diagnostics {
-
 namespace {
 
 constexpr DpslRpcServer::GrpcServerUri kGrpcServerUriInvalidValue =
@@ -103,8 +102,6 @@ class MockDpslRpcHandler : public DpslRpcHandler {
               (const grpc_api::HandleBluetoothDataChangedRequest& request));
 };
 
-}  // namespace
-
 class DpslRpcServerImplBaseTest : public testing::Test {
  public:
   DpslRpcServerImplBaseTest() = default;
@@ -163,9 +160,16 @@ TEST_F(DpslRpcServerImplBaseDeathTest, CreateWithNullRpcHandler) {
 }
 
 TEST_F(DpslRpcServerImplBaseDeathTest, CreateWithInvalidServerUri) {
+#ifdef NDEBUG
+  // In release builds the error is reported by returning null.
+  EXPECT_FALSE(DpslRpcServer::Create(thread_context_.get(), &mock_handler_,
+                                     kGrpcServerUriInvalidValue));
+#else
+  // In debug builds an assertion crash is expected.
   EXPECT_DEATH(DpslRpcServer::Create(thread_context_.get(), &mock_handler_,
                                      kGrpcServerUriInvalidValue),
                "Unexpected GrpcServerUri");
+#endif
 }
 
 TEST_F(DpslRpcServerImplBaseDeathTest, MultiThreadInvalidThreadContext) {
@@ -249,11 +253,12 @@ class DpslRpcServerImplUnixSocketTest : public DpslRpcServerImplTest {
 
     wilco_dtc_grpc_client_ =
         std::make_unique<brillo::AsyncGrpcClient<grpc_api::WilcoDtc>>(
-            base::ThreadTaskRunnerHandle::Get(), grpc_server_uri_string());
+            base::SingleThreadTaskRunner::GetCurrentDefault(),
+            grpc_server_uri_string());
   }
 
   void TearDown() override {
-    wilco_dtc_grpc_client_->ShutDown(base::Bind(
+    wilco_dtc_grpc_client_->ShutDown(base::BindRepeating(
         [](DpslThreadContext* thread_context) {
           ASSERT_TRUE(thread_context);
           thread_context->QuitEventLoop();
@@ -277,7 +282,7 @@ class DpslRpcServerImplUnixSocketTest : public DpslRpcServerImplTest {
                                        const ProtoResponse& response) {
     wilco_dtc_grpc_client_->CallRpc(
         client_rpc_ptr, request,
-        base::Bind(
+        base::BindOnce(
             [](DpslThreadContext* thread_context,
                const ProtoResponse& expected_response, grpc::Status status,
                std::unique_ptr<ProtoResponse> response) {
@@ -310,7 +315,7 @@ TEST_P(DpslRpcServerImplUnixSocketTest, HandleMessageFromUi) {
       DpslRpcServer::GrpcServerUri::kUiMessageReceiverVmVsock) {
     wilco_dtc_grpc_client_->CallRpc(
         &grpc_api::WilcoDtc::Stub::AsyncHandleMessageFromUi, request,
-        base::Bind(
+        base::BindOnce(
             [](DpslThreadContext* thread_context, grpc::Status status,
                std::unique_ptr<grpc_api::HandleMessageFromUiResponse>
                    response) {
@@ -399,4 +404,5 @@ INSTANTIATE_TEST_SUITE_P(
     testing::Values(DpslRpcServer::GrpcServerUri::kVmVsock,
                     DpslRpcServer::GrpcServerUri::kUiMessageReceiverVmVsock));
 
+}  // namespace
 }  // namespace diagnostics

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define POWER_MANAGER_COMMON_ACTION_RECORDER_H_
 
 #include <string>
-
-#include <base/macros.h>
 
 namespace power_manager {
 
@@ -25,11 +23,12 @@ std::string JoinActions(const char* action, ...);
 // are made by the code being tested.
 class ActionRecorder {
  public:
-  ActionRecorder();
+  ActionRecorder() = default;
+
   ActionRecorder(const ActionRecorder&) = delete;
   ActionRecorder& operator=(const ActionRecorder&) = delete;
 
-  virtual ~ActionRecorder();
+  virtual ~ActionRecorder() = default;
 
   // Returns a comma-separated string describing the actions that were
   // requested since the previous call to GetActions() (i.e. results are

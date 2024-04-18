@@ -1,13 +1,14 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <base/check.h>
 #include <brillo/http/http_transport_fake.h>
 
+#include <optional>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/json/json_reader.h>
 #include <base/json/json_writer.h>
 #include <base/logging.h>
@@ -65,21 +66,21 @@ std::shared_ptr<http::Connection> Transport::CreateConnection(
 }
 
 void Transport::RunCallbackAsync(const base::Location& /* from_here */,
-                                 const base::Closure& callback) {
+                                 base::OnceClosure callback) {
   if (!async_) {
-    callback.Run();
+    std::move(callback).Run();
     return;
   }
-  async_callback_queue_.push(callback);
+  async_callback_queue_.push(std::move(callback));
 }
 
 bool Transport::HandleOneAsyncRequest() {
   if (async_callback_queue_.empty())
     return false;
 
-  base::Closure callback = async_callback_queue_.front();
+  base::OnceClosure callback = std::move(async_callback_queue_.front());
   async_callback_queue_.pop();
-  callback.Run();
+  std::move(callback).Run();
   return true;
 }
 
@@ -90,8 +91,8 @@ void Transport::HandleAllAsyncRequests() {
 
 http::RequestID Transport::StartAsyncTransfer(
     http::Connection* /* connection */,
-    const SuccessCallback& /* success_callback */,
-    const ErrorCallback& /* error_callback */) {
+    SuccessCallback /* success_callback */,
+    ErrorCallback /* error_callback */) {
   // Fake transport doesn't use this method.
   LOG(FATAL) << "This method should not be called on fake transport";
   return 0;
@@ -127,7 +128,7 @@ void Transport::AddSimpleReplyHandler(const std::string& url,
     response->ReplyText(status_code, reply_text, mime_type);
   };
   AddHandler(url, method,
-             base::Bind(handler, status_code, reply_text, mime_type));
+             base::BindRepeating(handler, status_code, reply_text, mime_type));
 }
 
 Transport::HandlerCallback Transport::GetHandler(
@@ -171,15 +172,15 @@ std::string ServerRequestResponseBase::GetDataAsString() const {
   return std::string(chars, data_.size());
 }
 
-base::Optional<base::Value> ServerRequestResponseBase::GetDataAsJson() const {
+std::optional<base::Value> ServerRequestResponseBase::GetDataAsJson() const {
   if (brillo::mime::RemoveParameters(GetHeader(request_header::kContentType)) ==
       brillo::mime::application::kJson) {
     auto value = base::JSONReader::Read(GetDataAsString());
     if (!value->is_dict())
-      return base::nullopt;
+      return std::nullopt;
     return value;
   }
-  return base::nullopt;
+  return std::nullopt;
 }
 
 std::string ServerRequestResponseBase::GetDataAsNormalizedJsonString() const {
@@ -247,10 +248,10 @@ void ServerResponse::ReplyText(int status_code,
   Reply(status_code, text.data(), text.size(), mime_type);
 }
 
-void ServerResponse::ReplyJson(int status_code, const base::Value* json) {
+void ServerResponse::ReplyJson(int status_code, const base::ValueView json) {
   std::string text;
   base::JSONWriter::WriteWithOptions(
-      *json, base::JSONWriter::OPTIONS_PRETTY_PRINT, &text);
+      json, base::JSONWriter::OPTIONS_PRETTY_PRINT, &text);
   std::string mime_type = brillo::mime::AppendParameter(
       brillo::mime::application::kJson, brillo::mime::parameters::kCharset,
       "utf-8");
@@ -259,11 +260,11 @@ void ServerResponse::ReplyJson(int status_code, const base::Value* json) {
 
 void ServerResponse::ReplyJson(int status_code,
                                const http::FormFieldList& fields) {
-  base::Value json(base::Value::Type::DICTIONARY);
+  base::Value::Dict json;
   for (const auto& pair : fields) {
-    json.SetStringPath(pair.first, pair.second);
+    json.SetByDottedPath(pair.first, pair.second);
   }
-  ReplyJson(status_code, &json);
+  ReplyJson(status_code, json);
 }
 
 std::string ServerResponse::GetStatusText() const {

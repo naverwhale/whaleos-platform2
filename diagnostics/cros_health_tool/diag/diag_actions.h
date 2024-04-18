@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,15 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
-#include <base/optional.h>
 #include <base/time/default_tick_clock.h>
 #include <base/time/tick_clock.h>
-#include <base/time/time.h>
+#include <mojo/public/cpp/bindings/remote.h>
 
-#include "diagnostics/cros_healthd_mojo_adapter/cros_healthd_mojo_adapter.h"
+#include "diagnostics/mojom/public/cros_healthd.mojom.h"
 
 namespace diagnostics {
 
@@ -23,13 +24,7 @@ namespace diagnostics {
 // routine at a time.
 class DiagActions final {
  public:
-  // The two TimeDelta inputs are used to configure this instance's polling
-  // behavior - the time between polls, and the maximum time before giving up on
-  // a running routine.
-  // Override |tick_clock| for testing only.
-  DiagActions(base::TimeDelta polling_interval,
-              base::TimeDelta maximum_execution_time,
-              const base::TickClock* tick_clock = nullptr);
+  DiagActions();
   DiagActions(const DiagActions&) = delete;
   DiagActions& operator=(const DiagActions&) = delete;
   ~DiagActions();
@@ -43,50 +38,62 @@ class DiagActions final {
   // Note that this does not mean the routine succeeded, only that it started,
   // ran, and was removed.
   bool ActionRunAcPowerRoutine(
-      chromeos::cros_healthd::mojom::AcPowerStatusEnum expected_status,
-      const base::Optional<std::string>& expected_power_type);
+      ash::cros_healthd::mojom::AcPowerStatusEnum expected_status,
+      const std::optional<std::string>& expected_power_type);
   bool ActionRunBatteryCapacityRoutine();
-  bool ActionRunBatteryChargeRoutine(base::TimeDelta exec_duration,
+  bool ActionRunBatteryChargeRoutine(uint32_t length_seconds,
                                      uint32_t minimum_charge_percent_required);
   bool ActionRunBatteryDischargeRoutine(
-      base::TimeDelta exec_duration,
-      uint32_t maximum_discharge_percent_allowed);
+      uint32_t length_seconds, uint32_t maximum_discharge_percent_allowed);
   bool ActionRunBatteryHealthRoutine();
   bool ActionRunCaptivePortalRoutine();
-  bool ActionRunCpuCacheRoutine(
-      const base::Optional<base::TimeDelta>& exec_duration);
-  bool ActionRunCpuStressRoutine(
-      const base::Optional<base::TimeDelta>& exec_duration);
+  bool ActionRunCpuCacheRoutine(const std::optional<uint32_t>& length_seconds);
+  bool ActionRunCpuStressRoutine(const std::optional<uint32_t>& length_seconds);
   bool ActionRunDiskReadRoutine(
-      chromeos::cros_healthd::mojom::DiskReadRoutineTypeEnum type,
-      base::TimeDelta exec_duration,
+      ash::cros_healthd::mojom::DiskReadRoutineTypeEnum type,
+      uint32_t length_seconds,
       uint32_t file_size_mb);
   bool ActionRunDnsLatencyRoutine();
   bool ActionRunDnsResolutionRoutine();
   bool ActionRunDnsResolverPresentRoutine();
   bool ActionRunFloatingPointAccuracyRoutine(
-      const base::Optional<base::TimeDelta>& exec_duration);
+      const std::optional<uint32_t>& length_seconds);
   bool ActionRunGatewayCanBePingedRoutine();
   bool ActionRunHasSecureWiFiConnectionRoutine();
   bool ActionRunHttpFirewallRoutine();
   bool ActionRunHttpsFirewallRoutine();
   bool ActionRunHttpsLatencyRoutine();
   bool ActionRunLanConnectivityRoutine();
-  bool ActionRunMemoryRoutine();
+  bool ActionRunMemoryRoutine(std::optional<uint32_t> max_testing_mem_kib);
   bool ActionRunNvmeSelfTestRoutine(
-      chromeos::cros_healthd::mojom::NvmeSelfTestTypeEnum nvme_self_test_type);
-  bool ActionRunNvmeWearLevelRoutine(uint32_t wear_level_threshold);
+      ash::cros_healthd::mojom::NvmeSelfTestTypeEnum nvme_self_test_type);
+  bool ActionRunNvmeWearLevelRoutine(
+      const std::optional<uint32_t>& wear_level_threshold);
   bool ActionRunPrimeSearchRoutine(
-      const base::Optional<base::TimeDelta>& exec_duration);
+      const std::optional<uint32_t>& length_seconds);
   bool ActionRunSignalStrengthRoutine();
-  bool ActionRunSmartctlCheckRoutine();
-  bool ActionRunUrandomRoutine(
-      const base::Optional<base::TimeDelta>& length_seconds);
+  bool ActionRunSmartctlCheckRoutine(
+      const std::optional<uint32_t>& percentage_used_threshold);
+  bool ActionRunUrandomRoutine(const std::optional<uint32_t>& length_seconds);
   bool ActionRunVideoConferencingRoutine(
-      const base::Optional<std::string>& stun_server_hostname);
+      const std::optional<std::string>& stun_server_hostname);
   bool ActionRunArcHttpRoutine();
   bool ActionRunArcPingRoutine();
   bool ActionRunArcDnsResolutionRoutine();
+  bool ActionRunSensitiveSensorRoutine();
+  bool ActionRunFingerprintRoutine();
+  bool ActionRunFingerprintAliveRoutine();
+  bool ActionRunPrivacyScreenRoutine(bool target_state);
+  bool ActionRunEmmcLifetimeRoutine();
+  bool ActionRunBluetoothPowerRoutine();
+  bool ActionRunBluetoothDiscoveryRoutine();
+  bool ActionRunBluetoothScanningRoutine(
+      const std::optional<uint32_t>& length_seconds);
+  bool ActionRunBluetoothPairingRoutine(const std::string& peripheral_id);
+  bool ActionRunPowerButtonRoutine(uint32_t timeout_seconds);
+  bool ActionRunAudioDriverRoutine();
+  bool ActionRunUfsLifetimeRoutine();
+  bool ActionRunFanRoutine();
 
   // Cancels the next routine run, when that routine reports a progress percent
   // greater than or equal to |percent|. Should be called before running the
@@ -98,7 +105,7 @@ class DiagActions final {
   // the routine and then polls for the routine's result. Returns true if the
   // routine was invoked without error, or false otherwise.
   bool ProcessRoutineResponse(
-      const chromeos::cros_healthd::mojom::RunRoutineResponsePtr& response);
+      const ash::cros_healthd::mojom::RunRoutineResponsePtr& response);
   // Helper function to determine when a routine has finished. Also does any
   // necessary cleanup.
   bool PollRoutineAndProcessResult();
@@ -106,34 +113,38 @@ class DiagActions final {
   // input. After receiving input, resets the polling time and continues to
   // poll.
   bool ProcessInteractiveResultAndContinue(
-      chromeos::cros_healthd::mojom::InteractiveRoutineUpdatePtr
-          interactive_result);
+      ash::cros_healthd::mojom::InteractiveRoutineUpdatePtr interactive_result);
   // Displays information from a noninteractive routine update and removes the
   // routine corresponding to |id_|.
   bool ProcessNonInteractiveResultAndEnd(
-      chromeos::cros_healthd::mojom::NonInteractiveRoutineUpdatePtr
+      ash::cros_healthd::mojom::NonInteractiveRoutineUpdatePtr
           noninteractive_result);
   // Attempts to remove the routine corresponding to |id_|.
   void RemoveRoutine();
   // Helper function to print a routine |status| to stdout. Returns true if
   // |status| is known and false otherwise.
   bool PrintStatus(
-      chromeos::cros_healthd::mojom::DiagnosticRoutineStatusEnum status);
+      ash::cros_healthd::mojom::DiagnosticRoutineStatusEnum status);
+  // Gets an update for the specified routine.
+  ash::cros_healthd::mojom::RoutineUpdatePtr GetRoutineUpdate(
+      int32_t id,
+      ash::cros_healthd::mojom::DiagnosticRoutineCommandEnum command,
+      bool include_output);
+  // Returns which routines are available on the platform.
+  // TODO(b/237508808): Determine whether this function should be changed.
+  std::optional<std::vector<ash::cros_healthd::mojom::DiagnosticRoutineEnum>>
+  GetAvailableRoutines();
 
-  // Used to send mojo requests to cros_healthd.
-  std::unique_ptr<CrosHealthdMojoAdapter> adapter_;
+  // Diagnostics Service used to run routines from diag tool.
+  mojo::Remote<ash::cros_healthd::mojom::CrosHealthdDiagnosticsService>
+      cros_healthd_diagnostics_service_;
+
   // ID of the routine being run.
-  int32_t id_ = chromeos::cros_healthd::mojom::kFailedToStartId;
+  int32_t id_ = ash::cros_healthd::mojom::kFailedToStartId;
 
-  // If |force_cancel_| is true, the next routine run will be cancelled when its
-  // progress is greater than or equal to |cancellation_percent_|.
-  bool force_cancel_ = false;
-  uint32_t cancellation_percent_ = 0;
-
-  // Polling interval.
-  const base::TimeDelta kPollingInterval;
-  // Maximum time we're willing to wait for a routine to finish.
-  const base::TimeDelta kMaximumExecutionTime;
+  // If set, the next routine run will be cancelled when its progress is
+  // greater than or equal to |force_cancellation_percent_|.
+  std::optional<uint32_t> force_cancellation_percent_;
 
   // Tracks the passage of time.
   std::unique_ptr<base::DefaultTickClock> default_tick_clock_;

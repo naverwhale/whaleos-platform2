@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,25 +11,23 @@
 #include <map>
 #include <memory>
 
-#include <base/callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/weak_ptr.h>
 #include <dbus/bus.h>
 #include <dbus/exported_object.h>
 #include <dbus/message.h>
 
-namespace vm_tools {
-namespace seneschal {
+namespace vm_tools::seneschal {
 
 class Service final {
  public:
   // Creates a new Service instance.  |quit_closure| is posted to the TaskRunner
   // for the current thread when this process receives a SIGTERM.
-  static std::unique_ptr<Service> Create(base::Closure quit_closure);
+  static std::unique_ptr<Service> Create(base::OnceClosure quit_closure);
   ~Service() = default;
 
  private:
@@ -57,10 +55,9 @@ class Service final {
 
     // The root of this server.
     base::ScopedTempDir root_dir_;
-
   };
 
-  explicit Service(base::Closure quit_closure);
+  explicit Service(base::OnceClosure quit_closure);
   Service(const Service&) = delete;
   Service& operator=(const Service&) = delete;
 
@@ -93,7 +90,7 @@ class Service final {
 
   // The currently active 9p servers.
   std::map<uint32_t, ServerInfo> servers_;
-  uint32_t next_server_handle_;
+  uint32_t next_server_handle_ = 1;
 
   // File descriptor on which we will watch for signals.
   base::ScopedFD signal_fd_;
@@ -104,12 +101,11 @@ class Service final {
   dbus::ExportedObject* exported_object_;  // Owned by |bus_|.
 
   // Closure to be posted to the task runner when we receive a SIGTERM.
-  base::Closure quit_closure_;
+  base::OnceClosure quit_closure_;
 
   base::WeakPtrFactory<Service> weak_factory_;
 };
 
-}  // namespace seneschal
-}  // namespace vm_tools
+}  // namespace vm_tools::seneschal
 
 #endif  // VM_TOOLS_SENESCHAL_SERVICE_H_

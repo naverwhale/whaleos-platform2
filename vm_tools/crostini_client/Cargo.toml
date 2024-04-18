@@ -1,7 +1,7 @@
 [package]
 name = "crostini_client"
 version = "0.1.0"
-authors = ["The Chromium OS Authors"]
+authors = ["The ChromiumOS Authors"]
 build = "build.rs"
 edition = "2018"
 
@@ -17,10 +17,13 @@ overflow-checks = true
 [workspace]
 
 [dependencies]
-dbus = "0.8"
+base64 = "0.13.0"
+dbus = "0.9"
 getopts = "0.2"
 libc = "0.2.44"
-protobuf = "2.16"
+libchromeos = { path = "../../libchromeos-rs" } # provided by ebuild
+protobuf = "3.2"
+system_api = { path = "../../system_api" } # provided by ebuild
 
 [build-dependencies]
-protoc-rust = "2.16"
+protobuf-codegen = "3.2"

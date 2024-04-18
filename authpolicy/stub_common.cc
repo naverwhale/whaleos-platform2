@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,11 @@
 // For getresuid
 #include <unistd.h>
 
+#include <iterator>
+
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
-#include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <base/strings/utf_string_conversions.h>
 
@@ -60,7 +61,7 @@ const char kExpectOuUserPrincipal[] = "expect_ou@REALM.EXAMPLE.COM";
 const char kExpectedOuCreatecomputer[] =
     "ou=leaf,ou=\\ a\\\"b\\ ,ou=\\#123,ou=root,dc=REALM,dc=EXAMPLE,dc=COM";
 const char* kExpectedOuParts[] = {"leaf", " a\"b ", "#123", "root"};
-constexpr size_t kExpectedOuPartsSize = base::size(kExpectedOuParts);
+constexpr size_t kExpectedOuPartsSize = std::size(kExpectedOuParts);
 
 const char kDisplayName[] = "John Doe";
 const char kGivenName[] = "John";
@@ -200,7 +201,7 @@ void CheckMachinePassword(const std::string& password) {
 
 void TriggerSeccompFailure() {
   // If the tests start failing because this call got added to some seccomp
-  // file, switch to any other syscall that is not whitelisted.
+  // file, switch to any other syscall that is not allowlisted.
   uid_t unused_uid;
   getresuid(&unused_uid, &unused_uid, &unused_uid);
 }

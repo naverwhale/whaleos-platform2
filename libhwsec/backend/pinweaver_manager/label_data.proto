@@ -1,0 +1,18 @@
+// Copyright (c) 2023 NAVER Corp. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+syntax = "proto2";
+
+option optimize_for = LITE_RUNTIME;
+
+package hwsec;
+
+message LabelData {
+    optional bytes le_secret = 1;
+    optional bytes le_iv = 2;
+    optional bytes he_secret = 3;
+    optional bytes he_iv = 4;
+    optional bytes reset_secret = 5;
+    optional uint32 attempts = 6;
+}

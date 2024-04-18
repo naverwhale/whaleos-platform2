@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,9 +20,7 @@
 #include <base/files/file_path.h>
 #include <base/files/memory_mapped_file.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ptr_util.h>
-#include <base/stl_util.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
@@ -172,7 +170,7 @@ bool DecodePRegMultiStringValue(const std::vector<uint8_t>& data,
 // Decodes a value from a PReg file given as a uint8_t vector.
 bool DecodePRegValue(uint32_t type,
                      const std::vector<uint8_t>& data,
-                     std::unique_ptr<base::Value>* value) {
+                     base::Value& value) {
   std::string data_utf8;
   switch (type) {
     case REG_SZ:
@@ -180,13 +178,13 @@ bool DecodePRegValue(uint32_t type,
       if (!DecodePRegStringValue(data, &data_utf8)) {
         return false;
       }
-      value->reset(new base::Value(data_utf8));
+      value = base::Value(data_utf8);
       return true;
     case REG_MULTI_SZ:
       if (!DecodePRegMultiStringValue(data, &data_utf8)) {
         return false;
       }
-      value->reset(new base::Value(data_utf8));
+      value = base::Value(data_utf8);
       return true;
     case REG_DWORD_LITTLE_ENDIAN:
     case REG_DWORD_BIG_ENDIAN:
@@ -197,7 +195,7 @@ bool DecodePRegValue(uint32_t type,
         } else {
           val = base::ByteSwapToLE32(val);
         }
-        value->reset(new base::Value(static_cast<int>(val)));
+        value = base::Value(static_cast<int>(val));
         return true;
       } else {
         LOG(ERROR) << "Bad data size " << data.size();
@@ -270,15 +268,15 @@ void HandleRecord(const std::u16string& key_name,
   std::string value_name(base::UTF16ToUTF8(value));
   if (!base::StartsWith(value_name, kActionTriggerPrefix,
                         base::CompareCase::SENSITIVE)) {
-    std::unique_ptr<base::Value> data_value;
-    if (DecodePRegValue(type, data, &data_value))
+    base::Value data_value;
+    if (DecodePRegValue(type, data, data_value))
       dict->SetValue(value_name, std::move(data_value));
     return;
   }
 
   std::string data_utf8;
   std::string action_trigger(base::ToLowerASCII(
-      value_name.substr(base::size(kActionTriggerPrefix) - 1)));
+      value_name.substr(std::size(kActionTriggerPrefix) - 1)));
   if (action_trigger == kActionTriggerDeleteValues) {
     if (DecodePRegStringValue(data, &data_utf8)) {
       for (const std::string& data_value :
@@ -296,8 +294,8 @@ void HandleRecord(const std::u16string& key_name,
     }
   } else if (base::StartsWith(action_trigger, kActionTriggerDel,
                               base::CompareCase::SENSITIVE)) {
-    dict->RemoveValue(value_name.substr(base::size(kActionTriggerPrefix) - 1 +
-                                        base::size(kActionTriggerDel) - 1));
+    dict->RemoveValue(value_name.substr(std::size(kActionTriggerPrefix) - 1 +
+                                        std::size(kActionTriggerDel) - 1));
   } else if (base::StartsWith(action_trigger, kActionTriggerDelVals,
                               base::CompareCase::SENSITIVE)) {
     // Delete all values.
@@ -353,7 +351,7 @@ bool ReadDataInternal(const uint8_t* preg_data,
   }
 
   // Check the header.
-  const int kHeaderSize = base::size(kPRegFileHeader);
+  const int kHeaderSize = std::size(kPRegFileHeader);
   if (!preg_data || preg_data_size < kHeaderSize ||
       memcmp(kPRegFileHeader, preg_data, kHeaderSize) != 0) {
     LOG(ERROR) << "Bad PReg " << debug_name;

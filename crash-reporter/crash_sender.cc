@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,7 +18,9 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/string_piece.h>
 #include <base/time/default_clock.h>
+#include <brillo/array_utils.h>
 #include <brillo/syslog_logging.h>
 #include <libminijail.h>
 #include <metrics/metrics_library.h>
@@ -30,6 +32,19 @@
 #include "crash-reporter/util.h"
 
 namespace {
+
+// Does the CLI contain the dry run flag?
+bool IsDryRun(int argc, const char* argv[]) {
+  static constexpr base::StringPiece kDryRunFlag("--dry_run");
+
+  for (int i = 1; i < argc; ++i) {
+    if (kDryRunFlag == argv[i]) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 // Sets up the minijail sandbox.
 //
@@ -62,14 +77,63 @@ void SetUpSandbox(struct minijail* jail) {
   minijail_forward_signals(jail);
 }
 
+// Sets up the minijail sandbox for dry run in addition to the standard ones. It
+// bind-mounts as read-only directories that we know crash_sender shouldn't
+// write under the dry run mode.
+void SetUpSandboxForDryRun(struct minijail* jail) {
+  static constexpr auto kReadOnlyDirs = brillo::make_array<const char*>(
+      // Prevent modifying crash meta file directories
+      paths::kFallbackUserCrashDirectory, paths::kCryptohomeCrashDirectory,
+      paths::kSystemCrashDirectory,
+      // Prevent UMA reporting
+      "/var/lib");
+  for (const char* dir : kReadOnlyDirs) {
+    if (!base::PathExists(base::FilePath(dir))) {
+      // Some of the dirs may not exist and we don't bind-mount it if it
+      // doesn't exist. This suppresses noisy warnings from minijail:
+      //
+      // WARNING crash_sender[10928]:
+      // libminijail[10928]: realpath(/home/chronos/crash) failed: No such file
+      // or directory
+      // WARNING crash_sender[10928]: libminijail[10928]: path
+      // '/home/chronos/crash' is not a canonical path
+      // WARNING crash_sender[10928]: libminijail[10928]: src
+      // '/home/chronos/crash' is not a valid bind mount path
+      //
+      // We don't use `base::DirectoryExists` because, if the path exists and is
+      // not a directory, likely something's wrong.
+      continue;
+    }
+    // Recursively mount because some directories may contain mounted
+    // subdirectories, such as kCryptohomeCrashDirectory. It won't hurt if some
+    // directories don't contain mounted subdirectories, because the purpose is
+    // to make them read-only, not invisible.
+    PCHECK(0 == minijail_mount(jail, dir, dir, "none",
+                               /*flags=*/MS_RDONLY | MS_BIND | MS_REC));
+  }
+}
+
 // Runs the main function for the child process.
-int RunChildMain(int argc, char* argv[]) {
+int RunChildMain(int argc, const char* argv[]) {
   util::CommandLineFlags flags;
   util::ParseCommandLine(argc, argv, &flags);
 
   if (util::DoesPauseFileExist() && !flags.ignore_pause_file) {
-    LOG(INFO) << "Exiting early due to " << paths::kPauseCrashSending;
-    return EXIT_FAILURE;
+    // Ignore pause file in dry_run mode. This is a bit of a workaround for
+    // health.MonitorUnuploadedCrashEvent. We do it because:
+    // 1. The point of having the pause file is to avoid having crash_sender
+    //    interfere with running tests (e.g. by removing crashes that a test
+    //    expects to see). Having `crash_sender --dry_run` run to completion
+    //    will not interfere with non-cros_healthd tests.
+    // 2. The call to `crash_sender --dry_run` during the health tast tests
+    //    happens through enough layers that it's difficult to pipe a "this is
+    //    the call from a test" flag all the way through. And since it shouldn't
+    //    make a difference (point 1), we just allow all the calls from
+    //    cros_healthd to run even with the pause file.
+    if (!flags.dry_run) {
+      LOG(INFO) << "Exiting early due to " << paths::kPauseCrashSending;
+      return EXIT_FAILURE;
+    }
   }
 
   auto clock = std::make_unique<base::DefaultClock>();
@@ -79,8 +143,11 @@ int RunChildMain(int argc, char* argv[]) {
   } else if (flags.allow_dev_sending) {
     LOG(INFO) << "--dev flag present, ignore image checks and uploading "
               << "crashes to staging server at go/crash-staging";
+  } else if (flags.dry_run) {
+    LOG(INFO) << "--dry_run flag present, ignore image checks and will not "
+              << "actually upload to server.";
   } else {
-    // Normal mode (not test, not dev).
+    // Normal mode (not test, not dev, not dry run).
     if (util::IsTestImage() && !flags.force_upload_on_test_images) {
       LOG(INFO) << "Exiting early due to test image.";
       return EXIT_FAILURE;
@@ -95,11 +162,15 @@ int RunChildMain(int argc, char* argv[]) {
     options.max_crash_bytes = std::numeric_limits<int>::max();
   }
   if (flags.ignore_hold_off_time) {
-    options.hold_off_time = base::TimeDelta::FromSeconds(0);
+    options.hold_off_time = base::Seconds(0);
   }
   options.allow_dev_sending = flags.allow_dev_sending;
   options.test_mode = flags.test_mode;
+  options.upload_old_reports = flags.upload_old_reports;
   options.force_upload_on_test_images = flags.force_upload_on_test_images;
+  options.consent_already_checked_by_crash_reporter =
+      flags.consent_already_checked_by_crash_reporter;
+  options.dry_run = flags.dry_run;
   util::Sender sender(std::move(metrics_lib), std::move(clock), options);
 
   // If you add sigificant code past this point, consider updating
@@ -120,7 +191,9 @@ int RunChildMain(int argc, char* argv[]) {
 
   base::File lock_file(sender.AcquireLockFileOrDie());
   for (const auto& directory : crash_directories) {
-    util::RemoveOrphanedCrashFiles(directory);
+    if (!flags.dry_run) {
+      util::RemoveOrphanedCrashFiles(directory);
+    }
     sender.RemoveAndPickCrashFiles(directory, &reports_to_send);
   }
   lock_file.Close();
@@ -141,7 +214,7 @@ void CleanUp(void*) {
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, const char* argv[]) {
   // Log to syslog (/var/log/messages), and stderr if stdin is a tty.
   brillo::InitLog(brillo::kLogToSyslog | brillo::kLogToStderrIfTty);
   // Register the cleanup function to be called at exit.
@@ -151,6 +224,9 @@ int main(int argc, char* argv[]) {
   // Set up a sandbox, and jail the child process.
   ScopedMinijail jail(minijail_new());
   SetUpSandbox(jail.get());
+  if (IsDryRun(argc, argv)) {
+    SetUpSandboxForDryRun(jail.get());
+  }
   const pid_t pid = minijail_fork(jail.get());
 
   if (pid == 0)

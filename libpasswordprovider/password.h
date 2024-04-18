@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define LIBPASSWORDPROVIDER_PASSWORD_H_
 
 #include <memory>
-
-#include <base/macros.h>
 
 #include "libpasswordprovider/libpasswordprovider_export.h"
 

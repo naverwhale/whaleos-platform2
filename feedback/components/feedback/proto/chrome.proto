@@ -1,10 +1,12 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 syntax = "proto2";
 
 option optimize_for = LITE_RUNTIME;
+
+option go_package = "chromiumos/tast/local/bundles/cros/feedback/proto";
 
 package userfeedback;
 
@@ -40,8 +42,7 @@ message ChromeOsData {
   optional ChromeOsCategory category = 1 [default = OTHER];
 }
 
-message ChromeBrowserData{
-
+message ChromeBrowserData {
   enum ChromeBrowserCategory {
     PAGE_FORMATTING_OR_LAYOUT = 1;
     PAGES_NOT_LOADING = 2;
@@ -57,4 +58,3 @@ message ChromeBrowserData{
 
   optional ChromeBrowserCategory category = 1 [default = OTHER];
 }
-

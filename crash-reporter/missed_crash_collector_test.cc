@@ -1,16 +1,22 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/missed_crash_collector.h"
 
+#include <memory>
+
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library.h>
+#include <metrics/metrics_library_mock.h>
 
 #include "crash-reporter/test_util.h"
 
@@ -21,7 +27,11 @@ namespace {
 
 class MissedCrashCollectorMock : public MissedCrashCollector {
  public:
-  MissedCrashCollectorMock() : MissedCrashCollector() {}
+  MissedCrashCollectorMock()
+      : MissedCrashCollector(
+            base::MakeRefCounted<
+                base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+                std::make_unique<MetricsLibraryMock>())) {}
   MOCK_METHOD(void, SetUpDBus, (), (override));
 };
 
@@ -88,61 +98,16 @@ hello
   RunTestWithLogContents(kInput);
 }
 
-// Ensure our private ReadFILEToString handles files larger than
-// kDefaultChunkSize correctly.
-TEST(MissedCrashCollectorTest, LargeInput) {
-  std::string contents;
-  for (int i = 0; i < MissedCrashCollector::kDefaultChunkSize; ++i) {
-    base::StrAppend(&contents, {base::NumberToString(i), "|"});
-  }
-  // Make sure this doesn't overlap with the ExactMultiple test below.
-  ASSERT_NE(contents.size() % MissedCrashCollector::kDefaultChunkSize, 0);
-  ASSERT_NE(contents.size() % MissedCrashCollector::kDefaultChunkSize, 1);
-  ASSERT_NE(contents.size() % MissedCrashCollector::kDefaultChunkSize,
-            MissedCrashCollector::kDefaultChunkSize - 1);
-  RunTestWithLogContents(contents);
-}
+TEST(MissedCrashCollectorTest, ComputeSeverity_MissedCrashExecutable) {
+  MissedCrashCollector collector(
+      base::MakeRefCounted<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+          std::make_unique<MetricsLibraryMock>()));
+  CrashCollector::ComputedCrashSeverity computed_severity =
+      collector.ComputeSeverity("missed_crash");
 
-// Ensure our private ReadFILEToString handles files exactly equal to
-// kDefaultChunkSize in size.
-TEST(MissedCrashCollectorTest, OneChunk) {
-  std::string contents;
-  for (int i = 0; i < MissedCrashCollector::kDefaultChunkSize; ++i) {
-    base::StrAppend(&contents, {base::NumberToString(i), "|"});
-  }
-  contents.resize(MissedCrashCollector::kDefaultChunkSize);
-  RunTestWithLogContents(contents);
-}
-
-// Ensure our private ReadFILEToString handles files whose size is a multiple of
-// kDefaultChunkSize.
-TEST(MissedCrashCollectorTest, ExactMultiple) {
-  std::string contents;
-  for (int i = 0; i < 3 * MissedCrashCollector::kDefaultChunkSize; ++i) {
-    base::StrAppend(&contents, {base::NumberToString(i), "|"});
-  }
-  contents.resize(3 * MissedCrashCollector::kDefaultChunkSize);
-  RunTestWithLogContents(contents);
-}
-
-// Ensure our private ReadFILEToString handles files whose size is a 1 less
-// than a multiple of kDefaultChunkSize.
-TEST(MissedCrashCollectorTest, ExactMultipleLessOne) {
-  std::string contents;
-  for (int i = 0; i < 3 * MissedCrashCollector::kDefaultChunkSize; ++i) {
-    base::StrAppend(&contents, {base::NumberToString(i), "|"});
-  }
-  contents.resize(3 * MissedCrashCollector::kDefaultChunkSize - 1);
-  RunTestWithLogContents(contents);
-}
-
-// Ensure our private ReadFILEToString handles files whose size is a 1 greater
-// than a multiple of kDefaultChunkSize.
-TEST(MissedCrashCollectorTest, ExactMultiplePlusOne) {
-  std::string contents;
-  for (int i = 0; i < 3 * MissedCrashCollector::kDefaultChunkSize; ++i) {
-    base::StrAppend(&contents, {base::NumberToString(i), "|"});
-  }
-  contents.resize(3 * MissedCrashCollector::kDefaultChunkSize + 1);
-  RunTestWithLogContents(contents);
+  EXPECT_EQ(computed_severity.crash_severity,
+            CrashCollector::CrashSeverity::kInfo);
+  EXPECT_EQ(computed_severity.product_group,
+            CrashCollector::Product::kPlatform);
 }

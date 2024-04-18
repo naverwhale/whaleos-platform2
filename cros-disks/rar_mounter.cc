@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,11 +16,9 @@
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 
-#include "cros-disks/error_logger.h"
 #include "cros-disks/fuse_mounter.h"
 #include "cros-disks/metrics.h"
 #include "cros-disks/platform.h"
-#include "cros-disks/quote.h"
 
 namespace cros_disks {
 namespace {
@@ -34,44 +32,16 @@ RarMounter::RarMounter(const Platform* platform,
     : ArchiveMounter(platform,
                      process_reaper,
                      "rar",
+                     "rar",
                      metrics,
                      "Rar2fs",
                      {12,   // ERAR_BAD_DATA
                       22,   // ERAR_MISSING_PASSWORD
                       24},  // ERAR_BAD_PASSWORD
-                     std::move(sandbox_factory)) {}
+                     std::move(sandbox_factory),
+                     {"-o", "locale=en_US.UTF8"}) {}
 
 RarMounter::~RarMounter() = default;
-
-MountErrorType RarMounter::FormatInvocationCommand(
-    const base::FilePath& archive,
-    std::vector<std::string> params,
-    SandboxedProcess* sandbox) const {
-  // Bind-mount parts of a multipart archive if any.
-  for (const auto& path : GetBindPaths(archive.value())) {
-    if (!sandbox->BindMount(path, path, /* writeable= */ false,
-                            /* recursive= */ false)) {
-      PLOG(ERROR) << "Could not bind " << quote(path);
-      return MOUNT_ERROR_INTERNAL;
-    }
-  }
-
-  std::vector<std::string> opts = {
-      "ro", "umask=0222", "locale=en_US.UTF8",
-      base::StringPrintf("uid=%d", kChronosUID),
-      base::StringPrintf("gid=%d", kChronosAccessGID)};
-
-  std::string options;
-  if (!JoinParamsIntoOptions(opts, &options)) {
-    return MOUNT_ERROR_INVALID_MOUNT_OPTIONS;
-  }
-  sandbox->AddArgument("-o");
-  sandbox->AddArgument(options);
-
-  sandbox->AddArgument(archive.value());
-
-  return MOUNT_ERROR_NONE;
-}
 
 bool RarMounter::Increment(const std::string::iterator begin,
                            std::string::iterator end) {

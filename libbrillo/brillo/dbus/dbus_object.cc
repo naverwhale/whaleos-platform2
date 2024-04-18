@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,12 @@
 #include <brillo/dbus/dbus_object.h>
 
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <brillo/dbus/async_event_sequencer.h>
 #include <brillo/dbus/exported_object_manager.h>
@@ -61,7 +62,7 @@ void DBusInterface::ExportAsync(
     dbus::Bus* /* bus */,
     dbus::ExportedObject* exported_object,
     const dbus::ObjectPath& object_path,
-    const AsyncEventSequencer::CompletionAction& completion_callback) {
+    AsyncEventSequencer::CompletionAction completion_callback) {
   VLOG(1) << "Registering D-Bus interface '" << interface_name_ << "' for '"
           << object_path.value() << "'";
   scoped_refptr<AsyncEventSequencer> sequencer(new AsyncEventSequencer());
@@ -71,22 +72,30 @@ void DBusInterface::ExportAsync(
     std::string export_error = "Failed exporting " + method_name + " method";
     auto export_handler = sequencer->GetExportHandler(
         interface_name_, method_name, export_error, true);
-    auto method_handler =
-        base::Bind(&DBusInterface::HandleMethodCall, base::Unretained(this));
+    auto method_handler = base::BindRepeating(&DBusInterface::HandleMethodCall,
+                                              base::Unretained(this));
     exported_object->ExportMethod(interface_name_, method_name, method_handler,
-                                  export_handler);
+                                  std::move(export_handler));
   }
 
   std::vector<AsyncEventSequencer::CompletionAction> actions;
   if (object_manager) {
     auto property_writer_callback =
         dbus_object_->property_set_.GetPropertyWriter(interface_name_);
-    actions.push_back(base::Bind(
+    actions.push_back(base::BindOnce(
         &DBusInterface::ClaimInterface, weak_factory_.GetWeakPtr(),
         object_manager->AsWeakPtr(), object_path, property_writer_callback));
   }
-  actions.push_back(completion_callback);
-  sequencer->OnAllTasksCompletedCall(actions);
+  actions.push_back(std::move(completion_callback));
+  auto actions_cb = base::BindOnce(
+      [](std::vector<AsyncEventSequencer::CompletionAction> actions,
+         bool all_succeeded) {
+        for (auto& action : actions) {
+          std::move(action).Run(all_succeeded);
+        }
+      },
+      std::move(actions));
+  sequencer->OnAllTasksCompletedCall(std::move(actions_cb));
 }
 
 void DBusInterface::ExportAndBlock(ExportedObjectManager* object_manager,
@@ -98,8 +107,8 @@ void DBusInterface::ExportAndBlock(ExportedObjectManager* object_manager,
   for (const auto& pair : handlers_) {
     std::string method_name = pair.first;
     VLOG(1) << "Exporting method: " << interface_name_ << "." << method_name;
-    auto method_handler =
-        base::Bind(&DBusInterface::HandleMethodCall, base::Unretained(this));
+    auto method_handler = base::BindRepeating(&DBusInterface::HandleMethodCall,
+                                              base::Unretained(this));
     if (!exported_object->ExportMethodAndBlock(interface_name_, method_name,
                                                method_handler)) {
       LOG(FATAL) << "Failed exporting " << method_name << " method";
@@ -118,7 +127,7 @@ void DBusInterface::UnexportAsync(
     ExportedObjectManager* object_manager,
     dbus::ExportedObject* exported_object,
     const dbus::ObjectPath& object_path,
-    const AsyncEventSequencer::CompletionAction& completion_callback) {
+    AsyncEventSequencer::CompletionAction completion_callback) {
   VLOG(1) << "Unexporting D-Bus interface " << interface_name_ << " for "
           << object_path.value();
 
@@ -134,10 +143,10 @@ void DBusInterface::UnexportAsync(
     auto export_handler = sequencer->GetExportHandler(
         interface_name_, method_name, export_error, true);
     exported_object->UnexportMethod(interface_name_, method_name,
-                                    export_handler);
+                                    std::move(export_handler));
   }
 
-  sequencer->OnAllTasksCompletedCall({completion_callback});
+  sequencer->OnAllTasksCompletedCall(std::move(completion_callback));
 }
 
 void DBusInterface::UnexportAndBlock(ExportedObjectManager* object_manager,
@@ -170,8 +179,17 @@ void DBusInterface::ClaimInterface(
   object_manager->ClaimInterface(object_path, interface_name_, writer);
   release_interface_cb_.RunAndReset();
   release_interface_cb_.ReplaceClosure(
-      base::Bind(&ExportedObjectManager::ReleaseInterface, object_manager,
-                 object_path, interface_name_));
+      base::BindOnce(&ExportedObjectManager::ReleaseInterface, object_manager,
+                     object_path, interface_name_));
+}
+
+std::vector<std::string> DBusInterface::GetMethodNames() const {
+  std::vector<std::string> names;
+  names.reserve(handlers_.size());
+  for (const auto& [name, handler] : handlers_) {
+    names.push_back(name);
+  }
+  return names;
 }
 
 void DBusInterface::HandleMethodCall(dbus::MethodCall* method_call,
@@ -220,7 +238,7 @@ DBusObject::DBusObject(ExportedObjectManager* object_manager,
     : DBusObject::DBusObject(object_manager,
                              bus,
                              object_path,
-                             base::Bind(&SetupDefaultPropertyHandlers)) {}
+                             base::BindOnce(&SetupDefaultPropertyHandlers)) {}
 
 DBusObject::DBusObject(
     ExportedObjectManager* object_manager,
@@ -272,10 +290,10 @@ void DBusObject::RemoveInterface(const std::string& interface_name) {
 
 void DBusObject::ExportInterfaceAsync(
     const std::string& interface_name,
-    const AsyncEventSequencer::CompletionAction& completion_callback) {
+    AsyncEventSequencer::CompletionAction completion_callback) {
   AddOrGetInterface(interface_name)
       ->ExportAsync(object_manager_.get(), bus_.get(), exported_object_,
-                    object_path_, completion_callback);
+                    object_path_, std::move(completion_callback));
 }
 
 void DBusObject::ExportInterfaceAndBlock(const std::string& interface_name) {
@@ -286,10 +304,10 @@ void DBusObject::ExportInterfaceAndBlock(const std::string& interface_name) {
 
 void DBusObject::UnexportInterfaceAsync(
     const std::string& interface_name,
-    const AsyncEventSequencer::CompletionAction& completion_callback) {
+    AsyncEventSequencer::CompletionAction completion_callback) {
   AddOrGetInterface(interface_name)
       ->UnexportAsync(object_manager_.get(), exported_object_, object_path_,
-                      completion_callback);
+                      std::move(completion_callback));
 }
 
 void DBusObject::UnexportInterfaceAndBlock(const std::string& interface_name) {
@@ -298,7 +316,7 @@ void DBusObject::UnexportInterfaceAndBlock(const std::string& interface_name) {
 }
 
 void DBusObject::RegisterAsync(
-    const AsyncEventSequencer::CompletionAction& completion_callback) {
+    AsyncEventSequencer::CompletionAction completion_callback) {
   VLOG(1) << "Registering D-Bus object '" << object_path_.value() << "'.";
   CHECK(exported_object_ == nullptr) << "Object already registered.";
   scoped_refptr<AsyncEventSequencer> sequencer(new AsyncEventSequencer());
@@ -314,7 +332,7 @@ void DBusObject::RegisterAsync(
                               false));
   }
 
-  sequencer->OnAllTasksCompletedCall({completion_callback});
+  sequencer->OnAllTasksCompletedCall(std::move(completion_callback));
 }
 
 void DBusObject::RegisterAndBlock() {
@@ -331,7 +349,7 @@ void DBusObject::RegisterAndBlock() {
   }
 }
 
-void DBusObject::UnregisterAsync() {
+void DBusObject::UnregisterAndBlock() {
   VLOG(1) << "Unregistering D-Bus object '" << object_path_.value() << "'.";
   CHECK(exported_object_ != nullptr) << "Object not registered.";
 
@@ -357,7 +375,8 @@ bool DBusObject::SendSignal(dbus::Signal* signal) {
 
 void DBusObject::RegisterPropertiesInterface() {
   DBusInterface* prop_interface = AddOrGetInterface(dbus::kPropertiesInterface);
-  property_handler_setup_callback_.Run(prop_interface, &property_set_);
+  std::move(property_handler_setup_callback_)
+      .Run(prop_interface, &property_set_);
   property_set_.OnPropertiesInterfaceExported(prop_interface);
 }
 

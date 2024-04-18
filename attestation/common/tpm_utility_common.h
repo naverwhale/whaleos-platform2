@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,6 @@
 #include <string>
 #include <unordered_set>
 
-#include <base/macros.h>
 #include <tpm_manager/client/tpm_manager_utility.h>
 
 namespace attestation {
@@ -32,7 +31,6 @@ class TpmUtilityCommon : public TpmUtility {
   bool Initialize() override;
   bool IsTpmReady() override;
   bool RemoveOwnerDependency() override;
-  bool IsPCR0Valid() override;
 
  protected:
   // Gets the endorsement password from tpm_managerd. Returns false if the
@@ -44,13 +42,11 @@ class TpmUtilityCommon : public TpmUtility {
   bool GetOwnerPassword(std::string* password);
 
  private:
-  void UpdateTpmLocalData(const tpm_manager::LocalData& local_data);
+  void UpdateTpmStatus();
   void OnOwnershipTakenSignal();
   void BuildValidPCR0Values();
 
  protected:
-  virtual std::string GetPCRValueForMode(const std::string& mode) = 0;
-
   bool has_cache_tpm_state_{false};
   bool is_ready_{false};
   std::string endorsement_password_;
@@ -59,9 +55,6 @@ class TpmUtilityCommon : public TpmUtility {
   std::string delegate_secret_;
 
   std::unordered_set<std::string> valid_pcr0_values_;
-
-  // This Lock is used before updating is_ready_ or UpdateTpmLocalData().
-  base::Lock tpm_state_lock_;
 
   tpm_manager::TpmManagerUtility* tpm_manager_utility_;
 

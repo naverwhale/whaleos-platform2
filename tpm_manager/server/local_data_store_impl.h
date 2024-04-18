@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,6 @@
 #include "tpm_manager/server/local_data_store.h"
 
 #include <string>
-
-#include <base/macros.h>
 
 namespace tpm_manager {
 

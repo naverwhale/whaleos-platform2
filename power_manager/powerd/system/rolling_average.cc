@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,32 +9,31 @@
 #include <base/check_op.h>
 #include <base/logging.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
-RollingAverage::RollingAverage(size_t window_size)
-    : running_total_(0.0), window_size_(window_size) {
+RollingAverage::RollingAverage(size_t window_size) : window_size_(window_size) {
   DCHECK_GT(window_size_, static_cast<size_t>(0));
 }
-
-RollingAverage::~RollingAverage() {}
 
 void RollingAverage::AddSample(double value, const base::TimeTicks& time) {
   if (!samples_.empty() && time < samples_.back().time) {
     LOG(WARNING) << "Sample " << value << "'s timestamp ("
-                 << time.ToInternalValue() << ") precedes previously-"
-                 << "appended sample's timestamp ("
-                 << samples_.back().time.ToInternalValue() << ")";
+                 << (time - base::TimeTicks()).InMicroseconds()
+                 << ") precedes previously-appended sample's timestamp ("
+                 << (samples_.back().time - base::TimeTicks()).InMicroseconds()
+                 << ")";
   }
 
   while (samples_.size() >= window_size_)
     DeleteSample();
   running_total_ += value;
-  samples_.push(Sample(value, time));
+  samples_.emplace(value, time);
 }
 
 double RollingAverage::GetAverage() const {
-  return samples_.empty() ? 0.0 : running_total_ / samples_.size();
+  return samples_.empty()
+             ? 0.0
+             : running_total_ / static_cast<double>(samples_.size());
 }
 
 base::TimeDelta RollingAverage::GetTimeDelta() const {
@@ -63,5 +62,4 @@ void RollingAverage::DeleteSample() {
   }
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

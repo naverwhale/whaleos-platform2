@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,13 +7,14 @@
 #include <stdint.h>
 
 #include <memory>
+#include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
+#include <base/task/sequenced_task_runner.h>
 #include <base/test/task_environment.h>
-#include <base/threading/sequenced_task_runner_handle.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
@@ -68,15 +69,16 @@ class PowerManagerClientTest : public ::testing::Test {
         .WillOnce(Return(power_manager_proxy_.get()));
 
     EXPECT_CALL(*mock_bus_, GetDBusTaskRunner())
-        .WillRepeatedly(Return(base::SequencedTaskRunnerHandle::Get().get()));
+        .WillRepeatedly(
+            Return(base::SequencedTaskRunner::GetCurrentDefault().get()));
   }
 
  protected:
-  std::unique_ptr<dbus::Response> CreateMockProxyResponse(
-      dbus::MethodCall* method_call, int timeout_ms) {
+  base::expected<std::unique_ptr<dbus::Response>, dbus::Error>
+  CreateMockProxyResponse(dbus::MethodCall* method_call, int timeout_ms) {
     if (method_call->GetInterface() != power_manager::kPowerManagerInterface) {
       LOG(ERROR) << "Unexpected method call: " << method_call->ToString();
-      return std::unique_ptr<dbus::Response>();
+      return base::unexpected(dbus::Error());
     }
 
     std::unique_ptr<dbus::Response> response = dbus::Response::CreateEmpty();
@@ -94,7 +96,7 @@ class PowerManagerClientTest : public ::testing::Test {
       power_manager::SuspendReadinessInfo info;
       if (!dbus::MessageReader(method_call).PopArrayOfBytesAsProto(&info)) {
         LOG(ERROR) << "Failed to decode SuspendReadinessInfo";
-        return std::unique_ptr<dbus::Response>();
+        return base::unexpected(dbus::Error());
       }
 
       reported_delay_id_ = info.delay_id();
@@ -104,7 +106,7 @@ class PowerManagerClientTest : public ::testing::Test {
       unregistered_ = true;
     }
 
-    return response;
+    return base::ok(std::move(response));
   }
 
   base::test::TaskEnvironment task_environment_;
@@ -170,7 +172,7 @@ TEST_F(PowerManagerClientTest, SuspendImminent) {
   current_suspend_id_ = 1297;
 
   bool called = false;
-  client->RegisterSuspendDelay(base::Bind(&SetTrue, &called),
+  client->RegisterSuspendDelay(base::BindRepeating(&SetTrue, &called),
                                base::DoNothing());
 
   dbus::Signal suspend_imminent(power_manager::kPowerManagerInterface,
@@ -196,7 +198,7 @@ TEST_F(PowerManagerClientTest, SuspendDone) {
 
   bool called = false;
   client->RegisterSuspendDelay(base::DoNothing(),
-                               base::Bind(&SetTrue, &called));
+                               base::BindRepeating(&SetTrue, &called));
 
   dbus::Signal suspend_imminent(power_manager::kPowerManagerInterface,
                                 power_manager::kSuspendImminentSignal);
@@ -233,7 +235,7 @@ TEST_F(PowerManagerClientTest, WrongSuspendId) {
 
   bool called = false;
   client->RegisterSuspendDelay(base::DoNothing(),
-                               base::Bind(&SetTrue, &called));
+                               base::BindRepeating(&SetTrue, &called));
 
   dbus::Signal suspend_imminent(power_manager::kPowerManagerInterface,
                                 power_manager::kSuspendImminentSignal);
@@ -269,7 +271,7 @@ TEST_F(PowerManagerClientTest, MultipleSuspendImminents) {
   current_suspend_id_ = 7261;
 
   int32_t counter = 0;
-  client->RegisterSuspendDelay(base::Bind(&Increment, &counter),
+  client->RegisterSuspendDelay(base::BindRepeating(&Increment, &counter),
                                base::DoNothing());
 
   for (int i = 0; i < 3; ++i) {

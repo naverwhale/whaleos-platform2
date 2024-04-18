@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/check.h>
-#include <base/macros.h>
-#include <base/optional.h>
 #include <base/synchronization/lock.h>
 #include <base/threading/thread.h>
 #include <tpm_manager/proto_bindings/tpm_manager.pb.h>
@@ -155,17 +154,6 @@ class TPM_MANAGER_EXPORT TpmManagerUtility
   // the nvram at |index|.
   virtual bool LockSpace(uint32_t index);
 
-  // Gets the current status of the ownership taken signal. Returns |true| iff
-  // the signal is connected, no matter if it's connected successfully or not.
-  // |is_successful| indicates if the dbus signal connection is successful or
-  // not. |has_received| indicates if this instance has received the ownership
-  // taken signal. Once |has_received| is set as |true|,|local_data| gets
-  // updated. Any output parameter will be ignored to be set if the value is
-  // |nullptr|.
-  virtual bool GetOwnershipTakenSignalStatus(bool* is_successful,
-                                             bool* has_received,
-                                             LocalData* local_data);
-
   // Add callback which would be trigger after got tpm ownership.
   virtual void AddOwnershipCallback(OwnershipCallback ownership_callback);
 
@@ -264,10 +252,6 @@ class TPM_MANAGER_EXPORT TpmManagerUtility
 
   // Records if it's a successful signal connection once connected.
   bool is_connection_successful_{false};
-
-  // |ownership_taken_signal_| stores the data once the ownership
-  // taken signal is received.
-  base::Optional<OwnershipTakenSignal> ownership_taken_signal_;
 
   std::vector<OwnershipCallback> ownership_callbacks_;
 };

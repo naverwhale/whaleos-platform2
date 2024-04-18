@@ -1,4 +1,4 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -27,12 +27,14 @@ executable("arc-keymasterd") {
     "keymaster_server.cc",
     "main.cc",
   ]
+  configs += [ ":boringssl_config" ]
   pkg_deps = [
     "libbrillo",
     "libchrome",
     "libmojo",
   ]
   deps = [
+    ":install_dbus_service",
     ":keymaster_mojo_bindings",
     ":libarckeymaster_context",
     ":libkeymaster",
@@ -235,4 +237,10 @@ if (use.fuzzer) {
       ":libkeymaster",
     ]
   }
+}
+
+# Install dbus service file.
+install_config("install_dbus_service") {
+  sources = [ "dbus_permissions/org.chromium.ArcKeymaster.service" ]
+  install_path = "dbus_system_services"
 }

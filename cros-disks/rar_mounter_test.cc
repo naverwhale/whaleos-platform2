@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -41,6 +41,10 @@ class RarMounterTest : public testing::Test {
   const RarMounter mounter_{&platform_, &reaper_, &metrics_,
                             std::make_unique<FakeSandboxedProcessFactory>()};
 };
+
+TEST_F(RarMounterTest, FileSystemType) {
+  EXPECT_EQ(mounter_.filesystem_type(), "rar");
+}
 
 TEST_F(RarMounterTest, Increment) {
   std::string s;

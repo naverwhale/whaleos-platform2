@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,8 @@
 
 #include "cryptohome/platform.h"
 #include "cryptohome/storage/encrypted_container/backing_device.h"
-#include "cryptohome/storage/encrypted_container/loopback_device.h"
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
 #include "cryptohome/storage/encrypted_container/logical_volume_backing_device.h"
-#endif  // USE_LVM_STATEFUL_PARTITION
+#include "cryptohome/storage/encrypted_container/ramdisk_device.h"
 
 namespace cryptohome {
 
@@ -23,13 +20,13 @@ std::unique_ptr<BackingDevice> BackingDeviceFactory::Generate(
     const BackingDeviceConfig& config) {
   switch (config.type) {
     case BackingDeviceType::kLoopbackDevice:
-      return std::make_unique<LoopbackDevice>(
-          config, platform_, std::make_unique<brillo::LoopDeviceManager>());
-// TODO(b/177929620): Cleanup once lvm utils are built unconditionally.
-#if USE_LVM_STATEFUL_PARTITION
+      return std::make_unique<LoopbackDevice>(config, platform_);
+    case BackingDeviceType::kRamdiskDevice:
+      return RamdiskDevice::Generate(config.ramdisk.backing_file_name,
+                                     platform_);
     case BackingDeviceType::kLogicalVolumeBackingDevice:
-      return std::make_unique<LogicalVolumeBackingDevice>(config);
-#endif  // USE_LVM_STATEFUL_PARTITION
+      return std::make_unique<LogicalVolumeBackingDevice>(
+          config, platform_->GetLogicalVolumeManager());
     default:
       return nullptr;
   }

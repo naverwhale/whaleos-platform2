@@ -1,11 +1,13 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "attestation/common/crypto_utility_impl.h"
 
+#include <iterator>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -13,12 +15,14 @@
 #include <base/check_op.h>
 #include <base/hash/sha1.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
+#include <brillo/secure_blob.h>
 #include <crypto/libcrypto-compat.h>
 #include <crypto/scoped_openssl_types.h>
 #include <crypto/secure_util.h>
 #include <crypto/sha2.h>
+#include <libhwsec/frontend/attestation/frontend.h>
+#include <libhwsec-foundation/status/status_chain_macros.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -27,6 +31,8 @@
 #include <openssl/rsa.h>
 #include <openssl/sha.h>
 #include <openssl/x509.h>
+
+using ::hwsec::TPMError;
 
 namespace {
 
@@ -47,7 +53,7 @@ std::string GetOpenSSLError() {
 }
 
 unsigned char* StringAsOpenSSLBuffer(std::string* s) {
-  return reinterpret_cast<unsigned char*>(base::data(*s));
+  return reinterpret_cast<unsigned char*>(std::data(*s));
 }
 
 const unsigned char* StringAsConstOpenSSLBuffer(const std::string& s) {
@@ -87,8 +93,10 @@ crypto::ScopedOpenSSL<X509, X509_free> CreateX509FromCertificate(
 
 namespace attestation {
 
-CryptoUtilityImpl::CryptoUtilityImpl(TpmUtility* tpm_utility)
-    : tpm_utility_(tpm_utility) {
+CryptoUtilityImpl::CryptoUtilityImpl(TpmUtility* tpm_utility,
+                                     const hwsec::AttestationFrontend* hwsec)
+    : tpm_utility_(tpm_utility), hwsec_(hwsec) {
+  CHECK(hwsec_);
   OpenSSL_add_all_algorithms();
   EVP_PKEY_asn1_add_alias(EVP_PKEY_RSA, NID_rsaesOaep);
   ERR_load_crypto_strings();
@@ -116,10 +124,11 @@ bool CryptoUtilityImpl::CreateSealedKey(std::string* aes_key,
     LOG(ERROR) << __func__ << ": GetRandom failed.";
     return false;
   }
-  if (!tpm_utility_->SealToPCR0(*aes_key, sealed_key)) {
-    LOG(ERROR) << __func__ << ": Failed to seal cipher key.";
-    return false;
-  }
+  ASSIGN_OR_RETURN(
+      const brillo::Blob& sealed_key_blob,
+      hwsec_->Seal(brillo::SecureBlob(*aes_key)),
+      _.WithStatus<TPMError>("Failed to seal aes key").LogError().As(false));
+  *sealed_key = brillo::BlobToString(sealed_key_blob);
   return true;
 }
 
@@ -148,11 +157,12 @@ bool CryptoUtilityImpl::UnsealKey(const std::string& encrypted_data,
     LOG(ERROR) << __func__ << ": Failed to parse protobuf.";
     return false;
   }
+  ASSIGN_OR_RETURN(
+      const brillo::SecureBlob& aes_key_blob,
+      hwsec_->Unseal(brillo::BlobFromString(encrypted_pb.wrapped_key())),
+      _.WithStatus<TPMError>("Failed to unseal aes key").LogError().As(false));
+  *aes_key = aes_key_blob.to_string();
   *sealed_key = encrypted_pb.wrapped_key();
-  if (!tpm_utility_->Unseal(*sealed_key, aes_key)) {
-    LOG(ERROR) << __func__ << ": Cannot unseal aes key.";
-    return false;
-  }
   return true;
 }
 
@@ -479,7 +489,7 @@ bool CryptoUtilityImpl::AesEncrypt(const EVP_CIPHER* cipher,
   // Allocate enough space for the output (including padding).
   encrypted_data->resize(data.size() + kAesBlockSize);
   auto output_buffer =
-      reinterpret_cast<unsigned char*>(base::data(*encrypted_data));
+      reinterpret_cast<unsigned char*>(std::data(*encrypted_data));
   int output_size = 0;
   crypto::ScopedEVP_CIPHER_CTX encryption_context(EVP_CIPHER_CTX_new());
   if (!encryption_context) {
@@ -737,7 +747,7 @@ bool CryptoUtilityImpl::OAEPEncryptWithLabel(const std::string& label,
   std::string padded_input;
   padded_input.resize(RSA_size(key));
   auto padded_buffer =
-      reinterpret_cast<unsigned char*>(base::data(padded_input));
+      reinterpret_cast<unsigned char*>(std::data(padded_input));
   auto input_buffer = reinterpret_cast<const unsigned char*>(input.data());
   auto label_buffer = reinterpret_cast<const unsigned char*>(label.data());
   int result = RSA_padding_add_PKCS1_OAEP_mgf1(
@@ -749,7 +759,7 @@ bool CryptoUtilityImpl::OAEPEncryptWithLabel(const std::string& label,
     return false;
   }
   output->resize(padded_input.size());
-  auto output_buffer = reinterpret_cast<unsigned char*>(base::data(*output));
+  auto output_buffer = reinterpret_cast<unsigned char*>(std::data(*output));
   result = RSA_public_encrypt(padded_input.size(), padded_buffer, output_buffer,
                               key, RSA_NO_PADDING);
   if (result == -1) {
@@ -1004,7 +1014,7 @@ bool CryptoUtilityImpl::GetCertificatePublicKey(const std::string& certificate,
   }
   public_key->resize(der_length);
   unsigned char* der_buffer =
-      reinterpret_cast<unsigned char*>(base::data(*public_key));
+      reinterpret_cast<unsigned char*>(std::data(*public_key));
   if (i2d_RSAPublicKey(rsa.get(), &der_buffer) < 0) {
     LOG(ERROR) << __func__
                << ": Bad length of der-encoded output: " << GetOpenSSLError();
@@ -1021,8 +1031,33 @@ bool CryptoUtilityImpl::GetCertificateIssuerName(const std::string& certificate,
     return false;
   }
   char issuer_buf[100];  // A longer CN will truncate.
-  X509_NAME_get_text_by_NID(X509_get_issuer_name(x509.get()), NID_commonName,
-                            issuer_buf, base::size(issuer_buf));
+  X509_NAME* x509_name = X509_get_issuer_name(x509.get());
+
+  if (X509_NAME_get_text_by_NID(x509_name, NID_commonName, issuer_buf,
+                                std::size(issuer_buf)) == -1) {
+    LOG(WARNING) << __func__ << ": Failed to get the issuer name text by NID";
+
+    // A workaround for misconfigured certificate issuer field found in early
+    // samples of the Dauntless chip.
+    //
+    // Retrieve the text representation of the issuer name, and, if it matches
+    // the misconfigured value, replace it with the expected value, hardcoded
+    // to "CROS D2 CIK".
+    if (!X509_NAME_oneline(x509_name, issuer_buf, sizeof(issuer_buf))) {
+      LOG(ERROR) << __func__ << ": Failed to retrieve alt name";
+      return false;
+    }
+
+    if (strcmp(issuer_buf,
+               "/C=US/ST=California/O=Google Inc./OU=Engineering")) {
+      LOG(ERROR) << __func__ << ": Alt name is ^" << issuer_buf << "^";
+      return false;
+    }
+
+    strncpy(issuer_buf, "CROS D2 CIK", sizeof(issuer_buf));
+    LOG(WARNING) << __func__ << ": Substituted issuer name with " << issuer_buf;
+  }
+
   issuer_name->assign(issuer_buf);
   return true;
 }

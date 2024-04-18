@@ -1,11 +1,10 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chaps/object_policy_secret_key.h"
 
-#include <base/macros.h>
-#include <base/stl_util.h>
+#include <iterator>
 
 #include "chaps/chaps_utility.h"
 
@@ -28,7 +27,7 @@ static const AttributePolicy kSecretKeyPolicies[] = {
     {CKA_VALUE, true, {false, false, true}, true}};
 
 ObjectPolicySecretKey::ObjectPolicySecretKey() {
-  AddPolicies(kSecretKeyPolicies, base::size(kSecretKeyPolicies));
+  AddPolicies(kSecretKeyPolicies, std::size(kSecretKeyPolicies));
 }
 
 ObjectPolicySecretKey::~ObjectPolicySecretKey() {}

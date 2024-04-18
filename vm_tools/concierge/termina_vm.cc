@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,45 +11,54 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <memory>
+#include <optional>
 #include <utility>
+#include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
+#include <base/containers/span.h>
 #include <base/files/file.h>
+#include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
-#include <base/guid.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_forward.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/string_number_conversions.h>
+#include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/system/sys_info.h>
+#include <base/task/sequenced_task_runner.h>
 #include <base/time/time.h>
 #include <google/protobuf/repeated_field.h>
-#include <grpcpp/grpcpp.h>
 #include <chromeos/constants/vm_tools.h>
+#include <grpcpp/grpcpp.h>
+#include <net-base/ipv4_address.h>
+#include <sys/epoll.h>
+#include <vm_concierge/concierge_service.pb.h>
+#include <vm_protos/proto_bindings/vm_guest.grpc.pb.h>
 
+#include "vm_tools/common/vm_id.h"
+#include "vm_tools/concierge/future.h"
+#include "vm_tools/concierge/network/guest_os_network.h"
 #include "vm_tools/concierge/tap_device_builder.h"
+#include "vm_tools/concierge/tracing.h"
+#include "vm_tools/concierge/vm_base_impl.h"
 #include "vm_tools/concierge/vm_builder.h"
 #include "vm_tools/concierge/vm_permission_interface.h"
 #include "vm_tools/concierge/vm_util.h"
+#include "vm_tools/concierge/vm_wl_interface.h"
 
 using std::string;
 
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 namespace {
 
 // Features to enable.
-constexpr StartTerminaRequest_Feature kEnabledTerminaFeatures[] = {
-};
-
-// Name of the control socket used for controlling crosvm.
-constexpr char kCrosvmSocket[] = "crosvm.sock";
-
-// Path to the wayland socket.
-constexpr char kWaylandSocket[] = "/run/chrome/wayland-0";
+constexpr StartTerminaRequest_Feature kEnabledTerminaFeatures[] = {};
 
 // How long to wait before timing out on shutdown RPCs.
 constexpr int64_t kShutdownTimeoutSeconds = 30;
@@ -61,126 +70,104 @@ constexpr int64_t kStartTerminaTimeoutSeconds = 150;
 constexpr int64_t kDefaultTimeoutSeconds = 10;
 
 // How long to wait before timing out on child process exits.
-constexpr base::TimeDelta kChildExitTimeout = base::TimeDelta::FromSeconds(10);
-
-// Offset in a subnet of the gateway/host.
-constexpr size_t kHostAddressOffset = 0;
-
-// Offset in a subnet of the client/guest.
-constexpr size_t kGuestAddressOffset = 1;
-
-// The CPU cgroup where all the Termina crosvm processes should belong to.
-constexpr char kTerminaCpuCgroup[] = "/sys/fs/cgroup/cpu/vms/termina";
+constexpr base::TimeDelta kChildExitTimeout = base::Seconds(10);
 
 // The maximum GPU shader cache disk usage, interpreted by Mesa. For details
 // see MESA_GLSL_CACHE_MAX_SIZE at https://docs.mesa3d.org/envvars.html.
 constexpr char kGpuCacheSizeString[] = "50M";
+constexpr char kRenderServerCacheSizeString[] = "50M";
+
+// The maximum render server shader cache disk usage for borealis.
+// TODO(b/169802596): Set cache size in a smarter way.
+// See b/209849605#comment5 for borealis cache size reasoning.
+constexpr char kGpuCacheSizeStringBorealis[] = "1000M";
+constexpr char kRenderServerCacheSizeStringBorealis[] = "1000M";
 
 // Special value to represent an invalid disk index for `crosvm disk`
 // operations.
 constexpr int kInvalidDiskIndex = -1;
 
-std::unique_ptr<patchpanel::Subnet> MakeSubnet(
-    const patchpanel::IPv4Subnet& subnet) {
-  return std::make_unique<patchpanel::Subnet>(
-      subnet.base_addr(), subnet.prefix_len(), base::DoNothing());
+// Helper function to convert spaced enum to vm_tools equivalent.
+vm_tools::StatefulDiskSpaceState MapSpacedStateToGuestState(
+    spaced::StatefulDiskSpaceState state) {
+  switch (state) {
+    case spaced::StatefulDiskSpaceState::NORMAL:
+      return vm_tools::StatefulDiskSpaceState::DISK_NORMAL;
+      break;
+    case spaced::StatefulDiskSpaceState::LOW:
+      return vm_tools::StatefulDiskSpaceState::DISK_LOW;
+      break;
+    case spaced::StatefulDiskSpaceState::CRITICAL:
+      return vm_tools::StatefulDiskSpaceState::DISK_CRITICAL;
+      break;
+    case spaced::StatefulDiskSpaceState::NONE:
+    default:
+      return vm_tools::StatefulDiskSpaceState::DISK_NONE;
+  }
 }
 
 }  // namespace
 
-TerminaVm::TerminaVm(
-    uint32_t vsock_cid,
-    std::unique_ptr<patchpanel::Client> network_client,
-    std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-    base::FilePath runtime_dir,
-    base::FilePath log_path,
-    std::string stateful_device,
-    uint64_t stateful_size,
-    VmFeatures features,
-    dbus::ObjectProxy* vm_permission_service_proxy,
-    scoped_refptr<dbus::Bus> bus,
-    VmId id,
-    bool is_termina)
-    : VmBaseImpl(std::move(network_client),
-                 vsock_cid,
-                 std::move(seneschal_server_proxy),
-                 kCrosvmSocket,
-                 std::move(runtime_dir)),
-      features_(features),
-      stateful_device_(stateful_device),
-      stateful_size_(stateful_size),
-      stateful_resize_type_(DiskResizeType::NONE),
-      log_path_(std::move(log_path)),
-      id_(id),
-      bus_(bus),
-      vm_permission_service_proxy_(vm_permission_service_proxy),
-      is_termina_(is_termina) {}
-
-// For testing.
-TerminaVm::TerminaVm(
-    std::unique_ptr<patchpanel::Subnet> subnet,
-    uint32_t vsock_cid,
-    std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-    base::FilePath runtime_dir,
-    base::FilePath log_path,
-    std::string stateful_device,
-    uint64_t stateful_size,
-    VmFeatures features,
-    bool is_termina)
-    : VmBaseImpl(nullptr /* network_client */,
-                 vsock_cid,
-                 std::move(seneschal_server_proxy),
-                 "" /* cros_vm_socket */,
-                 std::move(runtime_dir)),
-      subnet_(std::move(subnet)),
-      features_(features),
-      stateful_device_(stateful_device),
-      stateful_size_(stateful_size),
-      stateful_resize_type_(DiskResizeType::NONE),
-      log_path_(std::move(log_path)),
-      id_(VmId("foo", "bar")),
-      is_termina_(is_termina) {
-  CHECK(subnet_);
+void TerminaVm::MaitredDeleter::operator()(
+    brillo::AsyncGrpcClient<vm_tools::Maitred>* maitred) const {
+  // It is unsafe to delete the handle until shutdown has completed, so
+  // instead of blocking the destructor, we move ownership to a callback
+  // which deletes the handle.
+  maitred->ShutDown(base::BindOnce(
+      [](brillo::AsyncGrpcClient<vm_tools::Maitred>* maitred) {
+        // Deleting in a callback like this looks dangerous, but it's
+        // (currently) safe for the same reason that *not* deleting in a
+        // callback (currently) deadlocks, i.e. the callback is posted to
+        // the same sequence that called ShutDown().
+        delete maitred;
+      },
+      maitred));
 }
+
+TerminaVm::TerminaVm(Config config)
+    : VmBaseImpl(VmBaseImpl::Config{
+          .vsock_cid = config.vsock_cid,
+          .network = std::move(config.network),
+          .seneschal_server_proxy = std::move(config.seneschal_server_proxy),
+          .cros_vm_socket = config.cros_vm_socket,
+          .runtime_dir = std::move(config.runtime_dir),
+      }),
+      features_(config.features),
+      stateful_device_(config.stateful_device),
+      stateful_size_(config.stateful_size),
+      log_path_(std::move(config.log_path)),
+      id_(config.id),
+      bus_(config.bus),
+      vm_permission_service_proxy_(config.vm_permission_service_proxy),
+      classification_(config.classification),
+      storage_ballooning_(config.storage_ballooning),
+      socket_(std::move(config.socket)) {}
 
 TerminaVm::~TerminaVm() {
   Shutdown();
 }
 
-std::unique_ptr<TerminaVm> TerminaVm::Create(
-    uint32_t vsock_cid,
-    std::unique_ptr<patchpanel::Client> network_client,
-    std::unique_ptr<SeneschalServerProxy> seneschal_server_proxy,
-    base::FilePath runtime_dir,
-    base::FilePath log_path,
-    std::string stateful_device,
-    uint64_t stateful_size,
-    VmFeatures features,
-    dbus::ObjectProxy* vm_permission_service_proxy,
-    scoped_refptr<dbus::Bus> bus,
-    VmId id,
-    bool is_termina,
-    VmBuilder vm_builder) {
-  auto vm = base::WrapUnique(new TerminaVm(
-      vsock_cid, std::move(network_client), std::move(seneschal_server_proxy),
-      std::move(runtime_dir), std::move(log_path), std::move(stateful_device),
-      std::move(stateful_size), features, vm_permission_service_proxy,
-      std::move(bus), std::move(id), is_termina));
+std::unique_ptr<TerminaVm> TerminaVm::Create(Config config) {
+  auto vm_builder = std::move(config.vm_builder);
 
-  if (!vm->Start(std::move(vm_builder)))
-    vm.reset();
+  auto vm = base::WrapUnique(new TerminaVm(std::move(config)));
+
+  if (!vm->Start(std::move(vm_builder))) {
+    return {};
+  }
 
   return vm;
 }
 
-std::string TerminaVm::GetVmSocketPath() const {
-  return runtime_dir_.GetPath().Append(kCrosvmSocket).value();
-}
-
 std::string TerminaVm::GetCrosVmSerial(std::string hardware,
                                        std::string console_type) const {
-  std::string common_params =
-      "hardware=" + hardware + ",num=1," + console_type + "=true";
+  std::string common_params = "hardware=" + hardware;
+  if (console_type != "") {
+    common_params += "," + console_type + "=true";
+  }
+  if (hardware != "debugcon") {
+    common_params += ",num=1";
+  }
   if (log_path_.empty()) {
     return common_params + ",type=syslog";
   }
@@ -188,17 +175,17 @@ std::string TerminaVm::GetCrosVmSerial(std::string hardware,
 }
 
 bool TerminaVm::Start(VmBuilder vm_builder) {
-  // Get the network interface.
-  patchpanel::IPv4Subnet container_subnet;
-  if (!network_client_->NotifyTerminaVmStartup(vsock_cid_, &network_device_,
-                                               &container_subnet)) {
-    LOG(ERROR) << "No network devices available";
-    return false;
-  }
+  // Sommelier relies on implicit modifier, which does not pass host modifier to
+  // zwp_linux_buffer_params_v1_add. Graphics will be broken if modifiers are
+  // enabled.  Sommelier shall be fixed to mirror what arc wayland_service does,
+  // and then we can re-enable UBWC here.
+  //
+  // See b/229147702
+  setenv("MINIGBM_DEBUG", "nocompression", 0);
 
   // TODO(b/193370101) Remove borealis specific code once crostini uses
   // permission service.
-  if (id_.name() == "borealis") {
+  if (classification_ == apps::VmType::BOREALIS) {
     // Register the VM with permission service and obtain permission
     // token.
     if (!vm_permission::RegisterVm(bus_, vm_permission_service_proxy_, id_,
@@ -209,55 +196,110 @@ bool TerminaVm::Start(VmBuilder vm_builder) {
     }
   }
 
-  subnet_ = MakeSubnet(network_device_.ipv4_subnet());
-  container_subnet_ = MakeSubnet(container_subnet);
+  if (classification_ == apps::BOREALIS) {
+    vm_builder.EnableWorkingSetReporting(true);
+
+    // Disable split lock detection in the guest kernel.
+    //
+    // Split lock detection has the potential to negatively impact performance.
+    // Typically, this setting only makes sense on the host kernel.
+    // However, some x86 architectures have a way to send
+    // this notification to user space applications (vCPU's). To ensure we
+    // don't see any issues on these architectures, we disable split lock
+    // detection completely in Borealis.
+    //
+    // Other guests in the system may want to preserve this behavior as it
+    // can be useful for application development/debugging.
+    vm_builder.AppendKernelParam("split_lock_detect=off");
+  }
 
   // Open the tap device.
   base::ScopedFD tap_fd = OpenTapDevice(
-      network_device_.ifname(), true /*vnet_hdr*/, nullptr /*ifname_out*/);
+      Network()->TapDevice(), true /*vnet_hdr*/, nullptr /*ifname_out*/);
   if (!tap_fd.is_valid()) {
     LOG(ERROR) << "Unable to open and configure TAP device "
-               << network_device_.ifname();
+               << Network()->TapDevice();
     return false;
   }
 
   vm_builder.AppendTapFd(std::move(tap_fd))
-      .AppendWaylandSocket(kWaylandSocket)
       .SetVsockCid(vsock_cid_)
       .SetSocketPath(GetVmSocketPath())
-      .SetMemory(GetVmMemoryMiB())
+      .SetMemory(std::to_string(GetVmMemoryMiB()))
       .AppendSerialDevice(GetCrosVmSerial("serial", "earlycon"))
       .AppendSerialDevice(GetCrosVmSerial("virtio-console", "console"))
+      .AppendSerialDevice(GetCrosVmSerial("debugcon", ""))
       .SetSyslogTag(base::StringPrintf("VM(%u)", vsock_cid_));
 
   if (features_.gpu) {
     vm_builder.EnableGpu(true)
         .EnableVulkan(features_.vulkan)
         .EnableBigGl(features_.big_gl)
-        .SetGpuCacheSize(kGpuCacheSizeString);
+        .EnableVirtgpuNativeContext(features_.virtgpu_native_context);
+
+    if (classification_ == apps::VmType::BOREALIS) {
+      vm_builder.SetGpuCacheSize(kGpuCacheSizeStringBorealis);
+      // For Borealis, place the render server process in
+      // the GPU server cpuset cgroup.
+      vm_builder.AppendCustomParam("--gpu-server-cgroup-path",
+                                   kBorealisGpuServerCpusetCgroup);
+    } else {
+      vm_builder.SetGpuCacheSize(kGpuCacheSizeString);
+    }
+
+    if (features_.render_server) {
+      vm_builder.EnableRenderServer(true);
+      if (classification_ == apps::VmType::BOREALIS) {
+        vm_builder.SetRenderServerCacheSize(
+            kRenderServerCacheSizeStringBorealis);
+      } else {
+        vm_builder.SetRenderServerCacheSize(kRenderServerCacheSizeString);
+      }
+    }
   }
 
-  if (features_.software_tpm)
-    vm_builder.EnableSoftwareTpm(true /* enable */);
+  // Enable dGPU passthrough argument is only supported on Borealis VM.
+  if (features_.dgpu_passthrough) {
+    if (classification_ == apps::VmType::BOREALIS) {
+      vm_builder.EnableDGpuPassthrough(true);
+    } else {
+      LOG(ERROR) << "--enable-dgpu-passthrough is only supported on Borealis.";
+      return false;
+    }
+  }
 
-  if (id_.name() == "borealis") {
+  if (features_.vtpm_proxy)
+    vm_builder.EnableVtpmProxy(true /* enable */);
+
+  // TODO(b/193370101) Remove borealis specific code once crostini uses
+  // permission service.
+  if (classification_ == apps::VmType::BOREALIS) {
     if (vm_permission::IsMicrophoneEnabled(bus_, vm_permission_service_proxy_,
                                            permission_token_)) {
       vm_builder.AppendAudioDevice(
-          "backend=cras,capture=true,client_type=borealis");
+          "capture=true,backend=cras,client_type=borealis,"
+          "socket_type=unified,num_output_devices=3,num_input_devices=3,"
+          "num_output_streams=10,num_input_streams=5");
     } else {
-      vm_builder.AppendAudioDevice("backend=cras,client_type=borealis");
+      vm_builder.AppendAudioDevice(
+          "backend=cras,client_type=borealis,socket_type=unified,"
+          "num_output_devices=3,num_input_devices=3,"
+          "num_output_streams=10,num_input_streams=5");
     }
   } else {
     if (features_.audio_capture) {
-      vm_builder.AppendAudioDevice("backend=cras,capture=true");
+      vm_builder.AppendAudioDevice(
+          "capture=true,backend=cras,socket_type=unified");
     } else {
-      vm_builder.AppendAudioDevice("backend=cras");
+      vm_builder.AppendAudioDevice("backend=cras,socket_type=unified");
     }
   }
 
   for (const std::string& p : features_.kernel_params)
     vm_builder.AppendKernelParam(p);
+
+  for (const std::string& s : features_.oem_strings)
+    vm_builder.AppendOemString(s);
 
   // Switch off kmsg throttling so we can log all relevant startup messages
   vm_builder.AppendKernelParam("printk.devkmsg=on");
@@ -268,27 +310,70 @@ bool TerminaVm::Start(VmBuilder vm_builder) {
   process_.SetPreExecCallback(base::BindOnce(
       &SetUpCrosvmProcess, base::FilePath(kTerminaCpuCgroup).Append("tasks")));
 
-  if (!StartProcess(vm_builder.BuildVmArgs()))
+  std::unique_ptr<CustomParametersForDev> custom_parameters =
+      MaybeLoadCustomParametersForDev(classification_);
+
+  std::optional<base::StringPairs> args =
+      std::move(vm_builder).BuildVmArgs(custom_parameters.get());
+  if (!args) {
+    LOG(ERROR) << "Failed to build VM arguments";
     return false;
+  }
+
+  if (!StartProcess(std::move(args).value())) {
+    LOG(ERROR) << "Failed to start VM process";
+    return false;
+  }
 
   // Create a stub for talking to the maitre'd instance inside the VM.
-  stub_ = std::make_unique<vm_tools::Maitred::Stub>(grpc::CreateChannel(
-      base::StringPrintf("vsock:%u:%u", vsock_cid_, vm_tools::kMaitredPort),
-      grpc::InsecureChannelCredentials()));
+  InitializeMaitredService(
+      std::make_unique<vm_tools::Maitred::Stub>(grpc::CreateChannel(
+          base::StringPrintf("vsock:%u:%u", vsock_cid_, vm_tools::kMaitredPort),
+          grpc::InsecureChannelCredentials())));
 
   return true;
 }
 
-bool TerminaVm::Shutdown() {
-  // Notify arc-patchpanel that the VM is down.
-  // This should run before the process existence check below since we still
-  // want to release the network resources on crash.
-  // Note the client will only be null during testing.
-  if (network_client_ &&
-      !network_client_->NotifyTerminaVmShutdown(vsock_cid_)) {
-    LOG(WARNING) << "Unable to notify networking services";
+bool TerminaVm::SetTimezone(const std::string& timezone,
+                            std::string* out_error) {
+  if (!stub_) {
+    *out_error = "maitred stub not initialized";
+    return false;
   }
 
+  grpc::ClientContext ctx;
+  ctx.set_deadline(gpr_time_add(
+      gpr_now(GPR_CLOCK_MONOTONIC),
+      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+
+  ::vm_tools::SetTimezoneRequest request;
+  request.set_timezone_name(timezone);
+  // Borealis needs timezone info to be bind-mounted due to Steam bug, see
+  // TODO(b/237960004): Clean up this exception once Steam bug is fixed.
+  request.set_use_bind_mount(classification_ == apps::VmType::BOREALIS);
+  ::vm_tools::EmptyMessage response;
+
+  auto result = stub_->SetTimezone(&ctx, request, &response);
+  if (result.ok()) {
+    *out_error = "";
+    return true;
+  }
+
+  *out_error = result.error_message();
+  return false;
+}
+
+grpc::Status TerminaVm::SendVMShutdownMessage() {
+  grpc::ClientContext ctx;
+  ctx.set_deadline(gpr_time_add(
+      gpr_now(GPR_CLOCK_MONOTONIC),
+      gpr_time_from_seconds(kShutdownTimeoutSeconds, GPR_TIMESPAN)));
+
+  vm_tools::EmptyMessage empty;
+  return stub_->Shutdown(&ctx, empty, &empty);
+}
+
+bool TerminaVm::Shutdown() {
   // Notify permission service of VM destruction.
   if (!permission_token_.empty()) {
     vm_permission::UnregisterVm(bus_, vm_permission_service_proxy_, id_);
@@ -304,14 +389,7 @@ bool TerminaVm::Shutdown() {
     return true;
   }
 
-  grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kShutdownTimeoutSeconds, GPR_TIMESPAN)));
-
-  vm_tools::EmptyMessage empty;
-  grpc::Status status = stub_->Shutdown(&ctx, empty, &empty);
-
+  grpc::Status status = SendVMShutdownMessage();
   // brillo::ProcessImpl doesn't provide a timed wait function and while the
   // Shutdown RPC may have been successful we can't really trust crosvm to
   // actually exit.  This may result in an untimed wait() blocking indefinitely.
@@ -328,7 +406,7 @@ bool TerminaVm::Shutdown() {
                << status.error_message();
 
   // Try to shut it down via the crosvm socket.
-  RunCrosvmCommand("stop");
+  Stop();
 
   // We can't actually trust the exit codes that crosvm gives us so just see if
   // it exited.
@@ -363,9 +441,9 @@ bool TerminaVm::ConfigureNetwork(const std::vector<string>& nameservers,
   vm_tools::EmptyMessage response;
 
   vm_tools::IPv4Config* config = request.mutable_ipv4_config();
-  config->set_address(IPv4Address());
-  config->set_gateway(GatewayAddress());
-  config->set_netmask(Netmask());
+  config->set_address(IPv4Address().ToInAddr().s_addr);
+  config->set_gateway(GatewayAddress().ToInAddr().s_addr);
+  config->set_netmask(Netmask().ToInAddr().s_addr);
 
   grpc::ClientContext ctx;
   ctx.set_deadline(gpr_time_add(
@@ -383,6 +461,7 @@ bool TerminaVm::ConfigureNetwork(const std::vector<string>& nameservers,
 }
 
 bool TerminaVm::ConfigureContainerGuest(const std::string& vm_token,
+                                        const std::string& vm_username,
                                         std::string* out_error) {
   LOG(INFO) << "Configuring container guest for for VM " << vsock_cid_;
 
@@ -390,6 +469,7 @@ bool TerminaVm::ConfigureContainerGuest(const std::string& vm_token,
   vm_tools::EmptyMessage response;
 
   request.set_container_token(vm_token);
+  request.set_vm_username(vm_username);
 
   grpc::ClientContext ctx;
   ctx.set_deadline(gpr_time_add(
@@ -404,10 +484,6 @@ bool TerminaVm::ConfigureContainerGuest(const std::string& vm_token,
   }
 
   return true;
-}
-
-void TerminaVm::RunCrosvmCommand(string command) {
-  vm_tools::concierge::RunCrosvmCommand(std::move(command), GetVmSocketPath());
 }
 
 bool TerminaVm::Mount(string source,
@@ -459,7 +535,7 @@ bool TerminaVm::StartTermina(
 
   vm_tools::StartTerminaRequest request;
 
-  request.set_tremplin_ipv4_address(GatewayAddress());
+  request.set_tremplin_ipv4_address(GatewayAddress().ToInAddr().s_addr);
   request.mutable_lxd_ipv4_subnet()->swap(lxd_subnet);
   request.set_stateful_device(StatefulDevice());
   request.set_allow_privileged_containers(allow_privileged_containers);
@@ -507,17 +583,16 @@ bool TerminaVm::AttachUsbDevice(uint8_t bus,
                                 uint16_t vid,
                                 uint16_t pid,
                                 int fd,
-                                UsbControlResponse* response) {
+                                uint8_t* out_port) {
   return vm_tools::concierge::AttachUsbDevice(GetVmSocketPath(), bus, addr, vid,
-                                              pid, fd, response);
+                                              pid, fd, out_port);
 }
 
-bool TerminaVm::DetachUsbDevice(uint8_t port, UsbControlResponse* response) {
-  return vm_tools::concierge::DetachUsbDevice(GetVmSocketPath(), port,
-                                              response);
+bool TerminaVm::DetachUsbDevice(uint8_t port) {
+  return vm_tools::concierge::DetachUsbDevice(GetVmSocketPath(), port);
 }
 
-bool TerminaVm::ListUsbDevice(std::vector<UsbDevice>* device) {
+bool TerminaVm::ListUsbDevice(std::vector<UsbDeviceEntry>* device) {
   return vm_tools::concierge::ListUsbDevice(GetVmSocketPath(), device);
 }
 
@@ -537,11 +612,11 @@ void TerminaVm::HandleSuspendImminent() {
     LOG(ERROR) << "Failed to prepare for suspending" << status.error_message();
   }
 
-  RunCrosvmCommand("suspend");
+  SuspendCrosvm();
 }
 
 void TerminaVm::HandleSuspendDone() {
-  RunCrosvmCommand("resume");
+  ResumeCrosvm();
 }
 
 bool TerminaVm::Mount9P(uint32_t port, string target) {
@@ -606,6 +681,7 @@ bool TerminaVm::MountExternalDisk(string source, std::string target_dir) {
 
 bool TerminaVm::SetResolvConfig(const std::vector<string>& nameservers,
                                 const std::vector<string>& search_domains) {
+  VMT_TRACE(kCategory, "TerminaVm::SetResolvConfig");
   LOG(INFO) << "Setting resolv config for VM " << vsock_cid_;
 
   vm_tools::SetResolvConfigRequest request;
@@ -655,6 +731,7 @@ void TerminaVm::HostNetworkChanged() {
 }
 
 bool TerminaVm::SetTime(string* failure_reason) {
+  VMT_TRACE(kCategory, "TerminaVm::SetTime");
   DCHECK(failure_reason);
 
   base::Time now = base::Time::Now();
@@ -701,7 +778,9 @@ bool TerminaVm::GetVmEnterpriseReportingInfo(
 // static
 bool TerminaVm::SetVmCpuRestriction(CpuRestrictionState cpu_restriction_state) {
   return VmBaseImpl::SetVmCpuRestriction(cpu_restriction_state,
-                                         kTerminaCpuCgroup);
+                                         kTerminaCpuCgroup) &&
+         VmBaseImpl::SetVmCpuRestriction(cpu_restriction_state,
+                                         kTerminaVcpuCpuCgroup);
 }
 
 // Extract the disk index of a virtio-blk device name.
@@ -908,69 +987,95 @@ uint64_t TerminaVm::GetAvailableDiskSpace() {
   return response.available_space();
 }
 
-uint32_t TerminaVm::GatewayAddress() const {
-  return subnet_->AddressAtOffset(kHostAddressOffset);
+void TerminaVm::HandleStatefulUpdate(
+    const spaced::StatefulDiskSpaceUpdate update) {
+  if (IsSuspended() || !storage_ballooning_) {
+    return;
+  }
+
+  grpc::ClientContext ctx;
+  ctx.set_deadline(gpr_time_add(
+      gpr_now(GPR_CLOCK_MONOTONIC),
+      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+
+  vm_tools::UpdateStorageBalloonRequest request;
+  vm_tools::UpdateStorageBalloonRequest out;
+  request.set_state(MapSpacedStateToGuestState(update.state()));
+  request.set_free_space_bytes(update.free_space_bytes());
+
+  maitred_handle_->CallRpc(
+      &vm_tools::Maitred::Stub::AsyncUpdateStorageBalloon,
+      base::Seconds(kDefaultTimeoutSeconds), std::move(request),
+      base::BindOnce(
+          [](grpc::Status status,
+             std::unique_ptr<vm_tools::UpdateStorageBalloonResponse> response) {
+            if (!status.ok()) {
+              LOG(ERROR) << "HandleStatefulUpdate RPC failed";
+            }
+          }));
+
+  return;
 }
 
-uint32_t TerminaVm::IPv4Address() const {
-  return subnet_->AddressAtOffset(kGuestAddressOffset);
+net_base::IPv4Address TerminaVm::GatewayAddress() const {
+  return Network()->GatewayV4();
 }
 
-uint32_t TerminaVm::Netmask() const {
-  return subnet_->Netmask();
+net_base::IPv4Address TerminaVm::IPv4Address() const {
+  return Network()->AddressV4();
 }
 
-uint32_t TerminaVm::ContainerNetmask() const {
-  if (container_subnet_)
-    return container_subnet_->Netmask();
-
-  return INADDR_ANY;
+net_base::IPv4Address TerminaVm::Netmask() const {
+  return Network()->SubnetV4().ToNetmask();
 }
 
-size_t TerminaVm::ContainerPrefixLength() const {
-  if (container_subnet_)
-    return container_subnet_->PrefixLength();
-
-  return 0;
-}
-
-uint32_t TerminaVm::ContainerSubnet() const {
-  if (container_subnet_)
-    return container_subnet_->AddressAtOffset(0);
-
-  return INADDR_ANY;
+net_base::IPv4CIDR TerminaVm::ContainerCIDRAddress() const {
+  return *net_base::IPv4CIDR::CreateFromAddressAndPrefix(
+      Network()->ContainerAddressV4(),
+      Network()->ContainerSubnetV4().prefix_length());
 }
 
 std::string TerminaVm::PermissionToken() const {
   return permission_token_;
 }
 
-VmInterface::Info TerminaVm::GetInfo() {
-  VmInterface::Info info = {
-      .ipv4_address = IPv4Address(),
+VmBaseImpl::Info TerminaVm::GetInfo() const {
+  VmBaseImpl::Info info = {
+      .ipv4_address = IPv4Address().ToInAddr().s_addr,
       .pid = pid(),
       .cid = cid(),
       .seneschal_server_handle = seneschal_server_handle(),
       .permission_token = permission_token_,
-      .status = IsTremplinStarted() ? VmInterface::Status::RUNNING
-                                    : VmInterface::Status::STARTING,
-      .type = is_termina_ ? VmInfo::TERMINA : VmInfo::UNKNOWN,
+      .status = IsTremplinStarted() ? VmBaseImpl::Status::RUNNING
+                                    : VmBaseImpl::Status::STARTING,
+      .type = classification_,
+      .storage_ballooning = storage_ballooning_,
   };
 
   return info;
+}
+
+GuestOsNetwork* TerminaVm::Network() const {
+  return static_cast<GuestOsNetwork*>(GetNetwork());
 }
 
 void TerminaVm::set_kernel_version_for_testing(std::string kernel_version) {
   kernel_version_ = kernel_version;
 }
 
-void TerminaVm::set_stub_for_testing(
+void TerminaVm::InitializeMaitredService(
     std::unique_ptr<vm_tools::Maitred::Stub> stub) {
-  stub_ = std::move(stub);
+  // It is not safe to delete the maitred handle without shutting it down first.
+  CHECK(!maitred_handle_);
+  stub_ = stub.get();
+  // The TaskRunner supplied here is the one on which *responses* will be
+  // posted, so we use the current sequence.
+  maitred_handle_.reset(new brillo::AsyncGrpcClient<vm_tools::Maitred>(
+      base::SequencedTaskRunner::GetCurrentDefault(), std::move(stub)));
 }
 
 std::unique_ptr<TerminaVm> TerminaVm::CreateForTesting(
-    std::unique_ptr<patchpanel::Subnet> subnet,
+    std::unique_ptr<GuestOsNetwork> network,
     uint32_t vsock_cid,
     base::FilePath runtime_dir,
     base::FilePath log_path,
@@ -978,22 +1083,38 @@ std::unique_ptr<TerminaVm> TerminaVm::CreateForTesting(
     uint64_t stateful_size,
     std::string kernel_version,
     std::unique_ptr<vm_tools::Maitred::Stub> stub,
-    bool is_termina,
     VmBuilder vm_builder) {
   VmFeatures features{
       .gpu = false,
-      .software_tpm = false,
+      .vtpm_proxy = false,
       .audio_capture = false,
   };
   auto vm = base::WrapUnique(new TerminaVm(
-      std::move(subnet), vsock_cid, nullptr, std::move(runtime_dir),
-      std::move(log_path), std::move(stateful_device), std::move(stateful_size),
-      features, is_termina));
+      TerminaVm::Config{.vsock_cid = vsock_cid,
+                        .network = std::move(network),
+                        .seneschal_server_proxy = nullptr,
+                        .cros_vm_socket = "",
+                        .runtime_dir = std::move(runtime_dir),
+                        .log_path = std::move(log_path),
+                        .stateful_device = std::move(stateful_device),
+                        .stateful_size = std::move(stateful_size),
+                        .features = features,
+                        .id = VmId("foo", "bar"),
+                        .classification = apps::VmType::UNKNOWN}));
   vm->set_kernel_version_for_testing(kernel_version);
-  vm->set_stub_for_testing(std::move(stub));
-
+  vm->InitializeMaitredService(std::move(stub));
   return vm;
 }
 
-}  // namespace concierge
-}  // namespace vm_tools
+void TerminaVm::StopMaitredForTesting(base::OnceClosure stop_callback) {
+  auto maitred = maitred_handle_.release();
+  maitred->ShutDown(base::BindOnce(
+      [](brillo::AsyncGrpcClient<vm_tools::Maitred>* maitred,
+         base::OnceClosure stop_callback) {
+        delete maitred;
+        std::move(stop_callback).Run();
+      },
+      maitred, std::move(stop_callback)));
+}
+
+}  // namespace vm_tools::concierge

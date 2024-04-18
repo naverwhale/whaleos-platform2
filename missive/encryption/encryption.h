@@ -1,18 +1,18 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef MISSIVE_ENCRYPTION_ENCRYPTION_H_
 #define MISSIVE_ENCRYPTION_ENCRYPTION_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/scoped_refptr.h>
-#include <base/optional.h>
-#include <base/strings/string_piece.h>
 
 #include "missive/proto/record.pb.h"
 #include "missive/util/status.h"
@@ -55,7 +55,7 @@ class Encryptor : public base::RefCountedThreadSafe<Encryptor> {
     ~Handle();
 
     // Adds piece of data to the record.
-    void AddToRecord(base::StringPiece data,
+    void AddToRecord(std::string_view data,
                      base::OnceCallback<void(Status)> cb);
 
     // Closes and encrypts the record, hands over the data (encrypted with
@@ -88,7 +88,7 @@ class Encryptor : public base::RefCountedThreadSafe<Encryptor> {
   // To affect specific record, must happen before Handle::CloseRecord
   // (it is OK to do it after OpenRecord and Handle::AddToRecord).
   // Executes on a sequenced thread, returns with callback.
-  void UpdateAsymmetricKey(base::StringPiece new_public_key,
+  void UpdateAsymmetricKey(std::string_view new_public_key,
                            PublicKeyId new_public_key_id,
                            base::OnceCallback<void(Status)> response_cb);
 
@@ -104,7 +104,7 @@ class Encryptor : public base::RefCountedThreadSafe<Encryptor> {
   ~Encryptor();
 
   // Public key used for asymmetric encryption of symmetric key and its id.
-  base::Optional<std::pair<std::string, PublicKeyId>> asymmetric_key_;
+  std::optional<std::pair<std::string, PublicKeyId>> asymmetric_key_;
 
   // Sequential task runner for all asymmetric_key_ activities: update, read.
   scoped_refptr<base::SequencedTaskRunner>

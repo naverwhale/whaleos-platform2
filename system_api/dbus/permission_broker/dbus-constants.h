@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,14 +13,15 @@ const char kPermissionBrokerServiceName[] = "org.chromium.PermissionBroker";
 // Methods
 const char kCheckPathAccess[] = "CheckPathAccess";
 const char kOpenPath[] = "OpenPath";
+const char kOpenPathAndRegisterClient[] = "OpenPathAndRegisterClient";
 const char kClaimDevicePath[] = "ClaimDevicePath";
-const char kRequestAdbPortForward[] = "RequestAdbPortForward";
+const char kDetachInterface[] = "DetachInterface";
+const char kReattachInterface[] = "ReattachInterface";
 const char kRequestLoopbackTcpPortLockdown[] = "RequestLoopbackTcpPortLockdown";
 const char kRequestTcpPortAccess[] = "RequestTcpPortAccess";
 const char kRequestTcpPortForward[] = "RequestTcpPortForward";
 const char kRequestUdpPortAccess[] = "RequestUdpPortAccess";
 const char kRequestUdpPortForward[] = "RequestUdpPortForward";
-const char kReleaseAdbPortForward[] = "ReleaseAdbPortForward";
 const char kReleaseLoopbackTcpPort[] = "ReleaseLoopbackTcpPort";
 const char kReleaseTcpPort[] = "ReleaseTcpPort";
 const char kReleaseTcpPortForward[] = "ReleaseTcpPortForward";

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,6 @@
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
 #include <base/gtest_prod_util.h>
-#include <base/macros.h>
 
 namespace debugd {
 
@@ -53,6 +52,15 @@ class SchedulerConfigurationUtils {
   // Open the file descriptors to the cpuset files before sandboxing.
   bool GetCPUSetFDs();
 
+  // This takes a range of CPUs from the /sys filesystem, which could be a raw
+  // number, hyphen separated range or comma separated list/range, and converts
+  // it into a vector.
+  static bool ParseCPUNumbers(const std::string& cpus,
+                              std::vector<std::string>* result);
+
+  // Talks to system dbus to get the current battery saver mode status.
+  bool IsBatterySaverModeOn();
+
  private:
   enum class DisableSiblingsResult {
     PHYSICAL_CORE,
@@ -66,14 +74,6 @@ class SchedulerConfigurationUtils {
   // Writes the online status to CPU control file fd.
   static bool WriteFlagToCPUControlFile(const base::ScopedFD& fd,
                                         const std::string& flag);
-
-  // This takes a range of CPUs from the /sys filesystem, which could be a raw
-  // number, comma separated list, or hyphen separated range, and converts it
-  // into a vector. Note: the kernel will in fact return lists such as 0,2-3;
-  // however, if that happens, something went wrong. Rather than support such
-  // complicated logic, this checks for it and errors out.
-  static bool ParseCPUNumbers(const std::string& cpus,
-                              std::vector<std::string>* result);
 
   // This fetches the FD from the map, makes sure it exists, and then writes it.
   bool LookupFDAndWriteFlag(const std::string& cpu_number,

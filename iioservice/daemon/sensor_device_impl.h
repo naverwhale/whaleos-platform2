@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,10 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
-#include <base/sequenced_task_runner.h>
+#include <base/task/sequenced_task_runner.h>
 #include <base/threading/thread.h>
 #include <libmems/iio_context.h>
 #include <libmems/iio_device.h>
@@ -22,6 +22,7 @@
 #include <mojo/public/cpp/bindings/remote.h>
 
 #include "iioservice/daemon/common_types.h"
+#include "iioservice/daemon/events_handler.h"
 #include "iioservice/daemon/samples_handler.h"
 #include "iioservice/mojo/sensor.mojom.h"
 
@@ -64,6 +65,14 @@ class SensorDeviceImpl final : public cros::mojom::SensorDevice {
   void GetChannelsAttributes(const std::vector<int32_t>& iio_chn_indices,
                              const std::string& attr_name,
                              GetChannelsAttributesCallback callback) override;
+  void GetAllEvents(GetAllEventsCallback callback) override;
+  void GetEventsAttributes(const std::vector<int32_t>& iio_event_indices,
+                           const std::string& attr_name,
+                           GetEventsAttributesCallback callback) override;
+  void StartReadingEvents(
+      const std::vector<int32_t>& iio_event_indices,
+      mojo::PendingRemote<cros::mojom::SensorDeviceEventsObserver> observer)
+      override;
 
   base::WeakPtr<SensorDeviceImpl> GetWeakPtr();
 
@@ -78,6 +87,8 @@ class SensorDeviceImpl final : public cros::mojom::SensorDevice {
   void OnSamplesObserverDisconnect(mojo::ReceiverId id);
   void StopReadingSamplesOnClient(mojo::ReceiverId id,
                                   base::OnceClosure callback);
+  void StopReadingEventsOnClient(mojo::ReceiverId id,
+                                 base::OnceClosure callback);
 
   scoped_refptr<base::SequencedTaskRunner> ipc_task_runner_;
   libmems::IioContext* context_;  // non-owned
@@ -92,8 +103,8 @@ class SensorDeviceImpl final : public cros::mojom::SensorDevice {
   // |clients_|.
   std::map<mojo::ReceiverId, ClientData> clients_;
 
-  std::map<libmems::IioDevice*, SamplesHandler::ScopedSamplesHandler>
-      samples_handlers_;
+  std::map<int, SamplesHandler::ScopedSamplesHandler> samples_handlers_;
+  std::map<int, EventsHandler::ScopedEventsHandler> events_handlers_;
 
   base::WeakPtrFactory<SensorDeviceImpl> weak_factory_{this};
 };

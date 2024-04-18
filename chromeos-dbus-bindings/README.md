@@ -68,29 +68,39 @@ D-Bus methods, signals and properties have [type signatures]. When generating
 bindings, `chromeos-dbus-bindings` will map D-Bus types to C++ types like
 so:
 
-| D-Bus type signature | C++ type                                               |
-| -------------------- | ------------------------------------------------------ |
-| `y`                  | `uint8_t`                                              |
-| `b`                  | `bool`                                                 |
-| `n`                  | `int16_t`                                              |
-| `q`                  | `uint16_t`                                             |
-| `i`                  | `int32_t`                                              |
-| `u`                  | `uint32_t`                                             |
-| `x`                  | `int64_t`                                              |
-| `t`                  | `uint64_t`                                             |
-| `d`                  | `double`                                               |
-| `s`                  | `std::string`                                          |
-| `h`                  | [brillo::dbus_utils::FileDescriptor], [base::ScopedFD] |
-| `o`                  | [dbus::ObjectPath]                                     |
-| `v` (variant)        | [brillo::Any]                                          |
-| `(TU...)`            | `std::tuple<T, U, ...>`                                |
-| `aT`                 | `std::vector<T>`                                       |
-| `a{TU}`              | `std::map<T, U>`                                       |
-| `a{sv}`              | [brillo::VariantDictionary]                            |
+| D-Bus type signature | C++ type                    |
+| -------------------- | ----------------------------|
+| `y`                  | `uint8_t`                   |
+| `b`                  | `bool`                      |
+| `n`                  | `int16_t`                   |
+| `q`                  | `uint16_t`                  |
+| `i`                  | `int32_t`                   |
+| `u`                  | `uint32_t`                  |
+| `x`                  | `int64_t`                   |
+| `t`                  | `uint64_t`                  |
+| `d`                  | `double`                    |
+| `s`                  | `std::string`               |
+| `h`                  | [base::ScopedFD]            |
+| `o`                  | [dbus::ObjectPath]          |
+| `v` (variant)        | [brillo::Any]               |
+| `(TU...)`            | `std::tuple<T, U, ...>`     |
+| `aT`                 | `std::vector<T>`            |
+| `a{TU}`              | `std::map<T, U>`            |
+| `a{sv}`              | [brillo::VariantDictionary] |
 
 This type mapping is also recursive, i.e. an argument of
 type `a{s(io)}` will be mapped to
 `std::map<std::string, std::tuple<int32_t, dbus::ObjectPath>>`.
+
+For protocol buffers, add an annotation `ay` (array of bytes) with
+`org.chromium.DBus.Argument.ProtobufClass`, like:
+
+```
+  <arg name="response" type="ay">
+    <annotation name="org.chromium.DBus.Argument.ProtobufClass"
+       value="vm_tools::concierge::DiskImageStatusResponse" />
+  </arg>
+```
 
 ## Method generation
 
@@ -231,9 +241,9 @@ class DBusAdaptor : public org::chromium::FrobinatorInterface,
   DBusAdaptor& operator=(const DBusAdaptor&) = delete;
 
   void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction& cb) {
+      brillo::dbus_utils::AsyncEventSequencer::CompletionAction cb) {
     RegisterWithDBusObject(&dbus_object_);
-    dbus_object_.RegisterAsync(cb);
+    dbus_object_.RegisterAsync(std::move(cb));
   }
 
   // org::chromium::FrobinatorInterface overrides.
@@ -312,7 +322,7 @@ To use this tool:
 
 2) Add the following to `.gitignore`:
     ```.gitignore
-    src/bindings
+    /src/bindings
     ```
 
 3) Create the `Cargo.toml` file (system_api is a good examples). Be sure to
@@ -352,9 +362,8 @@ To use this tool:
 [the introspection API]: https://dbus.freedesktop.org/doc/dbus-specification.html#introspection-format
 [best practices]: https://chromium.googlesource.com/chromiumos/docs/+/HEAD/dbus_best_practices.md
 [type signatures]: https://dbus.freedesktop.org/doc/dbus-specification.html#type-system
-[brillo::dbus_utils::FileDescriptor]: https://chromium.googlesource.com/aosp/platform/external/libbrillo/+/HEAD/brillo/dbus/file_descriptor.h
-[base::ScopedFD]: https://chromium.googlesource.com/aosp/platform/external/libchrome/+/HEAD/base/files/scoped_file.h
-[dbus::ObjectPath]: https://chromium.googlesource.com/aosp/platform/external/libchrome/+/HEAD/dbus/object_path.h
+[base::ScopedFD]: https://chromium.googlesource.com/chromiumos/platform/libchrome/+/HEAD/base/files/scoped_file.h
+[dbus::ObjectPath]: https://chromium.googlesource.com/chromiumos/platform/libchrome/+/HEAD/dbus/object_path.h
 [brillo::Any]: https://chromium.googlesource.com/aosp/platform/external/libbrillo/+/HEAD/brillo/any.h
 [brillo::VariantDictionary]: https://chromium.googlesource.com/aosp/platform/external/libbrillo/+/HEAD/brillo/variant_dictionary.h
 [DBusMethodResponse]: https://chromium.googlesource.com/aosp/platform/external/libbrillo/+/HEAD/brillo/dbus/dbus_method_response.h

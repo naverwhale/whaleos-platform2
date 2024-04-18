@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,13 @@
 #include <string>
 #include <utility>
 
+#include <vm_applications/apps.pb.h>
+
 namespace vm_tools {
+
+namespace apps {
+enum VmType : int;
+}
 
 class VmId {
  public:

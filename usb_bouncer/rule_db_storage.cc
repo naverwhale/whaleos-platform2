@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -62,7 +62,7 @@ bool RuleDBStorage::Persist() {
   }
 
   std::string serialized = val_->SerializeAsString();
-  if (fd_.Write(serialized.data(), serialized.size()) !=
+  if (fd_.Replace(serialized.data(), serialized.size()) !=
       SafeFD::Error::kNoError) {
     PLOG(ERROR) << "Failed to write proto to file!";
     return false;

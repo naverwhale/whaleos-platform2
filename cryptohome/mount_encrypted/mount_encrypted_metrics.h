@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -33,8 +33,6 @@ class MountEncryptedMetrics {
   void ReportSystemKeyStatus(EncryptionKey::SystemKeyStatus status);
 
   void ReportEncryptionKeyStatus(EncryptionKey::EncryptionKeyStatus status);
-
-  void ReportTimeToTakeTpmOwnership(base::TimeDelta elapsed_time);
 
  private:
   explicit MountEncryptedMetrics(const std::string& output_file);

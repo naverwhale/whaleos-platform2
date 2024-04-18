@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/memory/ptr_util.h>
 #include <base/strings/string_split.h>
 
 #include "diagnostics/cros_healthd/fetchers/graphics_header.h"
@@ -16,28 +16,10 @@
 
 namespace diagnostics {
 
-namespace {
-
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
-
-}  // namespace
-
-mojo_ipc::GraphicsResultPtr GraphicsFetcher::FetchGraphicsInfo(
-    std::unique_ptr<EglManager> egl_manager) {
-  auto graphics_info = mojo_ipc::GraphicsInfo::New();
-
-  auto& gles_info = graphics_info->gles_info;
-  auto& egl_info = graphics_info->egl_info;
-  auto error = FetchGraphicsInfo(std::move(egl_manager), &gles_info, &egl_info);
-  if (error.has_value()) {
-    return mojo_ipc::GraphicsResult::NewError(std::move(error.value()));
-  }
-
-  return mojo_ipc::GraphicsResult::NewGraphicsInfo(std::move(graphics_info));
-}
+namespace mojom = ::ash::cros_healthd::mojom;
 
 std::unique_ptr<EglManager> EglManager::Create() {
-  std::unique_ptr<EglManager> egl_manager(new EglManager());
+  auto egl_manager = base::WrapUnique(new EglManager());
   // CloudReady(CR) uses mesa-reven package for graphics driver, and the
   // graphics stack in CR is more complicated than usual ChromeOS devices. So in
   // CR, we need to use EGL v1.5 API to fetch the graphics info. However, not
@@ -83,8 +65,8 @@ EglManager::~EglManager() {
   eglDestroyContext(egl_display_, egl_context_);
 }
 
-mojo_ipc::GLESInfoPtr EglManager::FetchGLESInfo() {
-  auto gles_info = mojo_ipc::GLESInfo::New();
+mojom::GLESInfoPtr EglManager::FetchGLESInfo() {
+  auto gles_info = mojom::GLESInfo::New();
   gles_info->version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
   gles_info->shading_version =
       reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION));
@@ -98,41 +80,32 @@ mojo_ipc::GLESInfoPtr EglManager::FetchGLESInfo() {
   return gles_info;
 }
 
-mojo_ipc::EGLInfoPtr EglManager::FetchEGLInfo() {
-  auto egl_info = mojo_ipc::EGLInfo::New();
-  egl_info->version =
-      reinterpret_cast<const char*>(eglQueryString(egl_display_, EGL_VERSION));
-  egl_info->vendor =
-      reinterpret_cast<const char*>(eglQueryString(egl_display_, EGL_VENDOR));
-  egl_info->client_api = reinterpret_cast<const char*>(
-      eglQueryString(egl_display_, EGL_CLIENT_APIS));
-  std::string egl_extensions(reinterpret_cast<const char*>(
-      eglQueryString(egl_display_, EGL_EXTENSIONS)));
-  egl_info->extensions = base::SplitString(
-      egl_extensions, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
-
+mojom::EGLInfoPtr EglManager::FetchEGLInfo() {
+  auto egl_info = mojom::EGLInfo::New();
+  egl_info->version = eglQueryString(egl_display_, EGL_VERSION);
+  egl_info->vendor = eglQueryString(egl_display_, EGL_VENDOR);
+  egl_info->client_api = eglQueryString(egl_display_, EGL_CLIENT_APIS);
+  egl_info->extensions =
+      base::SplitString(eglQueryString(egl_display_, EGL_EXTENSIONS), " ",
+                        base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
   return egl_info;
 }
 
-base::Optional<mojo_ipc::ProbeErrorPtr> GraphicsFetcher::FetchGraphicsInfo(
-    std::unique_ptr<EglManager> egl_manager,
-    mojo_ipc::GLESInfoPtr* out_gles_info,
-    mojo_ipc::EGLInfoPtr* out_egl_info) {
+mojom::GraphicsResultPtr FetchGraphicsInfo(
+    std::unique_ptr<EglManager> egl_manager) {
   if (!egl_manager) {
     egl_manager = EglManager::Create();
   }
   if (!egl_manager) {
-    return CreateAndLogProbeError(mojo_ipc::ErrorType::kSystemUtilityError,
-                                  "Failed to initialze EglManager.");
+    return mojom::GraphicsResult::NewError(
+        CreateAndLogProbeError(mojom::ErrorType::kSystemUtilityError,
+                               "Failed to initialze EglManager."));
   }
 
-  auto gles_info = egl_manager->FetchGLESInfo();
-  *out_gles_info = std::move(gles_info);
-
-  auto egl_info = egl_manager->FetchEGLInfo();
-  *out_egl_info = std::move(egl_info);
-
-  return base::nullopt;
+  auto graphics_info = mojom::GraphicsInfo::New();
+  graphics_info->gles_info = egl_manager->FetchGLESInfo();
+  graphics_info->egl_info = egl_manager->FetchEGLInfo();
+  return mojom::GraphicsResult::NewGraphicsInfo(std::move(graphics_info));
 }
 
 }  // namespace diagnostics

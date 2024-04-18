@@ -1,9 +1,10 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "ml/machine_learning_service_impl.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -11,11 +12,11 @@
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/containers/flat_map.h>
-#include <base/bind.h>
 #include <base/files/file_util.h>
-#include <base/macros.h>
+#include <base/functional/bind.h>
 #include <base/run_loop.h>
 #include <base/task/single_thread_task_executor.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/message_loops/base_message_loop.h>
 #include <fuzzer/FuzzedDataProvider.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
@@ -40,6 +41,7 @@ using ::chromeos::machine_learning::mojom::BuiltinModelSpecPtr;
 using ::chromeos::machine_learning::mojom::CreateGraphExecutorResult;
 using ::chromeos::machine_learning::mojom::ExecuteResult;
 using ::chromeos::machine_learning::mojom::GraphExecutor;
+using ::chromeos::machine_learning::mojom::GraphExecutorOptions;
 using ::chromeos::machine_learning::mojom::LoadModelResult;
 using ::chromeos::machine_learning::mojom::MachineLearningService;
 using ::chromeos::machine_learning::mojom::Model;
@@ -71,7 +73,7 @@ class MLServiceFuzzer {
 
   void SetUp() {
     ipc_support_ = std::make_unique<mojo::core::ScopedIPCSupport>(
-        base::ThreadTaskRunnerHandle::Get(),
+        base::SingleThreadTaskRunner::GetCurrentDefault(),
         mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
 
     ml_service_impl_ = std::make_unique<MachineLearningServiceImplForTesting>(
@@ -98,6 +100,7 @@ class MLServiceFuzzer {
     // Get graph executor.
     bool ge_callback_done = false;
     model_->CreateGraphExecutor(
+        GraphExecutorOptions::New(),
         graph_executor_.BindNewPipeAndPassReceiver(),
         base::BindOnce(
             [](bool* ge_callback_done, const CreateGraphExecutorResult result) {
@@ -131,7 +134,7 @@ class MLServiceFuzzer {
         std::move(inputs), std::move(outputs),
         base::BindOnce(
             [](bool* infer_callback_done, const ExecuteResult result,
-               base::Optional<std::vector<TensorPtr>> outputs) {
+               std::optional<std::vector<TensorPtr>> outputs) {
               // Basic inference checks.
               CHECK_EQ(result, ExecuteResult::OK);
               CHECK(outputs.has_value());

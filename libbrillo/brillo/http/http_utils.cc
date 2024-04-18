@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,9 @@
 #include <brillo/http/http_utils.h>
 
 #include <algorithm>
+#include <optional>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/json/json_reader.h>
 #include <base/json/json_writer.h>
 #include <base/values.h>
@@ -33,10 +34,11 @@ std::unique_ptr<Response> GetAndBlock(const std::string& url,
 RequestID Get(const std::string& url,
               const HeaderList& headers,
               std::shared_ptr<Transport> transport,
-              const SuccessCallback& success_callback,
-              const ErrorCallback& error_callback) {
+              SuccessCallback success_callback,
+              ErrorCallback error_callback) {
   return SendRequestWithNoData(request_type::kGet, url, headers, transport,
-                               success_callback, error_callback);
+                               std::move(success_callback),
+                               std::move(error_callback));
 }
 
 std::unique_ptr<Response> HeadAndBlock(const std::string& url,
@@ -48,10 +50,11 @@ std::unique_ptr<Response> HeadAndBlock(const std::string& url,
 
 RequestID Head(const std::string& url,
                std::shared_ptr<Transport> transport,
-               const SuccessCallback& success_callback,
-               const ErrorCallback& error_callback) {
+               SuccessCallback success_callback,
+               ErrorCallback error_callback) {
   return SendRequestWithNoData(request_type::kHead, url, {}, transport,
-                               success_callback, error_callback);
+                               std::move(success_callback),
+                               std::move(error_callback));
 }
 
 std::unique_ptr<Response> PostTextAndBlock(const std::string& url,
@@ -69,10 +72,11 @@ RequestID PostText(const std::string& url,
                    const std::string& mime_type,
                    const HeaderList& headers,
                    std::shared_ptr<Transport> transport,
-                   const SuccessCallback& success_callback,
-                   const ErrorCallback& error_callback) {
+                   SuccessCallback success_callback,
+                   ErrorCallback error_callback) {
   return PostBinary(url, data.data(), data.size(), mime_type, headers,
-                    transport, success_callback, error_callback);
+                    transport, std::move(success_callback),
+                    std::move(error_callback));
 }
 
 std::unique_ptr<Response> SendRequestAndBlock(
@@ -112,8 +116,8 @@ RequestID SendRequest(const std::string& method,
                       const std::string& mime_type,
                       const HeaderList& headers,
                       std::shared_ptr<Transport> transport,
-                      const SuccessCallback& success_callback,
-                      const ErrorCallback& error_callback) {
+                      SuccessCallback success_callback,
+                      ErrorCallback error_callback) {
   Request request(url, method, transport);
   request.AddHeaders(headers);
   if (stream && (!stream->CanGetSize() || stream->GetRemainingSize() > 0)) {
@@ -122,13 +126,14 @@ RequestID SendRequest(const std::string& method,
     request.SetContentType(mime_type);
     brillo::ErrorPtr error;
     if (!request.AddRequestBody(std::move(stream), &error)) {
-      transport->RunCallbackAsync(
-          FROM_HERE,
-          base::Bind(error_callback, 0, base::Owned(error.release())));
+      transport->RunCallbackAsync(FROM_HERE,
+                                  base::BindOnce(std::move(error_callback), 0,
+                                                 base::Owned(error.release())));
       return 0;
     }
   }
-  return request.GetResponse(success_callback, error_callback);
+  return request.GetResponse(std::move(success_callback),
+                             std::move(error_callback));
 }
 
 RequestID SendRequest(const std::string& method,
@@ -138,21 +143,22 @@ RequestID SendRequest(const std::string& method,
                       const std::string& mime_type,
                       const HeaderList& headers,
                       std::shared_ptr<Transport> transport,
-                      const SuccessCallback& success_callback,
-                      const ErrorCallback& error_callback) {
-  return SendRequest(
-      method, url, MemoryStream::OpenCopyOf(data, data_size, nullptr),
-      mime_type, headers, transport, success_callback, error_callback);
+                      SuccessCallback success_callback,
+                      ErrorCallback error_callback) {
+  return SendRequest(method, url,
+                     MemoryStream::OpenCopyOf(data, data_size, nullptr),
+                     mime_type, headers, transport, std::move(success_callback),
+                     std::move(error_callback));
 }
 
 RequestID SendRequestWithNoData(const std::string& method,
                                 const std::string& url,
                                 const HeaderList& headers,
                                 std::shared_ptr<Transport> transport,
-                                const SuccessCallback& success_callback,
-                                const ErrorCallback& error_callback) {
-  return SendRequest(method, url, {}, {}, headers, transport, success_callback,
-                     error_callback);
+                                SuccessCallback success_callback,
+                                ErrorCallback error_callback) {
+  return SendRequest(method, url, {}, {}, headers, transport,
+                     std::move(success_callback), std::move(error_callback));
 }
 
 std::unique_ptr<Response> PostBinaryAndBlock(
@@ -172,10 +178,11 @@ RequestID PostBinary(const std::string& url,
                      const std::string& mime_type,
                      const HeaderList& headers,
                      std::shared_ptr<Transport> transport,
-                     const SuccessCallback& success_callback,
-                     const ErrorCallback& error_callback) {
+                     SuccessCallback success_callback,
+                     ErrorCallback error_callback) {
   return SendRequest(request_type::kPost, url, std::move(stream), mime_type,
-                     headers, transport, success_callback, error_callback);
+                     headers, transport, std::move(success_callback),
+                     std::move(error_callback));
 }
 
 RequestID PostBinary(const std::string& url,
@@ -184,10 +191,11 @@ RequestID PostBinary(const std::string& url,
                      const std::string& mime_type,
                      const HeaderList& headers,
                      std::shared_ptr<Transport> transport,
-                     const SuccessCallback& success_callback,
-                     const ErrorCallback& error_callback) {
+                     SuccessCallback success_callback,
+                     ErrorCallback error_callback) {
   return SendRequest(request_type::kPost, url, data, data_size, mime_type,
-                     headers, transport, success_callback, error_callback);
+                     headers, transport, std::move(success_callback),
+                     std::move(error_callback));
 }
 
 std::unique_ptr<Response> PostFormDataAndBlock(
@@ -219,29 +227,32 @@ RequestID PostFormData(const std::string& url,
                        const FormFieldList& data,
                        const HeaderList& headers,
                        std::shared_ptr<Transport> transport,
-                       const SuccessCallback& success_callback,
-                       const ErrorCallback& error_callback) {
+                       SuccessCallback success_callback,
+                       ErrorCallback error_callback) {
   std::string encoded_data = brillo::data_encoding::WebParamsEncode(data);
   return PostBinary(url, encoded_data.c_str(), encoded_data.size(),
                     brillo::mime::application::kWwwFormUrlEncoded, headers,
-                    transport, success_callback, error_callback);
+                    transport, std::move(success_callback),
+                    std::move(error_callback));
 }
 
 RequestID PostFormData(const std::string& url,
                        std::unique_ptr<FormData> form_data,
                        const HeaderList& headers,
                        std::shared_ptr<Transport> transport,
-                       const SuccessCallback& success_callback,
-                       const ErrorCallback& error_callback) {
+                       SuccessCallback success_callback,
+                       ErrorCallback error_callback) {
   Request request(url, request_type::kPost, transport);
   request.AddHeaders(headers);
   brillo::ErrorPtr error;
   if (!request.AddRequestBodyAsFormData(std::move(form_data), &error)) {
-    transport->RunCallbackAsync(
-        FROM_HERE, base::Bind(error_callback, 0, base::Owned(error.release())));
+    transport->RunCallbackAsync(FROM_HERE,
+                                base::BindOnce(std::move(error_callback), 0,
+                                               base::Owned(error.release())));
     return 0;
   }
-  return request.GetResponse(success_callback, error_callback);
+  return request.GetResponse(std::move(success_callback),
+                             std::move(error_callback));
 }
 
 std::unique_ptr<Response> PostJsonAndBlock(const std::string& url,
@@ -263,8 +274,8 @@ RequestID PostJson(const std::string& url,
                    std::unique_ptr<base::Value> json,
                    const HeaderList& headers,
                    std::shared_ptr<Transport> transport,
-                   const SuccessCallback& success_callback,
-                   const ErrorCallback& error_callback) {
+                   SuccessCallback success_callback,
+                   ErrorCallback error_callback) {
   std::string data;
   if (json)
     base::JSONWriter::Write(*json, &data);
@@ -272,7 +283,8 @@ RequestID PostJson(const std::string& url,
       AppendParameter(brillo::mime::application::kJson,
                       brillo::mime::parameters::kCharset, "utf-8");
   return PostBinary(url, data.c_str(), data.size(), mime_type, headers,
-                    transport, success_callback, error_callback);
+                    transport, std::move(success_callback),
+                    std::move(error_callback));
 }
 
 std::unique_ptr<Response> PatchJsonAndBlock(
@@ -295,8 +307,8 @@ RequestID PatchJson(const std::string& url,
                     std::unique_ptr<base::Value> json,
                     const HeaderList& headers,
                     std::shared_ptr<Transport> transport,
-                    const SuccessCallback& success_callback,
-                    const ErrorCallback& error_callback) {
+                    SuccessCallback success_callback,
+                    ErrorCallback error_callback) {
   std::string data;
   if (json)
     base::JSONWriter::Write(*json, &data);
@@ -304,15 +316,15 @@ RequestID PatchJson(const std::string& url,
       AppendParameter(brillo::mime::application::kJson,
                       brillo::mime::parameters::kCharset, "utf-8");
   return SendRequest(request_type::kPatch, url, data.c_str(), data.size(),
-                     mime_type, headers, transport, success_callback,
-                     error_callback);
+                     mime_type, headers, transport, std::move(success_callback),
+                     std::move(error_callback));
 }
 
-base::Optional<base::Value> ParseJsonResponse(Response* response,
-                                              int* status_code,
-                                              brillo::ErrorPtr* error) {
+std::optional<base::Value::Dict> ParseJsonResponse(Response* response,
+                                                   int* status_code,
+                                                   brillo::ErrorPtr* error) {
   if (!response)
-    return base::nullopt;
+    return std::nullopt;
 
   if (status_code)
     *status_code = response->GetStatusCode();
@@ -325,27 +337,28 @@ base::Optional<base::Value> ParseJsonResponse(Response* response,
     brillo::Error::AddTo(error, FROM_HERE, brillo::errors::json::kDomain,
                          "non_json_content_type",
                          "Unexpected response content type: " + content_type);
-    return base::nullopt;
+    return std::nullopt;
   }
 
   std::string json = response->ExtractDataAsString();
   auto json_result =
       base::JSONReader::ReadAndReturnValueWithError(json, base::JSON_PARSE_RFC);
-  if (!json_result.value) {
+  if (!json_result.has_value()) {
     brillo::Error::AddToPrintf(error, FROM_HERE, brillo::errors::json::kDomain,
                                brillo::errors::json::kParseError,
                                "Error '%s' occurred parsing JSON string '%s'",
-                               json_result.error_message.c_str(), json.c_str());
-    return base::nullopt;
+                               json_result.error().message.c_str(),
+                               json.c_str());
+    return std::nullopt;
   }
-  if (!json_result.value->is_dict()) {
+  if (!json_result->is_dict()) {
     brillo::Error::AddToPrintf(error, FROM_HERE, brillo::errors::json::kDomain,
                                brillo::errors::json::kObjectExpected,
                                "Response is not a valid dictionary: '%s'",
                                json.c_str());
-    return base::nullopt;
+    return std::nullopt;
   }
-  return std::move(json_result.value);
+  return std::move(json_result->GetDict());
 }
 
 std::string GetCanonicalHeaderName(const std::string& name) {

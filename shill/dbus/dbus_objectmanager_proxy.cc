@@ -1,14 +1,18 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/dbus/dbus_objectmanager_proxy.h"
 
+#include <utility>
+
+#include <base/functional/callback_helpers.h>
+#include <base/logging.h>
+#include <base/time/time.h>
+
 #include "shill/cellular/cellular_error.h"
 #include "shill/event_dispatcher.h"
 #include "shill/logging.h"
-
-#include <base/logging.h>
 
 namespace shill {
 
@@ -19,13 +23,17 @@ static std::string ObjectID(const dbus::ObjectPath* p) {
 }
 }  // namespace Logging
 
+namespace {
+constexpr base::TimeDelta kGetManagedObjectsTimeout = base::Seconds(5);
+}
+
 DBusObjectManagerProxy::DBusObjectManagerProxy(
     EventDispatcher* dispatcher,
     const scoped_refptr<dbus::Bus>& bus,
     const RpcIdentifier& path,
     const std::string& service,
-    const base::Closure& service_appeared_callback,
-    const base::Closure& service_vanished_callback)
+    const base::RepeatingClosure& service_appeared_callback,
+    const base::RepeatingClosure& service_vanished_callback)
     : proxy_(
           new org::freedesktop::DBus::ObjectManagerProxy(bus, service, path)),
       dispatcher_(dispatcher),
@@ -34,42 +42,44 @@ DBusObjectManagerProxy::DBusObjectManagerProxy(
       service_available_(false) {
   // Register signal handlers.
   proxy_->RegisterInterfacesAddedSignalHandler(
-      base::Bind(&DBusObjectManagerProxy::InterfacesAdded,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&DBusObjectManagerProxy::OnSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&DBusObjectManagerProxy::InterfacesAdded,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&DBusObjectManagerProxy::OnSignalConnected,
+                     weak_factory_.GetWeakPtr()));
   proxy_->RegisterInterfacesRemovedSignalHandler(
-      base::Bind(&DBusObjectManagerProxy::InterfacesRemoved,
-                 weak_factory_.GetWeakPtr()),
-      base::Bind(&DBusObjectManagerProxy::OnSignalConnected,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&DBusObjectManagerProxy::InterfacesRemoved,
+                          weak_factory_.GetWeakPtr()),
+      base::BindOnce(&DBusObjectManagerProxy::OnSignalConnected,
+                     weak_factory_.GetWeakPtr()));
 
   // Monitor service owner changes. This callback lives for the lifetime of
   // the ObjectProxy.
   proxy_->GetObjectProxy()->SetNameOwnerChangedCallback(
-      base::Bind(&DBusObjectManagerProxy::OnServiceOwnerChanged,
-                 weak_factory_.GetWeakPtr()));
+      base::BindRepeating(&DBusObjectManagerProxy::OnServiceOwnerChanged,
+                          weak_factory_.GetWeakPtr()));
 
   // One time callback when service becomes available.
-  proxy_->GetObjectProxy()->WaitForServiceToBeAvailable(base::Bind(
+  proxy_->GetObjectProxy()->WaitForServiceToBeAvailable(base::BindOnce(
       &DBusObjectManagerProxy::OnServiceAvailable, weak_factory_.GetWeakPtr()));
 }
 
 DBusObjectManagerProxy::~DBusObjectManagerProxy() = default;
 
 void DBusObjectManagerProxy::GetManagedObjects(
-    Error* error, const ManagedObjectsCallback& callback, int timeout) {
+    ManagedObjectsCallback callback) {
   if (!service_available_) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kInternalError,
-                          "Service not available");
+    std::move(callback).Run(
+        ObjectsWithProperties(),
+        Error(Error::kInternalError, "Service not available", FROM_HERE));
     return;
   }
+  auto split_cb = base::SplitOnceCallback(std::move(callback));
   proxy_->GetManagedObjectsAsync(
-      base::Bind(&DBusObjectManagerProxy::OnGetManagedObjectsSuccess,
-                 weak_factory_.GetWeakPtr(), callback),
-      base::Bind(&DBusObjectManagerProxy::OnGetManagedObjectsFailure,
-                 weak_factory_.GetWeakPtr(), callback),
-      timeout);
+      base::BindOnce(&DBusObjectManagerProxy::OnGetManagedObjectsSuccess,
+                     weak_factory_.GetWeakPtr(), std::move(split_cb.first)),
+      base::BindOnce(&DBusObjectManagerProxy::OnGetManagedObjectsFailure,
+                     weak_factory_.GetWeakPtr(), std::move(split_cb.second)),
+      kGetManagedObjectsTimeout.InMilliseconds());
 }
 
 void DBusObjectManagerProxy::OnServiceAvailable(bool available) {
@@ -128,7 +138,7 @@ void DBusObjectManagerProxy::InterfacesRemoved(
 }
 
 void DBusObjectManagerProxy::OnGetManagedObjectsSuccess(
-    const ManagedObjectsCallback& callback,
+    ManagedObjectsCallback callback,
     const DBusObjectsWithProperties& dbus_objects_with_properties) {
   SLOG(&proxy_->GetObjectPath(), 2) << __func__;
   ObjectsWithProperties objects_with_properties;
@@ -138,14 +148,14 @@ void DBusObjectManagerProxy::OnGetManagedObjectsSuccess(
     objects_with_properties.emplace(object.first.value(),
                                     interface_to_properties);
   }
-  callback.Run(objects_with_properties, Error());
+  std::move(callback).Run(objects_with_properties, Error());
 }
 
 void DBusObjectManagerProxy::OnGetManagedObjectsFailure(
-    const ManagedObjectsCallback& callback, brillo::Error* dbus_error) {
+    ManagedObjectsCallback callback, brillo::Error* dbus_error) {
   Error error;
   CellularError::FromMM1ChromeosDBusError(dbus_error, &error);
-  callback.Run(ObjectsWithProperties(), error);
+  std::move(callback).Run(ObjectsWithProperties(), error);
 }
 
 void DBusObjectManagerProxy::ConvertDBusInterfaceProperties(

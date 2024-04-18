@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,14 @@
 #include <fuse_opt.h>
 #include <unistd.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/safe_strerror.h>
 #include <base/strings/stringprintf.h>
@@ -212,7 +213,7 @@ class FuseSession::Impl {
             << " to_set: " << ToSetFlagsToString(to_set)
             << " handle: " << (info ? info->fh : 0);
     fs_->SetAttr(std::make_unique<AttrRequest>(request), inode,
-                 info ? info->fh : base::Optional<uint64_t>(), *attr, to_set);
+                 info ? info->fh : std::optional<uint64_t>(), *attr, to_set);
   }
 
   void Open(fuse_req_t request, fuse_ino_t inode, fuse_file_info* info) {

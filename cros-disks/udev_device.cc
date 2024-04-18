@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,11 +8,13 @@
 #include <linux/limits.h>
 #include <stdlib.h>
 #include <sys/statvfs.h>
+#include <unistd.h>
 
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
+#include <base/containers/contains.h>
+#include <base/functional/bind.h>
 #include <base/hash/sha1.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
@@ -203,15 +205,15 @@ size_t UdevDevice::GetPartitionCount() const {
   return partition_count;
 }
 
-DeviceMediaType UdevDevice::GetDeviceMediaType() const {
+DeviceType UdevDevice::GetDeviceMediaType() const {
   if (IsPropertyTrue(kPropertyCDROMDVD))
-    return DEVICE_MEDIA_DVD;
+    return DeviceType::kDVD;
 
   if (IsPropertyTrue(kPropertyCDROM))
-    return DEVICE_MEDIA_OPTICAL_DISC;
+    return DeviceType::kOpticalDisc;
 
   if (IsOnSdDevice())
-    return DEVICE_MEDIA_SD;
+    return DeviceType::kSD;
 
   std::string vendor_id, product_id;
   if (GetVendorAndProductId(&vendor_id, &product_id)) {
@@ -219,7 +221,7 @@ DeviceMediaType UdevDevice::GetDeviceMediaType() const {
     info.RetrieveFromFile(kUSBDeviceInfoFile);
     return info.GetDeviceMediaType(vendor_id, product_id);
   }
-  return DEVICE_MEDIA_UNKNOWN;
+  return DeviceType::kUnknown;
 }
 
 bool UdevDevice::EnumerateParentDevices(EnumerateCallback callback) const {
@@ -429,13 +431,20 @@ std::string UdevDevice::StorageDevicePath() const {
   std::string path;
   EnumerateParentDevices(base::BindRepeating(
       [](std::string* path, const brillo::UdevDevice& device) {
-        base::StringPiece subsystem(device.GetSubsystem());
-        if (subsystem == kSubsystemMmc || subsystem == kSubsystemNvme ||
-            subsystem == kSubsystemScsi) {
-          *path = device.GetSysPath();
-          return true;
+        const char* const subsystem = device.GetSubsystem();
+        const base::StringPiece allowed_subsystems[] = {
+            kSubsystemMmc, kSubsystemNvme, kSubsystemScsi};
+        if (!subsystem ||
+            !base::Contains(allowed_subsystems, base::StringPiece(subsystem)))
+          return false;
+
+        if (const char* const sys_path = device.GetSysPath()) {
+          path->assign(sys_path);
+        } else {
+          path->clear();
         }
-        return false;
+
+        return true;
       },
       &path));
   return path;

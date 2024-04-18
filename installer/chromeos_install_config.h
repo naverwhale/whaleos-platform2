@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,30 @@
 
 #include <string>
 
+#include <base/files/file_path.h>
+
 #include "installer/inst_util.h"
 
-enum BiosType {
-  kBiosTypeUnknown,
-  kBiosTypeSecure,
-  kBiosTypeUBoot,
-  kBiosTypeLegacy,
-  kBiosTypeEFI,
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class BiosType {
+  kUnknown = 0,
+  kSecure = 1,
+  kUBoot = 2,
+  kLegacy = 3,
+  kEFI = 4,
+  kMaxValue = kEFI
 };
 
 bool StrToBiosType(std::string name, BiosType* bios_type);
+
+enum DeferUpdateAction {
+  kAuto,
+  kHold,
+  kApply,
+};
+
+bool StrToDeferUpdateAction(std::string name, DeferUpdateAction* defer_updates);
 
 // We commonly need to have the same data about devices in multiple formats
 // during the install process. This class allows us to have a partition
@@ -29,31 +42,31 @@ bool StrToBiosType(std::string name, BiosType* bios_type);
 class Partition {
  public:
   Partition() {}
-  explicit Partition(std::string device) : device_(device) {}
-  Partition(std::string device, std::string mount)
+  explicit Partition(base::FilePath device) : device_(device) {}
+  Partition(base::FilePath device, base::FilePath mount)
       : device_(device), mount_(mount) {}
 
   // Get/Set the partition device, usually of form: /dev/sda3
-  std::string device() const { return device_; }
-  void set_device(const std::string& device) { device_ = device; }
+  base::FilePath device() const { return device_; }
+  void set_device(const base::FilePath& device) { device_ = device; }
 
   // If the device is /dev/sda3 the base_device is /dev/sda
-  std::string base_device() const {
+  base::FilePath base_device() const {
     return GetBlockDevFromPartitionDev(device());
   }
 
   // If the device is /dev/sda3 the number is 3
-  int number() const { return GetPartitionFromPartitionDev(device()); }
+  PartitionNum number() const { return GetPartitionFromPartitionDev(device()); }
 
   virtual std::string uuid() const;
 
   // The mount point for this device or "" if unmounted/unknown
-  std::string mount() const { return mount_; }
-  void set_mount(const std::string& mount) { mount_ = mount; }
+  base::FilePath mount() const { return mount_; }
+  void set_mount(const base::FilePath& mount) { mount_ = mount; }
 
  private:
-  std::string device_;
-  std::string mount_;
+  base::FilePath device_;
+  base::FilePath mount_;
 };
 
 // This class contains all of the information commonly passed around
@@ -67,6 +80,8 @@ struct InstallConfig {
   Partition boot;
 
   BiosType bios_type;
+  DeferUpdateAction defer_update_action;
+  bool force_update_firmware{false};
 };
 
 #endif  // INSTALLER_CHROMEOS_INSTALL_CONFIG_H_

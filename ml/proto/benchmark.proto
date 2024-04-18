@@ -1,10 +1,22 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 syntax = "proto3";
 
 package ml;
+
+// GPU delegate APIs.
+enum TfliteGpuDelegateApi {
+  // Unspecified.
+  GPU_DELEGATE_API_UNKNOWN = 0;
+
+  // OpenGL
+  GPU_DELEGATE_API_OPENGL = 1;
+
+  // OpenCL
+  GPU_DELEGATE_API_OPENCL = 2;
+}
 
 // TfliteBenchmarkConfig contains configurations used for tflite benchmarking.
 message TfliteBenchmarkConfig {
@@ -16,6 +28,8 @@ message TfliteBenchmarkConfig {
   int32 num_runs = 3;
   // delegate to gpu
   bool use_gpu = 4;
+  // Specific backend to use when delegating to GPU.
+  TfliteGpuDelegateApi gpu_delegate_api = 5;
 }
 
 // FlatBufferModelSpecProto contains full information of a tflite model.
@@ -41,9 +55,15 @@ message ExpectedInputOutput {
   // should be replaced by tensorflow::Example when it is available.
   message Example {
     // Containers to hold repeated fundamental values.
-    message BytesList { repeated bytes value = 1; }
-    message FloatList { repeated float value = 1 [packed = true]; }
-    message Int64List { repeated int64 value = 1 [packed = true]; }
+    message BytesList {
+      repeated bytes value = 1;
+    }
+    message FloatList {
+      repeated float value = 1 [packed = true];
+    }
+    message Int64List {
+      repeated int64 value = 1 [packed = true];
+    }
 
     // Containers for the data type.
     message Feature {

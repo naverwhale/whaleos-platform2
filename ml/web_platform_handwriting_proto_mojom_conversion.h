@@ -1,13 +1,12 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ML_WEB_PLATFORM_HANDWRITING_PROTO_MOJOM_CONVERSION_H_
 #define ML_WEB_PLATFORM_HANDWRITING_PROTO_MOJOM_CONVERSION_H_
 
+#include <optional>
 #include <vector>
-
-#include <base/optional.h>
 
 #include "chrome/knowledge/handwriting/handwriting_interface.pb.h"
 #include "ml/mojom/web_platform_handwriting.mojom.h"
@@ -27,7 +26,7 @@ WebPlatformHandwritingStrokesAndHintsToProto(
 
 // Converts chrome_knowledge::HandwritingRecognizerResult proto into a vector
 // of web_platform::mojom::HandwritingPredictionPtr.
-base::Optional<std::vector<
+std::optional<std::vector<
     chromeos::machine_learning::web_platform::mojom::HandwritingPredictionPtr>>
 WebPlatformHandwritingPredictionsFromProto(
     const std::vector<

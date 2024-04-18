@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,6 +31,10 @@ class MockProfile : public Profile {
   MOCK_METHOD(const RpcIdentifier&, GetRpcIdentifier, (), (const, override));
   MOCK_METHOD(bool, UpdateService, (const ServiceRefPtr&), (override));
   MOCK_METHOD(bool, UpdateDevice, (const DeviceRefPtr&), (override));
+  MOCK_METHOD(bool,
+              AdoptCredentials,
+              (const PasspointCredentialsRefPtr&),
+              (override));
   MOCK_METHOD(bool, Save, (), (override));
   MOCK_METHOD(StoreInterface*, GetStorage, (), (override));
   MOCK_METHOD(const StoreInterface*, GetConstStorage, (), (const, override));

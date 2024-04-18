@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@
 #include <memory>
 
 #include <gtest/gtest.h>
+
+#include "libhwsec/hwsec_export.h"
 #include "libhwsec/overalls/mock_overalls.h"
 
 // ON_CALL_OVERALLS and EXPECT_CALL_OVERALLS are meant to be used for specifying
@@ -38,7 +40,7 @@ enum class MOCK_OVERALLS_TYPE {
 };
 
 // A test fixture that implements the common setup for TPM1.2
-class Tpm1HwsecTest : public ::testing::Test {
+class HWSEC_EXPORT Tpm1HwsecTest : public ::testing::Test {
  public:
   // Constructs the test fixture with default setup; specifically, the type of
   // |MockOveralls| will be a NiceMock. See the delegated constructor below for

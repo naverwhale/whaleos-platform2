@@ -1,8 +1,8 @@
+# Crosh -- The ChromiumOS shell
+
 [TOC]
 
-# Crosh -- The Chromium OS shell
-
-This is the homepage/documentation for the crosh, the Chromium OS shell.
+This is the homepage/documentation for the crosh, the ChromiumOS shell.
 If you're on a CrOS devices right now, you should be able to launch crosh
 by hitting Ctrl+Alt+T.  If you aren't on CrOS, then most likely that won't
 do anything useful :).
@@ -15,9 +15,9 @@ You can also use tab completion to quickly find existing commands.
 
 It's an adventure!
 
-# For Chromium OS Developers
+# For ChromiumOS Developers
 
-This section is meant for people hacking on Chromium OS, especially when they
+This section is meant for people hacking on ChromiumOS, especially when they
 need to modify/extend crosh.
 
 ## Security Warning
@@ -27,17 +27,17 @@ code that crosh loads will be directly available to people in verified mode.
 That's an easy attack vector to run arbitrary code and mess with the user's
 state.  We don't want to undermine the security of CrOS!
 
-If you are looking for reviewers, look at the [./OWNERS](./OWNERS) file.
+If you are looking for reviewers, look at the [OWNERS](./OWNERS) file.
 
 ## Where Files Live
 
 Crosh is being migrated from shell to Rust. Crosh starts executing from
-[src/main.rs](src/main.rs) but most commands are implemented as their own submodule of
-one of the high level modules (e.g. `base` or `dev`).
+[src/main.rs](src/main.rs) but many commands are implemented as their own
+submodule of one of the high level modules (e.g. `base` or `dev`).
 
-The main [`crosh`](./crosh) script contains the legacy implementation of core
-crosh logic while other legacy functions live in module directories. The legacy
-version of crosh is installed to the device as `crosh.sh`.
+The old [`crosh`](./crosh) script contains the legacy implementations of
+commands that haven't been ported to Rust yet.  It is installed on the device
+as `crosh.sh`.
 
 ### Source Repos
 
@@ -48,6 +48,9 @@ available on all CrOS devices, that code should be kept in this repo.
 If you're unsure, just ask on chromium-os-dev@chromium.org.
 
 ## Adding New Commands
+
+> **Note**: All new commands must be implemented in Rust.  No new commands may
+> be implemented in the legacy shell crosh code.
 
 First determine what implementation strategy the new command will use. When
 selecting a strategy, it helps to know what permissions and privileges are
@@ -113,7 +116,7 @@ Now the `src/base/verify_ro.rs` source file is ready to be written. Start with
 this minimal source file and verify that crosh compiles with `cargo build`:
 
 ```rust
-use crate::dispatcher::Dispatcher;
+use crate::dispatcher::{self, Arguments, Command, Dispatcher};
 
 pub fn register(dispatcher: &mut Dispatcher) {
     dispatcher.register_command(
@@ -126,7 +129,7 @@ pub fn register(dispatcher: &mut Dispatcher) {
     );
 }
 
-fn execute_verify_ro(_cmd: &Command, args: &Arguments) -> Result<(), dispatcher::Error> {
+fn execute_verify_ro(_cmd: &Command, _args: &Arguments) -> Result<(), dispatcher::Error> {
     unimplemented!();
 }
 ```
@@ -293,6 +296,9 @@ Anyone should feel free to pick up these ideas and try to implement them :).
   at the same time as migrating a command over to debugd.
 
 # Legacy Crosh Documentation
+
+> **Note**: All new commands must be implemented in Rust.  No new commands may
+> be implemented in the legacy shell crosh code.
 
 Crosh was originally written in shell. At the time of writing many of the
 commands are still remain in shell and have yet to be ported over to the Rust

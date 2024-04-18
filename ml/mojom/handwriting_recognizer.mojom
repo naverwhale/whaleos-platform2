@@ -1,8 +1,8 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Next MinVersion: 2
+// Next MinVersion: 3
 
 // Datatypes and interfaces of handwriting recognition API.
 
@@ -139,7 +139,14 @@ struct HandwritingRecognizerSpec {
   string language;
 
   // Path to the language pack to use (downloaded by Chrome via DLC).
+  // If unset, ml-service will try to find the model from rootfs based on the
+  // `language` field above.
   [MinVersion=1] string? language_pack_path;
+
+  // Path to already-installed handwriting recognition library (downloaded by
+  // chrome via DLC).
+  // If unset, ml-service will try to find the library from rootfs.
+  [MinVersion=2] string? library_dlc_path;
 };
 
 // The mojom interface for performing the recognition of handwritten text.
@@ -177,7 +184,7 @@ enum LoadHandwritingModelResult {
   // on the device. (checked in chrome)
   DLC_DOES_NOT_EXIST = 6,
 
-  // If the dlc is on the device, but InstallDlc returns an error.
+  // If the dlc is on the device, but Install returns an error.
   // (checked in chrome).
   DLC_INSTALL_ERROR = 7,
 

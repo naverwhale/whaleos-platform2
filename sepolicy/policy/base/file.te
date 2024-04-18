@@ -22,9 +22,11 @@ type sysfs, fs_type, sysfs_type, mlstrustedobject;
 # proc, sysfs, or other nodes that allow accessing and configuring kernel interfaces.
 type cgroup, fs_type;
 type configfs, fs_type;
+type debugfs_sw_sync, fs_type, debugfs_type;
 type debugfs_sync, fs_type, debugfs_type;
 type debugfs_trace_marker, fs_type;
 type debugfs_tracing, fs_type, debugfs_type;
+type debugfs_tracing_instances, fs_type, debugfs_type;
 type functionfs, fs_type;
 type fuse, fs_type;
 type inotify, fs_type;
@@ -69,6 +71,8 @@ type usbfs, fs_type;
 type usermodehelper, fs_type, proc_type;
 type vfat, fs_type;
 
+type sysfs_lru_gen_min_ttl_ms, fs_type, sysfs_type;
+type sysfs_cpuidle, fs_type, sysfs_type;
 type sysfs_devices_system_cpu, fs_type, sysfs_type;
 type sysfs_loop, fs_type, sysfs_type;
 type sysfs_zram, fs_type, sysfs_type;

@@ -1,0 +1,102 @@
+# Copyright 2023 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+group("all") {
+  deps = [
+    ":install_headers",
+    ":install_tmpfiles_config",
+    ":libthinpool_migrator",
+    ":libthinpool_migrator_pc",
+    ":migration_status_proto",
+    ":thinpool_migrator",
+  ]
+
+  if (use.test) {
+    deps += [ ":thinpool_migrator_tests" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libcrypto",
+    "libmetrics",
+    "protobuf",
+  ]
+}
+
+generate_pkg_config("libthinpool_migrator_pc") {
+  name = "libthinpool_migrator"
+  description = "Library for thinpool migration"
+  version = getenv("PV")
+  install = true
+}
+
+shared_library("libthinpool_migrator") {
+  sources = [
+    "lvm_metadata.cc",
+    "migration_metrics.cc",
+    "stateful_metadata.cc",
+    "thinpool_migrator.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":migration_status_proto" ]
+  install_path = "lib"
+}
+
+executable("thinpool_migrator") {
+  sources = [ "main.cc" ]
+  configs += [ ":target_defaults" ]
+  install_path = "sbin"
+  deps = [ ":libthinpool_migrator" ]
+}
+
+install_config("install_headers") {
+  sources = [
+    "lvm_metadata.h",
+    "stateful_metadata.h",
+    "thinpool_migrator.h",
+  ]
+  install_path = "/usr/include/thinpool_migrator"
+}
+
+install_config("install_tmpfiles_config") {
+  sources = [ "tmpfiles.d/thinpool_migrator.conf" ]
+  install_path = "tmpfilesd"
+}
+
+proto_library("migration_status_proto") {
+  proto_in_dir = "./proto/"
+  proto_out_dir = "include/thinpool_migrator"
+  sources = [ "${proto_in_dir}/migration_status.proto" ]
+  standalone = true
+  use_pic = true
+}
+
+if (use.test) {
+  executable("thinpool_migrator_tests") {
+    sources = [
+      "lvm_metadata_test.cc",
+      "stateful_metadata_test.cc",
+      "thinpool_migrator_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+    ]
+    run_test = true
+    deps = [
+      ":libthinpool_migrator",
+      "//common-mk/testrunner",
+    ]
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+    ]
+  }
+}

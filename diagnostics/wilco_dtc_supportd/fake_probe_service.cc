@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,38 +9,41 @@
 #include <base/check.h>
 #include <base/logging.h>
 
-#include "mojo/cros_healthd_probe.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
+namespace wilco {
 
 namespace {
 
 using ProbeTelemetryInfoCallback =
-    base::OnceCallback<void(chromeos::cros_healthd::mojom::TelemetryInfoPtr)>;
+    base::OnceCallback<void(ash::cros_healthd::mojom::TelemetryInfoPtr)>;
 
 void MissingProbeTelemetryInfoCallback(
-    std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum>,
+    std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum>,
     ProbeTelemetryInfoCallback) {
   DCHECK(nullptr);
 }
+
 }  // namespace
 
 FakeProbeService::FakeProbeService()
-    : telemetry_callback_(base::Bind(MissingProbeTelemetryInfoCallback)) {}
+    : telemetry_callback_(base::BindOnce(MissingProbeTelemetryInfoCallback)) {}
 
 FakeProbeService::~FakeProbeService() = default;
 
 void FakeProbeService::SetProbeTelemetryInfoCallback(
-    base::Callback<
-        void(std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum>,
+    base::OnceCallback<
+        void(std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum>,
              ProbeTelemetryInfoCallback)> callback) {
-  telemetry_callback_ = callback;
+  telemetry_callback_ = std::move(callback);
 }
 
 void FakeProbeService::ProbeTelemetryInfo(
-    std::vector<chromeos::cros_healthd::mojom::ProbeCategoryEnum> categories,
+    std::vector<ash::cros_healthd::mojom::ProbeCategoryEnum> categories,
     ProbeTelemetryInfoCallback callback) {
-  telemetry_callback_.Run(categories, std::move(callback));
+  std::move(telemetry_callback_).Run(categories, std::move(callback));
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

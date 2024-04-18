@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 
 #include <memory>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <brillo/dbus/dbus_object_test_helpers.h>
 #include <brillo/dbus/mock_exported_object_manager.h>
 #include <dbus/message.h>
@@ -14,10 +14,13 @@
 #include <dbus/object_path.h>
 #include <dbus/mock_bus.h>
 #include <dbus/mock_exported_object.h>
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 using ::testing::_;
 using ::testing::AnyNumber;
 using ::testing::Return;
+using ::testing::UnorderedElementsAre;
 
 namespace brillo {
 namespace dbus_utils {
@@ -133,12 +136,13 @@ class DBusObjectTest : public ::testing::Test {
     itf2->AddSimpleMethodHandlerWithError(kTestMethod_CheckNonEmpty,
                                           CheckNonEmpty);
     DBusInterface* itf3 = dbus_object_->AddOrGetInterface(kTestInterface3);
-    base::Callback<void()> noop_callback = base::Bind(NoOp);
+    base::RepeatingCallback<void()> noop_callback = base::BindRepeating(NoOp);
     itf3->AddSimpleMethodHandler(kTestMethod_NoOp, noop_callback);
     itf3->AddSimpleMethodHandlerWithErrorAndMessage(
-        kTestMethod_WithMessage, base::Bind(&TestWithMessage));
-    itf3->AddMethodHandlerWithMessage(kTestMethod_WithMessageAsync,
-                                      base::Bind(&TestWithMessageAsync));
+        kTestMethod_WithMessage, base::BindRepeating(&TestWithMessage));
+    itf3->AddMethodHandlerWithMessage(
+        kTestMethod_WithMessageAsync,
+        base::BindRepeating(&TestWithMessageAsync));
 
     dbus_object_->RegisterAsync(
         AsyncEventSequencer::GetDefaultCompletionAction());
@@ -154,6 +158,22 @@ class DBusObjectTest : public ::testing::Test {
   std::unique_ptr<DBusObject> dbus_object_;
   Calc calc_;
 };
+
+TEST(DBusObjectInternalTest, FilterTuple) {
+  EXPECT_EQ(
+      (internal::FilterTuple<true, true, false>(std::tuple(1, false, 0.0))),
+      std::tuple(1, false));
+}
+
+TEST(DBusObjectInternalText, MapArgTypes) {
+  std::tuple<std::uint8_t, bool, double> storage;
+  auto args = internal::MapArgTypes<uint8_t, bool, double*>(storage);
+  // Make sure the returned references are actually pointing to the
+  // original tuple's element.
+  EXPECT_EQ(&std::get<0>(storage), &std::get<0>(args));
+  EXPECT_EQ(&std::get<1>(storage), &std::get<1>(args));
+  EXPECT_EQ(&std::get<2>(storage), std::get<2>(args));
+}
 
 TEST_F(DBusObjectTest, Add) {
   dbus::MethodCall method_call(kTestInterface1, kTestMethod_Add);
@@ -281,7 +301,7 @@ TEST_F(DBusObjectTest, CheckNonEmpty_MissingParams) {
   std::string message;
   ASSERT_TRUE(reader.PopString(&message));
   EXPECT_EQ(DBUS_ERROR_INVALID_ARGS, response->GetErrorName());
-  EXPECT_EQ("Too few parameters in a method call", message);
+  EXPECT_EQ("failed to read arguments", message);
   EXPECT_FALSE(reader.HasMoreData());
 }
 
@@ -346,7 +366,7 @@ TEST_F(DBusObjectTest, TestUnexportInterfaceAsync) {
               UnexportMethod(kTestInterface3, kTestMethod_WithMessageAsync, _))
       .Times(1);
   dbus_object_->UnexportInterfaceAsync(kTestInterface3,
-                                       base::Bind(&OnInterfaceExported));
+                                       base::BindOnce(&OnInterfaceExported));
 }
 
 TEST_F(DBusObjectTest, TestUnexportInterfaceBlocking) {
@@ -368,7 +388,7 @@ TEST_F(DBusObjectTest, TestUnexportInterfaceBlocking) {
 TEST_F(DBusObjectTest, TestInterfaceExportedLateAsync) {
   // Registers a new interface late.
   dbus_object_->ExportInterfaceAsync(kTestInterface4,
-                                     base::Bind(&OnInterfaceExported));
+                                     base::BindOnce(&OnInterfaceExported));
 
   const std::string sender{":1.2345"};
   dbus::MethodCall method_call(kTestInterface4, kTestMethod_WithMessage);
@@ -465,6 +485,21 @@ TEST_F(DBusObjectTest, ShouldReleaseOnlyClaimedInterfaces) {
   // ExportedObjectManager.  Since no interfaces have finished exporting
   // handlers, nothing should be released.
   dbus_object_.reset();
+}
+
+TEST_F(DBusObjectTest, MethodNames) {
+  DBusInterface* itf1 = dbus_object_->FindInterface(kTestInterface1);
+  ASSERT_TRUE(itf1);
+  EXPECT_THAT(
+      itf1->GetMethodNames(),
+      UnorderedElementsAre(kTestMethod_Add, kTestMethod_Negate,
+                           kTestMethod_Positive, kTestMethod_AddSubtract));
+
+  DBusInterface* itf2 = dbus_object_->FindInterface(kTestInterface2);
+  ASSERT_TRUE(itf2);
+  EXPECT_THAT(
+      itf2->GetMethodNames(),
+      UnorderedElementsAre(kTestMethod_StrLen, kTestMethod_CheckNonEmpty));
 }
 
 }  // namespace dbus_utils

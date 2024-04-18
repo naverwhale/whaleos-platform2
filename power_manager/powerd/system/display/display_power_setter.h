@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 #define POWER_MANAGER_POWERD_SYSTEM_DISPLAY_DISPLAY_POWER_SETTER_H_
 
 #include <base/compiler_specific.h>
-#include <base/macros.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
 #include <chromeos/dbus/service_constants.h>
@@ -15,20 +14,19 @@ namespace dbus {
 class ObjectProxy;
 }  // namespace dbus
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 class DBusWrapperInterface;
 
 // Interface for turning displays on and off.
 class DisplayPowerSetterInterface {
  public:
-  DisplayPowerSetterInterface() {}
+  DisplayPowerSetterInterface() = default;
   DisplayPowerSetterInterface(const DisplayPowerSetterInterface&) = delete;
   DisplayPowerSetterInterface& operator=(const DisplayPowerSetterInterface&) =
       delete;
 
-  virtual ~DisplayPowerSetterInterface() {}
+  virtual ~DisplayPowerSetterInterface() = default;
 
   // Configures displays to use |state| after |delay|. If another change has
   // already been scheduled, it will be aborted. If |delay| is zero, the change
@@ -44,15 +42,13 @@ class DisplayPowerSetterInterface {
 
 // Real DisplayPowerSetterInterface implementation that makes D-Bus method
 // calls to DisplayService.
-// TODO(chromeos-power): Write unit tests for this class now that it's using
-// DBusWrapperInterface.
 class DisplayPowerSetter : public DisplayPowerSetterInterface {
  public:
-  DisplayPowerSetter();
+  DisplayPowerSetter() = default;
   DisplayPowerSetter(const DisplayPowerSetter&) = delete;
   DisplayPowerSetter& operator=(const DisplayPowerSetter&) = delete;
 
-  ~DisplayPowerSetter() override;
+  ~DisplayPowerSetter() override = default;
 
   // Ownership of |dbus_wrapper| remains with the caller.
   void Init(DBusWrapperInterface* dbus_wrapper);
@@ -62,6 +58,8 @@ class DisplayPowerSetter : public DisplayPowerSetterInterface {
                        base::TimeDelta delay) override;
   void SetDisplaySoftwareDimming(bool dimmed) override;
 
+  void FireTimerForTesting();
+
  private:
   // Makes an asynchronous D-Bus method call to DisplayService to apply |state|.
   void SendStateToDisplayService(chromeos::DisplayPowerState state);
@@ -69,11 +67,10 @@ class DisplayPowerSetter : public DisplayPowerSetterInterface {
   // Runs SendStateToDisplayService().
   base::OneShotTimer timer_;
 
-  DBusWrapperInterface* dbus_wrapper_;        // weak
-  dbus::ObjectProxy* display_service_proxy_;  // non-owned
+  DBusWrapperInterface* dbus_wrapper_ = nullptr;        // weak
+  dbus::ObjectProxy* display_service_proxy_ = nullptr;  // non-owned
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_DISPLAY_DISPLAY_POWER_SETTER_H_

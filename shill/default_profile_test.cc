@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,21 +7,21 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <base/files/file_path.h>
 #include <chromeos/dbus/service_constants.h>
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
-#include "shill/dhcp/mock_dhcp_properties.h"
-#include "shill/fake_store.h"
 #include "shill/manager.h"
 #include "shill/mock_control.h"
 #include "shill/mock_device.h"
 #include "shill/mock_service.h"
 #include "shill/portal_detector.h"
-#include "shill/property_store_test.h"
 #include "shill/resolver.h"
+#include "shill/store/fake_store.h"
+#include "shill/store/property_store_test.h"
 
 using ::testing::_;
 using ::testing::DoAll;
@@ -46,7 +46,7 @@ class DefaultProfileTest : public PropertyStoreTest {
 
   scoped_refptr<DefaultProfile> profile_;
   scoped_refptr<MockDevice> device_;
-  Manager::Properties properties_;
+  ManagerProperties properties_;
 };
 
 const char DefaultProfileTest::kTestStoragePath[] = "/no/where";
@@ -77,9 +77,10 @@ TEST_F(DefaultProfileTest, GetProperties) {
     EXPECT_EQ(props[kArpGatewayProperty].Get<bool>(), properties_.arp_gateway);
   }
   {
-    Error error(Error::kInvalidProperty, "");
-    EXPECT_FALSE(profile_->mutable_store()->SetBoolProperty(kArpGatewayProperty,
-                                                            true, &error));
+    Error error;
+    profile_->mutable_store()->SetBoolProperty(kArpGatewayProperty, true,
+                                               &error);
+    EXPECT_EQ(Error::kInvalidArguments, error.type());
   }
 }
 
@@ -87,13 +88,8 @@ TEST_F(DefaultProfileTest, Save) {
   auto owned_storage = std::make_unique<FakeStore>();
   FakeStore* storage = owned_storage.get();
 
-  EXPECT_CALL(*device_, Save(storage)).Times(0);
   profile_->SetStorageForTest(std::move(owned_storage));
-  auto dhcp_props = std::make_unique<MockDhcpProperties>();
-  EXPECT_CALL(*dhcp_props, Save(_, _));
-  manager()->dhcp_properties_ = std::move(dhcp_props);
 
-  manager()->RegisterDevice(device_);
   ASSERT_TRUE(profile_->Save());
 
   bool gateway;
@@ -104,20 +100,14 @@ TEST_F(DefaultProfileTest, Save) {
   EXPECT_TRUE(storage->GetString(DefaultProfile::kStorageId,
                                  DefaultProfile::kStorageName, &name));
   EXPECT_EQ(name, DefaultProfile::kDefaultId);
-
-  manager()->DeregisterDevice(device_);
 }
 
 TEST_F(DefaultProfileTest, LoadManagerDefaultProperties) {
   auto owned_storage = std::make_unique<FakeStore>();
-  Manager::Properties manager_props;
-  auto dhcp_props = std::make_unique<MockDhcpProperties>();
-  EXPECT_CALL(*dhcp_props, Load(_, DefaultProfile::kStorageId));
-  manager()->dhcp_properties_ = std::move(dhcp_props);
+  ManagerProperties manager_props;
   profile_->SetStorageForTest(std::move(owned_storage));
 
-  profile_->LoadManagerProperties(&manager_props,
-                                  manager()->dhcp_properties_.get());
+  profile_->LoadManagerProperties(&manager_props);
   EXPECT_TRUE(manager_props.arp_gateway);
   EXPECT_EQ(PortalDetector::kDefaultCheckPortalList,
             manager_props.check_portal_list);
@@ -126,12 +116,13 @@ TEST_F(DefaultProfileTest, LoadManagerDefaultProperties) {
   EXPECT_EQ("", manager_props.no_auto_connect_technologies);
   EXPECT_EQ(PortalDetector::kDefaultHttpUrl, manager_props.portal_http_url);
   EXPECT_EQ(PortalDetector::kDefaultHttpsUrl, manager_props.portal_https_url);
-  EXPECT_EQ(PortalDetector::kDefaultFallbackHttpUrls,
-            manager_props.portal_fallback_http_urls);
+  EXPECT_EQ(
+      std::vector<std::string>(PortalDetector::kDefaultFallbackHttpUrls.begin(),
+                               PortalDetector::kDefaultFallbackHttpUrls.end()),
+      manager_props.portal_fallback_http_urls);
   EXPECT_EQ("", manager_props.prohibited_technologies);
-#if !defined(DISABLE_WIFI)
+  EXPECT_EQ("", manager_props.dhcp_hostname);
   EXPECT_FALSE(manager_props.ft_enabled.has_value());
-#endif  // DISABLE_WIFI
 }
 
 TEST_F(DefaultProfileTest, LoadManagerProperties) {
@@ -154,28 +145,24 @@ TEST_F(DefaultProfileTest, LoadManagerProperties) {
   storage->SetString(DefaultProfile::kStorageId,
                      DefaultProfile::kStorageProhibitedTechnologies,
                      prohibited_technologies);
-#if !defined(DISABLE_WIFI)
+  const std::string hostname = "chromeos";
+  storage->SetString(DefaultProfile::kStorageId,
+                     DefaultProfile::kStorageDhcpHostname, hostname);
   storage->SetBool(DefaultProfile::kStorageId,
                    DefaultProfile::kStorageWifiGlobalFTEnabled, true);
-#endif  // DISABLE_WIFI
   profile_->SetStorageForTest(std::move(owned_storage));
-  Manager::Properties manager_props;
-  auto dhcp_props = std::make_unique<MockDhcpProperties>();
-  EXPECT_CALL(*dhcp_props, Load(_, DefaultProfile::kStorageId));
-  manager()->dhcp_properties_ = std::move(dhcp_props);
+  ManagerProperties manager_props;
 
-  profile_->LoadManagerProperties(&manager_props,
-                                  manager()->dhcp_properties_.get());
+  profile_->LoadManagerProperties(&manager_props);
   EXPECT_FALSE(manager_props.arp_gateway);
   EXPECT_EQ(portal_list, manager_props.check_portal_list);
   EXPECT_EQ(ignored_paths, manager_props.ignored_dns_search_paths);
   EXPECT_EQ(no_auto_connect_technologies,
             manager_props.no_auto_connect_technologies);
   EXPECT_EQ(prohibited_technologies, manager_props.prohibited_technologies);
-#if !defined(DISABLE_WIFI)
+  EXPECT_EQ(hostname, manager_props.dhcp_hostname);
   EXPECT_TRUE(manager_props.ft_enabled.has_value());
   EXPECT_TRUE(manager_props.ft_enabled.value());
-#endif  // DISABLE_WIFI
 }
 
 TEST_F(DefaultProfileTest, GetStoragePath) {

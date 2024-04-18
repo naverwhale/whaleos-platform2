@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/threading/thread_checker.h>
 #include <dbus/exported_object.h>
@@ -47,6 +46,9 @@ class Service {
   // Sends a released ID. Chrome is responsible for releasing resources
   // associated with the ID.
   void SendIdReleased(const std::string& id);
+
+  // Returns true if the given string is a valid virtual file ID.
+  static bool IsValidVirtualFileId(const std::string& id);
 
  private:
   // Handles GenerateVirtualFileId D-Bus method call.

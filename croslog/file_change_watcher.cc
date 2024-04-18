@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,14 +11,14 @@
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 
-#include "base/bind.h"
 #include "base/files/scoped_file.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/no_destructor.h"
 #include "base/posix/eintr_wrapper.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/threading/platform_thread.h"
-#include "base/threading/sequenced_task_runner_handle.h"
-#include "base/threading/thread_task_runner_handle.h"
 
 #include <base/check.h>
 #include <base/check_op.h>
@@ -146,7 +146,7 @@ class FileChangeWatcherImpl : public FileChangeWatcher,
                               public InotifyReaderThread::Delegate {
  public:
   FileChangeWatcherImpl()
-      : task_runner_(base::ThreadTaskRunnerHandle::Get()),
+      : task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
         thread_(task_runner_, this) {
     // TODO(yoshiki): Handle log rotate.
 

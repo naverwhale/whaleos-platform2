@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 
 #include "shill/logging.h"
@@ -54,57 +54,78 @@ SupplicantInterfaceProxy::SupplicantInterfaceProxy(
     : interface_proxy_(new fi::w1::wpa_supplicant1::InterfaceProxy(
           bus, WPASupplicant::kDBusAddr, object_path)),
       delegate_(delegate) {
-  // Register properites.
-  properties_.reset(
-      new PropertySet(interface_proxy_->GetObjectProxy(), kInterfaceName,
-                      base::Bind(&SupplicantInterfaceProxy::OnPropertyChanged,
-                                 weak_factory_.GetWeakPtr())));
+  // Register properties.
+  properties_.reset(new PropertySet(
+      interface_proxy_->GetObjectProxy(), kInterfaceName,
+      base::BindRepeating(&SupplicantInterfaceProxy::OnPropertyChanged,
+                          weak_factory_.GetWeakPtr())));
 
   // Register signal handlers.
-  auto on_connected_callback = base::Bind(
+  auto on_connected_callback = base::BindRepeating(
       &SupplicantInterfaceProxy::OnSignalConnected, weak_factory_.GetWeakPtr());
   interface_proxy_->RegisterScanDoneSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::ScanDone,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::ScanDone,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterBSSAddedSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::BSSAdded,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::BSSAdded,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterBSSRemovedSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::BSSRemoved,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::BSSRemoved,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterBlobAddedSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::BlobAdded,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::BlobAdded,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterBlobRemovedSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::BlobRemoved,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::BlobRemoved,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterCertificationSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::Certification,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::Certification,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterEAPSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::EAP, weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::EAP,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterNetworkAddedSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::NetworkAdded,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::NetworkAdded,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterNetworkRemovedSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::NetworkRemoved,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::NetworkRemoved,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterNetworkSelectedSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::NetworkSelected,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::NetworkSelected,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
   interface_proxy_->RegisterPropertiesChangedSignalHandler(
-      base::Bind(&SupplicantInterfaceProxy::PropertiesChanged,
-                 weak_factory_.GetWeakPtr()),
+      base::BindRepeating(&SupplicantInterfaceProxy::PropertiesChanged,
+                          weak_factory_.GetWeakPtr()),
+      on_connected_callback);
+  interface_proxy_->RegisterInterworkingAPAddedSignalHandler(
+      base::BindRepeating(&SupplicantInterfaceProxy::InterworkingAPAdded,
+                          weak_factory_.GetWeakPtr()),
+      on_connected_callback);
+  interface_proxy_->RegisterInterworkingSelectDoneSignalHandler(
+      base::BindRepeating(&SupplicantInterfaceProxy::InterworkingSelectDone,
+                          weak_factory_.GetWeakPtr()),
+      on_connected_callback);
+  interface_proxy_->RegisterStationAddedSignalHandler(
+      base::BindRepeating(&SupplicantInterfaceProxy::StationAdded,
+                          weak_factory_.GetWeakPtr()),
+      on_connected_callback);
+  interface_proxy_->RegisterStationRemovedSignalHandler(
+      base::BindRepeating(&SupplicantInterfaceProxy::StationRemoved,
+                          weak_factory_.GetWeakPtr()),
+      on_connected_callback);
+  interface_proxy_->RegisterPskMismatchSignalHandler(
+      base::BindRepeating(&SupplicantInterfaceProxy::PskMismatch,
+                          weak_factory_.GetWeakPtr()),
       on_connected_callback);
 
   // Connect property signals and initialize cached values. Based on
@@ -159,8 +180,10 @@ bool SupplicantInterfaceProxy::Disconnect() {
   SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
   brillo::ErrorPtr error;
   if (!interface_proxy_->Disconnect(&error)) {
-    LOG(ERROR) << "Failed to disconnect: " << error->GetCode() << " "
-               << error->GetMessage();
+    // Don't log as an error because this happens when lower layers disconnect
+    // before shill does.
+    LOG(INFO) << "Failed to disconnect: " << error->GetCode() << " "
+              << error->GetMessage();
     return false;
   }
   return true;
@@ -236,6 +259,17 @@ bool SupplicantInterfaceProxy::RemoveAllNetworks() {
   return true;
 }
 
+bool SupplicantInterfaceProxy::InterworkingSelect() {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  brillo::ErrorPtr error;
+  if (!interface_proxy_->InterworkingSelect(&error)) {
+    LOG(ERROR) << "Failed to start passpoint interworking selection: "
+               << error->GetCode() << " " << error->GetMessage();
+    return false;
+  }
+  return true;
+}
+
 bool SupplicantInterfaceProxy::RemoveNetwork(const RpcIdentifier& network) {
   SLOG(&interface_proxy_->GetObjectPath(), 2)
       << __func__ << ": " << network.value();
@@ -266,8 +300,10 @@ bool SupplicantInterfaceProxy::Scan(const KeyValueStore& args) {
       KeyValueStore::ConvertToVariantDictionary(args);
   brillo::ErrorPtr error;
   if (!interface_proxy_->Scan(dict, &error)) {
-    LOG(ERROR) << "Failed to scan: " << error->GetCode() << " "
-               << error->GetMessage();
+    // Don't log as an error because this is expected to happen if the radio is
+    // busy.
+    LOG(INFO) << "Failed to scan: " << error->GetCode() << " "
+              << error->GetMessage();
     return false;
   }
   return true;
@@ -282,6 +318,19 @@ bool SupplicantInterfaceProxy::SelectNetwork(const RpcIdentifier& network) {
                << error->GetMessage();
     return false;
   }
+  return true;
+}
+
+bool SupplicantInterfaceProxy::SignalPoll(KeyValueStore* signalInfo) {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  brillo::ErrorPtr error;
+  brillo::VariantDictionary properties;
+  if (!interface_proxy_->SignalPoll(&properties, &error)) {
+    LOG(ERROR) << "Failed to poll signal: " << error->GetCode() << " "
+               << error->GetMessage();
+    return false;
+  }
+  *signalInfo = KeyValueStore::ConvertFromVariantDictionary(properties);
   return true;
 }
 
@@ -362,6 +411,45 @@ bool SupplicantInterfaceProxy::GetCapabilities(KeyValueStore* capabilities) {
   return true;
 }
 
+bool SupplicantInterfaceProxy::AddCred(const KeyValueStore& args,
+                                       RpcIdentifier* cred) {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  brillo::VariantDictionary dict =
+      KeyValueStore::ConvertToVariantDictionary(args);
+  dbus::ObjectPath path;
+  brillo::ErrorPtr error;
+  if (!interface_proxy_->AddCred(dict, &path, &error)) {
+    LOG(ERROR) << "Failed to add credential: " << error->GetCode() << " "
+               << error->GetMessage();
+    return false;
+  }
+  *cred = path;
+  return true;
+}
+
+bool SupplicantInterfaceProxy::RemoveCred(const RpcIdentifier& cred) {
+  SLOG(&interface_proxy_->GetObjectPath(), 2)
+      << __func__ << ": " << cred.value();
+  brillo::ErrorPtr error;
+  if (!interface_proxy_->RemoveCred(cred, &error)) {
+    LOG(ERROR) << "Failed to remove credential: " << error->GetCode() << " "
+               << error->GetMessage();
+    return false;
+  }
+  return true;
+}
+
+bool SupplicantInterfaceProxy::RemoveAllCreds() {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  brillo::ErrorPtr error;
+  if (!interface_proxy_->RemoveAllCreds(&error)) {
+    LOG(ERROR) << "Failed to remove all credentials: " << error->GetCode()
+               << " " << error->GetMessage();
+    return false;
+  }
+  return true;
+}
+
 void SupplicantInterfaceProxy::BlobAdded(const std::string& /*blobname*/) {
   SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
   // XXX
@@ -425,9 +513,41 @@ void SupplicantInterfaceProxy::PropertiesChanged(
   delegate_->PropertiesChanged(store);
 }
 
+void SupplicantInterfaceProxy::InterworkingAPAdded(
+    const dbus::ObjectPath& BSS,
+    const dbus::ObjectPath& cred,
+    const brillo::VariantDictionary& properties) {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  KeyValueStore store = KeyValueStore::ConvertFromVariantDictionary(properties);
+  delegate_->InterworkingAPAdded(BSS, cred, std::move(store));
+}
+
+void SupplicantInterfaceProxy::InterworkingSelectDone() {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  delegate_->InterworkingSelectDone();
+}
+
 void SupplicantInterfaceProxy::ScanDone(bool success) {
   SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__ << ": " << success;
   delegate_->ScanDone(success);
+}
+
+void SupplicantInterfaceProxy::StationAdded(
+    const dbus::ObjectPath& station,
+    const brillo::VariantDictionary& properties) {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  KeyValueStore store = KeyValueStore::ConvertFromVariantDictionary(properties);
+  delegate_->StationAdded(station, store);
+}
+
+void SupplicantInterfaceProxy::StationRemoved(const dbus::ObjectPath& station) {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  delegate_->StationRemoved(station);
+}
+
+void SupplicantInterfaceProxy::PskMismatch() {
+  SLOG(&interface_proxy_->GetObjectPath(), 2) << __func__;
+  delegate_->PskMismatch();
 }
 
 void SupplicantInterfaceProxy::OnPropertyChanged(

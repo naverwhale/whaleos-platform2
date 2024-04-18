@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,18 +8,21 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <brillo/secure_blob.h>
 #include <libhwsec/error/tpm_error.h>
+#include <libhwsec/frontend/cryptohome/frontend.h>
+#include <libhwsec/status.h>
 
+#include "cryptohome/challenge_credentials/challenge_credentials_helper.h"
 #include "cryptohome/challenge_credentials/challenge_credentials_operation.h"
-#include "cryptohome/key.pb.h"
-#include "cryptohome/signature_sealing_backend.h"
-#include "cryptohome/tpm.h"
-#include "cryptohome/vault_keyset.pb.h"
+#include "cryptohome/error/cryptohome_tpm_error.h"
+#include "cryptohome/flatbuffer_schemas/structures.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 
@@ -35,72 +38,69 @@ class KeyChallengeService;
 class ChallengeCredentialsDecryptOperation final
     : public ChallengeCredentialsOperation {
  public:
-  using KeysetSignatureChallengeInfo =
-      SerializedVaultKeyset_SignatureChallengeInfo;
-
-  // If the operation succeeds, |credentials| will contain the decrypted
-  // credentials that can be used for decryption of the user's vault keyset.
-  using CompletionCallback =
-      base::OnceCallback<void(hwsec::error::TPMErrorBase error,
-                              std::unique_ptr<Credentials> credentials)>;
+  // If the operation succeeds, |passkey| can be used for decryption of the
+  // user's vault keyset.
+  using CompletionCallback = base::OnceCallback<void(
+      CryptoStatusOr<ChallengeCredentialsHelper::GenerateNewOrDecryptResult>)>;
 
   // |key_challenge_service| is a non-owned pointer which must outlive the
   // created instance.
-  // |key_data| must have the |KEY_TYPE_CHALLENGE_RESPONSE| type.
+  // |public_key_info| describes the challenge-response public key information.
   // |keyset_challenge_info| contains the encrypted representation of secrets.
   // The result is reported via |completion_callback|.
   ChallengeCredentialsDecryptOperation(
       KeyChallengeService* key_challenge_service,
-      Tpm* tpm,
-      const brillo::Blob& delegate_blob,
-      const brillo::Blob& delegate_secret,
-      const std::string& account_id,
-      const KeyData& key_data,
-      const KeysetSignatureChallengeInfo& keyset_challenge_info,
+      const hwsec::CryptohomeFrontend* hwsec,
+      const Username& account_id,
+      const SerializedChallengePublicKeyInfo& public_key_info,
+      const SerializedSignatureChallengeInfo& keyset_challenge_info,
       CompletionCallback completion_callback);
 
   ~ChallengeCredentialsDecryptOperation() override;
 
   // ChallengeCredentialsOperation:
   void Start() override;
-  void Abort() override;
+  void Abort(CryptoStatus status) override;
 
  private:
   // Starts the processing.
-  hwsec::error::TPMErrorBase StartProcessing();
+  hwsec_foundation::status::StatusChain<
+      cryptohome::error::CryptohomeCryptoError>
+  StartProcessing();
 
   // Makes a challenge request with the salt.
-  hwsec::error::TPMErrorBase StartProcessingSalt();
+  hwsec_foundation::status::StatusChain<
+      cryptohome::error::CryptohomeCryptoError>
+  StartProcessingSalt();
 
   // Begins unsealing the secret, and makes a challenge request for unsealing
   // it.
-  hwsec::error::TPMErrorBase StartProcessingSealedSecret();
+  hwsec_foundation::status::StatusChain<
+      cryptohome::error::CryptohomeCryptoError>
+  StartProcessingSealedSecret();
 
   // Called when signature for the salt is received.
-  void OnSaltChallengeResponse(std::unique_ptr<brillo::Blob> salt_signature);
+  void OnSaltChallengeResponse(
+      CryptoStatusOr<std::unique_ptr<brillo::Blob>> salt_signature);
 
   // Called when signature for the unsealing challenge is received.
   void OnUnsealingChallengeResponse(
-      std::unique_ptr<brillo::Blob> challenge_signature);
+      CryptoStatusOr<std::unique_ptr<brillo::Blob>> challenge_signature);
 
   // Generates the result if all necessary challenges are completed.
   void ProceedIfChallengesDone();
 
   // Completes with returning the specified results.
-  void Resolve(hwsec::error::TPMErrorBase error,
-               std::unique_ptr<Credentials> credentials);
+  void Resolve(
+      CryptoStatusOr<ChallengeCredentialsHelper::GenerateNewOrDecryptResult>);
 
-  Tpm* const tpm_;
-  const brillo::Blob delegate_blob_;
-  const brillo::Blob delegate_secret_;
-  const std::string account_id_;
-  const KeyData key_data_;
-  const KeysetSignatureChallengeInfo keyset_challenge_info_;
+  const Username account_id_;
+  const SerializedChallengePublicKeyInfo public_key_info_;
+  const SerializedSignatureChallengeInfo keyset_challenge_info_;
   std::unique_ptr<brillo::Blob> salt_signature_;
   CompletionCallback completion_callback_;
-  SignatureSealingBackend* const signature_sealing_backend_;
-  ChallengePublicKeyInfo public_key_info_;
-  std::unique_ptr<SignatureSealingBackend::UnsealingSession> unsealing_session_;
+  const hwsec::CryptohomeFrontend* const hwsec_;
+  std::optional<hwsec::CryptohomeFrontend::ChallengeID> challenge_id_;
   std::unique_ptr<brillo::SecureBlob> unsealed_secret_;
   base::WeakPtrFactory<ChallengeCredentialsDecryptOperation> weak_ptr_factory_{
       this};

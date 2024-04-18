@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 #include <base/strings/stringprintf.h>
 #include <brillo/file_utils.h>
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -199,5 +198,4 @@ bool WilcoChargeControllerHelper::SetBatteryChargeCustomThresholds(
                            base::StringPrintf("%d", custom_charge_stop));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

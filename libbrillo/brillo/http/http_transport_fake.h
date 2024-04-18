@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,15 +7,15 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/location.h>
-#include <base/optional.h>
 #include <base/values.h>
 #include <brillo/brillo_export.h>
 #include <brillo/http/http_transport.h>
@@ -43,7 +43,7 @@ class BRILLO_EXPORT Transport : public http::Transport {
 
   // Server handler callback signature.
   using HandlerCallback =
-      base::Callback<void(const ServerRequest&, ServerResponse*)>;
+      base::RepeatingCallback<void(const ServerRequest&, ServerResponse*)>;
 
   // This method allows the test code to provide a callback to handle requests
   // for specific URL/HTTP-verb combination. When a specific |method| request
@@ -100,24 +100,34 @@ class BRILLO_EXPORT Transport : public http::Transport {
       brillo::ErrorPtr* error) override;
 
   void RunCallbackAsync(const base::Location& from_here,
-                        const base::Closure& callback) override;
+                        base::OnceClosure callback) override;
 
   RequestID StartAsyncTransfer(http::Connection* connection,
-                               const SuccessCallback& success_callback,
-                               const ErrorCallback& error_callback) override;
+                               SuccessCallback success_callback,
+                               ErrorCallback error_callback) override;
 
   bool CancelRequest(RequestID request_id) override;
 
   void SetDefaultTimeout(base::TimeDelta timeout) override;
 
+  void SetInterface(const std::string& ifname) override {}
+
   void SetLocalIpAddress(const std::string& ip_address) override {}
+
+  void SetDnsServers(const std::vector<std::string>& dns_servers) override {}
+
+  void SetDnsInterface(const std::string& dns_interface) override {}
+
+  void SetDnsLocalIPv4Address(const std::string& dns_ipv4_addr) override {}
+
+  void SetDnsLocalIPv6Address(const std::string& dns_ipv6_addr) override {}
 
   void ResolveHostToIp(const std::string& host,
                        uint16_t port,
                        const std::string& ip_address) override {}
 
-  void SetBufferSize(base::Optional<int> buffer_size) override{};
-  void SetUploadBufferSize(base::Optional<int> buffer_size) override{};
+  void SetBufferSize(std::optional<int> buffer_size) override{};
+  void SetUploadBufferSize(std::optional<int> buffer_size) override{};
 
  protected:
   void ClearHost() override {}
@@ -130,7 +140,7 @@ class BRILLO_EXPORT Transport : public http::Transport {
   bool async_{false};
   // A list of queued callbacks that need to be called at some point.
   // Call HandleOneAsyncRequest() or HandleAllAsyncRequests() to invoke them.
-  std::queue<base::Closure> async_callback_queue_;
+  std::queue<base::OnceClosure> async_callback_queue_;
 
   // Fake error to be returned from CreateConnection method.
   brillo::ErrorPtr create_connection_error_;
@@ -151,7 +161,7 @@ class ServerRequestResponseBase {
   void SetData(StreamPtr stream);
   const std::vector<uint8_t>& GetData() const { return data_; }
   std::string GetDataAsString() const;
-  base::Optional<base::Value> GetDataAsJson() const;
+  std::optional<base::Value> GetDataAsJson() const;
   // Parses the data into a JSON object and writes it back to JSON to normalize
   // its string representation (no pretty print, extra spaces, etc).
   std::string GetDataAsNormalizedJsonString() const;
@@ -227,7 +237,7 @@ class ServerResponse : public ServerRequestResponseBase {
                  const std::string& text,
                  const std::string& mime_type);
   // Reply with JSON object. The content type will be "application/json".
-  void ReplyJson(int status_code, const base::Value* json);
+  void ReplyJson(int status_code, const base::ValueView json);
   // Special form for JSON response for simple objects that have a flat
   // list of key-value pairs of string type.
   void ReplyJson(int status_code, const FormFieldList& fields);

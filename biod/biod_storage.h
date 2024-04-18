@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,24 +6,28 @@
 #define BIOD_BIOD_STORAGE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/base64.h>
 #include <base/files/file_path.h>
-#include <brillo/secure_blob.h>
+#include <base/functional/callback.h>
+#include <base/logging.h>
+#include <base/strings/string_util.h>
 #include <base/values.h>
+#include <brillo/secure_blob.h>
 #include <brillo/scoped_umask.h>
 
 #include "biod/biometrics_manager.h"
-#include "biod/biometrics_manager_record.h"
+#include "biod/biometrics_manager_record_interface.h"
 
 namespace biod {
 
 // Version of the record format.
-constexpr int kRecordFormatVersion = 2;
-constexpr int kRecordFormatVersionNoValidationValue = 1;
+inline constexpr int kRecordFormatVersion = 2;
+inline constexpr int kRecordFormatVersionNoValidationValue = 1;
 
 class BiodStorageInterface {
  public:
@@ -38,30 +42,77 @@ class BiodStorageInterface {
     std::string label;
     /** Positive match secrect validation value. */
     std::vector<uint8_t> validation_val;
+
+    bool operator==(const RecordMetadata& rhs) const {
+      return std::tie(this->record_format_version, this->validation_val,
+                      this->record_id, this->user_id, this->label) ==
+             std::tie(rhs.record_format_version, rhs.validation_val,
+                      rhs.record_id, rhs.user_id, rhs.label);
+    }
+
+    bool operator!=(const RecordMetadata& rhs) const { return !(*this == rhs); }
+
+    const std::string GetValidationValBase64() const {
+      std::string validation_val_base64(validation_val.begin(),
+                                        validation_val.end());
+      base::Base64Encode(validation_val_base64, &validation_val_base64);
+      return validation_val_base64;
+    }
+
+    bool IsValidUTF8() const {
+      if (!base::IsStringUTF8(label)) {
+        LOG(ERROR) << "Label is not valid UTF8";
+        return false;
+      }
+
+      if (!base::IsStringUTF8(record_id)) {
+        LOG(ERROR) << "Record ID is not valid UTF8";
+        return false;
+      }
+
+      if (!base::IsStringUTF8(GetValidationValBase64())) {
+        LOG(ERROR) << "Validation value is not valid UTF8";
+        return false;
+      }
+
+      if (!base::IsStringUTF8(user_id)) {
+        LOG(ERROR) << "User ID is not valid UTF8";
+        return false;
+      }
+
+      return true;
+    }
   };
 
   struct Record {
     RecordMetadata metadata;
     // "data" is base64 encoded.
     std::string data;
-  };
+    bool valid = true;
 
-  struct ReadRecordResult {
-    std::vector<Record> valid_records;
-    std::vector<Record> invalid_records;
+    bool operator==(const Record& rhs) const {
+      // Please note that |valid| is not taken into account when comparing
+      // Record structures.
+      return std::tie(this->metadata, this->data) ==
+             std::tie(rhs.metadata, rhs.data);
+    }
+
+    bool operator!=(const Record& rhs) const { return !(*this == rhs); }
   };
 
   virtual ~BiodStorageInterface() = default;
 
-  virtual void SetRootPathForTesting(const base::FilePath& root_path) = 0;
   virtual base::FilePath GetRecordFilename(
-      const BiometricsManagerRecord& record) = 0;
-  virtual bool WriteRecord(const BiometricsManagerRecord& record,
-                           base::Value data) = 0;
-  virtual ReadRecordResult ReadRecords(
+      const BiodStorageInterface::RecordMetadata& record_metadata) = 0;
+  virtual bool WriteRecord(
+      const BiodStorageInterface::RecordMetadata& record_metadata,
+      base::Value data) = 0;
+  virtual std::vector<Record> ReadRecords(
       const std::unordered_set<std::string>& user_ids) = 0;
-  virtual ReadRecordResult ReadRecordsForSingleUser(
+  virtual std::vector<Record> ReadRecordsForSingleUser(
       const std::string& user_id) = 0;
+  virtual std::optional<Record> ReadSingleRecord(
+      const std::string& user_id, const std::string& record_id) = 0;
   virtual bool DeleteRecord(const std::string& user_id,
                             const std::string& record_id) = 0;
   virtual void set_allow_access(bool allow_access) = 0;
@@ -70,13 +121,9 @@ class BiodStorageInterface {
 class BiodStorage : public BiodStorageInterface {
  public:
   // Constructor sets the file path to be
-  // /run/daemon-store/biod/<user_id>/CrosFpBiometricsManager/<record_id>,
-  // which is bound to
-  // /home/root/<user_id>/biod/CrosFpBiometricsManager/<record_id>.
-  explicit BiodStorage(const std::string& biometrics_manager_name);
-
-  // Set root path to a different path for testing purpose only.
-  void SetRootPathForTesting(const base::FilePath& root_path) override;
+  // <root_path>/<biometrics_manager_name>/<record_id>.
+  BiodStorage(const base::FilePath& root_path,
+              const std::string& biometrics_manager_name);
 
   /**
    * Get the file name for a given record. Intended to be used for testing.
@@ -85,29 +132,33 @@ class BiodStorage : public BiodStorageInterface {
    * @return Full path on success. Empty path on failure.
    */
   base::FilePath GetRecordFilename(
-      const BiometricsManagerRecord& record) override;
+      const BiodStorageInterface::RecordMetadata& record_metadata) override;
 
   // Write one record to file in per user stateful. This is called whenever
   // we enroll a new record.
-  bool WriteRecord(const BiometricsManagerRecord& record,
+  bool WriteRecord(const BiodStorageInterface::RecordMetadata& record_metadata,
                    base::Value data) override;
 
   // Read validation value from |record_dictionary| and store in |output|.
   static std::unique_ptr<std::vector<uint8_t>> ReadValidationValueFromRecord(
-      int record_format_version,
-      const base::Value& record_dictionary,
+      const base::Value::Dict& record_dictionary,
       const base::FilePath& record_path);
 
   // Read all records from file for all users in the set. Called whenever biod
   // starts or when a new user logs in.
-  ReadRecordResult ReadRecords(
+  std::vector<Record> ReadRecords(
       const std::unordered_set<std::string>& user_ids) override;
 
   // Read all records from disk for a single user. Uses a file enumerator to
   // enumerate through all record files. Called whenever biod starts or when
   // a new user logs in.
-  ReadRecordResult ReadRecordsForSingleUser(
+  std::vector<Record> ReadRecordsForSingleUser(
       const std::string& user_id) override;
+
+  // Read a single record from disk and return it. If record doesn't exist
+  // then std::nullopt is returned.
+  std::optional<Record> ReadSingleRecord(const std::string& user_id,
+                                         const std::string& record_id) override;
 
   // Delete one record file. User will be able to do this via UI. True if
   // this record does not exist on disk.
@@ -128,6 +179,10 @@ class BiodStorage : public BiodStorageInterface {
   }
 
  private:
+  // It reads single record from provided path. If record doesn't exist then
+  // std::nullopt is returned. If record is invalid then |valid| field in the
+  // Record structure will be set to false.
+  std::optional<Record> ReadRecordFromPath(const base::FilePath& record_path);
   base::FilePath root_path_;
   std::string biometrics_manager_name_;
   bool allow_access_;

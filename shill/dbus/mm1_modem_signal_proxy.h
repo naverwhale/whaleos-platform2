@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 
 #include "cellular/dbus-proxies.h"
 #include "shill/cellular/mm1_modem_signal_proxy_interface.h"
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 namespace mm1 {
@@ -32,14 +32,23 @@ class ModemSignalProxy : public ModemSignalProxyInterface {
   // Inherited methods from ModemSignalProxyInterface.
   void Setup(const int rate,
              Error* /*error*/,
-             const ResultCallback& callback,
+             ResultCallback callback,
              int timeout) override;
+
+  void SetupThresholds(const KeyValueStore& settings,
+                       Error* /*error*/,
+                       ResultCallback callback,
+                       int timeout) override;
 
  private:
   // Callbacks for Setup async call.
-  void OnSetupSuccess(const ResultCallback& callback);
-  void OnSetupFailure(const ResultCallback& callback,
-                      brillo::Error* dbus_error);
+  void OnSetupSuccess(ResultCallback callback);
+  void OnSetupFailure(ResultCallback callback, brillo::Error* dbus_error);
+
+  // Callbacks for SetupThresholds async call.
+  void OnSetupThresholdsSuccess(ResultCallback callback);
+  void OnSetupThresholdsFailure(ResultCallback callback,
+                                brillo::Error* dbus_error);
 
   std::unique_ptr<org::freedesktop::ModemManager1::Modem::SignalProxy> proxy_;
 

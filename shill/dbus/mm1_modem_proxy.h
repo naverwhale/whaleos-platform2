@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 
 #include "cellular/dbus-proxies.h"
 #include "shill/cellular/mm1_modem_proxy_interface.h"
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 namespace mm1 {
@@ -30,49 +30,36 @@ class ModemProxy : public ModemProxyInterface {
   ~ModemProxy() override;
 
   // Inherited methods from ModemProxyInterface.
-  void Enable(bool enable,
-              Error* error,
-              const ResultCallback& callback,
-              int timeout) override;
+  void Enable(bool enable, ResultCallback callback, int timeout) override;
   void CreateBearer(const KeyValueStore& properties,
-                    Error* error,
-                    const RpcIdentifierCallback& callback,
+                    RpcIdentifierCallback callback,
                     int timeout) override;
   void DeleteBearer(const RpcIdentifier& bearer,
-                    Error* error,
-                    const ResultCallback& callback,
+                    ResultCallback callback,
                     int timeout) override;
-  void Reset(Error* error,
-             const ResultCallback& callback,
-             int timeout) override;
+  void Reset(ResultCallback callback, int timeout) override;
   void FactoryReset(const std::string& code,
-                    Error* error,
-                    const ResultCallback& callback,
+                    ResultCallback callback,
                     int timeout) override;
   void SetCurrentCapabilities(uint32_t capabilities,
-                              Error* error,
-                              const ResultCallback& callback,
+                              ResultCallback callback,
                               int timeout) override;
   void SetCurrentModes(uint32_t allowed_modes,
                        uint32_t preferred_mode,
-                       Error* error,
-                       const ResultCallback& callback,
+                       ResultCallback callback,
                        int timeout) override;
   void SetCurrentBands(const std::vector<uint32_t>& bands,
-                       Error* error,
-                       const ResultCallback& callback,
+                       ResultCallback callback,
                        int timeout) override;
   void SetPrimarySimSlot(uint32_t slot,
-                         const ResultCallback& callback,
+                         ResultCallback callback,
                          int timeout) override;
   void Command(const std::string& cmd,
                uint32_t user_timeout,
-               Error* error,
-               const StringCallback& callback,
+               StringCallback callback,
                int timeout) override;
   void SetPowerState(uint32_t power_state,
-                     Error* error,
-                     const ResultCallback& callback,
+                     ResultCallback callback,
                      int timeout) override;
 
   void set_state_changed_callback(
@@ -85,21 +72,19 @@ class ModemProxy : public ModemProxyInterface {
   void StateChanged(int32_t old, int32_t _new, uint32_t reason);
 
   // Callbacks for CreateBearer async call.
-  void OnCreateBearerSuccess(const RpcIdentifierCallback& callback,
+  void OnCreateBearerSuccess(RpcIdentifierCallback callback,
                              const dbus::ObjectPath& path);
-  void OnCreateBearerFailure(const RpcIdentifierCallback& callback,
+  void OnCreateBearerFailure(RpcIdentifierCallback callback,
                              brillo::Error* dbus_error);
 
   // Callbacks for Command async call.
-  void OnCommandSuccess(const StringCallback& callback,
-                        const std::string& response);
-  void OnCommandFailure(const StringCallback& callback,
-                        brillo::Error* dbus_error);
+  void OnCommandSuccess(StringCallback callback, const std::string& response);
+  void OnCommandFailure(StringCallback callback, brillo::Error* dbus_error);
 
   // Callbacks for various async calls that uses ResultCallback.
-  void OnOperationSuccess(const ResultCallback& callback,
+  void OnOperationSuccess(ResultCallback callback,
                           const std::string& operation);
-  void OnOperationFailure(const ResultCallback& callback,
+  void OnOperationFailure(ResultCallback callback,
                           const std::string& operation,
                           brillo::Error* dbus_error);
 

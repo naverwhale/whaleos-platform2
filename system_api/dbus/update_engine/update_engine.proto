@@ -1,10 +1,11 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 syntax = "proto3";
 
 option optimize_for = LITE_RUNTIME;
+option go_package = "chromiumos/system_api/update_engine_proto";
 
 package update_engine;
 
@@ -22,6 +23,8 @@ enum Operation {
   ATTEMPTING_ROLLBACK = 8;
   DISABLED = 9;
   NEED_PERMISSION_TO_UPDATE = 10;
+  CLEANUP_PREVIOUS_UPDATE = 11;
+  UPDATED_BUT_DEFERRED = 12;
 
   // ERROR is only used by Chrome and update_engine doesn't really use/set this
   // value as it is not the proper way to propagate errors. DO NOT use this
@@ -35,6 +38,26 @@ enum Operation {
 enum UpdateUrgency {
   REGULAR = 0;
   CRITICAL = 1;
+}
+
+enum UpdateDoneAction {
+  REBOOT = 0;
+  SHUTDOWN = 1;
+}
+
+// This is the message transferred from other processes to update_engine for
+// configuring the behavior of applying the deferred update.
+message ApplyUpdateConfig {
+  // The action to take after applying the deferred update.
+  UpdateDoneAction done_action = 1;
+}
+
+message Feature {
+  // The name of the feature.
+  string name = 1;
+
+  // Whether the feature is enabled or not.
+  bool enabled = 2;
 }
 
 // This is the message transferred between update_engine and other processes
@@ -84,6 +107,15 @@ message StatusResult {
 
   // Indicates how important an update is.
   UpdateUrgency update_urgency = 12;
+
+  // List of features managed by update_engine.
+  repeated Feature features = 13;
+
+  // Whether the update is interactive.
+  bool is_interactive = 14;
+
+  // If true, the update will be downloaded but deferred.
+  bool will_defer_update = 15;
 }
 
 // This is the message flags that influences how updates are performed.
@@ -110,4 +142,18 @@ message UpdateParams {
 
   // Checks for an update, but does not apply it.
   bool skip_applying = 4;
+
+  // Forces a fw update with OS update.
+  bool force_fw_update = 5;
+}
+
+message InstallParams {
+  // ID of the DLC to install.
+  string id = 1;
+
+  // The Omaha URL to use. See `UpdateParams::omaha_url` for details.
+  string omaha_url = 2;
+
+  // Boolean indicating whether or not the DLC is scaled.
+  bool scaled = 3;
 }

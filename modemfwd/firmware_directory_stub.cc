@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,6 +27,10 @@ bool GetValue(const Map& map, const K& key, V* out_value) {
 
 namespace modemfwd {
 
+FirmwareDirectoryStub::FirmwareDirectoryStub(
+    const base::FilePath& fw_manifest_directory)
+    : fw_manifest_directory_(fw_manifest_directory) {}
+
 void FirmwareDirectoryStub::AddMainFirmware(const std::string& device_id,
                                             FirmwareFileInfo info) {
   main_fw_info_.insert(std::make_pair(device_id, info));
@@ -38,6 +42,13 @@ void FirmwareDirectoryStub::AddMainFirmwareForCarrier(
     FirmwareFileInfo info) {
   main_fw_info_for_carrier_.insert(
       std::make_pair(std::make_pair(device_id, carrier_id), info));
+}
+
+void FirmwareDirectoryStub::AddAssocFirmware(const std::string& main_fw_path,
+                                             const std::string& firmware_id,
+                                             FirmwareFileInfo info) {
+  assoc_fw_info_.insert(
+      std::make_pair(std::make_pair(main_fw_path, firmware_id), info));
 }
 
 void FirmwareDirectoryStub::AddOemFirmware(const std::string& device_id,
@@ -88,6 +99,13 @@ FirmwareDirectory::Files FirmwareDirectoryStub::FindFirmware(
     res.main_firmware = info;
   }
 
+  auto it = assoc_fw_info_.begin();
+  while (it != assoc_fw_info_.end()) {
+    // Collect all associated firmwares for the selected main firmware's path
+    if (it->first.first == res.main_firmware->firmware_path)
+      res.assoc_firmware.insert(std::make_pair(it->first.second, it->second));
+    it++;
+  }
   return res;
 }
 
@@ -129,5 +147,12 @@ bool FirmwareDirectoryStub::IsUsingSameFirmware(const std::string& device_id,
   // same firmware if they are pointing to the 2 same files.
   return info_a.firmware_path == info_b.firmware_path;
 }
+
+const base::FilePath& FirmwareDirectoryStub::GetFirmwarePath() {
+  return fw_manifest_directory_;
+}
+
+void FirmwareDirectoryStub::OverrideVariantForTesting(
+    const std::string& variant) {}
 
 }  // namespace modemfwd

@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,9 +20,9 @@
 
 #include "power_manager/common/metrics_constants.h"
 #include "power_manager/common/metrics_sender_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -34,11 +34,11 @@ std::string Hex(uint8_t byte) {
 // Test implementation of ExternalDisplay::Delegate.
 class TestDelegate : public ExternalDisplay::Delegate {
  public:
-  TestDelegate() : report_write_failure_(false), report_read_failure_(false) {}
+  TestDelegate() = default;
   TestDelegate(const TestDelegate&) = delete;
   TestDelegate& operator=(const TestDelegate&) = delete;
 
-  ~TestDelegate() override {}
+  ~TestDelegate() override = default;
 
   void set_reply_message(const std::vector<uint8_t>& message) {
     reply_message_ = message;
@@ -118,13 +118,13 @@ class TestDelegate : public ExternalDisplay::Delegate {
   std::vector<uint8_t> reply_message_;
 
   // True if either writes or reads should report failure.
-  bool report_write_failure_;
-  bool report_read_failure_;
+  bool report_write_failure_ = false;
+  bool report_read_failure_ = false;
 };
 
 }  // namespace
 
-class ExternalDisplayTest : public testing::Test {
+class ExternalDisplayTest : public TestEnvironment {
  public:
   ExternalDisplayTest()
       : delegate_(new TestDelegate),
@@ -144,7 +144,7 @@ class ExternalDisplayTest : public testing::Test {
             ExternalDisplay::kDdcGetCommand ^
             ExternalDisplay::kDdcBrightnessIndex);
   }
-  ~ExternalDisplayTest() override {}
+  ~ExternalDisplayTest() override = default;
 
  protected:
   // Updates the checksum byte that's already present at the end of |message|.
@@ -214,7 +214,7 @@ class ExternalDisplayTest : public testing::Test {
 
   MetricsSenderStub metrics_sender_;
 
-  TestDelegate* delegate_;  // weak pointer
+  TestDelegate* delegate_;  // owned elsewhere
   ExternalDisplay display_;
   ExternalDisplay::TestApi test_api_;
 };
@@ -234,8 +234,7 @@ TEST_F(ExternalDisplayTest, BasicCommunication) {
   // After the timer fires, the reply should be read and a request to set the
   // brightness to 60 should be sent.
   delegate_->set_reply_message(GetBrightnessReply(50, 100));
-  EXPECT_EQ(ExternalDisplay::kDdcGetDelayMs,
-            test_api_.GetTimerDelay().InMilliseconds());
+  EXPECT_EQ(ExternalDisplay::kDdcGetDelay, test_api_.GetTimerDelay());
   ASSERT_TRUE(test_api_.TriggerTimeout());
   EXPECT_EQ(GetSetBrightnessMessage(60), delegate_->PopSentMessage());
 
@@ -262,15 +261,13 @@ TEST_F(ExternalDisplayTest, BasicCommunication) {
   EXPECT_EQ("", delegate_->PopSentMessage());
   display_.AdjustBrightnessByPercent(5.0);
   EXPECT_EQ("", delegate_->PopSentMessage());
-  EXPECT_EQ(ExternalDisplay::kDdcSetDelayMs,
-            test_api_.GetTimerDelay().InMilliseconds());
+  EXPECT_EQ(ExternalDisplay::kDdcSetDelay, test_api_.GetTimerDelay());
   ASSERT_TRUE(test_api_.TriggerTimeout());
   EXPECT_EQ(GetSetBrightnessMessage(85), delegate_->PopSentMessage());
 
   // The timer should fire again when it's safe to send another message, but
   // nothing should happen since there are no pending adjustments.
-  EXPECT_EQ(ExternalDisplay::kDdcSetDelayMs,
-            test_api_.GetTimerDelay().InMilliseconds());
+  EXPECT_EQ(ExternalDisplay::kDdcSetDelay, test_api_.GetTimerDelay());
   EXPECT_TRUE(test_api_.TriggerTimeout());
   EXPECT_EQ("", delegate_->PopSentMessage());
   EXPECT_FALSE(test_api_.TriggerTimeout());
@@ -278,16 +275,15 @@ TEST_F(ExternalDisplayTest, BasicCommunication) {
   // Let enough time pass for the cached brightness to be invalidated.
   // Asking for another adjustment should result in the brightness being
   // re-read.
-  test_api_.AdvanceTime(base::TimeDelta::FromMilliseconds(
-      ExternalDisplay::kCachedBrightnessValidMs + 10));
+  test_api_.AdvanceTime(ExternalDisplay::kCachedBrightnessValid +
+                        base::Milliseconds(10));
   display_.AdjustBrightnessByPercent(-10.0);
   EXPECT_EQ(request_brightness_message_, delegate_->PopSentMessage());
 
   // Pretend like the user decreased the brightness via physical buttons on the
   // monitor and reply that the current level is 30.
   delegate_->set_reply_message(GetBrightnessReply(30, 100));
-  EXPECT_EQ(ExternalDisplay::kDdcGetDelayMs,
-            test_api_.GetTimerDelay().InMilliseconds());
+  EXPECT_EQ(ExternalDisplay::kDdcGetDelay, test_api_.GetTimerDelay());
   ASSERT_TRUE(test_api_.TriggerTimeout());
   EXPECT_EQ(GetSetBrightnessMessage(20), delegate_->PopSentMessage());
 }
@@ -345,8 +341,8 @@ TEST_F(ExternalDisplayTest, InvalidBrightnessReplies) {
 
   // Run through each test case, making sure that no subsequent request is sent
   // after the bogus reply is returned. The timer also shouldn't be rescheduled.
-  for (size_t i = 0; i < test_cases.size(); ++i) {
-    SCOPED_TRACE(test_cases[i].description);
+  for (const TestCase& test_case : test_cases) {
+    SCOPED_TRACE(test_case.description);
 
     display_.AdjustBrightnessByPercent(10.0);
     ASSERT_EQ(request_brightness_message_, delegate_->PopSentMessage());
@@ -357,11 +353,11 @@ TEST_F(ExternalDisplayTest, InvalidBrightnessReplies) {
                   .ToString(),
               PopMetric());
 
-    delegate_->set_reply_message(test_cases[i].reply);
+    delegate_->set_reply_message(test_case.reply);
     ASSERT_TRUE(test_api_.TriggerTimeout());
     EXPECT_EQ(MetricsSenderStub::Metric::CreateEnum(
                   metrics::kExternalBrightnessReadResultName,
-                  static_cast<int>(test_cases[i].metric),
+                  static_cast<int>(test_case.metric),
                   metrics::kExternalDisplayResultMax)
                   .ToString(),
               PopMetric());
@@ -550,8 +546,7 @@ TEST_F(ExternalDisplayTest, AbsoluteBrightness) {
   // After the timer fires, the reply should be read and a request to set the
   // brightness to 60 should be sent.
   delegate_->set_reply_message(GetBrightnessReply(50, 100));
-  EXPECT_EQ(ExternalDisplay::kDdcGetDelayMs,
-            test_api_.GetTimerDelay().InMilliseconds());
+  EXPECT_EQ(ExternalDisplay::kDdcGetDelay, test_api_.GetTimerDelay());
   ASSERT_TRUE(test_api_.TriggerTimeout());
   EXPECT_EQ(GetSetBrightnessMessage(60), delegate_->PopSentMessage());
 
@@ -579,11 +574,9 @@ TEST_F(ExternalDisplayTest, AbsoluteBrightness) {
   EXPECT_EQ("", delegate_->PopSentMessage());
   display_.AdjustBrightnessByPercent(35.0);
   EXPECT_EQ("", delegate_->PopSentMessage());
-  EXPECT_EQ(ExternalDisplay::kDdcSetDelayMs,
-            test_api_.GetTimerDelay().InMilliseconds());
+  EXPECT_EQ(ExternalDisplay::kDdcSetDelay, test_api_.GetTimerDelay());
   ASSERT_TRUE(test_api_.TriggerTimeout());
   EXPECT_EQ(GetSetBrightnessMessage(85), delegate_->PopSentMessage());
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

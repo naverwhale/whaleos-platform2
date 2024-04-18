@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,6 +19,7 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
+#include <base/message_loop/message_pump_libevent.h>
 #include <base/message_loop/message_pump_type.h>
 #include <base/run_loop.h>
 #include <base/strings/string_util.h>
@@ -29,11 +30,13 @@
 #include <brillo/flag_helper.h>
 #include <brillo/vcsid.h>
 #include <cros_config/cros_config.h>
+#include <libec/charge_current_limit_set_command.h>
+#include <libsar/sar_config_reader_delegate_impl.h>
 #include <metrics/metrics_library.h>
-#if USE_IIOSERVICE
+#include <ml/dbus-proxies.h>
+
 #include <mojo/core/embedder/embedder.h>
 #include <mojo/core/embedder/scoped_ipc_support.h>
-#endif  // USE_IIOSERVICE
 
 #include "power_manager/common/metrics_sender.h"
 #include "power_manager/common/prefs.h"
@@ -45,13 +48,9 @@
 #include "power_manager/powerd/policy/keyboard_backlight_controller.h"
 #include "power_manager/powerd/system/acpi_wakeup_helper.h"
 #include "power_manager/powerd/system/ambient_light_sensor_interface.h"
-#if USE_IIOSERVICE
-#include "power_manager/powerd/system/ambient_light_sensor_manager_mojo.h"
-#else  // !USE_IIOSERVICE
-#include "power_manager/powerd/system/ambient_light_sensor_manager_file.h"
-#endif  // USE_IIOSERVICE
 #include "power_manager/powerd/system/ambient_light_sensor_manager_interface.h"
-#include "power_manager/powerd/system/ambient_light_sensor_watcher.h"
+#include "power_manager/powerd/system/ambient_light_sensor_manager_mojo.h"
+#include "power_manager/powerd/system/ambient_light_sensor_watcher_mojo.h"
 #include "power_manager/powerd/system/audio_client.h"
 #include "power_manager/powerd/system/cros_ec_helper.h"
 #include "power_manager/powerd/system/dark_resume.h"
@@ -59,19 +58,22 @@
 #include "power_manager/powerd/system/display/display_power_setter.h"
 #include "power_manager/powerd/system/display/display_watcher.h"
 #include "power_manager/powerd/system/event_device.h"
-#include "power_manager/powerd/system/external_ambient_light_sensor_factory_file.h"
+#include "power_manager/powerd/system/external_ambient_light_sensor_factory_mojo.h"
 #include "power_manager/powerd/system/input_watcher.h"
 #include "power_manager/powerd/system/internal_backlight.h"
 #include "power_manager/powerd/system/lockfile_checker.h"
+#include "power_manager/powerd/system/machine_quirks.h"
 #include "power_manager/powerd/system/peripheral_battery_watcher.h"
 #include "power_manager/powerd/system/pluggable_internal_backlight.h"
 #include "power_manager/powerd/system/power_supply.h"
+#include "power_manager/powerd/system/sensor_service_handler.h"
 #include "power_manager/powerd/system/suspend_configurator.h"
 #include "power_manager/powerd/system/suspend_freezer.h"
 #include "power_manager/powerd/system/thermal/thermal_device.h"
 #include "power_manager/powerd/system/thermal/thermal_device_factory.h"
 #include "power_manager/powerd/system/udev.h"
-#include "power_manager/powerd/system/user_proximity_watcher.h"
+#include "power_manager/powerd/system/user_proximity_watcher_mojo.h"
+#include "power_manager/powerd/system/user_proximity_watcher_udev.h"
 #include "power_manager/powerd/system/wilco_charge_controller_helper.h"
 
 namespace power_manager {
@@ -103,29 +105,33 @@ class DaemonDelegateImpl : public DaemonDelegate {
     return udev;
   }
 
+  std::unique_ptr<system::SensorServiceHandler> CreateSensorServiceHandler()
+      override {
+    return std::make_unique<system::SensorServiceHandler>();
+  }
+
   std::unique_ptr<system::AmbientLightSensorManagerInterface>
-  CreateAmbientLightSensorManager(PrefsInterface* prefs) override {
-#if USE_IIOSERVICE
+  CreateAmbientLightSensorManager(
+      PrefsInterface* prefs,
+      system::SensorServiceHandler* sensor_service_handler) override {
     auto light_sensor_manager =
-        std::make_unique<system::AmbientLightSensorManagerMojo>(prefs);
-#else   // !USE_IIOSERVICE
-    auto light_sensor_manager =
-        std::make_unique<system::AmbientLightSensorManagerFile>(prefs);
-    light_sensor_manager->Run(false /* read_immediately */);
-#endif  // USE_IIOSERVICE
+        std::make_unique<system::AmbientLightSensorManagerMojo>(
+            prefs, sensor_service_handler);
     return light_sensor_manager;
   }
 
   std::unique_ptr<system::AmbientLightSensorWatcherInterface>
-  CreateAmbientLightSensorWatcher(system::UdevInterface* udev) override {
-    auto watcher = std::make_unique<system::AmbientLightSensorWatcher>();
-    watcher->Init(udev);
-    return watcher;
+  CreateAmbientLightSensorWatcher(
+      system::SensorServiceHandler* sensor_service_handler) override {
+    return std::make_unique<system::AmbientLightSensorWatcherMojo>(
+        sensor_service_handler);
   }
 
   std::unique_ptr<system::ExternalAmbientLightSensorFactoryInterface>
-  CreateExternalAmbientLightSensorFactory() override {
-    return std::make_unique<system::ExternalAmbientLightSensorFactoryFile>();
+  CreateExternalAmbientLightSensorFactory(
+      system::AmbientLightSensorWatcherMojo* watcher) override {
+    return std::make_unique<system::ExternalAmbientLightSensorFactoryMojo>(
+        watcher);
   }
 
   std::unique_ptr<system::DisplayWatcherInterface> CreateDisplayWatcher(
@@ -176,6 +182,11 @@ class DaemonDelegateImpl : public DaemonDelegate {
     return backlight;
   }
 
+  std::unique_ptr<ec::EcCommandFactoryInterface> CreateEcCommandFactory()
+      override {
+    return std::make_unique<ec::EcCommandFactory>();
+  }
+
   std::unique_ptr<policy::BacklightController>
   CreateInternalBacklightController(
       system::BacklightInterface* backlight,
@@ -191,17 +202,14 @@ class DaemonDelegateImpl : public DaemonDelegate {
   }
 
   std::unique_ptr<policy::BacklightController>
-  CreateKeyboardBacklightController(
-      system::BacklightInterface* backlight,
-      PrefsInterface* prefs,
-      system::AmbientLightSensorInterface* sensor,
-      system::DBusWrapperInterface* dbus_wrapper,
-      policy::BacklightController* display_backlight_controller,
-      LidState initial_lid_state,
-      TabletMode initial_tablet_mode) override {
+  CreateKeyboardBacklightController(system::BacklightInterface* backlight,
+                                    PrefsInterface* prefs,
+                                    system::AmbientLightSensorInterface* sensor,
+                                    system::DBusWrapperInterface* dbus_wrapper,
+                                    LidState initial_lid_state,
+                                    TabletMode initial_tablet_mode) override {
     auto controller = std::make_unique<policy::KeyboardBacklightController>();
-    controller->Init(backlight, prefs, sensor, dbus_wrapper,
-                     display_backlight_controller, initial_lid_state,
+    controller->Init(backlight, prefs, sensor, dbus_wrapper, initial_lid_state,
                      initial_tablet_mode);
     return controller;
   }
@@ -234,25 +242,38 @@ class DaemonDelegateImpl : public DaemonDelegate {
 
   std::unique_ptr<system::PowerSupplyInterface> CreatePowerSupply(
       const base::FilePath& power_supply_path,
+      const base::FilePath& cros_ec_path,
+      ec::EcCommandFactoryInterface* ec_command_factory,
       PrefsInterface* prefs,
       system::UdevInterface* udev,
       system::DBusWrapperInterface* dbus_wrapper,
       BatteryPercentageConverter* battery_percentage_converter) override {
     auto supply = std::make_unique<system::PowerSupply>();
-    supply->Init(power_supply_path, prefs, udev, dbus_wrapper,
-                 battery_percentage_converter);
+    supply->Init(power_supply_path, cros_ec_path, ec_command_factory, prefs,
+                 udev, dbus_wrapper, battery_percentage_converter);
     return supply;
   }
 
   std::unique_ptr<system::UserProximityWatcherInterface>
-  CreateUserProximityWatcher(PrefsInterface* prefs,
-                             system::UdevInterface* udev,
-                             TabletMode initial_tablet_mode) override {
-    auto watcher = std::make_unique<system::UserProximityWatcher>();
+  CreateUserProximityWatcher(
+      PrefsInterface* prefs,
+      system::UdevInterface* udev,
+      TabletMode initial_tablet_mode,
+      system::SensorServiceHandler* sensor_service_handler) override {
     auto config = std::make_unique<brillo::CrosConfig>();
-    if (!config->Init())
-      config = nullptr;
+
+// When |USE_IIOSERVICE_PROXIMITY| == true, proximity sensors are owned by
+// CrOS iioservice daemon. Powerd then needs to rely on iioservice to
+// facilitaete mojo IPC.
+#if USE_IIOSERVICE_PROXIMITY
+    auto watcher = std::make_unique<system::UserProximityWatcherMojo>(
+        prefs, std::move(config),
+        std::make_unique<libsar::SarConfigReaderDelegateImpl>(),
+        initial_tablet_mode, sensor_service_handler);
+#else   // !USE_IIOSERVICE_PROXIMITY
+    auto watcher = std::make_unique<system::UserProximityWatcherUdev>();
     watcher->Init(prefs, udev, std::move(config), initial_tablet_mode);
+#endif  // USE_IIOSERVICE_PROXIMITY
     return watcher;
   }
 
@@ -279,9 +300,23 @@ class DaemonDelegateImpl : public DaemonDelegate {
     return std::make_unique<system::LockfileChecker>(dir, files);
   }
 
+  std::unique_ptr<system::MachineQuirksInterface> CreateMachineQuirks(
+      PrefsInterface* prefs) override {
+    auto machine_quirks = std::make_unique<system::MachineQuirks>();
+    machine_quirks->Init(prefs);
+    return machine_quirks;
+  }
+
+  feature::PlatformFeaturesInterface* CreatePlatformFeatures(
+      system::DBusWrapperInterface* dbus_wrapper) override {
+    if (!feature::PlatformFeatures::Initialize(dbus_wrapper->GetBus())) {
+      return nullptr;
+    }
+    return feature::PlatformFeatures::Get();
+  }
+
   std::unique_ptr<MetricsSenderInterface> CreateMetricsSender() override {
-    auto metrics_lib = std::make_unique<MetricsLibrary>();
-    return std::make_unique<MetricsSender>(std::move(metrics_lib));
+    return std::make_unique<MetricsSender>(metrics_library_);
   }
 
   std::unique_ptr<system::ChargeControllerHelperInterface>
@@ -289,10 +324,35 @@ class DaemonDelegateImpl : public DaemonDelegate {
     return std::make_unique<system::WilcoChargeControllerHelper>();
   }
 
+  std::unique_ptr<policy::AdaptiveChargingControllerInterface>
+  CreateAdaptiveChargingController(
+      policy::AdaptiveChargingControllerInterface::Delegate* delegate,
+      policy::BacklightController* backlight_controller,
+      system::InputWatcherInterface* input_watcher,
+      system::PowerSupplyInterface* power_supply,
+      system::DBusWrapperInterface* dbus_wrapper,
+      feature::PlatformFeaturesInterface* platform_features,
+      PrefsInterface* prefs) override {
+    auto adaptive = std::make_unique<policy::AdaptiveChargingController>();
+    adaptive->Init(delegate, backlight_controller, input_watcher, power_supply,
+                   dbus_wrapper, platform_features, prefs);
+    return adaptive;
+  }
+
+  std::unique_ptr<
+      org::chromium::MachineLearning::AdaptiveChargingProxyInterface>
+  CreateAdaptiveChargingProxy(const scoped_refptr<dbus::Bus>& bus) override {
+    return std::make_unique<
+        org::chromium::MachineLearning::AdaptiveChargingProxy>(
+        bus, ml::kMachineLearningAdaptiveChargingServiceName);
+  }
+
   std::unique_ptr<system::SuspendConfiguratorInterface>
-  CreateSuspendConfigurator(PrefsInterface* prefs) override {
+  CreateSuspendConfigurator(
+      feature::PlatformFeaturesInterface* platform_features,
+      PrefsInterface* prefs) override {
     auto suspend_configurator = std::make_unique<system::SuspendConfigurator>();
-    suspend_configurator->Init(prefs);
+    suspend_configurator->Init(platform_features, prefs);
     return suspend_configurator;
   }
 
@@ -331,16 +391,18 @@ class DaemonDelegateImpl : public DaemonDelegate {
   int Run(const std::string& command) override {
     LOG(INFO) << "Running \"" << command << "\"";
     int return_value = ::system(command.c_str());
+    int exit_status = WEXITSTATUS(return_value);
     if (return_value == -1) {
       PLOG(ERROR) << "fork() failed";
-    } else if (return_value) {
-      return_value = WEXITSTATUS(return_value);
-      LOG(ERROR) << "Command failed with exit status " << return_value;
+      return return_value;
+    } else if (exit_status) {
+      LOG(ERROR) << "Command failed with exit status " << exit_status;
     }
-    return return_value;
+    return exit_status;
   }
 
  private:
+  MetricsLibrary metrics_library_;
   base::FilePath read_write_prefs_dir_;
   base::FilePath read_only_prefs_dir_;
 };
@@ -358,6 +420,7 @@ int main(int argc, char* argv[]) {
 
   brillo::FlagHelper::Init(argc, argv,
                            "powerd, the Chromium OS userspace power manager.");
+  base::MessagePumpLibevent::InitializeFeatures();
 
   CHECK(!FLAGS_log_dir.empty()) << "--log_dir is required";
   CHECK(!FLAGS_run_dir.empty()) << "--run_dir is required";
@@ -384,7 +447,7 @@ int main(int argc, char* argv[]) {
   if (sysinfo(&info) == 0) {
     LOG(INFO) << "System uptime: "
               << power_manager::util::TimeDeltaToString(
-                     base::TimeDelta::FromSeconds(info.uptime));
+                     base::Seconds(info.uptime));
   } else {
     PLOG(ERROR) << "sysinfo() failed";
   }

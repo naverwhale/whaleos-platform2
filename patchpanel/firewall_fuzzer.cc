@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,10 @@
 #include <string>
 #include <vector>
 
-#include "base/logging.h"
+#include <base/logging.h>
 
+#include "patchpanel/fake_process_runner.h"
 #include "patchpanel/firewall.h"
-#include "patchpanel/minijailed_process_runner.h"
 
 using patchpanel::ModifyPortRuleRequest;
 using Protocol = patchpanel::ModifyPortRuleRequest::Protocol;
@@ -21,26 +21,12 @@ using Protocol = patchpanel::ModifyPortRuleRequest::Protocol;
 namespace patchpanel {
 namespace {
 
-class FakeProcessRunner : public MinijailedProcessRunner {
- public:
-  FakeProcessRunner() : MinijailedProcessRunner(nullptr, nullptr) {}
-  FakeProcessRunner(const FakeProcessRunner&) = delete;
-  FakeProcessRunner& operator=(const FakeProcessRunner&) = delete;
-  ~FakeProcessRunner() = default;
-
-  int Run(const std::vector<std::string>& argv, bool log_failures) override {
-    return 0;
-  }
-
-  int RunSync(const std::vector<std::string>& argv,
-              bool log_failures,
-              std::string* output) override {
-    return 0;
-  }
-};
-}  // namespace
-
-}  // namespace patchpanel
+net_base::IPv4Address ConsumeIPv4Address(FuzzedDataProvider& provider) {
+  const auto bytes =
+      provider.ConsumeBytes<uint8_t>(net_base::IPv4Address::kAddressLength);
+  return net_base::IPv4Address::CreateFromBytes(bytes).value_or(
+      net_base::IPv4Address());
+}
 
 struct Environment {
   Environment() { logging::SetMinLogLevel(logging::LOGGING_FATAL); }
@@ -74,18 +60,8 @@ void FuzzForwardRules(patchpanel::Firewall* firewall,
                                                 : ModifyPortRuleRequest::UDP;
     uint16_t forwarded_port = data_provider.ConsumeIntegral<uint16_t>();
     uint16_t dst_port = data_provider.ConsumeIntegral<uint16_t>();
-    struct in_addr input_ip_addr = {
-        .s_addr = data_provider.ConsumeIntegral<uint32_t>()};
-    struct in_addr dst_ip_addr = {
-        .s_addr = data_provider.ConsumeIntegral<uint32_t>()};
-    char input_buffer[INET_ADDRSTRLEN];
-    char dst_buffer[INET_ADDRSTRLEN];
-    memset(input_buffer, 0, INET_ADDRSTRLEN);
-    memset(dst_buffer, 0, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &input_ip_addr, input_buffer, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &dst_ip_addr, dst_buffer, INET_ADDRSTRLEN);
-    std::string input_ip = input_buffer;
-    std::string dst_ip = dst_buffer;
+    const auto input_ip = ConsumeIPv4Address(data_provider);
+    const auto dst_ip = ConsumeIPv4Address(data_provider);
     std::string iface = data_provider.ConsumeRandomLengthString(IFNAMSIZ - 1);
     if (data_provider.ConsumeBool()) {
       firewall->AddIpv4ForwardRule(proto, input_ip, forwarded_port, iface,
@@ -126,3 +102,6 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
   return 0;
 }
+
+}  // namespace
+}  // namespace patchpanel

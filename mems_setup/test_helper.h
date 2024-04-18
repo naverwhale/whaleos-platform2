@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 #include <libmems/iio_context.h>
 #include <libmems/iio_device.h>
@@ -41,7 +39,7 @@ class FakeSysfsTrigger : public libmems::fakes::FakeIioDevice {
   std::unique_ptr<libmems::fakes::FakeIioDevice> mock_trigger_;
 };
 
-class SensorTestBase : public ::testing::Test {
+class SensorTestBase {
  public:
   Configuration* GetConfiguration();
 

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,20 +25,11 @@
 #include <chromeos/scoped_minijail.h>
 #include <dbus/object_proxy.h>
 
+#include "vm_tools/concierge/plugin_vm_config.h"
 #include "vm_tools/concierge/vmplugin_dispatcher_interface.h"
 
-namespace vm_tools {
-namespace concierge {
-namespace pvm {
-namespace helper {
+namespace vm_tools::concierge::pvm::helper {
 namespace {
-
-constexpr char kDlcPath[] = "/run/imageloader/pita/package/root";
-
-constexpr char kVmHelperCommand[] = "opt/pita/prlctl";
-constexpr char kVmHelperPolicyPath[] = "opt/pita/policy/pvm_helper.policy";
-
-constexpr char kDispatcherSocketPath[] = "/run/pvm/vmplugin_dispatcher.socket";
 
 // Minimal set of devices needed by the helpers.
 constexpr const char* kDeviceNames[] = {"full", "null", "urandom", "zero"};
@@ -87,13 +79,13 @@ ScopedMinijail SetupSandbox(const base::FilePath& policy_file) {
     return ScopedMinijail();
   }
 
-  if (minijail_bind(jail.get(), "/opt/pita/", "/opt/pita", 0)) {
-    LOG(ERROR) << "Failed to bind-mount /opt/pita";
+  if (minijail_bind(jail.get(), kApplicationDir, kApplicationDir, 0)) {
+    LOG(ERROR) << "Failed to bind-mount " << kApplicationDir;
     return ScopedMinijail();
   }
 
-  if (minijail_bind(jail.get(), "/run/pvm", "/run/pvm", 1)) {
-    LOG(ERROR) << "Failed to bind-mount /run/pvm";
+  if (minijail_bind(jail.get(), kRuntimeDir, kRuntimeDir, 1)) {
+    LOG(ERROR) << "Failed to bind-mount " << kRuntimeDir;
     return ScopedMinijail();
   }
 
@@ -125,17 +117,17 @@ bool ExecutePvmHelper(const std::string& owner_id,
                       std::vector<std::string> params,
                       std::string* stdout_str = nullptr,
                       std::string* stderr_str = nullptr) {
-  const base::FilePath path_prefix(kDlcPath);
-  ScopedMinijail jail = SetupSandbox(path_prefix.Append(kVmHelperPolicyPath));
+  const base::FilePath path_prefix(kApplicationDir);
+  ScopedMinijail jail = SetupSandbox(path_prefix.Append(kPolicyPath));
   if (!jail)
     return false;
 
   std::vector<std::string> args;
-  args.emplace_back(path_prefix.Append(kVmHelperCommand).value());
+  args.emplace_back(path_prefix.Append(kCommand).value());
   for (auto& param : params)
     args.emplace_back(std::move(param));
   args.emplace_back("--socket-path");
-  args.emplace_back(kDispatcherSocketPath);
+  args.emplace_back(dispatcher::kSocketPath);
   args.emplace_back("--user-identity");
   args.emplace_back(owner_id);
 
@@ -190,45 +182,39 @@ bool ExecutePvmHelper(const std::string& owner_id,
   }
 }
 
-static std::unique_ptr<base::DictionaryValue> GetVmInfo(const VmId& vm_id) {
+static std::optional<base::Value::Dict> GetVmInfo(const VmId& vm_id) {
   std::string output;
   if (!ExecutePvmHelper(vm_id.owner_id(),
                         {"list", "--info", "--json", vm_id.name()}, &output)) {
-    return nullptr;
+    return std::nullopt;
   }
 
   auto result = base::JSONReader::Read(output);
   if (!result) {
     LOG(ERROR) << "GetVmInfo(" << vm_id << "): Failed to parse VM info";
-    return nullptr;
+    return std::nullopt;
   }
 
   if (!result->is_list()) {
     LOG(ERROR) << "GetVmInfo(" << vm_id
                << "): Expected to find a list at top level";
-    return nullptr;
+    return std::nullopt;
   }
 
-  const base::ListValue* list;
-  if (!result->GetAsList(&list)) {
-    LOG(ERROR) << "GetVmInfo(" << vm_id << "): Failed to parse top level list";
-    return nullptr;
-  }
-
-  if (list->GetSize() != 1) {
+  if (result->GetList().size() != 1) {
     LOG(ERROR) << "GetVmInfo(" << vm_id << "): Unexpected list size of "
-               << list->GetSize();
-    return nullptr;
+               << result->GetList().size() << ", expect 1";
+    return std::nullopt;
   }
 
-  const base::DictionaryValue* vm_info;
-  if (!list->GetDictionary(0, &vm_info)) {
+  base::Value& vm_info = result->GetList()[0];
+  if (!vm_info.is_dict()) {
     LOG(ERROR) << "GetVmInfo(" << vm_id
                << "): Failed to fetch VM info dictionary";
-    return nullptr;
+    return std::nullopt;
   }
 
-  return vm_info->CreateDeepCopy();
+  return std::move(vm_info.GetDict());
 }
 
 bool DisconnectDevice(const VmId& vm_id, const std::string& device_name) {
@@ -238,10 +224,6 @@ bool DisconnectDevice(const VmId& vm_id, const std::string& device_name) {
 }
 
 }  // namespace
-
-bool IsDlcVm() {
-  return base::PathExists(base::FilePath(kDlcPath));
-}
 
 bool CreateVm(const VmId& vm_id, std::vector<std::string> params) {
   std::vector<std::string> args = {
@@ -281,44 +263,45 @@ void CleanUpAfterInstall(const VmId& vm_id, const base::FilePath& iso_path) {
     return;
   }
 
-  const base::DictionaryValue* hardware;
-  if (!vm_info->GetDictionary("Hardware", &hardware)) {
+  const base::Value::Dict* hardware = vm_info->FindDict("Hardware");
+  if (!hardware) {
     LOG(ERROR) << "Failed to obtain hardware info for " << vm_id;
     return;
   }
 
-  base::DictionaryValue::Iterator it(*hardware);
-  for (; !it.IsAtEnd(); it.Advance()) {
-    if (!base::StartsWith(it.key(), "cdrom"))
+  for (const auto& [key, value] : *hardware) {
+    if (!base::StartsWith(key, "cdrom"))
       continue;
 
-    const base::DictionaryValue* cdrom;
-    if (!it.value().GetAsDictionary(&cdrom)) {
-      LOG(WARNING) << "Hardware node " << it.key() << " in " << vm_id
+    if (!value.is_dict()) {
+      LOG(WARNING) << "Hardware node " << key << " in " << vm_id
                    << "is not a dictionary";
       continue;
     }
+    const base::Value::Dict& cdrom = value.GetDict();
 
-    std::string image_name;
-    if (!cdrom->GetString("image", &image_name))
+    const std::string* image_name = cdrom.FindString("image");
+    if (!image_name)
       continue;  // The device is not backed by an image.
 
-    LOG(INFO) << "CDROM image: " << image_name;
+    LOG(INFO) << "CDROM image: " << *image_name;
 
-    if (image_name != "/iso/install.iso" &&
-        image_name != "/opt/pita/tools/prl-tools-win.iso")
+    if (*image_name != plugin::kInstallIsoPath &&
+        *image_name != plugin::kToolsIsoPath)
       continue;
 
-    std::string state;
-    if (!cdrom->GetString("state", &state) || state != "disconnected") {
-      if (!DisconnectDevice(vm_id, it.key())) {
-        LOG(ERROR) << "Failed to disconnect " << it.key() << " from " << vm_id;
+    const std::string* state = cdrom.FindString("state");
+    if (!state || *state != "disconnected") {
+      if (!DisconnectDevice(vm_id, key)) {
+        LOG(ERROR) << "Failed to disconnect " << key << " from " << vm_id;
         continue;
       }
     }
 
-    if (image_name == "/iso/install.iso") {
-      base::FilePath image_path = iso_path.Append("install.iso");
+    if (*image_name == plugin::kInstallIsoPath) {
+      base::FilePath iso_name =
+          base::FilePath(plugin::kInstallIsoPath).BaseName();
+      base::FilePath image_path = iso_path.Append(iso_name);
       if (base::PathExists(image_path) && !DeleteFile(image_path)) {
         LOG(WARNING) << "Failed to delete " << image_path.value();
       }
@@ -401,7 +384,4 @@ bool ToggleSharedProfile(scoped_refptr<dbus::Bus> bus,
   return true;
 }
 
-}  // namespace helper
-}  // namespace pvm
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge::pvm::helper

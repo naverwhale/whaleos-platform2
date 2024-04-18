@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,9 +20,11 @@
 
 #include <base/files/file_enumerator.h>
 #include <base/files/file_util.h>
+#include <base/hash/md5.h>
 #include <base/json/json_writer.h>
 #include <base/logging.h>
 #include <base/notreached.h>
+#include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
@@ -30,12 +32,17 @@
 #include <base/threading/platform_thread.h>
 #include <base/time/time.h>
 #include <brillo/flag_helper.h>
+#include <brillo/files/file_util.h>
+#include <brillo/files/safe_fd.h>
 #include <brillo/http/http_proxy.h>
 #include <brillo/http/http_transport.h>
 #include <brillo/http/http_utils.h>
 #include <brillo/mime_utils.h>
+#include <brillo/syslog_logging.h>
+#include <brillo/userdb_utils.h>
 #include <brillo/variant_dictionary.h>
 #include <chromeos/dbus/service_constants.h>
+#include <third_party/abseil-cpp/absl/types/variant.h>
 
 #include "crash-reporter/constants.h"
 #include "crash-reporter/crash_sender.pb.h"
@@ -56,17 +63,28 @@ constexpr char kJsonLogKeyLocalId[] = "local_id";
 constexpr char kJsonLogKeyCaptureTime[] = "capture_time";
 constexpr char kJsonLogKeyState[] = "state";
 constexpr char kJsonLogKeySource[] = "source";
+constexpr char kJsonLogKeyPathHash[] = "path_hash";
+constexpr char kJsonLogKeyFatalCrashType[] = "fatal_crash_type";
 
 // Keys used in CrashDetails::metadata.
 constexpr char kMetadataKeyCaptureTimeMillis[] = "upload_var_reportTimeMillis";
 constexpr char kMetadataKeySource[] = "exec_name";
+constexpr char kMetadataKeyCollector[] = "upload_var_collector";
 constexpr char kHwTestSuiteRun[] = "upload_var_hwtest_suite_run";
 constexpr char kHwTestSenderUpload[] = "upload_var_hwtest_sender_direct";
+
+// Collectors' names.
+constexpr char kCollectorNameKernel[] = "kernel";
+constexpr char kCollectorNameEmbeddedController[] = "ec";
 
 // Values used for kJsonLogKeySource.
 constexpr char kMetadataValueRedacted[] = "REDACTED";
 
-// Must match testModeSuccessful in the tast-test chrome_crash_loop.go.
+// Created when we would normally send a message, if we are in test mode.
+// MUST MATCH testModeSuccessfulFile in chrome_crash_loop.go.
+constexpr char kTestModeSuccessfulFile[] =
+    "/var/spool/crash/crash_sender_test_mode_successful";
+
 constexpr char kTestModeSuccessful[] =
     "Test Mode: Logging success and exiting instead of actually uploading";
 
@@ -78,6 +96,9 @@ constexpr char kUMAAttemptedCrashRemoval[] =
 // UMA enum to track reasons crash_sender attempts to delete a crash.
 constexpr char kCrashSenderRemoveHistName[] =
     "Platform.CrOS.CrashSenderRemoveReason";
+
+// Receipt ID that indicates the crash report was rejected due to throttling.
+constexpr char kCrashSenderDroppedDueToThrottlingId[] = "0000000000000001";
 
 }  // namespace
 
@@ -102,23 +123,33 @@ void ParseCommandLine(int argc,
               "Send crash reports regardless of image/build type "
               "and upload them to the staging server instead.");
   DEFINE_bool(ignore_pause_file, false,
-              "Ignore the existence of the pause file and run anyways");
+              "Ignore the existence of the pause file and run anyways.");
   DEFINE_bool(test_mode, false,
-              "Do not upload crashes; instead, log a special message if the "
+              "Do not upload crashes; instead, touch a special file if the "
               "crash is valid. Used by tast test ChromeCrashLoop.");
   DEFINE_bool(upload_old_reports, false,
               "If set, ignore the timestamp check and upload older reports.");
   DEFINE_bool(force_upload_on_test_images, false,
               "If set, upload even on test images. Still respects consent. "
               "(Use either the mock-consent file or normal consent settings.)");
+  DEFINE_bool(consent_already_checked_by_crash_reporter, false,
+              "Indicates that crash_reporter already made a consent check "
+              "before invoking crash_sender. Therefore, skip the consent "
+              "check.");
+  DEFINE_bool(
+      dry_run, false,
+      "Indicates whether crash_sender is running in the dry run mode. "
+      "If set, does not upload crashes, delete crashes, or update uploads.log; "
+      "instead, writes the uploads.log content to standard output. "
+      "(To be implemented.)");
 
-  brillo::FlagHelper::Init(argc, argv, "Chromium OS Crash Sender");
+  brillo::FlagHelper::Init(argc, argv, "ChromeOS Crash Sender");
   if (FLAGS_max_spread_time < 0) {
     LOG(ERROR) << "Invalid value for max spread time: "
                << FLAGS_max_spread_time;
     exit(EXIT_FAILURE);
   }
-  flags->max_spread_time = base::TimeDelta::FromSeconds(FLAGS_max_spread_time);
+  flags->max_spread_time = base::Seconds(FLAGS_max_spread_time);
   flags->crash_directory = FLAGS_crash_directory;
   flags->ignore_rate_limits = FLAGS_ignore_rate_limits;
   flags->ignore_hold_off_time = FLAGS_ignore_hold_off_time;
@@ -127,10 +158,34 @@ void ParseCommandLine(int argc,
   flags->test_mode = FLAGS_test_mode;
   flags->upload_old_reports = FLAGS_upload_old_reports;
   flags->force_upload_on_test_images = FLAGS_force_upload_on_test_images;
+  flags->consent_already_checked_by_crash_reporter =
+      FLAGS_consent_already_checked_by_crash_reporter;
+  flags->dry_run = FLAGS_dry_run;
+  // We should only be skipping the consent check if we are sure it has been
+  // checked prior to crash_sender being invoked. This only happens when the
+  // flag is set via debugd, which also sets the crash_directory flag.
+  if (flags->consent_already_checked_by_crash_reporter &&
+      flags->crash_directory.empty()) {
+    LOG(ERROR) << "Skipping the consent check is only valid via debugd";
+    exit(EXIT_FAILURE);
+  }
   if (flags->test_mode) {
     // The pause file is intended to pause the cronjob crash_sender during
     // tests, not the crash_sender invoked by the test code.
     flags->ignore_pause_file = true;
+  }
+
+  if (flags->dry_run) {
+    // Forbid access to the path of uploads.log.
+    paths::ChromeCrashLog::SetDryRun(true);
+
+    // Set the prefix. In /var/log/messages, this looks like the follows:
+    //
+    // 2023-01-10T01:52:39.729632Z ERR crash_sender[13359]: dryrun:ERROR
+    // crash_sender: [crash_sender_util.cc(174)] Dry run mode not
+    // implemented yet. This flag is currently reserved...
+    logging::SetLogPrefix("dryrun");
+    brillo::SetLogFlags(brillo::GetLogFlags() | brillo::kLogHeader);
   }
 }
 
@@ -139,8 +194,7 @@ bool DoesPauseFileExist() {
 }
 
 base::FilePath GetBasePartOfCrashFile(const base::FilePath& file_name) {
-  std::vector<std::string> components;
-  file_name.GetComponents(&components);
+  std::vector<std::string> components = file_name.GetComponents();
 
   std::vector<std::string> parts = base::SplitString(
       components.back(), ".", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
@@ -237,8 +291,7 @@ bool IsAlreadyUploaded(const base::FilePath& meta_file) {
 }
 
 bool IsTimestampNewEnough(const base::FilePath& timestamp_file) {
-  const base::Time threshold =
-      base::Time::Now() - base::TimeDelta::FromHours(24);
+  const base::Time threshold = base::Time::Now() - base::Hours(24);
 
   base::File::Info info;
   if (!base::GetFileInfo(timestamp_file, &info)) {
@@ -332,6 +385,23 @@ void RecordSendAttempt(const base::FilePath& timestamps_dir, int bytes) {
   }
 }
 
+std::optional<std::string> GetFatalCrashType(const CrashDetails& details) {
+  std::string collector;
+  if (!details.metadata.GetString(kMetadataKeyCollector, &collector)) {
+    // no sufficient info
+    return std::nullopt;
+  }
+
+  if (collector == kCollectorNameKernel) {
+    return "kernel";
+  } else if (collector == kCollectorNameEmbeddedController) {
+    return "ec";
+  }
+
+  // unknown type
+  return std::nullopt;
+}
+
 Sender::Sender(std::unique_ptr<MetricsLibraryInterface> metrics_lib,
                std::unique_ptr<base::Clock> clock,
                const Sender::Options& options)
@@ -346,11 +416,26 @@ Sender::Sender(std::unique_ptr<MetricsLibraryInterface> metrics_lib,
       allow_dev_sending_(options.allow_dev_sending),
       test_mode_(options.test_mode),
       upload_old_reports_(options.upload_old_reports),
-      force_upload_on_test_images_(options.force_upload_on_test_images) {}
+      force_upload_on_test_images_(options.force_upload_on_test_images),
+      consent_already_checked_by_crash_reporter_(
+          options.consent_already_checked_by_crash_reporter),
+      dry_run_(options.dry_run) {}
 
-bool Sender::HasCrashUploadingConsent() {
+bool Sender::HasCrashUploadingConsent(const CrashInfo& info) {
   if (util::HasMockConsent()) {
     return true;
+  }
+
+  if (consent_already_checked_by_crash_reporter_) {
+    // The crash_loop_mode metadata key is set as an upload var, so we need to
+    // apply the prefix when checking if it is set.
+    const std::string crash_loop_mode_key = base::StrCat(
+        {constants::kUploadVarPrefix, constants::kCrashLoopModeKey});
+    // Only skip consent check if the crash happened in crash loop mode.
+    bool crash_loop_mode;
+    if (!info.metadata.GetBoolean(crash_loop_mode_key, &crash_loop_mode))
+      return false;
+    return crash_loop_mode;
   }
 
   return metrics_lib_->AreMetricsEnabled();
@@ -366,7 +451,8 @@ bool Sender::IsSafeDeviceCoredump(const CrashInfo& info) {
 SenderBase::Action Sender::ChooseAction(const base::FilePath& meta_file,
                                         std::string* reason,
                                         CrashInfo* info) {
-  if (!IsMock() && !IsOfficialImage() && !allow_dev_sending_ && !test_mode_) {
+  if (!IsMock() && !IsOfficialImage() && !allow_dev_sending_ && !test_mode_ &&
+      !dry_run_) {
     *reason = "Not an official OS version";
     RecordCrashRemoveReason(kNotOfficialImage);
     return kRemove;
@@ -387,7 +473,29 @@ SenderBase::Action Sender::ChooseAction(const base::FilePath& meta_file,
     *reason = "Crash sending delayed due to guest mode";
     return kIgnore;
   }
-  if (!HasCrashUploadingConsent()) {
+
+  bool allow_old_os_timestamps =
+      allow_dev_sending_ || test_mode_ || upload_old_reports_ || dry_run_;
+
+  std::unique_ptr<util::ScopedProcessingFileBase> f;
+  SenderBase::Action act = EvaluateMetaFileMinimal(
+      meta_file, allow_old_os_timestamps, reason, info, &f);
+
+  if (!HasCrashUploadingConsent(*info)) {
+    // In this per-user consent world, it's possible that user A consented to
+    // crash collection, a crash occurred which logged them out or caused the
+    // system to reboot, and then the crash was written to the system directory.
+    // Then, user B might log in, who does not consent to crash reporting.  In
+    // such a case, we still may upload the crash when user A logs in, so do
+    // *not* delete the crash -- instead, wait for a consenting user to log in.
+    // This should not cause the crash directory to fill up, because if there is
+    // no consent for an extended period of time, we will not write any new
+    // crashes to the spool directory.
+    if (paths::Get(paths::kSystemCrashDirectory).IsParent(meta_file) ||
+        paths::Get(paths::kFallbackUserCrashDirectory).IsParent(meta_file)) {
+      *reason = "Crash sending delayed for system dir due to lack of consent";
+      return kIgnore;
+    }
     *reason = "Crash reporting is disabled";
     // Note that this will probably not actually be sent (since there's no
     // consent). Record it for completion and in case the user later enables
@@ -395,13 +503,6 @@ SenderBase::Action Sender::ChooseAction(const base::FilePath& meta_file,
     RecordCrashRemoveReason(kNoMetricsConsent);
     return kRemove;
   }
-
-  bool allow_old_os_timestamps =
-      allow_dev_sending_ || test_mode_ || upload_old_reports_;
-
-  std::unique_ptr<util::ScopedProcessingFile> f;
-  SenderBase::Action act = EvaluateMetaFileMinimal(
-      meta_file, allow_old_os_timestamps, reason, info, &f);
 
   // Always set these tags on test images for easier filtering in dashboards.
   if (force_upload_on_test_images_) {
@@ -439,7 +540,7 @@ void Sender::RemoveAndPickCrashFiles(const base::FilePath& crash_dir,
     CrashInfo info;
     switch (ChooseAction(meta_file, &reason, &info)) {
       case kRemove:
-        LOG(INFO) << "Removing: " << reason;
+        LOG_IF(INFO, !dry_run_) << "Removing: " << reason;
         RemoveReportFiles(meta_file);
         break;
       case kIgnore:
@@ -467,8 +568,10 @@ void Sender::SendCrashes(const std::vector<MetaFile>& crash_meta_files) {
     LOG(INFO) << "Evaluating crash report: " << meta_file.value();
 
     base::TimeDelta sleep_time;
-    if (!GetSleepTime(meta_file, max_spread_time_, hold_off_time_,
-                      &sleep_time)) {
+    if (!GetSleepTime(meta_file,
+                      // max spread time set to 0 under the dry run mode
+                      dry_run_ ? base::TimeDelta() : max_spread_time_,
+                      hold_off_time_, &sleep_time)) {
       LOG(WARNING) << "Failed to compute sleep time for " << meta_file.value();
       continue;
     }
@@ -489,14 +592,14 @@ void Sender::SendCrashes(const std::vector<MetaFile>& crash_meta_files) {
       // This is in a scope so that RemoveReportFiles doesn't try to remove
       // the .processing file (causing a LOG(ERROR) in the ScopedProcessingFile
       // destructor).
-      ScopedProcessingFile processing(meta_file);
+      auto processing = MakeScopedProcessingFile(meta_file);
 
       // This should be checked inside of the loop, since the device can disable
       // metrics while sending crash reports with an interval up to
       // max_spread_time_ between sends. We only need to check if metrics are
       // enabled and not guest mode because in guest mode, it always indicates
       // that metrics are disabled.
-      if (!HasCrashUploadingConsent()) {
+      if (!HasCrashUploadingConsent(info)) {
         LOG(INFO) << "Metrics disabled or guest mode entered, delaying crash "
                   << "sending";
         return;
@@ -512,7 +615,8 @@ void Sender::SendCrashes(const std::vector<MetaFile>& crash_meta_files) {
 
       const base::FilePath timestamps_dir =
           paths::Get(paths::kTimestampsDirectory);
-      if (!IsBelowRate(timestamps_dir, max_crash_rate_, max_crash_bytes_)) {
+      if (!dry_run_ &&
+          !IsBelowRate(timestamps_dir, max_crash_rate_, max_crash_bytes_)) {
         LOG(WARNING) << "Cannot send more crashes. Sending "
                      << meta_file.value()
                      << " would exceed the max daily rate of "
@@ -535,9 +639,15 @@ void Sender::SendCrashes(const std::vector<MetaFile>& crash_meta_files) {
           .metadata = info.metadata,
       };
       Sender::CrashRemoveReason result = RequestToSendCrash(details);
-      if (SenderBase::CrashRemoveReason::kRetryUploading == result) {
-        LOG(WARNING) << "Failed to send " << meta_file.value()
-                     << ", not removing; will retry later";
+      if (SenderBase::CrashRemoveReason::kRetryUploading == result ||
+          SenderBase::CrashRemoveReason::kDryRun == result) {
+        if (result == kDryRun) {
+          LOG(INFO) << "Did not send " << meta_file.value()
+                    << " in the dry run mode; not removing.";
+        } else {
+          LOG(WARNING) << "Failed to send " << meta_file.value()
+                       << ", not removing; will retry later";
+        }
         continue;
       }
       if (SenderBase::CrashRemoveReason::kFinishedUploading == result) {
@@ -647,6 +757,11 @@ std::shared_ptr<brillo::http::Transport> Sender::GetTransport() {
 }
 
 void Sender::RemoveReportFiles(const base::FilePath& meta_file) {
+  // Don't do anything when running in the dry run mode.
+  if (dry_run_) {
+    return;
+  }
+
   if (meta_file.Extension() != ".meta") {
     LOG(ERROR) << "Not a meta file: " << meta_file.value();
     return;
@@ -687,22 +802,25 @@ void Sender::RemoveReportFiles(const base::FilePath& meta_file) {
 }
 
 void Sender::RecordCrashRemoveReason(SenderBase::CrashRemoveReason reason) {
+  // Do nothing if running under the dry run mode.
+  if (dry_run_) {
+    return;
+  }
+
   metrics_lib_->SendEnumToUMA(kCrashSenderRemoveHistName, reason,
                               kSendReasonCount);
 }
 
-std::unique_ptr<base::Value> Sender::CreateJsonEntity(
-    const std::string& report_id,
-    const std::string& product_name,
-    const CrashDetails& details) {
-  auto root_dict = std::make_unique<base::Value>(base::Value::Type::DICTIONARY);
+base::Value::Dict Sender::CreateJsonEntity(const std::string& report_id,
+                                           const std::string& product_name,
+                                           const CrashDetails& details) {
+  base::Value::Dict root_dict;
 
   int64_t timestamp = (base::Time::Now() - base::Time::UnixEpoch()).InSeconds();
-  root_dict->SetKey(kJsonLogKeyUploadTime,
-                    base::Value(std::to_string(timestamp)));
+  root_dict.Set(kJsonLogKeyUploadTime, std::to_string(timestamp));
 
-  root_dict->SetKey(kJsonLogKeyUploadId, base::Value(report_id));
-  root_dict->SetKey(kJsonLogKeyLocalId, base::Value(product_name));
+  root_dict.Set(kJsonLogKeyUploadId, report_id);
+  root_dict.Set(kJsonLogKeyLocalId, product_name);
 
   // The |capture_timestamp| should be converted from milliseconds to seconds.
   std::string capture_timestamp;
@@ -710,23 +828,30 @@ std::unique_ptr<base::Value> Sender::CreateJsonEntity(
   if (details.metadata.GetString(kMetadataKeyCaptureTimeMillis,
                                  &capture_timestamp) &&
       base::StringToInt64(capture_timestamp, &capture_timestamp_millis)) {
-    root_dict->SetKey(
-        kJsonLogKeyCaptureTime,
-        base::Value(std::to_string(capture_timestamp_millis / 1000)));
+    root_dict.Set(kJsonLogKeyCaptureTime,
+                  std::to_string(capture_timestamp_millis / 1000));
   }
 
   // The state value is always same as
   // UploadList::UploadInfo::State::Uploaded.
-  root_dict->SetKey(kJsonLogKeyState, base::Value(3));
+  root_dict.Set(kJsonLogKeyState, 3);
 
-  std::string source;
-  if (details.metadata.GetString(kMetadataKeySource, &source)) {
+  if (std::string source;
+      details.metadata.GetString(kMetadataKeySource, &source)) {
     // Hide the real source to avoid privacy concern if it is not a system
     // crash.
     if (!paths::Get(paths::kSystemCrashDirectory).IsParent(details.meta_file))
       source = kMetadataValueRedacted;
-    root_dict->SetKey(kJsonLogKeySource, base::Value(source));
+    root_dict.Set(kJsonLogKeySource, source);
   }
+
+  if (auto crash_type = GetFatalCrashType(details); crash_type.has_value()) {
+    root_dict.Set(kJsonLogKeyFatalCrashType, crash_type.value());
+  }
+
+  // Set the MD5 hash of the meta file path.
+  root_dict.Set(kJsonLogKeyPathHash,
+                base::MD5String(details.meta_file.value()));
 
   return root_dict;
 }
@@ -741,12 +866,47 @@ SenderBase::CrashRemoveReason Sender::RequestToSendCrash(
     return CrashRemoveReason::kRetryUploading;
   }
 
-  if (test_mode_) {
-    LOG(WARNING) << kTestModeSuccessful;
-    return CrashRemoveReason::kFinishedUploading;
+  if (dry_run_) {
+    if (IsMock()) {
+      CHECK(!crash_during_testing_) << "crashing as requested";
+    }
+    return WriteUploadLog(details, "", std::move(product_name));
   }
 
-  std::string report_id;
+  if (test_mode_) {
+    LOG(WARNING) << kTestModeSuccessful;
+
+    auto result = brillo::SafeFD::Root();
+    if (brillo::SafeFD::IsError(result.second)) {
+      LOG(ERROR) << "Could not open root directory: "
+                 << static_cast<int>(result.second);
+      return CrashRemoveReason::kFinishedUploading;
+    }
+
+    const base::FilePath kTestModeSuccessfulFilePath(kTestModeSuccessfulFile);
+    // We must use the GID that owns /var/spool/crash for the file as well.
+    gid_t crash_group_gid = -1;
+    if (!brillo::userdb::GetGroupInfo(constants::kCrashGroupName,
+                                      &crash_group_gid)) {
+      PLOG(ERROR) << "Couldn't look up group " << constants::kCrashGroupName;
+      return CrashRemoveReason::kFinishedUploading;
+    }
+
+    // Set the file permissions to kSystemCrashFilesMode (0660) instead of the
+    // default 0640. We don't actually care if the group is able to write to the
+    // file, but if we don't, SafeFD will refuse to create the file because
+    // /var/spool/crash is group writable.
+    result = result.first.MakeFile(
+        kTestModeSuccessfulFilePath,
+        /*permissions=*/constants::kSystemCrashFilesMode,
+        /*uid=*/constants::kRootUid, /*gid=*/crash_group_gid);
+    if (brillo::SafeFD::IsError(result.second)) {
+      LOG(ERROR) << "Could not create " << kTestModeSuccessfulFile << ": "
+                 << static_cast<int>(result.second);
+    }
+
+    return CrashRemoveReason::kFinishedUploading;
+  }
 
   auto stream_data = form_data->ExtractDataStream();
   uint64_t uncompressed_size = stream_data->GetSize();
@@ -775,6 +935,8 @@ SenderBase::CrashRemoveReason Sender::RequestToSendCrash(
       }
 
       LOG(INFO) << "Mocking successful send";
+      WriteUploadLog(details, /*report_id=*/"mockreport",
+                     std::move(product_name));
       return CrashRemoveReason::kFinishedUploading;
     }
   } else {
@@ -832,17 +994,34 @@ SenderBase::CrashRemoveReason Sender::RequestToSendCrash(
     return CrashRemoveReason::kRetryUploading;
   }
 
-  report_id = response->ExtractDataAsString();
+  std::string report_id = response->ExtractDataAsString();
 
-  if (product_name == "Chrome_ChromeOS")
+  return WriteUploadLog(details, report_id, std::move(product_name));
+}
+
+SenderBase::CrashRemoveReason Sender::WriteUploadLog(
+    const CrashDetails& details,
+    const std::string& report_id,
+    std::string product_name) {
+  if (product_name == constants::kProductNameChromeAsh)
     product_name = "Chrome";
-  if (!util::IsOfficialImage()) {
-    base::ReplaceSubstringsAfterOffset(&product_name, 0, "Chrome", "Chromium");
+  if (dry_run_) {
+    // Writes the log to stdout under the dry run mode.
+    auto entry_or_reason =
+        CreateUploadLogEntry(report_id, product_name, details);
+    if (const auto* reason = absl::get_if<CrashRemoveReason>(&entry_or_reason);
+        reason != nullptr) {
+      return *reason;
+    }
+    std::cout << absl::get<std::string>(entry_or_reason);
+
+    return CrashRemoveReason::kDryRun;
   }
+
   std::string silent;
   details.metadata.GetString("silent", &silent);
   if (always_write_uploads_log_ || (!USE_CHROMELESS_TTY && silent != "true")) {
-    base::FilePath upload_logs_path(paths::Get(paths::kChromeCrashLog));
+    base::FilePath upload_logs_path(paths::Get(paths::ChromeCrashLog::Get()));
 
     // Open the file before we check the normalized path or it will fail if the
     // path doesn't exist.
@@ -852,16 +1031,15 @@ SenderBase::CrashRemoveReason Sender::RequestToSendCrash(
     base::FilePath normalized_path;
     if (base::NormalizeFilePath(upload_logs_path, &normalized_path) &&
         upload_logs_path == normalized_path) {
-      std::unique_ptr<base::Value> json_entity =
-          CreateJsonEntity(report_id, product_name, details);
-      std::string upload_log_entry;
-      if (!base::JSONWriter::Write(*json_entity, &upload_log_entry)) {
-        LOG(WARNING) << "Cannot construct a valid uploads.log entry in JSON "
-                        "format, so skip the update.";
-        return CrashRemoveReason::kUnparseableMetaFile;
+      auto entry_or_reason =
+          CreateUploadLogEntry(report_id, product_name, details);
+      if (const auto* reason =
+              absl::get_if<CrashRemoveReason>(&entry_or_reason);
+          reason != nullptr) {
+        return *reason;
       }
-
-      upload_log_entry += "\n";
+      const std::string& upload_log_entry =
+          absl::get<std::string>(entry_or_reason);
       if (!upload_logs_file.IsValid() ||
           upload_logs_file.WriteAtCurrentPos(upload_log_entry.c_str(),
                                              upload_log_entry.size()) !=
@@ -875,8 +1053,27 @@ SenderBase::CrashRemoveReason Sender::RequestToSendCrash(
                  << " normalized: " << normalized_path.value();
     }
   }
-  LOG(INFO) << "Crash report receipt ID " << report_id;
+  LOG(INFO) << "Crash report receipt ID " << report_id
+            << ((report_id == kCrashSenderDroppedDueToThrottlingId)
+                    ? " (dropped due to crash report upload throttling)"
+                    : "");
+
   return CrashRemoveReason::kFinishedUploading;
+}
+
+absl::variant<std::string, SenderBase::CrashRemoveReason>
+Sender::CreateUploadLogEntry(const std::string& report_id,
+                             const std::string& product_name,
+                             const CrashDetails& details) {
+  base::Value::Dict json_entity =
+      CreateJsonEntity(report_id, product_name, details);
+  std::string upload_log_entry;
+  if (!base::JSONWriter::Write(json_entity, &upload_log_entry)) {
+    LOG(WARNING) << "Cannot construct a valid uploads.log entry in JSON "
+                    "format, so skip the update.";
+    return CrashRemoveReason::kUnparseableMetaFile;
+  }
+  return upload_log_entry + "\n";
 }
 
 bool Sender::IsNetworkOnline() {
@@ -906,6 +1103,15 @@ bool Sender::IsNetworkOnline() {
   // other values represent some other reduced (or no) level of connectivity or
   // the process of establishing a connection.
   return base::EqualsCaseInsensitiveASCII(state, "online");
+}
+
+std::unique_ptr<ScopedProcessingFileBase> Sender::MakeScopedProcessingFile(
+    const base::FilePath& meta_file) {
+  if (dry_run_) {
+    return std::make_unique<DummyScopedProcessingFile>(meta_file);
+  } else {
+    return std::make_unique<ScopedProcessingFile>(meta_file);
+  }
 }
 
 }  // namespace util

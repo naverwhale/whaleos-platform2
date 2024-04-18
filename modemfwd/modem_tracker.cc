@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,11 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/task/single_thread_task_runner.h>
 #include <brillo/variant_dictionary.h>
-#include <chromeos/dbus/service_constants.h>
+#include <dbus/shill/dbus-constants.h>
 
 namespace modemfwd {
 
@@ -74,7 +75,7 @@ void ModemTracker::OnManagerPropertyChanged(const std::string& property_name,
 void ModemTracker::OnDevicePropertyChanged(dbus::ObjectPath device_path,
                                            const std::string& property_name,
                                            const brillo::Any& property_value) {
-  // Listen only for the HomeProvider change triggered by a SIM change
+  // Listen for the HomeProvider change triggered by a SIM change
   if (property_name != shill::kHomeProviderProperty)
     return;
 
@@ -93,10 +94,32 @@ void ModemTracker::OnDevicePropertyChanged(dbus::ObjectPath device_path,
   ELOG(INFO) << "Carrier UUID changed to [" << carrier_id << "] for device "
              << device_path.value();
 
+  // Skip update if no carrier info
+  if (carrier_id.empty())
+    return;
+
   // trigger the firmware update
   auto device =
       std::make_unique<org::chromium::flimflam::DeviceProxy>(bus_, device_path);
   on_modem_carrier_id_ready_callback_.Run(std::move(device));
+}
+
+void ModemTracker::DelayedSimCheck(dbus::ObjectPath device_path) {
+  brillo::VariantDictionary properties;
+  bool sim_present;
+  auto device =
+      std::make_unique<org::chromium::flimflam::DeviceProxy>(bus_, device_path);
+
+  if (!device->GetProperties(&properties, NULL) ||
+      !properties[shill::kSIMPresentProperty].GetValue(&sim_present)) {
+    LOG(ERROR) << "Could not get SIMPresent property for device "
+               << device_path.value();
+    return;
+  }
+
+  if (!sim_present) {
+    on_modem_carrier_id_ready_callback_.Run(std::move(device));
+  }
 }
 
 void ModemTracker::OnDeviceListChanged(
@@ -141,6 +164,21 @@ void ModemTracker::OnDeviceListChanged(
     if (!properties[shill::kHomeProviderProperty].GetValue(&operator_info))
       continue;
 
+    bool sim_present;
+    if (!properties[shill::kSIMPresentProperty].GetValue(&sim_present)) {
+      LOG(ERROR) << "Modem " << device_path.value()
+                 << " has no SIM Present property, ignoring";
+      continue;
+    }
+    if (!sim_present) {
+      // Test the SIMPresent property again after short delay before fw update
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+          FROM_HERE,
+          BindOnce(&ModemTracker::DelayedSimCheck,
+                   weak_ptr_factory_.GetWeakPtr(), device_path),
+          base::Seconds(10));
+    }
+
     // Record the modem device with its current carrier UUID
     std::string carrier_id = operator_info[shill::kOperatorUuidKey];
     new_modems[device_path] = carrier_id;
@@ -152,7 +190,9 @@ void ModemTracker::OnDeviceListChanged(
                             weak_ptr_factory_.GetWeakPtr(), device_path),
         base::BindRepeating(&OnSignalConnected));
 
-    on_modem_carrier_id_ready_callback_.Run(std::move(device));
+    // Try to update if carrier is known
+    if (!carrier_id.empty())
+      on_modem_carrier_id_ready_callback_.Run(std::move(device));
   }
   modem_objects_ = new_modems;
 }

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,12 +23,13 @@ namespace {
 
 using ::testing::ByRef;
 using ::testing::Types;
+using ::testing::Unused;
 
 constexpr char kFakeUrl[] = "fake.url.org";
 constexpr char kFakeRequest[] = "fake request";
 constexpr char kFakeResponse[] = "fake response";
 constexpr char kFakeErrMessage[] = "a tactical error";
-constexpr char kDummyHandlerName[] = "testing";
+constexpr char kFakeHandlerName[] = "testing";
 
 constexpr char kFakeProxy1[] = "https://fake-proxy1:8000";
 constexpr char kFakeProxy2[] = "https://fake-proxy2:8000";
@@ -43,14 +44,6 @@ void FakeMethodHandler(int status_code,
       brillo::mime::text::kPlain);
 }
 
-// testing::InvokeArgument<N> does not work with base::Callback, need to use
-// |ACTION_TAMPLATE| along with predefined |args| tuple.
-ACTION_TEMPLATE(InvokeChromeProxyServersCallback,
-                HAS_1_TEMPLATE_PARAMS(int, k),
-                AND_2_VALUE_PARAMS(p0, p1)) {
-  std::get<k>(args).Run(p0, p1);
-}
-
 }  // namespace
 
 namespace attestation {
@@ -61,8 +54,9 @@ class PcaRequestTest : public ::testing::Test {
  protected:
   void SetUp() override {
     EXPECT_CALL(mock_pca_http_utils_, GetChromeProxyServersAsync(_, _))
-        .WillRepeatedly(InvokeChromeProxyServersCallback<1>(
-            ByRef(proxy_success_), ByRef(proxy_servers_)));
+        .WillRepeatedly([this](Unused, auto callback) {
+          std::move(callback).Run(proxy_success_, proxy_servers_);
+        });
     request_ = MakePcaRequest();
   }
 
@@ -71,7 +65,7 @@ class PcaRequestTest : public ::testing::Test {
     // base::Bind.
     auto v = [this](const ReplyType& reply) { this->Verify(reply); };
     auto response = MakeResponseWithVerifier<ReplyType>(v);
-    auto request = new PcaRequest<ReplyType>(kDummyHandlerName, kFakeUrl,
+    auto request = new PcaRequest<ReplyType>(kFakeHandlerName, kFakeUrl,
                                              kFakeRequest, std::move(response));
 
     // testing objects injected to the request.
@@ -115,9 +109,9 @@ TYPED_TEST_SUITE(PcaRequestTest, ReplyTypes);
 TYPED_TEST(PcaRequestTest, SuccessNoProxy) {
   this->expected_attestation_status_ = STATUS_SUCCESS;
   this->fake_trasport_factory_.get_fake_transport(brillo::http::kDirectProxy)
-      ->AddHandler(
-          kFakeUrl, brillo::http::request_type::kPost,
-          base::Bind(FakeMethodHandler, brillo::http::status_code::Ok));
+      ->AddHandler(kFakeUrl, brillo::http::request_type::kPost,
+                   base::BindRepeating(FakeMethodHandler,
+                                       brillo::http::status_code::Ok));
   this->request_->SendRequest();
 }
 
@@ -125,9 +119,9 @@ TYPED_TEST(PcaRequestTest, SuccessFailedToGetProxy) {
   this->expected_attestation_status_ = STATUS_SUCCESS;
   this->proxy_success_ = false;
   this->fake_trasport_factory_.get_fake_transport(brillo::http::kDirectProxy)
-      ->AddHandler(
-          kFakeUrl, brillo::http::request_type::kPost,
-          base::Bind(FakeMethodHandler, brillo::http::status_code::Ok));
+      ->AddHandler(kFakeUrl, brillo::http::request_type::kPost,
+                   base::BindRepeating(FakeMethodHandler,
+                                       brillo::http::status_code::Ok));
   this->request_->SendRequest();
 }
 
@@ -135,20 +129,21 @@ TYPED_TEST(PcaRequestTest, SuccessSecondProxy) {
   this->expected_attestation_status_ = STATUS_SUCCESS;
   this->set_proxy_servers({kFakeProxy1, kFakeProxy2, kFakeProxy3});
   this->fake_trasport_factory_.get_fake_transport(kFakeProxy1)
-      ->AddHandler(kFakeUrl, brillo::http::request_type::kPost,
-                   base::Bind(FakeMethodHandler,
-                              brillo::http::status_code::InternalServerError));
-  this->fake_trasport_factory_.get_fake_transport(kFakeProxy2)
       ->AddHandler(
           kFakeUrl, brillo::http::request_type::kPost,
-          base::Bind(FakeMethodHandler, brillo::http::status_code::Ok));
+          base::BindRepeating(FakeMethodHandler,
+                              brillo::http::status_code::InternalServerError));
+  this->fake_trasport_factory_.get_fake_transport(kFakeProxy2)
+      ->AddHandler(kFakeUrl, brillo::http::request_type::kPost,
+                   base::BindRepeating(FakeMethodHandler,
+                                       brillo::http::status_code::Ok));
   auto not_reached = [](const brillo::http::fake::ServerRequest& request,
                         brillo::http::fake::ServerResponse* response) {
     ASSERT_FALSE("Should not be reached.");
   };
   this->fake_trasport_factory_.get_fake_transport(kFakeProxy3)
       ->AddHandler(kFakeUrl, brillo::http::request_type::kPost,
-                   base::Bind(not_reached));
+                   base::BindRepeating(not_reached));
   this->request_->SendRequest();
 }
 
@@ -165,16 +160,18 @@ TYPED_TEST(PcaRequestTest, FailedAllProxies) {
   this->expected_attestation_status_ = STATUS_CA_NOT_AVAILABLE;
   this->set_proxy_servers({kFakeProxy1, kFakeProxy2, kFakeProxy3});
   this->fake_trasport_factory_.get_fake_transport(kFakeProxy1)
-      ->AddHandler(kFakeUrl, brillo::http::request_type::kPost,
-                   base::Bind(FakeMethodHandler,
+      ->AddHandler(
+          kFakeUrl, brillo::http::request_type::kPost,
+          base::BindRepeating(FakeMethodHandler,
                               brillo::http::status_code::InternalServerError));
   brillo::ErrorPtr error;
   brillo::Error::AddTo(&error, FROM_HERE, "", "", kFakeErrMessage);
   this->fake_trasport_factory_.get_fake_transport(kFakeProxy2)
       ->SetCreateConnectionError(std::move(error));
   this->fake_trasport_factory_.get_fake_transport(kFakeProxy3)
-      ->AddHandler(kFakeUrl, brillo::http::request_type::kPost,
-                   base::Bind(FakeMethodHandler,
+      ->AddHandler(
+          kFakeUrl, brillo::http::request_type::kPost,
+          base::BindRepeating(FakeMethodHandler,
                               brillo::http::status_code::InternalServerError));
   this->request_->SendRequest();
 }
@@ -184,9 +181,9 @@ TYPED_TEST(PcaRequestTest, FailedNotSupported) {
   // Sets the status code to partial to 'Partial`, which should recognized as an
   // unsupported HTTP status code.
   this->fake_trasport_factory_.get_fake_transport(brillo::http::kDirectProxy)
-      ->AddHandler(
-          kFakeUrl, brillo::http::request_type::kPost,
-          base::Bind(FakeMethodHandler, brillo::http::status_code::Partial));
+      ->AddHandler(kFakeUrl, brillo::http::request_type::kPost,
+                   base::BindRepeating(FakeMethodHandler,
+                                       brillo::http::status_code::Partial));
   this->request_->SendRequest();
 }
 

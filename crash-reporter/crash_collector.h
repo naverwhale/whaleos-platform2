@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,18 +13,18 @@
 #include <sys/types.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
-#include <base/callback_forward.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
-#include <base/optional.h>
+#include <base/functional/callback_forward.h>
+#include <base/memory/scoped_refptr.h>
+#include <base/memory/ref_counted.h>
 #include <base/time/clock.h>
 #include <base/time/time.h>
-#include <brillo/dbus/file_descriptor.h>
 #include <debugd/dbus-proxies.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 #include <metrics/metrics_library.h>
@@ -32,11 +32,14 @@
 #include <session_manager/dbus-proxies.h>
 #include <zlib.h>
 
-constexpr mode_t kSystemCrashFilesMode = 0660;
-
 // Walk the directory tree to make sure we avoid symlinks.
 // All parent parts must already exist else we return false.
 bool ValidatePathAndOpen(const base::FilePath& dir, int* outfd);
+
+// Extract environmental variables of interest and write them to the stream.
+// This is exported primarily for regression testing.
+void ExtractEnvironmentVars(const std::string& contents,
+                            std::ostringstream* stream);
 
 // User crash collector.
 class CrashCollector {
@@ -45,10 +48,16 @@ class CrashCollector {
     // Force reports to be stored in the user crash directory, even if we are
     // not running as the "chronos" user.
     kAlwaysUseUserCrashDirectory,
-    // Use the normal crash directory selection process: Store in the user crash
-    // directory if running as the "chronos" user, otherwise store in the system
-    // crash directory.
-    kUseNormalCrashDirectorySelectionMethod
+    // Use the normal crash directory selection process: Store in the
+    // daemon-store crash directory if a user is logged in, otherwise store in
+    // the system crash directory or /home/chronos/crash.
+    kUseNormalCrashDirectorySelectionMethod,
+    // Force reports to be stored in daemon store, even if we are not
+    // running as the "chronos" user, in the daemon-store experiment, or logged
+    // in. If not logged in, methods to get the crash directory will fail.
+    kAlwaysUseDaemonStore,
+    // Always use the system crash directory.
+    kAlwaysUseSystemCrashDirectory
   };
 
   enum CrashSendingMode {
@@ -76,14 +85,60 @@ class CrashCollector {
     kErrorCore2MinidumpConversion,
   };
 
-  explicit CrashCollector(const std::string& collector_name,
-                          const std::string& tag = "");
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  enum class CrashSeverity {
+    kUnspecified = 0,
+    kFatal = 1,
+    kError = 2,
+    kWarning = 3,
+    kInfo = 4,
+    kMaxValue = kInfo,
+  };
+
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  enum class Product {
+    kUnspecified = 0,
+    kUi = 1,
+    kPlatform = 2,
+    kArc = 3,
+    kLacros = 4,
+    kUnknownValue = 5,
+    kMaxValue = kUnknownValue,
+  };
+
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  enum class AddWeightResult {
+    kGoodValue = 0,
+    kBadValue = 1,
+    kAddedTwice = 2,
+    kAddedInWrongMethod = 3,
+    kMaxValue = kAddedInWrongMethod,
+  };
+
+  struct ComputedCrashSeverity {
+    CrashSeverity crash_severity;
+    Product product_group;
+  };
+
+  explicit CrashCollector(
+      const std::string& collector_name,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib,
+      const std::string& tag = "");
 
   explicit CrashCollector(
       const std::string& collector_name,
       CrashDirectorySelectionMethod crash_directory_selection_method,
       CrashSendingMode crash_sending_mode,
+      const scoped_refptr<
+          base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+          metrics_lib,
       const std::string& tag = "");
+
   CrashCollector(const CrashCollector&) = delete;
   CrashCollector& operator=(const CrashCollector&) = delete;
 
@@ -108,7 +163,10 @@ class CrashCollector {
 
   void set_metrics_library_for_test(
       std::unique_ptr<MetricsLibraryInterface> metrics_lib) {
-    metrics_lib_ = std::move(metrics_lib);
+    metrics_lib_ = base::MakeRefCounted<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+        std::forward<std::unique_ptr<MetricsLibraryInterface>>(
+            std::move(metrics_lib)));
   }
 
   // For testing, set the log config file path instead of kDefaultLogConfig.
@@ -135,13 +193,35 @@ class CrashCollector {
     device_policy_ = std::move(device_policy);
   }
 
+  // For testing, force UseDaemonStore to return true or false, instead of
+  // using a random number.
+  void force_daemon_store_for_testing(bool use_daemon_store) {
+    force_daemon_store_.emplace(use_daemon_store);
+  }
+
   // For testing, return the in-memory files generated when in
   // kCrashLoopSendingMode. Since in_memory_files_ is a move-only type, this
   // clears the in_memory_files_ member variable.
-  std::vector<std::tuple<std::string, brillo::dbus_utils::FileDescriptor>>
+  std::vector<std::tuple<std::string, base::ScopedFD>>
   get_in_memory_files_for_test() {
     return std::move(in_memory_files_);
   }
+
+  // Allow tests to control the current machine uptime returned from
+  // GetUptime().
+  void set_current_uptime_for_test(base::TimeDelta uptime);
+
+  // Get the complete set of extra metadata (as a string with newline-separated
+  // key-value pairs, exactly as it will be written to the .meta file). For
+  // testing purposes.
+  std::string get_extra_metadata_for_test() const { return extra_metadata_; }
+
+  // For testing, set whether to send detailed hardware data.
+  void set_send_detailed_hw_for_test(bool use_hw_details) {
+    send_detailed_hw_ = use_hw_details;
+  }
+
+  void SetUseSavedLsb(bool use_saved_lsb) { use_saved_lsb_ = use_saved_lsb; }
 
   // Initialize the crash collector for detection of crashes, given a
   // metrics collection enabled oracle.
@@ -185,6 +265,7 @@ class CrashCollector {
   FRIEND_TEST(CrashCollectorTest, CheckHasCapacityCorrectBasename);
   FRIEND_TEST(CrashCollectorTest, CheckHasCapacityStrangeNames);
   FRIEND_TEST(CrashCollectorTest, CheckHasCapacityUsual);
+  FRIEND_TEST(CrashCollectorTest, CheckHasCapacityFull_LeavesNote);
   FRIEND_TEST(CrashCollectorTest, CreateDirectoryWithSettingsMode);
   FRIEND_TEST(CrashCollectorTest, CreateDirectoryWithSettingsNonDir);
   FRIEND_TEST(CrashCollectorTest, CreateDirectoryWithSettingsSubdir);
@@ -198,12 +279,24 @@ class CrashCollector {
   FRIEND_TEST(CrashCollectorTest,
               CreateDirectoryWithSettings_FixSubdirPermissions);
   FRIEND_TEST(CrashCollectorTest, FormatDumpBasename);
-  FRIEND_TEST(CrashCollectorTest, GetCrashDirectoryInfo);
-  FRIEND_TEST(CrashCollectorTest, GetCrashDirectoryInfoLoggedOut);
+  FRIEND_TEST(CrashCollectorTest, GetCrashDirectoryInfoOld);
+  FRIEND_TEST(CrashCollectorTest, GetCrashDirectoryInfoOldLoggedOut);
+  FRIEND_TEST(CrashCollectorTest, GetCrashDirectoryInfoNew);
+  FRIEND_TEST(CrashCollectorTest, GetCrashDirectoryInfoNewLoggedOut);
+  FRIEND_TEST(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_Success);
+  FRIEND_TEST(CrashCollectorTest,
+              RunAsRoot_OpenCrashDirectory_ParentDirectoryMissing);
+
+  FRIEND_TEST(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_Missing);
+  FRIEND_TEST(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_NotADirectory);
+  FRIEND_TEST(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_WrongOwner);
+  FRIEND_TEST(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_WrongGroup);
+  FRIEND_TEST(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_WrongMode);
   FRIEND_TEST(CrashCollectorTest, GetCrashPath);
   FRIEND_TEST(CrashCollectorTest, GetLogContents);
   FRIEND_TEST(CrashCollectorTest, GetMultipleLogContents);
   FRIEND_TEST(CrashCollectorTest, GetProcessTree);
+  FRIEND_TEST(CrashCollectorTest, GetProcessPath);
   FRIEND_TEST(CrashCollectorTest, GetUptime);
   FRIEND_TEST(CrashCollectorTest, Initialize);
   FRIEND_TEST(CrashCollectorParameterizedTest, MetaData);
@@ -211,13 +304,26 @@ class CrashCollector {
   FRIEND_TEST(CrashCollectorTest, MetaDataDoesntCreateSymlink);
   FRIEND_TEST(CrashCollectorTest, MetaDataDoesntOverwriteSymlink);
   FRIEND_TEST(CrashCollectorTest, CollectionLogsToUMA);
+  FRIEND_TEST(CrashCollectorTest, AddCrashMetaWeight_ValidWeight);
+  FRIEND_TEST(CrashCollectorTest, AddCrashMetaWeight_InvalidWeight);
+  FRIEND_TEST(CrashCollectorTest, AddCrashMetaWeight_CalledTwice);
+  FRIEND_TEST(CrashCollectorTest, AddCrashMetaUploadData_WeightKey);
+  FRIEND_TEST(CrashCollectorTest, AddDetailedHardwareData);
+  FRIEND_TEST(CrashCollectorTest, AddDetailedHardwareData_DoNotSend);
+  FRIEND_TEST(CrashCollectorTest, AddDetailedHardwareData_FailedRead);
   FRIEND_TEST(CrashCollectorTest, ParseProcessTicksFromStat);
   FRIEND_TEST(CrashCollectorTest, Sanitize);
   FRIEND_TEST(CrashCollectorTest, StripMacAddressesBasic);
   FRIEND_TEST(CrashCollectorTest, StripMacAddressesBulk);
   FRIEND_TEST(CrashCollectorTest, StripSensitiveDataSample);
   FRIEND_TEST(CrashCollectorTest, StripEmailAddresses);
+  FRIEND_TEST(CrashCollectorTest, StripIPv4Addresses);
+  FRIEND_TEST(CrashCollectorTest, StripGaiaId);
+  FRIEND_TEST(CrashCollectorTest, StripLocationInformation);
+  FRIEND_TEST(CrashCollectorTest, StripIPv4Addresses);
+  FRIEND_TEST(CrashCollectorTest, StripIPv6Addresses);
   FRIEND_TEST(CrashCollectorTest, StripSerialNumbers);
+  FRIEND_TEST(CrashCollectorTest, StripRecoveryId);
   FRIEND_TEST(CrashCollectorTest, RemoveNewFileFailsOnNonExistantFiles);
   FRIEND_TEST(CrashCollectorTest,
               RemoveNewFileFailsOnNonExistantFilesInCrashLoopMode);
@@ -230,6 +336,8 @@ class CrashCollector {
               RemoveNewFileRemovesCorrectFileInCrashLoopMode);
   FRIEND_TEST(CrashCollectorTest,
               DISABLED_RemoveNewFileRemovesCorrectFileInCrashLoopMode);
+  FRIEND_TEST(CopyFirstNBytesParameterizedTest, CopyFirstNBytes);
+  FRIEND_TEST(CrashCollectorTest, CopyFirstNBytesFailsOnExistingFile);
   FRIEND_TEST(CrashCollectorTest, RemoveNewFileRemovesNormalFiles);
   FRIEND_TEST(CrashCollectorTest,
               RemoveNewFileRemovesNormalFilesInCrashLoopMode);
@@ -245,15 +353,14 @@ class CrashCollector {
   FRIEND_TEST(CrashCollectorTest, GetNewFileHandle_Symlink);
   FRIEND_TEST(CrashCollectorTest, WriteNewCompressedFile);
   FRIEND_TEST(CrashCollectorTest, WriteNewCompressedFileFailsIfFileExists);
+  FRIEND_TEST(CrashCollectorTest, ComputeSeverity_DefaultUnspecified);
+  FRIEND_TEST(UserCollectorTest, HandleSyscall);
 
   // Default value if OS version/description cannot be determined.
   static const char* const kUnknownValue;
 
   // Set maximum enqueued crashes in a crash directory.
   static const int kMaxCrashDirectorySize;
-
-  // UID for root account.
-  static const uid_t kRootUid;
 
   // Try to set up D-Bus, returning true on success and false on failure.
   virtual bool TrySetUpDBus();
@@ -271,9 +378,9 @@ class CrashCollector {
   // Copies |source_fd| to |target_path|, which must be a new file.
   // If the file already exists or writing fails, return false.
   // Otherwise returns true.
-  // Does _not_ incerement get_bytes_written().
+  // Does _not_ increment get_bytes_written().
   // Probably does not do what you want in kCrashLoopSendingMode (will create a
-  // memfd file)
+  // memfd file).
   bool CopyFdToNewFile(base::ScopedFD source_fd,
                        const base::FilePath& target_path);
 
@@ -283,6 +390,19 @@ class CrashCollector {
   // Otherwise returns true.
   bool CopyFdToNewCompressedFile(base::ScopedFD source_fd,
                                  const base::FilePath& target_path);
+
+  // Copies up to |bytes_to_copy| bytes from |source_pipe_fd|, which must be a
+  // pipe, to |target_path|, which must be a new file. If the file already
+  // exists or writing fails, return std::nullopt. Otherwise returns the actual
+  // number of bytes written. Note that both underflow (reaching EOF before
+  // writing |bytes_to_copy| bytes) and overflow (reaching |bytes_to_copy| bytes
+  // before EOF) return success (returns an integer byte count not
+  // std::nullopt).
+  // Does _not_ increment get_bytes_written().
+  // Probably does not do what you want in kCrashLoopSendingMode (will create a
+  // memfd file).
+  std::optional<int> CopyFirstNBytesOfFdToNewFile(
+      int source_pipe_fd, const base::FilePath& target_path, int bytes_to_copy);
 
   // Writes |data| of |size| to |filename|, which must be a new file ending in
   // ".gz". File will be a gzip-compressed file. Returns true on success,
@@ -304,17 +424,22 @@ class CrashCollector {
   // Strip any data that the user might not want sent up to the crash server.
   // |contents| is modified in-place.
   void StripSensitiveData(std::string* contents);
-  void StripMacAddresses(std::string* contents);
-  void StripEmailAddresses(std::string* contents);
-  void StripSerialNumbers(std::string* contents);
 
-  bool GetUserCrashDirectories(std::vector<base::FilePath>* directories,
-                               bool use_non_chronos_cryptohome);
-  base::FilePath GetUserCrashDirectory(bool use_non_chronos_cryptohome);
-  base::Optional<base::FilePath> GetCrashDirectoryInfo(
+  // This is going away once the experiment is done.
+  // TODO(b/186659673): Validate daemon-store usage and remove this.
+  std::optional<base::FilePath> GetCrashDirectoryInfoOld(
       uid_t process_euid,
       uid_t default_user_id,
-      bool use_non_chronos_cryptohome,
+      mode_t* mode,
+      uid_t* directory_owner,
+      gid_t* directory_group);
+  // Once the daemon-store experiment is done, rename to just
+  // GetCrashDirectoryInfo.
+  // TODO(b/186659673): Validate daemon-store usage and rename this.
+  std::optional<base::FilePath> GetCrashDirectoryInfoNew(
+      uid_t process_euid,
+      uid_t default_user_id,
+      bool* can_create_or_fix,
       mode_t* mode,
       uid_t* directory_owner,
       gid_t* directory_group);
@@ -324,12 +449,10 @@ class CrashCollector {
   // nullptr, it is set to indicate if the call failed due to not having
   // capacity in the crash directory. Returns true whether or not directory
   // needed to be created, false on any failure.  If the crash directory is at
-  // capacity, returns false.  If |use_non_chronos_cryptohome| is set, use the
-  // new crash directory under /run/daemon-store/crash/<user-hash>.
+  // capacity, returns false.
   bool GetCreatedCrashDirectoryByEuid(uid_t euid,
                                       base::FilePath* crash_file_path,
-                                      bool* out_of_capacity,
-                                      bool use_non_chronos_cryptohome = false);
+                                      bool* out_of_capacity);
 
   // Create a directory using the specified mode/user/group, and make sure it
   // is actually a directory with the specified permissions.
@@ -345,6 +468,14 @@ class CrashCollector {
                                           int* dir_fd,
                                           mode_t files_mode = 0);
 
+  // Opens the directory we store crashes in (/run/daemon-store/crash/<userhash>
+  // in most cases). Will fail if the mode, owner, or group does not match the
+  // expected values.
+  static bool OpenCrashDirectory(const base::FilePath& dir,
+                                 mode_t expected_mode,
+                                 uid_t expected_owner,
+                                 gid_t expected_group,
+                                 int* dirfd_out);
   // Format crash name based on components.
   std::string FormatDumpBasename(const std::string& exec_name,
                                  time_t timestamp,
@@ -359,10 +490,15 @@ class CrashCollector {
   // Returns the path /proc/<pid>.
   static base::FilePath GetProcessPath(pid_t pid);
 
-  static bool GetUptime(base::TimeDelta* uptime);
+  // Sets |*uptime| to the amount of time since the computer booted.
+  bool GetUptime(base::TimeDelta* uptime);
+
+  // Sets |*uptime| to the uptime (the amount of time since the computer booted)
+  // at the time the process started.
   static bool GetUptimeAtProcessStart(pid_t pid, base::TimeDelta* uptime);
 
-  virtual bool GetExecutableBaseNameFromPid(pid_t pid, std::string* base_name);
+  virtual bool GetExecutableBaseNameAndDirectoryFromPid(
+      pid_t pid, std::string* base_name, base::FilePath* exec_directory);
 
   // Check given crash directory still has remaining capacity for another
   // crash.
@@ -376,6 +512,12 @@ class CrashCollector {
   bool GetLogContents(const base::FilePath& config_path,
                       const std::string& exec_name,
                       const base::FilePath& output_file);
+  // Write a log to |output_file| based on the passed string |log_contents|. If
+  // |output_file| ends in .gz, it will be compressed in gzip format, otherwise
+  // it will be plaintext. The contents will also be redacted to avoid leaking
+  // any sensitive contents.
+  bool WriteLogContents(std::string& log_contents,
+                        const base::FilePath& output_file);
 
   // Write logs applicable to |exec_names| to |output_file| based on the
   // log configuration file at |config_path|. If |output_file| ends in .gz, it
@@ -396,6 +538,8 @@ class CrashCollector {
   // Add non-standard meta data to the crash metadata file.
   // Data added though this call will be uploaded to the crash reporter server,
   // appearing as a form field. Virtual for testing.
+  //
+  // NOTE: To add a weight key, use AddCrashMetaWeight instead of this method.
   virtual void AddCrashMetaUploadData(const std::string& key,
                                       const std::string& value);
 
@@ -403,7 +547,19 @@ class CrashCollector {
   // The file is not uploaded as an attachment, unlike AddCrashMetaUploadFile.
   void AddCrashMetaUploadText(const std::string& key, const std::string& path);
 
+  // Like AddCrashMetaUploadData, but only adds weight meta data to the crash
+  // metadata file. |weight| is also used as the weight when recording to UMA.
+  void AddCrashMetaWeight(int weight);
+
+  // Add non-standard hardware meta data to the crash metadata file, only if
+  // the hw_details USE flag is set.
+  //
+  // Intended for use by ChromeOS Flex, where hardware is highly unpredictable.
+  void AddDetailedHardwareData();
+
   // Gets the corresponding value for |key| from the lsb-release file.
+  // If |use_saved_lsb_| is true, prefer the lsb-release saved in
+  // crash_reporter_state_path_.
   std::string GetLsbReleaseValue(const std::string& key) const;
 
   // Returns the OS version written to the metadata file.
@@ -429,7 +585,10 @@ class CrashCollector {
   std::string GetKernelVersion() const;
 
   // Returns the enrollment status written to the metadata file.
-  base::Optional<bool> IsEnterpriseEnrolled();
+  std::optional<bool> IsEnterpriseEnrolled();
+
+  // Returns the severity level and product group of the crash.
+  virtual ComputedCrashSeverity ComputeSeverity(const std::string& exec_name);
 
   // Called after all files have been written and we want to send out this
   // crash. Write a file of metadata about crash and, if in crash-loop mode,
@@ -455,6 +614,19 @@ class CrashCollector {
   std::string test_kernel_version_;
   bool device_policy_loaded_;
   std::unique_ptr<policy::DevicePolicy> device_policy_;
+  int weight_ = 1;
+
+  // Whether to include detailed hardware info in crash metadata,
+  // based on hw_details USE flag. See AddDetailedHardwareData.
+#if USE_HW_DETAILS
+  bool send_detailed_hw_ = true;
+#else
+  bool send_detailed_hw_ = false;
+#endif  // USE_HW_DETAILS
+
+  // Should reports always be stored in the user crash directory, or can they be
+  // stored in the system directory if we are not running as "chronos"?
+  CrashDirectorySelectionMethod crash_directory_selection_method_;
 
   scoped_refptr<dbus::Bus> bus_;
 
@@ -486,11 +658,17 @@ class CrashCollector {
                                         uint64_t* ticks);
 
   // Adds variations (experiment IDs) to crash reports. Returns true on success.
-  bool AddVariations();
+  bool AddVariations(base::StringPiece file,
+                     base::StringPiece variation_key,
+                     base::StringPiece num_experiment_key);
 
-  // Should reports always be stored in the user crash directory, or can they be
-  // stored in the system directory if we are not running as "chronos"?
-  const CrashDirectorySelectionMethod crash_directory_selection_method_;
+  bool GetUserCrashDirectoriesOld(std::vector<base::FilePath>* directories,
+                                  bool use_daemon_store);
+  base::FilePath GetUserCrashDirectoryOld(bool use_daemon_store);
+  std::optional<base::FilePath> GetUserCrashDirectoryNew();
+
+  // If set, UseDaemonStore will always return the contained value.
+  std::optional<bool> force_daemon_store_;
 
   // True when FinishCrash has been called. Once true, no new files should be
   // created.
@@ -499,8 +677,7 @@ class CrashCollector {
   // If crash_loop_mode_ is true, all files are collected in here instead of
   // being written to disk. The first element of the tuple is the base filename,
   // the second is a memfd_create file descriptor with the file contents.
-  std::vector<std::tuple<std::string, brillo::dbus_utils::FileDescriptor>>
-      in_memory_files_;
+  std::vector<std::tuple<std::string, base::ScopedFD>> in_memory_files_;
 
   // Number of bytes successfully written by all calls to WriteNewFile() and
   // WriteNewCompressedFile() so far. For WriteNewCompressedFile(), the count is
@@ -530,15 +707,47 @@ class CrashCollector {
                                          base::ScopedFD fd_dup,
                                          const base::FilePath& filename);
 
+  // Determine whether to attempt to use daemon-store.
+  // This is for a temporary experiment and will be removed.
+  // TODO(b/186659673): Validate daemon-store usage and always use it.
+  bool UseDaemonStore();
+
+  // Returns the stringified version of a given |crash_severity| value, which is
+  // reported to the crash server.
+  std::string CrashSeverityEnumToString(CrashSeverity crash_severity) const;
+
+  // Returns the stringified version of a given |product| value, which is
+  // reported to the crash server.
+  std::string ProductEnumToString(Product product) const;
+
+  // Returns the histogram name of a given |crash_severity| value, which is
+  // reported to UMA.
+  std::string CrashSeverityEnumToHistogram(CrashSeverity crash_severity) const;
+
+  // Checks that |product| is one of { kUnspecified, kUi, kPlatform, kArc,
+  // kLacros }. If so, return |product| unmodified. If not, return
+  // Product::kUnknownValue. This value is reported to UMA.
+  Product ValidateProductGroupForHistogram(Product product) const;
+
   // Returns an error type signature for a given |error_type| value,
   // which is reported to the crash server along with the
   // crash_reporter-user-collection signature.
   std::string GetErrorTypeSignature(ErrorType error_type) const;
 
+  // If not null, GetUptime() will return *override_uptime_for_testing_;
+  std::unique_ptr<base::TimeDelta> override_uptime_for_testing_;
+
+  scoped_refptr<base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>
+      metrics_lib_;
+
   // Prepended to log messages to differentiate between collectors.
   const std::string tag_;
 
-  std::unique_ptr<MetricsLibraryInterface> metrics_lib_;
+  // Is this an early-boot crash collection?
+  bool early_ = false;
+
+  // Prefer the lsb-release saved in crash_reporter_state_path_?
+  bool use_saved_lsb_ = false;
 };
 
 // Information to invoke a specific call on a collector.
@@ -547,13 +756,16 @@ struct InvocationInfo {
   // Once this is true and we invoke the associated callback, main() returns,
   // so only one handler can run for each execution of crash_reporter.
   bool should_handle;
+  // If set to true, AppSync consent should be checked (via metrics_lib)
+  // before any collectors are run. Defaults to false.
+  bool should_check_appsync = false;
   // Callback to invoke if |should_handle| is true. (can be null).
   base::RepeatingCallback<bool()> cb;
 };
 
-// Information required to initialize and invoke a collector
+// Information required to initialize and invoke a collector.
 struct CollectorInfo {
-  // Shared pointer to the collector
+  // Shared pointer to the collector.
   std::shared_ptr<CrashCollector> collector;
   // Initialization function. If none is specified, invoke the default
   // crash_collector Initialize().

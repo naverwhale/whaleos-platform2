@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,8 +13,8 @@ namespace brillo {
 
 namespace {
 constexpr const char kSampleReport[] =
-    "{\"report\": [ { \"%s\": [ {\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\" } "
-    "] } ] }";
+    "0 227737600 thin-pool 3 5048/226304 155436/1779200 - rw discard_passdown "
+    "queue_if_no_space - 1024";
 }  // namespace
 
 TEST(PhysicalVolumeTest, InvalidPhysicalVolumeTest) {
@@ -58,6 +58,30 @@ TEST(VolumeGroupTest, VolumeGroupSanityTest) {
   EXPECT_EQ("", vg.GetName());
 }
 
+TEST(VolumeGroupTest, VolumeGroupRemoveRunnerTest) {
+  VolumeGroup vg("foobar", nullptr);
+  EXPECT_FALSE(vg.Rename("foo"));
+}
+
+TEST(VolumeGroupTest, VolumeGroupRemoveEmptySourceTest) {
+  auto lvm = std::make_shared<testing::StrictMock<MockLvmCommandRunner>>();
+  VolumeGroup vg("", lvm);
+  EXPECT_FALSE(vg.Rename("foobar"));
+}
+
+TEST(VolumeGroupTest, VolumeGroupRemoveEmptyTargetTest) {
+  auto lvm = std::make_shared<testing::StrictMock<MockLvmCommandRunner>>();
+  VolumeGroup vg("foobar", lvm);
+  EXPECT_FALSE(vg.Rename(""));
+}
+
+TEST(VolumeGroupTest, VolumeGroupRemoveTest) {
+  auto lvm = std::make_shared<testing::StrictMock<MockLvmCommandRunner>>();
+  EXPECT_CALL(*lvm, RunCommand(_)).WillOnce(testing::Return(true));
+  VolumeGroup vg("foobar", lvm);
+  EXPECT_TRUE(vg.Rename("foo"));
+}
+
 TEST(ThinpoolTest, InvalidThinpoolTest) {
   auto lvm = std::make_shared<MockLvmCommandRunner>();
   Thinpool thinpool("", "", lvm);
@@ -74,6 +98,8 @@ TEST(ThinpoolTest, ThinpoolSanityTest) {
   Thinpool thinpool("Foo", "Bar", lvm);
 
   EXPECT_EQ("Bar/Foo", thinpool.GetName());
+  EXPECT_EQ("Foo", thinpool.GetRawName());
+  EXPECT_EQ("Bar", thinpool.GetVolumeGroupName());
   EXPECT_TRUE(thinpool.Remove());
   EXPECT_EQ("", thinpool.GetName());
 }
@@ -82,9 +108,7 @@ TEST(ThinpoolTest, ThinpoolSpaceTest) {
   auto lvm = std::make_shared<MockLvmCommandRunner>();
   Thinpool thinpool("foo", "bar", lvm);
 
-  std::string report =
-      base::StringPrintf(kSampleReport, "lv", "lv_name", "thinpool", "lv_size",
-                         "1000000B", "data_percent", "2.5");
+  std::string report = kSampleReport;
 
   EXPECT_CALL(*lvm, RunProcess(_, _))
       .WillRepeatedly(DoAll(SetArgPointee<1>(report), Return(true)));
@@ -92,8 +116,8 @@ TEST(ThinpoolTest, ThinpoolSpaceTest) {
   int64_t total_space, free_space;
   EXPECT_TRUE(thinpool.GetTotalSpace(&total_space));
   EXPECT_TRUE(thinpool.GetFreeSpace(&free_space));
-  EXPECT_EQ(total_space, 1000000LL);
-  EXPECT_EQ(free_space, 975000LL);
+  EXPECT_EQ(total_space, 116601651200LL);
+  EXPECT_EQ(free_space, 106410666885LL);
 }
 
 TEST(LogicalVolumeTest, InvalidLogicalVolumeTest) {
@@ -111,6 +135,8 @@ TEST(LogicalVolumeTest, LogicalVolumeSanityTest) {
 
   EXPECT_EQ(base::FilePath("/dev/Bar/Foo"), lv.GetPath());
   EXPECT_EQ("Bar/Foo", lv.GetName());
+  EXPECT_EQ("Foo", lv.GetRawName());
+  EXPECT_EQ("Bar", lv.GetVolumeGroupName());
   EXPECT_TRUE(lv.Remove());
   EXPECT_EQ("", lv.GetName());
 }

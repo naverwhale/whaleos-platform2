@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,16 +22,59 @@ class MockOveralls : public Overalls {
   MockOveralls() = default;
   ~MockOveralls() override = default;
   MOCK_METHOD3(Orspi_UnloadBlob_UINT32, void(UINT64*, UINT32*, BYTE*));
+  MOCK_METHOD4(Orspi_UnloadBlob_UINT32_s,
+               TSS_RESULT(UINT64*, UINT32*, BYTE*, UINT64));
   MOCK_METHOD3(Orspi_UnloadBlob_UINT16, void(UINT64*, UINT16*, BYTE*));
-  MOCK_METHOD3(Orspi_UnloadBlob_PUBKEY,
-               TSS_RESULT(UINT64*, BYTE*, TCPA_PUBKEY*));
-  MOCK_METHOD3(Orspi_UnloadBlob_KEY12, TSS_RESULT(UINT64*, BYTE*, TPM_KEY12*));
+  MOCK_METHOD4(Orspi_UnloadBlob_UINT16_s,
+               TSS_RESULT(UINT64*, UINT16*, BYTE*, UINT64));
+  MOCK_METHOD4(Orspi_UnloadBlob_RSA_KEY_PARMS_s,
+               TSS_RESULT(UINT64*, BYTE*, UINT64, TCPA_RSA_KEY_PARMS*));
+  MOCK_METHOD3(Orspi_UnloadBlob_PCR_SELECTION,
+               TSS_RESULT(UINT64*, BYTE*, TCPA_PCR_SELECTION*));
+  MOCK_METHOD4(Orspi_UnloadBlob_PUBKEY_s,
+               TSS_RESULT(UINT64*, BYTE*, UINT64, TCPA_PUBKEY*));
+  MOCK_METHOD4(Orspi_UnloadBlob_KEY12_s,
+               TSS_RESULT(UINT64*, BYTE*, UINT64, TPM_KEY12*));
+  MOCK_METHOD3(Orspi_UnloadBlob_SYMMETRIC_KEY,
+               TSS_RESULT(UINT64*, BYTE*, TCPA_SYMMETRIC_KEY*));
+  MOCK_METHOD3(Orspi_UnloadBlob_IDENTITY_REQ,
+               TSS_RESULT(UINT64*, BYTE*, TCPA_IDENTITY_REQ*));
+  MOCK_METHOD3(Orspi_UnloadBlob_IDENTITY_PROOF,
+               TSS_RESULT(UINT64*, BYTE*, TCPA_IDENTITY_PROOF*));
+  MOCK_METHOD3(Orspi_UnloadBlob_CERTIFY_INFO,
+               TSS_RESULT(UINT64*, BYTE*, TPM_CERTIFY_INFO*));
+  MOCK_METHOD3(Orspi_UnloadBlob_TPM_DELEGATE_OWNER_BLOB,
+               TSS_RESULT(UINT64*, BYTE*, TPM_DELEGATE_OWNER_BLOB*));
+  MOCK_METHOD4(Orspi_UnloadBlob_TPM_DELEGATE_OWNER_BLOB_s,
+               TSS_RESULT(UINT64*, BYTE*, UINT64, TPM_DELEGATE_OWNER_BLOB*));
+  MOCK_METHOD4(Orspi_UnloadBlob_CAP_VERSION_INFO_s,
+               TSS_RESULT(UINT64*, BYTE*, UINT64, TPM_CAP_VERSION_INFO*));
+  MOCK_METHOD3(Orspi_UnloadBlob_NV_DATA_PUBLIC,
+               TSS_RESULT(UINT64*, BYTE*, TPM_NV_DATA_PUBLIC*));
+  MOCK_METHOD4(Orspi_UnloadBlob_NV_DATA_PUBLIC_s,
+               TSS_RESULT(UINT64*, BYTE*, UINT64, TPM_NV_DATA_PUBLIC*));
+  MOCK_METHOD4(Orspi_UnloadBlob_DA_INFO_s,
+               TSS_RESULT(UINT64*, BYTE*, UINT64, TPM_DA_INFO*));
   MOCK_METHOD3(Orspi_LoadBlob_UINT32, void(UINT64*, UINT32, BYTE*));
+  MOCK_METHOD3(Orspi_LoadBlob_UINT16, void(UINT64*, UINT16, BYTE*));
+  MOCK_METHOD3(Orspi_LoadBlob_BYTE, void(UINT64*, BYTE, BYTE*));
+  MOCK_METHOD3(Orspi_LoadBlob_RSA_KEY_PARMS,
+               void(UINT64*, BYTE*, TCPA_RSA_KEY_PARMS*));
+  MOCK_METHOD3(Orspi_LoadBlob_PCR_INFO_SHORT,
+               void(UINT64*, BYTE*, TPM_PCR_INFO_SHORT*));
   MOCK_METHOD3(Orspi_LoadBlob_PUBKEY, void(UINT64*, BYTE*, TCPA_PUBKEY*));
+  MOCK_METHOD3(Orspi_LoadBlob_KEY12, void(UINT64*, BYTE*, TPM_KEY12*));
+  MOCK_METHOD3(Orspi_LoadBlob_SYM_CA_ATTESTATION,
+               void(UINT64*, BYTE*, TCPA_SYM_CA_ATTESTATION*));
+  MOCK_METHOD3(Orspi_LoadBlob_ASYM_CA_CONTENTS,
+               void(UINT64*, BYTE*, TCPA_ASYM_CA_CONTENTS*));
+  MOCK_METHOD3(Orspi_LoadBlob_MSA_COMPOSITE,
+               void(UINT64*, BYTE*, TPM_MSA_COMPOSITE*));
   MOCK_METHOD8(
       Orspi_SymDecrypt,
       TSS_RESULT(UINT16, UINT16, BYTE*, BYTE*, BYTE*, UINT32, BYTE*, UINT32*));
   MOCK_METHOD5(Orspi_MGF1, TSS_RESULT(UINT32, UINT32, BYTE*, UINT32, BYTE*));
+  MOCK_METHOD2(Orspi_Native_To_UNICODE, BYTE*(BYTE*, unsigned*));
   MOCK_METHOD1(Orspi_Error_String, char*(TSS_RESULT));
   MOCK_METHOD4(Ospi_SetAttribUint32,
                TSS_RESULT(TSS_HOBJECT, TSS_FLAG, TSS_FLAG, UINT32));
@@ -61,6 +104,7 @@ class MockOveralls : public Overalls {
                TSS_RESULT(TSS_HCONTEXT, TSS_FLAG, TSS_UUID, TSS_HKEY*));
   MOCK_METHOD4(Ospi_Policy_SetSecret,
                TSS_RESULT(TSS_HPOLICY, TSS_FLAG, UINT32, BYTE*));
+  MOCK_METHOD1(Ospi_Policy_FlushSecret, TSS_RESULT(TSS_HPOLICY));
   MOCK_METHOD2(Ospi_Policy_AssignToObject,
                TSS_RESULT(TSS_HPOLICY, TSS_HOBJECT));
   MOCK_METHOD3(Ospi_TPM_CreateEndorsementKey,
@@ -104,6 +148,15 @@ class MockOveralls : public Overalls {
   MOCK_METHOD2(Ospi_TPM_CMKApproveMA, TSS_RESULT(TSS_HTPM, TSS_HMIGDATA));
   MOCK_METHOD3(Ospi_TPM_CMKCreateTicket,
                TSS_RESULT(TSS_HTPM, TSS_HKEY, TSS_HMIGDATA));
+  MOCK_METHOD3(Ospi_TPM_Delegate_AddFamily,
+               TSS_RESULT(TSS_HTPM, BYTE, TSS_HDELFAMILY*));
+  MOCK_METHOD6(Ospi_TPM_Delegate_CreateDelegation,
+               TSS_RESULT(TSS_HOBJECT,
+                          BYTE,
+                          UINT32,
+                          TSS_HPCRS,
+                          TSS_HDELFAMILY,
+                          TSS_HPOLICY));
   MOCK_METHOD2(Ospi_PcrComposite_SelectPcrIndex, TSS_RESULT(TSS_HPCRS, UINT32));
   MOCK_METHOD4(Ospi_PcrComposite_SetPcrValue,
                TSS_RESULT(TSS_HPCRS, UINT32, UINT32, BYTE*));
@@ -137,6 +190,7 @@ class MockOveralls : public Overalls {
                TSS_RESULT(TSS_HNVSTORE, UINT32, UINT32, BYTE*));
   MOCK_METHOD4(Ospi_NV_ReadValue,
                TSS_RESULT(TSS_HNVSTORE, UINT32, UINT32*, BYTE**));
+  MOCK_METHOD2(Ospi_Context_SecureFreeMemory, TSS_RESULT(TSS_HCONTEXT, BYTE*));
 };
 
 }  // namespace overalls

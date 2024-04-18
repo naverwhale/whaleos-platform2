@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,12 +13,7 @@
 #include <base/check.h>
 #include <base/logging.h>
 
-namespace power_manager {
-namespace system {
-
-DarkResume::DarkResume() {}
-
-DarkResume::~DarkResume() {}
+namespace power_manager::system {
 
 void DarkResume::Init(
     PrefsInterface* prefs,
@@ -37,7 +32,7 @@ void DarkResume::HandleSuccessfulResume(bool from_hibernate) {
   in_dark_resume_ = false;
 
   if (wakeup_source_identifier_->InputDeviceCausedLastWake()) {
-    VLOG(1) << "User triggered wake";
+    LOG(INFO) << "User triggered wake";
   } else {
     // Resumes from hibernate do not have a wake reason, so
     // look a lot to powerd like dark resume. Assume any resume
@@ -46,7 +41,7 @@ void DarkResume::HandleSuccessfulResume(bool from_hibernate) {
     if (from_hibernate) {
       LOG(INFO) << "Resumed from hibernate";
     } else {
-      VLOG(1) << "Wake not triggered by user";
+      LOG(INFO) << "Wake not triggered by user";
       if (enabled_) {
         LOG(INFO) << "In dark resume";
         in_dark_resume_ = true;
@@ -81,5 +76,4 @@ void DarkResume::ReadDarkResumePref() {
   LOG(INFO) << "Dark resume " << (enabled_ ? "enabled" : "disabled");
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

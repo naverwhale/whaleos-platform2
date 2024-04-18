@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,7 @@
 #include <vector>
 
 #include <attestation/proto_bindings/interface.pb.h>
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
 #include <brillo/dbus/dbus_connection.h>
@@ -120,7 +120,7 @@ class PcaRequest final : public base::RefCounted<PcaRequest<ReplyType>>,
   // |PcaRequestHttpUtils| overrides.
   void GetChromeProxyServersAsync(
       const std::string& url,
-      const brillo::http::GetChromeProxyServersCallback& callback) override;
+      brillo::http::GetChromeProxyServersCallback callback) override;
 
   // A |PcaRequestHttpUtils| used to perform HTTP related functions;
   // alternated during unittest for testability.

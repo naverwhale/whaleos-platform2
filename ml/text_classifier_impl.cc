@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,9 @@
 #include <vector>
 
 #include <base/check.h>
+#include <base/debug/leak_annotations.h>
 #include <base/logging.h>
+#include <brillo/message_loops/message_loop.h>
 #include <lang_id/lang-id-wrapper.h>
 #include <utils/utf8/unicodetext.h>
 
@@ -20,30 +22,27 @@ namespace ml {
 namespace {
 
 using ::chromeos::machine_learning::mojom::CodepointSpan;
+using ::chromeos::machine_learning::mojom ::
+    REMOVED_TextSuggestSelectionRequestPtr;
 using ::chromeos::machine_learning::mojom::TextAnnotation;
 using ::chromeos::machine_learning::mojom::TextAnnotationPtr;
 using ::chromeos::machine_learning::mojom::TextAnnotationRequestPtr;
 using ::chromeos::machine_learning::mojom::TextClassifier;
 using ::chromeos::machine_learning::mojom::TextEntity;
 using ::chromeos::machine_learning::mojom::TextEntityData;
+using ::chromeos::machine_learning::mojom::TextEntityDataPtr;
 using ::chromeos::machine_learning::mojom::TextEntityPtr;
 using ::chromeos::machine_learning::mojom::TextLanguage;
 using ::chromeos::machine_learning::mojom::TextLanguagePtr;
-using ::chromeos::machine_learning::mojom::TextSuggestSelectionRequestPtr;
 
 constexpr char kTextClassifierModelFilePath[] =
     "/opt/google/chrome/ml_models/"
-    "mlservice-model-text_classifier_en-v711_vocab-v1.fb";
+    "mlservice-model-text_classifier_en-v714_vocab-"
+    "with_beginner_words-20220318.fb";
 
 constexpr char kLanguageIdentificationModelFilePath[] =
     "/opt/google/chrome/ml_models/"
     "mlservice-model-language_identification-20190924.smfb";
-
-// To avoid passing a lambda as a base::OnceClosure.
-void DeleteTextClassifierImpl(
-    const TextClassifierImpl* const text_classifier_impl) {
-  delete text_classifier_impl;
-}
 
 }  // namespace
 
@@ -67,10 +66,18 @@ bool TextClassifierImpl::Create(
     return false;
   }
 
-  // Use a disconnection handler to strongly bind `text_classifier_impl` to
-  // `receiver`.
-  text_classifier_impl->SetDisconnectionHandler(base::BindOnce(
-      &DeleteTextClassifierImpl, base::Unretained(text_classifier_impl)));
+  // In production, `text_classifier_impl` is intentionally leaked, because this
+  // model runs in its own process and the model's memory is freed when the
+  // process exits. However, when being tested with ASAN, this memory leak
+  // causes an error. Therefore, we annotate it as an intentional leak.
+  ANNOTATE_LEAKING_OBJECT_PTR(text_classifier_impl);
+
+  //  Set the disconnection handler to quit the message loop (i.e. exit the
+  //  process) when the connection is gone, because this model is always run in
+  //  a dedicated process.
+  text_classifier_impl->receiver_.set_disconnect_handler(
+      base::BindOnce(&brillo::MessageLoop::BreakLoop,
+                     base::Unretained(brillo::MessageLoop::current())));
   return true;
 }
 
@@ -83,11 +90,6 @@ TextClassifierImpl::TextClassifierImpl(
       language_identifier_(
           libtextclassifier3::langid::LoadFromPath(langid_model_path)),
       receiver_(this, std::move(receiver)) {}
-
-void TextClassifierImpl::SetDisconnectionHandler(
-    base::OnceClosure disconnect_handler) {
-  receiver_.set_disconnect_handler(std::move(disconnect_handler));
-}
 
 void TextClassifierImpl::Annotate(TextAnnotationRequestPtr request,
                                   AnnotateCallback callback) {
@@ -119,6 +121,10 @@ void TextClassifierImpl::Annotate(TextAnnotationRequestPtr request,
   // Uses the vocab based model.
   option.use_vocab_annotator = true;
 
+  // Trigger dictionary for simple words (see b/222559828).
+  option.trigger_dictionary_on_beginner_words =
+      request->trigger_dictionary_on_beginner_words;
+
   // Do the annotation.
   const std::vector<libtextclassifier3::AnnotatedSpan> annotated_spans =
       annotator_->Annotate(request->text, option);
@@ -130,15 +136,16 @@ void TextClassifierImpl::Annotate(TextAnnotationRequestPtr request,
     std::vector<TextEntityPtr> entities;
     for (const auto& classification : annotated_result.classification) {
       // First, get entity data.
-      auto entity_data = TextEntityData::New();
+      TextEntityDataPtr entity_data;
       if (classification.collection == "number") {
-        entity_data->set_numeric_value(classification.numeric_double_value);
+        entity_data = TextEntityData::NewNumericValue(
+            classification.numeric_double_value);
       } else {
         // For the other types, just encode the substring into string_value.
         // TODO(honglinyu): add data extraction for more types when needed
         // and available.
         // Note that the returned indices by annotator is unicode codepoints.
-        entity_data->set_string_value(
+        entity_data = TextEntityData::NewStringValue(
             libtextclassifier3::UTF8ToUnicodeText(request->text, false)
                 .UTF8Substring(annotated_result.span.first,
                                annotated_result.span.second));
@@ -155,36 +162,6 @@ void TextClassifierImpl::Annotate(TextAnnotationRequestPtr request,
   }
 
   std::move(callback).Run(std::move(annotations));
-
-  request_metrics.FinishRecordingPerformanceMetrics();
-}
-
-void TextClassifierImpl::SuggestSelection(
-    TextSuggestSelectionRequestPtr request, SuggestSelectionCallback callback) {
-  RequestMetrics request_metrics("TextClassifier", "SuggestSelection");
-  request_metrics.StartRecordingPerformanceMetrics();
-
-  libtextclassifier3::SelectionOptions option;
-  if (request->default_locales) {
-    option.locales = request->default_locales.value();
-  }
-  option.detected_text_language_tags =
-      request->detected_text_language_tags.value_or("en");
-  option.annotation_usecase =
-      static_cast<libtextclassifier3::AnnotationUsecase>(
-          request->annotation_usecase);
-
-  libtextclassifier3::CodepointSpan user_selection;
-  user_selection.first = request->user_selection->start_offset;
-  user_selection.second = request->user_selection->end_offset;
-
-  const libtextclassifier3::CodepointSpan suggested_span =
-      annotator_->SuggestSelection(request->text, user_selection, option);
-  auto result_span = CodepointSpan::New();
-  result_span->start_offset = suggested_span.first;
-  result_span->end_offset = suggested_span.second;
-
-  std::move(callback).Run(std::move(result_span));
 
   request_metrics.FinishRecordingPerformanceMetrics();
 }
@@ -206,6 +183,12 @@ void TextClassifierImpl::FindLanguages(const std::string& text,
   std::move(callback).Run(std::move(langid_result));
 
   request_metrics.FinishRecordingPerformanceMetrics();
+}
+
+void TextClassifierImpl::REMOVED_1(
+    REMOVED_TextSuggestSelectionRequestPtr request,
+    REMOVED_1Callback callback) {
+  NOTIMPLEMENTED();
 }
 
 }  // namespace ml

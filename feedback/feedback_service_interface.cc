@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "chromeos/dbus/service_constants.h"
 #include "components/feedback/feedback_common.h"
 #include "components/feedback/proto/extension.pb.h"
@@ -42,8 +42,9 @@ bool DBusFeedbackServiceInterface::SendFeedback(
                            dbus::ObjectPath(feedback::kFeedbackServicePath));
 
   std::unique_ptr<dbus::Response> response =
-      object->CallMethodAndBlock(&call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
-  if (response.get() == nullptr) {
+      object->CallMethodAndBlock(&call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT)
+          .value_or(nullptr);
+  if (!response) {
     std::move(callback).Run(false);
     return true;
   }

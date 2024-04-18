@@ -1,29 +1,28 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/cellular/cellular_service_provider.h"
 
+#include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
-
-#include "shill/cellular/cellular_service.h"
-#include "shill/logging.h"
-#include "shill/manager.h"
-#include "shill/store_interface.h"
 
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/logging.h>
 
+#include "shill/cellular/cellular_service.h"
+#include "shill/logging.h"
+#include "shill/manager.h"
+#include "shill/store/store_interface.h"
+
 namespace shill {
 
 namespace Logging {
 static auto kModuleLogScope = ScopeLogger::kCellular;
-static std::string ObjectID(const CellularServiceProvider* e) {
-  return "(cellular_service_provider)";
-}
 }  // namespace Logging
 
 namespace {
@@ -42,7 +41,7 @@ bool GetServiceParametersFromArgs(const KeyValueStore& args,
   *iccid =
       args.Lookup<std::string>(CellularService::kStorageIccid, std::string());
   if (iccid->empty()) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidArguments,
                           "Missing ICCID");
     return false;
   }
@@ -76,7 +75,7 @@ bool GetServiceParametersFromStorage(const StoreInterface* storage,
                                      Error* error) {
   if (!storage->GetString(entry_name, CellularService::kStorageIccid, iccid) ||
       iccid->empty()) {
-    Error::PopulateAndLog(FROM_HERE, error, Error::kNotSupported,
+    Error::PopulateAndLog(FROM_HERE, error, Error::kInvalidProperty,
                           "Missing or empty ICCID");
     return false;
   }
@@ -105,13 +104,13 @@ bool GetServiceParametersFromStorage(const StoreInterface* storage,
 }  // namespace
 
 CellularServiceProvider::CellularServiceProvider(Manager* manager)
-    : manager_(manager) {}
+    : manager_(manager), cros_config_(std::make_unique<brillo::CrosConfig>()) {}
 
 CellularServiceProvider::~CellularServiceProvider() = default;
 
 void CellularServiceProvider::CreateServicesFromProfile(
     const ProfileRefPtr& profile) {
-  SLOG(this, 2) << __func__ << ": " << profile->GetFriendlyName();
+  SLOG(2) << __func__ << ": " << profile->GetFriendlyName();
   // A Cellular Device may not exist yet, so we do not load services here.
   // Cellular services associated with a Device are loaded in
   // LoadServicesForDevice when the Device is created. We store |profile| here
@@ -122,7 +121,7 @@ void CellularServiceProvider::CreateServicesFromProfile(
 
 ServiceRefPtr CellularServiceProvider::FindSimilarService(
     const KeyValueStore& args, Error* error) const {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   CHECK_EQ(kTypeCellular, args.Lookup<std::string>(kTypeProperty, ""))
       << "Service type must be Cellular!";
   // This is called from Manager::ConfigureServiceForProfile when the Manager
@@ -136,7 +135,7 @@ ServiceRefPtr CellularServiceProvider::FindSimilarService(
 
 ServiceRefPtr CellularServiceProvider::GetService(const KeyValueStore& args,
                                                   Error* error) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   // This is called from Manager::GetService or Manager::ConfigureService when
   // the corresponding Manager dbus api call is made (e.g. from Chrome). When a
   // Cellular Service is configured (e.g. from policy), find any existing
@@ -159,7 +158,7 @@ ServiceRefPtr CellularServiceProvider::GetService(const KeyValueStore& args,
 
 ServiceRefPtr CellularServiceProvider::CreateTemporaryService(
     const KeyValueStore& args, Error* error) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   std::string imsi, iccid, eid;
   if (GetServiceParametersFromArgs(args, &imsi, &iccid, &eid, error)) {
     return new CellularService(manager_, imsi, iccid, eid);
@@ -169,7 +168,7 @@ ServiceRefPtr CellularServiceProvider::CreateTemporaryService(
 
 ServiceRefPtr CellularServiceProvider::CreateTemporaryServiceFromProfile(
     const ProfileRefPtr& profile, const std::string& entry_name, Error* error) {
-  SLOG(this, 2) << __func__ << ": " << profile->GetFriendlyName();
+  SLOG(2) << __func__ << ": " << profile->GetFriendlyName();
   std::string imsi, iccid, eid;
   if (GetServiceParametersFromStorage(profile->GetConstStorage(), entry_name,
                                       &imsi, &iccid, &eid, error)) {
@@ -178,18 +177,22 @@ ServiceRefPtr CellularServiceProvider::CreateTemporaryServiceFromProfile(
   return nullptr;
 }
 
+void CellularServiceProvider::AbandonService(const ServiceRefPtr& service) {
+  SLOG(2) << __func__;
+}
+
 void CellularServiceProvider::Start() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
 }
 
 void CellularServiceProvider::Stop() {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   RemoveServices();
 }
 
 CellularServiceRefPtr CellularServiceProvider::LoadServicesForDevice(
     Cellular* device) {
-  SLOG(this, 2) << __func__ << " Device ICCID: " << device->iccid();
+  SLOG(2) << __func__ << " Device ICCID: " << device->iccid();
 
   CellularServiceRefPtr active_service = LoadMatchingServicesFromProfile(
       device->eid(), device->iccid(), device->imsi(), device);
@@ -204,10 +207,10 @@ CellularServiceRefPtr CellularServiceProvider::LoadServicesForDevice(
 }
 
 void CellularServiceProvider::RemoveNonDeviceServices(Cellular* device) {
-  SLOG(this, 2) << __func__ << " Device ICCID: " << device->iccid();
+  SLOG(2) << __func__ << " Device ICCID: " << device->iccid();
   std::vector<CellularServiceRefPtr> services_to_remove;
   for (CellularServiceRefPtr& service : services_) {
-    if (!device->HasSimCardId(service->GetSimCardId()))
+    if (!device->HasIccid(service->iccid()))
       services_to_remove.push_back(service);
   }
   for (CellularServiceRefPtr& service : services_to_remove)
@@ -226,18 +229,17 @@ CellularServiceRefPtr CellularServiceProvider::LoadMatchingServicesFromProfile(
   DCHECK(storage);
   KeyValueStore args;
   args.Set<std::string>(kTypeProperty, kTypeCellular);
-  std::string sim_card_id = eid.empty() ? iccid : eid;
-  args.Set<std::string>(CellularService::kStorageSimCardId, sim_card_id);
+  args.Set<std::string>(CellularService::kStorageIccid, iccid);
   std::set<std::string> groups = storage->GetGroupsWithProperties(args);
-
-  LOG(INFO) << __func__ << ": " << sim_card_id << ": Groups: " << groups.size();
+  SLOG(2) << __func__ << ": " << iccid;
+  LOG(INFO) << __func__ << ": Groups: " << groups.size();
   CellularServiceRefPtr active_service = nullptr;
   for (const std::string& group : groups) {
     std::string service_imsi, service_iccid, service_eid;
     if (!GetServiceParametersFromStorage(storage, group, &service_imsi,
                                          &service_iccid, &service_eid,
                                          /*error=*/nullptr)) {
-      LOG(ERROR) << "Unable to load service properties for: " << sim_card_id
+      LOG(ERROR) << "Unable to load service properties for: " << iccid
                  << ", removing old or invalid profile entry.";
       storage->DeleteGroup(group);
       continue;
@@ -245,14 +247,26 @@ CellularServiceRefPtr CellularServiceProvider::LoadMatchingServicesFromProfile(
     DCHECK_EQ(service_eid, eid);
     CellularServiceRefPtr service = FindService(service_iccid);
     if (!service) {
-      SLOG(this, 1) << "Creating Cellular service for ICCID: " << service_iccid;
+      SLOG(1) << "Creating Cellular service for ICCID: " << service_iccid;
       service = new CellularService(manager_, service_imsi, service_iccid,
                                     service_eid);
+      // Device.AllowRoaming was used to store roaming preferences before M94.
+      // To honor settings for services created before M94, we default
+      // Service.AllowRoaming to the value of Device.AllowRoaming.
+      // If a value for Service.AllowRoaming was persisted when the service was
+      // last used, the default is overridden in Service::Load,
+      // else the default value is stored to disk during AddService, thus the
+      // value of Device.AllowRoaming is copied over to the service. This
+      // completes the migration of Device.AllowRoaming to Service.AllowRoaming.
+      // The plan is to remove references to device->allow_roaming_ in M108,
+      // when we assume all services created before M94 have been used at least
+      // once between M94 and M108, and thus have migrated their AllowRoaming.
+      service->set_allow_roaming(device->allow_roaming());
       service->Load(storage);
       service->SetDevice(device);
       AddService(service);
     } else {
-      SLOG(this, 2) << "Cellular service exists for ICCID: " << service_iccid;
+      SLOG(2) << "Cellular service exists for ICCID: " << service_iccid;
       service->SetDevice(device);
     }
     if (service_iccid == iccid)
@@ -265,14 +279,14 @@ CellularServiceRefPtr CellularServiceProvider::LoadMatchingServicesFromProfile(
   // If a Service was never saved, it may still exist in |services_|.
   active_service = FindService(iccid);
   if (active_service) {
-    SLOG(this, 2) << "Cellular service exists for ICCID: " << iccid
-                  << " (but not saved)";
+    SLOG(2) << "Cellular service exists for ICCID: " << iccid
+            << " (but not saved)";
     active_service->SetDevice(device);
     return active_service;
   }
 
   // Create a Service for the ICCID.
-  SLOG(this, 1) << "No existing Cellular service with ICCID: " << iccid;
+  SLOG(1) << "No existing Cellular service with ICCID: " << iccid;
   active_service = new CellularService(manager_, imsi, iccid, eid);
   active_service->SetDevice(device);
   AddService(active_service);
@@ -285,18 +299,18 @@ void CellularServiceProvider::LoadServicesForSecondarySim(
     const std::string& imsi,
     Cellular* device) {
   DCHECK(!iccid.empty());
-  SLOG(this, 1) << __func__ << " eid: " << eid << " iccid: " << iccid;
+  SLOG(1) << __func__ << " eid: " << eid << " iccid: " << iccid;
   LoadMatchingServicesFromProfile(eid, iccid, imsi, device);
 }
 
 void CellularServiceProvider::UpdateServices(Cellular* device) {
-  SLOG(this, 2) << __func__;
+  SLOG(2) << __func__;
   for (CellularServiceRefPtr& service : services_)
     service->SetDevice(device);
 }
 
 void CellularServiceProvider::RemoveServices() {
-  SLOG(this, 1) << __func__;
+  SLOG(1) << __func__;
   while (!services_.empty())
     RemoveService(services_.back());
 }
@@ -311,22 +325,8 @@ CellularServiceRefPtr CellularServiceProvider::FindService(
   return nullptr;
 }
 
-bool CellularServiceProvider::OnServiceUnloaded(
-    const CellularServiceRefPtr& service) {
-  SLOG(this, 1) << __func__ << ": " << service->iccid();
-  const CellularRefPtr device = service->cellular();
-  if (device && device->iccid() == service->iccid()) {
-    LOG(WARNING) << "Service with active ICCID unloaded, Service not removed.";
-    return false;
-  }
-  auto iter = std::find(services_.begin(), services_.end(), service);
-  if (iter != services_.end())
-    services_.erase(iter);
-  return true;
-}
-
 void CellularServiceProvider::AddService(CellularServiceRefPtr service) {
-  SLOG(this, 1) << __func__ << " with ICCID: " << service->iccid();
+  SLOG(1) << __func__ << " with ICCID: " << service->iccid();
 
   // See comment in header for |profile_|.
   service->SetProfile(profile_);
@@ -337,7 +337,8 @@ void CellularServiceProvider::AddService(CellularServiceRefPtr service) {
 }
 
 void CellularServiceProvider::RemoveService(CellularServiceRefPtr service) {
-  SLOG(this, 1) << __func__ << " with ICCID: " << service->iccid();
+  SLOG(1) << __func__ << " with ICCID: " << service->iccid();
+  manager_->PersistService(service);
   manager_->DeregisterService(service);
   auto iter = std::find(services_.begin(), services_.end(), service);
   if (iter == services_.end()) {
@@ -345,6 +346,167 @@ void CellularServiceProvider::RemoveService(CellularServiceRefPtr service) {
     return;
   }
   services_.erase(iter);
+}
+
+CellularService* CellularServiceProvider::GetActiveService() {
+  for (CellularServiceRefPtr& service : services_) {
+    if (service->IsActive(nullptr))
+      return service.get();
+  }
+  return nullptr;
+}
+
+bool CellularServiceProvider::HardwareSupportsTethering() {
+  if (!variant_.has_value()) {
+    SLOG(3) << __func__ << " reading modem firmware variant";
+    std::string temp_variant;
+    if (!cros_config_->GetString("/modem", "firmware-variant", &temp_variant)) {
+      LOG(INFO) << "Cannot find modem firmware variant. Tethering through "
+                   "cellular is not supported";
+      return false;
+    }
+    variant_ = std::move(temp_variant);
+  }
+  // TODO(b/282816692): block/allow variants when the list is known.
+  return true;
+}
+
+void CellularServiceProvider::TetheringEntitlementCheck(
+    base::OnceCallback<void(TetheringManager::EntitlementStatus)> callback) {
+  SLOG(3) << __func__;
+  const auto cellular_service = GetActiveService();
+  if (!cellular_service || !cellular_service->cellular()) {
+    SLOG(3) << __func__ << " cellular device doesn't exist";
+    manager_->metrics()->NotifyCellularEntitlementCheckResult(
+        Metrics::kCellularEntitlementCheckNoCellularDevice);
+    std::move(callback).Run(
+        TetheringManager::EntitlementStatus::kUpstreamNetworkNotAvailable);
+    return;
+  }
+
+  cellular_service->cellular()->EntitlementCheck(std::move(callback));
+}
+
+void CellularServiceProvider::AcquireTetheringNetwork(
+    TetheringManager::UpdateTimeoutCallback update_timeout_callback,
+    TetheringManager::AcquireNetworkCallback callback,
+    TetheringManager::CellularUpstreamEventCallback tethering_event_callback) {
+  SLOG(3) << __func__;
+  if (!HardwareSupportsTethering()) {
+    manager_->dispatcher()->PostTask(
+        FROM_HERE,
+        base::BindOnce(std::move(callback),
+                       TetheringManager::SetEnabledResult::kNotAllowed, nullptr,
+                       nullptr));
+    return;
+  }
+
+  // Tethering setup requires an active service with a valid device.
+  const auto cellular_service = GetActiveService();
+  const auto cellular_device =
+      cellular_service ? cellular_service->cellular() : nullptr;
+  if (!cellular_device) {
+    manager_->dispatcher()->PostTask(
+        FROM_HERE,
+        base::BindOnce(
+            std::move(callback),
+            TetheringManager::SetEnabledResult::kUpstreamNetworkNotAvailable,
+            nullptr, nullptr));
+    return;
+  }
+
+  // Request a network for tethering.
+  LOG(INFO) << "Acquiring tethering network.";
+  cellular_device->AcquireTetheringNetwork(
+      update_timeout_callback,
+      base::BindOnce(&CellularServiceProvider::OnAcquireTetheringNetworkReady,
+                     weak_factory_.GetWeakPtr(), std::move(callback)),
+      std::move(tethering_event_callback));
+}
+
+void CellularServiceProvider::OnAcquireTetheringNetworkReady(
+    TetheringManager::AcquireNetworkCallback callback,
+    Network* network,
+    const Error& error) {
+  SLOG(3) << __func__;
+
+  const auto cellular_service = GetActiveService();
+  if (!cellular_service || !cellular_service->cellular()) {
+    LOG(WARNING)
+        << "Tethering network acquisition failed: no cellular service.";
+    std::move(callback).Run(
+        TetheringManager::SetEnabledResult::kUpstreamNetworkNotAvailable,
+        nullptr, nullptr);
+    return;
+  }
+
+  if (error.IsFailure()) {
+    LOG(WARNING) << "Tethering network acquisition failed: " << error;
+    std::move(callback).Run(
+        TetheringManager::SetEnabledResult::kUpstreamNetworkNotAvailable,
+        nullptr, nullptr);
+    return;
+  }
+
+  if (!network) {
+    LOG(WARNING)
+        << "Tethering network acquisition failed: no network reported.";
+    std::move(callback).Run(
+        TetheringManager::SetEnabledResult::kUpstreamNetworkNotAvailable,
+        nullptr, nullptr);
+    return;
+  }
+
+  LOG(INFO) << "Tethering network acquisition successful.";
+  std::move(callback).Run(TetheringManager::SetEnabledResult::kSuccess, network,
+                          cellular_service);
+}
+
+void CellularServiceProvider::ReleaseTetheringNetwork(
+    Network* network, base::OnceCallback<void(bool is_success)> callback) {
+  SLOG(3) << __func__;
+
+  // Tethering release requires an active service with a valid device.
+  const auto cellular_service = GetActiveService();
+  const auto cellular_device =
+      cellular_service ? cellular_service->cellular() : nullptr;
+  if (!cellular_device) {
+    manager_->dispatcher()->PostTask(
+        FROM_HERE, base::BindOnce(std::move(callback), false));
+    return;
+  }
+
+  LOG(INFO) << "Releasing tethering network.";
+  cellular_device->ReleaseTetheringNetwork(
+      network,
+      base::BindOnce(&CellularServiceProvider::OnReleaseTetheringNetworkReady,
+                     weak_factory_.GetWeakPtr(), std::move(callback)));
+}
+
+void CellularServiceProvider::OnReleaseTetheringNetworkReady(
+    base::OnceCallback<void(bool is_success)> callback, const Error& error) {
+  SLOG(3) << __func__;
+
+  if (error.IsFailure()) {
+    LOG(WARNING) << "Tethering network release failed: " << error;
+    std::move(callback).Run(false);
+    return;
+  }
+
+  LOG(WARNING) << "Tethering network release successful.";
+  std::move(callback).Run(true);
+}
+
+std::optional<std::string> CellularServiceProvider::GetOperatorCountryCode() {
+  SLOG(3) << __func__;
+  const auto cellular_service = GetActiveService();
+  if (!cellular_service || !cellular_service->cellular()) {
+    return std::nullopt;
+  }
+  auto country = cellular_service->cellular()
+                     ->mobile_operator_info()
+                     ->serving_mcc_alpha2();
+  return country.empty() ? std::nullopt : std::optional<std::string>(country);
 }
 
 }  // namespace shill

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -41,8 +41,7 @@ int main(int argc, char* argv[]) {
   // Note: we keep logs at least for 8 day, even If |GetOldestModifiedTime()|
   // returns a most recent time.
   base::Time first_timestamp_to_keep =
-      std::min(GetOldestModifiedTime(),
-               base::Time::Now() - base::TimeDelta::FromDays(8));
+      std::min(GetOldestModifiedTime(), base::Time::Now() - base::Days(8));
 
   if (WriteCurrentBootEntry(base::FilePath(kBootLogFile),
                             first_timestamp_to_keep, kBootLogMaxEntries))

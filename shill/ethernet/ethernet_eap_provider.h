@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <map>
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 
 #include "shill/provider_interface.h"
 #include "shill/refptr_types.h"
@@ -22,7 +22,7 @@ class Manager;
 
 class EthernetEapProvider : public ProviderInterface {
  public:
-  using CredentialChangeCallback = base::Callback<void()>;
+  using CredentialChangeCallback = base::RepeatingCallback<void()>;
 
   explicit EthernetEapProvider(Manager* manager);
   ~EthernetEapProvider() override;
@@ -37,6 +37,7 @@ class EthernetEapProvider : public ProviderInterface {
   ServiceRefPtr CreateTemporaryServiceFromProfile(const ProfileRefPtr& profile,
                                                   const std::string& entry_name,
                                                   Error* error) override;
+  void AbandonService(const ServiceRefPtr& service) override;
   void Start() override;
   void Stop() override;
 

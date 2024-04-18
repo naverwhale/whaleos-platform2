@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,9 @@
 
 namespace reporting {
 
-std::unique_ptr<::net::BackoffEntry> GetBackoffEntry() {
+std::unique_ptr<::brillo::BackoffEntry> GetBackoffEntry() {
   // Retry starts with 10 second delay and is doubled with every failure.
-  static const net::BackoffEntry::Policy kDefaultUploadBackoffPolicy = {
+  static const ::brillo::BackoffEntry::Policy kDefaultUploadBackoffPolicy = {
       // Number of initial errors to ignore before applying
       // exponential back-off rules.
       /*num_errors_to_ignore=*/0,
@@ -34,7 +34,7 @@ std::unique_ptr<::net::BackoffEntry> GetBackoffEntry() {
 
       /*always_use_initial_delay=*/true,
   };
-  return std::make_unique<::net::BackoffEntry>(&kDefaultUploadBackoffPolicy);
+  return std::make_unique<::brillo::BackoffEntry>(&kDefaultUploadBackoffPolicy);
 }
 
 }  // namespace reporting

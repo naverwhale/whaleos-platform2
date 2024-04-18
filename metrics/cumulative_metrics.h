@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,9 +14,9 @@
 //   CumulativeMetrics cm(
 //     backing_dir,
 //     stat_names,
-//     TimeDelta::FromMinutes(5),
+//     base::Minutes(5),
 //     base::BindRepeating(&UpdateConnectivityStats),
-//     TimeDelta::FromDays(1),
+//     base::Days(1),
 //     base::BindRepeating(&ReportConnectivityStats,
 //     base::Unretained(metrics_lib_));
 //
@@ -98,7 +98,7 @@ class CumulativeMetrics {
   CumulativeMetrics(const CumulativeMetrics&) = delete;
   CumulativeMetrics& operator=(const CumulativeMetrics&) = delete;
 
-  virtual ~CumulativeMetrics() {}
+  virtual ~CumulativeMetrics() = default;
 
   // Calls |update_callback_|.
   // This is automatically called every |update_period_seconds_| of active time,

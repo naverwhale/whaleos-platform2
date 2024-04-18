@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -59,7 +59,7 @@ config("compiler_defaults") {
     "-Wstring-compare",
     "-Wstring-plus-int",
     "-Wxor-used-as-pow",
-    "-Wimplicit-int-float-conversion",
+    "-Wdeprecated-declarations",
 
     # We use C99 array designators in C++ code.  Our compilers support this
     # extension since C++ has no equivalent yet (as of C++20).
@@ -74,8 +74,10 @@ config("compiler_defaults") {
     "-Wa,--noexecstack",
     "-Wimplicit-fallthrough",
   ]
-  cflags_c = [ "-std=gnu11" ] + external_cppflags + external_cxxflags
-  cflags_cc = [ "-std=gnu++17" ] + external_cppflags + external_cxxflags
+  cflags_c = [ "-std=gnu17" ] + external_cppflags + external_cxxflags
+  cc_version = "-std=gnu++20"
+
+  cflags_cc = [ cc_version ] + external_cppflags + external_cxxflags
   ldflags = external_ldflags + [
               "-Wl,-z,relro",
               "-Wl,-z,noexecstack",
@@ -86,10 +88,30 @@ config("compiler_defaults") {
     libs += [ "stdc++fs" ]
   }
   if (enable_werror) {
-    cflags += [ "-Werror" ]
+    cflags += [
+      "-Werror",
+
+      # TODO(b/217226507): reduce the scope of this error suppression or
+      # fix each case.
+      "-Wno-error=deprecated-enum-enum-conversion",
+
+      # TODO(b/217226507): some lambda capturing (specifically tests with
+      # gmock) implicitly capture this, but in C++20 it should to be
+      # explicit. However, this feature is not available until C++20, so
+      # updating the code requires C++20 enabled.
+      # For transition, suppress the error, and once C++20 is stabilized
+      # we can clean up the cases.
+      "-Wno-error=deprecated-this-capture",
+    ]
   }
+
   if (use.cros_host) {
     defines += [ "NDEBUG" ]
+  }
+  if (use.cros_debug) {
+    # Initialize stack variables with values that will likely transform
+    # logic bugs into crashes.
+    cflags += [ "-ftrivial-auto-var-init=pattern" ]
   }
   if (enable_lfs) {
     defines += [
@@ -130,6 +152,21 @@ config("compiler_defaults") {
   }
   if (use.tcmalloc) {
     libs += [ "tcmalloc" ]
+  }
+}
+
+config("lto_experiment") {
+  # TODO(b/286954353): This is under experiment still. Please do not
+  # use this in production yet until we evaluate more.
+  if (use.lto_experiment) {
+    cflags = [ "-flto" ]
+    if (use.function_elimination_experiment) {
+      cflags += [
+        "-ffunction-sections",
+        "-fvirtual-function-elimination",
+      ]
+      ldflags = [ "-Wl,--gc-sections" ]
+    }
   }
 }
 
@@ -175,7 +212,7 @@ config("test") {
   # Specifically, libchrome for host is linked. For host, it is built with
   # -DNDEBUG, but the target built without, which causes a link error.
   # cf) BaseInitLoggingImpl definition in
-  #     aosp/external/libchrome/base/logging.h
+  #     chromiumos/platform/libchrome/base/logging.h
   # gtest-config and gmock-config are not installed by gtest-1.8.1.
   ldflags = [
     "-pthread",

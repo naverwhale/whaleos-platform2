@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,13 @@
 
 #include <memory>
 
+#include "trunks/trunks_export.h"
+
 namespace trunks {
 namespace csme {
 
 // An interface for performing pinweaver provisioning.
-class PinWeaverProvision {
+class TRUNKS_EXPORT PinWeaverProvision {
  public:
   PinWeaverProvision() = default;
   virtual ~PinWeaverProvision() = default;

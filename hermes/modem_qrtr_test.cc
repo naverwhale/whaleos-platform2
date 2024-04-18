@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,8 +12,8 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/test/test_mock_time_task_runner.h>
@@ -23,6 +23,7 @@
 
 #include "hermes/apdu.h"
 #include "hermes/fake_euicc_manager.h"
+#include "hermes/mock_executor.h"
 #include "hermes/sgp_22.h"
 #include "hermes/socket_qrtr.h"
 #include "hermes/type_traits.h"
@@ -223,16 +224,6 @@ hermes::EnableIfIterator_t<Iterator, std::vector<uint8_t>> CreateQrtrFromApdu(
 
 namespace hermes {
 
-class MockExecutor : public Executor {
- public:
-  MockExecutor() : Executor(new base::TestMockTimeTaskRunner()) {}
-  void FastForwardBy(base::TimeDelta duration) {
-    scoped_refptr<base::TestMockTimeTaskRunner> mock_task_runner_(
-        dynamic_cast<base::TestMockTimeTaskRunner*>(task_runner().get()));
-    mock_task_runner_->FastForwardBy(duration);
-  }
-};
-
 // Socket class which mocks the outgoing (host -> modem) socket calls and
 // provides implementations for incoming (modem -> host) socket calls that reads
 // data from kQrtrFilename rather than from an actual QRTR socket.
@@ -286,6 +277,9 @@ class MockSocketQrtr : public SocketInterface {
   DataAvailableCallback cb_;
 };
 
+// Extend ModemManagerProxy to use it's protected constructor.
+class FakeModemManagerProxy : public ModemManagerProxy {};
+
 // Test framework for ModemQrtr tests. Allows for the faking of modem -> cpu
 // responses with the use of ModemReceiveData.
 class ModemQrtrTest : public testing::Test {
@@ -298,7 +292,9 @@ class ModemQrtrTest : public testing::Test {
 
     auto socket = std::make_unique<MockSocketQrtr>();
     socket_ = socket.get();
-    modem_ = ModemQrtr::Create(std::move(socket), nullptr, &executor_);
+    auto modem_manager_proxy = std::make_unique<FakeModemManagerProxy>();
+    modem_ = ModemQrtr::Create(std::move(socket), nullptr, &executor_,
+                               std::move(modem_manager_proxy));
     ASSERT_NE(modem_, nullptr);
 
     receive_ids_.clear();
@@ -341,7 +337,7 @@ class ModemQrtrTest : public testing::Test {
       ModemReceiveData(kQrtrSwitchSlotResp.begin(), kQrtrSwitchSlotResp.end(),
                        kUimPort);
       EXPECT_EQ(modem_->qmi_disabled_, true);
-      executor_.FastForwardBy(ModemQrtr::kSwitchSlotDelay);
+      executor_.FastForwardBy(kSimRefreshDelay);
       EXPECT_EQ(modem_->qmi_disabled_, false);
     }
     ModemReceiveData(kQrtrResetResp.begin(), kQrtrResetResp.end(), kUimPort);

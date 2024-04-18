@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@
 #define SHILL_VPN_VPN_PROVIDER_H_
 
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include <base/macros.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 #include "shill/ipconfig.h"
@@ -26,7 +26,7 @@ class Manager;
 class VPNProvider : public ProviderInterface {
  public:
   // Interface name of the ARC bridge.
-  static const char kArcBridgeIfName[];
+  static constexpr std::string_view kArcBridgeIfName = "arcbr0";
 
   explicit VPNProvider(Manager* manager);
   VPNProvider(const VPNProvider&) = delete;
@@ -46,6 +46,7 @@ class VPNProvider : public ProviderInterface {
   ServiceRefPtr CreateTemporaryServiceFromProfile(const ProfileRefPtr& profile,
                                                   const std::string& entry_name,
                                                   Error* error) override;
+  void AbandonService(const ServiceRefPtr& service) override;
   void Start() override;
   void Stop() override;
 
@@ -70,12 +71,9 @@ class VPNProvider : public ProviderInterface {
   friend class VPNProviderTest;
   friend class VPNServiceTest;
   FRIEND_TEST(ThirdPartyVpnDriverTest, SetParameters);
-  FRIEND_TEST(VPNProviderTest, ArcDeviceFound);
   FRIEND_TEST(VPNProviderTest, CreateService);
   FRIEND_TEST(VPNProviderTest, CreateArcService);
-  FRIEND_TEST(VPNProviderTest, OnDeviceInfoAvailable);
   FRIEND_TEST(VPNProviderTest, RemoveService);
-  FRIEND_TEST(VPNServiceTest, AddRemoveVMInterface);
   FRIEND_TEST(VPNServiceTest, Unload);
 
   // Create a service of type |type| and storage identifier |storage_id|

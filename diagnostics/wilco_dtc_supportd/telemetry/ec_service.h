@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,19 +9,19 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/observer_list.h>
 #include <base/observer_list_types.h>
 #include <base/sequence_checker_impl.h>
-#include <base/single_thread_task_runner.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/simple_thread.h>
 
 #include "diagnostics/wilco_dtc_supportd/ec_constants.h"
 
 namespace diagnostics {
+namespace wilco {
 
 namespace internal {
 class EcEventMonitoringThreadDelegate;
@@ -217,7 +217,7 @@ class EcService {
   bool Start();
 
   // Shuts down service.
-  void ShutDown(base::Closure on_shutdown_callback);
+  void ShutDown(base::OnceClosure on_shutdown_callback);
 
   // Reads the telemetry information.
   GetEcTelemetryResponse GetEcTelemetry(const std::string& request_payload);
@@ -257,7 +257,7 @@ class EcService {
   const scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
 
   // This callback will be invoked after current service shutdown.
-  base::Closure on_shutdown_callback_;
+  base::OnceClosure on_shutdown_callback_;
 
   // The file system root directory. Can be overridden in tests.
   base::FilePath root_dir_{"/"};
@@ -280,6 +280,7 @@ class EcService {
   base::SequenceCheckerImpl sequence_checker_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_TELEMETRY_EC_SERVICE_H_

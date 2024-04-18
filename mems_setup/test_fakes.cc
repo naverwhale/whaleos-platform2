@@ -1,19 +1,24 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "mems_setup/test_fakes.h"
+
+#include <optional>
 
 #include <base/logging.h>
 
 namespace mems_setup {
 namespace fakes {
 
-base::Optional<std::string> FakeDelegate::ReadVpdValue(
-    const std::string& name) {
+FakeDelegate::FakeDelegate()
+    : Delegate(std::make_unique<libsar::fakes::FakeSarConfigReaderDelegate>()) {
+}
+
+std::optional<std::string> FakeDelegate::ReadVpdValue(const std::string& name) {
   auto k = vpd_.find(name);
   if (k == vpd_.end())
-    return base::nullopt;
+    return std::nullopt;
   return k->second;
 }
 
@@ -53,10 +58,17 @@ void FakeDelegate::CreateFile(const base::FilePath& fp) {
   existing_files_.emplace(fp);
 }
 
-base::Optional<gid_t> FakeDelegate::FindGroupId(const char* group) {
+void FakeDelegate::SetStringToFile(const base::FilePath& fp,
+                                   const std::string& data) {
+  dynamic_cast<libsar::fakes::FakeSarConfigReaderDelegate*>(
+      sar_config_reader_delegate_.get())
+      ->SetStringToFile(fp, data);
+}
+
+std::optional<gid_t> FakeDelegate::FindGroupId(const char* group) {
   auto k = groups_.find(group);
   if (k == groups_.end())
-    return base::nullopt;
+    return std::nullopt;
   return k->second;
 }
 
@@ -90,6 +102,22 @@ bool FakeDelegate::SetOwnership(const base::FilePath& path,
                                 gid_t group) {
   ownerships_[path.value()] = {user, group};
   return true;
+}
+
+std::optional<std::string> FakeDelegate::GetIioSarSensorDevlink(
+    std::string sys_path) {
+  return mock_devlink_;
+}
+
+brillo::CrosConfigInterface* FakeDelegate::GetCrosConfig() {
+  return static_cast<brillo::CrosConfigInterface*>(GetFakeCrosConfig());
+}
+
+brillo::FakeCrosConfig* FakeDelegate::GetFakeCrosConfig() {
+  if (!cros_config_)
+    cros_config_ = std::make_unique<brillo::FakeCrosConfig>();
+
+  return cros_config_.get();
 }
 
 }  // namespace fakes

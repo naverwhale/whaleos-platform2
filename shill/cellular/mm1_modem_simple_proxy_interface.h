@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 #include <string>
 
 #include "shill/callbacks.h"
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 class Error;
@@ -25,13 +25,11 @@ class ModemSimpleProxyInterface {
   virtual ~ModemSimpleProxyInterface() = default;
 
   virtual void Connect(const KeyValueStore& properties,
-                       const RpcIdentifierCallback& callback,
+                       RpcIdentifierCallback callback,
                        int timeout) = 0;
   virtual void Disconnect(const RpcIdentifier& bearer,
-                          const ResultCallback& callback,
+                          ResultCallback callback,
                           int timeout) = 0;
-  virtual void GetStatus(const KeyValueStoreCallback& callback,
-                         int timeout) = 0;
 };
 
 }  // namespace mm1

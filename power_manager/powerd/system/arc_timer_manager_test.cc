@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,11 +11,10 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/run_loop.h>
 #include <chromeos/dbus/service_constants.h>
 #include <gtest/gtest.h>
@@ -23,9 +22,9 @@
 
 #include "power_manager/common/test_main_loop_runner.h"
 #include "power_manager/powerd/system/dbus_wrapper_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 namespace {
 
@@ -116,7 +115,7 @@ bool AreTimerIdsIdenticalSizeButDistinct(
 
 }  // namespace
 
-class ArcTimerManagerTest : public ::testing::Test {
+class ArcTimerManagerTest : public TestEnvironment {
  public:
   ArcTimerManagerTest() {
     arc_timer_manager_.set_for_testing_(true);
@@ -126,8 +125,8 @@ class ArcTimerManagerTest : public ::testing::Test {
   ArcTimerManagerTest& operator=(const ArcTimerManagerTest&) = delete;
 
  protected:
-  bool CreateTimers(const std::string& tag,
-                    const std::vector<clockid_t>& clocks) WARN_UNUSED_RESULT {
+  [[nodiscard]] bool CreateTimers(const std::string& tag,
+                                  const std::vector<clockid_t>& clocks) {
     dbus::MethodCall method_call(power_manager::kPowerManagerInterface,
                                  power_manager::kCreateArcTimersMethod);
     dbus::MessageWriter writer(&method_call);
@@ -176,9 +175,9 @@ class ArcTimerManagerTest : public ::testing::Test {
     return true;
   }
 
-  bool StartTimer(const std::string& tag,
-                  clockid_t clock_id,
-                  base::TimeTicks absolute_expiration_time) WARN_UNUSED_RESULT {
+  [[nodiscard]] bool StartTimer(const std::string& tag,
+                                clockid_t clock_id,
+                                base::TimeTicks absolute_expiration_time) {
     dbus::MethodCall method_call(power_manager::kPowerManagerInterface,
                                  power_manager::kStartArcTimerMethod);
 
@@ -210,8 +209,8 @@ class ArcTimerManagerTest : public ::testing::Test {
 
   // Returns true iff the read descriptor of a timer is signalled. If the
   // signalling is incorrect returns false. Blocks otherwise.
-  bool WaitForExpiration(const std::string& tag,
-                         clockid_t clock_id) WARN_UNUSED_RESULT {
+  [[nodiscard]] bool WaitForExpiration(const std::string& tag,
+                                       clockid_t clock_id) {
     if (arc_timer_stores_.find(tag) == arc_timer_stores_.end()) {
       LOG(ERROR) << "Tag=" << tag << " not created";
       return false;
@@ -231,26 +230,21 @@ class ArcTimerManagerTest : public ::testing::Test {
       return false;
     }
 
-    TestMainLoopRunner runner;
-    // Set up a watcher to watch for the timer's read fd to become readable.
+    // Run the loop until the timer's read fd to becomes readable.
+    base::RunLoop loop;
     std::unique_ptr<base::FileDescriptorWatcher::Controller> watcher;
     watcher = base::FileDescriptorWatcher::WatchReadable(
         timer_read_fd,
         base::BindRepeating(
-            [](TestMainLoopRunner* runner,
+            [](base::RunLoop* loop,
                std::unique_ptr<base::FileDescriptorWatcher::Controller>*
                    watcher) {
               VLOG(1) << "Fd readable";
               *watcher = nullptr;
-              runner->StopLoop();
+              loop->Quit();
             },
-            &runner, &watcher));
-
-    // Start run loop and error out if the fd isn't readable after a timeout.
-    if (!runner.StartLoop(base::TimeDelta::FromSeconds(30))) {
-      LOG(ERROR) << "Timed out waiting for expiration";
-      return false;
-    }
+            &loop, &watcher));
+    loop.Run();
 
     // The timer expects 8 bytes to be written from the host upon expiration.
     // The read data signifies the number of expirations. The powerd
@@ -265,7 +259,7 @@ class ArcTimerManagerTest : public ::testing::Test {
     return true;
   }
 
-  bool DeleteTimers(const std::string& tag) WARN_UNUSED_RESULT {
+  [[nodiscard]] bool DeleteTimers(const std::string& tag) {
     dbus::MethodCall method_call(power_manager::kPowerManagerInterface,
                                  power_manager::kDeleteArcTimersMethod);
     dbus::MessageWriter writer(&method_call);
@@ -331,7 +325,6 @@ class ArcTimerManagerTest : public ::testing::Test {
     // Map of timer id to the read fd that will indicate expiration of the
     // timer.
     std::map<ArcTimerManager::TimerId, base::ScopedFD> arc_timers_;
-
   };
 
   // Mapping of a client's tag and the |ArcTimerStore| to use with it.
@@ -344,9 +337,8 @@ TEST_F(ArcTimerManagerTest, CreateAndStartTimer) {
   std::vector<clockid_t> clocks = {CLOCK_REALTIME_ALARM, CLOCK_BOOTTIME_ALARM};
   const std::string kTag = "Test";
   ASSERT_TRUE(CreateTimers(kTag, clocks));
-  ASSERT_TRUE(StartTimer(
-      kTag, CLOCK_BOOTTIME_ALARM,
-      base::TimeTicks::Now() + base::TimeDelta::FromMilliseconds(1)));
+  ASSERT_TRUE(StartTimer(kTag, CLOCK_BOOTTIME_ALARM,
+                         base::TimeTicks::Now() + base::Milliseconds(1)));
   ASSERT_TRUE(WaitForExpiration(kTag, CLOCK_BOOTTIME_ALARM));
 }
 
@@ -359,9 +351,8 @@ TEST_F(ArcTimerManagerTest, CreateAndDeleteTimers) {
   // Delete created timers and then try to start a timer. The call should fail
   // as the timer doesn't exist.
   ASSERT_TRUE(DeleteTimers(kTag));
-  ASSERT_FALSE(StartTimer(
-      kTag, CLOCK_BOOTTIME_ALARM,
-      base::TimeTicks::Now() + base::TimeDelta::FromMilliseconds(1)));
+  ASSERT_FALSE(StartTimer(kTag, CLOCK_BOOTTIME_ALARM,
+                          base::TimeTicks::Now() + base::Milliseconds(1)));
 }
 
 TEST_F(ArcTimerManagerTest, CheckInvalidCreateTimersArgs) {
@@ -376,9 +367,8 @@ TEST_F(ArcTimerManagerTest, CheckInvalidStartTimerArgs) {
   const std::string kTag = "Test";
   ASSERT_TRUE(CreateTimers(kTag, clocks));
   // Starting timer for unregistered clock id should fail.
-  ASSERT_FALSE(StartTimer(
-      kTag, CLOCK_BOOTTIME_ALARM,
-      base::TimeTicks::Now() + base::TimeDelta::FromMilliseconds(1)));
+  ASSERT_FALSE(StartTimer(kTag, CLOCK_BOOTTIME_ALARM,
+                          base::TimeTicks::Now() + base::Milliseconds(1)));
 }
 
 TEST_F(ArcTimerManagerTest, CheckMultipleCreateTimers) {
@@ -414,11 +404,9 @@ TEST_F(ArcTimerManagerTest, CheckDeleteAndStartOther) {
   const std::string kTag2 = "Test2";
   ASSERT_TRUE(CreateTimers(kTag2, clocks));
   ASSERT_TRUE(DeleteTimers(kTag1));
-  ASSERT_TRUE(StartTimer(
-      kTag2, CLOCK_REALTIME_ALARM,
-      base::TimeTicks::Now() + base::TimeDelta::FromMilliseconds(1)));
+  ASSERT_TRUE(StartTimer(kTag2, CLOCK_REALTIME_ALARM,
+                         base::TimeTicks::Now() + base::Milliseconds(1)));
   ASSERT_TRUE(WaitForExpiration(kTag2, CLOCK_REALTIME_ALARM));
 }
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system

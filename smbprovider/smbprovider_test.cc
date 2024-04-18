@@ -1,18 +1,19 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/test/simple_test_tick_clock.h>
 #include <dbus/mock_bus.h>
 #include <dbus/object_path.h>
 #include <dbus/smbprovider/dbus-constants.h>
 #include <gtest/gtest.h>
+#include <kerberos/proto_bindings/kerberos_service.pb.h>
 
 #include "smbprovider/fake_kerberos_artifact_client.h"
 #include "smbprovider/fake_samba_interface.h"
@@ -34,7 +35,7 @@ namespace {
 
 using brillo::dbus_utils::DBusObject;
 
-// arbitary D-Bus
+// Arbitrary D-Bus serial.
 constexpr int32_t kDBusSerial = 123;
 
 ErrorType CastError(int error) {
@@ -138,7 +139,7 @@ class SmbProviderTest : public testing::Test {
 
     metadata_cache_ = std::make_unique<MetadataCache>(
         fake_tick_clock_,
-        base::TimeDelta::FromMicroseconds(kMetadataCacheLifetimeMicroseconds),
+        base::Microseconds(kMetadataCacheLifetimeMicroseconds),
         MetadataCache::Mode::kDisabled);
   }
 
@@ -345,7 +346,7 @@ TEST_F(SmbProviderTest, SetupKerberosWritesKerberosFilesSuccessfully) {
   const std::string krb5cc = "test creds";
   const std::string krb5conf = "test conf";
 
-  authpolicy::KerberosFiles kerberos_files =
+  kerberos::KerberosFiles kerberos_files =
       CreateKerberosFilesProto(krb5cc, krb5conf);
   kerberos_client_->AddKerberosFiles(user, kerberos_files);
 

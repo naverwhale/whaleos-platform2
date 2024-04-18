@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,101 +21,47 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/containers/contains.h>
 #include <base/files/file.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/weak_ptr.h>
 #include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <brillo/process/process_reaper.h>
 
-#include "cros-disks/error_logger.h"
 #include "cros-disks/mount_point.h"
 #include "cros-disks/platform.h"
 #include "cros-disks/quote.h"
 #include "cros-disks/sandboxed_process.h"
-#include "cros-disks/uri.h"
 
 namespace cros_disks {
-
 namespace {
 
-const char kFuseDeviceFile[] = "/dev/fuse";
-const char kBaseFreezerCgroup[] = "/sys/fs/cgroup/freezer";
-const char kCgroupProcsFile[] = "cgroup.procs";
-const int kFUSEMountFlags = MS_NODEV | MS_NOSUID | MS_NOEXEC | MS_DIRSYNC;
-
-class FUSEMountPoint : public MountPoint {
- public:
-  using MountPoint::MountPoint;
-
-  base::WeakPtr<FUSEMountPoint> GetWeakPtr() {
-    return weak_factory_.GetWeakPtr();
-  }
-
-  static void CleanUpCallback(const base::FilePath& mount_path,
-                              base::WeakPtr<FUSEMountPoint> ptr,
-                              const siginfo_t& info) {
-    CHECK_EQ(SIGCHLD, info.si_signo);
-    if (info.si_code != CLD_EXITED) {
-      LOG(WARNING) << "FUSE daemon for " << redact(mount_path)
-                   << " crashed with code " << info.si_code << " and status "
-                   << info.si_status;
-    } else if (info.si_status != 0) {
-      LOG(WARNING) << "FUSE daemon for " << redact(mount_path)
-                   << " exited with status " << info.si_status;
-    } else {
-      LOG(INFO) << "FUSE daemon for " << quote(mount_path)
-                << " exited normally";
-    }
-    if (!ptr) {
-      // If the MountPoint instance has been deleted, it was
-      // already unmounted and cleaned up due to a
-      // request from the browser (or logout). In this
-      // case, there's nothing to do.
-      // TODO(dats): Consolidate this logic into centralized place (likely
-      //  MountPoint base class).
-      return;
-    }
-    ptr->CleanUp();
-  }
-
- private:
-  void CleanUp() {
-    MountErrorType unmount_error = Unmount();
-    LOG_IF(ERROR, unmount_error != MOUNT_ERROR_NONE)
-        << "Cannot unmount FUSE mount point " << redact(path())
-        << " after process exit: " << unmount_error;
-
-    if (!platform_->RemoveEmptyDirectory(path().value())) {
-      PLOG(ERROR) << "Cannot remove FUSE mount point " << redact(path())
-                  << " after process exit";
-    }
-  }
-
-  base::WeakPtrFactory<FUSEMountPoint> weak_factory_{this};
-};
-
-bool GetPhysicalBlockSize(const std::string& source, int* size) {
-  base::ScopedFD fd(open(source.c_str(), O_RDONLY | O_CLOEXEC));
-
-  *size = 0;
+// Gets the physical block size of the given block device.
+// Returns 0 in case of error.
+int GetPhysicalBlockSize(const std::string& source) {
+  const base::ScopedFD fd(open(source.c_str(), O_RDONLY | O_CLOEXEC));
   if (!fd.is_valid()) {
-    PLOG(WARNING) << "Couldn't open " << source;
-    return false;
+    PLOG(WARNING) << "Cannot open device " << quote(source);
+    return 0;
   }
 
-  if (ioctl(fd.get(), BLKPBSZGET, size) < 0) {
-    PLOG(WARNING) << "Failed to get block size for" << source;
-    return false;
+  int block_size;
+  if (ioctl(fd.get(), BLKPBSZGET, &block_size) < 0) {
+    PLOG(WARNING) << "Cannot get block size of device " << quote(source);
+    return 0;
   }
 
-  return true;
+  DCHECK_GE(block_size, 0);
+  LOG(INFO) << "Device " << quote(source) << " has a block size of "
+            << block_size << " bytes";
+  return block_size;
 }
 
 }  // namespace
@@ -125,19 +71,19 @@ FUSESandboxedProcessFactory::FUSESandboxedProcessFactory(
     SandboxedExecutable executable,
     OwnerUser run_as,
     bool has_network_access,
+    bool kill_pid_namespace,
     std::vector<gid_t> supplementary_groups,
-    base::Optional<base::FilePath> mount_namespace)
+    std::optional<base::FilePath> mount_namespace)
     : platform_(platform),
       executable_(std::move(executable.executable)),
       seccomp_policy_(std::move(executable.seccomp_policy)),
       run_as_(std::move(run_as)),
       has_network_access_(has_network_access),
+      kill_pid_namespace_(kill_pid_namespace),
       supplementary_groups_(std::move(supplementary_groups)),
       mount_namespace_(std::move(mount_namespace)) {
   CHECK(executable_.IsAbsolute());
-  if (seccomp_policy_) {
-    CHECK(seccomp_policy_.value().IsAbsolute());
-  }
+  CHECK(seccomp_policy_.empty() || seccomp_policy_.IsAbsolute());
   if (mount_namespace_) {
     CHECK(mount_namespace_.value().IsAbsolute());
   }
@@ -147,45 +93,43 @@ FUSESandboxedProcessFactory::~FUSESandboxedProcessFactory() = default;
 
 std::unique_ptr<SandboxedProcess>
 FUSESandboxedProcessFactory::CreateSandboxedProcess() const {
-  auto sandbox = std::make_unique<SandboxedProcess>();
+  std::unique_ptr<SandboxedProcess> sandbox =
+      std::make_unique<SandboxedProcess>();
   if (!ConfigureSandbox(sandbox.get()))
-    return nullptr;
+    sandbox.reset();
   return sandbox;
 }
 
 bool FUSESandboxedProcessFactory::ConfigureSandbox(
     SandboxedProcess* sandbox) const {
-  base::FilePath cgroup = base::FilePath(kBaseFreezerCgroup)
-                              .Append(executable_.BaseName())
-                              .Append(kCgroupProcsFile);
   sandbox->SetCapabilities(0);
   sandbox->SetNoNewPrivileges();
 
   // The FUSE mount program is put under a new mount namespace, so mounts
   // inside that namespace don't normally propagate.
   sandbox->NewMountNamespace();
-  sandbox->SkipRemountPrivate();
+  sandbox->NewIpcNamespace();
+  sandbox->NewPidNamespace();
 
-  // TODO(benchan): Re-enable cgroup namespace when either Chrome OS
-  // kernel 3.8 supports it or no more supported devices use kernel
-  // 3.8.
-  // mount_process.NewCgroupNamespace();
+  sandbox->NewCgroupNamespace();
+
+  sandbox->SetKillPidNamespace(kill_pid_namespace_);
 
   // Add the sandboxed process to its cgroup that should be setup. Return an
   // error if it's not there.
+  const base::FilePath cgroup = base::FilePath("/sys/fs/cgroup/freezer")
+                                    .Append(executable_.BaseName())
+                                    .Append("cgroup.procs");
+
   if (!platform_->PathExists(cgroup.value())) {
-    LOG(ERROR) << "Freezer cgroup, " << cgroup << " is missing";
-    return MOUNT_ERROR_INTERNAL;
+    PLOG(ERROR) << "Freezer cgroup " << quote(cgroup) << " is missing";
+    return false;
   }
 
   if (!sandbox->AddToCgroup(cgroup.value())) {
-    LOG(ERROR) << "Unable to add sandboxed process to cgroup " << cgroup;
-    return MOUNT_ERROR_INTERNAL;
+    LOG(ERROR) << "Cannot add sandboxed process to cgroup " << quote(cgroup);
+    return false;
   }
-
-  sandbox->NewIpcNamespace();
-
-  sandbox->NewPidNamespace();
 
   // Prepare mounts for pivot_root.
   if (!sandbox->SetUpMinimalMounts()) {
@@ -205,14 +149,24 @@ bool FUSESandboxedProcessFactory::ConfigureSandbox(
     sandbox->NewNetworkNamespace();
   } else {
     // Network DNS configs are in /run/shill.
-    if (!sandbox->BindMount("/run/shill", "/run/shill", false, false)) {
-      LOG(ERROR) << "Cannot bind /run/shill";
+    // TODO(259354228): Remove once resolv.conf migration to dns-proxy is done.
+    if (const std::string p = "/run/shill";
+        !sandbox->BindMount(p, p, false, false)) {
+      PLOG(ERROR) << "Cannot bind-mount " << quote(p);
       return false;
     }
+
+    // Network DNS configs are in /run/dns-proxy.
+    if (const std::string p = "/run/dns-proxy";
+        !sandbox->BindMount(p, p, false, false)) {
+      PLOG(ERROR) << "Cannot bind-mount " << quote(p);
+      return false;
+    }
+
     // Hardcoded hosts are mounted into /etc/hosts.d when Crostini is enabled.
-    if (platform_->PathExists("/etc/hosts.d") &&
-        !sandbox->BindMount("/etc/hosts.d", "/etc/hosts.d", false, false)) {
-      LOG(ERROR) << "Cannot bind /etc/hosts.d";
+    if (const std::string p = "/etc/hosts.d";
+        platform_->PathExists(p) && !sandbox->BindMount(p, p, false, false)) {
+      PLOG(ERROR) << "Cannot bind-mount " << quote(p);
       return false;
     }
   }
@@ -222,30 +176,29 @@ bool FUSESandboxedProcessFactory::ConfigureSandbox(
     return false;
   }
 
-  if (seccomp_policy_) {
-    if (!platform_->PathExists(seccomp_policy_.value().value())) {
-      LOG(ERROR) << "Seccomp policy " << quote(seccomp_policy_.value())
-                 << " is missing";
+  if (!seccomp_policy_.empty()) {
+    if (!platform_->PathExists(seccomp_policy_.value())) {
+      LOG(ERROR) << "Cannot find SECCOMP policy " << quote(seccomp_policy_);
       return false;
     }
-    sandbox->LoadSeccompFilterPolicy(seccomp_policy_.value().value());
+    sandbox->SetSeccompPolicy(seccomp_policy_);
   }
 
   sandbox->SetUserId(run_as_.uid);
   sandbox->SetGroupId(run_as_.gid);
-  if (!supplementary_groups_.empty()) {
+
+  if (!supplementary_groups_.empty())
     sandbox->SetSupplementaryGroupIds(supplementary_groups_);
-  }
 
   // Enter mount namespace in the sandbox if necessary.
-  if (mount_namespace_) {
+  if (mount_namespace_)
     sandbox->EnterExistingMountNamespace(mount_namespace_.value().value());
-  }
 
   if (!platform_->PathExists(executable_.value())) {
-    LOG(ERROR) << "Cannot find mount program " << quote(executable_);
+    LOG(ERROR) << "Cannot find mounter program " << quote(executable_);
     return false;
   }
+
   sandbox->AddArgument(executable_.value());
 
   return true;
@@ -266,18 +219,18 @@ std::unique_ptr<MountPoint> FUSEMounter::Mount(
     const std::string& source,
     const base::FilePath& target_path,
     std::vector<std::string> params,
-    MountErrorType* error) const {
+    MountError* const error) const {
   // Read-only is the only parameter that has any effect at this layer.
   const bool read_only = config_.read_only || IsReadOnlyMount(params);
 
-  const base::File fuse_file = base::File(
-      base::FilePath(kFuseDeviceFile),
+  const base::FilePath fuse_device_path("/dev/fuse");
+  base::File fuse_file = base::File(
+      fuse_device_path,
       base::File::FLAG_OPEN | base::File::FLAG_READ | base::File::FLAG_WRITE);
   if (!fuse_file.IsValid()) {
-    LOG(ERROR) << "Unable to open FUSE device file. Error: "
-               << fuse_file.error_details() << " "
+    LOG(ERROR) << "Cannot open FUSE device " << quote(fuse_device_path) << ": "
                << base::File::ErrorToString(fuse_file.error_details());
-    *error = MOUNT_ERROR_INTERNAL;
+    *error = MountError::kInternalError;
     return nullptr;
   }
 
@@ -297,26 +250,18 @@ std::unique_ptr<MountPoint> FUSEMounter::Mount(
       fuse_file.GetPlatformFile(), kChronosUID, kChronosAccessGID, S_IFDIR);
 
   std::string fuse_type = "fuse";
-  std::string source_descr = source;
   base::stat_wrapper_t statbuf = {0};
   if (platform_->Lstat(source, &statbuf) && S_ISBLK(statbuf.st_mode)) {
-    int blksize = 0;
-
     // TODO(crbug.com/931500): It's possible that specifying a block size equal
     // to the file system cluster size (which might be larger than the physical
     // block size) might be more efficient. Data would be needed to see what
     // kind of performance benefit, if any, could be gained. At the very least,
     // specify the block size of the underlying device. Without this, UFS cards
     // with 4k sector size will fail to mount.
-    if (GetPhysicalBlockSize(source, &blksize) && blksize > 0)
+    if (const int blksize = GetPhysicalBlockSize(source))
       fuse_mount_options.append(base::StringPrintf(",blksize=%d", blksize));
 
-    LOG(INFO) << "Source file " << quote(source)
-              << " is a block device with block size " << blksize;
-
     fuse_type = "fuseblk";
-  } else {
-    source_descr = "fuse:" + source;
   }
 
   if (!filesystem_type_.empty()) {
@@ -324,90 +269,75 @@ std::unique_ptr<MountPoint> FUSEMounter::Mount(
     fuse_type += filesystem_type_;
   }
 
-  MountPointData data = {
-      .mount_path = target_path,
-      .source = source_descr,
-      .filesystem_type = fuse_type,
-      .flags = kFUSEMountFlags | (read_only ? MS_RDONLY : 0) |
-               (config_.nosymfollow ? MS_NOSYMFOLLOW : 0),
-      .data = fuse_mount_options,
-  };
-  *error = platform_->Mount(data.source, data.mount_path.value(),
-                            data.filesystem_type, data.flags, data.data);
-  if (*error != MOUNT_ERROR_NONE) {
-    LOG(ERROR) << "Cannot perform unprivileged FUSE mount: " << *error;
+  // Prepare mount flags.
+  uint64_t mount_flags = MS_NODEV | MS_NOSUID | MS_NOEXEC | MS_DIRSYNC;
+
+  if (read_only)
+    mount_flags |= MS_RDONLY;
+
+  if (config_.nosymfollow)
+    mount_flags |= MS_NOSYMFOLLOW;
+
+  std::unique_ptr<MountPoint> mount_point =
+      MountPoint::Mount({.mount_path = target_path,
+                         .source = source,
+                         .filesystem_type = fuse_type,
+                         .flags = mount_flags,
+                         .data = fuse_mount_options},
+                        platform_, error);
+
+  if (!mount_point) {
+    DCHECK_NE(*error, MountError::kSuccess);
     return nullptr;
   }
 
-  pid_t pid =
-      StartDaemon(fuse_file, source, target_path, std::move(params), error);
-  if (*error != MOUNT_ERROR_NONE || pid == Process::kInvalidProcessId) {
-    LOG(ERROR) << "FUSE daemon start failure: " << *error;
-    LOG(INFO) << "FUSE cleanup on start failure for " << quote(target_path);
-    MountErrorType unmount_error =
-        platform_->Unmount(target_path.value(), MNT_FORCE | MNT_DETACH);
-    LOG_IF(ERROR, unmount_error != MOUNT_ERROR_NONE)
-        << "Cannot unmount FUSE mount point " << redact(target_path)
-        << " after launch failure: " << unmount_error;
+  // Start FUSE daemon.
+  std::unique_ptr<SandboxedProcess> process = StartDaemon(
+      std::move(fuse_file), source, target_path, std::move(params), error);
+
+  if (!process) {
+    DCHECK_NE(*error, MountError::kSuccess);
+    LOG(ERROR) << "Cannot start FUSE daemon for " << redact(source) << ": "
+               << *error;
     return nullptr;
   }
 
-  // At this point, the FUSE daemon has successfully started.
-  std::unique_ptr<FUSEMountPoint> mount_point =
-      std::make_unique<FUSEMountPoint>(std::move(data), platform_);
+  mount_point->SetProcess(std::move(process), config_.metrics,
+                          config_.metrics_name,
+                          config_.password_needed_exit_codes);
 
-  // Add a watcher that cleans up the FUSE mount when the process exits.
-  // This is defined as in-jail "init" process, denoted by pid(),
-  // terminates, which happens only when the last process in the jailed PID
-  // namespace terminates.
-  process_reaper_->WatchForChild(
-      FROM_HERE, pid,
-      base::BindOnce(&FUSEMountPoint::CleanUpCallback, target_path,
-                     mount_point->GetWeakPtr()));
-
-  *error = MOUNT_ERROR_NONE;
-  return std::move(mount_point);
+  *error = MountError::kSuccess;
+  return mount_point;
 }
 
-pid_t FUSEMounter::StartDaemon(const base::File& fuse_file,
-                               const std::string& source,
-                               const base::FilePath& target_path,
-                               std::vector<std::string> params,
-                               MountErrorType* error) const {
-  auto mount_process =
+std::unique_ptr<SandboxedProcess> FUSEMounter::StartDaemon(
+    base::File fuse_file,
+    const std::string& source,
+    const base::FilePath& target_path,
+    std::vector<std::string> params,
+    MountError* const error) const {
+  DCHECK(error);
+
+  std::unique_ptr<SandboxedProcess> process =
       PrepareSandbox(source, target_path, std::move(params), error);
-  if (*error != MOUNT_ERROR_NONE) {
-    return Process::kInvalidProcessId;
+
+  if (!process) {
+    DCHECK_NE(*error, MountError::kSuccess);
+    return nullptr;
   }
 
-  mount_process->AddArgument(
-      base::StringPrintf("/dev/fd/%d", fuse_file.GetPlatformFile()));
+  const int fd = fuse_file.GetPlatformFile();
+  process->AddArgument(base::StringPrintf("/dev/fd/%d", fd));
+  process->PreserveFile(fd);
 
-  std::vector<std::string> output;
-  const int return_code = mount_process->Run(&output);
-  *error = InterpretReturnCode(return_code);
+  process->SetOutputCallback(base::DoNothing());
 
-  if (*error != MOUNT_ERROR_NONE) {
-    const auto& executable = mount_process->arguments()[0];
-    if (!output.empty()) {
-      LOG(ERROR) << "FUSE mount program " << quote(executable) << " outputted "
-                 << output.size() << " lines:";
-      for (const std::string& line : output) {
-        LOG(ERROR) << line;
-      }
-    }
-    LOG(ERROR) << "FUSE mount program " << quote(executable)
-               << " returned error code " << return_code;
-    return Process::kInvalidProcessId;
+  if (!process->Start()) {
+    *error = MountError::kMountProgramNotFound;
+    return nullptr;
   }
 
-  return mount_process->pid();
-}
-
-MountErrorType FUSEMounter::InterpretReturnCode(int return_code) const {
-  if (return_code != 0)
-    return MOUNT_ERROR_MOUNT_PROGRAM_FAILED;
-  return MOUNT_ERROR_NONE;
+  return process;
 }
 
 FUSEMounterHelper::FUSEMounterHelper(
@@ -428,17 +358,21 @@ std::unique_ptr<SandboxedProcess> FUSEMounterHelper::PrepareSandbox(
     const std::string& source,
     const base::FilePath& target_path,
     std::vector<std::string> params,
-    MountErrorType* error) const {
-  auto sandbox = sandbox_factory_->CreateSandboxedProcess();
+    MountError* const error) const {
+  DCHECK(error);
+
+  std::unique_ptr<SandboxedProcess> sandbox =
+      sandbox_factory_->CreateSandboxedProcess();
   if (!sandbox) {
-    *error = MOUNT_ERROR_INTERNAL;
+    *error = MountError::kInternalError;
     return nullptr;
   }
+
   *error =
       ConfigureSandbox(source, target_path, std::move(params), sandbox.get());
-  if (*error != MOUNT_ERROR_NONE) {
+  if (*error != MountError::kSuccess)
     return nullptr;
-  }
+
   return sandbox;
 }
 

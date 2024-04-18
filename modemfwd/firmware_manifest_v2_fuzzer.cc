@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/logging.h>
 #include <libprotobuf-mutator/src/libfuzzer/libfuzzer_macro.h>
 
 #include "modemfwd/firmware_manifest.h"
@@ -35,9 +36,9 @@ void FuzzParseFirmwareManifestV2(const modemfwd::FirmwareManifestV2& input) {
 
   base::WriteFile(file_path, text.data(), text.size());
 
-  FirmwareIndex index;
-
-  ParseFirmwareManifestV2(file_path, &index);
+  std::map<std::string, Dlc> dlc_per_variant;
+  std::unique_ptr<FirmwareIndex> index =
+      ParseFirmwareManifestV2(file_path, dlc_per_variant);
 }
 
 DEFINE_PROTO_FUZZER(const modemfwd::FirmwareManifestV2& input) {

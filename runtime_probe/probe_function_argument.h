@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2023 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,8 @@
 #define RUNTIME_PROBE_PROBE_FUNCTION_ARGUMENT_H_
 
 #include <memory>
-#include <set>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -15,115 +16,163 @@
 #include <base/logging.h>
 #include <base/values.h>
 
+#include "runtime_probe/probe_function.h"
+
 namespace runtime_probe {
+namespace internal {
 
-// To know how to define an argument parser and use it in your probe function,
-// please check "functions/shell.h" as an example.  It should be well commented.
-//
-// Currently, we only supports the following types of arguments:
-//   - std::string
-//   - int
-//   - bool
-//   - double
-//   - std::vector<std::string>
-//   - std::vector<std::unique_ptr<ProbeFunction>>
-//
-// Arguments can have default value, except for
-// std::vector<std::unique_ptr<ProbeFunction>>.
-
-class ProbeFunction;
-
-template <typename T>
-bool ParseArgumentInternal(const char* function_name,
-                           const char* member_name,
-                           T* member,
-                           const base::Value& value);
+// Type templates for identifying probe function argument type.
+template <typename>
+inline constexpr bool IsProbeFunctionArg = false;
+template <>
+inline constexpr bool IsProbeFunctionArg<std::string> = true;
+template <>
+inline constexpr bool IsProbeFunctionArg<bool> = true;
+template <>
+inline constexpr bool IsProbeFunctionArg<double> = true;
+template <>
+inline constexpr bool IsProbeFunctionArg<int> = true;
+template <>
+inline constexpr bool IsProbeFunctionArg<std::unique_ptr<ProbeFunction>> = true;
 
 template <typename T>
-bool ParseArgument(const char* function_name,
-                   const char* member_name,
-                   T* member,
-                   const base::Value& value) {
-  if (value.is_dict()) {
-    auto* real_value = value.FindKey(member_name);
-    if (!real_value) {
-      LOG(ERROR) << function_name << ": `" << member_name << "` not found";
+bool ParseArgumentImpl(const base::Value& value, T& out, std::string& err);
+
+template <typename T>
+bool ParseListArgument(const base::Value& value,
+                       std::vector<T>& out,
+                       std::string& err) {
+  static_assert(IsProbeFunctionArg<T>, "Unsupport type");
+
+  if (!value.is_list()) {
+    std::stringstream ss;
+    ss << "expected a list but got: " << value;
+    err = ss.str();
+    return false;
+  }
+
+  std::vector<T> tmp_list;
+  for (const auto& v : value.GetList()) {
+    T tmp;
+    if (!ParseArgumentImpl(v, tmp, err)) {
+      err = "failed to parse list: " + err;
       return false;
     }
-    return ParseArgumentInternal(function_name, member_name, member,
-                                 *real_value);
+    tmp_list.push_back(std::move(tmp));
   }
-  return ParseArgumentInternal(function_name, member_name, member, value);
+  out = std::move(tmp_list);
+  return true;
 }
 
+// Type templates for identifying the vector.
+template <typename>
+inline constexpr bool IsVector = false;
 template <typename T>
-bool ParseArgument(const char* function_name,
-                   const char* member_name,
-                   T* member,
-                   const base::Value& value,
-                   const T&& default_value) {
-  CHECK(value.is_dict());
-  if (!value.FindKey(member_name)) {
-    *member = default_value;
+inline constexpr bool IsVector<std::vector<T>> = true;
+
+template <typename T>
+bool ParseArgument(const base::Value& value, T& out, std::string& err) {
+  if constexpr (IsVector<T>) {
+    return ParseListArgument(value, out, err);
+  } else {
+    static_assert(IsProbeFunctionArg<T>, "Unsupport type");
+    return ParseArgumentImpl(value, out, err);
+  }
+}
+
+}  // namespace internal
+
+// Provides a ArgumentParser to parse argument to |target|.
+template <typename T>
+class ArgumentParserProvider : public ProbeFunction::ArgumentParser {
+ public:
+  ArgumentParserProvider(ProbeFunction* probe_function,
+                         const std::string& field_name,
+                         T& target,
+                         std::optional<T> default_value = std::nullopt)
+      : target_(target), default_value_(std::move(default_value)) {
+    probe_function->RegisterArgumentParser(field_name, this);
+  }
+  ArgumentParserProvider(const ArgumentParserProvider&) = delete;
+  ArgumentParserProvider& operator=(const ArgumentParserProvider&) = delete;
+  ~ArgumentParserProvider() override = default;
+
+  bool Parse(const std::optional<base::Value>& value,
+             std::string& err) override {
+    if (value.has_value()) {
+      return internal::ParseArgument(value.value(), target_, err);
+    }
+    if (default_value_.has_value()) {
+      target_ = std::move(default_value_.value());
+      return true;
+    }
+    err = "field is required but was not found";
+    return false;
+  }
+
+ private:
+  T& target_;
+  std::optional<T> default_value_;
+};
+
+// Same as above but |target| is std::optional<T>. Will set to |std::nullopt| if
+// argument is missing.
+template <typename T>
+class ArgumentParserProvider<std::optional<T>>
+    : public ProbeFunction::ArgumentParser {
+ public:
+  ArgumentParserProvider(ProbeFunction* probe_function,
+                         const std::string& field_name,
+                         std::optional<T>& target)
+      : target_(target) {
+    probe_function->RegisterArgumentParser(field_name, this);
+  }
+  ArgumentParserProvider(const ArgumentParserProvider&) = delete;
+  ArgumentParserProvider& operator=(const ArgumentParserProvider&) = delete;
+  ~ArgumentParserProvider() override = default;
+
+  bool Parse(const std::optional<base::Value>& value,
+             std::string& err) override {
+    if (value.has_value()) {
+      T tmp;
+      if (internal::ParseArgument(value.value(), tmp, err)) {
+        target_ = std::move(tmp);
+        return true;
+      }
+      return false;
+    }
+    target_ = std::nullopt;
     return true;
   }
 
-  return ParseArgument(function_name, member_name, member, value);
-}
+ private:
+  std::optional<T>& target_;
+};
 
-template <>
-bool ParseArgument<std::vector<std::unique_ptr<ProbeFunction>>>(
-    const char* function_name,
-    const char* member_name,
-    std::vector<std::unique_ptr<ProbeFunction>>* member,
-    const base::Value& dict_value,
-    const std::vector<std::unique_ptr<ProbeFunction>>&& default_value) = delete;
-
-// These macros are for argument parsing.
+// Defines a probe function arguments. Should be used in a derived class of
+// ProbeFunction class. This define a member variable and a
+// ArgumentParserProvider to parse argument to the member variable.
 //
-//  1. Due to the template declaration, the type of default value and member
-//  must match exactly.  That is, the default value of a double argument
-//  must be double (3.0 instead of 3).  And default value of string argument
-//  must be std::string{...}.
+// |type|: The type of the argument.
+// |field_name|: The field name of the argument. This will define a member
+//               variable |field_name_|.
+// |...|: A default value. Cannot be set if |type| is std::optional<T> (because
+//        it will never be nullopt).
+//        If |type| is not std::optional<T> and don't have default value, the
+//        argument become a required argument.
 //
-//  2. Due to the behavior of "&=", all parser will be executed even if some
-//  of them failed.
-//
-// See `functions/shell.h` for example usage.
-
-// Assumes that |T| and |dict_value| are in the scope.
-// Define |instance|, |keys| and |result| into the scope.
-#define PARSE_BEGIN()                                              \
-  base::Value raw_value{base::Value::Type::DICTIONARY};            \
-  raw_value.SetKey(T::function_name, dict_value.Clone());          \
-  auto instance = std::unique_ptr<T>{new T(std::move(raw_value))}; \
-  std::set<std::string> keys;                                      \
-  bool result = true
-
-// Parses each argument one by one. Stores the value into |instance->arg_name_|.
-// If fail, sets |result| to false. Assumes that PARSE_BEGIN is called before
-// this.
-#define PARSE_ARGUMENT(member_name, ...)                                       \
-  result &=                                                                    \
-      ParseArgument(T::function_name, #member_name, &instance->member_name##_, \
-                    dict_value, ##__VA_ARGS__);                                \
-  keys.insert(#member_name)
-
-// Checks |result| and returns |instance| or nullptr. Assumes that PARSE_BEGIN
-// is called before this.
-// Notes that the return type must be |std::unique_ptr<T>| to support return
-// type auto deduction.
-#define PARSE_END()                                                    \
-  if (!result)                                                         \
-    return std::unique_ptr<T>{nullptr};                                \
-  for (const auto kv : dict_value.DictItems()) {                       \
-    if (keys.find(kv.first) == keys.end()) {                           \
-      LOG(ERROR) << T::function_name << " doesn't have \"" << kv.first \
-                 << "\" argument.";                                    \
-      return std::unique_ptr<T>{nullptr};                              \
-    }                                                                  \
-  }                                                                    \
-  return instance
+// Example:
+//   class MyFunction: public ProbeFunction {
+//    private:
+//     PROBE_FUNCTION_ARG_DEF(int, a_int);
+//     PROBE_FUNCTION_ARG_DEF(int, default_int, 42);
+//     PROBE_FUNCTION_ARG_DEF(std::optional<int>, opt_int);
+//   }
+#define PROBE_FUNCTION_ARG_DEF(type, field_name, ...)                   \
+  type field_name##_;                                                   \
+  ArgumentParserProvider<type> field_name##_argument_parser_provider_ { \
+    this, #field_name, field_name##_, ##__VA_ARGS__                     \
+  }
 
 }  // namespace runtime_probe
 

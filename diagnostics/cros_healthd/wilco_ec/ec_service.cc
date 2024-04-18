@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,14 +15,14 @@
 #include <cstring>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 namespace diagnostics {
 
@@ -173,7 +173,8 @@ size_t EcService::EcEvent::PayloadSizeInBytes() const {
   return (sanitized_size - 1) * sizeof(uint16_t);
 }
 
-EcService::EcService() : task_runner_(base::ThreadTaskRunnerHandle::Get()) {}
+EcService::EcService()
+    : task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {}
 
 EcService::~EcService() {
   DCHECK(sequence_checker_.CalledOnValidSequence());

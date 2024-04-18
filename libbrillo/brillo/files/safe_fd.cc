@@ -1,12 +1,15 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "brillo/files/safe_fd.h"
 
 #include <fcntl.h>
+#include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include <algorithm>
 
 #include <base/files/file_util.h>
 #include <base/logging.h>
@@ -99,8 +102,7 @@ SafeFD::SafeFDResult OpenSafelyInternal(int parent_fd,
                                         const base::FilePath& path,
                                         int flags,
                                         mode_t mode) {
-  std::vector<std::string> components;
-  path.GetComponents(&components);
+  std::vector<std::string> components = path.GetComponents();
 
   auto itr = components.begin();
   if (itr == components.end()) {
@@ -167,6 +169,61 @@ SafeFD::Error GetFileSize(int fd, size_t* file_size) {
   return SafeFD::Error::kNoError;
 }
 
+SafeFD::Error SeekToBeginning(int fd) {
+  errno = 0;
+  if (lseek(fd, 0, SEEK_SET) == -1) {
+    PLOG(ERROR) << "Failed to seek file to beginning";
+    return SafeFD::Error::kIOError;
+  }
+  return SafeFD::Error::kNoError;
+}
+
+SafeFD::Error WriteImpl(int fd, const char* data, size_t size) {
+  errno = 0;
+  if (!base::WriteFileDescriptor(fd, base::StringPiece(data, size))) {
+    PLOG(ERROR) << "Failed to write to file";
+    return SafeFD::Error::kIOError;
+  }
+  return SafeFD::Error::kNoError;
+}
+
+SafeFD::Error TruncateImpl(int fd, size_t size) {
+  errno = 0;
+  if (HANDLE_EINTR(ftruncate(fd, size)) != 0) {
+    PLOG(ERROR) << "Failed to truncate file";
+    return SafeFD::Error::kIOError;
+  }
+  return SafeFD::Error::kNoError;
+}
+
+// Cover the case that sendfile is not supported for |source|.
+SafeFD::Error CopyContentsToFallback(SafeFD* source,
+                                     SafeFD* destination,
+                                     size_t max_size) {
+  std::vector<char> buffer(SafeFD::kDefaultPageSize, 0);
+  size_t total_copied = 0;
+  while (total_copied < max_size) {
+    // Use the current offset.
+    ssize_t read_count =
+        HANDLE_EINTR(read(source->get(), buffer.data(), buffer.size()));
+    if (read_count == 0) {
+      return TruncateImpl(destination->get(), total_copied);
+    }
+    if (read_count < 0) {
+      PLOG(ERROR) << "Failed to copy file; read";
+      return SafeFD::Error::kIOError;
+    }
+
+    SafeFD::Error err =
+        WriteImpl(destination->get(), buffer.data(), read_count);
+    if (err != SafeFD::Error::kNoError) {
+      return err;
+    }
+    total_copied += read_count;
+  }
+  return SafeFD::Error::kExceededMaximum;
+}
+
 }  // namespace
 
 bool SafeFD::IsError(SafeFD::Error err) {
@@ -209,21 +266,29 @@ void SafeFD::UnsafeReset(int fd) {
   return fd_.reset(fd);
 }
 
+SafeFD::Error SafeFD::Replace(const char* data, size_t size) {
+  if (!fd_.is_valid()) {
+    return SafeFD::Error::kNotInitialized;
+  }
+
+  SafeFD::Error error = SeekToBeginning(fd_.get());
+  if (IsError(error)) {
+    return error;
+  }
+
+  error = WriteImpl(fd_.get(), data, size);
+  if (IsError(error)) {
+    return error;
+  }
+
+  return TruncateImpl(fd_.get(), size);
+}
+
 SafeFD::Error SafeFD::Write(const char* data, size_t size) {
   if (!fd_.is_valid()) {
     return SafeFD::Error::kNotInitialized;
   }
-  errno = 0;
-  if (!base::WriteFileDescriptor(fd_.get(), base::StringPiece(data, size))) {
-    PLOG(ERROR) << "Failed to write to file";
-    return SafeFD::Error::kIOError;
-  }
-
-  if (HANDLE_EINTR(ftruncate(fd_.get(), size)) != 0) {
-    PLOG(ERROR) << "Failed to truncate file";
-    return SafeFD::Error::kIOError;
-  }
-  return SafeFD::Error::kNoError;
+  return WriteImpl(fd_.get(), data, size);
 }
 
 std::pair<std::vector<char>, SafeFD::Error> SafeFD::ReadContents(
@@ -234,6 +299,7 @@ std::pair<std::vector<char>, SafeFD::Error> SafeFD::ReadContents(
   }
 
   size_t file_size = 0;
+  // This is used as an estimate for picking the buffer size.
   SafeFD::Error err = GetFileSize(fd_.get(), &file_size);
   if (IsError(err)) {
     return std::make_pair(std::move(buffer), err);
@@ -243,11 +309,38 @@ std::pair<std::vector<char>, SafeFD::Error> SafeFD::ReadContents(
     return std::make_pair(std::move(buffer), SafeFD::Error::kExceededMaximum);
   }
 
-  buffer.resize(file_size);
+  // Pseudo file systems like /proc and /sys report a zero file size even
+  // though they have contents, but are at most one page, so add
+  // kDefaultMaxPathDepth to cover this case and additional writes since
+  // GetFileSize up to one page.
+  buffer.resize(std::min(max_size, file_size + kDefaultPageSize));
 
-  err = Read(buffer.data(), buffer.size());
+  size_t total_read = 0;
+  err = SafeFD::Error::kNoError;
+  while (total_read < max_size) {
+    ssize_t bytes_read = HANDLE_EINTR(read(
+        fd_.get(), buffer.data() + total_read, buffer.size() - total_read));
+    if (bytes_read == 0) {
+      break;
+    }
+    if (bytes_read < 0) {
+      PLOG(ERROR) << "Failed to read file";
+      err = SafeFD::Error::kIOError;
+      break;
+    }
+    total_read += bytes_read;
+
+    // Grow the buffer if necessary.
+    if (total_read + kDefaultPageSize > buffer.size()) {
+      buffer.resize(std::min(max_size, std::max(total_read + kDefaultPageSize,
+                                                buffer.capacity())),
+                    0);
+    }
+  }
   if (IsError(err)) {
     buffer.clear();
+  } else {
+    buffer.resize(total_read);
   }
   return std::make_pair(std::move(buffer), err);
 }
@@ -262,6 +355,58 @@ SafeFD::Error SafeFD::Read(char* data, size_t size) {
     return SafeFD::Error::kIOError;
   }
   return SafeFD::Error::kNoError;
+}
+
+std::pair<size_t, SafeFD::Error> SafeFD::ReadUntilEnd(char* data,
+                                                      size_t max_size) {
+  if (!fd_.is_valid()) {
+    return std::make_pair(0, SafeFD::Error::kNotInitialized);
+  }
+
+  // base::ReadFromFD returns a bool so it cannot be used in cases where the
+  // file size is not known like files in /proc, /sys, etc. These report zero
+  // length but still have contents.
+  size_t total_read = 0;
+  while (total_read < max_size) {
+    ssize_t bytes_read =
+        HANDLE_EINTR(read(fd_.get(), data + total_read, max_size - total_read));
+    if (bytes_read == 0) {
+      return std::make_pair(total_read, SafeFD::Error::kNoError);
+    }
+    if (bytes_read < 0) {
+      PLOG(ERROR) << "Failed to read file";
+      return std::make_pair(total_read, SafeFD::Error::kIOError);
+    }
+    total_read += bytes_read;
+  }
+  return std::make_pair(total_read, SafeFD::Error::kNoError);
+}
+
+SafeFD::Error SafeFD::CopyContentsTo(SafeFD* destination, size_t max_size) {
+  if (!fd_.is_valid() || !destination->is_valid()) {
+    return SafeFD::Error::kNotInitialized;
+  }
+
+  size_t total_copied = 0;
+  while (total_copied < max_size) {
+    // Use the current offset.
+    ssize_t copied =
+        HANDLE_EINTR(sendfile(destination->get(), fd_.get(), /*offset=*/nullptr,
+                              /*length=*/max_size - total_copied));
+    if (copied == 0) {
+      return SafeFD::Error::kNoError;
+    }
+    if (copied < 0) {
+      // Handle the case that an mmap-like operation is not available for fd_.
+      if (total_copied == 0 && errno == EINVAL) {
+        return CopyContentsToFallback(this, destination, max_size);
+      }
+      PLOG(ERROR) << "Failed to copy file";
+      return SafeFD::Error::kIOError;
+    }
+    total_copied += copied;
+  }
+  return SafeFD::Error::kExceededMaximum;
 }
 
 SafeFD::SafeFDResult SafeFD::OpenExistingFile(const base::FilePath& path,
@@ -330,6 +475,13 @@ SafeFD::SafeFDResult SafeFD::MakeFile(const base::FilePath& path,
   if (!file.first.is_valid()) {
     return file;
   }
+
+  // We may not have permission to chown, so check the ownership first.
+  SafeFD::Error err = CheckAttributes(file.first.get(), permissions, uid, gid);
+  if (!IsError(err)) {
+    return file;
+  }
+
   if (HANDLE_EINTR(fchown(file.first.get(), uid, gid)) != 0) {
     PLOG(ERROR) << "Failed to set ownership in MakeFile() for \""
                 << path.value() << '"';
@@ -347,8 +499,7 @@ SafeFD::SafeFDResult SafeFD::MakeDir(const base::FilePath& path,
     return MakeErrorResult(SafeFD::Error::kNotInitialized);
   }
 
-  std::vector<std::string> components;
-  path.GetComponents(&components);
+  std::vector<std::string> components = path.GetComponents();
   if (components.empty()) {
     LOG(ERROR) << "Called MakeDir() with an empty path";
     return MakeErrorResult(SafeFD::Error::kBadArgument);
@@ -386,6 +537,12 @@ SafeFD::SafeFDResult SafeFD::MakeDir(const base::FilePath& path,
   }
 
   if (made_dir) {
+    // We may not have permission to chown, so check the ownership first.
+    SafeFD::Error err = CheckAttributes(dir.get(), permissions, uid, gid);
+    if (!IsError(err)) {
+      return MakeSuccessResult(std::move(dir));
+    }
+
     // If the directory was created, set the ownership.
     if (HANDLE_EINTR(fchown(dir.get(), uid, gid)) != 0) {
       PLOG(ERROR) << "Failed to set ownership in MakeDir() for \""
@@ -438,7 +595,8 @@ SafeFD::Error SafeFD::Unlink(const std::string& name) {
   }
 
   if (HANDLE_EINTR(unlinkat(fd_.get(), name.c_str(), 0 /*flags*/)) != 0) {
-    PLOG(ERROR) << "Failed to unlink \"" << name << "\"";
+    // Callers can best handle whether to complain about ENOENT.
+    PLOG_IF(ERROR, errno != ENOENT) << "Failed to unlink \"" << name << "\"";
     return SafeFD::Error::kIOError;
   }
   return SafeFD::Error::kNoError;
@@ -474,19 +632,20 @@ SafeFD::Error SafeFD::Rmdir(const std::string& name,
     // The ScopedDIR takes ownership of this so dup_fd is not scoped on its own.
     int dup_fd = dup(dir_fd.get());
     if (dup_fd < 0) {
-      PLOG(ERROR) << "dup failed";
+      PLOG(ERROR) << "dup failed on fd for \"" << name << "\"";
       return SafeFD::Error::kIOError;
     }
 
     ScopedDIR dir(fdopendir(dup_fd));
     if (!dir.is_valid()) {
-      PLOG(ERROR) << "fdopendir failed";
+      PLOG(ERROR) << "fdopendir failed on fd for \"" << name << "\"";
       close(dup_fd);
       return SafeFD::Error::kIOError;
     }
 
     struct stat dir_info;
     if (fstat(dir_fd.get(), &dir_info) != 0) {
+      PLOG(ERROR) << "fstat failed for \"" << name << "\"";
       return SafeFD::Error::kIOError;
     }
 
@@ -502,6 +661,8 @@ SafeFD::Error SafeFD::Rmdir(const std::string& name,
         struct stat child_info;
         if (fstatat(dir_fd.get(), entry->d_name, &child_info,
                     AT_NO_AUTOMOUNT | AT_SYMLINK_NOFOLLOW) != 0) {
+          PLOG(ERROR) << "fstatat failed for file \"" << entry->d_name
+                      << "\" in \"" << name << "\"";
           return SafeFD::Error::kIOError;
         }
 
@@ -516,7 +677,9 @@ SafeFD::Error SafeFD::Rmdir(const std::string& name,
         return dir_fd.Rmdir(entry->d_name, true, max_depth - 1, keep_going);
       }();
 
-      if (IsError(err)) {
+      if (err == SafeFD::Error::kIOError && errno == ENOENT) {
+        // Ignore this error since it means the child entry is gone.
+      } else if (IsError(err)) {
         if (!keep_going) {
           return err;
         }
@@ -527,15 +690,18 @@ SafeFD::Error SafeFD::Rmdir(const std::string& name,
       entry = HANDLE_EINTR_IF_EQ(readdir(dir.get()), nullptr);
     }
     if (errno != 0) {
-      PLOG(ERROR) << "readdir failed";
+      PLOG(ERROR) << "readdir failed for \"" << name << "\"";
       return SafeFD::Error::kIOError;
     }
   }
 
   if (HANDLE_EINTR(unlinkat(fd_.get(), name.c_str(), AT_REMOVEDIR)) != 0) {
-    PLOG(ERROR) << "unlinkat failed";
     if (errno == ENOTDIR) {
+      // In brillo::DeleteFile we use both Rmdir and Unlink with an expectation
+      // that it will fail for files, so don't log here.
       return SafeFD::Error::kWrongType;
+    } else {
+      PLOG(ERROR) << "unlinkat failed for \"" << name << "\"";
     }
     // If there was an error during the recursive delete, we expect unlink
     // to fail with ENOTEMPTY and we bubble the error from recursion

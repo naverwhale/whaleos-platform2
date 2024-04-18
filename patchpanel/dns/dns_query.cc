@@ -1,16 +1,16 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "patchpanel/dns/dns_query.h"
 
+#include <string_view>
 #include <utility>
 
 #include "base/big_endian.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/numerics/safe_conversions.h"
-#include "base/optional.h"
 #include "base/sys_byteorder.h"
 
 #include "patchpanel/dns/dns_protocol.h"
@@ -46,7 +46,8 @@ bool DnsQuery::Parse(size_t valid_bytes) {
   // buffer. If we have constructed the query from data or the query is already
   // parsed after constructed from a raw buffer, |header_| is not null.
   DCHECK(header_ == nullptr);
-  base::BigEndianReader reader(io_buffer_->data(), valid_bytes);
+  base::BigEndianReader reader(
+      reinterpret_cast<const uint8_t*>(io_buffer_->data()), valid_bytes);
   dns_protocol::Header header;
   if (!ReadHeader(&reader, &header)) {
     return false;
@@ -79,20 +80,22 @@ uint16_t DnsQuery::id() const {
   return base::NetToHost16(header_->id);
 }
 
-base::StringPiece DnsQuery::qname() const {
-  return base::StringPiece(io_buffer_->data() + kHeaderSize, qname_size_);
+std::string_view DnsQuery::qname() const {
+  return std::string_view(io_buffer_->data() + kHeaderSize, qname_size_);
 }
 
 uint16_t DnsQuery::qtype() const {
   uint16_t type;
-  base::ReadBigEndian<uint16_t>(io_buffer_->data() + kHeaderSize + qname_size_,
-                                &type);
+  base::ReadBigEndian<uint16_t>(
+      reinterpret_cast<const uint8_t*>(io_buffer_->data() + kHeaderSize +
+                                       qname_size_),
+      &type);
   return type;
 }
 
-base::StringPiece DnsQuery::question() const {
-  return base::StringPiece(io_buffer_->data() + kHeaderSize,
-                           QuestionSize(qname_size_));
+std::string_view DnsQuery::question() const {
+  return std::string_view(io_buffer_->data() + kHeaderSize,
+                          QuestionSize(qname_size_));
 }
 
 size_t DnsQuery::question_size() const {
@@ -117,7 +120,7 @@ bool DnsQuery::ReadName(base::BigEndianReader* reader, std::string* out) {
   }
   out->append(reinterpret_cast<char*>(&label_length), 1);
   while (label_length) {
-    base::StringPiece label;
+    std::string_view label;
     if (!reader->ReadPiece(&label, label_length)) {
       return false;
     }

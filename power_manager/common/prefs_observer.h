@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,7 @@ namespace power_manager {
 // Interface for classes that want to be notified when preferences changed.
 class PrefsObserver : public base::CheckedObserver {
  public:
-  virtual ~PrefsObserver() {}
+  ~PrefsObserver() override = default;
 
   // Called when |pref_name|'s value has changed.
   virtual void OnPrefChanged(const std::string& pref_name) = 0;

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,20 +6,20 @@
 #define DIAGNOSTICS_WILCO_DTC_SUPPORTD_FAKE_WILCO_DTC_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
-#include <base/callback.h>
-#include <base/macros.h>
-#include <base/optional.h>
+#include <base/functional/callback.h>
 
 #include <brillo/grpc/async_grpc_client.h>
 #include <brillo/grpc/async_grpc_server.h>
 
-#include "wilco_dtc.grpc.pb.h"           // NOLINT(build/include)
-#include "wilco_dtc_supportd.grpc.pb.h"  // NOLINT(build/include)
+#include "wilco_dtc.grpc.pb.h"           // NOLINT(build/include_directory)
+#include "wilco_dtc_supportd.grpc.pb.h"  // NOLINT(build/include_directory)
 
 namespace diagnostics {
+namespace wilco {
 
 // Helper class that allows to test gRPC communication between wilco_dtc and
 // support daemon.
@@ -29,45 +29,45 @@ namespace diagnostics {
 // |wilco_dtc_supportd_grpc_uri| gRPC URI.
 class FakeWilcoDtc final {
  public:
-  using SendMessageToUiCallback = base::Callback<void(
+  using SendMessageToUiCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::SendMessageToUiResponse> response)>;
-  using GetProcDataCallback = base::Callback<void(
+  using GetProcDataCallback = base::OnceCallback<void(
       grpc::Status status, std::unique_ptr<grpc_api::GetProcDataResponse>)>;
-  using GetEcTelemetryCallback = base::Callback<void(
+  using GetEcTelemetryCallback = base::OnceCallback<void(
       grpc::Status status, std::unique_ptr<grpc_api::GetEcTelemetryResponse>)>;
-  using HandleMessageFromUiCallback = base::Callback<void(
+  using HandleMessageFromUiCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::HandleMessageFromUiResponse>)>;
-  using HandleEcNotificationCallback = base::Callback<void(
+  using HandleEcNotificationCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::HandleEcNotificationResponse>)>;
-  using HandlePowerNotificationCallback = base::Callback<void(
+  using HandlePowerNotificationCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::HandlePowerNotificationResponse>)>;
-  using PerformWebRequestResponseCallback = base::Callback<void(
+  using PerformWebRequestResponseCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::PerformWebRequestResponse>)>;
-  using GetConfigurationDataCallback = base::Callback<void(
+  using GetConfigurationDataCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::GetConfigurationDataResponse>)>;
-  using GetDriveSystemDataCallback = base::Callback<void(
+  using GetDriveSystemDataCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::GetDriveSystemDataResponse>)>;
-  using RequestBluetoothDataNotificationCallback = base::Callback<void(
+  using RequestBluetoothDataNotificationCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::RequestBluetoothDataNotificationResponse>)>;
-  using GetStatefulPartitionAvailableCapacityCallback = base::Callback<void(
+  using GetStatefulPartitionAvailableCapacityCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<
           grpc_api::GetStatefulPartitionAvailableCapacityResponse>)>;
-  using HandleConfigurationDataChangedCallback = base::Callback<void(
+  using HandleConfigurationDataChangedCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::HandleConfigurationDataChangedResponse>)>;
-  using HandleBluetoothDataChangedCallback = base::Callback<void(
+  using HandleBluetoothDataChangedCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::HandleBluetoothDataChangedResponse>)>;
-  using GetAvailableRoutinesCallback = base::Callback<void(
+  using GetAvailableRoutinesCallback = base::OnceCallback<void(
       grpc::Status status,
       std::unique_ptr<grpc_api::GetAvailableRoutinesResponse>)>;
 
@@ -95,24 +95,24 @@ class FakeWilcoDtc final {
   void GetEcTelemetry(const grpc_api::GetEcTelemetryRequest& request,
                       GetEcTelemetryCallback callback);
   void PerformWebRequest(const grpc_api::PerformWebRequestParameter& parameter,
-                         const PerformWebRequestResponseCallback& callback);
+                         PerformWebRequestResponseCallback callback);
   void GetConfigurationData(
       const grpc_api::GetConfigurationDataRequest& request,
-      const GetConfigurationDataCallback& callback);
+      GetConfigurationDataCallback callback);
   void GetDriveSystemData(const grpc_api::GetDriveSystemDataRequest& request,
-                          const GetDriveSystemDataCallback& callback);
+                          GetDriveSystemDataCallback callback);
   void RequestBluetoothDataNotification(
       const grpc_api::RequestBluetoothDataNotificationRequest& request,
-      const RequestBluetoothDataNotificationCallback& callback);
+      RequestBluetoothDataNotificationCallback callback);
   void GetStatefulPartitionAvailableCapacity(
       const grpc_api::GetStatefulPartitionAvailableCapacityRequest& request,
-      const GetStatefulPartitionAvailableCapacityCallback& callback);
-  void GetAvailableRoutines(const GetAvailableRoutinesCallback& callback);
+      GetStatefulPartitionAvailableCapacityCallback callback);
+  void GetAvailableRoutines(GetAvailableRoutinesCallback callback);
 
   // Sets up the passed callback to be used for subsequent
   // |HandleMessageFromUi| gRPC calls.
   void set_handle_message_from_ui_callback(
-      base::Closure handle_message_from_ui_callback) {
+      base::OnceClosure handle_message_from_ui_callback) {
     handle_message_from_ui_callback_.emplace(
         std::move(handle_message_from_ui_callback));
   }
@@ -140,15 +140,14 @@ class FakeWilcoDtc final {
     handle_power_event_request_callback_ = handle_powerd_event_request_callback;
   }
 
-  const base::Optional<std::string>&
-  handle_message_from_ui_actual_json_message() const {
+  const std::optional<std::string>& handle_message_from_ui_actual_json_message()
+      const {
     return handle_message_from_ui_actual_json_message_;
   }
 
   // Sets up the passed callback to be used for subsequent
   // |HandleConfigurationDataChanged| gRPC calls.
-  void set_configuration_data_changed_callback(
-      base::RepeatingClosure callback) {
+  void set_configuration_data_changed_callback(base::OnceClosure callback) {
     configuration_data_changed_callback_.emplace(std::move(callback));
   }
 
@@ -170,53 +169,54 @@ class FakeWilcoDtc final {
   // Calls the callback |handle_message_from_ui_callback_| after all.
   void HandleMessageFromUi(
       std::unique_ptr<grpc_api::HandleMessageFromUiRequest> request,
-      const HandleMessageFromUiCallback& callback);
+      HandleMessageFromUiCallback callback);
 
   // Receives gRPC request and invokes the given |callback| with gRPC response.
   // Calls the callback |handle_ec_event_request_callback_| after all with the
   // request type and payload.
   void HandleEcNotification(
       std::unique_ptr<grpc_api::HandleEcNotificationRequest> request,
-      const HandleEcNotificationCallback& callback);
+      HandleEcNotificationCallback callback);
 
   // Receives gRPC request and invokes the given |callback| with gRPC response.
   // Calls the callback |handle_power_event_request_callback_| after all with
   // the request type and payload.
   void HandlePowerNotification(
       std::unique_ptr<grpc_api::HandlePowerNotificationRequest> request,
-      const HandlePowerNotificationCallback& callback);
+      HandlePowerNotificationCallback callback);
 
   // Receives gRPC request and invokes the given |callback| with gRPC response.
   // Calls the callback |configuration_data_changed_callback_| after all.
   void HandleConfigurationDataChanged(
       std::unique_ptr<grpc_api::HandleConfigurationDataChangedRequest> request,
-      const HandleConfigurationDataChangedCallback& callback);
+      HandleConfigurationDataChangedCallback callback);
 
   // Receives gRPC request and invokes the given |callback| with gRPC response.
   // Calls the callback |bluetooth_data_changed_callback_| after all.
   void HandleBluetoothDataChanged(
       std::unique_ptr<grpc_api::HandleBluetoothDataChangedRequest> request,
-      const HandleBluetoothDataChangedCallback& callback);
+      HandleBluetoothDataChangedCallback callback);
 
   AsyncGrpcWilcoDtcServer grpc_server_;
   AsyncGrpcWilcoDtcSupportdClient wilco_dtc_supportd_grp_client_;
 
-  base::Optional<base::Closure> handle_message_from_ui_callback_;
-  base::Optional<std::string> handle_message_from_ui_actual_json_message_;
-  base::Optional<std::string> handle_message_from_ui_json_message_response_;
+  std::optional<base::OnceClosure> handle_message_from_ui_callback_;
+  std::optional<std::string> handle_message_from_ui_actual_json_message_;
+  std::optional<std::string> handle_message_from_ui_json_message_response_;
 
-  base::Optional<HandleEcNotificationRequestCallback>
+  std::optional<HandleEcNotificationRequestCallback>
       handle_ec_event_request_callback_;
 
-  base::Optional<HandlePowerNotificationRequestCallback>
+  std::optional<HandlePowerNotificationRequestCallback>
       handle_power_event_request_callback_;
 
-  base::Optional<base::RepeatingClosure> configuration_data_changed_callback_;
+  std::optional<base::OnceClosure> configuration_data_changed_callback_;
 
-  base::Optional<HandleBluetoothDataChangedRequestCallback>
+  std::optional<HandleBluetoothDataChangedRequestCallback>
       bluetooth_data_changed_request_callback_;
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_FAKE_WILCO_DTC_H_

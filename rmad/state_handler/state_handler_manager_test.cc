@@ -1,14 +1,16 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <memory>
 
 #include <base/files/file_path.h>
+#include <base/test/task_environment.h>
 #include <base/memory/scoped_refptr.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "rmad/daemon/daemon_callback.h"
 #include "rmad/state_handler/mock_state_handler.h"
 #include "rmad/state_handler/state_handler_manager.h"
 #include "rmad/utils/json_store.h"
@@ -23,7 +25,8 @@ using testing::StrictMock;
 class StateHandlerManagerTest : public testing::Test {
  public:
   StateHandlerManagerTest() {
-    json_store_ = base::MakeRefCounted<JsonStore>(base::FilePath(""));
+    json_store_ = base::MakeRefCounted<JsonStore>(base::FilePath(""), false);
+    daemon_callback_ = base::MakeRefCounted<DaemonCallback>();
     state_handler_manager_ = std::make_unique<StateHandlerManager>(json_store_);
   }
 
@@ -31,8 +34,8 @@ class StateHandlerManagerTest : public testing::Test {
       RmadState::StateCase state,
       RmadState::StateCase next_state,
       RmadErrorCode update_error = RMAD_ERROR_OK) {
-    auto handler =
-        base::MakeRefCounted<StrictMock<MockStateHandler>>(json_store_);
+    auto handler = base::MakeRefCounted<StrictMock<MockStateHandler>>(
+        json_store_, daemon_callback_);
     EXPECT_CALL(*handler, GetStateCase()).WillRepeatedly(Return(state));
     EXPECT_CALL(*handler, InitializeState())
         .WillRepeatedly(Return(RMAD_ERROR_OK));
@@ -45,6 +48,7 @@ class StateHandlerManagerTest : public testing::Test {
 
  protected:
   scoped_refptr<JsonStore> json_store_;
+  scoped_refptr<DaemonCallback> daemon_callback_;
   std::unique_ptr<StateHandlerManager> state_handler_manager_;
 };
 
@@ -80,6 +84,11 @@ TEST_F(StateHandlerManagerTest, RegisterStateHandlerCollision) {
   state_handler_manager_->RegisterStateHandler(handler1);
   EXPECT_DEATH(state_handler_manager_->RegisterStateHandler(handler2),
                "Registered handlers should have unique RmadStates.");
+}
+
+TEST_F(StateHandlerManagerTest, RegisterStateHandlers) {
+  base::test::SingleThreadTaskEnvironment task_environment;
+  state_handler_manager_->RegisterStateHandlers(daemon_callback_);
 }
 
 }  // namespace rmad

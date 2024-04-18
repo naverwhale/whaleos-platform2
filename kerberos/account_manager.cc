@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -55,8 +55,8 @@ std::string GetSafeFilename(const std::string& principal_name) {
 
 // Reads the file at |path| into |data|. Returns |ERROR_LOCAL_IO| if the file
 // could not be read.
-WARN_UNUSED_RESULT ErrorType LoadFile(const base::FilePath& path,
-                                      std::string* data) {
+[[nodiscard]] ErrorType LoadFile(const base::FilePath& path,
+                                 std::string* data) {
   data->clear();
   if (!base::ReadFileToStringWithMaxSize(path, data, kFileSizeLimit)) {
     PLOG(ERROR) << "Failed to read " << path.value();
@@ -68,8 +68,8 @@ WARN_UNUSED_RESULT ErrorType LoadFile(const base::FilePath& path,
 
 // Writes |data| to the file at |path|. Returns |ERROR_LOCAL_IO| if the file
 // could not be written.
-WARN_UNUSED_RESULT ErrorType SaveFile(const base::FilePath& path,
-                                      const std::string& data) {
+[[nodiscard]] ErrorType SaveFile(const base::FilePath& path,
+                                 const std::string& data) {
   const int data_size = static_cast<int>(data.size());
   if (base::WriteFile(path, data.data(), data_size) != data_size) {
     LOG(ERROR) << "Failed to write '" << path.value() << "'";
@@ -79,8 +79,8 @@ WARN_UNUSED_RESULT ErrorType SaveFile(const base::FilePath& path,
 }
 
 // Sets file permissions for a given |path|. Returns ERROR_LOCAL_IO on error.
-WARN_UNUSED_RESULT ErrorType SetFilePermissions(const base::FilePath& path,
-                                                int mode) {
+[[nodiscard]] ErrorType SetFilePermissions(const base::FilePath& path,
+                                           int mode) {
   if (!base::SetPosixFilePermissions(path, mode)) {
     LOG(ERROR) << "Failed to set permissions on '" << path.value() << "'";
     return ERROR_LOCAL_IO;
@@ -266,8 +266,6 @@ std::vector<Account> AccountManager::ListAccounts() const {
         base::PathExists(GetPasswordPath(it.data.principal_name())));
     account.set_use_login_password(it.data.use_login_password());
 
-    // TODO(https://crbug.com/952239): Set additional properties.
-
     // Do a best effort reporting results, don't bail on the first error. If
     // there's a broken account, the user is able to recover the situation
     // this way (reauthenticate or remove account and add back).
@@ -299,21 +297,26 @@ std::vector<Account> AccountManager::ListAccounts() const {
 ErrorType AccountManager::SetConfig(const std::string& principal_name,
                                     const std::string& krb5conf) const {
   const InternalAccount* account = GetAccount(principal_name);
-  if (!account)
+  if (!account) {
     return ERROR_UNKNOWN_PRINCIPAL_NAME;
+  }
 
   // Validate configuration before setting it to make sure it doesn't contain
   // invalid options.
   ConfigErrorInfo error_info;
   ErrorType error = krb5_->ValidateConfig(krb5conf, &error_info);
-  if (error != ERROR_NONE)
+  if (error != ERROR_NONE) {
     return error;
+  }
 
   error = SaveFile(GetKrb5ConfPath(principal_name), krb5conf);
 
-  // Triggering the signal is only necessary if the credential cache exists.
-  if (error == ERROR_NONE && base::PathExists(GetKrb5CCPath(principal_name)))
+  // Triggering the signal is only necessary if the file was saved successfully,
+  // and the credential cache exists.
+  if (error == ERROR_NONE && base::PathExists(GetKrb5CCPath(principal_name))) {
     TriggerKerberosFilesChanged(principal_name);
+  }
+
   return error;
 }
 
@@ -487,9 +490,6 @@ void AccountManager::NotifyTgtExpiration(
   // Only if that isn't possible or doesn't work, trigger the signal.
   ErrorType error = ERROR_NONE;
   if (!MaybeAutoAcquireTgt(principal_name, &error) || error != ERROR_NONE) {
-    // TODO(https://crbug.com/952245): Distinguish between "about to expire" and
-    // "expired" in the KerberosTicketExpiring signal and in the Chrome
-    // notification.
     TriggerKerberosTicketExpiring(principal_name);
   }
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,8 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
-#include <base/guid.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/stringprintf.h>
@@ -21,24 +20,25 @@
 #include <vm_protos/proto_bindings/container_guest.grpc.pb.h>
 #include <chromeos/constants/vm_tools.h>
 
+#include "vm_tools/cicerone/grpc_util.h"
+
 using std::string;
 
-namespace vm_tools {
-namespace cicerone {
-namespace {
+namespace vm_tools::cicerone {
 
-// How long to wait before timing out on regular RPCs.
-constexpr int64_t kDefaultTimeoutSeconds = 60;
+// static
+bool Container::wait_for_channel_ = true;
 
-}  // namespace
+void Container::DisableChannelWaitForTesting() {
+  wait_for_channel_ = false;
+}
 
 Container::Container(const std::string& name,
                      const std::string& token,
                      base::WeakPtr<VirtualMachine> vm)
     : name_(name), token_(token), vm_(vm) {}
 
-// Sets the container's IPv4 address.
-void Container::set_ipv4_address(uint32_t ipv4_address) {
+void Container::set_ipv4_address(const net_base::IPv4Address& ipv4_address) {
   ipv4_address_ = ipv4_address;
 }
 
@@ -55,8 +55,14 @@ void Container::set_listening_tcp4_ports(std::vector<uint16_t> ports) {
 }
 
 void Container::ConnectToGarcon(const std::string& addr) {
-  garcon_stub_ = std::make_unique<vm_tools::container::Garcon::Stub>(
-      grpc::CreateChannel(addr, grpc::InsecureChannelCredentials()));
+  auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
+  if (wait_for_channel_) {
+    if (channel->WaitForConnected(ToGprDeadline(kConnectTimeoutSeconds))) {
+      LOG(ERROR) << "Garcon channel not connected after "
+                 << kConnectTimeoutSeconds << " seconds.";
+    }
+  }
+  garcon_stub_ = std::make_unique<vm_tools::container::Garcon::Stub>(channel);
 }
 
 bool Container::LaunchContainerApplication(
@@ -64,6 +70,7 @@ bool Container::LaunchContainerApplication(
     std::vector<std::string> files,
     vm_tools::container::LaunchApplicationRequest::DisplayScaling
         display_scaling,
+    std::vector<vm_tools::container::ContainerFeature> container_features,
     std::string* out_error) {
   CHECK(out_error);
   vm_tools::container::LaunchApplicationRequest container_request;
@@ -74,11 +81,11 @@ bool Container::LaunchContainerApplication(
             google::protobuf::RepeatedFieldBackInserter(
                 container_request.mutable_files()));
   container_request.set_display_scaling(display_scaling);
+  container_request.mutable_container_features()->Add(
+      container_features.begin(), container_features.end());
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->LaunchApplication(&ctx, container_request,
                                                         &container_response);
@@ -93,15 +100,18 @@ bool Container::LaunchContainerApplication(
   return container_response.success();
 }
 
-bool Container::LaunchVshd(uint32_t port, std::string* out_error) {
+bool Container::LaunchVshd(
+    uint32_t port,
+    std::vector<vm_tools::container::ContainerFeature> container_features,
+    std::string* out_error) {
   vm_tools::container::LaunchVshdRequest container_request;
   vm_tools::container::LaunchVshdResponse container_response;
   container_request.set_port(port);
+  container_request.mutable_container_features()->Add(
+      container_features.begin(), container_features.end());
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       garcon_stub_->LaunchVshd(&ctx, container_request, &container_response);
@@ -125,9 +135,7 @@ bool Container::ConnectChunnel(uint32_t chunneld_port,
   container_request.set_target_tcp4_port(tcp4_port);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->ConnectChunnel(&ctx, container_request,
                                                      &container_response);
@@ -147,9 +155,7 @@ bool Container::GetDebugInformation(std::string* out) {
   vm_tools::container::GetDebugInformationResponse container_response;
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->GetDebugInformation(
       &ctx, container_request, &container_response);
@@ -182,9 +188,7 @@ bool Container::GetContainerAppIcon(std::vector<std::string> desktop_file_ids,
   container_request.set_scale(scale);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       garcon_stub_->GetIcon(&ctx, container_request, &container_response);
@@ -197,7 +201,8 @@ bool Container::GetContainerAppIcon(std::vector<std::string> desktop_file_ids,
   for (auto& icon : *container_response.mutable_desktop_icons()) {
     icons->emplace_back(
         Icon{.desktop_file_id = std::move(*icon.mutable_desktop_file_id()),
-             .content = std::move(*icon.mutable_icon())});
+             .content = std::move(*icon.mutable_icon()),
+             .format = icon.format()});
   }
   return true;
 }
@@ -213,9 +218,7 @@ bool Container::GetLinuxPackageInfo(const std::string& file_path,
   container_request.set_package_name(package_name);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->GetLinuxPackageInfo(
       &ctx, container_request, &container_response);
@@ -250,9 +253,7 @@ Container::InstallLinuxPackage(const std::string& file_path,
   container_request.set_command_uuid(command_uuid);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->InstallLinuxPackage(
       &ctx, container_request, &container_response);
@@ -276,9 +277,7 @@ Container::UninstallPackageOwningFile(const std::string& desktop_file_id,
   container_request.set_desktop_file_id(desktop_file_id);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->UninstallPackageOwningFile(
       &ctx, container_request, &container_response);
@@ -301,9 +300,7 @@ Container::ApplyAnsiblePlaybook(const std::string& playbook,
   container_request.set_playbook(playbook);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->ApplyAnsiblePlaybook(
       &ctx, container_request, &container_response);
@@ -325,9 +322,7 @@ Container::ConfigureForArcSideload(std::string* out_error) {
   vm_tools::container::ConfigureForArcSideloadResponse container_response;
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->ConfigureForArcSideload(
       &ctx, container_request, &container_response);
@@ -348,9 +343,7 @@ bool Container::AddFileWatch(const std::string& path, std::string* out_error) {
   container_request.set_path(path);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       garcon_stub_->AddFileWatch(&ctx, container_request, &container_response);
@@ -373,9 +366,7 @@ bool Container::RemoveFileWatch(const std::string& path,
   container_request.set_path(path);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = garcon_stub_->RemoveFileWatch(&ctx, container_request,
                                                       &container_response);
@@ -400,10 +391,37 @@ void Container::RegisterVshSession(int32_t host_vsh_pid,
   }
 }
 
+bool Container::GetGarconSessionInfo(std::string* out_failure_reason,
+                                     std::string* out_container_username,
+                                     std::string* out_container_homedir,
+                                     uint32_t* out_sftp_vsock_port) {
+  vm_tools::container::GetGarconSessionInfoRequest container_request;
+  vm_tools::container::GetGarconSessionInfoResponse container_response;
+
+  grpc::ClientContext ctx;
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
+
+  grpc::Status status = garcon_stub_->GetGarconSessionInfo(
+      &ctx, container_request, &container_response);
+  if (!status.ok()) {
+    LOG(ERROR) << "Failed to get garcon session info: "
+               << status.error_message() << " code: " << status.error_code();
+    out_failure_reason->assign("gRPC failure getting session info: " +
+                               status.error_message());
+    return false;
+  }
+
+  *out_failure_reason = container_response.failure_reason();
+  *out_container_username = container_response.container_username();
+  *out_container_homedir = container_response.container_homedir();
+  *out_sftp_vsock_port = container_response.sftp_vsock_port();
+  return container_response.status() ==
+         vm_tools::container::GetGarconSessionInfoResponse::SUCCEEDED;
+}
+
 int32_t Container::GetVshSession(int32_t host_vsh_pid) {
   auto it = vsh_pids_.find(host_vsh_pid);
   return it != vsh_pids_.end() ? it->second : 0;
 }
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone

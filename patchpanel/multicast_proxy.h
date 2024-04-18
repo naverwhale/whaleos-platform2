@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,6 +12,7 @@
 #include <brillo/daemons/daemon.h>
 
 #include "patchpanel/broadcast_forwarder.h"
+#include "patchpanel/ipc.h"
 #include "patchpanel/message_dispatcher.h"
 #include "patchpanel/multicast_forwarder.h"
 
@@ -31,12 +32,12 @@ class MulticastProxy : public brillo::Daemon {
   int OnInit() override;
 
   void OnParentProcessExit();
-  void OnDeviceMessage(const DeviceMessage& msg);
+  void OnDeviceMessage(const SubprocessMessage& msg);
 
  private:
   void Reset();
 
-  MessageDispatcher msg_dispatcher_;
+  MessageDispatcher<SubprocessMessage> msg_dispatcher_;
   std::map<std::string, std::unique_ptr<MulticastForwarder>> mdns_fwds_;
   std::map<std::string, std::unique_ptr<MulticastForwarder>> ssdp_fwds_;
   std::map<std::string, std::unique_ptr<BroadcastForwarder>> bcast_fwds_;

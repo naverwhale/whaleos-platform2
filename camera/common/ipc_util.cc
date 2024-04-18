@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -50,7 +50,8 @@ bool CreateUnixDomainSocket(base::ScopedFD* out_fd) {
     return false;
   }
 
-  fd.swap(*out_fd);
+  if (fd.get() != out_fd->get())
+    *out_fd = std::move(fd);
 
   return true;
 }
@@ -261,9 +262,10 @@ MojoResult CreateMojoChannelToChildByUnixDomainSocket(
   return MOJO_RESULT_OK;
 }
 
-base::UnguessableToken TokenFromString(const std::string& token_string) {
+std::optional<base::UnguessableToken> TokenFromString(
+    const std::string& token_string) {
   if (token_string.length() != 32) {
-    return {};
+    return std::nullopt;
   }
   std::string token_high_string = token_string.substr(0, 16);
   std::string token_low_string = token_string.substr(16, 16);
@@ -271,7 +273,7 @@ base::UnguessableToken TokenFromString(const std::string& token_string) {
   if (!base::HexStringToUInt64(token_high_string, &token_high) ||
       !base::HexStringToUInt64(token_low_string, &token_low)) {
     LOGF(ERROR) << "Failed to convert token strings";
-    return {};
+    return std::nullopt;
   }
   return base::UnguessableToken::Deserialize(token_high, token_low);
 }

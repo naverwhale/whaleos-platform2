@@ -1,8 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "sommelier.h"  // NOLINT(build/include_directory)
+#include "sommelier.h"                // NOLINT(build/include_directory)
+#include "sommelier-inpututils.h"     // NOLINT(build/include_directory)
+#include "sommelier-stylus-tablet.h"  // NOLINT(build/include_directory)
+#include "sommelier-transform.h"      // NOLINT(build/include_directory)
 
 #include <assert.h>
 #include <math.h>
@@ -37,7 +40,10 @@ struct sl_host_touch {
   struct wl_resource* resource;
   struct wl_touch* proxy;
   struct wl_resource* focus_resource;
+  struct sl_host_surface* focus_surface;
   struct wl_listener focus_resource_listener;
+  // TODO(b/281760854): This is needed for translating stylus to tablet events.
+  struct sl_touchrecorder* recorder;
 };
 
 static void sl_host_pointer_set_cursor(struct wl_client* client,
@@ -48,8 +54,10 @@ static void sl_host_pointer_set_cursor(struct wl_client* client,
                                        int32_t hotspot_y) {
   struct sl_host_pointer* host =
       static_cast<sl_host_pointer*>(wl_resource_get_user_data(resource));
-  struct sl_host_surface* host_surface = NULL;
-  double scale = host->seat->ctx->scale;
+  struct sl_host_surface* host_surface = nullptr;
+
+  int32_t hsx = hotspot_x;
+  int32_t hsy = hotspot_y;
 
   if (surface_resource) {
     host_surface = static_cast<sl_host_surface*>(
@@ -59,10 +67,11 @@ static void sl_host_pointer_set_cursor(struct wl_client* client,
       wl_surface_commit(host_surface->proxy);
   }
 
+  sl_transform_guest_to_host(host->seat->ctx, nullptr, &hsx, &hsy);
+
   wl_pointer_set_cursor(host->proxy, serial,
-                        host_surface ? host_surface->proxy : NULL,
-                        hotspot_x / scale, hotspot_y / scale);
-}  // NOLINT(whitespace/indent)
+                        host_surface ? host_surface->proxy : nullptr, hsx, hsy);
+}
 
 static void sl_host_pointer_release(struct wl_client* client,
                                     struct wl_resource* resource) {
@@ -86,7 +95,9 @@ static void sl_pointer_set_focus(struct sl_host_pointer* host,
                                  wl_fixed_t x,
                                  wl_fixed_t y) {
   struct wl_resource* surface_resource =
-      host_surface ? host_surface->resource : NULL;
+      host_surface ? host_surface->resource : nullptr;
+  wl_fixed_t ix = x;
+  wl_fixed_t iy = y;
 
   if (surface_resource == host->focus_resource)
     return;
@@ -98,10 +109,9 @@ static void sl_pointer_set_focus(struct sl_host_pointer* host,
   wl_list_init(&host->focus_resource_listener.link);
   host->focus_resource = surface_resource;
   host->focus_serial = serial;
+  host->focus_surface = host_surface;
 
   if (surface_resource) {
-    double scale = host->seat->ctx->scale;
-
     if (host->seat->ctx->xwayland) {
       // Make sure focus surface is on top before sending enter event.
       sl_restack_windows(host->seat->ctx, wl_resource_get_id(surface_resource));
@@ -111,8 +121,8 @@ static void sl_pointer_set_focus(struct sl_host_pointer* host,
     wl_resource_add_destroy_listener(surface_resource,
                                      &host->focus_resource_listener);
 
-    wl_pointer_send_enter(host->resource, serial, surface_resource, x * scale,
-                          y * scale);
+    sl_transform_host_to_guest_fixed(host->seat->ctx, host_surface, &ix, &iy);
+    wl_pointer_send_enter(host->resource, serial, surface_resource, ix, iy);
   }
 }
 
@@ -126,7 +136,7 @@ static void sl_pointer_enter(void* data,
       static_cast<sl_host_pointer*>(wl_pointer_get_user_data(pointer));
   struct sl_host_surface* host_surface =
       surface ? static_cast<sl_host_surface*>(wl_surface_get_user_data(surface))
-              : NULL;
+              : nullptr;
 
   if (!host_surface)
     return;
@@ -136,7 +146,7 @@ static void sl_pointer_enter(void* data,
   if (host->focus_resource)
     sl_set_last_event_serial(host->focus_resource, serial);
   host->seat->last_serial = serial;
-}  // NOLINT(whitespace/indent)
+}
 
 static void sl_pointer_leave(void* data,
                              struct wl_pointer* pointer,
@@ -145,7 +155,7 @@ static void sl_pointer_leave(void* data,
   struct sl_host_pointer* host =
       static_cast<sl_host_pointer*>(wl_pointer_get_user_data(pointer));
 
-  sl_pointer_set_focus(host, serial, NULL, 0, 0);
+  sl_pointer_set_focus(host, serial, nullptr, 0, 0);
 }
 
 static void sl_pointer_motion(void* data,
@@ -155,9 +165,13 @@ static void sl_pointer_motion(void* data,
                               wl_fixed_t y) {
   struct sl_host_pointer* host =
       static_cast<sl_host_pointer*>(wl_pointer_get_user_data(pointer));
-  double scale = host->seat->ctx->scale;
 
-  wl_pointer_send_motion(host->resource, time, x * scale, y * scale);
+  wl_fixed_t mx = x;
+  wl_fixed_t my = y;
+
+  sl_transform_host_to_guest_fixed(host->seat->ctx, host->focus_surface, &mx,
+                                   &my);
+  wl_pointer_send_motion(host->resource, time, mx, my);
 }
 
 static void sl_pointer_button(void* data,
@@ -183,10 +197,12 @@ static void sl_pointer_axis(void* data,
                             wl_fixed_t value) {
   struct sl_host_pointer* host =
       static_cast<sl_host_pointer*>(wl_pointer_get_user_data(pointer));
-  double scale = host->seat->ctx->scale;
+  wl_fixed_t svalue = value;
+
+  sl_transform_host_to_guest_fixed(host->seat->ctx, nullptr, &svalue, axis);
 
   host->time = time;
-  host->axis_delta[axis] += value * scale;
+  host->axis_delta[axis] += svalue;
 }
 
 static void sl_pointer_frame(void* data, struct wl_pointer* pointer) {
@@ -281,7 +297,7 @@ static void sl_keyboard_keymap(void* data,
   wl_keyboard_send_keymap(host->resource, format, fd, size);
 
   if (format == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
-    void* data = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+    void* data = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
 
     assert(data != MAP_FAILED);
 
@@ -314,7 +330,7 @@ static void sl_keyboard_set_focus(struct sl_host_keyboard* host,
                                   struct sl_host_surface* host_surface,
                                   struct wl_array* keys) {
   struct wl_resource* surface_resource =
-      host_surface ? host_surface->resource : NULL;
+      host_surface ? host_surface->resource : nullptr;
 
   if (surface_resource == host->focus_resource)
     return;
@@ -345,7 +361,7 @@ static void sl_keyboard_enter(void* data,
       static_cast<sl_host_keyboard*>(wl_keyboard_get_user_data(keyboard));
   struct sl_host_surface* host_surface =
       surface ? static_cast<sl_host_surface*>(wl_surface_get_user_data(surface))
-              : NULL;
+              : nullptr;
 
   if (!host_surface)
     return;
@@ -354,7 +370,7 @@ static void sl_keyboard_enter(void* data,
   sl_keyboard_set_focus(host, serial, host_surface, keys);
 
   host->seat->last_serial = serial;
-}  // NOLINT(whitespace/indent)
+}
 
 static void sl_keyboard_leave(void* data,
                               struct wl_keyboard* keyboard,
@@ -365,7 +381,7 @@ static void sl_keyboard_leave(void* data,
   struct wl_array array;
 
   wl_array_init(&array);
-  sl_keyboard_set_focus(host, serial, NULL, &array);
+  sl_keyboard_set_focus(host, serial, nullptr, &array);
 }
 
 static int sl_array_set_add(struct wl_array* array, uint32_t key) {
@@ -405,7 +421,7 @@ static void sl_keyboard_key(void* data,
                             uint32_t state) {
   struct sl_host_keyboard* host =
       static_cast<sl_host_keyboard*>(wl_keyboard_get_user_data(keyboard));
-  int handled = 1;
+  bool handled = true;
 
   if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
     if (host->state) {
@@ -420,16 +436,25 @@ static void sl_keyboard_key(void* data,
         symbol = symbols[0];
 
       wl_list_for_each(accelerator, &host->seat->ctx->accelerators, link) {
-        if (host->modifiers != accelerator->modifiers)
-          continue;
-        if (symbol != accelerator->symbol)
-          continue;
-
-        handled = 0;
-        break;
+        if (host->modifiers == accelerator->modifiers &&
+            xkb_keysym_to_lower(symbol) == accelerator->symbol) {
+          handled = false;
+          break;
+        }
+      }
+      if (host->seat->ctx->host_focus_window &&
+          !(host->seat->ctx->host_focus_window->fullscreen ||
+            host->seat->ctx->host_focus_window->compositor_fullscreen)) {
+        wl_list_for_each(accelerator, &host->seat->ctx->windowed_accelerators,
+                         link) {
+          if (host->modifiers == accelerator->modifiers &&
+              xkb_keysym_to_lower(symbol) == accelerator->symbol) {
+            handled = false;
+            break;
+          }
+        }
       }
     }
-
     // Forward key pressed event if it should be handled and not
     // already pressed.
     if (handled) {
@@ -520,12 +545,13 @@ static void sl_host_touch_down(void* data,
                                int32_t id,
                                wl_fixed_t x,
                                wl_fixed_t y) {
-  struct sl_host_touch* host =
-      static_cast<sl_host_touch*>(wl_touch_get_user_data(touch));
+  struct sl_host_touch* host = static_cast<sl_host_touch*>(data);
   struct sl_host_surface* host_surface =
       surface ? static_cast<sl_host_surface*>(wl_surface_get_user_data(surface))
-              : NULL;
-  double scale = host->seat->ctx->scale;
+              : nullptr;
+
+  wl_fixed_t ix = x;
+  wl_fixed_t iy = y;
 
   if (!host_surface)
     return;
@@ -534,6 +560,7 @@ static void sl_host_touch_down(void* data,
     wl_list_remove(&host->focus_resource_listener.link);
     wl_list_init(&host->focus_resource_listener.link);
     host->focus_resource = host_surface->resource;
+    host->focus_surface = host_surface;
     wl_resource_add_destroy_listener(host_surface->resource,
                                      &host->focus_resource_listener);
   }
@@ -545,25 +572,26 @@ static void sl_host_touch_down(void* data,
     sl_roundtrip(host->seat->ctx);
   }
 
+  sl_transform_host_to_guest_fixed(host->seat->ctx, host_surface, &ix, &iy);
   wl_touch_send_down(host->resource, serial, time, host_surface->resource, id,
-                     x * scale, y * scale);
+                     ix, iy);
 
   if (host->focus_resource)
     sl_set_last_event_serial(host->focus_resource, serial);
   host->seat->last_serial = serial;
-}  // NOLINT(whitespace/indent)
+}
 
 static void sl_host_touch_up(void* data,
                              struct wl_touch* touch,
                              uint32_t serial,
                              uint32_t time,
                              int32_t id) {
-  struct sl_host_touch* host =
-      static_cast<sl_host_touch*>(wl_touch_get_user_data(touch));
+  struct sl_host_touch* host = static_cast<sl_host_touch*>(data);
 
   wl_list_remove(&host->focus_resource_listener.link);
   wl_list_init(&host->focus_resource_listener.link);
-  host->focus_resource = NULL;
+  host->focus_resource = nullptr;
+  host->focus_surface = nullptr;
 
   wl_touch_send_up(host->resource, serial, time, id);
 
@@ -578,23 +606,23 @@ static void sl_host_touch_motion(void* data,
                                  int32_t id,
                                  wl_fixed_t x,
                                  wl_fixed_t y) {
-  struct sl_host_touch* host =
-      static_cast<sl_host_touch*>(wl_touch_get_user_data(touch));
-  double scale = host->seat->ctx->scale;
+  struct sl_host_touch* host = static_cast<sl_host_touch*>(data);
+  wl_fixed_t ix = x;
+  wl_fixed_t iy = y;
 
-  wl_touch_send_motion(host->resource, time, id, x * scale, y * scale);
+  sl_transform_host_to_guest_fixed(host->seat->ctx, host->focus_surface, &ix,
+                                   &iy);
+  wl_touch_send_motion(host->resource, time, id, ix, iy);
 }
 
 static void sl_host_touch_frame(void* data, struct wl_touch* touch) {
-  struct sl_host_touch* host =
-      static_cast<sl_host_touch*>(wl_touch_get_user_data(touch));
+  struct sl_host_touch* host = static_cast<sl_host_touch*>(data);
 
   wl_touch_send_frame(host->resource);
 }
 
 static void sl_host_touch_cancel(void* data, struct wl_touch* touch) {
-  struct sl_host_touch* host =
-      static_cast<sl_host_touch*>(wl_touch_get_user_data(touch));
+  struct sl_host_touch* host = static_cast<sl_host_touch*>(data);
 
   wl_touch_send_cancel(host->resource);
 }
@@ -602,6 +630,24 @@ static void sl_host_touch_cancel(void* data, struct wl_touch* touch) {
 static const struct wl_touch_listener sl_touch_listener = {
     sl_host_touch_down, sl_host_touch_up, sl_host_touch_motion,
     sl_host_touch_frame, sl_host_touch_cancel};
+
+static void sl_host_touch_recorder_frame(void* data,
+                                         struct sl_touchrecorder* recorder) {
+  struct sl_host_touch* host = static_cast<sl_host_touch*>(data);
+
+  if (host->seat->stylus_tablet) {
+    sl_host_stylus_tablet_handle_touch(host->seat->stylus_tablet, recorder);
+  }
+
+  sl_touchrecorder_replay_to_listener(recorder, &sl_touch_listener, data);
+}
+
+static void sl_host_touch_recorder_cancel(void* data,
+                                          struct sl_touchrecorder* recorder) {
+  struct sl_host_touch* host = static_cast<sl_host_touch*>(data);
+
+  wl_touch_send_cancel(host->resource);
+}
 
 static void sl_destroy_host_pointer(struct wl_resource* resource) {
   struct sl_host_pointer* host =
@@ -613,8 +659,8 @@ static void sl_destroy_host_pointer(struct wl_resource* resource) {
     wl_pointer_destroy(host->proxy);
   }
   wl_list_remove(&host->focus_resource_listener.link);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_pointer_focus_resource_destroyed(struct wl_listener* listener,
@@ -622,7 +668,7 @@ static void sl_pointer_focus_resource_destroyed(struct wl_listener* listener,
   struct sl_host_pointer* host;
 
   host = wl_container_of(listener, host, focus_resource_listener);
-  sl_pointer_set_focus(host, host->focus_serial, NULL, 0, 0);
+  sl_pointer_set_focus(host, host->focus_serial, nullptr, 0, 0);
 }
 
 static void sl_host_seat_get_host_pointer(struct wl_client* client,
@@ -630,9 +676,7 @@ static void sl_host_seat_get_host_pointer(struct wl_client* client,
                                           uint32_t id) {
   struct sl_host_seat* host =
       static_cast<sl_host_seat*>(wl_resource_get_user_data(resource));
-  struct sl_host_pointer* host_pointer =
-      static_cast<sl_host_pointer*>(malloc(sizeof(*host_pointer)));
-  assert(host_pointer);
+  struct sl_host_pointer* host_pointer = new sl_host_pointer();
 
   host_pointer->seat = host->seat;
   host_pointer->resource = wl_resource_create(
@@ -641,13 +685,13 @@ static void sl_host_seat_get_host_pointer(struct wl_client* client,
                                  &sl_pointer_implementation, host_pointer,
                                  sl_destroy_host_pointer);
   host_pointer->proxy = wl_seat_get_pointer(host->proxy);
-  wl_pointer_set_user_data(host_pointer->proxy, host_pointer);
   wl_pointer_add_listener(host_pointer->proxy, &sl_pointer_listener,
                           host_pointer);
   wl_list_init(&host_pointer->focus_resource_listener.link);
   host_pointer->focus_resource_listener.notify =
       sl_pointer_focus_resource_destroyed;
-  host_pointer->focus_resource = NULL;
+  host_pointer->focus_resource = nullptr;
+  host_pointer->focus_surface = nullptr;
   host_pointer->focus_serial = 0;
   host_pointer->time = 0;
   host_pointer->axis_delta[0] = wl_fixed_from_int(0);
@@ -677,8 +721,8 @@ static void sl_destroy_host_keyboard(struct wl_resource* resource) {
   }
 
   wl_list_remove(&host->focus_resource_listener.link);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_keyboard_focus_resource_destroyed(struct wl_listener* listener,
@@ -688,7 +732,7 @@ static void sl_keyboard_focus_resource_destroyed(struct wl_listener* listener,
 
   host = wl_container_of(listener, host, focus_resource_listener);
   wl_array_init(&array);
-  sl_keyboard_set_focus(host, host->focus_serial, NULL, &array);
+  sl_keyboard_set_focus(host, host->focus_serial, nullptr, &array);
 }
 
 static void sl_host_seat_get_host_keyboard(struct wl_client* client,
@@ -696,9 +740,7 @@ static void sl_host_seat_get_host_keyboard(struct wl_client* client,
                                            uint32_t id) {
   struct sl_host_seat* host =
       static_cast<sl_host_seat*>(wl_resource_get_user_data(resource));
-  struct sl_host_keyboard* host_keyboard =
-      static_cast<sl_host_keyboard*>(malloc(sizeof(*host_keyboard)));
-  assert(host_keyboard);
+  struct sl_host_keyboard* host_keyboard = new sl_host_keyboard();
 
   host_keyboard->seat = host->seat;
   host_keyboard->resource = wl_resource_create(
@@ -707,16 +749,15 @@ static void sl_host_seat_get_host_keyboard(struct wl_client* client,
                                  &sl_keyboard_implementation, host_keyboard,
                                  sl_destroy_host_keyboard);
   host_keyboard->proxy = wl_seat_get_keyboard(host->proxy);
-  wl_keyboard_set_user_data(host_keyboard->proxy, host_keyboard);
   wl_keyboard_add_listener(host_keyboard->proxy, &sl_keyboard_listener,
                            host_keyboard);
   wl_list_init(&host_keyboard->focus_resource_listener.link);
   host_keyboard->focus_resource_listener.notify =
       sl_keyboard_focus_resource_destroyed;
-  host_keyboard->focus_resource = NULL;
+  host_keyboard->focus_resource = nullptr;
   host_keyboard->focus_serial = 0;
-  host_keyboard->keymap = NULL;
-  host_keyboard->state = NULL;
+  host_keyboard->keymap = nullptr;
+  host_keyboard->state = nullptr;
   host_keyboard->control_mask = 0;
   host_keyboard->alt_mask = 0;
   host_keyboard->shift_mask = 0;
@@ -729,7 +770,7 @@ static void sl_host_seat_get_host_keyboard(struct wl_client* client,
             host->seat->ctx->keyboard_extension->internal,
             host_keyboard->proxy);
   } else {
-    host_keyboard->extended_keyboard_proxy = NULL;
+    host_keyboard->extended_keyboard_proxy = nullptr;
   }
 }
 
@@ -742,8 +783,11 @@ static void sl_destroy_host_touch(struct wl_resource* resource) {
   } else {
     wl_touch_destroy(host->proxy);
   }
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+
+  sl_touchrecorder_destroy(host->recorder);
+
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_touch_focus_resource_destroyed(struct wl_listener* listener,
@@ -753,7 +797,8 @@ static void sl_touch_focus_resource_destroyed(struct wl_listener* listener,
   host = wl_container_of(listener, host, focus_resource_listener);
   wl_list_remove(&host->focus_resource_listener.link);
   wl_list_init(&host->focus_resource_listener.link);
-  host->focus_resource = NULL;
+  host->focus_resource = nullptr;
+  host->focus_surface = nullptr;
 }
 
 static void sl_host_seat_get_host_touch(struct wl_client* client,
@@ -761,9 +806,7 @@ static void sl_host_seat_get_host_touch(struct wl_client* client,
                                         uint32_t id) {
   struct sl_host_seat* host =
       static_cast<sl_host_seat*>(wl_resource_get_user_data(resource));
-  struct sl_host_touch* host_touch =
-      static_cast<sl_host_touch*>(malloc(sizeof(*host_touch)));
-  assert(host_touch);
+  struct sl_host_touch* host_touch = new sl_host_touch();
 
   host_touch->seat = host->seat;
   host_touch->resource = wl_resource_create(
@@ -771,25 +814,19 @@ static void sl_host_seat_get_host_touch(struct wl_client* client,
   wl_resource_set_implementation(host_touch->resource, &sl_touch_implementation,
                                  host_touch, sl_destroy_host_touch);
   host_touch->proxy = wl_seat_get_touch(host->proxy);
-  wl_touch_set_user_data(host_touch->proxy, host_touch);
-  wl_touch_add_listener(host_touch->proxy, &sl_touch_listener, host_touch);
+  host_touch->recorder =
+      sl_touchrecorder_attach(host_touch->proxy, sl_host_touch_recorder_frame,
+                              sl_host_touch_recorder_cancel, host_touch);
   wl_list_init(&host_touch->focus_resource_listener.link);
   host_touch->focus_resource_listener.notify =
       sl_touch_focus_resource_destroyed;
-  host_touch->focus_resource = NULL;
-}
-
-static void sl_host_seat_release(struct wl_client* client,
-                                 struct wl_resource* resource) {
-  struct sl_host_seat* host =
-      static_cast<sl_host_seat*>(wl_resource_get_user_data(resource));
-
-  wl_seat_release(host->proxy);
+  host_touch->focus_resource = nullptr;
+  host_touch->focus_surface = nullptr;
 }
 
 static const struct wl_seat_interface sl_seat_implementation = {
     sl_host_seat_get_host_pointer, sl_host_seat_get_host_keyboard,
-    sl_host_seat_get_host_touch, sl_host_seat_release};
+    sl_host_seat_get_host_touch, ForwardRequest<wl_seat_release>};
 
 static void sl_seat_capabilities(void* data,
                                  struct wl_seat* seat,
@@ -821,8 +858,8 @@ static void sl_destroy_host_seat(struct wl_resource* resource) {
     wl_seat_release(host->proxy);
   else
     wl_seat_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_bind_host_seat(struct wl_client* client,
@@ -830,8 +867,7 @@ static void sl_bind_host_seat(struct wl_client* client,
                               uint32_t version,
                               uint32_t id) {
   struct sl_seat* seat = (struct sl_seat*)data;
-  struct sl_host_seat* host = static_cast<sl_host_seat*>(malloc(sizeof(*host)));
-  assert(host);
+  struct sl_host_seat* host = new sl_host_seat();
   host->seat = seat;
   host->resource = wl_resource_create(client, &wl_seat_interface,
                                       MIN(version, seat->version), id);
@@ -840,7 +876,6 @@ static void sl_bind_host_seat(struct wl_client* client,
   host->proxy = static_cast<wl_seat*>(wl_registry_bind(
       wl_display_get_registry(seat->ctx->display), seat->id, &wl_seat_interface,
       wl_resource_get_version(host->resource)));
-  wl_seat_set_user_data(host->proxy, host);
   wl_seat_add_listener(host->proxy, &sl_seat_listener, host);
 
   sl_host_seat_added(host);

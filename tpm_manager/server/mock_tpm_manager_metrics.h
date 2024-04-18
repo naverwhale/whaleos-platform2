@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,6 +23,19 @@ class MockTpmManagerMetrics : public TpmManagerMetrics {
   MOCK_METHOD(void, ReportVersionFingerprint, (int), (override));
   MOCK_METHOD(void, ReportTimeToTakeOwnership, (base::TimeDelta), (override));
   MOCK_METHOD(void, ReportSecretStatus, (const SecretStatus&), (override));
+  MOCK_METHOD(void,
+              ReportAlertsData,
+              (const TpmStatus::AlertsData&),
+              (override));
+  MOCK_METHOD(void, ReportPowerWashResult, (TPMPowerWashResult), (override));
+  MOCK_METHOD(void,
+              ReportTakeOwnershipResult,
+              (TPMTakeOwnershipResult),
+              (override));
+  MOCK_METHOD(void, ReportFilesystemUtilization, (uint32_t), (override));
+  MOCK_METHOD(void, ReportFilesystemInitTime, (uint32_t), (override));
+  MOCK_METHOD(void, ReportApRoVerificationTime, (uint32_t), (override));
+  MOCK_METHOD(void, ReportExpApRoVerificationStatus, (uint32_t), (override));
 };
 
 }  // namespace tpm_manager

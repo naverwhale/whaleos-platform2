@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,10 @@
 
 #include <string>
 
+#include <crypto/scoped_openssl_types.h>
+#include <libhwsec/frontend/attestation/frontend.h>
 #include <openssl/rsa.h>
 #include <openssl/ec.h>
-#include <crypto/scoped_openssl_types.h>
 
 #include "attestation/common/tpm_utility.h"
 
@@ -21,7 +22,8 @@ namespace attestation {
 class CryptoUtilityImpl : public CryptoUtility {
  public:
   // Does not take ownership of pointers.
-  explicit CryptoUtilityImpl(TpmUtility* tpm_utility);
+  CryptoUtilityImpl(TpmUtility* tpm_utility,
+                    const hwsec::AttestationFrontend* hwsec);
   ~CryptoUtilityImpl() override;
 
   // CryptoUtility methods.
@@ -201,6 +203,7 @@ class CryptoUtilityImpl : public CryptoUtility {
                            std::string* spkac);
 
   TpmUtility* tpm_utility_;
+  const hwsec::AttestationFrontend* hwsec_;
 };
 
 }  // namespace attestation

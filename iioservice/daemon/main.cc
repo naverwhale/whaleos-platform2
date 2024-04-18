@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,6 +16,7 @@ int main() {
 
   brillo::InitLog(brillo::kLogToSyslog | brillo::kLogHeader);
 
+  LOGF(INFO) << "Daemon started";
   iioservice::Daemon daemon;
   daemon.Run();
   LOGF(INFO) << "Daemon stopped";

@@ -1,17 +1,16 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "diagnostics/cros_healthd/system/fake_system_config.h"
 
+#include <optional>
+#include <utility>
+
 namespace diagnostics {
 
 FakeSystemConfig::FakeSystemConfig() = default;
 FakeSystemConfig::~FakeSystemConfig() = default;
-
-bool FakeSystemConfig::FioSupported() {
-  return fio_supported_;
-}
 
 bool FakeSystemConfig::HasBacklight() {
   return has_backlight_;
@@ -29,32 +28,53 @@ bool FakeSystemConfig::HasSkuNumber() {
   return has_sku_number_property_;
 }
 
+bool FakeSystemConfig::HasPrivacyScreen() {
+  return has_privacy_screen_;
+}
+
+bool FakeSystemConfig::HasChromiumEC() {
+  return has_chromium_ec_;
+}
+
 bool FakeSystemConfig::NvmeSupported() {
   return nvme_supported_;
 }
 
-bool FakeSystemConfig::NvmeSelfTestSupported() {
-  return nvme_self_test_supported_;
+void FakeSystemConfig::NvmeSelfTestSupported(
+    NvmeSelfTestSupportedCallback callback) {
+  std::move(callback).Run(nvme_self_test_supported_);
 }
 
 bool FakeSystemConfig::SmartCtlSupported() {
   return smart_ctrl_supported_;
 }
 
-void FakeSystemConfig::SetFioSupported(bool value) {
-  fio_supported_ = value;
+bool FakeSystemConfig::MmcSupported() {
+  return mmc_supported_;
+}
+
+bool FakeSystemConfig::FingerprintDiagnosticSupported() {
+  return fingerprint_diagnostic_supported_;
 }
 
 bool FakeSystemConfig::IsWilcoDevice() {
   return wilco_device_;
 }
 
-base::Optional<std::string> FakeSystemConfig::GetMarketingName() {
+std::optional<std::string> FakeSystemConfig::GetMarketingName() {
   return marketing_name_;
+}
+
+std::optional<std::string> FakeSystemConfig::GetOemName() {
+  return oem_name_;
 }
 
 std::string FakeSystemConfig::GetCodeName() {
   return code_name_;
+}
+
+std::optional<bool> FakeSystemConfig::HasSensor(SensorType sensor) {
+  return has_sensors_[sensor];
 }
 
 void FakeSystemConfig::SetHasBacklight(bool value) {
@@ -63,6 +83,14 @@ void FakeSystemConfig::SetHasBacklight(bool value) {
 
 void FakeSystemConfig::SetHasBattery(bool value) {
   has_battery_ = value;
+}
+
+void FakeSystemConfig::SetHasPrivacyScreen(bool value) {
+  has_privacy_screen_ = value;
+}
+
+void FakeSystemConfig::SetHasChromiumEC(bool value) {
+  has_chromium_ec_ = value;
 }
 
 void FakeSystemConfig::SetHasSmartBattery(bool value) {
@@ -85,17 +113,34 @@ void FakeSystemConfig::SetSmartCtrlSupported(bool value) {
   smart_ctrl_supported_ = value;
 }
 
+void FakeSystemConfig::SetMmcSupported(bool value) {
+  mmc_supported_ = value;
+}
+
+void FakeSystemConfig::SetFingerprintDiagnosticSupported(bool value) {
+  fingerprint_diagnostic_supported_ = value;
+}
+
 void FakeSystemConfig::SetIsWilcoDevice(bool value) {
   wilco_device_ = value;
 }
 
 void FakeSystemConfig::SetMarketingName(
-    const base::Optional<std::string>& value) {
+    const std::optional<std::string>& value) {
   marketing_name_ = value;
+}
+
+void FakeSystemConfig::SetOemName(const std::optional<std::string>& value) {
+  oem_name_ = value;
 }
 
 void FakeSystemConfig::SetCodeName(const std::string& value) {
   code_name_ = value;
+}
+
+void FakeSystemConfig::SetSensor(SensorType sensor,
+                                 const std::optional<bool>& value) {
+  has_sensors_[sensor] = value;
 }
 
 }  // namespace diagnostics

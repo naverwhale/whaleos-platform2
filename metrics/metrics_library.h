@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,23 +7,35 @@
 
 #include <sys/types.h>
 #include <unistd.h>
+
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/compiler_specific.h>
 #include <base/files/file_path.h>
-#include <base/macros.h>
-#include <gtest/gtest_prod.h>  // for FRIEND_TEST
+#include <base/memory/scoped_refptr.h>
+#include <base/strings/string_piece.h>
+#include <base/time/time.h>
 
+#include "metrics/metrics_writer.h"
 #include "policy/libpolicy.h"
 
 class MetricsLibraryInterface {
  public:
-  virtual void Init() = 0;  // TODO(chromium:940343): Remove this function.
   virtual bool AreMetricsEnabled() = 0;
+  virtual bool IsAppSyncEnabled() = 0;
   virtual bool IsGuestMode() = 0;
+
   virtual bool SendToUMA(
       const std::string& name, int sample, int min, int max, int nbuckets) = 0;
+  virtual bool SendRepeatedToUMA(const std::string& name,
+                                 int sample,
+                                 int min,
+                                 int max,
+                                 int nbuckets,
+                                 int num_samples) = 0;
+
   template <typename T>
   bool SendEnumToUMA(const std::string& name, T sample) {
     static_assert(std::is_enum<T>::value, "T is not an enum.");
@@ -40,40 +52,116 @@ class MetricsLibraryInterface {
   virtual bool SendEnumToUMA(const std::string& name,
                              int sample,
                              int exclusive_max) = 0;
+  template <typename T>
+  bool SendRepeatedEnumToUMA(const std::string& name,
+                             T sample,
+                             int num_samples) {
+    static_assert(std::is_enum<T>::value, "T is not an enum.");
+    // This also ensures that an enumeration that doesn't define kMaxValue fails
+    // with a semi-useful error ("no member named 'kMaxValue' in ...").
+    static_assert(static_cast<uintmax_t>(T::kMaxValue) <=
+                      static_cast<uintmax_t>(INT_MAX) - 1,
+                  "Enumeration's kMaxValue is out of range of INT_MAX!");
+    DCHECK_LE(static_cast<uintmax_t>(sample),
+              static_cast<uintmax_t>(T::kMaxValue));
+    return SendRepeatedEnumToUMA(name, static_cast<int>(sample),
+                                 static_cast<int>(T::kMaxValue) + 1,
+                                 num_samples);
+  }
+  virtual bool SendRepeatedEnumToUMA(const std::string& name,
+                                     int sample,
+                                     int exclusive_max,
+                                     int num_samples) = 0;
+
+  virtual bool SendLinearToUMA(const std::string& name,
+                               int sample,
+                               int max) = 0;
+  virtual bool SendRepeatedLinearToUMA(const std::string& name,
+                                       int sample,
+                                       int max,
+                                       int num_samples) = 0;
+
+  virtual bool SendPercentageToUMA(const std::string& name, int sample) = 0;
+  virtual bool SendRepeatedPercentageToUMA(const std::string& name,
+                                           int sample,
+                                           int num_samples) = 0;
+
   virtual bool SendBoolToUMA(const std::string& name, bool sample) = 0;
+  virtual bool SendRepeatedBoolToUMA(const std::string& name,
+                                     bool sample,
+                                     int num_samples) = 0;
+
   virtual bool SendSparseToUMA(const std::string& name, int sample) = 0;
+  virtual bool SendRepeatedSparseToUMA(const std::string& name,
+                                       int sample,
+                                       int num_samples) = 0;
+
   virtual bool SendUserActionToUMA(const std::string& action) = 0;
+  virtual bool SendRepeatedUserActionToUMA(const std::string& action,
+                                           int num_samples) = 0;
+
   virtual bool SendCrashToUMA(const char* crash_kind) = 0;
+  virtual bool SendRepeatedCrashToUMA(const char* crash_kind,
+                                      int num_samples) = 0;
+
   virtual bool SendCrosEventToUMA(const std::string& event) = 0;
-#if USE_METRICS_UPLOADER
-  virtual bool SendRepeatedToUMA(const std::string& name,
-                                 int sample,
-                                 int min,
-                                 int max,
-                                 int nbuckets,
-                                 int num_samples) = 0;
-#endif
-  virtual ~MetricsLibraryInterface() {}
+  virtual bool SendRepeatedCrosEventToUMA(const std::string& event,
+                                          int num_samples) = 0;
+
+  virtual bool SendTimeToUMA(std::string_view name,
+                             base::TimeDelta sample,
+                             base::TimeDelta min,
+                             base::TimeDelta max,
+                             size_t buckets) = 0;
+  virtual bool SendRepeatedTimeToUMA(std::string_view name,
+                                     base::TimeDelta sample,
+                                     base::TimeDelta min,
+                                     base::TimeDelta max,
+                                     size_t buckets,
+                                     int num_samples) = 0;
+
+  virtual void SetOutputFile(const std::string& output_file) = 0;
+  virtual ~MetricsLibraryInterface() = default;
 };
 
 // Library used to send metrics to Chrome/UMA.
+//
+// The thread-safety of Send*  methods in this class depends on the
+// `MetricsWriter`. By default (if using `SynchronousMetricsWriter`),
+// it is safe to call Send* functions from multiple threads, as long as
+// no other MetricsLibrary functions are being called.
+//
+// Other functions in this class are not thread-safe.
 class MetricsLibrary : public MetricsLibraryInterface {
  public:
+  // Creates `MetricsLibrary`.
+  //
+  // This sets `SynchronousMetricsWriter` as the default.
   MetricsLibrary();
+  // Creates `MetricsLibrary` with custom `MetricsWriter`.
+  //
+  // Example:
+  //    base::ThreadPoolInstance::CreateAndStartWithDefaultParams("name");
+  //    scoped_refptr<base::SequencedTaskRunner> sequenced_task_runner =
+  //      base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock()});
+  //    scoped_refptr<AsynchronousMetricsWriter> metrics_writer =
+  //      base::MakeRefCounted<AsynchronousMetricsWriter>(sequenced_task_runner,
+  //                                                        false);
+  //    MetricsLibrary metrics = MetricsLibrary(metrics_writer);
+  explicit MetricsLibrary(scoped_refptr<MetricsWriter> metrics_writer);
   MetricsLibrary(const MetricsLibrary&) = delete;
   MetricsLibrary& operator=(const MetricsLibrary&) = delete;
 
-  virtual ~MetricsLibrary();
-
-  // Formerly used to initialize the library.
-  // TODO(chromium:940343): Remove this function.
-  void Init() override;
+  ~MetricsLibrary() override;
 
   // Returns whether or not the machine is running in guest mode.
   bool IsGuestMode() override;
 
   // Returns whether or not metrics collection is enabled.
   bool AreMetricsEnabled() override;
+
+  // Returns where or not users have opted in to AppSync.
+  bool IsAppSyncEnabled() override;
 
   // Chrome normally manages Enable/Disable state. These functions are
   // intended ONLY for use by devices which don't run Chrome (e.g. Onhub)
@@ -96,7 +184,7 @@ class MetricsLibrary : public MetricsLibraryInterface {
   // fully available (e.g. when /var is not mounted). Note that the contents of
   // custom output files will not be sent to the server automatically, but need
   // to be imported via Replay() to get picked up by the reporting pipeline.
-  void SetOutputFile(const std::string& output_file);
+  void SetOutputFile(const std::string& output_file) override;
 
   // Replays metrics from the given file as if the events contained in |file|
   // where being generated via the SendXYZ functions.
@@ -120,17 +208,26 @@ class MetricsLibrary : public MetricsLibraryInterface {
   // 100 is high).
   //
   // The new metric must be documented in
-  // //tools/metrics/histograms/histograms.xml in the Chromium repository.
+  // //tools/metrics/histograms/metadata/platform/histograms.xml in the Chromium
+  // repository.
   bool SendToUMA(const std::string& name,
                  int sample,
                  int min,
                  int max,
                  int nbuckets) override;
+  // Sends |num_samples| samples with the same value to chrome.
+  // Otherwise equivalent to SendToUMA().
+  bool SendRepeatedToUMA(const std::string& name,
+                         int sample,
+                         int min,
+                         int max,
+                         int nbuckets,
+                         int num_samples) override;
 
-  // Sends linear histogram data to Chrome for transport to UMA and
+  // Sends enumerated histogram data to Chrome for transport to UMA and
   // returns true on success. These methods result in the equivalent of
   // an asynchronous non-blocking RPC to UMA_HISTOGRAM_ENUMERATION
-  // inside Chrome (see base/histogram.h).
+  // inside Chrome (see base/metrics/histogram_macros.h).
   //
   // |sample| is the value to be recorded (0 <= |sample| < |exclusive_max|).
   // |exclusive_max| should be set to 1 more than the largest enum value.
@@ -144,7 +241,8 @@ class MetricsLibrary : public MetricsLibraryInterface {
   // normal, while 100 is high).
   //
   // The new metric must be documented in
-  // //tools/metrics/histograms/histograms.xml in the Chromium repository.
+  // //tools/metrics/histograms/metadata/platform/histograms.xml in the Chromium
+  // repository.
   // Sample usage:
   //   // These values are logged to UMA. Entries should not be renumbered and
   //   // numeric values should never be reused. Please keep in sync with
@@ -166,14 +264,63 @@ class MetricsLibrary : public MetricsLibraryInterface {
                      int sample,
                      int exclusive_max) override;
 
+  // Sends |num_samples| samples with the same value to chrome.
+  // Otherwise equivalent to SendEnumToUMA().
+  bool SendRepeatedEnumToUMA(const std::string& name,
+                             int sample,
+                             int exclusive_max,
+                             int num_samples) override;
+
+  // Sends linear histogram data to Chrome for transport to UMA and
+  // returns true on success. These methods result in the equivalent of an
+  // asynchronous non-blocking RPC to UMA_HISTOGRAM_EXACT_LINEAR inside Chrome
+  // (see base/metrics/histogram_macros.h).
+  //
+  // |sample| is the value to be recorded (0 <= |sample| < |exclusive_max|).
+  // (-infinity, 0) is the implicit underflow bucket.
+  // [|exclusive_max|,infinity) is the implicit overflow bucket.
+  //
+  // |exclusive_max| should be 101 or less.
+  //
+  // The new metric must be documented in
+  // //tools/metrics/histograms/metadata/platform/histograms.xml in the Chromium
+  // repository.
+  bool SendLinearToUMA(const std::string& name,
+                       int sample,
+                       int exclusive_max) override;
+  // Same, but sends |num_samples| samples with the same value to chrome.
+  bool SendRepeatedLinearToUMA(const std::string& name,
+                               int sample,
+                               int exclusive_max,
+                               int num_samples) override;
+
+  // Sends percentage histogram data to Chrome for transport to UMA and
+  // returns true on success.  This is a specialization of SendLinearToUMA with
+  // |exclusive_max| = 101 for percentage values. These methods result in the
+  // equivalent of an asynchronous non-blocking RPC to UMA_HISTOGRAM_PERCENTAGE
+  // inside Chrome (see base/metrics/histogram_macros.h).
+  bool SendPercentageToUMA(const std::string& name, int sample) override;
+  // Same, but sends |num_samples| samples with the same value to chrome.
+  bool SendRepeatedPercentageToUMA(const std::string& name,
+                                   int sample,
+                                   int num_samples) override;
+
   // Specialization of SendEnumToUMA for boolean values.
   bool SendBoolToUMA(const std::string& name, bool sample) override;
+  // Same, but sends |num_samples| samples with the same value to chrome.
+  bool SendRepeatedBoolToUMA(const std::string& name,
+                             bool sample,
+                             int num_samples) override;
 
   // Sends sparse histogram sample to Chrome for transport to UMA.  Returns
   // true on success.
   //
   // |sample| is the 32-bit integer value to be recorded.
   bool SendSparseToUMA(const std::string& name, int sample) override;
+  // Same, but sends |num_samples| samples with the same value to chrome.
+  bool SendRepeatedSparseToUMA(const std::string& name,
+                               int sample,
+                               int num_samples) override;
 
   // Sends a user action to Chrome for transport to UMA and returns true on
   // success. This method results in the equivalent of an asynchronous
@@ -185,29 +332,53 @@ class MetricsLibrary : public MetricsLibraryInterface {
   // //tools/metrics/actions/extract_actions.py in the Chromium repository,
   // which should then be run to generate a hash for the new action.
   bool SendUserActionToUMA(const std::string& action) override;
+  // Same, but sends |num_samples| samples with the same value to chrome.
+  // NOTE that this operation will result in a loop within chrome to call
+  // RecordAction |num_samples| times, so num_samples should not be too large.
+  // (see kMaxRepeatedUserActions).
+  bool SendRepeatedUserActionToUMA(const std::string& action,
+                                   int num_samples) override;
 
   // Sends a signal to UMA that a crash of the given |crash_kind|
   // has occurred.  Used by UMA to generate stability statistics.
   bool SendCrashToUMA(const char* crash_kind) override;
+  // Same, but sends |num_samples| samples with the same value to chrome.
+  bool SendRepeatedCrashToUMA(const char* crash_kind, int num_samples) override;
 
   // Sends a "generic Chrome OS event" to UMA.  This is an event name
   // that is translated into an enumerated histogram entry.  Event names
   // must first be registered in metrics_library.cc.  See that file for
   // more details.
   bool SendCrosEventToUMA(const std::string& event) override;
+  // Same, but sends |num_samples| samples with the same value to chrome.
+  bool SendRepeatedCrosEventToUMA(const std::string& event,
+                                  int num_samples) override;
 
-#if USE_METRICS_UPLOADER
-  // Sends |num_samples| samples with the same value to chrome.
-  // Otherwise equivalent to SendToUMA().
-  bool SendRepeatedToUMA(const std::string& name,
-                         int sample,
-                         int min,
-                         int max,
-                         int nbuckets,
-                         int num_samples) override;
-#endif
+  // Sends timing data in milliseconds to UMA. Uses `SendToUMA()` under the hood
+  // and converts the timedeltas to milliseconds before handing it off.
+  bool SendTimeToUMA(std::string_view name,
+                     base::TimeDelta sample,
+                     base::TimeDelta min,
+                     base::TimeDelta max,
+                     size_t buckets) override;
+  // Same, but sends |num_samples| samples with the same value to chrome.
+  bool SendRepeatedTimeToUMA(std::string_view name,
+                             base::TimeDelta sample,
+                             base::TimeDelta min,
+                             base::TimeDelta max,
+                             size_t buckets,
+                             int num_samples) override;
 
   void SetConsentFileForTest(const base::FilePath& consent_file);
+
+  void SetDaemonStoreForTest(const base::FilePath& daemon_store) {
+    daemon_store_dir_ = daemon_store;
+  }
+
+  void SetAppSyncDaemonStoreForTest(
+      const base::FilePath& appsync_daemon_store) {
+    appsync_daemon_store_dir_ = appsync_daemon_store;
+  }
 
  private:
   friend class CMetricsLibraryTest;
@@ -216,14 +387,43 @@ class MetricsLibrary : public MetricsLibraryInterface {
   // This function is used by tests only to mock the device policies.
   void SetPolicyProvider(policy::PolicyProvider* provider);
 
+  // Check the per-user metrics consent, returning true if *all* of the
+  // logged-in users enabled consent and false if *any* disabled it.
+  // Return nullopt if we're unable to check per-user consent, if no users
+  // have overridden device policy, or if no users are logged in.
+  // We check all files because determining *which* consent file to use is
+  // tricky.
+  // We can't necessarily make a dbus call to session-manager (what if
+  // session-manager is not up, or session-manager calls AreMetricsEnabled?) and
+  // anyway it's not totally clear which user a metric or crash is from if
+  // multiple users are signed in simultaneously.
+  std::optional<bool> ArePerUserMetricsEnabled();
+
+  // Checks for user opt-in to AppSync. All the same caveats as
+  // ArePerUserMetricsEnabled apply.
+  std::optional<bool> IsPerUserAppSyncEnabled();
+
+  // Helper function which contains all the logic for ArePerUserMetricsEnabled
+  // and IsPerUserAppSyncEnabled.
+  std::optional<bool> CheckUserConsent(const base::FilePath& root_path,
+                                       const std::string consent_file);
+
   // Time at which we last checked if metrics were enabled.
-  static time_t cached_enabled_time_;
+  time_t cached_enabled_time_;
+
+  // Time at which we last checked if AppSync opt-in is enabled.
+  time_t cached_appsync_enabled_time_;
 
   // Cached state of whether or not metrics were enabled.
-  static bool cached_enabled_;
+  bool cached_enabled_;
 
-  base::FilePath uma_events_file_;
+  // Cached state of whether or not AppSync opt-in is enabled.
+  bool cached_appsync_enabled_;
+
+  scoped_refptr<MetricsWriter> metrics_writer_;
   base::FilePath consent_file_;
+  base::FilePath daemon_store_dir_;
+  base::FilePath appsync_daemon_store_dir_;
 
   std::unique_ptr<policy::PolicyProvider> policy_provider_;
 };

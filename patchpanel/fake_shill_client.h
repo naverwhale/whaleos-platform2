@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,17 +7,25 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <base/memory/ref_counted.h>
+// Ignore Wconversion warnings in dbus headers.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
 #include <dbus/mock_bus.h>
 #include <dbus/mock_object_proxy.h>
+#pragma GCC diagnostic pop
+#include <dbus/object_path.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "patchpanel/shill_client.h"
+#include "patchpanel/system.h"
 
 using testing::_;
 using testing::AnyNumber;
@@ -25,30 +33,43 @@ using testing::Return;
 
 namespace patchpanel {
 
+// TODO(b/273741099): Migrate all interface name arguments to device object path
+// arguments in this class.
 class FakeShillClient : public ShillClient {
  public:
-  explicit FakeShillClient(scoped_refptr<dbus::Bus> bus) : ShillClient(bus) {}
+  explicit FakeShillClient(scoped_refptr<dbus::Bus> bus, System* system)
+      : ShillClient(bus, system) {}
 
-  std::pair<Device, Device> GetDefaultDevices() override {
-    Device default_logical_device = {.type = Device::Type::kUnknown,
-                                     .ifname = fake_default_logical_ifname_};
-    Device default_physical_device = {.type = Device::Type::kUnknown,
-                                      .ifname = fake_default_physical_ifname_};
-    return std::make_pair(default_logical_device, default_physical_device);
-  }
-  const std::string& default_logical_interface() const override {
-    return fake_default_logical_ifname_;
-  }
-
-  const std::string& default_physical_interface() const override {
-    return fake_default_physical_ifname_;
+  std::vector<dbus::ObjectPath> GetServices() override {
+    std::vector<dbus::ObjectPath> services;
+    if (fake_default_logical_ifname_) {
+      services.emplace_back(*fake_default_logical_ifname_);
+    }
+    if (fake_default_physical_ifname_) {
+      services.emplace_back(*fake_default_physical_ifname_);
+    }
+    return services;
   }
 
-  void SetFakeDefaultLogicalDevice(const std::string& ifname) {
+  std::optional<Device> GetDeviceFromServicePath(
+      const dbus::ObjectPath& service_path) override {
+    Device device = {.type = Device::Type::kUnknown};
+    if (service_path.value() == fake_default_logical_ifname_) {
+      device.ifname = *fake_default_logical_ifname_;
+      return device;
+    }
+    if (service_path.value() == fake_default_physical_ifname_) {
+      device.ifname = *fake_default_physical_ifname_;
+      return device;
+    }
+    return std::nullopt;
+  }
+
+  void SetFakeDefaultLogicalDevice(std::optional<std::string> ifname) {
     fake_default_logical_ifname_ = ifname;
   }
 
-  void SetFakeDefaultPhysicalDevice(const std::string& ifname) {
+  void SetFakeDefaultPhysicalDevice(std::optional<std::string> ifname) {
     fake_default_physical_ifname_ = ifname;
   }
 
@@ -56,8 +77,9 @@ class FakeShillClient : public ShillClient {
     interface_names_[device_path] = ifname;
   }
 
-  std::string GetIfname(const dbus::ObjectPath& device_path) override {
-    return interface_names_[device_path.value()];
+  void SetFakeDeviceProperties(const dbus::ObjectPath& device_path,
+                               const Device& device) {
+    fake_device_properties_[device_path] = device;
   }
 
   void NotifyManagerPropertyChange(const std::string& name,
@@ -65,26 +87,43 @@ class FakeShillClient : public ShillClient {
     OnManagerPropertyChange(name, value);
   }
 
-  void NotifyDevicePropertyChange(const std::string& device,
+  void NotifyDevicePropertyChange(const dbus::ObjectPath& device_path,
                                   const std::string& name,
                                   const brillo::Any& value) {
-    OnDevicePropertyChange(device, name, value);
+    OnDevicePropertyChange(device_path, name, value);
   }
 
-  bool GetDeviceProperties(const std::string& device, Device* output) override {
-    get_device_properties_calls_.insert(device);
+  bool GetDeviceProperties(const dbus::ObjectPath& device_path,
+                           Device* output) override {
+    get_device_properties_calls_.insert(device_path);
+    if (fake_device_properties_.find(device_path) !=
+        fake_device_properties_.end()) {
+      *output = fake_device_properties_[device_path];
+    }
     return true;
   }
 
-  const std::set<std::string>& get_device_properties_calls() {
+  const ShillClient::Device* GetDeviceByShillDeviceName(
+      const std::string& shill_device_interface_property) const override {
+    for (const auto& [_, device] : fake_device_properties_) {
+      if (device.shill_device_interface_property ==
+          shill_device_interface_property) {
+        return &device;
+      }
+    }
+    return nullptr;
+  }
+
+  const std::set<dbus::ObjectPath>& get_device_properties_calls() {
     return get_device_properties_calls_;
   }
 
  private:
   std::map<std::string, std::string> interface_names_;
-  std::string fake_default_logical_ifname_;
-  std::string fake_default_physical_ifname_;
-  std::set<std::string> get_device_properties_calls_;
+  std::optional<std::string> fake_default_logical_ifname_;
+  std::optional<std::string> fake_default_physical_ifname_;
+  std::map<dbus::ObjectPath, Device> fake_device_properties_;
+  std::set<dbus::ObjectPath> get_device_properties_calls_;
 };
 
 class FakeShillClientHelper {
@@ -104,7 +143,7 @@ class FakeShillClientHelper {
                                                 "PropertyChanged", _, _))
         .Times(AnyNumber());
 
-    client_ = std::make_unique<FakeShillClient>(mock_bus_);
+    client_ = std::make_unique<FakeShillClient>(mock_bus_, nullptr);
   }
 
   std::unique_ptr<ShillClient> Client() { return std::move(client_); }

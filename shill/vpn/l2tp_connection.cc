@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,13 @@
 
 #include <map>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/strings/strcat.h>
 #include <base/strings/string_util.h>
@@ -20,29 +21,28 @@
 #include <libpasswordprovider/password_provider.h>
 
 #include "shill/ppp_daemon.h"
-#include "shill/ppp_device.h"
 #include "shill/vpn/vpn_util.h"
 
 namespace shill {
 
 namespace {
 
-// TODO(b/165170125): Consider using /run/xl2tpd folder.
-constexpr char kRunDir[] = "/run/l2tpipsec_vpn";
+constexpr char kRunDir[] = "/run/xl2tpd";
 constexpr char kXl2tpdPath[] = "/usr/sbin/xl2tpd";
+constexpr char kXl2tpdControlPath[] = "/usr/sbin/xl2tpd-control";
 constexpr char kL2TPDConfigFileName[] = "l2tpd.conf";
 constexpr char kL2TPDControlFileName[] = "l2tpd.control";
 constexpr char kPPPDConfigFileName[] = "pppd.conf";
 
 // Environment variable available to ppp plugin to know the resolved address
 // of the L2TP server.
-const char kLnsAddress[] = "LNS_ADDRESS";
+constexpr char kLnsAddress[] = "LNS_ADDRESS";
 
 // Constants used in the config file for xl2tpd.
-const char kL2TPConnectionName[] = "managed";
-const char kBpsParameter[] = "1000000";
-const char kRedialTimeoutParameter[] = "2";
-const char kMaxRedialsParameter[] = "30";
+constexpr char kL2TPConnectionName[] = "managed";
+constexpr char kBpsParameter[] = "1000000";
+constexpr char kRedialTimeoutParameter[] = "2";
+constexpr char kMaxRedialsParameter[] = "30";
 
 // xl2tpd (1.3.12 at the time of writing) uses fgets with a size 1024 buffer to
 // get configuration lines. If a configuration line was longer than that and
@@ -67,16 +67,9 @@ L2TPConnection::L2TPConnection(std::unique_ptr<Config> config,
       process_manager_(process_manager),
       vpn_util_(VPNUtil::New()) {}
 
-L2TPConnection::~L2TPConnection() {
-  if (state() == State::kIdle || state() == State::kStopped) {
-    return;
-  }
-
-  // This is unexpected but cannot be fully avoided. Call OnDisconnect() to make
-  // sure resources are released.
-  LOG(WARNING) << "Destructor called but the current state is " << state();
-  OnDisconnect();
-}
+// |external_task_| will be killed in its dtor if it is still running so no
+// explicit cleanup is needed here.
+L2TPConnection::~L2TPConnection() {}
 
 void L2TPConnection::OnConnect() {
   temp_dir_ = vpn_util_->CreateScopedTempDir(base::FilePath(kRunDir));
@@ -144,7 +137,7 @@ void L2TPConnection::Notify(const std::string& reason,
                 << state();
       return;
     }
-    NotifyFailure(PPPDevice::ParseExitFailure(dict), "pppd disconnected");
+    NotifyFailure(PPPDaemon::ParseExitFailure(dict), "pppd disconnected");
     return;
   }
 
@@ -156,50 +149,68 @@ void L2TPConnection::Notify(const std::string& reason,
     return;
   }
 
-  std::string interface_name = PPPDevice::GetInterfaceName(dict);
-  IPConfig::Properties ip_properties = PPPDevice::ParseIPConfiguration(dict);
+  std::string interface_name = PPPDaemon::GetInterfaceName(dict);
+  auto ipv4_properties = std::make_unique<IPConfig::Properties>(
+      PPPDaemon::ParseIPConfiguration(dict));
+  std::unique_ptr<IPConfig::Properties> ipv6_properties;
 
   // There is no IPv6 support for L2TP/IPsec VPN at this moment, so create a
   // blackhole route for IPv6 traffic after establishing a IPv4 VPN.
-  ip_properties.blackhole_ipv6 = true;
+  ipv4_properties->blackhole_ipv6 = true;
 
   // Reduce MTU to the minimum viable for IPv6, since the IPsec layer consumes
   // some variable portion of the payload.  Although this system does not yet
   // support IPv6, it is a reasonable value to start with, since the minimum
   // IPv6 packet size will plausibly be a size any gateway would support, and
   // is also larger than the IPv4 minimum size.
-  ip_properties.mtu = IPConfig::kMinIPv6MTU;
+  ipv4_properties->mtu = NetworkConfig::kMinIPv6MTU;
 
-  ip_properties.method = kTypeVPN;
+  ipv4_properties->method = kTypeVPN;
 
   // Notify() could be invoked either before or after the creation of the ppp
   // interface. We need to make sure that the interface is ready (by checking
   // DeviceInfo) before invoking the connected callback here.
   int interface_index = device_info_->GetIndex(interface_name);
   if (interface_index != -1) {
-    NotifyConnected(interface_name, interface_index, ip_properties);
+    NotifyConnected(interface_name, interface_index, std::move(ipv4_properties),
+                    /*ipv6_properties=*/nullptr);
   } else {
     device_info_->AddVirtualInterfaceReadyCallback(
         interface_name,
         base::BindOnce(&L2TPConnection::OnLinkReady, weak_factory_.GetWeakPtr(),
-                       ip_properties));
+                       std::move(ipv4_properties)));
   }
 }
 
 void L2TPConnection::OnDisconnect() {
-  // TODO(b/165170125): Terminate the connection before stopping xl2tpd.
-  external_task_ = nullptr;
-
-  if (state() == State::kDisconnecting) {
-    NotifyStopped();
+  // Do the cleanup directly if xl2tpd is not running.
+  if (!external_task_) {
+    OnXl2tpdControlDisconnectDone(/*exit_code=*/0);
+    return;
   }
+
+  const std::vector<std::string> args = {"-c", l2tpd_control_path_.value(),
+                                         "disconnect", kL2TPConnectionName};
+  int pid = process_manager_->StartProcessInMinijail(
+      FROM_HERE, base::FilePath(kXl2tpdControlPath), args, {},
+      VPNUtil::BuildMinijailOptions(0),
+      base::BindOnce(&L2TPConnection::OnXl2tpdControlDisconnectDone,
+                     weak_factory_.GetWeakPtr()));
+  if (pid != -1) {
+    return;
+  }
+  LOG(ERROR) << "Failed to start xl2tpd-control";
+  OnXl2tpdControlDisconnectDone(/*exit_code=*/0);
 }
 
 bool L2TPConnection::WritePPPDConfig() {
   pppd_config_path_ = temp_dir_.GetPath().Append(kPPPDConfigFileName);
 
+  // Note that since StringPiece is used here, all the strings in this vector
+  // MUST be alive until the end of this function. Unit tests are supposed to
+  // catch the issue if this condition is not met.
   // TODO(b/200636771): Use proper mtu and mru.
-  std::vector<std::string> lines = {
+  std::vector<std::string_view> lines = {
       "ipcp-accept-local",
       "ipcp-accept-remote",
       "refuse-eap",
@@ -219,7 +230,17 @@ bool L2TPConnection::WritePPPDConfig() {
     lines.push_back("lcp-echo-interval 30");
   }
 
-  lines.push_back(base::StrCat({"plugin ", PPPDaemon::kShimPluginPath}));
+  // This option avoids pppd logging to the fd of stdout (which is 1) (note that
+  // pppd will still log to syslog). We need to put this option before the
+  // plugin option below, since pppd will try to log when process that option,
+  // and fd of 1 may point to the actual data channel, which in turn causes that
+  // pppd sends the log string to the peer (see b/218437737 for an issue caused
+  // by this).
+  lines.push_back("logfd -1");
+
+  const std::string plugin_line =
+      base::StrCat({"plugin ", PPPDaemon::kShimPluginPath});
+  lines.push_back(plugin_line);
 
   std::string contents = base::JoinString(lines, "\n");
   return vpn_util_->WriteConfigFile(pppd_config_path_, contents);
@@ -240,7 +261,7 @@ bool L2TPConnection::WriteL2TPDConfig() {
   lines.push_back(base::StringPrintf("[lac %s]", kL2TPConnectionName));
 
   // Fills in bool properties.
-  auto bool_property = [](const std::string& key, bool value) -> std::string {
+  auto bool_property = [](std::string_view key, bool value) -> std::string {
     return base::StrCat({key, " = ", value ? "yes" : "no"});
   };
   lines.push_back(bool_property("require chap", config_->require_chap));
@@ -255,15 +276,17 @@ bool L2TPConnection::WriteL2TPDConfig() {
   // need to check them to ensure that the generated config file will not be
   // polluted. See https://crbug.com/1077754. Note that the ordering of
   // properties in the config file does not matter, we use a vector instead of
-  // map just for the ease of unit tests.
-  std::vector<std::pair<std::string, std::string>> string_properties = {
-      {"lns", config_->remote_ip},
-      {"name", config_->user},
-      {"bps", kBpsParameter},
-      {"redial timeout", kRedialTimeoutParameter},
-      {"max redials", kMaxRedialsParameter},
-      {"pppoptfile", pppd_config_path_.value()},
-  };
+  // map just for the ease of unit tests. Using StringPiece is safe here since
+  // because there is no temporary string object when constructing this vector.
+  const std::vector<std::pair<std::string_view, std::string_view>>
+      string_properties = {
+          {"lns", config_->remote_ip},
+          {"name", config_->user},
+          {"bps", kBpsParameter},
+          {"redial timeout", kRedialTimeoutParameter},
+          {"max redials", kMaxRedialsParameter},
+          {"pppoptfile", pppd_config_path_.value()},
+      };
   for (const auto& [key, value] : string_properties) {
     if (value.find('\n') != value.npos) {
       LOG(ERROR) << "The value for " << key << " contains newline characters";
@@ -283,12 +306,12 @@ bool L2TPConnection::WriteL2TPDConfig() {
 }
 
 void L2TPConnection::StartXl2tpd() {
-  const base::FilePath l2tpd_control_path =
-      temp_dir_.GetPath().Append(kL2TPDControlFileName);
+  l2tpd_control_path_ = temp_dir_.GetPath().Append(kL2TPDControlFileName);
 
   std::vector<std::string> args = {
-      "-c", l2tpd_config_path_.value(), "-C", l2tpd_control_path.value(),
-      "-D"  // prevents xl2tpd from detaching from the terminal and daemonizing
+      "-c", l2tpd_config_path_.value(), "-C", l2tpd_control_path_.value(),
+      "-D",  // prevents xl2tpd from detaching from the terminal and daemonizing
+      "-l",  // lets xl2tpd use syslog
   };
 
   std::map<std::string, std::string> env = {
@@ -297,8 +320,8 @@ void L2TPConnection::StartXl2tpd() {
 
   auto external_task_local = std::make_unique<ExternalTask>(
       control_interface_, process_manager_, weak_factory_.GetWeakPtr(),
-      base::BindRepeating(&L2TPConnection::OnXl2tpdExitedUnexpectedly,
-                          weak_factory_.GetWeakPtr()));
+      base::BindOnce(&L2TPConnection::OnXl2tpdExitedUnexpectedly,
+                     weak_factory_.GetWeakPtr()));
 
   Error error;
   constexpr uint64_t kCapMask = CAP_TO_MASK(CAP_NET_ADMIN);
@@ -313,19 +336,22 @@ void L2TPConnection::StartXl2tpd() {
   external_task_ = std::move(external_task_local);
 }
 
-void L2TPConnection::OnLinkReady(const IPConfig::Properties& ip_properties,
-                                 const std::string& if_name,
-                                 int if_index) {
+void L2TPConnection::OnLinkReady(
+    std::unique_ptr<IPConfig::Properties> ipv4_properties,
+    const std::string& if_name,
+    int if_index) {
   if (state() != State::kConnecting) {
     // Needs to do nothing here. The ppp interface is managed by the pppd
     // process so we don't need to remove it here.
     LOG(WARNING) << "OnLinkReady() called but the current state is " << state();
     return;
   }
-  NotifyConnected(if_name, if_index, ip_properties);
+  NotifyConnected(if_name, if_index, std::move(ipv4_properties),
+                  /*ipv6_properties=*/nullptr);
 }
 
 void L2TPConnection::OnXl2tpdExitedUnexpectedly(pid_t pid, int exit_code) {
+  external_task_ = nullptr;
   const std::string message =
       base::StringPrintf("xl2tpd exited unexpectedly with code=%d", exit_code);
   if (!IsConnectingOrConnected()) {
@@ -333,6 +359,23 @@ void L2TPConnection::OnXl2tpdExitedUnexpectedly(pid_t pid, int exit_code) {
     return;
   }
   NotifyFailure(Service::kFailureInternal, message);
+}
+
+void L2TPConnection::OnXl2tpdControlDisconnectDone(int exit_code) {
+  // Since this is only called in the disconnecting procedure, we only log this
+  // uncommon event instead of reporting it to the upper layer.
+  if (exit_code != 0) {
+    LOG(ERROR) << "xl2tpd-control exited with code=" << exit_code;
+  }
+
+  // Kill xl2tpd if it is still running. Note that it is usually the case that
+  // xl2tpd has disconnected the connection at this time, but this cannot be
+  // guaranteed, but we don't have better signal for that. Some servers might be
+  // unhappy when that happens (see b/234162302).
+  external_task_ = nullptr;
+  if (state() == State::kDisconnecting) {
+    NotifyStopped();
+  }
 }
 
 }  // namespace shill

@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,8 @@
 #include <map>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/command_line.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/rand_util.h>
 
@@ -156,8 +156,8 @@ string PeerSelector::GetUrlAndWait(const string& id, size_t minimum_size) {
               << constants::kMaxSimultaneousDownloadsPollTimeSeconds
               << " seconds until retrying.";
 
-    clock_->Sleep(base::TimeDelta::FromSeconds(
-        constants::kMaxSimultaneousDownloadsPollTimeSeconds));
+    clock_->Sleep(
+        base::Seconds(constants::kMaxSimultaneousDownloadsPollTimeSeconds));
 
     // Now that we've slept for a while, the URL may not be valid
     // anymore, so we do the lookup again.

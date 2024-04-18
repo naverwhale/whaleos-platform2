@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,9 +15,9 @@
 #include "power_manager/powerd/policy/user_proximity_handler.h"
 #include "power_manager/powerd/system/user_proximity_observer.h"
 #include "power_manager/powerd/system/user_proximity_watcher_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -61,7 +61,7 @@ class LteDelegate : public UserProximityHandler::Delegate,
   }
 };
 
-class UserProximityHandlerTest : public ::testing::Test {
+class UserProximityHandlerTest : public TestEnvironment {
  public:
   UserProximityHandlerTest() = default;
   UserProximityHandlerTest(const UserProximityHandlerTest&) = delete;
@@ -118,5 +118,4 @@ TEST_F(UserProximityHandlerTest, ProximityChange) {
   CHECK_EQ(JoinActions(nullptr), wifi_delegate_.GetActions());
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

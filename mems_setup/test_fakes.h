@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,23 +15,27 @@
 #include <utility>
 #include <vector>
 
-#include "libmems/test_fakes.h"
-#include "mems_setup/delegate.h"
-
 #include <base/check.h>
+#include <chromeos-config/libcros_config/fake_cros_config.h>
+#include <libmems/test_fakes.h>
+#include <libsar/test_fakes.h>
+
+#include "mems_setup/delegate.h"
 
 namespace mems_setup {
 namespace fakes {
 
 class FakeDelegate : public Delegate {
  public:
+  FakeDelegate();
+
   void SetVpdValue(const std::string& name, const std::string& value) {
     CHECK(!name.empty());
     CHECK(!value.empty());
     vpd_.emplace(name, value);
   }
 
-  base::Optional<std::string> ReadVpdValue(const std::string& key) override;
+  std::optional<std::string> ReadVpdValue(const std::string& key) override;
 
   bool ProbeKernelModule(const std::string& module) override;
 
@@ -43,8 +47,9 @@ class FakeDelegate : public Delegate {
       base::FilePath file_path) override;
 
   void CreateFile(const base::FilePath&);
+  void SetStringToFile(const base::FilePath&, const std::string&);
 
-  base::Optional<gid_t> FindGroupId(const char* group) override;
+  std::optional<gid_t> FindGroupId(const char* group) override;
 
   int GetPermissions(const base::FilePath& path) override;
   bool SetPermissions(const base::FilePath& path, int mode) override;
@@ -58,6 +63,15 @@ class FakeDelegate : public Delegate {
                     uid_t user,
                     gid_t group) override;
 
+  void SetMockDevlink(std::string mock_devlink) {
+    mock_devlink_ = mock_devlink;
+  }
+  std::optional<std::string> GetIioSarSensorDevlink(
+      std::string sys_path) override;
+
+  brillo::CrosConfigInterface* GetCrosConfig() override;
+  brillo::FakeCrosConfig* GetFakeCrosConfig();
+
   void SetMockContext(libmems::fakes::FakeIioContext* mock_context) {
     mock_context_ = mock_context;
   }
@@ -69,6 +83,8 @@ class FakeDelegate : public Delegate {
   std::map<std::string, int> permissions_;
   std::map<std::string, std::pair<uid_t, gid_t>> ownerships_;
   std::set<base::FilePath> existing_files_;
+  std::optional<std::string> mock_devlink_;
+  std::unique_ptr<brillo::FakeCrosConfig> cros_config_;
 
   libmems::fakes::FakeIioContext* mock_context_ = nullptr;
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2011 The Chromium OS Authors. All rights reserved.
+// Copyright 2011 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,9 @@
 
 #include <base/containers/adapters.h>
 #include <base/containers/contains.h>
+#include <base/containers/cxx20_erase.h>
 #include <base/strings/string_util.h>
 #include <base/strings/strcat.h>
-
-#include "cros-disks/quote.h"
 
 namespace cros_disks {
 

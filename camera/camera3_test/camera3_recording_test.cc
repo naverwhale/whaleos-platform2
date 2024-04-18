@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,19 +11,27 @@ namespace camera3_test {
 void Camera3RecordingFixture::SetUp() {
   ASSERT_EQ(0, cam_service_.Initialize(
                    Camera3Service::ProcessStillCaptureResultCallback(),
-                   base::Bind(&Camera3RecordingFixture::ProcessRecordingResult,
-                              base::Unretained(this))))
+                   base::BindRepeating(
+                       &Camera3RecordingFixture::ProcessRecordingResult,
+                       base::Unretained(this))))
       << "Failed to initialize camera service";
 }
 
 void Camera3RecordingFixture::ProcessRecordingResult(
     int cam_id, uint32_t /*frame_number*/, ScopedCameraMetadata metadata) {
-  VLOGF_ENTER();
   camera_metadata_ro_entry_t entry;
   ASSERT_EQ(0, find_camera_metadata_ro_entry(metadata.get(),
                                              ANDROID_SENSOR_TIMESTAMP, &entry))
       << "Failed to get sensor timestamp in recording result";
   sensor_timestamp_map_[cam_id].push_back(entry.data.i64[0]);
+
+  // b/259631409: Camera clients (e.g. CCA, Meet)
+  // need reliable timestamp for video use case.
+  auto last_idx = sensor_timestamp_map_[cam_id].size() - 1;
+  if (last_idx > 0) {
+    ASSERT_GT(sensor_timestamp_map_[cam_id][last_idx],
+              sensor_timestamp_map_[cam_id][last_idx - 1]);
+  }
 }
 
 // Test parameters:

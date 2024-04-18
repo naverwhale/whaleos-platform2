@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,14 +8,14 @@
 #include <fstream>
 #include <istream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
-#include <base/optional.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
+#include <brillo/cpuinfo.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 namespace chromeos_metrics {
@@ -56,8 +56,8 @@ bool VmStatsParseStats(std::istream* input, struct VmstatRecord* record);
 bool ParseCpuTime(std::istream* input, CpuTimeRecord* record);
 
 // Parse online CPU IDs from /proc/cpuinfo. Returns a vector of CPU ID on
-// success or base::nullopt on failure.
-base::Optional<std::vector<int>> GetOnlineCpus(std::istream& proc_cpuinfo);
+// success or std::nullopt on failure.
+std::optional<std::vector<int>> GetOnlineCpus(const brillo::CpuInfo& cpuinfo);
 
 // Encapsulates the access to GPU information.
 class GpuInfo {

@@ -1,9 +1,10 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "diagnostics/wilco_dtc_supportd/mojo_service_factory.h"
 
+#include <optional>
 #include <utility>
 
 #include <base/check.h>
@@ -16,6 +17,7 @@
 #include "diagnostics/wilco_dtc_supportd/mojo_service.h"
 
 namespace diagnostics {
+namespace wilco {
 namespace {
 
 void BindMojoServiceFactory(MojoServiceFactory::MojoReceiver* receiver,
@@ -56,7 +58,7 @@ MojoService* MojoServiceFactory::Get() const {
   return mojo_service_.get();
 }
 
-base::Optional<std::string> MojoServiceFactory::BootstrapMojoConnection(
+std::optional<std::string> MojoServiceFactory::BootstrapMojoConnection(
     const base::ScopedFD& mojo_fd) {
   if (!mojo_fd.is_valid()) {
     LOG(ERROR) << "Invalid Mojo file descriptor";
@@ -75,7 +77,7 @@ base::Optional<std::string> MojoServiceFactory::BootstrapMojoConnection(
   return Start(std::move(mojo_fd_copy));
 }
 
-base::Optional<std::string> MojoServiceFactory::Start(
+std::optional<std::string> MojoServiceFactory::Start(
     base::ScopedFD mojo_pipe_fd) {
   DCHECK(mojo_pipe_fd.is_valid());
 
@@ -103,12 +105,12 @@ base::Optional<std::string> MojoServiceFactory::Start(
     ShutdownDueToMojoError("Mojo bootstrap failed" /* debug_reason */);
     return "Failed to bootstrap Mojo";
   }
-  mojo_service_factory_receiver_.set_disconnect_handler(base::Bind(
+  mojo_service_factory_receiver_.set_disconnect_handler(base::BindOnce(
       &MojoServiceFactory::ShutdownDueToMojoError, base::Unretained(this),
       "Mojo connection error" /* debug_reason */));
 
   LOG(INFO) << "Successfully bootstrapped Mojo connection";
-  return base::nullopt;
+  return std::nullopt;
 }
 
 MojoServiceFactory::BindFactoryCallback
@@ -159,4 +161,5 @@ void MojoServiceFactory::GetService(
   std::move(callback).Run();
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

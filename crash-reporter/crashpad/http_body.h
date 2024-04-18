@@ -22,7 +22,6 @@
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 
 #include "crash-reporter/crashpad/file_io.h"
 #include "crash-reporter/crashpad/file_reader.h"
@@ -68,8 +67,6 @@ class StringHTTPBodyStream : public HTTPBodyStream {
  private:
   std::string string_;
   size_t bytes_read_;
-
-  DISALLOW_COPY_AND_ASSIGN(StringHTTPBodyStream);
 };
 
 //! \brief An implementation of HTTPBodyStream that reads from a
@@ -90,8 +87,6 @@ class FileReaderHTTPBodyStream : public HTTPBodyStream {
  private:
   FileReaderInterface* reader_;  // weak
   bool reached_eof_;
-
-  DISALLOW_COPY_AND_ASSIGN(FileReaderHTTPBodyStream);
 };
 
 //! \brief An implementation of HTTPBodyStream that combines an array of
@@ -116,8 +111,6 @@ class CompositeHTTPBodyStream : public HTTPBodyStream {
  private:
   PartsList parts_;
   PartsList::iterator current_part_;
-
-  DISALLOW_COPY_AND_ASSIGN(CompositeHTTPBodyStream);
 };
 
 }  // namespace crashpad

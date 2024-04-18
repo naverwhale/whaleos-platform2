@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,8 @@
 #include <string>
 
 #include "trunks/error_codes.h"
+#include "trunks/resilience/write_error_tracker.h"
+#include "trunks/trunks_metrics.h"
 
 namespace trunks {
 
@@ -24,7 +26,7 @@ namespace trunks {
 //   std::string response = handle.SendCommandAndWait(command);
 class TpmHandle : public CommandTransceiver {
  public:
-  TpmHandle();
+  explicit TpmHandle(WriteErrorTracker& write_error_tracker);
   TpmHandle(const TpmHandle&) = delete;
   TpmHandle& operator=(const TpmHandle&) = delete;
 
@@ -36,7 +38,7 @@ class TpmHandle : public CommandTransceiver {
 
   // CommandTranceiver methods.
   void SendCommand(const std::string& command,
-                   const ResponseCallback& callback) override;
+                   ResponseCallback callback) override;
   std::string SendCommandAndWait(const std::string& command) override;
 
  private:
@@ -45,6 +47,9 @@ class TpmHandle : public CommandTransceiver {
   TPM_RC SendCommandInternal(const std::string& command, std::string* response);
 
   int fd_;  // A file descriptor for /dev/tpm0.
+  // A TrunksMetrics instance for report UMA
+  TrunksMetrics metrics_;
+  WriteErrorTracker& write_error_tracker_;
 };
 
 }  // namespace trunks

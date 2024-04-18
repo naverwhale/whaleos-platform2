@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,7 @@ class Anonymizer;
 constexpr size_t kMachinePasswordCodePoints = 32;
 
 // By default, change the machine password every 30 days.
-constexpr base::TimeDelta kDefaultMachinePasswordChangeRate =
-    base::TimeDelta::FromDays(30);
+constexpr base::TimeDelta kDefaultMachinePasswordChangeRate = base::Days(30);
 
 // Group policy flags.
 const int kGpFlagAllEnabled = 0x00;
@@ -101,7 +100,7 @@ bool ParseGpFlags(const std::string& str, int* gp_flags);
 // Returns true if the string contains the given substring.
 bool Contains(const std::string& str, const std::string& substr);
 
-// Converts a valid GUID (see base::IsValidGUID()) to an octet string, see e.g.
+// Converts a valid GUID (see base::Uuid) to an octet string, see e.g.
 // http://stackoverflow.com/questions/1545630/searching-for-a-objectguid-in-ad.
 // Returns an empty string on error.
 std::string GuidToOctetString(const std::string& guid);

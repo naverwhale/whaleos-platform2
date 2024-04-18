@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,9 @@
 #include <algorithm>
 #include <utility>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
+#include <base/notreached.h>
 #include <brillo/message_loops/message_loop.h>
 
 #include "base/debug/leak_annotations.h"
@@ -18,6 +19,7 @@
 namespace ml {
 
 using ::chromeos::machine_learning::mojom::CreateGraphExecutorResult;
+using ::chromeos::machine_learning::mojom::GpuDelegateApi;
 using ::chromeos::machine_learning::mojom::GraphExecutor;
 using ::chromeos::machine_learning::mojom::GraphExecutorOptions;
 using ::chromeos::machine_learning::mojom::GraphExecutorOptionsPtr;
@@ -56,22 +58,19 @@ int ModelImpl::num_graph_executors_for_testing() const {
   return graph_executors_.size();
 }
 
-void ModelImpl::CreateGraphExecutor(
-    mojo::PendingReceiver<GraphExecutor> receiver,
-    CreateGraphExecutorCallback callback) {
-  auto options = GraphExecutorOptions::New(
-      /*use_nnapi=*/false, /*use_gpu=*/false);
-  CreateGraphExecutorWithOptions(std::move(options), std::move(receiver),
-                                 std::move(callback));
+void ModelImpl::REMOVED_0(mojo::PendingReceiver<GraphExecutor> receiver,
+                          CreateGraphExecutorCallback callback) {
+  NOTIMPLEMENTED();
 }
 
-void ModelImpl::CreateGraphExecutorWithOptions(
+void ModelImpl::CreateGraphExecutor(
     GraphExecutorOptionsPtr options,
     mojo::PendingReceiver<GraphExecutor> receiver,
     CreateGraphExecutorCallback callback) {
   GraphExecutorDelegate* graph_executor_delegate;
   auto result = model_delegate_->CreateGraphExecutorDelegate(
-      options->use_nnapi, options->use_gpu, &graph_executor_delegate);
+      options->use_nnapi, options->use_gpu, options->gpu_delegate_api,
+      &graph_executor_delegate);
   if (result != CreateGraphExecutorResult::OK) {
     std::move(callback).Run(result);
     return;

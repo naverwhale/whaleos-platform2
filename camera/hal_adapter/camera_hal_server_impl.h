@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -11,18 +11,27 @@
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/single_thread_task_runner.h>
 #include <base/synchronization/lock.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/thread_annotations.h>
 #include <base/threading/thread_checker.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/pending_remote.h>
 #include <mojo/public/cpp/bindings/receiver.h>
+#include <mojo/public/cpp/bindings/receiver_set.h>
 #include <mojo/public/cpp/bindings/remote.h>
+#include <mojo/public/cpp/bindings/remote_set.h>
+#include <mojo_service_manager/lib/mojom/service_manager.mojom.h>
 
 #include "camera/mojo/cros_camera_service.mojom.h"
+#include "camera/mojo/effects/effects_pipeline.mojom.h"
+#include "camera/mojo/unguessable_token.mojom.h"
 #include "cros-camera/cros_camera_hal.h"
 #include "hal_adapter/camera_hal_adapter.h"
+
+#if USE_CAMERA_FEATURE_DIAGNOSTICS
+#include "hal_adapter/camera_diagnostics_client.h"
+#endif
 
 namespace cros {
 
@@ -34,7 +43,7 @@ class CameraMojoChannelManager;
 // as Chrome VideoCaptureDeviceFactory and Android cameraserver process connect
 // to the CameraHalDispatcher to ask for camera service; CameraHalDispatcher
 // proxies the service requests to CameraHalServerImpl.
-class CameraHalServerImpl final {
+class CameraHalServerImpl {
  public:
   CameraHalServerImpl();
   CameraHalServerImpl(const CameraHalServerImpl&) = delete;
@@ -52,12 +61,15 @@ class CameraHalServerImpl final {
 
   // IPCBridge wraps all the IPC-related calls. Most of its methods should/will
   // be run on IPC thread.
-  class IPCBridge : public mojom::CameraHalServer {
+  class IPCBridge
+      : public mojom::CameraHalServer,
+        public mojom::CrosCameraService,
+        public chromeos::mojo_service_manager::mojom::ServiceProvider {
    public:
     IPCBridge(CameraHalServerImpl* camera_hal_server,
               CameraMojoChannelManager* mojo_manager);
 
-    ~IPCBridge();
+    ~IPCBridge() override;
 
     void Start(CameraHalAdapter* camera_hal_adapter,
                SetPrivacySwitchCallback set_privacy_switch_callback);
@@ -66,13 +78,37 @@ class CameraHalServerImpl final {
 
     void CreateChannel(
         mojo::PendingReceiver<mojom::CameraModule> camera_module_receiver,
-        mojom::CameraClientType camera_client_type) final;
+        mojom::CameraClientType camera_client_type) override;
 
-    void SetTracingEnabled(bool enabled) final;
+    void GetCameraModule(mojom::CameraClientType camera_client_type,
+                         GetCameraModuleCallback callback) override;
+
+    void SetTracingEnabled(bool enabled) override;
+
+    void SetAutoFramingState(mojom::CameraAutoFramingState state) override;
+
+    void GetCameraSWPrivacySwitchState(
+        mojom::CameraHalServer::GetCameraSWPrivacySwitchStateCallback callback)
+        override;
+
+    void SetCameraSWPrivacySwitchState(
+        mojom::CameraPrivacySwitchState state) override;
+
+    void GetAutoFramingSupported(
+        mojom::CameraHalServer::GetAutoFramingSupportedCallback callback)
+        override;
+
+    void SetCameraEffect(
+        mojom::EffectsConfigPtr config,
+        mojom::CameraHalServer::SetCameraEffectCallback callback) override;
 
     void NotifyCameraActivityChange(int32_t camera_id,
                                     bool opened,
                                     mojom::CameraClientType type);
+
+    void AddCrosCameraServiceObserver(
+        mojo::PendingRemote<mojom::CrosCameraServiceObserver> observer)
+        override;
 
     // Gets a weak pointer of the IPCBridge. This method can be called on
     // non-IPC thread.
@@ -81,7 +117,6 @@ class CameraHalServerImpl final {
    private:
     // Triggered when the HAL server is registered.
     void OnServerRegistered(
-        SetPrivacySwitchCallback set_privacy_switch_callback,
         int32_t result,
         mojo::PendingRemote<mojom::CameraHalServerCallbacks> callbacks);
 
@@ -89,7 +124,14 @@ class CameraHalServerImpl final {
     void OnServiceMojoChannelError();
 
     // Triggers when the camera privacy switch status changed.
-    void OnPrivacySwitchStatusChanged(PrivacySwitchState state);
+    void OnPrivacySwitchStatusChanged(int camera_id, PrivacySwitchState state);
+
+    // chromeos::mojo_service_manager::mojom::ServiceProvider overrides.
+    void Request(
+        chromeos::mojo_service_manager::mojom::ProcessIdentityPtr identity,
+        mojo::ScopedMessagePipeHandle receiver) override;
+
+    void OnObserverDisconnected(mojo::RemoteSetElementId id);
 
     CameraHalServerImpl* camera_hal_server_;
 
@@ -102,11 +144,21 @@ class CameraHalServerImpl final {
 
     CameraHalAdapter* camera_hal_adapter_;
 
+    SetPrivacySwitchCallback set_privacy_switch_callback_;
+
     // The CameraHalServer implementation receiver.  All the function calls to
     // |receiver_| runs on |ipc_task_runner_|.
-    mojo::Receiver<mojom::CameraHalServer> receiver_;
+    mojo::Receiver<mojom::CameraHalServer> receiver_{this};
 
     mojo::Remote<mojom::CameraHalServerCallbacks> callbacks_;
+
+    mojo::RemoteSet<mojom::CrosCameraServiceObserver> observers_;
+
+    mojo::ReceiverSet<mojom::CrosCameraService> camera_service_receiver_set_;
+
+    // Receiver for mojo service manager service provider.
+    mojo::Receiver<chromeos::mojo_service_manager::mojom::ServiceProvider>
+        provider_receiver_{this};
 
     base::WeakPtrFactory<IPCBridge> weak_ptr_factory_{this};
   };
@@ -115,18 +167,22 @@ class CameraHalServerImpl final {
   // corresponding error code on failure.
   int LoadCameraHal();
 
-  void ExitOnMainThread(int exit_status);
+  void ExitOnMainThread(int error);
 
-  void OnCameraActivityChange(int32_t camera_id,
+  void OnCameraActivityChange(base::WeakPtr<IPCBridge> ipc_bridge,
+                              int32_t camera_id,
                               bool opened,
                               mojom::CameraClientType type);
+
+#if USE_CAMERA_FEATURE_DIAGNOSTICS
+  std::unique_ptr<CameraDiagnosticsClient> camera_diagnostics_client_;
+#endif
 
   std::unique_ptr<CameraMojoChannelManager> mojo_manager_;
 
   // The instance which deals with the IPC-related calls. It should always run
   // and be deleted on IPC thread.
-  base::Lock ipc_bridge_lock_;
-  std::unique_ptr<IPCBridge> ipc_bridge_ GUARDED_BY(ipc_bridge_lock_);
+  std::unique_ptr<IPCBridge> ipc_bridge_;
 
   // Interfaces of Camera HALs.
   std::vector<cros_camera_hal_t*> cros_camera_hals_;

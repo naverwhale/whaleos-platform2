@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 The Chromium OS Authors. All rights reserved.
+ * Copyright 2016 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -20,60 +20,73 @@
 #include <fuse/fuse.h>
 #include <fuse/fuse_common.h>
 #include <fuse/fuse_lowlevel.h>
+#include <linux/fs.h>
 #include <linux/limits.h>
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/vfs.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <string>
 
+#include "arc/mount-passthrough/mount-passthrough-util.h"
+
 #define USER_NS_SHIFT 655360
 #define CHRONOS_UID 1000
 #define CHRONOS_GID 1000
-// Android's media_rw UID and GID shifted by USER_NS_SHIFT.
-#define AID_MEDIA_RW_UID 656383
-#define AID_MEDIA_RW_GID 656383
 
 #define WRAP_FS_CALL(res) ((res) < 0 ? -errno : 0)
 
 namespace {
 
-constexpr uid_t kAndroidAppUidStart = 10000 + USER_NS_SHIFT;
-constexpr uid_t kAndroidAppUidEnd = 19999 + USER_NS_SHIFT;
+// Android UID and GID values are taken from
+// system/core/libcutils/include/private/android_filesystem_config.h in the
+// Android codebase.
+constexpr uid_t kAndroidRootUid = 0;
+constexpr uid_t kAndroidMediaRwUid = 1023;
+constexpr uid_t kAndroidAppUidStart = 10000;
+constexpr uid_t kAndroidAppUidEnd = 19999;
+constexpr uid_t kAndroidAppUidStartInCrOS = kAndroidAppUidStart + USER_NS_SHIFT;
+constexpr uid_t kAndroidAppUidEndInCrOS = kAndroidAppUidEnd + USER_NS_SHIFT;
+
+constexpr gid_t kAndroidSdcardGid = 1015;
+constexpr gid_t kAndroidMediaRwGid = 1023;
+constexpr gid_t kAndroidExternalStorageGid = 1077;
+constexpr gid_t kAndroidEverybodyGid = 9997;
+
+constexpr char kCrosMountPassthroughFsContext[] =
+    "u:object_r:cros_mount_passthrough_fs:s0";
+constexpr char kMediaRwDataFileContext[] = "u:object_r:media_rw_data_file:s0";
 
 struct FusePrivateData {
   std::string android_app_access_type;
-  bool force_group_permission = false;
+  base::FilePath root;
+  bool enable_casefold_lookup = false;
 };
 
 // Given android_app_access_type, figure out the source of /storage mount in
 // Android.
-std::vector<std::string> get_storage_source(
-    const std::string& android_app_access_type) {
+std::string get_storage_source(const std::string& android_app_access_type) {
   std::string storage_source;
   // Either full (if no Android permission check is needed), read (for Android
   // READ_EXTERNAL_STORAGE permission check), or write (for Android
   // WRITE_EXTERNAL_STORAGE_PERMISSION).
   if (android_app_access_type == "full") {
-    return {};
+    return std::string();
   } else if (android_app_access_type == "read") {
-    // We allow apps with both READ_EXTERNAL_STORAGE and WRITE_EXTERNAL_STORAGE
-    // to access the read view. This is useful for MyFiles so that we can expose
-    // a read-only view (this one) as a second mount point under
-    // /mnt/runtime/write.
-    return {"/runtime/read", "/runtime/write"};
+    return "/runtime/read";
   } else if (android_app_access_type == "write") {
-    return {"/runtime/write"};
+    return "/runtime/write";
   } else {
     NOTREACHED();
-    return {"notreached"};
+    return "notreached";
   }
 }
 
@@ -91,11 +104,12 @@ int check_allowed() {
   // We only check Android app process for the Android external storage
   // permissions. Other kind of permissions (such as uid/gid) should be checked
   // through the standard Linux permission checks.
-  if (context->uid < kAndroidAppUidStart || context->uid > kAndroidAppUidEnd) {
+  if (context->uid < kAndroidAppUidStartInCrOS ||
+      context->uid > kAndroidAppUidEndInCrOS) {
     return 0;
   }
 
-  std::vector<std::string> storage_source =
+  std::string storage_source =
       get_storage_source(static_cast<FusePrivateData*>(context->private_data)
                              ->android_app_access_type);
   // No check is required because the android_app_access_type is "full".
@@ -122,14 +136,28 @@ int check_allowed() {
       continue;
     }
     std::string source = tokens[3];
-    auto source_iterator =
-        std::find(storage_source.begin(), storage_source.end(), source);
     std::string target = tokens[4];
-    if (source_iterator != storage_source.end() && target == "/storage") {
+    if (source == storage_source && target == "/storage") {
       return 0;
     }
   }
   return -EPERM;
+}
+
+// Converts the given relative path to an absolute path.
+base::FilePath GetAbsolutePath(const char* path) {
+  DCHECK_EQ(path[0], '/');
+  FusePrivateData* private_data =
+      static_cast<FusePrivateData*>(fuse_get_context()->private_data);
+  const base::FilePath absolute_path = private_data->root.Append(path + 1);
+
+  if (private_data->enable_casefold_lookup &&
+      access(absolute_path.value().c_str(), F_OK) != 0) {
+    // Fall back to casefold lookup only when there is no exact match.
+    return arc::CasefoldLookup(private_data->root, absolute_path);
+  }
+
+  return absolute_path;
 }
 
 int passthrough_create(const char* path,
@@ -139,9 +167,10 @@ int passthrough_create(const char* path,
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
+
   // Ignore specified |mode| and always use a fixed mode since we do not allow
-  // chmod anyway. Note that we explicitly set the umask to 0022 in main().
-  int fd = open(path, fi->flags, 0644);
+  // chmod anyway. Note that we explicitly set the umask in main().
+  int fd = open(GetAbsolutePath(path).value().c_str(), fi->flags, 0644);
   if (fd < 0) {
     return -errno;
   }
@@ -178,7 +207,43 @@ int passthrough_getattr(const char* path, struct stat* buf) {
   // Unfortunately, we dont have check_allowed() here because getattr is called
   // by kernel VFS during fstat (which receives fd). We couldn't prohibit such
   // fd calls to happen, so we need to relax this.
-  return WRAP_FS_CALL(lstat(path, buf));
+  return WRAP_FS_CALL(lstat(GetAbsolutePath(path).value().c_str(), buf));
+}
+
+int passthrough_getxattr(const char* path,
+                         const char* name,
+                         char* value,
+                         size_t size) {
+  int check_allowed_result = check_allowed();
+  if (check_allowed_result < 0) {
+    return check_allowed_result;
+  }
+  return WRAP_FS_CALL(
+      lgetxattr(GetAbsolutePath(path).value().c_str(), name, value, size));
+}
+
+int passthrough_ioctl(const char*,
+                      int cmd,
+                      void* arg,
+                      struct fuse_file_info* fi,
+                      unsigned int flags,
+                      void* data) {
+  int check_allowed_result = check_allowed();
+  if (check_allowed_result < 0) {
+    return check_allowed_result;
+  }
+  // NOTE: We don't check if FUSE_IOCTL_COMPAT is included in the flags because
+  // currently all supported ioctl commands are not affected by the difference
+  // between 32-bit and 64-bit.
+  int fd = static_cast<int>(fi->fh);
+  switch (static_cast<unsigned int>(cmd)) {
+    case FS_IOC_FSGETXATTR:
+      return WRAP_FS_CALL(ioctl(fd, FS_IOC_FSGETXATTR, data));
+    case FS_IOC_FSSETXATTR:
+      return WRAP_FS_CALL(ioctl(fd, FS_IOC_FSSETXATTR, data));
+    default:
+      return -ENOTTY;
+  }
 }
 
 int passthrough_mkdir(const char* path, mode_t mode) {
@@ -187,14 +252,7 @@ int passthrough_mkdir(const char* path, mode_t mode) {
     return check_allowed_result;
   }
 
-  // When |force_group_permission| is true, forcefully grant full group access
-  // permission so that Android's MediaProvider can access the new directory.
-  if (static_cast<FusePrivateData*>(fuse_get_context()->private_data)
-          ->force_group_permission) {
-    mode |= S_IRWXG;
-  }
-
-  return WRAP_FS_CALL(mkdir(path, mode));
+  return WRAP_FS_CALL(mkdir(GetAbsolutePath(path).value().c_str(), mode));
 }
 
 int passthrough_open(const char* path, struct fuse_file_info* fi) {
@@ -202,7 +260,7 @@ int passthrough_open(const char* path, struct fuse_file_info* fi) {
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
-  int fd = open(path, fi->flags);
+  int fd = open(GetAbsolutePath(path).value().c_str(), fi->flags);
   if (fd < 0) {
     return -errno;
   }
@@ -215,7 +273,7 @@ int passthrough_opendir(const char* path, struct fuse_file_info* fi) {
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
-  DIR* dirp = opendir(path);
+  DIR* dirp = opendir(GetAbsolutePath(path).value().c_str());
   if (!dirp) {
     return -errno;
   }
@@ -255,9 +313,12 @@ int passthrough_readdir(const char*,
                         fuse_fill_dir_t filler,
                         off_t off,
                         struct fuse_file_info* fi) {
-  // TODO(nya): This implementation returns all files at once and thus
+  // TODO(b/202085840): This implementation returns all files at once and thus
   // inefficient. Make use of offset and be better to memory.
   DIR* dirp = reinterpret_cast<DIR*>(fi->fh);
+  // Call rewinddir so that all entries are added by filler every time this
+  // function is called.
+  rewinddir(dirp);
   errno = 0;
   for (;;) {
     struct dirent* entry = readdir(dirp);
@@ -287,7 +348,8 @@ int passthrough_rename(const char* oldpath, const char* newpath) {
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
-  return WRAP_FS_CALL(rename(oldpath, newpath));
+  return WRAP_FS_CALL(rename(GetAbsolutePath(oldpath).value().c_str(),
+                             GetAbsolutePath(newpath).value().c_str()));
 }
 
 int passthrough_rmdir(const char* path) {
@@ -295,7 +357,7 @@ int passthrough_rmdir(const char* path) {
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
-  return WRAP_FS_CALL(rmdir(path));
+  return WRAP_FS_CALL(rmdir(GetAbsolutePath(path).value().c_str()));
 }
 
 int passthrough_statfs(const char* path, struct statvfs* buf) {
@@ -303,7 +365,7 @@ int passthrough_statfs(const char* path, struct statvfs* buf) {
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
-  return WRAP_FS_CALL(statvfs(path, buf));
+  return WRAP_FS_CALL(statvfs(GetAbsolutePath(path).value().c_str(), buf));
 }
 
 int passthrough_truncate(const char* path, off_t size) {
@@ -311,7 +373,7 @@ int passthrough_truncate(const char* path, off_t size) {
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
-  return WRAP_FS_CALL(truncate(path, size));
+  return WRAP_FS_CALL(truncate(GetAbsolutePath(path).value().c_str(), size));
 }
 
 int passthrough_unlink(const char* path) {
@@ -319,7 +381,7 @@ int passthrough_unlink(const char* path) {
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
-  return WRAP_FS_CALL(unlink(path));
+  return WRAP_FS_CALL(unlink(GetAbsolutePath(path).value().c_str()));
 }
 
 int passthrough_utimens(const char* path, const struct timespec tv[2]) {
@@ -327,7 +389,8 @@ int passthrough_utimens(const char* path, const struct timespec tv[2]) {
   if (check_allowed_result < 0) {
     return check_allowed_result;
   }
-  return WRAP_FS_CALL(utimensat(AT_FDCWD, path, tv, 0));
+  return WRAP_FS_CALL(
+      utimensat(AT_FDCWD, GetAbsolutePath(path).value().c_str(), tv, 0));
 }
 
 int passthrough_write(const char*,
@@ -365,6 +428,8 @@ void setup_passthrough_ops(struct fuse_operations* passthrough_ops) {
   FILL_OP(fsyncdir);
   FILL_OP(ftruncate);
   FILL_OP(getattr);
+  FILL_OP(getxattr);
+  FILL_OP(ioctl);
   FILL_OP(mkdir);
   FILL_OP(open);
   FILL_OP(opendir);
@@ -399,13 +464,13 @@ int main(int argc, char** argv) {
       android_app_access_type, "",
       "What type of permission checks should be done for Android apps."
       " Must be either full, read, or write (required)");
-
-  // TODO(b/123669632): Remove the argument |force_group_permission| and related
-  // logic once we start to run the daemon as MediaProvider UID and GID from
-  // mount-passthrough-jailed-play.
-  DEFINE_bool(force_group_permission, false,
-              "Forcefully grant full group access permission for newly created"
-              " directories (optional)");
+  DEFINE_bool(use_default_selinux_context, false,
+              "Use the default \"fuse\" SELinux context");
+  DEFINE_int32(
+      media_provider_uid, -1,
+      "UID of Android's MediaProvider "
+      "(required in Android R+ for setting non-default SELinux context)");
+  DEFINE_bool(enable_casefold_lookup, false, "Enable casefold lookup");
 
   // Use "arc-" prefix so that the log is recorded in /var/log/arc.log.
   brillo::OpenLog("arc-mount-passthrough", true /*log_pid*/);
@@ -426,13 +491,28 @@ int main(int argc, char** argv) {
     LOG(ERROR) << "--fuse_umask must be specified.";
     return 1;
   }
-  if (FLAGS_fuse_uid < 0) {
-    LOG(ERROR) << "--fuse_uid must be specified as a non-negative integer.";
-    return 1;
-  }
-  if (FLAGS_fuse_gid < 0) {
-    LOG(ERROR) << "--fuse_gid must be specified as a non-negative integer.";
-    return 1;
+  if (USE_ARCPP) {
+    if (FLAGS_fuse_uid != kAndroidRootUid &&
+        FLAGS_fuse_uid != kAndroidMediaRwUid) {
+      LOG(ERROR) << "Invalid FUSE file system UID: " << FLAGS_fuse_uid;
+      return 1;
+    }
+    if (FLAGS_fuse_gid != kAndroidSdcardGid &&
+        FLAGS_fuse_gid != kAndroidMediaRwGid &&
+        FLAGS_fuse_gid != kAndroidEverybodyGid) {
+      LOG(ERROR) << "Invalid FUSE file system GID: " << FLAGS_fuse_gid;
+      return 1;
+    }
+  } else {
+    if (FLAGS_fuse_uid < kAndroidAppUidStart ||
+        FLAGS_fuse_uid > kAndroidAppUidEnd) {
+      LOG(ERROR) << "Invalid FUSE file system UID: " << FLAGS_fuse_uid;
+      return 1;
+    }
+    if (FLAGS_fuse_gid != kAndroidExternalStorageGid) {
+      LOG(ERROR) << "Invalid FUSE file system GID: " << FLAGS_fuse_gid;
+      return 1;
+    }
   }
   if (FLAGS_android_app_access_type.empty()) {
     LOG(ERROR) << "--android_app_access_type must be specified.";
@@ -446,37 +526,42 @@ int main(int argc, char** argv) {
                << ". It must be either full, read, or write.";
     return 1;
   }
+  if (!USE_ARC_CONTAINER_P && !FLAGS_use_default_selinux_context) {
+    // MediaProvider UID needs to be specified in R+ to calculate the
+    // non-default SELinux context.
+    if (FLAGS_media_provider_uid < kAndroidAppUidStart ||
+        FLAGS_media_provider_uid > kAndroidAppUidEnd) {
+      LOG(ERROR) << "Invalid MediaProvider UID: " << FLAGS_media_provider_uid;
+      return 1;
+    }
+  }
 
-  const uid_t daemon_uid = getuid();
-  if (daemon_uid != CHRONOS_UID && daemon_uid != AID_MEDIA_RW_UID) {
-    LOG(ERROR) << "This daemon must run as chronos or Android's media_rw user.";
+  if (getuid() != CHRONOS_UID) {
+    LOG(ERROR) << "This daemon must run as chronos user.";
     return 1;
   }
 
-  const gid_t daemon_gid = getgid();
-  if (daemon_gid != CHRONOS_GID && daemon_gid != AID_MEDIA_RW_GID) {
-    LOG(ERROR) << "This daemon must run as chronos or Android's media_rw"
-               << " group.";
+  if (getgid() != CHRONOS_GID) {
+    LOG(ERROR) << "This daemon must run as chronos group.";
     return 1;
   }
+
+  const uid_t fuse_uid = FLAGS_fuse_uid + USER_NS_SHIFT;
+  const gid_t fuse_gid = FLAGS_fuse_gid + USER_NS_SHIFT;
 
   struct fuse_operations passthrough_ops;
   setup_passthrough_ops(&passthrough_ops);
 
-  const std::string fuse_subdir_opt("subdir=" + FLAGS_source);
-  const std::string fuse_uid_opt(
-      "uid=" + std::to_string(FLAGS_fuse_uid + USER_NS_SHIFT));
-  const std::string fuse_gid_opt(
-      "gid=" + std::to_string(FLAGS_fuse_gid + USER_NS_SHIFT));
+  const std::string fuse_uid_opt("uid=" + std::to_string(fuse_uid));
+  const std::string fuse_gid_opt("gid=" + std::to_string(fuse_gid));
   const std::string fuse_umask_opt("umask=" + FLAGS_fuse_umask);
-  LOG(INFO) << "subdir_opt(" << fuse_subdir_opt << ") "
-            << "uid_opt(" << fuse_uid_opt << ") "
+  LOG(INFO) << "uid_opt(" << fuse_uid_opt << ") "
             << "gid_opt(" << fuse_gid_opt << ") "
             << "umask_opt(" << fuse_umask_opt << ")";
 
-  const char* fuse_argv[] = {
+  std::vector<std::string> fuse_args({
       argv[0],
-      FLAGS_dest.c_str(),
+      FLAGS_dest,
       "-f",
       "-o",
       "allow_other",
@@ -495,37 +580,72 @@ int main(int argc, char** argv) {
       "-o",
       "fsname=passthrough",
       "-o",
-      fuse_uid_opt.c_str(),
+      fuse_uid_opt,
       "-o",
-      fuse_gid_opt.c_str(),
-      "-o",
-      "modules=subdir",
-      "-o",
-      fuse_subdir_opt.c_str(),
+      fuse_gid_opt,
       "-o",
       "direct_io",
       "-o",
-      fuse_umask_opt.c_str(),
+      fuse_umask_opt,
       "-o",
       "noexec",
-  };
-  int fuse_argc = sizeof(fuse_argv) / sizeof(fuse_argv[0]);
+  });
 
-  const mode_t daemon_umask = FLAGS_force_group_permission ? 0002 : 0022;
-  umask(daemon_umask);
+  if (!FLAGS_use_default_selinux_context) {
+    // NOTE: Commas are escaped by "\\" to avoid being processed by lifuse's
+    // option parsing code.
+    std::string security_context;
+    if (USE_ARC_CONTAINER_P) {
+      // In Android P, the security context of directories under /data/media/0
+      // is "u:object_r:media_rw_data_file:s0:c512,c768".
+      security_context = std::string(kMediaRwDataFileContext) + ":c512\\,c768";
+    } else {
+      // In Android R, the security context of directories under /data/media/0
+      // looks like "u:object_r:media_rw_data_file:s0:c64,c256,c512,c768".
+      //
+      // Calculate the categories in the same way as set_range_from_level() in
+      // Android's external/selinux/libselinux/src/android/android_platform.c.
+      const uid_t media_provider_app_id =
+          FLAGS_media_provider_uid - kAndroidAppUidStart;
+      security_context =
+          std::string(kMediaRwDataFileContext) +
+          base::StringPrintf(":c%d\\,c%d\\,c512\\,c768",
+                             media_provider_app_id & 0xff,
+                             256 + ((media_provider_app_id >> 8) & 0xff));
+    }
+
+    // The context string is quoted using "\"" so that the kernel won't split
+    // the mount option string at commas.
+    std::string fuse_context_opt(std::string("context=\"") + security_context +
+                                 "\"");
+    std::string fuse_fscontext_opt(std::string("fscontext=") +
+                                   kCrosMountPassthroughFsContext);
+    fuse_args.push_back("-o");
+    fuse_args.push_back(std::move(fuse_context_opt));
+    fuse_args.push_back("-o");
+    fuse_args.push_back(std::move(fuse_fscontext_opt));
+  }
+
+  umask(0022);
 
   FusePrivateData private_data;
   private_data.android_app_access_type = FLAGS_android_app_access_type;
-  private_data.force_group_permission = FLAGS_force_group_permission;
+  private_data.root = base::FilePath(FLAGS_source);
+  private_data.enable_casefold_lookup = FLAGS_enable_casefold_lookup;
+
+  std::vector<const char*> fuse_argv(fuse_args.size());
+  std::transform(
+      fuse_args.begin(), fuse_args.end(), std::begin(fuse_argv),
+      [](const std::string& arg) -> const char* { return arg.c_str(); });
 
   // The code below does the same thing as fuse_main() except that it ignores
   // signals during shutdown to perform clean shutdown. b/183343552
   // TODO(hashimoto): Stop using deprecated libfuse functions b/185322557.
   char* mountpoint = nullptr;
   int multithreaded = 0;
-  struct fuse* fuse = fuse_setup(fuse_argc, const_cast<char**>(fuse_argv),
-                                 &passthrough_ops, sizeof(passthrough_ops),
-                                 &mountpoint, &multithreaded, &private_data);
+  struct fuse* fuse = fuse_setup(
+      fuse_argv.size(), const_cast<char**>(fuse_argv.data()), &passthrough_ops,
+      sizeof(passthrough_ops), &mountpoint, &multithreaded, &private_data);
   if (fuse == nullptr)
     return 1;
 

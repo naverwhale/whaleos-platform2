@@ -1,66 +1,55 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <utility>
 
-#include <base/run_loop.h>
-#include <base/optional.h>
-#include <base/test/task_environment.h>
+#include <base/test/test_future.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "diagnostics/cros_healthd/fetchers/network_fetcher.h"
+#include "diagnostics/cros_healthd/system/fake_mojo_service.h"
 #include "diagnostics/cros_healthd/system/mock_context.h"
-#include "mojo/cros_healthd_probe.mojom.h"
-#include "mojo/network_health.mojom.h"
+#include "diagnostics/cros_healthd/utils/mojo_task_environment.h"
+#include "diagnostics/mojom/external/network_health_types.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
-
 namespace {
-
-// Saves |response| to |response_destination|.
-void OnGetNetworkInfoReceived(
-    chromeos::cros_healthd::mojom::NetworkResultPtr* response_destination,
-    base::Closure quit_closure,
-    chromeos::cros_healthd::mojom::NetworkResultPtr response) {
-  *response_destination = std::move(response);
-  quit_closure.Run();
-}
-
-}  // namespace
 
 class NetworkFetcherTest : public testing::Test {
  protected:
-  NetworkFetcherTest() = default;
-
-  chromeos::cros_healthd::mojom::NetworkResultPtr FetchNetworkInfo() {
-    base::RunLoop run_loop;
-    chromeos::cros_healthd::mojom::NetworkResultPtr result;
-    network_fetcher_.FetchNetworkInfo(base::BindOnce(
-        &OnGetNetworkInfoReceived, &result, run_loop.QuitClosure()));
-
-    run_loop.Run();
-    return result;
+  void SetUp() override {
+    mock_context_.fake_mojo_service()->InitializeFakeMojoService();
   }
 
-  FakeNetworkHealthAdapter* network_adapter() {
-    return mock_context_.fake_network_health_adapter();
+  ash::cros_healthd::mojom::NetworkResultPtr FetchNetworkInfoSync() {
+    base::test::TestFuture<ash::cros_healthd::mojom::NetworkResultPtr> future;
+    FetchNetworkInfo(&mock_context_, future.GetCallback());
+    return future.Take();
+  }
+
+  FakeNetworkHealthService& fake_network_health_service() {
+    return mock_context_.fake_mojo_service()->fake_network_health_service();
+  }
+
+  void ResetNetworkHealthService() {
+    mock_context_.fake_mojo_service()->ResetNetworkHealthService();
   }
 
  private:
-  base::test::TaskEnvironment task_environment_;
+  MojoTaskEnvironment env_;
   MockContext mock_context_;
-  NetworkFetcher network_fetcher_{&mock_context_};
 };
 
 // Test an appropriate error is returned if no remote is bound;
 TEST_F(NetworkFetcherTest, NoRemote) {
-  network_adapter()->SetRemoteBound(false);
-  auto result = FetchNetworkInfo();
+  ResetNetworkHealthService();
+  auto result = FetchNetworkInfoSync();
   ASSERT_TRUE(result->is_error());
   EXPECT_EQ(result->get_error()->type,
-            chromeos::cros_healthd::mojom::ErrorType::kServiceUnavailable);
+            ash::cros_healthd::mojom::ErrorType::kServiceUnavailable);
 }
 
 // Test that if the remote is bound, the NetworkHealthState is returned.
@@ -77,13 +66,13 @@ TEST_F(NetworkFetcherTest, GetNetworkHealthState) {
       chromeos::network_health::mojom::NetworkHealthState::New();
   network_health_state->networks.push_back(network.Clone());
 
-  network_adapter()->SetRemoteBound(true);
-  network_adapter()->SetNetworkHealthStateResponse(
+  fake_network_health_service().SetHealthSnapshotResponse(
       std::move(network_health_state));
-  auto result = FetchNetworkInfo();
+  auto result = FetchNetworkInfoSync();
   ASSERT_TRUE(result->is_network_health());
   EXPECT_EQ(result->get_network_health()->networks.size(), 1);
   EXPECT_EQ(result->get_network_health()->networks[0], network);
 }
 
+}  // namespace
 }  // namespace diagnostics

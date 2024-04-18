@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,10 +8,10 @@
 
 #include <fcntl.h>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 
 #include "arc/vm/libvda/libvda_decode.h"
@@ -32,7 +32,7 @@ namespace {
 template <class T>
 void WriteToFd(int fd, const T event) {
   CHECK(base::WriteFileDescriptor(fd,
-                                  base::as_bytes(base::make_span(&event, 1))));
+                                  base::as_bytes(base::make_span(&event, 1u))));
 }
 }  // namespace
 

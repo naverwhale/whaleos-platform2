@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <memory>
+#include <optional>
 
 #include <vector>
 
@@ -19,6 +20,8 @@
 #include <base/logging.h>
 #include <base/process/launch.h>
 #include <base/strings/stringprintf.h>
+#include <libmems/common_types.h>
+#include <libsar/sar_config_reader_delegate_impl.h>
 
 #include "mems_setup/delegate_impl.h"
 
@@ -58,6 +61,9 @@ bool LoadVpdFromString(const std::string& vpd_data,
   return true;
 }
 
+DelegateImpl::DelegateImpl()
+    : Delegate(std::make_unique<libsar::SarConfigReaderDelegateImpl>()) {}
+
 void DelegateImpl::LoadVpdIfNeeded() {
   if (vpd_loaded_)
     return;
@@ -72,14 +78,14 @@ void DelegateImpl::LoadVpdIfNeeded() {
   vpd_loaded_ = LoadVpdFromString(vpd_data, &vpd_cache_);
 }
 
-base::Optional<std::string> DelegateImpl::ReadVpdValue(const std::string& key) {
+std::optional<std::string> DelegateImpl::ReadVpdValue(const std::string& key) {
   LoadVpdIfNeeded();
 
   auto k = vpd_cache_.find(key);
   if (k != vpd_cache_.end())
     return k->second;
   else
-    return base::nullopt;
+    return std::nullopt;
 }
 
 bool DelegateImpl::ProbeKernelModule(const std::string& module) {
@@ -135,7 +141,7 @@ std::vector<base::FilePath> DelegateImpl::EnumerateAllFiles(
   return files;
 }
 
-base::Optional<gid_t> DelegateImpl::FindGroupId(const char* group) {
+std::optional<gid_t> DelegateImpl::FindGroupId(const char* group) {
   size_t len = 1024;
   const auto max_len = sysconf(_SC_GETGR_R_SIZE_MAX);
   if (max_len != -1)
@@ -147,7 +153,7 @@ base::Optional<gid_t> DelegateImpl::FindGroupId(const char* group) {
 
   getgrnam_r(group, &result, buf.data(), len, &resultp);
   if (!resultp)
-    return base::nullopt;
+    return std::nullopt;
 
   return resultp->gr_gid;
 }
@@ -168,6 +174,15 @@ bool DelegateImpl::SetOwnership(const base::FilePath& path,
                                 uid_t user,
                                 gid_t group) {
   return lchown(path.value().c_str(), user, group) == 0;
+}
+
+std::optional<std::string> DelegateImpl::GetIioSarSensorDevlink(
+    std::string sys_path) {
+  return libmems::GetIioSarSensorDevlink(sys_path);
+}
+
+brillo::CrosConfigInterface* DelegateImpl::GetCrosConfig() {
+  return &cros_config_;
 }
 
 }  // namespace mems_setup

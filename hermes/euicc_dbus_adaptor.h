@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "hermes/adaptor_interfaces.h"
 
@@ -40,13 +41,21 @@ class EuiccDBusAdaptor : public EuiccAdaptorInterface,
   // Update the PendingProfiles property.
   void RequestPendingProfiles(std::unique_ptr<DBusResponse<>> response,
                               const std::string& in_root_smds) override;
+  void RefreshSmdxProfiles(
+      std::unique_ptr<DBusResponse<std::vector<dbus::ObjectPath>, std::string>>
+          response,
+      const std::string& activation_code,
+      bool should_not_switch_slot) override;
   void RequestInstalledProfiles(
       std::unique_ptr<DBusResponse<>> response) override;
+  void RefreshInstalledProfiles(std::unique_ptr<DBusResponse<>> response,
+                                bool should_not_switch_slot) override;
   void SetTestMode(std::unique_ptr<DBusResponse<>> response,
                    bool in_is_test_mode) override;
   void UseTestCerts(bool in_use_test_certs) override;
   void ResetMemory(std::unique_ptr<DBusResponse<>> response,
                    int in_reset_options) override;
+  void IsTestEuicc(std::unique_ptr<DBusResponse<bool>> response) override;
 
   // EuiccAdaptorInterface override.
   dbus::ObjectPath object_path() const override { return object_path_; }

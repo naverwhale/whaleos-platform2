@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,7 @@
 #include <base/check_op.h>
 #include <base/logging.h>
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 UserProximityVoting::UserProximityVoting(bool prefer_far)
     : prefer_far_(prefer_far) {}
@@ -56,5 +55,4 @@ UserProximity UserProximityVoting::CalculateVote() const {
   return prefer_far_ ? UserProximity::NEAR : UserProximity::FAR;
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

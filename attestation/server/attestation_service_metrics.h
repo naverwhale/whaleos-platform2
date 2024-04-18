@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include <base/time/time.h>
 #include <metrics/metrics_library.h>
 
 namespace attestation {
@@ -15,18 +16,32 @@ namespace attestation {
 // should not be renumbered and numeric values should never be reused.
 enum class AttestationOpsStatus {
   kSuccess = 0,
-  kFailure = 1,
-  kInvalidPcr0Value = 2,
+  // kFailure = 1, // Deprecated. One should use more accurate terms following.
+  // Failure due to invalid boot mode.
+  kInvalidBootMode = 2,
+  // Failure related to sealing or unsealing.
+  kSealingFailure = 3,
+  // Failure related to encryption or decryption.
+  kCryptoFailure = 4,
+  // Failure of database operation.
+  kDatabaseFailure = 5,
+  // Failure to parse data.
+  kParsingFailue = 6,
+  // Failure related to identity.
+  kIdentityFailure = 7,
+  // Failure related to endorsement key or endorsement certificate.
+  kEndorsementFailure = 8,
   kMaxValue,
 };
 
 // Attestation-related operations. These are used as suffixes to
 // kAttestationStatusHistogramPrefix defined in the .cc.
-constexpr char kAttestationEncryptDatabase[] = "EncryptDatabase";
-constexpr char kAttestationDecryptDatabase[] = "DecryptDatabase";
-constexpr char kAttestationActivateAttestationKey[] = "ActivateAttestationKey";
-constexpr char kAttestationVerify[] = "AttestationVerify";
-constexpr char kAttestationPrepareForEnrollment[] = "PrepareForEnrollment";
+inline constexpr char kAttestationEncryptDatabase[] = "EncryptDatabase";
+inline constexpr char kAttestationDecryptDatabase[] = "DecryptDatabase";
+inline constexpr char kAttestationActivateAttestationKey[] =
+    "ActivateAttestationKey";
+inline constexpr char kAttestationPrepareForEnrollment[] =
+    "PrepareForEnrollment";
 
 // This class provides helper functions to report attestation-related
 // metrics.
@@ -41,6 +56,7 @@ class AttestationServiceMetrics : private MetricsLibrary {
 
   virtual void ReportAttestationOpsStatus(const std::string& operation,
                                           AttestationOpsStatus status);
+  virtual void ReportAttestationPrepareDuration(base::TimeDelta delta);
 
   void set_metrics_library_for_testing(
       MetricsLibraryInterface* metrics_library) {

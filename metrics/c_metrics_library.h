@@ -1,4 +1,4 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,10 +16,6 @@ CMetricsLibrary CMetricsLibraryNew(void);
 // C wrapper for MetricsLibrary::~MetricsLibrary.
 void CMetricsLibraryDelete(CMetricsLibrary handle);
 
-// C wrapper for MetricsLibrary::Init.
-// TODO(chromium:940343): Remove this function.
-void CMetricsLibraryInit(CMetricsLibrary handle);
-
 // C wrapper for MetricsLibrary::SendToUMA.
 int CMetricsLibrarySendToUMA(CMetricsLibrary handle,
                              const char* name,
@@ -33,6 +29,24 @@ int CMetricsLibrarySendEnumToUMA(CMetricsLibrary handle,
                                  const char* name,
                                  int sample,
                                  int max);
+
+// C wrapper for MetricsLibrary::SendRepeatedEnumToUMA.
+int CMetricsLibrarySendRepeatedEnumToUMA(CMetricsLibrary handle,
+                                         const char* name,
+                                         int sample,
+                                         int max,
+                                         int num_samples);
+
+// C wrapper for MetricsLibrary::SendLinearToUMA.
+int CMetricsLibrarySendLinearToUMA(CMetricsLibrary handle,
+                                   const char* name,
+                                   int sample,
+                                   int max);
+
+// C wrapper for MetricsLibrary::SendLinearToUMA.
+int CMetricsLibrarySendPercentageToUMA(CMetricsLibrary handle,
+                                       const char* name,
+                                       int sample);
 
 // C wrapper for MetricsLibrary::SendSparseToUMA.
 int CMetricsLibrarySendSparseToUMA(CMetricsLibrary handle,

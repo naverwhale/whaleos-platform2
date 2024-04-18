@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,10 @@
 #include <string>
 #include <vector>
 
-#include <base/callback_forward.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/callback_forward.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <libminijail.h>
 
 #include "libcontainer/config.h"
@@ -60,7 +59,7 @@ class HookState {
 
   // Waits for the event specified in InstallHook() and invokes |callbacks| in
   // the caller process. Returns true if all callbacks succeeded.
-  bool WaitForHookAndRun(const std::vector<HookCallback>& callbacks,
+  bool WaitForHookAndRun(std::vector<HookCallback> callbacks,
                          pid_t container_pid);
 
  private:

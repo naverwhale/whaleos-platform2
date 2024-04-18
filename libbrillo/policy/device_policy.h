@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,12 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/time/time.h>
 #include <base/version.h>
 
@@ -72,6 +72,14 @@ class DevicePolicy {
     kEnterprise,
   };
 
+  // Ephemeral Settings which are generated from DeviceLocalAccountInfoProto
+  // ephemeral_mode value and EphemeralUsersEnabledProto.
+  struct EphemeralSettings {
+    bool global_ephemeral_users_enabled = false;
+    std::vector<std::string> specific_ephemeral_users;
+    std::vector<std::string> specific_nonephemeral_users;
+  };
+
   DevicePolicy();
   DevicePolicy(const DevicePolicy&) = delete;
   DevicePolicy& operator=(const DevicePolicy&) = delete;
@@ -80,7 +88,9 @@ class DevicePolicy {
 
   // Load device policy off of disk into |policy_|.
   // Returns true unless there is a policy on disk and loading it fails.
-  virtual bool LoadPolicy() = 0;
+  // If |delete_invalid_files| is set to true, it deletes the files for
+  // which the policy loading failed.
+  virtual bool LoadPolicy(bool delete_invalid_files) = 0;
 
   // Returns true if OOBE has been completed and if the device has been enrolled
   // as an enterprise or enterpriseAD device.
@@ -114,6 +124,30 @@ class DevicePolicy {
   // on success.
   virtual bool GetMetricsEnabled(bool* metrics_enabled) const = 0;
 
+  // Write the value of HWDataUsageEnabled policy in |hw_data_usage_enabled|.
+  // Returns true on success.
+  virtual bool GetHwDataUsageEnabled(bool* hw_data_usage_enabled) const = 0;
+
+  // Writes the value of ReportSystemInfo policy in |report_system_info|.
+  // Returns true on success.
+  virtual bool GetReportSystemInfo(bool* report_system_info) const = 0;
+
+  // Writes the value of ReportCpuInfo policy in |report_cpu_info|.
+  // Returns true on success.
+  virtual bool GetReportCpuInfo(bool* report_cpu_info) const = 0;
+
+  // Writes the value of ReportGraphicsStatus policy in
+  // |report_graphics_status|. Returns true on success.
+  virtual bool GetReportGraphicsStatus(bool* report_graphics_status) const = 0;
+
+  // Writes the value of ReportMemoryInfo policy in |report_memory_info|.
+  // Returns true on success.
+  virtual bool GetReportMemoryInfo(bool* report_memory_info) const = 0;
+
+  // Writes the value of ReportNetworkConfiguration policy in
+  // |report_network_config|. Returns true on success.
+  virtual bool GetReportNetworkConfig(bool* report_network_config) const = 0;
+
   // Writes the value of ReportVersionInfo policy in |report_version_info|.
   // Returns true on success.
   virtual bool GetReportVersionInfo(bool* report_version_info) const = 0;
@@ -126,10 +160,11 @@ class DevicePolicy {
   // true on success.
   virtual bool GetReportBootMode(bool* report_boot_mode) const = 0;
 
-  // Writes the value of the EphemeralUsersEnabled policy in
-  // |ephemeral_users_enabled|. Returns true on success.
-  virtual bool GetEphemeralUsersEnabled(
-      bool* ephemeral_users_enabled) const = 0;
+  // Writes the value of the EphemeralUsersEnabled policy and the values from
+  // DeviceLocalAccountInfoProto EphemeralMode to |ephemeral_settings|.
+  // Returns true if either of the policies are present.
+  virtual bool GetEphemeralSettings(
+      EphemeralSettings* ephemeral_settings) const = 0;
 
   // Writes the value of the release channel policy in |release_channel|.
   // Returns true on success.
@@ -221,6 +256,10 @@ class DevicePolicy {
   // U2F or U2F_EXTENDED). Returns true on success.
   virtual bool GetSecondFactorAuthenticationMode(int* mode_out) const = 0;
 
+  // Returns the value of the DeviceRunAutomaticCleanupOnLogin policy. On
+  // error or if the policy is not set, returns an empty value.
+  virtual std::optional<bool> GetRunAutomaticCleanupOnLogin() const = 0;
+
   // Writes the valid time intervals to |intervals_out|. These
   // intervals are taken from the disallowed time intervals field in the
   // AutoUpdateSettingsProto. Returns true if the intervals in the proto are
@@ -280,11 +319,24 @@ class DevicePolicy {
   virtual bool GetDeviceMarketSegment(
       DeviceMarketSegment* device_market_segment) const = 0;
 
+  // Write the value of the DeviceKeylockerForStorageEncryptionEnabled policy in
+  // |keylocker_enabled|. Returns true on success.
+  virtual bool GetDeviceKeylockerForStorageEncryptionEnabled(
+      bool* keylocker_enabled) const = 0;
+
   // Writes the value of DevicePacketCaptureAllowed policy in |allowed|. Returns
   // true if the policy was set and a value was retrieved for it, or false if
   // the policy was not set. |allowed| is modified only when the function
   // returns true.
   virtual bool GetDeviceDebugPacketCaptureAllowed(bool* allowed) const = 0;
+
+  // Returns the value of the ReportDeviceSecurityStatus policy. On
+  // error or if the policy is not set, returns an empty value.
+  virtual std::optional<bool> GetReportDeviceSecurityStatus() const = 0;
+
+  // Returns the value of the DeviceReportXDREvents policy. On
+  // error or if the policy is not set, return an empty value.
+  virtual std::optional<bool> GetDeviceReportXDREvents() const = 0;
 
  private:
   // Verifies that the policy signature is correct.

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,6 @@
 #define METRICS_UPLOADER_SENDER_HTTP_H_
 
 #include <string>
-
-#include <base/macros.h>
 
 #include "metrics/uploader/sender.h"
 

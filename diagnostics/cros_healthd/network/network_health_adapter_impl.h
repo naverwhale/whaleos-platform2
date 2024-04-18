@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,7 @@
 #include <mojo/public/cpp/bindings/remote_set.h>
 
 #include "diagnostics/cros_healthd/network/network_health_adapter.h"
-#include "mojo/network_health.mojom.h"
+#include "diagnostics/mojom/external/network_health.mojom.h"
 
 namespace diagnostics {
 
@@ -29,14 +29,12 @@ class NetworkHealthAdapterImpl final
   ~NetworkHealthAdapterImpl() override;
 
   // NetworkHealthAdapterInterface overrides:
-  void GetNetworkHealthState(FetchNetworkStateCallback callback) override;
   void SetServiceRemote(
       mojo::PendingRemote<chromeos::network_health::mojom::NetworkHealthService>
           remote) override;
   void AddObserver(mojo::PendingRemote<
                    chromeos::network_health::mojom::NetworkEventsObserver>
                        observer) override;
-  bool ServiceRemoteBound() override;
 
  private:
   // network_health::mojom::NetworkEventsObserver overrides:

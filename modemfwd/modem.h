@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -33,17 +33,26 @@ class Modem {
   // necessarily a readable name or e.g. MCC/MNC pair.
   virtual std::string GetCarrierId() const = 0;
 
+  // Get the primary communication port to the modem.
+  virtual std::string GetPrimaryPort() const = 0;
+
   // Information about this modem's installed firmware.
   virtual std::string GetMainFirmwareVersion() const = 0;
   virtual std::string GetOemFirmwareVersion() const = 0;
   virtual std::string GetCarrierFirmwareId() const = 0;
   virtual std::string GetCarrierFirmwareVersion() const = 0;
+  virtual std::string GetAssocFirmwareVersion(std::string) const = 0;
 
   // Tell ModemManager not to deal with this modem for a little while.
   virtual bool SetInhibited(bool inhibited) = 0;
 
   virtual bool FlashFirmwares(const std::vector<FirmwareConfig>& configs) = 0;
   virtual bool ClearAttachAPN(const std::string& carrier_uuid) = 0;
+
+  // Tracking health of this modem
+  virtual int GetHeartbeatFailures() const = 0;
+  virtual void ResetHeartbeatFailures() = 0;
+  virtual void IncrementHeartbeatFailures() = 0;
 };
 
 std::unique_ptr<Modem> CreateModem(
@@ -52,7 +61,9 @@ std::unique_ptr<Modem> CreateModem(
     ModemHelperDirectory* helper_directory);
 
 std::unique_ptr<Modem> CreateStubModem(const std::string& device_id,
-                                       ModemHelperDirectory* helper_directory);
+                                       const std::string& carrier_id,
+                                       ModemHelperDirectory* helper_directory,
+                                       bool use_real_fw_info);
 
 }  // namespace modemfwd
 

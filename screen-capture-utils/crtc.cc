@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -93,6 +93,7 @@ std::vector<std::unique_ptr<Crtc>> GetConnectedCrtcs() {
       continue;
 
     // Set CAP_ATOMIC so we can query all planes and plane properties.
+    // TODO(b/290543296): Revisit if we still need this check after Hana EOL.
     bool atomic_modeset =
         drmSetClientCap(file.GetPlatformFile(), DRM_CLIENT_CAP_ATOMIC, 1) == 0;
 
@@ -117,42 +118,38 @@ std::vector<std::unique_ptr<Crtc>> GetConnectedCrtcs() {
       if (!crtc || !crtc->mode_valid || crtc->buffer_id == 0)
         continue;
 
-      ScopedDrmModeFBPtr fb(
-          drmModeGetFB(file.GetPlatformFile(), crtc->buffer_id));
-
       ScopedDrmModeFB2Ptr fb2(
-          drmModeGetFB2(file.GetPlatformFile(), crtc->buffer_id));
+          drmModeGetFB2(file.GetPlatformFile(), crtc->buffer_id),
+          file.GetPlatformFile());
 
-      if (!fb && !fb2) {
-        LOG(ERROR) << "getfb failed";
+      if (!fb2) {
+        LOG(ERROR) << "getfb2 failed";
         continue;
       }
 
       std::unique_ptr<Crtc> res_crtc;
 
-      // Multiplane is only handled by egl_capture, so don't bother if
-      // GETFB2 isn't supported. Obtain the |plane_res_| for later use.
-      //
-      // TODO(andrescj): is it possible for |fb2| to be nullptr even if it's
-      // possible to query multiple planes? i.e., is there a case where doing
-      // drmModeGetFB2() for |crtc->buffer_id| fails but doing it for the planes
-      // doesn't?
-      if (fb2 && atomic_modeset) {
+      // Keep around a file for next display if needed.
+      base::File file_dup = file.Duplicate();
+      if (!file_dup.IsValid())
+        continue;
+
+      // Multiplane is only supported when atomic_modeset is available. Obtain
+      // the |plane_res_| for later use.
+      if (atomic_modeset) {
         ScopedDrmPlaneResPtr plane_res(
             drmModeGetPlaneResources(file.GetPlatformFile()));
         CHECK(plane_res) << " Failed to get plane resources";
-        res_crtc = std::make_unique<Crtc>(
-            file.Duplicate(), std::move(connector), std::move(encoder),
-            std::move(crtc), std::move(fb), std::move(fb2),
-            std::move(plane_res));
+        res_crtc = std::make_unique<Crtc>(std::move(file), std::move(connector),
+                                          std::move(encoder), std::move(crtc),
+                                          std::move(fb2), std::move(plane_res));
+      } else {
+        res_crtc = std::make_unique<Crtc>(std::move(file), std::move(connector),
+                                          std::move(encoder), std::move(crtc),
+                                          std::move(fb2), nullptr);
       }
 
-      if (!res_crtc) {
-        res_crtc = std::make_unique<Crtc>(
-            file.Duplicate(), std::move(connector), std::move(encoder),
-            std::move(crtc), std::move(fb), std::move(fb2), nullptr);
-      }
-
+      file = std::move(file_dup);
       crtcs.emplace_back(std::move(res_crtc));
     }
   }
@@ -166,14 +163,12 @@ Crtc::Crtc(base::File file,
            ScopedDrmModeConnectorPtr connector,
            ScopedDrmModeEncoderPtr encoder,
            ScopedDrmModeCrtcPtr crtc,
-           ScopedDrmModeFBPtr fb,
            ScopedDrmModeFB2Ptr fb2,
            ScopedDrmPlaneResPtr plane_res)
     : file_(std::move(file)),
       connector_(std::move(connector)),
       encoder_(std::move(encoder)),
       crtc_(std::move(crtc)),
-      fb_(std::move(fb)),
       fb2_(std::move(fb2)),
       plane_res_(std::move(plane_res)) {}
 
@@ -238,7 +233,8 @@ std::vector<Crtc::PlaneInfo> Crtc::GetConnectedPlanes() const {
       continue;
     }
     ScopedDrmModeFB2Ptr fb_info(
-        drmModeGetFB2(file_.GetPlatformFile(), plane->fb_id));
+        drmModeGetFB2(file_.GetPlatformFile(), plane->fb_id),
+        file_.GetPlatformFile());
     if (!fb_info) {
       LOG(WARNING) << "Failed to query plane fb info, skipping.\n";
       continue;

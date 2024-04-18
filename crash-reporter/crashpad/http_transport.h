@@ -19,7 +19,6 @@
 #include <string>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 
 #include "crash-reporter/crashpad/http_headers.h"
 
@@ -113,8 +112,6 @@ class HTTPTransport {
   HTTPHeaders headers_;
   std::unique_ptr<HTTPBodyStream> body_stream_;
   double timeout_;
-
-  DISALLOW_COPY_AND_ASSIGN(HTTPTransport);
 };
 
 }  // namespace crashpad

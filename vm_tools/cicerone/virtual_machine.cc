@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,43 +11,37 @@
 #include <memory>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
-#include <base/guid.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/stringprintf.h>
+#include <base/uuid.h>
 #include <google/protobuf/repeated_field.h>
 #include <grpcpp/grpcpp.h>
-#include <vm_cicerone/proto_bindings/cicerone_service.pb.h>
+#include <vm_cicerone/cicerone_service.pb.h>
 #include <vm_protos/proto_bindings/container_guest.grpc.pb.h>
 #include <chromeos/constants/vm_tools.h>
 
+#include "vm_tools/cicerone/grpc_util.h"
+
 using std::string;
 
-namespace vm_tools {
-namespace cicerone {
+namespace vm_tools::cicerone {
 namespace {
 
 // Default name to use for a container.
 constexpr char kDefaultContainerName[] = "penguin";
 
-// How long to wait before timing out on regular RPCs.
-constexpr int64_t kDefaultTimeoutSeconds = 60;
-
-// How long to wait while doing more complex operations like starting or
-// creating a container.
-constexpr int64_t kLongOperationTimeoutSeconds = 120;
-
 VirtualMachine::VmType DetermineTypeFromCidAndToken(uint32_t cid,
                                                     const std::string& token) {
   // PluginVm does not have a CID
   if (cid == 0)
-    return VirtualMachine::VmType::ApplicationList_VmType_PLUGIN_VM;
+    return VirtualMachine::VmType::PLUGIN_VM;
   // Termina hosts containers, so it does not have a VM token.
   if (token.empty())
-    return VirtualMachine::VmType::ApplicationList_VmType_TERMINA;
-  return VirtualMachine::VmType::ApplicationList_VmType_BOREALIS;
+    return VirtualMachine::VmType::TERMINA;
+  return VirtualMachine::VmType::BOREALIS;
 }
 
 }  // namespace
@@ -57,7 +51,6 @@ VirtualMachine::VirtualMachine(uint32_t cid, pid_t pid, std::string vm_token)
       pid_(pid),
       vm_token_(std::move(vm_token)),
       vm_type_(DetermineTypeFromCidAndToken(cid, vm_token_)),
-      using_mock_tremplin_stub_(false),
       weak_ptr_factory_(this) {
   // CID-less VMs must also be containerless.
   DCHECK(vsock_cid_ != 0 || IsContainerless());
@@ -77,7 +70,7 @@ VirtualMachine::VmType VirtualMachine::GetType() const {
 
 bool VirtualMachine::IsContainerless() const {
   // Termina runs containers, the others do not.
-  return GetType() != VmType::ApplicationList_VmType_TERMINA;
+  return GetType() != VmType::TERMINA;
 }
 
 bool VirtualMachine::ConnectTremplin() {
@@ -87,9 +80,14 @@ bool VirtualMachine::ConnectTremplin() {
   if (!using_mock_tremplin_stub_) {
     std::string tremplin_address =
         base::StringPrintf("vsock:%u:%u", vsock_cid_, kTremplinPort);
-    tremplin_stub_ = std::make_unique<vm_tools::tremplin::Tremplin::Stub>(
-        grpc::CreateChannel(tremplin_address,
-                            grpc::InsecureChannelCredentials()));
+    auto channel = grpc::CreateChannel(tremplin_address,
+                                       grpc::InsecureChannelCredentials());
+    if (channel->WaitForConnected(ToGprDeadline(kConnectTimeoutSeconds))) {
+      LOG(ERROR) << "Tremplin channel not connected after "
+                 << kConnectTimeoutSeconds << " seconds.";
+    }
+    tremplin_stub_ =
+        std::make_unique<vm_tools::tremplin::Tremplin::Stub>(channel);
   }
   return tremplin_stub_ != nullptr;
 }
@@ -126,9 +124,7 @@ bool VirtualMachine::SetTimezone(
     request.add_container_names(name);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = tremplin_stub_->SetTimezone(&ctx, request, &response);
   if (!status.ok()) {
@@ -170,15 +166,12 @@ bool VirtualMachine::RegisterContainer(const std::string& container_token,
 
   auto iter = containers_.find(container_token);
   std::string garcon_addr;
-  if (GetType() == VmType::ApplicationList_VmType_PLUGIN_VM) {
+  if (GetType() == VmType::PLUGIN_VM) {
     garcon_addr = base::StringPrintf("unix:///run/vm_cicerone/client/%s.sock",
                                      container_token.c_str());
-  } else if (garcon_vsock_port != 0) {
+  } else {
     garcon_addr = base::StringPrintf("vsock:%" PRIu32 ":%" PRIu32, vsock_cid_,
                                      garcon_vsock_port);
-  } else {
-    garcon_addr = base::StringPrintf("%s:%d", container_ip.c_str(),
-                                     vm_tools::kGarconPort);
   }
 
   iter->second->ConnectToGarcon(garcon_addr);
@@ -199,7 +192,7 @@ std::string VirtualMachine::GenerateContainerToken(
     const std::string& container_name) {
   if (IsContainerless())
     return "";
-  std::string token = base::GenerateGUID();
+  std::string token = base::Uuid::GenerateRandomV4().AsLowercaseString();
   pending_containers_[token] = std::make_unique<Container>(
       container_name, token, weak_ptr_factory_.GetWeakPtr());
   return token;
@@ -242,9 +235,9 @@ Container* VirtualMachine::GetPendingContainerForToken(
 
 Container* VirtualMachine::GetContainerForName(
     const std::string& container_name) {
-  for (auto iter = containers_.begin(); iter != containers_.end(); ++iter) {
-    if (iter->second->name() == container_name) {
-      return iter->second.get();
+  for (auto& container : containers_) {
+    if (container.second->name() == container_name) {
+      return container.second.get();
     }
   }
   return nullptr;
@@ -273,6 +266,11 @@ std::vector<std::string> VirtualMachine::GetContainerNames() {
   return retval;
 }
 
+const std::map<std::string, std::unique_ptr<Container>>&
+VirtualMachine::GetContainers() {
+  return containers_;
+}
+
 VirtualMachine::CreateLxdContainerStatus VirtualMachine::CreateLxdContainer(
     const std::string& container_name,
     const std::string& image_server,
@@ -296,9 +294,7 @@ VirtualMachine::CreateLxdContainerStatus VirtualMachine::CreateLxdContainer(
   request.set_metadata_path(metadata_path);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kLongOperationTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kLongOperationTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->CreateContainer(&ctx, request, &response);
@@ -337,9 +333,7 @@ VirtualMachine::DeleteLxdContainerStatus VirtualMachine::DeleteLxdContainer(
   request.set_container_name(container_name);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->DeleteContainer(&ctx, request, &response);
@@ -372,10 +366,9 @@ VirtualMachine::DeleteLxdContainerStatus VirtualMachine::DeleteLxdContainer(
 
 VirtualMachine::StartLxdContainerStatus VirtualMachine::StartLxdContainer(
     const std::string& container_name,
-    const std::string& container_private_key,
-    const std::string& host_public_key,
     const std::string& token,
     tremplin::StartContainerRequest::PrivilegeLevel privilege_level,
+    bool disable_audio_capture,
     std::string* out_error) {
   DCHECK(out_error);
   if (!tremplin_stub_) {
@@ -387,15 +380,12 @@ VirtualMachine::StartLxdContainerStatus VirtualMachine::StartLxdContainer(
   vm_tools::tremplin::StartContainerResponse response;
 
   request.set_container_name(container_name);
-  request.set_container_private_key(container_private_key);
-  request.set_host_public_key(host_public_key);
   request.set_token(token);
   request.set_privilege_level(privilege_level);
+  request.set_disable_audio_capture(disable_audio_capture);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kLongOperationTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kLongOperationTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->StartContainer(&ctx, request, &response);
@@ -440,6 +430,57 @@ VirtualMachine::StartLxdContainerStatus VirtualMachine::StartLxdContainer(
   }
 }
 
+VirtualMachine::StopLxdContainerStatus VirtualMachine::StopLxdContainer(
+    const std::string& container_name, std::string* out_error) {
+  DCHECK(out_error);
+  if (!tremplin_stub_) {
+    *out_error = "tremplin is not connected";
+    return VirtualMachine::StopLxdContainerStatus::FAILED;
+  }
+
+  if (!GetContainerForName(container_name)) {
+    // We call it stopped if the container hasn't yet been registered.
+    return VirtualMachine::StopLxdContainerStatus::STOPPED;
+  }
+
+  vm_tools::tremplin::StopContainerRequest request;
+  vm_tools::tremplin::StopContainerResponse response;
+
+  request.set_container_name(container_name);
+
+  grpc::ClientContext ctx;
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
+
+  grpc::Status status = tremplin_stub_->StopContainer(&ctx, request, &response);
+  if (!status.ok()) {
+    LOG(ERROR) << "StopContainer RPC failed: " << status.error_message();
+    out_error->assign(status.error_message());
+    return VirtualMachine::StopLxdContainerStatus::FAILED;
+  }
+
+  switch (response.status()) {
+    case tremplin::StopContainerResponse::STOPPING:
+      return VirtualMachine::StopLxdContainerStatus::STOPPING;
+    case tremplin::StopContainerResponse::STOPPED:
+      return VirtualMachine::StopLxdContainerStatus::STOPPED;
+    case tremplin::StopContainerResponse::DOES_NOT_EXIST:
+      return VirtualMachine::StopLxdContainerStatus::DOES_NOT_EXIST;
+
+    case tremplin::StopContainerResponse::UNKNOWN:
+    case tremplin::StopContainerResponse::FAILED:
+      LOG(ERROR) << "Failed to stop LXD container: "
+                 << response.failure_reason();
+      out_error->assign(response.failure_reason());
+      return VirtualMachine::StopLxdContainerStatus::FAILED;
+
+    default:
+      LOG(ERROR) << "Unknown response received: " << response.status() << " "
+                 << response.failure_reason();
+      out_error->assign(response.failure_reason());
+      return VirtualMachine::StopLxdContainerStatus::UNKNOWN;
+  }
+}
+
 VirtualMachine::GetLxdContainerUsernameStatus
 VirtualMachine::GetLxdContainerUsername(const std::string& container_name,
                                         std::string* out_username,
@@ -459,9 +500,7 @@ VirtualMachine::GetLxdContainerUsername(const std::string& container_name,
   request.set_container_name(container_name);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->GetContainerUsername(&ctx, request, &response);
@@ -513,9 +552,7 @@ VirtualMachine::SetUpLxdContainerUser(const std::string& container_name,
   request.set_container_username(container_username);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status = tremplin_stub_->SetUpUser(&ctx, request, &response);
   out_username->assign(response.username());
@@ -560,9 +597,7 @@ VirtualMachine::GetLxdContainerInfoStatus VirtualMachine::GetLxdContainerInfo(
   request.set_container_name(container_name);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->GetContainerInfo(&ctx, request, &response);
@@ -572,7 +607,7 @@ VirtualMachine::GetLxdContainerInfoStatus VirtualMachine::GetLxdContainerInfo(
     return VirtualMachine::GetLxdContainerInfoStatus::FAILED;
   }
 
-  out_info->ipv4_address = response.ipv4_address();
+  out_info->ipv4_address = net_base::IPv4Address(response.ipv4_address());
   out_error->assign(response.failure_reason());
 
   switch (response.status()) {
@@ -604,9 +639,7 @@ VirtualMachine::ExportLxdContainerStatus VirtualMachine::ExportLxdContainer(
   request.set_export_path(export_path);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->ExportContainer(&ctx, request, &response);
@@ -642,9 +675,7 @@ VirtualMachine::CancelExportLxdContainer(
   request.set_in_progress_container_name(in_progress_container_name);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->CancelExportContainer(&ctx, request, &response);
@@ -685,9 +716,7 @@ VirtualMachine::ImportLxdContainerStatus VirtualMachine::ImportLxdContainer(
   request.set_available_disk_space(available_disk_space);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->ImportContainer(&ctx, request, &response);
@@ -723,9 +752,7 @@ VirtualMachine::CancelImportLxdContainer(
   request.set_in_progress_container_name(in_progress_container_name);
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->CancelImportContainer(&ctx, request, &response);
@@ -771,6 +798,10 @@ VirtualMachine::UpgradeContainerStatus VirtualMachine::UpgradeContainer(
     std::string* out_error) {
   DCHECK(container);
   DCHECK(out_error);
+  if (!tremplin_stub_) {
+    *out_error = "tremplin is not connected";
+    return VirtualMachine::UpgradeContainerStatus::FAILED;
+  }
 
   vm_tools::tremplin::UpgradeContainerRequest request;
   vm_tools::tremplin::UpgradeContainerResponse response;
@@ -779,9 +810,7 @@ VirtualMachine::UpgradeContainerStatus VirtualMachine::UpgradeContainer(
   request.set_target_version(ConvertVersion(target_version));
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->UpgradeContainer(&ctx, request, &response);
@@ -821,9 +850,7 @@ VirtualMachine::CancelUpgradeContainer(Container* container,
   request.set_container_name(container->name());
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->CancelUpgradeContainer(&ctx, request, &response);
@@ -848,16 +875,175 @@ VirtualMachine::CancelUpgradeContainer(Container* container,
   }
 }
 
+VirtualMachine::AttachUsbToContainerStatus VirtualMachine::AttachUsbToContainer(
+    const Container* container, uint32_t port_num, std::string* out_error) {
+  DCHECK(container);
+  DCHECK(out_error);
+
+  if (IsContainerless()) {
+    *out_error = "VM does not host containers";
+    return VirtualMachine::AttachUsbToContainerStatus::FAILED;
+  } else if (!tremplin_stub_) {
+    *out_error = "tremplin is not connected";
+    return VirtualMachine::AttachUsbToContainerStatus::FAILED;
+  }
+
+  vm_tools::tremplin::AttachUsbToContainerRequest request;
+  vm_tools::tremplin::AttachUsbToContainerResponse response;
+
+  request.set_container_name(container->name());
+  request.set_port_num(port_num);
+
+  grpc::ClientContext ctx;
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
+
+  grpc::Status status =
+      tremplin_stub_->AttachUsbToContainer(&ctx, request, &response);
+  if (!status.ok()) {
+    LOG(ERROR) << "AttachUsbToContainer RPC failed: " << status.error_message()
+               << " " << status.error_code();
+    out_error->assign(status.error_message());
+    return VirtualMachine::AttachUsbToContainerStatus::FAILED;
+  }
+  out_error->assign(response.failure_reason());
+  switch (response.status()) {
+    case tremplin::AttachUsbToContainerResponse::UNKNOWN:
+      return VirtualMachine::AttachUsbToContainerStatus::UNKNOWN;
+    case tremplin::AttachUsbToContainerResponse::OK:
+      return VirtualMachine::AttachUsbToContainerStatus::OK;
+    case tremplin::AttachUsbToContainerResponse::NO_SUCH_CONTAINER:
+      return VirtualMachine::AttachUsbToContainerStatus::NO_SUCH_CONTAINER;
+    case tremplin::AttachUsbToContainerResponse::FAILED:
+      return VirtualMachine::AttachUsbToContainerStatus::FAILED;
+    default:
+      return VirtualMachine::AttachUsbToContainerStatus::UNKNOWN;
+  }
+}
+
+VirtualMachine::DetachUsbFromContainerStatus
+VirtualMachine::DetachUsbFromContainer(uint32_t port_num,
+                                       std::string* out_error) {
+  DCHECK(out_error);
+
+  if (IsContainerless()) {
+    *out_error = "VM does not host containers";
+    return VirtualMachine::DetachUsbFromContainerStatus::FAILED;
+  } else if (!tremplin_stub_) {
+    *out_error = "tremplin is not connected";
+    return VirtualMachine::DetachUsbFromContainerStatus::FAILED;
+  }
+
+  vm_tools::tremplin::DetachUsbFromContainerRequest request;
+  vm_tools::tremplin::DetachUsbFromContainerResponse response;
+
+  request.set_port_num(port_num);
+
+  grpc::ClientContext ctx;
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
+
+  grpc::Status status =
+      tremplin_stub_->DetachUsbFromContainer(&ctx, request, &response);
+  if (!status.ok()) {
+    LOG(ERROR) << "DetachUsbFromContainer RPC failed: "
+               << status.error_message() << " " << status.error_code();
+    out_error->assign(status.error_message());
+    return VirtualMachine::DetachUsbFromContainerStatus::FAILED;
+  }
+  out_error->assign(response.failure_reason());
+  switch (response.status()) {
+    case tremplin::DetachUsbFromContainerResponse::UNKNOWN:
+      return VirtualMachine::DetachUsbFromContainerStatus::UNKNOWN;
+    case tremplin::DetachUsbFromContainerResponse::OK:
+      return VirtualMachine::DetachUsbFromContainerStatus::OK;
+    case tremplin::DetachUsbFromContainerResponse::FAILED:
+      return VirtualMachine::DetachUsbFromContainerStatus::FAILED;
+    default:
+      return VirtualMachine::DetachUsbFromContainerStatus::UNKNOWN;
+  }
+}
+
+namespace {
+template <typename key_t, typename src_value_t, typename dst_value_t>
+void ConvertProtoMap(const google::protobuf::Map<key_t, src_value_t>& src,
+                     google::protobuf::Map<key_t, dst_value_t>* dst,
+                     bool (*is_valid)(int)) {
+  for (const auto& iter : src) {
+    if (is_valid(static_cast<int>(iter.second))) {
+      (*dst)[iter.first] =
+          static_cast<dst_value_t>(static_cast<int>(iter.second));
+    }
+  }
+}
+
+}  // namespace
+
+VirtualMachine::UpdateContainerDevicesStatus
+VirtualMachine::UpdateContainerDevices(
+    Container* container,
+    const google::protobuf::Map<std::string, VmDeviceAction>& updates,
+    google::protobuf::Map<std::string,
+                          UpdateContainerDevicesResponse::UpdateResult>*
+        results,
+    std::string* out_error) {
+  DCHECK(container);
+  DCHECK(out_error);
+
+  if (IsContainerless()) {
+    *out_error = "VM does not host containers";
+    return VirtualMachine::UpdateContainerDevicesStatus::NO_SUCH_CONTAINER;
+  } else if (!tremplin_stub_) {
+    *out_error = "tremplin is not connected";
+    return VirtualMachine::UpdateContainerDevicesStatus::FAILED;
+  }
+
+  vm_tools::tremplin::UpdateContainerDevicesRequest request;
+  vm_tools::tremplin::UpdateContainerDevicesResponse response;
+
+  request.set_container_name(container->name());
+  ConvertProtoMap(updates, request.mutable_updates(),
+                  &vm_tools::tremplin::VmDeviceAction_IsValid);
+
+  grpc::ClientContext ctx;
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
+
+  grpc::Status status =
+      tremplin_stub_->UpdateContainerDevices(&ctx, request, &response);
+
+  if (!status.ok()) {
+    LOG(ERROR) << "UpdateContainerDevices RPC failed: "
+               << status.error_message() << " " << status.error_code();
+    out_error->assign(status.error_message());
+    return VirtualMachine::UpdateContainerDevicesStatus::FAILED;
+  }
+  out_error->assign(response.failure_reason());
+  ConvertProtoMap(response.results(), results,
+                  &UpdateContainerDevicesResponse::UpdateResult_IsValid);
+
+  switch (response.status()) {
+    case tremplin::UpdateContainerDevicesResponse::UNKNOWN:
+      return VirtualMachine::UpdateContainerDevicesStatus::UNKNOWN;
+    case tremplin::UpdateContainerDevicesResponse::OK:
+      return VirtualMachine::UpdateContainerDevicesStatus::OK;
+    case tremplin::UpdateContainerDevicesResponse::NO_SUCH_CONTAINER:
+      return VirtualMachine::UpdateContainerDevicesStatus::NO_SUCH_CONTAINER;
+    default:
+      return VirtualMachine::UpdateContainerDevicesStatus::UNKNOWN;
+  }
+}
+
 VirtualMachine::StartLxdStatus VirtualMachine::StartLxd(
     bool reset_lxd_db, std::string* out_error) {
   DCHECK(out_error);
+  if (!tremplin_stub_) {
+    *out_error = "tremplin is not connected";
+    return VirtualMachine::StartLxdStatus::FAILED;
+  }
+
   vm_tools::tremplin::StartLxdRequest request;
   vm_tools::tremplin::StartLxdResponse response;
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   request.set_reset_lxd_db(reset_lxd_db);
 
@@ -893,9 +1079,7 @@ void VirtualMachine::HostNetworkChanged() {
   vm_tools::tremplin::HostNetworkChangedResponse response;
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kDefaultTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kDefaultTimeoutSeconds));
 
   grpc::Status status =
       tremplin_stub_->HostNetworkChanged(&ctx, request, &response);
@@ -915,9 +1099,7 @@ bool VirtualMachine::GetTremplinDebugInfo(std::string* out) {
   vm_tools::tremplin::GetDebugInfoResponse response;
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(gpr_time_add(
-      gpr_now(GPR_CLOCK_MONOTONIC),
-      gpr_time_from_seconds(kLongOperationTimeoutSeconds, GPR_TIMESPAN)));
+  ctx.set_deadline(ToGprDeadline(kLongOperationTimeoutSeconds));
 
   grpc::Status status = tremplin_stub_->GetDebugInfo(&ctx, request, &response);
   if (!status.ok()) {
@@ -929,5 +1111,4 @@ bool VirtualMachine::GetTremplinDebugInfo(std::string* out) {
   return true;
 }
 
-}  // namespace cicerone
-}  // namespace vm_tools
+}  // namespace vm_tools::cicerone

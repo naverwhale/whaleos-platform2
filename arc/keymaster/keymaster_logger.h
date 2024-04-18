@@ -1,11 +1,10 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef ARC_KEYMASTER_KEYMASTER_LOGGER_H_
 #define ARC_KEYMASTER_KEYMASTER_LOGGER_H_
 
-#include <base/macros.h>
 #include <keymaster/logger.h>
 
 namespace arc {

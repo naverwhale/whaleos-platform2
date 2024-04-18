@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,12 +6,12 @@
 
 #include "cryptohome/pkcs11_init.h"
 
+#include <iterator>
 #include <memory>
 #include <string.h>
 
 #include <base/files/file_path.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/cryptohome.h>
@@ -28,10 +28,9 @@ constexpr char Pkcs11Init::kDefaultPin[];
 constexpr char Pkcs11Init::kDefaultSystemLabel[];
 constexpr char Pkcs11Init::kDefaultUserLabelPrefix[];
 
-Pkcs11Init::Pkcs11Init()
-    : default_platform_(new Platform), platform_(default_platform_.get()) {}
+Pkcs11Init::Pkcs11Init() = default;
 
-Pkcs11Init::~Pkcs11Init() {}
+Pkcs11Init::~Pkcs11Init() = default;
 
 void Pkcs11Init::GetTpmTokenInfo(std::string* OUT_label,
                                  std::string* OUT_user_pin) {
@@ -39,18 +38,18 @@ void Pkcs11Init::GetTpmTokenInfo(std::string* OUT_label,
   *OUT_user_pin = kDefaultPin;
 }
 
-void Pkcs11Init::GetTpmTokenInfoForUser(const std::string& username,
+void Pkcs11Init::GetTpmTokenInfoForUser(const Username& username,
                                         std::string* OUT_label,
                                         std::string* OUT_user_pin) {
   *OUT_label = GetTpmTokenLabelForUser(username);
   *OUT_user_pin = kDefaultPin;
 }
 
-std::string Pkcs11Init::GetTpmTokenLabelForUser(const std::string& username) {
+std::string Pkcs11Init::GetTpmTokenLabelForUser(const Username& username) {
   // Use a truncated sanitized username in the token label so a label collision
   // is extremely unlikely.
   return std::string(kDefaultUserLabelPrefix) +
-         brillo::cryptohome::home::SanitizeUserName(username).substr(0, 16);
+         brillo::cryptohome::home::SanitizeUserName(username)->substr(0, 16);
 }
 
 bool Pkcs11Init::GetTpmTokenSlotForPath(const FilePath& path,
@@ -165,7 +164,7 @@ bool Pkcs11Init::CheckTokenInSlot(CK_SLOT_ID slot_id,
   }
 
   std::string label(reinterpret_cast<const char*>(token_info.label),
-                    base::size(token_info.label));
+                    std::size(token_info.label));
   if (!base::StartsWith(label, expected_label_prefix,
                         base::CompareCase::SENSITIVE)) {
     LOG(WARNING) << "Token Label (" << label << ") does not match expected "

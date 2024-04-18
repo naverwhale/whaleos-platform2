@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -50,6 +50,10 @@ class ProviderInterface {
       const ProfileRefPtr& profile,
       const std::string& entry_name,
       Error* error) = 0;
+
+  // Abandon a service belonging to this provider.  It allows the provider to do
+  // all the cleaning related to this |service|.
+  virtual void AbandonService(const ServiceRefPtr& service) = 0;
 
   // Starts the provider.
   virtual void Start() = 0;

@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,17 @@
 #include <unistd.h>
 
 #include <base/logging.h>
+#include <base/strings/stringprintf.h>
 #include <gtest/gtest.h>
 
 namespace brillo {
 
 const int ScopedPipe::kPipeSize = 4096;
+
+base::FilePath GetFdPath(int fd) {
+  // /proc/self is not used in case the path is handed to a child process.
+  return base::FilePath(base::StringPrintf("/proc/%d/fd/%d", getpid(), fd));
+}
 
 ScopedPipe::ScopedPipe() {
   int fds[2];

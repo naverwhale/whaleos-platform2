@@ -1,10 +1,11 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "croslog/log_parser_syslog.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -20,8 +21,7 @@ constexpr size_t kTimeStringLengthUTC = 27;
 
 int ParseTime(const std::string& entire_line, base::Time* time) {
   DCHECK_NE(nullptr, time);
-
-  if (entire_line[26] == 'Z') {
+  if (entire_line.length() >= kTimeStringLengthUTC && entire_line[26] == 'Z') {
     // Case of UTC time format like "2020-05-25T00:00:00.000000Z".
     std::string log_time = entire_line.substr(0, kTimeStringLengthUTC);
 
@@ -30,7 +30,8 @@ int ParseTime(const std::string& entire_line, base::Time* time) {
       return -1;
 
     return kTimeStringLengthUTC;
-  } else if (entire_line[26] == '+' || entire_line[26] == '-') {
+  } else if (entire_line.length() >= kTimeStringLengthWithTimeZone &&
+             (entire_line[26] == '+' || entire_line[26] == '-')) {
     // Case of format with time-zone like "2020-05-25T00:00:00.000000+00:00".
     std::string log_time = entire_line.substr(0, kTimeStringLengthWithTimeZone);
 
@@ -53,25 +54,21 @@ LogParserSyslog::LogParserSyslog() = default;
 MaybeLogEntry LogParserSyslog::ParseInternal(std::string&& entire_line) {
   if (entire_line.empty()) {
     // Returns an invalid value if the line is invalid or empty.
-    return base::nullopt;
-  }
-
-  if (entire_line.size() < kTimeStringLengthUTC) {
-    // Parse failed. Maybe this line doesn't contains a header.
-    return base::nullopt;
+    return std::nullopt;
   }
 
   base::Time time;
   int message_start_pos = ParseTime(entire_line, &time);
   if (message_start_pos < 0) {
     // Parse failed. Maybe this line doesn't contains a header.
-    return base::nullopt;
+    return std::nullopt;
   }
+  DCHECK_LE(message_start_pos, entire_line.length());
 
   int pos = message_start_pos;
   if (entire_line[pos] != ' ') {
     // Parse failed. Maybe this line doesn't contains a header.
-    return base::nullopt;
+    return std::nullopt;
   }
 
   std::string severity_str;
@@ -109,12 +106,10 @@ MaybeLogEntry LogParserSyslog::ParseInternal(std::string&& entire_line) {
         std::string pid_str = entire_line.substr(pos + 1, i - pos - 1);
         if (!base::StringToInt(pid_str, &pid))
           pid = -1;
-        pos = i;
+        pos = i + 1;
         break;
       }
     }
-    DCHECK_EQ(']', entire_line[pos]);
-    pos++;
   }
 
   if (entire_line.size() > pos && entire_line[pos] == ':')
@@ -122,12 +117,15 @@ MaybeLogEntry LogParserSyslog::ParseInternal(std::string&& entire_line) {
 
   std::string message;
   if (entire_line.size() > pos) {
-    if (entire_line[pos] != ' ') {
+    if (entire_line[pos] == ' ') {
+      ++pos;
+    } else if (entire_line[pos] != '[') {
       // Parse failed. Maybe this line doesn't contains a header.
-      return base::nullopt;
+      // Note that the '[' character can happen when there's incomplete closing
+      // brace for PID that's parsed above.
+      return std::nullopt;
     }
 
-    pos++;
     message = entire_line.substr(pos, entire_line.size() - pos);
   }
 

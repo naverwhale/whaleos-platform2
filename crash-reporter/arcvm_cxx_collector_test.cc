@@ -1,18 +1,23 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/arcvm_cxx_collector.h"
 
 #include <fcntl.h>
+
 #include <memory>
 #include <utility>
 
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/stringprintf.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library.h>
+#include <metrics/metrics_library_mock.h>
 
 #include "crash-reporter/arc_util.h"
 #include "crash-reporter/test_util.h"
@@ -30,7 +35,7 @@ constexpr pid_t kPid = 1234;
 constexpr char kExecName[] = "execname";
 
 constexpr base::TimeDelta kUptimeValue =
-    base::TimeDelta::FromMilliseconds(123456789);  // 1d 10h 17min 36s
+    base::Milliseconds(123456789);  // 1d 10h 17min 36s
 constexpr char kUptimeFormatted[] = "1d 10h 17min 36s";
 
 constexpr char kTestCrashDirectory[] = "test-crash-directory";
@@ -52,7 +57,11 @@ ArcvmCxxCollector::CrashInfo GetCrashInfo() {
 
 class TestArcvmCxxCollector : public ArcvmCxxCollector {
  public:
-  explicit TestArcvmCxxCollector(const base::FilePath& crash_directory) {
+  explicit TestArcvmCxxCollector(const base::FilePath& crash_directory)
+      : ArcvmCxxCollector(
+            base::MakeRefCounted<
+                base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+                std::make_unique<MetricsLibraryMock>())) {
     Initialize(false /* early */);
     set_crash_directory_for_test(crash_directory);
   }
@@ -123,4 +132,13 @@ TEST_F(ArcvmCxxCollectorTest, AddArcMetadata) {
   EXPECT_TRUE(collector_->HasMetaData(arc_util::kCpuAbiField, kCpuAbi));
   EXPECT_TRUE(
       collector_->HasMetaData(arc_util::kUptimeField, kUptimeFormatted));
+}
+
+TEST_F(ArcvmCxxCollectorTest, ComputeSeverity) {
+  CrashCollector::ComputedCrashSeverity computed_severity =
+      collector_->ComputeSeverity("test exec name");
+
+  EXPECT_EQ(computed_severity.crash_severity,
+            CrashCollector::CrashSeverity::kError);
+  EXPECT_EQ(computed_severity.product_group, CrashCollector::Product::kArc);
 }

@@ -1,4 +1,4 @@
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,40 +10,9 @@
 MM1=org.freedesktop.ModemManager1
 MM1_OBJECT=/org/freedesktop/ModemManager1
 MM1_IMANAGER=org.freedesktop.ModemManager1
-MM1_IMODEM=${MM1_IMANAGER}.Modem
-MM1_IMODEM_SIMPLE=${MM1_IMODEM}.Simple
-MM1_IMODEM_3GPP=${MM1_IMODEM}.Modem3gpp
-MM1_IMODEM_CDMA=${MM1_IMODEM}.ModemCdma
-MM1_ISIM=${MM1_IMANAGER}.Sim
-
-mm1_modem_sim() {
-  dbus_property "${MM1}" "${modem}" "${MM1_IMODEM}" Sim
-}
 
 mm1_modem_properties() {
-  local modem="$1"
-  local sim=$(mm1_modem_sim "${modem}")
-
-  echo
-  echo "Modem ${modem}:"
-  echo "  GetStatus:"
-  dbus_call "${MM1}" "${modem}" "${MM1_IMODEM_SIMPLE}.GetStatus" \
-    | format_dbus_dict | indent 2
-  echo "  Properties:"
-  dbus_properties "${MM1}" "${modem}" "${MM1_IMODEM}" \
-    | format_dbus_dict | indent 2
-  echo "  3GPP:"
-  dbus_properties "${MM1}" "${modem}" "${MM1_IMODEM_3GPP}" \
-    | format_dbus_dict | indent 2
-  echo "  CDMA:"
-  dbus_properties "${MM1}" "${modem}" "${MM1_IMODEM_CDMA}" \
-    | format_dbus_dict | indent 2
-
-  if [ "${#sim}" -gt 1 ]; then
-    echo "  SIM ${sim}:"
-    dbus_properties "${MM1}" "${sim}" "${MM1_ISIM}" \
-      | format_dbus_dict | indent 2
-  fi
+  gdbus_introspect "${MM1}" "${MM1_OBJECT}"
 }
 
 mm1_modems() {
@@ -55,10 +24,23 @@ mm1_modems() {
 # Common stuff
 #
 MASKED_PROPERTIES="DeviceIdentifier|EquipmentIdentifier|OwnNumbers|\
-ESN|MEID|IMEI|IMSI|SimIdentifier|MDN|MIN|payment_url_postdata|Eid|Iccid"
+ESN|MEID|IMEI|IMSI|SimIdentifier|MDN|MIN|payment_url_postdata|Eid|\
+Iccid|Number|SMSC|Text|Data"
+MASKED_SUBPROPERTIES="user|password|${MASKED_PROPERTIES}"
+MASKED_MMCLI_FIELDS="device id|equipment id|own|${MASKED_PROPERTIES}"
+
+mask_esim_properties() {
+  sed -E "s/\<(${MASKED_PROPERTIES}): (.+)/\1: *** MASKED ***/i"
+}
+
+mask_mmcli_fields() {
+  sed -E "s/(${MASKED_MMCLI_FIELDS}): (.+)/\1: *** MASKED ***/i"
+}
 
 mask_modem_properties() {
-  sed -E "s/\<(${MASKED_PROPERTIES}): (.+)/\1: *** MASKED ***/i"
+  sed -E "s/\<(${MASKED_PROPERTIES}) = (.+)/\1 = *** MASKED ***/i" |
+  sed -E "s/('(${MASKED_SUBPROPERTIES})'): (<[^>]+>)/\1: *** MASKED ***/gi" |
+  sed -E "s/readonly //g"
 }
 
 mask_profiles() {
@@ -66,9 +48,7 @@ mask_profiles() {
 }
 
 all_modem_status() {
-  for modem in $(mm1_modems); do
-    mm1_modem_properties "${modem}"
-  done
+  mm1_modem_properties
 }
 
 default_modem() {
@@ -95,10 +75,13 @@ MODEMFWD_IFACE=org.chromium.Modemfwd
 
 force_flash() {
   local device="$1"
+  local carrier_uuid="$2"
   [ -z "${device}" ] && error_exit "No device_id provided."
+  [ -z "${carrier_uuid}" ] && carrier_uuid="generic"
 
   dbus_call_with_timeout "${MODEMFWD}" 120000 "${MODEMFWD_OBJECT}" \
-    "${MODEMFWD_IFACE}.ForceFlash" "string:${device}"
+    "${MODEMFWD_IFACE}.ForceFlash" "string:${device}" \
+    dict:string:string:"carrier_uuid","${carrier_uuid}"
 }
 
 #
@@ -127,10 +110,20 @@ esim() {
   fi
   [ -z "${euicc}" ] && error_exit "No euicc found."
 
+  if crossystem 'cros_debug?0'; then
+    if [ "${command}" != "status" ] && [ "${command}" != "refresh_profiles" ] ; then
+      error_exit "${command} not allowed outside of developer mode"
+    fi
+  fi
+
   case "${command}" in
     use_test_certs)
       poll_for_dbus_service "${HERMES}"
       esim_use_test_certs "${euicc}" "$@"
+      ;;
+    set_test_mode)
+      poll_for_dbus_service "${HERMES}"
+      esim_set_test_mode "${euicc}" "$@"
       ;;
     refresh_profiles)
       poll_for_dbus_service "${HERMES}"
@@ -157,13 +150,8 @@ esim() {
       esim_install_pending_profile "${euicc}" "$@"
       ;;
     uninstall)
-      if crossystem 'cros_debug?1'; then
         poll_for_dbus_service "${HERMES}"
         esim_uninstall "${euicc}" "$@"
-      else
-        error_exit "Cannot uninstall profile. Uninstallation allowed in"\
-          "dev mode only"
-      fi
       ;;
     enable)
       poll_for_dbus_service "${HERMES}"
@@ -175,7 +163,8 @@ esim() {
       ;;
     *)
       error_exit "Expected one of "\
-        "{use_test_certs|refresh_profiles|request_pending_profiles|"\
+        "{use_test_certs|set_test_mode|"\
+        "refresh_profiles|request_pending_profiles|"\
         "status|status_feedback|install|install_pending_profile|uninstall|"\
         "enable|disable}"
       ;;
@@ -233,6 +222,13 @@ esim_use_test_certs() {
             boolean:"$2"
 }
 
+esim_set_test_mode() {
+  local euicc="$1"
+  dbus_call "${HERMES}" "${euicc}" \
+            "${HERMES_EUICC_IFACE}.SetTestMode" \
+            boolean:"$2"
+}
+
 esim_status() {
   local euicc
   for euicc in $(all_euiccs); do
@@ -258,14 +254,17 @@ esim_status() {
 }
 
 esim_status_feedback() {
-  esim_status | mask_modem_properties | mask_profiles
+  esim_status | mask_esim_properties | mask_profiles
 }
 
 esim_refresh_profiles() {
   local euicc="$1"
+  local should_not_switch_slot="$2"
+  [ -z "${should_not_switch_slot}" ] && should_not_switch_slot="false"
 
   dbus_call "${HERMES}" "${euicc}" \
-           "${HERMES_EUICC_IFACE}.RequestInstalledProfiles"
+           "${HERMES_EUICC_IFACE}.RefreshInstalledProfiles" \
+           boolean:"${should_not_switch_slot}"
 }
 
 esim_install() {

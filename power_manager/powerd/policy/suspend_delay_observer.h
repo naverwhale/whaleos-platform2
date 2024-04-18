@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,13 @@
 
 #include <base/observer_list_types.h>
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 class SuspendDelayController;
 
 class SuspendDelayObserver : public base::CheckedObserver {
  public:
-  virtual ~SuspendDelayObserver() {}
+  ~SuspendDelayObserver() override = default;
 
   // Called when all clients that previously registered suspend delays have
   // reported that they're ready for the system to be suspended.  |suspend_id|
@@ -24,7 +23,6 @@ class SuspendDelayObserver : public base::CheckedObserver {
                                  int suspend_id) = 0;
 };
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy
 
 #endif  // POWER_MANAGER_POWERD_POLICY_SUSPEND_DELAY_OBSERVER_H_

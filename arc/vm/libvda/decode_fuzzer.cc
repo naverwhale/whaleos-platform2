@@ -1,16 +1,15 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <fcntl.h>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
 #include <base/memory/writable_shared_memory_region.h>
 #include <base/notreached.h>
@@ -295,7 +294,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         base::subtle::PlatformSharedMemoryRegion platform_shm =
             base::WritableSharedMemoryRegion::TakeHandleForSerialization(
                 std::move(shm_region));
-        base::subtle::PlatformSharedMemoryRegion::ScopedPlatformHandle handle =
+        base::subtle::ScopedPlatformSharedMemoryHandle handle =
             platform_shm.PassPlatformHandle();
         fd = handle.fd.release();
       }

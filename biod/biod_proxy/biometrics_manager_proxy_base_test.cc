@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -83,7 +83,7 @@ TEST_F(BiometricsManagerProxyBaseTest, RunFinishHandlerWithFalse) {
 // Test that StartAuthSession returns nullptr if no dbus response.
 TEST_F(BiometricsManagerProxyBaseTest, StartAuthSessionNoResponse) {
   EXPECT_CALL(*mock_object_proxy_, CallMethodAndBlock)
-      .WillOnce(Return(ByMove(dbus::Response::CreateEmpty())));
+      .WillOnce(Return(ByMove(base::ok(dbus::Response::CreateEmpty()))));
   EXPECT_FALSE(proxy_base_->StartAuthSession());
   EXPECT_EQ(GetBiodAuthSession(), nullptr);
 }
@@ -104,7 +104,7 @@ TEST_F(BiometricsManagerProxyBaseTest, StartAuthSessionGetSessionProxy) {
   // mock bus to return the predefined ObjectProxy once it sees that path,
   // which the class under test will extract from the fake_response.
   EXPECT_CALL(*mock_object_proxy_, CallMethodAndBlock)
-      .WillOnce(Return(ByMove(std::move(fake_response))));
+      .WillOnce(Return(ByMove(base::ok(std::move(fake_response)))));
   EXPECT_CALL(*mock_bus_, GetObjectProxy(kBiodServiceName, auth_session_path))
       .WillOnce(Return(auth_session_proxy.get()));
 

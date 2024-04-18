@@ -1,9 +1,11 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/anomaly_detector.h"
 
+#include <memory>
+#include <optional>
 #include <unordered_set>
 #include <utility>
 
@@ -15,9 +17,11 @@
 #include <base/strings/stringprintf.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/cryptohome/dbus-constants.h>
+#include <dbus/modemfwd/dbus-constants.h>
 #include <dbus/bus.h>
 #include <dbus/exported_object.h>
 #include <dbus/message.h>
+#include <metrics/metrics_library.h>
 #include <re2/re2.h>
 
 #include "crash-reporter/util.h"
@@ -73,7 +77,7 @@ bool Parser::WasAlreadySeen(uint32_t hash) {
 }
 
 MaybeCrashReport Parser::PeriodicUpdate() {
-  return base::nullopt;
+  return std::nullopt;
 }
 
 constexpr LazyRE2 service_failure = {
@@ -86,25 +90,25 @@ MaybeCrashReport ServiceParser::ParseLogEntry(const std::string& line) {
   std::string service_name;
   std::string exit_status;
   if (!RE2::FullMatch(line, *service_failure, &service_name, &exit_status))
-    return base::nullopt;
+    return std::nullopt;
 
   if (service_name == "cros-camera") {
     // cros-camera uses non-zero exit status to indicate transient failures and
     // to request that the service be re-started. This is 'nominal' and should
     // not be reported. (It's also flooding our servers.)
-    return base::nullopt;
+    return std::nullopt;
   }
 
   // We only want to report a limited number of service failures due to noise.
   if (!testonly_send_all_ &&
       base::RandGenerator(util::GetServiceFailureWeight()) != 0) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   uint32_t hash = StringHash(service_name.c_str());
 
   if (WasAlreadySeen(hash))
-    return base::nullopt;
+    return std::nullopt;
 
   std::string text = base::StringPrintf(
       "%08x-exit%s-%s\n", hash, exit_status.c_str(), service_name.c_str());
@@ -147,19 +151,19 @@ MaybeCrashReport SELinuxParser::ParseLogEntry(const std::string& line) {
   // real impact. The noise from them would crowd out other crashes that have
   // a more significant impact.
   if (line.find("permissive=1") != std::string::npos) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
-  // We only want to report 0.1% of selinux violations due to noise.
+  // We only want to report a limited number of selinux violations due to noise.
   if (!testonly_send_all_ &&
       base::RandGenerator(util::GetSelinuxWeight()) != 0) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   std::string only_alpha = OnlyAsciiAlpha(line);
   uint32_t hash = StringHash(only_alpha.c_str());
   if (WasAlreadySeen(hash))
-    return base::nullopt;
+    return std::nullopt;
 
   std::string signature;
 
@@ -183,7 +187,7 @@ MaybeCrashReport SELinuxParser::ParseLogEntry(const std::string& line) {
       // anomaly_detector saw the line and ignored it.
       LOG(INFO) << "Skipping non-CrOS selinux violation: " << line;
     }
-    return base::nullopt;
+    return std::nullopt;
   }
 
   signature += base::JoinString({scontext, tcontext, permission,
@@ -203,8 +207,17 @@ MaybeCrashReport SELinuxParser::ParseLogEntry(const std::string& line) {
   text += "\n";
   text += line;
 
-  return CrashReport(std::move(text), {"--selinux_violation"});
+  return CrashReport(
+      std::move(text),
+      {"--selinux_violation",
+       base::StringPrintf("--weight=%d", util::GetSelinuxWeightForCrash())});
 }
+
+static constexpr LazyRE2 kernel_suspend_warning = {
+    // Intel - PMT - failure to transition to S0ix detected on resume
+    "drivers/idle|"  // <= v4.14
+    // Intel - EC - detected failure to transition to S0ix
+    "drivers/platform/chrome/cros_ec"};
 
 std::string DetermineFlag(const std::string& info) {
   // Paths like:
@@ -214,7 +227,7 @@ std::string DetermineFlag(const std::string& info) {
   if (info.find("net/wireless") != std::string::npos ||
       info.find("net/mac80211") != std::string::npos)
     return "--kernel_wifi_warning";
-  if (info.find("drivers/idle") != std::string::npos)
+  if (RE2::PartialMatch(info, *kernel_suspend_warning))
     return "--kernel_suspend_warning";
 
   return "--kernel_warning";
@@ -223,6 +236,16 @@ std::string DetermineFlag(const std::string& info) {
 constexpr LazyRE2 start_ath10k_dump = {R"(ath10k_.*firmware crashed!)"};
 constexpr LazyRE2 end_ath10k_dump = {R"(ath10k_.*htt-ver)"};
 constexpr LazyRE2 tag_ath10k_dump = {R"(ath10k_)"};
+
+constexpr LazyRE2 start_ath11k_dump = {R"(ath11k_.*firmware crashed)"};
+constexpr LazyRE2 end_ath11k_dump = {R"(ath11k_.*fw_version)"};
+const char tag_ath11k_dump[] = "ath11k_";
+const char tag_ieee80211_dump[] = "ieee80211";
+const char tag_mhi_dump[] = "mhi";
+// The crash should have the start signature (ath11k_.*firmware crashed) and
+// the end signature (ath11k_.*fw_version). However, sometimes the end signature
+// isn't printed; in that case, assume we're done once we've seen 10 lines.
+const int kAth11kMaxLength = 10;
 
 // Older wifi chips have lmac dump only and newer wifi chips have lmac followed
 // by umac dumps. The KernelParser should parse the dumps accordingly.
@@ -250,6 +273,9 @@ constexpr LazyRE2 header = {
 
 constexpr LazyRE2 smmu_fault = {R"(Unhandled context fault: fsr=0x)"};
 
+static constexpr LazyRE2 kernel_lc_suspend_warning = {
+    R"((intel_pmc_core.+CPU did not enter SLP_S0!!!))"};
+
 KernelParser::KernelParser(bool testonly_send_all)
     : testonly_send_all_(testonly_send_all) {}
 
@@ -266,7 +292,7 @@ MaybeCrashReport KernelParser::ParseLogEntry(const std::string& line) {
       uint32_t hash = StringHash(info.c_str());
       if (WasAlreadySeen(hash)) {
         last_line_ = LineType::None;
-        return base::nullopt;
+        return std::nullopt;
       }
       flag_ = DetermineFlag(info);
 
@@ -294,13 +320,35 @@ MaybeCrashReport KernelParser::ParseLogEntry(const std::string& line) {
       // server. (See http://b/185156234.)
       const int kWeight = util::GetKernelWarningWeight(flag_);
       if (!testonly_send_all_ && base::RandGenerator(kWeight) != 0) {
-        return base::nullopt;
+        return std::nullopt;
       }
       return CrashReport(
           std::move(text_tmp),
           {std::move(flag_), base::StringPrintf("--weight=%d", kWeight)});
     }
     text_ += line + "\n";
+  }
+
+  // Intel kernels >= v4.19 generate suspend warnings using lower-case warning
+  // macros, e.g. `pr_warn()`. These do not generate a signature or stack dump,
+  // so they are not caught by the kernel warning matching code above. Look for
+  // them here, and make sure they are sampled identically to kernel_warning.
+  std::string sig;
+  if (RE2::PartialMatch(line, *kernel_lc_suspend_warning, &sig)) {
+    uint32_t hash = StringHash(sig.c_str());
+    if (WasAlreadySeen(hash)) {
+      return std::nullopt;
+    }
+    const std::string flag = "--kernel_suspend_warning";
+    // Sample kernel warnings since they are too noisy and overload the crash
+    // server. (See http://b/185156234.)
+    const int kWeight = util::GetKernelWarningWeight(flag);
+    if (!testonly_send_all_ && base::RandGenerator(kWeight) != 0) {
+      return std::nullopt;
+    }
+    return CrashReport(
+        sig + "\n",
+        {std::move(flag), base::StringPrintf("--weight=%d", kWeight)});
   }
 
   if (ath10k_last_line_ == Ath10kLineType::None) {
@@ -323,7 +371,7 @@ MaybeCrashReport KernelParser::ParseLogEntry(const std::string& line) {
       const std::string kFlag = "--kernel_ath10k_error";
       const int kWeight = util::GetKernelWarningWeight(kFlag);
       if (!testonly_send_all_ && base::RandGenerator(kWeight) != 0) {
-        return base::nullopt;
+        return std::nullopt;
       }
 
       return CrashReport(
@@ -332,6 +380,47 @@ MaybeCrashReport KernelParser::ParseLogEntry(const std::string& line) {
     }
 
     ath10k_text_ += line + "\n";
+  }
+
+  if (ath11k_last_line_ == Ath11kLineType::None) {
+    if (RE2::PartialMatch(line, *start_ath11k_dump)) {
+      ath11k_last_line_ = Ath11kLineType::Start;
+      ath11k_text_ += line + "\n";
+      ah11k_line_counter_ = 1;
+    }
+  } else if (ath11k_last_line_ == Ath11kLineType::Start) {
+    // Return if the end_ath11k_dump is reached. However, sometimes
+    // end_ath11k_dump is not printed. In that case, stop when a line is
+    // printed that doesn't match one of the tags associated with an
+    // ath11k dump (there are three: "ath11k", "ieee80211", and "mhi") or
+    // the number of lines is greater than the number of lines we'd expect
+    // in a dump.
+    if (RE2::PartialMatch(line, *end_ath11k_dump) ||
+        (ah11k_line_counter_ >= kAth11kMaxLength) ||
+        (line.find(tag_ath11k_dump) == std::string::npos &&
+         line.find(tag_ieee80211_dump) == std::string::npos &&
+         line.find(tag_mhi_dump) == std::string::npos)) {
+      ath11k_last_line_ = Ath11kLineType::None;
+      ah11k_line_counter_ = 0;
+      if (RE2::PartialMatch(line, *end_ath11k_dump)) {
+        ath11k_text_ += line + "\n";
+      }
+      std::string ath11k_text_tmp;
+      ath11k_text_tmp.swap(ath11k_text_);
+
+      const std::string kFlag = "--kernel_ath11k_error";
+      const int kWeight = util::GetKernelWarningWeight(kFlag);
+      if (!testonly_send_all_ && base::RandGenerator(kWeight) != 0) {
+        return std::nullopt;
+      }
+
+      return CrashReport(
+          std::move(ath11k_text_tmp),
+          {std::move(kFlag), base::StringPrintf("--weight=%d", kWeight)});
+    }
+
+    ath11k_text_ += line + "\n";
+    ah11k_line_counter_ = ah11k_line_counter_ + 1;
   }
 
   if (iwlwifi_last_line_ == IwlwifiLineType::None) {
@@ -353,7 +442,7 @@ MaybeCrashReport KernelParser::ParseLogEntry(const std::string& line) {
       const std::string kFlag = "--kernel_iwlwifi_error";
       const int kWeight = util::GetKernelWarningWeight(kFlag);
       if (!testonly_send_all_ && base::RandGenerator(kWeight) != 0) {
-        return base::nullopt;
+        return std::nullopt;
       }
 
       return CrashReport(
@@ -375,7 +464,7 @@ MaybeCrashReport KernelParser::ParseLogEntry(const std::string& line) {
       const std::string kFlag = "--kernel_iwlwifi_error";
       const int kWeight = util::GetKernelWarningWeight(kFlag);
       if (!testonly_send_all_ && base::RandGenerator(kWeight) != 0) {
-        return base::nullopt;
+        return std::nullopt;
       }
 
       return CrashReport(
@@ -395,13 +484,13 @@ MaybeCrashReport KernelParser::ParseLogEntry(const std::string& line) {
     // Rate limit reporting crash_reporter failures to prevent crash loops.
     if (crash_reporter_last_crashed_.is_null() ||
         (base::TimeTicks::Now() - crash_reporter_last_crashed_) >
-            base::TimeDelta::FromHours(1)) {
+            base::Hours(1)) {
       crash_reporter_last_crashed_ = base::TimeTicks::Now();
       return CrashReport("", {std::move("--crash_reporter_crashed")});
     }
   }
 
-  return base::nullopt;
+  return std::nullopt;
 }
 
 constexpr char begin_suspend_error_stats[] =
@@ -419,7 +508,7 @@ MaybeCrashReport SuspendParser::ParseLogEntry(const std::string& line) {
   // We only want to report a fraction of suspend failures due to noise.
   if (!testonly_send_all_ &&
       base::RandGenerator(util::GetSuspendFailureWeight()) != 0) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   if (last_line_ == LineType::None &&
@@ -428,11 +517,11 @@ MaybeCrashReport SuspendParser::ParseLogEntry(const std::string& line) {
     dev_str_ = "none";
     errno_str_ = "unknown";
     step_str_ = "unknown";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   if (last_line_ != LineType::Start && last_line_ != LineType::Body) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   if (line.find(end_suspend_error_stats) != 0) {
@@ -446,7 +535,7 @@ MaybeCrashReport SuspendParser::ParseLogEntry(const std::string& line) {
     }
 
     last_line_ = LineType::Body;
-    return base::nullopt;
+    return std::nullopt;
   }
 
   uint32_t hash = StringHash((dev_str_ + errno_str_ + step_str_).c_str());
@@ -456,22 +545,28 @@ MaybeCrashReport SuspendParser::ParseLogEntry(const std::string& line) {
   return CrashReport(std::move(text), {"--suspend_failure"});
 }
 
-TerminaParser::TerminaParser(scoped_refptr<dbus::Bus> dbus) : dbus_(dbus) {}
+TerminaParser::TerminaParser(
+    scoped_refptr<dbus::Bus> dbus,
+    std::unique_ptr<MetricsLibraryInterface> metrics_lib,
+    bool testonly_send_all)
+    : dbus_(dbus),
+      metrics_lib_(std::move(metrics_lib)),
+      testonly_send_all_(testonly_send_all) {}
 
 constexpr LazyRE2 btrfs_extent_corruption = {
     R"(BTRFS warning \(device .*\): csum failed root [[:digit:]]+ )"
     R"(ino [[:digit:]]+ off [[:digit:]]+ csum 0x[[:xdigit:]]+ expected )"
     R"(csum 0x[[:xdigit:]]+ mirror [[:digit:]]+)"};
 constexpr LazyRE2 btrfs_tree_node_corruption = {
-    R"(BTRFS warning \(device .*\): .* checksum verify failed on )"
-    R"([[:digit:]]+ wanted (0x)?[[:xdigit:]]+ found (0x)?[[:xdigit:]]+ level )"
+    R"(BTRFS warning \(device .*\): .*checksum verify failed on )"
+    R"(.* wanted (0x)?[[:xdigit:]]+ found (0x)?[[:xdigit:]]+ level )"
     R"([[:digit:]]+)"};
 
-MaybeCrashReport TerminaParser::ParseLogEntry(int cid,
-                                              const std::string& line) {
+MaybeCrashReport TerminaParser::ParseLogEntryForBtrfs(int cid,
+                                                      const std::string& line) {
   if (!RE2::PartialMatch(line, *btrfs_extent_corruption) &&
       !RE2::PartialMatch(line, *btrfs_tree_node_corruption)) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   anomaly_detector::GuestFileCorruptionSignal message;
@@ -488,26 +583,88 @@ MaybeCrashReport TerminaParser::ParseLogEntry(int cid,
 
   // Don't send a crash report here, because the gap between when the
   // corruption occurs and when we detect it can be arbitrarily large.
-  return base::nullopt;
+  return std::nullopt;
+}
+
+constexpr LazyRE2 crostini_oom_event = {
+    R"(Out of memory: Killed process [[:digit:]]+ \((.*)\) total-vm:)"
+    R"([[:digit:]]+kB, anon-rss:[[:digit:]]+kB, file-rss:[[:digit:]]+kB, )"
+    R"(shmem-rss:[[:digit:]]+kB, UID:[[:digit:]]+ pgtables:[[:digit:]]+kB )"
+    R"(oom_score_adj:[[:digit:]]+)"};
+constexpr char kUMAOomEvent[] = "Crostini.OomEvent";
+
+MaybeCrashReport TerminaParser::ParseLogEntryForOom(int cid,
+                                                    const std::string& line) {
+  if (!testonly_send_all_ &&
+      base::RandGenerator(util::GetOomEventWeight()) != 0) {
+    // We only want to report a limited number of oom events due to noise.
+    return std::nullopt;
+  }
+  std::string app_name;
+  if (!RE2::PartialMatch(line, *crostini_oom_event, &app_name)) {
+    return std::nullopt;
+  }
+
+  anomaly_detector::GuestOomEventSignal message;
+  message.set_vsock_cid(cid);
+  dbus::Signal signal(anomaly_detector::kAnomalyEventServiceInterface,
+                      anomaly_detector::kAnomalyGuestOomEventSignalName);
+
+  dbus::MessageWriter writer(&signal);
+  writer.AppendProtoAsArrayOfBytes(message);
+
+  dbus::ExportedObject* exported_object = dbus_->GetExportedObject(
+      dbus::ObjectPath(anomaly_detector::kAnomalyEventServicePath));
+  exported_object->SendSignal(&signal);
+
+  if (!metrics_lib_->SendCrosEventToUMA(kUMAOomEvent)) {
+    LOG(WARNING) << "Could not send OomEvent metric to UMA";
+  }
+
+  // replace any non-alphanumeric characters with underscores for signature
+  RE2::GlobalReplace(&app_name, "[^a-zA-Z0-9_-]", "_");
+  std::string text = "guest-oom-event-" + app_name + "\n" + line + '\n';
+
+  return CrashReport(std::move(text), {std::move("--guest_oom_event")});
 }
 
 constexpr LazyRE2 cryptohome_mount_failure = {
     R"(Failed to mount cryptohome, error = (\d+))"};
 
+constexpr LazyRE2 cryptohome_recovery_failure = {
+    R"(Cryptohome Recovery (.+) failure, error = (.*))"};
+
+CryptohomeParser::CryptohomeParser(bool testonly_send_all)
+    : testonly_send_all_(testonly_send_all) {}
+
 MaybeCrashReport CryptohomeParser::ParseLogEntry(const std::string& line) {
   uint64_t error_code;
-  if (!RE2::PartialMatch(line, *cryptohome_mount_failure, &error_code)) {
-    return base::nullopt;
+  if (RE2::PartialMatch(line, *cryptohome_mount_failure, &error_code)) {
+    // Avoid creating crash reports if the user doesn't exist or if cryptohome
+    // can't authenticate the user's password.
+    if (error_code == cryptohome::MOUNT_ERROR_USER_DOES_NOT_EXIST ||
+        error_code == cryptohome::MOUNT_ERROR_KEY_FAILURE)
+      return std::nullopt;
+
+    return CrashReport("", {std::move("--mount_failure"),
+                            std::move("--mount_device=cryptohome")});
   }
 
-  // Avoid creating crash reports if the user doesn't exist or if cryptohome
-  // can't authenticate the user's password.
-  if (error_code == cryptohome::MOUNT_ERROR_USER_DOES_NOT_EXIST ||
-      error_code == cryptohome::MOUNT_ERROR_KEY_FAILURE)
-    return base::nullopt;
+  std::string recovery_error_source, recovery_error;
+  if (RE2::PartialMatch(line, *cryptohome_recovery_failure,
+                        &recovery_error_source, &recovery_error)) {
+    if (!testonly_send_all_ &&
+        base::RandGenerator(util::GetRecoveryFailureWeight()) != 0) {
+      return std::nullopt;
+    }
+    std::string signature = base::StringPrintf("%s-%s-recovery-failure\n",
+                                               recovery_error_source.c_str(),
+                                               recovery_error.c_str());
+    return CrashReport(signature, {std::move("--cryptohome_recovery_failure")});
+  }
 
-  return CrashReport("", {std::move("--mount_failure"),
-                          std::move("--mount_device=cryptohome")});
+  // The line didn't match anything.
+  return std::nullopt;
 }
 
 constexpr LazyRE2 auth_failure = {
@@ -520,15 +677,163 @@ const std::unordered_set<uint32_t> auth_failure_blocklist = {
 MaybeCrashReport TcsdParser::ParseLogEntry(const std::string& line) {
   uint32_t hash;
   if (!RE2::PartialMatch(line, *auth_failure, RE2::Hex(&hash))) {
-    return base::nullopt;
+    return std::nullopt;
   }
   if (auth_failure_blocklist.count(hash)) {
     LOG(INFO) << "Ignoring auth_failure 0x" << std::hex << hash;
-    return base::nullopt;
+    return std::nullopt;
   }
   std::string text = base::StringPrintf("%08x-auth failure\n", hash);
 
   return CrashReport(std::move(text), {std::move("--auth_failure")});
+}
+
+HermesParser::HermesParser(bool testonly_send_all)
+    : testonly_send_all_(testonly_send_all) {}
+
+constexpr LazyRE2 esim_installation_failure = {
+    R"(Domain=dbus, Code=org.chromium.Hermes.Error.(\S+), Message=(.*))"};
+
+MaybeCrashReport HermesParser::ParseLogEntry(const std::string& line) {
+  std::string error_code;
+  std::string error_message;
+
+  int weight = 1;
+  if (!RE2::PartialMatch(line, *esim_installation_failure, &error_code,
+                         &error_message)) {
+    return std::nullopt;
+  }
+
+  if (error_code != "SendHttpsFailure" && error_code != "Unknown" &&
+      error_code != "ModemMessageProcessing" &&
+      error_code != "UnexpectedModemManagerState") {
+    return std::nullopt;
+  }
+
+  if (error_code == "SendHttpsFailure") {
+    weight = 5;
+  }
+
+  if (!testonly_send_all_ && base::RandGenerator(weight) != 0) {
+    return std::nullopt;
+  }
+
+  uint32_t hash = StringHash(error_message.c_str());
+  if (WasAlreadySeen(hash)) {
+    return std::nullopt;
+  }
+
+  std::string text = base::StringPrintf("%08x-%s\n", hash, error_code.c_str());
+  const std::string kFlag = "--hermes_failure";
+  return CrashReport(std::move(text),
+                     {std::move("--hermes_failure"),
+                      base::StringPrintf("--weight=%d", weight)});
+}
+
+ShillParser::ShillParser(bool testonly_send_all)
+    : testonly_send_all_(testonly_send_all) {}
+
+constexpr LazyRE2 mm_failure = {
+    R"(dbus.*org.freedesktop.ModemManager1.Error.(\S+), (.*))"};
+// logged by shill/manager.cc if cellular fails to enable
+constexpr LazyRE2 enable_failure = {
+    R"(dbus.*flimflam.Error.(\S+), Message=Enable cellular failed: (.*))"};
+// logged by shill/cellular.cc after a connection attempt fails
+constexpr LazyRE2 connect_failure = {
+    R"((\S+) could not connect \(trigger=(\S+)\) to mccmnc=(\S+): (.*))"};
+constexpr LazyRE2 sim_not_inserted_failure = {
+    R"(dbus.*org.freedesktop.ModemManager1.Error.Core.WrongState.*)"};
+// logged by shill/cellular.cc after an entitlement check fails
+constexpr LazyRE2 entitlement_check_failure = {R"(Entitlement check failed:)"};
+
+MaybeCrashReport ShillParser::ParseLogEntry(const std::string& line) {
+  std::string error_code;
+  std::string error_message;
+  std::string carrier;
+  std::string modem;
+  std::string trigger_mode;
+  int weight = 1;
+  if (RE2::PartialMatch(line, *connect_failure, &modem, &trigger_mode, &carrier,
+                        &error_message)) {
+    error_code = modem + "-" + carrier + "-" + trigger_mode + "-connect";
+    weight = 5;
+  } else if (RE2::PartialMatch(line, *enable_failure, &error_code,
+                               &error_message)) {
+    error_code = error_code + "-enable";
+    weight = 200;
+  } else if (RE2::PartialMatch(line, *mm_failure, &error_code,
+                               &error_message)) {
+    weight = 50;
+  } else if (RE2::PartialMatch(line, *entitlement_check_failure)) {
+    error_code = "EntitlementCheckFailure";
+    // No weight. Send all.
+  }
+  if (error_code.empty()) {
+    return std::nullopt;
+  }
+  if (RE2::PartialMatch(line, *sim_not_inserted_failure)) {
+    return std::nullopt;
+  }
+
+  // Writing an integration test for cellular anomalies would require hacks in
+  // production code to deterministically trigger an error path, and currently,
+  // most anomalies in the field occur due to network, modem, or ChromeOS quirks
+  // that need fixing. Such tests would also need to run in a separate cellular
+  // pool. Given the complexity of writing and maintaining a cellular
+  // integration test for anomaly detector, we prefer to rely on unit tests for
+  // current cellular anomalies. ref: b/243522072
+
+  if (!testonly_send_all_ && base::RandGenerator(weight) != 0) {
+    return std::nullopt;
+  }
+
+  uint32_t hash = StringHash((error_code + error_message).c_str());
+  if (WasAlreadySeen(hash)) {
+    return std::nullopt;
+  }
+
+  std::string text = base::StringPrintf("%08x-%s\n", hash, error_code.c_str());
+  return CrashReport(
+      std::move(text),
+      {"--modem_failure", base::StringPrintf("--weight=%d", weight)});
+}
+
+ModemfwdParser::ModemfwdParser(bool testonly_send_all)
+    : testonly_send_all_(testonly_send_all) {}
+// logged by modemfwd when an Error is logged.
+constexpr LazyRE2 modemfwd_failure = {
+    R"(Domain=modemfwd, Code=(\S+), Message=(.*))"};
+
+MaybeCrashReport ModemfwdParser::ParseLogEntry(const std::string& line) {
+  std::string error_code;
+  std::string error_message;
+  int weight = 1;
+  if (RE2::PartialMatch(line, *modemfwd_failure, &error_code, &error_message)) {
+    // Avoid creating crash reports for common errors that occur on non
+    // cellular SKUs.
+    if (error_code == modemfwd::kErrorResultInitFailureNonLteSku)
+      return std::nullopt;
+    weight = 50;
+  } else {
+    return std::nullopt;
+  }
+  if (error_code.empty()) {
+    return std::nullopt;
+  }
+
+  if (!testonly_send_all_ && base::RandGenerator(weight) != 0) {
+    return std::nullopt;
+  }
+
+  uint32_t hash = StringHash((error_code + error_message).c_str());
+  if (WasAlreadySeen(hash)) {
+    return std::nullopt;
+  }
+
+  std::string text = base::StringPrintf("%08x-%s\n", hash, error_code.c_str());
+  return CrashReport(
+      std::move(text),
+      {"--modemfwd_failure", base::StringPrintf("--weight=%d", weight)});
 }
 
 }  // namespace anomaly

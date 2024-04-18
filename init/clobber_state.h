@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,8 +7,10 @@
 
 #include <sys/stat.h>
 
+#include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -16,9 +18,14 @@
 #include <base/files/file_path.h>
 #include <base/time/time.h>
 #include <brillo/blkdev_utils/lvm.h>
+#include <brillo/process/process.h>
+#include <libcrossystem/crossystem.h>
+#include <libdlcservice/utils_interface.h>
 
 #include "init/clobber_ui.h"
-#include "init/crossystem.h"
+
+constexpr char kThinpool[] = "thinpool";
+constexpr char kUnencrypted[] = "unencrypted";
 
 class ClobberState {
  public:
@@ -29,7 +36,7 @@ class ClobberState {
     bool fast_wipe = false;
     // Don't delete the non-active set of kernel/root partitions.
     bool keepimg = false;
-    // Preserve some files and VPD keys.
+    // Preserve some files.
     bool safe_wipe = false;
     // Preserve rollback data.
     bool rollback_wipe = false;
@@ -37,11 +44,15 @@ class ClobberState {
     // Assume that the reason string is already sanitized by session
     // manager (non-alphanumeric characters replaced with '_').
     std::string reason = "";
-    // Setup the stateful partition using a thin logical volume.
-    bool setup_lvm = false;
     // Run in the context of an RMA flow. Additionally save the RMA
     // state file.
     bool rma_wipe = false;
+    // Preserve the flag file used to skip some OOBE screens during the Chromad
+    // to cloud migration.
+    bool ad_migration_wipe = false;
+    // Preserve LVM stateful without wiping entire stateful partition.
+    // (Only supported/enforced on LVM stateful devices)
+    bool preserve_lvs = false;
   };
 
   // The index of each partition within the gpt partition table.
@@ -68,36 +79,57 @@ class ClobberState {
     int active_kernel_partition = -1;
   };
 
+  // TODO(b/302427976): Add some kind of pairing/grouping to infos, so they can
+  // be batched. This will come in handy for DLCs/logical volumes that want to
+  // be atomically operated on.
+  struct PreserveLogicalVolumesWipeInfo {
+    std::string lv_name;
+    bool preserve = false;
+    bool zero = false;
+
+    struct DigestInfo {
+      int64_t bytes = 0;
+      std::vector<uint8_t> digest;
+    };
+    std::optional<DigestInfo> digest_info;
+
+    struct Hash {
+      auto operator()(const PreserveLogicalVolumesWipeInfo& info) const {
+        // Use the logical volume name for uniqueness.
+        return std::hash<std::string>{}(info.lv_name);
+      }
+    };
+
+    bool operator==(const PreserveLogicalVolumesWipeInfo& o) const {
+      // Again, use the logical volume name for uniqueness.
+      return this->lv_name == o.lv_name;
+    }
+  };
+  using PreserveLogicalVolumesWipeInfos =
+      std::unordered_set<PreserveLogicalVolumesWipeInfo,
+                         PreserveLogicalVolumesWipeInfo::Hash>;
+
   // Extracts ClobberState's arguments from argv.
   static Arguments ParseArgv(int argc, char const* const argv[]);
 
-  // Attempts to increment the contents of |path| by 1. If the contents cannot
+  // Attempts to increment the contents of `path` by 1. If the contents cannot
   // be read, or if the contents are not an integer, writes '1' to the file.
   static bool IncrementFileCounter(const base::FilePath& path);
 
-  // Attempts to write the last powerwash time to |path|.
-  // The |time| is that when the device have powerwash completed.
+  // Attempts to write the last powerwash time to `path`.
+  // The `time` is that when the device have powerwash completed.
   static bool WriteLastPowerwashTime(const base::FilePath& path,
                                      const base::Time& time);
 
-  // Given a list of files to preserve (relative to |preserved_files_root|),
-  // creates a tar file containing those files at |tar_file_path|.
+  // Given a list of files to preserve (relative to `preserved_files_root`),
+  // creates a tar file containing those files at `tar_file_path`.
   // The directory structure of the preserved files is preserved.
   static int PreserveFiles(const base::FilePath& preserved_files_root,
                            const std::vector<base::FilePath>& preserved_files,
                            const base::FilePath& tar_file_path);
 
-  // Splits a device path, for example /dev/mmcblk0p1, /dev/sda3,
-  // /dev/ubiblock9_0 into the base device and partition numbers,
-  // which would be respectively /dev/mmcblk0p, 1; /dev/sda, 3; and
-  // /dev/ubiblock, 9.
-  // Returns true on success.
-  static bool GetDevicePathComponents(const base::FilePath& device,
-                                      std::string* base_device_out,
-                                      int* partition_out);
-
   // Determine the devices to be wiped and their properties, and populate
-  // |wipe_info_out| with the results. Returns true if successful.
+  // `wipe_info_out` with the results. Returns true if successful.
   static bool GetDevicesToWipe(const base::FilePath& root_disk,
                                const base::FilePath& root_device,
                                const PartitionNumbers& partitions,
@@ -106,49 +138,46 @@ class ClobberState {
   static bool WipeMTDDevice(const base::FilePath& device_path,
                             const PartitionNumbers& partitions);
 
-  // Wipe |device_path|, showing a progress UI using |ui|.
+  // Wipe `device_path`, showing a progress UI using `ui`.
   //
-  // If |fast| is true, wipe |device_path| using a less-thorough but much faster
+  // If `fast` is true, wipe `device_path` using a less-thorough but much faster
   // wipe. Not all blocks are guaranteed to be overwritten, so this should be
   // reserved for situations when there is no concern of data leakage.
-  // A progress indicator will not be displayed if |fast| mode is enabled.
+  // A progress indicator will not be displayed if `fast` mode is enabled.
   static bool WipeBlockDevice(const base::FilePath& device_path,
                               ClobberUi* ui,
-                              bool fast);
+                              bool fast,
+                              bool discard);
 
-  // Reads successful and priority metadata from partition numbered
-  // |partition_number| on |disk|, storing the results in |successful_out| and
-  // |priority_out|, respectively. Returns true on success.
-  //
-  // successful is a 1 bit value indicating if a kernel partition
-  // has been successfully booted, while priority is a 4 bit value
-  // indicating what order the kernel partitions should be booted in, 15 being
-  // the highest, 1 the lowest, and 0 meaning not bootable.
-  // More information on partition metadata is available at.
-  // https://www.chromium.org/chromium-os/chromiumos-design-docs/disk-format
-  static bool ReadPartitionMetadata(const base::FilePath& disk,
-                                    int partition_number,
-                                    bool* successful_out,
-                                    int* priority_out);
+  // Removes well-known keys from the VPD.
+  static void RemoveVpdKeys();
 
-  // Searches |drive_name| for the partition labeled |partition_label| and
-  // returns its partition number if exactly one partition was found. Returns
-  // -1 on error.
-  static int GetPartitionNumber(const base::FilePath& drive_name,
-                                const std::string& partition_label);
+  void CreateUnencryptedStatefulLV(const brillo::VolumeGroup& vg,
+                                   const brillo::Thinpool& thinpool,
+                                   uint64_t lv_size);
 
-  // Make sure the kernel partition numbered |kernel_partition| is still
-  // bootable after being wiped. The system may be in AU state that active
-  // kernel does not have "successful" bit set to 1, but the kernel has been
-  // successfully booted.
-  static void EnsureKernelIsBootable(const base::FilePath root_disk,
-                                     int kernel_partition);
+  std::optional<uint64_t> GetPartitionSize(const base::FilePath& base_device);
 
+  // Creates the necessary LVM devices specifically for preserving logical
+  // volumes option during clobber.
+  void CreateLogicalVolumeStackForPreserved();
+
+  // Creates the necessary LVM devices.
   void CreateLogicalVolumeStack();
+
+  // Removes the necessary LVM devices.
   void RemoveLogicalVolumeStack();
 
+  // Safe wipe of logical volumes.
+  // Returns false if there are any failures during the safe wiping
+  // (zeroing/preserving/removing) of individual logical volumes.
+  bool PreserveLogicalVolumesWipe(const PreserveLogicalVolumesWipeInfos& infos);
+  bool ProcessInfo(const brillo::VolumeGroup& vg,
+                   const PreserveLogicalVolumesWipeInfo& info,
+                   std::unique_ptr<dlcservice::UtilsInterface> utils);
+
   ClobberState(const Arguments& args,
-               std::unique_ptr<CrosSystem> cros_system,
+               std::unique_ptr<crossystem::Crossystem> cros_system,
                std::unique_ptr<ClobberUi> ui,
                std::unique_ptr<brillo::LogicalVolumeManager> lvm);
 
@@ -169,9 +198,8 @@ class ClobberState {
   // contents (unlike on an SSD).
   void ShredRotationalStatefulFiles();
 
-  // Wipe encryption key information from the stateful partition for supported
-  // devices.
-  bool WipeKeysets();
+  // Wipe key information from the stateful partition for supported devices.
+  bool WipeKeyMaterial();
 
   // Forces a delay, writing progress to the TTY.  This is used to prevent
   // developer mode transitions from happening too quickly.
@@ -181,15 +209,19 @@ class ClobberState {
   // stateful_.
   std::vector<base::FilePath> GetPreservedFilesList();
 
-  // Determines if the given device (under |dev_|) is backed by a rotational
+  // Determines if the given device (under `dev_`) is backed by a rotational
   // hard drive.
   // Returns true if it can conclusively determine it's rotational,
   // otherwise false.
   bool IsRotational(const base::FilePath& device_path);
 
+  // Copies encrypted stateful files to the unencrypted preserve directory.
+  void PreserveEncryptedFiles();
+
   void SetArgsForTest(const Arguments& args);
   Arguments GetArgsForTest();
   void SetStatefulForTest(const base::FilePath& stateful_path);
+  void SetRootPathForTest(const base::FilePath& root_path);
   void SetDevForTest(const base::FilePath& dev_path);
   void SetSysForTest(const base::FilePath& sys_path);
 
@@ -223,22 +255,47 @@ class ClobberState {
   virtual std::string GenerateRandomVolumeGroupName();
 
  private:
+  FRIEND_TEST(DlcPreserveLogicalVolumesWipeArgsTest, MissingPowerwashFile);
+  FRIEND_TEST(DlcPreserveLogicalVolumesWipeArgsTest, EmptyPowerwashFile);
+  FRIEND_TEST(DlcPreserveLogicalVolumesWipeArgsTest, MismatchingPowerwashFile);
+  FRIEND_TEST(DlcPreserveLogicalVolumesWipeArgsTest, SingleDlcPowerwashFile);
+  FRIEND_TEST(DlcPreserveLogicalVolumesWipeArgsTest, MixedDlcPowerwashFile);
+
   bool ClearBiometricSensorEntropy();
 
   // Perform media-dependent wipe of the device based on if the device is
   // an MTD device or not.
-  // |device_path| should be the path under /dev/, e.g. /dev/sda3, /dev/ubi5_0.
-  bool WipeDevice(const base::FilePath& device_name);
+  // `device_path` should be the path under /dev/, e.g. /dev/sda3, /dev/ubi5_0.
+  // `discard` to discard the blocks after wiping.
+  virtual bool WipeDevice(const base::FilePath& device_name,
+                          bool discard = false);
 
-  // Makes a new filesystem on |wipe_info_.stateful_device|.
-  int CreateStatefulFileSystem();
+  // Makes a new filesystem on `stateful_filesystem_device`.
+  int CreateStatefulFileSystem(const std::string& stateful_filesystem_device);
 
   void Reboot();
 
+  // Helper to wrap calls removing logical volumes and device level wipes.
+  void ResetStatefulPartition();
+
+  // Returns the argument list for preserved wipe of LVM specific to DLCs.
+  // Takes in as argument:
+  //   - the path to the DLC powerwash safe file
+  //   - the path to the DLC manifest root
+  PreserveLogicalVolumesWipeInfos DlcPreserveLogicalVolumesWipeArgs(
+      const base::FilePath& ps_file_path,
+      const base::FilePath& dlc_manifest_root_path,
+      dlcservice::PartitionSlot active_slot,
+      std::unique_ptr<dlcservice::UtilsInterface> utils);
+
+  // Returns the argument list for preserved wipe of LVM.
+  PreserveLogicalVolumesWipeInfos PreserveLogicalVolumesWipeArgs();
+
   Arguments args_;
-  std::unique_ptr<CrosSystem> cros_system_;
+  std::unique_ptr<crossystem::Crossystem> cros_system_;
   std::unique_ptr<ClobberUi> ui_;
   base::FilePath stateful_;
+  base::FilePath root_path_;
   base::FilePath dev_;
   base::FilePath sys_;
   PartitionNumbers partitions_;
@@ -246,6 +303,9 @@ class ClobberState {
   DeviceWipeInfo wipe_info_;
   base::TimeTicks wipe_start_time_;
   std::unique_ptr<brillo::LogicalVolumeManager> lvm_;
+
+  // Must be last in member variable list.
+  base::WeakPtrFactory<ClobberState> weak_ptr_factory_;
 };
 
 #endif  // INIT_CLOBBER_STATE_H_

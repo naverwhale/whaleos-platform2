@@ -1,22 +1,22 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/util/task_runner_context.h"
 
-#include <functional>
 #include <memory>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/check.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/scoped_refptr.h>
-#include <base/sequenced_task_runner.h>
 #include <base/synchronization/waitable_event.h>
+#include <base/task/sequenced_task_runner.h>
+#include <base/task/thread_pool.h>
 #include <base/test/task_environment.h>
-#include <base/threading/sequenced_task_runner_handle.h>
+#include <base/time/time.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -28,7 +28,8 @@ namespace {
 
 class TaskRunner : public ::testing::Test {
  protected:
-  base::test::TaskEnvironment task_environment_;
+  base::test::TaskEnvironment task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 };
 
 // This is the simplest test - runs one action only on a sequenced task runner.
@@ -55,7 +56,7 @@ TEST_F(TaskRunner, SingleAction) {
             run_loop->Quit();
           },
           &run_loop, &result),
-      base::SequencedTaskRunnerHandle::Get());
+      base::SequencedTaskRunner::GetCurrentDefault());
   run_loop.Run();
   EXPECT_TRUE(result);
 }
@@ -97,7 +98,7 @@ TEST_F(TaskRunner, SeriesOfActions) {
             run_loop->Quit();
           },
           &run_loop, &result),
-      base::SequencedTaskRunnerHandle::Get());
+      base::SequencedTaskRunner::GetCurrentDefault());
   run_loop.Run();
   EXPECT_EQ(result, 7u);
 }
@@ -112,7 +113,7 @@ TEST_F(TaskRunner, SeriesOfDelays) {
         : TaskRunnerContext<uint32_t>(std::move(callback),
                                       std::move(task_runner)),
           init_value_(init_value),
-          delay_(base::TimeDelta::FromSecondsD(0.1)) {}
+          delay_(base::Seconds(0.1)) {}
 
    private:
     void Halve(uint32_t value, uint32_t log) {
@@ -121,7 +122,7 @@ TEST_F(TaskRunner, SeriesOfDelays) {
         Response(log);
         return;
       }
-      delay_ += base::TimeDelta::FromSecondsD(0.1);
+      delay_ += base::Seconds(0.1);
       ScheduleAfter(delay_, &SeriesOfDelaysContext::Halve,
                     base::Unretained(this), value / 2, log + 1);
     }
@@ -144,7 +145,8 @@ TEST_F(TaskRunner, SeriesOfDelays) {
             run_loop->Quit();
           },
           &run_loop, &result),
-      base::SequencedTaskRunnerHandle::Get());
+      base::SequencedTaskRunner::GetCurrentDefault());
+  task_environment_.FastForwardUntilNoTasksRemain();
   run_loop.Run();
   EXPECT_EQ(result, 7u);
 }
@@ -160,7 +162,7 @@ TEST_F(TaskRunner, SeriesOfAsyncs) {
         : TaskRunnerContext<uint32_t>(std::move(callback),
                                       std::move(task_runner)),
           init_value_(init_value),
-          delay_(base::TimeDelta::FromSecondsD(0.1)) {}
+          delay_(base::Seconds(0.1)) {}
 
    private:
     void Halve(uint32_t value, uint32_t log) {
@@ -171,7 +173,7 @@ TEST_F(TaskRunner, SeriesOfAsyncs) {
       }
       // Perform a calculation on a generic thread pool with delay,
       // then get back to the sequence by calling Schedule from there.
-      delay_ += base::TimeDelta::FromSecondsD(0.1);
+      delay_ += base::Seconds(0.1);
       base::ThreadPool::PostDelayedTask(
           FROM_HERE,
           base::BindOnce(
@@ -205,8 +207,8 @@ TEST_F(TaskRunner, SeriesOfAsyncs) {
             run_loop->Quit();
           },
           &run_loop, &result),
-      base::SequencedTaskRunnerHandle::Get());
-
+      base::SequencedTaskRunner::GetCurrentDefault());
+  task_environment_.FastForwardUntilNoTasksRemain();
   run_loop.Run();
   EXPECT_EQ(result, 7u);
 }
@@ -225,7 +227,7 @@ TEST_F(TaskRunner, TreeOfActions) {
 
    protected:
     virtual ~Summator() {
-      DCHECK(!callback_.is_null());
+      CHECK(!callback_.is_null());
       std::move(callback_).Run(result_);
     }
 
@@ -285,7 +287,7 @@ TEST_F(TaskRunner, TreeOfActions) {
   for (uint32_t n = 0; n < expected_fibo_results.size(); ++n) {
     uint32_t* const result = &actual_fibo_results[n];
     *result = 0;
-    base::SequencedTaskRunnerHandle::Get()->PostTask(
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(
                        [](size_t* count, base::RunLoop* run_loop, uint32_t n,
                           uint32_t* result) {
@@ -300,7 +302,7 @@ TEST_F(TaskRunner, TreeOfActions) {
                                    }
                                  },
                                  count, run_loop, result),
-                             base::SequencedTaskRunnerHandle::Get());
+                             base::SequencedTaskRunner::GetCurrentDefault());
                        },
                        &count, &run_loop, n, result));
   }
@@ -355,7 +357,7 @@ TEST_F(TaskRunner, ActionsWithStatus) {
             run_loop->Quit();
           },
           &run_loop, &result),
-      base::SequencedTaskRunnerHandle::Get());
+      base::SequencedTaskRunner::GetCurrentDefault());
   run_loop.Run();
   EXPECT_EQ(result, Status(error::CANCELLED, "Cancelled"));
 }
@@ -425,7 +427,7 @@ TEST_F(TaskRunner, ActionsWithStatusOrPtr) {
             run_loop->Quit();
           },
           &run_loop, &result),
-      base::SequencedTaskRunnerHandle::Get());
+      base::SequencedTaskRunner::GetCurrentDefault());
   run_loop.Run();
   EXPECT_TRUE(result.ok()) << result.status();
   EXPECT_EQ(result.ValueOrDie()->value(), kI);

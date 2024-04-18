@@ -1,33 +1,48 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/crash_collector_test.h"
 
+#include <dirent.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <memory>
+#include <optional>
 #include <utility>
 
 #include <base/check.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/memory/ref_counted.h>
 #include <base/memory/scoped_refptr.h>
+#include <base/strings/strcat.h>
+#include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/task/single_thread_task_executor.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/task/thread_pool.h>
+#include <base/test/bind.h>
 #include <base/test/simple_test_clock.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/test/task_environment.h>
+#include <base/threading/platform_thread.h>
+#include <base/threading/simple_thread.h>
+#include <base/time/time.h>
 #include <brillo/syslog_logging.h>
 #include <dbus/object_path.h>
 #include <dbus/message.h>
 #include <dbus/mock_bus.h>
 #include <dbus/mock_object_proxy.h>
 #include <gtest/gtest.h>
+#include <metrics/metrics_library.h>
 #include <metrics/metrics_library_mock.h>
 #include <policy/mock_device_policy.h>
 
@@ -39,8 +54,12 @@ using base::FilePath;
 using base::StringPrintf;
 using brillo::FindLog;
 using ::testing::_;
+using ::testing::Eq;
+using ::testing::HasSubstr;
 using ::testing::Invoke;
 using ::testing::IsEmpty;
+using ::testing::Not;
+using ::testing::Optional;
 using ::testing::Return;
 
 // The QEMU emulator we use to run unit tests on simulated ARM boards does not
@@ -59,18 +78,36 @@ namespace {
 // Sept 1, 2020, but basically arbitrary.
 constexpr int64_t kFakeNow = 1598929274543LL;
 
+#if USE_ARCPP
+constexpr char kARCStatus[] = "Built with ARC++";
+#elif USE_ARCVM
+constexpr char kARCStatus[] = "Built with ARCVM";
+#else
+constexpr char kARCStatus[] = "Not built with ARC";
+#endif
+
 }  // namespace
 
-CrashCollectorMock::CrashCollectorMock() : CrashCollector("mock") {}
+CrashCollectorMock::CrashCollectorMock()
+    : CrashCollector(
+          "mock",
+          base::MakeRefCounted<
+              base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+              std::make_unique<MetricsLibraryMock>())) {}
 CrashCollectorMock::CrashCollectorMock(
     CrashDirectorySelectionMethod crash_directory_selection_method,
     CrashSendingMode crash_sending_mode)
     : CrashCollector(
-          "mock", crash_directory_selection_method, crash_sending_mode) {}
+          "mock",
+          crash_directory_selection_method,
+          crash_sending_mode,
+          base::MakeRefCounted<
+              base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>(
+              std::make_unique<MetricsLibraryMock>())) {}
 
 class CrashCollectorTest : public ::testing::Test {
  public:
-  void SetUp() {
+  void SetUp() override {
     EXPECT_CALL(collector_, SetUpDBus()).WillRepeatedly(Return());
 
     collector_.Initialize(false);
@@ -95,6 +132,41 @@ class CrashCollectorTest : public ::testing::Test {
   FilePath test_dir_;
   base::ScopedTempDir scoped_temp_dir_;
 };
+
+TEST_F(CrashCollectorTest, ExtractEnvironmentVars_Regression) {
+  constexpr const char raw_contents[] =
+      "UPSTART_INSTANCE=\0INSTANCE=\0UPSTART_JOB=arcvm-forward-pstore\0TERM="
+      "linux\0PATH=/usr/bin:/usr/sbin:/sbin:/bin:/usr/local/sbin:/usr/local/"
+      "bin\0UPSTART_EVENTS=starting\0PWD=/"
+      "\0JOB=arcvm-pre-login-services\0SECCOMP_POLICY_PATH=/usr/share/policy/"
+      "arcvm-forward-pstore-seccomp.policy\0\0D_PRELOAD=/lib64/"
+      "libminijailpreload.so\0\0_MINIJAIL_FD=3\0";
+  std::ostringstream stream;
+  std::string contents(raw_contents, sizeof(raw_contents));
+  ExtractEnvironmentVars(contents, &stream);
+  EXPECT_EQ(stream.str(),
+            "SECCOMP_POLICY_PATH=/usr/share/policy/"
+            "arcvm-forward-pstore-seccomp.policy\n");
+}
+
+// A variation on the above regression test where SECCOMP_POLICY_PATH is set
+// after the double delimiter.
+TEST_F(CrashCollectorTest, ExtractEnvironmentVars_DoubleDelimiter) {
+  constexpr const char raw_contents[] =
+      "UPSTART_INSTANCE=\0INSTANCE=\0UPSTART_JOB=arcvm-forward-pstore\0TERM="
+      "linux\0PATH=/usr/bin:/usr/sbin:/sbin:/bin:/usr/local/sbin:/usr/local/"
+      "bin\0UPSTART_EVENTS=starting\0PWD=/"
+      "\0JOB=arcvm-pre-login-services\0\0D_PRELOAD=/lib64/"
+      "libminijailpreload.so\0\0_MINIJAIL_FD=3\0SECCOMP_POLICY_PATH=/usr/share/"
+      "policy/"
+      "arcvm-forward-pstore-seccomp.policy\0";
+  std::ostringstream stream;
+  std::string contents(raw_contents, sizeof(raw_contents));
+  ExtractEnvironmentVars(contents, &stream);
+  EXPECT_EQ(stream.str(),
+            "SECCOMP_POLICY_PATH=/usr/share/policy/"
+            "arcvm-forward-pstore-seccomp.policy\n");
+}
 
 TEST_F(CrashCollectorTest, WriteNewFile) {
   FilePath test_file = test_dir_.Append("test_new");
@@ -427,6 +499,252 @@ TEST_F(CrashCollectorTest,
   ASSERT_EQ(collector.get_in_memory_files_for_test().size(), 1);
 }
 
+struct CopyFirstNBytesTestParams {
+  std::string test_name;
+  std::string input;
+  int bytes_to_copy;
+  std::string expected_output;
+  int expected_bytes_written;
+  base::TimeDelta write_delay;
+  base::TimeDelta read_delay;
+  int write_chunks;
+};
+
+std::vector<CopyFirstNBytesTestParams> GetCopyFirstNBytesTestParams() {
+  const std::string kShortString = "Hello World And Everything Else";
+  constexpr int kLongStringLen = 40 * 1024 * 1024;
+  std::string long_string;
+  long_string.reserve(kLongStringLen);
+
+  // Generate a string without a repeating pattern.
+  while (long_string.size() < kLongStringLen) {
+    base::StrAppend(&long_string, {base::NumberToString(long_string.size())});
+  }
+  long_string = long_string.substr(0, kLongStringLen);
+
+  std::vector<CopyFirstNBytesTestParams> results;
+  enum StrLength { kShort, kLong };
+  for (StrLength len : {kShort, kLong}) {
+    std::string prefix = (len == kShort ? "Short" : "Long");
+    std::string input = (len == kShort ? kShortString : long_string);
+    int input_length = static_cast<int>(input.size());
+    std::string first_half_of_input = input.substr(0, input_length / 2);
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "FastComplete"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length * 2,
+        /*expected_output=*/input,
+        /*expected_bytes_written=*/input_length,
+        /*write_delay=*/base::TimeDelta(),
+        /*read_delay=*/base::TimeDelta(),
+        /*write_chunks=*/1});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "FastExactBytes"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length,
+        /*expected_output=*/input,
+        /*expected_bytes_written=*/input_length,
+        /*write_delay=*/base::TimeDelta(),
+        /*read_delay=*/base::TimeDelta(),
+        /*write_chunks=*/1});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "FastTruncated"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length / 2,
+        /*expected_output=*/first_half_of_input,
+        /*expected_bytes_written=*/input_length / 2,
+        /*write_delay=*/base::TimeDelta(),
+        /*read_delay=*/base::TimeDelta(),
+        /*write_chunks=*/1});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "WriteFirst"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length * 2,
+        /*expected_output=*/input,
+        /*expected_bytes_written=*/input_length,
+        /*write_delay=*/base::TimeDelta(),
+        /*read_delay=*/base::Milliseconds(200),
+        /*write_chunks=*/1});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "ReadFirst"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length * 2,
+        /*expected_output=*/input,
+        /*expected_bytes_written=*/input_length,
+        /*write_delay=*/base::Milliseconds(200),
+        /*read_delay=*/base::TimeDelta(),
+        /*write_chunks=*/1});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "WriteFirstTruncated"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length / 2,
+        /*expected_output=*/first_half_of_input,
+        /*expected_bytes_written=*/input_length / 2,
+        /*write_delay=*/base::TimeDelta(),
+        /*read_delay=*/base::Milliseconds(200),
+        /*write_chunks=*/1});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "ReadFirstTruncated"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length / 2,
+        /*expected_output=*/first_half_of_input,
+        /*expected_bytes_written=*/input_length / 2,
+        /*write_delay=*/base::Milliseconds(200),
+        /*read_delay=*/base::TimeDelta(),
+        /*write_chunks=*/1});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "ChunkedComplete"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length * 2,
+        /*expected_output=*/input,
+        /*expected_bytes_written=*/input_length,
+        /*write_delay=*/base::Milliseconds(200),
+        /*read_delay=*/base::TimeDelta(),
+        /*write_chunks=*/3});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "ChunkedTruncated3"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length / 2,
+        /*expected_output=*/first_half_of_input,
+        /*expected_bytes_written=*/input_length / 2,
+        /*write_delay=*/base::Milliseconds(200),
+        /*read_delay=*/base::TimeDelta(),
+        // write_chunks is 3 so that we pick up half of one chunk.
+        /*write_chunks=*/3});
+    results.push_back(CopyFirstNBytesTestParams{
+        /*test_name=*/base::StrCat({prefix, "ChunkedTruncated4"}),
+        /*input=*/input,
+        /*bytes_to_copy=*/input_length / 2,
+        /*expected_output=*/first_half_of_input,
+        /*expected_bytes_written=*/input_length / 2,
+        /*write_delay=*/base::Milliseconds(200),
+        /*read_delay=*/base::TimeDelta(),
+        // write_chunks is 4 so that we get a complete chunk and then nothing
+        // from the next chunk.
+        /*write_chunks=*/4});
+  }
+
+  results.push_back(CopyFirstNBytesTestParams{
+      /*test_name=*/"EmptyInput",
+      /*input=*/"Won't be written because of write_chunks = 0",
+      /*bytes_to_copy=*/20,
+      /*expected_output=*/"",
+      /*expected_bytes_written=*/0,
+      /*write_delay=*/base::TimeDelta(),
+      /*read_delay=*/base::TimeDelta(),
+      // write_chunks of 0 will close the write side of the pipe without writing
+      // anything to the file.
+      /*write_chunks=*/0});
+  return results;
+}
+
+class CopyFirstNBytesParameterizedTest
+    : public CrashCollectorTest,
+      public testing::WithParamInterface<CopyFirstNBytesTestParams> {
+ protected:
+  // Writes |params.input| to the given file descriptor. Run on a different
+  // thread so that we don't deadlock trying to both read and write a pipe on
+  // one thread.
+  static void WriteToFileDescriptor(CopyFirstNBytesTestParams params,
+                                    base::ScopedFD write_fd) {
+    for (int chunk_index = 0; chunk_index < params.write_chunks;
+         chunk_index++) {
+      int start = (params.input.length() * chunk_index) / params.write_chunks;
+      // end in the classic STL sense -- one past the last character in the
+      // chunk.
+      int end =
+          (params.input.length() * (chunk_index + 1)) / params.write_chunks;
+      std::string chunk = params.input.substr(start, end - start);
+      LOG(INFO) << "Writing chunk " << chunk_index << " [" << start << "-"
+                << end << ") on thread " << base::PlatformThread::CurrentId();
+      // Don't CHECK on the result. For the Truncated tests, the writes will
+      // often fail when the read side closes the file descriptor.
+      if (!base::WriteFileDescriptor(write_fd.get(), chunk.c_str())) {
+        PLOG(WARNING) << "base::WriteFileDescriptor failed for chunk "
+                      << chunk_index;
+        break;
+      }
+
+      if (chunk_index < params.write_chunks - 1) {
+        base::PlatformThread::Sleep(base::Milliseconds(200));
+      }
+    }
+  }
+
+ private:
+  // Needed for base::ThreadPool::PostDelayedTask to work. Must be in
+  // MULTIPLE_THREADS mode. Important that this is destructed after the
+  // local variable |read_fd|, so that the read side of the pipe closes and
+  // base::WriteFileDescriptor gives up before we try to join the threads.
+  base::test::TaskEnvironment task_env_;
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    CopyFirstNBytesSuite,
+    CopyFirstNBytesParameterizedTest,
+    testing::ValuesIn(GetCopyFirstNBytesTestParams()),
+    [](const ::testing::TestParamInfo<CopyFirstNBytesTestParams>& info) {
+      return info.param.test_name;
+    });
+
+TEST_P(CopyFirstNBytesParameterizedTest, CopyFirstNBytes) {
+  const FilePath kOutputPath = test_dir_.Append("output.txt");
+  CopyFirstNBytesTestParams params = GetParam();
+
+  int pipefd[2];
+  ASSERT_EQ(pipe(pipefd), 0) << strerror(errno);
+  base::ScopedFD read_fd(pipefd[0]);
+  base::ScopedFD write_fd(pipefd[1]);
+
+  // Spin off another thread to do the writing, to avoid deadlocks on writing
+  // to the pipe.
+  LOG(INFO) << "Preparing to launch write thread from thread "
+            << base::PlatformThread::CurrentId();
+  base::ThreadPool::PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&CopyFirstNBytesParameterizedTest::WriteToFileDescriptor,
+                     params, std::move(write_fd)),
+      params.write_delay);
+
+  if (params.read_delay.is_positive()) {
+    base::PlatformThread::Sleep(params.read_delay);
+  }
+
+  LOG(INFO) << "Starting read on thread " << base::PlatformThread::CurrentId();
+
+  EXPECT_THAT(collector_.CopyFirstNBytesOfFdToNewFile(
+                  read_fd.get(), kOutputPath, params.bytes_to_copy),
+              Optional(params.expected_bytes_written));
+  std::string file_contents;
+  EXPECT_TRUE(base::ReadFileToString(kOutputPath, &file_contents));
+  EXPECT_EQ(file_contents, params.expected_output);
+}
+
+TEST_F(CrashCollectorTest, CopyFirstNBytesFailsOnExistingFile) {
+  base::test::TaskEnvironment task_env;
+  const FilePath kOutputPath = test_dir_.Append("output.txt");
+  const std::string kOriginalFileContents = "Haha, already a file here!";
+  ASSERT_TRUE(base::WriteFile(kOutputPath, kOriginalFileContents));
+  int pipefd[2];
+  ASSERT_EQ(pipe(pipefd), 0) << strerror(errno);
+  base::ScopedFD read_fd(pipefd[0]);
+  base::ScopedFD write_fd(pipefd[1]);
+  const std::string kOverwriteString = "Overwrite the file!";
+  base::ThreadPool::PostTask(
+      FROM_HERE, base::BindLambdaForTesting([kOverwriteString,
+                                             write_fd = std::move(write_fd)]() {
+        base::WriteFileDescriptor(write_fd.get(), kOverwriteString);
+      }));
+
+  EXPECT_THAT(collector_.CopyFirstNBytesOfFdToNewFile(
+                  read_fd.get(), kOutputPath, kOverwriteString.size() * 2),
+              Eq(std::nullopt));
+
+  std::string file_contents;
+  EXPECT_TRUE(base::ReadFileToString(kOutputPath, &file_contents));
+  EXPECT_EQ(file_contents, kOriginalFileContents);
+}
+
 TEST_F(CrashCollectorTest, RemoveNewFileRemovesNormalFiles) {
   const FilePath kPath = test_dir_.Append("buffer.txt");
   const char kBuffer[] = "Hello, this is buffer";
@@ -555,7 +873,7 @@ TEST_F(CrashCollectorTest, StripMacAddressesBasic) {
   // Make sure that we handle the case where there's nothing before/after the
   // MAC address.
   const std::string kJustAMacOrig = "11:22:33:44:55:66";
-  const std::string kJustAMacStripped = "00:00:00:00:00:01";
+  const std::string kJustAMacStripped = "(MAC OUI=11:22:33 IFACE=1)";
   std::string just_a_mac(kJustAMacOrig);
   collector_.StripSensitiveData(&just_a_mac);
   EXPECT_EQ(kJustAMacStripped, just_a_mac);
@@ -567,27 +885,27 @@ TEST_F(CrashCollectorTest, StripMacAddressesBasic) {
   // it's OK to behave as shown here.
   const std::string kCrammedMacs1Orig = "11:22:33:44:55:66:11:22:33:44:55:66";
   const std::string kCrammedMacs1Stripped =
-      "00:00:00:00:00:01:00:00:00:00:00:01";
+      "(MAC OUI=11:22:33 IFACE=1):(MAC OUI=11:22:33 IFACE=1)";
   std::string crammed_macs_1(kCrammedMacs1Orig);
   collector_.StripSensitiveData(&crammed_macs_1);
   EXPECT_EQ(kCrammedMacs1Stripped, crammed_macs_1);
 
   const std::string kCrammedMacs2Orig = "11:22:33:44:55:6611:22:33:44:55:66";
   const std::string kCrammedMacs2Stripped =
-      "00:00:00:00:00:0100:00:00:00:00:01";
+      "(MAC OUI=11:22:33 IFACE=1)(MAC OUI=11:22:33 IFACE=1)";
   std::string crammed_macs_2(kCrammedMacs2Orig);
   collector_.StripSensitiveData(&crammed_macs_2);
   EXPECT_EQ(kCrammedMacs2Stripped, crammed_macs_2);
 
   // Test case-sensitiveness (we shouldn't be case-senstive).
   const std::string kCapsMacOrig = "AA:BB:CC:DD:EE:FF";
-  const std::string kCapsMacStripped = "00:00:00:00:00:01";
+  const std::string kCapsMacStripped = "(MAC OUI=aa:bb:cc IFACE=1)";
   std::string caps_mac(kCapsMacOrig);
   collector_.StripSensitiveData(&caps_mac);
   EXPECT_EQ(kCapsMacStripped, caps_mac);
 
   const std::string kLowerMacOrig = "aa:bb:cc:dd:ee:ff";
-  const std::string kLowerMacStripped = "00:00:00:00:00:01";
+  const std::string kLowerMacStripped = "(MAC OUI=aa:bb:cc IFACE=1)";
   std::string lower_mac(kLowerMacOrig);
   collector_.StripSensitiveData(&lower_mac);
   EXPECT_EQ(kLowerMacStripped, lower_mac);
@@ -607,11 +925,10 @@ TEST_F(CrashCollectorTest, StripMacAddressesBulk) {
   for (i = 0; i < 258; i++) {
     lotsa_macs_orig +=
         StringPrintf(" 11:11:11:11:%02X:%02x", (i & 0xff00) >> 8, i & 0x00ff);
-    lotsa_macs_stripped += StringPrintf(
-        " 00:00:00:00:%02X:%02x", ((i + 1) & 0xff00) >> 8, (i + 1) & 0x00ff);
+    lotsa_macs_stripped += StringPrintf(" (MAC OUI=11:11:11 IFACE=%d)", i + 1);
   }
   std::string lotsa_macs(lotsa_macs_orig);
-  collector_.StripMacAddresses(&lotsa_macs);
+  collector_.StripSensitiveData(&lotsa_macs);
   EXPECT_EQ(lotsa_macs_stripped, lotsa_macs);
 }
 
@@ -633,21 +950,25 @@ TEST_F(CrashCollectorTest, StripSensitiveDataSample) {
       " QCUSBNet Ethernet Device, 99:88:77:66:55:44\n"
       "<7>[111566.131728] PM: Entering mem sleep\n";
   const std::string kCrashWithMacsStripped =
-      "<6>[111567.195339] ata1.00: ACPI cmd ef/10:03:00:00:00:a0 (SET FEATURES)"
+      "<6>[111567.195339] ata1.00: ACPI cmd ef/(MAC OUI=10:03:00 IFACE=1) (SET "
+      "FEATURES)"
       " filtered out\n"
-      "<7>[108539.540144] wlan0: authenticate with 00:00:00:00:00:01 (try 1)\n"
-      "<7>[108539.554973] wlan0: associate with 00:00:00:00:00:01 (try 1)\n"
+      "<7>[108539.540144] wlan0: authenticate with (MAC OUI=11:22:33 IFACE=2) "
+      "(try 1)\n"
+      "<7>[108539.554973] wlan0: associate with (MAC OUI=11:22:33 IFACE=2) "
+      "(try 1)\n"
       "<6>[110136.587583] usb0: register 'QCUSBNet2k' at usb-0000:00:1d.7-2,"
-      " QCUSBNet Ethernet Device, 00:00:00:00:00:02\n"
-      "<7>[110964.314648] wlan0: deauthenticated from 00:00:00:00:00:01"
+      " QCUSBNet Ethernet Device, (MAC OUI=99:88:77 IFACE=3)\n"
+      "<7>[110964.314648] wlan0: deauthenticated from (MAC OUI=11:22:33 "
+      "IFACE=2)"
       " (Reason: 6)\n"
-      "<7>[110964.325057] phy0: Removed STA 00:00:00:00:00:01\n"
-      "<7>[110964.325115] phy0: Destroyed STA 00:00:00:00:00:01\n"
+      "<7>[110964.325057] phy0: Removed STA (MAC OUI=11:22:33 IFACE=2)\n"
+      "<7>[110964.325115] phy0: Destroyed STA (MAC OUI=11:22:33 IFACE=2)\n"
       "<6>[110969.219172] usb0: register 'QCUSBNet2k' at usb-0000:00:1d.7-2,"
-      " QCUSBNet Ethernet Device, 00:00:00:00:00:02\n"
+      " QCUSBNet Ethernet Device, (MAC OUI=99:88:77 IFACE=3)\n"
       "<7>[111566.131728] PM: Entering mem sleep\n";
   std::string crash_with_macs(kCrashWithMacsOrig);
-  collector_.StripMacAddresses(&crash_with_macs);
+  collector_.StripSensitiveData(&crash_with_macs);
   EXPECT_EQ(kCrashWithMacsStripped, crash_with_macs);
 }
 
@@ -663,7 +984,7 @@ TEST_F(CrashCollectorTest, StripEmailAddresses) {
       "pariatur. Excepteur sint occaecat:abuse@dev.reallylong,\n"
       "cupidatat non proident, sunt in culpa qui officia "
       "deserunt mollit anim id est laborum.";
-  collector_.StripEmailAddresses(&logs);
+  collector_.StripSensitiveData(&logs);
   EXPECT_EQ(0, logs.find("Lorem ipsum"));
   EXPECT_EQ(std::string::npos, logs.find("foo.bar"));
   EXPECT_EQ(std::string::npos, logs.find("secret"));
@@ -671,6 +992,78 @@ TEST_F(CrashCollectorTest, StripEmailAddresses) {
   EXPECT_EQ(std::string::npos, logs.find("example.com"));
   EXPECT_EQ(std::string::npos, logs.find("abuse"));
   EXPECT_EQ(std::string::npos, logs.find("dev.reallylong"));
+}
+
+TEST_F(CrashCollectorTest, StripGaiaId) {
+  std::string kCrashWithGaiaID =
+      "remove gaia_id:\"970787480432\" sample"
+      "don't remove 970787480432 sample"
+      "remove {id: 123, email: test1234} sample"
+      "don't remove id: 1234 sample"
+      "don't remove email_id: 1234";
+  std::string kCrashWithoutGaiaID =
+      "remove gaia_id:\"(GAIA: 1)\" sample"
+      "don't remove 970787480432 sample"
+      "remove {id: (GAIA: 2), email: test1234} sample"
+      "don't remove id: 1234 sample"
+      "don't remove email_id: 1234";
+  collector_.StripSensitiveData(&kCrashWithGaiaID);
+  EXPECT_EQ(kCrashWithGaiaID, kCrashWithoutGaiaID);
+}
+
+TEST_F(CrashCollectorTest, StripLocationInformation) {
+  std::string kCrashWithLocationInformation =
+      "remove Cell ID: 'AB123' sample"
+      "stay Cell: '123' sample"
+      "remove Location area code: '12Abcd3' sample"
+      "stay Location area code: '123AsDF' sample"
+      "stay code: 33 sample"
+      "remove Cell ID: '234234' sample";
+
+  std::string kCrashWithoutLocationInformation =
+      "remove Cell ID: '(CellID: 1)' sample"
+      "stay Cell: '123' sample"
+      "remove Location area code: '(LocAC: 1)' sample"
+      "stay Location area code: '123AsDF' sample"
+      "stay code: 33 sample"
+      "remove Cell ID: '(CellID: 2)' sample";
+  collector_.StripSensitiveData(&kCrashWithLocationInformation);
+  EXPECT_EQ(kCrashWithLocationInformation, kCrashWithoutLocationInformation);
+}
+
+TEST_F(CrashCollectorTest, StripIPv4Addresses) {
+  std::string logs =
+      "stay.1.2.3 remove.1.2.3.4."
+      "stay 255.255 255.255.255 255.255.259.255 255.255.255.255 remove 0.0.0.0 "
+      "stay 19.259.243.255 19.243.343.255 remove 19.143.29.255";
+  std::string redacted_log =
+      "stay.1.2.3 remove.(IPv4: 1)."
+      "stay 255.255 255.255.255 255.255.259.255 255.255.255.255 remove "
+      "(0.0.0.0/8: 2) "
+      "stay 19.259.243.255 19.243.343.255 remove (IPv4: 3)";
+  collector_.StripSensitiveData(&logs);
+  EXPECT_EQ(logs, redacted_log);
+}
+
+TEST_F(CrashCollectorTest, StripIPv6Addresses) {
+  // TODO(donnadionne): address (1::) is not currently redacted
+  // because (::) is skipped as the unspecified address.
+  std::string logs =
+      "stay:2001:0db8:0000:0000:0000:ff00:0042: "
+      "stay:0:0:0:0:0:FFFF:322.1.41.90 "
+      "remove:2001:0db8:0000:0000:0000:ff00:0042:8329 "
+      "remove:2001:0dB8:0000:0000:0000:Ff00:0042:8329 "
+      "remove:2001:db8:0:0:0:ff00:42:8329 2001:db8::ff00:42:8329 ::1 1:: "
+      "remove:0:0:0:0:0:FFFF:222.1.41.90";
+  std::string redacted_log =
+      "stay:2001:0db8:0000:0000:0000:ff00:0042: "
+      "stay:0:0:0:0:0:FFFF:3(IPv4: 1) "
+      "remove:(IPv6: 1) "
+      "remove:(IPv6: 2) "
+      "remove:(IPv6: 3) (IPv6: 4) ::1 1:: "
+      "remove:0:0:0:0:0:FFFF:(IPv4: 2)";
+  collector_.StripSensitiveData(&logs);
+  EXPECT_EQ(logs, redacted_log);
 }
 
 TEST_F(CrashCollectorTest, StripSerialNumbers) {
@@ -708,17 +1101,17 @@ TEST_F(CrashCollectorTest, StripSerialNumbers) {
       "[ 2.159587] usb 1-7: New USB device found, idVendor=2232, "
       "idProduct=1082, bcdDevice= 0.08\n"
       "[ 2.159620] usb 1-7: New USB device strings: Mfr=3, Product=1, "
-      "<redacted serial number>\n"
+      "SerialNumber=(Serial: 1)\n"
       "[ 2.159644] usb 1-7: Product: 720p HD Camera\n"
       "[ 2.159661] usb 1-7: Manufacturer: Namuga\n"
-      "[ 2.159676] usb 1-7: <redacted serial number>\n"
+      "[ 2.159676] usb 1-7: SerialNumber: (Serial: 2)\n"
       "[ 2.212541] usb 1-2.1: new high-speed USB device number 5 using "
       "xhci_hcd\n"
       "[ 2.248559] Switched to clocksource tsc\n"
       "[ 2.296473] usb 1-2.1: New USB device found, idVendor=0409, "
       "idProduct=005a, bcdDevice= 1.00\n"
       "[ 2.296506] usb 1-2.1: New USB device strings: Mfr=0, Product=0, "
-      "<redacted serial number>\n"
+      "SerialNumber=(Serial: 3)\n"
       "[ 2.297266] hub 1-2.1:1.0: USB hub found\n"
       "[ 2.297326] hub 1-2.1:1.0: 4 ports detected\n"
       "[ 2.570494] usb 1-2.1.2: new high-speed USB device number 6 using "
@@ -726,16 +1119,37 @@ TEST_F(CrashCollectorTest, StripSerialNumbers) {
       "[ 2.670246] usb 1-2.1.2: New USB device found, idVendor=13fe, "
       "idProduct=5500, bcdDevice= 1.00\n"
       "[ 2.670286] usb 1-2.1.2: New USB device strings: Mfr=1, Product=2, "
-      "<redacted serial number>\n"
+      "SerialNumber=(Serial: 4)\n"
       "[ 2.670338] usb 1-2.1.2: Product: Patriot Memory\n"
       "[ 2.670359] usb 1-2.1.2: Manufacturer:\n"
-      "[ 2.670379] usb 1-2.1.2: <redacted serial number>\n";
+      "[ 2.670379] usb 1-2.1.2: SerialNumber: (Serial: 5)\n";
   std::string crash_with_usb_serial_numbers(kCrashWithUsbSerialNumbers);
-  collector_.StripSerialNumbers(&crash_with_usb_serial_numbers);
+  collector_.StripSensitiveData(&crash_with_usb_serial_numbers);
   EXPECT_EQ(kCrashWithUsbSerialNumbersStripped, crash_with_usb_serial_numbers);
 }
 
-TEST_F(CrashCollectorTest, GetCrashDirectoryInfo) {
+TEST_F(CrashCollectorTest, StripRecoveryId) {
+  const std::string kCrashWithRecoveryId =
+      "2022-10-13T07:35:34.518810Z INFO cryptohomed[2055]: AuthSession: "
+      "started with is_ephemeral_user=0 intent=decrypt user_exists=1 keys=.\n"
+      "2022-10-13T07:35:34.576054Z INFO cryptohomed[2055]: "
+      "GenerateRecoveryRequestAssociatedData for recovery_id: "
+      "3ecb8fc835a164e741f3e002a93495ea9b2f40dcf16acb393c30c3b18768ddce\n"
+      "2022-10-13T07:35:36.060608Z INFO cryptohomed[2055]: AuthSession: "
+      "decrypt authentication attempt via test-recovery factor.";
+  const std::string kCrashWithRecoveryIdStripped =
+      "2022-10-13T07:35:34.518810Z INFO cryptohomed[2055]: AuthSession: "
+      "started with is_ephemeral_user=0 intent=decrypt user_exists=1 keys=.\n"
+      "2022-10-13T07:35:34.576054Z INFO cryptohomed[2055]: "
+      "GenerateRecoveryRequestAssociatedData for recovery_id: (HASH:3ecb 1)\n"
+      "2022-10-13T07:35:36.060608Z INFO cryptohomed[2055]: AuthSession: "
+      "decrypt authentication attempt via test-recovery factor.";
+  std::string crash_with_recovery_id(kCrashWithRecoveryId);
+  collector_.StripSensitiveData(&crash_with_recovery_id);
+  EXPECT_EQ(kCrashWithRecoveryIdStripped, crash_with_recovery_id);
+}
+
+TEST_F(CrashCollectorTest, GetCrashDirectoryInfoOld) {
   FilePath path;
   const int kRootUid = 0;
   const int kNtpUid = 5;
@@ -748,9 +1162,8 @@ TEST_F(CrashCollectorTest, GetCrashDirectoryInfo) {
   gid_t directory_group;
 
   path = collector_
-             .GetCrashDirectoryInfo(
-                 kRootUid, kChronosUid, /*use_non_chronos_cryptohome=*/false,
-                 &directory_mode, &directory_owner, &directory_group)
+             .GetCrashDirectoryInfoOld(kRootUid, kChronosUid, &directory_mode,
+                                       &directory_owner, &directory_group)
              .value();
   EXPECT_EQ("/var/spool/crash", path.value());
   EXPECT_EQ(kExpectedSystemMode, directory_mode);
@@ -758,9 +1171,8 @@ TEST_F(CrashCollectorTest, GetCrashDirectoryInfo) {
   EXPECT_EQ(kCrashAccessGid, directory_group);
 
   path = collector_
-             .GetCrashDirectoryInfo(
-                 kNtpUid, kChronosUid, /*use_non_chronos_cryptohome=*/false,
-                 &directory_mode, &directory_owner, &directory_group)
+             .GetCrashDirectoryInfoOld(kNtpUid, kChronosUid, &directory_mode,
+                                       &directory_owner, &directory_group)
              .value();
   EXPECT_EQ("/var/spool/crash", path.value());
   EXPECT_EQ(kExpectedSystemMode, directory_mode);
@@ -778,22 +1190,24 @@ TEST_F(CrashCollectorTest, GetCrashDirectoryInfo) {
   test_util::SetActiveSessions(mock, {{"user", "hashcakes"}});
   collector_.session_manager_proxy_.reset(mock);
 
-  path = collector_
-             .GetCrashDirectoryInfo(
-                 kChronosUid, kChronosUid, /*use_non_chronos_cryptohome=*/false,
-                 &directory_mode, &directory_owner, &directory_group)
-             .value();
+  path =
+      collector_
+          .GetCrashDirectoryInfoOld(kChronosUid, kChronosUid, &directory_mode,
+                                    &directory_owner, &directory_group)
+          .value();
   EXPECT_EQ(test_dir_.Append("home/user/hashcakes/crash").value(),
             path.value());
   EXPECT_EQ(kExpectedUserMode, directory_mode);
   EXPECT_EQ(kChronosUid, directory_owner);
   EXPECT_EQ(kCrashUserAccessGid, directory_group);
 
-  path = collector_
-             .GetCrashDirectoryInfo(
-                 kChronosUid, kChronosUid, /*use_non_chronos_cryptohome=*/true,
-                 &directory_mode, &directory_owner, &directory_group)
-             .value();
+  collector_.crash_directory_selection_method_ =
+      CrashCollector::kAlwaysUseDaemonStore;
+  path =
+      collector_
+          .GetCrashDirectoryInfoOld(kChronosUid, kChronosUid, &directory_mode,
+                                    &directory_owner, &directory_group)
+          .value();
   EXPECT_EQ(test_dir_.Append("run/daemon-store/crash/hashcakes").value(),
             path.value());
   EXPECT_EQ(kExpectedDaemonStoreMode, directory_mode);
@@ -802,7 +1216,7 @@ TEST_F(CrashCollectorTest, GetCrashDirectoryInfo) {
 #endif  // !USE_KVM_GUEST
 }
 
-TEST_F(CrashCollectorTest, GetCrashDirectoryInfoLoggedOut) {
+TEST_F(CrashCollectorTest, GetCrashDirectoryInfoOldLoggedOut) {
   FilePath path;
   const int kChronosUid = 1000;
   const mode_t kExpectedUserMode = 02770;
@@ -815,11 +1229,11 @@ TEST_F(CrashCollectorTest, GetCrashDirectoryInfoLoggedOut) {
   test_util::SetActiveSessions(mock, {});
   collector_.session_manager_proxy_.reset(mock);
 
-  path = collector_
-             .GetCrashDirectoryInfo(
-                 kChronosUid, kChronosUid, /*use_non_chronos_cryptohome=*/false,
-                 &directory_mode, &directory_owner, &directory_group)
-             .value();
+  path =
+      collector_
+          .GetCrashDirectoryInfoOld(kChronosUid, kChronosUid, &directory_mode,
+                                    &directory_owner, &directory_group)
+          .value();
   EXPECT_EQ(kExpectedUserMode, directory_mode);
 #if USE_KVM_GUEST
   // Inside the VM, everything goes to /var/spool/crash.
@@ -835,6 +1249,335 @@ TEST_F(CrashCollectorTest, GetCrashDirectoryInfoLoggedOut) {
 #endif  // USE_KVM_GUEST
 }
 
+TEST_F(CrashCollectorTest, GetCrashDirectoryInfoNew) {
+  FilePath path;
+  const int kRootUid = 0;
+  const int kNtpUid = 5;
+  const int kChronosUid = 1000;
+
+  bool can_create_or_fix = false;
+  mode_t directory_mode;
+  uid_t directory_owner;
+  gid_t directory_group;
+
+  // all crashes will first look at daemon store
+  auto* mock = new org::chromium::SessionManagerInterfaceProxyMock;
+  test_util::SetActiveSessions(mock, {{"user", "hashcakes"}});
+  collector_.session_manager_proxy_.reset(mock);
+
+#if USE_KVM_GUEST
+  const int kCrashAccessGid = 419;
+  const mode_t kExpectedSystemMode = 02770;
+  // In the guest, we use /var/spool/crash even though we're logged in
+  path = collector_
+             .GetCrashDirectoryInfoNew(kRootUid, kChronosUid,
+                                       &can_create_or_fix, &directory_mode,
+                                       &directory_owner, &directory_group)
+             .value();
+  EXPECT_EQ("/var/spool/crash", path.value());
+  EXPECT_TRUE(can_create_or_fix);
+  EXPECT_EQ(kExpectedSystemMode, directory_mode);
+  EXPECT_EQ(kRootUid, directory_owner);
+  EXPECT_EQ(kCrashAccessGid, directory_group);
+
+  can_create_or_fix = false;
+  path = collector_
+             .GetCrashDirectoryInfoNew(kNtpUid, kChronosUid, &can_create_or_fix,
+                                       &directory_mode, &directory_owner,
+                                       &directory_group)
+             .value();
+  EXPECT_EQ("/var/spool/crash", path.value());
+  EXPECT_TRUE(can_create_or_fix);
+  EXPECT_EQ(kExpectedSystemMode, directory_mode);
+  EXPECT_EQ(kRootUid, directory_owner);
+  EXPECT_EQ(kCrashAccessGid, directory_group);
+#else   // USE_KVM_GUEST
+  const int kCrashUserUid = 20137;
+  const int kCrashUserAccessGid = 420;
+  const mode_t kExpectedDaemonStoreMode = 03770;
+  const FilePath kExpectedDir = paths::Get("/run/daemon-store/crash/hashcakes");
+
+  // Create crash-test-in-progress file to force deterministic
+  // (always-daemon-store) behavior, rather than randomizing.
+  FilePath test_in_prog = paths::GetAt(paths::kSystemRunStateDirectory,
+                                       paths::kCrashTestInProgress);
+  ASSERT_TRUE(test_util::CreateFile(test_in_prog, ""));
+
+  // In the host, we always use daemon_store when logged in.
+  can_create_or_fix = true;
+  path = collector_
+             .GetCrashDirectoryInfoNew(kRootUid, kChronosUid,
+                                       &can_create_or_fix, &directory_mode,
+                                       &directory_owner, &directory_group)
+             .value();
+  EXPECT_EQ(kExpectedDir, path);
+  EXPECT_FALSE(can_create_or_fix);
+  EXPECT_EQ(kExpectedDaemonStoreMode, directory_mode);
+  EXPECT_EQ(kCrashUserUid, directory_owner);
+  EXPECT_EQ(kCrashUserAccessGid, directory_group);
+
+  can_create_or_fix = true;
+  path = collector_
+             .GetCrashDirectoryInfoNew(kNtpUid, kChronosUid, &can_create_or_fix,
+                                       &directory_mode, &directory_owner,
+                                       &directory_group)
+             .value();
+  EXPECT_EQ(kExpectedDir, path);
+  EXPECT_FALSE(can_create_or_fix);
+  EXPECT_EQ(kExpectedDaemonStoreMode, directory_mode);
+  EXPECT_EQ(kCrashUserUid, directory_owner);
+  EXPECT_EQ(kCrashUserAccessGid, directory_group);
+
+  can_create_or_fix = true;
+  path = collector_
+             .GetCrashDirectoryInfoNew(kChronosUid, kChronosUid,
+                                       &can_create_or_fix, &directory_mode,
+                                       &directory_owner, &directory_group)
+             .value();
+  EXPECT_EQ(kExpectedDir, path);
+  EXPECT_FALSE(can_create_or_fix);
+  EXPECT_EQ(kExpectedDaemonStoreMode, directory_mode);
+  EXPECT_EQ(kCrashUserUid, directory_owner);
+  EXPECT_EQ(kCrashUserAccessGid, directory_group);
+
+  collector_.crash_directory_selection_method_ =
+      CrashCollector::kAlwaysUseDaemonStore;
+  can_create_or_fix = true;
+  path = collector_
+             .GetCrashDirectoryInfoNew(kChronosUid, kChronosUid,
+                                       &can_create_or_fix, &directory_mode,
+                                       &directory_owner, &directory_group)
+             .value();
+  EXPECT_EQ(kExpectedDir, path);
+  EXPECT_FALSE(can_create_or_fix);
+  EXPECT_EQ(kExpectedDaemonStoreMode, directory_mode);
+  EXPECT_EQ(kCrashUserUid, directory_owner);
+  EXPECT_EQ(kCrashUserAccessGid, directory_group);
+#endif  // USE_KVM_GUEST
+}
+
+TEST_F(CrashCollectorTest, GetCrashDirectoryInfoNewLoggedOut) {
+  FilePath path;
+  const int kRootUid = 0;
+  const int kNtpUid = 5;
+  const int kCrashAccessGid = 419;
+  const int kChronosUid = 1000;
+  const mode_t kExpectedSystemMode = 02770;
+
+  bool can_create_or_fix = false;
+  mode_t directory_mode;
+  uid_t directory_owner;
+  gid_t directory_group;
+
+  auto* mock = new org::chromium::SessionManagerInterfaceProxyMock;
+  test_util::SetActiveSessions(mock, {});
+  collector_.session_manager_proxy_.reset(mock);
+
+  // When not logged in, system dirs should use /var/spool/crash/ (in VM or not)
+  path = collector_
+             .GetCrashDirectoryInfoNew(kRootUid, kChronosUid,
+                                       &can_create_or_fix, &directory_mode,
+                                       &directory_owner, &directory_group)
+             .value();
+  EXPECT_EQ("/var/spool/crash", path.value());
+  EXPECT_TRUE(can_create_or_fix);
+  EXPECT_EQ(kExpectedSystemMode, directory_mode);
+  EXPECT_EQ(kRootUid, directory_owner);
+  EXPECT_EQ(kCrashAccessGid, directory_group);
+
+  can_create_or_fix = false;
+  path = collector_
+             .GetCrashDirectoryInfoNew(kNtpUid, kChronosUid, &can_create_or_fix,
+                                       &directory_mode, &directory_owner,
+                                       &directory_group)
+             .value();
+  EXPECT_EQ("/var/spool/crash", path.value());
+  EXPECT_TRUE(can_create_or_fix);
+  EXPECT_EQ(kExpectedSystemMode, directory_mode);
+  EXPECT_EQ(kRootUid, directory_owner);
+  EXPECT_EQ(kCrashAccessGid, directory_group);
+
+  can_create_or_fix = false;
+  path = collector_
+             .GetCrashDirectoryInfoNew(kChronosUid, kChronosUid,
+                                       &can_create_or_fix, &directory_mode,
+                                       &directory_owner, &directory_group)
+             .value();
+#if USE_KVM_GUEST
+  // Inside the VM, everything goes to /var/spool/crash.
+  EXPECT_EQ("/var/spool/crash", path.value());
+  EXPECT_TRUE(can_create_or_fix);
+  EXPECT_EQ(0, directory_owner);
+  EXPECT_EQ(kCrashAccessGid, directory_group);
+  EXPECT_EQ(kExpectedSystemMode, directory_mode);
+#else
+  const int kCrashUserAccessGid = 420;
+  EXPECT_EQ(paths::Get("/home/chronos/crash"), path);
+  EXPECT_TRUE(can_create_or_fix);
+  EXPECT_EQ(kChronosUid, directory_owner);
+  EXPECT_EQ(kCrashUserAccessGid, directory_group);
+  EXPECT_EQ(kExpectedSystemMode, directory_mode);
+
+  collector_.crash_directory_selection_method_ =
+      CrashCollector::kAlwaysUseDaemonStore;
+  std::optional<FilePath> path_maybe = collector_.GetCrashDirectoryInfoNew(
+      kChronosUid, kChronosUid, &can_create_or_fix, &directory_mode,
+      &directory_owner, &directory_group);
+  EXPECT_FALSE(path_maybe.has_value());
+#endif  // USE_KVM_GUEST
+}
+
+TEST_F(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_Success) {
+  base::FilePath subdir = test_dir_.Append("crash");
+  ASSERT_TRUE(base::CreateDirectory(subdir));
+  const std::string kTestfileName = "testfile";
+  ASSERT_TRUE(base::WriteFile(subdir.Append(kTestfileName), "test"));
+  const int kCrashAccessGid = 419;
+  const int kChronosUid = 1001;
+  const mode_t kExpectedMode = 0770;
+
+  ASSERT_EQ(chown(subdir.value().c_str(), kChronosUid, kCrashAccessGid), 0)
+      << strerrordesc_np(errno);
+
+  ASSERT_EQ(chmod(subdir.value().c_str(), kExpectedMode), 0)
+      << strerrordesc_np(errno);
+
+  int fd = -1;
+  EXPECT_TRUE(CrashCollector::OpenCrashDirectory(
+      subdir, kExpectedMode, kChronosUid, kCrashAccessGid, &fd));
+  ASSERT_GT(fd, 0);
+
+  // Ensure fd is actually open and pointing to correct directory.
+  DIR* dir = fdopendir(fd);
+  ASSERT_TRUE(dir != nullptr) << strerrordesc_np(errno);
+
+  errno = 0;
+  bool found_test_file = false;
+  for (struct dirent* entry = readdir(dir); entry != nullptr;
+       entry = readdir(dir)) {
+    if (entry->d_name == kTestfileName) {
+      found_test_file = true;
+      break;
+    }
+    errno = 0;
+  }
+  // Only way to detect end-of-directory vs. an error.
+  EXPECT_EQ(errno, 0) << strerrordesc_np(errno);
+  EXPECT_TRUE(found_test_file);
+  closedir(dir);
+}
+
+TEST_F(CrashCollectorTest,
+       RunAsRoot_OpenCrashDirectory_ParentDirectoryMissing) {
+  base::FilePath crash_directory = test_dir_.Append("missing").Append("crash");
+  const int kCrashAccessGid = 419;
+  const int kChronosUid = 1001;
+  const mode_t kMode = 0770;
+
+  int fd = -1;
+  EXPECT_FALSE(CrashCollector::OpenCrashDirectory(
+      crash_directory, kMode, kChronosUid, kCrashAccessGid, &fd));
+  ASSERT_LT(fd, 0);
+
+  // Log message should be from ValidatePathAndOpen.
+  EXPECT_TRUE(brillo::FindLog("Unable to access crash path"));
+}
+
+TEST_F(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_Missing) {
+  base::FilePath subdir = test_dir_.Append("crash");
+  const int kCrashAccessGid = 419;
+  const int kChronosUid = 1001;
+  const mode_t kMode = 0770;
+
+  int fd = -1;
+  EXPECT_FALSE(CrashCollector::OpenCrashDirectory(subdir, kMode, kChronosUid,
+                                                  kCrashAccessGid, &fd));
+  ASSERT_LT(fd, 0);
+
+  EXPECT_FALSE(base::PathExists(subdir));
+  EXPECT_TRUE(brillo::FindLog("Unable to open crash directory"));
+}
+
+TEST_F(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_NotADirectory) {
+  base::FilePath file = test_dir_.Append("crash");
+  ASSERT_TRUE(base::WriteFile(file, ""));
+  const int kCrashAccessGid = 419;
+  const int kChronosUid = 1001;
+  const mode_t kMode = 0770;
+  ASSERT_EQ(chown(file.value().c_str(), kChronosUid, kCrashAccessGid), 0)
+      << strerrordesc_np(errno);
+
+  ASSERT_EQ(chmod(file.value().c_str(), kMode), 0) << strerrordesc_np(errno);
+
+  int fd = -1;
+  EXPECT_FALSE(CrashCollector::OpenCrashDirectory(file, kMode, kChronosUid,
+                                                  kCrashAccessGid, &fd));
+  ASSERT_LT(fd, 0);
+  EXPECT_TRUE(brillo::FindLog("Unable to open crash directory"));
+}
+
+TEST_F(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_WrongOwner) {
+  base::FilePath subdir = test_dir_.Append("crash");
+  ASSERT_TRUE(base::CreateDirectory(subdir));
+  const int kCrashAccessGid = 419;
+  const int kChronosUid = 1001;
+  const mode_t kExpectedMode = 0770;
+
+  ASSERT_EQ(chown(subdir.value().c_str(), /*owner_id=*/0, kCrashAccessGid), 0)
+      << strerrordesc_np(errno);
+
+  ASSERT_EQ(chmod(subdir.value().c_str(), kExpectedMode), 0)
+      << strerrordesc_np(errno);
+
+  int fd = -1;
+  EXPECT_FALSE(CrashCollector::OpenCrashDirectory(
+      subdir, kExpectedMode, kChronosUid, kCrashAccessGid, &fd));
+  ASSERT_LT(fd, 0);
+
+  EXPECT_TRUE(brillo::FindLog("Incorrect owner for"));
+}
+
+TEST_F(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_WrongGroup) {
+  base::FilePath subdir = test_dir_.Append("crash");
+  ASSERT_TRUE(base::CreateDirectory(subdir));
+  const int kCrashAccessGid = 419;
+  const int kChronosUid = 1001;
+  const mode_t kExpectedMode = 0770;
+
+  ASSERT_EQ(chown(subdir.value().c_str(), kChronosUid, /*group_id=*/0), 0)
+      << strerrordesc_np(errno);
+
+  ASSERT_EQ(chmod(subdir.value().c_str(), kExpectedMode), 0)
+      << strerrordesc_np(errno);
+
+  int fd = -1;
+  EXPECT_FALSE(CrashCollector::OpenCrashDirectory(
+      subdir, kExpectedMode, kChronosUid, kCrashAccessGid, &fd));
+  ASSERT_LT(fd, 0);
+
+  EXPECT_TRUE(brillo::FindLog("Incorrect group for"));
+}
+
+TEST_F(CrashCollectorTest, RunAsRoot_OpenCrashDirectory_WrongMode) {
+  base::FilePath subdir = test_dir_.Append("crash");
+  ASSERT_TRUE(base::CreateDirectory(subdir));
+  const int kCrashAccessGid = 419;
+  const int kChronosUid = 1001;
+  const mode_t kExpectedMode = 0770;
+
+  ASSERT_EQ(chown(subdir.value().c_str(), kChronosUid, kCrashAccessGid), 0)
+      << strerrordesc_np(errno);
+
+  ASSERT_EQ(chmod(subdir.value().c_str(), 0777), 0) << strerrordesc_np(errno);
+
+  int fd = -1;
+  EXPECT_FALSE(CrashCollector::OpenCrashDirectory(
+      subdir, kExpectedMode, kChronosUid, kCrashAccessGid, &fd));
+  ASSERT_LT(fd, 0);
+
+  EXPECT_TRUE(brillo::FindLog("Incorrect mode for"));
+}
+
 TEST_F(CrashCollectorTest, FormatDumpBasename) {
   struct tm tm = {};
   tm.tm_sec = 15;
@@ -844,7 +1587,7 @@ TEST_F(CrashCollectorTest, FormatDumpBasename) {
   tm.tm_mon = 4;
   tm.tm_year = 110;
   tm.tm_isdst = -1;
-  std::string basename = collector_.FormatDumpBasename("foo", mktime(&tm), 100);
+  std::string basename = collector_.FormatDumpBasename("foo", timegm(&tm), 100);
   EXPECT_THAT(basename,
               testing::MatchesRegex(R"(foo\.20100523\.135015\.[0-9]{5}\.100)"));
 }
@@ -893,13 +1636,29 @@ TEST_F(CrashCollectorTest, ParseProcessTicksFromStat) {
 }
 
 TEST_F(CrashCollectorTest, GetUptime) {
+  // We want to use the real proc filesystem.
+  paths::SetPrefixForTesting(base::FilePath());
+
   base::TimeDelta uptime_at_process_start;
   EXPECT_TRUE(CrashCollector::GetUptimeAtProcessStart(
       getpid(), &uptime_at_process_start));
 
   base::TimeDelta uptime;
-  EXPECT_TRUE(CrashCollector::GetUptime(&uptime));
+  EXPECT_TRUE(collector_.GetUptime(&uptime));
 
+#if defined(ARCH_CPU_ARM_FAMILY)
+  // On QEMU simulator (used for ARM testing), stat always says the uptime at
+  // process start is zero. (This was fixed in Jan 2022, but we don't have the
+  // patch yet.) Just test we didn't get a negative value. (Once we get the
+  // patch, the test will still pass, to avoid blocking uprev.)
+  EXPECT_FALSE(uptime_at_process_start.is_negative())
+      << uptime_at_process_start;
+#else
+  // On non-QEMU, the machine should have been up for a little while before
+  // the process started.
+  EXPECT_TRUE(uptime_at_process_start.is_positive()) << uptime_at_process_start;
+#endif
+  EXPECT_TRUE(uptime.is_positive()) << uptime;
   EXPECT_GT(uptime, uptime_at_process_start);
 }
 
@@ -970,12 +1729,39 @@ TEST_F(CrashCollectorTest, CheckHasCapacityStrangeNames) {
   EXPECT_TRUE(CheckHasCapacity());
 }
 
+// Tests that CheckHasCapacity creates a file on test images indicating that it
+// dropped crashes.
+TEST_F(CrashCollectorTest, CheckHasCapacityFull_LeavesNote) {
+  FilePath lsb_release = paths::Get("/etc/lsb-release");
+  collector_.set_lsb_release_for_test(lsb_release);
+  const char kLsbContents[] = "CHROMEOS_RELEASE_TRACK=testimage-channel\n";
+  ASSERT_TRUE(test_util::CreateFile(lsb_release, kLsbContents));
+
+  // Test kMaxCrashDirectorySize - 1 meta files fit.
+  for (int i = 0; i < CrashCollector::kMaxCrashDirectorySize - 1; ++i) {
+    ASSERT_TRUE(test_util::CreateFile(
+        test_dir_.Append(StringPrintf("file%d.meta", i)), ""));
+    EXPECT_TRUE(CheckHasCapacity());
+    EXPECT_FALSE(
+        base::PathExists(test_dir_.Append(paths::kAlreadyFullFileName)));
+  }
+
+  // Test an additional meta file doesn't fit.
+  ASSERT_TRUE(test_util::CreateFile(test_dir_.Append("overage.meta"), ""));
+  EXPECT_FALSE(CheckHasCapacity());
+
+  EXPECT_TRUE(base::PathExists(test_dir_.Append(paths::kAlreadyFullFileName)));
+}
+
 struct MetaDataTest {
   std::string test_case_name;
   bool test_in_prog = false;
   bool add_variations = false;
+  bool add_lacros_variations = false;
+  bool use_saved_lsb = false;
   std::string exec_name = "kernel";
-  base::Optional<bool> enterprise_enrolled = false;
+  std::optional<bool> enterprise_enrolled = false;
+  std::optional<CrashCollector::ComputedCrashSeverity> severity = std::nullopt;
   std::string expected_meta;
 };
 
@@ -987,6 +1773,17 @@ class CrashCollectorParameterizedTest
   static constexpr char kKernelName[] = "Linux";
   static constexpr char kKernelVersion[] =
       "3.8.11 #1 SMP Wed Aug 22 02:18:30 PDT 2018";
+  static constexpr int kNumLacrosExperiments = 10;
+  static constexpr char kLacrosVariations[] =
+      "3ac60855-486e2a9c,63dcb6a3-f774aad2,"
+      "e706e746-e4cdf2fd,f296190c-4c073154,4442aae2-4ad60575,f690cf64-75cb33fc,"
+      "31f573d2-ca7d8d80,c559031-3d47f4f4,9a38bae3-3d47f4f4,6f3a6be-3d47f4f4,";
+  static constexpr char kLacrosVariationsFile[] =
+      "num-experiments=10\n"
+      "variations=3ac60855-486e2a9c,63dcb6a3-f774aad2,"
+      "e706e746-e4cdf2fd,f296190c-4c073154,4442aae2-4ad60575,f690cf64-75cb33fc,"
+      "31f573d2-ca7d8d80,c559031-3d47f4f4,9a38bae3-3d47f4f4,6f3a6be-3d47f4f4,"
+      "\n";
   static constexpr int kNumExperiments = 17;
   static constexpr char kVariations[] =
       "3ac60855-486e2a9c,63dcb6a3-f774aad2,"
@@ -1041,11 +1838,17 @@ TEST_P(CrashCollectorParameterizedTest, MetaData) {
         kVariationsFile));
   }
 
+  if (test_case.add_lacros_variations) {
+    ASSERT_TRUE(
+        test_util::CreateFile(paths::GetAt(paths::kFallbackToHomeDir,
+                                           paths::kLacrosVariationsListFile),
+                              kLacrosVariationsFile));
+  }
+
   const char kMetaFileBasename[] = "generated.meta";
   FilePath meta_file = test_dir_.Append(kMetaFileBasename);
+
   FilePath lsb_release = paths::Get("/etc/lsb-release");
-  FilePath payload_file = test_dir_.Append(kPayloadName);
-  std::string contents;
   collector_.set_lsb_release_for_test(lsb_release);
   const char kLsbContents[] =
       "CHROMEOS_RELEASE_BOARD=lumpy\n"
@@ -1057,29 +1860,58 @@ TEST_P(CrashCollectorParameterizedTest, MetaData) {
   ASSERT_TRUE(test_util::CreateFile(lsb_release, kLsbContents));
   const base::Time kFakeOsTime = GetOsTimeForTest();
   ASSERT_TRUE(base::TouchFile(lsb_release, kFakeOsTime, kFakeOsTime));
+
+  FilePath saved_lsb_dir = paths::Get(paths::kCrashReporterStateDirectory);
+  collector_.set_reporter_state_directory_for_test(saved_lsb_dir);
+
+  const char kSavedLsbContents[] =
+      "CHROMEOS_RELEASE_BOARD=lumpy\n"
+      "CHROMEOS_RELEASE_VERSION=12345.0.2015_01_26_0853\n"
+      "CHROMEOS_RELEASE_NAME=Chromium OS\n"
+      "CHROMEOS_RELEASE_CHROME_MILESTONE=81\n"
+      "CHROMEOS_RELEASE_TRACK=beta-channel\n"
+      "CHROMEOS_RELEASE_DESCRIPTION=12345.0.2015_01_26_0853 (Test Build - foo)";
+  base::FilePath saved_lsb = saved_lsb_dir.Append("lsb-release");
+  ASSERT_TRUE(test_util::CreateFile(saved_lsb, kSavedLsbContents));
+  ASSERT_TRUE(base::TouchFile(saved_lsb, kFakeOsTime, kFakeOsTime));
+
   const char kPayload[] = "foo";
+  FilePath payload_file = test_dir_.Append(kPayloadName);
   ASSERT_TRUE(test_util::CreateFile(payload_file, kPayload));
+
   collector_.AddCrashMetaData("foo", "bar");
   collector_.AddCrashMetaData("weird  key#@!", "weird\nvalue");
+
   // Empty key should be ignored and not added.
   collector_.AddCrashMetaData("", "empty_key_val");
+
   std::unique_ptr<base::SimpleTestClock> test_clock =
       std::make_unique<base::SimpleTestClock>();
-  test_clock->SetNow(base::Time::UnixEpoch() +
-                     base::TimeDelta::FromMilliseconds(kFakeNow));
+  test_clock->SetNow(base::Time::UnixEpoch() + base::Milliseconds(kFakeNow));
   collector_.set_test_clock(std::move(test_clock));
   collector_.set_test_kernel_info(kKernelName, kKernelVersion);
   std::unique_ptr<policy::MockDevicePolicy> test_device_policy =
       std::make_unique<policy::MockDevicePolicy>();
   if (!test_case.enterprise_enrolled) {
-    EXPECT_CALL(*test_device_policy, LoadPolicy()).WillOnce(Return(false));
+    EXPECT_CALL(*test_device_policy, LoadPolicy(/*delete_invalid_files=*/false))
+        .WillOnce(Return(false));
   } else {
-    EXPECT_CALL(*test_device_policy, LoadPolicy()).WillOnce(Return(true));
+    EXPECT_CALL(*test_device_policy, LoadPolicy(/*delete_invalid_files=*/false))
+        .WillOnce(Return(true));
     EXPECT_CALL(*test_device_policy, IsEnterpriseEnrolled())
         .WillOnce(Return(*test_case.enterprise_enrolled));
   }
   collector_.set_device_policy_for_test(std::move(test_device_policy));
+
+  if (test_case.severity.has_value()) {
+    EXPECT_CALL(collector_, ComputeSeverity(_))
+        .WillOnce(Return(test_case.severity.value()));
+  }
+
+  collector_.SetUseSavedLsb(test_case.use_saved_lsb);
   collector_.FinishCrash(meta_file, test_case.exec_name, kPayloadName);
+
+  std::string contents;
   EXPECT_TRUE(base::ReadFileToString(meta_file, &contents));
   EXPECT_EQ(test_case.expected_meta, contents);
   EXPECT_EQ(test_case.expected_meta.size(), collector_.get_bytes_written());
@@ -1096,6 +1928,9 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "weird__key___=weird\\nvalue\n"
       "upload_var_channel=test\n"
       "upload_var_is-enterprise-enrolled=false\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
+      "upload_var_arc_status=%s\n"
       "upload_var_reportTimeMillis=%" PRId64
       "\n"
       "exec_name=kernel\n"
@@ -1108,7 +1943,71 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "upload_var_osVersion=%s\n"
       "payload=%s\n"
       "done=1\n",
-      kFakeNow, (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
+      kARCStatus, kFakeNow,
+      (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
+      CrashCollectorParameterizedTest::kKernelName,
+      CrashCollectorParameterizedTest::kKernelVersion,
+      CrashCollectorParameterizedTest::kPayloadName);
+
+  MetaDataTest base_saved_lsb;
+  base_saved_lsb.use_saved_lsb = true;
+  base_saved_lsb.test_case_name = "BaseUseSavedLsb";
+  base_saved_lsb.expected_meta = StringPrintf(
+      "upload_var_collector=mock\n"
+      "foo=bar\n"
+      "weird__key___=weird\\nvalue\n"
+      "upload_var_channel=beta\n"
+      "upload_var_is-enterprise-enrolled=false\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
+      "upload_var_arc_status=%s\n"
+      "upload_var_reportTimeMillis=%" PRId64
+      "\n"
+      "exec_name=kernel\n"
+      "ver=12345.0.2015_01_26_0853\n"
+      "upload_var_lsb-release=12345.0.2015_01_26_0853 (Test Build - foo)\n"
+      "upload_var_cros_milestone=81\n"
+      "os_millis=%" PRId64
+      "\n"
+      "upload_var_osName=%s\n"
+      "upload_var_osVersion=%s\n"
+      "payload=%s\n"
+      "done=1\n",
+      kARCStatus, kFakeNow,
+      (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
+      CrashCollectorParameterizedTest::kKernelName,
+      CrashCollectorParameterizedTest::kKernelVersion,
+      CrashCollectorParameterizedTest::kPayloadName);
+
+  MetaDataTest base_severity_fatal_platform;
+  base_severity_fatal_platform.test_case_name = "BaseSeverityFatalPlatform";
+  base_severity_fatal_platform.severity = CrashCollector::ComputedCrashSeverity{
+      .crash_severity = CrashCollector::CrashSeverity::kFatal,
+      .product_group = CrashCollector::Product::kPlatform,
+  };
+  base_severity_fatal_platform.expected_meta = StringPrintf(
+      "upload_var_collector=mock\n"
+      "foo=bar\n"
+      "weird__key___=weird\\nvalue\n"
+      "upload_var_channel=test\n"
+      "upload_var_is-enterprise-enrolled=false\n"
+      "upload_var_client_computed_severity=FATAL\n"
+      "upload_var_client_computed_product=Platform\n"
+      "upload_var_arc_status=%s\n"
+      "upload_var_reportTimeMillis=%" PRId64
+      "\n"
+      "exec_name=kernel\n"
+      "ver=6727.0.2015_01_26_0853\n"
+      "upload_var_lsb-release=6727.0.2015_01_26_0853 (Test Build - foo)\n"
+      "upload_var_cros_milestone=82\n"
+      "os_millis=%" PRId64
+      "\n"
+      "upload_var_osName=%s\n"
+      "upload_var_osVersion=%s\n"
+      "payload=%s\n"
+      "done=1\n",
+      kARCStatus, kFakeNow,
+      (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
       CrashCollectorParameterizedTest::kKernelName,
       CrashCollectorParameterizedTest::kKernelVersion,
       CrashCollectorParameterizedTest::kPayloadName);
@@ -1122,7 +2021,10 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "weird__key___=weird\\nvalue\n"
       "upload_var_channel=test\n"
       "upload_var_is-enterprise-enrolled=false\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
       "upload_var_in_progress_integration_test=some.Test\n"
+      "upload_var_arc_status=%s\n"
       "upload_var_reportTimeMillis=%" PRId64
       "\n"
       "exec_name=kernel\n"
@@ -1135,7 +2037,8 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "upload_var_osVersion=%s\n"
       "payload=%s\n"
       "done=1\n",
-      kFakeNow, (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
+      kARCStatus, kFakeNow,
+      (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
       CrashCollectorParameterizedTest::kKernelName,
       CrashCollectorParameterizedTest::kKernelVersion,
       CrashCollectorParameterizedTest::kPayloadName);
@@ -1151,6 +2054,9 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "upload_var_num-experiments=%d\n"
       "upload_var_channel=test\n"
       "upload_var_is-enterprise-enrolled=false\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
+      "upload_var_arc_status=%s\n"
       "upload_var_reportTimeMillis=%" PRId64
       "\n"
       "exec_name=kernel\n"
@@ -1164,7 +2070,39 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "payload=%s\n"
       "done=1\n",
       CrashCollectorParameterizedTest::kVariations,
-      CrashCollectorParameterizedTest::kNumExperiments, kFakeNow,
+      CrashCollectorParameterizedTest::kNumExperiments, kARCStatus, kFakeNow,
+      (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
+      CrashCollectorParameterizedTest::kKernelName,
+      CrashCollectorParameterizedTest::kKernelVersion,
+      CrashCollectorParameterizedTest::kPayloadName);
+
+  MetaDataTest lacros_variations;
+  lacros_variations.test_case_name = "Lacros_Variations";
+  lacros_variations.add_lacros_variations = true;
+  lacros_variations.expected_meta = StringPrintf(
+      "upload_var_collector=mock\n"
+      "foo=bar\n"
+      "weird__key___=weird\\nvalue\n"
+      "upload_var_lacros-variations=%s\n"
+      "upload_var_lacros-num-experiments=%d\n"
+      "upload_var_channel=test\n"
+      "upload_var_is-enterprise-enrolled=false\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
+      "upload_var_reportTimeMillis=%" PRId64
+      "\n"
+      "exec_name=kernel\n"
+      "ver=6727.0.2015_01_26_0853\n"
+      "upload_var_lsb-release=6727.0.2015_01_26_0853 (Test Build - foo)\n"
+      "upload_var_cros_milestone=82\n"
+      "os_millis=%" PRId64
+      "\n"
+      "upload_var_osName=%s\n"
+      "upload_var_osVersion=%s\n"
+      "payload=%s\n"
+      "done=1\n",
+      CrashCollectorParameterizedTest::kLacrosVariations,
+      CrashCollectorParameterizedTest::kNumLacrosExperiments, kFakeNow,
       (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
       CrashCollectorParameterizedTest::kKernelName,
       CrashCollectorParameterizedTest::kKernelVersion,
@@ -1179,6 +2117,9 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "weird__key___=weird\\nvalue\n"
       "upload_var_channel=test\n"
       "upload_var_is-enterprise-enrolled=false\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
+      "upload_var_arc_status=%s\n"
       "upload_var_reportTimeMillis=%" PRId64
       "\n"
       "ver=6727.0.2015_01_26_0853\n"
@@ -1190,7 +2131,8 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "upload_var_osVersion=%s\n"
       "payload=%s\n"
       "done=1\n",
-      kFakeNow, (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
+      kARCStatus, kFakeNow,
+      (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
       CrashCollectorParameterizedTest::kKernelName,
       CrashCollectorParameterizedTest::kKernelVersion,
       CrashCollectorParameterizedTest::kPayloadName);
@@ -1204,6 +2146,9 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "weird__key___=weird\\nvalue\n"
       "upload_var_channel=test\n"
       "upload_var_is-enterprise-enrolled=true\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
+      "upload_var_arc_status=%s\n"
       "upload_var_reportTimeMillis=%" PRId64
       "\n"
       "exec_name=kernel\n"
@@ -1216,19 +2161,23 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "upload_var_osVersion=%s\n"
       "payload=%s\n"
       "done=1\n",
-      kFakeNow, (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
+      kARCStatus, kFakeNow,
+      (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
       CrashCollectorParameterizedTest::kKernelName,
       CrashCollectorParameterizedTest::kKernelVersion,
       CrashCollectorParameterizedTest::kPayloadName);
 
   MetaDataTest device_policy_not_loaded;
   device_policy_not_loaded.test_case_name = "Device_policy_not_loaded";
-  device_policy_not_loaded.enterprise_enrolled = base::nullopt;
+  device_policy_not_loaded.enterprise_enrolled = std::nullopt;
   device_policy_not_loaded.expected_meta = StringPrintf(
       "upload_var_collector=mock\n"
       "foo=bar\n"
       "weird__key___=weird\\nvalue\n"
       "upload_var_channel=test\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
+      "upload_var_arc_status=%s\n"
       "upload_var_reportTimeMillis=%" PRId64
       "\n"
       "exec_name=kernel\n"
@@ -1241,13 +2190,20 @@ std::vector<MetaDataTest> GenerateMetaDataTests() {
       "upload_var_osVersion=%s\n"
       "payload=%s\n"
       "done=1\n",
-      kFakeNow, (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
+      kARCStatus, kFakeNow,
+      (kOsTimestamp - base::Time::UnixEpoch()).InMilliseconds(),
       CrashCollectorParameterizedTest::kKernelName,
       CrashCollectorParameterizedTest::kKernelVersion,
       CrashCollectorParameterizedTest::kPayloadName);
 
-  return {base,         test_in_progress,    variations,
-          no_exec_name, enterprise_enrolled, device_policy_not_loaded};
+  return {base,
+          base_saved_lsb,
+          base_severity_fatal_platform,
+          test_in_progress,
+          variations,
+          no_exec_name,
+          enterprise_enrolled,
+          device_policy_not_loaded};
 }
 
 INSTANTIATE_TEST_SUITE_P(CrashCollectorInstantiation,
@@ -1270,18 +2226,16 @@ TEST_F(CrashCollectorTest, ErrorCollectionMetaData) {
       "CHROMEOS_RELEASE_TRACK=beta-channel\n"
       "CHROMEOS_RELEASE_DESCRIPTION=6727.0.2015_01_26_0853 (Test Build - foo)";
   ASSERT_TRUE(test_util::CreateFile(lsb_release, kLsbContents));
-  base::Time os_time = base::Time::Now() - base::TimeDelta::FromDays(123);
+  base::Time os_time = base::Time::Now() - base::Days(123);
   // ext2/ext3 seem to have a timestamp granularity of 1s so round this time
   // value down to the nearest second.
-  os_time = base::TimeDelta::FromSeconds(
-                (os_time - base::Time::UnixEpoch()).InSeconds()) +
+  os_time = base::Seconds((os_time - base::Time::UnixEpoch()).InSeconds()) +
             base::Time::UnixEpoch();
   ASSERT_TRUE(base::TouchFile(lsb_release, os_time, os_time));
 
   std::unique_ptr<base::SimpleTestClock> test_clock =
       std::make_unique<base::SimpleTestClock>();
-  test_clock->SetNow(base::Time::UnixEpoch() +
-                     base::TimeDelta::FromMilliseconds(kFakeNow));
+  test_clock->SetNow(base::Time::UnixEpoch() + base::Milliseconds(kFakeNow));
   collector_.set_test_clock(std::move(test_clock));
 
   const char kKernelName[] = "Linux";
@@ -1309,6 +2263,9 @@ TEST_F(CrashCollectorTest, ErrorCollectionMetaData) {
       "error_type=unsupported-32bit-core-file\n"
       "upload_file_pslog=%s\n"
       "upload_var_channel=beta\n"
+      "upload_var_client_computed_severity=UNSPECIFIED\n"
+      "upload_var_client_computed_product=Unspecified\n"
+      "upload_var_arc_status=%s\n"
       "upload_var_reportTimeMillis=%" PRId64
       "\n"
       "exec_name=crash_reporter_failure\n"
@@ -1321,7 +2278,7 @@ TEST_F(CrashCollectorTest, ErrorCollectionMetaData) {
       "upload_var_osVersion=%s\n"
       "payload=%s\n"
       "done=1\n",
-      pslog_name.value().c_str(), kFakeNow,
+      pslog_name.value().c_str(), kARCStatus, kFakeNow,
       (os_time - base::Time::UnixEpoch()).InMilliseconds(), kKernelName,
       kKernelVersion, log_name.value().c_str());
   EXPECT_EQ(expected_meta, contents);
@@ -1386,7 +2343,179 @@ TEST_F(CrashCollectorTest, CollectionLogsToUMA) {
 
   EXPECT_CALL(*mock_ref, SendCrosEventToUMA("Crash.Collector.CollectionCount"))
       .WillOnce(Return(true));
-  collector_.FinishCrash(kMetaFilePath, "kernel", kPayloadName);
+  EXPECT_CALL(*mock_ref,
+              SendRepeatedEnumToUMA(
+                  "ChromeOS.Stability.Unspecified",
+                  static_cast<int>(CrashCollector::Product::kUnspecified),
+                  static_cast<int>(CrashCollector::Product::kMaxValue) + 1, 1))
+      .WillOnce(Return(true));
+  collector_.FinishCrash(kMetaFilePath, "test_exec", kPayloadName);
+}
+
+TEST_F(CrashCollectorTest, AddCrashMetaWeight_ValidWeight) {
+  auto metrics_lib = std::make_unique<MetricsLibraryMock>();
+  MetricsLibraryMock* mock_ref = metrics_lib.get();
+  collector_.set_metrics_library_for_test(std::move(metrics_lib));
+
+  const FilePath kMetaFilePath = test_dir_.Append("meta.txt");
+  const char kPayloadName[] = "payload-file";
+  FilePath payload_file = test_dir_.Append(kPayloadName);
+
+  EXPECT_CALL(
+      *mock_ref,
+      SendEnumToUMA(
+          "Platform.CrashCollector.AddWeightResult",
+          static_cast<int>(CrashCollector::AddWeightResult::kGoodValue),
+          static_cast<int>(CrashCollector::AddWeightResult::kMaxValue) + 1))
+      .WillOnce(Return(true));
+  EXPECT_CALL(*mock_ref,
+              SendRepeatedEnumToUMA(
+                  "ChromeOS.Stability.Unspecified",
+                  static_cast<int>(CrashCollector::Product::kUnspecified),
+                  static_cast<int>(CrashCollector::Product::kMaxValue) + 1, 10))
+      .WillOnce(Return(true));
+  collector_.AddCrashMetaWeight(10);
+  collector_.FinishCrash(kMetaFilePath, "test_exec", kPayloadName);
+}
+
+TEST_F(CrashCollectorTest, AddCrashMetaWeight_InvalidWeight) {
+  auto metrics_lib = std::make_unique<MetricsLibraryMock>();
+  MetricsLibraryMock* mock_ref = metrics_lib.get();
+  collector_.set_metrics_library_for_test(std::move(metrics_lib));
+
+  const FilePath kMetaFilePath = test_dir_.Append("meta.txt");
+  const char kPayloadName[] = "payload-file";
+  FilePath payload_file = test_dir_.Append(kPayloadName);
+
+  EXPECT_CALL(
+      *mock_ref,
+      SendEnumToUMA(
+          "Platform.CrashCollector.AddWeightResult",
+          static_cast<int>(CrashCollector::AddWeightResult::kBadValue),
+          static_cast<int>(CrashCollector::AddWeightResult::kMaxValue) + 1))
+      .WillOnce(Return(true));
+  EXPECT_CALL(*mock_ref,
+              SendRepeatedEnumToUMA(
+                  "ChromeOS.Stability.Unspecified",
+                  static_cast<int>(CrashCollector::Product::kUnspecified),
+                  static_cast<int>(CrashCollector::Product::kMaxValue) + 1, 1))
+      .WillOnce(Return(true));
+  collector_.AddCrashMetaWeight(0);
+  collector_.FinishCrash(kMetaFilePath, "test_exec", kPayloadName);
+}
+
+TEST_F(CrashCollectorTest, AddCrashMetaWeight_CalledTwice) {
+  auto metrics_lib = std::make_unique<MetricsLibraryMock>();
+  MetricsLibraryMock* mock_ref = metrics_lib.get();
+  collector_.set_metrics_library_for_test(std::move(metrics_lib));
+
+  const FilePath kMetaFilePath = test_dir_.Append("meta.txt");
+  const char kPayloadName[] = "payload-file";
+  FilePath payload_file = test_dir_.Append(kPayloadName);
+
+  EXPECT_CALL(
+      *mock_ref,
+      SendEnumToUMA(
+          "Platform.CrashCollector.AddWeightResult",
+          static_cast<int>(CrashCollector::AddWeightResult::kGoodValue),
+          static_cast<int>(CrashCollector::AddWeightResult::kMaxValue) + 1))
+      .WillOnce(Return(true));
+  EXPECT_CALL(
+      *mock_ref,
+      SendEnumToUMA(
+          "Platform.CrashCollector.AddWeightResult",
+          static_cast<int>(CrashCollector::AddWeightResult::kAddedTwice),
+          static_cast<int>(CrashCollector::AddWeightResult::kMaxValue) + 1))
+      .WillOnce(Return(true));
+  EXPECT_CALL(*mock_ref,
+              SendRepeatedEnumToUMA(
+                  "ChromeOS.Stability.Unspecified",
+                  static_cast<int>(CrashCollector::Product::kUnspecified),
+                  static_cast<int>(CrashCollector::Product::kMaxValue) + 1, 10))
+      .WillOnce(Return(true));
+  collector_.AddCrashMetaWeight(10);
+  collector_.AddCrashMetaWeight(0);
+  collector_.FinishCrash(kMetaFilePath, "test_exec", kPayloadName);
+}
+
+TEST_F(CrashCollectorTest, AddCrashMetaUploadData_WeightKey) {
+  auto metrics_lib = std::make_unique<MetricsLibraryMock>();
+  MetricsLibraryMock* mock_ref = metrics_lib.get();
+  collector_.set_metrics_library_for_test(std::move(metrics_lib));
+
+  EXPECT_CALL(
+      *mock_ref,
+      SendEnumToUMA(
+          "Platform.CrashCollector.AddWeightResult",
+          static_cast<int>(
+              CrashCollector::AddWeightResult::kAddedInWrongMethod),
+          static_cast<int>(CrashCollector::AddWeightResult::kMaxValue) + 1))
+      .WillOnce(Return(true));
+  collector_.AddCrashMetaUploadData("weight", "10");
+}
+
+TEST_F(CrashCollectorTest, AddDetailedHardwareData) {
+  collector_.set_send_detailed_hw_for_test(true);
+
+  base::FilePath dmi_id_path = paths::Get(paths::kDmiIdDirectory);
+  ASSERT_TRUE(base::CreateDirectory(dmi_id_path));
+  ASSERT_TRUE(base::WriteFile(dmi_id_path.Append(paths::kProductNameFile),
+                              "OptiPlex 9010\n"));
+  ASSERT_TRUE(base::WriteFile(dmi_id_path.Append(paths::kProductVersionFile),
+                              "01\n\n"));
+  ASSERT_TRUE(
+      base::WriteFile(dmi_id_path.Append(paths::kSysVendorFile), "Dell Inc."));
+
+  collector_.AddDetailedHardwareData();
+
+  std::string meta = collector_.extra_metadata_;
+  // The file ended in the expected single newline, which has been trimmed.
+  EXPECT_THAT(meta,
+              HasSubstr("upload_var_chromeosflex_product_name=OptiPlex 9010"));
+  // The file ended in the multiple newlines, only one has been trimmed.
+  EXPECT_THAT(meta, HasSubstr("upload_var_chromeosflex_product_version=01\\n"));
+  // The file ended in no newline, value preserved.
+  EXPECT_THAT(meta,
+              HasSubstr("upload_var_chromeosflex_product_vendor=Dell Inc."));
+}
+
+TEST_F(CrashCollectorTest, AddDetailedHardwareData_DoNotSend) {
+  collector_.set_send_detailed_hw_for_test(false);
+
+  base::FilePath dmi_id_path = paths::Get(paths::kDmiIdDirectory);
+  ASSERT_TRUE(base::CreateDirectory(dmi_id_path));
+  ASSERT_TRUE(base::WriteFile(dmi_id_path.Append(paths::kProductNameFile),
+                              "20AN0069US"));
+  ASSERT_TRUE(base::WriteFile(dmi_id_path.Append(paths::kProductVersionFile),
+                              "ThinkPad T440p"));
+  ASSERT_TRUE(
+      base::WriteFile(dmi_id_path.Append(paths::kSysVendorFile), "LENOVO"));
+
+  collector_.AddDetailedHardwareData();
+
+  std::string meta = collector_.extra_metadata_;
+  EXPECT_THAT(meta, Not(HasSubstr("upload_var_chromeosflex_product_name")));
+  EXPECT_THAT(meta, Not(HasSubstr("upload_var_chromeosflex_product_version")));
+  EXPECT_THAT(meta, Not(HasSubstr("upload_var_chromeosflex_product_vendor")));
+}
+
+TEST_F(CrashCollectorTest, AddDetailedHardwareData_FailedRead) {
+  collector_.set_send_detailed_hw_for_test(true);
+
+  base::FilePath dmi_id_path = paths::Get(paths::kDmiIdDirectory);
+  ASSERT_TRUE(base::CreateDirectory(dmi_id_path));
+  ASSERT_TRUE(base::WriteFile(dmi_id_path.Append(paths::kProductNameFile),
+                              "OptiPlex 9010"));
+  ASSERT_TRUE(
+      base::WriteFile(dmi_id_path.Append(paths::kProductVersionFile), "01"));
+
+  collector_.AddDetailedHardwareData();
+
+  std::string meta = collector_.extra_metadata_;
+  EXPECT_THAT(meta,
+              HasSubstr("upload_var_chromeosflex_product_name=OptiPlex 9010"));
+  EXPECT_THAT(meta, HasSubstr("upload_var_chromeosflex_product_version=01"));
+  EXPECT_THAT(meta, Not(HasSubstr("upload_var_chromeosflex_product_vendor")));
 }
 
 TEST_F(CrashCollectorTest, GetLogContents) {
@@ -1448,14 +2577,23 @@ TEST_F(CrashCollectorTest, GetMultipleLogContents) {
   EXPECT_EQ("foobaz\nbazbar\n", contents);
 }
 
+TEST_F(CrashCollectorTest, GetProcessPath) {
+  // We want to use the real proc filesystem.
+  paths::SetPrefixForTesting(base::FilePath());
+  FilePath path = collector_.GetProcessPath(100);
+  ASSERT_EQ("/proc/100", path.value());
+}
+
 TEST_F(CrashCollectorTest, GetProcessTree) {
+  // We want to use the real proc filesystem.
+  paths::SetPrefixForTesting(base::FilePath());
   const FilePath output_file = test_dir_.Append("log");
   std::string contents;
 
   ASSERT_TRUE(collector_.GetProcessTree(getpid(), output_file));
   ASSERT_TRUE(base::PathExists(output_file));
   EXPECT_TRUE(base::ReadFileToString(output_file, &contents));
-  EXPECT_LT(300, contents.size());
+  EXPECT_LT(300, contents.size()) << contents;
   EXPECT_EQ(collector_.get_bytes_written(), contents.size());
   base::DeleteFile(FilePath(output_file));
 
@@ -1463,7 +2601,7 @@ TEST_F(CrashCollectorTest, GetProcessTree) {
   ASSERT_TRUE(base::PathExists(output_file));
   std::string contents_pid_0;
   EXPECT_TRUE(base::ReadFileToString(output_file, &contents_pid_0));
-  EXPECT_GT(100, contents_pid_0.size());
+  EXPECT_GT(100, contents_pid_0.size()) << contents_pid_0;
   EXPECT_EQ(collector_.get_bytes_written(),
             contents.size() + contents_pid_0.size());
 }
@@ -1789,7 +2927,9 @@ void CrashCollectorTest::TestFinishCrashInCrashLoopMode(
         // contents inside the lambda.
         dbus::MessageReader reader(method_call);
         dbus::MessageReader array_reader(nullptr);
+        bool consent_already_checked = false;
         EXPECT_TRUE(reader.PopArray(&array_reader));
+        EXPECT_TRUE(reader.PopBool(&consent_already_checked));
         EXPECT_FALSE(reader.HasMoreData());
         dbus::MessageReader struct_reader_1(nullptr);
         EXPECT_TRUE(array_reader.PopStruct(&struct_reader_1));
@@ -1797,6 +2937,8 @@ void CrashCollectorTest::TestFinishCrashInCrashLoopMode(
         EXPECT_TRUE(array_reader.PopStruct(&struct_reader_2));
         EXPECT_FALSE(array_reader.HasMoreData())
             << "Should only have 2 files in array";
+        EXPECT_TRUE(consent_already_checked);
+
         std::string file_name_1;
         EXPECT_TRUE(struct_reader_1.PopString(&file_name_1));
         base::ScopedFD fd_1;
@@ -1835,21 +2977,21 @@ void CrashCollectorTest::TestFinishCrashInCrashLoopMode(
         EXPECT_TRUE(meta_file.IsValid());
         EXPECT_GT(meta_file.GetLength(), 0);
 
-        ASSERT_TRUE(base::ThreadTaskRunnerHandle::IsSet());
+        ASSERT_TRUE(base::SingleThreadTaskRunner::HasCurrentDefault());
         // Serial would normally be set by the transmission code before we tried
         // to make a reply from it. Since we are bypassing the transmission
         // code, we must set the serial number here.
         method_call->SetSerial(1);
         if (give_success_response) {
           empty_response = dbus::Response::FromMethodCall(method_call);
-          base::ThreadTaskRunnerHandle::Get()->PostTask(
+          base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
               FROM_HERE,
               base::BindOnce(std::move(*callback), empty_response.get()));
         } else {
           empty_error_response = dbus::ErrorResponse::FromMethodCall(
               method_call, "org.freedesktop.DBus.Error.Failed",
               "Things didn't work");
-          base::ThreadTaskRunnerHandle::Get()->PostTask(
+          base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
               FROM_HERE, base::BindOnce(std::move(*error_callback),
                                         empty_error_response.get()));
         }
@@ -1873,4 +3015,14 @@ TEST_F(CrashCollectorTest,
        DISABLED_ON_QEMU_FOR_MEMFD_CREATE(
            FinishCrashInCrashLoopModeErrorResponse)) {
   TestFinishCrashInCrashLoopMode(false);
+}
+
+TEST_F(CrashCollectorTest, ComputeSeverity_DefaultUnspecified) {
+  CrashCollector::ComputedCrashSeverity computed_severity =
+      collector_.ComputeSeverity("test");
+
+  EXPECT_EQ(computed_severity.crash_severity,
+            CrashCollector::CrashSeverity::kUnspecified);
+  EXPECT_EQ(computed_severity.product_group,
+            CrashCollector::Product::kUnspecified);
 }

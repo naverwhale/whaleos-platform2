@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,8 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/time/tick_clock.h>
 #include <libpasswordprovider/password.h>
 
@@ -120,8 +119,7 @@ class MountTracker {
       auto cache_mode = metadata_cache_enabled ? MetadataCache::Mode::kStandard
                                                : MetadataCache::Mode::kDisabled;
       cache = std::make_unique<MetadataCache>(
-          tick_clock,
-          base::TimeDelta::FromMicroseconds(kMetadataCacheLifetimeMicroseconds),
+          tick_clock, base::Microseconds(kMetadataCacheLifetimeMicroseconds),
           cache_mode);
     }
     MountInfo(const MountInfo&) = delete;
@@ -133,7 +131,6 @@ class MountTracker {
     SmbCredential credential;
     std::unique_ptr<SambaInterface> samba_interface;
     std::unique_ptr<MetadataCache> cache;
-
   };
 
   // Returns true if |mount_id| exists as a value in |samba_interface_map_|.

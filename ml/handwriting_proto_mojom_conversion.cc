@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -114,7 +114,7 @@ HandwritingRecognitionQueryFromProtoForTesting(
         point->x = point_proto.x();
         point->y = point_proto.y();
         if (point_proto.has_t()) {
-          point->t = base::TimeDelta::FromMilliseconds(point_proto.t());
+          point->t = base::Milliseconds(point_proto.t());
         }
 
         stroke->points.push_back(std::move(point));

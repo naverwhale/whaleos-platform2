@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,25 +9,26 @@ import os
 import re
 import struct
 
+
 class Util:
     """Helpers for generating C++."""
 
     @staticmethod
     def sanitize_name(name):
-        return re.sub('[^0-9a-zA-Z_]', '_', name)
+        return re.sub("[^0-9a-zA-Z_]", "_", name)
 
     @staticmethod
     def camel_to_snake(name):
-        pat = '((?<=[a-z0-9])[A-Z]|(?!^)[A-Z](?=[a-z]))'
-        return re.sub(pat, r'_\1', name).lower()
+        pat = "((?<=[a-z0-9])[A-Z]|(?!^)[A-Z](?=[a-z]))"
+        return re.sub(pat, r"_\1", name).lower()
 
     @staticmethod
     def hash_name(name):
         # This must match the hash function in chromium's
         # //base/metrics/metric_hashes.cc. >Q means 8 bytes, big endian.
-        name = name.encode('utf-8')
+        name = name.encode("utf-8")
         md5 = hashlib.md5(name)
-        return struct.unpack('>Q', md5.digest()[:8])[0]
+        return struct.unpack(">Q", md5.digest()[:8])[0]
 
     @staticmethod
     def event_name_hash(project_name, event_name):
@@ -50,9 +50,7 @@ class Util:
         """
         event_name = Util.sanitize_name(event_name)
         project_name = Util.sanitize_name(project_name)
-        # TODO(crbug.com/1148168): Once the minimum python version is 3.6+,
-        # rewrite this .format and others using f-strings.
-        return Util.hash_name('cros::{}::{}'.format(project_name, event_name))
+        return Util.hash_name(f"cros::{project_name}::{event_name}")
 
 
 class FileInfo:
@@ -78,23 +76,24 @@ class ProjectInfo:
         self.name_hash = Util.hash_name(self.name)
 
         # Set ID Type.
-        if project.id == 'uma':
-            self.id_type = 'kUmaId'
-        elif project.id == 'per-project':
-            self.id_type = 'kProjectId'
-        elif project.id == 'none':
-            self.id_type = 'kUnidentified'
+        if project.id == "uma":
+            self.id_type = "kUmaId"
+        elif project.id == "per-project":
+            self.id_type = "kProjectId"
+        elif project.id == "none":
+            self.id_type = "kUnidentified"
 
         # Set event type. This is inferred by checking all metrics within the
         # project. If any of a project's metrics is a raw string, then its
         # events are considered raw string events, even if they also contain
         # non-strings.
-        self.event_type = 'REGULAR'
+        self.event_type = "REGULAR"
         for event in project.events:
             for metric in event.metrics:
-                if metric.type == 'raw-string':
-                    self.event_type = 'RAW_STRING'
+                if metric.type == "raw-string":
+                    self.event_type = "RAW_STRING"
                     break
+
 
 class EventInfo:
     """Codegen-related info about an event."""
@@ -111,24 +110,51 @@ class MetricInfo:
         self.name = Util.sanitize_name(metric.name)
         self.hash = Util.hash_name(metric.name)
 
-        if metric.type == 'hmac-string':
-            self.type = 'std::string&'
-            self.setter = 'AddHmacMetric'
-        elif metric.type == 'int':
-            self.type = 'int64_t'
-            self.setter = 'AddIntMetric'
-        elif metric.type == 'raw-string':
-            self.type = 'std::string&'
-            self.setter = 'AddRawStringMetric'
+        if metric.type == "hmac-string":
+            self.setter_type = "std::string&"
+            self.setter = "AddHmacMetric"
+            self.getter_type = "std::string"
+            self.getter = "GetHmacMetricForTest"
+        elif metric.type == "int":
+            self.setter_type = "int64_t"
+            self.setter = "AddIntMetric"
+            self.getter_type = "int64_t"
+            self.getter = "GetIntMetricForTest"
+        elif metric.type == "raw-string":
+            self.setter_type = "std::string&"
+            self.setter = "AddRawStringMetric"
+            self.getter_type = "std::string"
+            self.getter = "GetRawStringMetricForTest"
+        elif metric.type == "double":
+            self.setter_type = "double"
+            self.setter = "AddDoubleMetric"
+            self.getter_type = "double"
+            self.getter = "GetDoubleMetricForTest"
+        elif metric.type == "int-array":
+            self.setter_type = "std::vector<int64_t>&"
+            self.max_size = metric.max_size
+            self.setter = "AddIntArrayMetric"
+            self.getter_type = "std::vector<int64_t>"
+            self.getter = "GetIntArrayMetricForTest"
         else:
-            raise ValueError('Invalid metric type.')
+            raise ValueError("Invalid metric type.")
 
 
 class Template:
     """Template for producing code from structured.xml."""
 
-    def __init__(self, model, dirname, basename, file_template,
-                 project_template, event_template, metric_template):
+    def __init__(
+        self,
+        model,
+        dirname,
+        basename,
+        file_template,
+        project_template,
+        event_template,
+        metric_template,
+        array_template,
+        is_header,
+    ):
         self.model = model
         self.dirname = dirname
         self.basename = basename
@@ -136,44 +162,78 @@ class Template:
         self.project_template = project_template
         self.event_template = event_template
         self.metric_template = metric_template
+        self.array_template = array_template
+        self.is_header = is_header
 
     def write_file(self):
         file_info = FileInfo(self.dirname, self.basename)
-        with open(file_info.filepath, 'w') as f:
+        with open(file_info.filepath, "w", encoding="utf-8") as f:
             f.write(self._stamp_file(file_info))
 
     def _stamp_file(self, file_info):
-        project_code = ''.join(self._stamp_project(file_info, p)
-            for p in self.model.projects)
+        project_code = "".join(
+            self._stamp_project(file_info, p) for p in self.model.projects
+        )
 
         project_names = sorted([p.name for p in self.model.projects])
-        project_hashes_list = ['UINT64_C({})'.format(Util.hash_name(n))
-            for n in project_names]
-        project_hashes_literal = '{' + ', '.join(project_hashes_list) + '}'
+        project_hashes_list = [
+            f"UINT64_C({Util.hash_name(n)})" for n in project_names
+        ]
+        project_hashes_literal = "{" + ", ".join(project_hashes_list) + "}"
 
-        return self.file_template.format(file=file_info,
+        return self.file_template.format(
+            file=file_info,
             project_code=project_code,
-            project_hashes=project_hashes_literal)
+            project_hashes=project_hashes_literal,
+        )
 
     def _stamp_project(self, file_info, project):
         project_info = ProjectInfo(project)
-        event_code = ''.join(self._stamp_event(file_info, project_info, event)
-            for event in project.events)
-        return self.project_template.format(file=file_info,
-            project=project_info,
-            event_code=event_code)
+        event_code = "".join(
+            self._stamp_event(file_info, project_info, event)
+            for event in project.events
+        )
+        return self.project_template.format(
+            file=file_info, project=project_info, event_code=event_code
+        )
 
     def _stamp_event(self, file_info, project_info, event):
         event_info = EventInfo(event, project_info)
-        metric_code = ''.join(self._stamp_metric(file_info, event_info, metric)
-                                                    for metric in event.metrics)
-        return self.event_template.format(file=file_info,
+        if self.is_header:
+            metric_code = "".join(
+                self._stamp_metric(file_info, event_info, metric)
+                for metric in event.metrics
+            )
+            metric_code += "".join(
+                self._stamp_array_metric(file_info, event_info, metric)
+                for metric in event.metrics
+                if metric.is_array()
+            )
+        else:
+            metric_code = "".join(
+                self._stamp_metric(file_info, event_info, metric)
+                for metric in event.metrics
+                if not metric.is_array()
+            )
+            metric_code += "".join(
+                self._stamp_array_metric(file_info, event_info, metric)
+                for metric in event.metrics
+                if metric.is_array()
+            )
+
+        return self.event_template.format(
+            file=file_info,
             project=project_info,
             event=event_info,
-            metric_code=metric_code)
+            metric_code=metric_code,
+        )
 
     def _stamp_metric(self, file_info, event_info, metric):
         return self.metric_template.format(
-            file=file_info,
-            event=event_info,
-            metric=MetricInfo(metric))
+            file=file_info, event=event_info, metric=MetricInfo(metric)
+        )
+
+    def _stamp_array_metric(self, file_info, event_info, metric):
+        return self.array_template.format(
+            file=file_info, event=event_info, metric=MetricInfo(metric)
+        )

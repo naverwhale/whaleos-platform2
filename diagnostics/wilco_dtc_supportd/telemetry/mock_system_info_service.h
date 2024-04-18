@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,6 +12,7 @@
 #include "diagnostics/wilco_dtc_supportd/telemetry/system_info_service.h"
 
 namespace diagnostics {
+namespace wilco {
 
 class MockSystemInfoService : public SystemInfoService {
  public:
@@ -26,6 +27,7 @@ class MockSystemInfoService : public SystemInfoService {
   MOCK_METHOD(bool, GetOsMilestone, (int*), (override));
 };
 
+}  // namespace wilco
 }  // namespace diagnostics
 
 #endif  // DIAGNOSTICS_WILCO_DTC_SUPPORTD_TELEMETRY_MOCK_SYSTEM_INFO_SERVICE_H_

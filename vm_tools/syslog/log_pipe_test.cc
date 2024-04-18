@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include <sys/socket.h>
@@ -8,12 +8,12 @@
 #include <base/files/file_util.h>
 #include <base/run_loop.h>
 #include <base/strings/stringprintf.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/test/task_environment.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/message.h>
 #include <gtest/gtest.h>
-#include <vm_concierge/proto_bindings/concierge_service.pb.h>
+#include <vm_concierge/concierge_service.pb.h>
 
 #include "vm_tools/syslog/log_pipe.h"
 
@@ -77,7 +77,7 @@ class LogPipeTest : public ::testing::Test {
   }
 
   std::string RecvOnDestSocket(int64_t cid) {
-    char buf[kMaxSyslogRecord + 1];
+    char buf[kMaxSyslogRecord + 1] = {0};
     auto ret =
         recv(dest_sockets_[cid].get(), buf, kMaxSyslogRecord, MSG_DONTWAIT);
     return ret > 0 ? std::string(buf) : std::string();
@@ -120,7 +120,7 @@ TEST_F(LogPipeTest, ShutdownNoCrash) {
 
   base::RunLoop().RunUntilIdle();
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(
           [](std::unique_ptr<LogPipeManager> manager) { manager->OnSigterm(); },

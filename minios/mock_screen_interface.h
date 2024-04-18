@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,9 @@
 
 #include <string>
 
+#include <brillo/errors/error.h>
 #include <gmock/gmock.h>
+#include <minios/proto_bindings/minios.pb.h>
 
 #include "minios/screen_interface.h"
 #include "minios/screen_types.h"
@@ -27,6 +29,9 @@ class MockScreenInterface : public ScreenInterface {
   MOCK_METHOD(void, Reset, ());
   MOCK_METHOD(ScreenType, GetType, ());
   MOCK_METHOD(std::string, GetName, ());
+  MOCK_METHOD(State, GetState, ());
+  MOCK_METHOD(bool, MoveForward, (brillo::ErrorPtr * err));
+  MOCK_METHOD(bool, MoveBackward, (brillo::ErrorPtr * err));
 };
 
 }  // namespace minios

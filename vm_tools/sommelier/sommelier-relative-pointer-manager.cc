@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -68,8 +68,8 @@ static void sl_destroy_host_relative_pointer(struct wl_resource* resource) {
           wl_resource_get_user_data(resource));
 
   zwp_relative_pointer_v1_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_relative_pointer_destroy(struct wl_client* client,
@@ -93,8 +93,8 @@ static void sl_destroy_host_relative_pointer_manager(
           wl_resource_get_user_data(resource));
 
   zwp_relative_pointer_manager_v1_destroy(host->proxy);
-  wl_resource_set_user_data(resource, NULL);
-  free(host);
+  wl_resource_set_user_data(resource, nullptr);
+  delete host;
 }
 
 static void sl_relative_pointer_manager_destroy(struct wl_client* client,
@@ -115,23 +115,19 @@ static void sl_relative_pointer_manager_get_relative_pointer(
   struct wl_resource* relative_pointer_resource =
       wl_resource_create(client, &zwp_relative_pointer_v1_interface, 1, id);
   struct sl_host_relative_pointer* relative_pointer_host =
-      static_cast<sl_host_relative_pointer*>(
-          malloc(sizeof(*relative_pointer_host)));
-  assert(relative_pointer_host);
+      new sl_host_relative_pointer();
   relative_pointer_host->resource = relative_pointer_resource;
   relative_pointer_host->ctx = host->ctx;
   relative_pointer_host->proxy =
-      zwp_relative_pointer_manager_v1_get_relative_pointer(
-          host->ctx->relative_pointer_manager->internal, host_pointer->proxy);
+      zwp_relative_pointer_manager_v1_get_relative_pointer(host->proxy,
+                                                           host_pointer->proxy);
   wl_resource_set_implementation(
       relative_pointer_resource, &sl_relative_pointer_implementation,
       relative_pointer_host, sl_destroy_host_relative_pointer);
-  zwp_relative_pointer_v1_set_user_data(relative_pointer_host->proxy,
-                                        relative_pointer_host);
   zwp_relative_pointer_v1_add_listener(relative_pointer_host->proxy,
                                        &sl_relative_pointer_listener,
                                        relative_pointer_host);
-}  // NOLINT(whitespace/indent)
+}
 
 static struct zwp_relative_pointer_manager_v1_interface
     sl_relative_pointer_manager_implementation = {
@@ -147,8 +143,7 @@ static void sl_bind_host_relative_pointer_manager(struct wl_client* client,
   struct sl_relative_pointer_manager* relative_pointer_manager =
       ctx->relative_pointer_manager;
   struct sl_host_relative_pointer_manager* host =
-      static_cast<sl_host_relative_pointer_manager*>(malloc(sizeof(*host)));
-  assert(host);
+      new sl_host_relative_pointer_manager();
   host->ctx = ctx;
   host->resource = wl_resource_create(
       client, &zwp_relative_pointer_manager_v1_interface, 1, id);

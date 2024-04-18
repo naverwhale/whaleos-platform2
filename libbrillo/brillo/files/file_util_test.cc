@@ -1,20 +1,40 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "brillo/files/file_util_test.h"
 
+#include <iterator>
+
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/rand_util.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <brillo/files/file_util.h>
 #include <brillo/files/safe_fd.h>
 
 namespace brillo {
+
+namespace {
+
+base::ScopedClosureRunner SetCurrentDirectoryScoped(base::FilePath change_to) {
+  base::FilePath current;
+  CHECK(base::GetCurrentDirectory(&current));
+
+  auto scoped_callback = base::ScopedClosureRunner(base::BindOnce(
+      [](const base::FilePath& current) {
+        ASSERT_TRUE(base::SetCurrentDirectory(current));
+      },
+      current));
+
+  CHECK(base::SetCurrentDirectory(change_to));
+  return scoped_callback;
+}
+
+}  // namespace
 
 #define TO_STRING_HELPER(x)      \
   case brillo::SafeFD::Error::x: \
@@ -46,8 +66,8 @@ std::ostream& operator<<(std::ostream& os, const brillo::SafeFD::Error err) {
 std::string GetRandomSuffix() {
   const int kBufferSize = 6;
   unsigned char buffer[kBufferSize];
-  base::RandBytes(buffer, base::size(buffer));
-  return base::HexEncode(buffer, base::size(buffer));
+  base::RandBytes(buffer, std::size(buffer));
+  return base::HexEncode(buffer, std::size(buffer));
 }
 
 void FileTest::SetUpTestCase() {
@@ -69,6 +89,11 @@ FileTest::FileTest() {
   SafeFD::SetRootPathForTesting(temp_dir_path_.data());
   root_ = SafeFD::Root().first;
   CHECK(root_.is_valid());
+}
+
+FileTest::~FileTest() {
+  // Restore root path to avoid UaF.
+  SafeFD::SetRootPathForTesting("/");
 }
 
 bool FileTest::SetupSubdir() {
@@ -282,6 +307,58 @@ TEST_F(FileUtilTest, OpenOrRemakeFile_IOError) {
   std::tie(file, err) = OpenOrRemakeFile(&dir, kFileName);
   EXPECT_EQ(err, SafeFD::Error::kIOError);
   EXPECT_FALSE(file.is_valid());
+}
+
+TEST_F(FileUtilTest, SimplifyPath_Success) {
+  EXPECT_EQ(SimplifyPath(base::FilePath("/")).value(), "/");
+  EXPECT_EQ(SimplifyPath(base::FilePath("/..")).value(), "/");
+  EXPECT_EQ(SimplifyPath(base::FilePath("/../..")).value(), "/");
+  EXPECT_EQ(SimplifyPath(base::FilePath("/a/..")).value(), "/");
+  EXPECT_EQ(SimplifyPath(base::FilePath("/../a")).value(), "/a");
+  EXPECT_EQ(SimplifyPath(base::FilePath("/a/b/c////.././d/../..")).value(),
+            "/a");
+
+  EXPECT_EQ(SimplifyPath(base::FilePath("a")).value(), "a");
+  EXPECT_EQ(SimplifyPath(base::FilePath("a/b/c/d")).value(), "a/b/c/d");
+  EXPECT_EQ(SimplifyPath(base::FilePath("a////b/c/.//./d//")).value(),
+            "a/b/c/d");
+  EXPECT_EQ(SimplifyPath(base::FilePath("../../a/b/c/../d/../..")).value(),
+            "../../a");
+}
+
+TEST_F(FileUtilTest, DeleteFileRelative_Success) {
+  ASSERT_TRUE(SetupSubdir());
+
+  auto scoped_callback =
+      SetCurrentDirectoryScoped(base::FilePath(temp_dir_path_.data()));
+
+  ASSERT_TRUE(WriteFile(""));
+
+  EXPECT_TRUE(brillo::DeleteFile(base::FilePath(kSubdirName)
+                                     .Append("..")
+                                     .Append(kSubdirName)
+                                     .Append(kFileName)));
+  EXPECT_FALSE(base::PathExists(file_path_));
+
+  // Check for success when the path does not exist.
+  EXPECT_TRUE(brillo::DeleteFile(
+      base::FilePath(std::string(kSubdirName) + "/" + kFileName)));
+}
+
+TEST_F(FileUtilTest, DeletePathRecursivelyRelative_Success) {
+  ASSERT_TRUE(SetupSubdir());
+
+  auto scoped_callback =
+      SetCurrentDirectoryScoped(base::FilePath(temp_dir_path_.data()));
+
+  ASSERT_TRUE(WriteFile(""));
+
+  EXPECT_TRUE(brillo::DeletePathRecursively(
+      base::FilePath(kSubdirName).Append("..").Append(kSubdirName)));
+  EXPECT_FALSE(base::PathExists(sub_dir_path_));
+
+  // Check for success when the path does not exist.
+  EXPECT_TRUE(brillo::DeletePathRecursively(base::FilePath(kSubdirName)));
 }
 
 }  // namespace brillo

@@ -1,10 +1,14 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "virtual_file_provider/fuse_main.h"
 
+#include <unistd.h>
+
 #include <algorithm>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -14,9 +18,7 @@
 #include <base/check_op.h>
 #include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/stl_util.h>
 #include <base/strings/stringprintf.h>
 
 #include "virtual_file_provider/operation_throttle.h"
@@ -162,8 +164,8 @@ void* Init(struct fuse_conn_info* conn) {
 
 int FuseMain(const base::FilePath& mount_path,
              FuseMainDelegate* delegate,
-             base::Optional<uid_t> userId,
-             base::Optional<gid_t> groupId) {
+             std::optional<uid_t> userId,
+             std::optional<gid_t> groupId) {
   std::string mount_options = "noexec";  // disallow code execution
   if (userId || groupId) {
     // allow others to access files
@@ -194,7 +196,7 @@ int FuseMain(const base::FilePath& mount_path,
   FusePrivateData private_data;
   private_data.delegate = delegate;
   private_data.operation_throttle = &operation_throttle;
-  return fuse_main(base::size(fuse_argv), const_cast<char**>(fuse_argv),
+  return fuse_main(std::size(fuse_argv), const_cast<char**>(fuse_argv),
                    &operations, &private_data);
 }
 

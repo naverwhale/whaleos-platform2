@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,6 @@
 #include <memory>
 #include <string>
 
-#include <base/macros.h>
 #include <mojo/public/cpp/bindings/pending_receiver.h>
 #include <mojo/public/cpp/bindings/receiver.h>
 #include <tensorflow/lite/model.h>
@@ -62,11 +61,10 @@ class ModelImpl : public chromeos::machine_learning::mojom::Model {
   void set_disconnect_handler(base::OnceClosure disconnect_handler);
 
   // chromeos::machine_learning::mojom::Model:
+  void REMOVED_0(mojo::PendingReceiver<
+                     chromeos::machine_learning::mojom::GraphExecutor> receiver,
+                 CreateGraphExecutorCallback callback) override;
   void CreateGraphExecutor(
-      mojo::PendingReceiver<chromeos::machine_learning::mojom::GraphExecutor>
-          receiver,
-      CreateGraphExecutorCallback callback) override;
-  void CreateGraphExecutorWithOptions(
       chromeos::machine_learning::mojom::GraphExecutorOptionsPtr options,
       mojo::PendingReceiver<chromeos::machine_learning::mojom::GraphExecutor>
           receiver,

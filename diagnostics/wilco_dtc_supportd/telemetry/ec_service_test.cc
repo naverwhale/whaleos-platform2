@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,10 +11,10 @@
 #include <tuple>
 
 #include <base/barrier_closure.h>
-#include <base/bind.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
 #include <base/run_loop.h>
 #include <base/test/task_environment.h>
 #include <gmock/gmock.h>
@@ -23,10 +23,9 @@
 #include "diagnostics/wilco_dtc_supportd/ec_constants.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/ec_service.h"
 #include "diagnostics/wilco_dtc_supportd/telemetry/ec_service_test_utils.h"
-#include "mojo/wilco_dtc_supportd.mojom.h"
 
 namespace diagnostics {
-
+namespace wilco {
 namespace {
 
 using testing::_;
@@ -35,7 +34,6 @@ using testing::StrictMock;
 
 using EcEvent = EcService::EcEvent;
 using EcEventReason = EcService::EcEvent::Reason;
-using MojoEvent = chromeos::wilco_dtc_supportd::mojom::WilcoDtcSupportdEvent;
 
 // Tests for EcEvent.
 //
@@ -190,5 +188,5 @@ TEST_F(StartedEcServiceTest, ReadManyEvent) {
 }
 
 }  // namespace
-
+}  // namespace wilco
 }  // namespace diagnostics

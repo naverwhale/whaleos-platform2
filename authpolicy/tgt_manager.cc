@@ -1,10 +1,11 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "authpolicy/tgt_manager.h"
 
 #include <algorithm>
+#include <tuple>
 #include <vector>
 
 #include <base/check.h>
@@ -14,8 +15,9 @@
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/strings/stringprintf.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/platform_thread.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/time/time.h>
 
 #include "authpolicy/anonymizer.h"
 #include "authpolicy/authpolicy_flags.h"
@@ -89,7 +91,7 @@ const char kKrb5TraceEnvKey[] = "KRB5_TRACE";
 // Maximum kinit tries.
 const int kKinitMaxTries = 60;
 // Wait interval between two kinit tries.
-const int kKinitRetryWaitSeconds = 1;
+constexpr base::TimeDelta kKinitRetryWait = base::Seconds(1);
 
 // Keys for interpreting kinit, klist and kpasswd output.
 const char kKeyBadPrincipal[] =
@@ -125,8 +127,8 @@ bool IsMachine(const std::string& principal) {
 
 // Reads the file at |path| into |data|. Returns |ERROR_LOCAL_IO| if the file
 // could not be read.
-WARN_UNUSED_RESULT ErrorType ReadFile(const base::FilePath& path,
-                                      std::string* data) {
+[[nodiscard]] ErrorType ReadFile(const base::FilePath& path,
+                                 std::string* data) {
   data->clear();
   if (!base::ReadFileToStringWithMaxSize(path, data, kKrb5FileSizeLimit)) {
     PLOG(ERROR) << "Failed to read '" << path.value() << "'";
@@ -160,8 +162,8 @@ std::ostream& operator<<(std::ostream& os,
 }
 
 // In case kinit failed, checks the output and returns appropriate error codes.
-WARN_UNUSED_RESULT ErrorType GetKinitError(const ProcessExecutor& kinit_cmd,
-                                           bool is_machine_principal) {
+[[nodiscard]] ErrorType GetKinitError(const ProcessExecutor& kinit_cmd,
+                                      bool is_machine_principal) {
   DCHECK_NE(0, kinit_cmd.GetExitCode());
   const std::string& kinit_out = kinit_cmd.GetStdout();
   const std::string& kinit_err = kinit_cmd.GetStderr();
@@ -213,7 +215,7 @@ WARN_UNUSED_RESULT ErrorType GetKinitError(const ProcessExecutor& kinit_cmd,
 }
 
 // In case klist failed, checks the output and returns appropriate error codes.
-WARN_UNUSED_RESULT ErrorType GetKListError(const ProcessExecutor& klist_cmd) {
+[[nodiscard]] ErrorType GetKListError(const ProcessExecutor& klist_cmd) {
   DCHECK_NE(0, klist_cmd.GetExitCode());
   const std::string& klist_out = klist_cmd.GetStdout();
   const std::string& klist_err = klist_cmd.GetStderr();
@@ -238,8 +240,8 @@ WARN_UNUSED_RESULT ErrorType GetKListError(const ProcessExecutor& klist_cmd) {
 
 // In case kpasswd failed, checks the output and returns appropriate error
 // codes.
-WARN_UNUSED_RESULT ErrorType GetKPasswdError(const ProcessExecutor& kpasswd_cmd,
-                                             bool is_machine_principal) {
+[[nodiscard]] ErrorType GetKPasswdError(const ProcessExecutor& kpasswd_cmd,
+                                        bool is_machine_principal) {
   DCHECK_NE(0, kpasswd_cmd.GetExitCode());
   const std::string& kpasswd_err = kpasswd_cmd.GetStderr();
 
@@ -397,7 +399,7 @@ ErrorType TgtManager::GetKerberosFiles(KerberosFiles* files) {
 }
 
 void TgtManager::SetKerberosFilesChangedCallback(
-    const base::Closure& callback) {
+    const base::RepeatingClosure& callback) {
   kerberos_files_changed_ = callback;
 }
 
@@ -555,7 +557,7 @@ bool TgtManager::Restore(const protos::TgtState& state) {
   // GetKerberosFiles(). Don't exit here since we'd be in an undefined state.
   // Even if this fails here, it'll eventually recover since many instances
   // write the config.
-  ignore_result(WriteKrb5Conf());
+  std::ignore = WriteKrb5Conf();
 
   // Trigger files changed signal.
   kerberos_files_dirty_ = true;
@@ -581,8 +583,7 @@ ErrorType TgtManager::RunKinit(ProcessExecutor* kinit_cmd,
   for (tries = 1; tries <= max_tries; ++tries) {
     // Sleep between subsequent tries (probably a propagation issue).
     if (tries > 1 && !kinit_retry_sleep_disabled_for_testing_) {
-      base::PlatformThread::Sleep(
-          base::TimeDelta::FromSeconds(kKinitRetryWaitSeconds));
+      base::PlatformThread::Sleep(kKinitRetryWait);
     }
     SetupKrb5Trace(kinit_cmd);
 
@@ -710,10 +711,10 @@ void TgtManager::UpdateTgtAutoRenewal() {
                   << FormatTimeDelta(delay_seconds) << " " << lifetime;
 
         tgt_renewal_callback_.Reset(
-            base::Bind(&TgtManager::AutoRenewTgt, base::Unretained(this)));
-        base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+            base::BindOnce(&TgtManager::AutoRenewTgt, base::Unretained(this)));
+        base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
             FROM_HERE, tgt_renewal_callback_.callback(),
-            base::TimeDelta::FromSeconds(delay_seconds));
+            base::Seconds(delay_seconds));
       }
     } else if (error == ERROR_KERBEROS_TICKET_EXPIRED) {
       // Expiry is the most likely error, print a nice message.

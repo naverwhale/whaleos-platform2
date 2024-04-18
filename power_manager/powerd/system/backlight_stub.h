@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 #define POWER_MANAGER_POWERD_SYSTEM_BACKLIGHT_STUB_H_
 
 #include <base/compiler_specific.h>
-#include <base/macros.h>
 #include <base/observer_list.h>
 #include <base/time/time.h>
 
@@ -14,8 +13,7 @@
 #include "power_manager/powerd/system/backlight_interface.h"
 #include "power_manager/powerd/system/backlight_observer.h"
 
-namespace power_manager {
-namespace system {
+namespace power_manager::system {
 
 // Stub implementation of BacklightInterface for testing.
 class BacklightStub : public BacklightInterface {
@@ -26,7 +24,7 @@ class BacklightStub : public BacklightInterface {
   BacklightStub(const BacklightStub&) = delete;
   BacklightStub& operator=(const BacklightStub&) = delete;
 
-  ~BacklightStub() override;
+  ~BacklightStub() override = default;
 
   void set_clock(Clock* clock) { clock_ = clock; }
   void set_device_exists(bool exists) { device_exists_ = exists; }
@@ -49,7 +47,7 @@ class BacklightStub : public BacklightInterface {
   // BacklightInterface implementation:
   void AddObserver(BacklightObserver* observer) override;
   void RemoveObserver(BacklightObserver* observer) override;
-  bool DeviceExists() override;
+  bool DeviceExists() const override;
   int64_t GetMaxBrightnessLevel() override;
   int64_t GetCurrentBrightnessLevel() override;
   bool SetBrightnessLevel(int64_t level, base::TimeDelta interval) override;
@@ -90,7 +88,6 @@ class BacklightStub : public BacklightInterface {
   BrightnessScale scale_ = BrightnessScale::kUnknown;
 };
 
-}  // namespace system
-}  // namespace power_manager
+}  // namespace power_manager::system
 
 #endif  // POWER_MANAGER_POWERD_SYSTEM_BACKLIGHT_STUB_H_

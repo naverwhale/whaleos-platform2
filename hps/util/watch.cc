@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -37,20 +37,20 @@ int Watch(std::unique_ptr<hps::HPS> hps,
     std::cerr << args[1] << ": feature number out of range (0,1)" << std::endl;
     return 1;
   }
-  hps->Enable(feat);
-  for (;;) {
-    hps::FeatureResult feature_result;
-    uint8_t last_inference_result = 0;
-    feature_result = hps->Result(feat);
-    if (feature_result.valid) {
-      if (last_inference_result != feature_result.inference_result) {
-        last_inference_result = feature_result.inference_result;
-        std::cout << "Result = " << last_inference_result << std::endl;
-      }
-    } else {
-      std::cout << "Invalid result" << std::endl;
+  if (!hps->Enable(feat)) {
+    std::cerr << "Enable feature failure." << std::endl;
+    return 1;
+  }
+  hps::FeatureResult last_inference_result = {0};
+  for (unsigned i = 0;; i++) {
+    hps::FeatureResult feature_result = hps->Result(feat);
+    if (0 == i || last_inference_result != feature_result) {
+      std::cout << "Result(" << i
+                << ") = " << static_cast<int>(feature_result.inference_result)
+                << (feature_result.valid ? "" : " (Invalid)") << std::endl;
     }
-    base::PlatformThread::Sleep(base::TimeDelta::FromMilliseconds(100));
+    last_inference_result = feature_result;
+    base::PlatformThread::Sleep(base::Milliseconds(100));
   }
 }
 

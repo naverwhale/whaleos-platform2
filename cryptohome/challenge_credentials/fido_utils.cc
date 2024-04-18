@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,16 +11,17 @@
 
 #include <base/logging.h>
 #include <brillo/secure_blob.h>
+#include <cryptohome/proto_bindings/fido.pb.h>
+#include <libhwsec-foundation/crypto/sha.h>
 
-#include "cryptohome/crypto/sha.h"
-#include "cryptohome/fido.pb.h"
+using ::hwsec_foundation::Sha256ToSecureBlob;
 
 namespace cryptohome {
 
 constexpr char kCrosLoginPrefix[] = "chromeos:login:";
 constexpr char kIconUrl[] = "http://www.noicon.google.com";
 // Default FIDO request timeout 30s.
-constexpr base::TimeDelta kRequestTimeOut = base::TimeDelta::FromSeconds(30);
+constexpr base::TimeDelta kRequestTimeOut = base::Seconds(30);
 
 // MakeCredential only uses ES256 algorithms.
 constexpr int kCOSEAlgorithmIdentifierES256 = -7;

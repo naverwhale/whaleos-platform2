@@ -1,10 +1,11 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef LIBBRILLO_POLICY_MOCK_DEVICE_POLICY_H_
 #define LIBBRILLO_POLICY_MOCK_DEVICE_POLICY_H_
 
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -48,11 +49,12 @@ namespace policy {
 class MockDevicePolicy : public DevicePolicy {
  public:
   MockDevicePolicy() {
-    ON_CALL(*this, LoadPolicy()).WillByDefault(testing::Return(true));
+    ON_CALL(*this, LoadPolicy(/*delete_invalid_files=*/testing::_))
+        .WillByDefault(testing::Return(true));
   }
   ~MockDevicePolicy() override = default;
 
-  MOCK_METHOD(bool, LoadPolicy, (), (override));
+  MOCK_METHOD(bool, LoadPolicy, (bool), (override));
   MOCK_METHOD(bool, IsEnterpriseEnrolled, (), (const, override));
 
   MOCK_METHOD(bool, GetPolicyRefreshRate, (int*), (const, override));
@@ -62,10 +64,19 @@ class MockDevicePolicy : public DevicePolicy {
   MOCK_METHOD(bool, GetDataRoamingEnabled, (bool*), (const, override));
   MOCK_METHOD(bool, GetAllowNewUsers, (bool*), (const, override));
   MOCK_METHOD(bool, GetMetricsEnabled, (bool*), (const, override));
+  MOCK_METHOD(bool, GetHwDataUsageEnabled, (bool*), (const, override));
+  MOCK_METHOD(bool, GetReportSystemInfo, (bool*), (const, override));
+  MOCK_METHOD(bool, GetReportCpuInfo, (bool*), (const, override));
+  MOCK_METHOD(bool, GetReportGraphicsStatus, (bool*), (const, override));
+  MOCK_METHOD(bool, GetReportMemoryInfo, (bool*), (const, override));
+  MOCK_METHOD(bool, GetReportNetworkConfig, (bool*), (const, override));
   MOCK_METHOD(bool, GetReportVersionInfo, (bool*), (const, override));
   MOCK_METHOD(bool, GetReportActivityTimes, (bool*), (const, override));
   MOCK_METHOD(bool, GetReportBootMode, (bool*), (const, override));
-  MOCK_METHOD(bool, GetEphemeralUsersEnabled, (bool*), (const, override));
+  MOCK_METHOD(bool,
+              GetEphemeralSettings,
+              (EphemeralSettings*),
+              (const, override));
   MOCK_METHOD(bool, GetReleaseChannel, (std::string*), (const, override));
   MOCK_METHOD(bool, GetReleaseChannelDelegated, (bool*), (const, override));
   MOCK_METHOD(bool, GetReleaseLtsTag, (std::string*), (const, override));
@@ -102,6 +113,10 @@ class MockDevicePolicy : public DevicePolicy {
               GetSecondFactorAuthenticationMode,
               (int*),
               (const, override));
+  MOCK_METHOD(std::optional<bool>,
+              GetRunAutomaticCleanupOnLogin,
+              (),
+              (const, override));
   MOCK_METHOD(bool,
               GetDisallowedTimeIntervals,
               (std::vector<WeeklyTimeInterval>*),
@@ -129,6 +144,18 @@ class MockDevicePolicy : public DevicePolicy {
   MOCK_METHOD(bool,
               GetDeviceDebugPacketCaptureAllowed,
               (bool*),
+              (const, override));
+  MOCK_METHOD(bool,
+              GetDeviceKeylockerForStorageEncryptionEnabled,
+              (bool*),
+              (const, override));
+  MOCK_METHOD(std::optional<bool>,
+              GetReportDeviceSecurityStatus,
+              (),
+              (const, override));
+  MOCK_METHOD(std::optional<bool>,
+              GetDeviceReportXDREvents,
+              (),
               (const, override));
 };
 }  // namespace policy

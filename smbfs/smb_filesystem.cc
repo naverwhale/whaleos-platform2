@@ -1,16 +1,17 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "smbfs/smb_filesystem.h"
 
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/posix/safe_strerror.h>
@@ -102,7 +103,7 @@ SmbFilesystem::ConnectError SmbFilesystem::EnsureConnected() {
   SMBCFILE* dir = nullptr;
   int err = samba_impl_->OpenDirectory(resolved_share_path_, &dir);
   if (err) {
-    LOG(INFO) << "EnsureConnected OpenDirectory failed";
+    LOG(INFO) << "EnsureConnected OpenDirectory failed: " << err;
     switch (err) {
       case EPERM:
       case EACCES:
@@ -296,6 +297,7 @@ void SmbFilesystem::OnRequestCredentialsDone(
 
 void SmbFilesystem::StatFs(std::unique_ptr<StatFsRequest> request,
                            fuse_ino_t inode) {
+  VLOG(2) << "StatFs inode: " << inode;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::StatFsInternal, base::Unretained(this),
@@ -304,11 +306,16 @@ void SmbFilesystem::StatFs(std::unique_ptr<StatFsRequest> request,
 
 void SmbFilesystem::StatFsInternal(std::unique_ptr<StatFsRequest> request,
                                    fuse_ino_t inode) {
+  VLOG(2) << "StatFsInternal inode: " << inode;
+
   if (request->IsInterrupted()) {
     return;
   }
 
   std::string share_file_path = ShareFilePathFromInode(inode);
+  VLOG(2) << "StatFsInternal inode: " << inode
+          << " -> path: " << share_file_path;
+
   struct statvfs smb_statvfs = {0};
   int error = samba_impl_->StatVfs(share_file_path, &smb_statvfs);
   if (error) {
@@ -324,6 +331,7 @@ void SmbFilesystem::StatFsInternal(std::unique_ptr<StatFsRequest> request,
 void SmbFilesystem::Lookup(std::unique_ptr<EntryRequest> request,
                            fuse_ino_t parent_inode,
                            const std::string& name) {
+  VLOG(2) << "Lookup parent_inode: " << parent_inode << " name: " << name;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::LookupInternal, base::Unretained(this),
@@ -333,6 +341,8 @@ void SmbFilesystem::Lookup(std::unique_ptr<EntryRequest> request,
 void SmbFilesystem::LookupInternal(std::unique_ptr<EntryRequest> request,
                                    fuse_ino_t parent_inode,
                                    const std::string& name) {
+  VLOG(2) << "LookupInternal parent_inode: " << parent_inode
+          << " name: " << name;
   if (request->IsInterrupted()) {
     return;
   }
@@ -342,6 +352,8 @@ void SmbFilesystem::LookupInternal(std::unique_ptr<EntryRequest> request,
       << "Lookup on invalid parent inode: " << parent_inode;
   const base::FilePath file_path = parent_path.Append(name);
   const std::string share_file_path = MakeShareFilePath(file_path);
+  VLOG(2) << "LookupInternal parent_inode: " << parent_inode
+          << " name: " << name << " -> path: " << share_file_path;
 
   ino_t inode = inode_map_.IncInodeRef(file_path);
   struct stat smb_stat = {0};
@@ -373,12 +385,14 @@ void SmbFilesystem::LookupInternal(std::unique_ptr<EntryRequest> request,
 }
 
 void SmbFilesystem::Forget(fuse_ino_t inode, uint64_t count) {
+  VLOG(2) << "Forget inode: " << inode << " count: " << count;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE, base::BindOnce(&SmbFilesystem::ForgetInternal,
                                 base::Unretained(this), inode, count));
 }
 
 void SmbFilesystem::ForgetInternal(fuse_ino_t inode, uint64_t count) {
+  VLOG(2) << "ForgetInternal inode: " << inode << " count: " << count;
   if (inode_map_.Forget(inode, count)) {
     // The inode was removed, invalidate any cached stat information.
     EraseCachedInodeStat(inode);
@@ -387,6 +401,7 @@ void SmbFilesystem::ForgetInternal(fuse_ino_t inode, uint64_t count) {
 
 void SmbFilesystem::GetAttr(std::unique_ptr<AttrRequest> request,
                             fuse_ino_t inode) {
+  VLOG(2) << "GetAttr inode: " << inode;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::GetAttrInternal, base::Unretained(this),
@@ -395,12 +410,15 @@ void SmbFilesystem::GetAttr(std::unique_ptr<AttrRequest> request,
 
 void SmbFilesystem::GetAttrInternal(std::unique_ptr<AttrRequest> request,
                                     fuse_ino_t inode) {
+  VLOG(2) << "GetAttrInternal inode: " << inode;
   if (request->IsInterrupted()) {
     return;
   }
 
   struct stat smb_stat = {0};
   const std::string share_file_path = ShareFilePathFromInode(inode);
+  VLOG(2) << "GetAttrInternal inode: " << inode
+          << " -> path: " << share_file_path;
 
   if (!GetCachedInodeStat(inode, &smb_stat)) {
     int error = samba_impl_->Stat(share_file_path, &smb_stat);
@@ -431,9 +449,10 @@ void SmbFilesystem::GetAttrInternal(std::unique_ptr<AttrRequest> request,
 
 void SmbFilesystem::SetAttr(std::unique_ptr<AttrRequest> request,
                             fuse_ino_t inode,
-                            base::Optional<uint64_t> file_handle,
+                            std::optional<uint64_t> file_handle,
                             const struct stat& attr,
                             int to_set) {
+  VLOG(2) << "SetAttr inode: " << inode << " to_set: " << to_set;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE, base::BindOnce(&SmbFilesystem::SetAttrInternal,
                                 base::Unretained(this), std::move(request),
@@ -442,9 +461,10 @@ void SmbFilesystem::SetAttr(std::unique_ptr<AttrRequest> request,
 
 void SmbFilesystem::SetAttrInternal(std::unique_ptr<AttrRequest> request,
                                     fuse_ino_t inode,
-                                    base::Optional<uint64_t> file_handle,
+                                    std::optional<uint64_t> file_handle,
                                     const struct stat& attr,
                                     int to_set) {
+  VLOG(2) << "SetAttrInternal inode: " << inode << " to_set: " << to_set;
   if (request->IsInterrupted()) {
     return;
   }
@@ -465,11 +485,13 @@ void SmbFilesystem::SetAttrInternal(std::unique_ptr<AttrRequest> request,
   }
 
   const std::string share_file_path = ShareFilePathFromInode(inode);
+  VLOG(2) << "SetAttrInternal inode: " << inode
+          << " -> path: " << share_file_path;
 
   struct stat smb_stat = {0};
   int error = samba_impl_->Stat(share_file_path, &smb_stat);
   if (error) {
-    VLOG(1) << "Stat path: " << share_file_path
+    VLOG(1) << "Stat path (during SetAttrInternal): " << share_file_path
             << " failed: " << base::safe_strerror(error);
     request->ReplyError(error);
     return;
@@ -504,10 +526,12 @@ void SmbFilesystem::SetAttrInternal(std::unique_ptr<AttrRequest> request,
 }
 
 int SmbFilesystem::SetFileSizeInternal(const std::string& share_file_path,
-                                       base::Optional<uint64_t> file_handle,
+                                       std::optional<uint64_t> file_handle,
                                        off_t size,
                                        const struct stat& current_stat,
                                        struct stat* reply_stat) {
+  VLOG(2) << "SetFileSizeInternal path: " << share_file_path
+          << " size: " << size;
   DCHECK(reply_stat);
 
   if (current_stat.st_mode & S_IFDIR) {
@@ -524,6 +548,7 @@ int SmbFilesystem::SetFileSizeInternal(const std::string& share_file_path,
   if (file_handle) {
     file = LookupOpenFile(*file_handle);
     if (!file) {
+      VLOG(1) << "Bad file handle";
       return EBADF;
     }
   } else {
@@ -563,6 +588,7 @@ int SmbFilesystem::SetUtimesInternal(const std::string& share_file_path,
                                      const struct timespec& mtime,
                                      const struct stat& current_stat,
                                      struct stat* reply_stat) {
+  VLOG(2) << "SetUtimesInternal path: " << share_file_path;
   DCHECK(to_set & (FUSE_SET_ATTR_ATIME | FUSE_SET_ATTR_MTIME));
   DCHECK(reply_stat);
 
@@ -593,6 +619,7 @@ int SmbFilesystem::SetUtimesInternal(const std::string& share_file_path,
 void SmbFilesystem::Open(std::unique_ptr<OpenRequest> request,
                          fuse_ino_t inode,
                          int flags) {
+  VLOG(2) << "Open inode: " << inode << " flags: " << flags;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::OpenInternal, base::Unretained(this),
@@ -602,6 +629,7 @@ void SmbFilesystem::Open(std::unique_ptr<OpenRequest> request,
 void SmbFilesystem::OpenInternal(std::unique_ptr<OpenRequest> request,
                                  fuse_ino_t inode,
                                  int flags) {
+  VLOG(2) << "OpenInternal inode: " << inode << " flags: " << flags;
   if (request->IsInterrupted()) {
     return;
   }
@@ -612,6 +640,8 @@ void SmbFilesystem::OpenInternal(std::unique_ptr<OpenRequest> request,
   }
 
   const std::string share_file_path = ShareFilePathFromInode(inode);
+  VLOG(2) << "OpenInternal inode: " << inode << " -> path: " << share_file_path;
+
   SMBCFILE* file = nullptr;
   int error = samba_impl_->OpenFile(share_file_path, flags, 0, &file);
   if (error) {
@@ -629,6 +659,8 @@ void SmbFilesystem::Create(std::unique_ptr<CreateRequest> request,
                            const std::string& name,
                            mode_t mode,
                            int flags) {
+  VLOG(2) << "Create parent_inode: " << parent_inode << " name: " << name
+          << " mode: " << mode << " flags: " << flags;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::CreateInternal, base::Unretained(this),
@@ -640,6 +672,8 @@ void SmbFilesystem::CreateInternal(std::unique_ptr<CreateRequest> request,
                                    const std::string& name,
                                    mode_t mode,
                                    int flags) {
+  VLOG(2) << "CreateInternal parent_inode: " << parent_inode
+          << " name: " << name << " mode: " << mode << " flags: " << flags;
   if (request->IsInterrupted()) {
     return;
   }
@@ -652,6 +686,8 @@ void SmbFilesystem::CreateInternal(std::unique_ptr<CreateRequest> request,
       << "Lookup on invalid parent inode: " << parent_inode;
   const base::FilePath file_path = parent_path.Append(name);
   const std::string share_file_path = MakeShareFilePath(file_path);
+  VLOG(2) << "CreateInternal parent inode: " << parent_inode
+          << " name: " << name << " -> path: " << share_file_path;
 
   // NOTE: |mode| appears to be ignored by libsmbclient.
   SMBCFILE* file = nullptr;
@@ -684,6 +720,8 @@ void SmbFilesystem::Read(std::unique_ptr<BufRequest> request,
                          uint64_t file_handle,
                          size_t size,
                          off_t offset) {
+  VLOG(2) << "Read inode: " << inode << " size: " << size
+          << " offset: " << offset;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::ReadInternal, base::Unretained(this),
@@ -695,12 +733,15 @@ void SmbFilesystem::ReadInternal(std::unique_ptr<BufRequest> request,
                                  uint64_t file_handle,
                                  size_t size,
                                  off_t offset) {
+  VLOG(2) << "ReadInternal inode: " << inode << " size: " << size
+          << " offset: " << offset;
   if (request->IsInterrupted()) {
     return;
   }
 
   SMBCFILE* file = LookupOpenFile(file_handle);
   if (!file) {
+    VLOG(1) << "Bad file handle";
     request->ReplyError(EBADF);
     return;
   }
@@ -734,6 +775,8 @@ void SmbFilesystem::Write(std::unique_ptr<WriteRequest> request,
                           const char* buf,
                           size_t size,
                           off_t offset) {
+  VLOG(2) << "Write inode: " << inode << "file_handle: " << file_handle
+          << " size: " << size << " offset: " << offset;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::WriteInternal, base::Unretained(this),
@@ -746,12 +789,15 @@ void SmbFilesystem::WriteInternal(std::unique_ptr<WriteRequest> request,
                                   uint64_t file_handle,
                                   const std::vector<char>& buf,
                                   off_t offset) {
+  VLOG(2) << "WriteInternal inode: " << inode << " file_handle: " << file_handle
+          << " offset: " << offset;
   if (request->IsInterrupted()) {
     return;
   }
 
   SMBCFILE* file = LookupOpenFile(file_handle);
   if (!file) {
+    VLOG(1) << "Bad file handle";
     request->ReplyError(EBADF);
     return;
   }
@@ -784,6 +830,7 @@ void SmbFilesystem::WriteInternal(std::unique_ptr<WriteRequest> request,
 void SmbFilesystem::Release(std::unique_ptr<SimpleRequest> request,
                             fuse_ino_t inode,
                             uint64_t file_handle) {
+  VLOG(2) << "Release inode: " << inode << " file_handle: " << file_handle;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::ReleaseInternal, base::Unretained(this),
@@ -793,12 +840,15 @@ void SmbFilesystem::Release(std::unique_ptr<SimpleRequest> request,
 void SmbFilesystem::ReleaseInternal(std::unique_ptr<SimpleRequest> request,
                                     fuse_ino_t inode,
                                     uint64_t file_handle) {
+  VLOG(2) << "ReleaseInternal inode: " << inode
+          << " file_handle: " << file_handle;
   if (request->IsInterrupted()) {
     return;
   }
 
   SMBCFILE* file = LookupOpenFile(file_handle);
   if (!file) {
+    VLOG(1) << "Bad file handle";
     request->ReplyError(EBADF);
     return;
   }
@@ -818,6 +868,10 @@ void SmbFilesystem::Rename(std::unique_ptr<SimpleRequest> request,
                            const std::string& old_name,
                            fuse_ino_t new_parent_inode,
                            const std::string& new_name) {
+  VLOG(2) << "Rename old_parent_inode: " << old_parent_inode
+          << " old_name: " << old_name
+          << " new_parent_inode: " << new_parent_inode
+          << " new_name: " << new_name;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::RenameInternal, base::Unretained(this),
@@ -830,6 +884,10 @@ void SmbFilesystem::RenameInternal(std::unique_ptr<SimpleRequest> request,
                                    const std::string& old_name,
                                    fuse_ino_t new_parent_inode,
                                    const std::string& new_name) {
+  VLOG(2) << "RenameInternal old_parent_inode: " << old_parent_inode
+          << " old_name: " << old_name
+          << " new_parent_inode: " << new_parent_inode
+          << " new_name: " << new_name;
   if (request->IsInterrupted()) {
     return;
   }
@@ -845,6 +903,8 @@ void SmbFilesystem::RenameInternal(std::unique_ptr<SimpleRequest> request,
   const std::string old_share_path = MakeShareFilePath(old_path);
   const base::FilePath new_path = new_parent_path.Append(new_name);
   const std::string new_share_path = MakeShareFilePath(new_path);
+  VLOG(2) << "RenameInternal old path: " << old_share_path
+          << " new path: " << new_share_path;
 
   if (inode_map_.PathExists(new_path)) {
     // This is posix-violating behaviour since rename() is supposed to replace
@@ -885,6 +945,7 @@ void SmbFilesystem::RenameInternal(std::unique_ptr<SimpleRequest> request,
 void SmbFilesystem::Unlink(std::unique_ptr<SimpleRequest> request,
                            fuse_ino_t parent_inode,
                            const std::string& name) {
+  VLOG(2) << "Unlink parent_inode: " << parent_inode << " name: " << name;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::UnlinkInternal, base::Unretained(this),
@@ -894,6 +955,8 @@ void SmbFilesystem::Unlink(std::unique_ptr<SimpleRequest> request,
 void SmbFilesystem::UnlinkInternal(std::unique_ptr<SimpleRequest> request,
                                    fuse_ino_t parent_inode,
                                    const std::string& name) {
+  VLOG(2) << "UnlinkInternal parent_inode: " << parent_inode
+          << " name: " << name;
   if (request->IsInterrupted()) {
     return;
   }
@@ -903,6 +966,8 @@ void SmbFilesystem::UnlinkInternal(std::unique_ptr<SimpleRequest> request,
       << "Lookup on invalid parent inode: " << parent_inode;
   const std::string share_file_path =
       MakeShareFilePath(parent_path.Append(name));
+  VLOG(2) << "UnlinkInternal parent_inode: " << parent_inode
+          << " name: " << name << " -> path: " << share_file_path;
 
   int error = samba_impl_->UnlinkFile(share_file_path);
   if (error) {
@@ -918,6 +983,7 @@ void SmbFilesystem::UnlinkInternal(std::unique_ptr<SimpleRequest> request,
 void SmbFilesystem::OpenDir(std::unique_ptr<OpenRequest> request,
                             fuse_ino_t inode,
                             int flags) {
+  VLOG(2) << "OpenDir inode: " << inode << " flags: " << flags;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::OpenDirInternal, base::Unretained(this),
@@ -927,16 +993,22 @@ void SmbFilesystem::OpenDir(std::unique_ptr<OpenRequest> request,
 void SmbFilesystem::OpenDirInternal(std::unique_ptr<OpenRequest> request,
                                     fuse_ino_t inode,
                                     int flags) {
+  VLOG(2) << "OpenDirInternal inode: " << inode << " flags: " << flags;
   if (request->IsInterrupted()) {
     return;
   }
 
   if ((flags & O_ACCMODE) != O_RDONLY) {
+    VLOG(1) << "Directories can only be opened read-only, requested flags: "
+            << flags;
     request->ReplyError(EACCES);
     return;
   }
 
   const std::string share_dir_path = ShareFilePathFromInode(inode);
+  VLOG(2) << "OpenDirInternal inode: " << inode << " flags: " << flags
+          << " -> path: " << share_dir_path;
+
   SMBCFILE* dir = nullptr;
   int error = samba_impl_->OpenDirectory(share_dir_path, &dir);
   if (error) {
@@ -953,6 +1025,7 @@ void SmbFilesystem::ReadDir(std::unique_ptr<DirentryRequest> request,
                             fuse_ino_t inode,
                             uint64_t file_handle,
                             off_t offset) {
+  VLOG(2) << "ReadDir inode: " << inode << " offset: " << offset;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::ReadDirInternal, base::Unretained(this),
@@ -963,17 +1036,21 @@ void SmbFilesystem::ReadDirInternal(std::unique_ptr<DirentryRequest> request,
                                     fuse_ino_t inode,
                                     uint64_t file_handle,
                                     off_t offset) {
+  VLOG(2) << "ReadDirInternal inode: " << inode << " offset: " << offset;
   if (request->IsInterrupted()) {
     return;
   }
 
   SMBCFILE* dir = LookupOpenFile(file_handle);
   if (!dir) {
+    VLOG(1) << "Bad file handle";
     request->ReplyError(EBADF);
     return;
   }
   const base::FilePath dir_path = inode_map_.GetPath(inode);
   CHECK(!dir_path.empty()) << "Inode not found: " << inode;
+  VLOG(2) << "ReadDirInternal inode: " << inode << " offset: " << offset
+          << " -> path: " << dir_path;
 
   int error = samba_impl_->SeekDirectory(dir, offset);
   if (error) {
@@ -1037,6 +1114,7 @@ void SmbFilesystem::ReadDirInternal(std::unique_ptr<DirentryRequest> request,
 void SmbFilesystem::ReleaseDir(std::unique_ptr<SimpleRequest> request,
                                fuse_ino_t inode,
                                uint64_t file_handle) {
+  VLOG(2) << "ReleaseDir inode: " << inode << " file_handle: " << file_handle;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::ReleaseDirInternal, base::Unretained(this),
@@ -1046,12 +1124,15 @@ void SmbFilesystem::ReleaseDir(std::unique_ptr<SimpleRequest> request,
 void SmbFilesystem::ReleaseDirInternal(std::unique_ptr<SimpleRequest> request,
                                        fuse_ino_t inode,
                                        uint64_t file_handle) {
+  VLOG(2) << "ReleaseDirInternal inode: " << inode
+          << " file_handle: " << file_handle;
   if (request->IsInterrupted()) {
     return;
   }
 
   SMBCFILE* dir = LookupOpenFile(file_handle);
   if (!dir) {
+    VLOG(1) << "Bad file handle";
     request->ReplyError(EBADF);
     return;
   }
@@ -1071,6 +1152,8 @@ void SmbFilesystem::MkDir(std::unique_ptr<EntryRequest> request,
                           fuse_ino_t parent_inode,
                           const std::string& name,
                           mode_t mode) {
+  VLOG(2) << "MkDir parent_inode: " << parent_inode << " name: " << name
+          << " mode: " << mode;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::MkDirInternal, base::Unretained(this),
@@ -1081,6 +1164,8 @@ void SmbFilesystem::MkDirInternal(std::unique_ptr<EntryRequest> request,
                                   fuse_ino_t parent_inode,
                                   const std::string& name,
                                   mode_t mode) {
+  VLOG(2) << "MkDirInternal parent_inode: " << parent_inode << " name: " << name
+          << " mode: " << mode;
   if (request->IsInterrupted()) {
     return;
   }
@@ -1090,6 +1175,8 @@ void SmbFilesystem::MkDirInternal(std::unique_ptr<EntryRequest> request,
       << "Lookup on invalid parent inode: " << parent_inode;
   const base::FilePath file_path = parent_path.Append(name);
   const std::string share_file_path = MakeShareFilePath(file_path);
+  VLOG(2) << "MkDirInternal parent_inode: " << parent_inode << " name: " << name
+          << " mode: " << mode << " -> path: " << share_file_path;
 
   int error = samba_impl_->CreateDirectory(share_file_path, mode);
   if (error) {
@@ -1116,6 +1203,7 @@ void SmbFilesystem::MkDirInternal(std::unique_ptr<EntryRequest> request,
 void SmbFilesystem::RmDir(std::unique_ptr<SimpleRequest> request,
                           fuse_ino_t parent_inode,
                           const std::string& name) {
+  VLOG(2) << "RmDir parent_inode: " << parent_inode << " name: " << name;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::RmDirinternal, base::Unretained(this),
@@ -1125,6 +1213,8 @@ void SmbFilesystem::RmDir(std::unique_ptr<SimpleRequest> request,
 void SmbFilesystem::RmDirinternal(std::unique_ptr<SimpleRequest> request,
                                   fuse_ino_t parent_inode,
                                   const std::string& name) {
+  VLOG(2) << "RmDirInternal parent_inode: " << parent_inode
+          << " name: " << name;
   if (request->IsInterrupted()) {
     return;
   }
@@ -1134,6 +1224,8 @@ void SmbFilesystem::RmDirinternal(std::unique_ptr<SimpleRequest> request,
       << "Lookup on invalid parent inode: " << parent_inode;
   const base::FilePath file_path = parent_path.Append(name);
   const std::string share_file_path = MakeShareFilePath(file_path);
+  VLOG(2) << "RmDirInternal parent_inode: " << parent_inode << " name: " << name
+          << " -> path: " << share_file_path;
 
   int error = samba_impl_->RemoveDirectory(share_file_path);
   if (error) {
@@ -1149,6 +1241,7 @@ void SmbFilesystem::RmDirinternal(std::unique_ptr<SimpleRequest> request,
 void SmbFilesystem::DeleteRecursively(
     const base::FilePath& path,
     RecursiveDeleteOperation::CompletionCallback callback) {
+  VLOG(2) << "DeleteRecursively path: " << path;
   samba_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&SmbFilesystem::DeleteRecursivelyInternal,
@@ -1158,6 +1251,8 @@ void SmbFilesystem::DeleteRecursively(
 void SmbFilesystem::DeleteRecursivelyInternal(
     const base::FilePath& path,
     RecursiveDeleteOperation::CompletionCallback callback) {
+  VLOG(2) << "DeleteRecursivelyInternal path: " << path;
+
   if (recursive_delete_operation_) {
     VLOG(1)
         << "Can't start a recursive delete operation whilst one is in progress";
@@ -1208,8 +1303,7 @@ void SmbFilesystem::AddCachedInodeStat(const struct stat& inode_stat) {
   StatCacheItem item;
 
   item.inode_stat = inode_stat;
-  item.expires_at = base::Time::Now() +
-                    base::TimeDelta::FromSecondsD(kStatCacheTimeoutSeconds);
+  item.expires_at = base::Time::Now() + base::Seconds(kStatCacheTimeoutSeconds);
 
   stat_cache_.Put(inode_stat.st_ino, item);
 }

@@ -1,9 +1,8 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <base/macros.h>
-#include <base/stl_util.h>
+#include <base/types/cxx23_to_underlying.h>
 #include <chromeos/ec/ec_commands.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -44,6 +43,13 @@ TEST_F(BiodMetricsTest, SendEnrolledFingerCount) {
   EXPECT_CALL(*GetMetricsLibraryMock(), SendEnumToUMA(_, finger_count, _))
       .Times(1);
   biod_metrics_.SendEnrolledFingerCount(finger_count);
+}
+
+TEST_F(BiodMetricsTest, SendEnrollmentCapturesCount) {
+  const int captures_count = 2;
+  EXPECT_CALL(*GetMetricsLibraryMock(), SendEnumToUMA(_, captures_count, _))
+      .Times(1);
+  biod_metrics_.SendEnrolledFingerCount(captures_count);
 }
 
 TEST_F(BiodMetricsTest, SendFpUnlockEnabled) {
@@ -100,7 +106,7 @@ TEST_F(BiodMetricsTest, SendFpLatencyStatsOnNoMatch) {
 }
 
 TEST_F(BiodMetricsTest, SendFpLatencyStatsValues) {
-  constexpr CrosFpDeviceInterface::FpStats stats = {
+  constexpr ec::CrosFpDeviceInterface::FpStats stats = {
       .capture_ms = 70,
       .matcher_ms = 187,
       .overall_ms = 223,
@@ -120,7 +126,7 @@ TEST_F(BiodMetricsTest, SendFwUpdaterStatusOnNoUpdate) {
   const auto reason = updater::UpdateReason::kNone;
   const int overall_ms = 60;
 
-  // TODO(crbug.com/1218246) Change UMA enum names for kUpdaterStatus if new
+  // TODO(b/266077024) Change UMA enum names for kUpdaterStatus if new
   // enums are added to avoid data discontinuity, and then use kMaxValue+1
   // rather than kMaxValue for 'exclusive_max'.
   EXPECT_CALL(*GetMetricsLibraryMock(),
@@ -203,7 +209,7 @@ TEST_F(BiodMetricsTest, SendPositiveMatchSecretCorrect) {
 
 TEST_F(BiodMetricsTest, SendResetContextMode) {
   constexpr int kExpectedResetSensorEnum = 10;
-  constexpr int kExpectedMaxEnum = 13;
+  constexpr int kExpectedMaxEnum = 18;
 
   EXPECT_CALL(*GetMetricsLibraryMock(),
               SendEnumToUMA(metrics::kResetContextMode,
@@ -253,6 +259,94 @@ TEST_F(BiodMetricsTest, SendUploadTemplateResult) {
                         kExpectedMaxEnum, kExpectedNumBuckets))
       .Times(1);
   biod_metrics_.SendUploadTemplateResult(EC_RES_UNAVAILABLE);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+}
+
+TEST_F(BiodMetricsTest, SendPartialAttemptsBeforeSuccess) {
+  const int partial_attempts = 2;
+  EXPECT_CALL(*GetMetricsLibraryMock(), SendEnumToUMA(_, partial_attempts, _))
+      .Times(1);
+  biod_metrics_.SendPartialAttemptsBeforeSuccess(partial_attempts);
+}
+
+TEST_F(BiodMetricsTest, SendFpSensorErrorNoIrq) {
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendBoolToUMA(metrics::kFpSensorErrorNoIrq, true))
+      .Times(1);
+  biod_metrics_.SendFpSensorErrorNoIrq(true);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendBoolToUMA(metrics::kFpSensorErrorNoIrq, false))
+      .Times(1);
+  biod_metrics_.SendFpSensorErrorNoIrq(false);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+}
+
+TEST_F(BiodMetricsTest, SendFpSensorErrorSpiCommunication) {
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendBoolToUMA(metrics::kFpSensorErrorSpiCommunication, true))
+      .Times(1);
+  biod_metrics_.SendFpSensorErrorSpiCommunication(true);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendBoolToUMA(metrics::kFpSensorErrorSpiCommunication, false))
+      .Times(1);
+  biod_metrics_.SendFpSensorErrorSpiCommunication(false);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+}
+
+TEST_F(BiodMetricsTest, SendFpSensorErrorBadHardwareID) {
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendBoolToUMA(metrics::kFpSensorErrorBadHardwareID, true))
+      .Times(1);
+  biod_metrics_.SendFpSensorErrorBadHardwareID(true);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendBoolToUMA(metrics::kFpSensorErrorBadHardwareID, false))
+      .Times(1);
+  biod_metrics_.SendFpSensorErrorBadHardwareID(false);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+}
+
+TEST_F(BiodMetricsTest, SendFpSensorErrorInitializationFailure) {
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendBoolToUMA(metrics::kFpSensorErrorInitializationFailure, true))
+      .Times(1);
+  biod_metrics_.SendFpSensorErrorInitializationFailure(true);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+
+  EXPECT_CALL(
+      *GetMetricsLibraryMock(),
+      SendBoolToUMA(metrics::kFpSensorErrorInitializationFailure, false))
+      .Times(1);
+  biod_metrics_.SendFpSensorErrorInitializationFailure(false);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+}
+
+TEST_F(BiodMetricsTest, SendSessionRetirevePrimarySessionResult) {
+  const auto result =
+      BiodMetrics::RetrievePrimarySessionResult::kErrorDBusNoReply;
+
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendEnumToUMA(metrics::kSessionRetrievePrimarySessionResult,
+                            base::to_underlying(result), 7))
+      .Times(1);
+
+  biod_metrics_.SendSessionRetrievePrimarySessionResult(result);
+  testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
+}
+
+TEST_F(BiodMetricsTest, SendSessionRetrievePrimarySessionDuration) {
+  const int ms = 9999;
+  EXPECT_CALL(*GetMetricsLibraryMock(),
+              SendToUMA(metrics::kSessionRetrievePrimarySessionDuration, ms, 0,
+                        25000, 50))
+      .Times(1);
+
+  biod_metrics_.SendSessionRetrievePrimarySessionDuration(ms);
   testing::Mock::VerifyAndClearExpectations(GetMetricsLibraryMock());
 }
 

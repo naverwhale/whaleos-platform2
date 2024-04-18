@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,10 +10,10 @@
 #include <gtest/gtest.h>
 
 #include "power_manager/powerd/system/ambient_light_sensor_stub.h"
+#include "power_manager/powerd/testing/test_environment.h"
 #include "power_manager/proto_bindings/backlight.pb.h"
 
-namespace power_manager {
-namespace policy {
+namespace power_manager::policy {
 
 namespace {
 
@@ -21,16 +21,15 @@ namespace {
 // brightness percent that was passed to it.
 class TestDelegate : public AmbientLightHandler::Delegate {
  public:
-  TestDelegate()
-      : percent_(-1.0),
-        cause_(AmbientLightHandler::BrightnessChangeCause::AMBIENT_LIGHT) {}
+  TestDelegate() = default;
   TestDelegate(const TestDelegate&) = delete;
   TestDelegate& operator=(const TestDelegate&) = delete;
 
-  ~TestDelegate() override {}
+  ~TestDelegate() override = default;
 
   double percent() const { return percent_; }
   AmbientLightHandler::BrightnessChangeCause cause() const { return cause_; }
+  int lux_on_resume() const { return resume_lux_; }
 
   void SetBrightnessPercentForAmbientLight(
       double brightness_percent,
@@ -41,19 +40,25 @@ class TestDelegate : public AmbientLightHandler::Delegate {
 
   void OnColorTemperatureChanged(int color_temperature) override {}
 
+  void ReportAmbientLightOnResumeMetrics(int lux) override {
+    resume_lux_ = lux;
+  }
+
  private:
-  double percent_;
-  AmbientLightHandler::BrightnessChangeCause cause_;
+  double percent_ = -1.0;
+  AmbientLightHandler::BrightnessChangeCause cause_ =
+      AmbientLightHandler::BrightnessChangeCause::AMBIENT_LIGHT;
+  int resume_lux_ = 0;
 };
 
-class AmbientLightHandlerTest : public ::testing::Test {
+class AmbientLightHandlerTest : public TestEnvironment {
  public:
   AmbientLightHandlerTest()
       : light_sensor_(0), handler_(&light_sensor_, &delegate_) {}
   AmbientLightHandlerTest(const AmbientLightHandlerTest&) = delete;
   AmbientLightHandlerTest& operator=(const AmbientLightHandlerTest&) = delete;
 
-  ~AmbientLightHandlerTest() override {}
+  ~AmbientLightHandlerTest() override = default;
 
  protected:
   // Initializes |handler_|.
@@ -181,10 +186,13 @@ TEST_F(AmbientLightHandlerTest, HandleResume) {
   // brightness to go to lower level
   handler_.HandleResume();
   UpdateSensor(50);  // First reading is discard as it is probably cached value.
+  EXPECT_EQ(delegate_.lux_on_resume(), 0);
   UpdateSensor(10);
   EXPECT_DOUBLE_EQ(20.0, delegate_.percent());
   EXPECT_EQ(AmbientLightHandler::BrightnessChangeCause::AMBIENT_LIGHT,
             delegate_.cause());
+  // Second lux reading after resume is reported for metrics
+  EXPECT_EQ(delegate_.lux_on_resume(), 10);
 }
 
 TEST_F(AmbientLightHandlerTest, PowerSources) {
@@ -278,5 +286,4 @@ TEST_F(AmbientLightHandlerTest, GetRecentReadingsString) {
             handler_.GetRecentReadingsString());
 }
 
-}  // namespace policy
-}  // namespace power_manager
+}  // namespace power_manager::policy

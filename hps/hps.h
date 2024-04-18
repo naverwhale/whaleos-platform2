@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,8 @@
 #define HPS_HPS_H_
 
 #include <base/files/file_path.h>
+#include <base/functional/callback.h>
+#include <base/time/time.h>
 
 #include "hps/hps_reg.h"
 
@@ -18,23 +20,27 @@ class HPS {
   virtual ~HPS() = default;
 
   // Set the application version and firmware.
-  virtual void Init(uint32_t appl_version,
+  virtual void Init(uint32_t stage1_version,
                     const base::FilePath& mcu,
-                    const base::FilePath& spi) = 0;
+                    const base::FilePath& fpga_bitstream,
+                    const base::FilePath& fpga_app_image) = 0;
 
   //
   // Boot the module, returns true if the module is working and ready.
   // Requires that the MCU and SPI flash blobs have been
   // set via Init().
   //
-  virtual bool Boot() = 0;
+  virtual void Boot() = 0;
+
+  // Shut down the module. If the module is needed again, it must be
+  // reinitialized with Boot() before calling other operations.
+  virtual bool ShutDown() = 0;
 
   //
-  // Skip the boot sequence, and assume the module is ready for
-  // feature processing. Required if the module is running
-  // application code without stage 0 RO and RW boot code.
+  // Check if the module is running normally and ready for feature control and
+  // detection.
   //
-  virtual void SkipBoot() = 0;
+  virtual bool IsRunning() = 0;
 
   //
   // Enable the selected feature, return false if the
@@ -68,6 +74,17 @@ class HPS {
   // Returns true on success, false on failure.
   //
   virtual bool Download(hps::HpsBank bank, const base::FilePath& source) = 0;
+
+  //
+  // Set a callback to be notified of incremental download progress. The
+  // callback will be called periodically during download operations.
+  //
+  using DownloadObserver =
+      base::RepeatingCallback<void(const base::FilePath& /*file_path*/,
+                                   uint64_t /*total_bytes*/,
+                                   uint64_t /*downloaded_bytes*/,
+                                   base::TimeDelta /*elapsed_time*/)>;
+  virtual void SetDownloadObserver(DownloadObserver) = 0;
 };
 
 }  // namespace hps

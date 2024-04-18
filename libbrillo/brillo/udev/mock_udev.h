@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #include <memory>
 
-#include <brillo/brillo_export.h>
 #include <brillo/udev/udev.h>
 #include <brillo/udev/udev_device.h>
 #include <brillo/udev/udev_enumerate.h>
@@ -16,7 +15,7 @@
 
 namespace brillo {
 
-class BRILLO_EXPORT MockUdev : public Udev {
+class MockUdev : public Udev {
  public:
   MockUdev() : Udev(nullptr) {}
   MockUdev(const MockUdev&) = delete;

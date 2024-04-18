@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,6 +27,8 @@ namespace iioservice {
 // Add a namespace here to not leak |DeviceHasType|.
 namespace {
 
+constexpr char kDeviceRemovedDescription[] = "Device was removed";
+
 // Assume there won't be more than 10000 iio devices.
 constexpr int32_t kFusionDeviceIdDelta = 10000;
 
@@ -40,6 +42,11 @@ constexpr char kChnPrefixes[][12] = {
     "magn_",        // MAGN
     "angl",         // ANGL
     "pressure",     // BARO
+    "",             // [unused] ACCEL_UNCALIBRATED
+    "",             // [unused] ANGLVEL_UNCALIBRATED
+    "",             // [unused] MAGN_UNCALIBRATED
+    "",             // [unused] GRAVITY
+    "proximity",    // PROXIMITY
 };
 
 bool DeviceHasType(libmems::IioDevice* iio_device,
@@ -50,6 +57,7 @@ bool DeviceHasType(libmems::IioDevice* iio_device,
     case cros::mojom::DeviceType::ACCEL:
     case cros::mojom::DeviceType::ANGLVEL:
     case cros::mojom::DeviceType::MAGN:
+    case cros::mojom::DeviceType::PROXIMITY:
       for (auto chn : channels) {
         if (strncmp(chn->GetId(), kChnPrefixes[type_int],
                     strlen(kChnPrefixes[type_int])) == 0)
@@ -76,7 +84,7 @@ bool DeviceHasType(libmems::IioDevice* iio_device,
 }
 
 Location GetLocation(libmems::IioDevice* device) {
-  auto location_opt = device->ReadStringAttribute(cros::mojom::kLocation);
+  auto location_opt = device->GetLocation();
   if (location_opt.has_value()) {
     std::string location_str = std::string(
         base::TrimString(location_opt.value(), base::StringPiece("\0\n", 2),
@@ -195,6 +203,21 @@ void SensorServiceImpl::OnDeviceAdded(int iio_device_id) {
   AddDevice(device);
 }
 
+void SensorServiceImpl::OnDeviceRemoved(int iio_device_id) {
+  DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
+
+  if (device_types_map_.find(iio_device_id) == device_types_map_.end()) {
+    // Not using the removed device. Nothing to do.
+    return;
+  }
+  device_types_map_.erase(iio_device_id);
+
+  // Reload to check if device with |iio_device_id| is actually removed.
+  context_->Reload();
+
+  sensor_device_->OnDeviceRemoved(iio_device_id);
+}
+
 void SensorServiceImpl::GetDeviceIds(cros::mojom::DeviceType type,
                                      GetDeviceIdsCallback callback) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
@@ -236,6 +259,10 @@ void SensorServiceImpl::GetDevice(
     auto it = device_types_map_.find(iio_device_id);
     if (it == device_types_map_.end()) {
       LOGF(ERROR) << "No available device with id: " << iio_device_id;
+      device_request.ResetWithReason(
+          static_cast<uint32_t>(
+              cros::mojom::SensorDeviceDisconnectReason::DEVICE_REMOVED),
+          kDeviceRemovedDescription);
       return;
     }
 
@@ -287,7 +314,14 @@ void SensorServiceImpl::AddDevice(libmems::IioDevice* device) {
   DCHECK(ipc_task_runner_->RunsTasksInCurrentSequence());
 
   const int32_t id = device->GetId();
-  if (!device->DisableBuffer()) {
+
+  bool disable_events = true;
+  for (auto* event : device->GetAllEvents()) {
+    if (!event->WriteStringAttribute("en", "0\n"))
+      disable_events = false;
+  }
+
+  if (!device->DisableBuffer() && !disable_events) {
     LOGF(ERROR) << "Permissions and ownerships hasn't been set for device: "
                 << id;
     return;
@@ -299,6 +333,13 @@ void SensorServiceImpl::AddDevice(libmems::IioDevice* device) {
     auto type = static_cast<cros::mojom::DeviceType>(i);
     if (DeviceHasType(device, type))
       types.push_back(type);
+  }
+
+  if (types.empty()) {
+    LOGF(WARNING) << "Ignoring device id: " << id << ", name: "
+                  << (device->GetName() ? device->GetName() : "null")
+                  << ", with no valid type";
+    return;
   }
 
   Location location = GetLocation(device);

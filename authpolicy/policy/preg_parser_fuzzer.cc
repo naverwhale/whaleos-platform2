@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string>
 
+#include <base/logging.h>
 #include <base/strings/utf_string_conversions.h>
 #include <components/policy/core/common/policy_load_status.h>
 #include <components/policy/core/common/registry_dict.h>

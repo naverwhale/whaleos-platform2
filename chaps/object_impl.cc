@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -73,7 +73,7 @@ CK_RV ObjectImpl::FinalizeNewObject() {
 
   if (GetObjectClass() == CKO_PRIVATE_KEY) {
     // Set the kKeyInSoftware attribute to let the user know if it's stored in
-    // software or TPM.
+    // software or secure elements such as TPM.
     SetAttributeBool(kKeyInSoftware, !IsAttributePresent(kKeyBlobAttribute));
   }
 
@@ -84,7 +84,7 @@ CK_RV ObjectImpl::FinalizeNewObject() {
 CK_RV ObjectImpl::FinalizeCopyObject() {
   if (GetObjectClass() == CKO_PRIVATE_KEY) {
     // Set the kKeyInSoftware attribute to let the user know if it's stored in
-    // software or TPM.
+    // software or secure elements such as TPM.
     SetAttributeBool(kKeyInSoftware, !IsAttributePresent(kKeyBlobAttribute));
   }
   stage_ = kModify;
@@ -133,7 +133,8 @@ CK_RV ObjectImpl::SetAttributes(const CK_ATTRIBUTE_PTR attributes,
     // Watch out for -1 in the length; this survives serialization (because
     // it is used as an error indicator for C_GetAttributeValue) but isn't
     // valid when setting attributes.
-    if (attributes[i].ulValueLen == static_cast<CK_ULONG>(-1))
+    if (attributes[i].ulValueLen == static_cast<CK_ULONG>(-1) ||
+        !attributes[i].pValue)
       return CKR_ATTRIBUTE_VALUE_INVALID;
     string value(reinterpret_cast<const char*>(attributes[i].pValue),
                  attributes[i].ulValueLen);

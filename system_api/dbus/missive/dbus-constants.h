@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,6 +15,7 @@ constexpr char kMissiveServiceName[] = "org.chromium.Missived";
 constexpr char kEnqueueRecord[] = "EnqueueRecord";
 constexpr char kFlushPriority[] = "FlushPriority";
 constexpr char kConfirmRecordUpload[] = "ConfirmRecordUpload";
+constexpr char kUpdateConfigInMissive[] = "UpdateConfigInMissive";
 constexpr char kUpdateEncryptionKey[] = "UpdateEncryptionKey";
 
 }  // namespace missive

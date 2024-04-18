@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,32 +6,32 @@
 #define MISSIVE_ENCRYPTION_ENCRYPTION_MODULE_INTERFACE_H_
 
 #include <atomic>
+#include <string_view>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
-#include <base/strings/string_piece.h>
 #include <base/time/time.h>
 
 #include "missive/proto/record.pb.h"
+#include "missive/util/dynamic_flag.h"
 #include "missive/util/status.h"
 #include "missive/util/statusor.h"
 
 namespace reporting {
 
+constexpr char kEncryptionKeyFilePrefix[] = "EncryptionKey.";
+constexpr int32_t kEncryptionKeyMaxFileSize = 256;
+
 class EncryptionModuleInterface
-    : public base::RefCountedThreadSafe<EncryptionModuleInterface> {
+    : public DynamicFlag,
+      public base::RefCountedThreadSafe<EncryptionModuleInterface> {
  public:
   // Public key id, as defined by Keystore.
   using PublicKeyId = int32_t;
 
-  // Feature to enable/disable encryption.
-  // By default encryption is enabled and supported by server.
-  // Disabled only for testing/stress purposes.
-  static const char kEncryptedReporting[];
-
   explicit EncryptionModuleInterface(
-      base::TimeDelta renew_encryption_key_period =
-          base::TimeDelta::FromDays(1));
+      bool is_enabled,
+      base::TimeDelta renew_encryption_key_period = base::Days(1));
   EncryptionModuleInterface(const EncryptionModuleInterface& other) = delete;
   EncryptionModuleInterface& operator=(const EncryptionModuleInterface& other) =
       delete;
@@ -41,11 +41,11 @@ class EncryptionModuleInterface
   // the encrypted string and encryption information. EncryptedRecord then can
   // be further updated by the caller.
   void EncryptRecord(
-      base::StringPiece record,
+      std::string_view record,
       base::OnceCallback<void(StatusOr<EncryptedRecord>)> cb) const;
 
   // Records current public asymmetric key. Makes a not about last update time.
-  void UpdateAsymmetricKey(base::StringPiece new_public_key,
+  void UpdateAsymmetricKey(std::string_view new_public_key,
                            PublicKeyId new_public_key_id,
                            base::OnceCallback<void(Status)> response_cb);
 
@@ -59,23 +59,20 @@ class EncryptionModuleInterface
   // (received more than |renew_encryption_key_period| ago).
   bool need_encryption_key() const;
 
-  // Returns 'true' if |kEncryptedReporting| feature is enabled.
-  static bool is_enabled();
-
  protected:
-  virtual ~EncryptionModuleInterface();
+  ~EncryptionModuleInterface() override;
 
  private:
   friend base::RefCountedThreadSafe<EncryptionModuleInterface>;
 
   // Implements EncryptRecord for the actual module.
   virtual void EncryptRecordImpl(
-      base::StringPiece record,
+      std::string_view record,
       base::OnceCallback<void(StatusOr<EncryptedRecord>)> cb) const = 0;
 
   // Implements UpdateAsymmetricKey for the actual module.
   virtual void UpdateAsymmetricKeyImpl(
-      base::StringPiece new_public_key,
+      std::string_view new_public_key,
       PublicKeyId new_public_key_id,
       base::OnceCallback<void(Status)> response_cb) = 0;
 

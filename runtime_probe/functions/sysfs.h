@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "runtime_probe/probe_function.h"
+#include "runtime_probe/probe_function_argument.h"
 
 namespace runtime_probe {
 
@@ -61,26 +62,6 @@ class SysfsFunction : public ProbeFunction {
   // It will be used for both parsing and logging.
   NAME_PROBE_FUNCTION("sysfs");
 
-  // Define a parser for this function.
-  //
-  // This function takes the arguments in `const base::Value&` type.
-  // This function should parse the `dict_value`, if the `dict_value` has
-  // correct format, this function should return a new instance of
-  // `SysfsFunction` whose members are decided by `dict_value`.
-  //
-  // @args dict_value: a JSON dictionary to parse arguments from.
-  //
-  // @return pointer to new `SysfsFunction` instance on success, nullptr
-  //   otherwise.
-  template <typename T>
-  static auto FromKwargsValue(const base::Value& dict_value) {
-    PARSE_BEGIN();
-    PARSE_ARGUMENT(dir_path);
-    PARSE_ARGUMENT(keys);
-    PARSE_ARGUMENT(optional_keys, {});
-    PARSE_END();
-  }
-
  private:
   // Override `EvalImpl` function, which should return a list of Value.
   DataType EvalImpl() const override;
@@ -88,11 +69,13 @@ class SysfsFunction : public ProbeFunction {
   // Declare function arguments
 
   // The path of target sysfs folder, the last component can contain '*'.
-  std::string dir_path_;
+  PROBE_FUNCTION_ARG_DEF(std::string, dir_path);
   // Required file names in the sysfs folder.
-  std::vector<std::string> keys_;
-  // Optional fils names in the sysfs folder.
-  std::vector<std::string> optional_keys_;
+  PROBE_FUNCTION_ARG_DEF(std::vector<std::string>, keys);
+  // Optional file names in the sysfs folder.
+  PROBE_FUNCTION_ARG_DEF(std::vector<std::string>,
+                         optional_keys,
+                         (std::vector<std::string>{}));
 
   // A mocked sysfs path that we allow to read while testing.
   base::FilePath sysfs_path_for_testing_;

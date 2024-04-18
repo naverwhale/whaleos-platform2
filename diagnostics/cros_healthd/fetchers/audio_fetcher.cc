@@ -1,6 +1,8 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+#include "diagnostics/cros_healthd/fetchers/audio_fetcher.h"
 
 #include <string>
 #include <utility>
@@ -9,62 +11,43 @@
 #include <chromeos/dbus/service_constants.h>
 #include <cras/dbus-proxies.h>
 
-#include "diagnostics/cros_healthd/fetchers/audio_fetcher.h"
 #include "diagnostics/cros_healthd/utils/error_utils.h"
 
 namespace diagnostics {
 
 namespace {
 
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
+namespace mojom = ::ash::cros_healthd::mojom;
 
-}  // namespace
-
-mojo_ipc::AudioResultPtr AudioFetcher::FetchAudioInfo() {
-  mojo_ipc::AudioInfo info;
-
-  auto error = PopulateMuteInfo(&info);
-  if (error.has_value()) {
-    return mojo_ipc::AudioResult::NewError(std::move(error.value()));
-  }
-
-  error = PopulateActiveNodeInfo(&info);
-  if (error.has_value()) {
-    return mojo_ipc::AudioResult::NewError(std::move(error.value()));
-  }
-
-  return mojo_ipc::AudioResult::NewAudioInfo(info.Clone());
-}
-
-base::Optional<mojo_ipc::ProbeErrorPtr> AudioFetcher::PopulateMuteInfo(
-    mojo_ipc::AudioInfo* info) {
+void PopulateMuteInfo(Context* context, mojom::AudioResultPtr& res) {
+  mojom::AudioInfoPtr& info = res->get_audio_info();
   int32_t unused_output_volume;
   bool output_mute = false;  // Mute by other system daemons.
   bool input_mute = false;
   bool output_user_mute = false;  // Mute by users.
   brillo::ErrorPtr error;
-  if (!context_->cras_proxy()->GetVolumeState(&unused_output_volume,
-                                              &output_mute, &input_mute,
-                                              &output_user_mute, &error)) {
-    return CreateAndLogProbeError(
-        mojo_ipc::ErrorType::kSystemUtilityError,
-        "Failed retrieving mute info from cras: " + error->GetMessage());
+  if (!context->cras_proxy()->GetVolumeState(&unused_output_volume,
+                                             &output_mute, &input_mute,
+                                             &output_user_mute, &error)) {
+    res->set_error(CreateAndLogProbeError(
+        mojom::ErrorType::kSystemUtilityError,
+        "Failed retrieving mute info from cras: " + error->GetMessage()));
+    return;
   }
 
   info->output_mute = output_mute | output_user_mute;
   info->input_mute = input_mute;
-
-  return base::nullopt;
 }
 
-base::Optional<mojo_ipc::ProbeErrorPtr> AudioFetcher::PopulateActiveNodeInfo(
-    mojo_ipc::AudioInfo* info) {
+void PopulateNodeInfo(Context* context, mojom::AudioResultPtr& res) {
+  mojom::AudioInfoPtr& info = res->get_audio_info();
   std::vector<brillo::VariantDictionary> nodes;
   brillo::ErrorPtr error;
-  if (!context_->cras_proxy()->GetNodeInfos(&nodes, &error)) {
-    return CreateAndLogProbeError(
-        mojo_ipc::ErrorType::kSystemUtilityError,
-        "Failed retrieving node info from cras: " + error->GetMessage());
+  if (!context->cras_proxy()->GetNodeInfos(&nodes, &error)) {
+    res->set_error(CreateAndLogProbeError(
+        mojom::ErrorType::kSystemUtilityError,
+        "Failed retrieving node info from cras: " + error->GetMessage()));
+    return;
   }
 
   // There might be no active output / input device such as Chromebox.
@@ -75,37 +58,73 @@ base::Optional<mojo_ipc::ProbeErrorPtr> AudioFetcher::PopulateActiveNodeInfo(
   info->underruns = 0;
   info->severe_underruns = 0;
 
+  std::vector<mojom::AudioNodeInfoPtr> output_nodes;
+  std::vector<mojom::AudioNodeInfoPtr> input_nodes;
   for (const auto& node : nodes) {
-    // Skip inactive node, or important fields are missing.
+    // Important fields are missing.
     if (node.find(cras::kIsInputProperty) == node.end() ||
-        node.find(cras::kActiveProperty) == node.end() ||
-        !brillo::GetVariantValueOrDefault<bool>(node, cras::kActiveProperty)) {
+        node.find(cras::kActiveProperty) == node.end()) {
       continue;
     }
+
+    auto node_info = mojom::AudioNodeInfo::New();
+    node_info->id =
+        brillo::GetVariantValueOrDefault<uint64_t>(node, cras::kIdProperty);
+    node_info->name = brillo::GetVariantValueOrDefault<std::string>(
+        node, cras::kNameProperty);
+    node_info->device_name = brillo::GetVariantValueOrDefault<std::string>(
+        node, cras::kDeviceNameProperty);
+    node_info->active =
+        brillo::GetVariantValueOrDefault<bool>(node, cras::kActiveProperty);
+    node_info->node_volume = brillo::GetVariantValueOrDefault<uint64_t>(
+        node, cras::kNodeVolumeProperty);
+    node_info->input_node_gain = brillo::GetVariantValueOrDefault<uint32_t>(
+        node, cras::kInputNodeGainProperty);
+
     if (!brillo::GetVariantValueOrDefault<bool>(node, cras::kIsInputProperty)) {
-      // Output node
-      info->output_device_name = brillo::GetVariantValueOrDefault<std::string>(
-          node, cras::kNameProperty);
-      info->output_volume = brillo::GetVariantValueOrDefault<uint64_t>(
-          node, cras::kNodeVolumeProperty);
-      if (node.find(cras::kNumberOfUnderrunsProperty) != node.end()) {
-        info->underruns = brillo::GetVariantValueOrDefault<uint32_t>(
-            node, cras::kNumberOfUnderrunsProperty);
+      if (node_info->active) {
+        // Active output node.
+        info->output_device_name = node_info->name;
+        info->output_volume = node_info->node_volume;
+        if (node.find(cras::kNumberOfUnderrunsProperty) != node.end()) {
+          info->underruns = brillo::GetVariantValueOrDefault<uint32_t>(
+              node, cras::kNumberOfUnderrunsProperty);
+        }
+        if (node.find(cras::kNumberOfSevereUnderrunsProperty) != node.end()) {
+          info->severe_underruns = brillo::GetVariantValueOrDefault<uint32_t>(
+              node, cras::kNumberOfSevereUnderrunsProperty);
+        }
       }
-      if (node.find(cras::kNumberOfSevereUnderrunsProperty) != node.end()) {
-        info->severe_underruns = brillo::GetVariantValueOrDefault<uint32_t>(
-            node, cras::kNumberOfSevereUnderrunsProperty);
-      }
+      output_nodes.push_back(std::move(node_info));
     } else {
-      // Input node
-      info->input_device_name = brillo::GetVariantValueOrDefault<std::string>(
-          node, cras::kNameProperty);
-      info->input_gain = brillo::GetVariantValueOrDefault<uint32_t>(
-          node, cras::kInputNodeGainProperty);
+      if (node_info->active) {
+        // Active input node.
+        info->input_device_name = node_info->name;
+        info->input_gain = node_info->input_node_gain;
+      }
+      input_nodes.push_back(std::move(node_info));
     }
   }
 
-  return base::nullopt;
+  info->output_nodes = std::move(output_nodes);
+  info->input_nodes = std::move(input_nodes);
+}
+
+mojom::AudioResultPtr FetchAudioInfoInner(Context* context) {
+  auto res = mojom::AudioResult::NewAudioInfo(mojom::AudioInfo::New());
+
+  PopulateMuteInfo(context, res);
+  if (res->is_error())
+    return res;
+
+  PopulateNodeInfo(context, res);
+  return res;
+}
+
+}  // namespace
+
+void FetchAudioInfo(Context* context, FetchAudioInfoCallback callback) {
+  std::move(callback).Run(FetchAudioInfoInner(context));
 }
 
 }  // namespace diagnostics

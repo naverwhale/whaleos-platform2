@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -45,6 +45,6 @@ int main(int argc, char** argv) {
 
   // Normally, the parent unit test will kill us. But just in case the parent
   // crashes, eventually exit.
-  base::PlatformThread::Sleep(base::TimeDelta::FromSeconds(30));
+  base::PlatformThread::Sleep(base::Seconds(30));
   return 0;
 }

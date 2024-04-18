@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,18 +16,19 @@ namespace rmad {
 
 class MockIioEcSensorUtils : public IioEcSensorUtils {
  public:
-  MockIioEcSensorUtils(const std::string& location, const std::string& name)
+  explicit MockIioEcSensorUtils(const std::string& location,
+                                const std::string& name)
       : IioEcSensorUtils(location, name) {}
   ~MockIioEcSensorUtils() override = default;
 
   MOCK_METHOD(bool,
-              GetData,
-              (const std::vector<std::string>&, int, std::vector<double>*),
+              GetAvgData,
+              (GetAvgDataCallback, const std::vector<std::string>&, int),
               (override));
   MOCK_METHOD(bool,
-              SetSysValues,
-              (const std::vector<std::string>&, const std::vector<int>&),
-              (override));
+              GetSysValues,
+              (const std::vector<std::string>&, std::vector<double>*),
+              (const override));
 };
 
 }  // namespace rmad

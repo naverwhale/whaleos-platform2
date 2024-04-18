@@ -1,0 +1,60 @@
+// Copyright 2022 The ChromiumOS Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+syntax = "proto2";
+
+package perfetto.protos;
+
+import "third_party/perfetto/protos/perfetto/metrics/metrics.proto";
+
+// A metric of a specific function.
+message FunctionMetrics {
+  optional string function_name = 1;  // Such as "HAL::OpenDevice".
+  optional string metric_name = 2;    // Such as "avg", "min".
+  optional string unit = 3;
+  optional int64 value = 4;
+  optional bool bigger_is_better = 5;
+}
+
+// Camera stream metadata associated with the capture request and result
+// buffers.
+message Stream {
+  optional int64 stream_id = 1;
+  optional int32 width = 2;
+  optional int32 height = 3;
+  optional int32 format = 4;
+}
+
+message CaptureResultBufferMetrics {
+  // The stream this capture result buffer is for.
+  optional Stream stream = 1;
+
+  repeated FunctionMetrics function_metrics = 2;
+}
+
+message CameraStreamMetrics {
+  repeated FunctionMetrics function_metrics = 1;
+  repeated CaptureResultBufferMetrics result_buffer_metrics = 2;
+}
+
+message CameraCoreMetrics {
+  // Camera session identifier.
+  optional int32 sid = 1;
+
+  repeated FunctionMetrics function_metrics = 2;
+
+  // Configuration latency, the aggregated request latency, and the aggregated
+  // per-stream result buffer latency of each set of stream configuration. A
+  // camera session can call configure_streams() multiple times to configure
+  // different set of streams.
+  repeated CameraStreamMetrics stream_metrics = 3;
+}
+
+message CameraCoreMetricsPerSession {
+  repeated CameraCoreMetrics sessions = 1;
+}
+
+extend TraceMetrics {
+  optional CameraCoreMetricsPerSession camera_core_metrics = 500;
+}

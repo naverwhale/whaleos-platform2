@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,13 +10,14 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/secure_blob.h>
 #include <gtest/gtest_prod.h>
 
+#include "trunks/cr50_headers/ap_ro_status.h"
 #include "trunks/scoped_key_handle.h"
 #include "trunks/trunks_export.h"
 
@@ -36,6 +37,13 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
 
   ~TpmUtilityImpl() override;
 
+  // Helper function for U2f vendor specific commands.
+  template <typename S, typename P>
+  TPM_RC U2fCommand(const std::string& tag,
+                    uint16_t subcommand,
+                    S serialize,
+                    P parse);
+
   // TpmUtility methods.
   TPM_RC Startup() override;
   TPM_RC Clear() override;
@@ -48,6 +56,8 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
   TPM_RC TakeOwnership(const std::string& owner_password,
                        const std::string& endorsement_password,
                        const std::string& lockout_password) override;
+  TPM_RC ChangeOwnerPassword(const std::string& old_password,
+                             const std::string& new_password) override;
   TPM_RC StirRandom(const std::string& entropy_data,
                     AuthorizationDelegate* delegate) override;
   TPM_RC GenerateRandom(size_t num_bytes,
@@ -72,6 +82,10 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
                            const std::string& ciphertext,
                            AuthorizationDelegate* delegate,
                            std::string* plaintext) override;
+  TPM_RC ECDHZGen(TPM_HANDLE key_handle,
+                  const TPM2B_ECC_POINT& in_point,
+                  AuthorizationDelegate* delegate,
+                  TPM2B_ECC_POINT* out_point) override;
   TPM_RC RawSign(TPM_HANDLE key_handle,
                  TPM_ALG_ID scheme,
                  TPM_ALG_ID hash_alg,
@@ -107,6 +121,14 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
                       const std::string& password,
                       AuthorizationDelegate* delegate,
                       std::string* key_blob) override;
+  TPM_RC ImportECCKeyWithPolicyDigest(AsymmetricKeyUsage key_type,
+                                      TPMI_ECC_CURVE curve_id,
+                                      const std::string& public_point_x,
+                                      const std::string& public_point_y,
+                                      const std::string& private_value,
+                                      const std::string& policy_digest,
+                                      AuthorizationDelegate* delegate,
+                                      std::string* key_blob) override;
   TPM_RC CreateRSAKeyPair(AsymmetricKeyUsage key_type,
                           int modulus_bits,
                           uint32_t public_exponent,
@@ -126,6 +148,16 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
                           AuthorizationDelegate* delegate,
                           std::string* key_blob,
                           std::string* creation_blob) override;
+  TPM_RC CreateRestrictedECCKeyPair(
+      AsymmetricKeyUsage key_type,
+      TPMI_ECC_CURVE curve_id,
+      const std::string& password,
+      const std::string& policy_digest,
+      bool use_only_policy_authorization,
+      const std::vector<uint32_t>& creation_pcr_indexes,
+      AuthorizationDelegate* delegate,
+      std::string* key_blob,
+      std::string* creation_blob) override;
   TPM_RC LoadKey(const std::string& key_blob,
                  AuthorizationDelegate* delegate,
                  TPM_HANDLE* key_handle) override;
@@ -149,6 +181,7 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
   TPM_RC SealData(const std::string& data_to_seal,
                   const std::string& policy_digest,
                   const std::string& auth_value,
+                  bool require_admin_with_policy,
                   AuthorizationDelegate* delegate,
                   std::string* sealed_data) override;
   TPM_RC UnsealData(const std::string& sealed_data,
@@ -158,6 +191,10 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
                               AuthorizationDelegate* delegate,
                               std::string* unsealed_data) override;
   TPM_RC StartSession(HmacSession* session) override;
+  TPM_RC AddPcrValuesToPolicySession(
+      const std::map<uint32_t, std::string>& pcr_map,
+      bool use_auth_value,
+      PolicySession* policy_session) override;
   TPM_RC GetPolicyDigestForPcrValues(
       const std::map<uint32_t, std::string>& pcr_map,
       bool use_auth_value,
@@ -181,6 +218,9 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
                       bool using_owner_authorization,
                       bool extend,
                       AuthorizationDelegate* delegate) override;
+  TPM_RC IncrementNVCounter(uint32_t index,
+                            bool using_owner_authorization,
+                            AuthorizationDelegate* delegate) override;
   TPM_RC ReadNVSpace(uint32_t index,
                      uint32_t offset,
                      size_t num_bytes,
@@ -197,6 +237,12 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
       uint32_t lockout_recovery,
       AuthorizationDelegate* delegate) override;
   TPM_RC ResetDictionaryAttackLock(AuthorizationDelegate* delegate) override;
+  TPM_RC GetAuthPolicyEndorsementKey(
+      TPM_ALG_ID key_type,
+      const std::string& auth_policy,
+      AuthorizationDelegate* endorsement_delegate,
+      TPM_HANDLE* key_handle,
+      TPM2B_NAME* key_name) override;
   TPM_RC GetEndorsementKey(TPM_ALG_ID key_type,
                            AuthorizationDelegate* endorsement_delegate,
                            AuthorizationDelegate* owner_delegate,
@@ -223,6 +269,7 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
                              const brillo::SecureBlob& reset_secret,
                              const std::map<uint32_t, uint32_t>& delay_schedule,
                              const ValidPcrCriteria& valid_pcr_criteria,
+                             std::optional<uint32_t> expiration_delay,
                              uint32_t* result_code,
                              std::string* root_hash,
                              std::string* cred_metadata,
@@ -246,11 +293,11 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
                           std::string* mac_out) override;
   TPM_RC PinWeaverResetAuth(uint8_t protocol_version,
                             const brillo::SecureBlob& reset_secret,
+                            bool strong_reset,
                             const std::string& h_aux,
                             const std::string& cred_metadata,
                             uint32_t* result_code,
                             std::string* root_hash,
-                            brillo::SecureBlob* he_secret,
                             std::string* cred_metadata_out,
                             std::string* mac_out) override;
   TPM_RC PinWeaverGetLog(uint8_t protocol_version,
@@ -266,10 +313,91 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
                             std::string* root_hash,
                             std::string* cred_metadata_out,
                             std::string* mac_out) override;
+  TPM_RC PinWeaverSysInfo(uint8_t protocol_version,
+                          uint32_t* result_code,
+                          std::string* root_hash,
+                          uint32_t* boot_count,
+                          uint64_t* seconds_since_boot) override;
+  TPM_RC PinWeaverGenerateBiometricsAuthPk(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      const PinWeaverEccPoint& client_public_key,
+      uint32_t* result_code,
+      std::string* root_hash,
+      PinWeaverEccPoint* server_public_key) override;
+  TPM_RC PinWeaverCreateBiometricsAuthRateLimiter(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      uint64_t label,
+      const std::string& h_aux,
+      const brillo::SecureBlob& reset_secret,
+      const std::map<uint32_t, uint32_t>& delay_schedule,
+      const ValidPcrCriteria& valid_pcr_criteria,
+      std::optional<uint32_t> expiration_delay,
+      uint32_t* result_code,
+      std::string* root_hash,
+      std::string* cred_metadata,
+      std::string* mac) override;
+  TPM_RC PinWeaverStartBiometricsAuth(
+      uint8_t protocol_version,
+      uint8_t auth_channel,
+      const brillo::Blob& client_nonce,
+      const std::string& h_aux,
+      const std::string& cred_metadata,
+      uint32_t* result_code,
+      std::string* root_hash,
+      brillo::Blob* server_nonce,
+      brillo::Blob* encrypted_high_entropy_secret,
+      brillo::Blob* iv,
+      std::string* cred_metadata_out,
+      std::string* mac_out) override;
+  TPM_RC PinWeaverBlockGenerateBiometricsAuthPk(
+      uint8_t protocol_version,
+      uint32_t* result_code,
+      std::string* root_hash) override;
+  TPM_RC U2fGenerate(uint8_t version,
+                     const brillo::Blob& app_id,
+                     const brillo::SecureBlob& user_secret,
+                     bool consume,
+                     bool up_required,
+                     const std::optional<brillo::Blob>& auth_time_secret_hash,
+                     brillo::Blob* public_key,
+                     brillo::Blob* key_handle) override;
+  TPM_RC U2fSign(uint8_t version,
+                 const brillo::Blob& app_id,
+                 const brillo::SecureBlob& user_secret,
+                 const std::optional<brillo::SecureBlob>& auth_time_secret,
+                 const std::optional<brillo::Blob>& hash_to_sign,
+                 bool check_only,
+                 bool consume,
+                 bool up_required,
+                 const brillo::Blob& key_handle,
+                 brillo::Blob* sig_r,
+                 brillo::Blob* sig_s) override;
+  TPM_RC U2fAttest(const brillo::SecureBlob& user_secret,
+                   uint8_t format,
+                   const brillo::Blob& data,
+                   brillo::Blob* sig_r,
+                   brillo::Blob* sig_s) override;
   TPM_RC GetRsuDeviceId(std::string* device_id) override;
-  TPM_RC GetRoVerificationStatus(ApRoStatus* status) override;
+  TPM_RC GetRoVerificationStatus(ap_ro_status* status) override;
 
-  bool IsCr50() override;
+  bool IsGsc() override;
+
+  std::string SendCommandAndWait(const std::string& command) override;
+
+  TPM_RC CreateSaltingKey(TPM_HANDLE* key, TPM2B_NAME* key_name) override;
+
+  TPM_RC GetTi50Stats(uint32_t* fs_init_time,
+                      uint32_t* fs_size,
+                      uint32_t* aprov_time,
+                      uint32_t* aprov_status) override;
+
+  TPM_RC GetRwVersion(uint32_t* epoch,
+                      uint32_t* major,
+                      uint32_t* minor) override;
+
+  TPM_RC GetConsoleLogs(std::string* logs) override;
 
  private:
   friend class TpmUtilityTest;
@@ -277,14 +405,14 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
 
   const TrunksFactory& factory_;
   std::map<uint32_t, TPMS_NV_PUBLIC> nvram_public_area_map_;
-  uint32_t vendor_id_;
+  std::optional<uint32_t> vendor_id_;
   std::string cached_rsu_device_id_;
   size_t max_nv_chunk_size_ = 0;
 
   enum class PinWeaverBackendType {
     kUnknown,
     kNotSupported,
-    kCr50,
+    kGsc,
     kCsme,
   };
   PinWeaverBackendType pinweaver_backend_type_ = PinWeaverBackendType::kUnknown;
@@ -293,7 +421,7 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
   // initialize the necessary TPM resources for pinweaver-csme. Returns
   // `TPM_RC_SUCCESS` if the operations succeed; otherwise, return
   // `TPM_RC_FAILURE`. If the pinweaver is supported natively by GCS (e.g.,
-  // cr50), performs no-ops and return `TPM_RC_SUCCESS`.
+  // cr50, ti50), performs no-ops and return `TPM_RC_SUCCESS`.
   TPM_RC InitializeOwnerForCsme();
 
   // This methods sets the well-known owner authorization and creates SRK and
@@ -312,10 +440,10 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
   // with an empty authorization value until the TPM is cleared.
   TPM_RC CreateStorageRootKeys(const std::string& owner_password);
 
-  // This method creates an RSA decryption key to be used for salting sessions.
-  // This method also makes the salting key permanent under the storage
-  // hierarchy.
-  TPM_RC CreateSaltingKey(const std::string& owner_password);
+  // This method creates an RSA/ECC decryption key to be used for salting
+  // sessions. This method also makes the salting key permanent under the
+  // storage hierarchy.
+  TPM_RC CreatePersistentSaltingKey(const std::string& owner_password);
 
   // Creates and persists the salting key for CSME. If the key is already
   // persisted, performs no-ops.
@@ -415,52 +543,47 @@ class TRUNKS_EXPORT TpmUtilityImpl : public TpmUtility {
   TPM_RC TpmBasicInit(std::unique_ptr<TpmState>* tpm_state);
 
   // Return true if the TPM supports padding-only scheme for Sign.
-  bool SupportsPaddingOnlySigningScheme() { return IsCr50() || IsSimulator(); }
+  bool SupportsPaddingOnlySigningScheme() { return IsGsc() || IsSimulator(); }
 
-  // Returns Vendor ID as reported in TPM_PT_MANUFACTURER property, or 0
-  // in case of error reading the property.
-  // Caches a non-zero vendor ID.
-  uint32_t VendorId();
+  // Queries Vendor ID as reported in TPM_PT_MANUFACTURER property and caches it
+  // in `vendor_id_`.
+  void CacheVendorId();
 
   // Returns true for TPMs running on simulator.
   bool IsSimulator();
 
-  // Send an arbitrary command to the TPM and wait for the response.
-  // Returns the response packet.
-  std::string SendCommandAndWait(const std::string& command);
-
-  // Sends vendor command in cr50 format, built from subcommand and already
+  // Sends vendor command in GSC format, built from subcommand and already
   // serialized |command_payload|.
   // Returns the result of the command. Fills the |response_payload|,
   // if successful.
-  TPM_RC Cr50VendorCommand(uint16_t subcommand,
-                           const std::string& command_payload,
-                           std::string* response_payload);
+  TPM_RC GscVendorCommand(uint16_t subcommand,
+                          const std::string& command_payload,
+                          std::string* response_payload);
 
-  // Helper function for serializing cr50 vendor command called from
-  // Cr50VendorCommand(). Builds the ready-to-send |serialized_command|
+  // Helper function for serializing GSC vendor command called from
+  // GscVendorCommand(). Builds the ready-to-send |serialized_command|
   // including the standard header, the |subcommand| code, and the
   // subcommand-specific |command_payload|.
   // Returns the result of serializing the command.
-  TPM_RC SerializeCommand_Cr50Vendor(uint16_t subcommand,
-                                     const std::string& command_payload,
-                                     std::string* serialized_command);
+  TPM_RC SerializeCommand_GscVendor(uint16_t subcommand,
+                                    const std::string& command_payload,
+                                    std::string* serialized_command);
 
-  // Helper function for parsing the response to cr50 vendor command,
-  // called from Cr50VendorCommand(). Takes the |response| received from
+  // Helper function for parsing the response to GSC vendor command,
+  // called from GscVendorCommand(). Takes the |response| received from
   // the TPM, parses and ensures the correctness of the header, and
   // extracts the subcommand-specific |response_payload| (kept serialized
   // as received from the TPM).
   // If deserialization failed, returns an error. If the header is correctly
   // parsed, returns the error code received from the TPM.
-  TPM_RC ParseResponse_Cr50Vendor(const std::string& response,
-                                  std::string* response_payload);
+  TPM_RC ParseResponse_GscVendor(const std::string& response,
+                                 std::string* response_payload);
 
   // Helper function for PinWeaver vendor specific commands.
   template <typename S, typename P>
   TPM_RC PinWeaverCommand(const std::string& tag, S serialize, P parse);
 
-  // Obrains RSU device id from Cr50.
+  // Obrains RSU device id from GSC.
   TPM_RC GetRsuDeviceIdInternal(std::string* device_id);
 
   // Sends pinweaver command to CSME instead of GSC.

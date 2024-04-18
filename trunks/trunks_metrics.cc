@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,10 +25,12 @@ constexpr char kFirstTimeoutWritingCommand[] =
 constexpr char kFirstTimeoutWritingTime[] =
     "Platform.Trunks.FirstTimeoutWritingTime";
 
-constexpr char kFirstTimeoutReadingCommand[] =
-    "Platform.Trunks.FirstTimeoutReadingCommand";
-constexpr char kFirstTimeoutReadingTime[] =
-    "Platform.Trunks.FirstTimeoutReadingTime";
+constexpr char kRecoverableWriteErrorNo[] =
+    "Platform.Trunks.RecoverableWriteErrorNo";
+constexpr char kUnrecoverableWriteErrorNo[] =
+    "Platform.Trunks.UnrecoverableWriteErrorNo";
+constexpr char kTransitionedWriteErrorNo[] =
+    "Platform.Trunks.TransitionedWriteErrorNo";
 
 constexpr char kTpmErrorCode[] = "Platform.Trunks.TpmErrorCode";
 
@@ -43,9 +45,7 @@ bool TrunksMetrics::ReportTpmHandleTimeoutCommandAndTime(int error_result,
       time_metrics = kFirstTimeoutWritingTime;
       break;
     case TRUNKS_RC_READ_ERROR:
-      command_metrics = kFirstTimeoutReadingCommand;
-      time_metrics = kFirstTimeoutReadingTime;
-      break;
+      return true;
     default:
       LOG(INFO) << "Reporting unexpected error: " << error_result;
       return false;
@@ -69,6 +69,35 @@ bool TrunksMetrics::ReportTpmHandleTimeoutCommandAndTime(int error_result,
 
 void TrunksMetrics::ReportTpmErrorCode(TPM_RC error_code) {
   metrics_library_.SendSparseToUMA(kTpmErrorCode, static_cast<int>(error_code));
+}
+
+void TrunksMetrics::ReportWriteErrorNo(int prev, int next) {
+  // Don't record any UMA if the state is good or just goes from good to bad.
+  if (prev <= 0) {
+    return;
+  }
+
+  static bool has_error_transitioned = false;
+  if (next <= 0) {
+    metrics_library_.SendSparseToUMA(kRecoverableWriteErrorNo, prev);
+  } else if (prev == next) {
+    // It is possible for the error to change, and the new error keeps
+    // happending. In that case, it is not conclusive if the error is
+    // unrecoverable until the next process cycle.
+    if (has_error_transitioned) {
+      return;
+    }
+    // Since the status gets stuck in a single error, the same call occurs for
+    // every single TPM commands, need a call-once guard for this case.
+    static bool call_once = [&]() {
+      this->metrics_library_.SendSparseToUMA(kUnrecoverableWriteErrorNo, prev);
+      return true;
+    }();
+    (void)(call_once);
+  } else {
+    metrics_library_.SendSparseToUMA(kTransitionedWriteErrorNo, prev);
+    has_error_transitioned = true;
+  }
 }
 
 }  // namespace trunks

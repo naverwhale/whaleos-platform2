@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <base/strings/string_piece.h>
 
 #include "cros-disks/fuse_mounter.h"
 
@@ -22,11 +24,13 @@ class ArchiveMounter : public FUSEMounter {
 
   ArchiveMounter(const Platform* platform,
                  brillo::ProcessReaper* process_reaper,
+                 std::string filesystem_type,
                  std::string archive_type,
                  Metrics* metrics,
                  std::string metrics_name,
                  std::vector<int> password_needed_exit_codes,
-                 std::unique_ptr<SandboxedProcessFactory> sandbox_factory);
+                 std::unique_ptr<SandboxedProcessFactory> sandbox_factory,
+                 std::vector<std::string> extra_command_line_options = {});
   ArchiveMounter(const ArchiveMounter&) = delete;
   ArchiveMounter& operator=(const ArchiveMounter&) = delete;
 
@@ -38,53 +42,29 @@ class ArchiveMounter : public FUSEMounter {
 
   OwnerUser GetDaemonUser() const;
 
+  // Checks if the given string might represent a realistic encoding. Allowed
+  // characters are uppercase and lowercase letters, numbers, '-', '_', '.' and
+  // ':'.
+  static bool IsValidEncoding(base::StringPiece encoding);
+
  protected:
   // FUSEMounter overrides:
-  MountErrorType InterpretReturnCode(int return_code) const override;
-
   std::unique_ptr<SandboxedProcess> PrepareSandbox(
       const std::string& source,
       const base::FilePath& target_path,
       std::vector<std::string> params,
-      MountErrorType* error) const final;
+      MountError* error) const final;
 
-  virtual MountErrorType FormatInvocationCommand(
-      const base::FilePath& archive,
-      std::vector<std::string> params,
-      SandboxedProcess* sandbox) const;
+  virtual std::vector<std::string> GetBindPaths(
+      base::StringPiece original_path) const {
+    return {std::string(original_path)};
+  }
 
  private:
-  const std::string archive_type_;
   const std::string extension_;
   Metrics* const metrics_;
-  const std::string metrics_name_;
-  const std::vector<int> password_needed_exit_codes_;
   const std::unique_ptr<SandboxedProcessFactory> sandbox_factory_;
-
-  // Archivemount can read "foo.bz2" and "bar.qux.gz" files that are compressed
-  // but aren't archives (multiple source files rolled into one). It calls
-  // these formats "raw" and treats them as a single-element archive.
-  //
-  // Note that while "bar.qux.gz" is raw, "bar.tar.gz" is not (it is a
-  // compressed archive). However, the archive_type argument passed to the
-  // constructor is just "gz", since we cannot practically enumerate all
-  // two-part extensions ("a.gz", "b.gz", ..., "qux.gz", ..., "tar.gz", ...),
-  //
-  // This format_raw_ field being true, based only on the archive_type
-  // constructor argument and not the archive's actual path name (passed to
-  // FormatInvocationCommand, possibly a different value for each
-  // FormatInvocationCommand call), means that it *can* be raw, but
-  // FormatInvocationCommand might override that and state that it's not raw.
-  //
-  // "archivemount" in this comment means a specific program
-  // (https://github.com/cybernoid/archivemount). This C++ class is also called
-  // "ArchiveMounter", but that name uses the "archive mounter" words in their
-  // general technical sense.
-  //
-  // Historically, we executed the archivemount program, not the fuse-archive
-  // program. More recently, we use fuse-archive which is a drop-in
-  // replacement, featurewise, but is faster.
-  const bool format_raw_;
+  const std::vector<std::string> extra_command_line_options_;
 
   friend class ArchiveMounterTest;
 };

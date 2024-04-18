@@ -1,45 +1,58 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "modemfwd/modem_helper.h"
-
-#include <memory>
-#include <tuple>
 #include <utility>
-#include <vector>
 
-#include <base/check.h>
+#include "modemfwd/modem_helper.h"
+#include "modemfwd/modem_sandbox.h"
+#include "modemfwd/upstart_job_controller.h"
+
+#include <base/containers/contains.h>
 #include <base/files/file.h>
+#include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/macros.h>
-#include <base/memory/ptr_util.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <brillo/process/process.h>
 #include <chromeos/switches/modemfwd_switches.h>
 
 namespace modemfwd {
 
 namespace {
 
-// This lock file prevents powerd from suspending the system. Take it
-// while we are attempting to flash the modem.
-constexpr char kPowerOverrideLockFilePath[] =
-    "/run/lock/power_override/modemfwd.lock";
-
 constexpr char kModemfwdLogDirectory[] = "/var/log/modemfwd";
+constexpr char kUpstartServiceName[] = "com.ubuntu.Upstart";
+constexpr char kHermesJobPath[] = "/com/ubuntu/Upstart/jobs/hermes";
+constexpr char kModemHelperJobPath[] =
+    "/com/ubuntu/Upstart/jobs/modemfwd_2dhelpers";
 
 bool RunHelperProcessWithLogs(const HelperInfo& helper_info,
                               const std::vector<std::string>& arguments) {
-  brillo::ProcessImpl helper;
-  helper.AddArg(helper_info.executable_path.value());
+  int child_stdout = -1, child_stderr = -1;
+  std::vector<std::string> formatted_args;
+  bool should_remove_capabilities = true;
+
+  formatted_args.push_back(helper_info.executable_path.value());
   for (const std::string& argument : arguments)
-    helper.AddArg("--" + argument);
+    formatted_args.push_back("--" + argument);
   for (const std::string& extra_argument : helper_info.extra_arguments)
-    helper.AddArg(extra_argument);
+    formatted_args.push_back(extra_argument);
+
+  // Determine where this helper's seccomp policy would be. Expected location:
+  // /usr/share/policy/{modem_id}-helper-seccomp.policy
+  const base::FilePath helper_seccomp_policy_file(base::StringPrintf(
+      "%s/%s-seccomp.policy", kSeccompPolicyDirectory,
+      helper_info.executable_path.BaseName().value().c_str()));
+
+  // Allow cap_net_admin to persist only on fm350-helper
+  if (base::Contains(helper_info.executable_path.value(), "fm350"))
+    should_remove_capabilities = false;
+
+  int exit_code = RunProcessInSandbox(
+      formatted_args, helper_seccomp_policy_file, should_remove_capabilities,
+      &child_stdout, &child_stderr);
 
   base::Time::Exploded time;
   base::Time::Now().LocalExplode(&time);
@@ -47,12 +60,21 @@ bool RunHelperProcessWithLogs(const HelperInfo& helper_info,
       "%s/helper_log.%4u%02u%02u-%02u%02u%02u%03u", kModemfwdLogDirectory,
       time.year, time.month, time.day_of_month, time.hour, time.minute,
       time.second, time.millisecond);
-  helper.RedirectOutput(output_log_file);
 
-  int exit_code = helper.Run();
+  base::ScopedFD scoped_stdout(child_stdout);
+  base::ScopedFD scoped_stderr(child_stderr);
+  if (scoped_stdout.is_valid()) {
+    base::File stdout_file = base::File(std::move(scoped_stdout));
+    base::File dest_stdout_file =
+        base::File(base::FilePath(output_log_file),
+                   base::File::FLAG_CREATE | base::File::FLAG_WRITE);
+
+    base::CopyFileContents(stdout_file, dest_stdout_file);
+  }
+
   if (exit_code != 0) {
     LOG(ERROR) << "Failed to perform \"" << base::JoinString(arguments, " ")
-               << "\" on the modem";
+               << "\" on the modem with retcode " << exit_code;
     return false;
   }
 
@@ -62,37 +84,36 @@ bool RunHelperProcessWithLogs(const HelperInfo& helper_info,
 bool RunHelperProcess(const HelperInfo& helper_info,
                       const std::vector<std::string>& arguments,
                       std::string* output) {
-  brillo::ProcessImpl helper;
-  helper.AddArg(helper_info.executable_path.value());
-  for (const std::string& argument : arguments)
-    helper.AddArg("--" + argument);
-  for (const std::string& extra_argument : helper_info.extra_arguments)
-    helper.AddArg(extra_argument);
+  int child_stdout = -1, child_stderr = -1;
+  std::vector<std::string> formatted_args;
+  bool should_remove_capabilities = true;
 
-  // Set up output redirection, if requested. We keep the file open
-  // across the process lifetime to ensure nobody is swapping out the
-  // file from underneath us while the helper is running.
-  base::File output_base_file;
-  if (output) {
-    base::FilePath output_path;
-    FILE* output_file =
-        base::CreateAndOpenTemporaryStream(&output_path).release();
-    if (output_file == nullptr) {
-      LOG(ERROR) << "Failed to create tempfile for helper process output";
-      return false;
-    }
-    output_base_file = base::File(fileno(output_file));
+  formatted_args.push_back(helper_info.executable_path.value());
+  for (const std::string& argument : arguments)
+    formatted_args.push_back("--" + argument);
+  for (const std::string& extra_argument : helper_info.extra_arguments)
+    formatted_args.push_back(extra_argument);
+
+  // Determine where this helper's seccomp policy would be. Expected location:
+  // /usr/share/policy/{modem_id}-helper-seccomp.policy
+  const base::FilePath helper_seccomp_policy_file(base::StringPrintf(
+      "%s/%s-seccomp.policy", kSeccompPolicyDirectory,
+      helper_info.executable_path.BaseName().value().c_str()));
+
+  // Allow cap_net_admin to persist only on fm350-helper
+  if (base::Contains(helper_info.executable_path.value(), "fm350"))
+    should_remove_capabilities = false;
+
+  int exit_code = RunProcessInSandbox(
+      formatted_args, helper_seccomp_policy_file, should_remove_capabilities,
+      &child_stdout, &child_stderr);
+
+  base::ScopedFD scoped_stdout(child_stdout);
+  base::ScopedFD scoped_stderr(child_stderr);
+  if (output && scoped_stdout.is_valid()) {
+    base::File output_base_file = base::File(std::move(scoped_stdout));
     DCHECK(output_base_file.IsValid());
 
-    helper.RedirectOutput(output_path.value());
-  }
-
-  int exit_code = helper.Run();
-
-  // Collect output if requested. Note that we only collect 1024 bytes of
-  // output here. We could read everything, but the API is simple enough
-  // that we shouldn't need more than this (at least for the time being).
-  if (output && output_base_file.IsValid()) {
     const int kBufSize = 1024;
     char buf[kBufSize];
     int bytes_read = output_base_file.ReadAtCurrentPos(buf, kBufSize);
@@ -102,7 +123,7 @@ bool RunHelperProcess(const HelperInfo& helper_info,
 
   if (exit_code != 0) {
     LOG(ERROR) << "Failed to perform \"" << base::JoinString(arguments, " ")
-               << "\" on the modem";
+               << "\" on the modem with retcode " << exit_code;
     return false;
   }
 
@@ -110,40 +131,16 @@ bool RunHelperProcess(const HelperInfo& helper_info,
 }
 
 // Ensures we reboot the modem to prevent us from leaving it in a bad state.
-// Also takes a power override lock so we don't suspend while we're in the
-// middle of flashing and ensures it's cleaned up later.
 class FlashMode {
  public:
-  static std::unique_ptr<FlashMode> Create(const HelperInfo& helper_info) {
-    const base::FilePath lock_path(kPowerOverrideLockFilePath);
-    // If the lock directory doesn't exist, then powerd is probably not running.
-    // Don't worry about it in that case.
-    if (base::DirectoryExists(lock_path.DirName())) {
-      base::File lock_file(lock_path,
-                           base::File::FLAG_CREATE | base::File::FLAG_WRITE);
-      if (lock_file.IsValid()) {
-        std::string lock_contents = base::StringPrintf("%d", getpid());
-        lock_file.WriteAtCurrentPos(lock_contents.data(), lock_contents.size());
-      }
-    }
-
-    if (!RunHelperProcess(helper_info, {kPrepareToFlash}, nullptr)) {
-      base::DeleteFile(lock_path);
-      return nullptr;
-    }
-
-    return base::WrapUnique(new FlashMode(helper_info));
-  }
+  explicit FlashMode(const HelperInfo& helper_info)
+      : helper_info_(helper_info) {}
 
   ~FlashMode() {
     RunHelperProcess(helper_info_, {kReboot}, nullptr);
-    base::DeleteFile(base::FilePath(kPowerOverrideLockFilePath));
   }
 
  private:
-  // Use the static factory method above.
-  explicit FlashMode(const HelperInfo& helper_info)
-      : helper_info_(helper_info) {}
   FlashMode(const FlashMode&) = delete;
   FlashMode& operator=(const FlashMode&) = delete;
 
@@ -154,18 +151,23 @@ class FlashMode {
 
 class ModemHelperImpl : public ModemHelper {
  public:
-  explicit ModemHelperImpl(const HelperInfo& helper_info)
-      : helper_info_(helper_info) {}
+  explicit ModemHelperImpl(const HelperInfo& helper_info,
+                           scoped_refptr<dbus::Bus> bus)
+      : helper_info_(helper_info), bus_(bus) {}
   ModemHelperImpl(const ModemHelperImpl&) = delete;
   ModemHelperImpl& operator=(const ModemHelperImpl&) = delete;
 
   ~ModemHelperImpl() override = default;
 
-  bool GetFirmwareInfo(FirmwareInfo* out_info) override {
+  bool GetFirmwareInfo(FirmwareInfo* out_info,
+                       const std::string& firmware_revision) override {
     CHECK(out_info);
-
     std::string helper_output;
-    if (!RunHelperProcess(helper_info_, {kGetFirmwareInfo}, &helper_output))
+    if (!RunHelperProcess(helper_info_,
+                          {kGetFirmwareInfo,
+                           base::StringPrintf("%s=%s", kShillFirmwareRevision,
+                                              firmware_revision.c_str())},
+                          &helper_output))
       return false;
 
     base::StringPairs parsed_versions;
@@ -186,7 +188,7 @@ class ModemHelperImpl : public ModemHelper {
       else if (pair.first == kFwOem)
         out_info->oem_version = pair.second;
       else
-        LOG(WARNING) << "Unknown version '" << pair.first << "', skipping.";
+        out_info->assoc_versions.insert(pair);
     }
 
     return true;
@@ -194,20 +196,35 @@ class ModemHelperImpl : public ModemHelper {
 
   // modemfwd::ModemHelper overrides.
   bool FlashFirmwares(const std::vector<FirmwareConfig>& configs) override {
-    auto flash_mode = FlashMode::Create(helper_info_);
-    if (!flash_mode)
-      return false;
+    FlashMode flash_mode(helper_info_);
 
     if (!configs.size())
       return false;
 
+    UpstartJobController hermes(kUpstartServiceName, kHermesJobPath, bus_);
+    if (hermes.IsRunning())
+      hermes.Stop();  // Job starts automatically upon exiting scope
     std::vector<std::string> firmwares;
+    std::vector<std::string> upstart_in_env;
     std::vector<std::string> versions;
     for (const auto& config : configs) {
       firmwares.push_back(base::StringPrintf("%s:%s", config.fw_type.c_str(),
                                              config.path.value().c_str()));
+      upstart_in_env.push_back(base::StringPrintf(
+          "%s=%s", config.fw_type.c_str(), config.path.value().c_str()));
       versions.push_back(base::StringPrintf("%s:%s", config.fw_type.c_str(),
                                             config.version.c_str()));
+    }
+
+    // If installed, modemfwd-helpers.conf may be used to perform actions with
+    // the fw that only root can perform. upstart_in_env must be checked by
+    // modemfwd-helpers.conf.
+    UpstartJobController modemfwd_helpers(kUpstartServiceName,
+                                          kModemHelperJobPath, bus_);
+    if (modemfwd_helpers.IsInstalled() &&
+        !modemfwd_helpers.Start(upstart_in_env)) {
+      LOG(ERROR) << "Failed to start modemfwd-helpers";
+      return false;
     }
 
     return RunHelperProcessWithLogs(
@@ -239,10 +256,12 @@ class ModemHelperImpl : public ModemHelper {
 
  private:
   HelperInfo helper_info_;
+  scoped_refptr<dbus::Bus> bus_;
 };
 
-std::unique_ptr<ModemHelper> CreateModemHelper(const HelperInfo& helper_info) {
-  return std::make_unique<ModemHelperImpl>(helper_info);
+std::unique_ptr<ModemHelper> CreateModemHelper(const HelperInfo& helper_info,
+                                               scoped_refptr<dbus::Bus> bus) {
+  return std::make_unique<ModemHelperImpl>(helper_info, bus);
 }
 
 }  // namespace modemfwd

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,8 @@
 
 #include <base/check.h>
 #include <base/strings/string_util.h>
+#include <base/synchronization/waitable_event.h>
+#include <base/task/thread_pool.h>
 #include <chromeos/dbus/service_constants.h>
 
 namespace cups_proxy {
@@ -49,24 +51,20 @@ IppHeaders ConvertHeadersToMojom(
 
 }  // namespace
 
-MojoHandler::MojoHandler() : mojo_thread_("cups_proxy_mojo_thread") {}
+MojoHandler::MojoHandler() = default;
 
 MojoHandler::~MojoHandler() {
-  // The message pipe is bound on the mojo thread, and it has to be closed on
-  // the same thread which it is bound, so we close the message pipe by calling
-  // .reset() on the mojo thread.
-  mojo_task_runner_->PostTask(FROM_HERE,
-                              base::BindOnce(&mojom::CupsProxierPtr::reset,
-                                             base::Unretained(&chrome_proxy_)));
-  mojo_thread_.Stop();
+  // The message pipe is bound on the mojo task runner, and it has to be closed
+  // on the same task runner which it is bound, so we close the message pipe by
+  // calling .reset() on the mojo task runner.
+  mojo_task_runner_->PostTask(
+      FROM_HERE, base::BindOnce(&mojo::Remote<mojom::CupsProxier>::reset,
+                                base::Unretained(&chrome_proxy_)));
 }
 
-bool MojoHandler::StartThread() {
-  if (!mojo_thread_.Start()) {
-    return false;
-  }
-  mojo_task_runner_ = mojo_thread_.task_runner();
-  return true;
+bool MojoHandler::CreateTaskRunner() {
+  mojo_task_runner_ = base::ThreadPool::CreateSingleThreadTaskRunner({});
+  return mojo_task_runner_ != nullptr;
 }
 
 void MojoHandler::SetupMojoPipe(base::ScopedFD fd,
@@ -87,11 +85,11 @@ void MojoHandler::SetupMojoPipeOnThread(base::OnceClosure error_handler,
   DCHECK(!chrome_proxy_);
 
   // Bind primordial message pipe to a CupsProxyService implementation.
-  chrome_proxy_.Bind(mojom::CupsProxierPtrInfo(
+  chrome_proxy_.Bind(mojo::PendingRemote<mojom::CupsProxier>(
       invitation.ExtractMessagePipe(
           printing::kBootstrapMojoConnectionChannelToken),
       0u /* version */));
-  chrome_proxy_.set_connection_error_handler(std::move(error_handler));
+  chrome_proxy_.set_disconnect_handler(std::move(error_handler));
 
   chrome_proxy_.RequireVersion(kMinVersionRequired);
 

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -21,14 +22,15 @@
 
 #include "shill/adaptor_interfaces.h"
 #include "shill/dbus/dbus_control.h"
-#include "shill/key_file_store.h"
 #include "shill/logging.h"
 #include "shill/manager.h"
 #include "shill/metrics.h"
-#include "shill/property_accessor.h"
 #include "shill/service.h"
-#include "shill/store_interface.h"
-#include "shill/stub_storage.h"
+#include "shill/store/key_file_store.h"
+#include "shill/store/pkcs11_slot_getter.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/stub_storage.h"
+#include "shill/wifi/passpoint_credentials.h"
 
 namespace shill {
 
@@ -41,8 +43,10 @@ Profile::Profile(Manager* manager,
                  bool connect_to_rpc)
     : manager_(manager),
       properties_(kAlwaysOnVpnModeOff, kDefaultAlwaysOnVpnService),
-      store_(base::Bind(&Profile::OnPropertyChanged, base::Unretained(this))),
-      name_(name) {
+      store_(base::BindRepeating(&Profile::OnPropertyChanged,
+                                 base::Unretained(this))),
+      name_(name),
+      slot_getter_(new Pkcs11SlotGetter(name_.user_hash)) {
   if (connect_to_rpc)
     adaptor_ = manager->control_interface()->CreateProfileAdaptor(this);
 
@@ -86,14 +90,14 @@ Profile::Profile(Manager* manager,
 
 Profile::~Profile() = default;
 
-void Profile::OnPropertyChanged(const std::string& /*name*/) {
+void Profile::OnPropertyChanged(std::string_view /*name*/) {
   manager()->OnProfileChanged(this);
 }
 
 bool Profile::InitStorage(InitStorageOption storage_option, Error* error) {
   CHECK(!persistent_profile_path_.empty());
   std::unique_ptr<StoreInterface> storage =
-      CreateStore(persistent_profile_path_, name_.user_hash);
+      CreateStore(persistent_profile_path_, slot_getter_.get());
   bool already_exists = !storage->IsEmpty();
   if (!already_exists && storage_option != kCreateNew &&
       storage_option != kCreateOrOpenExisting) {
@@ -120,7 +124,6 @@ bool Profile::InitStorage(InitStorageOption storage_option, Error* error) {
       // this file.  Move this file out of the way so a future open attempt
       // will succeed, assuming the failure reason was the former.
       storage->MarkAsCorrupted();
-      metrics()->NotifyCorruptedProfile();
     }
     return false;
   }
@@ -176,13 +179,16 @@ bool Profile::AdoptService(const ServiceRefPtr& service) {
   if (service->profile() == this) {
     return false;
   }
+  service->SetEapSlotGetter(slot_getter_.get());
   service->SetProfile(this);
   return service->Save(storage_.get()) && storage_->Flush();
 }
 
 bool Profile::AbandonService(const ServiceRefPtr& service) {
-  if (service->profile() == this)
+  if (service->profile() == this) {
     service->SetProfile(nullptr);
+    service->SetEapSlotGetter(nullptr);
+  }
   storage_->DeleteGroup(service->GetStorageIdentifier());
   storage_->PKCS11DeleteGroup(service->GetStorageIdentifier());
   return storage_->Flush();
@@ -195,6 +201,7 @@ bool Profile::UpdateService(const ServiceRefPtr& service) {
 bool Profile::LoadService(const ServiceRefPtr& service) {
   if (!ContainsService(service))
     return false;
+  service->SetEapSlotGetter(slot_getter_.get());
   bool ret = service->Load(storage_.get());
   service->MigrateDeprecatedStorage(storage_.get());
   return ret;
@@ -446,11 +453,20 @@ std::vector<std::string> Profile::EnumerateEntries(Error* /*error*/) {
   // Filter this list down to only entries that correspond
   // to a technology.  (wifi_*, etc)
   for (const auto& group : storage_->GetGroups()) {
-    if (Technology::CreateFromStorageGroup(group) != Technology::kUnknown)
+    if (TechnologyFromStorageGroup(group) != Technology::kUnknown)
       service_groups.push_back(group);
   }
 
   return service_groups;
+}
+
+bool Profile::AdoptCredentials(const PasspointCredentialsRefPtr& credentials) {
+  if (credentials->profile() == this) {
+    return false;
+  }
+  credentials->SetEapSlotGetter(slot_getter_.get());
+  credentials->SetProfile(this);
+  return credentials->Save(storage_.get()) && storage_->Flush();
 }
 
 bool Profile::UpdateDevice(const DeviceRefPtr& device) {
@@ -458,13 +474,13 @@ bool Profile::UpdateDevice(const DeviceRefPtr& device) {
 }
 
 void Profile::HelpRegisterConstDerivedRpcIdentifiers(
-    const std::string& name, RpcIdentifiers (Profile::*get)(Error* error)) {
+    std::string_view name, RpcIdentifiers (Profile::*get)(Error* error)) {
   store_.RegisterDerivedRpcIdentifiers(
       name, RpcIdentifiersAccessor(new CustomAccessor<Profile, RpcIdentifiers>(
                 this, get, nullptr)));
 }
 
-void Profile::HelpRegisterConstDerivedStrings(const std::string& name,
+void Profile::HelpRegisterConstDerivedStrings(std::string_view name,
                                               Strings (Profile::*get)(Error*)) {
   store_.RegisterDerivedStrings(
       name, StringsAccessor(
@@ -472,7 +488,7 @@ void Profile::HelpRegisterConstDerivedStrings(const std::string& name,
 }
 
 void Profile::HelpRegisterDerivedRpcIdentifier(
-    const std::string& name,
+    std::string_view name,
     RpcIdentifier (Profile::*get)(Error*),
     bool (Profile::*set)(const RpcIdentifier&, Error*)) {
   store_.RegisterDerivedRpcIdentifier(
@@ -481,7 +497,7 @@ void Profile::HelpRegisterDerivedRpcIdentifier(
 }
 
 void Profile::HelpRegisterDerivedString(
-    const std::string& name,
+    std::string_view name,
     std::string (Profile::*get)(Error* error),
     bool (Profile::*set)(const std::string&, Error*)) {
   store_.RegisterDerivedString(

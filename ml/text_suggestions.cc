@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,11 +13,36 @@
 namespace ml {
 namespace {
 
+using chrome_knowledge::MultiWordExperiment;
+
 constexpr char kTextSuggesterFilesPath[] =
     "/opt/google/chrome/ml_models/suggest/";
 constexpr char kTextSuggesterLibraryRelativePath[] = "libsuggest.so";
 constexpr char kTextSuggesterModelRelativePath[] = "nwp.uint8.mmap.tflite";
 constexpr char kTextSuggesterSymbolsRelativePath[] = "nwp.csym";
+constexpr char kTextSuggesterUpdatedModelRelativePath[] =
+    "nwp.20220920.uint8.mmap.tflite";
+constexpr char kTextSuggesterUpdatedSymbolsRelativePath[] = "nwp.20220920.csym";
+
+std::string GetModelPath(const MultiWordExperiment& experiment) {
+  switch (experiment) {
+    case MultiWordExperiment::MULTI_WORD_EXPERIMENT_GBOARD_D:
+    case MultiWordExperiment::MULTI_WORD_EXPERIMENT_GBOARD_E:
+      return kTextSuggesterUpdatedModelRelativePath;
+    default:
+      return kTextSuggesterModelRelativePath;
+  }
+}
+
+std::string GetSymbolsPath(const MultiWordExperiment& experiment) {
+  switch (experiment) {
+    case MultiWordExperiment::MULTI_WORD_EXPERIMENT_GBOARD_D:
+    case MultiWordExperiment::MULTI_WORD_EXPERIMENT_GBOARD_E:
+      return kTextSuggesterUpdatedSymbolsRelativePath;
+    default:
+      return kTextSuggesterSymbolsRelativePath;
+  }
+}
 
 }  // namespace
 
@@ -91,18 +116,21 @@ bool TextSuggestions::LoadTextSuggester(
 
   chrome_knowledge::MultiWordSettings* multi_word_settings =
       settings.mutable_multi_word_settings();
-  multi_word_settings->set_model_path(
-      base::FilePath(kTextSuggesterFilesPath)
-          .Append(kTextSuggesterModelRelativePath)
-          .value());
-  multi_word_settings->set_syms_path(
-      base::FilePath(kTextSuggesterFilesPath)
-          .Append(kTextSuggesterSymbolsRelativePath)
-          .value());
+  multi_word_settings->set_model_path(base::FilePath(kTextSuggesterFilesPath)
+                                          .Append(GetModelPath(experiment))
+                                          .value());
+  multi_word_settings->set_syms_path(base::FilePath(kTextSuggesterFilesPath)
+                                         .Append(GetSymbolsPath(experiment))
+                                         .value());
 
   chrome_knowledge::FeatureSettings* feature_settings =
       settings.mutable_feature_settings();
-  feature_settings->set_multi_word_experiment(experiment);
+  feature_settings->set_multi_word_enabled(true);
+  feature_settings->set_emojis_enabled(false);
+
+  chrome_knowledge::ExperimentSettings* experiment_settings =
+      settings.mutable_experiment_settings();
+  experiment_settings->set_multi_word(experiment);
 
   const std::string settings_pb = settings.SerializeAsString();
   return (*load_text_suggester_)(suggester, settings_pb.data(),

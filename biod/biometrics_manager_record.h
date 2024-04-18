@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2023 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,66 +6,42 @@
 #define BIOD_BIOMETRICS_MANAGER_RECORD_H_
 
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/base64.h>
-#include <base/logging.h>
-#include <base/strings/string_util.h>
+#include "base/memory/weak_ptr.h"
+#include "biod/biometrics_manager_record_interface.h"
 
 namespace biod {
 
-// Represents a record previously registered with this BiometricsManager in an
-// EnrollSession. These objects can be retrieved with GetRecords.
-class BiometricsManagerRecord {
+// Invokes the function object F with a given BiometricsManager object when
+// this session (EnrollSession or AuthSession) object goes out of scope. It's
+// possible that this will do nothing in the case that the session has ended
+// due to failure/finishing or the BiometricsManager object is no longer
+// valid.
+
+class CrosFpBiometricsManager;
+
+class BiometricsManagerRecord : public BiometricsManagerRecordInterface {
  public:
-  virtual ~BiometricsManagerRecord() = default;
-  virtual const std::string& GetId() const = 0;
-  virtual const std::string& GetUserId() const = 0;
-  virtual const std::string& GetLabel() const = 0;
-  virtual const std::vector<uint8_t>& GetValidationVal() const = 0;
+  BiometricsManagerRecord(
+      const base::WeakPtr<CrosFpBiometricsManager>& biometrics_manager,
+      const std::string& record_id)
+      : biometrics_manager_(biometrics_manager), record_id_(record_id) {}
 
-  // Returns true on success.
-  virtual bool SetLabel(std::string label) = 0;
+  // BiometricsManager::Record overrides:
+  const std::string& GetId() const override;
+  std::string GetUserId() const override;
+  std::string GetLabel() const override;
+  std::vector<uint8_t> GetValidationVal() const override;
+  bool SetLabel(std::string label) override;
+  bool Remove() override;
 
-  // Whether the BiometricsManager's device supports positive match secret.
-  virtual bool SupportsPositiveMatchSecret() const = 0;
-
-  // Returns true on success.
-  virtual bool Remove() = 0;
-
-  virtual const std::string GetValidationValBase64() const {
-    const auto& validation_val_bytes = GetValidationVal();
-    std::string validation_val(validation_val_bytes.begin(),
-                               validation_val_bytes.end());
-    base::Base64Encode(validation_val, &validation_val);
-    return validation_val;
-  }
-
-  virtual bool IsValidUTF8() const {
-    if (!base::IsStringUTF8(GetLabel())) {
-      LOG(ERROR) << "Label is not valid UTF8";
-      return false;
-    }
-
-    if (!base::IsStringUTF8(GetId())) {
-      LOG(ERROR) << "Record ID is not valid UTF8";
-      return false;
-    }
-
-    if (!base::IsStringUTF8(GetValidationValBase64())) {
-      LOG(ERROR) << "Validation value is not valid UTF8";
-      return false;
-    }
-
-    if (!base::IsStringUTF8(GetUserId())) {
-      LOG(ERROR) << "User ID is not valid UTF8";
-      return false;
-    }
-
-    return true;
-  }
+ private:
+  base::WeakPtr<CrosFpBiometricsManager> biometrics_manager_;
+  std::string record_id_;
 };
 
-}  //  namespace biod
+}  // namespace biod
 
 #endif  // BIOD_BIOMETRICS_MANAGER_RECORD_H_

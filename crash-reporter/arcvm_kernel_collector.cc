@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,13 +8,16 @@
 #include <sstream>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/syslog_logging.h>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/arc_util.h"
 #include "crash-reporter/constants.h"
@@ -39,10 +42,14 @@ constexpr char kRamoopsExtension[] = "log";
 
 }  // namespace
 
-ArcvmKernelCollector::ArcvmKernelCollector()
+ArcvmKernelCollector::ArcvmKernelCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
     : CrashCollector(kArcvmKernelCollectorName,
                      kAlwaysUseUserCrashDirectory,
-                     kNormalCrashSendMode) {}
+                     kNormalCrashSendMode,
+                     metrics_lib) {}
 
 ArcvmKernelCollector::~ArcvmKernelCollector() = default;
 
@@ -50,6 +57,17 @@ bool ArcvmKernelCollector::HandleCrash(
     const arc_util::BuildProperty& build_property) {
   return HandleCrashWithRamoopsStreamAndTimestamp(build_property, stdin,
                                                   time(nullptr));
+}
+
+// The parameter |exec_name| is unused as we are computing the crash severity
+// based on the crash type, which is always going to be `kArcvmKernelCrashType`
+// in this collector.
+CrashCollector::ComputedCrashSeverity ArcvmKernelCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  return ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kFatal,
+      .product_group = Product::kArc,
+  };
 }
 
 bool ArcvmKernelCollector::HandleCrashWithRamoopsStreamAndTimestamp(
@@ -118,8 +136,13 @@ std::string ArcvmKernelCollector::GetProductVersion() const {
 
 // static
 CollectorInfo ArcvmKernelCollector::GetHandlerInfo(
-    bool arc_kernel, const arc_util::BuildProperty& build_property) {
-  auto arcvm_kernel_collector = std::make_shared<ArcvmKernelCollector>();
+    bool arc_kernel,
+    const arc_util::BuildProperty& build_property,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
+  auto arcvm_kernel_collector =
+      std::make_shared<ArcvmKernelCollector>(metrics_lib);
   return {
       .collector = arcvm_kernel_collector,
       .handlers = {{

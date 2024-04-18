@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,10 +7,7 @@
 
 #include <stdint.h>
 
-#include <base/macros.h>
-
-namespace vm_tools {
-namespace concierge {
+namespace vm_tools::concierge {
 
 // Manages a pool of virtual socket context IDs to be assigned to VMs.
 class VsockCidPool {
@@ -26,7 +23,6 @@ class VsockCidPool {
   uint32_t Allocate();
 };
 
-}  // namespace concierge
-}  // namespace vm_tools
+}  // namespace vm_tools::concierge
 
 #endif  // VM_TOOLS_CONCIERGE_VSOCK_CID_POOL_H_

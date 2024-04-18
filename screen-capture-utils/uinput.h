@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,9 @@
 
 namespace screenshot {
 
+// Convert keysym to scancode.
+int KeySymToScancode(rfbKeySym key);
+
 // Manager of uinput devices. Implementation hidden in UinputImpl to avoid
 // dependencies in header.
 class Uinput {
@@ -21,7 +24,9 @@ class Uinput {
   // plain function pointers for input event callbacks, meaning the callback is
   // static and we cannot simply attach a particular Uinput instance to a server
   // instance.
-  static std::unique_ptr<Uinput> Create(rfbScreenInfoPtr server);
+  // If |rotate| is true, the instance will translate the pointer coordinates
+  // to handle rotation.
+  static std::unique_ptr<Uinput> Create(rfbScreenInfoPtr server, bool rotate);
 
   Uinput(const Uinput&) = delete;
   Uinput& operator=(const Uinput&) = delete;

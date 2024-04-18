@@ -1,9 +1,12 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::path::{Path, PathBuf};
-use std::process;
+use std::{
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+    process,
+};
 
 use anyhow::{Context, Error};
 
@@ -15,7 +18,7 @@ use crate::util::get_command_output;
 /// The return value is a string in /dev, for example "/dev/sda".
 fn get_root_disk_device_path() -> Result<PathBuf, Error> {
     let mut command = process::Command::new("rootdev");
-    command.args(&["-s", "-d"]);
+    command.args(["-s", "-d"]);
     let output = get_command_output(command)?;
     let output = String::from_utf8(output)?;
     let trimmed = output.trim();
@@ -113,6 +116,25 @@ fn classify_disk_layout(devices: &[LsBlkDevice]) -> DiskLayout {
     } else {
         DiskLayout::NotCros
     }
+}
+
+/// Get a disk partition device path.
+///
+/// This handles inserting a 'p' before the number if needed.
+pub fn get_partition_device(disk_device: &Path, num: u32) -> PathBuf {
+    let mut buf = disk_device.as_os_str().to_os_string();
+
+    // If the disk path ends in a number, e.g. "/dev/nvme0n1", append
+    // a "p" before the partition number.
+    if let Some(byte) = buf.as_bytes().last() {
+        if byte.is_ascii_digit() {
+            buf.push("p");
+        }
+    }
+
+    buf.push(num.to_string());
+
+    PathBuf::from(buf)
 }
 
 /// Check if the root device is an installer.

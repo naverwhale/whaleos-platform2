@@ -1,4 +1,4 @@
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,13 @@
 
 #include <string>
 
-#include <base/macros.h>
 #include <brillo/secure_blob.h>
 
 #include "chaps/chaps.h"
 
 namespace chaps {
 
-const size_t kIsolateCredentialBytes = 16;
+inline constexpr size_t kIsolateCredentialBytes = 16;
 
 // Manages a user's isolate credentials, including saving and retrieval of
 // isolate credentials. Sample usage:

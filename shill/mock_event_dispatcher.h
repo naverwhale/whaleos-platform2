@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 #define SHILL_MOCK_EVENT_DISPATCHER_H_
 
 #include <base/location.h>
-#include <base/macros.h>
+#include <base/time/time.h>
 #include <gmock/gmock.h>
 
 #include "shill/event_dispatcher.h"
@@ -25,7 +25,7 @@ class MockEventDispatcher : public EventDispatcher {
   MOCK_METHOD(void, DispatchPendingEvents, (), (override));
   MOCK_METHOD(void,
               PostDelayedTask,
-              (const base::Location&, base::OnceClosure, int64_t),
+              (const base::Location&, base::OnceClosure, base::TimeDelta),
               (override));
 };
 

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,9 +9,9 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 
-#include "shill/key_value_store.h"
+#include "shill/store/key_value_store.h"
 
 namespace shill {
 
@@ -20,13 +20,11 @@ class Error;
 using InterfaceToProperties = std::map<std::string, KeyValueStore>;
 using ObjectsWithProperties = std::map<RpcIdentifier, InterfaceToProperties>;
 using ManagedObjectsCallback =
-    base::Callback<void(const ObjectsWithProperties&, const Error&)>;
-using InterfaceAndPropertiesCallback =
-    base::Callback<void(const InterfaceToProperties&, const Error&)>;
-using InterfacesAddedSignalCallback =
-    base::Callback<void(const RpcIdentifier&, const InterfaceToProperties&)>;
-using InterfacesRemovedSignalCallback =
-    base::Callback<void(const RpcIdentifier&, const std::vector<std::string>&)>;
+    base::OnceCallback<void(const ObjectsWithProperties&, const Error&)>;
+using InterfacesAddedSignalCallback = base::RepeatingCallback<void(
+    const RpcIdentifier&, const InterfaceToProperties&)>;
+using InterfacesRemovedSignalCallback = base::RepeatingCallback<void(
+    const RpcIdentifier&, const std::vector<std::string>&)>;
 
 // These are the methods that a org.freedesktop.DBus.ObjectManager
 // proxy must support.  The interface is provided so that it can be
@@ -35,9 +33,7 @@ using InterfacesRemovedSignalCallback =
 class DBusObjectManagerProxyInterface {
  public:
   virtual ~DBusObjectManagerProxyInterface() = default;
-  virtual void GetManagedObjects(Error* error,
-                                 const ManagedObjectsCallback& callback,
-                                 int timeout) = 0;
+  virtual void GetManagedObjects(ManagedObjectsCallback callback) = 0;
   virtual void set_interfaces_added_callback(
       const InterfacesAddedSignalCallback& callback) = 0;
   virtual void set_interfaces_removed_callback(

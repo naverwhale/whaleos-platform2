@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 #include <base/files/file_util.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
+#include <brillo/files/file_util.h>
 
 namespace arc {
 namespace obb_mounter {
@@ -116,7 +117,7 @@ bool UnmountObb(const std::string& mount_path) {
     PLOG(ERROR) << "umount failed";
     return false;
   }
-  if (!base::DeletePathRecursively(base::FilePath(mount_path))) {
+  if (!brillo::DeletePathRecursively(base::FilePath(mount_path))) {
     LOG(ERROR) << "Failed to delete the destination directory.";
     return false;
   }

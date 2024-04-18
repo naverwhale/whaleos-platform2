@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #ifndef AVTEST_LABEL_DETECT_LABEL_DETECT_H_
@@ -29,8 +29,12 @@ extern void detect_label_by_board_name(void);
 /* util.c */
 extern int do_ioctl(int fd, int request, void* arg);
 extern bool is_any_device(const char* pattern, bool (*func)(int fd));
-extern bool is_any_device_with_path(const char* pattern,
-                                    bool (*func)(const char* dev_path, int fd));
+extern bool does_any_device_support_resolution(const char* pattern,
+                                               bool (*func)(int fd,
+                                                            int min_width,
+                                                            int min_height),
+                                               int32_t min_width,
+                                               int32_t min_height);
 extern void convert_fourcc_to_str(uint32_t fourcc, char* str);
 
 /* util_v4l2 */
@@ -44,6 +48,7 @@ bool get_v4l2_max_resolution(int fd,
                              uint32_t fourcc,
                              int32_t* const resolution_width,
                              int32_t* const resolution_height);
+bool is_v4l2_enc_vbr_supported(int fd);
 #endif  // defined(USE_V4L2_CODEC)
 
 /* util_vaapi */
@@ -67,11 +72,6 @@ bool is_amd_implementation(int fd);
 #endif  // defined(USE_VAAPI)
 
 /* detectors */
-extern bool detect_builtin_usb_camera(void);
-extern bool detect_builtin_mipi_camera(void);
-extern bool detect_vivid_camera(void);
-extern bool detect_builtin_camera(void);
-extern bool detect_builtin_or_vivid_camera(void);
 extern bool detect_video_acc_h264(void);
 extern bool detect_video_acc_vp8(void);
 extern bool detect_video_acc_vp9(void);
@@ -81,8 +81,13 @@ extern bool detect_video_acc_av1_10bpp(void);
 extern bool detect_video_acc_hevc(void);
 extern bool detect_video_acc_hevc_10bpp(void);
 extern bool detect_video_acc_enc_h264(void);
+extern bool detect_video_acc_enc_h264_vbr(void);
 extern bool detect_video_acc_enc_vp8(void);
+extern bool detect_video_acc_enc_vp8_vbr(void);
 extern bool detect_video_acc_enc_vp9(void);
+extern bool detect_video_acc_enc_vp9_vbr(void);
+extern bool detect_video_acc_enc_av1(void);
+extern bool detect_video_acc_enc_av1_vbr(void);
 extern bool detect_jpeg_acc_dec(void);
 extern bool detect_jpeg_acc_enc(void);
 bool detect_4k_device_h264(void);
@@ -92,9 +97,16 @@ bool detect_4k_device_av1(void);
 bool detect_4k_device_av1_10bpp(void);
 bool detect_4k_device_hevc(void);
 bool detect_4k_device_hevc_10bpp(void);
+bool detect_8k_device_h264(void);
+bool detect_8k_device_vp9(void);
+bool detect_8k_device_av1(void);
+bool detect_8k_device_av1_10bpp(void);
+bool detect_8k_device_hevc(void);
+bool detect_8k_device_hevc_10bpp(void);
 bool detect_4k_device_enc_h264(void);
 bool detect_4k_device_enc_vp8(void);
 bool detect_4k_device_enc_vp9(void);
+bool detect_4k_device_enc_av1(void);
 bool detect_video_prot_cencv1_h264_cbc(void);
 bool detect_video_prot_cencv1_h264_ctr(void);
 bool detect_video_prot_cencv3_av1_cbc(void);

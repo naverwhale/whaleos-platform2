@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,7 +31,7 @@ TEST(MessageStreamTest, ReadWrite) {
   message.mutable_data()->set_blob("abcde");
   {
     MessageStream stream(std::move(fd1));
-    ASSERT_TRUE(stream.Write(message));
+    ASSERT_TRUE(stream.Write(message, {}));
   }
 
   arc_proxy::MojoMessage read_message;

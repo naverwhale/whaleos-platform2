@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,18 @@
 
 #include <chromeos/dbus/service_constants.h>
 
+#include <optional>
+
 #include "lorgnette/dbus_adaptors/org.chromium.lorgnette.Manager.h"
 #include "lorgnette/ippusb_device.h"
 
 namespace lorgnette {
+
+namespace {
+
+constexpr char kIppUsbSocketDir[] = "/run/ippusb";
+
+}  // namespace
 
 std::unique_ptr<SaneDevice> SaneClient::ConnectToDevice(
     brillo::ErrorPtr* error,
@@ -18,7 +26,8 @@ std::unique_ptr<SaneDevice> SaneClient::ConnectToDevice(
   std::string real_device = device_name;
   if (device_name.substr(0, 7) == "ippusb:") {
     LOG(INFO) << "Finding real backend for device: " << device_name;
-    base::Optional<std::string> backend = BackendForDevice(device_name);
+    std::optional<std::string> backend =
+        BackendForDevice(device_name, IppUsbSocketDir());
     if (!backend.has_value()) {
       brillo::Error::AddToPrintf(
           error, FROM_HERE, brillo::errors::dbus::kDomain, kManagerServiceError,
@@ -33,6 +42,10 @@ std::unique_ptr<SaneDevice> SaneClient::ConnectToDevice(
   }
 
   return ConnectToDeviceInternal(error, sane_status, real_device);
+}
+
+base::FilePath SaneClient::IppUsbSocketDir() const {
+  return base::FilePath(kIppUsbSocketDir);
 }
 
 }  // namespace lorgnette

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@
 
 #include <string>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
@@ -28,24 +28,23 @@ SystemShutdownBlocker::~SystemShutdownBlocker() {
 void SystemShutdownBlocker::Block(int slot_id,
                                   base::TimeDelta fallback_timeout) {
   // Post block task.
-  auto perform_block_task = base::Bind(&SystemShutdownBlocker::PerformBlock,
-                                       base::Unretained(this), slot_id);
-  origin_thread_task_runner_->PostTask(FROM_HERE, perform_block_task);
+  origin_thread_task_runner_->PostTask(
+      FROM_HERE, base::BindOnce(&SystemShutdownBlocker::PerformBlock,
+                                base::Unretained(this), slot_id));
 
   // Post delayed unblock task (fallback).
-  auto perform_unblock_task =
-      base::Bind(&SystemShutdownBlocker::PerformUnblockIfBlocked,
-                 base::Unretained(this), slot_id);
-  origin_thread_task_runner_->PostDelayedTask(FROM_HERE, perform_unblock_task,
-                                              fallback_timeout);
+  origin_thread_task_runner_->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&SystemShutdownBlocker::PerformUnblockIfBlocked,
+                     base::Unretained(this), slot_id),
+      fallback_timeout);
 }
 
 void SystemShutdownBlocker::Unblock(int slot_id) {
   // Post unblock task.
-  auto perform_unblock_task =
-      base::Bind(&SystemShutdownBlocker::PerformUnblockIfBlocked,
-                 base::Unretained(this), slot_id);
-  origin_thread_task_runner_->PostTask(FROM_HERE, perform_unblock_task);
+  origin_thread_task_runner_->PostTask(
+      FROM_HERE, base::BindOnce(&SystemShutdownBlocker::PerformUnblockIfBlocked,
+                                base::Unretained(this), slot_id));
 }
 
 void SystemShutdownBlocker::PerformBlock(int slot_id) {

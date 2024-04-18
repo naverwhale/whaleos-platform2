@@ -1,15 +1,15 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "missive/util/statusor.h"
 
-#include <errno.h>
 #include <algorithm>
 #include <memory>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/compiler_specific.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/scoped_refptr.h>
 #include <gmock/gmock.h>
@@ -274,12 +274,10 @@ TEST(StatusOr, TestBinding) {
 
 TEST(StatusOr, TestAbort) {
   StatusOr<int> thing1(Status(error::UNKNOWN, "Unknown"));
-  int v1;
-  EXPECT_DEATH_IF_SUPPORTED(v1 = thing1.ValueOrDie(), "");
+  EXPECT_DEATH_IF_SUPPORTED(std::ignore = thing1.ValueOrDie(), "");
 
   StatusOr<std::unique_ptr<int>> thing2(Status(error::UNKNOWN, "Unknown"));
-  std::unique_ptr<int> v2;
-  EXPECT_DEATH_IF_SUPPORTED(v2 = std::move(thing2.ValueOrDie()), "");
+  EXPECT_DEATH_IF_SUPPORTED(std::ignore = std::move(thing2.ValueOrDie()), "");
 }
 }  // namespace
 }  // namespace reporting

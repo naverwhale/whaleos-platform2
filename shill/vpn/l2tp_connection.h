@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,16 +9,16 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/callback.h>
 #include <libpasswordprovider/password_provider.h>
 
 #include "shill/control_interface.h"
 #include "shill/device_info.h"
 #include "shill/event_dispatcher.h"
 #include "shill/external_task.h"
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 #include "shill/service.h"
 #include "shill/vpn/vpn_connection.h"
 #include "shill/vpn/vpn_util.h"
@@ -79,18 +79,22 @@ class L2TPConnection : public VPNConnection, public RpcTaskDelegate {
 
   // Callback registered in DeviceInfo to invoke NotifyConnected() once
   // DeviceInfo notices the ppp interface.
-  void OnLinkReady(const IPConfig::Properties& ip_properties,
+  void OnLinkReady(std::unique_ptr<IPConfig::Properties> ipv4_properties,
                    const std::string& if_name,
                    int if_index);
   void OnXl2tpdExitedUnexpectedly(pid_t pid, int exit_code);
+
+  // Callback for running `xl2tpd-control` to disconnect the connection.
+  void OnXl2tpdControlDisconnectDone(int exit_code);
 
   std::unique_ptr<Config> config_;
 
   base::ScopedTempDir temp_dir_;
 
-  // Paths to the config files. All the files are stored in |temp_dir_| and thus
-  // will be removed when this class is destroyed.
+  // Paths to the runtime files. All the files are stored in |temp_dir_| and
+  // thus will be removed when this class is destroyed.
   base::FilePath l2tpd_config_path_;
+  base::FilePath l2tpd_control_path_;
   base::FilePath pppd_config_path_;
 
   std::unique_ptr<ExternalTask> external_task_;

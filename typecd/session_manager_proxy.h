@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,6 +23,9 @@ class SessionManagerProxy {
  public:
   explicit SessionManagerProxy(scoped_refptr<dbus::Bus> bus);
 
+  SessionManagerProxy(const SessionManagerProxy&) = delete;
+  SessionManagerProxy& operator=(const SessionManagerProxy&) = delete;
+
   ~SessionManagerProxy() = default;
 
   void AddObserver(SessionManagerObserverInterface* observer);
@@ -37,6 +40,8 @@ class SessionManagerProxy {
   bool IsSessionStarted();
 
  private:
+  friend class SessionManagerProxyFuzzer;
+
   // Handles the ScreenIsLocked DBus signal.
   void OnScreenIsLocked();
 
@@ -49,8 +54,6 @@ class SessionManagerProxy {
   org::chromium::SessionManagerInterfaceProxy proxy_;
   base::ObserverList<SessionManagerObserverInterface> observer_list_;
   base::WeakPtrFactory<SessionManagerProxy> weak_ptr_factory_;
-
-  DISALLOW_COPY_AND_ASSIGN(SessionManagerProxy);
 };
 
 }  // namespace typecd

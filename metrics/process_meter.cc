@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,14 +10,13 @@
 #include <unordered_map>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/check_op.h>
 #include <base/command_line.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
@@ -284,9 +283,6 @@ void ProcessInfo::Classify() {
   for (const auto& pit : daemon_processes_map) {
     groups_[PG_DAEMONS].push_back(pit.second);
   }
-
-  // Make sure there is at most one GPU process.
-  CHECK_LE(groups_[PG_GPU].size(), 1);
 }
 
 bool ProcessNode::RetrieveProcessData(const base::FilePath& procfs_root) {

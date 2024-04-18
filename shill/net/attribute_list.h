@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,11 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <base/containers/span.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 
 #include "shill/net/netlink_message.h"
 #include "shill/net/shill_export.h"
@@ -23,14 +25,14 @@ class AttributeList;
 using AttributeListConstRefPtr = scoped_refptr<const AttributeList>;
 using AttributeListRefPtr = scoped_refptr<AttributeList>;
 
-class ByteString;
 class NetlinkAttribute;
 
 class SHILL_EXPORT AttributeList : public base::RefCounted<AttributeList> {
  public:
   using NewFromIdMethod =
-      base::Callback<std::unique_ptr<NetlinkAttribute>(int id)>;
-  using AttributeMethod = base::Callback<bool(int id, const ByteString& value)>;
+      base::RepeatingCallback<std::unique_ptr<NetlinkAttribute>(int id)>;
+  using AttributeMethod =
+      base::RepeatingCallback<bool(int id, base::span<const uint8_t> value)>;
 
   AttributeList();
   AttributeList(const AttributeList&) = delete;
@@ -50,10 +52,10 @@ class SHILL_EXPORT AttributeList : public base::RefCounted<AttributeList> {
   // using |factory|, initializes it from |value|, and adds it to |attributes_|.
   bool CreateAndInitAttribute(const NewFromIdMethod& factory,
                               int id,
-                              const ByteString& value);
+                              base::span<const uint8_t> value);
 
   // Initializes the attribute |id| from the data in |value|.
-  bool InitAttributeFromValue(int id, const ByteString& value);
+  bool InitAttributeFromValue(int id, base::span<const uint8_t> value);
 
   // Prints the attribute list with each attribute using no less than 1 line.
   // |indent| indicates the amout of leading spaces to be printed (useful for
@@ -64,20 +66,20 @@ class SHILL_EXPORT AttributeList : public base::RefCounted<AttributeList> {
   // for each attribute.  If |method| returns false, the travesal is terminated
   // and false is returned.  If a malformed attribute entry is encountered,
   // this method also returns false.
-  static bool IterateAttributes(const ByteString& payload,
+  static bool IterateAttributes(base::span<const uint8_t> payload,
                                 size_t offset,
                                 const AttributeMethod& method);
 
   // Decode an attribute list starting from |offset| within |payload|.  Use
   // |factory| to create each attribute object.
-  bool Decode(const ByteString& payload,
+  bool Decode(base::span<const uint8_t> payload,
               size_t offset,
               const NewFromIdMethod& factory);
 
   // Returns the attributes as the payload portion of a netlink message
   // suitable for Sockets::Send.  Return value is empty on failure (or if no
   // attributes exist).
-  ByteString Encode() const;
+  std::vector<uint8_t> Encode() const;
 
   // Create, get, and set attributes of the given types.  Attributes are
   // accessed via an integer |id|.  |id_string| is a string used to describe
@@ -121,8 +123,8 @@ class SHILL_EXPORT AttributeList : public base::RefCounted<AttributeList> {
   bool CreateRawAttribute(int id, const char* id_string);
   // |value| should point to the data (after the |nlattr| header, if there is
   // one).
-  bool SetRawAttributeValue(int id, ByteString value);
-  bool GetRawAttributeValue(int id, ByteString* output) const;
+  bool SetRawAttributeValue(int id, base::span<const uint8_t> value);
+  bool GetRawAttributeValue(int id, std::vector<uint8_t>* output) const;
 
   // This retrieves a string from any kind of attribute.
   bool GetAttributeAsString(int id, std::string* value) const;
@@ -147,7 +149,7 @@ class SHILL_EXPORT AttributeList : public base::RefCounted<AttributeList> {
 // Provides a mechanism to iterate through the ids of all of the attributes
 // in an |AttributeList|.  This class is really only useful if the caller
 // knows the type of each attribute in advance (such as with a nested array).
-class AttributeIdIterator {
+class SHILL_EXPORT AttributeIdIterator {
  public:
   explicit AttributeIdIterator(const AttributeList& list)
       : iter_(list.attributes_.begin()), end_(list.attributes_.end()) {}
@@ -157,6 +159,7 @@ class AttributeIdIterator {
   void Advance() { ++iter_; }
   bool AtEnd() const { return iter_ == end_; }
   int GetId() const { return iter_->first; }
+  int GetType() const;
 
  private:
   AttributeList::AttributeMap::const_iterator iter_;

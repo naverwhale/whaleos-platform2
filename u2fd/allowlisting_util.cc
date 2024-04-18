@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,6 +7,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,17 +15,16 @@
 #include <attestation/proto_bindings/interface.pb.h>
 #include <base/check_op.h>
 #include <base/logging.h>
-#include <base/optional.h>
 #include <base/strings/string_number_conversions.h>
 #include <policy/device_policy.h>
 #include <policy/libpolicy.h>
 
-#include "u2fd/util.h"
+#include "u2fd/client/util.h"
 
 namespace u2f {
 
 AllowlistingUtil::AllowlistingUtil(
-    std::function<base::Optional<attestation::GetCertifiedNvIndexReply>(int)>
+    std::function<std::optional<attestation::GetCertifiedNvIndexReply>(int)>
         get_certified_g2f_cert)
     : get_certified_g2f_cert_(get_certified_g2f_cert),
       policy_provider_(std::make_unique<policy::PolicyProvider>()) {}
@@ -141,7 +141,7 @@ bool AllowlistingUtil::AppendDataToCert(std::vector<uint8_t>* cert) {
   // Collect all the data we need to append.
   std::vector<uint8_t> cert_prefix;
   std::vector<uint8_t> signature;
-  base::Optional<std::string> device_id = GetDeviceId();
+  std::optional<std::string> device_id = GetDeviceId();
   if (!device_id.has_value() ||
       !GetCertifiedAttestationCert(orig_cert_size, &cert_prefix, &signature)) {
     return false;
@@ -181,7 +181,7 @@ bool AllowlistingUtil::GetCertifiedAttestationCert(
     int orig_cert_size,
     std::vector<uint8_t>* cert_prefix,
     std::vector<uint8_t>* signature) {
-  base::Optional<attestation::GetCertifiedNvIndexReply> reply =
+  std::optional<attestation::GetCertifiedNvIndexReply> reply =
       get_certified_g2f_cert_(orig_cert_size);
 
   if (!reply.has_value() || reply->status() != attestation::STATUS_SUCCESS) {
@@ -215,17 +215,17 @@ bool AllowlistingUtil::GetCertifiedAttestationCert(
   return true;
 }
 
-base::Optional<std::string> AllowlistingUtil::GetDeviceId() {
+std::optional<std::string> AllowlistingUtil::GetDeviceId() {
   if (!policy_provider_->Reload()) {
     LOG(ERROR) << "Failed to load device policy";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   std::string id;
 
   if (!policy_provider_->GetDevicePolicy().GetDeviceDirectoryApiId(&id)) {
     LOG(ERROR) << "Failed to read directory API ID";
-    return base::nullopt;
+    return std::nullopt;
   }
 
   return id;

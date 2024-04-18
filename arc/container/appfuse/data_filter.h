@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,13 +10,14 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/callback.h>
 #include <base/memory/ref_counted.h>
-#include <base/task_runner.h>
+#include <base/task/task_runner.h>
 #include <base/threading/thread.h>
 
 namespace arc {
@@ -32,8 +33,8 @@ class DataFilter {
   ~DataFilter();
 
   // The given callback will be run when this filter stops.
-  void set_on_stopped_callback(const base::Closure& callback) {
-    on_stopped_callback_ = callback;
+  void set_on_stopped_callback(base::OnceClosure callback) {
+    on_stopped_callback_ = std::move(callback);
   }
 
   // Starts watching the given /dev/fuse FD and returns a filtered FD.
@@ -90,7 +91,7 @@ class DataFilter {
   std::map<uint64_t, uint32_t> unique_to_opcode_;
 
   scoped_refptr<base::TaskRunner> origin_task_runner_;
-  base::Closure on_stopped_callback_;
+  base::OnceClosure on_stopped_callback_;
 };
 
 }  // namespace appfuse

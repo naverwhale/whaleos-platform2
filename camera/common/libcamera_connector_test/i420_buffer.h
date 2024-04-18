@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Chromium OS Authors. All rights reserved.
+ * Copyright 2020 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -43,7 +43,7 @@ class I420Buffer {
         expect_empty(planes[3]);
         int ret = libyuv::NV12ToI420(
             planes[0].data, planes[0].stride, planes[1].data, planes[1].stride,
-            buf.DataY(), buf.StrideY(), buf.DataU(), buf.StrideU(), buf.DataY(),
+            buf.DataY(), buf.StrideY(), buf.DataU(), buf.StrideU(), buf.DataV(),
             buf.StrideV(), buf.Width(), buf.Height());
         EXPECT_EQ(ret, 0) << "invalid NV12 frame";
         break;

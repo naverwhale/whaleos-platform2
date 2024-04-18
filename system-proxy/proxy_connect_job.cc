@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,18 +11,17 @@
 #include <curl/easy.h>
 
 #include <base/base64.h>
-#include <base/bind.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
-#include <base/strings/stringprintf.h>
 #include <base/strings/string_util.h>
+#include <base/strings/stringprintf.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/thread.h>
-#include <base/threading/thread_task_runner_handle.h>
 #include <base/time/time.h>
 #include <brillo/http/http_transport.h>
-#include <chromeos/patchpanel/net_util.h>
 #include <chromeos/patchpanel/socket.h>
 #include <chromeos/patchpanel/socket_forwarder.h>
 
@@ -40,16 +39,13 @@ namespace {
 // popular http server implementations (Apache, IIS, Tomcat) set the lower limit
 // to 8000.
 constexpr int kMaxHttpRequestHeadersSize = 8000;
-constexpr base::TimeDelta kCurlConnectTimeout =
-    base::TimeDelta::FromSeconds(30);
-constexpr base::TimeDelta kWaitClientConnectTimeout =
-    base::TimeDelta::FromSeconds(2);
+constexpr base::TimeDelta kCurlConnectTimeout = base::Seconds(30);
+constexpr base::TimeDelta kWaitClientConnectTimeout = base::Seconds(2);
 // Time to wait for proxy authentication credentials to be fetched from the
 // browser. The credentials are retrieved either from the Network Service or, if
 // the Network Service doesn't have them, directly from the user via a login
 // dialogue.
-constexpr base::TimeDelta kCredentialsRequestTimeout =
-    base::TimeDelta::FromMinutes(1);
+constexpr base::TimeDelta kCredentialsRequestTimeout = base::Minutes(1);
 
 constexpr int64_t kHttpCodeProxyAuthRequired = 407;
 
@@ -139,9 +135,9 @@ ProxyConnectJob::ProxyConnectJob(
       setup_finished_callback_(std::move(setup_finished_callback)),
       // Safe to use |base::Unretained| because the callback will be canceled
       // when it goes out of scope.
-      client_connect_timeout_callback_(base::Bind(
+      client_connect_timeout_callback_(base::BindOnce(
           &ProxyConnectJob::OnClientConnectTimeout, base::Unretained(this))),
-      credentials_request_timeout_callback_(base::Bind(
+      credentials_request_timeout_callback_(base::BindOnce(
           &ProxyConnectJob::OnAuthenticationTimeout, base::Unretained(this))) {
   client_socket_ = std::move(socket);
 }
@@ -158,12 +154,13 @@ bool ProxyConnectJob::Start() {
     }
     return false;
   }
-  base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, client_connect_timeout_callback_.callback(),
       kWaitClientConnectTimeout);
   read_watcher_ = base::FileDescriptorWatcher::WatchReadable(
-      client_socket_->fd(), base::Bind(&ProxyConnectJob::OnClientReadReady,
-                                       weak_ptr_factory_.GetWeakPtr()));
+      client_socket_->fd(),
+      base::BindRepeating(&ProxyConnectJob::OnClientReadReady,
+                          weak_ptr_factory_.GetWeakPtr()));
   return true;
 }
 
@@ -222,8 +219,8 @@ void ProxyConnectJob::HandleClientHTTPRequest(
   // target url.
   std::move(resolve_proxy_callback_)
       .Run(base::StringPrintf("https://%s", target_url_.c_str()),
-           base::Bind(&ProxyConnectJob::OnProxyResolution,
-                      weak_ptr_factory_.GetWeakPtr()));
+           base::BindOnce(&ProxyConnectJob::OnProxyResolution,
+                          weak_ptr_factory_.GetWeakPtr()));
 }
 
 void ProxyConnectJob::OnProxyResolution(
@@ -245,7 +242,7 @@ void ProxyConnectJob::AuthenticationRequired(
 
   if (!authentication_timer_started_) {
     authentication_timer_started_ = true;
-    base::ThreadTaskRunnerHandle::Get()->PostDelayedTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE, credentials_request_timeout_callback_.callback(),
         kCredentialsRequestTimeout);
   }

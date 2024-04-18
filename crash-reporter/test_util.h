@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,12 +13,20 @@
 #include <base/strings/string_piece.h>
 #include <base/time/clock.h>
 #include <base/time/time.h>
-
 #include <session_manager/dbus-proxy-mocks.h>
+
+#include "crash-reporter/crash_collector.h"
 
 namespace test_util {
 
-constexpr char kFakeClientId[] = "00112233445566778899aabbccddeeff";
+inline constexpr char kFakeClientId[] = "00112233445566778899aabbccddeeff";
+
+// Parameter for crash severity unit tests. Used by multiple collectors to test
+// ComputeSeverity().
+struct ComputeCrashSeverityTestParams {
+  std::string exec_name;
+  CrashCollector::CrashSeverity expected_severity;
+};
 
 // A Clock that advances 10 seconds (by default) on each call, used in tests and
 // fuzzers. Unlike a MockClock, it will not fail the test regardless of how many
@@ -66,8 +74,15 @@ bool DirectoryHasFileWithPattern(const base::FilePath& directory,
                                  const std::string& pattern,
                                  base::FilePath* found_file_path);
 
+// Returns true if at least one file in this directory matches the |pattern|
+// and contains the string |contents|.
+bool DirectoryHasFileWithPatternAndContents(const base::FilePath& directory,
+                                            const std::string& pattern,
+                                            const std::string& contents);
+
 // Return path to an input files used by unit tests.
-base::FilePath GetTestDataPath(const std::string& name);
+// use_testdata: Whether to add "testdata/" in front of the filename.
+base::FilePath GetTestDataPath(const std::string& name, bool use_testdata);
 
 // Helper function for calling base::TouchFile() concisely for tests.
 bool TouchFileHelper(const base::FilePath& file_name, base::Time modified_time);

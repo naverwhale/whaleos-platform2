@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,8 +12,8 @@
 #include <string>
 #include <vector>
 
-#include <base/callback_forward.h>
 #include <base/compiler_specific.h>
+#include <base/functional/callback_forward.h>
 #include <base/observer_list.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
@@ -25,7 +25,7 @@ class PrefsObserver;
 // Interface for reading and writing preferences.
 class PrefsInterface {
  public:
-  virtual ~PrefsInterface() {}
+  virtual ~PrefsInterface() = default;
 
   // Adds or removes an observer.
   virtual void AddObserver(PrefsObserver* observer) = 0;
@@ -43,6 +43,12 @@ class PrefsInterface {
   virtual void SetInt64(const std::string& name, int64_t value) = 0;
   virtual void SetDouble(const std::string& name, double value) = 0;
   virtual void SetBool(const std::string& name, bool value) = 0;
+
+  // Reads non-power settings that are part of one of the PrefsSourceInterfaces.
+  // These settings cannot be modified via the PrefsInterface.
+  virtual bool GetExternalString(const std::string& path,
+                                 const std::string& name,
+                                 std::string* value) = 0;
 };
 
 class PrefsSourceInterface;
@@ -59,7 +65,7 @@ struct PrefReadResult {
 // Interface for readable sources of preferences.
 class PrefsSourceInterface {
  public:
-  virtual ~PrefsSourceInterface() {}
+  virtual ~PrefsSourceInterface() = default;
 
   // Gets a description of this source suitable for logging.
   virtual std::string GetDescription() const = 0;
@@ -67,13 +73,19 @@ class PrefsSourceInterface {
   // Reads a pref named |name| from this source into the given string.
   virtual bool ReadPrefString(const std::string& name,
                               std::string* value_out) = 0;
+
+  // Reads non-power setting |name| from the |path| location into the given
+  // string.
+  virtual bool ReadExternalString(const std::string& path,
+                                  const std::string& name,
+                                  std::string* value_out) = 0;
 };
 
 // Interface for readable and writable storage of preferences.
 class PrefsStoreInterface : public PrefsSourceInterface {
  public:
   // Callback type for Watch(). |name| refers to the updated preference.
-  using ChangeCallback = base::Callback<void(const std::string& name)>;
+  using ChangeCallback = base::RepeatingCallback<void(const std::string& name)>;
 
   // Writes a pref named |name| to this store.
   virtual bool WritePrefString(const std::string& name,
@@ -86,10 +98,14 @@ class PrefsStoreInterface : public PrefsSourceInterface {
 };
 
 // PrefsInterface implementation that reads and writes prefs from/to disk and
-// from libcros_config.
+// from libcros_config and cros_ec.
 // Multiple directories are supported; this allows a default set of prefs
 // to be placed on the readonly root partition and a second set of
 // prefs under /var to be overlaid and changed at runtime.
+//
+// Default pref read priority when using GetDefaultStore() and
+// GetDefaultSources() is in decreasing order: read-write directory, cros_ec,
+// libcros_config, read-only directories.
 class Prefs : public PrefsInterface {
  public:
   // Helper class for tests.
@@ -99,7 +115,7 @@ class Prefs : public PrefsInterface {
     TestApi(const TestApi&) = delete;
     TestApi& operator=(const TestApi&) = delete;
 
-    ~TestApi();
+    ~TestApi() = default;
 
     void set_write_interval(base::TimeDelta interval) {
       prefs_->write_interval_ = interval;
@@ -111,7 +127,6 @@ class Prefs : public PrefsInterface {
 
    private:
     Prefs* prefs_;  // weak
-
   };
 
   Prefs();
@@ -143,6 +158,9 @@ class Prefs : public PrefsInterface {
   void SetInt64(const std::string& name, int64_t value) override;
   void SetDouble(const std::string& name, double value) override;
   void SetBool(const std::string& name, bool value) override;
+  bool GetExternalString(const std::string& path,
+                         const std::string& name,
+                         std::string* value) override;
 
  private:
   // Handle changes to pref values in |pref_store_|.

@@ -1,83 +1,22 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <memory>
-#include <string>
-#include <utility>
-
-#include <base/bind.h>
-#include <base/check.h>
-#include <base/run_loop.h>
-#include <base/test/task_environment.h>
-#include <dbus/object_path.h>
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
-#include <mojo/core/embedder/embedder.h>
-#include <mojo/public/cpp/bindings/pending_receiver.h>
-#include <mojo/public/cpp/bindings/receiver.h>
-
-#include "diagnostics/common/system/bluetooth_client.h"
-#include "diagnostics/common/system/fake_bluetooth_client.h"
 #include "diagnostics/cros_healthd/events/bluetooth_events_impl.h"
+
+#include <base/test/task_environment.h>
+#include <brillo/variant_dictionary.h>
+#include <dbus/object_path.h>
+#include <gtest/gtest.h>
+
+#include "diagnostics/cros_healthd/events/event_observer_test_future.h"
 #include "diagnostics/cros_healthd/system/mock_context.h"
-#include "mojo/cros_healthd_events.mojom.h"
+#include "diagnostics/mojom/public/cros_healthd_events.mojom.h"
 
 namespace diagnostics {
-
 namespace {
 
-namespace mojo_ipc = ::chromeos::cros_healthd::mojom;
-
-using ::testing::Invoke;
-using ::testing::StrictMock;
-
-void PropertyChanged(const std::string& property_name) {}
-
-std::unique_ptr<BluetoothClient::AdapterProperties> CreateAdapterProperties() {
-  auto properties = std::make_unique<BluetoothClient::AdapterProperties>(
-      nullptr, base::Bind(&PropertyChanged));
-  properties->name.ReplaceValue("hci0");
-  properties->address.ReplaceValue("aa:bb:cc:dd:ee:ff");
-  properties->powered.ReplaceValue(true);
-  return properties;
-}
-
-std::unique_ptr<BluetoothClient::DeviceProperties> CreateDeviceProperties() {
-  auto properties = std::make_unique<BluetoothClient::DeviceProperties>(
-      nullptr, base::Bind(&PropertyChanged));
-  properties->name.ReplaceValue("keyboard");
-  properties->address.ReplaceValue("70:88:6B:92:34:70");
-  properties->connected.ReplaceValue(true);
-  properties->adapter.ReplaceValue(dbus::ObjectPath("/org/bluez/hci0"));
-  return properties;
-}
-
-class MockCrosHealthdBluetoothObserver
-    : public mojo_ipc::CrosHealthdBluetoothObserver {
- public:
-  MockCrosHealthdBluetoothObserver(
-      mojo::PendingReceiver<mojo_ipc::CrosHealthdBluetoothObserver> receiver)
-      : receiver_{this /* impl */, std::move(receiver)} {
-    DCHECK(receiver_.is_bound());
-  }
-  MockCrosHealthdBluetoothObserver(const MockCrosHealthdBluetoothObserver&) =
-      delete;
-  MockCrosHealthdBluetoothObserver& operator=(
-      const MockCrosHealthdBluetoothObserver&) = delete;
-
-  MOCK_METHOD(void, OnAdapterAdded, (), (override));
-  MOCK_METHOD(void, OnAdapterRemoved, (), (override));
-  MOCK_METHOD(void, OnAdapterPropertyChanged, (), (override));
-  MOCK_METHOD(void, OnDeviceAdded, (), (override));
-  MOCK_METHOD(void, OnDeviceRemoved, (), (override));
-  MOCK_METHOD(void, OnDevicePropertyChanged, (), (override));
-
- private:
-  mojo::Receiver<mojo_ipc::CrosHealthdBluetoothObserver> receiver_;
-};
-
-}  // namespace
+namespace mojom = ::ash::cros_healthd::mojom;
 
 // Tests for the BluetoothEventsImpl class.
 class BluetoothEventsImplTest : public testing::Test {
@@ -87,140 +26,126 @@ class BluetoothEventsImplTest : public testing::Test {
   BluetoothEventsImplTest& operator=(const BluetoothEventsImplTest&) = delete;
 
   void SetUp() override {
-    // Before any observers have been added, we shouldn't have subscribed to
-    // BluetoothClient.
-    ASSERT_FALSE(fake_bluetooth_client()->HasObserver(&bluetooth_events_impl_));
-
-    mojo::PendingRemote<mojo_ipc::CrosHealthdBluetoothObserver> observer;
-    mojo::PendingReceiver<mojo_ipc::CrosHealthdBluetoothObserver>
-        observer_receiver(observer.InitWithNewPipeAndPassReceiver());
-    observer_ = std::make_unique<StrictMock<MockCrosHealthdBluetoothObserver>>(
-        std::move(observer_receiver));
-    bluetooth_events_impl_.AddObserver(std::move(observer));
-    // Now that an observer has been added, we should have subscribed to
-    // BluetoothClient.
-    ASSERT_TRUE(fake_bluetooth_client()->HasObserver(&bluetooth_events_impl_));
+    bluetooth_events_impl_.AddObserver(observer_.BindNewPendingRemote());
   }
 
-  BluetoothEventsImpl* bluetooth_events_impl() {
-    return &bluetooth_events_impl_;
+  FakeBluezEventHub* fake_bluez_event_hub() const {
+    return mock_context_.fake_bluez_event_hub();
   }
 
-  FakeBluetoothClient* fake_bluetooth_client() {
-    return mock_context_.fake_bluetooth_client();
+  FakeFlossEventHub* fake_floss_event_hub() const {
+    return mock_context_.fake_floss_event_hub();
   }
 
-  MockCrosHealthdBluetoothObserver* mock_observer() { return observer_.get(); }
-
-  dbus::ObjectPath adapter_path() {
-    return dbus::ObjectPath("/org/bluez/hci0");
-  }
-
-  dbus::ObjectPath device_path() {
-    return dbus::ObjectPath("/org/bluez/hci0/dev_70_88_6B_92_34_70");
-  }
-
-  void DestroyMojoObserver() {
-    observer_.reset();
-
-    // Make sure |bluetooth_events_impl_| gets a chance to observe the
-    // connection error.
-    task_environment_.RunUntilIdle();
+  void WaitAndCheckEvent(mojom::BluetoothEventInfo::State state) {
+    auto info = observer_.WaitForEvent();
+    ASSERT_TRUE(info->is_bluetooth_event_info());
+    const auto& bluetooth_event_info = info->get_bluetooth_event_info();
+    EXPECT_EQ(bluetooth_event_info->state, state);
   }
 
  private:
   base::test::TaskEnvironment task_environment_;
-
   MockContext mock_context_;
   BluetoothEventsImpl bluetooth_events_impl_{&mock_context_};
-  std::unique_ptr<StrictMock<MockCrosHealthdBluetoothObserver>> observer_;
+  EventObserverTestFuture observer_;
 };
 
-// Test that we can receive an adapter added event.
-TEST_F(BluetoothEventsImplTest, ReceiveAdapterAddedEvent) {
-  base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnAdapterAdded()).WillOnce(Invoke([&]() {
-    run_loop.Quit();
-  }));
+}  // namespace
 
-  fake_bluetooth_client()->EmitAdapterAdded(adapter_path(),
-                                            *CreateAdapterProperties());
-
-  run_loop.Run();
+// Test that we can receive an adapter added event via Bluez proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveBluezAdapterAddedEvent) {
+  fake_bluez_event_hub()->SendAdapterAdded();
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kAdapterAdded);
 }
 
-// Test that we can receive an adapter removed event.
-TEST_F(BluetoothEventsImplTest, ReceiveAdapterRemovedEvent) {
-  base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnAdapterRemoved()).WillOnce(Invoke([&]() {
-    run_loop.Quit();
-  }));
-
-  fake_bluetooth_client()->EmitAdapterRemoved(adapter_path());
-
-  run_loop.Run();
+// Test that we can receive an adapter removed event via Bluez proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveBluezAdapterRemovedEvent) {
+  fake_bluez_event_hub()->SendAdapterRemoved();
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kAdapterRemoved);
 }
 
-// Test that we can receive an adapter property changed event.
-TEST_F(BluetoothEventsImplTest, ReceiveAdapterPropertyChangedEvent) {
-  base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnAdapterPropertyChanged())
-      .WillOnce(Invoke([&]() { run_loop.Quit(); }));
-
-  fake_bluetooth_client()->EmitAdapterPropertyChanged(
-      adapter_path(), *CreateAdapterProperties());
-
-  run_loop.Run();
+// Test that we can receive an adapter property changed event via Bluez proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveBluezAdapterPropertyChangedEvent) {
+  fake_bluez_event_hub()->SendAdapterPropertyChanged();
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kAdapterPropertyChanged);
 }
 
-// Test that we can receive a device added event.
-TEST_F(BluetoothEventsImplTest, ReceiveDeviceAddedEvent) {
-  base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnDeviceAdded()).WillOnce(Invoke([&]() {
-    run_loop.Quit();
-  }));
-
-  fake_bluetooth_client()->EmitDeviceAdded(device_path(),
-                                           *CreateDeviceProperties());
-
-  run_loop.Run();
+// Test that we can receive a device added event via Bluez proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveBluezDeviceAddedEvent) {
+  fake_bluez_event_hub()->SendDeviceAdded();
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kDeviceAdded);
 }
 
-// Test that we can receive a device removed event.
-TEST_F(BluetoothEventsImplTest, ReceiveDeviceRemovedEvent) {
-  base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnDeviceRemoved()).WillOnce(Invoke([&]() {
-    run_loop.Quit();
-  }));
-
-  fake_bluetooth_client()->EmitDeviceRemoved(device_path());
-
-  run_loop.Run();
+// Test that we can receive a device removed event via Bluez proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveBluezDeviceRemovedEvent) {
+  fake_bluez_event_hub()->SendDeviceRemoved();
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kDeviceRemoved);
 }
 
-// Test that we can receive a device property changed event.
-TEST_F(BluetoothEventsImplTest, ReceiveDevicePropertyChangedEvent) {
-  base::RunLoop run_loop;
-  EXPECT_CALL(*mock_observer(), OnDevicePropertyChanged())
-      .WillOnce(Invoke([&]() { run_loop.Quit(); }));
-
-  fake_bluetooth_client()->EmitDevicePropertyChanged(device_path(),
-                                                     *CreateDeviceProperties());
-
-  run_loop.Run();
+// Test that we can receive a device property changed event via Bluez proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveBluezDevicePropertyChangedEvent) {
+  fake_bluez_event_hub()->SendDevicePropertyChanged();
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kDevicePropertyChanged);
 }
 
-// Test that BluetoothEvents unsubscribes from BluetoothClient when
-// BluetoothEvents loses all of its Mojo observers.
-TEST_F(BluetoothEventsImplTest,
-       UnsubscribeFromBluetoothClientWhenAllObserversLost) {
-  DestroyMojoObserver();
+// Test that we can receive an adapter added event via Floss proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveFlossAdapterAddedEvent) {
+  fake_floss_event_hub()->SendAdapterAdded();
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kAdapterAdded);
+}
 
-  // Emit an event so that BluetoothEventsImpl has a chance to check for any
-  // remaining Mojo observers.
-  fake_bluetooth_client()->EmitAdapterRemoved(adapter_path());
+// Test that we can receive an adapter removed event via Floss proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveFlossAdapterRemovedEvent) {
+  fake_floss_event_hub()->SendAdapterRemoved(dbus::ObjectPath(""));
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kAdapterRemoved);
+}
 
-  EXPECT_FALSE(fake_bluetooth_client()->HasObserver(bluetooth_events_impl()));
+// Test that we can receive an adapter property changed event via Floss proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveFlossAdapterPropertyChangedEvent) {
+  dbus::ObjectPath path{""};
+  std::vector<uint32_t> properties = {0x0,  0x1,  0x2,  0x3,  0xA,  0xB,
+                                      0x15, 0x18, 0x20, 0x50, 0XFE, 0xFF};
+  for (const auto property : properties) {
+    fake_floss_event_hub()->SendAdapterPropertyChanged(path, property);
+  }
+  fake_floss_event_hub()->SendAdapterDiscoveringChanged(path,
+                                                        /*discovering=*/true);
+  // One to check for adapter discovering change events.
+  for (int i = 0; i < properties.size() + 1; ++i) {
+    WaitAndCheckEvent(
+        mojom::BluetoothEventInfo::State::kAdapterPropertyChanged);
+  }
+}
+
+// Test that we can receive a device added event via Floss proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveFlossDeviceAddedEvent) {
+  fake_floss_event_hub()->SendDeviceAdded(brillo::VariantDictionary());
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kDeviceAdded);
+}
+
+// Test that we can receive a device removed event via Floss proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveFlossDeviceRemovedEvent) {
+  fake_floss_event_hub()->SendDeviceRemoved(brillo::VariantDictionary());
+  WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kDeviceRemoved);
+}
+
+// Test that we can receive a device property changed event via Floss proxy.
+TEST_F(BluetoothEventsImplTest, ReceiveFlossDevicePropertyChangedEvent) {
+  brillo::VariantDictionary device;
+  std::vector<uint32_t> properties = {0x0,  0x1,  0x2,  0x3,  0xA,  0xB,
+                                      0x15, 0x18, 0x20, 0x50, 0XFE, 0xFF};
+  fake_floss_event_hub()->SendDevicePropertiesChanged(device, properties);
+  fake_floss_event_hub()->SendDeviceConnectedChanged(device,
+                                                     /*connected=*/true);
+  // |bt_status| is 0 for Success and |bond_state| is 2 for Bonded.
+  fake_floss_event_hub()->SendDeviceBondChanged(/*bt_status=*/0, /*address=*/"",
+                                                /*bond_state=*/2);
+  // One to check for device connected change events and one to check for device
+  // bond change events.
+  for (int i = 0; i < properties.size() + 2; ++i) {
+    WaitAndCheckEvent(mojom::BluetoothEventInfo::State::kDevicePropertyChanged);
+  }
 }
 
 }  // namespace diagnostics

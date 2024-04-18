@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,29 +13,28 @@
 #include <utility>
 
 #include <anomaly_detector/proto_bindings/anomaly_detector.pb.h>
-#include <base/callback_helpers.h>
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/format_macros.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <base/memory/ptr_util.h>
 #include <base/synchronization/lock.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 #include <chromeos/dbus/service_constants.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
 #include <dbus/object_proxy.h>
-#include <vm_concierge/proto_bindings/concierge_service.pb.h>
+#include <vm_concierge/concierge_service.pb.h>
 #include <vm_protos/proto_bindings/vm_host.grpc.pb.h>
 
 #include "vm_tools/common/naming.h"
 #include "vm_tools/syslog/rotator.h"
 
-namespace vm_tools {
-namespace syslog {
+namespace vm_tools::syslog {
 
 namespace {
 // Cryptohome root base path.
@@ -49,7 +48,7 @@ constexpr char kLogFileExtension[] = ".log";
 
 constexpr int64_t kInvalidCid = 0;
 // how often to rotate logs in |managed_log_dir_|.
-constexpr base::TimeDelta kLogRotationPeriod = base::TimeDelta::FromDays(1);
+constexpr base::TimeDelta kLogRotationPeriod = base::Days(1);
 // maximum log files to keep per vm in |managed_log_dir_|
 constexpr int kMaxFilesPerLog = 5;
 
@@ -133,7 +132,7 @@ void LogPipe::Flush() {
 
 LogPipeManager::LogPipeManager(base::OnceClosure shutdown_closure)
     : shutdown_closure_(std::move(shutdown_closure)),
-      task_runner_(base::ThreadTaskRunnerHandle::Get()),
+      task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       weak_ptr_factory_(this) {}
 
 LogPipeManager::~LogPipeManager() {
@@ -166,7 +165,7 @@ bool LogPipeManager::Init(base::ScopedFD syslog_fd,
   }
 
   if (syslog_fd.is_valid()) {
-    syslog_forwarder_.reset(new Forwarder(std::move(syslog_fd), true));
+    syslog_forwarder_ = std::make_unique<Forwarder>(std::move(syslog_fd), true);
     only_forward_to_syslog_ = only_forward_to_syslog;
   } else {
     if (only_forward_to_syslog) {
@@ -384,5 +383,4 @@ void LogPipeManager::RotateLogs() {
   }
 }
 
-}  // namespace syslog
-}  // namespace vm_tools
+}  // namespace vm_tools::syslog

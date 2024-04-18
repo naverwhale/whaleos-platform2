@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,14 @@
 
 #include <base/memory/scoped_refptr.h>
 #include <dbus/bus.h>
-#include <shill/dbus-proxies.h>
+
+namespace org {
+namespace chromium {
+namespace flimflam {
+class ManagerProxyInterface;
+}  // namespace flimflam
+}  // namespace chromium
+}  // namespace org
 
 namespace rmad {
 
@@ -24,7 +31,7 @@ class ShillClientImpl : public ShillClient {
   ShillClientImpl(const ShillClientImpl&) = delete;
   ShillClientImpl& operator=(const ShillClientImpl&) = delete;
 
-  ~ShillClientImpl() override = default;
+  ~ShillClientImpl() override;
 
   bool DisableCellular() const override;
 

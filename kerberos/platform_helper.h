@@ -1,15 +1,14 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef KERBEROS_PLATFORM_HELPER_H_
 #define KERBEROS_PLATFORM_HELPER_H_
 
+#include <optional>
 #include <string>
 
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
-#include <base/optional.h>
 
 namespace base {
 class FilePath;
@@ -21,7 +20,7 @@ namespace kerberos {
 // string. If fd is a blocking pipe this call will block until the pipe is
 // closed. Returns nullopt if the pipe could not be read or some limit was
 // exceeded (see code).
-base::Optional<std::string> ReadPipeToString(int fd);
+std::optional<std::string> ReadPipeToString(int fd);
 
 // Creates a non-blocking pipe and writes the given string to it. |str| must be
 // small enough to fit into the pipe buffer. Returns base::ScopedFD() on error.

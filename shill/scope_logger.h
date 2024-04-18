@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <vector>
 
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/no_destructor.h>
 #include <gtest/gtest_prod.h>
 
@@ -27,6 +26,7 @@ class ScopeLogger {
   // Update kScopeNames in scope_logger.cc after changing this enumerated type.
   // These scope identifiers are sorted by their scope names alphabetically.
   enum Scope {
+    kBluetooth,
     kCellular,
     kConnection,
     kCrypto,
@@ -45,7 +45,6 @@ class ScopeLogger {
     kPortal,
     kPower,
     kPPP,
-    kPPPoE,
     kProfile,
     kProperty,
     kResolver,
@@ -60,17 +59,14 @@ class ScopeLogger {
     kNumScopes
   };
 
-  using ScopeEnableChangedCallback = base::Callback<void(bool)>;
-  using ScopeEnableChangedCallbacks = std::vector<ScopeEnableChangedCallback>;
-
   // Returns a singleton of this class.
   static ScopeLogger* GetInstance();
 
-  ~ScopeLogger();
-
   // Returns true if logging is enabled for |scope| and |verbose_level|, i.e.
   // scope_enable_[|scope|] is true and |verbose_level| <= |verbose_level_|
-  bool IsLogEnabled(Scope scope, int verbose_level) const;
+  static bool IsLogEnabled(Scope scope, int verbose_level);
+
+  ~ScopeLogger();
 
   // Returns true if logging is enabled for |scope| at any verbosity level.
   bool IsScopeEnabled(Scope scope) const;
@@ -101,8 +97,8 @@ class ScopeLogger {
   void EnableScopesByName(const std::string& expression);
 
   // Register for log scope enable/disable state changes for |scope|.
-  void RegisterScopeEnableChangedCallback(Scope scope,
-                                          ScopeEnableChangedCallback callback);
+  void RegisterScopeEnableChangedCallback(
+      Scope scope, base::RepeatingCallback<void(bool)> callback);
 
   // Sets the verbose level for all scopes to |verbose_level|.
   void set_verbose_level(int verbose_level) { verbose_level_ = verbose_level; }
@@ -134,7 +130,8 @@ class ScopeLogger {
   int verbose_level_;
 
   // Hooks to notify interested parties of changes to log scopes.
-  ScopeEnableChangedCallbacks log_scope_callbacks_[kNumScopes];
+  std::vector<base::RepeatingCallback<void(bool)>>
+      log_scope_callbacks_[kNumScopes];
 };
 
 }  // namespace shill

@@ -1,40 +1,43 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/arcvm_cxx_collector.h"
 
+#include <unistd.h>
+
 #include <memory>
 #include <utility>
 
-#include <unistd.h>
-
-#include <base/bind.h>
 #include <base/files/file.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/syslog_logging.h>
+#include <metrics/metrics_library.h>
 
 #include "crash-reporter/arc_util.h"
 #include "crash-reporter/constants.h"
-#include "crash-reporter/util.h"
 
 namespace {
 
 // TODO(b/169638371): Remove the word "native".
 constexpr char kArcvmCxxCollectorName[] = "ARCVM_native";
 
-// "native_crash" is a tag defined in Android.
-constexpr char kArcvmNativeCrashType[] = "native_crash";
-
 }  // namespace
 
-ArcvmCxxCollector::ArcvmCxxCollector()
+ArcvmCxxCollector::ArcvmCxxCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
     : CrashCollector(kArcvmCxxCollectorName,
                      kAlwaysUseUserCrashDirectory,
-                     kNormalCrashSendMode) {}
+                     kNormalCrashSendMode,
+                     metrics_lib) {}
 
 ArcvmCxxCollector::~ArcvmCxxCollector() = default;
 
@@ -45,6 +48,17 @@ bool ArcvmCxxCollector::HandleCrash(
   return HandleCrashWithMinidumpFD(build_property, crash_info, uptime,
                                    // use dup() to avoid closing STDIN_FILENO
                                    base::ScopedFD(dup(STDIN_FILENO)));
+}
+
+// The parameter |exec_name| is unused as we are computing the crash severity
+// based on the crash type, which is always going to be `kNativeCrash` in this
+// collector.
+CrashCollector::ComputedCrashSeverity ArcvmCxxCollector::ComputeSeverity(
+    const std::string& exec_name) {
+  return ComputedCrashSeverity{
+      .crash_severity = CrashSeverity::kError,
+      .product_group = Product::kArc,
+  };
 }
 
 bool ArcvmCxxCollector::HandleCrashWithMinidumpFD(
@@ -94,7 +108,7 @@ void ArcvmCxxCollector::AddArcMetadata(
     const CrashInfo& crash_info,
     base::TimeDelta uptime) {
   for (const auto& metadata : arc_util::ListBasicARCRelatedMetadata(
-           crash_info.exec_name, kArcvmNativeCrashType)) {
+           crash_info.exec_name, arc_util::kNativeCrash)) {
     AddCrashMetaUploadData(metadata.first, metadata.second);
   }
   AddCrashMetaUploadData(arc_util::kChromeOsVersionField, GetOsVersion());
@@ -118,8 +132,11 @@ CollectorInfo ArcvmCxxCollector::GetHandlerInfo(
     bool arc_native,
     const arc_util::BuildProperty& build_property,
     const CrashInfo& crash_info,
-    int64_t uptime_millis) {
-  auto arcvm_cxx_collector = std::make_shared<ArcvmCxxCollector>();
+    int64_t uptime_millis,
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib) {
+  auto arcvm_cxx_collector = std::make_shared<ArcvmCxxCollector>(metrics_lib);
   return {
       .collector = arcvm_cxx_collector,
       .handlers = {{
@@ -127,8 +144,7 @@ CollectorInfo ArcvmCxxCollector::GetHandlerInfo(
           .should_handle = arc_native,
           .cb = base::BindRepeating(
               &ArcvmCxxCollector::HandleCrash, arcvm_cxx_collector,
-              build_property, crash_info,
-              base::TimeDelta::FromMilliseconds(uptime_millis)),
+              build_property, crash_info, base::Milliseconds(uptime_millis)),
       }},
   };
 }

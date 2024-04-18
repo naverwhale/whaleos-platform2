@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,45 +6,54 @@
 
 #include <algorithm>
 #include <climits>
+#include <iterator>
+#include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <attestation/proto_bindings/attestation_ca.pb.h>
-#include <base/bind.h>
-#include <base/callback.h>
-#include <base/callback_helpers.h>
+#include <attestation/proto_bindings/database.pb.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/hash/sha1.h>
 #include <base/logging.h>
 #include <base/notreached.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/stringprintf.h>
+#include <base/time/time.h>
 #include <brillo/cryptohome.h>
 #include <brillo/data_encoding.h>
 #include <crypto/sha2.h>
+#include <libhwsec/factory/factory_impl.h>
+#include <libhwsec/frontend/attestation/frontend.h>
+#include <libhwsec/structures/key.h>
+#include <libhwsec-foundation/status/status_chain_macros.h>
 #include <libhwsec-foundation/tpm/tpm_version.h>
 #include <openssl/objects.h>
 #include <policy/device_policy.h>
 #include <policy/libpolicy.h>
-#if USE_TPM2
-#include <trunks/tpm_utility.h>
-#endif
 extern "C" {
-#if USE_TPM2
-#include <trunks/cr50_headers/virtual_nvmem.h>
-#endif
 #include <vboot/crossystem.h>
 }
 
-#include "attestation/common/database.pb.h"
+#include "attestation/common/nvram_quoter_factory.h"
 #include "attestation/common/tpm_utility_factory.h"
 #include "attestation/server/attestation_flow.h"
 #include "attestation/server/database_impl.h"
 #include "attestation/server/google_keys.h"
+
+using brillo::BlobFromString;
+using brillo::BlobToString;
+using hwsec::DeviceConfig;
+using hwsec::EndorsementAuth;
+using hwsec::KeyRestriction;
+using hwsec::TPMError;
 
 namespace {
 
@@ -54,6 +63,10 @@ const int kNumTemporalValues = 5;
 const char kKnownBootModes[8][3] = {{0, 0, 0}, {0, 0, 1}, {0, 1, 0}, {0, 1, 1},
                                     {1, 0, 0}, {1, 0, 1}, {1, 1, 0}, {1, 1, 1}};
 const char kVerifiedBootMode[3] = {0, 0, 1};
+
+// Default identity features for newly created identities.
+constexpr int kDefaultIdentityFeatures =
+    static_cast<int>(attestation::IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID);
 
 // Context name to derive stable secret for attestation-based enterprise
 // enrollment.
@@ -165,7 +178,6 @@ const CertificateAuthority kKnownEndorsementCA[] = {
      "e6203d96f539b542347a08e87fc6e248a346d61a505f52add7f768a5203d70b8"
      "68b6ec92ef7a83a4e6d1e1d259018705755d812175489fae83c4ab2957f69a99"
      "9394ac7a243a5c1cd85f92b8648a8e0d23165fdd86fad06990bfd16fb3293379"},
-    /* TODO(ngm): remove by: Aug 30 08:44:33 2020 GMT */
     {"CROS TPM DEV EK ROOT CA",
      "cdc108745dc50dd6a1098c31486fb31578607fd64f64b0d91b994244ca1a9a69"
      "a74c6bccc7f24923e1513e132dc0d9dbcb1b22089299bb6cb669cbf4b704c992"
@@ -240,6 +252,14 @@ const CertificateAuthoritySubjectPublicKeyInfo
          "3059301306072a8648ce3d020106082a8648ce3d030107034200048e72217be0"
          "16b33242092808a77dc4ec9671ceda85525748d6522455a3c61504afe1a21e12"
          "7876b346b6c89a84f1bd0e0343abcbc1617a1fbe2dbfd0bf18ce3e"},
+        {"CROS D2 CIK",
+         "3059301306072a8648ce3d020106082a8648ce3d030107034200040f1ad2760b"
+         "e780f36e57eee5a942ab5b153513b2117c74bb6e523216fb08afb008a09bdc7e"
+         "d59dadb62a2b08322f118245193bb117065c9a77fc732e86846bb3"},
+        {"CROS D2 CIK",
+         "3059301306072a8648ce3d020106082a8648ce3d03010703420004a011d8302f"
+         "e79d51c4a8d30f45411c8b3afe5218e25f0f1efa97e568a6d98b847f3df336bc"
+         "3948bb9d584f6c2dd80442b62c9bddece8472d0044b7d5c1083d73"},
 };
 
 const CertificateAuthority kKnownCrosCoreEndorsementCA[] = {
@@ -264,8 +284,7 @@ const CertificateAuthority kKnownCrosCoreEndorsementCA[] = {
 };
 
 // Default D-Bus call timeout.
-constexpr base::TimeDelta kPcaAgentDBusTimeout =
-    base::TimeDelta::FromMinutes(2);
+constexpr base::TimeDelta kPcaAgentDBusTimeout = base::Minutes(2);
 
 // Returns a human-readable description for a known 3-byte |mode|.
 std::string GetDescriptionForMode(const char* mode) {
@@ -277,10 +296,9 @@ std::string GetDescriptionForMode(const char* mode) {
 
 std::string GetHardwareID() {
   char buffer[VB_MAX_STRING_PROPERTY];
-  const char* property =
-      VbGetSystemPropertyString("hwid", buffer, base::size(buffer));
-  if (property != nullptr) {
-    return std::string(property);
+
+  if (VbGetSystemPropertyString("hwid", buffer, std::size(buffer)) == 0) {
+    return std::string(buffer);
   }
   LOG(WARNING) << "Could not read hwid property.";
   return std::string();
@@ -293,29 +311,11 @@ bool GetAuthorityPublicKey(const std::string& issuer_name,
                            std::string* public_key_hex) {
   const CertificateAuthority* const kKnownCA =
       is_cros_core ? kKnownCrosCoreEndorsementCA : kKnownEndorsementCA;
-  const int kNumIssuers = is_cros_core ? base::size(kKnownCrosCoreEndorsementCA)
-                                       : base::size(kKnownEndorsementCA);
+  const int kNumIssuers = is_cros_core ? std::size(kKnownCrosCoreEndorsementCA)
+                                       : std::size(kKnownEndorsementCA);
   for (int i = 0; i < kNumIssuers; ++i) {
     if (issuer_name == kKnownCA[i].issuer) {
       public_key_hex->assign(kKnownCA[i].modulus);
-      return true;
-    }
-  }
-  return false;
-}
-
-// Finds CA by |issuer_name| and |is_cros_core| flag. On success returns true
-// and fills |public_key_hex| with CA public key hex-encoded DER.
-bool GetAuthoritySubjectPublicKeyInfo(const std::string& issuer_name,
-                                      bool is_cros_core,
-                                      std::string* public_key_hex) {
-  if (is_cros_core) {
-    return false;
-  }
-  for (int i = 0; i < base::size(kKnownEndorsementCASubjectKeyInfo); ++i) {
-    if (issuer_name == kKnownEndorsementCASubjectKeyInfo[i].issuer) {
-      public_key_hex->assign(
-          kKnownEndorsementCASubjectKeyInfo[i].subject_public_key_info);
       return true;
     }
   }
@@ -328,43 +328,23 @@ std::string GetACAName(attestation::ACAType aca_type) {
       return "the default ACA";
     case attestation::TEST_ACA:
       return "the test ACA";
-    default: {
-      std::ostringstream stream;
-      stream << "ACA " << aca_type;
-      return stream.str();
-    }
+    default:
+      return "ACA " + base::NumberToString(static_cast<uint32_t>(aca_type));
   }
 }
 
 std::string GetIdentityFeaturesString(int identity_features) {
-  unsigned features_count = 0;
-  std::ostringstream stream;
-  if (identity_features == attestation::NO_IDENTITY_FEATURES) {
-    stream << "NO_IDENTITY_FEATURES";
-  } else {
-    // We don't have reflection, copy/paste and adapt these few lines when
-    // adding a new enum value.
-    if (identity_features &
-        attestation::IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID) {
-      ++features_count;
-      if (stream.tellp() > 0) {
-        stream << ", ";
-      }
-      stream << "IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID";
-      identity_features &=
-          ~attestation::IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID;
-    }
-    // Print other bits which may have been forgotten above.
-    if (identity_features) {
-      features_count += 2;  // Forces plural.
-      if (stream.tellp() > 0) {
-        stream << ", ";
-      }
-      stream << "(undecoded features: " << identity_features << ")";
-    }
+  std::string feature_str;
+  switch (identity_features) {
+    case attestation::NO_IDENTITY_FEATURES:
+      return "NO_IDENTITY_FEATURES";
+    case attestation::IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID:
+      return "IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID";
+    default:
+      LOG(WARNING) << __func__
+                   << ":Unexpected feature code: " << identity_features;
+      return "(" + base::NumberToString(identity_features) + ")";
   }
-  return std::string("identity feature") + (features_count != 1 ? "s " : " ") +
-         stream.str();
 }
 
 std::string GetKeyTypeName(attestation::KeyType key_type) {
@@ -391,14 +371,27 @@ void LogErrorFromCA(const std::string& func,
   LOG(ERROR) << stream.str() << ".";
 }
 
+template <typename RequestType>
+std::optional<attestation::DeviceSetupCertificateRequestMetadata>
+GetDeviceSetupCertificateRequestMetadataIfPresent(const RequestType& request) {
+  if (request.metadata_case() !=
+      RequestType::MetadataCase::kDeviceSetupCertificateRequestMetadata) {
+    return std::nullopt;
+  }
+
+  return std::optional(request.device_setup_certificate_request_metadata());
+}
+
 }  // namespace
 
 namespace attestation {
 
 namespace {
 
-// Last PCR index to quote (we start at 0).
-constexpr int kLastPcrToQuote = 1;
+DeviceConfig kDeviceConfigsToQuote[] = {
+    DeviceConfig::kBootMode,
+    DeviceConfig::kDeviceModel,
+};
 
 pca_agent::EnrollRequest ToPcaAgentEnrollRequest(
     const AttestationFlowData& data) {
@@ -416,59 +409,35 @@ pca_agent::GetCertificateRequest ToPcaAgentCertRequest(
   return ret;
 }
 
+constexpr KeyUsage GetKeyUsageByProfile(CertificateProfile profile) {
+  return profile == ENTERPRISE_VTPM_EK_CERTIFICATE ? KEY_USAGE_DECRYPT
+                                                   : KEY_USAGE_SIGN;
+}
+
+constexpr KeyRestriction GetKeyRestrictionByProfile(
+    CertificateProfile profile) {
+  return profile == ENTERPRISE_VTPM_EK_CERTIFICATE
+             ? KeyRestriction::kRestricted
+             : KeyRestriction::kUnrestricted;
+}
+
+constexpr EndorsementAuth GetEndorsementAuthByProfile(
+    CertificateProfile profile) {
+  return profile == ENTERPRISE_VTPM_EK_CERTIFICATE
+             ? EndorsementAuth::kEndorsement
+             : EndorsementAuth::kNoEndorsement;
+}
+
 }  // namespace
-
-#if USE_TPM2
-
-// For consistency with what we have in cr50 header, use all uppercases.
-constexpr uint32_t VIRTUAL_NV_INDEX_RMA_BYTES = 0x013fff04;
-constexpr uint32_t VIRTUAL_NV_INDEX_RMA_BYTES_SIZE = 8;
-
-// Description of virtual NVRAM indices used for attestation.
-const struct {
-  NVRAMQuoteType quote_type;
-  const char* quote_name;
-  uint32_t nv_index;  // From CertifyNV().
-  uint16_t nv_size;   // From CertifyNV().
-} kNvramIndexData[] = {
-    {BOARD_ID, "BoardId", VIRTUAL_NV_INDEX_BOARD_ID,
-     VIRTUAL_NV_INDEX_BOARD_ID_SIZE},
-    {SN_BITS, "SN Bits", VIRTUAL_NV_INDEX_SN_DATA,
-     VIRTUAL_NV_INDEX_SN_DATA_SIZE},
-    {RSA_PUB_EK_CERT, "RSA Public EK Certificate",
-     trunks::kRsaEndorsementCertificateIndex, 0},
-    {RSU_DEVICE_ID, "RSU Device ID", VIRTUAL_NV_INDEX_RSU_DEV_ID,
-     VIRTUAL_NV_INDEX_RSU_DEV_ID_SIZE},
-    {RMA_BYTES, "RMA Bytes", VIRTUAL_NV_INDEX_RMA_BYTES,
-     VIRTUAL_NV_INDEX_RMA_BYTES_SIZE},
-};
-
-// TODO(b/188319058): abstract the lists of nvram quotes from attestation
-// service, so attestation service doesn't have to care about the details of
-// nvram quote type by TPM versions.
-#if USE_GENERIC_TPM2
-// Types of quotes being cached in the identity data.
-const NVRAMQuoteType kNvramQuoteTypeInIdentityData[] = {BOARD_ID, SN_BITS,
-                                                        RMA_BYTES};
-// Types of quotes needed to obtain an enrollment certificate.
-const NVRAMQuoteType kNvramQuoteTypeForEnrollmentCertificate[] = {
-    BOARD_ID, SN_BITS, RMA_BYTES};
-#else
-// Types of quotes being cached in the identity data.
-const NVRAMQuoteType kNvramQuoteTypeInIdentityData[] = {BOARD_ID, SN_BITS};
-// Types of quotes needed to obtain an enrollment certificate.
-const NVRAMQuoteType kNvramQuoteTypeForEnrollmentCertificate[] = {
-    BOARD_ID, SN_BITS, RSU_DEVICE_ID};
-#endif
-
-#endif
-
 using QuoteMap = google::protobuf::Map<int, Quote>;
 
 const size_t kChallengeSignatureNonceSize = 20;  // For all TPMs.
 
-AttestationService::AttestationService(brillo::SecureBlob* abe_data)
-    : abe_data_(abe_data), weak_factory_(this) {}
+AttestationService::AttestationService(brillo::SecureBlob* abe_data,
+                                       const std::string& attested_device_id)
+    : abe_data_(abe_data),
+      attested_device_id_(attested_device_id),
+      weak_factory_(this) {}
 
 AttestationService::~AttestationService() {
   // Stop the worker thread before we destruct it.
@@ -515,25 +484,28 @@ void AttestationService::InitializeTask(InitializeCompleteCallback callback) {
     CHECK(default_tpm_utility_->Initialize());
     tpm_utility_ = default_tpm_utility_.get();
   }
+  if (!hwsec_factory_) {
+    default_hwsec_factory_ = std::make_unique<hwsec::FactoryImpl>();
+    hwsec_factory_ = default_hwsec_factory_.get();
+  }
+  if (!hwsec_) {
+    default_hwsec_ = hwsec_factory_->GetAttestationFrontend();
+    hwsec_ = default_hwsec_.get();
+  }
+  if (!nvram_quoter_) {
+    default_nvram_quoter_.reset(NvramQuoterFactory::New(*hwsec_));
+    nvram_quoter_ = default_nvram_quoter_.get();
+  }
   if (!crypto_utility_) {
-    default_crypto_utility_.reset(new CryptoUtilityImpl(tpm_utility_));
+    default_crypto_utility_.reset(new CryptoUtilityImpl(tpm_utility_, hwsec_));
     crypto_utility_ = default_crypto_utility_.get();
   }
-
-  TPM_SELECT_BEGIN;
-  TPM2_SECTION({
-    for (int i = 0; i < base::size(kNvramIndexData); ++i) {
-      nvram_quote_type_to_index_data_[kNvramIndexData[i].quote_type] = i;
-    }
-  });
-  OTHER_TPM_SECTION();
-  TPM_SELECT_END;
 
   bool existing_database;
   if (database_) {
     existing_database = true;
   } else {
-    default_database_.reset(new DatabaseImpl(crypto_utility_, tpm_utility_));
+    default_database_.reset(new DatabaseImpl(crypto_utility_, hwsec_));
     existing_database = default_database_->Initialize();
     database_ = default_database_.get();
   }
@@ -557,7 +529,7 @@ void AttestationService::InitializeTask(InitializeCompleteCallback callback) {
   } else {
     // Ignore errors. If failed this time, will be re-attempted on next boot.
     tpm_utility_->RemoveOwnerDependency();
-    std::move(callback).Run(false);
+    std::move(callback).Run(true);
   }
 }
 
@@ -710,15 +682,41 @@ void AttestationService::ShutdownTask() {
   }
 }
 
+void AttestationService::GetFeatures(const GetFeaturesRequest& request,
+                                     GetFeaturesCallback callback) {
+  auto result = std::make_shared<GetFeaturesReply>();
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::GetFeaturesTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<GetFeaturesReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
+}
+
+void AttestationService::GetFeaturesTask(
+    const GetFeaturesRequest& request,
+    const std::shared_ptr<GetFeaturesReply>& result) {
+  result->set_is_available(false);
+  for (const KeyType key_type : tpm_utility_->GetSupportedKeyTypes()) {
+    result->set_is_available(true);
+    *(result->mutable_supported_key_types()->Add()) = key_type;
+  }
+  result->set_status(STATUS_SUCCESS);
+}
+
 void AttestationService::GetKeyInfo(const GetKeyInfoRequest& request,
-                                    const GetKeyInfoCallback& callback) {
+                                    GetKeyInfoCallback callback) {
   auto result = std::make_shared<GetKeyInfoReply>();
-  base::Closure task = base::Bind(&AttestationService::GetKeyInfoTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<GetKeyInfoReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::GetKeyInfoTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<GetKeyInfoReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::GetKeyInfoTask(
@@ -741,6 +739,7 @@ void AttestationService::GetKeyInfoTask(
   result->set_public_key(public_key_info);
   result->set_certify_info(key.certified_key_info());
   result->set_certify_info_signature(key.certified_key_proof());
+  result->set_certified_key_credential(key.certified_key_credential());
   if (key.has_intermediate_ca_cert()) {
     result->set_certificate(CreatePEMCertificateChain(key));
   } else {
@@ -751,18 +750,19 @@ void AttestationService::GetKeyInfoTask(
 
 void AttestationService::GetEndorsementInfo(
     const GetEndorsementInfoRequest& request,
-    const GetEndorsementInfoCallback& callback) {
+    GetEndorsementInfoCallback callback) {
   auto result = std::make_shared<GetEndorsementInfoReply>();
-  base::Closure task = base::Bind(&AttestationService::GetEndorsementInfoTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::GetEndorsementInfoTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<GetEndorsementInfoReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
-base::Optional<std::string> AttestationService::GetEndorsementPublicKey()
-    const {
+std::optional<std::string> AttestationService::GetEndorsementPublicKey() const {
   const auto& database_pb = database_->GetProtobuf();
   if (database_pb.has_credentials() &&
       database_pb.credentials().has_endorsement_public_key()) {
@@ -773,12 +773,12 @@ base::Optional<std::string> AttestationService::GetEndorsementPublicKey()
   std::string public_key;
   if (!tpm_utility_->GetEndorsementPublicKey(GetEndorsementKeyType(),
                                              &public_key)) {
-    return base::nullopt;
+    return std::nullopt;
   }
   return public_key;
 }
 
-base::Optional<std::string> AttestationService::GetEndorsementCertificate()
+std::optional<std::string> AttestationService::GetEndorsementCertificate()
     const {
   const auto& database_pb = database_->GetProtobuf();
   if (database_pb.has_credentials() &&
@@ -790,7 +790,7 @@ base::Optional<std::string> AttestationService::GetEndorsementCertificate()
   std::string certificate;
   if (!tpm_utility_->GetEndorsementCertificate(GetEndorsementKeyType(),
                                                &certificate)) {
-    return base::nullopt;
+    return std::nullopt;
   }
   return certificate;
 }
@@ -798,21 +798,21 @@ base::Optional<std::string> AttestationService::GetEndorsementCertificate()
 void AttestationService::GetEndorsementInfoTask(
     const GetEndorsementInfoRequest& request,
     const std::shared_ptr<GetEndorsementInfoReply>& result) {
-  const auto& key_type = GetEndorsementKeyType();
+  KeyType key_type = GetEndorsementKeyType();
 
   if (key_type != KEY_TYPE_RSA && key_type != KEY_TYPE_ECC) {
     result->set_status(STATUS_INVALID_PARAMETER);
     return;
   }
 
-  base::Optional<std::string> public_key = GetEndorsementPublicKey();
+  std::optional<std::string> public_key = GetEndorsementPublicKey();
   if (!public_key.has_value()) {
     LOG(ERROR) << __func__ << ": Endorsement public key not available.";
     result->set_status(STATUS_NOT_AVAILABLE);
     return;
   }
 
-  base::Optional<std::string> certificate = GetEndorsementCertificate();
+  std::optional<std::string> certificate = GetEndorsementCertificate();
   if (!certificate.has_value()) {
     LOG(ERROR) << __func__ << ": Endorsement cert not available.";
     result->set_status(STATUS_UNEXPECTED_DEVICE_ERROR);
@@ -830,15 +830,16 @@ void AttestationService::GetEndorsementInfoTask(
 
 void AttestationService::GetAttestationKeyInfo(
     const GetAttestationKeyInfoRequest& request,
-    const GetAttestationKeyInfoCallback& callback) {
+    GetAttestationKeyInfoCallback callback) {
   auto result = std::make_shared<GetAttestationKeyInfoReply>();
-  base::Closure task =
-      base::Bind(&AttestationService::GetAttestationKeyInfoTask,
-                 base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::GetAttestationKeyInfoTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<GetAttestationKeyInfoReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::GetAttestationKeyInfoTask(
@@ -899,15 +900,16 @@ void AttestationService::GetAttestationKeyInfoTask(
 
 void AttestationService::ActivateAttestationKey(
     const ActivateAttestationKeyRequest& request,
-    const ActivateAttestationKeyCallback& callback) {
+    ActivateAttestationKeyCallback callback) {
   auto result = std::make_shared<ActivateAttestationKeyReply>();
-  base::Closure task =
-      base::Bind(&AttestationService::ActivateAttestationKeyTask,
-                 base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::ActivateAttestationKeyTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<ActivateAttestationKeyReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::ActivateAttestationKeyTask(
@@ -932,14 +934,16 @@ void AttestationService::ActivateAttestationKeyTask(
 
 void AttestationService::CreateCertifiableKey(
     const CreateCertifiableKeyRequest& request,
-    const CreateCertifiableKeyCallback& callback) {
+    CreateCertifiableKeyCallback callback) {
   auto result = std::make_shared<CreateCertifiableKeyReply>();
-  base::Closure task = base::Bind(&AttestationService::CreateCertifiableKeyTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::CreateCertifiableKeyTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<CreateCertifiableKeyReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::CreateCertifiableKeyTask(
@@ -947,7 +951,7 @@ void AttestationService::CreateCertifiableKeyTask(
     const std::shared_ptr<CreateCertifiableKeyReply>& result) {
   CertifiedKey key;
   if (!CreateKey(request.username(), request.key_label(), request.key_type(),
-                 request.key_usage(), &key)) {
+                 request.key_usage(), KeyRestriction::kUnrestricted, &key)) {
     result->set_status(STATUS_UNEXPECTED_DEVICE_ERROR);
     return;
   }
@@ -964,14 +968,16 @@ void AttestationService::CreateCertifiableKeyTask(
 }
 
 void AttestationService::Decrypt(const DecryptRequest& request,
-                                 const DecryptCallback& callback) {
+                                 DecryptCallback callback) {
   auto result = std::make_shared<DecryptReply>();
-  base::Closure task = base::Bind(&AttestationService::DecryptTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<DecryptReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::DecryptTask, base::Unretained(this),
+                     request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<DecryptReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::DecryptTask(
@@ -991,14 +997,15 @@ void AttestationService::DecryptTask(
 }
 
 void AttestationService::Sign(const SignRequest& request,
-                              const SignCallback& callback) {
+                              SignCallback callback) {
   auto result = std::make_shared<SignReply>();
-  base::Closure task = base::Bind(&AttestationService::SignTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<SignReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task = base::BindOnce(
+      &AttestationService::SignTask, base::Unretained(this), request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<SignReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::SignTask(const SignRequest& request,
@@ -1018,15 +1025,16 @@ void AttestationService::SignTask(const SignRequest& request,
 
 void AttestationService::RegisterKeyWithChapsToken(
     const RegisterKeyWithChapsTokenRequest& request,
-    const RegisterKeyWithChapsTokenCallback& callback) {
+    RegisterKeyWithChapsTokenCallback callback) {
   auto result = std::make_shared<RegisterKeyWithChapsTokenReply>();
-  base::Closure task =
-      base::Bind(&AttestationService::RegisterKeyWithChapsTokenTask,
-                 base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::RegisterKeyWithChapsTokenTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<RegisterKeyWithChapsTokenReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::RegisterKeyWithChapsTokenTask(
@@ -1192,7 +1200,7 @@ bool AttestationService::CreateEnrollRequestInternal(
           enterprise_enrollment_nonce.size());
     }
 
-    if (GetEndorsementKeyType() != kEndorsementKeyTypeForEnrollmentID) {
+    if (ShallQuoteRsaEkCertificate()) {
       // Include an encrypted quote of the RSA pub EK certificate so that
       // an EID can be computed during enrollment.
 
@@ -1274,13 +1282,19 @@ bool AttestationService::CreateCertificateRequestInternal(
     CertificateProfile profile,
     const std::string& origin,
     std::string* certificate_request,
-    std::string* message_id) {
+    std::string* message_id,
+    std::optional<DeviceSetupCertificateRequestMetadata>
+        device_setup_certificate_request_metadata) {
   if (!tpm_utility_->IsTpmReady()) {
     return false;
   }
   if (!IsEnrolledWithACA(aca_type)) {
     LOG(ERROR) << __func__ << ": Device is not enrolled for attestation with "
                << GetACAName(aca_type) << ".";
+    return false;
+  }
+  if (profile == ENTERPRISE_VTPM_EK_CERTIFICATE && !does_support_vtpm_ek_) {
+    LOG(ERROR) << __func__ << ": VTPM EK not supported on non-GSC device.";
     return false;
   }
   auto found = FindIdentityCertificate(kFirstIdentity, aca_type);
@@ -1303,55 +1317,121 @@ bool AttestationService::CreateCertificateRequestInternal(
       identity_certificate.identity_credential());
   request_pb.set_profile(profile);
 
-  TPM_SELECT_BEGIN;
-  TPM2_SECTION({
-    if (profile == ENTERPRISE_ENROLLMENT_CERTIFICATE) {
-      const int identity = identity_certificate.identity();
-      const AttestationDatabase::Identity& identity_data =
-          database_->GetProtobuf().identities().Get(identity);
-      // Copy NVRAM quotes to include in an enrollment certificate from the
-      // identity if possible.
-      std::set<NVRAMQuoteType> not_in_identity;
-      for (int i = 0; i < base::size(kNvramQuoteTypeForEnrollmentCertificate);
-           ++i) {
-        const auto quote_type = kNvramQuoteTypeForEnrollmentCertificate[i];
-        const auto found = identity_data.nvram_quotes().find(quote_type);
-        if (found != identity_data.nvram_quotes().cend()) {
-          (*request_pb.mutable_nvram_quotes())[quote_type] = found->second;
-        } else {
-          not_in_identity.insert(quote_type);
-        }
-      }
-      // Data that is supposed to be in the identity but is missing won't be
-      // quoted now, as we want to drive everything from the identity.
-      for (int i = 0; i < base::size(kNvramQuoteTypeInIdentityData); ++i) {
-        const auto quote_type = kNvramQuoteTypeInIdentityData[i];
-        if (not_in_identity.erase(quote_type)) {
-          LOG(WARNING)
-              << "Could not find "
-              << kNvramIndexData[nvram_quote_type_to_index_data_[quote_type]]
-                     .quote_name
-              << " quote in identity " << identity
-              << " to provide in enrollment cert request.";
-        }
-      }
-      // Quote the other data now.
-      for (auto it = not_in_identity.cbegin(), end = not_in_identity.cend();
-           it != end; ++it) {
-        Quote quote;
-        if (QuoteNvramData(*it, identity_data.identity_key(), &quote)) {
-          (*request_pb.mutable_nvram_quotes())[*it] = quote;
-        } else {
-          LOG(WARNING) << "Could not provide "
-                       << kNvramIndexData[nvram_quote_type_to_index_data_[*it]]
-                              .quote_name
-                       << " quote in enrollment cert request.";
-        }
+  // TODO(b/286838595): Remove the profile switch once PCA supports
+  // DEVICE_TRUST_USER_CERTIFICATE.
+  if (profile == DEVICE_TRUST_USER_CERTIFICATE) {
+    // Reuse the ENTERPRISE_USER_CERTIFICATE from PCA when requesting a
+    // DEVICE_TRUST_USER_CERTIFICATE as they provide a similar functionality.
+    request_pb.set_profile(ENTERPRISE_USER_CERTIFICATE);
+  }
+
+  if (profile == ENTERPRISE_ENROLLMENT_CERTIFICATE) {
+    // Send the attested device ID, if we have one.
+    if (!attested_device_id_.empty()) {
+      request_pb.set_attested_device_id(attested_device_id_);
+    }
+
+    const int identity = identity_certificate.identity();
+    const AttestationDatabase::Identity& identity_data =
+        database_->GetProtobuf().identities().Get(identity);
+    // Copy NVRAM quotes to include in an enrollment certificate from the
+    // identity if possible.
+    std::set<NVRAMQuoteType> not_in_identity;
+    for (NVRAMQuoteType quote_type :
+         nvram_quoter_->GetListForEnrollmentCertificate()) {
+      const auto found = identity_data.nvram_quotes().find(quote_type);
+      if (found != identity_data.nvram_quotes().cend()) {
+        (*request_pb.mutable_nvram_quotes())[quote_type] = found->second;
+      } else {
+        not_in_identity.insert(quote_type);
       }
     }
-  });
-  OTHER_TPM_SECTION();
-  TPM_SELECT_END;
+    // Data that is supposed to be in the identity but is missing won't be
+    // quoted now, as we want to drive everything from the identity.
+    for (NVRAMQuoteType quote_type : nvram_quoter_->GetListForIdentity()) {
+      if (not_in_identity.erase(quote_type)) {
+        LOG(WARNING) << "Could not find quote of type " << quote_type
+                     << " in identity " << identity
+                     << " to provide in enrollment cert request.";
+      }
+    }
+    // Quote the other data now.
+    for (auto it = not_in_identity.cbegin(), end = not_in_identity.cend();
+         it != end; ++it) {
+      Quote quote;
+      if (nvram_quoter_->Certify(
+              *it, identity_data.identity_key().identity_key_blob(), quote)) {
+        (*request_pb.mutable_nvram_quotes())[*it] = quote;
+      } else {
+        LOG(WARNING) << "Could not provide quote for enrollment cert request.";
+      }
+    }
+  }
+
+  if (profile == ENTERPRISE_VTPM_EK_CERTIFICATE) {
+    // VTPM EK certificate requires `attested_device_id_` to be presented.
+    if (attested_device_id_.empty()) {
+      LOG(ERROR) << __func__ << ": VTPM EK certificate request requires ADID.";
+      // Don't fail the request directly, because it's the server's
+      // responsibilities to reject this request.
+    } else {
+      request_pb.set_attested_device_id(attested_device_id_);
+    }
+
+    const int identity = identity_certificate.identity();
+    const AttestationDatabase::Identity& identity_data =
+        database_->GetProtobuf().identities().Get(identity);
+    for (NVRAMQuoteType quote_type :
+         nvram_quoter_->GetListForVtpmEkCertificate()) {
+      const auto found = identity_data.nvram_quotes().find(quote_type);
+      if (found != identity_data.nvram_quotes().cend()) {
+        (*request_pb.mutable_nvram_quotes())[quote_type] = found->second;
+        continue;
+      }
+      Quote quote;
+      if (nvram_quoter_->Certify(
+              quote_type, identity_data.identity_key().identity_key_blob(),
+              quote)) {
+        (*request_pb.mutable_nvram_quotes())[quote_type] = quote;
+        continue;
+      }
+      // For VTPM EK certificate, all the quotes are mandatory.
+      LOG(ERROR) << "Could not provide quote for VTPM EK cert request.";
+      // Don't fail the request directly, because it's the server's
+      // responsibilities to reject this request.
+    }
+  }
+
+  if (profile == DEVICE_SETUP_CERTIFICATE) {
+    if (!device_setup_certificate_request_metadata) {
+      LOG(ERROR) << __func__
+                 << ": Empty DEVICE_SETUP_CERTIFICATE request metadata";
+      return false;
+    }
+
+    if (!device_setup_certificate_request_metadata->has_id() ||
+        device_setup_certificate_request_metadata->id().empty()) {
+      LOG(ERROR) << __func__
+                 << ": DEVICE_SETUP_CERTIFICATE requires an id to be passed";
+      return false;
+    }
+
+    if (!device_setup_certificate_request_metadata->has_content_binding() ||
+        device_setup_certificate_request_metadata->content_binding().empty()) {
+      LOG(ERROR)
+          << __func__
+          << ": DEVICE_SETUP_CERTIFICATE requires content_binding to be passed";
+      return false;
+    }
+
+    request_pb.mutable_device_setup_certificate_metadata()->set_id(
+        device_setup_certificate_request_metadata->id());
+    request_pb.mutable_device_setup_certificate_metadata()
+        ->set_timestamp_seconds(
+            (base::Time::Now() - base::Time::UnixEpoch()).InSeconds());
+    request_pb.mutable_device_setup_certificate_metadata()->set_content_binding(
+        device_setup_certificate_request_metadata->content_binding());
+  }
 
   if (!origin.empty() &&
       (profile == CONTENT_PROTECTION_CERTIFICATE_WITH_STABLE_ID)) {
@@ -1368,41 +1448,11 @@ bool AttestationService::CreateCertificateRequestInternal(
   return true;
 }
 
-bool AttestationService::FinishCertificateRequestInternal(
-    const std::string& certificate_response,
-    const std::string& username,
-    const std::string& key_label,
-    const std::string& message_id,
-    CertifiedKey* key,
-    std::string* certificate_chain,
-    std::string* server_error) {
-  if (!tpm_utility_->IsTpmReady()) {
-    return false;
-  }
-  AttestationCertificateResponse response_pb;
-  if (!response_pb.ParseFromString(certificate_response)) {
-    LOG(ERROR) << __func__ << ": Failed to parse response from Attestation CA.";
-    return false;
-  }
-  if (response_pb.status() != OK) {
-    *server_error = response_pb.detail();
-    LogErrorFromCA(__func__, response_pb.detail(), response_pb.extra_details());
-    return false;
-  }
-  if (message_id != response_pb.message_id()) {
-    LOG(ERROR) << __func__ << ": Message ID mismatch.";
-    return false;
-  }
-  return PopulateAndStoreCertifiedKey(response_pb, username, key_label, key,
-                                      certificate_chain);
-}
-
 bool AttestationService::PopulateAndStoreCertifiedKey(
     const AttestationCertificateResponse& response_pb,
     const std::string& username,
     const std::string& key_label,
-    CertifiedKey* key,
-    std::string* certificate_chain) {
+    CertifiedKey* key) {
   // Finish populating the CertifiedKey protobuf and store it.
   key->set_key_name(key_label);
   key->set_certified_key_credential(response_pb.certified_key_credential());
@@ -1410,10 +1460,9 @@ bool AttestationService::PopulateAndStoreCertifiedKey(
   key->mutable_additional_intermediate_ca_cert()->MergeFrom(
       response_pb.additional_intermediate_ca_cert());
   if (!SaveKey(username, key_label, *key)) {
+    LOG(ERROR) << "Attestation: Failed to save key.";
     return false;
   }
-  LOG(INFO) << "Attestation: Certified key credential received and stored.";
-  *certificate_chain = CreatePEMCertificateChain(*key);
   return true;
 }
 
@@ -1447,6 +1496,7 @@ bool AttestationService::CreateKey(const std::string& username,
                                    const std::string& key_label,
                                    KeyType key_type,
                                    KeyUsage key_usage,
+                                   KeyRestriction key_restriction,
                                    CertifiedKey* key) {
   auto database_pb = database_->GetProtobuf();
   const int identity = kFirstIdentity;
@@ -1466,21 +1516,17 @@ bool AttestationService::CreateKey(const std::string& username,
   std::string public_key_tpm_format;
   std::string key_info;
   std::string proof;
-  const auto& identity_data = database_pb.identities().Get(identity);
-  if (!tpm_utility_->CreateCertifiedKey(
-          key_type, key_usage, identity_data.identity_key().identity_key_blob(),
-          nonce, &key_blob, &public_key, &public_key_tpm_format, &key_info,
-          &proof)) {
-    return false;
-  }
-  key->set_key_blob(key_blob);
-  key->set_public_key(public_key);
+  const auto& identity_key_blob =
+      database_pb.identities().Get(identity).identity_key().identity_key_blob();
+  ASSIGN_OR_RETURN(
+      *key,
+      hwsec_->CreateCertifiedKey(BlobFromString(identity_key_blob), key_type,
+                                 key_usage, KeyRestriction::kUnrestricted,
+                                 EndorsementAuth::kNoEndorsement, nonce),
+      _.WithStatus<TPMError>("Failed to create certified key")
+          .LogError()
+          .As(false));
   key->set_key_name(key_label);
-  key->set_public_key_tpm_format(public_key_tpm_format);
-  key->set_certified_key_info(key_info);
-  key->set_certified_key_proof(proof);
-  key->set_key_type(key_type);
-  key->set_key_usage(key_usage);
   return SaveKey(username, key_label, *key);
 }
 
@@ -1690,17 +1736,18 @@ void AttestationService::PrepareForEnrollment(
         FROM_HERE,
         base::BindOnce(&AttestationService::PrepareForEnrollment,
                        base::Unretained(this), std::move(callback)),
-        base::TimeDelta::FromSeconds(3));
+        base::Seconds(3));
     return;
   }
   base::TimeTicks start = base::TimeTicks::Now();
   LOG(INFO) << "Attestation: Preparing for enrollment...";
 
-  if (!tpm_utility_->IsPCR0Valid()) {
-    LOG(ERROR) << __func__ << "Invalid PCR0 value, aborting.";
-    metrics_.ReportAttestationOpsStatus(
-        kAttestationPrepareForEnrollment,
-        AttestationOpsStatus::kInvalidPcr0Value);
+  if (auto result = hwsec_->GetCurrentBootMode(); !result.ok()) {
+    LOG(ERROR) << __func__
+               << "Invalid boot mode, aborting: " << result.status();
+    metrics_.ReportAttestationOpsStatus(kAttestationPrepareForEnrollment,
+                                        AttestationOpsStatus::kInvalidBootMode);
+    std::move(callback).Run(false);
     return;
   }
 
@@ -1711,6 +1758,9 @@ void AttestationService::PrepareForEnrollment(
   if (!tpm_utility_->GetEndorsementPublicKey(key_type, &ek_public_key)) {
     LOG(ERROR) << __func__ << ": Failed to get EK public key with key_type "
                << key_type;
+    metrics_.ReportAttestationOpsStatus(
+        kAttestationPrepareForEnrollment,
+        AttestationOpsStatus::kEndorsementFailure);
     std::move(callback).Run(false);
     return;
   }
@@ -1721,6 +1771,9 @@ void AttestationService::PrepareForEnrollment(
   if (!tpm_utility_->GetEndorsementCertificate(key_type, &ek_certificate)) {
     LOG(ERROR) << __func__ << ": Failed to get " << GetKeyTypeName(key_type)
                << " EK certificate.";
+    metrics_.ReportAttestationOpsStatus(
+        kAttestationPrepareForEnrollment,
+        AttestationOpsStatus::kEndorsementFailure);
     std::move(callback).Run(false);
     return;
   }
@@ -1729,7 +1782,10 @@ void AttestationService::PrepareForEnrollment(
 
   // Create a new AIK and PCR quotes for the first identity with default
   // identity features.
-  if (CreateIdentity(default_identity_features_) < 0) {
+  if (!CreateIdentity(kDefaultIdentityFeatures)) {
+    LOG(ERROR) << __func__ << ": Failed to create identity.";
+    metrics_.ReportAttestationOpsStatus(kAttestationPrepareForEnrollment,
+                                        AttestationOpsStatus::kIdentityFailure);
     std::move(callback).Run(false);
     return;
   }
@@ -1748,6 +1804,8 @@ void AttestationService::PrepareForEnrollment(
 
   if (!database_->SaveChanges()) {
     LOG(ERROR) << "Attestation: Failed to write database.";
+    metrics_.ReportAttestationOpsStatus(kAttestationPrepareForEnrollment,
+                                        AttestationOpsStatus::kDatabaseFailure);
     std::move(callback).Run(false);
     return;
   }
@@ -1759,12 +1817,13 @@ void AttestationService::PrepareForEnrollment(
   base::TimeDelta delta = (base::TimeTicks::Now() - start);
   LOG(INFO) << "Attestation: Prepared successfully (" << delta.InMilliseconds()
             << "ms) with " << GetKeyTypeName(key_type) << " EK.";
+  metrics_.ReportAttestationPrepareDuration(delta);
   metrics_.ReportAttestationOpsStatus(kAttestationPrepareForEnrollment,
                                       AttestationOpsStatus::kSuccess);
   std::move(callback).Run(true);
 }
 
-int AttestationService::CreateIdentity(int identity_features) {
+bool AttestationService::CreateIdentity(int identity_features) {
   // The identity we're creating will have the next index in identities.
   auto* database_pb = database_->GetMutableProtobuf();
   const int identity = database_pb->identities().size();
@@ -1773,16 +1832,22 @@ int AttestationService::CreateIdentity(int identity_features) {
             << GetIdentityFeaturesString(identity_features) << " and "
             << GetKeyTypeName(identity_key_type) << " AIK.";
   AttestationDatabase::Identity new_identity_pb;
-
   new_identity_pb.set_features(identity_features);
+
+  ASSIGN_OR_RETURN(
+      const hwsec::AttestationFrontend::CreateIdentityResult& identity_result,
+      hwsec_->CreateIdentity(identity_key_type),
+      _.WithStatus<TPMError>("Failed to create identity").LogError().As(false));
+  new_identity_pb.mutable_identity_key()->CopyFrom(
+      identity_result.identity_key);
+  new_identity_pb.mutable_identity_binding()->CopyFrom(
+      identity_result.identity_binding);
+
   if (identity_features & IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID) {
     auto* identity_key = new_identity_pb.mutable_identity_key();
     identity_key->set_enrollment_id(database_pb->enrollment_id());
   }
-  if (!tpm_utility_->CreateIdentity(identity_key_type, &new_identity_pb)) {
-    LOG(ERROR) << __func__ << " failed to make a new identity.";
-    return -1;
-  }
+
   std::string identity_key_blob_for_quote =
       new_identity_pb.identity_key().identity_key_blob();
 
@@ -1792,113 +1857,56 @@ int AttestationService::CreateIdentity(int identity_features) {
   // will not change unless the TPM owner is cleared.
   auto* pcr_quote_map = new_identity_pb.mutable_pcr_quotes();
 
-  for (int pcr = 0; pcr <= kLastPcrToQuote; ++pcr) {
-    std::string quoted_pcr_value;
-    std::string quoted_data;
-    std::string quote;
-    if (tpm_utility_->QuotePCR(pcr, identity_key_blob_for_quote,
-                               &quoted_pcr_value, &quoted_data, &quote)) {
-      Quote quote_pb;
-      quote_pb.set_quote(quote);
-      quote_pb.set_quoted_data(quoted_data);
-      quote_pb.set_quoted_pcr_value(quoted_pcr_value);
-      switch (pcr) {
-        case 1:
-          quote_pb.set_pcr_source_hint(hwid_);
-          break;
-      }
-      auto in = pcr_quote_map->insert(QuoteMap::value_type(pcr, quote_pb));
-      if (!in.second) {
-        LOG(ERROR) << "Attestation: Failed to store PCR" << pcr
-                   << " quote for identity " << identity << ".";
-        return -1;
-      }
-    } else {
-      LOG(ERROR) << "Attestation: Failed to generate quote for PCR" << pcr
-                 << ".";
-      return -1;
+  for (DeviceConfig device_config : kDeviceConfigsToQuote) {
+    ASSIGN_OR_RETURN(
+        const Quote& quote_pb,
+        hwsec_->Quote(device_config,
+                      brillo::BlobFromString(identity_key_blob_for_quote)),
+        _.WithStatus<TPMError>("Failed to quote").LogError().As(false));
+
+    // TODO(b/278988714): refactor the PCR-related function/protobuf so that we
+    // don't need this conversion.
+    // Converts device config to corresponding index in Identity::pcr_quotes.
+    int pcr = 0;
+    switch (device_config) {
+      case DeviceConfig::kBootMode:
+        pcr = 0;
+        break;
+      case DeviceConfig::kDeviceModel:
+        pcr = 1;
+        break;
+      default:
+        LOG(ERROR) << __func__ << ": Unsupported Device Config";
+        return false;
+    }
+    auto in = pcr_quote_map->insert(QuoteMap::value_type(pcr, quote_pb));
+    if (!in.second) {
+      LOG(ERROR) << "Attestation: Failed to store PCR" << pcr
+                 << " quote for identity " << identity << ".";
+      return false;
     }
   }
-  TPM_SELECT_BEGIN;
-  TPM2_SECTION({
-    // Certify device-specific NV data and insert them in the identity when
-    // we can certify them. This is an almost identical process to the PCR
-    // quotes above.
 
-    for (int i = 0; i < base::size(kNvramQuoteTypeInIdentityData); ++i) {
-      if (!InsertCertifiedNvramData(kNvramQuoteTypeInIdentityData[i],
-                                    false /* must_be_present */,
-                                    &new_identity_pb)) {
-        return -1;
-      }
+  for (NVRAMQuoteType data : nvram_quoter_->GetListForIdentity()) {
+    if (!InsertCertifiedNvramData(data, false /* must_be_present */,
+                                  &new_identity_pb)) {
+      return false;
     }
+  }
 
-    // Certify the RSA EK cert only when we are using non-RSA EK. In this case,
-    // we don't provide the RSA EK cert which originally is used for calculating
-    // the Enrollment ID.
-    if ((identity_features & IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID) &&
-        GetEndorsementKeyType() != kEndorsementKeyTypeForEnrollmentID) {
-      if (!InsertCertifiedNvramData(RSA_PUB_EK_CERT, true /* must_be_present */,
-                                    &new_identity_pb)) {
-        return -1;
-      }
+  // Certify the RSA EK cert only when we are using non-RSA EK. In this case,
+  // we don't provide the RSA EK cert which originally is used for calculating
+  // the Enrollment ID.
+  if ((identity_features & IDENTITY_FEATURE_ENTERPRISE_ENROLLMENT_ID) &&
+      ShallQuoteRsaEkCertificate()) {
+    if (!InsertCertifiedNvramData(RSA_PUB_EK_CERT, true /* must_be_present */,
+                                  &new_identity_pb)) {
+      return false;
     }
-  });
-  OTHER_TPM_SECTION();
-  TPM_SELECT_END;
+  }
 
   database_pb->add_identities()->CopyFrom(new_identity_pb);
-  // Return the index of the newly created identity.
-  return database_pb->identities().size() - 1;
-}
-
-bool AttestationService::QuoteNvramData(NVRAMQuoteType quote_type,
-                                        const IdentityKey& identity_key,
-                                        Quote* quote) {
-  TPM_SELECT_BEGIN;
-  TPM1_SECTION({
-    LOG(ERROR) << __func__ << ": Should not be called for TPM 1.2 devices.";
-  });
-  TPM2_SECTION({
-    const int id = nvram_quote_type_to_index_data_[quote_type];
-    const char* quote_name = kNvramIndexData[id].quote_name;
-    const uint32_t nv_index = kNvramIndexData[id].nv_index;
-    uint16_t nv_size = kNvramIndexData[id].nv_size;
-
-    if (!nv_size) {
-      uint16_t nv_data_size = 0;
-      if (tpm_utility_->GetNVDataSize(nv_index, &nv_data_size)) {
-        nv_size = nv_data_size;
-      } else {
-        LOG(ERROR) << "Attestation: Failed to obtain data about the "
-                   << quote_name << ".";
-      }
-    }
-
-    if (nv_size) {
-      auto identity_key_blob = identity_key.identity_key_blob();
-      std::string certified_value;
-      std::string signature;
-
-      if (tpm_utility_->CertifyNV(nv_index, nv_size, identity_key_blob,
-                                  &certified_value, &signature)) {
-        quote->set_quote(signature);
-        quote->set_quoted_data(certified_value);
-        return true;
-      } else {
-        LOG(WARNING) << "Attestation: Failed to certify " << quote_name
-                     << " NV data of size " << nv_size << " at index "
-                     << std::hex << std::showbase << nv_index << ".";
-      }
-    }
-  });
-  OTHER_TPM_SECTION({
-    LOG(ERROR) << __func__
-               << ": Should not be called for none spported TPM devices.";
-  });
-  TPM_SELECT_END;
-
-  return false;
+  return true;
 }
 
 bool AttestationService::InsertCertifiedNvramData(
@@ -1906,32 +1914,25 @@ bool AttestationService::InsertCertifiedNvramData(
     bool must_be_present,
     AttestationDatabase::Identity* identity) {
   TPM_SELECT_BEGIN;
-  TPM1_SECTION({
-    LOG(ERROR) << __func__ << ": Should not be called for TPM 1.2 devices.";
-  });
-  TPM2_SECTION({
-    Quote quote;
-    if (!QuoteNvramData(quote_type, identity->identity_key(), &quote)) {
-      return !must_be_present;
-    }
-
-    auto* nv_quote_map = identity->mutable_nvram_quotes();
-    auto in_bid = nv_quote_map->insert(QuoteMap::value_type(quote_type, quote));
-    if (in_bid.second) {
-      return true;
-    } else {
-      LOG(ERROR) << "Attestation: Failed to store "
-                 << kNvramIndexData[nvram_quote_type_to_index_data_[quote_type]]
-                        .quote_name
-                 << " quote for identity " << identity << ".";
-    }
-  });
+  TPM2_SECTION();
   OTHER_TPM_SECTION({
-    LOG(ERROR) << __func__
-               << ": Should not be called for none supported TPM devices.";
+    LOG(WARNING) << __func__ << ": Should not be called for TPM 1.2 devices.";
   });
   TPM_SELECT_END;
+  Quote quote;
+  if (!nvram_quoter_->Certify(
+          quote_type, identity->identity_key().identity_key_blob(), quote)) {
+    return !must_be_present;
+  }
 
+  auto* nv_quote_map = identity->mutable_nvram_quotes();
+  auto in_bid = nv_quote_map->insert(QuoteMap::value_type(quote_type, quote));
+  if (in_bid.second) {
+    return true;
+  } else {
+    LOG(ERROR) << "Attestation: Failed to store quote of type " << quote_type
+               << " for identity " << identity << ".";
+  }
   return false;
 }
 
@@ -1950,7 +1951,7 @@ AttestationService::GetIdentityCertificateMap() const {
 
 bool AttestationService::EncryptAllEndorsementCredentials() {
   auto* database_pb = database_->GetMutableProtobuf();
-  base::Optional<std::string> ek_certificate = GetEndorsementCertificate();
+  std::optional<std::string> ek_certificate = GetEndorsementCertificate();
   if (!ek_certificate.has_value()) {
     LOG(ERROR) << "Attestation: Failed to obtain endorsement certificate.";
     return false;
@@ -1998,6 +1999,8 @@ bool AttestationService::ActivateAttestationKeyInternal(
   if (database_pb.identities().size() <= identity) {
     LOG(ERROR) << __func__ << ": Enrollment is not possible, identity "
                << identity << " does not exist.";
+    metrics_.ReportAttestationOpsStatus(kAttestationActivateAttestationKey,
+                                        AttestationOpsStatus::kIdentityFailure);
     return false;
   }
   const auto& identity_data = database_pb.identities().Get(identity);
@@ -2008,6 +2011,9 @@ bool AttestationService::ActivateAttestationKeyInternal(
             identity_data.identity_key().identity_key_blob(),
             encrypted_certificate.asym_ca_contents(),
             encrypted_certificate.sym_ca_attestation(), &certificate_local)) {
+      metrics_.ReportAttestationOpsStatus(
+          kAttestationActivateAttestationKey,
+          AttestationOpsStatus::kIdentityFailure);
       LOG(ERROR) << __func__ << ": Failed to activate identity " << identity
                  << ".";
       return false;
@@ -2021,6 +2027,9 @@ bool AttestationService::ActivateAttestationKeyInternal(
             encrypted_certificate.credential_mac(),
             encrypted_certificate.wrapped_certificate().wrapped_key(),
             &credential)) {
+      metrics_.ReportAttestationOpsStatus(
+          kAttestationActivateAttestationKey,
+          AttestationOpsStatus::kIdentityFailure);
       LOG(ERROR) << __func__ << ": Failed to activate identity " << identity
                  << ".";
       return false;
@@ -2028,17 +2037,20 @@ bool AttestationService::ActivateAttestationKeyInternal(
     if (!crypto_utility_->DecryptIdentityCertificateForTpm2(
             credential, encrypted_certificate.wrapped_certificate(),
             &certificate_local)) {
+      metrics_.ReportAttestationOpsStatus(kAttestationActivateAttestationKey,
+                                          AttestationOpsStatus::kCryptoFailure);
       LOG(ERROR) << __func__ << ": Failed to decrypt certificate for identity "
                  << identity << ".";
       return false;
     }
   }
   if (save_certificate) {
-    if (!tpm_utility_->IsPCR0Valid()) {
-      LOG(ERROR) << __func__ << "Invalid PCR0 value, aborting.";
+    if (auto result = hwsec_->GetCurrentBootMode(); !result.ok()) {
+      LOG(ERROR) << __func__
+                 << "Invalid boot mode, aborting: " << result.status();
       metrics_.ReportAttestationOpsStatus(
           kAttestationActivateAttestationKey,
-          AttestationOpsStatus::kInvalidPcr0Value);
+          AttestationOpsStatus::kInvalidBootMode);
       return false;
     }
 
@@ -2049,6 +2061,9 @@ bool AttestationService::ActivateAttestationKeyInternal(
       LOG(ERROR) << __func__ << ": Failed to find or create an identity"
                  << " certificate for identity " << identity << " with "
                  << GetACAName(aca_type) << ".";
+      metrics_.ReportAttestationOpsStatus(
+          kAttestationActivateAttestationKey,
+          AttestationOpsStatus::kIdentityFailure);
       return false;
     }
     // Set the credential obtained when activating the identity with the
@@ -2056,6 +2071,9 @@ bool AttestationService::ActivateAttestationKeyInternal(
     identity_certificate->set_identity_credential(certificate_local);
     if (!database_->SaveChanges()) {
       LOG(ERROR) << __func__ << ": Failed to persist database changes.";
+      metrics_.ReportAttestationOpsStatus(
+          kAttestationActivateAttestationKey,
+          AttestationOpsStatus::kDatabaseFailure);
       return false;
     }
     if (certificate_index) {
@@ -2065,20 +2083,23 @@ bool AttestationService::ActivateAttestationKeyInternal(
   if (certificate) {
     *certificate = certificate_local;
   }
+  metrics_.ReportAttestationOpsStatus(kAttestationActivateAttestationKey,
+                                      AttestationOpsStatus::kSuccess);
   return true;
 }
 
 void AttestationService::GetEnrollmentPreparations(
     const GetEnrollmentPreparationsRequest& request,
-    const GetEnrollmentPreparationsCallback& callback) {
+    GetEnrollmentPreparationsCallback callback) {
   auto result = std::make_shared<GetEnrollmentPreparationsReply>();
-  base::Closure task =
-      base::Bind(&AttestationService::GetEnrollmentPreparationsTask,
-                 base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::GetEnrollmentPreparationsTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<GetEnrollmentPreparationsReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::GetEnrollmentPreparationsTask(
@@ -2094,14 +2115,16 @@ void AttestationService::GetEnrollmentPreparationsTask(
 }
 
 void AttestationService::GetStatus(const GetStatusRequest& request,
-                                   const GetStatusCallback& callback) {
+                                   GetStatusCallback callback) {
   auto result = std::make_shared<GetStatusReply>();
-  base::Closure task = base::Bind(&AttestationService::GetStatusTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<GetStatusReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::GetStatusTask, base::Unretained(this),
+                     request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<GetStatusReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 bool AttestationService::IsVerifiedMode() const {
@@ -2146,14 +2169,15 @@ void AttestationService::GetStatusTask(
 }
 
 void AttestationService::Verify(const VerifyRequest& request,
-                                const VerifyCallback& callback) {
+                                VerifyCallback callback) {
   auto result = std::make_shared<VerifyReply>();
-  base::Closure task = base::Bind(&AttestationService::VerifyTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<VerifyReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task = base::BindOnce(
+      &AttestationService::VerifyTask, base::Unretained(this), request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<VerifyReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 bool AttestationService::VerifyIdentityBinding(const IdentityBinding& binding) {
@@ -2197,9 +2221,25 @@ bool AttestationService::VerifyQuoteSignature(
     LOG(ERROR) << __func__ << ": Signature mismatch.";
     return false;
   }
-  if (!tpm_utility_->IsQuoteForPCR(quote.quoted_pcr_value(),
-                                   quote.quoted_data(), quote.quote(),
-                                   pcr_index)) {
+  // TODO(b/278988714): refactor the PCR-related function so that we don't need
+  // this conversion.
+  DeviceConfig device_config;
+  switch (pcr_index) {
+    case 0:
+      device_config = DeviceConfig::kBootMode;
+      break;
+    case 1:
+      device_config = DeviceConfig::kDeviceModel;
+      break;
+    default:
+      LOG(ERROR) << __func__ << ": Unknown device config for pcr " << pcr_index;
+      return false;
+  }
+
+  ASSIGN_OR_RETURN(
+      bool is_quoted, hwsec_->IsQuoted(device_config, quote),
+      _.WithStatus<TPMError>("Failed to verify quote").LogError().As(false));
+  if (!is_quoted) {
     LOG(ERROR) << __func__ << ": Invalid quote.";
     return false;
   }
@@ -2232,10 +2272,10 @@ bool AttestationService::VerifyPCR0Quote(const std::string& aik_public_key_info,
   }
 
   // Check if the PCR0 value represents a known mode.
-  for (size_t i = 0; i < base::size(kKnownBootModes); ++i) {
-    std::string pcr_value = GetPCRValueForMode(kKnownBootModes[i]);
+  for (const auto& mode : kKnownBootModes) {
+    std::string pcr_value = GetPCRValueForMode(mode);
     if (pcr0_quote.quoted_pcr_value() == pcr_value) {
-      LOG(INFO) << "PCR0: " << GetDescriptionForMode(kKnownBootModes[i]);
+      LOG(INFO) << "PCR0: " << GetDescriptionForMode(mode);
       return true;
     }
   }
@@ -2308,27 +2348,25 @@ bool AttestationService::VerifyCertifiedKeyGeneration(
     LOG(ERROR) << __func__ << ": GetRandom(nonce) failed.";
     return false;
   }
-  std::vector<KeyType> key_type_candidates;
-  if (tpm_utility_->GetVersion() == TPM_2_0) {
-    key_type_candidates = {KEY_TYPE_RSA, KEY_TYPE_ECC};
-  } else {
-    key_type_candidates = {KEY_TYPE_RSA};
-  }
 
-  for (KeyType key_type : key_type_candidates) {
-    std::string key_blob;
-    std::string public_key_der;
-    std::string public_key_tpm_format;
-    std::string key_info;
-    std::string proof;
-    if (!tpm_utility_->CreateCertifiedKey(
-            key_type, KEY_USAGE_SIGN, aik_key_blob, nonce, &key_blob,
-            &public_key_der, &public_key_tpm_format, &key_info, &proof)) {
-      LOG(ERROR) << __func__
-                 << ": Failed to create certified key for key_type: "
-                 << key_type;
-      return false;
-    }
+  for (KeyType key_type : tpm_utility_->GetSupportedKeyTypes()) {
+    ASSIGN_OR_RETURN(
+        CertifiedKey certified_key,
+        hwsec_->CreateCertifiedKey(BlobFromString(aik_key_blob), key_type,
+                                   KEY_USAGE_SIGN,
+                                   KeyRestriction::kUnrestricted,
+                                   EndorsementAuth::kNoEndorsement, nonce),
+        _
+            .WithStatus<TPMError>(base::StringPrintf(
+                "Failed to create certified key for key_type %d", key_type))
+            .LogError()
+            .As(false));
+
+    std::string public_key_der = certified_key.public_key();
+    std::string public_key_tpm_format = certified_key.public_key_tpm_format();
+    std::string key_info = certified_key.certified_key_info();
+    std::string proof = certified_key.certified_key_proof();
+
     std::string public_key_info;
     if (!GetSubjectPublicKeyInfo(key_type, public_key_der, &public_key_info)) {
       LOG(ERROR) << __func__ << ": Failed to get public key info for key_type: "
@@ -2375,13 +2413,13 @@ void AttestationService::VerifyTask(
     const VerifyRequest& request, const std::shared_ptr<VerifyReply>& result) {
   result->set_verified(false);
 
-  base::Optional<std::string> ek_public_key = GetEndorsementPublicKey();
+  std::optional<std::string> ek_public_key = GetEndorsementPublicKey();
   if (!ek_public_key.has_value()) {
     LOG(ERROR) << __func__ << ": Endorsement key not available.";
     return;
   }
 
-  base::Optional<std::string> ek_cert = GetEndorsementCertificate();
+  std::optional<std::string> ek_cert = GetEndorsementCertificate();
   if (!ek_cert.has_value()) {
     LOG(ERROR) << __func__ << ": Endorsement cert not available.";
     return;
@@ -2395,29 +2433,19 @@ void AttestationService::VerifyTask(
   std::string ca_public_key;
   bool has_found_ca_public_key =
       GetAuthorityPublicKey(issuer, request.cros_core(), &ca_public_key);
-  bool is_subject_public_key_info = false;
-  if (!has_found_ca_public_key) {
-    has_found_ca_public_key = GetAuthoritySubjectPublicKeyInfo(
-        issuer, request.cros_core(), &ca_public_key);
-    is_subject_public_key_info = has_found_ca_public_key;
-  }
-
-  if (!has_found_ca_public_key) {
-    LOG(ERROR) << __func__ << ": Failed to get CA public key.";
-    return;
-  }
-
-  bool valid_credential = false;
-  if (is_subject_public_key_info) {
-    valid_credential = crypto_utility_->VerifyCertificateWithSubjectPublicKey(
-        ek_cert.value(), ca_public_key);
+  if (has_found_ca_public_key) {
+    if (!crypto_utility_->VerifyCertificate(ek_cert.value(), ca_public_key)) {
+      LOG(WARNING) << __func__ << ": Bad endorsement credential.";
+      return;
+    }
   } else {
-    valid_credential =
-        crypto_utility_->VerifyCertificate(ek_cert.value(), ca_public_key);
-  }
-  if (!valid_credential) {
-    LOG(WARNING) << __func__ << ": Bad endorsement credential.";
-    return;
+    if (!VerifyCertificateWithSubjectPublicKeyInfo(issuer, request.cros_core(),
+                                                   ek_cert.value())) {
+      LOG(ERROR)
+          << __func__
+          << ": Failed to verify the certificate with subject public key info.";
+      return;
+    }
   }
 
   // Verifies that the given public key matches the one in the credential.
@@ -2476,10 +2504,9 @@ void AttestationService::VerifyTask(
     LOG(ERROR) << __func__ << ": Bad identity binding.";
     return;
   }
-  if (!tpm_utility_->IsPCR0Valid()) {
-    LOG(ERROR) << __func__ << ": Bad PCR0 value.";
-    metrics_.ReportAttestationOpsStatus(
-        kAttestationVerify, AttestationOpsStatus::kInvalidPcr0Value);
+  if (auto result = hwsec_->GetCurrentBootMode(); !result.ok()) {
+    LOG(ERROR) << __func__ << "Invalid boot mode: " << result.status();
+    return;
   }
   if (!VerifyPCR0Quote(identity_public_key_info,
                        identity_data.pcr_quotes().at(0))) {
@@ -2515,15 +2542,16 @@ void AttestationService::VerifyTask(
 
 void AttestationService::CreateEnrollRequest(
     const CreateEnrollRequestRequest& request,
-    const CreateEnrollRequestCallback& callback) {
+    CreateEnrollRequestCallback callback) {
   auto result = std::make_shared<CreateEnrollRequestReply>();
-  base::Closure task = base::Bind(
+  base::OnceClosure task = base::BindOnce(
       &AttestationService::CreateEnrollRequestTask<CreateEnrollRequestRequest>,
       base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<CreateEnrollRequestReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 template <typename RequestType>
@@ -2538,15 +2566,16 @@ void AttestationService::CreateEnrollRequestTask(
 }
 
 void AttestationService::FinishEnroll(const FinishEnrollRequest& request,
-                                      const FinishEnrollCallback& callback) {
+                                      FinishEnrollCallback callback) {
   auto result = std::make_shared<FinishEnrollReply>();
-  base::Closure task =
-      base::Bind(&AttestationService::FinishEnrollTask<FinishEnrollReply>,
-                 base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<FinishEnrollReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::FinishEnrollTask<FinishEnrollReply>,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<FinishEnrollReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 template <typename ReplyType>
@@ -2566,27 +2595,30 @@ void AttestationService::FinishEnrollTask(
 
 void AttestationService::PostStartEnrollTask(
     const std::shared_ptr<AttestationFlowData>& data) {
-  base::Closure task = base::Bind(&AttestationService::StartEnrollTask,
-                                  base::Unretained(this), data);
-  base::Closure reply =
-      base::Bind(&AttestationService::OnEnrollAction, GetWeakPtr(), data);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task = base::BindOnce(&AttestationService::StartEnrollTask,
+                                          base::Unretained(this), data);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::OnEnrollAction, GetWeakPtr(), data);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::Enroll(const EnrollRequest& request,
-                                const EnrollCallback& callback) {
-  PostStartEnrollTask(std::make_shared<AttestationFlowData>(request, callback));
+                                EnrollCallback callback) {
+  PostStartEnrollTask(
+      std::make_shared<AttestationFlowData>(request, std::move(callback)));
 }
 
 void AttestationService::SendEnrollRequest(
     const std::shared_ptr<AttestationFlowData>& data) {
   auto pca_request = ToPcaAgentEnrollRequest(*data);
-  auto on_success = base::Bind(&AttestationService::HandlePcaAgentEnrollReply,
-                               GetWeakPtr(), data);
+  auto on_success = base::BindOnce(
+      &AttestationService::HandlePcaAgentEnrollReply, GetWeakPtr(), data);
   auto on_error =
-      base::Bind(&AttestationService::HandlePcaAgentEnrollRequestError,
-                 GetWeakPtr(), data);
-  pca_agent_proxy_->EnrollAsync(pca_request, on_success, on_error,
+      base::BindOnce(&AttestationService::HandlePcaAgentEnrollRequestError,
+                     GetWeakPtr(), data);
+  pca_agent_proxy_->EnrollAsync(pca_request, std::move(on_success),
+                                std::move(on_error),
                                 kPcaAgentDBusTimeout.InMilliseconds());
 }
 
@@ -2687,6 +2719,8 @@ void AttestationService::ReturnForAllCertificateRequestAliases(
     for (const auto& alias : certificate_queue_.PopAllAliases(data)) {
       if (data != alias) {
         alias->set_certificate(data->certificate());
+        alias->set_key_blob(data->key_blob());
+        alias->set_certified_key_credential(data->certified_key_credential());
         alias->ReturnCertificate();
       }
     }
@@ -2764,11 +2798,12 @@ void AttestationService::PostStartCertificateTaskOrReturn(
     data->ReturnStatus();
     return;
   }
-  base::Closure task = base::Bind(&AttestationService::StartCertificateTask,
-                                  base::Unretained(this), data);
-  base::Closure reply = base::Bind(&AttestationService::OnGetCertificateAction,
-                                   GetWeakPtr(), data);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task = base::BindOnce(
+      &AttestationService::StartCertificateTask, base::Unretained(this), data);
+  base::OnceClosure reply = base::BindOnce(
+      &AttestationService::OnGetCertificateAction, GetWeakPtr(), data);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::StartCertificateTask(
@@ -2793,6 +2828,8 @@ void AttestationService::StartCertificateTask(
     }
     data->set_public_key(std::move(public_key_info));
     data->set_certificate(CreatePEMCertificateChain(key));
+    data->set_certified_key_credential(key.certified_key_credential());
+    data->set_key_blob(key.key_blob());
     data->set_action(AttestationFlowAction::kNoop);
     return;
   }
@@ -2837,6 +2874,9 @@ void AttestationService::FinishCertificateTask(
   }
   data->set_public_key(std::move(*(reply->mutable_public_key())));
   data->set_certificate(std::move(*(reply->mutable_certificate())));
+  data->set_certified_key_credential(
+      std::move(*(reply->mutable_certified_key_credential())));
+  data->set_key_blob((std::move(*(reply->mutable_key_blob()))));
   data->set_action(AttestationFlowAction::kNoop);
 }
 
@@ -2851,25 +2891,27 @@ void AttestationService::HandlePcaAgentEnrollReply(
     return;
   }
   data->set_result_response(pca_reply.response());
-  base::Closure task = base::Bind(&AttestationService::FinishEnrollTaskV2,
-                                  base::Unretained(this), data);
-  base::Closure reply =
-      base::Bind(&AttestationService::OnEnrollAction, GetWeakPtr(), data);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task = base::BindOnce(
+      &AttestationService::FinishEnrollTaskV2, base::Unretained(this), data);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::OnEnrollAction, GetWeakPtr(), data);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::CreateCertificateRequest(
     const CreateCertificateRequestRequest& request,
-    const CreateCertificateRequestCallback& callback) {
+    CreateCertificateRequestCallback callback) {
   auto result = std::make_shared<CreateCertificateRequestReply>();
-  base::Closure task =
-      base::Bind(&AttestationService::CreateCertificateRequestTask<
-                     CreateCertificateRequestRequest>,
-                 base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::CreateCertificateRequestTask<
+                         CreateCertificateRequestRequest>,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<CreateCertificateRequestReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 template <typename RequestType>
@@ -2897,28 +2939,33 @@ void AttestationService::CreateCertificateRequestTask(
   std::string public_key_tpm_format;
   std::string key_info;
   std::string proof;
-  CertifiedKey key;
-  const auto& identity_data = database_pb.identities().Get(identity);
-  if (!tpm_utility_->CreateCertifiedKey(
-          key_type, KEY_USAGE_SIGN,
-          identity_data.identity_key().identity_key_blob(), nonce, &key_blob,
-          &public_key_der, &public_key_tpm_format, &key_info, &proof)) {
-    LOG(ERROR) << __func__ << ": Failed to create a key.";
+
+  const KeyUsage key_usage =
+      GetKeyUsageByProfile(request.certificate_profile());
+  const KeyRestriction key_restriction =
+      GetKeyRestrictionByProfile(request.certificate_profile());
+  const EndorsementAuth endorsement_auth =
+      GetEndorsementAuthByProfile(request.certificate_profile());
+
+  const auto& identity_key_blob =
+      database_pb.identities().Get(identity).identity_key().identity_key_blob();
+  auto certified_key_result = hwsec_->CreateCertifiedKey(
+      BlobFromString(identity_key_blob), key_type, key_usage, key_restriction,
+      endorsement_auth, nonce);
+  if (!certified_key_result.ok()) {
+    LOG(ERROR) << __func__ << ": Failed to create a certified key: "
+               << certified_key_result.status();
     result->set_status(STATUS_UNEXPECTED_DEVICE_ERROR);
     return;
   }
-  key.set_key_blob(key_blob);
-  key.set_public_key(public_key_der);
-  key.set_public_key_tpm_format(public_key_tpm_format);
-  key.set_certified_key_info(key_info);
-  key.set_certified_key_proof(proof);
-  key.set_key_type(key_type);
-  key.set_key_usage(KEY_USAGE_SIGN);
+
+  CertifiedKey key = certified_key_result.value();
   std::string message_id;
   if (!CreateCertificateRequestInternal(
           request.aca_type(), request.username(), key,
           request.certificate_profile(), request.request_origin(),
-          result->mutable_pca_request(), &message_id)) {
+          result->mutable_pca_request(), &message_id,
+          GetDeviceSetupCertificateRequestMetadataIfPresent(request))) {
     result->clear_pca_request();
     result->set_status(STATUS_UNEXPECTED_DEVICE_ERROR);
     return;
@@ -2935,16 +2982,17 @@ void AttestationService::CreateCertificateRequestTask(
 
 void AttestationService::FinishCertificateRequest(
     const FinishCertificateRequestRequest& request,
-    const FinishCertificateRequestCallback& callback) {
+    FinishCertificateRequestCallback callback) {
   auto result = std::make_shared<FinishCertificateRequestReply>();
-  base::Closure task =
-      base::Bind(&AttestationService::FinishCertificateRequestTask<
-                     FinishCertificateRequestReply>,
-                 base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::FinishCertificateRequestTask<
+                         FinishCertificateRequestReply>,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<FinishCertificateRequestReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 template <typename ReplyType>
@@ -2986,30 +3034,34 @@ void AttestationService::FinishCertificateRequestTask(
   }
   pending_cert_requests_.erase(iter);
   if (!PopulateAndStoreCertifiedKey(response_pb, request.username(),
-                                    request.key_label(), &key,
-                                    result->mutable_certificate())) {
-    result->clear_certificate();
+                                    request.key_label(), &key)) {
     result->set_status(STATUS_UNEXPECTED_DEVICE_ERROR);
     return;
   }
+  LOG(INFO) << "Attestation: Certified key credential received and stored.";
+  result->set_status(STATUS_SUCCESS);
+  result->set_certificate(CreatePEMCertificateChain(key));
+  result->set_certified_key_credential(key.certified_key_credential());
+  result->set_key_blob(key.key_blob());
 }
 
-void AttestationService::GetCertificate(
-    const GetCertificateRequest& request,
-    const GetCertificateCallback& callback) {
-  PostStartEnrollTask(std::make_shared<AttestationFlowData>(request, callback));
+void AttestationService::GetCertificate(const GetCertificateRequest& request,
+                                        GetCertificateCallback callback) {
+  PostStartEnrollTask(
+      std::make_shared<AttestationFlowData>(request, std::move(callback)));
 }
 
 void AttestationService::SendGetCertificateRequest(
     const std::shared_ptr<AttestationFlowData>& data) {
   auto pca_request = ToPcaAgentCertRequest(*data);
   auto on_success =
-      base::Bind(&AttestationService::HandlePcaAgentGetCertificateReply,
-                 GetWeakPtr(), data);
-  auto on_error =
-      base::Bind(&AttestationService::HandlePcaAgentGetCertificateRequestError,
-                 GetWeakPtr(), data);
-  pca_agent_proxy_->GetCertificateAsync(pca_request, on_success, on_error,
+      base::BindOnce(&AttestationService::HandlePcaAgentGetCertificateReply,
+                     GetWeakPtr(), data);
+  auto on_error = base::BindOnce(
+      &AttestationService::HandlePcaAgentGetCertificateRequestError,
+      GetWeakPtr(), data);
+  pca_agent_proxy_->GetCertificateAsync(pca_request, std::move(on_success),
+                                        std::move(on_error),
                                         kPcaAgentDBusTimeout.InMilliseconds());
 }
 
@@ -3033,11 +3085,12 @@ void AttestationService::HandlePcaAgentGetCertificateReply(
     return;
   }
   data->set_result_response(pca_reply.response());
-  base::Closure task = base::Bind(&AttestationService::FinishCertificateTask,
-                                  base::Unretained(this), data);
-  base::Closure reply = base::Bind(&AttestationService::OnGetCertificateAction,
-                                   GetWeakPtr(), data);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task = base::BindOnce(
+      &AttestationService::FinishCertificateTask, base::Unretained(this), data);
+  base::OnceClosure reply = base::BindOnce(
+      &AttestationService::OnGetCertificateAction, GetWeakPtr(), data);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 bool AttestationService::ValidateEnterpriseChallenge(
@@ -3076,15 +3129,16 @@ bool AttestationService::EncryptEnterpriseKeyInfo(
 
 void AttestationService::SignEnterpriseChallenge(
     const SignEnterpriseChallengeRequest& request,
-    const SignEnterpriseChallengeCallback& callback) {
+    SignEnterpriseChallengeCallback callback) {
   auto result = std::make_shared<SignEnterpriseChallengeReply>();
-  base::Closure task =
-      base::Bind(&AttestationService::SignEnterpriseChallengeTask,
-                 base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::SignEnterpriseChallengeTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<SignEnterpriseChallengeReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::SignEnterpriseChallengeTask(
@@ -3116,41 +3170,42 @@ void AttestationService::SignEnterpriseChallengeTask(
     return;
   }
 
-  const bool is_user_specific = !request.username().empty();
+  // A Verified Access (VA) flow type is required as part of the challenge
+  // response to determine the VA verification flow and the content of the VA
+  // response.
+  if (!request.has_flow_type()) {
+    result->set_status(STATUS_INVALID_PARAMETER);
+    return;
+  }
+
   KeyInfo key_info;
-  // EUK -> Enterprise User Key
-  // EMK -> Enterprise Machine Key
-  if (is_user_specific) {
-    key_info.set_key_type(EUK);
-    key_info.set_domain(request.domain());
-  } else {
-    // For machine key, the customer_id should be included, not the domain
-    // name.
-    key_info.set_key_type(EMK);
-    if (!PopulateCustomerId(&key_info)) {
-      result->set_status(STATUS_UNEXPECTED_DEVICE_ERROR);
-      return;
-    }
+  key_info.set_flow_type(request.flow_type());
+  key_info.set_domain(request.domain());
+
+  if (request.include_customer_id() && !PopulateCustomerId(&key_info)) {
+    result->set_status(STATUS_UNEXPECTED_DEVICE_ERROR);
+    return;
   }
   key_info.set_device_id(request.device_id());
 
-  if (request.has_device_trust_signals())
-    *key_info.mutable_device_trust_signals() = request.device_trust_signals();
+  if (request.has_device_trust_signals_json())
+    *key_info.mutable_device_trust_signals_json() =
+        request.device_trust_signals_json();
 
-  base::Optional<CertifiedKey> key_for_certificate_and_spkac;
-  if (is_user_specific) {
-    // Always include the EUK certificate if an EUK is being challenged.
-    // Note that if including SPKAC has been requested when challenging an EUK,
-    // the SPKAC will also be created for the EUK. In other words,
-    // |key_name_for_spkac| is currently ignored for EUKs.
+  std::optional<CertifiedKey> key_for_certificate_and_spkac;
+  if (request.include_certificate()) {
+    // Note that if including SPKAC has been requested when including the
+    // certificate of the signing key, the SPKAC will also be created for the
+    // signing key. In other words, |key_name_for_spkac| is currently ignored
+    // when including the certificate of the signing key.
     key_for_certificate_and_spkac = key;
   } else if (request.include_signed_public_key() &&
              !request.key_name_for_spkac().empty()) {
-    // If a specific key name for SPKAC has been requested when challenging an
-    // EMK, include the certificate for that key.
+    // If a specific key name for SPKAC has been requested when not including
+    // the certificate of the signing key, include the certificate for that key.
     CertifiedKey key_for_spkac;
-    if (!FindKeyByLabel(std::string() /* username */,
-                        request.key_name_for_spkac(), &key_for_spkac)) {
+    if (!FindKeyByLabel(request.username(), request.key_name_for_spkac(),
+                        &key_for_spkac)) {
       result->set_status(STATUS_INVALID_PARAMETER);
       return;
     }
@@ -3200,14 +3255,16 @@ void AttestationService::SignEnterpriseChallengeTask(
 
 void AttestationService::SignSimpleChallenge(
     const SignSimpleChallengeRequest& request,
-    const SignSimpleChallengeCallback& callback) {
+    SignSimpleChallengeCallback callback) {
   auto result = std::make_shared<SignSimpleChallengeReply>();
-  base::Closure task = base::Bind(&AttestationService::SignSimpleChallengeTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply = base::Bind(
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::SignSimpleChallengeTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<SignSimpleChallengeReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::SignSimpleChallengeTask(
@@ -3252,14 +3309,16 @@ bool AttestationService::SignChallengeData(const CertifiedKey& key,
 }
 
 void AttestationService::SetKeyPayload(const SetKeyPayloadRequest& request,
-                                       const SetKeyPayloadCallback& callback) {
+                                       SetKeyPayloadCallback callback) {
   auto result = std::make_shared<SetKeyPayloadReply>();
-  base::Closure task = base::Bind(&AttestationService::SetKeyPayloadTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<SetKeyPayloadReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::SetKeyPayloadTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<SetKeyPayloadReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::SetKeyPayloadTask(
@@ -3278,14 +3337,16 @@ void AttestationService::SetKeyPayloadTask(
 }
 
 void AttestationService::DeleteKeys(const DeleteKeysRequest& request,
-                                    const DeleteKeysCallback& callback) {
+                                    DeleteKeysCallback callback) {
   auto result = std::make_shared<DeleteKeysReply>();
-  base::Closure task = base::Bind(&AttestationService::DeleteKeysTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<DeleteKeysReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::DeleteKeysTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<DeleteKeysReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::DeleteKeysTask(
@@ -3306,14 +3367,16 @@ void AttestationService::DeleteKeysTask(
 }
 
 void AttestationService::ResetIdentity(const ResetIdentityRequest& request,
-                                       const ResetIdentityCallback& callback) {
+                                       ResetIdentityCallback callback) {
   auto result = std::make_shared<ResetIdentityReply>();
-  base::Closure task = base::Bind(&AttestationService::ResetIdentityTask,
-                                  base::Unretained(this), request, result);
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<ResetIdentityReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::ResetIdentityTask,
+                     base::Unretained(this), request, result);
+  base::OnceClosure reply =
+      base::BindOnce(&AttestationService::TaskRelayCallback<ResetIdentityReply>,
+                     GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::ResetIdentityTask(
@@ -3323,17 +3386,18 @@ void AttestationService::ResetIdentityTask(
   result->set_status(STATUS_NOT_SUPPORTED);
 }
 
-void AttestationService::GetEnrollmentId(
-    const GetEnrollmentIdRequest& request,
-    const GetEnrollmentIdCallback& callback) {
+void AttestationService::GetEnrollmentId(const GetEnrollmentIdRequest& request,
+                                         GetEnrollmentIdCallback callback) {
   auto result = std::make_shared<GetEnrollmentIdReply>();
-  base::Closure task = base::Bind(&AttestationService::GetEnrollmentIdTask,
-                                  base::Unretained(this), request, result);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::GetEnrollmentIdTask,
+                     base::Unretained(this), request, result);
 
-  base::Closure reply =
-      base::Bind(&AttestationService::TaskRelayCallback<GetEnrollmentIdReply>,
-                 GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+  base::OnceClosure reply = base::BindOnce(
+      &AttestationService::TaskRelayCallback<GetEnrollmentIdReply>,
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::GetEnrollmentIdTask(
@@ -3364,15 +3428,17 @@ void AttestationService::GetEnrollmentIdTask(
 
 void AttestationService::GetCertifiedNvIndex(
     const GetCertifiedNvIndexRequest& request,
-    const GetCertifiedNvIndexCallback& callback) {
+    GetCertifiedNvIndexCallback callback) {
   auto result = std::make_shared<GetCertifiedNvIndexReply>();
-  base::Closure task = base::Bind(&AttestationService::GetCertifiedNvIndexTask,
-                                  base::Unretained(this), request, result);
+  base::OnceClosure task =
+      base::BindOnce(&AttestationService::GetCertifiedNvIndexTask,
+                     base::Unretained(this), request, result);
 
-  base::Closure reply = base::Bind(
+  base::OnceClosure reply = base::BindOnce(
       &AttestationService::TaskRelayCallback<GetCertifiedNvIndexReply>,
-      GetWeakPtr(), callback, result);
-  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, task, reply);
+      GetWeakPtr(), std::move(callback), result);
+  worker_thread_->task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                  std::move(reply));
 }
 
 void AttestationService::GetCertifiedNvIndexTask(
@@ -3388,21 +3454,31 @@ void AttestationService::GetCertifiedNvIndexTask(
     return;
   }
 
-  std::string certified_value;
-  std::string signature;
+  // TODO(b/284426896): we should not expose the NV index logic outside of
+  // libhwsec. Remove this workaround once we refactor this function and u2f.
+  constexpr uint32_t kG2FCertNvIndex = 0x013fff02;
+  NVRAMQuoteType type;
+  switch (request.nv_index()) {
+    // Currently only nv index in use for the function is g2f cert.
+    case kG2FCertNvIndex:
+      type = G2F_CERT;
+      break;
+    default:
+      LOG(WARNING) << "Invalid NV index: " << request.nv_index();
+      result->set_status(STATUS_INVALID_PARAMETER);
+      return;
+  }
 
-  if (!tpm_utility_->CertifyNV(request.nv_index(), request.nv_size(),
-                               key.key_blob(), &certified_value, &signature)) {
-    LOG(WARNING) << "Attestation: Failed to certify NV data of size "
-                 << request.nv_size() << " at index " << std::hex
-                 << std::showbase << request.nv_index()
-                 << ", using key with label: " << request.key_label();
+  Quote quote;
+  if (!nvram_quoter_->Certify(type, key.key_blob(), quote)) {
+    LOG(WARNING) << __func__ << ": Failed to certify NV by key with label: "
+                 << request.key_label();
     result->set_status(STATUS_INVALID_PARAMETER);
     return;
   }
 
-  result->set_certified_data(certified_value);
-  result->set_signature(signature);
+  result->set_certified_data(quote.quoted_data());
+  result->set_signature(quote.quote());
   result->set_key_certificate(key.certified_key_credential());
   result->set_status(STATUS_SUCCESS);
 }
@@ -3428,7 +3504,7 @@ std::string AttestationService::ComputeEnterpriseEnrollmentId() {
 
   std::string ek_bytes;
   if (!tpm_utility_->GetEndorsementPublicKeyBytes(
-          kEndorsementKeyTypeForEnrollmentID, &ek_bytes)) {
+          endorsement_key_type_for_enrollment_id_, &ek_bytes)) {
     LOG(ERROR) << __func__ << ": Failed to key EK bytes.";
     return "";
   }
@@ -3449,11 +3525,11 @@ KeyType AttestationService::GetEndorsementKeyType() const {
   }
 
   // We didn't generate any data yet. Use the suggested key type.
-  return tpm_utility_->GetVersion() == TPM_2_0 ? KEY_TYPE_ECC : KEY_TYPE_RSA;
+  return default_endorsement_key_type_;
 }
 
 KeyType AttestationService::GetAttestationIdentityKeyType() const {
-  return tpm_utility_->GetVersion() == TPM_2_0 ? KEY_TYPE_ECC : KEY_TYPE_RSA;
+  return default_identity_key_type_;
 }
 
 bool AttestationService::PopulateCustomerId(KeyInfo* key_info) {
@@ -3489,6 +3565,43 @@ ACAType AttestationService::GetACAType(ACATypeInternal aca_type_internal) {
     default:
       return DEFAULT_ACA;
   }
+}
+
+bool AttestationService::VerifyCertificateWithSubjectPublicKeyInfo(
+    const std::string& issuer_name,
+    bool is_cros_core,
+    const std::string& ek_cert) {
+  if (is_cros_core) {
+    return false;
+  }
+  bool has_subject_public_key_info = false;
+  for (const auto& info : kKnownEndorsementCASubjectKeyInfo) {
+    if (issuer_name == info.issuer) {
+      if (crypto_utility_->VerifyCertificateWithSubjectPublicKey(
+              ek_cert, info.subject_public_key_info)) {
+        return true;
+      }
+      has_subject_public_key_info = true;
+    }
+  }
+  if (has_subject_public_key_info) {
+    LOG(WARNING) << __func__
+                 << ": Failed to verify the certificate with CA public keys";
+  } else {
+    LOG(WARNING) << __func__ << ": Failed to get CA public key.";
+  }
+  return false;
+}
+
+bool AttestationService::ShallQuoteRsaEkCertificate() const {
+  // The EK type is RSA; PCA server doesn't need the certificate to compute EID.
+  if (GetEndorsementKeyType() == KEY_TYPE_RSA) {
+    CHECK_EQ(endorsement_key_type_for_enrollment_id_, KEY_TYPE_RSA)
+        << "Attesation support don't support ECC-based EID computation with "
+           "RSA EK.";
+    return false;
+  }
+  return endorsement_key_type_for_enrollment_id_ == KEY_TYPE_RSA;
 }
 
 }  // namespace attestation

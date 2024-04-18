@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 #include <memory>
 
 #include <base/files/scoped_file.h>
-#include <base/macros.h>
 
 #include "arc/vm/libvda/event_pipe.h"
 #include "arc/vm/libvda/libvda_encode.h"

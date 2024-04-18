@@ -1,12 +1,22 @@
-// Copyright (c) 2010 The Chromium OS Authors. All rights reserved.
+// Copyright 2010 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "crash-reporter/unclean_shutdown_collector.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #include <base/files/file_util.h>
 #include <base/logging.h>
+#include <base/memory/ref_counted.h>
+#include <base/memory/scoped_refptr.h>
+#include <base/strings/string_number_conversions.h>
 #include <brillo/files/safe_fd.h>
+#include <brillo/process/process.h>
+#include <brillo/strings/string_utils.h>
+#include <metrics/metrics_library.h>
 
 using base::FilePath;
 using brillo::SafeFD;
@@ -75,9 +85,11 @@ bool SafelyCopyFile(FilePath source, FilePath dest) {
     return false;
   }
   base::ScopedFD scoped_dest_parent(dest_parent_fd);
-  int dest_fd =
-      HANDLE_EINTR(openat(dest_parent_fd, dest.BaseName().value().c_str(),
-                          O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644));
+  // We need O_TRUNC so that any existing larger files are deleted, rather than
+  // partially overwritten.
+  int dest_fd = HANDLE_EINTR(
+      openat(dest_parent_fd, dest.BaseName().value().c_str(),
+             O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644));
   if (dest_fd < 0) {
     PLOG(ERROR) << "Failed to open " << dest;
     return false;
@@ -89,9 +101,11 @@ bool SafelyCopyFile(FilePath source, FilePath dest) {
 
 }  // namespace
 
-
-UncleanShutdownCollector::UncleanShutdownCollector()
-    : CrashCollector("unclean_shutdown"),
+UncleanShutdownCollector::UncleanShutdownCollector(
+    const scoped_refptr<
+        base::RefCountedData<std::unique_ptr<MetricsLibraryInterface>>>&
+        metrics_lib)
+    : CrashCollector("unclean_shutdown", metrics_lib),
       unclean_shutdown_file_(kUncleanShutdownFile),
       powerd_trace_path_(kPowerdTracePath),
       powerd_suspended_file_(powerd_trace_path_.Append(kPowerdSuspended)),
@@ -136,6 +150,12 @@ bool UncleanShutdownCollector::Collect() {
     DeleteUncleanShutdownFiles();
     return false;
   }
+  // EC reboots also cause AP reboots, so log the EC uptime to help correlate
+  // them.
+  LogEcUptime();
+  // GSC reboots also cause AP reboots, so log the GSC uptime to help correlate
+  // them.
+  LogGscUptime();
   DeleteUncleanShutdownFiles();
 
   return true;
@@ -176,4 +196,90 @@ bool UncleanShutdownCollector::DeadBatteryCausedUncleanShutdown() {
     return true;
   }
   return false;
+}
+
+void UncleanShutdownCollector::LogEcUptime() {
+  const char kEcToolPath[] = "/usr/sbin/ectool";
+
+  if (!base::PathExists(base::FilePath(kEcToolPath))) {
+    LOG(INFO) << "ectool unavailable: '" << kEcToolPath << "'";
+    return;
+  }
+
+  brillo::ProcessImpl ectool;
+  ectool.AddArg(kEcToolPath);
+  // Get info about how long the EC has been running and the most recent AP
+  // resets.
+  ectool.AddArg("uptimeinfo");
+  // Combine stdout and stderr.
+  ectool.RedirectOutputToMemory(/*combine_stdout_and_stderr=*/true);
+
+  const int result = ectool.Run();
+  std::string uptimeinfo_output = ectool.GetOutputString(STDOUT_FILENO);
+  if (result != 0) {
+    LOG(ERROR) << "Failed to run ectool. Error: '" << result << "'";
+    return;
+  }
+
+  // LOG() converts newlines to "#012", logging all the output to a single line.
+  // This is difficult to read, so instead log each line of the ectool output
+  // separately to keep things human-readable.
+  std::vector<std::string> uptimeinfo_strings =
+      brillo::string_utils::Split(uptimeinfo_output, "\n", true, true);
+  for (const std::string& uptimeinfo_line : uptimeinfo_strings) {
+    LOG(INFO) << "[ectool uptimeinfo] " << uptimeinfo_line;
+  }
+}
+
+void UncleanShutdownCollector::LogGscUptime() {
+  const char kGscToolPath[] = "/usr/sbin/gsctool";
+  const char kGscFirmwarePath[] = "/opt/google/ti50/firmware";
+
+  if (!base::PathExists(base::FilePath(kGscToolPath))) {
+    LOG(INFO) << "gsctool unavailable: '" << kGscToolPath << "'";
+    return;
+  }
+  if (!base::PathExists(base::FilePath(kGscFirmwarePath))) {
+    LOG(INFO)
+        << "Unsupported GSC present on board. Unable to query GSC uptime.";
+    return;
+  }
+
+  brillo::ProcessImpl gsctool;
+  gsctool.AddArg(kGscToolPath);
+  gsctool.AddArg("-a");           // spi/i2c AP-to-GSC interface
+  gsctool.AddArg("--dauntless");  // Communicate with Dauntless chip.
+  gsctool.AddArg("--get_time");   // Get the GSC uptime, in milliseconds
+  // Combine stdout and stderr.
+  gsctool.RedirectOutputToMemory(true);
+
+  const int result = gsctool.Run();
+  std::string get_time_output = gsctool.GetOutputString(STDOUT_FILENO);
+  if (result != 0) {
+    LOG(ERROR) << "Failed to run gsctool. Error: '" << result << "'";
+    return;
+  }
+
+  std::vector<std::string> get_time_strings =
+      brillo::string_utils::Split(get_time_output, "\n", true, true);
+  if (get_time_strings.size() != 1) {
+    LOG(ERROR) << "Unexpected 'gsctool --gettime' output:";
+    // LOG() converts newlines to "#012", logging all the output to a single
+    // line. This is difficult to read, so instead log each line of the gsctool
+    // output separately to keep things human-readable.
+    for (const std::string& get_time_line : get_time_strings) {
+      LOG(INFO) << "[gsctool get_time] " << get_time_line;
+    }
+    return;
+  }
+  double gsc_uptime_msec = -1;
+  if (!base::StringToDouble(get_time_strings[0], &gsc_uptime_msec)) {
+    LOG(ERROR) << "Failed to convert uptime string to double: '"
+               << get_time_strings[0] << "'";
+  }
+  // gsctool --get_time outputs the GSC uptime in milliseconds. Convert to
+  // seconds, so it's more human-readable.
+  double gsc_uptime_sec =
+      gsc_uptime_msec / static_cast<double>(base::Time::kMillisecondsPerSecond);
+  LOG(INFO) << "GSC uptime: " << gsc_uptime_sec << " seconds";
 }

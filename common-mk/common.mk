@@ -1,4 +1,4 @@
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
@@ -63,7 +63,7 @@
 #
 # Possible command line variables:
 #   - COLOR=[0|1] to set ANSI color output (default: 1)
-#   - VERBOSE=[0|1] to hide/show commands (default: 0)
+#   - VERBOSE=[0|1] V=[0|1] to hide/show commands (default: 0)
 #   - MODE=[opt|dbg|profiling] (default: opt)
 #          opt - Enable optimizations for release builds
 #          dbg - Turn down optimization for debugging
@@ -98,7 +98,8 @@ SPLITDEBUG ?= 0
 NOSTRIP ?= 1
 VALGRIND ?= 0
 COLOR ?= 1
-VERBOSE ?= 0
+V ?= 0
+VERBOSE ?= $(V)
 MODE ?= opt
 CXXEXCEPTIONS ?= 0
 RUN_TESTS ?= 1
@@ -325,14 +326,13 @@ COMMON_CFLAGS-clang := -fvisibility=hidden -ggdb -Wimplicit-fallthrough
 COMMON_CFLAGS := -Wall -Wunused -Wno-unused-parameter -Wunreachable-code \
   -Wbool-operation -Wstring-compare -Wstring-plus-int  -Wxor-used-as-pow \
   -Wint-in-bool-context -Wfree-nonheap-object \
-  -Wimplicit-int-float-conversion \
   -Werror -Wformat=2 -fno-strict-aliasing $(SSP_CFLAGS) -O1
 CXXFLAGS += $(COMMON_CFLAGS) $(COMMON_CFLAGS-$(CXXDRIVER)) -std=gnu++17
-CFLAGS += $(COMMON_CFLAGS) $(COMMON_CFLAGS-$(CDRIVER)) -std=gnu11
+CFLAGS += $(COMMON_CFLAGS) $(COMMON_CFLAGS-$(CDRIVER)) -std=gnu17
 # We undefine _FORTIFY_SOURCE because some distros enable it by default in
 # their toolchains.  This makes the compiler issue warnings about redefines
 # and our -Werror usage breaks it all.
-CPPFLAGS += -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
+CPPFLAGS += -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3
 
 # Enable large file support.
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE

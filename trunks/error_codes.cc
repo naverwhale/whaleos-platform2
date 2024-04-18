@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -230,6 +230,8 @@ std::string GetErrorStringInternal(trunks::TPM_RC error) {
       return "TRUNKS_RC_IPC_ERROR";
     case trunks::TRUNKS_RC_SESSION_SETUP_ERROR:
       return "TRUNKS_RC_SESSION_SETUP_ERROR";
+    case trunks::TRUNKS_RC_PARSE_ERROR:
+      return "TRUNKS_RC_PARSE_ERROR";
     case trunks::TCTI_RC_TRY_AGAIN:
       return "TCTI_RC_TRY_AGAIN";
     case trunks::TCTI_RC_GENERAL_FAILURE:
@@ -302,15 +304,15 @@ bool IsFormatOne(trunks::TPM_RC error) {
 namespace trunks {
 
 std::string GetErrorString(TPM_RC error) {
-  std::string error_string = GetErrorStringInternal(error);
-  if (!error_string.empty()) {
-    return error_string;
-  }
   std::stringstream ss;
   if ((error & kLayerMask) == kResourceManagerTpmErrorBase) {
     error &= ~kLayerMask;
-    error_string = GetErrorStringInternal(error);
     ss << "Resource Manager: ";
+  }
+  std::string error_string = GetErrorStringInternal(error);
+  if (!error_string.empty()) {
+    ss << error_string;
+    return ss.str();
   }
   // Check if we have a TPM 'Format-One' response code.
   if (IsFormatOne(error)) {
@@ -349,6 +351,28 @@ std::string CreateErrorResponse(TPM_RC error_code) {
   CHECK_EQ(Serialize_UINT32(kErrorResponseSize, &response), TPM_RC_SUCCESS);
   CHECK_EQ(Serialize_TPM_RC(error_code, &response), TPM_RC_SUCCESS);
   return response;
+}
+
+TPM_RC GetResponseCode(const std::string& response, TPM_RC& rc) {
+  std::string buffer(response);
+  TPM_ST tag;
+  TPM_RC parse_rc = Parse_TPM_ST(&buffer, &tag, nullptr);
+  if (parse_rc != TPM_RC_SUCCESS) {
+    return parse_rc;
+  }
+  UINT32 response_size;
+  parse_rc = Parse_UINT32(&buffer, &response_size, nullptr);
+  if (parse_rc != TPM_RC_SUCCESS) {
+    return parse_rc;
+  }
+  if (response_size != response.size()) {
+    return TPM_RC_SIZE;
+  }
+  parse_rc = Parse_TPM_RC(&buffer, &rc, nullptr);
+  if (parse_rc != TPM_RC_SUCCESS) {
+    return parse_rc;
+  }
+  return TPM_RC_SUCCESS;
 }
 
 }  // namespace trunks

@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,7 @@ void LogMessage(const std::string& message) {
 
 }  // namespace
 
-void BaseActivityLogger::SetLogCallbackForTest(LogCallback callback) {
+void BaseActivityLogger::SetLogCallbackForTest(const LogCallback& callback) {
   log_callback_ = callback;
 }
 
@@ -54,13 +54,11 @@ bool BaseActivityLogger::TriggerOngoingTimerForTest() {
 BaseActivityLogger::BaseActivityLogger(const std::string& activity_name,
                                        base::TimeDelta stopped_delay,
                                        base::TimeDelta ongoing_interval)
-    : log_callback_(base::Bind(&LogMessage)),
+    : log_callback_(base::BindRepeating(&LogMessage)),
       clock_(new Clock()),
       activity_name_(activity_name),
       stopped_delay_(stopped_delay),
       ongoing_interval_(ongoing_interval) {}
-
-BaseActivityLogger::~BaseActivityLogger() {}
 
 std::string BaseActivityLogger::GetDelaySuffix(
     base::TimeTicks timestamp) const {
@@ -79,8 +77,6 @@ PeriodicActivityLogger::PeriodicActivityLogger(const std::string& activity_name,
   // the ongoing message being logged constantly.
   CHECK(ongoing_interval_.is_zero() || ongoing_interval_ > stopped_delay_);
 }
-
-PeriodicActivityLogger::~PeriodicActivityLogger() {}
 
 void PeriodicActivityLogger::OnActivityReported() {
   last_report_time_ = clock_->GetCurrentTime();
@@ -116,8 +112,6 @@ StartStopActivityLogger::StartStopActivityLogger(
     base::TimeDelta stopped_delay,
     base::TimeDelta ongoing_interval)
     : BaseActivityLogger(activity_name, stopped_delay, ongoing_interval) {}
-
-StartStopActivityLogger::~StartStopActivityLogger() {}
 
 void StartStopActivityLogger::OnActivityStarted() {
   stopped_time_ = base::TimeTicks();
@@ -168,7 +162,6 @@ OngoingStateActivityLogger::OngoingStateActivityLogger(
     base::TimeDelta ongoing_interval)
     : BaseActivityLogger(std::string(), base::TimeDelta(), ongoing_interval) {}
 
-OngoingStateActivityLogger::~OngoingStateActivityLogger() {}
 
 void OngoingStateActivityLogger::OnStateChanged(const std::string& state) {
   state_ = state;

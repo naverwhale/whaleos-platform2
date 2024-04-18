@@ -1,6 +1,9 @@
-# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Copyright 2020 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+
+# rseq should be first due to frequency and purpose to decrease nptl latency
+rseq: 1
 
 accept: 1
 accept4: 1
@@ -35,8 +38,7 @@ getdents64: 1
 geteuid32: 1
 getpeername: 1
 getpid: 1
-# Filter arg2 to disallow GRND_RANDOM (2).
-getrandom: arg2 in 0xfffffffd
+getrandom: arg2 in ~GRND_RANDOM
 getresgid32: 1
 getresuid32: 1
 getsockname: 1
@@ -63,8 +65,8 @@ lseek: 1
 lstat: 1
 lstat64: 1
 madvise: 1
-mmap2: arg2 in ~PROT_WRITE || arg2 in ~PROT_EXEC
-mprotect: arg2 in ~PROT_WRITE || arg2 in ~PROT_EXEC
+mmap2: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 munmap: 1
 nanosleep: 1
 open: 1
@@ -98,6 +100,7 @@ sigaltstack: 1
 sigreturn: 1
 socket: arg0 == AF_UNIX || arg0 == AF_NETLINK || arg0 == AF_INET
 stat64: 1
+statfs64: 1
 statx: 1
 tgkill: 1
 timerfd_create: 1

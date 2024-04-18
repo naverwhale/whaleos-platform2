@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,15 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 
 #include "shill/event_dispatcher.h"
 #include "shill/ipconfig.h"
 #include "shill/mockable.h"
-#include "shill/process_manager.h"
+#include "shill/net/process_manager.h"
 #include "shill/service.h"
 
 namespace shill {
@@ -47,7 +48,8 @@ class VPNConnection {
     using OnConnectedCallback = base::RepeatingCallback<void(
         const std::string& link_name,
         int interface_index,
-        const IPConfig::Properties& ip_properties)>;
+        std::unique_ptr<IPConfig::Properties> ipv4_properties,
+        std::unique_ptr<IPConfig::Properties> ipv6_properties)>;
     // The state has been changed to kDisconnecting caused by a failure
     // unexpectedly (i.e., Disconnect() is not called).
     using OnFailureCallback = base::OnceCallback<void(Service::ConnectFailure)>;
@@ -72,7 +74,7 @@ class VPNConnection {
   // Note that we cannot guarantee that when destructor is called, the state is
   // kIdle or kStopped, so the derived class should check the state and release
   // resources (e.g., call OnDisconnect()) if needed.
-  virtual ~VPNConnection() = default;
+  virtual ~VPNConnection();
 
   void Connect();
   void Disconnect();
@@ -105,13 +107,16 @@ class VPNConnection {
   // functions.
   void NotifyConnected(const std::string& link_name,
                        int interface_index,
-                       const IPConfig::Properties& ip_properties);
+                       std::unique_ptr<IPConfig::Properties> ipv4_properties,
+                       std::unique_ptr<IPConfig::Properties> ipv6_properties);
   // Note that NotifyFailure() will also invoke OnDisconnect() on the derived
   // class (by a PostTask()), and thus the derived class don't need to do any
   // clean up other than calling this function on failures.
   mockable void NotifyFailure(Service::ConnectFailure reason,
-                              const std::string& detail);
+                              std::string_view detail);
   void NotifyStopped();
+
+  EventDispatcher* dispatcher() { return dispatcher_; }
 
  private:
   // For able to modify |state_| in the tests.

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,8 +9,9 @@
 #include <string>
 
 #include <base/files/file_path.h>
+#include <base/types/expected.h>
 
-#include "diagnostics/common/statusor.h"
+#include "diagnostics/mojom/public/cros_healthd_probe.mojom.h"
 
 namespace diagnostics {
 
@@ -29,11 +30,11 @@ class Platform {
   // only the node name, not the full path, and is assumed to lie in '/dev/'.
   virtual std::string GetRootDeviceName() const;
   // Returns size of the block device in bytes.
-  virtual StatusOr<uint64_t> GetDeviceSizeBytes(
-      const base::FilePath& dev_path) const;
+  virtual base::expected<uint64_t, ash::cros_healthd::mojom::ProbeErrorPtr>
+  GetDeviceSizeBytes(const base::FilePath& dev_path) const;
   // Returns size of a block of the block device in bytes.
-  virtual StatusOr<uint64_t> GetDeviceBlockSizeBytes(
-      const base::FilePath& dev_path) const;
+  virtual base::expected<uint64_t, ash::cros_healthd::mojom::ProbeErrorPtr>
+  GetDeviceBlockSizeBytes(const base::FilePath& dev_path) const;
 };
 
 }  // namespace diagnostics

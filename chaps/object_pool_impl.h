@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,17 +13,12 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
-#include <base/synchronization/lock.h>
-#include <base/synchronization/waitable_event.h>
-
 #include "chaps/object_store.h"
 
 namespace chaps {
 
 class ChapsFactory;
 class HandleGenerator;
-class ObjectImporter;
 class SlotPolicy;
 
 // Key: Object handle.
@@ -42,8 +37,7 @@ class ObjectPoolImpl : public ObjectPool {
   ObjectPoolImpl(ChapsFactory* factory,
                  HandleGenerator* handle_generator,
                  SlotPolicy* slot_policy,
-                 ObjectStore* store,
-                 ObjectImporter* importer);
+                 ObjectStore* store);
   ObjectPoolImpl(const ObjectPoolImpl&) = delete;
   ObjectPoolImpl& operator=(const ObjectPoolImpl&) = delete;
 
@@ -62,6 +56,8 @@ class ObjectPoolImpl : public ObjectPool {
   Object* GetModifiableObject(const Object* object) override;
   Result Flush(const Object* object) override;
   bool IsPrivateLoaded() override;
+  bool IsValid() override;
+  void Invalidate() override;
 
  private:
   Result AddObject(Object* object, bool from_external_source);
@@ -82,10 +78,7 @@ class ObjectPoolImpl : public ObjectPool {
   HandleGenerator* handle_generator_;
   SlotPolicy* slot_policy_;
   std::unique_ptr<ObjectStore> store_;
-  std::unique_ptr<ObjectImporter> importer_;
   bool is_private_loaded_;
-  base::Lock lock_;
-  bool finish_import_required_;
 };
 
 }  // namespace chaps

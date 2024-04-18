@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,12 @@
 #define KERBEROS_KERBEROS_ADAPTOR_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
-#include <base/macros.h>
 #include <base/memory/weak_ptr.h>
-#include <base/optional.h>
 #include <brillo/dbus/async_event_sequencer.h>
 
 #include "kerberos/org.chromium.Kerberos.h"
@@ -42,9 +41,8 @@ class KerberosAdaptor : public org::chromium::KerberosAdaptor,
   ~KerberosAdaptor();
 
   // Registers the D-Bus object and interfaces.
-  void RegisterAsync(
-      const brillo::dbus_utils::AsyncEventSequencer::CompletionAction&
-          completion_callback);
+  void RegisterAsync(brillo::dbus_utils::AsyncEventSequencer::CompletionAction
+                         completion_callback);
 
   using ByteArray = std::vector<uint8_t>;
 
@@ -103,7 +101,7 @@ class KerberosAdaptor : public org::chromium::KerberosAdaptor,
   std::unique_ptr<AccountManager> manager_;
 
   // If set, overrides the directory where data is stored.
-  base::Optional<base::FilePath> storage_dir_for_testing_;
+  std::optional<base::FilePath> storage_dir_for_testing_;
 
   // If set, overrides the Krb5Interface instance passed to |manager_|.
   std::unique_ptr<Krb5Interface> krb5_for_testing_;

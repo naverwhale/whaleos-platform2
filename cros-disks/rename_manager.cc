@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,9 +8,9 @@
 
 #include <string>
 
-#include <base/bind.h>
 #include <base/containers/contains.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <brillo/process/process.h>
 
@@ -48,16 +48,16 @@ const RenameParameters* FindRenameParameters(
   return nullptr;
 }
 
-RenameErrorType LabelErrorToRenameError(LabelErrorType error_code) {
+RenameError LabelErrorToRenameError(LabelError error_code) {
   switch (error_code) {
-    case LabelErrorType::kLabelErrorNone:
-      return RENAME_ERROR_NONE;
-    case LabelErrorType::kLabelErrorUnsupportedFilesystem:
-      return RENAME_ERROR_UNSUPPORTED_FILESYSTEM;
-    case LabelErrorType::kLabelErrorLongName:
-      return RENAME_ERROR_LONG_NAME;
-    case LabelErrorType::kLabelErrorInvalidCharacter:
-      return RENAME_ERROR_INVALID_CHARACTER;
+    case LabelError::kSuccess:
+      return RenameError::kSuccess;
+    case LabelError::kUnsupportedFilesystem:
+      return RenameError::kUnsupportedFilesystem;
+    case LabelError::kLongName:
+      return RenameError::kLongName;
+    case LabelError::kInvalidCharacter:
+      return RenameError::kInvalidCharacter;
   }
 }
 
@@ -71,22 +71,20 @@ RenameManager::RenameManager(Platform* platform,
 
 RenameManager::~RenameManager() = default;
 
-RenameErrorType RenameManager::StartRenaming(
-    const std::string& device_path,
-    const std::string& device_file,
-    const std::string& volume_name,
-    const std::string& filesystem_type) {
+RenameError RenameManager::StartRenaming(const std::string& device_path,
+                                         const std::string& device_file,
+                                         const std::string& volume_name,
+                                         const std::string& filesystem_type) {
   std::string source_path;
   if (!platform_->GetRealPath(device_path, &source_path) ||
       !CanRename(source_path)) {
     LOG(WARNING) << "Device with path " << quote(device_path)
                  << " is not allowed for renaming";
-    return RENAME_ERROR_DEVICE_NOT_ALLOWED;
+    return RenameError::kDeviceNotAllowed;
   }
 
-  LabelErrorType label_error =
-      ValidateVolumeLabel(volume_name, filesystem_type);
-  if (label_error != LabelErrorType::kLabelErrorNone) {
+  LabelError label_error = ValidateVolumeLabel(volume_name, filesystem_type);
+  if (label_error != LabelError::kSuccess) {
     return LabelErrorToRenameError(label_error);
   }
 
@@ -95,13 +93,13 @@ RenameErrorType RenameManager::StartRenaming(
   if (!base::PathExists(base::FilePath(parameters->program_path))) {
     LOG(WARNING) << "Cannot find a rename program for filesystem "
                  << quote(filesystem_type);
-    return RENAME_ERROR_RENAME_PROGRAM_NOT_FOUND;
+    return RenameError::kRenameProgramNotFound;
   }
 
   if (base::Contains(rename_process_, device_path)) {
     LOG(WARNING) << "Device " << quote(device_path)
                  << " is already being renamed";
-    return RENAME_ERROR_DEVICE_BEING_RENAMED;
+    return RenameError::kDeviceBeingRenamed;
   }
 
   uid_t rename_user_id;
@@ -110,7 +108,7 @@ RenameErrorType RenameManager::StartRenaming(
       !platform_->GetGroupId(parameters->rename_group, &rename_group_id)) {
     LOG(WARNING) << "Cannot find a user with name " << quote(kRenameUser)
                  << " or a group with name " << quote(parameters->rename_group);
-    return RENAME_ERROR_INTERNAL;
+    return RenameError::kInternalError;
   }
 
   // TODO(klemenko): Further restrict the capabilities
@@ -141,28 +139,28 @@ RenameErrorType RenameManager::StartRenaming(
                  << " as filesystem " << quote(filesystem_type)
                  << " and volume name " << quote(volume_name);
     rename_process_.erase(device_path);
-    return RENAME_ERROR_RENAME_PROGRAM_FAILED;
+    return RenameError::kRenameProgramFailed;
   }
 
   process_reaper_->WatchForChild(
       FROM_HERE, process->pid(),
       base::BindOnce(&RenameManager::OnRenameProcessTerminated,
                      weak_ptr_factory_.GetWeakPtr(), device_path));
-  return RENAME_ERROR_NONE;
+  return RenameError::kSuccess;
 }
 
 void RenameManager::OnRenameProcessTerminated(const std::string& device_path,
                                               const siginfo_t& info) {
   rename_process_.erase(device_path);
-  RenameErrorType error_type = RENAME_ERROR_UNKNOWN;
+  RenameError error_type = RenameError::kUnknownError;
   switch (info.si_code) {
     case CLD_EXITED:
       if (info.si_status == 0) {
-        error_type = RENAME_ERROR_NONE;
+        error_type = RenameError::kSuccess;
         LOG(INFO) << "Process " << info.si_pid << " for renaming "
                   << quote(device_path) << " completed successfully";
       } else {
-        error_type = RENAME_ERROR_RENAME_PROGRAM_FAILED;
+        error_type = RenameError::kRenameProgramFailed;
         LOG(ERROR) << "Process " << info.si_pid << " for renaming "
                    << quote(device_path) << " exited with a status "
                    << info.si_status;
@@ -171,7 +169,7 @@ void RenameManager::OnRenameProcessTerminated(const std::string& device_path,
 
     case CLD_DUMPED:
     case CLD_KILLED:
-      error_type = RENAME_ERROR_RENAME_PROGRAM_FAILED;
+      error_type = RenameError::kRenameProgramFailed;
       LOG(ERROR) << "Process " << info.si_pid << " for renaming "
                  << quote(device_path) << " killed by a signal "
                  << info.si_status;

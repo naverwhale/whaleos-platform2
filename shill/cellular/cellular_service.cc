@@ -1,11 +1,16 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "shill/cellular/cellular_service.h"
 
+#include <optional>
+#include <string_view>
+#include <unordered_map>
+
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/containers/contains.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/stl_util.h>
@@ -15,13 +20,17 @@
 #include <base/time/time.h>
 #include <chromeos/dbus/service_constants.h>
 
+#include "dbus/shill/dbus-constants.h"
 #include "shill/adaptor_interfaces.h"
+#include "shill/cellular/apn_list.h"
 #include "shill/cellular/cellular.h"
-#include "shill/cellular/cellular_service_provider.h"
+#include "shill/cellular/cellular_consts.h"
+#include "shill/data_types.h"
 #include "shill/dbus/dbus_control.h"
+#include "shill/dbus-constants.h"
 #include "shill/manager.h"
-#include "shill/property_accessor.h"
-#include "shill/store_interface.h"
+#include "shill/store/property_accessor.h"
+#include "shill/store/store_interface.h"
 
 namespace shill {
 
@@ -36,6 +45,7 @@ static std::string ObjectID(const CellularService* c) {
 const char CellularService::kAutoConnActivating[] = "activating";
 const char CellularService::kAutoConnBadPPPCredentials[] =
     "bad PPP credentials";
+const char CellularService::kAutoConnNoDevice[] = "no device";
 const char CellularService::kAutoConnDeviceDisabled[] = "device disabled";
 const char CellularService::kAutoConnNotRegistered[] =
     "cellular not registered";
@@ -44,25 +54,23 @@ const char CellularService::kAutoConnSimUnselected[] = "SIM not selected";
 const char CellularService::kAutoConnConnectFailed[] =
     "previous connect failed";
 const char CellularService::kAutoConnInhibited[] = "inhibited";
+const char CellularService::kStorageAPN[] = "Cellular.APN";
 const char CellularService::kStorageIccid[] = "Cellular.Iccid";
 const char CellularService::kStorageImsi[] = "Cellular.Imsi";
 const char CellularService::kStoragePPPUsername[] = "Cellular.PPP.Username";
 const char CellularService::kStoragePPPPassword[] = "Cellular.PPP.Password";
 const char CellularService::kStorageSimCardId[] = "Cellular.SimCardId";
 const char CellularService::kStorageAllowRoaming[] = "Cellular.AllowRoaming";
+const char CellularService::kStorageCustomApnList[] = "Cellular.CustomAPNList";
 
 namespace {
 
 const char kGenericServiceNamePrefix[] = "MobileNetwork";
 
-const char kStorageAPN[] = "Cellular.APN";
 const char kStorageLastGoodAPN[] = "Cellular.LastGoodAPN";
-
-const char kApnVersionProperty[] = "version";
-const int kCurrentApnCacheVersion = 2;
-
-constexpr base::TimeDelta kAutoConnectFailedTime =
-    base::TimeDelta::FromSeconds(20);
+const char kStorageLastConnectedDefaultAPN[] =
+    "Cellular.LastConnectedDefaultAPN";
+const char kStorageLastConnectedAttachAPN[] = "Cellular.LastConnectedAttachAPN";
 
 bool GetNonEmptyField(const Stringmap& stringmap,
                       const std::string& fieldname,
@@ -101,6 +109,13 @@ bool LoadApnField(const StoreInterface* storage,
   return false;
 }
 
+bool ApnFieldExists(const StoreInterface* storage,
+                    const std::string& storage_group,
+                    const std::string& keytag,
+                    const std::string& apntag) {
+  return storage->GetString(storage_group, keytag + "." + apntag, NULL);
+}
+
 void LoadApn(const StoreInterface* storage,
              const std::string& storage_group,
              const std::string& keytag,
@@ -109,24 +124,57 @@ void LoadApn(const StoreInterface* storage,
   if (keytag == kStorageLastGoodAPN) {
     // Ignore LastGoodAPN that is too old.
     int version;
-    if (!LoadApnField(storage, storage_group, keytag, kApnVersionProperty,
-                      apn_info) ||
-        !base::StringToInt((*apn_info)[kApnVersionProperty], &version) ||
-        version < kCurrentApnCacheVersion) {
+    if (!LoadApnField(storage, storage_group, keytag,
+                      cellular::kApnVersionProperty, apn_info) ||
+        !base::StringToInt((*apn_info)[cellular::kApnVersionProperty],
+                           &version) ||
+        version < cellular::kCurrentApnCacheVersion) {
+      if (ApnFieldExists(storage, storage_group, keytag, kApnProperty)) {
+        LOG(INFO) << __func__ << ": APN version mismatch: " << keytag;
+      }
       return;
     }
   }
-
-  if (!LoadApnField(storage, storage_group, keytag, kApnProperty, apn_info))
+  if (!ApnFieldExists(storage, storage_group, keytag, kApnProperty)) {
+    LOG(INFO) << __func__
+              << ": APN field not previously stored in cache: " << keytag;
     return;
-  if (keytag == kStorageAPN)
+  }
+  if (!LoadApnField(storage, storage_group, keytag, kApnProperty, apn_info)) {
+    LOG(ERROR) << __func__ << ": Failed to load APN field: " << keytag;
+    return;
+  }
+  if (keytag == CellularService::kStorageAPN)
     FetchDetailsFromApnList(apn_list, apn_info);
   LoadApnField(storage, storage_group, keytag, kApnUsernameProperty, apn_info);
   LoadApnField(storage, storage_group, keytag, kApnPasswordProperty, apn_info);
   LoadApnField(storage, storage_group, keytag, kApnAuthenticationProperty,
                apn_info);
   LoadApnField(storage, storage_group, keytag, kApnIpTypeProperty, apn_info);
-  LoadApnField(storage, storage_group, keytag, kApnAttachProperty, apn_info);
+  LoadApnField(storage, storage_group, keytag, kApnTypesProperty, apn_info);
+  // b/251512775: kApnAttachProperty used to be used to indicate that an APN
+  // was an Attach APN. That property was replaced by |kApnTypesProperty| in
+  // 2022Q4, but shill needs to migrate the old property into kApnTypesProperty
+  // for devices updating from old OS versions.
+  if (!base::Contains(*apn_info, kApnTypesProperty)) {
+    LoadApnField(storage, storage_group, keytag, kApnAttachProperty, apn_info);
+    if (base::Contains(*apn_info, kApnAttachProperty)) {
+      (*apn_info)[kApnTypesProperty] =
+          ApnList::JoinApnTypes({kApnTypeDefault, kApnTypeIA});
+      apn_info->erase(kApnAttachProperty);
+    } else {
+      (*apn_info)[kApnTypesProperty] = ApnList::JoinApnTypes({kApnTypeDefault});
+    }
+  }
+  // TODO(b/251512775): Chrome still uses the "attach" property in ONC. The
+  // reason why kApnAttachProperty is deleted a few lines before, just to be
+  // added again, is to keep the migration logic separate from the ONC issue.
+  // The ONC might be updated before the old UI is obsoleted.
+  if (ApnList::IsAttachApn(*apn_info))
+    (*apn_info)[kApnAttachProperty] = kApnAttachProperty;
+
+  LoadApnField(storage, storage_group, keytag, cellular::kApnVersionProperty,
+               apn_info);
 }
 
 void SaveApnField(StoreInterface* storage,
@@ -152,8 +200,9 @@ void SaveApn(StoreInterface* storage,
   SaveApnField(storage, storage_group, apn_info, keytag,
                kApnAuthenticationProperty);
   SaveApnField(storage, storage_group, apn_info, keytag, kApnIpTypeProperty);
-  SaveApnField(storage, storage_group, apn_info, keytag, kApnAttachProperty);
-  SaveApnField(storage, storage_group, apn_info, keytag, kApnVersionProperty);
+  SaveApnField(storage, storage_group, apn_info, keytag, kApnTypesProperty);
+  SaveApnField(storage, storage_group, apn_info, keytag,
+               cellular::kApnVersionProperty);
 }
 
 }  // namespace
@@ -181,6 +230,9 @@ CellularService::CellularService(Manager* manager,
   store->RegisterConstString(kActivationStateProperty, &activation_state_);
   HelpRegisterDerivedStringmap(kCellularApnProperty, &CellularService::GetApn,
                                &CellularService::SetApn);
+  HelpRegisterDerivedStringmaps(
+      kCellularCustomApnListProperty, &CellularService::GetCustomApnList,
+      &CellularService::SetCustomApnList, &CellularService::ClearCustomApnList);
   store->RegisterConstString(kIccidProperty, &iccid_);
   store->RegisterConstString(kImsiProperty, &imsi_);
   store->RegisterConstString(kEidProperty, &eid_);
@@ -188,6 +240,10 @@ CellularService::CellularService(Manager* manager,
                                 &last_good_apn_info_);
   store->RegisterConstStringmap(kCellularLastAttachApnProperty,
                                 &last_attach_apn_info_);
+  store->RegisterConstStringmap(kCellularLastConnectedDefaultApnProperty,
+                                &last_connected_default_apn_info_);
+  store->RegisterConstStringmap(kCellularLastConnectedAttachApnProperty,
+                                &last_connected_attach_apn_info_);
   store->RegisterConstString(kNetworkTechnologyProperty, &network_technology_);
   HelpRegisterDerivedBool(kOutOfCreditsProperty,
                           &CellularService::IsOutOfCredits, nullptr);
@@ -197,12 +253,9 @@ CellularService::CellularService(Manager* manager,
   store->RegisterConstString(kUsageURLProperty, &usage_url_);
   store->RegisterString(kCellularPPPUsernameProperty, &ppp_username_);
   store->RegisterWriteOnlyString(kCellularPPPPasswordProperty, &ppp_password_);
-  mutable_store()->RegisterDerivedBool(
-      kCellularAllowRoamingProperty,
-      BoolAccessor(new CustomAccessor<CellularService, bool>(
-          this, &CellularService::GetAllowRoaming,
-          &CellularService::SetAllowRoaming,
-          &CellularService::ClearAllowRoaming)));
+  HelpRegisterDerivedBool(kCellularAllowRoamingProperty,
+                          &CellularService::GetAllowRoaming,
+                          &CellularService::SetAllowRoaming);
   storage_identifier_ = GetDefaultStorageIdentifier();
   SLOG(this, 1) << "CellularService Created: " << log_name();
 }
@@ -330,10 +383,16 @@ bool CellularService::Load(const StoreInterface* storage) {
     friendly_name_ = friendly_name;
   }
 
-  const Stringmaps& apn_list =
-      cellular() ? cellular()->apn_list() : Stringmaps();
+  const Stringmaps& apn_list = cellular_ ? cellular_->apn_list() : Stringmaps();
   LoadApn(storage, id, kStorageAPN, apn_list, &apn_info_);
   LoadApn(storage, id, kStorageLastGoodAPN, apn_list, &last_good_apn_info_);
+  LoadApn(storage, id, kStorageLastConnectedDefaultAPN, apn_list,
+          &last_connected_default_apn_info_);
+  LoadApn(storage, id, kStorageLastConnectedAttachAPN, apn_list,
+          &last_connected_attach_apn_info_);
+  Stringmaps custom_apn_list;
+  if (storage->GetStringmaps(id, kStorageCustomApnList, &custom_apn_list))
+    custom_apn_list_ = std::move(custom_apn_list);
 
   const std::string old_username = ppp_username_;
   const std::string old_password = ppp_password_;
@@ -344,22 +403,13 @@ bool CellularService::Load(const StoreInterface* storage) {
     SetState(kStateIdle);
   }
 
-  // If Chrome called SetAllowRoaming, we would have persisted the preference.
-  // If Chrome has never called SetAllowRoaming, we do not persist
-  // allow_roaming_
-  bool allow_roaming;
-  if (storage->GetBool(id, kStorageAllowRoaming, &allow_roaming))
-    allow_roaming_ = allow_roaming;
+  storage->GetBool(id, kStorageAllowRoaming, &allow_roaming_);
 
   return true;
 }
 
-bool CellularService::Unload() {
-  Service::Unload();
-  return manager()->cellular_service_provider()->OnServiceUnloaded(this);
-}
-
 bool CellularService::Save(StoreInterface* storage) {
+  SLOG(this, 2) << __func__;
   // Save properties common to all Services.
   if (!Service::Save(storage))
     return false;
@@ -371,13 +421,20 @@ bool CellularService::Save(StoreInterface* storage) {
 
   SaveApn(storage, id, GetUserSpecifiedApn(), kStorageAPN);
   SaveApn(storage, id, GetLastGoodApn(), kStorageLastGoodAPN);
+  SaveApn(storage, id, GetLastConnectedDefaultApn(),
+          kStorageLastConnectedDefaultAPN);
+  SaveApn(storage, id, GetLastConnectedAttachApn(),
+          kStorageLastConnectedAttachAPN);
+
+  if (custom_apn_list_.has_value())
+    storage->SetStringmaps(id, kStorageCustomApnList, custom_apn_list_.value());
+  else
+    storage->DeleteKey(id, kStorageCustomApnList);
+
   SaveStringOrClear(storage, id, kStoragePPPUsername, ppp_username_);
   SaveStringOrClear(storage, id, kStoragePPPPassword, ppp_password_);
 
-  if (allow_roaming_.has_value())
-    storage->SetBool(id, kStorageAllowRoaming, allow_roaming_.value());
-  else
-    storage->DeleteKey(id, kStorageAllowRoaming);
+  storage->SetBool(id, kStorageAllowRoaming, allow_roaming_);
 
   return true;
 }
@@ -492,7 +549,7 @@ void CellularService::SetRoamingState(const std::string& state) {
 bool CellularService::IsRoamingAllowed() {
   if (cellular_ && cellular_->provider_requires_roaming())
     return true;
-  return GetAllowRoaming() && cellular_ && cellular_->policy_allow_roaming();
+  return allow_roaming_ && cellular_ && cellular_->policy_allow_roaming();
 }
 
 bool CellularService::IsRoamingRuleViolated() {
@@ -500,10 +557,6 @@ bool CellularService::IsRoamingRuleViolated() {
     return false;
 
   return !IsRoamingAllowed();
-}
-
-bool CellularService::GetAllowRoaming() {
-  return allow_roaming_.value_or(cellular_ && cellular_->allow_roaming());
 }
 
 Stringmap* CellularService::GetUserSpecifiedApn() {
@@ -522,8 +575,11 @@ Stringmap* CellularService::GetLastGoodApn() {
 
 void CellularService::SetLastGoodApn(const Stringmap& apn_info) {
   last_good_apn_info_ = apn_info;
+  last_connected_default_apn_info_ = apn_info;
   adaptor()->EmitStringmapChanged(kCellularLastGoodApnProperty,
                                   last_good_apn_info_);
+  adaptor()->EmitStringmapChanged(kCellularLastConnectedDefaultApnProperty,
+                                  last_connected_default_apn_info_);
 }
 
 void CellularService::ClearLastGoodApn() {
@@ -549,6 +605,18 @@ void CellularService::ClearLastAttachApn() {
   last_attach_apn_info_.clear();
   adaptor()->EmitStringmapChanged(kCellularLastAttachApnProperty,
                                   last_attach_apn_info_);
+}
+
+void CellularService::SetLastConnectedAttachApn(const Stringmap& apn_info) {
+  last_connected_attach_apn_info_ = apn_info;
+  adaptor()->EmitStringmapChanged(kCellularLastConnectedAttachApnProperty,
+                                  last_connected_attach_apn_info_);
+}
+
+void CellularService::ClearLastConnectedAttachApn() {
+  last_connected_attach_apn_info_.clear();
+  adaptor()->EmitStringmapChanged(kCellularLastConnectedAttachApnProperty,
+                                  last_connected_attach_apn_info_);
 }
 
 void CellularService::NotifySubscriptionStateChanged(
@@ -592,8 +660,40 @@ void CellularService::OnDisconnect(Error* error, const char* reason) {
   cellular_->Disconnect(error, reason);
 }
 
+void CellularService::AutoConnect() {
+  const char* reason = nullptr;
+  if (!IsAutoConnectable(&reason)) {
+    if (reason == kAutoConnTechnologyNotAutoConnectable ||
+        reason == kAutoConnConnected) {
+      SLOG(this, 3) << "Suppressed autoconnect to " << log_name()
+                    << " Reason: " << reason;
+    } else if (reason == kAutoConnBusy ||
+               reason == kAutoConnMediumUnavailable) {
+      SLOG(this, 1) << "Suppressed autoconnect to " << log_name()
+                    << " Reason: " << reason;
+    } else if (reason == kAutoConnNotRegistered) {
+      SLOG(this, 1) << "Skip autoconnect attempt to " << log_name()
+                    << " Reason: " << reason;
+      ThrottleFutureAutoConnects();
+    } else {
+      LOG(INFO) << "Suppressed autoconnect to " << log_name()
+                << " Reason: " << reason;
+    }
+    return;
+  }
+
+  Error error;
+  LOG(INFO) << "Auto-connecting to " << log_name();
+  ThrottleFutureAutoConnects();
+  Connect(&error, __func__);
+}
+
 bool CellularService::IsAutoConnectable(const char** reason) const {
-  if (!cellular_ || !cellular_->enabled()) {
+  if (!cellular_) {
+    *reason = kAutoConnNoDevice;
+    return false;
+  }
+  if (!cellular_->enabled()) {
     *reason = kAutoConnDeviceDisabled;
     return false;
   }
@@ -636,14 +736,6 @@ bool CellularService::IsAutoConnectable(const char** reason) const {
     *reason = kAutoConnBadPPPCredentials;
     return false;
   }
-  if (failure() == kFailureConnect) {
-    base::Optional<base::TimeDelta> failed_time = GetTimeSinceFailed();
-    if (failed_time && *failed_time < kAutoConnectFailedTime) {
-      // For Cellular, do not immediately auto connect after a failure.
-      *reason = kAutoConnConnectFailed;
-      return false;
-    }
-  }
   if (out_of_credits_) {
     *reason = kAutoConnOutOfCredits;
     return false;
@@ -651,8 +743,12 @@ bool CellularService::IsAutoConnectable(const char** reason) const {
   return true;
 }
 
-uint64_t CellularService::GetMaxAutoConnectCooldownTimeMilliseconds() const {
-  return 30 * 60 * 1000;  // 30 minutes
+base::TimeDelta CellularService::GetMinAutoConnectCooldownTime() const {
+  return base::Seconds(10);
+}
+
+base::TimeDelta CellularService::GetMaxAutoConnectCooldownTime() const {
+  return base::Minutes(30);
 }
 
 bool CellularService::IsDisconnectable(Error* error) const {
@@ -684,7 +780,7 @@ RpcIdentifier CellularService::GetDeviceRpcId(Error* error) const {
 }
 
 void CellularService::HelpRegisterDerivedString(
-    const std::string& name,
+    std::string_view name,
     std::string (CellularService::*get)(Error* error),
     bool (CellularService::*set)(const std::string& value, Error* error)) {
   mutable_store()->RegisterDerivedString(
@@ -693,7 +789,7 @@ void CellularService::HelpRegisterDerivedString(
 }
 
 void CellularService::HelpRegisterDerivedStringmap(
-    const std::string& name,
+    std::string_view name,
     Stringmap (CellularService::*get)(Error* error),
     bool (CellularService::*set)(const Stringmap& value, Error* error)) {
   mutable_store()->RegisterDerivedStringmap(
@@ -701,8 +797,18 @@ void CellularService::HelpRegisterDerivedStringmap(
                 this, get, set)));
 }
 
+void CellularService::HelpRegisterDerivedStringmaps(
+    std::string_view name,
+    Stringmaps (CellularService::*get)(Error* error),
+    bool (CellularService::*set)(const Stringmaps& value, Error* error),
+    void (CellularService::*clear)(Error*)) {
+  mutable_store()->RegisterDerivedStringmaps(
+      name, StringmapsAccessor(new CustomAccessor<CellularService, Stringmaps>(
+                this, get, set, clear)));
+}
+
 void CellularService::HelpRegisterDerivedBool(
-    const std::string& name,
+    std::string_view name,
     bool (CellularService::*get)(Error* error),
     bool (CellularService::*set)(const bool&, Error*)) {
   mutable_store()->RegisterDerivedBool(
@@ -724,11 +830,9 @@ std::string CellularService::CalculateActivationType(Error* error) {
   return GetActivationTypeString();
 }
 
-Stringmap CellularService::GetApn(Error* /*error*/) {
-  return apn_info_;
-}
-
-bool CellularService::SetApn(const Stringmap& value, Error* error) {
+Stringmap CellularService::ValidateCustomApn(const Stringmap& value,
+                                             bool using_apn_revamp_ui) {
+  DCHECK(cellular_);
   // Only copy in the fields we care about, and validate the contents.
   // If the "apn" field is missing or empty, the APN is cleared.
   std::string new_apn;
@@ -737,7 +841,7 @@ bool CellularService::SetApn(const Stringmap& value, Error* error) {
     new_apn_info[kApnProperty] = new_apn;
 
     // Fetch details from the APN database first.
-    FetchDetailsFromApnList(cellular()->apn_list(), &new_apn_info);
+    FetchDetailsFromApnList(cellular_->apn_list(), &new_apn_info);
 
     // If this is a user-entered APN, the one or more of the following
     // details should exist, even if they are empty.
@@ -748,36 +852,156 @@ bool CellularService::SetApn(const Stringmap& value, Error* error) {
       new_apn_info[kApnPasswordProperty] = str;
     if (GetNonEmptyField(value, kApnAuthenticationProperty, &str))
       new_apn_info[kApnAuthenticationProperty] = str;
-    if (GetNonEmptyField(value, kApnAttachProperty, &str))
-      new_apn_info[kApnAttachProperty] = str;
-
-    new_apn_info[kApnVersionProperty] =
-        base::NumberToString(kCurrentApnCacheVersion);
+    if (using_apn_revamp_ui) {
+      if (GetNonEmptyField(value, kApnTypesProperty, &str))
+        new_apn_info[kApnTypesProperty] = str;
+      if (GetNonEmptyField(value, kApnIdProperty, &str))
+        new_apn_info[kApnIdProperty] = str;
+      if (GetNonEmptyField(value, kApnSourceProperty, &str))
+        new_apn_info[kApnSourceProperty] = str;
+      if (GetNonEmptyField(value, kApnIpTypeProperty, &str))
+        new_apn_info[kApnIpTypeProperty] = str;
+    } else {
+      // TODO(b/251512775): Chrome will keep sending the "attach" value on
+      // |SetApn| until the old UI is obsoleted. Convert the attach value into
+      // |kApnTypesProperty|, and retain |kApnAttachProperty| since it's used
+      // by ONC.
+      // SetApn should not contain the key |kApnTypesProperty|.
+      if (GetNonEmptyField(value, kApnAttachProperty, &str)) {
+        new_apn_info[kApnTypesProperty] =
+            ApnList::JoinApnTypes({kApnTypeIA, kApnTypeDefault});
+        new_apn_info[kApnAttachProperty] = kApnAttachProperty;
+      } else if (!base::Contains(new_apn_info, kApnTypesProperty)) {
+        // Skip setting |kApnTypesProperty| if the value was populated from the
+        // modb.
+        new_apn_info[kApnTypesProperty] =
+            ApnList::JoinApnTypes({kApnTypeDefault});
+      }
+    }
+    new_apn_info[cellular::kApnVersionProperty] =
+        base::NumberToString(cellular::kCurrentApnCacheVersion);
   }
+  return new_apn_info;
+}
+
+Stringmap CellularService::GetApn(Error* /*error*/) {
+  return apn_info_;
+}
+
+bool CellularService::SetApn(const Stringmap& value, Error* error) {
+  if (!cellular_) {
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kOperationFailed,
+        base::StringPrintf(
+            "Failed setting user APN: %s Service %s has no device.",
+            kTypeCellular, log_name().c_str()));
+    return false;
+  }
+
+  Stringmap new_apn_info = ValidateCustomApn(value, false);
   if (apn_info_ == new_apn_info) {
     return true;
   }
   apn_info_ = new_apn_info;
   adaptor()->EmitStringmapChanged(kCellularApnProperty, apn_info_);
 
-  if (apn_info_.count(kApnAttachProperty) ||
-      last_attach_apn_info_.count(kApnAttachProperty)) {
-    // If the new APN is an 'attach APN',we need to detach and re-attach
-    // to the LTE network in order to use it.
+  bool configure_attach_apn = ApnList::IsAttachApn(apn_info_) ||
+                              ApnList::IsAttachApn(last_attach_apn_info_);
+  return CustomApnUpdated(configure_attach_apn, error);
+}
+
+bool CellularService::CustomApnUpdated(bool configure_attach_apn,
+                                       Error* error) {
+  bool is_connected = IsConnected();
+  if (is_connected) {
+    Disconnect(error, __func__);
+    if (!error->IsSuccess()) {
+      return false;
+    }
+  }
+  if (configure_attach_apn) {
     // If we were using an attach APN, and we are no longer using it, we should
-    // also re-attach to clear the attach APN in the modem.
-    cellular_->ReAttach();
+    // re-configure the attach APN to clear the attach APN in the modem.
+    cellular_->ConfigureAttachApn();
     return true;
   }
-  if (!IsConnected()) {
-    return true;
+  if (is_connected) {
+    Connect(error, __func__);
+    return error->IsSuccess();
   }
-  Disconnect(error, __func__);
-  if (!error->IsSuccess()) {
+  ResetAutoConnectCooldownTime();
+  // UpdateService to trigger AutoConnect if necessary.
+  manager()->UpdateService(this);
+  return true;
+}
+
+Stringmap* CellularService::GetLastConnectedDefaultApn() {
+  Stringmap::iterator it = last_connected_default_apn_info_.find(kApnProperty);
+  if (it == last_connected_default_apn_info_.end() || it->second.empty())
+    return nullptr;
+  return &last_connected_default_apn_info_;
+}
+
+Stringmap* CellularService::GetLastConnectedAttachApn() {
+  Stringmap::iterator it = last_connected_attach_apn_info_.find(kApnProperty);
+  if (it == last_connected_attach_apn_info_.end() || it->second.empty())
+    return nullptr;
+  return &last_connected_attach_apn_info_;
+}
+
+Stringmaps CellularService::GetCustomApnList(Error* /*error*/) {
+  SLOG(this, 2) << __func__;
+  return custom_apn_list_.value_or(Stringmaps());
+}
+
+bool CellularService::SetCustomApnList(const Stringmaps& value, Error* error) {
+  SLOG(this, 2) << __func__;
+  bool exist_attach = false;
+  Stringmaps new_apn_info_list;
+
+  if (!cellular_) {
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kOperationFailed,
+        base::StringPrintf(
+            "Failed setting user APN list: %s Service %s has no device.",
+            kTypeCellular, log_name().c_str()));
     return false;
   }
-  Connect(error, __func__);
-  return error->IsSuccess();
+
+  for (auto& apn_value : value) {
+    Stringmap new_apn_info =
+        new_apn_info_list.emplace_back(ValidateCustomApn(apn_value, true));
+    exist_attach = exist_attach || ApnList::IsAttachApn(new_apn_info);
+  }
+
+  if (custom_apn_list_.has_value() &&
+      custom_apn_list_.value() == new_apn_info_list) {
+    return true;
+  }
+  custom_apn_list_.emplace(new_apn_info_list);
+  adaptor()->EmitStringmapsChanged(kCellularCustomApnListProperty,
+                                   custom_apn_list_.value());
+
+  bool configure_attach_apn =
+      exist_attach || ApnList::IsAttachApn(last_attach_apn_info_);
+  return CustomApnUpdated(configure_attach_apn, error);
+}
+
+void CellularService::ClearCustomApnList(Error* error) {
+  SLOG(this, 2) << __func__;
+  custom_apn_list_.reset();
+  adaptor()->EmitStringmapsChanged(kCellularCustomApnListProperty,
+                                   Stringmaps());
+
+  if (!cellular_) {
+    Error::PopulateAndLog(
+        FROM_HERE, error, Error::kOperationFailed,
+        base::StringPrintf(
+            "Failed clearing user APN list: %s Service %s has no device.",
+            kTypeCellular, log_name().c_str()));
+    return;
+  }
+  CustomApnUpdated(true, error);
 }
 
 KeyValueStore CellularService::GetStorageProperties() const {
@@ -786,6 +1010,7 @@ KeyValueStore CellularService::GetStorageProperties() const {
   properties.Set<std::string>(kStorageIccid, iccid_);
   return properties;
 }
+
 std::string CellularService::GetDefaultStorageIdentifier() const {
   if (iccid_.empty()) {
     LOG(ERROR) << "CellularService created with empty ICCID.";
@@ -817,11 +1042,7 @@ bool CellularService::SetAllowRoaming(const bool& value, Error* error) {
 }
 
 bool CellularService::GetAllowRoaming(Error* /*error*/) {
-  return GetAllowRoaming();
-}
-
-void CellularService::ClearAllowRoaming(Error* /*error*/) {
-  allow_roaming_.reset();
+  return allow_roaming_;
 }
 
 }  // namespace shill

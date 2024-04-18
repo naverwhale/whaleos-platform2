@@ -1,22 +1,22 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "authpolicy/samba_helper.h"
 
 #include <cstring>
+#include <iterator>
 #include <vector>
 
 #include <base/check.h>
 #include <base/check_op.h>
-#include <base/guid.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/utf_string_conversion_utils.h>
 #include <base/system/sys_info.h>
+#include <base/uuid.h>
 #include <crypto/random.h>
 
 #include "authpolicy/anonymizer.h"
@@ -92,7 +92,7 @@ const char* const kGpFlagsStr[] = {
     "3 GPFLAGS_ALL_DISABLED",
 };
 
-constexpr char kKerberosParam[] = "--kerberos";
+constexpr char kKerberosParam[] = "--use-kerberos=required";
 constexpr char kConfigParam[] = "--configfile";
 constexpr char kDebugParam[] = "--debuglevel";
 constexpr char kCommandParam[] = "--command";
@@ -185,7 +185,7 @@ bool ParseGpoVersion(const std::string& str, uint32_t* version) {
 }
 
 bool ParseGpFlags(const std::string& str, int* gp_flags) {
-  for (int flag = 0; flag < static_cast<int>(base::size(kGpFlagsStr)); ++flag) {
+  for (int flag = 0; flag < static_cast<int>(std::size(kGpFlagsStr)); ++flag) {
     if (str == kGpFlagsStr[flag]) {
       *gp_flags = flag;
       return true;
@@ -200,15 +200,14 @@ bool Contains(const std::string& str, const std::string& substr) {
 
 std::string GuidToOctetString(const std::string& guid) {
   std::string octet_str;
-  if (!base::IsValidGUID(guid))
+  if (!base::Uuid::ParseCaseInsensitive(guid).is_valid())
     return octet_str;
   DCHECK_EQ(kGuidSize, guid.size());
 
   octet_str.assign(kOctetSize, '\\');
-  for (size_t n = 0; n < base::size(octet_pos_map); ++n) {
+  for (const auto& pos : octet_pos_map) {
     for (int hex_digit = 0; hex_digit < 2; ++hex_digit) {
-      octet_str.at(octet_pos_map[n][1] + hex_digit) =
-          toupper(guid.at(octet_pos_map[n][0] + hex_digit));
+      octet_str.at(pos[1] + hex_digit) = toupper(guid.at(pos[0] + hex_digit));
     }
   }
 
@@ -221,10 +220,9 @@ std::string OctetStringToGuidForTesting(const std::string& octet_str) {
     return guid;
 
   guid.assign(kGuidSize, '-');
-  for (size_t n = 0; n < base::size(octet_pos_map); ++n) {
+  for (const auto& pos : octet_pos_map) {
     for (int hex_digit = 0; hex_digit < 2; ++hex_digit) {
-      guid.at(octet_pos_map[n][0] + hex_digit) =
-          tolower(octet_str.at(octet_pos_map[n][1] + hex_digit));
+      guid.at(pos[0] + hex_digit) = tolower(octet_str.at(pos[1] + hex_digit));
     }
   }
   return guid;

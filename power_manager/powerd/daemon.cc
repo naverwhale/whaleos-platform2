@@ -1,56 +1,64 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "power_manager/powerd/daemon.h"
 
+#include <fcntl.h>
 #include <inttypes.h>
 
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <utility>
 
-#include <base/bind.h>
+#include <brillo/whaleos_util.h>
+
 #include <base/check.h>
 #include <base/check_op.h>
 #include <base/files/file_util.h>
 #include <base/format_macros.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/system/sys_info.h>
+#include <base/task/sequenced_task_runner.h>
 #include <base/threading/platform_thread.h>
+#include <base/time/time.h>
+#include <brillo/files/file_util.h>
 #include <chromeos/dbus/service_constants.h>
+#include <chromeos/mojo/service_constants.h>
 #include <chromeos/ec/ec_commands.h>
+#include <cros_config/cros_config.h>
 #include <dbus/bus.h>
 #include <dbus/message.h>
+#include <libec/ec_command.h>
+#include <libec/charge_control_set_command.h>
+#include <libec/charge_current_limit_set_command.h>
 
 #include "power_manager/common/activity_logger.h"
 #include "power_manager/common/battery_percentage_converter.h"
+#include "power_manager/common/metrics_constants.h"
 #include "power_manager/common/metrics_sender.h"
 #include "power_manager/common/power_constants.h"
 #include "power_manager/common/prefs.h"
+#include "power_manager/common/tracing.h"
 #include "power_manager/common/util.h"
-#if USE_BUFFET
-#include "power_manager/powerd/buffet/command_handlers.h"
-#endif
 #include "power_manager/powerd/daemon_delegate.h"
 #include "power_manager/powerd/metrics_collector.h"
 #include "power_manager/powerd/policy/backlight_controller.h"
 #include "power_manager/powerd/policy/input_device_controller.h"
-#include "power_manager/powerd/policy/keyboard_backlight_controller.h"
 #include "power_manager/powerd/policy/shutdown_from_suspend.h"
 #include "power_manager/powerd/policy/state_controller.h"
 #include "power_manager/powerd/policy/thermal_event_handler.h"
 #include "power_manager/powerd/system/acpi_wakeup_helper_interface.h"
 #include "power_manager/powerd/system/ambient_light_sensor_manager_interface.h"
-#if USE_IIOSERVICE
-#include "power_manager/powerd/system/ambient_light_sensor_manager_mojo.h"
-#endif  // USE_IIOSERVICE
-#include "power_manager/powerd/system/ambient_light_sensor_watcher.h"
+#include "power_manager/powerd/system/ambient_light_sensor_watcher_interface.h"
+#include "power_manager/powerd/system/ambient_light_sensor_watcher_mojo.h"
 #include "power_manager/powerd/system/arc_timer_manager.h"
 #include "power_manager/powerd/system/audio_client_interface.h"
 #include "power_manager/powerd/system/backlight_interface.h"
@@ -61,7 +69,6 @@
 #include "power_manager/powerd/system/dbus_wrapper.h"
 #include "power_manager/powerd/system/display/display_power_setter.h"
 #include "power_manager/powerd/system/display/display_watcher.h"
-#include "power_manager/powerd/system/event_device_interface.h"
 #include "power_manager/powerd/system/external_ambient_light_sensor_factory_interface.h"
 #include "power_manager/powerd/system/input_watcher_interface.h"
 #include "power_manager/powerd/system/lockfile_checker.h"
@@ -72,12 +79,13 @@
 #include "power_manager/powerd/system/suspend_freezer.h"
 #include "power_manager/powerd/system/thermal/thermal_device.h"
 #include "power_manager/powerd/system/udev.h"
+#include "power_manager/powerd/system/usb_backlight.h"
 #include "power_manager/powerd/system/user_proximity_watcher_interface.h"
 #include "power_manager/powerd/system/wake_on_dp_configurator.h"
 #include "power_manager/powerd/system/wakeup_source_identifier.h"
-#include "power_manager/powerd/system/wilco_charge_controller_helper.h"
 #include "power_manager/proto_bindings/idle.pb.h"
 #include "power_manager/proto_bindings/policy.pb.h"
+#include "power_manager/proto_bindings/user_charging_event.pb.h"
 
 namespace power_manager {
 namespace {
@@ -106,23 +114,22 @@ const char kSessionStarted[] = "started";
 // After noticing that power management is overridden while suspending, wait up
 // to this long for the lockfile(s) to be removed before reporting a suspend
 // failure. The event loop is blocked during this period.
-constexpr base::TimeDelta kSuspendLockfileTimeout =
-    base::TimeDelta::FromMilliseconds(500);
+constexpr base::TimeDelta kSuspendLockfileTimeout = base::Milliseconds(500);
 
 // Interval between successive polls during kSuspendLockfileTimeout.
 constexpr base::TimeDelta kSuspendLockfilePollInterval =
-    base::TimeDelta::FromMilliseconds(100);
+    base::Milliseconds(100);
 
 // Interval between attempts to retry shutting the system down while power
 // management is overridden, in seconds.
-constexpr base::TimeDelta kShutdownLockfileRetryInterval =
-    base::TimeDelta::FromSeconds(5);
+constexpr base::TimeDelta kShutdownLockfileRetryInterval = base::Seconds(5);
 
 // Maximum amount of time to wait for responses to D-Bus method calls to other
 // processes.
-const int kSessionManagerDBusTimeoutMs = 3000;
-constexpr base::TimeDelta kTpmManagerdDBusTimeout =
-    base::TimeDelta::FromMinutes(2);
+constexpr base::TimeDelta kSessionManagerDBusTimeout = base::Seconds(3);
+constexpr base::TimeDelta kTpmManagerdDBusTimeout = base::Minutes(2);
+constexpr base::TimeDelta kResourceManagerDBusTimeout = base::Seconds(3);
+constexpr base::TimeDelta kPrivacyScreenServiceDBusTimeoutMs = base::Seconds(3);
 
 // Interval between log messages while user, audio, or video activity is
 // ongoing, in seconds.
@@ -140,14 +147,44 @@ const int kLogUserActivityStoppedDelaySec = 20;
 // turned off before the hover-off event that triggered it is logged.
 const int64_t kLogHoveringStoppedDelaySec = 20;
 
+// Domain for D-Bus error messages.
+const char kErrorDomain[] = "powerd";
+
+// Type for D-Bus error messages.
+const char kInternalError[] = "internal_error";
+
+// Cros Config path to search in for the PSU type.
+const char kHardwareProperties[] = "/hardware-properties";
+
+// Cros Config property to fetch to see if the system has a battery (not
+// counting back-up power supplies for short power outages).
+const char kPSUType[] = "psu-type";
+
+// PSU Type for Cros Config that refers to a system that is designed to run off
+// the battery as a primary use case.
+const char kBattery[] = "battery";
+
+// When we're making sync calls to the Adaptive Charging ML Service, use a
+// shorter timeout.
+const int kAdaptiveChargingSyncDBusTimeoutMs = 3000;
+
+#if USE_IIOSERVICE
+constexpr base::TimeDelta kReconnectServiceManagerDelay = base::Seconds(1);
+#endif  // USE_IIOSERVICE
+
+// MCU type for Prism in CrOS config
+const char kPrismRgbController[] = "prism_rgb_controller";
+
 // Passes |method_call| to |handler| and passes the response to
 // |response_sender|. If |handler| returns NULL, an empty response is
 // created and sent.
 void HandleSynchronousDBusMethodCall(
-    base::Callback<std::unique_ptr<dbus::Response>(dbus::MethodCall*)> handler,
+    base::OnceCallback<std::unique_ptr<dbus::Response>(dbus::MethodCall*)>
+        handler,
     dbus::MethodCall* method_call,
     dbus::ExportedObject::ResponseSender response_sender) {
-  std::unique_ptr<dbus::Response> response = handler.Run(method_call);
+  std::unique_ptr<dbus::Response> response =
+      std::move(handler).Run(method_call);
   if (!response)
     response = dbus::Response::FromMethodCall(method_call);
   std::move(response_sender).Run(std::move(response));
@@ -158,6 +195,22 @@ std::unique_ptr<dbus::Response> CreateInvalidArgsError(
     dbus::MethodCall* method_call, std::string message) {
   return std::unique_ptr<dbus::Response>(dbus::ErrorResponse::FromMethodCall(
       method_call, DBUS_ERROR_INVALID_ARGS, message));
+}
+
+std::string PrivacyScreenStateToString(
+    const privacy_screen::PrivacyScreenSetting_PrivacyScreenState& state) {
+  switch (state) {
+    case privacy_screen::PrivacyScreenSetting_PrivacyScreenState_DISABLED:
+      return "disabled";
+    case privacy_screen::PrivacyScreenSetting_PrivacyScreenState_ENABLED:
+      return "enabled";
+    case privacy_screen::PrivacyScreenSetting_PrivacyScreenState_NOT_SUPPORTED:
+      return "not supported";
+    default:
+      NOTREACHED() << "Unhandled privacy screen state "
+                   << static_cast<int>(state);
+      return base::StringPrintf("unknown (%d)", static_cast<int>(state));
+  }
 }
 
 }  // namespace
@@ -214,9 +267,9 @@ class Daemon::StateControllerDelegate
   void LockScreen() override {
     dbus::MethodCall method_call(login_manager::kSessionManagerInterface,
                                  login_manager::kSessionManagerLockScreen);
-    daemon_->dbus_wrapper_->CallMethodSync(
-        daemon_->session_manager_dbus_proxy_, &method_call,
-        base::TimeDelta::FromMilliseconds(kSessionManagerDBusTimeoutMs));
+    daemon_->dbus_wrapper_->CallMethodSync(daemon_->session_manager_dbus_proxy_,
+                                           &method_call,
+                                           kSessionManagerDBusTimeout);
   }
 
   void Suspend(policy::StateController::ActionReason reason) override {
@@ -233,7 +286,7 @@ class Daemon::StateControllerDelegate
         daemon_->suspender_->HandleSleepButtonPressed();
         break;
     }
-    daemon_->Suspend(suspend_reason, false, 0, base::TimeDelta(),
+    daemon_->Suspend(suspend_reason, std::nullopt, base::TimeDelta(),
                      SuspendFlavor::SUSPEND_DEFAULT);
   }
 
@@ -244,9 +297,9 @@ class Daemon::StateControllerDelegate
                                  login_manager::kSessionManagerStopSession);
     dbus::MessageWriter writer(&method_call);
     writer.AppendString("");
-    daemon_->dbus_wrapper_->CallMethodSync(
-        daemon_->session_manager_dbus_proxy_, &method_call,
-        base::TimeDelta::FromMilliseconds(kSessionManagerDBusTimeoutMs));
+    daemon_->dbus_wrapper_->CallMethodSync(daemon_->session_manager_dbus_proxy_,
+                                           &method_call,
+                                           kSessionManagerDBusTimeout);
   }
 
   void ShutDown() override {
@@ -256,6 +309,20 @@ class Daemon::StateControllerDelegate
 
   void ReportUserActivityMetrics() override {
     daemon_->metrics_collector_->GenerateUserActivityMetrics();
+  }
+
+  void ReportDimEventMetrics(metrics::DimEvent sample) override {
+    daemon_->metrics_collector_->GenerateDimEventMetrics(sample);
+  }
+
+  void ReportLockEventMetrics(metrics::LockEvent sample) override {
+    daemon_->metrics_collector_->GenerateLockEventMetrics(sample);
+  }
+
+  void ReportHpsEventDurationMetrics(const std::string& event_name,
+                                     base::TimeDelta duration) override {
+    daemon_->metrics_collector_->GenerateHpsEventDurationMetrics(event_name,
+                                                                 duration);
   }
 
  private:
@@ -270,13 +337,14 @@ Daemon::Daemon(DaemonDelegate* delegate, const base::FilePath& run_dir)
       input_device_controller_(new policy::InputDeviceController),
       shutdown_from_suspend_(std::make_unique<policy::ShutdownFromSuspend>()),
       suspender_(new policy::Suspender),
+      bluetooth_controller_(std::make_unique<policy::BluetoothController>()),
       wifi_controller_(std::make_unique<policy::WifiController>()),
       cellular_controller_(std::make_unique<policy::CellularController>()),
       metrics_collector_(new metrics::MetricsCollector),
       arc_timer_manager_(std::make_unique<system::ArcTimerManager>()),
-      retry_shutdown_for_lockfile_timer_(),
       wakeup_count_path_(kDefaultWakeupCountPath),
       oobe_completed_path_(kDefaultOobeCompletedPath),
+      cros_ec_path_(ec::kCrosEcPath),
       run_dir_(run_dir),
       suspended_state_path_(kDefaultSuspendedStatePath),
       hibernated_state_path_(kDefaultHibernatedStatePath),
@@ -284,19 +352,19 @@ Daemon::Daemon(DaemonDelegate* delegate, const base::FilePath& run_dir)
       already_ran_path_(run_dir.Append(Daemon::kAlreadyRanFileName)),
       video_activity_logger_(new PeriodicActivityLogger(
           "Video activity",
-          base::TimeDelta::FromSeconds(kLogVideoActivityStoppedDelaySec),
-          base::TimeDelta::FromSeconds(kLogOngoingActivitySec))),
+          base::Seconds(kLogVideoActivityStoppedDelaySec),
+          base::Seconds(kLogOngoingActivitySec))),
       user_activity_logger_(new PeriodicActivityLogger(
           "User activity",
-          base::TimeDelta::FromSeconds(kLogUserActivityStoppedDelaySec),
-          base::TimeDelta::FromSeconds(kLogOngoingActivitySec))),
-      audio_activity_logger_(new StartStopActivityLogger(
-          "Audio activity",
-          base::TimeDelta(),
-          base::TimeDelta::FromSeconds(kLogOngoingActivitySec))),
+          base::Seconds(kLogUserActivityStoppedDelaySec),
+          base::Seconds(kLogOngoingActivitySec))),
+      audio_activity_logger_(
+          new StartStopActivityLogger("Audio activity",
+                                      base::TimeDelta(),
+                                      base::Seconds(kLogOngoingActivitySec))),
       hovering_logger_(new StartStopActivityLogger(
           "Hovering",
-          base::TimeDelta::FromSeconds(kLogHoveringStoppedDelaySec),
+          base::Seconds(kLogHoveringStoppedDelaySec),
           base::TimeDelta())),
       weak_ptr_factory_(this) {}
 
@@ -307,6 +375,8 @@ Daemon::~Daemon() {
     audio_client_->RemoveObserver(this);
   if (power_supply_)
     power_supply_->RemoveObserver(this);
+
+  battery_saver_controller_.RemoveObserver(this);
 }
 
 void Daemon::Init() {
@@ -318,16 +388,19 @@ void Daemon::Init() {
   }
 
   prefs_ = delegate_->CreatePrefs();
+  InitTracing();
   InitDBus();
 
   factory_mode_ = BoolPrefIsTrue(kFactoryModePref);
   if (factory_mode_)
     LOG(INFO) << "Factory mode enabled; most functionality will be disabled";
 
+  platform_features_ = delegate_->CreatePlatformFeatures(dbus_wrapper_.get());
   metrics_sender_ = delegate_->CreateMetricsSender();
   udev_ = delegate_->CreateUdev();
   input_watcher_ = delegate_->CreateInputWatcher(prefs_.get(), udev_.get());
-  suspend_configurator_ = delegate_->CreateSuspendConfigurator(prefs_.get());
+  suspend_configurator_ =
+      delegate_->CreateSuspendConfigurator(platform_features_, prefs_.get());
   suspend_freezer_ = delegate_->CreateSuspendFreezer(prefs_.get());
   wakeup_source_identifier_ =
       std::make_unique<system::WakeupSourceIdentifier>(udev_.get());
@@ -339,20 +412,32 @@ void Daemon::Init() {
   if (lid_state == LidState::CLOSED)
     LOG(INFO) << "Lid closed at startup";
 
+#if USE_IIOSERVICE
+  sensor_service_handler_ = delegate_->CreateSensorServiceHandler();
+  if (!disable_mojo_for_testing_)
+    ConnectToMojoServiceManager();
+
   if (BoolPrefIsTrue(kExternalAmbientLightSensorPref)) {
-    ambient_light_sensor_watcher_ =
-        delegate_->CreateAmbientLightSensorWatcher(udev_.get());
+    ambient_light_sensor_watcher_ = delegate_->CreateAmbientLightSensorWatcher(
+        sensor_service_handler_.get());
     external_ambient_light_sensor_factory_ =
-        delegate_->CreateExternalAmbientLightSensorFactory();
+        delegate_->CreateExternalAmbientLightSensorFactory(
+            static_cast<system::AmbientLightSensorWatcherMojo*>(
+                ambient_light_sensor_watcher_.get()));
   }
+#endif  // USE_IIOSERVICE
   display_watcher_ = delegate_->CreateDisplayWatcher(udev_.get());
   display_power_setter_ =
       delegate_->CreateDisplayPowerSetter(dbus_wrapper_.get());
 
+  ec_command_factory_ = delegate_->CreateEcCommandFactory();
+
   // Ignore the ALS and backlights in factory mode.
   if (!factory_mode_) {
-    light_sensor_manager_ =
-        delegate_->CreateAmbientLightSensorManager(prefs_.get());
+#if USE_IIOSERVICE
+    light_sensor_manager_ = delegate_->CreateAmbientLightSensorManager(
+        prefs_.get(), sensor_service_handler_.get());
+#endif  // USE_IIOSERVICE
 
     if (BoolPrefIsTrue(kExternalDisplayOnlyPref)) {
       display_backlight_controller_ =
@@ -372,7 +457,9 @@ void Daemon::Init() {
         display_backlight_controller_ =
             delegate_->CreateInternalBacklightController(
                 display_backlight_.get(), prefs_.get(),
-                light_sensor_manager_->GetSensorForInternalBacklight(),
+                light_sensor_manager_
+                    ? light_sensor_manager_->GetSensorForInternalBacklight()
+                    : nullptr,
                 display_power_setter_.get(), dbus_wrapper_.get(), lid_state);
       }
     }
@@ -380,29 +467,45 @@ void Daemon::Init() {
       all_backlight_controllers_.push_back(display_backlight_controller_.get());
 
     if (BoolPrefIsTrue(kHasKeyboardBacklightPref)) {
-      keyboard_backlight_ = delegate_->CreatePluggableInternalBacklight(
-          udev_.get(), kKeyboardBacklightUdevSubsystem,
-          base::FilePath(kKeyboardBacklightPath), kKeyboardBacklightPattern);
+      auto config = std::make_unique<brillo::CrosConfig>();
+      std::string value;
+
+      if (config->GetString("/keyboard", "mcutype", &value) &&
+          value == kPrismRgbController) {
+        LOG(INFO) << "Attempting to create RGB keyboard backlight";
+        keyboard_backlight_ =
+            std::make_unique<system::UsbBacklight>(udev_.get());
+      } else {
+        LOG(INFO) << "Attempting to create PluggableInternalKeyboardBacklight";
+        keyboard_backlight_ = delegate_->CreatePluggableInternalBacklight(
+            udev_.get(), kKeyboardBacklightUdevSubsystem,
+            base::FilePath(kKeyboardBacklightPath), kKeyboardBacklightPattern);
+      }
+
       keyboard_backlight_controller_ =
           delegate_->CreateKeyboardBacklightController(
               keyboard_backlight_.get(), prefs_.get(),
-              light_sensor_manager_->GetSensorForKeyboardBacklight(),
-              dbus_wrapper_.get(), display_backlight_controller_.get(),
-              lid_state, tablet_mode);
+              light_sensor_manager_
+                  ? light_sensor_manager_->GetSensorForKeyboardBacklight()
+                  : nullptr,
+              dbus_wrapper_.get(), lid_state, tablet_mode);
       all_backlight_controllers_.push_back(
           keyboard_backlight_controller_.get());
     }
   }
 
-  prefs_->GetBool(kMosysEventlogPref, &log_suspend_with_mosys_eventlog_);
+  machine_quirks_ = delegate_->CreateMachineQuirks(prefs_.get());
+  machine_quirks_->ApplyQuirksToPrefs();
+  prefs_->GetBool(kManualEventlogAddPref, &log_suspend_manually_);
   prefs_->GetBool(kSuspendToIdlePref, &suspend_to_idle_);
 
   battery_percentage_converter_ =
       BatteryPercentageConverter::CreateFromPrefs(prefs_.get());
 
   power_supply_ = delegate_->CreatePowerSupply(
-      base::FilePath(kPowerStatusPath), prefs_.get(), udev_.get(),
-      dbus_wrapper_.get(), battery_percentage_converter_.get());
+      base::FilePath(kPowerStatusPath), cros_ec_path_,
+      ec_command_factory_.get(), prefs_.get(), udev_.get(), dbus_wrapper_.get(),
+      battery_percentage_converter_.get());
   power_supply_->AddObserver(this);
   if (!power_supply_->RefreshImmediately())
     LOG(ERROR) << "Initial power supply refresh failed; brace for weirdness";
@@ -412,6 +515,16 @@ void Daemon::Init() {
                            keyboard_backlight_controller_.get(), power_status,
                            first_run_after_boot_);
 
+  // Only create the Adaptive Charging Controller for battery powered systems.
+  std::string psu_type;
+  prefs_->GetExternalString(kHardwareProperties, kPSUType, &psu_type);
+  if (psu_type == kBattery) {
+    adaptive_charging_controller_ = delegate_->CreateAdaptiveChargingController(
+        this, display_backlight_controller_.get(), input_watcher_.get(),
+        power_supply_.get(), dbus_wrapper_.get(), platform_features_,
+        prefs_.get());
+  }
+
   dark_resume_ = delegate_->CreateDarkResume(prefs_.get(),
                                              wakeup_source_identifier_.get());
 
@@ -420,7 +533,8 @@ void Daemon::Init() {
 
   suspender_->Init(this, dbus_wrapper_.get(), dark_resume_.get(),
                    display_watcher_.get(), wakeup_source_identifier_.get(),
-                   shutdown_from_suspend_.get(), prefs_.get(),
+                   shutdown_from_suspend_.get(),
+                   adaptive_charging_controller_.get(), prefs_.get(),
                    suspend_configurator_.get());
 
   input_event_handler_->Init(input_watcher_.get(), this, display_watcher_.get(),
@@ -433,16 +547,29 @@ void Daemon::Init() {
                                  ec_helper_.get(), lid_state, tablet_mode,
                                  DisplayMode::NORMAL, prefs_.get());
 
+  battery_saver_controller_.Init(*dbus_wrapper_);
+  battery_saver_controller_.AddObserver(this);
+
   const PowerSource power_source =
       power_status.line_power_on ? PowerSource::AC : PowerSource::BATTERY;
   state_controller_->Init(state_controller_delegate_.get(), prefs_.get(),
                           dbus_wrapper_.get(), power_source, lid_state);
+
+  // Check last TPM response
+  if (brillo::IsWhalebook2Model()) {
+    std::string response;
+    base::ReadFileToString(
+        base::FilePath("/sys/class/tpm/tpm0/ppi/response"), &response);
+    LOG(INFO) << "TPM response: " << response;
+  }
 
   if (BoolPrefIsTrue(kUseCrasPref)) {
     audio_client_ = delegate_->CreateAudioClient(dbus_wrapper_.get(), run_dir_);
     audio_client_->AddObserver(this);
   }
 
+  bluetooth_controller_->Init(udev_.get(), platform_features_,
+                              dbus_wrapper_.get());
   wifi_controller_->Init(this, prefs_.get(), udev_.get(), tablet_mode);
   cellular_controller_->Init(this, prefs_.get(), dbus_wrapper_.get());
   peripheral_battery_watcher_ = delegate_->CreatePeripheralBatteryWatcher(
@@ -451,7 +578,7 @@ void Daemon::Init() {
       base::FilePath(kPowerOverrideLockfileDir), {});
 
   user_proximity_watcher_ = delegate_->CreateUserProximityWatcher(
-      prefs_.get(), udev_.get(), tablet_mode);
+      prefs_.get(), udev_.get(), tablet_mode, sensor_service_handler_.get());
   user_proximity_handler_ = std::make_unique<policy::UserProximityHandler>();
   user_proximity_handler_->Init(user_proximity_watcher_.get(),
                                 wifi_controller_.get(),
@@ -518,24 +645,74 @@ bool Daemon::TriggerRetryShutdownTimerForTesting() {
 }
 
 #if USE_IIOSERVICE
-void Daemon::OnClientReceived(
-    mojo::PendingReceiver<cros::mojom::SensorHalClient> client) {
-  if (!light_sensor_manager_) {
+void Daemon::ConnectToMojoServiceManager() {
+  TRACE_EVENT("power", "Daemon::ConnectToMojoServiceManager");
+  DCHECK(!service_manager_.is_bound());
+
+  auto service_manager_remote =
+      chromeos::mojo_service_manager::ConnectToMojoServiceManager();
+
+  if (!service_manager_remote) {
+    LOG(ERROR) << "Failed to connect to Mojo Service Manager. Retry in: "
+               << kReconnectServiceManagerDelay;
+    ReconnectToMojoServiceManagerWithDelay();
     return;
   }
-  system::AmbientLightSensorManagerMojo* manager =
-      dynamic_cast<system::AmbientLightSensorManagerMojo*>(
-          light_sensor_manager_.get());
 
-  manager->BindSensorHalClient(
-      std::move(client),
-      base::BindOnce(&Daemon::OnMojoDisconnect, base::Unretained(this)));
+  service_manager_.Bind(std::move(service_manager_remote));
+  service_manager_.set_disconnect_with_reason_handler(base::BindOnce(
+      &Daemon::OnServiceManagerDisconnect, base::Unretained(this)));
+
+  RequestIioSensor();
 }
 
-void Daemon::OnMojoDisconnect() {
-  LOG(ERROR) << "Chromium crashed. Try to establish a new Mojo connection.";
+void Daemon::ReconnectToMojoServiceManagerWithDelay() {
+  TRACE_EVENT("power", "Daemon::ReconnectToMojoServiceManagerWithDelay");
+  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&Daemon::ConnectToMojoServiceManager,
+                     base::Unretained(this)),
+      kReconnectServiceManagerDelay);
+}
 
-  ReconnectMojoWithDelay();
+void Daemon::RequestIioSensor() {
+  TRACE_EVENT("power", "Daemon::RequestIioSensor");
+  if (!service_manager_.is_bound())
+    return;
+
+  mojo::PendingRemote<cros::mojom::SensorService> sensor_service_remote;
+
+  service_manager_->Request(
+      chromeos::mojo_services::kIioSensor, std::nullopt,
+      sensor_service_remote.InitWithNewPipeAndPassReceiver().PassPipe());
+  // There might be race conditions when reconnecting iioservice and Mojo
+  // Service Manager, and this function might be called more than once. But it's
+  // fine as SensorServiceHandler::SetUpChannel will ignore the duplicated mojo
+  // pipes.
+  sensor_service_handler_->SetUpChannel(
+      std::move(sensor_service_remote),
+      base::BindOnce(&Daemon::OnIioSensorDisconnect, base::Unretained(this)));
+}
+
+void Daemon::OnServiceManagerDisconnect(uint32_t custom_reason,
+                                        const std::string& message) {
+  auto error = static_cast<chromeos::mojo_service_manager::mojom::ErrorCode>(
+      custom_reason);
+  LOG(ERROR) << "ServiceManagerDisconnected, error: " << error
+             << ", message: " << message;
+  service_manager_.reset();
+  sensor_service_handler_->ResetSensorService(false);
+
+  ReconnectToMojoServiceManagerWithDelay();
+}
+
+void Daemon::OnIioSensorDisconnect(base::TimeDelta delay) {
+  TRACE_EVENT("power", "Daemon::OnIioSensorDisconnect");
+  DCHECK(service_manager_.is_bound());
+
+  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&Daemon::RequestIioSensor, base::Unretained(this)), delay);
 }
 #endif  // USE_IIOSERVICE
 
@@ -685,7 +862,7 @@ void Daemon::SetSuspendAnnounced(bool announced) {
     if (base::WriteFile(suspend_announced_path_, nullptr, 0) < 0)
       PLOG(ERROR) << "Couldn't create " << suspend_announced_path_.value();
   } else {
-    if (!base::DeleteFile(suspend_announced_path_))
+    if (!brillo::DeleteFile(suspend_announced_path_))
       PLOG(ERROR) << "Couldn't delete " << suspend_announced_path_.value();
   }
 }
@@ -703,9 +880,17 @@ void Daemon::PrepareToSuspend() {
   SetBacklightsSuspended(true);
 
   power_supply_->SetSuspended(true);
+  metrics_collector_->PrepareForSuspend();
+}
+
+void Daemon::SuspendAudio() {
   if (audio_client_)
     audio_client_->SetSuspended(true);
-  metrics_collector_->PrepareForSuspend();
+}
+
+void Daemon::ResumeAudio() {
+  if (audio_client_)
+    audio_client_->SetSuspended(false);
 }
 
 policy::Suspender::Delegate::SuspendResult Daemon::DoSuspend(
@@ -745,9 +930,9 @@ policy::Suspender::Delegate::SuspendResult Daemon::DoSuspend(
 
   // This command is run synchronously to ensure that it finishes before the
   // system is suspended.
-  // TODO(b/192353448): Create a mosys eventlog code for hibernate.
-  if (log_suspend_with_mosys_eventlog_) {
-    RunSetuidHelper("mosys_eventlog", "--mosys_eventlog_code=0xa7", true);
+  // TODO(b/192353448): Create a eventlog code for hibernate.
+  if (log_suspend_manually_) {
+    RunSetuidHelper("eventlog_add", "--eventlog_code=0xa7", true);
   }
 
   std::vector<std::string> args;
@@ -763,8 +948,6 @@ policy::Suspender::Delegate::SuspendResult Daemon::DoSuspend(
   } else if (suspend_to_idle_) {
     args.push_back("--suspend_to_idle");
   }
-
-  suspend_configurator_->PrepareForSuspend(duration);
 
   // Sync filesystems since outstanding operations can significantly delay
   // freeze, causing it to time out.
@@ -785,23 +968,24 @@ policy::Suspender::Delegate::SuspendResult Daemon::DoSuspend(
     return policy::Suspender::Delegate::SuspendResult::CANCELED;
   }
 
+  wakealarm_time_ = suspend_configurator_->PrepareForSuspend(duration);
+
   const int exit_code =
       RunSetuidHelper("suspend", base::JoinString(args, " "), true);
   LOG(INFO) << "powerd_suspend returned " << exit_code;
 
-  // TODO(b/192353448): Create a mosys eventlog code for hibernate.
-  if (log_suspend_with_mosys_eventlog_)
-    RunSetuidHelper("mosys_eventlog", "--mosys_eventlog_code=0xa8", false);
+  // TODO(b/192353448): Create a eventlog code for hibernate.
+  if (log_suspend_manually_)
+    RunSetuidHelper("eventlog_add", "--eventlog_code=0xa8", false);
 
   if (created_suspended_state_file_) {
-    if (!base::DeleteFile(base::FilePath(suspended_state_path)))
+    if (!brillo::DeleteFile(base::FilePath(suspended_state_path)))
       PLOG(ERROR) << "Failed to delete " << suspended_state_path.value();
   }
 
-  // Use Bitwise-OR to make sure both ThawUserspace and UndoPrepareForSuspend
-  // are executed.
-  if (!suspend_freezer_->ThawUserspace() |
-      !suspend_configurator_->UndoPrepareForSuspend())
+  bool thaw_userspace_succ = suspend_freezer_->ThawUserspace();
+  bool undo_prep_suspend_succ = suspend_configurator_->UndoPrepareForSuspend();
+  if (!(thaw_userspace_succ && undo_prep_suspend_succ))
     return policy::Suspender::Delegate::SuspendResult::FAILURE;
 
   // These exit codes are defined in powerd/powerd_suspend.
@@ -820,7 +1004,9 @@ policy::Suspender::Delegate::SuspendResult Daemon::DoSuspend(
   }
 }
 
-void Daemon::UndoPrepareToSuspend(bool success, int num_suspend_attempts) {
+void Daemon::UndoPrepareToSuspend(bool success,
+                                  int num_suspend_attempts,
+                                  bool hibernated) {
   LidState lid_state = input_watcher_->QueryLidState();
 
   // Update the lid state first so that resume does not turn the internal
@@ -837,14 +1023,21 @@ void Daemon::UndoPrepareToSuspend(bool success, int num_suspend_attempts) {
   // off for the displays).
   SetBacklightsSuspended(false);
 
-  if (audio_client_)
-    audio_client_->SetSuspended(false);
   power_supply_->SetSuspended(false);
 
   if (success)
-    metrics_collector_->HandleResume(num_suspend_attempts);
+    metrics_collector_->HandleResume(num_suspend_attempts, hibernated);
   else if (num_suspend_attempts > 0)
-    metrics_collector_->HandleCanceledSuspendRequest(num_suspend_attempts);
+    metrics_collector_->HandleCanceledSuspendRequest(num_suspend_attempts,
+                                                     hibernated);
+}
+
+void Daemon::ApplyQuirksBeforeSuspend() {
+  bluetooth_controller_->ApplyAutosuspendQuirk();
+}
+
+void Daemon::UnapplyQuirksAfterSuspend() {
+  bluetooth_controller_->UnapplyAutosuspendQuirk();
 }
 
 void Daemon::GenerateDarkResumeMetrics(
@@ -855,8 +1048,9 @@ void Daemon::GenerateDarkResumeMetrics(
                                                 suspend_duration);
 }
 
-void Daemon::ShutDownForFailedSuspend() {
-  ShutDown(ShutdownMode::POWER_OFF, ShutdownReason::SUSPEND_FAILED);
+void Daemon::ShutDownForFailedSuspend(bool hibernate) {
+  ShutDown(ShutdownMode::POWER_OFF, hibernate ? ShutdownReason::HIBERNATE_FAILED
+                                              : ShutdownReason::SUSPEND_FAILED);
 }
 
 void Daemon::ShutDownFromSuspend() {
@@ -864,7 +1058,8 @@ void Daemon::ShutDownFromSuspend() {
 }
 
 void Daemon::SetWifiTransmitPower(RadioTransmitPower power,
-                                  WifiRegDomain domain) {
+                                  WifiRegDomain domain,
+                                  TriggerSource source) {
   const std::string power_arg = (power == RadioTransmitPower::LOW)
                                     ? "--wifi_transmit_power_tablet"
                                     : "--nowifi_transmit_power_tablet";
@@ -882,8 +1077,30 @@ void Daemon::SetWifiTransmitPower(RadioTransmitPower power,
     default:
       break;
   }
-  const std::string args =
-      base::StringPrintf("%s %s", power_arg.c_str(), domain_arg.c_str());
+
+  std::string source_arg = "--wifi_transmit_power_source=unknown";
+  switch (source) {
+    case TriggerSource::INIT:
+      source_arg = "--wifi_transmit_power_source=init";
+      break;
+    case TriggerSource::TABLET_MODE:
+      source_arg = "--wifi_transmit_power_source=tablet_mode";
+      break;
+    case TriggerSource::REG_DOMAIN:
+      source_arg = "--wifi_transmit_power_source=reg_domain";
+      break;
+    case TriggerSource::UDEV_EVENT:
+      source_arg = "--wifi_transmit_power_source=udev_event";
+      break;
+    case TriggerSource::PROXIMITY:
+      source_arg = "--wifi_transmit_power_source=proximity";
+      break;
+    default:
+      break;
+  }
+
+  const std::string args = base::StringPrintf(
+      "%s %s %s", power_arg.c_str(), domain_arg.c_str(), source_arg.c_str());
   LOG(INFO) << ((power == RadioTransmitPower::LOW) ? "Enabling" : "Disabling")
             << " tablet mode wifi transmit power";
   RunSetuidHelper("set_wifi_transmit_power", args, false);
@@ -899,6 +1116,127 @@ void Daemon::SetCellularTransmitPower(RadioTransmitPower power,
   LOG(INFO) << "Setting cellular transmit power "
             << (is_power_low ? "low" : "high");
   RunSetuidHelper("set_cellular_transmit_power", args, false);
+}
+
+bool Daemon::RunEcCommand(ec::EcCommandInterface& cmd) {
+  base::ScopedFD ec_fd =
+      base::ScopedFD(open(cros_ec_path_.value().c_str(), O_RDWR));
+
+  if (!ec_fd.is_valid()) {
+    PLOG(ERROR) << "Failed to open " << cros_ec_path_;
+    return false;
+  }
+
+  if (!cmd.Run(ec_fd.get())) {
+    return false;
+  }
+
+  return true;
+}
+
+bool Daemon::SetBatterySustain(int lower, int upper) {
+  auto cmd = ec_command_factory_->ChargeControlSetCommand(CHARGE_CONTROL_NORMAL,
+                                                          lower, upper);
+  bool success = RunEcCommand(*cmd);
+  if (!success) {
+    // This is expected if the EC doesn't support battery sustainer.
+    LOG(INFO) << "Setting battery sustain with lower = " << lower
+              << "% and upper = " << upper << "%  failed";
+  }
+
+  return success;
+}
+
+bool Daemon::SetBatterySlowCharging(uint32_t limit_mA) {
+  auto cmd = ec_command_factory_->ChargeCurrentLimitSetCommand(limit_mA);
+
+  bool success = RunEcCommand(*cmd);
+  if (!success) {
+    // This is expected if the EC doesn't support setting a charge current
+    // limit.
+    LOG(INFO) << "Setting charge limit = " << limit_mA << "mA failed";
+  }
+
+  return success;
+}
+
+bool Daemon::SetBatteryDischarge() {
+  // Second and third args don't matter for CHARGE_CONTROL_DISCHARGE.
+  auto cmd = ec_command_factory_->ChargeControlSetCommand(
+      CHARGE_CONTROL_DISCHARGE, 0, 0);
+
+  bool success = RunEcCommand(*cmd);
+  if (!success) {
+    LOG(ERROR) << "Failed to force discharge the battery";
+  }
+
+  return success;
+}
+
+bool Daemon::AddSuspendInternalDelay(policy::SuspendInternalDelay* delay) {
+  return suspender_->AddSuspendInternalDelay(delay);
+}
+
+void Daemon::RemoveSuspendInternalDelay(policy::SuspendInternalDelay* delay) {
+  suspender_->RemoveSuspendInternalDelay(delay);
+}
+
+void Daemon::GetAdaptiveChargingPrediction(
+    const assist_ranker::RankerExample& proto, bool async) {
+  brillo::ErrorPtr error;
+  std::vector<uint8_t> serialized(proto.ByteSizeLong());
+
+  if (!proto.SerializeToArray(serialized.data(), serialized.size())) {
+    error = brillo::Error::Create(FROM_HERE, kErrorDomain, kInternalError,
+                                  "Failed to serialize RankerExample");
+    adaptive_charging_controller_->OnPredictionFail(error.get());
+    return;
+  }
+
+  if (async) {
+    adaptive_charging_ml_proxy_->RequestAdaptiveChargingDecisionAsync(
+        serialized,
+        base::BindRepeating(
+            &policy::AdaptiveChargingControllerInterface::OnPredictionResponse,
+            base::Unretained(adaptive_charging_controller_.get())),
+        base::BindRepeating(
+            &policy::AdaptiveChargingControllerInterface::OnPredictionFail,
+            base::Unretained(adaptive_charging_controller_.get())));
+    return;
+  }
+
+  bool inference_done;
+  std::vector<double> result;
+  if (!adaptive_charging_ml_proxy_->RequestAdaptiveChargingDecision(
+          serialized, &inference_done, &result, &error,
+          kAdaptiveChargingSyncDBusTimeoutMs)) {
+    adaptive_charging_controller_->OnPredictionFail(error.get());
+    return;
+  }
+
+  if (!inference_done) {
+    error = brillo::Error::Create(
+        FROM_HERE, brillo::errors::dbus::kDomain, DBUS_ERROR_FAILED,
+        "Adaptive Charging ML Proxy failed to finish inference");
+
+    adaptive_charging_controller_->OnPredictionFail(error.get());
+    return;
+  }
+
+  adaptive_charging_controller_->OnPredictionResponse(inference_done, result);
+}
+
+void Daemon::GenerateAdaptiveChargingUnplugMetrics(
+    const metrics::AdaptiveChargingState state,
+    const base::TimeTicks& target_time,
+    const base::TimeTicks& hold_start_time,
+    const base::TimeTicks& hold_end_time,
+    const base::TimeTicks& charge_finished_time,
+    const base::TimeDelta& time_spent_slow_charging,
+    double display_battery_percentage) {
+  metrics_collector_->GenerateAdaptiveChargingUnplugMetrics(
+      state, target_time, hold_start_time, hold_end_time, charge_finished_time,
+      time_spent_slow_charging, display_battery_percentage);
 }
 
 void Daemon::OnAudioStateChange(bool active) {
@@ -918,11 +1256,16 @@ void Daemon::OnDBusNameOwnerChanged(const std::string& name,
   } else if (name == chromeos::kDisplayServiceName && !new_owner.empty()) {
     LOG(INFO) << "D-Bus " << name << " ownership changed to " << new_owner;
     HandleDisplayServiceAvailableOrRestarted(true);
+  } else if (name == privacy_screen::kPrivacyScreenServiceName &&
+             !new_owner.empty()) {
+    LOG(INFO) << "D-Bus " << name << " ownership changed to " << new_owner;
+    HandlePrivacyScreenServiceAvailableOrRestarted(true);
   }
   suspender_->HandleDBusNameOwnerChanged(name, old_owner, new_owner);
 }
 
 void Daemon::OnPowerStatusUpdate() {
+  TRACE_EVENT("power", "OnPowerStatusUpdate");
   const system::PowerStatus status = power_supply_->GetPowerStatus();
   if (status.battery_is_present)
     LOG(INFO) << system::GetPowerStatusBatteryDebugString(status);
@@ -936,21 +1279,27 @@ void Daemon::OnPowerStatusUpdate() {
   state_controller_->HandlePowerSourceChange(power_source);
   thermal_event_handler_->HandlePowerSourceChange(power_source);
 
-  if (status.battery_is_present && status.battery_below_shutdown_threshold) {
-    if (factory_mode_) {
-      LOG(INFO) << "Battery is low, but not shutting down in factory mode";
-    } else {
-      LOG(INFO) << "Shutting down due to low battery ("
-                << base::StringPrintf("%0.2f", status.battery_percentage)
-                << "%, "
-                << util::TimeDeltaToString(status.battery_time_to_empty)
-                << " until empty, "
-                << base::StringPrintf("%0.3f",
-                                      status.observed_battery_charge_rate)
-                << "A observed charge rate)";
-      ShutDown(ShutdownMode::POWER_OFF, ShutdownReason::LOW_BATTERY);
-    }
+  if (status.battery_below_shutdown_threshold) {
+    LOG(INFO) << "Shutting down due to low battery ("
+              << base::StringPrintf("%0.2f", status.battery_percentage) << "%, "
+              << util::TimeDeltaToString(status.battery_time_to_empty)
+              << " until empty, "
+              << base::StringPrintf("%0.3f",
+                                    status.observed_battery_charge_rate)
+              << "A observed charge rate)";
+    ShutDown(ShutdownMode::POWER_OFF, ShutdownReason::LOW_BATTERY);
   }
+}
+
+void Daemon::OnBatterySaverStateChanged(const BatterySaverModeState& state) {
+  TRACE_EVENT("power", "OnBatterySaverStateChanged");
+
+  // TODO(sxm): Collect metrics somewhere around here.
+
+  for (auto controller : all_backlight_controllers_)
+    controller->HandleBatterySaverModeChange(state);
+
+  power_supply_->OnBatterySaverStateChanged();
 }
 
 void Daemon::InitDBus() {
@@ -961,21 +1310,39 @@ void Daemon::InitDBus() {
       chromeos::kDisplayServiceName, chromeos::kDisplayServicePath);
   dbus_wrapper_->RegisterForServiceAvailability(
       display_service_proxy,
-      base::Bind(&Daemon::HandleDisplayServiceAvailableOrRestarted,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(&Daemon::HandleDisplayServiceAvailableOrRestarted,
+                          weak_ptr_factory_.GetWeakPtr()));
 
   session_manager_dbus_proxy_ =
       dbus_wrapper_->GetObjectProxy(login_manager::kSessionManagerServiceName,
                                     login_manager::kSessionManagerServicePath);
+  resource_manager_dbus_proxy_ = dbus_wrapper_->GetObjectProxy(
+      resource_manager::kResourceManagerServiceName,
+      resource_manager::kResourceManagerServicePath);
   dbus_wrapper_->RegisterForServiceAvailability(
       session_manager_dbus_proxy_,
-      base::Bind(&Daemon::HandleSessionManagerAvailableOrRestarted,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(&Daemon::HandleSessionManagerAvailableOrRestarted,
+                          weak_ptr_factory_.GetWeakPtr()));
   dbus_wrapper_->RegisterForSignal(
       session_manager_dbus_proxy_, login_manager::kSessionManagerInterface,
       login_manager::kSessionStateChangedSignal,
-      base::Bind(&Daemon::HandleSessionStateChangedSignal,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindRepeating(&Daemon::HandleSessionStateChangedSignal,
+                          weak_ptr_factory_.GetWeakPtr()));
+
+  privacy_screen_service_dbus_proxy_ =
+      dbus_wrapper_->GetObjectProxy(privacy_screen::kPrivacyScreenServiceName,
+                                    privacy_screen::kPrivacyScreenServicePath);
+  dbus_wrapper_->RegisterForServiceAvailability(
+      privacy_screen_service_dbus_proxy_,
+      base::BindRepeating(
+          &Daemon::HandlePrivacyScreenServiceAvailableOrRestarted,
+          weak_ptr_factory_.GetWeakPtr()));
+  dbus_wrapper_->RegisterForSignal(
+      privacy_screen_service_dbus_proxy_,
+      privacy_screen::kPrivacyScreenServiceInterface,
+      privacy_screen::kPrivacyScreenServicePrivacyScreenSettingChangedSignal,
+      base::BindRepeating(&Daemon::HandlePrivacyScreenSettingChangedSignal,
+                          weak_ptr_factory_.GetWeakPtr()));
 
   // Export Daemon's D-Bus method calls.
   typedef std::unique_ptr<dbus::Response> (Daemon::*DaemonMethod)(
@@ -984,6 +1351,7 @@ void Daemon::InitDBus() {
       {kRequestShutdownMethod, &Daemon::HandleRequestShutdownMethod},
       {kRequestRestartMethod, &Daemon::HandleRequestRestartMethod},
       {kRequestSuspendMethod, &Daemon::HandleRequestSuspendMethod},
+      {kGetLastWakealarmMethod, &Daemon::HandleGetLastWakealarmMethod},
       {kHandleVideoActivityMethod, &Daemon::HandleVideoActivityMethod},
       {kHandleUserActivityMethod, &Daemon::HandleUserActivityMethod},
       {kHandleWakeNotificationMethod, &Daemon::HandleWakeNotificationMethod},
@@ -993,17 +1361,24 @@ void Daemon::InitDBus() {
        &Daemon::HandleSetBacklightsForcedOffMethod},
       {kGetBacklightsForcedOffMethod,
        &Daemon::HandleGetBacklightsForcedOffMethod},
-      {kHasAmbientColorDeviceMethod,
-       &Daemon::HandleHasAmbientColorDeviceMethod},
       {kChangeWifiRegDomainMethod, &Daemon::HandleChangeWifiRegDomainMethod},
+      {kGetTabletModeMethod, &Daemon::HandleGetTabletModeMethod},
   };
   for (const auto& it : kDaemonMethods) {
     dbus_wrapper_->ExportMethod(
-        it.first, base::Bind(&HandleSynchronousDBusMethodCall,
-                             base::Bind(it.second, base::Unretained(this))));
+        it.first, base::BindRepeating(
+                      &HandleSynchronousDBusMethodCall,
+                      base::BindRepeating(it.second, base::Unretained(this))));
   }
 
   const scoped_refptr<dbus::Bus>& bus = dbus_wrapper_->GetBus();
+
+  // We don't need to wait for this DBus proxy to init, since calls to it will
+  // block if it's not currently available.
+  // Also, create this before returning due to |bus| == NULL, since we mock out
+  // the adaptive_charging_ml_proxy_ for testing.
+  adaptive_charging_ml_proxy_ = delegate_->CreateAdaptiveChargingProxy(bus);
+
   // There's no underlying dbus::Bus object when we're being tested.
   if (!bus)
     return;
@@ -1011,30 +1386,15 @@ void Daemon::InitDBus() {
   int64_t tpm_threshold = 0;
   prefs_->GetInt64(kTpmCounterSuspendThresholdPref, &tpm_threshold);
   if (tpm_threshold > 0) {
-    tpm_manager_proxy_.reset(new org::chromium::TpmManagerProxy(bus));
+    tpm_manager_proxy_ = std::make_unique<org::chromium::TpmManagerProxy>(bus);
     tpm_manager_proxy_->GetObjectProxy()->WaitForServiceToBeAvailable(
-        base::Bind(&Daemon::HandleTpmManagerdAvailable,
-                   weak_ptr_factory_.GetWeakPtr()));
+        base::BindRepeating(&Daemon::HandleTpmManagerdAvailable,
+                            weak_ptr_factory_.GetWeakPtr()));
 
     int64_t tpm_status_sec = 0;
     prefs_->GetInt64(kTpmStatusIntervalSecPref, &tpm_status_sec);
-    tpm_status_interval_ = base::TimeDelta::FromSeconds(tpm_status_sec);
+    tpm_status_interval_ = base::Seconds(tpm_status_sec);
   }
-
-#if USE_BUFFET
-  buffet::InitCommandHandlers(
-      bus, base::Bind(&Daemon::ShutDown, weak_ptr_factory_.GetWeakPtr(),
-                      ShutdownMode::REBOOT, ShutdownReason::USER_REQUEST));
-#endif  // USE_BUFFET
-#if USE_IIOSERVICE
-  int64_t num_sensors = 0;
-  prefs_->GetInt64(kHasAmbientLightSensorPref, &num_sensors);
-  if (num_sensors <= 0)
-    return;
-
-  SetBus(bus.get());
-  BootstrapMojoConnection();
-#endif  // USE_IIOSERVICE
 }
 
 void Daemon::HandleDisplayServiceAvailableOrRestarted(bool available) {
@@ -1066,8 +1426,7 @@ void Daemon::HandleSessionManagerAvailableOrRestarted(bool available) {
       login_manager::kSessionManagerInterface,
       login_manager::kSessionManagerRetrieveSessionState);
   std::unique_ptr<dbus::Response> response = dbus_wrapper_->CallMethodSync(
-      session_manager_dbus_proxy_, &method_call,
-      base::TimeDelta::FromMilliseconds(kSessionManagerDBusTimeoutMs));
+      session_manager_dbus_proxy_, &method_call, kSessionManagerDBusTimeout);
   if (!response)
     return;
 
@@ -1081,6 +1440,22 @@ void Daemon::HandleSessionManagerAvailableOrRestarted(bool available) {
   OnSessionStateChange(state);
 }
 
+void Daemon::HandlePrivacyScreenServiceAvailableOrRestarted(bool available) {
+  if (!available) {
+    LOG(ERROR)
+        << "Failed waiting for privacy screen service to become available";
+    return;
+  }
+  dbus::MethodCall method_call(
+      privacy_screen::kPrivacyScreenServiceInterface,
+      privacy_screen::kPrivacyScreenServiceGetPrivacyScreenSettingMethod);
+  dbus_wrapper_->CallMethodAsync(
+      privacy_screen_service_dbus_proxy_, &method_call,
+      kPrivacyScreenServiceDBusTimeoutMs,
+      base::BindRepeating(&Daemon::HandleGetPrivacyScreenSettingResponse,
+                          weak_ptr_factory_.GetWeakPtr()));
+}
+
 void Daemon::HandleTpmManagerdAvailable(bool available) {
   if (!available) {
     LOG(ERROR) << "Failed waiting for tpm_manager to become available";
@@ -1090,7 +1465,7 @@ void Daemon::HandleTpmManagerdAvailable(bool available) {
     return;
 
   RequestTpmStatus();
-  if (tpm_status_interval_ > base::TimeDelta::FromSeconds(0)) {
+  if (tpm_status_interval_ > base::Seconds(0)) {
     tpm_status_timer_.Start(FROM_HERE, tpm_status_interval_, this,
                             &Daemon::RequestTpmStatus);
   }
@@ -1104,6 +1479,39 @@ void Daemon::HandleSessionStateChangedSignal(dbus::Signal* signal) {
   } else {
     LOG(ERROR) << "Unable to read " << login_manager::kSessionStateChangedSignal
                << " args";
+  }
+}
+
+void Daemon::HandlePrivacyScreenSettingChangedSignal(dbus::Signal* signal) {
+  dbus::MessageReader reader(signal);
+  privacy_screen::PrivacyScreenSetting setting;
+  if (reader.PopArrayOfBytesAsProto(&setting)) {
+    OnPrivacyScreenStateChange(setting.state());
+  } else {
+    LOG(ERROR) << "Unable to read "
+               << privacy_screen::
+                      kPrivacyScreenServicePrivacyScreenSettingChangedSignal
+               << " args";
+  }
+}
+
+void Daemon::HandleGetPrivacyScreenSettingResponse(dbus::Response* response) {
+  if (!response) {
+    LOG(ERROR)
+        << "D-Bus method call to "
+        << privacy_screen::kPrivacyScreenServiceGetPrivacyScreenSettingMethod
+        << " failed";
+    return;
+  }
+  dbus::MessageReader reader(response);
+  privacy_screen::PrivacyScreenSetting setting;
+  if (reader.PopArrayOfBytesAsProto(&setting)) {
+    OnPrivacyScreenStateChange(setting.state());
+  } else {
+    LOG(ERROR)
+        << "Unable to read "
+        << privacy_screen::kPrivacyScreenServiceGetPrivacyScreenSettingMethod
+        << " args";
   }
 }
 
@@ -1172,6 +1580,9 @@ std::unique_ptr<dbus::Response> Daemon::HandleRequestRestartMethod(
         reason = ShutdownReason::SYSTEM_UPDATE;
         break;
       case REQUEST_RESTART_OTHER:
+      case REQUEST_RESTART_SCHEDULED_REBOOT_POLICY:
+      case REQUEST_RESTART_REMOTE_ACTION_REBOOT:
+      case REQUEST_RESTART_API:
         reason = ShutdownReason::OTHER_REQUEST_TO_POWERD;
         break;
       default:
@@ -1182,8 +1593,15 @@ std::unique_ptr<dbus::Response> Daemon::HandleRequestRestartMethod(
   std::string description;
   reader.PopString(&description);
 
-  if (description == "First boot in manufacturing")
+  if (description == "First boot in manufacturing") {
+    RunSetuidHelper("request_tpm_clear", "", true);
+    std::string response;
+    base::ReadFileToString(
+        base::FilePath("/sys/class/tpm/tpm0/ppi/response"), &response);
+    LOG(INFO) << "TPM clear result: " << response;
+
     RunSetuidHelper("boot_complete", "", true);
+  }
 
   LOG(INFO) << "Got " << kRequestRestartMethod << " message from "
             << method_call->GetSender() << " with reason "
@@ -1218,15 +1636,40 @@ std::unique_ptr<dbus::Response> Daemon::HandleRequestSuspendMethod(
   // suspend request.
   int32_t wakeup_timeout = 0;
   reader.PopInt32(&wakeup_timeout);
-  base::TimeDelta duration = base::TimeDelta::FromSeconds(wakeup_timeout);
+  base::TimeDelta duration = base::Seconds(wakeup_timeout);
   // Read an optional uint32_t argument specifying the suspend flavor.
   uint32_t suspend_flavor =
       static_cast<uint32_t>(SuspendFlavor::SUSPEND_DEFAULT);
   reader.PopUint32(&suspend_flavor);
-  Suspend(SuspendImminent_Reason_OTHER, got_external_wakeup_count,
-          external_wakeup_count, duration,
-          static_cast<SuspendFlavor>(suspend_flavor));
+  Suspend(SuspendImminent_Reason_OTHER,
+          got_external_wakeup_count
+              ? std::make_optional<uint64_t>(external_wakeup_count)
+              : std::nullopt,
+          duration, static_cast<SuspendFlavor>(suspend_flavor));
+
   return nullptr;
+}
+
+std::unique_ptr<dbus::Response> Daemon::HandleGetLastWakealarmMethod(
+    dbus::MethodCall* method_call) {
+  std::unique_ptr<dbus::Response> response(
+      dbus::Response::FromMethodCall(method_call));
+  LOG(INFO) << "have wakealarm time: " << wakealarm_time_ << std::endl;
+  dbus::MessageWriter(response.get()).AppendUint64(wakealarm_time_);
+
+  return response;
+}
+
+void Daemon::SetFullscreenVideoWithTimeout(bool active, int timeout_seconds) {
+  dbus::MethodCall method_call(
+      resource_manager::kResourceManagerInterface,
+      resource_manager::kSetFullscreenVideoWithTimeout);
+  dbus::MessageWriter writer(&method_call);
+  writer.AppendByte(static_cast<char>(active));
+  writer.AppendUint32(timeout_seconds);
+
+  dbus_wrapper_->CallMethodSync(resource_manager_dbus_proxy_, &method_call,
+                                kResourceManagerDBusTimeout);
 }
 
 std::unique_ptr<dbus::Response> Daemon::HandleVideoActivityMethod(
@@ -1241,6 +1684,10 @@ std::unique_ptr<dbus::Response> Daemon::HandleVideoActivityMethod(
   for (auto controller : all_backlight_controllers_)
     controller->HandleVideoActivity(fullscreen);
   state_controller_->HandleVideoActivity();
+
+  if (fullscreen)
+    SetFullscreenVideoWithTimeout(true /* active */,
+                                  10 /* timeout in seconds */);
   return nullptr;
 }
 
@@ -1308,6 +1755,12 @@ std::unique_ptr<dbus::Response> Daemon::HandleSetPolicyMethod(
     charge_controller_->HandlePolicyChange(policy);
   }
 
+  if (adaptive_charging_controller_) {
+    adaptive_charging_controller_->HandlePolicyChange(policy);
+  }
+
+  shutdown_from_suspend_->HandlePolicyChange(policy);
+
   for (auto controller : all_backlight_controllers_)
     controller->HandlePolicyChange(policy);
   return nullptr;
@@ -1337,18 +1790,6 @@ std::unique_ptr<dbus::Response> Daemon::HandleGetBacklightsForcedOffMethod(
                         ? false
                         : all_backlight_controllers_.front()->GetForcedOff();
   dbus::MessageWriter(response.get()).AppendBool(forced_off);
-  return response;
-}
-
-std::unique_ptr<dbus::Response> Daemon::HandleHasAmbientColorDeviceMethod(
-    dbus::MethodCall* method_call) {
-  std::unique_ptr<dbus::Response> response(
-      dbus::Response::FromMethodCall(method_call));
-  bool has_color_device = false;
-  if (light_sensor_manager_)
-    has_color_device = light_sensor_manager_->HasColorSensor();
-
-  dbus::MessageWriter(response.get()).AppendBool(has_color_device);
   return response;
 }
 
@@ -1383,6 +1824,16 @@ std::unique_ptr<dbus::Response> Daemon::HandleChangeWifiRegDomainMethod(
   return nullptr;
 }
 
+std::unique_ptr<dbus::Response> Daemon::HandleGetTabletModeMethod(
+    dbus::MethodCall* method_call) {
+  std::unique_ptr<dbus::Response> response(
+      dbus::Response::FromMethodCall(method_call));
+
+  const TabletMode tablet_mode = input_watcher_->GetTabletMode();
+  dbus::MessageWriter(response.get()).AppendBool(tablet_mode == TabletMode::ON);
+  return response;
+}
+
 void Daemon::OnSessionStateChange(const std::string& state_str) {
   SessionState state = (state_str == kSessionStarted) ? SessionState::STARTED
                                                       : SessionState::STOPPED;
@@ -1397,15 +1848,27 @@ void Daemon::OnSessionStateChange(const std::string& state_str) {
     controller->HandleSessionStateChange(state);
 }
 
+void Daemon::OnPrivacyScreenStateChange(
+    const privacy_screen::PrivacyScreenSetting_PrivacyScreenState& state) {
+  if (state == privacy_screen_state_)
+    return;
+
+  VLOG(1) << "Privacy screen state changed to "
+          << PrivacyScreenStateToString(state);
+  privacy_screen_state_ = state;
+  metrics_collector_->HandlePrivacyScreenStateChange(privacy_screen_state_);
+}
+
 void Daemon::RequestTpmStatus() {
+  TRACE_EVENT("power", "Daemon::RequestTpmStatus");
   DCHECK(tpm_manager_proxy_);
   tpm_manager::GetDictionaryAttackInfoRequest request;
   tpm_manager_proxy_->GetDictionaryAttackInfoAsync(
       request,
-      base::Bind(&Daemon::HandleGetDictionaryAttackInfoSuccess,
-                 weak_ptr_factory_.GetWeakPtr()),
-      base::Bind(&Daemon::HandleGetDictionaryAttackInfoFailed,
-                 weak_ptr_factory_.GetWeakPtr()),
+      base::BindRepeating(&Daemon::HandleGetDictionaryAttackInfoSuccess,
+                          weak_ptr_factory_.GetWeakPtr()),
+      base::BindRepeating(&Daemon::HandleGetDictionaryAttackInfoFailed,
+                          weak_ptr_factory_.GetWeakPtr()),
       kTpmManagerdDBusTimeout.InMilliseconds());
 }
 
@@ -1421,8 +1884,8 @@ void Daemon::ShutDown(ShutdownMode mode, ShutdownReason reason) {
     if (!retry_shutdown_for_lockfile_timer_.IsRunning()) {
       retry_shutdown_for_lockfile_timer_.Start(
           FROM_HERE, kShutdownLockfileRetryInterval,
-          base::Bind(&Daemon::ShutDown, weak_ptr_factory_.GetWeakPtr(), mode,
-                     reason));
+          base::BindRepeating(&Daemon::ShutDown, weak_ptr_factory_.GetWeakPtr(),
+                              mode, reason));
     }
     return;
   }
@@ -1431,6 +1894,8 @@ void Daemon::ShutDown(ShutdownMode mode, ShutdownReason reason) {
   retry_shutdown_for_lockfile_timer_.Stop();
   suspender_->HandleShutdown();
   metrics_collector_->HandleShutdown(reason);
+  if (adaptive_charging_controller_)
+    adaptive_charging_controller_->HandleShutdown();
 
   for (auto controller : all_backlight_controllers_) {
     // If we're going to display a low-battery alert while shutting down, don't
@@ -1459,8 +1924,7 @@ void Daemon::ShutDown(ShutdownMode mode, ShutdownReason reason) {
 }
 
 void Daemon::Suspend(SuspendImminent::Reason reason,
-                     bool use_external_wakeup_count,
-                     uint64_t external_wakeup_count,
+                     std::optional<uint64_t> external_wakeup_count,
                      base::TimeDelta duration,
                      SuspendFlavor flavor) {
   if (shutting_down_) {
@@ -1468,11 +1932,10 @@ void Daemon::Suspend(SuspendImminent::Reason reason,
     return;
   }
 
-  if (use_external_wakeup_count) {
-    suspender_->RequestSuspendWithExternalWakeupCount(
-        reason, external_wakeup_count, duration, flavor);
+  if (flavor == SuspendFlavor::RESUME_FROM_DISK_ABORT) {
+    suspender_->AbortResumeFromHibernate();
   } else {
-    suspender_->RequestSuspend(reason, duration, flavor);
+    suspender_->RequestSuspend(reason, external_wakeup_count, duration, flavor);
   }
 }
 

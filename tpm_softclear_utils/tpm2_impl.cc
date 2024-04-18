@@ -1,14 +1,14 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "tpm_softclear_utils/tpm2_impl.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base/logging.h>
-#include <base/optional.h>
 #include <tpm_manager/proto_bindings/tpm_manager.pb.h>
 #include <trunks/authorization_delegate.h>
 #include <trunks/error_codes.h>
@@ -27,7 +27,7 @@ bool Tpm2Impl::Initialize() {
   return true;
 }
 
-base::Optional<std::string> Tpm2Impl::GetAuthForOwnerReset() {
+std::optional<std::string> Tpm2Impl::GetAuthForOwnerReset() {
   if (!trunks_factory_) {
     LOG(ERROR) << __func__ << ": trunks factory is uninitialized.";
     return {};

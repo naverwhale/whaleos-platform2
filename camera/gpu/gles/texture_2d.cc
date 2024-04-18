@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -59,8 +59,10 @@ Texture2D::Texture2D(Target target, const EglImage& egl_image)
     Invalidate();
     return;
   }
-  glGetTexLevelParameteriv(target_, 0, GL_TEXTURE_INTERNAL_FORMAT,
-                           reinterpret_cast<GLint*>(&internal_format_));
+  if (target_ == GL_TEXTURE_2D) {
+    glGetTexLevelParameteriv(target_, 0, GL_TEXTURE_INTERNAL_FORMAT,
+                             reinterpret_cast<GLint*>(&internal_format_));
+  }
   Unbind();
 }
 
@@ -94,6 +96,17 @@ Texture2D::Texture2D(GLenum internal_format,
 Texture2D::Texture2D(Texture2D&& other) {
   *this = std::move(other);
 }
+
+Texture2D::Texture2D(GLuint texture,
+                     GLenum internal_format,
+                     int width,
+                     int height,
+                     int mipmap_levels)
+    : target_(GL_TEXTURE_2D),
+      id_(texture),
+      internal_format_(internal_format),
+      width_(width),
+      height_(height) {}
 
 Texture2D& Texture2D::operator=(Texture2D&& other) {
   if (this != &other) {

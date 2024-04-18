@@ -1,16 +1,17 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "trunks/background_command_transceiver.h"
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <utility>
+
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/location.h>
 #include <base/logging.h>
-#include <base/single_thread_task_runner.h>
 #include <base/synchronization/waitable_event.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 namespace {
 
@@ -24,11 +25,11 @@ void AssignAndSignal(std::string* destination,
 
 // A callback which posts another |callback| to a given |task_runner|.
 void PostCallbackToTaskRunner(
-    const trunks::CommandTransceiver::ResponseCallback& callback,
+    trunks::CommandTransceiver::ResponseCallback callback,
     scoped_refptr<base::SingleThreadTaskRunner> task_runner,
     const std::string& response) {
-  base::Closure task = base::Bind(callback, response);
-  task_runner->PostTask(FROM_HERE, task);
+  base::OnceClosure task = base::BindOnce(std::move(callback), response);
+  task_runner->PostTask(FROM_HERE, std::move(task));
 }
 
 }  // namespace
@@ -44,20 +45,20 @@ BackgroundCommandTransceiver::BackgroundCommandTransceiver(
 
 BackgroundCommandTransceiver::~BackgroundCommandTransceiver() {}
 
-void BackgroundCommandTransceiver::SendCommand(
-    const std::string& command, const ResponseCallback& callback) {
+void BackgroundCommandTransceiver::SendCommand(const std::string& command,
+                                               ResponseCallback callback) {
   if (task_runner_.get()) {
     ResponseCallback background_callback =
-        base::Bind(PostCallbackToTaskRunner, callback,
-                   base::ThreadTaskRunnerHandle::Get());
+        base::BindOnce(PostCallbackToTaskRunner, std::move(callback),
+                       base::SingleThreadTaskRunner::GetCurrentDefault());
     // Use SendCommandTask instead of binding to next_transceiver_ directly to
     // leverage weak pointer semantics.
-    base::Closure task =
-        base::Bind(&BackgroundCommandTransceiver::SendCommandTask, GetWeakPtr(),
-                   command, background_callback);
-    task_runner_->PostNonNestableTask(FROM_HERE, task);
+    base::OnceClosure task =
+        base::BindOnce(&BackgroundCommandTransceiver::SendCommandTask,
+                       GetWeakPtr(), command, std::move(background_callback));
+    task_runner_->PostNonNestableTask(FROM_HERE, std::move(task));
   } else {
-    next_transceiver_->SendCommand(command, callback);
+    next_transceiver_->SendCommand(command, std::move(callback));
   }
 }
 
@@ -69,13 +70,13 @@ std::string BackgroundCommandTransceiver::SendCommandAndWait(
         base::WaitableEvent::ResetPolicy::MANUAL,
         base::WaitableEvent::InitialState::NOT_SIGNALED);
     ResponseCallback callback =
-        base::Bind(&AssignAndSignal, &response, &response_ready);
+        base::BindOnce(&AssignAndSignal, &response, &response_ready);
     // Use SendCommandTask instead of binding to next_transceiver_ directly to
     // leverage weak pointer semantics.
-    base::Closure task =
-        base::Bind(&BackgroundCommandTransceiver::SendCommandTask, GetWeakPtr(),
-                   command, callback);
-    task_runner_->PostNonNestableTask(FROM_HERE, task);
+    base::OnceClosure task =
+        base::BindOnce(&BackgroundCommandTransceiver::SendCommandTask,
+                       GetWeakPtr(), command, std::move(callback));
+    task_runner_->PostNonNestableTask(FROM_HERE, std::move(task));
     response_ready.Wait();
     return response;
   } else {
@@ -83,9 +84,9 @@ std::string BackgroundCommandTransceiver::SendCommandAndWait(
   }
 }
 
-void BackgroundCommandTransceiver::SendCommandTask(
-    const std::string& command, const ResponseCallback& callback) {
-  next_transceiver_->SendCommand(command, callback);
+void BackgroundCommandTransceiver::SendCommandTask(const std::string& command,
+                                                   ResponseCallback callback) {
+  next_transceiver_->SendCommand(command, std::move(callback));
 }
 
 }  // namespace trunks

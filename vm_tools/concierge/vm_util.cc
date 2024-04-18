@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,149 +7,66 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <csignal>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <utility>
 
+#include <absl/strings/str_split.h>
+#include <base/base64.h>
+#include <base/containers/cxx20_erase.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
+#include <base/format_macros.h>
+#include <base/json/json_reader.h>
 #include <base/logging.h>
+#include <base/memory/ptr_util.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/stl_util.h>
 #include <base/strings/safe_sprintf.h>
 #include <base/strings/strcat.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/system/sys_info.h>
-#include <brillo/process/process.h>
 #include <brillo/files/file_util.h>
-#include <base/json/json_reader.h>
-#include <base/base64.h>
+#include <brillo/process/process.h>
+#include <chromeos-config/libcros_config/cros_config.h>
+#include <vboot/crossystem.h>
+#include <vm_applications/apps.pb.h>
+#include <vm_concierge/concierge_service.pb.h>
 
-namespace vm_tools {
-namespace concierge {
+#include "vm_tools/concierge/crosvm_control.h"
+
+namespace vm_tools::concierge {
 
 const char kCrosvmBin[] = "/usr/bin/crosvm";
 
-const char kAndroidUidMap[] = "0 655360 5000,5000 600 50,5050 660410 1994950";
-
-const char kAndroidGidMap[] =
-    "0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 "
-    "1994950";
-
 namespace {
 
-// Examples of the format of the given string can be seen at the enum
-// UsbControlResponseType definition.
-bool ParseUsbControlResponse(base::StringPiece s,
-                             UsbControlResponse* response) {
-  s = base::TrimString(s, base::kWhitespaceASCII, base::TRIM_ALL);
+constexpr char kFontsSharedDir[] = "/usr/share/fonts";
+constexpr char kFontsSharedDirTag[] = "fonts";
 
-  if (base::StartsWith(s, "ok ")) {
-    response->type = OK;
-    unsigned port;
-    if (!base::StringToUint(s.substr(3), &port))
-      return false;
-    if (port > UINT8_MAX) {
-      return false;
-    }
-    response->port = port;
-    return true;
-  }
+// The maximum of CPU capacity is defined in include/linux/sched.h as
+// SCHED_CAPACITY_SCALE. That is "1 << 10".
+constexpr int kMaxCapacity = 1024;
 
-  if (base::StartsWith(s, "no_available_port")) {
-    response->type = NO_AVAILABLE_PORT;
-    response->reason = "No available ports in guest's host controller.";
-    return true;
-  }
-  if (base::StartsWith(s, "no_such_device")) {
-    response->type = NO_SUCH_DEVICE;
-    response->reason = "No such host device.";
-    return true;
-  }
-  if (base::StartsWith(s, "no_such_port")) {
-    response->type = NO_SUCH_PORT;
-    response->reason = "No such port in guest's host controller.";
-    return true;
-  }
-  if (base::StartsWith(s, "fail_to_open_device")) {
-    response->type = FAIL_TO_OPEN_DEVICE;
-    response->reason = "Failed to open host device.";
-    return true;
-  }
-  if (base::StartsWith(s, "devices")) {
-    std::vector<base::StringPiece> device_parts = base::SplitStringPiece(
-        s.substr(7), " \t", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
-    if ((device_parts.size() % 3) != 0) {
-      return false;
-    }
-    response->type = DEVICES;
-    for (size_t i = 0; i < device_parts.size(); i += 3) {
-      unsigned port;
-      unsigned vid;
-      unsigned pid;
-      if (!(base::StringToUint(device_parts[i + 0], &port) &&
-            base::HexStringToUInt(device_parts[i + 1], &vid) &&
-            base::HexStringToUInt(device_parts[i + 2], &pid))) {
-        return false;
-      }
-      if (port > UINT8_MAX || vid > UINT16_MAX || pid > UINT16_MAX) {
-        return false;
-      }
-      UsbDevice device;
-      device.port = port;
-      device.vid = vid;
-      device.pid = pid;
-      response->devices.push_back(device);
-    }
-    return true;
-  }
-  if (base::StartsWith(s, "error ")) {
-    response->type = ERROR;
-    response->reason = std::string(s.substr(6));
-    return true;
-  }
+constexpr char kUringAsyncExecutorString[] = "uring";
+constexpr char kEpollAsyncExecutorString[] = "epoll";
 
-  return false;
-}
-
-bool CallUsbControl(std::unique_ptr<brillo::ProcessImpl> crosvm,
-                    UsbControlResponse* response) {
-  crosvm->RedirectUsingPipe(STDOUT_FILENO, false /* is_input */);
-  int ret = crosvm->Run();
-  if (ret != 0)
-    LOG(ERROR) << "Failed crosvm call returned code " << ret;
-
-  base::ScopedFD read_fd(crosvm->GetPipe(STDOUT_FILENO));
-  std::string crosvm_response;
-  crosvm_response.resize(2048);
-
-  ssize_t response_size =
-      read(read_fd.get(), &crosvm_response[0], crosvm_response.size());
-  if (response_size < 0) {
-    response->reason = "Failed to read USB response from crosvm";
-    return false;
-  }
-  if (response_size == 0) {
-    response->reason = "Empty USB response from crosvm";
-    return false;
-  }
-  crosvm_response.resize(response_size);
-
-  if (!ParseUsbControlResponse(crosvm_response, response)) {
-    response->reason =
-        "Failed to parse USB response from crosvm: " + crosvm_response;
-    return false;
-  }
-  return true;
-}
+constexpr char kSchedulerTunePath[] = "/scheduler-tune";
+constexpr char kBoostTopAppProperty[] = "boost-top-app";
+constexpr char kBoostArcVmProperty[] = "boost-arcvm";
 
 std::string BooleanParameter(const char* parameter, bool value) {
   std::string result = base::StrCat({parameter, value ? "true" : "false"});
@@ -158,86 +75,152 @@ std::string BooleanParameter(const char* parameter, bool value) {
 
 }  // namespace
 
-Disk::Disk(base::FilePath path, bool writable)
-    : path_(std::move(path)), writable_(writable) {}
-
-Disk::Disk(base::FilePath path, const Disk::Config& config)
-    : path_(std::move(path)),
-      writable_(config.writable),
-      sparse_(config.sparse),
-      o_direct_(config.o_direct) {}
-
-Disk::Disk(Disk&&) = default;
-
-void Disk::EnableODirect(bool enable) {
-  o_direct_ = enable;
+namespace internal {
+std::string GetDevConfPath(apps::VmType type) {
+  return base::StrCat({
+      "/usr/local/vms/etc/",
+      base::ToLowerASCII(apps::VmType_Name(type)),
+      "_dev.conf",
+  });
 }
 
-base::StringPairs Disk::GetCrosvmArgs() const {
-  std::string first;
-  if (writable_)
-    first = "--rwdisk";
-  else
-    first = "--disk";
-
-  std::string sparse_arg{};
-  if (sparse_) {
-    sparse_arg = BooleanParameter(",sparse=", sparse_.value());
-  }
-  std::string o_direct_arg{};
-  if (o_direct_) {
-    o_direct_arg = BooleanParameter(",o_direct=", o_direct_.value());
-  }
-
-  std::string second = base::StrCat({path_.value(), sparse_arg, o_direct_arg});
-  base::StringPairs result = {{std::move(first), std::move(second)}};
-  return result;
-}
-
-Disk::~Disk() = default;
-
-std::string GetVmMemoryMiB() {
-  int64_t sys_memory_mb = base::SysInfo::AmountOfPhysicalMemoryMB();
+int64_t GetVmMemoryMiBInternal(int64_t sys_memory_mb, bool is_32bit) {
   int64_t vm_memory_mb;
   if (sys_memory_mb >= 4096) {
-    vm_memory_mb = sys_memory_mb - 1024;
+    // On devices with >=4GB RAM, reserve 1GB for other processes.
+    vm_memory_mb = sys_memory_mb - kHostReservedNumMiB;
   } else {
     vm_memory_mb = sys_memory_mb / 4 * 3;
   }
 
   // Limit guest memory size to avoid running out of host process address space.
-  int64_t size_max_mb = int64_t(SIZE_MAX / (1024 * 1024));
-  vm_memory_mb = std::min(vm_memory_mb, size_max_mb / 4 * 3);
+  //
+  // A 32-bit process has 4GB address space, and some parts are not usable for
+  // various reasons including address space layout randomization (ASLR).
+  // In 32-bit crosvm address space, only ~3370MB is usable:
+  // - 256MB is not usable because of executable load bias ASLR.
+  // - 4MB is used for crosvm executable.
+  // - 32MB it not usable because of heap ASLR.
+  // - 16MB is used for mapped shared libraries.
+  // - 256MB is not usable because of mmap base address ASLR.
+  // - 132MB is used for gaps in the memory layout.
+  // - 30MB is used for other allocations.
+  //
+  // 3328 is chosen because it's a rounded number (i.e. 3328 % 256 == 0).
+  // TODO(hashimoto): Remove this once crosvm becomes 64-bit on ARM.
+  static constexpr int64_t k32bitVmMemoryMaxMb = 3328;
+  if (is_32bit) {
+    vm_memory_mb = std::min(vm_memory_mb, k32bitVmMemoryMaxMb);
+  }
 
-  return std::to_string(vm_memory_mb);
+  return vm_memory_mb;
+}
+}  // namespace internal
+
+std::optional<AsyncExecutor> StringToAsyncExecutor(
+    const std::string& async_executor) {
+  if (async_executor == kUringAsyncExecutorString) {
+    return std::optional{AsyncExecutor::kUring};
+  } else if (async_executor == kEpollAsyncExecutorString) {
+    return std::optional{AsyncExecutor::kEpoll};
+  } else {
+    LOG(ERROR) << "Failed to convert unknown string to AsyncExecutor"
+               << async_executor;
+    return std::nullopt;
+  }
 }
 
-base::Optional<int32_t> ReadFileToInt32(const base::FilePath& filename) {
+std::string AsyncExecutorToString(AsyncExecutor async_executor) {
+  switch (async_executor) {
+    case AsyncExecutor::kUring:
+      return kUringAsyncExecutorString;
+    case AsyncExecutor::kEpoll:
+      return kEpollAsyncExecutorString;
+  }
+}
+
+base::StringPairs Disk::GetCrosvmArgs() const {
+  std::string first;
+  if (writable)
+    first = "--rwdisk";
+  else
+    first = "--disk";
+
+  std::string sparse_arg;
+  if (sparse) {
+    sparse_arg = BooleanParameter(",sparse=", sparse.value());
+  }
+  std::string o_direct_arg;
+  if (o_direct) {
+    o_direct_arg = BooleanParameter(",o_direct=", o_direct.value());
+  }
+  std::string multiple_workers_arg;
+  if (multiple_workers) {
+    multiple_workers_arg =
+        BooleanParameter(",multiple-workers=", multiple_workers.value());
+  }
+  std::string block_size_arg;
+  if (block_size) {
+    block_size_arg =
+        base::StringPrintf(",block_size=%" PRIuS, block_size.value());
+  }
+  std::string async_executor_arg;
+  if (async_executor) {
+    async_executor_arg = base::StrCat(
+        {",async_executor=", AsyncExecutorToString(async_executor.value())});
+  }
+  std::string block_id_arg;
+  if (block_id) {
+    // Virtio_blk can't handle more than 20 chars:
+    // https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html#x1-2850006
+    CHECK_LE(block_id.value().size(), 20);
+    block_id_arg = base::StrCat({",id=", block_id.value()});
+  }
+
+  std::string second = base::StrCat({path.value(), sparse_arg, o_direct_arg,
+                                     multiple_workers_arg, block_size_arg,
+                                     async_executor_arg, block_id_arg});
+  base::StringPairs result = {{std::move(first), std::move(second)}};
+  return result;
+}
+
+int64_t GetVmMemoryMiB() {
+  return internal::GetVmMemoryMiBInternal(
+      base::SysInfo::AmountOfPhysicalMemoryMB(), sizeof(uintptr_t) == 4);
+}
+
+std::optional<int32_t> ReadFileToInt32(const base::FilePath& filename) {
   std::string str;
   int int_val;
   if (base::ReadFileToString(filename, &str) &&
       base::StringToInt(
           base::TrimWhitespaceASCII(str, base::TrimPositions::TRIM_TRAILING),
           &int_val)) {
-    return base::Optional<int32_t>(int_val);
+    return std::optional<int32_t>(int_val);
   }
 
-  return base::nullopt;
+  return std::nullopt;
 }
 
-base::Optional<int32_t> GetCpuPackageId(int32_t cpu) {
+std::optional<int32_t> GetCpuPackageId(int32_t cpu) {
   base::FilePath topology_path(base::StringPrintf(
       "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu));
   return ReadFileToInt32(topology_path);
 }
 
-base::Optional<int32_t> GetCpuCapacity(int32_t cpu) {
+std::optional<int32_t> GetCpuCapacity(int32_t cpu) {
   base::FilePath cpu_capacity_path(
       base::StringPrintf("/sys/devices/system/cpu/cpu%d/cpu_capacity", cpu));
   return ReadFileToInt32(cpu_capacity_path);
 }
 
-base::Optional<std::string> GetCpuAffinityFromClusters(
+std::optional<int32_t> GetCpuMaxFrequency(int32_t cpu) {
+  base::FilePath cpu_max_freq_path(base::StringPrintf(
+      "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu));
+  return ReadFileToInt32(cpu_max_freq_path);
+}
+
+std::optional<std::string> GetCpuAffinityFromClusters(
     const std::vector<std::vector<std::string>>& cpu_clusters,
     const std::map<int32_t, std::vector<std::string>>& cpu_capacity_groups) {
   if (cpu_clusters.size() > 1) {
@@ -268,7 +251,7 @@ base::Optional<std::string> GetCpuAffinityFromClusters(
     }
     return base::JoinString(cpu_affinities, ":");
   } else {
-    return base::nullopt;
+    return std::nullopt;
   }
 }
 
@@ -317,10 +300,6 @@ bool SetPgid() {
 }
 
 bool WaitForChild(pid_t child, base::TimeDelta timeout) {
-  sigset_t set;
-  sigemptyset(&set);
-  sigaddset(&set, SIGCHLD);
-
   const base::Time deadline = base::Time::Now() + timeout;
   while (true) {
     pid_t ret = waitpid(child, nullptr, WNOHANG);
@@ -340,12 +319,7 @@ bool WaitForChild(pid_t child, base::TimeDelta timeout) {
       // Timed out.
       return false;
     }
-
-    const struct timespec ts = (deadline - now).ToTimeSpec();
-    if (sigtimedwait(&set, nullptr, &ts) < 0 && errno == EAGAIN) {
-      // Timed out.
-      return false;
-    }
+    usleep(100);
   }
 }
 
@@ -354,182 +328,222 @@ bool CheckProcessExists(pid_t pid) {
     return false;
 
   // Try to reap child process in case it just exited.
-  waitpid(pid, NULL, WNOHANG);
+  waitpid(pid, nullptr, WNOHANG);
 
   // kill() with a signal value of 0 is explicitly documented as a way to
   // check for the existence of a process.
   return kill(pid, 0) >= 0 || errno != ESRCH;
 }
 
-void RunCrosvmCommand(std::initializer_list<std::string> args) {
-  brillo::ProcessImpl crosvm;
-  crosvm.AddArg(kCrosvmBin);
-  for (auto& s : args) {
-    crosvm.AddArg(s);
-  }
-
-  // This must be synchronous as we may do things after calling this function
-  // that depend on the crosvm command being completed (like suspending the
-  // device).
-  crosvm.Run();
-}
-
-void RunCrosvmCommand(std::string command, std::string socket_path) {
-  RunCrosvmCommand({command, socket_path});
-}
-
-base::Optional<BalloonStats> GetBalloonStats(std::string socket_path) {
-  // TODO(hikalium): Rewrite this logic to use FFI
-  // after b/188858559 is done.
-  brillo::ProcessImpl crosvm;
-  crosvm.AddArg(kCrosvmBin);
-  crosvm.AddArg("balloon_stats");
-  crosvm.AddArg(socket_path);
-  crosvm.RedirectUsingPipe(STDOUT_FILENO, false /* is_input */);
-
-  if (crosvm.Run() != 0) {
-    LOG(ERROR) << "Failed to run crosvm balloon_stats";
-    return base::nullopt;
-  }
-
-  base::ScopedFD read_fd(crosvm.GetPipe(STDOUT_FILENO));
-  std::string crosvm_response;
-  crosvm_response.resize(1024);
-  ssize_t response_size =
-      read(read_fd.get(), crosvm_response.data(), crosvm_response.size());
-  if (response_size < 0) {
-    LOG(ERROR) << "Failed to read balloon_stats";
-    return base::nullopt;
-  }
-  if (response_size == crosvm_response.size()) {
-    LOG(ERROR) << "Response of balloon_stats is too large";
-    return base::nullopt;
-  }
-  crosvm_response.resize(response_size);
-
-  auto root_value = base::JSONReader::Read(crosvm_response);
-  if (!root_value) {
-    std::string b64;
-    base::Base64Encode(crosvm_response, &b64);
-    LOG(ERROR) << "Failed to parse balloon_stats JSON";
-    return base::nullopt;
-  }
-  if (!root_value->is_dict()) {
-    LOG(ERROR) << "Output of balloon_stats was not a dict";
-    return base::nullopt;
-  }
-  auto balloon_stats = root_value->FindDictKey("BalloonStats");
-  if (!balloon_stats || !balloon_stats->is_dict()) {
-    LOG(ERROR) << "BalloonStats dict not found";
-    return base::nullopt;
-  }
-  auto additional_stats = balloon_stats->FindDictKey("stats");
-  if (!additional_stats || !additional_stats->is_dict()) {
-    LOG(ERROR) << "stats dict not found";
-    return base::nullopt;
-  }
-
+std::optional<BalloonStats> GetBalloonStats(
+    const std::string& socket_path, std::optional<base::TimeDelta> timeout) {
   BalloonStats stats;
-  // Using FindDoubleKey here since the value may exceeds 32bit integer range.
-  // This is safe since double has 52bits of integer precision.
-  stats.available_memory = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("available_memory").value_or(0));
-  stats.balloon_actual = static_cast<int64_t>(
-      balloon_stats->FindDoubleKey("balloon_actual").value_or(0));
-  stats.disk_caches = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("disk_caches").value_or(0));
-  stats.free_memory = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("free_memory").value_or(0));
-  stats.major_faults = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("major_faults").value_or(0));
-  stats.minor_faults = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("minor_faults").value_or(0));
-  stats.swap_in = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("swap_in").value_or(0));
-  stats.swap_out = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("swap_out").value_or(0));
-  stats.total_memory = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("total_memory").value_or(0));
-  stats.shared_memory = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("shared_memory").value_or(0));
-  stats.unevictable_memory = static_cast<int64_t>(
-      additional_stats->FindDoubleKey("unevictable_memory").value_or(0));
+  if (!CrosvmControl::Get()->BalloonStats(
+          socket_path, timeout, &stats.stats_ffi, &stats.balloon_actual)) {
+    LOG(ERROR) << "Failed to retrieve balloon stats";
+    return std::nullopt;
+  }
+
   return stats;
 }
 
-bool AttachUsbDevice(std::string socket_path,
+std::optional<BalloonWorkingSet> GetBalloonWorkingSet(
+    const std::string& socket_path) {
+  BalloonWorkingSet ws;
+  if (!CrosvmControl::Get()->BalloonWorkingSet(socket_path, &ws.working_set_ffi,
+                                               &ws.balloon_actual)) {
+    LOG(ERROR) << "Failed to retrieve balloon working set";
+    return std::nullopt;
+  }
+
+  return ws;
+}
+
+std::optional<BalloonStats> ParseBalloonStats(
+    const base::Value::Dict& balloon_stats) {
+  auto additional_stats = balloon_stats.FindDict("stats");
+  if (!additional_stats) {
+    LOG(ERROR) << "stats dict not found";
+    return std::nullopt;
+  }
+
+  BalloonStats stats;
+  // Using FindDouble here since the value may exceeds 32bit integer range.
+  // This is safe since double has 52bits of integer precision.
+  stats.balloon_actual = static_cast<int64_t>(
+      balloon_stats.FindDouble("balloon_actual").value_or(0));
+
+  stats.stats_ffi.available_memory = static_cast<int64_t>(
+      additional_stats->FindDouble("available_memory").value_or(0));
+  stats.stats_ffi.disk_caches = static_cast<int64_t>(
+      additional_stats->FindDouble("disk_caches").value_or(0));
+  stats.stats_ffi.free_memory = static_cast<int64_t>(
+      additional_stats->FindDouble("free_memory").value_or(0));
+  stats.stats_ffi.major_faults = static_cast<int64_t>(
+      additional_stats->FindDouble("major_faults").value_or(0));
+  stats.stats_ffi.minor_faults = static_cast<int64_t>(
+      additional_stats->FindDouble("minor_faults").value_or(0));
+  stats.stats_ffi.swap_in =
+      static_cast<int64_t>(additional_stats->FindDouble("swap_in").value_or(0));
+  stats.stats_ffi.swap_out = static_cast<int64_t>(
+      additional_stats->FindDouble("swap_out").value_or(0));
+  stats.stats_ffi.total_memory = static_cast<int64_t>(
+      additional_stats->FindDouble("total_memory").value_or(0));
+  stats.stats_ffi.shared_memory = static_cast<int64_t>(
+      additional_stats->FindDouble("shared_memory").value_or(0));
+  stats.stats_ffi.unevictable_memory = static_cast<int64_t>(
+      additional_stats->FindDouble("unevictable_memory").value_or(0));
+  return stats;
+}
+
+bool AttachNetDevice(const std::string& socket_path,
+                     const std::string& tap_name,
+                     uint8_t* out_bus) {
+  return CrosvmControl::Get()->NetAttach(socket_path, tap_name, out_bus);
+}
+
+bool DetachNetDevice(const std::string& socket_path, uint8_t bus) {
+  return CrosvmControl::Get()->NetDetach(socket_path, bus);
+}
+
+bool AttachUsbDevice(const std::string& socket_path,
                      uint8_t bus,
                      uint8_t addr,
                      uint16_t vid,
                      uint16_t pid,
                      int fd,
-                     UsbControlResponse* response) {
-  auto crosvm = std::make_unique<brillo::ProcessImpl>();
-  crosvm->AddArg(kCrosvmBin);
-  crosvm->AddArg("usb");
-  crosvm->AddArg("attach");
-  crosvm->AddArg(base::StringPrintf("%d:%d:%x:%x", bus, addr, vid, pid));
-  crosvm->AddArg("/proc/self/fd/" + std::to_string(fd));
-  crosvm->AddArg(std::move(socket_path));
-  crosvm->BindFd(fd, fd);
+                     uint8_t* out_port) {
+  std::string device_path = "/proc/self/fd/" + std::to_string(fd);
+
   fcntl(fd, F_SETFD, 0);  // Remove the CLOEXEC
 
-  CallUsbControl(std::move(crosvm), response);
-
-  return response->type == OK;
+  return CrosvmControl::Get()->UsbAttach(socket_path, bus, addr, vid, pid,
+                                         device_path, out_port);
 }
 
-bool DetachUsbDevice(std::string socket_path,
-                     uint8_t port,
-                     UsbControlResponse* response) {
-  auto crosvm = std::make_unique<brillo::ProcessImpl>();
-  crosvm->AddArg(kCrosvmBin);
-  crosvm->AddArg("usb");
-  crosvm->AddArg("detach");
-  crosvm->AddArg(std::to_string(port));
-  crosvm->AddArg(std::move(socket_path));
-
-  CallUsbControl(std::move(crosvm), response);
-
-  return response->type == OK;
+bool DetachUsbDevice(const std::string& socket_path, uint8_t port) {
+  return CrosvmControl::Get()->UsbDetach(socket_path, port);
 }
 
-bool ListUsbDevice(std::string socket_path, std::vector<UsbDevice>* device) {
-  auto crosvm = std::make_unique<brillo::ProcessImpl>();
-  crosvm->AddArg(kCrosvmBin);
-  crosvm->AddArg("usb");
-  crosvm->AddArg("list");
-  crosvm->AddArg(std::move(socket_path));
+bool ListUsbDevice(const std::string& socket_path,
+                   std::vector<UsbDeviceEntry>* device) {
+  // Allocate enough slots for the max number of USB devices
+  // This will never be more than 255
+  const size_t max_usb_devices = CrosvmControl::Get()->MaxUsbDevices();
+  device->resize(max_usb_devices);
 
-  UsbControlResponse response;
-  CallUsbControl(std::move(crosvm), &response);
+  ssize_t dev_count = CrosvmControl::Get()->UsbList(socket_path, device->data(),
+                                                    max_usb_devices);
 
-  if (response.type != DEVICES)
+  if (dev_count < 0) {
     return false;
+  }
 
-  *device = std::move(response.devices);
+  device->resize(dev_count);
 
   return true;
 }
 
-bool CrosvmDiskResize(std::string socket_path,
+bool CrosvmDiskResize(const std::string& socket_path,
                       int disk_index,
                       uint64_t new_size) {
-  brillo::ProcessImpl crosvm;
-  crosvm.AddArg(kCrosvmBin);
-  crosvm.AddArg("disk");
-  crosvm.AddArg("resize");
-  crosvm.AddArg(std::to_string(disk_index));
-  crosvm.AddArg(std::to_string(new_size));
-  crosvm.AddArg(std::move(socket_path));
-  return crosvm.Run() == 0;
+  return CrosvmControl::Get()->ResizeDisk(socket_path, disk_index, new_size);
 }
 
 bool UpdateCpuShares(const base::FilePath& cpu_cgroup, int cpu_shares) {
   const std::string cpu_shares_str = std::to_string(cpu_shares);
-  return base::WriteFile(cpu_cgroup.Append("cpu.shares"),
-                         cpu_shares_str.c_str(),
-                         cpu_shares_str.size()) == cpu_shares_str.size();
+  if (base::WriteFile(cpu_cgroup.Append("cpu.shares"), cpu_shares_str.c_str(),
+                      cpu_shares_str.size()) != cpu_shares_str.size()) {
+    PLOG(ERROR) << "Failed to update " << cpu_cgroup.value() << " to "
+                << cpu_shares;
+    return false;
+  }
+  return true;
+}
+
+// This will limit the tasks in the CGroup to P @percent of CPU.
+// Although P can be > 100, its maximum value depends on the number of CPUs.
+// For now, limit to a certain percent of 1 CPU. @percent=-1 disables quota.
+bool UpdateCpuQuota(const base::FilePath& cpu_cgroup, int percent) {
+  LOG_ASSERT(percent <= 100 && (percent >= 0 || percent == -1));
+
+  // Set period to 100000us and quota to percent * 1000us.
+  const std::string cpu_period_str = std::to_string(100000);
+  const base::FilePath cfs_period_us = cpu_cgroup.Append("cpu.cfs_period_us");
+  if (base::WriteFile(cfs_period_us, cpu_period_str.c_str(),
+                      cpu_period_str.size()) != cpu_period_str.size()) {
+    PLOG(ERROR) << "Failed to update " << cfs_period_us.value() << " to "
+                << cpu_period_str;
+    return false;
+  }
+
+  int quota_int;
+  if (percent == -1)
+    quota_int = -1;
+  else
+    quota_int = percent * 1000;
+
+  const std::string cpu_quota_str = std::to_string(quota_int);
+  const base::FilePath cfs_quota_us = cpu_cgroup.Append("cpu.cfs_quota_us");
+  if (base::WriteFile(cfs_quota_us, cpu_quota_str.c_str(),
+                      cpu_quota_str.size()) != cpu_quota_str.size()) {
+    PLOG(ERROR) << "Failed to update " << cfs_quota_us.value() << " to "
+                << cpu_quota_str;
+    return false;
+  }
+
+  return true;
+}
+
+bool UpdateCpuLatencySensitive(const base::FilePath& cpu_cgroup, bool enable) {
+  std::string enable_str = std::to_string(static_cast<int>(enable));
+  auto latency_sensitive = cpu_cgroup.Append("cpu.uclamp.latency_sensitive");
+  if (base::WriteFile(latency_sensitive, enable_str.c_str(),
+                      enable_str.size()) != enable_str.size()) {
+    PLOG(ERROR) << "Failed to update " << latency_sensitive.value() << " to "
+                << enable_str;
+    return false;
+  }
+  return true;
+}
+
+bool UpdateCpuUclampMin(const base::FilePath& cpu_cgroup, double percent) {
+  LOG_ASSERT(percent <= 100.0 && percent >= 0.0);
+
+  std::string uclamp_min_str = std::to_string(percent);
+  auto uclamp_min = cpu_cgroup.Append("cpu.uclamp.min");
+  if (base::WriteFile(uclamp_min, uclamp_min_str.c_str(),
+                      uclamp_min_str.size()) != uclamp_min_str.size()) {
+    PLOG(ERROR) << "Failed to update " << uclamp_min.value() << " to "
+                << uclamp_min_str;
+    return false;
+  }
+  return true;
+}
+
+// Convert file path into fd path
+// This will open the file and append SafeFD into provided container
+std::string ConvertToFdBasedPath(brillo::SafeFD& parent_fd,
+                                 base::FilePath* in_out_path,
+                                 int flags,
+                                 std::vector<brillo::SafeFD>& fd_storage) {
+  static auto procSelfFd = base::FilePath("/proc/self/fd");
+  if (procSelfFd.IsParent(*in_out_path)) {
+    if (!base::PathExists(*in_out_path)) {
+      return "Path does not exist";
+    }
+  } else {
+    auto disk_fd = parent_fd.OpenExistingFile(*in_out_path, flags);
+    if (brillo::SafeFD::IsError(disk_fd.second)) {
+      LOG(ERROR) << "Could not open file: " << static_cast<int>(disk_fd.second);
+      return "Could not open file";
+    }
+    *in_out_path = base::FilePath(kProcFileDescriptorsPath)
+                       .Append(base::NumberToString(disk_fd.first.get()));
+    fd_storage.push_back(std::move(disk_fd.first));
+  }
+
+  return "";
 }
 
 CustomParametersForDev::CustomParametersForDev(const std::string& data) {
@@ -540,73 +554,138 @@ CustomParametersForDev::CustomParametersForDev(const std::string& data) {
     if (line.empty() || line[0] == '#')
       continue;
 
-    // Line contains a prefix key. Remove all args with this prefix.
-    if (line[0] == '!' && line.size() > 1) {
-      const base::StringPiece prefix = line.substr(1, line.size() - 1);
-      prefix_to_remove_.emplace_back(prefix);
+    // Split line with first = sign. --key=value and KEY=VALUE parameters both
+    // use = to split. value will be an empty string in case of '--key'.
+    std::pair<std::string_view, std::string_view> param_pair =
+        absl::StrSplit(std::string_view(line), absl::MaxSplits('=', 1));
+    base::StringPiece key =
+        base::TrimWhitespaceASCII(param_pair.first, base::TRIM_ALL);
+    base::StringPiece value =
+        base::TrimWhitespaceASCII(param_pair.second, base::TRIM_ALL);
+
+    // Handle prerun: flags for flags before `run`.
+    if (line.substr(0, 7) == "prerun:") {
+      prerun_params_.emplace_back(key.substr(7), std::move(value));
       continue;
     }
 
-    // Line contains a key only. Append the whole line.
-    base::StringPairs pairs;
-    if (!base::SplitStringIntoKeyValuePairs(line, '=', '\n', &pairs)) {
-      params_to_add_.emplace_back(std::move(line), "");
+    // Add params before crosvm invocation.
+    if (line.substr(0, 10) == "precrosvm:") {
+      precrosvm_params_.emplace_back(line.substr(10));
       continue;
     }
 
-    // Line contains a key-value pair.
-    base::TrimWhitespaceASCII(pairs[0].first, base::TRIM_ALL, &pairs[0].first);
-    base::TrimWhitespaceASCII(pairs[0].second, base::TRIM_ALL,
-                              &pairs[0].second);
-    if (pairs[0].first[0] == '-') {
-      params_to_add_.emplace_back(std::move(pairs[0].first),
-                                  std::move(pairs[0].second));
-    } else {
-      special_parameters_.emplace(std::move(pairs[0].first),
-                                  std::move(pairs[0].second));
+    switch (line[0]) {
+      case '!':
+        // Line contains a prefix key. Remove all args with this prefix.
+        run_prefix_to_remove_.emplace_back(line.substr(1));
+        break;
+      case '^':
+        // Parameter to be prepended before run, expected to be ^--key=value
+        // format.
+        run_params_to_prepend_.emplace_back(key.substr(1), std::move(value));
+        break;
+      case '-':
+        // Parameter expected to be --key=value format.
+        run_params_to_add_.emplace_back(std::move(key), std::move(value));
+        break;
+      default:
+        // KEY=VALUE pair.
+        special_parameters_[std::string(key)].emplace_back(std::move(value));
+        break;
     }
   }
   initialized_ = true;
 }
 
-void CustomParametersForDev::Apply(base::StringPairs* args) {
+void CustomParametersForDev::Apply(base::StringPairs& args) {
   if (!initialized_)
     return;
-  for (const auto& prefix : prefix_to_remove_) {
-    base::EraseIf(*args, [&prefix](const auto& pair) {
+  for (const auto& prefix : run_prefix_to_remove_) {
+    base::EraseIf(args, [&prefix](const auto& pair) {
       return base::StartsWith(pair.first, prefix);
     });
   }
-  for (const auto& param : params_to_add_) {
-    args->emplace_back(param.first, param.second);
+  for (const auto& param : run_params_to_prepend_) {
+    args.emplace(args.begin(), param.first, param.second);
+  }
+  for (const auto& param : run_params_to_add_) {
+    args.emplace_back(param.first, param.second);
   }
 }
 
-base::Optional<const std::string>
-CustomParametersForDev::ObtainSpecialParameter(const std::string& key) {
+void CustomParametersForDev::AppendPrerunParams(
+    base::StringPairs& pre_run_args) const {
+  for (const auto& param : prerun_params_) {
+    pre_run_args.emplace_back(param.first, param.second);
+  }
+}
+
+std::optional<const std::string> CustomParametersForDev::ObtainSpecialParameter(
+    const std::string& key) const {
   if (!initialized_)
-    return base::nullopt;
-  if (special_parameters_.find(key) != special_parameters_.end()) {
-    return special_parameters_[key];
+    return std::nullopt;
+  if (auto it = special_parameters_.find(key);
+      it != special_parameters_.end()) {
+    DCHECK(it->second.size());
+    return it->second[it->second.size() - 1];
   } else {
-    return base::nullopt;
+    return std::nullopt;
   }
 }
 
-std::string CreateSharedDataParam(
-    const base::FilePath& data_dir,
-    const std::string& tag,
-    bool enable_caches,
-    bool ascii_casefold,
-    const std::vector<uid_t>& privileged_quota_uids) {
-  // TODO(b/169446394): Go back to using "never" when caching is disabled
-  // once we can switch /data/media to use 9p.
-  std::string result = base::StringPrintf(
-      "%s:%s:type=fs:cache=%s:uidmap=%s:gidmap=%s:timeout=%d:rewrite-"
-      "security-xattrs=true:ascii_casefold=%s:writeback=%s",
-      data_dir.value().c_str(), tag.c_str(), enable_caches ? "always" : "auto",
-      kAndroidUidMap, kAndroidGidMap, enable_caches ? 3600 : 1,
-      ascii_casefold ? "true" : "false", enable_caches ? "true" : "false");
+std::vector<const std::string> CustomParametersForDev::ObtainSpecialParameters(
+    const std::string& key) const {
+  if (!initialized_)
+    return {};
+  if (auto it = special_parameters_.find(key);
+      it != special_parameters_.end()) {
+    DCHECK(it->second.size());
+    return it->second;
+  } else {
+    return {};
+  }
+}
+
+std::unique_ptr<CustomParametersForDev> MaybeLoadCustomParametersForDev(
+    apps::VmType type, bool use_dev_conf) {
+  const bool is_dev_mode = (VbGetSystemPropertyInt("cros_debug") == 1);
+  // Load any custom parameters from the development configuration file if the
+  // feature is turned on (default) and path exists (dev mode only).
+  if (!is_dev_mode || !use_dev_conf) {
+    return nullptr;
+  }
+  // Path to the development configuration file (only visible in dev mode).
+  const base::FilePath dev_conf(internal::GetDevConfPath(type));
+  if (!base::PathExists(dev_conf)) {
+    return nullptr;
+  }
+
+  std::string data;
+  if (!base::ReadFileToString(dev_conf, &data)) {
+    PLOG(ERROR) << "Failed to read file " << dev_conf.value();
+    return nullptr;
+  }
+  return std::make_unique<CustomParametersForDev>(data);
+}
+
+std::string SharedDataParam::to_string() const {
+  // We can relax this condition later if we want to serve users which do not
+  // set uid_map and gid_map, but today there is none.
+  CHECK_NE(uid_map, "");
+  CHECK_NE(gid_map, "");
+
+  std::string result = base::StrCat(
+      {data_dir.value(), ":", tag, ":type=fs:cache=",
+       (enable_caches == SharedDataParam::Cache::kAlways)  ? "always"
+       : (enable_caches == SharedDataParam::Cache::kNever) ? "never"
+                                                           : "auto",
+       ":uidmap=", uid_map, ":gidmap=", gid_map, ":timeout=",
+       (enable_caches == SharedDataParam::Cache::kAlways) ? "3600" : "1",
+       ":rewrite-security-xattrs=", rewrite_security_xattrs ? "true" : "false",
+       ascii_casefold ? ":ascii_casefold=true" : "", ":writeback=",
+       (enable_caches == SharedDataParam::Cache::kAlways) ? "true" : "false",
+       posix_acl ? "" : ":posix_acl=false"});
 
   if (!privileged_quota_uids.empty()) {
     result += ":privileged_quota_uids=";
@@ -619,12 +698,23 @@ std::string CreateSharedDataParam(
   return result;
 }
 
-void ArcVmCPUTopology::CreateAffinity(void) {
+SharedDataParam CreateFontsSharedDataParam() {
+  return SharedDataParam{.data_dir = base::FilePath(kFontsSharedDir),
+                         .tag = kFontsSharedDirTag,
+                         .uid_map = kAndroidUidMap,
+                         .gid_map = kAndroidGidMap,
+                         .enable_caches = SharedDataParam::Cache::kAlways,
+                         .ascii_casefold = false,
+                         .posix_acl = true};
+}
+
+void ArcVmCPUTopology::CreateAffinity() {
   std::vector<std::string> cpu_list;
   std::vector<std::string> affinities;
 
   // Create capacity mask.
   int min_cap = -1;
+  int max_cap = -1;
   int last_non_rt_cpu = -1;
   for (const auto& cap : capacity_) {
     for (const auto cpu : cap.second) {
@@ -635,6 +725,7 @@ void ArcVmCPUTopology::CreateAffinity(void) {
         min_cap = cap.first;
         last_non_rt_cpu = cpu;
       }
+      max_cap = std::max(max_cap, static_cast<int>(cap.first));
     }
   }
   // Add RT VCPUs with a lowest capacity.
@@ -644,6 +735,74 @@ void ArcVmCPUTopology::CreateAffinity(void) {
     }
     capacity_mask_ = base::JoinString(cpu_list, ",");
     cpu_list.clear();
+  }
+  // If there are heterogeneous cores, calculate uclamp.min value.
+  if (min_cap != max_cap) {
+    // Calculate a better uclamp.min for Android top-app tasks so that
+    // those tasks will NOT be scheduled on the LITTLE cores.
+    // If ARCVM kernel boots with different capacity CPUs, it enables Capacity
+    // Aware Scheduler (CAS) which schedules the tasks to a CPU comparing with
+    // its capacity and the task's expected CPU utilization.
+    // Since the uclamp.min boosts up the minimum expected utilization to the
+    // given percentage of maximum capacity, if that is bigger than the LITTLE
+    // core capacity, CAS will schedule it on big core.
+    // Thus its value must be *slightly* bigger than LITTLE core capacity.
+    // Because of this reason, this adds 5% more than the LITTLE core capacity
+    // rate. Note that the uclamp value must be a percentage of the maximum
+    // capacity (~= utilization).
+    top_app_uclamp_min_ = std::min(min_cap * 100 / kMaxCapacity + 5, 100);
+  }
+  // Allow boards to override the top_app_uclamp_min by scheduler-tune/
+  // boost-top-app.
+  brillo::CrosConfig cros_config;
+  std::string boost;
+  if (cros_config.GetString(kSchedulerTunePath, kBoostTopAppProperty, &boost)) {
+    int uclamp_min;
+    if (base::StringToInt(boost, &uclamp_min))
+      top_app_uclamp_min_ = uclamp_min;
+    else
+      LOG(WARNING) << "Failed to convert value of " << kSchedulerTunePath << "/"
+                   << kBoostTopAppProperty << " to number";
+  }
+
+  // The board may request to boost the whole ARCVM globally, in order to reduce
+  // the latency and improve general experience of the ARCVM, especially on the
+  // little.BIG CPU architecture.
+  // If the global boost wasn't defined, it won't be used at all. b/217825939
+  global_vm_boost_ = 0.0;
+  if (cros_config.GetString(kSchedulerTunePath, kBoostArcVmProperty, &boost)) {
+    double boost_factor;
+    if (base::StringToDouble(boost, &boost_factor)) {
+      int32_t little_max_freq = std::numeric_limits<int32_t>::max();
+      int32_t big_max_freq = 0;
+
+      // The global boost factor is defined as:
+      // max_freq(little_core) / max_freq(big_core) * boost_factor
+      for (int32_t cpu = 0; cpu < num_cpus_; cpu++) {
+        auto max_freq = GetCpuMaxFrequency(cpu);
+        if (max_freq) {
+          little_max_freq = std::min(little_max_freq, *max_freq);
+          big_max_freq = std::max(big_max_freq, *max_freq);
+        }
+      }
+
+      if (little_max_freq <= big_max_freq && little_max_freq != 0 &&
+          big_max_freq != 0) {
+        double freq_ratio = static_cast<double>(little_max_freq) / big_max_freq;
+        global_vm_boost_ = freq_ratio * boost_factor * 100.0;
+        if (global_vm_boost_ > 100.0) {
+          LOG(INFO) << "Clamping global VM boost from " << global_vm_boost_
+                    << "% to 100%";
+          global_vm_boost_ = 100.0;
+        }
+
+        LOG(INFO) << "Calculated global VM boost: " << global_vm_boost_ << "%";
+      } else {
+        LOG(WARNING) << "VM cannot be boosted - invalid frequencies detected "
+                     << "little: " << little_max_freq
+                     << " big: " << big_max_freq;
+      }
+    }
   }
 
   for (const auto& pkg : package_) {
@@ -679,12 +838,6 @@ void ArcVmCPUTopology::CreateAffinity(void) {
   }
   non_rt_cpu_mask_ = base::JoinString(cpu_list, ",");
   cpu_list.clear();
-
-  // Just skip any affinity settings for a symmetric processor.
-  if (IsSymmetricCpu()) {
-    num_cpus_ += num_rt_cpus_;
-    return;
-  }
 
   // Try to group VCPUs based on physical CPUs topology.
   if (package_.size() > 1) {
@@ -737,7 +890,7 @@ void ArcVmCPUTopology::CreateAffinity(void) {
 }
 
 // Creates CPU grouping by cpu_capacity.
-void ArcVmCPUTopology::CreateTopology(void) {
+void ArcVmCPUTopology::CreateTopology() {
   for (uint32_t cpu = 0; cpu < num_cpus_; cpu++) {
     auto capacity = GetCpuCapacity(cpu);
     auto package = GetCpuPackageId(cpu);
@@ -757,9 +910,9 @@ void ArcVmCPUTopology::CreateTopology(void) {
 }
 
 // Check whether the host processor is symmetric.
-// TODO(kansho): Support ADL. IsSymmetricCpu() would return true even though
+// TODO(kansho): Support ADL. IsSymmetricCPU() would return true even though
 //               it's heterogeneous.
-bool ArcVmCPUTopology::IsSymmetricCpu() {
+bool ArcVmCPUTopology::IsSymmetricCPU() {
   return capacity_.size() == 1 && package_.size() == 1;
 }
 
@@ -814,10 +967,153 @@ const std::vector<std::string>& ArcVmCPUTopology::PackageMask() {
   return package_mask_;
 }
 
+int ArcVmCPUTopology::TopAppUclampMin() {
+  return top_app_uclamp_min_;
+}
+
+double ArcVmCPUTopology::GlobalVMBoost() {
+  return global_vm_boost_;
+}
+
 ArcVmCPUTopology::ArcVmCPUTopology(uint32_t num_cpus, uint32_t num_rt_cpus) {
   num_cpus_ = num_cpus;
   num_rt_cpus_ = num_rt_cpus;
 }
 
-}  // namespace concierge
-}  // namespace vm_tools
+std::ostream& operator<<(std::ostream& os, const VmStartChecker::Status& e) {
+  switch (e) {
+    case VmStartChecker::Status::READY:
+      os << "VM is ready";
+      break;
+    case VmStartChecker::Status::EPOLL_INVALID_EVENT:
+      os << "Received invalid event while waiting for VM to start";
+      break;
+    case VmStartChecker::Status::EPOLL_INVALID_FD:
+      os << "Received invalid fd while waiting for VM to start";
+      break;
+    case VmStartChecker::Status::TIMEOUT:
+      os << "Timed out while waiting for VM to start";
+      break;
+    case VmStartChecker::Status::INVALID_SIGNAL_INFO:
+      os << "Received invalid signal info while waiting for VM to start";
+      break;
+    case VmStartChecker::Status::SIGNAL_RECEIVED:
+      os << "Received signal while waiting for VM to start";
+      break;
+    default:
+      os << "Invalid enum value";
+      break;
+  }
+  return os;
+}
+
+std::unique_ptr<VmStartChecker> VmStartChecker::Create(int32_t signal_fd) {
+  // Create an event fd that will  be signalled when a VM is ready.
+  base::ScopedFD vm_start_event_fd(eventfd(0, EFD_CLOEXEC));
+  if (!vm_start_event_fd.is_valid()) {
+    PLOG(ERROR) << "Failed to create eventfd for VM start notification";
+    return nullptr;
+  }
+
+  // We need to add it to the epoll set so that |Wait| can use it successfully.
+  // This fd shouldn't be used across child processes but still pass
+  // EPOLL_CLOEXEC as good hygiene.
+  base::ScopedFD vm_start_epoll_fd(epoll_create1(EPOLL_CLOEXEC));
+  if (!vm_start_epoll_fd.is_valid()) {
+    PLOG(ERROR) << "Failed to create epoll fd for the VM start event";
+    return nullptr;
+  }
+
+  struct epoll_event ep_event {
+    .events = EPOLLIN,
+    .data.u32 = static_cast<uint32_t>(vm_start_event_fd.get()),
+  };
+  if (HANDLE_EINTR(epoll_ctl(vm_start_epoll_fd.get(), EPOLL_CTL_ADD,
+                             vm_start_event_fd.get(), &ep_event)) < 0) {
+    PLOG(ERROR) << "Failed to epoll add VM start event fd";
+    return nullptr;
+  }
+
+  // Add the signal fd to the epoll set to see if a signal is received while
+  // waiting for the VM.
+  ep_event = {
+      .events = EPOLLIN,
+      .data.u32 = static_cast<uint32_t>(signal_fd),
+  };
+  if (HANDLE_EINTR(epoll_ctl(vm_start_epoll_fd.get(), EPOLL_CTL_ADD, signal_fd,
+                             &ep_event)) < 0) {
+    PLOG(ERROR) << "Failed to epoll add signal fd";
+    return nullptr;
+  }
+
+  return base::WrapUnique(new VmStartChecker(
+      signal_fd, std::move(vm_start_event_fd), std::move(vm_start_epoll_fd)));
+}
+
+VmStartChecker::Status VmStartChecker::Wait(base::TimeDelta timeout) {
+  struct epoll_event ep_event;
+  if (HANDLE_EINTR(epoll_wait(epoll_fd_.get(), &ep_event, 1,
+                              timeout.InMilliseconds())) <= 0) {
+    PLOG(ERROR) << "Timed out waiting for VM to start";
+    return Status::TIMEOUT;
+  }
+
+  // We've only registered for input events.
+  if ((ep_event.events & EPOLLIN) == 0) {
+    LOG(ERROR) << "Got invalid event while waiting for VM to start: "
+               << ep_event.events;
+    return Status::EPOLL_INVALID_EVENT;
+  }
+
+  if ((ep_event.data.u32 != static_cast<uint32_t>(event_fd_.get())) &&
+      (ep_event.data.u32 != static_cast<uint32_t>(signal_fd_))) {
+    LOG(ERROR) << "Got invalid fd while waiting for VM to start: "
+               << ep_event.data.u32;
+    return Status::EPOLL_INVALID_FD;
+  }
+
+  if (ep_event.data.u32 == static_cast<uint32_t>(signal_fd_)) {
+    struct signalfd_siginfo siginfo;
+    if (read(signal_fd_, &siginfo, sizeof(siginfo)) != sizeof(siginfo)) {
+      PLOG(ERROR) << "Failed to read signal info";
+      return Status::INVALID_SIGNAL_INFO;
+    }
+
+    LOG(ERROR) << "Received signal: " << siginfo.ssi_signo
+               << " while waiting to start the VM";
+    return Status::SIGNAL_RECEIVED;
+  }
+
+  // At this point |event_fd_| has been successfully signalled.
+  return Status::READY;
+}
+
+int32_t VmStartChecker::GetEventFd() const {
+  return event_fd_.get();
+}
+
+VmStartChecker::VmStartChecker(int32_t signal_fd,
+                               base::ScopedFD event_fd,
+                               base::ScopedFD epoll_fd)
+    : signal_fd_(signal_fd),
+      event_fd_(std::move(event_fd)),
+      epoll_fd_(std::move(epoll_fd)) {}
+
+VmInfo_VmType ToLegacyVmType(apps::VmType type) {
+  switch (type) {
+    case apps::VmType::TERMINA:
+      return VmInfo::TERMINA;
+    case apps::PLUGIN_VM:
+      return VmInfo::PLUGIN_VM;
+    case apps::BOREALIS:
+      return VmInfo::BOREALIS;
+    case apps::ARCVM:
+      return VmInfo::ARC_VM;
+    case apps::BRUSCHETTA:
+      return VmInfo::BRUSCHETTA;
+    default:
+      return VmInfo::UNKNOWN;
+  }
+}
+
+}  // namespace vm_tools::concierge

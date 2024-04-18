@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium OS Authors. All rights reserved.
+// Copyright 2016 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,8 +8,7 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/functional/callback.h>
 #include <base/time/time.h>
 #include <base/timer/timer.h>
 
@@ -21,13 +20,16 @@ class Clock;
 // testing code shared by all implementations.
 class BaseActivityLogger {
  public:
+  BaseActivityLogger(const BaseActivityLogger&) = delete;
+  BaseActivityLogger& operator=(const BaseActivityLogger&) = delete;
+
   // Logging callback that can be replaced for testing.
-  using LogCallback = base::Callback<void(const std::string&)>;
+  using LogCallback = base::RepeatingCallback<void(const std::string&)>;
 
   Clock* clock_for_test() { return clock_.get(); }
 
   // Sets an alternate callback to be run to log messages.
-  void SetLogCallbackForTest(LogCallback callback);
+  void SetLogCallbackForTest(const LogCallback& callback);
 
   // Returns the current delays of timers or empty deltas if they're stopped.
   base::TimeDelta GetStoppedTimerDelayForTest() const;
@@ -35,17 +37,15 @@ class BaseActivityLogger {
 
   // Triggers timers and returns true if they're running. Returns false if they
   // aren't.
-  bool TriggerStoppedTimerForTest() WARN_UNUSED_RESULT;
-  bool TriggerOngoingTimerForTest() WARN_UNUSED_RESULT;
+  [[nodiscard]] bool TriggerStoppedTimerForTest();
+  [[nodiscard]] bool TriggerOngoingTimerForTest();
 
  protected:
   BaseActivityLogger(const std::string& activity_name,
                      base::TimeDelta stopped_delay,
                      base::TimeDelta ongoing_interval);
-  BaseActivityLogger(const BaseActivityLogger&) = delete;
-  BaseActivityLogger& operator=(const BaseActivityLogger&) = delete;
 
-  virtual ~BaseActivityLogger();
+  virtual ~BaseActivityLogger() = default;
 
   // Returns a string of the format "0.5 sec ago" describing how long ago
   // |timestamp| occurred (compared to |clock_|'s idea of "now").
@@ -109,7 +109,7 @@ class PeriodicActivityLogger : public BaseActivityLogger {
   PeriodicActivityLogger(const PeriodicActivityLogger&) = delete;
   PeriodicActivityLogger& operator=(const PeriodicActivityLogger&) = delete;
 
-  ~PeriodicActivityLogger() override;
+  ~PeriodicActivityLogger() override = default;
 
   // Should be called when a periodic report of activity is received.
   void OnActivityReported();
@@ -159,7 +159,7 @@ class StartStopActivityLogger : public BaseActivityLogger {
   StartStopActivityLogger(const StartStopActivityLogger&) = delete;
   StartStopActivityLogger& operator=(const StartStopActivityLogger&) = delete;
 
-  ~StartStopActivityLogger() override;
+  ~StartStopActivityLogger() override = default;
 
   // Should be called when activity starts or stops.
   void OnActivityStarted();
@@ -196,7 +196,7 @@ class OngoingStateActivityLogger : public BaseActivityLogger {
   OngoingStateActivityLogger& operator=(const OngoingStateActivityLogger&) =
       delete;
 
-  ~OngoingStateActivityLogger() override;
+  ~OngoingStateActivityLogger() override = default;
 
   // Should be called when the state to log has changed.
   // When |state| transitions from empty to non-empty, a message will be logged

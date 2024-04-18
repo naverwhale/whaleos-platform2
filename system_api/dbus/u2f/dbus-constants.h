@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,8 +22,14 @@ const char kU2FGetAssertion[] = "GetAssertion";
 const char kU2FHasCredentials[] = "HasCredentials";
 const char kU2FHasLegacyCredentials[] = "HasLegacyCredentials";
 const char kU2FCancelWebAuthnFlow[] = "CancelWebAuthnFlow";
+const char kU2FIsPlatformAuthenticatorInitialized[] =
+    "IsPlatformAuthenticatorInitialized";
 const char kU2FIsUvpaa[] = "IsUvpaa";
 const char kU2FIsU2fEnabled[] = "IsU2fEnabled";
+const char kU2FCountCredentialsInTimeRange[] = "CountCredentialsInTimeRange";
+const char kU2FDeleteCredentialsInTimeRange[] = "DeleteCredentialsInTimeRange";
+const char kU2FGetAlgorithms[] = "GetAlgorithms";
+const char kU2FGetSupportedFeatures[] = "GetSupportedFeatures";
 
 }  // namespace u2f
 

@@ -1,5 +1,5 @@
 
-// Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+// Copyright 2013 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <metrics/metrics_library_mock.h>
@@ -128,7 +128,7 @@ TEST_F(PeerSelectorTest, GetUrlAndWaitOnBusyNetwork) {
             "http://10.0.0.1:1111/some-file");
 
   EXPECT_EQ(sf_.GetNumLookupCalls(), 4);
-  EXPECT_EQ(clock_.GetSleptTime(), base::TimeDelta::FromSeconds(3 * 30));
+  EXPECT_EQ(clock_.GetSleptTime(), base::Seconds(3 * 30));
 }
 
 TEST_F(PeerSelectorTest, GetUrlAndWaitWhenThePeerGoesAway) {
@@ -156,7 +156,7 @@ TEST_F(PeerSelectorTest, GetUrlAndWaitWhenThePeerGoesAway) {
   EXPECT_EQ(ps_.GetUrlAndWait("some-file", 1), "");
 
   EXPECT_EQ(sf_.GetNumLookupCalls(), 5);
-  EXPECT_EQ(clock_.GetSleptTime(), base::TimeDelta::FromSeconds(4 * 30));
+  EXPECT_EQ(clock_.GetSleptTime(), base::Seconds(4 * 30));
 
   // Check the metrics. The Lookup should be kVanished.
   EXPECT_CALL(mock_metrics_lib_,
@@ -182,7 +182,7 @@ TEST_F(PeerSelectorTest, GetUrlDoesntWaitForSmallFiles) {
   EXPECT_EQ(ps_.GetUrlAndWait("some-file", 1000), "");
 
   EXPECT_EQ(sf_.GetNumLookupCalls(), 1);
-  EXPECT_EQ(clock_.GetSleptTime(), base::TimeDelta::FromSeconds(0));
+  EXPECT_EQ(clock_.GetSleptTime(), base::Seconds(0));
 
   // Check the metrics. The Lookup should be kVanished.
   EXPECT_CALL(mock_metrics_lib_,

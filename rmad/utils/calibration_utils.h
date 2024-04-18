@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,10 +36,23 @@ CalibrationSetupInstruction GetCalibrationSetupInstruction(
     RmadComponent component);
 
 // Check whether calibration is required according to the calibration status.
-bool ShouldCalibrate(CalibrationComponentStatus::CalibrationStatus status);
+bool IsWaitingForCalibration(
+    CalibrationComponentStatus::CalibrationStatus status);
 
-// Check if a component with specific calibration status can be calibrated.
-bool ShouldCalibrateComponent(CalibrationComponentStatus component_status);
+// Check whether calibration is complete (complete or skipped by user) or not.
+bool IsCompleteStatus(CalibrationComponentStatus::CalibrationStatus status);
+
+// Check whether calibration is failed or not.
+bool IsFailedStatus(CalibrationComponentStatus::CalibrationStatus status);
+
+// Check whether the status is in progress or not.
+bool IsInProgressStatus(CalibrationComponentStatus::CalibrationStatus status);
+
+// Check whether the status is pending write or not.
+bool IsPendingWriteStatus(CalibrationComponentStatus::CalibrationStatus status);
+
+// Check whether the status is unknown or not.
+bool IsUnknownStatus(CalibrationComponentStatus::CalibrationStatus status);
 
 using InstructionCalibrationStatusMap = std::map<
     CalibrationSetupInstruction,
@@ -57,9 +70,8 @@ bool SetCalibrationMap(scoped_refptr<JsonStore> json_store,
 
 // Get current setup instructions by providing calibration status of all
 // sensors.
-bool GetCurrentSetupInstruction(
-    const InstructionCalibrationStatusMap& calibration_map,
-    CalibrationSetupInstruction* setup_instruction);
+CalibrationSetupInstruction GetCurrentSetupInstruction(
+    const InstructionCalibrationStatusMap& calibration_map);
 
 }  // namespace rmad
 

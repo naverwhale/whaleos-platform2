@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "system-proxy/system_proxy_adaptor.h"
@@ -31,8 +31,7 @@ constexpr char kFailedToStartWorkerError[] = "Failed to start worker process";
 // enter the network namespace of the worker process to configure it and fails
 // if it's soon after the process starts. See https://crbug.com/1095170 for
 // details.
-constexpr base::TimeDelta kConnectNamespaceDelay =
-    base::TimeDelta::FromSeconds(1);
+constexpr base::TimeDelta kConnectNamespaceDelay = base::Seconds(1);
 constexpr int kNetworkNamespaceReconnectAttempts = 3;
 
 // Serializes |proto| to a vector of bytes.
@@ -70,10 +69,10 @@ SystemProxyAdaptor::SystemProxyAdaptor(
 SystemProxyAdaptor::~SystemProxyAdaptor() = default;
 
 void SystemProxyAdaptor::RegisterAsync(
-    const brillo::dbus_utils::AsyncEventSequencer::CompletionAction&
+    brillo::dbus_utils::AsyncEventSequencer::CompletionAction
         completion_callback) {
   RegisterWithDBusObject(dbus_object_.get());
-  dbus_object_->RegisterAsync(completion_callback);
+  dbus_object_->RegisterAsync(std::move(completion_callback));
 }
 
 std::vector<uint8_t> SystemProxyAdaptor::SetAuthenticationDetails(
@@ -134,8 +133,8 @@ void SystemProxyAdaptor::SetAuthenticationDetails(
 
     brillo::MessageLoop::current()->PostTask(
         FROM_HERE,
-        base::Bind(&SystemProxyAdaptor::SetCredentialsTask,
-                   weak_ptr_factory_.GetWeakPtr(), worker, credentials));
+        base::BindOnce(&SystemProxyAdaptor::SetCredentialsTask,
+                       weak_ptr_factory_.GetWeakPtr(), worker, credentials));
   }
   if (auth_details.has_kerberos_enabled()) {
     std::string principal_name = auth_details.has_active_principal_name()
@@ -143,9 +142,10 @@ void SystemProxyAdaptor::SetAuthenticationDetails(
                                      : std::string();
 
     brillo::MessageLoop::current()->PostTask(
-        FROM_HERE, base::Bind(&SystemProxyAdaptor::SetKerberosEnabledTask,
-                              weak_ptr_factory_.GetWeakPtr(), worker,
-                              auth_details.kerberos_enabled(), principal_name));
+        FROM_HERE,
+        base::BindOnce(&SystemProxyAdaptor::SetKerberosEnabledTask,
+                       weak_ptr_factory_.GetWeakPtr(), worker,
+                       auth_details.kerberos_enabled(), principal_name));
   }
 }
 
@@ -202,18 +202,18 @@ std::vector<uint8_t> SystemProxyAdaptor::ShutDownProcess(
 
   if (request.traffic_type() == TrafficOrigin::ALL) {
     brillo::MessageLoop::current()->PostTask(
-        FROM_HERE, base::Bind(&SystemProxyAdaptor::ShutDownTask,
-                              weak_ptr_factory_.GetWeakPtr()));
+        FROM_HERE, base::BindOnce(&SystemProxyAdaptor::ShutDownTask,
+                                  weak_ptr_factory_.GetWeakPtr()));
   }
   return SerializeProto(response);
 }
 
 void SystemProxyAdaptor::GetChromeProxyServersAsync(
     const std::string& target_url,
-    const brillo::http::GetChromeProxyServersCallback& callback) {
+    brillo::http::GetChromeProxyServersCallback callback) {
   brillo::http::GetChromeProxyServersWithOverrideAsync(
       dbus_object_->GetBus(), target_url,
-      brillo::http::SystemProxyOverride::kOptOut, move(callback));
+      brillo::http::SystemProxyOverride::kOptOut, std::move(callback));
 }
 
 std::unique_ptr<SandboxedWorker> SystemProxyAdaptor::CreateWorker() {
@@ -238,8 +238,8 @@ SandboxedWorker* SystemProxyAdaptor::CreateWorkerIfNeeded(bool user_traffic) {
       patchpanel::kPatchPanelServiceName,
       dbus::ObjectPath(patchpanel::kPatchPanelServicePath));
   patchpanel_proxy->WaitForServiceToBeAvailable(
-      base::Bind(&SystemProxyAdaptor::OnPatchpanelServiceAvailable,
-                 weak_ptr_factory_.GetWeakPtr(), user_traffic));
+      base::BindOnce(&SystemProxyAdaptor::OnPatchpanelServiceAvailable,
+                     weak_ptr_factory_.GetWeakPtr(), user_traffic));
   return worker;
 }
 
@@ -323,8 +323,8 @@ void SystemProxyAdaptor::ConnectNamespace(bool user_traffic) {
   // implements "ip netns" to create the veth pair across network namespaces.
   brillo::MessageLoop::current()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&SystemProxyAdaptor::ConnectNamespaceTask,
-                 weak_ptr_factory_.GetWeakPtr(), worker, user_traffic),
+      base::BindOnce(&SystemProxyAdaptor::ConnectNamespaceTask,
+                     weak_ptr_factory_.GetWeakPtr(), worker, user_traffic),
       kConnectNamespaceDelay);
 }
 
@@ -339,12 +339,13 @@ void SystemProxyAdaptor::ConnectNamespaceTask(SandboxedWorker* worker,
 
   // TODO(acostinas): The source will need to be updated to accommodate Crostini
   // when proxy support is added.
-  auto traffic_source = user_traffic ? patchpanel::TrafficCounter::ARC
-                                     : patchpanel::TrafficCounter::SYSTEM;
-  std::pair<base::ScopedFD, patchpanel::ConnectNamespaceResponse> result =
+  auto traffic_source = user_traffic
+                            ? patchpanel::Client::TrafficSource::kArc
+                            : patchpanel::Client::TrafficSource::kSystem;
+  std::pair<base::ScopedFD, patchpanel::Client::ConnectedNamespace> result =
       patchpanel_client->ConnectNamespace(
           worker->pid(), "" /* outbound_ifname */, user_traffic,
-          true /* route_on_vpn */, traffic_source);
+          true /* route_on_vpn */, traffic_source, /*static_ipv6=*/false);
 
   if (!result.first.is_valid()) {
     LOG(ERROR) << "Failed to setup network namespace on attempt "
@@ -357,7 +358,7 @@ void SystemProxyAdaptor::ConnectNamespaceTask(SandboxedWorker* worker,
   }
 
   worker->SetNetNamespaceLifelineFd(std::move(result.first));
-  if (!worker->SetListeningAddress(result.second.peer_ipv4_address(),
+  if (!worker->SetListeningAddress(result.second.peer_ipv4_address,
                                    kProxyPort)) {
     return;
   }

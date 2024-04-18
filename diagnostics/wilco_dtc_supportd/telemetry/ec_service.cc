@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,16 +15,17 @@
 #include <cstring>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/files/file_path.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/memory/ref_counted.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/task/single_thread_task_runner.h>
 
 namespace diagnostics {
+namespace wilco {
 
 namespace internal {
 
@@ -173,7 +174,8 @@ size_t EcService::EcEvent::PayloadSizeInBytes() const {
   return (sanitized_size - 1) * sizeof(uint16_t);
 }
 
-EcService::EcService() : task_runner_(base::ThreadTaskRunnerHandle::Get()) {}
+EcService::EcService()
+    : task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {}
 
 EcService::~EcService() {
   DCHECK(sequence_checker_.CalledOnValidSequence());
@@ -212,17 +214,17 @@ bool EcService::Start() {
   return true;
 }
 
-void EcService::ShutDown(base::Closure on_shutdown_callback) {
+void EcService::ShutDown(base::OnceClosure on_shutdown_callback) {
   DCHECK(sequence_checker_.CalledOnValidSequence());
   DCHECK(on_shutdown_callback_.is_null());
   DCHECK(!on_shutdown_callback.is_null());
 
   if (!monitoring_thread_) {
-    on_shutdown_callback.Run();
+    std::move(on_shutdown_callback).Run();
     return;
   }
 
-  on_shutdown_callback_ = on_shutdown_callback;
+  on_shutdown_callback_ = std::move(on_shutdown_callback);
 
   ShutDownMonitoringThread();
 }
@@ -325,9 +327,9 @@ void EcService::OnShutdown() {
   monitoring_thread_delegate_.reset();
 
   if (!on_shutdown_callback_.is_null()) {
-    on_shutdown_callback_.Run();
-    on_shutdown_callback_.Reset();
+    std::move(on_shutdown_callback_).Run();
   }
 }
 
+}  // namespace wilco
 }  // namespace diagnostics

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,8 @@
 #include <vector>
 
 #include <base/containers/contains.h>
+#include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <brillo/proto_file_io.h>
 
 #include "modemfwd/firmware_directory.h"
@@ -21,7 +21,8 @@
 
 namespace {
 
-constexpr char kManifestName[] = "helper_manifest.prototxt";
+constexpr char kManifestName[] = "helper_manifest.textproto";
+constexpr char kManifestNameLegacy[] = "helper_manifest.prototxt";
 
 }  // namespace
 
@@ -31,7 +32,8 @@ class ModemHelperDirectoryImpl : public ModemHelperDirectory {
  public:
   ModemHelperDirectoryImpl(const HelperManifest& manifest,
                            const base::FilePath& directory,
-                           const std::string variant) {
+                           const std::string variant,
+                           scoped_refptr<dbus::Bus> bus) {
     for (const HelperEntry& entry : manifest.helper()) {
       if (entry.filename().empty())
         continue;
@@ -48,7 +50,7 @@ class ModemHelperDirectoryImpl : public ModemHelperDirectory {
         helper_info.extra_arguments.push_back(extra_argument);
       }
 
-      auto helper = CreateModemHelper(helper_info);
+      auto helper = CreateModemHelper(helper_info, bus);
       for (const std::string& device_id : entry.device_id()) {
         ELOG(INFO) << "Adding helper " << helper_info.executable_path.value()
                    << " for [" << device_id << "]";
@@ -86,16 +88,18 @@ class ModemHelperDirectoryImpl : public ModemHelperDirectory {
 };
 
 std::unique_ptr<ModemHelperDirectory> CreateModemHelperDirectory(
-    const base::FilePath& directory) {
+    const base::FilePath& directory,
+    const std::string& variant,
+    scoped_refptr<dbus::Bus> bus) {
   HelperManifest parsed_manifest;
-  if (!brillo::ReadTextProtobuf(directory.Append(kManifestName),
-                                &parsed_manifest))
+  auto file_name = base::PathExists(directory.Append(kManifestName))
+                       ? kManifestName
+                       : kManifestNameLegacy;
+  if (!brillo::ReadTextProtobuf(directory.Append(file_name), &parsed_manifest))
     return nullptr;
 
-  std::string variant = GetModemFirmwareVariant();
-
   auto helper_dir = std::make_unique<ModemHelperDirectoryImpl>(
-      parsed_manifest, directory, variant);
+      parsed_manifest, directory, variant, bus);
   if (!helper_dir->FoundHelpers())
     return nullptr;
 

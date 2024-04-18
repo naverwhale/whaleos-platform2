@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,13 +14,13 @@
 #include <base/strings/string_util.h>
 #include <gtest/gtest.h>
 
-#include "shill/fake_store.h"
 #include "shill/mock_manager.h"
 #include "shill/mock_metrics.h"
 #include "shill/mock_profile.h"
 #include "shill/mock_service.h"
-#include "shill/property_store_test.h"
 #include "shill/service_under_test.h"
+#include "shill/store/fake_store.h"
+#include "shill/store/property_store_test.h"
 
 using testing::_;
 using testing::Invoke;
@@ -249,9 +249,9 @@ TEST_F(ProfileTest, EntryEnumeration) {
   scoped_refptr<MockService> service1 = CreateMockService();
   scoped_refptr<MockService> service2 = CreateMockService();
   std::string service1_storage_name =
-      Technology(Technology::kCellular).GetName() + "_1";
+      TechnologyName(Technology::kCellular) + "_1";
   std::string service2_storage_name =
-      Technology(Technology::kCellular).GetName() + "_2";
+      TechnologyName(Technology::kCellular) + "_2";
   EXPECT_CALL(*service1, Save(_))
       .WillRepeatedly(Invoke(service1.get(), &MockService::FauxSave));
   EXPECT_CALL(*service2, Save(_))
@@ -399,13 +399,11 @@ TEST_F(ProfileTest, InitStorage) {
   EXPECT_EQ(data.size(), base::WriteFile(final_path, data.data(), data.size()));
 
   // Then test that we fail to open this file.
-  EXPECT_CALL(*metrics(), NotifyCorruptedProfile());
   EXPECT_FALSE(ProfileInitStorage(id, Profile::kOpenExisting, false,
                                   Error::kInternalError));
   Mock::VerifyAndClearExpectations(metrics());
 
   // But then on a second try the file no longer exists.
-  EXPECT_CALL(*metrics(), NotifyCorruptedProfile()).Times(0);
   ASSERT_FALSE(
       ProfileInitStorage(id, Profile::kOpenExisting, false, Error::kNotFound));
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+// Copyright 2012 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,8 +15,9 @@
 #include <dbus/cryptohome/dbus-constants.h>
 #include <gmock/gmock.h>
 
-#include "cryptohome/credentials.h"
+#include "cryptohome/storage/error.h"
 #include "cryptohome/storage/mount.h"
+#include "cryptohome/username.h"
 
 namespace cryptohome {
 class DiskCleanup;
@@ -27,32 +28,43 @@ class MockHomeDirs : public HomeDirs {
   MockHomeDirs() = default;
   virtual ~MockHomeDirs() = default;
 
-  MOCK_METHOD(void, RemoveNonOwnerCryptohomes, (), (override));
-  MOCK_METHOD(bool, GetOwner, (std::string*), (override));
-  MOCK_METHOD(bool, GetPlainOwner, (std::string*), (override));
-  MOCK_METHOD(bool, AreEphemeralUsersEnabled, (), (override));
-  MOCK_METHOD(bool, Create, (const std::string&), (override));
-  MOCK_METHOD(bool, Remove, (const std::string&), (override));
-  MOCK_METHOD(bool,
-              Rename,
-              (const std::string&, const std::string&),
+  MOCK_METHOD(HomeDirs::CryptohomesRemovedStatus,
+              RemoveCryptohomesBasedOnPolicy,
+              (),
               (override));
-  MOCK_METHOD(int64_t, ComputeDiskUsage, (const std::string&), (override));
-  MOCK_METHOD(bool, Exists, (const std::string&), (const, override));
+  MOCK_METHOD(bool, GetOwner, (ObfuscatedUsername*), (override));
+  MOCK_METHOD(bool, GetPlainOwner, (Username*), (override));
   MOCK_METHOD(bool,
+              GetEphemeralSettings,
+              (policy::DevicePolicy::EphemeralSettings*),
+              (override));
+  MOCK_METHOD(bool, KeylockerForStorageEncryptionEnabled, (), (override));
+  MOCK_METHOD(bool, MustRunAutomaticCleanupOnLogin, (), (override));
+  MOCK_METHOD(bool, Create, (const Username&), (override));
+  MOCK_METHOD(bool, Remove, (const ObfuscatedUsername&), (override));
+  MOCK_METHOD(int64_t, ComputeDiskUsage, (const Username&), (override));
+  MOCK_METHOD(bool, Exists, (const ObfuscatedUsername&), (const, override));
+  MOCK_METHOD(bool,
+              DmcryptCacheContainerExists,
+              (const ObfuscatedUsername&),
+              (const, override));
+  MOCK_METHOD(bool,
+              RemoveDmcryptCacheContainer,
+              (const ObfuscatedUsername&),
+              (override));
+  MOCK_METHOD(StorageStatusOr<bool>,
               CryptohomeExists,
-              (const std::string&, MountError*),
+              (const ObfuscatedUsername&),
               (const, override));
   MOCK_METHOD(int32_t, GetUnmountedAndroidDataCount, (), (override));
 
   MOCK_METHOD(bool,
               NeedsDircryptoMigration,
-              (const std::string&),
+              (const ObfuscatedUsername&),
               (const, override));
 
   MOCK_METHOD(bool, SetLockedToSingleUser, (), (const, override));
   MOCK_METHOD(std::vector<HomeDir>, GetHomeDirs, (), (override));
-  MOCK_METHOD(void, set_enterprise_owned, (bool), (override));
   MOCK_METHOD(bool, enterprise_owned, (), (const, override));
 };
 

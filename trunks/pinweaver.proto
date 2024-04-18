@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,21 +12,11 @@ message PinWeaverInsertLeafLogEntry {
   bytes hmac = 1;
 }
 
-message PinWeaverRemoveLeafLogEntry {
-}
+message PinWeaverRemoveLeafLogEntry {}
 
-message PinWeaverResetTreeLogEntry {
-}
+message PinWeaverResetTreeLogEntry {}
 
-message PinWeaverTimestamp {
-  uint32 boot_count = 1;
-  uint64 timer_value = 2;
-}
-
-message PinWeaverAuthLogEntry {
-  PinWeaverTimestamp timestamp = 1;
-  uint32 return_code = 2;
-}
+message PinWeaverAuthLogEntry {}
 
 message PinWeaverLogEntry {
   bytes root = 1;
@@ -40,10 +30,10 @@ message PinWeaverLogEntry {
 }
 
 message ValidPcrValue {
-    bytes bitmask = 1;
-    string digest = 2;
+  bytes bitmask = 1;
+  string digest = 2;
 }
 
 message ValidPcrCriteria {
-    repeated ValidPcrValue valid_pcr_values = 1;
+  repeated ValidPcrValue valid_pcr_values = 1;
 }

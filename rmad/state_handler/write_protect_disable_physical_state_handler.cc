@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,58 +7,75 @@
 #include <memory>
 #include <utility>
 
+#include <base/functional/bind.h>
 #include <base/logging.h>
 
-#include "rmad/system/cryptohome_client_impl.h"
-#include "rmad/utils/cr50_utils_impl.h"
+#include "rmad/constants.h"
+#include "rmad/metrics/metrics_utils.h"
+#include "rmad/system/power_manager_client_impl.h"
 #include "rmad/utils/crossystem_utils_impl.h"
 #include "rmad/utils/dbus_utils.h"
+#include "rmad/utils/gsc_utils_impl.h"
+#include "rmad/utils/write_protect_utils_impl.h"
 
 namespace rmad {
 
-namespace {
-
-// crossystem HWWP property name.
-constexpr char kHwwpProperty[] = "wpsw_cur";
-
-}  // namespace
-
 WriteProtectDisablePhysicalStateHandler::
-    WriteProtectDisablePhysicalStateHandler(scoped_refptr<JsonStore> json_store)
-    : BaseStateHandler(json_store) {
-  cr50_utils_ = std::make_unique<Cr50UtilsImpl>();
+    WriteProtectDisablePhysicalStateHandler(
+        scoped_refptr<JsonStore> json_store,
+        scoped_refptr<DaemonCallback> daemon_callback)
+    : BaseStateHandler(json_store, daemon_callback),
+      working_dir_path_(kDefaultWorkingDirPath) {
+  gsc_utils_ = std::make_unique<GscUtilsImpl>();
   crossystem_utils_ = std::make_unique<CrosSystemUtilsImpl>();
-  cryptohome_client_ = std::make_unique<CryptohomeClientImpl>(GetSystemBus());
+  write_protect_utils_ = std::make_unique<WriteProtectUtilsImpl>();
 }
 
 WriteProtectDisablePhysicalStateHandler::
     WriteProtectDisablePhysicalStateHandler(
         scoped_refptr<JsonStore> json_store,
-        std::unique_ptr<Cr50Utils> cr50_utils,
+        scoped_refptr<DaemonCallback> daemon_callback,
+        const base::FilePath& working_dir_path,
+        std::unique_ptr<GscUtils> gsc_utils,
         std::unique_ptr<CrosSystemUtils> crossystem_utils,
-        std::unique_ptr<CryptohomeClient> cryptohome_client)
-    : BaseStateHandler(json_store),
-      cr50_utils_(std::move(cr50_utils)),
+        std::unique_ptr<WriteProtectUtils> write_protect_utils)
+    : BaseStateHandler(json_store, daemon_callback),
+      working_dir_path_(working_dir_path),
+      gsc_utils_(std::move(gsc_utils)),
       crossystem_utils_(std::move(crossystem_utils)),
-      cryptohome_client_(std::move(cryptohome_client)) {}
+      write_protect_utils_(std::move(write_protect_utils)) {}
 
 RmadErrorCode WriteProtectDisablePhysicalStateHandler::InitializeState() {
   if (!state_.has_wp_disable_physical()) {
-    state_.set_allocated_wp_disable_physical(
-        new WriteProtectDisablePhysicalState);
-  }
-  if (!write_protect_signal_sender_) {
-    return RMAD_ERROR_STATE_HANDLER_INITIALIZATION_FAILED;
+    auto wp_disable_physical =
+        std::make_unique<WriteProtectDisablePhysicalState>();
+    // Keep device open if we don't want to wipe the device.
+    bool wipe_device;
+    if (!json_store_->GetValue(kWipeDevice, &wipe_device)) {
+      LOG(ERROR) << "Variable " << kWipeDevice << " not found";
+      return RMAD_ERROR_STATE_HANDLER_INITIALIZATION_FAILED;
+    }
+    wp_disable_physical->set_keep_device_open(!wipe_device);
+    state_.set_allocated_wp_disable_physical(wp_disable_physical.release());
   }
 
-  PollUntilWriteProtectOff();
   return RMAD_ERROR_OK;
+}
+
+void WriteProtectDisablePhysicalStateHandler::RunState() {
+  VLOG(1) << "Start polling write protection";
+  if (signal_timer_.IsRunning()) {
+    signal_timer_.Stop();
+  }
+  signal_timer_.Start(
+      FROM_HERE, kPollInterval, this,
+      &WriteProtectDisablePhysicalStateHandler::CheckWriteProtectOffTask);
 }
 
 void WriteProtectDisablePhysicalStateHandler::CleanUpState() {
   // Stop the polling loop.
-  if (timer_.IsRunning()) {
-    timer_.Stop();
+  if (signal_timer_.IsRunning()) {
+    signal_timer_.Stop();
   }
 }
 
@@ -67,51 +84,134 @@ WriteProtectDisablePhysicalStateHandler::GetNextStateCase(
     const RmadState& state) {
   if (!state.has_wp_disable_physical()) {
     LOG(ERROR) << "RmadState missing |physical write protection| state.";
-    return {.error = RMAD_ERROR_REQUEST_INVALID, .state_case = GetStateCase()};
+    return NextStateCaseWrapper(RMAD_ERROR_REQUEST_INVALID);
   }
 
-  int hwwp_status;
-  if (crossystem_utils_->GetInt(kHwwpProperty, &hwwp_status) &&
-      hwwp_status == 0) {
-    // Enable cr50 factory mode if possible.
-    if (!cr50_utils_->IsFactoryModeEnabled() &&
-        !cryptohome_client_->IsEnrolled()) {
-      if (cr50_utils_->EnableFactoryMode()) {
-        return {.error = RMAD_ERROR_EXPECT_REBOOT,
-                .state_case = GetStateCase()};
-      } else {
-        LOG(WARNING) << "WpDisablePhysical: Failed to enable factory mode";
-      }
-    }
-    return {.error = RMAD_ERROR_OK,
-            .state_case = RmadState::StateCase::kWpDisableComplete};
-  }
-
-  return {.error = RMAD_ERROR_WAIT, .state_case = GetStateCase()};
+  // The state will reboot automatically when write protect is disabled. Before
+  // that, always return RMAD_ERROR_WAIT.
+  return NextStateCaseWrapper(RMAD_ERROR_WAIT);
 }
 
-void WriteProtectDisablePhysicalStateHandler::PollUntilWriteProtectOff() {
-  VLOG(1) << "Start polling write protection";
-  if (timer_.IsRunning()) {
-    timer_.Stop();
+BaseStateHandler::GetNextStateCaseReply
+WriteProtectDisablePhysicalStateHandler::TryGetNextStateCaseAtBoot() {
+  // If conditions are met, we can transition to the next state.
+  if (IsReadyForTransition()) {
+    if (gsc_utils_->IsFactoryModeEnabled()) {
+      json_store_->SetValue(
+          kWpDisableMethod,
+          WpDisableMethod_Name(
+              RMAD_WP_DISABLE_METHOD_PHYSICAL_ASSEMBLE_DEVICE));
+      MetricsUtils::SetMetricsValue(
+          json_store_, kMetricsWpDisableMethod,
+          WpDisableMethod_Name(
+              RMAD_WP_DISABLE_METHOD_PHYSICAL_ASSEMBLE_DEVICE));
+    } else {
+      json_store_->SetValue(
+          kWpDisableMethod,
+          WpDisableMethod_Name(
+              RMAD_WP_DISABLE_METHOD_PHYSICAL_KEEP_DEVICE_OPEN));
+      MetricsUtils::SetMetricsValue(
+          json_store_, kMetricsWpDisableMethod,
+          WpDisableMethod_Name(
+              RMAD_WP_DISABLE_METHOD_PHYSICAL_KEEP_DEVICE_OPEN));
+    }
+    return NextStateCaseWrapper(RmadState::StateCase::kWpDisableComplete);
   }
-  timer_.Start(
-      FROM_HERE, kPollInterval, this,
-      &WriteProtectDisablePhysicalStateHandler::CheckWriteProtectOffTask);
+
+  // Otherwise, stay on the same state.
+  return NextStateCaseWrapper(GetStateCase());
+}
+
+bool WriteProtectDisablePhysicalStateHandler::IsReadyForTransition() const {
+  // To transition to next state, all the conditions should meet
+  // - HWWP should be disabled.
+  // - We can skip enabling factory mode, either factory mode is already enabled
+  //   or we want to keep the device open.
+  return CanSkipEnablingFactoryMode() && IsHwwpDisabled();
+}
+
+bool WriteProtectDisablePhysicalStateHandler::IsHwwpDisabled() const {
+  bool hwwp_enabled;
+  return (
+      write_protect_utils_->GetHardwareWriteProtectionStatus(&hwwp_enabled) &&
+      !hwwp_enabled);
+}
+
+bool WriteProtectDisablePhysicalStateHandler::CanSkipEnablingFactoryMode()
+    const {
+  return gsc_utils_->IsFactoryModeEnabled() ||
+         state_.wp_disable_physical().keep_device_open();
 }
 
 void WriteProtectDisablePhysicalStateHandler::CheckWriteProtectOffTask() {
-  DCHECK(write_protect_signal_sender_);
   VLOG(1) << "Check write protection";
 
-  int hwwp_status;
-  if (!crossystem_utils_->GetInt(kHwwpProperty, &hwwp_status)) {
-    LOG(ERROR) << "Failed to get HWWP status";
-    return;
+  if (IsHwwpDisabled()) {
+    signal_timer_.Stop();
+    OnWriteProtectDisabled();
   }
-  if (hwwp_status == 0) {
-    write_protect_signal_sender_->Run(false);
-    timer_.Stop();
+}
+
+void WriteProtectDisablePhysicalStateHandler::OnWriteProtectDisabled() {
+  bool powerwash_required = false;
+  if (!CanSkipEnablingFactoryMode()) {
+    // Enable GSC factory mode. This no longer reboots the device, so we need
+    // to trigger a reboot ourselves.
+    if (!gsc_utils_->EnableFactoryMode()) {
+      LOG(ERROR) << "Failed to enable factory mode.";
+    }
+    if (!IsPowerwashDisabled(working_dir_path_)) {
+      powerwash_required = true;
+    }
+  }
+
+  // Chrome picks up the signal and shows the "Preparing to reboot" message.
+  daemon_callback_->GetWriteProtectSignalCallback().Run(false);
+
+  // Request RMA mode powerwash if required, then reboot EC.
+  if (powerwash_required) {
+    reboot_timer_.Start(
+        FROM_HERE, kRebootDelay,
+        base::BindOnce(&WriteProtectDisablePhysicalStateHandler::
+                           RequestRmaPowerwashAndRebootEc,
+                       base::Unretained(this)));
+  } else {
+    reboot_timer_.Start(
+        FROM_HERE, kRebootDelay,
+        base::BindOnce(&WriteProtectDisablePhysicalStateHandler::RebootEc,
+                       base::Unretained(this)));
+  }
+}
+
+void WriteProtectDisablePhysicalStateHandler::RequestRmaPowerwashAndRebootEc() {
+  DLOG(INFO) << "Requesting RMA mode powerwash";
+  daemon_callback_->GetExecuteRequestRmaPowerwashCallback().Run(
+      base::BindOnce(&WriteProtectDisablePhysicalStateHandler::
+                         RequestRmaPowerwashAndRebootEcCallback,
+                     base::Unretained(this)));
+}
+
+void WriteProtectDisablePhysicalStateHandler::
+    RequestRmaPowerwashAndRebootEcCallback(bool success) {
+  if (!success) {
+    LOG(ERROR) << "Failed to request RMA mode powerwash";
+  }
+  RebootEc();
+}
+
+void WriteProtectDisablePhysicalStateHandler::RebootEc() {
+  DLOG(INFO) << "Rebooting EC after physically removing WP";
+  json_store_->Sync();
+  daemon_callback_->GetExecuteRebootEcCallback().Run(
+      base::BindOnce(&WriteProtectDisablePhysicalStateHandler::RebootEcCallback,
+                     base::Unretained(this)));
+}
+
+void WriteProtectDisablePhysicalStateHandler::RebootEcCallback(bool success) {
+  // Just an informative callback.
+  // TODO(chenghan): Send an error to Chrome when the reboot fails.
+  if (!success) {
+    LOG(ERROR) << "Failed to reboot EC";
   }
 }
 

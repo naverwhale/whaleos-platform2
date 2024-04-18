@@ -1,18 +1,16 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CROS_DISKS_SANDBOXED_INIT_H_
 #define CROS_DISKS_SANDBOXED_INIT_H_
 
-#include <memory>
-#include <string>
-#include <vector>
+#include <utility>
 
 #include <sys/types.h>
 
-#include <base/callback.h>
 #include <base/files/scoped_file.h>
+#include <base/functional/callback.h>
 
 namespace cros_disks {
 
@@ -34,35 +32,64 @@ struct SubprocessPipe {
   static base::ScopedFD Open(Direction direction, base::ScopedFD* parent_fd);
 };
 
-// To run daemons in a PID namespace under minijail we need to provide
-// an "init" process for the sandbox. As we rely on return code of the
-// launcher of the daemonized process we must send it through a side
-// channel back to the caller without waiting to the whole PID namespace
-// to terminate.
+// To run daemons in a PID namespace under minijail we need to provide an 'init'
+// process for the sandbox. As we rely on return code of the launcher of the
+// daemonized process we must send it through a side channel back to the caller
+// without waiting to the whole PID namespace to terminate.
 class SandboxedInit {
  public:
-  SandboxedInit(base::ScopedFD in_fd,
-                base::ScopedFD out_fd,
-                base::ScopedFD err_fd,
-                base::ScopedFD ctrl_fd);
-  SandboxedInit(const SandboxedInit&) = delete;
-  SandboxedInit& operator=(const SandboxedInit&) = delete;
+  // Function to run in the 'launcher' process.
+  using Launcher = base::OnceCallback<int()>;
 
-  ~SandboxedInit();
+  SandboxedInit(Launcher launcher,
+                base::ScopedFD ctrl_fd,
+                base::ScopedFD termination_fd = {})
+      : launcher_(std::move(launcher)),
+        ctrl_fd_(std::move(ctrl_fd)),
+        termination_fd_(std::move(termination_fd)) {
+    DCHECK(launcher_);
+    DCHECK(ctrl_fd_.is_valid());
+  }
 
-  // To be run inside the jail. Never returns.
-  [[noreturn]] void RunInsideSandboxNoReturn(
-      base::OnceCallback<int()> launcher);
+  // This should be called in the 'init' process. Creates a child 'launcher'
+  // process in which the |launcher| function is run. Monitors child processes
+  // for termination. Terminates this 'init' process when there are no child
+  // process anymore.
+  [[noreturn]] void Run();
 
-  static bool PollLauncherStatus(base::ScopedFD* ctrl_fd, int* exit_code);
+  // Reads and returns the exit code from |*ctrl_fd|. Returns -1 immediately if
+  // no data is available yet. Closes |*ctrl_fd| once the exit code has been
+  // read.
+  //
+  // Precondition: ctrl_fd != nullptr && ctrl_fd->is_valid()
+  static int PollLauncher(base::ScopedFD* ctrl_fd);
 
-  static int WStatusToStatus(int wstatus);
+  // Reads and returns the exit code from |*ctrl_fd|. Waits for data to be
+  // available. Closes |*ctrl_fd| once the exit code has been read.
+  //
+  // Precondition: ctrl_fd != nullptr && ctrl_fd->is_valid()
+  static int WaitForLauncher(base::ScopedFD* ctrl_fd);
+
+  // Converts a process "wait status" (as returned by wait() and waitpid()) to
+  // an exit code in the range 0 to 255. Returns -1 if the wait status |wstatus|
+  // indicates that the process hasn't finished yet.
+  static int WaitStatusToExitCode(int wstatus);
 
  private:
-  int RunInitLoop(pid_t root_pid, base::ScopedFD ctrl_fd);
-  pid_t StartLauncher(base::OnceCallback<int()> launcher);
+  // Creates a child 'launcher' process in which the launcher function is run.
+  // Returns the PID of this 'launcher' process.
+  pid_t StartLauncher();
 
-  base::ScopedFD in_fd_, out_fd_, err_fd_, ctrl_fd_;
+  // Function to run in the 'launcher' process.
+  Launcher launcher_;
+
+  // Write end of the pipe into which the exit code of the launcher process is
+  // written.
+  base::ScopedFD ctrl_fd_;
+
+  // Read end of termination pipe. SandboxInit configures this pipe so that it
+  // terminates the init process when the write end is closed.
+  base::ScopedFD termination_fd_;
 };
 
 }  // namespace cros_disks

@@ -1,11 +1,14 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <base/bind.h>
-#include <base/callback.h>
+#include <utility>
+
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
+#include <base/functional/callback_helpers.h>
 #include <base/logging.h>
 #include <brillo/dbus/async_event_sequencer.h>
 
@@ -21,9 +24,9 @@ AsyncEventSequencer::Handler AsyncEventSequencer::GetHandler(
   CHECK(!started_) << "Cannot create handlers after OnAllTasksCompletedCall()";
   int unique_registration_id = ++registration_counter_;
   outstanding_registrations_.insert(unique_registration_id);
-  return base::Bind(&AsyncEventSequencer::HandleFinish, this,
-                    unique_registration_id, descriptive_message,
-                    failure_is_fatal);
+  return base::BindOnce(&AsyncEventSequencer::HandleFinish, this,
+                        unique_registration_id, descriptive_message,
+                        failure_is_fatal);
 }
 
 AsyncEventSequencer::ExportHandler AsyncEventSequencer::GetExportHandler(
@@ -32,35 +35,32 @@ AsyncEventSequencer::ExportHandler AsyncEventSequencer::GetExportHandler(
     const std::string& descriptive_message,
     bool failure_is_fatal) {
   auto finish_handler = GetHandler(descriptive_message, failure_is_fatal);
-  return base::Bind(&AsyncEventSequencer::HandleDBusMethodExported, this,
-                    finish_handler, interface_name, method_name);
+  return base::BindOnce(&AsyncEventSequencer::HandleDBusMethodExported, this,
+                        std::move(finish_handler), interface_name, method_name);
 }
 
-void AsyncEventSequencer::OnAllTasksCompletedCall(
-    std::vector<CompletionAction> actions) {
+void AsyncEventSequencer::OnAllTasksCompletedCall(CompletionAction action) {
   CHECK(!started_) << "OnAllTasksCompletedCall called twice!";
   started_ = true;
-  completion_actions_.assign(actions.begin(), actions.end());
+  completion_action_ = std::move(action);
   // All of our callbacks might have been called already.
   PossiblyRunCompletionActions();
 }
 
 namespace {
-void IgnoreSuccess(const AsyncEventSequencer::CompletionTask& task,
-                   bool /*success*/) {
-  task.Run();
+void IgnoreSuccess(AsyncEventSequencer::CompletionTask task, bool /*success*/) {
+  std::move(task).Run();
 }
-void DoNothing(bool /* success */) {}
 }  // namespace
 
 AsyncEventSequencer::CompletionAction AsyncEventSequencer::WrapCompletionTask(
-    const CompletionTask& task) {
-  return base::Bind(&IgnoreSuccess, task);
+    CompletionTask task) {
+  return base::BindOnce(&IgnoreSuccess, std::move(task));
 }
 
 AsyncEventSequencer::CompletionAction
 AsyncEventSequencer::GetDefaultCompletionAction() {
-  return base::Bind(&DoNothing);
+  return base::DoNothing();
 }
 
 void AsyncEventSequencer::HandleFinish(int registration_number,
@@ -73,7 +73,7 @@ void AsyncEventSequencer::HandleFinish(int registration_number,
 }
 
 void AsyncEventSequencer::HandleDBusMethodExported(
-    const AsyncEventSequencer::Handler& finish_handler,
+    AsyncEventSequencer::Handler finish_handler,
     const std::string& expected_interface_name,
     const std::string& expected_method_name,
     const std::string& actual_interface_name,
@@ -85,7 +85,7 @@ void AsyncEventSequencer::HandleDBusMethodExported(
   CHECK_EQ(expected_interface_name, actual_interface_name)
       << "Exported method DBus interface '" << actual_interface_name << "' "
       << "but expected '" << expected_interface_name << "'";
-  finish_handler.Run(success);
+  std::move(finish_handler).Run(success);
 }
 
 void AsyncEventSequencer::RetireRegistration(int registration_number) {
@@ -114,12 +114,11 @@ void AsyncEventSequencer::PossiblyRunCompletionActions() {
     // be scheduled in the future.
     return;
   }
-  for (const auto& completion_action : completion_actions_) {
-    // Should this be put on the message loop or run directly?
-    completion_action.Run(!had_failures_);
+  // Should this be put on the message loop or run directly?
+  if (!completion_action_.is_null()) {
+    // Our reference to the action is discarded by std::move.
+    std::move(completion_action_).Run(!had_failures_);
   }
-  // Discard our references to those actions.
-  completion_actions_.clear();
 }
 
 }  // namespace dbus_utils

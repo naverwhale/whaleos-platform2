@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@
 #include <string>
 
 #include <attestation/proto_bindings/attestation_ca.pb.h>
-#include <base/optional.h>
 #include <crypto/scoped_openssl_types.h>
 
 namespace hwsec_test_utils {

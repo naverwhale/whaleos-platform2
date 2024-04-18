@@ -1,15 +1,17 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHILL_RESULT_AGGREGATOR_H_
 #define SHILL_RESULT_AGGREGATOR_H_
 
+#include <string>
+
 #include <base/cancelable_callback.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/memory/ref_counted.h>
 #include <base/memory/scoped_refptr.h>
+#include <base/time/time.h>
 
 #include "shill/callbacks.h"
 #include "shill/error.h"
@@ -44,14 +46,14 @@ class EventDispatcher;
 //
 // void Manager::Foo() {
 //   auto result_aggregator(base::MakeRefCounted<ResultAggregator>(
-//       Bind(&Manager::Func, AsWeakPtr()), dispatcher_, 1000));
+//       BindOnce(&Manager::Func, AsWeakPtr()), dispatcher_, 1000));
 //   if (condition) {
 //     LOG(ERROR) << "Failed!"
 //     return;
 //   }
 //   ResultCallback aggregator_callback(
-//       Bind(&ResultAggregator::ReportResult, result_aggregator));
-//   devices_[0]->OnBeforeSuspend(aggregator_callback);
+//       BindOnce(&ResultAggregator::ReportResult, result_aggregator));
+//   devices_[0]->OnBeforeSuspend(std::move(aggregator_callback));
 // }
 //
 // If |condition| is true and the function returns without passing the
@@ -81,10 +83,14 @@ class EventDispatcher;
 
 class ResultAggregator : public base::RefCounted<ResultAggregator> {
  public:
-  explicit ResultAggregator(const ResultCallback& callback);
-  ResultAggregator(const ResultCallback& callback,
+  ResultAggregator(ResultCallback callback,
+                   base::Location location,
+                   std::string error_prefix);
+  ResultAggregator(ResultCallback callback,
+                   base::Location location,
+                   std::string error_prefix,
                    EventDispatcher* dispatcher,
-                   int timeout_milliseconds);
+                   base::TimeDelta timeout);
   ResultAggregator(const ResultAggregator&) = delete;
   ResultAggregator& operator=(const ResultAggregator&) = delete;
 
@@ -97,10 +103,12 @@ class ResultAggregator : public base::RefCounted<ResultAggregator> {
   void Timeout();
 
   base::WeakPtrFactory<ResultAggregator> weak_ptr_factory_;
-  const ResultCallback callback_;
-  base::CancelableClosure timeout_callback_;
+  ResultCallback callback_;
+  base::CancelableOnceClosure timeout_callback_;
   bool got_result_;
   bool timed_out_;
+  base::Location location_;
+  std::string error_prefix_;
   Error error_;
 };
 

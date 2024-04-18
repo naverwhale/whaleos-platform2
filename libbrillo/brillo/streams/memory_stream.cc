@@ -1,12 +1,13 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <brillo/streams/memory_stream.h>
 
 #include <limits>
+#include <utility>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <brillo/message_loops/message_loop.h>
 #include <brillo/streams/stream_errors.h>
 #include <brillo/streams/stream_utils.h>
@@ -78,7 +79,6 @@ StreamPtr MemoryStream::CreateEx(
     std::unique_ptr<data_container::DataContainerInterface> container,
     size_t stream_position,
     ErrorPtr* error) {
-  ignore_result(error);  // Unused.
   return StreamPtr{new MemoryStream(std::move(container), stream_position)};
 }
 
@@ -180,7 +180,6 @@ bool MemoryStream::FlushBlocking(ErrorPtr* error) {
 }
 
 bool MemoryStream::CloseBlocking(ErrorPtr* error) {
-  ignore_result(error);  // Unused.
   container_.reset();
   return true;
 }
@@ -189,19 +188,25 @@ bool MemoryStream::CheckContainer(ErrorPtr* error) const {
   return container_ || stream_utils::ErrorStreamClosed(FROM_HERE, error);
 }
 
-bool MemoryStream::WaitForData(AccessMode mode,
-                               const base::Callback<void(AccessMode)>& callback,
-                               ErrorPtr* /* error */) {
-  MessageLoop::current()->PostTask(FROM_HERE, base::BindOnce(callback, mode));
+bool MemoryStream::WaitForDataRead(base::OnceClosure callback,
+                                   ErrorPtr* /* error */) {
+  MessageLoop::current()->PostTask(FROM_HERE, std::move(callback));
   return true;
 }
 
-bool MemoryStream::WaitForDataBlocking(AccessMode in_mode,
-                                       base::TimeDelta /* timeout */,
-                                       AccessMode* out_mode,
-                                       ErrorPtr* /* error */) {
-  if (out_mode)
-    *out_mode = in_mode;
+bool MemoryStream::WaitForDataReadBlocking(base::TimeDelta /* timeout */,
+                                           ErrorPtr* /* error */) {
+  return true;
+}
+
+bool MemoryStream::WaitForDataWrite(base::OnceClosure callback,
+                                    ErrorPtr* /* error */) {
+  MessageLoop::current()->PostTask(FROM_HERE, std::move(callback));
+  return true;
+}
+
+bool MemoryStream::WaitForDataWriteBlocking(base::TimeDelta /* timeout */,
+                                            ErrorPtr* /* error */) {
   return true;
 }
 

@@ -1,4 +1,4 @@
-/* Copyright 2018 The Chromium OS Authors. All rights reserved.
+/* Copyright 2018 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -30,6 +30,15 @@ const char kForceDisableFaceAePath[] = "/run/camera/force_disable_face_ae";
 const char kForceEnableHdrNetPath[] = "/run/camera/force_enable_hdrnet";
 const char kForceDisableHdrNetPath[] = "/run/camera/force_disable_hdrnet";
 
+const char kForceEnableAutoFramingPath[] =
+    "/run/camera/force_enable_auto_framing";
+const char kForceDisableAutoFramingPath[] =
+    "/run/camera/force_disable_auto_framing";
+
+// Special files to force control effects
+const char kForceEnableEffectsPath[] = "/run/camera/force_enable_effects";
+const char kForceDisableEffectsPath[] = "/run/camera/force_disable_effects";
+
 // ------Configuration for |kCrosCameraTestConfigPathString|-------
 // boolean value used in test mode for forcing hardware jpeg encode/decode in
 // USB HAL (won't fallback to SW encode/decode).
@@ -41,6 +50,10 @@ const char kCrosForceJpegHardwareDecodeOption[] = "force_jpeg_hw_dec";
 const char kCrosEnableFrontCameraOption[] = "enable_front_camera";
 const char kCrosEnableBackCameraOption[] = "enable_back_camera";
 const char kCrosEnableExternalCameraOption[] = "enable_external_camera";
+
+// List of string of enabled camera HAL. The format is a list of the HAL .so
+// file names. e.g. ["usb.so", "fake.so"].
+const char kCrosEnabledHalsOption[] = "enabled_hals";
 
 // boolean value for specify enable/disable the mechanism to abort camera
 // service when capture request/response monitors reach timeout.

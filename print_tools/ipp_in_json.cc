@@ -1,172 +1,175 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "print_tools/ipp_in_json.h"
+#include "ipp_in_json.h"
 
 #include <memory>
 #include <utility>
 
 #include <base/check.h>
 #include <base/json/json_writer.h>
-#include <base/macros.h>
-#include <base/optional.h>
 #include <base/values.h>
+#include <chromeos/libipp/attribute.h>
+#include <chromeos/libipp/frame.h>
+#include <chromeos/libipp/ipp_enums.h>
+#include <chromeos/libipp/parser.h>
 
 namespace {
 
-base::Value SaveAsJson(const ipp::Collection* coll);
+base::StringPiece ToStringPiece(std::string_view sv) {
+  return base::StringPiece(sv.data(), sv.length());
+}
 
-// It saves a single value (at given index) from the attribute as JSON
-// structure. The parameter "attr" cannot be nullptr, "index" must be correct.
-base::Value SaveAsJson(const ipp::Attribute* attr, unsigned index) {
-  CHECK(attr != nullptr);
-  CHECK(index < attr->GetSize());
-  using AttrType = ipp::AttrType;
-  switch (attr->GetType()) {
-    case AttrType::integer: {
-      int vi;
-      attr->GetValue(&vi, index);
-      return base::Value(vi);
-    }
-    case AttrType::boolean: {
-      int vb;
-      attr->GetValue(&vb, index);
-      return base::Value(static_cast<bool>(vb));
-    }
-    case AttrType::enum_: {
-      std::string vs;
-      attr->GetValue(&vs, index);
-      if (vs.empty()) {
-        int vi;
-        attr->GetValue(&vi, index);
-        return base::Value(vi);
-      }
-      return base::Value(vs);
-    }
-    case AttrType::collection:
-      return SaveAsJson(attr->GetCollection(index));
-    case AttrType::text:
-    case AttrType::name: {
-      ipp::StringWithLanguage vs;
-      attr->GetValue(&vs, index);
-      if (vs.language.empty())
-        return base::Value(vs.value);
-      base::Value obj(base::Value::Type::DICTIONARY);
-      obj.SetStringKey("value", vs.value);
-      obj.SetStringKey("language", vs.language);
-      return obj;
-    }
-    case AttrType::dateTime:
-    case AttrType::resolution:
-    case AttrType::rangeOfInteger:
-    case AttrType::octetString:
-    case AttrType::keyword:
-    case AttrType::uri:
-    case AttrType::uriScheme:
-    case AttrType::charset:
-    case AttrType::naturalLanguage:
-    case AttrType::mimeMediaType: {
-      std::string vs;
-      attr->GetValue(&vs, index);
-      return base::Value(vs);
+base::Value SaveAsJson(const ipp::Collection& coll);
+
+// Converts `value` from the attribute `attr` to base::Value.
+template <typename ValueType>
+base::Value SaveValueAsJson(const ipp::Attribute& attr,
+                            const ValueType& value) {
+  return base::Value(ipp::ToString(value));
+}
+
+template <>
+base::Value SaveValueAsJson<int32_t>(const ipp::Attribute& attr,
+                                     const int32_t& value) {
+  if (attr.Tag() == ipp::ValueTag::boolean)
+    return base::Value(static_cast<bool>(value));
+  if (attr.Tag() == ipp::ValueTag::enum_) {
+    ipp::AttrName attrName;
+    if (ipp::FromString(std::string(attr.Name()), &attrName)) {
+      return base::Value(ipp::ToString(attrName, value));
     }
   }
-  return base::Value();  // not reachable
+  return base::Value(value);
+}
+
+template <>
+base::Value SaveValueAsJson<std::string>(const ipp::Attribute& attr,
+                                         const std::string& value) {
+  return base::Value(value);
+}
+
+template <>
+base::Value SaveValueAsJson<ipp::StringWithLanguage>(
+    const ipp::Attribute& attr, const ipp::StringWithLanguage& value) {
+  base::Value::Dict obj;
+  obj.Set("value", value.value);
+  obj.Set("language", value.language);
+  return base::Value(std::move(obj));
+}
+
+// Converts all values from `attr` to base::Value. The type of values must match
+// `ValueType`.
+template <typename ValueType>
+base::Value SaveValuesAsJsonTyped(const ipp::Attribute& attr) {
+  std::vector<ValueType> values;
+  attr.GetValues(values);
+  if (values.size() > 1) {
+    base::Value::List arr;
+    for (size_t i = 0; i < values.size(); ++i)
+      arr.Append(SaveValueAsJson(attr, values[i]));
+    return base::Value(std::move(arr));
+  } else {
+    return SaveValueAsJson(attr, values.at(0));
+  }
+}
+
+template <>
+base::Value SaveValuesAsJsonTyped<const ipp::Collection&>(
+    const ipp::Attribute& attr) {
+  ipp::ConstCollsView colls = attr.Colls();
+  if (colls.size() > 1) {
+    base::Value::List arr;
+    for (const ipp::Collection& coll : colls)
+      arr.Append(SaveAsJson(coll));
+    return base::Value(std::move(arr));
+  } else {
+    return SaveAsJson(colls[0]);
+  }
 }
 
 // It saves all attribute's values as JSON structure.
-// The parameter "attr" cannot be nullptr.
-base::Value SaveAsJson(const ipp::Attribute* attr) {
-  CHECK(attr != nullptr);
-  if (attr->IsASet()) {
-    base::Value arr(base::Value::Type::LIST);
-    const unsigned size = attr->GetSize();
-    for (unsigned i = 0; i < size; ++i)
-      arr.Append(SaveAsJson(attr, i));
-    return arr;
-  } else {
-    return SaveAsJson(attr, 0);
+base::Value SaveValuesAsJson(const ipp::Attribute& attr) {
+  switch (attr.Tag()) {
+    case ipp::ValueTag::textWithLanguage:
+    case ipp::ValueTag::nameWithLanguage:
+      return SaveValuesAsJsonTyped<ipp::StringWithLanguage>(attr);
+    case ipp::ValueTag::dateTime:
+      return SaveValuesAsJsonTyped<ipp::DateTime>(attr);
+    case ipp::ValueTag::resolution:
+      return SaveValuesAsJsonTyped<ipp::Resolution>(attr);
+    case ipp::ValueTag::rangeOfInteger:
+      return SaveValuesAsJsonTyped<ipp::RangeOfInteger>(attr);
+    case ipp::ValueTag::collection:
+      return SaveValuesAsJsonTyped<const ipp::Collection&>(attr);
+    default:
+      if (ipp::IsInteger(attr.Tag()))
+        return SaveValuesAsJsonTyped<int32_t>(attr);
+      return SaveValuesAsJsonTyped<std::string>(attr);
   }
 }
 
 // It saves a given Collection as JSON object.
-// The parameter "coll" cannot be nullptr.
-base::Value SaveAsJson(const ipp::Collection* coll) {
-  CHECK(coll != nullptr);
-  base::Value obj(base::Value::Type::DICTIONARY);
-  std::vector<const ipp::Attribute*> attrs = coll->GetAllAttributes();
+base::Value SaveAsJson(const ipp::Collection& coll) {
+  base::Value::Dict obj;
 
-  for (auto a : attrs) {
-    auto state = a->GetState();
-    if (state == ipp::AttrState::unset)
-      continue;
-
-    if (state == ipp::AttrState::set) {
-      base::Value obj2(base::Value::Type::DICTIONARY);
-      obj2.SetStringKey("type", ToString(a->GetType()));
-      obj2.SetKey("value", SaveAsJson(a));
-      obj.SetKey(a->GetName(), std::move(obj2));
+  for (const ipp::Attribute& a : coll) {
+    auto tag = a.Tag();
+    if (!ipp::IsOutOfBand(tag)) {
+      base::Value::Dict obj2;
+      obj2.Set("type", ToStringPiece(ipp::ToStrView(tag)));
+      obj2.Set("value", SaveValuesAsJson(a));
+      obj.Set(ToStringPiece(a.Name()), std::move(obj2));
     } else {
-      obj.SetStringKey(a->GetName(), ToString(state));
+      obj.Set(ToStringPiece(a.Name()), ToStringPiece(ipp::ToStrView(tag)));
     }
   }
 
-  return obj;
+  return base::Value(std::move(obj));
 }
 
 // It saves all groups from given Package as JSON object.
-// The parameter "pkg" cannot be nullptr.
-base::Value SaveAsJson(const ipp::Package* pkg) {
-  CHECK(pkg != nullptr);
-  base::Value obj(base::Value::Type::DICTIONARY);
-  std::vector<const ipp::Group*> groups = pkg->GetAllGroups();
-
-  for (auto g : groups) {
-    const size_t size = g->GetSize();
-    if (size == 0)
+base::Value SaveAsJson(const ipp::Frame& pkg) {
+  base::Value::Dict obj;
+  for (ipp::GroupTag gt : ipp::kGroupTags) {
+    auto groups = pkg.Groups(gt);
+    if (groups.empty())
       continue;
-    if (g->IsASet()) {
-      base::Value arr(base::Value::Type::LIST);
-      for (size_t i = 0; i < size; ++i)
-        arr.Append(SaveAsJson(g->GetCollection(i)));
-      obj.SetKey(ToString(g->GetName()), std::move(arr));
+    if (groups.size() > 1) {
+      base::Value::List arr;
+      for (const ipp::Collection& g : groups)
+        arr.Append(SaveAsJson(g));
+      obj.Set(ToString(gt), std::move(arr));
     } else {
-      obj.SetKey(ToString(g->GetName()), SaveAsJson(g->GetCollection()));
+      obj.Set(ToString(gt), SaveAsJson(groups[0]));
     }
   }
-
-  return obj;
+  return base::Value(std::move(obj));
 }
 
 // Saves given logs as JSON array.
-base::Value SaveAsJson(const std::vector<ipp::Log>& log) {
-  base::Value arr(base::Value::Type::LIST);
-  for (const auto& l : log) {
-    base::Value obj(base::Value::Type::DICTIONARY);
-    obj.SetStringKey("message", l.message);
-    if (!l.frame_context.empty())
-      obj.SetStringKey("frame_context", l.frame_context);
-    if (!l.parser_context.empty())
-      obj.SetStringKey("parser_context", l.parser_context);
-    arr.Append(std::move(obj));
+base::Value SaveAsJson(const ipp::SimpleParserLog& log) {
+  base::Value::List arr;
+  for (const auto& l : log.Errors()) {
+    arr.Append(base::Value(ipp::ToString(l)));
   }
-  return arr;
+  return base::Value(std::move(arr));
 }
 
 }  // namespace
 
-bool ConvertToJson(const ipp::Response& response,
-                   const std::vector<ipp::Log>& log,
+bool ConvertToJson(const ipp::Frame& response,
+                   const ipp::SimpleParserLog& log,
                    bool compressed_json,
                    std::string* json) {
   // Build structure.
-  base::Value doc(base::Value::Type::DICTIONARY);
-  doc.SetStringKey("status", ipp::ToString(response.StatusCode()));
-  if (!log.empty()) {
-    doc.SetKey("parsing_logs", SaveAsJson(log));
+  base::Value::Dict doc;
+  doc.Set("status", ipp::ToString(response.StatusCode()));
+  if (!log.Errors().empty()) {
+    doc.Set("parsing_logs", SaveAsJson(log));
   }
-  doc.SetKey("response", SaveAsJson(&response));
+  doc.Set("response", SaveAsJson(response));
   // Convert to JSON.
   bool result;
   if (compressed_json) {

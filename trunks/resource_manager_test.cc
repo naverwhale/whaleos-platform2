@@ -1,21 +1,23 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "trunks/resource_manager.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/check.h>
 #include <base/check_op.h>
+#include <base/functional/bind.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "trunks/error_codes.h"
 #include "trunks/mock_command_transceiver.h"
 #include "trunks/mock_tpm.h"
+#include "trunks/tpm_generated.h"
 #include "trunks/trunks_factory_for_test.h"
 
 using testing::_;
@@ -233,6 +235,22 @@ class ResourceManagerTest : public testing::Test {
     resource_manager_.SendCommandAndWait(command);
   }
 
+  // Causes the resource manager to evict an existing session handle and fail.
+  void EvictSessionFail() {
+    std::string command = CreateCommand(TPM_CC_Startup, kNoHandles,
+                                        kNoAuthorization, kNoParameters);
+    std::string response = CreateErrorResponse(TPM_RC_SESSION_MEMORY);
+    std::string success_response = CreateResponse(
+        TPM_RC_SUCCESS, kNoHandles, kNoAuthorization, kNoParameters);
+    EXPECT_CALL(transceiver_, SendCommandAndWait(_))
+        .WillOnce(Return(response))
+        .WillRepeatedly(Return(success_response));
+    EXPECT_CALL(tpm_, ContextSaveSync(_, _, _, _))
+        .WillOnce(Return(TPM_RC_REFERENCE_H0));
+    EXPECT_CALL(tpm_, FlushContextSync(_, _)).WillOnce(Return(TPM_RC_SUCCESS));
+    resource_manager_.SendCommandAndWait(command);
+  }
+
   // Creates a TPMS_CONTEXT with the given sequence field.
   TPMS_CONTEXT CreateContext(UINT64 sequence) {
     TPMS_CONTEXT context;
@@ -275,8 +293,8 @@ TEST_F(ResourceManagerTest, BasicPassThroughAsync) {
       .WillOnce(Return(response));
   std::string actual_response;
   CommandTransceiver::ResponseCallback callback =
-      base::Bind(&Assign, &actual_response);
-  resource_manager_.SendCommand(command, callback);
+      base::BindOnce(&Assign, &actual_response);
+  resource_manager_.SendCommand(command, std::move(callback));
   EXPECT_EQ(actual_response, response);
 }
 
@@ -756,6 +774,29 @@ TEST_F(ResourceManagerTest, EvictMostStaleSession) {
   EXPECT_EQ(response, actual_response);
 }
 
+TEST_F(ResourceManagerTest, EvictStaleSessionFail) {
+  StartSession(kArbitrarySessionHandle);
+  std::string response =
+      CreateResponse(TPM_RC_SUCCESS, kNoHandles,
+                     CreateResponseAuthorization(true),  // continue_session
+                     kNoParameters);
+  EXPECT_CALL(transceiver_, SendCommandAndWait(_))
+      .WillRepeatedly(Return(response));
+
+  EvictSessionFail();
+
+  std::string command =
+      CreateCommand(TPM_CC_Startup, kNoHandles,
+                    CreateCommandAuthorization(kArbitrarySessionHandle,
+                                               true),  // continue_session
+                    kNoParameters);
+
+  std::string error_response =
+      CreateErrorResponse(TPM_RC_HANDLE | kResourceManagerTpmErrorBase);
+  std::string actual_response = resource_manager_.SendCommandAndWait(command);
+  EXPECT_EQ(error_response, actual_response);
+}
+
 TEST_F(ResourceManagerTest, FlushWhenAuthSessionInUse) {
   StartSession(kArbitrarySessionHandle);
   StartSession(kArbitrarySessionHandle + 1);
@@ -1023,7 +1064,7 @@ TEST_F(ResourceManagerTest, SuspendBlocksCommands) {
 
   // After Suspend, commands with handles are blocked, commands without
   // handles are let through.
-  resource_manager_.set_max_suspend_duration(base::TimeDelta::FromDays(10));
+  resource_manager_.set_max_suspend_duration(base::Days(10));
   resource_manager_.Suspend();
   EXPECT_CALL(transceiver_, SendCommandAndWait(no_handles.command))
       .WillOnce(Return(no_handles.response));

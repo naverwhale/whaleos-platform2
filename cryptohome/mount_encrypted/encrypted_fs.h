@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@
 
 #include <base/files/file_path.h>
 #include <brillo/blkdev_utils/device_mapper.h>
+#include <brillo/blkdev_utils/lvm.h>
 #include <brillo/secure_blob.h>
 
 #include "cryptohome/mount_encrypted/mount_encrypted.h"
@@ -40,8 +41,8 @@ enum class TeardownStage {
 struct BindMount {
   base::FilePath src;  // Location of bind source.
   base::FilePath dst;  // Destination of bind.
-  std::string owner;
-  std::string group;
+  uid_t owner;
+  gid_t group;
   mode_t mode;
   bool submount;  // Submount is bound already.
 };
@@ -64,6 +65,7 @@ class EncryptedFs {
       const base::FilePath& rootdir,
       cryptohome::Platform* platform,
       brillo::DeviceMapper* device_mapper,
+      brillo::LogicalVolumeManager* lvm,
       cryptohome::EncryptedContainerFactory* encrypted_container_factory);
 
   // Setup mounts the encrypted mount by:
@@ -91,10 +93,6 @@ class EncryptedFs {
   result_code CheckStates(void);
   // ReportInfo - Reports the paths and bind mounts.
   result_code ReportInfo(void) const;
-  // GetKey - Returns the key for the dmcrypt device. This is used
-  // for finalization in devices that do not have the TPM available
-  // initially while setting up the encrypted mount.
-  brillo::SecureBlob GetKey() const;
 
  private:
   friend class EncryptedFsTest;

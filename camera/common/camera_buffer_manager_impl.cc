@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2017 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -32,7 +32,11 @@ std::unordered_map<uint32_t, std::vector<uint32_t>> kSupportedHalFormats{
      {DRM_FORMAT_NV12, DRM_FORMAT_XBGR8888, DRM_FORMAT_MTISP_SXYZW10}},
     {HAL_PIXEL_FORMAT_RGBX_8888, {DRM_FORMAT_XBGR8888}},
     {HAL_PIXEL_FORMAT_YCbCr_420_888, {DRM_FORMAT_NV12}},
+    // Map to DRM_FORMAT_ABGR8888 because DRM_FORMAT_VYUY or DRM_FORMAT_YUYV is
+    // not generally supported by minigbm.
+    {HAL_PIXEL_FORMAT_YCbCr_422_I, {DRM_FORMAT_ABGR8888}},
     {HAL_PIXEL_FORMAT_YCBCR_P010, {DRM_FORMAT_P010}},
+    {HAL_PIXEL_FORMAT_Y8, {DRM_FORMAT_R8}},
 };
 
 uint32_t GetGbmUseFlags(uint32_t hal_format, uint32_t usage) {
@@ -75,7 +79,7 @@ bool IsMatchingFormat(int32_t hal_pixel_format, uint32_t drm_format) {
     case HAL_PIXEL_FORMAT_YCrCb_420_SP:
       return drm_format == DRM_FORMAT_NV21;
     case HAL_PIXEL_FORMAT_YCbCr_422_I:
-      return drm_format == DRM_FORMAT_YUYV;
+      return drm_format == DRM_FORMAT_ABGR8888;
     case HAL_PIXEL_FORMAT_BLOB:
       return drm_format == DRM_FORMAT_R8;
     case HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED:
@@ -146,9 +150,9 @@ uint8_t* GetPlaneAddr(const android_ycbcr& ycbcr,
 
 void BufferHandleDeleter::operator()(buffer_handle_t* handle) {
   if (handle) {
-    auto* cbm = cros::CameraBufferManager::GetInstance();
-    if (cbm) {
-      cbm->Free(*handle);
+    auto* buf_mgr = cros::CameraBufferManager::GetInstance();
+    if (buf_mgr && *handle != nullptr) {
+      buf_mgr->Free(*handle);
     }
     delete handle;
   }
@@ -499,6 +503,16 @@ off_t CameraBufferManager::GetPlaneOffset(buffer_handle_t buffer,
 }
 
 // static
+uint64_t CameraBufferManager::GetModifier(buffer_handle_t buffer) {
+  auto handle = camera_buffer_handle_t::FromBufferHandle(buffer);
+  if (!handle) {
+    return DRM_FORMAT_MOD_INVALID;
+  }
+
+  return handle->modifier;
+}
+
+// static
 int CameraBufferManager::GetPlaneFd(buffer_handle_t buffer, size_t plane) {
   auto handle = camera_buffer_handle_t::FromBufferHandle(buffer);
   if (!handle) {
@@ -577,6 +591,7 @@ int CameraBufferManagerImpl::Allocate(size_t width,
     handle->strides[i] = gbm_bo_get_stride_for_plane(buffer_context->bo, i);
     handle->offsets[i] = gbm_bo_get_offset(buffer_context->bo, i);
   }
+  handle->modifier = gbm_bo_get_modifier(buffer_context->bo);
 
   if (num_planes == 1) {
     *out_stride = handle->strides[0];
@@ -595,7 +610,7 @@ ScopedBufferHandle CameraBufferManager::AllocateScopedBuffer(size_t width,
                                                              uint32_t format,
                                                              uint32_t usage) {
   auto* buf_mgr = CameraBufferManager::GetInstance();
-  ScopedBufferHandle buffer(new buffer_handle_t);
+  ScopedBufferHandle buffer(new buffer_handle_t(nullptr));
   uint32_t stride;
   if (buf_mgr->Allocate(width, height, format, usage, buffer.get(), &stride) !=
       0) {
@@ -652,6 +667,7 @@ int CameraBufferManagerImpl::Register(buffer_handle_t buffer) {
   import_data.width = handle->width;
   import_data.height = handle->height;
   import_data.format = handle->drm_format;
+  import_data.modifier = handle->modifier;
   uint32_t num_planes = GetNumPlanes(buffer);
   if (num_planes <= 0) {
     return -EINVAL;

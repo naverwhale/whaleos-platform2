@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium OS Authors. All rights reserved.
+// Copyright 2014 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,11 +6,13 @@
 #define TRUNKS_MOCK_TPM_UTILITY_H_
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <gmock/gmock.h>
 
+#include "trunks/cr50_headers/ap_ro_status.h"
 #include "trunks/tpm_utility.h"
 
 namespace trunks {
@@ -32,6 +34,8 @@ class MockTpmUtility : public TpmUtility {
                TPM_RC(const std::string&,
                       const std::string&,
                       const std::string&));
+  MOCK_METHOD2(ChangeOwnerPassword,
+               TPM_RC(const std::string&, const std::string&));
   MOCK_METHOD2(StirRandom, TPM_RC(const std::string&, AuthorizationDelegate*));
   MOCK_METHOD3(GenerateRandom,
                TPM_RC(size_t, AuthorizationDelegate*, std::string*));
@@ -55,6 +59,11 @@ class MockTpmUtility : public TpmUtility {
                       const std::string&,
                       AuthorizationDelegate*,
                       std::string*));
+  MOCK_METHOD4(ECDHZGen,
+               TPM_RC(TPM_HANDLE,
+                      const TPM2B_ECC_POINT&,
+                      AuthorizationDelegate*,
+                      TPM2B_ECC_POINT*));
   MOCK_METHOD7(RawSign,
                TPM_RC(TPM_HANDLE,
                       TPM_ALG_ID,
@@ -102,6 +111,15 @@ class MockTpmUtility : public TpmUtility {
                       const std::string&,
                       AuthorizationDelegate*,
                       std::string*));
+  MOCK_METHOD8(ImportECCKeyWithPolicyDigest,
+               TPM_RC(AsymmetricKeyUsage,
+                      TPMI_ECC_CURVE,
+                      const std::string&,
+                      const std::string&,
+                      const std::string&,
+                      const std::string&,
+                      AuthorizationDelegate*,
+                      std::string*));
   MOCK_METHOD10(CreateRSAKeyPair,
                 TPM_RC(AsymmetricKeyUsage,
                        int,
@@ -114,6 +132,16 @@ class MockTpmUtility : public TpmUtility {
                        std::string*,
                        std::string*));
   MOCK_METHOD9(CreateECCKeyPair,
+               TPM_RC(AsymmetricKeyUsage,
+                      TPMI_ECC_CURVE,
+                      const std::string&,
+                      const std::string&,
+                      bool,
+                      const std::vector<uint32_t>&,
+                      AuthorizationDelegate*,
+                      std::string*,
+                      std::string*));
+  MOCK_METHOD9(CreateRestrictedECCKeyPair,
                TPM_RC(AsymmetricKeyUsage,
                       TPMI_ECC_CURVE,
                       const std::string&,
@@ -144,10 +172,11 @@ class MockTpmUtility : public TpmUtility {
                       TPM_HANDLE*));
   MOCK_METHOD2(GetKeyName, TPM_RC(TPM_HANDLE, std::string*));
   MOCK_METHOD2(GetKeyPublicArea, TPM_RC(TPM_HANDLE, TPMT_PUBLIC*));
-  MOCK_METHOD5(SealData,
+  MOCK_METHOD6(SealData,
                TPM_RC(const std::string&,
                       const std::string&,
                       const std::string&,
+                      bool,
                       AuthorizationDelegate*,
                       std::string*));
   MOCK_METHOD3(UnsealData,
@@ -159,6 +188,10 @@ class MockTpmUtility : public TpmUtility {
                       AuthorizationDelegate*,
                       std::string*));
   MOCK_METHOD1(StartSession, TPM_RC(HmacSession*));
+  MOCK_METHOD3(AddPcrValuesToPolicySession,
+               TPM_RC(const std::map<uint32_t, std::string>&,
+                      bool,
+                      PolicySession*));
   MOCK_METHOD3(GetPolicyDigestForPcrValues,
                TPM_RC(const std::map<uint32_t, std::string>&,
                       bool,
@@ -180,6 +213,8 @@ class MockTpmUtility : public TpmUtility {
                       bool,
                       bool,
                       AuthorizationDelegate*));
+  MOCK_METHOD3(IncrementNVCounter,
+               TPM_RC(uint32_t, bool, AuthorizationDelegate*));
   MOCK_METHOD6(ReadNVSpace,
                TPM_RC(uint32_t,
                       uint32_t,
@@ -193,6 +228,12 @@ class MockTpmUtility : public TpmUtility {
   MOCK_METHOD4(SetDictionaryAttackParameters,
                TPM_RC(uint32_t, uint32_t, uint32_t, AuthorizationDelegate*));
   MOCK_METHOD1(ResetDictionaryAttackLock, TPM_RC(AuthorizationDelegate*));
+  MOCK_METHOD5(GetAuthPolicyEndorsementKey,
+               TPM_RC(TPM_ALG_ID,
+                      const std::string&,
+                      AuthorizationDelegate*,
+                      TPM_HANDLE*,
+                      TPM2B_NAME*));
   MOCK_METHOD4(GetEndorsementKey,
                TPM_RC(TPM_ALG_ID,
                       AuthorizationDelegate*,
@@ -206,19 +247,22 @@ class MockTpmUtility : public TpmUtility {
   MOCK_METHOD2(PinWeaverIsSupported, TPM_RC(uint8_t, uint8_t*));
   MOCK_METHOD5(PinWeaverResetTree,
                TPM_RC(uint8_t, uint8_t, uint8_t, uint32_t*, std::string*));
-  // No MOCK_METHOD11 (max is 10).
-  TPM_RC PinWeaverInsertLeaf(uint8_t protocol_version,
-                             uint64_t label,
-                             const std::string& h_aux,
-                             const brillo::SecureBlob& le_secret,
-                             const brillo::SecureBlob& he_secret,
-                             const brillo::SecureBlob& reset_secret,
-                             const std::map<uint32_t, uint32_t>& delay_schedule,
-                             const ValidPcrCriteria& valid_pcr_criteria,
-                             uint32_t* result_code,
-                             std::string* root_hash,
-                             std::string* cred_metadata,
-                             std::string* mac) override;
+  MOCK_METHOD(TPM_RC,
+              PinWeaverInsertLeaf,
+              (uint8_t,
+               uint64_t,
+               const std::string&,
+               const brillo::SecureBlob&,
+               const brillo::SecureBlob&,
+               const brillo::SecureBlob&,
+               (const std::map<uint32_t, uint32_t>&),
+               const ValidPcrCriteria&,
+               std::optional<uint32_t>,
+               uint32_t*,
+               std::string*,
+               std::string*,
+               std::string*),
+              (override));
   MOCK_METHOD6(PinWeaverRemoveLeaf,
                TPM_RC(uint8_t,
                       uint64_t,
@@ -226,25 +270,28 @@ class MockTpmUtility : public TpmUtility {
                       const std::string&,
                       uint32_t*,
                       std::string*));
-  TPM_RC PinWeaverTryAuth(uint8_t protocol_version,
-                          const brillo::SecureBlob& le_secret,
-                          const std::string& h_aux,
-                          const std::string& cred_metadata,
-                          uint32_t* result_code,
-                          std::string* root_hash,
-                          uint32_t* seconds_to_wait,
-                          brillo::SecureBlob* he_secret,
-                          brillo::SecureBlob* reset_secret,
-                          std::string* cred_metadata_out,
-                          std::string* mac_out) override;
+  MOCK_METHOD(TPM_RC,
+              PinWeaverTryAuth,
+              (uint8_t,
+               const brillo::SecureBlob&,
+               const std::string&,
+               const std::string&,
+               uint32_t*,
+               std::string*,
+               uint32_t*,
+               brillo::SecureBlob*,
+               brillo::SecureBlob*,
+               std::string*,
+               std::string*),
+              (override));
   MOCK_METHOD9(PinWeaverResetAuth,
                TPM_RC(uint8_t,
                       const brillo::SecureBlob&,
+                      bool,
                       const std::string&,
                       const std::string&,
                       uint32_t*,
                       std::string*,
-                      brillo::SecureBlob*,
                       std::string*,
                       std::string*));
   MOCK_METHOD5(PinWeaverGetLog,
@@ -262,9 +309,93 @@ class MockTpmUtility : public TpmUtility {
                       std::string*,
                       std::string*,
                       std::string*));
+  MOCK_METHOD5(PinWeaverSysInfo,
+               TPM_RC(uint8_t, uint32_t*, std::string*, uint32_t*, uint64_t*));
+  MOCK_METHOD6(PinWeaverGenerateBiometricsAuthPk,
+               TPM_RC(uint8_t,
+                      uint8_t,
+                      const PinWeaverEccPoint&,
+                      uint32_t*,
+                      std::string*,
+                      PinWeaverEccPoint*));
+  MOCK_METHOD(TPM_RC,
+              PinWeaverCreateBiometricsAuthRateLimiter,
+              (uint8_t,
+               uint8_t,
+               uint64_t,
+               const std::string&,
+               const brillo::SecureBlob&,
+               (const std::map<uint32_t, uint32_t>&),
+               const ValidPcrCriteria&,
+               std::optional<uint32_t>,
+               uint32_t*,
+               std::string*,
+               std::string*,
+               std::string*),
+              (override));
+  MOCK_METHOD(TPM_RC,
+              PinWeaverStartBiometricsAuth,
+              (uint8_t,
+               uint8_t,
+               const brillo::Blob&,
+               const std::string&,
+               const std::string&,
+               uint32_t*,
+               std::string*,
+               brillo::Blob*,
+               brillo::Blob*,
+               brillo::Blob*,
+               std::string*,
+               std::string*),
+              (override));
+  MOCK_METHOD3(PinWeaverBlockGenerateBiometricsAuthPk,
+               TPM_RC(uint8_t, uint32_t*, std::string*));
+  MOCK_METHOD8(U2fGenerate,
+               TPM_RC(uint8_t,
+                      const brillo::Blob&,
+                      const brillo::SecureBlob&,
+                      bool,
+                      bool,
+                      const std::optional<brillo::Blob>&,
+                      brillo::Blob*,
+                      brillo::Blob*));
+  MOCK_METHOD(TPM_RC,
+              U2fSign,
+              (uint8_t,
+               const brillo::Blob&,
+               const brillo::SecureBlob&,
+               const std::optional<brillo::SecureBlob>&,
+               const std::optional<brillo::Blob>&,
+               bool,
+               bool,
+               bool,
+               const brillo::Blob&,
+               brillo::Blob*,
+               brillo::Blob*),
+              (override));
+  MOCK_METHOD5(U2fAttest,
+               TPM_RC(const brillo::SecureBlob&,
+                      uint8_t,
+                      const brillo::Blob&,
+                      brillo::Blob*,
+                      brillo::Blob*));
   MOCK_METHOD1(GetRsuDeviceId, TPM_RC(std::string*));
-  MOCK_METHOD1(GetRoVerificationStatus, TPM_RC(ApRoStatus*));
-  MOCK_METHOD(bool, IsCr50, (), (override));
+  MOCK_METHOD1(GetRoVerificationStatus, TPM_RC(ap_ro_status*));
+  MOCK_METHOD(bool, IsGsc, (), (override));
+  MOCK_METHOD(std::string,
+              SendCommandAndWait,
+              (const std::string& command),
+              (override));
+  MOCK_METHOD(TPM_RC, CreateSaltingKey, (TPM_HANDLE*, TPM2B_NAME*), (override));
+  MOCK_METHOD(TPM_RC,
+              GetTi50Stats,
+              (uint32_t*, uint32_t*, uint32_t*, uint32_t*),
+              (override));
+  MOCK_METHOD(TPM_RC,
+              GetRwVersion,
+              (uint32_t*, uint32_t*, uint32_t*),
+              (override));
+  MOCK_METHOD(TPM_RC, GetConsoleLogs, (std::string*), (override));
 };
 
 }  // namespace trunks

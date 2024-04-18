@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium OS Authors. All rights reserved.
+// Copyright 2015 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -38,6 +38,11 @@ bool GetDefaultVersionInfo(uint32_t* family,
   return true;
 }
 
+bool GetDefaultRwVersion(std::string* rw_version) {
+  *rw_version = "0.5.190";
+  return true;
+}
+
 MockTpmStatus::MockTpmStatus() {
   ON_CALL(*this, IsTpmEnabled()).WillByDefault(Return(true));
 
@@ -51,6 +56,7 @@ MockTpmStatus::MockTpmStatus() {
       .WillByDefault(DoAll(SetArgPointee<0>(true), Return(true)));
   ON_CALL(*this, GetVersionInfo(_, _, _, _, _, _))
       .WillByDefault(Invoke(GetDefaultVersionInfo));
+  ON_CALL(*this, GetRwVersion(_)).WillByDefault(Invoke(GetDefaultRwVersion));
 }
 MockTpmStatus::~MockTpmStatus() {}
 
